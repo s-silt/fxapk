@@ -1,7 +1,16 @@
 """apkscan.gui.controller — GUI 控制器（**无任何 Tk import**，headless 可单测）。
 
-职责：把 view 选的动作分派到已做好的程序化核心、在后台线程跑、把进度文本与最终
-结果安全回传 UI，并把结果（steps / 计数 / report_paths）格式化为 UI 直接可显示的结构。
+职责：把 view 选的动作**派到子进程**跑 CLI（analyze/auto/doctor）、在后台线程读子
+进程 stdout、把进度文本与最终结果安全回传 UI，并把结果（计数 / report_paths）格式化
+为 UI 直接可显示的结构。
+
+为什么走子进程（卡死修复，根因）：
+- 旧版在 controller 的后台 daemon 线程里直接调 ``auto.run`` / ``analyze_static``。但
+  androguard 解析是 **CPU 密集的纯 Python**，独占 GIL，把 tkinter 主线程的消息泵饿死
+  → Windows 报「无响应」。同进程线程救不了（单 GIL）。
+- 改法：分析跑到**子进程**。GUI 这边只**阻塞读子进程 stdout**（I/O 释放 GIL），主线程
+  消息泵不再被饿 → 界面全程不卡。子进程命令：frozen 时 ``[sys.executable, <subcmd>, ...]``
+  （exe 做 dispatch 入口）；源码时 ``[sys.executable, "-m", "apkscan.cli", <subcmd>, ...]``。
 
 分层铁律：
 - 本模块**禁止 import tkinter / ttk**——线程与回调编排在这里，Tk 调度由 view 注入。
@@ -15,7 +24,9 @@
   ``on_done`` 弹回主线程，从而满足 tkinter「只能在主线程操作控件」的要求，同时保持
   可在无显示器环境用纯 mock 单测（schedule 直接同步执行 fn 即可）。
 
-- confirm 钩子由 view 注入（GUI 用对话框实现「请操作 app 后继续」）；仅一键全自动用。
+- confirm 钩子由 view 注入；子进程模式下子进程无 stdin 交互——无设备时 capture 本就
+  skip、不触发 confirm；有设备时 confirm 退化为不提示（已知限制，设备侧后续优化）。
+  钩子保留以维持构造契约，但子进程模式不再被 controller 调用。
 - 异常被吞成友好提示（``ActionResult.ok=False`` + 友好 message），**绝不抛**、绝不崩 UI。
 - 全量 type hints；except 必 logging，不静默。
 """
@@ -23,9 +34,13 @@
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
+import sys
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -34,12 +49,13 @@ ACTION_DOCTOR = "doctor"
 ACTION_STATIC = "static"
 ACTION_AUTO = "auto"
 
-# step / item 状态 → 友好中文标签（view 直接显示）。
-_STATUS_LABELS = {
-    "done": "完成",
-    "skipped": "跳过",
-    "error": "出错",
-}
+
+def _frozen() -> bool:
+    """是否 PyInstaller 冻结态（决定子进程命令是 exe 自调用还是 ``-m apkscan.cli``）。
+
+    本阶段不引入 ``apkscan.core.tools``（属打包阶段）；冻结判定就地内联。
+    """
+    return bool(getattr(sys, "frozen", False))
 
 
 @dataclass
@@ -63,7 +79,8 @@ class ActionResult:
     - ``ok``：动作整体是否成功（doctor 看 ok 字段；static/auto 看是否产出报告且无致命错）。
     - ``action``：ACTION_* 之一。
     - ``message``：一句话结论（友好；出错时是友好提示而非 traceback）。
-    - ``steps``：[{name, status, status_label, detail}]，doctor 时为体检项折叠成同结构。
+    - ``steps``：[{name, status, status_label, detail}]。子进程模式下进度已实时流入日志框，
+      此字段保留以维持 view 渲染契约，但通常为空（view ``_render_steps`` 空则早返回）。
     - ``counts``：端点/线索/发现计数（仅 static/auto 且能读到 report.json 时有意义）。
     - ``report_paths``：产出报告路径（去重保序）。
     - ``html_report``：首个 .html 报告路径（供「打开 HTML 报告」按钮；无则空串）。
@@ -179,7 +196,7 @@ class GuiController:
         self._emit_result(result)
 
     def _dispatch(self, request: ActionRequest) -> ActionResult:
-        """按 action 分派到对应核心（惰性 import，GUI 冷启动友好）。"""
+        """按 action 分派：全部经**子进程跑 CLI**（卡死修复核心）。"""
         if request.action == ACTION_DOCTOR:
             return self._run_doctor(request)
         if request.action == ACTION_STATIC:
@@ -189,89 +206,183 @@ class GuiController:
         logger.warning("[gui] 未知动作：%s", request.action)
         return ActionResult(ok=False, action=request.action, message=f"未知动作：{request.action}")
 
-    def _run_doctor(self, request: ActionRequest) -> ActionResult:
-        """环境体检：调 doctor.run，把 items 折叠成 steps，message 给体检结论。"""
-        from apkscan.dynamic import doctor
+    # -- 子进程命令构造 -----------------------------------------------------
 
-        result = doctor.run(auto_fix=request.auto_fix, on_progress=self._log)
-        ok = bool(result.get("ok")) if isinstance(result, dict) else False
-        items = result.get("items") or [] if isinstance(result, dict) else []
-        steps = [self._fold_item(it) for it in items if isinstance(it, dict)]
-        n_ok = sum(1 for it in items if isinstance(it, dict) and it.get("ok"))
-        message = (
-            f"体检通过：{n_ok}/{len(steps)} 项 OK，环境就绪。"
-            if ok
-            else f"体检存在未通过的关键项：{n_ok}/{len(steps)} 项 OK（详见下方列表）。"
+    @staticmethod
+    def _fmt_arg(formats: list[str]) -> str:
+        """格式列表 → CLI ``--fmt`` 逗号串（去空、去重保序）。"""
+        seen: list[str] = []
+        for f in formats:
+            f = str(f).strip().lower()
+            if f and f not in seen:
+                seen.append(f)
+        return ",".join(seen) if seen else "html,json"
+
+    def _subcmd_argv(self, subcmd: str, request: ActionRequest) -> list[str]:
+        """构造子进程命令行（frozen vs 源码 两形态）。
+
+        - frozen（PyInstaller 冻结）：``[sys.executable, <subcmd>, *args]``——exe 自身做
+          dispatch 入口，按 argv[1] 分发到 CLI 子命令。
+        - 源码：``[sys.executable, "-m", "apkscan.cli", <subcmd>, *args]``。
+
+        各 subcmd 的参数与 :mod:`apkscan.cli` 的命令签名严格对齐：
+        - ``doctor``：``--fix`` / ``--no-fix``（按 ``request.auto_fix``）。
+        - ``analyze``（GUI 静态=CLI analyze，纯静态、**不传 --dynamic**、不连设备）：
+          ``<apk> --online|--offline --out <dir> --fmt <csv>``。
+        - ``auto``：``<apk> --out <dir> --online|--offline --fix|--no-fix
+          --duration <n> --fmt <csv>``。
+        """
+        base: list[str] = (
+            [sys.executable, subcmd]
+            if _frozen()
+            else [sys.executable, "-m", "apkscan.cli", subcmd]
         )
-        return ActionResult(ok=ok, action=ACTION_DOCTOR, message=message, steps=steps)
+        if subcmd == "doctor":
+            return [*base, "--fix" if request.auto_fix else "--no-fix"]
+        if subcmd == "analyze":
+            return [
+                *base,
+                request.apk_path,
+                "--online" if request.online else "--offline",
+                "--out",
+                request.out_dir,
+                "--fmt",
+                self._fmt_arg(request.formats),
+            ]
+        if subcmd == "auto":
+            return [
+                *base,
+                request.apk_path,
+                "--out",
+                request.out_dir,
+                "--online" if request.online else "--offline",
+                "--fix" if request.auto_fix else "--no-fix",
+                "--duration",
+                str(request.capture_duration),
+                "--fmt",
+                self._fmt_arg(request.formats),
+            ]
+        logger.warning("[gui] 未知子命令：%s", subcmd)
+        return base
+
+    def _run_subprocess(self, argv: list[str], on_line: Callable[[str], None]) -> int:
+        """起子进程跑 argv，**阻塞逐行读 stdout**（I/O 释放 GIL，主线程不卡）→ on_line。
+
+        合并 stderr 到 stdout，UTF-8 解码、坏字节 replace、行缓冲。返回退出码。
+        子进程注入 ``PYTHONUTF8=1`` 让它也按 UTF-8 输出（否则 Windows 默认 GBK 写、
+        本端按 UTF-8 读 → 中文乱码）。Windows 下用 ``CREATE_NO_WINDOW`` 隐藏子进程控制台窗口。
+        起进程/读流失败由调用方（``_run_worker`` 外层 try/except）转友好结果。
+        """
+        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
+        proc = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            env=env,
+            creationflags=creationflags,
+        )
+        stdout = proc.stdout
+        if stdout is not None:
+            for line in stdout:  # 阻塞读 → 释放 GIL，tkinter 主线程消息泵不被饿死
+                on_line(line.rstrip("\n"))
+        return proc.wait()
+
+    def _run_doctor(self, request: ActionRequest) -> ActionResult:
+        """环境体检：子进程跑 ``doctor``，stdout 流式回日志；ok 由退出码判定。
+
+        doctor 子命令体检全 OK 退出码 0、有未通过项退出码 1（见 cli.doctor）。
+        子进程模式拿不到 items 结构 → steps 留空（view 兼容空 steps）；结论看退出码。
+        """
+        argv = self._subcmd_argv("doctor", request)
+        rc = self._run_subprocess(argv, self._log)
+        ok = rc == 0
+        message = (
+            "体检通过：关键项全部 OK，环境就绪（详见上方日志）。"
+            if ok
+            else "体检存在未通过的关键项（详见上方日志；含可复制的建议命令）。"
+        )
+        return ActionResult(ok=ok, action=ACTION_DOCTOR, message=message)
 
     def _run_static(self, request: ActionRequest) -> ActionResult:
-        """静态分析：调 auto.analyze_static（仅静态，不触发 doctor/动态）。"""
-        from apkscan.dynamic import auto
-
-        result = auto.analyze_static(
-            request.apk_path,
-            out_dir=request.out_dir,
-            online=request.online,
-            formats=list(request.formats),
-            on_progress=self._log,
-        )
-        return self._build_pipeline_result(ACTION_STATIC, result)
+        """静态分析：子进程跑 ``analyze``（纯静态、不连设备）；跑完读 report.json 计数。"""
+        argv = self._subcmd_argv("analyze", request)
+        rc = self._run_subprocess(argv, self._log)
+        return self._build_subprocess_result(ACTION_STATIC, request.out_dir, rc)
 
     def _run_auto(self, request: ActionRequest) -> ActionResult:
-        """一键全自动：调 auto.run（含体检/脱壳/抓包），抓包前经注入的 confirm 提示。"""
-        from apkscan.dynamic import auto
+        """一键全自动：子进程跑 ``auto``（含体检/脱壳/抓包）；跑完读 report.json 计数。
 
-        result = auto.run(
-            request.apk_path,
-            out_dir=request.out_dir,
-            online=request.online,
-            auto_fix=request.auto_fix,
-            capture_duration=request.capture_duration,
-            formats=list(request.formats),
-            on_progress=self._log,
-            confirm=self._confirm,
-        )
-        return self._build_pipeline_result(ACTION_AUTO, result)
+        子进程无 stdin 交互：无设备时 capture skip、不触发 confirm；有设备时 confirm
+        退化为不提示（已知限制）。
+        """
+        argv = self._subcmd_argv("auto", request)
+        rc = self._run_subprocess(argv, self._log)
+        return self._build_subprocess_result(ACTION_AUTO, request.out_dir, rc)
 
-    # -- 结果解析 -----------------------------------------------------------
+    # -- 结果解析（子进程模式：探测 out_dir 下报告 + 读 report.json 计数） --------
 
-    def _build_pipeline_result(self, action: str, result: object) -> ActionResult:
-        """把 auto.run / analyze_static 的 {steps, report_paths, package_name, out_dir}
-        解析成 :class:`ActionResult`：折叠 steps、读 report.json 计数、挑 html 报告。"""
-        if not isinstance(result, dict):
-            logger.warning("[gui] %s 返回非 dict：%r", action, type(result).__name__)
-            return ActionResult(ok=False, action=action, message="核心返回值非预期格式（详见日志）。")
+    def _build_subprocess_result(self, action: str, out_dir: str, returncode: int) -> ActionResult:
+        """子进程跑完 → 探测 ``out_dir`` 下的报告文件，读 report.json 计数，组装结果。
 
-        raw_steps = result.get("steps") or []
-        steps = [self._fold_step(s) for s in raw_steps if isinstance(s, dict)]
-        report_paths = [str(p) for p in (result.get("report_paths") or []) if p]
-        out_dir = str(result.get("out_dir") or "")
-        package_name = str(result.get("package_name") or "")
-
-        has_error = any(s.get("status") == "error" for s in raw_steps if isinstance(s, dict))
-        ok = bool(report_paths) and not has_error
+        - ``report_paths``：在 ``out_dir`` 下探测存在的 ``report.{json,html,pdf}``（保序去重）。
+        - ``counts``：从 ``report.json`` 解析端点/线索/发现（复用 :meth:`_read_counts`）。
+        - ``html_report``：首个 .html 报告路径（供「打开 HTML 报告」按钮）。
+        - ``ok``：``returncode == 0`` **且** ``report.json`` 存在（auto 失败步骤会非 0 退出
+          或不产出 report.json）。steps 子进程模式留空（日志已实时呈现）。
+        """
+        report_paths = self._discover_reports(out_dir)
+        has_json = any(p.lower().endswith("report.json") for p in report_paths)
+        ok = (returncode == 0) and has_json
         counts = self._read_counts(report_paths)
         html_report = next((p for p in report_paths if p.lower().endswith(".html")), "")
 
         if ok:
-            pkg = package_name or "(未知)"
-            message = f"完成：包名 {pkg}，已产出 {len(report_paths)} 份报告。"
+            message = f"完成：已产出 {len(report_paths)} 份报告（详见上方日志）。"
         elif report_paths:
-            message = "已产出报告，但部分步骤出错（详见下方步骤列表）。"
+            message = (
+                f"已产出报告，但子进程退出码非 0（{returncode}），"
+                "部分步骤可能出错（详见上方日志）。"
+            )
         else:
-            message = "未产出报告，请检查 APK 是否有效（详见下方步骤列表）。"
+            message = (
+                f"未产出报告（子进程退出码 {returncode}），"
+                "请检查 APK 是否有效（详见上方日志）。"
+            )
 
         return ActionResult(
             ok=ok,
             action=action,
             message=message,
-            steps=steps,
             counts=counts,
             report_paths=report_paths,
             html_report=html_report,
             out_dir=out_dir,
         )
+
+    @staticmethod
+    def _discover_reports(out_dir: str) -> list[str]:
+        """探测 ``out_dir`` 下存在的报告文件（report.json/html/pdf），保序去重、不抛。
+
+        json 放首位（计数读取依赖它），其余按 html、pdf 顺序。读目录失败 → 空列表。
+        """
+        if not out_dir:
+            return []
+        found: list[str] = []
+        try:
+            base = Path(out_dir)
+            for name in ("report.json", "report.html", "report.pdf"):
+                p = base / name
+                if p.is_file():
+                    found.append(str(p))
+        except OSError:
+            logger.exception("[gui] 探测输出目录报告失败：%s", out_dir)
+            return []
+        return found
 
     def _read_counts(self, report_paths: list[str]) -> Counts:
         """从 report.json 读端点/线索/发现计数；读不到 / 无 json → Counts(全 -1)，不抛。"""
@@ -280,7 +391,6 @@ class GuiController:
             return Counts()
         try:
             import json as _json
-            from pathlib import Path
 
             data = _json.loads(Path(json_path).read_text(encoding="utf-8"))
         except Exception:
@@ -294,37 +404,6 @@ class GuiController:
             leads=_safe_len(data.get("leads")),
             findings=_safe_len(data.get("findings")),
         )
-
-    @staticmethod
-    def _fold_step(step: dict) -> dict:
-        """auto/analyze_static 的 step → view 可显示结构（附友好 status_label）。"""
-        status = str(step.get("status", "?"))
-        return {
-            "name": str(step.get("name", "?")),
-            "status": status,
-            "status_label": _STATUS_LABELS.get(status, status),
-            "detail": str(step.get("detail", "")),
-        }
-
-    @staticmethod
-    def _fold_item(item: dict) -> dict:
-        """doctor 的 item({name, ok, detail, fix_cmd}) → 与 step 同结构，便于 view 统一渲染。
-
-        fix_cmd 拼进 detail（未通过项给出可复制命令提示，新手友好）。
-        """
-        ok = bool(item.get("ok"))
-        status = "done" if ok else "error"
-        detail = str(item.get("detail", ""))
-        fix_cmd = item.get("fix_cmd") or []
-        if not ok and isinstance(fix_cmd, list) and fix_cmd:
-            joined = "  ".join(str(c) for c in fix_cmd)
-            detail = f"{detail}  [建议命令] {joined}" if detail else f"[建议命令] {joined}"
-        return {
-            "name": str(item.get("name", "?")),
-            "status": status,
-            "status_label": _STATUS_LABELS.get(status, status),
-            "detail": detail,
-        }
 
     # -- 回调安全包装（经 schedule 弹回主线程） ----------------------------
 

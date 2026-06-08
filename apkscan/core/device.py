@@ -14,6 +14,8 @@ import logging
 import shutil
 import subprocess
 
+from apkscan.core import tools
+
 logger = logging.getLogger(__name__)
 
 # adb / frida 子命令的默认超时（秒）。设备无响应时不应卡死主流程。
@@ -21,8 +23,17 @@ _DEFAULT_TIMEOUT = 5.0
 
 
 def _run(args: list[str], timeout: float = _DEFAULT_TIMEOUT) -> subprocess.CompletedProcess | None:
-    """运行外部命令并捕获输出。任何失败（缺命令/超时/非零退出/异常）返回 None，绝不抛。"""
-    exe = shutil.which(args[0]) if args else None
+    """运行外部命令并捕获输出。任何失败（缺命令/超时/非零退出/异常）返回 None，绝不抛。
+
+    ``adb`` 走 tools.adb_path()（frozen 用同目录随包 adb.exe，源码用 PATH）；
+    其它命令仍走 shutil.which。
+    """
+    if not args:
+        exe = None
+    elif args[0] == "adb":
+        exe = tools.adb_path() or None
+    else:
+        exe = shutil.which(args[0])
     if exe is None:
         logger.debug("命令不在 PATH，跳过：%s", args[0] if args else "(空)")
         return None
@@ -88,18 +99,18 @@ def has_device() -> bool:
 
 
 def has_frida() -> bool:
-    """frida CLI 是否在 PATH。"""
-    return shutil.which("frida") is not None
+    """frida CLI 是否可用（frozen 看内置 frida_tools；源码看 PATH）。"""
+    return tools.has_frida()
 
 
 def has_frida_dexdump() -> bool:
-    """frida-dexdump 是否在 PATH。"""
-    return shutil.which("frida-dexdump") is not None
+    """frida-dexdump 是否可用（frozen 看内置 frida_dexdump；源码看 PATH）。"""
+    return tools.has_frida_dexdump()
 
 
 def has_mitmproxy() -> bool:
-    """mitmproxy（或 mitmdump）是否在 PATH。"""
-    return shutil.which("mitmproxy") is not None or shutil.which("mitmdump") is not None
+    """mitmproxy（或 mitmdump）是否可用（frozen 看内置 mitmproxy；源码看 PATH）。"""
+    return tools.has_mitmproxy()
 
 
 # ---------------------------------------------------------------------------

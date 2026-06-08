@@ -30,11 +30,17 @@ from apkscan.dynamic import unpack
 
 
 def _all_capabilities_ok(monkeypatch: pytest.MonkeyPatch) -> None:
-    """让 unpack 看到的 device.* 全部返回 True（root 设备 + frida + frida-dexdump + frida-server）。"""
+    """让 unpack 看到的 device.* 全部返回 True（root 设备 + frida + frida-dexdump + frida-server）。
+
+    同时把 tools.frida_invocation 桩成返回纯命令名 ``["frida-dexdump"]``——_dexdump 改用
+    tools 解析后，源码态 PATH 无 frida-dexdump 会返回 []，需在此显式给出可读命令前缀，
+    令 ``cmd[0]=="frida-dexdump"`` 断言成立、subprocess 桩正常拿到命令。
+    """
     monkeypatch.setattr(unpack.device, "has_device", lambda: True)
     monkeypatch.setattr(unpack.device, "has_frida", lambda: True)
     monkeypatch.setattr(unpack.device, "has_frida_dexdump", lambda: True)
     monkeypatch.setattr(unpack.device, "frida_server_running", lambda serial=None: True)
+    monkeypatch.setattr(unpack.tools, "frida_invocation", lambda tool: ["frida-dexdump"])
 
 
 def _patch_package_name(monkeypatch: pytest.MonkeyPatch, name: str = "com.fraud.app") -> None:

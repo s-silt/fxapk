@@ -12,6 +12,12 @@ out/
 /build/
 /dist/
 
+# adb 下载缓存(build_exe.py 下 Google platform-tools 解压取 adb.exe + 2 dll)
+/.platform_tools/
+
+# 入口自检临时 venv(用 mangled 路径建的一次性 venv，绝不入库)
+*.tmp_epcheck/
+
 # 烟测/分析输出目录(任何 out_* 变体，绝不入库；注意 out/ 已在上方单列)
 out_exe/
 out_exe*/

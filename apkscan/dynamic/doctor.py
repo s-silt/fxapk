@@ -37,10 +37,9 @@ from __future__ import annotations
 
 import logging
 import re
-import shutil
 from collections.abc import Callable
 
-from apkscan.core import device
+from apkscan.core import device, tools
 from apkscan.dynamic import provision
 
 logger = logging.getLogger(__name__)
@@ -152,11 +151,11 @@ def _device_frida_version(serial: str | None = None) -> str:
 def _check_device(serial: str | None) -> dict:
     """(1) 是否有在线 adb 设备。"""
     try:
-        if shutil.which("adb") is None:
+        if not tools.has_adb():
             return _item(
                 _NAME_DEVICE,
                 False,
-                "adb 不在 PATH，无法连接设备（请安装 platform-tools 并加入 PATH）",
+                "adb 不可用（frozen 同目录无 adb.exe / PATH 无 adb；请安装 platform-tools 并加入 PATH）",
                 ["adb devices"],
             )
         serials = device.adb_devices()

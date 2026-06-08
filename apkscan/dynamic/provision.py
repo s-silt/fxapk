@@ -38,7 +38,7 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
-from apkscan.core import device
+from apkscan.core import device, tools
 
 logger = logging.getLogger(__name__)
 
@@ -98,10 +98,13 @@ def _emit(on_progress: Callable[[str], None] | None, msg: str) -> None:
 
 
 def _adb(extra: list[str], serial: str | None = None) -> subprocess.CompletedProcess[str] | None:
-    """运行 adb 子命令，返回 CompletedProcess。缺 adb / 超时 / 异常 → None（不抛）。"""
-    exe = shutil.which("adb")
-    if exe is None:
-        logger.warning("[provision] adb 不在 PATH，跳过：%s", " ".join(extra))
+    """运行 adb 子命令，返回 CompletedProcess。缺 adb / 超时 / 异常 → None（不抛）。
+
+    adb 走 tools.adb_path()（frozen 用同目录随包 adb.exe，源码用 PATH）。
+    """
+    exe = tools.adb_path()
+    if not exe:
+        logger.warning("[provision] adb 不可用，跳过：%s", " ".join(extra))
         return None
     args = [exe]
     if serial:
@@ -166,14 +169,17 @@ def device_abi(serial: str | None = None) -> str:
 
 
 def host_frida_version() -> str:
-    """返回主机 frida CLI 版本（规范化 'x.y.z'）。frida 不在 PATH / 解析失败 → ''（不抛）。"""
-    exe = shutil.which("frida")
-    if exe is None:
-        logger.debug("[provision] frida CLI 不在 PATH")
+    """返回主机 frida CLI 版本（规范化 'x.y.z'）。frida 不可用 / 解析失败 → ''（不抛）。
+
+    frozen 时经 tools.frida_invocation 自调用内置 frida；源码时用 PATH。
+    """
+    inv = tools.frida_invocation("frida")
+    if not inv:
+        logger.debug("[provision] frida CLI 不可用")
         return ""
     try:
         proc = subprocess.run(
-            [exe, "--version"],
+            [*inv, "--version"],
             capture_output=True,
             text=True,
             timeout=device._DEFAULT_TIMEOUT,
@@ -435,16 +441,19 @@ def _mitm_ca_path() -> Path:
 
 
 def _generate_ca(ca_path: Path, on_progress: Callable[[str], None] | None) -> bool:
-    """跑一次 mitmdump 触发生成 CA：Popen → 轮询 pem 出现 → terminate。成功 → True（不抛）。"""
-    exe = shutil.which("mitmdump") or shutil.which("mitmproxy")
-    if exe is None:
-        logger.warning("[provision] mitmdump/mitmproxy 不在 PATH，无法生成 CA")
+    """跑一次 mitmdump 触发生成 CA：Popen → 轮询 pem 出现 → terminate。成功 → True（不抛）。
+
+    frozen 时经 tools.frida_invocation 自调用内置 mitmdump；源码时用 PATH。
+    """
+    inv = tools.frida_invocation("mitmdump")
+    if not inv:
+        logger.warning("[provision] mitmdump/mitmproxy 不可用，无法生成 CA")
         return False
     _emit(on_progress, "运行一次 mitmdump 以生成 CA")
     proc: subprocess.Popen[bytes] | None = None
     try:
         proc = subprocess.Popen(
-            [exe, "--listen-port", "0"],
+            [*inv, "--listen-port", "0"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
