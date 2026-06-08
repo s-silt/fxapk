@@ -16,6 +16,22 @@
 
 ---
 
+## ⬇️ 下载即用（新手，无需装 Python）
+
+不想碰命令行？到 **[Releases](https://github.com/s-silt/fxapk/releases/latest)** 下载
+`fxapk-gui-vX.Y.Z-win64.zip`（64 位 Windows **自包含**包，内置 frida / mitmproxy / adb，**无需另装任何东西**）：
+
+1. 下载并**解压出整个 `fxapk-gui` 文件夹**（依赖在 `_internal/`，别只拷 exe）。
+2. 双击 **`fxapk-gui.exe`** → 选 APK → 点「静态分析」或「一键全自动」。
+3. 要脱壳 / 抓包：USB 接好**已 root 的手机或模拟器**（adb 已内置）→ 点「环境体检」自动配 frida-server 与证书 → 再「一键全自动」。
+
+> ⚠️ 未签名，首次运行 Windows SmartScreen / 杀软可能拦，点「更多信息 → 仍要运行」或加白名单。
+> frida-server 由程序按设备 ABI 自动推到手机，无需手动准备。整个文件夹一起拷贝。
+
+开发者 / 命令行用户走下面的 `pip install`。
+
+---
+
 ## 它产出什么（核心区别）
 
 普通工具告诉你「检测到个推 SDK」；fxapk 告诉你 **具体值 + 所属公司 + 调证建议**：
@@ -60,7 +76,7 @@ python -m pip install -e .
 > 单元测试**不依赖 androguard、不联网、不需要真机/jadx/frida**（全部基于 `FakeContext` 合成数据）：
 > ```bash
 > python -m pip install jinja2 typer python-whois requests pyyaml pytest
-> python -m pytest -q          # 487 passed
+> python -m pytest -q          # 556 passed
 > ```
 
 可选依赖（缺失时对应能力**优雅降级**，核心不受影响、不报错）：
@@ -190,7 +206,7 @@ apkscan/
   dynamic/    doctor（体检）/ provision（自动配 frida-server·CA）/ unpack（脱壳）/ capture（抓包）/ merge（运行时端点并回）/ auto（一键编排）
   report/     html / json / pdf + templates/
   rules/      *.yaml（SDK/加固/支付/配置键/权限等规则库，数据与代码分离）
-tests/        487 个单测（FakeContext，离线）
+tests/        556 个单测（FakeContext，离线）
 docs/         设计文档
 ```
 

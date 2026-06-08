@@ -18,6 +18,24 @@ real fraud servers out of hundreds of library/CDN noise entries.
 
 ---
 
+## ⬇️ Download & run (no Python needed)
+
+Don't want the command line? Grab `fxapk-gui-vX.Y.Z-win64.zip` from
+**[Releases](https://github.com/s-silt/fxapk/releases/latest)** — a 64-bit Windows **self-contained**
+bundle with frida / mitmproxy / adb built in (**nothing else to install**):
+
+1. Download and **unzip the whole `fxapk-gui` folder** (deps live in `_internal/` — don't copy just the exe).
+2. Double-click **`fxapk-gui.exe`** → pick an APK → click "static analysis" or "one-click auto".
+3. To unpack / capture: USB-connect a **rooted phone or emulator** (adb is bundled) → click "doctor" to
+   auto-provision frida-server + CA → then "one-click auto".
+
+> ⚠️ Unsigned; on first run Windows SmartScreen / AV may warn — choose "More info → Run anyway" or
+> allow-list it. frida-server is auto-pushed to the device by ABI. Keep the whole folder together.
+
+Developers / CLI users: use `pip install` below.
+
+---
+
 ## What it produces (the key difference)
 
 Ordinary tools tell you "GeTui SDK detected"; fxapk tells you **the value + the owner + the advice**:
@@ -63,7 +81,7 @@ Unit tests need none of androguard/network/device (they use a `FakeContext`):
 
 ```bash
 python -m pip install jinja2 typer python-whois requests pyyaml pytest
-python -m pytest -q          # 487 passed
+python -m pytest -q          # 556 passed
 ```
 
 Optional (gracefully skipped when missing): `jadx` (deep decompile), `frida-tools` +
