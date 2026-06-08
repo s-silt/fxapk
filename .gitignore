@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+*.apk
+out/
+.apkscan_cache/
+
+# 样本数据与工作产物(不入库)
+ybku/
+/run_real.py
+/run_both.py
+/.wf_keyvalue_plan.md
+*.pdf

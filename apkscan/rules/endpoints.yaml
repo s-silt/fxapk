@@ -1,0 +1,108 @@
+# 网络端点提取规则 — 噪音过滤 / 私网判定 / 资源扫描范围。
+#
+# 由 apkscan.analyzers.endpoints 通过 registry.load_rules("endpoints") 读取。
+# 顶层为 dict，含以下键（缺失时分析器用内置兜底，保证离线/规则缺失仍可用）：
+#
+#   noise_hosts        : list[str]，命中（域名等于或以其结尾）即丢弃的"框架/命名空间"噪音域名
+#                        （xmlns、schema、开源库官网等，非业务端点）。大小写不敏感。
+#   noise_substrings   : list[str]，URL/域名包含这些子串即视为噪音（命名空间 URI 等）。
+#   resource_extensions: list[str]，参与"资源文本扫描"的文件扩展名（.xml/.json/.properties...）。
+#   resource_dirs      : list[str]，参与资源扫描的目录前缀（assets/res/raw...）。
+#   max_string_len     : int，单条候选字符串的最大保留长度（超过截断 snippet）。
+#
+# 说明：端点分析器只产 Endpoint（kind=url|domain|ip），标注明文(http://)/私网(RFC1918 等)。
+# 不产 DOMAIN/IP Lead —— 由 pipeline 富化后统一建。
+
+# ---- 噪音域名（精确或后缀匹配；这些是命名空间/schema/SDK 官网，不是业务端点）----
+noise_hosts:
+  # XML 命名空间 / schema
+  - "schemas.android.com"
+  - "schemas.microsoft.com"
+  - "schemas.xmlsoap.org"
+  - "schemas.openxmlformats.org"
+  - "www.w3.org"
+  - "w3.org"
+  - "ns.adobe.com"
+  - "xml.org"
+  - "purl.org"
+  - "xmlpull.org"
+  - "java.sun.com"
+  - "javax.xml.XMLConstants"
+  # 开源/框架官网与文档站（出现在注释/license/SDK 元数据里，非业务落地端点）
+  - "apache.org"
+  - "www.apache.org"
+  - "gnu.org"
+  - "www.gnu.org"
+  - "opensource.org"
+  - "creativecommons.org"
+  - "json-schema.org"
+  - "github.com"
+  - "raw.githubusercontent.com"
+  - "github.io"
+  - "googlesource.com"
+  - "android.googlesource.com"
+  - "developer.android.com"
+  - "developer.apple.com"
+  - "kotlinlang.org"
+  - "square.github.io"
+  - "reactivex.io"
+  - "slf4j.org"
+  - "www.slf4j.org"
+  - "fasterxml.com"
+  - "bouncycastle.org"
+  - "www.bouncycastle.org"
+  - "eclipse.org"
+  - "tools.ietf.org"
+  - "www.ietf.org"
+  - "rfc-editor.org"
+  - "unicode.org"
+  - "www.unicode.org"
+  - "localhost"
+
+# ---- 噪音子串（命名空间 URI / 资源标识里常见，整段 URL 含之即丢弃）----
+noise_substrings:
+  - "schemas.android.com/apk"
+  - "/apk/res/"
+  - "/apk/res-auto"
+  - "/2000/svg"
+  - "/2001/XMLSchema"
+  - "/1999/xhtml"
+  - "/1999/xlink"
+  - "/XML/1998/namespace"
+  - "ns.adobe.com/xap"
+  - "www.w3.org/"
+
+# ---- 资源文本扫描范围 ----
+# 这些扩展名的文件会被 read_file 后按文本扫描 URL/域名/IP。
+resource_extensions:
+  - ".xml"
+  - ".json"
+  - ".js"
+  - ".html"
+  - ".htm"
+  - ".properties"
+  - ".cfg"
+  - ".conf"
+  - ".ini"
+  - ".txt"
+  - ".csv"
+  - ".plist"
+  - ".yml"
+  - ".yaml"
+  - ".wxss"
+  - ".wxml"
+  - ".vue"
+  - ".ts"
+  - ".sql"
+
+# 这些目录前缀下的文件也参与资源扫描（覆盖小程序/H5 容器 res/raw/assets 等）。
+resource_dirs:
+  - "assets/"
+  - "res/"
+  - "res/raw/"
+  - "res/xml/"
+  - "raw/"
+  - "META-INF/"
+
+# 单条候选字符串/片段的最大长度（用于 snippet 截断，避免超长二进制噪音）。
+max_string_len: 300

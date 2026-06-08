@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "apkscan"
+version = "0.1.0"
+description = "涉诈 APK 调证分析 CLI — 静态分析 + 网络端点/服务归属提取，产出调证线索清单"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "apkscan" }]
+dependencies = [
+    "androguard>=4.1",
+    "jinja2",
+    "typer",
+    "python-whois",
+    "requests",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+apkscan = "apkscan.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["apkscan*"]
+
+[tool.setuptools.package-data]
+apkscan = ["rules/*.yaml", "report/templates/*.j2"]

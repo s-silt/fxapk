@@ -1,0 +1,488 @@
+# 第三方服务 / SDK 指纹库 — 国内主流厂商特征 → 调证主体映射（覆盖中文涉诈场景）。
+#
+# 由 apkscan.analyzers.sdk_fingerprint 通过 registry.load_rules("sdks") 读取。
+# 顶层为 dict，含两个键：
+#   sdks : list[规则]，每条第三方 SDK / 云服务一条
+#   meta : 全局兜底文案（命中后写入 Lead 的字段，单条规则可覆盖）
+#
+# ★ 核心价值：每个 SDK 绑定一家可调证公司 —— 命中即产 Lead(category=SDK_SERVICE)，
+#   把 SDK 厂商作为调证目标（持有开发者实名、appid/appkey 注册主体、调用/下发日志）。
+#
+# 每条 sdk 规则字段：
+#   name              : SDK / 服务展示名
+#   vendor            : 厂商公司全称（= 调证对象，写入 Lead.subject / where_to_request）
+#   category          : SDK 分类（payment/sms/push/storage/im/analytics/map 等，仅用于分组/notes）
+#   dex_prefixes      : DEX 类名包前缀 / 字符串特征（匹配 ctx.dex_strings()，子串比较，大小写敏感）
+#   so_names          : .so 库名特征（匹配 ctx.native_libs()+list_files() 的 basename，大小写不敏感）
+#   files             : 资源 / assets 特征文件（路径子串，匹配 ctx.list_files()，大小写不敏感）
+#   evidence_to_obtain: 可向厂商调取的证据（写入 Lead.evidence_to_obtain；缺省用 meta 兜底）
+#   note              : 补充说明（写入 Lead.notes）
+#
+# 置信度规则（由分析器按命中强度判定，非 YAML 字段）：
+#   命中 so / 资源文件，或命中 >=2 类特征  → HIGH
+#   仅命中单一 dex 类前缀特征             → MEDIUM
+
+meta:
+  # 命中后 Lead 默认可调取证据（单条 sdk 可用 evidence_to_obtain 覆盖）。
+  evidence_to_obtain:
+    - "开发者账号实名信息（注册主体/联系人/手机号/邮箱）"
+    - "应用绑定的 appid / appkey / 商户号注册主体"
+    - "服务调用日志（调用 IP / 时间 / 频次）"
+  where_to_request_suffix: ""
+
+sdks:
+  # ======================================================================
+  # 支付（payment）—— 资金流核心
+  # ======================================================================
+  - name: "支付宝 (Alipay SDK)"
+    vendor: "支付宝（中国）网络技术有限公司 / 蚂蚁科技集团股份有限公司"
+    category: "payment"
+    dex_prefixes:
+      - "com.alipay.sdk"
+      - "com.alipay.android.phone"
+      - "com.alipay.apmobilesecuritysdk"
+    so_names:
+      - "libalipayssl.so"
+      - "libalipayrandom.so"
+    files:
+      - "assets/alipay"
+    evidence_to_obtain:
+      - "收款商户 PID / 合作伙伴身份与实名主体"
+      - "签约商户号 / 应用 APPID 注册主体（营业执照、法人、结算银行卡）"
+      - "交易流水 / 收款对账单 / 资金结算记录"
+      - "商户接入时提交的回调地址与服务器 IP"
+    note: "支付宝移动支付 SDK；商户号/PID 直接对应实名收款主体，资金流核心调证点。"
+
+  - name: "微信支付 (WeChat Pay / OpenSDK)"
+    vendor: "财付通支付科技有限公司 / 腾讯（深圳市腾讯计算机系统有限公司）"
+    category: "payment"
+    dex_prefixes:
+      - "com.tencent.mm.opensdk"
+      - "com.tencent.mm.sdk"
+      - "com.tencent.wxpay"
+    files:
+      - "assets/wechat"
+    evidence_to_obtain:
+      - "微信支付商户号（mch_id）注册主体（营业执照、法人、结算账户）"
+      - "公众号 / 开放平台 APPID 注册主体与绑定关系"
+      - "交易流水 / 资金结算记录 / 退款记录"
+      - "商户配置的支付回调（notify_url）域名与服务器 IP"
+    note: "微信支付 OpenSDK；mch_id+APPID 关联实名收款主体，资金流核心调证点。"
+
+  - name: "银联支付 (UnionPay / UPPay)"
+    vendor: "中国银联股份有限公司 / 银联商务股份有限公司"
+    category: "payment"
+    dex_prefixes:
+      - "com.unionpay"
+      - "com.unionpay.uppay"
+      - "com.unionpay.tsmservice"
+    files:
+      - "assets/uppay"
+    evidence_to_obtain:
+      - "银联商户号注册主体（营业执照、法人、结算账户）"
+      - "接入机构 / 收单机构信息"
+      - "交易流水与清结算记录"
+    note: "银联 UPPay 控件 / 云闪付 SDK；商户号关联实名收单主体。"
+
+  - name: "京东支付 (JD Pay)"
+    vendor: "网银在线（北京）科技有限公司 / 京东科技"
+    category: "payment"
+    dex_prefixes:
+      - "com.jdpay"
+      - "com.wangyin.payment"
+      - "com.jd.lib.jdpaysdk"
+    evidence_to_obtain:
+      - "京东支付 / 网银在线商户号注册主体"
+      - "交易流水与结算记录"
+    note: "京东支付（网银在线）SDK。"
+
+  # ======================================================================
+  # 短信（sms）—— 验证码 / 通知下发，关联实名签名与下发记录
+  # ======================================================================
+  - name: "阿里云短信 (Aliyun SMS / Dypns)"
+    vendor: "阿里云计算有限公司"
+    category: "sms"
+    dex_prefixes:
+      - "com.aliyun.sms"
+      - "com.alibaba.sdk.android.dypnsapi"
+      - "com.mobile.auth"
+    evidence_to_obtain:
+      - "阿里云账号实名信息（企业/个人实名）"
+      - "短信签名 / 模板报备主体与审核资料"
+      - "短信下发记录（手机号 / 内容 / 时间 / 调用 IP）"
+      - "AccessKey 绑定账号主体"
+    note: "阿里云短信/号码认证 SDK；短信签名报备含实名主体，下发记录可调。"
+
+  - name: "腾讯云短信 (Tencent Cloud SMS)"
+    vendor: "腾讯云计算（北京）有限责任公司"
+    category: "sms"
+    dex_prefixes:
+      - "com.tencent.cloud.huiyansdkface"
+      - "com.tencentcloudapi.sms"
+      - "com.qcloud.sms"
+    evidence_to_obtain:
+      - "腾讯云账号实名信息"
+      - "短信签名 / 模板报备主体"
+      - "短信下发记录（手机号 / 内容 / 时间 / 调用 IP）"
+      - "SecretId / SecretKey 绑定账号主体"
+    note: "腾讯云短信 SDK；签名报备含实名主体，下发记录可调。"
+
+  - name: "容联云通讯 (CloOpen)"
+    vendor: "北京容联易通信息技术有限公司"
+    category: "sms"
+    dex_prefixes:
+      - "com.cloopen"
+      - "com.cloopen.rest"
+    evidence_to_obtain:
+      - "容联云账号实名信息（主账号 ACCOUNT SID 注册主体）"
+      - "短信签名 / 模板报备主体"
+      - "短信 / 语音下发记录"
+    note: "容联云通讯（CCP）短信/语音 SDK；主账号实名主体可调。"
+
+  - name: "Mob 短信验证 (MobSMSSDK)"
+    vendor: "深圳市和讯华谷信息技术有限公司（MobTech）"
+    category: "sms"
+    dex_prefixes:
+      - "com.mob.sms"
+      - "com.mob.secverify"
+      - "com.mob"
+      - "cn.smssdk"
+    files:
+      - "assets/mob"
+    evidence_to_obtain:
+      - "MobTech 账号实名信息（AppKey 注册主体）"
+      - "短信 / 一键登录下发记录"
+    note: "Mob（MobTech）短信验证 / 秒验 SDK；AppKey 注册主体可调。"
+
+  # ======================================================================
+  # 推送（push）—— 下发记录可证用户触达，厂商持注册主体
+  # ======================================================================
+  - name: "极光推送 (JPush / JIGUANG)"
+    vendor: "深圳市和讯华谷信息技术有限公司 / 极光（Aurora Mobile）"
+    category: "push"
+    dex_prefixes:
+      - "cn.jpush"
+      - "cn.jiguang"
+      - "cn.jpush.android"
+    so_names:
+      - "libjcore"
+      - "libjpush"
+    evidence_to_obtain:
+      - "极光账号实名信息（AppKey 注册主体）"
+      - "推送下发记录（目标设备 / 内容 / 时间）"
+      - "设备注册 / 别名 / 标签数据"
+    note: "极光 JPush / JCore；AppKey 注册主体与推送下发记录可调，覆盖率极高。"
+
+  - name: "个推 (GeTui / Getui)"
+    vendor: "每日互动股份有限公司（个推 GeTui）"
+    category: "push"
+    dex_prefixes:
+      - "com.igexin"
+      - "com.getui"
+      - "com.igexin.sdk"
+    so_names:
+      - "libgetui"
+    evidence_to_obtain:
+      - "个推账号实名信息（AppID / AppKey 注册主体）"
+      - "推送下发记录"
+      - "设备 CID / 注册信息"
+    note: "个推 SDK（com.igexin）；AppID 注册主体与下发记录可调。"
+
+  - name: "友盟推送 (UMeng Push)"
+    vendor: "友盟同欣（北京）科技有限公司 / 阿里巴巴（友盟+）"
+    category: "push"
+    dex_prefixes:
+      - "com.umeng.message"
+      - "com.umeng.umzid"
+      - "org.android.agoo"
+    evidence_to_obtain:
+      - "友盟+ 账号实名信息（AppKey 注册主体）"
+      - "推送下发记录"
+    note: "友盟（U-Push / agoo）推送 SDK；AppKey 注册主体可调，归阿里友盟+。"
+
+  - name: "华为推送 (Huawei HMS Push)"
+    vendor: "华为软件技术有限公司 / 华为终端有限公司"
+    category: "push"
+    dex_prefixes:
+      - "com.huawei.hms.push"
+      - "com.huawei.hms"
+      - "com.huawei.agconnect"
+    files:
+      - "agconnect-services.json"
+    evidence_to_obtain:
+      - "华为开发者账号实名信息（AppID 注册主体）"
+      - "AGConnect 项目绑定主体"
+      - "推送下发记录"
+    note: "华为 HMS Push / AGConnect；含 agconnect-services.json 配置，开发者实名可调。"
+
+  - name: "小米推送 (Xiaomi MiPush)"
+    vendor: "小米科技有限责任公司 / 北京小米移动软件有限公司"
+    category: "push"
+    dex_prefixes:
+      - "com.xiaomi.mipush"
+      - "com.xiaomi.push"
+      - "com.xiaomi.mipush.sdk"
+    evidence_to_obtain:
+      - "小米开放平台账号实名信息（AppID / AppKey 注册主体）"
+      - "推送下发记录"
+    note: "小米 MiPush SDK；AppID 注册主体与下发记录可调。"
+
+  - name: "OPPO推送 (OPPO Push / HeyTap)"
+    vendor: "广东欢太科技有限公司 / OPPO广东移动通信有限公司"
+    category: "push"
+    dex_prefixes:
+      - "com.heytap.msp.push"
+      - "com.coloros.mcssdk"
+      - "com.heytap.mcssdk"
+    evidence_to_obtain:
+      - "OPPO / HeyTap 开发者账号实名信息（AppKey 注册主体）"
+      - "推送下发记录"
+    note: "OPPO 推送（HeyTap / ColorOS MCS）SDK；开发者实名可调。"
+
+  - name: "vivo推送 (vivo Push)"
+    vendor: "维沃移动通信有限公司（vivo）"
+    category: "push"
+    dex_prefixes:
+      - "com.vivo.push"
+      - "com.vivo.vms"
+    evidence_to_obtain:
+      - "vivo 开放平台账号实名信息（AppID 注册主体）"
+      - "推送下发记录"
+    note: "vivo 推送 SDK；开发者实名可调。"
+
+  - name: "魅族推送 (Meizu Flyme Push)"
+    vendor: "珠海市魅族通讯设备有限公司（Flyme）"
+    category: "push"
+    dex_prefixes:
+      - "com.meizu.cloud.pushsdk"
+      - "com.meizu.cloud.pushinternal"
+    evidence_to_obtain:
+      - "魅族开放平台账号实名信息"
+      - "推送下发记录"
+    note: "魅族 Flyme 推送 SDK。"
+
+  # ======================================================================
+  # 云存储 / CDN（storage）—— 桶名/外链可定位，账号实名可调
+  # ======================================================================
+  - name: "阿里云 OSS (Aliyun OSS)"
+    vendor: "阿里云计算有限公司"
+    category: "storage"
+    dex_prefixes:
+      - "com.alibaba.sdk.android.oss"
+      - "com.aliyun.oss"
+    evidence_to_obtain:
+      - "阿里云账号实名信息（AccessKey 绑定主体）"
+      - "OSS Bucket 归属账号与访问日志"
+      - "上传 / 下载对象记录"
+    note: "阿里云 OSS 移动 SDK；Bucket 归属账号实名可调，外链域名可定位。"
+
+  - name: "腾讯云 COS (Tencent Cloud COS)"
+    vendor: "腾讯云计算（北京）有限责任公司"
+    category: "storage"
+    dex_prefixes:
+      - "com.tencent.cos"
+      - "com.tencent.qcloud.core"
+      - "com.tencent.cos.xml"
+    evidence_to_obtain:
+      - "腾讯云账号实名信息（SecretId 绑定主体）"
+      - "COS Bucket 归属账号与访问日志"
+    note: "腾讯云 COS SDK；Bucket 归属账号实名可调。"
+
+  - name: "七牛云存储 (Qiniu)"
+    vendor: "上海七牛信息技术有限公司"
+    category: "storage"
+    dex_prefixes:
+      - "com.qiniu"
+      - "com.qiniu.android"
+      - "com.qiniu.pili"
+    evidence_to_obtain:
+      - "七牛云账号实名信息（AccessKey / Bucket 绑定主体）"
+      - "存储 / CDN 访问日志"
+    note: "七牛云存储 / 直播 SDK；账号实名与 Bucket 归属可调。"
+
+  - name: "又拍云 (UPYUN)"
+    vendor: "杭州又拍云科技有限公司"
+    category: "storage"
+    dex_prefixes:
+      - "com.upyun"
+      - "com.upyun.library"
+    evidence_to_obtain:
+      - "又拍云账号实名信息（服务 / Bucket 绑定主体）"
+      - "存储 / CDN 访问日志"
+    note: "又拍云存储 / CDN SDK。"
+
+  - name: "华为云 OBS (Huawei Cloud OBS)"
+    vendor: "华为云计算技术有限公司"
+    category: "storage"
+    dex_prefixes:
+      - "com.obs.services"
+      - "com.huawei.obs"
+    evidence_to_obtain:
+      - "华为云账号实名信息（AK/SK 绑定主体）"
+      - "OBS 桶归属账号与访问日志"
+    note: "华为云 OBS 对象存储 SDK。"
+
+  # ======================================================================
+  # IM / 客服（im）—— 聊天/会话记录可调，账号实名归厂商
+  # ======================================================================
+  - name: "融云 IM (RongCloud)"
+    vendor: "北京云中融信网络科技有限公司（融云 RongCloud）"
+    category: "im"
+    dex_prefixes:
+      - "io.rong"
+      - "io.rong.imlib"
+      - "cn.rongcloud"
+    so_names:
+      - "librongimlib"
+      - "libsqlite-rong"
+    evidence_to_obtain:
+      - "融云账号实名信息（AppKey 注册主体）"
+      - "会话 / 消息记录（IM 服务端留存）"
+      - "用户注册 / Token 签发记录"
+    note: "融云 IM SDK（io.rong）；AppKey 注册主体与会话记录可调，涉诈聊天常用。"
+
+  - name: "环信 IM (Easemob / Hyphenate)"
+    vendor: "北京易掌云峰科技有限公司（环信 Easemob）"
+    category: "im"
+    dex_prefixes:
+      - "com.hyphenate"
+      - "com.hyphenate.chat"
+      - "com.easemob"
+    so_names:
+      - "libhyphenate"
+    evidence_to_obtain:
+      - "环信账号实名信息（AppKey / orgName 注册主体）"
+      - "会话 / 消息记录"
+      - "用户注册记录"
+    note: "环信 IM / 客服 SDK（com.hyphenate）；AppKey 注册主体与会话记录可调。"
+
+  - name: "网易云信 (NetEase IM / NIM)"
+    vendor: "杭州网易雷火科技有限公司 / 网易（杭州网易智企科技有限公司）"
+    category: "im"
+    dex_prefixes:
+      - "com.netease.nimlib"
+      - "com.netease.nim"
+      - "com.netease.yunxin"
+    so_names:
+      - "libnimtools"
+      - "libne_audio"
+    evidence_to_obtain:
+      - "网易云信账号实名信息（AppKey 注册主体）"
+      - "会话 / 消息记录"
+      - "用户注册 / Token 记录"
+    note: "网易云信 IM / 音视频 SDK（com.netease.nimlib）；AppKey 注册主体与会话记录可调。"
+
+  - name: "容联七陌 (7Moor 云客服)"
+    vendor: "北京容联七陌科技有限公司 / 容联易通"
+    category: "im"
+    dex_prefixes:
+      - "com.moor.imkf"
+      - "com.m7.imkfsdk"
+    evidence_to_obtain:
+      - "七陌账号实名信息（AppKey / 企业账号注册主体）"
+      - "客服会话记录"
+    note: "容联七陌云客服 SDK（com.moor.imkf）；企业账号实名可调。"
+
+  - name: "美洽客服 (Meiqia)"
+    vendor: "成都美洽科技有限公司"
+    category: "im"
+    dex_prefixes:
+      - "com.meiqia"
+      - "com.meiqia.core"
+    evidence_to_obtain:
+      - "美洽账号实名信息（企业 ID 注册主体）"
+      - "客服会话记录"
+    note: "美洽在线客服 SDK；企业账号实名可调。"
+
+  # ======================================================================
+  # 统计 / 数据分析（analytics）—— 账号实名 + 上报数据可调
+  # ======================================================================
+  - name: "友盟统计 (UMeng Analytics)"
+    vendor: "友盟同欣（北京）科技有限公司 / 阿里巴巴（友盟+）"
+    category: "analytics"
+    dex_prefixes:
+      - "com.umeng.analytics"
+      - "com.umeng.commonsdk"
+      - "com.umeng.common"
+    evidence_to_obtain:
+      - "友盟+ 账号实名信息（AppKey 注册主体）"
+      - "统计上报数据（设备 / 行为 / 渠道）"
+    note: "友盟统计 SDK；AppKey 注册主体可调，归阿里友盟+。"
+
+  - name: "TalkingData"
+    vendor: "北京腾云天下科技有限公司（TalkingData）"
+    category: "analytics"
+    dex_prefixes:
+      - "com.tendcloud.tenddata"
+      - "com.tendcloud"
+      - "com.talkingdata"
+    evidence_to_obtain:
+      - "TalkingData 账号实名信息（AppID 注册主体）"
+      - "统计上报数据"
+    note: "TalkingData 移动统计 SDK（com.tendcloud.tenddata）；AppID 注册主体可调。"
+
+  - name: "神策分析 (Sensors Analytics)"
+    vendor: "神策网络科技（北京）有限公司（Sensors Data）"
+    category: "analytics"
+    dex_prefixes:
+      - "com.sensorsdata.analytics"
+      - "com.sensorsdata"
+    evidence_to_obtain:
+      - "神策账号 / 部署项目实名信息"
+      - "用户行为上报数据"
+    note: "神策数据分析 SDK（com.sensorsdata）；项目归属主体可调。"
+
+  - name: "GrowingIO"
+    vendor: "北京易数科技有限公司（GrowingIO）"
+    category: "analytics"
+    dex_prefixes:
+      - "com.growingio.android"
+      - "io.growing"
+    evidence_to_obtain:
+      - "GrowingIO 账号实名信息（项目 AccountId 注册主体）"
+      - "用户行为上报数据"
+    note: "GrowingIO 用户行为分析 SDK。"
+
+  # ======================================================================
+  # 地图 / 定位（map）—— Key 注册主体 + 定位调用可调
+  # ======================================================================
+  - name: "高德地图 (AMap / Gaode)"
+    vendor: "高德软件有限公司（阿里巴巴）"
+    category: "map"
+    dex_prefixes:
+      - "com.amap.api"
+      - "com.autonavi"
+      - "com.loc"
+    so_names:
+      - "libAMapSDK"
+    evidence_to_obtain:
+      - "高德开放平台账号实名信息（API Key 注册主体）"
+      - "定位 / 地图调用记录"
+    note: "高德地图 / 定位 SDK（com.amap.api）；API Key 注册主体可调。"
+
+  - name: "百度地图 (Baidu Map)"
+    vendor: "北京百度网讯科技有限公司"
+    category: "map"
+    dex_prefixes:
+      - "com.baidu.mapapi"
+      - "com.baidu.location"
+      - "com.baidu.platform"
+    so_names:
+      - "libBaiduMapSDK"
+      - "liblocSDK"
+    evidence_to_obtain:
+      - "百度地图开放平台账号实名信息（AK 注册主体）"
+      - "定位 / 地图调用记录"
+    note: "百度地图 / 定位 SDK（com.baidu.mapapi / com.baidu.location）；AK 注册主体可调。"
+
+  - name: "腾讯地图 (Tencent Map / SOSO)"
+    vendor: "腾讯（深圳市腾讯计算机系统有限公司）"
+    category: "map"
+    dex_prefixes:
+      - "com.tencent.map.geolocation"
+      - "com.tencent.tencentmap"
+      - "com.tencent.lbssearch"
+    evidence_to_obtain:
+      - "腾讯位置服务账号实名信息（Key 注册主体）"
+      - "定位 / 地图调用记录"
+    note: "腾讯位置服务 / 地图 SDK；Key 注册主体可调。"

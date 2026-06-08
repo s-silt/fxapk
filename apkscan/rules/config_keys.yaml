@@ -1,0 +1,146 @@
+# 配置键值 → SDK / 厂商映射库 —— 把 App 里**真实配置的 key=value** 抠出来后归属到调证主体。
+#
+# 由 apkscan.analyzers.config_keys 通过 registry.load_rules("config_keys") 读取。
+# 顶层为 dict，含两个键：
+#   patterns : list[规则]，每条把一类 key 名 / 前缀 映射到 SDK + 厂商（调证对象）
+#   meta     : 全局兜底文案（命中后写入 Lead 的字段，单条规则可覆盖）
+#
+# ★ 核心价值：报告必须显示 'GETUI_APPID=DVRqpR8NztAJAfq8f4dbv3' 这种**具体值**，
+#   并把它绑定到一家可调证公司（持有开发者实名 / 应用注册主体 / 调用下发日志）。
+#
+# 每条 pattern 规则字段：
+#   prefixes  : key 名前缀（大小写不敏感，startswith 匹配）—— 命中 key 名以此开头者
+#   exact     : key 名精确匹配（大小写不敏感）
+#   contains  : key 名子串匹配（大小写不敏感）
+#   subject   : 归属厂商公司全称（= 调证对象，写入 Lead.subject / where_to_request）
+#   sdk       : 该配置对应的 SDK / 服务名（写入 Lead.notes）
+#
+# 匹配优先级：exact > prefixes（更长前缀优先）> contains。未命中任何规则 →
+#   subject = "待核（应用配置）"。
+
+meta:
+  # 命中后 Lead 默认可调取证据（写入 Lead.evidence_to_obtain）。
+  evidence_to_obtain:
+    - "凭该 AppID/AppKey/渠道号向厂商调取：开发者账号实名、应用注册主体、调用/下发日志"
+  # 未知 key 的兜底归属主体。
+  unknown_subject: "待核（应用配置）"
+
+patterns:
+  # ======================================================================
+  # 个推 / 每日互动（GeTui / 智数渠道）
+  # ======================================================================
+  - sdk: "个推推送 (GeTui)"
+    subject: "每日互动股份有限公司（个推）"
+    prefixes:
+      - "GETUI_"
+      - "GT_"
+      - "GTSDK"
+    exact:
+      - "PUSH_APPID"
+      - "PUSH_APPKEY"
+      - "PUSH_APPSECRET"
+
+  - sdk: "个推推送 (GeTui / 智数渠道)"
+    subject: "每日互动股份有限公司（个推 / 智数渠道）"
+    prefixes:
+      - "ZX_APPID_GETUI"
+      - "ZX_APPID"
+      - "ZX_"
+
+  # ======================================================================
+  # DCloud / 数字天堂（uni-app）
+  # ======================================================================
+  - sdk: "uni-app / DCloud"
+    subject: "数字天堂（北京）网络技术有限公司（DCloud）"
+    prefixes:
+      - "DCLOUD_"
+      - "dcloud_"
+      - "__UNI__"
+
+  # ======================================================================
+  # 腾讯（微信开放平台 / QQ / Bugly）
+  # ======================================================================
+  - sdk: "微信开放平台 (WeChat Open)"
+    subject: "腾讯（深圳市腾讯计算机系统有限公司 / 微信开放平台）"
+    prefixes:
+      - "WX_"
+      - "WEIXIN"
+      - "WECHAT"
+
+  - sdk: "腾讯 QQ 开放平台"
+    subject: "腾讯（深圳市腾讯计算机系统有限公司）"
+    prefixes:
+      - "QQ_APPID"
+      - "TENCENT_"
+
+  - sdk: "腾讯 Bugly"
+    subject: "腾讯（深圳市腾讯计算机系统有限公司 / Bugly）"
+    prefixes:
+      - "BUGLY_"
+
+  # ======================================================================
+  # 友盟 / 极光 / 百度 / 高德 / 支付宝
+  # ======================================================================
+  - sdk: "友盟 UMeng"
+    subject: "友盟同欣（北京）科技有限公司（友盟 UMeng）"
+    prefixes:
+      - "UMENG_"
+
+  - sdk: "极光推送 (JPush / JIGUANG)"
+    subject: "深圳市和讯华谷信息技术有限公司（极光 JPush）"
+    prefixes:
+      - "JPUSH_"
+      - "JIGUANG"
+
+  - sdk: "百度地图 / 百度开放服务"
+    subject: "百度（北京百度网讯科技有限公司）"
+    prefixes:
+      - "BAIDU_"
+    exact:
+      - "api_key"
+      - "com.baidu.lbsapi.API_KEY"
+
+  - sdk: "高德地图 (AMap)"
+    subject: "高德软件有限公司（高德 AMap）"
+    prefixes:
+      - "AMAP_"
+      - "AMAP"
+    contains:
+      - "amap"
+      - "高德"
+      - "com.amap.api.v2.apikey"
+
+  - sdk: "支付宝 (Alipay)"
+    subject: "支付宝（中国）网络技术有限公司 / 蚂蚁科技集团股份有限公司"
+    prefixes:
+      - "ALIPAY"
+    contains:
+      - "支付宝"
+
+  # ======================================================================
+  # 厂商推送（小米 / OPPO / vivo / 华为）
+  # ======================================================================
+  - sdk: "小米推送 (MiPush)"
+    subject: "小米（北京小米移动软件有限公司）"
+    prefixes:
+      - "MI_"
+      - "XIAOMI_PUSH"
+      - "XIAOMI_"
+
+  - sdk: "OPPO 推送 (HeyTap)"
+    subject: "OPPO（广东欢太科技有限公司 / HeyTap）"
+    prefixes:
+      - "OPPO_"
+      - "HEYTAP"
+
+  - sdk: "vivo 推送"
+    subject: "vivo（维沃移动通信有限公司）"
+    prefixes:
+      - "VIVO_"
+
+  - sdk: "华为推送 (HMS Push)"
+    subject: "华为（华为软件技术有限公司 / HMS）"
+    prefixes:
+      - "HUAWEI_"
+      - "HMS"
+      - "com.huawei.hms"
