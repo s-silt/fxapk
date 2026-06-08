@@ -540,7 +540,7 @@ class App:
             return
         target = Path(self._last_out)
         try:
-            if sys.platform.startswith("win"):
+            if sys.platform == "win32":
                 os.startfile(str(target))  # noqa: S606 - Windows 资源管理器打开目录
             elif sys.platform == "darwin":
                 import subprocess
