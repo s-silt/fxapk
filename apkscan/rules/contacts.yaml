@@ -1,0 +1,136 @@
+# 联系方式线索规则库 —— 直接落地线索（QQ / 微信 / Telegram / 邮箱 / 手机号）。
+#
+# 由 apkscan.analyzers.contacts 通过 registry.load_rules("contacts") 读取。
+# 顶层 dict：
+#   meta  : 全局兜底（默认可调取证据）
+#   types : list[联系方式类型规则]
+#
+# ---- types 规则字段 ----
+#   name              : 类型展示名（如 "QQ"）
+#   kind              : 机器标识（email/phone/qq/wechat/telegram）
+#   subject           : 归属主体 / 平台（写入 Lead.subject）
+#   where_to_request  : 向谁调证（写入 Lead.where_to_request）
+#   confidence        : high/medium/low（默认 medium）
+#   patterns          : 正则列表（IGNORECASE）；若有捕获组取首个非空组为线索值，否则取整段
+#   blacklist         : 命中值若包含其中任一子串（大小写不敏感）则丢弃（去误报）
+#   evidence_to_obtain: 可调取证据（缺省用 meta 兜底）
+#   note              : 备注（写入 Lead.notes）
+#
+# 误报控制：手机号用前后非数字边界；QQ/微信要求上下文关键字；邮箱黑名单排除 @drawable 等资源引用。
+
+meta:
+  evidence_to_obtain:
+    - "账号实名注册信息"
+    - "绑定手机号 / 邮箱"
+    - "登录 IP 与设备信息"
+    - "依法可调取的通信 / 交易记录"
+
+types:
+  # ---------------- 邮箱 ----------------
+  - name: "邮箱"
+    kind: "email"
+    subject: "邮箱服务商（按域名定）"
+    where_to_request: "对应邮箱服务商（腾讯 / 网易 / Google 等）/ 域名注册商"
+    confidence: "medium"
+    patterns:
+      - '[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}'
+    blacklist:
+      - "@drawable"
+      - "@string"
+      - "@android"
+      - "@id/"
+      - "@style"
+      - "@color"
+      - "@mipmap"
+      - "@xml"
+      - "@layout"
+      - "@dimen"
+      - "@anim"
+      - "@array"
+      - "@integer"
+      - "@2x"
+      - "@3x"
+      - "schemas.android.com"
+      - "w3.org"
+      - "example.com"
+      - "@attr"
+    evidence_to_obtain:
+      - "邮箱注册实名信息 / 注册手机号"
+      - "登录 IP 与登录时间日志"
+      - "收发件记录（依法调取）"
+    note: "邮箱可定位注册主体；企业邮箱后缀可关联公司域名。"
+
+  # ---------------- 手机号 ----------------
+  - name: "手机号"
+    kind: "phone"
+    subject: "电信运营商（移动 / 联通 / 电信 / 虚商）"
+    where_to_request: "号码归属电信运营商"
+    confidence: "medium"
+    patterns:
+      - '(?<!\d)1[3-9]\d{9}(?!\d)'
+    blacklist: []
+    evidence_to_obtain:
+      - "机主实名信息 / 开户资料"
+      - "通话详单 / 短信记录（依法调取）"
+      - "号码绑定的 App / 支付账户"
+    note: "中国大陆手机号；可经运营商定位机主实名与通信记录。"
+
+  # ---------------- QQ ----------------
+  - name: "QQ"
+    kind: "qq"
+    subject: "腾讯（QQ）"
+    where_to_request: "深圳市腾讯计算机系统有限公司"
+    confidence: "medium"
+    patterns:
+      - '(?:QQ|扣扣|企鹅)[号码群:：＠@\s]{0,3}(\d{5,11})'
+      - '(\d{5,11})@qq\.com'
+      - 'mqqwpa://im/chat\?[^"\s]*?uin=(\d{5,11})'
+      - 'qq://[^"\s]*?uin=(\d{5,11})'
+    blacklist: []
+    evidence_to_obtain:
+      - "QQ 号实名信息 / 绑定手机号"
+      - "登录 IP 与设备信息"
+      - "聊天 / 群成员记录（依法调取）"
+    note: "QQ 号 / QQ 群可经腾讯调取实名与通信记录；客服 QQ 常为引流落地点。"
+
+  # ---------------- 微信 ----------------
+  - name: "微信"
+    kind: "wechat"
+    subject: "腾讯 / 财付通（微信）"
+    where_to_request: "财付通支付科技有限公司 / 腾讯（微信）"
+    confidence: "medium"
+    # 必须有明确分隔符（：: ＠@）才认微信号，避免 JS 里 weixin/wechat 后跟 base64
+    # 标识符（如 weixinJSBridge / FShareApi）被误判。裸 weixin/wechat 触发词已移除
+    # （微信 SDK 代码里满地都是）。wxid_ 前缀是可靠的微信内部 id 形态。
+    patterns:
+      - '(?:微信号|加我?微信|微信|加微|薇信|威信|vx|v信)[：:＠@]\s*([a-zA-Z][-_a-zA-Z0-9]{5,19})'
+      - '(wxid_[a-zA-Z0-9]{6,20})'
+    blacklist:
+      - "weixin://"
+      - "wechat_sdk"
+      - "weixinhao"
+      - "jsbridge"
+    evidence_to_obtain:
+      - "微信号实名信息 / 绑定手机号、银行卡"
+      - "登录 IP 与设备信息"
+      - "支付 / 转账记录（依法调取）"
+    note: "微信号可经腾讯调取实名、绑定与资金记录；常为引流与收款落地点。"
+
+  # ---------------- Telegram ----------------
+  - name: "Telegram"
+    kind: "telegram"
+    subject: "Telegram（境外平台）"
+    where_to_request: "Telegram（境外，需国际执法协作 / 链路侧落地）"
+    confidence: "low"
+    patterns:
+      - 't\.me/([A-Za-z0-9_]{4,32})'
+      - 'tg://resolve\?domain=([A-Za-z0-9_]{4,32})'
+      - '(?:telegram|电报|飞机|纸飞机|tg)[:：@\s]{0,5}@([A-Za-z0-9_]{5,32})'
+    blacklist:
+      - "telegram.org"
+      - "t.me/share"
+    evidence_to_obtain:
+      - "账号注册手机号 / 登录 IP（经国际协作）"
+      - "关联频道 / 群组及管理员"
+      - "应用侧落地：引流落地页 / 推广链路归属"
+    note: "境外即时通讯，常用于涉诈引流与黑产协作；境内难直接调证，重在链路侧固定。"

@@ -1,0 +1,159 @@
+# apkscan — components 分析器规则
+#
+# 由 apkscan.core.registry.load_rules("components") 读取。
+# 覆盖中文涉诈 / 灰产 App 在四大组件导出层面的真实攻击面与研判语义。
+#
+# 顶层为 dict，键含义：
+#   findings:        各组件类型导出对应的 Finding 模板（标题/严重度/描述/建议/参考）
+#   severity:        默认严重度（组件类型 → 默认 Severity；可被 findings 模板覆盖）
+#   provider_writable_hints: provider name 命中以下子串（不区分大小写）时升级为 HIGH
+#                            （疑似可写/可读敏感数据的内容提供者）
+#   sensitive_name_hints:    组件 name 命中以下关键字时在 notes 标注（涉诈高敏组件研判提示）
+#   fraud_notes:     涉诈场景的研判说明（增强报告可读性）
+
+# ---------------------------------------------------------------------------
+# 导出组件 Finding 模板（每种组件类型一条）
+# ---------------------------------------------------------------------------
+findings:
+  activity:
+    id: COMPONENT-EXPORTED-ACTIVITY
+    title: "导出的 Activity（界面可被外部应用拉起）"
+    severity: MEDIUM
+    description: >-
+      该 Activity 设置 android:exported="true"（或含 intent-filter 而默认导出），
+      可被任意第三方应用通过 Intent 直接拉起。涉诈 App 常将充值/收银/H5 容器/
+      客服跳转等界面导出，外部可绕过登录态直达内部页面；也可能因导出页面
+      接收外部 Intent 中的 URL/参数而被注入跳转或加载任意 WebView 链接。
+    recommendation: >-
+      研判：枚举导出 Activity 并用 `adb shell am start -n 包名/组件名` 拉起，
+      观察是否绕过鉴权直达内部页、是否回显接口域名/商户号，作为端点与界面取证线索。
+    references:
+      - "https://developer.android.com/guide/topics/manifest/activity-element#exported"
+
+  service:
+    id: COMPONENT-EXPORTED-SERVICE
+    title: "导出的 Service（后台服务可被外部应用绑定/启动）"
+    severity: MEDIUM
+    description: >-
+      该 Service 设置 android:exported="true"，可被外部应用 bind/start。
+      涉诈 App 常用导出 Service 承载推送、远控指令下发、短信/通知转发、
+      后台保活等逻辑；导出后外部可触发其暴露的 AIDL/Messenger 接口，
+      也便于现场取证时主动激活并观察其行为与外联端点。
+    recommendation: >-
+      研判：分析导出 Service 的 AIDL/Intent 协议，必要时主动绑定触发，
+      观察其外联域名/IP、是否承载远控或短信转发，作为远控与端点调证线索。
+    references:
+      - "https://developer.android.com/guide/topics/manifest/service-element#exported"
+
+  receiver:
+    id: COMPONENT-EXPORTED-RECEIVER
+    title: "导出的 BroadcastReceiver（广播可被外部应用触发）"
+    severity: MEDIUM
+    description: >-
+      该 BroadcastReceiver 设置 android:exported="true"（或注册了系统广播
+      intent-filter 而默认导出），可被外部应用发送广播触发。涉诈 App 常用
+      导出 Receiver 监听开机/网络变化做保活，或监听短信到达（SMS_RECEIVED）做
+      验证码窃取与转发；外部可伪造广播触发其逻辑，亦可作为窃码行为佐证。
+    recommendation: >-
+      研判：检查导出 Receiver 监听的 action（尤其 SMS_RECEIVED / BOOT_COMPLETED），
+      结合短信/通知相关权限研判验证码窃取与保活行为，作为窃码链路调证线索。
+    references:
+      - "https://developer.android.com/guide/topics/manifest/receiver-element#exported"
+
+  provider:
+    id: COMPONENT-EXPORTED-PROVIDER
+    title: "导出的 ContentProvider（数据可被外部应用读写）"
+    severity: HIGH
+    description: >-
+      该 ContentProvider 设置 android:exported="true" 且未以 permission 限制，
+      外部应用可通过其 content:// URI 读取甚至写入应用私有数据。涉诈 App 的
+      Provider 常承载本地账本、聊天记录、配置（服务器域名/商户号/token）等敏感数据，
+      导出后构成直接数据泄露面；可写 Provider 还可被外部注入数据篡改逻辑。
+    recommendation: >-
+      研判：用 `adb shell content query --uri content://<authority>` 枚举可读数据，
+      尝试 query/insert 验证读写权限，直接提取本地落地的服务器地址、商户号、
+      账本与聊天数据库，作为一手资金流与端点调证物。
+    references:
+      - "https://developer.android.com/guide/topics/manifest/provider-element#exported"
+
+# ---------------------------------------------------------------------------
+# 组件类型默认严重度（findings 模板缺 severity 时回退）
+# ---------------------------------------------------------------------------
+severity:
+  activity: MEDIUM
+  service: MEDIUM
+  receiver: MEDIUM
+  # 可读/可写 ContentProvider 直接构成数据泄露面，默认 HIGH。
+  provider: HIGH
+
+# ---------------------------------------------------------------------------
+# 可写/可读敏感 provider 提示：name 命中以下子串（不区分大小写）→ 强调 HIGH
+# （即便上游未单独标 writable，命中也维持 HIGH 并在 notes 标注）
+# ---------------------------------------------------------------------------
+provider_writable_hints:
+  - "fileprovider"      # 误配的 FileProvider 可导出任意私有文件
+  - "file"
+  - "db"
+  - "database"
+  - "data"
+  - "share"
+  - "export"
+  - "content"
+  - "cache"
+  - "download"
+
+# ---------------------------------------------------------------------------
+# 高敏组件名研判提示：name 命中以下关键字 → 在 notes 标注涉诈高价值面
+# ---------------------------------------------------------------------------
+sensitive_name_hints:
+  sms:
+    - "sms"
+    - "message"
+    - "短信"
+    - "验证码"
+    - "verify"
+    - "code"
+  payment:
+    - "pay"
+    - "wallet"
+    - "recharge"
+    - "充值"
+    - "收银"
+    - "支付"
+    - "order"
+    - "cashier"
+  remote:
+    - "remote"
+    - "control"
+    - "command"
+    - "cmd"
+    - "shell"
+    - "远控"
+    - "task"
+  keepalive:
+    - "daemon"
+    - "keepalive"
+    - "alive"
+    - "guard"
+    - "保活"
+    - "watch"
+  web:
+    - "web"
+    - "h5"
+    - "browser"
+    - "jsbridge"
+
+# ---------------------------------------------------------------------------
+# 涉诈研判通用说明（供报告人理解导出组件的调证价值）
+# ---------------------------------------------------------------------------
+fraud_notes:
+  attack_surface: >-
+    导出组件是 App 暴露给外部的攻击面，也是现场取证时可主动触发观察行为的入口。
+    枚举导出组件并主动拉起/绑定/查询，常能绕过鉴权直达内部界面、激活后台外联、
+    或直接读取本地落地的服务器域名、商户号与账本数据库。
+  sms_receiver: >-
+    导出且监听 SMS_RECEIVED 的 Receiver 结合 RECEIVE_SMS/READ_SMS 权限，
+    是验证码窃取/转发木马的典型结构，应重点研判窃码与转发链路。
+  provider_leak: >-
+    可读/可写 ContentProvider 是最直接的数据泄露面，往往能一步取到
+    服务器地址、商户号、token 与本地账本/聊天数据库，调证价值极高。

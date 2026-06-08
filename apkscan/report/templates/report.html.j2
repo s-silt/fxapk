@@ -1,0 +1,504 @@
+{#- apkscan 调证报告模板（单文件，CSS 内联，中文界面）。
+    版式对齐「思知」：具体 key 值与调证建议显著呈现。章节顺序：
+      ① 概览（含加固 / uni 加密提示）
+      ② ★ 调用插件 / 配置键值（CONFIG_KEY：Key=值 / 所属公司 / 调证建议 / 取证依据）
+      ③ 主控域名（DOMAIN/IP 中 advice=建议调证 的）
+      ④ 通联域名 / IP（advice=无需调证 的，弱化 / 可折叠）
+      ⑤ 第三方 SDK → 厂商
+      ⑥ 支付 / 资金线索 · 联系方式线索
+      ⑦ 签名证书（serial / 有效期 / thumbprint sha256）
+      ⑧ 技术附录（权限 / 组件 / crypto / findings）
+      ⑨ 分析器 + 富化器运行状态
+-#}
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>apkscan 调证报告 — {{ report.package_name }}</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --ink: #1f2329; --muted: #6b7280;
+    --line: #e3e6ea; --accent: #1d4ed8; --accent-soft: #eef2ff;
+    --hi: #b91c1c; --mid: #b45309; --lo: #4b5563;
+    --warn-bg: #fef2f2; --warn-ink: #991b1b; --ok-bg: #ecfdf5; --ok-ink: #065f46;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", Roboto, sans-serif;
+    line-height: 1.55; font-size: 14px;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 24px 20px 64px; }
+  header.top {
+    background: linear-gradient(120deg, #111827, #1e3a8a);
+    color: #fff; border-radius: 12px; padding: 22px 26px; margin-bottom: 22px;
+  }
+  header.top h1 { margin: 0 0 6px; font-size: 22px; }
+  header.top .pkg { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 15px; opacity: .95; }
+  header.top .sub { color: #c7d2fe; font-size: 12px; margin-top: 8px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px 22px; margin-bottom: 20px; }
+  h2 { font-size: 18px; margin: 0 0 14px; padding-bottom: 8px; border-bottom: 2px solid var(--accent-soft); }
+  h2 .num { display: inline-block; min-width: 26px; color: var(--accent); }
+  h3 { font-size: 15px; margin: 18px 0 8px; color: #111827; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { background: #f8fafc; color: var(--muted); font-weight: 600; white-space: nowrap; }
+  tr:hover td { background: #fafbfc; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; }
+  .mono-strong {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    word-break: break-all; font-size: 14px; font-weight: 700; color: #0f172a;
+    background: #f1f5f9; border: 1px solid var(--line); border-radius: 6px;
+    padding: 2px 6px; display: inline-block;
+  }
+  .muted { color: var(--muted); }
+  .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
+  ul.tight { margin: 4px 0; padding-left: 18px; }
+  ul.tight li { margin: 2px 0; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .conf-high { background: #fee2e2; color: var(--hi); }
+  .conf-medium { background: #fef3c7; color: var(--mid); }
+  .conf-low { background: #e5e7eb; color: var(--lo); }
+  .advice-need { background: #fee2e2; color: var(--hi); border: 1px solid #fca5a5; }
+  .advice-skip { background: #e5e7eb; color: var(--lo); }
+  .advice-todo { background: #fef3c7; color: var(--mid); }
+  details.fold { margin: 8px 0 0; }
+  details.fold > summary { cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 600; padding: 4px 0; }
+  details.fold[open] > summary { color: var(--ink); }
+  .star { color: var(--hi); }
+  .tag { display: inline-block; padding: 1px 7px; border-radius: 6px; font-size: 11px; font-weight: 600; margin-right: 4px; }
+  .tag-cleartext { background: var(--warn-bg); color: var(--warn-ink); }
+  .tag-private { background: #eff6ff; color: #1e40af; }
+  .tag-susp { background: #fdf2f8; color: #9d174d; }
+  .sev { display: inline-block; padding: 1px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; }
+  .sev-CRITICAL { background: #fee2e2; color: #7f1d1d; }
+  .sev-HIGH { background: #ffedd5; color: #9a3412; }
+  .sev-MEDIUM { background: #fef3c7; color: #92400e; }
+  .sev-LOW { background: #ecfeff; color: #155e75; }
+  .sev-INFO { background: #eef2ff; color: #3730a3; }
+  .status { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .st-ran { background: var(--ok-bg); color: var(--ok-ink); }
+  .st-skipped { background: #f3f4f6; color: #4b5563; }
+  .st-error { background: var(--warn-bg); color: var(--warn-ink); }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+  .stat { background: #f8fafc; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .stat .k { color: var(--muted); font-size: 12px; }
+  .stat .v { font-size: 22px; font-weight: 700; }
+  .kv { display: grid; grid-template-columns: 150px 1fr; gap: 4px 14px; }
+  .kv .k { color: var(--muted); }
+  .harden-warn { background: var(--warn-bg); color: var(--warn-ink); border: 1px solid #fecaca; border-radius: 10px; padding: 10px 14px; margin-top: 12px; font-weight: 600; }
+  .harden-ok { background: var(--ok-bg); color: var(--ok-ink); border: 1px solid #a7f3d0; border-radius: 10px; padding: 10px 14px; margin-top: 12px; }
+  .group-head { display: flex; align-items: center; gap: 10px; margin: 20px 0 6px; }
+  .group-head h3 { margin: 0; }
+  .group-head .count { background: var(--accent-soft); color: var(--accent); border-radius: 999px; padding: 0 8px; font-size: 12px; font-weight: 700; }
+  .lead-table th.c-val { width: 22%; }
+  .lead-table th.c-subj { width: 16%; }
+  .lead-table th.c-who { width: 16%; }
+  .footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 8px; }
+  code.snip { background: #f1f5f9; border-radius: 4px; padding: 0 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <h1>APK 涉诈调证分析报告</h1>
+    <div class="pkg">{{ report.package_name or "(未知包名)" }}</div>
+    <div class="sub">apkscan · 调证线索清单 · 共 {{ lead_total }} 条线索 / {{ endpoint_total }} 个端点 / {{ findings|length }} 项技术发现</div>
+  </header>
+
+  {#- ============ ① 概览 ============ -#}
+  <section id="overview">
+    <h2><span class="num">①</span> 概览</h2>
+    <div class="cards">
+      <div class="stat"><div class="k">调证线索</div><div class="v">{{ lead_total }}</div></div>
+      <div class="stat"><div class="k">网络端点</div><div class="v">{{ endpoint_total }}</div></div>
+      <div class="stat"><div class="k">技术发现</div><div class="v">{{ findings|length }}</div></div>
+      <div class="stat"><div class="k">分析器</div><div class="v">{{ analyzer_status|length }}</div></div>
+    </div>
+    <h3>基础指纹</h3>
+    <div class="kv">
+      <div class="k">包名</div><div class="mono">{{ report.package_name or "—" }}</div>
+      {% for key in ["version_name", "version_code", "min_sdk", "target_sdk", "sign_subject", "sign_sha256"] %}
+        {% if meta.get(key) is not none %}
+      <div class="k">{{ {"version_name":"版本名","version_code":"版本号","min_sdk":"minSDK","target_sdk":"targetSDK","sign_subject":"签名主体","sign_sha256":"签名指纹"}[key] }}</div>
+      <div class="mono">{{ meta.get(key) }}</div>
+        {% endif %}
+      {% endfor %}
+    </div>
+    {#- 加固状态：从 meta 读取，键名容错 -#}
+    {% set packer = meta.get("packer") or meta.get("packer_vendor") or meta.get("hardening") %}
+    {% set is_hardened = meta.get("is_hardened") if meta.get("is_hardened") is not none else (packer is not none and packer != "" and packer != "无") %}
+    <h3>加固状态</h3>
+    {% if is_hardened %}
+    <div class="harden-warn">⚠ 检测到加固：{{ packer or "未知厂商" }}。静态可见端点可能不完整，建议人工脱壳 / 真机动态补全。加固厂商本身是高价值调证目标。</div>
+    {% else %}
+    <div class="harden-ok">✔ 未检测到已知加固特征，静态端点视图较完整。</div>
+    {% endif %}
+
+    {#- uni-app / 代码加密提示：plus.confusion 表示 uni 代码加密，静态抠取受限 -#}
+    {% set uni_app = meta.get("uni_app") or meta.get("uni_app_id") or meta.get("uniapp") %}
+    {% set uni_encrypted = meta.get("uni_encrypted") if meta.get("uni_encrypted") is not none else meta.get("plus_confusion") %}
+    {% if uni_app or uni_encrypted %}
+    <h3>uni-app / 代码加密</h3>
+    {% if uni_encrypted %}
+    <div class="harden-warn">⚠ 检测到 uni-app 代码加密（plus.confusion）{% if uni_app %}：{{ uni_app }}{% endif %}。JS 业务逻辑经加密，静态抠取的端点 / 配置键值可能不完整，建议结合 manifest.json 与真机动态补全。</div>
+    {% elif uni_app %}
+    <div class="harden-ok" style="background:#eff6ff;color:#1e40af;border-color:#bfdbfe">ℹ 检测到 uni-app 工程：{{ uni_app }}。配置键值多在 manifest &lt;meta-data&gt; 与 assets manifest.json 中。</div>
+    {% endif %}
+    {% endif %}
+
+    {#- 数据完整性 / 采集说明：把降级与离线显式告知，避免"未采集"被误读为"采集为空" -#}
+    {% if meta.get("dex_parse_failed") %}
+    <div class="harden-warn">⚠ DEX 未能解析（加固或无 dex）：静态端点 / SDK / 支付线索严重不完整，强烈建议脱壳或真机动态补全后重新分析。</div>
+    {% endif %}
+    {% if meta.get("apk_validation_warning") %}
+    <div class="harden-warn">⚠ {{ meta.get("apk_validation_warning") }}</div>
+    {% endif %}
+    {% if meta.get("enrichment_skipped_offline") %}
+    <div class="harden-ok" style="background:#eff6ff;color:#1e40af;border-color:#bfdbfe">ℹ 离线模式：未做 WHOIS / ICP / ASN 归属查询。域名 / IP 的归属为空表示「未查询」，并非「查无结果」，联网后可补全。</div>
+    {% endif %}
+  </section>
+
+  {#- 复用：advice 醒目徽标（建议调证=红 / 无需调证=灰 / 待核=黄）。 -#}
+  {% macro advice_badge(advice) %}<span class="badge {{ advice|advice_class }}">{{ advice|advice_label }}</span>{% endmacro %}
+
+  {#- 复用：取证依据（source_refs）列表。 -#}
+  {% macro source_refs_cell(lead) %}
+    {% if lead.source_refs %}
+    <ul class="tight">
+      {% for ref in lead.source_refs %}
+      <li><span class="muted">[{{ ref.source }}]</span> <span class="mono">{{ ref.location }}</span>
+        {% if ref.snippet %}<br><code class="snip">{{ ref.snippet }}</code>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}<span class="muted">—</span>{% endif %}
+  {% endmacro %}
+
+  {#- ============ ② ★ 调用插件 / 配置键值 ============ -#}
+  <section id="config-keys">
+    <h2><span class="num">②</span> <span class="star">★</span> 调用插件 / 配置键值 <span class="muted" style="font-size:13px;font-weight:400">（具体 Key=值 / 所属公司 / 调证建议 / 取证依据）</span></h2>
+    {% if config_key_leads %}
+    <table class="lead-table">
+      <thead>
+        <tr>
+          <th class="c-val">Key = 值</th>
+          <th class="c-subj">所属公司</th>
+          <th>调证建议</th>
+          <th>取证依据（APK 内位置）</th>
+          <th>置信度</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for lead in config_key_leads %}
+        <tr>
+          <td><span class="mono-strong">{{ lead.value }}</span>
+            {% if lead.notes %}<div class="muted" style="font-size:12px">{{ lead.notes }}</div>{% endif %}
+            {% if lead.where_to_request %}<div class="muted" style="font-size:12px">向谁调取：{{ lead.where_to_request }}</div>{% endif %}
+          </td>
+          <td>{{ lead.subject or "—" }}</td>
+          <td>{{ advice_badge(lead.advice) }}
+            {% if lead.evidence_to_obtain %}
+            <ul class="tight">{% for ev in lead.evidence_to_obtain %}<li>{{ ev }}</li>{% endfor %}</ul>
+            {% endif %}
+          </td>
+          <td>{{ source_refs_cell(lead) }}</td>
+          <td><span class="badge {{ lead.confidence|confidence_class }}">{{ lead.confidence|confidence_label }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <div class="empty">未抠取到配置键值（如 GETUI_APPID / PUSH_APPKEY 等）。可能为非 uni-app 工程或 manifest meta-data 为空。</div>
+    {% endif %}
+  </section>
+
+  {#- 网络端点富化宏（按值查富化字典，域名章节复用） -#}
+  {% macro enrich_cell(value) %}
+    {% set en = enrichment_by_endpoint.get(value) or {} %}
+    {% set whois = en.get("whois") or {} %}
+    {% set icp = en.get("icp") or {} %}
+    {% set asn = en.get("asn") or {} %}
+    {% if not (whois or icp or asn) %}
+      <span class="muted">未富化</span>
+    {% else %}
+      {% if icp %}<div><b>ICP：</b>{{ icp.get("subject") or icp.get("unit") or icp.get("error") or "需人工核" }}{% if icp.get("license") %}（{{ icp.get("license") }}）{% endif %}</div>{% endif %}
+      {% if whois %}<div><b>WHOIS：</b>{{ whois.get("registrant") or whois.get("org") or "—" }} / 注册商 {{ whois.get("registrar") or "—" }}{% if whois.get("error") %} <span class="muted">({{ whois.get("error") }})</span>{% endif %}</div>{% endif %}
+      {% if asn %}<div><b>ASN：</b>{{ asn.get("asn") or "—" }} {{ asn.get("org") or asn.get("isp") or "" }}{% if asn.get("country") %} · {{ asn.get("country") }}{% endif %}{% if asn.get("error") %} <span class="muted">({{ asn.get("error") }})</span>{% endif %}</div>{% endif %}
+    {% endif %}
+  {% endmacro %}
+
+  {#- 域名 / IP 线索行（含 advice 列、富化、取证依据） -#}
+  {% macro net_lead_row(lead) %}
+    <tr>
+      <td><span class="mono-strong">{{ lead.value }}</span>
+        {% if lead.notes %}<div class="muted" style="font-size:12px">{{ lead.notes }}</div>{% endif %}
+      </td>
+      <td>{{ advice_badge(lead.advice) }}</td>
+      <td>{{ lead.subject or "—" }}</td>
+      <td>{{ lead.where_to_request or "—" }}</td>
+      <td>{{ enrich_cell(lead.value) }}</td>
+      <td>{{ source_refs_cell(lead) }}</td>
+      <td><span class="badge {{ lead.confidence|confidence_class }}">{{ lead.confidence|confidence_label }}</span></td>
+    </tr>
+  {% endmacro %}
+
+  {#- ============ ③ 主控域名（建议调证） ============ -#}
+  <section id="control-domains">
+    <h2><span class="num">③</span> 主控域名 <span class="muted" style="font-size:13px;font-weight:400">（域名 / IP 中「建议调证」的高价值线索）</span></h2>
+    {% if network_leads.need %}
+    <table class="lead-table">
+      <thead>
+        <tr>
+          <th class="c-val">域名 / IP</th>
+          <th>调证建议</th>
+          <th class="c-subj">归属主体</th>
+          <th class="c-who">向谁调取</th>
+          <th>归属富化</th>
+          <th>取证依据（APK 内位置）</th>
+          <th>置信度</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for lead in network_leads.need %}{{ net_lead_row(lead) }}{% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <div class="empty">未识别到「建议调证」的主控域名 / IP。</div>
+    {% endif %}
+  </section>
+
+  {#- ============ ④ 通联域名 / IP（无需调证，弱化 / 可折叠） ============ -#}
+  <section id="contact-domains">
+    <h2><span class="num">④</span> 通联域名 / IP <span class="muted" style="font-size:13px;font-weight:400">（「无需调证」的基础设施 / CDN / 公共服务，弱化展示）</span></h2>
+    {% if network_leads.skip %}
+    <details class="fold">
+      <summary>展开 {{ network_leads.skip|length }} 条「无需调证」域名 / IP</summary>
+      <table class="lead-table">
+        <thead>
+          <tr>
+            <th class="c-val">域名 / IP</th>
+            <th>调证建议</th>
+            <th class="c-subj">归属主体</th>
+            <th>归属富化</th>
+            <th>取证依据（APK 内位置）</th>
+            <th>置信度</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for lead in network_leads.skip %}
+          <tr>
+            <td class="mono">{{ lead.value }}</td>
+            <td>{{ advice_badge(lead.advice) }}</td>
+            <td class="muted">{{ lead.subject or "—" }}</td>
+            <td class="muted">{{ enrich_cell(lead.value) }}</td>
+            <td>{{ source_refs_cell(lead) }}</td>
+            <td><span class="badge {{ lead.confidence|confidence_class }}">{{ lead.confidence|confidence_label }}</span></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </details>
+    {% else %}
+      <div class="empty">无「无需调证」的通联域名 / IP。</div>
+    {% endif %}
+  </section>
+
+  {#- ============ ⑤ 第三方 SDK → 厂商 ============ -#}
+  <section id="sdk">
+    <h2><span class="num">⑤</span> 第三方 SDK → 厂商清单</h2>
+    {% set sdk_leads = [] %}
+    {% for group in lead_groups %}{% if group.category.value == "SDK_SERVICE" %}{% set _ = sdk_leads.extend(group.leads) %}{% endif %}{% endfor %}
+    {% if sdk_leads %}
+    <table>
+      <thead><tr><th>SDK / 服务</th><th>厂商（归属主体）</th><th>调证建议</th><th>向谁调取</th><th>可调取证据</th><th>置信度</th></tr></thead>
+      <tbody>
+        {% for lead in sdk_leads %}
+        <tr>
+          <td>{{ lead.value }}</td>
+          <td>{{ lead.subject or "—" }}</td>
+          <td>{{ advice_badge(lead.advice) }}</td>
+          <td>{{ lead.where_to_request or "—" }}</td>
+          <td>{% if lead.evidence_to_obtain %}<ul class="tight">{% for ev in lead.evidence_to_obtain %}<li>{{ ev }}</li>{% endfor %}</ul>{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td><span class="badge {{ lead.confidence|confidence_class }}">{{ lead.confidence|confidence_label }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <div class="empty">未识别到第三方 SDK / 服务。</div>
+    {% endif %}
+  </section>
+
+  {#- ============ ⑥ 支付/资金线索 · 联系方式线索 ============ -#}
+  <section id="payment-contact">
+    <h2><span class="num">⑥</span> 支付 / 资金线索 · 联系方式线索</h2>
+    {% set pay_leads = [] %}
+    {% set contact_leads = [] %}
+    {% for group in lead_groups %}
+      {% if group.category.value == "PAYMENT" %}{% set _ = pay_leads.extend(group.leads) %}{% endif %}
+      {% if group.category.value == "CONTACT" %}{% set _ = contact_leads.extend(group.leads) %}{% endif %}
+    {% endfor %}
+
+    <h3>支付 / 资金线索</h3>
+    {% if pay_leads %}
+    <table>
+      <thead><tr><th>线索值</th><th>归属主体</th><th>调证建议</th><th>向谁调取</th><th>可调取证据</th><th>置信度</th></tr></thead>
+      <tbody>
+        {% for lead in pay_leads %}
+        <tr>
+          <td><span class="mono-strong">{{ lead.value }}</span></td>
+          <td>{{ lead.subject or "—" }}</td>
+          <td>{{ advice_badge(lead.advice) }}</td>
+          <td>{{ lead.where_to_request or "—" }}</td>
+          <td>{% if lead.evidence_to_obtain %}<ul class="tight">{% for ev in lead.evidence_to_obtain %}<li>{{ ev }}</li>{% endfor %}</ul>{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td><span class="badge {{ lead.confidence|confidence_class }}">{{ lead.confidence|confidence_label }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<div class="empty">未提取到支付 / 资金线索。</div>{% endif %}
+
+    <h3>联系方式线索</h3>
+    {% if contact_leads %}
+    <table>
+      <thead><tr><th>线索值</th><th>类型 / 备注</th><th>调证建议</th><th>取证依据</th><th>置信度</th></tr></thead>
+      <tbody>
+        {% for lead in contact_leads %}
+        <tr>
+          <td><span class="mono-strong">{{ lead.value }}</span></td>
+          <td>{{ lead.notes or lead.subject or "—" }}</td>
+          <td>{{ advice_badge(lead.advice) }}</td>
+          <td>{{ source_refs_cell(lead) }}</td>
+          <td><span class="badge {{ lead.confidence|confidence_class }}">{{ lead.confidence|confidence_label }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<div class="empty">未提取到联系方式线索。</div>{% endif %}
+  </section>
+
+  {#- ============ ⑦ 签名证书 ============ -#}
+  <section id="signing">
+    <h2><span class="num">⑦</span> 签名证书 <span class="muted" style="font-size:13px;font-weight:400">（serial / 有效期 / thumbprint sha256）</span></h2>
+    {% set certs = meta.get("certificates") or [] %}
+    {% if certs %}
+    <table>
+      <thead><tr><th>主体</th><th>颁发者</th><th>序列号 serial</th><th>thumbprint (SHA-256)</th><th>有效期</th><th>方案</th><th>调试证书</th></tr></thead>
+      <tbody>
+        {% for c in certs %}
+        <tr>
+          <td>{{ c.get("subject", "—") }}</td>
+          <td>{{ c.get("issuer", "—") }}</td>
+          <td class="mono" style="font-size:11px">{{ c.get("serial") or c.get("serial_number") or "—" }}</td>
+          <td><span class="mono-strong" style="font-size:11px">{{ c.get("sha256") or c.get("thumbprint") or "—" }}</span></td>
+          <td>{{ c.get("not_before", "—") }} ~ {{ c.get("not_after", "—") }}</td>
+          <td>{{ (c.get("schemes") or [])|join("/") or "—" }}</td>
+          <td>{% if c.get("is_debug") %}<span class="tag tag-cleartext">是</span>{% else %}否{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<div class="empty">无证书信息。</div>{% endif %}
+  </section>
+
+  {#- ============ ⑧ 技术附录 ============ -#}
+  <section id="appendix">
+    <h2><span class="num">⑧</span> 技术附录 <span class="muted" style="font-size:13px;font-weight:400">（权限 / 组件 / crypto / findings）</span></h2>
+
+    {% set perms = meta.get("permissions") or [] %}
+    <h3>权限{% if perms %}（{{ perms|length }}）{% endif %}</h3>
+    {% if perms %}
+      <div class="mono" style="font-size:12px">{{ perms|join("、") }}</div>
+    {% else %}<div class="empty">无权限信息。</div>{% endif %}
+
+    {% set comps = meta.get("components") or meta.get("exported_components") or [] %}
+    <h3>导出组件{% if comps %}（{{ comps|length }}）{% endif %}</h3>
+    {% if comps %}
+    <table>
+      <thead><tr><th>名称</th><th>类型</th><th>exported</th></tr></thead>
+      <tbody>
+        {% for c in comps %}
+        <tr>
+          <td class="mono">{{ c.get("name") if c is mapping else c }}</td>
+          <td>{{ c.get("kind") if c is mapping else "—" }}</td>
+          <td>{% if (c.get("exported") if c is mapping else true) %}是{% else %}否{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<div class="empty">无导出组件信息。</div>{% endif %}
+
+    <h3>技术发现 / crypto{% if findings %}（{{ findings|length }}）{% endif %}</h3>
+    {% if findings %}
+    <table>
+      <thead><tr><th>ID</th><th>标题</th><th>严重度</th><th>分类</th><th>描述</th><th>建议</th></tr></thead>
+      <tbody>
+        {% for f in findings %}
+        <tr>
+          <td class="mono">{{ f.id }}</td>
+          <td>{{ f.title }}</td>
+          <td><span class="sev sev-{{ f.severity.value if f.severity.value is defined else f.severity }}">{{ f.severity.value if f.severity.value is defined else f.severity }}</span></td>
+          <td>{{ f.category }}</td>
+          <td>{{ f.description }}</td>
+          <td>{{ f.recommendation or "—" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<div class="empty">无技术发现。</div>{% endif %}
+  </section>
+
+  {#- ============ ⑨ 分析器 + 富化器运行状态 ============ -#}
+  <section id="analyzer-status">
+    <h2><span class="num">⑨</span> 分析器 + 富化器运行状态 <span class="muted" style="font-size:13px;font-weight:400">（透明，不吞错）</span></h2>
+    {% if analyzer_status %}
+    <table>
+      <thead><tr><th>分析器</th><th>状态</th><th>原因 / 错误</th></tr></thead>
+      <tbody>
+        {% for s in analyzer_status %}
+        {% set st = s.get("status", "") %}
+        <tr>
+          <td class="mono">{{ s.get("name", "—") }}</td>
+          <td>
+            {% if st == "ran" %}<span class="status st-ran">已运行</span>
+            {% elif st == "skipped" %}<span class="status st-skipped">已跳过</span>
+            {% elif st == "error" %}<span class="status st-error">异常</span>
+            {% else %}<span class="status st-skipped">{{ st or "—" }}</span>{% endif %}
+          </td>
+          <td>{{ s.get("reason") or "—" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <div class="empty">无分析器状态记录。</div>
+    {% endif %}
+
+    {#- 富化器状态：让某 provider 的系统性失败（如 WHOIS 全失败）透明可见 -#}
+    {% if enricher_status %}
+    <h3>富化器状态</h3>
+    <table>
+      <thead><tr><th>富化器</th><th>尝试</th><th>成功</th><th>未获取</th><th>典型原因</th></tr></thead>
+      <tbody>
+        {% for s in enricher_status %}
+        <tr>
+          <td class="mono">{{ s.get("provider", "—") }}</td>
+          <td>{{ s.get("attempted", 0) }}</td>
+          <td>{{ s.get("ok", 0) }}</td>
+          <td>{{ s.get("failed", 0) }}</td>
+          <td>{{ s.get("typical_error") or "—" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </section>
+
+  <div class="footer">本报告由 apkscan 生成，仅用于授权的反诈调证场景。线索为机器提取，归属信息以人工核实为准。</div>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,453 @@
+# 支付 / 资金线索规则库 —— 涉诈调证核心（资金流）。
+#
+# 由 apkscan.analyzers.payment 通过 registry.load_rules("payment") 读取。
+# 顶层为 dict，含三个键：
+#   sdks      : list[支付/聚合支付 SDK 指纹规则]（包前缀/so/资源特征 → 支付机构）
+#   keywords  : list[收款/资金相关字符串特征规则]（商户号/收款码/USDT/钱包地址 等）
+#   meta      : 全局兜底文案（命中后写入 Lead 的字段，单条规则可覆盖）
+#
+# ★ 核心价值：识别第三方/聚合支付 SDK 与收款/资金特征 →
+#   产 Lead(category=PAYMENT)，把支付机构 / 待核主体作为资金流调证目标
+#   （持有商户号实名主体、交易流水、结算银行账户、提现记录）。
+#
+# ---- sdks 规则字段 ----
+#   name              : 支付 / 聚合支付 SDK 展示名
+#   vendor            : 支付机构 / 公司全称（写入 Lead.subject）
+#   where_to_request  : 向谁调证（缺省回退 vendor 或 meta）
+#   dex_prefixes      : DEX 类名包前缀 / 字符串特征（匹配 ctx.dex_strings()，子串，大小写敏感）
+#   so_names          : .so 库名特征（匹配 native_libs()+list_files() basename，大小写不敏感）
+#   files             : 资源 / assets 特征文件（路径子串，匹配 ctx.list_files()，大小写不敏感）
+#   evidence_to_obtain: 可向机构调取的证据（缺省用 meta 兜底）
+#   confidence        : 可选，强制置信度（high/medium/low）；缺省由分析器按命中强度判定
+#   note              : 补充说明（写入 Lead.notes）
+#
+# ---- keywords 规则字段 ----
+#   name              : 线索展示名（如 "商户号 (mch_id)"）
+#   patterns          : 命中关键字 / 正则；逐条按 regex 编译，失败回退纯子串（大小写不敏感）
+#   subject           : 归属主体；强收款特征通常 "待核（疑似收款主体）"
+#   where_to_request  : 向谁调证（如 "对应支付/清算机构与开户银行"）
+#   category          : 关键字分类（merchant/cashier/withdraw/recharge/crypto/wallet/aggregate）
+#   strong            : true 表示强线索（商户号/mch_id 等）→ Confidence.HIGH
+#   evidence_to_obtain: 可调取证据（缺省用 meta 兜底）
+#   note              : 补充说明
+#
+# 置信度规则（分析器判定，除非 sdks.confidence / keywords.strong 显式指定）：
+#   sdk     : 命中 so / 资源文件，或命中 >=2 类特征 → HIGH；仅单一 dex 前缀 → MEDIUM
+#   keyword : strong=true → HIGH；命中 >=2 个不同关键字规则的同分类 → 维持各自；普通 → MEDIUM
+
+meta:
+  # 命中后 Lead 默认可调取证据（任意条目可用 evidence_to_obtain 覆盖）。
+  evidence_to_obtain:
+    - "商户号实名主体（营业执照 / 法人 / 联系人）"
+    - "交易流水 / 收款对账单"
+    - "结算银行账户（开户行 / 账号 / 户名）"
+    - "提现记录 / 资金划转记录"
+  # 关键字类线索的默认调证对象（无法确定具体机构时）。
+  default_where_to_request: "对应第三方支付 / 清算机构与结算开户银行"
+  # 关键字类线索默认归属主体。
+  default_subject: "待核（疑似收款主体）"
+
+# =======================================================================
+# 一、第三方 / 聚合支付 SDK 指纹
+# =======================================================================
+sdks:
+  # ---------------- 持牌第三方支付（官方收单 SDK） ----------------
+  - name: "支付宝 (Alipay SDK)"
+    vendor: "支付宝（中国）网络技术有限公司 / 蚂蚁科技集团股份有限公司"
+    where_to_request: "支付宝（蚂蚁集团）商户后台 / 监管调证"
+    category: "third_party"
+    dex_prefixes:
+      - "com.alipay.sdk"
+      - "com.alipay.android.phone"
+      - "com.alipay.apmobilesecuritysdk"
+    so_names:
+      - "libalipayssl.so"
+      - "libalipayrandom.so"
+    files:
+      - "assets/alipay"
+    evidence_to_obtain:
+      - "收款商户 PID / 合作伙伴身份与实名主体"
+      - "签约商户号 / 应用 APPID 注册主体（营业执照、法人、结算银行卡）"
+      - "交易流水 / 收款对账单 / 资金结算记录"
+      - "提现 / 资金归集账户与划转记录"
+    note: "支付宝移动支付 SDK；PID / 商户号直接对应实名收款主体，资金流核心调证点。"
+
+  - name: "微信支付 (WeChat Pay / OpenSDK)"
+    vendor: "财付通支付科技有限公司 / 腾讯（深圳市腾讯计算机系统有限公司）"
+    where_to_request: "财付通 / 微信支付商户平台 / 监管调证"
+    category: "third_party"
+    dex_prefixes:
+      - "com.tencent.mm.opensdk"
+      - "com.tencent.mm.sdk"
+      - "com.tencent.wxpay"
+    files:
+      - "assets/wechat"
+    evidence_to_obtain:
+      - "微信支付商户号（mch_id）注册主体（营业执照、法人、结算账户）"
+      - "公众号 / 开放平台 APPID 注册主体与绑定关系"
+      - "交易流水 / 资金结算记录 / 退款记录"
+      - "结算到账银行账户与提现记录"
+    note: "微信支付 OpenSDK；mch_id + APPID 关联实名收款主体，资金流核心调证点。"
+
+  - name: "银联支付 (UnionPay / UPPay)"
+    vendor: "中国银联股份有限公司 / 银联商务股份有限公司"
+    where_to_request: "中国银联 / 收单机构（银联商务等）/ 监管调证"
+    category: "third_party"
+    dex_prefixes:
+      - "com.unionpay"
+      - "com.unionpay.uppay"
+      - "com.unionpay.tsmservice"
+    files:
+      - "assets/uppay"
+    evidence_to_obtain:
+      - "银联商户号注册主体（营业执照、法人、结算账户）"
+      - "接入机构 / 收单机构信息"
+      - "交易流水与清结算记录"
+      - "结算银行账户与提现记录"
+    note: "银联 UPPay 控件 / 云闪付 SDK；商户号关联实名收单主体。"
+
+  - name: "京东支付 (JD Pay / 网银在线)"
+    vendor: "网银在线（北京）科技有限公司 / 京东科技"
+    where_to_request: "网银在线（京东科技）商户后台 / 监管调证"
+    category: "third_party"
+    dex_prefixes:
+      - "com.jdpay"
+      - "com.wangyin.payment"
+      - "com.jd.lib.jdpaysdk"
+    evidence_to_obtain:
+      - "京东支付 / 网银在线商户号注册主体"
+      - "交易流水与结算记录"
+      - "结算银行账户与提现记录"
+    note: "京东支付（网银在线）持牌第三方支付 SDK。"
+
+  - name: "百度钱包 / 度小满支付 (Baidu / Duxiaoman Pay)"
+    vendor: "重庆度小满支付科技有限公司 / 度小满金融"
+    where_to_request: "度小满支付商户后台 / 监管调证"
+    category: "third_party"
+    dex_prefixes:
+      - "com.baidu.wallet"
+      - "com.dxmpay"
+      - "com.baidu.paysdk"
+    evidence_to_obtain:
+      - "度小满 / 百度钱包商户号注册主体"
+      - "交易流水与结算记录"
+    note: "度小满支付（原百度钱包）持牌第三方支付 SDK。"
+
+  # ---------------- 聚合支付 / 第四方（涉诈高发） ----------------
+  - name: "通联支付 (Allinpay 聚合支付)"
+    vendor: "通联支付网络服务股份有限公司（Allinpay）"
+    where_to_request: "通联支付商户平台 / 监管调证"
+    category: "aggregate"
+    dex_prefixes:
+      - "com.allinpay"
+      - "com.allinpay.apppaysdk"
+      - "com.allinpay.usdk"
+      - "com.tianyu.allinpay"
+    evidence_to_obtain:
+      - "通联支付商户号 / 子商户实名主体"
+      - "交易流水与分账 / 清算记录"
+      - "结算银行账户与提现记录"
+    note: "通联支付（持牌）常被聚合接入；子商户号关联实名收款主体，涉诈高发调证点。"
+
+  - name: "钱方好近 (QFPay / 钱方)"
+    vendor: "钱方（北京）信息技术有限公司 / 钱方好近"
+    where_to_request: "钱方 QFPay 商户平台 / 监管调证"
+    category: "aggregate"
+    dex_prefixes:
+      - "com.qfpay"
+      - "com.qf.pay"
+      - "com.qfpay.sdk"
+    evidence_to_obtain:
+      - "钱方商户号 / 子商户实名主体"
+      - "交易流水与结算记录"
+      - "收款码绑定主体与提现记录"
+    note: "钱方好近聚合收款 SDK；子商户与收款码关联实名主体。"
+
+  - name: "收钱吧 (Shouqianba / 上海喔噻)"
+    vendor: "上海喔噻互联网科技有限公司（收钱吧）"
+    where_to_request: "收钱吧商户平台 / 监管调证"
+    category: "aggregate"
+    dex_prefixes:
+      - "com.wosai"
+      - "com.shouqianba"
+      - "com.wosai.upay"
+    evidence_to_obtain:
+      - "收钱吧商户号 / 门店实名主体"
+      - "收款码归属与交易流水"
+      - "结算银行账户与提现记录"
+    note: "收钱吧（上海喔噻）聚合收款 SDK；收款码 / 门店关联实名主体。"
+
+  - name: "拉卡拉支付 (Lakala)"
+    vendor: "拉卡拉支付股份有限公司"
+    where_to_request: "拉卡拉支付商户平台 / 监管调证"
+    category: "aggregate"
+    dex_prefixes:
+      - "com.lakala"
+      - "com.lkl.cloudpos"
+      - "com.lakala.cashier"
+    evidence_to_obtain:
+      - "拉卡拉商户号 / 子商户实名主体"
+      - "交易流水与清结算记录"
+      - "结算银行账户与提现记录"
+    note: "拉卡拉（持牌收单）SDK；商户号关联实名收单主体。"
+
+  - name: "汇付天下 / 斗拱 (Adapay / Huifu)"
+    vendor: "汇付天下有限公司 / 上海汇付支付有限公司"
+    where_to_request: "汇付天下（Adapay 斗拱）商户平台 / 监管调证"
+    category: "aggregate"
+    dex_prefixes:
+      - "com.huifu"
+      - "com.adapay"
+      - "com.huifu.adapay"
+    evidence_to_obtain:
+      - "汇付天下 / 斗拱商户号 / 子商户实名主体"
+      - "交易流水与分账记录"
+      - "结算银行账户与提现记录"
+    note: "汇付天下 Adapay（斗拱）聚合分账 SDK；子商户关联实名主体。"
+
+  - name: "易宝支付 (YeePay)"
+    vendor: "易宝支付有限公司（YeePay）"
+    where_to_request: "易宝支付商户平台 / 监管调证"
+    category: "aggregate"
+    dex_prefixes:
+      - "com.yeepay"
+      - "com.yeepay.android"
+    evidence_to_obtain:
+      - "易宝支付商户号 / 子商户实名主体"
+      - "交易流水与结算记录"
+    note: "易宝支付（持牌）聚合接入 SDK；商户号关联实名主体。"
+
+  - name: "富友支付 (Fuiou)"
+    vendor: "上海富友支付服务股份有限公司（Fuiou）"
+    where_to_request: "富友支付商户平台 / 监管调证"
+    category: "aggregate"
+    dex_prefixes:
+      - "com.fuiou"
+      - "com.fuiou.pay"
+    evidence_to_obtain:
+      - "富友支付商户号 / 子商户实名主体"
+      - "交易流水与结算记录"
+    note: "富友支付（持牌）聚合接入 SDK。"
+
+  - name: "随行付 / 杉德支付 (Vbill / Sand)"
+    vendor: "随行付 / 杉德支付网络服务发展有限公司"
+    where_to_request: "随行付 / 杉德支付商户平台 / 监管调证"
+    category: "aggregate"
+    dex_prefixes:
+      - "com.vbill"
+      - "com.sand.airservice"
+      - "com.sandpay"
+    evidence_to_obtain:
+      - "随行付 / 杉德商户号 / 子商户实名主体"
+      - "交易流水与清结算记录"
+    note: "随行付 / 杉德支付（持牌收单）SDK；子商户关联实名主体。"
+
+  - name: "Ping++ 聚合支付 (Pingplusplus)"
+    vendor: "上海钱阵信息技术有限公司（Ping++）"
+    where_to_request: "Ping++ 接入商户 / 实际清算机构 / 监管调证"
+    category: "aggregate"
+    dex_prefixes:
+      - "com.pingplusplus"
+      - "com.pingplusplus.android"
+    evidence_to_obtain:
+      - "Ping++ 接入应用 AppID 注册主体"
+      - "对接的底层支付渠道商户号与实名主体"
+      - "交易流水与渠道清算记录"
+    note: "Ping++ 聚合支付网关 SDK；需穿透到底层渠道商户号定位实名收款主体。"
+
+  - name: "BeeCloud / 第四方聚合支付 (通用)"
+    vendor: "聚合支付 / 第四方平台（具体运营主体待核）"
+    where_to_request: "聚合平台运营主体 + 底层持牌支付 / 清算机构 / 监管调证"
+    category: "aggregate"
+    dex_prefixes:
+      - "cn.beecloud"
+      - "com.beecloud"
+    evidence_to_obtain:
+      - "聚合平台接入应用注册主体"
+      - "底层支付渠道商户号与实名主体"
+      - "交易流水与清算记录"
+    note: "BeeCloud 等第四方聚合 SDK；常用于规避监管，需穿透底层渠道定位实名主体。"
+
+# =======================================================================
+# 二、收款 / 资金相关字符串特征（dex 字符串 + assets/资源文本）
+# =======================================================================
+keywords:
+  # ---------------- 强线索：商户号 / mch_id（直接定位实名主体） ----------------
+  - name: "商户号 (mch_id / merchant id)"
+    category: "merchant"
+    strong: true
+    patterns:
+      - "mch_id"
+      - "mchid"
+      - "merchant_id"
+      - "merchantId"
+      - "merchant_no"
+      - "merchantNo"
+      - "sub_mch_id"
+      - "subMchId"
+      - "商户号"
+      - "子商户号"
+    subject: "待核（商户号对应实名收款主体）"
+    where_to_request: "对应第三方支付 / 清算机构（按商户号反查实名主体与结算账户）"
+    evidence_to_obtain:
+      - "商户号实名主体（营业执照 / 法人 / 联系人）"
+      - "商户结算银行账户（开户行 / 账号 / 户名）"
+      - "交易流水 / 收款对账单"
+      - "提现 / 资金划转记录"
+    note: "商户号 / mch_id 是最强资金线索，可按号反查实名收款主体与结算账户。"
+
+  - name: "合作伙伴 / partner_id (PID)"
+    category: "merchant"
+    strong: true
+    patterns:
+      - "partner_id"
+      - "partnerId"
+      - "partner_key"
+      - "seller_id"
+      - "sellerId"
+      - "合作伙伴身份"
+    subject: "待核（PID / 合作伙伴对应实名主体）"
+    where_to_request: "对应第三方支付机构（按 PID / seller 反查实名主体）"
+    note: "支付宝旧版 partner / seller_id；可反查签约实名主体。"
+
+  - name: "应用支付凭据 (appid/key/secret 上下文)"
+    category: "merchant"
+    strong: false
+    patterns:
+      - "pay_app_id"
+      - "payAppId"
+      - "api_key"
+      - "apiKey"
+      - "app_secret"
+      - "appSecret"
+      - "支付密钥"
+      - "支付配置"
+    subject: "待核（支付应用注册主体）"
+    where_to_request: "对应支付机构（按 AppID 反查注册主体与绑定商户号）"
+    note: "支付应用凭据上下文；结合商户号可定位注册主体（弱特征，需人工确认）。"
+
+  # ---------------- 收款 / 收银台 / 收款码 ----------------
+  - name: "收款码 / 收银台 (cashier / 收款)"
+    category: "cashier"
+    strong: false
+    patterns:
+      - "收款码"
+      - "收款二维码"
+      - "收银台"
+      - "聚合收款"
+      - "扫码收款"
+      - "cashier"
+      - "qrcode_pay"
+      - "qr_pay"
+      - "收款账户"
+    subject: "待核（疑似收款主体）"
+    where_to_request: "对应支付 / 清算机构（按收款码 / 商户反查实名主体）"
+    note: "收款码 / 收银台特征；收款码绑定商户号可定位实名收款主体。"
+
+  - name: "通知回调 / notify_url (资金回调)"
+    category: "cashier"
+    strong: false
+    patterns:
+      - "notify_url"
+      - "notifyUrl"
+      - "callback_url"
+      - "支付回调"
+      - "异步通知"
+      - "payNotify"
+    subject: "待核（回调服务器归属主体）"
+    where_to_request: "回调域名注册商 / 云厂商 + 对应支付机构"
+    note: "支付异步通知回调；回调域名 / IP 可定位收款方服务器归属。"
+
+  # ---------------- 提现 / 充值 / 钱包余额 ----------------
+  - name: "提现 (withdraw)"
+    category: "withdraw"
+    strong: false
+    patterns:
+      - "提现"
+      - "申请提现"
+      - "withdraw"
+      - "withdrawal"
+      - "cash_out"
+      - "cashout"
+      - "tixian"
+      - "提款"
+      - "出金"
+    subject: "待核（疑似资金归集 / 出金主体）"
+    where_to_request: "对应支付 / 清算机构与结算开户银行"
+    note: "提现 / 出金特征；关联结算银行账户与资金划转记录。"
+
+  - name: "充值 / 入金 (recharge / deposit)"
+    category: "recharge"
+    strong: false
+    patterns:
+      - "充值"
+      - "立即充值"
+      - "recharge"
+      - "topup"
+      - "top_up"
+      - "deposit"
+      - "chongzhi"
+      - "入金"
+      - "充币"
+    subject: "待核（疑似收款 / 入金主体）"
+    where_to_request: "对应支付 / 清算机构（按入金渠道反查商户）"
+    note: "充值 / 入金特征；关联入金渠道商户号与交易流水。"
+
+  - name: "钱包余额 / 资金账户 (wallet balance)"
+    category: "wallet"
+    strong: false
+    patterns:
+      - "钱包余额"
+      - "账户余额"
+      - "可用余额"
+      - "wallet_balance"
+      - "我的钱包"
+      - "资金账户"
+    subject: "待核（疑似资金账户运营主体）"
+    where_to_request: "对应支付 / 清算机构 + 应用运营主体"
+    note: "应用内钱包 / 余额账户特征；常见于平台资金池，需核资金归集主体。"
+
+  # ---------------- 虚拟货币 / USDT / 钱包地址（涉诈跑分高发） ----------------
+  - name: "USDT / 虚拟货币 (crypto)"
+    category: "crypto"
+    strong: true
+    # 拉丁词加 (?<![A-Za-z0-9])...(?![A-Za-z0-9]) 边界，避免撞进 base64 / 压缩标识符
+    # （如 "...usdt..." 内嵌、electronic 里的 tron）。中文词无此问题。
+    patterns:
+      - '(?<![A-Za-z0-9_])USDT(?![A-Za-z0-9_])'
+      - '(?<![A-Za-z0-9_])TRC-?20(?![A-Za-z0-9_])'
+      - '(?<![A-Za-z0-9_])ERC-?20(?![A-Za-z0-9_])'
+      - '(?<![A-Za-z0-9_])TRON(?![A-Za-z0-9_])'
+      - "波场"
+      - "泰达币"
+      - "虚拟币"
+      - "数字货币充值"
+      - "数字货币钱包"
+    subject: "待核（疑似涉币资金通道主体）"
+    where_to_request: "虚拟货币交易所 / 链上分析 + 公安涉案资金协查"
+    evidence_to_obtain:
+      - "钱包地址链上交易记录（充提地址 / 流向）"
+      - "关联交易所账户实名（KYC）信息"
+      - "法币兑换 / OTC 商户实名主体"
+      - "资金归集与划转记录"
+    note: "USDT / TRC20 等虚拟货币特征；涉诈跑分 / 洗钱高发，链上地址可追踪资金流向。"
+
+  - name: "加密货币钱包地址 (wallet address)"
+    category: "wallet_address"
+    strong: true
+    # 加前后非字母数字边界，避免匹配到 base64 / lambda 名等压缩标识符内部子串。
+    # 已移除 BTC 旧版 1.../3... 地址正则（与 base58 标识符撞车率极高，几乎全是误报）；
+    # 仅保留 TRON(T...)、EVM(0x...)、BTC bech32(bc1...) 三种前缀较独特的形态。
+    # (?-i:...) 关闭作用域内忽略大小写——base58/bech32 本就区分大小写（排除 I/O/l/0），
+    # 否则在 IGNORECASE 下会把 CamelCase 类名（如 TracingControllerBoundaryInterface）误判。
+    patterns:
+      - '(?<![A-Za-z0-9_])(?-i:T[1-9A-HJ-NP-Za-km-z]{33})(?![A-Za-z0-9_])'
+      - '(?<![A-Za-z0-9_])0x[a-fA-F0-9]{40}(?![A-Za-z0-9_])'
+      - '(?<![A-Za-z0-9_])(?-i:bc1[a-z0-9]{25,39})(?![A-Za-z0-9_])'
+    subject: "待核（钱包地址持有 / 控制主体）"
+    where_to_request: "对应公链浏览器 / 交易所 + 链上分析 + 公安涉案资金协查"
+    evidence_to_obtain:
+      - "钱包地址链上完整交易记录与对手地址"
+      - "地址在各交易所的归集 / 提现关联账户实名"
+      - "资金流向与法币出入金记录"
+    note: "硬编码加密货币钱包地址（TRON / EVM / BTC）；可直接做链上资金追踪。"

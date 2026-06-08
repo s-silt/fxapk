@@ -1,0 +1,216 @@
+"""分析器/富化器基类、自动发现、能力探测、规则加载。
+
+自动发现：用 pkgutil.iter_modules 扫描 apkscan.analyzers / apkscan.enrichers，
+import 后实例化所有 Base* 的具体子类（跳过抽象基类）→ 新增模块无需改任何中心文件。
+"""
+
+from __future__ import annotations
+
+import importlib
+import inspect
+import logging
+import pkgutil
+import shutil
+import socket
+from abc import ABC, abstractmethod
+from pathlib import Path
+from types import ModuleType
+from typing import TYPE_CHECKING
+
+import yaml
+
+from apkscan.core import device
+from apkscan.core.models import AnalyzerResult, EnrichmentResult, Endpoint
+
+if TYPE_CHECKING:
+    from apkscan.core.context import AnalysisContext
+
+logger = logging.getLogger(__name__)
+
+
+class BaseAnalyzer(ABC):
+    """静态分析器基类。
+
+    name:     稳定标识，用于报告/状态/日志。
+    requires: 需要的能力（空 = 永远可用）；registry 探测后决定是否运行。
+              可选值见 detect_capabilities()，如 "jadx" / "adb" / "online"。
+    """
+
+    name: str = ""
+    requires: list[str] = []
+
+    @abstractmethod
+    def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
+        """对上下文做分析，返回 AnalyzerResult。异常由 pipeline 捕获并记录。"""
+        ...
+
+
+class BaseEnricher(ABC):
+    """联网富化器基类。
+
+    name:        稳定标识。
+    applies_to:  适用的端点类型，元素为 "domain" / "ip"。
+    """
+
+    name: str = ""
+    applies_to: list[str] = []
+
+    @abstractmethod
+    def enrich(self, ep: Endpoint) -> EnrichmentResult:
+        """对单个端点做富化，返回 EnrichmentResult。异常由 pipeline 捕获并记录。"""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# 自动发现
+# ---------------------------------------------------------------------------
+
+
+def _iter_package_modules(package_name: str) -> list[ModuleType]:
+    """import 并返回某包下所有子模块。单模块导入失败记录后跳过。"""
+    modules: list[ModuleType] = []
+    try:
+        package = importlib.import_module(package_name)
+    except Exception:
+        logger.exception("无法导入包：%s", package_name)
+        return modules
+
+    pkg_path = getattr(package, "__path__", None)
+    if pkg_path is None:
+        logger.warning("%s 不是包（无 __path__），跳过自动发现", package_name)
+        return modules
+
+    for mod_info in pkgutil.iter_modules(pkg_path):
+        if mod_info.name.startswith("_"):
+            continue
+        full_name = f"{package_name}.{mod_info.name}"
+        try:
+            modules.append(importlib.import_module(full_name))
+        except Exception:
+            logger.exception("导入模块失败，跳过：%s", full_name)
+    return modules
+
+
+def _instantiate_subclasses(modules: list[ModuleType], base: type) -> list:
+    """实例化 modules 中所有 base 的具体子类（跳过 base 自身与抽象类）。"""
+    seen: set[type] = set()
+    instances: list = []
+    for module in modules:
+        for _, obj in inspect.getmembers(module, inspect.isclass):
+            if not issubclass(obj, base) or obj is base:
+                continue
+            if inspect.isabstract(obj):
+                continue
+            # 仅实例化定义于被扫描模块内的类，避免重复（import 进来的同名类）
+            if obj.__module__ != module.__name__:
+                continue
+            if obj in seen:
+                continue
+            seen.add(obj)
+            try:
+                instances.append(obj())
+            except Exception:
+                logger.exception("实例化失败，跳过：%s", obj)
+    return instances
+
+
+def discover_analyzers() -> list[BaseAnalyzer]:
+    """发现并实例化 apkscan.analyzers 下所有 BaseAnalyzer 具体子类。"""
+    modules = _iter_package_modules("apkscan.analyzers")
+    return _instantiate_subclasses(modules, BaseAnalyzer)
+
+
+def discover_enrichers() -> list[BaseEnricher]:
+    """发现并实例化 apkscan.enrichers 下所有 BaseEnricher 具体子类。"""
+    modules = _iter_package_modules("apkscan.enrichers")
+    return _instantiate_subclasses(modules, BaseEnricher)
+
+
+# ---------------------------------------------------------------------------
+# 能力探测
+# ---------------------------------------------------------------------------
+
+
+def detect_capabilities(online: bool = True) -> set[str]:
+    """探测可用能力集合。
+
+    静态/工具类：
+    - "jadx" / "adb"：对应外部工具在 PATH 中。
+    - "online"：当 online=True 且本机有出网连通性时加入。
+
+    动态(脱壳/抓包)类（探测助手见 apkscan.core.device，全部不抛）：
+    - "frida" / "frida-dexdump" / "mitmproxy"：对应外部工具在 PATH 中。
+    - "device"：有至少一台在线 adb 设备。
+
+    返回的集合用于决定 requires 不满足的分析器/能力是否跳过。
+    """
+    caps: set[str] = set()
+
+    for tool in ("jadx", "adb"):
+        if shutil.which(tool):
+            caps.add(tool)
+
+    if online and _has_network():
+        caps.add("online")
+
+    # 动态能力（无设备/工具时静默不加入；探测助手内部已 try/except+logging）。
+    if device.has_frida():
+        caps.add("frida")
+    if device.has_frida_dexdump():
+        caps.add("frida-dexdump")
+    if device.has_mitmproxy():
+        caps.add("mitmproxy")
+    if device.has_device():
+        caps.add("device")
+
+    return caps
+
+
+def _has_network(timeout: float = 2.0) -> bool:
+    """轻量探测出网连通性（连 DNS 端口，不发明文请求）。"""
+    for host, port in (("1.1.1.1", 53), ("8.8.8.8", 53)):
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except OSError:
+            logger.debug("网络探测失败：%s:%s", host, port, exc_info=True)
+    return False
+
+
+# ---------------------------------------------------------------------------
+# 规则加载
+# ---------------------------------------------------------------------------
+
+
+def _rules_dir() -> Path:
+    """apkscan/rules 目录（基于本文件定位，安装后亦有效）。"""
+    return Path(__file__).resolve().parent.parent / "rules"
+
+
+def load_rules(name: str) -> dict | list:
+    """读取 apkscan/rules/<name>.yaml。
+
+    找不到 / 解析失败 → 记 warning（用 logging，不静默 pass）并返回空 dict。
+    name 可带或不带 .yaml 后缀。
+    """
+    stem = name[:-5] if name.endswith(".yaml") else name
+    path = _rules_dir() / f"{stem}.yaml"
+
+    if not path.is_file():
+        logger.warning("规则文件不存在：%s", path)
+        return {}
+
+    try:
+        text = path.read_text(encoding="utf-8")
+        data = yaml.safe_load(text)
+    except Exception:
+        logger.exception("读取/解析规则失败：%s", path)
+        return {}
+
+    if data is None:
+        logger.warning("规则文件为空：%s", path)
+        return {}
+    if not isinstance(data, (dict, list)):
+        logger.warning("规则文件顶层类型应为 dict/list，实际 %s：%s", type(data).__name__, path)
+        return {}
+    return data

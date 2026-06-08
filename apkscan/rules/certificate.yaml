@@ -1,0 +1,56 @@
+# 证书分析规则 — 调试证书识别 + 弱/可疑证书特征。
+#
+# 由 apkscan.analyzers.certificate 通过 registry.load_rules("certificate") 读取。
+# 顶层为 dict，分键说明：
+#   debug_issuers     : 调试证书的 issuer/subject 特征子串（大小写不敏感匹配）
+#   debug_subjects    : 调试证书惯用主体子串
+#   suspicious_subjects: 涉诈/批量打包样本常见的可疑/占位证书主体特征
+#   weak_subjects     : 信息缺失（占位、空 O/CN）等弱证书特征
+#
+# 说明：调试证书表示 App 用 Android SDK 自带 debug.keystore 签名，
+# 正规上架应用不会出现；涉诈 App 因批量、临时打包常残留调试签名，
+# 是高价值的“同源/非正规发布”信号。
+
+debug_issuers:
+  # Android SDK 自动生成的 debug keystore 默认 DN
+  - "Android Debug"
+  - "CN=Android Debug"
+  - "O=Android"
+  - "C=US, O=Android, CN=Android Debug"
+  # 部分二次打包工具沿用的调试 DN
+  - "OU=Android"
+
+debug_subjects:
+  - "Android Debug"
+  - "CN=Android Debug"
+
+# 涉诈/灰产批量打包样本中高频出现的占位 / 山寨证书主体特征。
+# 命中仅作“可疑”提示（MEDIUM Finding），不作实锤；用于人工复核与跨样本聚类。
+suspicious_subjects:
+  - "Unknown"          # 一键打包工具常见占位
+  - "Test"             # 测试证书残留
+  - "test"
+  - "Demo"
+  - "demo"
+  - "CN=a,"            # 单字符占位 DN
+  - "CN=app"
+  - "CN=android"
+  - "CN=Android"
+  - "Apktool"          # 二次打包工具
+  - "apktool"
+  - "CN=, O=,"         # 全空 DN
+  - "Default"
+  - "default"
+
+# 弱证书：关键身份字段缺失，无法据此定位真实主体，需人工核实。
+weak_subjects:
+  - "O=, "             # 组织字段为空
+  - "OU=, "
+  - ", O=,"
+
+# 自签名提示：issuer == subject 属正常（Android 应用普遍自签），
+# 仅在同时命中 debug/suspicious 特征时才升级告警，这里仅作记录开关。
+flag_self_signed: false
+
+# 短有效期阈值（天）：低于此值的证书在正规发布中罕见，记 INFO 提示。
+short_validity_days: 365
