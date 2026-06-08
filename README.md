@@ -1,5 +1,9 @@
 # apkscan
 
+[![CI](https://github.com/s-silt/fxfx/actions/workflows/ci.yml/badge.svg)](https://github.com/s-silt/fxfx/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+
 > 面向**反诈调证**的 APK 静态分析 CLI —— 不止列出 IP/域名，而是产出**调证线索清单**：
 > 每条线索回答「**这是什么、归属哪家公司、能去找谁调取什么证据**」。
 
@@ -28,6 +32,10 @@
 
 调证建议：凭上述 AppSecret 向【个推】调开发者账号实名、应用注册主体、推送下发记录。
 ```
+
+实际渲染的 HTML 报告（**演示数据，已脱敏**）：
+
+![apkscan 报告示例](docs/images/report-demo.png)
 
 ---
 
