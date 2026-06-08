@@ -34,21 +34,30 @@
 
 from __future__ import annotations
 
-import ipaddress
 import logging
 import posixpath
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from apkscan.core.models import (
     AnalyzerResult,
-    Endpoint,
     Evidence,
     Finding,
     Severity,
 )
 from apkscan.core.registry import BaseAnalyzer, load_rules
+from apkscan.analyzers._common import EndpointCollector
+from apkscan.core.textutil import as_str_list as _as_str_list
+from apkscan.core.textutil import host_from_url as _host_from_url
+from apkscan.core.textutil import host_is_private as _host_is_private
+from apkscan.core.textutil import ip_is_private as _ip_is_private
+from apkscan.core.textutil import is_noise_bare_ip as _is_noise_bare_ip
+from apkscan.core.textutil import looks_keyish as _looks_keyish
+from apkscan.core.textutil import parse_ipv4 as _parse_ipv4
+from apkscan.core.textutil import strip_url_tail as _strip_url_tail
+from apkscan.core.textutil import truncate as _short
+from apkscan.core.textutil import valid_url_host as _valid_url_host
 
 if TYPE_CHECKING:
     from apkscan.core.context import AnalysisContext
@@ -339,50 +348,6 @@ class _Rules:
 
 
 @dataclass
-class _Collector:
-    """累积去重的端点表：value -> Endpoint，evidences 合并。"""
-
-    by_value: dict[str, Endpoint] = field(default_factory=dict)
-    _ev_keys: dict[str, set[tuple[str, str]]] = field(default_factory=dict)
-
-    def add(
-        self,
-        value: str,
-        kind: str,
-        evidence: Evidence,
-        *,
-        is_cleartext: bool = False,
-        is_private: bool = False,
-    ) -> None:
-        ep = self.by_value.get(value)
-        if ep is None:
-            ep = Endpoint(
-                value=value,
-                kind=kind,
-                evidences=[],
-                is_cleartext=is_cleartext,
-                is_private=is_private,
-            )
-            self.by_value[value] = ep
-            self._ev_keys[value] = set()
-        else:
-            ep.is_cleartext = ep.is_cleartext or is_cleartext
-            ep.is_private = ep.is_private or is_private
-
-        ev_key = (evidence.source, evidence.location)
-        if ev_key not in self._ev_keys[value]:
-            self._ev_keys[value].add(ev_key)
-            ep.evidences.append(evidence)
-
-    def endpoints(self) -> list[Endpoint]:
-        order = {"url": 0, "domain": 1, "ip": 2, "path": 3}
-        return sorted(
-            self.by_value.values(),
-            key=lambda e: (order.get(e.kind, 9), e.value),
-        )
-
-
-@dataclass
 class _SecretHit:
     """一处硬编码密钥命中（去重 + 聚合用）。"""
 
@@ -405,7 +370,7 @@ class JsBundleAnalyzer(BaseAnalyzer):
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
         result = AnalyzerResult(analyzer=self.name)
         rules = self._load_rules()
-        collector = _Collector()
+        collector = EndpointCollector()
 
         try:
             all_files = [p for p in ctx.list_files() if isinstance(p, str)]
@@ -434,7 +399,7 @@ class JsBundleAnalyzer(BaseAnalyzer):
             except Exception:  # noqa: BLE001 — 单文件失败不影响其余
                 logger.exception("[%s] 扫描 JS 文件失败，跳过：%s", self.name, path)
 
-        endpoints = collector.endpoints()
+        endpoints = collector.endpoints({"url": 0, "domain": 1, "ip": 2, "path": 3})
         result.endpoints = endpoints
         result.findings = self._build_findings(secret_hits)
 
@@ -559,7 +524,7 @@ class JsBundleAnalyzer(BaseAnalyzer):
         self,
         text: str,
         path: str,
-        collector: _Collector,
+        collector: EndpointCollector,
         secret_hits: dict[tuple[str, str], _SecretHit],
         rules: _Rules,
     ) -> None:
@@ -626,7 +591,7 @@ class JsBundleAnalyzer(BaseAnalyzer):
             )
 
     def _scan_literal(
-        self, literal: str, path: str, collector: _Collector, rules: _Rules
+        self, literal: str, path: str, collector: EndpointCollector, rules: _Rules
     ) -> None:
         """在单个字符串字面量内部抽 URL / host / IP / 相对 API 路径。"""
         consumed: list[tuple[int, int]] = []
@@ -952,113 +917,6 @@ class JsBundleAnalyzer(BaseAnalyzer):
 # ---------------------------------------------------------------------------
 
 
-def _as_str_list(value: Any) -> list[str]:
-    """把规则字段规整为 str 列表（容忍 None / 非 list / 含非 str 元素）。"""
-    if not isinstance(value, list):
-        return []
-    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
-
-
-def _short(text: str, limit: int) -> str:
-    if len(text) <= limit:
-        return text
-    return text[:limit] + "…"
-
-
-def _strip_url_tail(url: str) -> str:
-    """去掉 URL 尾部常见标点噪音（句号、逗号、引号、闭合括号等）。"""
-    url = url.strip()
-    while url and url[-1] in ".,;:'\")]}>" + "”’、，。；":
-        if url[-1] == ")" and url.count("(") > url.count(")"):
-            break
-        if url[-1] == "]" and url.count("[") > url.count("]"):
-            break
-        url = url[:-1]
-    return url
-
-
-def _host_from_url(url: str) -> str:
-    """从 URL 取 host（去 scheme / userinfo / port / path）。失败返回空。"""
-    try:
-        after = url.split("://", 1)[1]
-    except IndexError:
-        return ""
-    for sep in ("/", "?", "#"):
-        idx = after.find(sep)
-        if idx != -1:
-            after = after[:idx]
-    if "@" in after:
-        after = after.rsplit("@", 1)[1]
-    if after.startswith("["):  # IPv6 字面量
-        end = after.find("]")
-        if end != -1:
-            return after[: end + 1]
-    if ":" in after:
-        after = after.split(":", 1)[0]
-    return after.strip().rstrip(".").lower()
-
-
-def _is_noise_bare_ip(ip_str: str) -> bool:
-    """裸 IP 是否为版本号 / 网络地址噪音：首段或末段为 0。"""
-    octets = ip_str.split(".")
-    if len(octets) != 4:
-        return False
-    return octets[0] == "0" or octets[-1] == "0"
-
-
-def _parse_ipv4(ip_str: str) -> ipaddress.IPv4Address | None:
-    """严格解析 IPv4（每段 0-255）。非法返回 None。"""
-    parts = ip_str.split(".")
-    if len(parts) != 4:
-        return None
-    for p in parts:
-        if not p.isdigit() or len(p) > 3:
-            return None
-        if int(p) > 255:
-            return None
-    try:
-        return ipaddress.IPv4Address(ip_str)
-    except ValueError:
-        return None
-
-
-def _ip_is_private(ip: ipaddress.IPv4Address) -> bool:
-    """RFC1918 / 回环 / 链路本地 / 0.0.0.0 / 保留 / 多播 → 私网。"""
-    return bool(
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_unspecified
-        or ip.is_reserved
-        or ip.is_multicast
-    )
-
-
-def _host_is_private(host: str) -> bool:
-    """host 是私网 IPv4 字面量 / 本机别名 / .local 等 → True。"""
-    ip = _parse_ipv4(host)
-    if ip is not None:
-        return _ip_is_private(ip)
-    if host in ("localhost", "localhost.localdomain"):
-        return True
-    return host.endswith(".local") or host.endswith(".lan") or host.endswith(".internal")
-
-
-def _valid_url_host(host: str) -> bool:
-    """URL 的 host 是否像真实主机：IPv4 / 含点且末段 2+ 字母 / 本机别名。"""
-    host = host.strip().rstrip(".")
-    if not host:
-        return False
-    if _parse_ipv4(host) is not None:
-        return True
-    if host in ("localhost", "localhost.localdomain"):
-        return True
-    if "." not in host:
-        return False
-    last = host.rsplit(".", 1)[-1]
-    return last.isalpha() and 2 <= len(last) <= 24
-
-
 def _looks_like_domain(domain: str) -> bool:
     """判定点分串是否像真实域名（而非文件名 / 类名 / 包名）。
 
@@ -1118,14 +976,3 @@ def _is_real_secret_value(val: str) -> bool:
     if " " in val:  # 含空格多为句子/说明文本
         return False
     return True
-
-
-def _looks_keyish(value: str) -> bool:
-    """值是否“像密钥”：纯十六进制 / 含 Base64 特征字符 / 字母数字混合。"""
-    if re.fullmatch(r"[0-9a-fA-F]+", value):
-        return True
-    if any(c in value for c in "+/="):
-        return True
-    if any(c.isdigit() for c in value) and any(c.isalpha() for c in value):
-        return True
-    return False

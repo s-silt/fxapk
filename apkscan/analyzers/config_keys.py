@@ -28,7 +28,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import xml.etree.ElementTree as ET
 import xml.parsers.expat as expat
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
@@ -44,6 +43,9 @@ from apkscan.core.models import (
     Severity,
 )
 from apkscan.core.registry import BaseAnalyzer, load_rules
+from apkscan.core.xmlutil import UnsafeXmlError as _UnsafeXmlError
+from apkscan.core.xmlutil import android_attr as _android_attr
+from apkscan.core.xmlutil import safe_fromstring as _safe_fromstring
 
 if TYPE_CHECKING:
     from apkscan.core.context import AnalysisContext
@@ -51,9 +53,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _RULES_NAME = "config_keys"
-
-# Android 资源命名空间；ElementTree 会把 android:foo 展开为 {NS}foo。
-_ANDROID_NS = "http://schemas.android.com/apk/res/android"
 
 # value 片段截断长度（写入 Evidence.snippet）。
 _SNIPPET_MAX = 200
@@ -129,44 +128,6 @@ _CREDENTIAL_MARKERS: tuple[str, ...] = (
     "access_key", "accesskey", "api_key", "apikey", "client_id", "client_secret",
     "push_app", "getui", "umeng", "jpush", "wx", "qq_", "alipay", "miid", "mi_app",
 )
-
-
-class _UnsafeXmlError(ValueError):
-    """XML 中出现 DTD/实体声明（XXE / billion-laughs 攻击面），拒绝解析。"""
-
-
-def _safe_fromstring(xml_text: str) -> ET.Element:
-    """用 stdlib expat + ElementTree.TreeBuilder 安全解析，封堵 XXE / billion-laughs。
-
-    与 analyzers/manifest.py 同思路：关闭参数实体解析、拒绝任何实体/记法/外部引用声明，
-    其余事件转发给 ET.TreeBuilder。正常 manifest / strings.xml 不含 DTD/实体，不受影响。
-    """
-    builder = ET.TreeBuilder()
-    parser = expat.ParserCreate()
-
-    def _reject(*_args: object, **_kwargs: object) -> None:
-        raise _UnsafeXmlError("XML 含 DTD/实体声明或外部引用，已拒绝解析")
-
-    parser.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_NEVER)
-    parser.EntityDeclHandler = _reject
-    parser.UnparsedEntityDeclHandler = _reject
-    parser.NotationDeclHandler = _reject
-    parser.ExternalEntityRefHandler = _reject  # type: ignore[assignment]
-
-    parser.StartElementHandler = builder.start
-    parser.EndElementHandler = builder.end
-    parser.CharacterDataHandler = builder.data
-
-    parser.Parse(xml_text, True)
-    return builder.close()
-
-
-def _android_attr(elem: ET.Element, name: str) -> str | None:
-    """读取 android:<name> 属性；兼容已展开命名空间与裸属性两种形态。"""
-    val = elem.get(f"{{{_ANDROID_NS}}}{name}")
-    if val is not None:
-        return val
-    return elem.get(f"android:{name}", elem.get(name))
 
 
 def _truncate(text: str, limit: int = _SNIPPET_MAX) -> str:

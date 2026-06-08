@@ -27,10 +27,27 @@
 from __future__ import annotations
 
 import logging
-import posixpath
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from apkscan.analyzers._common import (
+    as_str_list as _as_str_list,
+)
+from apkscan.analyzers._common import (
+    collect_dex_strings as _collect_dex_strings_shared,
+)
+from apkscan.analyzers._common import (
+    collect_file_paths as _collect_file_paths_shared,
+)
+from apkscan.analyzers._common import (
+    collect_so_basenames as _collect_so_basenames_shared,
+)
+from apkscan.analyzers._common import (
+    str_or_empty as _str_or_empty,
+)
+from apkscan.analyzers._common import (
+    truncate as _truncate_shared,
+)
 from apkscan.core.models import (
     AnalyzerResult,
     Confidence,
@@ -177,50 +194,15 @@ class SdkFingerprintAnalyzer(BaseAnalyzer):
 
     def _collect_so_basenames(self, ctx: "AnalysisContext") -> dict[str, str]:
         """返回 {小写 basename: 原始路径}。包含 native_libs 与 list_files 中的 .so。"""
-        result: dict[str, str] = {}
-        try:
-            libs = list(ctx.native_libs())
-        except Exception:
-            logger.exception("[%s] 读取 native_libs 失败", self.name)
-            libs = []
-        try:
-            files = list(ctx.list_files())
-        except Exception:
-            logger.exception("[%s] 读取 list_files 失败（用于 .so 采集）", self.name)
-            files = []
-
-        for path in libs + files:
-            if not isinstance(path, str):
-                continue
-            base = posixpath.basename(path.replace("\\", "/"))
-            if base.lower().endswith(".so"):
-                result.setdefault(base.lower(), path)
-        return result
+        return _collect_so_basenames_shared(ctx, self.name)
 
     def _collect_file_paths(self, ctx: "AnalysisContext") -> list[str]:
         """APK 内全部文件路径。"""
-        try:
-            return [p for p in ctx.list_files() if isinstance(p, str)]
-        except Exception:
-            logger.exception("[%s] 读取 list_files 失败", self.name)
-            return []
+        return _collect_file_paths_shared(ctx, self.name)
 
     def _collect_dex_strings(self, ctx: "AnalysisContext") -> tuple[bool, list[str]]:
         """收集 DEX 字符串（带上限）。返回 (是否成功遍历, 字符串列表)。"""
-        strings: list[str] = []
-        try:
-            for idx, s in enumerate(ctx.dex_strings()):
-                if idx >= _MAX_DEX_STRINGS:
-                    logger.warning(
-                        "[%s] DEX 字符串超过上限 %d，截断扫描", self.name, _MAX_DEX_STRINGS
-                    )
-                    break
-                if isinstance(s, str) and s:
-                    strings.append(s)
-        except Exception:
-            logger.exception("[%s] 遍历 dex_strings 失败", self.name)
-            return False, strings
-        return True, strings
+        return _collect_dex_strings_shared(ctx, self.name, max_strings=_MAX_DEX_STRINGS)
 
     # ------------------------------------------------------------------
     # 单规则匹配
@@ -365,19 +347,5 @@ class SdkFingerprintAnalyzer(BaseAnalyzer):
 # ---------------------------------------------------------------------------
 
 
-def _str_or_empty(value: object) -> str:
-    """规则字段取 str（去空白），非 str / None → 空串。"""
-    return value.strip() if isinstance(value, str) else ""
-
-
-def _as_str_list(value: object) -> list[str]:
-    """把规则字段规整为 str 列表（容忍 None / 非 list / 含非 str 元素）。"""
-    if not isinstance(value, list):
-        return []
-    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
-
-
 def _truncate(text: str, limit: int = _SNIPPET_MAX) -> str:
-    if len(text) <= limit:
-        return text
-    return text[:limit] + "…"
+    return _truncate_shared(text, limit)
