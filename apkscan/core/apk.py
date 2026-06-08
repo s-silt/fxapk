@@ -194,14 +194,27 @@ class ApkContext:
         return mapping
 
     def dex_strings(self) -> Iterator[str]:
-        """惰性产出全部 DEX 字符串池（主 DEX + 外部脱壳 DEX）。
+        """产出全部 DEX 字符串池（主 DEX + 外部脱壳 DEX）。
 
         逐个 DEX 取，单个失败不影响其余。外部 extra dex（脱壳 dump）紧随主 DEX 产出。
+        首次访问解码并缓存为 tuple（见 _dex_strings_tuple）；多个分析器重复遍历时直接
+        命中缓存，避免对同一 DEX 反复做 mutf8 解码。迭代顺序/内容与逐 DEX 直出完全一致。
         """
+        return iter(self._dex_strings_tuple)
+
+    @cached_property
+    def _dex_strings_tuple(self) -> tuple[str, ...]:
+        """全部 DEX 字符串的不可变快照：主 DEX 在前、extra 脱壳 DEX 在后。
+
+        一次性解码并缓存，使 dex_strings() 的重复遍历（6+ 个分析器）只解码一次。
+        顺序与 _dex_objs → _extra_dex_objs 逐 DEX 产出严格一致。
+        """
+        out: list[str] = []
         for dex in self._dex_objs:
-            yield from _iter_dex_strings(dex)
+            out.extend(_iter_dex_strings(dex))
         for dex in self._extra_dex_objs:
-            yield from _iter_dex_strings(dex)
+            out.extend(_iter_dex_strings(dex))
+        return tuple(out)
 
     def list_files(self) -> list[str]:
         try:
@@ -210,13 +223,26 @@ class ApkContext:
             logger.exception("get_files 失败")
             return []
 
+    @cached_property
+    def _read_cache(self) -> dict[str, bytes | None]:
+        """read_file 的按需字节缓存：path -> bytes|None（None 也缓存，避免重复未命中查询）。
+
+        bytes 不可变，缓存返回值语义不变；多个分析器对同一文本资源的重复读取直接命中。
+        """
+        return {}
+
     def read_file(self, path: str) -> bytes | None:
+        cache = self._read_cache
+        if path in cache:
+            return cache[path]
         try:
-            return self._apk.get_file(path)
+            data = self._apk.get_file(path)
         except Exception:
             # androguard 对缺失文件抛 FileNotPresent；视为正常缺失但仍记录
             logger.debug("read_file 未命中：%s", path, exc_info=True)
-            return None
+            data = None
+        cache[path] = data
+        return data
 
     def native_libs(self) -> list[str]:
         """APK 内所有 .so 路径（含 lib/<abi>/ 下）。"""
@@ -292,17 +318,29 @@ class ApkContext:
 
 
 def _iter_dex_strings(dex: Any) -> Iterator[str]:
-    """惰性产出单个 DEX 的字符串池，bytes 解码为 str。单个 DEX 失败记录后跳过。"""
+    """惰性产出单个 DEX 的字符串池，bytes 解码为 str。单个 DEX 失败记录后跳过。
+
+    坏 DEX 只跳过自身：get_strings() 抛错、返回 None、或返回非可迭代/迭代中途抛错，
+    都记日志后中断本 DEX，不让异常冒泡中断整个 dex_strings 生成器（否则后续含 extra
+    脱壳 DEX 全产不出，与"单 DEX 失败跳过"的契约不符）。
+    """
     try:
         strings = dex.get_strings()
     except Exception:
         logger.exception("get_strings 失败：dex=%r", dex)
         return
-    for s in strings:
-        if isinstance(s, bytes):
-            yield s.decode("utf-8", errors="replace")
-        else:
-            yield str(s)
+    if strings is None:
+        logger.warning("get_strings 返回 None，跳过该 DEX：dex=%r", dex)
+        return
+    try:
+        for s in strings:
+            if isinstance(s, bytes):
+                yield s.decode("utf-8", errors="replace")
+            else:
+                yield str(s)
+    except Exception:
+        logger.exception("遍历 DEX 字符串失败，跳过该 DEX：dex=%r", dex)
+        return
 
 
 def _load_extra_dex(extra_dex: list[str]) -> list:

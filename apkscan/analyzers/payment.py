@@ -23,11 +23,47 @@
 from __future__ import annotations
 
 import logging
-import posixpath
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, TypeGuard
+from typing import TYPE_CHECKING
 
+from apkscan.analyzers._common import (
+    TEXT_RESOURCE_PREFIXES as _TEXT_PREFIXES,
+)
+from apkscan.analyzers._common import (
+    TEXT_RESOURCE_SUFFIXES as _TEXT_SUFFIXES,
+)
+from apkscan.analyzers._common import (
+    as_str_list as _as_str_list,
+)
+from apkscan.analyzers._common import (
+    collect_dex_strings as _collect_dex_strings_shared,
+)
+from apkscan.analyzers._common import (
+    collect_file_paths as _collect_file_paths_shared,
+)
+from apkscan.analyzers._common import (
+    collect_so_basenames as _collect_so_basenames_shared,
+)
+from apkscan.analyzers._common import (
+    is_text_resource as _is_text_resource_shared,
+)
+from apkscan.analyzers._common import (
+    nonempty_str as _nonempty_str,
+)
+from apkscan.analyzers._common import (
+    parse_confidence as _parse_confidence,
+)
+from apkscan.analyzers._common import (
+    snippet_around as _snippet_around,
+)
+from apkscan.analyzers._common import (
+    str_or_empty as _str_or_empty,
+)
+from apkscan.analyzers._common import (
+    truncate as _truncate_shared,
+)
 from apkscan.core.models import (
     AnalyzerResult,
     Confidence,
@@ -41,6 +77,9 @@ if TYPE_CHECKING:
     from apkscan.core.context import AnalysisContext
 
 logger = logging.getLogger(__name__)
+
+# 关键字匹配器类型：text -> re.Match|None（正则）或子串替身。
+_Matcher = Callable[[str], "re.Match | None"]
 
 _RULES_NAME = "payment"
 
@@ -62,13 +101,6 @@ _MAX_RESOURCE_BYTES = 512 * 1024
 # 单条 Lead 最多保留的证据条数（防止刷屏）。
 _MAX_EVIDENCES = 6
 _SNIPPET_MAX = 160
-
-# 视为文本、值得做关键字扫描的资源后缀 / 路径前缀。
-_TEXT_SUFFIXES: tuple[str, ...] = (
-    ".json", ".xml", ".txt", ".properties", ".js", ".html", ".htm",
-    ".cfg", ".conf", ".ini", ".csv", ".kv", ".plist",
-)
-_TEXT_PREFIXES: tuple[str, ...] = ("assets/", "res/raw/", "res/xml/")
 
 
 @dataclass
@@ -95,6 +127,11 @@ class _KeywordRule:
     where_to_request: str = ""
     evidence_to_obtain: list[str] = field(default_factory=list)
     note: str = ""
+    # 预编译的匹配器：与 patterns 一一对应的 (matcher, prefilter_literal_lower)。
+    # prefilter_literal_lower 非 None 时是该 pattern 命中的「必要且充分」小写字面量
+    # （pattern 为纯字面量、无正则元字符时才填），可在跑 matcher 前廉价短路。
+    # 加载时一次性编译，避免每次 analyze 重复 re.compile。
+    compiled: list[tuple[_Matcher, str | None]] = field(default_factory=list)
 
 
 @dataclass
@@ -148,6 +185,13 @@ class PaymentAnalyzer(BaseAnalyzer):
         result.meta["dex_scanned"] = dex_ok
         # 关键字匹配的语料：dex 字符串 + 文本资源（带来源标注）。
         corpus = self._build_corpus(ctx, dex_strings, file_paths)
+        # 预筛用的小写副本（每条语料 lower 一次，供所有规则复用，避免重复 lower）。
+        # 仅对纯 ASCII 文本生成预筛串：ASCII 大小写折叠与 re.IGNORECASE 完全一致，子串
+        # 预筛既必要又充分；含非 ASCII 字符的文本置 None → 跳过预筛、直接跑正则，避免
+        # ı/ſ 等同形字在 re.IGNORECASE 下命中却被 str.lower() 子串预筛漏掉（保命中集合不变）。
+        corpus_lower: list[str | None] = [
+            text.lower() if text.isascii() else None for _src, _loc, text in corpus
+        ]
 
         # 1) 支付 SDK 指纹
         sdk_hits: list[_SdkHit] = []
@@ -164,7 +208,7 @@ class PaymentAnalyzer(BaseAnalyzer):
         kw_hits: list[_KeywordHit] = []
         for rule in kw_rules:
             try:
-                hit = self._match_keyword(rule, corpus)
+                hit = self._match_keyword(rule, corpus, corpus_lower)
             except Exception:
                 logger.exception("[%s] 资金关键字规则匹配失败，跳过：%s", self.name, rule.name)
                 continue
@@ -195,47 +239,13 @@ class PaymentAnalyzer(BaseAnalyzer):
     # ------------------------------------------------------------------
 
     def _collect_so_basenames(self, ctx: "AnalysisContext") -> dict[str, str]:
-        result: dict[str, str] = {}
-        try:
-            libs = list(ctx.native_libs())
-        except Exception:
-            logger.exception("[%s] 读取 native_libs 失败", self.name)
-            libs = []
-        try:
-            files = list(ctx.list_files())
-        except Exception:
-            logger.exception("[%s] 读取 list_files 失败（用于 .so 采集）", self.name)
-            files = []
-        for path in libs + files:
-            if not isinstance(path, str):
-                continue
-            base = posixpath.basename(path.replace("\\", "/"))
-            if base.lower().endswith(".so"):
-                result.setdefault(base.lower(), path)
-        return result
+        return _collect_so_basenames_shared(ctx, self.name)
 
     def _collect_file_paths(self, ctx: "AnalysisContext") -> list[str]:
-        try:
-            return [p for p in ctx.list_files() if isinstance(p, str)]
-        except Exception:
-            logger.exception("[%s] 读取 list_files 失败", self.name)
-            return []
+        return _collect_file_paths_shared(ctx, self.name)
 
     def _collect_dex_strings(self, ctx: "AnalysisContext") -> tuple[bool, list[str]]:
-        strings: list[str] = []
-        try:
-            for idx, s in enumerate(ctx.dex_strings()):
-                if idx >= _MAX_DEX_STRINGS:
-                    logger.warning(
-                        "[%s] DEX 字符串超过上限 %d，截断扫描", self.name, _MAX_DEX_STRINGS
-                    )
-                    break
-                if isinstance(s, str) and s:
-                    strings.append(s)
-        except Exception:
-            logger.exception("[%s] 遍历 dex_strings 失败", self.name)
-            return False, strings
-        return True, strings
+        return _collect_dex_strings_shared(ctx, self.name, max_strings=_MAX_DEX_STRINGS)
 
     def _build_corpus(
         self,
@@ -266,17 +276,23 @@ class PaymentAnalyzer(BaseAnalyzer):
                 continue
             if not raw:
                 continue
+            if not isinstance(raw, (bytes, bytearray)):
+                logger.warning("[%s] read_file 返回非 bytes，跳过：%s", self.name, path)
+                continue
+            try:
+                text = bytes(raw[:_MAX_RESOURCE_BYTES]).decode("utf-8", errors="replace")
+            except Exception:
+                logger.exception("[%s] 解码资源失败，跳过：%s", self.name, path)
+                continue
             scanned += 1
-            text = raw[:_MAX_RESOURCE_BYTES].decode("utf-8", errors="replace")
             corpus.append(("resource", path, text))
         return corpus
 
     @staticmethod
     def _is_text_resource(path: str) -> bool:
-        low = path.lower()
-        if low.endswith(_TEXT_SUFFIXES):
-            return True
-        return low.startswith(_TEXT_PREFIXES)
+        return _is_text_resource_shared(
+            path, suffixes=_TEXT_SUFFIXES, prefixes=_TEXT_PREFIXES
+        )
 
     # ------------------------------------------------------------------
     # 匹配
@@ -336,12 +352,21 @@ class PaymentAnalyzer(BaseAnalyzer):
         return hit
 
     def _match_keyword(
-        self, rule: _KeywordRule, corpus: list[tuple[str, str, str]]
+        self,
+        rule: _KeywordRule,
+        corpus: list[tuple[str, str, str]],
+        corpus_lower: list[str | None],
     ) -> _KeywordHit:
         hit = _KeywordHit(rule=rule)
-        for pattern in rule.patterns:
-            matcher = _compile_matcher(pattern)
-            for source, location, text in corpus:
+        # 用预编译 matcher（避免每次 analyze 重复 re.compile）；保持 patterns 顺序。
+        for pattern, (matcher, prefilter) in zip(rule.patterns, rule.compiled):
+            for idx, (source, location, text) in enumerate(corpus):
+                # 廉价子串预筛：prefilter 是该 pattern 命中的必要且充分字面量时，
+                # 不含即必不命中，跳过正则；prefilter 为 None（pattern 非纯 ASCII 字面量）
+                # 或 cl 为 None（语料含非 ASCII，预筛不健全）则照常跑 matcher。
+                cl = corpus_lower[idx]
+                if prefilter is not None and cl is not None and prefilter not in cl:
+                    continue
                 m = matcher(text)
                 if m is None:
                     continue
@@ -516,6 +541,10 @@ class PaymentAnalyzer(BaseAnalyzer):
                     where_to_request=_str_or_empty(entry.get("where_to_request")),
                     evidence_to_obtain=_as_str_list(entry.get("evidence_to_obtain")),
                     note=_str_or_empty(entry.get("note")),
+                    # 一次性预编译每条 pattern 的 matcher + 安全预筛字面量。
+                    compiled=[
+                        (_compile_matcher(p), _prefilter_literal(p)) for p in patterns
+                    ],
                 )
             )
         return rules
@@ -524,6 +553,23 @@ class PaymentAnalyzer(BaseAnalyzer):
 # ---------------------------------------------------------------------------
 # 模块级工具
 # ---------------------------------------------------------------------------
+
+
+def _prefilter_literal(pattern: str) -> str | None:
+    """若 pattern 是纯 ASCII 字面量（无正则元字符），返回其小写形式作为安全预筛字面量；否则 None。
+
+    matcher 走 re.IGNORECASE。对**纯 ASCII** 字面量 pattern 与**纯 ASCII** 语料文本，命中
+    ⇔ pattern.lower() 是 text.lower() 的子串（ASCII 大小写折叠与 IGNORECASE 完全一致），
+    既必要又充分，可在跑正则前廉价短路而绝不改变命中集合（语料含非 ASCII 时由调用方退回
+    直接跑正则，见 _match_keyword）。含元字符（[](){}|.*+?^$\\ 等）或非 ASCII 字符的
+    pattern 无法保证 str.lower() 子串预筛与 IGNORECASE 等价，返回 None 不做预筛。
+    """
+    if not pattern:
+        return None
+    # 纯 ASCII 且 re.escape 不改变 → 无正则元字符的 ASCII 字面量。
+    if pattern.isascii() and re.escape(pattern) == pattern:
+        return pattern.lower()
+    return None
 
 
 def _compile_matcher(pattern: str):
@@ -567,49 +613,10 @@ class _Span:
         return self._e
 
 
-def _snippet_around(text: str, m: object, radius: int = 60) -> str:
-    """截取命中位置周边片段，便于人工复核。"""
-    try:
-        start = max(0, m.start() - radius)  # type: ignore[attr-defined]
-        end = min(len(text), m.end() + radius)  # type: ignore[attr-defined]
-    except Exception:
-        return _truncate(text)
-    seg = text[start:end].replace("\n", " ").strip()
-    prefix = "…" if start > 0 else ""
-    suffix = "…" if end < len(text) else ""
-    return f"{prefix}{seg}{suffix}"
-
-
 def _trim_evidences(evidences: list[Evidence]) -> None:
     if len(evidences) > _MAX_EVIDENCES:
         del evidences[_MAX_EVIDENCES:]
 
 
-def _parse_confidence(value: str) -> Confidence | None:
-    if not value:
-        return None
-    key = value.strip().upper()
-    try:
-        return Confidence[key]
-    except KeyError:
-        return None
-
-
-def _nonempty_str(value: object) -> TypeGuard[str]:
-    return isinstance(value, str) and bool(value.strip())
-
-
-def _str_or_empty(value: object) -> str:
-    return value.strip() if isinstance(value, str) else ""
-
-
-def _as_str_list(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
-
-
 def _truncate(text: str, limit: int = _SNIPPET_MAX) -> str:
-    if len(text) <= limit:
-        return text
-    return text[:limit] + "…"
+    return _truncate_shared(text, limit)

@@ -78,6 +78,23 @@ def test_keyword_hit_in_text_resource():
     assert any(ev.source == "resource" for ev in hit.source_refs)
 
 
+def test_keyword_hit_survives_homoglyph_prefilter():
+    """回归：关键字预筛优化必须保行为——同形字变体仍被 re.IGNORECASE 命中。
+
+    payment 给纯 ASCII 字面量 pattern 加了 str.lower() 子串预筛提速；但 re.IGNORECASE
+    用 Unicode case-folding，会把 ſ(U+017F 长 s)折叠为 s、ı(U+0131 无点 i)匹配 i 等，
+    而 str.lower() 不会——若对含非 ASCII 的语料也套预筛，会把 'caſhier' 这类同形字
+    规避变体漏掉（涉诈样本作者的真实手法）。修复后含非 ASCII 文本退回直接跑正则。
+    """
+    # 'caſhier' = cashier 的长 s 同形字变体；re.IGNORECASE 命中、str.lower() 预筛不命中。
+    ctx = FakeContext(dex_strings=["caſhier 收银台入口 amount=100"])
+    result = PaymentAnalyzer().analyze(ctx)
+    leads = _pay_leads(result)
+    assert any("收银台" in l.value or "cashier" in l.value for l in leads), (
+        "同形字 'caſhier' 应仍命中 cashier 规则（预筛不得漏掉非 ASCII 语料）"
+    )
+
+
 def test_no_payment_signal_yields_no_leads():
     ctx = FakeContext(
         dex_strings=["android.app.Activity", "java.lang.String", "hello world"],

@@ -159,7 +159,8 @@ def capture(
 def _resolve_extra_dex(spec: str) -> list[str]:
     """解析 --extra-dex（逗号分隔的 .dex 路径或目录）为 .dex 文件路径列表。
 
-    - 目录：收集其下所有 .dex 文件。
+    - 目录：递归收集其下所有 .dex 文件（frida-dexdump 常把 dump 放子目录，
+      与 unpack._collect_dex 的 rglob 行为对齐，避免子目录 dex 静默漏掉）。
     - 文件：原样保留。
     - 不存在的条目记 warning 跳过（不静默吞错），交由 load_apk 对单个失败再降级。
     """
@@ -170,7 +171,7 @@ def _resolve_extra_dex(spec: str) -> list[str]:
             continue
         p = Path(item)
         if p.is_dir():
-            dexes = sorted(p.glob("*.dex"))
+            dexes = sorted(p.rglob("*.dex"))
             if not dexes:
                 logger.warning("--extra-dex 目录内无 .dex 文件：%s", p)
             files.extend(str(d) for d in dexes)

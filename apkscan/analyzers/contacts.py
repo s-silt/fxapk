@@ -21,8 +21,35 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, TypeGuard
+from typing import TYPE_CHECKING
 
+from apkscan.analyzers._common import (
+    TEXT_RESOURCE_PREFIXES as _TEXT_PREFIXES,
+)
+from apkscan.analyzers._common import (
+    TEXT_RESOURCE_SUFFIXES as _TEXT_SUFFIXES,
+)
+from apkscan.analyzers._common import (
+    as_str_list as _as_str_list,
+)
+from apkscan.analyzers._common import (
+    is_text_resource as _is_text_resource_shared,
+)
+from apkscan.analyzers._common import (
+    nonempty_str as _nonempty_str,
+)
+from apkscan.analyzers._common import (
+    parse_confidence as _parse_confidence,
+)
+from apkscan.analyzers._common import (
+    snippet_around as _snippet_around_shared,
+)
+from apkscan.analyzers._common import (
+    str_or_empty as _str_or_empty,
+)
+from apkscan.analyzers._common import (
+    truncate as _truncate_shared,
+)
 from apkscan.core.models import (
     AnalyzerResult,
     Confidence,
@@ -52,12 +79,6 @@ _MAX_RESOURCE_BYTES = 512 * 1024
 _MAX_LEADS_PER_TYPE = 200
 _MAX_EVIDENCES = 5
 _SNIPPET_MAX = 160
-
-_TEXT_SUFFIXES: tuple[str, ...] = (
-    ".json", ".xml", ".txt", ".properties", ".js", ".html", ".htm",
-    ".cfg", ".conf", ".ini", ".csv", ".kv", ".plist",
-)
-_TEXT_PREFIXES: tuple[str, ...] = ("assets/", "res/raw/", "res/xml/")
 
 
 @dataclass
@@ -164,14 +185,23 @@ class ContactsAnalyzer(BaseAnalyzer):
                 continue
             if not raw:
                 continue
+            if not isinstance(raw, (bytes, bytearray)):
+                logger.warning("[%s] read_file 返回非 bytes，跳过：%s", self.name, path)
+                continue
+            try:
+                text = bytes(raw[:_MAX_RESOURCE_BYTES]).decode("utf-8", errors="replace")
+            except Exception:
+                logger.exception("[%s] 解码资源失败，跳过：%s", self.name, path)
+                continue
             scanned += 1
-            corpus.append(("resource", path, raw[:_MAX_RESOURCE_BYTES].decode("utf-8", errors="replace")))
+            corpus.append(("resource", path, text))
         return corpus
 
     @staticmethod
     def _is_text_resource(path: str) -> bool:
-        low = path.lower()
-        return low.endswith(_TEXT_SUFFIXES) or low.startswith(_TEXT_PREFIXES)
+        return _is_text_resource_shared(
+            path, suffixes=_TEXT_SUFFIXES, prefixes=_TEXT_PREFIXES
+        )
 
     # ------------------------------------------------------------------
     # 匹配
@@ -351,38 +381,9 @@ def _valid_for_kind(kind: str, value: str) -> bool:
 
 
 def _snippet_around(text: str, m: re.Match, radius: int = 40) -> str:
-    start = max(0, m.start() - radius)
-    end = min(len(text), m.end() + radius)
-    seg = text[start:end].replace("\n", " ").strip()
-    prefix = "…" if start > 0 else ""
-    suffix = "…" if end < len(text) else ""
-    return f"{prefix}{seg}{suffix}"
-
-
-def _parse_confidence(value: object) -> Confidence | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    try:
-        return Confidence[value.strip().upper()]
-    except KeyError:
-        return None
-
-
-def _nonempty_str(value: object) -> TypeGuard[str]:
-    return isinstance(value, str) and bool(value.strip())
-
-
-def _str_or_empty(value: object) -> str:
-    return value.strip() if isinstance(value, str) else ""
-
-
-def _as_str_list(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+    """联系方式命中片段：复用共享实现，半径默认 40（与原行为一致）。"""
+    return _snippet_around_shared(text, m, radius)
 
 
 def _truncate(text: str, limit: int = _SNIPPET_MAX) -> str:
-    if len(text) <= limit:
-        return text
-    return text[:limit] + "…"
+    return _truncate_shared(text, limit)
