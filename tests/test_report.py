@@ -406,3 +406,20 @@ def test_html_render_empty_report(tmp_path: Path) -> None:
     # 各空线索区给出空提示，不崩溃
     assert "未抠取到配置键值" in html
     assert "未识别到「建议调证」的主控域名" in html
+
+
+# --------------------------- 资源审计（exe-ready）---------------------------
+
+
+def test_template_loaded_via_importlib_resources(sample_report: Report, tmp_path: Path) -> None:
+    """html 模板经 importlib.resources 定位而非 Path(__file__) 相对路径，仍能正常渲染。
+
+    锚顶层包 'apkscan'，并断言模板加载链不再引用模块级 __file__ 相对目录常量
+    （exe-ready：PyInstaller onefile 下资源不是真实目录，靠 importlib.resources + as_file）。
+    """
+    # 模块不再保留 __file__ 相对的模板目录常量。
+    assert not hasattr(report_html, "_TEMPLATE_DIR")
+    # render_to_string 走 importlib.resources，渲染产物与现状一致。
+    out = report_html.render_to_string(sample_report)
+    assert out.lstrip().lower().startswith("<!doctype html")
+    assert "ctrl.fraud-example.com" in out

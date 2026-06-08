@@ -13,4 +13,6 @@ ybku/
 /run_real.py
 /run_both.py
 /.wf_keyvalue_plan.md
+/.wf_*.md
+/_perf_probe*.py
 *.pdf

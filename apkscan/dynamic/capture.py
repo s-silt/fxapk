@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import subprocess
 import time
@@ -39,6 +40,7 @@ from apkscan.dynamic import (
     DynamicResult,
     empty_result,
 )
+from apkscan.dynamic import provision
 from apkscan.report import json as report_json
 
 logger = logging.getLogger(__name__)
@@ -55,6 +57,10 @@ _TERMINATE_TIMEOUT = 5.0
 
 # 子进程 stderr 尾部保留字符数（记日志 / reason，防刷屏）。
 _STDERR_TAIL = 2000
+
+# frida 注入后短暂等待，用于检测进程是否秒退（版本不匹配/包名不存在/spawn 失败）。
+# 用 _wait 走同一计时入口，测试可 monkeypatch 避免真睡。
+_FRIDA_GRACE = 2
 
 
 class _MitmStartupError(RuntimeError):
@@ -259,8 +265,30 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
     frida_proc: subprocess.Popen[bytes] | None = None
     proxy_set = False
     reverse_set = False
+    # 抓包加固产生的告警（CA 未装系统库 / frida 版本不一致），收尾并入 reason，
+    # 不假成功——但都不阻断抓包（HTTP 仍可抓；frida 不匹配仍尝试注入）。
+    warnings: list[str] = []
 
     try:
+        # 0) HTTPS 命门：把 mitmproxy CA 装入设备系统信任库。失败不中止抓包
+        #    （HTTP 仍可抓），但把降级原因写进 playbook + reason，确保不假成功。
+        ca = provision.ensure_mitm_ca(on_progress=None)
+        if ca.get("ok"):
+            playbook.append(f"mitmproxy CA 已就绪（{ca.get('action', '')}）")
+        else:
+            ca_detail = str(ca.get("detail") or "CA 未装入系统信任库")
+            warn = f"CA 未装入系统信任库：{ca_detail}，HTTPS 可能仅密文"
+            logger.warning("[capture] %s", warn)
+            playbook.append(warn)
+            warnings.append(warn)
+
+        # 0.5) frida 主机/设备版本一致性校验。不一致不阻断（仍注入），但写入告警。
+        match_ok, match_msg = _check_frida_version_match()
+        if not match_ok:
+            logger.warning("[capture] %s", match_msg)
+            playbook.append(match_msg)
+            warnings.append(match_msg)
+
         # 1) 起 mitmdump（-w flows.mitm）。超时 = duration + 缓冲。
         mitm_proc = _start_mitmdump(flows_file)
         playbook.append(f"启动 mitmdump -w {flows_file}（监听 {_PROXY_HOST}:{_PROXY_PORT}）")
@@ -288,8 +316,28 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
 
         # 3) frida 注入通用 SSL unpinning 并 spawn 目标 app。
         frida_proc = _start_frida_unpinning(package, out_path)
-        if frida_proc is not None:
+        if frida_proc is None:
+            # 未起 frida（缺 frida / 写脚本失败）→ 无 unpinning，HTTPS 可能仅密文。
+            warn = "frida 未启动（缺 frida / 脚本写出失败），无 SSL unpinning，HTTPS 可能仅密文"
+            logger.warning("[capture] %s", warn)
+            playbook.append(warn)
+            warnings.append(warn)
+        else:
+            # 存活检测：frida 若因 frida-server 版本不匹配 / 包名不存在 / spawn 失败而
+            # 瞬间退出，Popen 不抛——必须主动检测，否则会照常 sleep 满 duration 并以
+            # "成功"收尾，把"unpinning 根本没生效（HTTPS 仅密文）"静默成假成功。
+            # 与 CA 失败路径一致：不阻断（HTTP 仍可抓），但如实降级写入 reason/playbook。
             playbook.append(f"frida 注入 SSL unpinning 并启动 {package}")
+            _wait(_FRIDA_GRACE)
+            if frida_proc.poll() is not None:
+                err = _read_proc_stderr(frida_proc)
+                warn = (
+                    f"frida 注入失败/秒退（frida-server 版本不匹配 / 包名不存在 / "
+                    f"spawn 失败？）stderr 尾部：{err}；HTTPS 可能仅密文"
+                )
+                logger.warning("[capture] %s", warn)
+                playbook.append(warn)
+                warnings.append(warn)
 
         # 4) 抓 duration 秒。
         playbook.append(f"采集流量约 {duration} 秒")
@@ -330,6 +378,13 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
             f"解析 {flows_file.name} 提取运行时端点 {len(endpoints)} 个 → {Path(report_path).name if report_path else 'runtime_report.json'}"
         )
         result["reason"] = f"抓包完成，提取运行时端点 {len(endpoints)} 个"
+
+    # 把加固告警（CA 降级 / frida 版本不一致）追加进 reason，确保不假成功——
+    # 即便抓包 done，调用方也能从 reason 看到 HTTPS/注入可能不可靠。done 与 error
+    # 两路都追加（error 时已有 reason，告警作为补充上下文）。
+    if warnings:
+        suffix = "；".join(warnings)
+        result["reason"] = f"{result['reason']}；{suffix}" if result["reason"] else suffix
 
     result["artifacts"] = artifacts
     result["report_paths"] = report_paths
@@ -379,6 +434,80 @@ def _start_frida_unpinning(package: str, out_path: Path) -> subprocess.Popen[byt
     except Exception:
         logger.exception("[capture] 启动 frida 失败，跳过注入")
         return None
+
+
+# ---------------------------------------------------------------------------
+# frida 主机/设备版本一致性校验（best-effort，不阻断）
+# ---------------------------------------------------------------------------
+
+# frida-server 在设备上的常驻路径（与 provision 部署口径一致）。
+_FRIDA_SERVER_REMOTE = "/data/local/tmp/frida-server"
+
+
+def _device_frida_version(serial: str | None = None) -> str:
+    """best-effort 取设备端 frida-server 版本。
+
+    尝试 ``adb shell <frida-server> --version`` 解析 semver；缺 adb / 设备拿不到
+    （非常见，frida-server 路径不定 / 无 root / 不支持 --version）→ ''（不抛）。
+    设计为"拿不到只校在跑、不阻断"，故空串由调用方按"无法比对"处理。
+    """
+    exe = shutil.which("adb")
+    if exe is None:
+        logger.debug("[capture] adb 不在 PATH，无法取设备 frida-server 版本")
+        return ""
+    args = [exe]
+    if serial:
+        args += ["-s", serial]
+    args += ["shell", _FRIDA_SERVER_REMOTE, "--version"]
+    try:
+        proc = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=device._DEFAULT_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("[capture] 取设备 frida-server 版本超时")
+        return ""
+    except Exception:
+        logger.exception("[capture] 取设备 frida-server 版本异常")
+        return ""
+
+    text = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    match = re.search(r"(\d+\.\d+\.\d+)", text)
+    if match is None:
+        logger.debug("[capture] 无法从设备解析 frida-server 版本：%r", text.strip())
+        return ""
+    return match.group(1)
+
+
+def _check_frida_version_match(serial: str | None = None) -> tuple[bool, str]:
+    """校验主机 frida 与设备 frida-server 版本是否一致（best-effort，不阻断注入）。
+
+    Returns:
+        (ok, msg)。一致 / 无法比对（任一版本取不到）→ (True, '')；
+        明确不一致 → (False, 警告文案)。版本不一致时注入可能失败，但 capture 设计为
+        仍尝试注入，仅把告警写入 playbook/reason，由 _capture 决定如何呈现。
+    """
+    host_ver = provision.host_frida_version()
+    dev_ver = _device_frida_version(serial)
+    # 任一取不到 → 无法比对，按"通过"处理（只校在跑，不阻断）。
+    if not host_ver or not dev_ver:
+        logger.debug(
+            "[capture] frida 版本无法比对（主机=%r 设备=%r），跳过版本校验",
+            host_ver,
+            dev_ver,
+        )
+        return True, ""
+    if host_ver != dev_ver:
+        msg = (
+            f"主机 frida {host_ver} 与设备 frida-server {dev_ver} 版本不一致，"
+            "注入可能失败"
+        )
+        logger.warning("[capture] %s", msg)
+        return False, msg
+    return True, ""
 
 
 # ---------------------------------------------------------------------------

@@ -84,13 +84,20 @@ def _stub_orchestration(
     frida: _FakeProc | None = None,
     wait_raises: bool = False,
 ) -> dict[str, Any]:
-    """把真编排步骤换成无副作用替身，返回调用记录。"""
+    """把真编排步骤换成无副作用替身，返回调用记录。
+
+    抓包加固引入的新副作用（provision.ensure_mitm_ca / _check_frida_version_match）
+    在此默认 monkeypatch 为"全 OK、无告警"，保证既有 done/error 用例不因真实
+    adb/frida 调用而行为漂移；针对加固路径的新用例会再覆写这两个桩。
+    """
     calls: dict[str, Any] = {
         "mitm": mitm,
         "frida": frida,
         "terminated": [],
         "adb": [],
         "waited": False,
+        "ensure_ca_called": False,
+        "version_check_called": False,
     }
 
     monkeypatch.setattr(capture, "_start_mitmdump", lambda flows_file: mitm)
@@ -101,6 +108,18 @@ def _stub_orchestration(
     monkeypatch.setattr(capture, "_adb_set_proxy", lambda: (calls["adb"].append("proxy") or True))
     monkeypatch.setattr(capture, "_adb_clear_proxy", lambda: calls["adb"].append("clear_proxy"))
     monkeypatch.setattr(capture, "_adb_remove_reverse", lambda: calls["adb"].append("remove_reverse"))
+
+    # 加固新调用：默认 CA 成功、版本匹配，无告警（避免污染既有用例的 reason 断言）。
+    def _fake_ensure_ca(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        calls["ensure_ca_called"] = True
+        return {"ok": True, "action": "installed_system", "detail": ""}
+
+    def _fake_version_match(*args: Any, **kwargs: Any) -> tuple[bool, str]:
+        calls["version_check_called"] = True
+        return True, ""
+
+    monkeypatch.setattr(capture.provision, "ensure_mitm_ca", _fake_ensure_ca)
+    monkeypatch.setattr(capture, "_check_frida_version_match", _fake_version_match)
 
     def _fake_wait(duration: int) -> None:
         calls["waited"] = True
@@ -404,3 +423,226 @@ def test_terminate_calls_terminate_on_live_proc():
     proc = _FakeProc()
     capture._terminate(proc, "mitmdump")
     assert proc.terminated is True
+
+
+# ---------------------------------------------------------------------------
+# 抓包加固：CA 注入 + frida 版本一致性校验（不阻断抓包，写入 reason/playbook）
+# ---------------------------------------------------------------------------
+
+
+def test_capture_calls_ensure_mitm_ca_before_capture(monkeypatch, tmp_path):
+    """抓包前必须调用 provision.ensure_mitm_ca（HTTPS 命门）。"""
+    _set_capabilities(monkeypatch)
+    calls = _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+
+    assert result["status"] == STATUS_DONE
+    assert calls["ensure_ca_called"] is True
+    assert calls["version_check_called"] is True
+
+
+def test_capture_ca_failure_does_not_abort_but_notes_in_reason(monkeypatch, tmp_path):
+    """CA 装入失败（ok=False）：仍 done，但 reason/playbook 含 CA 降级说明，不假成功。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+
+    def _ca_fail(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "action": "error",
+            "detail": "无法把 CA 装入系统信任库（设备无 root）",
+        }
+
+    monkeypatch.setattr(capture.provision, "ensure_mitm_ca", _ca_fail)
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+
+    # 抓包不被 CA 失败阻断（HTTP 仍可抓）
+    assert result["status"] == STATUS_DONE
+    # reason 必须点明 CA 降级 + HTTPS 可能仅密文，避免假成功
+    assert "CA" in result["reason"]
+    assert "密文" in result["reason"]
+    assert "无法把 CA 装入系统信任库（设备无 root）" in result["reason"]
+    # playbook 也记录降级
+    pb = "\n".join(result["playbook"])
+    assert "CA 未装入系统信任库" in pb
+
+
+def test_capture_frida_version_mismatch_warns_in_reason(monkeypatch, tmp_path):
+    """frida 主机/设备版本不一致：不阻断注入，但 reason 含版本警告。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+
+    def _mismatch(*args: Any, **kwargs: Any) -> tuple[bool, str]:
+        return False, "主机 frida 16.5.9 与设备 frida-server 16.1.0 版本不一致，注入可能失败"
+
+    monkeypatch.setattr(capture, "_check_frida_version_match", _mismatch)
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+
+    # 不阻断：仍 done
+    assert result["status"] == STATUS_DONE
+    assert "版本不一致" in result["reason"]
+    pb = "\n".join(result["playbook"])
+    assert "版本不一致" in pb
+
+
+def test_capture_frida_version_match_no_warning(monkeypatch, tmp_path):
+    """frida 版本一致：reason 无版本警告（仅正常完成文案）。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+
+    assert result["status"] == STATUS_DONE
+    assert "版本不一致" not in result["reason"]
+    assert "抓包完成" in result["reason"]
+
+
+class _DeadFridaProc(_FakeProc):
+    """frida 秒退替身：poll() 立即返回非 None（已退出），communicate 给 stderr 尾部。"""
+
+    def __init__(self, stderr: bytes = b"Failed to spawn: unable to find process") -> None:
+        super().__init__()
+        self._alive = False
+        self.returncode = 1
+        self._stderr = stderr
+
+    def poll(self) -> int | None:
+        return 1  # 始终已退出
+
+    def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+        return b"", self._stderr
+
+
+def test_capture_frida_dead_after_start_warns_in_reason(monkeypatch, tmp_path):
+    """frida 注入后秒退（版本不匹配/包名不存在/spawn 失败）：不阻断（HTTP 仍抓），
+    但 reason/playbook 必须如实降级，不假成功（HTTPS 命门）。"""
+    _set_capabilities(monkeypatch)
+    dead_frida = _DeadFridaProc()
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=dead_frida)
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+
+    # 不阻断：仍 done。
+    assert result["status"] == STATUS_DONE
+    # reason 必须点明 frida 注入失败/秒退 + HTTPS 可能仅密文。
+    assert "frida" in result["reason"].lower()
+    assert "密文" in result["reason"]
+    pb = "\n".join(result["playbook"])
+    assert "秒退" in pb or "注入失败" in pb
+
+
+def test_capture_frida_none_warns_no_unpinning(monkeypatch, tmp_path):
+    """frida 未启动（_start_frida_unpinning 返回 None）：reason 点明无 unpinning。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+
+    assert result["status"] == STATUS_DONE
+    assert "密文" in result["reason"]
+    pb = "\n".join(result["playbook"])
+    assert "unpinning" in pb.lower()
+
+
+def test_capture_frida_alive_no_warning(monkeypatch, tmp_path):
+    """frida 注入后存活：无降级告警（仅正常完成文案）。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+
+    assert result["status"] == STATUS_DONE
+    assert "秒退" not in result["reason"]
+    assert "密文" not in result["reason"]
+    assert "抓包完成" in result["reason"]
+
+
+def test_existing_done_test_still_passes_with_new_hooks_mocked(monkeypatch, tmp_path):
+    """锁定无回归：默认桩下（CA ok、版本匹配）done 路径行为不变。"""
+    _set_capabilities(monkeypatch)
+    mitm = _FakeProc()
+    frida = _FakeProc()
+    calls = _stub_orchestration(monkeypatch, mitm=mitm, frida=frida)
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+
+    assert result["status"] == STATUS_DONE
+    # 子进程仍被清理（finally 行为不变）
+    assert "mitmdump" in calls["terminated"]
+    assert "frida" in calls["terminated"]
+    assert mitm.terminated is True
+    assert frida.terminated is True
+    # 默认桩无告警 → reason 不含降级文案
+    assert "密文" not in result["reason"]
+    assert "版本不一致" not in result["reason"]
+
+
+# ---------------------------------------------------------------------------
+# _check_frida_version_match / _device_frida_version 单元行为
+# ---------------------------------------------------------------------------
+
+
+def test_version_match_returns_true_when_either_version_missing(monkeypatch):
+    """任一版本取不到 → 无法比对 → (True, '')（只校在跑，不阻断）。"""
+    monkeypatch.setattr(capture.provision, "host_frida_version", lambda: "")
+    monkeypatch.setattr(capture, "_device_frida_version", lambda serial=None: "16.5.9")
+    assert capture._check_frida_version_match() == (True, "")
+
+    monkeypatch.setattr(capture.provision, "host_frida_version", lambda: "16.5.9")
+    monkeypatch.setattr(capture, "_device_frida_version", lambda serial=None: "")
+    assert capture._check_frida_version_match() == (True, "")
+
+
+def test_version_match_true_when_equal(monkeypatch):
+    monkeypatch.setattr(capture.provision, "host_frida_version", lambda: "16.5.9")
+    monkeypatch.setattr(capture, "_device_frida_version", lambda serial=None: "16.5.9")
+    ok, msg = capture._check_frida_version_match()
+    assert ok is True
+    assert msg == ""
+
+
+def test_version_match_false_when_mismatch(monkeypatch):
+    monkeypatch.setattr(capture.provision, "host_frida_version", lambda: "16.5.9")
+    monkeypatch.setattr(capture, "_device_frida_version", lambda serial=None: "16.1.0")
+    ok, msg = capture._check_frida_version_match()
+    assert ok is False
+    assert "16.5.9" in msg
+    assert "16.1.0" in msg
+
+
+def test_device_frida_version_no_adb_returns_empty(monkeypatch):
+    monkeypatch.setattr(capture.shutil, "which", lambda name: None)
+    assert capture._device_frida_version() == ""
+
+
+def test_device_frida_version_parses_semver(monkeypatch):
+    monkeypatch.setattr(capture.shutil, "which", lambda name: "adb")
+
+    class _CP:
+        returncode = 0
+        stdout = "16.5.9\n"
+        stderr = ""
+
+    monkeypatch.setattr(capture.subprocess, "run", lambda *a, **k: _CP())
+    assert capture._device_frida_version() == "16.5.9"
+
+
+def test_device_frida_version_timeout_returns_empty(monkeypatch):
+    monkeypatch.setattr(capture.shutil, "which", lambda name: "adb")
+
+    def _boom(*a: Any, **k: Any):
+        raise capture.subprocess.TimeoutExpired(cmd="adb", timeout=5.0)
+
+    monkeypatch.setattr(capture.subprocess, "run", _boom)
+    assert capture._device_frida_version() == ""

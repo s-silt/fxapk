@@ -84,6 +84,11 @@ def analyze(
     # 的协议匹配有已知局限，故此处显式忽略。
     report = pipeline.run(ctx, config)  # type: ignore[arg-type]
 
+    # 把真实联网状态落到 meta：merge 生成运行时线索时据此决定 online 分级标注，
+    # 离线扫描（--no-online）下运行时端点才不会被默认 online=True 当成已联网核实
+    # （否则拿不到静态侧"离线扫描，归属未查询"标注，偏乐观、轻微假成功）。
+    report.meta["online"] = config.online
+
     # 设备探测：有在线设备则提示并写入 meta，便于报告/后续动态补全感知。
     device_detected = device.has_device()
     if device_detected:
@@ -101,7 +106,9 @@ def analyze(
         if not device_detected:
             typer.echo("未检测到在线设备，跳过 --dynamic（动态脱壳/抓包需真机）。")
         else:
-            _run_dynamic_after_static(str(apk), ctx.package_name or "", out)
+            _run_dynamic_after_static(
+                str(apk), ctx.package_name or "", out, report, formats
+            )
 
 
 @app.command()
@@ -156,6 +163,65 @@ def capture(
     _print_dynamic_result("抓包", result)
 
 
+@app.command()
+def doctor(
+    serial: str = typer.Option(
+        "", "--serial", help="目标设备序列号（默认 adb 当前设备）。"
+    ),
+    auto_fix: bool = typer.Option(
+        True,
+        "--fix/--no-fix",
+        help="对 frida-server / CA 等可自动修的项调 provision 自动修复（--no-fix 仅体检不动设备）。",
+    ),
+) -> None:
+    """动态抓包/脱壳前置环境体检：设备/root/ABI/frida/mitmproxy/CA，逐项给出状态与可复制命令。
+
+    实现由 apkscan.dynamic.doctor 提供（纯结构化返回）；本命令是唯一打印体检结果的薄包装。
+    """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    try:
+        from apkscan.dynamic import doctor as _doctor
+    except ImportError:
+        typer.echo("该功能未安装：apkscan.dynamic.doctor 不可用（环境体检模块尚未就绪）。")
+        raise typer.Exit(code=1) from None
+
+    typer.echo("===== 动态环境体检 =====")
+    result = _doctor.run(
+        serial=serial or None,
+        auto_fix=auto_fix,
+        on_progress=lambda m: typer.echo(f"... {m}"),
+    )
+    _print_doctor_result(result)
+    if not result.get("ok", False):
+        raise typer.Exit(code=1)
+
+
+def _print_doctor_result(result: object) -> None:
+    """打印 doctor.run 的结构化结果：逐项 [OK]/[FAIL] + 缩进列出 fix_cmd。"""
+    if not isinstance(result, dict):
+        typer.echo("体检：返回值非预期格式，已忽略。")
+        return
+    items = result.get("items") or []
+    typer.echo("")
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        ok = bool(item.get("ok"))
+        name = str(item.get("name", "?"))
+        detail = str(item.get("detail", ""))
+        tag = "[OK]  " if ok else "[FAIL]"
+        typer.echo(f"{tag} {name}{('：' + detail) if detail else ''}")
+        if not ok:
+            fix_cmd = item.get("fix_cmd") or []
+            if isinstance(fix_cmd, list) and fix_cmd:
+                typer.echo("       建议命令：")
+                for cmd in fix_cmd:
+                    typer.echo(f"         {cmd}")
+    typer.echo("")
+    overall = "全部关键项通过" if result.get("ok", False) else "存在未通过的关键项（详见上方 [FAIL]）"
+    typer.echo(f"体检结论：{overall}")
+
+
 def _resolve_extra_dex(spec: str) -> list[str]:
     """解析 --extra-dex（逗号分隔的 .dex 路径或目录）为 .dex 文件路径列表。
 
@@ -182,10 +248,15 @@ def _resolve_extra_dex(spec: str) -> list[str]:
     return files
 
 
-def _run_dynamic_after_static(apk_path: str, package: str, out: str) -> None:
-    """--dynamic：静态完成且有设备时，顺序执行 unpack + capture。
+def _run_dynamic_after_static(
+    apk_path: str, package: str, out: str, report: Report, formats: list[str]
+) -> None:
+    """--dynamic：静态完成且有设备时，顺序执行 unpack + capture，并把运行时端点并回主报告。
 
     两个动态模块均惰性导入，缺失时打印"该功能未安装"并跳过，绝不崩主流程。
+    capture status==done 后，惰性 import merge，从 out/runtime_report.json 读回运行时端点，
+    去重并入静态 report.endpoints、按 infra 分级生成线索、重渲 report.html/json，
+    让真·C2 进入主线索清单而非游离在 runtime_report.json。合并失败不影响已产出静态报告。
     """
     typer.echo("")
     typer.echo("===== 动态补全（真机） =====")
@@ -209,12 +280,70 @@ def _run_dynamic_after_static(apk_path: str, package: str, out: str) -> None:
         from apkscan.dynamic import capture as _capture
     except ImportError:
         typer.echo("该功能未安装：apkscan.dynamic.capture 不可用，跳过抓包。")
-    else:
-        try:
-            _print_dynamic_result("抓包", _capture.run(package, out=out))
-        except Exception:
-            logger.exception("动态抓包执行异常（不影响已产出的静态报告）")
-            typer.echo("抓包执行异常（详见日志），已跳过。")
+        return
+
+    try:
+        capture_result = _capture.run(package, out=out)
+    except Exception:
+        logger.exception("动态抓包执行异常（不影响已产出的静态报告）")
+        typer.echo("抓包执行异常（详见日志），已跳过。")
+        return
+
+    _print_dynamic_result("抓包", capture_result)
+
+    # 抓包成功（done）才把运行时端点并回主报告并重渲；skipped/error 不调 merge。
+    status = capture_result.get("status") if isinstance(capture_result, dict) else None
+    from apkscan.dynamic import STATUS_DONE
+
+    if status != STATUS_DONE:
+        return
+
+    _merge_runtime_into_report(capture_result, out, report, formats)
+
+
+def _merge_runtime_into_report(
+    capture_result: object, out: str, report: Report, formats: list[str]
+) -> None:
+    """把 capture 抓到的运行时端点并回主报告并重渲；任何失败不破坏已产出的静态报告。"""
+    try:
+        from apkscan.dynamic import merge as _merge
+    except ImportError:
+        typer.echo("该功能未安装：apkscan.dynamic.merge 不可用，跳过运行时端点并入。")
+        return
+
+    try:
+        # 运行时端点来源（不动 capture 契约）：优先 report_paths 里的 runtime_report.json，
+        # 否则回退到约定路径 out/runtime_report.json。
+        runtime_path = _resolve_runtime_report_path(capture_result, out)
+        endpoints = _merge.load_runtime_endpoints(runtime_path)
+        stats = _merge.merge_and_rerender(
+            report,
+            endpoints,
+            out,
+            formats=formats,
+            on_progress=lambda m: typer.echo(f"... {m}"),
+        )
+        merged = stats.get("merged", 0)
+        new_leads = stats.get("new_leads", 0)
+        report_paths = stats.get("report_paths") or []
+        typer.echo(
+            f"运行时端点并入：新增端点 {merged}，新增线索 {new_leads}；"
+            f"重渲报告 {len(report_paths)} 份"
+        )
+        for p in report_paths:
+            typer.echo(f"  - {p}")
+    except Exception:
+        logger.exception("运行时端点并入/重渲异常（不影响已产出的静态报告）")
+        typer.echo("运行时端点并入异常（详见日志），静态报告不受影响。")
+
+
+def _resolve_runtime_report_path(capture_result: object, out: str) -> str:
+    """从 capture 返回的 report_paths 里找 runtime_report.json，否则回退 out/runtime_report.json。"""
+    if isinstance(capture_result, dict):
+        for p in capture_result.get("report_paths") or []:
+            if isinstance(p, str) and Path(p).name == "runtime_report.json":
+                return p
+    return str(Path(out) / "runtime_report.json")
 
 
 def _print_dynamic_result(label: str, result: object) -> None:

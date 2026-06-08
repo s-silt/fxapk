@@ -253,3 +253,30 @@ def test_advice_assigned_by_infra_and_category(monkeypatch, fake_ctx):
 
     # 每条 Lead 都应被研判（无空 advice）。
     assert all(l.advice for l in report.leads)
+
+
+# --------------------------- 资源审计（exe-ready）---------------------------
+
+
+def test_load_rules_via_importlib_resources_reads_yaml():
+    """registry.load_rules 经 importlib.resources 读 rules/*.yaml（非 Path(__file__) 相对）。
+
+    锚顶层包 'apkscan'，读真实存在的规则文件，断言返回非空 dict/list；并确认
+    模块不再保留 __file__ 相对的 _rules_dir 帮助器（exe-ready 改造已落地）。
+    """
+    from apkscan.core import registry
+
+    # __file__ 相对定位帮助器已移除。
+    assert not hasattr(registry, "_rules_dir")
+
+    data = registry.load_rules("sdks")
+    assert isinstance(data, (dict, list))
+    assert data  # sdks.yaml 非空
+
+    # 带 .yaml 后缀亦可。
+    data2 = registry.load_rules("sdks.yaml")
+    assert isinstance(data2, (dict, list))
+    assert data2
+
+    # 不存在的规则 → 空 dict（不抛）。
+    assert registry.load_rules("__nope__") == {}

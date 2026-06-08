@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import importlib.resources
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +21,6 @@ from apkscan.core.models import (
     Report,
 )
 
-_TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 _TEMPLATE_NAME = "report.html.j2"
 
 # LeadCategory → 中文标签（用于线索清单分组标题）。
@@ -200,9 +201,15 @@ def network_leads_by_advice(leads: list[Lead]) -> dict[str, list[Lead]]:
     }
 
 
-def _build_environment() -> Environment:
+def _build_environment(template_dir: str) -> Environment:
+    """用给定模板目录构造 Jinja2 Environment 并注册自定义 filter。
+
+    template_dir 由 :func:`render_to_string` 经 ``importlib.resources.as_file`` 取得，
+    使打包形态（PyInstaller onefile，资源不是真实目录）下仍能定位模板，且保持原有
+    FileSystemLoader + autoescape/trim_blocks/lstrip_blocks 行为不变（最小化偏移）。
+    """
     env = Environment(
-        loader=FileSystemLoader(str(_TEMPLATE_DIR)),
+        loader=FileSystemLoader(template_dir),
         autoescape=select_autoescape(["html", "htm", "xml", "j2"]),
         trim_blocks=True,
         lstrip_blocks=True,
@@ -215,9 +222,22 @@ def _build_environment() -> Environment:
 
 
 def render_to_string(report: Report) -> str:
-    """渲染 Report 为 HTML 字符串。"""
-    env = _build_environment()
-    template = env.get_template(_TEMPLATE_NAME)
+    """渲染 Report 为 HTML 字符串。
+
+    模板目录用 importlib.resources 锚顶层包 ``apkscan`` 定位（templates/ 是数据目录、
+    非子包，故锚 'apkscan'），不依赖 ``Path(__file__)`` 相对路径（exe-ready）。
+    ``as_file`` 取得的真实目录仅在 with 作用域内有效，故在作用域内完成 ``template.render``。
+    """
+    templates_res = importlib.resources.files("apkscan") / "report" / "templates"
+    with ExitStack() as stack:
+        template_dir = stack.enter_context(importlib.resources.as_file(templates_res))
+        env = _build_environment(str(template_dir))
+        template = env.get_template(_TEMPLATE_NAME)
+        return _render_template(template, report)
+
+
+def _render_template(template: Any, report: Report) -> str:
+    """用已加载的模板对象渲染（提出来便于在 as_file 作用域内调用）。"""
     lead_groups = group_leads_by_category(report.leads)
     endpoints = split_endpoints(report.endpoints)
     enrichment_by_endpoint = {ep.value: _endpoint_enrichment(ep) for ep in report.endpoints}
