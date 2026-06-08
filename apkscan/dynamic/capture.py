@@ -25,13 +25,12 @@ from __future__ import annotations
 
 import logging
 import re
-import shutil
 import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
-from apkscan.core import device
+from apkscan.core import device, tools
 from apkscan.core.models import Endpoint, Evidence
 from apkscan.dynamic import (
     STATUS_DONE,
@@ -393,12 +392,15 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
 
 
 def _start_mitmdump(flows_file: Path) -> subprocess.Popen[bytes]:
-    """启动 mitmdump 子进程（-w flows_file）。失败抛异常由上层 finally 兜底清理。"""
-    exe = shutil.which("mitmdump") or shutil.which("mitmproxy")
-    if exe is None:  # _detect_missing 已确认存在，此处防御
-        raise RuntimeError("mitmdump/mitmproxy 不在 PATH")
+    """启动 mitmdump 子进程（-w flows_file）。失败抛异常由上层 finally 兜底清理。
+
+    frozen 时经 tools.frida_invocation 自调用内置 mitmdump；源码时用 PATH。
+    """
+    inv = tools.frida_invocation("mitmdump")
+    if not inv:  # _detect_missing 已确认存在，此处防御
+        raise RuntimeError("mitmdump/mitmproxy 不可用")
     args = [
-        exe,
+        *inv,
         "-w",
         str(flows_file),
         "--listen-host",
@@ -414,10 +416,11 @@ def _start_frida_unpinning(package: str, out_path: Path) -> subprocess.Popen[byt
     """写出内置 unpinning 脚本，frida -U -f <package> -l <js> --no-pause 注入并 spawn。
 
     frida 缺失/启动失败 → 记 warning 返回 None（不抛，抓包仍可在无 unpinning 下进行）。
+    frozen 时经 tools.frida_invocation 自调用内置 frida；源码时用 PATH。
     """
-    exe = shutil.which("frida")
-    if exe is None:
-        logger.warning("[capture] frida 不在 PATH，跳过 unpinning 注入")
+    inv = tools.frida_invocation("frida")
+    if not inv:
+        logger.warning("[capture] frida 不可用，跳过 unpinning 注入")
         return None
 
     js_path = out_path / "unpinning.js"
@@ -427,7 +430,7 @@ def _start_frida_unpinning(package: str, out_path: Path) -> subprocess.Popen[byt
         logger.exception("[capture] 写出 frida unpinning 脚本失败，跳过注入")
         return None
 
-    args = [exe, "-U", "-f", package, "-l", str(js_path), "--no-pause", "-q"]
+    args = [*inv, "-U", "-f", package, "-l", str(js_path), "--no-pause", "-q"]
     logger.info("[capture] frida 注入 unpinning 并启动 app：%s", " ".join(args))
     try:
         return subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -451,9 +454,9 @@ def _device_frida_version(serial: str | None = None) -> str:
     （非常见，frida-server 路径不定 / 无 root / 不支持 --version）→ ''（不抛）。
     设计为"拿不到只校在跑、不阻断"，故空串由调用方按"无法比对"处理。
     """
-    exe = shutil.which("adb")
-    if exe is None:
-        logger.debug("[capture] adb 不在 PATH，无法取设备 frida-server 版本")
+    exe = tools.adb_path()
+    if not exe:
+        logger.debug("[capture] adb 不可用，无法取设备 frida-server 版本")
         return ""
     args = [exe]
     if serial:
@@ -547,9 +550,9 @@ def _adb_remove_reverse() -> None:
 
 def _adb(extra: list[str]) -> bool:
     """运行 adb 子命令，成功（returncode==0）返回 True。缺 adb / 失败 / 异常 → False。"""
-    exe = shutil.which("adb")
-    if exe is None:
-        logger.warning("[capture] adb 不在 PATH，跳过：%s", " ".join(extra))
+    exe = tools.adb_path()
+    if not exe:
+        logger.warning("[capture] adb 不可用，跳过：%s", " ".join(extra))
         return False
     try:
         proc = subprocess.run(

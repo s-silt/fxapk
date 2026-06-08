@@ -22,7 +22,7 @@ import logging
 import subprocess
 from pathlib import Path
 
-from apkscan.core import device
+from apkscan.core import device, tools
 from apkscan.core.models import AnalysisConfig
 from apkscan.dynamic import (
     STATUS_DONE,
@@ -207,9 +207,15 @@ def _dexdump(
     超时 / 异常由调用方 try/except 兜底（本函数超时返回字符串、不抛）。
     """
     dump_dir.mkdir(parents=True, exist_ok=True)
+    # frozen 时经 tools.frida_invocation 自调用内置 frida-dexdump；源码时用 PATH。
+    inv = tools.frida_invocation("frida-dexdump")
+    if not inv:
+        logger.error("frida-dexdump 不可用（frozen 内置缺失 / PATH 无 frida-dexdump）")
+        return "frida-dexdump 不可用"
     # -F=attach 前台应用, -U=USB 设备, -f=按包名 spawn, -o=输出目录。
-    cmd = ["frida-dexdump", "-FU", "-f", package_name, "-o", str(dump_dir)]
-    playbook.append(" ".join(cmd))
+    cmd = [*inv, "-FU", "-f", package_name, "-o", str(dump_dir)]
+    # playbook 记**人类可读命令**（不暴露 sys.executable frida-dexdump），与实际 argv 解耦。
+    playbook.append(f"frida-dexdump -FU -f {package_name} -o {dump_dir}")
     logger.info("执行 frida-dexdump：%s", " ".join(cmd))
 
     try:

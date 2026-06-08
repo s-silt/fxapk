@@ -48,7 +48,8 @@ def _all_present(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(device, "has_device", lambda: True)
     monkeypatch.setattr(device, "has_mitmproxy", lambda: True)
     monkeypatch.setattr(device, "frida_server_running", lambda serial=None: True)
-    monkeypatch.setattr(doctor.shutil, "which", lambda name: f"/usr/bin/{name}")
+    # adb 可用：_check_device 改用 tools.has_adb（取代旧 shutil.which mock）。
+    monkeypatch.setattr(doctor.tools, "has_adb", lambda: True)
     monkeypatch.setattr(provision, "device_abi", lambda serial=None: "arm64-v8a")
     monkeypatch.setattr(provision, "host_frida_version", lambda: "16.5.9")
     # 设备已 root：su -c id → uid=0。
@@ -132,7 +133,7 @@ def test_run_no_device_item_fail_with_fix_cmd(monkeypatch):
 
 def test_run_no_device_when_adb_missing(monkeypatch):
     _all_present(monkeypatch)
-    monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+    monkeypatch.setattr(doctor.tools, "has_adb", lambda: False)
     res = doctor.run()
     item = _item_by_name(res, doctor._NAME_DEVICE)
     assert item["ok"] is False
@@ -448,7 +449,7 @@ def test_run_never_prints_or_raises(monkeypatch, capsys):
     monkeypatch.setattr(device, "has_device", lambda: False)
     monkeypatch.setattr(device, "has_mitmproxy", lambda: False)
     monkeypatch.setattr(device, "frida_server_running", lambda serial=None: False)
-    monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
+    monkeypatch.setattr(doctor.tools, "has_adb", lambda: False)
     monkeypatch.setattr(provision, "device_abi", lambda serial=None: "")
     monkeypatch.setattr(provision, "host_frida_version", lambda: "")
     monkeypatch.setattr(provision, "_adb", lambda extra, serial=None: None)

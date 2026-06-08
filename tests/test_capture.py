@@ -622,12 +622,13 @@ def test_version_match_false_when_mismatch(monkeypatch):
 
 
 def test_device_frida_version_no_adb_returns_empty(monkeypatch):
-    monkeypatch.setattr(capture.shutil, "which", lambda name: None)
+    # adb 不可用：tools.adb_path 返回 ""（取代旧 shutil.which mock）。
+    monkeypatch.setattr(capture.tools, "adb_path", lambda: "")
     assert capture._device_frida_version() == ""
 
 
 def test_device_frida_version_parses_semver(monkeypatch):
-    monkeypatch.setattr(capture.shutil, "which", lambda name: "adb")
+    monkeypatch.setattr(capture.tools, "adb_path", lambda: "adb")
 
     class _CP:
         returncode = 0
@@ -639,7 +640,7 @@ def test_device_frida_version_parses_semver(monkeypatch):
 
 
 def test_device_frida_version_timeout_returns_empty(monkeypatch):
-    monkeypatch.setattr(capture.shutil, "which", lambda name: "adb")
+    monkeypatch.setattr(capture.tools, "adb_path", lambda: "adb")
 
     def _boom(*a: Any, **k: Any):
         raise capture.subprocess.TimeoutExpired(cmd="adb", timeout=5.0)

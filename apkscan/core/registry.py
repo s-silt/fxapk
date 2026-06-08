@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 
-from apkscan.core import device
+from apkscan.core import device, tools
 from apkscan.core.models import AnalyzerResult, EnrichmentResult, Endpoint
 
 if TYPE_CHECKING:
@@ -146,9 +146,11 @@ def detect_capabilities(online: bool = True) -> set[str]:
     """
     caps: set[str] = set()
 
-    for tool in ("jadx", "adb"):
-        if shutil.which(tool):
-            caps.add(tool)
+    # jadx 不内置，仍走 PATH；adb 走 tools.has_adb（frozen 看 exe 同目录随包 adb.exe）。
+    if shutil.which("jadx"):
+        caps.add("jadx")
+    if tools.has_adb():
+        caps.add("adb")
 
     if online and _has_network():
         caps.add("online")
