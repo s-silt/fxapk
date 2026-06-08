@@ -100,6 +100,17 @@ fxapk auto app.apk --out out
 
 未安装为命令时等价用：`python -m apkscan.cli analyze app.apk --out out`。
 
+### 命令一览
+
+| 命令 | 作用 |
+|---|---|
+| `analyze APK` | 静态分析（零环境）产出调证线索清单；加 `--dynamic` 且有设备时自动脱壳+抓包，并把运行时端点**并回主报告** |
+| `auto APK` | 一键全自动：`doctor`→静态→脱壳→抓包→合并一份总报告（无设备自动跳过动态步骤） |
+| `doctor` | 环境体检：在线设备 / root / ABI / 主机 frida 版本 / 设备 frida-server / mitmproxy / CA 逐项 `[OK]`/`[FAIL]`，`--fix` 自动修（部署 frida-server、装 CA），关键项失败时退出码 1 |
+| `unpack APK` | 真机脱壳：frida-dexdump dump 隐藏 DEX 回灌重分析 |
+| `capture PACKAGE` | 真机抓包：mitmproxy + frida 绕证书绑定，抓运行时端点 |
+| `gui` | 图形界面（tkinter 单窗口：体检 / 静态 / 一键全自动） |
+
 ### 常用参数
 
 | 参数 | 说明 |
