@@ -196,6 +196,99 @@ def doctor(
         raise typer.Exit(code=1)
 
 
+@app.command()
+def auto(
+    apk: Path = typer.Argument(
+        ...,
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="待分析的 APK 文件路径。",
+    ),
+    out: str = typer.Option("out", "--out", help="报告 / 产物输出目录。"),
+    online: bool = typer.Option(
+        False,
+        "--online/--offline",
+        help="静态分析是否联网富化归属（WHOIS/ICP/ASN）。默认离线。",
+    ),
+    auto_fix: bool = typer.Option(
+        True,
+        "--fix/--no-fix",
+        help="体检时对 frida-server / CA 等可自动修的项调 provision 自动修复（--no-fix 仅体检不动设备）。",
+    ),
+    duration: int = typer.Option(60, "--duration", help="抓包时长（秒）。"),
+    fmt: str = typer.Option(
+        "html,json",
+        "--fmt",
+        help="输出格式，逗号分隔：html,json,pdf。",
+    ),
+) -> None:
+    """一键全自动：体检 → 静态分析 → 脱壳 → 抓包 → 合并，串成确定性流水线产出总报告。
+
+    无设备时优雅跳过脱壳/抓包，仍产出静态报告。实现由 apkscan.dynamic.auto 提供
+    （纯结构化返回 + 回调）；本命令是唯一打印 / 交互（提示操作 app）的薄包装。
+    """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    try:
+        from apkscan.dynamic import auto as _auto
+    except ImportError:
+        typer.echo("该功能未安装：apkscan.dynamic.auto 不可用（一键全自动模块尚未就绪）。")
+        raise typer.Exit(code=1) from None
+
+    formats = [f.strip().lower() for f in fmt.split(",") if f.strip()]
+
+    def _confirm(msg: str) -> None:
+        """抓包前提示用户操作 app 触发网络，并等回车（CLI 落点；GUI 用弹窗）。"""
+        typer.echo("")
+        typer.echo(f">>> {msg}")
+        typer.confirm("已准备好，开始抓包？", default=True)
+
+    typer.echo(f"===== 一键全自动：{apk} =====")
+    result = _auto.run(
+        str(apk),
+        out_dir=out,
+        online=online,
+        auto_fix=auto_fix,
+        capture_duration=duration,
+        formats=formats,
+        on_progress=lambda m: typer.echo(f"... {m}"),
+        confirm=_confirm,
+    )
+    _print_auto_result(result)
+
+
+def _print_auto_result(result: object) -> None:
+    """打印 auto.run 的结构化结果：逐步状态 + 报告路径。"""
+    if not isinstance(result, dict):
+        typer.echo("一键全自动：返回值非预期格式，已忽略。")
+        return
+    typer.echo("")
+    typer.echo("===== 步骤摘要 =====")
+    steps = result.get("steps") or []
+    _tags = {"done": "[OK]  ", "skipped": "[SKIP]", "error": "[ERR] "}
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        status = str(step.get("status", "?"))
+        name = str(step.get("name", "?"))
+        detail = str(step.get("detail", ""))
+        tag = _tags.get(status, "[?]   ")
+        typer.echo(f"{tag} {name}{('：' + detail) if detail else ''}")
+
+    pkg = str(result.get("package_name") or "(未知)")
+    out_dir = str(result.get("out_dir") or "")
+    typer.echo("")
+    typer.echo(f"包名：{pkg}  输出目录：{out_dir}")
+
+    report_paths = result.get("report_paths") or []
+    if report_paths:
+        typer.echo(f"报告（{len(report_paths)}）：")
+        for p in report_paths:
+            typer.echo(f"  - {p}")
+    else:
+        typer.echo("未产出报告（详见步骤摘要）。")
+
+
 def _print_doctor_result(result: object) -> None:
     """打印 doctor.run 的结构化结果：逐项 [OK]/[FAIL] + 缩进列出 fix_cmd。"""
     if not isinstance(result, dict):
