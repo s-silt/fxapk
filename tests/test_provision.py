@@ -1,9 +1,9 @@
-"""apkscan.dynamic.provision 单测：urllib / lzma / subprocess / shutil.which / 文件系统全 mock。
+"""apkscan.dynamic.provision 单测：requests / lzma / subprocess / shutil.which / 文件系统全 mock。
 
 策略（无真机/无外网，离线锁行为）：
 - subprocess 调用：monkeypatch provision._adb / provision._adb_ok 或 subprocess.run。
 - shutil.which：monkeypatch 控制工具是否在 PATH。
-- 下载：monkeypatch urllib.request.urlopen + lzma.decompress。
+- 下载：monkeypatch requests.get + lzma.decompress。
 - 文件系统：tmp_path + monkeypatch _mitm_ca_path / Path.home。
 
 覆盖：ABI 各值 / 版本解析 / 有无网络 / 有无 root / CA 已装-未装-无 root 降级 /
@@ -16,7 +16,6 @@ import hashlib
 import io as _io
 import lzma
 import subprocess
-import urllib.error
 from pathlib import Path
 from typing import Any
 
@@ -230,26 +229,33 @@ def _xz_bytes(payload: bytes = b"ELF-FAKE-FRIDA") -> bytes:
     return lzma.compress(payload)
 
 
-def test_ensure_frida_server_download_uses_urllib_and_lzma_mocked(monkeypatch, tmp_path):
+def _fake_requests_get(content: bytes):
+    """构造 requests 风格的假响应工厂（.content + .raise_for_status no-op）。"""
+
+    class _Resp:
+        content = b""
+
+        def raise_for_status(self) -> None:
+            return None
+
+    def _get(url: str, timeout: float = 0):
+        r = _Resp()
+        r.content = content
+        return r
+
+    return _get
+
+
+def test_ensure_frida_server_download_uses_requests_and_lzma_mocked(monkeypatch, tmp_path):
+    import requests
+
     # 第一次 running=False（进入部署），部署后验证为 True。
     states = iter([False, True])
     monkeypatch.setattr(device, "frida_server_running", lambda serial=None: next(states, True))
     monkeypatch.setattr(provision, "device_abi", lambda serial=None: "arm64-v8a")
     monkeypatch.setattr(provision, "host_frida_version", lambda: "16.5.9")
 
-    fake_xz = _xz_bytes()
-
-    class _FakeResp:
-        def __enter__(self) -> _FakeResp:
-            return self
-
-        def __exit__(self, *exc: Any) -> None:
-            return None
-
-        def read(self) -> bytes:
-            return fake_xz
-
-    monkeypatch.setattr(provision.urllib.request, "urlopen", lambda url, timeout=0: _FakeResp())
+    monkeypatch.setattr(requests, "get", _fake_requests_get(_xz_bytes()))
     monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None: True)
     monkeypatch.setattr(provision.time, "sleep", lambda s: None)
 
@@ -260,14 +266,16 @@ def test_ensure_frida_server_download_uses_urllib_and_lzma_mocked(monkeypatch, t
 
 
 def test_ensure_frida_server_network_error_returns_error_not_raise(monkeypatch):
+    import requests
+
     monkeypatch.setattr(device, "frida_server_running", lambda serial=None: False)
     monkeypatch.setattr(provision, "device_abi", lambda serial=None: "arm64-v8a")
     monkeypatch.setattr(provision, "host_frida_version", lambda: "16.5.9")
 
-    def _raise_urlerror(url: str, timeout: float = 0) -> None:
-        raise urllib.error.URLError("no route to host")
+    def _raise_conn(url: str, timeout: float = 0) -> None:
+        raise requests.exceptions.ConnectionError("no route to host")
 
-    monkeypatch.setattr(provision.urllib.request, "urlopen", _raise_urlerror)
+    monkeypatch.setattr(requests, "get", _raise_conn)
     res = provision.ensure_frida_server()
     assert res["ok"] is False
     assert res["action"] == "error"
@@ -276,35 +284,31 @@ def test_ensure_frida_server_network_error_returns_error_not_raise(monkeypatch):
 
 
 def test_ensure_frida_server_http_404_returns_version_not_found(monkeypatch):
+    import requests
+
     monkeypatch.setattr(device, "frida_server_running", lambda serial=None: False)
     monkeypatch.setattr(provision, "device_abi", lambda serial=None: "arm64-v8a")
     monkeypatch.setattr(provision, "host_frida_version", lambda: "99.99.99")
 
     def _raise_404(url: str, timeout: float = 0) -> None:
-        raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)  # type: ignore[arg-type]
+        resp = requests.Response()
+        resp.status_code = 404
+        raise requests.exceptions.HTTPError("404", response=resp)
 
-    monkeypatch.setattr(provision.urllib.request, "urlopen", _raise_404)
+    monkeypatch.setattr(requests, "get", _raise_404)
     res = provision.ensure_frida_server()
     assert res["ok"] is False
     assert "不存在" in res["detail"]
 
 
 def test_ensure_frida_server_lzma_error_returns_error(monkeypatch):
+    import requests
+
     monkeypatch.setattr(device, "frida_server_running", lambda serial=None: False)
     monkeypatch.setattr(provision, "device_abi", lambda serial=None: "arm64-v8a")
     monkeypatch.setattr(provision, "host_frida_version", lambda: "16.5.9")
 
-    class _FakeResp:
-        def __enter__(self) -> _FakeResp:
-            return self
-
-        def __exit__(self, *exc: Any) -> None:
-            return None
-
-        def read(self) -> bytes:
-            return b"not-valid-xz-bytes"
-
-    monkeypatch.setattr(provision.urllib.request, "urlopen", lambda url, timeout=0: _FakeResp())
+    monkeypatch.setattr(requests, "get", _fake_requests_get(b"not-valid-xz-bytes"))
     res = provision.ensure_frida_server()
     assert res["ok"] is False
     assert res["action"] == "error"
@@ -674,18 +678,15 @@ def test_ensure_mitm_ca_falls_back_to_user_store_on_readonly_system(monkeypatch,
     # 关键：用户库路径**不算已信任**（Android 10+ 默认不生效，需 magisk/重启），
     # 故 ok=False、verified=False——避免 doctor 把"已写入待生效"误判为绿（不假成功）。
     def _adb_ok(extra: list[str], serial: str | None = None) -> bool:
+        cmd = " ".join(extra)
         if extra[:2] == ["shell", "ls"]:
-            return False
+            return False  # 未已信任
         if extra == ["root"]:
             return True
-        if extra == ["remount"]:
+        # remount 全失败（adb remount / 直执 mount / su mount）→ 系统库主路不通。
+        if extra == ["remount"] or "remount" in cmd:
             return False
-        # su -c mount remount → 也失败（系统库主路不通）
-        if extra[:2] == ["shell", "su"] and "remount" in " ".join(extra):
-            return False
-        # 系统库 su cp → 不会到（remount 失败短路）；用户库 push 中转 + su cp 全成功
-        if extra[:2] == ["shell", "su"] and "/system/etc/security/cacerts" in " ".join(extra):
-            return False
+        # 系统库 cp 不会到（remount 失败短路）；用户库 push 中转 + cp（直执/su）全成功。
         return True
 
     monkeypatch.setattr(provision, "_adb_ok", _adb_ok)

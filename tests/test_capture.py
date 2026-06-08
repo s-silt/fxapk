@@ -647,3 +647,42 @@ def test_device_frida_version_timeout_returns_empty(monkeypatch):
 
     monkeypatch.setattr(capture.subprocess, "run", _boom)
     assert capture._device_frida_version() == ""
+
+
+# ---------------------------------------------------------------------------
+# A1 回归：frida unpinning 不再无脑传 --no-pause（≥14 删除该参数会秒退失效）
+# ---------------------------------------------------------------------------
+
+
+def _capture_popen_args(monkeypatch, host_ver: str, tmp_path):
+    """跑 _start_frida_unpinning，捕获传给 subprocess.Popen 的 args。"""
+    monkeypatch.setattr(capture.tools, "frida_invocation", lambda tool: ["frida"])
+    monkeypatch.setattr(capture.provision, "host_frida_version", lambda: host_ver)
+    captured: dict[str, list[str]] = {}
+
+    class _FakePopen:
+        def __init__(self, args, **kwargs):
+            captured["args"] = args
+
+    monkeypatch.setattr(capture.subprocess, "Popen", _FakePopen)
+    capture._start_frida_unpinning("com.x.y", tmp_path)
+    return captured["args"]
+
+
+def test_frida_unpinning_drops_no_pause_on_new_frida(monkeypatch, tmp_path):
+    """frida-tools ≥14：不传 --no-pause（默认就不暂停；传了会 unrecognized arguments 秒退）。"""
+    args = _capture_popen_args(monkeypatch, "17.11.0", tmp_path)
+    assert "--no-pause" not in args
+    assert "-f" in args and "com.x.y" in args
+
+
+def test_frida_unpinning_keeps_no_pause_on_old_frida(monkeypatch, tmp_path):
+    """frida-tools <14：补 --no-pause 以保持不暂停。"""
+    args = _capture_popen_args(monkeypatch, "12.5.0", tmp_path)
+    assert "--no-pause" in args
+
+
+def test_frida_unpinning_no_no_pause_when_version_unknown(monkeypatch, tmp_path):
+    """版本拿不到 → 按新版处理，不加 --no-pause。"""
+    args = _capture_popen_args(monkeypatch, "", tmp_path)
+    assert "--no-pause" not in args

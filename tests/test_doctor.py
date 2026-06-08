@@ -602,3 +602,43 @@ def test_module_has_no_forbidden_calls():
                 if value.id == "sys" and func.attr == "exit":
                     bad.append("sys.exit")
     assert not bad, f"forbidden calls in doctor.py: {bad}"
+
+
+# ---------------------------------------------------------------------------
+# A4 回归：--no-fix 也用 frida-ps -U 权威探测，不对已在跑的 frida-server 误报未运行
+# ---------------------------------------------------------------------------
+
+
+def test_no_fix_uses_frida_ps_when_ps_heuristic_misses(monkeypatch):
+    """ps 进程名启发式漏判，但 frida-ps -U 能连 → --no-fix 仍报在跑（不误报未运行）。"""
+    monkeypatch.setattr(doctor.device, "frida_server_running", lambda serial=None: False)
+    monkeypatch.setattr(doctor, "_frida_ps_reachable", lambda serial=None: True)
+    monkeypatch.setattr(doctor, "_device_frida_version", lambda serial=None: "")
+    item = doctor._check_frida_server(None, "17.11.0", auto_fix=False, on_progress=None)
+    assert item["ok"] is True
+
+
+def test_no_fix_reports_not_running_when_truly_down(monkeypatch):
+    """ps 与 frida-ps 都探测不到 → --no-fix 如实报未运行。"""
+    monkeypatch.setattr(doctor.device, "frida_server_running", lambda serial=None: False)
+    monkeypatch.setattr(doctor, "_frida_ps_reachable", lambda serial=None: False)
+    item = doctor._check_frida_server(None, "17.11.0", auto_fix=False, on_progress=None)
+    assert item["ok"] is False
+    assert "未运行" in item["detail"]
+
+
+def test_frida_ps_reachable_true_on_exit0(monkeypatch):
+    """frida-ps -U exit 0 → 视作可达。"""
+    monkeypatch.setattr(doctor.tools, "frida_invocation", lambda tool: ["frida-ps"])
+
+    class _Proc:
+        returncode = 0
+
+    monkeypatch.setattr(doctor.subprocess, "run", lambda *a, **k: _Proc())
+    assert doctor._frida_ps_reachable() is True
+
+
+def test_frida_ps_reachable_false_when_tool_missing(monkeypatch):
+    """frida-ps 不可用 → False（不抛）。"""
+    monkeypatch.setattr(doctor.tools, "frida_invocation", lambda tool: [])
+    assert doctor._frida_ps_reachable() is False

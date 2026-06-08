@@ -16,8 +16,9 @@
 - 每个 except 必 logging（warning/exception），不裸 pass、不静默吞错。
 - 可选依赖（cryptography）惰性 import 且容缺；外部工具（adb/frida/openssl/mitmdump）
   一律 shutil.which 先探，缺则结构化降级 + fix_cmd。
-- 下载只用 stdlib：urllib.request + lzma + tempfile + hashlib，**不引入 requests**。
-- 所有 urllib / subprocess 调用必带 timeout；临时文件 finally 清理（ignore errors）。
+- 下载用 requests（自带 certifi，避免 macOS/Homebrew Python 的 urllib 默认 SSL 上下文
+  缺 CA → SSLCertVerificationError）+ lzma + tempfile + hashlib。requests 已是运行期依赖。
+- 所有 requests / subprocess 调用必带 timeout；临时文件 finally 清理（ignore errors）。
 - 耗时/分阶段函数接受可选 on_progress 回调上报进度（None → no-op；回调异常吞 + logging）。
 - 全量 type hints；Callable 从 collections.abc 导入。
 """
@@ -33,8 +34,6 @@ import shutil
 import subprocess
 import tempfile
 import time
-import urllib.error
-import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
@@ -142,6 +141,16 @@ def _adb_ok(extra: list[str], serial: str | None = None) -> bool:
     return True
 
 
+def _adb_root_shell(cmd: str, serial: str | None = None) -> bool:
+    """以 root 跑一条设备 shell 命令：优先直接 ``adb shell``（``adb root`` 后 adbd 即
+    uid0，AOSP rootful 镜像上最稳），失败再回退 ``adb shell su -c``（Magisk/su 型设备）。
+
+    实测教训：AOSP/模拟器 rootful 镜像上 ``su -c`` 行为不稳，而 ``adb root`` 后 adb shell
+    本身就是 root，根本不必 su。两条都试以兼容两类 root。
+    """
+    return _adb_ok(["shell", cmd], serial) or _adb_ok(["shell", "su", "-c", cmd], serial)
+
+
 # ---------------------------------------------------------------------------
 # device_abi / host_frida_version
 # ---------------------------------------------------------------------------
@@ -205,22 +214,34 @@ def host_frida_version() -> str:
 
 
 def _download_and_extract(url: str, dest: Path, on_progress: Callable[[str], None] | None) -> str:
-    """下载 .xz 并 lzma 解压到 dest。成功 → ''；失败 → 错误说明字符串（不抛）。"""
+    """下载 .xz 并 lzma 解压到 dest。成功 → ''；失败 → 错误说明字符串（不抛）。
+
+    用 requests 下载（自带 certifi CA bundle）——macOS/Homebrew Python 的 urllib 默认
+    SSL 上下文常没接系统 CA，会 ``SSLCertVerificationError: unable to get local issuer
+    certificate`` 下不动 GitHub。requests 已是本项目运行期依赖，零新增。
+    """
     _emit(on_progress, f"下载 frida-server：{url}")
     try:
-        with urllib.request.urlopen(url, timeout=_DOWNLOAD_TIMEOUT) as resp:
-            compressed = resp.read()
-    except urllib.error.HTTPError as exc:
-        logger.exception("[provision] frida-server 下载 HTTPError：%s", url)
-        if exc.code == 404:
+        import requests
+
+        resp = requests.get(url, timeout=_DOWNLOAD_TIMEOUT)
+        resp.raise_for_status()
+        compressed = resp.content
+    except requests.exceptions.HTTPError as exc:
+        code = getattr(exc.response, "status_code", "?")
+        logger.exception("[provision] frida-server 下载 HTTP 错误（%s）：%s", code, url)
+        if code == 404:
             return f"该 frida 版本/ABI 不存在（HTTP 404）：{url}"
-        return f"下载失败 HTTP {exc.code}：{url}"
-    except urllib.error.URLError as exc:
-        logger.exception("[provision] frida-server 下载 URLError：%s", url)
-        return f"无网络或无法访问 GitHub（{exc.reason}）：{url}"
-    except TimeoutError:
+        return f"下载失败 HTTP {code}：{url}"
+    except requests.exceptions.SSLError as exc:
+        logger.exception("[provision] frida-server 下载 SSL 校验失败：%s", url)
+        return f"SSL 证书校验失败（certifi 仍不通？）：{exc}"
+    except requests.exceptions.Timeout:
         logger.exception("[provision] frida-server 下载超时：%s", url)
         return f"下载超时（>{_DOWNLOAD_TIMEOUT}s）：{url}"
+    except requests.exceptions.RequestException as exc:
+        logger.exception("[provision] frida-server 下载失败：%s", url)
+        return f"无网络或无法访问 GitHub（{exc}）：{url}"
     except Exception:
         logger.exception("[provision] frida-server 下载异常：%s", url)
         return f"下载异常：{url}"
@@ -259,8 +280,9 @@ def _start_frida_server_background(serial: str | None) -> None:
     成败由调用方随后轮询 ``device.frida_server_running`` 判定（不依赖本步 returncode）。
     """
     for cmd in _FRIDA_START_CMDS:
-        # _adb_ok 内部已吞超时/异常；这里两条都尝试一遍（setsid 不存在则 nohup 兜底），
-        # 不以 returncode 短路——returncode 在脱离会话写法下不可靠。
+        # 两条都尝试一遍（setsid 不存在则 nohup 兜底），不以 returncode 短路——returncode
+        # 在脱离会话写法下不可靠。每条优先直执（adb root 后 uid0）、su 兜底。
+        _adb_ok(["shell", cmd], serial)
         _adb_ok(["shell", "su", "-c", cmd], serial)
 
 
@@ -366,7 +388,7 @@ def _ensure_frida_server_impl(
         result["fix_cmd"] = _manual_frida_steps(ver, abi, fabi)
         return result
 
-    # 6) 下载 + 解压（stdlib urllib + lzma），写临时文件。
+    # 6) 下载 + 解压（requests[certifi] + lzma），写临时文件。
     url = _FRIDA_RELEASE_URL.format(ver=ver, abi=fabi)
     tmp_path: str | None = None
     try:
@@ -379,7 +401,8 @@ def _ensure_frida_server_impl(
             result["fix_cmd"] = _manual_frida_steps(ver, abi, fabi)
             return result
 
-        # 7) push / chmod / 后台启动（su -c 失败几乎都意味未 root）。
+        # 7) adb root → push / chmod / 后台启动（chmod 优先直执、su 兜底，与 CA 安装一致）。
+        _adb_ok(["root"], serial)  # best-effort：AOSP rootful 镜像后续 adb shell 即 uid0
         _emit(on_progress, f"adb push frida-server → {_FRIDA_SERVER_REMOTE}")
         if not _adb_ok(["push", tmp_path, _FRIDA_SERVER_REMOTE], serial):
             result["detail"] = "adb push frida-server 失败（设备离线 / 路径不可写？）"
@@ -387,8 +410,8 @@ def _ensure_frida_server_impl(
             return result
 
         _emit(on_progress, "chmod 755 frida-server（需 root）")
-        if not _adb_ok(["shell", "su", "-c", f"chmod 755 {_FRIDA_SERVER_REMOTE}"], serial):
-            result["detail"] = "chmod 755 失败：设备可能未 root（su 不可用）"
+        if not _adb_root_shell(f"chmod 755 {_FRIDA_SERVER_REMOTE}", serial):
+            result["detail"] = "chmod 755 失败：设备可能未 root（adb root 与 su 均不可用）"
             result["fix_cmd"] = _manual_frida_steps(ver, abi, fabi)
             return result
 
@@ -637,21 +660,24 @@ def _ensure_mitm_ca_impl(
         )
         return result
 
-    # 中转路径：先 push 到可写的 /data/local/tmp，再用 su 在 root 上下文 cp 到目标分区。
-    # 直接 `adb push` 到 /system 即便 remount 成功也常被 adbd（非 root 上下文 / SELinux）
-    # 拒绝——与 docs §6.2 的 push 中转 + su cp 两步法一致。
+    # 中转路径：先 push 到可写的 /data/local/tmp，再在 root 上下文 cp 到目标分区。
+    # 直接 `adb push` 到 /system 即便 remount 成功也常被 adbd（SELinux）拒绝——push 中转
+    # + root shell cp 两步法（与 docs §6.2 一致）。
     staging = f"/data/local/tmp/{target_name}"
 
-    # 4) 主路：root + remount → push 中转 → su cp 到系统库 → chmod 644。
-    _emit(on_progress, "尝试 remount /system 并推入系统信任库")
-    _adb_ok(["root"], serial)  # best-effort，失败不阻断
-    remounted = _adb_ok(["remount"], serial) or _adb_ok(
-        ["shell", "su", "-c", "mount -o rw,remount /system"], serial
+    # 4) 主路：adb root → remount → push 中转 → 直接 adb shell cp/chmod（su 兜底）。
+    #    实测教训：`adb root` 后 adb shell 即 uid0，AOSP rootful 镜像直执比 `su -c` 稳；
+    #    remount 也优先 `adb remount`，再直 mount，最后 su mount。
+    _emit(on_progress, "尝试 adb root + remount /system 并推入系统信任库")
+    _adb_ok(["root"], serial)  # best-effort，失败不阻断（部分设备 adbd 本就 root）
+    remounted = (
+        _adb_ok(["remount"], serial)
+        or _adb_root_shell("mount -o rw,remount /system", serial)
+        or _adb_root_shell("mount -o rw,remount /", serial)
     )
     if remounted and _adb_ok(["push", str(ca_path), staging], serial):
-        if _adb_ok(
-            ["shell", "su", "-c", f"cp {staging} {system_target} && chmod 644 {system_target}"],
-            serial,
+        if _adb_root_shell(
+            f"cp {staging} {system_target} && chmod 644 {system_target}", serial
         ):
             result.update(
                 ok=True,
@@ -661,7 +687,7 @@ def _ensure_mitm_ca_impl(
                 store_path=system_target,
             )
             return result
-        logger.warning("[provision] 系统库中转 push 成功但 su cp/chmod 失败")
+        logger.warning("[provision] 系统库中转 push 成功但 cp/chmod 失败（直执与 su 均不行）")
 
     # 5) 退路：用户信任库（Android 10+ /system 只读 / magisk）。**不报 ok=True**：
     #    仅把文件 cp 到 /data/misc/user/0/cacerts-added 在 Android 10+ 默认并不生效，
@@ -670,15 +696,10 @@ def _ensure_mitm_ca_impl(
     #    通过 → 与"CA 是 HTTPS 命门、务必不假成功"红线相冲突。故此路 ok=False、
     #    verified=False，由 doctor/调用方提示"已写入但待 magisk/重启后复检"。
     _emit(on_progress, "系统库不可写，写入用户信任库（需 magisk/重启生效，不算已信任）")
-    _adb_ok(["shell", "su", "-c", f"mkdir -p {_USER_CACERTS}"], serial)  # best-effort
-    if _adb_ok(["push", str(ca_path), staging], serial) and _adb_ok(
-        [
-            "shell",
-            "su",
-            "-c",
-            f"cp {staging} {user_target} && chmod 644 {user_target} "
-            f"&& chown system:system {user_target}",
-        ],
+    _adb_root_shell(f"mkdir -p {_USER_CACERTS}", serial)  # best-effort
+    if _adb_ok(["push", str(ca_path), staging], serial) and _adb_root_shell(
+        f"cp {staging} {user_target} && chmod 644 {user_target} "
+        f"&& chown system:system {user_target}",
         serial,
     ):
         result.update(

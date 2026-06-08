@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import logging
 import re
+import subprocess
 from collections.abc import Callable
 
 from apkscan.core import device, tools
@@ -141,6 +142,32 @@ def _device_frida_version(serial: str | None = None) -> str:
         logger.debug("[doctor] 无法从设备 frida-server 输出解析版本：%r", text.strip())
         return ""
     return match.group(1)
+
+
+def _frida_ps_reachable(serial: str | None = None) -> bool:
+    """``frida-ps -U`` 能连上设备 frida-server（exit 0）→ 确认 server 在跑且可达。
+
+    比 ``adb shell ps | grep frida-server`` 的进程名启发式更可靠（进程名可能被截断/改名
+    导致漏判，正是 --no-fix 误报"未运行"的根因）。frozen 时经 tools.frida_invocation
+    自调用内置 frida-ps；缺工具 / 异常 → False（不抛）。
+    """
+    inv = tools.frida_invocation("frida-ps")
+    if not inv:
+        return False
+    # 指定了 serial 用 -D <serial>（多设备精确）；否则 -U（单 USB/远程设备）。
+    args = [*inv, "-D", serial] if serial else [*inv, "-U"]
+    try:
+        proc = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=device._DEFAULT_TIMEOUT,
+            check=False,
+        )
+    except Exception:
+        logger.debug("[doctor] frida-ps -U 探测异常（按未连接处理）", exc_info=True)
+        return False
+    return proc.returncode == 0
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +287,10 @@ def _check_frida_server(
             running = device.frida_server_running(serial)
         except Exception:
             logger.exception("[doctor] frida_server_running 探测异常（按未运行处理）")
+        if not running:
+            # ps 进程名启发式可能漏判（名字被截断/改名）→ 用 frida-ps -U 权威探测：
+            # 能连上设备 frida-server 即确认在跑。修 --no-fix 对已在跑的 server 误报未运行。
+            running = _frida_ps_reachable(serial)
 
         if running:
             # best-effort 版本比对：拿不到设备端版本只 warning，不判失败。

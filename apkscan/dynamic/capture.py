@@ -235,7 +235,7 @@ def _build_playbook(package: str, out_dir: str, duration: int) -> list[str]:
         "推为系统级信任证书（Android 7+ 用户证书默认不被 app 信任，需 root 推到 /system/etc/security/cacerts/ "
         "并 chmod 644，按 subject_hash_old 命名 <hash>.0）。",
         "4. 绕过证书绑定（cert pinning）：frida 注入通用 SSL unpinning 脚本并启动 app："
-        f"frida -U -f {package} -l unpinning.js --no-pause"
+        f"frida -U -f {package} -l unpinning.js -q  （老版 frida-tools<14 才加 --no-pause）"
         "（unpinning.js 内容见本模块 FRIDA_UNPINNING_JS：覆盖 OkHttp3 CertificatePinner / "
         "X509TrustManager / TrustManagerImpl）。",
         f"5. 操作 app（登录/支付/拉配置等触发网络），持续约 {duration} 秒采集流量。",
@@ -413,10 +413,14 @@ def _start_mitmdump(flows_file: Path) -> subprocess.Popen[bytes]:
 
 
 def _start_frida_unpinning(package: str, out_path: Path) -> subprocess.Popen[bytes] | None:
-    """写出内置 unpinning 脚本，frida -U -f <package> -l <js> --no-pause 注入并 spawn。
+    """写出内置 unpinning 脚本，frida -U -f <package> -l <js> 注入并 spawn 目标 app。
 
     frida 缺失/启动失败 → 记 warning 返回 None（不抛，抓包仍可在无 unpinning 下进行）。
     frozen 时经 tools.frida_invocation 自调用内置 frida；源码时用 PATH。
+
+    注意：frida-tools ≥14 删除了 ``--no-pause``（不暂停已是默认，传它会
+    ``unrecognized arguments`` 让 frida 秒退、unpinning 永不注入）；故只对老版本(<14)
+    才补 ``--no-pause``，版本拿不到则按新版处理（不加）。
     """
     inv = tools.frida_invocation("frida")
     if not inv:
@@ -430,7 +434,10 @@ def _start_frida_unpinning(package: str, out_path: Path) -> subprocess.Popen[byt
         logger.exception("[capture] 写出 frida unpinning 脚本失败，跳过注入")
         return None
 
-    args = [*inv, "-U", "-f", package, "-l", str(js_path), "--no-pause", "-q"]
+    args = [*inv, "-U", "-f", package, "-l", str(js_path), "-q"]
+    host_major = re.match(r"(\d+)\.", provision.host_frida_version())
+    if host_major is not None and int(host_major.group(1)) < 14:
+        args.append("--no-pause")  # 仅老版 frida-tools(<14) 需要；新版默认不暂停
     logger.info("[capture] frida 注入 unpinning 并启动 app：%s", " ".join(args))
     try:
         return subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
