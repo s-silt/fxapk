@@ -63,7 +63,7 @@ Unit tests need none of androguard/network/device (they use a `FakeContext`):
 
 ```bash
 python -m pip install jinja2 typer python-whois requests pyyaml pytest
-python -m pytest -q          # 324 passed
+python -m pytest -q          # 487 passed
 ```
 
 Optional (gracefully skipped when missing): `jadx` (deep decompile), `frida-tools` +
@@ -84,6 +84,14 @@ fxapk analyze app.apk --out out --offline --fmt html,json,pdf
 fxapk analyze app.apk --fmt json
 ```
 
+**One-click full pipeline** (with a rooted device/emulator attached — chains doctor → static → unpack → capture → merge):
+
+```bash
+fxapk doctor                  # env health check (device/root/ABI/frida-server/CA), auto-fixes what it can
+fxapk auto app.apk --out out  # one command end to end; prompts you to operate the app during capture
+                              # no device? unpack/capture are skipped, static report still produced
+```
+
 | Flag | Meaning |
 |---|---|
 | `--out DIR` | report output dir (default `out`) |
@@ -101,7 +109,9 @@ Output: `out/report.html` (self-contained), `out/report.json`, `out/report.pdf`.
 `config_keys` (★ real `key=value` + owner), `sdk_fingerprint` (SDK → vendor),
 `payment` (aggregators / merchant IDs / USDT / wallet addresses), `endpoints`
 (URLs/domains/IPs, strict denoise), `js_bundle` (extract from JS string literals in
-uni-app/H5/RN bundles), `jadx` (deep decompile, needs jadx), `packing` (hardening vendor),
+uni-app/H5/RN bundles), `jadx` (deep decompile, needs jadx), `packing` (hardening vendor;
+**evidence-tiered** — only a real `.so`/feature file marks it hardened, bare dex name strings
+are downgraded to a note, avoiding false positives),
 `certificate` (cross-sample dev correlation), `contacts` (QQ/WeChat/Telegram/email/phone),
 `permissions` / `components` / `manifest` / `crypto`.
 
@@ -110,15 +120,27 @@ Investigate-vs-skip grading lives in `core/infra.py` (known infra/CDN/libs → s
 
 ---
 
-## Dynamic completion (unpack / capture)
+## Dynamic completion (doctor / auto / unpack / capture)
+
+Real-hardened apps hide the true C2 from static analysis; you unpack + capture on a rooted
+device/emulator. **With a device attached, just use `fxapk auto`**; or run steps individually:
 
 ```bash
+fxapk doctor                            # env check: device/root/ABI/frida-server/CA, auto-fix
+fxapk auto app.apk --out out            # one-click: doctor→static→unpack→capture→merge
 fxapk unpack app.apk --out out          # rooted device + frida-dexdump unpack, re-analyze
 fxapk capture <package> --duration 60   # mitmproxy + frida SSL-unpinning, runtime endpoints
 ```
 
-When no device/tools are present these return `status=skipped` with a **copy-paste playbook**
-(install frida-server, push CA, inject unpinning, `--extra-dex` re-ingest), never crashing.
+**Auto-provisioning**: `doctor` (and `auto`) can **download & deploy frida-server** matching the
+device ABI + host frida version (stdlib-only download) and **install the mitmproxy CA into the
+system trust store** (root). When it can't, it degrades honestly with copy-paste commands —
+the HTTPS-decryption linchpin never fakes success.
+**Runtime endpoints merged back**: `auto` / `analyze --dynamic` fold captured runtime endpoints
+(the real C2, `source=runtime`) into the same lead sheet and re-render the report.
+**No device/tools** → those steps return `status=skipped` with a copy-paste playbook; the static
+report is still produced. See [docs/dynamic-setup.md](docs/dynamic-setup.md) for device/emulator
+setup (adb connect, root, ARM compatibility, frida version match, CA install).
 
 ---
 

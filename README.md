@@ -60,7 +60,7 @@ python -m pip install -e .
 > 单元测试**不依赖 androguard、不联网、不需要真机/jadx/frida**（全部基于 `FakeContext` 合成数据）：
 > ```bash
 > python -m pip install jinja2 typer python-whois requests pyyaml pytest
-> python -m pytest -q          # 324 passed
+> python -m pytest -q          # 487 passed
 > ```
 
 可选依赖（缺失时对应能力**优雅降级**，核心不受影响、不报错）：
@@ -85,6 +85,17 @@ fxapk analyze app.apk --out out --offline --fmt html,json,pdf
 
 # 只产 JSON（机器读 / 留档）
 fxapk analyze app.apk --fmt json
+```
+
+**一键全自动**（接好真机/模拟器后，把体检→静态→脱壳→抓包→合并串成一条）：
+
+```bash
+# 接上设备后先体检（缺 frida-server / CA 等可自动修，修不了给可复制命令）
+fxapk doctor
+
+# 一键：doctor → 静态 → 脱壳 → 抓包（提示你在设备上操作 app）→ 合并一份总报告
+fxapk auto app.apk --out out
+# 无设备也能跑：自动跳过脱壳/抓包，仍产出静态报告
 ```
 
 未安装为命令时等价用：`python -m apkscan.cli analyze app.apk --out out`。
@@ -126,7 +137,7 @@ fxapk analyze app.apk --fmt json
 | `endpoints` | dex/资源/native/manifest 全量抽 URL/域名/IP（严格降噪） |
 | `js_bundle` | uni-app/H5/RN 打包 JS **字符串字面量内**精确抽端点 + 硬编码密钥 |
 | `jadx` | （需 jadx）深度反编译补端点/密钥 |
-| `packing` | 加固厂商识别（梆梆/爱加密/360/腾讯乐固/娜迦/百度/网易易盾/阿里聚安全/几维） |
+| `packing` | 加固厂商识别（梆梆/爱加密/360/腾讯乐固/娜迦/百度/网易易盾/阿里聚安全/几维）；**证据分级**：`.so`/特征文件才判已加固，仅 dex 名词命中降级为提示，避免误报 |
 | `certificate` | 签名证书 → 跨样本关联同一开发者 |
 | `contacts` | QQ/微信/Telegram/邮箱/手机号（带去误报） |
 | `permissions` / `components` / `manifest` / `crypto` | 危险权限/导出组件/基础指纹/弱加密 |
@@ -137,17 +148,23 @@ fxapk analyze app.apk --fmt json
 
 ---
 
-## 真机动态补全（unpack / 脱壳、capture / 抓包）
+## 真机动态补全（doctor / auto / unpack / capture）
 
-涉诈 App 常加固（DEX 加密、运行时还原），静态拿不到真实 C2。apkscan 提供 **device-gated** 的动态补全：
+真加固 App（DEX 加密、运行时还原）静态拿不到真实 C2，需要在 root 真机/模拟器上脱壳 + 抓包。
+**接好设备后推荐直接用一键 `fxapk auto`**；也可分步：
 
 ```bash
-fxapk unpack app.apk --out out          # root 设备 + frida-dexdump 脱壳，回灌重分析
-fxapk capture <package> --duration 60   # mitmproxy + frida 绕证书绑定，抓运行时端点
+fxapk doctor                            # 环境体检：设备/root/ABI/frida-server/CA 逐项检查，可自动修
+fxapk auto app.apk --out out            # 一键：doctor→静态→脱壳→抓包→合并一份总报告
+fxapk unpack app.apk --out out          # 单独脱壳：frida-dexdump dump 隐藏 DEX，回灌重分析
+fxapk capture <package> --duration 60   # 单独抓包：mitmproxy + frida 绕证书绑定，抓运行时端点
 ```
 
-**无设备/缺工具时不报错**：返回 `status=skipped`，打印**可逐条复制的取证手册**（装 frida-server、推 CA、注入 SSL unpinning、`--extra-dex` 回灌等完整步骤）。脱壳得到的 DEX 可用 `fxapk analyze app.apk --extra-dex <dump_dir>` 并入静态分析，补全加固隐藏的端点/SDK/配置。
+**自动配环境**：`doctor`（及 `auto` 内部）能按设备 ABI + 主机 frida 版本**自动下载部署 frida-server**、**安装 mitmproxy CA 到系统信任库**（纯标准库下载，root 写入；装不了则如实降级并给命令——HTTPS 抓明文的命门绝不假成功）。
+**运行时端点并回主报告**：`auto` / `analyze --dynamic` 会把抓到的运行时端点（真·C2，`source=runtime`）并入同一张调证线索清单并重渲报告。
+**无设备/缺工具时不报错**：相关步骤 `status=skipped` + 打印**可逐条复制的取证手册**；静态报告照常产出。脱壳得到的 DEX 也可用 `fxapk analyze app.apk --extra-dex <dump_dir>` 手动并入。
 
+> 设备/模拟器接入要点（adb 连接、root、ARM 兼容、frida 版本一致、CA 安装）见 [docs/dynamic-setup.md](docs/dynamic-setup.md)。
 > 云端方案：在 root 真机 / 云手机（华为云手机、阿里无影等原生 ARM 安卓）上跑 frida-server，apkscan 部署在小 Linux VM 上经 ADB 驱动即可。
 
 ---
@@ -159,10 +176,10 @@ apkscan/
   core/       models / context / apk(androguard 适配) / registry(自动发现) / pipeline / infra / device
   analyzers/  13 个静态分析器（见上表）
   enrichers/  whois / asn / icp
-  dynamic/    unpack（脱壳）/ capture（抓包）
+  dynamic/    doctor（体检）/ provision（自动配 frida-server·CA）/ unpack（脱壳）/ capture（抓包）/ merge（运行时端点并回）/ auto（一键编排）
   report/     html / json / pdf + templates/
   rules/      *.yaml（SDK/加固/支付/配置键/权限等规则库，数据与代码分离）
-tests/        324 个单测（FakeContext，离线）
+tests/        487 个单测（FakeContext，离线）
 docs/         设计文档
 ```
 
