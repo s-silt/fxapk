@@ -16,6 +16,11 @@
 # 说明：加固（加壳）会把真实 DEX 加密/隐藏，静态分析拿不到完整端点/SDK/支付线索，
 # 因此命中即产 HIGH Finding 提示"静态端点不完整，建议脱壳或真机动态补全"，
 # 同时加固厂商本身是高价值调证目标（持有未加固原始包、实名注册、操作日志）。
+#
+# ★ 证据分级（分析器实现，见 packing.py）：so_names / files 匹配 = 强证据（加固运行时实证）；
+#   dex_prefixes 匹配 = 弱证据（可能只是某检测/风控库内嵌的"加固名词表"字符串）。
+#   判已加固（产 HIGH PACK-DETECTED + PACKER Lead + is_hardened=True）**必须该厂商至少 1 条强证据**；
+#   仅 dex 名词命中 → 不判加固，降级为 LOW PACK-NAME-STRINGS-ONLY Finding（透明说明，不产脱壳建议）。
 
 # 命中后 Lead 默认可调取证据（packer 条目可用 evidence_to_obtain 覆盖）。
 meta:

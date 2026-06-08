@@ -4,12 +4,20 @@
 - 用 ctx.native_libs() + ctx.list_files() + ctx.dex_strings() 三路匹配加固特征。
 - 规则来自 apkscan/rules/packers.yaml（梆梆/爱加密/360/腾讯乐固/娜迦/百度/网易易盾/
   阿里聚安全/几维等），每条含 so 名 / 特征文件 / dex 类前缀。
-- 命中（任一厂商）→
-    * Finding(HIGH, "已加固，静态端点不完整，建议脱壳或真机动态补全")
-    * Lead(category=PACKER, subject=加固厂商, where_to_request=加固厂商,
-           evidence_to_obtain=["未加固原始安装包","开发者实名注册信息","加固/打包账号与操作日志"],
-           confidence=HIGH)
-    * meta["packed"] = vendor（多厂商命中时取首个；meta["packers"] 记全部）
+- 证据分级（关键）：so 名匹配 与 特征文件匹配 = 强证据（加固运行时实证）；
+  dex 类名/字符串子串匹配 = 弱证据（可能只是某检测/风控库内嵌的"加固名词表"字符串）。
+- 判定规则：**判已加固必须该厂商至少有 1 条强证据（so/file）**。
+    * 有强证据命中 →
+        - Finding(HIGH, "已加固，静态端点不完整，建议脱壳或真机动态补全")
+        - Lead(category=PACKER, subject=加固厂商, where_to_request=加固厂商,
+               evidence_to_obtain=["未加固原始安装包","开发者实名注册信息","加固/打包账号与操作日志"],
+               confidence=HIGH)
+        - meta["packed"] = vendor（多厂商命中时取首个；meta["packers"] 记全部）、is_hardened=True
+    * 仅弱（dex）证据命中（无任何强证据）→ **不判已加固**：
+        - 不产 PACKER Lead、不产 HIGH "建议脱壳" Finding、is_hardened=False、packed=None
+        - 改产一条 LOW Finding(PACK-NAME-STRINGS-ONLY)，透明列出命中的厂商名称字符串与具体
+          dex 片段，并声明"未发现对应加固运行时特征(.so/特征文件)，判定为未加固"，
+          疑似内嵌加固检测/风控库（≥2 家弱命中更确证为检测词表）。
 
 约束：
 - 只依赖 AnalysisContext 公开接口，禁止 import androguard。
@@ -89,11 +97,24 @@ class _PackerRule:
 
 @dataclass
 class _Hit:
-    """一条规则的命中证据集合。"""
+    """一条规则的命中证据集合。
+
+    证据分级：
+    - strong_evidences：so 名 / 特征文件匹配（加固运行时实证，可据此判已加固）。
+    - weak_evidences：dex 类名/字符串子串匹配（可能只是内嵌加固名词表字符串，单独不足判加固）。
+    evidences / matched_features 保持"全集"语义（强+弱），供 Finding 汇总与 Lead.source_refs 使用。
+    """
 
     rule: _PackerRule
     evidences: list[Evidence] = field(default_factory=list)
     matched_features: list[str] = field(default_factory=list)
+    strong_evidences: list[Evidence] = field(default_factory=list)
+    weak_evidences: list[Evidence] = field(default_factory=list)
+
+    @property
+    def is_strong(self) -> bool:
+        """是否含至少一条强证据（so/file）；仅此情形可判已加固。"""
+        return bool(self.strong_evidences)
 
     def matched_summary(self) -> str:
         """命中摘要：'产品名[特征1、特征2]'，用于 Finding 描述拼接。"""
@@ -115,6 +136,7 @@ class PackingAnalyzer(BaseAnalyzer):
             logger.info("[%s] 无可用加固规则，跳过识别", self.name)
             result.meta["packed"] = None
             result.meta["packer"] = None
+            result.meta["packers"] = []
             result.meta["is_hardened"] = False
             return result
 
@@ -138,11 +160,40 @@ class PackingAnalyzer(BaseAnalyzer):
             logger.info("[%s] 未识别到已知加固特征", self.name)
             result.meta["packed"] = None
             result.meta["packer"] = None
+            result.meta["packers"] = []
             result.meta["is_hardened"] = False
             return result
 
-        # 命中：产出 Finding + 每厂商一条 Lead。
-        vendors = [hit.rule.vendor for hit in hits]
+        # 证据分级分流：强命中（so/file）才判已加固；仅弱命中（dex 名词）降级为 LOW INFO。
+        strong_hits = [h for h in hits if h.is_strong]
+        weak_only_hits = [h for h in hits if not h.is_strong and h.weak_evidences]
+
+        if strong_hits:
+            self._emit_hardened(result, strong_hits, default_evidence, where_suffix)
+            return result
+
+        # 仅弱命中（无任何强证据）→ 不判已加固，产一条 LOW 透明说明 Finding。
+        logger.info(
+            "[%s] 仅命中加固厂商名称字符串（无 so/特征文件强证据），判定为未加固：%s",
+            self.name,
+            "、".join(h.rule.name for h in weak_only_hits),
+        )
+        result.meta["packed"] = None
+        result.meta["packer"] = None
+        result.meta["packers"] = []
+        result.meta["is_hardened"] = False
+        result.findings.append(self._build_weak_finding(weak_only_hits))
+        return result
+
+    def _emit_hardened(
+        self,
+        result: AnalyzerResult,
+        strong_hits: list[_Hit],
+        default_evidence: list[str],
+        where_suffix: str,
+    ) -> None:
+        """有强证据命中：产 HIGH Finding + 每厂商一条 PACKER Lead（文案/字段不变）。"""
+        vendors = [hit.rule.vendor for hit in strong_hits]
         result.meta["packed"] = vendors[0]
         result.meta["packers"] = vendors
         # 报告概览加固 banner 消费的键。
@@ -150,10 +201,10 @@ class PackingAnalyzer(BaseAnalyzer):
         result.meta["is_hardened"] = True
 
         all_evidences: list[Evidence] = []
-        for hit in hits:
+        for hit in strong_hits:
             all_evidences.extend(hit.evidences)
 
-        product_names = "、".join(hit.rule.name for hit in hits)
+        product_names = "、".join(hit.rule.name for hit in strong_hits)
         result.findings.append(
             Finding(
                 id="PACK-DETECTED",
@@ -165,7 +216,7 @@ class PackingAnalyzer(BaseAnalyzer):
                     "加固会对真实 DEX 加密/隐藏并在运行时还原，"
                     "静态分析无法获取完整的 DEX 字符串、网络端点、第三方 SDK 与支付线索，"
                     "本次静态产出的端点/SDK/支付清单可能严重不完整。"
-                    f"命中特征：{'; '.join(h.matched_summary() for h in hits)}。"
+                    f"命中特征：{'; '.join(h.matched_summary() for h in strong_hits)}。"
                 ),
                 recommendation=(
                     "建议脱壳后重新静态分析，或在真机/沙箱动态运行抓包补全端点与资金流线索；"
@@ -178,7 +229,7 @@ class PackingAnalyzer(BaseAnalyzer):
             )
         )
 
-        for hit in hits:
+        for hit in strong_hits:
             rule = hit.rule
             where = rule.vendor + where_suffix
             result.leads.append(
@@ -194,7 +245,51 @@ class PackingAnalyzer(BaseAnalyzer):
                 )
             )
 
-        return result
+    def _build_weak_finding(self, weak_only_hits: list[_Hit]) -> Finding:
+        """仅 dex 名词命中（无 so/特征文件）→ 一条 LOW、透明说明的 Finding。
+
+        逐厂商列出命中的加固名称字符串与具体 dex 片段，显式声明"未加固"，
+        便于分析员理解为何无加固结论（不吞、可复现）。
+        """
+        vendor_names = [h.rule.name for h in weak_only_hits]
+        multi = len(weak_only_hits) >= 2
+
+        # 逐厂商列具体片段（厂商 → prefix / 截断片段）。
+        detail_lines: list[str] = []
+        all_weak_evidences: list[Evidence] = []
+        for hit in weak_only_hits:
+            frags = "；".join(
+                f"{ev.location}→{ev.snippet}" for ev in hit.weak_evidences
+            )
+            detail_lines.append(f"  - {hit.rule.name}：{frags}")
+            all_weak_evidences.extend(hit.weak_evidences)
+
+        description_parts = [
+            "在 DEX 字符串中检测到加固厂商名称/类名特征字符串（命中厂商："
+            f"{'、'.join(vendor_names)}），"
+            "但未发现对应加固运行时特征（无 vendor .so 库、无加固特征文件），"
+            "疑似为某检测/风控库内嵌的加固名词表（黑名单/检测词表），"
+            "并非真实加固运行时，据此判定为【未加固】。",
+        ]
+        if multi:
+            description_parts.append(
+                f"本次同时命中 {len(weak_only_hits)} 家加固厂商名称字符串"
+                f"（{'、'.join(vendor_names)}），更确证为加固检测词表而非真实加固。"
+            )
+        description_parts.append("命中的具体 dex 片段（前缀→片段）：\n" + "\n".join(detail_lines))
+
+        return Finding(
+            id="PACK-NAME-STRINGS-ONLY",
+            title="检测到加固厂商名称字符串，未见加固运行时特征（疑似内嵌加固检测/风控库）",
+            severity=Severity.LOW,
+            category="packing",
+            description="".join(description_parts),
+            recommendation=(
+                "无需脱壳：本应用未被加固，静态端点/SDK/支付线索完整可信。"
+                "如需进一步确认，可人工核对 .so 列表与 assets 特征文件是否存在加固运行时。"
+            ),
+            evidences=all_weak_evidences,
+        )
 
     # ------------------------------------------------------------------
     # 数据源采集（各自 try/except）
@@ -225,49 +320,50 @@ class PackingAnalyzer(BaseAnalyzer):
     ) -> _Hit:
         hit = _Hit(rule=rule)
 
-        # 1) .so 库名（basename 精确匹配，大小写不敏感）
+        # 1) .so 库名（basename 精确匹配，大小写不敏感）→ 强证据
         for so in rule.so_names:
             key = so.lower()
             # 精确 basename 命中
             if key in so_basenames:
-                hit.evidences.append(
-                    Evidence(source="native", location=so_basenames[key], snippet=f"so={so}")
-                )
+                ev = Evidence(source="native", location=so_basenames[key], snippet=f"so={so}")
+                hit.evidences.append(ev)
+                hit.strong_evidences.append(ev)
                 hit.matched_features.append(f"so:{so}")
                 continue
             # 容忍规则写不带 .so 后缀 / 库名为前缀（如 libnllvm* / libsgmainso*）的情况
             if not key.endswith(".so"):
                 for base, path in so_basenames.items():
                     if base.startswith(key):
-                        hit.evidences.append(
-                            Evidence(source="native", location=path, snippet=f"so~={so}")
-                        )
+                        ev = Evidence(source="native", location=path, snippet=f"so~={so}")
+                        hit.evidences.append(ev)
+                        hit.strong_evidences.append(ev)
                         hit.matched_features.append(f"so:{so}")
                         break
 
-        # 2) 特征文件（路径子串匹配，大小写不敏感）
+        # 2) 特征文件（路径子串匹配，大小写不敏感）→ 强证据
         lowered_files = [(p, p.lower()) for p in file_paths]
         for feat in rule.files:
             needle = feat.lower()
             for orig, low in lowered_files:
                 if needle in low:
-                    hit.evidences.append(
-                        Evidence(source="resource", location=orig, snippet=f"file~={feat}")
-                    )
+                    ev = Evidence(source="resource", location=orig, snippet=f"file~={feat}")
+                    hit.evidences.append(ev)
+                    hit.strong_evidences.append(ev)
                     hit.matched_features.append(f"file:{feat}")
                     break
 
-        # 3) DEX 类前缀/字符串特征（子串匹配，大小写敏感保留原样）
+        # 3) DEX 类前缀/字符串特征（子串匹配，大小写敏感保留原样）→ 弱证据
+        #    可能只是内嵌加固名词表字符串，单独不足以判已加固。
         for prefix in rule.dex_prefixes:
             for s in dex_strings:
                 if prefix in s:
-                    hit.evidences.append(
-                        Evidence(
-                            source="dex",
-                            location=prefix,
-                            snippet=_truncate(s),
-                        )
+                    ev = Evidence(
+                        source="dex",
+                        location=prefix,
+                        snippet=_truncate(s),
                     )
+                    hit.evidences.append(ev)
+                    hit.weak_evidences.append(ev)
                     hit.matched_features.append(f"dex:{prefix}")
                     break
 

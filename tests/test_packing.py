@@ -64,6 +64,26 @@ def test_no_packing_yields_empty():
     assert result.findings == []
     assert result.endpoints == []
     assert result.meta["packed"] is None
+    # meta["packers"] 在所有 is_hardened=False 分支均显式置空（含"无命中"早退分支），
+    # 与"仅弱命中"/"强命中"路径保持键齐全，避免下游 meta["packers"] 触发 KeyError。
+    assert result.meta["packers"] == []
+    assert result.meta["is_hardened"] is False
+
+
+def test_meta_packers_present_on_no_rules_branch(monkeypatch):
+    # "无可用规则"早退分支也应显式置 meta["packers"]=[]（键齐全、is_hardened=False）。
+    from apkscan.analyzers import packing as packing_mod
+
+    monkeypatch.setattr(
+        PackingAnalyzer,
+        "_load_rules",
+        lambda self: ([], list(packing_mod._DEFAULT_EVIDENCE_TO_OBTAIN), "（加固厂商）"),
+    )
+    result = _analyze(native_libs=["lib/arm64-v8a/libjiagu.so"])
+    assert result.meta["packed"] is None
+    assert result.meta["packers"] == []
+    assert result.meta["is_hardened"] is False
+    assert not any(l.category == LeadCategory.PACKER for l in result.leads)
 
 
 # --- 通过 .so 命中（梆梆）--------------------------------------------------
@@ -123,17 +143,32 @@ def test_ijiami_feature_file_hits():
     assert any(ev.source == "resource" for ev in lead.source_refs)
 
 
-# --- 通过 dex 类前缀命中（腾讯乐固 StubShell）-----------------------------
+# --- 仅 dex 名词命中（无 so/特征文件强证据）→ 不判加固，降级为 LOW INFO -----
 
 
-def test_tencent_legu_dex_prefix_hits():
+def test_dex_only_match_not_hardened_yields_info_finding():
+    # 仅 dex 字符串命中腾讯乐固类名（无任何 so / 特征文件）：
+    # 新语义下这是误报场景（内嵌名词表），必须判【未加固】并降级为 LOW Finding。
     result = _analyze(
         dex_strings=["com.tencent.StubShell.TxAppEntry", "com.example.app.A"]
     )
-    assert result.meta["packed"] is not None
-    assert "腾讯" in result.meta["packed"]
-    lead = next(l for l in result.leads if l.category == LeadCategory.PACKER)
-    assert any(ev.source == "dex" for ev in lead.source_refs)
+    assert result.meta["packed"] is None
+    assert result.meta["is_hardened"] is False
+    # 不产 PACKER Lead
+    assert not any(l.category == LeadCategory.PACKER for l in result.leads)
+    # 出一条 LOW、category=packing、id=PACK-NAME-STRINGS-ONLY 的透明说明 Finding
+    info = [
+        f
+        for f in result.findings
+        if f.id == "PACK-NAME-STRINGS-ONLY"
+        and f.severity == Severity.LOW
+        and f.category == "packing"
+    ]
+    assert len(info) == 1
+    # 不产 HIGH PACK-DETECTED
+    assert not any(f.id == "PACK-DETECTED" for f in result.findings)
+    # evidences 透明保留 dex 来源证据
+    assert any(ev.source == "dex" for ev in info[0].evidences)
 
 
 # --- 各主流厂商 so 名命中一例 ---------------------------------------------
@@ -266,3 +301,111 @@ def test_fixture_ctx_not_flagged_as_packed(fake_ctx):
     assert result.meta["packed"] is None
     assert result.findings == []
     assert not any(l.category == LeadCategory.PACKER for l in result.leads)
+
+
+# --- 证据分级回归：强证据(so/file)才判加固，dex-only 降级 -------------------
+
+
+def test_real_packer_so_still_hardened():
+    # 验收①：真加固 fixture（真 vendor .so）→ 仍识别 360、is_hardened=True、有 PACKER Lead
+    # 与 HIGH PACK-DETECTED Finding。锚定"强证据存在 → 行为不变"。
+    result = _analyze(native_libs=["lib/arm64-v8a/libjiagu.so"])
+    assert result.error is None
+    assert result.meta["is_hardened"] is True
+    assert result.meta["packed"] is not None
+    assert "360" in result.meta["packed"]
+    packer_leads = [l for l in result.leads if l.category == LeadCategory.PACKER]
+    assert len(packer_leads) == 1
+    assert any(
+        f.id == "PACK-DETECTED" and f.severity == Severity.HIGH for f in result.findings
+    )
+
+
+def test_name_table_dex_strings_not_hardened():
+    # 验收②：内嵌加固名词表（dex 字符串）+ uni-app/weex 库（无 vendor so）
+    # → NOT packed、is_hardened=False、无 PACKER Lead、一条 LOW INFO Finding，
+    #   description 透明声明"未加固"。
+    # 注：这些 .so 文件名字符串不匹配 dex_prefixes（类名前缀），仅 com.stub.StubApp/
+    #    com.qihoo360. 命中 360（与真实样本一致：名词表里只有 360 类前缀被命中）。
+    result = _analyze(
+        native_libs=[
+            "lib/arm64-v8a/libweexjsb.so",
+            "lib/arm64-v8a/libc++_shared.so",
+        ],
+        dex_strings=[
+            "com.stub.StubApp",
+            "com.qihoo360.launcher",
+            "libSecShell.so",
+            "libmobisec.so",
+            "libnqshield.so",
+            "libDexHelper-x86.so",
+        ],
+    )
+    assert result.error is None
+    assert result.meta["packed"] is None
+    assert result.meta["is_hardened"] is False
+    assert not any(l.category == LeadCategory.PACKER for l in result.leads)
+
+    info = [
+        f
+        for f in result.findings
+        if f.severity == Severity.LOW and f.category == "packing"
+    ]
+    assert len(info) == 1
+    assert info[0].id == "PACK-NAME-STRINGS-ONLY"
+    # 透明声明未加固
+    assert "未加固" in info[0].description
+    # 命中厂商名（360）写进 description
+    assert "360" in info[0].description
+    # 无 HIGH PACK-DETECTED
+    assert not any(f.id == "PACK-DETECTED" for f in result.findings)
+
+
+def test_multi_vendor_dex_only_flags_name_table():
+    # 验收④：≥2 家厂商仅 dex 类前缀命中（真实类名前缀）→ 一条 LOW Finding，
+    # description 点明"加固检测词表"。用 YAML 里的真实 dex_prefixes 构造多厂商弱命中。
+    result = _analyze(
+        native_libs=["lib/arm64-v8a/libweexjsb.so"],  # 无 vendor so
+        dex_strings=[
+            "com.qihoo360.launcher",  # 360
+            "com.tencent.StubShell.TxAppEntry",  # 腾讯乐固
+            "com.secneo.apkwrapper.X",  # 梆梆
+        ],
+    )
+    assert result.meta["packed"] is None
+    assert result.meta["is_hardened"] is False
+    assert not any(l.category == LeadCategory.PACKER for l in result.leads)
+    info = [f for f in result.findings if f.id == "PACK-NAME-STRINGS-ONLY"]
+    assert len(info) == 1
+    assert info[0].severity == Severity.LOW
+    assert "加固检测词表" in info[0].description
+    assert "未加固" in info[0].description
+
+
+def test_single_vendor_dex_only_still_info_not_hardened():
+    # 单厂商仅 dex 命中（非多厂商）同样走 INFO：不判加固、一条 LOW Finding。
+    result = _analyze(dex_strings=["com.tencent.StubShell.TxAppEntry"])
+    assert result.meta["packed"] is None
+    assert result.meta["is_hardened"] is False
+    info = [
+        f
+        for f in result.findings
+        if f.id == "PACK-NAME-STRINGS-ONLY" and f.severity == Severity.LOW
+    ]
+    assert len(info) == 1
+    assert "未加固" in info[0].description
+
+
+def test_strong_hit_with_extra_dex_noise_still_only_strong_vendor():
+    # 强命中厂商正常报加固；同时仅 dex 命中的其他厂商不混入 Lead（互斥分流）。
+    result = _analyze(
+        native_libs=["lib/arm64-v8a/libjiagu.so"],  # 360 强证据
+        dex_strings=["com.tencent.StubShell.TxAppEntry"],  # 腾讯仅 dex 弱命中
+    )
+    assert result.meta["is_hardened"] is True
+    packer_leads = [l for l in result.leads if l.category == LeadCategory.PACKER]
+    # 仅 360 一条 Lead，腾讯（仅弱命中）不产 Lead
+    assert len(packer_leads) == 1
+    assert "360" in (packer_leads[0].subject or "")
+    # 强命中存在 → 不产 LOW INFO Finding（2b/2c 互斥）
+    assert not any(f.id == "PACK-NAME-STRINGS-ONLY" for f in result.findings)
