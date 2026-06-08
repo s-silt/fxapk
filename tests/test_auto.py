@@ -584,5 +584,71 @@ def test_cli_auto_handles_nondict_result(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "非预期格式" in res.output
 
 
+# ---------------------------------------------------------------------------
+# analyze_static：仅静态公共函数（GUI「静态分析」按钮专用，不触发 doctor/动态）
+# ---------------------------------------------------------------------------
+
+
+def test_analyze_static_runs_only_static_not_doctor_or_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """analyze_static 只跑静态：不调 doctor / 不探测设备 / 不调 unpack/capture。"""
+    import apkscan.dynamic.capture as capture_mod
+    import apkscan.dynamic.doctor as doctor_mod
+    import apkscan.dynamic.unpack as unpack_mod
+
+    _patch_static_ok(monkeypatch, "com.fraud.app")
+
+    doctor_called = {"v": False}
+    unpack_called = {"v": False}
+    capture_called = {"v": False}
+    device_called = {"v": False}
+    monkeypatch.setattr(doctor_mod, "run", lambda **k: doctor_called.__setitem__("v", True))
+    monkeypatch.setattr(unpack_mod, "run", lambda *a, **k: unpack_called.__setitem__("v", True))
+    monkeypatch.setattr(capture_mod, "run", lambda *a, **k: capture_called.__setitem__("v", True))
+    monkeypatch.setattr(
+        auto.device, "has_device", lambda: device_called.__setitem__("v", True) or True
+    )
+
+    progresses: list[str] = []
+    result = auto.analyze_static(
+        "sample.apk", out_dir="out", online=True, formats=["html"], on_progress=progresses.append
+    )
+
+    assert _status_of(result["steps"], auto._STEP_STATIC) == STATUS_DONE
+    assert len(result["steps"]) == 1  # 仅静态一步
+    assert result["package_name"] == "com.fraud.app"
+    assert result["out_dir"] == "out"
+    assert result["report_paths"]
+    assert progresses  # on_progress 透传
+    # 关键：不触发体检/设备/动态。
+    assert doctor_called["v"] is False
+    assert unpack_called["v"] is False
+    assert capture_called["v"] is False
+    assert device_called["v"] is False
+
+
+def test_analyze_static_load_failure_returns_error_step_not_raise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import apkscan.core.apk as apk_mod
+
+    def _boom(*a: Any, **k: Any) -> Any:
+        raise apk_mod.ApkParseError("无法解析 APK")
+
+    monkeypatch.setattr(apk_mod, "load_apk", _boom)
+
+    result = auto.analyze_static("broken.apk", out_dir="out")  # 不应抛
+    assert _status_of(result["steps"], auto._STEP_STATIC) == STATUS_ERROR
+    assert result["package_name"] == ""
+    assert result["report_paths"] == []
+
+
+def test_analyze_static_callbacks_none_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_static_ok(monkeypatch, "com.x")
+    result = auto.analyze_static("sample.apk", out_dir="out", on_progress=None)
+    assert _status_of(result["steps"], auto._STEP_STATIC) == STATUS_DONE
+
+
 # silence unused import warnings for path helper (kept for parity/readability).
 _ = Path

@@ -191,6 +191,56 @@ def run(
     }
 
 
+def analyze_static(
+    apk_path: str,
+    *,
+    out_dir: str = "out",
+    online: bool = False,
+    formats: list[str] | None = None,
+    on_progress: Callable[[str], None] | None = None,
+) -> dict:
+    """仅静态分析（无 doctor / 无设备 / 无动态）：load_apk → pipeline.run → 写报告。绝不抛。
+
+    供 GUI「静态分析」按钮与任何只想跑纯静态的程序化调用直接使用——
+    复用与 ``run`` 第 2 步完全相同的 ``_run_static`` / ``_write_reports``，
+    **不复制任何分析器逻辑**，与 ``run`` 的静态步骤口径严格一致。
+
+    与 ``run`` 同样的设计铁律：禁 print/typer/input；异常被吞成结构化结果；
+    on_progress 回调安全调用（None → no-op；回调抛异常吞 + logging）。
+
+    Args:
+        apk_path: 待分析的 APK 文件路径。
+        out_dir: 报告输出目录。
+        online: 是否联网富化归属（WHOIS/ICP/ASN）。默认 False（离线）。
+        formats: 报告格式，默认 ``["html", "json"]``。
+        on_progress: 可选进度回调（GUI 弹窗 / None → no-op）。
+
+    Returns:
+        dict：{steps, report_paths, package_name, out_dir}，结构与 ``run`` 一致
+        （steps 仅含一个「静态分析」步骤），便于 GUI 复用同一套结果解析。绝不抛。
+    """
+    fmts = list(formats) if formats else list(_DEFAULT_FORMATS)
+    try:
+        static_step, _report, package_name, static_paths = _run_static(
+            apk_path, out_dir=out_dir, online=online, formats=fmts, on_progress=on_progress
+        )
+        return {
+            "steps": [static_step],
+            "report_paths": list(static_paths),
+            "package_name": package_name,
+            "out_dir": out_dir,
+        }
+    except Exception:
+        # _run_static 自身已吞异常；此处为外层兜底，确保任何意外都转结构化结果，绝不抛。
+        logger.exception("[auto] analyze_static 未预期异常（已转结构化结果）：%s", apk_path)
+        return {
+            "steps": [_step(_STEP_STATIC, _ERROR, "静态分析发生未预期异常（详见日志）")],
+            "report_paths": [],
+            "package_name": "",
+            "out_dir": out_dir,
+        }
+
+
 # ---------------------------------------------------------------------------
 # 各步骤（每步独立 try/except，失败不中断后续、绝不抛）
 # ---------------------------------------------------------------------------
@@ -449,4 +499,4 @@ def _extend_unique(acc: list[str], new: list[str]) -> None:
             acc.append(p)
 
 
-__all__ = ["run"]
+__all__ = ["analyze_static", "run"]

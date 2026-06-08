@@ -45,6 +45,10 @@ dev = ["pytest", "ruff", "pyright"]
 fxapk = "apkscan.cli:main"
 apkscan = "apkscan.cli:main"
 
+[project.gui-scripts]
+# 双击 / 无控制台窗口启动图形界面（Windows 下不弹黑框）。
+fxapk-gui = "apkscan.gui:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["apkscan*"]
