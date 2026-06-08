@@ -16,6 +16,28 @@ GUI 只是前端壳：所有分析/编排逻辑都在已做好的程序化核心
 
 from __future__ import annotations
 
+import logging
+import os
+import sys
+
+logger = logging.getLogger(__name__)
+
+
+def _ensure_std_streams() -> None:
+    """windowed PyInstaller exe / pythonw 下 sys.stdout/stderr 为 None。
+
+    分析过程中的 logging / loguru(androguard) 等向标准流 ``.write`` 会抛
+    ``'NoneType' object has no attribute 'write'``，被吞成「静态分析失败」。
+    用 os.devnull 兜底（GUI 自身进度经回调展示，不依赖标准流）。失败静默、不阻断启动。
+    """
+    for name in ("stdout", "stderr"):
+        if getattr(sys, name, None) is not None:
+            continue
+        try:
+            setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))
+        except Exception:
+            logger.debug("兜底标准流 sys.%s 失败（忽略）", name, exc_info=True)
+
 
 def main() -> None:
     """GUI 入口：创建 Tk root、实例化 App、进入主循环。
@@ -23,6 +45,7 @@ def main() -> None:
     view 在函数内部惰性 import，保证 ``import apkscan.gui`` 本身不加载 tkinter，
     headless 环境只要不调用 ``main()`` 就永远不构造 Tk。
     """
+    _ensure_std_streams()
     from apkscan.gui.view import run_app
 
     run_app()

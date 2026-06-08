@@ -35,6 +35,25 @@ def test_cli_gui_help_lists_command() -> None:
     assert "图形界面" in res.output
 
 
+def test_ensure_std_streams_bridges_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """windowed exe/pythonw 下 sys.stdout/stderr 为 None 时 _ensure_std_streams 兜底为可写流。
+
+    回归：v0.2.1 的 windowed GUI exe 因 None 标准流，分析中 logging/loguru 写入抛
+    'NoneType' object has no attribute 'write'，被吞成「静态分析失败」。
+    """
+    import sys
+
+    import apkscan.gui as gui_mod
+
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    gui_mod._ensure_std_streams()
+    assert sys.stdout is not None
+    assert sys.stderr is not None
+    sys.stdout.write("x")  # 不应抛
+    sys.stderr.write("y")
+
+
 def test_cli_gui_import_failure_exits_one(monkeypatch: pytest.MonkeyPatch) -> None:
     """tkinter 不可用（import apkscan.gui 抛）→ 友好提示 + 退出码 1，不崩。"""
     import builtins
