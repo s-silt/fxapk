@@ -40,6 +40,8 @@ Issues = "https://github.com/s-silt/fxapk/issues"
 
 [project.optional-dependencies]
 dev = ["pytest", "ruff", "pyright"]
+# 构建期工具：仅打包 exe 时需要，不进运行期 dependencies。
+build = ["pyinstaller>=6.0"]
 
 [project.scripts]
 fxapk = "apkscan.cli:main"

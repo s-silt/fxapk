@@ -8,6 +8,17 @@ venv/
 out/
 .apkscan_cache/
 
+# PyInstaller 构建产物(大，绝不入库)
+/build/
+/dist/
+
+# 烟测/分析输出目录(任何 out_* 变体，绝不入库；注意 out/ 已在上方单列)
+out_exe/
+out_exe*/
+out_chk/
+out_review/
+/out_*/
+
 # 样本数据与工作产物(不入库)
 ybku/
 /run_real.py
