@@ -1,9 +1,8 @@
 name: Release to PyPI
 
-# 推送 vX.Y.Z 标签时构建并发布到 PyPI。
-# 采用 PyPI Trusted Publishing（OIDC），仓库内无需存任何 token。
-# 一次性准备：在 https://pypi.org 该项目（fxapk）的 "Publishing" 设置里，
-# 添加 Trusted Publisher：owner=s-silt, repo=fxapk, workflow=release.yml, environment=pypi。
+# 推送 vX.Y.Z 标签时构建并发布到 PyPI（使用仓库 Secret 中的 API token）。
+# Secret：PYPI_API_TOKEN（在仓库 Settings → Secrets → Actions 配置）。
+# token 泄露应立即在 PyPI 吊销并更新本 Secret。
 
 on:
   push:
@@ -13,9 +12,6 @@ jobs:
   publish:
     name: build & publish
     runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write  # Trusted Publishing 必需
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -27,3 +23,5 @@ jobs:
           python -m build
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
