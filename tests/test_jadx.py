@@ -5,7 +5,6 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-import pytest
 
 from apkscan.analyzers import jadx
 from apkscan.analyzers.jadx import JadxAnalyzer

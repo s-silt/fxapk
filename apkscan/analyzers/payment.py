@@ -26,7 +26,7 @@ import logging
 import posixpath
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeGuard
 
 from apkscan.core.models import (
     AnalyzerResult,
@@ -595,7 +595,7 @@ def _parse_confidence(value: str) -> Confidence | None:
         return None
 
 
-def _nonempty_str(value: object) -> bool:
+def _nonempty_str(value: object) -> TypeGuard[str]:
     return isinstance(value, str) and bool(value.strip())
 
 

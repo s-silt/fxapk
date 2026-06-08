@@ -281,7 +281,9 @@ def _reanalyze(apk_path: str, extra_dex: list[str], out_dir: str) -> list[str]:
 
     config = AnalysisConfig(online=False, out_dir=out_dir)
     ctx = load_apk(apk_path, config, extra_dex=extra_dex)
-    report = pipeline.run(ctx, config)
+    # ApkContext 运行期满足 AnalysisContext 协议；pyright 对 cached_property→property
+    # 协议匹配有已知局限，显式忽略（见 cli.analyze 同处说明）。
+    report = pipeline.run(ctx, config)  # type: ignore[arg-type]
     # 标注本报告来自脱壳回灌，便于报告消费方区分。
     report.meta["unpacked"] = True
     report.meta["unpacked_dex_count"] = len(extra_dex)

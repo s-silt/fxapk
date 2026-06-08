@@ -1,8 +1,10 @@
-# apkscan
+# fxapk
 
-[![CI](https://github.com/s-silt/fxfx/actions/workflows/ci.yml/badge.svg)](https://github.com/s-silt/fxfx/actions/workflows/ci.yml)
+[![CI](https://github.com/s-silt/fxapk/actions/workflows/ci.yml/badge.svg)](https://github.com/s-silt/fxapk/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+
+*CLI 命令 `fxapk`（亦保留 `apkscan` 别名）；PyPI 包名 `fxapk`。* · **English**: [README.en.md](README.en.md)
 
 > 面向**反诈调证**的 APK 静态分析 CLI —— 不止列出 IP/域名，而是产出**调证线索清单**：
 > 每条线索回答「**这是什么、归属哪家公司、能去找谁调取什么证据**」。
@@ -16,7 +18,7 @@
 
 ## 它产出什么（核心区别）
 
-普通工具告诉你「检测到个推 SDK」；apkscan 告诉你 **具体值 + 所属公司 + 调证建议**：
+普通工具告诉你「检测到个推 SDK」；fxapk 告诉你 **具体值 + 所属公司 + 调证建议**：
 
 ```
 调用插件 / 配置键值（CONFIG_KEY）
@@ -44,8 +46,12 @@
 要求 **Python 3.11+**。
 
 ```bash
-git clone https://github.com/s-silt/fxfx.git
-cd fxfx
+# 从 PyPI（发布后）
+python -m pip install fxapk
+
+# 或从源码
+git clone https://github.com/s-silt/fxapk.git
+cd fxapk
 python -m pip install -e .
 ```
 
@@ -72,13 +78,13 @@ python -m pip install -e .
 
 ```bash
 # 默认：联网富化归属，产出 HTML + JSON 到 out/
-apkscan analyze app.apk --out out
+fxapk analyze app.apk --out out
 
 # 离线（不联网），加导出 PDF
-apkscan analyze app.apk --out out --offline --fmt html,json,pdf
+fxapk analyze app.apk --out out --offline --fmt html,json,pdf
 
 # 只产 JSON（机器读 / 留档）
-apkscan analyze app.apk --fmt json
+fxapk analyze app.apk --fmt json
 ```
 
 未安装为命令时等价用：`python -m apkscan.cli analyze app.apk --out out`。
@@ -136,11 +142,11 @@ apkscan analyze app.apk --fmt json
 涉诈 App 常加固（DEX 加密、运行时还原），静态拿不到真实 C2。apkscan 提供 **device-gated** 的动态补全：
 
 ```bash
-apkscan unpack app.apk --out out          # root 设备 + frida-dexdump 脱壳，回灌重分析
-apkscan capture <package> --duration 60   # mitmproxy + frida 绕证书绑定，抓运行时端点
+fxapk unpack app.apk --out out          # root 设备 + frida-dexdump 脱壳，回灌重分析
+fxapk capture <package> --duration 60   # mitmproxy + frida 绕证书绑定，抓运行时端点
 ```
 
-**无设备/缺工具时不报错**：返回 `status=skipped`，打印**可逐条复制的取证手册**（装 frida-server、推 CA、注入 SSL unpinning、`--extra-dex` 回灌等完整步骤）。脱壳得到的 DEX 可用 `apkscan analyze app.apk --extra-dex <dump_dir>` 并入静态分析，补全加固隐藏的端点/SDK/配置。
+**无设备/缺工具时不报错**：返回 `status=skipped`，打印**可逐条复制的取证手册**（装 frida-server、推 CA、注入 SSL unpinning、`--extra-dex` 回灌等完整步骤）。脱壳得到的 DEX 可用 `fxapk analyze app.apk --extra-dex <dump_dir>` 并入静态分析，补全加固隐藏的端点/SDK/配置。
 
 > 云端方案：在 root 真机 / 云手机（华为云手机、阿里无影等原生 ARM 安卓）上跑 frida-server，apkscan 部署在小 Linux VM 上经 ADB 驱动即可。
 

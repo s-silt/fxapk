@@ -351,7 +351,7 @@ class PackingAnalyzer(BaseAnalyzer):
                     so_names=_as_str_list(entry.get("so_names")),
                     files=_as_str_list(entry.get("files")),
                     dex_prefixes=_as_str_list(entry.get("dex_prefixes")),
-                    note=entry.get("note") if isinstance(entry.get("note"), str) else "",
+                    note=_str_or_empty(entry.get("note")),
                 )
             )
         return rules
@@ -373,6 +373,11 @@ class PackingAnalyzer(BaseAnalyzer):
 # ---------------------------------------------------------------------------
 # 模块级工具函数
 # ---------------------------------------------------------------------------
+
+
+def _str_or_empty(value: object) -> str:
+    """规则字段取 str（去空白），非 str / None → 空串。"""
+    return value.strip() if isinstance(value, str) else ""
 
 
 def _as_str_list(value: object) -> list[str]:

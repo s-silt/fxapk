@@ -13,6 +13,7 @@ import logging
 from collections.abc import Iterator
 from functools import cached_property
 from pathlib import Path
+from typing import Any
 
 from apkscan.core.models import (
     AnalysisConfig,
@@ -53,12 +54,12 @@ class ApkContext:
 
     def __init__(
         self,
-        apk: object,
-        dex_objs: list,
+        apk: Any,  # androguard.core.apk.APK；动态访问其方法，故标 Any
+        dex_objs: list[Any],
         config: AnalysisConfig,
         *,
         apk_path: str = "",
-        extra_dex_objs: list | None = None,
+        extra_dex_objs: list[Any] | None = None,
         dex_available: bool = True,
         apk_validation_ok: bool = True,
     ) -> None:
@@ -258,7 +259,7 @@ class ApkContext:
         return schemes
 
     @staticmethod
-    def _to_certinfo(cert: object, schemes: list[str]) -> CertInfo:
+    def _to_certinfo(cert: Any, schemes: list[str]) -> CertInfo:
         """把 asn1crypto x509.Certificate 转成 CertInfo。"""
         subject = _human(getattr(cert, "subject", None))
         issuer = _human(getattr(cert, "issuer", None))
@@ -290,7 +291,7 @@ class ApkContext:
         )
 
 
-def _iter_dex_strings(dex: object) -> Iterator[str]:
+def _iter_dex_strings(dex: Any) -> Iterator[str]:
     """惰性产出单个 DEX 的字符串池，bytes 解码为 str。单个 DEX 失败记录后跳过。"""
     try:
         strings = dex.get_strings()
@@ -337,7 +338,7 @@ def _resolve_name(name: str, pkg: str) -> str:
     return name
 
 
-def _human(name: object) -> str:
+def _human(name: Any) -> str:
     """从 asn1crypto Name 取人类可读字符串。"""
     if name is None:
         return ""
@@ -347,14 +348,14 @@ def _human(name: object) -> str:
     return str(name)
 
 
-def _dt(value: object) -> str:
+def _dt(value: Any) -> str:
     """日期时间转 ISO 字符串。"""
     if value is None:
         return ""
     iso = getattr(value, "isoformat", None)
     if callable(iso):
         try:
-            return iso()
+            return str(iso())
         except Exception:
             logger.exception("日期 isoformat 失败")
     return str(value)

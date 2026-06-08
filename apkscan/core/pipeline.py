@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING
 from apkscan.core import infra
 from apkscan.core.models import (
     AnalysisConfig,
-    AnalyzerResult,
     Confidence,
     Endpoint,
     Evidence,

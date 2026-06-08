@@ -3,13 +3,27 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "apkscan"
+# 发行名 fxapk（PyPI）；CLI 命令 fxapk（保留 apkscan 别名）；内部 import 包仍为 apkscan。
+name = "fxapk"
 version = "0.1.0"
-description = "涉诈 APK 调证分析 CLI — 静态分析 + 网络端点/服务归属提取，产出调证线索清单"
+description = "涉诈 APK 调证分析 CLI — 静态分析 + 配置键值/服务归属提取，产出调证线索清单"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Proprietary" }
-authors = [{ name = "apkscan" }]
+license = { text = "MIT" }
+authors = [{ name = "s-silt" }]
+keywords = [
+    "android", "apk", "forensics", "fraud", "reverse-engineering",
+    "security", "androguard", "调证", "反诈",
+]
+classifiers = [
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+    "Topic :: Security",
+    "Intended Audience :: Information Technology",
+]
 dependencies = [
     "androguard>=4.1",
     "jinja2",
@@ -19,10 +33,16 @@ dependencies = [
     "pyyaml",
 ]
 
+[project.urls]
+Homepage = "https://github.com/s-silt/fxapk"
+Repository = "https://github.com/s-silt/fxapk"
+Issues = "https://github.com/s-silt/fxapk/issues"
+
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest", "ruff", "pyright"]
 
 [project.scripts]
+fxapk = "apkscan.cli:main"
 apkscan = "apkscan.cli:main"
 
 [tool.setuptools.packages.find]
@@ -31,3 +51,18 @@ include = ["apkscan*"]
 
 [tool.setuptools.package-data]
 apkscan = ["rules/*.yaml", "report/templates/*.j2"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# E741：歧义变量名 l —— 测试与推导式里 `for l in leads` 大量使用且可读，忽略此风格项。
+ignore = ["E741"]
+
+[tool.pyright]
+include = ["apkscan"]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+# 第三方依赖（androguard 等）无类型存根，缺存根不算错。
+reportMissingModuleSource = false

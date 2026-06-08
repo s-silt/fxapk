@@ -20,8 +20,18 @@ class AnalysisContext(Protocol):
           tests.conftest.FakeContext（测试，合成数据）
     """
 
-    package_name: str
-    manifest_xml: str
+    # package_name / manifest_xml 声明为只读 property：既能被实现方用普通属性
+    # （FakeContext）满足，也能被 @cached_property（ApkContext 惰性解析）满足。
+    @property
+    def package_name(self) -> str:
+        """APK 包名。"""
+        ...
+
+    @property
+    def manifest_xml(self) -> str:
+        """解码后的 AndroidManifest.xml 文本。"""
+        ...
+
     config: AnalysisConfig
     apk_path: str  # APK 原始文件绝对路径（jadx/unpack 等增强器需要；无则空串）
 

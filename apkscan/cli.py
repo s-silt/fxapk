@@ -79,7 +79,10 @@ def analyze(
 
     typer.echo(f"包名：{ctx.package_name or '(未知)'}  联网富化：{'是' if online else '否'}")
     typer.echo("运行分析流水线 ...")
-    report = pipeline.run(ctx, config)
+    # ApkContext 用 @cached_property 暴露 package_name/manifest_xml，运行期满足
+    # AnalysisContext 协议（324 测试+真机已证）；pyright 对 cached_property→property
+    # 的协议匹配有已知局限，故此处显式忽略。
+    report = pipeline.run(ctx, config)  # type: ignore[arg-type]
 
     # 设备探测：有在线设备则提示并写入 meta，便于报告/后续动态补全感知。
     device_detected = device.has_device()

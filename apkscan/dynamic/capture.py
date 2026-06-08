@@ -28,6 +28,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 from apkscan.core import device
 from apkscan.core.models import Endpoint, Evidence
@@ -549,8 +550,10 @@ def _read_proc_stderr(proc: object) -> str:
 
     真实 Popen 才有 communicate；测试替身无则降级。任何异常不抛。
     """
-    communicate = getattr(proc, "communicate", None)
-    if not callable(communicate):
+    communicate: Any = getattr(proc, "communicate", None)
+    # 用 is None 守卫而非 callable()：后者会把 Any 收窄成 Callable[..., object]，
+    # 导致返回值被当 object 无法解包。
+    if communicate is None:
         return f"exit code {getattr(proc, 'returncode', '?')}"
     try:
         out, err = communicate(timeout=2.0)
