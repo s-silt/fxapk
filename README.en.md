@@ -92,6 +92,15 @@ fxapk auto app.apk --out out  # one command end to end; prompts you to operate t
                               # no device? unpack/capture are skipped, static report still produced
 ```
 
+| Command | What it does |
+|---|---|
+| `analyze APK` | static analysis (zero-env) → investigation lead sheet; with `--dynamic` and a device, auto unpack+capture and **merge runtime endpoints back into the main report** |
+| `auto APK` | one-click: `doctor`→static→unpack→capture→merge into one report (dynamic steps skipped if no device) |
+| `doctor` | env health check: online device / root / ABI / host frida / device frida-server / mitmproxy / CA, per-item `[OK]`/`[FAIL]`; `--fix` auto-fixes (deploy frida-server, install CA); exits 1 when a critical item fails |
+| `unpack APK` | rooted-device unpack: frida-dexdump dumps hidden DEX, re-analyzed |
+| `capture PACKAGE` | rooted-device capture: mitmproxy + frida SSL-unpinning, runtime endpoints |
+| `gui` | graphical UI (single-window tkinter: doctor / static / one-click auto) |
+
 | Flag | Meaning |
 |---|---|
 | `--out DIR` | report output dir (default `out`) |
