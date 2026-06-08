@@ -49,7 +49,7 @@ Actual rendered HTML report (**demo, redacted data**):
 Requires **Python 3.11+**.
 
 ```bash
-# From PyPI (after release)
+# From PyPI
 python -m pip install fxapk
 
 # Or from source

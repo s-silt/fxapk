@@ -46,7 +46,7 @@
 要求 **Python 3.11+**。
 
 ```bash
-# 从 PyPI（发布后）
+# 从 PyPI
 python -m pip install fxapk
 
 # 或从源码
