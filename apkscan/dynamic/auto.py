@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 # 步骤名常量（避免裸字符串漂移；CLI / 测试以此识别步骤）。
 _STEP_DOCTOR = "环境体检"
 _STEP_STATIC = "静态分析"
+_STEP_INSTALL = "安装到设备"
 _STEP_UNPACK = "脱壳"
 _STEP_CAPTURE = "抓包"
 _STEP_MERGE = "合并运行时端点"
@@ -141,6 +142,17 @@ def run(
         except Exception:
             logger.exception("[auto] 设备探测异常，按无设备处理")
             has_device = False
+
+        # 3.4) 确保 frida-server 在跑且是 **root**（脱壳/抓包 spawn 注入必须 root，否则 jailed）。
+        #      自愈逻辑在 ensure_frida_server，但 doctor「看见在跑就 OK」不会调它 → 非 root 实例
+        #      不会被换掉。这里显式调一次，触发「非 root → 杀掉以 root 重启」自愈。失败不阻断。
+        if has_device:
+            _ensure_root_frida_server(on_progress=on_progress)
+
+        # 3.5) 安装 APK 到设备（脱壳/抓包 spawn 前置）：frida -f <包名> 要 spawn 的是**已安装**
+        #      的 app；只分析 APK 文件而设备上没装 → "unable to find application"。仅有设备才做。
+        if has_device:
+            steps.append(_run_install_app(apk_path, on_progress=on_progress))
 
         # 3) 脱壳：仅有设备才做（产出 dex 由 unpack 内部 reanalyze 回灌）。
         unpack_step, unpack_paths = _run_unpack(
@@ -348,6 +360,44 @@ def _write_reports(report: object, *, out_dir: str, formats: list[str], base: st
         except Exception:
             logger.exception("[auto] 写出 %s 失败：%s", target.name, target)
     return paths
+
+
+def _ensure_root_frida_server(*, on_progress: Callable[[str], None] | None) -> None:
+    """脱壳/抓包前确保 frida-server 在跑且是 root（触发非 root → root 自愈）。绝不抛、不阻断。
+
+    不产 step（仅作前置保障，结果体现在后续 spawn 成败上）；失败只 logging。
+    """
+    _emit(on_progress, "确保 frida-server 以 root 运行（spawn 注入前置）")
+    try:
+        from apkscan.dynamic import provision
+
+        res = provision.ensure_frida_server()
+        action = res.get("action")
+        if action == "restarted_as_root":
+            _emit(on_progress, "检测到 frida-server 非 root，已以 root 重启")
+        logger.info("[auto] ensure_frida_server: ok=%s action=%s", res.get("ok"), action)
+    except Exception:  # noqa: BLE001 — 前置保障失败不中断流水线
+        logger.exception("[auto] ensure_frida_server 异常（继续，spawn 若失败会有提示）")
+
+
+def _run_install_app(apk_path: str, *, on_progress: Callable[[str], None] | None) -> dict:
+    """安装 APK 到设备（脱壳/抓包 spawn 前置）。失败不阻断流水线（设备或已装兼容版本）。
+
+    成功 → done；失败 → error（带原因，如签名冲突需先 uninstall），但后续步骤仍尝试
+    （unpack/capture 会以 "unable to find application" 给出明确提示）。绝不抛。
+    """
+    _emit(on_progress, "安装 APK 到设备（frida spawn 前置：需 app 已安装）")
+    try:
+        from apkscan.dynamic import provision
+
+        res = provision.install_apk(apk_path)
+    except Exception as exc:  # noqa: BLE001 — 安装异常不中断流水线
+        logger.exception("[auto] 安装 APK 异常：%s", apk_path)
+        return _step(_STEP_INSTALL, _ERROR, f"安装 APK 异常：{exc}")
+    detail = str(res.get("detail") or "")
+    if res.get("ok"):
+        return _step(_STEP_INSTALL, _DONE, detail or "APK 已安装到设备")
+    return _step(_STEP_INSTALL, _ERROR, detail or "APK 安装失败（设备上若无此 app，spawn 会失败）")
 
 
 def _run_unpack(

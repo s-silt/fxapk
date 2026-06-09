@@ -161,7 +161,9 @@ class AsnEnricher(BaseEnricher):
         try:
             data = self._query(ip)
         except Exception as exc:  # noqa: BLE001 — 富化失败不得炸主流程
-            logger.warning("ASN 查询失败：%s（%s）", ip, exc, exc_info=True)
+            # 不带 exc_info：富化失败（超时/限速/无应答）很常见，整段 traceback 是噪音；
+            # 消息已含异常摘要，排障足够。
+            logger.warning("ASN 查询失败：%s（%s）", ip, exc)
             return EnrichmentResult(
                 provider=self.name, ok=False, error=f"{type(exc).__name__}: {exc}"
             )

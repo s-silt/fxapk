@@ -29,6 +29,26 @@ WHOIS_TIMEOUT = 8
 CACHE_DIR = Path(".apkscan_cache")
 CACHE_FILE = CACHE_DIR / "whois.json"
 
+# python-whois 库自身的 logger（名为 "whois"）在连接超时/无应答时会刷 ERROR
+# 「Error trying to connect to socket: ...」——对富化失败属预期内噪音，抬高其级别静默
+# （与 androguard loguru 同思路：不影响我方结构化降级，只是不让它喧哗）。
+logging.getLogger("whois").setLevel(logging.CRITICAL)
+
+
+def _short_err(exc: object) -> str:
+    """把异常压成一行短摘要：取首个非空行、截到 120 字符。
+
+    必要性：whois 服务器（如 VeriSign .com）会把整段 NOTICE / TERMS OF USE 法律声明塞进
+    响应，python-whois 又把它带进异常消息——直接打日志会刷出几十行 boilerplate 噪音。
+    取「No match for X」/「timed out」这类首行关键信息即可。
+    """
+    text = str(exc).strip()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:120]
+    return text[:120] or type(exc).__name__
+
 
 def _first(value: Any) -> Any:
     """WHOIS 字段常为 list（多注册商/多时间）；取首个非空元素。"""
@@ -131,6 +151,13 @@ class WhoisEnricher(BaseEnricher):
                 provider=self.name, ok=False, error="空域名，跳过 WHOIS 查询"
             )
 
+        # 0) 系统性不可用（如 whois 库数据文件未打进 exe）→ 本次起跳过所有查询，
+        #    避免对每个域名重复刷同一条 traceback（已在首次失败时记过一次清晰提示）。
+        if getattr(self, "_data_unavailable", False):
+            return EnrichmentResult(
+                provider=self.name, ok=False, error="WHOIS 不可用（数据文件缺失），已跳过"
+            )
+
         # 1) 缓存命中直接返回（不消耗网络）。
         cache = self._load_cache()
         cached = cache.get(domain)
@@ -138,13 +165,22 @@ class WhoisEnricher(BaseEnricher):
             logger.debug("WHOIS 缓存命中：%s", domain)
             return EnrichmentResult(provider=self.name, ok=True, data=dict(cached))
 
-        # 2) 网络查询，全部异常吞成 ok=False。
+        # 2) 网络查询，全部异常吞成 ok=False（不刷 traceback：富化失败很常见）。
         try:
             data = self._query(domain)
-        except Exception as exc:  # noqa: BLE001 — 富化失败不得炸主流程
-            logger.warning("WHOIS 查询失败：%s（%s）", domain, exc, exc_info=True)
+        except FileNotFoundError as exc:
+            # whois 库数据文件（public_suffix_list.dat）缺失 —— 系统性失败（常见于打包 exe
+            # 未收 whois 数据）。记一次清晰提示后本次禁用 WHOIS，不再逐域名刷 traceback。
+            self._data_unavailable = True
+            logger.warning("WHOIS 数据文件缺失，本次运行跳过所有 WHOIS 查询：%s", exc)
             return EnrichmentResult(
-                provider=self.name, ok=False, error=f"{type(exc).__name__}: {exc}"
+                provider=self.name, ok=False, error=f"WHOIS 数据缺失: {exc}"
+            )
+        except Exception as exc:  # noqa: BLE001 — 富化失败不得炸主流程
+            short = _short_err(exc)
+            logger.warning("WHOIS 查询失败：%s（%s）", domain, short)
+            return EnrichmentResult(
+                provider=self.name, ok=False, error=f"{type(exc).__name__}: {short}"
             )
 
         # 3) 区分"查到了"与"全空"：全空可能是网络抖动/限速/无应答，

@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import click
 import typer
 
 from apkscan.core import device, pipeline
@@ -278,10 +279,17 @@ def auto(
         formats = [f.strip().lower() for f in fmt.split(",") if f.strip()]
 
         def _confirm(msg: str) -> None:
-            """抓包前提示用户操作 app 触发网络，并等回车（CLI 落点；GUI 用弹窗）。"""
+            """抓包前提示用户操作 app 触发网络，并等回车（CLI 落点；GUI 用弹窗）。
+
+            确认提示只是「准备好就继续」的暂停闸（返回值本就不使用）。无 stdin / EOF /
+            Ctrl-C 时 click.confirm 抛 Abort —— 这不是错误，直接继续抓包，不刷 ERROR+traceback。
+            """
             typer.echo("")
             typer.echo(f">>> {msg}")
-            typer.confirm("已准备好，开始抓包？", default=True)
+            try:
+                typer.confirm("已准备好，开始抓包？", default=True)
+            except (click.Abort, EOFError):
+                typer.echo("（未读到输入，直接继续抓包）")
 
         typer.echo(f"===== 一键全自动：{apk} =====")
         result = _auto.run(
@@ -583,9 +591,12 @@ def main() -> None:
     """[project.scripts] 入口。"""
     # 入口先开 UTF-8 环境：修控制台中文乱码 + 让后续 adb/frida 子进程自动带 UTF-8
     # （Windows 默认 GBK，否则读子进程输出遇非 GBK 字节会崩）。
+    from apkscan.core.logsetup import setup_logging
     from apkscan.core.utf8 import enable_utf8_runtime
 
     enable_utf8_runtime()
+    # 装「错误定位标识」日志格式器（WARNING+ 末尾带 [@模块.函数:行号]，便于按日志反馈定位）。
+    setup_logging()
     app()
 
 

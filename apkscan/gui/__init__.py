@@ -47,9 +47,11 @@ def main() -> None:
     """
     _ensure_std_streams()
     # 标准流就绪后再开 UTF-8（reconfigure 需流非 None）：自身日志中文不乱码 + 子进程继承。
+    from apkscan.core.logsetup import setup_logging
     from apkscan.core.utf8 import enable_utf8_runtime
 
     enable_utf8_runtime()
+    setup_logging()  # 错误定位标识（WARNING+ 带 [@模块.函数:行号]）
     from apkscan.gui.view import run_app
 
     run_app()

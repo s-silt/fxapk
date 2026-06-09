@@ -88,6 +88,14 @@ datas += collect_data_files("frida_tools")
 hiddenimports += collect_submodules("frida_dexdump")
 datas += collect_data_files("frida_dexdump")
 
+# python-whois：联网富化的 WHOIS 查询依赖随包数据文件 whois/data/public_suffix_list.dat，
+# 不收则 frozen exe 里每个域名查询都 FileNotFoundError（whois.py 已优雅降级不崩，但收了
+# 才能真正联网查 WHOIS）。whois 可选，缺失时静默跳过不阻断构建。
+try:
+    datas += collect_data_files("whois")
+except Exception:  # noqa: BLE001 — whois 未装则跳过（运行期富化优雅降级）
+    pass
+
 # dispatch 入口需显式 import 的内置工具入口模块（保险，防 collect_submodules 漏顶层）。
 hiddenimports += [
     "frida",

@@ -316,3 +316,22 @@ def test_domain_normalized_lowercase_in_cache(
     assert "mixedcase.cn" in cache
     # 触网时用归一化后的域名。
     assert "mixedcase.cn" in fake_requests.calls[0][0]
+
+
+def test_unavailable_logged_once_for_multiple_domains(
+    _isolated_cache: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """未配置 provider（系统性不可用）→ 多域名只记一次 INFO，不逐域名刷屏；
+    但每个域名仍返回人工核验数据（manual_required + 工信部链接）。"""
+    import logging
+
+    enr = IcpEnricher()
+    with caplog.at_level(logging.INFO, logger="apkscan.enrichers.icp"):
+        enr.enrich(_ep("a.cn"))
+        enr.enrich(_ep("b.cn"))
+        enr.enrich(_ep("c.cn"))
+
+    assert caplog.text.count("ICP 自动查询不可用") == 1
+    r = enr.enrich(_ep("d.cn"))
+    assert r.ok is False
+    assert r.data and r.data.get("status") == "manual_required"

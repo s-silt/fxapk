@@ -247,6 +247,7 @@ def _dexdump(
         return (
             f"frida-dexdump 非零退出（returncode={proc.returncode}）。"
             f"stdout 尾部：{tail.strip()} | stderr 尾部：{tail_err.strip()}"
+            f"{device.frida_spawn_hint(tail + tail_err)}"
         )
 
     dumped = _collect_dex(dump_dir)
