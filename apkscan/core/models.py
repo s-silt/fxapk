@@ -80,6 +80,25 @@ class Lead:
     # 由 pipeline 末尾兜底或 build_endpoint_leads 按 infra 分级赋值。
     advice: str = ""
 
+    @property
+    def is_c2(self) -> bool:
+        """是否疑似诈骗 App 的 **C2 / 主控后端服务器**（调证最该盯的落点）。
+
+        判定：网络端点（DOMAIN/IP）且研判为「建议调证」——即 App 自有后端，已排除 CDN /
+        SDK / 公共服务（googleapis、地图、jsdelivr 等）/ 开源库内嵌站点。这类是 App 真实
+        通信或硬编码的命令与后端服务器，是还原资金流 / 冒充关系 / 服务器归属的首要目标。
+        """
+        return self.category in (LeadCategory.DOMAIN, LeadCategory.IP) and self.advice == "建议调证"
+
+    @property
+    def is_runtime_seen(self) -> bool:
+        """是否在**真机抓包**中被实际观测到（运行时真连了它 / 带回了加密信封）。
+
+        来源 source 以 ``runtime`` 开头（runtime / runtime-decrypted）= 动态确认，比纯静态
+        硬编码可信度更高——C2 若 ``is_runtime_seen`` 即「**已抓到通信的确认 C2**」。
+        """
+        return any(str(getattr(ev, "source", "")).startswith("runtime") for ev in self.source_refs)
+
 
 @dataclass
 class Finding:

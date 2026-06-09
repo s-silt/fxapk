@@ -460,3 +460,72 @@ def test_template_loaded_via_importlib_resources(sample_report: Report, tmp_path
     out = report_html.render_to_string(sample_report)
     assert out.lstrip().lower().startswith("<!doctype html")
     assert "ctrl.fraud-example.com" in out
+
+
+# ---------------------------------------------------------------------------
+# C2 标注：Lead.is_c2 / is_runtime_seen + 报告渲染
+# ---------------------------------------------------------------------------
+
+
+def test_lead_is_c2_only_network_and_investigate() -> None:
+    from apkscan.core.models import Lead, LeadCategory
+
+    assert Lead(category=LeadCategory.DOMAIN, value="c2.fraud.cn", advice="建议调证").is_c2 is True
+    assert Lead(category=LeadCategory.IP, value="203.0.113.9", advice="建议调证").is_c2 is True
+    # 无需调证（CDN/公共服务）→ 非 C2
+    assert Lead(category=LeadCategory.DOMAIN, value="maps.googleapis.com", advice="无需调证").is_c2 is False
+    # 非网络端点（配置键）即使建议调证也非 C2 服务器
+    assert Lead(category=LeadCategory.CONFIG_KEY, value="K=V", advice="建议调证").is_c2 is False
+
+
+def test_lead_is_runtime_seen() -> None:
+    from apkscan.core.models import Evidence, Lead, LeadCategory
+
+    runtime = Lead(
+        category=LeadCategory.DOMAIN, value="c2.fraud.cn", advice="建议调证",
+        source_refs=[Evidence(source="runtime-decrypted", location="flows", snippet="y")],
+    )
+    static = Lead(
+        category=LeadCategory.DOMAIN, value="c2.fraud.cn", advice="建议调证",
+        source_refs=[Evidence(source="dex", location="classes.dex", snippet="y")],
+    )
+    assert runtime.is_runtime_seen is True
+    assert static.is_runtime_seen is False
+
+
+def test_json_includes_c2_flags(sample_report: Report, tmp_path: Path) -> None:
+    import json as _json
+
+    from apkscan.report import json as report_json
+
+    p = tmp_path / "r.json"
+    report_json.dump(sample_report, str(p))
+    data = _json.loads(p.read_text(encoding="utf-8"))
+    for lead in data["leads"]:
+        assert "is_c2" in lead
+        assert "is_runtime_seen" in lead
+
+
+def test_html_marks_c2_servers(tmp_path: Path) -> None:
+    from apkscan.core.models import Evidence, Lead, LeadCategory, Report
+    from apkscan.report import html as report_html
+
+    rpt = Report(
+        package_name="com.x",
+        meta={},
+        leads=[
+            Lead(
+                category=LeadCategory.DOMAIN, value="c2.fraud-gw.cn", advice="建议调证",
+                source_refs=[Evidence(source="runtime", location="flows", snippet="x")],
+            ),
+            Lead(category=LeadCategory.DOMAIN, value="maps.googleapis.com", advice="无需调证"),
+        ],
+        endpoints=[],
+        findings=[],
+        analyzer_status=[],
+    )
+    out = tmp_path / "r.html"
+    report_html.render(rpt, str(out))
+    text = out.read_text(encoding="utf-8")
+    assert "C2" in text  # C2 标注出现
+    assert "c2.fraud-gw.cn" in text
