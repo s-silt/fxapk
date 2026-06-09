@@ -152,14 +152,57 @@ def _adb_ok(extra: list[str], serial: str | None = None) -> bool:
     return True
 
 
+def _shq(cmd: str) -> str:
+    """POSIX 单引号包裹整条命令，使其经 adb shell 重拼+设备 shell 再分词后，作为**单个参数**
+    传给 ``su -c``。
+
+    实测血泪坑（Superuser.apk/KingUser 型 su）：``_adb(["shell","su","-c",cmd])`` 里 cmd 即便是
+    单个 argv 元素，adb.exe 也会把 ``shell`` 之后的 argv **用空格重拼**成一条命令串下发，设备
+    shell 再分词 → ``su -c pkill -f frida-server`` 中的 ``-f frida-server`` 被 su 当成**自己的
+    选项**（打印 usage 退 2），``su -c cp a b && chmod ...`` 里的路径被 su 当成**用户名**（Unknown
+    id）。单引号包裹后设备 shell 把整条当一个参数交给 su -c，flags/重定向/`&&`/`&` 才不外泄。
+    """
+    return "'" + cmd.replace("'", "'\\''") + "'"
+
+
+def _su_ok(cmd: str, serial: str | None = None) -> bool:
+    """以 root 跑 cmd，尝试多种 su 调用形态（兼容 Magisk / Superuser.apk / KingUser）。
+
+    每条都把 cmd 单引号包裹成**单个** adb shell 参数（见 :func:`_shq`）。任一形态
+    returncode==0 → True。全失败 → False（含无 su / 设备已锁）。
+    """
+    q = _shq(cmd)
+    for form in (f"su -c {q}", f"su 0 -c {q}", f"su root -c {q}"):
+        if _adb_ok(["shell", form], serial):
+            return True
+    return False
+
+
+def _su_uid0(serial: str | None = None) -> bool:
+    """设备 su 是否真能拿到 uid=0（权威 root 能力判定，不只是 returncode）。"""
+    for form in ("su -c id", "su 0 -c id", "su root -c id"):
+        proc = _adb(["shell", form], serial)
+        if proc is not None and proc.returncode == 0 and "uid=0" in (proc.stdout or ""):
+            return True
+    return False
+
+
+def _adbd_is_root(serial: str | None = None) -> bool:
+    """adbd 当前是否 uid=0（AOSP rootful 镜像 ``adb root`` 后为真；此时 adb shell 直执即 root）。"""
+    proc = _adb(["shell", "id"], serial)
+    return proc is not None and proc.returncode == 0 and "uid=0" in (proc.stdout or "")
+
+
 def _adb_root_shell(cmd: str, serial: str | None = None) -> bool:
     """以 root 跑一条设备 shell 命令：优先直接 ``adb shell``（``adb root`` 后 adbd 即
-    uid0，AOSP rootful 镜像上最稳），失败再回退 ``adb shell su -c``（Magisk/su 型设备）。
+    uid0，AOSP rootful 镜像上最稳），失败再回退 ``adb shell su -c '<cmd>'``（Magisk/su 型设备）。
 
     实测教训：AOSP/模拟器 rootful 镜像上 ``su -c`` 行为不稳，而 ``adb root`` 后 adb shell
-    本身就是 root，根本不必 su。两条都试以兼容两类 root。
+    本身就是 root，根本不必 su；而 Superuser.apk/KingUser 型设备 ``adb root`` 不支持、必须 su。
+    两条都试以兼容两类 root。su 路径经 :func:`_su_ok` 正确单引号包裹（否则 cmd 的选项/`&&`
+    会外泄给 su 本身）。
     """
-    return _adb_ok(["shell", cmd], serial) or _adb_ok(["shell", "su", "-c", cmd], serial)
+    return _adb_ok(["shell", cmd], serial) or _su_ok(cmd, serial)
 
 
 # ---------------------------------------------------------------------------
@@ -285,25 +328,35 @@ _FRIDA_START_CMDS: tuple[str, ...] = (
 )
 
 
-def _start_frida_server_background(serial: str | None) -> None:
-    """后台拉起 frida-server，脱离 adb 会话（setsid→nohup 兜底）。不看 returncode、不抛。
+def _start_frida_server_background(serial: str | None) -> bool:
+    """后台拉起 frida-server，脱离 adb 会话（setsid→nohup 兜底）。不抛。
 
     长驻进程必须重定向 std{in,out,err} 并 setsid/nohup，否则 adb shell 会被进程的
-    管道阻塞到 subprocess 超时，误把"已启动"判成失败。本函数只负责把它拉起来，
-    成败由调用方随后轮询 ``device.frida_server_running`` 判定（不依赖本步 returncode）。
+    管道阻塞到 subprocess 超时，误把"已启动"判成失败。本函数负责把它拉起来，是否真在跑
+    由调用方随后轮询 ``device.frida_server_running`` 判定。
+
+    Returns:
+        ``root_started``：拉起的 frida-server 是否以 **root** 运行——以**权威 root 能力**为准
+        （adbd 本身 uid=0[AOSP rootful]，或 su 能拿 uid=0[su 型设备]），**与长驻启动命令那条
+        不可靠的 returncode 解耦**（含 ``&`` 的后台命令会被管道阻塞到超时，returncode 不可信，
+        故不能据它判 root）。ps 在 MuMu 上又看不到 frida-server 行、无法靠 ps 判 root。
     """
     # 先杀掉可能已在跑的**非 root** frida-server：su 型设备（adb root 不可用）上若先有非 root
     # 实例占着端口，root 实例就起不来 → frida-ps 能列进程但 spawn 注入失败（"need Gadget /
     # jailed Android"）。杀掉后再以 root 重起，确保 spawn 可用。失败无害（本就没在跑）。
-    _adb_ok(["shell", "su", "-c", "pkill -f frida-server"], serial)
+    _su_ok("pkill -f frida-server", serial)
     _adb_ok(["shell", "pkill", "-f", "frida-server"], serial)
 
+    # 权威 root 能力：adbd 已 root（AOSP rootful）则直执即 root；否则看 su 能否拿 uid=0。
+    adb_root = _adbd_is_root(serial)
+    su_root = False if adb_root else _su_uid0(serial)
     for cmd in _FRIDA_START_CMDS:
-        # **root 优先**：spawn 注入必须 root frida-server。先 su -c（root）把端口占住，
-        # 直执（非 root）仅作无 su 时的兜底——顺序反了会让非 root 实例先占端口致 spawn 失败。
-        # 两条 setsid/nohup 都试一遍；不以 returncode 短路（脱离会话写法下不可靠）。
-        _adb_ok(["shell", "su", "-c", cmd], serial)
+        # **root 优先**：spawn 注入必须 root frida-server。su 型设备先 su -c（正确单引号包裹）把
+        # 端口占住；直执（adbd 为 root 则 root、否则非 root 兜底）。两条 setsid/nohup 都试。
+        if su_root:
+            _su_ok(cmd, serial)
         _adb_ok(["shell", cmd], serial)
+    return adb_root or su_root
 
 
 def _manual_frida_steps(ver: str, abi: str, fabi: str) -> list[str]:
@@ -422,27 +475,47 @@ def _ensure_frida_server_impl(
                     ok=True, action="already_running", detail="设备上 frida-server 已在运行（root）"
                 )
                 return result
-            # 未确认 root（含 ps 看不到 frida-server 行的 MuMu 等）→ 杀掉以 root 重启
-            # （_start_frida_server_background 含 pkill + su -c 优先）。重启后**只验
-            # frida_server_running**（frida-ps 可达）即可：用 su -c 起的、起来即 root；
-            # 不再回头查 frida_server_is_root（它在 ps 不认 frida-server 时永远确认不了，
-            # 会让自愈成功也判失败、继续白走部署）。
+            # 未确认 root（含 ps 看不到 frida-server 行的 MuMu 等）→ 杀掉以 root 重启。
+            # **权威 root 信号 = _start_frida_server_background 是否经 su 把它真起起来**
+            # （返回 root_started）：ps 在 MuMu 上看不到 frida-server 行，无法靠 is_root 判；
+            # 而"running" 对非 root 实例同样为真，**只验 running 会把 jailed 误报成 root**
+            # （实测：Superuser.apk 型 su 拒收旧的未加引号命令 → 旧非 root 实例还在跑 → 误判
+            # restarted_as_root → 脱壳/抓包全 jailed 却显示成功）。故 root_started 为准。
             _emit(on_progress, "frida-server 未确认 root，杀掉以 root 重启（spawn 注入需 root）")
             logger.warning(
                 "[provision] frida-server 未确认以 root 运行（spawn 会 jailed）；杀掉以 root 重启"
             )
-            _start_frida_server_background(serial)
+            root_started = _start_frida_server_background(serial)
             for _ in range(_VERIFY_RETRIES):
                 try:
-                    if device.frida_server_running(serial):
-                        result.update(
-                            ok=True,
-                            action="restarted_as_root",
-                            detail="未确认 root，已杀掉并以 root（su -c）重启 frida-server",
-                        )
-                        return result
+                    running = device.frida_server_running(serial)
                 except Exception:
                     logger.exception("[provision] root 重启后验证轮询异常")
+                    running = False
+                if running and root_started:
+                    result.update(
+                        ok=True,
+                        action="restarted_as_root",
+                        detail="未确认 root，已杀掉并以 root（su -c）重启 frida-server",
+                    )
+                    return result
+                if running and not root_started:
+                    # 在跑但 su 没把它起起来（设备 su 不接受 -c 形态 / 已锁）→ 仍是非 root，
+                    # spawn 会 jailed。如实报告 + 给手动命令，不假成功（避免下游白走 spawn）。
+                    su_uid0 = _su_uid0(serial)
+                    detail = (
+                        "frida-server 在跑但未能以 root 重启（设备 su 不接受标准 `su -c` 形态）："
+                        + ("su 可拿 uid=0 但未起成功，请手动起" if su_uid0 else "su 不可用/已锁，无法获取 root")
+                        + "；spawn 注入将被判 jailed，脱壳/运行时 hook 不可用。"
+                    )
+                    logger.warning("[provision] %s", detail)
+                    result.update(ok=False, action="running_not_root", detail=detail)
+                    result["fix_cmd"] = [
+                        "adb shell su -c 'pkill -f frida-server'",
+                        f"adb shell su -c 'setsid {_FRIDA_SERVER_REMOTE} >/dev/null 2>&1 &'",
+                        "frida-ps -U  # 应能列出进程；spawn 仍 jailed 则 su 未给 root",
+                    ]
+                    return result
                 time.sleep(_VERIFY_INTERVAL)
             # 重启后仍未见运行（su 受限 / 二进制架构不符？）→ 继续走下方部署流程兜底。
             logger.warning("[provision] 以 root 重启 frida-server 后仍未见运行；继续走部署流程兜底")
@@ -515,21 +588,34 @@ def _ensure_frida_server_impl(
         # 因此用 setsid/nohup 彻底脱离会话并把 std{in,out,err} 重定向掉，adb shell 才会
         # 立即返回。且**不以这一步的 returncode 判成败**——以第 8 步轮询 frida_server_running
         # 成功为准（命令本身超时/非零都不直接判失败）。
-        _start_frida_server_background(serial)
+        root_started = _start_frida_server_background(serial)
 
         # 8) 轮询验证（启动成败以此为准，不看上一步 returncode）。
         _emit(on_progress, "验证 frida-server 是否在跑")
         for _ in range(_VERIFY_RETRIES):
             try:
-                if device.frida_server_running(serial):
-                    result.update(
-                        ok=True,
-                        action="deployed",
-                        detail=f"已部署并启动 frida-server {ver}（abi {fabi}）",
-                    )
-                    return result
+                running = device.frida_server_running(serial)
             except Exception:
                 logger.exception("[provision] frida_server_running 验证轮询异常")
+                running = False
+            if running and root_started:
+                result.update(
+                    ok=True,
+                    action="deployed",
+                    detail=f"已部署并以 root 启动 frida-server {ver}（abi {fabi}）",
+                )
+                return result
+            if running and not root_started:
+                # 部署成功且在跑，但 su 没把它起成 root（spawn 会 jailed）→ 如实报告、不假成功。
+                detail = (
+                    f"已部署 frida-server {ver}（abi {fabi}）且在跑，但未能以 root 启动"
+                    "（设备 su 不接受标准 `su -c` 形态 / 已锁）；spawn 注入将 jailed，"
+                    "脱壳/运行时 hook 不可用。"
+                )
+                logger.warning("[provision] %s", detail)
+                result.update(ok=False, action="running_not_root", detail=detail)
+                result["fix_cmd"] = _manual_frida_steps(ver, abi, fabi)
+                return result
             time.sleep(_VERIFY_INTERVAL)
 
         result["detail"] = (
