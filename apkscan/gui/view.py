@@ -31,6 +31,7 @@ from apkscan.gui.controller import (
     ActionRequest,
     ActionResult,
     GuiController,
+    clamp_duration,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,9 @@ class App:
         self._last_html = ""
         self._last_out = ""
         self._action_buttons: list[ttk.Button] = []
+        # 运行中应一并禁用的输入控件（浏览 / Radio / 勾选 / Spinbox）——运行中改它们对已定型的
+        # 子进程 argv 无效，禁用避免新手误以为生效。结束随三动作按钮一起恢复（见 _set_buttons_enabled）。
+        self._input_widgets: list[ttk.Widget] = []
         # 日志框是否已有真实内容（显式初始化，不依赖 _build_ui 的调用顺序隐式契约）。
         self._log_has_content = False
 
@@ -95,6 +99,9 @@ class App:
         )
 
         self._build_ui()
+
+        # 运行中关窗安全：忙时确认→确认则先 cancel 子进程再 destroy；空闲直接关。
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # -- 窗口 / 样式 --------------------------------------------------------
 
@@ -256,40 +263,45 @@ class App:
         ttk.Label(card, text="APK 文件", style="Card.TLabel").grid(
             row=0, column=0, sticky="w", padx=(0, 10), pady=6
         )
-        ttk.Entry(card, textvariable=self.var_apk, style="Flat.TEntry").grid(
-            row=0, column=1, sticky="ew", pady=6
+        entry_apk = ttk.Entry(card, textvariable=self.var_apk, style="Flat.TEntry")
+        entry_apk.grid(row=0, column=1, sticky="ew", pady=6)
+        btn_browse_apk = ttk.Button(
+            card, text="浏览…", style="Tool.TButton", command=self._browse_apk
         )
-        ttk.Button(card, text="浏览…", style="Tool.TButton", command=self._browse_apk).grid(
-            row=0, column=2, sticky="w", padx=(10, 0), pady=6
-        )
+        btn_browse_apk.grid(row=0, column=2, sticky="w", padx=(10, 0), pady=6)
 
         # 输出目录。
         ttk.Label(card, text="输出目录", style="Card.TLabel").grid(
             row=1, column=0, sticky="w", padx=(0, 10), pady=6
         )
-        ttk.Entry(card, textvariable=self.var_out, style="Flat.TEntry").grid(
-            row=1, column=1, sticky="ew", pady=6
+        entry_out = ttk.Entry(card, textvariable=self.var_out, style="Flat.TEntry")
+        entry_out.grid(row=1, column=1, sticky="ew", pady=6)
+        btn_browse_out = ttk.Button(
+            card, text="选择…", style="Tool.TButton", command=self._browse_out
         )
-        ttk.Button(card, text="选择…", style="Tool.TButton", command=self._browse_out).grid(
-            row=1, column=2, sticky="w", padx=(10, 0), pady=6
-        )
+        btn_browse_out.grid(row=1, column=2, sticky="w", padx=(10, 0), pady=6)
 
         # 选项行：联网 / 格式 / 抓包时长。
         opts = ttk.Frame(card, style="Card.TFrame")
         opts.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 0))
 
-        ttk.Radiobutton(opts, text="离线", value=False, variable=self.var_online).pack(side="left")
-        ttk.Radiobutton(opts, text="联网富化", value=True, variable=self.var_online).pack(
-            side="left", padx=(8, 18)
-        )
+        radio_offline = ttk.Radiobutton(opts, text="离线", value=False, variable=self.var_online)
+        radio_offline.pack(side="left")
+        radio_online = ttk.Radiobutton(opts, text="联网富化", value=True, variable=self.var_online)
+        radio_online.pack(side="left", padx=(8, 18))
 
         ttk.Label(opts, text="输出：", style="Card.TLabel").pack(side="left")
-        ttk.Checkbutton(opts, text="HTML", variable=self.var_html).pack(side="left", padx=(0, 8))
-        ttk.Checkbutton(opts, text="JSON", variable=self.var_json).pack(side="left", padx=(0, 8))
-        ttk.Checkbutton(opts, text="PDF", variable=self.var_pdf).pack(side="left", padx=(0, 18))
+        chk_html = ttk.Checkbutton(opts, text="HTML", variable=self.var_html)
+        chk_html.pack(side="left", padx=(0, 8))
+        chk_json = ttk.Checkbutton(opts, text="JSON", variable=self.var_json)
+        chk_json.pack(side="left", padx=(0, 8))
+        chk_pdf = ttk.Checkbutton(opts, text="PDF", variable=self.var_pdf)
+        chk_pdf.pack(side="left", padx=(0, 18))
 
         ttk.Label(opts, text="抓包时长(秒)：", style="Card.TLabel").pack(side="left")
-        ttk.Spinbox(
+        # 存为实例属性：_start 用 widget `.get()`（返回 str，空/非数字也不抛）取值，
+        # 不再走 `IntVar.get()`（会抛 tk.TclError）。钳制责任全在 controller.clamp_duration。
+        self.spin_duration = ttk.Spinbox(
             opts,
             from_=10,
             to=600,
@@ -297,10 +309,25 @@ class App:
             width=5,
             textvariable=self.var_duration,
             style="Flat.TSpinbox",
-        ).pack(side="left")
+        )
+        self.spin_duration.pack(side="left")
         ttk.Label(opts, text="（仅一键全自动用）", style="CardHint.TLabel").pack(
             side="left", padx=(6, 0)
         )
+
+        # 注册运行中应禁用的输入控件（运行结束随三动作按钮一起恢复）。
+        self._input_widgets = [
+            entry_apk,
+            btn_browse_apk,
+            entry_out,
+            btn_browse_out,
+            radio_offline,
+            radio_online,
+            chk_html,
+            chk_json,
+            chk_pdf,
+            self.spin_duration,
+        ]
 
     def _build_action_bar(self, parent: ttk.Frame) -> None:
         bar = ttk.Frame(parent, style="TFrame")
@@ -325,6 +352,14 @@ class App:
         self._tooltip(btn_doctor, "检查设备 / root / frida / mitmproxy / CA，可自动修复")
 
         self._action_buttons = [btn_auto, btn_static, btn_doctor]
+
+        # 停止按钮：风格与 Secondary 一致；空闲禁用、运行时启用（与三动作按钮相反）。
+        # 不加入 _action_buttons（那批运行时禁用；停止逻辑相反）。
+        self.btn_stop = ttk.Button(
+            bar, text="■ 停止", style="Secondary.TButton", command=self._on_stop, state="disabled"
+        )
+        self.btn_stop.pack(side="left", padx=(10, 0))
+        self._tooltip(self.btn_stop, "终止当前任务（子进程会被结束）；空闲时不可点")
 
     def _build_log_card(self, parent: ttk.Frame) -> None:
         card = self._card(parent, row=4, sticky="nsew")
@@ -412,29 +447,102 @@ class App:
     def _on_doctor(self) -> None:
         self._start(ACTION_DOCTOR)
 
+    def _on_stop(self) -> None:
+        """停止当前任务：先防连点禁用自身，调 controller.cancel()；未在跑则复位（理论上不会）。
+
+        cancel() 终止子进程 → worker 感知 _cancelled → on_done 回友好「已取消」结果，
+        在 _on_done 里经 _set_buttons_enabled(True) 恢复三动作按钮 + 禁用停止按钮。
+        """
+        self.btn_stop.configure(state="disabled")  # 防连点
+        if not self.controller.cancel():
+            self.btn_stop.configure(state="normal")  # 没在跑，复位
+
+    def _on_close(self) -> None:
+        """关窗（WM_DELETE_WINDOW）：忙时弹确认→确认则先 cancel 子进程再 destroy；空闲直接 destroy。
+
+        用 messagebox.askyesno（返回 bool）判断用户意图，比注入的 confirm 回调（无返回值，
+        为抓包设计）更合适。cancel / destroy 失败都吞 + logging，不崩。
+        """
+        if self.controller.busy:
+            if not messagebox.askyesno(
+                "仍在运行", "任务还在跑，关闭会终止它。确定关闭吗？", parent=self.root
+            ):
+                return
+            try:
+                self.controller.cancel()
+            except Exception:
+                logger.exception("[gui] 关窗时取消任务失败（继续关闭）")
+        try:
+            self.root.destroy()
+        except Exception:
+            logger.exception("[gui] 销毁窗口失败")
+
     def _start(self, action: str) -> None:
         """组装 ActionRequest 并交给 controller；**仅受理后**才清日志 + 禁用按钮。
 
         先禁用按钮再 start；只有真正受理（start 返回 True）才清掉上一次运行日志，
         避免「忙 / 未选 APK」这类被拒场景把用户上一次的运行记录清空。
         """
+        # Spinbox widget.get() 返回当前显示文本（str），空/非数字也只返回该串、绝不抛；
+        # controller.clamp_duration 负责钳到 [10,600]。不再用 IntVar.get()（会抛 TclError）。
+        # 仅 auto 用时长：把钳后值算出来回写 Spinbox（所见即所得），坏值（如 9999/abc/空）
+        # 被静默改用 60/600 时给用户可见反馈（回写 + 日志一行），而非「填的数没生效」的困惑。
+        # raw 仍原样传给 controller（其 clamp_duration 是单一真源、幂等），view 只负责呈现一致。
+        duration_raw = self.spin_duration.get()
+        clamp_note: str | None = None
+        if action == ACTION_AUTO:
+            duration_raw, clamp_note = self._reflect_clamped_duration(duration_raw)
         request = ActionRequest(
             action=action,
             apk_path=self.var_apk.get().strip(),
             out_dir=self.var_out.get().strip() or "out",
             online=bool(self.var_online.get()),
             formats=self._collect_formats(),
-            capture_duration=int(self.var_duration.get()),
+            capture_duration_raw=duration_raw,
         )
         self._set_buttons_enabled(False)
-        if self.controller.start(request):
+        # 纵深防御：controller.start() 设计上「绝不抛」（校验函数都吞成友好结果），但万一未来有
+        # 逃逸异常（如极端非法路径），别让 traceback 静默打进 Tk 回调让按钮点击哑火——转友好
+        # messagebox + 恢复按钮。正常路径零开销。
+        try:
+            accepted = self.controller.start(request)
+        except Exception as exc:  # noqa: BLE001 - UI 回调绝不外抛；转友好提示
+            logger.exception("[gui] 发起任务时未预期异常：%s", action)
+            self._set_buttons_enabled(True)
+            messagebox.showwarning(
+                "无法开始", f"启动任务时出错（详见日志）：\n{exc}", parent=self.root
+            )
+            return
+        if accepted:
             # 已受理：清掉占位/上轮日志，开始本次运行（进度经 on_log 实时 append）。
             self._clear_log()
+            # 清日志后再补钳制提示，避免被 _clear_log 抹掉（让用户看到「实际用了多少秒」）。
+            if clamp_note:
+                self._append_log(clamp_note)
             return
         # 被拒（忙 / 校验失败）：保留上一次日志不清。controller 已经 on_done 回友好结果
         # （含恢复按钮）；但若纯粹是「忙」则 on_done 不触发，这里兜底恢复按钮。
         if not self.controller.busy:
             self._set_buttons_enabled(True)
+
+    def _reflect_clamped_duration(self, raw: str) -> tuple[str, str | None]:
+        """把抓包时长钳到合法值并回写 Spinbox（所见即所得）；返回 (钳后字符串, 可选日志提示)。
+
+        坏值（空 / 非数字 / 越界，如 ''/'abc'/'9999'）会被 controller 静默改用 60/600——这里
+        把钳后值算出来：① 若与用户原输入不同则回写 Spinbox 并给一行日志提示，让新手看到
+        「实际用了多少秒」而非困惑「我填的数没生效」；② 仍把钳后字符串交回（controller 的
+        clamp_duration 是单一真源、幂等，二次钳制无副作用）。绝不抛：回写失败仅 logging。
+        """
+        clamped = clamp_duration(raw)
+        clamped_str = str(clamped)
+        if clamped_str == (raw or "").strip():
+            return clamped_str, None  # 用户输入本就合法，无需回写 / 提示，不打扰
+        try:
+            self.var_duration.set(clamped)  # 回写 Spinbox：显示值与实际生效值一致
+        except Exception:  # noqa: BLE001 - 回写失败不影响任务，仅记日志
+            logger.exception("[gui] 回写钳制后抓包时长失败（已忽略）：%s", clamped)
+        note = f"抓包时长已调整为 {clamped} 秒（有效范围 10–600）。"
+        return clamped_str, note
 
     def _collect_formats(self) -> list[str]:
         fmts: list[str] = []
@@ -475,7 +583,14 @@ class App:
 
         if result.ok:
             self._append_log(f"✓ {result.message}")
+            if result.out_dir:
+                # 可发现性：out_dir 已由 controller 绝对化，明确告诉新手产物在哪。
+                self._append_log(f"报告已保存到 {result.out_dir}")
+        elif result.cancelled:
+            # 取消是友好结局：仅记日志，不弹 warning messagebox。
+            self._append_log(f"■ {result.message}")
         else:
+            # 真错误（含坏 APK / 坏输出目录等校验失败）：日志 + 友好 messagebox（文案来自 controller）。
             self._append_log(f"✗ {result.message}")
             messagebox.showwarning("未完全成功", result.message, parent=self.root)
 
@@ -538,7 +653,8 @@ class App:
     def _open_dir(self) -> None:
         if not self._last_out:
             return
-        target = Path(self._last_out)
+        # _last_out 现已是 controller 绝对化后的路径；resolve 幂等加固，冻结 exe 下也指向真实位置。
+        target = Path(self._last_out).resolve()
         try:
             if sys.platform == "win32":
                 os.startfile(str(target))  # noqa: S606 - Windows 资源管理器打开目录
@@ -557,9 +673,24 @@ class App:
     # -- 小工具 -------------------------------------------------------------
 
     def _set_buttons_enabled(self, enabled: bool) -> None:
+        """三动作按钮 + 输入控件启停 + 停止按钮**相反**联动。
+
+        运行时：三动作按钮 + 输入控件（浏览/Radio/勾选/Spinbox/路径框）禁用、停止按钮可点；
+        空闲时反之。运行中禁用输入是因为改它们对已定型的子进程 argv 无效，禁用避免误导新手。
+        单个 widget configure 失败（极端：已销毁）仅 logging，不影响其它控件与按钮恢复。
+        """
         state = "normal" if enabled else "disabled"
         for btn in self._action_buttons:
             btn.configure(state=state)
+        # 输入控件用 ttk 的 .state()（所有 ttk widget 通用、类型干净）：禁用置 ["disabled"]、
+        # 恢复置 ["!disabled"]。比 configure(state=) 更贴 ttk 语义，且不受泛型 Widget 存根限制。
+        widget_state = ["disabled"] if not enabled else ["!disabled"]
+        for widget in self._input_widgets:
+            try:
+                widget.state(widget_state)
+            except Exception:  # noqa: BLE001 - 单控件失败不应阻断整体启停
+                logger.exception("[gui] 切换输入控件状态失败（已忽略）")
+        self.btn_stop.configure(state=("disabled" if enabled else "normal"))
 
     def _clear_log(self) -> None:
         self.log_text.configure(state="normal")
