@@ -781,3 +781,47 @@ def test_frida_unpinning_no_no_pause_when_version_unknown(monkeypatch, tmp_path)
     """版本拿不到 → 按新版处理，不加 --no-pause。"""
     args = _capture_popen_args(monkeypatch, "", tmp_path)
     assert "--no-pause" not in args
+
+
+class _FakeServerConn:
+    def __init__(self, peername) -> None:  # noqa: ANN001
+        self.peername = peername
+
+
+class _FakeFlowWithConn:
+    def __init__(self, request: "_FakeRequest", server_conn: "_FakeServerConn") -> None:
+        self.request = request
+        self.server_conn = server_conn
+
+
+def test_parse_flows_extracts_server_ip(monkeypatch, tmp_path):  # noqa: ANN001
+    """server_conn.peername 的**实连服务器 IP** 作为运行时端点产出（C2 真实落点，调证关键）。"""
+    flows_file = tmp_path / "flows.mitm"
+    flows_file.write_bytes(b"\x00data")
+
+    flows = [
+        _FakeFlowWithConn(
+            _FakeRequest("https://gw.hxhcapi.vip/cfg", "gw.hxhcapi.vip", "https"),
+            _FakeServerConn(("203.0.113.9", 443)),
+        ),
+    ]
+    fake_io = type(
+        "io",
+        (),
+        {"FlowReader": staticmethod(lambda fh: type("R", (), {"stream": lambda self: iter(flows)})())},
+    )
+    fake_http = type("http", (), {"HTTPFlow": _FakeFlowWithConn})
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "mitmproxy", type("m", (), {}))
+    monkeypatch.setitem(sys.modules, "mitmproxy.io", fake_io)
+    monkeypatch.setitem(sys.modules, "mitmproxy.http", fake_http)
+
+    eps = capture._parse_flows(flows_file)
+    by_value = {ep.value: ep for ep in eps}
+
+    assert "203.0.113.9" in by_value  # 实连服务器 IP 被抽出
+    assert by_value["203.0.113.9"].kind == "ip"
+    assert "gw.hxhcapi.vip" in by_value  # 域名也在
+    assert all(ev.source == "runtime" for ep in eps for ev in ep.evidences)

@@ -333,6 +333,7 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
                 warn = (
                     f"frida 注入失败/秒退（frida-server 版本不匹配 / 包名不存在 / "
                     f"spawn 失败？）stderr 尾部：{err}；HTTPS 可能仅密文"
+                    f"{device.frida_spawn_hint(err)}"
                 )
                 logger.warning("[capture] %s", warn)
                 playbook.append(warn)
@@ -654,10 +655,7 @@ def _parse_flows(flows_file: Path) -> list[Endpoint]:
             for flow in reader.stream():
                 if not isinstance(flow, mitm_http.HTTPFlow):
                     continue
-                req = getattr(flow, "request", None)
-                if req is None:
-                    continue
-                _collect_flow_endpoints(req, str(flows_file), collector)
+                _collect_flow_endpoints(flow, str(flows_file), collector)
     except Exception:
         logger.exception("[capture] 解析流文件失败：%s（仅记原始路径）", flows_file)
         return list(collector.values())
@@ -668,28 +666,45 @@ def _parse_flows(flows_file: Path) -> list[Endpoint]:
 
 
 def _collect_flow_endpoints(
-    request: object, location: str, collector: dict[str, Endpoint]
+    flow: object, location: str, collector: dict[str, Endpoint]
 ) -> None:
-    """从单条 mitmproxy 请求对象提取 url + host，去重累积进 collector。"""
-    url = getattr(request, "pretty_url", None) or getattr(request, "url", None)
-    host = getattr(request, "pretty_host", None) or getattr(request, "host", None)
-    scheme = getattr(request, "scheme", "") or ""
+    """从单条 mitmproxy 流提取 url + host(域名) + **服务器实连 IP**，去重累积进 collector。
 
-    if isinstance(url, str) and url:
-        ep = collector.get(url)
-        if ep is None:
+    ``flow.server_conn.peername`` 是经 mitmproxy 中转后**实际连到的上游服务器 IP**——即 C2
+    域名在抓包当时真实解析到的落点 IP（连去哪个机房/IDC），比仅有域名更直接可调取（可凭 IP
+    向 IDC/云厂商调取租用主体）。故除 url/域名外，把实连 IP 也作为运行时端点产出。
+    """
+    request = getattr(flow, "request", None)
+    host: str | None = None
+    if request is not None:
+        url = getattr(request, "pretty_url", None) or getattr(request, "url", None)
+        host = getattr(request, "pretty_host", None) or getattr(request, "host", None)
+        scheme = getattr(request, "scheme", "") or ""
+        if isinstance(url, str) and url and url not in collector:
             collector[url] = Endpoint(
                 value=url,
                 kind="url",
                 evidences=[Evidence(source="runtime", location=location, snippet=url)],
                 is_cleartext=str(scheme).lower() == "http" or url.lower().startswith("http://"),
             )
-    if isinstance(host, str) and host and "." in host:
-        if host not in collector:
+        if isinstance(host, str) and host and "." in host and host not in collector:
             collector[host] = Endpoint(
                 value=host,
                 kind="domain",
                 evidences=[Evidence(source="runtime", location=location, snippet=host)],
+            )
+
+    # 服务器实连 IP（C2 真实落点）：mitmproxy 上游连接的 peername=(ip, port)。
+    server_conn = getattr(flow, "server_conn", None)
+    peername = getattr(server_conn, "peername", None) if server_conn is not None else None
+    if isinstance(peername, (tuple, list)) and len(peername) >= 1:
+        ip = peername[0]
+        if isinstance(ip, str) and ip and ip not in collector:
+            note = f"{ip}（{host} 实连服务器 IP）" if isinstance(host, str) and host else f"{ip}（实连服务器 IP）"
+            collector[ip] = Endpoint(
+                value=ip,
+                kind="ip",
+                evidences=[Evidence(source="runtime", location=location, snippet=note)],
             )
 
 

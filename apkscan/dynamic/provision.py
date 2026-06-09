@@ -59,6 +59,9 @@ _FRIDA_RELEASE_URL = (
 # frida-server 在设备上的部署路径。
 _FRIDA_SERVER_REMOTE = "/data/local/tmp/frida-server"
 
+# adb install 超时（秒）：大 APK / 加固包安装可能较慢。
+_INSTALL_TIMEOUT = 180.0
+
 # urllib 下载超时（秒）。GitHub releases 大文件，给足时间但仍有上限。
 _DOWNLOAD_TIMEOUT = 60.0
 
@@ -136,8 +139,14 @@ def _adb_ok(extra: list[str], serial: str | None = None) -> bool:
     if proc is None:
         return False
     if proc.returncode != 0:
+        # 带上 stderr 尾部：排障需要看到真因（如 "more than one device" / "device offline"
+        # / "read-only file system"），否则只看到「非零退出」无从判断。
+        err = (proc.stderr or "").strip()
         logger.warning(
-            "[provision] adb 非零退出（%s）：%s", proc.returncode, " ".join(extra)
+            "[provision] adb 非零退出（%s）：%s%s",
+            proc.returncode,
+            " ".join(extra),
+            f"（{err[-200:]}）" if err else "",
         )
         return False
     return True
@@ -283,11 +292,18 @@ def _start_frida_server_background(serial: str | None) -> None:
     管道阻塞到 subprocess 超时，误把"已启动"判成失败。本函数只负责把它拉起来，
     成败由调用方随后轮询 ``device.frida_server_running`` 判定（不依赖本步 returncode）。
     """
+    # 先杀掉可能已在跑的**非 root** frida-server：su 型设备（adb root 不可用）上若先有非 root
+    # 实例占着端口，root 实例就起不来 → frida-ps 能列进程但 spawn 注入失败（"need Gadget /
+    # jailed Android"）。杀掉后再以 root 重起，确保 spawn 可用。失败无害（本就没在跑）。
+    _adb_ok(["shell", "su", "-c", "pkill -f frida-server"], serial)
+    _adb_ok(["shell", "pkill", "-f", "frida-server"], serial)
+
     for cmd in _FRIDA_START_CMDS:
-        # 两条都尝试一遍（setsid 不存在则 nohup 兜底），不以 returncode 短路——returncode
-        # 在脱离会话写法下不可靠。每条优先直执（adb root 后 uid0）、su 兜底。
-        _adb_ok(["shell", cmd], serial)
+        # **root 优先**：spawn 注入必须 root frida-server。先 su -c（root）把端口占住，
+        # 直执（非 root）仅作无 su 时的兜底——顺序反了会让非 root 实例先占端口致 spawn 失败。
+        # 两条 setsid/nohup 都试一遍；不以 returncode 短路（脱离会话写法下不可靠）。
         _adb_ok(["shell", "su", "-c", cmd], serial)
+        _adb_ok(["shell", cmd], serial)
 
 
 def _manual_frida_steps(ver: str, abi: str, fabi: str) -> list[str]:
@@ -305,6 +321,52 @@ def _manual_frida_steps(ver: str, abi: str, fabi: str) -> list[str]:
         f"adb shell su -c 'setsid {_FRIDA_SERVER_REMOTE} >/dev/null 2>&1 &'",
         "frida-ps -U  # 验证 frida-server 在跑",
     ]
+
+
+def install_apk(apk_path: str, serial: str | None = None) -> dict:
+    """把 APK 安装到设备（dynamic spawn 前置：``frida -f <pkg>`` 要 spawn 的是**已安装**的 app）。
+
+    用 ``adb install -r -t -g``（-r 覆盖安装、-t 允许 test 包、-g 自动授运行时权限）。
+    绝不抛，返回 ``{ok, detail}``：
+    - 成功（输出含 Success）→ ok=True。
+    - 已装同包但签名不同（INSTALL_FAILED_UPDATE_INCOMPATIBLE / signatures）→ ok=False，
+      detail 提示先 ``adb uninstall <pkg>``（不自动卸载，避免误删用户设备上的同名 app 数据）。
+    - adb 不可用 / apk 不存在 / 超时 / 非零 → ok=False + detail。
+    """
+    exe = tools.adb_path()
+    if not exe:
+        return {"ok": False, "detail": "adb 不可用，无法安装 APK 到设备"}
+    if not apk_path or not Path(apk_path).is_file():
+        return {"ok": False, "detail": f"APK 文件不存在，无法安装：{apk_path}"}
+
+    args = [exe, *(["-s", serial] if serial else []), "install", "-r", "-t", "-g", apk_path]
+    try:
+        proc = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_INSTALL_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("[provision] adb install 超时（%ss）：%s", _INSTALL_TIMEOUT, apk_path)
+        return {"ok": False, "detail": f"adb install 超时（{_INSTALL_TIMEOUT:.0f}s）"}
+    except Exception:
+        logger.exception("[provision] adb install 异常：%s", apk_path)
+        return {"ok": False, "detail": "adb install 异常（详见日志）"}
+
+    out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+    if proc.returncode == 0 and "Success" in out:
+        return {"ok": True, "detail": "APK 已安装到设备"}
+    low = out.lower()
+    if "signatures do not match" in low or "update_incompatible" in low:
+        return {
+            "ok": False,
+            "detail": "设备上已装同包名但签名不同的 app；请先 `adb uninstall <包名>` 再重试",
+        }
+    return {"ok": False, "detail": f"adb install 失败：{out[-300:]}"}
 
 
 def ensure_frida_server(
@@ -350,13 +412,40 @@ def _ensure_frida_server_impl(
         "fix_cmd": [],
     }
 
-    # 1) 已在跑 → 直接成功。
+    # 1) 已在跑 → 进一步确认是 **root**（spawn 注入必须 root frida-server；非 root 会被
+    #    frida 判为 jailed、要求 Gadget 注入 → 脱壳/抓包 spawn 全失败）。非 root 则杀掉
+    #    以 root 重启（自愈，无需用户手动 pkill）。
     try:
         if device.frida_server_running(serial):
-            result.update(
-                ok=True, action="already_running", detail="设备上 frida-server 已在运行"
+            if device.frida_server_is_root(serial):
+                result.update(
+                    ok=True, action="already_running", detail="设备上 frida-server 已在运行（root）"
+                )
+                return result
+            # 未确认 root（含 ps 看不到 frida-server 行的 MuMu 等）→ 杀掉以 root 重启
+            # （_start_frida_server_background 含 pkill + su -c 优先）。重启后**只验
+            # frida_server_running**（frida-ps 可达）即可：用 su -c 起的、起来即 root；
+            # 不再回头查 frida_server_is_root（它在 ps 不认 frida-server 时永远确认不了，
+            # 会让自愈成功也判失败、继续白走部署）。
+            _emit(on_progress, "frida-server 未确认 root，杀掉以 root 重启（spawn 注入需 root）")
+            logger.warning(
+                "[provision] frida-server 未确认以 root 运行（spawn 会 jailed）；杀掉以 root 重启"
             )
-            return result
+            _start_frida_server_background(serial)
+            for _ in range(_VERIFY_RETRIES):
+                try:
+                    if device.frida_server_running(serial):
+                        result.update(
+                            ok=True,
+                            action="restarted_as_root",
+                            detail="未确认 root，已杀掉并以 root（su -c）重启 frida-server",
+                        )
+                        return result
+                except Exception:
+                    logger.exception("[provision] root 重启后验证轮询异常")
+                time.sleep(_VERIFY_INTERVAL)
+            # 重启后仍未见运行（su 受限 / 二进制架构不符？）→ 继续走下方部署流程兜底。
+            logger.warning("[provision] 以 root 重启 frida-server 后仍未见运行；继续走部署流程兜底")
     except Exception:
         logger.exception("[provision] frida_server_running 探测异常（按未运行处理）")
 

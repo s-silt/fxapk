@@ -114,7 +114,9 @@ def test_host_frida_version_unparseable_returns_empty(monkeypatch):
 
 
 def test_ensure_frida_server_already_running_ok(monkeypatch):
+    # 已在跑 + 确认 root → already_running（严格 is_root：需显式 mock 为 True 走此路径）。
     monkeypatch.setattr(device, "frida_server_running", lambda serial=None: True)
+    monkeypatch.setattr(device, "frida_server_is_root", lambda serial=None: True)
     res = provision.ensure_frida_server()
     assert res["ok"] is True
     assert res["action"] == "already_running"
@@ -801,3 +803,85 @@ def test_adb_subprocess_uses_utf8_replace(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert captured.get("encoding") == "utf-8"
     assert captured.get("errors") == "replace"
+
+
+def test_ensure_frida_server_restarts_non_root_as_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """真机实测自愈：检测到非 root frida-server → 杀掉以 root 重启，action=restarted_as_root。"""
+    monkeypatch.setattr(provision.device, "frida_server_running", lambda serial=None: True)
+    # is_root：初查非 root(False) → 重启后 root(True)。
+    states = iter([False, True])
+    monkeypatch.setattr(provision.device, "frida_server_is_root", lambda serial=None: next(states))
+    started: list[object] = []
+    monkeypatch.setattr(
+        provision, "_start_frida_server_background", lambda serial=None: started.append(serial)
+    )
+    monkeypatch.setattr(provision.time, "sleep", lambda *_a: None)
+
+    res = provision.ensure_frida_server()
+    assert res["ok"] is True
+    assert res["action"] == "restarted_as_root"
+    assert started  # 确实调了重启
+
+
+def test_ensure_frida_server_already_running_root_no_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """root frida-server 已在跑 → already_running，不重启。"""
+    monkeypatch.setattr(provision.device, "frida_server_running", lambda serial=None: True)
+    monkeypatch.setattr(provision.device, "frida_server_is_root", lambda serial=None: True)
+    started: list[object] = []
+    monkeypatch.setattr(
+        provision, "_start_frida_server_background", lambda serial=None: started.append(serial)
+    )
+    res = provision.ensure_frida_server()
+    assert res["ok"] is True
+    assert res["action"] == "already_running"
+    assert not started  # 没重启
+
+
+# ---------------------------------------------------------------------------
+# install_apk：dynamic spawn 前置（adb install -r -t -g）
+# ---------------------------------------------------------------------------
+
+
+def test_install_apk_success(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    apk = tmp_path / "x.apk"
+    apk.write_bytes(b"PK\x03\x04")
+    monkeypatch.setattr(provision.tools, "adb_path", lambda: "/usr/bin/adb")
+    monkeypatch.setattr(
+        provision.subprocess, "run", lambda *a, **k: _FakeCompleted(0, "Success\n")
+    )
+    res = provision.install_apk(str(apk))
+    assert res["ok"] is True
+
+
+def test_install_apk_signature_conflict_hints_uninstall(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    apk = tmp_path / "x.apk"
+    apk.write_bytes(b"PK")
+    monkeypatch.setattr(provision.tools, "adb_path", lambda: "/usr/bin/adb")
+    monkeypatch.setattr(
+        provision.subprocess,
+        "run",
+        lambda *a, **k: _FakeCompleted(
+            1, "", "Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE: signatures do not match]"
+        ),
+    )
+    res = provision.install_apk(str(apk))
+    assert res["ok"] is False
+    assert "uninstall" in res["detail"]
+
+
+def test_install_apk_no_adb(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    apk = tmp_path / "x.apk"
+    apk.write_bytes(b"PK")
+    monkeypatch.setattr(provision.tools, "adb_path", lambda: "")
+    assert provision.install_apk(str(apk))["ok"] is False
+
+
+def test_install_apk_missing_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(provision.tools, "adb_path", lambda: "/usr/bin/adb")
+    assert provision.install_apk("/no/such/file.apk")["ok"] is False

@@ -177,6 +177,14 @@ def _patch_merge(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 def _set_device(monkeypatch: pytest.MonkeyPatch, present: bool) -> None:
     monkeypatch.setattr(auto.device, "has_device", lambda: present)
+    # 有设备时 auto 会在脱壳/抓包前调 provision.ensure_frida_server / install_apk；mock 掉
+    # 避免单测触发真 adb / frida-ps -U（无设备 → 数秒超时，拖慢测试）。
+    import apkscan.dynamic.provision as _prov
+
+    monkeypatch.setattr(
+        _prov, "ensure_frida_server", lambda *a, **k: {"ok": True, "action": "already_running"}
+    )
+    monkeypatch.setattr(_prov, "install_apk", lambda *a, **k: {"ok": True, "detail": "已安装"})
 
 
 def _status_of(steps: list[dict], name: str) -> str:
@@ -661,3 +669,21 @@ def test_analyze_static_callbacks_none_ok(monkeypatch: pytest.MonkeyPatch) -> No
 
 # silence unused import warnings for path helper (kept for parity/readability).
 _ = Path
+
+
+def test_run_install_app_done_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    import apkscan.dynamic.provision as _prov
+    from apkscan.dynamic import auto as _auto
+
+    monkeypatch.setattr(_prov, "install_apk", lambda apk, serial=None: {"ok": True, "detail": "已安装"})
+    step = _auto._run_install_app("x.apk", on_progress=None)
+    assert step["status"] == "done"
+
+
+def test_run_install_app_error_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    import apkscan.dynamic.provision as _prov
+    from apkscan.dynamic import auto as _auto
+
+    monkeypatch.setattr(_prov, "install_apk", lambda apk, serial=None: {"ok": False, "detail": "失败"})
+    step = _auto._run_install_app("x.apk", on_progress=None)
+    assert step["status"] == "error"

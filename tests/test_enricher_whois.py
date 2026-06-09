@@ -224,3 +224,47 @@ def test_domain_normalized_lowercase_in_cache(
     assert "mixedcase.cn" in cache
     # 触网时用归一化后的域名。
     assert fake_whois.calls[0][0] == "mixedcase.cn"
+
+
+# --- 系统性失败：数据文件缺失（打包 exe 未收 whois 数据）优雅降级 --------------
+
+
+def test_missing_data_file_disables_whois_for_run(
+    fake_whois: _FakeWhoisModule, _isolated_cache: Path
+) -> None:
+    """whois 数据文件缺失(FileNotFoundError，常见于 frozen exe 未收 whois 数据)：
+    首次失败记一次提示并本次禁用，后续域名短路、不再触网、不再刷 traceback。"""
+    fake_whois.raises = FileNotFoundError("public_suffix_list.dat 缺失")
+    enr = WhoisEnricher()
+
+    r1 = enr.enrich(_ep("a.fraud-gw.cn"))
+    assert r1.ok is False
+    assert "数据" in (r1.error or "")
+    assert len(fake_whois.calls) == 1  # 触网一次
+
+    # 第二个域名：已禁用 → 短路，不再触网。
+    r2 = enr.enrich(_ep("b.fraud-gw.cn"))
+    assert r2.ok is False
+    assert len(fake_whois.calls) == 1  # 仍只 1 次（被短路）
+
+
+def test_short_err_strips_whois_boilerplate() -> None:
+    """WHOIS 大段 VeriSign 法律声明 boilerplate → 只留首行关键信息（去噪）。"""
+    from apkscan.enrichers.whois import _short_err
+
+    boilerplate = (
+        'No match for "MAPS.GOOGLEAPIS.COM".\n\n'
+        ">>> Last update of whois database: 2026-06-09T16:04:21Z <<<\n\n"
+        "NOTICE: The expiration date displayed ...\n\n"
+        "TERMS OF USE: You are not authorized ...\n"
+    )
+    out = _short_err(Exception(boilerplate))
+    assert out == 'No match for "MAPS.GOOGLEAPIS.COM".'
+    assert "NOTICE" not in out
+    assert "TERMS OF USE" not in out
+
+
+def test_short_err_caps_length() -> None:
+    from apkscan.enrichers.whois import _short_err
+
+    assert len(_short_err(Exception("x" * 500))) <= 120

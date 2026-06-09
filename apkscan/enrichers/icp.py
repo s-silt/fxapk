@@ -179,7 +179,13 @@ class IcpEnricher(BaseEnricher):
         try:
             data = self._query(domain)
         except IcpUnavailable as exc:
-            logger.info("ICP 自动查询不可用：%s（%s）", domain, exc)
+            # 「未配置 provider」是系统性不可用（每个域名都一样）：只在首个域名记一次，
+            # 之后各域名静默返回人工核验链接，避免逐域名刷 INFO 噪声（与 whois 降级一致）。
+            if not getattr(self, "_unavailable_logged", False):
+                self._unavailable_logged = True
+                logger.info(
+                    "ICP 自动查询不可用（%s）；本次起对各域名静默返回人工核验链接", exc
+                )
             return EnrichmentResult(
                 provider=self.name,
                 ok=False,
