@@ -76,7 +76,7 @@ python -m pip install -e .
 > 单元测试**不依赖 androguard、不联网、不需要真机/jadx/frida**（全部基于 `FakeContext` 合成数据）：
 > ```bash
 > python -m pip install jinja2 typer python-whois requests pyyaml pytest
-> python -m pytest -q          # 654 passed
+> python -m pytest -q          # 698 passed
 > ```
 
 可选依赖（缺失时对应能力**优雅降级**，核心不受影响、不报错）：
@@ -208,7 +208,7 @@ apkscan/
   dynamic/    doctor（体检）/ provision（自动配 frida-server·CA）/ unpack（脱壳）/ capture（抓包）/ merge（运行时端点并回）/ auto（一键编排）
   report/     html / json / pdf + templates/
   rules/      *.yaml（SDK/加固/支付/配置键/权限等规则库，数据与代码分离）
-tests/        654 个单测（FakeContext，离线）
+tests/        698 个单测（FakeContext，离线）
 docs/         设计文档
 ```
 
