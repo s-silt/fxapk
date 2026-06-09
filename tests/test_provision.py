@@ -778,3 +778,26 @@ def test_module_has_no_forbidden_calls():
 
 # 占位：保证 io 导入被使用（部分替身用 BytesIO 风格时引用），避免 ruff F401。
 _ = _io.BytesIO
+
+
+# ---------------------------------------------------------------------------
+# GBK 回归：动态 subprocess 必须 encoding=utf-8 + errors=replace
+# ---------------------------------------------------------------------------
+
+
+def test_adb_subprocess_uses_utf8_replace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """真机实测 bug 回归：adb/frida 子进程曾因 text=True 缺 encoding，在 Windows 上按
+    GBK 解输出，遇非 GBK 字节（如 0xad）崩 _readerthread。锁死：必须传 encoding=utf-8 +
+    errors=replace，坏字节降级替换而非崩溃。"""
+    monkeypatch.setattr(provision.tools, "adb_path", lambda: "/usr/bin/adb")
+    captured: dict[str, Any] = {}
+
+    def _spy_run(_args: list[str], **kwargs: Any) -> _FakeCompleted:
+        captured.update(kwargs)
+        return _FakeCompleted(returncode=0, stdout="ok")
+
+    monkeypatch.setattr(provision.subprocess, "run", _spy_run)
+    provision._adb(["devices"])
+
+    assert captured.get("encoding") == "utf-8"
+    assert captured.get("errors") == "replace"
