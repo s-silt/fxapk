@@ -42,6 +42,8 @@ def _run(args: list[str], timeout: float = _DEFAULT_TIMEOUT) -> subprocess.Compl
             [exe, *args[1:]],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
             check=False,
         )

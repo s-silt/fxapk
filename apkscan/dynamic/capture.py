@@ -479,6 +479,8 @@ def _device_frida_version(serial: str | None = None) -> str:
             args,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=device._DEFAULT_TIMEOUT,
             check=False,
         )
@@ -571,6 +573,8 @@ def _adb(extra: list[str]) -> bool:
             [exe, *extra],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=device._DEFAULT_TIMEOUT,
             check=False,
         )

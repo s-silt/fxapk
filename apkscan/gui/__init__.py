@@ -46,6 +46,10 @@ def main() -> None:
     headless 环境只要不调用 ``main()`` 就永远不构造 Tk。
     """
     _ensure_std_streams()
+    # 标准流就绪后再开 UTF-8（reconfigure 需流非 None）：自身日志中文不乱码 + 子进程继承。
+    from apkscan.core.utf8 import enable_utf8_runtime
+
+    enable_utf8_runtime()
     from apkscan.gui.view import run_app
 
     run_app()

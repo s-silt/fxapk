@@ -581,6 +581,11 @@ def _print_summary(report: Report) -> None:
 
 def main() -> None:
     """[project.scripts] 入口。"""
+    # 入口先开 UTF-8 环境：修控制台中文乱码 + 让后续 adb/frida 子进程自动带 UTF-8
+    # （Windows 默认 GBK，否则读子进程输出遇非 GBK 字节会崩）。
+    from apkscan.core.utf8 import enable_utf8_runtime
+
+    enable_utf8_runtime()
     app()
 
 

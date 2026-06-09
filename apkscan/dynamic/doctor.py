@@ -161,6 +161,8 @@ def _frida_ps_reachable(serial: str | None = None) -> bool:
             args,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=device._DEFAULT_TIMEOUT,
             check=False,
         )

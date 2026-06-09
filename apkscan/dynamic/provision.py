@@ -114,6 +114,8 @@ def _adb(extra: list[str], serial: str | None = None) -> subprocess.CompletedPro
             args,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=device._DEFAULT_TIMEOUT,
             check=False,
         )
@@ -191,6 +193,8 @@ def host_frida_version() -> str:
             [*inv, "--version"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=device._DEFAULT_TIMEOUT,
             check=False,
         )
@@ -514,6 +518,8 @@ def _hash_via_openssl(pem_path: Path) -> str:
             [exe, "x509", "-inform", "PEM", "-subject_hash_old", "-in", str(pem_path), "-noout"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=device._DEFAULT_TIMEOUT,
             check=False,
         )
