@@ -1,0 +1,98 @@
+# apkscan — webview_jsbridge 分析器规则
+#
+# 由 apkscan.core.registry.load_rules("webview_jsbridge") 读取。
+# 审查 WebView/JS-bridge 攻击面：H5（常服务端下发/可控）经桥调用原生能力 + 危险 WebSettings。
+#
+# 顶层 dict：
+#   signals:              信号列表。每条：
+#     id/title/severity/description/recommendation/references
+#     dex_tokens:         任一在 DEX 字符串里出现即触发。
+#     all_tokens:         全部出现才触发（组合信号，如危险 WebSettings 共现）。
+#     resource_tokens:    任一在 assets/www 的 .js/.html 文本里出现即触发（H5 侧调用）。
+#   bridge_object_hints:  桥接框架/对象名 token -> 厂商（命中 → CONFIG_KEY Lead）。
+#
+# severity：INFO/LOW/MEDIUM/HIGH/CRITICAL。
+signals:
+  - id: WV-ADD-JS-INTERFACE
+    title: "WebView 暴露 JS-bridge (addJavascriptInterface)"
+    severity: HIGH
+    dex_tokens: ["addJavascriptInterface"]
+    description: >-
+      代码调用 addJavascriptInterface，把 Java 对象（@JavascriptInterface 方法）暴露给
+      WebView 内的 H5 页面。涉诈 uni-app/H5 样本中，H5 前端常由服务端下发/可控，桥接面
+      意味着「服务端可经网页驱动设备原生能力」。这是混合应用最关键的攻击面。
+    recommendation: >-
+      研判：结合 jadx 反编译确认被暴露对象的 @JavascriptInterface 方法清单（能读设备信息/
+      发短信/读通讯录/调支付？），以及 H5 是否远程加载——网页可控 + 强桥接 = 远程驱动能力。
+    references:
+      - "https://developer.android.com/reference/android/webkit/WebView#addJavascriptInterface(java.lang.Object,%20java.lang.String)"
+
+  - id: WV-DANGEROUS-WEBSETTINGS
+    title: "WebView 危险配置：file:// + JS 提权"
+    severity: HIGH
+    all_tokens: ["setJavaScriptEnabled", "setAllowFileAccessFromFileURLs"]
+    description: >-
+      WebView 同时开启 JavaScript 与 file:// 协议跨源访问（setAllowFileAccessFromFileURLs /
+      setAllowUniversalAccessFromFileURLs）。恶意/被劫持网页可借此读取本地文件（私有目录、
+      其它 app 数据），是本地文件窃取与提权的经典面。
+    recommendation: "研判：核查 WebView 是否加载远程/不可信内容，结合 file:// 访问评估本地数据泄露风险。"
+    references:
+      - "https://developer.android.com/reference/android/webkit/WebSettings#setAllowFileAccessFromFileURLs(boolean)"
+
+  - id: WV-UNIVERSAL-ACCESS
+    title: "WebView 开启 file:// 通用跨源访问 (setAllowUniversalAccessFromFileURLs)"
+    severity: HIGH
+    dex_tokens: ["setAllowUniversalAccessFromFileURLs"]
+    description: >-
+      WebView 开启 file:// 页面对任意源的访问。结合 JS 与本地 H5，可被构造为读取本地文件
+      并外发的通道。
+    recommendation: "研判：核查是否与 addJavascriptInterface / 远程内容共现，评估本地文件外发风险。"
+    references: []
+
+  - id: WV-EVALUATE-JS
+    title: "WebView JS 注入面 (evaluateJavascript / javascript:)"
+    severity: MEDIUM
+    dex_tokens: ["evaluateJavascript"]
+    resource_tokens: ["javascript:"]
+    description: >-
+      代码经 evaluateJavascript 或 loadUrl("javascript:...") 向 WebView 注入脚本。属 JS 注入面，
+      若注入内容含可控数据（服务端下发）则可被滥用。
+    recommendation: "研判：核查注入脚本内容来源是否可控。"
+    references: []
+
+  - id: WV-SAVE-PASSWORD
+    title: "WebView 明文保存密码 (setSavePassword)"
+    severity: MEDIUM
+    dex_tokens: ["setSavePassword"]
+    description: >-
+      WebView 开启密码保存（setSavePassword(true)）。会把表单密码明文存入数据库，是凭据泄露面。
+    recommendation: "研判：核查是否在登录/支付 WebView 上开启，评估凭据泄露风险。"
+    references: []
+
+  - id: WV-H5-BRIDGE-CALL
+    title: "H5 前端调用原生桥 (window.bridge / webkit.messageHandlers)"
+    severity: MEDIUM
+    resource_tokens:
+      - "webkit.messageHandlers"
+      - "window.webkit"
+      - "uni.postMessage"
+      - "window.__dcloud"
+      - "window.JSBridge"
+      - "window.AndroidNative"
+      - "window.android."
+      - "_dsbridge"
+      - "window._dswk"
+      - "prompt('_dsbridge"
+    description: >-
+      assets/www 下的 H5 前端代码出现调用原生桥的写法（webkit.messageHandlers / window.<bridge> /
+      uni.postMessage 等），确认桥接在实际被 H5 使用——「网页驱动原生」链路成立。
+    recommendation: "研判：结合 addJavascriptInterface 暴露的方法，还原 H5→原生 的完整能力链。"
+    references: []
+
+# 已知 WebView/JS-bridge 框架与桥接对象名 → 厂商（命中产 CONFIG_KEY Lead）。
+bridge_object_hints:
+  "com.tencent.smtt": "腾讯（X5 / TBS WebView）"
+  "com.uc.webview": "UC（U4 WebView）"
+  "wendu.dsbridge": "DSBridge（开源 JS-bridge 框架）"
+  "com.github.lzyzsd.jsbridge": "JsBridge（lzyzsd 开源框架）"
+  "io.dcloud": "DCloud（uni-app / 5+ Runtime）"
