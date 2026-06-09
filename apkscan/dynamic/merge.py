@@ -446,6 +446,7 @@ def merge_and_rerender(
     report: Report,
     endpoints: list[Endpoint],
     out_dir: str,
+    base: str = "report",
     *,
     formats: list[str] | None = None,
     on_progress: Callable[[str], None] | None = None,
@@ -456,13 +457,16 @@ def merge_and_rerender(
     供 cli ``analyze --dynamic`` 在 capture 后调用：先 :func:`merge_runtime_endpoints`
     就地补全 report，再（C5b）用静态配方对 runtime_report.json 的信封报文
     :func:`decrypt_runtime_messages` 解密、把明文端点并入，最后惰性 import
-    ``apkscan.report.{json,html}`` 覆盖写 ``out_dir/report.{json,html}``，使真·C2 与
+    ``apkscan.report.{json,html}`` 覆盖写 ``out_dir/<base>.{json,html}``，使真·C2 与
     解密还原的接口契约都进入主线索清单与报告。
 
     Args:
         report: 主报告，就地被修改。
         endpoints: 运行时端点。
         out_dir: 报告输出目录（与 analyze 首次写出一致）。
+        base: 报告文件名 base（APK 名去后缀）。**必须与静态首次写出同一 base**，否则静态
+            写 ``<apk>.*`` 而重渲写 ``report.*`` 产两套报告。默认 ``"report"`` 仅兜底，
+            调用方应显式传同一 base。
         formats: 要重渲的格式，默认 ``["html", "json"]``。
         on_progress: 可选进度回调。
         runtime_report_path: runtime_report.json 路径（含 messages 信封）；默认
@@ -495,11 +499,11 @@ def merge_and_rerender(
 
     report_paths: list[str] = []
     if "json" in fmts:
-        json_path = _rerender_json(report, out_path, on_progress)
+        json_path = _rerender_json(report, out_path, base, on_progress)
         if json_path:
             report_paths.append(json_path)
     if "html" in fmts:
-        html_path = _rerender_html(report, out_path, on_progress)
+        html_path = _rerender_html(report, out_path, base, on_progress)
         if html_path:
             report_paths.append(html_path)
 
@@ -507,30 +511,34 @@ def merge_and_rerender(
     return stats
 
 
-def _rerender_json(report: Report, out_path: Any, on_progress: Callable[[str], None] | None) -> str:
-    """惰性 import report.json 并覆盖写 report.json；失败记 logging 返回空串（不致命）。"""
-    target = out_path / "report.json"
-    _emit(on_progress, "重渲 report.json ...")
+def _rerender_json(
+    report: Report, out_path: Any, base: str, on_progress: Callable[[str], None] | None
+) -> str:
+    """惰性 import report.json 并覆盖写 ``<base>.json``；失败记 logging 返回空串（不致命）。"""
+    target = out_path / f"{base}.json"
+    _emit(on_progress, f"重渲 {base}.json ...")
     try:
         from apkscan.report import json as report_json
 
         report_json.dump(report, str(target))
     except Exception:  # noqa: BLE001 - 单格式重渲失败不致命，不计入 report_paths
-        logger.exception("[merge] 重渲 report.json 失败：%s", target)
+        logger.exception("[merge] 重渲 %s 失败：%s", target.name, target)
         return ""
     return str(target)
 
 
-def _rerender_html(report: Report, out_path: Any, on_progress: Callable[[str], None] | None) -> str:
-    """惰性 import report.html 并覆盖写 report.html；失败记 logging 返回空串（不致命）。"""
-    target = out_path / "report.html"
-    _emit(on_progress, "重渲 report.html ...")
+def _rerender_html(
+    report: Report, out_path: Any, base: str, on_progress: Callable[[str], None] | None
+) -> str:
+    """惰性 import report.html 并覆盖写 ``<base>.html``；失败记 logging 返回空串（不致命）。"""
+    target = out_path / f"{base}.html"
+    _emit(on_progress, f"重渲 {base}.html ...")
     try:
         from apkscan.report import html as report_html
 
         report_html.render(report, str(target))
     except Exception:  # noqa: BLE001 - 单格式重渲失败不致命，不计入 report_paths
-        logger.exception("[merge] 重渲 report.html 失败：%s", target)
+        logger.exception("[merge] 重渲 %s 失败：%s", target.name, target)
         return ""
     return str(target)
 

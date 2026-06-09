@@ -78,9 +78,11 @@ def _patch_static_ok(
     report = _make_report(package_name)
     monkeypatch.setattr(apk_mod, "load_apk", lambda *a, **k: _FakeCtx(package_name))
     monkeypatch.setattr(pipeline_mod, "run", lambda ctx, config: report)
-    # 不写真报告：替换 auto 的内部写报告函数，返回固定路径。
+    # 不写真报告：替换 auto 的内部写报告函数，返回固定路径（新签名含 base 关键字参数）。
     monkeypatch.setattr(
-        auto, "_write_reports", lambda report, *, out_dir, formats: [f"{out_dir}/report.html"]
+        auto,
+        "_write_reports",
+        lambda report, *, out_dir, formats, base: [f"{out_dir}/{base}.html"],
     )
     return report
 
@@ -143,13 +145,20 @@ def _patch_merge(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         return ["EP"]
 
     def _fake_rerender(
-        report: Report, endpoints: list, out_dir: str, *, formats: Any = None, on_progress: Any = None
+        report: Report,
+        endpoints: list,
+        out_dir: str,
+        base: str = "report",
+        *,
+        formats: Any = None,
+        on_progress: Any = None,
     ) -> dict[str, Any]:
         calls["rerender_called"] = True
         calls["rerender_args"] = {
             "report": report,
             "endpoints": endpoints,
             "out_dir": out_dir,
+            "base": base,
             "formats": formats,
         }
         if on_progress is not None:
@@ -158,7 +167,7 @@ def _patch_merge(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             "merged": 2,
             "new_leads": 1,
             "total_endpoints": 5,
-            "report_paths": [f"{out_dir}/report.json"],
+            "report_paths": [f"{out_dir}/{base}.json"],
         }
 
     monkeypatch.setattr(merge_mod, "load_runtime_endpoints", _fake_load)
@@ -454,7 +463,7 @@ def test_report_paths_deduplicated(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(apk_mod, "load_apk", lambda *a, **k: _FakeCtx("com.fraud.app"))
     monkeypatch.setattr(pipeline_mod, "run", lambda ctx, config: report)
     monkeypatch.setattr(
-        auto, "_write_reports", lambda report, *, out_dir, formats: ["out/report.json"]
+        auto, "_write_reports", lambda report, *, out_dir, formats, base: ["out/report.json"]
     )
     _set_device(monkeypatch, True)
     _patch_unpack(monkeypatch, _dynamic_result(STATUS_DONE))

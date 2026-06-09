@@ -456,3 +456,123 @@ def test_meta_counts_reported():
     assert meta["domain_count"] >= 1
     assert meta["cleartext_count"] >= 1
     assert meta["private_count"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# 问题 3：大文件分块扫描（不漏端点 + WARNING 降级）
+# ---------------------------------------------------------------------------
+
+import logging  # noqa: E402
+
+from apkscan.analyzers import endpoints as _ep_mod  # noqa: E402
+
+# 块大小 / 重叠（与实现常量对齐，测试据此定位边界）。
+_CHUNK = _ep_mod._SCAN_CHUNK_BYTES
+_OVERLAP = _ep_mod._SCAN_OVERLAP_BYTES
+_STEP = _CHUNK - _OVERLAP
+
+
+def _filler(n: int) -> bytes:
+    """生成 n 字节无端点的可打印 ASCII 填充（避免被正则误命中域名/URL/IP）。"""
+    return b"X" * n
+
+
+def _native_with_endpoints_at(positions: dict[int, str], total: int) -> bytes:
+    """构造 total 字节的合成 native bytes，在指定字节偏移处嵌入端点字符串（其余填充）。
+
+    端点前后补空格，确保 _NATIVE_ASCII_RE（可见 ASCII run）能切出干净的 run。
+    """
+    buf = bytearray(_filler(total))
+    for off, token in positions.items():
+        payload = (" " + token + " ").encode("ascii")
+        buf[off : off + len(payload)] = payload
+    return bytes(buf)
+
+
+def test_native_large_file_endpoints_beyond_8mb():
+    """大 native（>8MB）：8MB 之后（~9MB / ~12MB）的端点不被漏（改前截断到 8MB 会丢）。"""
+    total = 13 * 1024 * 1024  # 13MB，贴近真样本 libweexjss.so
+    big = _native_with_endpoints_at(
+        {
+            9 * 1024 * 1024: "https://past8mb-c2.example.cn/x",
+            12 * 1024 * 1024: "https://second-c2.example.cn/y",
+        },
+        total,
+    )
+    result = _analyze(native_libs=["lib/x/big.so"], files={"lib/x/big.so": big})
+    values = _by_value(result)
+    assert "https://past8mb-c2.example.cn/x" in values, "9MB 处端点（>8MB）应被扫到"
+    assert "https://second-c2.example.cn/y" in values, "12MB 处端点（>8MB）应被扫到"
+
+
+def test_resource_large_file_not_truncated():
+    """大资源文本（>8MB）：8MB 后的端点不被漏。"""
+    total = 10 * 1024 * 1024
+    buf = bytearray(_filler(total))
+    token = b'"u":"https://res-past8mb.example.cn/z"'
+    off = 9 * 1024 * 1024
+    buf[off : off + len(token)] = token
+    result = _analyze(files={"assets/big.json": bytes(buf)})
+    assert "https://res-past8mb.example.cn/z" in _by_value(result)
+
+
+def test_chunk_boundary_url_not_split():
+    """跨块边界的 URL（放在步进点 _STEP 附近）：靠重叠窗口完整抽到，不被切断。"""
+    total = _CHUNK + 2 * 1024 * 1024  # > 阈值，触发分块
+    token = "https://boundary-c2.example.cn/cut"
+    # 把 URL 起点放在第一块末尾、跨进步进点：起点 = _STEP - len(token)//2，使其横跨 chunk0/chunk1。
+    off = _STEP - len(token) // 2
+    big = _native_with_endpoints_at({off: token}, total)
+    result = _analyze(native_libs=["lib/x/edge.so"], files={"lib/x/edge.so": big})
+    assert token in _by_value(result), "跨块边界 URL 应被重叠窗口完整抽到"
+
+
+def test_chunked_dedup_no_double_count():
+    """重叠区里的端点只产 1 个 Endpoint（按 value 去重），证据不因重叠膨胀。"""
+    total = _CHUNK + 2 * 1024 * 1024
+    token = "https://overlap-once.example.cn/p"
+    # 放在重叠区内（步进点之后、第一块末尾之前 = [_STEP, _CHUNK)），会被 chunk0、chunk1 各命中一次。
+    off = _STEP + _OVERLAP // 4
+    big = _native_with_endpoints_at({off: token}, total)
+    result = _analyze(native_libs=["lib/x/dup.so"], files={"lib/x/dup.so": big})
+    matched = [e for e in result.endpoints if e.value == token]
+    assert len(matched) == 1, "重叠区端点应只产 1 个 Endpoint（value 去重）"
+    # 证据按 (source, location, snippet) 去重 → 同一 location 不该出现重复证据。
+    locs = [(ev.source, ev.location, ev.snippet) for ev in matched[0].evidences]
+    assert len(locs) == len(set(locs)), "证据不应因重叠重复膨胀"
+
+
+def test_no_truncation_warning_emitted(caplog):
+    """扫 >8MB 文件时不再出现「文件超过上限...仅扫前段」WARNING（GUI 日志不被吓人噪声刷屏）。"""
+    total = 12 * 1024 * 1024
+    big = _native_with_endpoints_at({10 * 1024 * 1024: "https://c2.example.cn/late"}, total)
+    with caplog.at_level(logging.WARNING):
+        _analyze(native_libs=["lib/x/big.so"], files={"lib/x/big.so": big})
+    assert not any("文件超过上限" in r.message for r in caplog.records)
+    assert not any("仅扫前段" in r.message for r in caplog.records)
+
+
+def test_small_file_endpoints_unchanged():
+    """不回归：小文件（< 阈值）端点抽取与改前一致（整体扫，行为不变）。"""
+    result = _analyze(
+        files={"assets/c.json": b'{"u":"https://small.example.cn/api"}'},
+        native_libs=["lib/x/s.so"],
+    )
+    # native 也走小文件整体扫路径。
+    result2 = _analyze(
+        native_libs=["lib/x/s.so"],
+        files={"lib/x/s.so": b"  https://native-small.example.cn/n  "},
+    )
+    assert "https://small.example.cn/api" in _by_value(result)
+    assert "https://native-small.example.cn/n" in _by_value(result2)
+
+
+def test_large_native_does_not_crash_on_empty_overlap_chunks():
+    """大文件分块在无端点的纯填充块上不崩、不误产端点（只 8MB 后那个真端点出现）。"""
+    total = 11 * 1024 * 1024
+    big = _native_with_endpoints_at({10 * 1024 * 1024: "https://only-one.example.cn/x"}, total)
+    result = _analyze(native_libs=["lib/x/big.so"], files={"lib/x/big.so": big})
+    values = _by_value(result)
+    assert "https://only-one.example.cn/x" in values
+    # 填充 "X"*N 不该产任何端点。
+    assert all("only-one.example.cn" in v or "example" not in v for v in values)

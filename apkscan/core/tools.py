@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -96,6 +97,53 @@ def has_adb() -> bool:
     return bool(adb_path())
 
 
+def kill_adb_server() -> bool:
+    """收掉本工具自起的 adb server（仅当 adb 可用时）。绝不抛。
+
+    用与起 server 时同一个 adb（frozen→包内 adb.exe，源码→PATH，经 :func:`adb_path`）跑
+    ``[adb, "kill-server"]``。adb 不可用（``adb_path()`` 为空）→ 直接返回 False（不做任何
+    子进程调用，绝不会反而把 server 起起来）。
+
+    退出码 0 → True；非 0 / 超时 / OSError / 其它异常 → False + logging（不崩、不假成功）。
+    Windows 下用 ``CREATE_NO_WINDOW`` 避免弹控制台。``kill-server`` 对「本就没起 server」
+    也安全：adb 文档明确该子命令在无 server 时直接返回，不会拉起新 server。
+
+    设计取舍：不做「只在确实用过 adb 之后才收」的全局状态判定——让本函数幂等 + 仅在
+    ``adb_path()`` 非空时执行，已等价于「可用且可能起过 server 时收」；额外的「用过才收」
+    状态标志会引入跨模块可变状态、且与 GUI 子进程模型割裂（子进程里的标志主进程看不到）。
+    """
+    exe = adb_path()
+    if not exe:
+        # 守住「只在 adb 可用时收」：没装 adb 直接返回，绝不触发子进程、绝不起 server。
+        return False
+    args = [exe, "kill-server"]
+    creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    try:
+        proc = subprocess.run(
+            args,
+            capture_output=True,
+            timeout=5.0,
+            check=False,
+            creationflags=creationflags,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("[tools] adb kill-server 超时（已忽略）：%s", exe)
+        return False
+    except OSError:
+        logger.warning("[tools] adb kill-server 启动失败（已忽略）：%s", exe)
+        return False
+    except Exception:  # noqa: BLE001 - 任何意外都不得抛给关窗/退出路径
+        logger.exception("[tools] adb kill-server 未预期异常（已忽略）：%s", exe)
+        return False
+    if proc.returncode != 0:
+        logger.warning(
+            "[tools] adb kill-server 退出码非 0（%d，已忽略）：%s", proc.returncode, exe
+        )
+        return False
+    logger.info("[tools] 已收掉自起的 adb server：%s", exe)
+    return True
+
+
 def _has_module(name: str) -> bool:
     """frozen 下判断内置库是否打进包（importlib.util.find_spec，不真 import 重模块）。"""
     import importlib.util
@@ -132,4 +180,5 @@ __all__ = [
     "has_frida",
     "has_frida_dexdump",
     "has_mitmproxy",
+    "kill_adb_server",
 ]

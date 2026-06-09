@@ -17,6 +17,7 @@ import typer
 from apkscan.core import device, pipeline
 from apkscan.core.apk import ApkParseError, load_apk
 from apkscan.core.models import AnalysisConfig, LeadCategory, Report
+from apkscan.core.report_naming import report_base
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,23 @@ app = typer.Typer(
     add_completion=False,
     help="涉诈 APK 调证分析 CLI：静态分析 + 端点/服务归属提取，产出调证线索清单。",
 )
+
+
+def _cleanup_adb_quiet() -> None:
+    """命令收尾：收掉本次进程自起的 adb server（惰性 import tools，绝不抛）。
+
+    adb server 是 adb 全局单例：analyze 的设备探测（device.has_device）、doctor/auto/
+    capture 的动态动作都会经 adb 起一个常驻 adb server。GUI 分析走子进程，子进程跑的就是
+    这些 CLI 命令——退出时若不收，adb.exe 残留、下次重打 exe 被锁。每个 dynamic 命令体外
+    包 ``try/finally`` 调本函数，收掉子进程自己起的那个 server。kill-server 幂等、对未起
+    server 零副作用、且仅在 adb 可用时执行（见 tools.kill_adb_server），不会反而起 server。
+    """
+    try:
+        from apkscan.core import tools
+
+        tools.kill_adb_server()
+    except Exception:
+        logger.exception("[cli] 收尾清理 adb server 失败（已忽略）")
 
 
 @app.command()
@@ -63,52 +81,62 @@ def analyze(
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    formats = [f.strip().lower() for f in fmt.split(",") if f.strip()]
-    config = AnalysisConfig(online=online, out_dir=out, formats=formats)
-
-    extra_dex_files = _resolve_extra_dex(extra_dex)
-    if extra_dex_files:
-        typer.echo(f"额外 DEX：{len(extra_dex_files)} 个并入静态分析")
-
-    typer.echo(f"加载 APK：{apk}")
+    # 无条件 finally 收 adb server：analyze 的 device.has_device() 设备探测每次都会经
+    # adb 起一个常驻 adb server（即便纯静态/离线），不收则 adb.exe 残留（GUI 子进程尤甚）。
     try:
-        ctx = load_apk(str(apk), config, extra_dex=extra_dex_files or None)
-    except ApkParseError as exc:
-        typer.echo(f"错误：{exc}", err=True)
-        raise typer.Exit(code=2) from exc
+        formats = [f.strip().lower() for f in fmt.split(",") if f.strip()]
+        config = AnalysisConfig(online=online, out_dir=out, formats=formats)
 
-    typer.echo(f"包名：{ctx.package_name or '(未知)'}  联网富化：{'是' if online else '否'}")
-    typer.echo("运行分析流水线 ...")
-    # ApkContext 用 @cached_property 暴露 package_name/manifest_xml，运行期满足
-    # AnalysisContext 协议（324 测试+真机已证）；pyright 对 cached_property→property
-    # 的协议匹配有已知局限，故此处显式忽略。
-    report = pipeline.run(ctx, config)  # type: ignore[arg-type]
+        extra_dex_files = _resolve_extra_dex(extra_dex)
+        if extra_dex_files:
+            typer.echo(f"额外 DEX：{len(extra_dex_files)} 个并入静态分析")
 
-    # 把真实联网状态落到 meta：merge 生成运行时线索时据此决定 online 分级标注，
-    # 离线扫描（--no-online）下运行时端点才不会被默认 online=True 当成已联网核实
-    # （否则拿不到静态侧"离线扫描，归属未查询"标注，偏乐观、轻微假成功）。
-    report.meta["online"] = config.online
+        typer.echo(f"加载 APK：{apk}")
+        try:
+            ctx = load_apk(str(apk), config, extra_dex=extra_dex_files or None)
+        except ApkParseError as exc:
+            typer.echo(f"错误：{exc}", err=True)
+            raise typer.Exit(code=2) from exc
 
-    # 设备探测：有在线设备则提示并写入 meta，便于报告/后续动态补全感知。
-    device_detected = device.has_device()
-    if device_detected:
-        report.meta["device_detected"] = True
-        typer.echo("检测到在线 adb 设备：可用 --dynamic 做真机脱壳/抓包补全静态盲区。")
+        typer.echo(f"包名：{ctx.package_name or '(未知)'}  联网富化：{'是' if online else '否'}")
+        typer.echo("运行分析流水线 ...")
+        # ApkContext 用 @cached_property 暴露 package_name/manifest_xml，运行期满足
+        # AnalysisContext 协议（324 测试+真机已证）；pyright 对 cached_property→property
+        # 的协议匹配有已知局限，故此处显式忽略。
+        report = pipeline.run(ctx, config)  # type: ignore[arg-type]
 
-    out_dir = Path(out)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    _write_reports(report, out_dir, formats)
+        # 把真实联网状态落到 meta：merge 生成运行时线索时据此决定 online 分级标注，
+        # 离线扫描（--no-online）下运行时端点才不会被默认 online=True 当成已联网核实
+        # （否则拿不到静态侧"离线扫描，归属未查询"标注，偏乐观、轻微假成功）。
+        report.meta["online"] = config.online
 
-    _print_summary(report)
+        # 设备探测：有在线设备则提示并写入 meta，便于报告/后续动态补全感知。
+        device_detected = device.has_device()
+        if device_detected:
+            report.meta["device_detected"] = True
+            typer.echo("检测到在线 adb 设备：可用 --dynamic 做真机脱壳/抓包补全静态盲区。")
 
-    # --dynamic：静态完成后，若有设备则自动 unpack + capture（实现由 dynamic 模块 agent 完成）。
-    if dynamic:
-        if not device_detected:
-            typer.echo("未检测到在线设备，跳过 --dynamic（动态脱壳/抓包需真机）。")
-        else:
-            _run_dynamic_after_static(
-                str(apk), ctx.package_name or "", out, report, formats
-            )
+        # 报告文件名 base：用 APK 文件名去后缀（清理非法字符），空/异常回退包名再回退 report。
+        base = report_base(str(apk), ctx.package_name or "")
+
+        out_dir = Path(out)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        _write_reports(report, out_dir, formats, base)
+
+        _print_summary(report)
+
+        # --dynamic：静态完成后，若有设备则自动 unpack + capture（实现由 dynamic 模块 agent 完成）。
+        if dynamic:
+            if not device_detected:
+                typer.echo("未检测到在线设备，跳过 --dynamic（动态脱壳/抓包需真机）。")
+            else:
+                # base 透传：merge 重渲必须用与静态写出同一 base，否则静态写 <apk>.* 而
+                # 重渲写 report.* 产两套报告。
+                _run_dynamic_after_static(
+                    str(apk), ctx.package_name or "", out, report, formats, base
+                )
+    finally:
+        _cleanup_adb_quiet()
 
 
 @app.command()
@@ -153,14 +181,18 @@ def capture(
     实现由 apkscan.dynamic.capture 提供；未安装时打印提示并退出，不崩。
     """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # 抓包必经 adb（frida -U / mitmproxy 走设备），finally 收掉自起的 adb server。
     try:
-        from apkscan.dynamic import capture as _capture
-    except ImportError:
-        typer.echo("该功能未安装：apkscan.dynamic.capture 不可用（动态抓包模块尚未就绪）。")
-        raise typer.Exit(code=1) from None
+        try:
+            from apkscan.dynamic import capture as _capture
+        except ImportError:
+            typer.echo("该功能未安装：apkscan.dynamic.capture 不可用（动态抓包模块尚未就绪）。")
+            raise typer.Exit(code=1) from None
 
-    result = _capture.run(package, out=out, duration=duration)
-    _print_dynamic_result("抓包", result)
+        result = _capture.run(package, out=out, duration=duration)
+        _print_dynamic_result("抓包", result)
+    finally:
+        _cleanup_adb_quiet()
 
 
 @app.command()
@@ -179,21 +211,27 @@ def doctor(
     实现由 apkscan.dynamic.doctor 提供（纯结构化返回）；本命令是唯一打印体检结果的薄包装。
     """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # doctor 体检会经 adb 探测设备/起 server，finally 收掉自起的 adb server。
+    # 注意：doctor 给用户的 "adb kill-server && adb start-server" 是可复制的修复命令字符串
+    # （结构化结果里的 fix_cmd），不是程序执行路径——本收尾不触碰它，语义不破坏。
     try:
-        from apkscan.dynamic import doctor as _doctor
-    except ImportError:
-        typer.echo("该功能未安装：apkscan.dynamic.doctor 不可用（环境体检模块尚未就绪）。")
-        raise typer.Exit(code=1) from None
+        try:
+            from apkscan.dynamic import doctor as _doctor
+        except ImportError:
+            typer.echo("该功能未安装：apkscan.dynamic.doctor 不可用（环境体检模块尚未就绪）。")
+            raise typer.Exit(code=1) from None
 
-    typer.echo("===== 动态环境体检 =====")
-    result = _doctor.run(
-        serial=serial or None,
-        auto_fix=auto_fix,
-        on_progress=lambda m: typer.echo(f"... {m}"),
-    )
-    _print_doctor_result(result)
-    if not result.get("ok", False):
-        raise typer.Exit(code=1)
+        typer.echo("===== 动态环境体检 =====")
+        result = _doctor.run(
+            serial=serial or None,
+            auto_fix=auto_fix,
+            on_progress=lambda m: typer.echo(f"... {m}"),
+        )
+        _print_doctor_result(result)
+        if not result.get("ok", False):
+            raise typer.Exit(code=1)
+    finally:
+        _cleanup_adb_quiet()
 
 
 @app.command()
@@ -229,32 +267,36 @@ def auto(
     （纯结构化返回 + 回调）；本命令是唯一打印 / 交互（提示操作 app）的薄包装。
     """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # auto 流水线含体检/脱壳/抓包，全经 adb；finally 收掉自起的 adb server。
     try:
-        from apkscan.dynamic import auto as _auto
-    except ImportError:
-        typer.echo("该功能未安装：apkscan.dynamic.auto 不可用（一键全自动模块尚未就绪）。")
-        raise typer.Exit(code=1) from None
+        try:
+            from apkscan.dynamic import auto as _auto
+        except ImportError:
+            typer.echo("该功能未安装：apkscan.dynamic.auto 不可用（一键全自动模块尚未就绪）。")
+            raise typer.Exit(code=1) from None
 
-    formats = [f.strip().lower() for f in fmt.split(",") if f.strip()]
+        formats = [f.strip().lower() for f in fmt.split(",") if f.strip()]
 
-    def _confirm(msg: str) -> None:
-        """抓包前提示用户操作 app 触发网络，并等回车（CLI 落点；GUI 用弹窗）。"""
-        typer.echo("")
-        typer.echo(f">>> {msg}")
-        typer.confirm("已准备好，开始抓包？", default=True)
+        def _confirm(msg: str) -> None:
+            """抓包前提示用户操作 app 触发网络，并等回车（CLI 落点；GUI 用弹窗）。"""
+            typer.echo("")
+            typer.echo(f">>> {msg}")
+            typer.confirm("已准备好，开始抓包？", default=True)
 
-    typer.echo(f"===== 一键全自动：{apk} =====")
-    result = _auto.run(
-        str(apk),
-        out_dir=out,
-        online=online,
-        auto_fix=auto_fix,
-        capture_duration=duration,
-        formats=formats,
-        on_progress=lambda m: typer.echo(f"... {m}"),
-        confirm=_confirm,
-    )
-    _print_auto_result(result)
+        typer.echo(f"===== 一键全自动：{apk} =====")
+        result = _auto.run(
+            str(apk),
+            out_dir=out,
+            online=online,
+            auto_fix=auto_fix,
+            capture_duration=duration,
+            formats=formats,
+            on_progress=lambda m: typer.echo(f"... {m}"),
+            confirm=_confirm,
+        )
+        _print_auto_result(result)
+    finally:
+        _cleanup_adb_quiet()
 
 
 @app.command()
@@ -358,7 +400,7 @@ def _resolve_extra_dex(spec: str) -> list[str]:
 
 
 def _run_dynamic_after_static(
-    apk_path: str, package: str, out: str, report: Report, formats: list[str]
+    apk_path: str, package: str, out: str, report: Report, formats: list[str], base: str
 ) -> None:
     """--dynamic：静态完成且有设备时，顺序执行 unpack + capture，并把运行时端点并回主报告。
 
@@ -407,11 +449,11 @@ def _run_dynamic_after_static(
     if status != STATUS_DONE:
         return
 
-    _merge_runtime_into_report(capture_result, out, report, formats)
+    _merge_runtime_into_report(capture_result, out, report, formats, base)
 
 
 def _merge_runtime_into_report(
-    capture_result: object, out: str, report: Report, formats: list[str]
+    capture_result: object, out: str, report: Report, formats: list[str], base: str
 ) -> None:
     """把 capture 抓到的运行时端点并回主报告并重渲；任何失败不破坏已产出的静态报告。"""
     try:
@@ -429,6 +471,7 @@ def _merge_runtime_into_report(
             report,
             endpoints,
             out,
+            base,
             formats=formats,
             on_progress=lambda m: typer.echo(f"... {m}"),
         )
@@ -471,19 +514,23 @@ def _print_dynamic_result(label: str, result: object) -> None:
                 typer.echo(f"    - {it}")
 
 
-def _write_reports(report: Report, out_dir: Path, formats: list[str]) -> None:
-    """按 formats 写出报告。report.html / report.json 由其它 agent 实现。"""
+def _write_reports(report: Report, out_dir: Path, formats: list[str], base: str) -> None:
+    """按 formats 写出报告，文件名用 ``base``（APK 名去后缀）：``<base>.{json,html,pdf}``。
+
+    report.html / report.json 由其它 agent 实现。``runtime_report.json`` 不在此处写
+    （那是 capture 的独立契约名）。
+    """
     if "json" in formats:
         try:
             from apkscan.report import json as report_json
 
-            path = out_dir / "report.json"
+            path = out_dir / f"{base}.json"
             report_json.dump(report, str(path))
             typer.echo(f"已写出 JSON 报告：{path}")
         except Exception:
             logger.exception("写出 JSON 报告失败（report.json 模块可能尚未就绪）")
 
-    html_path = out_dir / "report.html"
+    html_path = out_dir / f"{base}.html"
     if "html" in formats:
         try:
             from apkscan.report import html as report_html
@@ -498,7 +545,7 @@ def _write_reports(report: Report, out_dir: Path, formats: list[str]) -> None:
         try:
             from apkscan.report import pdf as report_pdf
 
-            path = out_dir / "report.pdf"
+            path = out_dir / f"{base}.pdf"
             html_source = str(html_path) if ("html" in formats and html_path.is_file()) else None
             if report_pdf.render(report, str(path), html_source=html_source):
                 typer.echo(f"已写出 PDF 报告：{path}")

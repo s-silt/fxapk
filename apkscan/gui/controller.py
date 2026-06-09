@@ -428,6 +428,30 @@ class GuiController:
         """:meth:`cancel` 的别名（spec 文案「取消 / 停止」两词混用）。"""
         return self.cancel()
 
+    # -- 对外：关窗清理（收掉自起的 adb server） ----------------------------
+
+    def cleanup_adb(self) -> None:
+        """GUI 关窗时收掉本工具自起的 adb server（headless 安全、**绝不抛**）。
+
+        根因：dynamic 动作（doctor/auto/capture）与每次 analyze 的设备探测都会经
+        ``adb`` 起一个常驻 adb server；GUI 退出时无人收 → adb.exe 残留、下次重打 exe 被锁。
+        这里在关窗时收掉它。
+
+        惰性 import ``apkscan.core.tools``（不给 import controller 增加 core 依赖；且保持
+        「controller 不 import tkinter」分层不变——tools 无 Tk）。tools 缺失 / kill 失败
+        一律吞 + logging，绝不阻断关窗。
+
+        注意：GUI 分析走子进程，子进程自起的 adb server 由 CLI 侧 finally 收（见
+        :mod:`apkscan.cli`）；本方法收的是 GUI 主进程（若将来直接调 core 时）起的那个。
+        两者各管各进程、kill-server 幂等，无冲突。
+        """
+        try:
+            from apkscan.core import tools
+
+            tools.kill_adb_server()
+        except Exception:
+            logger.exception("[gui] 清理 adb server 失败（已忽略）")
+
     # -- worker（后台线程） -------------------------------------------------
 
     def _run_worker(self, request: ActionRequest) -> None:
@@ -632,13 +656,13 @@ class GuiController:
         return ActionResult(ok=ok, action=ACTION_DOCTOR, message=message)
 
     def _run_static(self, request: ActionRequest) -> ActionResult:
-        """静态分析：子进程跑 ``analyze``（纯静态、不连设备）；跑完读 report.json 计数。"""
+        """静态分析：子进程跑 ``analyze``（纯静态、不连设备）；跑完发现报告并读其计数。"""
         argv = self._subcmd_argv("analyze", request)
         rc = self._run_subprocess(argv, self._log)
         return self._build_subprocess_result(ACTION_STATIC, request.out_dir, rc)
 
     def _run_auto(self, request: ActionRequest) -> ActionResult:
-        """一键全自动：子进程跑 ``auto``（含体检/脱壳/抓包）；跑完读 report.json 计数。
+        """一键全自动：子进程跑 ``auto``（含体检/脱壳/抓包）；跑完发现报告并读其计数。
 
         子进程无 stdin 交互：无设备时 capture skip、不触发 confirm；有设备时 confirm
         退化为不提示（已知限制）。
@@ -647,19 +671,22 @@ class GuiController:
         rc = self._run_subprocess(argv, self._log)
         return self._build_subprocess_result(ACTION_AUTO, request.out_dir, rc)
 
-    # -- 结果解析（子进程模式：探测 out_dir 下报告 + 读 report.json 计数） --------
+    # -- 结果解析（子进程模式：探测 out_dir 下报告 + 读主报告 json 计数） --------
 
     def _build_subprocess_result(self, action: str, out_dir: str, returncode: int) -> ActionResult:
-        """子进程跑完 → 探测 ``out_dir`` 下的报告文件，读 report.json 计数，组装结果。
+        """子进程跑完 → 探测 ``out_dir`` 下的报告文件，读主报告 json 计数，组装结果。
 
-        - ``report_paths``：在 ``out_dir`` 下探测存在的 ``report.{json,html,pdf}``（保序去重）。
-        - ``counts``：从 ``report.json`` 解析端点/线索/发现（复用 :meth:`_read_counts`）。
+        - ``report_paths``：在 ``out_dir`` 下 glob 出的主报告 ``<base>.{json,html,pdf}``
+          （按 APK 名命名；排除 runtime_report.json；保序去重，json 首位）。
+        - ``counts``：从主报告 json 解析端点/线索/发现（复用 :meth:`_read_counts`）。
         - ``html_report``：首个 .html 报告路径（供「打开 HTML 报告」按钮）。
-        - ``ok``：``returncode == 0`` **且** ``report.json`` 存在（auto 失败步骤会非 0 退出
-          或不产出 report.json）。steps 子进程模式留空（日志已实时呈现）。
+        - ``ok``：``returncode == 0`` **且** 主报告 json 存在（auto 失败步骤会非 0 退出
+          或不产出 json）。steps 子进程模式留空（日志已实时呈现）。
         """
         report_paths = self._discover_reports(out_dir)
-        has_json = any(p.lower().endswith("report.json") for p in report_paths)
+        # 主报告 json 存在即视作有结果。报告现按 APK 名命名（<base>.json），不能再写死
+        # "report.json"；_discover_reports 已排除 runtime_report.json，故任一 .json 即主报告。
+        has_json = any(p.lower().endswith(".json") for p in report_paths)
         ok = (returncode == 0) and has_json
         counts = self._read_counts(report_paths)
         html_report = next((p for p in report_paths if p.lower().endswith(".html")), "")
@@ -689,21 +716,58 @@ class GuiController:
 
     @staticmethod
     def _discover_reports(out_dir: str) -> list[str]:
-        """探测 ``out_dir`` 下存在的报告文件（report.json/html/pdf），保序去重、不抛。
+        """glob ``out_dir`` 下按 APK 名命名的主报告 ``<base>.{json,html,pdf}``，不抛。
 
-        json 放首位（计数读取依赖它），其余按 html、pdf 顺序。读目录失败 → 空列表。
+        报告现按 APK 文件名去后缀命名（demo.apk → demo.json/demo.html/demo.pdf），controller
+        拿不到 base（base 由子进程内部从 apk 名算），故用 glob 发现：
+
+        - glob ``*.json``，**排除 ``runtime_report.json``**（capture 的独立契约文件，其结构
+          非主报告：有 endpoints 但无 leads/findings，被 _read_counts 误读会污染计数）。
+        - 以「mtime 最新的非 runtime json」为主报告锚点，其 stem 即 base；再取同 stem 的
+          ``.html`` / ``.pdf``（若存在）。一次分析产出的 ``<base>.{json,html,pdf}`` 被当成一组，
+          多次分析（不同 base）不混。
+        - 若无 json 但有 html（如 ``--fmt html``）：退化为取 mtime 最新的 html，json 列表空
+          （_read_counts 返回未知计数，ok 因无 json 判 False，与既有契约一致）。
+        - 旧 ``report.{json,html,pdf}`` 命名天然兼容（``report`` 也是合法 base/回退名）。
+
+        返回顺序 ``[<base>.json?, <base>.html?, <base>.pdf?]``（json 首位，供 has_json /
+        计数读取）。读目录失败 → 空列表。
         """
         if not out_dir:
             return []
-        found: list[str] = []
         try:
-            base = Path(out_dir)
-            for name in ("report.json", "report.html", "report.pdf"):
-                p = base / name
-                if p.is_file():
-                    found.append(str(p))
+            base_dir = Path(out_dir)
+            json_files = [
+                p
+                for p in base_dir.glob("*.json")
+                if p.is_file() and p.name.lower() != "runtime_report.json"
+            ]
         except OSError:
             logger.exception("[gui] 探测输出目录报告失败：%s", out_dir)
+            return []
+
+        found: list[str] = []
+        try:
+            if json_files:
+                # 主报告锚点：mtime 最新的非 runtime json，其 stem 即 base。
+                main_json = max(json_files, key=lambda p: p.stat().st_mtime)
+                stem = main_json.stem
+                found.append(str(main_json))
+                for ext in (".html", ".pdf"):
+                    sibling = base_dir / f"{stem}{ext}"
+                    if sibling.is_file():
+                        found.append(str(sibling))
+            else:
+                # 无 json：退化取最新 html（无 json → 计数未知、ok=False，符合既有契约）。
+                html_files = [p for p in base_dir.glob("*.html") if p.is_file()]
+                if html_files:
+                    main_html = max(html_files, key=lambda p: p.stat().st_mtime)
+                    found.append(str(main_html))
+                    pdf_sibling = base_dir / f"{main_html.stem}.pdf"
+                    if pdf_sibling.is_file():
+                        found.append(str(pdf_sibling))
+        except OSError:
+            logger.exception("[gui] 配组输出目录报告失败：%s", out_dir)
             return []
         return found
 

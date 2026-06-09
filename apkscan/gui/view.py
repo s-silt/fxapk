@@ -472,6 +472,12 @@ class App:
                 self.controller.cancel()
             except Exception:
                 logger.exception("[gui] 关窗时取消任务失败（继续关闭）")
+        # destroy 前收掉自起的 adb server（绝不阻断关窗）。无论 busy 与否都收一次：
+        # 每次 analyze 的设备探测也会起 adb server，空闲关窗同样需要收尾。
+        try:
+            self.controller.cleanup_adb()
+        except Exception:
+            logger.exception("[gui] 关窗清理 adb 失败（继续关闭）")
         try:
             self.root.destroy()
         except Exception:

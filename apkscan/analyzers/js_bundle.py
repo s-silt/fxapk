@@ -73,8 +73,16 @@ logger = logging.getLogger(__name__)
 
 _RULES_NAME = "js_bundle"
 
-# 单文件读取上限（字节）。RN bundle / app-service.js 可能数 MB，超过只扫前段。
-_MAX_FILE_BYTES = 8 * 1024 * 1024
+# 大文件分块扫描参数（替代旧的「截断到前 8MB」语义）。反诈调证最忌漏端点/漏真 C2，
+# 大 index.android.bundle / app-service.js（uni-app 杀猪盘的 C2 主来源）后段的端点/密钥
+# 不能丢，故改为分块扫完整个文件而非截断。<= 阈值整体扫（行为/性能与改前一致）；超阈值
+# 按 (chunk - overlap) 步进、块间重叠避免跨界匹配被切断。
+_SCAN_CHUNK_BYTES = 4 * 1024 * 1024  # 单块 4MB（解码 + 正则工作集，内存可控）
+# 块间重叠窗口：本分析器所有匹配均 < 8KB（字符串字面量 <= _MAX_LITERAL_LEN=4096、
+# 密钥 KV 值 <= 512、JWT/PEM 头行更短），8KB 重叠保证任一跨块 token 必在相邻某块内完整出现。
+_SCAN_OVERLAP_CHARS = 8 * 1024
+# 触发分块的文件字符阈值：<= 此值整体扫（小文件零行为变化）。
+_CHUNK_THRESHOLD_CHARS = _SCAN_CHUNK_BYTES
 
 # 参与扫描的文件数上限，防止资源极多的样本拖垮。
 _MAX_FILES = 3000
@@ -141,9 +149,14 @@ _API_PATH_RE = re.compile(
 
 # 硬编码密钥：键值上下文（key : "value" / key = "value" / "key":"value"）。
 # value 取引号内或裸 token。
+# 键名量词**必须有上界**（{0,63}）：真实键名远短于 64 字符，而无界 `*` 在「超长无分隔
+# 符的同字符 run」（如大 bundle 里 9MB 连续 base64/x）上会对每个起点贪婪吞掉整段再回溯找
+# `[:=]`，整体 O(n²) 灾难性回溯（旧 8MB 截断曾掩盖此 ReDoS，分块扫全文件后暴露 → 卡死）。
 _SECRET_KV_RE = re.compile(
     r"""
-    ["']?(?P<key>[A-Za-z_][A-Za-z0-9_]*)["']?        # 键名
+    (?<![\w$])                                        # 键名前须为非标识符字符：长 run 里每个位置
+                                                      # 直接被 lookbehind 挡掉，只在边界起匹配 → O(n)
+    ["']?(?P<key>[A-Za-z_][A-Za-z0-9_]{0,63})["']?   # 键名（上界 64，防 ReDoS）
     \s*[:=]\s*
     ["'](?P<val>[^"'\n]{6,512})["']                   # 引号内的值
     """,
@@ -408,10 +421,7 @@ class JsBundleAnalyzer(BaseAnalyzer):
             if text is None:
                 continue
             scanned += 1
-            try:
-                self._scan_file(text, path, collector, secret_hits, rules)
-            except Exception:  # noqa: BLE001 — 单文件失败不影响其余
-                logger.exception("[%s] 扫描 JS 文件失败，跳过：%s", self.name, path)
+            self._scan_file_chunked(text, path, collector, secret_hits, rules)
 
         endpoints = collector.endpoints({"url": 0, "domain": 1, "ip": 2, "path": 3})
         result.endpoints = endpoints
@@ -533,6 +543,48 @@ class JsBundleAnalyzer(BaseAnalyzer):
     # ------------------------------------------------------------------
     # 单文件扫描
     # ------------------------------------------------------------------
+
+    def _scan_file_chunked(
+        self,
+        text: str,
+        path: str,
+        collector: EndpointCollector,
+        secret_hits: dict[tuple[str, str], _SecretHit],
+        rules: _Rules,
+    ) -> None:
+        """整文件分块扫（不漏端点/密钥），块间重叠避免跨界匹配被切断。
+
+        ``<= _CHUNK_THRESHOLD_CHARS`` 直接整体扫（行为/性能与改前一致）；超阈值按
+        ``(_SCAN_CHUNK_BYTES - _SCAN_OVERLAP_CHARS)`` 步进、每块取
+        ``[start, start+_SCAN_CHUNK_BYTES]`` 字符再 :meth:`_scan_file`。本分析器所有
+        匹配 < 8KB，重叠 8KB 保证跨块 token 必在某块内完整出现。去重由 collector /
+        secret_hits（按 value/token 键）兜底，重叠区不致端点/密钥虚增。单块异常吞 + logging。
+        """
+        n = len(text)
+        if n <= _CHUNK_THRESHOLD_CHARS:
+            try:
+                self._scan_file(text, path, collector, secret_hits, rules)
+            except Exception:  # noqa: BLE001 — 单文件失败不影响其余
+                logger.exception("[%s] 扫描 JS 文件失败，跳过：%s", self.name, path)
+            return
+
+        logger.debug(
+            "[%s] 大文件分块扫描（%d 字符，块 %d，重叠 %d）：%s",
+            self.name,
+            n,
+            _SCAN_CHUNK_BYTES,
+            _SCAN_OVERLAP_CHARS,
+            path,
+        )
+        step = _SCAN_CHUNK_BYTES - _SCAN_OVERLAP_CHARS
+        start = 0
+        while start < n:
+            chunk = text[start : start + _SCAN_CHUNK_BYTES]
+            try:
+                self._scan_file(chunk, path, collector, secret_hits, rules)
+            except Exception:  # noqa: BLE001 — 单块失败不影响其余块/文件
+                logger.exception("[%s] 分块扫描失败，跳过该块：%s", self.name, path)
+            start += step
 
     def _scan_file(
         self,
@@ -868,7 +920,12 @@ class JsBundleAnalyzer(BaseAnalyzer):
     # ------------------------------------------------------------------
 
     def _read_text(self, ctx: "AnalysisContext", path: str) -> str | None:
-        """read_file + utf-8 容错解码；失败 / 空返回 None，记日志不抛。"""
+        """read_file + utf-8 容错解码（**不截断**）；失败 / 空返回 None，记日志不抛。
+
+        改前对 >8MB 文件截断到前 8MB 并 WARNING——反诈调证最忌漏端点/漏真 C2，大
+        index.android.bundle / app-service.js 后段的端点/密钥直接丢、且 WARNING 吓新手。
+        现返回完整文本，由 :meth:`_scan_file_chunked` 分块扫完整个文件（内存可控、不漏）。
+        """
         try:
             raw = ctx.read_file(path)
         except Exception:  # noqa: BLE001 — 单文件读取失败不影响其余
@@ -881,11 +938,6 @@ class JsBundleAnalyzer(BaseAnalyzer):
             return None
         if not raw:
             return None
-        if len(raw) > _MAX_FILE_BYTES:
-            logger.warning(
-                "[%s] 文件超过上限 %d 字节，仅扫前段：%s", self.name, _MAX_FILE_BYTES, path
-            )
-            raw = bytes(raw[:_MAX_FILE_BYTES])
         try:
             return bytes(raw).decode("utf-8", errors="ignore")
         except Exception:  # noqa: BLE001 — utf-8 errors=ignore 几乎不抛，仅防御

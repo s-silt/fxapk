@@ -413,6 +413,32 @@ def test_merge_and_rerender_only_json_format(tmp_path) -> None:
     assert stats["report_paths"] == [str(tmp_path / "report.json")]
 
 
+def test_merge_and_rerender_uses_same_base(tmp_path) -> None:
+    """问题 2：merge 重渲用传入的 base（APK 名）写 <base>.{json,html}，不写死 report.*。
+
+    这是「静态写 <apk>.* 而重渲写 report.* 产两套」回退坑的锁定测试：base 一致则只一套。
+    """
+    report = _make_report()
+    eps = [_runtime_ep("c2.fraud-gw.cn", "domain")]
+    stats = merge.merge_and_rerender(report, eps, str(tmp_path), "demo")
+
+    assert (tmp_path / "demo.json").exists()
+    assert (tmp_path / "demo.html").exists()
+    # 不再写死 report.*（否则与静态侧 <apk>.* 产两套报告）。
+    assert not (tmp_path / "report.json").exists()
+    assert not (tmp_path / "report.html").exists()
+    assert str(tmp_path / "demo.json") in stats["report_paths"]
+    assert str(tmp_path / "demo.html") in stats["report_paths"]
+
+
+def test_merge_and_rerender_base_preserves_chinese(tmp_path) -> None:
+    """中文 base 也正常写出（报告本就中文）。"""
+    report = _make_report()
+    stats = merge.merge_and_rerender(report, [], str(tmp_path), "深远记算", formats=["json"])
+    assert (tmp_path / "深远记算.json").exists()
+    assert stats["report_paths"] == [str(tmp_path / "深远记算.json")]
+
+
 def test_merge_and_rerender_report_module_missing_not_fatal(tmp_path, monkeypatch) -> None:
     """重渲单格式失败（如渲染异常）不致命：不计入 report_paths，仍返回统计。"""
     report = _make_report()

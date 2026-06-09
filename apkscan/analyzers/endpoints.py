@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import posixpath
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -50,10 +51,18 @@ logger = logging.getLogger(__name__)
 _RULES_NAME = "endpoints"
 
 # DEX 字符串扫描上限：加固/大型样本字符串池可能很大，避免极端情况扫描过久。
+# （注意：dex 字符串走 ctx.dex_strings() 独立通道，不经下面的文件级分块，故此限额与本次无关。）
 _MAX_DEX_STRINGS = 200_000
 
-# 单个资源/native 文件读取上限（字节）。超过则只扫前段，防止超大文件拖垮。
-_MAX_FILE_BYTES = 8 * 1024 * 1024
+# 大文件分块扫描参数（替代旧的「截断到前 8MB」语义——反诈调证最忌漏端点/漏真 C2，
+# 大 .so / 大资源后段的端点不能丢，故改为分块扫完整个文件）。
+_SCAN_CHUNK_BYTES = 4 * 1024 * 1024  # 单块 4MB（解码 + 正则的工作集，内存可控）
+# 块间重叠窗口：防 URL/域名/IP 跨块边界被切断。8KB 远超任何真实端点 token（域名 host <255、
+# IPv4 ~21 字符、URL 的 host 部分必 <255），跨块的端点必在相邻某一块内完整出现；相对 4MB
+# 块（0.2%）重复扫描开销可忽略。满足 spec「重叠 ≥ 最长可能匹配」。
+_SCAN_OVERLAP_BYTES = 8 * 1024
+# 触发分块的文件阈值：<= 此值直接整文件扫（小文件行为/性能与改前完全一致）。
+_CHUNK_THRESHOLD_BYTES = _SCAN_CHUNK_BYTES
 
 # native .so 内可见 ASCII 字符串的最小长度（短串多为噪音）。
 _MIN_NATIVE_RUN = 6
@@ -455,14 +464,11 @@ class EndpointsAnalyzer(BaseAnalyzer):
             data = self._safe_read(ctx, path)
             if data is None:
                 continue
-            text = self._decode_latin1(data)
-            if not text:
-                continue
             scanned += 1
-            try:
-                self._scan_text(text, "resource", path, collector, rules)
-            except Exception:
-                logger.exception("[%s] 解析资源文件失败，跳过：%s", self.name, path)
+            # 分块扫描：大文件按块解码 + 扫，块间重叠避免跨界漏匹配；小文件整体扫（行为不变）。
+            self._scan_bytes_chunked(
+                data, "resource", path, collector, rules, self._decode_latin1
+            )
         return scanned
 
     def _scan_native(
@@ -476,15 +482,111 @@ class EndpointsAnalyzer(BaseAnalyzer):
             if data is None:
                 continue
             scanned += 1
-            try:
-                for m in _NATIVE_ASCII_RE.finditer(data):
-                    chunk = m.group().decode("ascii", errors="ignore")
-                    if not chunk:
-                        continue
-                    self._scan_text(chunk, "native", path, collector, rules)
-            except Exception:
-                logger.exception("[%s] 解析 native 文件失败，跳过：%s", self.name, path)
+            # 分块抽 ASCII 串：大 .so（如 12MB+ libweexjss.so）按块跑，块间重叠避免跨界
+            # 的端点 ASCII run 被切断；小文件整体扫（行为不变）。
+            self._scan_native_bytes_chunked(data, path, collector, rules)
         return scanned
+
+    # ------------------------------------------------------------------
+    # 大文件分块扫描（不漏端点：扫完整个文件而非截断到前 8MB）
+    # ------------------------------------------------------------------
+
+    def _scan_bytes_chunked(
+        self,
+        data: bytes,
+        source: str,
+        location: str,
+        collector: EndpointCollector,
+        rules: _Rules,
+        decode: Callable[[bytes], str],
+    ) -> None:
+        """对完整 bytes 分块解码 + 扫描（resource 通道），块间重叠避免跨界漏匹配。
+
+        ``<= _CHUNK_THRESHOLD_BYTES`` 直接整体扫（行为/性能与改前一致）；超阈值按
+        ``(_SCAN_CHUNK_BYTES - _SCAN_OVERLAP_BYTES)`` 步进、每块取
+        ``[start, start+_SCAN_CHUNK_BYTES]`` 字节，decode 后 :meth:`_scan_text`。
+        去重由 ``collector.add`` 兜底（同 value 跨块只合并 evidence，不重复产端点；同
+        location+snippet 的 evidence 也去重 → 重叠不致端点/证据虚增）。
+        """
+        n = len(data)
+        if n <= _CHUNK_THRESHOLD_BYTES:
+            text = decode(data)
+            if text:
+                try:
+                    self._scan_text(text, source, location, collector, rules)
+                except Exception:
+                    logger.exception("[%s] 解析文件失败，跳过：%s", self.name, location)
+            return
+
+        logger.debug(
+            "[%s] 大文件分块扫描（%d 字节，块大小 %d，重叠 %d）：%s",
+            self.name,
+            n,
+            _SCAN_CHUNK_BYTES,
+            _SCAN_OVERLAP_BYTES,
+            location,
+        )
+        step = _SCAN_CHUNK_BYTES - _SCAN_OVERLAP_BYTES
+        start = 0
+        while start < n:
+            chunk = data[start : start + _SCAN_CHUNK_BYTES]
+            text = decode(chunk)
+            if text:
+                try:
+                    self._scan_text(text, source, location, collector, rules)
+                except Exception:
+                    logger.exception("[%s] 分块扫描失败，跳过该块：%s", self.name, location)
+            start += step
+
+    def _scan_native_bytes_chunked(
+        self,
+        data: bytes,
+        location: str,
+        collector: EndpointCollector,
+        rules: _Rules,
+    ) -> None:
+        """对完整 native bytes 分块抽 ASCII 串再扫，块间重叠避免跨界 ASCII run 被切断。
+
+        ``<= _CHUNK_THRESHOLD_BYTES`` 整体扫；超阈值按字节分块（重叠 8KB > 任何真实端点串
+        且 > ``_MIN_NATIVE_RUN``，跨块 ASCII run 在某块内完整出现）。去重同 collector 兜底。
+        """
+        n = len(data)
+        if n <= _CHUNK_THRESHOLD_BYTES:
+            self._scan_native_chunk(data, location, collector, rules)
+            return
+
+        logger.debug(
+            "[%s] 大 native 分块扫描（%d 字节，块大小 %d，重叠 %d）：%s",
+            self.name,
+            n,
+            _SCAN_CHUNK_BYTES,
+            _SCAN_OVERLAP_BYTES,
+            location,
+        )
+        step = _SCAN_CHUNK_BYTES - _SCAN_OVERLAP_BYTES
+        start = 0
+        while start < n:
+            self._scan_native_chunk(
+                data[start : start + _SCAN_CHUNK_BYTES], location, collector, rules
+            )
+            start += step
+
+    def _scan_native_chunk(
+        self,
+        chunk: bytes,
+        location: str,
+        collector: EndpointCollector,
+        rules: _Rules,
+    ) -> None:
+        """对一段 native bytes 抽可见 ASCII 串并逐串扫端点。单块异常吞 + logging，不炸整体。"""
+        try:
+            for m in _NATIVE_ASCII_RE.finditer(chunk):
+                ascii_run = m.group().decode("ascii", errors="ignore")
+                if not ascii_run:
+                    continue
+                self._scan_text(ascii_run, "native", location, collector, rules)
+        except Exception:
+            logger.exception("[%s] 解析 native 文件失败，跳过：%s", self.name, location)
 
     # ------------------------------------------------------------------
     # 文本 → 端点
@@ -639,6 +741,12 @@ class EndpointsAnalyzer(BaseAnalyzer):
         return False
 
     def _safe_read(self, ctx: "AnalysisContext", path: str) -> bytes | None:
+        """读单个资源/native 文件为完整 bytes（**不截断**）。失败/非 bytes → None（不抛）。
+
+        改前对 >8MB 文件截断到前 8MB 并 WARNING——反诈调证最忌漏端点/漏真 C2，大文件后段的
+        端点直接丢、且 WARNING 吓新手。现改为返回完整 bytes，由 :meth:`_scan_bytes_chunked` /
+        :meth:`_scan_native_bytes_chunked` 分块扫完整个文件（内存可控、不漏端点）。
+        """
         try:
             data = ctx.read_file(path)
         except Exception:
@@ -649,12 +757,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
         if not isinstance(data, (bytes, bytearray)):
             logger.warning("[%s] read_file 返回非 bytes，跳过：%s", self.name, path)
             return None
-        if len(data) > _MAX_FILE_BYTES:
-            logger.warning(
-                "[%s] 文件超过上限 %d 字节，仅扫前段：%s", self.name, _MAX_FILE_BYTES, path
-            )
-            data = bytes(data[:_MAX_FILE_BYTES])
-        return bytes(data)
+        return bytes(data)  # 不再截断：完整返回，扫描侧分块处理大文件
 
     @staticmethod
     def _decode_latin1(data: bytes) -> str:
