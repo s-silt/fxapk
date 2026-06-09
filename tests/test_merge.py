@@ -11,7 +11,10 @@
 
 from __future__ import annotations
 
+import base64 as _b64
+import hashlib as _hashlib
 import json
+import warnings as _warnings
 from typing import Any
 
 from apkscan.core import infra
@@ -492,3 +495,191 @@ def test_merge_module_has_no_print_or_typer() -> None:
     assert "input" not in called_names
     assert "sys.exit" not in called_names
     assert not any(n.startswith("typer.") for n in called_names)
+
+
+# ---------------------------------------------------------------------------
+# C5b：用静态配方解密运行时信封报文 → 明文端点并入
+# ---------------------------------------------------------------------------
+
+_C5B_KEY = "55f0e4afd83cf8dcae7a4d3daf663467"
+_C5B_TS = 1700000000000
+
+
+def _c5b_recipe_meta() -> dict[str, Any]:
+    return {
+        "algo": "AES",
+        "mode": "CFB",
+        "padding": "Pkcs7",
+        "segment_size": 128,
+        "key": _C5B_KEY,
+        "key_encoding": "utf8",
+        "iv_derive": "md5(key+ts)[:16]",
+        "iv_value": None,
+        "envelope_fields": ["data", "timestamp"],
+        "payload_encoding": "base64",
+        "source": "assets/.../app-service.js",
+    }
+
+
+def _c5b_encrypt(plaintext: str) -> str:
+    """用 C5b 配方加密明文，返回信封 data（base64）。"""
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
+
+    try:
+        from cryptography.hazmat.decrepit.ciphers.modes import CFB
+    except ImportError:
+        from cryptography.hazmat.primitives.ciphers.modes import CFB
+
+    kb = _C5B_KEY.encode("utf-8")
+    iv = _hashlib.md5(kb + str(_C5B_TS).encode()).hexdigest()[:16].encode("utf-8")
+    pb = plaintext.encode("utf-8")
+    pad = 16 - (len(pb) % 16)
+    padded = pb + bytes([pad]) * pad
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("ignore")
+        enc = Cipher(algorithms.AES(kb), CFB(iv)).encryptor()
+        ct = enc.update(padded) + enc.finalize()
+    return _b64.b64encode(ct).decode("ascii")
+
+
+def _write_runtime_report_with_messages(tmp_path, messages: list[dict[str, Any]]) -> str:
+    path = tmp_path / "runtime_report.json"
+    payload = {
+        "package_name": "com.test.app",
+        "source": "runtime",
+        "capture_complete": True,
+        "endpoint_total": 0,
+        "endpoints": [],
+        "messages": messages,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return str(path)
+
+
+_C5B_PLAINTEXT = json.dumps(
+    {
+        "webName": "华西证券",
+        "register": "/api/register",
+        "login": "/api/login",
+        "webConfig": "https://gw.hxhcapi.vip/config",
+        "inviteCode": "ABC123",
+    },
+    ensure_ascii=False,
+)
+
+
+def test_decrypt_runtime_messages_extracts_plaintext_endpoints(tmp_path) -> None:
+    """合成 runtime_report.json（含信封）+ report.meta 配方 → 明文端点以
+    source=runtime-decrypted 并入 report.endpoints，并产新 lead。"""
+    data = _c5b_encrypt(_C5B_PLAINTEXT)
+    env = json.dumps({"data": data, "timestamp": _C5B_TS})
+    rr_path = _write_runtime_report_with_messages(
+        tmp_path, [{"url": "https://api.hxhcapi.vip/post", "response_body": env}]
+    )
+    report = _make_report(meta={"crypto_recipe": _c5b_recipe_meta()})
+
+    stats = merge.decrypt_runtime_messages(report, rr_path)
+
+    assert stats["decrypted"] == 1
+    assert stats["failed"] == 0
+    assert stats["plaintext_endpoints"] >= 1
+    assert report.meta["runtime_decrypted"] is True
+
+    # 明文里的 webConfig URL 与其 host 应作为端点并入，证据来源 runtime-decrypted。
+    values = {ep.value for ep in report.endpoints}
+    assert "https://gw.hxhcapi.vip/config" in values
+    assert "/api/register" in values or "/api/login" in values
+    decrypted_eps = [
+        ep
+        for ep in report.endpoints
+        if any(ev.source == "runtime-decrypted" for ev in ep.evidences)
+    ]
+    assert decrypted_eps
+    # 解密引入的 domain 应产线索。
+    domain_leads = [l for l in report.leads if l.category == LeadCategory.DOMAIN]
+    assert any("hxhcapi.vip" in l.value for l in domain_leads)
+
+
+def test_decrypt_runtime_messages_no_recipe_skips(tmp_path) -> None:
+    """report.meta 无 crypto_recipe → 不解密、保留密文、不崩、统计 decrypted=0。"""
+    data = _c5b_encrypt(_C5B_PLAINTEXT)
+    env = json.dumps({"data": data, "timestamp": _C5B_TS})
+    rr_path = _write_runtime_report_with_messages(tmp_path, [{"response_body": env}])
+    report = _make_report()  # 无配方
+
+    stats = merge.decrypt_runtime_messages(report, rr_path)
+
+    assert stats["decrypted"] == 0
+    assert stats["plaintext_endpoints"] == 0
+    assert "runtime_decrypted" not in report.meta
+    assert report.endpoints == []
+
+
+def test_decrypt_runtime_messages_bad_envelope_preserved(tmp_path, caplog) -> None:
+    """坏信封（坏 base64） → warning + 不并入明文端点，不崩。"""
+    env = json.dumps({"data": "!!!not base64!!!", "timestamp": _C5B_TS})
+    rr_path = _write_runtime_report_with_messages(tmp_path, [{"response_body": env}])
+    report = _make_report(meta={"crypto_recipe": _c5b_recipe_meta()})
+
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        stats = merge.decrypt_runtime_messages(report, rr_path)
+
+    assert stats["decrypted"] == 0
+    assert stats["failed"] == 1
+    assert report.endpoints == []  # 未并入明文端点
+    assert caplog.records
+
+
+def test_decrypt_runtime_messages_non_envelope_ignored(tmp_path) -> None:
+    """报文体非信封（无 data/timestamp） → 不解密、不报失败。"""
+    rr_path = _write_runtime_report_with_messages(
+        tmp_path, [{"response_body": json.dumps({"foo": "bar"})}]
+    )
+    report = _make_report(meta={"crypto_recipe": _c5b_recipe_meta()})
+    stats = merge.decrypt_runtime_messages(report, rr_path)
+    assert stats["decrypted"] == 0
+    assert stats["failed"] == 0
+
+
+def test_decrypt_runtime_messages_missing_crypto_lib(tmp_path, monkeypatch) -> None:
+    """缺 cryptography → 不解密、warning、静态报告不受损（保留密文，不崩）。"""
+    from apkscan.core import appcrypto
+
+    monkeypatch.setattr(appcrypto, "_HAS_CRYPTO", False)
+    data = "anybase64=="
+    env = json.dumps({"data": data, "timestamp": _C5B_TS})
+    rr_path = _write_runtime_report_with_messages(tmp_path, [{"response_body": env}])
+    report = _make_report(meta={"crypto_recipe": _c5b_recipe_meta()})
+
+    stats = merge.decrypt_runtime_messages(report, rr_path)
+    assert stats["decrypted"] == 0
+    assert stats["failed"] == 1
+    assert report.endpoints == []
+
+
+def test_merge_and_rerender_runs_decryption(tmp_path) -> None:
+    """merge_and_rerender 端到端：信封 messages + 配方 → 解密统计进 stats、明文端点入报告。"""
+    data = _c5b_encrypt(_C5B_PLAINTEXT)
+    env = json.dumps({"data": data, "timestamp": _C5B_TS})
+    _write_runtime_report_with_messages(
+        tmp_path, [{"url": "https://api.hxhcapi.vip/post", "response_body": env}]
+    )
+    report = _make_report(meta={"crypto_recipe": _c5b_recipe_meta()})
+
+    stats = merge.merge_and_rerender(report, [], str(tmp_path))
+
+    assert stats["decrypted"] == 1
+    assert stats["plaintext_endpoints"] >= 1
+    values = {ep.value for ep in report.endpoints}
+    assert "https://gw.hxhcapi.vip/config" in values
+    assert (tmp_path / "report.json").exists()
+
+
+def test_merge_and_rerender_no_runtime_report_no_decrypt(tmp_path) -> None:
+    """无 runtime_report.json → 解密零统计、不崩、正常重渲。"""
+    report = _make_report(meta={"crypto_recipe": _c5b_recipe_meta()})
+    stats = merge.merge_and_rerender(report, [], str(tmp_path))
+    assert stats["decrypted"] == 0
+    assert (tmp_path / "report.json").exists()

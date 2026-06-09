@@ -1,0 +1,59 @@
+# apkscan — crypto_recipe 分析器规则（C5a 应用层加密配方提取）
+#
+# 由 apkscan.core.registry.load_rules("crypto_recipe") 读取（可选；缺失时分析器用内置兜底）。
+# 针对 uni-app / H5 打包 JS 里的 CryptoJS(crypto-js) 加密配方：检测算法/模式/填充、
+# 硬编码 key、iv 推导式、请求/响应信封字段，产出一条「解密配方」高价值调证线索 + Finding，
+# 并把结构化配方写进 meta["crypto_recipe"] 供 C5b 自动解密抓到的流量。
+#
+# 纪律：提取靠通用模式（CryptoJS token + 硬编码常量 + iv 推导式），HuaCai 的具体值仅作
+# 测试对照真值，不进产品逻辑。
+#
+# 顶层为 dict，键含义（均可缺省，缺省走分析器内置兜底）：
+#   cryptojs_tokens   : list[str]，命中其一即认为存在 CryptoJS（或同形 API）用法。
+#   mode_aliases      : list[str]，CryptoJS mode 名（CFB/CBC/ECB/CTR/OFB）。
+#   padding_aliases   : list[str]，CryptoJS padding 名（Pkcs7/NoPadding/Iso97971/ZeroPadding）。
+#   envelope_fields   : list[str]，信封字段候选名（data/timestamp/sign/nonce）。
+#   snippet_max       : int，证据 snippet 最大保留长度。
+
+# ---- CryptoJS 存在性 token（命中其一即判定存在 CryptoJS 形态加密）----
+cryptojs_tokens:
+  - "CryptoJS"
+  - "crypto-js"
+  - ".enc.Utf8.parse"
+  - ".enc.Hex.parse"
+  - ".AES.encrypt"
+  - ".AES.decrypt"
+  - ".DES.encrypt"
+  - ".DES.decrypt"
+  - "TripleDES"
+  - ".mode.CFB"
+  - ".mode.CBC"
+  - ".mode.ECB"
+  - ".pad.Pkcs7"
+
+# ---- 模式别名（从 mode:X.mode.<name> 抓）----
+mode_aliases:
+  - "CFB"
+  - "CBC"
+  - "ECB"
+  - "CTR"
+  - "OFB"
+
+# ---- 填充别名（从 padding:X.pad.<name> 抓）----
+padding_aliases:
+  - "Pkcs7"
+  - "NoPadding"
+  - "Iso97971"
+  - "ZeroPadding"
+  - "AnsiX923"
+  - "Iso10126"
+
+# ---- 信封字段候选名（加/解密调用周围抓对象字面量键）----
+envelope_fields:
+  - "data"
+  - "timestamp"
+  - "sign"
+  - "nonce"
+
+# 证据 snippet 最大长度。
+snippet_max: 200
