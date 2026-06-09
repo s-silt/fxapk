@@ -39,7 +39,7 @@ from apkscan.dynamic import (
     DynamicResult,
     empty_result,
 )
-from apkscan.dynamic import provision
+from apkscan.dynamic import cryptohook, provision
 from apkscan.report import json as report_json
 
 logger = logging.getLogger(__name__)
@@ -262,6 +262,11 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
 
     mitm_proc: subprocess.Popen[bytes] | None = None
     frida_proc: subprocess.Popen[bytes] | None = None
+    # P0 运行时密钥 hook：frida-core 会话（带 crypto 回传）+ 其收集到的活体 crypto 事件。
+    # frida-core 不可用/注入失败时 frida_session 保持 None、回退 subprocess（无 key 回传）。
+    frida_session: Any = None
+    frida_script: Any = None
+    crypto_events: list[dict[str, Any]] = []
     proxy_set = False
     reverse_set = False
     # 抓包加固产生的告警（CA 未装系统库 / frida 版本不一致），收尾并入 reason，
@@ -313,15 +318,24 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
         if proxy_set:
             playbook.append(f"adb 设全局代理 {_PROXY_HOST}:{_PROXY_PORT}")
 
-        # 3) frida 注入通用 SSL unpinning 并 spawn 目标 app。
-        frida_proc = _start_frida_unpinning(package, out_path)
-        if frida_proc is None:
+        # 3) frida 注入：优先 frida-core 通道（SSL unpinning + 运行时密钥 hook，可回传活体 key）；
+        #    frida-core 不可用 / attach 失败 → 回退现有 subprocess 路径（仅 unpinning，无 key 回传）。
+        #    两路都 best-effort、失败不阻断抓包（HTTP 仍可抓）。
+        frida_session, frida_script = _start_frida_session(package, crypto_events)
+        if frida_session is not None:
+            playbook.append(
+                f"frida-core 注入 SSL unpinning + 运行时密钥 hook 并启动 {package}（活体 key 回传）"
+            )
+            logger.info("[capture] frida-core 会话已建立，运行时密钥 hook 生效")
+        else:
+            frida_proc = _start_frida_unpinning(package, out_path)
+        if frida_session is None and frida_proc is None:
             # 未起 frida（缺 frida / 写脚本失败）→ 无 unpinning，HTTPS 可能仅密文。
             warn = "frida 未启动（缺 frida / 脚本写出失败），无 SSL unpinning，HTTPS 可能仅密文"
             logger.warning("[capture] %s", warn)
             playbook.append(warn)
             warnings.append(warn)
-        else:
+        elif frida_proc is not None:
             # 存活检测：frida 若因 frida-server 版本不匹配 / 包名不存在 / spawn 失败而
             # 瞬间退出，Popen 不抛——必须主动检测，否则会照常 sleep 满 duration 并以
             # "成功"收尾，把"unpinning 根本没生效（HTTPS 仅密文）"静默成假成功。
@@ -353,6 +367,7 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
     finally:
         # 5) 清理：先停 frida（让 app 网络收尾），再撤代理/reverse，最后停 mitmdump（落盘）。
         _terminate(frida_proc, "frida")
+        _teardown_frida_session(frida_session, frida_script)
         if proxy_set:
             _adb_clear_proxy()
             playbook.append("还原：清除设备全局代理")
@@ -373,8 +388,15 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
     # 抓包失败（mitmdump 没起来 / 编排异常）时，产出的 runtime_report 基于不完整/未抓全
     # 的流量，必须在报告里标明，避免它伪装成正常结果被下游误用。
     capture_ok = result["status"] != STATUS_ERROR
+    # P0：把活体 crypto 事件（去掉 sink 上限触发的 _capped 占位）一并写进 runtime_report.json。
+    clean_crypto_events = [e for e in crypto_events if not e.get("_capped")]
     report_path = _write_runtime_report(
-        package, out_path, endpoints, complete=capture_ok, messages=messages
+        package,
+        out_path,
+        endpoints,
+        complete=capture_ok,
+        messages=messages,
+        crypto_events=clean_crypto_events,
     )
     report_paths = [report_path] if report_path else []
 
@@ -450,6 +472,90 @@ def _start_frida_unpinning(package: str, out_path: Path) -> subprocess.Popen[byt
     except Exception:
         logger.exception("[capture] 启动 frida 失败，跳过注入")
         return None
+
+
+# ---------------------------------------------------------------------------
+# P0：frida-core 会话（SSL unpinning + 运行时密钥 hook，可回传活体 key）
+# ---------------------------------------------------------------------------
+
+# frida.get_usb_device 连接设备的超时（秒）。_detect_missing 已确认设备+frida-server，
+# 此处只是防御性上限，避免无设备时阻塞。
+_FRIDA_USB_TIMEOUT = 10
+
+
+def _start_frida_session(package: str, sink: list[dict[str, Any]]) -> tuple[Any, Any]:
+    """用 frida-core（``import frida``）spawn 目标 app 并注入 unpinning + 运行时密钥 hook。
+
+    与 subprocess 路径（``_start_frida_unpinning``）的关键差异：frida-core 提供
+    ``send()``/``on_message`` 双向通道，能把活体 AES key/iv/明文**结构化回传** Python
+    （收集进 ``sink``），这是 subprocess 单向 console.log 做不到的。
+
+    Args:
+        package: 目标应用包名（spawn）。
+        sink: 收集 crypto 事件的共享列表（``cryptohook.make_message_handler`` 写入）。
+
+    Returns:
+        ``(session, script)``：成功 → 两者非 None（脚本已 load、app 已 resume）；
+        frida-core 不可用 / spawn / attach / load 任一失败 → ``(None, None)`` + warning，
+        由调用方回退 subprocess 路径。**绝不抛**：失败必清理已 spawn 的进程，避免回退路径
+        二次 spawn 冲突（同包名 already running）。
+    """
+    try:
+        import frida  # type: ignore[import-not-found]  # lazy：缺库时回退 subprocess
+    except Exception as exc:  # noqa: BLE001 — 缺 frida-core 不阻断，回退 subprocess
+        logger.warning(
+            "[capture] frida-core（import frida）不可用，回退 subprocess unpinning"
+            "（无运行时密钥回传）：%s",
+            exc,
+        )
+        return None, None
+
+    source = FRIDA_UNPINNING_JS + "\n" + cryptohook.FRIDA_CRYPTO_HOOK_JS
+    device_handle: Any = None
+    pid: Any = None
+    session: Any = None
+    try:
+        device_handle = frida.get_usb_device(timeout=_FRIDA_USB_TIMEOUT)
+        pid = device_handle.spawn([package])
+        session = device_handle.attach(pid)
+        script = session.create_script(source)
+        script.on("message", cryptohook.make_message_handler(sink))
+        script.load()
+        device_handle.resume(pid)
+        logger.info("[capture] frida-core spawn+attach 成功：pid=%s package=%s", pid, package)
+        return session, script
+    except Exception as exc:  # noqa: BLE001 — frida-core 任一环节失败 → 回退 subprocess
+        logger.warning(
+            "[capture] frida-core 注入失败，回退 subprocess unpinning：%s%s",
+            exc,
+            device.frida_spawn_hint(str(exc)),
+        )
+        # 清理已 spawn 的进程/会话，避免 subprocess 回退 `-f` 二次 spawn 冲突。
+        if session is not None:
+            try:
+                session.detach()
+            except Exception:
+                logger.debug("[capture] 清理 frida-core 会话失败（忽略）", exc_info=True)
+        if pid is not None and device_handle is not None:
+            try:
+                device_handle.kill(pid)
+            except Exception:
+                logger.debug("[capture] 清理 frida-core spawned 进程失败（忽略）", exc_info=True)
+        return None, None
+
+
+def _teardown_frida_session(session: Any, script: Any) -> None:
+    """best-effort 收尾 frida-core 会话：script.unload() → session.detach()。异常记日志不抛。"""
+    if script is not None:
+        try:
+            script.unload()
+        except Exception:
+            logger.debug("[capture] frida-core script.unload 失败（忽略）", exc_info=True)
+    if session is not None:
+        try:
+            session.detach()
+        except Exception:
+            logger.debug("[capture] frida-core session.detach 失败（忽略）", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -832,6 +938,7 @@ def _write_runtime_report(
     *,
     complete: bool = True,
     messages: list[dict[str, Any]] | None = None,
+    crypto_events: list[dict[str, Any]] | None = None,
 ) -> str:
     """把运行时端点写成 out/runtime_report.json（复用 report.json 的序列化）。
 
@@ -840,6 +947,9 @@ def _write_runtime_report(
 
     C5b：``messages`` 为抽出的 {data,timestamp} 信封报文体（请求/响应），供 merge 阶段
     据静态配方自动解密；默认空数组（向后兼容，旧消费方忽略即可）。
+
+    P0：``crypto_events`` 为运行时密钥 hook 抓到的活体 crypto 事件（key/iv/明文等），供
+    merge 阶段反推「实测配方」优先解密信封；默认空数组（向后兼容）。
     返回报告路径；写出失败记日志返回空串（不抛）。
     """
     report_file = out_path / "runtime_report.json"
@@ -850,6 +960,7 @@ def _write_runtime_report(
         "endpoint_total": len(endpoints),
         "endpoints": [report_json._to_jsonable(ep) for ep in endpoints],
         "messages": list(messages or []),
+        "crypto_events": list(crypto_events or []),
     }
     if not complete:
         payload["note"] = "抓包未完整（代理未起或编排中断），运行时端点可能不全。"

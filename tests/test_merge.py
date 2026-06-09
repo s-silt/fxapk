@@ -709,3 +709,241 @@ def test_merge_and_rerender_no_runtime_report_no_decrypt(tmp_path) -> None:
     stats = merge.merge_and_rerender(report, [], str(tmp_path))
     assert stats["decrypted"] == 0
     assert (tmp_path / "report.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# P0：运行时密钥 hook —— 实测配方优先 + 冒充品牌线索
+# ---------------------------------------------------------------------------
+
+# JS getEncoded() 回传的 key bytes 的 hex（真样本 key 是 ASCII 串当 UTF-8 key）。
+_C5B_KEY_HEX = _C5B_KEY.encode("utf-8").hex()
+
+
+def _write_rr(
+    tmp_path,
+    messages: list[dict[str, Any]] | None = None,
+    crypto_events: list[dict[str, Any]] | None = None,
+) -> str:
+    """写出含 messages + crypto_events 的 runtime_report.json（P0 形态）。"""
+    path = tmp_path / "runtime_report.json"
+    payload = {
+        "package_name": "com.test.app",
+        "source": "runtime",
+        "capture_complete": True,
+        "endpoint_total": 0,
+        "endpoints": [],
+        "messages": list(messages or []),
+        "crypto_events": list(crypto_events or []),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return str(path)
+
+
+def test_decrypt_uses_runtime_recipe_over_static(tmp_path) -> None:
+    """活体实测 key 反哺：静态配方填错 key，运行时 hook 抓到真 key → 仍解出明文。"""
+    data = _c5b_encrypt(_C5B_PLAINTEXT)  # 用真 key 加密
+    env = json.dumps({"data": data, "timestamp": _C5B_TS})
+    # 运行时事件带真 key（无 iv → 不设 fixed，iv 仍交静态 md5(key+ts) 推导）。
+    crypto_events = [
+        {
+            "src": "cipher",
+            "event": "init",
+            "transformation": "AES/CFB/PKCS5Padding",
+            "key_hex": _C5B_KEY_HEX,
+            "iv_hex": None,
+        }
+    ]
+    rr_path = _write_rr(
+        tmp_path,
+        messages=[{"url": "https://api.hxhcapi.vip/post", "response_body": env}],
+        crypto_events=crypto_events,
+    )
+    # 静态配方故意填错 key（单用它会解密失败）。
+    wrong_meta = _c5b_recipe_meta()
+    wrong_meta["key"] = "0" * 32
+    report = _make_report(meta={"crypto_recipe": wrong_meta})
+
+    stats = merge.decrypt_runtime_messages(report, rr_path)
+
+    assert stats["live_recipe"] == 1
+    assert stats["decrypted"] == 1  # 用实测真 key 解出
+    assert report.meta["runtime_crypto_recipe"]["key"] == _C5B_KEY
+    assert report.meta["runtime_crypto_event_count"] == 1
+    values = {ep.value for ep in report.endpoints}
+    assert "https://gw.hxhcapi.vip/config" in values
+
+
+def test_decrypt_static_only_wrong_key_fails_without_events(tmp_path) -> None:
+    """对照组：同样的错 key 静态配方、但无运行时事件 → 解密失败（证明上一个用例靠的是实测 key）。"""
+    data = _c5b_encrypt(_C5B_PLAINTEXT)
+    env = json.dumps({"data": data, "timestamp": _C5B_TS})
+    rr_path = _write_rr(tmp_path, messages=[{"response_body": env}], crypto_events=[])
+    wrong_meta = _c5b_recipe_meta()
+    wrong_meta["key"] = "0" * 32
+    report = _make_report(meta={"crypto_recipe": wrong_meta})
+
+    stats = merge.decrypt_runtime_messages(report, rr_path)
+    assert stats["live_recipe"] == 0
+    assert stats["decrypted"] == 0
+    assert stats["failed"] == 1
+
+
+def test_decrypt_falls_back_to_static_when_no_events(tmp_path) -> None:
+    """无 crypto_events → 沿用静态配方解密（锁定无回归），live_recipe=0、无 runtime_crypto_recipe。"""
+    data = _c5b_encrypt(_C5B_PLAINTEXT)
+    env = json.dumps({"data": data, "timestamp": _C5B_TS})
+    rr_path = _write_rr(tmp_path, messages=[{"response_body": env}], crypto_events=[])
+    report = _make_report(meta={"crypto_recipe": _c5b_recipe_meta()})  # 正确静态 key
+
+    stats = merge.decrypt_runtime_messages(report, rr_path)
+    assert stats["live_recipe"] == 0
+    assert stats["decrypted"] == 1
+    assert "runtime_crypto_recipe" not in report.meta
+
+
+def test_decrypt_runtime_brand_hints_recorded(tmp_path) -> None:
+    """运行时明文捕获的冒充对象（webName）写进 report.meta['runtime_brand_hints']。"""
+    plain = json.dumps({"webName": "示例证券"}, ensure_ascii=False).encode("utf-8")
+    crypto_events = [
+        {
+            "src": "cipher",
+            "event": "doFinal",
+            "opmode": 2,
+            "plaintext_b64": _b64.b64encode(plain).decode("ascii"),
+        }
+    ]
+    rr_path = _write_rr(tmp_path, crypto_events=crypto_events)
+    report = _make_report()  # 无静态配方、无 messages
+
+    merge.decrypt_runtime_messages(report, rr_path)
+    assert report.meta.get("runtime_brand_hints") == ["示例证券"]
+
+
+def test_merge_recipe_meta_overlays_live_over_static() -> None:
+    static = {"algo": "AES", "mode": "CFB", "key": "static", "iv_derive": "md5(key+ts)[:16]"}
+    live = {"key": "live", "key_encoding": "utf8"}  # 只覆盖 key
+    merged = merge._merge_recipe_meta(static, live)
+    assert merged is not None
+    assert merged["key"] == "live"  # 实测覆盖
+    assert merged["iv_derive"] == "md5(key+ts)[:16]"  # 静态保留
+    assert merged["mode"] == "CFB"
+
+
+def test_merge_recipe_meta_none_when_both_empty() -> None:
+    assert merge._merge_recipe_meta(None, None) is None
+    assert merge._merge_recipe_meta({}, None) is None
+
+
+def test_load_crypto_events_missing_or_bad(tmp_path) -> None:
+    # 缺文件
+    assert merge._load_crypto_events(str(tmp_path / "nope.json")) == []
+    # 旧版报告无 crypto_events 字段
+    p = tmp_path / "runtime_report.json"
+    p.write_text(json.dumps({"endpoints": []}), encoding="utf-8")
+    assert merge._load_crypto_events(str(p)) == []
+
+
+def test_merge_recipe_meta_varying_live_iv_preserves_static_fixed_iv() -> None:
+    """不变量 #7：实测 varying-iv（live 无 iv 键）绝不覆盖静态 fixed iv_value。"""
+    static = {
+        "algo": "AES",
+        "mode": "CFB",
+        "key": "wrong",
+        "iv_derive": "fixed",
+        "iv_value": "1234567890abcdef",
+    }
+    live = {"key": "realkey", "key_encoding": "utf8"}  # varying iv → 无 iv 键
+    merged = merge._merge_recipe_meta(static, live)
+    assert merged is not None
+    assert merged["key"] == "realkey"  # 实测 key 覆盖
+    assert merged["iv_derive"] == "fixed"  # 静态 fixed 存活
+    assert merged["iv_value"] == "1234567890abcdef"  # iv_value 不被清掉
+
+
+def _c5b_encrypt_fixed_iv(plaintext: str, key: str, iv_ascii: str) -> str:
+    """用固定 iv（非 md5(key+ts)）加密，返回信封 data（base64）。"""
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
+
+    try:
+        from cryptography.hazmat.decrepit.ciphers.modes import CFB
+    except ImportError:
+        from cryptography.hazmat.primitives.ciphers.modes import CFB
+
+    kb = key.encode("utf-8")
+    iv = iv_ascii.encode("utf-8")
+    pb = plaintext.encode("utf-8")
+    pad = 16 - (len(pb) % 16)
+    padded = pb + bytes([pad]) * pad
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("ignore")
+        enc = Cipher(algorithms.AES(kb), CFB(iv)).encryptor()
+        ct = enc.update(padded) + enc.finalize()
+    return _b64.b64encode(ct).decode("ascii")
+
+
+def test_decrypt_uses_runtime_fixed_iv(tmp_path) -> None:
+    """不变量 #7 正路：实测 iv 恒定 → fixed，用该恒定 iv（非 md5）解出信封。"""
+    iv_ascii = "abcdefghijklmnop"  # 16B 可见 ASCII
+    iv_hex = iv_ascii.encode("utf-8").hex()
+    data = _c5b_encrypt_fixed_iv(_C5B_PLAINTEXT, _C5B_KEY, iv_ascii)
+    env = json.dumps({"data": data, "timestamp": _C5B_TS})
+    crypto_events = [
+        {"src": "cipher", "event": "init", "transformation": "AES/CFB/PKCS5Padding",
+         "key_hex": _C5B_KEY_HEX, "iv_hex": iv_hex},
+        {"src": "cipher", "event": "init", "transformation": "AES/CFB/PKCS5Padding",
+         "key_hex": _C5B_KEY_HEX, "iv_hex": iv_hex},  # 同一 iv 恒定
+    ]
+    rr_path = _write_rr(
+        tmp_path,
+        messages=[{"url": "https://api.hxhcapi.vip/post", "response_body": env}],
+        crypto_events=crypto_events,
+    )
+    report = _make_report()  # 无静态配方，全靠实测
+
+    stats = merge.decrypt_runtime_messages(report, rr_path)
+
+    assert stats["live_recipe"] == 1
+    assert stats["decrypted"] == 1
+    assert report.meta["runtime_crypto_recipe"]["iv_derive"] == "fixed"
+    assert report.meta["runtime_crypto_recipe"]["iv_value"] == iv_ascii
+    values = {ep.value for ep in report.endpoints}
+    assert "https://gw.hxhcapi.vip/config" in values
+
+
+def test_decrypt_falls_back_to_static_when_live_recipe_fails(tmp_path) -> None:
+    """fix A：实测拿到二进制 key（hex，与静态 md5(key+ts) 口径不兼容）解不出 → 回退纯静态成功。"""
+    data = _c5b_encrypt(_C5B_PLAINTEXT)  # 用真 utf8 key（静态）加密
+    env = json.dumps({"data": data, "timestamp": _C5B_TS})
+    # 实测抓到一个二进制 key（hex 编码）——单用它 + 静态 md5 推导会解错。
+    crypto_events = [
+        {"src": "cipher", "event": "init", "transformation": "AES/CFB/PKCS5Padding",
+         "key_hex": "aa" * 16, "iv_hex": None},
+    ]
+    rr_path = _write_rr(
+        tmp_path,
+        messages=[{"url": "https://api.hxhcapi.vip/post", "response_body": env}],
+        crypto_events=crypto_events,
+    )
+    report = _make_report(meta={"crypto_recipe": _c5b_recipe_meta()})  # 正确静态 key
+
+    stats = merge.decrypt_runtime_messages(report, rr_path)
+
+    assert stats["live_recipe"] == 1  # 实测配方存在并被优先尝试
+    assert stats["decrypted"] == 1  # 但靠回退纯静态配方解出（不回归）
+    assert stats["failed"] == 0
+    values = {ep.value for ep in report.endpoints}
+    assert "https://gw.hxhcapi.vip/config" in values
+
+
+def test_decrypt_runtime_brand_hints_only_when_match(tmp_path) -> None:
+    """无品牌词 → 不写 runtime_brand_hints；且无 key 事件 → 不写 runtime_crypto_recipe。"""
+    plain = json.dumps({"foo": "bar", "n": 1}, ensure_ascii=False).encode("utf-8")
+    crypto_events = [
+        {"src": "cipher", "event": "doFinal", "opmode": 2,
+         "plaintext_b64": _b64.b64encode(plain).decode("ascii")}
+    ]
+    rr_path = _write_rr(tmp_path, crypto_events=crypto_events)
+    report = _make_report()
+    merge.decrypt_runtime_messages(report, rr_path)
+    assert "runtime_brand_hints" not in report.meta
+    assert "runtime_crypto_recipe" not in report.meta  # 无 key 事件 → 无实测配方
