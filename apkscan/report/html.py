@@ -25,6 +25,7 @@ _TEMPLATE_NAME = "report.html.j2"
 
 # LeadCategory → 中文标签（用于线索清单分组标题）。
 CATEGORY_LABELS: dict[LeadCategory, str] = {
+    LeadCategory.CRYPTO_RECIPE: "应用层加密配方",
     LeadCategory.CONFIG_KEY: "调用插件 / 配置键值",
     LeadCategory.DOMAIN: "域名线索",
     LeadCategory.IP: "IP 线索",
@@ -38,6 +39,7 @@ CATEGORY_LABELS: dict[LeadCategory, str] = {
 
 # 调证人员视角下的分组展示顺序（配置键值最高优先，其次资金/SDK/联系方式）。
 CATEGORY_ORDER: list[LeadCategory] = [
+    LeadCategory.CRYPTO_RECIPE,
     LeadCategory.CONFIG_KEY,
     LeadCategory.PAYMENT,
     LeadCategory.SDK_SERVICE,
@@ -249,12 +251,21 @@ def _render_template(template: Any, report: Report) -> str:
             and lead.category is LeadCategory.CONFIG_KEY
         ]
     )
+    crypto_recipe_leads = sort_leads_by_confidence(
+        [
+            lead
+            for lead in report.leads
+            if isinstance(lead.category, LeadCategory)
+            and lead.category is LeadCategory.CRYPTO_RECIPE
+        ]
+    )
     network_leads = network_leads_by_advice(report.leads)
     return template.render(
         report=report,
         lead_groups=lead_groups,
         lead_total=len(report.leads),
         config_key_leads=config_key_leads,
+        crypto_recipe_leads=crypto_recipe_leads,
         network_leads=network_leads,
         endpoints=endpoints,
         endpoint_total=len(report.endpoints),

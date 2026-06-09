@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -32,6 +33,8 @@ logger = logging.getLogger(__name__)
 
 # 运行时端点 / 证据的来源标记（与 capture._collect_flow_endpoints / models.Evidence 约定一致）。
 _RUNTIME_SOURCE = "runtime"
+# C5b：运行时解密出的明文端点来源标记（与抓包原始端点 "runtime" 区分，便于报告标注来源）。
+_RUNTIME_DECRYPTED_SOURCE = "runtime-decrypted"
 
 # 重渲支持的报告格式（默认全产出，覆盖 analyze 首次写出的静态报告）。
 _DEFAULT_FORMATS = ["html", "json"]
@@ -144,10 +147,14 @@ def _evidences_from_jsonable(raw: Any, value: str) -> list[Evidence]:
 
 
 def _force_runtime_source(endpoints: list[Endpoint]) -> None:
-    """就地确保运行时端点的每条 evidence source="runtime"（合并语义靠 source 区分来源）。"""
+    """就地确保运行时端点的每条 evidence source="runtime"（合并语义靠 source 区分来源）。
+
+    C5b：已标 "runtime-decrypted"（解密出的明文端点）的 evidence 放行——它本就是运行时
+    来源的一种，需保留更精确的来源标记，便于报告区分"密文抓到"与"解密还原"。
+    """
     for ep in endpoints:
         for ev in ep.evidences:
-            if ev.source != _RUNTIME_SOURCE:
+            if ev.source not in (_RUNTIME_SOURCE, _RUNTIME_DECRYPTED_SOURCE):
                 ev.source = _RUNTIME_SOURCE
 
 
@@ -234,6 +241,207 @@ def _build_runtime_leads(report: Report, runtime_only: list[Endpoint]) -> int:
     return len(new_leads)
 
 
+# ---------------------------------------------------------------------------
+# C5b：用静态配方解密运行时信封报文 → 明文端点并入主报告
+# ---------------------------------------------------------------------------
+
+# 明文 JSON 里抽端点的正则：http(s) URL 与 /api 风格相对路径。
+_PLAINTEXT_URL_RE = re.compile(r"""https?://[^\s"'`<>()\[\]{}\\^|,;]+""", re.IGNORECASE)
+_PLAINTEXT_PATH_RE = re.compile(
+    r"""(?<![\w.])(/(?:api|app|v\d+|gateway|service|interface|open|mobile|client|user|auth|register|login|pay|order|account|member|sys|admin|h5|wap|webconfig|config)
+        (?:/[A-Za-z0-9_\-.~%]+)*)""",
+    re.VERBOSE | re.IGNORECASE,
+)
+
+
+def decrypt_runtime_messages(report: Report, runtime_report_path: str) -> dict[str, int]:
+    """用 ``report.meta["crypto_recipe"]`` 对 runtime_report.json 的信封报文解密，
+    把明文里的端点（register/login/webConfig/产品/入金/客服等）并入 ``report``。
+
+    流程（见 §3.4 spec）：
+      1. 从 report.meta 取配方；无配方 → 跳过（零统计），保留密文，不崩。
+      2. 读 runtime_report.json 的 messages。
+      3. 每条 message 的请求/响应体若命中信封（含 data 与 timestamp）→ decrypt_envelope。
+      4. 明文是合法 JSON → 抽 URL/路径/webName 关联域名 → Endpoint(source=runtime-decrypted)
+         → 走 merge_runtime_endpoints 并入（去重/分级/产线索）。
+      5. 解密失败/配方不全/padding 错 → warning + 保留原密文，不并入、不崩。
+      6. 统计写 report.meta["runtime_decrypted"]。
+
+    Returns:
+        ``{"decrypted", "failed", "plaintext_endpoints"}``。内部 try/except，绝不抛。
+    """
+    stats = {"decrypted": 0, "failed": 0, "plaintext_endpoints": 0}
+    try:
+        from apkscan.core import appcrypto
+
+        recipe = appcrypto.CryptoRecipe.from_meta(report.meta.get("crypto_recipe"))
+        if recipe is None:
+            logger.info("[merge] report.meta 无 crypto_recipe 配方，跳过运行时信封解密")
+            return stats
+
+        messages = _load_runtime_messages(runtime_report_path)
+        if not messages:
+            logger.info("[merge] runtime 报告无 messages，无信封可解密")
+            return stats
+
+        plaintext_endpoints: list[Endpoint] = []
+        for msg in messages:
+            url = str(msg.get("url", "")) if isinstance(msg, dict) else ""
+            for body_key in ("response_body", "request_body"):
+                body = msg.get(body_key) if isinstance(msg, dict) else None
+                env = _parse_envelope(body)
+                if env is None:
+                    continue
+                plain = appcrypto.decrypt_envelope(env["data"], recipe, env["timestamp"])
+                if plain is None:
+                    stats["failed"] += 1
+                    logger.warning(
+                        "[merge] 信封解密失败（配方不全/padding 错/缺 crypto），保留密文：%s", url or body_key
+                    )
+                    continue
+                stats["decrypted"] += 1
+                eps = _endpoints_from_plaintext(plain, url)
+                plaintext_endpoints.extend(eps)
+
+        stats["plaintext_endpoints"] = len(plaintext_endpoints)
+        if plaintext_endpoints:
+            merge_runtime_endpoints(report, plaintext_endpoints)
+
+        report.meta["runtime_decrypted"] = True
+        report.meta["runtime_decrypt_stats"] = dict(stats)
+        logger.info(
+            "[merge] 运行时信封解密完成：decrypted=%d failed=%d plaintext_endpoints=%d",
+            stats["decrypted"],
+            stats["failed"],
+            stats["plaintext_endpoints"],
+        )
+    except Exception:  # noqa: BLE001 - 解密失败不得抛给调用方（不破坏已产出报告）
+        logger.exception("[merge] 运行时信封解密异常")
+    return stats
+
+
+def _load_runtime_messages(runtime_report_path: str) -> list[dict[str, Any]]:
+    """读 runtime_report.json 的 messages 数组；缺文件/坏 JSON/无字段 → []（不抛）。"""
+    import json
+    from pathlib import Path
+
+    path = Path(runtime_report_path)
+    if not path.exists():
+        logger.info("[merge] runtime 报告不存在，无信封报文：%s", path)
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        logger.exception("[merge] 读取/解析 runtime 报告失败（信封解密跳过）：%s", path)
+        return []
+    raw = payload.get("messages") if isinstance(payload, dict) else None
+    if not isinstance(raw, list):
+        return []
+    return [m for m in raw if isinstance(m, dict)]
+
+
+def _parse_envelope(body: Any) -> dict[str, Any] | None:
+    """把报文体（str 或 dict）解析为信封 dict，须含 data 与 timestamp 两键；否则 None。"""
+    import json
+
+    obj: Any = body
+    if isinstance(body, str):
+        if not body.strip():
+            return None
+        try:
+            obj = json.loads(body)
+        except ValueError:
+            return None
+    if not isinstance(obj, dict):
+        return None
+    if "data" not in obj or "timestamp" not in obj:
+        return None
+    data = obj.get("data")
+    if not isinstance(data, str) or not data:
+        return None
+    return {"data": data, "timestamp": obj.get("timestamp")}
+
+
+def _endpoints_from_plaintext(plaintext: str, source_url: str) -> list[Endpoint]:
+    """从解密后的明文（合法 JSON 优先）抽端点：http(s) URL / /api 风格路径 / webName 关联域名。
+
+    产 Endpoint(source="runtime-decrypted")。明文非 JSON 时退化为在文本上跑正则。
+    """
+    import json
+
+    location = source_url or "runtime-decrypted"
+    found: dict[str, Endpoint] = {}
+
+    def _add(value: str, kind: str, snippet: str) -> None:
+        value = value.strip()
+        if not value or value in found:
+            return
+        found[value] = Endpoint(
+            value=value,
+            kind=kind,
+            evidences=[
+                Evidence(source=_RUNTIME_DECRYPTED_SOURCE, location=location, snippet=snippet[:200])
+            ],
+            is_cleartext=value.lower().startswith("http://"),
+        )
+
+    # 优先把明文当 JSON 递归收集字符串值（精确，能抓到 webName 等）。
+    text_values: list[str] = []
+    web_name = ""
+    try:
+        obj = json.loads(plaintext)
+        for key, val in _walk_json_strings(obj):
+            text_values.append(val)
+            if key.lower() == "webname" and val:
+                web_name = val
+    except ValueError:
+        text_values = [plaintext]
+
+    haystack = "\n".join(text_values) if text_values else plaintext
+
+    for m in _PLAINTEXT_URL_RE.finditer(haystack):
+        raw = m.group(0).rstrip(".,;)\"'")
+        _add(raw, "url", raw)
+        host = _host_of_url(raw)
+        if host:
+            _add(host, "domain", raw)
+    for m in _PLAINTEXT_PATH_RE.finditer(haystack):
+        _add(m.group(1), "path", m.group(1))
+
+    if web_name:
+        # webName（冒充对象）本身不是端点，但作为线索片段附在第一个端点证据里更有价值；
+        # 这里仅记日志，端点抽取已覆盖明文里的真实地址。
+        logger.info("[merge] 解密明文含 webName（冒充对象）：%s", web_name)
+
+    return list(found.values())
+
+
+def _walk_json_strings(obj: Any, key: str = "") -> list[tuple[str, str]]:
+    """递归收集 JSON 里的 (key, str_value) 对（用于从明文契约抽地址/字段）。"""
+    out: list[tuple[str, str]] = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            out.extend(_walk_json_strings(v, str(k)))
+    elif isinstance(obj, list):
+        for item in obj:
+            out.extend(_walk_json_strings(item, key))
+    elif isinstance(obj, str):
+        out.append((key, obj))
+    return out
+
+
+def _host_of_url(url: str) -> str:
+    """从 URL 取 host（不含端口/路径）。解析失败 → 空串。"""
+    from urllib.parse import urlsplit
+
+    try:
+        netloc = urlsplit(url).netloc
+    except ValueError:
+        return ""
+    host = netloc.split("@")[-1].split(":")[0]
+    return host if "." in host else ""
+
+
 def merge_and_rerender(
     report: Report,
     endpoints: list[Endpoint],
@@ -241,12 +449,15 @@ def merge_and_rerender(
     *,
     formats: list[str] | None = None,
     on_progress: Callable[[str], None] | None = None,
+    runtime_report_path: str | None = None,
 ) -> dict[str, Any]:
     """并入运行时端点后按 ``formats`` 重渲报告，覆盖 ``out_dir`` 下的首次产出。
 
     供 cli ``analyze --dynamic`` 在 capture 后调用：先 :func:`merge_runtime_endpoints`
-    就地补全 report，再惰性 import ``apkscan.report.{json,html}`` 覆盖写
-    ``out_dir/report.{json,html}``，使真·C2 进入主线索清单与报告。
+    就地补全 report，再（C5b）用静态配方对 runtime_report.json 的信封报文
+    :func:`decrypt_runtime_messages` 解密、把明文端点并入，最后惰性 import
+    ``apkscan.report.{json,html}`` 覆盖写 ``out_dir/report.{json,html}``，使真·C2 与
+    解密还原的接口契约都进入主线索清单与报告。
 
     Args:
         report: 主报告，就地被修改。
@@ -254,18 +465,29 @@ def merge_and_rerender(
         out_dir: 报告输出目录（与 analyze 首次写出一致）。
         formats: 要重渲的格式，默认 ``["html", "json"]``。
         on_progress: 可选进度回调。
+        runtime_report_path: runtime_report.json 路径（含 messages 信封）；默认
+            ``out_dir/runtime_report.json``。用于 C5b 解密。
 
     Returns:
         在 :func:`merge_runtime_endpoints` 统计基础上加 ``"report_paths"``（成功重渲的
-        报告路径列表；单格式失败不计入、不致命）。绝不抛。
+        报告路径列表；单格式失败不计入、不致命）与 ``"decrypt_*"`` 解密统计。绝不抛。
     """
     from pathlib import Path
+
+    out_path = Path(out_dir)
 
     _emit(on_progress, "并入运行时端点 ...")
     stats: dict[str, Any] = dict(merge_runtime_endpoints(report, endpoints))
 
+    # C5b：用静态配方解密运行时信封报文，把明文端点并入（在端点并入之后、重渲之前）。
+    _emit(on_progress, "解密运行时信封报文 ...")
+    rr_path = runtime_report_path or str(out_path / "runtime_report.json")
+    decrypt_stats = decrypt_runtime_messages(report, rr_path)
+    stats["decrypted"] = decrypt_stats.get("decrypted", 0)
+    stats["decrypt_failed"] = decrypt_stats.get("failed", 0)
+    stats["plaintext_endpoints"] = decrypt_stats.get("plaintext_endpoints", 0)
+
     fmts = list(formats) if formats else list(_DEFAULT_FORMATS)
-    out_path = Path(out_dir)
     try:
         out_path.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -316,5 +538,6 @@ def _rerender_html(report: Report, out_path: Any, on_progress: Callable[[str], N
 __all__ = [
     "load_runtime_endpoints",
     "merge_runtime_endpoints",
+    "decrypt_runtime_messages",
     "merge_and_rerender",
 ]

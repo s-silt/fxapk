@@ -366,10 +366,15 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
         artifacts.append(str(flows_file))
 
     endpoints = _parse_flows(flows_file)
+    # C5b：额外抽出报文体（请求/响应），供 merge 阶段对 {data,timestamp} 信封解密。
+    # 失败/缺 mitmproxy 包 → 空列表（不影响端点提取与报告写出）。
+    messages = _parse_messages(flows_file)
     # 抓包失败（mitmdump 没起来 / 编排异常）时，产出的 runtime_report 基于不完整/未抓全
     # 的流量，必须在报告里标明，避免它伪装成正常结果被下游误用。
     capture_ok = result["status"] != STATUS_ERROR
-    report_path = _write_runtime_report(package, out_path, endpoints, complete=capture_ok)
+    report_path = _write_runtime_report(
+        package, out_path, endpoints, complete=capture_ok, messages=messages
+    )
     report_paths = [report_path] if report_path else []
 
     if capture_ok:
@@ -684,6 +689,101 @@ def _collect_flow_endpoints(
             )
 
 
+# ---------------------------------------------------------------------------
+# 报文体提取（C5b：供 merge 对 {data,timestamp} 信封解密）
+# ---------------------------------------------------------------------------
+
+# 单条报文体保留上限（字节）：信封 data 是 base64 密文，通常不大；超大体多为上传/下载，跳过。
+_MAX_BODY_BYTES = 256 * 1024
+
+
+def _parse_messages(flows_file: Path) -> list[dict[str, Any]]:
+    """解析流文件，提取每条 HTTP 流的请求/响应体（文本），供解密信封用。
+
+    只保留**像 JSON 信封**（文本含 "data" 且含 "timestamp"）的报文体，避免把全部流量
+    体塞进 runtime_report.json。mitmproxy 包不可用 / 文件缺失 / 解析失败 → []（不抛）。
+
+    返回 ``[{"url": str, "request_body": str, "response_body": str}]``。
+    """
+    if not flows_file.exists():
+        return []
+
+    try:
+        import importlib
+
+        mitm_io = importlib.import_module("mitmproxy.io")  # type: ignore[import-not-found]
+        mitm_http = importlib.import_module("mitmproxy.http")  # type: ignore[import-not-found]
+    except ImportError:
+        logger.warning("[capture] mitmproxy 包不可用，无法提取报文体（信封解密将跳过）")
+        return []
+
+    messages: list[dict[str, Any]] = []
+    try:
+        with flows_file.open("rb") as fh:
+            reader = mitm_io.FlowReader(fh)
+            for flow in reader.stream():
+                if not isinstance(flow, mitm_http.HTTPFlow):
+                    continue
+                msg = _message_from_flow(flow)
+                if msg is not None:
+                    messages.append(msg)
+    except Exception:
+        logger.exception("[capture] 提取报文体失败：%s（信封解密将跳过）", flows_file)
+        return messages
+
+    logger.info("[capture] 从流文件提取信封报文 %d 条", len(messages))
+    return messages
+
+
+def _message_from_flow(flow: object) -> dict[str, Any] | None:
+    """从单条 HTTPFlow 提取 url + 请求/响应体（仅保留 JSON 信封形态）。无信封 → None。"""
+    req = getattr(flow, "request", None)
+    resp = getattr(flow, "response", None)
+    url = ""
+    if req is not None:
+        url = getattr(req, "pretty_url", None) or getattr(req, "url", None) or ""
+
+    req_body = _body_text(req)
+    resp_body = _body_text(resp)
+
+    # 只在请求或响应体像信封（含 data 且含 timestamp）时才保留。
+    if not _looks_like_envelope(req_body) and not _looks_like_envelope(resp_body):
+        return None
+
+    return {
+        "url": str(url),
+        "request_body": req_body,
+        "response_body": resp_body,
+    }
+
+
+def _body_text(msg: object) -> str:
+    """安全取出 mitmproxy 请求/响应的文本体（超限截断；取不到 → 空串）。"""
+    if msg is None:
+        return ""
+    # 优先 .text（mitmproxy 已按 content-type 解码）；回退 .content（bytes）。
+    text = getattr(msg, "text", None)
+    if isinstance(text, str) and text:
+        return text[:_MAX_BODY_BYTES]
+    content = getattr(msg, "content", None)
+    if isinstance(content, (bytes, bytearray)):
+        if len(content) > _MAX_BODY_BYTES:
+            content = bytes(content[:_MAX_BODY_BYTES])
+        try:
+            return bytes(content).decode("utf-8", errors="ignore")
+        except Exception:  # noqa: BLE001 — errors=ignore 几乎不抛，仅防御
+            logger.exception("[capture] 报文体解码失败")
+            return ""
+    return ""
+
+
+def _looks_like_envelope(body: str) -> bool:
+    """文本体是否像 {data,timestamp} 信封（粗判：含 data 与 timestamp 两词）。"""
+    if not body:
+        return False
+    return '"data"' in body and '"timestamp"' in body
+
+
 def _read_proc_stderr(proc: object) -> str:
     """读取已退出子进程的 stderr 尾部（用于诊断 mitmdump/frida 立即退出原因）。
 
@@ -707,12 +807,20 @@ def _read_proc_stderr(proc: object) -> str:
 
 
 def _write_runtime_report(
-    package: str, out_path: Path, endpoints: list[Endpoint], *, complete: bool = True
+    package: str,
+    out_path: Path,
+    endpoints: list[Endpoint],
+    *,
+    complete: bool = True,
+    messages: list[dict[str, Any]] | None = None,
 ) -> str:
     """把运行时端点写成 out/runtime_report.json（复用 report.json 的序列化）。
 
     complete=False（抓包失败/中断）时在 payload 标 capture_complete=False + note，
     使报告自身能表明它产自一次不完整的抓包，而非静默以正常结果示人。
+
+    C5b：``messages`` 为抽出的 {data,timestamp} 信封报文体（请求/响应），供 merge 阶段
+    据静态配方自动解密；默认空数组（向后兼容，旧消费方忽略即可）。
     返回报告路径；写出失败记日志返回空串（不抛）。
     """
     report_file = out_path / "runtime_report.json"
@@ -722,6 +830,7 @@ def _write_runtime_report(
         "capture_complete": complete,
         "endpoint_total": len(endpoints),
         "endpoints": [report_json._to_jsonable(ep) for ep in endpoints],
+        "messages": list(messages or []),
     }
     if not complete:
         payload["note"] = "抓包未完整（代理未起或编排中断），运行时端点可能不全。"

@@ -344,6 +344,43 @@ def test_html_config_key_section_shows_key_and_advice(sample_report: Report, tmp
     assert "advice-skip" in html
 
 
+def test_html_crypto_recipe_section_renders(tmp_path: Path) -> None:
+    """C5a：CRYPTO_RECIPE 线索渲染为专属小节（配方摘要 + advice），不缺标题。"""
+    report = Report(
+        package_name="com.test",
+        meta={},
+        leads=[
+            Lead(
+                category=LeadCategory.CRYPTO_RECIPE,
+                value="AES-CFB/Pkcs7 key(utf8,32B)=55f0…3467 iv=md5(key+ts)[:16]",
+                confidence=Confidence.HIGH,
+                advice="建议调证",
+                notes="自 JS 逆出的应用层加密配方",
+                source_refs=[Evidence(source="js", location="app-service.js", snippet="AES.encrypt")],
+            )
+        ],
+        endpoints=[],
+        findings=[],
+        analyzer_status=[],
+    )
+    path = tmp_path / "report.html"
+    report_html.render(report, str(path))
+    html = path.read_text(encoding="utf-8")
+
+    assert 'id="crypto-recipe"' in html
+    assert "应用层加密配方" in html
+    assert "AES-CFB/Pkcs7 key(utf8,32B)" in html
+    assert "建议调证" in html
+
+
+def test_html_no_crypto_recipe_section_when_absent(sample_report: Report, tmp_path: Path) -> None:
+    """无 CRYPTO_RECIPE 线索时不渲染该小节（避免空小节噪音）。"""
+    path = tmp_path / "report.html"
+    report_html.render(sample_report, str(path))
+    html = path.read_text(encoding="utf-8")
+    assert 'id="crypto-recipe"' not in html
+
+
 def test_html_network_split_by_advice(sample_report: Report, tmp_path: Path) -> None:
     """主控域名（建议调证）与通联域名/IP（无需调证）分区展示。"""
     path = tmp_path / "report.html"
