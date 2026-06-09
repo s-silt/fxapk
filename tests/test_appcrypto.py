@@ -25,13 +25,13 @@ from apkscan.core.appcrypto import CryptoRecipe, decrypt_envelope
 _KEY = "0123456789abcdef0123456789abcdef"
 _TS = 1700000000000
 _PLAINTEXT = (
-    '{"webName":"华西证券","register":"/api/register",'
+    '{"webName":"示例证券","register":"/api/register",'
     '"login":"/api/login","inviteCode":"ABC123"}'
 )
 
 
 # ---------------------------------------------------------------------------
-# 合成密文构造（测试内用 cryptography 加密，复刻 示例应用 配方）
+# 合成密文构造（测试内用 cryptography 加密，复刻真样本配方）
 # ---------------------------------------------------------------------------
 
 
@@ -58,7 +58,7 @@ def _encrypt_envelope_b64(
     ts: int = _TS,
     payload_encoding: str = "base64",
 ) -> str:
-    """用 示例应用 配方加密明文，返回信封 data 字段（base64 或 hex）。"""
+    """用真样本配方加密明文，返回信封 data 字段（base64 或 hex）。"""
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
 
     kb = key.encode("utf-8")

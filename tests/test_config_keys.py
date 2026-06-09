@@ -29,7 +29,7 @@ def _leads_by_value(result) -> dict[str, object]:
     return {lead.value: lead for lead in result.leads}
 
 
-# 真实样本（深远记算.apk）已验证的 <meta-data> 配置。
+# 真实样本已验证的 <meta-data> 配置。
 _REAL_MANIFEST = (
     '<?xml version="1.0" encoding="utf-8"?>\n'
     '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
@@ -60,7 +60,7 @@ def _uni_manifest_json() -> bytes:
     return json.dumps(
         {
             "id": "__UNI__F7A0431",
-            "name": "深远记算",
+            "name": "示例记账",
             "version": {"name": "1.0.0", "code": "100"},
             "description": "记账本",
             "plus": {"confusion": {"resources": "*.html,*.js,*.css"}},
@@ -195,7 +195,7 @@ def test_uni_app_encrypted_and_meta() -> None:
 
     assert result.meta.get("uni_encrypted") is True
     assert result.meta.get("uni_appid") == "__UNI__F7A0431"
-    assert result.meta.get("uni_app_name") == "深远记算"
+    assert result.meta.get("uni_app_name") == "示例记账"
 
     enc_findings = [f for f in result.findings if f.id == "CONFIG-UNIAPP-ENCRYPTED"]
     assert len(enc_findings) == 1
