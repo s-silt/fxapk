@@ -35,6 +35,10 @@ logger = logging.getLogger(__name__)
 
 #: ``send()`` payload 的通道判别值（JS 与 Python 两端约定）。
 CRYPTO_MSG_TYPE = "apkscan-crypto"
+#: P1 运行时 JS-bridge 追踪通道（hook WebView.addJavascriptInterface + 暴露方法调用）。
+JSBRIDGE_MSG_TYPE = "apkscan-jsbridge"
+#: P1 运行时敏感 API 追踪通道（hook TelephonyManager/SmsManager/… 实际调用）。
+SENSITIVE_API_MSG_TYPE = "apkscan-api"
 
 #: sink 累积上限：高频加密（每帧/每请求）会刷爆，超限丢弃 + 记一次 warning。
 _SINK_CAP = 4000
@@ -289,6 +293,119 @@ Java.perform(function () {
 
 
 # ---------------------------------------------------------------------------
+# P1：运行时 JS-bridge 追踪 —— hook WebView.addJavascriptInterface 列暴露接口 + 调用
+# ---------------------------------------------------------------------------
+FRIDA_JSBRIDGE_HOOK_JS: str = r"""
+// apkscan 运行时 JS-bridge 追踪（best-effort）：列出 H5 可调用的原生桥接面与实际调用。
+Java.perform(function () {
+    var _jb_count = 0;
+    function jbEmit(p) {
+        try {
+            if (_jb_count >= 2000) return;
+            _jb_count += 1;
+            p.type = 'apkscan-jsbridge';
+            send(p);
+        } catch (e) {}
+    }
+    function brief(v) {
+        try {
+            if (v === null || v === undefined) return null;
+            var s = '' + v;
+            return s.length > 256 ? s.slice(0, 256) : s;
+        } catch (e) { return null; }
+    }
+    try {
+        var WebView = Java.use('android.webkit.WebView');
+        WebView.addJavascriptInterface.overload('java.lang.Object', 'java.lang.String')
+            .implementation = function (obj, name) {
+                try {
+                    var cls = '';
+                    try { cls = obj.getClass().getName(); } catch (e) {}
+                    // 列出该桥对象上 @JavascriptInterface 可被 H5 调用的方法名（暴露面）。
+                    var methodNames = [];
+                    try {
+                        var methods = obj.getClass().getDeclaredMethods();
+                        for (var i = 0; i < methods.length && i < 64; i++) {
+                            methodNames.push('' + methods[i].getName());
+                        }
+                    } catch (e) {}
+                    jbEmit({event: 'register', iface: '' + name, object_class: cls,
+                            methods: methodNames.join(','), ts: Date.now()});
+                } catch (e) {}
+                return this.addJavascriptInterface(obj, name);
+            };
+        console.log('[apkscan] WebView.addJavascriptInterface hooked');
+    } catch (e) {
+        console.log('[apkscan] addJavascriptInterface hook skip: ' + e);
+    }
+    // DSBridge：统一桥接调用入口 callSync/call（覆盖常见框架的方法分发）。
+    try {
+        var DSB = Java.use('wendu.dsbridge.DWebView');
+        if (DSB.callHandler) {
+            DSB.callHandler.overloads.forEach(function (ov) {
+                ov.implementation = function () {
+                    try { jbEmit({event: 'call', iface: 'dsbridge', method: brief(arguments[0]), ts: Date.now()}); } catch (e) {}
+                    return ov.apply(this, arguments);
+                };
+            });
+        }
+        console.log('[apkscan] DSBridge hooked');
+    } catch (e) {
+        console.log('[apkscan] DSBridge hook skip: ' + e);
+    }
+});
+"""
+
+
+# ---------------------------------------------------------------------------
+# P1：运行时敏感 API 追踪 —— hook TelephonyManager/SmsManager/… 实际调用
+# ---------------------------------------------------------------------------
+FRIDA_SENSITIVE_API_HOOK_JS: str = r"""
+// apkscan 运行时敏感 API 追踪（best-effort）：记录设备标识/短信/通讯录/剪贴板等实际调用。
+Java.perform(function () {
+    var _api_count = 0;
+    function apiEmit(api, ret) {
+        try {
+            if (_api_count >= 2000) return;
+            _api_count += 1;
+            var rs = null;
+            try { if (ret !== null && ret !== undefined) { rs = ('' + ret).slice(0, 128); } } catch (e) {}
+            send({type: 'apkscan-api', event: 'call', api: api, result_summary: rs, ts: Date.now()});
+        } catch (e) {}
+    }
+    function hook(cls, method, label) {
+        try {
+            var C = Java.use(cls);
+            if (!C[method]) return;
+            C[method].overloads.forEach(function (ov) {
+                ov.implementation = function () {
+                    var ret = ov.apply(this, arguments);
+                    apiEmit(label, ret);
+                    return ret;
+                };
+            });
+            console.log('[apkscan] hooked ' + label);
+        } catch (e) {
+            console.log('[apkscan] hook skip ' + label + ': ' + e);
+        }
+    }
+    var TM = 'android.telephony.TelephonyManager';
+    hook(TM, 'getDeviceId', 'TelephonyManager.getDeviceId');
+    hook(TM, 'getImei', 'TelephonyManager.getImei');
+    hook(TM, 'getSubscriberId', 'TelephonyManager.getSubscriberId');
+    hook(TM, 'getSimSerialNumber', 'TelephonyManager.getSimSerialNumber');
+    hook(TM, 'getLine1Number', 'TelephonyManager.getLine1Number');
+    hook(TM, 'getSimOperator', 'TelephonyManager.getSimOperator');
+    hook(TM, 'getSimOperatorName', 'TelephonyManager.getSimOperatorName');
+    hook('android.telephony.SmsManager', 'sendTextMessage', 'SmsManager.sendTextMessage');
+    hook('android.content.ContentResolver', 'query', 'ContentResolver.query');
+    hook('android.content.ClipboardManager', 'getPrimaryClip', 'ClipboardManager.getPrimaryClip');
+    hook('android.location.LocationManager', 'getLastKnownLocation', 'LocationManager.getLastKnownLocation');
+});
+"""
+
+
+# ---------------------------------------------------------------------------
 # on_message handler：把 Frida send() 的 crypto 事件规范化进 sink
 # ---------------------------------------------------------------------------
 
@@ -336,6 +453,40 @@ def make_message_handler(sink: list[dict[str, Any]]) -> Callable[[dict[str, Any]
             sink.append(event)
         except Exception:  # noqa: BLE001 — 回调绝不抛（否则炸 Frida 会话）
             logger.exception("[cryptohook] 处理 Frida 消息异常（已忽略该条）")
+
+    return handler
+
+
+def make_typed_handler(
+    sink: list[dict[str, Any]],
+    msg_type: str,
+    normalizer: Callable[[Any], dict[str, Any] | None],
+) -> Callable[[dict[str, Any], Any], None]:
+    """通用 on_message 工厂：只收 ``payload['type']==msg_type`` 的 send 消息进 ``sink``。
+
+    与 ``make_message_handler`` 同范式（绝不抛、sink 封顶），但通道/规范化可参数化，供
+    crypto/jsbridge/sensitive_api 三通道复用。本工厂**不记 error 日志**（避免多 handler
+    重复刷；error 由 crypto 通道的 make_message_handler 统一记一次）。
+    """
+
+    def handler(message: Any, _data: Any = None) -> None:
+        try:
+            if not isinstance(message, dict) or message.get("type") != "send":
+                return
+            payload = message.get("payload")
+            if not isinstance(payload, dict) or payload.get("type") != msg_type:
+                return
+            event = normalizer(payload)
+            if event is None:
+                return
+            if len(sink) >= _SINK_CAP:
+                if len(sink) == _SINK_CAP:
+                    logger.warning("[cryptohook] %s 事件达上限 %d，后续丢弃", msg_type, _SINK_CAP)
+                    sink.append({"_capped": True})
+                return
+            sink.append(event)
+        except Exception:  # noqa: BLE001 — 回调绝不抛
+            logger.exception("[cryptohook] 处理 %s 消息异常（已忽略该条）", msg_type)
 
     return handler
 
@@ -398,6 +549,39 @@ def _as_hex_str(value: Any) -> str | None:
     except ValueError:
         return None
     return text
+
+
+def normalize_jsbridge_event(payload: Any) -> dict[str, Any] | None:
+    """规范化 JS-bridge 事件：register（暴露接口+方法）/ call（H5 实际调用）。"""
+    if not isinstance(payload, dict):
+        return None
+    event = _as_clean_str(payload.get("event"))
+    iface = _as_clean_str(payload.get("iface"))
+    if not event or not iface:
+        return None
+    return {
+        "event": event,  # register | call
+        "iface": iface,
+        "object_class": _as_clean_str(payload.get("object_class")) or "",
+        "methods": _as_clean_str(payload.get("methods")) or "",
+        "method": _as_clean_str(payload.get("method")) or "",
+        "ts": payload.get("ts") if isinstance(payload.get("ts"), int) else None,
+    }
+
+
+def normalize_sensitive_api_event(payload: Any) -> dict[str, Any] | None:
+    """规范化敏感 API 调用事件：api（<类>.<方法>）+ 结果摘要。"""
+    if not isinstance(payload, dict):
+        return None
+    api = _as_clean_str(payload.get("api"))
+    if not api:
+        return None
+    return {
+        "event": _as_clean_str(payload.get("event")) or "call",
+        "api": api,
+        "result_summary": _as_clean_str(payload.get("result_summary")) or "",
+        "ts": payload.get("ts") if isinstance(payload.get("ts"), int) else None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -644,12 +828,63 @@ def _walk_strings(obj: Any, key: str = "") -> list[tuple[str, str]]:
     return out
 
 
+def jsbridge_hints_from_events(events: list[dict[str, Any]]) -> list[str]:
+    """从 JS-bridge 事件抽「接口名（+方法）」线索，去重保序。
+
+    register → ``<iface>``（及暴露方法概览）；call → ``<iface>.<method>``。供 merge 把
+    运行时实际暴露/调用的桥接面并回报告（确认静态 webview_jsbridge 的桥接面）。
+    """
+    hints: list[str] = []
+    seen: set[str] = set()
+
+    def _add(value: str) -> None:
+        v = value.strip()
+        if v and v not in seen and len(v) <= 120:
+            seen.add(v)
+            hints.append(v)
+
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        iface = str(ev.get("iface", "")).strip()
+        if not iface:
+            continue
+        if ev.get("event") == "call" and ev.get("method"):
+            _add(f"{iface}.{str(ev.get('method')).strip()}")
+        else:
+            _add(iface)
+    return hints
+
+
+def sensitive_api_hints_from_events(events: list[dict[str, Any]]) -> list[str]:
+    """从敏感 API 事件抽「<类>.<方法>」清单，去重保序（供 merge 确认静态 sensitive_api）。"""
+    hints: list[str] = []
+    seen: set[str] = set()
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        api = str(ev.get("api", "")).strip()
+        if api and api not in seen:
+            seen.add(api)
+            hints.append(api)
+    return hints
+
+
 __all__ = [
     "FRIDA_CRYPTO_HOOK_JS",
+    "FRIDA_JSBRIDGE_HOOK_JS",
+    "FRIDA_SENSITIVE_API_HOOK_JS",
     "CRYPTO_MSG_TYPE",
+    "JSBRIDGE_MSG_TYPE",
+    "SENSITIVE_API_MSG_TYPE",
     "make_message_handler",
+    "make_typed_handler",
     "normalize_crypto_event",
+    "normalize_jsbridge_event",
+    "normalize_sensitive_api_event",
     "recipe_from_events",
     "brand_hints_from_events",
+    "jsbridge_hints_from_events",
+    "sensitive_api_hints_from_events",
     "transformation_parts",
 ]

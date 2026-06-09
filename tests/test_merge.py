@@ -843,6 +843,105 @@ def test_load_crypto_events_missing_or_bad(tmp_path) -> None:
     assert merge._load_crypto_events(str(p)) == []
 
 
+# ---------------------------------------------------------------------------
+# P1：运行时追踪并回（merge_runtime_traces）
+# ---------------------------------------------------------------------------
+
+
+def _write_rr_traces(tmp_path, jsbridge=None, sensitive=None) -> str:
+    path = tmp_path / "runtime_report.json"
+    path.write_text(
+        json.dumps(
+            {
+                "package_name": "com.test.app",
+                "source": "runtime",
+                "endpoints": [],
+                "messages": [],
+                "crypto_events": [],
+                "jsbridge_events": list(jsbridge or []),
+                "sensitive_api_events": list(sensitive or []),
+            }
+        ),
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def test_merge_runtime_traces_adds_jsbridge_leads(tmp_path) -> None:
+    rr = _write_rr_traces(
+        tmp_path,
+        jsbridge=[
+            {"event": "register", "iface": "AndroidNative", "methods": "pay,getDeviceInfo"},
+            {"event": "call", "iface": "AndroidNative", "method": "pay"},
+        ],
+    )
+    report = _make_report()
+    stats = merge.merge_runtime_traces(report, rr)
+
+    assert stats["jsbridge_leads"] >= 1
+    jsbridge_leads = [l for l in report.leads if l.value.startswith("JSBridge:")]
+    assert any(l.value == "JSBridge:AndroidNative" for l in jsbridge_leads)
+    lead = next(l for l in jsbridge_leads if l.value == "JSBridge:AndroidNative")
+    assert lead.is_runtime_seen is True  # source=runtime
+    assert report.meta["runtime_jsbridge"]
+    assert report.meta["runtime_traced"] is True
+
+
+def test_merge_runtime_traces_confirms_sensitive_api_finding(tmp_path) -> None:
+    from apkscan.core.models import Finding, Severity
+
+    rr = _write_rr_traces(
+        tmp_path, sensitive=[{"api": "TelephonyManager.getDeviceId"}]
+    )
+    static_finding = Finding(
+        id="SAPI-IMEI",
+        title="读取 IMEI / 设备序列号 (getDeviceId/getImei)",
+        severity=Severity.HIGH,
+        category="sensitive_api",
+        description="代码调用 getDeviceId 读取 IMEI",
+    )
+    report = _make_report()
+    report.findings.append(static_finding)
+
+    stats = merge.merge_runtime_traces(report, rr)
+    assert stats["api_confirmed"] == 1
+    # 静态 Finding 被追加 runtime 证据（活体确认）
+    assert any(ev.source == "runtime" for ev in static_finding.evidences)
+    assert report.meta["runtime_sensitive_apis"] == ["TelephonyManager.getDeviceId"]
+
+
+def test_merge_runtime_traces_existing_jsbridge_lead_gets_runtime_evidence(tmp_path) -> None:
+    """静态桥接框架 Lead 已存在 → 运行时同名只追加证据、不重复产 Lead。"""
+    rr = _write_rr_traces(tmp_path, jsbridge=[{"event": "register", "iface": "com.tencent.smtt"}])
+    report = _make_report(
+        leads=[
+            Lead(category=LeadCategory.CONFIG_KEY, value="JSBridge:com.tencent.smtt", confidence=Confidence.HIGH)
+        ]
+    )
+    before = len(report.leads)
+    merge.merge_runtime_traces(report, rr)
+    assert len(report.leads) == before  # 未新增重复 Lead
+    lead = report.leads[0]
+    assert lead.is_runtime_seen is True  # 追加了 runtime 证据
+
+
+def test_merge_runtime_traces_no_events_noop(tmp_path) -> None:
+    rr = _write_rr_traces(tmp_path)  # 空
+    report = _make_report()
+    stats = merge.merge_runtime_traces(report, rr)
+    assert stats == {"jsbridge_leads": 0, "api_confirmed": 0}
+    assert "runtime_traced" not in report.meta
+
+
+def test_merge_runtime_traces_missing_fields_backward_compat(tmp_path) -> None:
+    """旧版 runtime_report.json 无 jsbridge_events/sensitive_api_events 字段 → 不崩、零统计。"""
+    p = tmp_path / "runtime_report.json"
+    p.write_text(json.dumps({"endpoints": [], "messages": []}), encoding="utf-8")
+    report = _make_report()
+    stats = merge.merge_runtime_traces(report, str(p))
+    assert stats == {"jsbridge_leads": 0, "api_confirmed": 0}
+
+
 def test_merge_recipe_meta_varying_live_iv_preserves_static_fixed_iv() -> None:
     """不变量 #7：实测 varying-iv（live 无 iv 键）绝不覆盖静态 fixed iv_value。"""
     static = {

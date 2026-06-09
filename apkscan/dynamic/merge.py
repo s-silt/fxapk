@@ -27,7 +27,14 @@ from collections.abc import Callable
 from typing import Any
 
 from apkscan.core import pipeline
-from apkscan.core.models import Endpoint, Evidence, Report
+from apkscan.core.models import (
+    Confidence,
+    Endpoint,
+    Evidence,
+    Lead,
+    LeadCategory,
+    Report,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -384,8 +391,8 @@ def _decrypt_with_candidates(
     return None
 
 
-def _load_crypto_events(runtime_report_path: str) -> list[dict[str, Any]]:
-    """读 runtime_report.json 的 crypto_events 数组（P0 运行时密钥 hook 产出）。
+def _load_events_field(runtime_report_path: str, field: str) -> list[dict[str, Any]]:
+    """读 runtime_report.json 里某个事件数组字段（crypto_events/jsbridge_events/…）。
 
     缺文件/坏 JSON/无字段/旧版报告无该字段 → []（向后兼容，不抛）。
     """
@@ -398,12 +405,112 @@ def _load_crypto_events(runtime_report_path: str) -> list[dict[str, Any]]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        logger.exception("[merge] 读取/解析 runtime 报告失败（crypto_events 跳过）：%s", path)
+        logger.exception("[merge] 读取/解析 runtime 报告失败（%s 跳过）：%s", field, path)
         return []
-    raw = payload.get("crypto_events") if isinstance(payload, dict) else None
+    raw = payload.get(field) if isinstance(payload, dict) else None
     if not isinstance(raw, list):
         return []
     return [e for e in raw if isinstance(e, dict)]
+
+
+def _load_crypto_events(runtime_report_path: str) -> list[dict[str, Any]]:
+    """读 runtime_report.json 的 crypto_events 数组（P0 运行时密钥 hook 产出）。"""
+    return _load_events_field(runtime_report_path, "crypto_events")
+
+
+def merge_runtime_traces(report: Report, runtime_report_path: str) -> dict[str, int]:
+    """把 P1 运行时追踪（JS-bridge 暴露面/调用、敏感 API 实调）并回主报告。
+
+    - JS-bridge：运行时实际暴露/调用的桥接接口 → Lead(CONFIG_KEY, "JSBridge:<iface>",
+      source=runtime → is_runtime_seen=True)，去重并入；写 report.meta["runtime_jsbridge"]。
+    - 敏感 API：运行时实测调用的 ``<类>.<方法>`` → 给匹配的静态 sensitive_api Finding 追加
+      runtime Evidence（把"静态存在"升级为"活体确认"）；写 report.meta["runtime_sensitive_apis"]。
+
+    Returns:
+        ``{"jsbridge_leads", "api_confirmed"}``。内部 try/except，绝不抛。
+    """
+    stats = {"jsbridge_leads": 0, "api_confirmed": 0}
+    try:
+        from apkscan.dynamic import cryptohook
+
+        jb_events = _load_events_field(runtime_report_path, "jsbridge_events")
+        api_events = _load_events_field(runtime_report_path, "sensitive_api_events")
+
+        jb_hints = cryptohook.jsbridge_hints_from_events(jb_events)
+        if jb_hints:
+            report.meta["runtime_jsbridge"] = jb_hints
+            stats["jsbridge_leads"] = _add_runtime_jsbridge_leads(report, jb_hints)
+
+        api_hints = cryptohook.sensitive_api_hints_from_events(api_events)
+        if api_hints:
+            report.meta["runtime_sensitive_apis"] = api_hints
+            stats["api_confirmed"] = _confirm_sensitive_api_findings(report, api_hints)
+
+        if jb_hints or api_hints:
+            report.meta["runtime_traced"] = True
+            logger.info(
+                "[merge] 运行时追踪并回：jsbridge_leads=%d api_confirmed=%d",
+                stats["jsbridge_leads"],
+                stats["api_confirmed"],
+            )
+    except Exception:  # noqa: BLE001 - 追踪并回失败不得抛给调用方
+        logger.exception("[merge] 运行时追踪并回异常")
+    return stats
+
+
+def _add_runtime_jsbridge_leads(report: Report, jb_hints: list[str]) -> int:
+    """把运行时观测到的桥接接口加成 CONFIG_KEY Lead（source=runtime），去重 append。"""
+    existing = {(lead.category.value, lead.value) for lead in report.leads}
+    added = 0
+    for hint in jb_hints:
+        value = f"JSBridge:{hint}"
+        key = (LeadCategory.CONFIG_KEY.value, value)
+        if key in existing:
+            # 已有同名（静态桥接框架）→ 追加 runtime 证据，升为活体确认。
+            for lead in report.leads:
+                if lead.category == LeadCategory.CONFIG_KEY and lead.value == value:
+                    lead.source_refs.append(
+                        Evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=f"运行时暴露/调用：{hint}")
+                    )
+                    break
+            continue
+        existing.add(key)
+        report.leads.append(
+            Lead(
+                category=LeadCategory.CONFIG_KEY,
+                value=value,
+                confidence=Confidence.HIGH,
+                advice="建议调证",
+                source_refs=[
+                    Evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=f"运行时暴露/调用：{hint}")
+                ],
+                notes="运行时实测：H5 可调用/已调用的原生 JS-bridge 接口（活体确认）。",
+            )
+        )
+        added += 1
+    return added
+
+
+def _confirm_sensitive_api_findings(report: Report, api_hints: list[str]) -> int:
+    """给匹配的静态 sensitive_api Finding 追加 runtime Evidence（活体确认）。
+
+    匹配口径：运行时 api 串（如 "TelephonyManager.getDeviceId"）的方法名出现在 Finding 的
+    title/description/id 里即视为同一能力，追加一条 runtime 证据。返回确认条数。
+    """
+    confirmed = 0
+    method_names = {h.rsplit(".", 1)[-1] for h in api_hints if h}
+    for finding in report.findings:
+        if getattr(finding, "category", "") != "sensitive_api":
+            continue
+        hay = f"{finding.id} {finding.title} {finding.description}"
+        matched = next((m for m in method_names if m and m in hay), None)
+        if matched is None:
+            continue
+        finding.evidences.append(
+            Evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=f"运行时实测调用：{matched}")
+        )
+        confirmed += 1
+    return confirmed
 
 
 def _merge_recipe_meta(
@@ -584,6 +691,12 @@ def merge_and_rerender(
     stats["plaintext_endpoints"] = decrypt_stats.get("plaintext_endpoints", 0)
     stats["live_recipe"] = decrypt_stats.get("live_recipe", 0)
 
+    # P1：运行时追踪（JS-bridge 暴露面/调用、敏感 API 实调）并回 + 确认静态发现。
+    _emit(on_progress, "并回运行时 JS-bridge / 敏感 API 追踪 ...")
+    trace_stats = merge_runtime_traces(report, rr_path)
+    stats["jsbridge_leads"] = trace_stats.get("jsbridge_leads", 0)
+    stats["api_confirmed"] = trace_stats.get("api_confirmed", 0)
+
     fmts = list(formats) if formats else list(_DEFAULT_FORMATS)
     try:
         out_path.mkdir(parents=True, exist_ok=True)
@@ -640,5 +753,6 @@ __all__ = [
     "load_runtime_endpoints",
     "merge_runtime_endpoints",
     "decrypt_runtime_messages",
+    "merge_runtime_traces",
     "merge_and_rerender",
 ]

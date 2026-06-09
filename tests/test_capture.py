@@ -106,7 +106,11 @@ def _stub_orchestration(
     )
     # P0：默认让 frida-core 会话路径不可用（返回 (None, None)），既有用例继续走 subprocess
     # 回退路径（_start_frida_unpinning），行为零漂移；针对会话路径的新用例会再覆写此桩。
-    monkeypatch.setattr(capture, "_start_frida_session", lambda package, sink: (None, None))
+    monkeypatch.setattr(
+        capture,
+        "_start_frida_session",
+        lambda package, sink, jsbridge_sink=None, api_sink=None: (None, None),
+    )
     monkeypatch.setattr(capture, "_adb_reverse", lambda: (calls["adb"].append("reverse") or True))
     monkeypatch.setattr(capture, "_adb_set_proxy", lambda: (calls["adb"].append("proxy") or True))
     monkeypatch.setattr(capture, "_adb_clear_proxy", lambda: calls["adb"].append("clear_proxy"))
@@ -698,7 +702,7 @@ def test_capped_sentinel_filtered_from_runtime_report(monkeypatch, tmp_path):
     _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
     monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
 
-    def _fake_session(package: str, sink: list[dict[str, Any]]):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None):
         sink.append({"src": "cipher", "event": "init", "key_hex": "55f0"})
         sink.append({"_capped": True})  # 上限占位
         return object(), object()
@@ -722,7 +726,7 @@ def test_capture_done_collects_crypto_events_via_session(monkeypatch, tmp_path):
         {"src": "cipher", "event": "doFinal", "key_hex": "55f0", "plaintext_b64": "eyJhIjoxfQ=="},
     ]
 
-    def _fake_session(package: str, sink: list[dict[str, Any]]):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None):
         # 模拟 on_message 回调把 2 条事件写进共享 sink。
         sink.extend(fake_events)
         return object(), object()  # 非 None 会话/脚本（teardown 对 dummy 容错）
@@ -735,6 +739,35 @@ def test_capture_done_collects_crypto_events_via_session(monkeypatch, tmp_path):
     payload = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
     assert len(payload["crypto_events"]) == 2
     assert {e["event"] for e in payload["crypto_events"]} == {"init", "doFinal"}
+
+
+def test_capture_collects_jsbridge_and_sensitive_api_events(monkeypatch, tmp_path):
+    """P1：会话路径把 JS-bridge / 敏感 API 事件分别落进 runtime_report.json。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None):
+        if jsbridge_sink is not None:
+            jsbridge_sink.append({"event": "register", "iface": "AndroidNative"})
+        if api_sink is not None:
+            api_sink.append({"event": "call", "api": "TelephonyManager.getDeviceId"})
+        return object(), object()
+
+    monkeypatch.setattr(capture, "_start_frida_session", _fake_session)
+
+    capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+    payload = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    assert payload["jsbridge_events"] == [{"event": "register", "iface": "AndroidNative"}]
+    assert payload["sensitive_api_events"] == [{"event": "call", "api": "TelephonyManager.getDeviceId"}]
+
+
+def test_runtime_report_p1_events_default_empty(tmp_path):
+    """_write_runtime_report 默认写出空 jsbridge_events/sensitive_api_events（向后兼容）。"""
+    rp = capture._write_runtime_report("com.test.app", tmp_path, [], complete=True)
+    payload = json.loads(Path(rp).read_text(encoding="utf-8"))
+    assert payload["jsbridge_events"] == []
+    assert payload["sensitive_api_events"] == []
 
 
 # ---------------------------------------------------------------------------

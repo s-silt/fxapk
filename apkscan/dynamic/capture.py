@@ -267,6 +267,8 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
     frida_session: Any = None
     frida_script: Any = None
     crypto_events: list[dict[str, Any]] = []
+    jsbridge_events: list[dict[str, Any]] = []  # P1：运行时 JS-bridge 暴露面/调用
+    sensitive_api_events: list[dict[str, Any]] = []  # P1：运行时敏感 API 调用
     proxy_set = False
     reverse_set = False
     # 抓包加固产生的告警（CA 未装系统库 / frida 版本不一致），收尾并入 reason，
@@ -321,7 +323,9 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
         # 3) frida 注入：优先 frida-core 通道（SSL unpinning + 运行时密钥 hook，可回传活体 key）；
         #    frida-core 不可用 / attach 失败 → 回退现有 subprocess 路径（仅 unpinning，无 key 回传）。
         #    两路都 best-effort、失败不阻断抓包（HTTP 仍可抓）。
-        frida_session, frida_script = _start_frida_session(package, crypto_events)
+        frida_session, frida_script = _start_frida_session(
+            package, crypto_events, jsbridge_events, sensitive_api_events
+        )
         if frida_session is not None:
             playbook.append(
                 f"frida-core 注入 SSL unpinning + 运行时密钥 hook 并启动 {package}（活体 key 回传）"
@@ -388,15 +392,19 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
     # 抓包失败（mitmdump 没起来 / 编排异常）时，产出的 runtime_report 基于不完整/未抓全
     # 的流量，必须在报告里标明，避免它伪装成正常结果被下游误用。
     capture_ok = result["status"] != STATUS_ERROR
-    # P0：把活体 crypto 事件（去掉 sink 上限触发的 _capped 占位）一并写进 runtime_report.json。
-    clean_crypto_events = [e for e in crypto_events if not e.get("_capped")]
+    # P0/P1：把活体事件（去掉 sink 上限触发的 _capped 占位）一并写进 runtime_report.json。
+    def _clean(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [e for e in events if not e.get("_capped")]
+
     report_path = _write_runtime_report(
         package,
         out_path,
         endpoints,
         complete=capture_ok,
         messages=messages,
-        crypto_events=clean_crypto_events,
+        crypto_events=_clean(crypto_events),
+        jsbridge_events=_clean(jsbridge_events),
+        sensitive_api_events=_clean(sensitive_api_events),
     )
     report_paths = [report_path] if report_path else []
 
@@ -483,16 +491,23 @@ def _start_frida_unpinning(package: str, out_path: Path) -> subprocess.Popen[byt
 _FRIDA_USB_TIMEOUT = 10
 
 
-def _start_frida_session(package: str, sink: list[dict[str, Any]]) -> tuple[Any, Any]:
-    """用 frida-core（``import frida``）spawn 目标 app 并注入 unpinning + 运行时密钥 hook。
+def _start_frida_session(
+    package: str,
+    sink: list[dict[str, Any]],
+    jsbridge_sink: list[dict[str, Any]] | None = None,
+    api_sink: list[dict[str, Any]] | None = None,
+) -> tuple[Any, Any]:
+    """用 frida-core（``import frida``）spawn 目标 app 并注入 unpinning + 运行时 hook 套件。
 
     与 subprocess 路径（``_start_frida_unpinning``）的关键差异：frida-core 提供
-    ``send()``/``on_message`` 双向通道，能把活体 AES key/iv/明文**结构化回传** Python
-    （收集进 ``sink``），这是 subprocess 单向 console.log 做不到的。
+    ``send()``/``on_message`` 双向通道，能把活体 AES key/iv/明文（P0）+ JS-bridge 暴露面/
+    敏感 API 调用（P1）**结构化回传** Python，这是 subprocess 单向 console.log 做不到的。
 
     Args:
         package: 目标应用包名（spawn）。
-        sink: 收集 crypto 事件的共享列表（``cryptohook.make_message_handler`` 写入）。
+        sink: 收集 crypto 事件的共享列表（``make_message_handler`` 写入）。
+        jsbridge_sink: 收集 JS-bridge 事件（None 则不注册该通道）。
+        api_sink: 收集敏感 API 调用事件（None 则不注册该通道）。
 
     Returns:
         ``(session, script)``：成功 → 两者非 None（脚本已 load、app 已 resume）；
@@ -510,7 +525,15 @@ def _start_frida_session(package: str, sink: list[dict[str, Any]]) -> tuple[Any,
         )
         return None, None
 
-    source = FRIDA_UNPINNING_JS + "\n" + cryptohook.FRIDA_CRYPTO_HOOK_JS
+    source = (
+        FRIDA_UNPINNING_JS
+        + "\n"
+        + cryptohook.FRIDA_CRYPTO_HOOK_JS
+        + "\n"
+        + cryptohook.FRIDA_JSBRIDGE_HOOK_JS
+        + "\n"
+        + cryptohook.FRIDA_SENSITIVE_API_HOOK_JS
+    )
     device_handle: Any = None
     pid: Any = None
     session: Any = None
@@ -519,7 +542,22 @@ def _start_frida_session(package: str, sink: list[dict[str, Any]]) -> tuple[Any,
         pid = device_handle.spawn([package])
         session = device_handle.attach(pid)
         script = session.create_script(source)
+        # 三通道：crypto（含 error 诊断）/ jsbridge / 敏感 API，各自规范化进对应 sink。
         script.on("message", cryptohook.make_message_handler(sink))
+        if jsbridge_sink is not None:
+            script.on(
+                "message",
+                cryptohook.make_typed_handler(
+                    jsbridge_sink, cryptohook.JSBRIDGE_MSG_TYPE, cryptohook.normalize_jsbridge_event
+                ),
+            )
+        if api_sink is not None:
+            script.on(
+                "message",
+                cryptohook.make_typed_handler(
+                    api_sink, cryptohook.SENSITIVE_API_MSG_TYPE, cryptohook.normalize_sensitive_api_event
+                ),
+            )
         script.load()
         device_handle.resume(pid)
         logger.info("[capture] frida-core spawn+attach 成功：pid=%s package=%s", pid, package)
@@ -939,6 +977,8 @@ def _write_runtime_report(
     complete: bool = True,
     messages: list[dict[str, Any]] | None = None,
     crypto_events: list[dict[str, Any]] | None = None,
+    jsbridge_events: list[dict[str, Any]] | None = None,
+    sensitive_api_events: list[dict[str, Any]] | None = None,
 ) -> str:
     """把运行时端点写成 out/runtime_report.json（复用 report.json 的序列化）。
 
@@ -961,6 +1001,8 @@ def _write_runtime_report(
         "endpoints": [report_json._to_jsonable(ep) for ep in endpoints],
         "messages": list(messages or []),
         "crypto_events": list(crypto_events or []),
+        "jsbridge_events": list(jsbridge_events or []),
+        "sensitive_api_events": list(sensitive_api_events or []),
     }
     if not complete:
         payload["note"] = "抓包未完整（代理未起或编排中断），运行时端点可能不全。"
