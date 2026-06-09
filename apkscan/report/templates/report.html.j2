@@ -177,6 +177,39 @@
     {% else %}<span class="muted">—</span>{% endif %}
   {% endmacro %}
 
+  {#- ============ ★ 应用层加密配方（凭此可离线解密全部加密流量） ============ -#}
+  {% if crypto_recipe_leads %}
+  <section id="crypto-recipe">
+    <h2><span class="star">★</span> 应用层加密配方 <span class="muted" style="font-size:13px;font-weight:400">（算法 / key / iv 推导 / 信封字段 —— 凭此可离线解密全部 {data,timestamp} 信封流量）</span></h2>
+    <table class="lead-table">
+      <thead>
+        <tr>
+          <th class="c-val">配方摘要</th>
+          <th>调证建议</th>
+          <th>说明 / 用途</th>
+          <th>取证依据（APK 内位置）</th>
+          <th>置信度</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for lead in crypto_recipe_leads %}
+        <tr>
+          <td><span class="mono-strong">{{ lead.value }}</span>
+            {% if lead.where_to_request %}<div class="muted" style="font-size:12px">{{ lead.where_to_request }}</div>{% endif %}
+          </td>
+          <td>{{ advice_badge(lead.advice) }}</td>
+          <td>{% if lead.notes %}<div class="muted" style="font-size:12px">{{ lead.notes }}</div>{% endif %}
+            {% if lead.evidence_to_obtain %}<ul class="tight">{% for ev in lead.evidence_to_obtain %}<li>{{ ev }}</li>{% endfor %}</ul>{% endif %}
+          </td>
+          <td>{{ source_refs_cell(lead) }}</td>
+          <td><span class="badge {{ lead.confidence|confidence_class }}">{{ lead.confidence|confidence_label }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  {% endif %}
+
   {#- ============ ② ★ 调用插件 / 配置键值 ============ -#}
   <section id="config-keys">
     <h2><span class="num">②</span> <span class="star">★</span> 调用插件 / 配置键值 <span class="muted" style="font-size:13px;font-weight:400">（具体 Key=值 / 所属公司 / 调证建议 / 取证依据）</span></h2>

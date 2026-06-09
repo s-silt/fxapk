@@ -398,6 +398,101 @@ def test_parse_flows_no_mitmproxy_package_returns_empty(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# C5b：_parse_messages 报文体提取（供 merge 信封解密）
+# ---------------------------------------------------------------------------
+
+
+class _FakeMessage:
+    """mitmproxy 请求/响应的最小替身：带 .text。"""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.content = text.encode("utf-8")
+
+
+class _FakeFullFlow:
+    def __init__(self, request: object, response: object) -> None:
+        self.request = request
+        self.response = response
+
+
+def _inject_fake_mitmproxy(monkeypatch, flows: list[object]) -> None:
+    fake_io = type(
+        "io",
+        (),
+        {"FlowReader": staticmethod(lambda fh: type("R", (), {"stream": lambda self: iter(flows)})())},
+    )
+    fake_http = type("http", (), {"HTTPFlow": _FakeFullFlow})
+    import sys
+
+    monkeypatch.setitem(sys.modules, "mitmproxy", type("m", (), {}))
+    monkeypatch.setitem(sys.modules, "mitmproxy.io", fake_io)
+    monkeypatch.setitem(sys.modules, "mitmproxy.http", fake_http)
+
+
+def test_parse_messages_extracts_envelope_bodies(monkeypatch, tmp_path):
+    flows_file = tmp_path / "flows.mitm"
+    flows_file.write_bytes(b"\x00data")
+
+    class _Req:
+        pretty_url = "https://api.fraud-gw.cn/post"
+        url = "https://api.fraud-gw.cn/post"
+
+    req = _Req()
+    req_msg = _FakeMessage('{"data":"abc","timestamp":123}')
+    resp_msg = _FakeMessage('{"data":"def","timestamp":456}')
+    # 给 request 对象补 text/content（_body_text 从中取）。
+    req.text = req_msg.text  # type: ignore[attr-defined]
+    req.content = req_msg.content  # type: ignore[attr-defined]
+    flow = _FakeFullFlow(req, resp_msg)
+
+    _inject_fake_mitmproxy(monkeypatch, [flow])
+    msgs = capture._parse_messages(flows_file)
+    assert len(msgs) == 1
+    assert msgs[0]["url"] == "https://api.fraud-gw.cn/post"
+    assert '"data"' in msgs[0]["request_body"]
+    assert '"data"' in msgs[0]["response_body"]
+
+
+def test_parse_messages_skips_non_envelope(monkeypatch, tmp_path):
+    flows_file = tmp_path / "flows.mitm"
+    flows_file.write_bytes(b"\x00data")
+
+    class _Req:
+        pretty_url = "https://api.fraud-gw.cn/x"
+        url = "https://api.fraud-gw.cn/x"
+        text = '{"foo":"bar"}'
+        content = b'{"foo":"bar"}'
+
+    flow = _FakeFullFlow(_Req(), _FakeMessage('{"foo":"bar"}'))
+    _inject_fake_mitmproxy(monkeypatch, [flow])
+    assert capture._parse_messages(flows_file) == []
+
+
+def test_parse_messages_missing_file_returns_empty(tmp_path):
+    assert capture._parse_messages(tmp_path / "nope.mitm") == []
+
+
+def test_runtime_report_includes_messages_field(tmp_path):
+    """_write_runtime_report 写出 messages 字段（默认空数组，向后兼容）。"""
+    report_path = capture._write_runtime_report(
+        "com.test.app", tmp_path, [], complete=True
+    )
+    payload = json.loads(Path(report_path).read_text(encoding="utf-8"))
+    assert "messages" in payload
+    assert payload["messages"] == []
+
+
+def test_runtime_report_persists_messages(tmp_path):
+    msgs = [{"url": "u", "request_body": "{}", "response_body": '{"data":"x","timestamp":1}'}]
+    report_path = capture._write_runtime_report(
+        "com.test.app", tmp_path, [], complete=True, messages=msgs
+    )
+    payload = json.loads(Path(report_path).read_text(encoding="utf-8"))
+    assert payload["messages"] == msgs
+
+
+# ---------------------------------------------------------------------------
 # 内置 frida unpinning 脚本完整性
 # ---------------------------------------------------------------------------
 

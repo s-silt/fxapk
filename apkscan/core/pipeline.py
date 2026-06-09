@@ -268,6 +268,7 @@ def build_endpoint_leads(endpoints: list[Endpoint], online: bool = True) -> list
 # advice 兜底：未自带研判建议的 Lead 按类别给默认值。
 # DOMAIN/IP 不在此表（其 advice 已由 build_endpoint_leads 按 infra 分级赋值）。
 _DEFAULT_ADVICE_BY_CATEGORY: dict[LeadCategory, str] = {
+    LeadCategory.CRYPTO_RECIPE: infra.ADVICE_INVESTIGATE,
     LeadCategory.SDK_SERVICE: infra.ADVICE_INVESTIGATE,
     LeadCategory.PAYMENT: infra.ADVICE_INVESTIGATE,
     LeadCategory.CONFIG_KEY: infra.ADVICE_INVESTIGATE,
