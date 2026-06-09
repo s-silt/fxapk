@@ -1,0 +1,25 @@
+# apkscan — deeplink_surface 分析器规则
+#
+# 由 apkscan.core.registry.load_rules("deeplink_surface") 读取。
+# 枚举导出组件的 intent-filter / BROWSABLE deeplink 外部入口攻击面。
+#
+# 顶层 dict：
+#   high_risk_component_hints: 组件名（小写子串）命中 → Finding 升 HIGH。
+#       涉诈 App 的 deeplink 常直达内置 WebView（加载服务端可控 H5）或支付/充值入口，
+#       组件名含这些词时外部可控触发风险更高。
+high_risk_component_hints:
+  - webview
+  - web
+  - h5
+  - browser
+  - pay
+  - wallet
+  - recharge
+  - cashier
+  - jump
+  - redirect
+  - scheme
+  - deeplink
+  - router
+  - open
+  - external
