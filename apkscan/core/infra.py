@@ -14,11 +14,23 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
+from fnmatch import fnmatch
+
+logger = logging.getLogger(__name__)
 
 # 研判建议三态（与 Lead.advice 取值约定一致）。
 ADVICE_INVESTIGATE = "建议调证"
 ADVICE_SKIP = "无需调证"
 ADVICE_REVIEW = "待核"
+
+# 域名来源可信度档（写入 Endpoint.enrichment["tier"]，pipeline 据此降可信）。
+TIER_APP = "app"                       # App 自有文件/普通字符串 —— 最可信。
+TIER_LIBRARY_FILE = "library-file"     # 来源命中已知第三方库文件路径 —— 疑似库内置。
+TIER_BULK_STRING = "bulk-string"       # 来源是超大字符串表 —— 疑似内置域名库噪音。
+
+# tier 可信度排序（app 最优，bulk-string 最差）；dedup 合并时取最优。
+_TIER_RANK: dict[str, int] = {TIER_APP: 0, TIER_LIBRARY_FILE: 1, TIER_BULK_STRING: 2}
 
 # 已知正规基础设施：域名后缀 / 关键字集合（全小写）。命中任一 = 正规基础设施，
 # 对其本身无需调证。新增第三方/云厂商/开源 CDN 只需往这里加一行。
@@ -30,6 +42,8 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         # ---- DCloud / uni-app（本样本 __UNI__ 打包框架）----
         "dcloud.net.cn",
         "dcloud.io",
+        "m3w.cn",  # DCloud uni 短链（m3w.cn/s/...），样本实测误判建议调证
+
         # ---- 腾讯云 / 腾讯 ----
         "myqcloud.com",
         "qcloud",
@@ -215,6 +229,109 @@ KNOWN_INFRA: frozenset[str] = frozenset(
 _STOCK_SUFFIXES: tuple[str, ...] = (".sh", ".sz", ".bj", ".hk")
 
 
+# ---------------------------------------------------------------------------
+# C1：library-embedded 分级 + 域名来源可信度档（数据放 rules/domain_tiers.yaml）
+# ---------------------------------------------------------------------------
+
+# library-embedded 兜底（规则缺失时仍兜最常见的知名站点噪音，离线/规则缺失不崩）。
+_FALLBACK_LIBRARY_EMBEDDED: tuple[str, ...] = (
+    "amazon.com", "ebay.com", "bbc.co.uk", "cnn.com", "nytimes.com",
+    "wikipedia.org", "facebook.com", "twitter.com", "youtube.com",
+    "chase.com", "paypal.com", "pornhub.com", "xvideos.com",
+)
+# library-file 路径 glob 兜底。
+_FALLBACK_LIBRARY_FILE_GLOBS: tuple[str, ...] = (
+    "*/uni_modules/*", "*/node_modules/*", "*/vendor/*", "*.min.js",
+    "*/static/echarts*", "*echarts.min.js", "*/dist/*",
+)
+_FALLBACK_BULK_STRING_MIN_LEN = 2000
+
+
+def _load_domain_tiers() -> tuple[tuple[str, ...], tuple[str, ...], int]:
+    """加载 rules/domain_tiers.yaml，返回 (library_embedded_suffixes, library_file_globs,
+    bulk_string_min_len)。任何缺失/异常走内置兜底（纯增量，不破坏离线）。
+
+    用延迟导入 registry 避免 infra（被广泛依赖的纯函数模块）与 registry 形成导入环。
+    """
+    suffixes: tuple[str, ...] = _FALLBACK_LIBRARY_EMBEDDED
+    globs: tuple[str, ...] = _FALLBACK_LIBRARY_FILE_GLOBS
+    bulk_min = _FALLBACK_BULK_STRING_MIN_LEN
+    try:
+        from apkscan.core.registry import load_rules
+
+        data = load_rules("domain_tiers")
+    except Exception:
+        logger.exception("加载 domain_tiers 规则失败，使用内置兜底")
+        return suffixes, globs, bulk_min
+
+    if isinstance(data, dict):
+        emb = data.get("library_embedded_suffixes")
+        if isinstance(emb, list):
+            vals = tuple(s.strip().lower() for s in emb if isinstance(s, str) and s.strip())
+            if vals:
+                suffixes = vals
+        gl = data.get("library_file_globs")
+        if isinstance(gl, list):
+            vals = tuple(s.strip().lower() for s in gl if isinstance(s, str) and s.strip())
+            if vals:
+                globs = vals
+        bm = data.get("bulk_string_min_len")
+        if isinstance(bm, int) and bm > 0:
+            bulk_min = bm
+    return suffixes, globs, bulk_min
+
+
+# 进程级缓存（规则文件在运行期不变；首次访问后复用，避免每次 classify 都读盘）。
+_DOMAIN_TIERS_CACHE: tuple[tuple[str, ...], tuple[str, ...], int] | None = None
+
+
+def _domain_tiers() -> tuple[tuple[str, ...], tuple[str, ...], int]:
+    global _DOMAIN_TIERS_CACHE
+    if _DOMAIN_TIERS_CACHE is None:
+        _DOMAIN_TIERS_CACHE = _load_domain_tiers()
+    return _DOMAIN_TIERS_CACHE
+
+
+def _is_library_embedded(domain: str) -> str | None:
+    """域名是否命中 library-embedded（打包库内置全球站点库）；命中返回匹配后缀。
+
+    与 KNOWN_INFRA 同口径用子串匹配（已小写、去端口）。★ 仅精确后缀，绝不碰任意
+    .vip / .com SLD —— 确保真 C2（hxhcapi.vip / hcrsex.com）不受影响。
+    """
+    d = _normalize_domain(domain)
+    if not d:
+        return None
+    suffixes, _globs, _bulk = _domain_tiers()
+    for suffix in suffixes:
+        if d == suffix or d.endswith("." + suffix):
+            return suffix
+    return None
+
+
+def domain_source_tier(location: str, raw_len: int) -> str:
+    """按端点来源判定域名可信度档（纯函数，数据来自 domain_tiers.yaml）。
+
+    - location 命中已知第三方库文件路径 glob → TIER_LIBRARY_FILE。
+    - 单条字符串/字面量长度超阈值（典型内置域名库大表）→ TIER_BULK_STRING。
+    - 否则 → TIER_APP（最可信）。
+    """
+    loc = (location or "").replace("\\", "/").lower()
+    _suffixes, globs, bulk_min = _domain_tiers()
+    for pat in globs:
+        if fnmatch(loc, pat):
+            return TIER_LIBRARY_FILE
+    if raw_len >= bulk_min:
+        return TIER_BULK_STRING
+    return TIER_APP
+
+
+def best_tier(a: str | None, b: str | None) -> str:
+    """合并两个 tier，取最可信档（app > library-file > bulk-string）；None 视为最差。"""
+    ra = _TIER_RANK.get(a or "", 99)
+    rb = _TIER_RANK.get(b or "", 99)
+    return a if ra <= rb else b  # type: ignore[return-value]
+
+
 def _normalize_domain(domain: str) -> str:
     """规整域名：去空白、转小写、剥协议/路径/端口，便于后缀/关键字匹配。"""
     d = (domain or "").strip().lower()
@@ -265,12 +382,19 @@ def classify_domain(domain: str) -> tuple[str, str]:
     """对域名做调证研判分级，返回 (advice, reason)。
 
     - 命中 KNOWN_INFRA          → ("无需调证", "已知第三方基础设施/库：<匹配>")
+    - 命中 library-embedded     → ("无需调证", "第三方库内置站点（library-embedded），非 App 后端：<匹配>")
     - 无效 / 私网/回环 IP 字面   → ("待核", "...")
     - 其它（疑似 App 自有服务）  → ("建议调证", "疑似 App 自有服务，建议落地核查归属")
     """
     matched = _matched_infra(domain)
     if matched is not None:
         return ADVICE_SKIP, f"已知第三方基础设施/库：{matched}"
+
+    # library-embedded：打包库内置的全球站点库（amazon / 各国银行 / 新闻 / 成人站），
+    # 非 App 后端，调证无意义。★ 仅精确后缀，绝不碰真 C2 的任意 .vip/.com SLD。
+    embedded = _is_library_embedded(domain)
+    if embedded is not None:
+        return ADVICE_SKIP, f"第三方库内置站点（library-embedded），非 App 后端：{embedded}"
 
     d = _normalize_domain(domain)
     # 行情代码伪域名（600000.sh / 399006.sz）：SLD 纯数字 + 交易所后缀 → 待核。

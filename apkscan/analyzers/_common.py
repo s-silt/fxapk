@@ -154,6 +154,20 @@ class EndpointCollector:
             self._ev_keys[value].add(ev_key)
             ep.evidences.append(evidence)
 
+    def mark_tier(self, value: str, tier: str) -> None:
+        """给已收集的端点写域名来源可信度档（C1）。多来源取最可信档（app 优先）。
+
+        延迟导入 infra 的合并器，避免 _common 顶层依赖 infra。tier 写入
+        Endpoint.enrichment["tier"]，pipeline 据此对非 infra 域名降可信到"待核"。
+        """
+        ep = self.by_value.get(value)
+        if ep is None:
+            return
+        from apkscan.core.infra import best_tier
+
+        current = ep.enrichment.get("tier")
+        ep.enrichment["tier"] = best_tier(current, tier) if current else tier
+
     def endpoints(self, order: dict[str, int]) -> list[Endpoint]:
         """稳定排序：按 order 给出的 kind 权重，再按 value。"""
         return sorted(

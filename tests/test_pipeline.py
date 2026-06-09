@@ -187,6 +187,48 @@ def test_offline_skips_enrichers(monkeypatch, fake_ctx):
     assert called["n"] == 0
 
 
+def test_domain_tier_downgrades_advice_to_review():
+    # C1：library-file / bulk-string tier 的非 infra 域名 → advice 降"待核" + notes 标库内置。
+    eps = [
+        Endpoint(value="amazon-mirror-cdn.com", kind="domain", enrichment={"tier": "library-file"}),
+    ]
+    leads = pipeline.build_endpoint_leads(eps, online=False)
+    domain_lead = next(l for l in leads if l.category == LeadCategory.DOMAIN)
+    assert domain_lead.advice == "待核"
+    assert domain_lead.confidence == Confidence.LOW
+    assert "库内置" in domain_lead.notes
+
+
+def test_app_tier_real_c2_not_downgraded():
+    # ★ C1 回归锁：app tier（或无 tier）的真 C2（hxhcapi.vip）→ 建议调证，不被降档。
+    eps = [
+        Endpoint(value="api.hxhcapi.vip", kind="domain", enrichment={"tier": "app"}),
+        Endpoint(value="pay.hcrsex.com", kind="domain"),  # 无 tier
+    ]
+    leads = pipeline.build_endpoint_leads(eps, online=False)
+    by_val = {l.value: l for l in leads}
+    assert by_val["api.hxhcapi.vip"].advice == "建议调证"
+    assert by_val["pay.hcrsex.com"].advice == "建议调证"
+
+
+def test_infra_domain_with_library_tier_stays_skip():
+    # 已知 infra 域名即便 tier=library-file，仍"无需调证"（不被降到"待核"）。
+    eps = [Endpoint(value="sdk.getui.com", kind="domain", enrichment={"tier": "library-file"})]
+    leads = pipeline.build_endpoint_leads(eps, online=False)
+    assert leads[0].advice == "无需调证"
+
+
+def test_dedup_endpoints_tier_takes_best():
+    # C1：同域名既来自 app 文件又来自 library 文件 → tier 取最可信（app）。
+    eps = [
+        Endpoint(value="x.fraud.cn", kind="domain", enrichment={"tier": "library-file"}),
+        Endpoint(value="x.fraud.cn", kind="domain", enrichment={"tier": "app"}),
+    ]
+    merged = pipeline._dedup_endpoints(eps)
+    assert len(merged) == 1
+    assert merged[0].enrichment["tier"] == "app"
+
+
 def test_build_endpoint_leads_directly():
     eps = [
         Endpoint(value="a.com", kind="domain", enrichment={"whois": {"registrar": "GoDaddy"}}),

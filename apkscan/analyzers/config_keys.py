@@ -43,6 +43,7 @@ from apkscan.core.models import (
     Severity,
 )
 from apkscan.core.registry import BaseAnalyzer, load_rules
+from apkscan.core.secrets import SecretRules, is_real_secret, load_secret_rules
 from apkscan.core.xmlutil import UnsafeXmlError as _UnsafeXmlError
 from apkscan.core.xmlutil import android_attr as _android_attr
 from apkscan.core.xmlutil import safe_fromstring as _safe_fromstring
@@ -172,6 +173,7 @@ class ConfigKeysAnalyzer(BaseAnalyzer):
         result = AnalyzerResult(analyzer=self.name)
 
         patterns, default_evidence, unknown_subject = self._load_rules()
+        secret_rules = load_secret_rules()
 
         keys: list[_ConfigKey] = []
 
@@ -201,7 +203,7 @@ class ConfigKeysAnalyzer(BaseAnalyzer):
             try:
                 lead = self._build_lead(ck, patterns, default_evidence, unknown_subject)
                 result.leads.append(lead)
-                secret_finding = self._maybe_secret_finding(ck)
+                secret_finding = self._maybe_secret_finding(ck, secret_rules)
                 if secret_finding is not None:
                     result.findings.append(secret_finding)
             except Exception:
@@ -541,10 +543,26 @@ class ConfigKeysAnalyzer(BaseAnalyzer):
 
         return None
 
-    def _maybe_secret_finding(self, ck: _ConfigKey) -> Finding | None:
-        """名字含 SECRET/APPKEY/APP_SECRET/PRIVATE/KEY/TOKEN 的 → Finding(HIGH, secret)。"""
+    def _maybe_secret_finding(
+        self, ck: _ConfigKey, secret_rules: SecretRules
+    ) -> Finding | None:
+        """名字含 SECRET/APPKEY/APP_SECRET/PRIVATE/KEY/TOKEN + 值像真凭据 → Finding(HIGH, secret)。
+
+        C2 旁路修复：原仅看 key 名即产 HIGH，导致 manifest 里任何 *_APPKEY meta-data
+        （哪怕 value 是常量名，如 OPPOPUSH_APPKEY=OPPOPUSH_APPKEY）都误报 HIGH。现增 value
+        形态判定（value==key / 已知 SDK 常量 / looks_keyish），不像真凭据则不产 Finding。
+        注意：CONFIG_KEY lead 仍照常产出 key=value（无信息损失），符合"宁标低勿误杀"。
+        """
         upper = ck.name.upper()
         if not any(tok in upper for tok in _SECRET_TOKENS):
+            return None
+        # value 形态闸：value==key / 已知 SDK 常量名值 / 不像凭据形态 → 不产 Finding。
+        if not is_real_secret(ck.name, ck.value, secret_rules):
+            logger.debug(
+                "[%s] %s 的值不像真凭据（疑似 SDK 常量名/占位），不产 secret Finding",
+                self.name,
+                ck.name,
+            )
             return None
         return Finding(
             id=f"CONFIG-SECRET-{re.sub(r'[^A-Z0-9]+', '-', upper).strip('-')}",

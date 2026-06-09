@@ -220,6 +220,49 @@ def test_keyword_like_key_name_denied() -> None:
     assert result.findings == []
 
 
+def test_sdk_constant_value_equals_key_not_flagged() -> None:
+    # C2：value==key（OPPOPUSH_APPKEY="OPPOPUSH_APPKEY"）+ KEY_DEVICE_TOKEN=deviceToken
+    # 等 SDK 常量名/值 → 不产 Finding。
+    result = _analyze(
+        {
+            _UNIAPP_PATH: (
+                b"var c={"
+                b"OPPOPUSH_APPKEY:'OPPOPUSH_APPKEY',"
+                b"KEY_DEVICE_TOKEN:'deviceToken',"
+                b"METHOD_CHECK_APPKEY:'dc_checkappkey'"
+                b"};"
+            )
+        }
+    )
+    assert FINDING_SECRET not in _finding_ids(result)
+    assert FINDING_APPID not in _finding_ids(result)
+
+
+def test_non_keyish_secret_value_not_flagged() -> None:
+    # C2：value 不像凭据形态（纯字母无数字/非 hex）→ 不产 Finding。
+    result = _analyze({_UNIAPP_PATH: b"var c={appSecret:'deviceToken'};"})
+    assert FINDING_SECRET not in _finding_ids(result)
+
+
+def test_appid_numeric_still_medium() -> None:
+    # ★ 回归锁：数字型 appid=100215079（looks_keyish=True）仍产 MEDIUM。
+    result = _analyze({_UNIAPP_PATH: b"var c={appid:'100215079'};"})
+    assert FINDING_APPID in _finding_ids(result)
+    f = next(x for x in result.findings if x.id == FINDING_APPID)
+    assert f.severity == Severity.MEDIUM
+
+
+def test_js_version_ip_filtered_real_ip_kept() -> None:
+    # C4：js 路径裸 IP——版本号 2.1.5.1 / 占位 1.2.3.4 过滤，真公网 IP（全球可达）保留。
+    result = _analyze(
+        {_UNIAPP_PATH: b"var a='2.1.5.1';var b='1.2.3.4';var c='45.76.10.20';"}
+    )
+    ips = {ep.value for ep in result.endpoints if ep.kind == "ip"}
+    assert "2.1.5.1" not in ips
+    assert "1.2.3.4" not in ips
+    assert "45.76.10.20" in ips
+
+
 # --- 端点：路径 / IP / 明文 ----------------------------------------------
 
 

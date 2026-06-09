@@ -160,6 +160,13 @@ def _dedup_endpoints(endpoints: list[Endpoint]) -> list[Endpoint]:
         existing.is_private = existing.is_private or ep.is_private
         existing.is_suspicious = existing.is_suspicious or ep.is_suspicious
         for key, val in ep.enrichment.items():
+            if key == "tier":
+                # C1：域名来源可信度档特殊处理——多来源取最可信档（app > library-file
+                #   > bulk-string），避免"既来自 app 文件又来自 library 文件"被错降。
+                existing.enrichment["tier"] = infra.best_tier(
+                    existing.enrichment.get("tier"), val
+                )
+                continue
             existing.enrichment.setdefault(key, val)
 
     # evidences 去重（保持顺序）。
@@ -310,6 +317,18 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
 
     # infra 分级：命中已知基础设施→无需调证；私网/无效→待核；否则→建议调证。
     advice, _reason = infra.classify_domain(ep.value)
+    notes = _endpoint_notes(ep, online, enriched)
+
+    # C1：域名来源可信度档降可信。当端点仅见于第三方库文件/超大字符串表（tier=
+    #   library-file / bulk-string）且 classify 仍判"建议调证"（即非已知 infra/
+    #   library-embedded、非私网）时，把 advice 降为"待核"并标低可信。★ 绝不降为"无需
+    #   调证"（避免误杀真 C2）；已是 infra/私网档的不动（app tier 的真 C2 不受影响）。
+    tier = ep.enrichment.get("tier")
+    if tier in (infra.TIER_LIBRARY_FILE, infra.TIER_BULK_STRING) and advice == infra.ADVICE_INVESTIGATE:
+        advice = infra.ADVICE_REVIEW
+        confidence = Confidence.LOW
+        tier_note = "仅见于第三方库文件/超大字符串表，疑似库内置，低可信"
+        notes = f"{notes}；{tier_note}" if notes else tier_note
 
     return Lead(
         category=LeadCategory.DOMAIN,
@@ -319,7 +338,7 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
         evidence_to_obtain=evidence_to_obtain,
         confidence=confidence,
         source_refs=list(ep.evidences),
-        notes=_endpoint_notes(ep, online, enriched),
+        notes=notes,
         advice=advice,
     )
 

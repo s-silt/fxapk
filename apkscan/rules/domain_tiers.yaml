@@ -1,0 +1,77 @@
+# 域名可信度档规则（C1：脱壳后域名误报降噪）。
+#
+# 由 apkscan.core.infra 通过 registry.load_rules("domain_tiers") 读取（可选；
+# 缺失时走内置兜底，离线/规则缺失不崩）。顶层为 dict，键含义：
+#
+#   library_embedded_suffixes : list[str]，打包库内置的"全球网站域名库"/演示数据/
+#       知名站点（与 KNOWN_INFRA 同口径，子串/后缀匹配，已小写）。命中 →
+#       classify_domain 返回 (无需调证, "第三方库内置站点（library-embedded）")。
+#       这类是 C1 dump dex 噪音主体（amazon / 各国银行 / 新闻 / 成人站等）。
+#       ★ 只精确后缀/关键字匹配，绝不碰任意 .vip / .com SLD —— 确保真 C2
+#       （*.hxhcapi.vip / *.hcrsex.com）不受影响。此表只增不减。
+#
+#   library_file_globs : list[str]，"已知第三方库文件路径"glob（fnmatch，已小写）。
+#       端点来源 location 命中 → tier="library-file"（pipeline 据此降可信到"待核"）。
+#
+#   bulk_string_min_len : int，单条 dex 字符串/字面量长度超过此阈值 → tier="bulk-string"
+#       （典型内置域名库大字符串表）。
+#
+# 说明：本表是有限枚举，不可能穷尽 dump dex 的 1481 个噪音域名；真正的降噪靠
+# "来源标记"机制（library-file / bulk-string 来源 → 整批降档为"待核"），枚举表只兜知名站点。
+
+# ---- library-embedded：打包库内置的全球网站库 / 演示数据 / 知名站点 ----
+library_embedded_suffixes:
+  # 知名站点（被某打包库的"全球网站域名库"内置，非 App 后端）
+  - "amazon.com"
+  - "ebay.com"
+  - "bbc.co.uk"
+  - "cnn.com"
+  - "nytimes.com"
+  - "reddit.com"
+  - "instagram.com"
+  - "linkedin.com"
+  - "pinterest.com"
+  - "tumblr.com"
+  - "yahoo.com"
+  - "bing.com"
+  - "yandex.ru"
+  - "facebook.com"
+  - "twitter.com"
+  - "youtube.com"
+  - "netflix.com"
+  - "spotify.com"
+  - "wordpress.com"
+  - "blogspot.com"
+  # 各国银行 / 支付门户（出现即库内置，调证无意义）—按需增补
+  - "chase.com"
+  - "paypal.com"
+  - "wellsfargo.com"
+  - "bankofamerica.com"
+  - "citibank.com"
+  - "hsbc.com"
+  - "barclays.co.uk"
+  - "santander.com"
+  # 成人站（库内置黑/白名单，非业务）
+  - "pornhub.com"
+  - "xvideos.com"
+  - "xnxx.com"
+  - "redtube.com"
+  - "xhamster.com"
+
+# ---- library-file：已知第三方库文件路径 glob（命中 → tier=library-file，降可信）----
+library_file_globs:
+  - "*/uni_modules/*"
+  - "*/node_modules/*"
+  - "*/vendor/*"
+  - "*.min.js"
+  - "*.min.css"
+  - "*/static/echarts*"
+  - "*/static/lime-echart/*"
+  - "*echarts.min.js"
+  - "*lame.min.js"
+  - "*/static/js/chunk-vendors*"
+  - "*polyfill*"
+  - "*/dist/*"
+
+# ---- bulk-string：单条字符串/字面量超过此长度 → tier=bulk-string（疑似内置域名库大表）----
+bulk_string_min_len: 2000

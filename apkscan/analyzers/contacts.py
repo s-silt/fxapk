@@ -92,12 +92,17 @@ class _ContactType:
     blacklist: list[str] = field(default_factory=list)
     evidence_to_obtain: list[str] = field(default_factory=list)
     note: str = ""
+    # 占位/测试手机号显式 denylist（仅 phone 类用；缺失走内置兜底）。
+    placeholder_numbers: set[str] = field(default_factory=set)
 
 
 @dataclass
 class _ContactHit:
     value: str
     evidences: list[Evidence] = field(default_factory=list)
+    # 弱置信：命中"疑似 vanity/占位"启发式但未在显式 denylist 中——保留但降为 LOW（C3 评审）。
+    low_confidence: bool = False
+    low_confidence_note: str = ""
 
 
 class ContactsAnalyzer(BaseAnalyzer):
@@ -224,6 +229,17 @@ class ContactsAnalyzer(BaseAnalyzer):
                         continue
                     if not _valid_for_kind(ctype.kind, value):
                         continue
+                    low_conf = False
+                    low_conf_note = ""
+                    if ctype.kind == "phone":
+                        verdict = _classify_phone(value, ctype.placeholder_numbers)
+                        if verdict == _PHONE_DROP:
+                            continue  # 显式占位 denylist → drop（13800138000 等）。
+                        if verdict == _PHONE_SUSPECT:
+                            # vanity/长重复-run（18888888888 等）：保留但降 LOW（评审 C3，
+                            # 杀猪盘客服常用靓号，不可一票误杀）。
+                            low_conf = True
+                            low_conf_note = "疑似 vanity/占位号（长重复数字段）；保留待人工核实。"
                     hit = by_value.get(value)
                     if hit is None:
                         if len(by_value) >= _MAX_LEADS_PER_TYPE:
@@ -234,7 +250,11 @@ class ContactsAnalyzer(BaseAnalyzer):
                                 _MAX_LEADS_PER_TYPE,
                             )
                             return list(by_value.values())
-                        hit = _ContactHit(value=value)
+                        hit = _ContactHit(
+                            value=value,
+                            low_confidence=low_conf,
+                            low_confidence_note=low_conf_note,
+                        )
                         by_value[value] = hit
                     if len(hit.evidences) < _MAX_EVIDENCES:
                         hit.evidences.append(
@@ -253,13 +273,18 @@ class ContactsAnalyzer(BaseAnalyzer):
             list(ctype.evidence_to_obtain) if ctype.evidence_to_obtain else list(default_evidence)
         )
         note = f"类型：{ctype.name}。" + (ctype.note or "")
+        confidence = ctype.confidence
+        if hit.low_confidence:
+            confidence = Confidence.LOW
+            if hit.low_confidence_note:
+                note = f"{note} {hit.low_confidence_note}"
         return Lead(
             category=LeadCategory.CONTACT,
             value=f"{ctype.name}：{hit.value}",
             subject=ctype.subject or None,
             where_to_request=ctype.where_to_request or None,
             evidence_to_obtain=evidence_to_obtain,
-            confidence=ctype.confidence,
+            confidence=confidence,
             source_refs=list(hit.evidences),
             notes=note.strip(),
         )
@@ -313,6 +338,9 @@ class ContactsAnalyzer(BaseAnalyzer):
                     blacklist=[b.lower() for b in _as_str_list(entry.get("blacklist"))],
                     evidence_to_obtain=_as_str_list(entry.get("evidence_to_obtain")),
                     note=_str_or_empty(entry.get("note")),
+                    placeholder_numbers={
+                        n.strip() for n in _as_str_list(entry.get("placeholder_numbers"))
+                    },
                 )
             )
         return types, default_evidence
@@ -378,6 +406,54 @@ def _valid_for_kind(kind: str, value: str) -> bool:
         return False
     tld = domain.rsplit(".", 1)[-1]
     return tld.isalpha() and tld.lower() in _EMAIL_TLDS
+
+
+# 占位手机号内置兜底（规则缺失时仍过滤最常见占位号）。
+_FALLBACK_PLACEHOLDER_PHONES: frozenset[str] = frozenset({"13800138000", "13888888801"})
+
+# 重复-run 阈值：最长连续相同数字 ≥ 此值视为"疑似 vanity/占位"（C3）。
+# 实测：13666666666 run=9、13700000000 run=8、18888888888 run=10、13966666660 run=7 命中；
+# 真号 13912345678 run=1、18612349999 run=4 不命中。
+# ★评审 C3 修复：run 启发式只"降可信"不"drop"——杀猪盘客服/引流常用靓号（连号/豹子号），
+#   一票误杀会丢真线索。真占位仍靠显式 denylist drop（13800138000 run 仅 3，无法靠 run 识别）。
+_MAX_REPEAT_RUN = 6
+
+# 手机号判定三态结果。
+_PHONE_KEEP = "keep"        # 正常保留（原 confidence）。
+_PHONE_SUSPECT = "suspect"  # 疑似 vanity/占位：保留但降 LOW。
+_PHONE_DROP = "drop"        # 显式占位 denylist：drop。
+
+
+def _longest_repeat_run(value: str) -> int:
+    """返回字符串中最长连续相同字符的长度。"""
+    if not value:
+        return 0
+    longest = 1
+    cur = 1
+    for prev, ch in zip(value, value[1:]):
+        if ch == prev:
+            cur += 1
+            longest = max(longest, cur)
+        else:
+            cur = 1
+    return longest
+
+
+def _classify_phone(value: str, placeholders: set[str]) -> str:
+    """手机号三态判定（C3 降噪，no-false-kill）：
+
+    - value ∈ placeholders（YAML denylist，缺失走内置兜底）→ _PHONE_DROP（确认占位，如
+      13800138000 run 仅 3，必须靠显式 denylist）。
+    - 最长连续相同数字 ≥ _MAX_REPEAT_RUN → _PHONE_SUSPECT（疑似 vanity/占位，**保留**但降
+      LOW；杀猪盘靓号客服号不可一票误杀）。
+    - 其它 → _PHONE_KEEP（真号 13912345678 run=1、18612349999 run=4 原样保留）。
+    """
+    deny = placeholders or _FALLBACK_PLACEHOLDER_PHONES
+    if value in deny:
+        return _PHONE_DROP
+    if _longest_repeat_run(value) >= _MAX_REPEAT_RUN:
+        return _PHONE_SUSPECT
+    return _PHONE_KEEP
 
 
 def _snippet_around(text: str, m: re.Match, radius: int = 40) -> str:

@@ -29,7 +29,15 @@ from apkscan.core.models import (
     Finding,
     Severity,
 )
+from apkscan.core import infra
 from apkscan.core.registry import BaseAnalyzer
+from apkscan.core.secrets import (
+    SecretRules,
+    is_sdk_constant,
+    load_secret_rules,
+    looks_like_secret_value,
+)
+from apkscan.core.textutil import is_noise_bare_ip as _is_noise_bare_ip
 
 if TYPE_CHECKING:
     from apkscan.core.context import AnalysisContext
@@ -93,6 +101,11 @@ class JadxAnalyzer(BaseAnalyzer):
     name: str = "jadx"
     requires: list[str] = ["jadx"]
 
+    def __init__(self) -> None:
+        # 每次 analyze 重新加载（见下）；这里给默认值供类型检查与兜底。
+        self._secret_rules: SecretRules = SecretRules()
+        self._noise_ips: frozenset[str] = frozenset()
+
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
         result = AnalyzerResult(analyzer=self.name)
         apk_path = (getattr(ctx, "apk_path", "") or "").strip()
@@ -101,6 +114,10 @@ class JadxAnalyzer(BaseAnalyzer):
             result.error = "无 apk_path，跳过 jadx 反编译"
             result.meta["jadx_status"] = "no_apk_path"
             return result
+
+        # C2/C4 规则一次性加载（缺失走内置兜底，离线不崩）。
+        self._secret_rules = load_secret_rules()
+        self._noise_ips = _load_noise_ips()
 
         tmp = tempfile.mkdtemp(prefix="apkscan_jadx_")
         try:
@@ -207,17 +224,23 @@ class JadxAnalyzer(BaseAnalyzer):
             if ip is not None:
                 _add(collector, host, "ip", location, is_private=_ip_private(ip))
             elif _safe_domain(host):
-                _add(collector, host, "domain", location)
+                _add(collector, host, "domain", location,
+                     tier=infra.domain_source_tier(location, len(lit)))
         for m in _IPV4_RE.finditer(lit):
             ip_str = m.group(1)
             ip = _parse_ipv4(ip_str)
-            if ip is None or ip_str.split(".")[0] == "0" or ip_str.split(".")[-1] == "0":
+            if ip is None:
+                continue
+            # C4：裸 IP 去噪，与 endpoints/js_bundle 共享判定（bogon/保留段 +
+            #   占位/版本号 denylist），消除三处不一致。URL 内 IP 走上面 host 通道不受限。
+            if ip_str in self._noise_ips or _is_noise_bare_ip(ip_str):
                 continue
             _add(collector, ip_str, "ip", location, is_private=_ip_private(ip))
         for m in _DOMAIN_RE.finditer(lit):
             dom = m.group(1).rstrip(".").lower()
             if _safe_domain(dom):
-                _add(collector, dom, "domain", location)
+                _add(collector, dom, "domain", location,
+                     tier=infra.domain_source_tier(location, len(lit)))
 
     def _consider_secret(
         self, key: str, val: str, location: str, hits: dict[tuple[str, str], Finding]
@@ -229,6 +252,15 @@ class JadxAnalyzer(BaseAnalyzer):
         if v.lower() in _PLACEHOLDER or len(set(v)) <= 2 or " " in v:
             return
         if v.startswith(("/", "http://", "https://", "./", "../")) or any(c in v for c in "{}$<>"):
+            return
+        # C2 三道闸（杀 SDK 常量名误报）：
+        #  ① value==key / 已知 SDK 常量名/值 → drop（MIPUSH_APPKEY=MIPUSH_APPKEY、
+        #     KEY_DEVICE_TOKEN=deviceToken、METHOD_CHECK_APPKEY=dc_checkappkey）。
+        if is_sdk_constant(key, v, self._secret_rules):
+            return
+        #  ② value 不像凭据形态（无数字/非 hex/无 base64 字符）→ drop（deviceToken 类）。
+        #     真凭据（Abc123Xyz789Def456 等）全 looks_keyish=True，不误杀。
+        if not looks_like_secret_value(v, self._secret_rules):
             return
         dedup = (location, f"{low}:{v[:48]}")
         if dedup in hits:
@@ -252,6 +284,28 @@ class JadxAnalyzer(BaseAnalyzer):
 # 模块级工具
 # ---------------------------------------------------------------------------
 
+# 噪音 IP 兜底（C4：与 endpoints/js_bundle 同口径）。
+_FALLBACK_NOISE_IPS: tuple[str, ...] = (
+    "1.2.3.4", "0.0.0.0", "13.3.3.7", "2.1.5.1", "3.2.16.7",
+)
+
+
+def _load_noise_ips() -> frozenset[str]:
+    """从 endpoints.yaml 读 noise_ips（C4 单一数据源；缺失走内置兜底）。"""
+    try:
+        from apkscan.core.registry import load_rules
+        from apkscan.core.textutil import as_str_list
+
+        data = load_rules("endpoints")
+    except Exception:  # noqa: BLE001 — 规则读取失败不应炸掉 analyze
+        logger.exception("[jadx] 读取 endpoints 规则（noise_ips）失败，用兜底")
+        return frozenset(_FALLBACK_NOISE_IPS)
+    if isinstance(data, dict):
+        nips = as_str_list(data.get("noise_ips"))
+        if nips:
+            return frozenset(ip.strip() for ip in nips)
+    return frozenset(_FALLBACK_NOISE_IPS)
+
 
 def _add(
     collector: dict[str, Endpoint],
@@ -261,19 +315,27 @@ def _add(
     *,
     is_cleartext: bool = False,
     is_private: bool = False,
+    tier: str | None = None,
 ) -> None:
     ep = collector.get(value)
     if ep is None:
-        collector[value] = Endpoint(
+        ep = Endpoint(
             value=value,
             kind=kind,
             evidences=[Evidence(source="jadx", location=location, snippet=_short(value))],
             is_cleartext=is_cleartext,
             is_private=is_private,
         )
+        if tier is not None:
+            ep.enrichment["tier"] = tier
+        collector[value] = ep
         return
     ep.is_cleartext = ep.is_cleartext or is_cleartext
     ep.is_private = ep.is_private or is_private
+    if tier is not None:
+        # 域名来源可信度档（C1）：多来源取最可信档（app 优先）。
+        current = ep.enrichment.get("tier")
+        ep.enrichment["tier"] = infra.best_tier(current, tier) if current else tier
     if all(ev.location != location for ev in ep.evidences):
         ep.evidences.append(Evidence(source="jadx", location=location, snippet=_short(value)))
 

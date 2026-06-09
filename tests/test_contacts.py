@@ -28,9 +28,80 @@ def test_email_hit_and_resource_blacklist():
 
 
 def test_phone_hit_with_boundary():
-    ctx = FakeContext(dex_strings=["客服热线13800138000随时在线"])
+    # 真实形态号码（13912345678，无长重复-run）应命中，前后非数字边界生效。
+    ctx = FakeContext(dex_strings=["客服热线13912345678随时在线"])
     result = ContactsAnalyzer().analyze(ctx)
-    assert any("13800138000" in v for v in _contact_values(result))
+    assert any("13912345678" in v for v in _contact_values(result))
+
+
+def test_placeholder_phone_filtered():
+    # C3：占位/测试号 13800138000（显式 denylist）+ 13888888801（denylist & run≥6）
+    # 不应产 phone lead；真号 13912345678 / 18612349999(run4) 保留。
+    ctx = FakeContext(
+        dex_strings=[
+            "测试号13800138000占位",
+            "客服13888888801引流",
+            "真号13912345678",
+            "另一真号18612349999",
+        ]
+    )
+    result = ContactsAnalyzer().analyze(ctx)
+    phones = [v for v in _contact_values(result) if v.startswith("手机号")]
+    joined = " ".join(phones)
+    assert "13800138000" not in joined
+    assert "13888888801" not in joined
+    assert "13912345678" in joined
+    assert "18612349999" in joined
+
+
+def test_repeat_run_phone_demoted_not_dropped():
+    # C3 评审 no-false-kill：最长连续相同数字 ≥6 的号（13666666666 run=9、13700000000
+    # run=8）疑似 vanity/占位，但杀猪盘靓号客服号不可一票误杀 → 保留但降 LOW，不 drop。
+    ctx = FakeContext(dex_strings=["13666666666", "13700000000"])
+    result = ContactsAnalyzer().analyze(ctx)
+    phone_leads = [
+        l
+        for l in result.leads
+        if l.category == LeadCategory.CONTACT and l.value.startswith("手机号")
+    ]
+    values = " ".join(l.value for l in phone_leads)
+    assert "13666666666" in values
+    assert "13700000000" in values
+    # 全部降为 LOW 可信，且带"疑似 vanity/占位"提示。
+    assert all(l.confidence == Confidence.LOW for l in phone_leads)
+    assert all("vanity" in (l.notes or "") for l in phone_leads)
+
+
+def test_vanity_phone_kept_low_confidence():
+    # 杀猪盘客服靓号（18888888888 run=10、13966666660 run=7）属真线索形态，必须保留。
+    ctx = FakeContext(dex_strings=["客服18888888888", "引流13966666660"])
+    result = ContactsAnalyzer().analyze(ctx)
+    phone_leads = [
+        l
+        for l in result.leads
+        if l.category == LeadCategory.CONTACT and l.value.startswith("手机号")
+    ]
+    values = " ".join(l.value for l in phone_leads)
+    assert "18888888888" in values
+    assert "13966666660" in values
+    assert all(l.confidence == Confidence.LOW for l in phone_leads)
+
+
+def test_oss_author_emails_filtered():
+    # C3：OSS 库作者邮箱（GSAP / JS 库作者）不应被当 App 联系方式；真线索保留。
+    ctx = FakeContext(
+        dex_strings=[
+            "GSAP by jack@greensock.com",
+            "lib author jhruby.web@gmail.com",
+            "联系骗子 scammer@gmail.com",
+        ]
+    )
+    result = ContactsAnalyzer().analyze(ctx)
+    values = " ".join(_contact_values(result))
+    assert "jack@greensock.com" not in values
+    assert "jhruby.web@gmail.com" not in values
+    # 真线索（gmail 个人邮箱）仍保留。
+    assert "scammer@gmail.com" in values
 
 
 def test_long_digit_run_is_not_a_phone():
@@ -69,9 +140,10 @@ def test_telegram_link_is_low_confidence():
 
 
 def test_dedup_same_value_across_sources():
+    # 用真实形态号（13912345678，非占位）验证跨源去重。
     ctx = FakeContext(
-        dex_strings=["13800138000", "13800138000"],
-        files={"assets/a.txt": b"13800138000"},
+        dex_strings=["13912345678", "13912345678"],
+        files={"assets/a.txt": b"13912345678"},
     )
     result = ContactsAnalyzer().analyze(ctx)
     phones = [v for v in _contact_values(result) if v.startswith("手机号")]
