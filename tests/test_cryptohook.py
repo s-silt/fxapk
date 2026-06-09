@@ -355,3 +355,41 @@ def test_frida_p1_hook_js_integrity() -> None:
     assert "getDeviceId" in api
     assert "sendTextMessage" in api
     assert "apkscan-api" in api
+
+
+# ---------------------------------------------------------------------------
+# P3：反检测绕过
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_antidetect_event() -> None:
+    ev = cryptohook.normalize_antidetect_event(
+        {"type": "x", "kind": "root", "probe": "File.exists: /system/bin/su", "bypassed": True}
+    )
+    assert ev is not None
+    assert ev["kind"] == "root"
+    assert ev["bypassed"] is True
+    assert cryptohook.normalize_antidetect_event({"kind": "root"}) is None  # 缺 probe
+    assert cryptohook.normalize_antidetect_event({"probe": "x"}) is None  # 缺 kind
+
+
+def test_antidetect_kinds_from_events() -> None:
+    events = [
+        {"kind": "root", "probe": "su"},
+        {"kind": "root", "probe": "magisk"},
+        {"kind": "emulator", "probe": "qemu"},
+        {"kind": "frida", "probe": "27042"},
+    ]
+    counts = cryptohook.antidetect_kinds_from_events(events)
+    assert counts == {"root": 2, "emulator": 1, "frida": 1}
+
+
+def test_frida_antidetect_js_integrity() -> None:
+    js = cryptohook.FRIDA_ANTIDETECT_JS
+    assert "Java.perform" in js
+    assert "File" in js and "exists" in js  # File.exists 绕过
+    assert "Runtime" in js  # Runtime.exec 拦截
+    assert "android.os.Build" in js  # Build 字段伪装
+    assert "SystemProperties" in js  # qemu 属性屏蔽
+    assert "apkscan-antidetect" in js  # 通道判别值
+    assert "su" in js and "qemu" in js and "frida" in js  # 三类检测特征

@@ -848,7 +848,7 @@ def test_load_crypto_events_missing_or_bad(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _write_rr_traces(tmp_path, jsbridge=None, sensitive=None) -> str:
+def _write_rr_traces(tmp_path, jsbridge=None, sensitive=None, antidetect=None) -> str:
     path = tmp_path / "runtime_report.json"
     path.write_text(
         json.dumps(
@@ -860,11 +860,45 @@ def _write_rr_traces(tmp_path, jsbridge=None, sensitive=None) -> str:
                 "crypto_events": [],
                 "jsbridge_events": list(jsbridge or []),
                 "sensitive_api_events": list(sensitive or []),
+                "antidetect_events": list(antidetect or []),
             }
         ),
         encoding="utf-8",
     )
     return str(path)
+
+
+def test_merge_runtime_traces_anti_analysis_finding(tmp_path) -> None:
+    """反检测探测 → 反分析行为 Finding（root/frida → HIGH）+ meta 画像。"""
+    rr = _write_rr_traces(
+        tmp_path,
+        antidetect=[
+            {"kind": "root", "probe": "File.exists: /system/bin/su"},
+            {"kind": "emulator", "probe": "Build fields spoofed"},
+            {"kind": "frida", "probe": "File.exists: frida-server"},
+        ],
+    )
+    report = _make_report()
+    stats = merge.merge_runtime_traces(report, rr)
+
+    assert stats["antidetect_probes"] == 3
+    from apkscan.core.models import Severity
+
+    aa = [f for f in report.findings if f.category == "anti_analysis"]
+    assert len(aa) == 1
+    assert aa[0].severity == Severity.HIGH  # 含 root/frida
+    assert report.meta["runtime_antidetect"] == {"root": 1, "emulator": 1, "frida": 1}
+    assert report.meta["runtime_traced"] is True
+
+
+def test_merge_runtime_traces_emulator_only_is_medium(tmp_path) -> None:
+    rr = _write_rr_traces(tmp_path, antidetect=[{"kind": "emulator", "probe": "qemu"}])
+    report = _make_report()
+    merge.merge_runtime_traces(report, rr)
+    from apkscan.core.models import Severity
+
+    aa = next(f for f in report.findings if f.category == "anti_analysis")
+    assert aa.severity == Severity.MEDIUM  # 仅模拟器检测
 
 
 def test_merge_runtime_traces_adds_jsbridge_leads(tmp_path) -> None:
@@ -929,17 +963,17 @@ def test_merge_runtime_traces_no_events_noop(tmp_path) -> None:
     rr = _write_rr_traces(tmp_path)  # 空
     report = _make_report()
     stats = merge.merge_runtime_traces(report, rr)
-    assert stats == {"jsbridge_leads": 0, "api_confirmed": 0}
+    assert stats == {"jsbridge_leads": 0, "api_confirmed": 0, "antidetect_probes": 0}
     assert "runtime_traced" not in report.meta
 
 
 def test_merge_runtime_traces_missing_fields_backward_compat(tmp_path) -> None:
-    """旧版 runtime_report.json 无 jsbridge_events/sensitive_api_events 字段 → 不崩、零统计。"""
+    """旧版 runtime_report.json 无 jsbridge/sensitive/antidetect 字段 → 不崩、零统计。"""
     p = tmp_path / "runtime_report.json"
     p.write_text(json.dumps({"endpoints": [], "messages": []}), encoding="utf-8")
     report = _make_report()
     stats = merge.merge_runtime_traces(report, str(p))
-    assert stats == {"jsbridge_leads": 0, "api_confirmed": 0}
+    assert stats == {"jsbridge_leads": 0, "api_confirmed": 0, "antidetect_probes": 0}
 
 
 def test_merge_recipe_meta_varying_live_iv_preserves_static_fixed_iv() -> None:

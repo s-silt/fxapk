@@ -109,7 +109,7 @@ def _stub_orchestration(
     monkeypatch.setattr(
         capture,
         "_start_frida_session",
-        lambda package, sink, jsbridge_sink=None, api_sink=None: (None, None),
+        lambda package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None: (None, None),
     )
     monkeypatch.setattr(capture, "_adb_reverse", lambda: (calls["adb"].append("reverse") or True))
     monkeypatch.setattr(capture, "_adb_set_proxy", lambda: (calls["adb"].append("proxy") or True))
@@ -702,7 +702,7 @@ def test_capped_sentinel_filtered_from_runtime_report(monkeypatch, tmp_path):
     _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
     monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None):
         sink.append({"src": "cipher", "event": "init", "key_hex": "55f0"})
         sink.append({"_capped": True})  # 上限占位
         return object(), object()
@@ -726,7 +726,7 @@ def test_capture_done_collects_crypto_events_via_session(monkeypatch, tmp_path):
         {"src": "cipher", "event": "doFinal", "key_hex": "55f0", "plaintext_b64": "eyJhIjoxfQ=="},
     ]
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None):
         # 模拟 on_message 回调把 2 条事件写进共享 sink。
         sink.extend(fake_events)
         return object(), object()  # 非 None 会话/脚本（teardown 对 dummy 容错）
@@ -747,7 +747,7 @@ def test_capture_collects_jsbridge_and_sensitive_api_events(monkeypatch, tmp_pat
     _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
     monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None):
         if jsbridge_sink is not None:
             jsbridge_sink.append({"event": "register", "iface": "AndroidNative"})
         if api_sink is not None:
@@ -763,11 +763,74 @@ def test_capture_collects_jsbridge_and_sensitive_api_events(monkeypatch, tmp_pat
 
 
 def test_runtime_report_p1_events_default_empty(tmp_path):
-    """_write_runtime_report 默认写出空 jsbridge_events/sensitive_api_events（向后兼容）。"""
+    """_write_runtime_report 默认写出空 jsbridge_events/sensitive_api_events/antidetect_events。"""
     rp = capture._write_runtime_report("com.test.app", tmp_path, [], complete=True)
     payload = json.loads(Path(rp).read_text(encoding="utf-8"))
     assert payload["jsbridge_events"] == []
     assert payload["sensitive_api_events"] == []
+    assert payload["antidetect_events"] == []
+
+
+def test_capture_collects_antidetect_events(monkeypatch, tmp_path):
+    """P3：会话路径把反检测探测事件落进 runtime_report.json。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None):
+        if antidetect_sink is not None:
+            antidetect_sink.append({"kind": "root", "probe": "File.exists: /system/bin/su", "bypassed": True})
+        return object(), object()
+
+    monkeypatch.setattr(capture, "_start_frida_session", _fake_session)
+    capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+    payload = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    assert payload["antidetect_events"] == [
+        {"kind": "root", "probe": "File.exists: /system/bin/su", "bypassed": True}
+    ]
+
+
+def test_frida_session_script_includes_antidetect(monkeypatch):
+    """会话注入脚本应含反检测绕过段（与 unpinning/crypto/jsbridge/api 拼接）。"""
+    import sys
+    import types
+
+    captured: dict[str, Any] = {}
+
+    class _FakeScript:
+        def __init__(self, source: str) -> None:
+            captured["source"] = source
+
+        def on(self, name: str, cb: Any) -> None:
+            pass
+
+        def load(self) -> None:
+            pass
+
+    class _FakeSession:
+        def create_script(self, source: str) -> _FakeScript:
+            return _FakeScript(source)
+
+        def detach(self) -> None:
+            pass
+
+    class _FakeDevice:
+        def spawn(self, argv: Any) -> int:
+            return 1
+
+        def attach(self, pid: int) -> _FakeSession:
+            return _FakeSession()
+
+        def resume(self, pid: int) -> None:
+            pass
+
+        def kill(self, pid: int) -> None:
+            pass
+
+    monkeypatch.setitem(sys.modules, "frida", types.SimpleNamespace(get_usb_device=lambda timeout=None: _FakeDevice()))
+    capture._start_frida_session("com.x", [], [], [], [])
+    assert "apkscan-antidetect" in captured["source"]
+    assert "addJavascriptInterface" in captured["source"]  # P1 也在
 
 
 # ---------------------------------------------------------------------------

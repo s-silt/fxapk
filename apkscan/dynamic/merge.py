@@ -31,9 +31,11 @@ from apkscan.core.models import (
     Confidence,
     Endpoint,
     Evidence,
+    Finding,
     Lead,
     LeadCategory,
     Report,
+    Severity,
 )
 
 logger = logging.getLogger(__name__)
@@ -429,7 +431,7 @@ def merge_runtime_traces(report: Report, runtime_report_path: str) -> dict[str, 
     Returns:
         ``{"jsbridge_leads", "api_confirmed"}``。内部 try/except，绝不抛。
     """
-    stats = {"jsbridge_leads": 0, "api_confirmed": 0}
+    stats = {"jsbridge_leads": 0, "api_confirmed": 0, "antidetect_probes": 0}
     try:
         from apkscan.dynamic import cryptohook
 
@@ -446,12 +448,21 @@ def merge_runtime_traces(report: Report, runtime_report_path: str) -> dict[str, 
             report.meta["runtime_sensitive_apis"] = api_hints
             stats["api_confirmed"] = _confirm_sensitive_api_findings(report, api_hints)
 
-        if jb_hints or api_hints:
+        # P3：反检测探测（root/模拟器/frida）→ 反分析行为 Finding + meta。
+        ad_events = _load_events_field(runtime_report_path, "antidetect_events")
+        ad_kinds = cryptohook.antidetect_kinds_from_events(ad_events)
+        if ad_kinds:
+            report.meta["runtime_antidetect"] = ad_kinds
+            _add_anti_analysis_finding(report, ad_kinds, ad_events)
+            stats["antidetect_probes"] = sum(ad_kinds.values())
+
+        if jb_hints or api_hints or ad_kinds:
             report.meta["runtime_traced"] = True
             logger.info(
-                "[merge] 运行时追踪并回：jsbridge_leads=%d api_confirmed=%d",
+                "[merge] 运行时追踪并回：jsbridge_leads=%d api_confirmed=%d antidetect=%s",
                 stats["jsbridge_leads"],
                 stats["api_confirmed"],
+                ad_kinds,
             )
     except Exception:  # noqa: BLE001 - 追踪并回失败不得抛给调用方
         logger.exception("[merge] 运行时追踪并回异常")
@@ -489,6 +500,49 @@ def _add_runtime_jsbridge_leads(report: Report, jb_hints: list[str]) -> int:
         )
         added += 1
     return added
+
+
+def _add_anti_analysis_finding(
+    report: Report, ad_kinds: dict[str, int], ad_events: list[dict[str, Any]]
+) -> None:
+    """运行时探测到 root/模拟器/frida 检测 → 产「反分析行为」Finding（涉诈/木马研判信号）。
+
+    正经 app 极少探测 su/qemu/frida；运行时实测到这类探测是反取证/反沙箱行为的活体证据。
+    """
+    kinds_label = "、".join(f"{k}×{v}" for k, v in sorted(ad_kinds.items()))
+    # 取每类首个 probe 作为证据样本。
+    samples: dict[str, str] = {}
+    for ev in ad_events:
+        if not isinstance(ev, dict):
+            continue
+        kind = str(ev.get("kind", "")).strip()
+        probe = str(ev.get("probe", "")).strip()
+        if kind and probe and kind not in samples:
+            samples[kind] = probe
+    evidences = [
+        Evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=f"[{k}] {p[:160]}")
+        for k, p in samples.items()
+    ]
+    severity = Severity.HIGH if ("root" in ad_kinds or "frida" in ad_kinds) else Severity.MEDIUM
+    report.findings.append(
+        Finding(
+            id="RUNTIME-ANTI-ANALYSIS",
+            title="运行时反分析行为：探测 root/模拟器/frida",
+            severity=severity,
+            category="anti_analysis",
+            description=(
+                f"运行时实测：应用主动探测了 {kinds_label}（被 apkscan 绕过）。"
+                "正经应用极少探测 su/qemu/frida——这类反取证/反沙箱行为是涉诈样本/木马规避"
+                "动态分析与风控的典型特征，应作为研判加权信号。"
+            ),
+            recommendation=(
+                "研判：结合静态加固/反调试线索综合判断样本的反分析强度；样本越在意被分析，"
+                "越可能隐藏涉诈核心逻辑（在检测通过后才解密/拉取真实后台）。"
+            ),
+            evidences=evidences,
+            references=[],
+        )
+    )
 
 
 def _confirm_sensitive_api_findings(report: Report, api_hints: list[str]) -> int:
