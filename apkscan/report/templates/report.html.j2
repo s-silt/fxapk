@@ -63,6 +63,10 @@
   .advice-need { background: #fee2e2; color: var(--hi); border: 1px solid #fca5a5; }
   .advice-skip { background: #e5e7eb; color: var(--lo); }
   .advice-todo { background: #fef3c7; color: var(--mid); }
+  /* C2 / 主控服务器醒目标注：红底白字，比 advice 更抢眼；实连=已抓到通信的确认 C2 */
+  .badge-c2 { background: #b91c1c; color: #fff; border: 1px solid #7f1d1d; }
+  .badge-c2-live { background: #7f1d1d; color: #fff; border: 1px solid #450a0a; }
+  tr.c2-row { background: #fff5f5; }
   details.fold { margin: 8px 0 0; }
   details.fold > summary { cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 600; padding: 4px 0; }
   details.fold[open] > summary { color: var(--ink); }
@@ -263,10 +267,18 @@
     {% endif %}
   {% endmacro %}
 
-  {#- 域名 / IP 线索行（含 advice 列、富化、取证依据） -#}
+  {#- C2 醒目徽标：is_c2 → 红「🎯 C2」；真机抓到通信(is_runtime_seen) → 深红「🎯 C2·实连」 -#}
+  {% macro c2_badge(lead) %}
+    {% if lead.is_c2 %}
+      {% if lead.is_runtime_seen %}<span class="badge badge-c2-live" title="真机抓包已观测到通信，确认 C2">🎯 C2·实连</span>
+      {% else %}<span class="badge badge-c2" title="App 自有后端，疑似 C2/主控服务器">🎯 C2</span>{% endif %}
+    {% endif %}
+  {% endmacro %}
+
+  {#- 域名 / IP 线索行（含 C2 标注、advice 列、富化、取证依据） -#}
   {% macro net_lead_row(lead) %}
-    <tr>
-      <td><span class="mono-strong">{{ lead.value }}</span>
+    <tr{% if lead.is_c2 %} class="c2-row"{% endif %}>
+      <td><span class="mono-strong">{{ lead.value }}</span> {{ c2_badge(lead) }}
         {% if lead.notes %}<div class="muted" style="font-size:12px">{{ lead.notes }}</div>{% endif %}
       </td>
       <td>{{ advice_badge(lead.advice) }}</td>
@@ -278,9 +290,9 @@
     </tr>
   {% endmacro %}
 
-  {#- ============ ③ 主控域名（建议调证） ============ -#}
+  {#- ============ ③ C2 / 主控域名（建议调证） ============ -#}
   <section id="control-domains">
-    <h2><span class="num">③</span> 主控域名 <span class="muted" style="font-size:13px;font-weight:400">（域名 / IP 中「建议调证」的高价值线索）</span></h2>
+    <h2><span class="num">③</span> 🎯 C2 / 主控域名 <span class="muted" style="font-size:13px;font-weight:400">（域名 / IP 中「建议调证」的高价值线索 = App 自有后端 / 命令服务器；标「实连」者为真机抓包已确认通信）</span></h2>
     {% if network_leads.need %}
     <table class="lead-table">
       <thead>
