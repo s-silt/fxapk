@@ -131,20 +131,52 @@ def test_https_url_not_cleartext():
 # --- 私网标记 ------------------------------------------------------------
 
 
-def test_private_rfc1918_ip_flagged():
-    for ip in ("10.0.0.5", "192.168.1.100", "172.16.5.9"):
+def test_bare_private_rfc1918_ip_filtered():
+    # C4 新语义：裸的私网/保留 IP 无调证价值，直接不产端点（区别于旧"产出+标私网"）。
+    for ip in ("10.0.0.5", "192.168.1.100", "172.16.5.9", "169.254.1.1"):
         result = _analyze(dex_strings=[f"server {ip}"])
-        ep = _by_value(result)[ip]
-        assert ep.is_private is True, f"{ip} 应判为私网"
+        assert ip not in _by_value(result), f"裸 {ip} 应被 C4 过滤不产端点"
+
+
+def test_private_host_in_url_still_flagged():
+    # URL host 内的私网 IP 仍产端点并标私网（host 通道不受裸 IP 过滤影响）。
+    result = _analyze(dex_strings=["http://10.0.0.5:8080/admin"])
+    eps = _by_value(result)
+    assert eps["10.0.0.5"].is_private is True
 
 
 def test_loopback_private_and_network_addr_filtered():
-    # 127.0.0.1 提取且标私网；0.0.0.0 / x.x.x.0 作版本号/网络地址噪音被过滤。
+    # C4 新语义：裸 127.0.0.1 / 0.0.0.0 / x.x.x.0 全作保留/网络地址噪音被过滤，不产端点。
     result = _analyze(dex_strings=["bind 127.0.0.1", "any 0.0.0.0", "net 10.0.0.0"])
     eps = _by_value(result)
-    assert eps["127.0.0.1"].is_private is True
+    assert "127.0.0.1" not in eps
     assert "0.0.0.0" not in eps
     assert "10.0.0.0" not in eps
+
+
+def test_loopback_in_url_still_extracted():
+    # URL 形式 http://127.0.0.1/ 仍产 IP 端点（host 通道）。
+    result = _analyze(dex_strings=["http://127.0.0.1/health"])
+    assert "127.0.0.1" in _by_value(result)
+
+
+def test_version_and_placeholder_ips_filtered():
+    # C4：版本号被当 IP（13.3.3.7 / 2.1.5.1 / 3.2.16.7）+ 占位 IP（1.2.3.4）裸出现 → 不产端点。
+    result = _analyze(
+        dex_strings=["v13.3.3.7", "ver 2.1.5.1", "sdk 3.2.16.7", "addr 1.2.3.4"]
+    )
+    eps = _by_value(result)
+    for ip in ("13.3.3.7", "2.1.5.1", "3.2.16.7", "1.2.3.4"):
+        assert ip not in eps, f"{ip} 应被 noise_ips 过滤"
+
+
+def test_real_public_ips_kept():
+    # C4 回归锁：真实公网 IP 不在 denylist、非保留段 → 保留（不得误杀）。
+    result = _analyze(dex_strings=["dns 8.8.8.8", "c2 139.59.12.34"])
+    eps = _by_value(result)
+    assert "8.8.8.8" in eps
+    assert "139.59.12.34" in eps
+    assert eps["8.8.8.8"].is_private is False
 
 
 def test_public_ip_not_private():
@@ -229,13 +261,13 @@ def test_dedup_merges_evidences_across_sources():
 
 
 def test_flags_union_on_merge():
-    ip = "10.1.2.3"
-    # 同一 IP 出现两次，去重后仍标私网
+    # 用公网 IP（私网裸 IP 已被 C4 过滤）验证同 value 去重合并。
+    ip = "8.8.4.4"
     result = _analyze(dex_strings=[f"a {ip}", f"b {ip}"])
     matches = [e for e in result.endpoints if e.value == ip]
     assert len(matches) == 1
-    assert matches[0].is_private is True
-    # 两条证据（不同 snippet 但同 source/location 仍按 (source,location) 去重 → 1 条）
+    assert matches[0].is_private is False
+    # 两条命中同 source/location 仍按 (source,location) 去重 → 1 条证据
     assert len(matches[0].evidences) == 1
 
 
@@ -378,16 +410,42 @@ def test_manifest_non_string_does_not_crash():
     assert any(e.value == "https://pay.heika-gw.cn/n" for e in result.endpoints)
 
 
+# --- C1：域名来源可信度档（tier）---------------------------------------
+
+
+def test_domain_from_library_file_marked_tier():
+    # 来源是第三方库文件（uni_modules/.../echarts.min.js）→ tier=library-file。
+    result = _analyze(
+        files={
+            "assets/apps/X/www/uni_modules/lime-echart/static/echarts.min.js":
+                b"var u='https://lib-cdn.fraud-x.cn/a';",
+        }
+    )
+    eps = _by_value(result)
+    assert eps["lib-cdn.fraud-x.cn"].enrichment.get("tier") == "library-file"
+
+
+def test_domain_from_app_file_marked_app_tier():
+    # 普通 app 文件 → tier=app。
+    result = _analyze(
+        files={"assets/apps/X/www/app-service.js": b"var u='https://api.fraud-x.cn/a';"}
+    )
+    eps = _by_value(result)
+    assert eps["api.fraud-x.cn"].enrichment.get("tier") == "app"
+
+
 # --- meta 统计 -----------------------------------------------------------
 
 
 def test_meta_counts_reported():
+    # 用两个公网 IP（裸私网 IP 已被 C4 过滤）+ 一个 URL 内私网 host 维持 private_count。
     result = _analyze(
         dex_strings=[
             "https://a.heika-gw.cn/x",
             "http://b.heika-gw.cn/y",
-            "10.0.0.1",
+            "http://10.0.0.1:9000/p",   # URL host 私网 → 标 private（host 通道）
             "8.8.4.4",
+            "139.59.12.34",
             "host=cdn.heika-gw.cn",
         ]
     )

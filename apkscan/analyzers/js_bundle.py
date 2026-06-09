@@ -40,6 +40,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from apkscan.core import infra
 from apkscan.core.models import (
     AnalyzerResult,
     Evidence,
@@ -47,6 +48,12 @@ from apkscan.core.models import (
     Severity,
 )
 from apkscan.core.registry import BaseAnalyzer, load_rules
+from apkscan.core.secrets import (
+    SecretRules,
+    is_sdk_constant,
+    load_secret_rules,
+    looks_like_secret_value as _looks_like_secret_value,
+)
 from apkscan.analyzers._common import EndpointCollector
 from apkscan.core.textutil import as_str_list as _as_str_list
 from apkscan.core.textutil import host_from_url as _host_from_url
@@ -324,6 +331,11 @@ _PLACEHOLDER_VALUES: frozenset[str] = frozenset(
 # AES key 的典型长度（去引号后的可见字符长度）。
 _AES_KEY_LENGTHS: frozenset[int] = frozenset({16, 24, 32})
 
+# 噪音 IP 兜底（C4：与 endpoints 同口径，公认占位/示例 + 版本号形态）。
+_FALLBACK_NOISE_IPS: tuple[str, ...] = (
+    "1.2.3.4", "0.0.0.0", "13.3.3.7", "2.1.5.1", "3.2.16.7",
+)
+
 # Finding id 常量（稳定，供报告 / 测试引用）。
 FINDING_SECRET = "JS-HARDCODED-SECRET"
 FINDING_APPID = "JS-HARDCODED-APPID"
@@ -345,6 +357,8 @@ class _Rules:
     noise_substrings: tuple[str, ...] = ()
     secret_key_hints: tuple[str, ...] = ()
     snippet_max: int = _DEFAULT_SNIPPET_MAX
+    noise_ips: frozenset[str] = field(default_factory=frozenset)
+    secret_rules: SecretRules = field(default_factory=SecretRules)
 
 
 @dataclass
@@ -632,6 +646,7 @@ class JsBundleAnalyzer(BaseAnalyzer):
                     "domain",
                     Evidence(source="js", location=path, snippet=host_snippet),
                 )
+                collector.mark_tier(host, infra.domain_source_tier(path, len(literal)))
 
         def _in_consumed(pos: int) -> bool:
             return any(start <= pos < end for start, end in consumed)
@@ -644,7 +659,8 @@ class JsBundleAnalyzer(BaseAnalyzer):
             ip_obj = _parse_ipv4(ip_str)
             if ip_obj is None:
                 continue
-            if _is_noise_bare_ip(ip_str):
+            # C4：裸 IP 去噪——bogon/保留段（is_noise_bare_ip）或占位/版本号 denylist。
+            if ip_str in rules.noise_ips or _is_noise_bare_ip(ip_str):
                 continue
             collector.add(
                 ip_str,
@@ -670,6 +686,7 @@ class JsBundleAnalyzer(BaseAnalyzer):
                 "domain",
                 Evidence(source="js", location=path, snippet=_short(m.group(), rules.snippet_max)),
             )
+            collector.mark_tier(domain, infra.domain_source_tier(path, len(literal)))
 
         # 4) 相对 API 路径（/api/... /v1/... 等）。
         for m in _API_PATH_RE.finditer(literal):
@@ -706,6 +723,9 @@ class JsBundleAnalyzer(BaseAnalyzer):
         if hint is None:
             return
         val = value.strip()
+        # C2：value==key / 已知 SDK 常量名 / 常量值 → 非真凭据，drop（杀 SDK 常量名误报）。
+        if is_sdk_constant(key, val, rules.secret_rules):
+            return
         if not _is_real_secret_value(val):
             return
 
@@ -909,12 +929,28 @@ class JsBundleAnalyzer(BaseAnalyzer):
             noise_substrings=tuple(noise_subs),
             secret_key_hints=tuple(h.lower() for h in secret_hints),
             snippet_max=snippet_max,
+            noise_ips=_load_noise_ips(),
+            secret_rules=load_secret_rules(),
         )
 
 
 # ---------------------------------------------------------------------------
 # 模块级工具函数
 # ---------------------------------------------------------------------------
+
+
+def _load_noise_ips() -> frozenset[str]:
+    """从 endpoints.yaml 读 noise_ips（C4 单一数据源；缺失走内置兜底）。"""
+    try:
+        data = load_rules("endpoints")
+    except Exception:  # noqa: BLE001 — 规则读取失败不应炸掉 analyze
+        logger.exception("[js_bundle] 读取 endpoints 规则（noise_ips）失败，用兜底")
+        return frozenset(_FALLBACK_NOISE_IPS)
+    if isinstance(data, dict):
+        nips = _as_str_list(data.get("noise_ips"))
+        if nips:
+            return frozenset(ip.strip() for ip in nips)
+    return frozenset(_FALLBACK_NOISE_IPS)
 
 
 def _looks_like_domain(domain: str) -> bool:
@@ -961,8 +997,14 @@ def _is_literal_domain(domain: str) -> bool:
     return True
 
 
+# 形态判定专用规则：长度/多样性门由本模块上游自查（len<8 / distinct<=2 已先 drop），
+# 故 min_secret_len/min_distinct_chars 置 1，让共享 looks_like_secret_value 只负责
+# keyish + 长纯字母混合熵的决策，与 jadx/config_keys 一致（min_alpha_secret_len 走默认 16）。
+_SHAPE_RULES = SecretRules(min_secret_len=1, min_distinct_chars=1)
+
+
 def _is_real_secret_value(val: str) -> bool:
-    """密钥值是否像真实凭证（排除占位 / 过短 / 纯路径 / URL / 模板表达式）。"""
+    """密钥值是否像真实凭证（排除占位 / 过短 / 纯路径 / URL / 模板表达式 / 非凭据形态）。"""
     low = val.strip().lower()
     if low in _PLACEHOLDER_VALUES:
         return False
@@ -974,5 +1016,11 @@ def _is_real_secret_value(val: str) -> bool:
     if any(ch in val for ch in "{}$<>") or val.startswith(("/", "http://", "https://", "./", "../")):
         return False
     if " " in val:  # 含空格多为句子/说明文本
+        return False
+    # C2：value 形态判定收敛到共享 looks_like_secret_value（与 jadx/config_keys 一致）：
+    #   含数字+字母 / 纯 hex / 含 +/= → looks_keyish=True；此外评审 MEDIUM 修复——
+    #   够长（默认≥16）且大小写混合的纯字母值也保留（不误杀纯字母真 secret），
+    #   仅纯小写/纯大写或过短的非 keyish 值被 drop（deviceToken 等）。
+    if not _looks_like_secret_value(val, _SHAPE_RULES):
         return False
     return True

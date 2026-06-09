@@ -85,3 +85,47 @@ def test_nonzero_exit_still_scans_partial_output(monkeypatch, tmp_path) -> None:
 def test_requires_jadx_capability() -> None:
     # requires 声明 jadx，pipeline 在无 jadx 能力时会 skipped（此处仅断言声明）。
     assert JadxAnalyzer().requires == ["jadx"]
+
+
+# --- C2：SDK 常量名误报被过滤 --------------------------------------------
+
+
+def test_sdk_constant_secrets_not_flagged(monkeypatch, tmp_path) -> None:
+    # MIPUSH_APPKEY=MIPUSH_APPKEY（value==key）、OPPOPUSH_APPKEY=OPPOPUSH_APPKEY、
+    # KEY_DEVICE_TOKEN=deviceToken、METHOD_CHECK_APPKEY=dc_checkappkey 全是 SDK 常量名误报。
+    java = (
+        "class C {\n"
+        '  String MIPUSH_APPKEY = "MIPUSH_APPKEY";\n'
+        '  String OPPOPUSH_APPKEY = "OPPOPUSH_APPKEY";\n'
+        '  String KEY_DEVICE_TOKEN = "deviceToken";\n'
+        '  String METHOD_CHECK_APPKEY = "dc_checkappkey";\n'
+        "}\n"
+    )
+    monkeypatch.setattr(jadx.subprocess, "run", _fake_run_writing(java))
+    result = JadxAnalyzer().analyze(_ctx(tmp_path))
+    assert [f for f in result.findings if f.category == "secret"] == []
+
+
+def test_real_secret_still_flagged(monkeypatch, tmp_path) -> None:
+    # ★ 回归锁：真凭据 app_secret=Abc123Xyz789Def456 仍产 HIGH secret Finding。
+    java = 'class C { String app_secret = "Abc123Xyz789Def456"; }'
+    monkeypatch.setattr(jadx.subprocess, "run", _fake_run_writing(java))
+    result = JadxAnalyzer().analyze(_ctx(tmp_path))
+    assert any(f.category == "secret" for f in result.findings)
+
+
+def test_version_ip_filtered_real_ip_kept(monkeypatch, tmp_path) -> None:
+    # C4：jadx 路径裸 IP 与 endpoints 共享判定——版本号 13.3.3.7 过滤，真 IP 8.8.8.8 保留。
+    java = (
+        "class C {\n"
+        '  String ver = "13.3.3.7";\n'
+        '  String dns = "8.8.8.8";\n'
+        '  String lan = "192.168.0.1";\n'
+        "}\n"
+    )
+    monkeypatch.setattr(jadx.subprocess, "run", _fake_run_writing(java))
+    result = JadxAnalyzer().analyze(_ctx(tmp_path))
+    vals = {e.value for e in result.endpoints}
+    assert "13.3.3.7" not in vals
+    assert "192.168.0.1" not in vals
+    assert "8.8.8.8" in vals

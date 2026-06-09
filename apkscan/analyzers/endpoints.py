@@ -28,6 +28,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from apkscan.core import infra
 from apkscan.core.models import AnalyzerResult, Evidence
 from apkscan.core.registry import BaseAnalyzer, load_rules
 from apkscan.analyzers._common import EndpointCollector
@@ -98,6 +99,10 @@ _FALLBACK_RESOURCE_EXTS: tuple[str, ...] = (
     ".yaml",
 )
 _FALLBACK_RESOURCE_DIRS: tuple[str, ...] = ("assets/", "res/", "raw/")
+# 噪音 IP 兜底（C4：公认占位/示例 + 本次实测版本号形态）。规则缺失时仍过滤。
+_FALLBACK_NOISE_IPS: tuple[str, ...] = (
+    "1.2.3.4", "0.0.0.0", "13.3.3.7", "2.1.5.1", "3.2.16.7",
+)
 
 # ---------------------------------------------------------------------------
 # 正则
@@ -342,6 +347,7 @@ class _Rules:
     resource_exts: tuple[str, ...] = ()
     resource_dirs: tuple[str, ...] = ()
     snippet_max: int = _DEFAULT_SNIPPET_MAX
+    noise_ips: frozenset[str] = field(default_factory=frozenset)
 
 
 class EndpointsAnalyzer(BaseAnalyzer):
@@ -535,6 +541,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
                     "domain",
                     Evidence(source=source, location=location, snippet=host_snippet),
                 )
+                collector.mark_tier(host, infra.domain_source_tier(location, len(text)))
 
         def _in_consumed(pos: int) -> bool:
             return any(start <= pos < end for start, end in consumed)
@@ -547,9 +554,10 @@ class EndpointsAnalyzer(BaseAnalyzer):
             ip_obj = _parse_ipv4(ip_str)
             if ip_obj is None:
                 continue
-            # 裸 IP 去版本号噪音：首段/末段为 0 多为网络地址或版本串（如 1.0.0.0 /
-            #   3.2.16.0），几乎不是真实主机端点。URL 内的 IP 走上面 host 通道，不受此限。
-            if _is_noise_bare_ip(ip_str):
+            # 裸 IP 去噪（C4）：首段/末段为 0、bogon/保留段（私网/回环/链路本地/保留/
+            #   多播）、或公认占位/版本号 denylist（noise_ips：1.2.3.4 / 13.3.3.7 等）。
+            #   URL 内的 IP 走上面 host 通道，不受此限。
+            if ip_str in rules.noise_ips or _is_noise_bare_ip(ip_str):
                 continue
             collector.add(
                 ip_str,
@@ -576,6 +584,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
                 "domain",
                 Evidence(source=source, location=location, snippet=_truncate(m.group(), rules.snippet_max)),
             )
+            collector.mark_tier(domain, infra.domain_source_tier(location, len(text)))
 
     # ------------------------------------------------------------------
     # 噪音过滤
@@ -667,6 +676,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
         res_exts: list[str] = list(_FALLBACK_RESOURCE_EXTS)
         res_dirs: list[str] = list(_FALLBACK_RESOURCE_DIRS)
         snippet_max = _DEFAULT_SNIPPET_MAX
+        noise_ips: list[str] = list(_FALLBACK_NOISE_IPS)
 
         if isinstance(data, dict):
             hosts = _as_str_list(data.get("noise_hosts"))
@@ -684,6 +694,9 @@ class EndpointsAnalyzer(BaseAnalyzer):
             ms = data.get("max_string_len")
             if isinstance(ms, int) and ms > 0:
                 snippet_max = ms
+            nips = _as_str_list(data.get("noise_ips"))
+            if nips:
+                noise_ips = nips
         else:
             logger.warning(
                 "[%s] 规则顶层应为 dict，实际 %s；使用内置兜底",
@@ -697,6 +710,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
             resource_exts=tuple(e.lower() for e in res_exts),
             resource_dirs=tuple(d.lower() for d in res_dirs),
             snippet_max=snippet_max,
+            noise_ips=frozenset(ip.strip() for ip in noise_ips),
         )
 
 

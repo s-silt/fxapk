@@ -161,6 +161,30 @@ def test_plain_appid_is_not_secret_finding() -> None:
     assert not any("GETUI_APPID" in t for t in secret_keys)
 
 
+def test_sdk_constant_appkey_value_not_secret_finding() -> None:
+    """C2：value==key（OPPOPUSH_APPKEY=OPPOPUSH_APPKEY）的 meta-data 不应产 secret Finding。
+
+    虽然 key 名含 APPKEY，但 value 是常量名本身（非真凭据），按新语义不产 Finding；
+    CONFIG_KEY lead 仍照常产出（无信息损失）。
+    """
+    manifest = (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+        'package="com.test.app">\n'
+        '  <application>\n'
+        '    <meta-data android:name="OPPOPUSH_APPKEY" android:value="OPPOPUSH_APPKEY"/>\n'
+        '    <meta-data android:name="KEY_DEVICE_TOKEN" android:value="deviceToken"/>\n'
+        '    <meta-data android:name="METHOD_CHECK_APPKEY" android:value="dc_checkappkey"/>\n'
+        '  </application>\n'
+        '</manifest>\n'
+    )
+    result = _analyzer().analyze(FakeContext(manifest_xml=manifest))
+    assert [f for f in result.findings if f.category == "secret"] == []
+    # CONFIG_KEY lead 仍产出（无信息损失）。
+    leads = _leads_by_value(result)
+    assert "OPPOPUSH_APPKEY=OPPOPUSH_APPKEY" in leads
+
+
 # ---------------------------------------------------------------------------
 # uni-app manifest.json：confusion → 加密 Finding + meta
 # ---------------------------------------------------------------------------

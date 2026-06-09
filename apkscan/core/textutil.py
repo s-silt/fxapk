@@ -68,14 +68,33 @@ def host_from_url(url: str) -> str:
 
 
 def is_noise_bare_ip(ip_str: str) -> bool:
-    """裸 IP 是否为版本号/网络地址噪音：首段或末段为 0。
+    """裸 IP 是否为版本号/网络地址/保留段噪音（C4 降噪）。
 
-    1.0.0.0 / 3.2.16.0 / 0.0.0.0 之类在代码里多为版本串或网络地址，非真实主机端点。
+    仅作用于"裸 IP"——URL host 内的 IP 仍走 host 通道不受此限（URL 形式的私网/示例
+    IP 仍产端点，与现状一致）。判为噪音的情形：
+    - 首段或末段为 0（1.0.0.0 / 3.2.16.0 / 0.0.0.0 等版本串/网络地址）。
+    - bogon / 保留 / 示例段（用 ipaddress 判定，比手写段更稳）：私网(RFC1918) /
+      回环(127/8) / 链路本地(169.254/16) / 保留 / 多播 / 未指定。这类裸 IP 无调证价值。
+    注意：TEST-NET（192.0.2/24 等 RFC5737 文档示例段）不被 ipaddress 判为 is_reserved，
+    故由调用方的 noise_ips denylist 或 host 通道处理；本函数不强行覆盖。
     """
     octets = ip_str.split(".")
     if len(octets) != 4:
         return False
-    return octets[0] == "0" or octets[-1] == "0"
+    if octets[0] == "0" or octets[-1] == "0":
+        return True
+    try:
+        ip = ipaddress.IPv4Address(ip_str)
+    except ValueError:
+        return False
+    return bool(
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
 
 
 def parse_ipv4(ip_str: str) -> ipaddress.IPv4Address | None:
