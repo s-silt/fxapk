@@ -272,3 +272,86 @@ def test_frida_crypto_hook_js_integrity() -> None:
     assert "CryptoJS" in js  # WebView 补充路径
     assert "send(" in js  # 回传通道
     assert "apkscan-crypto" in js  # 通道判别值与 Python 端一致
+
+
+# ---------------------------------------------------------------------------
+# P1：make_typed_handler + JS-bridge / 敏感 API 通道
+# ---------------------------------------------------------------------------
+
+
+def test_make_typed_handler_routes_by_type() -> None:
+    sink: list[dict[str, Any]] = []
+    handler = cryptohook.make_typed_handler(
+        sink, cryptohook.JSBRIDGE_MSG_TYPE, cryptohook.normalize_jsbridge_event
+    )
+    # 本通道消息 → 收
+    handler({"type": "send", "payload": {"type": cryptohook.JSBRIDGE_MSG_TYPE, "event": "register", "iface": "android"}}, None)
+    # 别的通道（crypto）→ 忽略
+    handler({"type": "send", "payload": {"type": cryptohook.CRYPTO_MSG_TYPE, "src": "cipher", "event": "init"}}, None)
+    # error → 忽略不抛（typed handler 不记 error）
+    handler({"type": "error", "description": "x"}, None)
+    assert len(sink) == 1
+    assert sink[0]["iface"] == "android"
+
+
+def test_make_typed_handler_never_raises() -> None:
+    sink: list[dict[str, Any]] = []
+    handler = cryptohook.make_typed_handler(sink, "apkscan-api", cryptohook.normalize_sensitive_api_event)
+    handler("garbage", None)  # type: ignore[arg-type]
+    handler(None, None)
+    handler({"type": "send", "payload": "notadict"}, None)
+    assert sink == []
+
+
+def test_normalize_jsbridge_event() -> None:
+    ev = cryptohook.normalize_jsbridge_event(
+        {"type": "x", "event": "register", "iface": "AndroidNative", "object_class": "com.x.Bridge", "methods": "pay,getInfo"}
+    )
+    assert ev is not None
+    assert ev["event"] == "register"
+    assert ev["iface"] == "AndroidNative"
+    assert ev["methods"] == "pay,getInfo"
+    # 缺 iface → None
+    assert cryptohook.normalize_jsbridge_event({"event": "register"}) is None
+
+
+def test_normalize_sensitive_api_event() -> None:
+    ev = cryptohook.normalize_sensitive_api_event(
+        {"event": "call", "api": "TelephonyManager.getDeviceId", "result_summary": "8601..."}
+    )
+    assert ev is not None
+    assert ev["api"] == "TelephonyManager.getDeviceId"
+    assert cryptohook.normalize_sensitive_api_event({"event": "call"}) is None  # 缺 api
+
+
+def test_jsbridge_hints_from_events() -> None:
+    events = [
+        {"event": "register", "iface": "android"},
+        {"event": "call", "iface": "android", "method": "pay"},
+        {"event": "register", "iface": "android"},  # 去重
+    ]
+    hints = cryptohook.jsbridge_hints_from_events(events)
+    assert "android" in hints
+    assert "android.pay" in hints
+    assert len([h for h in hints if h == "android"]) == 1
+
+
+def test_sensitive_api_hints_from_events() -> None:
+    events = [
+        {"api": "TelephonyManager.getDeviceId"},
+        {"api": "SmsManager.sendTextMessage"},
+        {"api": "TelephonyManager.getDeviceId"},  # 去重
+    ]
+    hints = cryptohook.sensitive_api_hints_from_events(events)
+    assert hints == ["TelephonyManager.getDeviceId", "SmsManager.sendTextMessage"]
+
+
+def test_frida_p1_hook_js_integrity() -> None:
+    jb = cryptohook.FRIDA_JSBRIDGE_HOOK_JS
+    assert "Java.perform" in jb
+    assert "addJavascriptInterface" in jb
+    assert "apkscan-jsbridge" in jb
+    api = cryptohook.FRIDA_SENSITIVE_API_HOOK_JS
+    assert "getDeviceId" in api
+    assert "sendTextMessage" in api
+    assert "apkscan-api" in api
