@@ -270,14 +270,41 @@ def decrypt_runtime_messages(report: Report, runtime_report_path: str) -> dict[s
     Returns:
         ``{"decrypted", "failed", "plaintext_endpoints"}``。内部 try/except，绝不抛。
     """
-    stats = {"decrypted": 0, "failed": 0, "plaintext_endpoints": 0}
+    stats = {"decrypted": 0, "failed": 0, "plaintext_endpoints": 0, "live_recipe": 0}
     try:
         from apkscan.core import appcrypto
+        from apkscan.dynamic import cryptohook
 
-        recipe = appcrypto.CryptoRecipe.from_meta(report.meta.get("crypto_recipe"))
-        if recipe is None:
-            logger.info("[merge] report.meta 无 crypto_recipe 配方，跳过运行时信封解密")
+        # P0：运行时密钥 hook 抓到的活体事件 → 反推「实测配方」，与静态配方浅合并（实测优先）。
+        # 实测拿到权威 key（静态可能逆错/逆不到），iv 仅在实测恒定时覆盖、否则交静态推导。
+        events = _load_crypto_events(runtime_report_path)
+        live_meta = cryptohook.recipe_from_events(events) if events else None
+        if live_meta:
+            report.meta["runtime_crypto_recipe"] = dict(live_meta)
+            report.meta["runtime_crypto_event_count"] = len(events)
+            stats["live_recipe"] = 1
+            logger.info("[merge] 采用运行时实测配方（活体 key）解密：%s", _recipe_brief(live_meta))
+        # 冒充对象（webName/品牌/行业词）从活体明文抽出，写进 meta 供报告呈现。
+        brand_hints = cryptohook.brand_hints_from_events(events) if events else []
+        if brand_hints:
+            report.meta["runtime_brand_hints"] = brand_hints
+            logger.info("[merge] 运行时明文捕获冒充对象线索：%s", "、".join(brand_hints[:5]))
+
+        # 候选配方（按优先级）：实测合并配方优先、纯静态配方兜底。逐信封依次尝试、首个解出即用。
+        # 关键：「实测优先但绝不回归静态」——实测拿到二进制 key 覆盖、却与静态 iv 推导口径不兼容
+        # （如静态 md5(key+ts) 对 hex key 失效）时，仍能用纯静态配方解出原本能解的信封。
+        # 也顺带消解 iv 伪恒定风险：实测 fixed iv 解错其它信封时自动回退静态 md5 推导。
+        static_meta = report.meta.get("crypto_recipe")
+        merged_meta = _merge_recipe_meta(static_meta, live_meta)
+        merged_recipe = appcrypto.CryptoRecipe.from_meta(merged_meta)
+        if merged_recipe is None:
+            logger.info("[merge] 无静态/运行时 crypto 配方，跳过运行时信封解密")
             return stats
+        candidates = [merged_recipe]
+        if live_meta:
+            static_recipe = appcrypto.CryptoRecipe.from_meta(static_meta)
+            if static_recipe is not None:
+                candidates.append(static_recipe)  # 实测优先、静态兜底
 
         messages = _load_runtime_messages(runtime_report_path)
         if not messages:
@@ -292,7 +319,9 @@ def decrypt_runtime_messages(report: Report, runtime_report_path: str) -> dict[s
                 env = _parse_envelope(body)
                 if env is None:
                     continue
-                plain = appcrypto.decrypt_envelope(env["data"], recipe, env["timestamp"])
+                plain = _decrypt_with_candidates(
+                    appcrypto, env["data"], candidates, env["timestamp"]
+                )
                 if plain is None:
                     stats["failed"] += 1
                     logger.warning(
@@ -338,6 +367,69 @@ def _load_runtime_messages(runtime_report_path: str) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         return []
     return [m for m in raw if isinstance(m, dict)]
+
+
+def _decrypt_with_candidates(
+    appcrypto: Any, data: str, candidates: list[Any], timestamp: Any
+) -> str | None:
+    """逐个候选配方尝试解密信封，返回首个解出的明文；全失败 → None（不抛）。
+
+    候选按优先级排列（实测合并配方在前、纯静态兜底在后）：实测优先但绝不回归静态——
+    实测配方解不出时自动落到静态配方，避免「实测覆盖把本可成功的静态解密拉成全失败」。
+    """
+    for recipe in candidates:
+        plain = appcrypto.decrypt_envelope(data, recipe, timestamp)
+        if plain is not None:
+            return plain
+    return None
+
+
+def _load_crypto_events(runtime_report_path: str) -> list[dict[str, Any]]:
+    """读 runtime_report.json 的 crypto_events 数组（P0 运行时密钥 hook 产出）。
+
+    缺文件/坏 JSON/无字段/旧版报告无该字段 → []（向后兼容，不抛）。
+    """
+    import json
+    from pathlib import Path
+
+    path = Path(runtime_report_path)
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        logger.exception("[merge] 读取/解析 runtime 报告失败（crypto_events 跳过）：%s", path)
+        return []
+    raw = payload.get("crypto_events") if isinstance(payload, dict) else None
+    if not isinstance(raw, list):
+        return []
+    return [e for e in raw if isinstance(e, dict)]
+
+
+def _merge_recipe_meta(
+    static_meta: Any, live_meta: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """把运行时实测配方浅合并到静态配方上（实测非空字段覆盖静态）；都没有 → None。
+
+    语义：实测拿到的字段（权威 key、恒定 iv）覆盖静态推断；实测没把握的字段（如变化的
+    iv 未设 iv_derive）保留静态值——避免无依据地改写静态推断、或把单次 iv 误当 fixed。
+    """
+    base: dict[str, Any] = dict(static_meta) if isinstance(static_meta, dict) else {}
+    if isinstance(live_meta, dict):
+        for key, val in live_meta.items():
+            if val not in (None, ""):
+                base[key] = val
+    return base or None
+
+
+def _recipe_brief(meta: dict[str, Any]) -> str:
+    """配方一行摘要（日志用，不泄全 key）。"""
+    key = str(meta.get("key", ""))
+    key_tail = key[:4] + "…" + key[-4:] if len(key) >= 8 else key
+    return (
+        f"{meta.get('algo', '?')}-{meta.get('mode', '?')}/{meta.get('padding', '?')} "
+        f"key({meta.get('key_encoding', '?')})={key_tail} iv={meta.get('iv_derive', '继承静态')}"
+    )
 
 
 def _parse_envelope(body: Any) -> dict[str, Any] | None:
@@ -490,6 +582,7 @@ def merge_and_rerender(
     stats["decrypted"] = decrypt_stats.get("decrypted", 0)
     stats["decrypt_failed"] = decrypt_stats.get("failed", 0)
     stats["plaintext_endpoints"] = decrypt_stats.get("plaintext_endpoints", 0)
+    stats["live_recipe"] = decrypt_stats.get("live_recipe", 0)
 
     fmts = list(formats) if formats else list(_DEFAULT_FORMATS)
     try:

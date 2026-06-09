@@ -104,6 +104,9 @@ def _stub_orchestration(
     monkeypatch.setattr(
         capture, "_start_frida_unpinning", lambda package, out_path: frida
     )
+    # P0：默认让 frida-core 会话路径不可用（返回 (None, None)），既有用例继续走 subprocess
+    # 回退路径（_start_frida_unpinning），行为零漂移；针对会话路径的新用例会再覆写此桩。
+    monkeypatch.setattr(capture, "_start_frida_session", lambda package, sink: (None, None))
     monkeypatch.setattr(capture, "_adb_reverse", lambda: (calls["adb"].append("reverse") or True))
     monkeypatch.setattr(capture, "_adb_set_proxy", lambda: (calls["adb"].append("proxy") or True))
     monkeypatch.setattr(capture, "_adb_clear_proxy", lambda: calls["adb"].append("clear_proxy"))
@@ -490,6 +493,248 @@ def test_runtime_report_persists_messages(tmp_path):
     )
     payload = json.loads(Path(report_path).read_text(encoding="utf-8"))
     assert payload["messages"] == msgs
+
+
+# ---------------------------------------------------------------------------
+# P0：frida-core 会话（运行时密钥 hook）+ crypto_events 落盘
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_report_crypto_events_default_empty(tmp_path):
+    """_write_runtime_report 默认写出空 crypto_events（向后兼容）。"""
+    report_path = capture._write_runtime_report("com.test.app", tmp_path, [], complete=True)
+    payload = json.loads(Path(report_path).read_text(encoding="utf-8"))
+    assert "crypto_events" in payload
+    assert payload["crypto_events"] == []
+
+
+def test_runtime_report_persists_crypto_events(tmp_path):
+    events = [{"src": "cipher", "event": "init", "key_hex": "55f0", "iv_hex": None}]
+    report_path = capture._write_runtime_report(
+        "com.test.app", tmp_path, [], complete=True, crypto_events=events
+    )
+    payload = json.loads(Path(report_path).read_text(encoding="utf-8"))
+    assert payload["crypto_events"] == events
+
+
+def test_start_frida_session_falls_back_when_frida_core_missing(monkeypatch):
+    """frida-core（import frida）不可用 → 返回 (None, None)，由调用方回退 subprocess。"""
+    import sys
+
+    # sys.modules['frida']=None 让 `import frida` 抛 ImportError。
+    monkeypatch.setitem(sys.modules, "frida", None)
+    session, script = capture._start_frida_session("com.test.app", [])
+    assert session is None
+    assert script is None
+
+
+def test_start_frida_session_attaches_and_loads_script(monkeypatch):
+    """注入假 frida-core：断言注入脚本同时含 unpinning + 运行时密钥 hook，且注册了 on_message。"""
+    import sys
+    import types
+
+    captured: dict[str, Any] = {}
+
+    class _FakeScript:
+        def __init__(self, source: str) -> None:
+            captured["source"] = source
+            self.on_calls: list[tuple[str, Any]] = []
+            self.loaded = False
+
+        def on(self, name: str, cb: Any) -> None:
+            self.on_calls.append((name, cb))
+            captured["on"] = (name, cb)
+
+        def load(self) -> None:
+            self.loaded = True
+            captured["loaded"] = True
+
+    class _FakeSession:
+        def create_script(self, source: str) -> _FakeScript:
+            return _FakeScript(source)
+
+        def detach(self) -> None:
+            captured["detached"] = True
+
+    class _FakeDevice:
+        def spawn(self, argv: Any) -> int:
+            captured["spawned"] = argv
+            return 4321
+
+        def attach(self, pid: int) -> _FakeSession:
+            captured["attached_pid"] = pid
+            return _FakeSession()
+
+        def resume(self, pid: int) -> None:
+            captured["resumed"] = pid
+
+        def kill(self, pid: int) -> None:
+            captured["killed"] = pid
+
+    fake_frida = types.SimpleNamespace(get_usb_device=lambda timeout=None: _FakeDevice())
+    monkeypatch.setitem(sys.modules, "frida", fake_frida)
+
+    sink: list[dict[str, Any]] = []
+    session, script = capture._start_frida_session("com.test.app", sink)
+
+    assert session is not None
+    assert script is not None
+    # 注入脚本同时含 unpinning（TrustManager）与运行时密钥 hook（Cipher）。
+    src = captured["source"]
+    assert "Java.perform" in src
+    assert "javax.crypto.Cipher" in src
+    assert "X509TrustManager" in src  # unpinning 也在
+    # 注册了 message 回调、脚本已 load、app 已 resume。
+    assert captured["on"][0] == "message"
+    assert captured["loaded"] is True
+    assert captured["spawned"] == ["com.test.app"]
+    assert captured["resumed"] == 4321
+
+
+def test_start_frida_session_cleans_up_on_load_failure(monkeypatch):
+    """脚本 load 失败 → kill 已 spawn 的进程 + detach，返回 (None,None)（避免回退路径二次 spawn 冲突）。"""
+    import sys
+    import types
+
+    captured: dict[str, Any] = {}
+
+    class _FakeScript:
+        def __init__(self, source: str) -> None:
+            pass
+
+        def on(self, name: str, cb: Any) -> None:
+            pass
+
+        def load(self) -> None:
+            raise RuntimeError("script load boom")
+
+    class _FakeSession:
+        def create_script(self, source: str) -> _FakeScript:
+            return _FakeScript(source)
+
+        def detach(self) -> None:
+            captured["detached"] = True
+
+    class _FakeDevice:
+        def spawn(self, argv: Any) -> int:
+            return 999
+
+        def attach(self, pid: int) -> _FakeSession:
+            return _FakeSession()
+
+        def resume(self, pid: int) -> None:
+            captured["resumed"] = pid
+
+        def kill(self, pid: int) -> None:
+            captured["killed"] = pid
+
+    fake_frida = types.SimpleNamespace(get_usb_device=lambda timeout=None: _FakeDevice())
+    monkeypatch.setitem(sys.modules, "frida", fake_frida)
+
+    session, script = capture._start_frida_session("com.test.app", [])
+    assert session is None and script is None
+    # 清理：已 spawn 的进程被 kill、会话被 detach；resume 未发生（load 在 resume 前失败）。
+    assert captured.get("killed") == 999
+    assert captured.get("detached") is True
+    assert "resumed" not in captured
+
+
+def test_start_frida_session_kills_pid_on_attach_failure(monkeypatch):
+    """attach 失败（pid 已 spawn、session 仍 None）→ kill(pid) 但不 detach，返回 (None,None)。"""
+    import sys
+    import types
+
+    captured: dict[str, Any] = {}
+
+    class _FakeDevice:
+        def spawn(self, argv: Any) -> int:
+            return 777
+
+        def attach(self, pid: int) -> Any:
+            raise RuntimeError("attach denied")
+
+        def resume(self, pid: int) -> None:
+            captured["resumed"] = pid
+
+        def kill(self, pid: int) -> None:
+            captured["killed"] = pid
+
+    fake_frida = types.SimpleNamespace(get_usb_device=lambda timeout=None: _FakeDevice())
+    monkeypatch.setitem(sys.modules, "frida", fake_frida)
+
+    session, script = capture._start_frida_session("com.test.app", [])
+    assert session is None and script is None
+    # 不变量 #3：已 spawn 的 pid 必须被 kill（否则 subprocess 回退 -f 二次 spawn 冲突）。
+    assert captured.get("killed") == 777
+    assert "detached" not in captured  # session 为 None，无可 detach
+    assert "resumed" not in captured
+
+
+def test_start_frida_session_no_kill_on_spawn_failure(monkeypatch):
+    """spawn 失败（pid 未生成）→ 既不 kill 也不 detach，返回 (None,None)（不误杀别的进程）。"""
+    import sys
+    import types
+
+    captured: dict[str, Any] = {}
+
+    class _FakeDevice:
+        def spawn(self, argv: Any) -> int:
+            raise RuntimeError("spawn failed: app not installed")
+
+        def kill(self, pid: int) -> None:
+            captured["killed"] = pid
+
+    fake_frida = types.SimpleNamespace(get_usb_device=lambda timeout=None: _FakeDevice())
+    monkeypatch.setitem(sys.modules, "frida", fake_frida)
+
+    session, script = capture._start_frida_session("com.test.app", [])
+    assert session is None and script is None
+    assert "killed" not in captured  # pid 未生成，不该误 kill
+
+
+def test_capped_sentinel_filtered_from_runtime_report(monkeypatch, tmp_path):
+    """sink 上限占位 {_capped:True} 不得写进 runtime_report.json（只留真事件）。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+
+    def _fake_session(package: str, sink: list[dict[str, Any]]):
+        sink.append({"src": "cipher", "event": "init", "key_hex": "55f0"})
+        sink.append({"_capped": True})  # 上限占位
+        return object(), object()
+
+    monkeypatch.setattr(capture, "_start_frida_session", _fake_session)
+
+    capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+    payload = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    assert len(payload["crypto_events"]) == 1  # _capped 占位被过滤
+    assert all(not e.get("_capped") for e in payload["crypto_events"])
+
+
+def test_capture_done_collects_crypto_events_via_session(monkeypatch, tmp_path):
+    """frida-core 会话路径：on_message 收到的活体 crypto 事件落进 runtime_report.json。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+
+    fake_events = [
+        {"src": "cipher", "event": "init", "key_hex": "55f0", "iv_hex": None},
+        {"src": "cipher", "event": "doFinal", "key_hex": "55f0", "plaintext_b64": "eyJhIjoxfQ=="},
+    ]
+
+    def _fake_session(package: str, sink: list[dict[str, Any]]):
+        # 模拟 on_message 回调把 2 条事件写进共享 sink。
+        sink.extend(fake_events)
+        return object(), object()  # 非 None 会话/脚本（teardown 对 dummy 容错）
+
+    monkeypatch.setattr(capture, "_start_frida_session", _fake_session)
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+    assert result["status"] == STATUS_DONE
+
+    payload = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    assert len(payload["crypto_events"]) == 2
+    assert {e["event"] for e in payload["crypto_events"]} == {"init", "doFinal"}
 
 
 # ---------------------------------------------------------------------------
