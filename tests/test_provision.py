@@ -259,6 +259,7 @@ def test_ensure_frida_server_download_uses_requests_and_lzma_mocked(monkeypatch,
 
     monkeypatch.setattr(requests, "get", _fake_requests_get(_xz_bytes()))
     monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None: True)
+    monkeypatch.setattr(provision, "_adbd_is_root", lambda serial=None: True)
     monkeypatch.setattr(provision.time, "sleep", lambda s: None)
 
     res = provision.ensure_frida_server()
@@ -360,6 +361,7 @@ def test_ensure_frida_server_verify_fail_returns_error(monkeypatch):
         provision, "_download_and_extract", lambda url, dest, on_progress: ""
     )
     monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None: True)
+    monkeypatch.setattr(provision, "_adbd_is_root", lambda serial=None: True)
     monkeypatch.setattr(provision.time, "sleep", lambda s: None)
     # 始终 False → 验证轮询全失败。
     res = provision.ensure_frida_server()
@@ -377,6 +379,7 @@ def test_ensure_frida_server_success_deployed_ok(monkeypatch):
         provision, "_download_and_extract", lambda url, dest, on_progress: ""
     )
     monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None: True)
+    monkeypatch.setattr(provision, "_adbd_is_root", lambda serial=None: True)
     monkeypatch.setattr(provision.time, "sleep", lambda s: None)
     res = provision.ensure_frida_server()
     assert res["ok"] is True
@@ -397,13 +400,15 @@ def test_ensure_frida_server_start_command_blocking_does_not_false_fail(monkeypa
         provision, "_download_and_extract", lambda url, dest, on_progress: ""
     )
     monkeypatch.setattr(provision.time, "sleep", lambda s: None)
+    # adbd 已 root（AOSP rootful）→ root_started 由能力判定为真，与启动步 returncode 解耦。
+    monkeypatch.setattr(provision, "_adbd_is_root", lambda serial=None: True)
 
     start_attempts: list[str] = []
 
     def _adb_ok(extra: list[str], serial: str | None = None) -> bool:
         joined = " ".join(extra)
         # 模拟后台启动命令被 adb shell 长驻进程管道阻塞 → 超时 → _adb_ok 返回 False。
-        if extra[:2] == ["shell", "su"] and provision._FRIDA_SERVER_REMOTE in joined and (
+        if extra[0] == "shell" and provision._FRIDA_SERVER_REMOTE in joined and (
             "setsid" in joined or "nohup" in joined
         ):
             start_attempts.append(joined)
@@ -415,7 +420,7 @@ def test_ensure_frida_server_start_command_blocking_does_not_false_fail(monkeypa
     # 启动命令确实被尝试（脱离会话写法，含 setsid/nohup 重定向）。
     assert start_attempts
     assert any(">/dev/null" in c for c in start_attempts)
-    # 即便启动步返回 False，轮询成功 → 仍判 deployed（不假失败）。
+    # 即便启动步返回 False，轮询成功 + adbd root → 仍判 deployed（不假失败、不误报非 root）。
     assert res["ok"] is True
     assert res["action"] == "deployed"
 
@@ -431,6 +436,7 @@ def test_ensure_frida_server_start_uses_detached_redirected_command(monkeypatch)
         provision, "_download_and_extract", lambda url, dest, on_progress: ""
     )
     monkeypatch.setattr(provision.time, "sleep", lambda s: None)
+    monkeypatch.setattr(provision, "_adbd_is_root", lambda serial=None: True)
 
     seen: list[list[str]] = []
 
@@ -442,15 +448,47 @@ def test_ensure_frida_server_start_uses_detached_redirected_command(monkeypatch)
     provision.ensure_frida_server()
 
     start_cmds = [
-        " ".join(e)
+        e[1]
         for e in seen
-        if e[:2] == ["shell", "su"]
-        and provision._FRIDA_SERVER_REMOTE in " ".join(e)
-        and ("setsid" in " ".join(e) or "nohup" in " ".join(e))
+        if e[0] == "shell"
+        and len(e) == 2
+        and provision._FRIDA_SERVER_REMOTE in e[1]
+        and ("setsid" in e[1] or "nohup" in e[1])
     ]
     assert start_cmds, "应有脱离会话的后台启动命令"
     for c in start_cmds:
         assert ">/dev/null" in c  # std{out,err} 被重定向，adb shell 才会立即返回
+
+
+def test_su_ok_single_quotes_command_as_one_adb_arg(monkeypatch):
+    """核心修复回归锁：su -c 必须把整条命令**单引号包裹成单个 adb shell 参数**，否则
+    Superuser.apk/KingUser 型 su 会把 cmd 的 flags（如 pkill 的 -f）当成 su 自己的选项。"""
+    seen: list[list[str]] = []
+
+    def _adb_ok(extra: list[str], serial: str | None = None) -> bool:
+        seen.append(extra)
+        return False  # 全失败，强制把三种 su 形态都走一遍
+
+    monkeypatch.setattr(provision, "_adb_ok", _adb_ok)
+    provision._su_ok("pkill -f frida-server")
+
+    # 每条都是 ["shell", "su ... -c '<cmd>'"]：cmd 被单引号包裹，作为单个 adb 参数（不外泄 -f）。
+    for extra in seen:
+        assert extra[0] == "shell"
+        assert len(extra) == 2  # 关键：不是 ["shell","su","-c","pkill","-f",...] 那种会被 su 吞 flags 的形态
+        assert "-c '" in extra[1]
+        assert "'pkill -f frida-server'" in extra[1]
+    forms = [e[1].split(" -c ")[0] for e in seen]
+    assert forms == ["su", "su 0", "su root"]  # 三种 su 形态都试（兼容性）
+
+
+def test_su_ok_escapes_inner_single_quotes(monkeypatch):
+    """cmd 内含单引号也能安全包裹（POSIX '\\'' 转义），不破坏引号配对。"""
+    seen: list[str] = []
+    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None: seen.append(extra[1]) or False)
+    provision._su_ok("echo it's ok")
+    assert seen
+    assert "'echo it'\\''s ok'" in seen[0]
 
 
 def test_ensure_frida_server_on_progress_called(monkeypatch):
@@ -462,6 +500,7 @@ def test_ensure_frida_server_on_progress_called(monkeypatch):
         provision, "_download_and_extract", lambda url, dest, on_progress: ""
     )
     monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None: True)
+    monkeypatch.setattr(provision, "_adbd_is_root", lambda serial=None: True)
     monkeypatch.setattr(provision.time, "sleep", lambda s: None)
 
     msgs: list[str] = []
@@ -810,19 +849,38 @@ def test_ensure_frida_server_restarts_non_root_as_root(
 ) -> None:
     """真机实测自愈：检测到非 root frida-server → 杀掉以 root 重启，action=restarted_as_root。"""
     monkeypatch.setattr(provision.device, "frida_server_running", lambda serial=None: True)
-    # is_root：初查非 root(False) → 重启后 root(True)。
-    states = iter([False, True])
-    monkeypatch.setattr(provision.device, "frida_server_is_root", lambda serial=None: next(states))
+    monkeypatch.setattr(provision.device, "frida_server_is_root", lambda serial=None: False)
     started: list[object] = []
-    monkeypatch.setattr(
-        provision, "_start_frida_server_background", lambda serial=None: started.append(serial)
-    )
+
+    def _fake_start(serial: object = None) -> bool:
+        started.append(serial)
+        return True  # su/adbd 拿到 root，成功以 root 起起来
+
+    monkeypatch.setattr(provision, "_start_frida_server_background", _fake_start)
     monkeypatch.setattr(provision.time, "sleep", lambda *_a: None)
 
     res = provision.ensure_frida_server()
     assert res["ok"] is True
     assert res["action"] == "restarted_as_root"
     assert started  # 确实调了重启
+
+
+def test_ensure_frida_server_running_not_root_reports_honestly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """核心修复：frida-server 在跑但 su 没把它起成 root（root_started=False）→ 不假成功，
+    如实 action=running_not_root + ok=False（避免下游白走 spawn 报 jailed 却显示成功）。"""
+    monkeypatch.setattr(provision.device, "frida_server_running", lambda serial=None: True)
+    monkeypatch.setattr(provision.device, "frida_server_is_root", lambda serial=None: False)
+    monkeypatch.setattr(provision, "_start_frida_server_background", lambda serial=None: False)
+    monkeypatch.setattr(provision, "_su_uid0", lambda serial=None: False)
+    monkeypatch.setattr(provision.time, "sleep", lambda *_a: None)
+
+    res = provision.ensure_frida_server()
+    assert res["ok"] is False
+    assert res["action"] == "running_not_root"
+    assert "jailed" in res["detail"]
+    assert res["fix_cmd"]  # 给手动起 root 的命令
 
 
 def test_ensure_frida_server_already_running_root_no_restart(
