@@ -39,15 +39,24 @@ import subprocess
 import sys
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# 看门狗必须跑在**真**后台线程上。单测会把 ``threading.Thread`` 替成同步替身（让 worker
+# 在当前线程确定性执行），但看门狗若也同步执行就会在 ``_run`` 里空转死循环（永不被 disarm）。
+# 故在 import 期固定真 ``Thread``，看门狗专用，不受测试对 ``threading.Thread`` 的 patch 影响。
+_RealThread = threading.Thread
 
 # 三个动作标识（避免裸字符串漂移；view 按钮 → controller 分派以此识别）。
 ACTION_DOCTOR = "doctor"
 ACTION_STATIC = "static"
 ACTION_AUTO = "auto"
+
+# 取消后等子进程（及其进程树）退出、stdout 管道 EOF 的看门狗超时（秒）。
+# 超时后强杀 + 放弃读循环，避免孙进程（mitmdump/frida）继续占着管道写端 → 读循环永久阻塞。
+_CANCEL_GRACE_SECONDS = 5.0
 
 
 def _frozen() -> bool:
@@ -56,6 +65,193 @@ def _frozen() -> bool:
     本阶段不引入 ``apkscan.core.tools``（属打包阶段）；冻结判定就地内联。
     """
     return bool(getattr(sys, "frozen", False))
+
+
+# -- 取消时收割子进程**及其进程树**（孙进程 mitmdump/frida 不能成孤儿，详见 cancel 文档） --
+
+
+def _kill_process_tree(proc: subprocess.Popen[str]) -> None:
+    """尽力杀掉 ``proc`` 及其整棵进程树（含 mitmdump/frida 等孙进程）。绝不抛。
+
+    - Windows：``taskkill /F /T /PID <pid>``（``/T`` 连杀子孙、``/F`` 强杀），失败再退回
+      ``proc.kill()``。``taskkill`` 用 ``CREATE_NO_WINDOW`` 避免弹控制台。
+    - POSIX：进程以 ``start_new_session`` 起（独立进程组），向进程组发 ``SIGTERM``；拿不到
+      进程组就退回 ``proc.terminate()``。
+    进程已退出（``taskkill`` 报错 / ``ProcessLookupError`` / ``OSError``）均吞 + logging。
+    """
+    pid = proc.pid
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                check=False,
+                capture_output=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            return
+        except Exception:  # noqa: BLE001 - taskkill 不可用 / 进程已退；退回 kill
+            logger.exception("[gui] taskkill 收割进程树失败，退回 kill：pid=%s", pid)
+    # POSIX：向进程组发 SIGTERM 收割整组（含孙进程）。getpgid/killpg 仅 POSIX 有，
+    # 故经 getattr 访问以兼容 Windows 静态检查（Windows 不走到此分支）。
+    getpgid = getattr(os, "getpgid", None)
+    killpg = getattr(os, "killpg", None)
+    try:
+        import signal
+
+        if getpgid is not None and killpg is not None:
+            killpg(getpgid(pid), signal.SIGTERM)
+            return
+    except (ProcessLookupError, OSError):
+        logger.exception("[gui] 向进程组发信号失败，退回 terminate：pid=%s", pid)
+    try:
+        proc.terminate()
+    except Exception:  # noqa: BLE001 - 进程可能已退出，无害
+        logger.exception("[gui] 终止子进程失败（可能已退出）：pid=%s", pid)
+
+
+class _CancelWatchdog:
+    """看门狗线程：取消请求发出后，等宽限期仍未退出就强 ``kill()`` 子进程。
+
+    根因：``auto`` 抓包时孙进程（mitmdump/frida）继承了 GUI↔子进程的 stdout 管道写端；
+    即便 ``cancel()`` 已收割进程树，竞态下读循环可能短暂仍卡——看门狗是兜底，超时强杀让
+    管道彻底 EOF、读循环退出、``wait()`` 返回。``cancelled`` 未置时看门狗空转后即退出。
+    """
+
+    def __init__(
+        self, proc: subprocess.Popen[str], cancelled: threading.Event, grace_seconds: float
+    ) -> None:
+        self._proc = proc
+        self._cancelled = cancelled
+        self._grace = grace_seconds
+        self._disarmed = threading.Event()
+        # 用固定的真 Thread（见模块顶 _RealThread 注释）：测试把 threading.Thread 替成同步替身
+        # 是为 worker，看门狗不能被波及（否则同步执行 _run → 永不 disarm 的死循环）。
+        self._thread = _RealThread(
+            target=self._run, daemon=True, name="apkscan-gui-cancel-watchdog"
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def disarm(self) -> None:
+        """读循环正常收束后调用：让看门狗立刻退出，不再强杀。"""
+        self._disarmed.set()
+
+    def _run(self) -> None:
+        # 等到「取消被请求」或「读循环已收束（disarm）」任一发生。
+        while not self._disarmed.is_set():
+            if self._cancelled.wait(timeout=0.1):
+                break
+        if self._disarmed.is_set():
+            return  # 读循环已正常结束，无需介入
+        # 取消已请求：给整树收割留宽限期；超时仍存活 → 强 kill 兜底（防孙进程拖住管道）。
+        if self._disarmed.wait(timeout=self._grace):
+            return  # 宽限期内已 EOF 收束
+        if self._proc.poll() is None:
+            logger.warning("[gui] 取消后子进程仍存活，看门狗强制 kill：pid=%s", self._proc.pid)
+            try:
+                self._proc.kill()
+            except Exception:  # noqa: BLE001 - 进程可能刚退出，无害
+                logger.exception("[gui] 看门狗强杀子进程失败：pid=%s", self._proc.pid)
+
+
+# -- 防呆校验（纯函数，零 Tk，headless 可测；返回 None=通过 / str=友好文案，绝不抛） ----
+
+# ZIP/APK 本质是 ZIP，魔数以下列之一开头（本地文件头 / 空档案 / 跨段档案）。
+_ZIP_MAGICS = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+
+
+def validate_apk_path(apk_path: str) -> str | None:
+    """校验 APK 路径（static/auto 用）。返回 ``None`` 通过，否则返回友好错误文案（中文、具体、不吓人）。
+
+    顺序：空 → 不存在 → 是目录 → 不可读 → 空文件 → 既非 ``.apk`` 后缀又非 ZIP(PK) 魔数。
+    全程 try/OSError 包裹：任何 IO 异常都转成友好文案而非抛。
+    放行策略：``.apk`` 后缀 **或** PK 魔数 任一满足即过（宽松，容忍无后缀真 APK / 改后缀场景）。
+    """
+    p = (apk_path or "").strip()
+    if not p:
+        return "请先选择一个 APK 文件再开始。"
+    try:
+        path = Path(p)
+        if not path.exists():
+            return f"找不到这个文件，路径可能已改名或被移动：\n{p}"
+        if path.is_dir():
+            return "这是一个文件夹，请选择 .apk 文件本身。"
+        if not os.access(p, os.R_OK):
+            return "没有读取权限，请检查文件是否被占用或换个位置。"
+        if path.stat().st_size == 0:
+            return "这个文件是空的（0 字节），不是有效的 APK。"
+        has_apk_suffix = path.suffix.lower() == ".apk"
+        try:
+            with path.open("rb") as fh:
+                head = fh.read(4)
+        except OSError:
+            logger.exception("[gui] 读取 APK 头部失败：%s", p)
+            return "没有读取权限，请检查文件是否被占用或换个位置。"
+        is_zip = any(head.startswith(magic) for magic in _ZIP_MAGICS)
+        if not has_apk_suffix and not is_zip:
+            return "这看起来不是一个 APK 文件（应是 ZIP/PK 格式）。"
+    except OSError:
+        logger.exception("[gui] 校验 APK 路径时 IO 异常：%s", p)
+        return "没有读取权限，请检查文件是否被占用或换个位置。"
+    return None
+
+
+def resolve_out_dir(out_dir: str) -> str:
+    """把 out_dir 解析为绝对路径字符串（**不创建**）。空串 → 'out' → resolve。
+
+    resolve 失败（极端非法路径）→ 退回原（或 'out'）字符串，不抛。
+    可发现性：冻结 exe 下 cwd 不可控，绝对化后日志/「打开目录」才指向真实产物位置。
+
+    含 NUL 等非法字符的路径 ``Path.resolve()`` 抛的是 ``ValueError``（"embedded null
+    character"）而非 ``OSError``——一并捕获，守住「绝不抛」契约（粘贴构造路径可触发）。
+    """
+    raw = (out_dir or "").strip() or "out"
+    try:
+        return str(Path(raw).resolve())
+    except (OSError, ValueError):
+        logger.exception("[gui] 解析输出目录为绝对路径失败，退回原串：%s", raw)
+        return raw
+
+
+def validate_out_dir(out_dir: str) -> str | None:
+    """校验输出目录可创建/可写。返回 ``None`` 通过，否则友好文案，绝不抛。
+
+    策略：已存在 → 须是目录且可写（``os.access(W_OK)``）；不存在 → 尝试 ``mkdir(parents=True,
+    exist_ok=True)`` 创建（建成即视为可写，目录留着无害）。失败（OSError/PermissionError）→
+    友好文案。提前建目标产物目录是受控副作用（本就要建），且能最真实探测「可写」。
+
+    含 NUL 等非法字符时 ``Path.exists()/stat()`` 抛 ``ValueError`` 而非 ``OSError``——一并捕获，
+    守住「绝不抛」契约（resolve_out_dir 已先挡一层，这里再兜底 exists/stat 路径）。
+    """
+    abs_out = resolve_out_dir(out_dir)
+    fail_msg = f"无法创建/写入输出目录（可能无权限或磁盘只读），换一个位置试试：\n{abs_out}"
+    try:
+        path = Path(abs_out)
+        if path.exists():
+            if not path.is_dir():
+                return f"输出目录的位置被一个同名文件占用了，换一个位置试试：\n{abs_out}"
+            if not os.access(abs_out, os.W_OK):
+                return fail_msg
+            return None
+        path.mkdir(parents=True, exist_ok=True)
+    except (OSError, ValueError):
+        logger.exception("[gui] 校验/创建输出目录失败：%s", abs_out)
+        return fail_msg
+    return None
+
+
+def clamp_duration(raw: str, *, lo: int = 10, hi: int = 600, default: int = 60) -> int:
+    """Spinbox 文本 → ``[lo, hi]`` 内的 int。空 / 非数字 → ``default``；越界 → 钳到边界。**绝不抛**。"""
+    try:
+        value = int((raw or "").strip())
+    except (ValueError, TypeError):
+        return default
+    if value < lo:
+        return lo
+    if value > hi:
+        return hi
+    return value
 
 
 @dataclass
@@ -84,7 +280,8 @@ class ActionResult:
     - ``counts``：端点/线索/发现计数（仅 static/auto 且能读到 report.json 时有意义）。
     - ``report_paths``：产出报告路径（去重保序）。
     - ``html_report``：首个 .html 报告路径（供「打开 HTML 报告」按钮；无则空串）。
-    - ``out_dir``：输出目录（供「打开输出目录」按钮）。
+    - ``out_dir``：输出目录（**绝对路径**，供「打开输出目录」按钮 + 日志可发现性提示）。
+    - ``cancelled``：True 表示用户主动取消（view 据此**不弹 warning messagebox**，与真错误区分）。
     """
 
     ok: bool
@@ -95,6 +292,7 @@ class ActionResult:
     report_paths: list[str] = field(default_factory=list)
     html_report: str = ""
     out_dir: str = ""
+    cancelled: bool = False
 
 
 @dataclass
@@ -106,7 +304,9 @@ class ActionRequest:
     out_dir: str = "out"
     online: bool = False
     formats: list[str] = field(default_factory=lambda: ["html", "json"])
-    capture_duration: int = 60
+    # Spinbox 原始文本（可能空 / 非数字）。钳制责任全在 controller `clamp_duration`，
+    # 把 ``IntVar.get()`` 的 ``tk.TclError`` 风险从 view 移走（view 改传 widget `.get()` str）。
+    capture_duration_raw: str = "60"
     auto_fix: bool = True
 
 
@@ -135,6 +335,10 @@ class GuiController:
         self._confirm = confirm
         self._busy = False
         self._lock = threading.Lock()
+        # 当前子进程句柄（供 cancel 收割）；_lock 同时保护 _proc 与 _busy。
+        self._proc: subprocess.Popen[str] | None = None
+        # 取消标志（cancel 与 worker 跨线程协作；worker 据此把结果覆盖为友好「已取消」）。
+        self._cancelled = threading.Event()
 
     # -- 状态查询 -----------------------------------------------------------
 
@@ -158,17 +362,29 @@ class GuiController:
             if self._busy:
                 logger.warning("[gui] 已有动作在运行，忽略新的 start：%s", request.action)
                 return False
-            # 静态 / 一键需要 APK；doctor 不需要。
-            if request.action in (ACTION_STATIC, ACTION_AUTO) and not request.apk_path:
-                self._emit_result(
-                    ActionResult(
-                        ok=False,
-                        action=request.action,
-                        message="请先选择一个 APK 文件再开始。",
+            # 静态 / 一键需要 APK（含空串、不存在、非 APK 等防呆校验）；doctor 不需要。
+            if request.action in (ACTION_STATIC, ACTION_AUTO):
+                apk_err = validate_apk_path(request.apk_path)
+                if apk_err:
+                    self._emit_result(
+                        ActionResult(ok=False, action=request.action, message=apk_err)
                     )
-                )
-                return False
+                    return False
+            # 输出目录绝对化（三动作都做，可发现性）。绝对路径回填进 request 供子进程/结果用。
+            abs_out = resolve_out_dir(request.out_dir)
+            request = replace(request, out_dir=abs_out)
+            # 仅 static/auto 产报告，提前校验可写以免白跑；doctor 不产报告，跳过 out 校验。
+            if request.action in (ACTION_STATIC, ACTION_AUTO):
+                out_err = validate_out_dir(abs_out)
+                if out_err:
+                    self._emit_result(
+                        ActionResult(
+                            ok=False, action=request.action, message=out_err, out_dir=abs_out
+                        )
+                    )
+                    return False
             self._busy = True
+            self._cancelled.clear()  # 新一轮开始前清取消标志
 
         thread = threading.Thread(
             target=self._run_worker, args=(request,), daemon=True, name="apkscan-gui-worker"
@@ -176,24 +392,96 @@ class GuiController:
         thread.start()
         return True
 
+    # -- 对外：取消 / 停止 ---------------------------------------------------
+
+    def cancel(self) -> bool:
+        """请求取消当前动作：置取消标志 + 收割子进程**及其进程树**。零 Tk。
+
+        无运行中动作 → 返回 False（无副作用）。
+
+        为什么收割整棵进程树（而非只 ``terminate()`` 直接子进程）：``auto`` 抓包阶段，
+        子进程（``-m apkscan.cli``）会再 spawn ``mitmdump`` / ``frida`` 等**孙进程**
+        （见 :mod:`apkscan.dynamic.capture`）。它们的清理只在 ``capture()`` 的 ``finally``
+        里跑——但 Windows 的 ``terminate()`` 是 ``TerminateProcess`` 硬杀、**不跑子进程的
+        Python finally** → 孙进程成孤儿（仍占代理端口 / 设备 frida）；更糟的是孙进程继承了
+        GUI↔子进程的 stdout 管道写端，直接子进程虽死但管道不 EOF → ``_run_subprocess``
+        的读循环**永久阻塞**、「已取消」结果永不送达。故这里用 ``taskkill /F /T``（Windows，
+        ``/T`` 连杀进程树）/ 进程组信号（POSIX）把整棵树收掉。``_run_subprocess`` 侧另有
+        看门狗：超时仍不 EOF 就强 ``kill()`` 并放弃读循环（双保险）。
+
+        worker 据 ``_cancelled`` 把结果覆盖为友好「已取消」（``cancelled=True``，view 据此
+        不弹 warning）。
+
+        Returns:
+            True 表示已发出取消请求；False 表示当前无运行中动作。
+        """
+        with self._lock:
+            if not self._busy:
+                return False
+            self._cancelled.set()
+            proc = self._proc
+        if proc is not None:
+            _kill_process_tree(proc)
+        return True
+
+    def stop(self) -> bool:
+        """:meth:`cancel` 的别名（spec 文案「取消 / 停止」两词混用）。"""
+        return self.cancel()
+
     # -- worker（后台线程） -------------------------------------------------
 
     def _run_worker(self, request: ActionRequest) -> None:
-        """后台线程主体：调核心 → 解析结果 → 经 schedule 把结果弹回主线程。绝不抛。"""
+        """后台线程主体：调核心 → 解析结果 → 经 schedule 把结果弹回主线程。绝不抛。
+
+        取消感知：子进程被 ``cancel()`` 收割后退出码通常非 0，``_build_subprocess_result``
+        本会回 error；这里据 ``_cancelled`` 覆盖为友好「已取消」结果（``cancelled=True``），
+        保证文案是「已取消」而非「退出码非 0」，view 据此不弹 warning messagebox。
+
+        取消-异常竞态：硬杀子进程时读流 / 回调链路偶发抛异常（管道被强制关闭等），会落到
+        ``except``。此时若 ``_cancelled`` 已置，仍应回友好「已取消」而非吓人的「运行出错」
+        ——故 ``except`` 分支也优先判 ``_cancelled``（与正常分支同语义）。
+
+        迟到取消竞态：``_run_subprocess`` 的 ``finally`` 已置 ``_proc=None`` 但本方法 ``finally``
+        尚未把 ``_busy=False``，这窄窗内点【停止】→ ``cancel()`` 见 ``busy`` 仍 True、置
+        ``_cancelled``、却没杀到任何进程（``_proc`` 已 None），子进程其实**已成功跑完、报告
+        已落盘**。若无条件覆盖成「已取消」会丢掉 html_report/counts，view 据 ``cancelled``
+        只记日志、「打开 HTML 报告」按钮保持禁用——分析跑完了用户却被告知「已取消」且打不开
+        报告。故仅在 ``not result.ok`` 时才 relabel：被真正杀掉的子进程 rc 非 0 且无
+        report.json → ``ok=False`` → 仍走 relabel（语义不变）；迟到取消撞上真成功 →
+        ``ok=True`` → 保留成功结果（含报告入口）。
+        """
         try:
             result = self._dispatch(request)
+            if self._cancelled.is_set() and not result.ok:
+                result = self._cancelled_result(request)
         except Exception as exc:  # noqa: BLE001 - worker 绝不把异常抛出线程，转友好结果
-            logger.exception("[gui] 动作执行未预期异常：%s", request.action)
-            result = ActionResult(
-                ok=False,
-                action=request.action,
-                message=f"运行出错（详见日志）：{exc}",
-                out_dir=request.out_dir,
-            )
+            if self._cancelled.is_set():
+                # 取消过程中抛异常：取消是用户意图，按友好「已取消」处理（不弹 warning）。
+                logger.info("[gui] 取消时子进程拆卸异常（按已取消处理）：%s", exc)
+                result = self._cancelled_result(request)
+            else:
+                logger.exception("[gui] 动作执行未预期异常：%s", request.action)
+                result = ActionResult(
+                    ok=False,
+                    action=request.action,
+                    message=f"运行出错（详见日志）：{exc}",
+                    out_dir=request.out_dir,
+                )
         finally:
             with self._lock:
                 self._busy = False
         self._emit_result(result)
+
+    @staticmethod
+    def _cancelled_result(request: ActionRequest) -> ActionResult:
+        """构造统一的友好「已取消」结果（``cancelled=True``，view 据此不弹 warning）。"""
+        return ActionResult(
+            ok=False,
+            action=request.action,
+            message="已取消本次任务。",
+            cancelled=True,
+            out_dir=request.out_dir,
+        )
 
     def _dispatch(self, request: ActionRequest) -> ActionResult:
         """按 action 分派：全部经**子进程跑 CLI**（卡死修复核心）。"""
@@ -258,7 +546,7 @@ class GuiController:
                 "--online" if request.online else "--offline",
                 "--fix" if request.auto_fix else "--no-fix",
                 "--duration",
-                str(request.capture_duration),
+                str(clamp_duration(request.capture_duration_raw)),
                 "--fmt",
                 self._fmt_arg(request.formats),
             ]
@@ -270,13 +558,28 @@ class GuiController:
 
         合并 stderr 到 stdout，UTF-8 解码、坏字节 replace、行缓冲。返回退出码。
         子进程注入 ``PYTHONUTF8=1`` 让它也按 UTF-8 输出（否则 Windows 默认 GBK 写、
-        本端按 UTF-8 读 → 中文乱码）。Windows 下用 ``CREATE_NO_WINDOW`` 隐藏子进程控制台窗口。
+        本端按 UTF-8 读 → 中文乱码）。Windows 下用 ``CREATE_NO_WINDOW`` 隐藏子进程控制台窗口、
+        ``CREATE_NEW_PROCESS_GROUP`` 让 ``cancel()`` 能整树收割（见 :meth:`cancel`）。
+        ``stdin=DEVNULL`` 避免子进程意外继承句柄读到不确定输入（如 frida/adb 交互提示）。
         起进程/读流失败由调用方（``_run_worker`` 外层 try/except）转友好结果。
+
+        取消协作（双保险）：
+        1) 起进程后立刻把句柄存入 ``self._proc``，**并在同一把锁内复查 ``_cancelled``**——
+           收口「start 后秒点取消、_proc 尚未赋值」的竞态（否则取消标志置了却没人杀进程，
+           子进程会跑满全程）。若已取消，立即整树收割。
+        2) 武装一个看门狗线程：取消请求发出后，等 ``_CANCEL_GRACE_SECONDS`` 仍未退出（孙进程
+           可能拖着 stdout 管道写端不 EOF → 读循环卡死）就强 ``kill()`` 收尾，保证读循环能
+           走到 EOF、``wait()`` 返回、「已取消」结果送达。
         """
-        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        flags = 0
+        if sys.platform == "win32":
+            flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+        # POSIX：独立 session/进程组，让 cancel() 能向整组发信号收割孙进程。
+        new_session = sys.platform != "win32"
         env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
         proc = subprocess.Popen(
             argv,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -284,13 +587,33 @@ class GuiController:
             errors="replace",
             bufsize=1,
             env=env,
-            creationflags=creationflags,
+            creationflags=flags,
+            start_new_session=new_session,
         )
-        stdout = proc.stdout
-        if stdout is not None:
-            for line in stdout:  # 阻塞读 → 释放 GIL，tkinter 主线程消息泵不被饿死
-                on_line(line.rstrip("\n"))
-        return proc.wait()
+        with self._lock:
+            self._proc = proc  # 持有句柄，供 cancel() 整树收割
+            # 竞态收口：若取消在「set 标志」与「赋值 _proc」之间发生，cancel() 当时拿到的是
+            # None（没杀成）；这里赋值后立刻复查，补杀（仍在锁内，与 cancel() 互斥）。
+            cancel_pending = self._cancelled.is_set()
+        if cancel_pending:
+            _kill_process_tree(proc)
+        watchdog = self._arm_cancel_watchdog(proc)
+        try:
+            stdout = proc.stdout
+            if stdout is not None:
+                for line in stdout:  # 阻塞读 → 释放 GIL，tkinter 主线程消息泵不被饿死
+                    on_line(line.rstrip("\n"))
+            return proc.wait()
+        finally:
+            watchdog.disarm()
+            with self._lock:
+                self._proc = None
+
+    def _arm_cancel_watchdog(self, proc: subprocess.Popen[str]) -> _CancelWatchdog:
+        """启动看门狗线程：取消后等宽限期仍未退出就强 ``kill()``（防孙进程拖住管道→读循环卡死）。"""
+        watchdog = _CancelWatchdog(proc, self._cancelled, _CANCEL_GRACE_SECONDS)
+        watchdog.start()
+        return watchdog
 
     def _run_doctor(self, request: ActionRequest) -> ActionResult:
         """环境体检：子进程跑 ``doctor``，stdout 流式回日志；ok 由退出码判定。
@@ -443,4 +766,8 @@ __all__ = [
     "ActionResult",
     "Counts",
     "GuiController",
+    "clamp_duration",
+    "resolve_out_dir",
+    "validate_apk_path",
+    "validate_out_dir",
 ]
