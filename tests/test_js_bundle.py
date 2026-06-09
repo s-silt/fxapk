@@ -336,3 +336,70 @@ def test_non_js_files_ignored() -> None:
     result = _analyze({"lib/x/foo.js": b"var u='https://ignored.example.org/a';"})
     assert _values(result) == set()
     assert result.meta["js_files_scanned"] == 0
+
+
+# --- 大文件分块：不漏端点 + 无吓人 WARNING（问题 3 同因覆盖到 js_bundle）---------
+
+
+def test_large_bundle_endpoint_after_8mb_not_dropped() -> None:
+    """>8MB 的 index.android.bundle 后段（9MB 处）的端点不被截断丢失（改前会丢）。"""
+    pad = b"// padding line\n" * (9 * 1024 * 1024 // 16)  # ~9MB 良性填充
+    blob = pad + b"\nvar c2='https://evil-c2-after8mb.top/cmd';\n"
+    result = _analyze({_UNIAPP_PATH: blob})
+    assert "https://evil-c2-after8mb.top/cmd" in _values(result)
+    assert result.meta["js_files_scanned"] == 1
+
+
+def test_large_bundle_secret_after_8mb_not_dropped() -> None:
+    """>8MB 文件后段的硬编码密钥（JWT）不被截断丢失。"""
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcDEFghiJKLmnoPQRs"
+    pad = b"x" * (9 * 1024 * 1024)
+    blob = pad + f"\nvar t='{jwt}';\n".encode()
+    result = _analyze({_UNIAPP_PATH: blob})
+    assert FINDING_JWT in _finding_ids(result)
+
+
+def test_url_across_chunk_boundary_not_split() -> None:
+    """跨 4MB 块边界的 URL 字面量被块间重叠完整抽到，不被切断。"""
+    from apkscan.analyzers.js_bundle import _SCAN_CHUNK_BYTES
+
+    url = "https://boundary-c2.example-fraud.cn/path"
+    lit = f"var u='{url}';"
+    # 让字面量起点落在首块末尾的重叠窗内（块边界 _SCAN_CHUNK_BYTES 之前 100 字节起）。
+    head = b"a" * (_SCAN_CHUNK_BYTES - 100)
+    tail = b"b" * (2 * 1024 * 1024)
+    blob = head + lit.encode() + b"\n" + tail
+    result = _analyze({_UNIAPP_PATH: blob})
+    assert url in _values(result)
+
+
+def test_overlap_does_not_double_count_endpoint() -> None:
+    """落在重叠窗内的端点被相邻两块各扫一次，collector 去重后仍只产 1 个端点。"""
+    from apkscan.analyzers.js_bundle import _SCAN_CHUNK_BYTES, _SCAN_OVERLAP_CHARS
+
+    url = "https://dedup-c2.example-fraud.cn/x"
+    lit = f"var u='{url}';"
+    # 放在重叠窗中部（块0尾 + 块1头都覆盖）。
+    pos = _SCAN_CHUNK_BYTES - _SCAN_OVERLAP_CHARS // 2
+    blob = b"a" * pos + lit.encode() + b"\n" + b"b" * (2 * 1024 * 1024)
+    result = _analyze({_UNIAPP_PATH: blob})
+    matches = [ep for ep in result.endpoints if ep.value == url]
+    assert len(matches) == 1
+
+
+def test_large_bundle_no_truncation_warning(caplog) -> None:  # type: ignore[no-untyped-def]
+    """大文件不再打「文件超过上限/仅扫前段」WARNING（吓新手的噪声已删）。"""
+    import logging
+
+    pad = b"y" * (9 * 1024 * 1024)
+    blob = pad + b"\nvar u='https://q.fraud.cn/a';\n"
+    with caplog.at_level(logging.WARNING, logger="apkscan.analyzers.js_bundle"):
+        _analyze({_UNIAPP_PATH: blob})
+    assert not any("仅扫前段" in r.message or "文件超过上限" in r.message for r in caplog.records)
+
+
+def test_small_bundle_behavior_unchanged() -> None:
+    """<= 阈值的小文件走整体扫，行为与改前一致（无回归）。"""
+    result = _analyze({_UNIAPP_PATH: b"var u='https://api.real-fraud.top/login';"})
+    assert "https://api.real-fraud.top/login" in _values(result)
+    assert result.meta["js_files_scanned"] == 1

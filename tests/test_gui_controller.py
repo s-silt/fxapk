@@ -916,6 +916,116 @@ def test_kill_process_tree_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> N
     ctrl_mod._kill_process_tree(_DeadProc())  # type: ignore[arg-type]
 
 
+# ---------------------------------------------------------------------------
+# 问题 1：cleanup_adb（关 GUI 时收掉自起的 adb server）
+# ---------------------------------------------------------------------------
+
+
+def test_controller_cleanup_adb_calls_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    """cleanup_adb 惰性 import core.tools 并调 kill_adb_server 一次。"""
+    from apkscan.core import tools
+
+    calls = {"n": 0}
+    monkeypatch.setattr(tools, "kill_adb_server", lambda: calls.__setitem__("n", calls["n"] + 1))
+
+    controller, _logs, _results = _make_controller(monkeypatch)
+    controller.cleanup_adb()
+    assert calls["n"] == 1
+
+
+def test_controller_cleanup_adb_swallows_tools_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """tools.kill_adb_server 抛异常 → cleanup_adb 吞掉（绝不阻断关窗）。"""
+    from apkscan.core import tools
+
+    def _boom() -> bool:
+        raise RuntimeError("adb 收尾炸了")
+
+    monkeypatch.setattr(tools, "kill_adb_server", _boom)
+    controller, _logs, _results = _make_controller(monkeypatch)
+    # 不应抛。
+    controller.cleanup_adb()
+
+
+# ---------------------------------------------------------------------------
+# 问题 2：_discover_reports 发现按 APK 名命名的报告（glob + 排除 runtime_report.json）
+# ---------------------------------------------------------------------------
+
+
+def test_discover_reports_finds_apk_named(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """报告按 APK 名命名（demo.json/demo.html）→ 子进程结果能发现、html_report 非空、计数读到。"""
+    monkeypatch.setattr(ctrl_mod, "_frozen", lambda: False)
+    (tmp_path / "demo.json").write_text(
+        json.dumps({"endpoints": [1, 2, 3], "leads": [1], "findings": []}), encoding="utf-8"
+    )
+    (tmp_path / "demo.html").write_text("<html></html>", encoding="utf-8")
+
+    _patch_subprocess(monkeypatch, returncode=0)
+    controller, _logs, results = _make_controller(monkeypatch)
+    controller.start(
+        ActionRequest(action=ACTION_STATIC, apk_path=_make_apk(tmp_path), out_dir=str(tmp_path))
+    )
+    res = results[0]
+    assert res.ok is True
+    assert any(p.endswith("demo.json") for p in res.report_paths)
+    assert res.html_report.endswith("demo.html")  # 「打开 HTML 报告」按钮仍能发现新命名
+    assert (res.counts.endpoints, res.counts.leads, res.counts.findings) == (3, 1, 0)
+
+
+def test_discover_reports_excludes_runtime_report(tmp_path: Path) -> None:
+    """同时存在 demo.json + runtime_report.json → 主报告锚点是 demo.json，不误读 runtime。"""
+    (tmp_path / "demo.json").write_text(
+        json.dumps({"endpoints": [1], "leads": [1, 2], "findings": [1]}), encoding="utf-8"
+    )
+    # runtime_report.json 结构非主报告（有 endpoints 但无 leads/findings），且 mtime 更新。
+    (tmp_path / "runtime_report.json").write_text(
+        json.dumps({"endpoints": [1, 2, 3, 4, 5]}), encoding="utf-8"
+    )
+    found = GuiController._discover_reports(str(tmp_path))
+    # runtime_report.json 不被当主报告：返回里没有它，json 首位是 demo.json。
+    assert not any(p.endswith("runtime_report.json") for p in found)
+    assert found and found[0].endswith("demo.json")
+
+
+def test_discover_reports_picks_latest_group(tmp_path: Path) -> None:
+    """两组按 APK 名报告（不同 mtime）→ 选 mtime 最新一组，不混。"""
+    import os
+    import time
+
+    (tmp_path / "old.json").write_text(json.dumps({"endpoints": []}), encoding="utf-8")
+    (tmp_path / "old.html").write_text("<html>old</html>", encoding="utf-8")
+    time.sleep(0.02)
+    (tmp_path / "new.json").write_text(json.dumps({"endpoints": [1]}), encoding="utf-8")
+    (tmp_path / "new.html").write_text("<html>new</html>", encoding="utf-8")
+    # 显式把 new.json 设为更晚 mtime，避免文件系统时间粒度抖动。
+    now = time.time()
+    os.utime(tmp_path / "old.json", (now - 10, now - 10))
+    os.utime(tmp_path / "new.json", (now, now))
+
+    found = GuiController._discover_reports(str(tmp_path))
+    assert found[0].endswith("new.json")
+    # 同组 html 也是 new.html，不混进 old.html。
+    assert any(p.endswith("new.html") for p in found)
+    assert not any(p.endswith("old.html") for p in found)
+
+
+def test_discover_reports_legacy_report_name_still_found(tmp_path: Path) -> None:
+    """向后兼容：旧 report.json/report.html 仍被发现（report 是合法 base/回退名）。"""
+    (tmp_path / "report.json").write_text(json.dumps({"endpoints": [1]}), encoding="utf-8")
+    (tmp_path / "report.html").write_text("<html></html>", encoding="utf-8")
+    found = GuiController._discover_reports(str(tmp_path))
+    assert found and found[0].endswith("report.json")
+    assert any(p.endswith("report.html") for p in found)
+
+
+def test_discover_reports_html_only_no_json(tmp_path: Path) -> None:
+    """只有 html（--fmt html）→ 退化取最新 html，无 json（计数未知、ok 由上层判 False）。"""
+    (tmp_path / "demo.html").write_text("<html></html>", encoding="utf-8")
+    found = GuiController._discover_reports(str(tmp_path))
+    assert found == [str(tmp_path / "demo.html")]
+
+
 def test_cancel_terminate_exception_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
     """收割抛异常（进程已退）→ cancel 仍返回 True、不崩。"""
 

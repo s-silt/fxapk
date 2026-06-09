@@ -54,8 +54,9 @@ logger = logging.getLogger(__name__)
 
 _RULES_NAME = "crypto_recipe"
 
-# 与 js_bundle 同口径：单文件上限 8MB、文件数 3000。
-_MAX_FILE_BYTES = 8 * 1024 * 1024
+# 文件数上限 3000。单文件**不再截断**：本分析器靠「加密调用 + 硬编码 key + iv 推导」跨全文
+# 信号相关性聚合配方，三者在文件内可能相距很远，分块会切断相关性（调用在块 0、key 在块 2 →
+# 漏配方），故整文件一次扫完（read_file 已把整文件载入内存，不增额外整文件读取峰值）。
 _MAX_FILES = 3000
 _DEFAULT_SNIPPET_MAX = 200
 
@@ -600,11 +601,6 @@ class CryptoRecipeAnalyzer(BaseAnalyzer):
             return None
         if not raw:
             return None
-        if len(raw) > _MAX_FILE_BYTES:
-            logger.warning(
-                "[%s] 文件超过上限 %d 字节，仅扫前段：%s", self.name, _MAX_FILE_BYTES, path
-            )
-            raw = bytes(raw[:_MAX_FILE_BYTES])
         try:
             return bytes(raw).decode("utf-8", errors="ignore")
         except Exception:  # noqa: BLE001 — utf-8 errors=ignore 几乎不抛，仅防御

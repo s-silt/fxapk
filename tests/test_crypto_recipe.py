@@ -255,3 +255,40 @@ def test_groundtruth_key_extracted() -> None:
         return
 
     pytest.skip("本地样本中未找到目标加密配方")
+
+
+# ---------------------------------------------------------------------------
+# 大文件不再截断：>8MB 的 bundle 仍能提取配方（改前截断到前 8MB 会漏后段信号）
+# + 不刷吓人 WARNING（问题 3 同因覆盖到 crypto_recipe）
+# ---------------------------------------------------------------------------
+
+
+def test_recipe_extracted_when_signals_after_8mb() -> None:
+    """配方信号整体落在 8MB 之后仍被提取（改前截断到前 8MB 会整段漏掉）。
+
+    crypto_recipe 靠「加密调用 + 硬编码 key + iv 推导」跨全文相关性聚合，不分块；本测验证
+    去掉 8MB 截断后整文件一次扫完，后段信号不丢。
+    """
+    pad = b"// benign padding\n" * (9 * 1024 * 1024 // 18)  # ~9MB 良性填充
+    js = pad + _SYNTHETIC_JS.encode("utf-8")
+    ctx = FakeContext(files={"assets/apps/__UNI__X/www/app-service.js": js})
+    result = CryptoRecipeAnalyzer().analyze(ctx)
+    meta = result.meta.get("crypto_recipe")
+    assert isinstance(meta, dict)
+    assert meta["algo"] == "AES"
+    assert meta["key"] == "0123456789abcdef0123456789abcdef"
+    assert meta["mode"] == "CFB"
+
+
+def test_large_file_no_truncation_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """大文件不再打「文件超过上限/仅扫前段」WARNING（吓新手的噪声已删）。"""
+    import logging
+
+    pad = b"z" * (9 * 1024 * 1024)
+    js = pad + _SYNTHETIC_JS.encode("utf-8")
+    ctx = FakeContext(files={"assets/apps/__UNI__X/www/app-service.js": js})
+    with caplog.at_level(logging.WARNING, logger="apkscan.analyzers.crypto_recipe"):
+        CryptoRecipeAnalyzer().analyze(ctx)
+    assert not any(
+        "仅扫前段" in r.message or "文件超过上限" in r.message for r in caplog.records
+    )

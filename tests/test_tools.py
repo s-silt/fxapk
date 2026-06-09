@@ -249,3 +249,107 @@ def test_has_module_true_for_stdlib():
 
 def test_has_module_false_for_nonexistent():
     assert tools._has_module("definitely_not_a_real_module_xyz") is False
+
+
+# ---------------------------------------------------------------------------
+# kill_adb_server()（问题 1：关 GUI / dynamic 动作后收掉自起的 adb server）
+# ---------------------------------------------------------------------------
+
+
+class _FakeProc:
+    """subprocess.run 返回值替身，仅暴露 returncode。"""
+
+    def __init__(self, returncode: int = 0) -> None:
+        self.returncode = returncode
+
+
+def test_kill_adb_server_runs_kill_when_adb_available(monkeypatch):
+    """adb 可用 → 跑 [adb, "kill-server"]，rc=0 → True。"""
+    monkeypatch.setattr(tools, "adb_path", lambda: "/x/adb")
+    recorded: dict[str, object] = {}
+
+    def _fake_run(args, **kwargs):
+        recorded["args"] = args
+        recorded["kwargs"] = kwargs
+        return _FakeProc(returncode=0)
+
+    monkeypatch.setattr(tools.subprocess, "run", _fake_run)
+
+    assert tools.kill_adb_server() is True
+    assert recorded["args"] == ["/x/adb", "kill-server"]
+    # check=False（不让非 0 退出码抛 CalledProcessError）、有超时。
+    assert recorded["kwargs"]["check"] is False
+    assert recorded["kwargs"]["timeout"] == 5.0
+
+
+def test_kill_adb_server_frozen_uses_bundled_adb(monkeypatch, tmp_path):
+    """frozen 且包内有 adb.exe → kill 用的是包内 adb 路径（与起 server 的同一个 adb）。"""
+    _set_frozen(monkeypatch, True)
+    monkeypatch.delattr(tools.sys, "_MEIPASS", raising=False)
+    fake_exe = tmp_path / "fxapk.exe"
+    fake_exe.write_bytes(b"MZ")
+    adb_name = "adb.exe" if sys.platform == "win32" else "adb"
+    adb_file = tmp_path / adb_name
+    adb_file.write_bytes(b"adb-binary")
+    monkeypatch.setattr(tools.sys, "executable", str(fake_exe))
+    monkeypatch.setattr(tools.shutil, "which", lambda name: "/other/adb")
+
+    recorded: dict[str, object] = {}
+
+    def _fake_run(args, **kwargs):
+        recorded["args"] = args
+        return _FakeProc(returncode=0)
+
+    monkeypatch.setattr(tools.subprocess, "run", _fake_run)
+
+    assert tools.kill_adb_server() is True
+    assert recorded["args"] == [str(adb_file.resolve()), "kill-server"]
+
+
+def test_kill_adb_server_returns_false_when_no_adb(monkeypatch):
+    """adb 不可用 → 不调 subprocess.run、返回 False（绝不反而把 server 起起来）。"""
+    monkeypatch.setattr(tools, "adb_path", lambda: "")
+
+    def _must_not_run(*a, **k):  # pragma: no cover - 断言不被调用
+        raise AssertionError("adb 不可用时不应调用 subprocess.run")
+
+    monkeypatch.setattr(tools.subprocess, "run", _must_not_run)
+    assert tools.kill_adb_server() is False
+
+
+def test_kill_adb_server_false_when_nonzero_returncode(monkeypatch):
+    """kill-server 退出码非 0 → False（不假成功）+ 不抛。"""
+    monkeypatch.setattr(tools, "adb_path", lambda: "/x/adb")
+    monkeypatch.setattr(tools.subprocess, "run", lambda *a, **k: _FakeProc(returncode=1))
+    assert tools.kill_adb_server() is False
+
+
+def test_kill_adb_server_swallows_oserror(monkeypatch, caplog):
+    """subprocess.run 抛 OSError → 返回 False + logging（不抛）。"""
+    import logging
+
+    monkeypatch.setattr(tools, "adb_path", lambda: "/x/adb")
+
+    def _boom(*a, **k):
+        raise OSError("adb not executable")
+
+    monkeypatch.setattr(tools.subprocess, "run", _boom)
+    with caplog.at_level(logging.WARNING):
+        assert tools.kill_adb_server() is False
+    assert any("kill-server" in r.message for r in caplog.records)
+
+
+def test_kill_adb_server_swallows_timeout(monkeypatch, caplog):
+    """subprocess.run 超时（TimeoutExpired）→ 返回 False + logging（不抛）。"""
+    import logging
+    import subprocess as _sp
+
+    monkeypatch.setattr(tools, "adb_path", lambda: "/x/adb")
+
+    def _timeout(*a, **k):
+        raise _sp.TimeoutExpired(cmd="adb kill-server", timeout=5.0)
+
+    monkeypatch.setattr(tools.subprocess, "run", _timeout)
+    with caplog.at_level(logging.WARNING):
+        assert tools.kill_adb_server() is False
+    assert any("超时" in r.message for r in caplog.records)

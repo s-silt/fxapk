@@ -40,6 +40,7 @@ from pathlib import Path
 
 from apkscan.core import device
 from apkscan.core.models import AnalysisConfig
+from apkscan.core.report_naming import report_base
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +129,7 @@ def run(
         steps.append(_run_doctor(auto_fix=auto_fix, on_progress=on_progress))
 
         # 2) 静态分析（load_apk → pipeline.run → 写报告）。
-        static_step, report, package_name, static_paths = _run_static(
+        static_step, report, package_name, static_paths, base = _run_static(
             apk_path, out_dir=out_dir, online=online, formats=fmts, on_progress=on_progress
         )
         steps.append(static_step)
@@ -165,6 +166,7 @@ def run(
                 report,
                 runtime_report_path,
                 out_dir=out_dir,
+                base=base,
                 formats=fmts,
                 on_progress=on_progress,
             )
@@ -221,7 +223,7 @@ def analyze_static(
     """
     fmts = list(formats) if formats else list(_DEFAULT_FORMATS)
     try:
-        static_step, _report, package_name, static_paths = _run_static(
+        static_step, _report, package_name, static_paths, _base = _run_static(
             apk_path, out_dir=out_dir, online=online, formats=fmts, on_progress=on_progress
         )
         return {
@@ -274,14 +276,17 @@ def _run_static(
     online: bool,
     formats: list[str],
     on_progress: Callable[[str], None] | None,
-) -> tuple[dict, object | None, str, list[str]]:
+) -> tuple[dict, object | None, str, list[str], str]:
     """步骤 2：静态分析 load_apk → pipeline.run → 写报告。
 
     Returns:
-        (step, report, package_name, report_paths)。失败时 report=None、包名空串、
-        路径空列表，step.status=error，但不抛（后续脱壳/抓包仍可在有设备时进行）。
+        (step, report, package_name, report_paths, base)。失败时 report=None、包名空串、
+        路径空列表、base 回退到 APK 名（仍合法，供 merge 同 base 重渲），step.status=error，
+        但不抛（后续脱壳/抓包仍可在有设备时进行）。
     """
     _emit(on_progress, "步骤 2/5：静态分析（load_apk → pipeline → 写报告）")
+    # base 在 try 外先算：即便 load_apk/pipeline 失败，merge 步骤也用同一 base（保持一致）。
+    base = report_base(apk_path, "")
     try:
         # 惰性 import：避免顶层加载 androguard / pipeline / report（慢、且 GUI 冷启动友好）。
         from apkscan.core import pipeline
@@ -290,6 +295,8 @@ def _run_static(
         config = AnalysisConfig(online=online, out_dir=out_dir, formats=list(formats))
         ctx = load_apk(apk_path, config)
         package_name = ctx.package_name or ""
+        # base 升级：拿到包名后用「APK 名→包名」回退链重算，覆盖 apk 名清理后为空的边界。
+        base = report_base(apk_path, package_name)
         # ApkContext 运行期满足 AnalysisContext 协议；pyright 对 cached_property→property
         # 协议匹配有已知局限，显式忽略（见 cli.analyze / unpack._reanalyze 同处说明）。
         report = pipeline.run(ctx, config)  # type: ignore[arg-type]
@@ -297,21 +304,22 @@ def _run_static(
         # （与 cli.analyze 一致，离线扫描下运行时端点不被当成已联网核实）。
         report.meta["online"] = config.online
 
-        report_paths = _write_reports(report, out_dir=out_dir, formats=formats)
+        report_paths = _write_reports(report, out_dir=out_dir, formats=formats, base=base)
         detail = (
             f"静态分析完成：包名 {package_name or '(未知)'}，"
             f"端点 {len(report.endpoints)}，线索 {len(report.leads)}"
         )
-        return _step(_STEP_STATIC, _DONE, detail), report, package_name, report_paths
+        return _step(_STEP_STATIC, _DONE, detail), report, package_name, report_paths, base
     except Exception as exc:  # noqa: BLE001 - load_apk(ApkParseError 等)/pipeline 失败不中断流水线
         logger.exception("[auto] 静态分析步骤异常：%s", apk_path)
-        return _step(_STEP_STATIC, _ERROR, f"静态分析失败：{exc}"), None, "", []
+        return _step(_STEP_STATIC, _ERROR, f"静态分析失败：{exc}"), None, "", [], base
 
 
-def _write_reports(report: object, *, out_dir: str, formats: list[str]) -> list[str]:
-    """写出静态报告（report.json / report.html）。单格式失败不致命，记 logging 跳过。
+def _write_reports(report: object, *, out_dir: str, formats: list[str], base: str) -> list[str]:
+    """写出静态报告（``<base>.json`` / ``<base>.html``）。单格式失败不致命，记 logging 跳过。
 
     不依赖 cli 私有函数：直接惰性 import report.{json,html}，与 merge 重渲口径一致。
+    文件名用 ``base``（APK 名去后缀），与 cli.analyze / merge 重渲严格同 base。
     返回成功写出的报告路径列表。
     """
     out_path = Path(out_dir)
@@ -322,23 +330,23 @@ def _write_reports(report: object, *, out_dir: str, formats: list[str]) -> list[
 
     paths: list[str] = []
     if "json" in formats:
-        target = out_path / "report.json"
+        target = out_path / f"{base}.json"
         try:
             from apkscan.report import json as report_json
 
             report_json.dump(report, str(target))  # type: ignore[arg-type]
             paths.append(str(target))
         except Exception:
-            logger.exception("[auto] 写出 report.json 失败：%s", target)
+            logger.exception("[auto] 写出 %s 失败：%s", target.name, target)
     if "html" in formats:
-        target = out_path / "report.html"
+        target = out_path / f"{base}.html"
         try:
             from apkscan.report import html as report_html
 
             report_html.render(report, str(target))  # type: ignore[arg-type]
             paths.append(str(target))
         except Exception:
-            logger.exception("[auto] 写出 report.html 失败：%s", target)
+            logger.exception("[auto] 写出 %s 失败：%s", target.name, target)
     return paths
 
 
@@ -418,10 +426,13 @@ def _run_merge(
     runtime_report_path: str,
     *,
     out_dir: str,
+    base: str,
     formats: list[str],
     on_progress: Callable[[str], None] | None,
 ) -> tuple[dict, list[str]]:
     """步骤 5：把运行时端点并回主报告并重渲。失败 → error，但不破坏已产出静态报告。
+
+    ``base`` 必须与静态首次写出同一 base，否则重渲会写到 report.* 而静态在 <apk>.*，产两套。
 
     Returns:
         (step, report_paths)。report_paths 为重渲后的报告路径。
@@ -440,6 +451,7 @@ def _run_merge(
             report,
             endpoints,
             out_dir,
+            base,
             formats=list(formats),
             on_progress=on_progress,
         )

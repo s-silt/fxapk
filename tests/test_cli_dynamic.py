@@ -124,6 +124,71 @@ def test_doctor_command_exit_0_when_ok(monkeypatch):
     assert res.exit_code == 0
 
 
+def test_doctor_cleans_adb_on_exit(monkeypatch):
+    """问题 1：doctor 命令退出时 finally 收掉自起的 adb server（含体检失败 rc=1 路径）。"""
+    from apkscan.core import tools
+
+    calls = {"n": 0}
+    monkeypatch.setattr(tools, "kill_adb_server", lambda: calls.__setitem__("n", calls["n"] + 1))
+    # 体检失败（ok=False → rc=1），断言即便 raise typer.Exit(1) 仍穿过 finally 收 adb。
+    _patch_doctor_run(
+        monkeypatch,
+        {"ok": False, "items": [{"name": "在线设备", "ok": False, "detail": "无", "fix_cmd": []}]},
+    )
+
+    res = runner.invoke(cli.app, ["doctor"])
+    assert res.exit_code == 1
+    assert calls["n"] == 1  # finally 收了一次（rc=1 也收）
+
+
+def test_doctor_killserver_repair_cmd_unchanged(monkeypatch):
+    """问题 1：doctor 给用户的 "adb kill-server && adb start-server" 修复命令字符串语义未破坏。
+
+    cleanup 收的是程序自起的 server（kill_adb_server），不触碰 doctor 结构化结果里的
+    fix_cmd 字符串——它仍是给用户复制的命令。这里断言该修复命令仍能原样打印。
+    """
+    from apkscan.core import tools
+
+    monkeypatch.setattr(tools, "kill_adb_server", lambda: True)
+    _patch_doctor_run(
+        monkeypatch,
+        {
+            "ok": False,
+            "items": [
+                {
+                    "name": "在线设备",
+                    "ok": False,
+                    "detail": "未检测到在线设备",
+                    "fix_cmd": ["adb devices", "adb kill-server && adb start-server"],
+                }
+            ],
+        },
+    )
+    res = runner.invoke(cli.app, ["doctor"])
+    assert "adb kill-server && adb start-server" in res.output
+
+
+def test_analyze_cleans_adb_on_exit(monkeypatch):
+    """问题 1：analyze（纯静态）退出时也无条件收 adb（device.has_device 每次都会起 server）。"""
+    from apkscan.core import tools
+
+    calls = {"n": 0}
+    monkeypatch.setattr(tools, "kill_adb_server", lambda: calls.__setitem__("n", calls["n"] + 1))
+    monkeypatch.setattr(cli.device, "has_device", lambda: False)
+    monkeypatch.setattr(cli.pipeline, "run", lambda ctx, config: _make_report("com.x"))
+    monkeypatch.setattr(cli, "load_apk", lambda *a, **k: _FakeCtx())
+    monkeypatch.setattr(cli, "_write_reports", lambda *a, **k: None)
+
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".apk", delete=False) as fh:
+        apk = fh.name
+
+    res = runner.invoke(cli.app, ["analyze", apk, "--offline"])
+    assert res.exit_code == 0
+    assert calls["n"] == 1  # 纯静态 analyze 也收（has_device 探测已可能起过 server）
+
+
 def test_doctor_command_module_missing_graceful_exit(monkeypatch):
     """惰性 import doctor 失败 → 打印"该功能未安装" + 退出码 1，不崩。"""
     import builtins
@@ -205,18 +270,25 @@ def _patch_merge(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         return ["EP"]  # 非空哨兵，断言被透传给 merge_and_rerender
 
     def _fake_rerender(
-        report: Report, endpoints: list, out_dir: str, *, formats: Any = None, on_progress: Any = None
+        report: Report,
+        endpoints: list,
+        out_dir: str,
+        base: str = "report",
+        *,
+        formats: Any = None,
+        on_progress: Any = None,
     ) -> dict[str, Any]:
         calls["rerender_called"] = True
         calls["rerender_args"] = {
             "report": report,
             "endpoints": endpoints,
             "out_dir": out_dir,
+            "base": base,
             "formats": formats,
         }
         if on_progress is not None:
             on_progress("并入运行时端点 ...")
-        return {"merged": 2, "new_leads": 1, "total_endpoints": 5, "report_paths": [f"{out_dir}/report.json"]}
+        return {"merged": 2, "new_leads": 1, "total_endpoints": 5, "report_paths": [f"{out_dir}/{base}.json"]}
 
     monkeypatch.setattr(merge, "load_runtime_endpoints", _fake_load)
     monkeypatch.setattr(merge, "merge_and_rerender", _fake_rerender)
@@ -270,12 +342,13 @@ def test_analyze_dynamic_calls_merge_after_capture_done(monkeypatch):
     merge_calls = _patch_merge(monkeypatch)
 
     report = _make_report("com.x")
-    cli._run_dynamic_after_static("a.apk", "com.x", "outdir", report, ["html", "json"])
+    cli._run_dynamic_after_static("a.apk", "com.x", "outdir", report, ["html", "json"], "demo")
 
     assert merge_calls["rerender_called"] is True
     args = merge_calls["rerender_args"]
     assert args["report"] is report  # 同一 report 就地补全
     assert args["out_dir"] == "outdir"
+    assert args["base"] == "demo"  # base 透传给重渲（与静态写出同 base，避免两套报告）
     assert args["formats"] == ["html", "json"]
     assert args["endpoints"] == ["EP"]  # load_runtime_endpoints 的结果被透传
 
@@ -286,7 +359,7 @@ def test_analyze_dynamic_merge_uses_runtime_report_json(monkeypatch):
     _patch_capture(monkeypatch, _done_result(report_paths=["outdir/runtime_report.json"]))
     merge_calls = _patch_merge(monkeypatch)
 
-    cli._run_dynamic_after_static("a.apk", "com.x", "outdir", _make_report("com.x"), ["json"])
+    cli._run_dynamic_after_static("a.apk", "com.x", "outdir", _make_report("com.x"), ["json"], "demo")
 
     assert merge_calls["load_path"] == "outdir/runtime_report.json"
 
@@ -299,7 +372,7 @@ def test_analyze_dynamic_merge_falls_back_to_out_dir_path(monkeypatch):
     _patch_capture(monkeypatch, _done_result(report_paths=[]))
     merge_calls = _patch_merge(monkeypatch)
 
-    cli._run_dynamic_after_static("a.apk", "com.x", "outdir", _make_report("com.x"), ["json"])
+    cli._run_dynamic_after_static("a.apk", "com.x", "outdir", _make_report("com.x"), ["json"], "demo")
 
     assert merge_calls["load_path"] == os.path.join("outdir", "runtime_report.json")
 
@@ -319,7 +392,7 @@ def test_analyze_dynamic_capture_skipped_does_not_call_merge(monkeypatch, status
     )
     merge_calls = _patch_merge(monkeypatch)
 
-    cli._run_dynamic_after_static("a.apk", "com.x", "outdir", _make_report("com.x"), ["json"])
+    cli._run_dynamic_after_static("a.apk", "com.x", "outdir", _make_report("com.x"), ["json"], "demo")
 
     assert merge_calls["rerender_called"] is False
 
@@ -337,7 +410,7 @@ def test_analyze_dynamic_merge_exception_does_not_break_static_report(monkeypatc
     monkeypatch.setattr(merge, "load_runtime_endpoints", _boom_load)
 
     # 不应抛出。
-    cli._run_dynamic_after_static("a.apk", "com.x", "outdir", _make_report("com.x"), ["json"])
+    cli._run_dynamic_after_static("a.apk", "com.x", "outdir", _make_report("com.x"), ["json"], "demo")
 
 
 def test_analyze_dynamic_capture_exception_does_not_call_merge(monkeypatch):
@@ -352,7 +425,7 @@ def test_analyze_dynamic_capture_exception_does_not_call_merge(monkeypatch):
 
     monkeypatch.setattr(capture, "run", _boom_run)
 
-    cli._run_dynamic_after_static("a.apk", "com.x", "outdir", _make_report("com.x"), ["json"])
+    cli._run_dynamic_after_static("a.apk", "com.x", "outdir", _make_report("com.x"), ["json"], "demo")
     assert merge_calls["rerender_called"] is False
 
 
@@ -362,26 +435,27 @@ def test_analyze_dynamic_no_package_skips_capture_and_merge(monkeypatch):
     cap_calls = _patch_capture(monkeypatch, _done_result())
     merge_calls = _patch_merge(monkeypatch)
 
-    cli._run_dynamic_after_static("a.apk", "", "outdir", _make_report("com.x"), ["json"])
+    cli._run_dynamic_after_static("a.apk", "", "outdir", _make_report("com.x"), ["json"], "demo")
 
     assert cap_calls["called"] is False
     assert merge_calls["rerender_called"] is False
 
 
 def test_run_dynamic_after_static_new_signature_passes_report_and_formats(monkeypatch):
-    """新签名 _run_dynamic_after_static(apk, package, out, report, formats) 把 report+formats
-    透传给 merge_and_rerender。"""
+    """新签名 _run_dynamic_after_static(apk, package, out, report, formats, base) 把
+    report+formats+base 透传给 merge_and_rerender。"""
     _patch_unpack(monkeypatch)
     _patch_capture(monkeypatch, _done_result())
     merge_calls = _patch_merge(monkeypatch)
 
     report = _make_report("com.sig")
     formats = ["html", "json", "pdf"]
-    cli._run_dynamic_after_static("a.apk", "com.sig", "od", report, formats)
+    cli._run_dynamic_after_static("a.apk", "com.sig", "od", report, formats, "myapk")
 
     args = merge_calls["rerender_args"]
     assert args["report"] is report
     assert args["formats"] == formats
+    assert args["base"] == "myapk"  # base 透传，merge 重渲用同 base
 
 
 # ---------------------------------------------------------------------------
