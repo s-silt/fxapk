@@ -13,7 +13,7 @@
   由调用方保留原密文条目，绝不静默吞错、绝不抛给调用方。
 - 全程 type hints。
 
-配方对照真值（仅用于测试，不进产品逻辑）：HuaCai 样本 AES-256-CFB128 + Pkcs7，
+配方对照真值（仅用于测试，不进产品逻辑）：真样本 AES-256-CFB128 + Pkcs7，
 key=UTF-8("55f0e4afd83cf8dcae7a4d3daf663467")（32B），iv=MD5(key+str(ts)).hexdigest()[:16]
 的 UTF-8 字节（16B），载荷裸 base64（无 OpenSSL Salted__ 前缀）。
 """
@@ -49,7 +49,7 @@ class CryptoRecipe:
     """应用层加密配方（C5a 静态逆出，C5b 据此解密）。
 
     字段语义见 §2.2 spec：algo/mode/padding/segment_size + key/key_encoding +
-    iv_derive/iv_value + payload_encoding。默认值即 HuaCai 形态（AES-CFB/Pkcs7/utf8）。
+    iv_derive/iv_value + payload_encoding。默认值即真样本形态（AES-CFB/Pkcs7/utf8）。
     """
 
     algo: str = "AES"  # AES|DES|3DES

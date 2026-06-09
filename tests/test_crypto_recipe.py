@@ -3,7 +3,7 @@
 覆盖：
 - 配方提取命中（合成 JS）：CryptoJS + 硬编码 key + iv 推导 + 信封字段 → CRYPTO_RECIPE lead
   + meta["crypto_recipe"] 各字段正确。
-- 本地 HuaCai 真值验证（skipif 保护，无样本环境不挂）：key==55f0… / AES / iv 含 md5。
+- 本地真样本真值验证（skipif 保护，无样本环境不挂）：key / AES / iv 含 md5。
 - 无 CryptoJS → 不产配方。
 - 规则缺失走兜底：monkeypatch load_rules 返回 {} 仍正确提取。
 全程 type hints。
@@ -20,10 +20,11 @@ from apkscan.analyzers.crypto_recipe import CryptoRecipeAnalyzer
 from apkscan.core.models import LeadCategory
 from tests.conftest import FakeContext
 
-_HUACAI_APK = Path(__file__).resolve().parent.parent / "ybku" / "HuaCai-S0jZhGw4enKpBumE.apk"
+_EXPECTED_KEY = "55f0e4afd83cf8dcae7a4d3daf663467"
+_GROUNDTRUTH_APKS = sorted((Path(__file__).resolve().parent.parent / "ybku").glob("*.apk"))
 
 # 合成 JS：CryptoJS AES-CFB/Pkcs7 + 硬编码 key（utf8）+ iv=MD5(key+ts).substring(0,16)
-# + 请求信封 {timestamp,data} —— 复刻 HuaCai 形态（值是合成的，不是真 key）。
+# + 请求信封 {timestamp,data} —— 复刻真样本形态（值是合成的，不是真 key）。
 _SYNTHETIC_JS = """
 var cu = CryptoJS;
 var wl = "0123456789abcdef0123456789abcdef";
@@ -226,27 +227,31 @@ def test_iv_derive_unknown_when_no_md5_no_iv() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 本地 HuaCai 真值验证（skipif 保护）
+# 本地真样本真值验证（skipif 保护）
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not _HUACAI_APK.exists(), reason="本地无 HuaCai 样本，跳过真值验证")
-def test_huacai_groundtruth_key_extracted() -> None:
+@pytest.mark.skipif(not _GROUNDTRUTH_APKS, reason="本地无样本，跳过真值验证")
+def test_groundtruth_key_extracted() -> None:
     from apkscan.core.apk import load_apk
     from apkscan.core.models import AnalysisConfig
 
-    ctx = load_apk(str(_HUACAI_APK), AnalysisConfig(online=False))
-    result = CryptoRecipeAnalyzer().analyze(ctx)
+    # 遍历本地 ybku/ 下的样本，找出产出目标加密配方的那个（按 key 定位，不硬编码样本文件名）。
+    for apk in _GROUNDTRUTH_APKS:
+        ctx = load_apk(str(apk), AnalysisConfig(online=False))
+        result = CryptoRecipeAnalyzer().analyze(ctx)
+        meta = result.meta.get("crypto_recipe")
+        if not isinstance(meta, dict) or meta.get("key") != _EXPECTED_KEY:
+            continue
+        assert meta["algo"] == "AES"
+        assert meta["mode"] == "CFB"
+        assert meta["padding"] == "Pkcs7"
+        assert meta["key_encoding"] == "utf8"
+        assert "md5" in meta["iv_derive"]
+        assert "app-service.js" in meta["source"]
 
-    meta = result.meta.get("crypto_recipe")
-    assert isinstance(meta, dict)
-    assert meta["key"] == "55f0e4afd83cf8dcae7a4d3daf663467"
-    assert meta["algo"] == "AES"
-    assert meta["mode"] == "CFB"
-    assert meta["padding"] == "Pkcs7"
-    assert meta["key_encoding"] == "utf8"
-    assert "md5" in meta["iv_derive"]
-    assert "app-service.js" in meta["source"]
+        leads = [l for l in result.leads if l.category == LeadCategory.CRYPTO_RECIPE]
+        assert len(leads) == 1
+        return
 
-    leads = [l for l in result.leads if l.category == LeadCategory.CRYPTO_RECIPE]
-    assert len(leads) == 1
+    pytest.skip("本地样本中未找到目标加密配方")

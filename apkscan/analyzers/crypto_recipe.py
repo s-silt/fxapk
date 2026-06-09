@@ -382,7 +382,7 @@ class CryptoRecipeAnalyzer(BaseAnalyzer):
             var = m.group("var")
             val = m.group("val")
             # 上下文确认：该常量变量须用于 enc.parse 或 AES.crypt 的 key 位置，
-            # 或文件里存在 enc.parse（HuaCai 形态：常量经形参传入 enc.Utf8.parse(t)）。
+            # 或文件里存在 enc.parse（真样本形态：常量经形参传入 enc.Utf8.parse(t)）。
             if not self._key_var_in_context(text, var):
                 continue
             encoding = enc_by_var.get(var) or global_encoding or "utf8"
@@ -390,7 +390,7 @@ class CryptoRecipeAnalyzer(BaseAnalyzer):
 
         if not candidates:
             return "", ""
-        # 优先 32 长（AES-256，HuaCai 形态），其次 24/16。
+        # 优先 32 长（AES-256，真样本形态），其次 24/16。
         candidates.sort(key=lambda c: (-_aes_len_rank(len(c[0])), len(c[0])))
         return candidates[0]
 

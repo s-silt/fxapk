@@ -558,7 +558,7 @@ def _write_runtime_report_with_messages(tmp_path, messages: list[dict[str, Any]]
 
 _C5B_PLAINTEXT = json.dumps(
     {
-        "webName": "华西证券",
+        "webName": "示例证券",
         "register": "/api/register",
         "login": "/api/login",
         "webConfig": "https://gw.hxhcapi.vip/config",
