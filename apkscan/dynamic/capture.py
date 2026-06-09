@@ -269,6 +269,7 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
     crypto_events: list[dict[str, Any]] = []
     jsbridge_events: list[dict[str, Any]] = []  # P1：运行时 JS-bridge 暴露面/调用
     sensitive_api_events: list[dict[str, Any]] = []  # P1：运行时敏感 API 调用
+    antidetect_events: list[dict[str, Any]] = []  # P3：反检测探测（root/模拟器/frida）
     proxy_set = False
     reverse_set = False
     # 抓包加固产生的告警（CA 未装系统库 / frida 版本不一致），收尾并入 reason，
@@ -324,7 +325,7 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
         #    frida-core 不可用 / attach 失败 → 回退现有 subprocess 路径（仅 unpinning，无 key 回传）。
         #    两路都 best-effort、失败不阻断抓包（HTTP 仍可抓）。
         frida_session, frida_script = _start_frida_session(
-            package, crypto_events, jsbridge_events, sensitive_api_events
+            package, crypto_events, jsbridge_events, sensitive_api_events, antidetect_events
         )
         if frida_session is not None:
             playbook.append(
@@ -405,6 +406,7 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
         crypto_events=_clean(crypto_events),
         jsbridge_events=_clean(jsbridge_events),
         sensitive_api_events=_clean(sensitive_api_events),
+        antidetect_events=_clean(antidetect_events),
     )
     report_paths = [report_path] if report_path else []
 
@@ -496,6 +498,7 @@ def _start_frida_session(
     sink: list[dict[str, Any]],
     jsbridge_sink: list[dict[str, Any]] | None = None,
     api_sink: list[dict[str, Any]] | None = None,
+    antidetect_sink: list[dict[str, Any]] | None = None,
 ) -> tuple[Any, Any]:
     """用 frida-core（``import frida``）spawn 目标 app 并注入 unpinning + 运行时 hook 套件。
 
@@ -533,6 +536,8 @@ def _start_frida_session(
         + cryptohook.FRIDA_JSBRIDGE_HOOK_JS
         + "\n"
         + cryptohook.FRIDA_SENSITIVE_API_HOOK_JS
+        + "\n"
+        + cryptohook.FRIDA_ANTIDETECT_JS
     )
     device_handle: Any = None
     pid: Any = None
@@ -556,6 +561,13 @@ def _start_frida_session(
                 "message",
                 cryptohook.make_typed_handler(
                     api_sink, cryptohook.SENSITIVE_API_MSG_TYPE, cryptohook.normalize_sensitive_api_event
+                ),
+            )
+        if antidetect_sink is not None:
+            script.on(
+                "message",
+                cryptohook.make_typed_handler(
+                    antidetect_sink, cryptohook.ANTIDETECT_MSG_TYPE, cryptohook.normalize_antidetect_event
                 ),
             )
         script.load()
@@ -979,6 +991,7 @@ def _write_runtime_report(
     crypto_events: list[dict[str, Any]] | None = None,
     jsbridge_events: list[dict[str, Any]] | None = None,
     sensitive_api_events: list[dict[str, Any]] | None = None,
+    antidetect_events: list[dict[str, Any]] | None = None,
 ) -> str:
     """把运行时端点写成 out/runtime_report.json（复用 report.json 的序列化）。
 
@@ -1003,6 +1016,7 @@ def _write_runtime_report(
         "crypto_events": list(crypto_events or []),
         "jsbridge_events": list(jsbridge_events or []),
         "sensitive_api_events": list(sensitive_api_events or []),
+        "antidetect_events": list(antidetect_events or []),
     }
     if not complete:
         payload["note"] = "抓包未完整（代理未起或编排中断），运行时端点可能不全。"
