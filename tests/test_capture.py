@@ -1235,6 +1235,44 @@ def test_is_noise_host_matching():
     assert capture._is_noise_host("", pats) is False
 
 
+def test_mumu_netease_domain_is_noise():
+    """MuMu（网易）走 163 域名的自身流量（store-api.mumu.163.com）算噪音；合法 163.com 不误杀。
+
+    回归锁：真机实测中 MuMu 模拟器自身的 store-api.mumu.163.com（及其实连 IP）被误判成被分析
+    app 的 C2·实连。读真实 capture_noise.yaml，断言已被过滤、且 mail.163.com 这类合法域名不连坐。
+    """
+    pats = capture._load_noise_patterns()  # 读真实 rules/capture_noise.yaml
+    assert capture._is_noise_host("store-api.mumu.163.com", pats) is True
+    assert capture._is_noise_host("update.mumu.163.com", pats) is True
+    assert capture._is_noise_host("mail.163.com", pats) is False  # 合法网易域名不误杀
+    assert capture._is_noise_host("163.com", pats) is False
+
+
+def test_cleanup_diag_removes_empty_keeps_nonempty(tmp_path):
+    """成功抓包后：.diag/ 下的空 stderr 日志删掉、非空的保留（供排障）。"""
+    diag = tmp_path / ".diag"
+    diag.mkdir()
+    (diag / "mitmdump.stderr.log").write_bytes(b"")  # 空 → 删
+    (diag / "frida.stderr.log").write_bytes(b"boom")  # 非空 → 留
+    capture._cleanup_diag(tmp_path)
+    assert not (diag / "mitmdump.stderr.log").exists()
+    assert (diag / "frida.stderr.log").exists()
+
+
+def test_cleanup_diag_removes_empty_dir(tmp_path):
+    """.diag/ 全空 → 连目录一起删（不在主输出目录留杂物）。"""
+    diag = tmp_path / ".diag"
+    diag.mkdir()
+    (diag / "mitmdump.stderr.log").write_bytes(b"")
+    capture._cleanup_diag(tmp_path)
+    assert not diag.exists()
+
+
+def test_cleanup_diag_no_diag_is_noop(tmp_path):
+    """无 .diag 目录 → no-op，不抛。"""
+    capture._cleanup_diag(tmp_path)  # 不抛即通过
+
+
 def test_parse_flows_filters_emulator_noise(monkeypatch, tmp_path):
     """模拟器/系统自身流量（连通性检测/授时/模拟器遥测）→ 整条跳过，不入运行时端点。"""
     monkeypatch.setattr(capture, "_NOISE_PATTERNS_CACHE", None)  # 重置进程内缓存

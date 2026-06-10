@@ -90,6 +90,66 @@ def _ensure_std_streams() -> None:
                 logger.debug("兜底标准流 sys.%s 失败（忽略）", name, exc_info=True)
 
 
+def _ensure_console_for_builtin() -> None:
+    """windowed exe（fxapk-gui，无控制台）自调用内置工具时，分配一个**隐藏**控制台**并把标准
+    句柄重新指向它**，让依赖控制台屏幕缓冲的工具（``frida_tools.repl`` → ``prompt_toolkit``）
+    能正常初始化。
+
+    根因：``fxapk-gui.exe`` 是 windowed 子系统、无控制台屏幕缓冲；``frida`` CLI 经 prompt_toolkit
+    在初始化期取 Windows 控制台屏幕缓冲（``GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT))``），
+    无控制台直接抛 ``NoConsoleScreenBufferError``（GUI 跑 auto/capture 自调用内置 frida 即触发）。
+
+    **关键**：仅 ``AllocConsole`` 不够 —— 父进程（capture）已把子进程 stdout 重定向到 NUL
+    （DEVNULL），``STD_OUTPUT_HANDLE`` 已被设过，``AllocConsole`` 按规范**不会**覆盖它；于是
+    prompt_toolkit 的 ``GetStdHandle(STD_OUTPUT)`` 仍拿到 NUL → ``GetConsoleScreenBufferInfo``
+    失败 → 还是崩。故分配后必须 ``CreateFile("CONOUT$"/"CONIN$")`` + ``SetStdHandle`` 把
+    STD_{OUTPUT,ERROR,INPUT} 重新指向新控制台。
+
+    ``console`` 版 ``fxapk.exe`` 本就有控制台（``GetConsoleWindow()!=0``）→ 跳过、零副作用。
+    非 Windows / 任一步失败 → 静默返回，绝不阻断工具运行。
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        if kernel32.GetConsoleWindow() != 0:
+            return  # 已有控制台（console exe，或已分配过）
+        if not kernel32.AllocConsole():
+            return  # 分配失败（罕见）→ 交由工具自身处理
+        hwnd = kernel32.GetConsoleWindow()
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE=0：隐藏黑框，仅留屏幕缓冲
+
+        # 把 STD_{OUTPUT,ERROR,INPUT} 重新指向新控制台（CONOUT$/CONIN$）。prompt_toolkit 用
+        # GetStdHandle(STD_OUTPUT) 取句柄，不重指就还是父进程留下的 NUL → 仍崩。
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+            ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+        ]
+        kernel32.SetStdHandle.argtypes = [wintypes.DWORD, wintypes.HANDLE]
+        _GENERIC_RW = 0x80000000 | 0x40000000
+        _SHARE_RW = 0x1 | 0x2
+        _OPEN_EXISTING = 3
+        _INVALID = ctypes.c_void_p(-1).value
+        conout = kernel32.CreateFileW(
+            "CONOUT$", _GENERIC_RW, _SHARE_RW, None, _OPEN_EXISTING, 0, None
+        )
+        conin = kernel32.CreateFileW(
+            "CONIN$", _GENERIC_RW, _SHARE_RW, None, _OPEN_EXISTING, 0, None
+        )
+        if conout and conout != _INVALID:
+            kernel32.SetStdHandle(0xFFFFFFF5, conout)  # STD_OUTPUT_HANDLE = (DWORD)-11
+            kernel32.SetStdHandle(0xFFFFFFF4, conout)  # STD_ERROR_HANDLE  = (DWORD)-12
+        if conin and conin != _INVALID:
+            kernel32.SetStdHandle(0xFFFFFFF6, conin)  # STD_INPUT_HANDLE  = (DWORD)-10
+    except Exception:
+        logger.debug("[entry] 为内置工具分配/重指控制台失败（忽略）", exc_info=True)
+
+
 def _dispatch_builtin(tool: str) -> None:
     """把内置工具的调用透传给其库入口：改写 argv → import → 调 main → 传退出码。
 
@@ -97,8 +157,12 @@ def _dispatch_builtin(tool: str) -> None:
     argv[0]、保留工具后续参数（frida_tools.* / frida_dexdump / mitmproxy 内部 argparse
     读 ``sys.argv[1:]``，需要这种形态）。
 
+    分发前先 :func:`_ensure_console_for_builtin`：windowed exe 自调用 frida/mitmproxy 时
+    这些工具需要真实控制台屏幕缓冲，否则崩（见该函数）。
+
     库入口惰性 import：缺库（源码态未装该工具）抛 ImportError，转友好提示 + 退出码 1。
     """
+    _ensure_console_for_builtin()
     mod_name, attr = _BUILTIN_TOOLS[tool]
     sys.argv = [tool, *sys.argv[2:]]
     try:

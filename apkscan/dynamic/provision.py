@@ -197,6 +197,19 @@ def _adbd_is_root(serial: str | None = None) -> bool:
     return proc is not None and proc.returncode == 0 and "uid=0" in (proc.stdout or "")
 
 
+def _frida_binary_present(serial: str | None = None) -> bool:
+    """设备上 ``/data/local/tmp/frida-server`` 二进制是否已部署（best-effort，绝不抛）。
+
+    用于区分"frida-server 真在跑"与"frida_server_running 误判但二进制根本没部署"（MuMu 实测：
+    二进制不存在却被判在跑 → 不该去重启幽灵进程，应走部署流程把它 push 上去）。
+    """
+    proc = _adb(["shell", "ls", _FRIDA_SERVER_REMOTE], serial)
+    if proc is None or proc.returncode != 0:
+        return False
+    out = (proc.stdout or "") + (proc.stderr or "")
+    return "No such" not in out and "not found" not in out and "inaccessible" not in out
+
+
 def _adb_root_shell(cmd: str, serial: str | None = None) -> bool:
     """以 root 跑一条设备 shell 命令：优先直接 ``adb shell``（``adb root`` 后 adbd 即
     uid0，AOSP rootful 镜像上最稳），失败再回退 ``adb shell su -c '<cmd>'``（Magisk/su 型设备）。
@@ -358,18 +371,33 @@ def _start_frida_server_background(serial: str | None) -> bool:
     # 先杀掉可能已在跑的**非 root** frida-server：su 型设备（adb root 不可用）上若先有非 root
     # 实例占着端口，root 实例就起不来 → frida-ps 能列进程但 spawn 注入失败（"need Gadget /
     # jailed Android"）。杀掉后再以 root 重起，确保 spawn 可用。失败无害（本就没在跑）。
-    _su_ok("pkill -f frida-server", serial)
-    _adb_ok(["shell", "pkill", "-f", "frida-server"], serial)
+    # **多法杀**（MuMu 等把 frida-server 藏进 ps：comm 被改名、`pkill -x frida-server` 按 comm
+    # 精确匹配会一个都匹配不到 → 旧实例没杀掉 → 重启仍 jailed）：
+    #  - ``pkill -f frida-server``：匹配**完整命令行**（cmdline 含 ``/data/local/tmp/frida-server``
+    #    路径时仍可中，即便 comm 被隐藏）。代价：pkill 自身命令行也含 "frida-server" → 会顺带
+    #    自伤那条 shell（returncode 143），但 frida-server 在同一遍扫描里已被一起 SIGTERM，故仍杀到。
+    #  - ``for p in $(pidof frida-server); do kill -9 $p; done``：按 exe basename 取 PID 再杀
+    #    （用 for 循环而非裸 ``kill $(pidof …)``，pidof 为空时**不报 kill usage 错**，干净）。
+    for _kill in ("pkill -f frida-server", "for p in $(pidof frida-server); do kill -9 $p; done"):
+        _su_ok(_kill, serial)
+        _adb_ok(["shell", _kill], serial)
 
     # 权威 root 能力：adbd 已 root（AOSP rootful）则直执即 root；否则看 su 能否拿 uid=0。
     adb_root = _adbd_is_root(serial)
     su_root = False if adb_root else _su_uid0(serial)
     for cmd in _FRIDA_START_CMDS:
-        # **root 优先**：spawn 注入必须 root frida-server。su 型设备先 su -c（正确单引号包裹）把
-        # 端口占住；直执（adbd 为 root 则 root、否则非 root 兜底）。两条 setsid/nohup 都试。
-        if su_root:
+        # **只起 root 实例**（spawn 注入必须 root frida-server）：
+        # - adbd 已 root（AOSP rootful）→ 直执 adb shell 即 root。
+        # - 否则 su 能拿 uid=0（su 型设备，如 MuMu）→ **只走 su -c（root）**。绝不再跑非 root 的
+        #   直执 adb shell —— 它会和 su 的 root 实例**抢端口 27042**，非 root 实例若先 bind，
+        #   frida-server 就以非 root 跑、spawn 全 jailed（这正是 MuMu 上"重启成功却仍 jailed"的根因）。
+        # - 两者都没有（无 root）→ 尽力非 root 起（frida-ps 可达，但 spawn 会 jailed）。
+        if adb_root:
+            _adb_ok(["shell", cmd], serial)
+        elif su_root:
             _su_ok(cmd, serial)
-        _adb_ok(["shell", cmd], serial)
+        else:
+            _adb_ok(["shell", cmd], serial)
     return adb_root or su_root
 
 
@@ -489,50 +517,58 @@ def _ensure_frida_server_impl(
                     ok=True, action="already_running", detail="设备上 frida-server 已在运行（root）"
                 )
                 return result
-            # 未确认 root（含 ps 看不到 frida-server 行的 MuMu 等）→ 杀掉以 root 重启。
-            # **权威 root 信号 = _start_frida_server_background 是否经 su 把它真起起来**
-            # （返回 root_started）：ps 在 MuMu 上看不到 frida-server 行，无法靠 is_root 判；
-            # 而"running" 对非 root 实例同样为真，**只验 running 会把 jailed 误报成 root**
-            # （实测：Superuser.apk 型 su 拒收旧的未加引号命令 → 旧非 root 实例还在跑 → 误判
-            # restarted_as_root → 脱壳/抓包全 jailed 却显示成功）。故 root_started 为准。
-            _emit(on_progress, "frida-server 未确认 root，杀掉以 root 重启（spawn 注入需 root）")
-            logger.warning(
-                "[provision] frida-server 未确认以 root 运行（spawn 会 jailed）；杀掉以 root 重启"
-            )
-            root_started = _start_frida_server_background(serial)
-            for _ in range(_VERIFY_RETRIES):
-                try:
-                    running = device.frida_server_running(serial)
-                except Exception:
-                    logger.exception("[provision] root 重启后验证轮询异常")
-                    running = False
-                if running and root_started:
-                    result.update(
-                        ok=True,
-                        action="restarted_as_root",
-                        detail="未确认 root，已杀掉并以 root（su -c）重启 frida-server",
-                    )
-                    return result
-                if running and not root_started:
-                    # 在跑但 su 没把它起起来（设备 su 不接受 -c 形态 / 已锁）→ 仍是非 root，
-                    # spawn 会 jailed。如实报告 + 给手动命令，不假成功（避免下游白走 spawn）。
-                    su_uid0 = _su_uid0(serial)
-                    detail = (
-                        "frida-server 在跑但未能以 root 重启（设备 su 不接受标准 `su -c` 形态）："
-                        + ("su 可拿 uid=0 但未起成功，请手动起" if su_uid0 else "su 不可用/已锁，无法获取 root")
-                        + "；spawn 注入将被判 jailed，脱壳/运行时 hook 不可用。"
-                    )
-                    logger.warning("[provision] %s", detail)
-                    result.update(ok=False, action="running_not_root", detail=detail)
-                    result["fix_cmd"] = [
-                        "adb shell su -c 'pkill -f frida-server'",
-                        f"adb shell su -c 'setsid {_FRIDA_SERVER_REMOTE} >/dev/null 2>&1 &'",
-                        "frida-ps -U  # 应能列出进程；spawn 仍 jailed 则 su 未给 root",
-                    ]
-                    return result
-                time.sleep(_VERIFY_INTERVAL)
-            # 重启后仍未见运行（su 受限 / 二进制架构不符？）→ 继续走下方部署流程兜底。
-            logger.warning("[provision] 以 root 重启 frida-server 后仍未见运行；继续走部署流程兜底")
+            # 未确认 root（含 ps 看不到 frida-server 行的 MuMu 等）。
+            # **关键（真机实测教训）**：``frida_server_running`` 可能**误判"在跑"**——MuMu 上即便
+            # ``/data/local/tmp/frida-server`` 根本不存在、27042 端口也没人监听，它仍可能返回 True。
+            # 此时若去"杀掉以 root 重启"，重启的是一个**不存在的二进制**（127 not found），旧的
+            # 非 root 状态原封不动 → 脱壳/抓包全 jailed，却凭"root 能力"假报 restarted_as_root。
+            # 故先查**我们自己的 frida-server 二进制是否已部署**：
+            #   - 未部署 → 别重启幽灵进程，**直接落到下方部署流程**（push 二进制 + su 起 root）。
+            #   - 已部署 → 杀旧 + 以 root 重启（自愈）；仍确认不了 root 再落部署兜底。
+            if _frida_binary_present(serial):
+                _emit(on_progress, "frida-server 未确认 root，杀掉以 root 重启（spawn 注入需 root）")
+                logger.warning(
+                    "[provision] frida-server 未确认以 root 运行（spawn 会 jailed）；杀掉以 root 重启"
+                )
+                root_started = _start_frida_server_background(serial)
+                for _ in range(_VERIFY_RETRIES):
+                    try:
+                        running = device.frida_server_running(serial)
+                    except Exception:
+                        logger.exception("[provision] root 重启后验证轮询异常")
+                        running = False
+                    if running and root_started:
+                        result.update(
+                            ok=True,
+                            action="restarted_as_root",
+                            detail="未确认 root，已杀掉并以 root（su -c）重启 frida-server",
+                        )
+                        return result
+                    if running and not root_started:
+                        su_uid0 = _su_uid0(serial)
+                        detail = (
+                            "frida-server 在跑但未能以 root 重启（设备 su 不接受标准 `su -c` 形态）："
+                            + ("su 可拿 uid=0 但未起成功，请手动起" if su_uid0 else "su 不可用/已锁，无法获取 root")
+                            + "；spawn 注入将被判 jailed，脱壳/运行时 hook 不可用。"
+                        )
+                        logger.warning("[provision] %s", detail)
+                        result.update(ok=False, action="running_not_root", detail=detail)
+                        result["fix_cmd"] = [
+                            "adb shell su -c 'pkill -f frida-server'",
+                            f"adb shell su -c 'setsid {_FRIDA_SERVER_REMOTE} >/dev/null 2>&1 &'",
+                            "frida-ps -U  # 应能列出进程；spawn 仍 jailed 则 su 未给 root",
+                        ]
+                        return result
+                    time.sleep(_VERIFY_INTERVAL)
+                logger.warning("[provision] 以 root 重启 frida-server 后仍未见运行；继续走部署流程兜底")
+            else:
+                # 二进制未部署却被判"在跑"（MuMu 误判）→ 落到下方部署流程，把自己的 frida-server
+                # push 上去并以 root 起，别去重启一个不存在的二进制。
+                _emit(on_progress, "frida-server 二进制未部署，转部署流程（push + su 起 root）")
+                logger.warning(
+                    "[provision] 判在跑但 %s 不存在（疑似 frida_server_running 误判）；走部署流程",
+                    _FRIDA_SERVER_REMOTE,
+                )
     except Exception:
         logger.exception("[provision] frida_server_running 探测异常（按未运行处理）")
 

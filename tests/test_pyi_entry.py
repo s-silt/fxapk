@@ -101,6 +101,22 @@ def test_frida_dispatches_to_frida_tools_repl_with_argv_rewrite(
     assert seen["argv"] == ["frida", "-U", "--version"]
 
 
+def test_dispatch_builtin_allocates_console_before_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """分发内置工具前先 _ensure_console_for_builtin（windowed exe 无控制台 → frida 崩溃的修复）。"""
+    order: list[str] = []
+    monkeypatch.setattr(_pyi_entry, "_ensure_console_for_builtin", lambda: order.append("console"))
+    _install_fake_module(monkeypatch, "frida_tools.repl", "main", lambda: order.append("frida"))
+    monkeypatch.setattr(sys, "argv", ["fxapk-gui.exe", "frida", "-U", "-f", "com.x"])
+    _pyi_entry._run("gui")
+    assert order == ["console", "frida"]  # 控制台分配发生在工具运行之前
+
+
+def test_ensure_console_noop_off_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """非 Windows → _ensure_console_for_builtin 直接返回，不碰 ctypes、不抛。"""
+    monkeypatch.setattr(_pyi_entry.sys, "platform", "linux")
+    _pyi_entry._ensure_console_for_builtin()  # 不抛即通过
+
+
 def test_frida_dexdump_dispatches_with_argv_rewrite(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, Any] = {}
     _install_fake_module(
