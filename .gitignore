@@ -8,6 +8,9 @@ venv/
 out/
 .apkscan_cache/
 
+# CodeGraph 本地索引(生成物，类似 .git，绝不入库)
+/.codegraph/
+
 # PyInstaller 构建产物(大，绝不入库)
 /build/
 /dist/

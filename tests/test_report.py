@@ -111,7 +111,7 @@ def sample_report() -> Report:
             is_cleartext=False,
             enrichment={
                 "whois": {"registrar": "Alibaba Cloud", "registrant": "隐藏"},
-                "icp": {"subject": "某科技有限公司", "license": "粤ICP备12345678号"},
+                "icp": {"subject": "某科技有限公司", "license_no": "粤ICP备12345678号"},
             },
         ),
         Endpoint(
@@ -371,6 +371,50 @@ def test_html_crypto_recipe_section_renders(tmp_path: Path) -> None:
     assert "应用层加密配方" in html
     assert "AES-CFB/Pkcs7 key(utf8,32B)" in html
     assert "建议调证" in html
+
+
+def test_html_escapes_attacker_controlled_strings(tmp_path: Path) -> None:
+    """报告嵌入的包名/线索值是涉诈样本里攻击者可控的串：必须被 HTML 转义，绝不原样注入。
+
+    报告常在浏览器打开给执法/调证人员看，若模板某处不慎用 |safe 或关 autoescape，样本里的
+    <script> 就会 XSS。此用例钉住转义状态（之前 19 个 HTML 用例全是正向存在性，无转义断言）。
+    """
+    report = Report(
+        package_name="<script>alert(1)</script>",
+        meta={},
+        leads=[
+            Lead(
+                category=LeadCategory.CONFIG_KEY,
+                value="<img src=x onerror=alert(2)>",
+                confidence=Confidence.HIGH,
+                advice="建议调证",
+                notes='a&b"c',
+                source_refs=[Evidence(source="dex", location="X.java", snippet="<b>x</b>")],
+            )
+        ],
+        endpoints=[],
+        findings=[],
+        analyzer_status=[],
+    )
+    path = tmp_path / "report.html"
+    report_html.render(report, str(path))
+    html = path.read_text(encoding="utf-8")
+
+    assert "<script>alert(1)</script>" not in html  # 原始恶意标签绝不出现
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html  # 转义形态出现
+    assert "<img src=x onerror=alert(2)>" not in html
+    assert "&lt;img src=x onerror=alert(2)&gt;" in html
+
+
+def test_html_template_has_no_unsafe_filter() -> None:
+    """模板不得使用 |safe（会绕过 autoescape 引入 XSS）——防有人将来误加。"""
+    import importlib.resources
+
+    tmpl = (
+        importlib.resources.files("apkscan") / "report" / "templates" / "report.html.j2"
+    ).read_text(encoding="utf-8")
+    assert "|safe" not in tmpl
+    assert "| safe" not in tmpl
 
 
 def test_html_no_crypto_recipe_section_when_absent(sample_report: Report, tmp_path: Path) -> None:

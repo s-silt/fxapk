@@ -33,8 +33,8 @@ ASN_TIMEOUT = 8
 ASN_API_URL = "http://ip-api.com/json/{ip}"
 ASN_FIELDS = "status,country,isp,org,as,query"
 
-#: 免费档限速约 45/min；每次真实查询前的最小间隔（秒），保护性留余量。
-ASN_MIN_INTERVAL = 1.0
+#: 免费档限速约 45/min → 安全间隔 60/45≈1.34s；取 1.4s 留余量（1.0s=60/min 会触发 429 封禁）。
+ASN_MIN_INTERVAL = 1.4
 
 #: 本地缓存目录与文件。
 CACHE_DIR = Path(".apkscan_cache")

@@ -349,12 +349,23 @@ def _normalize_domain(domain: str) -> str:
 
 
 def _matched_infra(domain: str) -> str | None:
-    """返回命中的 KNOWN_INFRA 关键字/后缀；未命中返回 None。"""
+    """返回命中的 KNOWN_INFRA 关键字/后缀；未命中返回 None。
+
+    两类 marker 区别匹配，避免短域名后缀被当子串误命中：
+    - **域名后缀型**（含点，如 ``qq.com`` / ``mob.com``）：要求 ``d == marker`` 或以
+      ``.<marker>`` 结尾（域边界）。否则 ``mob.com`` 会子串命中攻击者构造的 ``evilmob.com.cn``，
+      把真 C2 误判成"无需调证"——与本模块"宁可建议调证"的取向正好相反。
+    - **品牌关键字型**（无点，如 ``aliyun`` / ``qcloud`` / ``igexin``）：保留子串匹配
+      （它们本就是为匹配 ``aliyun-xxx.com`` 这类品牌变体而设）。
+    """
     d = _normalize_domain(domain)
     if not d:
         return None
     for marker in KNOWN_INFRA:
-        if marker in d:
+        if "." in marker:
+            if d == marker or d.endswith("." + marker):
+                return marker
+        elif marker in d:
             return marker
     return None
 

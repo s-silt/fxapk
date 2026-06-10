@@ -261,7 +261,7 @@
     {% if not (whois or icp or asn) %}
       <span class="muted">未富化</span>
     {% else %}
-      {% if icp %}<div><b>ICP：</b>{{ icp.get("subject") or icp.get("unit") or icp.get("error") or "需人工核" }}{% if icp.get("license") %}（{{ icp.get("license") }}）{% endif %}</div>{% endif %}
+      {% if icp %}<div><b>ICP：</b>{{ icp.get("subject") or icp.get("site_name") or icp.get("error") or icp.get("note") or icp.get("hint") or "需人工核" }}{% if icp.get("license_no") %}（{{ icp.get("license_no") }}）{% endif %}{% if icp.get("lookup_url") %} <a href="{{ icp.get("lookup_url") }}" target="_blank" rel="noopener">去核验</a>{% endif %}</div>{% endif %}
       {% if whois %}<div><b>WHOIS：</b>{{ whois.get("registrant") or whois.get("org") or "—" }} / 注册商 {{ whois.get("registrar") or "—" }}{% if whois.get("error") %} <span class="muted">({{ whois.get("error") }})</span>{% endif %}</div>{% endif %}
       {% if asn %}<div><b>ASN：</b>{{ asn.get("asn") or "—" }} {{ asn.get("org") or asn.get("isp") or "" }}{% if asn.get("country") %} · {{ asn.get("country") }}{% endif %}{% if asn.get("error") %} <span class="muted">({{ asn.get("error") }})</span>{% endif %}</div>{% endif %}
     {% endif %}

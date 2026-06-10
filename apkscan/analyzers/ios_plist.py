@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import plistlib
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from apkscan.core.models import (
@@ -74,16 +75,22 @@ class IosPlistAnalyzer(BaseAnalyzer):
         result.meta["ios_display_name"] = display
         result.meta["ios_min_os"] = _s(plist.get("MinimumOSVersion"))
 
-        try:
-            self._emit_brand(bundle_id, display, result)
-            self._emit_url_schemes(plist, result)
-            self._emit_ats(plist, result)
-            self._emit_query_schemes(plist, result)
-            self._emit_usage(plist, result)
-        except Exception:  # noqa: BLE001 — 单点失败不炸整体
-            logger.exception("[%s] Info.plist 线索生成异常", self.name)
-            if not result.error:
-                result.error = "Info.plist 线索生成异常（详见日志）"
+        # 逐发射器独立 try/except（与其它分析器"单源失败不连坐其余"的惯例一致）：
+        # 某个畸形 plist 字段只会丢自己那条线索，不会把后面的 ATS/支付探测/权限用途全带走。
+        emitters: tuple[tuple[str, Callable[[], None]], ...] = (
+            ("brand", lambda: self._emit_brand(bundle_id, display, result)),
+            ("url_schemes", lambda: self._emit_url_schemes(plist, result)),
+            ("ats", lambda: self._emit_ats(plist, result)),
+            ("query_schemes", lambda: self._emit_query_schemes(plist, result)),
+            ("usage", lambda: self._emit_usage(plist, result)),
+        )
+        for label, emit in emitters:
+            try:
+                emit()
+            except Exception:  # noqa: BLE001 — 单发射器失败不连坐其余线索
+                logger.exception("[%s] Info.plist 发射器 %s 异常", self.name, label)
+                if not result.error:
+                    result.error = "部分 Info.plist 线索生成异常（详见日志）"
         return result
 
     # ------------------------------------------------------------------

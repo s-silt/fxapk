@@ -40,6 +40,33 @@ def test_browsable_deeplink_yields_finding() -> None:
     assert r.meta["browsable_deeplink_count"] == 1
 
 
+def test_app_links_https_with_host_not_flagged() -> None:
+    """带 host 的 https（标准 App Links）不应被当自定义 scheme deeplink 攻击面（误报回归锁）。"""
+    body = _activity(
+        "com.x.LinkActivity",
+        exported="true",
+        filter_body=_BROWSABLE + '<data android:scheme="https" android:host="example.com"/>',
+    )
+    r = _run(body)
+    assert r.meta.get("deeplinks", []) == []  # https 被跳过 → 无 deeplink
+    assert not r.findings
+
+
+def test_mixed_custom_scheme_kept_https_skipped() -> None:
+    """同一 filter 既有自定义 scheme 又有 https：只枚举自定义 scheme，跳过 https。"""
+    body = _activity(
+        "com.x.JumpActivity",
+        exported="true",
+        filter_body=_BROWSABLE
+        + '<data android:scheme="myapp" android:host="open"/>'
+        + '<data android:scheme="https" android:host="example.com"/>',
+    )
+    r = _run(body)
+    uris = {d["uri"] for d in r.meta.get("deeplinks", [])}
+    assert any(u.startswith("myapp://") for u in uris)  # 自定义 scheme 保留
+    assert not any(u.startswith(("http://", "https://")) for u in uris)  # https 被跳过
+
+
 def test_high_risk_component_name_is_high() -> None:
     body = _activity("com.x.WebViewActivity", exported="true", filter_body=_BROWSABLE + '<data android:scheme="myapp"/>')
     r = _run(body)

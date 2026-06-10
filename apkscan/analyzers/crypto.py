@@ -21,7 +21,6 @@
 from __future__ import annotations
 
 import logging
-import posixpath
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -32,6 +31,7 @@ from apkscan.core.models import (
     Finding,
     Severity,
 )
+from apkscan.analyzers._common import TEXT_RESOURCE_PREFIXES, is_text_resource
 from apkscan.core.registry import BaseAnalyzer, load_rules
 
 if TYPE_CHECKING:
@@ -258,8 +258,9 @@ class CryptoAnalyzer(BaseAnalyzer):
         return items, scanned
 
     def _is_text_resource(self, path: str) -> bool:
-        base = posixpath.basename(path.replace("\\", "/")).lower()
-        return base.endswith(_TEXT_SUFFIXES)
+        # 后缀 + assets/、res/raw/、res/xml/ 前缀（与 payment/contacts 口径一致）：弱加密密钥常
+        # 落在 assets/config（无扩展名）、res/raw/keys 这类无后缀资源里，只看后缀会整片漏抽。
+        return is_text_resource(path, suffixes=_TEXT_SUFFIXES, prefixes=TEXT_RESOURCE_PREFIXES)
 
     def _read_text(self, ctx: "AnalysisContext", path: str) -> str | None:
         """读取并解码文本资源；失败 / 非文本返回 None，记 debug 不抛出。"""

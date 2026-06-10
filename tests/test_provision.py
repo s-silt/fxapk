@@ -227,7 +227,11 @@ def test_ensure_frida_server_builds_correct_github_url(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _xz_bytes(payload: bytes = b"ELF-FAKE-FRIDA") -> bytes:
+def _xz_bytes(payload: bytes | None = None) -> bytes:
+    # 解压后需 ≥ _FRIDA_MIN_SERVER_BYTES（完整性下限），否则被当损坏下载拒绝；用可压缩的
+    # 大 payload（重复字节，xz 后仍很小）模拟真实 frida-server ELF 体量。
+    if payload is None:
+        payload = b"\x7fELF" + b"\x00" * 1_100_000
     return lzma.compress(payload)
 
 

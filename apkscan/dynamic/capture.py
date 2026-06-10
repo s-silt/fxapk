@@ -429,6 +429,24 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
     return result
 
 
+def _spawn_logged(args: list[str], log_path: Path) -> subprocess.Popen[bytes]:
+    """起长驻子进程：stdout 丢弃、stderr 重定向到 ``log_path`` 文件（**而非 PIPE**）。
+
+    长驻子进程（mitmdump/frida）若用 ``PIPE`` 且在抓包窗口内无人读，输出写满 OS 管道缓冲
+    （~64KB）会阻塞其主循环 → 代理停转、后续真·C2 流量静默丢失，而 capture 仍 sleep 满
+    duration 并以"成功 N 端点"收尾（"假成功"）。改用文件重定向：既不会阻塞，又把 stderr
+    完整留盘供秒退诊断（``_read_proc_stderr`` 优先读该文件）。stdout 用 ``DEVNULL``（flows 已
+    落 ``-w`` 文件、frida ``-q`` 本就安静）。
+    """
+    log_f = open(log_path, "wb")  # noqa: SIM115 - 句柄交 subprocess 继承，父进程随即关闭副本
+    try:
+        proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=log_f)
+    finally:
+        log_f.close()  # 父进程关副本；子进程已继承自己的 fd，照常写入
+    proc._fxapk_stderr_log = log_path  # type: ignore[attr-defined]  # 供 _read_proc_stderr 读取
+    return proc
+
+
 def _start_mitmdump(flows_file: Path) -> subprocess.Popen[bytes]:
     """启动 mitmdump 子进程（-w flows_file）。失败抛异常由上层 finally 兜底清理。
 
@@ -447,7 +465,7 @@ def _start_mitmdump(flows_file: Path) -> subprocess.Popen[bytes]:
         str(_PROXY_PORT),
     ]
     logger.info("[capture] 启动 mitmdump：%s", " ".join(args))
-    return subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return _spawn_logged(args, flows_file.parent / "mitmdump.stderr.log")
 
 
 def _start_frida_unpinning(package: str, out_path: Path) -> subprocess.Popen[bytes] | None:
@@ -478,7 +496,7 @@ def _start_frida_unpinning(package: str, out_path: Path) -> subprocess.Popen[byt
         args.append("--no-pause")  # 仅老版 frida-tools(<14) 需要；新版默认不暂停
     logger.info("[capture] frida 注入 unpinning 并启动 app：%s", " ".join(args))
     try:
-        return subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return _spawn_logged(args, out_path / "frida.stderr.log")
     except Exception:
         logger.exception("[capture] 启动 frida 失败，跳过注入")
         return None
@@ -1072,8 +1090,19 @@ def _looks_like_envelope(body: str) -> bool:
 def _read_proc_stderr(proc: object) -> str:
     """读取已退出子进程的 stderr 尾部（用于诊断 mitmdump/frida 立即退出原因）。
 
-    真实 Popen 才有 communicate；测试替身无则降级。任何异常不抛。
+    优先读 ``_spawn_logged`` 重定向的 stderr 日志文件（真实进程）；测试替身无该属性时降级走
+    ``communicate``。任何异常不抛。
     """
+    log_path = getattr(proc, "_fxapk_stderr_log", None)
+    if log_path is not None:
+        try:
+            text = Path(log_path).read_bytes().decode("utf-8", errors="ignore")
+            text = text[-_STDERR_TAIL:].strip()
+            return text or f"exit code {getattr(proc, 'returncode', '?')}"
+        except OSError:
+            logger.exception("[capture] 读取子进程 stderr 日志失败：%s", log_path)
+            return f"exit code {getattr(proc, 'returncode', '?')}"
+
     communicate: Any = getattr(proc, "communicate", None)
     # 用 is None 守卫而非 callable()：后者会把 Any 收窄成 Callable[..., object]，
     # 导致返回值被当 object 无法解包。

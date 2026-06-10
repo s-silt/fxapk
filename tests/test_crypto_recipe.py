@@ -193,6 +193,29 @@ def test_iv_derive_fixed_detected() -> None:
     assert meta["iv_value"] == "1234567890abcdef"
 
 
+def test_iv_md5_full_text_false_positive_not_misclassified() -> None:
+    """全文出现 MD5(签名用) + timestamp，但 iv 实为固定字面量 → 必须判 fixed，不被误标 md5(key+ts)。
+
+    A1 回归锁：CryptoJS bundle 必带 MD5 函数、业务必有 timestamp，旧的"全文 MD5+ts 即判 md5
+    派生"兜底会把这种样本误标，使 C5b 用错 iv 解出"看似成功实则错误"的明文。
+    """
+    js = """
+    var CryptoJS;
+    var ts = Date.now();                       // timestamp 提示
+    var sign = CryptoJS.MD5(payload + ts);     // MD5 仅用于签名，与 iv 无关、无 substring(0,16)
+    var kk = "0123456789abcdef0123456789abcdef";
+    var key = CryptoJS.enc.Utf8.parse(kk);
+    var ct = CryptoJS.AES.encrypt(plain, key,
+        {iv: CryptoJS.enc.Utf8.parse("1234567890abcdef"), mode:CryptoJS.mode.CBC, padding:CryptoJS.pad.Pkcs7});
+    """
+    ctx = _ctx_with_js(js)
+    result = CryptoRecipeAnalyzer().analyze(ctx)
+    meta = result.meta.get("crypto_recipe")
+    assert isinstance(meta, dict)
+    assert meta["iv_derive"] == "fixed"  # 正确识别固定 iv
+    assert meta["iv_value"] == "1234567890abcdef"
+
+
 def test_iv_derive_same_as_key_detected() -> None:
     """iv 与 key 用同一变量 → iv_derive=same_as_key，不再误标 md5。"""
     js = """

@@ -87,3 +87,26 @@ def test_no_info_plist_no_crash():
 def test_benign_plist_no_noise():
     r = _run({"CFBundleIdentifier": "com.x", "CFBundleVersion": "1.0"})
     assert r.findings == []  # 没有 URL scheme/ATS/敏感权限 → 无 Finding（只产品牌 Lead）
+
+
+def test_one_emitter_failure_does_not_kill_others(monkeypatch):
+    """单个发射器抛异常只丢自己那条线索，不连坐其余（逐源独立 try 的回归锁）。"""
+    raw = plistlib.dumps(
+        {
+            "CFBundleIdentifier": "com.x",
+            "CFBundleURLTypes": [{"CFBundleURLSchemes": ["evilpay"]}],  # url_schemes
+            "NSAppTransportSecurity": {"NSAllowsArbitraryLoads": True},  # ats
+        },
+        fmt=plistlib.FMT_BINARY,
+    )
+    ctx = FakeContext(files={_PLIST_PATH: raw}, platform="ios")
+    analyzer = IosPlistAnalyzer()
+    # 让 url_schemes 发射器抛异常；ats 发射器仍应照常产出 IOS-ATS-CLEARTEXT。
+    monkeypatch.setattr(
+        analyzer, "_emit_url_schemes", lambda *a, **k: (_ for _ in ()).throw(ValueError("boom"))
+    )
+    r = analyzer.analyze(ctx)
+    ids = {f.id for f in r.findings}
+    assert "IOS-URL-SCHEME" not in ids  # 抛异常的发射器丢了
+    assert "IOS-ATS-CLEARTEXT" in ids  # 但后续发射器没被连坐
+    assert r.error is not None  # 记录了部分失败

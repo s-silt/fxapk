@@ -338,10 +338,10 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
     evidence_to_obtain: list[str] = []
     enriched = bool(icp or whois)
 
-    if icp.get("subject") or icp.get("license"):
+    if icp.get("subject") or icp.get("license_no"):
         where = "工信部 ICP 备案系统 / 备案服务商"
-        if icp.get("license"):
-            evidence_to_obtain.append(f"ICP 备案号 {icp.get('license')} 主体实名信息")
+        if icp.get("license_no"):
+            evidence_to_obtain.append(f"ICP 备案号 {icp.get('license_no')} 主体实名信息")
         else:
             evidence_to_obtain.append("ICP 备案主体实名信息")
     elif whois.get("registrar"):
@@ -384,7 +384,7 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
 def _ip_lead(ep: Endpoint, online: bool = True) -> Lead:
     asn = ep.enrichment.get("asn") or {}
 
-    subject = asn.get("org") or asn.get("isp") or asn.get("as")
+    subject = asn.get("org") or asn.get("isp") or asn.get("asn")
     where = None
     evidence_to_obtain: list[str] = []
     enriched = bool(asn)

@@ -145,11 +145,6 @@ _ENVELOPE_OBJ_RE = re.compile(
 )
 _OBJ_KEY_RE = re.compile(r"""["']?\b(?P<key>timestamp|data|sign|nonce)\b["']?\s*:""", re.IGNORECASE)
 
-# 时间戳形态 token（用于确认 md5(key+ts)：拼接里出现 timestamp / ts / Date.getTime / +n 等）。
-_TS_HINT_RE = re.compile(
-    r"timestamp|getTime\s*\(\)|\bts\b|\.now\s*\(\)", re.IGNORECASE
-)
-
 # AES/DES 调用附近窗口（字符）。
 _CALL_WINDOW = 400
 
@@ -426,10 +421,13 @@ class CryptoRecipeAnalyzer(BaseAnalyzer):
           4. 都不匹配 → ``unknown``（不伪造推导式；C5b 据此解密会失败但安全降级，
              notes 标注由人复核——避免把 fixed/same_as_key 样本错标成 md5 派生）。
         """
-        # 1) md5(key+ts)[:16]：substring(0,16) 形态，或 MD5 + timestamp 拼接。
+        # 1) md5(key+ts)[:16]：仅认 substring(0,16) 的强形态。
+        #    旧实现还有一条"全文出现 MD5 且出现 timestamp 即判 md5 派生"的兜底——但 CryptoJS
+        #    bundle 必然打包 MD5 函数、业务里几乎必有时间戳字段，二者全文共现与本样本是否真用
+        #    md5(key+ts) 派生 iv 无关，会把 fixed/same_as_key/unknown 样本误标成 md5 派生，
+        #    使 C5b 用错 iv 解出"看似成功实则错误"的明文（比解密失败更糟）。故移除该全文兜底，
+        #    弱信号一律落 unknown（由人复核，安全降级，绝不伪造推导式）。
         if _IV_MD5_SUBSTR_RE.search(text):
-            return "md5(key+ts)[:16]", None
-        if "MD5" in text and _TS_HINT_RE.search(text):
             return "md5(key+ts)[:16]", None
 
         # 2) 固定 iv：iv:enc.X.parse("<literal>")。
