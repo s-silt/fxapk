@@ -87,7 +87,7 @@ def test_view_app_constructs_without_error_if_display_available(app) -> None:  #
     """有显示器：真构造一次 App 验证布局/样式无异常；无显示器（CI）经 fixture 自动 skip。"""
     # 控件就绪：动作按钮存在、日志框存在、变量默认值合理。
     assert len(app._action_buttons) == 3
-    assert app.var_online.get() is False  # 默认离线
+    assert app.var_online.get() is True  # 默认联网富化（与 cli 一致）
     assert app.var_html.get() is True  # 默认勾 HTML
     assert app.var_json.get() is True  # 默认勾 JSON
     assert app.var_pdf.get() is False  # 默认不勾 PDF

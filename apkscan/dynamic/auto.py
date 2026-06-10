@@ -92,7 +92,7 @@ def run(
     apk_path: str,
     *,
     out_dir: str = "out",
-    online: bool = False,
+    online: bool = True,
     auto_fix: bool = True,
     capture_duration: int = 60,
     formats: list[str] | None = None,
@@ -107,7 +107,7 @@ def run(
     Args:
         apk_path: 待分析的 APK 文件路径。
         out_dir: 报告 / 产物输出目录。
-        online: 静态分析是否联网富化归属（WHOIS/ICP/ASN）。默认 False（离线）。
+        online: 静态分析是否联网富化归属（WHOIS/ICP/ASN）。默认 True（联网，与 cli analyze 一致）。
         auto_fix: 体检时是否对 frida-server / CA 等调 provision 自动修复。
         capture_duration: 抓包时长（秒）。
         formats: 报告格式，默认 ``["html", "json"]``。
@@ -209,7 +209,7 @@ def analyze_static(
     apk_path: str,
     *,
     out_dir: str = "out",
-    online: bool = False,
+    online: bool = True,
     formats: list[str] | None = None,
     on_progress: Callable[[str], None] | None = None,
 ) -> dict:
@@ -225,7 +225,7 @@ def analyze_static(
     Args:
         apk_path: 待分析的 APK 文件路径。
         out_dir: 报告输出目录。
-        online: 是否联网富化归属（WHOIS/ICP/ASN）。默认 False（离线）。
+        online: 是否联网富化归属（WHOIS/ICP/ASN）。默认 True（联网，与 cli analyze 一致）。
         formats: 报告格式，默认 ``["html", "json"]``。
         on_progress: 可选进度回调（GUI 弹窗 / None → no-op）。
 
