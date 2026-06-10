@@ -1124,6 +1124,57 @@ def test_frida_unpinning_no_no_pause_when_version_unknown(monkeypatch, tmp_path)
     assert "--no-pause" not in args
 
 
+# ---------------------------------------------------------------------------
+# 包名形态校验（防御性：样本可控的畸形包名不下发到 frida/adb）
+# ---------------------------------------------------------------------------
+
+
+def test_is_valid_package() -> None:
+    assert device.is_valid_package("com.evil.app") is True
+    assert device.is_valid_package("com.x_y.App2") is True
+    assert device.is_valid_package("") is False
+    assert device.is_valid_package("com.x;rm -rf /") is False  # 含 shell 元字符
+    assert device.is_valid_package("com.x app") is False  # 含空格
+    assert device.is_valid_package("com/x") is False  # 含斜杠
+
+
+def test_capture_rejects_malformed_package(tmp_path) -> None:  # noqa: ANN001
+    """畸形包名 → capture.run 早返回 error，不进入设备探测/下发。"""
+    res = capture.run("com.x;evil", out_dir=str(tmp_path), duration=1)
+    assert res["status"] == STATUS_ERROR
+    assert "包名形态非法" in res["reason"]
+
+
+# ---------------------------------------------------------------------------
+# frida-core 会话收尾：kill spawned app（避免堆叠孤儿进程）
+# ---------------------------------------------------------------------------
+
+
+def test_teardown_kills_spawned_pid(monkeypatch) -> None:  # noqa: ANN001
+    """有真实 int pid 的会话 → 收尾调 _kill_spawned_app(pid)。"""
+    killed: list[int] = []
+    monkeypatch.setattr(capture, "_kill_spawned_app", lambda pid: killed.append(pid))
+
+    class _Sess:
+        pid = 4321
+
+        def detach(self) -> None: ...
+
+    class _Script:
+        def unload(self) -> None: ...
+
+    capture._teardown_frida_session(_Sess(), _Script())
+    assert killed == [4321]
+
+
+def test_teardown_no_kill_when_session_has_no_pid(monkeypatch) -> None:  # noqa: ANN001
+    """会话无 pid（如测试替身 object()）→ 不触发 kill（不误调真 frida）。"""
+    killed: list[int] = []
+    monkeypatch.setattr(capture, "_kill_spawned_app", lambda pid: killed.append(pid))
+    capture._teardown_frida_session(object(), object())
+    assert killed == []
+
+
 class _FakeServerConn:
     def __init__(self, peername) -> None:  # noqa: ANN001
         self.peername = peername

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import subprocess
 
@@ -37,6 +38,19 @@ _EMULATOR_ADB_ENDPOINTS: tuple[str, ...] = (
     "127.0.0.1:62001",  # 夜神 Nox
     "127.0.0.1:21503",  # 逍遥 Memu
 )
+
+# 合法 Android 包名形态：仅字母/数字/下划线/点。
+_PACKAGE_RE = re.compile(r"^[A-Za-z0-9_.]+$")
+
+
+def is_valid_package(package: str) -> bool:
+    """包名是否形态合法（仅字母/数字/下划线/点）。
+
+    防御性校验：包名源自样本 manifest（attacker 可控输入）。下发 frida/adb 全走 argv 列表
+    （无 shell、无经典注入），但仍校验形态以挡住异常字符（空格 / ``;&$`/`` 等），符合
+    "样本输入不可信"的威胁模型——畸形包名直接拒绝，不下发到设备。
+    """
+    return bool(package) and _PACKAGE_RE.match(package) is not None
 
 
 def _run(args: list[str], timeout: float = _DEFAULT_TIMEOUT) -> subprocess.CompletedProcess | None:

@@ -152,6 +152,11 @@ def run(
     if out is not None:
         out_dir = out
 
+    # 防御：包名源自样本 manifest（不可信）。畸形包名直接拒绝，不下发到 frida/adb。
+    if not device.is_valid_package(package):
+        logger.error("[capture] 包名形态非法，拒绝抓包：%r", package)
+        return empty_result(STATUS_ERROR, f"包名形态非法，拒绝抓包：{package!r}")
+
     out_path = Path(out_dir)
     try:
         out_path.mkdir(parents=True, exist_ok=True)
@@ -613,7 +618,12 @@ def _start_frida_session(
 
 
 def _teardown_frida_session(session: Any, script: Any) -> None:
-    """best-effort 收尾 frida-core 会话：script.unload() → session.detach()。异常记日志不抛。"""
+    """best-effort 收尾 frida-core 会话：unload → detach → kill spawned app。异常记日志不抛。
+
+    收尾还会 kill 掉 spawn 出来的目标 app（与失败路径对称）：否则反复跑 auto 会在设备上堆叠同
+    包名进程，下次 spawn 可能 ``already running``。pid 在 detach 前取（detach 后可能失效）。
+    """
+    pid = getattr(session, "pid", None) if session is not None else None
     if script is not None:
         try:
             script.unload()
@@ -624,6 +634,20 @@ def _teardown_frida_session(session: Any, script: Any) -> None:
             session.detach()
         except Exception:
             logger.debug("[capture] frida-core session.detach 失败（忽略）", exc_info=True)
+    # 仅当拿到真实 int pid 才 kill（测试替身的 object() 会话无 pid → 跳过，不触真 frida）。
+    if isinstance(pid, int):
+        _kill_spawned_app(pid)
+
+
+def _kill_spawned_app(pid: int) -> None:
+    """best-effort kill frida spawn 出来的目标 app 进程（重新取设备句柄）。绝不抛。"""
+    try:
+        import frida  # type: ignore[import-not-found]
+
+        frida.get_usb_device(timeout=_FRIDA_USB_TIMEOUT).kill(pid)
+        logger.debug("[capture] 收尾已 kill spawned app：pid=%s", pid)
+    except Exception:
+        logger.debug("[capture] 收尾 kill spawned app 失败（忽略）：pid=%s", pid, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
