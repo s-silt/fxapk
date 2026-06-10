@@ -91,16 +91,15 @@ severity:
 # （即便上游未单独标 writable，命中也维持 HIGH 并在 notes 标注）
 # ---------------------------------------------------------------------------
 provider_writable_hints:
+  # 注：以子串匹配 provider name。曾含 "file"/"data"/"content"/"share" 等通用词，几乎命中
+  # 任意 provider（如框架自带 androidx.core.content.FileProvider、任何含 data 的名字），研判
+  # 价值被稀释——已收窄为有判别力的特征词。
   - "fileprovider"      # 误配的 FileProvider 可导出任意私有文件
-  - "file"
-  - "db"
   - "database"
-  - "data"
-  - "share"
+  - "db"
   - "export"
-  - "content"
-  - "cache"
   - "download"
+  - "cache"
 
 # ---------------------------------------------------------------------------
 # 高敏组件名研判提示：name 命中以下关键字 → 在 notes 标注涉诈高价值面

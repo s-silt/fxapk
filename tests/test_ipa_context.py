@@ -110,6 +110,20 @@ def test_load_ipa_macho_encrypted_graceful(tmp_path):
     assert list(ctx.dex_strings()) == []
 
 
+def test_ipa_context_close_idempotent_and_context_manager(tmp_path):
+    """IpaContext.close() 关闭底层 ZipFile（幂等）；亦支持 with 语境（防句柄泄漏/Windows 锁文件）。"""
+    path = _make_ipa(tmp_path)
+    ctx = load_ipa(path, AnalysisConfig(online=False))
+    assert ctx._zf.fp is not None  # 打开中
+    ctx.close()
+    assert ctx._zf.fp is None  # ZipFile.close() 后 fp 置 None
+    ctx.close()  # 幂等，不抛
+
+    with load_ipa(path, AnalysisConfig(online=False)) as ctx2:
+        assert ctx2.package_name == "com.evil.demo"
+    assert ctx2._zf.fp is None  # 退出 with 自动关闭
+
+
 def test_load_ipa_corrupt_raises_ipaparseerror(tmp_path):
     bad = tmp_path / "bad.ipa"
     bad.write_bytes(b"not a zip at all")
