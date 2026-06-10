@@ -1,0 +1,48 @@
+# apkscan — capture_noise 抓包噪音过滤名单
+#
+# 由 apkscan.dynamic.capture._load_noise_patterns() 读取（load_rules("capture_noise")）。
+#
+# 背景：adb 全局代理把**整机**流量回流到 mitmproxy（不止目标 app），模拟器/系统自身会发
+# 连通性探测（generate_204）、NTP 授时、GMS 传输、模拟器厂商遥测/更新等——这些不是涉诈线索，
+# 混进运行时端点是噪音。命中本名单的 host → 整条流被跳过、不入运行时端点 / 不参与信封解密。
+#
+# 匹配规则：
+#   - 以 "." 开头 → 后缀匹配（".pool.ntp.org" 命中 "a.pool.ntp.org" 与 "pool.ntp.org" 本身）。
+#   - 其余 → 精确 host 匹配。大小写不敏感。
+#
+# **保守原则（重要）**：只列 OS/连通性/模拟器自身的 host。绝不列 maps.googleapis.com /
+# firebase* / fcm 等 **app 也会用的 Google SDK**——那些由 infra 分级标"无需调证"，不会污染
+# C2/调证线索，列进来反而会误杀真实 app 线索。给了 noise_hosts 即整体覆盖内置兜底，请保留常见项。
+noise_hosts:
+  # ---- 连通性 / captive portal 检测 ----
+  - connectivitycheck.gstatic.com
+  - connectivitycheck.android.com
+  - clients3.google.com
+  - clients4.google.com
+  - clients.l.google.com
+  - captive.apple.com
+  - www.msftconnecttest.com
+  - .msftncsi.com
+  # ---- 时间同步（NTP）----
+  - time.android.com
+  - time.google.com
+  - .pool.ntp.org
+  - .ntp.org
+  # ---- GMS / Play 传输层（OS 级，非 app SDK）----
+  - mtalk.google.com
+  - alt1-mtalk.google.com
+  - alt2-mtalk.google.com
+  - android.clients.google.com
+  - play.googleapis.com
+  - .gvt1.com
+  - .gvt2.com
+  - update.googleapis.com
+  - dl.google.com
+  # ---- 模拟器自身遥测 / 更新 ----
+  - .mumu.com        # MuMu（网易）
+  - .nemu.com        # MuMu/NemuPlayer
+  - .bignox.com      # 夜神 Nox
+  - .ldmnq.com       # 雷电 LDPlayer
+  - .ldrescdn.com    # 雷电资源 CDN
+  - .yeshen.com      # 逍遥
+  - .vmos.cloud      # VMOS
