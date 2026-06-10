@@ -30,6 +30,9 @@ logger = logging.getLogger(__name__)
 ASN_TIMEOUT = 8
 
 #: ip-api 免费接口地址模板与需要的字段。
+#: ⚠️ 明文 HTTP：ip-api 免费档不支持 HTTPS（HTTPS 需付费 key），故被查 IP（疑似 C2）会以
+#: 明文经过在途节点 —— 暴露"正在核查哪个 C2"的侦查意图，且响应未认证、归属可被中间人篡改。
+#: 敏感目标慎用 / 改用支持 HTTPS 的权威源（如 RDAP）。仅对"建议调证"端点查询已缩小暴露面。
 ASN_API_URL = "http://ip-api.com/json/{ip}"
 ASN_FIELDS = "status,country,isp,org,as,query"
 
@@ -99,10 +102,11 @@ class AsnEnricher(BaseEnricher):
             cache[ip] = entry
             try:
                 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-                CACHE_FILE.write_text(
-                    json.dumps(cache, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
+                # 原子写：先写临时文件再 replace，避免崩溃/并发时留半截坏缓存（读侧虽容忍坏文件
+                # 重查，但原子替换从源头消除半截文件）。
+                tmp = CACHE_FILE.with_name(CACHE_FILE.name + ".tmp")
+                tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+                tmp.replace(CACHE_FILE)
             except Exception:
                 logger.warning("ASN 缓存写入失败：%s", CACHE_FILE, exc_info=True)
 

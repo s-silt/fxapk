@@ -82,6 +82,11 @@ def run(
             "无法从 APK 解析包名（frida-dexdump 需 -f <package> 定位目标进程）。",
         )
 
+    # 防御：包名源自样本 manifest（不可信），畸形包名直接拒绝，不下发到 frida-dexdump。
+    if not device.is_valid_package(package_name):
+        logger.error("[unpack] 包名形态非法，拒绝脱壳：%r", package_name)
+        return empty_result(STATUS_ERROR, f"包名形态非法，拒绝脱壳：{package_name!r}")
+
     # 3) 跑 frida-dexdump dump 到 out_dir/dump。
     dump_dir = Path(out_dir) / "dump"
     playbook: list[str] = []

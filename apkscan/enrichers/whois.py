@@ -128,10 +128,10 @@ class WhoisEnricher(BaseEnricher):
             cache[domain] = entry
             try:
                 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-                CACHE_FILE.write_text(
-                    json.dumps(cache, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
+                # 原子写：临时文件 + replace，避免崩溃/并发留半截坏缓存。
+                tmp = CACHE_FILE.with_name(CACHE_FILE.name + ".tmp")
+                tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+                tmp.replace(CACHE_FILE)
             except Exception:
                 logger.warning("WHOIS 缓存写入失败：%s", CACHE_FILE, exc_info=True)
 

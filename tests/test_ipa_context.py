@@ -161,3 +161,12 @@ def test_macho_extracts_printable_runs():
 def test_macho_empty_and_encrypted_return_empty():
     assert macho.scan_ascii_strings(b"") == []
     assert macho.scan_ascii_strings(bytes(range(16)) * 50) == []  # 高熵无可读串
+
+
+def test_macho_extracts_utf16le_runs():
+    """UTF-16LE 对齐串（每字符后跟 0x00，iOS CFString 形态）也被捞回，纯 ASCII 扫描会漏。"""
+    ascii_part = b"\x00".join(f"asciirun{i}str".encode() for i in range(12))  # 凑够阈值
+    utf16_url = "https://utf16.evil.com/seed".encode("utf-16-le")
+    out = macho.scan_ascii_strings(ascii_part + b"\x00\x00" + utf16_url, min_len=4)
+    assert any("utf16.evil.com" in s for s in out)  # UTF-16 串被提取
+    assert any("asciirun0str" in s for s in out)  # ASCII 串照常
