@@ -367,8 +367,12 @@ def _load_extra_dex(extra_dex: list[str]) -> list:
         try:
             buff = Path(path).read_bytes()
             out.append(DEX(buff))
-        except Exception:
-            logger.exception("解析额外 DEX 失败，跳过：%s", path)
+        except Exception as exc:  # noqa: BLE001 - 坏/不兼容 DEX 跳过即可，不炸主流程
+            # 收敛成一行 warning + 异常摘要（不打整坨 traceback）：frida-dexdump dump 的
+            # Android 10+ DEX 常因 androguard 不认 hidden-api flag 抛 ValueError
+            # （HiddenApiClassDataItem.*ApiFlag），是已知库限制、会成批出现，整坨 traceback
+            # 纯噪音。仍如实记录（不 swallow），只是不再刷屏。
+            logger.warning("解析额外 DEX 失败，跳过：%s（%s: %s）", path, type(exc).__name__, exc)
     return out
 
 

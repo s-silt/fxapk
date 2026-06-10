@@ -40,6 +40,8 @@ noise_hosts:
   - dl.google.com
   # ---- 模拟器自身遥测 / 更新 ----
   - .mumu.com        # MuMu（网易）
+  - .mumu.163.com    # MuMu（网易，走 163 域名：store-api/update 等自身流量）
+  - .mumuglobal.com  # MuMu Global
   - .nemu.com        # MuMu/NemuPlayer
   - .bignox.com      # 夜神 Nox
   - .ldmnq.com       # 雷电 LDPlayer

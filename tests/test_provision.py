@@ -464,6 +464,45 @@ def test_ensure_frida_server_start_uses_detached_redirected_command(monkeypatch)
         assert ">/dev/null" in c  # std{out,err} 被重定向，adb shell 才会立即返回
 
 
+def test_start_frida_server_su_device_only_root_no_nonroot_race(monkeypatch):
+    """su 型设备（adbd 非 root、su 可用，如 MuMu）：只经 su -c 起 **root** 实例，**绝不**再直执
+    非 root 起 frida-server。
+
+    根因回归锁：旧实现对每条启动命令既 su -c（root）又直执 adb shell（非 root），两者抢端口
+    27042，非 root 实例若先 bind，frida-server 就以非 root 跑 → spawn 全 jailed（"重启成功却
+    仍 jailed"）。本用例钉死：su 设备上只起 root、无非 root 竞争者；pkill 用 -x（不自伤）。
+    """
+    monkeypatch.setattr(provision, "_adbd_is_root", lambda serial=None: False)  # adbd 非 root
+    monkeypatch.setattr(provision, "_su_uid0", lambda serial=None: True)  # su 可拿 uid=0
+    su_cmds: list[str] = []
+    direct_starts: list[list[str]] = []
+
+    def _fake_su_ok(cmd, serial=None):  # noqa: ANN001
+        su_cmds.append(cmd)
+        return True
+
+    def _fake_adb_ok(extra, serial=None):  # noqa: ANN001
+        joined = " ".join(extra)
+        if (
+            extra
+            and extra[0] == "shell"
+            and provision._FRIDA_SERVER_REMOTE in joined
+            and ("setsid" in joined or "nohup" in joined)
+        ):
+            direct_starts.append(extra)  # 记录任何"直执非 root 起 frida-server"
+        return True
+
+    monkeypatch.setattr(provision, "_su_ok", _fake_su_ok)
+    monkeypatch.setattr(provision, "_adb_ok", _fake_adb_ok)
+
+    assert provision._start_frida_server_background(None) is True
+    # 多法杀旧实例（pkill -f 匹配 cmdline + pidof 兜底；MuMu comm 被隐藏时 -x 会漏杀）。
+    assert "pkill -f frida-server" in su_cmds
+    assert any("pidof frida-server" in c for c in su_cmds)
+    assert any("setsid" in c or "nohup" in c for c in su_cmds)  # 经 su 起了 root 实例
+    assert direct_starts == []  # **绝不**直执非 root 起 frida-server（关键：不抢端口变 jailed）
+
+
 def test_su_ok_single_quotes_command_as_one_adb_arg(monkeypatch):
     """核心修复回归锁：su -c 必须把整条命令**单引号包裹成单个 adb shell 参数**，否则
     Superuser.apk/KingUser 型 su 会把 cmd 的 flags（如 pkill 的 -f）当成 su 自己的选项。"""
@@ -854,6 +893,7 @@ def test_ensure_frida_server_restarts_non_root_as_root(
     """真机实测自愈：检测到非 root frida-server → 杀掉以 root 重启，action=restarted_as_root。"""
     monkeypatch.setattr(provision.device, "frida_server_running", lambda serial=None: True)
     monkeypatch.setattr(provision.device, "frida_server_is_root", lambda serial=None: False)
+    monkeypatch.setattr(provision, "_frida_binary_present", lambda serial=None: True)  # 二进制已部署
     started: list[object] = []
 
     def _fake_start(serial: object = None) -> bool:
@@ -876,6 +916,7 @@ def test_ensure_frida_server_running_not_root_reports_honestly(
     如实 action=running_not_root + ok=False（避免下游白走 spawn 报 jailed 却显示成功）。"""
     monkeypatch.setattr(provision.device, "frida_server_running", lambda serial=None: True)
     monkeypatch.setattr(provision.device, "frida_server_is_root", lambda serial=None: False)
+    monkeypatch.setattr(provision, "_frida_binary_present", lambda serial=None: True)  # 二进制已部署
     monkeypatch.setattr(provision, "_start_frida_server_background", lambda serial=None: False)
     monkeypatch.setattr(provision, "_su_uid0", lambda serial=None: False)
     monkeypatch.setattr(provision.time, "sleep", lambda *_a: None)
@@ -885,6 +926,27 @@ def test_ensure_frida_server_running_not_root_reports_honestly(
     assert res["action"] == "running_not_root"
     assert "jailed" in res["detail"]
     assert res["fix_cmd"]  # 给手动起 root 的命令
+
+
+def test_ensure_frida_server_running_but_binary_absent_falls_through_to_deploy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MuMu 实测根因：frida_server_running **误判**"在跑"但 /data/local/tmp/frida-server 根本
+    不存在 → 不去重启幽灵二进制 + 假报成功，而是**落到部署流程**（push 二进制 + 以 root 起）。"""
+    monkeypatch.setattr(provision.device, "frida_server_running", lambda serial=None: True)
+    monkeypatch.setattr(provision.device, "frida_server_is_root", lambda serial=None: False)
+    monkeypatch.setattr(provision, "_frida_binary_present", lambda serial=None: False)  # 二进制未部署
+    monkeypatch.setattr(provision, "device_abi", lambda serial=None: "arm64-v8a")
+    monkeypatch.setattr(provision, "host_frida_version", lambda: "16.5.9")
+    monkeypatch.setattr(provision, "_download_and_extract", lambda url, dest, on_progress: "")
+    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None: True)
+    monkeypatch.setattr(provision, "_adbd_is_root", lambda serial=None: True)
+    monkeypatch.setattr(provision.time, "sleep", lambda *_a: None)
+
+    res = provision.ensure_frida_server()
+    # 关键：走了部署（push + 起 root），而不是"restarted_as_root"假成功。
+    assert res["action"] == "deployed"
+    assert res["ok"] is True
 
 
 def test_ensure_frida_server_already_running_root_no_restart(

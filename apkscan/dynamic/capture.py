@@ -431,6 +431,7 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
     result["artifacts"] = artifacts
     result["report_paths"] = report_paths
     result["playbook"] = playbook
+    _cleanup_diag(out_path)  # 清掉 .diag/ 下空的 mitmdump/frida stderr 日志（成功时纯杂物）
     return result
 
 
@@ -441,8 +442,10 @@ def _spawn_logged(args: list[str], log_path: Path) -> subprocess.Popen[bytes]:
     （~64KB）会阻塞其主循环 → 代理停转、后续真·C2 流量静默丢失，而 capture 仍 sleep 满
     duration 并以"成功 N 端点"收尾（"假成功"）。改用文件重定向：既不会阻塞，又把 stderr
     完整留盘供秒退诊断（``_read_proc_stderr`` 优先读该文件）。stdout 用 ``DEVNULL``（flows 已
-    落 ``-w`` 文件、frida ``-q`` 本就安静）。
+    落 ``-w`` 文件、frida ``-q`` 本就安静）。日志写进 ``out/.diag/``（不与报告混在主输出目录），
+    成功（空文件）由 :func:`_cleanup_diag` 收尾清掉。
     """
+    log_path.parent.mkdir(parents=True, exist_ok=True)  # .diag 子目录
     log_f = open(log_path, "wb")  # noqa: SIM115 - 句柄交 subprocess 继承，父进程随即关闭副本
     try:
         proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=log_f)
@@ -450,6 +453,25 @@ def _spawn_logged(args: list[str], log_path: Path) -> subprocess.Popen[bytes]:
         log_f.close()  # 父进程关副本；子进程已继承自己的 fd，照常写入
     proc._fxapk_stderr_log = log_path  # type: ignore[attr-defined]  # 供 _read_proc_stderr 读取
     return proc
+
+
+def _cleanup_diag(out_path: Path) -> None:
+    """收尾清理 ``out/.diag/`` 下的**空**诊断日志（成功时 stderr 为空、纯杂物，别和报告混在
+    主输出目录）；非空的保留供排障。目录清空后连 ``.diag`` 一并删。绝不抛。"""
+    diag = out_path / ".diag"
+    if not diag.is_dir():
+        return
+    try:
+        for f in diag.iterdir():
+            try:
+                if f.is_file() and f.stat().st_size == 0:
+                    f.unlink()
+            except OSError:
+                logger.debug("[capture] 清理空诊断日志失败（忽略）：%s", f, exc_info=True)
+        if not any(diag.iterdir()):
+            diag.rmdir()
+    except OSError:
+        logger.debug("[capture] 清理 .diag 目录失败（忽略）", exc_info=True)
 
 
 def _start_mitmdump(flows_file: Path) -> subprocess.Popen[bytes]:
@@ -470,7 +492,7 @@ def _start_mitmdump(flows_file: Path) -> subprocess.Popen[bytes]:
         str(_PROXY_PORT),
     ]
     logger.info("[capture] 启动 mitmdump：%s", " ".join(args))
-    return _spawn_logged(args, flows_file.parent / "mitmdump.stderr.log")
+    return _spawn_logged(args, flows_file.parent / ".diag" / "mitmdump.stderr.log")
 
 
 def _start_frida_unpinning(package: str, out_path: Path) -> subprocess.Popen[bytes] | None:
@@ -501,7 +523,7 @@ def _start_frida_unpinning(package: str, out_path: Path) -> subprocess.Popen[byt
         args.append("--no-pause")  # 仅老版 frida-tools(<14) 需要；新版默认不暂停
     logger.info("[capture] frida 注入 unpinning 并启动 app：%s", " ".join(args))
     try:
-        return _spawn_logged(args, out_path / "frida.stderr.log")
+        return _spawn_logged(args, out_path / ".diag" / "frida.stderr.log")
     except Exception:
         logger.exception("[capture] 启动 frida 失败，跳过注入")
         return None
