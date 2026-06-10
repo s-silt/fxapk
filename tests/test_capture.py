@@ -1166,3 +1166,79 @@ def test_parse_flows_extracts_server_ip(monkeypatch, tmp_path):  # noqa: ANN001
     assert by_value["203.0.113.9"].kind == "ip"
     assert "gw.hxhcapi.vip" in by_value  # 域名也在
     assert all(ev.source == "runtime" for ep in eps for ev in ep.evidences)
+
+
+# ---------------------------------------------------------------------------
+# 噪音过滤：模拟器/系统自身流量
+# ---------------------------------------------------------------------------
+
+
+def test_is_noise_host_matching():
+    pats = (".pool.ntp.org", "connectivitycheck.gstatic.com", ".mumu.com")
+    assert capture._is_noise_host("a.pool.ntp.org", pats) is True  # 后缀
+    assert capture._is_noise_host("pool.ntp.org", pats) is True  # 后缀含自身
+    assert capture._is_noise_host("connectivitycheck.gstatic.com", pats) is True  # 精确
+    assert capture._is_noise_host("update.mumu.com", pats) is True
+    assert capture._is_noise_host("gw.hxhcapi.vip", pats) is False  # 真涉诈域名不误杀
+    assert capture._is_noise_host("maps.googleapis.com", pats) is False  # app SDK 不误杀
+    assert capture._is_noise_host("", pats) is False
+
+
+def test_parse_flows_filters_emulator_noise(monkeypatch, tmp_path):
+    """模拟器/系统自身流量（连通性检测/授时/模拟器遥测）→ 整条跳过，不入运行时端点。"""
+    monkeypatch.setattr(capture, "_NOISE_PATTERNS_CACHE", None)  # 重置进程内缓存
+    flows_file = tmp_path / "flows.mitm"
+    flows_file.write_bytes(b"\x00data")
+
+    flows = [
+        _FakeFlowWithConn(  # 噪音：连通性检测
+            _FakeRequest("http://connectivitycheck.gstatic.com/generate_204", "connectivitycheck.gstatic.com", "http"),
+            _FakeServerConn(("142.250.0.1", 80)),
+        ),
+        _FakeFlowWithConn(  # 噪音：MuMu 遥测
+            _FakeRequest("https://log.mumu.com/report", "log.mumu.com", "https"),
+            _FakeServerConn(("1.2.3.4", 443)),
+        ),
+        _FakeFlowWithConn(  # 真涉诈端点
+            _FakeRequest("https://gw.hxhcapi.vip/cfg", "gw.hxhcapi.vip", "https"),
+            _FakeServerConn(("203.0.113.9", 443)),
+        ),
+    ]
+    fake_io = type("io", (), {"FlowReader": staticmethod(lambda fh: type("R", (), {"stream": lambda self: iter(flows)})())})
+    fake_http = type("http", (), {"HTTPFlow": _FakeFlowWithConn})
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "mitmproxy", type("m", (), {}))
+    monkeypatch.setitem(sys.modules, "mitmproxy.io", fake_io)
+    monkeypatch.setitem(sys.modules, "mitmproxy.http", fake_http)
+
+    values = {ep.value for ep in capture._parse_flows(flows_file)}
+    # 真涉诈域名 + 其实连 IP 保留
+    assert "gw.hxhcapi.vip" in values
+    assert "203.0.113.9" in values
+    # 噪音 host / url / 其 IP 全被滤掉
+    assert "connectivitycheck.gstatic.com" not in values
+    assert "log.mumu.com" not in values
+    assert "142.250.0.1" not in values  # 噪音流的实连 IP 也不入
+    assert "1.2.3.4" not in values
+
+
+def test_load_noise_patterns_rule_override(monkeypatch):
+    """rules/capture_noise.yaml 给了 noise_hosts 即整体覆盖内置兜底。"""
+    monkeypatch.setattr(capture, "_NOISE_PATTERNS_CACHE", None)
+    from apkscan.core import registry
+
+    monkeypatch.setattr(registry, "load_rules", lambda name: {"noise_hosts": ["evil-noise.test"]})
+    pats = capture._load_noise_patterns()
+    assert "evil-noise.test" in pats
+    assert ".mumu.com" not in pats  # 规则覆盖了兜底
+
+
+def test_load_noise_patterns_fallback_on_bad_rules(monkeypatch):
+    monkeypatch.setattr(capture, "_NOISE_PATTERNS_CACHE", None)
+    from apkscan.core import registry
+
+    monkeypatch.setattr(registry, "load_rules", lambda name: "garbage")
+    pats = capture._load_noise_patterns()
+    assert ".mumu.com" in pats  # 坏规则 → 用内置兜底

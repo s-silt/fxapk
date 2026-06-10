@@ -776,6 +776,100 @@ def _terminate(proc: subprocess.Popen[bytes] | None, label: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 噪音过滤：模拟器/系统自身流量（连通性检测/时间同步/GMS 传输/模拟器遥测）
+# ---------------------------------------------------------------------------
+#
+# adb 全局代理把**整机**流量（不止目标 app）都回流到 mitmproxy，模拟器/系统自身会发连通性
+# 探测（generate_204）、NTP 授时、GMS 传输、模拟器厂商遥测等——这些不是涉诈线索，混进运行时
+# 端点里是噪音。按 host 精确/后缀名单过滤掉整条流。**保守**：只列 OS/连通性/模拟器自身的 host，
+# 绝不含 maps/firebase/fcm 等 app 也会用的 Google SDK（那些由 infra 分级标"无需调证"，不误杀）。
+_FALLBACK_NOISE_HOSTS: tuple[str, ...] = (
+    # 连通性 / captive portal 检测
+    "connectivitycheck.gstatic.com",
+    "connectivitycheck.android.com",
+    "clients3.google.com",
+    "clients4.google.com",
+    "clients.l.google.com",
+    "captive.apple.com",
+    "www.msftconnecttest.com",
+    ".msftncsi.com",
+    # 时间同步
+    "time.android.com",
+    "time.google.com",
+    ".pool.ntp.org",
+    ".ntp.org",
+    # GMS / Play 传输层（OS 级，非 app SDK）
+    "mtalk.google.com",
+    "alt1-mtalk.google.com",
+    "alt2-mtalk.google.com",
+    "android.clients.google.com",
+    "play.googleapis.com",
+    ".gvt1.com",
+    ".gvt2.com",
+    "update.googleapis.com",
+    "dl.google.com",
+    # 模拟器自身遥测 / 更新（MuMu/网易、Nox、LDPlayer、逍遥、VMOS 等）
+    ".mumu.com",
+    ".nemu.com",
+    ".bignox.com",
+    ".ldmnq.com",
+    ".ldrescdn.com",
+    ".yeshen.com",
+    ".vmos.cloud",
+)
+
+# 进程内缓存（一次抓包解析内复用，避免每条流都 load_rules）。
+_NOISE_PATTERNS_CACHE: tuple[str, ...] | None = None
+
+
+def _load_noise_patterns() -> tuple[str, ...]:
+    """加载噪音 host 名单（rules/capture_noise.yaml 覆盖/扩展内置兜底）。规则缺失/异常 → 兜底。"""
+    global _NOISE_PATTERNS_CACHE
+    if _NOISE_PATTERNS_CACHE is not None:
+        return _NOISE_PATTERNS_CACHE
+    patterns: list[str] = list(_FALLBACK_NOISE_HOSTS)
+    try:
+        from apkscan.core.registry import load_rules
+
+        data = load_rules("capture_noise")
+        if isinstance(data, dict):
+            extra = data.get("noise_hosts")
+            if isinstance(extra, list):
+                cleaned = [str(h).strip().lower() for h in extra if str(h).strip()]
+                if cleaned:
+                    patterns = cleaned  # 规则给了就以规则为准（含内置常见项即可整体覆盖）
+    except Exception:  # noqa: BLE001 — 规则不可用不影响抓包，用兜底
+        logger.debug("[capture] 加载 capture_noise 规则失败，用内置兜底", exc_info=True)
+    _NOISE_PATTERNS_CACHE = tuple(dict.fromkeys(p for p in patterns if p))
+    return _NOISE_PATTERNS_CACHE
+
+
+def _is_noise_host(host: str, patterns: tuple[str, ...]) -> bool:
+    """host 是否命中噪音名单：``.suffix`` 做后缀匹配（含自身），其余做精确匹配（大小写不敏感）。"""
+    if not host:
+        return False
+    h = host.strip().lower().rstrip(".")
+    for p in patterns:
+        if not p:
+            continue
+        if p.startswith("."):
+            if h == p[1:] or h.endswith(p):
+                return True
+        elif h == p:
+            return True
+    return False
+
+
+def _flow_host(flow: object) -> str:
+    """从流取 host（pretty_host 优先），用于噪音判定。取不到 → 空串。"""
+    request = getattr(flow, "request", None)
+    if request is None:
+        return ""
+    host = getattr(request, "pretty_host", None) or getattr(request, "host", None)
+    return host if isinstance(host, str) else ""
+
+
+# ---------------------------------------------------------------------------
 # flows 解析 → 运行时端点
 # ---------------------------------------------------------------------------
 
@@ -804,12 +898,18 @@ def _parse_flows(flows_file: Path) -> list[Endpoint]:
         )
         return []
 
+    noise_patterns = _load_noise_patterns()
     collector: dict[str, Endpoint] = {}
+    filtered = 0
     try:
         with flows_file.open("rb") as fh:
             reader = mitm_io.FlowReader(fh)
             for flow in reader.stream():
                 if not isinstance(flow, mitm_http.HTTPFlow):
+                    continue
+                # 模拟器/系统自身流量（连通性检测/授时/GMS/模拟器遥测）→ 整条跳过，不入端点。
+                if _is_noise_host(_flow_host(flow), noise_patterns):
+                    filtered += 1
                     continue
                 _collect_flow_endpoints(flow, str(flows_file), collector)
     except Exception:
@@ -817,7 +917,14 @@ def _parse_flows(flows_file: Path) -> list[Endpoint]:
         return list(collector.values())
 
     endpoints = list(collector.values())
-    logger.info("[capture] 从流文件提取运行时端点 %d 个", len(endpoints))
+    if filtered:
+        logger.info(
+            "[capture] 从流文件提取运行时端点 %d 个（已过滤模拟器/系统自身噪音流 %d 条）",
+            len(endpoints),
+            filtered,
+        )
+    else:
+        logger.info("[capture] 从流文件提取运行时端点 %d 个", len(endpoints))
     return endpoints
 
 
@@ -892,6 +999,7 @@ def _parse_messages(flows_file: Path) -> list[dict[str, Any]]:
         logger.warning("[capture] mitmproxy 包不可用，无法提取报文体（信封解密将跳过）")
         return []
 
+    noise_patterns = _load_noise_patterns()
     messages: list[dict[str, Any]] = []
     try:
         with flows_file.open("rb") as fh:
@@ -899,6 +1007,8 @@ def _parse_messages(flows_file: Path) -> list[dict[str, Any]]:
             for flow in reader.stream():
                 if not isinstance(flow, mitm_http.HTTPFlow):
                     continue
+                if _is_noise_host(_flow_host(flow), noise_patterns):
+                    continue  # 模拟器/系统自身流量不参与信封解密
                 msg = _message_from_flow(flow)
                 if msg is not None:
                     messages.append(msg)
