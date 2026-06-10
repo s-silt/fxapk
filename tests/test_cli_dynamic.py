@@ -175,7 +175,7 @@ def test_analyze_cleans_adb_on_exit(monkeypatch):
     calls = {"n": 0}
     monkeypatch.setattr(tools, "kill_adb_server", lambda: calls.__setitem__("n", calls["n"] + 1))
     monkeypatch.setattr(cli.device, "has_device", lambda: False)
-    monkeypatch.setattr(cli.pipeline, "run", lambda ctx, config: _make_report("com.x"))
+    monkeypatch.setattr("apkscan.core.pipeline.run", lambda ctx, config: _make_report("com.x"))
     monkeypatch.setattr(cli, "load_apk", lambda *a, **k: _FakeCtx())
     monkeypatch.setattr(cli, "_write_reports", lambda *a, **k: None)
 
@@ -317,7 +317,7 @@ def test_analyze_dynamic_no_device_skips(monkeypatch):
     monkeypatch.setattr(cli.device, "has_device", lambda: False)
     # pipeline.run 用轻量桩，避免真跑分析器。
     monkeypatch.setattr(
-        cli.pipeline, "run", lambda ctx, config: _make_report("com.x")
+        "apkscan.core.pipeline.run", lambda ctx, config: _make_report("com.x")
     )
     monkeypatch.setattr(cli, "load_apk", lambda *a, **k: _FakeCtx())
     monkeypatch.setattr(cli, "_write_reports", lambda *a, **k: None)

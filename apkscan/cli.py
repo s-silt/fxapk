@@ -15,7 +15,7 @@ from pathlib import Path
 import click
 import typer
 
-from apkscan.core import device, pipeline
+from apkscan.core import device
 from apkscan.core.apk import ApkParseError, load_apk
 from apkscan.core.models import AnalysisConfig, LeadCategory, Report
 from apkscan.core.report_naming import report_base
@@ -101,6 +101,10 @@ def analyze(
 
         typer.echo(f"包名：{ctx.package_name or '(未知)'}  联网富化：{'是' if online else '否'}")
         typer.echo("运行分析流水线 ...")
+        # 启动提速：pipeline（→registry）延迟到真正分析时才 import；--version/doctor/gui
+        # 等不分析的命令不再付这份导入开销。
+        from apkscan.core import pipeline
+
         # ApkContext 用 @cached_property 暴露 package_name/manifest_xml，运行期满足
         # AnalysisContext 协议（324 测试+真机已证）；pyright 对 cached_property→property
         # 的协议匹配有已知局限，故此处显式忽略。
