@@ -16,7 +16,8 @@ import click
 import typer
 
 from apkscan.core import device
-from apkscan.core.apk import ApkParseError, load_apk
+from apkscan.core.apk import ApkParseError
+from apkscan.core.loader import load_app
 from apkscan.core.models import AnalysisConfig, LeadCategory, Report
 from apkscan.core.report_naming import report_base
 
@@ -92,14 +93,19 @@ def analyze(
         if extra_dex_files:
             typer.echo(f"额外 DEX：{len(extra_dex_files)} 个并入静态分析")
 
-        typer.echo(f"加载 APK：{apk}")
+        typer.echo(f"加载：{apk}")
         try:
-            ctx = load_apk(str(apk), config, extra_dex=extra_dex_files or None)
-        except ApkParseError as exc:
+            # load_app 按文件类型分流：.ipa / 含 Payload 的 ZIP → IPA（纯静态），否则 → APK。
+            ctx = load_app(str(apk), config, extra_dex=extra_dex_files or None)
+        except ApkParseError as exc:  # IpaParseError 继承 ApkParseError，一并兜住
             typer.echo(f"错误：{exc}", err=True)
             raise typer.Exit(code=2) from exc
 
-        typer.echo(f"包名：{ctx.package_name or '(未知)'}  联网富化：{'是' if online else '否'}")
+        is_ios = getattr(ctx, "platform", "android") == "ios"
+        if is_ios and extra_dex_files:
+            typer.echo("IPA 无 DEX，已忽略 --extra-dex。")
+        kind = "IPA(iOS)" if is_ios else "APK(Android)"
+        typer.echo(f"类型：{kind}  包名：{ctx.package_name or '(未知)'}  联网富化：{'是' if online else '否'}")
         typer.echo("运行分析流水线 ...")
         # 启动提速：pipeline（→registry）延迟到真正分析时才 import；--version/doctor/gui
         # 等不分析的命令不再付这份导入开销。
@@ -116,7 +122,8 @@ def analyze(
         report.meta["online"] = config.online
 
         # 设备探测：有在线设备则提示并写入 meta，便于报告/后续动态补全感知。
-        device_detected = device.has_device()
+        # IPA 无 Android 动态（adb/frida 不适用），跳过设备探测。
+        device_detected = False if is_ios else device.has_device()
         if device_detected:
             report.meta["device_detected"] = True
             typer.echo("检测到在线 adb 设备：可用 --dynamic 做真机脱壳/抓包补全静态盲区。")
@@ -131,7 +138,9 @@ def analyze(
         _print_summary(report)
 
         # --dynamic：静态完成后，若有设备则自动 unpack + capture（实现由 dynamic 模块 agent 完成）。
-        if dynamic:
+        if dynamic and is_ios:
+            typer.echo("IPA 仅静态分析（iOS 动态需越狱设备 + frida-iOS，本工具不支持），跳过 --dynamic。")
+        elif dynamic:
             if not device_detected:
                 typer.echo("未检测到在线设备，跳过 --dynamic（动态脱壳/抓包需真机）。")
             else:

@@ -35,11 +35,15 @@ logger = logging.getLogger(__name__)
 def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     """执行完整流水线，返回 Report。"""
     capabilities = detect_capabilities(online=config.online)
+    # 平台能力：让 requires=["apk"] 的 Android 专属 analyzer 在 IPA 上自动 skipped、
+    # requires=["ipa"] 的 iOS analyzer 在 APK 上 skipped（复用既有 requires 门控，pipeline 主体不变）。
+    platform = getattr(ctx, "platform", "android")
+    capabilities.add("apk" if platform == "android" else "ipa")
 
     leads: list[Lead] = []
     endpoints: list[Endpoint] = []
     findings: list = []
-    meta: dict = {"package_name": ctx.package_name}
+    meta: dict = {"package_name": ctx.package_name, "platform": platform}
     analyzer_status: list[dict] = []
 
     # 1) 跑分析器（逐个 try/except；requires 不满足→skipped）
@@ -95,8 +99,12 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
 
     # 2.5) 把上下文的降级标志显式带入报告，避免"未采集"被静默当成"采集为空"。
     if getattr(ctx, "dex_available", True) is False:
-        meta["dex_parse_failed"] = True
-        logger.warning("DEX 不可用（加固/无 dex），静态端点/SDK/支付线索严重不完整")
+        if platform == "ios":
+            # iOS 本就无 DEX，不是"加固"——H5 端点在 www JS 资源里命中，这不是降级告警。
+            meta["dex_parse_failed"] = False
+        else:
+            meta["dex_parse_failed"] = True
+            logger.warning("DEX 不可用（加固/无 dex），静态端点/SDK/支付线索严重不完整")
     if getattr(ctx, "apk_validation_ok", True) is False:
         meta["apk_validation_warning"] = "APK 合法性校验异常，分析结果可能不可靠（详见日志）"
 

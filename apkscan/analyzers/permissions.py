@@ -72,7 +72,7 @@ class PermissionsAnalyzer(BaseAnalyzer):
     """检测危险权限与高危权限组合，产出 category=\"permission\" 的 Finding。"""
 
     name = "permissions"
-    requires: list[str] = []  # 纯静态读取权限列表，永远可用
+    requires: list[str] = ["apk"]  # Android 专属（权限声明）；IPA 上自动 skipped
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
         result = AnalyzerResult(analyzer=self.name)

@@ -34,12 +34,15 @@ from apkscan.gui.controller import (
     ACTION_AUTO,
     ACTION_DOCTOR,
     ACTION_STATIC,
+    FILE_TYPE_APK,
+    FILE_TYPE_IPA,
     ActionRequest,
     ActionResult,
     GuiController,
     clamp_duration,
     resolve_out_dir,
     validate_apk_path,
+    validate_ipa_path,
     validate_out_dir,
 )
 
@@ -125,6 +128,19 @@ def _make_apk(tmp_path: Path, name: str = "app.apk") -> str:
     return str(p)
 
 
+def _make_ipa(tmp_path: Path, name: str = "app.ipa", *, with_payload: bool = True) -> str:
+    """在 tmp_path 写一个能过 validate_ipa_path 的最小「IPA」（ZIP + 可选 Payload/）。"""
+    import zipfile
+
+    p = tmp_path / name
+    with zipfile.ZipFile(p, "w") as zf:
+        if with_payload:
+            zf.writestr("Payload/Demo.app/Info.plist", b"x")
+        else:
+            zf.writestr("foo.txt", b"bar")
+    return str(p)
+
+
 # ---------------------------------------------------------------------------
 # 1) 子进程命令构造（frozen vs 源码；各 subcmd 参数）
 # ---------------------------------------------------------------------------
@@ -185,6 +201,37 @@ def test_subcmd_argv_auto_full_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     assert argv[argv.index("--duration") + 1] == "30"
     assert argv[argv.index("--out") + 1] == "d"
     assert argv[argv.index("--fmt") + 1] == "html"
+
+
+def test_subcmd_argv_analyze_ipa_uses_ipa_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """IPA 栏：analyze 子命令位置参取 ipa_path（而非 apk_path）；CLI load_app 自动分流。"""
+    monkeypatch.setattr(ctrl_mod, "_frozen", lambda: False)
+    controller, _logs, _results = _make_controller(monkeypatch)
+    req = ActionRequest(
+        action=ACTION_STATIC,
+        file_type=FILE_TYPE_IPA,
+        apk_path="should_not_use.apk",
+        ipa_path="fraud.ipa",
+        out_dir="o",
+        online=False,
+    )
+    argv = controller._subcmd_argv("analyze", req)
+    assert argv[3] == "analyze"
+    assert "fraud.ipa" in argv  # 用 ipa_path
+    assert "should_not_use.apk" not in argv  # 不用 apk_path
+    assert "--offline" in argv
+    assert "--dynamic" not in argv  # IPA 纯静态
+
+
+def test_action_request_target_path() -> None:
+    """target_path 按 file_type 选路径：默认 apk，IPA 栏取 ipa_path。"""
+    apk_req = ActionRequest(action=ACTION_STATIC, apk_path="a.apk", ipa_path="b.ipa")
+    assert apk_req.file_type == FILE_TYPE_APK  # 默认 APK
+    assert apk_req.target_path == "a.apk"
+    ipa_req = ActionRequest(
+        action=ACTION_STATIC, file_type=FILE_TYPE_IPA, apk_path="a.apk", ipa_path="b.ipa"
+    )
+    assert ipa_req.target_path == "b.ipa"
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +500,65 @@ def test_doctor_without_apk_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
     assert results[0].action == ACTION_DOCTOR
 
 
+def test_ipa_static_runs_analyze_with_ipa_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """IPA 栏静态分析：start 校验 ipa_path → 子进程跑 analyze、位置参是 ipa_path。"""
+    monkeypatch.setattr(ctrl_mod, "_frozen", lambda: False)
+    _write_report_json(tmp_path, endpoints=2, leads=1, findings=1)
+    ipa = _make_ipa(tmp_path)
+    captures = _patch_subprocess(monkeypatch, returncode=0, lines=["类型：IPA(iOS)"])
+    controller, logs, results = _make_controller(monkeypatch)
+    assert (
+        controller.start(
+            ActionRequest(
+                action=ACTION_STATIC,
+                file_type=FILE_TYPE_IPA,
+                ipa_path=ipa,
+                out_dir=str(tmp_path),
+            )
+        )
+        is True
+    )
+    argv = captures["argv"]
+    assert argv[3] == "analyze"
+    assert ipa in argv  # 位置参是 ipa_path
+    assert "--dynamic" not in argv
+    assert "类型：IPA(iOS)" in logs
+    assert results[0].ok is True
+
+
+def test_ipa_auto_rejected_friendly(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """IPA 栏点【一键全自动】→ 被挡（iOS 仅静态），友好文案、不起子进程。"""
+    monkeypatch.setattr(ctrl_mod, "_frozen", lambda: False)
+    captures = _patch_subprocess(monkeypatch, returncode=0)
+    controller, _logs, results = _make_controller(monkeypatch)
+    accepted = controller.start(
+        ActionRequest(
+            action=ACTION_AUTO,
+            file_type=FILE_TYPE_IPA,
+            ipa_path=_make_ipa(tmp_path),
+            out_dir=str(tmp_path),
+        )
+    )
+    assert accepted is False
+    assert results[0].ok is False
+    assert "仅支持静态分析" in results[0].message
+    assert captures["called"] is False  # 不起子进程
+
+
+def test_ipa_static_without_ipa_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """IPA 栏未选文件 → 用 IPA 校验器挡（友好「请先选择一个 IPA」）。"""
+    controller, _logs, results = _make_controller(monkeypatch)
+    accepted = controller.start(
+        ActionRequest(action=ACTION_STATIC, file_type=FILE_TYPE_IPA, ipa_path="")
+    )
+    assert accepted is False
+    assert results[0].ok is False
+    assert "请先选择一个 IPA" in results[0].message
+    assert controller.busy is False
+
+
 def test_unknown_action_friendly(monkeypatch: pytest.MonkeyPatch) -> None:
     controller, _logs, results = _make_controller(monkeypatch)
     # 直接调内部 dispatch（start 不校验 action 取值）。
@@ -514,6 +620,64 @@ def test_validate_apk_path_ok_by_suffix(tmp_path: Path) -> None:
     p = tmp_path / "app.apk"
     p.write_bytes(b"\x01\x02\x03\x04anything")
     assert validate_apk_path(str(p)) is None
+
+
+# ===========================================================================
+# 8b) 防呆：IPA 路径校验纯函数（iOS 栏，headless，零 Tk，绝不抛）
+# ===========================================================================
+
+
+def test_validate_ipa_path_empty() -> None:
+    msg = validate_ipa_path("")
+    assert msg is not None
+    assert "请先选择" in msg
+
+
+def test_validate_ipa_path_missing(tmp_path: Path) -> None:
+    msg = validate_ipa_path(str(tmp_path / "不存在.ipa"))
+    assert msg is not None
+    assert "找不到这个文件" in msg
+
+
+def test_validate_ipa_path_is_dir(tmp_path: Path) -> None:
+    sub = tmp_path / "adir"
+    sub.mkdir()
+    msg = validate_ipa_path(str(sub))
+    assert msg is not None
+    assert "文件夹" in msg
+
+
+def test_validate_ipa_path_empty_file(tmp_path: Path) -> None:
+    p = tmp_path / "empty.ipa"
+    p.write_bytes(b"")
+    msg = validate_ipa_path(str(p))
+    assert msg is not None
+    assert "空的" in msg
+
+
+def test_validate_ipa_path_not_zip(tmp_path: Path) -> None:
+    p = tmp_path / "thing.ipa"
+    p.write_bytes(b"NOTPK and content")  # .ipa 后缀但非 ZIP → 挡（IPA 必是 ZIP 容器）
+    msg = validate_ipa_path(str(p))
+    assert msg is not None
+    assert "不是一个 IPA" in msg
+
+
+def test_validate_ipa_path_ok_by_suffix(tmp_path: Path) -> None:
+    # .ipa 后缀 + 是 ZIP（即便无 Payload/）→ 放行（容忍/信任后缀）。
+    assert validate_ipa_path(_make_ipa(tmp_path, "app.ipa", with_payload=False)) is None
+
+
+def test_validate_ipa_path_ok_by_payload_no_suffix(tmp_path: Path) -> None:
+    # 无 .ipa 后缀但 ZIP 内含 Payload/ → 放行（兜住改名/无后缀真 IPA）。
+    assert validate_ipa_path(_make_ipa(tmp_path, "app.bin", with_payload=True)) is None
+
+
+def test_validate_ipa_path_rejects_plain_apk(tmp_path: Path) -> None:
+    # 普通 APK/ZIP（无 .ipa 后缀、无 Payload/）→ 挡在 iOS 栏外，避免误投。
+    msg = validate_ipa_path(_make_apk(tmp_path, "app.apk"))  # PK 魔数但非 ipa、无 Payload
+    assert msg is not None
+    assert "未找到 Payload" in msg
 
 
 # ===========================================================================

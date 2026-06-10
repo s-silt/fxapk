@@ -51,7 +51,7 @@ def _release_cert(**overrides: object) -> CertInfo:
 def test_analyzer_name_and_requires():
     analyzer = CertificateAnalyzer()
     assert analyzer.name == "certificate"
-    assert analyzer.requires == []
+    assert analyzer.requires == ["apk"]
 
 
 # --- SIGNING Lead 产出 -----------------------------------------------------

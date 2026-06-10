@@ -51,7 +51,7 @@ class CertificateAnalyzer(BaseAnalyzer):
     """从签名证书提取 SIGNING 线索，并对调试/可疑证书产出 Finding。"""
 
     name: str = "certificate"
-    requires: list[str] = []  # 纯静态，永远可用
+    requires: list[str] = ["apk"]  # Android 专属；IPA 上 pipeline 自动 skipped
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
         result = AnalyzerResult(analyzer=self.name)

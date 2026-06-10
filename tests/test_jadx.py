@@ -84,7 +84,7 @@ def test_nonzero_exit_still_scans_partial_output(monkeypatch, tmp_path) -> None:
 
 def test_requires_jadx_capability() -> None:
     # requires 声明 jadx，pipeline 在无 jadx 能力时会 skipped（此处仅断言声明）。
-    assert JadxAnalyzer().requires == ["jadx"]
+    assert JadxAnalyzer().requires == ["jadx", "apk"]
 
 
 # --- C2：SDK 常量名误报被过滤 --------------------------------------------

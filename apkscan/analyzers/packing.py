@@ -126,7 +126,7 @@ class PackingAnalyzer(BaseAnalyzer):
     """识别加固厂商，产出 PACKER 线索 + 静态端点不完整 Finding。"""
 
     name: str = "packing"
-    requires: list[str] = []  # 纯静态，永远可用
+    requires: list[str] = ["apk"]  # Android 专属；IPA 上 pipeline 自动 skipped
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
         result = AnalyzerResult(analyzer=self.name)

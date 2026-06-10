@@ -34,7 +34,7 @@ def _leads_by_value(result) -> dict[str, object]:
 def test_analyzer_identity() -> None:
     a = _analyzer()
     assert a.name == "sdk_fingerprint"
-    assert a.requires == []
+    assert a.requires == ["apk"]
 
 
 # ---------------------------------------------------------------------------

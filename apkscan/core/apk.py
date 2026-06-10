@@ -60,6 +60,8 @@ class ApkContext:
     通过 load_apk() 构造，不要直接实例化。
     """
 
+    platform: str = "android"  # 包平台（IPA 走 IpaContext，返回 "ios"）
+
     def __init__(
         self,
         apk: Any,  # androguard.core.apk.APK；动态访问其方法，故标 Any
