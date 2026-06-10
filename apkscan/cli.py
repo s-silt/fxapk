@@ -250,9 +250,10 @@ def auto(
     ),
     out: str = typer.Option("out", "--out", help="报告 / 产物输出目录。"),
     online: bool = typer.Option(
-        False,
+        True,
         "--online/--offline",
-        help="静态分析是否联网富化归属（WHOIS/ICP/ASN）。默认离线。",
+        help="静态分析是否联网富化归属（WHOIS/ICP/ASN）。默认联网（与 analyze 一致）；"
+        "网络受限/不想等富化可加 --offline。",
     ),
     auto_fix: bool = typer.Option(
         True,

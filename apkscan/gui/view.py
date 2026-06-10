@@ -74,7 +74,7 @@ class App:
         # tk 变量（控件状态）。
         self.var_apk = tk.StringVar()
         self.var_out = tk.StringVar(value="out")
-        self.var_online = tk.BooleanVar(value=False)  # 默认离线
+        self.var_online = tk.BooleanVar(value=True)  # 默认联网富化（与 cli 一致；可切"离线"）
         self.var_html = tk.BooleanVar(value=True)  # 默认勾 HTML
         self.var_json = tk.BooleanVar(value=True)  # 默认勾 JSON
         self.var_pdf = tk.BooleanVar(value=False)  # 默认不勾 PDF

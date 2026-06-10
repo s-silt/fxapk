@@ -302,7 +302,7 @@ class ActionRequest:
     action: str
     apk_path: str = ""
     out_dir: str = "out"
-    online: bool = False
+    online: bool = True  # 默认联网富化（与 cli analyze/auto 一致）；view 总是显式传 var_online
     formats: list[str] = field(default_factory=lambda: ["html", "json"])
     # Spinbox 原始文本（可能空 / 非数字）。钳制责任全在 controller `clamp_duration`，
     # 把 ``IntVar.get()`` 的 ``tk.TclError`` 风险从 view 移走（view 改传 widget `.get()` str）。
