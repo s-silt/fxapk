@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 
-from apkscan.core import pipeline
+from apkscan.core import infra, pipeline
 from apkscan.core.models import (
     AnalysisConfig,
     AnalyzerResult,
@@ -185,6 +185,44 @@ def test_offline_skips_enrichers(monkeypatch, fake_ctx):
 
     pipeline.run(fake_ctx, AnalysisConfig(online=False))
     assert called["n"] == 0
+
+
+def test_enrichment_targets_only_suspicious():
+    """联网富化只对"高度可疑"端点（建议调证）：infra 域名 / 私网·回环 IP 一律不查。"""
+    eps = [
+        Endpoint(value="gw.hxhcapi.vip", kind="domain", evidences=[]),  # 疑似 C2 → 查
+        Endpoint(value="maps.googleapis.com", kind="domain", evidences=[]),  # 已知 infra → 跳
+        Endpoint(value="connectivitycheck.gstatic.com", kind="domain", evidences=[]),  # infra → 跳
+        Endpoint(value="45.76.1.1", kind="ip", evidences=[]),  # 真公网 IP → 查
+        Endpoint(value="127.0.0.1", kind="ip", evidences=[]),  # 回环 → 待核 → 跳
+        Endpoint(value="192.168.1.1", kind="ip", evidences=[]),  # 私网 → 跳
+        Endpoint(value="https://gw.hxhcapi.vip/x", kind="url", evidences=[]),  # url 不富化
+    ]
+    targets = {e.value for e in pipeline._enrichment_targets(eps)}
+    assert targets == {"gw.hxhcapi.vip", "45.76.1.1"}
+
+
+def test_online_skips_infra_domain_enrichment(monkeypatch, fake_ctx):
+    """端到端：online=True 下，已知 infra 域名不被富化器查询（只查建议调证的）。"""
+    queried: list[str] = []
+
+    class _Spy(BaseEnricher):
+        name = "whois"
+        applies_to = ["domain"]
+
+        def enrich(self, ep: Endpoint) -> EnrichmentResult:
+            queried.append(ep.value)
+            return EnrichmentResult(provider=self.name, ok=True, data={"registrar": "x"})
+
+    monkeypatch.setattr(pipeline, "discover_analyzers", lambda: [_GoodAnalyzer()])
+    monkeypatch.setattr(pipeline, "discover_enrichers", lambda: [_Spy()])
+    monkeypatch.setattr(pipeline, "detect_capabilities", lambda online=True: {"online"})
+
+    pipeline.run(fake_ctx, AnalysisConfig(online=True))
+    # 被查的域名都必须是"建议调证"（绝不含 infra/已知第三方）
+    for d in queried:
+        advice, _ = infra.classify_domain(d)
+        assert advice == infra.ADVICE_INVESTIGATE, f"不该查 {d}（{advice}）"
 
 
 def test_domain_tier_downgrades_advice_to_review():

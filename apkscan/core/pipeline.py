@@ -100,10 +100,22 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     if getattr(ctx, "apk_validation_ok", True) is False:
         meta["apk_validation_warning"] = "APK 合法性校验异常，分析结果可能不可靠（详见日志）"
 
-    # 3) 联网富化（按 applies_to 路由）
+    # 3) 联网富化（按 applies_to 路由）——**只对"高度可疑"端点查归属**，不再有一个查一个。
+    #    判据：infra 分级为"建议调证"（疑似 App 自有服务/C2）的域名/IP 才查 WHOIS/ICP/ASN；
+    #    已知第三方基础设施/SDK/CDN（无需调证）、私网/回环/行情代码（待核）一律跳过。
+    #    既省时（网络受限时不被一堆 infra/google 域名拖死、也不再误查 127.0.0.1）、又聚焦调证
+    #    （WHOIS 归属对真 C2 才有意义，对 google 没意义）。
     enricher_status: list[dict] = []
     if config.online:
-        enricher_status = _enrich_endpoints(endpoints, discover_enrichers())
+        targets = _enrichment_targets(endpoints)
+        enricher_status = _enrich_endpoints(targets, discover_enrichers())
+        meta["enriched_target_count"] = len(targets)
+        net_eps = sum(1 for ep in endpoints if ep.kind in ("domain", "ip"))
+        logger.info(
+            "联网富化：仅对 %d 个高度可疑端点（建议调证）查归属，跳过其余 %d 个域名/IP（infra/已知/私网）",
+            len(targets),
+            max(0, net_eps - len(targets)),
+        )
     else:
         meta["enrichment_skipped_offline"] = True
         logger.info("offline 模式：跳过全部富化器（归属信息未查询，非查无结果）")
@@ -182,6 +194,23 @@ def _dedup_endpoints(endpoints: list[Endpoint]) -> list[Endpoint]:
         ep.evidences = deduped
 
     return list(merged.values())
+
+
+def _enrichment_targets(endpoints: list[Endpoint]) -> list[Endpoint]:
+    """筛出"高度可疑"端点（域名/IP 且 infra 分级为"建议调证"）作为联网富化目标。
+
+    只对疑似 App 自有服务/C2 的域名/IP 查 WHOIS/ICP/ASN；已知第三方基础设施/SDK/CDN
+    （无需调证）、私网/回环 IP / 行情代码伪域名（待核）都不查。这正是"最后只对高度可疑的查、
+    而不是有一个查一个"：省时（网络受限不被 infra 域名拖死、不误查 127.0.0.1）+ 聚焦调证。
+    """
+    targets: list[Endpoint] = []
+    for ep in endpoints:
+        if ep.kind not in ("domain", "ip"):
+            continue  # 非 domain/ip 本就不被 WHOIS/ICP/ASN 路由
+        advice, _reason = infra.classify_domain(ep.value)
+        if advice == infra.ADVICE_INVESTIGATE:
+            targets.append(ep)
+    return targets
 
 
 def _enrich_endpoints(
