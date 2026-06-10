@@ -455,7 +455,8 @@ class ConfigKeysAnalyzer(BaseAnalyzer):
         keys: list[_ConfigKey] = []
         if isinstance(data, dict):
             for k, v in data.items():
-                if isinstance(k, str) and isinstance(v, (str, int, float, bool)):
+                # bool 是 int 子类：显式排除，避免把 {"debug": false} 这类开关抠成配置键噪音。
+                if isinstance(k, str) and isinstance(v, (str, int, float)) and not isinstance(v, bool):
                     keys.append(_ConfigKey(k.strip(), str(v).strip(), "resource", path))
         return keys
 

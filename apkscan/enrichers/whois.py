@@ -137,10 +137,18 @@ class WhoisEnricher(BaseEnricher):
 
     # ------------------------------------------------------------------ 查询
     def _query(self, domain: str) -> dict[str, str | None]:
-        """实际网络查询；任何异常向上抛由 enrich() 统一捕获。"""
+        """实际网络查询；任何异常向上抛由 enrich() 统一捕获。
+
+        传 ``ignore_socket_errors=False`` 让**网络失败真正抛异常**（走 enrich 的 except 分支、
+        error 带真实异常类型），而非被 python-whois 默认吞成空记录 → 与"查到但无记录"混为
+        "全空"。如实区分"网络失败"与"查无备案/记录"是铁律要求。老版库无此形参则退回默认调用。
+        """
         import whois  # 延迟导入：缓存命中或离线时无需该依赖
 
-        record = whois.whois(domain, timeout=WHOIS_TIMEOUT)
+        try:
+            record = whois.whois(domain, timeout=WHOIS_TIMEOUT, ignore_socket_errors=False)
+        except TypeError:  # 旧版 python-whois 无 ignore_socket_errors 形参
+            record = whois.whois(domain, timeout=WHOIS_TIMEOUT)
         return _extract(record)
 
     # ------------------------------------------------------------------ 入口

@@ -210,8 +210,10 @@ class DeeplinkSurfaceAnalyzer(BaseAnalyzer):
         host = hosts[0] if hosts else ""
         path = paths[0] if paths else ""
         for scheme in schemes:
-            # 跳过纯 http/https（那是 App Links，不是自定义 scheme deeplink 攻击面重点）。
-            if scheme.lower() in ("http", "https") and not host:
+            # 跳过 http/https（无论是否带 host）：那是标准 App Links / 浏览器可打开链接，
+            # 不是自定义 scheme 的 deeplink 攻击面重点。带 host 的 https 是最常见的 App Links
+            # 形态，旧的 `and not host` 反而只跳过无 host 的畸形项、把真 App Links 误报成攻击面。
+            if scheme.lower() in ("http", "https"):
                 continue
             out.append(
                 _Deeplink(

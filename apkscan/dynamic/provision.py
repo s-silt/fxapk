@@ -50,6 +50,10 @@ _FRIDA_ABI_MAP: dict[str, str] = {
     "x86": "x86",
 }
 
+# 解压后 frida-server 的体积下限（字节）：真实 frida-server ELF 数十 MB，远超此值；用于挡住
+# 截断/损坏/投毒的下载（非密码学校验，见 _download_and_extract 注释）。
+_FRIDA_MIN_SERVER_BYTES = 1_000_000
+
 # frida releases 下载地址模板。
 _FRIDA_RELEASE_URL = (
     "https://github.com/frida/frida/releases/download/"
@@ -311,6 +315,16 @@ def _download_and_extract(url: str, dest: Path, on_progress: Callable[[str], Non
     except Exception:
         logger.exception("[provision] frida-server 解压异常")
         return "解压异常"
+
+    # 完整性兜底：frida-server 是数十 MB 的 ELF，过小 = 下载被截断 / 投毒 / 拿错产物。这不是
+    # 密码学校验（同尺寸恶意替换挡不住——理想是随包固定 SHA256 清单按 ver+abi 比对），但能挡住
+    # truncated/empty/错误文件，避免把坏二进制以 root 推到取证设备执行。
+    if len(raw) < _FRIDA_MIN_SERVER_BYTES:
+        logger.error(
+            "[provision] 解压后 frida-server 体积异常小（%d 字节 < %d），疑似下载损坏/投毒，拒绝部署",
+            len(raw), _FRIDA_MIN_SERVER_BYTES,
+        )
+        return f"解压后体积异常（{len(raw)} 字节），拒绝部署疑似损坏的 frida-server"
 
     try:
         dest.write_bytes(raw)
@@ -654,10 +668,12 @@ def _generate_ca(ca_path: Path, on_progress: Callable[[str], None] | None) -> bo
     _emit(on_progress, "运行一次 mitmdump 以生成 CA")
     proc: subprocess.Popen[bytes] | None = None
     try:
+        # stdout/stderr 用 DEVNULL（只关心 CA 文件是否生成，不读其输出）：PIPE 不读会有写满
+        # 缓冲阻塞 mitmdump 的隐患（与 capture 同根），且这里也不需要其输出。
         proc = subprocess.Popen(
             [*inv, "--listen-port", "0"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         for _ in range(_CA_GEN_RETRIES):
             if ca_path.exists():
@@ -678,6 +694,7 @@ def _generate_ca(ca_path: Path, on_progress: Callable[[str], None] | None) -> bo
                     except subprocess.TimeoutExpired:
                         logger.warning("[provision] mitmdump 未及时退出，强杀")
                         proc.kill()
+                        proc.wait(timeout=5.0)  # kill 后回收，避免 POSIX 僵尸
             except Exception:
                 logger.exception("[provision] 停止 mitmdump 异常")
 

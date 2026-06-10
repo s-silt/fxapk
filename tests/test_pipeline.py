@@ -79,7 +79,7 @@ class _DomainEnricher(BaseEnricher):
         return EnrichmentResult(
             provider=self.name,
             ok=True,
-            data={"subject": "示例科技有限公司", "license": "京ICP备12345678号"},
+            data={"subject": "示例科技有限公司", "license_no": "京ICP备12345678号"},
         )
 
 

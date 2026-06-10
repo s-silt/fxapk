@@ -114,16 +114,58 @@ def _instantiate_subclasses(modules: list[ModuleType], base: type) -> list:
     return instances
 
 
+# requires 可声明的已知能力名：detect_capabilities() 探测的 + pipeline 按平台注入的 apk/ipa。
+# 分析器 requires 里出现此集合外的名字（如把 "jadx" 拼成 "jdax"）会让它永久被 skip，且
+# skipped 理由像"环境缺工具"而非代码 bug——极难发现，故自动发现期校验并点名告警。
+_KNOWN_CAPABILITIES: frozenset[str] = frozenset(
+    {"apk", "ipa", "jadx", "adb", "online", "frida", "frida-dexdump", "mitmproxy", "device"}
+)
+
+
+def _dedup_and_validate(instances: list, *, kind: str) -> list:
+    """对自动发现的实例做 name 唯一性 + requires 能力名校验（不静默，快速失败式告警）。
+
+    - **重名 name**：复制新模块时最常见的错。两个同名分析器都会跑、meta 互相覆盖、报告出现
+      两条同名 status 却无法区分——这里保留首个、对后续重名 ``logger.error`` 点名两个类。
+    - **requires 拼写错**：未知能力名会让分析器永久 skip 且伪装成"缺工具"，``logger.error`` 点名。
+    name 为空的实例直接跳过并告警（无名分析器无法被状态/报告引用）。
+    """
+    seen: dict[str, object] = {}
+    kept: list = []
+    for inst in instances:
+        name = getattr(inst, "name", "") or ""
+        if not name:
+            logger.error("%s %s 的 name 为空，已跳过", kind, type(inst).__name__)
+            continue
+        if name in seen:
+            logger.error(
+                "%s name 冲突：'%s' 已被 %s 占用，跳过 %s（重名会互相覆盖，请改名）",
+                kind, name, type(seen[name]).__name__, type(inst).__name__,
+            )
+            continue
+        requires = getattr(inst, "requires", None)
+        if isinstance(requires, list):
+            unknown = [c for c in requires if c not in _KNOWN_CAPABILITIES]
+            if unknown:
+                logger.error(
+                    "%s '%s' 的 requires 含未知能力名 %s（疑似拼写错误→永久 skip）；已知能力：%s",
+                    kind, name, unknown, sorted(_KNOWN_CAPABILITIES),
+                )
+        seen[name] = inst
+        kept.append(inst)
+    return kept
+
+
 def discover_analyzers() -> list[BaseAnalyzer]:
-    """发现并实例化 apkscan.analyzers 下所有 BaseAnalyzer 具体子类。"""
+    """发现并实例化 apkscan.analyzers 下所有 BaseAnalyzer 具体子类（含重名/requires 校验）。"""
     modules = _iter_package_modules("apkscan.analyzers")
-    return _instantiate_subclasses(modules, BaseAnalyzer)
+    return _dedup_and_validate(_instantiate_subclasses(modules, BaseAnalyzer), kind="分析器")
 
 
 def discover_enrichers() -> list[BaseEnricher]:
-    """发现并实例化 apkscan.enrichers 下所有 BaseEnricher 具体子类。"""
+    """发现并实例化 apkscan.enrichers 下所有 BaseEnricher 具体子类（含重名校验）。"""
     modules = _iter_package_modules("apkscan.enrichers")
-    return _instantiate_subclasses(modules, BaseEnricher)
+    return _dedup_and_validate(_instantiate_subclasses(modules, BaseEnricher), kind="富化器")
 
 
 # ---------------------------------------------------------------------------

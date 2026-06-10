@@ -25,8 +25,62 @@ logger = logging.getLogger(__name__)
 
 app = typer.Typer(
     add_completion=False,
-    help="涉诈 APK 调证分析 CLI：静态分析 + 端点/服务归属提取，产出调证线索清单。",
+    help="涉诈 APK / iOS IPA 调证分析 CLI：静态分析 + 端点/服务归属提取，产出调证线索清单。",
 )
+
+# 合法输出格式（--fmt）。全非法时回退而非静默产出零报告。
+_VALID_FORMATS = ("html", "json", "pdf")
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        from apkscan import __version__
+
+        typer.echo(f"fxapk {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _main(
+    version: bool = typer.Option(  # noqa: ARG001 - eager callback 内即退出，形参仅供 typer 注册
+        False,
+        "--version",
+        help="显示版本号并退出。",
+        callback=_version_callback,
+        is_eager=True,
+    ),
+) -> None:
+    """涉诈 APK / iOS IPA 调证分析 CLI。"""
+
+
+def _parse_formats(fmt: str) -> list[str]:
+    """解析 ``--fmt`` 逗号串为合法格式列表。
+
+    无法识别的格式会告警并忽略；**全部非法 → 回退 ['html','json'] 并告警**，绝不让"格式参数
+    全填错"静默产出零报告却 exit 0（调证场景最怕"以为出了报告其实没有"）。
+    """
+    requested = [f.strip().lower() for f in fmt.split(",") if f.strip()]
+    formats = [f for f in requested if f in _VALID_FORMATS]
+    invalid = [f for f in requested if f not in _VALID_FORMATS]
+    if invalid:
+        typer.echo(
+            f"忽略无法识别的输出格式：{'、'.join(invalid)}（合法：{', '.join(_VALID_FORMATS)}）",
+            err=True,
+        )
+    if not formats:
+        typer.echo("未指定任何合法输出格式，回退为 html,json。", err=True)
+        formats = ["html", "json"]
+    return formats
+
+
+def _close_ctx_quiet(ctx: object) -> None:
+    """关闭分析上下文的底层资源（IPA 的 ZipFile 句柄）；ApkContext 无 close 则 no-op。绝不抛。"""
+    close = getattr(ctx, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            logger.exception("[cli] 关闭分析上下文失败（已忽略）")
 
 
 def _cleanup_adb_quiet() -> None:
@@ -85,8 +139,9 @@ def analyze(
 
     # 无条件 finally 收 adb server：analyze 的 device.has_device() 设备探测每次都会经
     # adb 起一个常驻 adb server（即便纯静态/离线），不收则 adb.exe 残留（GUI 子进程尤甚）。
+    ctx: object = None  # 供 finally 关闭 IPA 句柄（IpaContext 持有打开的 ZipFile）
     try:
-        formats = [f.strip().lower() for f in fmt.split(",") if f.strip()]
+        formats = _parse_formats(fmt)
         config = AnalysisConfig(online=online, out_dir=out, formats=formats)
 
         extra_dex_files = _resolve_extra_dex(extra_dex)
@@ -150,6 +205,7 @@ def analyze(
                     str(apk), ctx.package_name or "", out, report, formats, base
                 )
     finally:
+        _close_ctx_quiet(ctx)  # IPA 的 ZipFile 句柄必须关（ApkContext 无 close 则 no-op）
         _cleanup_adb_quiet()
 
 
@@ -290,7 +346,7 @@ def auto(
             typer.echo("该功能未安装：apkscan.dynamic.auto 不可用（一键全自动模块尚未就绪）。")
             raise typer.Exit(code=1) from None
 
-        formats = [f.strip().lower() for f in fmt.split(",") if f.strip()]
+        formats = _parse_formats(fmt)
 
         def _confirm(msg: str) -> None:
             """抓包前提示用户操作 app 触发网络，并等回车（CLI 落点；GUI 用弹窗）。

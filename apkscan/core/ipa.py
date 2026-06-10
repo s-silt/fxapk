@@ -85,6 +85,24 @@ class IpaContext:
         self.apk_validation_ok = True
         self._read_cache: dict[str, bytes | None] = {}
 
+    # ---- 资源生命周期 ---------------------------------------------------
+    # IpaContext 持有一个打开的 ZipFile（ApkContext 用 androguard 已读进内存、无句柄）。成功路径
+    # 必须显式关闭，否则每分析一个 IPA 泄漏一个文件句柄，且 Windows 下会锁住 IPA 文件导致后续
+    # 删除/移动失败。CLI 在 finally 里调 close()；亦支持 `with load_app(...) as ctx`。
+
+    def close(self) -> None:
+        """关闭底层 ZipFile（幂等、绝不抛）。"""
+        try:
+            self._zf.close()
+        except Exception:  # noqa: BLE001 - 关闭失败无需炸主流程
+            logger.exception("[ipa] 关闭 IPA ZipFile 失败（已忽略）")
+
+    def __enter__(self) -> "IpaContext":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
     # ---- 标量属性 -------------------------------------------------------
 
     @cached_property
