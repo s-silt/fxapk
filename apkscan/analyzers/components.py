@@ -100,7 +100,7 @@ class ComponentsAnalyzer(BaseAnalyzer):
     """枚举导出组件，产出攻击面 Finding（provider 可读写 → HIGH）。"""
 
     name: str = "components"
-    requires: list[str] = []  # 纯静态解析，永远可用
+    requires: list[str] = ["apk"]  # Android 专属；IPA 上 pipeline 自动 skipped
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
         result = AnalyzerResult(analyzer=self.name)

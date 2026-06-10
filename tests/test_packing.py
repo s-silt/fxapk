@@ -47,7 +47,7 @@ def _analyze(
 def test_analyzer_name_and_requires():
     analyzer = PackingAnalyzer()
     assert analyzer.name == "packing"
-    assert analyzer.requires == []
+    assert analyzer.requires == ["apk"]
 
 
 # --- 不命中 ---------------------------------------------------------------

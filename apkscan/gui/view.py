@@ -28,6 +28,8 @@ from apkscan.gui.controller import (
     ACTION_AUTO,
     ACTION_DOCTOR,
     ACTION_STATIC,
+    FILE_TYPE_APK,
+    FILE_TYPE_IPA,
     ActionRequest,
     ActionResult,
     GuiController,
@@ -73,6 +75,7 @@ class App:
 
         # tk 变量（控件状态）。
         self.var_apk = tk.StringVar()
+        self.var_ipa = tk.StringVar()  # iOS 栏的 IPA 路径（与 APK 栏各自独立）
         self.var_out = tk.StringVar(value="out")
         self.var_online = tk.BooleanVar(value=True)  # 默认联网富化（与 cli 一致；可切"离线"）
         self.var_html = tk.BooleanVar(value=True)  # 默认勾 HTML
@@ -106,7 +109,7 @@ class App:
     # -- 窗口 / 样式 --------------------------------------------------------
 
     def _init_window(self) -> None:
-        self.root.title("fxapk · 涉诈 APK 调证分析")
+        self.root.title("fxapk · 涉诈 APK/IPA 调证分析")
         self.root.configure(bg=BG_WINDOW)
         self.root.geometry("860x680")
         self.root.minsize(720, 560)
@@ -230,6 +233,23 @@ class App:
         )
         style.map("Tool.TButton", background=[("active", "#E2E8F0")])
 
+        # Notebook（APK / IPA 两栏）：扁平、淡色；选中页签亮主强调色、并入白卡片底。
+        style.configure("Card.TNotebook", background=BG_CARD, borderwidth=0, tabmargins=(0, 0, 0, 0))
+        style.configure(
+            "Card.TNotebook.Tab",
+            background="#EDF2F7",
+            foreground=COLOR_TEXT_MUTED,
+            font=FONT_BTN,
+            padding=(18, 8),
+            borderwidth=0,
+        )
+        style.map(
+            "Card.TNotebook.Tab",
+            background=[("selected", BG_CARD)],
+            foreground=[("selected", COLOR_PRIMARY)],
+            expand=[("selected", (0, 0, 0, 0))],
+        )
+
     # -- 布局 ---------------------------------------------------------------
 
     def _build_ui(self) -> None:
@@ -251,38 +271,58 @@ class App:
         ttk.Label(header, text="fxapk 调证分析", style="Title.TLabel").pack(anchor="w")
         ttk.Label(
             header,
-            text="① 选 APK  →  ② 点【一键全自动】或【静态分析】  ·  无设备也能跑纯静态",
+            text="① 选 APK / IPA  →  ② 点【一键全自动】或【静态分析】  ·  无设备也能跑纯静态，iOS 仅静态",
             style="Hint.TLabel",
         ).pack(anchor="w", pady=(4, 0))
 
     def _build_input_card(self, parent: ttk.Frame) -> None:
-        card = self._card(parent, row=1)
-        card.columnconfigure(1, weight=1)
+        """输入卡片：用 Notebook 分 APK（Android）/ IPA（iOS）两栏。
 
-        # APK 选择。
-        ttk.Label(card, text="APK 文件", style="Card.TLabel").grid(
+        两栏共享输出目录（``var_out``）。APK 栏含联网/格式/抓包时长全套选项、支持三动作；
+        IPA 栏只选文件 + 说明，仅【静态分析】（iOS 涉诈包是 H5 壳，纯静态即出端点/加密配方/
+        Info.plist 攻击面，不连设备、无需越狱）。切到 IPA 栏时【一键全自动】/【环境体检】
+        自动禁用（见 :meth:`_apply_tab_constraints`）。
+        """
+        card = self._card(parent, row=1)
+        card.columnconfigure(0, weight=1)
+
+        # 两栏控件统一汇总到 _input_widgets（运行中一并禁用，结束随三动作按钮恢复）。
+        self._input_widgets = []
+        self.notebook = ttk.Notebook(card, style="Card.TNotebook")
+        self.notebook.grid(row=0, column=0, sticky="ew")
+        self.notebook.add(self._build_apk_page(self.notebook), text="  APK（Android）  ")
+        self.notebook.add(self._build_ipa_page(self.notebook), text="  IPA（iOS）  ")
+        # 切栏 → 按当前栏约束动作按钮（IPA 仅静态：禁用一键全自动/环境体检）。
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+    def _build_apk_page(self, parent: ttk.Notebook) -> ttk.Frame:
+        """APK（Android）栏：文件 + 输出目录 + 联网/格式/抓包时长选项（支持三动作）。"""
+        page = ttk.Frame(parent, style="Card.TFrame", padding=PAD)
+        page.columnconfigure(1, weight=1)
+
+        ttk.Label(page, text="APK 文件", style="Card.TLabel").grid(
             row=0, column=0, sticky="w", padx=(0, 10), pady=6
         )
-        entry_apk = ttk.Entry(card, textvariable=self.var_apk, style="Flat.TEntry")
+        entry_apk = ttk.Entry(page, textvariable=self.var_apk, style="Flat.TEntry")
         entry_apk.grid(row=0, column=1, sticky="ew", pady=6)
         btn_browse_apk = ttk.Button(
-            card, text="浏览…", style="Tool.TButton", command=self._browse_apk
+            page, text="浏览…", style="Tool.TButton", command=self._browse_apk
         )
         btn_browse_apk.grid(row=0, column=2, sticky="w", padx=(10, 0), pady=6)
 
-        # 输出目录。
-        ttk.Label(card, text="输出目录", style="Card.TLabel").grid(
+        # 输出目录（与 IPA 栏共享 var_out）。
+        ttk.Label(page, text="输出目录", style="Card.TLabel").grid(
             row=1, column=0, sticky="w", padx=(0, 10), pady=6
         )
-        entry_out = ttk.Entry(card, textvariable=self.var_out, style="Flat.TEntry")
+        entry_out = ttk.Entry(page, textvariable=self.var_out, style="Flat.TEntry")
         entry_out.grid(row=1, column=1, sticky="ew", pady=6)
         btn_browse_out = ttk.Button(
-            card, text="选择…", style="Tool.TButton", command=self._browse_out
+            page, text="选择…", style="Tool.TButton", command=self._browse_out
         )
         btn_browse_out.grid(row=1, column=2, sticky="w", padx=(10, 0), pady=6)
 
         # 选项行：联网 / 格式 / 抓包时长。
-        opts = ttk.Frame(card, style="Card.TFrame")
+        opts = ttk.Frame(page, style="Card.TFrame")
         opts.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 0))
 
         radio_offline = ttk.Radiobutton(opts, text="离线", value=False, variable=self.var_online)
@@ -315,8 +355,7 @@ class App:
             side="left", padx=(6, 0)
         )
 
-        # 注册运行中应禁用的输入控件（运行结束随三动作按钮一起恢复）。
-        self._input_widgets = [
+        self._input_widgets += [
             entry_apk,
             btn_browse_apk,
             entry_out,
@@ -328,30 +367,73 @@ class App:
             chk_pdf,
             self.spin_duration,
         ]
+        return page
+
+    def _build_ipa_page(self, parent: ttk.Notebook) -> ttk.Frame:
+        """IPA（iOS）栏：文件 + 共享输出目录 + 「仅静态」说明（无联网/格式/时长选项）。"""
+        page = ttk.Frame(parent, style="Card.TFrame", padding=PAD)
+        page.columnconfigure(1, weight=1)
+
+        ttk.Label(page, text="IPA 文件", style="Card.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(0, 10), pady=6
+        )
+        entry_ipa = ttk.Entry(page, textvariable=self.var_ipa, style="Flat.TEntry")
+        entry_ipa.grid(row=0, column=1, sticky="ew", pady=6)
+        btn_browse_ipa = ttk.Button(
+            page, text="浏览…", style="Tool.TButton", command=self._browse_ipa
+        )
+        btn_browse_ipa.grid(row=0, column=2, sticky="w", padx=(10, 0), pady=6)
+
+        # 输出目录（与 APK 栏共享 var_out）。
+        ttk.Label(page, text="输出目录", style="Card.TLabel").grid(
+            row=1, column=0, sticky="w", padx=(0, 10), pady=6
+        )
+        entry_out_ipa = ttk.Entry(page, textvariable=self.var_out, style="Flat.TEntry")
+        entry_out_ipa.grid(row=1, column=1, sticky="ew", pady=6)
+        btn_browse_out_ipa = ttk.Button(
+            page, text="选择…", style="Tool.TButton", command=self._browse_out
+        )
+        btn_browse_out_ipa.grid(row=1, column=2, sticky="w", padx=(10, 0), pady=6)
+
+        ttk.Label(
+            page,
+            text=(
+                "iOS IPA 仅做静态分析（H5 端点 / 加密配方 / Info.plist 攻击面），"
+                "不连设备、无需越狱 —— 点【静态分析】即可。"
+            ),
+            style="CardHint.TLabel",
+            wraplength=560,
+            justify="left",
+        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 2))
+
+        self._input_widgets += [entry_ipa, btn_browse_ipa, entry_out_ipa, btn_browse_out_ipa]
+        return page
 
     def _build_action_bar(self, parent: ttk.Frame) -> None:
         bar = ttk.Frame(parent, style="TFrame")
         bar.grid(row=2, column=0, sticky="ew", pady=(PAD, PAD))
 
-        btn_auto = ttk.Button(
+        # 存为实例属性：切栏时按当前栏约束按钮（IPA 栏禁用一键全自动/环境体检，见
+        # _apply_tab_constraints）需在 _build_action_bar 之外引用它们。
+        self.btn_auto = ttk.Button(
             bar, text="🚀 一键全自动", style="Primary.TButton", command=self._on_auto
         )
-        btn_auto.pack(side="left")
-        self._tooltip(btn_auto, "体检 → 静态 → 脱壳 → 抓包 → 合并；无设备时自动跳过动态步骤")
+        self.btn_auto.pack(side="left")
+        self._tooltip(self.btn_auto, "体检 → 静态 → 脱壳 → 抓包 → 合并；无设备时自动跳过动态步骤（仅 APK）")
 
-        btn_static = ttk.Button(
+        self.btn_static = ttk.Button(
             bar, text="静态分析", style="Secondary.TButton", command=self._on_static
         )
-        btn_static.pack(side="left", padx=(10, 0))
-        self._tooltip(btn_static, "仅静态分析（不连设备）：提取端点 / 服务归属 / 调证线索")
+        self.btn_static.pack(side="left", padx=(10, 0))
+        self._tooltip(self.btn_static, "仅静态分析（不连设备）：提取端点 / 服务归属 / 调证线索（APK 与 IPA 通用）")
 
-        btn_doctor = ttk.Button(
+        self.btn_doctor = ttk.Button(
             bar, text="环境体检", style="Ghost.TButton", command=self._on_doctor
         )
-        btn_doctor.pack(side="left", padx=(10, 0))
-        self._tooltip(btn_doctor, "检查设备 / root / frida / mitmproxy / CA，可自动修复")
+        self.btn_doctor.pack(side="left", padx=(10, 0))
+        self._tooltip(self.btn_doctor, "检查设备 / root / frida / mitmproxy / CA，可自动修复（仅 APK）")
 
-        self._action_buttons = [btn_auto, btn_static, btn_doctor]
+        self._action_buttons = [self.btn_auto, self.btn_static, self.btn_doctor]
 
         # 停止按钮：风格与 Secondary 一致；空闲禁用、运行时启用（与三动作按钮相反）。
         # 不加入 _action_buttons（那批运行时禁用；停止逻辑相反）。
@@ -433,6 +515,14 @@ class App:
         if path:
             self.var_apk.set(path)
 
+    def _browse_ipa(self) -> None:
+        path = filedialog.askopenfilename(
+            title="选择 IPA 文件",
+            filetypes=[("IPA 文件", "*.ipa"), ("所有文件", "*.*")],
+        )
+        if path:
+            self.var_ipa.set(path)
+
     def _browse_out(self) -> None:
         path = filedialog.askdirectory(title="选择输出目录")
         if path:
@@ -446,6 +536,36 @@ class App:
 
     def _on_doctor(self) -> None:
         self._start(ACTION_DOCTOR)
+
+    # -- 两栏（APK / IPA）切换 ----------------------------------------------
+
+    def _current_file_type(self) -> str:
+        """当前选中栏对应的文件类型：第 0 页=APK，第 1 页=IPA。读不到 → 退回 APK。"""
+        try:
+            return FILE_TYPE_IPA if self.notebook.index(self.notebook.select()) == 1 else FILE_TYPE_APK
+        except Exception:  # noqa: BLE001 - 取栏失败不应崩 UI，退回 APK 语义
+            logger.exception("[gui] 读取当前栏失败，按 APK 处理")
+            return FILE_TYPE_APK
+
+    def _on_tab_changed(self, _event: object = None) -> None:
+        """切栏回调：按当前栏约束动作按钮（IPA 仅静态）。"""
+        self._apply_tab_constraints()
+
+    def _apply_tab_constraints(self) -> None:
+        """按当前栏启停动作按钮：IPA 栏仅【静态分析】，禁用【一键全自动】/【环境体检】。
+
+        运行中（controller.busy）不动：此时按钮已被 _set_buttons_enabled(False) 全禁用，
+        结束时 _set_buttons_enabled(True) 会再调本方法按当前栏复位。单控件 configure 失败仅
+        logging，不崩。
+        """
+        if self.controller.busy:
+            return
+        state = "disabled" if self._current_file_type() == FILE_TYPE_IPA else "normal"
+        try:
+            self.btn_auto.configure(state=state)
+            self.btn_doctor.configure(state=state)
+        except Exception:  # noqa: BLE001 - 按钮约束失败不应崩 UI
+            logger.exception("[gui] 按栏约束动作按钮失败（已忽略）")
 
     def _on_stop(self) -> None:
         """停止当前任务：先防连点禁用自身，调 controller.cancel()；未在跑则复位（理论上不会）。
@@ -500,7 +620,9 @@ class App:
             duration_raw, clamp_note = self._reflect_clamped_duration(duration_raw)
         request = ActionRequest(
             action=action,
+            file_type=self._current_file_type(),  # 按当前栏选 APK / IPA
             apk_path=self.var_apk.get().strip(),
+            ipa_path=self.var_ipa.get().strip(),
             out_dir=self.var_out.get().strip() or "out",
             online=bool(self.var_online.get()),
             formats=self._collect_formats(),
@@ -697,6 +819,9 @@ class App:
             except Exception:  # noqa: BLE001 - 单控件失败不应阻断整体启停
                 logger.exception("[gui] 切换输入控件状态失败（已忽略）")
         self.btn_stop.configure(state=("disabled" if enabled else "normal"))
+        # 恢复后按当前栏复位：IPA 栏须把刚被统一启用的【一键全自动】/【环境体检】再禁回去。
+        if enabled:
+            self._apply_tab_constraints()
 
     def _clear_log(self) -> None:
         self.log_text.configure(state="normal")

@@ -97,7 +97,7 @@ class ManifestAnalyzer(BaseAnalyzer):
     """解析 AndroidManifest，产出基础指纹 meta 与安全 Finding。"""
 
     name = "manifest"
-    requires: list[str] = []  # 纯静态解析，永远可用
+    requires: list[str] = ["apk"]  # Android 专属；IPA 上 pipeline 自动 skipped
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
         result = AnalyzerResult(analyzer=self.name)

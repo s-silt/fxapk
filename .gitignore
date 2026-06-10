@@ -11,6 +11,8 @@ out/
 # PyInstaller 构建产物(大，绝不入库)
 /build/
 /dist/
+# GUI 发行 zip(build_exe.py 打出的 onedir 压缩包，大，绝不入库)
+/fxapk-gui-*.zip
 
 # adb 下载缓存(build_exe.py 下 Google platform-tools 解压取 adb.exe + 2 dll)
 /.platform_tools/

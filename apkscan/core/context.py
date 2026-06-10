@@ -29,7 +29,17 @@ class AnalysisContext(Protocol):
 
     @property
     def manifest_xml(self) -> str:
-        """解码后的 AndroidManifest.xml 文本。"""
+        """解码后的 AndroidManifest.xml 文本（iOS/IPA 无此概念 → 空串）。"""
+        ...
+
+    @property
+    def platform(self) -> str:
+        """包平台：``"android"``（APK）/ ``"ios"``（IPA）。
+
+        pipeline 据此注入 ``apk``/``ipa`` 能力，让 Android 专属 analyzer（requires=["apk"]）
+        在 IPA 上自动 skipped。旧实现未声明此成员时，消费方一律 ``getattr(ctx,"platform","android")``
+        兼容读取（对标 ``dex_available`` 的既有做法），故不强制破坏现有构造契约。
+        """
         ...
 
     config: AnalysisConfig

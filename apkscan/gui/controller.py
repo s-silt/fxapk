@@ -54,6 +54,10 @@ ACTION_DOCTOR = "doctor"
 ACTION_STATIC = "static"
 ACTION_AUTO = "auto"
 
+# 待分析文件类型（GUI 两栏分别选 APK / IPA）。IPA 仅支持静态分析（不连设备、无动态）。
+FILE_TYPE_APK = "apk"
+FILE_TYPE_IPA = "ipa"
+
 # 取消后等子进程（及其进程树）退出、stdout 管道 EOF 的看门狗超时（秒）。
 # 超时后强杀 + 放弃读循环，避免孙进程（mitmdump/frida）继续占着管道写端 → 读循环永久阻塞。
 _CANCEL_GRACE_SECONDS = 5.0
@@ -197,6 +201,58 @@ def validate_apk_path(apk_path: str) -> str | None:
     return None
 
 
+def _zip_has_payload(path: str) -> bool:
+    """IPA 判定辅助：ZIP 内是否含 ``Payload/`` 目录（IPA 的标志性结构）。绝不抛。"""
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(path) as zf:
+            return any(name.startswith("Payload/") for name in zf.namelist())
+    except (zipfile.BadZipFile, OSError):
+        logger.exception("[gui] 探测 IPA Payload 结构失败：%s", path)
+        return False
+
+
+def validate_ipa_path(ipa_path: str) -> str | None:
+    """校验 IPA 路径（iOS 栏静态分析用）。返回 ``None`` 通过，否则友好错误文案，绝不抛。
+
+    顺序与 :func:`validate_apk_path` 一致（空 → 不存在 → 目录 → 不可读 → 空文件 → 非 IPA）。
+    放行策略：须先是 ZIP(PK 魔数)；再 ``.ipa`` 后缀 **或** ZIP 内含 ``Payload/``（IPA 标志）
+    任一满足即过——后缀容忍改名场景，``Payload/`` 探测兜住无后缀真 IPA，且把普通 APK/ZIP
+    （无 ``Payload/``、无 ``.ipa`` 后缀）挡在 iOS 栏外，避免误投。
+    """
+    p = (ipa_path or "").strip()
+    if not p:
+        return "请先选择一个 IPA 文件再开始。"
+    try:
+        path = Path(p)
+        if not path.exists():
+            return f"找不到这个文件，路径可能已改名或被移动：\n{p}"
+        if path.is_dir():
+            return "这是一个文件夹，请选择 .ipa 文件本身。"
+        if not os.access(p, os.R_OK):
+            return "没有读取权限，请检查文件是否被占用或换个位置。"
+        if path.stat().st_size == 0:
+            return "这个文件是空的（0 字节），不是有效的 IPA。"
+        has_ipa_suffix = path.suffix.lower() == ".ipa"
+        try:
+            with path.open("rb") as fh:
+                head = fh.read(4)
+        except OSError:
+            logger.exception("[gui] 读取 IPA 头部失败：%s", p)
+            return "没有读取权限，请检查文件是否被占用或换个位置。"
+        is_zip = any(head.startswith(magic) for magic in _ZIP_MAGICS)
+        if not is_zip:
+            return "这看起来不是一个 IPA 文件（应是 ZIP 容器，内含 Payload/<App>.app）。"
+        # .ipa 后缀直接放行；无后缀则须含 Payload/ 才认定为 IPA（与普通 APK/ZIP 区分）。
+        if not has_ipa_suffix and not _zip_has_payload(p):
+            return "这看起来不是一个 IPA 文件（ZIP 内未找到 Payload/<App>.app）。"
+    except OSError:
+        logger.exception("[gui] 校验 IPA 路径时 IO 异常：%s", p)
+        return "没有读取权限，请检查文件是否被占用或换个位置。"
+    return None
+
+
 def resolve_out_dir(out_dir: str) -> str:
     """把 out_dir 解析为绝对路径字符串（**不创建**）。空串 → 'out' → resolve。
 
@@ -308,6 +364,15 @@ class ActionRequest:
     # 把 ``IntVar.get()`` 的 ``tk.TclError`` 风险从 view 移走（view 改传 widget `.get()` str）。
     capture_duration_raw: str = "60"
     auto_fix: bool = True
+    # GUI 两栏分别选 APK / IPA。FILE_TYPE_IPA 时取 ``ipa_path``、仅允许静态分析（CLI analyze
+    # 经 load_app 自动分流 IPA，无需额外子命令）。默认 apk 保持旧调用方（含测试）行为不变。
+    file_type: str = FILE_TYPE_APK
+    ipa_path: str = ""
+
+    @property
+    def target_path(self) -> str:
+        """按 ``file_type`` 取当前要分析的文件路径（IPA 栏 → ipa_path，否则 apk_path）。"""
+        return self.ipa_path if self.file_type == FILE_TYPE_IPA else self.apk_path
 
 
 class GuiController:
@@ -362,12 +427,26 @@ class GuiController:
             if self._busy:
                 logger.warning("[gui] 已有动作在运行，忽略新的 start：%s", request.action)
                 return False
-            # 静态 / 一键需要 APK（含空串、不存在、非 APK 等防呆校验）；doctor 不需要。
+            # IPA 仅支持静态分析（不连设备、无脱壳/抓包）；一键全自动是 Android 专属，挡住。
+            if request.file_type == FILE_TYPE_IPA and request.action == ACTION_AUTO:
+                self._emit_result(
+                    ActionResult(
+                        ok=False,
+                        action=request.action,
+                        message="iOS IPA 仅支持静态分析，请改用【静态分析】按钮。",
+                    )
+                )
+                return False
+            # 静态 / 一键需要待分析文件（含空串、不存在、非 APK/IPA 等防呆校验）；doctor 不需要。
+            # 按 file_type 选对应校验器：IPA 栏校验 .ipa（ZIP+Payload），APK 栏校验 .apk（ZIP/PK）。
             if request.action in (ACTION_STATIC, ACTION_AUTO):
-                apk_err = validate_apk_path(request.apk_path)
-                if apk_err:
+                if request.file_type == FILE_TYPE_IPA:
+                    path_err = validate_ipa_path(request.ipa_path)
+                else:
+                    path_err = validate_apk_path(request.apk_path)
+                if path_err:
                     self._emit_result(
-                        ActionResult(ok=False, action=request.action, message=apk_err)
+                        ActionResult(ok=False, action=request.action, message=path_err)
                     )
                     return False
             # 输出目录绝对化（三动作都做，可发现性）。绝对路径回填进 request 供子进程/结果用。
@@ -540,9 +619,11 @@ class GuiController:
         各 subcmd 的参数与 :mod:`apkscan.cli` 的命令签名严格对齐：
         - ``doctor``：``--fix`` / ``--no-fix``（按 ``request.auto_fix``）。
         - ``analyze``（GUI 静态=CLI analyze，纯静态、**不传 --dynamic**、不连设备）：
-          ``<apk> --online|--offline --out <dir> --fmt <csv>``。
+          ``<target> --online|--offline --out <dir> --fmt <csv>``。``<target>`` 取
+          ``request.target_path``（IPA 栏=ipa_path / APK 栏=apk_path）；CLI ``load_app``
+          按 ``.ipa``/含 ``Payload`` 自动分流，IPA 走纯静态、无需额外参数。
         - ``auto``：``<apk> --out <dir> --online|--offline --fix|--no-fix
-          --duration <n> --fmt <csv>``。
+          --duration <n> --fmt <csv>``（仅 APK；IPA 不允许 auto）。
         """
         base: list[str] = (
             [sys.executable, subcmd]
@@ -554,7 +635,7 @@ class GuiController:
         if subcmd == "analyze":
             return [
                 *base,
-                request.apk_path,
+                request.target_path,  # IPA 栏=ipa_path / APK 栏=apk_path（CLI load_app 自动分流）
                 "--online" if request.online else "--offline",
                 "--out",
                 request.out_dir,
@@ -826,6 +907,8 @@ __all__ = [
     "ACTION_AUTO",
     "ACTION_DOCTOR",
     "ACTION_STATIC",
+    "FILE_TYPE_APK",
+    "FILE_TYPE_IPA",
     "ActionRequest",
     "ActionResult",
     "Counts",
@@ -833,5 +916,6 @@ __all__ = [
     "clamp_duration",
     "resolve_out_dir",
     "validate_apk_path",
+    "validate_ipa_path",
     "validate_out_dir",
 ]

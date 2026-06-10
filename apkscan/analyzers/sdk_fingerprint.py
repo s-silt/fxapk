@@ -119,7 +119,7 @@ class SdkFingerprintAnalyzer(BaseAnalyzer):
     """识别第三方 SDK / 服务，产出 SDK_SERVICE 调证线索（每 SDK 绑定一家可调证厂商）。"""
 
     name: str = "sdk_fingerprint"
-    requires: list[str] = []  # 纯静态，永远可用
+    requires: list[str] = ["apk"]  # Android 专属；IPA 上 pipeline 自动 skipped
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
         result = AnalyzerResult(analyzer=self.name)

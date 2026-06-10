@@ -13,6 +13,8 @@ import importlib
 
 import pytest
 
+from apkscan.gui.controller import FILE_TYPE_APK, FILE_TYPE_IPA
+
 
 def test_import_gui_does_not_need_display() -> None:
     """import apkscan.gui 不构造 Tk，无显示器也能成功；暴露 main。"""
@@ -275,3 +277,96 @@ def test_running_disables_input_widgets(app) -> None:  # noqa: ANN001
     assert all(w.instate(["disabled"]) for w in app._input_widgets)
     app._set_buttons_enabled(True)  # 空闲
     assert all(w.instate(["!disabled"]) for w in app._input_widgets)
+
+
+# ---------------------------------------------------------------------------
+# 两栏（APK / IPA）：Notebook 分栏 + IPA 仅静态门控
+# ---------------------------------------------------------------------------
+
+
+def test_notebook_has_two_tabs_and_var_ipa(app) -> None:  # noqa: ANN001
+    """输入卡片是 Notebook、两栏（APK + IPA）；var_ipa 存在；默认选中 APK 栏。"""
+    assert hasattr(app, "notebook")
+    assert len(app.notebook.tabs()) == 2  # APK（Android）+ IPA（iOS）
+    assert hasattr(app, "var_ipa")
+    assert app._current_file_type() == FILE_TYPE_APK  # 默认 APK 栏
+
+
+def test_ipa_tab_disables_auto_and_doctor(app) -> None:  # noqa: ANN001
+    """切到 IPA 栏：禁用【一键全自动】/【环境体检】，【静态分析】仍可点；切回 APK 栏恢复。"""
+    app.notebook.select(1)  # IPA 栏
+    app._apply_tab_constraints()  # 直接驱动约束（不依赖虚拟事件时序）
+    assert app._current_file_type() == FILE_TYPE_IPA
+    assert str(app.btn_auto["state"]) == "disabled"
+    assert str(app.btn_doctor["state"]) == "disabled"
+    assert str(app.btn_static["state"]) == "normal"  # 静态仍可点（IPA 支持静态）
+
+    app.notebook.select(0)  # 切回 APK 栏
+    app._apply_tab_constraints()
+    assert app._current_file_type() == FILE_TYPE_APK
+    assert str(app.btn_auto["state"]) == "normal"
+    assert str(app.btn_doctor["state"]) == "normal"
+
+
+def test_tab_changed_event_fires_constraints(app) -> None:  # noqa: ANN001
+    """<<NotebookTabChanged>> 绑定生效：select 切栏经事件触发约束（不手动调）。"""
+    app.notebook.select(1)
+    app.root.update()  # 抽干事件队列 → 触发 <<NotebookTabChanged>> → _apply_tab_constraints
+    assert str(app.btn_auto["state"]) == "disabled"
+
+
+def test_set_buttons_enabled_respects_ipa_tab(app) -> None:  # noqa: ANN001
+    """运行结束恢复按钮时按当前栏复位：IPA 栏下 auto/doctor 仍禁、static 恢复可用。"""
+    app.notebook.select(1)  # IPA 栏
+    app._apply_tab_constraints()
+    app._set_buttons_enabled(False)  # 运行中：三动作全禁
+    assert str(app.btn_auto["state"]) == "disabled"
+    app._set_buttons_enabled(True)  # 结束恢复 → IPA 栏下 auto/doctor 应仍禁
+    assert str(app.btn_auto["state"]) == "disabled"
+    assert str(app.btn_doctor["state"]) == "disabled"
+    assert str(app.btn_static["state"]) == "normal"  # 静态恢复可用
+
+
+def test_start_from_ipa_tab_sets_file_type_and_ipa_path(  # noqa: ANN001
+    app, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """IPA 栏点【静态分析】→ 组装的 ActionRequest 带 file_type=ipa + ipa_path。"""
+    captured: dict[str, str] = {}
+    monkeypatch.setattr(
+        app.controller,
+        "start",
+        lambda req: captured.update(file_type=req.file_type, ipa_path=req.ipa_path) or False,
+    )
+    app.notebook.select(1)  # IPA 栏
+    app.var_ipa.set("/some/fraud.ipa")
+    app._on_static()
+    assert captured["file_type"] == FILE_TYPE_IPA
+    assert captured["ipa_path"] == "/some/fraud.ipa"
+
+
+def test_start_from_apk_tab_sets_apk_file_type(  # noqa: ANN001
+    app, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """APK 栏点【静态分析】→ ActionRequest file_type=apk + apk_path。"""
+    captured: dict[str, str] = {}
+    monkeypatch.setattr(
+        app.controller,
+        "start",
+        lambda req: captured.update(file_type=req.file_type, apk_path=req.apk_path) or False,
+    )
+    app.notebook.select(0)  # APK 栏
+    app.var_apk.set("/some/app.apk")
+    app._on_static()
+    assert captured["file_type"] == FILE_TYPE_APK
+    assert captured["apk_path"] == "/some/app.apk"
+
+
+def test_browse_ipa_sets_var_ipa(app, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: ANN001
+    """浏览 IPA：选了路径 → 写入 var_ipa。"""
+    from apkscan.gui import view as view_mod
+
+    monkeypatch.setattr(
+        view_mod.filedialog, "askopenfilename", lambda *a, **k: "/picked/x.ipa"
+    )
+    app._browse_ipa()
+    assert app.var_ipa.get() == "/picked/x.ipa"
