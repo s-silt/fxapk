@@ -25,21 +25,29 @@ from apkscan.core.models import (
 logger = logging.getLogger(__name__)
 
 
+_ANDROGUARD_SILENCED = False
+
+
 def _silence_androguard_logging() -> None:
     """关闭 androguard 4.x 的 loguru 噪音（解析大 APK 会刷出上百 MB DEBUG）。
 
-    androguard 用 loguru 而非 stdlib logging，stdlib 的 level 配置管不到它，
-    故在此处显式 disable。loguru 缺失（理论上不会）则跳过并记 debug。
+    androguard 用 loguru 而非 stdlib logging，stdlib 的 level 配置管不到它，故显式 disable。
+
+    **启动提速**：本函数会 import loguru（拉起 loguru→asyncio ~114ms）；故**不在模块导入期
+    调用**，而是延迟到真正 import androguard 之前（load_apk / _load_extra_dex 内）才调一次。
+    这样 ``import apkscan.cli``（doctor/gui/--version/--help 等不分析的命令）不再白付 loguru。
+    幂等：只在首次（androguard 用到前）执行 import+disable。loguru 缺失则跳过并记 debug。
     """
+    global _ANDROGUARD_SILENCED
+    if _ANDROGUARD_SILENCED:
+        return
     try:
         from loguru import logger as _loguru_logger
 
         _loguru_logger.disable("androguard")
+        _ANDROGUARD_SILENCED = True
     except Exception:
         logger.debug("禁用 androguard loguru 失败（忽略）", exc_info=True)
-
-
-_silence_androguard_logging()
 
 
 class ApkParseError(RuntimeError):
@@ -349,6 +357,7 @@ def _load_extra_dex(extra_dex: list[str]) -> list:
     - 单个文件读取/解析失败 → try/except + logging 跳过，不影响主流程（不裸 pass、不吞错）。
     - androguard 的 import 只允许出现在本文件。
     """
+    _silence_androguard_logging()  # 用 androguard 前才禁其 loguru（避免启动期白付 loguru）
     from androguard.core.dex import DEX
 
     out: list = []
@@ -412,6 +421,7 @@ def load_apk(
                产出，使脱壳后的隐藏端点/SDK 也能被静态分析命中。单个 dex 失败不影响主流程。
     """
     # androguard 的 import 只允许出现在本文件。
+    _silence_androguard_logging()  # 用 androguard 前才禁其 loguru（避免启动期白付 loguru）
     from androguard.core.apk import APK
     from androguard.misc import AnalyzeAPK
 
