@@ -1009,3 +1009,71 @@ def test_install_apk_no_adb(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
 def test_install_apk_missing_file(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(provision.tools, "adb_path", lambda: "/usr/bin/adb")
     assert provision.install_apk("/no/such/file.apk")["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# uninstall_app：批量分析逐个收尾（adb uninstall <pkg>，只卸本批装的）
+# ---------------------------------------------------------------------------
+
+
+def test_uninstall_app_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(provision.tools, "adb_path", lambda: "/usr/bin/adb")
+    monkeypatch.setattr(
+        provision.subprocess, "run", lambda *a, **k: _FakeCompleted(0, "Success\n")
+    )
+    res = provision.uninstall_app("com.evil.app")
+    assert res["ok"] is True
+
+
+def test_uninstall_app_builds_adb_uninstall_argv(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict = {}
+    monkeypatch.setattr(provision.tools, "adb_path", lambda: "/usr/bin/adb")
+
+    def _capture(args: list[str], **k: object) -> _FakeCompleted:
+        captured["args"] = args
+        return _FakeCompleted(0, "Success\n")
+
+    monkeypatch.setattr(provision.subprocess, "run", _capture)
+    provision.uninstall_app("com.evil.app", serial="emulator-5554")
+    assert captured["args"] == [
+        "/usr/bin/adb", "-s", "emulator-5554", "uninstall", "com.evil.app"
+    ]
+
+
+def test_uninstall_app_no_adb(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(provision.tools, "adb_path", lambda: "")
+    assert provision.uninstall_app("com.evil.app")["ok"] is False
+
+
+def test_uninstall_app_empty_package_rejected_without_adb_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(provision.tools, "adb_path", lambda: "/usr/bin/adb")
+
+    def _boom(*a: object, **k: object) -> _FakeCompleted:
+        raise AssertionError("空包名不应触达 subprocess")
+
+    monkeypatch.setattr(provision.subprocess, "run", _boom)
+    assert provision.uninstall_app("")["ok"] is False
+
+
+def test_uninstall_app_failure_not_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(provision.tools, "adb_path", lambda: "/usr/bin/adb")
+    monkeypatch.setattr(
+        provision.subprocess,
+        "run",
+        lambda *a, **k: _FakeCompleted(1, "", "Failure [DELETE_FAILED_INTERNAL_ERROR]"),
+    )
+    res = provision.uninstall_app("com.evil.app")
+    assert res["ok"] is False
+    assert "DELETE_FAILED" in res["detail"]
+
+
+def test_uninstall_app_timeout_not_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(provision.tools, "adb_path", lambda: "/usr/bin/adb")
+
+    def _timeout(*a: object, **k: object) -> _FakeCompleted:
+        raise provision.subprocess.TimeoutExpired(cmd="adb", timeout=60)
+
+    monkeypatch.setattr(provision.subprocess, "run", _timeout)
+    assert provision.uninstall_app("com.evil.app")["ok"] is False
