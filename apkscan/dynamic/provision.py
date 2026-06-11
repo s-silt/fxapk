@@ -65,6 +65,8 @@ _FRIDA_SERVER_REMOTE = "/data/local/tmp/frida-server"
 
 # adb install 超时（秒）：大 APK / 加固包安装可能较慢。
 _INSTALL_TIMEOUT = 180.0
+# adb uninstall 超时（秒）：卸载很快，给足兜底即可。
+_UNINSTALL_TIMEOUT = 60.0
 
 # urllib 下载超时（秒）。GitHub releases 大文件，给足时间但仍有上限。
 _DOWNLOAD_TIMEOUT = 60.0
@@ -462,6 +464,44 @@ def install_apk(apk_path: str, serial: str | None = None) -> dict:
             "detail": "设备上已装同包名但签名不同的 app；请先 `adb uninstall <包名>` 再重试",
         }
     return {"ok": False, "detail": f"adb install 失败：{out[-300:]}"}
+
+
+def uninstall_app(package: str, serial: str | None = None) -> dict:
+    """从设备卸载指定包（批量分析逐个收尾：本批装一个、跑完卸一个，**只卸本批自己装的**）。
+
+    用 ``adb uninstall <package>``。绝不抛，返回 ``{ok, detail}``：
+    - 成功（输出含 Success）→ ok=True。
+    - 空包名 → ok=False（不触达 adb，纵深防御：别把空串拼进 adb 命令）。
+    - adb 不可用 / 超时 / 非零（如设备上本就没装该包 DELETE_FAILED）→ ok=False + detail。
+    """
+    if not package:
+        return {"ok": False, "detail": "包名为空，拒绝卸载"}
+    exe = tools.adb_path()
+    if not exe:
+        return {"ok": False, "detail": "adb 不可用，无法卸载 app"}
+
+    args = [exe, *(["-s", serial] if serial else []), "uninstall", package]
+    try:
+        proc = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_UNINSTALL_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("[provision] adb uninstall 超时（%ss）：%s", _UNINSTALL_TIMEOUT, package)
+        return {"ok": False, "detail": f"adb uninstall 超时（{_UNINSTALL_TIMEOUT:.0f}s）"}
+    except Exception:
+        logger.exception("[provision] adb uninstall 异常：%s", package)
+        return {"ok": False, "detail": "adb uninstall 异常（详见日志）"}
+
+    out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+    if proc.returncode == 0 and "Success" in out:
+        return {"ok": True, "detail": f"已从设备卸载：{package}"}
+    return {"ok": False, "detail": f"adb uninstall 失败：{out[-300:]}"}
 
 
 def ensure_frida_server(
