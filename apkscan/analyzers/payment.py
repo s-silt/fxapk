@@ -64,6 +64,7 @@ from apkscan.analyzers._common import (
 from apkscan.analyzers._common import (
     truncate as _truncate_shared,
 )
+from apkscan.core import chainaddr
 from apkscan.core.models import (
     AnalyzerResult,
     Confidence,
@@ -204,9 +205,12 @@ class PaymentAnalyzer(BaseAnalyzer):
             if hit.evidences:
                 sdk_hits.append(hit)
 
-        # 2) 资金关键字
+        # 2) 资金关键字（wallet_address 规则跳过通用匹配——链上地址改由 _crypto_address_leads
+        #    按地址逐条产出，带校验和 + 判链，避免双轨与泛化 value）。
         kw_hits: list[_KeywordHit] = []
         for rule in kw_rules:
+            if rule.category == "wallet_address":
+                continue
             try:
                 hit = self._match_keyword(rule, corpus, corpus_lower)
             except Exception:
@@ -215,13 +219,18 @@ class PaymentAnalyzer(BaseAnalyzer):
             if hit.evidences:
                 kw_hits.append(hit)
 
+        # 2b) 链上钱包地址：过 chainaddr 校验和 + 判链，每地址一条 Lead（随机串被校验和滤掉）。
+        crypto_leads = self._crypto_address_leads(corpus, kw_rules, defaults)
+
         for hit in sdk_hits:
             result.leads.append(self._sdk_lead(hit, defaults))
         for hit in kw_hits:
             result.leads.append(self._keyword_lead(hit, defaults))
+        result.leads.extend(crypto_leads)
 
         result.meta["payment_sdks"] = [h.rule.name for h in sdk_hits]
         result.meta["payment_keywords"] = [h.rule.name for h in kw_hits]
+        result.meta["crypto_addresses"] = [lead.value for lead in crypto_leads]
 
         if sdk_hits or kw_hits:
             logger.info(
@@ -423,6 +432,60 @@ class PaymentAnalyzer(BaseAnalyzer):
             source_refs=list(hit.evidences),
             notes=self._keyword_notes(hit),
         )
+
+    def _crypto_address_leads(
+        self,
+        corpus: list[tuple[str, str, str]],
+        kw_rules: list["_KeywordRule"],
+        defaults: dict[str, object],
+    ) -> list[Lead]:
+        """扫语料里的链上钱包地址，过 chainaddr 校验和 + 判链，每地址一条 PAYMENT 线索。
+
+        归一：取 yaml 里 category=wallet_address 规则的 subject/where/evidence 作元数据模板，
+        但 value=**真实地址**（不是规则名）。校验失败的随机串由 find_addresses 滤掉；EVM 全
+        小写/全大写无法 EIP-55 校验 → 仍出线索但降 MEDIUM + notes 标低可信。绝不抛。
+        """
+        tmpl = next((r for r in kw_rules if r.category == "wallet_address"), None)
+        subject = (tmpl.subject if tmpl else "") or str(defaults["default_subject"])
+        where = (tmpl.where_to_request if tmpl else "") or str(
+            defaults["default_where_to_request"]
+        )
+        evidence = (
+            list(tmpl.evidence_to_obtain)
+            if tmpl and tmpl.evidence_to_obtain
+            else list(defaults["evidence_to_obtain"])  # type: ignore[arg-type]
+        )
+        seen: dict[str, Lead] = {}
+        for source, location, text in corpus:
+            try:
+                addrs = chainaddr.find_addresses(text)
+            except Exception:
+                logger.exception("[%s] 链上地址扫描异常，跳过该语料", self.name)
+                continue
+            for addr in addrs:
+                if addr.value in seen:
+                    continue
+                if addr.checksum_verified:
+                    note = f"链上收款地址（{addr.chain}），校验和已通过。"
+                    conf = Confidence.HIGH
+                else:
+                    note = (
+                        f"链上收款地址（{addr.chain}），全小写/全大写未通过大小写校验，"
+                        "低可信、需人工复核。"
+                    )
+                    conf = Confidence.MEDIUM
+                note += "区分收款地址 vs 链 RPC / 官方合约 / SDK 内置地址需人工核实。"
+                seen[addr.value] = Lead(
+                    category=LeadCategory.PAYMENT,
+                    value=addr.value,
+                    subject=subject,
+                    where_to_request=where,
+                    evidence_to_obtain=evidence,
+                    confidence=conf,
+                    source_refs=[Evidence(source=source, location=location, snippet=addr.value)],
+                    notes=note,
+                )
+        return list(seen.values())
 
     @staticmethod
     def _sdk_notes(hit: _SdkHit) -> str:

@@ -57,13 +57,40 @@ def test_usdt_keyword_hit():
     assert any("USDT" in l.value or "虚拟货币" in l.value for l in leads)
 
 
-def test_tron_wallet_address_regex_hit():
-    # 合法格式 TRON 地址（T + 33 位 base58）。
-    addr = "TQn9Y2khEsLJW1ChVWFMSMeRDow5KcbLSE"
+def test_crypto_address_lead_is_per_address_with_chain():
+    """归一：wallet_address 命中产「每地址一条」Lead（value=真地址 + 链 + 校验通过），
+    不再产泛化的『加密货币钱包地址』规则名 Lead（避免双轨）。"""
+    addr = "TQn9Y2khEsLJW1ChVWFMSMeRDow5KcbLSE"  # 合法 Base58Check TRON
     ctx = FakeContext(dex_strings=[f"收款地址 {addr}"])
     result = PaymentAnalyzer().analyze(ctx)
     leads = _pay_leads(result)
-    assert any("钱包地址" in l.value for l in leads), "应命中加密货币钱包地址规则"
+    lead = next((l for l in leads if l.value == addr), None)
+    assert lead is not None, "应产出 value=真地址的线索"
+    assert "TRON" in lead.notes
+    assert lead.confidence == Confidence.HIGH  # 校验和通过
+    assert lead.where_to_request  # 带调证落点
+    assert not any(l.value.startswith("加密货币钱包地址") for l in leads), "不应再有泛化规则名 Lead"
+
+
+def test_crypto_address_random_string_filtered_by_checksum():
+    """校验和降噪：T 开头但校验失败的随机串不产线索。"""
+    bad = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6X"  # 末位改动 → Base58Check 失败
+    ctx = FakeContext(dex_strings=[f"噪声 {bad} 结束"])
+    result = PaymentAnalyzer().analyze(ctx)
+    leads = _pay_leads(result)
+    assert not any(l.value == bad for l in leads)
+
+
+def test_evm_lowercase_address_marked_low_confidence():
+    """EVM 全小写无法 EIP-55 校验 → 仍出线索但标低可信、不给 HIGH。"""
+    addr = "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed"
+    ctx = FakeContext(dex_strings=[f"eth {addr}"])
+    result = PaymentAnalyzer().analyze(ctx)
+    leads = _pay_leads(result)
+    lead = next((l for l in leads if l.value == addr), None)
+    assert lead is not None
+    assert lead.confidence != Confidence.HIGH
+    assert "未" in lead.notes  # 标注未通过大小写校验
 
 
 def test_keyword_hit_in_text_resource():
