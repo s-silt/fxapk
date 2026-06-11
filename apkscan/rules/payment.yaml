@@ -435,11 +435,10 @@ keywords:
   - name: "加密货币钱包地址 (wallet address)"
     category: "wallet_address"
     strong: true
-    # 加前后非字母数字边界，避免匹配到 base64 / lambda 名等压缩标识符内部子串。
-    # 已移除 BTC 旧版 1.../3... 地址正则（与 base58 标识符撞车率极高，几乎全是误报）；
-    # 仅保留 TRON(T...)、EVM(0x...)、BTC bech32(bc1...) 三种前缀较独特的形态。
-    # (?-i:...) 关闭作用域内忽略大小写——base58/bech32 本就区分大小写（排除 I/O/l/0），
-    # 否则在 IGNORECASE 下会把 CamelCase 类名（如 TracingControllerBoundaryInterface）误判。
+    # ★ 本规则的 patterns 已不再用于匹配——链上地址改由 apkscan.core.chainaddr 统一抠取
+    #   （带 Base58Check / EIP-55 / Bech32 校验和 + 自动判链，每地址一条线索、随机串被滤）。
+    #   本条仅作 PaymentAnalyzer._crypto_address_leads 的 subject/where/evidence 元数据模板，
+    #   category=wallet_address 是其识别键；patterns 保留仅作形态文档，改它不影响实际匹配。
     patterns:
       - '(?<![A-Za-z0-9_])(?-i:T[1-9A-HJ-NP-Za-km-z]{33})(?![A-Za-z0-9_])'
       - '(?<![A-Za-z0-9_])0x[a-fA-F0-9]{40}(?![A-Za-z0-9_])'
