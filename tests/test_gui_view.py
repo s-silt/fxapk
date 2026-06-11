@@ -88,7 +88,7 @@ def app(_shared_root):  # noqa: ANN001, ANN201 - pytest fixture
 def test_view_app_constructs_without_error_if_display_available(app) -> None:  # noqa: ANN001
     """有显示器：真构造一次 App 验证布局/样式无异常；无显示器（CI）经 fixture 自动 skip。"""
     # 控件就绪：动作按钮存在、日志框存在、变量默认值合理。
-    assert len(app._action_buttons) == 3
+    assert len(app._action_buttons) == 4  # 一键 / 静态 / 体检 / 批量
     assert app.var_online.get() is True  # 默认联网富化（与 cli 一致）
     assert app.var_html.get() is True  # 默认勾 HTML
     assert app.var_json.get() is True  # 默认勾 JSON
@@ -105,11 +105,15 @@ def test_stop_button_exists_and_disabled_when_idle(app) -> None:  # noqa: ANN001
 
 
 def test_running_toggles_button_states(app) -> None:  # noqa: ANN001
+    app.notebook.select(0)  # 确保 APK 栏（默认）
     app._set_buttons_enabled(False)  # 运行中
     assert all(str(b["state"]) == "disabled" for b in app._action_buttons)
     assert str(app.btn_stop["state"]) == "normal"  # 停止按钮可点
-    app._set_buttons_enabled(True)  # 空闲
-    assert all(str(b["state"]) == "normal" for b in app._action_buttons)
+    app._set_buttons_enabled(True)  # 空闲（APK 栏 → 一键/静态/体检可点，批量按栏禁用）
+    assert str(app.btn_auto["state"]) == "normal"
+    assert str(app.btn_static["state"]) == "normal"
+    assert str(app.btn_doctor["state"]) == "normal"
+    assert str(app.btn_batch["state"]) == "disabled"  # 批量仅在【批量】栏可点
     assert str(app.btn_stop["state"]) == "disabled"  # 停止按钮禁用
 
 
@@ -284,10 +288,10 @@ def test_running_disables_input_widgets(app) -> None:  # noqa: ANN001
 # ---------------------------------------------------------------------------
 
 
-def test_notebook_has_two_tabs_and_var_ipa(app) -> None:  # noqa: ANN001
-    """输入卡片是 Notebook、两栏（APK + IPA）；var_ipa 存在；默认选中 APK 栏。"""
+def test_notebook_has_three_tabs_and_var_ipa(app) -> None:  # noqa: ANN001
+    """输入卡片是 Notebook、三栏（APK + IPA + 批量）；var_ipa 存在；默认选中 APK 栏。"""
     assert hasattr(app, "notebook")
-    assert len(app.notebook.tabs()) == 2  # APK（Android）+ IPA（iOS）
+    assert len(app.notebook.tabs()) == 3  # APK（Android）/ IPA（iOS）/ 批量（文件夹）
     assert hasattr(app, "var_ipa")
     assert app._current_file_type() == FILE_TYPE_APK  # 默认 APK 栏
 
@@ -370,3 +374,57 @@ def test_browse_ipa_sets_var_ipa(app, monkeypatch: pytest.MonkeyPatch) -> None: 
     )
     app._browse_ipa()
     assert app.var_ipa.get() == "/picked/x.ipa"
+
+
+# ---------------------------------------------------------------------------
+# 批量（文件夹）栏：第三个 tab + 【批量分析】按钮 + 按栏约束
+# ---------------------------------------------------------------------------
+
+
+def test_batch_tab_and_widgets_exist(app) -> None:  # noqa: ANN001
+    assert hasattr(app, "btn_batch")
+    assert hasattr(app, "var_folder")
+    assert hasattr(app, "var_force")
+    assert app.btn_batch in app._action_buttons
+    assert app.notebook.index("end") == 3  # APK / IPA / 批量 三栏
+
+
+def test_batch_tab_enables_only_batch_button(app) -> None:  # noqa: ANN001
+    app.notebook.select(2)  # 批量栏
+    app._apply_tab_constraints()
+    assert str(app.btn_batch["state"]) == "normal"
+    assert str(app.btn_auto["state"]) == "disabled"
+    assert str(app.btn_static["state"]) == "disabled"
+    assert str(app.btn_doctor["state"]) == "disabled"
+
+
+def test_apk_tab_disables_batch_button(app) -> None:  # noqa: ANN001
+    app.notebook.select(0)  # APK 栏
+    app._apply_tab_constraints()
+    assert str(app.btn_batch["state"]) == "disabled"
+    assert str(app.btn_auto["state"]) == "normal"
+    assert str(app.btn_static["state"]) == "normal"
+
+
+def test_on_batch_builds_request_with_folder_and_force(
+    app, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:  # noqa: ANN001
+    from apkscan.gui.controller import ACTION_BATCH
+
+    captured: dict = {}
+    monkeypatch.setattr(app.controller, "start", lambda req: captured.update(req=req) or False)
+    app.var_folder.set(str(tmp_path))
+    app.var_force.set(True)
+    app._on_batch()
+    req = captured["req"]
+    assert req.action == ACTION_BATCH
+    assert req.folder == str(tmp_path)
+    assert req.force is True
+
+
+def test_browse_folder_sets_var(app, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: ANN001
+    from apkscan.gui import view as view_mod
+
+    monkeypatch.setattr(view_mod.filedialog, "askdirectory", lambda *a, **k: "/picked/samples")
+    app._browse_folder()
+    assert app.var_folder.get() == "/picked/samples"

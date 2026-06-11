@@ -26,6 +26,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from apkscan.gui.controller import (
     ACTION_AUTO,
+    ACTION_BATCH,
     ACTION_DOCTOR,
     ACTION_STATIC,
     FILE_TYPE_APK,
@@ -35,6 +36,11 @@ from apkscan.gui.controller import (
     GuiController,
     clamp_duration,
 )
+
+# Notebook 栏序号（_current_file_type / _apply_tab_constraints 共用，避免裸数字漂移）。
+_TAB_APK = 0
+_TAB_IPA = 1
+_TAB_BATCH = 2
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +88,8 @@ class App:
         self.var_json = tk.BooleanVar(value=True)  # 默认勾 JSON
         self.var_pdf = tk.BooleanVar(value=False)  # 默认不勾 PDF
         self.var_duration = tk.IntVar(value=60)
+        self.var_folder = tk.StringVar()  # 批量栏：待扫描样本文件夹
+        self.var_force = tk.BooleanVar(value=False)  # 批量栏：无视台账全部重跑
         self.var_counts = tk.StringVar(value="端点 -    线索 -    发现 -")
 
         # 结果区状态（供「打开报告/目录」按钮）。
@@ -292,7 +300,8 @@ class App:
         self.notebook.grid(row=0, column=0, sticky="ew")
         self.notebook.add(self._build_apk_page(self.notebook), text="  APK（Android）  ")
         self.notebook.add(self._build_ipa_page(self.notebook), text="  IPA（iOS）  ")
-        # 切栏 → 按当前栏约束动作按钮（IPA 仅静态：禁用一键全自动/环境体检）。
+        self.notebook.add(self._build_batch_page(self.notebook), text="  批量（文件夹）  ")
+        # 切栏 → 按当前栏约束动作按钮（IPA 仅静态、批量仅【批量分析】）。
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
     def _build_apk_page(self, parent: ttk.Notebook) -> ttk.Frame:
@@ -409,6 +418,86 @@ class App:
         self._input_widgets += [entry_ipa, btn_browse_ipa, entry_out_ipa, btn_browse_out_ipa]
         return page
 
+    def _build_batch_page(self, parent: ttk.Notebook) -> ttk.Frame:
+        """批量（文件夹）栏：选文件夹 → 逐个分析没分析过的 APK（静态 + 仅启动动态 + 自动卸载）。
+
+        与 APK 栏共享 var_out / var_online / 格式勾选；**不含抓包时长**（launch-only 固定 30s）。
+        额外一个「强制重跑」勾选（无视去重台账）。切到本栏时仅【批量分析】可点（见
+        :meth:`_apply_tab_constraints`）。
+        """
+        page = ttk.Frame(parent, style="Card.TFrame", padding=PAD)
+        page.columnconfigure(1, weight=1)
+
+        ttk.Label(page, text="样本文件夹", style="Card.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(0, 10), pady=6
+        )
+        entry_folder = ttk.Entry(page, textvariable=self.var_folder, style="Flat.TEntry")
+        entry_folder.grid(row=0, column=1, sticky="ew", pady=6)
+        btn_browse_folder = ttk.Button(
+            page, text="浏览…", style="Tool.TButton", command=self._browse_folder
+        )
+        btn_browse_folder.grid(row=0, column=2, sticky="w", padx=(10, 0), pady=6)
+
+        # 输出目录（与 APK/IPA 栏共享 var_out）。每个 APK 落到 <out>/<名>__<sha8>/。
+        ttk.Label(page, text="输出目录", style="Card.TLabel").grid(
+            row=1, column=0, sticky="w", padx=(0, 10), pady=6
+        )
+        entry_out_b = ttk.Entry(page, textvariable=self.var_out, style="Flat.TEntry")
+        entry_out_b.grid(row=1, column=1, sticky="ew", pady=6)
+        btn_browse_out_b = ttk.Button(
+            page, text="选择…", style="Tool.TButton", command=self._browse_out
+        )
+        btn_browse_out_b.grid(row=1, column=2, sticky="w", padx=(10, 0), pady=6)
+
+        # 选项行：联网 / 格式 / 强制重跑。
+        opts = ttk.Frame(page, style="Card.TFrame")
+        opts.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+
+        radio_offline_b = ttk.Radiobutton(opts, text="离线", value=False, variable=self.var_online)
+        radio_offline_b.pack(side="left")
+        radio_online_b = ttk.Radiobutton(
+            opts, text="联网富化", value=True, variable=self.var_online
+        )
+        radio_online_b.pack(side="left", padx=(8, 18))
+
+        ttk.Label(opts, text="输出：", style="Card.TLabel").pack(side="left")
+        chk_html_b = ttk.Checkbutton(opts, text="HTML", variable=self.var_html)
+        chk_html_b.pack(side="left", padx=(0, 8))
+        chk_json_b = ttk.Checkbutton(opts, text="JSON", variable=self.var_json)
+        chk_json_b.pack(side="left", padx=(0, 8))
+        chk_pdf_b = ttk.Checkbutton(opts, text="PDF", variable=self.var_pdf)
+        chk_pdf_b.pack(side="left", padx=(0, 18))
+        chk_force = ttk.Checkbutton(
+            opts, text="强制重跑（无视已分析台账）", variable=self.var_force
+        )
+        chk_force.pack(side="left")
+
+        ttk.Label(
+            page,
+            text=(
+                "逐个分析文件夹里没分析过的 APK：静态 + 仅启动 app 抓冷启动流量（30s、不等人"
+                "操作）；有设备时每个跑完自动卸载。需登录才出流量的 app，请在场时用【APK 栏 ·"
+                "一键全自动】单跑。"
+            ),
+            style="CardHint.TLabel",
+            wraplength=560,
+            justify="left",
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 2))
+
+        self._input_widgets += [
+            entry_folder,
+            btn_browse_folder,
+            entry_out_b,
+            btn_browse_out_b,
+            radio_offline_b,
+            radio_online_b,
+            chk_html_b,
+            chk_json_b,
+            chk_pdf_b,
+            chk_force,
+        ]
+        return page
+
     def _build_action_bar(self, parent: ttk.Frame) -> None:
         bar = ttk.Frame(parent, style="TFrame")
         bar.grid(row=2, column=0, sticky="ew", pady=(PAD, PAD))
@@ -433,7 +522,14 @@ class App:
         self.btn_doctor.pack(side="left", padx=(10, 0))
         self._tooltip(self.btn_doctor, "检查设备 / root / frida / mitmproxy / CA，可自动修复（仅 APK）")
 
-        self._action_buttons = [self.btn_auto, self.btn_static, self.btn_doctor]
+        # 批量分析：仅【批量（文件夹）】栏可点（_apply_tab_constraints 按栏启停）。
+        self.btn_batch = ttk.Button(
+            bar, text="📁 批量分析", style="Primary.TButton", command=self._on_batch, state="disabled"
+        )
+        self.btn_batch.pack(side="left", padx=(10, 0))
+        self._tooltip(self.btn_batch, "逐个分析文件夹里没分析过的 APK（静态 + 仅启动动态 + 自动卸载）；切到【批量】栏可用")
+
+        self._action_buttons = [self.btn_auto, self.btn_static, self.btn_doctor, self.btn_batch]
 
         # 停止按钮：风格与 Secondary 一致；空闲禁用、运行时启用（与三动作按钮相反）。
         # 不加入 _action_buttons（那批运行时禁用；停止逻辑相反）。
@@ -528,6 +624,11 @@ class App:
         if path:
             self.var_out.set(path)
 
+    def _browse_folder(self) -> None:
+        path = filedialog.askdirectory(title="选择样本文件夹（里面放待分析的 APK）")
+        if path:
+            self.var_folder.set(path)
+
     def _on_auto(self) -> None:
         self._start(ACTION_AUTO)
 
@@ -537,22 +638,33 @@ class App:
     def _on_doctor(self) -> None:
         self._start(ACTION_DOCTOR)
 
-    # -- 两栏（APK / IPA）切换 ----------------------------------------------
+    def _on_batch(self) -> None:
+        self._start(ACTION_BATCH)
 
-    def _current_file_type(self) -> str:
-        """当前选中栏对应的文件类型：第 0 页=APK，第 1 页=IPA。读不到 → 退回 APK。"""
+    # -- 三栏（APK / IPA / 批量）切换 --------------------------------------
+
+    def _current_tab_index(self) -> int:
+        """当前选中栏序号（0=APK / 1=IPA / 2=批量）。读不到 → 退回 0（APK）。"""
         try:
-            return FILE_TYPE_IPA if self.notebook.index(self.notebook.select()) == 1 else FILE_TYPE_APK
+            return self.notebook.index(self.notebook.select())
         except Exception:  # noqa: BLE001 - 取栏失败不应崩 UI，退回 APK 语义
             logger.exception("[gui] 读取当前栏失败，按 APK 处理")
-            return FILE_TYPE_APK
+            return _TAB_APK
+
+    def _current_file_type(self) -> str:
+        """当前栏对应的文件类型：IPA 栏=IPA，其余（APK/批量）=APK（批量不按文件类型走）。"""
+        return FILE_TYPE_IPA if self._current_tab_index() == _TAB_IPA else FILE_TYPE_APK
 
     def _on_tab_changed(self, _event: object = None) -> None:
-        """切栏回调：按当前栏约束动作按钮（IPA 仅静态）。"""
+        """切栏回调：按当前栏约束动作按钮（IPA 仅静态、批量仅【批量分析】）。"""
         self._apply_tab_constraints()
 
     def _apply_tab_constraints(self) -> None:
-        """按当前栏启停动作按钮：IPA 栏仅【静态分析】，禁用【一键全自动】/【环境体检】。
+        """按当前栏启停动作按钮：
+
+        - APK 栏：一键全自动 / 静态分析 / 环境体检 可点，批量禁用。
+        - IPA 栏：仅静态分析（不连设备），其余禁用。
+        - 批量栏：仅【批量分析】，其余禁用。
 
         运行中（controller.busy）不动：此时按钮已被 _set_buttons_enabled(False) 全禁用，
         结束时 _set_buttons_enabled(True) 会再调本方法按当前栏复位。单控件 configure 失败仅
@@ -560,10 +672,19 @@ class App:
         """
         if self.controller.busy:
             return
-        state = "disabled" if self._current_file_type() == FILE_TYPE_IPA else "normal"
+        tab = self._current_tab_index()
+        # 每栏下各按钮的目标状态（auto, static, doctor, batch）。
+        if tab == _TAB_BATCH:
+            states = ("disabled", "disabled", "disabled", "normal")
+        elif tab == _TAB_IPA:
+            states = ("disabled", "normal", "disabled", "disabled")
+        else:  # APK
+            states = ("normal", "normal", "normal", "disabled")
         try:
-            self.btn_auto.configure(state=state)
-            self.btn_doctor.configure(state=state)
+            self.btn_auto.configure(state=states[0])
+            self.btn_static.configure(state=states[1])
+            self.btn_doctor.configure(state=states[2])
+            self.btn_batch.configure(state=states[3])
         except Exception:  # noqa: BLE001 - 按钮约束失败不应崩 UI
             logger.exception("[gui] 按栏约束动作按钮失败（已忽略）")
 
@@ -627,6 +748,8 @@ class App:
             online=bool(self.var_online.get()),
             formats=self._collect_formats(),
             capture_duration_raw=duration_raw,
+            folder=self.var_folder.get().strip(),  # 批量栏用（其它动作忽略）
+            force=bool(self.var_force.get()),
         )
         self._set_buttons_enabled(False)
         # 纵深防御：controller.start() 设计上「绝不抛」（校验函数都吞成友好结果），但万一未来有
