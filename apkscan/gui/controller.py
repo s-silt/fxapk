@@ -53,6 +53,10 @@ _RealThread = threading.Thread
 ACTION_DOCTOR = "doctor"
 ACTION_STATIC = "static"
 ACTION_AUTO = "auto"
+ACTION_BATCH = "batch"  # 文件夹批量分析（逐个 launch-only auto + 卸载）
+
+# 批量 launch-only 抓包固定时长（秒）：只抓冷启动流量，逐个都短一点；不开放给用户调。
+_BATCH_DURATION = 30
 
 # 待分析文件类型（GUI 两栏分别选 APK / IPA）。IPA 仅支持静态分析（不连设备、无动态）。
 FILE_TYPE_APK = "apk"
@@ -297,6 +301,29 @@ def validate_out_dir(out_dir: str) -> str | None:
     return None
 
 
+def validate_folder(folder: str) -> str | None:
+    """校验批量分析的文件夹路径。返回 ``None`` 通过，否则友好错误文案（中文、具体），绝不抛。
+
+    顺序：空 → 不存在 → 是文件（非目录）→ 不可读。空文件夹（无 APK）不算错——交由引擎
+    扫出 0 个、如实汇总。
+    """
+    p = (folder or "").strip()
+    if not p:
+        return "请先选择一个文件夹再开始。"
+    try:
+        path = Path(p)
+        if not path.exists():
+            return f"找不到这个文件夹，路径可能已改名或被移动：\n{p}"
+        if not path.is_dir():
+            return "这是一个文件，请选择一个**文件夹**（里面放待分析的 APK）。"
+        if not os.access(p, os.R_OK):
+            return "没有读取权限，请检查文件夹是否可访问或换个位置。"
+    except OSError:
+        logger.exception("[gui] 校验文件夹路径时 IO 异常：%s", p)
+        return "没有读取权限，请检查文件夹是否可访问或换个位置。"
+    return None
+
+
 def clamp_duration(raw: str, *, lo: int = 10, hi: int = 600, default: int = 60) -> int:
     """Spinbox 文本 → ``[lo, hi]`` 内的 int。空 / 非数字 → ``default``；越界 → 钳到边界。**绝不抛**。"""
     try:
@@ -368,6 +395,9 @@ class ActionRequest:
     # 经 load_app 自动分流 IPA，无需额外子命令）。默认 apk 保持旧调用方（含测试）行为不变。
     file_type: str = FILE_TYPE_APK
     ipa_path: str = ""
+    # 批量分析（ACTION_BATCH）专用：待扫描文件夹 + 是否无视台账全部重跑。
+    folder: str = ""
+    force: bool = False
 
     @property
     def target_path(self) -> str:
@@ -449,11 +479,19 @@ class GuiController:
                         ActionResult(ok=False, action=request.action, message=path_err)
                     )
                     return False
-            # 输出目录绝对化（三动作都做，可发现性）。绝对路径回填进 request 供子进程/结果用。
+            # 批量分析：校验待扫描文件夹（存在 / 是目录 / 可读）。
+            if request.action == ACTION_BATCH:
+                folder_err = validate_folder(request.folder)
+                if folder_err:
+                    self._emit_result(
+                        ActionResult(ok=False, action=request.action, message=folder_err)
+                    )
+                    return False
+            # 输出目录绝对化（各动作都做，可发现性）。绝对路径回填进 request 供子进程/结果用。
             abs_out = resolve_out_dir(request.out_dir)
             request = replace(request, out_dir=abs_out)
-            # 仅 static/auto 产报告，提前校验可写以免白跑；doctor 不产报告，跳过 out 校验。
-            if request.action in (ACTION_STATIC, ACTION_AUTO):
+            # static/auto/batch 产报告，提前校验可写以免白跑；doctor 不产报告，跳过 out 校验。
+            if request.action in (ACTION_STATIC, ACTION_AUTO, ACTION_BATCH):
                 out_err = validate_out_dir(abs_out)
                 if out_err:
                     self._emit_result(
@@ -594,6 +632,8 @@ class GuiController:
             return self._run_static(request)
         if request.action == ACTION_AUTO:
             return self._run_auto(request)
+        if request.action == ACTION_BATCH:
+            return self._run_batch(request)
         logger.warning("[gui] 未知动作：%s", request.action)
         return ActionResult(ok=False, action=request.action, message=f"未知动作：{request.action}")
 
@@ -655,6 +695,21 @@ class GuiController:
                 "--fmt",
                 self._fmt_arg(request.formats),
             ]
+        if subcmd == "batch":
+            argv = [
+                *base,
+                request.folder,
+                "--out",
+                request.out_dir,
+                "--online" if request.online else "--offline",
+                "--duration",
+                str(_BATCH_DURATION),  # launch-only 固定 30s（不开放给用户调）
+                "--fmt",
+                self._fmt_arg(request.formats),
+            ]
+            if request.force:
+                argv.append("--force")  # 无视台账、全部重跑
+            return argv
         logger.warning("[gui] 未知子命令：%s", subcmd)
         return base
 
@@ -751,6 +806,23 @@ class GuiController:
         argv = self._subcmd_argv("auto", request)
         rc = self._run_subprocess(argv, self._log)
         return self._build_subprocess_result(ACTION_AUTO, request.out_dir, rc)
+
+    def _run_batch(self, request: ActionRequest) -> ActionResult:
+        """文件夹批量分析：子进程跑 ``batch``（逐个 launch-only auto + 卸载），汇总实时流入日志。
+
+        与 static/auto 不同，batch 的报告分散在 ``<out>/<名>__<sha8>/`` 子目录、没有单一主
+        报告，故**不走** :meth:`_build_subprocess_result`（它只 glob out_dir 顶层）；结果按退出
+        码判 ok，逐个 [OK]/[ERR]/[SKIP] + 计数已实时打进日志框。out_dir 回传供「打开输出目录」。
+        """
+        argv = self._subcmd_argv("batch", request)
+        rc = self._run_subprocess(argv, self._log)
+        ok = rc == 0
+        message = (
+            "批量完成：详见上方日志的逐个结果与汇总。"
+            if ok
+            else f"批量分析子进程退出码非 0（{rc}），可能部分失败（详见上方日志）。"
+        )
+        return ActionResult(ok=ok, action=ACTION_BATCH, message=message, out_dir=request.out_dir)
 
     # -- 结果解析（子进程模式：探测 out_dir 下报告 + 读主报告 json 计数） --------
 
