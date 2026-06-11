@@ -378,6 +378,64 @@ def auto(
 
 
 @app.command()
+def batch(
+    folder: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        help="待扫描的文件夹：逐个分析其中**没分析过**的 APK（顶层 *.apk，不递归）。",
+    ),
+    out: str = typer.Option(
+        "out_batch", "--out", help="批量输出根目录；每个 APK 落到 <out>/<名>__<sha8>/。"
+    ),
+    online: bool = typer.Option(
+        True,
+        "--online/--offline",
+        help="静态分析是否联网富化归属（WHOIS/ICP/ASN）。默认联网（与 auto 一致）。",
+    ),
+    duration: int = typer.Option(30, "--duration", help="launch-only 抓包时长（秒）。"),
+    fmt: str = typer.Option(
+        "html,json", "--fmt", help="输出格式，逗号分隔：html,json,pdf。"
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="无视去重台账、文件夹内全部重跑。"
+    ),
+) -> None:
+    """批量分析文件夹：扫描没分析过的 APK，逐个「静态 + launch-only 动态」产出报告。
+
+    launch-only = 只启动 app 抓冷启动流量、不等人操作（需登录才出流量的 app 请在场时手动
+    单跑 ``auto``）。有设备时每个 app 跑完自动 ``adb uninstall`` 收尾，保持设备干净。去重按
+    APK 内容 sha256：同一样本改名也跳过；``--force`` 强制重跑。实现由 apkscan.dynamic.batch
+    提供（纯结构化返回 + 回调），本命令是打印薄包装。
+    """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # 批量逐个走 auto（含体检/脱壳/抓包），全经 adb；finally 收掉自起的 adb server。
+    try:
+        try:
+            from apkscan.dynamic import batch as _batch
+        except ImportError:
+            typer.echo("该功能未安装：apkscan.dynamic.batch 不可用（批量分析模块尚未就绪）。")
+            raise typer.Exit(code=1) from None
+
+        formats = _parse_formats(fmt)
+        typer.echo(f"===== 批量分析文件夹：{folder} =====")
+        result = _batch.run_folder(
+            str(folder),
+            out_dir=out,
+            online=online,
+            capture_duration=duration,
+            formats=formats,
+            force=force,
+            on_progress=lambda m: typer.echo(f"... {m}"),
+        )
+        _print_batch_result(result)
+    finally:
+        _cleanup_adb_quiet()
+
+
+@app.command()
 def gui() -> None:
     """启动新手友好的图形界面（tkinter 单窗口：环境体检 / 静态分析 / 一键全自动）。
 
@@ -423,6 +481,30 @@ def _print_auto_result(result: object) -> None:
             typer.echo(f"  - {p}")
     else:
         typer.echo("未产出报告（详见步骤摘要）。")
+
+
+def _print_batch_result(result: object) -> None:
+    """打印 batch.run_folder 的结构化汇总：计数行 + 逐个 [OK]/[ERR]/[SKIP]。"""
+    if not isinstance(result, dict):
+        typer.echo("批量分析：返回值非预期格式，已忽略。")
+        return
+    summary = result.get("summary") or {}
+    typer.echo("")
+    typer.echo("===== 批量汇总 =====")
+    had = "有" if summary.get("had_device") else "无（仅静态）"
+    typer.echo(
+        f"共 {summary.get('total', 0)} 个 · 分析 {summary.get('analyzed', 0)}"
+        f" · 跳过 {summary.get('skipped', 0)} · 失败 {summary.get('failed', 0)} · 设备：{had}"
+    )
+    for item in result.get("analyzed") or []:
+        if isinstance(item, dict):
+            typer.echo(f"[OK]   {item.get('apk')} → {item.get('out_dir')}")
+    for item in result.get("failed") or []:
+        if isinstance(item, dict):
+            typer.echo(f"[ERR]  {item.get('apk')}：{item.get('detail')}")
+    for item in result.get("skipped") or []:
+        if isinstance(item, dict):
+            typer.echo(f"[SKIP] {item.get('apk')}（已分析过）")
 
 
 def _print_doctor_result(result: object) -> None:

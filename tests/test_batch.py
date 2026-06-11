@@ -9,9 +9,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
+from apkscan import cli
 from apkscan.dynamic import batch
 from apkscan.dynamic.ledger import AnalyzedLedger, apk_sha256
+
+runner = CliRunner()
 
 
 def _make_apk(folder: Path, name: str) -> Path:
@@ -222,3 +226,74 @@ def test_run_folder_empty_folder(
     assert res["analyzed"] == []
     assert res["skipped"] == []
     assert res["failed"] == []
+
+
+# ---------------------------------------------------------------------------
+# CLI：fxapk batch <folder>（薄包装，把参数透传引擎 + 打印汇总）
+# ---------------------------------------------------------------------------
+
+
+def _patch_run_folder(monkeypatch: pytest.MonkeyPatch, result: dict) -> dict:
+    calls: dict = {"called": False, "kwargs": None}
+
+    def _fake(folder: str, **kwargs: object) -> dict:
+        calls["called"] = True
+        calls["folder"] = folder
+        calls["kwargs"] = kwargs
+        cb = kwargs.get("on_progress")
+        if callable(cb):
+            cb("扫描中")  # 确认 cli 进度回调可安全调用
+        return result
+
+    monkeypatch.setattr(batch, "run_folder", _fake)
+    return calls
+
+
+def test_cli_batch_passes_args_and_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = {
+        "analyzed": [{"apk": "a.apk", "sha256": "x", "package_name": "com.x",
+                      "report_paths": ["r"], "out_dir": "o", "status": "done"}],
+        "skipped": [],
+        "failed": [],
+        "summary": {"total": 1, "analyzed": 1, "skipped": 0, "failed": 0, "had_device": False},
+        "out_dir": "out_batch",
+        "ledger_path": "x",
+    }
+    calls = _patch_run_folder(monkeypatch, result)
+    res = runner.invoke(
+        cli.app,
+        ["batch", str(tmp_path), "--out", "myout", "--offline",
+         "--duration", "30", "--fmt", "json", "--force"],
+    )
+    assert res.exit_code == 0
+    assert calls["called"] is True
+    kw = calls["kwargs"]
+    assert kw["out_dir"] == "myout"
+    assert kw["online"] is False
+    assert kw["capture_duration"] == 30
+    assert kw["formats"] == ["json"]
+    assert kw["force"] is True
+    assert callable(kw["on_progress"])
+    assert "a.apk" in res.output
+
+
+def test_cli_batch_prints_summary_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = {
+        "analyzed": [],
+        "skipped": [{"apk": "old.apk", "sha256": "y"}],
+        "failed": [{"apk": "bad.apk", "sha256": "z", "detail": "处理异常"}],
+        "summary": {"total": 2, "analyzed": 0, "skipped": 1, "failed": 1, "had_device": True},
+        "out_dir": "out_batch",
+        "ledger_path": "x",
+    }
+    _patch_run_folder(monkeypatch, result)
+    res = runner.invoke(cli.app, ["batch", str(tmp_path)])
+    assert res.exit_code == 0
+    assert "跳过 1" in res.output
+    assert "失败 1" in res.output
+    assert "old.apk" in res.output
+    assert "bad.apk" in res.output
