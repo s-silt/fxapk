@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -229,6 +230,53 @@ def test_run_folder_empty_folder(
 
 
 # ---------------------------------------------------------------------------
+# 跨样本团伙聚类接线（读各包主报告 → correlate → 写 case_correlation.json）
+# ---------------------------------------------------------------------------
+
+
+def _write_report(d: Path, c2: str) -> None:
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "report.json").write_text(
+        json.dumps({"meta": {"sign_subject": "CN=X"}, "leads": [{"value": c2, "is_c2": True}]}),
+        encoding="utf-8",
+    )
+
+
+def test_run_correlation_clusters_shared_c2(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    a, b = out / "a__1111", out / "b__2222"
+    _write_report(a, "evil.com")
+    _write_report(b, "evil.com")
+    analyzed = [
+        {"apk": "a.apk", "sha256": "sha_a", "report_paths": [str(a / "report.json")], "out_dir": str(a)},
+        {"apk": "b.apk", "sha256": "sha_b", "report_paths": [str(b / "report.json")], "out_dir": str(b)},
+    ]
+    clusters = batch._run_correlation(analyzed, str(out))
+    assert len(clusters) == 1
+    assert set(clusters[0]["members"]) == {"sha_a", "sha_b"}
+    assert (out / "case_correlation.json").is_file()
+
+
+def test_run_correlation_missing_report_is_safe(tmp_path: Path) -> None:
+    # 主报告文件不存在（如静态都失败）→ 不崩，无簇。
+    analyzed = [
+        {"apk": "a.apk", "sha256": "sha_a", "report_paths": [str(tmp_path / "nope.json")], "out_dir": "x"},
+    ]
+    assert batch._run_correlation(analyzed, str(tmp_path / "out")) == []
+
+
+def test_run_folder_includes_clusters_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_device: None
+) -> None:
+    folder = tmp_path / "empty"
+    folder.mkdir()
+    monkeypatch.setattr(batch.auto, "run", lambda apk_path, **k: _ok_result(str(k["out_dir"])))
+    res = batch.run_folder(str(folder), out_dir=str(tmp_path / "out"))
+    assert "clusters" in res
+    assert res["summary"]["clusters"] == 0
+
+
+# ---------------------------------------------------------------------------
 # CLI：fxapk batch <folder>（薄包装，把参数透传引擎 + 打印汇总）
 # ---------------------------------------------------------------------------
 
@@ -277,6 +325,31 @@ def test_cli_batch_passes_args_and_exits_zero(
     assert kw["force"] is True
     assert callable(kw["on_progress"])
     assert "a.apk" in res.output
+
+
+def test_cli_batch_prints_clusters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = {
+        "analyzed": [],
+        "skipped": [],
+        "failed": [],
+        "clusters": [
+            {
+                "cluster_id": 1,
+                "members": ["sha_a", "sha_b"],
+                "shared": [{"kind": "c2", "value": "evil.com"}],
+            }
+        ],
+        "summary": {"total": 2, "analyzed": 2, "skipped": 0, "failed": 0, "had_device": False, "clusters": 1},
+        "out_dir": "out_batch",
+        "ledger_path": "x",
+    }
+    _patch_run_folder(monkeypatch, result)
+    res = runner.invoke(cli.app, ["batch", str(tmp_path)])
+    assert res.exit_code == 0
+    assert "团伙簇" in res.output
+    assert "evil.com" in res.output  # 并案依据（共享 C2）
 
 
 def test_cli_batch_prints_summary_counts(

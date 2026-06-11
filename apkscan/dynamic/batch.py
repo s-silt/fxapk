@@ -30,16 +30,61 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+import json
 from pathlib import Path
 
 from apkscan.core import device
-from apkscan.dynamic import auto, provision
+from apkscan.dynamic import auto, correlate, provision
 from apkscan.dynamic.ledger import AnalyzedLedger, apk_sha256
 
 logger = logging.getLogger(__name__)
 
 # launch-only 批量默认抓包时长（秒）：只抓冷启动流量，逐个都短一点省时间。
 _DEFAULT_DURATION = 30
+
+
+def _load_main_report(report_paths: list[str]) -> dict | None:
+    """从一组报告路径里读主报告 JSON（``<base>.json``，排除 runtime_report.json）。坏文件→None。"""
+    for p in report_paths:
+        low = p.lower()
+        if low.endswith(".json") and "runtime_report" not in low:
+            try:
+                return json.loads(Path(p).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                logger.warning("[batch] 读主报告失败（跳过聚类）：%s", p, exc_info=True)
+                return None
+    return None
+
+
+def _run_correlation(analyzed: list[dict], out_dir: str) -> list[dict]:
+    """读各包主报告 → 跨样本团伙聚类 → 写 ``<out_dir>/case_correlation.json``。绝不抛，返回簇列表。"""
+    samples: list[tuple[str, dict]] = []
+    for entry in analyzed:
+        rep = _load_main_report(entry.get("report_paths") or [])
+        if rep is not None:
+            samples.append((str(entry.get("sha256") or entry.get("apk") or ""), rep))
+    try:
+        clusters = correlate.correlate(samples)
+    except Exception:
+        logger.exception("[batch] 团伙聚类异常（忽略）")
+        return []
+    payload = [
+        {
+            "cluster_id": c.cluster_id,
+            "members": c.members,
+            "shared": [{"kind": f.kind, "value": f.value} for f in c.shared],
+        }
+        for c in clusters
+    ]
+    try:
+        out = Path(out_dir) / "case_correlation.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(
+            json.dumps({"clusters": payload}, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        logger.warning("[batch] 写 case_correlation.json 失败（忽略）", exc_info=True)
+    return payload
 
 
 def _emit(on_progress: Callable[[str], None] | None, msg: str) -> None:
@@ -145,21 +190,28 @@ def run_folder(
             logger.exception("[batch] 处理 APK 异常（已隔离，继续下一个）：%s", apk)
             failed.append({"apk": name, "sha256": sha, "detail": "处理异常（详见日志）"})
 
+    # 跨样本团伙聚类（纯离线后处理：读各包主报告，按共享强指纹串并换皮包）。
+    clusters = _run_correlation(analyzed, out_dir)
+
     summary = {
         "total": total,
         "analyzed": len(analyzed),
         "skipped": len(skipped),
         "failed": len(failed),
         "had_device": had_device,
+        "clusters": len(clusters),
     }
+    cluster_note = f" / 团伙簇 {len(clusters)}" if clusters else ""
     _emit(
         on_progress,
-        f"批量完成：分析 {summary['analyzed']} / 跳过 {summary['skipped']} / 失败 {summary['failed']}",
+        f"批量完成：分析 {summary['analyzed']} / 跳过 {summary['skipped']}"
+        f" / 失败 {summary['failed']}{cluster_note}",
     )
     return {
         "analyzed": analyzed,
         "skipped": skipped,
         "failed": failed,
+        "clusters": clusters,
         "summary": summary,
         "out_dir": out_dir,
         "ledger_path": str(led_path),

@@ -496,6 +496,18 @@ def _print_batch_result(result: object) -> None:
         f"共 {summary.get('total', 0)} 个 · 分析 {summary.get('analyzed', 0)}"
         f" · 跳过 {summary.get('skipped', 0)} · 失败 {summary.get('failed', 0)} · 设备：{had}"
     )
+    clusters = result.get("clusters") or []
+    if clusters:
+        typer.echo(f"团伙簇：{len(clusters)} 个（共享强指纹串并，详见 case_correlation.json）")
+        for c in clusters:
+            if not isinstance(c, dict):
+                continue
+            members = c.get("members") or []
+            shared = c.get("shared") or []
+            keys = "、".join(
+                f"{s.get('kind')}={s.get('value')}" for s in shared[:3] if isinstance(s, dict)
+            )
+            typer.echo(f"  簇#{c.get('cluster_id')}：{len(members)} 个样本，并案依据：{keys}")
     for item in result.get("analyzed") or []:
         if isinstance(item, dict):
             typer.echo(f"[OK]   {item.get('apk')} → {item.get('out_dir')}")
