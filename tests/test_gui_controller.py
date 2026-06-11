@@ -24,6 +24,7 @@ import json
 import subprocess
 import sys
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,7 @@ import pytest
 from apkscan.gui import controller as ctrl_mod
 from apkscan.gui.controller import (
     ACTION_AUTO,
+    ACTION_BATCH,
     ACTION_DOCTOR,
     ACTION_STATIC,
     FILE_TYPE_APK,
@@ -42,6 +44,7 @@ from apkscan.gui.controller import (
     clamp_duration,
     resolve_out_dir,
     validate_apk_path,
+    validate_folder,
     validate_ipa_path,
     validate_out_dir,
 )
@@ -1275,3 +1278,93 @@ def test_cancel_watchdog_no_cancel_exits_cleanly(monkeypatch: pytest.MonkeyPatch
     wd._thread.join(timeout=2.0)
     assert not wd._thread.is_alive()
     assert proc.killed == 0
+
+
+# ---------------------------------------------------------------------------
+# batch（文件夹批量分析）：子命令构造 / 校验 / 分派 / 结果
+# ---------------------------------------------------------------------------
+
+
+def test_validate_folder_empty_and_missing_and_file(tmp_path: Path) -> None:
+    assert validate_folder("") is not None  # 空
+    assert validate_folder(str(tmp_path / "nope")) is not None  # 不存在
+    f = tmp_path / "x.apk"
+    f.write_bytes(b"PK")
+    assert validate_folder(str(f)) is not None  # 是文件不是文件夹
+
+
+def test_validate_folder_ok(tmp_path: Path) -> None:
+    assert validate_folder(str(tmp_path)) is None
+
+
+def test_subcmd_argv_batch_full_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ctrl_mod, "_frozen", lambda: False)
+    controller, _logs, _results = _make_controller(monkeypatch)
+    req = ActionRequest(
+        action=ACTION_BATCH,
+        folder="C:/samples",
+        out_dir="d",
+        online=False,
+        formats=["html", "json"],
+    )
+    argv = controller._subcmd_argv("batch", req)
+    assert argv[:4] == [sys.executable, "-m", "apkscan.cli", "batch"]
+    assert "C:/samples" in argv
+    assert "--offline" in argv and "--online" not in argv
+    assert argv[argv.index("--out") + 1] == "d"
+    assert argv[argv.index("--duration") + 1] == "30"  # launch-only 固定 30s
+    assert argv[argv.index("--fmt") + 1] == "html,json"
+
+
+def test_subcmd_argv_batch_force_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ctrl_mod, "_frozen", lambda: False)
+    controller, _logs, _results = _make_controller(monkeypatch)
+    base = ActionRequest(action=ACTION_BATCH, folder="C:/s", out_dir="d")
+    assert "--force" not in controller._subcmd_argv("batch", base)
+    forced = controller._subcmd_argv("batch", replace(base, force=True))
+    assert "--force" in forced
+
+
+def test_run_batch_ok_by_returncode(monkeypatch: pytest.MonkeyPatch) -> None:
+    controller, _logs, _results = _make_controller(monkeypatch)
+    _patch_subprocess(monkeypatch, returncode=0, lines=["... 批量完成"])
+    res = controller._run_batch(ActionRequest(action=ACTION_BATCH, folder="C:/s", out_dir="d"))
+    assert res.ok is True
+    assert res.action == ACTION_BATCH
+
+
+def test_run_batch_nonzero_not_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    controller, _logs, _results = _make_controller(monkeypatch)
+    _patch_subprocess(monkeypatch, returncode=1)
+    res = controller._run_batch(ActionRequest(action=ACTION_BATCH, folder="C:/s", out_dir="d"))
+    assert res.ok is False
+
+
+def test_start_batch_rejects_missing_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    controller, _logs, results = _make_controller(monkeypatch)
+    captures = _patch_subprocess(monkeypatch, returncode=0)
+    accepted = controller.start(
+        ActionRequest(action=ACTION_BATCH, folder=str(tmp_path / "missing"), out_dir="o")
+    )
+    assert accepted is False
+    assert captures["called"] is False  # 校验没过，根本没起子进程
+    assert results and results[-1].ok is False
+
+
+def test_start_batch_accepts_valid_folder_and_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(ctrl_mod, "_frozen", lambda: False)
+    controller, _logs, results = _make_controller(monkeypatch)
+    captures = _patch_subprocess(monkeypatch, returncode=0, lines=["... 批量完成"])
+    accepted = controller.start(
+        ActionRequest(action=ACTION_BATCH, folder=str(tmp_path), out_dir=str(tmp_path / "out"))
+    )
+    assert accepted is True
+    assert captures["called"] is True
+    assert "batch" in captures["argv"]
+    assert str(tmp_path) in captures["argv"]
+    assert results[-1].action == ACTION_BATCH
+    assert results[-1].ok is True
