@@ -30,7 +30,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from apkscan.core import device, tools
+from apkscan.core import device, infra, tools
 from apkscan.core.models import Endpoint, Evidence
 from apkscan.dynamic import (
     STATUS_DONE,
@@ -1354,14 +1354,114 @@ def _collect_flow_endpoints(
 # 单条报文体保留上限（字节）：信封 data 是 base64 密文，通常不大；超大体多为上传/下载，跳过。
 _MAX_BODY_BYTES = 256 * 1024
 
+# ---------------------------------------------------------------------------
+# Dead-Drop：明文配置响应保留通道（白名单 + 限大小 + 剔噪声 host）
+# ---------------------------------------------------------------------------
+#
+# 二段式 dead-drop：app 先打伪装的「命令域名」（甚至像合规备案域名），回包**明文 JSON 配置**
+# 里才带真实交易/后台域名（rest.apizza.net→acedealex.xyz 模式）。现有信封保留通道只留
+# {data,timestamp} 密文，会把这类明文配置回包丢弃 → merge 层无米下锅。故新增**独立**的明文
+# 响应保留通道：当请求 URL 命中 config 类路径**或**响应体里出现与请求 host 不同的新域名时，
+# 保留该明文响应体（标 kind="config"，供 merge.resolve_dead_drop_c2 做回包关系分析浮出二级 C2）。
+#
+# 护栏：① **限大小**（≤_MAX_CONFIG_BODY_BYTES，避免大段明文落盘——隐私）；② **剔噪声 host**
+# （请求 host 命中已知基础设施/CDN → 不留，避免把 CDN/SDK 配置回调当 dead-drop）；③ 不动现有
+# 信封保留逻辑（信封流照旧保留、不带 kind 标记，向后兼容）。
+#
+# ★ 诚实标注：本通道依赖抓包窗口真触发了命令域名的回包（需人工操作 app 登录/拉配置）；
+# launch-only 抓不到登录后接口 → 二级 C2 需配合人工操作触发命令域名回包（见 merge 模块标注）。
+
+# 明文配置响应单独的保留上限（字节，32KB）：比信封更克制——明文配置含可读字段，限小防隐私外泄。
+_MAX_CONFIG_BODY_BYTES = 32 * 1024
+
+# 请求 URL 命中即视为「疑似配置下发接口」的路径关键词（小写子串匹配）。
+_CONFIG_PATH_KEYWORDS: tuple[str, ...] = (
+    "config", "webconfig", "geth5", "home", "init", "appconfig",
+)
+
+# 从明文响应体里抽 host 的正则（http(s) URL 的 host 段）；用于「回包出现新域名」判定。
+_RESP_HOST_RE = re.compile(r"""https?://([A-Za-z0-9.\-]+)""", re.IGNORECASE)
+
+
+def _url_hits_config_keyword(url: str) -> bool:
+    """请求 URL（路径）是否命中 config 类白名单关键词（小写子串）。"""
+    low = (url or "").lower()
+    return any(kw in low for kw in _CONFIG_PATH_KEYWORDS)
+
+
+def _response_new_domains(resp_body: str, request_host: str) -> list[str]:
+    """从明文响应体抽出与请求 host 不同的新域名（http(s) URL 的 host）。
+
+    用于 dead-drop 判定：命令域名回包里若带与自身不同的新域名 → 疑似二级下发。
+    剔掉与请求 host 相同的自引用；其余去重保序返回（不在此判 infra，留给 merge 兜底）。
+    """
+    if not resp_body:
+        return []
+    req = (request_host or "").strip().lower().rstrip(".")
+    found: list[str] = []
+    seen: set[str] = set()
+    for m in _RESP_HOST_RE.finditer(resp_body):
+        host = m.group(1).strip().lower().rstrip(".")
+        if not host or "." not in host or host == req:
+            continue
+        if host in seen:
+            continue
+        seen.add(host)
+        found.append(host)
+    return found
+
+
+def _config_message_from_flow(flow: object) -> dict[str, Any] | None:
+    """Dead-Drop 明文配置保留通道：命中条件时保留响应体（限大小 + 剔噪声 host）。
+
+    保留条件（任一）：① 请求 URL 命中 config 类白名单路径；② 明文响应体里出现与请求 host
+    不同的新域名。护栏：请求 host 命中已知基础设施/CDN → 不留；响应体超
+    ``_MAX_CONFIG_BODY_BYTES`` → 不留。命中 → ``{"url","request_body","response_body",
+    "kind":"config"}``；否则 None。**不在此判加密信封**（信封走原通道，避免与本通道重复保留）。
+    """
+    req = getattr(flow, "request", None)
+    resp = getattr(flow, "response", None)
+    url = ""
+    request_host = ""
+    if req is not None:
+        url = getattr(req, "pretty_url", None) or getattr(req, "url", None) or ""
+        request_host = getattr(req, "pretty_host", None) or getattr(req, "host", None) or ""
+
+    resp_body = _body_text(resp)
+    if not resp_body:
+        return None
+
+    # 护栏①：剔噪声 host——请求 host 是已知基础设施/CDN（infra），其配置回调非 dead-drop。
+    if request_host and infra.is_known_infra(str(request_host)):
+        return None
+
+    hit_keyword = _url_hits_config_keyword(str(url))
+    new_domains = _response_new_domains(resp_body, str(request_host))
+    if not hit_keyword and not new_domains:
+        return None
+
+    # 护栏②：限大小——明文配置含可读字段，超 32KB 不留（隐私 + 防大段明文落盘）。
+    if len(resp_body.encode("utf-8", errors="ignore")) > _MAX_CONFIG_BODY_BYTES:
+        logger.info("[capture] 明文配置响应超 %d 字节，跳过保留：%s", _MAX_CONFIG_BODY_BYTES, url)
+        return None
+
+    return {
+        "url": str(url),
+        "request_body": _body_text(req),
+        "response_body": resp_body,
+        "kind": "config",
+    }
+
 
 def _parse_messages(flows_file: Path) -> list[dict[str, Any]]:
-    """解析流文件，提取每条 HTTP 流的请求/响应体（文本），供解密信封用。
+    """解析流文件，提取每条 HTTP 流的请求/响应体（文本），供解密信封 + dead-drop 浮出用。
 
-    只保留**像 JSON 信封**（文本含 "data" 且含 "timestamp"）的报文体，避免把全部流量
-    体塞进 runtime_report.json。mitmproxy 包不可用 / 文件缺失 / 解析失败 → []（不抛）。
+    两条**独立**保留通道：① 现有信封通道——保留像 JSON 信封（文本含 "data" 且含
+    "timestamp"）的报文体（供 merge 解密）；② 新增 dead-drop 明文配置通道——保留命中 config
+    类路径**或**回包出现新域名的明文响应体（标 kind="config"，供 merge 浮出二级真实 C2）。
+    避免把全部流量塞进 runtime_report.json。mitmproxy 包不可用 / 文件缺失 / 解析失败 → []（不抛）。
 
-    返回 ``[{"url": str, "request_body": str, "response_body": str}]``。
+    返回 ``[{"url": str, "request_body": str, "response_body": str[, "kind": "config"]}]``。
     """
     if not flows_file.exists():
         return []
@@ -1384,10 +1484,16 @@ def _parse_messages(flows_file: Path) -> list[dict[str, Any]]:
                 if not isinstance(flow, mitm_http.HTTPFlow):
                     continue
                 if _is_noise_host(_flow_host(flow), noise_patterns):
-                    continue  # 模拟器/系统自身流量不参与信封解密
+                    continue  # 模拟器/系统自身流量不参与信封解密 / dead-drop
+                # 通道①：现有信封保留（{data,timestamp} 密文）——优先，沿用旧契约不带 kind。
                 msg = _message_from_flow(flow)
                 if msg is not None:
                     messages.append(msg)
+                    continue
+                # 通道②：dead-drop 明文配置保留（config 路径 / 回包新域名；限大小 + 剔噪声 host）。
+                cfg = _config_message_from_flow(flow)
+                if cfg is not None:
+                    messages.append(cfg)
     except Exception:
         logger.exception("[capture] 提取报文体失败：%s（信封解密将跳过）", flows_file)
         return messages
