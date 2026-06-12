@@ -1108,6 +1108,127 @@ def _add_db_degraded_lead(
     return 1
 
 
+# ---------------------------------------------------------------------------
+# 第二波：运行时剪贴板链上地址 → PAYMENT 类 Lead（资金流起点·运行时确认）
+# ---------------------------------------------------------------------------
+#
+# 资金流价值：杀猪盘/跑分引导受害人「复制这个地址转账」——剪贴板里就是真实收款钱包地址。
+# 运行时抓到 = is_runtime_seen 的铁证（比静态硬编码可信度更高，能拿到服务端运行时下发、静态
+# 抠不到的地址）。本功能产的剪贴板地址走 PAYMENT 类（与静态链上地址归一、不新增 LeadCategory），
+# 但 source 标 runtime（使 Lead.is_runtime_seen=True）。
+#
+# ★ 隐私护栏在 cryptohook.normalize_clipboard_event 已完成（抽地址、丢全文）；本模块只消费
+# 抽出的地址，runtime_report.json['clipboard_events'] 本就不含剪贴板全文。
+
+# 剪贴板地址 Lead 的归属/调证语义（复用 payment 链上地址口径：交易所/链上分析/Tether 冻结）。
+_CLIPBOARD_LEAD_SUBJECT = "待核（疑似收款主体）"
+_CLIPBOARD_LEAD_WHERE = (
+    "凭地址上链做钱包聚类→归集点→落地交易所，对接 TronScan/Etherscan 等链上分析；"
+    "向交易所/Tether 申请冻结与调取 KYC（充提记录、绑定身份）。"
+)
+_CLIPBOARD_LEAD_EVIDENCE: tuple[str, ...] = (
+    "链上交易流水（充值/提现/归集路径）",
+    "落地交易所 KYC（实名、绑定手机/邮箱、登录 IP）",
+    "Tether/交易所冻结与协查",
+)
+
+
+def merge_runtime_clipboard(report: Report, runtime_report_path: str) -> dict[str, int]:
+    """把运行时剪贴板抓到的链上地址产成 PAYMENT 类 Lead 并回主报告（资金流起点·运行时确认）。
+
+    流程：
+      1. 读 runtime_report.json 的 ``clipboard_events``（缺/旧版无该字段 → 跳过，零统计）。
+      2. ``cryptohook.clipboard_addresses_from_events`` 抽出 (value, chain, checksum) 链上地址
+         （已过校验和、去重保序；隐私护栏在 normalize 阶段已抽地址丢全文，此处只见地址）。
+      3. 每地址产 PAYMENT 类 Lead（value=地址、where_to_request 复用 payment 链上地址语义、
+         source 标 runtime → ``Lead.is_runtime_seen=True``、notes 标链 + 「运行时剪贴板抓取，
+         受害人复制转账入口」）。
+      4. 去重：静态已抠到同地址 PAYMENT Lead → 不产重复，给静态那条**追加** runtime 证据
+         （把「静态硬编码」升级为「运行时剪贴板确认」，is_runtime_seen 随之为 True）。
+      5. meta 打标 runtime_clipboard / runtime_clipboard_address_count。
+
+    Returns:
+        ``{"clipboard_leads"}``（新增 Lead 数；仅追加确认到已有静态 Lead 的不计入新增）。
+        内部 try/except，绝不抛。
+    """
+    stats = {"clipboard_leads": 0}
+    try:
+        from apkscan.dynamic import cryptohook
+
+        events = _load_events_field(runtime_report_path, "clipboard_events")
+        if not events:
+            return stats
+
+        addresses = cryptohook.clipboard_addresses_from_events(events)
+        if not addresses:
+            return stats
+
+        stats["clipboard_leads"] = _add_runtime_clipboard_leads(report, addresses)
+
+        report.meta["runtime_clipboard"] = True
+        report.meta["runtime_clipboard_address_count"] = len(addresses)
+        logger.info(
+            "[merge] 运行时剪贴板链上地址并回：clipboard_leads=%d addresses=%d",
+            stats["clipboard_leads"],
+            len(addresses),
+        )
+    except Exception:  # noqa: BLE001 - 剪贴板并回失败不得抛给调用方（不破坏已产出报告）
+        logger.exception("[merge] 运行时剪贴板链上地址并回异常")
+    return stats
+
+
+def _add_runtime_clipboard_leads(
+    report: Report, addresses: list[tuple[str, str, bool]]
+) -> int:
+    """把剪贴板抽出的链上地址产成 PAYMENT 类 Lead，去重 append；返回**新增** Lead 数。
+
+    去重：同地址静态已有 PAYMENT Lead → 不重复产，给其追加一条 runtime 证据（升为运行时确认）。
+    """
+    added = 0
+    # 同地址、同类目的已有 Lead 索引（便于追加 runtime 证据）。
+    existing: dict[str, Lead] = {
+        lead.value: lead
+        for lead in report.leads
+        if lead.category == LeadCategory.PAYMENT
+    }
+    for value, chain, checksum_verified in addresses:
+        runtime_ev = Evidence(
+            source=_RUNTIME_SOURCE,
+            location="runtime-clipboard",
+            snippet=f"运行时剪贴板抓取链上地址（{chain}）：{value}"[:200],
+        )
+        prior = existing.get(value)
+        if prior is not None:
+            # 静态已抠到同地址 → 不产重复，追加 runtime 证据使 is_runtime_seen=True。
+            if not any(
+                str(ev.source).startswith("runtime") for ev in prior.source_refs
+            ):
+                prior.source_refs.append(runtime_ev)
+            continue
+        verified_note = (
+            "校验和已通过。" if checksum_verified else "全小写/全大写未通过大小写校验，低可信、需人工复核。"
+        )
+        lead = Lead(
+            category=LeadCategory.PAYMENT,
+            value=value,
+            subject=_CLIPBOARD_LEAD_SUBJECT,
+            where_to_request=_CLIPBOARD_LEAD_WHERE,
+            evidence_to_obtain=list(_CLIPBOARD_LEAD_EVIDENCE),
+            confidence=Confidence.HIGH if checksum_verified else Confidence.MEDIUM,
+            advice="建议调证",
+            source_refs=[runtime_ev],
+            notes=(
+                f"链上收款地址（{chain}），{verified_note}"
+                "运行时剪贴板抓取，受害人复制转账入口（资金流起点）——"
+                "运行时确认，比静态硬编码可信度更高。"
+            ),
+        )
+        report.leads.append(lead)
+        existing[value] = lead
+        added += 1
+    return added
+
+
 def _merge_recipe_meta(
     static_meta: Any, live_meta: dict[str, Any] | None
 ) -> dict[str, Any] | None:
@@ -1304,6 +1425,11 @@ def merge_and_rerender(
     stats["victim_leads"] = db_stats.get("victim_leads", 0)
     stats["victim_databases"] = db_stats.get("victim_databases", 0)
 
+    # 第二波：运行时剪贴板链上地址 → PAYMENT 类 Lead（资金流起点·运行时确认，is_runtime_seen）。
+    _emit(on_progress, "并回运行时剪贴板链上地址 ...")
+    clip_stats = merge_runtime_clipboard(report, rr_path)
+    stats["clipboard_leads"] = clip_stats.get("clipboard_leads", 0)
+
     fmts = list(formats) if formats else list(_DEFAULT_FORMATS)
     try:
         out_path.mkdir(parents=True, exist_ok=True)
@@ -1363,5 +1489,6 @@ __all__ = [
     "merge_runtime_traces",
     "merge_runtime_credentials",
     "merge_runtime_databases",
+    "merge_runtime_clipboard",
     "merge_and_rerender",
 ]

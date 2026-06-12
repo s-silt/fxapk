@@ -109,7 +109,7 @@ def _stub_orchestration(
     monkeypatch.setattr(
         capture,
         "_start_frida_session",
-        lambda package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None: (None, None),
+        lambda package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None: (None, None),
     )
     monkeypatch.setattr(capture, "_adb_reverse", lambda: (calls["adb"].append("reverse") or True))
     monkeypatch.setattr(capture, "_adb_set_proxy", lambda: (calls["adb"].append("proxy") or True))
@@ -702,7 +702,7 @@ def test_capped_sentinel_filtered_from_runtime_report(monkeypatch, tmp_path):
     _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
     monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None):
         sink.append({"src": "cipher", "event": "init", "key_hex": "55f0"})
         sink.append({"_capped": True})  # 上限占位
         return object(), object()
@@ -726,7 +726,7 @@ def test_capture_done_collects_crypto_events_via_session(monkeypatch, tmp_path):
         {"src": "cipher", "event": "doFinal", "key_hex": "55f0", "plaintext_b64": "eyJhIjoxfQ=="},
     ]
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None):
         # 模拟 on_message 回调把 2 条事件写进共享 sink。
         sink.extend(fake_events)
         return object(), object()  # 非 None 会话/脚本（teardown 对 dummy 容错）
@@ -747,7 +747,7 @@ def test_capture_collects_jsbridge_and_sensitive_api_events(monkeypatch, tmp_pat
     _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
     monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None):
         if jsbridge_sink is not None:
             jsbridge_sink.append({"event": "register", "iface": "AndroidNative"})
         if api_sink is not None:
@@ -777,7 +777,7 @@ def test_capture_collects_antidetect_events(monkeypatch, tmp_path):
     _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
     monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None):
         if antidetect_sink is not None:
             antidetect_sink.append({"kind": "root", "probe": "File.exists: /system/bin/su", "bypassed": True})
         return object(), object()
@@ -798,7 +798,7 @@ def test_capture_collects_credential_events_via_session(monkeypatch, tmp_path):
     # 不触真 adb pull（无 shared_prefs）。
     monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda pkg, op, sink: None)
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None):
         if credential_sink is not None:
             credential_sink.append(
                 {"source": "okhttp", "url": "https://api.fraud-c2.cn/login", "method": "POST",
@@ -835,6 +835,81 @@ def test_runtime_report_credential_events_default_empty(tmp_path):
     rp = capture._write_runtime_report("com.test.app", tmp_path, [], complete=True)
     payload = json.loads(Path(rp).read_text(encoding="utf-8"))
     assert payload["credential_events"] == []
+
+
+def test_capture_collects_clipboard_events_via_session(monkeypatch, tmp_path):
+    """第二波：会话路径把剪贴板抽出的链上地址事件落进 runtime_report.json（★ 全文不落盘）。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda pkg, op, sink: None)
+
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None):
+        if clipboard_sink is not None:
+            # 模拟 normalize_clipboard_event 已抽地址丢全文：sink 里只有地址、无剪贴板原文。
+            clipboard_sink.append(
+                {"addresses": [{"value": "TJRyWwFs9wTFGZg3JbrVriFbNfCug5tDeC",
+                                "chain": "TRON", "checksum_verified": True}], "ts": 1700000000000}
+            )
+        return object(), object()
+
+    monkeypatch.setattr(capture, "_start_frida_session", _fake_session)
+    capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+    payload = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    assert len(payload["clipboard_events"]) == 1
+    assert payload["clipboard_events"][0]["addresses"][0]["chain"] == "TRON"
+    # ★ 隐私护栏：clipboard_events 不含 "text" 全文字段。
+    assert "text" not in payload["clipboard_events"][0]
+
+
+def test_runtime_report_clipboard_events_default_empty(tmp_path):
+    """_write_runtime_report 默认写出空 clipboard_events（向后兼容旧消费方）。"""
+    rp = capture._write_runtime_report("com.test.app", tmp_path, [], complete=True)
+    payload = json.loads(Path(rp).read_text(encoding="utf-8"))
+    assert payload["clipboard_events"] == []
+
+
+def test_frida_session_script_includes_clipboard(monkeypatch):
+    """会话注入脚本应含剪贴板 hook 段（与 unpinning/crypto/.../sqlcipher 拼接）。"""
+    import sys
+    import types
+
+    captured: dict[str, Any] = {}
+
+    class _FakeScript:
+        def __init__(self, source: str) -> None:
+            captured["source"] = source
+
+        def on(self, name: str, cb: Any) -> None:
+            pass
+
+        def load(self) -> None:
+            pass
+
+    class _FakeSession:
+        def create_script(self, source: str) -> _FakeScript:
+            return _FakeScript(source)
+
+        def detach(self) -> None:
+            pass
+
+    class _FakeDevice:
+        def spawn(self, argv: Any) -> int:
+            return 1
+
+        def attach(self, pid: int) -> _FakeSession:
+            return _FakeSession()
+
+        def resume(self, pid: int) -> None:
+            pass
+
+        def kill(self, pid: int) -> None:
+            pass
+
+    monkeypatch.setitem(sys.modules, "frida", types.SimpleNamespace(get_usb_device=lambda timeout=None: _FakeDevice()))
+    capture._start_frida_session("com.x", [], [], [], [])
+    assert "apkscan-clipboard" in captured["source"]
+    assert "ClipboardManager" in captured["source"]
 
 
 def test_pull_shared_prefs_no_adb_is_noop(monkeypatch):
