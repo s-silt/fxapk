@@ -288,12 +288,78 @@ def host_frida_version() -> str:
 # ---------------------------------------------------------------------------
 
 
+# 内置 frida-server 在胖包里的子目录名（fxapk.spec datas 收进 _internal/frida-servers/）。
+_BUNDLED_FRIDA_SUBDIR = "frida-servers"
+
+
+def _bundled_frida_server_xz(ver: str, fabi: str) -> Path | None:
+    """frozen 胖包里随附的 frida-server-{ver}-android-{fabi}.xz 路径（存在则返回，否则 None）。
+
+    国内免 github 下载的命门：打包时 build_exe.py 把打包机 host frida 版本对应的
+    frida-server-{ver}-android-{abi}.xz 各 ABI 收进 ``_internal/frida-servers/``；运行时
+    ``host_frida_version()``（exe 内置同一个 frida）= 同 ver → 文件名能对上，直接用内置免下载。
+
+    定位逻辑参照 :func:`tools.adb_path`：复用 ``tools._bundle_dirs()`` 给出的候选目录
+    （PyInstaller 6.x onedir 把 datas 收进 ``sys._MEIPASS`` = ``<dist>/<name>/_internal/``，
+    onefile 解包同样落 ``_MEIPASS``；兜底再探 exe 同级），各目录下拼 ``frida-servers/`` 子目录。
+
+    源码态（非 frozen）：无内置，恒返回 None（调用方走下载兜底）。全程不抛。
+    """
+    if not tools.frozen():
+        return None
+    name = f"frida-server-{ver}-android-{fabi}.xz"
+    try:
+        for d in tools._bundle_dirs():
+            cand = d / _BUNDLED_FRIDA_SUBDIR / name
+            if cand.is_file():
+                return cand
+    except OSError:
+        logger.exception("[provision] 探测内置 frida-server 失败：%s", name)
+    except Exception:
+        logger.exception("[provision] 定位内置 frida-server 异常：%s", name)
+    return None
+
+
+def _extract_xz_to(compressed: bytes, dest: Path) -> str:
+    """把 .xz 字节 lzma 解压并写到 dest。成功 → ''；失败 → 错误说明字符串（不抛）。
+
+    抽自 :func:`_download_and_extract` 的解压段，供下载兜底与内置 .xz（免下载）共用，
+    保证两条路径行为一致：含 lzma 解压、:data:`_FRIDA_MIN_SERVER_BYTES` 体积下限兜底、写盘。
+
+    体积下限非密码学校验（同尺寸恶意替换挡不住——理想是随包固定 SHA256 清单按 ver+abi
+    比对），但能挡住 truncated/empty/错误文件，避免把坏二进制以 root 推到取证设备执行。
+    """
+    try:
+        raw = lzma.decompress(compressed)
+    except lzma.LZMAError:
+        logger.exception("[provision] frida-server lzma 解压失败")
+        return "内容不是有效的 .xz（lzma 解压失败）"
+    except Exception:
+        logger.exception("[provision] frida-server 解压异常")
+        return "解压异常"
+
+    if len(raw) < _FRIDA_MIN_SERVER_BYTES:
+        logger.error(
+            "[provision] 解压后 frida-server 体积异常小（%d 字节 < %d），疑似损坏/投毒，拒绝部署",
+            len(raw), _FRIDA_MIN_SERVER_BYTES,
+        )
+        return f"解压后体积异常（{len(raw)} 字节），拒绝部署疑似损坏的 frida-server"
+
+    try:
+        dest.write_bytes(raw)
+    except OSError:
+        logger.exception("[provision] 写出解压后的 frida-server 失败：%s", dest)
+        return f"写出临时文件失败：{dest}"
+    return ""
+
+
 def _download_and_extract(url: str, dest: Path, on_progress: Callable[[str], None] | None) -> str:
     """下载 .xz 并 lzma 解压到 dest。成功 → ''；失败 → 错误说明字符串（不抛）。
 
     用 requests 下载（自带 certifi CA bundle）——macOS/Homebrew Python 的 urllib 默认
     SSL 上下文常没接系统 CA，会 ``SSLCertVerificationError: unable to get local issuer
-    certificate`` 下不动 GitHub。requests 已是本项目运行期依赖，零新增。
+    certificate`` 下不动 GitHub。requests 已是本项目运行期依赖，零新增。解压复用
+    :func:`_extract_xz_to`（含体积下限兜底 + 写盘）。
     """
     _emit(on_progress, f"下载 frida-server：{url}")
     try:
@@ -322,31 +388,7 @@ def _download_and_extract(url: str, dest: Path, on_progress: Callable[[str], Non
         return f"下载异常：{url}"
 
     _emit(on_progress, "lzma 解压 frida-server")
-    try:
-        raw = lzma.decompress(compressed)
-    except lzma.LZMAError:
-        logger.exception("[provision] frida-server lzma 解压失败")
-        return "下载内容不是有效的 .xz（lzma 解压失败）"
-    except Exception:
-        logger.exception("[provision] frida-server 解压异常")
-        return "解压异常"
-
-    # 完整性兜底：frida-server 是数十 MB 的 ELF，过小 = 下载被截断 / 投毒 / 拿错产物。这不是
-    # 密码学校验（同尺寸恶意替换挡不住——理想是随包固定 SHA256 清单按 ver+abi 比对），但能挡住
-    # truncated/empty/错误文件，避免把坏二进制以 root 推到取证设备执行。
-    if len(raw) < _FRIDA_MIN_SERVER_BYTES:
-        logger.error(
-            "[provision] 解压后 frida-server 体积异常小（%d 字节 < %d），疑似下载损坏/投毒，拒绝部署",
-            len(raw), _FRIDA_MIN_SERVER_BYTES,
-        )
-        return f"解压后体积异常（{len(raw)} 字节），拒绝部署疑似损坏的 frida-server"
-
-    try:
-        dest.write_bytes(raw)
-    except OSError:
-        logger.exception("[provision] 写出解压后的 frida-server 失败：%s", dest)
-        return f"写出临时文件失败：{dest}"
-    return ""
+    return _extract_xz_to(compressed, dest)
 
 
 # frida-server 后台启动命令模板：把 std{out,err} 重定向、用 setsid/nohup 脱离 adb
@@ -644,14 +686,32 @@ def _ensure_frida_server_impl(
         result["fix_cmd"] = _manual_frida_steps(ver, abi, fabi)
         return result
 
-    # 6) 下载 + 解压（requests[certifi] + lzma），写临时文件。
+    # 6) 取 frida-server 二进制（解压到临时文件）：**优先用内置 .xz（国内免 github 下载）**，
+    #    内置无对应 ABI 再回退 github 下载兜底。
+    #    - 内置：frozen 胖包 _internal/frida-servers/ 下有 frida-server-{ver}-android-{fabi}.xz
+    #      （打包机 host frida 版本 = 运行时 host_frida_version()，同 ver 文件名能对上）→ 读 .xz
+    #      bytes → _extract_xz_to 解压，**完全跳过 github**。
+    #    - 回退：源码态 / 内置缺该 ABI → _download_and_extract（requests[certifi] + lzma）。
     url = _FRIDA_RELEASE_URL.format(ver=ver, abi=fabi)
     tmp_path: str | None = None
     try:
         fd, tmp_name = tempfile.mkstemp(prefix="frida-server-", suffix=".bin")
         os.close(fd)
         tmp_path = tmp_name
-        err = _download_and_extract(url, Path(tmp_path), on_progress)
+
+        bundled = _bundled_frida_server_xz(ver, fabi)
+        if bundled is not None:
+            _emit(on_progress, "使用内置 frida-server（免下载）")
+            try:
+                compressed = bundled.read_bytes()
+            except OSError:
+                logger.exception("[provision] 读取内置 frida-server .xz 失败：%s", bundled)
+                err = f"读取内置 frida-server 失败：{bundled}"
+            else:
+                err = _extract_xz_to(compressed, Path(tmp_path))
+        else:
+            _emit(on_progress, f"内置无 {fabi} 的 frida-server，回退 github 下载")
+            err = _download_and_extract(url, Path(tmp_path), on_progress)
         if err:
             result["detail"] = err
             result["fix_cmd"] = _manual_frida_steps(ver, abi, fabi)
