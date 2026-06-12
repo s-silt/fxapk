@@ -32,6 +32,8 @@ import re
 from collections.abc import Callable
 from typing import Any
 
+from apkscan.core import chainaddr
+
 logger = logging.getLogger(__name__)
 
 #: ``send()`` payload 的通道判别值（JS 与 Python 两端约定）。
@@ -46,6 +48,10 @@ ANTIDETECT_MSG_TYPE = "apkscan-antidetect"
 CREDENTIAL_MSG_TYPE = "apkscan-credential"
 #: 第二波：运行时 SQLCipher/SQLite 落地库导出通道（库路径 + key + 明文导出库路径）。
 SQLCIPHER_MSG_TYPE = "apkscan-sqlcipher"
+#: 第二波：运行时剪贴板链上地址采集通道（资金流起点·受害人复制转账入口）。
+#: ★ JS 侧回传剪贴板**实际文本**，Python 侧 normalize 立刻抽出校验通过的链上地址、丢弃全文
+#: （隐私护栏）——runtime_report.json 只落抽出的地址，绝不落剪贴板全文。
+CLIPBOARD_MSG_TYPE = "apkscan-clipboard"
 
 #: sink 累积上限：高频加密（每帧/每请求）会刷爆，超限丢弃 + 记一次 warning。
 _SINK_CAP = 4000
@@ -853,6 +859,115 @@ Java.perform(function () {
 
 
 # ---------------------------------------------------------------------------
+# 第二波：剪贴板链上地址采集 —— hook ClipboardManager 抓实际剪贴板文本回传
+# ---------------------------------------------------------------------------
+#
+# 资金流价值（资金流起点·运行时确认）：杀猪盘/跑分引导受害人「复制这个地址转账」——剪贴板里
+# 就是真实收款钱包地址。运行时抓到 = is_runtime_seen 的铁证（比静态硬编码可信度更高，且能拿到
+# 服务端运行时下发、静态抠不到的地址）。
+#
+# ★ 隐私护栏（关键）：剪贴板含验证码/密码/聊天等隐私。JS 侧只负责把剪贴板**实际文本**回传，
+# Python 侧 normalize_clipboard_event 收到后**立即** chainaddr.find_addresses 抽出通过校验的
+# 地址、只保留地址列表、丢弃原文——runtime_report.json 只落抽出的地址，绝不落剪贴板全文。
+# （全文从设备出来后只在 normalize 内存里走一遭、立刻被抽地址替换，不写任何 sink/磁盘。）
+#
+# 机制：hook android.content.ClipboardManager 的 getPrimaryClip（取回 ClipData → getItemAt(0)
+# .coerceToText / getText）与 getText（旧 API），把剪贴板实际文本经 send() 回传。文本上限截断
+# （地址不长，截断不影响抽取，且兜底防超大体刷爆通道）。best-effort 每个 hook 独立 try/catch，
+# hook 不到只 console.log、绝不崩。
+FRIDA_CLIPBOARD_HOOK_JS: str = r"""
+// apkscan 运行时剪贴板链上地址采集（best-effort）：hook ClipboardManager 抓实际剪贴板文本回传。
+Java.perform(function () {
+    var _cb_count = 0;
+    var _CB_CAP = 1000;
+    var _CB_MAX = 8192;       // 剪贴板文本回传字符上限（地址不长，截断不影响抽取）
+    var _cb_seen = {};        // 同一文本只回传一次（剪贴板读多次很常见，避免刷爆）
+
+    function cbEmit(text) {
+        try {
+            if (_cb_count >= _CB_CAP) return;
+            if (text === null || text === undefined) return;
+            var t = '' + text;
+            if (!t) return;
+            if (t.length > _CB_MAX) t = t.slice(0, _CB_MAX);
+            if (_cb_seen[t]) return;
+            _cb_seen[t] = true;
+            _cb_count += 1;
+            // 只回传文本；地址抽取与全文丢弃由 Python normalize_clipboard_event 负责（隐私护栏）。
+            send({type: 'apkscan-clipboard', event: 'read', text: t, ts: Date.now()});
+        } catch (e) { /* 回传失败不得炸会话 */ }
+    }
+
+    // 从 ClipData 取首个 item 的文本（coerceToText 兜底 getText）。
+    function textFromClip(clip, ctx) {
+        try {
+            if (clip === null || clip === undefined) return null;
+            var n = 0;
+            try { n = clip.getItemCount(); } catch (e) { n = 0; }
+            if (n <= 0) return null;
+            var item = clip.getItemAt(0);
+            if (item === null || item === undefined) return null;
+            var txt = null;
+            // coerceToText 需 Context；拿不到 Context 时退回 getText（纯文本剪贴足够）。
+            try {
+                if (ctx !== null && ctx !== undefined && item.coerceToText) {
+                    txt = item.coerceToText(ctx);
+                }
+            } catch (e) {}
+            if (txt === null || txt === undefined) {
+                try { if (item.getText) txt = item.getText(); } catch (e) {}
+            }
+            return txt;
+        } catch (e) { return null; }
+    }
+
+    // --- android.content.ClipboardManager.getPrimaryClip：取回 ClipData → 抽文本 ---
+    try {
+        var CM = Java.use('android.content.ClipboardManager');
+        if (CM.getPrimaryClip) {
+            CM.getPrimaryClip.implementation = function () {
+                var clip = this.getPrimaryClip();
+                try {
+                    var ctx = null;
+                    // best-effort 取一个 Context 供 coerceToText（拿不到也能退回 getText）。
+                    try { ctx = Java.use('android.app.ActivityThread').currentApplication(); } catch (e) {}
+                    cbEmit(textFromClip(clip, ctx));
+                } catch (e) {}
+                return clip;
+            };
+        }
+        // 旧 API：getText() 直接返回 CharSequence。
+        if (CM.getText) {
+            CM.getText.implementation = function () {
+                var t = this.getText();
+                try { cbEmit(t); } catch (e) {}
+                return t;
+            };
+        }
+        console.log('[apkscan] ClipboardManager clipboard hook armed');
+    } catch (e) {
+        console.log('[apkscan] ClipboardManager clipboard hook skip: ' + e);
+    }
+
+    // --- ClipData.Item.coerceToText：兜底另一常见读取面（部分 app 直接对 item 取文本）---
+    try {
+        var Item = Java.use('android.content.ClipData$Item');
+        if (Item.coerceToText) {
+            Item.coerceToText.implementation = function (ctx) {
+                var t = this.coerceToText(ctx);
+                try { cbEmit(t); } catch (e) {}
+                return t;
+            };
+        }
+        console.log('[apkscan] ClipData.Item.coerceToText hook armed');
+    } catch (e) {
+        console.log('[apkscan] ClipData.Item hook skip: ' + e);
+    }
+});
+"""
+
+
+# ---------------------------------------------------------------------------
 # on_message handler：把 Frida send() 的 crypto 事件规范化进 sink
 # ---------------------------------------------------------------------------
 
@@ -1351,6 +1466,81 @@ def normalize_sqlcipher_event(payload: Any) -> dict[str, Any] | None:
 
 
 # ---------------------------------------------------------------------------
+# 第二波：剪贴板事件规范化 —— ★ 隐私护栏：抽地址、丢全文
+# ---------------------------------------------------------------------------
+
+
+def normalize_clipboard_event(payload: Any) -> dict[str, Any] | None:
+    """把 JS 侧剪贴板文本 payload 规范化为「只含校验通过的链上地址」的事件；无地址 → None。
+
+    **★ 隐私护栏（本函数的核心职责，必须照做）**：剪贴板含验证码/密码/聊天等隐私。本函数收到
+    剪贴板文本后**立即** :func:`apkscan.core.chainaddr.find_addresses` 抽出过校验和 + 判链的
+    地址，**只保留地址列表、丢弃原文**——返回的事件**绝不含**剪贴板全文或任何隐私串，落进
+    ``runtime_report.json['clipboard_events']`` 的也只有抽出的地址。文本里没有合法地址 → 返回
+    None（该事件为空、不留任何内容）。
+
+    **clipboard_event 权威 schema**（producer=Frida FRIDA_CLIPBOARD_HOOK_JS 回传文本，
+    本函数=normalizer 抽地址丢全文，consumer=merge_runtime_clipboard）：
+
+    - ``addresses``: ``[{"value": 地址, "chain": TRON|EVM|BTC, "checksum_verified": bool}, ...]``
+      —— 去重保序、全部过 chainaddr 校验（随机串/隐私文本被滤掉）。
+    - ``ts``: JS Date.now()（int 或 None），仅排序/去重。
+
+    绝不抛（on_message 在 Frida 回调线程触发）。
+    """
+    if not isinstance(payload, dict):
+        return None
+    text = payload.get("text")
+    if not isinstance(text, str) or not text:
+        return None
+    # ★ 立刻抽地址、丢全文：text 只在此函数内存里走一遭，下面只把抽出的地址放进事件。
+    try:
+        found = chainaddr.find_addresses(text)
+    except Exception:  # noqa: BLE001 — 抽取异常按「无地址」保守处理（绝不泄全文）
+        logger.exception("[clipboard] 链上地址抽取异常，按无地址处理（不泄全文）")
+        return None
+    # text 在此之后不再被引用——全文不进任何返回值/sink/磁盘（隐私护栏）。
+    if not found:
+        return None
+    addresses = [
+        {"value": a.value, "chain": a.chain, "checksum_verified": a.checksum_verified}
+        for a in found
+    ]
+    return {
+        "addresses": addresses,
+        "ts": payload.get("ts") if isinstance(payload.get("ts"), int) else None,
+    }
+
+
+def clipboard_addresses_from_events(
+    events: list[dict[str, Any]],
+) -> list[tuple[str, str, bool]]:
+    """从规范化剪贴板事件抽出 ``(value, chain, checksum_verified)`` 链上地址，去重保序。
+
+    供 merge 把运行时剪贴板抓到的地址产成 PAYMENT 类 Lead。坏/空事件被跳过；地址缺 value 跳过。
+    """
+    out: list[tuple[str, str, bool]] = []
+    seen: set[str] = set()
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        addrs = ev.get("addresses")
+        if not isinstance(addrs, list):
+            continue
+        for a in addrs:
+            if not isinstance(a, dict):
+                continue
+            value = a.get("value")
+            if not isinstance(value, str) or not value or value in seen:
+                continue
+            seen.add(value)
+            chain = a.get("chain")
+            chain_str = chain if isinstance(chain, str) and chain else "?"
+            out.append((value, chain_str, bool(a.get("checksum_verified", False))))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # 从活体事件反推 crypto_recipe meta（喂回 appcrypto.CryptoRecipe.from_meta）
 # ---------------------------------------------------------------------------
 
@@ -1655,12 +1845,14 @@ __all__ = [
     "FRIDA_ANTIDETECT_JS",
     "FRIDA_OKHTTP_HOOK_JS",
     "FRIDA_SQLCIPHER_HOOK_JS",
+    "FRIDA_CLIPBOARD_HOOK_JS",
     "CRYPTO_MSG_TYPE",
     "JSBRIDGE_MSG_TYPE",
     "SENSITIVE_API_MSG_TYPE",
     "ANTIDETECT_MSG_TYPE",
     "CREDENTIAL_MSG_TYPE",
     "SQLCIPHER_MSG_TYPE",
+    "CLIPBOARD_MSG_TYPE",
     "make_message_handler",
     "make_typed_handler",
     "normalize_crypto_event",
@@ -1669,6 +1861,8 @@ __all__ = [
     "normalize_antidetect_event",
     "normalize_credential_event",
     "normalize_sqlcipher_event",
+    "normalize_clipboard_event",
+    "clipboard_addresses_from_events",
     "extract_sharedprefs_credentials",
     "recipe_from_events",
     "brand_hints_from_events",

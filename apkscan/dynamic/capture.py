@@ -279,6 +279,9 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
     credential_events: list[dict[str, Any]] = []
     # P2：运行时落地库导出（SQLCipher hook 导明文 .plain.db + 收尾 adb pull databases 回 dump_db/）。
     sqlcipher_events: list[dict[str, Any]] = []
+    # 第二波：运行时剪贴板链上地址（受害人复制转账入口）。★ 隐私护栏：normalize 抽地址丢全文，
+    # 此 sink 只存抽出的链上地址，剪贴板全文绝不入此 sink/落盘。
+    clipboard_events: list[dict[str, Any]] = []
     proxy_set = False
     reverse_set = False
     # 抓包加固产生的告警（CA 未装系统库 / frida 版本不一致），收尾并入 reason，
@@ -341,6 +344,7 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
             antidetect_events,
             credential_events,
             sqlcipher_events,
+            clipboard_events,
         )
         if frida_session is not None:
             playbook.append(
@@ -430,6 +434,7 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
         antidetect_events=_clean(antidetect_events),
         credential_events=_clean(credential_events),
         sqlcipher_events=_clean(sqlcipher_events),
+        clipboard_events=_clean(clipboard_events),
     )
     report_paths = [report_path] if report_path else []
 
@@ -564,6 +569,7 @@ def _start_frida_session(
     antidetect_sink: list[dict[str, Any]] | None = None,
     credential_sink: list[dict[str, Any]] | None = None,
     sqlcipher_sink: list[dict[str, Any]] | None = None,
+    clipboard_sink: list[dict[str, Any]] | None = None,
 ) -> tuple[Any, Any]:
     """用 frida-core（``import frida``）spawn 目标 app 并注入 unpinning + 运行时 hook 套件。
 
@@ -607,6 +613,8 @@ def _start_frida_session(
         + cryptohook.FRIDA_OKHTTP_HOOK_JS
         + "\n"
         + cryptohook.FRIDA_SQLCIPHER_HOOK_JS
+        + "\n"
+        + cryptohook.FRIDA_CLIPBOARD_HOOK_JS
     )
     device_handle: Any = None
     pid: Any = None
@@ -651,6 +659,15 @@ def _start_frida_session(
                 "message",
                 cryptohook.make_typed_handler(
                     sqlcipher_sink, cryptohook.SQLCIPHER_MSG_TYPE, cryptohook.normalize_sqlcipher_event
+                ),
+            )
+        if clipboard_sink is not None:
+            # ★ 隐私护栏：normalize_clipboard_event 收到剪贴板文本后立即抽地址丢全文，
+            # 写进 sink 的只有抽出的链上地址，剪贴板全文绝不落 sink/磁盘。
+            script.on(
+                "message",
+                cryptohook.make_typed_handler(
+                    clipboard_sink, cryptohook.CLIPBOARD_MSG_TYPE, cryptohook.normalize_clipboard_event
                 ),
             )
         script.load()
@@ -1474,6 +1491,7 @@ def _write_runtime_report(
     antidetect_events: list[dict[str, Any]] | None = None,
     credential_events: list[dict[str, Any]] | None = None,
     sqlcipher_events: list[dict[str, Any]] | None = None,
+    clipboard_events: list[dict[str, Any]] | None = None,
 ) -> str:
     """把运行时端点写成 out/runtime_report.json（复用 report.json 的序列化）。
 
@@ -1501,6 +1519,8 @@ def _write_runtime_report(
         "antidetect_events": list(antidetect_events or []),
         "credential_events": list(credential_events or []),
         "sqlcipher_events": list(sqlcipher_events or []),
+        # 第二波：剪贴板链上地址（★ 隐私护栏：只含抽出的地址，绝不含剪贴板全文）。
+        "clipboard_events": list(clipboard_events or []),
     }
     if not complete:
         payload["note"] = "抓包未完整（代理未起或编排中断），运行时端点可能不全。"
