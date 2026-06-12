@@ -165,6 +165,27 @@
     {% endif %}
   </section>
 
+  {#- ============ 证据完整性（可复现 / 可回溯 / 完整性校验背书层；措辞克制，不打包票） ============ -#}
+  {% set manifest = meta.get("evidence_manifest") %}
+  {% if manifest %}
+  <section id="evidence-integrity">
+    <h2>证据完整性 <span class="muted" style="font-size:13px;font-weight:400">（检材指纹 + 分析环境，供可复现 / 可回溯校验）</span></h2>
+    <div class="kv">
+      <div class="k">检材 SHA-256</div><div class="mono-strong" style="font-size:11px">{{ manifest.get("sha256") or "—" }}</div>
+      <div class="k">检材大小</div><div class="mono">{{ manifest.get("size") }} 字节</div>
+      <div class="k">分析时间</div><div class="mono">{{ manifest.get("analyzed_at") or "—" }}</div>
+      <div class="k">工具版本</div><div class="mono">{{ manifest.get("tool_version") or "—" }}</div>
+      <div class="k">分析平台</div><div class="mono">{{ manifest.get("platform") or "—" }}</div>
+      {% if manifest.get("sha1") %}<div class="k">SHA-1（冗余）</div><div class="mono" style="font-size:11px">{{ manifest.get("sha1") }}</div>{% endif %}
+      {% if manifest.get("md5") %}<div class="k">MD5（冗余）</div><div class="mono" style="font-size:11px">{{ manifest.get("md5") }}</div>{% endif %}
+    </div>
+    <div class="harden-ok" style="background:#eff6ff;color:#1e40af;border-color:#bfdbfe;font-weight:400;margin-top:12px">
+      ℹ 上方「分析时间」为本工具<b>分析检材的时间，非扣押 / 采集时间</b>。MD5 / SHA-1 仅作兼容冗余，<b>完整性以 SHA-256 为准</b>。
+      检材指纹与同目录 <span class="mono">&lt;报告名&gt;.sha256</span> 旁文件均为<b>工具产物自证</b>，用于复现核验与篡改检测，<b>不替代司法鉴定机构的证据保全</b>。
+    </div>
+  </section>
+  {% endif %}
+
   {#- 复用：advice 醒目徽标（建议调证=红 / 无需调证=灰 / 待核=黄）。 -#}
   {% macro advice_badge(advice) %}<span class="badge {{ advice|advice_class }}">{{ advice|advice_label }}</span>{% endmacro %}
 

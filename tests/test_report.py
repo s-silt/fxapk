@@ -573,3 +573,114 @@ def test_html_marks_c2_servers(tmp_path: Path) -> None:
     text = out.read_text(encoding="utf-8")
     assert "C2" in text  # C2 标注出现
     assert "c2.fraud-gw.cn" in text
+
+
+# ---------------------------------------------------------------------------
+# 取证完整性：Evidence 注入 evidence_id（可回溯锚点）
+# ---------------------------------------------------------------------------
+
+
+def test_json_injects_evidence_id_on_every_evidence(sample_report: Report, tmp_path: Path) -> None:
+    """每条 Evidence（line 在 lead.source_refs / endpoint.evidences / finding.evidences）
+    序列化后都带 evidence_id，且与 integrity.evidence_id(source, location) 一致。"""
+    import json as _json
+
+    from apkscan.core.integrity import evidence_id
+    from apkscan.report import json as report_json
+
+    p = tmp_path / "r.json"
+    report_json.dump(sample_report, str(p))
+    data = _json.loads(p.read_text(encoding="utf-8"))
+
+    seen = 0
+    for lead in data["leads"]:
+        for ev in lead.get("source_refs", []):
+            assert "evidence_id" in ev
+            assert ev["evidence_id"] == evidence_id(ev["source"], ev["location"])
+            seen += 1
+    for ep in data["endpoints"]:
+        for ev in ep.get("evidences", []):
+            assert "evidence_id" in ev
+            assert ev["evidence_id"] == evidence_id(ev["source"], ev["location"])
+            seen += 1
+    for f in data["findings"]:
+        for ev in f.get("evidences", []):
+            assert "evidence_id" in ev
+            assert ev["evidence_id"] == evidence_id(ev["source"], ev["location"])
+            seen += 1
+    assert seen > 0  # sample_report 里确有若干 Evidence，确保真的断言到了
+
+
+def test_json_evidence_id_ignores_snippet(tmp_path: Path) -> None:
+    """同 source|location、snippet 不同的两条证据，evidence_id 相同（id 不随 snippet 漂移）。"""
+    import json as _json
+
+    from apkscan.report import json as report_json
+
+    rpt = Report(
+        package_name="com.x",
+        meta={},
+        leads=[
+            Lead(
+                category=LeadCategory.DOMAIN,
+                value="c2.example.cn",
+                source_refs=[
+                    Evidence(source="runtime", location="flows#0", snippet="ts=111"),
+                    Evidence(source="runtime", location="flows#0", snippet="ts=999"),
+                ],
+            ),
+        ],
+        endpoints=[],
+        findings=[],
+        analyzer_status=[],
+    )
+    p = tmp_path / "r.json"
+    report_json.dump(rpt, str(p))
+    data = _json.loads(p.read_text(encoding="utf-8"))
+    refs = data["leads"][0]["source_refs"]
+    assert refs[0]["evidence_id"] == refs[1]["evidence_id"]
+
+
+def test_html_renders_evidence_integrity_section(tmp_path: Path) -> None:
+    """meta 带 evidence_manifest 时，HTML 渲染「证据完整性」小节，列检材 sha256/大小/时间/版本，
+    且含克制的法律措辞（分析时间≠采集时间、md5/sha1 仅兼容冗余、不替代司法鉴定）。"""
+    rpt = Report(
+        package_name="com.x",
+        meta={
+            "evidence_manifest": {
+                "sha256": "ab" * 32,
+                "sha1": "cd" * 20,
+                "md5": "ef" * 16,
+                "size": 123456,
+                "analyzed_at": "2026-06-12T00:00:00+00:00",
+                "tool_version": "0.5.4",
+                "platform": "Windows-11",
+            },
+            "sample_sha256": "ab" * 32,
+        },
+        leads=[],
+        endpoints=[],
+        findings=[],
+        analyzer_status=[],
+    )
+    out = tmp_path / "r.html"
+    report_html.render(rpt, str(out))
+    html = out.read_text(encoding="utf-8")
+
+    assert "证据完整性" in html  # 小节标题
+    assert "ab" * 32 in html  # 检材 sha256
+    assert "0.5.4" in html  # 工具版本
+    # 法律措辞：克制、不夸大
+    assert "分析时间" in html and "采集时间" in html  # 显式区分
+    assert "SHA-256 为准" in html  # md5/sha1 仅兼容冗余，完整性以 sha256 为准
+    assert "司法鉴定" in html  # 不替代证据保全
+    # 不出现打包票措辞
+    assert "法律可采性" not in html
+
+
+def test_html_no_integrity_section_when_manifest_absent(sample_report: Report, tmp_path: Path) -> None:
+    """meta 无 evidence_manifest 时不渲染该小节（避免空小节噪音；现有报告不受影响）。"""
+    path = tmp_path / "r.html"
+    report_html.render(sample_report, str(path))
+    html = path.read_text(encoding="utf-8")
+    assert "证据完整性" not in html
