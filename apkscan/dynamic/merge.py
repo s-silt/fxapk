@@ -26,7 +26,7 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from apkscan.core import pipeline
+from apkscan.core import infra, pipeline
 from apkscan.core.models import (
     Confidence,
     Endpoint,
@@ -1229,6 +1229,267 @@ def _add_runtime_clipboard_leads(
     return added
 
 
+# ---------------------------------------------------------------------------
+# Dead-Drop：二级真实 C2 从回包浮出（命令域名 → 回包 JSON 二段式）
+# ---------------------------------------------------------------------------
+#
+# 很多涉诈盘子是二段式：app 先打一个伪装的「命令域名」（甚至像合规备案域名），回包 JSON 里才带
+# 真实交易/后台域名（dead-drop resolver 模式，如 Sophos 记录的 rest.apizza.net→acedealex.xyz）。
+# 静态 endpoints 只看到伪装命令域名，真后端只在运行时回包出现。本函数对 capture 保留的 messages
+# （信封 + 新增的 config 明文响应）做**回包关系分析**：把响应体里出现的、与请求 host 不同的新域名/IP
+# 抽出，走现有 infra 分级兜底——infra 判「建议调证」才作为二级 C2 浮出（标 secondary、调高排序），
+# infra 判 CDN/SDK/公共服务 → 不升不标（避免误升 CDN/SDK 回调）。
+#
+# ★ 设计取向：**只调整优先级排序与 notes，不改 advice 终判**——advice 仍由现有 infra 分级决定，
+# 避免误杀/误升。命令域名保留并在 notes 标与二级 C2 的关系。二级 C2 若同时 is_runtime_seen
+# （运行时实连）即高可信。
+#
+# ★ 诚实标注（核验坑）：本功能依赖抓包窗口真触发了命令域名的回包（需人工操作 app 登录/拉配置）；
+# launch-only 抓不到登录后接口 → 二级 C2 需配合人工操作触发命令域名回包（写进 Lead.notes）。
+
+# Lead.notes 模板：二级下发关系（标明经回包关系分析浮出、非直连命令域名）。
+_DEAD_DROP_SECONDARY_NOTE = (
+    "二级下发，经回包关系分析浮出，非直连命令域名——由命令域名 {cmd} 的回包 JSON 携带，"
+    "疑似 dead-drop 二级真实 C2（伪装命令域名先合规探测、真后端只在运行时回包出现）。"
+)
+# Lead.notes 模板：命令域名标与二级 C2 的关系。
+_DEAD_DROP_COMMAND_NOTE = (
+    "命令域名（dead-drop 一级）：其回包 JSON 携带了疑似二级真实 C2（{secondaries}）；"
+    "本域名可能仅作伪装/合规探测，真交易后端走二级下发地址。"
+)
+# 诚实标注：launch-only 抓不全（横切硬要求，写进二级 C2 Lead.notes）。
+_DEAD_DROP_TIMING_NOTE = (
+    "时序提示：依赖抓包窗口真触发了命令域名回包，launch-only 抓不全——"
+    "二级 C2 需配合人工操作（登录/拉配置）触发命令域名回包后重抓。"
+)
+
+
+def resolve_dead_drop_c2(report: Report, runtime_report_path: str) -> dict[str, int]:
+    """对保留的 messages 做回包关系分析，把二级真实 C2 从回包浮出、标高优先级。
+
+    流程：
+      1. 读 runtime_report.json 的 messages（信封 + dead-drop config 明文响应）。
+      2. 每条 message：抽请求 host（命令域名）+ 响应体里出现的、与请求 host 不同的新域名。
+      3. 新域名走 ``infra.classify_domain`` 兜底——判「建议调证」才作为二级 C2 浮出
+         （并入端点 + 产/取 DOMAIN Lead，notes 标二级下发、调高排序）；判 CDN/SDK/公共服务
+         （无需调证）或私网/无效（待核）→ 不升、不标 C2（避免误升 CDN/SDK 回调）。
+      4. 命令域名保留并在 notes 标与二级 C2 的关系。
+      5. **只调优先级排序与 notes，不改 advice 终判**（advice 仍由 infra 分级决定）。
+      6. 二级 C2 若同时 is_runtime_seen（已有 runtime 端点）→ 高可信。
+
+    Returns:
+        ``{"secondary_c2", "command_domains"}``。内部 try/except，绝不抛。
+    """
+    stats = {"secondary_c2": 0, "command_domains": 0}
+    try:
+        messages = _load_runtime_messages(runtime_report_path)
+        if not messages:
+            return stats
+
+        # 回包关系：命令域名 → 其回包里浮出的二级真实 C2 域名集合（去重保序）。
+        relations: dict[str, list[str]] = {}
+        for msg in messages:
+            cmd_host = _host_of_url(str(msg.get("url", "")))
+            resp_body = str(msg.get("response_body", ""))
+            if not resp_body:
+                continue
+            for domain in _new_domains_in_response(resp_body, cmd_host):
+                # infra 兜底：只有「建议调证」才作二级 C2 浮出（CDN/SDK/公共服务/私网不升）。
+                advice, _reason = infra.classify_domain(domain)
+                if advice != infra.ADVICE_INVESTIGATE:
+                    continue
+                bucket = relations.setdefault(cmd_host, [])
+                if domain not in bucket:
+                    bucket.append(domain)
+
+        if not relations:
+            return stats
+
+        # 先把二级 C2 域名作为运行时端点并入（去重 + infra 分级产 DOMAIN Lead），再标 secondary。
+        secondary_domains = _unique_secondaries(relations)
+        endpoints = [
+            Endpoint(
+                value=d,
+                kind="domain",
+                evidences=[
+                    Evidence(
+                        source=_RUNTIME_SOURCE,
+                        location="runtime-deaddrop",
+                        snippet=f"回包关系分析浮出二级 C2：{d}",
+                    )
+                ],
+            )
+            for d in secondary_domains
+        ]
+        merge_runtime_endpoints(report, endpoints)
+
+        stats["secondary_c2"] = _mark_secondary_c2_leads(report, relations)
+        stats["command_domains"] = _note_command_domains(report, relations)
+        _prioritize_secondary_c2(report, secondary_domains)
+
+        report.meta["runtime_dead_drop"] = True
+        report.meta["runtime_dead_drop_relations"] = {
+            cmd: list(secs) for cmd, secs in relations.items()
+        }
+        logger.info(
+            "[merge] Dead-Drop 二级 C2 浮出：secondary_c2=%d command_domains=%d",
+            stats["secondary_c2"],
+            stats["command_domains"],
+        )
+    except Exception:  # noqa: BLE001 - dead-drop 浮出失败不得抛给调用方（不破坏已产出报告）
+        logger.exception("[merge] Dead-Drop 二级 C2 浮出异常")
+    return stats
+
+
+def _new_domains_in_response(resp_body: str, cmd_host: str) -> list[str]:
+    """从明文响应体抽出与命令域名（请求 host）不同的新域名（http(s) URL host）。去重保序。"""
+    req = (cmd_host or "").strip().lower().rstrip(".")
+    found: list[str] = []
+    seen: set[str] = set()
+    for m in _PLAINTEXT_URL_RE.finditer(resp_body):
+        raw = m.group(0).rstrip(".,;)\"'")
+        host = _host_of_url(raw)
+        if not host:
+            continue
+        host = host.strip().lower().rstrip(".")
+        if not host or host == req or host in seen:
+            continue
+        seen.add(host)
+        found.append(host)
+    return found
+
+
+def _unique_secondaries(relations: dict[str, list[str]]) -> list[str]:
+    """汇总所有命令域名回包里浮出的二级 C2 域名（跨命令域名去重保序）。"""
+    out: list[str] = []
+    seen: set[str] = set()
+    for secs in relations.values():
+        for d in secs:
+            if d not in seen:
+                seen.add(d)
+                out.append(d)
+    return out
+
+
+def _mark_secondary_c2_leads(report: Report, relations: dict[str, list[str]]) -> int:
+    """给浮出的二级 C2 域名 Lead 标 secondary（notes + 高可信），**不改 advice**。返回标记数。
+
+    每个二级 C2 找到对应 DOMAIN Lead（merge_runtime_endpoints 已产/已有）：追加二级下发 notes
+    + launch-only 诚实标注；若已有 runtime 端点（is_runtime_seen）→ 升 Confidence.HIGH。
+    advice 一律不动（终判归 infra 分级，避免误杀/误升）。
+    """
+    # 二级 C2 → 携带它的命令域名集合（用于 notes 标关系）。
+    carriers: dict[str, list[str]] = {}
+    for cmd, secs in relations.items():
+        for d in secs:
+            carriers.setdefault(d, [])
+            if cmd and cmd not in carriers[d]:
+                carriers[d].append(cmd)
+
+    runtime_seen = {
+        ep.value
+        for ep in report.endpoints
+        if any(str(getattr(ev, "source", "")).startswith("runtime") for ev in ep.evidences)
+    }
+    existing_keys = {(l.category.value, l.value) for l in report.leads}
+    marked = 0
+    for domain, cmds in carriers.items():
+        lead = next(
+            (l for l in report.leads
+             if l.category == LeadCategory.DOMAIN and l.value == domain),
+            None,
+        )
+        if lead is None:
+            # 二级 C2 已并端点但无 Lead（如它本就已是 runtime 端点，merge_runtime_endpoints
+            # 视其为"已覆盖"而不产 Lead）→ 补一条最小 DOMAIN Lead，advice 走 infra（不强升）。
+            advice, _reason = infra.classify_domain(domain)
+            lead = Lead(
+                category=LeadCategory.DOMAIN,
+                value=domain,
+                confidence=Confidence.MEDIUM,
+                advice=advice,
+                source_refs=[
+                    Evidence(
+                        source=_RUNTIME_SOURCE,
+                        location="runtime-deaddrop",
+                        snippet=f"回包关系分析浮出二级 C2：{domain}",
+                    )
+                ],
+            )
+            key = (LeadCategory.DOMAIN.value, domain)
+            if key not in existing_keys:
+                existing_keys.add(key)
+                report.leads.append(lead)
+        cmd_label = "、".join(cmds) if cmds else "（未知命令域名）"
+        note = _DEAD_DROP_SECONDARY_NOTE.format(cmd=cmd_label)
+        # 追加二级下发关系 + 诚实标注（保留原 notes，幂等：已标过不重复）。
+        if "二级下发" not in lead.notes:
+            lead.notes = f"{lead.notes}；{note} {_DEAD_DROP_TIMING_NOTE}".lstrip("；")
+        # 二级 C2 同时运行时实连 → 高可信（不改 advice）。
+        if domain in runtime_seen:
+            lead.confidence = Confidence.HIGH
+        marked += 1
+    return marked
+
+
+def _note_command_domains(report: Report, relations: dict[str, list[str]]) -> int:
+    """命令域名（发起请求那个）保留并在 notes 标与二级 C2 的关系。返回标注的命令域名数。
+
+    命令域名 Lead 若不存在（其端点可能未被并入）→ 产一条最小 DOMAIN Lead（advice 由 infra 判）。
+    **不改 advice 终判**：命令域名 advice 仍由 infra 分级决定。
+    """
+    existing_keys = {(l.category.value, l.value) for l in report.leads}
+    noted = 0
+    for cmd, secs in relations.items():
+        if not cmd or not secs:
+            continue
+        lead = next(
+            (l for l in report.leads
+             if l.category == LeadCategory.DOMAIN and l.value == cmd),
+            None,
+        )
+        if lead is None:
+            # 命令域名没有现成 Lead：补一条最小 DOMAIN Lead（advice 走 infra，不强升）。
+            advice, _reason = infra.classify_domain(cmd)
+            lead = Lead(
+                category=LeadCategory.DOMAIN,
+                value=cmd,
+                confidence=Confidence.MEDIUM,
+                advice=advice,
+                source_refs=[
+                    Evidence(
+                        source=_RUNTIME_SOURCE,
+                        location="runtime-deaddrop",
+                        snippet=f"命令域名（dead-drop 一级）：{cmd}",
+                    )
+                ],
+            )
+            key = (LeadCategory.DOMAIN.value, cmd)
+            if key not in existing_keys:
+                existing_keys.add(key)
+                report.leads.append(lead)
+        note = _DEAD_DROP_COMMAND_NOTE.format(secondaries="、".join(secs))
+        if "命令域名（dead-drop 一级）" not in lead.notes:
+            lead.notes = f"{lead.notes}；{note}".lstrip("；")
+        noted += 1
+    return noted
+
+
+def _prioritize_secondary_c2(report: Report, secondary_domains: list[str]) -> None:
+    """调高二级 C2 排序：把浮出的 secondary C2 Lead 稳定前移到线索清单最前（优先级）。
+
+    稳定排序：secondary C2 之间保持原相对顺序，其余 Lead 亦保持原相对顺序——只把 secondary
+    整体提到前面，不打乱其它线索。dead-drop 只调排序、不改 advice/类别。
+    """
+    sec_set = set(secondary_domains)
+    front = [
+        l for l in report.leads
+        if l.category == LeadCategory.DOMAIN and l.value in sec_set
+    ]
+    rest = [l for l in report.leads if l not in front]
+    report.leads[:] = front + rest
+
+
 def _merge_recipe_meta(
     static_meta: Any, live_meta: dict[str, Any] | None
 ) -> dict[str, Any] | None:
@@ -1430,6 +1691,12 @@ def merge_and_rerender(
     clip_stats = merge_runtime_clipboard(report, rr_path)
     stats["clipboard_leads"] = clip_stats.get("clipboard_leads", 0)
 
+    # 第二波：Dead-Drop 二级真实 C2 从回包浮出（命令域名 → 回包 JSON）。在端点并回之后跑——
+    # 复用已并入的端点/Lead，对 config/信封回包做关系分析，把二级 C2 标 secondary、调高优先级。
+    _emit(on_progress, "浮出 Dead-Drop 二级真实 C2 ...")
+    dd_stats = resolve_dead_drop_c2(report, rr_path)
+    stats["secondary_c2"] = dd_stats.get("secondary_c2", 0)
+
     fmts = list(formats) if formats else list(_DEFAULT_FORMATS)
     try:
         out_path.mkdir(parents=True, exist_ok=True)
@@ -1490,5 +1757,6 @@ __all__ = [
     "merge_runtime_credentials",
     "merge_runtime_databases",
     "merge_runtime_clipboard",
+    "resolve_dead_drop_c2",
     "merge_and_rerender",
 ]

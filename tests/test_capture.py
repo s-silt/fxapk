@@ -1488,3 +1488,117 @@ def test_load_noise_patterns_fallback_on_bad_rules(monkeypatch):
     monkeypatch.setattr(registry, "load_rules", lambda name: "garbage")
     pats = capture._load_noise_patterns()
     assert ".mumu.com" in pats  # 坏规则 → 用内置兜底
+
+
+# ---------------------------------------------------------------------------
+# Dead-Drop：明文配置响应保留通道（_message_from_flow 白名单 + 限大小 + 剔噪声）
+#
+# 二段式 dead-drop：app 先打伪装的「命令域名」，回包**明文 JSON 配置**里才带真实交易/后台
+# 域名（rest.apizza.net→acedealex.xyz 模式）。现有 _parse_messages 只留 {data,timestamp}
+# 加密信封，明文配置回包会被丢弃 → merge 无米下锅。本节锁定新增的明文响应保留通道。
+# ---------------------------------------------------------------------------
+
+
+class _DDReq:
+    """带 pretty_host/pretty_url 的请求替身（dead-drop 用，需 host 做"新域名"判定）。"""
+
+    def __init__(self, url: str, host: str, body: str = "") -> None:
+        self.pretty_url = url
+        self.url = url
+        self.pretty_host = host
+        self.host = host
+        self.text = body
+        self.content = body.encode("utf-8")
+
+
+def _dd_flow(req: _DDReq, resp_body: str) -> _FakeFullFlow:
+    return _FakeFullFlow(req, _FakeMessage(resp_body))
+
+
+def test_parse_messages_retains_config_path_plaintext(monkeypatch, tmp_path):
+    """请求 URL 命中 config 类路径（webConfig）→ 即便回包是明文（非信封）也保留响应体。"""
+    flows_file = tmp_path / "flows.mitm"
+    flows_file.write_bytes(b"\x00data")
+
+    req = _DDReq("https://rest.apizza.net/api/webConfig", "rest.apizza.net")
+    resp = '{"home":"https://acedealex.xyz","name":"ACE"}'
+    _inject_fake_mitmproxy(monkeypatch, [_dd_flow(req, resp)])
+
+    msgs = capture._parse_messages(flows_file)
+    assert len(msgs) == 1
+    assert msgs[0]["url"] == "https://rest.apizza.net/api/webConfig"
+    assert "acedealex.xyz" in msgs[0]["response_body"]
+    assert msgs[0].get("kind") == "config"  # 标为明文配置保留通道
+
+
+def test_parse_messages_retains_response_with_new_domain(monkeypatch, tmp_path):
+    """回包 JSON 里出现与请求 host 不同的新域名 → 即便路径不命中白名单也保留（dead-drop 浮出）。"""
+    flows_file = tmp_path / "flows.mitm"
+    flows_file.write_bytes(b"\x00data")
+
+    req = _DDReq("https://cmd.example-record.cn/api/profile", "cmd.example-record.cn")
+    resp = '{"backend":"https://evil-c2.shop/in","ok":1}'  # 新域名 evil-c2.shop
+    _inject_fake_mitmproxy(monkeypatch, [_dd_flow(req, resp)])
+
+    msgs = capture._parse_messages(flows_file)
+    assert len(msgs) == 1
+    assert "evil-c2.shop" in msgs[0]["response_body"]
+
+
+def test_parse_messages_skips_plaintext_same_host_no_new_domain(monkeypatch, tmp_path):
+    """普通明文回包（路径不命中白名单、且无新域名）→ 不保留（不把全部流量塞进报告）。"""
+    flows_file = tmp_path / "flows.mitm"
+    flows_file.write_bytes(b"\x00data")
+
+    req = _DDReq("https://api.normal-biz.cn/user/list", "api.normal-biz.cn")
+    resp = '{"items":[1,2,3],"self":"https://api.normal-biz.cn/x"}'  # 只引用自身 host
+    _inject_fake_mitmproxy(monkeypatch, [_dd_flow(req, resp)])
+
+    assert capture._parse_messages(flows_file) == []
+
+
+def test_parse_messages_config_response_size_capped(monkeypatch, tmp_path):
+    """明文配置响应超 _MAX_CONFIG_BODY_BYTES（32KB）→ 不保留（隐私 + 防大段明文落盘）。"""
+    flows_file = tmp_path / "flows.mitm"
+    flows_file.write_bytes(b"\x00data")
+
+    req = _DDReq("https://rest.apizza.net/api/config", "rest.apizza.net")
+    # 构造超大明文（含新域名也不留：超限优先）。
+    big = '{"home":"https://acedealex.xyz","pad":"' + ("A" * (40 * 1024)) + '"}'
+    _inject_fake_mitmproxy(monkeypatch, [_dd_flow(req, big)])
+
+    assert capture._parse_messages(flows_file) == []
+
+
+def test_parse_messages_skips_cdn_host_response(monkeypatch, tmp_path):
+    """命中 config 路径但请求 host 是已知 CDN/基础设施（myqcloud）→ 不保留（剔噪声 host）。"""
+    flows_file = tmp_path / "flows.mitm"
+    flows_file.write_bytes(b"\x00data")
+
+    req = _DDReq("https://res.myqcloud.com/getH5/config", "res.myqcloud.com")
+    resp = '{"url":"https://cdn.other-infra.aliyuncs.com/a"}'
+    _inject_fake_mitmproxy(monkeypatch, [_dd_flow(req, resp)])
+
+    assert capture._parse_messages(flows_file) == []
+
+
+def test_parse_messages_config_channel_does_not_break_envelope(monkeypatch, tmp_path):
+    """新增明文通道不影响现有信封保留：同时含信封流 + 配置流 → 两条都在，信封无 kind 标记。"""
+    flows_file = tmp_path / "flows.mitm"
+    flows_file.write_bytes(b"\x00data")
+
+    env_req = _DDReq("https://api.fraud-gw.cn/post", "api.fraud-gw.cn",
+                     body='{"data":"abc","timestamp":1}')
+    env_flow = _dd_flow(env_req, '{"data":"def","timestamp":2}')
+
+    cfg_req = _DDReq("https://rest.apizza.net/api/webConfig", "rest.apizza.net")
+    cfg_flow = _dd_flow(cfg_req, '{"home":"https://acedealex.xyz"}')
+
+    _inject_fake_mitmproxy(monkeypatch, [env_flow, cfg_flow])
+    msgs = capture._parse_messages(flows_file)
+    assert len(msgs) == 2
+    by_url = {m["url"]: m for m in msgs}
+    # 信封流仍保留、且不带 config 标记（沿用旧契约）。
+    assert by_url["https://api.fraud-gw.cn/post"].get("kind") != "config"
+    # 配置流标 config。
+    assert by_url["https://rest.apizza.net/api/webConfig"].get("kind") == "config"
