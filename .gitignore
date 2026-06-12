@@ -20,6 +20,9 @@ out/
 # adb 下载缓存(build_exe.py 下 Google platform-tools 解压取 adb.exe + 2 dll)
 /.platform_tools/
 
+# 内置 frida-server 下载缓存(build_exe.py 下各 ABI 的 frida-server-*.xz，随包进 _internal，大，不入库)
+/.frida_servers/
+
 # 入口自检临时 venv(用 mangled 路径建的一次性 venv，绝不入库)
 *.tmp_epcheck/
 

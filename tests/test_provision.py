@@ -16,12 +16,13 @@ import hashlib
 import io as _io
 import lzma
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from apkscan.core import device
+from apkscan.core import device, tools
 from apkscan.dynamic import provision
 
 
@@ -1077,3 +1078,154 @@ def test_uninstall_app_timeout_not_ok(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(provision.subprocess, "run", _timeout)
     assert provision.uninstall_app("com.evil.app")["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# _extract_xz_to：lzma 解压抽取（含体积下限兜底，不抛）
+# ---------------------------------------------------------------------------
+
+
+def test_extract_xz_to_success_writes_file(tmp_path: Path) -> None:
+    """合法 .xz（解压后体积 ≥ 下限）→ 解压成功写盘，返回 ''。"""
+    payload = b"\x7fELF" + b"\x00" * 1_100_000
+    compressed = lzma.compress(payload)
+    dest = tmp_path / "frida-server.bin"
+    err = provision._extract_xz_to(compressed, dest)
+    assert err == ""
+    assert dest.exists()
+    assert dest.read_bytes() == payload
+
+
+def test_extract_xz_to_too_small_returns_error_no_raise(tmp_path: Path) -> None:
+    """解压后体积过小（< 下限）→ 返回错误串、不写盘、不抛（挡截断/投毒）。"""
+    compressed = lzma.compress(b"tiny")
+    dest = tmp_path / "frida-server.bin"
+    err = provision._extract_xz_to(compressed, dest)
+    assert err != ""
+    assert "体积" in err
+    assert not dest.exists()
+
+
+def test_extract_xz_to_bad_xz_returns_error_no_raise(tmp_path: Path) -> None:
+    """非法 .xz 字节 → 返回错误串不抛。"""
+    dest = tmp_path / "frida-server.bin"
+    err = provision._extract_xz_to(b"not-valid-xz-bytes", dest)
+    assert err != ""
+    assert "lzma" in err
+    assert not dest.exists()
+
+
+# ---------------------------------------------------------------------------
+# _bundled_frida_server_xz：frozen 时优先用内置 .xz（免下载）
+# ---------------------------------------------------------------------------
+
+
+def test_bundled_frida_server_xz_found_when_frozen(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """frozen + _internal/frida-servers/ 下有对应 .xz → 返回其路径。"""
+    internal = tmp_path / "_internal"
+    fs_dir = internal / "frida-servers"
+    fs_dir.mkdir(parents=True)
+    xz = fs_dir / "frida-server-17.11.0-android-arm64.xz"
+    xz.write_bytes(b"\x00")
+    # frozen=True 且 _MEIPASS 指向 _internal（onedir 实际布局）。
+    monkeypatch.setattr(tools, "frozen", lambda: True)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(internal), raising=False)
+    got = provision._bundled_frida_server_xz("17.11.0", "arm64")
+    assert got is not None
+    assert got == xz
+
+
+def test_bundled_frida_server_xz_missing_file_returns_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """frozen 但内置无对应 ABI 的 .xz → None（回退下载）。"""
+    internal = tmp_path / "_internal"
+    (internal / "frida-servers").mkdir(parents=True)
+    monkeypatch.setattr(tools, "frozen", lambda: True)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(internal), raising=False)
+    assert provision._bundled_frida_server_xz("17.11.0", "x86") is None
+
+
+def test_bundled_frida_server_xz_not_frozen_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """非 frozen（源码态）→ 无内置，恒 None（走下载兜底）。"""
+    monkeypatch.setattr(tools, "frozen", lambda: False)
+    assert provision._bundled_frida_server_xz("17.11.0", "arm64") is None
+
+
+# ---------------------------------------------------------------------------
+# _ensure_frida_server_impl：部署优先用内置，缺则回退下载
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_frida_server_prefers_bundled_no_download(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """内置有对应 .xz → 用内置解压部署，**完全跳过 github 下载**（requests 不被调用）。"""
+    states = iter([False, True])
+    monkeypatch.setattr(device, "frida_server_running", lambda serial=None: next(states, True))
+    monkeypatch.setattr(provision, "device_abi", lambda serial=None: "arm64-v8a")
+    monkeypatch.setattr(provision, "host_frida_version", lambda: "17.11.0")
+
+    # 造一个内置 .xz（合法、解压后够大）。
+    xz = tmp_path / "frida-server-17.11.0-android-arm64.xz"
+    xz.write_bytes(lzma.compress(b"\x7fELF" + b"\x00" * 1_100_000))
+    monkeypatch.setattr(provision, "_bundled_frida_server_xz", lambda ver, fabi: xz)
+
+    # requests 一旦被调用就炸 —— 断言走内置时绝不下载。
+    import requests
+
+    def _boom_get(*a: Any, **k: Any) -> None:
+        raise AssertionError("走内置时不应调用 requests.get（应免下载）")
+
+    monkeypatch.setattr(requests, "get", _boom_get)
+    # _download_and_extract 也不应被调用。
+    monkeypatch.setattr(
+        provision,
+        "_download_and_extract",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应走下载兜底")),
+    )
+
+    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None: True)
+    monkeypatch.setattr(provision, "_adbd_is_root", lambda serial=None: True)
+    monkeypatch.setattr(provision.time, "sleep", lambda s: None)
+
+    msgs: list[str] = []
+    res = provision.ensure_frida_server(on_progress=msgs.append)
+    assert res["ok"] is True
+    assert res["action"] == "deployed"
+    assert res["version"] == "17.11.0"
+    assert any("内置" in m for m in msgs)  # 上报了"使用内置 frida-server"
+
+
+def test_ensure_frida_server_falls_back_to_download_when_no_bundled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """内置无对应 ABI（_bundled_frida_server_xz→None）→ 回退调 _download_and_extract。"""
+    states = iter([False, True])
+    monkeypatch.setattr(device, "frida_server_running", lambda serial=None: next(states, True))
+    monkeypatch.setattr(provision, "device_abi", lambda serial=None: "arm64-v8a")
+    monkeypatch.setattr(provision, "host_frida_version", lambda: "17.11.0")
+    monkeypatch.setattr(provision, "_bundled_frida_server_xz", lambda ver, fabi: None)
+
+    called: dict[str, str] = {}
+
+    def _fake_dl(url: str, dest: Path, on_progress: Any) -> str:
+        called["url"] = url
+        return ""  # 下载成功
+
+    monkeypatch.setattr(provision, "_download_and_extract", _fake_dl)
+    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None: True)
+    monkeypatch.setattr(provision, "_adbd_is_root", lambda serial=None: True)
+    monkeypatch.setattr(provision.time, "sleep", lambda s: None)
+
+    res = provision.ensure_frida_server()
+    assert res["ok"] is True
+    assert res["action"] == "deployed"
+    assert "url" in called  # 回退确实走了下载
+    assert "android-arm64.xz" in called["url"]

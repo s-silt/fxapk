@@ -25,6 +25,7 @@ adb 三件套（adb.exe + 2 dll）随 onedir 根。dispatch 入口（apkscan/_py
                 + collect_dynamic_libs，并把 androguard.pentest / frida 放进 excludes。
 """
 
+import glob
 import os
 
 from PyInstaller.utils.hooks import (
@@ -135,6 +136,19 @@ for _fn in ("adb.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll"):
         datas.append((_src, "."))
     else:
         print(f"[fxapk.spec] adb 文件缺失，跳过打包：{_src}")
+
+# --- 5b) 内置 frida-server（build_exe.py 预先下载到 REPO_ROOT/.frida_servers/）------
+# 把各 ABI 的 frida-server-{ver}-android-{abi}.xz 收进 onedir 的 _internal/frida-servers/
+# （目标子目录 "frida-servers"，运行期 provision._bundled_frida_server_xz 据此定位免下载）。
+# 源码态 .frida_servers/ 可能不存在 / 为空 → glob 容错（空集合不报错，运行时回退 github 下载）。
+_FRIDA_SRV_DIR = os.path.join(os.path.abspath(SPECPATH), ".frida_servers")
+_frida_xz = glob.glob(os.path.join(_FRIDA_SRV_DIR, "*.xz"))
+if _frida_xz:
+    for _xz in _frida_xz:
+        datas.append((_xz, "frida-servers"))
+        print(f"[fxapk.spec] 内置 frida-server 随包：{os.path.basename(_xz)}")
+else:
+    print(f"[fxapk.spec] 未发现内置 frida-server（.frida_servers/*.xz 为空），运行时回退 github 下载：{_FRIDA_SRV_DIR}")
 
 
 block_cipher = None
