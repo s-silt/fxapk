@@ -136,27 +136,45 @@ def run(
         steps.append(static_step)
         _extend_unique(report_paths, static_paths)
 
-        # 3) 设备探测：无设备则脱壳 / 抓包优雅跳过。
+        # 3) 设备探测 + **钉定单台 serial**：多设备/一机多 transport（模拟器常被列成多条目，
+        #    尤其 adb root 触发重连后）下，下游 adb/frida 命令必须带 -s/-D，否则
+        #    "more than one device" → 代理/CA/reverse/getprop/frida 部署一连串失败。
+        #    select_target_serial 选定一个（emulator-* 优先），has_device 由它是否为 None 推出。
         try:
-            has_device = device.has_device()
+            target_serial = device.select_target_serial()
         except Exception:
-            logger.exception("[auto] 设备探测异常，按无设备处理")
-            has_device = False
+            logger.exception("[auto] 设备探测/选定异常，按无设备处理")
+            target_serial = None
+        has_device = target_serial is not None
+        # 把选定 serial 记入静态报告 meta，便于排查（report 可能为 None：静态失败时）。
+        if target_serial is not None and report is not None:
+            meta = getattr(report, "meta", None)
+            if isinstance(meta, dict):
+                meta["target_serial"] = target_serial
+            logger.info(
+                "[auto] 已钉定目标设备 serial=%s（下游 adb -s / frida -D）", target_serial
+            )
 
         # 3.4) 确保 frida-server 在跑且是 **root**（脱壳/抓包 spawn 注入必须 root，否则 jailed）。
         #      自愈逻辑在 ensure_frida_server，但 doctor「看见在跑就 OK」不会调它 → 非 root 实例
         #      不会被换掉。这里显式调一次，触发「非 root → 杀掉以 root 重启」自愈。失败不阻断。
         if has_device:
-            _ensure_root_frida_server(on_progress=on_progress)
+            _ensure_root_frida_server(serial=target_serial, on_progress=on_progress)
 
         # 3.5) 安装 APK 到设备（脱壳/抓包 spawn 前置）：frida -f <包名> 要 spawn 的是**已安装**
         #      的 app；只分析 APK 文件而设备上没装 → "unable to find application"。仅有设备才做。
         if has_device:
-            steps.append(_run_install_app(apk_path, on_progress=on_progress))
+            steps.append(
+                _run_install_app(apk_path, serial=target_serial, on_progress=on_progress)
+            )
 
         # 3) 脱壳：仅有设备才做（产出 dex 由 unpack 内部 reanalyze 回灌）。
         unpack_step, unpack_paths = _run_unpack(
-            apk_path, out_dir=out_dir, has_device=has_device, on_progress=on_progress
+            apk_path,
+            out_dir=out_dir,
+            has_device=has_device,
+            serial=target_serial,
+            on_progress=on_progress,
         )
         steps.append(unpack_step)
         _extend_unique(report_paths, unpack_paths)
@@ -166,6 +184,7 @@ def run(
             package_name,
             out_dir=out_dir,
             has_device=has_device,
+            serial=target_serial,
             duration=capture_duration,
             on_progress=on_progress,
             confirm=confirm,
@@ -362,16 +381,19 @@ def _write_reports(report: object, *, out_dir: str, formats: list[str], base: st
     return paths
 
 
-def _ensure_root_frida_server(*, on_progress: Callable[[str], None] | None) -> None:
+def _ensure_root_frida_server(
+    *, serial: str | None = None, on_progress: Callable[[str], None] | None
+) -> None:
     """脱壳/抓包前确保 frida-server 在跑且是 root（触发非 root → root 自愈）。绝不抛、不阻断。
 
     不产 step（仅作前置保障，结果体现在后续 spawn 成败上）；失败只 logging。
+    serial 透传给 provision（多设备消歧）；None 时退回旧行为。
     """
     _emit(on_progress, "确保 frida-server 以 root 运行（spawn 注入前置）")
     try:
         from apkscan.dynamic import provision
 
-        res = provision.ensure_frida_server()
+        res = provision.ensure_frida_server(serial=serial)
         action = res.get("action")
         if action == "restarted_as_root":
             _emit(on_progress, "检测到 frida-server 非 root，已以 root 重启")
@@ -380,17 +402,20 @@ def _ensure_root_frida_server(*, on_progress: Callable[[str], None] | None) -> N
         logger.exception("[auto] ensure_frida_server 异常（继续，spawn 若失败会有提示）")
 
 
-def _run_install_app(apk_path: str, *, on_progress: Callable[[str], None] | None) -> dict:
+def _run_install_app(
+    apk_path: str, *, serial: str | None = None, on_progress: Callable[[str], None] | None
+) -> dict:
     """安装 APK 到设备（脱壳/抓包 spawn 前置）。失败不阻断流水线（设备或已装兼容版本）。
 
     成功 → done；失败 → error（带原因，如签名冲突需先 uninstall），但后续步骤仍尝试
     （unpack/capture 会以 "unable to find application" 给出明确提示）。绝不抛。
+    serial 透传给 provision（多设备消歧）；None 时退回旧行为。
     """
     _emit(on_progress, "安装 APK 到设备（frida spawn 前置：需 app 已安装）")
     try:
         from apkscan.dynamic import provision
 
-        res = provision.install_apk(apk_path)
+        res = provision.install_apk(apk_path, serial=serial)
     except Exception as exc:  # noqa: BLE001 — 安装异常不中断流水线
         logger.exception("[auto] 安装 APK 异常：%s", apk_path)
         return _step(_STEP_INSTALL, _ERROR, f"安装 APK 异常：{exc}")
@@ -405,9 +430,12 @@ def _run_unpack(
     *,
     out_dir: str,
     has_device: bool,
+    serial: str | None = None,
     on_progress: Callable[[str], None] | None,
 ) -> tuple[dict, list[str]]:
     """步骤 3：脱壳（仅有设备才做）。无设备 → skipped；失败 → error，均不中断。
+
+    serial 透传给 unpack.run（多设备消歧）；None 时退回旧行为（-FU）。
 
     Returns:
         (step, report_paths)。脱壳内部 reanalyze 默认回灌，report_paths 来自其产出。
@@ -420,7 +448,7 @@ def _run_unpack(
     try:
         from apkscan.dynamic import unpack
 
-        result = unpack.run(apk_path, out=out_dir, reanalyze=True)
+        result = unpack.run(apk_path, out=out_dir, reanalyze=True, serial=serial)
         return _fold_dynamic_step(_STEP_UNPACK, result)
     except Exception as exc:  # noqa: BLE001 - 脱壳失败不中断流水线
         logger.exception("[auto] 脱壳步骤异常：%s", apk_path)
@@ -432,11 +460,14 @@ def _run_capture(
     *,
     out_dir: str,
     has_device: bool,
+    serial: str | None = None,
     duration: int,
     on_progress: Callable[[str], None] | None,
     confirm: Callable[[str], None] | None,
 ) -> tuple[dict, str]:
     """步骤 4：抓包（有设备 + 有包名才做）。先 confirm 提示用户操作 app 触发网络。
+
+    serial 透传给 capture.run（多设备消歧）；None 时退回旧行为（-U）。
 
     Returns:
         (step, runtime_report_path)。runtime_report_path：抓包成功时 runtime_report.json
@@ -460,7 +491,7 @@ def _run_capture(
     try:
         from apkscan.dynamic import capture
 
-        result = capture.run(package_name, out=out_dir, duration=duration)
+        result = capture.run(package_name, out=out_dir, duration=duration, serial=serial)
         step, _ = _fold_dynamic_step(_STEP_CAPTURE, result)
         runtime_path = ""
         if step["status"] == _DONE:

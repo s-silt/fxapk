@@ -47,6 +47,7 @@ def run(
     reanalyze: bool = True,
     *,
     out: str | None = None,
+    serial: str | None = None,
 ) -> DynamicResult:
     """真机脱壳主入口（见模块 docstring）。
 
@@ -55,6 +56,9 @@ def run(
         out_dir: 产物 / 报告输出目录（dump 落到 ``out_dir/dump``）。
         reanalyze: 脱壳得到额外 DEX 后是否自动 load_apk(extra_dex=...) 重新静态分析。
         out: ``out_dir`` 的关键字别名（CLI 以 ``out=`` 调用，二者取其一，out 优先）。
+        serial: 目标设备 serial（多设备/一机多 transport 下钉定那台，由 auto 选定后传入）。
+                frida-dexdump 用 ``-F -D <serial>``、frida-server 探测带 serial；None 时退回
+                ``-FU``（向后兼容无设备选择的旧路径/测试）。
 
     Returns:
         DynamicResult（status=done|skipped|error，字段齐全，绝不抛异常）。
@@ -63,7 +67,7 @@ def run(
         out_dir = out
 
     # 1) 能力探测：任一缺失 → skipped + 精确手册。
-    skipped = _check_capabilities()
+    skipped = _check_capabilities(serial)
     if skipped is not None:
         return skipped
 
@@ -91,7 +95,7 @@ def run(
     dump_dir = Path(out_dir) / "dump"
     playbook: list[str] = []
     try:
-        dumped = _dexdump(package_name, dump_dir, playbook)
+        dumped = _dexdump(package_name, dump_dir, playbook, serial)
     except Exception as exc:  # noqa: BLE001 - dump 任何异常都转 error
         logger.exception("frida-dexdump 脱壳异常：package=%s", package_name)
         result = empty_result(STATUS_ERROR, f"frida-dexdump 执行异常：{exc}")
@@ -140,10 +144,11 @@ def run(
     return result
 
 
-def _check_capabilities() -> DynamicResult | None:
+def _check_capabilities(serial: str | None = None) -> DynamicResult | None:
     """探测脱壳所需能力。全部满足返回 None；任一缺失返回 status=skipped 的 DynamicResult。
 
     缺什么写进 reason，并在 playbook 给出可直接复制的精确补全命令。
+    serial 非空时 frida-server 运行探测钉定那台（多设备消歧）；None 退回旧行为。
     """
     missing: list[str] = []
     if not device.has_device():
@@ -153,7 +158,7 @@ def _check_capabilities() -> DynamicResult | None:
     if not device.has_frida_dexdump():
         missing.append("frida-dexdump（PATH 无 frida-dexdump）")
     # frida-server 仅在有设备时判定才有意义；无设备时上面已记，避免误导。
-    if device.has_device() and not device.frida_server_running():
+    if device.has_device() and not device.frida_server_running(serial):
         missing.append("设备上运行中的 frida-server")
 
     if not missing:
@@ -204,12 +209,15 @@ def _resolve_package_name(apk_path: str) -> str:
 
 
 def _dexdump(
-    package_name: str, dump_dir: Path, playbook: list[str]
+    package_name: str, dump_dir: Path, playbook: list[str], serial: str | None = None
 ) -> list[Path] | str:
-    """跑 ``frida-dexdump -FU -f <package> -o <dump_dir>`` 脱壳。
+    """跑 ``frida-dexdump`` 脱壳（设备选择按 serial：``-F -D <serial>`` 或 ``-FU``）。
 
     返回 dump 出的 .dex 文件路径列表；失败（非零退出 / 超时 / 无产物）返回字符串原因。
     超时 / 异常由调用方 try/except 兜底（本函数超时返回字符串、不抛）。
+
+    设备选择：serial 非空时用 ``-F -D <serial>`` 钉定那台（多设备/一机多 transport 下
+    ``-U`` 会因多个可达设备 ambiguous）；serial=None 退回 ``-FU``（向后兼容）。
     """
     dump_dir.mkdir(parents=True, exist_ok=True)
     # frozen 时经 tools.frida_invocation 自调用内置 frida-dexdump；源码时用 PATH。
@@ -217,10 +225,12 @@ def _dexdump(
     if not inv:
         logger.error("frida-dexdump 不可用（frozen 内置缺失 / PATH 无 frida-dexdump）")
         return "frida-dexdump 不可用"
-    # -F=attach 前台应用, -U=USB 设备, -f=按包名 spawn, -o=输出目录。
-    cmd = [*inv, "-FU", "-f", package_name, "-o", str(dump_dir)]
+    # -F=attach 前台应用, -U=USB 设备, -D <serial>=钉定设备, -f=按包名 spawn, -o=输出目录。
+    device_flags = ["-F", "-D", serial] if serial else ["-FU"]
+    cmd = [*inv, *device_flags, "-f", package_name, "-o", str(dump_dir)]
     # playbook 记**人类可读命令**（不暴露 sys.executable frida-dexdump），与实际 argv 解耦。
-    playbook.append(f"frida-dexdump -FU -f {package_name} -o {dump_dir}")
+    human_flags = f"-F -D {serial}" if serial else "-FU"
+    playbook.append(f"frida-dexdump {human_flags} -f {package_name} -o {dump_dir}")
     logger.info("执行 frida-dexdump：%s", " ".join(cmd))
 
     try:

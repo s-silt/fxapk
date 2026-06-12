@@ -37,7 +37,7 @@ def _ok_result(out_dir: str, pkg: str = "com.evil.app") -> dict:
 
 @pytest.fixture
 def no_device(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(batch.device, "has_device", lambda: False)
+    monkeypatch.setattr(batch.device, "select_target_serial", lambda: None)
     monkeypatch.setattr(
         batch.provision, "uninstall_app", lambda *a, **k: {"ok": True, "detail": ""}
     )
@@ -119,19 +119,20 @@ def test_run_folder_uninstalls_when_device_present(
 ) -> None:
     folder = tmp_path / "samples"
     _make_apk(folder, "a.apk")
-    monkeypatch.setattr(batch.device, "has_device", lambda: True)
+    monkeypatch.setattr(batch.device, "select_target_serial", lambda: "emulator-5554")
     monkeypatch.setattr(
         batch.auto, "run", lambda apk_path, **k: _ok_result(str(k["out_dir"]), pkg="com.evil.app")
     )
-    uninstalled: list[str] = []
+    uninstalled: list[tuple[str, object]] = []
 
-    def _uninstall(pkg: str, *a: object, **k: object) -> dict:
-        uninstalled.append(pkg)
+    def _uninstall(pkg: str, serial: object = None, **k: object) -> dict:
+        uninstalled.append((pkg, serial))
         return {"ok": True, "detail": ""}
 
     monkeypatch.setattr(batch.provision, "uninstall_app", _uninstall)
     batch.run_folder(str(folder), out_dir=str(tmp_path / "out"))
-    assert uninstalled == ["com.evil.app"]
+    # 卸载钉定选中设备的 serial（多设备/一机多 transport 不再 more than one）。
+    assert uninstalled == [("com.evil.app", "emulator-5554")]
 
 
 def test_run_folder_no_uninstall_without_device(
@@ -139,7 +140,7 @@ def test_run_folder_no_uninstall_without_device(
 ) -> None:
     folder = tmp_path / "samples"
     _make_apk(folder, "a.apk")
-    monkeypatch.setattr(batch.device, "has_device", lambda: False)
+    monkeypatch.setattr(batch.device, "select_target_serial", lambda: None)
     monkeypatch.setattr(
         batch.auto, "run", lambda apk_path, **k: _ok_result(str(k["out_dir"]), pkg="com.evil.app")
     )

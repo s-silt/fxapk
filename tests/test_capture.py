@@ -102,19 +102,20 @@ def _stub_orchestration(
 
     monkeypatch.setattr(capture, "_start_mitmdump", lambda flows_file: mitm)
     monkeypatch.setattr(
-        capture, "_start_frida_unpinning", lambda package, out_path: frida
+        capture, "_start_frida_unpinning", lambda package, out_path, serial=None: frida
     )
     # P0：默认让 frida-core 会话路径不可用（返回 (None, None)），既有用例继续走 subprocess
     # 回退路径（_start_frida_unpinning），行为零漂移；针对会话路径的新用例会再覆写此桩。
+    # serial 关键字默认 None（向后兼容；多设备修复后 _capture 会透传选定 serial）。
     monkeypatch.setattr(
         capture,
         "_start_frida_session",
-        lambda package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None: (None, None),
+        lambda package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None, serial=None: (None, None),
     )
-    monkeypatch.setattr(capture, "_adb_reverse", lambda: (calls["adb"].append("reverse") or True))
-    monkeypatch.setattr(capture, "_adb_set_proxy", lambda: (calls["adb"].append("proxy") or True))
-    monkeypatch.setattr(capture, "_adb_clear_proxy", lambda: calls["adb"].append("clear_proxy"))
-    monkeypatch.setattr(capture, "_adb_remove_reverse", lambda: calls["adb"].append("remove_reverse"))
+    monkeypatch.setattr(capture, "_adb_reverse", lambda serial=None: (calls["adb"].append("reverse") or True))
+    monkeypatch.setattr(capture, "_adb_set_proxy", lambda serial=None: (calls["adb"].append("proxy") or True))
+    monkeypatch.setattr(capture, "_adb_clear_proxy", lambda serial=None: calls["adb"].append("clear_proxy"))
+    monkeypatch.setattr(capture, "_adb_remove_reverse", lambda serial=None: calls["adb"].append("remove_reverse"))
 
     # 加固新调用：默认 CA 成功、版本匹配，无告警（避免污染既有用例的 reason 断言）。
     def _fake_ensure_ca(*args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -702,7 +703,7 @@ def test_capped_sentinel_filtered_from_runtime_report(monkeypatch, tmp_path):
     _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
     monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None, serial=None):
         sink.append({"src": "cipher", "event": "init", "key_hex": "55f0"})
         sink.append({"_capped": True})  # 上限占位
         return object(), object()
@@ -726,7 +727,7 @@ def test_capture_done_collects_crypto_events_via_session(monkeypatch, tmp_path):
         {"src": "cipher", "event": "doFinal", "key_hex": "55f0", "plaintext_b64": "eyJhIjoxfQ=="},
     ]
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None, serial=None):
         # 模拟 on_message 回调把 2 条事件写进共享 sink。
         sink.extend(fake_events)
         return object(), object()  # 非 None 会话/脚本（teardown 对 dummy 容错）
@@ -747,7 +748,7 @@ def test_capture_collects_jsbridge_and_sensitive_api_events(monkeypatch, tmp_pat
     _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
     monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None, serial=None):
         if jsbridge_sink is not None:
             jsbridge_sink.append({"event": "register", "iface": "AndroidNative"})
         if api_sink is not None:
@@ -777,7 +778,7 @@ def test_capture_collects_antidetect_events(monkeypatch, tmp_path):
     _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
     monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None, serial=None):
         if antidetect_sink is not None:
             antidetect_sink.append({"kind": "root", "probe": "File.exists: /system/bin/su", "bypassed": True})
         return object(), object()
@@ -796,9 +797,9 @@ def test_capture_collects_credential_events_via_session(monkeypatch, tmp_path):
     _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
     monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
     # 不触真 adb pull（无 shared_prefs）。
-    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda pkg, op, sink: None)
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda pkg, op, sink, serial=None: None)
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None, serial=None):
         if credential_sink is not None:
             credential_sink.append(
                 {"source": "okhttp", "url": "https://api.fraud-c2.cn/login", "method": "POST",
@@ -819,7 +820,7 @@ def test_capture_pulls_shared_prefs_credentials_at_teardown(monkeypatch, tmp_pat
     _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
     monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
 
-    def _fake_pull(pkg, out_path, sink):
+    def _fake_pull(pkg, out_path, sink, serial=None):
         sink.append({"source": "sharedprefs", "name": "token", "value": "Abc1…f456", "file": "p.xml"})
 
     monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", _fake_pull)
@@ -842,9 +843,9 @@ def test_capture_collects_clipboard_events_via_session(monkeypatch, tmp_path):
     _set_capabilities(monkeypatch)
     _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
     monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
-    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda pkg, op, sink: None)
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda pkg, op, sink, serial=None: None)
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None, serial=None):
         if clipboard_sink is not None:
             # 模拟 normalize_clipboard_event 已抽地址丢全文：sink 里只有地址、无剪贴板原文。
             clipboard_sink.append(
@@ -914,7 +915,7 @@ def test_frida_session_script_includes_clipboard(monkeypatch):
 
 def test_pull_shared_prefs_no_adb_is_noop(monkeypatch):
     """无 adb（_adb_capture 全 None）→ 不抠任何凭据、不抛。"""
-    monkeypatch.setattr(capture, "_adb_capture", lambda extra: None)
+    monkeypatch.setattr(capture, "_adb_capture", lambda extra, serial=None: None)
     sink: list[dict[str, Any]] = []
     capture._pull_shared_prefs_credentials("com.test.app", Path("."), sink)
     assert sink == []
@@ -929,7 +930,7 @@ def test_pull_shared_prefs_extracts_via_run_as(monkeypatch, tmp_path):
         "</map>"
     )
 
-    def _fake_capture(extra):
+    def _fake_capture(extra, serial=None):
         if "ls" in extra:
             return "user_prefs.xml\nother.txt\n"
         if "cat" in extra:
@@ -1379,6 +1380,198 @@ def test_parse_flows_extracts_server_ip(monkeypatch, tmp_path):  # noqa: ANN001
 # ---------------------------------------------------------------------------
 # 噪音过滤：模拟器/系统自身流量
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# serial 注入（P0 多设备/一机多 transport：所有 adb 带 -s、frida 用 -D <serial>）
+# ---------------------------------------------------------------------------
+
+
+def test_adb_includes_dash_s_when_serial_given(monkeypatch):
+    """capture._adb 带 serial → argv 含 -s <serial>；serial=None → 不含 -s（向后兼容）。"""
+    monkeypatch.setattr(capture.tools, "adb_path", lambda: "/usr/bin/adb")
+    captured: dict[str, list[str]] = {}
+
+    class _CP:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _spy(args, **k):
+        captured["args"] = list(args)
+        return _CP()
+
+    monkeypatch.setattr(capture.subprocess, "run", _spy)
+
+    capture._adb(["reverse", "tcp:8080", "tcp:8080"], serial="emulator-5554")
+    assert captured["args"][:4] == ["/usr/bin/adb", "-s", "emulator-5554", "reverse"]
+
+    capture._adb(["reverse", "tcp:8080", "tcp:8080"])  # serial=None → 无 -s
+    assert "-s" not in captured["args"]
+    assert captured["args"][:2] == ["/usr/bin/adb", "reverse"]
+
+
+def test_adb_capture_includes_dash_s_when_serial_given(monkeypatch):
+    """capture._adb_capture 带 serial → argv 含 -s <serial>；None → 不含。"""
+    monkeypatch.setattr(capture.tools, "adb_path", lambda: "/usr/bin/adb")
+    captured: dict[str, list[str]] = {}
+
+    class _CP:
+        returncode = 0
+        stdout = "x"
+        stderr = ""
+
+    def _spy(args, **k):
+        captured["args"] = list(args)
+        return _CP()
+
+    monkeypatch.setattr(capture.subprocess, "run", _spy)
+
+    capture._adb_capture(["shell", "ls"], serial="127.0.0.1:7555")
+    assert captured["args"][:3] == ["/usr/bin/adb", "-s", "127.0.0.1:7555"]
+
+    capture._adb_capture(["shell", "ls"])
+    assert "-s" not in captured["args"]
+
+
+def test_adb_proxy_reverse_helpers_thread_serial(monkeypatch):
+    """_adb_set_proxy/_adb_reverse/_adb_clear_proxy/_adb_remove_reverse 把 serial 透传给 _adb。"""
+    seen: list[tuple[list[str], str | None]] = []
+    monkeypatch.setattr(capture, "_adb", lambda extra, serial=None: seen.append((extra, serial)) or True)
+
+    capture._adb_set_proxy("emulator-5554")
+    capture._adb_clear_proxy("emulator-5554")
+    capture._adb_reverse("emulator-5554")
+    capture._adb_remove_reverse("emulator-5554")
+
+    assert all(s == "emulator-5554" for _, s in seen)
+    assert len(seen) == 4
+
+
+def test_device_frida_version_uses_dash_s(monkeypatch):
+    """_device_frida_version 带 serial → adb argv 含 -s <serial>。"""
+    monkeypatch.setattr(capture.tools, "adb_path", lambda: "adb")
+    captured: dict[str, list[str]] = {}
+
+    class _CP:
+        returncode = 0
+        stdout = "16.5.9\n"
+        stderr = ""
+
+    monkeypatch.setattr(capture.subprocess, "run", lambda args, **k: (captured.__setitem__("args", list(args)), _CP())[1])
+    capture._device_frida_version("emulator-5554")
+    assert "-s" in captured["args"] and "emulator-5554" in captured["args"]
+
+
+def test_start_frida_unpinning_uses_dash_d_when_serial(monkeypatch, tmp_path):
+    """_start_frida_unpinning 带 serial → frida 用 -D <serial>（不用 -U）；None → 用 -U。"""
+    monkeypatch.setattr(capture.tools, "frida_invocation", lambda tool: ["frida"])
+    monkeypatch.setattr(capture.provision, "host_frida_version", lambda: "17.0.0")
+    captured: dict[str, list[str]] = {}
+
+    class _FakePopen:
+        def __init__(self, args, **kwargs):
+            captured["args"] = list(args)
+
+    monkeypatch.setattr(capture.subprocess, "Popen", _FakePopen)
+
+    capture._start_frida_unpinning("com.x.y", tmp_path, serial="emulator-5554")
+    assert "-D" in captured["args"]
+    assert "emulator-5554" in captured["args"]
+    assert "-U" not in captured["args"]
+
+    capture._start_frida_unpinning("com.x.y", tmp_path)  # serial=None → -U（向后兼容）
+    assert "-U" in captured["args"]
+    assert "-D" not in captured["args"]
+
+
+def test_start_frida_session_uses_get_device_when_serial(monkeypatch):
+    """_start_frida_session 带 serial → 走 frida.get_device(serial)（即 -D 等价）；None → get_usb_device。"""
+    import sys
+    import types
+
+    seen: dict[str, Any] = {}
+
+    class _FakeScript:
+        def __init__(self, source: str) -> None:
+            pass
+
+        def on(self, name: str, cb: Any) -> None:
+            pass
+
+        def load(self) -> None:
+            pass
+
+    class _FakeSession:
+        def create_script(self, source: str) -> _FakeScript:
+            return _FakeScript(source)
+
+        def detach(self) -> None:
+            pass
+
+    class _FakeDevice:
+        def spawn(self, argv: Any) -> int:
+            return 1
+
+        def attach(self, pid: int) -> _FakeSession:
+            return _FakeSession()
+
+        def resume(self, pid: int) -> None:
+            pass
+
+        def kill(self, pid: int) -> None:
+            pass
+
+    fake_frida = types.SimpleNamespace(
+        get_usb_device=lambda timeout=None: (seen.__setitem__("via", "usb"), _FakeDevice())[1],
+        get_device=lambda serial, timeout=None: (seen.__setitem__("via", ("device", serial)), _FakeDevice())[1],
+    )
+    monkeypatch.setitem(sys.modules, "frida", fake_frida)
+
+    capture._start_frida_session("com.x", [], serial="emulator-5554")
+    assert seen["via"] == ("device", "emulator-5554")
+
+    seen.clear()
+    capture._start_frida_session("com.x", [])  # serial=None → USB（向后兼容）
+    assert seen["via"] == "usb"
+
+
+def test_capture_run_threads_serial_to_adb_and_frida(monkeypatch, tmp_path):
+    """端到端：capture.run(serial=...) → 所有 adb 代理/reverse 与 frida 注入收到该 serial。"""
+    _set_capabilities(monkeypatch)
+    calls = _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+
+    # 覆写为记录 serial 的桩（_stub_orchestration 的 adb 桩不带 serial）。
+    seen: dict[str, Any] = {"reverse": None, "proxy": None, "frida_serial": None, "session_serial": "MISSING"}
+    monkeypatch.setattr(capture, "_adb_reverse", lambda serial=None: seen.__setitem__("reverse", serial) or True)
+    monkeypatch.setattr(capture, "_adb_set_proxy", lambda serial=None: seen.__setitem__("proxy", serial) or True)
+    monkeypatch.setattr(capture, "_adb_clear_proxy", lambda serial=None: None)
+    monkeypatch.setattr(capture, "_adb_remove_reverse", lambda serial=None: None)
+    monkeypatch.setattr(
+        capture,
+        "_start_frida_unpinning",
+        lambda package, out_path, serial=None: seen.__setitem__("frida_serial", serial) or _FakeProc(),
+    )
+
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None,
+                      credential_sink=None, sqlcipher_sink=None, clipboard_sink=None,
+                      remote_control_sink=None, serial=None):
+        seen["session_serial"] = serial
+        return None, None  # 回退 subprocess 路径
+
+    monkeypatch.setattr(capture, "_start_frida_session", _fake_session)
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda pkg, op, sink, serial=None: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda pkg, op, ev, serial=None: None)
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1, serial="emulator-5554")
+    assert result["status"] == STATUS_DONE
+    assert seen["reverse"] == "emulator-5554"
+    assert seen["proxy"] == "emulator-5554"
+    assert seen["session_serial"] == "emulator-5554"
+    assert seen["frida_serial"] == "emulator-5554"
+    # 默认 calls 桩未被用到（被覆写），仅确保 run 跑通。
+    assert calls["waited"] is True
 
 
 def test_is_noise_host_matching():

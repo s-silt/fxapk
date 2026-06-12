@@ -224,6 +224,76 @@ def test_out_keyword_alias(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
 
 
 # ---------------------------------------------------------------------------
+# serial 注入（P0 多设备：frida-dexdump 用 -F -D <serial> 钉定那台；None 退回 -FU）
+# ---------------------------------------------------------------------------
+
+
+def test_dexdump_uses_dash_d_when_serial_given(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """serial 给定 → frida-dexdump 命令含 -F -D <serial>（不含 -FU/-U）；frida-server 探测带 serial。"""
+    _all_capabilities_ok(monkeypatch)
+    _patch_package_name(monkeypatch, "com.fraud.app")
+    seen_serials: list[str | None] = []
+    monkeypatch.setattr(
+        unpack.device,
+        "frida_server_running",
+        lambda serial=None: seen_serials.append(serial) or True,
+    )
+
+    captured: dict[str, list[str]] = {}
+
+    def _fake_run(cmd: list[str], **kwargs: Any) -> _FakeProc:
+        captured["cmd"] = list(cmd)
+        o_idx = cmd.index("-o")
+        dump_dir = Path(cmd[o_idx + 1])
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        (dump_dir / "classes.dex").write_bytes(b"dex\n035\x00x")
+        return _FakeProc(returncode=0, stdout="ok")
+
+    monkeypatch.setattr(unpack.subprocess, "run", _fake_run)
+    monkeypatch.setattr(unpack, "_reanalyze", lambda a, e, o: [])
+
+    result = unpack.run(
+        "sample.apk", out_dir=str(tmp_path / "out"), reanalyze=True, serial="emulator-5554"
+    )
+    assert result["status"] == STATUS_DONE
+    cmd = captured["cmd"]
+    assert "-D" in cmd
+    assert "emulator-5554" in cmd
+    assert "-FU" not in cmd  # 不再用 USB ambiguous 选择
+    assert "-F" in cmd  # 仍 attach 前台
+    # frida-server 运行探测也带上了选定 serial（多设备消歧）。
+    assert "emulator-5554" in seen_serials
+
+
+def test_dexdump_keeps_fu_when_serial_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """serial=None（旧路径/测试）→ 仍用 -FU（向后兼容）。"""
+    _all_capabilities_ok(monkeypatch)
+    _patch_package_name(monkeypatch, "com.fraud.app")
+
+    captured: dict[str, list[str]] = {}
+
+    def _fake_run(cmd: list[str], **kwargs: Any) -> _FakeProc:
+        captured["cmd"] = list(cmd)
+        o_idx = cmd.index("-o")
+        dump_dir = Path(cmd[o_idx + 1])
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        (dump_dir / "classes.dex").write_bytes(b"dex\n035\x00x")
+        return _FakeProc(returncode=0, stdout="ok")
+
+    monkeypatch.setattr(unpack.subprocess, "run", _fake_run)
+    monkeypatch.setattr(unpack, "_reanalyze", lambda a, e, o: [])
+
+    result = unpack.run("sample.apk", out_dir=str(tmp_path / "out"), reanalyze=True)
+    assert result["status"] == STATUS_DONE
+    assert "-FU" in captured["cmd"]
+    assert "-D" not in captured["cmd"]
+
+
+# ---------------------------------------------------------------------------
 # 3) frida-dexdump 失败 → error
 # ---------------------------------------------------------------------------
 

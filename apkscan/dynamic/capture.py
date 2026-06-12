@@ -134,6 +134,7 @@ def run(
     duration: int = 60,
     *,
     out: str | None = None,
+    serial: str | None = None,
 ) -> DynamicResult:
     """对运行中的目标应用做真机抓包，提取运行时端点。
 
@@ -143,6 +144,9 @@ def run(
         duration: 抓包时长（秒）。
         out: ``out_dir`` 的关键字别名（CLI 以 ``out=`` 调用，与 unpack.run 一致；
              二者取其一，out 优先）。
+        serial: 目标设备 serial（多设备/一机多 transport 下钉定那台，由 auto 选定后传入）。
+                所有 adb 命令带 ``-s <serial>``、frida 用 ``-D <serial>``；None 时不带 -s、
+                frida 用 ``-U``（向后兼容无设备选择的旧路径/测试）。
 
     Returns:
         DynamicResult 契约 dict。前置不满足 → status="skipped" + playbook；
@@ -166,7 +170,7 @@ def run(
         return result
 
     # --- 前置能力探测：缺任一 → skipped + 手册 ---------------------------
-    missing = _detect_missing()
+    missing = _detect_missing(serial)
     if missing:
         reason = "缺少前置条件：" + "、".join(missing)
         logger.info("[capture] %s；返回手册（playbook）", reason)
@@ -175,8 +179,11 @@ def run(
         return result
 
     # --- 前置满足：真·抓包编排 ------------------------------------------
-    logger.info("[capture] 前置满足，开始真机抓包：package=%s duration=%ds", package, duration)
-    return _capture(package, out_path, duration)
+    logger.info(
+        "[capture] 前置满足，开始真机抓包：package=%s duration=%ds serial=%s",
+        package, duration, serial or "(未指定/-U)",
+    )
+    return _capture(package, out_path, duration, serial)
 
 
 # ---------------------------------------------------------------------------
@@ -184,10 +191,11 @@ def run(
 # ---------------------------------------------------------------------------
 
 
-def _detect_missing() -> list[str]:
+def _detect_missing(serial: str | None = None) -> list[str]:
     """返回缺失的前置条件名列表（空 = 全部就绪）。
 
     顺序：设备 / frida / mitmproxy。每项探测均走 device 模块（不抛）。
+    serial 非空时 frida-server 运行探测钉定那台（多设备消歧）；None 退回旧行为。
     """
     missing: list[str] = []
     try:
@@ -214,7 +222,7 @@ def _detect_missing() -> list[str]:
     # 设备上 frida-server 是否在跑（与 unpack 口径一致）：host 有 frida CLI 但设备
     # frida-server 没起来时，注入会失败、抓包绕不过证书绑定，应提前判为缺失。
     try:
-        if device.has_device() and not device.frida_server_running():
+        if device.has_device() and not device.frida_server_running(serial):
             missing.append("设备上运行中的 frida-server")
     except Exception:
         logger.exception("[capture] frida-server 运行状态探测异常")
@@ -256,10 +264,14 @@ def _build_playbook(package: str, out_dir: str, duration: int) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
+def _capture(
+    package: str, out_path: Path, duration: int, serial: str | None = None
+) -> DynamicResult:
     """编排 mitmdump + adb 代理 + frida unpinning + 启 app，到时停并解析流量。
 
     所有子进程在 finally 中清理（terminate→kill），proxy/reverse 在 finally 还原。
+    serial 一路传给所有 adb 调用（reverse/proxy/CA/收尾 pull）与 frida 注入（-D 设备选择）；
+    None 时全部退回旧行为（不带 -s、frida 用 -U），向后兼容。
     """
     result = empty_result(STATUS_DONE, "")
     playbook: list[str] = []
@@ -294,7 +306,7 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
     try:
         # 0) HTTPS 命门：把 mitmproxy CA 装入设备系统信任库。失败不中止抓包
         #    （HTTP 仍可抓），但把降级原因写进 playbook + reason，确保不假成功。
-        ca = provision.ensure_mitm_ca(on_progress=None)
+        ca = provision.ensure_mitm_ca(serial, on_progress=None)
         if ca.get("ok"):
             playbook.append(f"mitmproxy CA 已就绪（{ca.get('action', '')}）")
         else:
@@ -305,7 +317,7 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
             warnings.append(warn)
 
         # 0.5) frida 主机/设备版本一致性校验。不一致不阻断（仍注入），但写入告警。
-        match_ok, match_msg = _check_frida_version_match()
+        match_ok, match_msg = _check_frida_version_match(serial)
         if not match_ok:
             logger.warning("[capture] %s", match_msg)
             playbook.append(match_msg)
@@ -329,10 +341,10 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
             raise _MitmStartupError(msg)
 
         # 2) adb 代理 + reverse，把设备流量回流到主机 mitmproxy。
-        reverse_set = _adb_reverse()
+        reverse_set = _adb_reverse(serial)
         if reverse_set:
             playbook.append(f"adb reverse tcp:{_PROXY_PORT} tcp:{_PROXY_PORT}")
-        proxy_set = _adb_set_proxy()
+        proxy_set = _adb_set_proxy(serial)
         if proxy_set:
             playbook.append(f"adb 设全局代理 {_PROXY_HOST}:{_PROXY_PORT}")
 
@@ -349,6 +361,7 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
             sqlcipher_events,
             clipboard_events,
             remote_control_events,
+            serial=serial,
         )
         if frida_session is not None:
             playbook.append(
@@ -356,7 +369,7 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
             )
             logger.info("[capture] frida-core 会话已建立，运行时密钥 hook 生效")
         else:
-            frida_proc = _start_frida_unpinning(package, out_path)
+            frida_proc = _start_frida_unpinning(package, out_path, serial)
         if frida_session is None and frida_proc is None:
             # 未起 frida（缺 frida / 写脚本失败）→ 无 unpinning，HTTPS 可能仅密文。
             warn = "frida 未启动（缺 frida / 脚本写出失败），无 SSL unpinning，HTTPS 可能仅密文"
@@ -396,17 +409,17 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
         # 5) 清理：先停 frida（让 app 网络收尾），再撤代理/reverse，最后停 mitmdump（落盘）。
         # P2：收尾在 kill app 前 adb pull shared_prefs（app 活着时 prefs 多已 flush 到磁盘），
         #     抠登录态/凭据进 credential_events（best-effort，失败不影响抓包/其它事件）。
-        _pull_shared_prefs_credentials(package, out_path, credential_events)
+        _pull_shared_prefs_credentials(package, out_path, credential_events, serial)
         # P2：把 SQLCipher hook 导出的 *.plain.db（及普通 SQLite databases/*）adb pull 回
         #     out/dump_db/，并把回拉后的本地路径回填 sqlcipher_events.plain_path（供 merge 只读抠值）。
-        _pull_exported_databases(package, out_path, sqlcipher_events)
+        _pull_exported_databases(package, out_path, sqlcipher_events, serial)
         _terminate(frida_proc, "frida")
         _teardown_frida_session(frida_session, frida_script)
         if proxy_set:
-            _adb_clear_proxy()
+            _adb_clear_proxy(serial)
             playbook.append("还原：清除设备全局代理")
         if reverse_set:
-            _adb_remove_reverse()
+            _adb_remove_reverse(serial)
             playbook.append(f"还原：adb reverse --remove tcp:{_PROXY_PORT}")
         _terminate(mitm_proc, "mitmdump")
 
@@ -523,8 +536,14 @@ def _start_mitmdump(flows_file: Path) -> subprocess.Popen[bytes]:
     return _spawn_logged(args, flows_file.parent / ".diag" / "mitmdump.stderr.log")
 
 
-def _start_frida_unpinning(package: str, out_path: Path) -> subprocess.Popen[bytes] | None:
-    """写出内置 unpinning 脚本，frida -U -f <package> -l <js> 注入并 spawn 目标 app。
+def _start_frida_unpinning(
+    package: str, out_path: Path, serial: str | None = None
+) -> subprocess.Popen[bytes] | None:
+    """写出内置 unpinning 脚本，frida 注入并 spawn 目标 app。
+
+    设备选择：serial 非空时用 ``-D <serial>`` 钉定那台（多设备/一机多 transport 下，
+    ``-U`` 会因有多个可达设备而 ambiguous）；serial=None 退回 ``-U``（向后兼容无设备
+    选择的旧路径/测试）。
 
     frida 缺失/启动失败 → 记 warning 返回 None（不抛，抓包仍可在无 unpinning 下进行）。
     frozen 时经 tools.frida_invocation 自调用内置 frida；源码时用 PATH。
@@ -545,7 +564,8 @@ def _start_frida_unpinning(package: str, out_path: Path) -> subprocess.Popen[byt
         logger.exception("[capture] 写出 frida unpinning 脚本失败，跳过注入")
         return None
 
-    args = [*inv, "-U", "-f", package, "-l", str(js_path), "-q"]
+    device_flags = ["-D", serial] if serial else ["-U"]
+    args = [*inv, *device_flags, "-f", package, "-l", str(js_path), "-q"]
     host_major = re.match(r"(\d+)\.", provision.host_frida_version())
     if host_major is not None and int(host_major.group(1)) < 14:
         args.append("--no-pause")  # 仅老版 frida-tools(<14) 需要；新版默认不暂停
@@ -576,6 +596,7 @@ def _start_frida_session(
     sqlcipher_sink: list[dict[str, Any]] | None = None,
     clipboard_sink: list[dict[str, Any]] | None = None,
     remote_control_sink: list[dict[str, Any]] | None = None,
+    serial: str | None = None,
 ) -> tuple[Any, Any]:
     """用 frida-core（``import frida``）spawn 目标 app 并注入 unpinning + 运行时 hook 套件。
 
@@ -588,6 +609,9 @@ def _start_frida_session(
         sink: 收集 crypto 事件的共享列表（``make_message_handler`` 写入）。
         jsbridge_sink: 收集 JS-bridge 事件（None 则不注册该通道）。
         api_sink: 收集敏感 API 调用事件（None 则不注册该通道）。
+        serial: 目标设备 serial。非空时经 ``frida.get_device(serial)`` 钉定那台（多设备/
+                一机多 transport 下 ``get_usb_device`` 会因多个可达设备 ambiguous）；
+                None 退回 ``get_usb_device``（向后兼容无设备选择的旧路径/测试）。
 
     Returns:
         ``(session, script)``：成功 → 两者非 None（脚本已 load、app 已 resume）；
@@ -628,7 +652,11 @@ def _start_frida_session(
     pid: Any = None
     session: Any = None
     try:
-        device_handle = frida.get_usb_device(timeout=_FRIDA_USB_TIMEOUT)
+        # serial 钉定那台（-D 等价）；None 退回 USB（向后兼容）。
+        if serial:
+            device_handle = frida.get_device(serial, timeout=_FRIDA_USB_TIMEOUT)
+        else:
+            device_handle = frida.get_usb_device(timeout=_FRIDA_USB_TIMEOUT)
         pid = device_handle.spawn([package])
         session = device_handle.attach(pid)
         script = session.create_script(source)
@@ -827,45 +855,51 @@ def _check_frida_version_match(serial: str | None = None) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 
 
-def _adb_set_proxy() -> bool:
+def _adb_set_proxy(serial: str | None = None) -> bool:
     """adb shell settings put global http_proxy 127.0.0.1:8080。成功返回 True。"""
     ok = _adb(
-        ["shell", "settings", "put", "global", "http_proxy", f"{_PROXY_HOST}:{_PROXY_PORT}"]
+        ["shell", "settings", "put", "global", "http_proxy", f"{_PROXY_HOST}:{_PROXY_PORT}"],
+        serial,
     )
     if not ok:
         logger.warning("[capture] 设置设备全局代理失败（不阻断抓包）")
     return ok
 
 
-def _adb_clear_proxy() -> None:
+def _adb_clear_proxy(serial: str | None = None) -> None:
     """还原设备全局代理：settings delete global http_proxy。"""
-    if not _adb(["shell", "settings", "delete", "global", "http_proxy"]):
+    if not _adb(["shell", "settings", "delete", "global", "http_proxy"], serial):
         logger.warning("[capture] 清除设备全局代理失败（请手动还原）")
 
 
-def _adb_reverse() -> bool:
+def _adb_reverse(serial: str | None = None) -> bool:
     """adb reverse tcp:8080 tcp:8080，让设备 localhost 回流到主机 mitmproxy。"""
-    ok = _adb(["reverse", f"tcp:{_PROXY_PORT}", f"tcp:{_PROXY_PORT}"])
+    ok = _adb(["reverse", f"tcp:{_PROXY_PORT}", f"tcp:{_PROXY_PORT}"], serial)
     if not ok:
         logger.warning("[capture] adb reverse 失败（不阻断抓包）")
     return ok
 
 
-def _adb_remove_reverse() -> None:
+def _adb_remove_reverse(serial: str | None = None) -> None:
     """还原 adb reverse。"""
-    if not _adb(["reverse", "--remove", f"tcp:{_PROXY_PORT}"]):
+    if not _adb(["reverse", "--remove", f"tcp:{_PROXY_PORT}"], serial):
         logger.warning("[capture] adb reverse --remove 失败（请手动还原）")
 
 
-def _adb(extra: list[str]) -> bool:
-    """运行 adb 子命令，成功（returncode==0）返回 True。缺 adb / 失败 / 异常 → False。"""
+def _adb(extra: list[str], serial: str | None = None) -> bool:
+    """运行 adb 子命令，成功（returncode==0）返回 True。缺 adb / 失败 / 异常 → False。
+
+    serial 非空时插入 ``-s <serial>``（多设备/一机多 transport 下消解 ``more than one
+    device`` 歧义）；serial=None 时不带 -s（向后兼容无设备选择的旧路径/测试）。
+    """
     exe = tools.adb_path()
     if not exe:
         logger.warning("[capture] adb 不可用，跳过：%s", " ".join(extra))
         return False
+    args = [exe, *(["-s", serial] if serial else []), *extra]
     try:
         proc = subprocess.run(
-            [exe, *extra],
+            args,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -885,15 +919,19 @@ def _adb(extra: list[str]) -> bool:
     return True
 
 
-def _adb_capture(extra: list[str]) -> str | None:
-    """运行 adb 子命令并返回 stdout 文本；缺 adb / 非零退出 / 异常 → None（不抛）。"""
+def _adb_capture(extra: list[str], serial: str | None = None) -> str | None:
+    """运行 adb 子命令并返回 stdout 文本；缺 adb / 非零退出 / 异常 → None（不抛）。
+
+    serial 非空时插入 ``-s <serial>``（同 :func:`_adb`）；None 时不带 -s（向后兼容）。
+    """
     exe = tools.adb_path()
     if not exe:
         logger.debug("[capture] adb 不可用，跳过取数：%s", " ".join(extra))
         return None
+    args = [exe, *(["-s", serial] if serial else []), *extra]
     try:
         proc = subprocess.run(
-            [exe, *extra],
+            args,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -927,22 +965,23 @@ _SHARED_PREFS_DIR = "/data/data/{pkg}/shared_prefs"
 
 
 def _pull_shared_prefs_credentials(
-    package: str, out_path: Path, sink: list[dict[str, Any]]
+    package: str, out_path: Path, sink: list[dict[str, Any]], serial: str | None = None
 ) -> None:
     """adb 读取 ``/data/data/<pkg>/shared_prefs/*.xml``，抠登录态/凭据进 ``sink``。绝不抛。
 
     通道（依次尝试，任一成功即用）：``run-as <pkg>``（debuggable）/ ``su -c``（root）。
     抠出的凭据经 ``extract_sharedprefs_credentials`` 脱敏/形态闸/截断；高敏，不落全文。
+    serial 透传给底层 adb（多设备消歧）；None 时不带 -s（向后兼容）。
     """
     try:
         prefs_dir = _SHARED_PREFS_DIR.format(pkg=package)
-        xml_files = _list_shared_prefs_files(package, prefs_dir)
+        xml_files = _list_shared_prefs_files(package, prefs_dir, serial)
         if not xml_files:
             logger.debug("[capture] 未列到 shared_prefs xml（无 root/非 debuggable/无凭据），跳过")
             return
         total = 0
         for fname in xml_files:
-            xml_text = _read_shared_prefs_file(package, prefs_dir, fname)
+            xml_text = _read_shared_prefs_file(package, prefs_dir, fname, serial)
             if not xml_text:
                 continue
             creds = cryptohook.extract_sharedprefs_credentials(xml_text, fname)
@@ -959,13 +998,15 @@ def _pull_shared_prefs_credentials(
         logger.exception("[capture] adb pull shared_prefs 抽凭据异常（已忽略）")
 
 
-def _list_shared_prefs_files(package: str, prefs_dir: str) -> list[str]:
+def _list_shared_prefs_files(
+    package: str, prefs_dir: str, serial: str | None = None
+) -> list[str]:
     """列出 shared_prefs 目录下的 *.xml 文件名（run-as 优先，回退 su）。失败 → []。"""
     for cmd in (
         ["shell", "run-as", package, "ls", prefs_dir],
         ["shell", "su", "-c", f"ls {prefs_dir}"],
     ):
-        out = _adb_capture(cmd)
+        out = _adb_capture(cmd, serial)
         if out:
             names = [
                 line.strip().rsplit("/", 1)[-1]
@@ -977,7 +1018,9 @@ def _list_shared_prefs_files(package: str, prefs_dir: str) -> list[str]:
     return []
 
 
-def _read_shared_prefs_file(package: str, prefs_dir: str, fname: str) -> str:
+def _read_shared_prefs_file(
+    package: str, prefs_dir: str, fname: str, serial: str | None = None
+) -> str:
     """读取单个 shared_prefs xml 文本（run-as 优先，回退 su）。失败 → 空串。"""
     # 防御：文件名取自设备 ls 输出，钉死只接受简单文件名，杜绝路径穿越/命令注入。
     if not re.fullmatch(r"[A-Za-z0-9_.\-]+\.xml", fname):
@@ -988,7 +1031,7 @@ def _read_shared_prefs_file(package: str, prefs_dir: str, fname: str) -> str:
         ["shell", "run-as", package, "cat", path],
         ["shell", "su", "-c", f"cat {path}"],
     ):
-        out = _adb_capture(cmd)
+        out = _adb_capture(cmd, serial)
         if out and "<map" in out:
             return out
     return ""
@@ -1013,13 +1056,16 @@ _DB_PULL_MAX_BYTES = 200 * 1024 * 1024
 
 
 def _pull_exported_databases(
-    package: str, out_path: Path, sqlcipher_events: list[dict[str, Any]]
+    package: str,
+    out_path: Path,
+    sqlcipher_events: list[dict[str, Any]],
+    serial: str | None = None,
 ) -> None:
     """adb pull SQLCipher 导出的 ``*.plain.db``（及普通 SQLite ``databases/*``）回 ``out/dump_db/``。
 
     回填每条 exported 事件的 ``plain_path`` 为回拉后的**本地**路径（供 merge 只读抠值）；
     设备上回拉不到的事件保持原样（merge 端按缺文件跳过）。绝不抛——单库失败/无 root/无 adb
-    只记日志，不影响抓包与其它事件。
+    只记日志，不影响抓包与其它事件。serial 透传给底层 adb（多设备消歧）；None 不带 -s。
     """
     try:
         dump_dir = out_path / "dump_db"
@@ -1031,14 +1077,14 @@ def _pull_exported_databases(
             dev_plain = str(ev.get("plain_path") or "")
             if not dev_plain or not dev_plain.endswith(".plain.db"):
                 continue
-            local = _adb_pull_db(dev_plain, dump_dir)
+            local = _adb_pull_db(dev_plain, dump_dir, serial)
             if local:
                 ev["plain_path"] = str(local)  # 回填本地路径供 merge
                 pulled_any = True
         # 2) 补充：尽力把 app 私有 databases/*.db（普通 SQLite）一并拉回（best-effort）。
-        _pull_plain_sqlite_databases(package, dump_dir)
+        _pull_plain_sqlite_databases(package, dump_dir, serial)
         # 3) 兜底：把导出临时目录里所有 .plain.db 拉回（事件可能漏记某些库）。
-        _pull_exported_tmp_dir(dump_dir)
+        _pull_exported_tmp_dir(dump_dir, serial)
         if pulled_any:
             logger.info(
                 "[capture] 落地库已回拉至 %s（含受害人高敏明文，按办案合规留存处置）", dump_dir
@@ -1047,17 +1093,18 @@ def _pull_exported_databases(
         logger.exception("[capture] adb pull 落地库异常（已忽略）")
 
 
-def _adb_pull_db(device_path: str, dump_dir: Path) -> Path | None:
+def _adb_pull_db(device_path: str, dump_dir: Path, serial: str | None = None) -> Path | None:
     """把设备上单个 db 文件 adb pull 到 ``dump_dir``；超大/失败/无 adb → None（不抛）。
 
     防御：device_path 来自 Frida 事件（不完全可信），钉死只接受 .db/.plain.db 结尾的
     绝对路径，杜绝把任意设备文件拉回。pull 前用 ``ls -l`` 估大小，超 _DB_PULL_MAX_BYTES 跳过。
+    serial 透传（多设备消歧）；None 不带 -s（向后兼容）。
     """
     if not re.fullmatch(r"/[A-Za-z0-9_./\-]+\.db", device_path):
         logger.debug("[capture] 跳过形态可疑的 db 设备路径：%r", device_path)
         return None
     # 大小闸（best-effort）：ls -l 第 5 列为字节数；拿不到不阻断（仍尝试 pull）。
-    size = _adb_db_size(device_path)
+    size = _adb_db_size(device_path, serial)
     if size is not None and size > _DB_PULL_MAX_BYTES:
         logger.info("[capture] 落地库超大（%d 字节）跳过回拉：%s", size, device_path)
         return None
@@ -1072,7 +1119,7 @@ def _adb_pull_db(device_path: str, dump_dir: Path) -> Path | None:
     local = dump_dir / device_path.rsplit("/", 1)[-1]
     try:
         proc = subprocess.run(
-            [exe, "pull", device_path, str(local)],
+            [exe, *(["-s", serial] if serial else []), "pull", device_path, str(local)],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -1092,9 +1139,9 @@ def _adb_pull_db(device_path: str, dump_dir: Path) -> Path | None:
     return local
 
 
-def _adb_db_size(device_path: str) -> int | None:
+def _adb_db_size(device_path: str, serial: str | None = None) -> int | None:
     """best-effort 取设备上 db 文件字节数（ls -l 第 5 列）；拿不到 → None（不阻断 pull）。"""
-    out = _adb_capture(["shell", "ls", "-l", device_path])
+    out = _adb_capture(["shell", "ls", "-l", device_path], serial)
     if not out:
         return None
     parts = out.split()
@@ -1104,7 +1151,9 @@ def _adb_db_size(device_path: str) -> int | None:
     return None
 
 
-def _pull_plain_sqlite_databases(package: str, dump_dir: Path) -> None:
+def _pull_plain_sqlite_databases(
+    package: str, dump_dir: Path, serial: str | None = None
+) -> None:
     """尽力把 app 私有 ``databases/*.db`` 普通 SQLite 库拉回（run-as 优先、回退 su）。
 
     普通（未加密）SQLite 库直接含可读物证；命中 run-as/su 通道即逐个 pull。无 root/非
@@ -1116,7 +1165,7 @@ def _pull_plain_sqlite_databases(package: str, dump_dir: Path) -> None:
         ["shell", "run-as", package, "ls", db_dir],
         ["shell", "su", "-c", f"ls {db_dir}"],
     ):
-        out = _adb_capture(cmd)
+        out = _adb_capture(cmd, serial)
         if out:
             names = [
                 line.strip().rsplit("/", 1)[-1]
@@ -1128,18 +1177,18 @@ def _pull_plain_sqlite_databases(package: str, dump_dir: Path) -> None:
     for fname in names:
         if not re.fullmatch(r"[A-Za-z0-9_.\-]+\.db", fname):
             continue
-        _adb_pull_db(f"{db_dir}/{fname}", dump_dir)
+        _adb_pull_db(f"{db_dir}/{fname}", dump_dir, serial)
 
 
-def _pull_exported_tmp_dir(dump_dir: Path) -> None:
+def _pull_exported_tmp_dir(dump_dir: Path, serial: str | None = None) -> None:
     """兜底：把 SQLCipher 导出临时目录里所有 ``*.plain.db`` 拉回（事件漏记时的补网）。绝不抛。"""
-    out = _adb_capture(["shell", "ls", _EXPORTED_DB_TMP])
+    out = _adb_capture(["shell", "ls", _EXPORTED_DB_TMP], serial)
     if not out:
         return
     for line in out.splitlines():
         name = line.strip().rsplit("/", 1)[-1]
         if name.endswith(".plain.db") and re.fullmatch(r"[A-Za-z0-9_.\-]+\.plain\.db", name):
-            _adb_pull_db(f"{_EXPORTED_DB_TMP}/{name}", dump_dir)
+            _adb_pull_db(f"{_EXPORTED_DB_TMP}/{name}", dump_dir, serial)
 
 
 # ---------------------------------------------------------------------------

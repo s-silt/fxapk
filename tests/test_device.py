@@ -220,3 +220,58 @@ def test_ensure_adb_server_skips_connect_when_device_present(monkeypatch: Any) -
 
     assert ["adb", "start-server"] in [c[:2] for c in calls]
     assert not any(c[:2] == ["adb", "connect"] for c in calls)  # 设备已可见 → 不 connect
+
+
+# ---------------------------------------------------------------------------
+# select_target_serial：多设备/一机多 transport 下钉定单个 serial（P0 真机 bug 修复）
+# ---------------------------------------------------------------------------
+
+
+def test_select_target_serial_none_when_no_device(monkeypatch: Any) -> None:
+    """0 个在线设备 → None（下游照旧不带 -s、frida 用 -U，向后兼容）。"""
+    monkeypatch.setattr(device, "adb_devices", lambda: [])
+    assert device.select_target_serial() is None
+
+
+def test_select_target_serial_returns_the_only_one(monkeypatch: Any) -> None:
+    """恰好 1 个设备 → 返回它（无 warning，单设备本就是常态）。"""
+    monkeypatch.setattr(device, "adb_devices", lambda: ["emulator-5554"])
+    assert device.select_target_serial() == "emulator-5554"
+
+
+def test_select_target_serial_prefers_emulator_transport(monkeypatch: Any, caplog: Any) -> None:
+    """一机多 transport（emulator-5554 + 127.0.0.1:7555 同一台 MuMu）→ 钉定 emulator-*（原生
+    transport 比 tcp connect 稳）并 log warning。"""
+    import logging
+
+    monkeypatch.setattr(device, "adb_devices", lambda: ["127.0.0.1:7555", "emulator-5554"])
+    with caplog.at_level(logging.WARNING):
+        chosen = device.select_target_serial()
+    assert chosen == "emulator-5554"
+    # warning 文案明确：检测到多个、已钉定、其余忽略、单设备假设。
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "emulator-5554" in text
+    assert "钉定" in text or "钉死" in text
+
+
+def test_select_target_serial_prefers_usb_real_device_over_localhost(monkeypatch: Any) -> None:
+    """多个真机/transport，无 emulator-* 时优先非 127.0.0.1/localhost 的 USB 真机。"""
+    monkeypatch.setattr(device, "adb_devices", lambda: ["127.0.0.1:7555", "ABCDEF0123"])
+    assert device.select_target_serial() == "ABCDEF0123"
+
+
+def test_select_target_serial_falls_back_to_first_sorted(monkeypatch: Any) -> None:
+    """全是 localhost transport（无 emulator-*、无 USB 真机）→ 取排序第一个，仍只选一个。"""
+    monkeypatch.setattr(device, "adb_devices", lambda: ["127.0.0.1:7555", "127.0.0.1:16384"])
+    assert device.select_target_serial() == "127.0.0.1:16384"  # 排序后第一
+
+
+def test_select_target_serial_multiple_real_devices_warns(monkeypatch: Any, caplog: Any) -> None:
+    """多台真机 → 选定一个 + warning（fxapk 单设备假设）。"""
+    import logging
+
+    monkeypatch.setattr(device, "adb_devices", lambda: ["DEV2SERIAL", "DEV1SERIAL"])
+    with caplog.at_level(logging.WARNING):
+        chosen = device.select_target_serial()
+    assert chosen in ("DEV1SERIAL", "DEV2SERIAL")
+    assert any("钉定" in r.getMessage() or "钉死" in r.getMessage() for r in caplog.records)
