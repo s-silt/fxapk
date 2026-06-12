@@ -436,6 +436,71 @@ def batch(
 
 
 @app.command()
+def export(
+    report_json: Path = typer.Argument(
+        ...,
+        help="已产出的 report.json 路径（analyze/auto/batch 写出的 JSON 报告）。",
+    ),
+    out: str = typer.Option(
+        "",
+        "--out",
+        help="导出的 CSV 路径。默认 = 与 report.json 同目录的 <base>.ioc.csv。",
+    ),
+    only_investigate: bool = typer.Option(
+        False,
+        "--only-investigate",
+        help="只导 advice=建议调证 的线索（默认全导，但带 advice 列让下游自行过滤）。",
+    ),
+) -> None:
+    """把 report.json 的线索导成扁平 IOC CSV，便于进 MISP/i2/Maltego 做跨案碰撞。
+
+    薄包装：读 report.json → leads_to_ioc_rows → write_csv。绝不抛——读不到文件 / 坏 JSON
+    都打印友好提示并退出码 1。CSV 为 UTF-8 with BOM（Excel 打开中文不乱码）。
+    """
+    import json as _json
+
+    try:
+        try:
+            raw = report_json.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            typer.echo(f"错误：找不到报告文件：{report_json}", err=True)
+            raise typer.Exit(code=1) from None
+        except OSError as exc:
+            typer.echo(f"错误：读取报告文件失败：{report_json}（{exc}）", err=True)
+            raise typer.Exit(code=1) from exc
+
+        try:
+            report = _json.loads(raw)
+        except (ValueError, UnicodeDecodeError) as exc:
+            typer.echo(f"错误：报告 JSON 解析失败：{report_json}（{exc}）", err=True)
+            raise typer.Exit(code=1) from exc
+
+        from apkscan.report import ioc
+
+        rows = ioc.leads_to_ioc_rows(report, only_investigate=only_investigate)
+
+        # 默认 out = 与 report.json 同目录的 <base>.ioc.csv（base = 去掉 .json 后缀的名）。
+        out_path = Path(out) if out else report_json.with_suffix("").with_suffix(".ioc.csv")
+        if out_path.parent and not out_path.parent.exists():
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            ioc.write_csv(rows, str(out_path))
+        except OSError as exc:
+            typer.echo(f"错误：写出 CSV 失败：{out_path}（{exc}）", err=True)
+            raise typer.Exit(code=1) from exc
+
+        scope = "（仅 建议调证）" if only_investigate else ""
+        typer.echo(f"已导出 IOC CSV：{out_path}（{len(rows)} 行{scope}）")
+    except typer.Exit:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 兜底任何意外，转友好提示而非 traceback
+        logger.exception("[cli] export 导出 IOC CSV 异常")
+        typer.echo(f"错误：导出失败：{exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+@app.command()
 def gui() -> None:
     """启动新手友好的图形界面（tkinter 单窗口：环境体检 / 静态分析 / 一键全自动）。
 
