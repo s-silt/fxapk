@@ -128,11 +128,14 @@ def run_folder(
     led_path = Path(ledger_path) if ledger_path else Path(out_dir) / ".apkscan_cache" / "analyzed.json"
     ledger = AnalyzedLedger(led_path)
 
+    # 选定唯一目标设备的 serial（多设备 / 一机多 transport 去重，钉定一个）；逐个卸载带 -s 它，
+    # 避免多条目下 `more than one device`。每个 APK 的 auto.run 内部另会各自选定 serial。
     try:
-        had_device = device.has_device()
+        target_serial = device.select_target_serial()
     except Exception:
-        logger.exception("[batch] 设备探测异常，按无设备处理")
-        had_device = False
+        logger.exception("[batch] 选定目标设备异常，按无设备处理")
+        target_serial = None
+    had_device = target_serial is not None
 
     apks = sorted(Path(folder).glob("*.apk")) if Path(folder).is_dir() else []
     total = len(apks)
@@ -169,7 +172,7 @@ def run_folder(
 
             # 逐个卸载：有设备 + 有包名才卸（auto.run 装的就是这个包）。失败无害，只记日志。
             if had_device and pkg:
-                u = provision.uninstall_app(pkg)
+                u = provision.uninstall_app(pkg, serial=target_serial)
                 if not u.get("ok"):
                     logger.warning("[batch] 卸载失败（忽略）：%s — %s", pkg, u.get("detail"))
 

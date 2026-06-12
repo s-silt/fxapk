@@ -164,6 +164,56 @@ def has_device() -> bool:
     return bool(adb_devices())
 
 
+def _is_localhost_serial(serial: str) -> bool:
+    """serial 是否为 localhost tcp transport（127.0.0.1:* / localhost:*）。"""
+    s = serial.strip().lower()
+    return s.startswith("127.0.0.1") or s.startswith("localhost")
+
+
+def select_target_serial() -> str | None:
+    """从在线设备里**钉定单台**目标 serial，下游一律带 ``-s <serial>`` / frida ``-D <serial>``。
+
+    真机实测 P0 根因：模拟器（MuMu/夜神/雷电）常被 adb 列成**多条 transport**（如
+    ``emulator-5554`` + ``127.0.0.1:7555`` 实为同一台），尤其 ``adb root`` 触发重连后。
+    若下游 adb/frida 命令不指定设备 → ``more than one device/emulator`` → 代理/CA/reverse/
+    getprop/frida 部署一连串 exit 1 → 脱壳/抓包全挂。本函数据此钉定一个 serial（**单设备
+    假设**：fxapk 一次只调证一台），消解歧义。
+
+    选择优先级（同一台的多条目里挑最稳的那条；多台真机里挑一台）：
+      1. ``emulator-*`` 开头：模拟器原生 transport，比 tcp ``connect`` 上来的条目更稳。
+      2. 非 ``127.0.0.1``/``localhost`` 的 USB 真机 serial。
+      3. 兜底：排序后第一个（确定性，避免每次跑选到不同条目）。
+
+    Returns:
+        0 个在线 → None（下游 serial=None：照旧不带 -s、frida 用 -U，**完全向后兼容**）；
+        1 个 → 它（不告警，单设备本就是常态）；
+        多个 → 按上述优先级选定一个并 **log warning**（提示其余被忽略）。绝不抛。
+    """
+    serials = adb_devices()
+    if not serials:
+        return None
+    if len(serials) == 1:
+        return serials[0]
+
+    ordered = sorted(serials)  # 确定性排序，作为兜底与组内稳定次序
+    emulators = [s for s in ordered if s.startswith("emulator-")]
+    usb_reals = [s for s in ordered if not s.startswith("emulator-") and not _is_localhost_serial(s)]
+    if emulators:
+        chosen = emulators[0]
+    elif usb_reals:
+        chosen = usb_reals[0]
+    else:
+        chosen = ordered[0]
+
+    logger.warning(
+        "检测到多个 adb 设备/transport（可能是同一模拟器的多条目）：%s；"
+        "已钉定 %s，其余忽略（fxapk 单设备假设）",
+        ", ".join(serials),
+        chosen,
+    )
+    return chosen
+
+
 def frida_spawn_hint(output: str) -> str:
     """frida spawn 失败输出 → 按具体特征返回可操作中文提示（区分两类常见根因）；无匹配 → 空串。
 

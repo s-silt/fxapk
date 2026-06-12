@@ -176,7 +176,11 @@ def _patch_merge(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 
 def _set_device(monkeypatch: pytest.MonkeyPatch, present: bool) -> None:
-    monkeypatch.setattr(auto.device, "has_device", lambda: present)
+    # auto 现以 select_target_serial() 选定单台设备（多设备/一机多 transport 钉定一个）：
+    # present=True → 给一个 serial（has_device 由 serial is not None 推出）；False → None。
+    monkeypatch.setattr(
+        auto.device, "select_target_serial", lambda: "emulator-5554" if present else None
+    )
     # 有设备时 auto 会在脱壳/抓包前调 provision.ensure_frida_server / install_apk；mock 掉
     # 避免单测触发真 adb / frida-ps -U（无设备 → 数秒超时，拖慢测试）。
     import apkscan.dynamic.provision as _prov
@@ -687,3 +691,96 @@ def test_run_install_app_error_on_failure(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(_prov, "install_apk", lambda apk, serial=None: {"ok": False, "detail": "失败"})
     step = _auto._run_install_app("x.apk", on_progress=None)
     assert step["status"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# serial 注入（P0 多设备：auto 选定 serial 后一路传给 frida/install/unpack/capture）
+# ---------------------------------------------------------------------------
+
+
+def test_auto_selects_serial_and_threads_to_all_downstream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """select_target_serial 返回某 serial → ensure_frida_server/install_apk/unpack/capture 全收到该 serial。"""
+    import apkscan.dynamic.provision as _prov
+    import apkscan.dynamic.unpack as unpack_mod
+    import apkscan.dynamic.capture as capture_mod
+
+    _patch_doctor(monkeypatch, ok=True)
+    _patch_static_ok(monkeypatch, "com.fraud.app")
+    _patch_merge(monkeypatch)
+
+    # 多设备/一机多 transport 已被 select_target_serial 钉定为 emulator-5554。
+    monkeypatch.setattr(auto.device, "select_target_serial", lambda: "emulator-5554")
+
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        _prov,
+        "ensure_frida_server",
+        lambda *a, **k: seen.__setitem__("frida_serial", k.get("serial"))
+        or {"ok": True, "action": "already_running"},
+    )
+    monkeypatch.setattr(
+        _prov,
+        "install_apk",
+        lambda apk, serial=None: seen.__setitem__("install_serial", serial)
+        or {"ok": True, "detail": "已安装"},
+    )
+
+    def _fake_unpack(apk_path: str, *a: Any, **k: Any) -> dict:
+        seen["unpack_serial"] = k.get("serial")
+        return _dynamic_result(STATUS_DONE)
+
+    def _fake_capture(package: str, *a: Any, **k: Any) -> dict:
+        seen["capture_serial"] = k.get("serial")
+        return _dynamic_result(STATUS_DONE, report_paths=["out/runtime_report.json"])
+
+    monkeypatch.setattr(unpack_mod, "run", _fake_unpack)
+    monkeypatch.setattr(capture_mod, "run", _fake_capture)
+
+    result = auto.run("sample.apk", out_dir="out")
+
+    assert _status_of(result["steps"], auto._STEP_CAPTURE) == STATUS_DONE
+    assert seen["frida_serial"] == "emulator-5554"
+    assert seen["install_serial"] == "emulator-5554"
+    assert seen["unpack_serial"] == "emulator-5554"
+    assert seen["capture_serial"] == "emulator-5554"
+
+
+def test_auto_no_serial_means_no_device_skips_dynamic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """select_target_serial 返回 None → has_device=False → 脱壳/抓包 skipped（与旧无设备路径一致）。"""
+    _patch_doctor(monkeypatch, ok=False)
+    _patch_static_ok(monkeypatch, "com.fraud.app")
+    monkeypatch.setattr(auto.device, "select_target_serial", lambda: None)
+    unpack_calls = _patch_unpack(monkeypatch, _dynamic_result(STATUS_DONE))
+    cap_calls = _patch_capture(monkeypatch, _dynamic_result(STATUS_DONE))
+    _patch_merge(monkeypatch)
+
+    result = auto.run("sample.apk", out_dir="out")
+
+    assert _status_of(result["steps"], auto._STEP_UNPACK) == STATUS_SKIPPED
+    assert _status_of(result["steps"], auto._STEP_CAPTURE) == STATUS_SKIPPED
+    assert unpack_calls["called"] is False
+    assert cap_calls["called"] is False
+
+
+def test_auto_records_target_serial_in_meta(monkeypatch: pytest.MonkeyPatch) -> None:
+    """选定的 serial 记入 report.meta['target_serial']（便于排查）。"""
+    report = _patch_static_ok(monkeypatch, "com.fraud.app")
+    _patch_doctor(monkeypatch, ok=True)
+    _patch_merge(monkeypatch)
+    monkeypatch.setattr(auto.device, "select_target_serial", lambda: "emulator-5554")
+
+    import apkscan.dynamic.provision as _prov
+
+    monkeypatch.setattr(
+        _prov, "ensure_frida_server", lambda *a, **k: {"ok": True, "action": "already_running"}
+    )
+    monkeypatch.setattr(_prov, "install_apk", lambda *a, **k: {"ok": True, "detail": "ok"})
+    _patch_unpack(monkeypatch, _dynamic_result(STATUS_DONE))
+    _patch_capture(monkeypatch, _dynamic_result(STATUS_DONE, report_paths=["out/runtime_report.json"]))
+
+    auto.run("sample.apk", out_dir="out")
+    assert report.meta.get("target_serial") == "emulator-5554"
