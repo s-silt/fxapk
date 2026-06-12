@@ -126,8 +126,26 @@ def run(
     report: object | None = None
 
     try:
-        # 1) 环境体检（自检 + 自修）。失败不中断后续静态分析。
-        steps.append(_run_doctor(auto_fix=auto_fix, on_progress=on_progress))
+        # 0) 设备探测 + **钉定单台 serial**：必须在体检之前选定。多设备/一机多 transport
+        #    （模拟器常被列成多条目，尤其 adb root 触发重连后）下，下游 adb/frida 命令必须
+        #    带 -s/-D，否则 "more than one device" → 体检装 CA/代理/reverse/getprop/frida
+        #    部署一连串失败。这里先钉定一个（emulator-* 优先），has_device 由它是否为 None 推出，
+        #    并贯穿进体检与之后每一步（体检/装 CA 同样需要 serial，否则多设备下照样炸）。
+        try:
+            target_serial = device.select_target_serial()
+        except Exception:
+            logger.exception("[auto] 设备探测/选定异常，按无设备处理")
+            target_serial = None
+        has_device = target_serial is not None
+        if target_serial is not None:
+            logger.info(
+                "[auto] 已钉定目标设备 serial=%s（下游 adb -s / frida -D）", target_serial
+            )
+
+        # 1) 环境体检（自检 + 自修）。带 serial：体检/装 CA 全程钉定同一台。失败不中断后续静态分析。
+        steps.append(
+            _run_doctor(serial=target_serial, auto_fix=auto_fix, on_progress=on_progress)
+        )
 
         # 2) 静态分析（load_apk → pipeline.run → 写报告）。
         static_step, report, package_name, static_paths, base = _run_static(
@@ -136,24 +154,11 @@ def run(
         steps.append(static_step)
         _extend_unique(report_paths, static_paths)
 
-        # 3) 设备探测 + **钉定单台 serial**：多设备/一机多 transport（模拟器常被列成多条目，
-        #    尤其 adb root 触发重连后）下，下游 adb/frida 命令必须带 -s/-D，否则
-        #    "more than one device" → 代理/CA/reverse/getprop/frida 部署一连串失败。
-        #    select_target_serial 选定一个（emulator-* 优先），has_device 由它是否为 None 推出。
-        try:
-            target_serial = device.select_target_serial()
-        except Exception:
-            logger.exception("[auto] 设备探测/选定异常，按无设备处理")
-            target_serial = None
-        has_device = target_serial is not None
-        # 把选定 serial 记入静态报告 meta，便于排查（report 可能为 None：静态失败时）。
+        # 2.5) 把选定 serial 记入静态报告 meta，便于排查（report 此时才有，可能为 None：静态失败时）。
         if target_serial is not None and report is not None:
             meta = getattr(report, "meta", None)
             if isinstance(meta, dict):
                 meta["target_serial"] = target_serial
-            logger.info(
-                "[auto] 已钉定目标设备 serial=%s（下游 adb -s / frida -D）", target_serial
-            )
 
         # 3.4) 确保 frida-server 在跑且是 **root**（脱壳/抓包 spawn 注入必须 root，否则 jailed）。
         #      自愈逻辑在 ensure_frida_server，但 doctor「看见在跑就 OK」不会调它 → 非 root 实例
@@ -279,13 +284,18 @@ def analyze_static(
 # ---------------------------------------------------------------------------
 
 
-def _run_doctor(*, auto_fix: bool, on_progress: Callable[[str], None] | None) -> dict:
-    """步骤 1：动态前置环境体检 + 自修。失败转 error step，不中断后续。"""
+def _run_doctor(
+    *, serial: str | None = None, auto_fix: bool, on_progress: Callable[[str], None] | None
+) -> dict:
+    """步骤 1：动态前置环境体检 + 自修。失败转 error step，不中断后续。
+
+    serial 透传给 doctor.run（多设备消歧：体检/装 CA 全程钉定同一台）；None 时退回旧行为。
+    """
     _emit(on_progress, "步骤 1/5：环境体检（设备/root/frida/mitmproxy/CA）")
     try:
         from apkscan.dynamic import doctor
 
-        result = doctor.run(auto_fix=auto_fix, on_progress=on_progress)
+        result = doctor.run(serial=serial, auto_fix=auto_fix, on_progress=on_progress)
         items = result.get("items") or [] if isinstance(result, dict) else []
         ok = bool(result.get("ok")) if isinstance(result, dict) else False
         n_ok = sum(1 for it in items if isinstance(it, dict) and it.get("ok"))

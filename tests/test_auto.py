@@ -91,11 +91,12 @@ def _patch_doctor(monkeypatch: pytest.MonkeyPatch, ok: bool = True) -> dict[str,
     """打桩 doctor.run，记录被调与 on_progress 透传。"""
     import apkscan.dynamic.doctor as doctor_mod
 
-    calls: dict[str, Any] = {"called": False, "on_progress": None}
+    calls: dict[str, Any] = {"called": False, "on_progress": None, "serial": None}
 
     def _fake_run(**kwargs: Any) -> dict[str, Any]:
         calls["called"] = True
         calls["on_progress"] = kwargs.get("on_progress")
+        calls["serial"] = kwargs.get("serial")
         cb = kwargs.get("on_progress")
         if cb is not None:
             cb("体检中")
@@ -784,3 +785,34 @@ def test_auto_records_target_serial_in_meta(monkeypatch: pytest.MonkeyPatch) -> 
 
     auto.run("sample.apk", out_dir="out")
     assert report.meta.get("target_serial") == "emulator-5554"
+
+
+def test_auto_threads_serial_to_doctor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """serial 必须在体检之前选定并透传给 doctor.run（多设备/一机多 transport：
+    体检/装 CA 阶段也要钉定同一台，否则 `more than one device` 一连串失败）。"""
+    doctor_calls = _patch_doctor(monkeypatch, ok=True)
+    _patch_static_ok(monkeypatch, "com.fraud.app")
+    _set_device(monkeypatch, True)  # select_target_serial → emulator-5554
+    _patch_unpack(monkeypatch, _dynamic_result(STATUS_DONE))
+    _patch_capture(
+        monkeypatch, _dynamic_result(STATUS_DONE, report_paths=["out/runtime_report.json"])
+    )
+    _patch_merge(monkeypatch)
+
+    auto.run("sample.apk", out_dir="out")
+
+    assert doctor_calls["serial"] == "emulator-5554"
+
+
+def test_auto_no_device_threads_none_serial_to_doctor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """无设备（select_target_serial → None）时 doctor.run 收到 serial=None（旧行为不变）。"""
+    doctor_calls = _patch_doctor(monkeypatch, ok=False)
+    _patch_static_ok(monkeypatch, "com.fraud.app")
+    monkeypatch.setattr(auto.device, "select_target_serial", lambda: None)
+
+    auto.run("sample.apk", out_dir="out")
+
+    assert doctor_calls["called"] is True
+    assert doctor_calls["serial"] is None
