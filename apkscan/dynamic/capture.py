@@ -277,6 +277,8 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
     antidetect_events: list[dict[str, Any]] = []  # P3：反检测探测（root/模拟器/frida）
     # P2：运行时凭据（OkHttp 加密前明文 token/手机号 + 收尾 adb pull shared_prefs 落地凭据）。
     credential_events: list[dict[str, Any]] = []
+    # P2：运行时落地库导出（SQLCipher hook 导明文 .plain.db + 收尾 adb pull databases 回 dump_db/）。
+    sqlcipher_events: list[dict[str, Any]] = []
     proxy_set = False
     reverse_set = False
     # 抓包加固产生的告警（CA 未装系统库 / frida 版本不一致），收尾并入 reason，
@@ -338,6 +340,7 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
             sensitive_api_events,
             antidetect_events,
             credential_events,
+            sqlcipher_events,
         )
         if frida_session is not None:
             playbook.append(
@@ -386,6 +389,9 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
         # P2：收尾在 kill app 前 adb pull shared_prefs（app 活着时 prefs 多已 flush 到磁盘），
         #     抠登录态/凭据进 credential_events（best-effort，失败不影响抓包/其它事件）。
         _pull_shared_prefs_credentials(package, out_path, credential_events)
+        # P2：把 SQLCipher hook 导出的 *.plain.db（及普通 SQLite databases/*）adb pull 回
+        #     out/dump_db/，并把回拉后的本地路径回填 sqlcipher_events.plain_path（供 merge 只读抠值）。
+        _pull_exported_databases(package, out_path, sqlcipher_events)
         _terminate(frida_proc, "frida")
         _teardown_frida_session(frida_session, frida_script)
         if proxy_set:
@@ -423,6 +429,7 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
         sensitive_api_events=_clean(sensitive_api_events),
         antidetect_events=_clean(antidetect_events),
         credential_events=_clean(credential_events),
+        sqlcipher_events=_clean(sqlcipher_events),
     )
     report_paths = [report_path] if report_path else []
 
@@ -556,6 +563,7 @@ def _start_frida_session(
     api_sink: list[dict[str, Any]] | None = None,
     antidetect_sink: list[dict[str, Any]] | None = None,
     credential_sink: list[dict[str, Any]] | None = None,
+    sqlcipher_sink: list[dict[str, Any]] | None = None,
 ) -> tuple[Any, Any]:
     """用 frida-core（``import frida``）spawn 目标 app 并注入 unpinning + 运行时 hook 套件。
 
@@ -597,6 +605,8 @@ def _start_frida_session(
         + cryptohook.FRIDA_ANTIDETECT_JS
         + "\n"
         + cryptohook.FRIDA_OKHTTP_HOOK_JS
+        + "\n"
+        + cryptohook.FRIDA_SQLCIPHER_HOOK_JS
     )
     device_handle: Any = None
     pid: Any = None
@@ -634,6 +644,13 @@ def _start_frida_session(
                 "message",
                 cryptohook.make_typed_handler(
                     credential_sink, cryptohook.CREDENTIAL_MSG_TYPE, cryptohook.normalize_credential_event
+                ),
+            )
+        if sqlcipher_sink is not None:
+            script.on(
+                "message",
+                cryptohook.make_typed_handler(
+                    sqlcipher_sink, cryptohook.SQLCIPHER_MSG_TYPE, cryptohook.normalize_sqlcipher_event
                 ),
             )
         script.load()
@@ -939,6 +956,154 @@ def _read_shared_prefs_file(package: str, prefs_dir: str, fname: str) -> str:
         if out and "<map" in out:
             return out
     return ""
+
+
+# ---------------------------------------------------------------------------
+# P2：收尾 adb pull 落地库（SQLCipher 导出的 *.plain.db + 普通 SQLite databases/*）
+# ---------------------------------------------------------------------------
+#
+# 机制：SQLCipher hook 在设备 /data/local/tmp/apkscan_db/ 导出明文 *.plain.db（sqlcipher_events
+# 记其设备路径）；收尾把这些 .plain.db **adb pull** 回 out/dump_db/，并把回拉后的本地路径回填进
+# 事件的 plain_path（供 merge 用标准库 sqlite3 只读抠值）。同时尽力 pull 普通 SQLite 库
+# （/data/data/<pkg>/databases/*.db）作为补充物证。pull 限大小/超时，失败只记日志、不影响抓包。
+# 拉回的 .plain.db 是受害人高敏明文——SHA256 留存由 merge 落盘时算（取证完整性）。
+
+#: app 私有 databases 目录（<pkg> 占位）。
+_DATABASES_DIR = "/data/data/{pkg}/databases"
+#: SQLCipher hook 在设备上导出明文库的临时目录（与 FRIDA_SQLCIPHER_HOOK_JS 的 _TMP_DIR 一致）。
+_EXPORTED_DB_TMP = "/data/local/tmp/apkscan_db"
+#: 单个 db 文件 adb pull 的大小上限（字节）：超大库多为缓存/媒体，跳过避免拖垮收尾。
+_DB_PULL_MAX_BYTES = 200 * 1024 * 1024
+
+
+def _pull_exported_databases(
+    package: str, out_path: Path, sqlcipher_events: list[dict[str, Any]]
+) -> None:
+    """adb pull SQLCipher 导出的 ``*.plain.db``（及普通 SQLite ``databases/*``）回 ``out/dump_db/``。
+
+    回填每条 exported 事件的 ``plain_path`` 为回拉后的**本地**路径（供 merge 只读抠值）；
+    设备上回拉不到的事件保持原样（merge 端按缺文件跳过）。绝不抛——单库失败/无 root/无 adb
+    只记日志，不影响抓包与其它事件。
+    """
+    try:
+        dump_dir = out_path / "dump_db"
+        # 1) 回拉 SQLCipher hook 导出的明文 .plain.db（事件里记了设备路径）。
+        pulled_any = False
+        for ev in sqlcipher_events:
+            if not isinstance(ev, dict):
+                continue
+            dev_plain = str(ev.get("plain_path") or "")
+            if not dev_plain or not dev_plain.endswith(".plain.db"):
+                continue
+            local = _adb_pull_db(dev_plain, dump_dir)
+            if local:
+                ev["plain_path"] = str(local)  # 回填本地路径供 merge
+                pulled_any = True
+        # 2) 补充：尽力把 app 私有 databases/*.db（普通 SQLite）一并拉回（best-effort）。
+        _pull_plain_sqlite_databases(package, dump_dir)
+        # 3) 兜底：把导出临时目录里所有 .plain.db 拉回（事件可能漏记某些库）。
+        _pull_exported_tmp_dir(dump_dir)
+        if pulled_any:
+            logger.info(
+                "[capture] 落地库已回拉至 %s（含受害人高敏明文，按办案合规留存处置）", dump_dir
+            )
+    except Exception:  # noqa: BLE001 — 收尾落地库回拉绝不影响抓包/报告写出
+        logger.exception("[capture] adb pull 落地库异常（已忽略）")
+
+
+def _adb_pull_db(device_path: str, dump_dir: Path) -> Path | None:
+    """把设备上单个 db 文件 adb pull 到 ``dump_dir``；超大/失败/无 adb → None（不抛）。
+
+    防御：device_path 来自 Frida 事件（不完全可信），钉死只接受 .db/.plain.db 结尾的
+    绝对路径，杜绝把任意设备文件拉回。pull 前用 ``ls -l`` 估大小，超 _DB_PULL_MAX_BYTES 跳过。
+    """
+    if not re.fullmatch(r"/[A-Za-z0-9_./\-]+\.db", device_path):
+        logger.debug("[capture] 跳过形态可疑的 db 设备路径：%r", device_path)
+        return None
+    # 大小闸（best-effort）：ls -l 第 5 列为字节数；拿不到不阻断（仍尝试 pull）。
+    size = _adb_db_size(device_path)
+    if size is not None and size > _DB_PULL_MAX_BYTES:
+        logger.info("[capture] 落地库超大（%d 字节）跳过回拉：%s", size, device_path)
+        return None
+    exe = tools.adb_path()
+    if not exe:
+        return None
+    try:
+        dump_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logger.exception("[capture] 创建 dump_db 目录失败：%s", dump_dir)
+        return None
+    local = dump_dir / device_path.rsplit("/", 1)[-1]
+    try:
+        proc = subprocess.run(
+            [exe, "pull", device_path, str(local)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=device._DEFAULT_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("[capture] adb pull 落地库超时：%s", device_path)
+        return None
+    except Exception:
+        logger.exception("[capture] adb pull 落地库异常：%s", device_path)
+        return None
+    if proc.returncode != 0 or not local.exists():
+        logger.debug("[capture] adb pull 落地库失败（无 root/不存在）：%s", device_path)
+        return None
+    return local
+
+
+def _adb_db_size(device_path: str) -> int | None:
+    """best-effort 取设备上 db 文件字节数（ls -l 第 5 列）；拿不到 → None（不阻断 pull）。"""
+    out = _adb_capture(["shell", "ls", "-l", device_path])
+    if not out:
+        return None
+    parts = out.split()
+    for token in parts:
+        if token.isdigit() and int(token) > 0:
+            return int(token)
+    return None
+
+
+def _pull_plain_sqlite_databases(package: str, dump_dir: Path) -> None:
+    """尽力把 app 私有 ``databases/*.db`` 普通 SQLite 库拉回（run-as 优先、回退 su）。
+
+    普通（未加密）SQLite 库直接含可读物证；命中 run-as/su 通道即逐个 pull。无 root/非
+    debuggable → 列不到、跳过（预期降级）。绝不抛。
+    """
+    db_dir = _DATABASES_DIR.format(pkg=package)
+    names: list[str] = []
+    for cmd in (
+        ["shell", "run-as", package, "ls", db_dir],
+        ["shell", "su", "-c", f"ls {db_dir}"],
+    ):
+        out = _adb_capture(cmd)
+        if out:
+            names = [
+                line.strip().rsplit("/", 1)[-1]
+                for line in out.splitlines()
+                if line.strip().lower().endswith(".db")
+            ]
+            if names:
+                break
+    for fname in names:
+        if not re.fullmatch(r"[A-Za-z0-9_.\-]+\.db", fname):
+            continue
+        _adb_pull_db(f"{db_dir}/{fname}", dump_dir)
+
+
+def _pull_exported_tmp_dir(dump_dir: Path) -> None:
+    """兜底：把 SQLCipher 导出临时目录里所有 ``*.plain.db`` 拉回（事件漏记时的补网）。绝不抛。"""
+    out = _adb_capture(["shell", "ls", _EXPORTED_DB_TMP])
+    if not out:
+        return
+    for line in out.splitlines():
+        name = line.strip().rsplit("/", 1)[-1]
+        if name.endswith(".plain.db") and re.fullmatch(r"[A-Za-z0-9_.\-]+\.plain\.db", name):
+            _adb_pull_db(f"{_EXPORTED_DB_TMP}/{name}", dump_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -1308,6 +1473,7 @@ def _write_runtime_report(
     sensitive_api_events: list[dict[str, Any]] | None = None,
     antidetect_events: list[dict[str, Any]] | None = None,
     credential_events: list[dict[str, Any]] | None = None,
+    sqlcipher_events: list[dict[str, Any]] | None = None,
 ) -> str:
     """把运行时端点写成 out/runtime_report.json（复用 report.json 的序列化）。
 
@@ -1334,6 +1500,7 @@ def _write_runtime_report(
         "sensitive_api_events": list(sensitive_api_events or []),
         "antidetect_events": list(antidetect_events or []),
         "credential_events": list(credential_events or []),
+        "sqlcipher_events": list(sqlcipher_events or []),
     }
     if not complete:
         payload["note"] = "抓包未完整（代理未起或编排中断），运行时端点可能不全。"

@@ -27,6 +27,7 @@ _TEMPLATE_NAME = "report.html.j2"
 CATEGORY_LABELS: dict[LeadCategory, str] = {
     LeadCategory.CRYPTO_RECIPE: "应用层加密配方",
     LeadCategory.RUNTIME_CREDENTIAL: "运行时凭据 / 登录态（高敏）",
+    LeadCategory.VICTIM_DATA: "落地库受害人物证（高敏）",
     LeadCategory.CONFIG_KEY: "调用插件 / 配置键值",
     LeadCategory.DOMAIN: "域名线索",
     LeadCategory.IP: "IP 线索",
@@ -42,6 +43,7 @@ CATEGORY_LABELS: dict[LeadCategory, str] = {
 CATEGORY_ORDER: list[LeadCategory] = [
     LeadCategory.CRYPTO_RECIPE,
     LeadCategory.RUNTIME_CREDENTIAL,
+    LeadCategory.VICTIM_DATA,
     LeadCategory.CONFIG_KEY,
     LeadCategory.PAYMENT,
     LeadCategory.SDK_SERVICE,

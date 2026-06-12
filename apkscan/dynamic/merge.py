@@ -720,6 +720,394 @@ def _confirm_sensitive_api_findings(report: Report, api_hints: list[str]) -> int
     return confirmed
 
 
+# ---------------------------------------------------------------------------
+# 第二波：运行时 SQLCipher/SQLite 落地库导出 → VICTIM_DATA 受害人物证 Lead
+# ---------------------------------------------------------------------------
+#
+# 物证价值（全工程最高之一）：诈骗 app 本地落地库（SQLCipher 加密）藏 IM 聊天/话术剧本、
+# 通讯录、account/会员表、订单/入金缓存——导成明文 = 受害人名单 + 话术 + 上下线对接人。
+#
+# 流程：capture 把 SQLCipher hook 导出的 .plain.db adb pull 回 out/dump_db/，并在
+# runtime_report.json['sqlcipher_events'] 记 {event,db_path,plain_path,key}。本模块用标准库
+# sqlite3 **只读**打开 .plain.db，按 rules/db_carve.yaml 的表/列名启发式 + 通用正则抠值，
+# 产 VICTIM_DATA Lead（含合规脱敏与 SHA256 留存）。导出失败降级事件（key_only）→ 产带人工
+# 解密 playbook 的 Lead，不崩、不假成功。
+
+# Lead.notes / 日志的合规提示（横切硬要求：含受害人高敏个人信息，按办案合规留存处置）。
+_VICTIM_DATA_COMPLIANCE_NOTE = (
+    "运行时从落地库导出，含受害人/高敏个人信息（IM 账号/手机号/订单/商户号/话术），已脱敏截断；"
+    "原 .plain.db 已算 SHA256 留存（取证完整性）；按办案合规要求留存处置，不得外泄全文。"
+)
+
+# 时序依赖诚实标注（核验坑）：sqlcipher_export 需库已被 app 打开，launch-only 抓不全。
+_VICTIM_DATA_TIMING_NOTE = (
+    "时序提示：落地库导出依赖 app 运行时已打开该库，launch-only 抓不全未触发的库——"
+    "建议配合人工操作（登录/收消息/下单）触发后重抓。"
+)
+
+# 导出失败降级（key_only）时的人工解密 playbook（写进 Lead.notes，不崩、不假成功）。
+_VICTIM_DATA_MANUAL_PLAYBOOK = (
+    "自动导出失败（SQLCipher v3/v4 KDF 不匹配或库未就绪），已降级为仅回传库路径 + 密钥。"
+    "人工解密：sqlcipher <db> 后 PRAGMA key=\"x'<keyhex>'\"（raw key）或 PRAGMA key='<key>'；"
+    "v3 库先 PRAGMA cipher_compatibility = 3; 再 .dump / sqlcipher_export 导明文。"
+)
+
+#: db_carve 启发式规则惰性缓存。
+_DB_CARVE_RULES_CACHE: dict[str, Any] | None = None
+
+#: 兜底表名关键词（rules/db_carve.yaml 不可用时用，保守圈高物证价值表）。
+_FALLBACK_CARVE_TABLES: tuple[str, ...] = (
+    "account", "user", "member", "contact", "friend", "message", "msg", "chat",
+    "conversation", "order", "recharge", "deposit", "withdraw", "pay", "wallet",
+    "bank", "customer",
+)
+#: 兜底列名关键词。
+_FALLBACK_CARVE_COLUMNS: tuple[str, ...] = (
+    "phone", "mobile", "tel", "account", "username", "nickname", "im", "uid",
+    "openid", "wechat", "qq", "telegram", "whatsapp", "email", "idcard", "card",
+    "bank", "mchid", "merchant", "token", "amount", "money", "balance", "content",
+    "remark", "url", "domain", "host",
+)
+
+# 系统/sqlite 自身表（绝不抠，避免噪音）。
+_DB_SYSTEM_TABLES: frozenset[str] = frozenset(
+    {"android_metadata", "sqlite_sequence", "sqlite_master", "room_master_table"}
+)
+
+# 单值/单库抠值上限（保守，宁缺毋滥，避免把每行都当线索刷爆报告）。
+_DB_MAX_TABLES = 40
+_DB_MAX_ROWS = 50
+_DB_MAX_VALUES_PER_COL = 20
+# 抠出的单值脱敏后截断上限（不留全文聊天/话术）。
+_DB_VALUE_MAX = 80
+
+# 手机号打码（与 cryptohook 同口径：前 3 后 4 保留，中间 ****）。
+_DB_PHONE_RE = re.compile(r"(?<!\d)(1\d{2})(\d{4})(\d{4})(?!\d)")
+
+
+def _load_db_carve_rules() -> dict[str, Any]:
+    """惰性加载 db_carve 启发式规则（rules/db_carve.yaml）；缺失/异常 → 兜底。"""
+    global _DB_CARVE_RULES_CACHE
+    if _DB_CARVE_RULES_CACHE is not None:
+        return _DB_CARVE_RULES_CACHE
+    tables: list[str] = list(_FALLBACK_CARVE_TABLES)
+    columns: list[str] = list(_FALLBACK_CARVE_COLUMNS)
+    try:
+        from apkscan.core.registry import load_rules
+
+        data = load_rules("db_carve")
+        if isinstance(data, dict):
+            tk = data.get("table_keywords")
+            if isinstance(tk, list):
+                cleaned = [str(t).strip().lower() for t in tk if str(t).strip()]
+                if cleaned:
+                    tables = cleaned
+            ck = data.get("column_keywords")
+            if isinstance(ck, list):
+                cleaned_c = [str(c).strip().lower() for c in ck if str(c).strip()]
+                if cleaned_c:
+                    columns = cleaned_c
+    except Exception:  # noqa: BLE001 — 规则不可用不阻断，用兜底
+        logger.exception("[merge] 加载 db_carve 规则失败，用内置兜底")
+    _DB_CARVE_RULES_CACHE = {"tables": tuple(tables), "columns": tuple(columns)}
+    return _DB_CARVE_RULES_CACHE
+
+
+def _is_carve_table(table: str) -> bool:
+    """表名是否命中物证价值关键词（子串、小写）；系统表一律排除。"""
+    if not isinstance(table, str) or not table:
+        return False
+    low = table.strip().lower()
+    if low in _DB_SYSTEM_TABLES or low.startswith("sqlite_"):
+        return False
+    keywords = _load_db_carve_rules()["tables"]
+    return any(tok in low for tok in keywords)
+
+
+def _is_carve_column(column: str) -> bool:
+    """列名是否命中可调证关键词（子串、小写）。"""
+    if not isinstance(column, str) or not column:
+        return False
+    low = column.strip().lower()
+    if low == "id":  # 主键自增 id 无物证价值，显式排除
+        return False
+    keywords = _load_db_carve_rules()["columns"]
+    return any(tok in low for tok in keywords)
+
+
+def _mask_db_value(value: str) -> str:
+    """落地库抠出的值脱敏：手机号中间打码 + 截断（不留全文聊天/话术）。绝不抛。"""
+    try:
+        masked = _DB_PHONE_RE.sub(lambda m: f"{m.group(1)}****{m.group(3)}", value)
+    except Exception:  # noqa: BLE001
+        logger.exception("[merge] db 值脱敏异常")
+        masked = value
+    masked = masked.strip()
+    return masked[:_DB_VALUE_MAX]
+
+
+def _sha256_of_file(path: Any) -> str:
+    """算文件 SHA256（取证完整性留存）；失败 → 空串（不抛）。"""
+    import hashlib
+    from pathlib import Path
+
+    try:
+        h = hashlib.sha256()
+        with Path(path).open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        logger.exception("[merge] 计算 .plain.db SHA256 失败：%s", path)
+        return ""
+
+
+def merge_runtime_databases(report: Report, runtime_report_path: str) -> dict[str, int]:
+    """把运行时导出的落地库（SQLCipher .plain.db / 普通 SQLite）抠成 VICTIM_DATA Lead 并回报告。
+
+    流程：
+      1. 读 runtime_report.json 的 ``sqlcipher_events``（缺/旧版无该字段 → 跳过，零统计）。
+      2. ``exported`` 事件：用标准库 sqlite3 **只读**打开 .plain.db，按 db_carve 启发式抠表/列值
+         （手机号脱敏、截断），产 VICTIM_DATA Lead；落盘 .plain.db 算 SHA256 留存（meta 台账）。
+      3. ``key_only`` 降级事件：产带人工解密 playbook 的 Lead（不崩、不假成功）。
+      4. where_to_request：向 IM 平台调账号实名+注册手机/IP、向支付机构凭商户号调结算主体。
+      5. meta 打标 runtime_databases / runtime_db_digests。
+
+    单库读取失败（坏文件/锁/缺文件）只记日志、不影响其它库，绝不抛。
+
+    Returns:
+        ``{"victim_leads", "victim_databases"}``。内部 try/except，绝不抛。
+    """
+    stats = {"victim_leads": 0, "victim_databases": 0}
+    try:
+        from apkscan.dynamic import cryptohook
+
+        raw_events = _load_events_field(runtime_report_path, "sqlcipher_events")
+        if not raw_events:
+            return stats
+
+        events: list[dict[str, Any]] = []
+        for raw in raw_events:
+            ev = cryptohook.normalize_sqlcipher_event(raw)
+            if ev is not None:
+                events.append(ev)
+        if not events:
+            return stats
+
+        existing = {(lead.category.value, lead.value) for lead in report.leads}
+        digests: dict[str, str] = {}
+        seen_db: set[str] = set()
+        added = 0
+        dbs = 0
+
+        for ev in events:
+            db_path = str(ev.get("db_path", ""))
+            if db_path in seen_db:
+                continue
+            seen_db.add(db_path)
+            dbs += 1
+            plain_path = str(ev.get("plain_path", ""))
+            if ev.get("event") == "exported" and plain_path:
+                digest = _sha256_of_file(plain_path)
+                if digest:
+                    digests[plain_path] = digest
+                carved = _carve_plain_db(plain_path)
+                if carved:
+                    added += _add_victim_data_leads(report, db_path, carved, existing)
+                    continue
+                # 导出库存在但抠不出物证（空库/坏库/无敏感表）：不产 Lead（宁缺毋滥）。
+                logger.info("[merge] 落地库无可抠物证（空库/无敏感表）：%s", db_path)
+                continue
+            # key_only 降级 / exported 但 plain_path 缺：产人工解密 playbook Lead。
+            added += _add_db_degraded_lead(report, db_path, str(ev.get("key", "")), existing)
+
+        stats["victim_leads"] = added
+        stats["victim_databases"] = dbs
+        if digests:
+            report.meta["runtime_db_digests"] = digests
+        report.meta["runtime_databases"] = True
+        report.meta["runtime_database_count"] = dbs
+        logger.info(
+            "[merge] 运行时落地库并回：victim_leads=%d victim_databases=%d（%s）",
+            stats["victim_leads"],
+            stats["victim_databases"],
+            "含受害人高敏个人信息，按办案合规留存处置",
+        )
+    except Exception:  # noqa: BLE001 - 落地库并回失败不得抛给调用方（不破坏已产出报告）
+        logger.exception("[merge] 运行时落地库并回异常")
+    return stats
+
+
+def _carve_plain_db(plain_path: str) -> list[tuple[str, str, str]]:
+    """用标准库 sqlite3 **只读**打开 .plain.db，按 db_carve 启发式抠 (table, column, value)。
+
+    返回脱敏/截断后的 (table, column, masked_value) 列表（去重、限量）。坏库/缺文件/锁/任何
+    异常 → []（单库失败不影响其它，绝不抛）。
+    """
+    import sqlite3
+    from pathlib import Path
+
+    out: list[tuple[str, str, str]] = []
+    p = Path(plain_path)
+    if not p.exists() or not p.is_file():
+        logger.info("[merge] .plain.db 不存在，跳过：%s", plain_path)
+        return out
+    conn: Any = None
+    try:
+        # 只读打开（uri mode=ro），避免误改物证库。
+        conn = sqlite3.connect(f"file:{p.as_posix()}?mode=ro", uri=True, timeout=2.0)
+        conn.text_factory = lambda b: b.decode("utf-8", errors="replace")
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = [str(r[0]) for r in cur.fetchall() if r and r[0]]
+        seen: set[tuple[str, str, str]] = set()
+        tcount = 0
+        for table in tables:
+            if tcount >= _DB_MAX_TABLES:
+                break
+            if not _is_carve_table(table):
+                continue
+            tcount += 1
+            _carve_table(cur, table, out, seen)
+    except sqlite3.DatabaseError:
+        # 非 sqlite / 损坏 / 加密未解 → 单库失败，不影响其它。
+        logger.exception("[merge] sqlite 读取落地库失败（坏库/非 sqlite），跳过：%s", plain_path)
+        return out
+    except Exception:  # noqa: BLE001 — 单库任何异常都不应中断整体
+        logger.exception("[merge] 读取落地库异常，跳过：%s", plain_path)
+        return out
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                logger.debug("[merge] 关闭 sqlite 连接失败（忽略）", exc_info=True)
+    return out
+
+
+def _carve_table(
+    cur: Any, table: str, out: list[tuple[str, str, str]], seen: set[tuple[str, str, str]]
+) -> None:
+    """抠单表命中关键词的列值（限行/限值、脱敏截断）。单表失败只记日志、不抛。"""
+    import sqlite3
+
+    try:
+        # 表名取自 sqlite_master（库自身），但仍用引号包裹防御特殊字符。
+        cur.execute(f'PRAGMA table_info("{table}")')
+        cols_info = cur.fetchall()
+        carve_cols = [str(c[1]) for c in cols_info if c and len(c) > 1 and _is_carve_column(str(c[1]))]
+        if not carve_cols:
+            return
+        col_list = ", ".join(f'"{c}"' for c in carve_cols)
+        cur.execute(f'SELECT {col_list} FROM "{table}" LIMIT {_DB_MAX_ROWS}')
+        rows = cur.fetchall()
+        per_col_count: dict[str, int] = {}
+        for row in rows:
+            for col, raw in zip(carve_cols, row):
+                if raw is None:
+                    continue
+                value = str(raw).strip()
+                if not value:
+                    continue
+                if per_col_count.get(col, 0) >= _DB_MAX_VALUES_PER_COL:
+                    continue
+                masked = _mask_db_value(value)
+                key = (table, col, masked)
+                if key in seen:
+                    continue
+                seen.add(key)
+                per_col_count[col] = per_col_count.get(col, 0) + 1
+                out.append((table, col, masked))
+    except sqlite3.DatabaseError:
+        logger.warning("[merge] 抠表失败（坏表/列），跳过：%s", table, exc_info=True)
+    except Exception:  # noqa: BLE001 — 单表失败不影响其它表
+        logger.exception("[merge] 抠表异常，跳过：%s", table)
+
+
+def _add_victim_data_leads(
+    report: Report,
+    db_path: str,
+    carved: list[tuple[str, str, str]],
+    existing: set[tuple[str, str]],
+) -> int:
+    """把抠出的 (table, column, masked_value) 产成 VICTIM_DATA Lead，去重 append，返回新增数。"""
+    db_name = db_path.rsplit("/", 1)[-1] if db_path else "db"
+    added = 0
+    for table, column, value in carved:
+        lead_value = f"DB:{db_name}/{table}.{column}={value}"
+        key = (LeadCategory.VICTIM_DATA.value, lead_value)
+        if key in existing:
+            continue
+        existing.add(key)
+        report.leads.append(
+            Lead(
+                category=LeadCategory.VICTIM_DATA,
+                value=lead_value,
+                where_to_request=_db_where_to_request(column),
+                confidence=Confidence.HIGH,
+                advice="建议调证",
+                source_refs=[
+                    Evidence(
+                        source=_RUNTIME_SOURCE,
+                        location=db_path,
+                        snippet=f"{table}.{column}={value}"[:200],
+                    )
+                ],
+                notes=f"{_VICTIM_DATA_COMPLIANCE_NOTE} {_VICTIM_DATA_TIMING_NOTE}",
+            )
+        )
+        added += 1
+    return added
+
+
+def _db_where_to_request(column: str) -> str:
+    """按列语义给 where_to_request：手机号→运营商；商户号→支付机构；IM 账号→平台。"""
+    low = column.lower()
+    if any(tok in low for tok in ("phone", "mobile", "tel")):
+        return "凭手机号向运营商调取号主实名/开户信息与通话记录（受害人/上下线身份核实）。"
+    if any(tok in low for tok in ("mchid", "merchant", "mch")):
+        return "凭商户号向第三方支付/收单机构调取商户实名与结算主体（资金归集落点）。"
+    if any(tok in low for tok in ("im", "wechat", "qq", "telegram", "whatsapp", "openid", "uid")):
+        return "凭 IM 账号向对应平台调取账号实名、注册手机/IP 与登录记录（定位对接人/上线）。"
+    if any(tok in low for tok in ("card", "bank")):
+        return "凭卡号向开户银行调取户名/开户行/流水（资金流向）。"
+    return "向落地库归属平台调取该字段对应主体实名与关联信息（受害人/对接人物证）。"
+
+
+def _add_db_degraded_lead(
+    report: Report, db_path: str, key: str, existing: set[tuple[str, str]]
+) -> int:
+    """SQLCipher 导出失败降级（key_only）：产带人工解密 playbook 的 VICTIM_DATA Lead，去重 append。"""
+    db_name = db_path.rsplit("/", 1)[-1] if db_path else "db"
+    lead_value = f"DB(加密未导出):{db_name}"
+    dedup = (LeadCategory.VICTIM_DATA.value, lead_value)
+    if dedup in existing:
+        return 0
+    existing.add(dedup)
+    key_hint = f"（密钥已截断留存：{key}）" if key else ""
+    report.leads.append(
+        Lead(
+            category=LeadCategory.VICTIM_DATA,
+            value=lead_value,
+            where_to_request="解密后凭库内 IM 账号/手机号/商户号向对应平台/运营商/支付机构调证。",
+            confidence=Confidence.MEDIUM,
+            advice="待核",
+            source_refs=[
+                Evidence(
+                    source=_RUNTIME_SOURCE,
+                    location=db_path,
+                    snippet=f"SQLCipher 加密库，自动导出失败{key_hint}"[:200],
+                )
+            ],
+            notes=(
+                f"{_VICTIM_DATA_MANUAL_PLAYBOOK} {_VICTIM_DATA_COMPLIANCE_NOTE} "
+                f"{_VICTIM_DATA_TIMING_NOTE}"
+            ),
+        )
+    )
+    return 1
+
+
 def _merge_recipe_meta(
     static_meta: Any, live_meta: dict[str, Any] | None
 ) -> dict[str, Any] | None:
@@ -910,6 +1298,12 @@ def merge_and_rerender(
     stats["credential_leads"] = cred_stats.get("credential_leads", 0)
     stats["credential_endpoints"] = cred_stats.get("credential_endpoints", 0)
 
+    # P2：运行时落地库（SQLCipher/SQLite）导出 → VICTIM_DATA 受害人物证（含合规脱敏 + SHA256 留存）。
+    _emit(on_progress, "并回运行时落地库受害人物证 ...")
+    db_stats = merge_runtime_databases(report, rr_path)
+    stats["victim_leads"] = db_stats.get("victim_leads", 0)
+    stats["victim_databases"] = db_stats.get("victim_databases", 0)
+
     fmts = list(formats) if formats else list(_DEFAULT_FORMATS)
     try:
         out_path.mkdir(parents=True, exist_ok=True)
@@ -968,5 +1362,6 @@ __all__ = [
     "decrypt_runtime_messages",
     "merge_runtime_traces",
     "merge_runtime_credentials",
+    "merge_runtime_databases",
     "merge_and_rerender",
 ]

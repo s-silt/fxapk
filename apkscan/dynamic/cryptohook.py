@@ -44,6 +44,8 @@ SENSITIVE_API_MSG_TYPE = "apkscan-api"
 ANTIDETECT_MSG_TYPE = "apkscan-antidetect"
 #: 第二波：运行时登录态/明文凭据采集通道（OkHttp 加密前明文 dump + SharedPrefs 落地凭据）。
 CREDENTIAL_MSG_TYPE = "apkscan-credential"
+#: 第二波：运行时 SQLCipher/SQLite 落地库导出通道（库路径 + key + 明文导出库路径）。
+SQLCIPHER_MSG_TYPE = "apkscan-sqlcipher"
 
 #: sink 累积上限：高频加密（每帧/每请求）会刷爆，超限丢弃 + 记一次 warning。
 _SINK_CAP = 4000
@@ -688,6 +690,169 @@ Java.perform(function () {
 
 
 # ---------------------------------------------------------------------------
+# 第二波：SQLCipher/SQLite 落地库导出 —— hook openDatabase 抓库路径+key，导明文库回传
+# ---------------------------------------------------------------------------
+#
+# 物证价值（全工程最高之一）：诈骗 app 本地落地库（SQLCipher 加密）藏 IM 聊天/话术剧本、
+# 通讯录、account/会员表、订单/入金缓存——导成明文 = 受害人名单 + 话术 + 上下线对接人。
+#
+# 机制：hook net.sqlcipher.database.SQLiteDatabase.openOrCreateDatabase（SQLCipher 加密库）
+# 与 android.database.sqlite.SQLiteDatabase.openDatabase（普通 SQLite），抓**库路径 + password/
+# raw key**；对 SQLCipher 库随即用 rawExecSQL 注入
+#   ATTACH DATABASE '<tmp>/<name>.plain.db' AS plain KEY ''; SELECT sqlcipher_export('plain'); DETACH plain;
+# 把明文库导到设备临时目录，send() 回传 {plain_path, db_path, key}。
+#
+# v3/v4 KDF 适配（核验坑）：SQLCipher v3/v4 默认 KDF 迭代数不同，导出前先按 v4 默认尝试，
+# 失败则 `PRAGMA cipher_compatibility = 3` 再试。导出失败必降级（event=key_only，仅回传
+# key + 原库路径，由 merge 写人工解密 playbook 进 Lead.notes），**不崩、不假成功**。
+#
+# 时序依赖（核验坑）：sqlcipher_export 需库**已被 app 打开**——hook 在 openDatabase 回调里
+# 即时导出（库此刻已开），但 launch-only 抓不全未触发打开的库。merge/文档侧诚实标注。
+#
+# R8 混淆护栏：SQLCipher 类名随版本/混淆而变，多 fallback 类名 + 每步 try/catch，hook 不到
+# 只 console.log、绝不崩。
+FRIDA_SQLCIPHER_HOOK_JS: str = r"""
+// apkscan 运行时落地库导出（best-effort）：hook SQLCipher/SQLite openDatabase，导明文库回传。
+Java.perform(function () {
+    var _db_count = 0;
+    var _DB_CAP = 200;
+    var _seen_db = {};        // 同一库路径只导一次（避免反复 export 刷爆 + 重复磁盘 IO）
+    var _TMP_DIR = '/data/local/tmp/apkscan_db';
+
+    function dbEmit(p) {
+        try {
+            if (_db_count >= _DB_CAP) return;
+            _db_count += 1;
+            p.type = 'apkscan-sqlcipher';
+            send(p);
+        } catch (e) { /* 回传失败不得炸会话 */ }
+    }
+    function clipStr(s, n) {
+        try {
+            if (s === null || s === undefined) return null;
+            var t = '' + s;
+            return t.length > n ? t.slice(0, n) : t;
+        } catch (e) { return null; }
+    }
+    function baseName(p) {
+        try {
+            var s = '' + p;
+            var i = s.lastIndexOf('/');
+            return i >= 0 ? s.slice(i + 1) : s;
+        } catch (e) { return 'db'; }
+    }
+    // 确保设备临时导出目录存在（best-effort，失败照常尝试导出，导不出再降级）。
+    function ensureTmpDir() {
+        try {
+            var JFile = Java.use('java.io.File');
+            var d = JFile.$new(_TMP_DIR);
+            if (!d.exists()) { try { d.mkdirs(); } catch (e2) {} }
+        } catch (e) {}
+    }
+    // 对一个已打开的 SQLCipher db 句柄注入 ATTACH+sqlcipher_export，导明文库。
+    // 返回明文库设备路径（成功）或 null（失败 → 调用方降级 key_only）。
+    function exportPlain(db, dbPath, key) {
+        if (db === null || db === undefined) return null;
+        if (!db.rawExecSQL) return null;        // 非 SQLCipher 句柄（普通 SQLite）→ 不导，交收尾 adb pull
+        ensureTmpDir();
+        var plainPath = _TMP_DIR + '/' + baseName(dbPath) + '.plain.db';
+        // 先按 SQLCipher v4 默认尝试；失败再降到 v3 KDF 兼容模式重试。
+        var compat = [4, 3];
+        for (var ci = 0; ci < compat.length; ci++) {
+            try {
+                try { db.rawExecSQL('PRAGMA cipher_compatibility = ' + compat[ci] + ';'); } catch (eC) {}
+                // 目标明文库 KEY '' = 不加密（明文）。
+                db.rawExecSQL("ATTACH DATABASE '" + plainPath + "' AS plain KEY '';");
+                db.rawExecSQL("SELECT sqlcipher_export('plain');");
+                db.rawExecSQL("DETACH DATABASE plain;");
+                return plainPath;   // 任一兼容档导出成功即返回
+            } catch (eExp) {
+                // 本档失败：清掉可能半导出的目标，换下一档重试。
+                try { db.rawExecSQL("DETACH DATABASE plain;"); } catch (eD) {}
+            }
+        }
+        return null;   // v4/v3 都失败 → 降级
+    }
+
+    function handleOpen(db, dbPath, key, where) {
+        try {
+            var path = '' + dbPath;
+            if (_seen_db[path]) return;
+            _seen_db[path] = true;
+            var plainPath = null;
+            try { plainPath = exportPlain(db, path, key); } catch (eX) { plainPath = null; }
+            if (plainPath) {
+                dbEmit({event: 'exported', db_path: path, plain_path: plainPath,
+                        key: clipStr(key, 128), where: where, ts: Date.now()});
+            } else {
+                // 导出失败 / 普通 SQLite（无 rawExecSQL）：降级，仅回传 key + 原库路径。
+                // merge 侧据此写人工解密 playbook；普通 SQLite 由收尾 adb pull databases 拉回。
+                dbEmit({event: 'key_only', db_path: path, plain_path: null,
+                        key: clipStr(key, 128), where: where, ts: Date.now()});
+            }
+        } catch (e) {}
+    }
+
+    // --- SQLCipher：net.sqlcipher.database.SQLiteDatabase.openOrCreateDatabase ---
+    // 多 fallback 类名（不同 SQLCipher 版本/打包）。
+    var cipherNames = ['net.sqlcipher.database.SQLiteDatabase',
+                       'net.zetetic.database.sqlcipher.SQLiteDatabase'];
+    cipherNames.forEach(function (cn) {
+        try {
+            var SDB = Java.use(cn);
+            if (SDB.openOrCreateDatabase) {
+                SDB.openOrCreateDatabase.overloads.forEach(function (ov) {
+                    ov.implementation = function () {
+                        var db = ov.apply(this, arguments);
+                        try {
+                            var args = arguments;
+                            // 形参形态多样：(String path, ...) 或 (File file, ...)；key 多为第 2 参。
+                            var dbPath = null, key = null;
+                            try { dbPath = (args.length > 0) ? ('' + args[0]) : null; } catch (e1) {}
+                            try {
+                                if (args.length > 1 && args[1] !== null && args[1] !== undefined) {
+                                    key = '' + args[1];   // password（String 或 char[]）
+                                }
+                            } catch (e2) {}
+                            handleOpen(db, dbPath, key, cn + '.openOrCreateDatabase');
+                        } catch (e) {}
+                        return db;
+                    };
+                });
+                console.log('[apkscan] SQLCipher ' + cn + '.openOrCreateDatabase hooked');
+            }
+        } catch (e) {
+            console.log('[apkscan] SQLCipher ' + cn + ' hook skip: ' + e);
+        }
+    });
+
+    // --- 普通 SQLite：android.database.sqlite.SQLiteDatabase.openDatabase（无 key）---
+    // 普通库无 sqlcipher_export，handleOpen 走 key_only 降级；真正拉回交收尾 adb pull databases。
+    try {
+        var ADB = Java.use('android.database.sqlite.SQLiteDatabase');
+        if (ADB.openDatabase) {
+            ADB.openDatabase.overloads.forEach(function (ov) {
+                ov.implementation = function () {
+                    var db = ov.apply(this, arguments);
+                    try {
+                        var dbPath = (arguments.length > 0) ? ('' + arguments[0]) : null;
+                        if (dbPath && ('' + dbPath).indexOf('.db') >= 0) {
+                            handleOpen(db, dbPath, null, 'android.SQLiteDatabase.openDatabase');
+                        }
+                    } catch (e) {}
+                    return db;
+                };
+            });
+            console.log('[apkscan] android SQLiteDatabase.openDatabase hooked');
+        }
+    } catch (e) {
+        console.log('[apkscan] android SQLiteDatabase hook skip: ' + e);
+    }
+});
+"""
+
+
+# ---------------------------------------------------------------------------
 # on_message handler：把 Frida send() 的 crypto 事件规范化进 sink
 # ---------------------------------------------------------------------------
 
@@ -1137,6 +1302,55 @@ def extract_sharedprefs_credentials(xml_text: str, file_name: str) -> list[dict[
 
 
 # ---------------------------------------------------------------------------
+# 第二波：SQLCipher/SQLite 落地库导出事件规范化（key 截断 + 路径校形）
+# ---------------------------------------------------------------------------
+#
+# 合规护栏：db key 是高敏（凭它可解全库受害人物证），回传/落盘截断不留全文（与 token 同口径）。
+
+#: 落地库事件类型（与 JS 侧约定）：exported=已导出明文库；key_only=导出失败降级仅 key+路径。
+_SQLCIPHER_EVENTS: frozenset[str] = frozenset({"exported", "key_only"})
+
+
+def normalize_sqlcipher_event(payload: Any) -> dict[str, Any] | None:
+    """把 JS 侧 SQLCipher/SQLite 落地库事件规范化为稳定 schema；非法 → None（绝不抛）。
+
+    **sqlcipher_event 权威 schema**（producer=Frida FRIDA_SQLCIPHER_HOOK_JS，
+    consumer=merge_runtime_databases；落进 runtime_report.json['sqlcipher_events']）：
+
+    - ``event``: ``exported``（已导出明文 .plain.db）| ``key_only``（导出失败降级，仅 key+路径）。
+    - ``db_path``: 设备上原加密库路径（必有，否则无取证价值 → None）。
+    - ``plain_path``: 导出的明文库设备路径（exported 才有；key_only 为空）。
+    - ``key``: 库密钥（**高敏**，截断不留全文，凭它可人工解密原库）。
+    - ``where``: 来源 hook 标记。
+    - ``ts``: JS Date.now()（int 或 None）。
+
+    合规护栏：key 截断/脱敏，绝不回传/落盘全文。
+    """
+    if not isinstance(payload, dict):
+        return None
+    db_path = _as_clean_str(payload.get("db_path"), 1024)
+    if not db_path:
+        return None  # 无原库路径的事件无取证价值
+
+    event = _as_clean_str(payload.get("event"))
+    if event not in _SQLCIPHER_EVENTS:
+        event = "exported" if _as_clean_str(payload.get("plain_path")) else "key_only"
+
+    plain_path = _as_clean_str(payload.get("plain_path"), 1024)
+    raw_key = payload.get("key")
+    key = _truncate_secret(str(raw_key)) if isinstance(raw_key, str) and raw_key.strip() else ""
+
+    return {
+        "event": event,
+        "db_path": db_path,
+        "plain_path": plain_path or "",
+        "key": key,
+        "where": _as_clean_str(payload.get("where")) or "",
+        "ts": payload.get("ts") if isinstance(payload.get("ts"), int) else None,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 从活体事件反推 crypto_recipe meta（喂回 appcrypto.CryptoRecipe.from_meta）
 # ---------------------------------------------------------------------------
 
@@ -1440,11 +1654,13 @@ __all__ = [
     "FRIDA_SENSITIVE_API_HOOK_JS",
     "FRIDA_ANTIDETECT_JS",
     "FRIDA_OKHTTP_HOOK_JS",
+    "FRIDA_SQLCIPHER_HOOK_JS",
     "CRYPTO_MSG_TYPE",
     "JSBRIDGE_MSG_TYPE",
     "SENSITIVE_API_MSG_TYPE",
     "ANTIDETECT_MSG_TYPE",
     "CREDENTIAL_MSG_TYPE",
+    "SQLCIPHER_MSG_TYPE",
     "make_message_handler",
     "make_typed_handler",
     "normalize_crypto_event",
@@ -1452,6 +1668,7 @@ __all__ = [
     "normalize_sensitive_api_event",
     "normalize_antidetect_event",
     "normalize_credential_event",
+    "normalize_sqlcipher_event",
     "extract_sharedprefs_credentials",
     "recipe_from_events",
     "brand_hints_from_events",
