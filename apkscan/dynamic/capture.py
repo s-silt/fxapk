@@ -282,6 +282,9 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
     # 第二波：运行时剪贴板链上地址（受害人复制转账入口）。★ 隐私护栏：normalize 抽地址丢全文，
     # 此 sink 只存抽出的链上地址，剪贴板全文绝不入此 sink/落盘。
     clipboard_events: list[dict[str, Any]] = []
+    # 第二波（最后）：无障碍远控（被劫持目标银行/支付包名清单 + 远控手势/全局动作 + 屏幕录制）。
+    # ★ launch-only 抓不到，多数需引导式人工动态——多数情况下此 sink 为空，属预期。
+    remote_control_events: list[dict[str, Any]] = []
     proxy_set = False
     reverse_set = False
     # 抓包加固产生的告警（CA 未装系统库 / frida 版本不一致），收尾并入 reason，
@@ -345,6 +348,7 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
             credential_events,
             sqlcipher_events,
             clipboard_events,
+            remote_control_events,
         )
         if frida_session is not None:
             playbook.append(
@@ -435,6 +439,7 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
         credential_events=_clean(credential_events),
         sqlcipher_events=_clean(sqlcipher_events),
         clipboard_events=_clean(clipboard_events),
+        remote_control_events=_clean(remote_control_events),
     )
     report_paths = [report_path] if report_path else []
 
@@ -570,6 +575,7 @@ def _start_frida_session(
     credential_sink: list[dict[str, Any]] | None = None,
     sqlcipher_sink: list[dict[str, Any]] | None = None,
     clipboard_sink: list[dict[str, Any]] | None = None,
+    remote_control_sink: list[dict[str, Any]] | None = None,
 ) -> tuple[Any, Any]:
     """用 frida-core（``import frida``）spawn 目标 app 并注入 unpinning + 运行时 hook 套件。
 
@@ -615,6 +621,8 @@ def _start_frida_session(
         + cryptohook.FRIDA_SQLCIPHER_HOOK_JS
         + "\n"
         + cryptohook.FRIDA_CLIPBOARD_HOOK_JS
+        + "\n"
+        + cryptohook.FRIDA_ACCESSIBILITY_HOOK_JS
     )
     device_handle: Any = None
     pid: Any = None
@@ -668,6 +676,17 @@ def _start_frida_session(
                 "message",
                 cryptohook.make_typed_handler(
                     clipboard_sink, cryptohook.CLIPBOARD_MSG_TYPE, cryptohook.normalize_clipboard_event
+                ),
+            )
+        if remote_control_sink is not None:
+            # 无障碍远控：被劫持目标银行/支付包名清单 + 远控手势/全局动作 + 屏幕录制。
+            # ★ launch-only 抓不到，多数需引导式人工动态——多数情况下此 sink 为空，属预期。
+            script.on(
+                "message",
+                cryptohook.make_typed_handler(
+                    remote_control_sink,
+                    cryptohook.ACCESSIBILITY_MSG_TYPE,
+                    cryptohook.normalize_remote_control_event,
                 ),
             )
         script.load()
@@ -1598,6 +1617,7 @@ def _write_runtime_report(
     credential_events: list[dict[str, Any]] | None = None,
     sqlcipher_events: list[dict[str, Any]] | None = None,
     clipboard_events: list[dict[str, Any]] | None = None,
+    remote_control_events: list[dict[str, Any]] | None = None,
 ) -> str:
     """把运行时端点写成 out/runtime_report.json（复用 report.json 的序列化）。
 
@@ -1627,6 +1647,9 @@ def _write_runtime_report(
         "sqlcipher_events": list(sqlcipher_events or []),
         # 第二波：剪贴板链上地址（★ 隐私护栏：只含抽出的地址，绝不含剪贴板全文）。
         "clipboard_events": list(clipboard_events or []),
+        # 第二波（最后）：无障碍远控（目标银行/支付包名清单 + 远控手势 + 屏幕录制）。
+        # ★ launch-only 抓不到，多数需引导式人工动态——多数情况下为空数组，属预期。
+        "remote_control_events": list(remote_control_events or []),
     }
     if not complete:
         payload["note"] = "抓包未完整（代理未起或编排中断），运行时端点可能不全。"
