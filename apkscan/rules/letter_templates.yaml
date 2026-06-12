@@ -1,0 +1,65 @@
+# 调证函 / 协查文书套打模板（apkscan.report.letters 消费）。
+#
+# 按 LeadCategory 给标准话术：
+#   - title:        文书标题前缀（最终标题 = "<title>（标的：<value>）"）
+#   - recipient_hint: 受文机关性质提示（正文里点明该向哪类机构调，受文机关名仍取自 Lead.where_to_request）
+#   - target_desc:  标的描述引导语（说明该标的是什么、为何要调）
+#   - evidence_lead_in: 证据清单引导语（"建议依法调取以下材料："之类）
+#
+# 话术一律中性、克制，**不替办案单位下定性结论**（不写"该 App 系诈骗"）。
+# 缺某 category 模板 → 走 _default 兜底，绝不崩。
+
+PAYMENT:
+  title: 协查（资金/收款账户）函
+  recipient_hint: 受文机关为该收款渠道 / 支付机构（据线索推导的候选）
+  target_desc: 涉案样本中出现的收款账户 / 支付标识，疑用于归集涉案资金
+  evidence_lead_in: 为核实资金归集与账户归属，建议依法调取以下材料：
+
+DOMAIN:
+  title: 协查（域名/服务器归属）函
+  recipient_hint: 受文机关为该域名注册商 / 云服务商（据线索推导的候选）
+  target_desc: 涉案样本通信或硬编码的域名，疑为后端服务地址
+  evidence_lead_in: 为核实服务器归属与运营主体，建议依法调取以下材料：
+
+IP:
+  title: 协查（IP/服务器归属）函
+  recipient_hint: 受文机关为该 IP 所属云服务商 / IDC（据线索推导的候选）
+  target_desc: 涉案样本通信或硬编码的 IP 地址，疑为后端服务地址
+  evidence_lead_in: 为核实服务器归属与租户实名，建议依法调取以下材料：
+
+SDK_SERVICE:
+  title: 协查（第三方服务厂商）函
+  recipient_hint: 受文机关为该 SDK / 第三方服务厂商（据线索推导的候选）
+  target_desc: 涉案样本集成的第三方服务，其后台可关联 App 注册与配置信息
+  evidence_lead_in: 为核实接入主体与注册信息，建议依法调取以下材料：
+
+CONFIG_KEY:
+  title: 协查（应用注册/配置）函
+  recipient_hint: 受文机关为该配置键对应的服务厂商（据线索推导的候选）
+  target_desc: 涉案样本中硬编码的服务配置键值，可据此回溯 App 注册主体
+  evidence_lead_in: 为核实应用注册与配置归属，建议依法调取以下材料：
+
+CONTACT:
+  title: 协查（联系方式归属）函
+  recipient_hint: 受文机关为该联系方式所属平台 / 运营商（据线索推导的候选）
+  target_desc: 涉案样本中出现的联系方式，疑用于引流 / 收款 / 客服
+  evidence_lead_in: 为核实联系方式归属与使用人，建议依法调取以下材料：
+
+CHANNEL:
+  title: 协查（分发渠道）函
+  recipient_hint: 受文机关为该分发渠道 / 应用市场（据线索推导的候选）
+  target_desc: 涉案样本的分发渠道标识，可关联上架 / 推广主体
+  evidence_lead_in: 为核实分发与推广主体，建议依法调取以下材料：
+
+PACKER:
+  title: 协查（加固/打包厂商）函
+  recipient_hint: 受文机关为该加固 / 打包服务厂商（据线索推导的候选）
+  target_desc: 涉案样本使用的加固服务，其后台可关联接入账号
+  evidence_lead_in: 为核实加固服务接入主体，建议依法调取以下材料：
+
+# 缺模板兜底：通用话术，保证任何 category 都能成文不崩。
+_default:
+  title: 协查函
+  recipient_hint: 受文机关为据线索推导的候选机构
+  target_desc: 涉案样本中提取的调证标的
+  evidence_lead_in: 建议依法调取以下材料：
