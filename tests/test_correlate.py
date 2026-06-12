@@ -17,6 +17,7 @@ def _report(
     uni: str | None = None,
     addrs: list[str] | None = None,
     c2: list[str] | None = None,
+    fb: str | None = None,
 ) -> dict:
     leads = [
         {"category": "DOMAIN", "value": v, "is_c2": True, "is_runtime_seen": False}
@@ -29,7 +30,20 @@ def _report(
         meta["uni_appid"] = uni
     if addrs is not None:
         meta["crypto_addresses"] = addrs
+    if fb is not None:
+        meta["firebase_project_id"] = fb
     return {"meta": meta, "leads": leads}
+
+
+def test_extract_firebase_project_fingerprint() -> None:
+    fps = extract_fingerprints(_report(fb="proj-123"))
+    assert Fingerprint("firebase_project", "proj-123") in fps
+
+
+def test_correlate_shared_firebase_project_forms_cluster() -> None:
+    clusters = correlate([("a", _report(fb="proj-9")), ("b", _report(fb="proj-9"))])
+    assert len(clusters) == 1
+    assert set(clusters[0].members) == {"a", "b"}
 
 
 def test_extract_fingerprints_all_kinds() -> None:
