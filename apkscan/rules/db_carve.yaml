@@ -1,0 +1,75 @@
+# apkscan — db_carve 落地库取证启发式规则
+#
+# 由 apkscan.dynamic.merge.merge_runtime_databases 经 registry.load_rules("db_carve") 读取。
+# 对运行时导出的明文 .plain.db（SQLCipher 解密）+ 普通 SQLite 库做**保守**的表/列名启发式
+# 抠值，产 VICTIM_DATA Lead（受害人名单/话术/上下线对接人物证）。
+#
+# 反诈视角：诈骗 app 本地落地库藏 IM 聊天/话术剧本、通讯录、account/会员、订单/入金缓存——
+# 导成明文 = 受害人名单 + 话术 + 上下线对接人。本规则只圈**高物证价值**的表/列，宁缺毋滥
+# （避免把每行都当线索刷爆报告）。
+#
+# 顶层 dict：
+#   table_keywords: 命中（子串、小写）即认为该表可能含受害人物证的表名关键词。
+#   column_keywords: 命中（子串、小写）即认为该列可能含可调证值的列名关键词。
+#   max_tables / max_rows_per_table / max_values_per_column: 抠值上限（防刷爆）。
+
+# ---- 高物证价值的表名（account/会员、IM 消息/会话、通讯录、订单/入金）----
+table_keywords:
+  - account      # 账户/会员
+  - user         # 用户
+  - member       # 会员
+  - contact      # 通讯录/联系人
+  - friend       # 好友（IM）
+  - message      # 聊天消息
+  - msg          # 聊天消息（缩写）
+  - chat         # 会话
+  - conversation # 会话
+  - session      # 会话
+  - order        # 订单
+  - recharge     # 充值/入金
+  - deposit      # 入金
+  - withdraw     # 提现/出金
+  - pay          # 支付
+  - wallet       # 钱包
+  - bank         # 银行卡
+  - customer     # 客户（受害人）
+
+# ---- 可调证的列名（手机号/账号/IM 号/商户号/token/金额/对接人）----
+column_keywords:
+  - phone        # 手机号
+  - mobile       # 手机号
+  - tel          # 电话
+  - account      # 账号
+  - username     # 用户名
+  - nickname     # 昵称（话术/冒充）
+  - im           # IM 账号
+  - imid         # IM 账号
+  - uid          # 用户 ID
+  - openid       # 平台 openid
+  - wechat       # 微信号
+  - qq           # QQ 号
+  - telegram     # Telegram
+  - whatsapp     # WhatsApp
+  - email        # 邮箱
+  - idcard       # 身份证
+  - id_card      # 身份证
+  - card         # 卡号
+  - bank         # 银行卡
+  - mchid        # 商户号
+  - mch_id       # 商户号
+  - merchant     # 商户号
+  - token        # 登录态/凭据
+  - amount       # 金额（入金/订单）
+  - money        # 金额
+  - balance      # 余额
+  - content      # 消息内容（话术剧本）
+  - text         # 消息文本
+  - remark       # 备注（对接人标注）
+  - url          # 嵌入的后端地址
+  - domain       # 嵌入域名
+  - host         # 嵌入主机
+
+# ---- 抠值上限（保守，避免把每行都当线索刷爆）----
+max_tables: 40
+max_rows_per_table: 50
+max_values_per_column: 20

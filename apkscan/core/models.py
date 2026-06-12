@@ -41,6 +41,7 @@ class LeadCategory(Enum):
     CONFIG_KEY = "CONFIG_KEY"  # 调用插件 / 配置键值（具体 key=value，如 GETUI_APPID）
     CRYPTO_RECIPE = "CRYPTO_RECIPE"  # 应用层加密配方（算法/key/iv 推导/信封字段，凭此可解全部加密流量）
     RUNTIME_CREDENTIAL = "RUNTIME_CREDENTIAL"  # 运行时实测登录态/凭据（OkHttp 明文 token/手机号、SharedPrefs 落地凭据；含高敏个人信息）
+    VICTIM_DATA = "VICTIM_DATA"  # 运行时落地库（SQLCipher/SQLite）导出的受害人物证（IM 账号/手机号/订单/商户号；含受害人高敏个人信息）
 
 
 @dataclass

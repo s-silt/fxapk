@@ -109,7 +109,7 @@ def _stub_orchestration(
     monkeypatch.setattr(
         capture,
         "_start_frida_session",
-        lambda package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None: (None, None),
+        lambda package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None: (None, None),
     )
     monkeypatch.setattr(capture, "_adb_reverse", lambda: (calls["adb"].append("reverse") or True))
     monkeypatch.setattr(capture, "_adb_set_proxy", lambda: (calls["adb"].append("proxy") or True))
@@ -702,7 +702,7 @@ def test_capped_sentinel_filtered_from_runtime_report(monkeypatch, tmp_path):
     _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
     monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None):
         sink.append({"src": "cipher", "event": "init", "key_hex": "55f0"})
         sink.append({"_capped": True})  # 上限占位
         return object(), object()
@@ -726,7 +726,7 @@ def test_capture_done_collects_crypto_events_via_session(monkeypatch, tmp_path):
         {"src": "cipher", "event": "doFinal", "key_hex": "55f0", "plaintext_b64": "eyJhIjoxfQ=="},
     ]
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None):
         # 模拟 on_message 回调把 2 条事件写进共享 sink。
         sink.extend(fake_events)
         return object(), object()  # 非 None 会话/脚本（teardown 对 dummy 容错）
@@ -747,7 +747,7 @@ def test_capture_collects_jsbridge_and_sensitive_api_events(monkeypatch, tmp_pat
     _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
     monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None):
         if jsbridge_sink is not None:
             jsbridge_sink.append({"event": "register", "iface": "AndroidNative"})
         if api_sink is not None:
@@ -777,7 +777,7 @@ def test_capture_collects_antidetect_events(monkeypatch, tmp_path):
     _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
     monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None):
         if antidetect_sink is not None:
             antidetect_sink.append({"kind": "root", "probe": "File.exists: /system/bin/su", "bypassed": True})
         return object(), object()
@@ -798,7 +798,7 @@ def test_capture_collects_credential_events_via_session(monkeypatch, tmp_path):
     # 不触真 adb pull（无 shared_prefs）。
     monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda pkg, op, sink: None)
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None):
         if credential_sink is not None:
             credential_sink.append(
                 {"source": "okhttp", "url": "https://api.fraud-c2.cn/login", "method": "POST",
