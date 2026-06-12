@@ -514,6 +514,68 @@ def export(
 
 
 @app.command()
+def letters(
+    report_json: Path = typer.Argument(
+        ...,
+        help="已产出的 report.json 路径（analyze/auto/batch 写出的 JSON 报告）。",
+    ),
+    out: str = typer.Option(
+        "",
+        "--out",
+        help="文书输出目录（其下生成 letters/ 子目录）。默认 = report.json 同目录。",
+    ),
+) -> None:
+    """把 report.json 的可办案化线索套打成「调证函 / 协查文书」草稿（markdown）。
+
+    薄包装：读 report.json → build_letters → write_letters。只对建议调证、有可调取证据、
+    且 where_to_request 为真实受文机关的线索成文（证书指纹/解密配方等占位 Lead 自动跳过）。
+    绝不抛——读不到文件 / 坏 JSON 都打印友好提示并退出码 1。每份文书顶部带免责声明草稿标注。
+    """
+    import json as _json
+
+    try:
+        try:
+            raw = report_json.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            typer.echo(f"错误：找不到报告文件：{report_json}", err=True)
+            raise typer.Exit(code=1) from None
+        except OSError as exc:
+            typer.echo(f"错误：读取报告文件失败：{report_json}（{exc}）", err=True)
+            raise typer.Exit(code=1) from exc
+
+        try:
+            report = _json.loads(raw)
+        except (ValueError, UnicodeDecodeError) as exc:
+            typer.echo(f"错误：报告 JSON 解析失败：{report_json}（{exc}）", err=True)
+            raise typer.Exit(code=1) from exc
+
+        from apkscan.report import letters as letters_mod
+
+        drafts = letters_mod.build_letters(report)
+
+        # 默认 out = report.json 同目录（其下再建 letters/ 子目录）。
+        out_dir = out or str(report_json.parent)
+        try:
+            paths = letters_mod.write_letters(drafts, out_dir)
+        except OSError as exc:
+            typer.echo(f"错误：写出文书失败：{out_dir}（{exc}）", err=True)
+            raise typer.Exit(code=1) from exc
+
+        letters_dir = Path(out_dir) / "letters"
+        typer.echo(f"已生成 {len(drafts)} 份调证 / 协查文书草稿：{letters_dir}（含 index.md）")
+        if not drafts:
+            typer.echo("提示：本样本无可套打的调证线索（仅生成空索引 index.md）。")
+        else:
+            logger.info("[cli] letters 写出 %d 个文件", len(paths))
+    except typer.Exit:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 兜底任何意外，转友好提示而非 traceback
+        logger.exception("[cli] letters 套打调证文书异常")
+        typer.echo(f"错误：套打失败：{exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+@app.command()
 def gui() -> None:
     """启动新手友好的图形界面（tkinter 单窗口：环境体检 / 静态分析 / 一键全自动）。
 
