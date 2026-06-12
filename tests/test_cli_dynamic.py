@@ -189,6 +189,81 @@ def test_analyze_cleans_adb_on_exit(monkeypatch):
     assert calls["n"] == 1  # 纯静态 analyze 也收（has_device 探测已可能起过 server）
 
 
+# ---------------------------------------------------------------------------
+# 取证完整性：analyze 写 evidence_manifest + sample_sha256 + <base>.sha256 旁文件
+# ---------------------------------------------------------------------------
+
+
+def _stub_analyze_static(monkeypatch: pytest.MonkeyPatch, report: Report) -> None:
+    """把 analyze 的设备/加载/流水线打桩成纯静态、无设备、不收 adb 真动作。"""
+    from apkscan.core import tools
+
+    monkeypatch.setattr(tools, "kill_adb_server", lambda: None)
+    monkeypatch.setattr(cli.device, "has_device", lambda: False)
+    monkeypatch.setattr("apkscan.core.pipeline.run", lambda ctx, config: report)
+    monkeypatch.setattr(cli, "load_app", lambda *a, **k: _FakeCtx())
+
+
+def test_analyze_writes_evidence_manifest_and_sample_sha256(monkeypatch, tmp_path):
+    """analyze 跑完，report.meta 含 evidence_manifest（含真实 sha256）与顶层 sample_sha256。"""
+    import hashlib
+
+    report = _make_report("com.x")
+    _stub_analyze_static(monkeypatch, report)
+
+    captured: dict[str, Any] = {}
+    real_write = cli._write_reports
+
+    def _spy_write(rep, out_dir, formats, base):
+        captured["report"] = rep
+        return real_write(rep, out_dir, formats, base)
+
+    monkeypatch.setattr(cli, "_write_reports", _spy_write)
+
+    apk = tmp_path / "evil.apk"
+    apk.write_bytes(b"PK\x03\x04 fake apk bytes for fingerprint")
+    expected_sha = hashlib.sha256(apk.read_bytes()).hexdigest()
+
+    res = runner.invoke(cli.app, ["analyze", str(apk), "--offline", "--out", str(tmp_path / "out")])
+    assert res.exit_code == 0
+
+    rep = captured["report"]
+    manifest = rep.meta["evidence_manifest"]
+    assert manifest["sha256"] == expected_sha
+    assert manifest["tool_version"]  # 工具版本已写入
+    assert rep.meta["sample_sha256"] == expected_sha  # 顶层快捷键
+
+
+def test_analyze_writes_sha256_sidecar(monkeypatch, tmp_path):
+    """<base>.sha256 旁文件生成：每行 ``<sha256>  <文件名>``（对标 sha256sum）。"""
+    import hashlib
+
+    report = _make_report("com.x")
+    _stub_analyze_static(monkeypatch, report)
+
+    out_dir = tmp_path / "out"
+    apk = tmp_path / "evil.apk"
+    apk.write_bytes(b"PK\x03\x04 fake apk bytes")
+
+    res = runner.invoke(
+        cli.app, ["analyze", str(apk), "--offline", "--fmt", "json", "--out", str(out_dir)]
+    )
+    assert res.exit_code == 0
+
+    # base = apk 名去后缀 = "evil"
+    json_path = out_dir / "evil.json"
+    sidecar = out_dir / "evil.sha256"
+    assert json_path.is_file()
+    assert sidecar.is_file()
+
+    line = sidecar.read_text(encoding="utf-8").strip()
+    expected = hashlib.sha256(json_path.read_bytes()).hexdigest()
+    # 行内含产物 sha256 与文件名（sha256sum 风格：哈希 + 双空格 + 名）
+    assert expected in line
+    assert "evil.json" in line
+    assert f"{expected}  evil.json" in line
+
+
 def test_doctor_command_module_missing_graceful_exit(monkeypatch):
     """惰性 import doctor 失败 → 打印"该功能未安装" + 退出码 1，不崩。"""
     import builtins

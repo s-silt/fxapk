@@ -13,7 +13,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from apkscan.core.models import Lead, Report
+from apkscan.core.integrity import evidence_id
+from apkscan.core.models import Evidence, Lead, Report
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,10 @@ def _to_jsonable(obj: Any) -> Any:
         if isinstance(obj, Lead):
             d["is_c2"] = obj.is_c2
             d["is_runtime_seen"] = obj.is_runtime_seen
+        # Evidence 注入确定性 evidence_id（仅 source|location，不含 snippet），让每条证据带
+        # 可回溯锚点 —— 同条证据跨报告 / 跨文件 id 稳定（取证完整性背书层）。
+        if isinstance(obj, Evidence):
+            d["evidence_id"] = evidence_id(obj.source, obj.location)
         return d
     if isinstance(obj, dict):
         return {str(_to_jsonable(k)): _to_jsonable(v) for k, v in obj.items()}
