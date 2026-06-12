@@ -117,9 +117,10 @@ _FALLBACK_NOISE_IPS: tuple[str, ...] = (
 # 正则
 # ---------------------------------------------------------------------------
 
-# URL：http/https，主机部分到首个空白/引号/反引号/尖括号/中文等终止。
+# URL：http/https + ws/wss/mqtt，主机部分到首个空白/引号/反引号/尖括号/中文等终止。
+# ws/wss/mqtt 是实时 C2 主力通道（杀猪盘行情推送、远控指令、IM 长连接），不抓就漏整类后端。
 _URL_RE = re.compile(
-    r"""https?://[^\s"'`<>()\[\]{}\\^|,;]+""",
+    r"""(?:https?|wss?|mqtt)://[^\s"'`<>()\[\]{}\\^|,;]+""",
     re.IGNORECASE,
 )
 
@@ -617,7 +618,8 @@ class EndpointsAnalyzer(BaseAnalyzer):
             if self._is_noise(cleaned, host, rules):
                 continue
             consumed.append((m.start(), m.start() + len(cleaned)))
-            is_cleartext = cleaned.lower().startswith("http://")
+            # 明文 scheme：http / ws / mqtt（对应加密的 https / wss / mqtts）。
+            is_cleartext = cleaned.lower().startswith(("http://", "ws://", "mqtt://"))
             is_private = _host_is_private(host)
             collector.add(
                 cleaned,

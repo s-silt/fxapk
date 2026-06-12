@@ -576,3 +576,28 @@ def test_large_native_does_not_crash_on_empty_overlap_chunks():
     assert "https://only-one.example.cn/x" in values
     # 填充 "X"*N 不该产任何端点。
     assert all("only-one.example.cn" in v or "example" not in v for v in values)
+
+
+# --- WebSocket / MQTT 实时 C2 端点（杀猪盘行情推送 / 远控 / IM 长连接） ----------
+
+
+def test_wss_url_extracted_and_host_derived() -> None:
+    result = _analyze(dex_strings=["wss://c2.evil-trade.com:8443/ws"])
+    url_ep = next((ep for ep in result.endpoints if ep.kind == "url"), None)
+    assert url_ep is not None and url_ep.value.startswith("wss://")
+    assert url_ep.is_cleartext is False  # wss 加密
+    assert "c2.evil-trade.com" in _by_value(result)  # host 派生 domain 端点供富化
+
+
+def test_ws_marked_cleartext() -> None:
+    result = _analyze(dex_strings=["ws://c2.evil-trade.com/rt"])
+    url_ep = next(ep for ep in result.endpoints if ep.kind == "url")
+    assert url_ep.value.startswith("ws://")
+    assert url_ep.is_cleartext is True  # ws 明文（对标 http://）
+
+
+def test_mqtt_url_extracted() -> None:
+    result = _analyze(dex_strings=["mqtt://broker.evil-trade.com:1883"])
+    url_ep = next((ep for ep in result.endpoints if ep.kind == "url"), None)
+    assert url_ep is not None and url_ep.value.startswith("mqtt://")
+    assert "broker.evil-trade.com" in _by_value(result)
