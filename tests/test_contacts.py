@@ -164,3 +164,113 @@ def test_meta_counts_present():
     assert isinstance(result.meta.get("contacts"), dict)
     assert result.meta["contacts"].get("email", 0) >= 1
     assert result.meta["contacts"].get("phone", 0) >= 1
+
+
+# ===========================================================================
+# IM 回传通道：Telegram bot token / chat_id + 企微钉钉飞书 webhook → CHANNEL
+# ===========================================================================
+
+# 合法 bot token：冒号前 10 位纯数字，冒号后正好 35 位 [A-Za-z0-9_-]。
+_VALID_BOT_TOKEN = "1234567890:ABCdefGHIjklMNOpqrsTUVwxyz123456789"
+
+
+def _channel_leads(result):
+    return [l for l in result.leads if l.category == LeadCategory.CHANNEL]
+
+
+def test_telegram_bot_token_yields_channel_lead():
+    ctx = FakeContext(dex_strings=[f"botToken={_VALID_BOT_TOKEN} 上传短信"])
+    result = ContactsAnalyzer().analyze(ctx)
+    channel = _channel_leads(result)
+    tg = [l for l in channel if "Telegram" in (l.subject or "")]
+    assert tg, "应产出 Telegram bot token 的 CHANNEL Lead"
+    lead = tg[0]
+    # value 是裸 token（不带类型前缀），主体含 Telegram，HIGH 置信。
+    assert lead.value == _VALID_BOT_TOKEN
+    assert "Telegram" in (lead.subject or "")
+    assert lead.confidence == Confidence.HIGH
+    assert lead.where_to_request
+    assert lead.evidence_to_obtain
+
+
+def test_bot_token_form_gate_rejects_malformed():
+    # 冒号后非 35 位（34 位）/ 冒号前非纯数字 → 不应命中。
+    too_short = "1234567890:ABCdefGHIjklMNOpqrsTUVwxyz12345678"   # 34 位
+    too_long = "1234567890:ABCdefGHIjklMNOpqrsTUVwxyz1234567890"  # 36 位
+    non_digit_prefix = "12ab567890:ABCdefGHIjklMNOpqrsTUVwxyz123456789"
+    ctx = FakeContext(
+        dex_strings=[
+            f"token={too_short}",
+            f"token={too_long}",
+            f"token={non_digit_prefix}",
+        ]
+    )
+    result = ContactsAnalyzer().analyze(ctx)
+    vals = " ".join(l.value for l in _channel_leads(result))
+    assert too_short not in vals
+    assert too_long not in vals
+    assert non_digit_prefix not in vals
+
+
+def _webhook_lead_for(result, domain: str):
+    cands = [l for l in _channel_leads(result) if domain in l.value]
+    return cands[0] if cands else None
+
+
+def test_dingtalk_webhook_attributes_to_alibaba():
+    url = "https://oapi.dingtalk.com/robot/send?access_token=abc123def456"
+    ctx = FakeContext(dex_strings=[f"webhook {url}"])
+    result = ContactsAnalyzer().analyze(ctx)
+    lead = _webhook_lead_for(result, "oapi.dingtalk.com")
+    assert lead is not None, "钉钉 webhook 应产 CHANNEL Lead"
+    assert "oapi.dingtalk.com/robot/send" in lead.value
+    assert "阿里" in (lead.subject or "")
+    assert lead.confidence == Confidence.HIGH
+
+
+def test_wecom_webhook_attributes_to_tencent():
+    url = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxxx"
+    ctx = FakeContext(dex_strings=[f"上报 {url}"])
+    result = ContactsAnalyzer().analyze(ctx)
+    lead = _webhook_lead_for(result, "qyapi.weixin.qq.com")
+    assert lead is not None, "企微 webhook 应产 CHANNEL Lead"
+    assert "腾讯" in (lead.subject or "")
+
+
+def test_feishu_webhook_attributes_to_bytedance():
+    url = "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx"
+    ctx = FakeContext(dex_strings=[f"外传 {url}"])
+    result = ContactsAnalyzer().analyze(ctx)
+    lead = _webhook_lead_for(result, "open.feishu.cn")
+    assert lead is not None, "飞书 webhook 应产 CHANNEL Lead"
+    assert "字节" in (lead.subject or "")
+
+
+def test_meta_has_telegram_bot_tokens():
+    ctx = FakeContext(dex_strings=[f"botToken={_VALID_BOT_TOKEN}"])
+    result = ContactsAnalyzer().analyze(ctx)
+    tokens = result.meta.get("telegram_bot_tokens")
+    assert isinstance(tokens, list)
+    assert _VALID_BOT_TOKEN in tokens
+
+
+def test_getme_default_off_offline():
+    # 默认离线（FakeContext online=False）：不联网、不抛，仍保留静态 token 线索，
+    # notes 带离线告警。
+    ctx = FakeContext(dex_strings=[f"botToken={_VALID_BOT_TOKEN}"], online=False)
+    result = ContactsAnalyzer().analyze(ctx)
+    assert result.error is None
+    tg = [l for l in _channel_leads(result) if "Telegram" in (l.subject or "")]
+    assert tg, "离线下静态 token 线索必须保留"
+    # 未发 getMe（无 bot username），notes 含离线/未验证提示。
+    notes = tg[0].notes or ""
+    assert "getMe" in notes or "未验证" in notes or "离线" in notes
+
+
+def test_channel_leads_do_not_disturb_contacts():
+    # 同一语料里既有真号又有 webhook：CONTACT 与 CHANNEL 各自独立产出，互不污染。
+    url = "https://oapi.dingtalk.com/robot/send?access_token=zzz"
+    ctx = FakeContext(dex_strings=[f"客服13912345678 上报 {url}"])
+    result = ContactsAnalyzer().analyze(ctx)
+    assert any("13912345678" in v for v in _contact_values(result))
+    assert any("oapi.dingtalk.com" in l.value for l in _channel_leads(result))

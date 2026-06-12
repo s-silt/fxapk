@@ -157,3 +157,46 @@ types:
       - "关联频道 / 群组及管理员"
       - "应用侧落地：引流落地页 / 推广链路归属"
     note: "境外即时通讯，常用于涉诈引流与黑产协作；境内难直接调证，重在链路侧固定。"
+
+  # ================= IM 回传通道（CHANNEL）=================
+  # 涉诈短信转发马 / RAT 常硬编码以下回传凭据把窃取数据（短信验证码 / 通讯录）外传给接料人。
+  # 抠出 = 直接锁定「接收数据的接料人 / 操盘通道」，是高保真团伙归属物证。
+  # 这些类型 category=channel → Lead.category=CHANNEL，value=裸 token/webhook（不带类型前缀）。
+
+  # ---------------- Telegram bot token ----------------
+  # 严格形态：冒号前 8-10 位纯数字（bot 数字 id），冒号后正好 35 位 base64url（[A-Za-z0-9_-]）。
+  # patterns 已写紧（边界 + 长度精确），代码侧另做"形态闸"二次校验（digit-prefix / 35 位）降误报。
+  - name: "Telegram bot token"
+    kind: "telegram_bot"
+    category: "channel"
+    subject: "Telegram（境外平台，bot 接料通道）"
+    where_to_request: "Telegram（境外，需国际执法协作）/ bot 控制人侧落地"
+    confidence: "high"
+    patterns:
+      - '(?<![A-Za-z0-9_:-])(\d{8,10}:[A-Za-z0-9_-]{35})(?![A-Za-z0-9_-])'
+    blacklist: []
+    evidence_to_obtain:
+      - "bot 控制人注册手机号 / 登录 IP（经国际协作）"
+      - "接收 bot 消息的群成员 / 频道管理员"
+      - "历史外传数据（短信验证码 / 通讯录等）"
+    note: "硬编码 Telegram bot token，外传窃取数据的接料通道；形态强特征且可在线验证（getMe），高保真团伙归属物证。"
+
+  # ---------------- IM webhook（钉钉 / 企微 / 飞书）----------------
+  # 按域名 + 路径匹配；vendor 归属在代码里按域名判定（钉钉→阿里 / 企微→腾讯 / 飞书→字节）。
+  # 一条规则三种 pattern，代码据命中 URL 的域名归属对应厂商主体。
+  - name: "IM webhook"
+    kind: "im_webhook"
+    category: "channel"
+    subject: "IM 群机器人 webhook（接料通道，按域名归属厂商）"
+    where_to_request: "对应平台厂商（钉钉→阿里 / 企微→腾讯 / 飞书→字节）调注册主体 / 控制人"
+    confidence: "high"
+    patterns:
+      - 'https?://oapi\.dingtalk\.com/robot/send[^\s"''<>]*'
+      - 'https?://qyapi\.weixin\.qq\.com/cgi-bin/webhook/[^\s"''<>]*'
+      - 'https?://open\.feishu\.cn/open-apis/bot/[^\s"''<>]*'
+    blacklist: []
+    evidence_to_obtain:
+      - "webhook 注册主体 / 控制人（按厂商调）"
+      - "接收消息的群成员 / 群管理员"
+      - "历史外传数据（短信验证码 / 通讯录等）"
+    note: "硬编码 IM 群机器人 webhook，外传窃取数据的接料通道；高保真团伙归属物证。"

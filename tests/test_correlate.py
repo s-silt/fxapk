@@ -18,6 +18,7 @@ def _report(
     addrs: list[str] | None = None,
     c2: list[str] | None = None,
     fb: str | None = None,
+    tg: list[str] | None = None,
 ) -> dict:
     leads = [
         {"category": "DOMAIN", "value": v, "is_c2": True, "is_runtime_seen": False}
@@ -32,12 +33,26 @@ def _report(
         meta["crypto_addresses"] = addrs
     if fb is not None:
         meta["firebase_project_id"] = fb
+    if tg is not None:
+        meta["telegram_bot_tokens"] = tg
     return {"meta": meta, "leads": leads}
 
 
 def test_extract_firebase_project_fingerprint() -> None:
     fps = extract_fingerprints(_report(fb="proj-123"))
     assert Fingerprint("firebase_project", "proj-123") in fps
+
+
+def test_extract_telegram_bot_fingerprint() -> None:
+    fps = extract_fingerprints(_report(tg=["12345678:AbcdefghijklmnopqrstuvwxyZ0123456789"]))
+    assert Fingerprint("telegram_bot", "12345678:AbcdefghijklmnopqrstuvwxyZ0123456789") in fps
+
+
+def test_correlate_shared_telegram_bot_forms_cluster() -> None:
+    tok = "12345678:AbcdefghijklmnopqrstuvwxyZ0123456789"
+    clusters = correlate([("a", _report(tg=[tok])), ("b", _report(tg=[tok]))])
+    assert len(clusters) == 1
+    assert set(clusters[0].members) == {"a", "b"}
 
 
 def test_correlate_shared_firebase_project_forms_cluster() -> None:

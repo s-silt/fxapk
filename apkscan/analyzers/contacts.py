@@ -80,6 +80,13 @@ _MAX_LEADS_PER_TYPE = 200
 _MAX_EVIDENCES = 5
 _SNIPPET_MAX = 160
 
+# IM 回传通道 kind 标识（CHANNEL 类）。
+_KIND_TELEGRAM_BOT = "telegram_bot"
+_KIND_WEBHOOK = "im_webhook"
+
+# Telegram getMe 在线验证超时（秒）；仅在 online 能力下才会真的发请求。
+_GETME_TIMEOUT = 8
+
 
 @dataclass
 class _ContactType:
@@ -94,6 +101,9 @@ class _ContactType:
     note: str = ""
     # 占位/测试手机号显式 denylist（仅 phone 类用；缺失走内置兜底）。
     placeholder_numbers: set[str] = field(default_factory=set)
+    # Lead 分类：联系方式默认 CONTACT；IM 回传通道（telegram_bot/im_webhook）声明 channel
+    # → 走 CHANNEL（value 用裸 token/webhook，不带类型前缀）。
+    category: LeadCategory = LeadCategory.CONTACT
 
 
 @dataclass
@@ -122,6 +132,7 @@ class ContactsAnalyzer(BaseAnalyzer):
 
         corpus = self._build_corpus(ctx)
         counts: dict[str, int] = {}
+        telegram_bot_tokens: list[str] = []
 
         for ctype in types:
             try:
@@ -133,9 +144,13 @@ class ContactsAnalyzer(BaseAnalyzer):
                 continue
             counts[ctype.kind] = len(hits)
             for hit in hits:
-                result.leads.append(self._lead(ctype, hit, default_evidence))
+                if ctype.kind == _KIND_TELEGRAM_BOT:
+                    telegram_bot_tokens.append(hit.value)
+                result.leads.append(self._lead(ctype, hit, default_evidence, ctx))
 
         result.meta["contacts"] = counts
+        # IM 回传通道：Telegram bot token 列表写 meta，供后续团伙聚类（接料人归并）。
+        result.meta["telegram_bot_tokens"] = telegram_bot_tokens
         total = sum(counts.values())
         if total:
             logger.info("[%s] 提取到 %d 条联系方式线索：%s", self.name, total, counts)
@@ -267,8 +282,15 @@ class ContactsAnalyzer(BaseAnalyzer):
         return list(by_value.values())
 
     def _lead(
-        self, ctype: _ContactType, hit: _ContactHit, default_evidence: list[str]
+        self,
+        ctype: _ContactType,
+        hit: _ContactHit,
+        default_evidence: list[str],
+        ctx: "AnalysisContext",
     ) -> Lead:
+        if ctype.category is LeadCategory.CHANNEL:
+            return self._channel_lead(ctype, hit, default_evidence, ctx)
+
         evidence_to_obtain = (
             list(ctype.evidence_to_obtain) if ctype.evidence_to_obtain else list(default_evidence)
         )
@@ -288,6 +310,89 @@ class ContactsAnalyzer(BaseAnalyzer):
             source_refs=list(hit.evidences),
             notes=note.strip(),
         )
+
+    def _channel_lead(
+        self,
+        ctype: _ContactType,
+        hit: _ContactHit,
+        default_evidence: list[str],
+        ctx: "AnalysisContext",
+    ) -> Lead:
+        """IM 回传通道 → CHANNEL Lead。
+
+        与 CONTACT 的差异：
+        - value 用**裸 token/webhook**（不带"类型："前缀），供后续团伙聚类直接比对。
+        - webhook 按命中 URL 域名重新归属厂商主体（钉钉→阿里 / 企微→腾讯 / 飞书→字节），
+          覆盖规则里的通用 subject。
+        - Telegram bot token：默认离线**不**发 getMe（见 _maybe_getme 告警），notes 标未验证；
+          仅在 online 能力下才尝试在线验证并把 bot username 写进 notes。
+        """
+        evidence_to_obtain = (
+            list(ctype.evidence_to_obtain) if ctype.evidence_to_obtain else list(default_evidence)
+        )
+        subject = ctype.subject or None
+        note = f"类型：{ctype.name}。" + (ctype.note or "")
+
+        if ctype.kind == _KIND_WEBHOOK:
+            vendor = _webhook_vendor(hit.value)
+            if vendor:
+                subject = vendor
+        elif ctype.kind == _KIND_TELEGRAM_BOT:
+            note = f"{note} {self._maybe_getme(hit.value, ctx)}"
+
+        return Lead(
+            category=LeadCategory.CHANNEL,
+            value=hit.value,
+            subject=subject,
+            where_to_request=ctype.where_to_request or None,
+            evidence_to_obtain=evidence_to_obtain,
+            confidence=ctype.confidence,
+            source_refs=list(hit.evidences),
+            notes=note.strip(),
+        )
+
+    def _maybe_getme(self, token: str, ctx: "AnalysisContext") -> str:
+        """Telegram bot token 在线验证（getMe）—— **默认 OFF**。
+
+        默认离线不发：主动打 api.telegram.org 会暴露侦查意图、可能惊动接料人致 token 失效
+        （对照 enrichers/asn.py 对明文 ip-api 的告警范式）。仅当 analyzer 具备 online 能力
+        （ctx.config.online 为真）时才尝试发 getMe；失败（token 失效 / 无网）优雅降级、保留
+        静态 token 线索不丢。返回写入 Lead.notes 的告警 / 验证结果片段。
+        """
+        if not _ctx_online(ctx):
+            return (
+                "未验证：默认离线未发 getMe（主动打 api.telegram.org 会暴露侦查意图、"
+                "可能惊动接料人致 token 失效）；如需在线核验请显式启用 online 能力。"
+            )
+        username = self._getme_username(token)
+        if username:
+            return f"getMe 在线验证通过：bot @{username}。"
+        return "getMe 在线验证失败（token 可能已失效 / 无网）；保留静态 token 线索待人工核实。"
+
+    def _getme_username(self, token: str) -> str | None:
+        """实际调 https://api.telegram.org/bot<token>/getMe 拿 bot username。
+
+        全异常吞掉（不抛、不静默——记 warning），失败返回 None。仅在 online 能力下被调用。
+        """
+        try:
+            import requests
+
+            resp = requests.get(
+                f"https://api.telegram.org/bot{token}/getMe", timeout=_GETME_TIMEOUT
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+        except Exception as exc:  # noqa: BLE001 — getMe 失败不得炸主流程
+            logger.warning("[%s] Telegram getMe 失败（保留静态线索）：%s", self.name, exc)
+            return None
+        if not isinstance(payload, dict) or not payload.get("ok"):
+            return None
+        result = payload.get("result")
+        if isinstance(result, dict):
+            username = result.get("username")
+            if isinstance(username, str) and username:
+                return username
+        return None
 
     # ------------------------------------------------------------------
     # 规则加载
@@ -341,6 +446,7 @@ class ContactsAnalyzer(BaseAnalyzer):
                     placeholder_numbers={
                         n.strip() for n in _as_str_list(entry.get("placeholder_numbers"))
                     },
+                    category=_parse_category(entry.get("category")),
                 )
             )
         return types, default_evidence
@@ -376,6 +482,55 @@ def _is_blacklisted(text: str, blacklist: list[str]) -> bool:
     return any(b in low for b in blacklist)
 
 
+def _parse_category(value: object) -> LeadCategory:
+    """规则 category 字段 → LeadCategory；缺省 / 未知 → CONTACT（联系方式默认）。
+
+    目前只识别 "channel"（IM 回传通道）；其余一律按联系方式 CONTACT 处理，保证旧规则零影响。
+    """
+    if isinstance(value, str) and value.strip().lower() == "channel":
+        return LeadCategory.CHANNEL
+    return LeadCategory.CONTACT
+
+
+# Telegram bot token 形态闸：冒号前 8-10 位纯数字，冒号后正好 35 位 base64url。
+# 用独立 fullmatch 二次校验（不依赖松正则），剔除被误命中的长冒号分隔串。
+_BOT_TOKEN_RE = re.compile(r"\d{8,10}:[A-Za-z0-9_-]{35}")
+
+
+def _is_valid_bot_token(value: str) -> bool:
+    """严格校验 Telegram bot token 形态：冒号前 8-10 位纯数字、冒号后正好 35 位 [A-Za-z0-9_-]。"""
+    return bool(_BOT_TOKEN_RE.fullmatch(value))
+
+
+# IM webhook 域名 → 厂商主体（接收方平台主体）。按域名子串归属。
+_WEBHOOK_VENDORS: tuple[tuple[str, str], ...] = (
+    ("oapi.dingtalk.com", "钉钉群机器人（阿里巴巴 / 钉钉，接料通道）"),
+    ("qyapi.weixin.qq.com", "企业微信群机器人（腾讯，接料通道）"),
+    ("open.feishu.cn", "飞书群机器人（字节跳动 / 飞书，接料通道）"),
+)
+
+
+def _webhook_vendor(url: str) -> str | None:
+    """按 webhook URL 域名归属接收方厂商主体；未知域名返回 None（保留规则通用 subject）。"""
+    low = url.lower()
+    for domain, vendor in _WEBHOOK_VENDORS:
+        if domain in low:
+            return vendor
+    return None
+
+
+def _ctx_online(ctx: "AnalysisContext") -> bool:
+    """analyzer 是否具备 online 能力（用于门控 getMe 在线验证）。
+
+    读 ctx.config.online（与 pipeline 的 online 能力门控一致）；读不到一律视为离线（保守）。
+    """
+    try:
+        return bool(getattr(ctx.config, "online", False))
+    except Exception:
+        logger.debug("[contacts] 读取 ctx.config.online 失败，按离线处理", exc_info=True)
+        return False
+
+
 # 邮箱后缀白名单：邮箱必须以真实 TLD 结尾，否则多为代码误报
 # （如 Kotlin `this@AbstractTypeConstructor.builtIns` / `x@y.type` / `@a.parameters`）。
 _EMAIL_TLDS: frozenset[str] = frozenset(
@@ -394,8 +549,12 @@ def _valid_for_kind(kind: str, value: str) -> bool:
 
     email：取 @ 后域名的末段（TLD），必须是真实 TLD（小写、在白名单）。
            这能杀掉 Kotlin `this@Class.prop` / `x@y.type` 这类被邮箱正则误命中的代码。
+    telegram_bot：形态闸——冒号前 8-10 位纯数字、冒号后正好 35 位 [A-Za-z0-9_-]，
+                  剔除被松正则误命中的长冒号分隔串。
     其它类型：不额外限制。
     """
+    if kind == _KIND_TELEGRAM_BOT:
+        return _is_valid_bot_token(value)
     if kind != "email":
         return True
     at = value.rfind("@")
