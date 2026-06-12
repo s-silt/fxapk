@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from apkscan.analyzers.classify import classify_app
 from apkscan.core import infra
 from apkscan.core.models import (
     AnalysisConfig,
@@ -137,7 +138,7 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     _apply_default_advice(leads)
 
     # 5) 组装 Report
-    return Report(
+    report = Report(
         package_name=ctx.package_name,
         meta=meta,
         leads=leads,
@@ -146,6 +147,14 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
         analyzer_status=analyzer_status,
         enricher_status=enricher_status,
     )
+
+    # 6) App 类型聚合分类（在所有分析器跑完 + build_endpoint_leads 之后调用一次）。
+    #    聚合 report 现成 meta/leads/endpoints/findings 信号，加权定类，并据类型**追加**
+    #    针对性调证 Lead（只追加、不改已有 Lead）。classify_app 整体 try/except 兜底，
+    #    分类失败时 report 原样返回，绝不炸流水线。
+    classify_app(report)
+
+    return report
 
 
 def _dedup_endpoints(endpoints: list[Endpoint]) -> list[Endpoint]:
