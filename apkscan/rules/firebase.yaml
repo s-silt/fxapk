@@ -1,0 +1,39 @@
+# Firebase / google-services.json 后端归属解析规则
+#
+# 由 apkscan.analyzers.firebase 通过 registry.load_rules("firebase") 读取。
+# 顶层为 dict，含：
+#   strings_keys : res/values/strings.xml 里 google-services 插件注入键 → 逻辑字段名映射
+#   project_lead : project_id 产 CONFIG_KEY Lead 的调证模板文案
+#
+# ★ 核心价值：国内涉诈 RAT/盘子大量用 Firebase 做 C2/数据回传，project_id 归属
+#   确定性高（向 Google / GCP 调实名 + 账单 + 付款主体），databaseURL 即数据回传后端。
+#
+# 噪音提示：正规 App 也用 Firebase（推送/分析），advice 仍给"建议调证"，但 notes
+#   提示需结合敏感行为研判。
+
+# strings.xml <string name="X">value</string> 里 google-services 注入键 →
+# firebase 逻辑字段名（database_url / api_key / project_id / sender_id / storage_bucket）。
+# 名字大小写不敏感（分析器侧统一小写匹配）。
+strings_keys:
+  database_url:
+    - firebase_database_url
+  api_key:
+    - google_api_key
+  project_id:
+    - project_id
+    - gcm_defaultsenderid_project_id   # 极少数模板变体；保留兼容
+  sender_id:
+    - gcm_defaultsenderid
+  storage_bucket:
+    - google_storage_bucket
+
+# project_id → CONFIG_KEY Lead 的调证模板。
+project_lead:
+  subject: "Google / GCP 项目所有者"
+  where_to_request: "向 Google（境内常经第三方代理）调 GCP 项目实名 / 账单 / 付款主体"
+  evidence_to_obtain:
+    - "GCP 项目注册实名与付款主体"
+    - "RTDB 数据库读写访问日志"
+    - "项目关联的其它 app"
+  # Firebase 亦正规常用（推送/分析），需结合敏感行为研判；advice 仍建议调证。
+  notes: "Firebase/GCP 项目归属确定性高；但 Firebase 亦正规 App 常用（推送/分析），需结合敏感行为研判。"

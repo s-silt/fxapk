@@ -31,7 +31,7 @@ _DEBUG_CERT_MARK = "android debug"
 
 @dataclass(frozen=True)
 class Fingerprint:
-    """一个强指纹。kind ∈ {sign, c2, uni_appid, crypto_addr}。"""
+    """一个强指纹。kind ∈ {sign, c2, uni_appid, crypto_addr, firebase_project}。"""
 
     kind: str
     value: str
@@ -63,6 +63,9 @@ def extract_fingerprints(report: dict) -> set[Fingerprint]:
         uni = str(meta.get("uni_appid") or "").strip()
         if uni:
             fps.add(Fingerprint("uni_appid", uni))
+        fb = str(meta.get("firebase_project_id") or "").strip()
+        if fb:
+            fps.add(Fingerprint("firebase_project", fb))
         for addr in meta.get("crypto_addresses") or []:
             if addr:
                 fps.add(Fingerprint("crypto_addr", str(addr)))
