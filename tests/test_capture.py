@@ -109,7 +109,7 @@ def _stub_orchestration(
     monkeypatch.setattr(
         capture,
         "_start_frida_session",
-        lambda package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None: (None, None),
+        lambda package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None: (None, None),
     )
     monkeypatch.setattr(capture, "_adb_reverse", lambda: (calls["adb"].append("reverse") or True))
     monkeypatch.setattr(capture, "_adb_set_proxy", lambda: (calls["adb"].append("proxy") or True))
@@ -702,7 +702,7 @@ def test_capped_sentinel_filtered_from_runtime_report(monkeypatch, tmp_path):
     _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
     monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None):
         sink.append({"src": "cipher", "event": "init", "key_hex": "55f0"})
         sink.append({"_capped": True})  # 上限占位
         return object(), object()
@@ -726,7 +726,7 @@ def test_capture_done_collects_crypto_events_via_session(monkeypatch, tmp_path):
         {"src": "cipher", "event": "doFinal", "key_hex": "55f0", "plaintext_b64": "eyJhIjoxfQ=="},
     ]
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None):
         # 模拟 on_message 回调把 2 条事件写进共享 sink。
         sink.extend(fake_events)
         return object(), object()  # 非 None 会话/脚本（teardown 对 dummy 容错）
@@ -747,7 +747,7 @@ def test_capture_collects_jsbridge_and_sensitive_api_events(monkeypatch, tmp_pat
     _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
     monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None):
         if jsbridge_sink is not None:
             jsbridge_sink.append({"event": "register", "iface": "AndroidNative"})
         if api_sink is not None:
@@ -777,7 +777,7 @@ def test_capture_collects_antidetect_events(monkeypatch, tmp_path):
     _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
     monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None):
         if antidetect_sink is not None:
             antidetect_sink.append({"kind": "root", "probe": "File.exists: /system/bin/su", "bypassed": True})
         return object(), object()
@@ -788,6 +788,88 @@ def test_capture_collects_antidetect_events(monkeypatch, tmp_path):
     assert payload["antidetect_events"] == [
         {"kind": "root", "probe": "File.exists: /system/bin/su", "bypassed": True}
     ]
+
+
+def test_capture_collects_credential_events_via_session(monkeypatch, tmp_path):
+    """P2：会话路径把 OkHttp 凭据事件落进 runtime_report.json。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    # 不触真 adb pull（无 shared_prefs）。
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda pkg, op, sink: None)
+
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None):
+        if credential_sink is not None:
+            credential_sink.append(
+                {"source": "okhttp", "url": "https://api.fraud-c2.cn/login", "method": "POST",
+                 "headers": {}, "body": ""}
+            )
+        return object(), object()
+
+    monkeypatch.setattr(capture, "_start_frida_session", _fake_session)
+    capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+    payload = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    assert len(payload["credential_events"]) == 1
+    assert payload["credential_events"][0]["source"] == "okhttp"
+
+
+def test_capture_pulls_shared_prefs_credentials_at_teardown(monkeypatch, tmp_path):
+    """P2：收尾 _pull_shared_prefs_credentials 把落地凭据写进 credential_events。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+
+    def _fake_pull(pkg, out_path, sink):
+        sink.append({"source": "sharedprefs", "name": "token", "value": "Abc1…f456", "file": "p.xml"})
+
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", _fake_pull)
+    capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+    payload = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    assert payload["credential_events"] == [
+        {"source": "sharedprefs", "name": "token", "value": "Abc1…f456", "file": "p.xml"}
+    ]
+
+
+def test_runtime_report_credential_events_default_empty(tmp_path):
+    """_write_runtime_report 默认写出空 credential_events（向后兼容旧消费方）。"""
+    rp = capture._write_runtime_report("com.test.app", tmp_path, [], complete=True)
+    payload = json.loads(Path(rp).read_text(encoding="utf-8"))
+    assert payload["credential_events"] == []
+
+
+def test_pull_shared_prefs_no_adb_is_noop(monkeypatch):
+    """无 adb（_adb_capture 全 None）→ 不抠任何凭据、不抛。"""
+    monkeypatch.setattr(capture, "_adb_capture", lambda extra: None)
+    sink: list[dict[str, Any]] = []
+    capture._pull_shared_prefs_credentials("com.test.app", Path("."), sink)
+    assert sink == []
+
+
+def test_pull_shared_prefs_extracts_via_run_as(monkeypatch, tmp_path):
+    """run-as 列 xml + cat 内容 → 抠出脱敏凭据进 sink。"""
+    prefs_xml = (
+        "<?xml version='1.0'?><map>"
+        '<string name="token">Abc123Xyz789Def456Ghi012</string>'
+        '<string name="nickname">张三</string>'
+        "</map>"
+    )
+
+    def _fake_capture(extra):
+        if "ls" in extra:
+            return "user_prefs.xml\nother.txt\n"
+        if "cat" in extra:
+            return prefs_xml
+        return None
+
+    monkeypatch.setattr(capture, "_adb_capture", _fake_capture)
+    sink: list[dict[str, Any]] = []
+    capture._pull_shared_prefs_credentials("com.test.app", tmp_path, sink)
+    names = {c["name"] for c in sink}
+    assert "token" in names
+    assert "nickname" not in names  # 非敏感键不抠
+    # 脱敏：token 不留全文
+    token = next(c for c in sink if c["name"] == "token")
+    assert "Abc123Xyz789Def456Ghi012" not in token["value"]
 
 
 def test_frida_session_script_includes_antidetect(monkeypatch):

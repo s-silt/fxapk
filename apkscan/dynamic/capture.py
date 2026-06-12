@@ -275,6 +275,8 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
     jsbridge_events: list[dict[str, Any]] = []  # P1：运行时 JS-bridge 暴露面/调用
     sensitive_api_events: list[dict[str, Any]] = []  # P1：运行时敏感 API 调用
     antidetect_events: list[dict[str, Any]] = []  # P3：反检测探测（root/模拟器/frida）
+    # P2：运行时凭据（OkHttp 加密前明文 token/手机号 + 收尾 adb pull shared_prefs 落地凭据）。
+    credential_events: list[dict[str, Any]] = []
     proxy_set = False
     reverse_set = False
     # 抓包加固产生的告警（CA 未装系统库 / frida 版本不一致），收尾并入 reason，
@@ -330,7 +332,12 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
         #    frida-core 不可用 / attach 失败 → 回退现有 subprocess 路径（仅 unpinning，无 key 回传）。
         #    两路都 best-effort、失败不阻断抓包（HTTP 仍可抓）。
         frida_session, frida_script = _start_frida_session(
-            package, crypto_events, jsbridge_events, sensitive_api_events, antidetect_events
+            package,
+            crypto_events,
+            jsbridge_events,
+            sensitive_api_events,
+            antidetect_events,
+            credential_events,
         )
         if frida_session is not None:
             playbook.append(
@@ -376,6 +383,9 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
         result["reason"] = "抓包编排过程异常（详见日志）"
     finally:
         # 5) 清理：先停 frida（让 app 网络收尾），再撤代理/reverse，最后停 mitmdump（落盘）。
+        # P2：收尾在 kill app 前 adb pull shared_prefs（app 活着时 prefs 多已 flush 到磁盘），
+        #     抠登录态/凭据进 credential_events（best-effort，失败不影响抓包/其它事件）。
+        _pull_shared_prefs_credentials(package, out_path, credential_events)
         _terminate(frida_proc, "frida")
         _teardown_frida_session(frida_session, frida_script)
         if proxy_set:
@@ -412,6 +422,7 @@ def _capture(package: str, out_path: Path, duration: int) -> DynamicResult:
         jsbridge_events=_clean(jsbridge_events),
         sensitive_api_events=_clean(sensitive_api_events),
         antidetect_events=_clean(antidetect_events),
+        credential_events=_clean(credential_events),
     )
     report_paths = [report_path] if report_path else []
 
@@ -544,6 +555,7 @@ def _start_frida_session(
     jsbridge_sink: list[dict[str, Any]] | None = None,
     api_sink: list[dict[str, Any]] | None = None,
     antidetect_sink: list[dict[str, Any]] | None = None,
+    credential_sink: list[dict[str, Any]] | None = None,
 ) -> tuple[Any, Any]:
     """用 frida-core（``import frida``）spawn 目标 app 并注入 unpinning + 运行时 hook 套件。
 
@@ -583,6 +595,8 @@ def _start_frida_session(
         + cryptohook.FRIDA_SENSITIVE_API_HOOK_JS
         + "\n"
         + cryptohook.FRIDA_ANTIDETECT_JS
+        + "\n"
+        + cryptohook.FRIDA_OKHTTP_HOOK_JS
     )
     device_handle: Any = None
     pid: Any = None
@@ -613,6 +627,13 @@ def _start_frida_session(
                 "message",
                 cryptohook.make_typed_handler(
                     antidetect_sink, cryptohook.ANTIDETECT_MSG_TYPE, cryptohook.normalize_antidetect_event
+                ),
+            )
+        if credential_sink is not None:
+            script.on(
+                "message",
+                cryptohook.make_typed_handler(
+                    credential_sink, cryptohook.CREDENTIAL_MSG_TYPE, cryptohook.normalize_credential_event
                 ),
             )
         script.load()
@@ -809,6 +830,115 @@ def _adb(extra: list[str]) -> bool:
         logger.warning("[capture] adb 命令非零退出（%s）：%s", proc.returncode, " ".join(extra))
         return False
     return True
+
+
+def _adb_capture(extra: list[str]) -> str | None:
+    """运行 adb 子命令并返回 stdout 文本；缺 adb / 非零退出 / 异常 → None（不抛）。"""
+    exe = tools.adb_path()
+    if not exe:
+        logger.debug("[capture] adb 不可用，跳过取数：%s", " ".join(extra))
+        return None
+    try:
+        proc = subprocess.run(
+            [exe, *extra],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=device._DEFAULT_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("[capture] adb 取数超时：%s", " ".join(extra))
+        return None
+    except Exception:
+        logger.exception("[capture] adb 取数异常：%s", " ".join(extra))
+        return None
+    if proc.returncode != 0:
+        logger.debug("[capture] adb 取数非零退出（%s）：%s", proc.returncode, " ".join(extra))
+        return None
+    return proc.stdout or ""
+
+
+# ---------------------------------------------------------------------------
+# P2：收尾 adb pull shared_prefs，抠落地凭据（登录态/token/商户号/邀请码）
+# ---------------------------------------------------------------------------
+#
+# 机制：debuggable app 可 `run-as <pkg>` 以 app 身份读自己私有目录；非 debuggable 则需 root
+# （`su -c`）。两条通道都 best-effort 试一遍，任一成功即抠 xml。失败（无 root / 非 debuggable /
+# 无 adb）只记 debug、不影响抓包与其它事件——这正是反诈样本常见的封堵，属预期降级。
+# 拉回的 xml 走 cryptohook.extract_sharedprefs_credentials（脱敏/形态闸/截断），不落全文。
+
+#: shared_prefs 私有目录（<pkg> 占位）。
+_SHARED_PREFS_DIR = "/data/data/{pkg}/shared_prefs"
+
+
+def _pull_shared_prefs_credentials(
+    package: str, out_path: Path, sink: list[dict[str, Any]]
+) -> None:
+    """adb 读取 ``/data/data/<pkg>/shared_prefs/*.xml``，抠登录态/凭据进 ``sink``。绝不抛。
+
+    通道（依次尝试，任一成功即用）：``run-as <pkg>``（debuggable）/ ``su -c``（root）。
+    抠出的凭据经 ``extract_sharedprefs_credentials`` 脱敏/形态闸/截断；高敏，不落全文。
+    """
+    try:
+        prefs_dir = _SHARED_PREFS_DIR.format(pkg=package)
+        xml_files = _list_shared_prefs_files(package, prefs_dir)
+        if not xml_files:
+            logger.debug("[capture] 未列到 shared_prefs xml（无 root/非 debuggable/无凭据），跳过")
+            return
+        total = 0
+        for fname in xml_files:
+            xml_text = _read_shared_prefs_file(package, prefs_dir, fname)
+            if not xml_text:
+                continue
+            creds = cryptohook.extract_sharedprefs_credentials(xml_text, fname)
+            for c in creds:
+                sink.append(c)
+            total += len(creds)
+        if total:
+            logger.info(
+                "[capture] shared_prefs 抠出落地凭据 %d 条（含高敏个人信息，已脱敏截断，"
+                "按办案合规留存处置）",
+                total,
+            )
+    except Exception:  # noqa: BLE001 — 收尾凭据抽取绝不影响抓包/报告写出
+        logger.exception("[capture] adb pull shared_prefs 抽凭据异常（已忽略）")
+
+
+def _list_shared_prefs_files(package: str, prefs_dir: str) -> list[str]:
+    """列出 shared_prefs 目录下的 *.xml 文件名（run-as 优先，回退 su）。失败 → []。"""
+    for cmd in (
+        ["shell", "run-as", package, "ls", prefs_dir],
+        ["shell", "su", "-c", f"ls {prefs_dir}"],
+    ):
+        out = _adb_capture(cmd)
+        if out:
+            names = [
+                line.strip().rsplit("/", 1)[-1]
+                for line in out.splitlines()
+                if line.strip().lower().endswith(".xml")
+            ]
+            if names:
+                return names
+    return []
+
+
+def _read_shared_prefs_file(package: str, prefs_dir: str, fname: str) -> str:
+    """读取单个 shared_prefs xml 文本（run-as 优先，回退 su）。失败 → 空串。"""
+    # 防御：文件名取自设备 ls 输出，钉死只接受简单文件名，杜绝路径穿越/命令注入。
+    if not re.fullmatch(r"[A-Za-z0-9_.\-]+\.xml", fname):
+        logger.debug("[capture] 跳过形态可疑的 prefs 文件名：%r", fname)
+        return ""
+    path = f"{prefs_dir}/{fname}"
+    for cmd in (
+        ["shell", "run-as", package, "cat", path],
+        ["shell", "su", "-c", f"cat {path}"],
+    ):
+        out = _adb_capture(cmd)
+        if out and "<map" in out:
+            return out
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -1177,6 +1307,7 @@ def _write_runtime_report(
     jsbridge_events: list[dict[str, Any]] | None = None,
     sensitive_api_events: list[dict[str, Any]] | None = None,
     antidetect_events: list[dict[str, Any]] | None = None,
+    credential_events: list[dict[str, Any]] | None = None,
 ) -> str:
     """把运行时端点写成 out/runtime_report.json（复用 report.json 的序列化）。
 
@@ -1202,6 +1333,7 @@ def _write_runtime_report(
         "jsbridge_events": list(jsbridge_events or []),
         "sensitive_api_events": list(sensitive_api_events or []),
         "antidetect_events": list(antidetect_events or []),
+        "credential_events": list(credential_events or []),
     }
     if not complete:
         payload["note"] = "抓包未完整（代理未起或编排中断），运行时端点可能不全。"

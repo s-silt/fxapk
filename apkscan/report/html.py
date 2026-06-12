@@ -26,6 +26,7 @@ _TEMPLATE_NAME = "report.html.j2"
 # LeadCategory → 中文标签（用于线索清单分组标题）。
 CATEGORY_LABELS: dict[LeadCategory, str] = {
     LeadCategory.CRYPTO_RECIPE: "应用层加密配方",
+    LeadCategory.RUNTIME_CREDENTIAL: "运行时凭据 / 登录态（高敏）",
     LeadCategory.CONFIG_KEY: "调用插件 / 配置键值",
     LeadCategory.DOMAIN: "域名线索",
     LeadCategory.IP: "IP 线索",
@@ -40,6 +41,7 @@ CATEGORY_LABELS: dict[LeadCategory, str] = {
 # 调证人员视角下的分组展示顺序（配置键值最高优先，其次资金/SDK/联系方式）。
 CATEGORY_ORDER: list[LeadCategory] = [
     LeadCategory.CRYPTO_RECIPE,
+    LeadCategory.RUNTIME_CREDENTIAL,
     LeadCategory.CONFIG_KEY,
     LeadCategory.PAYMENT,
     LeadCategory.SDK_SERVICE,
