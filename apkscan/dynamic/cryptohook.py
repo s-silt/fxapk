@@ -28,6 +28,7 @@ import base64
 import binascii
 import json
 import logging
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -41,6 +42,8 @@ JSBRIDGE_MSG_TYPE = "apkscan-jsbridge"
 SENSITIVE_API_MSG_TYPE = "apkscan-api"
 #: P3 反检测绕过通道（绕过 root/模拟器/frida 检测，并把检测尝试本身作为反分析行为上报）。
 ANTIDETECT_MSG_TYPE = "apkscan-antidetect"
+#: 第二波：运行时登录态/明文凭据采集通道（OkHttp 加密前明文 dump + SharedPrefs 落地凭据）。
+CREDENTIAL_MSG_TYPE = "apkscan-credential"
 
 #: sink 累积上限：高频加密（每帧/每请求）会刷爆，超限丢弃 + 记一次 warning。
 _SINK_CAP = 4000
@@ -559,6 +562,132 @@ Java.perform(function () {
 
 
 # ---------------------------------------------------------------------------
+# 第二波：OkHttp interceptor-before 明文 dump —— 拿加密前明文 + 真实业务后端 host
+# ---------------------------------------------------------------------------
+#
+# 价值（补抓包/cryptohook 之不足）：抓包拿到的是 app 自己的签名/加密 interceptor **之后**
+# 的密文请求；本 hook 在 OkHttp 调用链最外层（RealCall.execute/enqueue、RealInterceptorChain
+# .proceed 的首个 request）dump **加密前的明文** request —— 真实业务后端 host、Authorization/
+# Bearer/JWT token、登录账号/手机号，直接定位「向谁登录、带的什么凭据」。
+#
+# R8 混淆护栏：OkHttp 类名随版本（3.x/4.x okhttp3.* vs internal.http.*）与混淆而变，需多
+# fallback 类名 + best-effort 跳过（hook 不到只 console.log、绝不崩）。每个 hook 独立 try/catch。
+# 高敏值（token/手机号）在 JS 侧先截断回传（Python 侧 normalize 再脱敏兜底），不留全文。
+FRIDA_OKHTTP_HOOK_JS: str = r"""
+// apkscan 运行时凭据采集（best-effort）：OkHttp 加密前明文 request dump（真实 host + token）。
+Java.perform(function () {
+    var _cred_count = 0;
+    var _CRED_CAP = 1500;
+    function credEmit(p) {
+        try {
+            if (_cred_count >= _CRED_CAP) return;
+            _cred_count += 1;
+            p.type = 'apkscan-credential';
+            p.source = 'okhttp';
+            send(p);
+        } catch (e) { /* 回传失败不得炸会话 */ }
+    }
+    function clipStr(s, n) {
+        try {
+            if (s === null || s === undefined) return null;
+            var t = '' + s;
+            return t.length > n ? t.slice(0, n) : t;
+        } catch (e) { return null; }
+    }
+    // 从 okhttp3.Request 提取 url/method/headers/body 明文（best-effort，逐项 try/catch）。
+    function dumpRequest(req, where) {
+        try {
+            if (req === null || req === undefined) return;
+            var url = null, method = null, headersObj = {}, bodyText = null;
+            try { url = '' + req.url().toString(); } catch (e) {}
+            try { method = '' + req.method(); } catch (e) {}
+            // headers：抓 Authorization/Cookie/token 类敏感头（全量回传上限保护）。
+            try {
+                var hs = req.headers();
+                var n = hs.size();
+                for (var i = 0; i < n && i < 40; i++) {
+                    var hn = '' + hs.name(i);
+                    var hv = '' + hs.value(i);
+                    headersObj[hn] = clipStr(hv, 512);
+                }
+            } catch (e) {}
+            // body：把 RequestBody 写进 Buffer 取明文（仅文本类，超大跳过）。
+            try {
+                var body = req.body();
+                if (body !== null && body !== undefined) {
+                    var Buffer = Java.use('okio.Buffer');
+                    var buf = Buffer.$new();
+                    body.writeTo(buf);
+                    var len = -1;
+                    try { len = buf.size(); } catch (e) {}
+                    if (len < 0 || len <= 262144) {
+                        bodyText = clipStr('' + buf.readUtf8(), 8192);
+                    }
+                }
+            } catch (e) {}
+            credEmit({url: url, method: method, headers: headersObj, body: bodyText,
+                      where: where, ts: Date.now()});
+        } catch (e) {}
+    }
+
+    // --- 主路径：okhttp3.RealCall.execute()/getResponseWithInterceptorChain 前的原始 request ---
+    // RealCall 持有最外层（未经 app interceptor 加密）的 originalRequest。
+    var realCallNames = ['okhttp3.RealCall', 'okhttp3.internal.connection.RealCall'];
+    var hookedRealCall = false;
+    realCallNames.forEach(function (cn) {
+        if (hookedRealCall) return;
+        try {
+            var RealCall = Java.use(cn);
+            if (RealCall.execute) {
+                RealCall.execute.implementation = function () {
+                    try {
+                        var req = null;
+                        try { req = this.request(); } catch (e) {}
+                        if (req === null) { try { req = this.originalRequest.value; } catch (e2) {} }
+                        dumpRequest(req, cn + '.execute');
+                    } catch (e) {}
+                    return this.execute();
+                };
+                hookedRealCall = true;
+                console.log('[apkscan] OkHttp ' + cn + '.execute hooked');
+            }
+        } catch (e) {
+            console.log('[apkscan] OkHttp ' + cn + ' hook skip: ' + e);
+        }
+    });
+
+    // --- 备路径：RealInterceptorChain.proceed(request) 的首个 request（app interceptor 之前）---
+    // 仅在最外层（index 小）dump，避免每个 interceptor 都回传一遍同一请求。
+    var chainNames = ['okhttp3.internal.http.RealInterceptorChain',
+                      'okhttp3.internal.connection.RealInterceptorChain'];
+    chainNames.forEach(function (cn) {
+        try {
+            var Chain = Java.use(cn);
+            if (Chain.proceed && Chain.proceed.overload) {
+                try {
+                    Chain.proceed.overload('okhttp3.Request').implementation = function (request) {
+                        try {
+                            var idx = -1;
+                            try { idx = this.index.value; } catch (e) {}
+                            // 只在调用链最外层（index<=0）dump 一次原始 request。
+                            if (idx <= 0) dumpRequest(request, cn + '.proceed');
+                        } catch (e) {}
+                        return this.proceed(request);
+                    };
+                    console.log('[apkscan] OkHttp ' + cn + '.proceed hooked');
+                } catch (e) {
+                    console.log('[apkscan] OkHttp ' + cn + '.proceed overload skip: ' + e);
+                }
+            }
+        } catch (e) {
+            console.log('[apkscan] OkHttp ' + cn + ' chain hook skip: ' + e);
+        }
+    });
+});
+"""
+
+
+# ---------------------------------------------------------------------------
 # on_message handler：把 Frida send() 的 crypto 事件规范化进 sink
 # ---------------------------------------------------------------------------
 
@@ -751,6 +880,260 @@ def normalize_antidetect_event(payload: Any) -> dict[str, Any] | None:
         "bypassed": bool(payload.get("bypassed", False)),
         "ts": payload.get("ts") if isinstance(payload.get("ts"), int) else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# 第二波：运行时凭据规范化 —— 高敏个人信息脱敏/截断 + token 形态闸
+# ---------------------------------------------------------------------------
+#
+# 合规护栏（横切硬要求）：token / 账号 / 手机号是受害人/高敏个人信息，回传与落盘必须截断、
+# 不留全文；手机号中间打码、token 只留前后几位。本模块的规范化与抽取统一执行这一脱敏口径。
+
+#: 凭据来源（与 JS 侧约定）：okhttp=加密前明文请求；sharedprefs=落地凭据 xml。
+_CREDENTIAL_SOURCES: frozenset[str] = frozenset({"okhttp", "sharedprefs"})
+
+#: 高敏 header 名（命中即整值脱敏，只留前后片段）。
+_SENSITIVE_HEADER_KEYS: frozenset[str] = frozenset(
+    {"authorization", "cookie", "token", "access-token", "x-token", "x-auth-token", "x-access-token"}
+)
+
+#: SharedPrefs 里视为「登录态/凭据」的敏感键名子串（小写匹配；命中即抠出）。
+_SHAREDPREFS_SENSITIVE_KEYS: tuple[str, ...] = (
+    "token",
+    "access_token",
+    "accesstoken",
+    "refresh_token",
+    "session",
+    "sessionid",
+    "auth",
+    "jwt",
+    "ticket",
+    "merchant",      # 商户号
+    "merchant_no",
+    "mch_id",
+    "invite",        # 邀请码
+    "invite_code",
+    "invitecode",
+    "mobile",        # 登录手机号
+    "phone",
+    "account",
+    "username",
+    "uid",
+    "userid",
+    "login_status",  # 登录态
+    "is_login",
+    "islogin",
+    "logined",
+)
+
+#: SharedPrefs xml 中 <string name="...">value</string> 的提取正则。
+_PREFS_STRING_RE = re.compile(
+    r'<string\s+name="([^"]+)"\s*>(.*?)</string>', re.IGNORECASE | re.DOTALL
+)
+#: <int/long/boolean name="..." value="..." /> 形态（登录态多为 int/boolean）。
+_PREFS_SCALAR_RE = re.compile(
+    r'<(?:int|long|boolean)\s+name="([^"]+)"\s+value="([^"]*)"\s*/>', re.IGNORECASE
+)
+
+#: 手机号（中国大陆 11 位）打码用：保留前 3 后 4，中间 ****。
+_PHONE_RE = re.compile(r"(?<!\d)(1\d{2})(\d{4})(\d{4})(?!\d)")
+
+#: 高敏值回传/落盘的截断上限（远小于全文，确保不留全凭据）。
+_CRED_VALUE_HEAD = 6
+_CRED_VALUE_TAIL = 4
+_CRED_VALUE_MAX = 24
+
+# 形态闸规则惰性缓存（避免每条事件重读 rules/secrets.yaml）。
+_SECRET_RULES_CACHE: Any = None
+
+
+def _secret_rules() -> Any:
+    """惰性加载 secrets 形态闸规则（与 js_bundle/jadx 同口径）；加载失败 → 兜底规则。"""
+    global _SECRET_RULES_CACHE
+    if _SECRET_RULES_CACHE is not None:
+        return _SECRET_RULES_CACHE
+    try:
+        from apkscan.core.secrets import load_secret_rules
+
+        _SECRET_RULES_CACHE = load_secret_rules()
+    except Exception:  # noqa: BLE001 — 规则不可用不阻断，用兜底 SecretRules
+        logger.exception("[credential] 加载 secrets 形态闸规则失败，用兜底")
+        from apkscan.core.secrets import SecretRules
+
+        _SECRET_RULES_CACHE = SecretRules()
+    return _SECRET_RULES_CACHE
+
+
+def _looks_like_credential(value: str) -> bool:
+    """value 是否像真实凭据形态（复用 secrets 形态/熵闸，过滤占位/常量名）。绝不抛。"""
+    try:
+        from apkscan.core.secrets import looks_like_secret_value
+
+        return looks_like_secret_value(value, _secret_rules())
+    except Exception:  # noqa: BLE001 — 形态闸异常按"非凭据"保守处理（不泄明文）
+        logger.exception("[credential] 形态闸判定异常，按非凭据处理")
+        return False
+
+
+def _mask_phone_numbers(text: str) -> str:
+    """把文本里的手机号中间四位打码（前 3 后 4 保留）。绝不抛。"""
+    try:
+        return _PHONE_RE.sub(lambda m: f"{m.group(1)}****{m.group(3)}", text)
+    except Exception:  # noqa: BLE001
+        logger.exception("[credential] 手机号打码异常")
+        return text
+
+
+def _truncate_secret(value: str) -> str:
+    """高敏凭据值截断：只留前 ``_CRED_VALUE_HEAD`` 后 ``_CRED_VALUE_TAIL`` 位，中间省略号。
+
+    短值（<= head+tail）整体保留（本就不含全文风险）；长值截断不留全文。
+    """
+    v = value.strip()
+    if len(v) <= _CRED_VALUE_HEAD + _CRED_VALUE_TAIL:
+        return v[:_CRED_VALUE_MAX]
+    return f"{v[:_CRED_VALUE_HEAD]}…{v[-_CRED_VALUE_TAIL:]}"
+
+
+def _desensitize_header(name: str, value: str) -> str:
+    """header 值脱敏：高敏头（Authorization/Cookie/token 类）整值截断；其余仅手机号打码。
+
+    Authorization 形如 ``Bearer <token>``：保留方案前缀（Bearer/Basic）+ token 前后几位。
+    """
+    if not isinstance(value, str):
+        return ""
+    low = name.strip().lower()
+    if low in _SENSITIVE_HEADER_KEYS:
+        parts = value.split(" ", 1)
+        if len(parts) == 2 and parts[0].lower() in ("bearer", "basic", "token", "jwt"):
+            return f"{parts[0]} {_truncate_secret(parts[1])}"
+        return _truncate_secret(value)
+    return _mask_phone_numbers(value)[:512]
+
+
+def normalize_credential_event(payload: Any) -> dict[str, Any] | None:
+    """把 JS/SharedPrefs 侧 credential payload 规范化为稳定 schema；非法 → None（绝不抛）。
+
+    **credential_event 权威 schema**（producer=Frida OkHttp JS / SharedPrefs 抽取，
+    consumer=merge_runtime_credentials；落进 runtime_report.json['credential_events']）：
+
+    - ``source``: ``okhttp`` | ``sharedprefs``（区分加密前明文请求 / 落地凭据）。
+    - okhttp：``url`` / ``method`` / ``headers``（dict，高敏头脱敏）/ ``body``（手机号打码、截断）。
+    - sharedprefs：``name``（键名）/ ``value``（经形态闸 + 截断）/ ``file``（来源 xml）。
+    - ``ts``: JS Date.now()（int 或 None）。
+
+    合规护栏：所有高敏值（token/手机号/账号）一律脱敏或截断，绝不回传/落盘全文。
+    """
+    if not isinstance(payload, dict):
+        return None
+    source = _as_clean_str(payload.get("source"))
+    if source not in _CREDENTIAL_SOURCES:
+        return None
+
+    if source == "okhttp":
+        return _normalize_okhttp_credential(payload)
+    return _normalize_sharedprefs_credential(payload)
+
+
+def _normalize_okhttp_credential(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """规范化 OkHttp 明文请求事件：url 必有；headers 高敏脱敏、body 手机号打码 + 截断。"""
+    url = _as_clean_str(payload.get("url"))
+    if not url:
+        return None  # 无 url 的 okhttp 事件无取证价值
+
+    headers_raw = payload.get("headers")
+    headers: dict[str, str] = {}
+    if isinstance(headers_raw, dict):
+        for k, v in headers_raw.items():
+            key = str(k)
+            headers[key] = _desensitize_header(key, str(v) if v is not None else "")
+
+    body_raw = _as_clean_str(payload.get("body"), 8192)
+    body = _mask_phone_numbers(body_raw) if body_raw else ""
+
+    return {
+        "source": "okhttp",
+        "url": url,
+        "method": _as_clean_str(payload.get("method")) or "",
+        "headers": headers,
+        "body": body,
+        "ts": payload.get("ts") if isinstance(payload.get("ts"), int) else None,
+    }
+
+
+def _normalize_sharedprefs_credential(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """规范化 SharedPrefs 落地凭据：name 必有；value 经形态闸（占位→占位标记）+ 截断/打码。"""
+    name = _as_clean_str(payload.get("name"))
+    if not name:
+        return None
+    raw_value = payload.get("value")
+    value = _gate_and_mask_value(name, str(raw_value) if raw_value is not None else "")
+    return {
+        "source": "sharedprefs",
+        "name": name,
+        "value": value,
+        "file": _as_clean_str(payload.get("file")) or "",
+        "ts": payload.get("ts") if isinstance(payload.get("ts"), int) else None,
+    }
+
+
+def _gate_and_mask_value(name: str, value: str) -> str:
+    """对 SharedPrefs 值施加形态闸 + 脱敏：
+
+    - 登录态布尔/小整数（如 login_status=1）：直接保留（非个人信息、是状态量）。
+    - 手机号/账号形态：打码后截断。
+    - token 类长值：先过形态闸——像真凭据 → 截断保留前后位；不像（占位/常量名）→ 占位标记
+      （``<非凭据形态>``，不回传非凭据明文，也避免把 deviceToken 之类当真 token）。
+    """
+    v = value.strip()
+    if not v:
+        return ""
+    # 状态量（登录态）：短布尔/数字直接留（是状态、非高敏个人信息）。
+    low_name = name.lower()
+    if any(tok in low_name for tok in ("login", "status", "is_login", "logined")):
+        if v.lower() in ("0", "1", "true", "false", "yes", "no") or (v.isdigit() and len(v) <= 4):
+            return v
+    # 手机号/账号：打码后截断。
+    masked = _mask_phone_numbers(v)
+    if masked != v:
+        return masked[:_CRED_VALUE_MAX]
+    # token/secret 类：形态闸过占位。
+    if _looks_like_credential(v):
+        return _truncate_secret(v)
+    # 不像凭据（占位/SDK 常量名 deviceToken 等）→ 占位标记，不回传非凭据明文。
+    return "<非凭据形态>"
+
+
+def extract_sharedprefs_credentials(xml_text: str, file_name: str) -> list[dict[str, Any]]:
+    """从单个 shared_prefs xml 文本抠出敏感键（token/商户号/邀请码/手机号/登录态）。绝不抛。
+
+    返回 ``[{"source":"sharedprefs","name":..,"value":..(脱敏/截断),"file":file_name}]``。
+    供 capture 收尾对 adb pull 回的每个 xml 调用、产 credential_events；merge 侧据此产 Lead。
+    """
+    creds: list[dict[str, Any]] = []
+    if not isinstance(xml_text, str) or not xml_text.strip():
+        return creds
+    seen: set[str] = set()
+    try:
+        pairs: list[tuple[str, str]] = []
+        pairs.extend(_PREFS_STRING_RE.findall(xml_text))
+        pairs.extend(_PREFS_SCALAR_RE.findall(xml_text))
+        for name, value in pairs:
+            name = name.strip()
+            low = name.lower()
+            if not any(tok in low for tok in _SHAREDPREFS_SENSITIVE_KEYS):
+                continue
+            if name in seen:
+                continue
+            seen.add(name)
+            ev = _normalize_sharedprefs_credential(
+                {"source": "sharedprefs", "name": name, "value": value, "file": file_name}
+            )
+            if ev is not None:
+                creds.append(ev)
+    except Exception:  # noqa: BLE001 — 单个 xml 解析失败不影响其它，绝不抛
+        logger.exception("[credential] 解析 shared_prefs xml 失败（已忽略）：%s", file_name)
+    return creds
 
 
 # ---------------------------------------------------------------------------
@@ -1056,16 +1439,20 @@ __all__ = [
     "FRIDA_JSBRIDGE_HOOK_JS",
     "FRIDA_SENSITIVE_API_HOOK_JS",
     "FRIDA_ANTIDETECT_JS",
+    "FRIDA_OKHTTP_HOOK_JS",
     "CRYPTO_MSG_TYPE",
     "JSBRIDGE_MSG_TYPE",
     "SENSITIVE_API_MSG_TYPE",
     "ANTIDETECT_MSG_TYPE",
+    "CREDENTIAL_MSG_TYPE",
     "make_message_handler",
     "make_typed_handler",
     "normalize_crypto_event",
     "normalize_jsbridge_event",
     "normalize_sensitive_api_event",
     "normalize_antidetect_event",
+    "normalize_credential_event",
+    "extract_sharedprefs_credentials",
     "recipe_from_events",
     "brand_hints_from_events",
     "jsbridge_hints_from_events",

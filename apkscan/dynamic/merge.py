@@ -469,6 +469,159 @@ def merge_runtime_traces(report: Report, runtime_report_path: str) -> dict[str, 
     return stats
 
 
+# ---------------------------------------------------------------------------
+# 第二波：运行时登录态/明文凭据 → RUNTIME_CREDENTIAL Lead + 明文 host 走 infra
+# ---------------------------------------------------------------------------
+
+# Lead.notes / 日志的合规提示（横切硬要求：含高敏个人信息，按办案合规留存处置）。
+_CREDENTIAL_COMPLIANCE_NOTE = (
+    "运行时实测捕获，含受害人/高敏个人信息（登录态/凭据/账号），已脱敏截断；"
+    "按办案合规要求留存处置，不得外泄全文。"
+)
+
+
+def merge_runtime_credentials(report: Report, runtime_report_path: str) -> dict[str, int]:
+    """把 P2 运行时凭据（OkHttp 加密前明文 token/手机号、SharedPrefs 落地凭据）并回主报告。
+
+    流程：
+      1. 读 runtime_report.json 的 ``credential_events``（缺/旧版报告无该字段 → 跳过，零统计）。
+      2. 每条事件经 ``cryptohook.normalize_credential_event`` 再脱敏兜底，产 RUNTIME_CREDENTIAL
+         Lead（去重；where_to_request 指向凭 token/手机号向平台/运营商调证；notes 带合规提示）。
+      3. OkHttp 事件的明文真实 host：复用 ``_endpoints_from_plaintext`` 从 url 抽 domain/url 端点，
+         走 ``merge_runtime_endpoints``（去重 + infra 分级）——务必走 infra，别把 CDN 当 C2。
+      4. meta 打标 runtime_credentials。
+
+    Returns:
+        ``{"credential_leads", "credential_endpoints"}``。内部 try/except，绝不抛。
+    """
+    stats = {"credential_leads": 0, "credential_endpoints": 0}
+    try:
+        from apkscan.dynamic import cryptohook
+
+        raw_events = _load_events_field(runtime_report_path, "credential_events")
+        if not raw_events:
+            return stats
+
+        # 规范化兜底（capture 侧已规范化，这里再过一遍确保脱敏/形态闸口径统一、向后兼容旧报告）。
+        events: list[dict[str, Any]] = []
+        for raw in raw_events:
+            ev = cryptohook.normalize_credential_event(raw)
+            if ev is not None:
+                events.append(ev)
+        if not events:
+            return stats
+
+        stats["credential_leads"] = _add_runtime_credential_leads(report, events)
+
+        # OkHttp 明文真实 host → 端点并入（走 infra 分级，CDN 自动判无需调证）。
+        host_endpoints = _credential_host_endpoints(events)
+        if host_endpoints:
+            merge_runtime_endpoints(report, host_endpoints)
+            stats["credential_endpoints"] = len(host_endpoints)
+
+        report.meta["runtime_credentials"] = True
+        report.meta["runtime_credential_count"] = len(events)
+        logger.info(
+            "[merge] 运行时凭据并回：credential_leads=%d credential_endpoints=%d（%s）",
+            stats["credential_leads"],
+            stats["credential_endpoints"],
+            "含高敏个人信息，按办案合规留存处置",
+        )
+    except Exception:  # noqa: BLE001 - 凭据并回失败不得抛给调用方（不破坏已产出报告）
+        logger.exception("[merge] 运行时凭据并回异常")
+    return stats
+
+
+def _add_runtime_credential_leads(report: Report, events: list[dict[str, Any]]) -> int:
+    """把规范化凭据事件产成 RUNTIME_CREDENTIAL Lead，去重 append 进 report.leads，返回新增数。"""
+    existing = {(lead.category.value, lead.value) for lead in report.leads}
+    added = 0
+    for ev in events:
+        value, snippet, where = _credential_lead_fields(ev)
+        if not value:
+            continue
+        key = (LeadCategory.RUNTIME_CREDENTIAL.value, value)
+        if key in existing:
+            continue
+        existing.add(key)
+        report.leads.append(
+            Lead(
+                category=LeadCategory.RUNTIME_CREDENTIAL,
+                value=value,
+                where_to_request=where,
+                confidence=Confidence.HIGH,
+                advice="建议调证",
+                source_refs=[
+                    Evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=snippet[:200])
+                ],
+                notes=_CREDENTIAL_COMPLIANCE_NOTE,
+            )
+        )
+        added += 1
+    return added
+
+
+def _credential_lead_fields(ev: dict[str, Any]) -> tuple[str, str, str]:
+    """从规范化凭据事件产 (lead_value, evidence_snippet, where_to_request)。
+
+    okhttp：value=登录/请求的真实 host + 路径；snippet=脱敏 token/body 摘要；where=凭 token
+      以受害人身份向平台调登录 IP/设备。
+    sharedprefs：value=``凭据键名=脱敏值``；where=凭手机号向运营商调号主实名 / 凭 token 向平台调登录态。
+    """
+    source = str(ev.get("source", ""))
+    if source == "okhttp":
+        url = str(ev.get("url", ""))
+        host = _host_of_url(url) or url
+        headers = ev.get("headers") if isinstance(ev.get("headers"), dict) else {}
+        auth = ""
+        for k, v in headers.items():  # type: ignore[union-attr]
+            if str(k).strip().lower() in ("authorization", "token", "cookie"):
+                auth = f"{k}={v}"
+                break
+        value = f"OkHttp登录态:{host}"
+        body = str(ev.get("body", ""))
+        snippet = f"{ev.get('method', '')} {url} | {auth} | body={body[:80]}".strip(" |")
+        where = (
+            "凭抓到的 token/登录凭据以受害人身份向该平台后台调取登录 IP/设备指纹/操作日志；"
+            "凭明文手机号向运营商调取号主实名。"
+        )
+        return value, snippet, where
+
+    # sharedprefs
+    name = str(ev.get("name", ""))
+    val = str(ev.get("value", ""))
+    file_ = str(ev.get("file", ""))
+    value = f"SharedPrefs:{name}={val}"
+    snippet = f"{file_} {name}={val}"
+    low = name.lower()
+    if any(tok in low for tok in ("mobile", "phone")):
+        where = "凭手机号向运营商调取号主实名/开户信息与通话记录。"
+    elif any(tok in low for tok in ("merchant", "mch")):
+        where = "凭商户号向第三方支付/收单机构调取商户实名与结算账户。"
+    else:
+        where = "凭 token/会话以受害人身份向平台后台调取登录态、绑定信息与操作日志。"
+    return value, snippet, where
+
+
+def _credential_host_endpoints(events: list[dict[str, Any]]) -> list[Endpoint]:
+    """从 OkHttp 凭据事件的明文 url 抽 domain/url 端点（复用 _endpoints_from_plaintext）。
+
+    务必复用同一抽取 + 后续走 merge_runtime_endpoints 的 infra 分级，确保真实业务后端 host
+    与解密明文 host 同等待遇（CDN/SDK 自动判无需调证，疑似 App 自有 → 建议调证）。
+    """
+    found: dict[str, Endpoint] = {}
+    for ev in events:
+        if str(ev.get("source", "")) != "okhttp":
+            continue
+        url = str(ev.get("url", ""))
+        if not url:
+            continue
+        for ep in _endpoints_from_plaintext(url, url):
+            if ep.value not in found:
+                found[ep.value] = ep
+    return list(found.values())
+
+
 def _add_runtime_jsbridge_leads(report: Report, jb_hints: list[str]) -> int:
     """把运行时观测到的桥接接口加成 CONFIG_KEY Lead（source=runtime），去重 append。"""
     existing = {(lead.category.value, lead.value) for lead in report.leads}
@@ -751,6 +904,12 @@ def merge_and_rerender(
     stats["jsbridge_leads"] = trace_stats.get("jsbridge_leads", 0)
     stats["api_confirmed"] = trace_stats.get("api_confirmed", 0)
 
+    # P2：运行时登录态/明文凭据（OkHttp token/手机号、SharedPrefs 落地凭据）并回（含合规脱敏）。
+    _emit(on_progress, "并回运行时登录态/明文凭据 ...")
+    cred_stats = merge_runtime_credentials(report, rr_path)
+    stats["credential_leads"] = cred_stats.get("credential_leads", 0)
+    stats["credential_endpoints"] = cred_stats.get("credential_endpoints", 0)
+
     fmts = list(formats) if formats else list(_DEFAULT_FORMATS)
     try:
         out_path.mkdir(parents=True, exist_ok=True)
@@ -808,5 +967,6 @@ __all__ = [
     "merge_runtime_endpoints",
     "decrypt_runtime_messages",
     "merge_runtime_traces",
+    "merge_runtime_credentials",
     "merge_and_rerender",
 ]
