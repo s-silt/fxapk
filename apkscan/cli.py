@@ -176,6 +176,19 @@ def analyze(
         # （否则拿不到静态侧"离线扫描，归属未查询"标注，偏乐观、轻微假成功）。
         report.meta["online"] = config.online
 
+        # 取证完整性背书：检材指纹（多算法 + 分析环境）落 meta["evidence_manifest"]，
+        # 并把 sha256 提到顶层快捷键 meta["sample_sha256"]（CSV 导出 / 团伙聚类已预留引用）。
+        # 纯函数容错、绝不抛；外层仍包 try 兜底任何意外，失败只 logging 不炸 analyze。
+        try:
+            from apkscan import __version__
+            from apkscan.core.integrity import sample_fingerprint
+
+            manifest = sample_fingerprint(str(apk), tool_version=__version__)
+            report.meta["evidence_manifest"] = manifest
+            report.meta["sample_sha256"] = manifest.get("sha256", "")
+        except Exception:
+            logger.exception("[cli] 写入取证完整性元数据失败（已忽略，不影响报告产出）")
+
         # 设备探测：有在线设备则提示并写入 meta，便于报告/后续动态补全感知。
         # IPA 无 Android 动态（adb/frida 不适用），跳过设备探测。
         device_detected = False if is_ios else device.has_device()
@@ -756,13 +769,19 @@ def _write_reports(report: Report, out_dir: Path, formats: list[str], base: str)
 
     report.html / report.json 由其它 agent 实现。``runtime_report.json`` 不在此处写
     （那是 capture 的独立契约名）。
+
+    写完后对每个产物算 sha256，落 ``<base>.sha256`` 旁文件（对标 sha256sum 格式），作为
+    报告自证完整性的可复现校验锚点（工具产物自证，不替代司法鉴定机构的证据保全）。
     """
+    written: list[Path] = []  # 实际落盘成功的产物，供生成 .sha256 旁文件
+
     if "json" in formats:
         try:
             from apkscan.report import json as report_json
 
             path = out_dir / f"{base}.json"
             report_json.dump(report, str(path))
+            written.append(path)
             typer.echo(f"已写出 JSON 报告：{path}")
         except Exception:
             logger.exception("写出 JSON 报告失败（report.json 模块可能尚未就绪）")
@@ -773,6 +792,7 @@ def _write_reports(report: Report, out_dir: Path, formats: list[str], base: str)
             from apkscan.report import html as report_html
 
             report_html.render(report, str(html_path))
+            written.append(html_path)
             typer.echo(f"已写出 HTML 报告：{html_path}")
         except Exception:
             logger.exception("写出 HTML 报告失败（report.html 模块可能尚未就绪）")
@@ -785,6 +805,7 @@ def _write_reports(report: Report, out_dir: Path, formats: list[str], base: str)
             path = out_dir / f"{base}.pdf"
             html_source = str(html_path) if ("html" in formats and html_path.is_file()) else None
             if report_pdf.render(report, str(path), html_source=html_source):
+                written.append(path)
                 typer.echo(f"已写出 PDF 报告：{path}")
             else:
                 typer.echo(
@@ -793,6 +814,38 @@ def _write_reports(report: Report, out_dir: Path, formats: list[str], base: str)
                 )
         except Exception:
             logger.exception("写出 PDF 报告失败")
+
+    _write_sha256_sidecar(out_dir, base, written)
+
+
+def _write_sha256_sidecar(out_dir: Path, base: str, products: list[Path]) -> None:
+    """对每个报告产物算 sha256，落 ``<base>.sha256`` 旁文件（sha256sum 风格：``<hash>  <文件名>``）。
+
+    工具产物自证：供调证人员 / 复核方用 sha256sum 校验报告未被篡改，**不替代司法鉴定机构的
+    证据保全**。算 hash / 写旁文件全包 try/except——失败只 logging，绝不影响已产出的报告。
+    """
+    if not products:
+        return
+    try:
+        import hashlib
+
+        lines: list[str] = []
+        for path in products:
+            if not path.is_file():
+                continue
+            h = hashlib.sha256()
+            with open(path, "rb") as f:
+                for chunk in iter(lambda f=f: f.read(1 << 20), b""):
+                    h.update(chunk)
+            # sha256sum 风格：哈希 + 两个空格 + 文件名（旁文件与产物同目录，用 name 即可）。
+            lines.append(f"{h.hexdigest()}  {path.name}")
+        if not lines:
+            return
+        sidecar = out_dir / f"{base}.sha256"
+        sidecar.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        typer.echo(f"已写出完整性校验旁文件：{sidecar}")
+    except Exception:
+        logger.exception("[cli] 写出 .sha256 旁文件失败（已忽略，不影响报告产出）")
 
 
 def _print_summary(report: Report) -> None:
