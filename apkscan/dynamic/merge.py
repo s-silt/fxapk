@@ -1230,6 +1230,332 @@ def _add_runtime_clipboard_leads(
 
 
 # ---------------------------------------------------------------------------
+# 第二波（最后）：无障碍远控目标银行清单 → REMOTE_CONTROL Lead + 回传 host 走 infra + 手势 Finding
+# ---------------------------------------------------------------------------
+#
+# 反诈价值：无障碍远控木马劫持银行/支付 app 自动转账。运行时 hook 抓到：被劫持的目标 app 包名
+# 清单（针对性盗刷的硬物证、指明向哪些银行调被害人流水）、下发的远控手势/全局动作（远控指令）、
+# 屏幕回传 host（操盘端 C2）。
+#
+# ★ 优先级与边界（务必照做）：无障碍远控逻辑绝大多数要诱导真人操作才走，launch-only 抓不到——
+#   降 P2，Lead/Finding.notes 明标「需引导式人工动态，launch-only 抓不到」。三条产出：
+#   ① 目标银行/支付包名清单 → 按 rules/bank_packages.yaml 映射机构主体，产 REMOTE_CONTROL Lead
+#      （命中已知银行包名才产；未知包名进 Finding/notes，不滥产 Lead）。
+#   ② 屏幕/控件树回传 host → 并入端点走 merge_runtime_endpoints（infra 分级，别把 CDN 当 C2）。
+#   ③ 远控手势/指令序列 + MediaProjection 开启 → 产 Finding（severity 高，行为定性证据），不 Lead 化。
+
+# launch-only 诚实标注（横切硬要求，写进 REMOTE_CONTROL Lead.notes 与 Finding）。
+_REMOTE_CONTROL_TIMING_NOTE = (
+    "时序提示：无障碍远控逻辑绝大多数要诱导真人操作才触发，launch-only 抓不到——"
+    "需配合引导式人工动态（在被劫持 app 内模拟登录/转账操作）触发后重抓。"
+)
+# REMOTE_CONTROL Lead 的合规提示（含受害人高敏调证去向）。
+_REMOTE_CONTROL_COMPLIANCE_NOTE = (
+    "运行时实测：无障碍服务劫持了该目标银行/支付 app（针对性盗刷物证）；"
+    "凭目标机构主体向其调取被害人交易流水/异常转账记录，按办案合规留存处置。"
+)
+# REMOTE_CONTROL Lead 可调取的证据（指明向目标银行/支付机构调被害人流水）。
+_REMOTE_CONTROL_EVIDENCE: tuple[str, ...] = (
+    "被害账户交易流水",
+    "异常转账记录",
+    "设备登录指纹",
+)
+# 屏幕/控件树回传 host 的端点来源标记位置（runtime，走 infra 分级）。
+
+#: bank_packages 规则惰性缓存（包名精确键 dict + 前缀键 list）。
+_BANK_PACKAGES_CACHE: dict[str, Any] | None = None
+
+#: bank_packages.yaml 不可用时的内置兜底映射（覆盖主要几家，数据化便于扩）。
+_FALLBACK_BANK_PACKAGES: dict[str, str] = {
+    "com.icbc": "中国工商银行",
+    "com.icbc.": "中国工商银行",
+    "com.chinamworld.main": "中国建设银行",
+    "com.android.bankabc": "中国农业银行",
+    "com.chinamworld.bocmbci": "中国银行",
+    "com.bankcomm.Bankcomm": "交通银行",
+    "cmb.pb": "招商银行",
+    "com.cmbchina.": "招商银行",
+    "com.eg.android.AlipayGphone": "支付宝（蚂蚁集团）",
+    "com.alipay.": "支付宝（蚂蚁集团）",
+    "com.tencent.mm": "微信（财付通）",
+}
+
+
+def _load_bank_packages() -> dict[str, Any]:
+    """惰性加载 bank_packages 映射（rules/bank_packages.yaml）；缺失/异常 → 内置兜底。
+
+    返回 ``{"exact": {pkg: subject}, "prefixes": [(prefix, subject), ...]}``：以 ``.`` 结尾的
+    键作前缀匹配（覆盖同机构多子包/马甲），其余作精确匹配。前缀按长度降序（更具体优先）。
+    """
+    global _BANK_PACKAGES_CACHE
+    if _BANK_PACKAGES_CACHE is not None:
+        return _BANK_PACKAGES_CACHE
+    raw: dict[str, str] = dict(_FALLBACK_BANK_PACKAGES)
+    try:
+        from apkscan.core.registry import load_rules
+
+        data = load_rules("bank_packages")
+        if isinstance(data, dict):
+            packages = data.get("packages")
+            if isinstance(packages, dict):
+                cleaned = {
+                    str(k).strip().lower(): str(v).strip()
+                    for k, v in packages.items()
+                    if str(k).strip() and str(v).strip()
+                }
+                if cleaned:
+                    raw = cleaned
+    except Exception:  # noqa: BLE001 — 规则不可用不阻断，用兜底
+        logger.exception("[merge] 加载 bank_packages 规则失败，用内置兜底")
+    exact: dict[str, str] = {}
+    prefixes: list[tuple[str, str]] = []
+    for key, subject in raw.items():
+        if key.endswith("."):
+            prefixes.append((key, subject))
+        else:
+            exact[key] = subject
+    # 前缀按长度降序：更具体的前缀优先命中（如 com.cmbchina. 优先于 com.）。
+    prefixes.sort(key=lambda kv: -len(kv[0]))
+    _BANK_PACKAGES_CACHE = {"exact": exact, "prefixes": prefixes}
+    return _BANK_PACKAGES_CACHE
+
+
+def _bank_subject_of_package(package: str) -> str | None:
+    """把目标 app 包名映射回机构主体（精确优先、再前缀）；未命中 → None（不滥产 Lead）。"""
+    if not isinstance(package, str) or not package.strip():
+        return None
+    pkg = package.strip().lower()
+    rules = _load_bank_packages()
+    exact = rules["exact"]
+    if pkg in exact:
+        return exact[pkg]
+    for prefix, subject in rules["prefixes"]:
+        if pkg.startswith(prefix):
+            return subject
+    return None
+
+
+def merge_runtime_remote_control(report: Report, runtime_report_path: str) -> dict[str, int]:
+    """把无障碍远控事件并回主报告：目标银行包名→机构 Lead / 回传 host 走 infra / 手势序列 Finding。
+
+    流程（见模块顶部 §边界）：
+      1. 读 runtime_report.json 的 ``remote_control_events``（缺/旧版无该字段 → 跳过，零统计）。
+      2. 每条事件经 ``cryptohook.normalize_remote_control_event`` 再规范化兜底。
+      3. 目标包名清单（去重）→ ``_bank_subject_of_package`` 映射机构主体：
+         - **命中已知银行/支付包名** → 产 REMOTE_CONTROL Lead（subject=机构主体、where_to_request=
+           向目标机构调被害人流水、evidence_to_obtain=[被害账户交易流水/异常转账记录/设备登录指纹]、
+           notes 带 launch-only 诚实标注）。去重。
+         - **未知包名** → 不产 Lead，收集进 Finding 描述/notes（不滥产 Lead）。
+      4. 屏幕/控件树回传 host → 并入端点走 ``merge_runtime_endpoints``（infra 分级，CDN 不升 C2）。
+      5. 远控手势/指令序列 + MediaProjection 开启 → 产 Finding（severity 高，描述实测无障碍远控
+         行为：下发 N 个自动手势 / 劫持包名 X / 屏幕录制开启），**不 Lead 化**。
+      6. meta 打标 runtime_remote_control。
+
+    Returns:
+        ``{"rc_leads", "gesture_count", "screencapture", "unknown_packages", "rc_endpoints"}``。
+        内部 try/except，绝不抛。
+    """
+    stats = {
+        "rc_leads": 0,
+        "gesture_count": 0,
+        "screencapture": 0,
+        "unknown_packages": 0,
+        "rc_endpoints": 0,
+    }
+    try:
+        from apkscan.dynamic import cryptohook
+
+        raw_events = _load_events_field(runtime_report_path, "remote_control_events")
+        if not raw_events:
+            return stats
+
+        events: list[dict[str, Any]] = []
+        for raw in raw_events:
+            ev = cryptohook.normalize_remote_control_event(raw)
+            if ev is not None:
+                events.append(ev)
+        if not events:
+            return stats
+
+        # 分流：目标包名清单（去重保序）/ 手势计数 / 屏幕录制 / 回传 host。
+        target_packages: list[str] = []
+        seen_pkg: set[str] = set()
+        gesture_actions: list[str] = []
+        screencapture = 0
+        hosts: list[str] = []
+        seen_host: set[str] = set()
+        for ev in events:
+            pkg = str(ev.get("target_package", "")).strip()
+            if pkg and pkg not in seen_pkg:
+                seen_pkg.add(pkg)
+                target_packages.append(pkg)
+            if ev.get("event") == "gesture":
+                action = str(ev.get("action", "")).strip()
+                if action:
+                    gesture_actions.append(action)
+            if ev.get("event") == "screencapture":
+                screencapture += 1
+            host = str(ev.get("host", "")).strip()
+            if host and host not in seen_host:
+                seen_host.add(host)
+                hosts.append(host)
+
+        # ① 目标银行/支付包名 → 机构主体 Lead（命中才产；未知进 Finding/notes）。
+        known_targets: list[tuple[str, str]] = []  # (package, subject)
+        unknown_targets: list[str] = []
+        for pkg in target_packages:
+            subject = _bank_subject_of_package(pkg)
+            if subject is not None:
+                known_targets.append((pkg, subject))
+            else:
+                unknown_targets.append(pkg)
+        stats["rc_leads"] = _add_remote_control_leads(report, known_targets)
+        stats["unknown_packages"] = len(unknown_targets)
+
+        # ② 屏幕/控件树回传 host → 并入端点走 infra 分级（别把 CDN 当 C2）。
+        if hosts:
+            host_endpoints = [
+                Endpoint(
+                    value=h,
+                    kind="domain",
+                    evidences=[
+                        Evidence(
+                            source=_RUNTIME_SOURCE,
+                            location="runtime-remote-control",
+                            snippet=f"无障碍远控屏幕/控件树回传 host：{h}",
+                        )
+                    ],
+                )
+                for h in hosts
+            ]
+            merge_runtime_endpoints(report, host_endpoints)
+            stats["rc_endpoints"] = len(host_endpoints)
+
+        # ③ 远控手势序列 + MediaProjection → Finding（不 Lead 化）。
+        stats["gesture_count"] = len(gesture_actions)
+        stats["screencapture"] = screencapture
+        if gesture_actions or screencapture:
+            _add_remote_control_finding(
+                report, known_targets, unknown_targets, gesture_actions, screencapture
+            )
+
+        report.meta["runtime_remote_control"] = True
+        report.meta["runtime_remote_control_targets"] = [s for _, s in known_targets]
+        if unknown_targets:
+            report.meta["runtime_remote_control_unknown_packages"] = unknown_targets
+        logger.info(
+            "[merge] 无障碍远控并回：rc_leads=%d gesture=%d screencapture=%d unknown_pkg=%d host=%d"
+            "（launch-only 抓不到，多数需引导式人工动态）",
+            stats["rc_leads"],
+            stats["gesture_count"],
+            stats["screencapture"],
+            stats["unknown_packages"],
+            stats["rc_endpoints"],
+        )
+    except Exception:  # noqa: BLE001 - 远控并回失败不得抛给调用方（不破坏已产出报告）
+        logger.exception("[merge] 无障碍远控并回异常")
+    return stats
+
+
+def _add_remote_control_leads(
+    report: Report, known_targets: list[tuple[str, str]]
+) -> int:
+    """把命中已知银行/支付包名的目标产成 REMOTE_CONTROL Lead，去重 append，返回新增数。"""
+    existing = {(lead.category.value, lead.value) for lead in report.leads}
+    added = 0
+    for package, subject in known_targets:
+        lead_value = f"无障碍远控目标:{subject}({package})"
+        key = (LeadCategory.REMOTE_CONTROL.value, lead_value)
+        if key in existing:
+            continue
+        existing.add(key)
+        report.leads.append(
+            Lead(
+                category=LeadCategory.REMOTE_CONTROL,
+                value=lead_value,
+                subject=subject,
+                where_to_request=(
+                    f"向 {subject} 调取被害人账户交易流水、异常转账记录与设备登录指纹"
+                    "（针对性盗刷物证，凭机构主体落地被害人资金流）。"
+                ),
+                evidence_to_obtain=list(_REMOTE_CONTROL_EVIDENCE),
+                confidence=Confidence.HIGH,
+                advice="建议调证",
+                source_refs=[
+                    Evidence(
+                        source=_RUNTIME_SOURCE,
+                        location="runtime-remote-control",
+                        snippet=f"无障碍服务劫持目标 app：{package}（{subject}）"[:200],
+                    )
+                ],
+                notes=f"{_REMOTE_CONTROL_COMPLIANCE_NOTE} {_REMOTE_CONTROL_TIMING_NOTE}",
+            )
+        )
+        added += 1
+    return added
+
+
+def _add_remote_control_finding(
+    report: Report,
+    known_targets: list[tuple[str, str]],
+    unknown_targets: list[str],
+    gesture_actions: list[str],
+    screencapture: int,
+) -> None:
+    """运行时实测无障碍远控行为（手势序列 / 屏幕录制）→ 产高 severity Finding（不 Lead 化）。
+
+    行为定性证据走 Finding（category=runtime）：描述下发 N 个自动手势 / 劫持包名 X / 屏幕录制
+    开启。未知包名也在此呈现（不滥产 Lead，但作为劫持面证据保留）。
+    """
+    target_labels = [f"{subject}({pkg})" for pkg, subject in known_targets]
+    target_labels.extend(unknown_targets)
+    targets_text = "、".join(target_labels) if target_labels else "（未捕获到具体目标包名）"
+    screen_text = "已开启屏幕录制（MediaProjection）" if screencapture else "未观测到屏幕录制"
+    evidences: list[Evidence] = []
+    # 取每类首个手势动作作为证据样本（限量，避免刷爆）。
+    sample_actions: list[str] = []
+    for action in gesture_actions:
+        if action not in sample_actions:
+            sample_actions.append(action)
+        if len(sample_actions) >= 5:
+            break
+    for action in sample_actions:
+        evidences.append(
+            Evidence(
+                source=_RUNTIME_SOURCE,
+                location="runtime-remote-control",
+                snippet=f"下发远控指令：{action}",
+            )
+        )
+    if screencapture:
+        evidences.append(
+            Evidence(
+                source=_RUNTIME_SOURCE,
+                location="runtime-remote-control",
+                snippet="MediaProjection.createVirtualDisplay：屏幕录制开启",
+            )
+        )
+    report.findings.append(
+        Finding(
+            id="RUNTIME-REMOTE-CONTROL",
+            title="运行时无障碍远控行为：自动手势 / 屏幕录制劫持银行支付",
+            severity=Severity.HIGH,
+            category="runtime",
+            description=(
+                f"运行时实测无障碍远控行为：下发 {len(gesture_actions)} 个自动手势/全局动作；"
+                f"劫持目标 app：{targets_text}；{screen_text}。"
+                "无障碍服务被用于劫持银行/支付 app 自动转账（远控盗刷），是涉诈木马的典型攻击面。"
+            ),
+            recommendation=(
+                f"研判：结合目标机构清单向对应银行/支付机构调取被害人流水；{_REMOTE_CONTROL_TIMING_NOTE}"
+            ),
+            evidences=evidences,
+            references=[],
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
 # Dead-Drop：二级真实 C2 从回包浮出（命令域名 → 回包 JSON 二段式）
 # ---------------------------------------------------------------------------
 #
@@ -1691,6 +2017,13 @@ def merge_and_rerender(
     clip_stats = merge_runtime_clipboard(report, rr_path)
     stats["clipboard_leads"] = clip_stats.get("clipboard_leads", 0)
 
+    # 第二波（最后）：无障碍远控目标银行清单 → REMOTE_CONTROL Lead / 回传 host 走 infra /
+    # 手势序列产 Finding（不 Lead 化）。★ launch-only 抓不到，多数需引导式人工动态。
+    _emit(on_progress, "并回无障碍远控目标银行清单 ...")
+    rc_stats = merge_runtime_remote_control(report, rr_path)
+    stats["rc_leads"] = rc_stats.get("rc_leads", 0)
+    stats["rc_gesture_count"] = rc_stats.get("gesture_count", 0)
+
     # 第二波：Dead-Drop 二级真实 C2 从回包浮出（命令域名 → 回包 JSON）。在端点并回之后跑——
     # 复用已并入的端点/Lead，对 config/信封回包做关系分析，把二级 C2 标 secondary、调高优先级。
     _emit(on_progress, "浮出 Dead-Drop 二级真实 C2 ...")
@@ -1757,6 +2090,7 @@ __all__ = [
     "merge_runtime_credentials",
     "merge_runtime_databases",
     "merge_runtime_clipboard",
+    "merge_runtime_remote_control",
     "resolve_dead_drop_c2",
     "merge_and_rerender",
 ]

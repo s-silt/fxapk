@@ -52,6 +52,12 @@ SQLCIPHER_MSG_TYPE = "apkscan-sqlcipher"
 #: ★ JS 侧回传剪贴板**实际文本**，Python 侧 normalize 立刻抽出校验通过的链上地址、丢弃全文
 #: （隐私护栏）——runtime_report.json 只落抽出的地址，绝不落剪贴板全文。
 CLIPBOARD_MSG_TYPE = "apkscan-clipboard"
+#: 第二波（最后）：无障碍远控指令与目标银行清单采集通道（REMOTE_CONTROL 行为物证 + C2）。
+#: hook AccessibilityService.onAccessibilityEvent（记被操作 app 包名 = 目标清单）、
+#: dispatchGesture/performGlobalAction（记下发手势 = 远控指令）、
+#: MediaProjectionManager.createVirtualDisplay（屏幕录制开启）。
+#: ★ 边界：无障碍远控逻辑绝大多数要诱导真人操作才走，launch-only 抓不到（见各 normalize/merge 标注）。
+ACCESSIBILITY_MSG_TYPE = "apkscan-accessibility"
 
 #: sink 累积上限：高频加密（每帧/每请求）会刷爆，超限丢弃 + 记一次 warning。
 _SINK_CAP = 4000
@@ -968,6 +974,143 @@ Java.perform(function () {
 
 
 # ---------------------------------------------------------------------------
+# 第二波（最后）：无障碍远控指令与目标银行清单 —— hook AccessibilityService 回调 + 手势 + 屏幕录制
+# ---------------------------------------------------------------------------
+#
+# 反诈价值：无障碍远控木马劫持银行/支付 app 自动转账。运行时能抓到：
+#   ① 被劫持的目标 app 包名清单（onAccessibilityEvent 的 event.getPackageName）——证明针对性
+#      盗刷、指明向哪些银行调被害人流水（merge 侧映射机构主体产 REMOTE_CONTROL Lead）。
+#   ② 下发的远控手势/全局动作（dispatchGesture / performGlobalAction）= 远控指令（行为定性证据）。
+#   ③ 屏幕录制开启（MediaProjectionManager.createVirtualDisplay）= 操盘端可视化远控的活体确认。
+#
+# ★ 边界（务必照做）：无障碍远控逻辑**绝大多数要诱导真人操作才走，launch-only 抓不到**——本段
+#   hook best-effort 武装，能不能抓到取决于是否有引导式人工动态（merge/Lead/Finding 诚实标注）。
+#
+# 抽象类护栏：android.accessibilityservice.AccessibilityService 是**抽象类**，无障碍服务子类才
+#   实现 onAccessibilityEvent。Frida 对抽象基类方法 hook 仅 best-effort（部分 ROM/版本能命中基类
+#   分发，部分需子类）——hook 不到只 console.log、绝不崩；另对 AccessibilityNodeInfo.getPackageName
+#   做补充面，覆盖 hook 不到回调时仍能从控件树拿目标包名。
+#
+# 限流（核验坑）：dispatchGesture 在自动操作时**高频**触发（每个手势一次），不限流会刷爆 send
+#   通道。JS 侧按总计数封顶（_CAP）+ 手势按采样计数，超限丢弃，避免拖垮抓包。
+FRIDA_ACCESSIBILITY_HOOK_JS: str = r"""
+// apkscan 无障碍远控指令与目标银行清单采集（best-effort）：hook AccessibilityService 回调 +
+// dispatchGesture/performGlobalAction（远控指令，限流）+ MediaProjection（屏幕录制）。
+Java.perform(function () {
+    var _rc_count = 0;
+    var _RC_CAP = 2000;          // 总事件封顶（避免刷爆 send 通道）
+    var _gesture_count = 0;
+    var _GESTURE_CAP = 200;      // dispatchGesture 高频 → 单独限流（采样上限）
+    var _seen_pkg = {};          // 同一目标包名只回传一次（onAccessibilityEvent 极高频）
+
+    function rcEmit(p) {
+        try {
+            if (_rc_count >= _RC_CAP) return;
+            _rc_count += 1;
+            p.type = 'apkscan-accessibility';
+            send(p);
+        } catch (e) { /* 回传失败不得炸会话 */ }
+    }
+    // 目标包名去重回传（被劫持的银行/支付 app 清单）。
+    function emitTargetPackage(pkg) {
+        try {
+            if (pkg === null || pkg === undefined) return;
+            var s = ('' + pkg).trim();
+            if (!s || _seen_pkg[s]) return;
+            _seen_pkg[s] = true;
+            rcEmit({event: 'accessibility_event', package: s, ts: Date.now()});
+        } catch (e) {}
+    }
+    function emitGesture(action) {
+        try {
+            if (_gesture_count >= _GESTURE_CAP) return;   // 高频限流
+            _gesture_count += 1;
+            rcEmit({event: 'gesture', action: ('' + action).slice(0, 200), ts: Date.now()});
+        } catch (e) {}
+    }
+
+    // --- AccessibilityService（抽象基类）onAccessibilityEvent：抓被操作 app 包名 ----------
+    // 抽象类——hook 基类回调 best-effort（命中与否随 ROM/版本），hook 不到不崩。
+    try {
+        var AccSvc = Java.use('android.accessibilityservice.AccessibilityService');
+        if (AccSvc.onAccessibilityEvent) {
+            AccSvc.onAccessibilityEvent.overload(
+                'android.view.accessibility.AccessibilityEvent'
+            ).implementation = function (event) {
+                try {
+                    if (event !== null && event !== undefined && event.getPackageName) {
+                        emitTargetPackage(event.getPackageName());
+                    }
+                } catch (e) {}
+                return this.onAccessibilityEvent(event);
+            };
+            console.log('[apkscan] AccessibilityService.onAccessibilityEvent hooked (abstract best-effort)');
+        }
+    } catch (e) {
+        console.log('[apkscan] AccessibilityService hook skip: ' + e);
+    }
+
+    // --- AccessibilityNodeInfo.getPackageName：补充面（hook 不到基类回调时从控件树拿目标包名）---
+    try {
+        var Node = Java.use('android.view.accessibility.AccessibilityNodeInfo');
+        if (Node.getPackageName) {
+            Node.getPackageName.implementation = function () {
+                var pkg = this.getPackageName();
+                try { emitTargetPackage(pkg); } catch (e) {}
+                return pkg;
+            };
+            console.log('[apkscan] AccessibilityNodeInfo.getPackageName hooked');
+        }
+    } catch (e) {
+        console.log('[apkscan] AccessibilityNodeInfo hook skip: ' + e);
+    }
+
+    // --- AccessibilityService.dispatchGesture：下发自动手势 = 远控指令（高频，限流）---------
+    try {
+        var AccSvc2 = Java.use('android.accessibilityservice.AccessibilityService');
+        if (AccSvc2.dispatchGesture) {
+            AccSvc2.dispatchGesture.overloads.forEach(function (ov) {
+                ov.implementation = function () {
+                    try { emitGesture('dispatchGesture'); } catch (e) {}
+                    return ov.apply(this, arguments);
+                };
+            });
+            console.log('[apkscan] AccessibilityService.dispatchGesture hooked (rate-limited)');
+        }
+        // performGlobalAction：返回/HOME/最近任务等全局动作（远控指令的另一形态）。
+        if (AccSvc2.performGlobalAction) {
+            AccSvc2.performGlobalAction.overload('int').implementation = function (action) {
+                try { emitGesture('performGlobalAction:' + action); } catch (e) {}
+                return this.performGlobalAction(action);
+            };
+            console.log('[apkscan] AccessibilityService.performGlobalAction hooked');
+        }
+    } catch (e) {
+        console.log('[apkscan] dispatchGesture/performGlobalAction hook skip: ' + e);
+    }
+
+    // --- MediaProjectionManager.createVirtualDisplay：屏幕录制开启（操盘端可视化远控）-------
+    try {
+        var MP = Java.use('android.media.projection.MediaProjection');
+        if (MP.createVirtualDisplay) {
+            MP.createVirtualDisplay.overloads.forEach(function (ov) {
+                ov.implementation = function () {
+                    try {
+                        rcEmit({event: 'screencapture', action: 'createVirtualDisplay', ts: Date.now()});
+                    } catch (e) {}
+                    return ov.apply(this, arguments);
+                };
+            });
+            console.log('[apkscan] MediaProjection.createVirtualDisplay hooked');
+        }
+    } catch (e) {
+        console.log('[apkscan] MediaProjection hook skip: ' + e);
+    }
+});
+"""
+
+
+# ---------------------------------------------------------------------------
 # on_message handler：把 Frida send() 的 crypto 事件规范化进 sink
 # ---------------------------------------------------------------------------
 
@@ -1541,6 +1684,78 @@ def clipboard_addresses_from_events(
 
 
 # ---------------------------------------------------------------------------
+# 第二波（最后）：无障碍远控事件规范化 —— 目标包名 / 远控指令 / 屏幕录制 / 回传 host
+# ---------------------------------------------------------------------------
+#
+# ★ 边界（务必照做）：无障碍远控逻辑绝大多数要诱导真人操作才走，launch-only 抓不到——本规范化
+#   只做纯逻辑（不抛、限流由 JS 侧封顶），抓没抓到取决于是否有引导式人工动态（merge/Lead 标注）。
+
+#: 远控事件的合法 event 取值（与 JS 侧约定）。
+_REMOTE_CONTROL_EVENTS: frozenset[str] = frozenset(
+    {"accessibility_event", "gesture", "screencapture", "screen_upload"}
+)
+
+
+def normalize_remote_control_event(payload: Any) -> dict[str, Any] | None:
+    """把 JS 侧无障碍远控 payload 规范化为稳定 schema；非法/空 → None（绝不抛）。
+
+    **remote_control_event 权威 schema**（producer=Frida FRIDA_ACCESSIBILITY_HOOK_JS，
+    consumer=merge_runtime_remote_control；落进 runtime_report.json['remote_control_events']）：
+
+    - ``event``: ``accessibility_event``（被操作 app 包名）| ``gesture``（下发手势/全局动作 =
+      远控指令）| ``screencapture``（MediaProjection 屏幕录制开启）| ``screen_upload``（屏幕/
+      控件树回传 host）。
+    - ``target_package``: 被劫持的目标 app 包名（accessibility_event 才有；映射机构主体的依据）。
+    - ``action``: 远控指令动作（gesture/screencapture：dispatchGesture / performGlobalAction:N /
+      createVirtualDisplay）。
+    - ``host``: 屏幕/控件树回传服务器 host（screen_upload 才有；并入端点走 infra 分级）。
+    - ``ts``: JS Date.now()（int 或 None）。
+
+    判别（容缺，JS 侧字段名 ``package`` → 本侧 ``target_package``）：必须至少带 target_package /
+    action / host 之一，否则视为空事件 → None（不留无物证价值的空壳）。
+    """
+    if not isinstance(payload, dict):
+        return None
+    event = _as_clean_str(payload.get("event")) or ""
+    # JS 侧回传 package；规范化为 target_package（merge 侧亦可直接喂 target_package）。
+    target_package = _as_clean_str(payload.get("target_package"), 256) or _as_clean_str(
+        payload.get("package"), 256
+    )
+    action = _as_clean_str(payload.get("action"), 256)
+    host = _normalize_host(payload.get("host"))
+
+    if not target_package and not action and not host:
+        return None  # 无任何远控物证字段 → 空事件，丢弃
+
+    # event 兜底：未给/非法时按携带的字段推断，确保下游分流稳定。
+    if event not in _REMOTE_CONTROL_EVENTS:
+        if target_package:
+            event = "accessibility_event"
+        elif host:
+            event = "screen_upload"
+        else:
+            event = "gesture"
+
+    return {
+        "event": event,
+        "target_package": target_package or "",
+        "action": action or "",
+        "host": host or "",
+        "ts": payload.get("ts") if isinstance(payload.get("ts"), int) else None,
+    }
+
+
+def _normalize_host(value: Any) -> str | None:
+    """把回传 host 规整为小写域名串；非 str/空/无点（非 FQDN）→ None。"""
+    if not isinstance(value, str):
+        return None
+    h = value.strip().lower().rstrip(".")
+    if not h or "." not in h:
+        return None
+    return h[:256]
+
+
+# ---------------------------------------------------------------------------
 # 从活体事件反推 crypto_recipe meta（喂回 appcrypto.CryptoRecipe.from_meta）
 # ---------------------------------------------------------------------------
 
@@ -1846,6 +2061,7 @@ __all__ = [
     "FRIDA_OKHTTP_HOOK_JS",
     "FRIDA_SQLCIPHER_HOOK_JS",
     "FRIDA_CLIPBOARD_HOOK_JS",
+    "FRIDA_ACCESSIBILITY_HOOK_JS",
     "CRYPTO_MSG_TYPE",
     "JSBRIDGE_MSG_TYPE",
     "SENSITIVE_API_MSG_TYPE",
@@ -1853,6 +2069,7 @@ __all__ = [
     "CREDENTIAL_MSG_TYPE",
     "SQLCIPHER_MSG_TYPE",
     "CLIPBOARD_MSG_TYPE",
+    "ACCESSIBILITY_MSG_TYPE",
     "make_message_handler",
     "make_typed_handler",
     "normalize_crypto_event",
@@ -1862,6 +2079,7 @@ __all__ = [
     "normalize_credential_event",
     "normalize_sqlcipher_event",
     "normalize_clipboard_event",
+    "normalize_remote_control_event",
     "clipboard_addresses_from_events",
     "extract_sharedprefs_credentials",
     "recipe_from_events",
