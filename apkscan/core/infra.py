@@ -221,6 +221,33 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         "360buyimg.com",
         "jddebug.com",
         "vipstatic.com",
+        # ---- Flutter / Dart 生态（跨平台框架与包仓库引用）----
+        "flutter.dev",
+        "flutter.io",
+        "dart.io",
+        "pub.dev",                  # Dart/Flutter 包仓库
+        "dartbug.com",              # Dart issue 追踪
+        "baseflow.com",             # Flutter 插件作者（permission_handler 等）
+        "dexterous.com",            # Flutter 插件作者（fluttertoast 等）
+        # ---- Go 语言官方 ----
+        "golang.org",
+        "go.dev",
+        # ---- 机器学习 / 框架官网 ----
+        "tensorflow.org",
+        # ---- 代码托管 / CI ----
+        "gitee.com",
+        "travisci.net",             # Travis CI 持续集成
+        # ---- 多媒体 / 编解码标准与厂商（DASH/AV1/音频专利引用）----
+        "dashif.org",               # DASH Industry Forum
+        "aomedia.org",              # AV1 编解码联盟
+        "dolby.com",
+        "dts.com",
+        # ---- 工具库 / 标准组织 ----
+        "curl.se",                  # libcurl 官网
+        "iptc.org",                 # 图片元数据标准
+        "useplus.org",              # PLUS 图片版权标准
+        "open.gl",                  # OpenGL 教程站
+        "g.co",                     # Google 短链
     }
 )
 

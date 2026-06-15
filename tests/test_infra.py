@@ -42,6 +42,40 @@ def test_library_embedded_does_not_touch_arbitrary_tld():
     assert advice == infra.ADVICE_INVESTIGATE
 
 
+# --- C3：收紧 tier 假阳（框架/库/开发基础设施域名误判建议调证）-------------
+
+# 这些是框架/库/开发基础设施的具体引用域名（非 C2），应判 ADVICE_SKIP。
+_FRAMEWORK_INFRA_DOMAINS = (
+    "flutter.dev", "flutter.io", "dart.io", "pub.dev", "dartbug.com",
+    "baseflow.com", "dexterous.com", "golang.org", "go.dev", "googleapis.com",
+    "gstatic.com", "mozilla.org", "openssl.org", "oracle.com", "tensorflow.org",
+    "jetbrains.com", "github.com", "gitee.com", "dashif.org", "aomedia.org",
+    "dolby.com", "dts.com", "sf.net", "w3.org", "apache.org", "curl.se",
+    "iptc.org", "useplus.org", "open.gl", "g.co", "android.com",
+    "androidplatform.net", "travisci.net",
+)
+
+
+def test_framework_infra_domains_skip():
+    for dom in _FRAMEWORK_INFRA_DOMAINS:
+        advice, _reason = infra.classify_domain(dom)
+        assert advice == infra.ADVICE_SKIP, f"{dom} 应判框架/库基础设施 无需调证"
+
+
+def test_framework_infra_subdomains_skip():
+    # 子域同样命中（域边界后缀匹配，非裸 TLD 子串）。
+    for dom in ("api.flutter.dev", "pkg.go.dev", "cdn.gstatic.com", "www.github.com"):
+        advice, _reason = infra.classify_domain(dom)
+        assert advice == infra.ADVICE_SKIP, f"{dom} 子域应命中框架基础设施"
+
+
+def test_real_c2_not_killed_by_framework_infra():
+    # ★ 守卫：真可疑 C2 域名不得被新增条目误降为无需调证。
+    for dom in ("aqecw.com", "mmybp.com", "bubdm.com", "91669.lol"):
+        advice, _reason = infra.classify_domain(dom)
+        assert advice == infra.ADVICE_INVESTIGATE, f"{dom} 应仍建议调证（真 C2 不得误杀）"
+
+
 # --- C1：domain_source_tier 来源档 ---------------------------------------
 
 
