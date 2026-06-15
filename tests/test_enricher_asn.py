@@ -9,7 +9,7 @@
 - 空 IP → ok=False，不触网。
 - 本地 JSON 缓存：首查写盘、二次查命中缓存（不再触网）。
 - 缓存目录不存在时自动创建。
-- 限速：time.sleep 被打桩，测试不真正等待。
+- 限速已集中到 _ipinfo（asn 不再自带限速）；conftest autouse 已重置共享状态并打桩 sleep。
 """
 
 from __future__ import annotations
@@ -37,10 +37,8 @@ def _isolated_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return cache_file
 
 
-@pytest.fixture(autouse=True)
-def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
-    """打桩 time.sleep，限速逻辑不真正阻塞测试。"""
-    monkeypatch.setattr(asn_mod.time, "sleep", lambda _seconds: None)
+# 限速已集中到 _ipinfo：sleep 打桩 + 共享状态重置由 conftest 的 autouse fixture
+# (_reset_ipinfo_shared_state) 统一处理，asn 测试不再自带 _no_sleep。
 
 
 class _FakeResponse:

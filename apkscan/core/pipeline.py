@@ -251,8 +251,8 @@ def _enrich_endpoints(
       无并发写竞争；端点之间互不共享 enrichment dict。
     - ``endpoints`` 列表**原地不动、顺序不变**（只就地写 ``ep.enrichment``，绝不重排）。
     - 跨端点共享的 provider 统计用锁聚合，``attempted/ok/failed/typical_error`` 准确。
-    - ip-api 免费档 45/min 硬限由 asn 富化器自身的线程安全限速器（``_respect_rate_limit``）
-      担保——并发下仍是全局闸，本层只管并发分发。
+    - ip-api 免费档限速由 ``_ipinfo`` 内部的进程级线程安全限速器担保（asn 单查走 45/min·1.4s 闸、
+      dns 批量走 /batch 15/min·4.0s 独立闸）——并发下仍是全局闸，本层只管并发分发。
 
     返回每个富化器的聚合状态 [{provider, attempted, ok, failed, typical_error}]，
     使富化器层的系统性失败（如某 provider 全部失败）在报告里透明可见，
