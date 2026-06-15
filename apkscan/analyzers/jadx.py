@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -29,7 +30,7 @@ from apkscan.core.models import (
     Finding,
     Severity,
 )
-from apkscan.core import infra
+from apkscan.core import infra, tools
 from apkscan.core.registry import BaseAnalyzer
 from apkscan.core.secrets import (
     SecretRules,
@@ -144,16 +145,21 @@ class JadxAnalyzer(BaseAnalyzer):
 
     def _run_jadx(self, apk_path: str, out_dir: str) -> str:
         """跑 jadx --no-res -d <out> <apk>。返回 ok|partial|timeout|failed（不抛）。"""
-        # ★ 用 shutil.which 解析完整路径（与 registry 能力探测同口径）：Windows 上 jadx 是
-        #   jadx.bat，裸名 ["jadx", ...] 经 subprocess(CreateProcess) 启动不走 PATHEXT →
-        #   WinError 2 找不到文件。完整路径（含 .bat）可直接被 subprocess 启动。
-        #   which 落空时退回裸名（requires=["jadx"] 已门控，正常不会到这）。
-        jadx_exe = shutil.which("jadx") or "jadx"
-        cmd = [jadx_exe, "--no-res", "-d", out_dir, apk_path]
+        # ★ 经 tools.resolve_jadx 解析：优先 PATH 上的 jadx，否则用独立插件包 jadx-addon/
+        #   （自带 JRE → 注入 JAVA_HOME，无系统 Java 也能跑）。返回完整路径而非裸名：
+        #   Windows 上 jadx 是 .bat，裸名经 subprocess 启动会 WinError 2。
+        resolved = tools.resolve_jadx()
+        if resolved is None:
+            logger.warning("[jadx] 无可用 jadx（PATH 与插件包 jadx-addon 均无），跳过反编译")
+            return "failed"
+        jadx_cmd, extra_env = resolved
+        cmd = [*jadx_cmd, "--no-res", "-d", out_dir, apk_path]
+        # 插件包自带 JRE 时把 JAVA_HOME 注入子进程环境（在系统环境基础上覆盖）。
+        env = {**os.environ, **extra_env} if extra_env else None
         logger.info("[jadx] 执行：%s", " ".join(cmd))
         try:
             proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=_TIMEOUT, check=False
+                cmd, capture_output=True, text=True, timeout=_TIMEOUT, check=False, env=env
             )
         except subprocess.TimeoutExpired:
             logger.warning("[jadx] 反编译超时（%ss）：%s", _TIMEOUT, apk_path)

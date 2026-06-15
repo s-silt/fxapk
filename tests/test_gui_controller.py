@@ -571,6 +571,97 @@ def test_unknown_action_friendly(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ===========================================================================
+# 7.5) install_jadx_addon：一键启用 jadx 插件包（解压 + 校验，headless）
+# ===========================================================================
+
+
+def _make_jadx_zip(zip_path: Path, *, with_jadx: bool = True, with_jre: bool = True) -> None:
+    import zipfile
+
+    from apkscan.core import tools
+
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        if with_jadx:
+            # 用平台对应的 jadx 启动器名（win=jadx.bat / 其它=jadx），与 install_jadx_addon
+            # 的校验同口径，使本测试在非 Windows CI 上也成立。
+            zf.writestr(f"jadx/bin/{tools._jadx_bat_name()}", "@echo jadx")
+            zf.writestr("jadx/lib/jadx.jar", "x")
+        if with_jre:
+            zf.writestr("jre/bin/java.exe", "MZ")
+            zf.writestr("jre/lib/rt", "x")
+
+
+def test_install_jadx_addon_success(tmp_path: Path) -> None:
+    zp = tmp_path / "fxapk-jadx.zip"
+    _make_jadx_zip(zp)
+    dest = tmp_path / "app"
+    ok, msg = ctrl_mod.install_jadx_addon(str(zp), dest_base=str(dest))
+    assert ok, msg
+    assert (dest / "jadx-addon" / "jadx" / "bin" / "jadx.bat").is_file()
+    assert (dest / "jadx-addon" / "jre" / "bin").is_dir()
+
+
+def test_install_jadx_addon_missing_file(tmp_path: Path) -> None:
+    ok, msg = ctrl_mod.install_jadx_addon(str(tmp_path / "nope.zip"), dest_base=str(tmp_path / "a"))
+    assert not ok
+    assert "不存在" in msg
+
+
+def test_install_jadx_addon_rejects_non_zip(tmp_path: Path) -> None:
+    f = tmp_path / "fake.zip"
+    f.write_text("not a real zip", encoding="utf-8")
+    ok, msg = ctrl_mod.install_jadx_addon(str(f), dest_base=str(tmp_path / "a"))
+    assert not ok
+    assert "zip" in msg.lower()
+
+
+def test_install_jadx_addon_zip_without_jadx_rejected(tmp_path: Path) -> None:
+    zp = tmp_path / "nojadx.zip"
+    _make_jadx_zip(zp, with_jadx=False)
+    ok, msg = ctrl_mod.install_jadx_addon(str(zp), dest_base=str(tmp_path / "a"))
+    assert not ok
+    assert "jadx" in msg
+
+
+def test_install_jadx_addon_without_jre_warns_but_ok(tmp_path: Path) -> None:
+    zp = tmp_path / "nojre.zip"
+    _make_jadx_zip(zp, with_jre=False)
+    ok, msg = ctrl_mod.install_jadx_addon(str(zp), dest_base=str(tmp_path / "a"))
+    assert ok
+    assert "JRE" in msg or "Java" in msg
+
+
+def test_install_jadx_addon_overwrites_existing(tmp_path: Path) -> None:
+    dest = tmp_path / "app"
+    stale = dest / "jadx-addon" / "stale"
+    stale.mkdir(parents=True)
+    (stale / "old.txt").write_text("old", encoding="utf-8")
+    zp = tmp_path / "f.zip"
+    _make_jadx_zip(zp)
+    ok, _ = ctrl_mod.install_jadx_addon(str(zp), dest_base=str(dest))
+    assert ok
+    assert not stale.exists()  # 重装前清掉旧内容
+
+
+def test_install_jadx_addon_rmtree_failure_returns_error_not_swallowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """旧 jadx-addon 删不掉（占用/权限）→ 不静默吞错，返回 (False, 原因)，绝不混合新旧内容。"""
+    dest = tmp_path / "app"
+    (dest / "jadx-addon").mkdir(parents=True)  # 已存在 → 触发 rmtree
+    zp = tmp_path / "f.zip"
+    _make_jadx_zip(zp)
+
+    def _boom(*_a: Any, **_k: Any) -> None:
+        raise OSError("目录被占用")
+
+    monkeypatch.setattr(ctrl_mod.shutil, "rmtree", _boom)
+    ok, msg = ctrl_mod.install_jadx_addon(str(zp), dest_base=str(dest))
+    assert not ok
+    assert "占用" in msg or "清理" in msg
+
+
+# ===========================================================================
 # 8) 防呆：APK 路径校验纯函数（headless，零 Tk，绝不抛）
 # ===========================================================================
 

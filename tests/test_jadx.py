@@ -5,10 +5,18 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
 
 from apkscan.analyzers import jadx
 from apkscan.analyzers.jadx import JadxAnalyzer
 from tests.conftest import FakeContext
+
+
+@pytest.fixture(autouse=True)
+def _stub_resolve_jadx(monkeypatch: pytest.MonkeyPatch) -> None:
+    """默认把 tools.resolve_jadx 桩成「裸 jadx、无额外 env」，使既有用例只关注 subprocess 行为。
+    需要测 resolve_jadx 解析/JAVA_HOME 注入的用例各自覆盖此桩。"""
+    monkeypatch.setattr(jadx.tools, "resolve_jadx", lambda: (["jadx"], {}))
 
 
 def _ctx(tmp_path: Path) -> FakeContext:
@@ -131,35 +139,54 @@ def test_version_ip_filtered_real_ip_kept(monkeypatch, tmp_path) -> None:
     assert "8.8.8.8" in vals
 
 
-def test_run_jadx_resolves_full_path_not_bare_name(monkeypatch, tmp_path) -> None:
-    """回归：Windows 上 jadx 是 jadx.bat，裸名 ["jadx", ...] 经 subprocess 启动会 WinError2
-    （CreateProcess 不走 PATHEXT）。必须用 shutil.which 解析成带扩展名的完整路径作为 argv[0]。"""
+def test_run_jadx_uses_resolved_full_path(monkeypatch, tmp_path) -> None:
+    """回归：argv[0] 必须是 tools.resolve_jadx() 解析出的完整路径（Windows 下 jadx.bat），
+    而非裸 'jadx'（裸名经 subprocess 启动会 WinError2，CreateProcess 不走 PATHEXT）。"""
     fake_exe = r"C:\tools\jadx\bin\jadx.BAT"
-    monkeypatch.setattr(
-        jadx.shutil, "which", lambda name, **kw: fake_exe if name == "jadx" else None
-    )
-    seen: dict[str, list[str]] = {}
+    monkeypatch.setattr(jadx.tools, "resolve_jadx", lambda: ([fake_exe], {}))
+    seen: dict[str, object] = {}
 
     def _fake_run(cmd, **kwargs):  # noqa: ANN001
         seen["cmd"] = list(cmd)
+        seen["env"] = kwargs.get("env")
         return subprocess.CompletedProcess(cmd, 0, stdout="done", stderr="")
 
     monkeypatch.setattr(jadx.subprocess, "run", _fake_run)
 
     JadxAnalyzer()._run_jadx("app.apk", str(tmp_path))
-    assert seen["cmd"][0] == fake_exe, "argv[0] 必须是 which 解析的完整路径，而非裸 'jadx'"
+    cmd = seen["cmd"]
+    assert isinstance(cmd, list) and cmd[0] == fake_exe
+    assert seen["env"] is None  # 无额外 env → 不显式传 env
 
 
-def test_run_jadx_falls_back_to_bare_name_when_which_none(monkeypatch, tmp_path) -> None:
-    """which 落空（理论上 requires=['jadx'] 已门控）→ 退回裸名，不崩。"""
-    monkeypatch.setattr(jadx.shutil, "which", lambda name, **kw: None)
-    seen: dict[str, list[str]] = {}
+def test_run_jadx_injects_java_home_from_addon(monkeypatch, tmp_path) -> None:
+    """插件包路径：resolve_jadx 返回 JAVA_HOME → 必须注入子进程 env（无系统 Java 也能跑）。"""
+    monkeypatch.setattr(
+        jadx.tools,
+        "resolve_jadx",
+        lambda: ([r"C:\addon\jadx\bin\jadx.BAT"], {"JAVA_HOME": r"C:\addon\jre"}),
+    )
+    seen: dict[str, object] = {}
 
     def _fake_run(cmd, **kwargs):  # noqa: ANN001
-        seen["cmd"] = list(cmd)
+        seen["env"] = kwargs.get("env")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(jadx.subprocess, "run", _fake_run)
 
     JadxAnalyzer()._run_jadx("app.apk", str(tmp_path))
-    assert seen["cmd"][0] == "jadx"
+    env = seen["env"]
+    assert isinstance(env, dict)
+    assert env.get("JAVA_HOME") == r"C:\addon\jre"
+
+
+def test_run_jadx_failed_when_no_jadx(monkeypatch, tmp_path) -> None:
+    """resolve_jadx 落空（理论上 requires=['jadx'] 已门控）→ 返回 failed，不调 subprocess、不崩。"""
+    monkeypatch.setattr(jadx.tools, "resolve_jadx", lambda: None)
+
+    def _boom(*a, **k):  # noqa: ANN001, ANN002, ANN003
+        raise AssertionError("resolve_jadx 为 None 时不应调 subprocess")
+
+    monkeypatch.setattr(jadx.subprocess, "run", _boom)
+
+    assert JadxAnalyzer()._run_jadx("app.apk", str(tmp_path)) == "failed"
