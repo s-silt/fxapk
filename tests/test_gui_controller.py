@@ -592,12 +592,15 @@ def _make_jadx_zip(zip_path: Path, *, with_jadx: bool = True, with_jre: bool = T
 
 
 def test_install_jadx_addon_success(tmp_path: Path) -> None:
+    from apkscan.core import tools
+
     zp = tmp_path / "fxapk-jadx.zip"
     _make_jadx_zip(zp)
     dest = tmp_path / "app"
     ok, msg = ctrl_mod.install_jadx_addon(str(zp), dest_base=str(dest))
     assert ok, msg
-    assert (dest / "jadx-addon" / "jadx" / "bin" / "jadx.bat").is_file()
+    # 用平台对应的 jadx 启动器名（win=jadx.bat / 其它=jadx），勿硬编码 .bat（否则 Linux CI 挂）。
+    assert (dest / "jadx-addon" / "jadx" / "bin" / tools._jadx_bat_name()).is_file()
     assert (dest / "jadx-addon" / "jre" / "bin").is_dir()
 
 
