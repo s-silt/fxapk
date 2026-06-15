@@ -72,6 +72,17 @@ library_file_globs:
   - "*/static/js/chunk-vendors*"
   - "*polyfill*"
   - "*/dist/*"
+  # jadx 反编译出的第三方库包路径（库内置的 URL/XML 命名空间/常量，非 App 后端 → 降待核）
+  - "*/org/xmlpull/*"
+  - "*/com/adobe/*"
+  - "*/org/apache/*"
+  - "*/org/jetbrains/*"
+  - "*/kotlin/*"
+  - "*/kotlinx/*"
+  - "*/io/reactivex/*"
+  - "*/com/squareup/*"
+  - "*/androidx/*"
+  - "*/android/support/*"
 
 # ---- bulk-string：单条字符串/字面量超过此长度 → tier=bulk-string（疑似内置域名库大表）----
 bulk_string_min_len: 2000

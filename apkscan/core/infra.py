@@ -248,6 +248,16 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         "useplus.org",              # PLUS 图片版权标准
         "open.gl",                  # OpenGL 教程站
         "g.co",                     # Google 短链
+        # ---- XML 命名空间 URI / 框架代码常量（反编译 Java/资源里的命名空间声明与
+        #      Kotlin/Java 常量被端点抽取器误当域名，本质非网络端点）----
+        "adobe.com",                # ns.adobe.com XMP/XAP 命名空间
+        "xml.org",                  # SAX 命名空间
+        "xmlpull.org",              # XmlPull 解析器命名空间
+        "purl.org",                 # Dublin Core / RDF 命名空间
+        "schema.org",               # 结构化数据词汇
+        "openxmlformats.org",       # OOXML 命名空间
+        "dispatchers.io",           # Kotlin Dispatchers.IO 被误当域名
+        "locale.us",                # Java Locale.US 被误当域名
     }
 )
 
@@ -266,10 +276,13 @@ _FALLBACK_LIBRARY_EMBEDDED: tuple[str, ...] = (
     "wikipedia.org", "facebook.com", "twitter.com", "youtube.com",
     "chase.com", "paypal.com", "pornhub.com", "xvideos.com",
 )
-# library-file 路径 glob 兜底。
+# library-file 路径 glob 兜底（含 jadx 反编译第三方库包路径：库内置 URL/命名空间/常量降待核）。
 _FALLBACK_LIBRARY_FILE_GLOBS: tuple[str, ...] = (
     "*/uni_modules/*", "*/node_modules/*", "*/vendor/*", "*.min.js",
     "*/static/echarts*", "*echarts.min.js", "*/dist/*",
+    "*/org/xmlpull/*", "*/com/adobe/*", "*/org/apache/*", "*/org/jetbrains/*",
+    "*/kotlin/*", "*/kotlinx/*", "*/io/reactivex/*", "*/com/squareup/*",
+    "*/androidx/*", "*/android/support/*",
 )
 _FALLBACK_BULK_STRING_MIN_LEN = 2000
 
@@ -400,6 +413,38 @@ def _matched_infra(domain: str) -> str | None:
 def is_known_infra(domain: str) -> bool:
     """域名是否命中已知正规基础设施清单（纯函数）。"""
     return _matched_infra(domain) is not None
+
+
+# XML 命名空间 / schema 声明的常见 host 与 path 片段。出现这些的 URL 是 XML 命名空间
+# 标识符（反编译 Java / 资源里大量存在），**不是网络端点**，应在抽取层直接丢弃。
+_XML_NS_HOSTS: tuple[str, ...] = (
+    "w3.org", "adobe.com", "xml.org", "xmlpull.org", "purl.org", "schema.org",
+    "openxmlformats.org", "schemas.android.com", "schemas.microsoft.com",
+    "schemas.xmlsoap.org", "xml.apache.org", "java.sun.com", "jcp.org", "iptc.org",
+)
+_XML_NS_PATH_HINTS: tuple[str, ...] = (
+    "/xmlns", "/xml/1998/namespace", "/2000/xmlns", "/2001/xmlschema",
+    "/xap/", "/xap-", "/sax/", "/dtd/", "/dc/elements", "/dc/terms",
+    "/v1/doc/", "/apk/res/", "/apk/res-auto", "/ns/", "/namespace",
+)
+
+
+def is_xml_namespace_url(url: str) -> bool:
+    """URL 是否为 XML 命名空间 / schema 声明（非网络端点）。
+
+    判据：host 命中已知命名空间域（w3.org / adobe.com / xmlpull.org / schemas.* 等），
+    或 path 含命名空间惯用片段（``/xmlns``、``/XML/1998/namespace``、``/xap/``、``/sax/``、
+    ``/apk/res/`` 等）。命中即应在端点抽取层丢弃，避免反编译代码里的命名空间声明污染调证线索。
+    """
+    u = (url or "").strip().lower()
+    if not u:
+        return False
+    host = _normalize_domain(u)
+    if host:
+        for h in _XML_NS_HOSTS:
+            if host == h or host.endswith("." + h):
+                return True
+    return any(hint in u for hint in _XML_NS_PATH_HINTS)
 
 
 def _is_invalid_or_private_domain(domain: str) -> bool:

@@ -116,3 +116,66 @@ def test_best_tier_library_beats_bulk():
 def test_best_tier_none_is_worst():
     assert infra.best_tier(None, infra.TIER_BULK_STRING) == infra.TIER_BULK_STRING
     assert infra.best_tier(infra.TIER_APP, None) == infra.TIER_APP
+
+
+# --- A：XML 命名空间 / 框架常量噪音域名 → 无需调证（jadx 干扰收紧）------------
+
+
+def test_xml_namespace_and_framework_const_domains_skip():
+    # 反编译 Java 里的 XML 命名空间域 + Kotlin/Java 常量被误当域名，应判无需调证。
+    for dom in (
+        "ns.adobe.com", "xml.org", "xmlpull.org", "purl.org", "schema.org",
+        "openxmlformats.org", "dispatchers.io", "locale.us",
+    ):
+        advice, _reason = infra.classify_domain(dom)
+        assert advice == infra.ADVICE_SKIP, f"{dom} 应判 XML 命名空间/框架常量 无需调证"
+
+
+def test_namespace_const_additions_dont_kill_real_c2():
+    # 守卫：新增噪音条目不得误降真可疑域（含同后缀变体）。
+    for dom in ("aqecw.com", "mmybp.com", "evil-adobe.com.cn", "fakexml.org.cn"):
+        assert infra.classify_domain(dom)[0] == infra.ADVICE_INVESTIGATE, dom
+
+
+# --- B：is_xml_namespace_url 命名空间 URI 识别 ----------------------------
+
+
+def test_is_xml_namespace_url_true_for_namespace_uris():
+    for u in (
+        "http://ns.adobe.com/xap/1.0/",
+        "http://xmlpull.org/v1/doc/features.html",
+        "http://www.w3.org/2000/xmlns/",
+        "http://schemas.android.com/apk/res/android",
+        "http://purl.org/dc/elements/1.1/",
+        "https://schemas.xmlsoap.org/soap/envelope/",
+    ):
+        assert infra.is_xml_namespace_url(u) is True, u
+
+
+def test_is_xml_namespace_url_false_for_real_endpoints():
+    for u in (
+        "https://api.aqecw.com/login",
+        "http://app-api2.bubdm.com/notify",
+        "https://1358355812.cos.ap-chengdu.myqcloud.com/x.json",
+        "",
+    ):
+        assert infra.is_xml_namespace_url(u) is False, u
+
+
+# --- C：jadx 反编译第三方库包路径 → library-file（降待核）------------------
+
+
+def test_source_tier_jadx_library_packages():
+    for loc in (
+        r"sources\org\xmlpull\v1\XmlPullParser.java",
+        "sources/com/adobe/xmp/XMPMeta.java",
+        "sources/kotlinx/coroutines/Dispatchers.java",
+        "sources/org/apache/commons/io/IOUtils.java",
+        "sources/androidx/core/app/NotificationCompat.java",
+    ):
+        assert infra.domain_source_tier(loc, 50) == infra.TIER_LIBRARY_FILE, loc
+
+
+def test_source_tier_app_package_still_app():
+    # App 自有包路径仍判 app（不被库包 glob 误降）。
+    assert infra.domain_source_tier("sources/com/zmeiop/vsnmyuor/MainActivity.java", 50) == infra.TIER_APP
