@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from datetime import date, datetime
 from pathlib import Path
@@ -70,6 +71,25 @@ def _to_str(value: Any) -> str | None:
     return str(value).strip() or None
 
 
+def query_whois(domain: str) -> dict[str, str | None]:
+    """对域名做一次 python-whois 查询并抽取字段，返回 ``{registrar, registrant, org,
+    creation_date, country}``。
+
+    **可复用查询点**：供 rdap 富化器在 RDAP 无结果（404 / TLD 无 RDAP / 网络失败）时兜底
+    复用，避免重复造轮子。本函数**不吞错**：网络/解析异常原样向上抛，由调用方决定如何降级
+    （区分"网络失败"与"查无记录"是铁律要求）。
+
+    传 ``ignore_socket_errors=False`` 让网络失败真正抛异常；老版库无此形参则退回默认调用。
+    """
+    import whois  # 延迟导入：缓存命中或离线时无需该依赖
+
+    try:
+        record = whois.whois(domain, timeout=WHOIS_TIMEOUT, ignore_socket_errors=False)
+    except TypeError:  # 旧版 python-whois 无 ignore_socket_errors 形参
+        record = whois.whois(domain, timeout=WHOIS_TIMEOUT)
+    return _extract(record)
+
+
 def _extract(record: Any) -> dict[str, str | None]:
     """从 python-whois 返回对象提取关心的字段。
 
@@ -101,7 +121,10 @@ class WhoisEnricher(BaseEnricher):
     """对域名端点做 WHOIS 富化（注册商/注册人/机构/注册时间/国家）。"""
 
     name = "whois"
-    applies_to = ["domain"]
+    #: ★ 空 applies_to → pipeline 不再把它路由到任何端点（避免 whois 双查）。
+    #: 域名注册归属已收敛到 rdap 富化器（RDAP 优先 + 本类的 query_whois 兜底）；
+    #: 本类的 enrich/缓存逻辑保留，供需要时直接调用，但默认不参与 pipeline 富化路由。
+    applies_to: list[str] = []
 
     def __init__(self) -> None:
         # 缓存写入串行化，避免并发富化时写坏 JSON 文件。
@@ -109,6 +132,9 @@ class WhoisEnricher(BaseEnricher):
 
     # ------------------------------------------------------------------ 缓存
     def _load_cache(self) -> dict[str, dict[str, Any]]:
+        """读缓存文件。★必须持 self._lock 调用：Windows 下读句柄 open 与另一线程的
+        os.replace(whois.json) 撞同一文件会抛 PermissionError(WinError 5)/Errno 13，
+        让缓存静默丢失。读写共用一把锁消除该重叠窗口；enrich() 经 _load_cache_locked 进入。"""
         if not CACHE_FILE.is_file():
             return {}
         try:
@@ -122,6 +148,11 @@ class WhoisEnricher(BaseEnricher):
             return {}
         return data
 
+    def _load_cache_locked(self) -> dict[str, dict[str, Any]]:
+        """持锁读缓存，供 enrich() 的命中检查用，避免与并发写的 os.replace 撞车。"""
+        with self._lock:
+            return self._load_cache()
+
     def _save_cache_entry(self, domain: str, entry: dict[str, Any]) -> None:
         with self._lock:
             cache = self._load_cache()
@@ -129,7 +160,10 @@ class WhoisEnricher(BaseEnricher):
             try:
                 CACHE_DIR.mkdir(parents=True, exist_ok=True)
                 # 原子写：临时文件 + replace，避免崩溃/并发留半截坏缓存。
-                tmp = CACHE_FILE.with_name(CACHE_FILE.name + ".tmp")
+                # tmp 名带 pid+线程 id 唯一后缀：避免多写者复用固定 whois.json.tmp 互相覆盖/再撞 replace。
+                tmp = CACHE_FILE.with_name(
+                    f"{CACHE_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+                )
                 tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
                 tmp.replace(CACHE_FILE)
             except Exception:
@@ -139,17 +173,10 @@ class WhoisEnricher(BaseEnricher):
     def _query(self, domain: str) -> dict[str, str | None]:
         """实际网络查询；任何异常向上抛由 enrich() 统一捕获。
 
-        传 ``ignore_socket_errors=False`` 让**网络失败真正抛异常**（走 enrich 的 except 分支、
-        error 带真实异常类型），而非被 python-whois 默认吞成空记录 → 与"查到但无记录"混为
-        "全空"。如实区分"网络失败"与"查无备案/记录"是铁律要求。老版库无此形参则退回默认调用。
+        委托给模块级 ``query_whois``（同一逻辑也供 rdap 兜底复用），如实区分"网络失败"与
+        "查无记录"。
         """
-        import whois  # 延迟导入：缓存命中或离线时无需该依赖
-
-        try:
-            record = whois.whois(domain, timeout=WHOIS_TIMEOUT, ignore_socket_errors=False)
-        except TypeError:  # 旧版 python-whois 无 ignore_socket_errors 形参
-            record = whois.whois(domain, timeout=WHOIS_TIMEOUT)
-        return _extract(record)
+        return query_whois(domain)
 
     # ------------------------------------------------------------------ 入口
     def enrich(self, ep: Endpoint) -> EnrichmentResult:
@@ -166,8 +193,8 @@ class WhoisEnricher(BaseEnricher):
                 provider=self.name, ok=False, error="WHOIS 不可用（数据文件缺失），已跳过"
             )
 
-        # 1) 缓存命中直接返回（不消耗网络）。
-        cache = self._load_cache()
+        # 1) 缓存命中直接返回（不消耗网络）。持锁读，避免与并发写 os.replace 撞车（Windows race）。
+        cache = self._load_cache_locked()
         cached = cache.get(domain)
         if isinstance(cached, dict):
             logger.debug("WHOIS 缓存命中：%s", domain)

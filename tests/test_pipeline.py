@@ -335,6 +335,134 @@ def test_advice_assigned_by_infra_and_category(monkeypatch, fake_ctx):
     assert all(l.advice for l in report.leads)
 
 
+# --------------------------- 归属优先级 icp → rdap → whois ---------------------
+
+
+def test_domain_lead_subject_priority_icp_first():
+    """归属优先级：icp.subject > rdap.registrant > whois.registrant。"""
+    eps = [
+        Endpoint(
+            value="a.fraud.com",
+            kind="domain",
+            enrichment={
+                "icp": {"subject": "ICP 主体公司", "license_no": "京ICP备1号"},
+                "rdap": {"registrant": "RDAP 注册人", "registrar": "GoDaddy", "source": "rdap"},
+                "whois": {"registrant": "WHOIS 注册人", "registrar": "OldReg"},
+            },
+        ),
+    ]
+    leads = pipeline.build_endpoint_leads(eps)
+    lead = next(l for l in leads if l.category == LeadCategory.DOMAIN)
+    assert lead.subject == "ICP 主体公司"
+    assert "ICP" in (lead.where_to_request or "")
+
+
+def test_domain_lead_rdap_when_no_icp():
+    """无 icp 时用 rdap 的 registrar / registrant 填归属（rdap 优先于 whois）。"""
+    eps = [
+        Endpoint(
+            value="b.fraud.com",
+            kind="domain",
+            enrichment={
+                "rdap": {
+                    "registrar": "RDAP Registrar Inc",
+                    "registrant": "RDAP Registrant Co",
+                    "source": "rdap",
+                },
+                "whois": {"registrar": "Whois Reg", "registrant": "Whois Co"},
+            },
+        ),
+    ]
+    leads = pipeline.build_endpoint_leads(eps)
+    lead = next(l for l in leads if l.category == LeadCategory.DOMAIN)
+    assert lead.subject == "RDAP Registrant Co"
+    assert "RDAP Registrar Inc" in (lead.where_to_request or "")
+    # 用了 rdap 的注册商，而非 whois 的。
+    assert "Whois Reg" not in (lead.where_to_request or "")
+
+
+def test_domain_lead_whois_fallback_when_no_icp_no_rdap():
+    """无 icp、无 rdap 时回退 whois。"""
+    eps = [
+        Endpoint(
+            value="c.fraud.com",
+            kind="domain",
+            enrichment={"whois": {"registrar": "Whois Only Reg", "registrant": "Whois Co"}},
+        ),
+    ]
+    leads = pipeline.build_endpoint_leads(eps)
+    lead = next(l for l in leads if l.category == LeadCategory.DOMAIN)
+    assert lead.subject == "Whois Co"
+    assert "Whois Only Reg" in (lead.where_to_request or "")
+
+
+def test_domain_lead_rdap_whois_fallback_source_used():
+    """rdap 内部 whois 兜底（source=whois-fallback）的字段同样可用于归属。"""
+    eps = [
+        Endpoint(
+            value="d.fraud.com",
+            kind="domain",
+            enrichment={
+                "rdap": {
+                    "registrar": "Fallback Reg",
+                    "registrant": "Fallback Co",
+                    "source": "whois-fallback",
+                }
+            },
+        ),
+    ]
+    leads = pipeline.build_endpoint_leads(eps)
+    lead = next(l for l in leads if l.category == LeadCategory.DOMAIN)
+    assert lead.subject == "Fallback Co"
+    assert "Fallback Reg" in (lead.where_to_request or "")
+
+
+def test_domain_lead_dns_hosting_in_evidence_and_notes():
+    """dns 富化的托管 IP / ASN 体现在 evidence_to_obtain 或 notes。"""
+    eps = [
+        Endpoint(
+            value="e.fraud.com",
+            kind="domain",
+            enrichment={
+                "rdap": {"registrar": "R", "source": "rdap"},
+                "dns": {
+                    "ips": ["45.76.1.1", "45.76.1.2"],
+                    "hosting": [
+                        {"ip": "45.76.1.1", "asn": "AS20473 Vultr", "org": "Vultr", "country": "US"},
+                        {"ip": "45.76.1.2", "asn": "AS20473 Vultr", "org": "Vultr", "country": "US"},
+                    ],
+                },
+            },
+        ),
+    ]
+    leads = pipeline.build_endpoint_leads(eps)
+    lead = next(l for l in leads if l.category == LeadCategory.DOMAIN)
+    blob = " ".join(lead.evidence_to_obtain) + " " + (lead.notes or "")
+    assert "45.76.1.1" in blob
+    assert "Vultr" in blob
+
+
+def test_whois_enricher_not_routed_by_pipeline():
+    """避免 whois 双查：独立 WhoisEnricher 的 applies_to 应为空，pipeline 不再路由它。"""
+    from apkscan.enrichers.whois import WhoisEnricher
+
+    assert WhoisEnricher().applies_to == []
+
+    queried: list[str] = []
+
+    class _SpyWhois(BaseEnricher):
+        name = "whois"
+        applies_to = WhoisEnricher().applies_to  # 即 []
+
+        def enrich(self, ep: Endpoint) -> EnrichmentResult:  # pragma: no cover
+            queried.append(ep.value)
+            return EnrichmentResult(provider=self.name, ok=True, data={})
+
+    eps = [Endpoint(value="pay.evil-app.com", kind="domain")]
+    pipeline._enrich_endpoints(eps, [_SpyWhois()])
+    assert queried == []  # applies_to=[] → 不被路由
+
+
 # --------------------------- 资源审计（exe-ready）---------------------------
 
 
