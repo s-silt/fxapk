@@ -293,6 +293,38 @@ def test_dexdump_keeps_fu_when_serial_none(
     assert "-D" not in captured["cmd"]
 
 
+def test_dexdump_does_not_use_pipe_avoids_grandchild_hang(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """回归：frida-dexdump 的 stdout/stderr 绝不能用 PIPE（capture_output=True）。
+
+    frida-dexdump 会派生 frida 孙进程并继承 stdout 管道写端；若用 PIPE，300s 超时后
+    subprocess.run 排空管道的 communicate() 会因孙进程未退而**永久阻塞**——超时形同虚设，
+    GUI 一键全自动卡在第三步脱壳、进不了第四步抓包。必须重定向到文件（无管道可阻塞）。
+    """
+    _all_capabilities_ok(monkeypatch)
+    _patch_package_name(monkeypatch)
+    seen: dict[str, Any] = {}
+
+    def _fake_run(cmd: list[str], **kwargs: Any) -> _FakeProc:
+        seen["kwargs"] = kwargs
+        o_idx = cmd.index("-o")
+        dump_dir = Path(cmd[o_idx + 1])
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        (dump_dir / "classes.dex").write_bytes(b"dex\n035\x00x")
+        return _FakeProc(returncode=0, stdout="ok")
+
+    monkeypatch.setattr(unpack.subprocess, "run", _fake_run)
+    monkeypatch.setattr(unpack, "_reanalyze", lambda a, e, o: [])
+
+    unpack.run("sample.apk", out_dir=str(tmp_path / "out"), reanalyze=True)
+
+    kw = seen["kwargs"]
+    assert not kw.get("capture_output"), "不得用 capture_output(=PIPE)，孙进程持管道写端会致超时后卡死"
+    assert kw.get("stdout") not in (None, subprocess.PIPE), "stdout 必须重定向到文件，而非 PIPE"
+    assert kw.get("stderr") != subprocess.PIPE, "stderr 不得用 PIPE"
+
+
 # ---------------------------------------------------------------------------
 # 3) frida-dexdump 失败 → error
 # ---------------------------------------------------------------------------

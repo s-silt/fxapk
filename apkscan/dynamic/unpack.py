@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import tempfile
 from pathlib import Path
 
 from apkscan.core import device, tools
@@ -233,53 +234,70 @@ def _dexdump(
     playbook.append(f"frida-dexdump {human_flags} -f {package_name} -o {dump_dir}")
     logger.info("执行 frida-dexdump：%s", " ".join(cmd))
 
+    # ★ stdout/stderr 重定向到临时文件，绝不用 capture_output(=PIPE)：
+    #   frida-dexdump 会派生 frida 孙进程并继承管道写端；用 PIPE 时 300s 超时后
+    #   subprocess.run 排空管道的 communicate() 会因孙进程未退而**永久阻塞**——超时形同虚设，
+    #   GUI 一键全自动卡在第三步脱壳、进不了第四步抓包。重定向到文件 → 无管道可阻塞，超时如期触发。
+    fd, log_path = tempfile.mkstemp(prefix="apkscan_dexdump_", suffix=".log")
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=_DEXDUMP_TIMEOUT,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        logger.warning("frida-dexdump 超时（%ss）：package=%s", _DEXDUMP_TIMEOUT, package_name)
-        return f"frida-dexdump 超时（{_DEXDUMP_TIMEOUT}s 未完成），目标可能未启动或壳脱不出。"
+        try:
+            with open(fd, "w", encoding="utf-8", errors="replace") as log_fh:
+                proc = subprocess.run(
+                    cmd,
+                    stdout=log_fh,
+                    stderr=subprocess.STDOUT,  # 并入 stdout 同一文件，诊断尾部一并保留
+                    timeout=_DEXDUMP_TIMEOUT,
+                    check=False,
+                )
+        except subprocess.TimeoutExpired:
+            logger.warning("frida-dexdump 超时（%ss）：package=%s", _DEXDUMP_TIMEOUT, package_name)
+            return f"frida-dexdump 超时（{_DEXDUMP_TIMEOUT}s 未完成），目标可能未启动或壳脱不出。"
+        # frida-dexdump 的真实错误（连不上 frida-server / 版本不匹配 / spawn 失败 / 权限）多走
+        # stderr，已并入同一文件一并纳入诊断，避免失败原因被静默丢弃、排障无据。
+        tail = _read_log_tail(log_path)
+    finally:
+        try:
+            Path(log_path).unlink()
+        except OSError:
+            logger.debug("清理 frida-dexdump 日志临时文件失败：%s", log_path, exc_info=True)
 
-    tail = (proc.stdout or "")[-_STDOUT_TAIL:]
-    # frida-dexdump 的真实错误（连不上 frida-server / 版本不匹配 / spawn 失败 / 权限）
-    # 绝大多数走 stderr，必须一并纳入诊断，否则失败原因被静默丢弃、排障无据。
-    tail_err = (proc.stderr or "")[-_STDOUT_TAIL:]
     if proc.returncode != 0:
         logger.error(
-            "frida-dexdump 非零退出（%s）：package=%s\nstdout尾部：%s\nstderr尾部：%s",
+            "frida-dexdump 非零退出（%s）：package=%s\n输出尾部：%s",
             proc.returncode,
             package_name,
             tail,
-            tail_err,
         )
         return (
             f"frida-dexdump 非零退出（returncode={proc.returncode}）。"
-            f"stdout 尾部：{tail.strip()} | stderr 尾部：{tail_err.strip()}"
-            f"{device.frida_spawn_hint(tail + tail_err)}"
+            f"输出尾部：{tail.strip()}"
+            f"{device.frida_spawn_hint(tail)}"
         )
 
     dumped = _collect_dex(dump_dir)
     if not dumped:
         logger.error(
-            "frida-dexdump 退出 0 但未产出 .dex：package=%s\nstdout尾部：%s\nstderr尾部：%s",
+            "frida-dexdump 退出 0 但未产出 .dex：package=%s\n输出尾部：%s",
             package_name,
             tail,
-            tail_err,
         )
         return (
             f"frida-dexdump 未 dump 出任何 .dex（目录 {dump_dir} 为空）。"
-            f"stdout 尾部：{tail.strip()} | stderr 尾部：{tail_err.strip()}"
+            f"输出尾部：{tail.strip()}"
         )
 
-    logger.debug("frida-dexdump stdout 尾部：%s", tail)
+    logger.debug("frida-dexdump 输出尾部：%s", tail)
     return dumped
+
+
+def _read_log_tail(log_path: str, limit: int = _STDOUT_TAIL) -> str:
+    """读 frida-dexdump 日志文件尾部（合并的 stdout+stderr）。读失败返回空串（不抛、记 debug）。"""
+    try:
+        text = Path(log_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        logger.debug("读取 frida-dexdump 日志失败：%s", log_path, exc_info=True)
+        return ""
+    return text[-limit:]
 
 
 def _collect_dex(dump_dir: Path) -> list[Path]:
