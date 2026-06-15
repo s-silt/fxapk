@@ -340,19 +340,42 @@ def test_returncode_nonzero_marks_not_ok(
     assert res.report_paths  # 报告路径仍被探测/上报
 
 
-def test_no_report_json_marks_not_ok_even_if_returncode_zero(
+def test_html_only_is_ok_with_unknown_counts(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    # 只有 html、无 json（如 --fmt html）→ 报告已产出 → ok=True；计数依赖 json，故未知。
     monkeypatch.setattr(ctrl_mod, "_frozen", lambda: False)
-    # 只有 html、无 json（如 --fmt html）→ 没 report.json 则 ok=False（计数依赖 json）。
     (tmp_path / "report.html").write_text("<html></html>", encoding="utf-8")
     apk = _make_apk(tmp_path)
     _patch_subprocess(monkeypatch, returncode=0)
     controller, _logs, results = _make_controller(monkeypatch)
     controller.start(ActionRequest(action=ACTION_STATIC, apk_path=apk, out_dir=str(tmp_path)))
     res = results[0]
-    assert res.ok is False
+    assert res.ok is True  # 产出了报告即成功（修复：不再因无 json 误判失败）
     assert res.counts.known is False
+    assert any(p.lower().endswith(".html") for p in res.report_paths)
+
+
+def test_pdf_only_is_ok_and_discovered(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """回归：GUI 单选 PDF（--fmt pdf，无 json/html）→ 报告应被发现且 ok=True，不再报「未产出报告」。"""
+    monkeypatch.setattr(ctrl_mod, "_frozen", lambda: False)
+    (tmp_path / "sample.pdf").write_bytes(b"%PDF-1.4 fake")
+    apk = _make_apk(tmp_path)
+    _patch_subprocess(monkeypatch, returncode=0)
+    controller, _logs, results = _make_controller(monkeypatch)
+    controller.start(ActionRequest(action=ACTION_STATIC, apk_path=apk, out_dir=str(tmp_path)))
+    res = results[0]
+    assert res.ok is True
+    assert any(p.lower().endswith(".pdf") for p in res.report_paths)
+    assert res.counts.known is False
+
+
+def test_discover_reports_finds_pdf_only(tmp_path: Path) -> None:
+    (tmp_path / "x.pdf").write_bytes(b"%PDF-1.4 fake")
+    found = ctrl_mod.GuiController._discover_reports(str(tmp_path))
+    assert any(p.lower().endswith(".pdf") for p in found)
 
 
 def test_counts_unknown_when_json_unreadable(
