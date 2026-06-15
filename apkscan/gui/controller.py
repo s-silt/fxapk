@@ -891,10 +891,10 @@ class GuiController:
           或不产出 json）。steps 子进程模式留空（日志已实时呈现）。
         """
         report_paths = self._discover_reports(out_dir)
-        # 主报告 json 存在即视作有结果。报告现按 APK 名命名（<base>.json），不能再写死
-        # "report.json"；_discover_reports 已排除 runtime_report.json，故任一 .json 即主报告。
-        has_json = any(p.lower().endswith(".json") for p in report_paths)
-        ok = (returncode == 0) and has_json
+        # 产出**任一**报告（json/html/pdf）且子进程正常退出即视作成功——不再强求 json。
+        # 旧逻辑 ok 依赖 has_json，导致单选 --fmt pdf / html 时虽已产报告却被误判"未产出报告"。
+        # 计数仍依赖 json（无 json → counts 未知），但计数未知不等于失败。
+        ok = (returncode == 0) and bool(report_paths)
         counts = self._read_counts(report_paths)
         html_report = next((p for p in report_paths if p.lower().endswith(".html")), "")
 
@@ -965,7 +965,7 @@ class GuiController:
                     if sibling.is_file():
                         found.append(str(sibling))
             else:
-                # 无 json：退化取最新 html（无 json → 计数未知、ok=False，符合既有契约）。
+                # 无 json：退化按 html → pdf 找锚（支持 --fmt html / --fmt pdf 单格式；计数未知）。
                 html_files = [p for p in base_dir.glob("*.html") if p.is_file()]
                 if html_files:
                     main_html = max(html_files, key=lambda p: p.stat().st_mtime)
@@ -973,6 +973,11 @@ class GuiController:
                     pdf_sibling = base_dir / f"{main_html.stem}.pdf"
                     if pdf_sibling.is_file():
                         found.append(str(pdf_sibling))
+                else:
+                    # 仅 PDF（--fmt pdf）：取最新 pdf 作锚。修复"单选 PDF 报未产出报告"。
+                    pdf_files = [p for p in base_dir.glob("*.pdf") if p.is_file()]
+                    if pdf_files:
+                        found.append(str(max(pdf_files, key=lambda p: p.stat().st_mtime)))
         except OSError:
             logger.exception("[gui] 配组输出目录报告失败：%s", out_dir)
             return []
