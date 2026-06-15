@@ -144,7 +144,12 @@ class JadxAnalyzer(BaseAnalyzer):
 
     def _run_jadx(self, apk_path: str, out_dir: str) -> str:
         """跑 jadx --no-res -d <out> <apk>。返回 ok|partial|timeout|failed（不抛）。"""
-        cmd = ["jadx", "--no-res", "-d", out_dir, apk_path]
+        # ★ 用 shutil.which 解析完整路径（与 registry 能力探测同口径）：Windows 上 jadx 是
+        #   jadx.bat，裸名 ["jadx", ...] 经 subprocess(CreateProcess) 启动不走 PATHEXT →
+        #   WinError 2 找不到文件。完整路径（含 .bat）可直接被 subprocess 启动。
+        #   which 落空时退回裸名（requires=["jadx"] 已门控，正常不会到这）。
+        jadx_exe = shutil.which("jadx") or "jadx"
+        cmd = [jadx_exe, "--no-res", "-d", out_dir, apk_path]
         logger.info("[jadx] 执行：%s", " ".join(cmd))
         try:
             proc = subprocess.run(
