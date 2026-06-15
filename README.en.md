@@ -28,6 +28,8 @@ bundle with frida / mitmproxy / adb built in (**nothing else to install**):
 2. Double-click **`fxapk-gui.exe`** → pick an APK → click "static analysis" or "one-click auto".
 3. To unpack / capture: USB-connect a **rooted phone or emulator** (adb is bundled) → click "doctor" to
    auto-provision frida-server + CA → then "one-click auto".
+4. *(optional)* For deeper jadx decompilation: download **`fxapk-jadx-*.zip`** (bundles a portable JRE — no
+   Java install needed) → click "🔌 Enable jadx" and pick the zip → jadx is then used automatically.
 
 > ⚠️ Unsigned; on first run Windows SmartScreen / AV may warn — choose "More info → Run anyway" or
 > allow-list it. frida-server is auto-pushed to the device by ABI. Keep the whole folder together.
@@ -84,8 +86,9 @@ python -m pip install jinja2 typer python-whois requests pyyaml pytest
 python -m pytest -q          # 556 passed
 ```
 
-Optional (gracefully skipped when missing): `jadx` (deep decompile), `frida-tools` +
-`frida-dexdump` (`unpack`), `mitmproxy` (`capture`), Chrome/Edge/Chromium (`--fmt pdf`).
+Optional (gracefully skipped when missing): `jadx` (deep decompile — on PATH, or the standalone
+`fxapk-jadx-*.zip` add-on which bundles a portable JRE; GUI users click "🔌 Enable jadx" once),
+`frida-tools` + `frida-dexdump` (`unpack`), `mitmproxy` (`capture`), Chrome/Edge/Chromium (`--fmt pdf`).
 
 ---
 
@@ -142,7 +145,9 @@ are downgraded to a note, avoiding false positives),
 `certificate` (cross-sample dev correlation), `contacts` (QQ/WeChat/Telegram/email/phone),
 `permissions` / `components` / `manifest` / `crypto`.
 
-Enrichers (online, `--offline` to disable, cached): `whois`, `icp`, `asn`.
+Enrichers (online, `--offline` to disable, cached, **concurrent** lookups for suspicious endpoints):
+`rdap` (HTTPS — registrar/dates/status/NS, more reliable than port-43 whois, falls back to `whois`),
+`whois`, `icp`, `dns` (DoH resolve domain→IP + hosting cloud lookup, to locate the real backend), `asn`.
 Investigate-vs-skip grading lives in `core/infra.py` (known infra/CDN/libs → skip).
 
 ---

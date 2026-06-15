@@ -24,6 +24,7 @@
 1. 下载并**解压出整个 `fxapk-gui` 文件夹**（依赖在 `_internal/`，别只拷 exe）。
 2. 双击 **`fxapk-gui.exe`** → 在「APK（Android）」或「IPA（iOS）」栏选文件 → 点「静态分析」（APK 还可「一键全自动」；iOS IPA 仅静态、无需越狱）。
 3. 要脱壳 / 抓包（仅 Android）：USB 接好**已 root 的手机或模拟器**（adb 已内置）→ 点「环境体检」自动配 frida-server 与证书 → 再「一键全自动」。
+4. *(可选)* 想要更深的 jadx 反编译补漏：下载 **`fxapk-jadx-*.zip`**（自带便携 JRE，无需另装 Java）→ 点界面「🔌 启用 jadx」选这个 zip → 一键启用，之后静态/一键全自动自动用上 jadx。
 
 > ⚠️ 未签名，首次运行 Windows SmartScreen / 杀软可能拦，点「更多信息 → 仍要运行」或加白名单。
 > frida-server 由程序按设备 ABI 自动推到手机，无需手动准备。整个文件夹一起拷贝。
@@ -83,7 +84,7 @@ python -m pip install -e .
 
 | 可选项 | 启用的能力 |
 |---|---|
-| `jadx`（PATH 外部命令） | `jadx` 深度反编译增强器（不在 PATH 则自动跳过并在报告标注） |
+| `jadx`（PATH 外部命令 **或** 独立插件包） | `jadx` 深度反编译增强器，从反编译 Java 字面量补 androguard 漏掉的端点/密钥（不可用则自动跳过并在报告标注）。GUI 用户**无需装 Java**：下载独立插件包 `fxapk-jadx-*.zip`（自带便携 JRE），点界面「🔌 启用 jadx」选 zip 即一键启用，之后静态/一键全自动自动调用 |
 | `frida-tools` + `frida-dexdump` | `unpack` 真机脱壳 |
 | `mitmproxy` | `capture` 真机抓包流量解析 |
 | `cryptography` | C5b 自动解密抓到的 `{data,timestamp}` 加密信封（缺失则只报配方+保留密文，不崩） |
@@ -176,7 +177,7 @@ fxapk auto app.apk --out out
 > 复用 `endpoints` / `js_bundle` / `crypto_recipe` 等平台无关分析器 + `ios_plist`，从 `Payload/<App>.app/www/`
 > 的 H5 包抠端点与加密配方，从 `Info.plist` 抠攻击面 —— **不连设备、无需越狱**（Android 专属分析器在 IPA 上自动跳过）。
 
-**富化器（默认联网，`--offline` 可关，结果缓存）**：`whois`（注册人/注册商）、`icp`（ICP 备案主体）、`asn`（IP 归属云厂商/IDC）。
+**富化器（默认联网，`--offline` 可关，结果缓存，对可疑端点**并发**查询提速）**：`rdap`（HTTPS 查注册商/注册时间/状态/NS，比 port-43 whois 更可靠，失败自动回退 `whois`）、`whois`（注册人/注册商，作 rdap 兜底）、`icp`（ICP 备案主体）、`dns`（DoH 解析域名→IP 并查托管云厂商，定位真实后端）、`asn`（IP 归属云厂商/IDC）。
 
 **「是否建议调证」分级**（`core/infra.py`）：命中公有云/主流 SDK/开源 CDN/标准协议/运营商域名 → 「无需调证」；私网/无效 → 「待核」；其余疑似 App 自有 → 「建议调证」。
 
