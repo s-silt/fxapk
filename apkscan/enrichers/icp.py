@@ -206,7 +206,7 @@ class IcpEnricher(BaseEnricher):
                 error=MANUAL_HINT,
             )
         except Exception as exc:  # noqa: BLE001 — 富化失败不得炸主流程
-            logger.warning("ICP 查询失败：%s（%s）", domain, exc, exc_info=True)
+            logger.debug("ICP 查询失败：%s（%s）", domain, exc, exc_info=True)
             manual = _manual_data(domain)
             return EnrichmentResult(
                 provider=self.name,

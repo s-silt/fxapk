@@ -253,16 +253,16 @@ class RdapEnricher(BaseEnricher):
             if _has_values(data):
                 self._save_cache_entry(domain, data)
                 return EnrichmentResult(provider=self.name, ok=True, data=data)
-            logger.info("RDAP 返回无有效字段，回退 whois：%s", domain)
+            logger.debug("RDAP 返回无有效字段，回退 whois：%s", domain)
         except Exception as exc:  # noqa: BLE001 — 富化失败不得炸主流程
             rdap_err = f"{type(exc).__name__}: {exc}"
-            logger.warning("RDAP 查询失败，回退 whois：%s（%s）", domain, exc)
+            logger.debug("RDAP 查询失败，回退 whois：%s（%s）", domain, exc)
 
         # 3) whois 兜底。
         try:
             data = self._query_whois_fallback(domain)
         except Exception as exc:  # noqa: BLE001 — 富化失败不得炸主流程
-            logger.warning("RDAP 的 whois 兜底也失败：%s（%s）", domain, exc)
+            logger.debug("RDAP 的 whois 兜底也失败：%s（%s）", domain, exc)
             err = f"RDAP+whois 均失败: {rdap_err or 'RDAP 无结果'}; whois: {type(exc).__name__}: {exc}"
             return EnrichmentResult(provider=self.name, ok=False, error=err)
 
