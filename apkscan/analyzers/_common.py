@@ -34,6 +34,7 @@ __all__ = [
     "parse_confidence",
     "TEXT_RESOURCE_SUFFIXES",
     "TEXT_RESOURCE_PREFIXES",
+    "BINARY_RESOURCE_SUFFIXES",
     "is_text_resource",
     "snippet_around",
     "EndpointCollector",
@@ -51,6 +52,23 @@ TEXT_RESOURCE_SUFFIXES: tuple[str, ...] = (
     ".cfg", ".conf", ".ini", ".csv", ".kv", ".plist",
 )
 TEXT_RESOURCE_PREFIXES: tuple[str, ...] = ("assets/", "res/raw/", "res/xml/")
+
+# 已知二进制资源后缀：即使落在文本前缀目录（assets/ 等）下也**绝不**按文本扫描。
+# 把字体/图片/音视频/原生库/压缩包解码成 utf-8 去跑正则既错（在字体里"找邮箱"）又危险——
+# 曾因 "assets/" 前缀把 512KB 的 MaterialIcons-Regular.otf 当文本喂给 contacts，触发
+# email 正则灾难性回溯卡死 4.6 分钟。优先级高于前缀/后缀命中。
+BINARY_RESOURCE_SUFFIXES: tuple[str, ...] = (
+    # 字体
+    ".otf", ".ttf", ".ttc", ".woff", ".woff2", ".eot",
+    # 图片
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".svgz", ".tif", ".tiff",
+    # 音视频
+    ".mp3", ".mp4", ".wav", ".ogg", ".webm", ".aac", ".m4a", ".flac", ".mov", ".avi", ".mkv",
+    # 原生库 / 可执行 / 字节码
+    ".so", ".dex", ".jar", ".class", ".arsc",
+    # 压缩 / 二进制数据
+    ".zip", ".gz", ".tar", ".7z", ".bin", ".dat", ".pak", ".lottie", ".pdf",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -89,8 +107,14 @@ def is_text_resource(
     suffixes: tuple[str, ...],
     prefixes: tuple[str, ...],
 ) -> bool:
-    """路径是否为值得做文本扫描的资源（后缀或路径前缀命中）。"""
+    """路径是否为值得做文本扫描的资源（后缀或路径前缀命中）。
+
+    二进制资源（字体/图片/音视频/.so/压缩包等）优先排除：即使落在 assets/ 等文本前缀下
+    也不按文本扫描——把二进制解码成 utf-8 跑正则既错又可能触发灾难性回溯。
+    """
     low = path.lower()
+    if low.endswith(BINARY_RESOURCE_SUFFIXES):
+        return False
     if low.endswith(suffixes):
         return True
     return low.startswith(prefixes)

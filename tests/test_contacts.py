@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import time
+
 from apkscan.analyzers.contacts import ContactsAnalyzer
 from apkscan.core.models import Confidence, LeadCategory
 
@@ -13,6 +15,46 @@ from tests.conftest import FakeContext
 
 def _contact_values(result) -> list[str]:
     return [l.value for l in result.leads if l.category == LeadCategory.CONTACT]
+
+
+def test_email_regex_no_redos_on_pathological_input():
+    """回归：email 正则曾对长字母/点串灾难性回溯（O(n²)）。
+
+    真机上一个 512KB 二进制字体（MaterialIcons-Regular.otf）解码后内容让 contacts
+    单独卡 4.6 分钟。界定量词（local≤64 / label≤63 / TLD 2–24）修复后必须线性、秒级完成。
+    30KB 病态输入：旧正则 ~9s，修复后 <0.1s。
+    """
+    pathological = "a." * 15000  # 30KB，无 @、纯 [A-Za-z.] 长串 → 旧前缀扫描 O(n²)
+    ctx = FakeContext(dex_strings=[pathological])
+    start = time.perf_counter()
+    result = ContactsAnalyzer().analyze(ctx)
+    elapsed = time.perf_counter() - start
+    assert result.error is None
+    assert elapsed < 3.0, f"contacts 在病态输入上耗时 {elapsed:.1f}s，疑似 email 正则回溯未修复"
+
+
+def test_binary_resources_not_scanned_for_contacts():
+    """回归：assets/ 前缀曾把整棵资源树（含 .otf 字体 / .png 图片 / .so）当文本资源。
+
+    把二进制解码成 utf-8 去跑联系方式正则既错（字体里"找邮箱"）又慢。二进制资源必须排除；
+    合法文本资源（.json）仍须照常扫描。
+    """
+    payload = b"......scammer@gmail.com......"
+    binary = FakeContext(
+        files={
+            "assets/flutter_assets/fonts/MaterialIcons-Regular.otf": payload,
+            "assets/flutter_assets/assets/images/splash.png": payload,
+            "assets/payload.so": payload,
+        }
+    )
+    assert not any(
+        "scammer@gmail.com" in v for v in _contact_values(ContactsAnalyzer().analyze(binary))
+    ), "字体/图片/.so 等二进制资源不应被当文本扫描出联系方式"
+
+    text = FakeContext(files={"assets/config.json": payload})
+    assert any(
+        "scammer@gmail.com" in v for v in _contact_values(ContactsAnalyzer().analyze(text))
+    ), "合法文本资源(.json)仍应被扫描"
 
 
 def test_email_hit_and_resource_blacklist():
