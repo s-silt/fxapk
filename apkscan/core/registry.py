@@ -11,7 +11,6 @@ import importlib.resources
 import inspect
 import logging
 import pkgutil
-import shutil
 import socket
 from abc import ABC, abstractmethod
 from types import ModuleType
@@ -188,8 +187,9 @@ def detect_capabilities(online: bool = True) -> set[str]:
     """
     caps: set[str] = set()
 
-    # jadx 不内置，仍走 PATH；adb 走 tools.has_adb（frozen 看 exe 同目录随包 adb.exe）。
-    if shutil.which("jadx"):
+    # jadx 不内置：PATH 上有则用，否则看独立 jadx 插件包（jadx-addon/，自带 JRE）是否就位；
+    # adb 走 tools.has_adb（frozen 看 exe 同目录随包 adb.exe）。
+    if tools.has_jadx():
         caps.add("jadx")
     if tools.has_adb():
         caps.add("adb")

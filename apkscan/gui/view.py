@@ -35,6 +35,7 @@ from apkscan.gui.controller import (
     ActionResult,
     GuiController,
     clamp_duration,
+    install_jadx_addon,
 )
 
 # Notebook 栏序号（_current_file_type / _apply_tab_constraints 共用，避免裸数字漂移）。
@@ -539,6 +540,18 @@ class App:
         self.btn_stop.pack(side="left", padx=(10, 0))
         self._tooltip(self.btn_stop, "终止当前任务（子进程会被结束）；空闲时不可点")
 
+        # jadx 深度反编译插件：选独立插件包 zip → 自动解压到 exe 同级 jadx-addon/，之后
+        # 静态/一键全自动自动用上 jadx（补 androguard 漏掉的端点/密钥）。靠右弱化放置，
+        # 不入 _action_buttons（与分析无关，运行中也可点）。
+        self.btn_jadx = ttk.Button(
+            bar, text="🔌 启用 jadx", style="Ghost.TButton", command=self._on_enable_jadx
+        )
+        self.btn_jadx.pack(side="right")
+        self._tooltip(
+            self.btn_jadx,
+            "导入 jadx 深度反编译插件包（fxapk-jadx-*.zip，含便携 JRE）；装一次后自动启用",
+        )
+
     def _build_log_card(self, parent: ttk.Frame) -> None:
         card = self._card(parent, row=4, sticky="nsew")
         card.rowconfigure(1, weight=1)
@@ -610,6 +623,20 @@ class App:
         )
         if path:
             self.var_apk.set(path)
+
+    def _on_enable_jadx(self) -> None:
+        """一键启用 jadx 深度反编译：选插件包 zip → 解压到 jadx-addon/ → 友好提示结果。"""
+        path = filedialog.askopenfilename(
+            title="选择 jadx 插件包（fxapk-jadx-*.zip，含便携 JRE）",
+            filetypes=[("jadx 插件包", "*.zip"), ("所有文件", "*.*")],
+        )
+        if not path:
+            return
+        ok, detail = install_jadx_addon(path)
+        if ok:
+            messagebox.showinfo("jadx 已启用", f"{detail}\n\n下次「静态分析 / 一键全自动」将自动用上 jadx。")
+        else:
+            messagebox.showerror("启用 jadx 失败", detail)
 
     def _browse_ipa(self) -> None:
         path = filedialog.askopenfilename(

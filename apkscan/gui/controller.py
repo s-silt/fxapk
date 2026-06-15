@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -335,6 +336,59 @@ def clamp_duration(raw: str, *, lo: int = 10, hi: int = 600, default: int = 60) 
     if value > hi:
         return hi
     return value
+
+
+def install_jadx_addon(zip_path: str, dest_base: str | None = None) -> tuple[bool, str]:
+    """把 jadx 插件包 zip 解压到应用目录下的 ``jadx-addon/``，校验 jadx + JRE 就位。
+
+    一键启用 jadx 深度反编译：解压后 ``tools.resolve_jadx()`` 即能发现并调用（GUI 静态/
+    一键全自动自动用上 jadx）。dest_base 缺省取 ``tools.app_data_dirs()[0]``（frozen=exe
+    同级 / 源码=repo 根）。**绝不抛**——任何失败返回 ``(False, 中文原因)``。
+    """
+    import zipfile
+
+    from apkscan.core import tools
+
+    p = Path(zip_path)
+    if not p.is_file():
+        return False, f"插件包不存在：{zip_path}"
+    if not zipfile.is_zipfile(p):
+        return False, "选择的文件不是有效的 zip 插件包。"
+
+    try:
+        dirs = tools.app_data_dirs()
+        base = Path(dest_base) if dest_base else (dirs[0] if dirs else Path("."))
+    except Exception:
+        logger.exception("[gui] 解析应用目录失败，回退当前目录")
+        base = Path(".")
+
+    addon = base / tools._JADX_ADDON_NAME
+    # 重装前清掉旧目录：**不静默吞错**——被占用（jadx 正在跑 / 杀软锁文件）导致删不净时
+    # 如实返回失败，避免旧残留与新内容混合却仍报"已启用"（resolve_jadx 可能指向半残 JRE，
+    # 或 bat 校验命中的是上一版 jadx）。
+    if addon.exists():
+        try:
+            shutil.rmtree(addon)
+        except OSError as exc:
+            logger.exception("[gui] 清理旧 jadx-addon 失败：%s", addon)
+            return False, f"无法清理旧插件目录（可能被占用，请关闭正在运行的 jadx 后重试）：{exc}"
+    try:
+        addon.mkdir(parents=True, exist_ok=True)
+        # ★ 依赖 zipfile.extractall 对成员名的清洗（剥离前导分隔符/盘符、丢弃 ".." → 实测无
+        #   zip-slip 逃逸）。**勿**改为手写 zf.extract(member, 自拼路径) 循环——那会引入路径穿越。
+        with zipfile.ZipFile(p) as zf:
+            zf.extractall(addon)
+    except Exception as exc:  # noqa: BLE001 - 解压失败如实返回，不崩 GUI
+        logger.exception("[gui] 解压 jadx 插件包失败：%s", zip_path)
+        return False, f"解压失败：{exc}"
+
+    bat = addon / "jadx" / "bin" / tools._jadx_bat_name()
+    if not bat.is_file():
+        return False, "插件包内未找到 jadx（缺 jadx/bin/jadx.bat），可能不是 fxapk-jadx 插件包。"
+    msg = f"jadx 深度反编译已启用：{addon}"
+    if not (addon / "jre" / "bin").is_dir():
+        msg += "（注意：插件包未含便携 JRE，需本机已装 Java 才能跑 jadx）"
+    return True, msg
 
 
 @dataclass

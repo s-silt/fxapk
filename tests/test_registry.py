@@ -21,7 +21,7 @@ from apkscan.core.registry import BaseAnalyzer, _dedup_and_validate, detect_capa
 
 def _stub_all_absent(monkeypatch: pytest.MonkeyPatch) -> None:
     """把所有工具/设备/网络探测打成"不存在"，便于逐项点亮断言。"""
-    monkeypatch.setattr(registry.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(registry.tools, "has_jadx", lambda: False)
     monkeypatch.setattr(registry.tools, "has_adb", lambda: False)
     monkeypatch.setattr(registry, "_has_network", lambda timeout=2.0: False)
     monkeypatch.setattr(registry.device, "has_frida", lambda: False)
@@ -55,7 +55,7 @@ def test_detect_capabilities_online_true_no_network(monkeypatch: pytest.MonkeyPa
 
 def test_detect_capabilities_jadx_and_adb(monkeypatch: pytest.MonkeyPatch) -> None:
     _stub_all_absent(monkeypatch)
-    monkeypatch.setattr(registry.shutil, "which", lambda name: "/usr/bin/jadx" if name == "jadx" else None)
+    monkeypatch.setattr(registry.tools, "has_jadx", lambda: True)
     monkeypatch.setattr(registry.tools, "has_adb", lambda: True)
     caps = detect_capabilities(online=False)
     assert {"jadx", "adb"} <= caps

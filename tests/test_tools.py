@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -353,3 +354,59 @@ def test_kill_adb_server_swallows_timeout(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING):
         assert tools.kill_adb_server() is False
     assert any("超时" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# jadx 插件包解析（resolve_jadx / jadx_addon_dir / has_jadx）
+# ---------------------------------------------------------------------------
+
+
+def _make_jadx_addon(base: Path, *, with_jre: bool = True) -> Path:
+    """在 base 下造 jadx-addon/jadx/bin/jadx(.bat)（+可选 jre/bin/java.exe）。"""
+    addon = base / "jadx-addon"
+    binp = addon / "jadx" / "bin"
+    binp.mkdir(parents=True, exist_ok=True)
+    (binp / tools._jadx_bat_name()).write_text("@echo jadx", encoding="utf-8")
+    if with_jre:
+        (addon / "jre" / "bin").mkdir(parents=True, exist_ok=True)
+        (addon / "jre" / "bin" / "java.exe").write_bytes(b"MZ")
+    return addon
+
+
+def test_resolve_jadx_prefers_path(monkeypatch, tmp_path):
+    """PATH 上有 jadx → 直接用，不注入 JAVA_HOME（即使插件包也在）。"""
+    monkeypatch.setattr(tools.shutil, "which", lambda n: r"C:\sys\jadx.exe" if n == "jadx" else None)
+    monkeypatch.setattr(tools, "app_data_dirs", lambda: [tmp_path])
+    _make_jadx_addon(tmp_path)
+    assert tools.resolve_jadx() == ([r"C:\sys\jadx.exe"], {})
+    assert tools.has_jadx() is True
+
+
+def test_resolve_jadx_uses_addon_with_java_home(monkeypatch, tmp_path):
+    """PATH 无 jadx，但插件包就位（含 JRE）→ 用包内 jadx.bat 完整路径 + 注入 JAVA_HOME。"""
+    monkeypatch.setattr(tools.shutil, "which", lambda n: None)
+    monkeypatch.setattr(tools, "app_data_dirs", lambda: [tmp_path])
+    addon = _make_jadx_addon(tmp_path, with_jre=True)
+    cmd, env = tools.resolve_jadx()
+    assert cmd == [str(addon / "jadx" / "bin" / tools._jadx_bat_name())]
+    assert env.get("JAVA_HOME") == str(addon / "jre")
+    assert tools.jadx_addon_dir() == addon
+    assert tools.has_jadx() is True
+
+
+def test_resolve_jadx_addon_without_jre_no_java_home(monkeypatch, tmp_path):
+    """插件包无 jre/ → 不注入 JAVA_HOME（退回系统 Java），仍返回包内 jadx。"""
+    monkeypatch.setattr(tools.shutil, "which", lambda n: None)
+    monkeypatch.setattr(tools, "app_data_dirs", lambda: [tmp_path])
+    _make_jadx_addon(tmp_path, with_jre=False)
+    cmd, env = tools.resolve_jadx()
+    assert cmd and env == {}
+
+
+def test_resolve_jadx_none_when_nothing(monkeypatch, tmp_path):
+    """PATH 无 jadx、无插件包 → None，has_jadx False。"""
+    monkeypatch.setattr(tools.shutil, "which", lambda n: None)
+    monkeypatch.setattr(tools, "app_data_dirs", lambda: [tmp_path])
+    assert tools.resolve_jadx() is None
+    assert tools.has_jadx() is False
+    assert tools.jadx_addon_dir() is None

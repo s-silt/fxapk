@@ -97,6 +97,71 @@ def has_adb() -> bool:
     return bool(adb_path())
 
 
+# jadx 插件包（独立下载、不内置）解压后的约定目录名。用户把 fxapk-jadx zip 解压到
+# **应用目录**（frozen=exe 同级 / 源码=repo 根）下的此目录，GUI/CLI 即自动发现并调用。
+_JADX_ADDON_NAME = "jadx-addon"
+
+
+def app_data_dirs() -> list[Path]:
+    """jadx 插件包可能落地的"应用目录"（按优先级）。
+
+    frozen：exe 同级目录（用户把插件包放 exe 旁）；源码：repo 根目录。失败仅记日志返回空。
+    """
+    dirs: list[Path] = []
+    try:
+        if frozen():
+            dirs.append(Path(sys.executable).resolve().parent)
+        else:
+            # apkscan/core/tools.py → parents[2] = repo 根。
+            dirs.append(Path(__file__).resolve().parents[2])
+    except Exception:
+        logger.exception("[tools] 解析应用目录失败")
+    return dirs
+
+
+def _jadx_bat_name() -> str:
+    return "jadx.bat" if sys.platform == "win32" else "jadx"
+
+
+def jadx_addon_dir() -> Path | None:
+    """已就位的 jadx 插件包目录（含 ``jadx/bin/jadx(.bat)``）。未就位返回 None。"""
+    name = _jadx_bat_name()
+    for base in app_data_dirs():
+        cand = base / _JADX_ADDON_NAME
+        if (cand / "jadx" / "bin" / name).is_file():
+            return cand
+    return None
+
+
+def resolve_jadx() -> tuple[list[str], dict[str, str]] | None:
+    """解析 jadx 启动方式：返回 ``(命令前缀 argv, 需注入的环境变量)``；都不可用返回 None。
+
+    优先级：
+    1. PATH 上的 jadx（用户自管，与既有行为一致，不注入 JAVA_HOME）；
+    2. 插件包 ``jadx-addon/``（独立下载随包自带 JRE）——返回包内 jadx.bat 完整路径，并把
+       ``JAVA_HOME`` 注入指向包内 JRE，使**无系统 Java** 的机器也能跑（GUI 一键导入即用）。
+
+    完整路径而非裸名：Windows 上 jadx 是 .bat，裸名经 subprocess 启动会 WinError 2。
+    """
+    on_path = shutil.which("jadx")
+    if on_path:
+        return [on_path], {}
+    addon = jadx_addon_dir()
+    if addon is not None:
+        bat = addon / "jadx" / "bin" / _jadx_bat_name()
+        env: dict[str, str] = {}
+        jre = addon / "jre"
+        if (jre / "bin").is_dir():
+            env["JAVA_HOME"] = str(jre)
+        return [str(bat)], env
+    return None
+
+
+def has_jadx() -> bool:
+    """jadx 是否可用（PATH 或已就位的插件包）。"""
+    return resolve_jadx() is not None
+
+
 def kill_adb_server() -> bool:
     """收掉本工具自起的 adb server（仅当 adb 可用时）。绝不抛。
 

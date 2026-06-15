@@ -16,6 +16,9 @@ out/
 /dist/
 # GUI 发行 zip(build_exe.py 打出的 onedir 压缩包，大，绝不入库)
 /fxapk-gui-*.zip
+# jadx 独立插件包 zip(build_jadx_addon.py 打出，含 JRE，大，绝不入库)+ 解压落地目录
+/fxapk-jadx-*.zip
+/jadx-addon/
 
 # adb 下载缓存(build_exe.py 下 Google platform-tools 解压取 adb.exe + 2 dll)
 /.platform_tools/
