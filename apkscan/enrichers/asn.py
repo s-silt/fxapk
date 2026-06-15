@@ -1,7 +1,8 @@
 """ASN 富化器：对 IP 查归属 ISP / 机构(云厂商 / IDC) / ASN / 国家。
 
 用 ip-api.com 免费接口（``http://ip-api.com/json/{ip}?fields=...``）。
-免费档限速约 45 次/分钟，本模块在每次真实网络查询前加 ~1s 间隔保护。
+免费档限速约 45 次/分钟：限速集中到共享的 ``_ipinfo.lookup_ip`` 内部（进程级共享限速器），
+asn 与 dns 共用同一闸，避免各自限速叠加（~90/min）触发 429。
 结果带本地 JSON 文件缓存（键=IP，放 ``.apkscan_cache/asn.json``）避免重复查询。
 
 错误处理（符合规范）：
@@ -16,7 +17,6 @@ import json
 import logging
 import os
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -39,9 +39,6 @@ ASN_TIMEOUT = 8
 ASN_API_URL = _ipinfo.IPINFO_API_URL
 ASN_FIELDS = _ipinfo.IPINFO_FIELDS
 
-#: 免费档限速约 45/min → 安全间隔 60/45≈1.34s；取 1.4s 留余量（1.0s=60/min 会触发 429 封禁）。
-ASN_MIN_INTERVAL = 1.4
-
 #: 本地缓存目录与文件。
 CACHE_DIR = Path(".apkscan_cache")
 CACHE_FILE = CACHE_DIR / "asn.json"
@@ -56,9 +53,6 @@ class AsnEnricher(BaseEnricher):
     def __init__(self) -> None:
         # 缓存写入串行化，避免并发富化时写坏 JSON 文件。
         self._lock = threading.Lock()
-        # 限速：记录上次真实查询时间戳（单调时钟），串行化访问。
-        self._rate_lock = threading.Lock()
-        self._last_query_ts: float = 0.0
 
     # ------------------------------------------------------------------ 缓存
     def _load_cache(self) -> dict[str, dict[str, Any]]:
@@ -100,26 +94,16 @@ class AsnEnricher(BaseEnricher):
             except Exception:
                 logger.warning("ASN 缓存写入失败：%s", CACHE_FILE, exc_info=True)
 
-    # ------------------------------------------------------------------ 限速
-    def _respect_rate_limit(self) -> None:
-        """每次真实查询前确保与上次间隔 >= ASN_MIN_INTERVAL 秒。"""
-        with self._rate_lock:
-            elapsed = time.monotonic() - self._last_query_ts
-            wait = ASN_MIN_INTERVAL - elapsed
-            if wait > 0:
-                time.sleep(wait)
-            self._last_query_ts = time.monotonic()
-
     # ------------------------------------------------------------------ 查询
     def _query(self, ip: str) -> dict[str, str | None]:
         """实际网络查询；网络/HTTP/解析异常向上抛由 enrich() 统一捕获。
 
-        查询逻辑下沉到共享的 ``_ipinfo.lookup_ip``（dns 富化器同样复用）；本处只负责
-        限速 + 透传本模块的 ``requests``（被测试 monkeypatch 的就是它，保持既有 mock 路径）。
-        接口语义失败（``status != "success"``）由 ``lookup_ip`` 以 ValueError 抛出，同样由
-        enrich() 转 ok=False。
+        查询逻辑下沉到共享的 ``_ipinfo.lookup_ip``（dns 富化器同样复用）：限速（进程级共享
+        限速器）与内存缓存都在 ``lookup_ip`` 内部完成，asn 不再各自限速（避免与 dns 叠加触发
+        429）。本处只负责透传本模块的 ``requests``（被测试 monkeypatch 的就是它，保持既有 mock
+        路径）。接口语义失败（``status != "success"``）由 ``lookup_ip`` 以 ValueError 抛出，
+        同样由 enrich() 转 ok=False。
         """
-        self._respect_rate_limit()
         return _ipinfo.lookup_ip(ip, http=requests, timeout=ASN_TIMEOUT)
 
     # ------------------------------------------------------------------ 入口
@@ -143,7 +127,7 @@ class AsnEnricher(BaseEnricher):
         except Exception as exc:  # noqa: BLE001 — 富化失败不得炸主流程
             # 不带 exc_info：富化失败（超时/限速/无应答）很常见，整段 traceback 是噪音；
             # 消息已含异常摘要，排障足够。
-            logger.warning("ASN 查询失败：%s（%s）", ip, exc)
+            logger.debug("ASN 查询失败：%s（%s）", ip, exc)
             return EnrichmentResult(
                 provider=self.name, ok=False, error=f"{type(exc).__name__}: {exc}"
             )

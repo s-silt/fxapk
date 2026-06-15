@@ -1,16 +1,17 @@
-"""DnsEnricher 单测：mock 掉网络层（requests / socket / _ipinfo.lookup_ip），不发真实请求。
+"""DnsEnricher 单测：mock 掉网络层（requests / socket / _ipinfo.lookup_ips_batch），不发真实请求。
 
-DoH 解析 A 记录（dns.google），异常回退 socket.gethostbyname_ex；
-对每个解析出的 IP 复用 _ipinfo.lookup_ip 拿托管(org/asn/country)。
+DoH 解析 A 记录（国内优先 DoH 链），异常回退 socket.gethostbyname_ex；
+对解析出的 IP 列表**一次** lookup_ips_batch 批量拿托管(org/asn/country)。
 
 覆盖：
 - 基本属性 name / applies_to。
-- DoH 成功：解析多 IP，每 IP 富化托管 → data.ips / data.hosting 聚合。
+- DoH 成功：解析多 IP，批量富化托管 → data.ips / data.hosting 聚合。
 - DoH 失败 → 回退 socket.gethostbyname_ex。
 - 两者都失败 → ok=False。
 - 空域名（不触网）。
 - 缓存命中（不触网）。
 - 离线/失败不缓存。
+- 托管查询走 lookup_ips_batch 单次批量（非逐 IP）。
 """
 
 from __future__ import annotations
@@ -24,14 +25,6 @@ import pytest
 import apkscan.enrichers.dns as dns_mod
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.enrichers.dns import DnsEnricher
-
-
-@pytest.fixture(autouse=True)
-def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
-    """把 time.sleep 置空（项目 enricher 测试约定）：_hosting 每个 IP 前过 _respect_rate_limit，
-    HOSTING_MIN_INTERVAL=1.4，多 IP 会触发真实 sleep 把测试墙钟卡成秒级。置空后降到毫秒级，
-    测试由逻辑驱动而非限速器。限速间隔逻辑可另用 fake monotonic 做纯逻辑断言（见下）。"""
-    monkeypatch.setattr(dns_mod.time, "sleep", lambda *_a, **_k: None)
 
 
 @pytest.fixture(autouse=True)
@@ -61,7 +54,9 @@ class _FakeResponse:
 class _FakeRequests:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []
+        self.post_calls: list[tuple[str, dict]] = []
         self.response: _FakeResponse | None = None
+        self.post_response: _FakeResponse | None = None
         self.raises: Exception | None = None
 
     def get(self, url: str, **kwargs: object) -> _FakeResponse:
@@ -71,6 +66,13 @@ class _FakeRequests:
         assert self.response is not None, "测试未配置 response"
         return self.response
 
+    def post(self, url: str, **kwargs: object) -> _FakeResponse:
+        self.post_calls.append((url, dict(kwargs)))
+        if self.raises is not None:
+            raise self.raises
+        assert self.post_response is not None, "测试未配置 post_response"
+        return self.post_response
+
 
 @pytest.fixture
 def fake_requests(monkeypatch: pytest.MonkeyPatch) -> _FakeRequests:
@@ -79,18 +81,29 @@ def fake_requests(monkeypatch: pytest.MonkeyPatch) -> _FakeRequests:
     return fake
 
 
+class _FakeBatchLookup:
+    """_ipinfo.lookup_ips_batch 的查表打桩（不触网）。
+
+    - ``table[ip] = info`` 由测试填充；调用时仅对 table 里有的 IP 返回（与真实批量跳过
+      查不到的 IP 行为一致）。
+    - ``calls`` 记录每次调用传入的 ips 列表，供"单次批量"断言（len(calls)==1）。
+    """
+
+    def __init__(self) -> None:
+        self.table: dict[str, dict] = {}
+        self.calls: list[list[str]] = []
+
+    def __call__(self, ips: list[str], **kwargs: object) -> dict[str, dict]:
+        self.calls.append(list(ips))
+        return {ip: self.table[ip] for ip in ips if ip in self.table}
+
+
 @pytest.fixture
-def fake_lookup(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict]:
-    """把 _ipinfo.lookup_ip 打桩为查表函数（不触网）。"""
-    table: dict[str, dict] = {}
-
-    def _fake(ip: str, **kwargs: object) -> dict:
-        return table.get(
-            ip, {"isp": None, "org": None, "asn": None, "country": None}
-        )
-
-    monkeypatch.setattr(dns_mod, "lookup_ip", _fake)
-    return table
+def fake_lookup(monkeypatch: pytest.MonkeyPatch) -> _FakeBatchLookup:
+    """把 _ipinfo.lookup_ips_batch 打桩为查表对象（不触网）。"""
+    fake = _FakeBatchLookup()
+    monkeypatch.setattr(dns_mod, "lookup_ips_batch", fake)
+    return fake
 
 
 def _ep(value: str = "pay.fraud-gw.com") -> Endpoint:
@@ -118,13 +131,13 @@ def test_name_and_applies_to() -> None:
 
 
 def test_doh_success_aggregates_hosting(
-    fake_requests: _FakeRequests, fake_lookup: dict[str, dict]
+    fake_requests: _FakeRequests, fake_lookup: _FakeBatchLookup
 ) -> None:
     fake_requests.response = _FakeResponse(_doh_payload(["1.1.1.1", "2.2.2.2"]))
-    fake_lookup["1.1.1.1"] = {
+    fake_lookup.table["1.1.1.1"] = {
         "isp": "ISP A", "org": "Org A", "asn": "AS111", "country": "US"
     }
-    fake_lookup["2.2.2.2"] = {
+    fake_lookup.table["2.2.2.2"] = {
         "isp": "ISP B", "org": "Org B", "asn": "AS222", "country": "CN"
     }
 
@@ -152,11 +165,11 @@ def test_doh_success_aggregates_hosting(
 
 def test_doh_failure_falls_back_to_socket(
     fake_requests: _FakeRequests,
-    fake_lookup: dict[str, dict],
+    fake_lookup: _FakeBatchLookup,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_requests.raises = TimeoutError("dns.google timed out")
-    fake_lookup["9.9.9.9"] = {
+    fake_lookup.table["9.9.9.9"] = {
         "isp": "Q", "org": "Quad9", "asn": "AS999", "country": "US"
     }
 
@@ -176,7 +189,7 @@ def test_doh_failure_falls_back_to_socket(
 
 def test_both_doh_and_socket_fail_returns_not_ok(
     fake_requests: _FakeRequests,
-    fake_lookup: dict[str, dict],
+    fake_lookup: _FakeBatchLookup,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_requests.raises = TimeoutError("doh down")
@@ -193,7 +206,7 @@ def test_both_doh_and_socket_fail_returns_not_ok(
 
 def test_doh_no_answer_returns_not_ok(
     fake_requests: _FakeRequests,
-    fake_lookup: dict[str, dict],
+    fake_lookup: _FakeBatchLookup,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """DoH 返回 Status=3（NXDOMAIN）/ 无 A 记录，socket 也无 → ok=False。"""
@@ -212,7 +225,7 @@ def test_doh_no_answer_returns_not_ok(
 
 
 def test_empty_domain_short_circuits(
-    fake_requests: _FakeRequests, fake_lookup: dict[str, dict]
+    fake_requests: _FakeRequests, fake_lookup: _FakeBatchLookup
 ) -> None:
     result = DnsEnricher().enrich(Endpoint(value="   ", kind="domain"))
     assert result.ok is False
@@ -224,10 +237,10 @@ def test_empty_domain_short_circuits(
 
 
 def test_dns_result_written_to_cache(
-    fake_requests: _FakeRequests, fake_lookup: dict[str, dict], _isolated_cache: Path
+    fake_requests: _FakeRequests, fake_lookup: _FakeBatchLookup, _isolated_cache: Path
 ) -> None:
     fake_requests.response = _FakeResponse(_doh_payload(["3.3.3.3"]))
-    fake_lookup["3.3.3.3"] = {
+    fake_lookup.table["3.3.3.3"] = {
         "isp": "I", "org": "O", "asn": "AS333", "country": "JP"
     }
     DnsEnricher().enrich(_ep("cache-me.com"))
@@ -239,10 +252,10 @@ def test_dns_result_written_to_cache(
 
 
 def test_dns_cache_hit_skips_network(
-    fake_requests: _FakeRequests, fake_lookup: dict[str, dict]
+    fake_requests: _FakeRequests, fake_lookup: _FakeBatchLookup
 ) -> None:
     fake_requests.response = _FakeResponse(_doh_payload(["4.4.4.4"]))
-    fake_lookup["4.4.4.4"] = {
+    fake_lookup.table["4.4.4.4"] = {
         "isp": "I", "org": "O", "asn": "AS444", "country": "DE"
     }
     enr = DnsEnricher()
@@ -260,7 +273,7 @@ def test_dns_cache_hit_skips_network(
 
 def test_failed_query_not_cached(
     fake_requests: _FakeRequests,
-    fake_lookup: dict[str, dict],
+    fake_lookup: _FakeBatchLookup,
     monkeypatch: pytest.MonkeyPatch,
     _isolated_cache: Path,
 ) -> None:
@@ -274,38 +287,46 @@ def test_failed_query_not_cached(
     assert not _isolated_cache.exists()
 
 
-# --- 限速器纯逻辑（fake monotonic，不睡真实时间）---------------------------
+# --- 托管查询走单次批量（非逐 IP）-----------------------------------------
 
 
-def test_respect_rate_limit_sleeps_when_too_soon(
-    monkeypatch: pytest.MonkeyPatch,
+def test_hosting_uses_single_batch_call(
+    fake_requests: _FakeRequests, fake_lookup: _FakeBatchLookup
 ) -> None:
-    """间隔 < HOSTING_MIN_INTERVAL 时按差值 sleep；用 fake monotonic 驱动，sleep 仅记录入参。
+    """多 IP 时托管查询只调一次 lookup_ips_batch（限速/去重集中到 _ipinfo 批量端点）。"""
+    fake_requests.response = _FakeResponse(
+        _doh_payload(["1.1.1.1", "2.2.2.2", "3.3.3.3"])
+    )
+    for ip in ("1.1.1.1", "2.2.2.2", "3.3.3.3"):
+        fake_lookup.table[ip] = {
+            "isp": f"I-{ip}", "org": f"O-{ip}", "asn": f"AS-{ip}", "country": "CN"
+        }
 
-    第 1 次调用上次时间戳=0、当下 t=0.5（<1.4）→ 应 sleep 约 0.9s（=1.4-0.5）。
-    """
-    now = [0.5]
-    slept: list[float] = []
-    monkeypatch.setattr(dns_mod.time, "monotonic", lambda: now[0])
-    monkeypatch.setattr(dns_mod.time, "sleep", lambda s: slept.append(s))
+    result = DnsEnricher().enrich(_ep("multi.com"))
 
-    enr = DnsEnricher()
-    enr._respect_rate_limit()
-
-    assert len(slept) == 1
-    assert slept[0] == pytest.approx(dns_mod.HOSTING_MIN_INTERVAL - 0.5)
+    assert result.ok is True
+    # 关键：只一次批量调用，且传入全部解析出的 IP（而非逐 IP）。
+    assert len(fake_lookup.calls) == 1
+    assert fake_lookup.calls[0] == ["1.1.1.1", "2.2.2.2", "3.3.3.3"]
+    # data 结构不变：hosting 仍逐 IP 一项。
+    assert [h["ip"] for h in result.data["hosting"]] == [
+        "1.1.1.1", "2.2.2.2", "3.3.3.3"
+    ]
 
 
-def test_respect_rate_limit_no_sleep_when_elapsed(
-    monkeypatch: pytest.MonkeyPatch,
+def test_hosting_batch_partial_miss_keeps_ips(
+    fake_requests: _FakeRequests, fake_lookup: _FakeBatchLookup
 ) -> None:
-    """间隔 >= HOSTING_MIN_INTERVAL 时不 sleep（已过冷却窗口）。"""
-    now = [dns_mod.HOSTING_MIN_INTERVAL + 1.0]
-    slept: list[float] = []
-    monkeypatch.setattr(dns_mod.time, "monotonic", lambda: now[0])
-    monkeypatch.setattr(dns_mod.time, "sleep", lambda s: slept.append(s))
+    """批量结果缺某 IP（查不到/被跳过）时，IP 列表保留，hosting 仅含查到的项。"""
+    fake_requests.response = _FakeResponse(_doh_payload(["1.1.1.1", "2.2.2.2"]))
+    fake_lookup.table["1.1.1.1"] = {
+        "isp": "I", "org": "O", "asn": "AS1", "country": "US"
+    }
+    # 2.2.2.2 不在 table → 批量返回里缺它。
 
-    enr = DnsEnricher()
-    enr._respect_rate_limit()
+    result = DnsEnricher().enrich(_ep("partial.com"))
 
-    assert slept == []
+    assert result.ok is True
+    assert result.data["ips"] == ["1.1.1.1", "2.2.2.2"]  # IP 列表完整
+    hosting_ips = [h["ip"] for h in result.data["hosting"]]
+    assert hosting_ips == ["1.1.1.1"]  # 仅查到的入 hosting

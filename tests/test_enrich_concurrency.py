@@ -10,8 +10,8 @@
 - endpoints 列表顺序稳定（只改 enrichment，绝不重排端点）。
 - 逐 enrich 的 try/except 不吞错：异常端点写入 ok=False、统计计入 failed。
 - 并发确实带来加速（总耗时 << 串行累加）。
-- 限速器（asn._respect_rate_limit）在并发下仍是全局闸：
-  并发多线程调用，相邻两次真实查询间隔 >= ASN_MIN_INTERVAL（不突破 45/min）。
+- 限速器（_ipinfo._respect_rate_limit，单查端点共用的进程级共享闸）在并发下仍**真正串行化**：
+  20 线程满争用并发调用，总墙钟耗时 >= 19×interval（持锁 sleep；sleep 移出锁即红）。
 - asn / icp 缓存并发写不损坏（最终 JSON 可解析且含全部条目）。
 """
 
@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+import apkscan.enrichers._ipinfo as ipinfo_mod
 import apkscan.enrichers.asn as asn_mod
 from apkscan.core import pipeline
 from apkscan.core.models import Endpoint, EnrichmentResult
@@ -194,7 +195,13 @@ def test_concurrent_matches_serial_field_for_field(
 
 
 def test_concurrency_speeds_up(monkeypatch: pytest.MonkeyPatch) -> None:
-    """8 个端点，每个 enrich 睡 0.1s。串行需 ~0.8s；并发(8 worker)应远小于串行累加。"""
+    """8 个端点，每个 enrich 睡 0.1s。串行需 ~0.8s；并发(8 worker)应远小于串行累加。
+
+    ★ 防退化护栏（评审命中点）：_DelayEnricher.enrich 用真实 time.sleep。若 conftest 误把全进程
+    time.sleep clobber 成 no-op（旧实现），本测试会退化成恒真断言（par≈0 < 0.48 永真）。故先
+    断言**串行跑确实耗到了 ~delay×n 量级**（serial_real_lower_bound），证明 sleep 真在睡；只有
+    在 sleep 真生效的前提下，再断言并发明显更快才有意义。
+    """
     delay = 0.1
     n = 8
 
@@ -206,59 +213,66 @@ def test_concurrency_speeds_up(monkeypatch: pytest.MonkeyPatch) -> None:
         pipeline._enrich_endpoints(eps, [dom])
         return time.monotonic() - t0
 
+    serial = elapsed(1)
     par = elapsed(8)
-    serial_lower_bound = delay * n  # 0.8s
+
+    serial_total = delay * n  # 0.8s
+    # 护栏：串行必须真耗时（sleep 未被 clobber）。取 0.7 余量吸收调度抖动。
+    assert serial >= serial_total * 0.7, (
+        f"串行仅耗 {serial:.4f}s ≪ 预期 {serial_total}s —— time.sleep 疑被全局置空，"
+        f"本不变量测试已退化"
+    )
     # 并发应明显快于串行下界；留宽松阈值避免 CI 抖动误报。
-    assert par < serial_lower_bound * 0.6
+    assert par < serial_total * 0.6
 
 
 # --- 限速器并发下仍是全局闸（不突破 45/min）-------------------------------
 
 
-def test_asn_rate_limiter_global_under_concurrency(
+def test_ipinfo_rate_limiter_global_under_concurrency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """多线程并发调用 asn._respect_rate_limit：相邻真实查询间隔 >= ASN_MIN_INTERVAL。
+    """多线程并发调用 _ipinfo._respect_rate_limit：N 次放行被真正**串行化**到限速节奏。
 
-    用「记录每次放行时间戳」替代真实 sleep（按需快进 monotonic 时钟），既不真等
-    又能验证闸门：任意相邻两次放行的逻辑时间差 >= ASN_MIN_INTERVAL。
+    ★ 用真实（极小）sleep + 真实 wall-clock 计时，而非虚拟时钟。原因（评审命中点）：虚拟时钟
+    版本把放行时间戳 sort 后查相邻间隔，对「sleep 移出 _RATE_LOCK（持锁 sleep 退化为不持锁
+    sleep）」这一真正的并发回归**测不出来**——sort 后的逻辑时间戳天然单调递增，与是否串行无关。
+
+    判据改为：把 IPINFO_MIN_INTERVAL 缩成 0.02s，20 线程满争用并发调用，断言 20 次放行的
+    **总墙钟耗时 >= 19 × interval**。
+    - 正确实现（持锁 sleep）：相邻放行被串行化 → 总耗时 ≈ 19×interval，过。
+    - 回归实现（sleep 在锁外）：各线程拿到锁后在锁外并行 sleep → 总耗时 ≈ 1×interval ≪ 19×interval，红。
     """
-    enr = AsnEnricher()
+    n = 20
+    tiny = 0.02
+    monkeypatch.setattr(ipinfo_mod, "IPINFO_MIN_INTERVAL", tiny)
+    # 用真实 time.sleep / time.monotonic（conftest 把 _SLEEP 置空了，这里恢复成真 sleep）。
+    monkeypatch.setattr(ipinfo_mod, "_SLEEP", time.sleep)
+    monkeypatch.setattr(ipinfo_mod, "_MONOTONIC", time.monotonic)
+    # conftest 已 reset_state，但 IPINFO_MIN_INTERVAL 是改后才生效；再 reset 一次保险。
+    ipinfo_mod.reset_state()
 
-    # 虚拟时钟：sleep 不真睡，只推进虚拟时间；monotonic 读虚拟时间。
-    vclock = {"t": 0.0}
-    vlock = threading.Lock()
-
-    def fake_monotonic() -> float:
-        with vlock:
-            return vclock["t"]
-
-    def fake_sleep(seconds: float) -> None:
-        with vlock:
-            vclock["t"] += max(0.0, seconds)
-
-    monkeypatch.setattr(asn_mod.time, "monotonic", fake_monotonic)
-    monkeypatch.setattr(asn_mod.time, "sleep", fake_sleep)
-
-    release_times: list[float] = []
-    rlock = threading.Lock()
+    barrier = threading.Barrier(n)  # 拉满争用：所有线程同时冲闸。
 
     def worker() -> None:
-        enr._respect_rate_limit()
-        with rlock:
-            release_times.append(fake_monotonic())
+        barrier.wait()
+        ipinfo_mod._respect_rate_limit()
 
-    threads = [threading.Thread(target=worker) for _ in range(20)]
+    threads = [threading.Thread(target=worker) for _ in range(n)]
+    t0 = time.monotonic()
     for t in threads:
         t.start()
     for t in threads:
         t.join()
+    total = time.monotonic() - t0
 
-    release_times.sort()
-    for a, b in zip(release_times, release_times[1:]):
-        gap = b - a
-        # 浮点容差。
-        assert gap >= asn_mod.ASN_MIN_INTERVAL - 1e-9, f"间隔 {gap} < 限速 {asn_mod.ASN_MIN_INTERVAL}"
+    # 串行化下界：首个不等、其余各等 ~interval → 总耗时 >= 19×interval。
+    # 取 0.85 余量吸收调度抖动（仍远高于回归实现的 ~1×interval）。
+    lower_bound = (n - 1) * tiny * 0.85
+    assert total >= lower_bound, (
+        f"总耗时 {total:.4f}s < 串行化下界 {lower_bound:.4f}s —— 限速未真正串行化"
+        f"（sleep 可能被移出 _RATE_LOCK）"
+    )
 
 
 # --- 并发写 asn 缓存不损坏 -------------------------------------------------
@@ -344,8 +358,7 @@ def test_asn_enrich_concurrent_no_silent_cache_loss(
     cache_file = cache_dir / "asn.json"
     monkeypatch.setattr(asn_mod, "CACHE_DIR", cache_dir)
     monkeypatch.setattr(asn_mod, "CACHE_FILE", cache_file)
-    # 限速 sleep 置空：本测试只验缓存不丢，不验限速。
-    monkeypatch.setattr(asn_mod.time, "sleep", lambda _s: None)
+    # 限速已下沉到 _ipinfo，其 sleep 由 conftest autouse 置空（本测试只验缓存不丢，不验限速）。
     # 假 requests：每个 IP 成功返回。
     monkeypatch.setattr(asn_mod, "requests", _fake_asn_requests_factory())
 

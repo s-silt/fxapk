@@ -9,6 +9,7 @@ from collections.abc import Iterator
 
 import pytest
 
+import apkscan.enrichers._ipinfo as _ipinfo_mod
 from apkscan.core.context import AnalysisContext
 from apkscan.core.models import (
     AnalysisConfig,
@@ -16,6 +17,23 @@ from apkscan.core.models import (
     Component,
     ComponentSet,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_ipinfo_shared_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """每个测试前重置 _ipinfo 进程级共享状态（避免跨测试污染）。
+
+    _ipinfo 的共享内存缓存 + 限速时钟是进程级单例，若不重置：上一个测试缓存的 IP 会让
+    下一个测试的 lookup_ip 命中缓存而不触网（断言 client.get 调用次数即失败），限速时钟
+    也会带入上次 monotonic。同时把 _ipinfo 的限速 sleep 置空（限速已集中到此模块），否则
+    多次真实查询会触发真实 sleep 把测试墙钟拖到秒级。
+
+    ★ 只 patch _ipinfo 模块级的 _SLEEP 间接函数，**不** clobber stdlib 全局 time.sleep——
+    后者会把进程里别处的 time.sleep（如 test_enrich_concurrency 的 _DelayEnricher）也置空，
+    令依赖真实 sleep 的不变量测试退化成恒真。
+    """
+    _ipinfo_mod.reset_state()
+    monkeypatch.setattr(_ipinfo_mod, "_SLEEP", lambda *_a, **_k: None)
 
 
 class FakeContext:

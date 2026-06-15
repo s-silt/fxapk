@@ -213,7 +213,7 @@ class WhoisEnricher(BaseEnricher):
             )
         except Exception as exc:  # noqa: BLE001 — 富化失败不得炸主流程
             short = _short_err(exc)
-            logger.warning("WHOIS 查询失败：%s（%s）", domain, short)
+            logger.debug("WHOIS 查询失败：%s（%s）", domain, short)
             return EnrichmentResult(
                 provider=self.name, ok=False, error=f"{type(exc).__name__}: {short}"
             )
@@ -221,7 +221,7 @@ class WhoisEnricher(BaseEnricher):
         # 3) 区分"查到了"与"全空"：全空可能是网络抖动/限速/无应答，
         #    不写缓存（避免把偶发空响应永久固化成"该域名 WHOIS 为空"），返回 ok=False。
         if not any(v not in (None, "") for v in data.values()):
-            logger.info("WHOIS 返回全空，不缓存（可能限速/无应答）：%s", domain)
+            logger.debug("WHOIS 返回全空，不缓存（可能限速/无应答）：%s", domain)
             return EnrichmentResult(
                 provider=self.name,
                 ok=False,
