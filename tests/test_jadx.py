@@ -129,3 +129,37 @@ def test_version_ip_filtered_real_ip_kept(monkeypatch, tmp_path) -> None:
     assert "13.3.3.7" not in vals
     assert "192.168.0.1" not in vals
     assert "8.8.8.8" in vals
+
+
+def test_run_jadx_resolves_full_path_not_bare_name(monkeypatch, tmp_path) -> None:
+    """回归：Windows 上 jadx 是 jadx.bat，裸名 ["jadx", ...] 经 subprocess 启动会 WinError2
+    （CreateProcess 不走 PATHEXT）。必须用 shutil.which 解析成带扩展名的完整路径作为 argv[0]。"""
+    fake_exe = r"C:\tools\jadx\bin\jadx.BAT"
+    monkeypatch.setattr(
+        jadx.shutil, "which", lambda name, **kw: fake_exe if name == "jadx" else None
+    )
+    seen: dict[str, list[str]] = {}
+
+    def _fake_run(cmd, **kwargs):  # noqa: ANN001
+        seen["cmd"] = list(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="done", stderr="")
+
+    monkeypatch.setattr(jadx.subprocess, "run", _fake_run)
+
+    JadxAnalyzer()._run_jadx("app.apk", str(tmp_path))
+    assert seen["cmd"][0] == fake_exe, "argv[0] 必须是 which 解析的完整路径，而非裸 'jadx'"
+
+
+def test_run_jadx_falls_back_to_bare_name_when_which_none(monkeypatch, tmp_path) -> None:
+    """which 落空（理论上 requires=['jadx'] 已门控）→ 退回裸名，不崩。"""
+    monkeypatch.setattr(jadx.shutil, "which", lambda name, **kw: None)
+    seen: dict[str, list[str]] = {}
+
+    def _fake_run(cmd, **kwargs):  # noqa: ANN001
+        seen["cmd"] = list(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(jadx.subprocess, "run", _fake_run)
+
+    JadxAnalyzer()._run_jadx("app.apk", str(tmp_path))
+    assert seen["cmd"][0] == "jadx"
