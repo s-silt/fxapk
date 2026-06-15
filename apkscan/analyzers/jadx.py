@@ -229,6 +229,10 @@ class JadxAnalyzer(BaseAnalyzer):
             host = _host_from_url(url)
             if not url or not host:
                 continue
+            # B：XML 命名空间 / schema 声明（http://ns.adobe.com/xap/、xmlpull.org/v1/… 等）
+            #   是反编译代码里的命名空间标识符、非网络端点，整条丢弃（含其 url 与 host）。
+            if infra.is_xml_namespace_url(url):
+                continue
             _add(collector, url, "url", location,
                  is_cleartext=url.lower().startswith("http://"))
             ip = _parse_ipv4(host)
