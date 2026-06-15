@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 from apkscan.analyzers.classify import classify_app
@@ -31,6 +33,11 @@ if TYPE_CHECKING:
     from apkscan.core.context import AnalysisContext
 
 logger = logging.getLogger(__name__)
+
+#: 富化并发度：按端点并发跑富化器（I/O 密集，瓶颈是 whois/rdap 的 ~30s 超时串行累加）。
+#: 默认 8 个 worker。每个端点由单一 worker 串行跑其匹配的全部富化器，故同一 ep.enrichment
+#: 无并发写竞争；只有跨端点共享的 provider 统计需加锁聚合。
+ENRICH_MAX_WORKERS = 8
 
 
 def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
@@ -235,67 +242,98 @@ def _enrich_endpoints(
 ) -> list[dict]:
     """对每个端点按 applies_to 跑匹配的富化器，结果写入 endpoint.enrichment[provider]。
 
+    按端点并发（``ThreadPoolExecutor``，worker 数 = ``ENRICH_MAX_WORKERS``）：富化是
+    I/O 密集（whois/rdap 单次可达 ~30s 超时），串行双重循环单包可达 7 分钟，按端点并发
+    把这些超时叠在一起跑而非顺序累加。
+
+    并发不变量：
+    - 每个端点由**单一** worker 串行跑其匹配的全部富化器 → 同一 ``ep.enrichment``
+      无并发写竞争；端点之间互不共享 enrichment dict。
+    - ``endpoints`` 列表**原地不动、顺序不变**（只就地写 ``ep.enrichment``，绝不重排）。
+    - 跨端点共享的 provider 统计用锁聚合，``attempted/ok/failed/typical_error`` 准确。
+    - ip-api 免费档 45/min 硬限由 asn 富化器自身的线程安全限速器（``_respect_rate_limit``）
+      担保——并发下仍是全局闸，本层只管并发分发。
+
     返回每个富化器的聚合状态 [{provider, attempted, ok, failed, typical_error}]，
     使富化器层的系统性失败（如某 provider 全部失败）在报告里透明可见，
     而非打散进各 endpoint 难以察觉。
     """
     stats: dict[str, dict] = {}
+    stats_lock = threading.Lock()
 
     def _stat(provider: str) -> dict:
+        # 在 stats_lock 内调用。
         return stats.setdefault(
             provider,
             {"provider": provider, "attempted": 0, "ok": 0, "failed": 0, "typical_error": None},
         )
 
-    def _note_fail(st: dict, msg: str) -> None:
-        st["failed"] += 1
-        if not st["typical_error"]:
-            st["typical_error"] = msg
-
-    for ep in endpoints:
+    def _enrich_one(ep: Endpoint) -> None:
+        """对单个端点跑其匹配的全部富化器（在单一 worker 内串行）。"""
         for enricher in enrichers:
             applies_to = list(getattr(enricher, "applies_to", []) or [])
             if ep.kind not in applies_to:
                 continue
             provider = getattr(enricher, "name", "") or enricher.__class__.__name__
-            st = _stat(provider)
-            st["attempted"] += 1
+
+            with stats_lock:
+                st = _stat(provider)
+                st["attempted"] += 1
 
             try:
                 result = enricher.enrich(ep)
             except Exception:  # noqa: BLE001 - 富化失败不阻塞主流程
                 logger.exception("富化器执行异常：provider=%s endpoint=%s", provider, ep.value)
                 ep.enrichment[provider] = {"ok": False, "error": "富化器异常"}
-                _note_fail(st, "富化器异常")
+                with stats_lock:
+                    _note_fail(_stat(provider), "富化器异常")
                 continue
 
             if result is None:
                 logger.warning("富化器 %s 返回 None：%s", provider, ep.value)
                 ep.enrichment[provider] = {"ok": False, "error": "enrich 返回 None"}
-                _note_fail(st, "enrich 返回 None")
+                with stats_lock:
+                    _note_fail(_stat(provider), "enrich 返回 None")
                 continue
 
             data = dict(result.data)
             has_values = any(v not in (None, "", [], {}) for v in data.values())
-            if result.ok and has_values:
-                st["ok"] += 1
-            elif result.ok and not has_values:
-                # 成功但零信息：显式标注，避免与"查到了"在报告里视觉混淆。
-                data.setdefault("note", "查询无结果")
-                _note_fail(st, "查询无结果")
-            else:
-                if result.error:
-                    data.setdefault("error", result.error)
-                _note_fail(st, result.error or "富化失败")
+            with stats_lock:
+                st = _stat(provider)
+                if result.ok and has_values:
+                    st["ok"] += 1
+                elif result.ok and not has_values:
+                    # 成功但零信息：显式标注，避免与"查到了"在报告里视觉混淆。
+                    data.setdefault("note", "查询无结果")
+                    _note_fail(st, "查询无结果")
+                else:
+                    if result.error:
+                        data.setdefault("error", result.error)
+                    _note_fail(st, result.error or "富化失败")
             ep.enrichment[provider] = data
 
+    if endpoints:
+        # max_workers 不超过端点数，避免端点少时空建大量线程。
+        workers = max(1, min(ENRICH_MAX_WORKERS, len(endpoints)))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="enrich") as pool:
+            # list() 强制求值 → 任一 worker 内未捕获异常会在此重抛（_enrich_one 内部已逐
+            # enrich try/except，正常不会到这；这里是兜底，不让异常被 executor 静默吞掉）。
+            list(pool.map(_enrich_one, endpoints))
+
     return list(stats.values())
+
+
+def _note_fail(st: dict, msg: str) -> None:
+    """记一次失败到 provider 统计（调用方须持 stats_lock）。"""
+    st["failed"] += 1
+    if not st["typical_error"]:
+        st["typical_error"] = msg
 
 
 def build_endpoint_leads(endpoints: list[Endpoint], online: bool = True) -> list[Lead]:
     """把（已富化的）domain/IP 端点转成 DOMAIN/IP Lead。
 
-    - domain 的 where_to_request 优先用 icp 结果，其次 whois。
+    - domain 的归属优先级：icp > rdap（RDAP/whois 兜底）> whois；dns 托管 IP/ASN 入 evidence/notes。
     - IP 的 where_to_request 用 asn 结果。
     URL 端点不直接产 Lead（其归属取决于其 domain/ip 部分）。
 
@@ -340,12 +378,24 @@ _OFFLINE_NOTE = "离线扫描：未做 WHOIS/ICP/ASN 归属查询，归属待联
 
 def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
     icp = ep.enrichment.get("icp") or {}
+    rdap = ep.enrichment.get("rdap") or {}
     whois = ep.enrichment.get("whois") or {}
+    dns = ep.enrichment.get("dns") or {}
 
-    subject = icp.get("subject") or whois.get("registrant") or whois.get("org")
+    # 归属优先级：icp（中国备案实名）> rdap（RDAP/whois 兜底）> whois（独立，已基本不再路由）。
+    subject = (
+        icp.get("subject")
+        or rdap.get("registrant")
+        or rdap.get("org")
+        or whois.get("registrant")
+        or whois.get("org")
+    )
     where = None
     evidence_to_obtain: list[str] = []
-    enriched = bool(icp or whois)
+    enriched = bool(icp or rdap or whois or dns)
+
+    rdap_registrar = rdap.get("registrar")
+    whois_registrar = whois.get("registrar")
 
     if icp.get("subject") or icp.get("license_no"):
         where = "工信部 ICP 备案系统 / 备案服务商"
@@ -353,18 +403,27 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
             evidence_to_obtain.append(f"ICP 备案号 {icp.get('license_no')} 主体实名信息")
         else:
             evidence_to_obtain.append("ICP 备案主体实名信息")
-    elif whois.get("registrar"):
-        where = f"域名注册商：{whois.get('registrar')}"
+    elif rdap_registrar:
+        where = f"域名注册商：{rdap_registrar}"
+        evidence_to_obtain.append("RDAP/WHOIS 注册人/注册邮箱/注册时间")
+    elif whois_registrar:
+        where = f"域名注册商：{whois_registrar}"
         evidence_to_obtain.append("WHOIS 注册人/注册邮箱/注册时间")
     else:
         where = "域名注册商 / ICP 备案系统（需人工核）"
-        evidence_to_obtain.append("WHOIS / ICP 备案主体信息")
+        evidence_to_obtain.append("RDAP / WHOIS / ICP 备案主体信息")
 
     confidence = Confidence.HIGH if subject else Confidence.MEDIUM
 
     # infra 分级：命中已知基础设施→无需调证；私网/无效→待核；否则→建议调证。
     advice, _reason = infra.classify_domain(ep.value)
     notes = _endpoint_notes(ep, online, enriched)
+
+    # dns 富化：把当前解析 IP / 托管 ASN 体现为调证落点（向云厂商调租户/访问日志）。
+    hosting_note = _dns_hosting_note(dns)
+    if hosting_note:
+        evidence_to_obtain.append(hosting_note)
+        notes = f"{notes}；{hosting_note}" if notes else hosting_note
 
     # C1：域名来源可信度档降可信。当端点仅见于第三方库文件/超大字符串表（tier=
     #   library-file / bulk-string）且 classify 仍判"建议调证"（即非已知 infra/
@@ -421,6 +480,42 @@ def _ip_lead(ep: Endpoint, online: bool = True) -> Lead:
         notes=_endpoint_notes(ep, online, enriched),
         advice=advice,
     )
+
+
+def _dns_hosting_note(dns: dict) -> str:
+    """把 dns 富化的解析 IP / 托管 ASN 压成一句调证落点说明（无数据 → 空串）。
+
+    形如「当前解析 IP 45.76.1.1(AS20473 Vultr), 45.76.1.2(AS20473 Vultr)→向云厂商调租户/访问日志」。
+    """
+    ips = dns.get("ips") or []
+    hosting = dns.get("hosting") or []
+    if not ips and not hosting:
+        return ""
+
+    by_ip: dict[str, dict] = {}
+    for h in hosting:
+        if isinstance(h, dict) and h.get("ip"):
+            by_ip[h["ip"]] = h
+
+    parts: list[str] = []
+    # 以 hosting 的 IP 优先（带 ASN/org），再补只在 ips 里出现的裸 IP。
+    seen: set[str] = set()
+    for ip in ips:
+        seen.add(ip)
+        h = by_ip.get(ip)
+        org_or_asn = ""
+        if h:
+            org_or_asn = h.get("asn") or h.get("org") or ""
+        parts.append(f"{ip}({org_or_asn})" if org_or_asn else ip)
+    for ip, h in by_ip.items():
+        if ip in seen:
+            continue
+        org_or_asn = h.get("asn") or h.get("org") or ""
+        parts.append(f"{ip}({org_or_asn})" if org_or_asn else ip)
+
+    if not parts:
+        return ""
+    return f"当前解析 IP {', '.join(parts)}→向云厂商/IDC 调该 IP 在涉案时段的租户/访问日志"
 
 
 def _endpoint_notes(ep: Endpoint, online: bool = True, enriched: bool = False) -> str:

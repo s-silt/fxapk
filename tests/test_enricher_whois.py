@@ -69,7 +69,38 @@ def _ep(value: str = "pay.fraud-gw.cn") -> Endpoint:
 def test_name_and_applies_to():
     enr = WhoisEnricher()
     assert enr.name == "whois"
-    assert enr.applies_to == ["domain"]
+    # 避免 whois 双查：归属收敛到 rdap（RDAP→whois 兜底），独立 WhoisEnricher 不再被
+    # pipeline 路由 → applies_to 置空。其查询函数仍供 rdap 复用（见下）。
+    assert enr.applies_to == []
+
+
+# --- 可复用查询函数（供 rdap 兜底复用）-------------------------------------
+
+
+def test_query_whois_reusable_function(fake_whois: _FakeWhoisModule):
+    """whois.py 把查询+抽取逻辑抽成可复用的模块级函数 query_whois(domain)->dict。"""
+    from apkscan.enrichers.whois import query_whois
+
+    fake_whois.return_value = {
+        "registrar": "GoDaddy.com, LLC",
+        "registrant_name": "Zhang San",
+        "creation_date": datetime(2021, 5, 1, 12, 0, 0),
+        "country": "CN",
+    }
+    data = query_whois("reuse.cn")
+    assert data["registrar"] == "GoDaddy.com, LLC"
+    assert data["registrant"] == "Zhang San"
+    assert data["creation_date"] == "2021-05-01T12:00:00"
+    assert fake_whois.calls[0][0] == "reuse.cn"
+
+
+def test_query_whois_propagates_exception(fake_whois: _FakeWhoisModule):
+    """query_whois 不吞错：网络失败原样抛出，由调用方决定兜底（rdap 据此回退失败）。"""
+    from apkscan.enrichers.whois import query_whois
+
+    fake_whois.raises = TimeoutError("down")
+    with pytest.raises(TimeoutError):
+        query_whois("boom.cn")
 
 
 # --- 成功路径 -------------------------------------------------------------

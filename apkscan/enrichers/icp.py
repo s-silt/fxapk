@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -91,6 +92,9 @@ class IcpEnricher(BaseEnricher):
 
     # ------------------------------------------------------------------ 缓存
     def _load_cache(self) -> dict[str, dict[str, Any]]:
+        """读缓存文件。★必须持 self._lock 调用：Windows 下读句柄 open 与另一线程的
+        os.replace(icp.json) 撞同一文件会抛 PermissionError(WinError 5)/Errno 13，
+        让缓存静默丢失。读写共用一把锁消除该重叠窗口；enrich() 经 _load_cache_locked 进入。"""
         if not CACHE_FILE.is_file():
             return {}
         try:
@@ -104,6 +108,11 @@ class IcpEnricher(BaseEnricher):
             return {}
         return data
 
+    def _load_cache_locked(self) -> dict[str, dict[str, Any]]:
+        """持锁读缓存，供 enrich() 的命中检查用，避免与并发写的 os.replace 撞车。"""
+        with self._lock:
+            return self._load_cache()
+
     def _save_cache_entry(self, domain: str, entry: dict[str, Any]) -> None:
         with self._lock:
             cache = self._load_cache()
@@ -111,7 +120,10 @@ class IcpEnricher(BaseEnricher):
             try:
                 CACHE_DIR.mkdir(parents=True, exist_ok=True)
                 # 原子写：临时文件 + replace，避免崩溃/并发留半截坏缓存。
-                tmp = CACHE_FILE.with_name(CACHE_FILE.name + ".tmp")
+                # tmp 名带 pid+线程 id 唯一后缀：避免多写者复用固定 icp.json.tmp 互相覆盖/再撞 replace。
+                tmp = CACHE_FILE.with_name(
+                    f"{CACHE_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+                )
                 tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
                 tmp.replace(CACHE_FILE)
             except Exception:
@@ -167,7 +179,8 @@ class IcpEnricher(BaseEnricher):
             )
 
         # 1) 缓存命中直接返回（不消耗网络）。仅缓存成功结果。
-        cache = self._load_cache()
+        #    持锁读，避免与并发写 os.replace 撞车（Windows race）。
+        cache = self._load_cache_locked()
         cached = cache.get(domain)
         if isinstance(cached, dict):
             logger.debug("ICP 缓存命中：%s", domain)

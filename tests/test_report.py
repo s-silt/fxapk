@@ -459,6 +459,73 @@ def test_html_shows_hardening_and_enrichment(sample_report: Report, tmp_path: Pa
     assert "AS37963" in html  # asn 富化（通联 IP 行）
 
 
+def test_html_renders_rdap_and_dns_enrichment(tmp_path: Path) -> None:
+    """归属富化迁移回归：enrichment 改用 rdap（注册归属）+ dns（托管）后，富化单元格须渲染二者。
+
+    旧模板只读 whois/icp/asn 三个 provider；WhoisEnricher.applies_to 置空后 pipeline 不再产
+    whois 键，注册归属迁到 enrichment["rdap"]，并新增 enrichment["dns"] 托管。本用例钉住：
+    - 仅有 rdap（无 icp/asn）的域名不再误判「未富化」；
+    - rdap 注册商/注册人与 dns 托管 IP/ASN/org 都渲染得出来。
+    """
+    report = Report(
+        package_name="com.x",
+        meta={},
+        leads=[
+            Lead(
+                category=LeadCategory.DOMAIN,
+                value="c2.fraud-gw.cn",
+                subject="某科技有限公司",
+                where_to_request="域名注册商",
+                confidence=Confidence.HIGH,
+                advice="建议调证",
+            )
+        ],
+        endpoints=[
+            Endpoint(
+                value="c2.fraud-gw.cn",
+                kind="domain",
+                enrichment={
+                    "rdap": {
+                        "registrar": "GoDaddy.com, LLC",
+                        "registrant": "Zhang Fraud",
+                        "created": "2024-01-02T00:00:00Z",
+                        "status": ["client transfer prohibited"],
+                        "nameservers": ["ns1.dnspod.net"],
+                        "source": "rdap",
+                    },
+                    "dns": {
+                        "ips": ["203.0.113.9"],
+                        "hosting": [
+                            {
+                                "ip": "203.0.113.9",
+                                "asn": "AS37963",
+                                "org": "Hangzhou Alibaba",
+                                "country": "CN",
+                                "isp": "Aliyun",
+                            }
+                        ],
+                    },
+                },
+            )
+        ],
+        findings=[],
+        analyzer_status=[],
+    )
+    path = tmp_path / "report.html"
+    report_html.render(report, str(path))
+    html = path.read_text(encoding="utf-8")
+
+    # rdap-only 端点不得命中「未富化」分支。
+    assert "未富化" not in html
+    # RDAP 注册归属渲染得出来。
+    assert "GoDaddy.com, LLC" in html  # 注册商
+    assert "Zhang Fraud" in html  # 注册人
+    # DNS 托管渲染得出来（IP / ASN / org）。
+    assert "203.0.113.9" in html
+    assert "AS37963" in html
+    assert "Hangzhou Alibaba" in html
+
+
 def test_html_shows_analyzer_status(sample_report: Report, tmp_path: Path) -> None:
     path = tmp_path / "report.html"
     report_html.render(sample_report, str(path))

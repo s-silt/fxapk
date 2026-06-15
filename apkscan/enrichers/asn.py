@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -23,18 +24,20 @@ import requests
 
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
+from apkscan.enrichers import _ipinfo
 
 logger = logging.getLogger(__name__)
 
 #: 查询超时（秒）。
 ASN_TIMEOUT = 8
 
-#: ip-api 免费接口地址模板与需要的字段。
+#: ip-api 免费接口地址模板与需要的字段（实际查询逻辑下沉到 _ipinfo.lookup_ip，dns 也复用）。
+#: 这两个常量保留作向后兼容 / 测试断言锚点，与 _ipinfo 同源。
 #: ⚠️ 明文 HTTP：ip-api 免费档不支持 HTTPS（HTTPS 需付费 key），故被查 IP（疑似 C2）会以
 #: 明文经过在途节点 —— 暴露"正在核查哪个 C2"的侦查意图，且响应未认证、归属可被中间人篡改。
 #: 敏感目标慎用 / 改用支持 HTTPS 的权威源（如 RDAP）。仅对"建议调证"端点查询已缩小暴露面。
-ASN_API_URL = "http://ip-api.com/json/{ip}"
-ASN_FIELDS = "status,country,isp,org,as,query"
+ASN_API_URL = _ipinfo.IPINFO_API_URL
+ASN_FIELDS = _ipinfo.IPINFO_FIELDS
 
 #: 免费档限速约 45/min → 安全间隔 60/45≈1.34s；取 1.4s 留余量（1.0s=60/min 会触发 429 封禁）。
 ASN_MIN_INTERVAL = 1.4
@@ -42,30 +45,6 @@ ASN_MIN_INTERVAL = 1.4
 #: 本地缓存目录与文件。
 CACHE_DIR = Path(".apkscan_cache")
 CACHE_FILE = CACHE_DIR / "asn.json"
-
-
-def _to_str(value: Any) -> str | None:
-    """统一成可 JSON 序列化的字符串；None/空 → None。"""
-    if value in (None, ""):
-        return None
-    text = str(value).strip()
-    return text or None
-
-
-def _extract(payload: dict[str, Any]) -> dict[str, str | None]:
-    """从 ip-api 返回 JSON 提取关心字段。
-
-    - ``isp``：网络服务商。
-    - ``org``：归属机构（常为云厂商 / IDC）。
-    - ``as``：ASN（含编号与名称）。
-    - ``country``：国家。
-    """
-    return {
-        "isp": _to_str(payload.get("isp")),
-        "org": _to_str(payload.get("org")),
-        "asn": _to_str(payload.get("as")),
-        "country": _to_str(payload.get("country")),
-    }
 
 
 class AsnEnricher(BaseEnricher):
@@ -83,6 +62,9 @@ class AsnEnricher(BaseEnricher):
 
     # ------------------------------------------------------------------ 缓存
     def _load_cache(self) -> dict[str, dict[str, Any]]:
+        """读缓存文件。★必须持 self._lock 调用：Windows 下读句柄 open 与另一线程的
+        os.replace(asn.json) 撞同一文件会抛 PermissionError(WinError 5)/Errno 13，
+        让缓存静默丢失。读写共用一把锁消除该重叠窗口；enrich() 经 _load_cache_locked 进入。"""
         if not CACHE_FILE.is_file():
             return {}
         try:
@@ -96,6 +78,11 @@ class AsnEnricher(BaseEnricher):
             return {}
         return data
 
+    def _load_cache_locked(self) -> dict[str, dict[str, Any]]:
+        """持锁读缓存，供 enrich() 的命中检查用，避免与并发写的 os.replace 撞车。"""
+        with self._lock:
+            return self._load_cache()
+
     def _save_cache_entry(self, ip: str, entry: dict[str, Any]) -> None:
         with self._lock:
             cache = self._load_cache()
@@ -104,7 +91,10 @@ class AsnEnricher(BaseEnricher):
                 CACHE_DIR.mkdir(parents=True, exist_ok=True)
                 # 原子写：先写临时文件再 replace，避免崩溃/并发时留半截坏缓存（读侧虽容忍坏文件
                 # 重查，但原子替换从源头消除半截文件）。
-                tmp = CACHE_FILE.with_name(CACHE_FILE.name + ".tmp")
+                # tmp 名带 pid+线程 id 唯一后缀：避免多写者复用固定 asn.json.tmp 互相覆盖/再撞 replace。
+                tmp = CACHE_FILE.with_name(
+                    f"{CACHE_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+                )
                 tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
                 tmp.replace(CACHE_FILE)
             except Exception:
@@ -124,27 +114,13 @@ class AsnEnricher(BaseEnricher):
     def _query(self, ip: str) -> dict[str, str | None]:
         """实际网络查询；网络/HTTP/解析异常向上抛由 enrich() 统一捕获。
 
-        接口语义上的失败（``status != "success"``）以 ValueError 形式抛出，
-        同样由 enrich() 转成 ok=False。
+        查询逻辑下沉到共享的 ``_ipinfo.lookup_ip``（dns 富化器同样复用）；本处只负责
+        限速 + 透传本模块的 ``requests``（被测试 monkeypatch 的就是它，保持既有 mock 路径）。
+        接口语义失败（``status != "success"``）由 ``lookup_ip`` 以 ValueError 抛出，同样由
+        enrich() 转 ok=False。
         """
         self._respect_rate_limit()
-
-        url = ASN_API_URL.format(ip=ip)
-        resp = requests.get(
-            url, params={"fields": ASN_FIELDS}, timeout=ASN_TIMEOUT
-        )
-        resp.raise_for_status()
-        payload = resp.json()
-
-        if not isinstance(payload, dict):
-            raise ValueError(f"ip-api 返回非对象：{type(payload).__name__}")
-
-        status = payload.get("status")
-        if status != "success":
-            message = payload.get("message") or status or "unknown"
-            raise ValueError(f"ip-api 查询未成功：{message}")
-
-        return _extract(payload)
+        return _ipinfo.lookup_ip(ip, http=requests, timeout=ASN_TIMEOUT)
 
     # ------------------------------------------------------------------ 入口
     def enrich(self, ep: Endpoint) -> EnrichmentResult:
@@ -154,8 +130,8 @@ class AsnEnricher(BaseEnricher):
                 provider=self.name, ok=False, error="空 IP，跳过 ASN 查询"
             )
 
-        # 1) 缓存命中直接返回（不消耗网络）。
-        cache = self._load_cache()
+        # 1) 缓存命中直接返回（不消耗网络）。持锁读，避免与并发写 os.replace 撞车（Windows race）。
+        cache = self._load_cache_locked()
         cached = cache.get(ip)
         if isinstance(cached, dict):
             logger.debug("ASN 缓存命中：%s", ip)

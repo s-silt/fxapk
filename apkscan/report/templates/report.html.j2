@@ -277,13 +277,26 @@
   {% macro enrich_cell(value) %}
     {% set en = enrichment_by_endpoint.get(value) or {} %}
     {% set whois = en.get("whois") or {} %}
+    {% set rdap = en.get("rdap") or {} %}
+    {% set dns = en.get("dns") or {} %}
     {% set icp = en.get("icp") or {} %}
     {% set asn = en.get("asn") or {} %}
-    {% if not (whois or icp or asn) %}
+    {% if not (whois or rdap or dns or icp or asn) %}
       <span class="muted">未富化</span>
     {% else %}
       {% if icp %}<div><b>ICP：</b>{{ icp.get("subject") or icp.get("site_name") or icp.get("error") or icp.get("note") or icp.get("hint") or "需人工核" }}{% if icp.get("license_no") %}（{{ icp.get("license_no") }}）{% endif %}{% if icp.get("lookup_url") %} <a href="{{ icp.get("lookup_url") }}" target="_blank" rel="noopener">去核验</a>{% endif %}</div>{% endif %}
+      {% if rdap %}<div><b>注册：</b>{{ rdap.get("registrant") or rdap.get("org") or "—" }} / 注册商 {{ rdap.get("registrar") or "—" }}{% if rdap.get("created") %} · 注册 {{ rdap.get("created") }}{% endif %}{% if rdap.get("error") %} <span class="muted">({{ rdap.get("error") }})</span>{% endif %}
+        {% if rdap.get("status") %}<div class="muted" style="font-size:12px">状态：{{ rdap.get("status")|join("、") }}</div>{% endif %}
+        {% if rdap.get("nameservers") %}<div class="muted" style="font-size:12px">NS：{{ rdap.get("nameservers")|join("、") }}</div>{% endif %}
+      </div>{% endif %}
       {% if whois %}<div><b>WHOIS：</b>{{ whois.get("registrant") or whois.get("org") or "—" }} / 注册商 {{ whois.get("registrar") or "—" }}{% if whois.get("error") %} <span class="muted">({{ whois.get("error") }})</span>{% endif %}</div>{% endif %}
+      {% if dns.get("hosting") %}<div><b>托管：</b>
+        <ul class="tight">
+          {% for h in dns.get("hosting") %}
+          <li><span class="mono">{{ h.get("ip") or "—" }}</span>{% if h.get("asn") or h.get("org") or h.get("country") %}（{{ h.get("asn") or "" }}{% if h.get("org") or h.get("isp") %} {{ h.get("org") or h.get("isp") }}{% endif %}{% if h.get("country") %} · {{ h.get("country") }}{% endif %}）{% endif %}</li>
+          {% endfor %}
+        </ul>
+      </div>{% elif dns.get("ips") %}<div><b>解析 IP：</b><span class="mono">{{ dns.get("ips")|join("、") }}</span></div>{% endif %}
       {% if asn %}<div><b>ASN：</b>{{ asn.get("asn") or "—" }} {{ asn.get("org") or asn.get("isp") or "" }}{% if asn.get("country") %} · {{ asn.get("country") }}{% endif %}{% if asn.get("error") %} <span class="muted">({{ asn.get("error") }})</span>{% endif %}</div>{% endif %}
     {% endif %}
   {% endmacro %}
