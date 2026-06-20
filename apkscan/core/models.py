@@ -44,6 +44,10 @@ class LeadCategory(Enum):
     VICTIM_DATA = "VICTIM_DATA"  # 运行时落地库（SQLCipher/SQLite）导出的受害人物证（IM 账号/手机号/订单/商户号；含受害人高敏个人信息）
     REMOTE_CONTROL = "REMOTE_CONTROL"  # 无障碍远控劫持的目标银行/支付 app（映射机构主体，指明向哪些银行调被害人流水）
     ADMIN_PANEL = "ADMIN_PANEL"  # 诈骗 App 的后台管理系统/控制台入口（团伙运营控制端；指明向云厂商/IDC 调后台服务器与运营日志）
+    FOURTH_PARTY_PAYMENT = "FOURTH_PARTY_PAYMENT"  # 四方支付/跑分/代收代付/二清聚合支付平台（资金流重建，向支付/收单机构调进件实名与流水）
+    SMS_FORWARDING = "SMS_FORWARDING"  # 短信/验证码转发服务（OTP 接管基础设施，向短信平台/运营商调转发目标与接收记录）
+    CARD_MERCHANT = "CARD_MERCHANT"  # 卡商/料商/开户供应链（情报研判线索，默认待核，结合资金/通联落地）
+    SELF_HOSTED_IM = "SELF_HOSTED_IM"  # 自建 IM/C2 控制信道（团伙落地强连边，向云厂商/IDC 调服务器归属与信道日志）
 
 
 @dataclass

@@ -359,8 +359,12 @@ _DEFAULT_ADVICE_BY_CATEGORY: dict[LeadCategory, str] = {
     LeadCategory.PACKER: infra.ADVICE_INVESTIGATE,
     LeadCategory.CONTACT: infra.ADVICE_INVESTIGATE,
     LeadCategory.SIGNING: infra.ADVICE_REVIEW,
-    # ADMIN_PANEL 的 advice 由 admin_panel 分析器按 host 研判+规则档自带；此处仅兜底未研判项。
+    # 以下分析器均按证据档自带 advice；此处仅兜底未研判项（默认待核，绝不默认建议调证）。
     LeadCategory.ADMIN_PANEL: infra.ADVICE_REVIEW,
+    LeadCategory.FOURTH_PARTY_PAYMENT: infra.ADVICE_REVIEW,
+    LeadCategory.SMS_FORWARDING: infra.ADVICE_REVIEW,
+    LeadCategory.CARD_MERCHANT: infra.ADVICE_REVIEW,
+    LeadCategory.SELF_HOSTED_IM: infra.ADVICE_REVIEW,
 }
 
 
