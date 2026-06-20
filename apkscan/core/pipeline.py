@@ -365,6 +365,7 @@ _DEFAULT_ADVICE_BY_CATEGORY: dict[LeadCategory, str] = {
     LeadCategory.SMS_FORWARDING: infra.ADVICE_REVIEW,
     LeadCategory.CARD_MERCHANT: infra.ADVICE_REVIEW,
     LeadCategory.SELF_HOSTED_IM: infra.ADVICE_REVIEW,
+    LeadCategory.WALLET_SECRET: infra.ADVICE_INVESTIGATE,
 }
 
 

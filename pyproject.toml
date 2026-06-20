@@ -61,7 +61,7 @@ where = ["."]
 include = ["apkscan*"]
 
 [tool.setuptools.package-data]
-apkscan = ["rules/*.yaml", "report/templates/*.j2"]
+apkscan = ["rules/*.yaml", "rules/*.txt", "report/templates/*.j2"]
 
 [tool.ruff]
 line-length = 100
