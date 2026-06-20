@@ -20,6 +20,7 @@ _EPIC_A = (
     "sms_forwarding",
     "card_merchant",
     "self_hosted_im",
+    "wallet_secret",
 )
 
 
@@ -52,6 +53,7 @@ def _big_ctx() -> _Ctx:
         urls
         + ["跑分代收代付卡商"] * 1500
         + ["ws://evilbroker.com:1883"] * 200
+        + ["abandon " * 5000]  # 长 BIP-39 词 run：压测 wallet_secret 助记词滑窗（校验和快速过滤）
         + [big_run]
     )
     h5 = ("var a='https://manage.evilbackend.com/api/admin/list';" + kw + big_run).encode()
