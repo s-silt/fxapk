@@ -43,6 +43,7 @@ class LeadCategory(Enum):
     RUNTIME_CREDENTIAL = "RUNTIME_CREDENTIAL"  # 运行时实测登录态/凭据（OkHttp 明文 token/手机号、SharedPrefs 落地凭据；含高敏个人信息）
     VICTIM_DATA = "VICTIM_DATA"  # 运行时落地库（SQLCipher/SQLite）导出的受害人物证（IM 账号/手机号/订单/商户号；含受害人高敏个人信息）
     REMOTE_CONTROL = "REMOTE_CONTROL"  # 无障碍远控劫持的目标银行/支付 app（映射机构主体，指明向哪些银行调被害人流水）
+    ADMIN_PANEL = "ADMIN_PANEL"  # 诈骗 App 的后台管理系统/控制台入口（团伙运营控制端；指明向云厂商/IDC 调后台服务器与运营日志）
 
 
 @dataclass
