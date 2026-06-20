@@ -34,6 +34,7 @@ from apkscan.analyzers._common import (
     TEXT_RESOURCE_SUFFIXES,
     collect_dex_strings,
     is_text_resource,
+    present_tokens,
     str_or_empty,
     truncate,
 )
@@ -85,30 +86,6 @@ class _Hit:
     sample_location: str = ""
 
 
-def _is_ident_char(c: str) -> bool:
-    return c.isalnum() or c == "_"
-
-
-def _token_match(token: str, s: str) -> bool:
-    """token 是否在 s 里按标识符边界出现（前后字符非 [A-Za-z0-9_]）。
-
-    与 sensitive_api._token_match 同口径：避免 ``io.netty`` 误命中
-    ``io.nettyextra``，同时仍命中包名前缀 / 类描述符里的真实引用。token 自身含非标识符
-    字符（如 ``org.eclipse.paho``）时点号天然提供边界。线性扫描，无 ReDoS。
-    """
-    n = len(token)
-    if not n:
-        return False
-    start = 0
-    while True:
-        idx = s.find(token, start)
-        if idx < 0:
-            return False
-        before = s[idx - 1] if idx > 0 else ""
-        after = s[idx + n] if idx + n < len(s) else ""
-        if not _is_ident_char(before) and not _is_ident_char(after):
-            return True
-        start = idx + 1
 
 
 class SelfHostedImAnalyzer(BaseAnalyzer):
@@ -237,17 +214,17 @@ class SelfHostedImAnalyzer(BaseAnalyzer):
     def _match_fingerprints(
         self, fingerprints: list[_Fingerprint], dex_strings: list[str]
     ) -> list[_Fingerprint]:
-        """返回命中的库指纹（任一 token 按词边界出现在任一 dex 字符串）。绝不抛。"""
-        matched: list[_Fingerprint] = []
-        for fp in fingerprints:
-            try:
-                if any(
-                    _token_match(tok, s) for tok in fp.tokens for s in dex_strings
-                ):
-                    matched.append(fp)
-            except Exception:
-                logger.exception("[%s] 库指纹匹配失败，跳过：%s", self.name, fp.id)
-        return matched
+        """返回命中的库指纹（任一 token 按词边界出现在任一 dex 字符串）。绝不抛。
+
+        性能：合并所有指纹 token 单遍扫（present_tokens），替代每 token 全量扫 dex（O(串×token)）。
+        """
+        try:
+            all_tokens = {tok for fp in fingerprints for tok in fp.tokens if tok}
+            present = present_tokens(all_tokens, dex_strings)
+        except Exception:
+            logger.exception("[%s] 库指纹匹配失败", self.name)
+            return []
+        return [fp for fp in fingerprints if any(tok in present for tok in fp.tokens)]
 
     # ------------------------------------------------------------------
     # 出线索

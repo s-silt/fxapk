@@ -25,6 +25,7 @@ where_to_request 写「无直接调证对象（线索研判用）」——letter
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -119,11 +120,15 @@ class CardMerchantAnalyzer(BaseAnalyzer):
             return result
 
         hit = _Hit()
+        # 性能：合并关键词正则预筛——整段无任一关键词子串即跳过昂贵的逐词 find+白名单窗口判定。
+        # 预筛是详细逻辑的超集（详细逻辑也以关键词子串为前置），跳过的串本就不会命中，行为不变。
+        prefilter = re.compile("|".join(re.escape(k.text) for k in keywords))
 
         # 1) DEX 字符串（代码内硬编码文案）。
         _ok, dex_strings = collect_dex_strings(ctx, self.name, max_strings=_MAX_DEX_STRINGS)
         for s in dex_strings:
-            self._scan_text(s, "dex", "dex_strings", keywords, whitelist, hit)
+            if prefilter.search(s):
+                self._scan_text(s, "dex", "dex_strings", keywords, whitelist, hit)
 
         # 2) 文本资源（H5 / JS / json / xml 里的文案）。
         self._scan_resources(ctx, keywords, whitelist, hit)

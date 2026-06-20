@@ -38,6 +38,7 @@ from apkscan.analyzers._common import (
     TEXT_RESOURCE_SUFFIXES,
     collect_dex_strings,
     is_text_resource,
+    present_tokens,
     str_or_empty,
     truncate,
 )
@@ -124,32 +125,6 @@ class _Findings:
             self.sample_source, self.sample_location, self.sample_snippet = source, location, snippet
         elif not self.sample_snippet:
             self.sample_source, self.sample_location, self.sample_snippet = source, location, snippet
-
-
-def _is_ident_char(c: str) -> bool:
-    return c.isalnum() or c == "_"
-
-
-def _token_match(token: str, s: str) -> bool:
-    """token 是否在 s 里按标识符边界出现（前后字符非 [A-Za-z0-9_]）。
-
-    照搬 sensitive_api 的词边界匹配：避免 ``getMessageBody`` 误命中
-    ``getMessageBodyExtra``，同时仍命中方法签名 / 裸方法名。token 自身含非标识符字符
-    （如 ``android.provider.Telephony.SMS_RECEIVED``）时边界判定天然成立。
-    """
-    n = len(token)
-    if not n:
-        return False
-    start = 0
-    while True:
-        idx = s.find(token, start)
-        if idx < 0:
-            return False
-        before = s[idx - 1] if idx > 0 else ""
-        after = s[idx + n] if idx + n < len(s) else ""
-        if not _is_ident_char(before) and not _is_ident_char(after):
-            return True
-        start = idx + 1
 
 
 class SmsForwardingAnalyzer(BaseAnalyzer):
@@ -275,9 +250,14 @@ class SmsForwardingAnalyzer(BaseAnalyzer):
         if not rules.combos:
             return
         try:
+            # 性能：一次扫描收齐全部组合 token 的存在性（替代每 token 各自全量扫 dex）。
+            all_tokens = {
+                t for c in rules.combos for t in (*c.receive_tokens, *c.forward_tokens) if t
+            }
+            present = present_tokens(all_tokens, dex_strings)
             for combo in rules.combos:
-                receive = any(self._token_present(t, dex_strings) for t in combo.receive_tokens)
-                forward = any(self._token_present(t, dex_strings) for t in combo.forward_tokens)
+                receive = any(t in present for t in combo.receive_tokens)
+                forward = any(t in present for t in combo.forward_tokens)
                 if receive and forward:
                     findings.receive_hit = True
                     findings.forward_hit = True
@@ -347,13 +327,6 @@ class SmsForwardingAnalyzer(BaseAnalyzer):
         after = url.split("://", 1)[-1]
         slash = after.find("/")
         return after[slash:] if slash >= 0 else ""
-
-    @staticmethod
-    def _token_present(token: str, dex_strings: list[str]) -> bool:
-        """token 是否按标识符边界出现在任一 DEX 字符串里。"""
-        if not token:
-            return False
-        return any(_token_match(token, s) for s in dex_strings)
 
     # ------------------------------------------------------------------
     # 出线索
