@@ -21,6 +21,7 @@ _EPIC_A = (
     "card_merchant",
     "self_hosted_im",
     "wallet_secret",
+    "backend_credential",
 )
 
 
