@@ -48,6 +48,7 @@ class LeadCategory(Enum):
     SMS_FORWARDING = "SMS_FORWARDING"  # 短信/验证码转发服务（OTP 接管基础设施，向短信平台/运营商调转发目标与接收记录）
     CARD_MERCHANT = "CARD_MERCHANT"  # 卡商/料商/开户供应链（情报研判线索，默认待核，结合资金/通联落地）
     SELF_HOSTED_IM = "SELF_HOSTED_IM"  # 自建 IM/C2 控制信道（团伙落地强连边，向云厂商/IDC 调服务器归属与信道日志）
+    WALLET_SECRET = "WALLET_SECRET"  # 钱包私钥/助记词（高敏，直接掌控资金；境外/链上路径：派生地址上链回溯+交易所冻结）
 
 
 @dataclass
