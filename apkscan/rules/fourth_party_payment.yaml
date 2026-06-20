@@ -1,0 +1,60 @@
+# 四方支付 / 跑分平台识别规则（apkscan.analyzers.fourth_party_payment 消费）。
+#
+# 两类特征：
+#   - endpoint_patterns：支付网关 URL 指纹（host 子域名 / path 支付接口 / URL 含支付参数）。
+#       host_regex 命中 URL host、path_regex 命中 path、param_regex 命中整段 URL。
+#   - keyword_patterns：跑分 / 代收代付 / 聚合支付中文黑话（正则，IGNORECASE）。
+#
+# 强档 = 同一 host 既命中支付端点又命中中文关键词，且 host 经 infra.classify_domain
+#         研判为「建议调证」→ HIGH·建议调证。弱档（仅端点或仅关键词）→ MEDIUM·待核。
+#
+# FP 收敛：
+#   - 已知正规支付 SDK / 网关（alipay / wechat / tenpay / unionpay / stripe / paypal /
+#     adyen 等）由分析器侧 _LEGIT_PAYMENT_HOST_MARKERS 统一排除，不在此维护。
+#   - 已知第三方基础设施 / 库内置站点由 infra.classify_domain 排除。
+#   - 中文关键词务必用「组合词 / 词边界」，避免"支付"单字泛滥误报。
+#
+# 正则一律字符类 / 定长替换、无嵌套量词、无外包无界量词 → 线性、无灾难性回溯（ReDoS）。
+
+where_to_request: 第四方 / 聚合支付平台 / 收单机构 / 支付公司
+
+evidence_to_obtain:
+  - 商户进件资料（商户实名主体 / 营业执照 / 法人 / 联系人 / 进件审核记录）
+  - 结算账户信息（开户行 / 账号 / 户名 / 结算周期 D0-T0）
+  - 交易流水与代收代付 / 代付流水明细（订单号 / 金额 / 对手方 / 时间）
+  - 商户号（mch_id / merchantNo）归属与开通 / 续费主体
+  - 资金清分 / 分润记录与上下游通道（上游三方支付、下游商户）
+
+# 支付网关 URL 指纹（host / path / param 任一命中即记一条端点特征）。
+endpoint_patterns:
+  - id: FPP-HOST
+    title: 支付网关子域名
+    host_regex: '^(pay|payment|gateway|gw|cashier|collect|settle|order|trade|mch|merchant|fund|daifu|daishou|paofen)\.'
+
+  - id: FPP-PATH-PAY
+    title: 支付下单 / 回调接口
+    path_regex: '/(api/)?(pay|payment|gateway|cashier|collect|settle|order|trade)/(create|order|notify|callback|query|submit|gateway|pay|unifiedorder|scanpay)(/|$)'
+
+  - id: FPP-PATH-GATEWAY
+    title: 支付网关 / 聚合下单路径
+    path_regex: '/(gateway/pay|pay/notify|pay/gateway|api/pay|api/order|api/gateway|unifiedorder|aggregate/pay|polymer/pay)(/|$)'
+
+  - id: FPP-PARAM-MCHID
+    title: 支付网关参数（商户号 / 密钥配对）
+    param_regex: '[?&](mch_id|mchid|merchant_no|merchantno|merchant_id|mchno|pay_key|paykey|app_key|sign_type)='
+
+# 跑分 / 代收代付 / 聚合支付中文黑话（组合词 / 词边界，避免单字泛滥）。
+keyword_patterns:
+  - '跑分(平台|系统|商户|代理|抢单)?'
+  - '代收代付'
+  - '(资金|批量|银行卡)?代付(平台|系统|通道)?'
+  - '聚合支付(平台|系统|通道)?'
+  - '四方支付'
+  - '三方支付通道'
+  - '商户进件'
+  - '(D0|T0|D1|T1)结算'
+  - '收银(台|系统)聚合'
+  - '通道(费率|进件|轮询|切换)'
+  - '抢单(返佣|系统|大厅)'
+  - '担保(交易)?跑分'
+  - '出U|收U|承兑商'

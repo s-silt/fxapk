@@ -1,0 +1,62 @@
+# 自建 IM / C2 控制信道识别规则（apkscan.analyzers.self_hosted_im 消费）。
+#
+# 本规则只承载两类数据：
+#   - where_to_request / evidence_to_obtain：调证落点与拟调取证据（套打调证函用）。
+#   - fingerprints：IM / 消息库包名指纹（弱证据，dex token 词边界匹配）。
+#
+# 强证据（硬编码 ws:// / wss:// / mqtt:// / xmpp:// / tcp:// 等非白名单服务器地址）由分析器
+# 内置的有界信道正则（字符类、无嵌套量词 → 线性、无灾难性回溯）直接抽取，无需在此维护。
+#
+# FP 收敛铁律：正常 App 大量用 MQTT / WebSocket 做推送 / 客服 / 实时刷新。公共 IM / 推送 /
+# MQTT 基础设施（getui / jpush / umeng / firebase / mqtt.eclipseprojects.io / hivemq public /
+# 阿里云 mqtt 等）由 infra.classify_domain 在分析器侧统一排除，无需在此维护白名单；私网 host
+# 由 host_is_private 跳过。仅「硬编码非白名单服务器地址」才升 HIGH·建议调证；仅命中下列库
+# 指纹（无地址）只给 MEDIUM·待核，绝不轻易升建议调证。
+
+where_to_request: 服务器云厂商 / IDC
+
+evidence_to_obtain:
+  - 控制信道服务器（MQTT broker / WebSocket 网关 / XMPP / socket 服务端）的归属、租户实名与开通 / 续费信息（向云服务商 / IDC）
+  - 信道连接日志、会话 / 消息收发日志、在线设备与登录来源 IP
+  - 该信道上注册的账号信息（手机号 / 邮箱 / 实名认证）
+  - 所连接的客户端清单与设备标识（用于还原团伙组织关系与指挥链）
+
+# IM / 消息库包名指纹（弱证据）：命中只证明集成了对应库，不等于自建信道——
+# 故仅 MEDIUM·待核，需 jadx / runtime 复核服务器地址是否自建、非白名单。
+# tokens 用包名前缀（含点，token 词边界匹配天然有界），宁缺毋滥。
+fingerprints:
+  - id: IM-XMPP-SMACK
+    title: XMPP（Smack 客户端库）
+    tokens:
+      - org.jivesoftware.smack
+      - Lorg/jivesoftware/smack
+
+  - id: IM-MQTT-PAHO
+    title: MQTT（Eclipse Paho 客户端库）
+    tokens:
+      - org.eclipse.paho
+      - Lorg/eclipse/paho
+
+  - id: IM-MQTT-HIVEMQ
+    title: MQTT（HiveMQ 客户端库）
+    tokens:
+      - com.hivemq.client
+      - Lcom/hivemq/client
+
+  - id: IM-SOCKET-NETTY
+    title: 自建 socket（Netty 网络框架）
+    tokens:
+      - io.netty.channel
+      - Lio/netty/channel
+
+  - id: IM-WS-JAVA-WEBSOCKET
+    title: WebSocket（Java-WebSocket 库）
+    tokens:
+      - org.java_websocket
+      - Lorg/java_websocket
+
+  - id: IM-MATRIX-SDK
+    title: Matrix（去中心化 IM SDK）
+    tokens:
+      - org.matrix.android.sdk
+      - org.matrix.androidsdk
