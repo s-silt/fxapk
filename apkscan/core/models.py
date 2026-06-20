@@ -49,6 +49,7 @@ class LeadCategory(Enum):
     CARD_MERCHANT = "CARD_MERCHANT"  # 卡商/料商/开户供应链（情报研判线索，默认待核，结合资金/通联落地）
     SELF_HOSTED_IM = "SELF_HOSTED_IM"  # 自建 IM/C2 控制信道（团伙落地强连边，向云厂商/IDC 调服务器归属与信道日志）
     WALLET_SECRET = "WALLET_SECRET"  # 钱包私钥/助记词（高敏，直接掌控资金；境外/链上路径：派生地址上链回溯+交易所冻结）
+    BACKEND_CREDENTIAL = "BACKEND_CREDENTIAL"  # 硬编码后端/管理凭据（Basic-Auth/DB DSN/云AK；高敏，供有权机关依法登录取证、调服务器镜像/日志）
 
 
 @dataclass
