@@ -39,6 +39,12 @@ CONFIG_KEY:
   target_desc: 涉案样本中硬编码的服务配置键值，可据此回溯 App 注册主体
   evidence_lead_in: 为核实应用注册与配置归属，建议依法调取以下材料：
 
+ADMIN_PANEL:
+  title: 协查（后台管理系统/服务器归属）函
+  recipient_hint: 受文机关为该后台所在域名注册商 / 云服务商 / IDC（据线索推导的候选）
+  target_desc: 涉案样本中出现的后台管理系统 / 控制台入口，疑为团伙运营控制端
+  evidence_lead_in: 为核实后台运营主体、服务器归属与运营日志，建议依法调取以下材料：
+
 CONTACT:
   title: 协查（联系方式归属）函
   recipient_hint: 受文机关为该联系方式所属平台 / 运营商（据线索推导的候选）
