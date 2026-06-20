@@ -45,6 +45,24 @@ ADMIN_PANEL:
   target_desc: 涉案样本中出现的后台管理系统 / 控制台入口，疑为团伙运营控制端
   evidence_lead_in: 为核实后台运营主体、服务器归属与运营日志，建议依法调取以下材料：
 
+FOURTH_PARTY_PAYMENT:
+  title: 协查（四方/聚合支付平台）函
+  recipient_hint: 受文机关为该第四方 / 聚合支付平台 / 收单机构（据线索推导的候选）
+  target_desc: 涉案样本接入的四方 / 跑分 / 代收代付平台，疑用于归集与清分涉案资金
+  evidence_lead_in: 为核实商户进件主体、结算账户与资金流水，建议依法调取以下材料：
+
+SMS_FORWARDING:
+  title: 协查（短信/验证码转发）函
+  recipient_hint: 受文机关为该短信转发平台 / 接收号码归属运营商（据线索推导的候选）
+  target_desc: 涉案样本中出现的短信 / 验证码转发服务，疑用于拦截转发受害人验证码以接管账户
+  evidence_lead_in: 为核实转发目标、接收记录与平台账号实名，建议依法调取以下材料：
+
+SELF_HOSTED_IM:
+  title: 协查（自建 IM / 控制信道服务器）函
+  recipient_hint: 受文机关为该信道服务器所属云服务商 / IDC（据线索推导的候选）
+  target_desc: 涉案样本硬编码的自建 IM / 控制信道服务器，疑为团伙内部通信 / 控制端
+  evidence_lead_in: 为核实服务器归属、租户实名与信道日志，建议依法调取以下材料：
+
 CONTACT:
   title: 协查（联系方式归属）函
   recipient_hint: 受文机关为该联系方式所属平台 / 运营商（据线索推导的候选）
