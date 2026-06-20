@@ -1513,11 +1513,14 @@ def _config_message_from_flow(flow: object) -> dict[str, Any] | None:
         logger.info("[capture] 明文配置响应超 %d 字节，跳过保留：%s", _MAX_CONFIG_BODY_BYTES, url)
         return None
 
+    flow_id, ts = _flow_meta(flow)
     return {
         "url": str(url),
         "request_body": _body_text(req),
         "response_body": resp_body,
         "kind": "config",
+        "flow_id": flow_id,
+        "ts": ts,
     }
 
 
@@ -1570,6 +1573,20 @@ def _parse_messages(flows_file: Path) -> list[dict[str, Any]]:
     return messages
 
 
+def _flow_meta(flow: object) -> tuple[str, float | None]:
+    """取 mitmproxy flow 的 flow_id 与请求起始时间戳（epoch 秒），供通信会话时序重建。
+
+    取不到 → ("", None)。flow_id=flow.id（mitmproxy 每条流唯一）；ts=request.timestamp_start。
+    """
+    flow_id = str(getattr(flow, "id", "") or "")
+    ts: float | None = None
+    req = getattr(flow, "request", None)
+    raw = getattr(req, "timestamp_start", None) if req is not None else None
+    if isinstance(raw, (int, float)):
+        ts = float(raw)
+    return flow_id, ts
+
+
 def _message_from_flow(flow: object) -> dict[str, Any] | None:
     """从单条 HTTPFlow 提取 url + 请求/响应体（仅保留 JSON 信封形态）。无信封 → None。"""
     req = getattr(flow, "request", None)
@@ -1585,10 +1602,13 @@ def _message_from_flow(flow: object) -> dict[str, Any] | None:
     if not _looks_like_envelope(req_body) and not _looks_like_envelope(resp_body):
         return None
 
+    flow_id, ts = _flow_meta(flow)
     return {
         "url": str(url),
         "request_body": req_body,
         "response_body": resp_body,
+        "flow_id": flow_id,
+        "ts": ts,
     }
 
 
