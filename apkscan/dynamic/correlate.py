@@ -5,15 +5,17 @@ C2 域名 / AppID / 收款地址等强指标在批量层白白浪费。本模块
 单包升级为「团伙簇」——直击办案最缺的**串并**一环：
 
 - 同一签名证书 sha256 = 同一开发者 / 打包账号
-- 同一 C2 域名 / 同一收款地址 = 同一资金与服务器基础设施
+- 同一 C2 域名 / 同一收款地址 / 同一后台 host / 同一自建 IM 服务器 = 同一资金与服务器基础设施
 - 同一 uni AppID = 同一前端工程
+- 同一钱包私钥 / 助记词 = 同一资金操作者（校验和铁证，最强连边）
 
 做法：每个样本从其 ``report.json``（dict）抽一组**强指纹**（高区分度、零公共基础设施），
 建 ``指纹 -> [样本]`` 倒排索引，对共享任一强指纹的样本用并查集（union-find）连边成簇。
 每个簇给出成员清单 + 并案依据（哪些指纹把它们连起来），可入卷支撑并案。
 
-★ 只用强指纹（签名/ C2 / uni AppID / 收款地址），且**排除调试证书**（海量样本共用，
-会把无关包错并）——宁可少并不可错并。
+★ 只用强指纹（签名 / C2 / uni AppID / 收款地址 / 后台 host / 自建 IM 服务器 / 钱包凭据），
+A 期新增线索仅取强档（建议调证）入、待核不入，且**排除调试证书**（海量样本共用，会把无关包
+错并）——宁可少并不可错并。
 """
 
 from __future__ import annotations
@@ -28,10 +30,20 @@ __all__ = ["Fingerprint", "Cluster", "extract_fingerprints", "correlate"]
 # 调试证书 subject 标记（CN=Android Debug…）：海量样本共用，绝不作并簇键。
 _DEBUG_CERT_MARK = "android debug"
 
+# 由 lead 派生的强连边指纹：category → fingerprint kind（A 期新增线索接入图谱串案）。
+# 后台 host / 自建 IM 服务器 = 同伙运营基础设施；钱包私钥/助记词共享 = 同操作者铁证。
+_LEAD_FP_KINDS = {
+    "ADMIN_PANEL": "admin_host",
+    "SELF_HOSTED_IM": "im_server",
+    "WALLET_SECRET": "wallet_secret",
+}
+_ADVICE_INVESTIGATE = "建议调证"
+
 
 @dataclass(frozen=True)
 class Fingerprint:
-    """一个强指纹。kind ∈ {sign, c2, uni_appid, crypto_addr, firebase_project, telegram_bot}。"""
+    """一个强指纹。kind ∈ {sign, c2, uni_appid, crypto_addr, firebase_project, telegram_bot,
+    admin_host, im_server, wallet_secret}。"""
 
     kind: str
     value: str
@@ -52,6 +64,8 @@ def extract_fingerprints(report: dict) -> set[Fingerprint]:
     - ``meta['sign_sha256']``（签名证书指纹）—— ``sign_subject`` 含 "Android Debug" 则跳过。
     - ``meta['uni_appid']`` / ``meta['crypto_addresses'][]``。
     - ``leads[]`` 中 ``is_c2=True`` 的 value（已研判的诈骗后端，排除了 CDN/SDK/公共服务）。
+    - ``leads[]`` 中 ADMIN_PANEL/SELF_HOSTED_IM（建议调证档）→ admin_host/im_server；
+      WALLET_SECRET（校验和铁证，恒入）→ wallet_secret。让 A 期新线索自动入图串案。
     """
     fps: set[Fingerprint] = set()
     meta = report.get("meta")
@@ -73,8 +87,16 @@ def extract_fingerprints(report: dict) -> set[Fingerprint]:
             if tok:
                 fps.add(Fingerprint("telegram_bot", str(tok)))
     for lead in report.get("leads") or []:
-        if isinstance(lead, dict) and lead.get("is_c2") and lead.get("value"):
-            fps.add(Fingerprint("c2", str(lead["value"])))
+        if not isinstance(lead, dict) or not lead.get("value"):
+            continue
+        value = str(lead["value"])
+        if lead.get("is_c2"):
+            fps.add(Fingerprint("c2", value))
+        # A 期新增线索入图串案：后台 host / 自建 IM 服务器 / 钱包凭据。
+        # admin/im 仅强档（建议调证）入；钱包私钥/助记词经校验和恒为铁证，恒入。
+        kind = _LEAD_FP_KINDS.get(str(lead.get("category") or ""))
+        if kind and (kind == "wallet_secret" or lead.get("advice") == _ADVICE_INVESTIGATE):
+            fps.add(Fingerprint(kind, value))
     return fps
 
 
