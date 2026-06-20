@@ -19,7 +19,7 @@ jobs:
       - name: Install deps + linters
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e .
+          python -m pip install -e ".[graph]"
           python -m pip install ruff pyright
       - name: Ruff (lint)
         run: python -m ruff check apkscan tests
@@ -42,7 +42,7 @@ jobs:
       - name: Install package + test deps
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e .
+          python -m pip install -e ".[graph]"
           python -m pip install pytest
       - name: Run tests
         run: python -m pytest -q
