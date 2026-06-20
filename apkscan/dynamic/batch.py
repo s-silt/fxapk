@@ -196,6 +196,22 @@ def run_folder(
     # 跨样本团伙聚类（纯离线后处理：读各包主报告，按共享强指纹串并换皮包）。
     clusters = _run_correlation(analyzed, out_dir)
 
+    # 图谱串案：把本批分析过的样本 + 强指纹持久化进本地 Kuzu 图谱（跨批次累积，约束 C1）。
+    # 纯副作用：不改本函数返回结构、不触碰 on_progress 链路；kuzu 缺失 → info 跳过、batch 仍成功。
+    try:
+        from apkscan.graph import GraphStore, ingest_batch
+
+        _store = GraphStore(Path(out_dir) / ".apkscan_cache" / "cases.kuzu")
+        try:
+            _res = ingest_batch(analyzed, _store)
+            _emit(on_progress, f"图谱摄入：成功 {_res['ingested']} / 失败 {_res['failed']}")
+        finally:
+            _store.close()
+    except ImportError:
+        logger.info("[batch] 未安装 kuzu，跳过图谱摄入（pip install kuzu==0.11.3 启用）")
+    except Exception:
+        logger.warning("[batch] 图谱摄入失败（非致命，已隔离）", exc_info=True)
+
     summary = {
         "total": total,
         "analyzed": len(analyzed),
