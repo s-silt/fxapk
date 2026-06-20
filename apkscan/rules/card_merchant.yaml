@@ -1,0 +1,85 @@
+# 卡商 / 料商 / 开户供应链关键词规则（apkscan.analyzers.card_merchant 消费）。
+#
+# keyword 为**定长字面子串**（无正则、无量词 → 线性、无灾难性回溯），命中 dex 字符串或
+# 文本资源即累积。tier 概念不适用：本类信号 FP 高、无直接调证对象 →
+#   **默认一律 MEDIUM·待核（advice=待核）**，绝不自动「建议调证」。
+#   命中多个不同高区分关键词时分析器会在 notes 标「重点」，但仍待核。
+#
+# FP 收敛铁律（宁缺毋滥）：
+#   - 只收**高区分**词：完整词 / 多字组合（"银行卡料""四件套""收U承兑"）。
+#   - **绝不**收单字泛词（"料""卡"）——分析器对 len < 2 的关键词硬性拒收。
+#   - whitelist 命中**近邻窗口**（命中词 snippet 半径内）含白名单字面 → 跳过该命中；
+#     不再整段 in 判定（长文本里别处的"银行卡管理"不应吞掉"卡商一手"真命中）。
+#   - 文本含已知正规基础设施 host 的 URL 由 infra.is_known_infra 排除。
+#
+# 弱区分关键词（weak: true）：泛义高频词，单独出现误报率高（"跑分"=安兔兔跑分/马拉松跑分），
+#   **必须与另一个高区分卡商词在同一段文本里共现**才计入（单独出现不产线索、不计 title）。
+# 词边界关键词（boundary: true）：2 字英文混排组合（"收U""出U"），要求字母 U 前后不是
+#   其他 ASCII 字母/数字（避免 "...callbackUrl..." 把 "kU" 之类误拼）；或与高区分词共现。
+#
+# where_to_request 写「无直接调证对象（线索研判用）」——letters 据此跳过（这是预期）。
+# 本类属情报研判线索，落地需结合资金 / 通联进一步核查。
+
+where_to_request: 无直接调证对象（线索研判用）
+
+evidence_to_obtain:
+  - 线索研判用：结合资金流水 / 通联记录 / 聊天内容进一步落地核查上下游主体
+
+# 可选 whitelist：命中行含以下字面 → 判为正规语境，跳过该命中（不填走分析器内置兜底）。
+whitelist:
+  - 承兑汇票
+  - 银行卡管理
+  - 银行卡绑定
+  - 银行卡号
+  - 添加银行卡
+
+patterns:
+  # ---- 卡商（贩卡 / 收 U / 承兑 / 卡农）----
+  - keyword: 卡商
+    title: 卡商
+  # 收U/出U：2 字英文混排 → boundary（U 前后非 ASCII 字母数字）或与高区分词共现才计入。
+  - keyword: 收U
+    title: 收 U（虚拟币承兑）
+    boundary: true
+  - keyword: 收u
+    title: 收 U（虚拟币承兑）
+    boundary: true
+  - keyword: U商
+    title: U 商（虚拟币兑换商）
+  - keyword: 承兑商
+    title: 承兑商
+  # 跑分：泛义高频词（安兔兔跑分/手机跑分/马拉松跑分）→ 弱区分，须与另一卡商词共现才计入。
+  - keyword: 跑分
+    title: 跑分（洗钱代收付）
+    weak: true
+  - keyword: 卡农
+    title: 卡农（出借银行卡者）
+  - keyword: 出U
+    title: 出 U（出售虚拟币）
+    boundary: true
+
+  # ---- 料商（贩卖公民个人信息 / 四件套）----
+  - keyword: 料商
+    title: 料商
+  - keyword: 卡料
+    title: 卡料（银行卡个人信息）
+  - keyword: 银行卡料
+    title: 银行卡料
+  - keyword: 身份证料
+    title: 身份证料
+  - keyword: U盾料
+    title: U 盾料
+  - keyword: 对公料
+    title: 对公料（对公账户四件套）
+  - keyword: 四件套
+    title: 四件套（卡 / 盾 / 证 / 卡）
+  - keyword: 全套料
+    title: 全套料
+  - keyword: 实名料
+    title: 实名料
+
+  # ---- 开户供应链 ----
+  - keyword: 代开户
+    title: 代开户
+  - keyword: 对公账户出售
+    title: 对公账户出售
