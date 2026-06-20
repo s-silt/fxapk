@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 from apkscan.analyzers.classify import classify_app
-from apkscan.core import infra
+from apkscan.core import forensic, infra
 from apkscan.core.models import (
     AnalysisConfig,
     Confidence,
@@ -383,6 +383,21 @@ def _apply_default_advice(leads: list[Lead]) -> None:
 _OFFLINE_NOTE = "离线扫描：未做 WHOIS/ICP/ASN 归属查询，归属待联网或人工核（非查无结果）"
 
 
+def _apply_forensic(
+    advice: str, host: str, evidence_to_obtain: list[str], notes: str, **enr: object
+) -> str:
+    """对「建议调证」的后端 Lead 按服务器辖区追加取证路径（国内调证 / 国外取证）。
+
+    就地向 evidence_to_obtain 追加路径证据，返回带辖区标签的 notes。非建议调证（infra/私网/
+    待核）不标——只给真后端分流。绝不抛（forensic 为纯函数）。
+    """
+    if advice != infra.ADVICE_INVESTIGATE:
+        return notes
+    fp = forensic.forensic_path(forensic.classify_jurisdiction(host, **enr))
+    evidence_to_obtain.extend(fp.evidence)
+    return f"{notes}；{fp.label}" if notes else fp.label
+
+
 def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
     icp = ep.enrichment.get("icp") or {}
     rdap = ep.enrichment.get("rdap") or {}
@@ -443,6 +458,9 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
         tier_note = "仅见于第三方库文件/超大字符串表，疑似库内置，低可信"
         notes = f"{notes}；{tier_note}" if notes else tier_note
 
+    notes = _apply_forensic(
+        advice, ep.value, evidence_to_obtain, notes, icp=icp, rdap=rdap, whois=whois, dns=dns
+    )
     return Lead(
         category=LeadCategory.DOMAIN,
         value=ep.value,
@@ -476,6 +494,9 @@ def _ip_lead(ep: Endpoint, online: bool = True) -> Lead:
     # IP 研判：内网/回环（端点已标 is_private）无需调证；公网 IP 默认建议调证。
     advice = infra.ADVICE_SKIP if ep.is_private else infra.ADVICE_INVESTIGATE
 
+    notes = _apply_forensic(
+        advice, ep.value, evidence_to_obtain, _endpoint_notes(ep, online, enriched), asn=asn
+    )
     return Lead(
         category=LeadCategory.IP,
         value=ep.value,
@@ -484,7 +505,7 @@ def _ip_lead(ep: Endpoint, online: bool = True) -> Lead:
         evidence_to_obtain=evidence_to_obtain,
         confidence=confidence,
         source_refs=list(ep.evidences),
-        notes=_endpoint_notes(ep, online, enriched),
+        notes=notes,
         advice=advice,
     )
 
