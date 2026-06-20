@@ -27,6 +27,7 @@ from collections.abc import Callable
 from typing import Any
 
 from apkscan.core import infra, pipeline
+from apkscan.core.textutil import host_from_url
 from apkscan.core.models import (
     Confidence,
     Endpoint,
@@ -418,6 +419,43 @@ def _load_events_field(runtime_report_path: str, field: str) -> list[dict[str, A
 def _load_crypto_events(runtime_report_path: str) -> list[dict[str, Any]]:
     """读 runtime_report.json 的 crypto_events 数组（P0 运行时密钥 hook 产出）。"""
     return _load_events_field(runtime_report_path, "crypto_events")
+
+
+def merge_runtime_sessions(report: Report, runtime_report_path: str) -> dict[str, int]:
+    """把运行时报文按 flow 时间戳重建为**通信会话时序**，写 ``report.meta['comm_sessions']``。
+
+    每条会话条目 = ``{ts, flow_id, url, host, kind, has_request_body, has_response_body}``，按 ts
+    升序（无 ts 排末尾、稳定）。还原 App↔服务器交互时间线，作通信会话物证供办案串起请求/响应
+    序列。纯派生（不新增 Lead），绝不抛。
+    """
+    try:
+        messages = _load_runtime_messages(runtime_report_path)
+        if not messages:
+            return {"sessions": 0}
+        sessions: list[dict[str, Any]] = []
+        for m in messages:
+            if not isinstance(m, dict):
+                continue
+            url = str(m.get("url") or "")
+            ts = m.get("ts")
+            sessions.append(
+                {
+                    "ts": ts if isinstance(ts, (int, float)) else None,
+                    "flow_id": str(m.get("flow_id") or ""),
+                    "url": url,
+                    "host": host_from_url(url),
+                    "kind": str(m.get("kind") or "envelope"),
+                    "has_request_body": bool(m.get("request_body")),
+                    "has_response_body": bool(m.get("response_body")),
+                }
+            )
+        sessions.sort(key=lambda s: (s["ts"] is None, s["ts"] or 0.0))
+        report.meta["comm_sessions"] = sessions
+        logger.info("[merge] 重建通信会话时序 %d 条", len(sessions))
+        return {"sessions": len(sessions)}
+    except Exception:
+        logger.exception("[merge] 重建通信会话时序异常（已忽略）")
+        return {"sessions": 0}
 
 
 def merge_runtime_traces(report: Report, runtime_report_path: str) -> dict[str, int]:
@@ -2029,6 +2067,11 @@ def merge_and_rerender(
     _emit(on_progress, "浮出 Dead-Drop 二级真实 C2 ...")
     dd_stats = resolve_dead_drop_c2(report, rr_path)
     stats["secondary_c2"] = dd_stats.get("secondary_c2", 0)
+
+    # 通信会话时序重建：把运行时报文按 flow 时间戳串成会话物证（App↔服务器交互时间线）。
+    _emit(on_progress, "重建运行时通信会话时序 ...")
+    sess_stats = merge_runtime_sessions(report, rr_path)
+    stats["comm_sessions"] = sess_stats.get("sessions", 0)
 
     fmts = list(formats) if formats else list(_DEFAULT_FORMATS)
     try:
