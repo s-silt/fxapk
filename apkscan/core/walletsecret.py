@@ -97,6 +97,10 @@ def find_mnemonics(text: str) -> list[WalletSecret]:
     _index, wordset = load_wordlist()
     if not wordset or not text:
         return []
+    # 性能预筛：12 词助记词至少 11 个空白分隔；空白不足直接跳过——杀掉海量无空白的 dex 类描述符串，
+    # 避免对每条都 lower()+findall 分词。是安全超集（真助记词必含 ≥11 空白），行为不变。
+    if sum(c.isspace() for c in text) < 11:
+        return []
     tokens = _WORD_RE.findall(text.lower())
     if len(tokens) > _MAX_TOKENS:
         tokens = tokens[:_MAX_TOKENS]

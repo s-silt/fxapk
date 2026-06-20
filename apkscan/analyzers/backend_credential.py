@@ -39,6 +39,10 @@ _MAX_DEX_STRINGS = 200_000
 _MAX_RESOURCE_BYTES = 4_000_000
 _MAX_TOTAL_RESOURCE_BYTES = 64_000_000
 
+# 性能预筛：5 类凭据必含下列锚点之一（DSN/JDBC→"://"、Basic→"Authorization"、云 AK→AKIA/LTAI）；
+# 整段无锚点即跳过昂贵的 5 条正则 finditer。是详细规则的超集，跳过的串本就不会命中，行为不变。
+_ANCHOR_RE = re.compile(r"://|AKIA|LTAI|Authorization")
+
 _DECODE_BASIC = "base64_userpass"
 _DEFAULT_WHERE = "无直接调证对象（凭据供有权机关依法登录取证 / 据服务器归属向云厂商调镜像与日志）"
 _COMPLIANCE = "高敏：硬编码后端/管理凭据，仅供有权机关依法登录取证 / 调服务器镜像与日志，严禁未授权使用"
@@ -92,7 +96,7 @@ class BackendCredentialAnalyzer(BaseAnalyzer):
         hits: dict[str, tuple[str, str, str]],
     ) -> None:
         """从一段文本抽硬编码凭据，去重累积。绝不抛。"""
-        if not text:
+        if not text or not _ANCHOR_RE.search(text):
             return
         try:
             for p in patterns:
