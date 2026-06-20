@@ -12,7 +12,12 @@ from __future__ import annotations
 WEIGHT_CONFIG: dict[str, dict] = {
     "sign": {"weight": 10.0, "strength": "strong"},
     "c2": {"weight": 10.0, "strength": "strong"},
+    # 钱包私钥/助记词共享 = 同一操作者铁证（校验和近零误报），最强连边。
+    "wallet_secret": {"weight": 11.0, "strength": "strong"},
     "crypto_addr": {"weight": 9.0, "strength": "strong"},
+    # A 期新增：后台 host / 自建 IM 服务器 = 同伙运营基础设施，强连边。
+    "admin_host": {"weight": 9.0, "strength": "strong"},
+    "im_server": {"weight": 8.0, "strength": "strong"},
     "telegram_bot": {"weight": 8.0, "strength": "strong"},
     "firebase_project": {"weight": 5.0, "strength": "medium"},
     "uni_appid": {"weight": 5.0, "strength": "medium"},
