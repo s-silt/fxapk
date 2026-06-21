@@ -490,3 +490,19 @@ def classify_domain(domain: str) -> tuple[str, str]:
         return ADVICE_REVIEW, "无效域名或私网/回环字面，无法对外调证，需人工核"
 
     return ADVICE_INVESTIGATE, "疑似 App 自有服务，建议落地核查归属"
+
+
+def effective_advice(domain: str, tier: object) -> str:
+    """综合 ``classify_domain`` 分级 + 来源可信度档（tier）的**最终**调证研判（单一事实源）。
+
+    在 ``classify_domain`` 基础上叠加 C1 来源档降级：当端点仅见于第三方库文件 / 超大字符串表
+    （``tier`` ∈ {library-file, bulk-string}）且 classify 仍判"建议调证"时，降为"待核"——
+    与 ``pipeline._domain_lead`` 的 C1 逻辑同口径。
+
+    ★ 用途：目标筛选 / 主动探测门控须与**最终 Lead 研判**用同一套判据，避免"被判待核（不建议调证）
+    的库内置档端点却被主动探测"的判据漂移（合规红线：主动探测仅对【建议调证】目标）。
+    """
+    advice, _reason = classify_domain(domain)
+    if advice == ADVICE_INVESTIGATE and tier in (TIER_LIBRARY_FILE, TIER_BULK_STRING):
+        return ADVICE_REVIEW
+    return advice

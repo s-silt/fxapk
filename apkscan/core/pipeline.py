@@ -30,6 +30,8 @@ from apkscan.core.registry import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from apkscan.core.context import AnalysisContext
 
 logger = logging.getLogger(__name__)
@@ -116,15 +118,15 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     if getattr(ctx, "apk_validation_ok", True) is False:
         meta["apk_validation_warning"] = "APK 合法性校验异常，分析结果可能不可靠（详见日志）"
 
-    # 3) 联网富化（按 applies_to 路由）——**只对"高度可疑"端点查归属**，不再有一个查一个。
-    #    判据：infra 分级为"建议调证"（疑似 App 自有服务/C2）的域名/IP 才查 WHOIS/ICP/ASN；
-    #    已知第三方基础设施/SDK/CDN（无需调证）、私网/回环/行情代码（待核）一律跳过。
-    #    既省时（网络受限时不被一堆 infra/google 域名拖死、也不再误查 127.0.0.1）、又聚焦调证
-    #    （WHOIS 归属对真 C2 才有意义，对 google 没意义）。
+    # 3) 联网富化（两遍）——**只对"高度可疑"端点（建议调证）查**，不再有一个查一个。
+    #    判据：infra 分级为"建议调证"（疑似 App 自有服务/C2）的域名/IP 才查；已知第三方基础设施/
+    #    SDK/CDN（无需调证）、私网/回环/行情代码（待核）一律跳过。省时 + 聚焦调证。
+    #    ★ 两遍富化（见 _run_enrichment）：①归属(rdap/whois/dns/asn/icp/webcheck)定辖区 →
+    #      ②攻击面(shodan/recon/cve/certs)仅对【国外+未知】跑；主动探测(recon)仅对【国外】跑。
     enricher_status: list[dict] = []
     if config.online:
         targets = _enrichment_targets(endpoints)
-        enricher_status = _enrich_endpoints(targets, discover_enrichers())
+        enricher_status = _run_enrichment(targets, discover_enrichers())
         meta["enriched_target_count"] = len(targets)
         net_eps = sum(1 for ep in endpoints if ep.kind in ("domain", "ip"))
         logger.info(
@@ -238,9 +240,15 @@ def _enrichment_targets(endpoints: list[Endpoint]) -> list[Endpoint]:
 
 
 def _enrich_endpoints(
-    endpoints: list[Endpoint], enrichers: list[BaseEnricher]
+    endpoints: list[Endpoint],
+    enrichers: list[BaseEnricher],
+    *,
+    gate: "Callable[[Endpoint, BaseEnricher], bool] | None" = None,
 ) -> list[dict]:
     """对每个端点按 applies_to 跑匹配的富化器，结果写入 endpoint.enrichment[provider]。
+
+    ``gate``（可选）：额外的 (端点, 富化器)→bool 谓词，返回 False 则跳过该富化器（不计入统计）。
+    两遍富化用它把"主动探测（active=True）"门控到仅国外端点；不传则全跑（向后兼容）。
 
     按端点并发（``ThreadPoolExecutor``，worker 数 = ``ENRICH_MAX_WORKERS``）：富化是
     I/O 密集（whois/rdap 单次可达 ~30s 超时），串行双重循环单包可达 7 分钟，按端点并发
@@ -274,6 +282,8 @@ def _enrich_endpoints(
             applies_to = list(getattr(enricher, "applies_to", []) or [])
             if ep.kind not in applies_to:
                 continue
+            if gate is not None and not gate(ep, enricher):
+                continue  # 两遍富化门控：如主动探测仅国外（非国外端点跳过该富化器，不计统计）
             provider = getattr(enricher, "name", "") or enricher.__class__.__name__
 
             with stats_lock:
@@ -328,6 +338,80 @@ def _note_fail(st: dict, msg: str) -> None:
     st["failed"] += 1
     if not st["typical_error"]:
         st["typical_error"] = msg
+
+
+# attack_surface 阶段的组内顺序：cve 依赖同端点 shodan/recon 写入的指纹，故排在它们之后。
+_ATTACK_SURFACE_ORDER = {"shodan": 0, "recon": 0, "certs": 0, "cve": 1}
+
+
+def _enricher_phase(enricher: BaseEnricher) -> str:
+    """富化器阶段（缺失/空 → 默认 attribution，兼容未标 phase 的旧富化器）。"""
+    return getattr(enricher, "phase", "attribution") or "attribution"
+
+
+def _classify_endpoint_jurisdiction(ep: Endpoint) -> str:
+    """据第①遍归属富化结果判该端点服务器辖区（国内/国外/未知）。绝不抛（失败→未知，保守）。"""
+    e = ep.enrichment
+    try:
+        return forensic.classify_jurisdiction(
+            ep.value,
+            icp=e.get("icp"),
+            rdap=e.get("rdap"),
+            whois=e.get("whois"),
+            dns=e.get("dns"),
+            asn=e.get("asn"),
+            webcheck=e.get("webcheck"),
+        )
+    except Exception:  # noqa: BLE001 — 辖区判定失败不得炸主流程；保守判未知（不触发主动探测）
+        logger.debug("辖区判定失败，按未知处理：%s", ep.value, exc_info=True)
+        return forensic.JURIS_UNKNOWN
+
+
+def _run_enrichment(targets: list[Endpoint], enrichers: list[BaseEnricher]) -> list[dict]:
+    """两遍富化编排：①归属(attribution) → 定辖区 → ②攻击面(attack_surface)。
+
+    第②遍只对【国外 + 未知】端点跑（境内服务器走调证路径、不做攻击面取证）；其中 **active=True
+    的主动探测（recon）再收紧到仅【国外】**（未知辖区不主动触达，最保守）。辖区结果仅暂存于本函数
+    局部 dict（按 id(ep)），**绝不写入 ep.enrichment**——避免 ``_jurisdiction`` 等内部键泄漏进
+    report.json 被下游误当 provider。
+    """
+    attribution = [e for e in enrichers if _enricher_phase(e) == "attribution"]
+    attack_surface = sorted(
+        (e for e in enrichers if _enricher_phase(e) == "attack_surface"),
+        key=lambda e: _ATTACK_SURFACE_ORDER.get(getattr(e, "name", ""), 0),
+    )
+
+    # 第①遍：归属富化（沿用既有并发/缓存/统计机制）。
+    stats = _enrich_endpoints(targets, attribution)
+    if not attack_surface:
+        return stats
+
+    # 定辖区（本地 dict，绝不写回 ep.enrichment）。
+    juris: dict[int, str] = {id(ep): _classify_endpoint_jurisdiction(ep) for ep in targets}
+
+    # 第②遍目标：国外 + 未知（被动攻击面）；主动探测再收紧到仅国外（见 gate）。
+    phase2_targets = [
+        ep
+        for ep in targets
+        if juris[id(ep)] in (forensic.JURIS_FOREIGN, forensic.JURIS_UNKNOWN)
+    ]
+    if not phase2_targets:
+        return stats
+
+    def _gate(ep: Endpoint, enricher: BaseEnricher) -> bool:
+        # 主动探测（active=True）仅对【国外 + 最终建议调证】端点放行；被动攻击面对【国外+未知】均放行。
+        # ★ tier 判据：库内置档（library-file/bulk-string）端点最终被判"待核"（见 _domain_lead C1），
+        #   即便辖区=国外也绝不主动探测——与最终 Lead 研判同口径，消除判据漂移（合规红线）。
+        if getattr(enricher, "active", False):
+            return (
+                juris[id(ep)] == forensic.JURIS_FOREIGN
+                and infra.effective_advice(ep.value, ep.enrichment.get("tier"))
+                == infra.ADVICE_INVESTIGATE
+            )
+        return True
+
+    stats += _enrich_endpoints(phase2_targets, attack_surface, gate=_gate)
+    return stats
 
 
 def build_endpoint_leads(endpoints: list[Endpoint], online: bool = True) -> list[Lead]:
@@ -394,8 +478,25 @@ def _apply_forensic(
     """
     if advice != infra.ADVICE_INVESTIGATE:
         return notes
-    fp = forensic.forensic_path(forensic.classify_jurisdiction(host, **enr))
+    juris = forensic.classify_jurisdiction(host, **enr)
+    fp = forensic.forensic_path(juris)
     evidence_to_obtain.extend(fp.evidence)
+
+    # ★ 攻击面/主动探测证据按**最终辖区**门控（与两遍富化 gate 同口径，落到渲染层）：
+    #   - 被动攻击面（Shodan/CVE/crt.sh）：仅【国外+未知】渲染；
+    #   - 主动探测（recon）：仅【国外】渲染；
+    #   - 国内（含 shodan country 把国外/未知翻成国内的情形）：一概不渲染——避免一条最终标
+    #     「国内·可调证」的 Lead 上挂着对它的攻击面/主动侦查痕迹（合规呈现自相矛盾、不可审计）。
+    if juris in (forensic.JURIS_FOREIGN, forensic.JURIS_UNKNOWN):
+        # Shodan 攻击面（被动）：开放端口/服务指纹/已知漏洞方向/关联主机。
+        evidence_to_obtain.extend(forensic.render_attack_surface(enr.get("shodan")))
+        # CVE 补查（被动 NVD）：补 Shodan 未覆盖指纹的已知漏洞方向（带 CVSS），仅情报方向、非利用。
+        evidence_to_obtain.extend(forensic.render_cve_surface(enr.get("cve")))
+        # 证书透明度（被动 crt.sh）：CT 日志关联子域（含历史/影子子域），疑同团伙基础设施→并簇串案。
+        evidence_to_obtain.extend(forensic.render_related_subdomains(enr.get("certs")))
+    if juris == forensic.JURIS_FOREIGN:
+        # 主动探测（recon，opt-in/已授权）：实时侦查的开放端口/TLS证书/HTTP指纹/暴露后台路径。
+        evidence_to_obtain.extend(forensic.render_active_recon(enr.get("recon")))
     return f"{notes}；{fp.label}" if notes else fp.label
 
 
@@ -452,8 +553,9 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
     #   library-file / bulk-string）且 classify 仍判"建议调证"（即非已知 infra/
     #   library-embedded、非私网）时，把 advice 降为"待核"并标低可信。★ 绝不降为"无需
     #   调证"（避免误杀真 C2）；已是 infra/私网档的不动（app tier 的真 C2 不受影响）。
+    #   用 infra.effective_advice 统一判据（与目标筛选/主动探测门控同口径，防判据漂移）。
     tier = ep.enrichment.get("tier")
-    if tier in (infra.TIER_LIBRARY_FILE, infra.TIER_BULK_STRING) and advice == infra.ADVICE_INVESTIGATE:
+    if advice == infra.ADVICE_INVESTIGATE and infra.effective_advice(ep.value, tier) != infra.ADVICE_INVESTIGATE:
         advice = infra.ADVICE_REVIEW
         confidence = Confidence.LOW
         tier_note = "仅见于第三方库文件/超大字符串表，疑似库内置，低可信"
@@ -461,7 +563,10 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
 
     notes = _apply_forensic(
         advice, ep.value, evidence_to_obtain, notes,
-        icp=icp, rdap=rdap, whois=whois, dns=dns, webcheck=ep.enrichment.get("webcheck"),
+        icp=icp, rdap=rdap, whois=whois, dns=dns,
+        webcheck=ep.enrichment.get("webcheck"), shodan=ep.enrichment.get("shodan"),
+        recon=ep.enrichment.get("recon"), cve=ep.enrichment.get("cve"),
+        certs=ep.enrichment.get("certs"),
     )
     return Lead(
         category=LeadCategory.DOMAIN,
@@ -498,7 +603,9 @@ def _ip_lead(ep: Endpoint, online: bool = True) -> Lead:
 
     notes = _apply_forensic(
         advice, ep.value, evidence_to_obtain, _endpoint_notes(ep, online, enriched),
-        asn=asn, webcheck=ep.enrichment.get("webcheck"),
+        asn=asn, webcheck=ep.enrichment.get("webcheck"), shodan=ep.enrichment.get("shodan"),
+        recon=ep.enrichment.get("recon"), cve=ep.enrichment.get("cve"),
+        certs=ep.enrichment.get("certs"),
     )
     return Lead(
         category=LeadCategory.IP,
