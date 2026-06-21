@@ -8,6 +8,11 @@ venv/
 out/
 .apkscan_cache/
 
+# 本地密钥(Shodan/在线富化 API key 等)，绝不入库
+.env
+.env.*
+!.env.example
+
 # CodeGraph 本地索引(生成物，类似 .git，绝不入库)
 /.codegraph/
 
