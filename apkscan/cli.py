@@ -520,10 +520,10 @@ def digest(
         ...,
         help="已产出的 report.json 路径（analyze/auto/batch 写出的 JSON 报告）。",
     ),
-    show_raw: bool = typer.Option(
+    redact: bool = typer.Option(
         False,
-        "--raw",
-        help="不脱敏高敏值（默认对钱包私钥/助记词、后端凭据、受害人 PII 等脱敏；明文在本地完整报告里）。",
+        "--redact",
+        help="脱敏高敏值（钱包私钥/助记词、后端凭据、受害人 PII、加密配方）——喂云端 agent 时用；默认明文，便于取证查看。",
     ),
 ) -> None:
     """把 report.json 压成**紧凑调证摘要 JSON** 打印到 stdout（供任意 AI agent（Codex/Claude 等）/ 脚本低 token 消费）。
@@ -552,7 +552,7 @@ def digest(
 
         from apkscan.report.digest import build_digest
 
-        typer.echo(_json.dumps(build_digest(report, redact=not show_raw), ensure_ascii=False, indent=2))
+        typer.echo(_json.dumps(build_digest(report, redact=redact), ensure_ascii=False, indent=2))
     except typer.Exit:
         raise
     except Exception as exc:  # noqa: BLE001 - 兜底任何意外，转友好提示而非 traceback
