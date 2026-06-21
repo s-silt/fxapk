@@ -520,8 +520,13 @@ def digest(
         ...,
         help="已产出的 report.json 路径（analyze/auto/batch 写出的 JSON 报告）。",
     ),
+    show_raw: bool = typer.Option(
+        False,
+        "--raw",
+        help="不脱敏高敏值（默认对钱包私钥/助记词、后端凭据、受害人 PII 等脱敏；明文在本地完整报告里）。",
+    ),
 ) -> None:
-    """把 report.json 压成**紧凑调证摘要 JSON** 打印到 stdout（供 Codex / 脚本低 token 消费）。
+    """把 report.json 压成**紧凑调证摘要 JSON** 打印到 stdout（供任意 AI agent（Codex/Claude 等）/ 脚本低 token 消费）。
 
     线索按优先级排序（建议调证 > 待核 > 无需调证；同档高可信、C2 在前），只保留可办案化的扁平
     字段 + 计数摘要，去掉端点全表 / 技术附录 / 富化原始数据等冗长内容。绝不抛——读不到 / 坏 JSON
@@ -547,13 +552,36 @@ def digest(
 
         from apkscan.report.digest import build_digest
 
-        typer.echo(_json.dumps(build_digest(report), ensure_ascii=False, indent=2))
+        typer.echo(_json.dumps(build_digest(report, redact=not show_raw), ensure_ascii=False, indent=2))
     except typer.Exit:
         raise
     except Exception as exc:  # noqa: BLE001 - 兜底任何意外，转友好提示而非 traceback
         logger.exception("[cli] digest 生成摘要异常")
         typer.echo(f"错误：生成摘要失败：{exc}", err=True)
         raise typer.Exit(code=1) from exc
+
+
+@app.command()
+def selfcheck(
+    online: bool = typer.Option(
+        True, "--online/--offline", help="是否探测联网富化 / web-check 连通性。"
+    ),
+    probe: bool = typer.Option(
+        True, "--probe/--no-probe", help="是否实际发起网络探测（web-check 等）；--no-probe 只看配置。"
+    ),
+) -> None:
+    """自检诊断：逐项报告**哪个能力通 / 不通 / 怎么修**，输出稳定 JSON（供任意 AI agent 驱动前自检）。
+
+    覆盖：核心、可选依赖（图谱 kuzu / 解密 / mcp）、外部工具（jadx/adb）、动态（frida/mitmproxy/设备）、
+    联网富化、web-check。每项给 status（ok/missing/disabled/unreachable）+ 一句话修复指引。绝不抛。
+    """
+    import json as _json
+
+    from apkscan.selfcheck import run_selfcheck
+
+    typer.echo(
+        _json.dumps(run_selfcheck(online=online, probe_network=probe), ensure_ascii=False, indent=2)
+    )
 
 
 @app.command()
