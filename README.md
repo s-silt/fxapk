@@ -136,7 +136,8 @@ fxapk auto app.apk --out out
 | `capture PACKAGE` | 真机抓包：mitmproxy + frida 绕证书绑定，抓运行时端点 |
 | `batch DIR` | 批量分析文件夹下所有 APK + 跨样本团伙聚类（写 `case_correlation.json`），并持久化进本地案件图谱 |
 | `letters REPORT.json` | 把可办案化线索套打成「调证函 / 协查文书」草稿（markdown，带免责标注） |
-| `digest REPORT.json` | 把 report.json 压成**紧凑调证摘要 JSON** 打到 stdout（按优先级排序、扁平字段，供 Codex / 脚本低 token 直接决策） |
+| `digest REPORT.json` | 把 report.json 压成**紧凑调证摘要 JSON** 打到 stdout（按优先级排序、扁平字段、高敏值默认脱敏，供任意 AI agent / 脚本低 token 直接决策；`--raw` 关脱敏） |
+| `selfcheck` | **自检诊断 JSON**：逐项报告各能力（图谱/解密/jadx/动态/联网富化/web-check）通不通、怎么修——供任意 AI agent 驱动前自检 |
 | `graph …` | 本地案件图谱串案（需 `fxapk[graph]`）：`ingest`（报告入图）/ `link <sha256>`（拉关联 APK）/ `query --kind --value`（按实体反查）/ `cluster`（团伙簇+置信分）/ `stats` / `cypher`（原始 Cypher）。默认输出稳定 JSON |
 | `gui` | 图形界面（tkinter 单窗口：体检 / 静态 / 一键全自动） |
 
@@ -251,18 +252,30 @@ fxapk graph stats                           # 图谱体检（节点 / 边 / 各 
 
 ---
 
+## 对接任意 AI agent（诊断 / 隐私 / agent 无关）
+
+fxapk 的产出与控制面是**标准 JSON CLI + 标准 MCP**，不绑定任何单一 agent——Codex / Claude / 其它 agent 都能驱动：
+
+- **自检诊断**：`fxapk selfcheck` 逐项报告各能力（图谱 / 解密 / jadx / 动态脱壳抓包 / 联网富化 / web-check）的状态（`ok` / `missing` / `disabled` / `unreachable`）+ 一句话修复指引。agent 跑之前先自检、按结果选路或提示用户装依赖，而非试错。
+- **紧凑摘要**：`fxapk digest` 给按优先级排序的扁平 JSON，低 token 直接决策；要细节再读本地完整报告。
+- **隐私安全**：高敏物证（钱包私钥 / 助记词、后端凭据、运行时登录态、受害人 PII）在 digest 里**默认脱敏**，明文只留**本地完整 `report.json`**，不进可能经云端模型处理的 agent 上下文（`--raw` 可关）。联网富化默认仅查「建议调证」端点缩小暴露面；web-check 走**本地实例**；ip-api 明文 HTTP 风险见下方隐私提示。
+- **MCP（预留）**：`docs/mcp-design.md` 给出把上述能力暴露成标准 MCP tool 的设计，任意 MCP 客户端可原生 tool-call。
+
+---
+
 ## 项目结构
 
 ```
 apkscan/
-  core/       models / context / apk(androguard) / ipa / loader / registry(自动发现) / pipeline / infra / forensic(辖区分流) / chainaddr / walletsecret / device
+  core/       models / context / apk(androguard) / ipa / loader / registry(自动发现) / pipeline / infra / forensic(辖区分流) / redact(脱敏) / chainaddr / walletsecret / device
+  selfcheck.py 自检诊断（AI 友好：能力 / 连通 / 修复指引）
   analyzers/  28 个静态分析器（见上表；含 iOS `ios_plist`，按 requires 能力门控自动分流 APK/IPA）
   graph/      本地案件图谱（嵌入式 Kuzu）：store / ingest / query / schema / weight（`fxapk graph` 串案）
-  enrichers/  rdap / whois / icp / dns / asn（默认联网，结果缓存）
+  enrichers/  rdap / whois / icp / dns / asn / webcheck(opt-in OSINT)（默认联网，结果缓存）
   dynamic/    doctor / provision / unpack / capture / merge(运行时并回+会话时序) / correlate(团伙聚类) / batch(批量) / fingerprint / auto(一键编排)
-  report/     html / json / pdf / ioc(IOC CSV) / letters(调证函) + templates/
+  report/     html / json / pdf / ioc(IOC CSV) / letters(调证函) / digest(紧凑摘要) + templates/
   rules/      *.yaml + bip39_english.txt（SDK/加固/支付/配置键/权限/银行包名/词表等规则库）
-tests/        1512 个单测（FakeContext，离线）
+tests/        1531 个单测（FakeContext，离线）
 docs/         设计文档
 ```
 
