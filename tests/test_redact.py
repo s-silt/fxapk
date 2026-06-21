@@ -1,4 +1,4 @@
-"""高敏值脱敏（隐私安全）测试 + digest 默认脱敏验证。"""
+"""高敏值脱敏（隐私安全）测试 + digest 可选脱敏验证（默认明文，--redact 才脱敏）。"""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ def test_redact_value_only_sensitive() -> None:
     assert redact_value("ADMIN_PANEL", "admin.evil.com") == "admin.evil.com"
 
 
-def test_digest_redacts_sensitive_by_default() -> None:
+def test_digest_redact_is_opt_in() -> None:
     report = {
         "meta": {"package_name": "com.x"},
         "leads": [
@@ -30,15 +30,13 @@ def test_digest_redacts_sensitive_by_default() -> None:
             {"category": "DOMAIN", "value": "c2.evil.com", "advice": "建议调证", "confidence": "HIGH"},
         ],
     }
-    d = build_digest(report)  # 默认脱敏
-    wallet = next(lead for lead in d["leads"] if lead["category"] == "WALLET_SECRET")
-    domain = next(lead for lead in d["leads"] if lead["category"] == "DOMAIN")
-    assert "已脱敏" in wallet["value"] and "real mnemonic" not in wallet["value"]
+    # 默认明文（取证查看需要看到实际值）。
+    d_raw = build_digest(report)
+    wallet_raw = next(lead for lead in d_raw["leads"] if lead["category"] == "WALLET_SECRET")
+    assert wallet_raw["value"] == "abandon abandon about real mnemonic here"
+    # --redact / redact=True 时才脱敏（喂云端 agent）。
+    d_red = build_digest(report, redact=True)
+    wallet_red = next(lead for lead in d_red["leads"] if lead["category"] == "WALLET_SECRET")
+    domain = next(lead for lead in d_red["leads"] if lead["category"] == "DOMAIN")
+    assert "已脱敏" in wallet_red["value"] and "real mnemonic" not in wallet_red["value"]
     assert domain["value"] == "c2.evil.com"  # 非高敏不脱敏
-
-
-def test_digest_raw_keeps_plaintext() -> None:
-    report = {"leads": [{"category": "WALLET_SECRET", "value": "secret mnemonic words here all",
-                         "advice": "建议调证", "confidence": "HIGH"}]}
-    d = build_digest(report, redact=False)
-    assert d["leads"][0]["value"] == "secret mnemonic words here all"
