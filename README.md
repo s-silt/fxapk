@@ -136,7 +136,7 @@ fxapk auto app.apk --out out
 | `capture PACKAGE` | 真机抓包：mitmproxy + frida 绕证书绑定，抓运行时端点 |
 | `batch DIR` | 批量分析文件夹下所有 APK + 跨样本团伙聚类（写 `case_correlation.json`），并持久化进本地案件图谱 |
 | `letters REPORT.json` | 把可办案化线索套打成「调证函 / 协查文书」草稿（markdown，带免责标注） |
-| `digest REPORT.json` | 把 report.json 压成**紧凑调证摘要 JSON** 打到 stdout（按优先级排序、扁平字段、高敏值默认脱敏，供任意 AI agent / 脚本低 token 直接决策；`--raw` 关脱敏） |
+| `digest REPORT.json` | 把 report.json 压成**紧凑调证摘要 JSON** 打到 stdout（按优先级排序、扁平字段，供任意 AI agent / 脚本低 token 直接决策；默认明文便于取证查看，`--redact` 喂云端 agent 时脱敏高敏值） |
 | `selfcheck` | **自检诊断 JSON**：逐项报告各能力（图谱/解密/jadx/动态/联网富化/web-check）通不通、怎么修——供任意 AI agent 驱动前自检 |
 | `graph …` | 本地案件图谱串案（需 `fxapk[graph]`）：`ingest`（报告入图）/ `link <sha256>`（拉关联 APK）/ `query --kind --value`（按实体反查）/ `cluster`（团伙簇+置信分）/ `stats` / `cypher`（原始 Cypher）。默认输出稳定 JSON |
 | `gui` | 图形界面（tkinter 单窗口：体检 / 静态 / 一键全自动） |
@@ -259,7 +259,7 @@ fxapk 的产出与控制面是**标准 JSON CLI**——agent（Codex / Claude / 
 - **自检诊断**：`fxapk selfcheck` 逐项报告各能力（图谱 / 解密 / jadx / 动态脱壳抓包 / 联网富化 / web-check）的状态（`ok` / `missing` / `disabled` / `unreachable`）+ 一句话修复指引。agent 跑之前先自检、按结果选路或提示用户装依赖，而非试错。
 - **紧凑摘要**：`fxapk digest` 给按优先级排序的扁平 JSON，低 token 直接决策；要细节再读本地完整报告。
 - **图谱串案**：`fxapk graph`（含只读 `cypher` 逃生口）默认输出稳定 JSON，供 agent 串并团伙。
-- **隐私安全**：高敏物证（钱包私钥 / 助记词、后端凭据、运行时登录态、受害人 PII）在 digest 里**默认脱敏**，明文只留**本地完整 `report.json`**，不进可能经云端模型处理的 agent 上下文（`--raw` 可关）。联网富化默认仅查「建议调证」端点缩小暴露面；web-check 走**本地实例**；ip-api 明文 HTTP 风险见下方隐私提示。
+- **隐私安全**：digest **默认明文**（取证查看需要看到钱包私钥 / 凭据等实际值）；要把摘要喂可能经云端模型处理的 agent 时用 `fxapk digest --redact`，对高敏物证（钱包私钥 / 助记词、后端凭据、运行时登录态、受害人 PII、加密配方）脱敏，明文始终在本地完整 `report.json`。联网富化默认仅查「建议调证」端点缩小暴露面；web-check 走**本地实例**；ip-api 明文 HTTP 风险见下方隐私提示。
 
 ---
 
