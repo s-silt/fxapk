@@ -121,7 +121,13 @@ def find_mnemonics(text: str) -> list[WalletSecret]:
             for cnt in _VALID_WORD_COUNTS:
                 for s in range(0, len(run) - cnt + 1):
                     cand = run[s : s + cnt]
-                    if validate_mnemonic(cand):
+                    # 互异度护栏：真助记词的词几近全互异（12 词≈12 个不同词）；而 CSS/常见英文词
+                    # （day/color/top/left…恰在 BIP-39 词表内）凑出的窗口虽偶过校验和，却只有 3-4 个
+                    # 不同词在重复 → 互异度 <2/3 滤掉（真样本 HuaCai uni-app JS 的实测误报根因）。
+                    if (
+                        len(set(cand)) * 3 >= cnt * 2
+                        and validate_mnemonic(cand)
+                    ):
                         phrase = " ".join(cand)
                         if phrase not in seen:
                             seen.add(phrase)
