@@ -165,6 +165,21 @@ def test_attack_surface_marks_cdn() -> None:
     assert surface[0]["cdn"] == "Cloudflare"  # 标记：下列端口是 CDN 边缘、非源站
 
 
+def test_attack_surface_includes_exposures_and_tech_stack() -> None:
+    # 结构化段含 exposures(暴露文件) + tech_stack(栈指纹)，供 Codex 直读。
+    ep = _ep("evil.example", {
+        "shodan": {"country": "United States", "ports": [443]},
+        "recon": {
+            "exposed_paths": [{"path": "/.git/config", "status": 200}],
+            "http": [{"cookies": ["PHPSESSID"], "title": "Jeecg-Boot"}],
+        },
+    })
+    h = _build_attack_surface([ep])[0]
+    assert any("Git" in e["name"] for e in h["exposures"])
+    stack_names = {t["name"] for t in h["tech_stack"]}
+    assert "PHP" in stack_names and "Jeecg-Boot 低代码后台" in stack_names
+
+
 def test_foreign_forensic_path_no_longer_says_diaozheng() -> None:
     # ★ 海外取证原则：国外分支不走调证，转"查真实源站、取镜像/磁盘/日志"。
     fp = forensic.forensic_path(forensic.JURIS_FOREIGN)

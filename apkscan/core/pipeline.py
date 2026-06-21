@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 from apkscan.analyzers.classify import classify_app
-from apkscan.core import forensic, infra
+from apkscan.core import exposure, forensic, infra
 from apkscan.core.models import (
     AnalysisConfig,
     Confidence,
@@ -556,6 +556,13 @@ def _build_attack_surface(endpoints: list[Endpoint]) -> list[dict]:
         if subs:
             entry["related_subdomains"] = subs[:_AS_MAX_SUBDOMAINS]
 
+        # 暴露面研判（暴露敏感文件/误配 + 技术栈/后台框架指纹；纯映射、零网络、零 payload）。
+        exp = exposure.assess_exposure(shodan, recon)
+        if exp.get("exposed_files"):
+            entry["exposures"] = exp["exposed_files"]
+        if exp.get("tech_stack"):
+            entry["tech_stack"] = exp["tech_stack"]
+
         # 仅在确实有攻击面内容时收（光 host/kind/jurisdiction 无意义）。
         if len(entry) > 3:
             out.append(entry)
@@ -630,6 +637,11 @@ def _apply_forensic(
         evidence_to_obtain.extend(forensic.render_cve_surface(enr.get("cve")))
         # 证书透明度（被动 crt.sh）：CT 日志关联子域（含历史/影子子域），疑同团伙基础设施→并簇串案。
         evidence_to_obtain.extend(forensic.render_related_subdomains(enr.get("certs")))
+        # 暴露面研判（纯映射·零 payload）：暴露的敏感文件/误配（直达源码/密钥/源站真IP）+ 技术栈/后台指纹
+        # （仅识别+方向+串案，无 RCE 靶单）。指引授权后人工取证，工具不自动利用。
+        _exp = exposure.assess_exposure(enr.get("shodan"), enr.get("recon"))
+        evidence_to_obtain.extend(forensic.render_exposures(_exp.get("exposed_files")))
+        evidence_to_obtain.extend(forensic.render_tech_stack(_exp.get("tech_stack")))
     if juris == forensic.JURIS_FOREIGN:
         # 主动探测（recon，opt-in/已授权）：实时侦查的开放端口/TLS证书/HTTP指纹/暴露后台路径。
         evidence_to_obtain.extend(forensic.render_active_recon(enr.get("recon")))
