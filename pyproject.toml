@@ -31,6 +31,7 @@ dependencies = [
     "python-whois",
     "requests",
     "pyyaml",
+    "psutil",  # 并行分析器 worker 数按可用内存封顶（pipeline._decide_workers）；缺失则退固定兜底
 ]
 
 [project.urls]
