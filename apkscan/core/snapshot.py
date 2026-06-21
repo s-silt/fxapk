@@ -36,6 +36,12 @@ _TEXT_SUFFIXES: tuple[str, ...] = (
 #: 文本资源（实测整包文本 ~8MB），只挡病态超大单文件。
 _MAX_PREREAD_BYTES = 32 * 1024 * 1024
 
+#: 预读总体积上限：累计预读文本资源超过此值即停止预读（剩余文件落 worker 惰性兜底）。与单文件
+#: 32MB 上限并存——单文件上限挡不住"许多接近上限的伪装大文件累加把快照撑到上百 MB"。快照体积是
+#: worker 内存封顶公式的输入(snapshot_size)，恶意样本可借此放大反噬封顶（pipeline._decide_workers）。
+#: 64MB 远超实测整包文本 ~8MB，只挡病态累加。
+_MAX_SNAPSHOT_TOTAL_BYTES = 64 * 1024 * 1024
+
 
 class SnapshotContext:
     """可 pickle 的 AnalysisContext 快照（满足同一协议；read_file 走预读 dict + 惰性 APK 兜底）。"""
@@ -160,6 +166,7 @@ def build_snapshot(ctx: Any) -> SnapshotContext:
     except Exception:  # noqa: BLE001 — 枚举失败不致命（worker 惰性兜底）
         logger.warning("snapshot 枚举文件表失败，依赖 worker 惰性 read_file 兜底", exc_info=True)
 
+    total = 0
     for path in file_list:
         if not isinstance(path, str):
             continue
@@ -177,7 +184,15 @@ def build_snapshot(ctx: Any) -> SnapshotContext:
             # pickle ×worker 数放大致 OOM；worker 惰性兜底仍可按需读到完整字节，正确性不受影响。
             logger.debug("snapshot 跳过超大预读文件（worker 惰性兜底）：%s（%d 字节）", path, len(data))
             continue
+        if total + len(data) > _MAX_SNAPSHOT_TOTAL_BYTES:
+            # 预读累计达总上限：停止预读，剩余文件落 worker 惰性兜底。防恶意样本用多个伪装大文件
+            # 把快照（= worker 内存封顶公式输入）撑大反噬封顶。正确性不受影响（惰性仍可读）。
+            logger.debug(
+                "snapshot 预读累计达总上限 %d 字节，剩余文件落 worker 惰性兜底", _MAX_SNAPSHOT_TOTAL_BYTES
+            )
+            break
         files[path] = data
+        total += len(data)
 
     return SnapshotContext(
         package_name=getattr(ctx, "package_name", "") or "",
