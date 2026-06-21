@@ -253,6 +253,13 @@ def _build_corpus(report: "Report", meta: dict[str, Any]) -> str:
         parts.append(str(getattr(lead, "value", "") or ""))
         parts.append(str(getattr(lead, "notes", "") or ""))
 
+    # 弱资金关键词（提现/充值/收银台/钱包余额等 strong=false）命中后只记入
+    # meta["payment_keywords"]（规则名）、不再产 Lead，但其规则名仍是分类 text_any
+    # （如投资理财/杀猪盘的 提现/充值/钱包）的有效文案信号源——并入语料，避免「砍弱 Lead」
+    # 连带砍掉分类的文案信号导致漏判。
+    for kw in _as_str_list(meta.get("payment_keywords")):
+        parts.append(kw)
+
     vname = meta.get("version_name")
     if isinstance(vname, str):
         parts.append(vname)
