@@ -146,6 +146,11 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     #      避免报告里出现空白的"是否调证"列。已自带 advice 的不覆盖。
     _apply_default_advice(leads)
 
+    # 4.6) 结构化攻击面段（按主机聚合 shodan/recon/cve/certs，机器可读）：供 digest/HTML/Codex
+    #      直接查询/聚合/交叉比对，免去从 evidence 自然语言串里解析。仅联网富化后有内容。
+    if config.online:
+        meta["attack_surface"] = _build_attack_surface(endpoints)
+
     # 5) 组装 Report
     report = Report(
         package_name=ctx.package_name,
@@ -431,6 +436,121 @@ def build_endpoint_leads(endpoints: list[Endpoint], online: bool = True) -> list
         elif ep.kind == "ip":
             leads.append(_ip_lead(ep, online))
     return leads
+
+
+# 结构化攻击面聚合的展示上限（防个别巨型主机塞爆 meta；完整原始数据仍在 endpoints[].enrichment）。
+_AS_MAX_CVES = 30
+_AS_MAX_PATHS = 30
+_AS_MAX_SUBDOMAINS = 50
+
+
+def _as_dict(value: object) -> dict:
+    """value 是 dict 则返回之，否则空 dict（兼容缺字段 / 坏结构）。"""
+    return value if isinstance(value, dict) else {}
+
+
+def _build_attack_surface(endpoints: list[Endpoint]) -> list[dict]:
+    """把各端点的攻击面富化(shodan/recon/cve/certs)聚合成**结构化、按主机**的列表，写 report.meta。
+
+    供 digest / HTML / Codex **机器可读**地查询/聚合/交叉比对（端口/服务/CVE/暴露后台/关联子域），
+    免去从 evidence_to_obtain 的自然语言串里解析。辖区门控与渲染层同口径：只收【国外+未知】主机；
+    主动探测字段(exposed_paths/tls/http)只在【国外】收；境内主机不进（境内走调证、不呈现攻击面）。
+    绝不抛（坏字段安全跳过）。
+    """
+    out: list[dict] = []
+    for ep in endpoints:
+        if ep.kind not in ("domain", "ip"):
+            continue
+        e = _as_dict(ep.enrichment)
+        shodan = _as_dict(e.get("shodan"))
+        recon = _as_dict(e.get("recon"))
+        cve = _as_dict(e.get("cve"))
+        certs = _as_dict(e.get("certs"))
+        if not (shodan or recon or cve or certs):
+            continue
+
+        try:
+            juris = forensic.classify_jurisdiction(
+                ep.value,
+                icp=e.get("icp"), rdap=e.get("rdap"), whois=e.get("whois"),
+                dns=e.get("dns"), asn=e.get("asn"), webcheck=e.get("webcheck"), shodan=shodan,
+            )
+        except Exception:  # noqa: BLE001 — 辖区判定失败不得炸主流程；保守判未知
+            logger.debug("[attack_surface] 辖区判定失败：%s", ep.value, exc_info=True)
+            juris = forensic.JURIS_UNKNOWN
+        if juris == forensic.JURIS_DOMESTIC:
+            continue  # 境内不呈现攻击面（与渲染层一致）
+        is_foreign = juris == forensic.JURIS_FOREIGN
+
+        entry: dict[str, object] = {"host": ep.value, "kind": ep.kind, "jurisdiction": juris}
+
+        # 端口（shodan + 主动 recon 开放端口的并集）。
+        ports = {p for p in (shodan.get("ports") or []) if isinstance(p, int)}
+        if is_foreign:
+            ports |= {p for p in (recon.get("open_ports") or []) if isinstance(p, int)}
+        if ports:
+            entry["ports"] = sorted(ports)
+
+        # 服务指纹（shodan：product/version）。
+        services: list[dict] = []
+        for s in shodan.get("services") or []:
+            if isinstance(s, dict) and s.get("port") is not None:
+                svc: dict[str, object] = {"port": s.get("port"), "source": "shodan"}
+                if s.get("product"):
+                    svc["product"] = s.get("product")
+                if s.get("version"):
+                    svc["version"] = s.get("version")
+                services.append(svc)
+        if services:
+            entry["services"] = services
+
+        # CVE 方向（cve 富化结构化 cvss/severity + shodan vulns 补 id；去重）。
+        cves: list[dict] = []
+        seen_cve: set[str] = set()
+        for r in cve.get("cves") or []:
+            if isinstance(r, dict) and isinstance(r.get("id"), str):
+                cid = r["id"].upper()
+                if cid in seen_cve:
+                    continue
+                seen_cve.add(cid)
+                row: dict[str, object] = {
+                    "id": cid, "source": "shodan+nvd" if r.get("reused_from_shodan") else "nvd"
+                }
+                if isinstance(r.get("cvss"), (int, float)):
+                    row["cvss"] = r["cvss"]
+                if r.get("severity"):
+                    row["severity"] = r["severity"]
+                cves.append(row)
+        for v in shodan.get("vulns") or []:
+            if isinstance(v, str) and v.upper() not in seen_cve:
+                seen_cve.add(v.upper())
+                cves.append({"id": v.upper(), "source": "shodan"})
+        if cves:
+            entry["cves"] = cves[:_AS_MAX_CVES]
+
+        # 主动探测字段（仅国外：recon 只对国外端点跑，此处再门控一次保一致）。
+        if is_foreign:
+            paths = [p for p in (recon.get("exposed_paths") or []) if isinstance(p, dict)]
+            if paths:
+                entry["exposed_paths"] = paths[:_AS_MAX_PATHS]
+            http = [h for h in (recon.get("http") or []) if isinstance(h, dict)]
+            if http:
+                entry["http_fingerprints"] = http
+            tls = recon.get("tls")
+            if isinstance(tls, dict) and tls:
+                entry["tls"] = list(tls.values())
+            if recon:
+                entry["active_probed"] = True
+
+        # 关联子域（crt.sh 证书透明度）。
+        subs = [h for h in (certs.get("related_hostnames") or []) if isinstance(h, str)]
+        if subs:
+            entry["related_subdomains"] = subs[:_AS_MAX_SUBDOMAINS]
+
+        # 仅在确实有攻击面内容时收（光 host/kind/jurisdiction 无意义）。
+        if len(entry) > 3:
+            out.append(entry)
+    return out
 
 
 # advice 兜底：未自带研判建议的 Lead 按类别给默认值。
