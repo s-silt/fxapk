@@ -254,12 +254,12 @@ fxapk graph stats                           # 图谱体检（节点 / 边 / 各 
 
 ## 对接任意 AI agent（诊断 / 隐私 / agent 无关）
 
-fxapk 的产出与控制面是**标准 JSON CLI + 标准 MCP**，不绑定任何单一 agent——Codex / Claude / 其它 agent 都能驱动：
+fxapk 的产出与控制面是**标准 JSON CLI**——agent（Codex / Claude / 其它）直接 shell 调命令、解析 stdout JSON 即可驱动，不绑定任何单一 agent，也无需额外协议层：
 
 - **自检诊断**：`fxapk selfcheck` 逐项报告各能力（图谱 / 解密 / jadx / 动态脱壳抓包 / 联网富化 / web-check）的状态（`ok` / `missing` / `disabled` / `unreachable`）+ 一句话修复指引。agent 跑之前先自检、按结果选路或提示用户装依赖，而非试错。
 - **紧凑摘要**：`fxapk digest` 给按优先级排序的扁平 JSON，低 token 直接决策；要细节再读本地完整报告。
+- **图谱串案**：`fxapk graph`（含只读 `cypher` 逃生口）默认输出稳定 JSON，供 agent 串并团伙。
 - **隐私安全**：高敏物证（钱包私钥 / 助记词、后端凭据、运行时登录态、受害人 PII）在 digest 里**默认脱敏**，明文只留**本地完整 `report.json`**，不进可能经云端模型处理的 agent 上下文（`--raw` 可关）。联网富化默认仅查「建议调证」端点缩小暴露面；web-check 走**本地实例**；ip-api 明文 HTTP 风险见下方隐私提示。
-- **MCP（预留）**：`docs/mcp-design.md` 给出把上述能力暴露成标准 MCP tool 的设计，任意 MCP 客户端可原生 tool-call。
 
 ---
 

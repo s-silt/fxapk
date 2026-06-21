@@ -572,7 +572,7 @@ def selfcheck(
 ) -> None:
     """自检诊断：逐项报告**哪个能力通 / 不通 / 怎么修**，输出稳定 JSON（供任意 AI agent 驱动前自检）。
 
-    覆盖：核心、可选依赖（图谱 kuzu / 解密 / mcp）、外部工具（jadx/adb）、动态（frida/mitmproxy/设备）、
+    覆盖：核心、可选依赖（图谱 kuzu / 解密）、外部工具（jadx/adb）、动态（frida/mitmproxy/设备）、
     联网富化、web-check。每项给 status（ok/missing/disabled/unreachable）+ 一句话修复指引。绝不抛。
     """
     import json as _json
@@ -784,7 +784,7 @@ def graph_cypher(
     query: str = typer.Argument(..., help="原始 Cypher（仅供只读探查；写操作请用 ingest）。"),
     db: str = typer.Option("", "--db", help="图谱 DB 路径。"),
 ) -> None:
-    """原始 Cypher 逃生口（预留 MCP）。语法/执行错误 → 友好 JSON 错误 + exit 1。"""
+    """原始 Cypher 只读逃生口（供 agent 自定义图谱查询）。语法/执行错误 → 友好 JSON 错误 + exit 1。"""
     with _graph_session(db) as store:
         try:
             rows = store.query_cypher(query)
