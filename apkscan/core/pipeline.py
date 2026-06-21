@@ -484,6 +484,12 @@ def _build_attack_surface(endpoints: list[Endpoint]) -> list[dict]:
 
         entry: dict[str, object] = {"host": ep.value, "kind": ep.kind, "jurisdiction": juris}
 
+        # CDN 标记：解析 IP 全为反代型 CDN 时标厂商——告知下游/Codex 下列端口是**边缘节点非源站**，
+        # 真实源站需穿透 CDN 另行定位（见 forensic.render_origin_hint）。
+        cdn = forensic.cdn_vendor(e.get("dns"), e.get("asn"))
+        if cdn:
+            entry["cdn"] = cdn
+
         # 端口（shodan + 主动 recon 开放端口的并集）。
         ports = {p for p in (shodan.get("ports") or []) if isinstance(p, int)}
         if is_foreign:
@@ -604,6 +610,13 @@ def _apply_forensic(
     juris = forensic.classify_jurisdiction(host, **enr)
     fp = forensic.forensic_path(juris)
     evidence_to_obtain.extend(fp.evidence)
+
+    # 海外取证第一步：解析 IP 全为 CDN/反代时，提示先穿透 CDN 定位真实源站（再打源站取镜像/日志）。
+    # 放在攻击面之前——给随后的 Shodan「暴露面」加上下文（那是 CDN 边缘端口、非源站）。
+    if juris == forensic.JURIS_FOREIGN:
+        evidence_to_obtain.extend(
+            forensic.render_origin_hint(enr.get("dns"), enr.get("asn"))
+        )
 
     # ★ 攻击面/主动探测证据按**最终辖区**门控（与两遍富化 gate 同口径，落到渲染层）：
     #   - 被动攻击面（Shodan/CVE/crt.sh）：仅【国外+未知】渲染；
