@@ -194,7 +194,7 @@ fxapk auto app.apk --out out
 > 复用 `endpoints` / `js_bundle` / `crypto_recipe` 等平台无关分析器 + `ios_plist`，从 `Payload/<App>.app/www/`
 > 的 H5 包抠端点与加密配方，从 `Info.plist` 抠攻击面 —— **不连设备、无需越狱**（Android 专属分析器在 IPA 上自动跳过）。
 
-**富化器（默认联网，`--offline` 可关，结果缓存，对可疑端点**并发**查询提速）**：`rdap`（HTTPS 查注册商/注册时间/状态/NS，比 port-43 whois 更可靠，失败自动回退 `whois`）、`whois`（注册人/注册商，作 rdap 兜底）、`icp`（ICP 备案主体）、`dns`（DoH 解析域名→IP 并查托管云厂商，定位真实后端）、`asn`（IP 归属云厂商/IDC）。
+**富化器（默认联网，`--offline` 可关，结果缓存，对可疑端点**并发**查询提速）**：`rdap`（HTTPS 查注册商/注册时间/状态/NS，比 port-43 whois 更可靠，失败自动回退 `whois`）、`whois`（注册人/注册商，作 rdap 兜底）、`icp`（ICP 备案主体）、`dns`（DoH 解析域名→IP 并查托管云厂商，定位真实后端）、`asn`（IP 归属云厂商/IDC）、`webcheck`（**opt-in**：设环境变量 `FXAPK_WEBCHECK_URL` 指向自托管 [web-check](https://github.com/Lissy93/web-check) 实例后，对每个建议调证的域名/IP 再查一轮 OSINT——服务器地理 / SSL / DNS / 技术栈 / 开放端口 / 邮件配置 / 威胁情报 / 子域，结果进 `enrichment['webcheck']` 并喂**辖区分流**（地理→国内/国外）、**国外取证攻击面**（端口/技术栈）、**串案**（子域/关联主机）；可用 `FXAPK_WEBCHECK_CHECKS` 定制检查项）。
 
 **「是否建议调证」分级**（`core/infra.py`）：命中公有云/主流 SDK/开源 CDN/标准协议/运营商域名 → 「无需调证」；私网/无效 → 「待核」；其余疑似 App 自有 → 「建议调证」。
 

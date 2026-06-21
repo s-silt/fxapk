@@ -50,14 +50,19 @@ def classify_jurisdiction(
     whois: object = None,
     dns: object = None,
     asn: object = None,
+    webcheck: object = None,
 ) -> str:
-    """据富化归属国 + 域名启发式判服务器辖区。返回 国内 / 国外 / 未知。绝不抛。"""
+    """据富化归属国 + 域名启发式判服务器辖区。返回 国内 / 国外 / 未知。绝不抛。
+
+    归属国信号来源：rdap/whois 注册国、dns 托管 country、asn 归属国、web-check ``location``
+    归一化的 ``country``（见 enrichers/webcheck）。ICP 备案 / .cn 直判国内。
+    """
     if isinstance(icp, dict) and (icp.get("subject") or icp.get("license_no")):
         return JURIS_DOMESTIC
     h = (host or "").lower().strip().rstrip(".")
     if h.endswith(".cn") or h.endswith(".gov.cn") or h.endswith(".中国"):
         return JURIS_DOMESTIC
-    countries = _countries(rdap, whois, dns, asn)
+    countries = _countries(rdap, whois, dns, asn, webcheck)
     if any(_country_is_domestic(c) for c in countries):
         return JURIS_DOMESTIC
     if countries:
