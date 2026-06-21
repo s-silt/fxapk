@@ -37,6 +37,8 @@ _MAX_TOKENS = 200_000
 _MAX_RUN_WORDS = 48
 
 _WORD_RE = re.compile(r"[a-z]+")
+#: 空白匹配（C 级扫描，供 find_mnemonics 预筛数空白——比 Python 逐字符 isspace 累加快得多）。
+_WS_RE = re.compile(r"\s")
 _B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 # WIF：版本 0x80，主体 51~52 字符；否定后顾/前瞻避免截断更长 base58 串。
 _WIF_RE = re.compile(r"(?<![1-9A-HJ-NP-Za-km-z])[5KL][1-9A-HJ-NP-Za-km-z]{50,51}(?![1-9A-HJ-NP-Za-km-z])")
@@ -99,7 +101,14 @@ def find_mnemonics(text: str) -> list[WalletSecret]:
         return []
     # 性能预筛：12 词助记词至少 11 个空白分隔；空白不足直接跳过——杀掉海量无空白的 dex 类描述符串，
     # 避免对每条都 lower()+findall 分词。是安全超集（真助记词必含 ≥11 空白），行为不变。
-    if sum(c.isspace() for c in text) < 11:
+    # ★ 提速：用 C 级 _WS_RE.finditer + 短路到 11，替代对每条字符串逐字符 Python 级 isspace 累加
+    #   （实测 12 万条 dex 串 → 1170 万次 isspace 是分析器热点；无空白串现一次 C 扫即返回）。
+    _ws = 0
+    for _ in _WS_RE.finditer(text):
+        _ws += 1
+        if _ws >= 11:
+            break
+    if _ws < 11:
         return []
     tokens = _WORD_RE.findall(text.lower())
     if len(tokens) > _MAX_TOKENS:
