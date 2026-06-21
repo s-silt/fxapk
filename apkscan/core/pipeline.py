@@ -7,8 +7,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 from apkscan.analyzers.classify import classify_app
@@ -56,11 +57,25 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     meta: dict = {"package_name": ctx.package_name, "platform": platform}
     analyzer_status: list[dict] = []
 
-    # 1) 跑分析器（逐个 try/except；requires 不满足→skipped）
-    for analyzer in discover_analyzers():
+    # 1) 跑分析器（android 多核走进程池并行，否则串行；按 requires 门控）。
+    #    ★ 结果**按发现顺序聚合**（meta last-writer / endpoints 顺序与串行逐字节一致）。
+    discovered = discover_analyzers()
+    eligible: list[tuple[str, object]] = []  # (name, analyzer)，requires 已满足，发现顺序
+    for analyzer in discovered:
+        name = getattr(analyzer, "name", "") or analyzer.__class__.__name__
+        missing = [cap for cap in (getattr(analyzer, "requires", []) or []) if cap not in capabilities]
+        if not missing:
+            eligible.append((name, analyzer))
+
+    # 执行（并行或串行），得 name → (result, error)。
+    results_map = {
+        name: (result, error) for name, result, error in _analyze_eligible(ctx, eligible)
+    }
+
+    # 2) 按发现顺序聚合 + 记 status（与串行行为一致）。
+    for analyzer in discovered:
         name = getattr(analyzer, "name", "") or analyzer.__class__.__name__
         requires = list(getattr(analyzer, "requires", []) or [])
-
         missing = [cap for cap in requires if cap not in capabilities]
         if missing:
             reason = f"缺少能力：{', '.join(missing)}"
@@ -68,13 +83,11 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
             analyzer_status.append({"name": name, "status": "skipped", "reason": reason})
             continue
 
-        try:
-            result = analyzer.analyze(ctx)
-        except Exception as exc:  # noqa: BLE001 - 单点故障不得中断流水线
-            logger.exception("分析器执行异常：%s", name)
-            analyzer_status.append({"name": name, "status": "error", "reason": str(exc)})
+        result, error = results_map.get(name, (None, "分析器未返回结果"))
+        if error is not None:
+            logger.warning("分析器执行异常：%s（%s）", name, error)
+            analyzer_status.append({"name": name, "status": "error", "reason": error})
             continue
-
         if result is None:
             logger.warning("分析器 %s 返回 None，按空结果处理", name)
             analyzer_status.append(
@@ -82,7 +95,6 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
             )
             continue
 
-        # 2) 聚合 endpoints/leads/findings/meta
         endpoints.extend(result.endpoints)
         leads.extend(result.leads)
         findings.extend(result.findings)
@@ -169,6 +181,87 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     classify_app(report)
 
     return report
+
+
+# ---------------------------------------------------------------------------
+# 分析器执行：android 多核走进程池并行（绕 GIL），否则/失败串行。结果按发现顺序聚合。
+# ---------------------------------------------------------------------------
+
+#: 逃生开关：设 FXAPK_NO_PARALLEL 强制串行（排障 / 兼容）。
+_ENV_NO_PARALLEL = "FXAPK_NO_PARALLEL"
+
+#: worker 进程级状态（spawn 后由 initializer 填充）。
+_WORKER_STATE: dict = {}
+
+
+def _worker_init(snapshot: object) -> None:
+    """进程池 worker 初始化：缓存快照 + 发现分析器（每 worker 一次，不含 androguard 重导入）。"""
+    _WORKER_STATE["snapshot"] = snapshot
+    _WORKER_STATE["analyzers"] = {
+        (getattr(a, "name", "") or a.__class__.__name__): a for a in discover_analyzers()
+    }
+
+
+def _worker_analyze(name: str) -> tuple:
+    """worker 内跑一个分析器，返回 (name, result|None, error|None)。结果须可 pickle。"""
+    snap = _WORKER_STATE.get("snapshot")
+    analyzer = (_WORKER_STATE.get("analyzers") or {}).get(name)
+    if analyzer is None:
+        return (name, None, "worker 未发现该分析器")
+    try:
+        return (name, analyzer.analyze(snap), None)
+    except Exception as exc:  # noqa: BLE001 — 单分析器失败不炸 worker，回传错误
+        return (name, None, f"{type(exc).__name__}: {exc}")
+
+
+def _should_parallelize(ctx: object, eligible: list) -> bool:
+    """是否走进程池并行：android + 多核 + 足够多分析器 + 有 apk_path（惰性兜底需要）+ 未禁用。"""
+    if os.environ.get(_ENV_NO_PARALLEL):
+        return False
+    if getattr(ctx, "platform", "android") != "android":
+        return False  # IPA 等 read_file 语义不同 → 串行
+    if (os.cpu_count() or 1) < 2 or len(eligible) < 3:
+        return False  # 单核 / 分析器太少不值进程开销
+    if not getattr(ctx, "apk_path", ""):
+        return False  # 无 apk_path 无法在 worker 惰性兜底非文本 read_file
+    return True
+
+
+def _analyze_serial(ctx: object, eligible: list) -> list[tuple]:
+    """串行跑（无 androguard pickle 开销；并行不适用/失败时的回退）。"""
+    out: list[tuple] = []
+    for name, analyzer in eligible:
+        try:
+            out.append((name, analyzer.analyze(ctx), None))
+        except Exception as exc:  # noqa: BLE001 — 单点故障不中断流水线
+            logger.exception("分析器执行异常：%s", name)
+            out.append((name, None, f"{type(exc).__name__}: {exc}"))
+    return out
+
+
+def _analyze_parallel(ctx: object, eligible: list) -> list[tuple]:
+    """进程池并行跑（snapshot 快照发各 worker，绕 GIL 在多核真并行）。pool.map 保序。"""
+    from apkscan.core.snapshot import build_snapshot
+
+    snapshot = build_snapshot(ctx)
+    names = [name for name, _ in eligible]
+    workers = max(1, min(len(names), os.cpu_count() or 2))
+    with ProcessPoolExecutor(
+        max_workers=workers, initializer=_worker_init, initargs=(snapshot,)
+    ) as pool:
+        return list(pool.map(_worker_analyze, names))
+
+
+def _analyze_eligible(ctx: object, eligible: list) -> list[tuple]:
+    """跑一组（已过 requires）分析器，返回 [(name, result, error)]。并行不适用/失败 → 串行回退。"""
+    if _should_parallelize(ctx, eligible):
+        try:
+            results = _analyze_parallel(ctx, eligible)
+            logger.info("分析器并行执行：%d 个（进程池，%d worker）", len(eligible), os.cpu_count() or 1)
+            return results
+        except Exception:  # noqa: BLE001 — 并行整体失败（spawn/pickle 等）→ 回退串行，绝不漏分析
+            logger.exception("分析器并行执行失败，回退串行")
+    return _analyze_serial(ctx, eligible)
 
 
 def _dedup_endpoints(endpoints: list[Endpoint]) -> list[Endpoint]:
