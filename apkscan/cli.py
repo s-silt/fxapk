@@ -515,6 +515,48 @@ def export(
 
 
 @app.command()
+def digest(
+    report_json: Path = typer.Argument(
+        ...,
+        help="已产出的 report.json 路径（analyze/auto/batch 写出的 JSON 报告）。",
+    ),
+) -> None:
+    """把 report.json 压成**紧凑调证摘要 JSON** 打印到 stdout（供 Codex / 脚本低 token 消费）。
+
+    线索按优先级排序（建议调证 > 待核 > 无需调证；同档高可信、C2 在前），只保留可办案化的扁平
+    字段 + 计数摘要，去掉端点全表 / 技术附录 / 富化原始数据等冗长内容。绝不抛——读不到 / 坏 JSON
+    打印友好错误并退出码 1。
+    """
+    import json as _json
+
+    try:
+        try:
+            raw = report_json.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            typer.echo(f"错误：找不到报告文件：{report_json}", err=True)
+            raise typer.Exit(code=1) from None
+        except OSError as exc:
+            typer.echo(f"错误：读取报告文件失败：{report_json}（{exc}）", err=True)
+            raise typer.Exit(code=1) from exc
+
+        try:
+            report = _json.loads(raw)
+        except (ValueError, UnicodeDecodeError) as exc:
+            typer.echo(f"错误：报告 JSON 解析失败：{report_json}（{exc}）", err=True)
+            raise typer.Exit(code=1) from exc
+
+        from apkscan.report.digest import build_digest
+
+        typer.echo(_json.dumps(build_digest(report), ensure_ascii=False, indent=2))
+    except typer.Exit:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 兜底任何意外，转友好提示而非 traceback
+        logger.exception("[cli] digest 生成摘要异常")
+        typer.echo(f"错误：生成摘要失败：{exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+@app.command()
 def letters(
     report_json: Path = typer.Argument(
         ...,
