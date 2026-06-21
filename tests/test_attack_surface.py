@@ -77,6 +77,26 @@ def test_attack_surface_skips_endpoints_without_enrichment() -> None:
     assert _build_attack_surface([_ep("plain.example", {"asn": {"country": "US"}})]) == []
 
 
+def test_attack_surface_recon_skipped_not_marked_active_probed() -> None:
+    # ★ 回归（真机发现）：未开 FXAPK_ACTIVE_RECON 时 recon 富化是 {"error": 跳过} 占位，
+    # 主动探测并未发生——不得标 active_probed=True；且若该主机无其它攻击面数据则整条丢弃。
+    only_skip = _ep("us.example", {
+        "asn": {"country": "United States"},
+        "recon": {"error": "未设 FXAPK_ACTIVE_RECON=1，跳过主动探测（opt-in，主动探测默认关闭）"},
+    })
+    assert _build_attack_surface([only_skip]) == []  # 无被动攻击面数据 + recon 仅占位 → 不收
+
+    # 有被动 Shodan 数据但 recon 仅占位 → 收（含被动字段），但 active_probed 不置 True。
+    passive_plus_skip = _ep("us2.example", {
+        "shodan": {"country": "United States", "ports": [80]},
+        "recon": {"error": "未设 FXAPK_ACTIVE_RECON=1，跳过主动探测"},
+    })
+    surface = _build_attack_surface([passive_plus_skip])
+    assert len(surface) == 1
+    assert surface[0]["ports"] == [80]
+    assert "active_probed" not in surface[0]
+
+
 def test_digest_includes_attack_surface() -> None:
     report = {
         "meta": {
