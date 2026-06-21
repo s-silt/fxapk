@@ -274,68 +274,81 @@ def _enrich_endpoints(
     stats: dict[str, dict] = {}
     stats_lock = threading.Lock()
 
-    def _stat(provider: str) -> dict:
-        # 在 stats_lock 内调用。
-        return stats.setdefault(
-            provider,
-            {"provider": provider, "attempted": 0, "ok": 0, "failed": 0, "typical_error": None},
-        )
-
-    def _enrich_one(ep: Endpoint) -> None:
-        """对单个端点跑其匹配的全部富化器（在单一 worker 内串行）。"""
-        for enricher in enrichers:
-            applies_to = list(getattr(enricher, "applies_to", []) or [])
-            if ep.kind not in applies_to:
-                continue
-            if gate is not None and not gate(ep, enricher):
-                continue  # 两遍富化门控：如主动探测仅国外（非国外端点跳过该富化器，不计统计）
-            provider = getattr(enricher, "name", "") or enricher.__class__.__name__
-
-            with stats_lock:
-                st = _stat(provider)
-                st["attempted"] += 1
-
-            try:
-                result = enricher.enrich(ep)
-            except Exception:  # noqa: BLE001 - 富化失败不阻塞主流程
-                logger.exception("富化器执行异常：provider=%s endpoint=%s", provider, ep.value)
-                ep.enrichment[provider] = {"ok": False, "error": "富化器异常"}
-                with stats_lock:
-                    _note_fail(_stat(provider), "富化器异常")
-                continue
-
-            if result is None:
-                logger.warning("富化器 %s 返回 None：%s", provider, ep.value)
-                ep.enrichment[provider] = {"ok": False, "error": "enrich 返回 None"}
-                with stats_lock:
-                    _note_fail(_stat(provider), "enrich 返回 None")
-                continue
-
-            data = dict(result.data)
-            has_values = any(v not in (None, "", [], {}) for v in data.values())
-            with stats_lock:
-                st = _stat(provider)
-                if result.ok and has_values:
-                    st["ok"] += 1
-                elif result.ok and not has_values:
-                    # 成功但零信息：显式标注，避免与"查到了"在报告里视觉混淆。
-                    data.setdefault("note", "查询无结果")
-                    _note_fail(st, "查询无结果")
-                else:
-                    if result.error:
-                        data.setdefault("error", result.error)
-                    _note_fail(st, result.error or "富化失败")
-            ep.enrichment[provider] = data
-
     if endpoints:
         # max_workers 不超过端点数，避免端点少时空建大量线程。
         workers = max(1, min(ENRICH_MAX_WORKERS, len(endpoints)))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="enrich") as pool:
-            # list() 强制求值 → 任一 worker 内未捕获异常会在此重抛（_enrich_one 内部已逐
-            # enrich try/except，正常不会到这；这里是兜底，不让异常被 executor 静默吞掉）。
-            list(pool.map(_enrich_one, endpoints))
+            # list() 强制求值 → 任一 worker 内未捕获异常会在此重抛（_run_enrichers_on_endpoint
+            # 内部已逐 enrich try/except，正常不会到这；这里是兜底，不让异常被 executor 静默吞掉）。
+            list(pool.map(
+                lambda ep: _run_enrichers_on_endpoint(ep, enrichers, stats, stats_lock, gate),
+                endpoints,
+            ))
 
     return list(stats.values())
+
+
+def _stat(stats: dict[str, dict], provider: str) -> dict:
+    """取/建某 provider 的统计条目（调用方须持 stats 的锁）。"""
+    return stats.setdefault(
+        provider,
+        {"provider": provider, "attempted": 0, "ok": 0, "failed": 0, "typical_error": None},
+    )
+
+
+def _run_enrichers_on_endpoint(
+    ep: Endpoint,
+    enrichers: list[BaseEnricher],
+    stats: dict[str, dict],
+    stats_lock: threading.Lock,
+    gate: "Callable[[Endpoint, BaseEnricher], bool] | None" = None,
+) -> None:
+    """对单个端点**串行**跑匹配的富化器（applies_to + gate 过滤），就地写 ep.enrichment + 聚合 stats。
+
+    在单一 worker 内调用：同一 ep.enrichment 无并发写竞争；跨端点共享的 stats 用锁聚合。
+    """
+    for enricher in enrichers:
+        applies_to = list(getattr(enricher, "applies_to", []) or [])
+        if ep.kind not in applies_to:
+            continue
+        if gate is not None and not gate(ep, enricher):
+            continue  # 门控：如主动探测仅国外（非国外端点跳过该富化器，不计统计）
+        provider = getattr(enricher, "name", "") or enricher.__class__.__name__
+
+        with stats_lock:
+            _stat(stats, provider)["attempted"] += 1
+
+        try:
+            result = enricher.enrich(ep)
+        except Exception:  # noqa: BLE001 - 富化失败不阻塞主流程
+            logger.exception("富化器执行异常：provider=%s endpoint=%s", provider, ep.value)
+            ep.enrichment[provider] = {"ok": False, "error": "富化器异常"}
+            with stats_lock:
+                _note_fail(_stat(stats, provider), "富化器异常")
+            continue
+
+        if result is None:
+            logger.warning("富化器 %s 返回 None：%s", provider, ep.value)
+            ep.enrichment[provider] = {"ok": False, "error": "enrich 返回 None"}
+            with stats_lock:
+                _note_fail(_stat(stats, provider), "enrich 返回 None")
+            continue
+
+        data = dict(result.data)
+        has_values = any(v not in (None, "", [], {}) for v in data.values())
+        with stats_lock:
+            st = _stat(stats, provider)
+            if result.ok and has_values:
+                st["ok"] += 1
+            elif result.ok and not has_values:
+                # 成功但零信息：显式标注，避免与"查到了"在报告里视觉混淆。
+                data.setdefault("note", "查询无结果")
+                _note_fail(st, "查询无结果")
+            else:
+                if result.error:
+                    data.setdefault("error", result.error)
+                _note_fail(st, result.error or "富化失败")
+        ep.enrichment[provider] = data
 
 
 def _note_fail(st: dict, msg: str) -> None:
@@ -373,12 +386,13 @@ def _classify_endpoint_jurisdiction(ep: Endpoint) -> str:
 
 
 def _run_enrichment(targets: list[Endpoint], enrichers: list[BaseEnricher]) -> list[dict]:
-    """两遍富化编排：①归属(attribution) → 定辖区 → ②攻击面(attack_surface)。
+    """两遍富化编排（**单遍并发·每端点内两阶段**，无跨端点栅栏）：
+    每个端点在自己的 worker 里串行跑 ①归属(attribution) → 定辖区 → ②攻击面(attack_surface)，
+    端点之间互不等待——慢端点（如 30s WHOIS 超时）不再阻塞其它端点的攻击面（去掉旧版两遍之间的栅栏）。
 
-    第②遍只对【国外 + 未知】端点跑（境内服务器走调证路径、不做攻击面取证）；其中 **active=True
-    的主动探测（recon）再收紧到仅【国外】**（未知辖区不主动触达，最保守）。辖区结果仅暂存于本函数
-    局部 dict（按 id(ep)），**绝不写入 ep.enrichment**——避免 ``_jurisdiction`` 等内部键泄漏进
-    report.json 被下游误当 provider。
+    第②遍只对【国外 + 未知】端点跑（境内走调证、不做攻击面取证）；其中 **active=True 的主动探测
+    （recon）再收紧到仅【国外 + 建议调证】**。辖区结果仅为 worker 内局部变量，**绝不写入 ep.enrichment**
+    （避免 ``_jurisdiction`` 等内部键泄漏进 report.json）。
     """
     attribution = [e for e in enrichers if _enricher_phase(e) == "attribution"]
     attack_surface = sorted(
@@ -386,37 +400,39 @@ def _run_enrichment(targets: list[Endpoint], enrichers: list[BaseEnricher]) -> l
         key=lambda e: _ATTACK_SURFACE_ORDER.get(getattr(e, "name", ""), 0),
     )
 
-    # 第①遍：归属富化（沿用既有并发/缓存/统计机制）。
-    stats = _enrich_endpoints(targets, attribution)
-    if not attack_surface:
-        return stats
+    stats: dict[str, dict] = {}
+    stats_lock = threading.Lock()
 
-    # 定辖区（本地 dict，绝不写回 ep.enrichment）。
-    juris: dict[int, str] = {id(ep): _classify_endpoint_jurisdiction(ep) for ep in targets}
+    def _enrich_one_two_phase(ep: Endpoint) -> None:
+        # ① 归属富化。
+        _run_enrichers_on_endpoint(ep, attribution, stats, stats_lock)
+        if not attack_surface:
+            return
+        # 定辖区（worker 内局部，绝不写回 ep.enrichment）。
+        juris = _classify_endpoint_jurisdiction(ep)
+        if juris not in (forensic.JURIS_FOREIGN, forensic.JURIS_UNKNOWN):
+            return  # 境内：走调证、不做攻击面取证
 
-    # 第②遍目标：国外 + 未知（被动攻击面）；主动探测再收紧到仅国外（见 gate）。
-    phase2_targets = [
-        ep
-        for ep in targets
-        if juris[id(ep)] in (forensic.JURIS_FOREIGN, forensic.JURIS_UNKNOWN)
-    ]
-    if not phase2_targets:
-        return stats
+        def _gate(e: Endpoint, enricher: BaseEnricher) -> bool:
+            # 主动探测（active=True）仅对【国外 + 最终建议调证】放行；被动攻击面对【国外+未知】均放行。
+            # ★ tier 判据：库内置档端点最终判"待核"，即便国外也不主动探测（与 Lead 研判同口径，合规红线）。
+            if getattr(enricher, "active", False):
+                return (
+                    juris == forensic.JURIS_FOREIGN
+                    and infra.effective_advice(e.value, e.enrichment.get("tier"))
+                    == infra.ADVICE_INVESTIGATE
+                )
+            return True
 
-    def _gate(ep: Endpoint, enricher: BaseEnricher) -> bool:
-        # 主动探测（active=True）仅对【国外 + 最终建议调证】端点放行；被动攻击面对【国外+未知】均放行。
-        # ★ tier 判据：库内置档（library-file/bulk-string）端点最终被判"待核"（见 _domain_lead C1），
-        #   即便辖区=国外也绝不主动探测——与最终 Lead 研判同口径，消除判据漂移（合规红线）。
-        if getattr(enricher, "active", False):
-            return (
-                juris[id(ep)] == forensic.JURIS_FOREIGN
-                and infra.effective_advice(ep.value, ep.enrichment.get("tier"))
-                == infra.ADVICE_INVESTIGATE
-            )
-        return True
+        # ② 攻击面富化（同 worker 内串行，组内顺序由 attack_surface 排序保证 cve 在 shodan/recon 之后）。
+        _run_enrichers_on_endpoint(ep, attack_surface, stats, stats_lock, gate=_gate)
 
-    stats += _enrich_endpoints(phase2_targets, attack_surface, gate=_gate)
-    return stats
+    if targets:
+        workers = max(1, min(ENRICH_MAX_WORKERS, len(targets)))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="enrich") as pool:
+            list(pool.map(_enrich_one_two_phase, targets))
+
+    return list(stats.values())
 
 
 def build_endpoint_leads(endpoints: list[Endpoint], online: bool = True) -> list[Lead]:
