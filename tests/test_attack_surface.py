@@ -6,9 +6,18 @@ digest 透传该段供 Codex 机器可读消费。
 
 from __future__ import annotations
 
+from apkscan.core import forensic
 from apkscan.core.models import Endpoint
 from apkscan.core.pipeline import _build_attack_surface
 from apkscan.report.digest import build_digest
+
+# 取自 HuaCai 真样本的 dns 富化（两个 C2 全在 Cloudflare 后）。
+_CF_DNS = {
+    "hosting": [
+        {"ip": "104.21.27.56", "asn": "AS13335 Cloudflare, Inc.", "org": "Cloudflare, Inc."},
+        {"ip": "172.67.141.119", "asn": "AS13335 Cloudflare, Inc.", "org": "Cloudflare, Inc."},
+    ]
+}
 
 
 def _ep(value: str, enrichment: dict, kind: str = "domain") -> Endpoint:
@@ -116,3 +125,48 @@ def test_digest_attack_surface_absent_is_empty() -> None:
     d = build_digest({"meta": {}, "leads": []})
     assert d["attack_surface"] == []
     assert d["summary"]["attack_surface_hosts"] == 0
+
+
+# --------------------------------------------------------------------------- CDN 穿透（海外取证第一步）
+
+
+def test_cdn_vendor_all_cloudflare() -> None:
+    assert forensic.cdn_vendor(_CF_DNS) == "Cloudflare"
+    # IP 端点走 asn 富化。
+    assert forensic.cdn_vendor(None, {"org": "Akamai Technologies", "asn": "AS20940"}) == "Akamai Technologies"
+
+
+def test_cdn_vendor_mixed_or_none() -> None:
+    # 有一个非 CDN 归属（可能就是裸源站）→ 不判全 CDN。
+    mixed = {"hosting": [
+        {"org": "Cloudflare, Inc.", "asn": "AS13335 Cloudflare, Inc."},
+        {"org": "DigitalOcean, LLC", "asn": "AS14061"},
+    ]}
+    assert forensic.cdn_vendor(mixed) is None
+    assert forensic.cdn_vendor(None, None) is None
+    assert forensic.cdn_vendor({"hosting": []}) is None
+
+
+def test_render_origin_hint() -> None:
+    lines = forensic.render_origin_hint(_CF_DNS)
+    assert len(lines) == 1
+    blob = lines[0]
+    assert "Cloudflare" in blob and "非真实源站" in blob and "不走调证" in blob and "穿透" in blob
+    # 非全 CDN → 不提示。
+    assert forensic.render_origin_hint({"hosting": [{"org": "Vultr"}]}) == []
+
+
+def test_attack_surface_marks_cdn() -> None:
+    ep = _ep("evil.example", {
+        "shodan": {"country": "United States", "ports": [80, 443]},
+        "dns": _CF_DNS,
+    })
+    surface = _build_attack_surface([ep])
+    assert surface[0]["cdn"] == "Cloudflare"  # 标记：下列端口是 CDN 边缘、非源站
+
+
+def test_foreign_forensic_path_no_longer_says_diaozheng() -> None:
+    # ★ 海外取证原则：国外分支不走调证，转"查真实源站、取镜像/磁盘/日志"。
+    fp = forensic.forensic_path(forensic.JURIS_FOREIGN)
+    assert "不调证" in fp.label or "不走调证" in fp.label
+    assert any("真实源站" in e for e in fp.evidence)
