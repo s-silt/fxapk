@@ -460,7 +460,8 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
         notes = f"{notes}；{tier_note}" if notes else tier_note
 
     notes = _apply_forensic(
-        advice, ep.value, evidence_to_obtain, notes, icp=icp, rdap=rdap, whois=whois, dns=dns
+        advice, ep.value, evidence_to_obtain, notes,
+        icp=icp, rdap=rdap, whois=whois, dns=dns, webcheck=ep.enrichment.get("webcheck"),
     )
     return Lead(
         category=LeadCategory.DOMAIN,
@@ -496,7 +497,8 @@ def _ip_lead(ep: Endpoint, online: bool = True) -> Lead:
     advice = infra.ADVICE_SKIP if ep.is_private else infra.ADVICE_INVESTIGATE
 
     notes = _apply_forensic(
-        advice, ep.value, evidence_to_obtain, _endpoint_notes(ep, online, enriched), asn=asn
+        advice, ep.value, evidence_to_obtain, _endpoint_notes(ep, online, enriched),
+        asn=asn, webcheck=ep.enrichment.get("webcheck"),
     )
     return Lead(
         category=LeadCategory.IP,
