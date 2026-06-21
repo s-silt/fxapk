@@ -195,7 +195,15 @@ _WORKER_STATE: dict = {}
 
 
 def _worker_init(snapshot: object) -> None:
-    """进程池 worker 初始化：缓存快照 + 发现分析器（每 worker 一次，不含 androguard 重导入）。"""
+    """进程池 worker 初始化：配置日志 + 缓存快照 + 发现分析器（每 worker 一次，不含 androguard 重导入）。"""
+    # spawn 的 worker 是全新进程，不继承主进程 cli 的 logging 配置——不配则分析器内
+    # logger.info/warning/exception 走 root 兜底 handler（无时间戳、格式不一致、INFO 被丢）。
+    # 取证工具的审计日志是关键证据，同一 APK 不能因走并行/串行而产出详尽程度不同的日志。
+    # 与 cli.basicConfig 同口径（level/format 一致），保证两路日志一致。
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     _WORKER_STATE["snapshot"] = snapshot
     _WORKER_STATE["analyzers"] = {
         (getattr(a, "name", "") or a.__class__.__name__): a for a in discover_analyzers()
@@ -211,6 +219,10 @@ def _worker_analyze(name: str) -> tuple:
     try:
         return (name, analyzer.analyze(snap), None)
     except Exception as exc:  # noqa: BLE001 — 单分析器失败不炸 worker，回传错误
+        # 错误处理铁律：记完整堆栈（与串行 _analyze_serial 同口径）。worker 已在 _worker_init
+        # 配好日志，logger.exception 把 traceback 落到 worker stderr（继承主控台）；否则并行路只
+        # 回一行 "ValueError: ..." 无堆栈，崩溃分析器排障从"看堆栈"退化成"盲猜"。
+        logger.exception("分析器执行异常：%s", name)
         return (name, None, f"{type(exc).__name__}: {exc}")
 
 
@@ -246,6 +258,9 @@ def _analyze_parallel(ctx: object, eligible: list) -> list[tuple]:
     snapshot = build_snapshot(ctx)
     names = [name for name, _ in eligible]
     workers = max(1, min(len(names), os.cpu_count() or 2))
+    # 报真实 worker 数（= min(分析器数, 核数)），而非 os.cpu_count()：多核少分析器时进程池只起
+    # min(...) 个，按 cpu_count 记会误导从日志诊断并行规模的人。
+    logger.info("分析器并行执行：%d 个（进程池，%d worker）", len(names), workers)
     with ProcessPoolExecutor(
         max_workers=workers, initializer=_worker_init, initargs=(snapshot,)
     ) as pool:
@@ -256,9 +271,7 @@ def _analyze_eligible(ctx: object, eligible: list) -> list[tuple]:
     """跑一组（已过 requires）分析器，返回 [(name, result, error)]。并行不适用/失败 → 串行回退。"""
     if _should_parallelize(ctx, eligible):
         try:
-            results = _analyze_parallel(ctx, eligible)
-            logger.info("分析器并行执行：%d 个（进程池，%d worker）", len(eligible), os.cpu_count() or 1)
-            return results
+            return _analyze_parallel(ctx, eligible)
         except Exception:  # noqa: BLE001 — 并行整体失败（spawn/pickle 等）→ 回退串行，绝不漏分析
             logger.exception("分析器并行执行失败，回退串行")
     return _analyze_serial(ctx, eligible)
