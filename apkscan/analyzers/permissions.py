@@ -85,7 +85,10 @@ class PermissionsAnalyzer(BaseAnalyzer):
             )
             rules = {}
 
-        permissions = self._read_permissions(ctx, result)
+        # 确定性排序：ctx.permissions() 顺序是 set 派生（跨进程/跨运行不稳定）；排序后 meta["permissions"]
+        # 及下游（短名回填/分类）确定可复现，且支持分析器进程池并行时输出与串行逐字节一致。
+        # 下游 classify 把它读进 set（顺序无关），短名→全名每短名通常唯一，排序不改变研判，仅稳定顺序。
+        permissions = sorted(self._read_permissions(ctx, result))
 
         # 短名 -> 原始全限定名（取首个），用于命中时回填证据。
         short_to_full: dict[str, str] = {}
