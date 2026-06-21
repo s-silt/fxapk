@@ -539,7 +539,10 @@ def _build_attack_surface(endpoints: list[Endpoint]) -> list[dict]:
             tls = recon.get("tls")
             if isinstance(tls, dict) and tls:
                 entry["tls"] = list(tls.values())
-            if recon:
+            # active_probed 仅当 recon **真正产出探测数据** 时为 True——不能只看 recon 键是否存在：
+            # 未开 FXAPK_ACTIVE_RECON 时 recon 富化是 {"error": "...跳过"} 占位，主动探测并未发生，
+            # 标 True 会误导分析员/审计以为做过主动侦查（合规上也是假声称）。
+            if recon.get("open_ports") or http or paths or (isinstance(tls, dict) and tls):
                 entry["active_probed"] = True
 
         # 关联子域（crt.sh 证书透明度）。
