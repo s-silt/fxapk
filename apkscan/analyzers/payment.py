@@ -224,8 +224,13 @@ class PaymentAnalyzer(BaseAnalyzer):
 
         for hit in sdk_hits:
             result.leads.append(self._sdk_lead(hit, defaults))
+        # 弱关键词（strong=false：提现/充值/收款码/notify/凭据上下文/钱包余额）只是"资金活动"
+        # 上下文——value 仅为标签、subject 为"待核"、无可办案化的实际值 → 不产 Lead（宁缺毋滥；真样本
+        # HuaCai 实测它们污染「建议调证」清单且无调证价值）。仍记入 meta["payment_keywords"]（见下）
+        # 供分类器 / 调试，故分类（杀猪盘判定走 meta + endpoints）不受影响。
         for hit in kw_hits:
-            result.leads.append(self._keyword_lead(hit, defaults))
+            if hit.rule.strong:
+                result.leads.append(self._keyword_lead(hit, defaults))
         result.leads.extend(crypto_leads)
 
         result.meta["payment_sdks"] = [h.rule.name for h in sdk_hits]
