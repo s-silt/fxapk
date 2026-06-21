@@ -408,3 +408,51 @@ def render_related_subdomains(certs: object) -> list[str]:
     return [
         f"关联子域(crt.sh)：{shown}{more}（CT 日志关联，疑同团伙基础设施，建议并簇串案）"
     ]
+
+
+# 暴露面研判渲染上限。
+_MAX_EXPOSURES_SHOWN = 12
+_MAX_STACK_SHOWN = 10
+
+
+def render_exposures(exposed_files: object) -> list[str]:
+    """把**暴露的敏感文件/误配**渲成取证证据行（暴露本身即直接取证价值：源码/密钥/源站真IP/数据）。
+
+    无数据 / 非 list → 空列表。绝不抛（坏字段安全跳过）。
+    输出形如：⚠ 暴露泄露：Git 源码仓库暴露 (/.git)（critical）→ 可还原源码+硬编码密钥+源站真实IP
+    """
+    if not isinstance(exposed_files, list):
+        return []
+    lines: list[str] = []
+    for e in exposed_files[:_MAX_EXPOSURES_SHOWN]:
+        if not isinstance(e, dict) or not e.get("name"):
+            continue
+        seg = f"⚠ 暴露泄露：{e['name']}"
+        if e.get("severity"):
+            seg += f"（{e['severity']}）"
+        if e.get("forensic_value"):
+            seg += f" → {e['forensic_value']}"
+        lines.append(seg)
+    return lines
+
+
+def render_tech_stack(tech_stack: object) -> list[str]:
+    """把识别到的**技术栈/后台框架**渲成证据行（仅识别 + 通用方向 + 串案；**不含 per-CVE RCE 靶单**）。
+
+    无数据 / 非 list → 空列表。绝不抛（坏字段安全跳过）。
+    """
+    if not isinstance(tech_stack, list):
+        return []
+    names: list[str] = []
+    notes: list[str] = []
+    for t in tech_stack[:_MAX_STACK_SHOWN]:
+        if isinstance(t, dict) and t.get("name"):
+            names.append(str(t["name"]))
+            if t.get("note"):
+                notes.append(f"· {t['name']}：{t['note']}")
+    if not names:
+        return []
+    return [
+        "技术栈/后台指纹（仅识别·须授权后人工评估利用面，工具不自动利用）：" + "、".join(names),
+        *notes,
+    ]
