@@ -94,15 +94,26 @@ def test_evm_lowercase_address_marked_low_confidence():
 
 
 def test_keyword_hit_in_text_resource():
+    # 用强关键词（商户号）验证资源命中 + 证据来源=resource（弱关键词如 notify_url 不再产 Lead）。
+    ctx = FakeContext(
+        files={"assets/config.json": b'{"mch_id":"1900000109"}'}
+    )
+    result = PaymentAnalyzer().analyze(ctx)
+    leads = _pay_leads(result)
+    assert any("商户号" in l.value or "mch_id" in l.value for l in leads)
+    # 证据来源应为 resource
+    hit = next(l for l in leads if l.source_refs)
+    assert any(ev.source == "resource" for ev in hit.source_refs)
+
+
+def test_weak_keyword_recorded_in_meta_but_no_lead():
+    # 弱关键词（提现/充值/收款码/notify 等 strong=false）：检测仍记入 meta 喂分类，但不产无值 Lead。
     ctx = FakeContext(
         files={"assets/config.json": b'{"notify_url":"https://evil.example/cb"}'}
     )
     result = PaymentAnalyzer().analyze(ctx)
-    leads = _pay_leads(result)
-    assert any("notify_url" in l.value or "回调" in l.value for l in leads)
-    # 证据来源应为 resource
-    hit = next(l for l in leads if l.source_refs)
-    assert any(ev.source == "resource" for ev in hit.source_refs)
+    assert any("notify" in k or "回调" in k for k in result.meta["payment_keywords"])
+    assert not any("notify" in l.value or "回调" in l.value for l in _pay_leads(result))
 
 
 def test_keyword_hit_survives_homoglyph_prefilter():
@@ -114,10 +125,10 @@ def test_keyword_hit_survives_homoglyph_prefilter():
     规避变体漏掉（涉诈样本作者的真实手法）。修复后含非 ASCII 文本退回直接跑正则。
     """
     # 'caſhier' = cashier 的长 s 同形字变体；re.IGNORECASE 命中、str.lower() 预筛不命中。
+    # cashier 是弱关键词（不再产 Lead），故验证「检测命中」走 meta["payment_keywords"]。
     ctx = FakeContext(dex_strings=["caſhier 收银台入口 amount=100"])
     result = PaymentAnalyzer().analyze(ctx)
-    leads = _pay_leads(result)
-    assert any("收银台" in l.value or "cashier" in l.value for l in leads), (
+    assert any("收银台" in k or "cashier" in k for k in result.meta["payment_keywords"]), (
         "同形字 'caſhier' 应仍命中 cashier 规则（预筛不得漏掉非 ASCII 语料）"
     )
 
