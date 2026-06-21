@@ -97,22 +97,37 @@ _MAX_HEADER_LEN = 200
 #: curated 暴露后台/敏感路径（**只看状态码+标题，绝不提交凭据/payload**）。
 #: 选取依据：诈骗后台/运维面板/框架管理端常见入口；命中 200/302/401/403 即"存在该入口"的暴露信号。
 _CURATED_PATHS: tuple[str, ...] = (
+    # ---- 后台 / 管理端 / 监控（暴露即入口信号）----
     "/admin",
     "/login",
     "/api",
     "/actuator",        # Spring Boot Actuator（常泄露 env/heapdump）
     "/actuator/health",
+    "/actuator/env",
+    "/actuator/heapdump",
     "/druid",           # Druid 监控台（常未授权）
     "/swagger-ui.html",
     "/swagger",
     "/api-docs",
+    "/v2/api-docs",
+    "/openapi.json",
     "/phpmyadmin",
-    "/.env",            # 误配置泄露
-    "/.git/config",     # 源码泄露
     "/console",
     "/dashboard",
     "/grafana",
     "/management",
+    # ---- 暴露的敏感文件 / 误配（暴露本身即直接取证价值：源码/密钥/源站真IP/数据）----
+    "/.env",            # DB凭据/APP_KEY/源站直连
+    "/.git/config",     # 源码 + 硬编码密钥 + 源站真IP
+    "/.git/HEAD",
+    "/.svn/entries",    # SVN 源码泄露
+    "/.DS_Store",       # 目录结构泄露
+    "/phpinfo.php",     # 服务器环境/绝对路径/环境变量
+    "/info.php",
+    "/www.zip",         # 整站源码备份
+    "/backup.sql",      # 数据库导出
+    "/database.sql",
+    "/.well-known/security.txt",
 )
 
 #: 探测后台路径时认为"该入口存在/有价值"的状态码（含鉴权拦截，恰恰证明入口存在）。
@@ -299,7 +314,7 @@ class ReconEnricher(BaseEnricher):
             return None
         if raw is None:
             return None
-        status, headers, body = raw
+        status, headers, body, cookies = raw
         info: dict[str, Any] = {
             "port": port,
             "scheme": "https" if use_tls else "http",
@@ -314,6 +329,8 @@ class ReconEnricher(BaseEnricher):
         title = _extract_title(body)
         if title:
             info["title"] = title[:_MAX_TITLE_LEN]
+        if cookies:
+            info["cookies"] = cookies[:8]  # 只留 cookie 名（栈指纹用），不留值
         return info
 
     def _probe_paths(
@@ -341,7 +358,7 @@ class ReconEnricher(BaseEnricher):
                 continue
             if raw is None:
                 continue
-            status, _headers, body = raw
+            status, _headers, body, _cookies = raw
             if status not in _INTERESTING_STATUS:
                 continue
             entry: dict[str, Any] = {"path": path, "status": status}
@@ -545,7 +562,7 @@ def _parse_cert(der: object, cipher: object, port: int) -> dict[str, Any]:
 
 def _http_exchange(
     ip: str, port: int, use_tls: bool, host_header: str, path: str, timeout: float
-) -> "tuple[int, dict[str, str], str] | None":
+) -> "tuple[int, dict[str, str], str, list[str]] | None":
     """对 (ip, port) 发一个最小 HTTP/1.1 GET，返回 (status, headers, body)。失败抛由调用方兜底。
 
     手写裸 socket：精确控超时/读取上限/SNI，且不引第三方依赖。只 GET，不带任何 body/凭据/payload。
@@ -629,8 +646,12 @@ def _host_for_header(host: str) -> str:
     return host
 
 
-def _parse_http_response(raw: bytes) -> "tuple[int, dict[str, str], str] | None":
-    """从原始 HTTP 响应字节抽 (status_code, headers_lower, body_text)。无法解析 → None。"""
+def _parse_http_response(raw: bytes) -> "tuple[int, dict[str, str], str, list[str]] | None":
+    """从原始 HTTP 响应字节抽 (status_code, headers_lower, body_text, cookie_names)。无法解析 → None。
+
+    cookie_names：从 Set-Cookie 头抽出的 cookie 名列表（如 PHPSESSID/laravel_session/JSESSIONID）——
+    供技术栈指纹（exposure.tech_stack），只取**名**不取值（不留存任何会话凭据值）。
+    """
     if not raw:
         return None
     sep = raw.find(b"\r\n\r\n")
@@ -651,12 +672,20 @@ def _parse_http_response(raw: bytes) -> "tuple[int, dict[str, str], str] | None"
     if len(parts) >= 2 and parts[1].isdigit():
         status = int(parts[1])
     headers: dict[str, str] = {}
+    cookies: list[str] = []
     for line in lines[1:]:
         if ":" in line:
             k, _, v = line.partition(":")
-            headers[k.strip().lower()] = v.strip()
+            kl = k.strip().lower()
+            vv = v.strip()
+            if kl == "set-cookie":
+                # 只取 cookie 名（= 之前），绝不留存值（不落任何会话凭据）。
+                name = vv.split("=", 1)[0].strip()
+                if name and name not in cookies:
+                    cookies.append(name)
+            headers[kl] = vv
     body_text = body.decode("utf-8", errors="replace")
-    return status, headers, body_text
+    return status, headers, body_text, cookies
 
 
 def _extract_title(body: str) -> str:
