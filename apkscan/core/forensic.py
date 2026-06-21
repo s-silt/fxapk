@@ -98,12 +98,12 @@ _PATHS = {
     ),
     JURIS_FOREIGN: ForensicPath(
         JURIS_FOREIGN,
-        "国外服务器·取证为主",
+        "国外服务器·取证为主（不调证）",
         (
-            "国外难直接调证：以获取服务器镜像 / 磁盘与访问日志为目标",
-            "结合该服务器已识别的后台 / 管理端、技术栈已知漏洞方向、暴露的敏感路径研判（被动情报，非主动攻击）",
+            "海外不走调证：以定位**真实源站服务器**、对源站取镜像 / 磁盘与访问日志为目标",
+            "结合该服务器已识别的后台 / 管理端、技术栈已知漏洞方向、暴露的敏感路径研判取证落点（被动情报指引）",
         ),
-        "国外服务器：难直接调证——转取证路径，以拿到服务器镜像 / 磁盘与日志为目标",
+        "国外服务器：不走调证——查真实源站、对源站取镜像 / 磁盘 / 访问日志",
     ),
     JURIS_UNKNOWN: ForensicPath(
         JURIS_UNKNOWN,
@@ -117,6 +117,72 @@ _PATHS = {
 def forensic_path(jurisdiction: str) -> ForensicPath:
     """取辖区对应的取证路径；未知辖区兜底。"""
     return _PATHS.get(jurisdiction, _PATHS[JURIS_UNKNOWN])
+
+
+#: 已知 CDN / 反向代理 / WAF 厂商标记（org / ASN 字符串里命中即判该 IP 为边缘节点、非真实源站）。
+#: 只收**会隐藏源站**的反代型 CDN；纯托管云（AWS EC2 / GCP / Azure 裸机）不在此列——那些 IP 可能就是源站。
+_CDN_ORG_MARKERS = (
+    "cloudflare", "akamai", "fastly", "incapsula", "imperva", "sucuri",
+    "stackpath", "cdn77", "bunny", "gcore", "g-core", "edgio", "limelight",
+    "cloudfront", "keycdn", "section.io", "ddos-guard", "qrator",
+)
+
+
+def _hosting_units(*dicts: object) -> list[tuple[str, str]]:
+    """把 dns(hosting[]) 与 asn 富化归一成 [(匹配用 blob, 展示用 org)]，**每个解析 IP / ASN 归属一条**。
+
+    blob = org+isp+asn 合并（供 CDN 标记子串匹配，避免纯编号 asn 拉低判定）；org 取最具名字段供展示。
+    """
+    units: list[tuple[str, str]] = []
+    for d in dicts:
+        if not isinstance(d, dict):
+            continue
+        sources = list(d.get("hosting") or [])
+        # asn 富化本身（IP 端点无 hosting，归属直接在顶层）也算一条。
+        if any(d.get(k) for k in ("org", "isp", "asn")):
+            sources.append(d)
+        for h in sources:
+            if not isinstance(h, dict):
+                continue
+            blob = " ".join(str(h.get(k) or "") for k in ("org", "isp", "asn"))
+            if blob.strip():
+                org = str(h.get("org") or h.get("isp") or h.get("asn") or "")
+                units.append((blob, org))
+    return units
+
+
+def cdn_vendor(dns: object = None, asn: object = None) -> str | None:
+    """若解析 IP / ASN 归属**全部**命中已知反代型 CDN，返回厂商名；否则 None（含混合/无信号）。
+
+    全 CDN ⇒ 当前看到的解析 IP 是边缘节点、**不是真实源站**——海外取证须先穿透 CDN 定位源站。
+    只要有一个解析 IP 的归属非 CDN（可能就是裸源站），即返回 None，不误判。
+    """
+    units = _hosting_units(dns, asn)
+    if not units:
+        return None
+    vendor: str | None = None
+    for blob, org in units:
+        low = blob.lower()
+        if not any(m in low for m in _CDN_ORG_MARKERS):
+            return None  # 有非 CDN 归属 → 不算全 CDN（该 IP 可能就是源站）
+        if vendor is None:
+            vendor = org.split(",")[0].strip() or org
+    return vendor
+
+
+def render_origin_hint(dns: object = None, asn: object = None) -> list[str]:
+    """解析 IP 全为反代型 CDN 时，渲一条「先穿透 CDN 定位真实源站」取证证据行（海外取证第一步）。
+
+    非全 CDN / 无信号 → 空列表。绝不抛。海外不走调证（含不向 CDN 调证）：直接技术穿透找源站。
+    """
+    vendor = cdn_vendor(dns, asn)
+    if not vendor:
+        return []
+    return [
+        f"⚠ 解析 IP 均为 CDN/反代（{vendor}），是边缘节点**非真实源站** → 海外取证不走调证："
+        "先穿透 CDN 定位真实源站 IP（历史 DNS 解析 / 证书透明度 SAN / 源站直连泄露 / SSRF / 错误配置 / "
+        "邮件发信头），再对**源站**取镜像 / 磁盘 / 访问日志"
+    ]
 
 
 # 攻击面渲染的展示上限（防个别巨型主机刷屏；完整数据仍在 report.json 的 enrichment 里）。
