@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import posixpath
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypeGuard
 
@@ -41,6 +42,7 @@ __all__ = [
     "collect_so_basenames",
     "collect_file_paths",
     "collect_dex_strings",
+    "present_tokens",
 ]
 
 # DEX 字符串扫描上限：样本字符串池可能很大，避免极端情况下扫描过久。
@@ -260,3 +262,32 @@ def collect_dex_strings(
         logger.exception("[%s] 遍历 dex_strings 失败", analyzer_name)
         return False, strings
     return True, strings
+
+
+def present_tokens(tokens: set[str], strings: list[str]) -> set[str]:
+    """一次扫描收集 ``strings`` 中按**标识符边界**出现的 token 集合。
+
+    性能：替代「每 token 各自全量扫」（O(串×token)）为「合并正则单遍扫」（O(串)）。用标识符边界
+    lookaround ``(?<![A-Za-z0-9_])…(?![A-Za-z0-9_])`` 精确复刻逐 token 的词边界匹配语义（含 token
+    自带非标识符字符的情形——其边界判定天然成立）；命中即从待找集合移除、全部找到即早停。
+    sms_forwarding / self_hosted_im 等的 dex token 存在性判定共用本实现。
+    """
+    toks = [t for t in tokens if t]
+    if not toks:
+        return set()
+    pat = re.compile(
+        r"(?<![A-Za-z0-9_])(?:"
+        + "|".join(re.escape(t) for t in sorted(toks, key=len, reverse=True))
+        + r")(?![A-Za-z0-9_])"
+    )
+    present: set[str] = set()
+    remaining = set(toks)
+    for s in strings:
+        if not remaining:
+            break
+        for m in pat.finditer(s):
+            tok = m.group(0)
+            if tok in remaining:
+                present.add(tok)
+                remaining.discard(tok)
+    return present
