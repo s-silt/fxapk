@@ -53,7 +53,8 @@ def test_meta_counts_and_lists() -> None:
     perms = [_P + "READ_SMS", _P + "INTERNET", _P + "READ_CONTACTS"]
     result = _run(perms)
     assert result.meta["permission_count"] == 3
-    assert result.meta["permissions"] == perms
+    # meta["permissions"] 确定性排序（跨进程/跨运行稳定，支持分析器进程池并行输出与串行一致）。
+    assert result.meta["permissions"] == sorted(perms)
     # 仅 READ_SMS / READ_CONTACTS 是危险权限；INTERNET 不计。
     assert result.meta["dangerous_count"] == 2
     assert set(result.meta["dangerous_matched"]) == {"READ_SMS", "READ_CONTACTS"}
