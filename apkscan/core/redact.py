@@ -33,7 +33,11 @@ def mask(value: str) -> str:
 
 
 def redact_value(category: object, value: object) -> object:
-    """高敏类别的字符串 value → 脱敏；其余原样返回。"""
-    if str(category or "") in SENSITIVE_CATEGORIES and isinstance(value, str):
-        return mask(value)
+    """高敏类别的 value → 脱敏；其余原样返回。
+
+    非字符串高敏 value（如携带 key/iv 的 dict/list、数字）先 str() 再脱敏——否则会绕过
+    脱敏把明文带进可能经云端模型处理的 agent 上下文。value 为 None 时原样放行（非敏感物证）。
+    """
+    if str(category or "") in SENSITIVE_CATEGORIES and value is not None:
+        return mask(value if isinstance(value, str) else str(value))
     return value

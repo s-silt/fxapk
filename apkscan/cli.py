@@ -1140,12 +1140,15 @@ def main() -> None:
     """[project.scripts] 入口。"""
     # 入口先开 UTF-8 环境：修控制台中文乱码 + 让后续 adb/frida 子进程自动带 UTF-8
     # （Windows 默认 GBK，否则读子进程输出遇非 GBK 字节会崩）。
+    from apkscan.core.dotenv import load_dotenv
     from apkscan.core.logsetup import setup_logging
     from apkscan.core.utf8 import enable_utf8_runtime
 
     enable_utf8_runtime()
     # 装「错误定位标识」日志格式器（WARNING+ 末尾带 [@模块.函数:行号]，便于按日志反馈定位）。
     setup_logging()
+    # 从项目根 .env 兜底加载密钥（FXAPK_SHODAN_KEY 等）；真实环境变量优先，绝不抛。
+    load_dotenv()
     app()
 
 

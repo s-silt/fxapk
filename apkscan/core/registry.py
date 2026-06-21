@@ -49,10 +49,19 @@ class BaseEnricher(ABC):
 
     name:        稳定标识。
     applies_to:  适用的端点类型，元素为 "domain" / "ip"。
+    phase:       富化阶段（两遍富化调度用）：
+                 - ``"attribution"``（默认）：第①遍，查归属（rdap/whois/dns/asn/icp/webcheck），
+                   定服务器辖区（国内/国外/未知）。
+                 - ``"attack_surface"``：第②遍，攻击面取证（shodan/recon/cve/certs），**仅对
+                   国外(+未知)端点跑**；其中 ``active=True`` 的（主动探测）仅对**国外**端点跑。
+    active:      是否**主动向目标发起连接**（recon=True）。主动 enricher 受最严门控：opt-in +
+                 仅国外 + 公网 IP。被动 enricher（默认 False）对目标零流量。
     """
 
     name: str = ""
     applies_to: list[str] = []
+    phase: str = "attribution"
+    active: bool = False
 
     @abstractmethod
     def enrich(self, ep: Endpoint) -> EnrichmentResult:

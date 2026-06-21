@@ -51,7 +51,8 @@ def test_merchant_id_keyword_is_strong_high():
 
 
 def test_usdt_keyword_hit():
-    ctx = FakeContext(dex_strings=["充值 USDT TRC20 到账"])
+    # 只放强规则 USDT（'充值' 是弱关键词、不产 Lead），避免测试名实不符、命中来源含混。
+    ctx = FakeContext(dex_strings=["USDT TRC20 到账"])
     result = PaymentAnalyzer().analyze(ctx)
     leads = _pay_leads(result)
     assert any("USDT" in l.value or "虚拟货币" in l.value for l in leads)
@@ -126,10 +127,14 @@ def test_keyword_hit_survives_homoglyph_prefilter():
     """
     # 'caſhier' = cashier 的长 s 同形字变体；re.IGNORECASE 命中、str.lower() 预筛不命中。
     # cashier 是弱关键词（不再产 Lead），故验证「检测命中」走 meta["payment_keywords"]。
-    ctx = FakeContext(dex_strings=["caſhier 收银台入口 amount=100"])
+    # 关键：语料里**不放**任何其它 cashier 规则的明文词（收银台/收款码…），否则那些词会
+    # 独立把规则名灌进 meta，使断言无论同形字是否命中都通过——回归就守不住了。此处命中
+    # 只能来自 'caſhier'→'cashier' 的 Unicode case-fold 匹配；若预筛漏掉非 ASCII 语料，meta 为空、断言失败。
+    ctx = FakeContext(dex_strings=["caſhier amount=100"])
     result = PaymentAnalyzer().analyze(ctx)
-    assert any("收银台" in k or "cashier" in k for k in result.meta["payment_keywords"]), (
-        "同形字 'caſhier' 应仍命中 cashier 规则（预筛不得漏掉非 ASCII 语料）"
+    assert any("cashier" in k for k in result.meta["payment_keywords"]), (
+        "同形字 'caſhier' 应仍命中 cashier 规则（预筛不得漏掉非 ASCII 语料）；"
+        "语料中已无其它触发词，命中只能来自同形字匹配"
     )
 
 
