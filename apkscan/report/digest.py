@@ -29,8 +29,8 @@ def _lead_sort_key(lead: dict[str, Any]) -> tuple[int, int, int, str]:
 def _compact_lead(lead: dict[str, Any], redact: bool) -> dict[str, Any]:
     """单条线索压成扁平稳定字段（去掉 source_refs 等冗长内部结构）。
 
-    redact=True（默认）：高敏类别（钱包私钥/凭据/受害人 PII）的 value 脱敏——明文只留本地完整报告，
-    不进 agent 上下文。
+    redact=True（可选）：高敏类别（钱包私钥/凭据/受害人 PII/加密配方）的 value 脱敏。默认 False
+    （取证查看需要看到实际值）。
     """
     category = lead.get("category")
     value = lead.get("value")
@@ -50,11 +50,11 @@ def _compact_lead(lead: dict[str, Any], redact: bool) -> dict[str, Any]:
     }
 
 
-def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
+def build_digest(report: object, *, redact: bool = False) -> dict[str, Any]:
     """report.json 解析出的对象 → 紧凑摘要 dict（线索按优先级排序）。绝不抛。
 
-    redact=True（默认）：高敏类别（钱包私钥/凭据/受害人 PII）的 value 脱敏，明文只留本地完整报告，
-    不进 agent 上下文（隐私安全）。--raw / redact=False 关闭脱敏。
+    redact=False（默认）：原样输出——取证查看需要看到钱包私钥/凭据等实际值。
+    redact=True（`fxapk digest --redact`，喂云端 agent 时）：高敏类别 value 脱敏，明文只留本地完整报告。
     """
     if not isinstance(report, dict):
         return {"error": "report 非 dict", "leads": []}
