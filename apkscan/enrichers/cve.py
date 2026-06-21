@@ -41,6 +41,7 @@ from typing import Any
 
 import requests
 
+from apkscan.core import forensic
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
 
@@ -51,7 +52,7 @@ _ENV_KEY = "FXAPK_NVD_KEY"
 
 #: NVD 2.0 CVE 检索端点。
 NVD_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
-NVD_TIMEOUT = 20
+NVD_TIMEOUT = 12
 
 #: NVD 限速窗口（秒）与每窗口最大请求数（无 key 5/30s；有 key 50/30s）。官方建议保守。
 _RATE_WINDOW = 30.0
@@ -59,7 +60,8 @@ _RATE_MAX_NOKEY = 5
 _RATE_MAX_KEYED = 50
 
 #: 单端点最多对几个不同 CPE/keyword 走 NVD（防个别巨型主机几十个指纹刷爆限速 / 报告）。
-_MAX_QUERIES_PER_EP = 6
+#: 调小到 3：NVD 无 key 限速 5/30s，每端点 6 个查询易把限速器拖到 ~21s（实测 HuaCai）。
+_MAX_QUERIES_PER_EP = 3
 
 #: 每个 CPE 取回的 CVE 上限（NVD resultsPerPage），再在本地按 CVSS 取 top-N。
 _NVD_RESULTS_PER_PAGE = 50
@@ -112,6 +114,10 @@ _LIMITER_LOCK = threading.Lock()
 _LIMITER: _RateLimiter | None = None
 _LIMITER_KEYED: bool | None = None
 
+#: 进程级内存结果缓存（CPE/keyword → rows）：跨端点去重，避免并发 worker 重复打 NVD 同一指纹。
+_MEM_LOCK = threading.Lock()
+_MEM_CACHE: dict[str, list[dict[str, Any]]] = {}
+
 
 def _limiter() -> _RateLimiter:
     """取进程级限速器（首次按是否配 key 选档惰性建；之后复用同一把全局闸）。
@@ -136,8 +142,27 @@ def _as_list(value: object) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def _cpe22_to_23(cpe: str) -> str:
+    """把 shodan 的 CPE 2.2 URI（``cpe:/a:vendor:product:version``）转 NVD 2.0 要的 CPE 2.3
+    formatted-string（``cpe:2.3:a:vendor:product:version:*:*:*:*:*:*:*``）。
+
+    ★ 修 bug：shodan 给的是 2.2 格式，原样喂 NVD ``cpeName`` 恒不匹配（查询全失败、白耗限速）。
+    已是 2.3 / 非 cpe 串原样返回。补足 11 段（part+vendor+product+version+update+edition+lang+
+    sw_edition+target_sw+target_hw+other），空段填 ``*``。
+    """
+    s = cpe.strip()
+    if s.startswith("cpe:2.3:"):
+        return s
+    if not s.startswith("cpe:/"):
+        return s
+    parts = s[len("cpe:/"):].split(":")
+    parts = [p if p else "*" for p in parts]
+    parts = (parts + ["*"] * 11)[:11]
+    return "cpe:2.3:" + ":".join(parts)
+
+
 def _collect_cpes(shodan: object) -> list[str]:
-    """从 shodan services 抽 CPE 字符串（去重保序）。无 → 空列表。"""
+    """从 shodan services 抽 CPE 字符串并归一为 NVD 2.0 要的 2.3 格式（去重保序）。无 → 空列表。"""
     out: list[str] = []
     seen: set[str] = set()
     if not isinstance(shodan, dict):
@@ -148,9 +173,11 @@ def _collect_cpes(shodan: object) -> list[str]:
         cpe = svc.get("cpe")
         candidates = cpe if isinstance(cpe, list) else [cpe]
         for c in candidates:
-            if isinstance(c, str) and c.strip() and c not in seen:
-                seen.add(c)
-                out.append(c.strip())
+            if isinstance(c, str) and c.strip():
+                cpe23 = _cpe22_to_23(c)
+                if cpe23 not in seen:
+                    seen.add(cpe23)
+                    out.append(cpe23)
     return out
 
 
@@ -312,18 +339,26 @@ class CveEnricher(BaseEnricher):
     def _lookup(
         self, cache_key: str, params: dict[str, Any], key: str, cache: dict[str, Any]
     ) -> list[dict[str, Any]] | None:
-        """查单个 CPE/keyword：先缓存，未命中走 NVD。失败 → None（调用方计入 errors，不炸整体）。"""
+        """查单个 CPE/keyword：本端点缓存 → 进程级内存缓存 → 磁盘 → NVD。失败 → None（不炸整体）。"""
         cached = cache.get(cache_key)
         if isinstance(cached, list):
             logger.debug("CVE 缓存命中：%s", cache_key)
             return cached
+        # 进程级内存缓存：跨端点去重——并发 worker 查同一 CPE（如多端点同后端 nginx）不重复打 NVD。
+        with _MEM_LOCK:
+            mem = _MEM_CACHE.get(cache_key)
+        if isinstance(mem, list):
+            cache[cache_key] = mem
+            return mem
         try:
             rows = self._query_nvd(params, key)
         except Exception as exc:  # noqa: BLE001 — 单 CPE 查询失败不得影响其它 CPE / 主流程
             logger.debug("NVD 查询失败：%s（%s）", cache_key, exc)
             return None
-        self._save_cache_entry(cache_key, rows)
-        cache[cache_key] = rows  # 同端点内多 query 复用，避免重复读盘
+        self._save_cache_entry(cache_key, rows)  # 成功（含空结果）写盘，避免下次重查
+        cache[cache_key] = rows
+        with _MEM_LOCK:
+            _MEM_CACHE[cache_key] = rows
         return rows
 
     def _gather(self, ep: Endpoint, key: str) -> dict[str, Any]:
@@ -413,6 +448,15 @@ class CveEnricher(BaseEnricher):
         value = (ep.value or "").strip()
         if not value:
             return EnrichmentResult(provider=self.name, ok=False, error="空值，跳过 CVE 补查")
+
+        # ★ CDN 边缘主机：shodan 给的是 CDN 节点指纹（非真实源站），查 CVE 无价值且白耗 NVD 限速
+        #   （实测 HuaCai 这类 CF 后端每次白跑 ~21s）→ 直接跳过。源站要查 CVE 须先穿透 CDN 拿真实指纹。
+        if forensic.cdn_vendor(ep.enrichment.get("dns"), ep.enrichment.get("asn")):
+            return EnrichmentResult(
+                provider=self.name,
+                ok=True,
+                data={"note": "CDN 边缘主机，跳过 CVE 补查（非源站、无价值）", "source": "nvd"},
+            )
 
         # 无指纹可查（shodan/recon 未写入或无 services）→ 优雅返回 ok=True 无值（非错误）。
         # ★ 这也是"组内顺序未保证"时的安全退化：若本模块先于 shodan/recon 跑，此处无指纹即跳过。
