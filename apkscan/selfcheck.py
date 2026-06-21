@@ -25,7 +25,6 @@ _STATUS_UNREACHABLE = "unreachable"
 _OPTIONAL_DEPS = (
     ("graph", "kuzu", "pip install fxapk[graph]", "本地案件图谱串案（fxapk graph）"),
     ("decrypt", "cryptography", "pip install cryptography", "解密运行时 {data,timestamp} 加密信封"),
-    ("mcp", "mcp", "pip install fxapk[mcp]", "MCP 服务器（agent 原生 tool-call，预留）"),
 )
 
 #: 工具 / 动态能力：(cap 名, category, 修复, 用途)。状态由 detect_capabilities 判定。
