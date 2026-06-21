@@ -85,10 +85,10 @@ class PermissionsAnalyzer(BaseAnalyzer):
             )
             rules = {}
 
-        # 确定性排序：ctx.permissions() 顺序是 set 派生（跨进程/跨运行不稳定）；排序后 meta["permissions"]
-        # 及下游（短名回填/分类）确定可复现，且支持分析器进程池并行时输出与串行逐字节一致。
-        # 下游 classify 把它读进 set（顺序无关），短名→全名每短名通常唯一，排序不改变研判，仅稳定顺序。
-        permissions = sorted(self._read_permissions(ctx, result))
+        # 确定性：_read_permissions 已在短名去重**之前**按全名排序，故 meta["permissions"] 及下游
+        # （短名回填/分类）确定可复现，分析器进程池并行时输出与串行逐字节一致——包括两个不同全名归一到
+        # 同一短名时"保留哪个全名"也稳定（取字典序最小）。此处不再二次 sort（去重结果本已有序）。
+        permissions = self._read_permissions(ctx, result)
 
         # 短名 -> 原始全限定名（取首个），用于命中时回填证据。
         short_to_full: dict[str, str] = {}
@@ -144,14 +144,15 @@ class PermissionsAnalyzer(BaseAnalyzer):
             logger.exception("读取权限列表失败")
             result.error = "读取权限列表失败（详见日志）"
             return []
+        # 先按全名排序、再按短名去重：ctx.permissions() 源自 set（跨进程/跨运行顺序不稳）。若两个不同
+        # 全名归一到同一短名（如 com.a.MDM vs com.b.MDM，OEM 权限常见），"保留首个"必须在确定序上取，
+        # 否则保留谁本身随机——仅在去重后排序只稳定了展示顺序，没稳定"留下哪个全名"（report 证据串里的
+        # <uses-permission android:name=...> 仍不可复现）。排序后去重 → 每短名稳定保留字典序最小的全名，
+        # 且去重结果本身有序。
+        cleaned = sorted(p for p in (str(item).strip() for item in raw or []) if p)
         out: list[str] = []
-        # 按短名去重：android.permission.READ_SMS 与裸 READ_SMS 视为同一权限，
-        # 保留首次出现的原始形态（全限定名优先于裸名时取首个）。
         seen_short: set[str] = set()
-        for item in raw or []:
-            perm = str(item).strip()
-            if not perm:
-                continue
+        for perm in cleaned:
             short = _short_name(perm)
             if short in seen_short:
                 continue
