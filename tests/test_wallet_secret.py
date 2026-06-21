@@ -8,8 +8,9 @@ from __future__ import annotations
 from apkscan.analyzers.wallet_secret import WalletSecretAnalyzer
 from apkscan.core.models import Confidence, LeadCategory
 
-# 标准 BIP-39 全零熵向量（合法 12 词）。
-_M12 = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+# 标准 BIP-39 测试向量（合法 12 词，9 个互异词 → 过 2/3 互异度护栏）。
+# 不用全零熵向量（abandon×11+about，仅 2 互异词）——它会被互异度护栏当 FP 滤掉（真钱包从不用）。
+_M12 = "legal winner thank year wave sausage worth useful legal winner thank yellow"
 # 校验和不合法的 12 词。
 _BAD12 = "zone zoo zero year wrong write world work word wood wolf wish"
 # 知名合法 WIF 私钥测试向量。
@@ -49,6 +50,13 @@ def test_mnemonic_detected_high() -> None:
 
 def test_random_words_no_lead() -> None:
     assert _leads(_Ctx(dex=[f"ui strings: {_BAD12}"])) == []
+
+
+def test_low_distinctness_css_words_no_lead() -> None:
+    # 真样本(HuaCai uni-app)误报根因：CSS/常见英文词(day/color/top/left,皆在 BIP-39 词表)凑出过
+    # 校验和的 12 词窗口，但只有 3-4 个互异词 → 互异度护栏滤掉，不产假助记词。
+    assert _leads(_Ctx(dex=["day color day color this day color day color this day color"])) == []
+    assert _leads(_Ctx(dex=["top left left top top right right top bottom left left bottom"])) == []
 
 
 def test_wif_detected_and_corrupted_rejected() -> None:
