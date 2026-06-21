@@ -63,6 +63,13 @@ include = ["apkscan*"]
 [tool.setuptools.package-data]
 apkscan = ["rules/*.yaml", "rules/*.txt", "report/templates/*.j2"]
 
+[tool.pytest.ini_options]
+markers = [
+    # 重型真 spawn 端到端校验（加载真实 APK + 起进程池，~40s）。默认仍跑（需本地有 *.apk 样本，
+    # 否则 skip）；要提速可 `pytest -m "not slow"` 排除。
+    "slow: 重型/慢测试（真实 APK + 进程池真 spawn）",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

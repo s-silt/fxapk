@@ -30,6 +30,12 @@ _TEXT_SUFFIXES: tuple[str, ...] = (
     ".ts", ".map", ".md", ".csv", ".sql", ".plist", ".pem", ".crt", ".key",
 )
 
+#: 单文件预读上限：内容超过则不收进快照（worker 惰性兜底仍可读完整字节）。后缀属文本白名单不代表
+#: 内容是小文本——被分析 APK 可塞个几百 MB 的二进制 keystore 命名 *.key、或巨型 *.map，仅凭文件名
+#: 就把它物化进快照，随 pickle ×worker 数放大致 OOM（正是本工具针对的混淆涉诈样本）。32MB 远超正常
+#: 文本资源（实测整包文本 ~8MB），只挡病态超大单文件。
+_MAX_PREREAD_BYTES = 32 * 1024 * 1024
+
 
 class SnapshotContext:
     """可 pickle 的 AnalysisContext 快照（满足同一协议；read_file 走预读 dict + 惰性 APK 兜底）。"""
@@ -113,40 +119,65 @@ class SnapshotContext:
             return None
 
     def _ensure_worker_apk(self) -> Any:
-        """worker 内惰性建 androguard APK（按 apk_path），缓存；失败标 False 不再重试。"""
-        if self._worker_apk is not None:
-            return self._worker_apk or None
+        """worker 内惰性建 androguard APK（按 apk_path），缓存；失败标 False 不再重试。
+
+        三态用 ``is None`` / ``is False`` 显式判别，不靠 APK 实例真值：未来 androguard 若给 APK
+        定义在空档案上为假的 ``__bool__``/``__len__``，``self._worker_apk or None`` 会把已建好的
+        句柄误判为失败丢弃，导致 worker 内所有非预读读取静默返 None（仅并行路出错，与串行分叉）。
+        """
+        if self._worker_apk is False:  # 建过且失败：不再重试
+            return None
+        if self._worker_apk is not None:  # 已建好的 APK 句柄
+            return self._worker_apk
         if not self.apk_path:
             self._worker_apk = False
             return None
         try:
             from androguard.core.apk import APK
 
+            from apkscan.core.apk import _silence_androguard_logging
+
+            # 用 androguard 前先禁其 loguru（与 ApkContext.load_apk 同口径）：否则首次惰性重开会
+            # 刷上百 MB DEBUG 到 worker stderr，淹没取证日志。
+            _silence_androguard_logging()
             self._worker_apk = APK(self.apk_path)
         except Exception:  # noqa: BLE001 — worker 内重开失败兜底为 None（极罕见非文本读才走到）
             logger.warning("snapshot worker 重开 APK 失败，非文本 read_file 将返 None", exc_info=True)
             self._worker_apk = False
-        return self._worker_apk or None
+            return None
+        return self._worker_apk
 
 
 def build_snapshot(ctx: Any) -> SnapshotContext:
     """把真实 ApkContext 物化成可 pickle 的 SnapshotContext（仅 android/APK 用；预读文本资源）。绝不抛。"""
     files: dict[str, bytes] = {}
+    file_list: list[str] = []
     try:
-        for path in ctx.list_files():
-            if not isinstance(path, str):
-                continue
-            low = path.lower()
-            if low.endswith(".dex") or not low.endswith(_TEXT_SUFFIXES):
-                continue
-            try:
-                data = ctx.read_file(path)
-            except Exception:  # noqa: BLE001 — 单文件预读失败跳过，worker 内惰性兜底仍可读
-                continue
-            if data is not None:
-                files[path] = data
-    except Exception:  # noqa: BLE001 — 预读整体失败不致命（worker 惰性兜底）
-        logger.warning("snapshot 预读文本资源失败，依赖 worker 惰性 read_file 兜底", exc_info=True)
+        # 只枚举一次文件表并复用：ApkContext.list_files() 未缓存，每次重走 androguard get_files()，
+        # 大 APK（数千 zip 项）上三倍枚举（预读循环 + file_list + native_libs）是串行热路浪费。
+        # 预读循环与下方 file_list 共用此份；native_libs() 语义独立，保守不在此重导。
+        file_list = list(ctx.list_files())
+    except Exception:  # noqa: BLE001 — 枚举失败不致命（worker 惰性兜底）
+        logger.warning("snapshot 枚举文件表失败，依赖 worker 惰性 read_file 兜底", exc_info=True)
+
+    for path in file_list:
+        if not isinstance(path, str):
+            continue
+        low = path.lower()
+        if low.endswith(".dex") or not low.endswith(_TEXT_SUFFIXES):
+            continue
+        try:
+            data = ctx.read_file(path)
+        except Exception:  # noqa: BLE001 — 单文件预读失败跳过，worker 内惰性兜底仍可读
+            continue
+        if data is None:
+            continue
+        if len(data) > _MAX_PREREAD_BYTES:
+            # 后缀属文本白名单但内容超大（如伪装成 *.key/*.map 的二进制）：不收进快照，避免随
+            # pickle ×worker 数放大致 OOM；worker 惰性兜底仍可按需读到完整字节，正确性不受影响。
+            logger.debug("snapshot 跳过超大预读文件（worker 惰性兜底）：%s（%d 字节）", path, len(data))
+            continue
+        files[path] = data
 
     return SnapshotContext(
         package_name=getattr(ctx, "package_name", "") or "",
@@ -157,7 +188,7 @@ def build_snapshot(ctx: Any) -> SnapshotContext:
         permissions=list(ctx.permissions()),
         components=ctx.components(),
         dex_strings=tuple(ctx.dex_strings()),
-        file_list=list(ctx.list_files()),
+        file_list=file_list,
         native_libs=list(ctx.native_libs()),
         certificates=list(ctx.certificates()),
         files=files,
