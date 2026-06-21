@@ -349,6 +349,39 @@
     {% endif %}
   </section>
 
+  {#- ============ ★ 海外服务器攻击面（结构化：端口/服务/CVE/暴露后台/关联子域） ============ -#}
+  {% set attack_surface = meta.get("attack_surface") or [] %}
+  {% if attack_surface %}
+  <section id="attack-surface">
+    <h2><span class="star">★</span> 🛰 海外服务器攻击面 <span class="muted" style="font-size:13px;font-weight:400">（被动 OSINT + 授权主动侦查：开放端口 / 服务 / 已知漏洞方向 / 暴露后台 / 关联子域；仅【国外 + 未知】服务器，国内走调证不在此列）</span></h2>
+    <table class="lead-table">
+      <thead>
+        <tr>
+          <th class="c-val">主机</th>
+          <th>辖区</th>
+          <th>开放端口 / 服务</th>
+          <th>已知漏洞方向（CVE）</th>
+          <th>暴露后台（主动·已授权）</th>
+          <th>关联子域（crt.sh）</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for h in attack_surface %}
+        <tr>
+          <td class="mono">{{ h.host }}{% if h.get("active_probed") %} <span class="badge">主动探测</span>{% endif %}</td>
+          <td>{{ h.jurisdiction }}</td>
+          <td class="mono">{% for s in h.get("services") or [] %}{{ s.port }}{% if s.get("product") %}({{ s.product }}{% if s.get("version") %} {{ s.version }}{% endif %}){% endif %} {% endfor %}{% if not h.get("services") %}{{ (h.get("ports") or [])|join(" ") }}{% endif %}</td>
+          <td class="mono">{% for c in (h.get("cves") or [])[:8] %}{{ c.id }}{% if c.get("cvss") %}({{ c.cvss }}{% if c.get("severity") %} {{ c.severity }}{% endif %}){% endif %} {% endfor %}{% if (h.get("cves") or [])|length > 8 %}… 等 {{ h.get("cves")|length }} 个{% endif %}</td>
+          <td class="mono">{% for p in (h.get("exposed_paths") or [])[:8] %}{{ p.path }}({{ p.status }}) {% endfor %}{% if (h.get("exposed_paths") or [])|length > 8 %}…{% endif %}</td>
+          <td class="mono muted">{% for s in (h.get("related_subdomains") or [])[:8] %}{{ s }} {% endfor %}{% if (h.get("related_subdomains") or [])|length > 8 %}… 等 {{ h.get("related_subdomains")|length }} 个{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <div class="muted" style="font-size:12px;margin-top:6px">CVE / 后台路径仅为**情报方向**（非利用）；标「主动探测」者为对授权目标的实时侦查（仅侦查、不利用）。完整结构化数据见 report.json 的 endpoints[].enrichment 与摘要 digest 的 attack_surface 段。</div>
+  </section>
+  {% endif %}
+
   {#- ============ ④ 通联域名 / IP（无需调证，弱化 / 可折叠） ============ -#}
   <section id="contact-domains">
     <h2><span class="num">④</span> 通联域名 / IP <span class="muted" style="font-size:13px;font-weight:400">（「无需调证」的基础设施 / CDN / 公共服务，弱化展示）</span></h2>

@@ -72,8 +72,13 @@ fxapk digest out/<样本名>.json
 ## 4. 读结果（给 agent 的要点）
 - 一切以 **leads** 为中心：每条带 `category`/`value`/`subject`/`advice`(建议调证/待核/无需调证)/
   `where_to_request`/`evidence_to_obtain`/`notes`。**优先看 advice=建议调证 的**。
-- `report.meta` 含 `app_classification`(涉诈类型研判)、`sample_sha256`(检材指纹)、`enriched_target_count` 等。
-- 先 `digest` 拿摘要决策；要细节再读 `out/<样本名>.json` 全量。
+- **结构化攻击面**：`digest` 输出含顶层 `attack_surface`（也在 `report.meta["attack_surface"]`），
+  **按主机机器可读**——`[{host, kind, jurisdiction, ports[], services[{port,product,version}],
+  cves[{id,cvss,severity,source}], exposed_paths[{path,status}], tls[], related_subdomains[],
+  active_probed}]`。要"列所有 C2 开放端口""找所有挂某 CVE 的主机""比对暴露后台"时**直接读这个段**，
+  别去解析 evidence 的自然语言串。仅【国外+未知】主机入此段（国内走调证不在此列）。
+- `report.meta` 还含 `app_classification`(涉诈类型研判)、`sample_sha256`(检材指纹)、`enriched_target_count` 等。
+- 先 `digest` 拿摘要决策；要细节再读 `out/<样本名>.json` 全量（`endpoints[].enrichment` 有富化原始数据）。
 
 ---
 
