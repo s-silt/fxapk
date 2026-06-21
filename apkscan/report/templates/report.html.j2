@@ -362,6 +362,7 @@
           <th>开放端口 / 服务</th>
           <th>已知漏洞方向（CVE）</th>
           <th>暴露后台（主动·已授权）</th>
+          <th>暴露泄露 / 技术栈</th>
           <th>关联子域（crt.sh）</th>
         </tr>
       </thead>
@@ -373,6 +374,7 @@
           <td class="mono">{% for s in h.get("services") or [] %}{{ s.port }}{% if s.get("product") %}({{ s.product }}{% if s.get("version") %} {{ s.version }}{% endif %}){% endif %} {% endfor %}{% if not h.get("services") %}{{ (h.get("ports") or [])|join(" ") }}{% endif %}</td>
           <td class="mono">{% for c in (h.get("cves") or [])[:8] %}{{ c.id }}{% if c.get("cvss") %}({{ c.cvss }}{% if c.get("severity") %} {{ c.severity }}{% endif %}){% endif %} {% endfor %}{% if (h.get("cves") or [])|length > 8 %}… 等 {{ h.get("cves")|length }} 个{% endif %}</td>
           <td class="mono">{% for p in (h.get("exposed_paths") or [])[:8] %}{{ p.path }}({{ p.status }}) {% endfor %}{% if (h.get("exposed_paths") or [])|length > 8 %}…{% endif %}</td>
+          <td class="mono">{% for e in h.get("exposures") or [] %}<div>⚠ {{ e.name }}{% if e.get("severity") %}（{{ e.severity }}）{% endif %}</div>{% endfor %}{% if h.get("tech_stack") %}<div class="muted">栈：{% for t in h.tech_stack %}{{ t.name }}{% if not loop.last %}、{% endif %}{% endfor %}</div>{% endif %}</td>
           <td class="mono muted">{% for s in (h.get("related_subdomains") or [])[:8] %}{{ s }} {% endfor %}{% if (h.get("related_subdomains") or [])|length > 8 %}… 等 {{ h.get("related_subdomains")|length }} 个{% endif %}</td>
         </tr>
         {% endfor %}

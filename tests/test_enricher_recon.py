@@ -159,9 +159,9 @@ def test_optin_public_ip_probes_and_emits_notice(
         recon_mod,
         "_http_exchange",
         lambda ip, port, use_tls, host, path, timeout: (
-            (200, {"server": "nginx", "x-powered-by": "PHP/7.4"}, "<title>XX管理后台</title>")
+            (200, {"server": "nginx", "x-powered-by": "PHP/7.4"}, "<title>XX管理后台</title>", ["PHPSESSID"])
             if path == "/"
-            else (200, {}, "<title>admin</title>")
+            else (200, {}, "<title>admin</title>", [])
             if path == "/admin"
             else None
         ),
@@ -216,16 +216,18 @@ def test_is_public_ip() -> None:
 
 def test_parse_http_response() -> None:
     raw = (
-        b"HTTP/1.1 200 OK\r\nServer: nginx\r\nX-Powered-By: PHP/7.4\r\n\r\n"
+        b"HTTP/1.1 200 OK\r\nServer: nginx\r\nX-Powered-By: PHP/7.4\r\n"
+        b"Set-Cookie: PHPSESSID=abc123; path=/\r\n\r\n"
         b"<html><head><title>  Admin  Panel </title></head></html>"
     )
     parsed = recon_mod._parse_http_response(raw)
     assert parsed is not None
-    status, headers, body = parsed
+    status, headers, body, cookies = parsed
     assert status == 200
     assert headers["server"] == "nginx"
     assert headers["x-powered-by"] == "PHP/7.4"
     assert "Admin" in body
+    assert cookies == ["PHPSESSID"]  # 只取 cookie 名，不留值
     assert recon_mod._parse_http_response(b"") is None
 
 

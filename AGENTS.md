@@ -54,11 +54,17 @@ fxapk digest out/<样本名>.json
 |---|---|---|
 | `FXAPK_SHODAN_KEY` | Shodan 被动查库：开放端口/服务 banner/产品版本/**现成 CVE(vulns)**/关联主机名 | 被动·对目标零流量 |
 | `FXAPK_NVD_KEY`（可选） | CVE 在线补查提速（无 key 也能用，仅限速更严） | 被动 |
-| `FXAPK_ACTIVE_RECON=1` | **主动探测**：实时端口连通/TLS 证书/HTTP 指纹/暴露后台路径 | **主动·对目标发起连接** |
+| `FXAPK_ACTIVE_RECON=1` | **主动探测**：实时端口连通/TLS 证书/HTTP 指纹/暴露后台与敏感文件路径/Set-Cookie | **主动·对目标发起连接** |
 | crt.sh（免 key，默认开） | 证书透明度关联子域 → 串案 | 被动 |
 
+**暴露面研判（`exposure`，纯映射·零网络·零 payload·默认开）**：把已采集指纹映射到
+- **暴露的敏感文件/误配**（/.git→源码+密钥+源站真IP、/.env→DB凭据/APP_KEY、备份dump、phpinfo、目录列表、swagger、source map）——暴露本身即直接取证价值；
+- **技术栈/后台框架指纹**（PHP/Laravel/ThinkPHP/Spring/Jeecg/RuoYi/通达·泛微·致远OA…）——**仅识别**+「框架级已知漏洞·须授权人工评估」通用方向+**串案**（同后台疑同团伙），**不内置 per-CVE RCE 靶单**。
+> ★ 边界：本层是侦查/取证情报，**不发 exploit/不自动利用**；具体漏洞利用由授权操作者对确认目标人工评估。暴露文件检测的数据来自主动 recon（需开 `FXAPK_ACTIVE_RECON`），栈指纹部分被动 Shodan 也能出。
+
 **结果在哪看**：攻击面证据并进对应 Lead 的 `evidence_to_obtain`/`notes`（自动进 `digest`），例如
-`Shodan 暴露面：80(nginx 1.18) …`、`主动探测·已授权 暴露后台路径：/admin(200)`、`关联子域(crt.sh)：…建议并簇串案`。
+`Shodan 暴露面：80(nginx 1.18) …`、`主动探测·已授权 暴露后台路径：/admin(200)`、`⚠ 暴露泄露：Git 源码仓库暴露 (/.git)（critical）→…`、`技术栈/后台指纹（仅识别·须授权人工评估）：PHP、Jeecg-Boot…`、`关联子域(crt.sh)：…建议并簇串案`。
+结构化 `attack_surface` 段每主机另带 `exposures[]` / `tech_stack[]` 字段供 Codex 直读。
 
 **取证原则（辖区分流）**：
 - **国内服务器** → 走「调证」：向境内云厂商/IDC/ICP 依法调取日志/租户实名，**不做攻击面取证**。
