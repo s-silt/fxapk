@@ -368,7 +368,7 @@
       <tbody>
         {% for h in attack_surface %}
         <tr>
-          <td class="mono">{{ h.host }}{% if h.get("active_probed") %} <span class="badge">主动探测</span>{% endif %}</td>
+          <td class="mono">{{ h.host }}{% if h.get("cdn") %} <span class="badge">CDN:{{ h.cdn }}·端口为边缘非源站</span>{% endif %}{% if h.get("active_probed") %} <span class="badge">主动探测</span>{% endif %}</td>
           <td>{{ h.jurisdiction }}</td>
           <td class="mono">{% for s in h.get("services") or [] %}{{ s.port }}{% if s.get("product") %}({{ s.product }}{% if s.get("version") %} {{ s.version }}{% endif %}){% endif %} {% endfor %}{% if not h.get("services") %}{{ (h.get("ports") or [])|join(" ") }}{% endif %}</td>
           <td class="mono">{% for c in (h.get("cves") or [])[:8] %}{{ c.id }}{% if c.get("cvss") %}({{ c.cvss }}{% if c.get("severity") %} {{ c.severity }}{% endif %}){% endif %} {% endfor %}{% if (h.get("cves") or [])|length > 8 %}… 等 {{ h.get("cves")|length }} 个{% endif %}</td>
