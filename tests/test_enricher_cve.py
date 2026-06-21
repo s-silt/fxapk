@@ -50,9 +50,10 @@ def _isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cve_mod, "CACHE_FILE", tmp_path / ".apkscan_cache" / "cve.json")
     # 默认无 NVD key（慢档限速，但不门控）。
     monkeypatch.delenv("FXAPK_NVD_KEY", raising=False)
-    # 每个测试重置进程级限速器，避免跨测试污染（且测试里限速窗口不应真 sleep）。
+    # 每个测试重置进程级限速器 + 内存结果缓存，避免跨测试污染（且测试里限速窗口不应真 sleep）。
     monkeypatch.setattr(cve_mod, "_LIMITER", None)
     monkeypatch.setattr(cve_mod, "_LIMITER_KEYED", None)
+    monkeypatch.setattr(cve_mod, "_MEM_CACHE", {})
 
 
 class _Resp:
