@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -514,6 +515,16 @@ def test_analyze_dynamic_no_package_skips_capture_and_merge(monkeypatch):
 
     assert cap_calls["called"] is False
     assert merge_calls["rerender_called"] is False
+
+
+def test_resolve_out_defaults_to_apk_dir(tmp_path: Path) -> None:
+    """未给 --out → 默认落到 APK 同目录下的 out/；显式 --out 原样（相对/绝对都不动）。"""
+    apk = tmp_path / "sub" / "sample.apk"
+    apk.parent.mkdir(parents=True)
+    apk.write_bytes(b"x")
+    assert cli._resolve_out(None, apk) == str(apk.resolve().parent / "out")
+    assert cli._resolve_out("myout", apk) == "myout"
+    assert cli._resolve_out("/abs/out", apk) == "/abs/out"
 
 
 def test_run_dynamic_after_static_new_signature_passes_report_and_formats(monkeypatch):
