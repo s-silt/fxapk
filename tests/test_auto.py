@@ -606,6 +606,48 @@ def test_cli_auto_handles_nondict_result(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "非预期格式" in res.output
 
 
+def test_cli_auto_repackage_flag_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--no-repackage → repackage=False；默认 → repackage=True（透传 auto.run）。"""
+    import tempfile
+
+    calls = _patch_auto_run(
+        monkeypatch, {"steps": [], "report_paths": [], "package_name": "com.x", "out_dir": "out"}
+    )
+    with tempfile.NamedTemporaryFile(suffix=".apk", delete=False) as fh:
+        apk = fh.name
+
+    assert runner.invoke(cli.app, ["auto", apk, "--no-repackage", "--offline", "--no-fix"]).exit_code == 0
+    assert calls["kwargs"]["repackage"] is False
+    assert runner.invoke(cli.app, ["auto", apk, "--offline", "--no-fix"]).exit_code == 0
+    assert calls["kwargs"]["repackage"] is True  # 默认开
+
+
+def test_run_repackage_no_device_skipped() -> None:
+    step, paths = auto._run_repackage(
+        "a.apk", "com.x", out_dir="o", has_device=False, on_progress=None
+    )
+    assert step["status"] == "skipped"
+    assert paths == []
+
+
+def test_run_repackage_invokes_repackage_run_with_serial(monkeypatch: pytest.MonkeyPatch) -> None:
+    """有设备 → 调 repackage.run 并透传 serial/package_name，折叠成 done step。"""
+    seen: dict[str, Any] = {}
+
+    def _fake(apk_path: str, **kw: Any) -> dict:
+        seen["apk"] = apk_path
+        seen["kw"] = kw
+        return {"status": "done", "reason": "去壳成功", "artifacts": ["x.apk"], "playbook": [], "report_paths": []}
+
+    monkeypatch.setattr("apkscan.dynamic.repackage.run", _fake)
+    step, _paths = auto._run_repackage(
+        "a.apk", "com.x", out_dir="o", has_device=True, serial="emulator-5554", on_progress=None
+    )
+    assert step["status"] == "done"
+    assert seen["kw"]["serial"] == "emulator-5554"  # serial 透传
+    assert seen["kw"]["package_name"] == "com.x"
+
+
 # ---------------------------------------------------------------------------
 # analyze_static：仅静态公共函数（GUI「静态分析」按钮专用，不触发 doctor/动态）
 # ---------------------------------------------------------------------------

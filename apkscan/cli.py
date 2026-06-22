@@ -278,6 +278,34 @@ def unpack(
 
 
 @app.command()
+def repackage(
+    apk: Path = typer.Argument(
+        ...,
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="原 APK 路径（以它为基底替换脱壳 DEX 重打包）。",
+    ),
+    out: str | None = typer.Option(None, "--out", help="产物目录（脱壳 DEX 取自 <out>/dump；默认 APK 同目录 out/）。"),
+) -> None:
+    """脱壳后重打包出去壳 APK 并装回设备，使其能被重新动态抓包（绕加固壳反 frida）。
+
+    前置：先 unpack 出脱壳 DEX（落 <out>/dump）+ apksigner/zipalign + 在线设备。需 unpack
+    先成功；缺工具/设备则 skipped 给手册。实现由 apkscan.dynamic.repackage 提供，未安装优雅退出。
+    """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    try:
+        from apkscan.dynamic import repackage as _repackage
+    except ImportError:
+        typer.echo("该功能未安装：apkscan.dynamic.repackage 不可用。")
+        raise typer.Exit(code=1) from None
+
+    out = _resolve_out(out, apk)  # 未给 --out → 默认落到 APK 同目录下的 out/
+    result = _repackage.run(str(apk), out=out)
+    _print_dynamic_result("去壳重打包", result)
+
+
+@app.command()
 def capture(
     package: str = typer.Argument(..., help="目标应用包名（在设备上运行/抓包）。"),
     out: str = typer.Option("out", "--out", help="产物 / 报告输出目录。"),
@@ -373,6 +401,12 @@ def auto(
         "--track/--no-track",
         help="静态分析写报告后自动把线索入追踪台账（+喂案件图谱）。默认开；--no-track 关闭。",
     ),
+    repackage: bool = typer.Option(
+        True,
+        "--repackage/--no-repackage",
+        help="脱壳后把去壳版重打包装回设备供 capture 抓（绕壳反 frida）。默认开；"
+        "--no-repackage 关（重签必卸原包会清 app 数据/登录态）。",
+    ),
 ) -> None:
     """一键全自动：体检 → 静态分析 → 脱壳 → 抓包 → 合并，串成确定性流水线产出总报告。
 
@@ -413,6 +447,7 @@ def auto(
             capture_duration=duration,
             formats=formats,
             track=track,
+            repackage=repackage,
             on_progress=lambda m: typer.echo(f"... {m}"),
             confirm=_confirm,
         )
