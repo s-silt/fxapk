@@ -43,6 +43,8 @@ Issues = "https://github.com/s-silt/fxapk/issues"
 dev = ["pytest", "ruff", "pyright"]
 # 本地案件图谱串案（嵌入式 Kuzu，离线、无第三方依赖）。可选——核心命令不依赖它。
 graph = ["kuzu==0.11.3"]
+# 线索追踪 + 办案进度的局域网网页（flask）。可选——台账数据层不依赖它，核心命令不依赖它。
+track = ["flask"]
 # 构建期工具：仅打包 exe 时需要，不进运行期 dependencies。
 build = ["pyinstaller>=6.0"]
 # 胖包：把 frida / mitmproxy / frida-dexdump 等内置进 exe（dispatch 自调用），
@@ -62,7 +64,7 @@ where = ["."]
 include = ["apkscan*"]
 
 [tool.setuptools.package-data]
-apkscan = ["rules/*.yaml", "rules/*.txt", "report/templates/*.j2"]
+apkscan = ["rules/*.yaml", "rules/*.txt", "report/templates/*.j2", "track/templates/*.html"]
 
 [tool.pytest.ini_options]
 markers = [
