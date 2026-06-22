@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -160,6 +161,52 @@ def resolve_jadx() -> tuple[list[str], dict[str, str]] | None:
 def has_jadx() -> bool:
     """jadx 是否可用（PATH 或已就位的插件包）。"""
     return resolve_jadx() is not None
+
+
+# ---- 重打包工具链（apksigner / zipalign / keytool）：PATH 优先，仿 resolve_jadx 返回 (argv, env) ----
+
+
+def resolve_apksigner() -> tuple[list[str], dict[str, str]] | None:
+    """解析 apksigner（Android SDK build-tools；重签名）：PATH 优先。返回 (argv, 注入 env) 或 None。
+
+    完整路径而非裸名：Windows 上 apksigner 是 .bat，shutil.which 已解析为全名，避免 subprocess WinError 2。
+    """
+    exe = shutil.which("apksigner")
+    return ([exe], {}) if exe else None
+
+
+def has_apksigner() -> bool:
+    """apksigner 是否可用。"""
+    return resolve_apksigner() is not None
+
+
+def resolve_zipalign() -> tuple[list[str], dict[str, str]] | None:
+    """解析 zipalign（Android SDK build-tools；4 字节对齐）：PATH 优先。返回 (argv, env) 或 None。"""
+    exe = shutil.which("zipalign")
+    return ([exe], {}) if exe else None
+
+
+def has_zipalign() -> bool:
+    """zipalign 是否可用。"""
+    return resolve_zipalign() is not None
+
+
+def resolve_keytool() -> tuple[list[str], dict[str, str]] | None:
+    """解析 keytool（JDK 自带；首次生成 debug keystore）：PATH 优先，回退 ``JAVA_HOME/bin``。"""
+    exe = shutil.which("keytool")
+    if exe:
+        return ([exe], {})
+    java_home = os.environ.get("JAVA_HOME")
+    if java_home:
+        cand = Path(java_home) / "bin" / ("keytool.exe" if os.name == "nt" else "keytool")
+        if cand.is_file():
+            return ([str(cand)], {})
+    return None
+
+
+def has_keytool() -> bool:
+    """keytool 是否可用。"""
+    return resolve_keytool() is not None
 
 
 def kill_adb_server() -> bool:
