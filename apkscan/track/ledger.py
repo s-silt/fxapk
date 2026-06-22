@@ -277,6 +277,88 @@ class TrackingLedger:
             return str(value)
         return str(cat)
 
+    # ---- 手动加线索（网页/CLI 人工补录，自动没抠到的线索进台账跟进） ----
+    def add_lead(
+        self,
+        sha256: str,
+        category: str,
+        value: str,
+        *,
+        subject: str = "",
+        status: str = _DEFAULT_LEAD_STATUS,
+        notes: str = "",
+    ) -> bool:
+        """手动新增一条线索（spec §4）。绝不抛。
+
+        - APK 不在台账 → 建最小 APK 壳（``apk_status`` 默认、package/label 空）。
+        - ``lead_key = make_lead_key(category, value)``：已存在 → 返回 False（已跟踪，
+          不覆盖）；不存在 → 建线索并**标 ``manual: true``**，``first_seen/updated_at``
+          置当前。
+        - 手动线索与自动入账线索同结构，后续重分析 upsert 命中同 key 走既有合并
+          （保留人工 status/notes/history）。
+        - 不自动喂图谱（本轮决策：手动线索只进台账）。
+
+        返回是否新建并落盘成功；已存在 / 失败 → False。
+        """
+        try:
+            sha = str(sha256 or "").strip()
+            if not sha:
+                logger.warning("[track] add_lead 缺 sha256，跳过")
+                return False
+            category = str(category or "")
+            value = str(value or "")
+            key = make_lead_key(category, value)
+            now = _now_iso()
+
+            with self._lock:
+                apks = self._data.setdefault("apks", {})
+                apk = apks.get(sha)
+                if not isinstance(apk, dict):
+                    # APK 不在台账：建最小壳（package/label 空，sha256 才是主键）。
+                    apk = {
+                        "package": "",
+                        "label": "",
+                        "report_path": "",
+                        "apk_status": _DEFAULT_APK_STATUS,
+                        "apk_notes": "",
+                        "first_seen": now,
+                        "updated_at": now,
+                        "leads": {},
+                    }
+                    apks[sha] = apk
+                lead_map = apk.get("leads")
+                if not isinstance(lead_map, dict):
+                    lead_map = {}
+                    apk["leads"] = lead_map
+
+                if key in lead_map and isinstance(lead_map[key], dict):
+                    # 已跟踪：不覆盖人工/自动既有线索。
+                    logger.info("[track] add_lead 线索已存在，不覆盖：%s / %s", sha, key)
+                    return False
+
+                lead_map[key] = {
+                    "category": category,
+                    "value": value,
+                    "subject": str(subject),
+                    "status": str(status),
+                    "notes": str(notes),
+                    "history": [],
+                    "manual": True,
+                    "first_seen": now,
+                    "updated_at": now,
+                }
+                self._save()
+                return True
+        except Exception:  # noqa: BLE001 — 台账层绝不抛
+            logger.error(
+                "[track] add_lead 异常（已吞）：%s / %s:%s",
+                sha256,
+                category,
+                value,
+                exc_info=True,
+            )
+            return False
+
     # ---- 手动改（单字段，最小化覆盖面） ----
     def set_apk(
         self,
