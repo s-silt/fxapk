@@ -317,6 +317,106 @@ def test_set_lead_missing_returns_false(tmp_path: Path) -> None:
     assert ledger.add_history("a" * 64, "DOMAIN:nope", "x") is False
 
 
+# ---------------------------------------------------------------------------
+# add_lead：手动加线索（标 manual / 建壳 / 重复返 False / 不破坏 upsert 合并）
+# ---------------------------------------------------------------------------
+
+
+def test_add_lead_creates_manual_lead(tmp_path: Path) -> None:
+    """手动加线索：新建并标 manual:true，first_seen/updated_at 置当前。"""
+    ledger = TrackingLedger(tmp_path / "t.json")
+    ledger.upsert_report(_make_report(), "/r/report.json")  # APK 已在台账
+    sha = "a" * 64
+
+    assert (
+        ledger.add_lead(sha, "DOMAIN", "manual.x.com", subject="人工", notes="举报来的")
+        is True
+    )
+
+    lead = ledger.all()["apks"][sha]["leads"]["DOMAIN:manual.x.com"]
+    assert lead["manual"] is True
+    assert lead["category"] == "DOMAIN"
+    assert lead["value"] == "manual.x.com"
+    assert lead["subject"] == "人工"
+    assert lead["notes"] == "举报来的"
+    assert lead["status"] == "待办"  # 默认状态
+    assert lead["history"] == []
+    assert lead["first_seen"] == lead["updated_at"]
+
+
+def test_add_lead_custom_status(tmp_path: Path) -> None:
+    ledger = TrackingLedger(tmp_path / "t.json")
+    ledger.upsert_report(_make_report(), "/r/report.json")
+    assert ledger.add_lead("a" * 64, "IP", "9.9.9.9", status="调查中") is True
+    lead = ledger.all()["apks"]["a" * 64]["leads"]["IP:9.9.9.9"]
+    assert lead["status"] == "调查中"
+
+
+def test_add_lead_creates_apk_shell_when_absent(tmp_path: Path) -> None:
+    """APK 不在台账 → 建最小壳（package/label 空、默认 apk_status），线索照常入。"""
+    ledger = TrackingLedger(tmp_path / "t.json")
+    sha = "d" * 64
+    assert ledger.add_lead(sha, "DOMAIN", "new.x.com") is True
+
+    apk = ledger.all()["apks"][sha]
+    assert apk["package"] == ""
+    assert apk["label"] == ""
+    assert apk["report_path"] == ""
+    assert apk["apk_status"] == "待处理"
+    assert "DOMAIN:new.x.com" in apk["leads"]
+    assert apk["leads"]["DOMAIN:new.x.com"]["manual"] is True
+
+
+def test_add_lead_duplicate_key_returns_false(tmp_path: Path) -> None:
+    """同 lead_key 已存在（无论自动或手动）→ 返回 False，不覆盖既有线索。"""
+    ledger = TrackingLedger(tmp_path / "t.json")
+    sha = "e" * 64
+    # 先自动入账一条 DOMAIN:dup.x.com
+    rep = _make_report(sha256=sha, leads=[_lead(LeadCategory.DOMAIN, "dup.x.com")])
+    ledger.upsert_report(rep, "/r/report.json")
+
+    # 手动加同 key → False，不覆盖原线索（仍非 manual）。
+    assert ledger.add_lead(sha, "DOMAIN", "dup.x.com", notes="试图覆盖") is False
+    lead = ledger.all()["apks"][sha]["leads"]["DOMAIN:dup.x.com"]
+    assert lead["notes"] == ""  # 未被覆盖
+    assert "manual" not in lead  # 原自动线索未被改写
+
+    # 手动加一条后再加同 key → 第二次 False。
+    assert ledger.add_lead(sha, "IP", "8.8.8.8") is True
+    assert ledger.add_lead(sha, "IP", "8.8.8.8") is False
+
+
+def test_add_lead_missing_sha256_returns_false(tmp_path: Path) -> None:
+    ledger = TrackingLedger(tmp_path / "t.json")
+    assert ledger.add_lead("", "DOMAIN", "x.com") is False
+    assert ledger.add_lead("   ", "DOMAIN", "x.com") is False
+
+
+def test_add_lead_survives_subsequent_upsert_merge(tmp_path: Path) -> None:
+    """手动线索被后续同 key 的 upsert 命中 → 走既有合并，保留人工 status/notes/history。"""
+    ledger = TrackingLedger(tmp_path / "t.json")
+    sha = "f" * 64
+    # 手动加一条线索，再人工改状态/备注/进展。
+    assert ledger.add_lead(sha, "DOMAIN", "c2.x.com", subject="人工主体") is True
+    key = "DOMAIN:c2.x.com"
+    assert ledger.set_lead(sha, key, status="已出函", notes="函号 123")
+    assert ledger.add_history(sha, key, "已出函至注册商")
+
+    # 后续分析命中同 key（subject 不同）→ 合并刷新派生字段，保留人工字段。
+    rep = _make_report(
+        sha256=sha, leads=[_lead(LeadCategory.DOMAIN, "c2.x.com", "分析主体")]
+    )
+    ledger.upsert_report(rep, "/r/v2.json")
+
+    lead = ledger.all()["apks"][sha]["leads"][key]
+    assert lead["status"] == "已出函"  # 人工状态保留
+    assert lead["notes"] == "函号 123"  # 人工备注保留
+    assert len(lead["history"]) == 1  # 人工进展保留
+    assert lead["history"][0]["text"] == "已出函至注册商"
+    assert lead["subject"] == "分析主体"  # 派生字段照常刷新
+    assert lead["manual"] is True  # manual 标记不被 upsert 抹掉
+
+
 def test_load_reloads_from_disk(tmp_path: Path) -> None:
     path = tmp_path / "t.json"
     ledger = TrackingLedger(path)

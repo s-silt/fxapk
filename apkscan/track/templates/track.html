@@ -50,6 +50,9 @@
     color: #fff; border-radius: 6px; padding: 4px 10px;
   }
   button.ghost { background: #fff; color: var(--accent); }
+  button.danger { background: var(--warn-ink); border-color: var(--warn-ink); color: #fff; }
+  .subpanel { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--line); }
+  .subhead { color: var(--muted); font-weight: 600; margin-bottom: 8px; }
   .badge { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--accent-soft); color: var(--accent); }
   .hist { margin: 6px 0 0; padding-left: 16px; font-size: 12px; color: var(--muted); }
   .hist li { margin: 2px 0; }
@@ -78,6 +81,7 @@
   const TOKEN = {{ token | tojson }};
   const APK_STATUS_PRESETS = {{ apk_status_presets | tojson }};
   const LEAD_STATUS_PRESETS = {{ lead_status_presets | tojson }};
+  const LEAD_CATEGORY_PRESETS = {{ lead_category_presets | tojson }};
 
   function withToken(url) {
     if (!TOKEN) return url;
@@ -248,8 +252,196 @@
       body.appendChild(table);
     }
 
+    // + 添加线索表单（人工补录）。
+    body.appendChild(addLeadForm(sha));
+
+    // 图谱面板（每 APK 一块；kuzu 缺失则降级提示）。
+    body.appendChild(graphPanel(sha));
+
     det.appendChild(body);
     return det;
+  }
+
+  // ---- 人工加线索表单 -------------------------------------------------------
+  function addLeadForm(sha) {
+    const box = document.createElement("div");
+    box.className = "subpanel";
+    box.innerHTML = '<div class="subhead">+ 添加线索（人工补录）</div>';
+
+    const f = document.createElement("div");
+    f.className = "row-field";
+
+    const cat = document.createElement("select");
+    for (const c of LEAD_CATEGORY_PRESETS) {
+      const op = document.createElement("option");
+      op.value = c; op.textContent = c; cat.appendChild(op);
+    }
+
+    const val = document.createElement("input");
+    val.type = "text"; val.placeholder = "值（域名/IP/地址...）"; val.style.minWidth = "180px";
+
+    const subj = document.createElement("input");
+    subj.type = "text"; subj.placeholder = "对象/说明（可选）"; subj.style.minWidth = "140px";
+
+    const statusWrap = document.createElement("span");
+    statusWrap.className = "row-field";
+    const statusSel = document.createElement("select");
+    for (const s of LEAD_STATUS_PRESETS) {
+      const op = document.createElement("option");
+      op.value = s; op.textContent = s; statusSel.appendChild(op);
+    }
+    statusWrap.appendChild(statusSel);
+
+    const notes = document.createElement("input");
+    notes.type = "text"; notes.placeholder = "备注（可选）"; notes.style.minWidth = "140px";
+
+    const btn = document.createElement("button");
+    btn.textContent = "添加";
+    btn.addEventListener("click", async () => {
+      const value = val.value.trim();
+      if (!value) { toast("请填写线索值", true); return; }
+      try {
+        await post("/api/lead/add", {
+          sha256: sha, category: cat.value, value: value,
+          subject: subj.value.trim(), status: statusSel.value, notes: notes.value.trim(),
+        });
+        toast("线索已添加");
+        load();
+      } catch (e) { toast("添加失败：" + e.message, true); }
+    });
+
+    f.appendChild(cat); f.appendChild(val); f.appendChild(subj);
+    f.appendChild(statusWrap); f.appendChild(notes); f.appendChild(btn);
+    box.appendChild(f);
+    return box;
+  }
+
+  // ---- 图谱面板 -------------------------------------------------------------
+  function graphPanel(sha) {
+    const box = document.createElement("div");
+    box.className = "subpanel";
+    box.innerHTML = '<div class="subhead">图谱（关联 APK / 共享强实体）</div>';
+
+    const status = document.createElement("div");
+    status.className = "muted"; status.textContent = "加载图谱 ...";
+    box.appendChild(status);
+
+    const listWrap = document.createElement("div");
+    box.appendChild(listWrap);
+
+    // + 加实体并连到本 APK 表单。
+    const ef = document.createElement("div");
+    ef.className = "row-field"; ef.style.marginTop = "10px";
+    const kind = document.createElement("input");
+    kind.type = "text"; kind.placeholder = "kind（如 c2/sign）"; kind.style.width = "150px";
+    const eval_ = document.createElement("input");
+    eval_.type = "text"; eval_.placeholder = "value"; eval_.style.minWidth = "180px";
+    const eb = document.createElement("button");
+    eb.textContent = "+ 加实体并连本 APK";
+    eb.addEventListener("click", async () => {
+      const k = kind.value.trim(), v = eval_.value.trim();
+      if (!k || !v) { toast("请填写 kind 和 value", true); return; }
+      try {
+        const r = await post("/api/graph/entity", { sha256: sha, kind: k, value: v });
+        if (r.ok === false) { toast(r.error || "图谱未启用", true); return; }
+        toast("实体已连入"); kind.value = ""; eval_.value = "";
+        loadGraph();
+      } catch (e) { toast("操作失败：" + e.message, true); }
+    });
+    ef.appendChild(kind); ef.appendChild(eval_); ef.appendChild(eb);
+
+    async function loadGraph() {
+      try {
+        const r = await fetch(withToken("/api/graph?sha256=" + encodeURIComponent(sha)), { headers: headers() });
+        const data = await r.json();
+        if (!data || data.ok === false) {
+          status.textContent = (data && data.error) || "图谱未启用";
+          listWrap.innerHTML = "";
+          ef.style.display = "none";
+          return;
+        }
+        ef.style.display = "";
+        renderGraph(data.graph || {});
+      } catch (e) {
+        status.textContent = "图谱加载失败：" + e.message;
+        listWrap.innerHTML = "";
+      }
+    }
+
+    function renderGraph(graph) {
+      const related = graph.related || [];
+      // 汇总本 APK 的所有共享强实体（去重 kind:value）。
+      const seen = {};
+      const entities = [];
+      for (const rel of related) {
+        for (const ent of (rel.shared_entities || [])) {
+          const id = ent.kind + ":" + ent.value;
+          if (!seen[id]) { seen[id] = true; entities.push(ent); }
+        }
+      }
+      if (entities.length === 0) {
+        status.textContent = "本 APK 暂无与他案共享的强实体。";
+        listWrap.innerHTML = "";
+        return;
+      }
+      status.textContent = "本 APK 共享强实体 " + entities.length + " 个，关联 APK " + related.length + " 个：";
+      const table = document.createElement("table");
+      table.innerHTML = "<thead><tr><th>kind</th><th class='c-val'>value</th><th>权重</th><th>操作</th></tr></thead>";
+      const tb = document.createElement("tbody");
+      for (const ent of entities) {
+        const tr = document.createElement("tr");
+        tr.innerHTML =
+          "<td><span class='badge'>" + esc(ent.kind) + "</span></td>" +
+          "<td class='mono'>" + esc(ent.value) + "</td>" +
+          "<td>" + esc(ent.weight) + "</td>";
+        const tdOp = document.createElement("td");
+        const bUnlink = document.createElement("button");
+        bUnlink.className = "ghost"; bUnlink.textContent = "断开本边";
+        bUnlink.addEventListener("click", () => doUnlink(ent.kind, ent.value));
+        const bDel = document.createElement("button");
+        bDel.className = "danger"; bDel.textContent = "全局删除"; bDel.style.marginLeft = "6px";
+        bDel.addEventListener("click", () => doDelete(ent.kind, ent.value));
+        tdOp.appendChild(bUnlink); tdOp.appendChild(bDel);
+        tr.appendChild(tdOp);
+        tb.appendChild(tr);
+      }
+      table.appendChild(tb);
+      listWrap.innerHTML = "";
+      listWrap.appendChild(table);
+
+      // 关联 APK 概览。
+      if (related.length) {
+        const ul = document.createElement("ul");
+        ul.className = "hist";
+        for (const rel of related) {
+          const li = document.createElement("li");
+          li.textContent =
+            (rel.package || "(未知包名)") + "  " + (rel.sha256 || "").slice(0, 16) + "..." +
+            "  共享强实体 " + (rel.strong_shared_count || 0);
+          ul.appendChild(li);
+        }
+        listWrap.appendChild(ul);
+      }
+    }
+
+    async function doUnlink(kind, value) {
+      try {
+        const r = await post("/api/graph/unlink", { sha256: sha, kind: kind, value: value });
+        if (r.ok === false) { toast(r.error || "图谱未启用", true); return; }
+        toast("已断开（删除边 " + (r.removed || 0) + "）"); loadGraph();
+      } catch (e) { toast("操作失败：" + e.message, true); }
+    }
+    async function doDelete(kind, value) {
+      try {
+        const r = await post("/api/graph/delete_entity", { kind: kind, value: value });
+        if (r.ok === false) { toast(r.error || "图谱未启用", true); return; }
+        toast("已全局删除（实体 " + (r.deleted || 0) + "）"); loadGraph();
+      } catch (e) { toast("操作失败：" + e.message, true); }
+    }
+
+    box.appendChild(ef);
+    loadGraph();
+    return box;
   }
 
   async function load() {
