@@ -49,6 +49,7 @@ _STEP_DOCTOR = "环境体检"
 _STEP_STATIC = "静态分析"
 _STEP_INSTALL = "安装到设备"
 _STEP_UNPACK = "脱壳"
+_STEP_REPACKAGE = "去壳重打包"
 _STEP_CAPTURE = "抓包"
 _STEP_MERGE = "合并运行时端点"
 
@@ -97,6 +98,7 @@ def run(
     capture_duration: int = 60,
     formats: list[str] | None = None,
     track: bool = True,
+    repackage: bool = True,
     on_progress: Callable[[str], None] | None = None,
     confirm: Callable[[str], None] | None = None,
 ) -> dict:
@@ -186,6 +188,19 @@ def run(
         )
         steps.append(unpack_step)
         _extend_unique(report_paths, unpack_paths)
+
+        # 3.6) 去壳重打包：把脱壳 DEX 装回去壳版，使 capture 抓去壳版（绕壳反 frida）。默认开，
+        #      --no-repackage 关。失败/无料优雅降级（重装原包），capture 仍跑原版，不中断流水线。
+        if repackage:
+            repack_step, _repack_paths = _run_repackage(
+                apk_path,
+                package_name,
+                out_dir=out_dir,
+                has_device=has_device,
+                serial=target_serial,
+                on_progress=on_progress,
+            )
+            steps.append(repack_step)
 
         # 4) 抓包：有设备且有包名才做；先 confirm 提示用户操作 app 触发网络。
         capture_step, runtime_report_path = _run_capture(
@@ -497,6 +512,35 @@ def _run_unpack(
     except Exception as exc:  # noqa: BLE001 - 脱壳失败不中断流水线
         logger.exception("[auto] 脱壳步骤异常：%s", apk_path)
         return _step(_STEP_UNPACK, _ERROR, f"脱壳异常：{exc}"), []
+
+
+def _run_repackage(
+    apk_path: str,
+    package_name: str,
+    *,
+    out_dir: str,
+    has_device: bool,
+    serial: str | None = None,
+    on_progress: Callable[[str], None] | None,
+) -> tuple[dict, list[str]]:
+    """步骤 3.6：去壳重打包（仅有设备才做）。无设备 → skipped；异常 → error，均不中断流水线。
+
+    去壳成功 → done（去壳版已装回，capture 将抓此版）；无料/判定不过 → repackage 内部降级 skipped
+    （重装原包，capture 仍跑原版）。serial 透传（多设备消歧）。
+    """
+    if not has_device:
+        _emit(on_progress, "步骤 3.6：去壳重打包（无设备，优雅跳过）")
+        return _step(_STEP_REPACKAGE, _SKIPPED, "未检测到在线设备，跳过去壳重打包"), []
+
+    _emit(on_progress, "步骤 3.6：去壳重打包（脱壳 DEX 装回 → 重签 → 装去壳版供 capture 抓）")
+    try:
+        from apkscan.dynamic import repackage
+
+        result = repackage.run(apk_path, out=out_dir, serial=serial, package_name=package_name)
+        return _fold_dynamic_step(_STEP_REPACKAGE, result)
+    except Exception as exc:  # noqa: BLE001 - 去壳重打包失败不中断流水线
+        logger.exception("[auto] 去壳重打包步骤异常：%s", apk_path)
+        return _step(_STEP_REPACKAGE, _ERROR, f"去壳重打包异常：{exc}"), []
 
 
 def _run_capture(
