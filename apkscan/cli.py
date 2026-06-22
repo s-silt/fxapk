@@ -101,6 +101,18 @@ def _cleanup_adb_quiet() -> None:
         logger.exception("[cli] 收尾清理 adb server 失败（已忽略）")
 
 
+def _resolve_out(out: str | None, apk: Path) -> str:
+    """输出目录解析：显式 --out 原样用（相对则相对 cwd）；未给 --out 时默认落到 **APK 同目录**
+    下的 ``out/``。
+
+    动机：旧默认是相对当前工作目录的 ``"out"``——从哪个目录跑就把 out/ 建在哪、GUI/auto 下 cwd
+    还不可预测，产物散落（"建在错的位置"）。默认跟着样本走最可预测。
+    """
+    if out is not None:
+        return out
+    return str(apk.resolve().parent / "out")
+
+
 @app.command()
 def analyze(
     apk: Path = typer.Argument(
@@ -115,7 +127,7 @@ def analyze(
         "--online/--offline",
         help="是否联网富化归属信息（WHOIS/ICP/ASN）。",
     ),
-    out: str = typer.Option("out", "--out", help="报告输出目录。"),
+    out: str | None = typer.Option(None, "--out", help="报告输出目录（默认：APK 同目录下的 out/）。"),
     fmt: str = typer.Option(
         "html,json",
         "--fmt",
@@ -143,6 +155,7 @@ def analyze(
     ctx: object = None  # 供 finally 关闭 IPA 句柄（IpaContext 持有打开的 ZipFile）
     try:
         formats = _parse_formats(fmt)
+        out = _resolve_out(out, apk)  # 未给 --out → 默认落到 APK 同目录下的 out/
         config = AnalysisConfig(online=online, out_dir=out, formats=formats)
 
         extra_dex_files = _resolve_extra_dex(extra_dex)
@@ -232,7 +245,7 @@ def unpack(
         readable=True,
         help="待脱壳的 APK 文件路径。",
     ),
-    out: str = typer.Option("out", "--out", help="产物 / 报告输出目录。"),
+    out: str | None = typer.Option(None, "--out", help="产物 / 报告输出目录（默认：APK 同目录下的 out/）。"),
     reanalyze: bool = typer.Option(
         True,
         "--reanalyze/--no-reanalyze",
@@ -250,6 +263,7 @@ def unpack(
         typer.echo("该功能未安装：apkscan.dynamic.unpack 不可用（动态脱壳模块尚未就绪）。")
         raise typer.Exit(code=1) from None
 
+    out = _resolve_out(out, apk)  # 未给 --out → 默认落到 APK 同目录下的 out/
     result = _unpack.run(str(apk), out=out, reanalyze=reanalyze)
     _print_dynamic_result("脱壳", result)
 
@@ -327,7 +341,7 @@ def auto(
         readable=True,
         help="待分析的 APK 文件路径。",
     ),
-    out: str = typer.Option("out", "--out", help="报告 / 产物输出目录。"),
+    out: str | None = typer.Option(None, "--out", help="报告 / 产物输出目录（默认：APK 同目录下的 out/）。"),
     online: bool = typer.Option(
         True,
         "--online/--offline",
@@ -375,6 +389,7 @@ def auto(
             except (click.Abort, EOFError):
                 typer.echo("（未读到输入，直接继续抓包）")
 
+        out = _resolve_out(out, apk)  # 未给 --out → 默认落到 APK 同目录下的 out/
         typer.echo(f"===== 一键全自动：{apk} =====")
         result = _auto.run(
             str(apk),
