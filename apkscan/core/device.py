@@ -366,3 +366,21 @@ def frida_server_running(serial: str | None = None) -> bool:
 
     # ps 没命中 / 探测失败 → frida-ps 权威兜底（进程名截断改名场景，或 adb shell ps 不可用）。
     return frida_ps_reachable(serial)
+
+
+def force_stop_app(package: str, serial: str | None = None) -> None:
+    """best-effort ``adb [-s serial] shell am force-stop <package>``：清掉目标 app（含 frida ``-f``
+    spawn 残留的挂起态实例）。绝不抛、失败静默——仅用于清理，不影响主流程。
+
+    背景：frida-dexdump ``-f`` 以**挂起态** spawn 目标；PC 端进程被超时杀掉时设备侧 app 会残留
+    挂起，导致下次 ``-f`` spawn 冲突卡死、dump 全空，且模拟器里点不开该 app。脱壳前后各清一次
+    可断此级联。包名形态非法（样本可控输入）直接拒绝、不下发到设备。
+    """
+    if not is_valid_package(package):
+        logger.debug("[device] 包名形态非法，跳过 force-stop：%r", package)
+        return
+    args = ["adb"]
+    if serial:
+        args += ["-s", serial]
+    args += ["shell", "am", "force-stop", package]
+    _run(args)  # 失败返回 None，忽略（清理是 best-effort）
