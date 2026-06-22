@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>线索追踪 · 办案进度</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --ink: #1f2329; --muted: #6b7280;
+    --line: #e3e6ea; --accent: #1d4ed8; --accent-soft: #eef2ff;
+    --ok-bg: #ecfdf5; --ok-ink: #065f46; --warn-bg: #fef2f2; --warn-ink: #991b1b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", Roboto, sans-serif;
+    line-height: 1.55; font-size: 14px;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 24px 20px 64px; }
+  header.top {
+    background: linear-gradient(120deg, #111827, #1e3a8a);
+    color: #fff; border-radius: 12px; padding: 20px 26px; margin-bottom: 20px;
+  }
+  header.top h1 { margin: 0 0 4px; font-size: 21px; }
+  header.top .sub { color: #c7d2fe; font-size: 12px; }
+  .apk { background: var(--card); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 16px; }
+  .apk > summary {
+    cursor: pointer; list-style: none; padding: 16px 20px; display: flex; align-items: center;
+    gap: 12px; flex-wrap: wrap;
+  }
+  .apk > summary::-webkit-details-marker { display: none; }
+  .apk > summary .pkg { font-family: ui-monospace, Consolas, monospace; font-weight: 700; font-size: 15px; }
+  .apk > summary .label { color: var(--muted); }
+  .apk > summary .sha { font-family: ui-monospace, Consolas, monospace; color: var(--muted); font-size: 12px; }
+  .apk-body { padding: 0 20px 18px; border-top: 1px solid var(--line); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 12px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { background: #f8fafc; color: var(--muted); font-weight: 600; white-space: nowrap; }
+  .mono { font-family: ui-monospace, Consolas, monospace; word-break: break-all; }
+  .muted { color: var(--muted); }
+  .empty { color: var(--muted); font-style: italic; padding: 14px 0; }
+  .row-field { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  select, input[type=text], textarea {
+    font: inherit; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: #fff;
+  }
+  textarea { width: 100%; min-height: 38px; resize: vertical; }
+  input.notes { width: 100%; }
+  button {
+    font: inherit; cursor: pointer; border: 1px solid var(--accent); background: var(--accent);
+    color: #fff; border-radius: 6px; padding: 4px 10px;
+  }
+  button.ghost { background: #fff; color: var(--accent); }
+  .badge { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--accent-soft); color: var(--accent); }
+  .hist { margin: 6px 0 0; padding-left: 16px; font-size: 12px; color: var(--muted); }
+  .hist li { margin: 2px 0; }
+  .toast {
+    position: fixed; right: 18px; bottom: 18px; background: var(--ok-ink); color: #fff;
+    padding: 10px 16px; border-radius: 8px; opacity: 0; transition: opacity .25s; font-size: 13px;
+  }
+  .toast.show { opacity: 1; }
+  .toast.err { background: var(--warn-ink); }
+  th.c-val { width: 22%; } th.c-status { width: 14%; } th.c-notes { width: 22%; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>线索追踪 · 办案进度</h1>
+    <div class="sub">按 APK 展开线索 · 状态 / 备注 / 进展即时落台账（单条更新，留痕不删）</div>
+  </header>
+
+  <div id="app"><div class="empty">加载中 ...</div></div>
+</div>
+<div id="toast" class="toast"></div>
+
+<script>
+  // 令牌：模板注入；后续所有 fetch 带 ?token= 或 X-Track-Token 头。
+  const TOKEN = {{ token | tojson }};
+  const APK_STATUS_PRESETS = {{ apk_status_presets | tojson }};
+  const LEAD_STATUS_PRESETS = {{ lead_status_presets | tojson }};
+
+  function withToken(url) {
+    if (!TOKEN) return url;
+    return url + (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(TOKEN);
+  }
+  function headers() {
+    const h = { "Content-Type": "application/json" };
+    if (TOKEN) h["X-Track-Token"] = TOKEN;
+    return h;
+  }
+  function toast(msg, isErr) {
+    const t = document.getElementById("toast");
+    t.textContent = msg;
+    t.className = "toast show" + (isErr ? " err" : "");
+    setTimeout(() => { t.className = "toast"; }, 2200);
+  }
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, c =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  async function post(url, body) {
+    const r = await fetch(withToken(url), { method: "POST", headers: headers(), body: JSON.stringify(body) });
+    let data = {};
+    try { data = await r.json(); } catch (e) {}
+    if (!r.ok) throw new Error((data && data.error) || ("HTTP " + r.status));
+    return data;
+  }
+
+  // 状态下拉：预设 + 「自定义...」选项；选自定义切到输入框。
+  function statusControl(presets, current, onChange) {
+    const wrap = document.createElement("span");
+    wrap.className = "row-field";
+    const sel = document.createElement("select");
+    const opts = presets.slice();
+    if (current && !opts.includes(current)) opts.unshift(current);
+    for (const o of opts) {
+      const op = document.createElement("option");
+      op.value = o; op.textContent = o; if (o === current) op.selected = true;
+      sel.appendChild(op);
+    }
+    const custom = document.createElement("option");
+    custom.value = "__custom__"; custom.textContent = "自定义...";
+    sel.appendChild(custom);
+    const inp = document.createElement("input");
+    inp.type = "text"; inp.placeholder = "自定义状态"; inp.style.display = "none"; inp.style.width = "120px";
+    sel.addEventListener("change", () => {
+      if (sel.value === "__custom__") { inp.style.display = ""; inp.focus(); }
+      else { inp.style.display = "none"; onChange(sel.value); }
+    });
+    inp.addEventListener("change", () => { if (inp.value.trim()) onChange(inp.value.trim()); });
+    wrap.appendChild(sel); wrap.appendChild(inp);
+    return wrap;
+  }
+
+  function leadRow(sha, key, lead) {
+    const tr = document.createElement("tr");
+
+    const tdCat = document.createElement("td");
+    tdCat.innerHTML = '<span class="badge">' + esc(lead.category) + '</span>';
+    tr.appendChild(tdCat);
+
+    const tdVal = document.createElement("td");
+    tdVal.className = "mono";
+    tdVal.innerHTML = esc(lead.value) + (lead.subject ? '<div class="muted">' + esc(lead.subject) + '</div>' : "");
+    tr.appendChild(tdVal);
+
+    const tdStatus = document.createElement("td");
+    tdStatus.appendChild(statusControl(LEAD_STATUS_PRESETS, lead.status || "", async (v) => {
+      try { await post("/api/lead", { sha256: sha, lead_key: key, status: v }); toast("线索状态已更新"); }
+      catch (e) { toast("更新失败：" + e.message, true); }
+    }));
+    tr.appendChild(tdStatus);
+
+    const tdNotes = document.createElement("td");
+    const notes = document.createElement("input");
+    notes.type = "text"; notes.className = "notes"; notes.value = lead.notes || ""; notes.placeholder = "备注";
+    notes.addEventListener("change", async () => {
+      try { await post("/api/lead", { sha256: sha, lead_key: key, notes: notes.value }); toast("线索备注已保存"); }
+      catch (e) { toast("保存失败：" + e.message, true); }
+    });
+    tdNotes.appendChild(notes);
+    tr.appendChild(tdNotes);
+
+    const tdHist = document.createElement("td");
+    const ul = document.createElement("ul");
+    ul.className = "hist";
+    for (const h of (lead.history || [])) {
+      const li = document.createElement("li");
+      li.textContent = (h.at || "").slice(0, 19).replace("T", " ") + "  " + (h.text || "");
+      ul.appendChild(li);
+    }
+    tdHist.appendChild(ul);
+    const ha = document.createElement("div");
+    ha.className = "row-field";
+    const hi = document.createElement("input");
+    hi.type = "text"; hi.placeholder = "加一条进展"; hi.style.width = "160px";
+    const hb = document.createElement("button");
+    hb.className = "ghost"; hb.textContent = "+ 进展";
+    async function addHist() {
+      const text = hi.value.trim();
+      if (!text) return;
+      try {
+        await post("/api/history", { sha256: sha, lead_key: key, text });
+        const li = document.createElement("li");
+        li.textContent = new Date().toISOString().slice(0, 19).replace("T", " ") + "  " + text;
+        ul.appendChild(li); hi.value = ""; toast("进展已记录");
+      } catch (e) { toast("记录失败：" + e.message, true); }
+    }
+    hb.addEventListener("click", addHist);
+    hi.addEventListener("keydown", (e) => { if (e.key === "Enter") addHist(); });
+    ha.appendChild(hi); ha.appendChild(hb);
+    tdHist.appendChild(ha);
+    tr.appendChild(tdHist);
+
+    return tr;
+  }
+
+  function apkBlock(sha, apk) {
+    const det = document.createElement("details");
+    det.className = "apk";
+    const leads = apk.leads || {};
+    const leadKeys = Object.keys(leads);
+
+    const sum = document.createElement("summary");
+    sum.innerHTML =
+      '<span class="pkg">' + esc(apk.package || "(未知包名)") + '</span>' +
+      (apk.label ? '<span class="label">' + esc(apk.label) + '</span>' : "") +
+      '<span class="badge">' + esc(apk.apk_status || "") + '</span>' +
+      '<span class="muted">线索 ' + leadKeys.length + '</span>' +
+      '<span class="sha">' + esc(sha.slice(0, 16)) + '...</span>';
+    det.appendChild(sum);
+
+    const body = document.createElement("div");
+    body.className = "apk-body";
+
+    // APK 级状态 + 备注。
+    const ctrl = document.createElement("div");
+    ctrl.className = "row-field";
+    ctrl.style.marginTop = "12px";
+    const lab = document.createElement("span"); lab.className = "muted"; lab.textContent = "APK 状态：";
+    ctrl.appendChild(lab);
+    ctrl.appendChild(statusControl(APK_STATUS_PRESETS, apk.apk_status || "", async (v) => {
+      try { await post("/api/apk", { sha256: sha, status: v }); toast("APK 状态已更新"); }
+      catch (e) { toast("更新失败：" + e.message, true); }
+    }));
+    const an = document.createElement("input");
+    an.type = "text"; an.className = "notes"; an.style.flex = "1"; an.style.minWidth = "200px";
+    an.value = apk.apk_notes || ""; an.placeholder = "APK 备注";
+    an.addEventListener("change", async () => {
+      try { await post("/api/apk", { sha256: sha, notes: an.value }); toast("APK 备注已保存"); }
+      catch (e) { toast("保存失败：" + e.message, true); }
+    });
+    ctrl.appendChild(an);
+    body.appendChild(ctrl);
+
+    if (leadKeys.length === 0) {
+      const e = document.createElement("div"); e.className = "empty"; e.textContent = "暂无线索。";
+      body.appendChild(e);
+    } else {
+      const table = document.createElement("table");
+      table.innerHTML =
+        "<thead><tr><th>类型</th><th class='c-val'>值 / 对象</th>" +
+        "<th class='c-status'>状态</th><th class='c-notes'>备注</th><th>进展</th></tr></thead>";
+      const tb = document.createElement("tbody");
+      for (const k of leadKeys) tb.appendChild(leadRow(sha, k, leads[k]));
+      table.appendChild(tb);
+      body.appendChild(table);
+    }
+
+    det.appendChild(body);
+    return det;
+  }
+
+  async function load() {
+    const app = document.getElementById("app");
+    try {
+      const r = await fetch(withToken("/api/tracking"), { headers: headers() });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const data = await r.json();
+      const apks = (data && data.apks) || {};
+      const keys = Object.keys(apks);
+      app.innerHTML = "";
+      if (keys.length === 0) {
+        app.innerHTML = '<div class="empty">台账为空：先跑 analyze / auto 入账，或 fxapk track ingest 回填历史报告。</div>';
+        return;
+      }
+      for (const sha of keys) app.appendChild(apkBlock(sha, apks[sha]));
+    } catch (e) {
+      app.innerHTML = '<div class="empty">加载台账失败：' + esc(e.message) + '</div>';
+    }
+  }
+
+  load();
+</script>
+</body>
+</html>

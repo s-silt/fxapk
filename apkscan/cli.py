@@ -143,6 +143,11 @@ def analyze(
         "--dynamic",
         help="静态分析后，若探测到在线设备则自动执行真机 unpack + capture（需设备/工具）。",
     ),
+    track: bool = typer.Option(
+        True,
+        "--track/--no-track",
+        help="写报告后自动把线索入追踪台账（+喂案件图谱）。默认开；--no-track 关闭。",
+    ),
 ) -> None:
     """分析一个 APK 并产出报告。"""
     logging.basicConfig(
@@ -219,6 +224,10 @@ def analyze(
 
         _print_summary(report)
 
+        # 自动入账 + 喂图谱（best-effort 旁路，绝不影响已产出报告）。默认开，--no-track 关。
+        # 报告路径用主 JSON 报告（<base>.json，溯源用）；台账主键是 sha256，路径仅展示。
+        _auto_track(report, str(out_dir / f"{base}.json"), track=track)
+
         # --dynamic：静态完成后，若有设备则自动 unpack + capture（实现由 dynamic 模块 agent 完成）。
         if dynamic and is_ios:
             typer.echo("IPA 仅静态分析（iOS 动态需越狱设备 + frida-iOS，本工具不支持），跳过 --dynamic。")
@@ -229,7 +238,7 @@ def analyze(
                 # base 透传：merge 重渲必须用与静态写出同一 base，否则静态写 <apk>.* 而
                 # 重渲写 report.* 产两套报告。
                 _run_dynamic_after_static(
-                    str(apk), ctx.package_name or "", out, report, formats, base
+                    str(apk), ctx.package_name or "", out, report, formats, base, track=track
                 )
     finally:
         _close_ctx_quiet(ctx)  # IPA 的 ZipFile 句柄必须关（ApkContext 无 close 则 no-op）
@@ -359,6 +368,11 @@ def auto(
         "--fmt",
         help="输出格式，逗号分隔：html,json,pdf。",
     ),
+    track: bool = typer.Option(
+        True,
+        "--track/--no-track",
+        help="静态分析写报告后自动把线索入追踪台账（+喂案件图谱）。默认开；--no-track 关闭。",
+    ),
 ) -> None:
     """一键全自动：体检 → 静态分析 → 脱壳 → 抓包 → 合并，串成确定性流水线产出总报告。
 
@@ -398,6 +412,7 @@ def auto(
             auto_fix=auto_fix,
             capture_duration=duration,
             formats=formats,
+            track=track,
             on_progress=lambda m: typer.echo(f"... {m}"),
             confirm=_confirm,
         )
@@ -677,6 +692,199 @@ def gui() -> None:
     _gui_main()
 
 
+# ===== track 子命令：线索追踪 / 办案进度（裸 track → 起网页；track ingest → 回填台账） =====
+track_app = typer.Typer(
+    add_completion=False,
+    invoke_without_command=True,  # 裸 `fxapk track`（不带子命令）→ 回调里起网页
+    help="线索追踪 / 办案进度：裸 track 起网页；track ingest 把历史报告回填进台账（+图谱）。",
+)
+app.add_typer(track_app, name="track")
+
+
+@track_app.callback()
+def track(
+    ctx: typer.Context,
+    host: str = typer.Option(
+        "127.0.0.1", "--host", help="绑定地址。默认 127.0.0.1（仅本机）；0.0.0.0 暴露到局域网。"
+    ),
+    port: int = typer.Option(8787, "--port", help="监听端口。"),
+    ledger: str = typer.Option(
+        "", "--ledger", help="台账路径（默认 ~/.apkscan/tracking.json，或 FXAPK_TRACKING_DB env）。"
+    ),
+    no_auth: bool = typer.Option(
+        False,
+        "--no-auth",
+        help="关闭令牌鉴权（信任封闭内网）。默认绑定到非 loopback 时自动启用令牌。",
+    ),
+) -> None:
+    """起线索追踪 / 办案进度网页（flask）：本机或局域网查看与编辑台账。
+
+    带子命令（如 ``track ingest``）时本回调不起网页，交由子命令处理。裸 ``track``
+    才起网页。绑定到非 loopback（如 0.0.0.0）时自动生成访问令牌并强制校验（--no-auth 关闭）。
+    flask 未安装时打印 ``pip install -e .[track]`` 提示并退出，不崩。
+    """
+    # 有子命令（ingest 等）时回调只负责注册公共选项，不起网页。
+    if ctx.invoked_subcommand is not None:
+        return
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    try:
+        import flask  # noqa: F401  # flask 是可选 extra，缺失则优雅退出（不在顶层强依赖）
+        from apkscan.track import web as _web
+    except ImportError:
+        typer.echo(
+            "该功能未安装：flask 不可用。请安装：pip install -e .[track]", err=True
+        )
+        raise typer.Exit(code=1) from None
+
+    from apkscan.track import TrackingLedger
+
+    led = TrackingLedger(ledger or None)
+    _web.serve(host=host, port=port, ledger=led, no_auth=no_auth)
+
+
+@track_app.command("ingest")
+def track_ingest(
+    reports: list[Path] = typer.Argument(
+        ...,
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="历史 report.json 路径（可多个），回填进追踪台账（+案件图谱）。",
+    ),
+    ledger: str = typer.Option(
+        "", "--ledger", help="台账路径（默认 ~/.apkscan/tracking.json，或 FXAPK_TRACKING_DB env）。"
+    ),
+    track_graph: bool = typer.Option(
+        True,
+        "--graph/--no-graph",
+        help="同时喂案件图谱（kuzu 不可用时静默跳过）。默认开。",
+    ),
+) -> None:
+    """把历史 report.json 回填进追踪台账（便于存量数据补登）+ 喂案件图谱。
+
+    入账层 never-throw：单份报告坏 JSON / 缺 sha256 只记 warning 跳过，不中断其余报告。
+    kuzu 缺失时图谱喂入静默跳过。
+    """
+    import json as _json
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    from apkscan.track import TrackingLedger
+
+    led = TrackingLedger(ledger or None)
+    typer.echo(f"台账：{led.path}")
+
+    ok = 0
+    failed = 0
+    for rp in reports:
+        try:
+            raw = rp.read_text(encoding="utf-8")
+            report_dict = _json.loads(raw)
+        except (OSError, ValueError) as exc:
+            failed += 1
+            typer.echo(f"[ERR]  {rp}：读取/解析失败（{exc}）", err=True)
+            continue
+        if not isinstance(report_dict, dict):
+            failed += 1
+            typer.echo(f"[ERR]  {rp}：报告顶层非 JSON 对象，跳过", err=True)
+            continue
+
+        # 台账入账：用一个轻量 Report-like 适配器，复用 upsert_report 的合并铁律。
+        if _ingest_one_report_dict(led, report_dict, str(rp)):
+            ok += 1
+            typer.echo(f"[OK]   {rp}")
+        else:
+            failed += 1
+            typer.echo(f"[SKIP] {rp}（缺 sha256 或无可入账内容）", err=True)
+
+        # 图谱喂入（best-effort，kuzu 缺失静默跳过）。
+        if track_graph:
+            _ingest_one_report_dict_to_graph(report_dict, str(rp))
+
+    typer.echo(f"回填完成：入账 {ok} 份，失败/跳过 {failed} 份。")
+
+
+def _ingest_one_report_dict(ledger: object, report_dict: dict, report_path: str) -> bool:
+    """把一份 report.json dict 回填进台账。返回是否入账了该 APK。绝不抛。
+
+    复用 ledger.upsert_report 的合并铁律：用一个最小 Report-like 适配器承载
+    package_name / meta / leads（report.json 里 category 已是 .value 字符串，口径与
+    analyze 路径一致）。
+    """
+    try:
+        meta = report_dict.get("meta")
+        if not isinstance(meta, dict):
+            meta = {}
+        sha = str(meta.get("sample_sha256") or "").strip()
+        if not sha:
+            return False
+
+        adapter = _ReportAdapter(report_dict)
+        ledger.upsert_report(adapter, report_path)  # type: ignore[attr-defined]
+        # 确认该 sha 真入账了（upsert_report never-throw，可能内部跳过）。
+        return sha in ledger.all().get("apks", {})  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 — 回填旁路绝不抛
+        logger.warning("[track] 回填报告入账异常（已跳过）：%s", report_path, exc_info=True)
+        return False
+
+
+def _ingest_one_report_dict_to_graph(report_dict: dict, report_path: str) -> None:
+    """把一份 report.json dict 喂进案件图谱（kuzu 缺失静默跳过）。绝不抛。"""
+    try:
+        from apkscan.graph import GraphStore, ingest_report
+
+        meta = report_dict.get("meta")
+        sha = str(meta.get("sample_sha256") or "") if isinstance(meta, dict) else ""
+        store = GraphStore()
+        try:
+            ingest_report(report_dict, store, report_path=report_path, sha256=sha)
+        finally:
+            store.close()
+    except ImportError:
+        logger.debug("[graph] kuzu 未安装，跳过回填喂图谱：%s", report_path)
+    except Exception:  # noqa: BLE001 — 图谱旁路绝不抛
+        logger.warning("[graph] 回填喂图谱失败（已忽略）：%s", report_path, exc_info=True)
+
+
+class _ReportAdapter:
+    """把 report.json dict 适配成 ledger.upsert_report 所需的最小 Report-like 接口。
+
+    upsert_report 只取 ``meta`` / ``package_name`` / ``leads``，且对 leads 用 getattr
+    取 ``category`` / ``value`` / ``subject``（category 再取 .value 或 str）。这里用
+    一个轻量对象承载，避免反序列化整个 Report dataclass（dict → Report 无现成入口）。
+    """
+
+    __slots__ = ("meta", "package_name", "leads")
+
+    def __init__(self, report_dict: dict) -> None:
+        meta = report_dict.get("meta")
+        self.meta = meta if isinstance(meta, dict) else {}
+        self.package_name = str(report_dict.get("package_name") or "")
+        raw_leads = report_dict.get("leads")
+        leads: list[_LeadAdapter] = []
+        if isinstance(raw_leads, list):
+            for item in raw_leads:
+                if isinstance(item, dict):
+                    leads.append(_LeadAdapter(item))
+        self.leads = leads
+
+
+class _LeadAdapter:
+    """把 report.json 里的单条 lead dict 适配成 ledger 取数所需的最小接口。
+
+    ``category`` 在 report.json 里已是字符串（Enum 序列化为 .value），直接承载；
+    ledger._lead_category 会对其取 ``.value``（字符串无此属性 → 回退 str），口径一致。
+    """
+
+    __slots__ = ("category", "value", "subject")
+
+    def __init__(self, lead_dict: dict) -> None:
+        self.category = lead_dict.get("category", "")
+        self.value = lead_dict.get("value", "")
+        self.subject = lead_dict.get("subject")
+
+
 # ===== graph 子命令：本地图谱串案（摄入 → 关联 → 团伙聚类，默认输出稳定 JSON 供 Codex 消费） =====
 graph_app = typer.Typer(
     add_completion=False,
@@ -932,7 +1140,8 @@ def _resolve_extra_dex(spec: str) -> list[str]:
 
 
 def _run_dynamic_after_static(
-    apk_path: str, package: str, out: str, report: Report, formats: list[str], base: str
+    apk_path: str, package: str, out: str, report: Report, formats: list[str], base: str,
+    *, track: bool = True,
 ) -> None:
     """--dynamic：静态完成且有设备时，顺序执行 unpack + capture，并把运行时端点并回主报告。
 
@@ -981,11 +1190,12 @@ def _run_dynamic_after_static(
     if status != STATUS_DONE:
         return
 
-    _merge_runtime_into_report(capture_result, out, report, formats, base)
+    _merge_runtime_into_report(capture_result, out, report, formats, base, track=track)
 
 
 def _merge_runtime_into_report(
-    capture_result: object, out: str, report: Report, formats: list[str], base: str
+    capture_result: object, out: str, report: Report, formats: list[str], base: str,
+    *, track: bool = True,
 ) -> None:
     """把 capture 抓到的运行时端点并回主报告并重渲；任何失败不破坏已产出的静态报告。"""
     try:
@@ -1016,6 +1226,9 @@ def _merge_runtime_into_report(
         )
         for p in report_paths:
             typer.echo(f"  - {p}")
+        # 动态富化后 report 已就地并入运行时线索 → 重新入账：upsert 合并安全（新增运行时线索、
+        # 保留人工改过的进度）。报告路径用主 JSON（与静态入账同口径）。best-effort，绝不抛。
+        _auto_track(report, str(Path(out) / f"{base}.json"), track=track)
     except Exception:
         logger.exception("运行时端点并入/重渲异常（不影响已产出的静态报告）")
         typer.echo("运行时端点并入异常（详见日志），静态报告不受影响。")
@@ -1128,6 +1341,20 @@ def _write_sha256_sidecar(out_dir: Path, base: str, products: list[Path]) -> Non
         typer.echo(f"已写出完整性校验旁文件：{sidecar}")
     except Exception:
         logger.exception("[cli] 写出 .sha256 旁文件失败（已忽略，不影响报告产出）")
+
+
+def _auto_track(report: Report, report_path: str, *, track: bool) -> None:
+    """写报告后自动入账 + 喂图谱（best-effort 旁路）。绝不抛——失败只 logging，不影响报告。
+
+    薄包装：委托 :func:`apkscan.track.autoingest.auto_track_and_ingest`（never-throw）。
+    --no-track 时 ``track=False``，整体跳过。
+    """
+    try:
+        from apkscan.track.autoingest import auto_track_and_ingest
+
+        auto_track_and_ingest(report, report_path, track=track)
+    except Exception:  # noqa: BLE001 — 入账旁路绝不抛：连 import 异常也吞，不影响报告产出
+        logger.warning("[track] 自动入账/喂图谱调用异常（已忽略，不影响报告产出）", exc_info=True)
 
 
 def _print_summary(report: Report) -> None:
