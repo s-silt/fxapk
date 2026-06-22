@@ -40,7 +40,9 @@ fxapk digest out/<样本名>.json
 其它常用：
 - `fxapk auto <apk>`：静态 +（有设备则）动态一把梭。`fxapk batch <dir>`：批量。
 - `fxapk unpack` / `fxapk capture`：真机脱壳 / 抓包（需 adb 设备 + frida；`analyze --dynamic` 会自动接力）。
-- `fxapk graph ...`：把多份报告导入知识图谱做**团伙串案/聚类**（`graph_ingest`/`graph_link`/`graph_cluster`/`graph_query`）。
+- `fxapk repackage <apk>`：脱壳后把**去壳版**重打包（zip 替 DEX + apksigner 重签）装回设备，使 capture 抓去壳版（绕壳反 frida）。需 apksigner/zipalign + 设备；auto 默认含此步（`--no-repackage` 关；重签必卸原包会清 app 数据）。能力边界：治不了 VMP/重 native/反模拟器壳，多数样本预期降级、capture 仍跑原版。
+- `fxapk track`：起**本地/LAN 网页**看每个 APK 的线索 + 办案进度（手动改状态/备注/进展）；`fxapk track ingest <report.json...>` 回填历史报告。analyze/auto 默认自动入台账（`--no-track` 关）。台账在 `~/.apkscan/tracking.json`（仓库外，`git pull` 不覆盖）。LAN 共享 `--host 0.0.0.0`（自动令牌鉴权，承载 PII）。
+- `fxapk graph ...`：把多份报告导入知识图谱做**团伙串案/聚类**（`graph_ingest`/`graph_link`/`graph_cluster`/`graph_query`）。analyze/auto 入台账时也会顺带喂图谱（kuzu 可用时）。
 
 ---
 
