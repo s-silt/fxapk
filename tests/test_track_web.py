@@ -21,6 +21,9 @@ from typer.testing import CliRunner
 from apkscan.track import web
 from apkscan.track.ledger import TrackingLedger
 
+# flask 是可选 extra（pip install -e .[track]）；未装则整模块跳过（CI 装了 track extra 会真跑）。
+pytest.importorskip("flask")
+
 runner = CliRunner()
 
 
