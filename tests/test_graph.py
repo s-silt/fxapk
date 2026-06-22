@@ -97,15 +97,15 @@ def test_ingest_upsert_dedup(tmp_path) -> None:
 
 
 def test_extract_fingerprints_to_entity_mapping(tmp_path) -> None:
-    """6 种 kind 全覆盖：每个 Fingerprint 映射到一个对应 kind/value 的 Entity。"""
+    """只入强档：含强+中档的 report 摄入后，图里只剩强档 Entity（中档 uni/firebase 被丢）。"""
     with GraphStore(_db(tmp_path)) as store:
         rep = _report(
             "sha_all",
             sign="S",
-            uni="U",
+            uni="U",  # 中档 → 丢
             addrs=["TXxxxAddr"],
             c2=["c2.example.com"],
-            fb="proj-1",
+            fb="proj-1",  # 中档 → 丢
             tg=["123:tok"],
         )
         ingest_report(rep, store, sha256="sha_all")
@@ -113,10 +113,8 @@ def test_extract_fingerprints_to_entity_mapping(tmp_path) -> None:
         got = {(r["kind"], r["value"]) for r in rows}
     assert got == {
         ("sign", "S"),
-        ("uni_appid", "U"),
         ("crypto_addr", "TXxxxAddr"),
         ("c2", "c2.example.com"),
-        ("firebase_project", "proj-1"),
         ("telegram_bot", "123:tok"),
     }
 
@@ -143,20 +141,23 @@ def test_link_query_cluster_synthetic_3apk(tmp_path) -> None:
         assert ("sign", "SHARED") in shared
 
 
-def test_confidence_ranking_strong_vs_medium(tmp_path) -> None:
-    """共享强指纹(sign)的簇置信 > 仅共享中指纹(uni_appid+firebase)的簇（只断相对序）。"""
+def test_confidence_ranking_heavier_strong_vs_lighter_strong(tmp_path) -> None:
+    """共享更重强指纹(sign,w=10)的簇置信 > 共享更轻强指纹(telegram_bot,w=8)的簇（只断相对序）。
+
+    中档(uni/firebase)现已不入图，故两组都用强档、靠权重区分。
+    """
     with GraphStore(_db(tmp_path)) as store:
         ingest_report(_report("a1", sign="CERT1"), store)
         ingest_report(_report("a2", sign="CERT1"), store)
-        ingest_report(_report("b1", uni="UNI1", fb="FB1"), store)
-        ingest_report(_report("b2", uni="UNI1", fb="FB1"), store)
+        ingest_report(_report("b1", tg=["TG1"]), store)
+        ingest_report(_report("b2", tg=["TG1"]), store)
 
         cl = query_clusters(store)
         by_members = {tuple(sorted(c["members"])): c for c in cl["clusters"]}
-        c_strong = by_members[("a1", "a2")]
-        c_medium = by_members[("b1", "b2")]
-        assert c_strong["confidence"] > c_medium["confidence"]
-        assert c_strong["rationale"]["strong_kind_count"] == 1
+        c_heavy = by_members[("a1", "a2")]
+        c_light = by_members[("b1", "b2")]
+        assert c_heavy["confidence"] > c_light["confidence"]
+        assert c_heavy["rationale"]["strong_kind_count"] == 1
 
 
 def test_bad_corrupt_report_never_throws(tmp_path) -> None:
