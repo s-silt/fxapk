@@ -7,7 +7,13 @@
 from __future__ import annotations
 
 from apkscan.graph.ingest import ingest_batch, ingest_report
-from apkscan.graph.query import query_by_kind, query_clusters, query_link, query_stats
+from apkscan.graph.query import (
+    prune_weak,
+    query_by_kind,
+    query_clusters,
+    query_link,
+    query_stats,
+)
 from apkscan.graph.store import GraphStore
 from apkscan.graph.weight import WEIGHT_CONFIG, get_weight, is_strong
 
@@ -18,6 +24,7 @@ __all__ = [
     "ingest_batch",
     "ingest_report",
     "is_strong",
+    "prune_weak",
     "query_by_kind",
     "query_clusters",
     "query_link",

@@ -258,6 +258,251 @@ def test_token_protects_post(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 阶段3：手动加线索 /api/lead/add
+# ---------------------------------------------------------------------------
+
+
+def test_lead_add_creates_manual_lead(tmp_path: Path) -> None:
+    led, sha, _ = _seed_ledger(tmp_path)
+    app = web.create_app(led, token=None)
+    res = app.test_client().post(
+        "/api/lead/add",
+        json={"sha256": sha, "category": "IP", "value": "1.2.3.4", "subject": "C2", "notes": "n"},
+    )
+    assert res.status_code == 200
+    assert res.get_json()["ok"] is True
+    fresh = TrackingLedger(tmp_path / "tracking.json")
+    lead = fresh.all()["apks"][sha]["leads"]["IP:1.2.3.4"]
+    assert lead["manual"] is True
+    assert lead["subject"] == "C2"
+    assert lead["notes"] == "n"
+
+
+def test_lead_add_creates_apk_shell(tmp_path: Path) -> None:
+    """APK 不在台账 → add_lead 建壳。"""
+    led, _, _ = _seed_ledger(tmp_path)
+    app = web.create_app(led, token=None)
+    new_sha = "c" * 64
+    res = app.test_client().post(
+        "/api/lead/add", json={"sha256": new_sha, "category": "DOMAIN", "value": "x.com"}
+    )
+    assert res.status_code == 200
+    fresh = TrackingLedger(tmp_path / "tracking.json")
+    assert "DOMAIN:x.com" in fresh.all()["apks"][new_sha]["leads"]
+
+
+def test_lead_add_duplicate_400(tmp_path: Path) -> None:
+    """已存在的 lead_key → add_lead 返 False → 400。"""
+    led, sha, lead_key = _seed_ledger(tmp_path)
+    app = web.create_app(led, token=None)
+    # seed 里 lead_key = DOMAIN:bad.example.com
+    res = app.test_client().post(
+        "/api/lead/add", json={"sha256": sha, "category": "DOMAIN", "value": "bad.example.com"}
+    )
+    assert res.status_code == 400
+    assert res.get_json()["ok"] is False
+
+
+def test_lead_add_missing_value_400(tmp_path: Path) -> None:
+    led, sha, _ = _seed_ledger(tmp_path)
+    app = web.create_app(led, token=None)
+    res = app.test_client().post("/api/lead/add", json={"sha256": sha, "category": "IP"})
+    assert res.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# 阶段3：图谱路由（mock query_link/GraphStore；不碰真 kuzu）
+# ---------------------------------------------------------------------------
+
+
+class _FakeStore:
+    """记录图谱写调用、按预设回放读结果的 GraphStore 替身。"""
+
+    def __init__(self) -> None:
+        self.upserts: list[tuple[str, str]] = []
+        self.links: list[tuple[str, str, str]] = []
+        self.deleted: list[tuple[str, str]] = []
+        self.unlinked: list[tuple[str, str, str]] = []
+
+    def ensure_ready(self) -> None:
+        pass
+
+    def upsert_entity(self, kind: str, value: str) -> str:
+        self.upserts.append((kind, value))
+        return f"{kind}:{value}"
+
+    def link(self, sha256: str, kind: str, value: str, weight: float = 1.0) -> None:
+        self.links.append((sha256, kind, value))
+
+    def delete_entity(self, kind: str, value: str) -> int:
+        self.deleted.append((kind, value))
+        return 1
+
+    def unlink(self, sha256: str, kind: str, value: str) -> int:
+        self.unlinked.append((sha256, kind, value))
+        return 1
+
+    def close(self) -> None:
+        pass
+
+
+def _patch_graph(monkeypatch: pytest.MonkeyPatch, store: Any, link_result: Any = None) -> None:
+    """让 web._with_graph 用 _FakeStore，query_link 返预设。"""
+    import apkscan.graph as graph_mod
+
+    monkeypatch.setattr(graph_mod, "GraphStore", lambda *a, **k: store)
+    monkeypatch.setattr(graph_mod, "query_link", lambda s, sha: link_result or {"related": []})
+    monkeypatch.setattr(graph_mod, "get_weight", lambda kind: 9.0)
+
+
+def test_graph_get_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    led, sha, _ = _seed_ledger(tmp_path)
+    store = _FakeStore()
+    _patch_graph(monkeypatch, store, link_result={"apk": {"sha256": sha}, "related": []})
+    app = web.create_app(led, token=None)
+    res = app.test_client().get(f"/api/graph?sha256={sha}")
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["ok"] is True
+    assert data["graph"]["related"] == []
+
+
+def test_graph_get_missing_sha_400(tmp_path: Path) -> None:
+    led, _, _ = _seed_ledger(tmp_path)
+    app = web.create_app(led, token=None)
+    assert app.test_client().get("/api/graph").status_code == 400
+
+
+def test_graph_get_bad_sha256_400(tmp_path: Path) -> None:
+    """畸形 sha256（非 64 位 hex）→ 400（spec §5：写/读路由 sha256 须 hex 校验）。"""
+    led, _, _ = _seed_ledger(tmp_path)
+    app = web.create_app(led, token=None)
+    assert app.test_client().get("/api/graph?sha256=zz").status_code == 400
+
+
+def test_lead_add_bad_sha256_400(tmp_path: Path) -> None:
+    """/api/lead/add 喂畸形 sha256 → 400，不进台账建脏壳。"""
+    led, _, _ = _seed_ledger(tmp_path)
+    app = web.create_app(led, token=None)
+    res = app.test_client().post(
+        "/api/lead/add", json={"sha256": "nothex", "category": "DOMAIN", "value": "x.com"}
+    )
+    assert res.status_code == 400
+
+
+def test_graph_entity_upsert_and_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    led, sha, _ = _seed_ledger(tmp_path)
+    store = _FakeStore()
+    _patch_graph(monkeypatch, store)
+    app = web.create_app(led, token=None)
+    res = app.test_client().post(
+        "/api/graph/entity", json={"sha256": sha, "kind": "c2", "value": "evil.com"}
+    )
+    assert res.status_code == 200
+    assert res.get_json()["ok"] is True
+    assert store.upserts == [("c2", "evil.com")]
+    assert store.links == [(sha, "c2", "evil.com")]
+
+
+def test_graph_delete_entity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    led, _, _ = _seed_ledger(tmp_path)
+    store = _FakeStore()
+    _patch_graph(monkeypatch, store)
+    app = web.create_app(led, token=None)
+    res = app.test_client().post(
+        "/api/graph/delete_entity", json={"kind": "c2", "value": "evil.com"}
+    )
+    assert res.status_code == 200
+    assert res.get_json()["deleted"] == 1
+    assert store.deleted == [("c2", "evil.com")]
+
+
+def test_graph_unlink(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    led, sha, _ = _seed_ledger(tmp_path)
+    store = _FakeStore()
+    _patch_graph(monkeypatch, store)
+    app = web.create_app(led, token=None)
+    res = app.test_client().post(
+        "/api/graph/unlink", json={"sha256": sha, "kind": "c2", "value": "evil.com"}
+    )
+    assert res.status_code == 200
+    assert res.get_json()["removed"] == 1
+    assert store.unlinked == [(sha, "c2", "evil.com")]
+
+
+def test_graph_entity_bad_input_400(tmp_path: Path) -> None:
+    led, sha, _ = _seed_ledger(tmp_path)
+    app = web.create_app(led, token=None)
+    res = app.test_client().post("/api/graph/entity", json={"sha256": sha, "kind": "c2"})
+    assert res.status_code == 400
+
+
+def test_graph_route_kuzu_missing_degrades(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """kuzu 缺失：GraphStore 打开即抛 ImportError → 路由返 ok=false（200，不 500）。"""
+    led, sha, _ = _seed_ledger(tmp_path)
+
+    class _ImportRaisingStore:
+        """模拟 kuzu 缺失：ensure_ready 探活即抛 ImportError（真实：_ensure_open import kuzu 失败）。
+        关键——delete_entity/unlink 照真实语义吞 ImportError 返 0（不抛），证明四路降级靠
+        ensure_ready 探活、而非靠 delete/unlink 自己抛错（防 false-green 回归）。"""
+
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        def ensure_ready(self) -> None:
+            raise ImportError("no kuzu")
+
+        def upsert_entity(self, *a: Any, **k: Any) -> str:
+            raise ImportError("no kuzu")
+
+        def link(self, *a: Any, **k: Any) -> None:
+            raise ImportError("no kuzu")
+
+        def delete_entity(self, *a: Any, **k: Any) -> int:
+            return 0  # 真实 store 吞 ImportError 返 0；降级须由 ensure_ready 触发
+
+        def unlink(self, *a: Any, **k: Any) -> int:
+            return 0  # 同上
+
+        def close(self) -> None:
+            pass
+
+    import apkscan.graph as graph_mod
+
+    monkeypatch.setattr(graph_mod, "GraphStore", _ImportRaisingStore)
+
+    def _raise_link(_s: Any, _sha: str) -> Any:
+        raise ImportError("no kuzu")
+
+    monkeypatch.setattr(graph_mod, "query_link", _raise_link)
+    monkeypatch.setattr(graph_mod, "get_weight", lambda kind: 9.0)
+
+    app = web.create_app(led, token=None)
+    client = app.test_client()
+
+    r1 = client.get(f"/api/graph?sha256={sha}")
+    assert r1.status_code == 200 and r1.get_json()["ok"] is False
+    r2 = client.post("/api/graph/entity", json={"sha256": sha, "kind": "c2", "value": "x"})
+    assert r2.status_code == 200 and r2.get_json()["ok"] is False
+    r3 = client.post("/api/graph/delete_entity", json={"kind": "c2", "value": "x"})
+    assert r3.status_code == 200 and r3.get_json()["ok"] is False
+    r4 = client.post("/api/graph/unlink", json={"sha256": sha, "kind": "c2", "value": "x"})
+    assert r4.status_code == 200 and r4.get_json()["ok"] is False
+
+
+def test_graph_route_token_protected(tmp_path: Path) -> None:
+    led, sha, _ = _seed_ledger(tmp_path)
+    app = web.create_app(led, token="secret-tok")
+    assert app.test_client().get(f"/api/graph?sha256={sha}").status_code == 401
+    assert (
+        app.test_client()
+        .post("/api/graph/delete_entity", json={"kind": "c2", "value": "x"})
+        .status_code
+        == 401
+    )
+
+
+# ---------------------------------------------------------------------------
 # serve：鉴权策略（非 loopback 自动生成 token；loopback / --no-auth 不强制）
 # ---------------------------------------------------------------------------
 
@@ -267,7 +512,7 @@ def test_serve_non_loopback_auto_token(tmp_path: Path, monkeypatch: pytest.Monke
     led, _, _ = _seed_ledger(tmp_path)
     captured: dict[str, Any] = {}
 
-    def _fake_create_app(ledger: TrackingLedger, *, token: str | None = None):  # type: ignore[no-untyped-def]
+    def _fake_create_app(ledger: TrackingLedger, *, token: str | None = None, graph_db: str = ""):  # type: ignore[no-untyped-def]
         captured["token"] = token
 
         class _App:
@@ -288,7 +533,7 @@ def test_serve_loopback_no_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     led, _, _ = _seed_ledger(tmp_path)
     captured: dict[str, Any] = {}
 
-    def _fake_create_app(ledger: TrackingLedger, *, token: str | None = None):  # type: ignore[no-untyped-def]
+    def _fake_create_app(ledger: TrackingLedger, *, token: str | None = None, graph_db: str = ""):  # type: ignore[no-untyped-def]
         captured["token"] = token
 
         class _App:
@@ -307,7 +552,7 @@ def test_serve_no_auth_disables_token(tmp_path: Path, monkeypatch: pytest.Monkey
     led, _, _ = _seed_ledger(tmp_path)
     captured: dict[str, Any] = {}
 
-    def _fake_create_app(ledger: TrackingLedger, *, token: str | None = None):  # type: ignore[no-untyped-def]
+    def _fake_create_app(ledger: TrackingLedger, *, token: str | None = None, graph_db: str = ""):  # type: ignore[no-untyped-def]
         captured["token"] = token
 
         class _App:
