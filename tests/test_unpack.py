@@ -41,6 +41,8 @@ def _all_capabilities_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(unpack.device, "has_frida_dexdump", lambda: True)
     monkeypatch.setattr(unpack.device, "frida_server_running", lambda serial=None: True)
     monkeypatch.setattr(unpack.tools, "frida_invocation", lambda tool: ["frida-dexdump"])
+    # 默认把设备侧清理桩成 no-op，避免单测打真 adb；需断言清理调用的测试自行覆盖。
+    monkeypatch.setattr(unpack.device, "force_stop_app", lambda package, serial=None: None)
 
 
 def _patch_package_name(monkeypatch: pytest.MonkeyPatch, name: str = "com.fraud.app") -> None:
@@ -459,3 +461,88 @@ def test_reanalyze_failure_keeps_artifacts_done(
     assert result["artifacts"]  # 脱壳产物保留
     assert "重分析失败" in result["reason"]
     assert result["report_paths"] == []
+
+
+# ---------------------------------------------------------------------------
+# 4) 防级联：spawn 前后 force-stop 清残留 + 超时抢救部分 DEX + 超时保留诊断输出
+# ---------------------------------------------------------------------------
+
+
+def test_dexdump_force_stops_app_before_and_after_spawn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """spawn 前后各 force-stop 一次清挂起残留（断"很多失败"级联 + "模拟器打不开 app"）。"""
+    _all_capabilities_ok(monkeypatch)
+    _patch_package_name(monkeypatch, "com.fraud.app")
+
+    events: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        unpack.device,
+        "force_stop_app",
+        lambda package, serial=None: events.append(("stop", package)),
+    )
+
+    def _fake_run(cmd: list[str], **kwargs: Any) -> _FakeProc:
+        events.append(("run", None))
+        o_idx = cmd.index("-o")
+        dump_dir = Path(cmd[o_idx + 1])
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        (dump_dir / "classes.dex").write_bytes(b"dex\n035\x00x")
+        return _FakeProc(returncode=0, stdout="ok")
+
+    monkeypatch.setattr(unpack.subprocess, "run", _fake_run)
+    monkeypatch.setattr(unpack, "_reanalyze", lambda a, e, o: [])
+
+    result = unpack.run(
+        "sample.apk", out_dir=str(tmp_path / "out"), reanalyze=True, serial="emulator-5554"
+    )
+
+    assert result["status"] == STATUS_DONE
+    # spawn 前清一次、run、spawn 后再清一次。
+    assert [e[0] for e in events] == ["stop", "run", "stop"]
+    assert all(e[1] == "com.fraud.app" for e in events if e[0] == "stop")
+
+
+def test_dexdump_timeout_salvages_partial_dex(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """超时但已 dump 出部分 DEX → 抢救为 done + artifacts（不再把已脱产物当彻底失败丢掉）。"""
+    _all_capabilities_ok(monkeypatch)
+    _patch_package_name(monkeypatch)
+
+    def _fake_run(cmd: list[str], **kwargs: Any) -> _FakeProc:
+        o_idx = cmd.index("-o")
+        dump_dir = Path(cmd[o_idx + 1])
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        (dump_dir / "classes.dex").write_bytes(b"dex\n035\x00partial")  # 超时前已落一个
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=unpack._DEXDUMP_TIMEOUT)
+
+    monkeypatch.setattr(unpack.subprocess, "run", _fake_run)
+    monkeypatch.setattr(unpack, "_reanalyze", lambda a, e, o: [])
+
+    result = unpack.run("sample.apk", out_dir=str(tmp_path / "out"), reanalyze=True)
+
+    assert result["status"] == STATUS_DONE
+    assert len(result["artifacts"]) == 1
+
+
+def test_dexdump_timeout_captures_output_tail(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """超时路径保留 frida-dexdump 真实输出尾部（旧实现把它连临时文件一起丢了，排障无据）。"""
+    _all_capabilities_ok(monkeypatch)
+    _patch_package_name(monkeypatch)
+
+    def _fake_run(cmd: list[str], **kwargs: Any) -> _FakeProc:
+        # 写入诊断到重定向的日志文件后再超时——验证尾部被读出并并入 reason。
+        kwargs["stdout"].write("Failed to attach: unable to connect to frida-server")
+        kwargs["stdout"].flush()
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=unpack._DEXDUMP_TIMEOUT)
+
+    monkeypatch.setattr(unpack.subprocess, "run", _fake_run)
+
+    result = unpack.run("sample.apk", out_dir=str(tmp_path / "out"))
+
+    assert result["status"] == STATUS_ERROR
+    assert "超时" in result["reason"]
+    assert "frida-server" in result["reason"]  # 真实输出尾部已并入 reason

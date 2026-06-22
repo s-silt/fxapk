@@ -234,11 +234,17 @@ def _dexdump(
     playbook.append(f"frida-dexdump {human_flags} -f {package_name} -o {dump_dir}")
     logger.info("执行 frida-dexdump：%s", " ".join(cmd))
 
-    # ★ stdout/stderr 重定向到临时文件，绝不用 capture_output(=PIPE)：
-    #   frida-dexdump 会派生 frida 孙进程并继承管道写端；用 PIPE 时 300s 超时后
-    #   subprocess.run 排空管道的 communicate() 会因孙进程未退而**永久阻塞**——超时形同虚设，
-    #   GUI 一键全自动卡在第三步脱壳、进不了第四步抓包。重定向到文件 → 无管道可阻塞，超时如期触发。
+    # 防级联：frida-dexdump 用 -f 以**挂起态** spawn 目标；spawn 要求目标未在运行。先 force-stop
+    # 清掉上一轮超时被杀后残留的挂起实例，否则本次 spawn 冲突会卡死、dump 全空（模拟器也点不开 app）。
+    device.force_stop_app(package_name, serial)
+
+    # ★ stdout/stderr 重定向到临时文件，绝不用 capture_output(=PIPE)：frida-dexdump 会派生 frida
+    #   孙进程并继承管道写端；用 PIPE 时 300s 超时后 communicate() 排空管道会因孙进程未退而**永久
+    #   阻塞**——超时形同虚设。重定向到文件 → 无管道可阻塞，超时如期触发。
+    #   stdin=DEVNULL：避免子进程继承非 TTY stdin 时阻塞（终端手动跑正常、被 subprocess 包起来却卡）。
     fd, log_path = tempfile.mkstemp(prefix="apkscan_dexdump_", suffix=".log")
+    timed_out = False
+    proc: subprocess.CompletedProcess | None = None
     try:
         try:
             with open(fd, "w", encoding="utf-8", errors="replace") as log_fh:
@@ -246,21 +252,42 @@ def _dexdump(
                     cmd,
                     stdout=log_fh,
                     stderr=subprocess.STDOUT,  # 并入 stdout 同一文件，诊断尾部一并保留
+                    stdin=subprocess.DEVNULL,
                     timeout=_DEXDUMP_TIMEOUT,
                     check=False,
                 )
         except subprocess.TimeoutExpired:
+            timed_out = True
             logger.warning("frida-dexdump 超时（%ss）：package=%s", _DEXDUMP_TIMEOUT, package_name)
-            return f"frida-dexdump 超时（{_DEXDUMP_TIMEOUT}s 未完成），目标可能未启动或壳脱不出。"
-        # frida-dexdump 的真实错误（连不上 frida-server / 版本不匹配 / spawn 失败 / 权限）多走
-        # stderr，已并入同一文件一并纳入诊断，避免失败原因被静默丢弃、排障无据。
+        # 无论超时与否都读日志尾部：旧实现超时路径直接 return，把 frida-dexdump 的真实输出
+        # （连不上 frida-server / 反调试 / spawn 失败 / 卡等 app）连同临时文件一起丢了，排障无据。
         tail = _read_log_tail(log_path)
     finally:
         try:
             Path(log_path).unlink()
         except OSError:
             logger.debug("清理 frida-dexdump 日志临时文件失败：%s", log_path, exc_info=True)
+        # 清设备侧 spawn 残留（挂起态 app）：治"很多失败"级联 + "模拟器打不开 app"。脱壳后该 app
+        # 不再需要常驻；auto 后续 capture 会重新拉起。
+        device.force_stop_app(package_name, serial)
 
+    # 超时：先抢救已 dump 的部分 DEX（壳已脱大半时不白丢），无产物再按超时失败（带真实输出尾部）。
+    if timed_out:
+        partial = _collect_dex(dump_dir)
+        if partial:
+            logger.warning(
+                "frida-dexdump 超时但已 dump %d 个 DEX，按部分成功返回（壳可能未脱完）", len(partial)
+            )
+            return partial
+        logger.error(
+            "frida-dexdump 超时且无产物：package=%s\n输出尾部：%s", package_name, tail
+        )
+        return (
+            f"frida-dexdump 超时（{_DEXDUMP_TIMEOUT}s 未完成）且未 dump 出任何 .dex。"
+            f"输出尾部：{tail.strip()}{device.frida_spawn_hint(tail)}"
+        )
+
+    assert proc is not None  # 非超时路径 subprocess.run 已正常返回
     if proc.returncode != 0:
         logger.error(
             "frida-dexdump 非零退出（%s）：package=%s\n输出尾部：%s",
