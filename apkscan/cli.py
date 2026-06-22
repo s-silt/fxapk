@@ -1054,6 +1054,48 @@ def graph_cypher(
         _graph_print(rows)
 
 
+@graph_app.command("rm-entity")
+def graph_rm_entity(
+    kind: str = typer.Argument(..., help="实体类型，如 sign/c2/crypto_addr。"),
+    value: str = typer.Argument(..., help="实体值。"),
+    db: str = typer.Option("", "--db", help="图谱 DB 路径。"),
+) -> None:
+    """全局删除一个实体及其所有 OBSERVED 边（参数化防注入）。打印删除数。"""
+    with _graph_session(db) as store:
+        store.ensure_ready()  # 先探活：kuzu 缺失 → _graph_session 给统一安装提示
+        n = store.delete_entity(kind, value)
+        _graph_print({"deleted": n, "kind": kind, "value": value, "db": str(store.db_path)})
+
+
+@graph_app.command("unlink")
+def graph_unlink(
+    sha256: str = typer.Argument(..., help="APK 内容 sha256。"),
+    kind: str = typer.Argument(..., help="实体类型。"),
+    value: str = typer.Argument(..., help="实体值。"),
+    db: str = typer.Option("", "--db", help="图谱 DB 路径。"),
+) -> None:
+    """只断该 APK 与某实体的这条边（不动节点）。打印删除边数。"""
+    with _graph_session(db) as store:
+        store.ensure_ready()  # 先探活：kuzu 缺失 → _graph_session 给统一安装提示
+        n = store.unlink(sha256, kind, value)
+        _graph_print(
+            {"removed": n, "sha256": sha256, "kind": kind, "value": value, "db": str(store.db_path)}
+        )
+
+
+@graph_app.command("prune-weak")
+def graph_prune_weak(
+    db: str = typer.Option("", "--db", help="图谱 DB 路径。"),
+) -> None:
+    """一次性清存量非强档噪音实体（not is_strong）。打印清理数。"""
+    from apkscan.graph import prune_weak
+
+    with _graph_session(db) as store:
+        store.ensure_ready()  # 先探活：kuzu 缺失 → _graph_session 给统一安装提示
+        n = prune_weak(store)
+        _graph_print({"pruned": n, "db": str(store.db_path)})
+
+
 def _print_auto_result(result: object) -> None:
     """打印 auto.run 的结构化结果：逐步状态 + 报告路径。"""
     if not isinstance(result, dict):
