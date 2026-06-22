@@ -96,6 +96,7 @@ def run(
     auto_fix: bool = True,
     capture_duration: int = 60,
     formats: list[str] | None = None,
+    track: bool = True,
     on_progress: Callable[[str], None] | None = None,
     confirm: Callable[[str], None] | None = None,
 ) -> dict:
@@ -111,6 +112,7 @@ def run(
         auto_fix: 体检时是否对 frida-server / CA 等调 provision 自动修复。
         capture_duration: 抓包时长（秒）。
         formats: 报告格式，默认 ``["html", "json"]``。
+        track: 静态分析写报告后是否自动入追踪台账（+喂案件图谱）。默认 True；CLI ``--no-track`` 关。
         on_progress: 可选进度回调（GUI 弹窗 / CLI echo；None → no-op）。
         confirm: 抓包前的「提示用户操作 app」钩子（GUI 弹窗 / CLI 等回车）；
                  None 则不等待直接继续。
@@ -149,7 +151,8 @@ def run(
 
         # 2) 静态分析（load_apk → pipeline.run → 写报告）。
         static_step, report, package_name, static_paths, base = _run_static(
-            apk_path, out_dir=out_dir, online=online, formats=fmts, on_progress=on_progress
+            apk_path, out_dir=out_dir, online=online, formats=fmts, track=track,
+            on_progress=on_progress,
         )
         steps.append(static_step)
         _extend_unique(report_paths, static_paths)
@@ -208,6 +211,10 @@ def run(
             )
             steps.append(merge_step)
             _extend_unique(report_paths, merge_paths)
+            # 动态富化后 report 已就地并入运行时线索 → 重新入账（upsert 合并安全：新增运行时线索、
+            # 保留人工改过的进度）。仅合并成功时；best-effort，绝不抛、不影响流水线。
+            if merge_step.get("status") == _DONE:
+                _auto_track(report, str(Path(out_dir) / f"{base}.json"), track=track)
         else:
             steps.append(
                 _step(
@@ -235,6 +242,7 @@ def analyze_static(
     out_dir: str = "out",
     online: bool = True,
     formats: list[str] | None = None,
+    track: bool = True,
     on_progress: Callable[[str], None] | None = None,
 ) -> dict:
     """仅静态分析（无 doctor / 无设备 / 无动态）：load_apk → pipeline.run → 写报告。绝不抛。
@@ -251,6 +259,7 @@ def analyze_static(
         out_dir: 报告输出目录。
         online: 是否联网富化归属（WHOIS/ICP/ASN）。默认 True（联网，与 cli analyze 一致）。
         formats: 报告格式，默认 ``["html", "json"]``。
+        track: 写报告后是否自动入追踪台账（+喂案件图谱）。默认 True；CLI ``--no-track`` 关。
         on_progress: 可选进度回调（GUI 弹窗 / None → no-op）。
 
     Returns:
@@ -260,7 +269,8 @@ def analyze_static(
     fmts = list(formats) if formats else list(_DEFAULT_FORMATS)
     try:
         static_step, _report, package_name, static_paths, _base = _run_static(
-            apk_path, out_dir=out_dir, online=online, formats=fmts, on_progress=on_progress
+            apk_path, out_dir=out_dir, online=online, formats=fmts, track=track,
+            on_progress=on_progress,
         )
         return {
             "steps": [static_step],
@@ -316,6 +326,7 @@ def _run_static(
     out_dir: str,
     online: bool,
     formats: list[str],
+    track: bool = True,
     on_progress: Callable[[str], None] | None,
 ) -> tuple[dict, object | None, str, list[str], str]:
     """步骤 2：静态分析 load_apk → pipeline.run → 写报告。
@@ -346,6 +357,11 @@ def _run_static(
         report.meta["online"] = config.online
 
         report_paths = _write_reports(report, out_dir=out_dir, formats=formats, base=base)
+
+        # 自动入账 + 喂图谱（best-effort 旁路，绝不影响已产出报告）。默认开，--no-track 关。
+        # 报告路径用主 JSON 报告（<base>.json，与 cli.analyze 口径一致）。
+        _auto_track(report, str(Path(out_dir) / f"{base}.json"), track=track)
+
         detail = (
             f"静态分析完成：包名 {package_name or '(未知)'}，"
             f"端点 {len(report.endpoints)}，线索 {len(report.leads)}"
@@ -354,6 +370,24 @@ def _run_static(
     except Exception as exc:  # noqa: BLE001 - load_apk(ApkParseError 等)/pipeline 失败不中断流水线
         logger.exception("[auto] 静态分析步骤异常：%s", apk_path)
         return _step(_STEP_STATIC, _ERROR, f"静态分析失败：{exc}"), None, "", [], base
+
+
+def _auto_track(report: object, report_path: str, *, track: bool) -> None:
+    """静态写报告后自动入账 + 喂图谱（best-effort 旁路）。绝不抛——失败只 logging，不影响报告。
+
+    薄包装：委托 :func:`apkscan.track.autoingest.auto_track_and_ingest`（never-throw）。
+    --no-track 时 ``track=False``，整体跳过。report 须是 Report；非 Report 由下游容错。
+    """
+    try:
+        from apkscan.core.models import Report
+        from apkscan.track.autoingest import auto_track_and_ingest
+
+        if not isinstance(report, Report):
+            logger.debug("[auto] 自动入账收到非 Report 对象，跳过：%r", type(report).__name__)
+            return
+        auto_track_and_ingest(report, report_path, track=track)
+    except Exception:  # noqa: BLE001 — 入账旁路绝不抛：连 import 异常也吞，不影响报告产出
+        logger.warning("[auto] 自动入账/喂图谱调用异常（已忽略，不影响报告产出）", exc_info=True)
 
 
 def _write_reports(report: object, *, out_dir: str, formats: list[str], base: str) -> list[str]:
