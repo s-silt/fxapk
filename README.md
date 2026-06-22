@@ -83,7 +83,7 @@ python -m pip install -e .
 > 单元测试**不依赖 androguard、不联网、不需要真机/jadx/frida**（全部基于 `FakeContext` 合成数据）：
 > ```bash
 > python -m pip install jinja2 typer python-whois requests pyyaml pytest
-> python -m pytest -q          # 1512 passed
+> python -m pytest -q          # 跑全部单元测试（离线、不需真机）
 > ```
 
 可选依赖（缺失时对应能力**优雅降级**，核心不受影响、不报错）：
@@ -299,7 +299,7 @@ apkscan/
   track/      线索追踪台账 + 办案进度（ledger）+ 本地/LAN 网页（web, flask 可选 extra）+ 自动入账(autoingest)
   report/     html / json / pdf / ioc(IOC CSV) / letters(调证函) / digest(紧凑摘要) + templates/
   rules/      *.yaml + bip39_english.txt（SDK/加固/支付/配置键/权限/银行包名/词表等规则库）
-tests/        1531 个单测（FakeContext，离线）
+tests/        单元测试（FakeContext，离线，不需真机 / 网络）
 docs/         设计文档
 ```
 
