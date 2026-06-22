@@ -15,7 +15,7 @@ import logging
 
 from apkscan.dynamic.correlate import extract_fingerprints
 from apkscan.graph.store import GraphStore
-from apkscan.graph.weight import get_weight
+from apkscan.graph.weight import get_weight, is_strong
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +65,10 @@ def ingest_report(
             kind = str(fp.kind)
             value = str(fp.value)
             if not value:
+                continue
+            # 只入强档降噪：丢中档 uni_appid/firebase_project（易被无关包共用→串案噪音）。
+            # 抽取集不变（extract_fingerprints 仍吐全档），只在摄入端按 is_strong 过滤。
+            if not is_strong(kind):
                 continue
             store.upsert_entity(kind, value)
             store.link(sha, kind, value, weight=get_weight(kind))
