@@ -78,7 +78,7 @@ cd fxapk
 python -m pip install -e .
 ```
 
-核心依赖：`androguard`（解析 APK）、`jinja2`、`typer`、`python-whois`、`requests`、`pyyaml`。
+核心依赖：`androguard`（解析 APK）、`jinja2`、`typer`、`python-whois`、`requests`、`pyyaml`、`psutil`（分析器进程池按可用内存封顶 worker 数防 OOM）。
 
 > 单元测试**不依赖 androguard、不联网、不需要真机/jadx/frida**（全部基于 `FakeContext` 合成数据）：
 > ```bash
@@ -95,6 +95,8 @@ python -m pip install -e .
 | `mitmproxy` | `capture` 真机抓包流量解析 |
 | `cryptography` | C5b 自动解密抓到的 `{data,timestamp}` 加密信封（缺失则只报配方+保留密文，不崩） |
 | `kuzu`（`pip install fxapk[graph]`） | 本地案件图谱串案（`fxapk graph` 子命令）；缺失时仅 `graph` 命令提示安装，核心分析不受影响 |
+| `flask`（`pip install fxapk[track]`） | `fxapk track` 本地/局域网网页看线索 + 办案进度；缺失时仅 `track` 命令提示安装，台账写入与自动入账不受影响 |
+| `apksigner` + `zipalign`（Android SDK build-tools） | `repackage` 去壳重打包重签名；缺失时该步 `skipped` 给手册，不影响其它 |
 | Chrome / Edge / Chromium | `--fmt pdf` 报告导出（无头打印） |
 
 ---
@@ -112,13 +114,13 @@ fxapk analyze app.apk --out out --offline --fmt html,json,pdf
 fxapk analyze app.apk --fmt json
 ```
 
-**一键全自动**（接好真机/模拟器后，把体检→静态→脱壳→抓包→合并串成一条）：
+**一键全自动**（接好真机/模拟器后，把体检→静态→脱壳→去壳重打包→抓包→合并串成一条）：
 
 ```bash
 # 接上设备后先体检（缺 frida-server / CA 等可自动修，修不了给可复制命令）
 fxapk doctor
 
-# 一键：doctor → 静态 → 脱壳 → 抓包（提示你在设备上操作 app）→ 合并一份总报告
+# 一键：doctor → 静态 → 脱壳 → 去壳重打包 → 抓包（提示你在设备上操作 app）→ 合并一份总报告
 fxapk auto app.apk --out out
 # 无设备也能跑：自动跳过脱壳/抓包，仍产出静态报告
 ```
@@ -130,15 +132,17 @@ fxapk auto app.apk --out out
 | 命令 | 作用 |
 |---|---|
 | `analyze APK` | 静态分析（零环境）产出调证线索清单；加 `--dynamic` 且有设备时自动脱壳+抓包，并把运行时端点**并回主报告** |
-| `auto APK` | 一键全自动：`doctor`→静态→脱壳→抓包→合并一份总报告（无设备自动跳过动态步骤） |
+| `auto APK` | 一键全自动：`doctor`→静态→脱壳→去壳重打包→抓包→合并一份总报告（无设备自动跳过动态步骤） |
 | `doctor` | 环境体检：在线设备 / root / ABI / 主机 frida 版本 / 设备 frida-server / mitmproxy / CA 逐项 `[OK]`/`[FAIL]`，`--fix` 自动修（部署 frida-server、装 CA），关键项失败时退出码 1 |
 | `unpack APK` | 真机脱壳：frida-dexdump dump 隐藏 DEX 回灌重分析 |
 | `capture PACKAGE` | 真机抓包：mitmproxy + frida 绕证书绑定，抓运行时端点 |
+| `repackage APK` | 脱壳后把**去壳版**重打包（zip 替 DEX + apksigner 重签）装回设备，使抓包抓**去壳版**（绕壳反 frida/反调试）；`auto` 默认含此步（`--no-repackage` 关）。需 apksigner/zipalign + 设备；**四联判活**确认起得来才算成功、失败优雅降级回原版抓包。治不了 VMP/重 native/反模拟器壳 |
 | `batch DIR` | 批量分析文件夹下所有 APK + 跨样本团伙聚类（写 `case_correlation.json`），并持久化进本地案件图谱 |
 | `letters REPORT.json` | 把可办案化线索套打成「调证函 / 协查文书」草稿（markdown，带免责标注） |
 | `digest REPORT.json` | 把 report.json 压成**紧凑调证摘要 JSON** 打到 stdout（按优先级排序、扁平字段，供任意 AI agent / 脚本低 token 直接决策；默认明文便于取证查看，`--redact` 喂云端 agent 时脱敏高敏值） |
 | `selfcheck` | **自检诊断 JSON**：逐项报告各能力（图谱/解密/jadx/动态/联网富化/web-check）通不通、怎么修——供任意 AI agent 驱动前自检 |
 | `graph …` | 本地案件图谱串案（需 `fxapk[graph]`）：`ingest`（报告入图）/ `link <sha256>`（拉关联 APK）/ `query --kind --value`（按实体反查）/ `cluster`（团伙簇+置信分）/ `stats` / `cypher`（原始 Cypher）。默认输出稳定 JSON |
+| `track` | 起**本地/局域网网页**追踪每个 APK 发现的线索 + **手动办案进度**（两级：APK 总进度 + 每条线索状态/备注/带时间戳进展留痕，需 `fxapk[track]`）；`analyze`/`auto` 默认自动入台账（`--no-track` 关）。`track ingest <report.json…>` 回填历史报告。台账在 `~/.apkscan/tracking.json`（仓库外，`git pull` 不覆盖） |
 | `gui` | 图形界面（tkinter 单窗口：体检 / 静态 / 一键全自动） |
 
 ### 常用参数
@@ -209,12 +213,14 @@ fxapk auto app.apk --out out
 
 ```bash
 fxapk doctor                            # 环境体检：设备/root/ABI/frida-server/CA 逐项检查，可自动修
-fxapk auto app.apk --out out            # 一键：doctor→静态→脱壳→抓包→合并一份总报告
+fxapk auto app.apk --out out            # 一键：doctor→静态→脱壳→去壳重打包→抓包→合并一份总报告
 fxapk unpack app.apk --out out          # 单独脱壳：frida-dexdump dump 隐藏 DEX，回灌重分析
+fxapk repackage app.apk --out out       # 去壳重打包：脱壳 DEX 装回去壳版供抓包（auto 默认含；--no-repackage 关）
 fxapk capture <package> --duration 60   # 单独抓包：mitmproxy + frida 绕证书绑定，抓运行时端点
 ```
 
 **自动配环境**：`doctor`（及 `auto` 内部）能按设备 ABI + 主机 frida 版本**自动下载部署 frida-server**、**安装 mitmproxy CA 到系统信任库**（纯标准库下载，root 写入；装不了则如实降级并给命令——HTTPS 抓明文的命门绝不假成功）。
+**去壳重打包（`repackage`，`auto` 默认含、`--no-repackage` 关）**：加固壳的反 frida/反调试会让抓包抓不到去壳后逻辑。脱壳得到 DEX 后用 zipfile 把它替回原 APK 的 `classes*.dex`、`zipalign` + `apksigner` 重签、卸原包装去壳包，并经**四联判活**（装上 + `am start` + 进程存活非秒退 + frida 可附）确认起得来才算成功——装上起不来**绝不假成功**，优雅降级重装原包让抓包仍跑原版。需 apksigner/zipalign（Android SDK build-tools）+ 设备；治不了 VMP/重 native/带完整性自校验/反模拟器壳（多数样本预期降级）。
 **运行时端点并回主报告**：`auto` / `analyze --dynamic` 会把抓到的运行时端点（真·C2，`source=runtime`）并入同一张调证线索清单并重渲报告。
 **无设备/缺工具时不报错**：相关步骤 `status=skipped` + 打印**可逐条复制的取证手册**；静态报告照常产出。脱壳得到的 DEX 也可用 `fxapk analyze app.apk --extra-dex <dump_dir>` 手动并入。
 
@@ -252,6 +258,23 @@ fxapk graph stats                           # 图谱体检（节点 / 边 / 各 
 
 ---
 
+## 线索追踪 + 办案进度（track，本地/局域网网页）
+
+分析只是起点，线索要**跟进办案**。`fxapk track` 起一个本地/局域网网页，集中看**每个 APK 发现的线索**并**手动记办案进度**——两级：APK 总进度（待处理 / 调查中 / 已移送 / 已结案）+ 每条线索状态（待办 / 已出函 / 已收数据 / 无果 / 不调证）+ 备注 + 带时间戳的进展留痕（预设词表，也可自定义）。
+
+- **自动入账**：`analyze` / `auto` 跑完自动把该样本的线索写进台账（`--no-track` 关），合并时**保留你手改的状态 / 备注 / 进展**（重分析不覆盖）、新线索默认「待办」；同时顺带喂案件图谱（kuzu 可用时）。也可 `fxapk track ingest <report.json…>` 回填历史报告。
+- **台账位置**：`~/.apkscan/tracking.json`（用户主目录、仓库之外，`git pull` / 重新 clone 都不覆盖你的办案数据）；`--ledger PATH` / 环境变量 `FXAPK_TRACKING_DB` 可改。
+- **起网页**（需 `pip install fxapk[track]`，flask）：
+
+```bash
+fxapk track                       # 仅本机：http://127.0.0.1:8787
+fxapk track --host 0.0.0.0        # 局域网共享：打印含访问令牌的 http://<本机IP>:8787/?token=...
+```
+
+  局域网共享自动启用**令牌鉴权**（台账含受害人 PII，信任内网才 `--no-auth` 关）；多人查看 / 编辑按条更新落盘。
+
+---
+
 ## 对接任意 AI agent（诊断 / 隐私 / agent 无关）
 
 fxapk 的产出与控制面是**标准 JSON CLI**——agent（Codex / Claude / 其它）直接 shell 调命令、解析 stdout JSON 即可驱动，不绑定任何单一 agent，也无需额外协议层：
@@ -272,7 +295,8 @@ apkscan/
   analyzers/  28 个静态分析器（见上表；含 iOS `ios_plist`，按 requires 能力门控自动分流 APK/IPA）
   graph/      本地案件图谱（嵌入式 Kuzu）：store / ingest / query / schema / weight（`fxapk graph` 串案）
   enrichers/  rdap / whois / icp / dns / asn / webcheck(opt-in OSINT)（默认联网，结果缓存）
-  dynamic/    doctor / provision / unpack / capture / merge(运行时并回+会话时序) / correlate(团伙聚类) / batch(批量) / fingerprint / auto(一键编排)
+  dynamic/    doctor / provision / unpack / repackage(去壳重打包) / capture / merge(运行时并回+会话时序) / correlate(团伙聚类) / batch(批量) / fingerprint / auto(一键编排)
+  track/      线索追踪台账 + 办案进度（ledger）+ 本地/LAN 网页（web, flask 可选 extra）+ 自动入账(autoingest)
   report/     html / json / pdf / ioc(IOC CSV) / letters(调证函) / digest(紧凑摘要) + templates/
   rules/      *.yaml + bip39_english.txt（SDK/加固/支付/配置键/权限/银行包名/词表等规则库）
 tests/        1531 个单测（FakeContext，离线）
