@@ -145,4 +145,7 @@ fxapk digest out/<样本名>.json
   - `FXAPK_NO_PARALLEL=1` 强制串行（排障/兼容）；`FXAPK_MAX_WORKERS=N` 钳死 worker 数（=1 即强制串行）。
   - `FXAPK_WORKER_BASE_MB` / `FXAPK_MEM_SAFETY`（0<v≤1）现场覆盖内存封顶的标定（单 worker 估算 / 安全系数）。
   - ★ 改并行或快照路径须守不变量 **「串行 == 并行 逐字节一致」**（由 slow 等价测试背书）；分析器输出须确定（跨进程 PYTHONHASHSEED 不同，set 派生的顺序要显式排序）。设计文档见 `docs/superpowers/specs/`。
+- **合并前必过三关（本地）**：`python -m ruff check apkscan tests` + `python -m pyright apkscan` + `python -m pytest -q`——CI（`.github/workflows/ci.yml`）这三样都跑，**只跑 pytest/pyright 不够，ruff 必跑**（曾因一个未用 import F401 把 CI 刷红）。
+- **CI 环境对齐**：CI 装的是 `pip install -e ".[graph,track]"`（含 kuzu + flask）。新增**可选依赖**必须进对应 extra（如 web→`track`、图谱→`graph`），且 ci.yml 两个 job 都要装上它，否则 CI 缺包报 `ModuleNotFoundError`/pyright 解析失败。依赖某可选 extra 的测试在模块顶部 `pytest.importorskip("<pkg>")`，未装该 extra 的环境优雅跳过。
+- **合并前等 CI 绿**：开 PR 后 `gh run watch <id> --exit-status` 等 CI 跑完再 `gh pr merge`——别本地绿就盲合（本地与 CI 环境/依赖/平台不一致，本地缺 ruff、CI 缺可选依赖都坑过）。
 - commit：conventional commits OK，中文 OK；**不要** `--no-verify` / 不要 force push 到 master；未经指示不主动 commit。
