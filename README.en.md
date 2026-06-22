@@ -83,7 +83,7 @@ Unit tests need none of androguard/network/device (they use a `FakeContext`):
 
 ```bash
 python -m pip install jinja2 typer python-whois requests pyyaml pytest
-python -m pytest -q          # 556 passed
+python -m pytest -q          # run all unit tests (offline, no device)
 ```
 
 Optional (gracefully skipped when missing): `jadx` (deep decompile — on PATH, or the standalone
