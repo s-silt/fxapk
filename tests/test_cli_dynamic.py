@@ -24,6 +24,15 @@ from apkscan import cli
 from apkscan.core.models import Report
 from apkscan.dynamic import STATUS_DONE, STATUS_ERROR, STATUS_SKIPPED
 
+
+@pytest.fixture(autouse=True)
+def _isolate_tracking(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """隔离追踪台账到 tmp + 关图谱喂入：动态 merge 后新增的自动入账钩子不污染真实 ~/.apkscan/、不写真 kuzu。"""
+    monkeypatch.setenv("FXAPK_TRACKING_DB", str(tmp_path / "track.json"))
+    import apkscan.track.autoingest as _ai
+
+    monkeypatch.setattr(_ai, "_ingest_graph", lambda *a, **k: None)
+
 runner = CliRunner()
 
 
@@ -515,6 +524,41 @@ def test_analyze_dynamic_no_package_skips_capture_and_merge(monkeypatch):
 
     assert cap_calls["called"] is False
     assert merge_calls["rerender_called"] is False
+
+
+def test_dynamic_merge_reingests_enriched_report(monkeypatch):
+    """动态富化（merge）成功后，用就地富化的同一 report 再入账，且 track 透传。"""
+    from apkscan.dynamic import merge
+
+    monkeypatch.setattr(merge, "load_runtime_endpoints", lambda p: ["EP"])
+    monkeypatch.setattr(
+        merge,
+        "merge_and_rerender",
+        lambda *a, **k: {"merged": 1, "new_leads": 1, "report_paths": ["outdir/demo.json"]},
+    )
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        cli, "_auto_track", lambda report, path, *, track: calls.append((report, path, track))
+    )
+
+    report = _make_report("com.x")
+    cli._merge_runtime_into_report({"status": STATUS_DONE}, "outdir", report, ["json"], "demo", track=True)
+
+    assert len(calls) == 1
+    assert calls[0][0] is report  # 用就地富化后的同一 report 再入账（含运行时新增线索）
+    assert calls[0][2] is True  # track 透传
+
+
+def test_dynamic_merge_failure_skips_reingest(monkeypatch):
+    """merge 抛异常 → 不再入账（异常被兜住，不调 _auto_track）。"""
+    from apkscan.dynamic import merge
+
+    monkeypatch.setattr(merge, "load_runtime_endpoints", lambda p: (_ for _ in ()).throw(RuntimeError("boom")))
+    calls: list[tuple] = []
+    monkeypatch.setattr(cli, "_auto_track", lambda *a, **k: calls.append(a))
+
+    cli._merge_runtime_into_report({"status": STATUS_DONE}, "outdir", _make_report("com.x"), ["json"], "demo", track=True)
+    assert calls == []  # merge 失败路径不触发再入账
 
 
 def test_resolve_out_defaults_to_apk_dir(tmp_path: Path) -> None:
