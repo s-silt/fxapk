@@ -56,6 +56,15 @@ class GraphStore:
         ensure_schema(self._conn)
         return self._conn
 
+    def ensure_ready(self) -> None:
+        """显式打开连接（建库 + schema）。kuzu 缺失 → ImportError 上抛（不在此吞）。
+
+        供 CLI 在调用 never-throw 的 delete_entity/unlink/prune_weak **之前**探活：
+        那些方法自身吞 ImportError 返 0，CLI 需要先探活才能给出统一的「装 kuzu」提示。
+        """
+        with self._lock:
+            self._ensure_open()
+
     def close(self) -> None:
         """关闭连接与 DB（绝不抛）。重复 close 安全。"""
         with self._lock:
@@ -148,3 +157,55 @@ class GraphStore:
             "MERGE (a)-[r:OBSERVED]->(e) SET r.weight=$weight",
             {"sha256": apk_sha256, "eid": eid, "weight": weight},
         )
+
+    # ---- 删除（参数化防注入；绝不抛——失败 log 返 0） ----------------------
+    def delete_entity(self, kind: str, value: str) -> int:
+        """全局删除一个实体及其所有 OBSERVED 边。返回删除的实体数（0/1）。
+
+        Kuzu 删除语义：先删边、再删节点（不依赖 DETACH DELETE 是否受支持）。
+        value 来自样本/人工输入不可信 → 全经 query_rows(params=) 参数化（约束 C：防 Cypher 注入）。
+        kuzu 缺失 / 查询异常一律 log + 返 0，绝不抛、不连累线索面板与主流程。
+        """
+        eid = f"{kind}:{value}"
+        try:
+            # 无 RETURN 的 DELETE 走 execute（不取行）；仅 COUNT 用 query_rows。
+            self.execute(
+                "MATCH (:Apk)-[r:OBSERVED]->(e:Entity {id: $id}) DELETE r",
+                {"id": eid},
+            )
+            rows = self.query_rows(
+                "MATCH (e:Entity {id: $id}) RETURN COUNT(e) AS c",
+                {"id": eid},
+            )
+            n = int(rows[0]["c"]) if rows else 0
+            self.execute(
+                "MATCH (e:Entity {id: $id}) DELETE e",
+                {"id": eid},
+            )
+            return n
+        except Exception:
+            logger.warning("[graph] delete_entity 失败（已隔离返 0）：%s", eid, exc_info=True)
+            return 0
+
+    def unlink(self, apk_sha256: str, kind: str, value: str) -> int:
+        """只断这一条 (Apk)-[:OBSERVED]->(Entity) 边（不动节点）。返回删除的边数。
+
+        全经参数化查询防注入；kuzu 缺失 / 查询异常一律 log + 返 0，绝不抛。
+        """
+        eid = f"{kind}:{value}"
+        try:
+            rows = self.query_rows(
+                "MATCH (a:Apk {sha256: $sha})-[r:OBSERVED]->(e:Entity {id: $id}) RETURN COUNT(r) AS c",
+                {"sha": apk_sha256, "id": eid},
+            )
+            n = int(rows[0]["c"]) if rows else 0
+            self.execute(
+                "MATCH (a:Apk {sha256: $sha})-[r:OBSERVED]->(e:Entity {id: $id}) DELETE r",
+                {"sha": apk_sha256, "id": eid},
+            )
+            return n
+        except Exception:
+            logger.warning(
+                "[graph] unlink 失败（已隔离返 0）：%s -> %s", apk_sha256, eid, exc_info=True
+            )
+            return 0

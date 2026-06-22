@@ -6,10 +6,13 @@
 
 from __future__ import annotations
 
+import logging
 from collections import Counter, defaultdict
 
 from apkscan.graph.store import GraphStore
 from apkscan.graph.weight import get_weight, is_strong
+
+logger = logging.getLogger(__name__)
 
 # 置信分归一化常数：confidence = score / (score + K)，单调、落 (0,1)。
 # 契约：同一次查询内单调可比、可用于簇间排序；绝对值不稳定、不跨查询/版本承诺（见 spec §7.2）。
@@ -72,6 +75,27 @@ def query_link(store: GraphStore, sha256: str) -> dict:
         reverse=True,
     )
     return {"apk": apk[0] if apk else {"sha256": sha256}, "related": related}
+
+
+def prune_weak(store: GraphStore) -> int:
+    """一次性清存量非强档噪音：枚举所有实体，对 not is_strong(kind) 的逐个 delete_entity。
+
+    返回清理掉的实体数。kuzu 缺失 / 查询异常一律 log + 返 0，绝不抛
+    （delete_entity 本身也已隔离，逐个删失败仅少计一个、不连累整体）。
+    """
+    try:
+        rows = store.query_rows("MATCH (e:Entity) RETURN e.kind AS kind, e.value AS value")
+    except Exception:
+        logger.warning("[graph] prune_weak 枚举实体失败（已隔离返 0）", exc_info=True)
+        return 0
+    pruned = 0
+    for r in rows:
+        kind = str(r.get("kind") or "")
+        if is_strong(kind):
+            continue
+        value = str(r.get("value") or "")
+        pruned += store.delete_entity(kind, value)
+    return pruned
 
 
 def query_by_kind(store: GraphStore, kind: str, value: str) -> dict:
