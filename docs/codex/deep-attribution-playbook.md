@@ -39,6 +39,21 @@
 
 **web-check 不覆盖的**（被动 DNS 历史、CT 全量轮换池、ASN-BGP 深查、Shodan/Censys/FOFA/Hunter/ZoomEye）→ crt.sh 直查 + **Shodan 实查（Codex 有 key）** + 其余 key-gated 给「建议调取语句」。
 
+## 动态抓包抓不到目标：诊断 + 自写探针（绝不"抓不到就算了"）
+
+`fxapk capture` 已内置 mitmproxy + frida SSL unpinning（OkHttp3 / SSLContext / TrustManagerImpl）+ frida-core 运行时密钥 hook + JS-bridge 事件 + OkHttp 加密前明文 token + SQLCipher 落库明文。**先确认这些已生效**（看 capture 日志的 hook 命中）。关键目标（客服后端 / 聊天会话 / 加密请求体）若仍没抓到——**不要停，诊断原因再写针对性 frida 探针**：
+
+| 症状 | 大概率原因 | 探针怎么写 |
+|---|---|---|
+| 抓到 HTTPS 但请求体是密文/乱码 | 应用层加密（CryptoJS/AES `{data,timestamp}` 信封） | 优先用 fxapk 抠的 `crypto_recipe`（算法/key/iv）离线解密；或 hook `javax.crypto.Cipher.doFinal` / 应用自身加解密·签名函数，dump 明文 + URL |
+| 聊天/实时消息不在流量里 | 走 **WebSocket**（socket.js / OkHttp `WebSocket` / WebView 内 JS） | hook `okhttp3.WebSocket` / `WebSocketListener.onMessage`、WebView `evaluateJavascript` / JS-bridge、或 H5 里 `WebSocket.prototype.send`+`onmessage`，dump 收发帧 |
+| 端点只在点了某功能后才出现 | UI 触发型（要进客服会话才发请求） | 驱动 app 走到该功能（点客服/发消息）再抓；必要时录操作脚本复现 |
+| 完全没流量 / 进程秒退 | pinning 没绕过 / 反 frida / 非 OkHttp 栈 / native 发包 | 加强 unpinning + spawn 模式 + 反检测；非标准栈则 hook 其发送函数（`java.net.*`、native `send`/JNI） |
+
+**写探针标准做法**：写一段 frida JS hook 上述方法，把**明文 URL / 参数 / WS 帧 / 解密后体**打到 console 或落文件；`frida -U -f <包名> -l probe.js -q` 启动并触发对应功能。探针抓到的端点 / 标识符**回灌进调证线索**（`fxapk analyze --extra-dex` / 手动并入 report，或直接进调证报告）。
+
+**循环**：探针 → 抓到明文 → 仍缺就精修 hook 点 → 直到拿到后端端点与聊天内容。**这是默认要求，不是可选**——本案客服系统就是标准抓包抓不到、靠自写探针 hook 才拿下。
+
 ## 标准侦察动作（够用即止，按线索取）
 
 - **注册/解析**：RDAP（rdap.org / verisign）、whois、历史 WHOIS、NS。`Gname 等境外注册商 + Cloudflare DNS-only` 是灰产高频组合信号。
