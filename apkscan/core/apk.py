@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from collections.abc import Iterator
-from functools import cached_property
+from functools import cached_property, lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,117 @@ def _silence_androguard_logging() -> None:
         _ANDROGUARD_SILENCED = True
     except Exception:
         logger.debug("禁用 androguard loguru 失败（忽略）", exc_info=True)
+
+
+# 合法 NCName：首字符字母/下划线，其余字母/数字/下划线/'-'/'.'（不含冒号）。
+_NCNAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.\-]*$")
+
+
+@lru_cache(maxsize=512)
+def _uri_lxml_ok(uri: str) -> bool:
+    """该 uri 能否作为 namespace URI 被 lxml ``etree.Element`` 接受（以 lxml 实判为准）。
+
+    不用手搓字符黑名单：lxml 拒收的字符集远比直觉广——除空白/C0-C1 控制符/NUL 外，还含
+    ``< > | ^ [ ] { } ` "`` 等可见 ASCII 及全部非 ASCII（0xA0-0xFF）。黑名单必有漏网，加固壳
+    换个投毒字符即可绕过、让构造再次抛 'Invalid namespace URI'。直接问 lxml 最稳，对任意投毒
+    变体都满足"净化结果必被 lxml 接受"的后置条件。按 uri 串 memoize（get_xml_obj 对每个
+    START_TAG 都读一次 nsmap，避免重复探测）。空串 '' 合法（保留）。
+    """
+    if not uri:
+        return True  # 空 URI 对 lxml 合法，快路返回（兼具防版本差异）
+    try:
+        from lxml import etree  # type: ignore[reportMissingModuleSource]
+
+        etree.Element("_p", nsmap={"_p": uri})  # type: ignore[reportUnknownMemberType]
+    except ValueError:
+        return False
+    except Exception:  # noqa: BLE001 - lxml 缺失/异常不阻塞解析，保守保留（绝不误丢合法项）
+        logger.debug("lxml namespace URI 校验异常，保守保留：%r", uri, exc_info=True)
+        return True
+    return True
+
+
+def _sanitize_nsmap(raw: dict[str | None, str]) -> dict[str | None, str]:
+    """净化 AXML 的 {prefix: uri} 命名空间映射，使其能被 lxml ``etree.Element`` 接受。
+
+    背景：加固壳在二进制 AndroidManifest 注入【非法 namespace URI / 前缀】（反分析投毒）。
+    androguard 在 APK() 构造期把 manifest 转 lxml，``etree.Element(tag, nsmap=...)`` 对非法
+    URI/前缀抛 ValueError，而 androguard 只救 'Invalid namespace prefix'，坏 URI 落 else:
+    raise → 整个 APK() 构造崩 → fxapk fail-fast、静态阶段全死。apktool 的宽容 AXML 解码器
+    则跳过非法项继续出包名/资源。本函数对齐 apktool：丢坏项、留好项、空前缀降级为默认 ns，
+    让 lxml 不再抛、manifest 降级可解。
+
+    逐项 {prefix: uri} 规则（顺序固定，保证幂等）：
+      1. URI 被 lxml 拒收（含空白/控制符/NUL/`< > | ^` 等可见 ASCII 及非 ASCII，见
+         :func:`_uri_lxml_ok`）→ 整对丢弃（投毒 URI 无法安全救回；据下游分析，android: 属性
+         走属性自带 URI(getAttributeNamespace)，与 nsmap 无关，丢弃不会让组件/exported 解析
+         读空）。空串 URI '' 合法，保留。
+      2. 前缀规整：None 保留；'' → None（空前缀=默认命名空间，不丢、不留 ''）；
+         非法 NCName（含 '<!--'/空格/冒号/数字开头）→ 整对丢弃（无法安全规整）；合法则原样留。
+      3. 规整后若出现重复 key（如多个空前缀都→None），保留首个、丢后续。
+      4. 返回新 dict，绝不原地改 raw（纯函数，便于单测）。
+
+    Args:
+        raw: 原始 {prefix: uri} 映射；prefix 可能为 None/''/非法 NCName，uri 可能被投毒。
+
+    Returns:
+        净化后的新 dict，可安全传给 ``etree.Element(nsmap=...)``。
+    """
+    out: dict[str | None, str] = {}
+    for prefix, uri in raw.items():
+        # 1) URI 坏（以 lxml 实判为准）→ 整对丢弃（空串 '' 合法，lxml 接受）。
+        if uri is not None and not _uri_lxml_ok(uri):
+            continue
+        # 2) 前缀规整。
+        key: str | None
+        if prefix is None or prefix == "":
+            key = None  # 空前缀 = 默认命名空间
+        elif _NCNAME_RE.match(prefix) is not None:
+            key = prefix
+        else:
+            continue  # 非法 NCName，无法安全规整 → 丢弃
+        # 3) 去重：保留首个出现的 key。
+        if key in out:
+            continue
+        out[key] = uri
+    return out
+
+
+_AXML_NSMAP_PATCHED = False
+
+
+def _install_axml_nsmap_shim() -> None:
+    """幂等 monkeypatch androguard ``AXMLParser.nsmap``（property），使其返回净化映射。
+
+    把原 property 取到的 {prefix: uri} 过 :func:`_sanitize_nsmap` 后再返回，让被加固壳投毒
+    的非法 namespace URI/前缀在抵达 ``etree.Element`` 前被剔除，避免 APK() 构造期崩溃。
+
+    幂等：用模块级标记 ``_AXML_NSMAP_PATCHED`` 防重复包裹（否则多次 load_apk 会把 property
+    层层套娃）。安装失败时 ``logging.exception`` 如实记录后回退原行为（不 swallow、不裸 pass）。
+    androguard 的 import 只允许出现在本文件。
+    """
+    global _AXML_NSMAP_PATCHED
+    if _AXML_NSMAP_PATCHED:
+        return
+    try:
+        from androguard.core.axml import AXMLParser
+
+        original = AXMLParser.nsmap
+        if not isinstance(original, property):
+            logger.warning("AXMLParser.nsmap 非 property（androguard 版本变化？），跳过 shim")
+            return
+        original_fget = original.fget
+        if original_fget is None:
+            logger.warning("AXMLParser.nsmap property 无 getter，跳过 shim")
+            return
+
+        def _sanitized_nsmap(self: Any) -> dict[str | None, str]:
+            return _sanitize_nsmap(original_fget(self))
+
+        AXMLParser.nsmap = property(_sanitized_nsmap)  # type: ignore  # noqa: PGH003 - property 无 setter，monkeypatch 替换
+        _AXML_NSMAP_PATCHED = True
+    except Exception:  # noqa: BLE001 - 装 shim 失败要如实记录后回退原行为，不阻塞加载
+        logger.exception("安装 AXML nsmap 净化 shim 失败，回退原行为（坏命名空间可能仍致解析失败）")
 
 
 class ApkParseError(RuntimeError):
@@ -428,6 +540,10 @@ def load_apk(
     """
     # androguard 的 import 只允许出现在本文件。
     _silence_androguard_logging()  # 用 androguard 前才禁其 loguru（避免启动期白付 loguru）
+    # 加固壳常在二进制 manifest 注入非法 namespace URI（反分析投毒），会让 APK() 构造期
+    # 的 lxml etree.Element 抛 ValueError 致整体 fail-fast。装幂等 shim 净化 nsmap，对齐
+    # apktool 的宽容降级，让 manifest 可解（包名/组件/权限/证书等不再因此全丢）。
+    _install_axml_nsmap_shim()
     from androguard.core.apk import APK
     from androguard.core.dex import DEX
 
