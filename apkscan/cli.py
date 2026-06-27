@@ -711,6 +711,68 @@ def letters(
         raise typer.Exit(code=1) from exc
 
 
+@app.command(name="probe-leads")
+def probe_leads(
+    log: Path = typer.Argument(..., help="frida 探针日志（`frida -o probe.log` 的 console 输出）。"),
+    md: str = typer.Option("", "--md", help="台账 markdown 输出路径（默认打到终端）。"),
+    json_out: str = typer.Option("", "--json", help="台账 JSON 输出路径（程序化消费/入图）。"),
+    into: str = typer.Option("", "--into", help="把线索追加进已有 report.json 的 leads（去重）。"),
+) -> None:
+    """把 46 个独立探针(`-l` 注入)散落的 `[LEAD]` 输出聚成**调证台账**，并可回灌进 report.json。
+
+    薄包装：读探针日志 → parse_probe_log（按 LeadCategory 分类+where_to_request）→ 去重 →
+    build_ledger_md / to_ledger_dict / merge_into_report_json。绝不抛——读不到 / 坏文件打印
+    友好提示并退出码 1。线索带合规提示（含高敏个人信息按办案合规留存处置）。
+    """
+    import json as _json
+
+    try:
+        try:
+            text = log.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            typer.echo(f"错误：找不到探针日志：{log}", err=True)
+            raise typer.Exit(code=1) from None
+        except OSError as exc:
+            typer.echo(f"错误：读取探针日志失败：{log}（{exc}）", err=True)
+            raise typer.Exit(code=1) from exc
+
+        from apkscan.dynamic import probe_ingest
+
+        leads = probe_ingest.dedup(probe_ingest.parse_probe_log(text))
+        typer.echo(f"解析出 {len(leads)} 条去重调证线索。")
+
+        ledger_md = probe_ingest.build_ledger_md(leads)
+        if md:
+            try:
+                Path(md).write_text(ledger_md, encoding="utf-8")
+                typer.echo(f"台账(markdown) → {md}")
+            except OSError as exc:
+                typer.echo(f"错误：写台账失败：{md}（{exc}）", err=True)
+                raise typer.Exit(code=1) from exc
+        if json_out:
+            try:
+                Path(json_out).write_text(
+                    _json.dumps(probe_ingest.to_ledger_dict(leads), ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                typer.echo(f"台账(JSON) → {json_out}")
+            except OSError as exc:
+                typer.echo(f"错误：写台账 JSON 失败：{json_out}（{exc}）", err=True)
+                raise typer.Exit(code=1) from exc
+        if into:
+            added = probe_ingest.merge_into_report_json(into, leads)
+            typer.echo(f"已追加 {added} 条探针线索进 {into}（去重）。")
+        if not (md or json_out or into):
+            typer.echo("")
+            typer.echo(ledger_md)
+    except typer.Exit:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 兜底任何意外，转友好提示而非 traceback
+        logger.exception("[cli] probe-leads 聚合台账异常")
+        typer.echo(f"错误：聚合台账失败：{exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
 @app.command()
 def gui() -> None:
     """启动新手友好的图形界面（tkinter 单窗口：环境体检 / 静态分析 / 一键全自动）。
