@@ -18,7 +18,14 @@ real fraud servers out of hundreds of library/CDN noise entries.
 
 ---
 
-## ⬇️ Download & run (no Python needed)
+## ⬇️ Download & run (GUI bundle — no longer packaged)
+
+> ⚠️ **The GUI / self-contained exe bundle is no longer built or adapted for new features** (since 2026-06).
+> The project's primary path is now **running from source + the `fxapk` CLI + Codex (AI agent) driving it** — see [Install](#install) below.
+> The `fxapk gui` (tkinter) source still ships in the repo and runs locally, but `fxapk-gui-*.zip` is no longer released and new commands (e.g. `probe-leads`, the bundled frida-probe library) are CLI-only. Old zips still run but only include the commands present at build time.
+
+<details>
+<summary>Legacy GUI bundle instructions (kept for users who already have an old zip)</summary>
 
 Don't want the command line? Grab `fxapk-gui-vX.Y.Z-win64.zip` from
 **[Releases](https://github.com/s-silt/fxapk/releases/latest)** — a 64-bit Windows **self-contained**
@@ -34,7 +41,9 @@ bundle with frida / mitmproxy / adb built in (**nothing else to install**):
 > ⚠️ Unsigned; on first run Windows SmartScreen / AV may warn — choose "More info → Run anyway" or
 > allow-list it. frida-server is auto-pushed to the device by ABI. Keep the whole folder together.
 
-Developers / CLI users: use `pip install` below.
+</details>
+
+Developers / CLI users: use `pip install` below (the primary path now).
 
 ---
 
