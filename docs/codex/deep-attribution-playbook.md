@@ -41,7 +41,9 @@
 
 ## 动态抓包抓不到目标：诊断 + 自写探针（绝不"抓不到就算了"）
 
-`fxapk capture` 已内置 mitmproxy + frida SSL unpinning（OkHttp3 / SSLContext / TrustManagerImpl）+ frida-core 运行时密钥 hook + JS-bridge 事件 + OkHttp 加密前明文 token + SQLCipher 落库明文。**先确认这些已生效**（看 capture 日志的 hook 命中）。关键目标（客服后端 / 聊天会话 / 加密请求体）若仍没抓到——**不要停，诊断原因再写针对性 frida 探针**：
+`fxapk capture` 已内置 mitmproxy + frida SSL unpinning（OkHttp3 / SSLContext / TrustManagerImpl）+ frida-core 运行时密钥 hook + JS-bridge 事件 + OkHttp 加密前明文 token + SQLCipher 落库明文。**先确认这些已生效**（看 capture 日志的 hook 命中）。关键目标（客服后端 / 聊天会话 / 加密请求体）若仍没抓到——**不要停**。
+
+**先查现成探针库**（`git pull` 更新，别动手写重复轮子）：本仓库 `docs/codex/frida-probes/` 有 **46 个现成 frida 探针** + 指导书（`指导书.md`）。按指导书 §2「症状 → 选哪个探针」决策表挑，直接 `frida -U -f <包名> -l probe-templates/<探针>.js -q` 注入。覆盖：Telegram/MTProto 改包、QUIC/Cronet、RN/Flutter、MQTT/gRPC、RTC 裸聊、支付 SDK 商户号、推送 C2、短信马、AndroidKeyStore/MMKV 解密 key、native 接入节点、敏感数据窃取/无障碍远控/NFC 盗刷/毁证抢救/多开识别等。**确实没有覆盖的症状，再按下表诊断写针对性探针**：
 
 | 症状 | 大概率原因 | 探针怎么写 |
 |---|---|---|
@@ -50,9 +52,16 @@
 | 端点只在点了某功能后才出现 | UI 触发型（要进客服会话才发请求） | 驱动 app 走到该功能（点客服/发消息）再抓；必要时录操作脚本复现 |
 | 完全没流量 / 进程秒退 | pinning 没绕过 / 反 frida / 非 OkHttp 栈 / native 发包 | 加强 unpinning + spawn 模式 + 反检测；非标准栈则 hook 其发送函数（`java.net.*`、native `send`/JNI） |
 
-**写探针标准做法**：写一段 frida JS hook 上述方法，把**明文 URL / 参数 / WS 帧 / 解密后体**打到 console 或落文件；`frida -U -f <包名> -l probe.js -q` 启动并触发对应功能。探针抓到的端点 / 标识符**回灌进调证线索**（`fxapk analyze --extra-dex` / 手动并入 report，或直接进调证报告）。
+**写探针标准做法**：写一段 frida JS hook 上述方法，把**明文 URL / 参数 / WS 帧 / 解密后体**打到 console（探针在命中高价值锚点处打 `[tag][LEAD-...]` 标记）；`frida -U -f <包名> -l probe.js -o probe.log -q` 启动并触发对应功能、**落盘** `probe.log`。
 
-**循环**：探针 → 抓到明文 → 仍缺就精修 hook 点 → 直到拿到后端端点与聊天内容。**这是默认要求，不是可选**——本案客服系统就是标准抓包抓不到、靠自写探针 hook 才拿下。
+**回灌进调证线索（一条命令）**：
+```
+fxapk probe-leads probe.log                     # 聚成调证台账（按 LeadCategory 分组 + 调证落点 + 取证完备性诊断）
+fxapk probe-leads probe.log --into report.json  # 直接把探针线索回灌进 fxapk 报告的 leads（去重、source=runtime-probe）
+```
+台账末尾的「**取证完备性**」会诊断**定人 / 穿透 / 固证**三轴哪类没抓到、该补跑哪个探针——照它补抓。回灌后探针线索与 fxapk 静态/动态线索同构，一起进报告渲染、串案、套打调证函（`fxapk letters`）。
+
+**循环**：选库探针/写探针 → 抓到明文 → `probe-leads` 看台账缺哪类 → 按完备性诊断补跑 → 直到三轴齐、拿到后端端点与聊天内容。**这是默认要求，不是可选**——标准抓包抓不到的客服系统/自建协议，就靠探针库 + 自写探针 hook 才拿下。
 
 ## 标准侦察动作（够用即止，按线索取）
 
