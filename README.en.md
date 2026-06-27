@@ -16,6 +16,8 @@ Built for forensics on fraudulent Android apps: it extracts the **real configure
 to **subpoena-able owners**, grades domains/IPs by **"investigate vs. skip"**, and surfaces the
 real fraud servers out of hundreds of library/CDN noise entries.
 
+> Disclaimer: this project is for **personal security research / testing**. Any fraud-related findings may be handed to the **relevant authorities** for lawful handling. Terms like "investigate / case-handling / assistance request" only describe lawful evidence-collection paths and imply no official status.
+
 ---
 
 ## ⬇️ Download & run (GUI bundle — no longer packaged)
