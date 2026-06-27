@@ -22,7 +22,15 @@
 
 ---
 
-## ⬇️ 下载即用（新手，无需装 Python）
+## ⬇️ 下载即用（GUI 包 —— 已停止打包适配）
+
+> ⚠️ **GUI / 自包含 exe 包不再打包、不再适配新功能**（自 2026-06）。
+> 项目改为 **源码直接运行 + CLI（`fxapk`）+ Codex（AI agent）驱动** 为主路径 —— 见下方 [安装](#安装)。
+> `fxapk gui`（tkinter 窗口）源码仍在仓库、可本地运行，但**不再随版本构建/发布 `fxapk-gui-*.zip`、也不再为新增能力（如 `probe-leads`、新探针库）适配界面**；旧版 zip 仍能跑但只含打包时的命令。
+> 新功能一律走 CLI；动态取证的 frida 探针库见 [`docs/codex/frida-probes/`](docs/codex/frida-probes/)（`git pull` 更新）。
+
+<details>
+<summary>历史 GUI 包说明（仅对已有旧 zip 的用户保留）</summary>
 
 不想碰命令行？到 **[Releases](https://github.com/s-silt/fxapk/releases/latest)** 下载
 `fxapk-gui-vX.Y.Z-win64.zip`（64 位 Windows **自包含**包，内置 frida / mitmproxy / adb，**无需另装任何东西**）：
@@ -35,7 +43,9 @@
 > ⚠️ 未签名，首次运行 Windows SmartScreen / 杀软可能拦，点「更多信息 → 仍要运行」或加白名单。
 > frida-server 由程序按设备 ABI 自动推到手机，无需手动准备。整个文件夹一起拷贝。
 
-开发者 / 命令行用户走下面的 `pip install`。
+</details>
+
+开发者 / 命令行用户走下面的 `pip install`（现主路径）。
 
 ---
 
@@ -139,11 +149,12 @@ fxapk auto app.apk --out out
 | `repackage APK` | 脱壳后把**去壳版**重打包（zip 替 DEX + apksigner 重签）装回设备，使抓包抓**去壳版**（绕壳反 frida/反调试）；`auto` 默认含此步（`--no-repackage` 关）。需 apksigner/zipalign + 设备；**四联判活**确认起得来才算成功、失败优雅降级回原版抓包。治不了 VMP/重 native/反模拟器壳 |
 | `batch DIR` | 批量分析文件夹下所有 APK + 跨样本团伙聚类（写 `case_correlation.json`），并持久化进本地案件图谱 |
 | `letters REPORT.json` | 把可办案化线索套打成「调证函 / 协查文书」草稿（markdown，带免责标注） |
+| `probe-leads probe.log` | 把独立 frida 探针（[`docs/codex/frida-probes/`](docs/codex/frida-probes/) 46 个）`-l` 注入吐的 `[LEAD]` 散点聚成**调证台账**（按 LeadCategory 分组 + where_to_request + 取证完备性三轴诊断）；`--into report.json` 回灌进报告 leads，`--md`/`--json` 落盘 |
 | `digest REPORT.json` | 把 report.json 压成**紧凑调证摘要 JSON** 打到 stdout（按优先级排序、扁平字段，供任意 AI agent / 脚本低 token 直接决策；默认明文便于取证查看，`--redact` 喂云端 agent 时脱敏高敏值） |
 | `selfcheck` | **自检诊断 JSON**：逐项报告各能力（图谱/解密/jadx/动态/联网富化/web-check）通不通、怎么修——供任意 AI agent 驱动前自检 |
 | `graph …` | 本地案件图谱串案（需 `fxapk[graph]`）：`ingest`（报告入图）/ `link <sha256>`（拉关联 APK）/ `query --kind --value`（按实体反查）/ `cluster`（团伙簇+置信分）/ `stats` / `cypher`（原始 Cypher）。默认输出稳定 JSON |
 | `track` | 起**本地/局域网网页**追踪每个 APK 发现的线索 + **手动办案进度**（两级：APK 总进度 + 每条线索状态/备注/带时间戳进展留痕，需 `fxapk[track]`）；`analyze`/`auto` 默认自动入台账（`--no-track` 关）。`track ingest <report.json…>` 回填历史报告。台账在 `~/.apkscan/tracking.json`（仓库外，`git pull` 不覆盖） |
-| `gui` | 图形界面（tkinter 单窗口：体检 / 静态 / 一键全自动） |
+| `gui` | 图形界面（tkinter 单窗口：体检 / 静态 / 一键全自动）。**⚠️ 已停止打包/适配新功能**（不再发布 `fxapk-gui-*.zip`、新命令如 `probe-leads` 不进界面）；源码仍可本地跑，主路径用 CLI |
 
 ### 常用参数
 
