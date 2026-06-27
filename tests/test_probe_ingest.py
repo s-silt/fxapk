@@ -130,6 +130,27 @@ def test_to_report_leads_sets_runtime_source_and_advice() -> None:
     assert all(lead.is_runtime_seen for lead in rls)
 
 
+def test_coverage_axes_flags_missing_and_suggests() -> None:
+    """只抓到 PAYMENT(定人轴)时，穿透/固证轴标未覆盖并给补跑建议。"""
+    leads = probe_ingest.parse_probe_log("[pay] seller_id=2088123 [LEAD-定人]")
+    cov = probe_ingest.coverage_axes(leads)
+    assert len(cov) == 3  # 定人/穿透/固证
+    ren = {k: v for k, v in cov.items()}
+    dingren = next(v for k, v in ren.items() if "定人" in k)
+    assert dingren["covered"] and "PAYMENT" in dingren["categories"]
+    chuantou = next(v for k, v in ren.items() if "穿透" in k)
+    assert not chuantou["covered"]
+    assert "http-url" in chuantou["suggestion"] or "netstat" in chuantou["suggestion"]
+    guzheng = next(v for k, v in ren.items() if "固证" in k)
+    assert not guzheng["covered"] and guzheng["suggestion"]
+
+
+def test_ledger_md_includes_coverage_section() -> None:
+    md = probe_ingest.build_ledger_md(probe_ingest.parse_probe_log(_SAMPLE_LOG))
+    assert "取证完备性" in md
+    assert "定人" in md and "穿透" in md and "固证" in md
+
+
 def test_merge_into_report_json_appends_and_dedups(tmp_path) -> None:
     report = {"leads": [{"category": "PAYMENT", "value": "已存在 2088", "advice": "建议调证"}]}
     p = tmp_path / "report.json"

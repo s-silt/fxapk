@@ -87,6 +87,28 @@ _SKIP_TAGS = {
     "dexload", "memdex", "loadlib", "exec", "unpin", "anti", "anti-native", "tenant", "native",
 }
 
+# 三类调证价值轴 → 命中即覆盖的 LeadCategory（取证完备性诊断用）。
+_AXIS_CATS: dict[str, set[LeadCategory]] = {
+    "定人(锚定自然人/账户)": {
+        LeadCategory.PAYMENT, LeadCategory.CHANNEL, LeadCategory.SMS_FORWARDING,
+        LeadCategory.CARD_MERCHANT, LeadCategory.RUNTIME_CREDENTIAL, LeadCategory.CONTACT,
+        LeadCategory.CONFIG_KEY, LeadCategory.SDK_SERVICE,
+    },
+    "穿透(逼出真源站/接入节点)": {
+        LeadCategory.DOMAIN, LeadCategory.IP, LeadCategory.SELF_HOSTED_IM, LeadCategory.ADMIN_PANEL,
+    },
+    "固证(受害人物证/远控/解密)": {
+        LeadCategory.VICTIM_DATA, LeadCategory.REMOTE_CONTROL, LeadCategory.WALLET_SECRET,
+        LeadCategory.CRYPTO_RECIPE, LeadCategory.FOURTH_PARTY_PAYMENT,
+    },
+}
+# 某轴未覆盖时的补跑建议（指向具体探针）。
+_AXIS_SUGGEST: dict[str, str] = {
+    "定人(锚定自然人/账户)": "补跑 pay-sdk / sdk-appkey / sms-forward-outbound / sharedprefs 抓商户号/appKey/转发号/落地凭据。",
+    "穿透(逼出真源站/接入节点)": "补跑 http-url / okhttp-interceptor / cronet-quic-http3 / native-ssl / netstat / coldstart-config 抓真后端域名/native 接入节点。",
+    "固证(受害人物证/远控/解密)": "补跑 sensitive-data-access / sqlite(SQLCipher) / accessibility-abuse / keystore-alias-tracer 抓受害人数据/落地库/远控/解密 key。",
+}
+
 _TAG_RE = re.compile(r"^\s*\[([a-z0-9][a-z0-9_-]*)\]")
 _BRACKET_RE = re.compile(r"\[[^\]]*\]")
 _WS_RE = re.compile(r"\s+")
@@ -190,8 +212,29 @@ def to_report_leads(leads: list[ProbeLead]) -> list[Lead]:
     return out
 
 
+def coverage_axes(leads: list[ProbeLead]) -> dict[str, dict[str, object]]:
+    """诊断三类调证价值轴（定人/穿透/固证）的覆盖情况 + 未覆盖轴的补跑建议。
+
+    Returns:
+        ``{轴名: {"covered": bool, "categories": [命中的 category.value], "suggestion": str}}``。
+        covered 轴 suggestion 为空串；未覆盖轴给指向具体探针的补跑建议。
+    """
+    present = {pl.category for pl in dedup(leads)}
+    out: dict[str, dict[str, object]] = {}
+    for axis, cats in _AXIS_CATS.items():
+        hit = sorted(c.value for c in (present & cats))
+        out[axis] = {
+            "covered": bool(hit),
+            "categories": hit,
+            "suggestion": "" if hit else _AXIS_SUGGEST[axis],
+        }
+    return out
+
+
 def build_ledger_md(leads: list[ProbeLead]) -> str:
-    """把线索聚成调证台账（markdown），按 LeadCategory 分组、每组带 where_to_request。"""
+    """把线索聚成调证台账（markdown），按 LeadCategory 分组、每组带 where_to_request，
+    末尾附「取证完备性」三轴诊断（定人/穿透/固证覆盖 + 缺轴补跑建议）。
+    """
     deduped = dedup(leads)
     by_cat: dict[LeadCategory, list[ProbeLead]] = {}
     for pl in deduped:
@@ -212,6 +255,17 @@ def build_ledger_md(leads: list[ProbeLead]) -> str:
         for pl in items:
             lines.append(f"- `{pl.value}`  ← 探针 [{pl.probe}]")
         lines.append("")
+
+    # 取证完备性：三类调证价值轴的覆盖诊断（闭环——告诉办案人还差哪类、补跑什么）。
+    lines.append("## 取证完备性（三类调证价值）")
+    lines.append("")
+    for axis, info in coverage_axes(deduped).items():
+        if info["covered"]:
+            cats = "、".join(info["categories"]) if isinstance(info["categories"], list) else ""
+            lines.append(f"- ✓ **{axis}**：已覆盖（{cats}）")
+        else:
+            lines.append(f"- ✗ **{axis}**：未覆盖 → {info['suggestion']}")
+    lines.append("")
     return "\n".join(lines)
 
 
