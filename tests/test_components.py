@@ -162,6 +162,46 @@ def test_kind_inferred_from_group_when_field_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 全量 activity 基线（all_activities）：供下游覆盖度对照 / UI 自动驱动选屏
+# ---------------------------------------------------------------------------
+
+
+def test_all_activities_includes_non_exported() -> None:
+    # all_activities 收录全量 activity（无论是否 exported），作为覆盖度对照分母；
+    # exported 子集（components）仍只含导出那条，两者互不影响。
+    comp = ComponentSet(
+        activities=[
+            Component(name="com.x.MainActivity", exported=False, kind="activity"),
+            Component(name="com.x.OpenActivity", exported=True, kind="activity"),
+        ]
+    )
+    result = _run(comp)
+    assert result.meta["all_activities"] == [
+        "com.x.MainActivity",
+        "com.x.OpenActivity",
+    ]
+    assert [c["name"] for c in result.meta["components"]] == ["com.x.OpenActivity"]
+
+
+def test_all_activities_empty_when_no_activities() -> None:
+    result = _run(ComponentSet())
+    assert result.meta["all_activities"] == []
+
+
+def test_all_activities_skips_blank_names() -> None:
+    # 缺名/空白 activity 不计入全量名单（与产 Finding 时的缺名跳过保持一致）。
+    comp = ComponentSet(
+        activities=[
+            Component(name="", exported=False, kind="activity"),
+            Component(name="   ", exported=True, kind="activity"),
+            Component(name="com.x.RealActivity", exported=False, kind="activity"),
+        ]
+    )
+    result = _run(comp)
+    assert result.meta["all_activities"] == ["com.x.RealActivity"]
+
+
+# ---------------------------------------------------------------------------
 # 不命中：无导出组件
 # ---------------------------------------------------------------------------
 
