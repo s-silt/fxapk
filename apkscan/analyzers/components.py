@@ -152,6 +152,14 @@ class ComponentsAnalyzer(BaseAnalyzer):
         result.meta["exported_counts"] = exported_counts
         result.meta["exported_total"] = sum(exported_counts.values())
         result.meta["components"] = exported_components
+        # 全量 activity 名单（无论是否 exported）：下游运行时取证（覆盖度对照、
+        # UI 自动驱动选屏）需要 manifest 全量 activity 作为基线分母。缺名/空白跳过，
+        # 与产 Finding 时的缺名处理保持一致。
+        result.meta["all_activities"] = [
+            name
+            for comp in comp_set.activities
+            if (name := (getattr(comp, "name", "") or "").strip())
+        ]
         return result
 
     # ------------------------------------------------------------------
