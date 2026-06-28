@@ -773,6 +773,67 @@ def probe_leads(
         raise typer.Exit(code=1) from exc
 
 
+@app.command(name="pcap-leads")
+def pcap_leads(
+    pcap: Path = typer.Argument(..., help="带外抓的 pcap/pcapng（网关 tcpdump / PCAPdroid 免 root 导出 / Wireshark）。"),
+    md: str = typer.Option("", "--md", help="台账 markdown 输出路径（默认打到终端）。"),
+    json_out: str = typer.Option("", "--json", help="台账 JSON 输出路径（程序化消费）。"),
+    into: str = typer.Option("", "--into", help="把线索追加进已有 report.json 的 leads（去重）。"),
+) -> None:
+    """从**带外 pcap** 抽接入节点 IP:port + TLS SNI + DNS + JA3 → 调证台账，可回灌 report.json。
+
+    针对反分析涉诈 App：即便 TLS 解不开、走 MTProto/native 自建协议（普通抓包 endpoint=0），
+    带外抓的 pcap 里仍有真实接入节点 IP/SNI——这就是穿透真源站的调证锚点。纯标准库解析，绝不抛。
+    """
+    import json as _json
+
+    try:
+        from apkscan.core.models import LeadCategory
+        from apkscan.dynamic import pcap_ingest
+
+        summary = pcap_ingest.parse_pcap(str(pcap))
+        leads = pcap_ingest.to_report_leads(summary)
+        n_ip = sum(1 for lead in leads if lead.category == LeadCategory.IP)
+        n_dom = sum(1 for lead in leads if lead.category == LeadCategory.DOMAIN)
+        typer.echo(
+            f"解析出 {len(summary.flows)} 条流、{n_ip} 个公网接入节点、{n_dom} 个域名、"
+            f"{len(summary.dns_queries)} 条 DNS 查询。"
+        )
+        if not summary.flows and not summary.dns_queries:
+            typer.echo("提示：没解析出流量——确认是 pcap/pcapng、且为 Ethernet/RAW/Linux-SLL 链路（pcapng 也支持）。")
+
+        ledger = pcap_ingest.build_ledger_md(summary)
+        if md:
+            try:
+                Path(md).write_text(ledger, encoding="utf-8")
+                typer.echo(f"台账(markdown) → {md}")
+            except OSError as exc:
+                typer.echo(f"错误：写台账失败：{md}（{exc}）", err=True)
+                raise typer.Exit(code=1) from exc
+        if json_out:
+            try:
+                Path(json_out).write_text(
+                    _json.dumps(pcap_ingest.to_ledger_dict(summary), ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                typer.echo(f"台账(JSON) → {json_out}")
+            except OSError as exc:
+                typer.echo(f"错误：写台账 JSON 失败：{json_out}（{exc}）", err=True)
+                raise typer.Exit(code=1) from exc
+        if into:
+            added = pcap_ingest.merge_into_report_json(into, summary)
+            typer.echo(f"已追加 {added} 条带外线索进 {into}（去重）。")
+        if not (md or json_out or into):
+            typer.echo("")
+            typer.echo(ledger)
+    except typer.Exit:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 兜底任何意外，转友好提示而非 traceback
+        logger.exception("[cli] pcap-leads 聚合台账异常")
+        typer.echo(f"错误：聚合台账失败：{exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
 @app.command()
 def gui() -> None:
     """启动新手友好的图形界面（tkinter 单窗口：环境体检 / 静态分析 / 一键全自动）。
