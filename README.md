@@ -152,6 +152,8 @@ fxapk auto app.apk --out out
 | `batch DIR` | 批量分析文件夹下所有 APK + 跨样本团伙聚类（写 `case_correlation.json`），并持久化进本地案件图谱 |
 | `letters REPORT.json` | 把可办案化线索套打成「调证函 / 协查文书」草稿（markdown，带免责标注） |
 | `probe-leads probe.log` | 把独立 frida 探针（[`docs/codex/frida-probes/`](docs/codex/frida-probes/) 46 个）`-l` 注入吐的 `[LEAD]` 散点聚成**调证台账**（按 LeadCategory 分组 + where_to_request + 取证完备性三轴诊断）；`--into report.json` 回灌进报告 leads，`--md`/`--json` 落盘 |
+| `pcap-leads capture.pcap` | 从**带外 pcap**（网关 tcpdump / PCAPdroid 免 root / Wireshark）抽 **接入节点 IP:port + TLS SNI + DNS + JA3**——反 frida/pinning/MTProto 等普通抓包 `endpoint=0` 时，带外拿 IP/SNI 即穿透锚点（**解不开也能办案**）。纯标准库解析（零依赖）；`--into report.json` 回灌。见 [`capture-methods-beyond-frida.md`](docs/codex/capture-methods-beyond-frida.md) |
+| `capture-plan report.json` | 据静态报告的规避信号（加固/`endpoint=0`/加密配方/自建IM）输出**针对该样本的抓包打法**（起手式带外 pcap → 脱壳+反检测 → native/pcap-leads/tls-keylog → telegram-mtproto → 静态去 pin → 回灌串案） |
 | `digest REPORT.json` | 把 report.json 压成**紧凑调证摘要 JSON** 打到 stdout（按优先级排序、扁平字段，供任意 AI agent / 脚本低 token 直接决策；默认明文便于取证查看，`--redact` 喂云端 agent 时脱敏高敏值） |
 | `selfcheck` | **自检诊断 JSON**：逐项报告各能力（图谱/解密/jadx/动态/联网富化/web-check）通不通、怎么修——供任意 AI agent 驱动前自检 |
 | `graph …` | 本地案件图谱串案（需 `fxapk[graph]`）：`ingest`（报告入图）/ `link <sha256>`（拉关联 APK）/ `query --kind --value`（按实体反查）/ `cluster`（团伙簇+置信分）/ `stats` / `cypher`（原始 Cypher）。默认输出稳定 JSON |
