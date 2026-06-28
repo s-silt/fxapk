@@ -834,6 +834,47 @@ def pcap_leads(
         raise typer.Exit(code=1) from exc
 
 
+@app.command(name="capture-plan")
+def capture_plan_cmd(
+    report_json: Path = typer.Argument(..., help="已产出的 report.json（analyze/auto 写出）。"),
+) -> None:
+    """据静态报告的规避信号（加固/endpoint数/加密配方/自建IM），输出**针对该样本的抓包打法**。
+
+    薄包装：读 report.json → capture_plan.plan_capture → 打印有序步骤（起手式带外 pcap 保底 → 按
+    规避类型选 frida unpinning / 静态去 pin / pcap-leads / 专项探针）。绝不抛——读不到/坏 JSON
+    打印友好提示并退出码 1。供办案人/Codex 决定"这个样本该怎么抓"。
+    """
+    import json as _json
+
+    try:
+        try:
+            raw = report_json.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            typer.echo(f"错误：找不到报告文件：{report_json}", err=True)
+            raise typer.Exit(code=1) from None
+        except OSError as exc:
+            typer.echo(f"错误：读取报告失败：{report_json}（{exc}）", err=True)
+            raise typer.Exit(code=1) from exc
+        try:
+            report = _json.loads(raw)
+        except (ValueError, UnicodeDecodeError) as exc:
+            typer.echo(f"错误：报告 JSON 解析失败：{report_json}（{exc}）", err=True)
+            raise typer.Exit(code=1) from exc
+
+        from apkscan.dynamic import capture_plan
+
+        steps = capture_plan.plan_capture(report)
+        typer.echo("# 抓包打法（据静态报告规避信号 + 方法目录决策树）\n")
+        for i, step in enumerate(steps, 1):
+            typer.echo(f"{i}. {step}\n")
+    except typer.Exit:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 兜底任何意外，转友好提示而非 traceback
+        logger.exception("[cli] capture-plan 生成打法异常")
+        typer.echo(f"错误：生成打法失败：{exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
 @app.command()
 def gui() -> None:
     """启动新手友好的图形界面（tkinter 单窗口：环境体检 / 静态分析 / 一键全自动）。
