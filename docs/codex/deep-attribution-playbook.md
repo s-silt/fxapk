@@ -63,6 +63,13 @@ fxapk probe-leads probe.log --into report.json  # 直接把探针线索回灌进
 ```
 台账末尾的「**取证完备性**」会诊断**定人 / 穿透 / 固证**三轴哪类没抓到、该补跑哪个探针——照它补抓。回灌后探针线索与 fxapk 静态/动态线索同构，一起进报告渲染、串案、套打调证函（`fxapk letters`）。
 
+**frida 上不去 / 解不开 → 带外 pcap（`fxapk pcap-leads`）**：反 frida 秒退、TLS pinning、MTProto 等自建协议（`endpoint_total=0`）时，**不碰 App 本体**抓一份带外 pcap（网关/旁路由 `tcpdump`、设备端 `PCAPdroid` 免 root 导出、Wireshark），照样能拿**真实接入节点 IP:port + TLS SNI + DNS**——这就是穿透真源站的调证锚点（**解不开密文也能办案**，北极星）：
+```
+fxapk pcap-leads capture.pcap                     # 台账：接入节点 IP:port + SNI + DNS（IP/DOMAIN 分组 + 调证落点）
+fxapk pcap-leads capture.pcap --into report.json  # 回灌 report.leads（source=runtime-pcap，去重）
+```
+纯标准库解析（不需 dpkt/scapy/tshark）；公网接入节点→`IP` 线索、SNI/DNS→`DOMAIN`（经 infra 分级）、私网自动过滤。**与探针互补**：探针拿明文/落地数据（定人+固证），pcap 拿接入节点 IP/SNI（穿透），两边 `--into` 同一 report.json 合并串案。
+
 **循环**：选库探针/写探针 → 抓到明文 → `probe-leads` 看台账缺哪类 → 按完备性诊断补跑 → 直到三轴齐、拿到后端端点与聊天内容。**这是默认要求，不是可选**——标准抓包抓不到的客服系统/自建协议，就靠探针库 + 自写探针 hook 才拿下。
 
 ## 标准侦察动作（够用即止，按线索取）
