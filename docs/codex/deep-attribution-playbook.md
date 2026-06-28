@@ -129,3 +129,5 @@ fxapk pcap-leads capture.pcap --into report.json  # 回灌 report.leads（source
 ## 禁止
 
 编造 key-gated 源的结果；停留在表层复述上游；把边缘节点当真实源站；把可信度「高」乱标在单一来源/推断上；按技术显眼度而非现实可行性排调证优先级。
+
+**把「编码伪域名」当真实域名去调证 / 回溯**：base64 / hex / 随机串里夹了点会被误当域名（如 `aGVsbG8.d29ybGQ.example`），调证不可回溯、纯属噪音。fxapk 的 `classify_domain` 已把这类自动降级为「**待核**」并标原因（"疑似编码/hex/base64/随机串/伪域名"）；**遇到待核 + 该原因的目标，一律人工核、不主动探测、不写进调证目标**。严格只对 advice=「建议调证」的目标动作。
