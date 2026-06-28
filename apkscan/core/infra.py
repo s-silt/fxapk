@@ -15,6 +15,9 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import math
+import re
+from collections import Counter
 from fnmatch import fnmatch
 
 logger = logging.getLogger(__name__)
@@ -461,6 +464,47 @@ def _is_invalid_or_private_domain(domain: str) -> bool:
     return bool(ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved)
 
 
+# 编码伪域名识别：base64/hex/随机串里夹点会被当域名 → 调证不可回溯（之前靠人工才排掉）。
+_HEX_LABEL_RE = re.compile(r"[0-9a-fA-F]+")
+_B64_LABEL_RE = re.compile(r"[A-Za-z0-9_+/=-]+")
+
+
+def _shannon_entropy(s: str) -> float:
+    """字符级香农熵（bit/char）；空串 0。base64/随机串近 6，真实词偏低，用于区分编码 vs 真域名。"""
+    if not s:
+        return 0.0
+    n = len(s)
+    return -sum((c / n) * math.log2(c / n) for c in Counter(s).values())
+
+
+def looks_like_encoding(domain: str) -> str | None:
+    """点分串是否疑似 base64/hex/随机编码伪域名（而非真实可调证域名）。
+
+    命中返回原因串（供"待核"标注），否则 None。判据**保守**——只标 **过长 + 高熵** 的标签，
+    既抓住"编码里夹点被误当域名"的不可回溯噪音，又**不误伤短随机 C2（DGA，如 al2x9k.vip）
+    与正常词域名**。绝不静默丢弃，只降级为待核 + 标原因，保留可见可人工核。
+    """
+    for label in str(domain).split("."):
+        length = len(label)
+        if length < 20:
+            continue
+        has_digit = any(c.isdigit() for c in label)
+        has_alpha = any(c.isalpha() for c in label)
+        has_upper = any(c.isupper() for c in label)
+        # 长 hex 串（≥20、字母+数字混合）= 摘要/编码，非真实域名标签。
+        if has_digit and has_alpha and _HEX_LABEL_RE.fullmatch(label):
+            return f"标签「{label[:20]}…」为 {length} 位 hex 串，疑似哈希/编码而非真实域名（不可回溯，需人工核）"
+        # base64/base64url：≥22、高熵、且(含大写 或 字母数字混合) = 编码串。
+        if (
+            length >= 22
+            and _B64_LABEL_RE.fullmatch(label)
+            and (has_upper or (has_digit and has_alpha))
+            and _shannon_entropy(label) >= 4.0
+        ):
+            return f"标签「{label[:20]}…」过长（{length}）且高熵，疑似 base64/编码或随机串伪域名（不可回溯，需人工核）"
+    return None
+
+
 def classify_domain(domain: str) -> tuple[str, str]:
     """对域名做调证研判分级，返回 (advice, reason)。
 
@@ -478,6 +522,12 @@ def classify_domain(domain: str) -> tuple[str, str]:
     embedded = _is_library_embedded(domain)
     if embedded is not None:
         return ADVICE_SKIP, f"第三方库内置站点（library-embedded），非 App 后端：{embedded}"
+
+    # 编码伪域名（base64/hex/随机串夹点）→ 待核 + 标原因（放在 known-infra/库内置之后，
+    # 避免误伤合法 CDN 哈希子域；这类"像域名的编码"调证不可回溯，须人工核而非直接调）。
+    enc = looks_like_encoding(domain)
+    if enc is not None:
+        return ADVICE_REVIEW, enc
 
     d = _normalize_domain(domain)
     # 行情代码伪域名（600000.sh / 399006.sz）：SLD 纯数字 + 交易所后缀 → 待核。
