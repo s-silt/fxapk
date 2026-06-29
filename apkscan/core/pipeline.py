@@ -197,7 +197,7 @@ _ENV_NO_PARALLEL = "FXAPK_NO_PARALLEL"
 #: worker 进程级状态（spawn 后由 initializer 填充）。
 _WORKER_STATE: dict = {}
 
-# ---- worker 数内存封顶常量（详见 docs/superpowers/specs/2026-06-22-parallel-worker-memory-cap-design.md）----
+# ---- worker 数内存封顶常量 ----
 _ENV_MAX_WORKERS = "FXAPK_MAX_WORKERS"  # 运维强制覆盖最终 worker 数
 _ENV_WORKER_BASE_MB = "FXAPK_WORKER_BASE_MB"  # 覆盖 _WORKER_BASE_BYTES（单位 MB）
 _ENV_MEM_SAFETY = "FXAPK_MEM_SAFETY"  # 覆盖 _MEM_SAFETY（0<v<=1）
