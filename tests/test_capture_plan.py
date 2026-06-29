@@ -14,11 +14,12 @@ def _joined(steps: list[str]) -> str:
     return "\n".join(steps)
 
 
-def test_always_includes_pcap_baseline() -> None:
-    """任何样本第一条都是带外 pcap 保底起手式。"""
+def test_directives_first_then_pcap_baseline() -> None:
+    """第一条恒为铁律（时间盒 / fail-fast / 停止门），第二条恒为带外 pcap 保底起手式。"""
     steps = capture_plan.plan_capture({})
-    assert steps
-    assert "pcap" in steps[0].lower() or "PCAPdroid" in steps[0]
+    assert len(steps) >= 2
+    assert "铁律" in steps[0]
+    assert "pcap" in steps[1].lower() or "PCAPdroid" in steps[1]
     assert "pcap-leads" in _joined(steps)
 
 
@@ -64,4 +65,27 @@ def test_self_hosted_im_recommends_telegram_line() -> None:
 def test_never_throws_on_bad_input() -> None:
     for bad in (None, "garbage", [], 123, {"leads": "notalist"}):
         steps = capture_plan.plan_capture(bad)  # type: ignore[arg-type]
-        assert isinstance(steps, list) and steps  # 至少有起手式
+        assert isinstance(steps, list) and steps  # 至少有铁律 + 起手式
+
+
+def test_directives_encode_timebox_and_failfast() -> None:
+    """铁律必须含 floor 优先、时间盒、frida fail-fast、停止门——治"几小时零产出"的约束。"""
+    text = _joined(capture_plan.plan_capture({}))
+    assert "floor" in text.lower() or "保底" in text
+    assert "时间盒" in text or "≤" in text  # 时间盒
+    assert "秒退" in text and ("弃" in text or "别死磕" in text or "fail-fast" in text)  # fail-fast
+    assert "停止门" in text
+
+
+def test_floor_baseline_has_stop_gate() -> None:
+    """带外 pcap 起手式必须给"拿到接入节点=已有产出"的停止门，保证不会零产出。"""
+    text = _joined(capture_plan.plan_capture({}))
+    assert "接入节点" in text
+    assert "停止门" in text
+
+
+def test_recipe_is_zero_inject_priority() -> None:
+    """命中加密配方时，离线解密应标为零注入、优先于注入（绕开反 frida 的明文首选）。"""
+    report = {"meta": {"crypto_recipe": {"algo": "AES", "key": "..."}}}
+    text = _joined(capture_plan.plan_capture(report))
+    assert "零注入" in text or "优先于" in text
