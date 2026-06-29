@@ -11,7 +11,7 @@
 
 1. **静态**：`fxapk analyze <apk>` / `fxapk auto <apk> --fix` 出 report.json → 读 digest（已按 建议调证 > 待核 排序）。
 
-2. **抓包先看打法**：`fxapk capture-plan report.json` —— 据样本规避信号（加固 / endpoint=0 / 加密配方 / 自建 IM）给**针对该样本的抓包打法链**，照它走，别瞎试。
+2. **抓包先看打法（死守 `docs/codex/capture-playbook.md` 四铁律，治"几小时零产出"）**：`fxapk capture-plan report.json` 给**带时间盒 / 停止门**的有序打法。铁律：① floor 优先（先带外 pcap 保底拿接入节点再谈明文，「零产出」不可接受）② 每步时间盒 ③ frida 秒退 fail-fast（累计 ≤2~3 次就弃明文、退 floor、**别死磕**）④ 达停止门即停。要明文**先走静态 `crypto_recipe` 离线解（零注入）**，只有 pinned 标准 TLS 才动注入（先 LSPosed）。
 
 3. **抓不到就按打法选探针 / 带外（默认要求，不是可选）**：关键目标（客服后端 / 聊天 WebSocket / 加密请求体 / 无企业号触不到的真源站 / native 接入节点）没抓到时**别放弃**——
    - **探针库** `docs/codex/frida-probes/`（**46 个**，按指导书 §2「症状→选哪个探针」决策表 ⑲–㊵ 挑）：**反检测/解 pinning 最先注入**（`anti-detection-hook`[+仍秒退叠 `anti-detection-native`] → `ssl-unpinning-hook`），冷启动取证必须 spawn(`-f`)。业务探针含：资金链 `pay-sdk`(商户号/seller_id)、C2 `push-c2-inbound`、卡农 `sms-forward-outbound`、Telegram 改包 `telegram-mtproto`(+`activity-nav` 绕「加载页→视频→登录」门控 +`netstat`)、协议栈 `cronet-quic-http3`/`rn-bridge-native`/`mqtt-xmpp-im`/`protobuf-grpc`/`rtc-join`、凭据 `keystore-alias-tracer`/`mmkv-realm-wcdb-key`/`native-crypto-key`、取证 `sensitive-data-access`/`accessibility-abuse`/`nfc-hce-relay`/`evidence-wipe-interceptor`、冷启动 `sdk-appkey`/`objstore-config`、密文解不开(Flutter/QUIC) `tls-keylog` 导密钥离线解、加固脱壳 `memdex-dump`/`dexload`…
