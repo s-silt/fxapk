@@ -50,3 +50,33 @@
   - `fxapk pcap-leads capture.pcap [--into report.json]` —— 带外 pcap → 接入节点 IP:port + SNI + DNS（纯标准库、零依赖；解不开也能办案）
   - `fxapk capture-plan report.json` —— 据规避信号给针对该样本的抓包打法链
 - **排噪音**：`classify_domain` 自动把 base64/hex/随机串「编码伪域名」降级为「待核」+ 标原因（不静默丢弃，可人工核）。
+
+## 反 frida 秒退专项（一挂 frida 就退时，贴这段给 Codex）
+
+```
+样本反 frida 秒退（一挂 frida 就退）。按 A→B→C 处理。先自更新：
+cd <fxapk仓库> && git pull && pip install -e . --upgrade
+
+A. 重试 frida —— 必须 -f spawn（不能 attach）、anti-detection 排第一：
+   frida -U -f <包名> \
+     -l docs/codex/frida-probes/probe-templates/anti-detection-native.js \
+     -l docs/codex/frida-probes/probe-templates/anti-detection-hook.js \
+     -l docs/codex/frida-probes/probe-templates/ssl-unpinning-hook.js \
+     -l docs/codex/frida-probes/probe-templates/<按 capture-plan/§2决策表选的业务探针>.js \
+     -o probe.log -q
+   看 [antidet-native] 命中=壳用了哪种检测。起来了就正常抓，抓完：
+   fxapk probe-leads probe.log --into report.json
+
+B. A 仍秒退（检测早于我们 hook，在壳 .init_array/JNI_OnLoad；或扫 frida-server 本身）→ 换 server/注入面：
+   · 用 Florida 或 strongR-frida（改名+改端口的 frida-server）替换 frida-server，重试 A；或
+   · frida-gadget 重打包注入（不跑 server）：objection patchapk <apk>；或
+   · 换 LSPosed(Xposed) + JustTrustMe/TrustMeAlready（很多样本只测 frida、不测 Xposed）。
+
+C. 保底出活 / 不想再跟反 frida 纠缠 → 带外 pcap（完全不注入，App 检测不到、也闪退不了）：
+   装 PCAPdroid(F-Droid 免 root)，设只抓目标 App 的 UID → 开 App 走到登录/聊天/支付 → 导出 capture.pcap：
+   fxapk pcap-leads capture.pcap --into report.json
+   解不开也能办案：带外拿到的接入节点 IP:port + SNI + DNS 就是穿透真源站的调证锚点。
+
+全部线索 --into 同一 report.json；fxapk capture-plan report.json 看针对打法；完事 fxapk graph 串案 / fxapk letters 套打文书。
+红线：探针只读、唯一出口 console.log；主动探测仅对 advice=建议调证 目标；待核+疑似编码的伪域名不调证、不回溯。
+```
