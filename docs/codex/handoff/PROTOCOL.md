@@ -5,8 +5,7 @@
 两台机、不同网络，异步对讲（不是实时直连）。
 
 - **飞书群 `FXAPK`** = 对讲机：状态 / 问答 / 交接（`feishu_handoff.py send / read`）。
-- **OneDrive `fxapk-handoff/`** = 附件柜：report.json / pcap / apk / PDF（大或结构化文件）。两台机同步同一个文件夹，消息里只写文件的 OneDrive 路径。
-  > 备用：OneDrive 不便时，可用 `feishu_handoff.py sendfile / getfile` 走飞书云空间（免费版单文件 ≤20MB，脚本自动切块）。
+- **OneDrive `fxapk-handoff/`** = 附件柜：report.json / pcap / apk / PDF **一律放这里**。两台机同步同一个文件夹，消息里只写文件的 OneDrive 路径。**文件不走飞书云空间。**
 
 ## 分工
 
@@ -38,10 +37,10 @@
 ```
 send  --from CLAUDE "..."        对讲：发消息
 read  [--limit 10]               对讲：读最近消息(旧->新)
-# 以下为可选备用(OneDrive 不便时走飞书云空间)：
-sendfile --from CODEX ./x.pcap   上传飞书云空间(>18MB 自动切块)+发指针
+# 文件一律走 OneDrive(见上)。下面三条是飞书云空间应急工具，默认不用：
+sendfile --from CODEX ./x.pcap   (应急)上传飞书云空间(>18MB 自动切块)+发指针
 getfile  <token[,token2]> --out x.pcap
-delfile  <token[,token2]>        删云空间(清容量)
+delfile  <token[,token2]>        删云空间
 ```
 
 ## 两台机要配的

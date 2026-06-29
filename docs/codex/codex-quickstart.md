@@ -55,7 +55,7 @@
   - `fxapk pcap-leads capture.pcap [--into report.json]` —— 带外 pcap → 接入节点 IP:port + SNI + DNS（纯标准库、零依赖；解不开也能办案）
   - `fxapk capture-plan report.json` —— 据规避信号给针对该样本的抓包打法链
 - **排噪音**：`classify_domain` 自动把 base64/hex/随机串「编码伪域名」降级为「待核」+ 标原因（不静默丢弃，可人工核）。
-- **Claude↔Codex 飞书信箱**：`docs/codex/handoff/feishu_handoff.py`（`send`/`read` 对讲；`sendfile`/`getfile`/`delfile` 走飞书云空间作备用）+ `docs/codex/handoff/PROTOCOL.md`。每回合先 `read` 看 Claude 交接、产出放 OneDrive、`send` 回交接。前置：本机 `.env` 飞书三件套 + OneDrive 同步 `fxapk-handoff`。
+- **Claude↔Codex 飞书信箱**：`docs/codex/handoff/feishu_handoff.py`（`send`/`read` 对讲；**文件一律走 OneDrive**，`sendfile`/`getfile` 仅应急）+ `docs/codex/handoff/PROTOCOL.md`。每回合先 `read` 看 Claude 交接、产出放 OneDrive、`send` 回交接。前置：本机 `.env` 飞书三件套 + OneDrive 同步 `fxapk-handoff`。
 
 ## 反 frida 秒退专项（一挂 frida 就退时，贴这段给 Codex）
 
