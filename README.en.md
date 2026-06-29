@@ -20,35 +20,6 @@ real fraud servers out of hundreds of library/CDN noise entries.
 
 ---
 
-## ⬇️ Download & run (GUI bundle — no longer packaged)
-
-> ⚠️ **The GUI / self-contained exe bundle is no longer built or adapted for new features** (since 2026-06).
-> The project's primary path is now **running from source + the `fxapk` CLI + Codex (AI agent) driving it** — see [Install](#install) below.
-> The `fxapk gui` (tkinter) source still ships in the repo and runs locally, but `fxapk-gui-*.zip` is no longer released and new commands (e.g. `probe-leads`, the bundled frida-probe library) are CLI-only. Old zips still run but only include the commands present at build time.
-
-<details>
-<summary>Legacy GUI bundle instructions (kept for users who already have an old zip)</summary>
-
-Don't want the command line? Grab `fxapk-gui-vX.Y.Z-win64.zip` from
-**[Releases](https://github.com/s-silt/fxapk/releases/latest)** — a 64-bit Windows **self-contained**
-bundle with frida / mitmproxy / adb built in (**nothing else to install**):
-
-1. Download and **unzip the whole `fxapk-gui` folder** (deps live in `_internal/` — don't copy just the exe).
-2. Double-click **`fxapk-gui.exe`** → pick an APK → click "static analysis" or "one-click auto".
-3. To unpack / capture: USB-connect a **rooted phone or emulator** (adb is bundled) → click "doctor" to
-   auto-provision frida-server + CA → then "one-click auto".
-4. *(optional)* For deeper jadx decompilation: download **`fxapk-jadx-*.zip`** (bundles a portable JRE — no
-   Java install needed) → click "🔌 Enable jadx" and pick the zip → jadx is then used automatically.
-
-> ⚠️ Unsigned; on first run Windows SmartScreen / AV may warn — choose "More info → Run anyway" or
-> allow-list it. frida-server is auto-pushed to the device by ABI. Keep the whole folder together.
-
-</details>
-
-Developers / CLI users: use `pip install` below (the primary path now).
-
----
-
 ## What it produces (the key difference)
 
 Ordinary tools tell you "GeTui SDK detected"; fxapk tells you **the value + the owner + the advice**:
@@ -97,8 +68,7 @@ python -m pip install jinja2 typer python-whois requests pyyaml pytest
 python -m pytest -q          # run all unit tests (offline, no device)
 ```
 
-Optional (gracefully skipped when missing): `jadx` (deep decompile — on PATH, or the standalone
-`fxapk-jadx-*.zip` add-on which bundles a portable JRE; GUI users click "🔌 Enable jadx" once),
+Optional (gracefully skipped when missing): `jadx` (deep decompile — on PATH),
 `frida-tools` + `frida-dexdump` (`unpack`), `mitmproxy` (`capture`), Chrome/Edge/Chromium (`--fmt pdf`).
 
 ---
@@ -131,8 +101,6 @@ fxapk auto app.apk --out out  # one command end to end; prompts you to operate t
 | `doctor` | env health check: online device / root / ABI / host frida / device frida-server / mitmproxy / CA, per-item `[OK]`/`[FAIL]`; `--fix` auto-fixes (deploy frida-server, install CA); exits 1 when a critical item fails |
 | `unpack APK` | rooted-device unpack: frida-dexdump dumps hidden DEX, re-analyzed |
 | `capture PACKAGE` | rooted-device capture: mitmproxy + frida SSL-unpinning, runtime endpoints |
-| `gui` | graphical UI (single-window tkinter: doctor / static / one-click auto) |
-
 | Flag | Meaning |
 |---|---|
 | `--out DIR` | report output dir (default `out`) |
