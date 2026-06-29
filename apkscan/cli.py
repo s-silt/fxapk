@@ -875,22 +875,6 @@ def capture_plan_cmd(
         raise typer.Exit(code=1) from exc
 
 
-@app.command()
-def gui() -> None:
-    """启动新手友好的图形界面（tkinter 单窗口：环境体检 / 静态分析 / 一键全自动）。
-
-    GUI 只是前端壳，复用同一套程序化核心（auto/doctor）。tkinter 不可用（极少数无
-    GUI 的 Python）时打印提示并退出，不崩。
-    """
-    try:
-        from apkscan.gui import main as _gui_main
-    except Exception as exc:  # noqa: BLE001 - tkinter 缺失 / 导入异常都转友好提示
-        logger.exception("启动 GUI 失败（tkinter 可能不可用）")
-        typer.echo(f"无法启动图形界面（tkinter 可能不可用）：{exc}", err=True)
-        raise typer.Exit(code=1) from exc
-    _gui_main()
-
-
 # ===== track 子命令：线索追踪 / 办案进度（裸 track → 起网页；track ingest → 回填台账） =====
 track_app = typer.Typer(
     add_completion=False,
