@@ -1,6 +1,8 @@
 # Codex 启动 Prompt · 网址 / 域名 / IP 取证（每次开案粘这段）
 
 > 资料随 fxapk 仓库 `git pull` 更新。本机已配 webcheck / Shodan API，可实查。把下面整段贴给 Codex。
+>
+> **与 Claude 协作（飞书信箱）**：每回合先 `python docs/codex/handoff/feishu_handoff.py read` 看交接，产出放 OneDrive `fxapk-handoff/`，完事 `send --from CODEX "...; 球→CLAUDE"`。详见 `docs/codex/handoff/PROTOCOL.md`。
 
 ---
 
