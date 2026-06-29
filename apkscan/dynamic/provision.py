@@ -288,14 +288,14 @@ def host_frida_version() -> str:
 # ---------------------------------------------------------------------------
 
 
-# 内置 frida-server 在胖包里的子目录名（fxapk.spec datas 收进 _internal/frida-servers/）。
+# 内置 frida-server 在(历史)胖包里的子目录名（_internal/frida-servers/）。
 _BUNDLED_FRIDA_SUBDIR = "frida-servers"
 
 
 def _bundled_frida_server_xz(ver: str, fabi: str) -> Path | None:
     """frozen 胖包里随附的 frida-server-{ver}-android-{fabi}.xz 路径（存在则返回，否则 None）。
 
-    国内免 github 下载的命门：打包时 build_exe.py 把打包机 host frida 版本对应的
+    国内免 github 下载的命门：(历史胖包)打包时把打包机 host frida 版本对应的
     frida-server-{ver}-android-{abi}.xz 各 ABI 收进 ``_internal/frida-servers/``；运行时
     ``host_frida_version()``（exe 内置同一个 frida）= 同 ver → 文件名能对上，直接用内置免下载。
 

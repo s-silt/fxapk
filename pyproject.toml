@@ -45,19 +45,10 @@ dev = ["pytest", "ruff", "pyright"]
 graph = ["kuzu==0.11.3"]
 # 线索追踪 + 办案进度的局域网网页（flask）。可选——台账数据层不依赖它，核心命令不依赖它。
 track = ["flask"]
-# 构建期工具：仅打包 exe 时需要，不进运行期 dependencies。
-build = ["pyinstaller>=6.0"]
-# 胖包：把 frida / mitmproxy / frida-dexdump 等内置进 exe（dispatch 自调用），
-# 仅打包用，不进运行期 dependencies。build_exe.py 构建前会确保装好。
-build-fat = ["pyinstaller>=6.0", "frida", "frida-tools", "frida-dexdump", "mitmproxy"]
 
 [project.scripts]
 fxapk = "apkscan.cli:main"
 apkscan = "apkscan.cli:main"
-
-[project.gui-scripts]
-# 双击 / 无控制台窗口启动图形界面（Windows 下不弹黑框）。
-fxapk-gui = "apkscan.gui:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
