@@ -24,33 +24,6 @@
 
 ---
 
-## ⬇️ 下载即用（GUI 包 —— 已停止打包适配）
-
-> ⚠️ **GUI / 自包含 exe 包不再打包、不再适配新功能**（自 2026-06）。
-> 项目改为 **源码直接运行 + CLI（`fxapk`）+ Codex（AI agent）驱动** 为主路径 —— 见下方 [安装](#安装)。
-> `fxapk gui`（tkinter 窗口）源码仍在仓库、可本地运行，但**不再随版本构建/发布 `fxapk-gui-*.zip`、也不再为新增能力（如 `probe-leads`、新探针库）适配界面**；旧版 zip 仍能跑但只含打包时的命令。
-> 新功能一律走 CLI；动态取证的 frida 探针库见 [`docs/codex/frida-probes/`](docs/codex/frida-probes/)（`git pull` 更新）。
-
-<details>
-<summary>历史 GUI 包说明（仅对已有旧 zip 的用户保留）</summary>
-
-不想碰命令行？到 **[Releases](https://github.com/s-silt/fxapk/releases/latest)** 下载
-`fxapk-gui-vX.Y.Z-win64.zip`（64 位 Windows **自包含**包，内置 frida / mitmproxy / adb，**无需另装任何东西**）：
-
-1. 下载并**解压出整个 `fxapk-gui` 文件夹**（依赖在 `_internal/`，别只拷 exe）。
-2. 双击 **`fxapk-gui.exe`** → 在「APK（Android）」或「IPA（iOS）」栏选文件 → 点「静态分析」（APK 还可「一键全自动」；iOS IPA 仅静态、无需越狱）。
-3. 要脱壳 / 抓包（仅 Android）：USB 接好**已 root 的手机或模拟器**（adb 已内置）→ 点「环境体检」自动配 frida-server 与证书 → 再「一键全自动」。
-4. *(可选)* 想要更深的 jadx 反编译补漏：下载 **`fxapk-jadx-*.zip`**（自带便携 JRE，无需另装 Java）→ 点界面「🔌 启用 jadx」选这个 zip → 一键启用，之后静态/一键全自动自动用上 jadx。
-
-> ⚠️ 未签名，首次运行 Windows SmartScreen / 杀软可能拦，点「更多信息 → 仍要运行」或加白名单。
-> frida-server 由程序按设备 ABI 自动推到手机，无需手动准备。整个文件夹一起拷贝。
-
-</details>
-
-开发者 / 命令行用户走下面的 `pip install`（现主路径）。
-
----
-
 ## 它产出什么（核心区别）
 
 普通工具告诉你「检测到个推 SDK」；fxapk 告诉你 **具体值 + 所属公司 + 调证建议**：
@@ -102,7 +75,7 @@ python -m pip install -e .
 
 | 可选项 | 启用的能力 |
 |---|---|
-| `jadx`（PATH 外部命令 **或** 独立插件包） | `jadx` 深度反编译增强器，从反编译 Java 字面量补 androguard 漏掉的端点/密钥（不可用则自动跳过并在报告标注）。GUI 用户**无需装 Java**：下载独立插件包 `fxapk-jadx-*.zip`（自带便携 JRE），点界面「🔌 启用 jadx」选 zip 即一键启用，之后静态/一键全自动自动调用 |
+| `jadx`（PATH 外部命令） | `jadx` 深度反编译增强器，从反编译 Java 字面量补 androguard 漏掉的端点/密钥（不可用则自动跳过并在报告标注）。装好 `jadx` 在 PATH 即自动调用 |
 | `frida-tools` + `frida-dexdump` | `unpack` 真机脱壳 |
 | `mitmproxy` | `capture` 真机抓包流量解析 |
 | `cryptography` | C5b 自动解密抓到的 `{data,timestamp}` 加密信封（缺失则只报配方+保留密文，不崩） |
@@ -158,8 +131,6 @@ fxapk auto app.apk --out out
 | `selfcheck` | **自检诊断 JSON**：逐项报告各能力（图谱/解密/jadx/动态/联网富化/web-check）通不通、怎么修——供任意 AI agent 驱动前自检 |
 | `graph …` | 本地案件图谱串案（需 `fxapk[graph]`）：`ingest`（报告入图）/ `link <sha256>`（拉关联 APK）/ `query --kind --value`（按实体反查）/ `cluster`（团伙簇+置信分）/ `stats` / `cypher`（原始 Cypher）。默认输出稳定 JSON |
 | `track` | 起**本地/局域网网页**追踪每个 APK 发现的线索 + **手动办案进度**（两级：APK 总进度 + 每条线索状态/备注/带时间戳进展留痕，需 `fxapk[track]`）；`analyze`/`auto` 默认自动入台账（`--no-track` 关）。`track ingest <report.json…>` 回填历史报告。台账在 `~/.apkscan/tracking.json`（仓库外，`git pull` 不覆盖） |
-| `gui` | 图形界面（tkinter 单窗口：体检 / 静态 / 一键全自动）。**⚠️ 已停止打包/适配新功能**（不再发布 `fxapk-gui-*.zip`、新命令如 `probe-leads` 不进界面）；源码仍可本地跑，主路径用 CLI |
-
 ### 常用参数
 
 | 参数 | 说明 |

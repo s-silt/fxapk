@@ -14,7 +14,7 @@
      （``env`` 默认继承 ``os.environ``）的子进程**自动带上 UTF-8 环境**，无需逐个传 ``env``。
 
 幂等、绝不抛、跨平台安全（非 Windows 也设 env + reconfigure，无害）。无第三方依赖，
-仅用 stdlib，便于 ``_pyi_entry`` / cli / gui 各入口早调用。
+仅用 stdlib，便于 cli 等入口早调用。
 """
 
 from __future__ import annotations

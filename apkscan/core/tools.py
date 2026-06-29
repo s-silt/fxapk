@@ -26,7 +26,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# dispatch 能自调用的内置库工具名（与 _pyi_entry._BUILTIN_TOOLS 对齐）。
+# dispatch 能自调用的内置库工具名。
 _FRIDA_TOOLS: frozenset[str] = frozenset(
     {"frida", "frida-ps", "frida-trace", "frida-dexdump", "mitmdump", "mitmproxy", "mitmweb"}
 )
