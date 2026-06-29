@@ -17,8 +17,10 @@
 
 【静态】fxapk analyze / auto 出 report.json（端点 / IP / 标识符 + 富化 + 调证分级 advice）。
 
-【抓包/动态：先看打法，再抓】
-  fxapk capture-plan report.json        # 据样本规避信号(加固/endpoint=0/加密配方/自建IM)给针对性抓包打法链
+【抓包/动态：先看打法，再抓 —— 死守 docs/codex/capture-playbook.md 四铁律，治"几小时零产出"】
+  铁律：①floor 优先(先带外 pcap 保底拿接入节点再谈明文,「零产出」不可接受) ②每步时间盒 ③frida 秒退 fail-fast(累计≤2~3次就弃明文退floor、别死磕) ④达停止门即停。
+  要明文先走静态 crypto_recipe 离线解(零注入)，只有 pinned 标准 TLS 才动注入(先 LSPosed)。
+  fxapk capture-plan report.json        # 据样本规避信号给"带时间盒/停止门"的有序打法(= capture-playbook 定制版)
 按打法选：
   · 探针库 docs/codex/frida-probes/（46 个现成 frida 探针 + 指导书.md，按 §2「症状→选探针」决策表挑）：
       frida -U -f <包名> -l probe-templates/anti-detection-hook.js -l probe-templates/ssl-unpinning-hook.js \
@@ -53,7 +55,7 @@
 - **新命令**：
   - `fxapk probe-leads probe.log [--into report.json]` —— 探针 `[LEAD]` 散点 → 调证台账 + 取证完备性诊断 + 回灌
   - `fxapk pcap-leads capture.pcap [--into report.json]` —— 带外 pcap → 接入节点 IP:port + SNI + DNS（纯标准库、零依赖；解不开也能办案）
-  - `fxapk capture-plan report.json` —— 据规避信号给针对该样本的抓包打法链
+  - `fxapk capture-plan report.json` —— 据规避信号给**带时间盒/停止门**的有序抓包打法（= `docs/codex/capture-playbook.md` 定制版；治"几小时零产出"：floor 优先 + frida 秒退 fail-fast）
 - **排噪音**：`classify_domain` 自动把 base64/hex/随机串「编码伪域名」降级为「待核」+ 标原因（不静默丢弃，可人工核）。
 - **Claude↔Codex 飞书信箱**：`docs/codex/handoff/feishu_handoff.py`（`send`/`read` 对讲；**文件一律走 OneDrive**，`sendfile`/`getfile` 仅应急）+ `docs/codex/handoff/PROTOCOL.md`。每回合先 `read` 看 Claude 交接、产出放 OneDrive、`send` 回交接。前置：本机 `.env` 飞书三件套 + OneDrive 同步 `fxapk-handoff`。
 
