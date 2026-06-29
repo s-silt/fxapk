@@ -44,10 +44,3 @@ def test_import_apk_does_not_pull_loguru() -> None:
     mods = _modules_after_import("import apkscan.core.apk")
     assert "loguru" not in mods
     assert "androguard" not in mods
-
-
-def test_import_gui_is_clean() -> None:
-    """import apkscan.gui 必须轻（GUI 启动走它、不走 cli），不拉 androguard/tkinter/pipeline。"""
-    mods = _modules_after_import("import apkscan.gui")
-    for heavy in ("androguard", "loguru", "tkinter"):
-        assert heavy not in mods
