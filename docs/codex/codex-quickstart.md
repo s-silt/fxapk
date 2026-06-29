@@ -10,6 +10,11 @@
 你驱动 fxapk（仓库 s-silt/fxapk）做反诈 APK 取证。每次开工先自助更新：
   cd <fxapk仓库> && git pull && pip install -e . --upgrade
 
+【与 Claude 协作·飞书信箱】每回合先读 Claude 交接、完事回交接（前置：本机 .env 放飞书三件套 + OneDrive 同步 fxapk-handoff 文件夹；详见 docs/codex/handoff/PROTOCOL.md）：
+  python docs/codex/handoff/feishu_handoff.py read --limit 10                 # 看 [CLAUDE] 的「下一步 / 球→CODEX」
+  ……按交接取证，产出放 OneDrive fxapk-handoff/<案子>/……
+  python docs/codex/handoff/feishu_handoff.py send --from CODEX "<案子>进展; OneDrive路径; 需Claude核实啥; 球→CLAUDE"
+
 【静态】fxapk analyze / auto 出 report.json（端点 / IP / 标识符 + 富化 + 调证分级 advice）。
 
 【抓包/动态：先看打法，再抓】
@@ -50,6 +55,7 @@
   - `fxapk pcap-leads capture.pcap [--into report.json]` —— 带外 pcap → 接入节点 IP:port + SNI + DNS（纯标准库、零依赖；解不开也能办案）
   - `fxapk capture-plan report.json` —— 据规避信号给针对该样本的抓包打法链
 - **排噪音**：`classify_domain` 自动把 base64/hex/随机串「编码伪域名」降级为「待核」+ 标原因（不静默丢弃，可人工核）。
+- **Claude↔Codex 飞书信箱**：`docs/codex/handoff/feishu_handoff.py`（`send`/`read` 对讲；`sendfile`/`getfile`/`delfile` 走飞书云空间作备用）+ `docs/codex/handoff/PROTOCOL.md`。每回合先 `read` 看 Claude 交接、产出放 OneDrive、`send` 回交接。前置：本机 `.env` 飞书三件套 + OneDrive 同步 `fxapk-handoff`。
 
 ## 反 frida 秒退专项（一挂 frida 就退时，贴这段给 Codex）
 
