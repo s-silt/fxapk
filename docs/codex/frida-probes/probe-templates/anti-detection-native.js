@@ -139,7 +139,10 @@ try {
   } catch (e) {}
 });
 
-// ============ E. 字符串函数中和：strstr/strcasestr/strcmp/strncmp/memmem needle=frida 串 → 不命中 ============
+// ============ E. 字符串扫描中和：strstr/strcasestr needle=frida 串 → 不命中 ============
+// 注意：刻意【不】hook strcmp/strncmp/strcasecmp——它们是超高频函数(每秒上千次)，
+// onEnter 每次 readCString 两个串会严重拖慢甚至 ANR/闪退，得不偿失。壳扫 maps/buffer 多用
+// strstr(子串)，已覆盖；若确认壳用 strcmp 精确比 frida 串，再按需临时加并自担性能风险。
 try {
   var ss = Module.findExportByName(null, 'strstr');
   if (ss) Interceptor.attach(ss, {
@@ -154,15 +157,6 @@ try {
     onLeave: function (ret) { try { if (this.needle && hasMark(this.needle) && !ret.isNull()) { emit('neutralize', 'strcasestr("' + this.needle + '") → NULL'); ret.replace(ptr(0)); } } catch (e) {} }
   });
 } catch (e) {}
-['strcmp', 'strncmp', 'strcasecmp'].forEach(function (name) {
-  try {
-    var p = Module.findExportByName(null, name); if (!p) return;
-    Interceptor.attach(p, {
-      onEnter: function (a) { try { this.s1 = a[0].isNull() ? '' : a[0].readCString(); this.s2 = a[1].isNull() ? '' : a[1].readCString(); } catch (e) { this.s1 = ''; this.s2 = ''; } },
-      onLeave: function (ret) { try { if ((hasMark(this.s1) || hasMark(this.s2)) && ret.toInt32() === 0) { emit('neutralize', name + ' frida 串相等 → 改不等'); ret.replace(ptr(1)); } } catch (e) {} }
-    });
-  } catch (e) {}
-});
 
 // ============ F. connect：app 连 27042/27043 探 frida-server → 观测；BLOCK 时让其失败 ============
 try {
