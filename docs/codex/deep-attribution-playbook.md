@@ -24,8 +24,8 @@
 **① fxapk（本仓库 `s-silt/fxapk`）** — APK 取证主入口：`analyze`/`auto` 出端点 / IP / 标识符 + 富化（rdap/whois/icp/dns/asn/shodan/webcheck）；`digest` 取重点；`graph` 串案；`track` 台账。深度归因的输入来自它的 `report.json`（`endpoints[].enrichment`、`attack_surface`、`leads`）。
 
 **② web-check（`lissy93/web-check`，自托管，无需 key = 实测级）** — 对域名 / IP 一把抓 OSINT。两种用法：
-- **优先 · 经 fxapk 自动集成**：设 `FXAPK_WEBCHECK_URL=http://localhost:3000`（按本机实际端口），fxapk 的 webcheck 富化器即对「建议调证」端点自动跑 curated 检查（location/get-ip/whois/dns/dnssec/ssl/http-security/tech-stack/ports/mail-config/threats/subdomains/redirects/archives/firewall），结果直接进辖区分流 / 攻击面 / 串案 / `report.json`。→ **Codex 先把这个环境变量设上，跑 fxapk 就顺带拿到 web-check 数据。**
-- **深挖 · 直接打 API**：对单个可疑目标逐项 `curl 'http://localhost:3000/api/<check>?url=<域名或IP>'`。
+- **优先 · 经 fxapk 自动集成**：设 `FXAPK_WEBCHECK_URL=http://127.0.0.1:18080`（按本机实际端口），fxapk 的 webcheck 富化器即对「建议调证」端点自动跑 curated 检查（location/get-ip/whois/dns/dnssec/ssl/http-security/tech-stack/ports/mail-config/threats/subdomains/redirects/archives/firewall），结果直接进辖区分流 / 攻击面 / 串案 / `report.json`。→ **Codex 先把这个环境变量设上，跑 fxapk 就顺带拿到 web-check 数据。**
+- **深挖 · 直接打 API**：对单个可疑目标逐项 `curl 'http://127.0.0.1:18080/api/<check>?url=<域名或IP>'`。
 
 **侦察动作 → 工具映射**：
 

@@ -20,13 +20,7 @@ webcheck、Shodan、DNS、TLS、HTTP 实测结果是事实来源；Censys / FOFA
 
 ## 2. 先跑命令
 
-对每个目标先跑本机 OSINT / 实测命令，再判断：
-
-```bash
-./scripts/fx-recon.sh <target>
-```
-
-脚本不可用或输出不足，按本机实际工具补跑：`webcheck <target>`、`shodan host <ip>`、`shodan search <domain-or-ip>`、`dig <domain> A AAAA CNAME NS MX TXT`、`curl -I -L --max-time 15 <url>`、`openssl s_client -connect <host>:443 -servername <host>`、`whois <domain-or-ip>`。
+对每个目标先跑本机 OSINT / 实测命令，再判断。首选把目标喂给 `fxapk analyze`，读取报告中的 `endpoints[].enrichment` / `attack_surface`；输出不足时按本机实际工具补跑：`shodan host <ip>`、`shodan search <domain-or-ip>`、`dig <domain> A AAAA CNAME NS MX TXT`、`curl -I -L --max-time 15 <url>`、`openssl s_client -connect <host>:443 -servername <host>`、`whois <domain-or-ip>`。web-check 的实测富化由 `FXAPK_WEBCHECK_URL` 驱动的 fxapk 富化器完成，无独立 `webcheck` 命令。
 
 读完输出后再决定是否继续：有 CDN/WAF/反代→判边缘还是源站；高风险端口→Shodan/webcheck 复核指纹；有证书/备案/对象存储/后台路径/跳转链→继续挖关联域名/IP；结果矛盾→保留矛盾、对抗式核验、不强行归因。
 

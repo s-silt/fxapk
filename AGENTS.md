@@ -1,186 +1,180 @@
-# AGENTS.md — fxapk 操作指南（给 AI agent / Codex）
+<!-- CODEGRAPH_START -->
+## CodeGraph
 
-本仓库是 **fxapk（apkscan）**：涉诈 APK/IPA **调证取证分析 CLI**。你（agent）通过命令行驱动它对样本做
-全套静态/动态分析 + 海外服务器攻击面取证，产出**可办案化的调证线索（leads）**。本文件让你在新机
-clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件只讲**怎么跑**。
+In repositories indexed by CodeGraph (a `.codegraph/` directory exists at the repo root), reach for it before grep/find or reading source when you need to understand or locate code. If CodeGraph hangs or the target is a small Markdown/runtime artifact, fall back to direct file reads and do not block the task.
+<!-- CODEGRAPH_END -->
 
-> 设计取向：本项目由人直接跑源码 + agent 驱动，**不打包 exe/GUI**。密钥走项目根 `.env`（已 gitignore）。
-> 输出刻意做成 **agent 友好**：核心调证信息进 `evidence_to_obtain`/`notes`/`report.meta`，并由 `digest` 命令压成低 token 摘要。
+# AGENTS.md — fxapk 常驻操作指南（Codex / AI agent）
+
+本仓库是 **fxapk（apkscan）**：面向授权样本与隔离取证环境的反诈 APK / URL / 域名 / IP 取证分析 CLI。你通过命令驱动 fxapk 做静态分析、带外抓包、探针取证、线索回灌、基础设施归因、串案和文书草稿。
+
+**授权口径**：仅针对自有或已授权样本、取证设备和测试网络；全程取证语境，不做漏洞利用、爆破、DoS，不在他人网络嗅探。报告中的“调证/协查/办案”只指合法取证路径，不代表官方身份。
+
+**权威资料**：本机主指导书单一权威副本是 `C:\Users\hjjca\OneDrive\doc\fxapk-master.md`。仓库内文档、探针、脚本随 `git pull` 更新；`AGENTS.md` 只保留常驻执行规则。涉及 APK 分析、报告生成、动态抓包、样本复核或批量处理前，还必须先读 `apkscan/memory.md`。
 
 ---
 
-## 0. 行为铁律：直接用 fxapk 跑，别空想 / 别手搓
+## 0. 开工第一步：自更新
 
-你是来**驱动 fxapk 出结果**的，不是来手动逆向、读源码猜结论、或大段推演的。收到「分析这个 APK / 查这些线索 / 准备设备 / 为什么动态跑不起来」一类请求时——**先跑对应 fxapk 命令，再据产物决策**。命令产物（`report.json` / `digest` / track 台账）才是事实来源，不是你的推测。
+每次开案/开工先执行：
 
-按意图直接选一条执行（别在跑命令前就长篇分析）：
+```bash
+cd <fxapk仓库> && git pull && pip install -e . --upgrade
+```
 
-| 用户想要 | 直接执行 |
+如本地改动阻挡 pull：只保护冲突文件（stash 或移到本地备份），不得覆盖 `apkscan/AGENTS.md`、`apkscan/memory.md`、报告目录、OneDrive 中间件或用户未授权改动。
+
+---
+
+## 1. 核心纪律：先跑命令再判断
+
+- 先跑命令、读输出，再决定下一步；不空想、不手搓逆向、不复述工具过程、不 dump 全 report。
+- 事实来源是 `report.json`、`fxapk digest`、pcap/probe 原始台账、web-check/Shodan/RDAP/DNS/TLS/HTTP 实测结果。
+- 判断、写探针、归因、证据分级、对抗式核验是你的活；机械步骤交给 fxapk/脚本。
+- 不把钱包/收款/四方支付当默认重点，除非用户明确要资金线。
+- 每个重要结论写 `【证据】`、`【推理】`、`【可信度 高/中/低】`。
+- key-gated 情报（Censys/FOFA/Hunter/ZoomEye/VT/微步等）拿不到正文就只写建议查询/调取语句，绝不编造。
+### PowerShell / Markdown 写文件纪律
+
+在 Windows / PowerShell 下生成或修改 `.md`、prompt、README、交接说明、飞书消息草稿时，必须防止 PowerShell 反引号转义污染内容：
+
+- 不要在可展开 here-string（`@"..."@`）里直接放 Markdown 代码围栏（三个反引号）或包含反引号的正文；`` `b``、`` `t`` 等会被解释成控制字符。
+- 不需要变量插值时，优先用单引号 here-string（`@'...'@`）；需要变量插值时，优先用逐行数组 + `Set-Content -LiteralPath ... -Encoding UTF8`，或用占位符写完后 `.Replace()`。
+- 本机 Windows PowerShell 5.1 的 `New-Item` 不支持 `-LiteralPath`；创建目录/文件禁止写 `New-Item -LiteralPath`。创建目录用 `New-Item -ItemType Directory -Force -Path $dir` 或 `[System.IO.Directory]::CreateDirectory($dir)`；只在 `Copy-Item`、`Get-Content`、`Set-Content`、`Test-Path` 等支持该参数的命令上使用 `-LiteralPath`。
+- 说明文档里的命令块可用四空格缩进代码块，少用三反引号，避免被 PowerShell 误转义。
+- 写完 Markdown/prompt/README 后，必须抽样读取并检索控制字符：`Select-String -LiteralPath <file> -Pattern "`t|`a|`b|`f|`v"`；发现乱码或控制字符立即重写。
+
+---
+
+## 2. 常用入口
+
+| 意图 | 命令 |
 |---|---|
-| 分析一个 APK（静态 + 联网富化） | `fxapk analyze <apk> --online --out out` 然后 `fxapk digest out/<名>.json` |
-| 一把梭（有真机：体检→静态→脱壳→去壳重打包→抓包→合并） | `fxapk auto <apk> --fix` |
-| 批量整个文件夹 | `fxapk batch <dir>` |
-| 准备真机环境 / 排查动态为什么跑不起来 | `fxapk doctor --fix` |
-| 真机脱壳 / 去壳重打包 / 抓包（单步） | `fxapk unpack <apk>` / `fxapk repackage <apk>` / `fxapk capture <pkg>` |
-| 看每个 APK 的线索 + 办案进度（网页还能手动加线索、增删图谱） | `fxapk track`（起网页）；`fxapk track ingest <report.json...>` 回填 |
-| 串案 / 团伙聚类 | `fxapk graph ...` |
-| 清图谱噪音 / 删错误的图谱实体或边 | `fxapk graph prune-weak` / `graph rm-entity <kind> <value>` / `graph unlink <sha256> <kind> <value>`（或 track 网页图谱面板点） |
+| 环境修复/真机工具链 | `fxapk doctor --fix` |
+| 只读自检 | `fxapk selfcheck` |
+| 单 APK 静态+富化 | `fxapk analyze <apk> --online --out <out> --fmt html,json` |
+| 一把梭 | `fxapk auto <apk> --fix` |
+| 读摘要 | `fxapk digest <report.json>` |
+| 抓包打法 | `fxapk capture-plan <report.json>` |
+| 带外 pcap 回灌 | `fxapk pcap-leads capture.pcap --into <report.json>` |
+| 探针日志回灌 | `fxapk probe-leads probe.log --into <report.json>` |
+| 串案 | `fxapk graph ...` |
+| 文书草稿 | `fxapk letters ...` |
+| 台账网页 | `fxapk track` / `fxapk track ingest <report.json...>` |
 
-- 决策只读 `fxapk digest <report.json>`（低 token、已按"建议调证 > 待核"排序）；要细节再读 `out/<名>.json` 全量。
-- 命令失败/缺前置 → 看它打印的 `playbook`（每条是可直接复制的修复命令），照着修，**别自己另起炉灶手搓**。
-- 只有当**没有**对应 fxapk 命令、或要改 fxapk 代码本身时，才进入"分析/开发"模式（见第 5 节）。
-
----
-
-## 0.5 分析 APK：标准动作 + 调证重点 + 汇报模板（核心办案逻辑）
-
-**两件套（操作机已装，优先用，别空跑外部付费源）**：① `fxapk`（本仓库，APK 取证→端点/IP/标识符+富化+图谱+台账）；② `web-check`（`lissy93/web-check` 自托管 OSINT，无需 key=实测级）。**先设 `FXAPK_WEBCHECK_URL=http://localhost:3000`**（按本机端口），fxapk 跑富化时就自动对建议调证端点拉 web-check（DNS/SSL/头/技术栈/端口/威胁/子域/邮件…）进辖区分流与攻击面。
-
-**标准动作（先跑命令、据产物决策，别空想）**
-1. `fxapk analyze <apk> --online --out out` → `fxapk digest out/<名>.json`。
-2. 决策以 digest 为主；仅在补「国内登记主体端点」「攻击面细节」时翻 `report.json` 全量。
-3. 不手搓逆向、不逐步复述工具过程、不把整份 report 倒出来。
-
-**调证重点优先级（本办案口径，覆盖工具默认的"高敏物证优先"）**
-1. **可依法调证的后端服务器（第一优先）**：后端域名/IP，**登记主体在国内**（阿里云/腾讯云/华为云/电信·联通·移动/国内 IDC/有 ICP）→ 向该境内云·IDC·ICP 调租户实名 + 访问/登录日志。★ **纠偏**：fxapk 会把命中云/CDN 关键字的端点标「无需调证」折叠——但**只要 ASN/ICP 登记主体是国内提供商就不能忽略**，主动从 `endpoints[].enrichment` 的 asn/icp（org/isp 含 阿里云/Aliyun/腾讯/Tencent/华为/电信/联通/移动/ChinaNet，或归属国=中国大陆）捞出来列为调证目标。区分：App 自有/疑似后端要调；纯第三方 SDK/公共 CDN 共享域名（百度地图/umeng/个推下发）即便国内也是噪音。
-2. **运营基础设施（第二优先）**：后台入口(admin_panel)、自建 IM/C2、短信验证码转发、硬编码后端凭据 → 可登录取证的运营端。
-3. **国外服务器**：列出但走**攻击面取证**（端口/CVE/暴露面）、CDN 提示穿透找源站；不调证。
-4. **降级、不再当重点**：钱包私钥/助记词、收款/四方支付——本口径下是死胡同。报告**保留但不高亮、digest 不排前、不作汇报重点**；仅用户明确要资金线时才展开。
-
-**汇报模板（固定、限长、只产可办案信息）**
-```
-## <app名> 研判（sha256 前12位）
-- 涉诈类型：<app_classification>
-- 可调证后端（按优先级，≤6 条）：· <域名/IP> | 登记主体<国内云/IDC/ICP> | 调证落点：<向谁>，取<什么证据>
-- 运营端线索：后台/自建IM/短信转发/后端凭据（有则列+调证落点）
-- 国外服务器：<N 条>，攻击面：<端口/CVE/暴露面要点>（不调证，找源站）
-- 下一步取证动作：<1-3 条可执行>
-（钱包/收款/四方支付：默认不展开，除非要资金线）
-```
-
-**动态抓包抓不到就写探针（默认要求，不是可选）**：`fxapk capture/auto` 已内置 SSL unpinning + 运行时密钥/JS-bridge hook；若关键目标（客服后端 / 聊天 WebSocket / 加密请求体）仍没抓到，**别放弃**——诊断原因（WebSocket / 应用层加密 / UI 触发型 / 反 frida / 非 OkHttp 栈）并**自写 frida 探针** hook 拿明文（`Cipher.doFinal`、`okhttp3.WebSocket`、WebView `evaluateJavascript`、crypto_recipe 离线解密等），再把抓到的端点回灌线索。诊断表与写法见 playbook。
-
-**深度归因（拿到后端域名/IP/标识符后做服务器归因 + 调证报告）**：按 [`docs/codex/deep-attribution-playbook.md`](docs/codex/deep-attribution-playbook.md) 执行——证据分级 + 对抗式核验 + 绝不编造（web-check/Shodan 可实查，其余 key-gated 给语句）+ 辖区驱动 P0–P5 调证优先级 + 固定输出《技术侦查与调证建议报告》A–L。
-
-**禁止**：dump 全 report；手搓逆向；逐步复述工具过程；铺开"无需调证"的 SDK/CDN 噪音；把钱包/收款当重点。
+`analyze` 富化阶段内置 web-check / Shodan / RDAP / 反查等；web-check 需 `FXAPK_WEBCHECK_URL`，Shodan 需 `FXAPK_SHODAN_KEY`，未配置则跳过，不影响核心分析。
 
 ---
 
-## 1. 环境准备（新机 clone 后一次性）
+## 3. APK 标准流程
+
+1. 读 `apkscan/memory.md`，确认本机路径、设备、报告落点。
+2. `fxapk doctor --fix` 或按需 `fxapk selfcheck`。
+3. `fxapk analyze <apk> --online --out <case_out> --fmt html,json`，再 `fxapk digest <report.json>`。
+4. 先跑 `fxapk capture-plan <report.json>`，按打法链执行，不盲试。
+5. 抓不到关键目标时按“带外 floor / 探针 / 零注入明文”规则补抓，并全部 `--into` 同一份 `report.json`。
+6. 回灌后 `fxapk graph` 串案，`fxapk letters` 套打调证/协查文书草稿。
+
+---
+
+## 4. 抓包打法四铁律
+
+- **floor 优先**：先带外 pcap 保底拿接入节点。零产出不可接受；带外至少应有 dst IP:port，SNI/DNS 视加密情况而定，ECH/DoH 下退 IP+JA3/JA4。
+- **时间盒**：单步超时即停，进下一步。
+- **frida fail-fast**：秒退累计 2~3 次就弃明文，退带外 pcap；不死磕 frida。
+- **停止门**：任一目标达成即停，不追求全都要。
+
+优先链：`capture-plan` → PCAPdroid/网关 tcpdump 带外 pcap → `pcap-leads --into`。需要明文时再按选路矩阵：明文 HTTP+应用层加密走静态 `crypto_recipe` 离线解；TLS+应用层加密走 `tls-keylog` + recipe；pinning 走 LSPosed/系统 CA/静态去 pin/Florida；自建协议/MTProto 通常停在接入节点 + 云厂商调证。
+
+---
+
+## 5. 探针库规则
+
+探针目录：`docs/codex/frida-probes/probe-templates/*.js`，数量以实际文件为准；决策表见 `docs/codex/frida-probes/指导书.md`。
+
+注入顺序：
 
 ```bash
-# 需 Python >= 3.11
-pip install -e .                 # 装运行期依赖 + 注册 fxapk / apkscan 命令
-cp .env.example .env             # 创建本地密钥文件（已 gitignore，绝不入库）
-#   然后编辑 .env 填入 key（见第 3 节；不填也能跑，仅缺对应富化能力）
-fxapk doctor                     # 环境自检：报告 python/依赖/可选工具(jadx/adb/frida)就绪情况
+frida -U -f <包名> \
+  -l docs/codex/frida-probes/probe-templates/anti-detection-hook.js \
+  -l docs/codex/frida-probes/probe-templates/anti-detection-native.js \
+  -l docs/codex/frida-probes/probe-templates/ssl-unpinning-hook.js \
+  -l docs/codex/frida-probes/probe-templates/<业务探针>.js \
+  -o probe.log -q
+fxapk probe-leads probe.log --into report.json
 ```
 
-命令两种等价调用方式：`fxapk <cmd> ...`（装好后）或 `python -m apkscan.cli <cmd> ...`（免装）。
+冷启动取证必须 `-f` spawn；反检测/解 pinning 在业务探针前。探针只读，唯一出口 `console.log`，落盘仅设备临时目录；取证结束清理 `/data/local/tmp/fx_*` 和 frida 日志。
+
+库里选不中再自写，遵守 house style：单文件自包含、中文文件头、每个 hook 独立 try/catch、失败打印 `[tag] skip: <e>`、输出 `[LEAD->后端/凭据]`、二进制同时给 text/hex/base64，抓不到写下一步换哪个 hook。
 
 ---
 
-## 1.5 真机取证机准备（Android，动态分析前置）
+## 6. URL / 域名 / IP 取证
 
-脱壳 / 抓包 / 去壳重打包都需要**已 root 的 Android 真机或模拟器**（frida-server 必须 root 跑）。**纯静态 `analyze` 不需要设备**。一次性配置：
-
-1. **root**（以红米 K40＝代号 `alioth` 为例）：解锁 BL（登小米账号 + 插**任意 SIM**翻开关，翻完可拔；小米有强制等待期）→ 取**与当前 MIUI/HyperOS 版本完全一致的 boot.img** → Magisk「安装 → 修补文件」生成 `magisk_patched.img` → `fastboot flash boot magisk_patched.img`。给 **shell（adb）授予 su 权限**（doctor 的 root 判定就认 `adb shell su -c id` 出 uid=0）。
-2. **一键体检 + 自愈**：`fxapk doctor --fix` —— 自动按设备 ABI（K40＝arm64-v8a）+ 主机 frida 版本**下载并部署 frida-server、起进程、把 mitmproxy CA 装进系统信任库**，逐项报 OK / 怎么修。这一步能修的都自动修，别手动逐个搞。
-3. **装 APK 绕过 MIUI「USB 安装要插 SIM」闸**：root 后不用开"USB 安装"那个 SIM 限制开关，直接
-   `adb push x.apk /data/local/tmp/ && adb shell su -c 'pm install -r -t /data/local/tmp/x.apk'`。
-4. **验证**：`frida-ps -U` 能列出设备进程 = frida 通；`fxapk doctor`（不带 --fix，纯体检）全绿即可开跑 `fxapk auto`。
-
-常见坑：
-- **frida-server 从 GitHub releases 下载**——PC 在国内无代理会失败/慢。解决：挂代理；或手动下 `frida-server-<主机frida版本>-android-<abi>.xz`（版本须与 PC `frida --version` 一致，doctor 已自动对齐版本号）push 到 `/data/local/tmp/frida-server` 自起。
-- **mitmproxy CA** 仅 HTTPS 抓包要：先 `pip install mitmproxy` 跑一次 `mitmdump`（Ctrl-C 退）生成 `~/.mitmproxy`，再 `doctor --fix` 装系统证书。
-- **boot.img 必须与当前 ROM 版本匹配**，否则 bootloop。
-- 取证测试机建议用**一次性小米账号 + Magisk**，别登个人账号。
-
----
-
-## 2. 全套分析（核心流程）
+目标可能是 URL、域名或 IP。先标准化 scheme/host/port/path/query，再跑命令。首选 `fxapk analyze` 的富化结果；不足时手动复核：
 
 ```bash
-# ① 跑分析 → 产出报告（默认联网富化；--offline 跳过所有联网富化）
-fxapk analyze <sample.apk> --online --out out --fmt html,json
-#   产物：out/<样本名>.json（完整报告） + out/<样本名>.html（人看）
-
-# ② 把完整报告压成【紧凑调证摘要】供你（agent）低 token 消费、直接决策
-fxapk digest out/<样本名>.json
-#   摘要：leads 按优先级排序（建议调证 > 待核 > 无需调证；高可信/C2 在前）+ 计数摘要。
-#   高敏值（钱包私钥/助记词、后端凭据、受害人 PII、加密配方）默认**明文**（取证查看需要）。
-#   ★ 若要把摘要再喂给云端模型，加 --redact 脱敏：fxapk digest out/<样本名>.json --redact
+dig <domain> A AAAA CNAME NS MX TXT
+curl -I -L --max-time 15 <url>
+openssl s_client -connect <host>:443 -servername <host>
+whois <domain-or-ip>
+shodan host <ip> ; shodan search <domain-or-ip>
 ```
 
-其它常用：
-- `fxapk auto <apk>`：静态 +（有设备则）动态一把梭。`fxapk batch <dir>`：批量。
-- `fxapk unpack` / `fxapk capture`：真机脱壳 / 抓包（需 adb 设备 + frida；`analyze --dynamic` 会自动接力）。
-- `fxapk repackage <apk>`：脱壳后把**去壳版**重打包（zip 替 DEX + apksigner 重签）装回设备，使 capture 抓去壳版（绕壳反 frida）。需 apksigner/zipalign + 设备；auto 默认含此步（`--no-repackage` 关；重签必卸原包会清 app 数据）。能力边界：治不了 VMP/重 native/反模拟器壳，多数样本预期降级、capture 仍跑原版。
-- `fxapk track`：起**本地/LAN 网页**看每个 APK 的线索 + 办案进度（手动改状态/备注/进展）；网页还能**手动补线索**（自动没抠到的人工录入，标 manual）和**编辑图谱面板**（看共享强实体/关联 APK、全局删实体、断本 APK 与某实体的边、加实体并连本 APK）。`fxapk track ingest <report.json...>` 回填历史报告。analyze/auto 默认自动入台账（`--no-track` 关）。台账在 `~/.apkscan/tracking.json`（仓库外，`git pull` 不覆盖）。LAN 共享 `--host 0.0.0.0`（自动令牌鉴权，承载 PII）。
-- `fxapk graph ...`：把多份报告导入知识图谱做**团伙串案/聚类**（`graph ingest`/`link`/`cluster`/`query`/`stats`/`cypher`）。**入图只留强档降噪**（sign/c2/wallet/crypto_addr/admin_host/im_server/telegram_bot；中档 uni_appid/firebase 不入，避免无关包被串到一起）。analyze/auto 入台账时也顺带喂图谱（kuzu 可用时）。手工维护：`graph rm-entity <kind> <value>`（全局删实体+边）/ `graph unlink <sha256> <kind> <value>`（只断一条边）/ `graph prune-weak`（一次性清存量非强档噪音）；这些也能在 track 网页图谱面板里点。
+`dig/curl/openssl/whois/shodan` 是系统/第三方 CLI，不是 fxapk 子命令。境外目标不主动访问/枚举/抓取；轻量主动核验只对授权范围内的境内目标做。
 
 ---
 
-## 3. 海外服务器攻击面取证（联网富化，`--online` 时生效）
+## 7. 归因与调证优先级
 
-对「建议调证」的域名/IP 端点做**两遍富化**：
-1. **第①遍·归属** → 判服务器**辖区**（国内/国外/未知）：rdap/whois/dns/asn/icp/webcheck。
-2. **第②遍·攻击面**（仅**国外+未知**端点；主动探测仅**国外**）：
+P0：境内云/IDC/CDN/WAF/对象存储/注册商/解析商、运营商、有 ICP 的主体。可调实名、订单、支付、登录 IP、操作日志、访问日志、回源配置、源站配置、对象上传记录、绑定域名。即便 fxapk 标为“无需调证”，只要 `endpoints[].enrichment` 显示境内登记/承租主体，也要主动捞出复核。
 
-| 开关（写进 `.env`） | 能力 | 性质 |
-|---|---|---|
-| `FXAPK_SHODAN_KEY` | Shodan 被动查库：开放端口/服务 banner/产品版本/**现成 CVE(vulns)**/关联主机名 | 被动·对目标零流量 |
-| `FXAPK_NVD_KEY`（可选） | CVE 在线补查提速（无 key 也能用，仅限速更严） | 被动 |
-| `FXAPK_ACTIVE_RECON=1` | **主动探测**：实时端口连通/TLS 证书/HTTP 指纹/暴露后台与敏感文件路径/Set-Cookie | **主动·对目标发起连接** |
-| crt.sh（免 key，默认开） | 证书透明度关联子域 → 串案 | 被动 |
+P1：境外但平台主体明确（Cloudflare/AWS/Google/Telegram/GitHub/Vercel/Netlify 等），走司法协助、平台投诉、保全或情报协作。
 
-**暴露面研判（`exposure`，纯映射·零网络·零 payload·默认开）**：把已采集指纹映射到
-- **暴露的敏感文件/误配**（/.git→源码+密钥+源站真IP、/.env→DB凭据/APP_KEY、备份dump、phpinfo、目录列表、swagger、source map）——暴露本身即直接取证价值；
-- **技术栈/后台框架指纹**（PHP/Laravel/ThinkPHP/Spring/Jeecg/RuoYi/通达·泛微·致远OA…）——**仅识别**+「框架级已知漏洞·须授权人工评估」通用方向+**串案**（同后台疑同团伙），**不内置 per-CVE RCE 靶单**。
-> ★ 边界：本层是侦查/取证情报，**不发 exploit/不自动利用**；具体漏洞利用由授权操作者对确认目标人工评估。暴露文件检测的数据来自主动 recon（需开 `FXAPK_ACTIVE_RECON`），栈指纹部分被动 Shodan 也能出。
+P2：历史资产、弱关联、纯攻击面线索，用于扩线，不作核心调证对象。
 
-**结果在哪看**：攻击面证据并进对应 Lead 的 `evidence_to_obtain`/`notes`（自动进 `digest`），例如
-`Shodan 暴露面：80(nginx 1.18) …`、`主动探测·已授权 暴露后台路径：/admin(200)`、`⚠ 暴露泄露：Git 源码仓库暴露 (/.git)（critical）→…`、`技术栈/后台指纹（仅识别·须授权人工评估）：PHP、Jeecg-Boot…`、`关联子域(crt.sh)：…建议并簇串案`。
-结构化 `attack_surface` 段每主机另带 `exposures[]` / `tech_stack[]` 字段供 Codex 直读。
-
-**取证原则（辖区分流）**：
-- **国内服务器** → 走「调证」：向境内云厂商/IDC/ICP 依法调取日志/租户实名，**不做攻击面取证**。
-- **国外服务器** → **不走调证**：目标是**定位真实源站服务器、对源站取镜像/磁盘/访问日志**。
-  - ★ 若解析 IP 全是 **CDN/反代（如 Cloudflare）** → 那是边缘节点**非源站**：取证落点会提示
-    「先穿透 CDN 定位真实源站 IP（历史 DNS/证书透明度 SAN/源站泄露/SSRF/错配/邮件头），再对源站取证」；
-    结构化 `attack_surface` 段会给该主机标 `cdn` 字段（提示其 Shodan 端口是边缘、非源站）。**别向 CDN 调证。**
-
-### ⚠️ 主动探测（`FXAPK_ACTIVE_RECON`）合规边界 —— 务必知悉
-- **默认关闭**，须显式 `FXAPK_ACTIVE_RECON=1` 才启用；这是本工具**唯一主动向目标发连接**的功能。
-- 仅对【**国外** + **建议调证** + **公网 IP**】目标动手（境内/私网/CDN/库内置档一律跳过）。
-- **仅侦查不利用**：端口连通 / TLS 证书 / HTTP 指纹 / 已知后台路径状态码——**绝不**漏洞利用/爆破/DoS。
-- 启用时会打一条授权声明日志（可审计）。**操作者须确保已获授权、在合法取证范围内使用。**
+边缘不等于源站：识别 `via`、`x-cache`、`cf-ray`、`x-oss-*`、`x-amz-*`、`x-tencent-*`、`acw_tc`、`ESA`、`ens-cache`、CDN/WAF/对象存储 CNAME。阿里云 ENS/CDN/WAF 边缘可调客户/配置/回源/日志，但不得写成真实源站。
 
 ---
 
-## 4. 读结果（给 agent 的要点）
-- 一切以 **leads** 为中心：每条带 `category`/`value`/`subject`/`advice`(建议调证/待核/无需调证)/
-  `where_to_request`/`evidence_to_obtain`/`notes`。**优先看 advice=建议调证 的**。
-- **结构化攻击面**：`digest` 输出含顶层 `attack_surface`（也在 `report.meta["attack_surface"]`），
-  **按主机机器可读**——`[{host, kind, jurisdiction, ports[], services[{port,product,version}],
-  cves[{id,cvss,severity,source}], exposed_paths[{path,status}], tls[], related_subdomains[],
-  active_probed}]`。要"列所有 C2 开放端口""找所有挂某 CVE 的主机""比对暴露后台"时**直接读这个段**，
-  别去解析 evidence 的自然语言串。仅【国外+未知】主机入此段（国内走调证不在此列）。
-- `report.meta` 还含 `app_classification`(涉诈类型研判)、`sample_sha256`(检材指纹)、`enriched_target_count` 等。
-- 先 `digest` 拿摘要决策；要细节再读 `out/<样本名>.json` 全量（`endpoints[].enrichment` 有富化原始数据）。
+## 8. 排噪音红线
+
+- 线索 `advice=待核` 且 reason 含“疑似编码 / hex / base64 / 随机串 / 伪域名”：只人工核，不调证、不回溯、不主动探测。
+- 严格只对 `advice=建议调证` 的目标做主动探测；待核/无需调证一律不动。
+- 不把公共 SDK、统计、广告、地图、证书吊销、公共 CDN、公共 DNS、IP 查询站误写为嫌疑人自有资产。
+- 不把“备案主体被滥用”直接认定为诈骗主体；要用上传账号、推送路径、登录 IP、云租户交叉定责。
+- 可信度“高”只给实测或多源交叉。
 
 ---
 
-## 5. 开发约定（改代码时）
-- Python type hints；测试用 **pytest**（不要 unittest）。跑全套：`python -m pytest -q`；快跑（排除重型）：`python -m pytest -q -m "not slow"`。
-  - `@pytest.mark.slow` 标记的真 spawn 端到端等价测试需本地 `*.apk` 样本（`FXAPK_TEST_APK` 或仓库内任一 `*.apk`），无样本自动 skip（CI 不挂）。
-- 富化器（`apkscan/enrichers/*.py`）继承 `BaseEnricher`，自动发现；失败吞成 `EnrichmentResult(ok=False)`
-  **不抛、不裸 except、不在 try 里 swallow log**。新增富化器标 `phase`（attribution/attack_surface）+ `active`。
-- **分析器并行**（`apkscan/core/pipeline.py` + `snapshot.py`）：android 多核默认走**进程池并行**（绕 GIL；把 ApkContext 物化成可 pickle 的 `SnapshotContext` 发各 worker）。worker 数按 `min(CPU, 分析器数, 可用内存可容纳数)` 封顶防 OOM，**Linux cgroup 感知**（容器里取 cgroup 限额而非宿主机内存）。逃生 / 调优开关（env）：
-  - `FXAPK_NO_PARALLEL=1` 强制串行（排障/兼容）；`FXAPK_MAX_WORKERS=N` 钳死 worker 数（=1 即强制串行）。
-  - `FXAPK_WORKER_BASE_MB` / `FXAPK_MEM_SAFETY`（0<v≤1）现场覆盖内存封顶的标定（单 worker 估算 / 安全系数）。
-  - ★ 改并行或快照路径须守不变量 **「串行 == 并行 逐字节一致」**（由 slow 等价测试背书）；分析器输出须确定（跨进程 PYTHONHASHSEED 不同，set 派生的顺序要显式排序）。
-- **合并前必过三关（本地）**：`python -m ruff check apkscan tests` + `python -m pyright apkscan` + `python -m pytest -q`——CI（`.github/workflows/ci.yml`）这三样都跑，**只跑 pytest/pyright 不够，ruff 必跑**（曾因一个未用 import F401 把 CI 刷红）。
-- **CI 环境对齐**：CI 装的是 `pip install -e ".[graph,track]"`（含 kuzu + flask）。新增**可选依赖**必须进对应 extra（如 web→`track`、图谱→`graph`），且 ci.yml 两个 job 都要装上它，否则 CI 缺包报 `ModuleNotFoundError`/pyright 解析失败。依赖某可选 extra 的测试在模块顶部 `pytest.importorskip("<pkg>")`，未装该 extra 的环境优雅跳过。
-- **合并前等 CI 绿**：开 PR 后 `gh run watch <id> --exit-status` 等 CI 跑完再 `gh pr merge`——别本地绿就盲合（本地与 CI 环境/依赖/平台不一致，本地缺 ruff、CI 缺可选依赖都坑过）。
-- commit：conventional commits OK，中文 OK；**不要** `--no-verify` / 不要 force push 到 master；未经指示不主动 commit。
+## 9. 报告与协作
+
+最终报告和成品放本机 OneDrive `C:\Users\hjjca\OneDrive\reports`；交换中间件放 `C:\Users\hjjca\OneDrive\fxapk-handoff\<案子>`；主指导书在 `C:\Users\hjjca\OneDrive\doc\fxapk-master.md`。飞书 handoff 脚本：`docs/codex/handoff/feishu_handoff.py`，协议见 `docs/codex/handoff/PROTOCOL.md`。
+
+报告固定产出《技术侦查与调证建议报告》A-L：基础归因、基础设施图谱、云/CDN/WAF 判断、关联域名、关联 IP、ASN/运营商/IDC、运营主体线索、调证对象、调证优先级、调证后可获数据、建议调取语句、没做到+风险+下一步。风险重点写证据灭失：短效证书、轮换域/IP、删桶、CDN 隐源。
+
+---
+
+## 10. 开发约定
+
+只有在缺少 fxapk 命令或用户要求改 fxapk 代码时进入开发模式。遵守现有架构；用 `pytest`，不新增无必要抽象。合并前本地三关：
+
+```bash
+python -m ruff check apkscan tests
+python -m pyright apkscan
+python -m pytest -q
+```
+
+新增可选依赖要进对应 extra，并确保 CI 环境同步。未经用户指示不主动 commit，不 force push，不 `--no-verify`。
+
+---
+
+## 按需文档索引
+
+- `docs/codex/commands.md`：完整命令参数。
+- `docs/codex/capture-playbook.md`：带时间盒抓包打法。
+- `docs/codex/capture-methods-beyond-frida.md`：PCAPdroid、网关 tcpdump、系统 CA、tls-keylog 等非 frida 方法。
+- `docs/codex/frida-probes/指导书.md`：46 个探针决策表。
+- `docs/codex/deep-attribution-playbook.md`：深度归因、证据分级、A-L 报告。
+- `docs/codex/handoff/PROTOCOL.md`：飞书 + OneDrive 交接协议。

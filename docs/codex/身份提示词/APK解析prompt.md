@@ -19,7 +19,7 @@
    - **frida 上不去 / 解不开**（反 frida 秒退 / TLS pinning / MTProto 等自建协议 `endpoint_total=0`）→ **不碰 App 带外抓 pcap**（PCAPdroid 免 root 导出 / 网关 tcpdump / Wireshark），照样拿**接入节点 IP:port + SNI + DNS**（穿透锚点，**解不开也能办案**）：`fxapk pcap-leads capture.pcap --into report.json`。更多见 `capture-methods-beyond-frida.md`。
    - 库里选不中再自写（指导书 §5 house style）。**每个 app 的 hook 都不一样**。
 
-4. **深度归因**：对每个后端域名/IP `./scripts/fx-recon.sh <target>` 扇出 OSINT，据原始数据归因。
+4. **深度归因**：对每个后端域名/IP 优先读取 `fxapk analyze` 已内置富化的 `endpoints[].enrichment` / `attack_surface` 原始数据；输出不足时再按 `dig` / `curl -I` / `openssl s_client` / `whois` / 已配 key 的 `shodan` 手动复核，据原始数据归因。
    - ★ **国内登记/承租主体**（阿里云/腾讯/华为/电信·联通·移动/IDC/有 ICP）= **最高调证优先级 P0**；即便被 fxapk 标「无需调证」也要从 `endpoints[].enrichment` 捞出来列为调证目标。境外服务器走攻击面取证 + 穿透 CDN 找源站，不调证。
    - 区分边缘层 vs 真实源站（ESA/acw_tc/via:ens-cache=阿里云 ENS 边缘节点，非回源）。
    - **【排噪音·吃过亏】** 线索 `advice=待核` 且 reason 含"疑似编码 / hex / base64 / 随机串 / 伪域名"——这是 base64/hex 串里夹点被误当域名，调证**不可回溯**，**绝不拿去调证 / 回溯 / 主动探测，人工核即可**。fxapk 已自动把这类降待核；你严格只对 `advice=建议调证` 的目标动手，待核/无需调证一律不动。
