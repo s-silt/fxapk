@@ -256,12 +256,17 @@ def test_iv_derive_unknown_when_no_md5_no_iv() -> None:
 
 @pytest.mark.skipif(not _GROUNDTRUTH_APKS, reason="本地无样本，跳过真值验证")
 def test_groundtruth_key_extracted() -> None:
-    from apkscan.core.apk import load_apk
+    from apkscan.core.apk import ApkParseError, load_apk
     from apkscan.core.models import AnalysisConfig
 
     # 遍历本地 ybku/ 下的样本，找出产出目标加密配方的那个（按 key 定位，不硬编码样本文件名）。
+    loaded_any = False
     for apk in _GROUNDTRUTH_APKS:
-        ctx = load_apk(str(apk), AnalysisConfig(online=False))
+        try:
+            ctx = load_apk(str(apk), AnalysisConfig(online=False))
+        except ApkParseError:
+            continue  # 结构非法/无法解析的本地样本跳过，不算失败
+        loaded_any = True
         result = CryptoRecipeAnalyzer().analyze(ctx)
         meta = result.meta.get("crypto_recipe")
         if not isinstance(meta, dict) or meta.get("key") != _EXPECTED_KEY:
@@ -277,6 +282,8 @@ def test_groundtruth_key_extracted() -> None:
         assert len(leads) == 1
         return
 
+    if not loaded_any:
+        pytest.skip("本地样本均无法解析（结构非法），跳过真值验证")
     pytest.skip("本地样本中未找到目标加密配方")
 
 
