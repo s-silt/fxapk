@@ -651,3 +651,325 @@ class _FakeCtx:
 
     package_name = "com.x"
     platform = "android"
+
+
+# ---------------------------------------------------------------------------
+# 组 A · 修复 1：capture/unpack/repackage 业务失败返回非零 exit code
+#   STATUS_ERROR → 1；STATUS_SKIPPED → 2（缺 frida/mitmproxy/root，零产出高发）；正常 → 0。
+# ---------------------------------------------------------------------------
+
+
+def _patch_capture_cmd(monkeypatch: pytest.MonkeyPatch, status: str) -> None:
+    """给 `fxapk capture` 命令桩：capture.run 返回给定 status 的 DynamicResult。"""
+    from apkscan.core import tools
+    from apkscan.dynamic import capture
+
+    monkeypatch.setattr(tools, "kill_adb_server", lambda: None)
+    monkeypatch.setattr(
+        capture,
+        "run",
+        lambda *a, **k: {
+            "status": status,
+            "reason": "桩",
+            "artifacts": [],
+            "playbook": [],
+            "report_paths": [],
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [(STATUS_DONE, 0), (STATUS_ERROR, 1), (STATUS_SKIPPED, 2)],
+)
+def test_capture_cmd_exit_code_by_status(monkeypatch, status, expected):
+    _patch_capture_cmd(monkeypatch, status)
+    res = runner.invoke(cli.app, ["capture", "com.x", "--out", "out", "--duration", "10"])
+    assert res.exit_code == expected
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [(STATUS_DONE, 0), (STATUS_ERROR, 1), (STATUS_SKIPPED, 2)],
+)
+def test_unpack_cmd_exit_code_by_status(monkeypatch, tmp_path, status, expected):
+    from apkscan.dynamic import unpack
+
+    monkeypatch.setattr(
+        unpack,
+        "run",
+        lambda *a, **k: {
+            "status": status,
+            "reason": "桩",
+            "artifacts": [],
+            "playbook": [],
+            "report_paths": [],
+        },
+    )
+    apk = tmp_path / "s.apk"
+    apk.write_bytes(b"PK\x03\x04")
+    res = runner.invoke(cli.app, ["unpack", str(apk), "--out", str(tmp_path / "o")])
+    assert res.exit_code == expected
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [(STATUS_DONE, 0), (STATUS_ERROR, 1), (STATUS_SKIPPED, 2)],
+)
+def test_repackage_cmd_exit_code_by_status(monkeypatch, tmp_path, status, expected):
+    from apkscan.dynamic import repackage
+
+    monkeypatch.setattr(
+        repackage,
+        "run",
+        lambda *a, **k: {
+            "status": status,
+            "reason": "桩",
+            "artifacts": [],
+            "playbook": [],
+            "report_paths": [],
+        },
+    )
+    apk = tmp_path / "s.apk"
+    apk.write_bytes(b"PK\x03\x04")
+    res = runner.invoke(cli.app, ["repackage", str(apk), "--out", str(tmp_path / "o")])
+    assert res.exit_code == expected
+
+
+def test_capture_cmd_still_cleans_adb_on_nonzero(monkeypatch):
+    """业务失败（skipped→rc=2）仍穿过 finally 收 adb server。"""
+    from apkscan.core import tools
+    from apkscan.dynamic import capture
+
+    calls = {"n": 0}
+    monkeypatch.setattr(tools, "kill_adb_server", lambda: calls.__setitem__("n", calls["n"] + 1))
+    monkeypatch.setattr(
+        capture,
+        "run",
+        lambda *a, **k: {
+            "status": STATUS_SKIPPED,
+            "reason": "缺 frida",
+            "artifacts": [],
+            "playbook": [],
+            "report_paths": [],
+        },
+    )
+    res = runner.invoke(cli.app, ["capture", "com.x"])
+    assert res.exit_code == 2
+    assert calls["n"] == 1  # rc=2 也收 adb
+
+
+# ---------------------------------------------------------------------------
+# 组 A · 修复 2：capture --out 默认口径与 analyze/unpack 一致（不再是相对 cwd 的裸 "out"）
+# ---------------------------------------------------------------------------
+
+
+def test_capture_out_default_resolves_absolute(monkeypatch):
+    """不传 --out 时 capture 把 out 解析成绝对路径（与 analyze/unpack 的确定性口径一致），
+    而非相对 cwd 的裸字符串 "out"。"""
+    from apkscan.core import tools
+    from apkscan.dynamic import capture
+
+    monkeypatch.setattr(tools, "kill_adb_server", lambda: None)
+    seen: dict[str, Any] = {}
+
+    def _fake_run(package: str, *, out: str, duration: int) -> dict[str, Any]:
+        seen["out"] = out
+        return _done_result()
+
+    monkeypatch.setattr(capture, "run", _fake_run)
+    res = runner.invoke(cli.app, ["capture", "com.x"])
+    assert res.exit_code == 0
+    assert Path(seen["out"]).is_absolute()  # 已绝对化，口径确定（不再相对 cwd 的裸 "out"）
+    assert Path(seen["out"]).name == "out"
+
+
+def test_resolve_out_cwd_absolutizes(tmp_path: Path, monkeypatch) -> None:
+    """capture 无样本文件 → 用 cwd 基准把裸 out 解析成绝对路径；显式路径原样绝对化。"""
+    monkeypatch.chdir(tmp_path)
+    assert cli._resolve_out_cwd(None) == str((tmp_path / "out").resolve())
+    assert cli._resolve_out_cwd("myout") == str((tmp_path / "myout").resolve())
+
+
+# ---------------------------------------------------------------------------
+# 组 A · 修复 3：--duration 下限 min=1，<1 直接报错（不产出 0-endpoint 空报告）
+# ---------------------------------------------------------------------------
+
+
+def test_capture_duration_zero_rejected(monkeypatch):
+    """--duration 0 → typer 参数校验拒绝（非零退出），不进入 capture.run。"""
+    from apkscan.core import tools
+    from apkscan.dynamic import capture
+
+    monkeypatch.setattr(tools, "kill_adb_server", lambda: None)
+    called = {"n": 0}
+    monkeypatch.setattr(capture, "run", lambda *a, **k: called.__setitem__("n", called["n"] + 1) or _done_result())
+
+    res = runner.invoke(cli.app, ["capture", "com.x", "--duration", "0"])
+    assert res.exit_code != 0
+    assert called["n"] == 0  # 参数校验先拦，未触达 capture.run
+
+
+def test_capture_duration_one_accepted(monkeypatch):
+    """--duration 1 是下限，仍合法。"""
+    _patch_capture_cmd(monkeypatch, STATUS_DONE)
+    res = runner.invoke(cli.app, ["capture", "com.x", "--duration", "1"])
+    assert res.exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# 组 A · 修复 4：probe-leads / pcap-leads --into 后若同目录有 report.html 则重渲
+# ---------------------------------------------------------------------------
+
+
+def _write_min_report_json(path: Path, leads: list[dict[str, Any]]) -> None:
+    """写一份最小 report.json（字段与 report/json.py 序列化同构，供 --into 合并 + 重渲）。"""
+    import json as _json
+
+    payload = {
+        "package_name": "com.x",
+        "meta": {},
+        "leads": leads,
+        "endpoints": [],
+        "findings": [],
+        "analyzer_status": [],
+        "enricher_status": [],
+    }
+    path.write_text(_json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def test_rerender_html_from_report_json_rebuilds_leads(tmp_path: Path) -> None:
+    """_rerender_html_if_present 从改后的 report.json 重建 Report 并覆盖写 report.html，
+    新 lead 值出现在 html 里。"""
+    rp = tmp_path / "report.json"
+    hp = tmp_path / "report.html"
+    _write_min_report_json(rp, leads=[])
+    hp.write_text("<html>OLD</html>", encoding="utf-8")
+
+    # 模拟 --into 已把新线索写进 report.json。
+    _write_min_report_json(
+        rp,
+        leads=[
+            {
+                "category": "DOMAIN",
+                "value": "evil-c2.example.com",
+                "subject": None,
+                "where_to_request": "注册商",
+                "evidence_to_obtain": [],
+                "confidence": "HIGH",
+                "source_refs": [
+                    {"source": "runtime", "location": "probe", "snippet": "", "observed_at": None}
+                ],
+                "notes": "",
+                "advice": "建议调证",
+            }
+        ],
+    )
+
+    out = cli._rerender_html_if_present(str(rp))
+    assert out == str(hp)
+    html = hp.read_text(encoding="utf-8")
+    assert "OLD" not in html  # 已重渲覆盖
+    assert "evil-c2.example.com" in html  # 新线索进了 html
+
+
+def test_rerender_html_noop_when_no_html(tmp_path: Path) -> None:
+    """同目录无 report.html → 不重渲、不新建（返回空串）。"""
+    rp = tmp_path / "report.json"
+    _write_min_report_json(rp, leads=[])
+    out = cli._rerender_html_if_present(str(rp))
+    assert out == ""
+    assert not (tmp_path / "report.html").exists()
+
+
+def test_probe_leads_into_rerenders_html(monkeypatch, tmp_path: Path):
+    """probe-leads --into 改了 report.json 后，若同目录有 report.html 则重渲（内容随之更新）。"""
+    from apkscan.dynamic import probe_ingest
+
+    rp = tmp_path / "report.json"
+    hp = tmp_path / "report.html"
+    hp.write_text("<html>STALE</html>", encoding="utf-8")
+
+    def _fake_merge(report_json_path: str, leads: list) -> int:
+        # 模拟合并：把一条新线索写进 report.json。
+        _write_min_report_json(
+            Path(report_json_path),
+            leads=[
+                {
+                    "category": "IP",
+                    "value": "203.0.113.9",
+                    "subject": None,
+                    "where_to_request": "IDC",
+                    "evidence_to_obtain": [],
+                    "confidence": "HIGH",
+                    "source_refs": [
+                        {"source": "runtime", "location": "probe", "snippet": "", "observed_at": None}
+                    ],
+                    "notes": "",
+                    "advice": "建议调证",
+                }
+            ],
+        )
+        return 1
+
+    monkeypatch.setattr(probe_ingest, "parse_probe_log", lambda text: [])
+    monkeypatch.setattr(probe_ingest, "dedup", lambda leads: leads)
+    monkeypatch.setattr(probe_ingest, "build_ledger_md", lambda leads: "台账")
+    monkeypatch.setattr(probe_ingest, "merge_into_report_json", _fake_merge)
+
+    log = tmp_path / "probe.log"
+    log.write_text("[LEAD] x", encoding="utf-8")
+
+    res = runner.invoke(cli.app, ["probe-leads", str(log), "--into", str(rp)])
+    assert res.exit_code == 0
+    html = hp.read_text(encoding="utf-8")
+    assert "STALE" not in html
+    assert "203.0.113.9" in html
+
+
+def test_pcap_leads_into_rerenders_html(monkeypatch, tmp_path: Path):
+    """pcap-leads --into 改了 report.json 后，若同目录有 report.html 则重渲（内容随之更新）。"""
+    from apkscan.dynamic import pcap_ingest
+
+    rp = tmp_path / "report.json"
+    hp = tmp_path / "report.html"
+    hp.write_text("<html>STALE</html>", encoding="utf-8")
+
+    class _FakeSummary:
+        flows = ["f"]
+        dns_queries = []
+
+    def _fake_merge(report_json_path: str, summary: object) -> int:
+        _write_min_report_json(
+            Path(report_json_path),
+            leads=[
+                {
+                    "category": "DOMAIN",
+                    "value": "pcap-sni.example.net",
+                    "subject": None,
+                    "where_to_request": "注册商",
+                    "evidence_to_obtain": [],
+                    "confidence": "MEDIUM",
+                    "source_refs": [
+                        {"source": "runtime", "location": "pcap", "snippet": "", "observed_at": None}
+                    ],
+                    "notes": "",
+                    "advice": "建议调证",
+                }
+            ],
+        )
+        return 1
+
+    monkeypatch.setattr(pcap_ingest, "parse_pcap", lambda p: _FakeSummary())
+    monkeypatch.setattr(pcap_ingest, "to_report_leads", lambda summary: [])
+    monkeypatch.setattr(pcap_ingest, "build_ledger_md", lambda summary: "台账")
+    monkeypatch.setattr(pcap_ingest, "merge_into_report_json", _fake_merge)
+
+    pcap = tmp_path / "cap.pcap"
+    pcap.write_bytes(b"\x00")
+
+    res = runner.invoke(cli.app, ["pcap-leads", str(pcap), "--into", str(rp)])
+    assert res.exit_code == 0
+    html = hp.read_text(encoding="utf-8")
+    assert "STALE" not in html
+    assert "pcap-sni.example.net" in html
