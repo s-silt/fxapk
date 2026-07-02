@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import bisect
 import logging
 import posixpath
 import re
@@ -360,6 +361,26 @@ class _Rules:
     noise_ips: frozenset[str] = field(default_factory=frozenset)
 
 
+def _pos_in_consumed(consumed: list[tuple[int, int]], pos: int) -> bool:
+    """pos 是否落在某个已被 URL 覆盖的区间内（半开 [start, end)）。
+
+    ``consumed`` 由 ``_scan_text`` 按 ``_URL_RE.finditer`` 顺序追加，故区间按 start
+    严格升序且互不重叠（每段是对应 URL 匹配的子区间）。据此用 bisect 定位候选区间：
+    找到 start <= pos 的最右一个区间，只需检查该区间的 end 即可，无需线性扫全部区间
+    （旧实现对每个 IP/域名候选 O(URL) 全扫，密集样本上 O(URL×候选)）。
+
+    判定结果与旧 ``any(start <= pos < end for start, end in consumed)`` 逐点一致。
+    """
+    if not consumed:
+        return False
+    # bisect_right 按 (start,) 找插入点：所有 start <= pos 的区间都在其左侧，取最右一个。
+    idx = bisect.bisect_right(consumed, (pos, float("inf"))) - 1
+    if idx < 0:
+        return False
+    start, end = consumed[idx]
+    return pos < end
+
+
 class EndpointsAnalyzer(BaseAnalyzer):
     """从 dex/resource/native/manifest 提取 URL/域名/IP 端点（只产 Endpoint）。"""
 
@@ -372,7 +393,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
         collector = EndpointCollector()
 
         # 四路数据源各自 try/except，单源失败不影响其余。
-        dex_ok = self._scan_dex(ctx, collector, rules)
+        dex_ok, dex_truncated = self._scan_dex(ctx, collector, rules)
         self._scan_manifest(ctx, collector, rules)
         res_count = self._scan_resources(ctx, collector, rules)
         native_count = self._scan_native(ctx, collector, rules)
@@ -387,6 +408,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
         result.meta.update(
             {
                 "dex_scanned": dex_ok,
+                "dex_strings_truncated": dex_truncated,
                 "resource_files_scanned": res_count,
                 "native_files_scanned": native_count,
                 "endpoint_total": len(endpoints),
@@ -413,14 +435,20 @@ class EndpointsAnalyzer(BaseAnalyzer):
 
     def _scan_dex(
         self, ctx: "AnalysisContext", collector: EndpointCollector, rules: _Rules
-    ) -> bool:
-        """扫 DEX 字符串池。返回是否成功遍历。"""
+    ) -> tuple[bool, bool]:
+        """扫 DEX 字符串池。返回 (是否成功遍历, 是否因超上限被截断)。
+
+        截断标记暴露给 meta（dex_strings_truncated），使"字符串池超 _MAX_DEX_STRINGS
+        被截断、后段字符串未扫"这一降级在报告里可见，而非静默丢失端点。
+        """
+        truncated = False
         try:
             for idx, s in enumerate(ctx.dex_strings()):
                 if idx >= _MAX_DEX_STRINGS:
                     logger.warning(
                         "[%s] DEX 字符串超过上限 %d，截断扫描", self.name, _MAX_DEX_STRINGS
                     )
+                    truncated = True
                     break
                 if not isinstance(s, str) or not s:
                     continue
@@ -430,8 +458,8 @@ class EndpointsAnalyzer(BaseAnalyzer):
                     logger.exception("[%s] 解析 DEX 字符串失败，跳过该条", self.name)
         except Exception:
             logger.exception("[%s] 遍历 dex_strings 失败", self.name)
-            return False
-        return True
+            return False, truncated
+        return True, truncated
 
     def _scan_manifest(
         self, ctx: "AnalysisContext", collector: EndpointCollector, rules: _Rules
@@ -647,12 +675,11 @@ class EndpointsAnalyzer(BaseAnalyzer):
                 )
                 collector.mark_tier(host, infra.domain_source_tier(location, len(text)))
 
-        def _in_consumed(pos: int) -> bool:
-            return any(start <= pos < end for start, end in consumed)
-
+        # consumed 已按 URL 匹配顺序（start 升序、互不重叠）追加 → 用 bisect O(log n) 判定，
+        # 不再对每个 IP/域名候选线性扫全部区间（密集样本上省下 O(URL×候选)）。
         # 2) IPv4（带可选端口）。
         for m in _IPV4_RE.finditer(text):
-            if _in_consumed(m.start()):
+            if _pos_in_consumed(consumed, m.start()):
                 continue
             ip_str = m.group(1)
             ip_obj = _parse_ipv4(ip_str)
@@ -672,7 +699,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
 
         # 3) 裸域名。
         for m in _DOMAIN_RE.finditer(text):
-            if _in_consumed(m.start()):
+            if _pos_in_consumed(consumed, m.start()):
                 continue
             raw_domain = m.group(1).rstrip(".")
             if not _looks_like_domain(raw_domain):

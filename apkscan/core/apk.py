@@ -166,6 +166,14 @@ class ApkParseError(RuntimeError):
     """APK 无法解析（损坏 / 非 APK）。fail fast 用。"""
 
 
+#: read_file 缓存的单文件上限：超过此值的文件（大 .so / 大资源）读到后不进 _read_cache，
+#: 避免巨型二进制随分析常驻内存（缓存本意是让多个分析器重复读小文本资源命中，大文件重复读
+#: 罕见，收益远不抵内存代价）。与 snapshot.py 的 _MAX_PREREAD_BYTES（预读进快照的单文件上限）
+#: 同口径 32MB：两处都在挡"病态超大单文件把内存撑爆"，取相同阈值保持一致。正确性不受影响——
+#: 未缓存只是每次重读，read_file 返回的字节完全一致。
+_MAX_READ_CACHE_BYTES = 32 * 1024 * 1024
+
+
 class ApkContext:
     """AnalysisContext 的真实实现，由 androguard 驱动。
 
@@ -363,7 +371,17 @@ class ApkContext:
             # androguard 对缺失文件抛 FileNotPresent；视为正常缺失但仍记录
             logger.debug("read_file 未命中：%s", path, exc_info=True)
             data = None
-        cache[path] = data
+        # 超大文件（大 .so / 大资源）不进缓存，避免常驻内存。None（未命中）仍缓存以避免重复
+        # 未命中查询；小文件照常缓存供多分析器重复读命中。未缓存的大文件仍返回完整字节。
+        if data is None or len(data) <= _MAX_READ_CACHE_BYTES:
+            cache[path] = data
+        else:
+            logger.debug(
+                "read_file 跳过缓存（超 %d 字节，避免常驻内存）：%s（%d 字节）",
+                _MAX_READ_CACHE_BYTES,
+                path,
+                len(data),
+            )
         return data
 
     def native_libs(self) -> list[str]:
