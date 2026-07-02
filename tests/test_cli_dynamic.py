@@ -589,6 +589,59 @@ def test_run_dynamic_after_static_new_signature_passes_report_and_formats(monkey
 
 
 # ---------------------------------------------------------------------------
+# capture-plan：--json 输出结构化决策（供引擎 / Codex 机器可读消费）
+# ---------------------------------------------------------------------------
+
+
+def test_capture_plan_json_emits_structured_decision(tmp_path: Path) -> None:
+    """capture-plan --json 输出纯 JSON 结构化决策（floor_first/预算/秒退阈值/信号）。"""
+    import json as _json
+
+    rep = tmp_path / "report.json"
+    rep.write_text(
+        _json.dumps({"meta": {"crypto_recipe": {"algo": "AES", "key": "x"}}}), encoding="utf-8"
+    )
+    result = runner.invoke(cli.app, ["capture-plan", str(rep), "--json"])
+    assert result.exit_code == 0
+    payload = _json.loads(result.stdout)  # 纯 JSON，无人读表头
+    assert payload["floor_first"] is True
+    assert payload["prefer_offline_decrypt"] is True
+    assert payload["total_budget_sec"] == 3600
+    assert payload["frida_retreat_threshold"] == 3  # 非加固 → 默认阈值
+    assert payload["signals"]["has_crypto_recipe"] is True
+    assert payload["reasons"]
+    assert "离线" in result.stdout  # 中文未转义 → ensure_ascii=False 契约（机器/人读均友好）
+
+
+def test_capture_plan_json_packed_lowers_threshold(tmp_path: Path) -> None:
+    """--json 端到端锁住『秒退阈值随信号变化』：加固样本 → frida_retreat_threshold=2。"""
+    import json as _json
+
+    rep = tmp_path / "report.json"
+    rep.write_text(
+        _json.dumps({"findings": [{"id": "PACK-DETECTED", "category": "packing"}]}),
+        encoding="utf-8",
+    )
+    result = runner.invoke(cli.app, ["capture-plan", str(rep), "--json"])
+    assert result.exit_code == 0
+    payload = _json.loads(result.stdout)
+    assert payload["frida_retreat_threshold"] == 2
+    assert payload["signals"]["packed"] is True
+    assert payload["expect_native_protocol"] is True  # 无端点键 → 预判 native
+
+
+def test_capture_plan_default_still_prints_text_steps(tmp_path: Path) -> None:
+    """默认（无 --json）仍打印人读文本打法——向后兼容不破坏。"""
+    import json as _json
+
+    rep = tmp_path / "report.json"
+    rep.write_text(_json.dumps({}), encoding="utf-8")
+    result = runner.invoke(cli.app, ["capture-plan", str(rep)])
+    assert result.exit_code == 0
+    assert "抓包打法" in result.stdout
+
+
+# ---------------------------------------------------------------------------
 # 测试替身
 # ---------------------------------------------------------------------------
 

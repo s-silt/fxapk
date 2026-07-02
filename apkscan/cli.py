@@ -837,12 +837,18 @@ def pcap_leads(
 @app.command(name="capture-plan")
 def capture_plan_cmd(
     report_json: Path = typer.Argument(..., help="已产出的 report.json（analyze/auto 写出）。"),
+    as_json: bool = typer.Option(
+        False,
+        "--json",
+        help="输出机器可读的结构化决策（CaptureDecision：floor 优先 / 秒退阈值 / 总预算 / 信号），供引擎或 Codex 消费，而非人读文本步骤。",
+    ),
 ) -> None:
     """据静态报告的规避信号（加固/endpoint数/加密配方/自建IM），输出**针对该样本的抓包打法**。
 
     薄包装：读 report.json → capture_plan.plan_capture → 打印有序步骤（起手式带外 pcap 保底 → 按
     规避类型选 frida unpinning / 静态去 pin / pcap-leads / 专项探针）。绝不抛——读不到/坏 JSON
-    打印友好提示并退出码 1。供办案人/Codex 决定"这个样本该怎么抓"。
+    打印友好提示并退出码 1。供办案人/Codex 决定"这个样本该怎么抓"。``--json`` 则改出与文本同源的
+    结构化决策（decide_capture），供自动编排读。
     """
     import json as _json
 
@@ -862,6 +868,13 @@ def capture_plan_cmd(
             raise typer.Exit(code=1) from exc
 
         from apkscan.dynamic import capture_plan
+
+        if as_json:
+            import dataclasses
+
+            decision = capture_plan.decide_capture(report)
+            typer.echo(_json.dumps(dataclasses.asdict(decision), ensure_ascii=False, indent=2))
+            return
 
         steps = capture_plan.plan_capture(report)
         typer.echo("# 抓包打法（据静态报告规避信号 + 方法目录决策树）\n")
