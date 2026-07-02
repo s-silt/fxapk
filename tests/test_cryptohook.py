@@ -275,6 +275,56 @@ def test_frida_crypto_hook_js_integrity() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 内嵌 Frida JS 外置为 frida_js/*.js（importlib.resources 读取）：逐字一致 + 装后可读
+# ---------------------------------------------------------------------------
+
+# 8 个对外常量 ↔ frida_js/ 下 .js 资源文件（capture.py 拼接注入真机的全部脚本）。
+_FRIDA_JS_FILES: dict[str, str] = {
+    "FRIDA_CRYPTO_HOOK_JS": "crypto_hook.js",
+    "FRIDA_JSBRIDGE_HOOK_JS": "jsbridge_hook.js",
+    "FRIDA_SENSITIVE_API_HOOK_JS": "sensitive_api_hook.js",
+    "FRIDA_ANTIDETECT_JS": "antidetect.js",
+    "FRIDA_OKHTTP_HOOK_JS": "okhttp_hook.js",
+    "FRIDA_SQLCIPHER_HOOK_JS": "sqlcipher_hook.js",
+    "FRIDA_CLIPBOARD_HOOK_JS": "clipboard_hook.js",
+    "FRIDA_ACCESSIBILITY_HOOK_JS": "accessibility_hook.js",
+}
+
+
+def test_all_frida_constants_are_nonempty_str() -> None:
+    """8 个 Frida JS 常量都必须是非空 str（对外契约：capture.py 直接字符串拼接注入）。"""
+    for attr in _FRIDA_JS_FILES:
+        value = getattr(cryptohook, attr)
+        assert isinstance(value, str), f"{attr} 应为 str"
+        assert value, f"{attr} 不应为空"
+        assert "Java.perform" in value, f"{attr} 应是 Frida perform 脚本"
+
+
+def test_frida_constants_match_js_resource_files_verbatim() -> None:
+    """外置迁移铁律：每个常量必须与 frida_js/ 下同名 .js 资源**逐字一致**（纯搬运，不改语义）。
+
+    经 importlib.resources 按 bytes 读回资源、UTF-8 解码（无换行翻译），与常量比对全等。
+    """
+    import importlib.resources
+
+    for attr, fname in _FRIDA_JS_FILES.items():
+        res = importlib.resources.files("apkscan.dynamic") / "frida_js" / fname
+        disk = res.read_bytes().decode("utf-8")
+        assert getattr(cryptohook, attr) == disk, f"{attr} 与 {fname} 内容不一致（迁移应逐字搬运）"
+
+
+def test_frida_js_resources_are_readable_and_lf_only() -> None:
+    """资源必须可经 importlib.resources 读取（装后同样可读），且为 LF-only（无 CR 泄漏）。"""
+    import importlib.resources
+
+    for fname in _FRIDA_JS_FILES.values():
+        res = importlib.resources.files("apkscan.dynamic") / "frida_js" / fname
+        raw = res.read_bytes()
+        assert raw, f"{fname} 不应为空"
+        assert b"\r" not in raw, f"{fname} 不应含 CR（保持源文件 LF 一致）"
+
+
+# ---------------------------------------------------------------------------
 # P1：make_typed_handler + JS-bridge / 敏感 API 通道
 # ---------------------------------------------------------------------------
 

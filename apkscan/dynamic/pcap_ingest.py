@@ -23,7 +23,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from apkscan.core import infra
-from apkscan.core.models import Confidence, Evidence, Lead, LeadCategory
+from apkscan.core.atomic import atomic_write_text
+from apkscan.core.models import (
+    Confidence,
+    Evidence,
+    Lead,
+    LeadCategory,
+    merge_runtime_into_lead_dict,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -406,6 +413,7 @@ def to_report_leads(summary: PcapSummary) -> list[Lead]:
                         source=_SOURCE,
                         location="pcap",
                         snippet=f"{f.src_ip}:{f.src_port}->{value} pkts={f.packets}{sni}{ja3}"[:200],
+                        observed_at=f.first_ts or None,  # 首包时间 → 观测时刻（0.0 视作未知留 None）
                     )
                 ],
                 notes="带外 pcap 实测接入节点；即便协议/密文解不开，也能凭此 IP 调证穿透真源站。",
@@ -413,9 +421,12 @@ def to_report_leads(summary: PcapSummary) -> list[Lead]:
         )
 
     domains: dict[str, str] = {}
+    domain_ts: dict[str, float] = {}  # SNI 域名 → 承载它的最早 flow 首包时间（DNS 域名无 per-query ts，留空）
     for f in summary.flows:
         for s in f.sni:
             domains.setdefault(s, "TLS SNI")
+            if f.first_ts and (s not in domain_ts or f.first_ts < domain_ts[s]):
+                domain_ts[s] = f.first_ts
     for q in summary.dns_queries:
         domains.setdefault(q, "DNS 查询")
     for dom, src in domains.items():
@@ -434,7 +445,14 @@ def to_report_leads(summary: PcapSummary) -> list[Lead]:
                 where_to_request=_DOMAIN_WHERE,
                 confidence=Confidence.HIGH,
                 advice=advice or "建议调证",
-                source_refs=[Evidence(source=_SOURCE, location="pcap", snippet=f"{src}: {dom}")],
+                source_refs=[
+                    Evidence(
+                        source=_SOURCE,
+                        location="pcap",
+                        snippet=f"{src}: {dom}",
+                        observed_at=domain_ts.get(dom),  # SNI 域名带首包时间，DNS 域名留 None
+                    )
+                ],
                 notes=f"带外 pcap 捕获（{src}）。",
             )
         )
@@ -482,7 +500,13 @@ def to_ledger_dict(summary: PcapSummary) -> dict[str, object]:
 
 
 def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:
-    """把 pcap 线索追加进 report.json 的 ``leads``（去重 by (category, value)）。绝不抛，失败返 0。"""
+    """把 pcap 线索合并进 report.json 的 ``leads``。绝不抛，失败返 0。
+
+    - 新键（(category, value) 不存在）→ append，计入返回的 added。
+    - 命中已存在键（如静态已抓到同 domain/ip）→ 不丢弃，把 runtime 证据并进原 lead、升为
+      ``is_runtime_seen``（静态→活体确认），不计入 added。
+    - 落盘走 :func:`atomic_write_text`：写中途失败绝不留半截坏 JSON（保底 return 0）。
+    """
     try:
         from apkscan.report import json as report_json
 
@@ -495,21 +519,27 @@ def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:
         if not isinstance(existing, list):
             existing = []
             payload["leads"] = existing
-        existing_keys = {
-            (str(item.get("category")), str(item.get("value")))
+        existing_by_key: dict[tuple[str, str], dict] = {
+            (str(item.get("category")), str(item.get("value"))): item
             for item in existing
             if isinstance(item, dict)
         }
         added = 0
+        confirmed = 0
         for lead in to_report_leads(summary):
             key = (lead.category.value, lead.value)
-            if key in existing_keys:
+            lead_dict = report_json._to_jsonable(lead)
+            hit = existing_by_key.get(key)
+            if hit is not None:
+                # 命中已存在键：不丢弃——把 runtime 证据并进原 lead、升为活体确认。
+                if merge_runtime_into_lead_dict(hit, lead_dict):
+                    confirmed += 1
                 continue
-            existing_keys.add(key)
-            existing.append(report_json._to_jsonable(lead))
+            existing_by_key[key] = lead_dict
+            existing.append(lead_dict)
             added += 1
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        logger.info("[pcap] 追加 %d 条带外线索进 %s", added, path)
+        atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
+        logger.info("[pcap] 追加 %d 条、runtime 确认 %d 条带外线索进 %s", added, confirmed, path)
         return added
     except (OSError, ValueError):
         logger.exception("[pcap] 读取/解析 report.json 失败：%s", report_json_path)

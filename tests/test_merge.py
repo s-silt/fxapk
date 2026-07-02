@@ -493,6 +493,136 @@ def test_merge_and_rerender_on_progress_exception_swallowed(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 性能：一次 merge_and_rerender 内 runtime_report.json 只读盘 + 解析一次
+# ---------------------------------------------------------------------------
+
+
+def _write_full_runtime_report(tmp_path) -> str:
+    """写出一份含所有运行时事件数组的 runtime_report.json，触发全部 _load_* 消费者。"""
+    path = tmp_path / "runtime_report.json"
+    payload = {
+        "package_name": "com.test.app",
+        "source": "runtime",
+        "endpoints": [],
+        "messages": [{"url": "https://api.example.cn/x", "response_body": None}],
+        "crypto_events": [],
+        "jsbridge_events": [],
+        "sensitive_api_events": [],
+        "antidetect_events": [],
+        "credential_events": [],
+        "sqlcipher_events": [],
+        "clipboard_events": [],
+        "remote_control_events": [],
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return str(path)
+
+
+def test_merge_and_rerender_reads_runtime_report_once(tmp_path, monkeypatch) -> None:
+    """回归锁定：一次 merge_and_rerender 对同一 runtime_report.json 只读盘 + json 解析一次。
+
+    历史坑：decrypt/traces/credentials/... 各消费者各自 read_text + json.loads，
+    同一文件在一次 merge 内被读/解析约 11 次。修复后经进程内缓存去重到 1 次。
+    """
+    rr_path = _write_full_runtime_report(tmp_path)
+    report = _make_report()
+
+    from pathlib import Path
+
+    real_read_text = Path.read_text
+    read_counts: dict[str, int] = {}
+
+    def _counting_read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+        key = str(self)
+        read_counts[key] = read_counts.get(key, 0) + 1
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _counting_read_text)
+
+    real_loads = json.loads
+    loads_count = {"n": 0}
+
+    def _counting_loads(*args: Any, **kwargs: Any) -> Any:
+        loads_count["n"] += 1
+        return real_loads(*args, **kwargs)
+
+    monkeypatch.setattr(merge.json, "loads", _counting_loads)
+
+    merge.merge_and_rerender(report, [], str(tmp_path))
+
+    # runtime_report.json 只被读盘一次（重渲写出的 report.json 是「写」不是「读」）。
+    assert read_counts.get(rr_path, 0) == 1, read_counts
+    # 该文件内容也只被 json 解析一次。
+    assert loads_count["n"] == 1, loads_count["n"]
+
+
+def test_runtime_payload_cache_scoped_to_call(tmp_path) -> None:
+    """缓存是 per-call 的：merge_and_rerender 外单独调用 loader 不受上一次调用缓存影响。
+
+    改文件内容后再单独调 loader，必须读到新内容（缓存不得跨调用泄漏 / 变陈旧）。
+    """
+    rr_path = _write_full_runtime_report(tmp_path)
+    report = _make_report()
+    merge.merge_and_rerender(report, [], str(tmp_path))
+
+    # 改写文件：messages 变为 2 条。缓存若泄漏则仍读到旧的 1 条。
+    from pathlib import Path
+
+    payload = json.loads(Path(rr_path).read_text(encoding="utf-8"))
+    payload["messages"] = [
+        {"url": "https://a.cn/1", "response_body": None},
+        {"url": "https://b.cn/2", "response_body": None},
+    ]
+    Path(rr_path).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    assert len(merge._load_runtime_messages(rr_path)) == 2
+
+
+def test_loaders_unchanged_without_active_cache(tmp_path) -> None:
+    """无活动缓存（直接调 loader）时行为不变：缺文件 → []，坏 JSON → []（不抛）。"""
+    missing = str(tmp_path / "nope.json")
+    assert merge._load_runtime_messages(missing) == []
+    assert merge._load_events_field(missing, "crypto_events") == []
+
+    bad = tmp_path / "runtime_report.json"
+    bad.write_text("{not json", encoding="utf-8")
+    assert merge._load_runtime_messages(str(bad)) == []
+    assert merge._load_events_field(str(bad), "clipboard_events") == []
+
+
+# ---------------------------------------------------------------------------
+# stats glue：表驱动透传子统计（行为不变）
+# ---------------------------------------------------------------------------
+
+
+def test_merge_and_rerender_stats_glue_maps_all_substats(tmp_path) -> None:
+    """merge_and_rerender 把各子步骤统计（含 key 重映射）透传进 stats，键齐全。"""
+    _write_full_runtime_report(tmp_path)
+    report = _make_report()
+    stats = merge.merge_and_rerender(report, [], str(tmp_path))
+
+    for key in (
+        "decrypted",
+        "decrypt_failed",
+        "plaintext_endpoints",
+        "live_recipe",
+        "jsbridge_leads",
+        "api_confirmed",
+        "credential_leads",
+        "credential_endpoints",
+        "victim_leads",
+        "victim_databases",
+        "clipboard_leads",
+        "rc_leads",
+        "rc_gesture_count",
+        "secondary_c2",
+        "comm_sessions",
+    ):
+        assert key in stats, key
+        assert isinstance(stats[key], int), key
+
+
+# ---------------------------------------------------------------------------
 # GUI-ready：核心模块不含 print / typer / sys.exit
 # ---------------------------------------------------------------------------
 

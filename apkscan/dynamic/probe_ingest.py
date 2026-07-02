@@ -15,9 +15,17 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
-from apkscan.core.models import Confidence, Evidence, Lead, LeadCategory
+from apkscan.core.atomic import atomic_write_text
+from apkscan.core.models import (
+    Confidence,
+    Evidence,
+    Lead,
+    LeadCategory,
+    merge_runtime_into_lead_dict,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +120,28 @@ _AXIS_SUGGEST: dict[str, str] = {
 _TAG_RE = re.compile(r"^\s*\[([a-z0-9][a-z0-9_-]*)\]")
 _BRACKET_RE = re.compile(r"\[[^\]]*\]")
 _WS_RE = re.compile(r"\s+")
+# 行首 ISO-8601 时间戳（logcat/frida 常见前缀），如 "2026-07-02 10:30:00" / "…10:30:00.123"。
+# 分组 1 = 时间串，分组 2 = 行首时间戳后的剩余内容（交给 tag/value 解析）。
+_TS_RE = re.compile(
+    r"^\s*(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+(.*)$"
+)
+
+
+def _split_leading_ts(line: str) -> tuple[float | None, str]:
+    """剥离行首 ISO 时间戳，返回 ``(epoch 秒 | None, 去时间戳后的行)``。
+
+    解析失败（无时间戳 / 格式非法）时返回 ``(None, 原行)``——观测时间是可选富化，缺失不影响线索。
+    """
+    m = _TS_RE.match(line)
+    if not m:
+        return None, line
+    raw_ts, rest = m.group(1), m.group(2)
+    try:
+        dt = datetime.fromisoformat(raw_ts.replace(" ", "T"))
+    except ValueError:
+        logger.debug("[probe_ingest] 行首时间戳解析失败，忽略：%r", raw_ts)
+        return None, line
+    return dt.timestamp(), rest
 
 
 @dataclass
@@ -123,6 +153,7 @@ class ProbeLead:
     probe: str  # 探针 tag（如 pay/sms/ks）
     raw: str  # 原始日志行（证据留痕）
     where_to_request: str = ""
+    observed_at: float | None = None  # 行首时间戳（Unix epoch 秒），日志无时间前缀则 None
 
 
 def _first_tag(line: str) -> str | None:
@@ -161,14 +192,26 @@ def parse_probe_log(text: str) -> list[ProbeLead]:
         if "[LEAD" not in line:
             continue
         try:
-            tag = _first_tag(line)
+            # 剥离行首时间戳后再做 tag/value 解析（时间戳不在方括号内，否则会污染 value）；
+            # raw 仍留原始整行作证据。
+            observed_at, body = _split_leading_ts(line)
+            tag = _first_tag(body)
             if tag is None or tag in _SKIP_TAGS:
                 continue
-            cat, where = _classify(tag, line)
-            value = _extract_value(line)
+            cat, where = _classify(tag, body)
+            value = _extract_value(body)
             if not value:
                 continue
-            out.append(ProbeLead(category=cat, value=value, probe=tag, raw=line.strip(), where_to_request=where))
+            out.append(
+                ProbeLead(
+                    category=cat,
+                    value=value,
+                    probe=tag,
+                    raw=line.strip(),
+                    where_to_request=where,
+                    observed_at=observed_at,
+                )
+            )
         except Exception:  # noqa: BLE001 - 单行解析失败不影响其余
             logger.exception("[probe_ingest] 解析行失败，跳过：%r", line)
     return out
@@ -204,7 +247,12 @@ def to_report_leads(leads: list[ProbeLead]) -> list[Lead]:
                 confidence=Confidence.HIGH,
                 advice=advice,
                 source_refs=[
-                    Evidence(source=_RUNTIME_SOURCE, location="frida-probe:" + pl.probe, snippet=pl.raw[:200])
+                    Evidence(
+                        source=_RUNTIME_SOURCE,
+                        location="frida-probe:" + pl.probe,
+                        snippet=pl.raw[:200],
+                        observed_at=pl.observed_at,
+                    )
                 ],
                 notes=notes,
             )
@@ -281,13 +329,18 @@ def to_ledger_dict(leads: list[ProbeLead]) -> dict[str, object]:
 
 
 def merge_into_report_json(report_json_path: str, leads: list[ProbeLead]) -> int:
-    """把探针线索追加进已有 report.json 的 ``leads`` 数组（去重 by (category, value)）。
+    """把探针线索合并进已有 report.json 的 ``leads`` 数组。
 
-    轻量原地修改（不重建 Report 对象）：load → append lead dict → dump。新 lead 用 report.json
+    轻量原地修改（不重建 Report 对象）：load → 合并 lead dict → 原子落盘。新 lead 用 report.json
     同款序列化（含 is_c2/is_runtime_seen/evidence_id），与静态 leads 同构。绝不抛，失败返 0。
 
+    - 新键 → append（计入返回值）；
+    - 命中已存在键（静态已有同 (category,value)）→ 不丢弃，把 runtime 探针证据并进原 lead、
+      升为 ``is_runtime_seen``（不计入返回值）；
+    - 落盘走 :func:`atomic_write_text`，写中途失败不留半截坏 JSON。
+
     Returns:
-        新增条数（已被既有 leads 覆盖的不计）。
+        新增条数（命中既有 leads 而被合并的不计）。
     """
     try:
         from apkscan.report import json as report_json
@@ -301,21 +354,27 @@ def merge_into_report_json(report_json_path: str, leads: list[ProbeLead]) -> int
         if not isinstance(existing, list):
             existing = []
             payload["leads"] = existing
-        existing_keys = {
-            (str(item.get("category")), str(item.get("value")))
+        existing_by_key: dict[tuple[str, str], dict] = {
+            (str(item.get("category")), str(item.get("value"))): item
             for item in existing
             if isinstance(item, dict)
         }
         added = 0
+        confirmed = 0
         for lead in to_report_leads(leads):
             key = (lead.category.value, lead.value)
-            if key in existing_keys:
+            lead_dict = report_json._to_jsonable(lead)
+            hit = existing_by_key.get(key)
+            if hit is not None:
+                # 命中已存在键：不丢弃——把 runtime 探针证据并进原 lead、升为活体确认。
+                if merge_runtime_into_lead_dict(hit, lead_dict):
+                    confirmed += 1
                 continue
-            existing_keys.add(key)
-            existing.append(report_json._to_jsonable(lead))
+            existing_by_key[key] = lead_dict
+            existing.append(lead_dict)
             added += 1
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        logger.info("[probe_ingest] 追加 %d 条探针线索进 %s", added, path)
+        atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
+        logger.info("[probe_ingest] 追加 %d 条、runtime 确认 %d 条探针线索进 %s", added, confirmed, path)
         return added
     except (OSError, ValueError):
         logger.exception("[probe_ingest] 读取/解析 report.json 失败：%s", report_json_path)

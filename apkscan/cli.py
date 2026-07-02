@@ -113,6 +113,33 @@ def _resolve_out(out: str | None, apk: Path) -> str:
     return str(apk.resolve().parent / "out")
 
 
+def _resolve_out_cwd(out: str | None) -> str:
+    """无样本文件命令（capture）的输出目录解析：统一绝对化到 **当前工作目录** 基准。
+
+    动机：capture 只有包名、没有样本文件路径，无法像 analyze/unpack 那样落到「样本同目录」。
+    旧默认是相对 cwd 的裸字符串 ``"out"``——从哪跑就散在哪、GUI/auto 下 cwd 不可预测。这里把
+    未给 / 相对的 out 都解析成绝对路径（口径确定、可预测），与 analyze/unpack「产物落点确定」
+    的精神一致，只是基准是 cwd（capture 无样本可依）。
+    """
+    return str((Path(out) if out else Path("out")).resolve())
+
+
+def _raise_exit_for_status(status: object) -> None:
+    """按 DynamicResult 的 status 决定命令退出码：
+
+    - ``STATUS_ERROR`` → ``typer.Exit(1)``（执行出错）；
+    - ``STATUS_SKIPPED`` → ``typer.Exit(2)``（缺 frida/mitmproxy/root 等前置 → 零产出高发场景，
+      与 error 分开，便于调用方/脚本区分「跑错了」与「没跑起来」）；
+    - 其它（done/未知）→ 不抛，正常返回 0。
+    """
+    from apkscan.dynamic import STATUS_ERROR, STATUS_SKIPPED
+
+    if status == STATUS_ERROR:
+        raise typer.Exit(code=1)
+    if status == STATUS_SKIPPED:
+        raise typer.Exit(code=2)
+
+
 @app.command()
 def analyze(
     apk: Path = typer.Argument(
@@ -275,6 +302,8 @@ def unpack(
     out = _resolve_out(out, apk)  # 未给 --out → 默认落到 APK 同目录下的 out/
     result = _unpack.run(str(apk), out=out, reanalyze=reanalyze)
     _print_dynamic_result("脱壳", result)
+    # 业务失败返回非零退出码：error→1 / skipped（缺 root/frida 等前置）→2，正常→0。
+    _raise_exit_for_status(result.get("status") if isinstance(result, dict) else None)
 
 
 @app.command()
@@ -303,17 +332,22 @@ def repackage(
     out = _resolve_out(out, apk)  # 未给 --out → 默认落到 APK 同目录下的 out/
     result = _repackage.run(str(apk), out=out)
     _print_dynamic_result("去壳重打包", result)
+    # 业务失败返回非零退出码：error→1 / skipped（缺 unpack 产物/apksigner/设备）→2，正常→0。
+    _raise_exit_for_status(result.get("status") if isinstance(result, dict) else None)
 
 
 @app.command()
 def capture(
     package: str = typer.Argument(..., help="目标应用包名（在设备上运行/抓包）。"),
-    out: str = typer.Option("out", "--out", help="产物 / 报告输出目录。"),
-    duration: int = typer.Option(60, "--duration", help="抓包时长（秒）。"),
+    out: str | None = typer.Option(
+        None, "--out", help="产物 / 报告输出目录（默认：当前目录下的 out/，绝对化）。"
+    ),
+    duration: int = typer.Option(60, "--duration", min=1, help="抓包时长（秒，下限 1）。"),
 ) -> None:
     """真机抓包：对运行中的目标应用做流量抓取，提取动态端点。
 
-    实现由 apkscan.dynamic.capture 提供；未安装时打印提示并退出，不崩。
+    实现由 apkscan.dynamic.capture 提供；未安装时打印提示并退出，不崩。业务失败按 status
+    返回非零退出码（error→1 / skipped→2），便于脚本区分「跑错了」与「缺前置没跑起来」。
     """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     # 抓包必经 adb（frida -U / mitmproxy 走设备），finally 收掉自起的 adb server。
@@ -324,8 +358,11 @@ def capture(
             typer.echo("该功能未安装：apkscan.dynamic.capture 不可用（动态抓包模块尚未就绪）。")
             raise typer.Exit(code=1) from None
 
+        out = _resolve_out_cwd(out)  # 未给 / 相对 → 绝对化到 cwd 下的 out/（口径确定）
         result = _capture.run(package, out=out, duration=duration)
         _print_dynamic_result("抓包", result)
+        # 业务失败返回非零退出码（在 adb 清理 finally 之前抛，仍会穿过 finally 收 server）。
+        _raise_exit_for_status(result.get("status") if isinstance(result, dict) else None)
     finally:
         _cleanup_adb_quiet()
 
@@ -390,7 +427,7 @@ def auto(
         "--fix/--no-fix",
         help="体检时对 frida-server / CA 等可自动修的项调 provision 自动修复（--no-fix 仅体检不动设备）。",
     ),
-    duration: int = typer.Option(60, "--duration", help="抓包时长（秒）。"),
+    duration: int = typer.Option(60, "--duration", min=1, help="抓包时长（秒，下限 1）。"),
     fmt: str = typer.Option(
         "html,json",
         "--fmt",
@@ -474,7 +511,7 @@ def batch(
         "--online/--offline",
         help="静态分析是否联网富化归属（WHOIS/ICP/ASN）。默认联网（与 auto 一致）。",
     ),
-    duration: int = typer.Option(30, "--duration", help="launch-only 抓包时长（秒）。"),
+    duration: int = typer.Option(30, "--duration", min=1, help="launch-only 抓包时长（秒，下限 1）。"),
     fmt: str = typer.Option(
         "html,json", "--fmt", help="输出格式，逗号分隔：html,json,pdf。"
     ),
@@ -762,6 +799,10 @@ def probe_leads(
         if into:
             added = probe_ingest.merge_into_report_json(into, leads)
             typer.echo(f"已追加 {added} 条探针线索进 {into}（去重）。")
+            # report.json 被改后，若同目录有 report.html 则重渲，让人读报告随台账更新。
+            rerendered = _rerender_html_if_present(into)
+            if rerendered:
+                typer.echo(f"已重渲 HTML 报告：{rerendered}")
         if not (md or json_out or into):
             typer.echo("")
             typer.echo(ledger_md)
@@ -823,6 +864,10 @@ def pcap_leads(
         if into:
             added = pcap_ingest.merge_into_report_json(into, summary)
             typer.echo(f"已追加 {added} 条带外线索进 {into}（去重）。")
+            # report.json 被改后，若同目录有 report.html 则重渲，让人读报告随台账更新。
+            rerendered = _rerender_html_if_present(into)
+            if rerendered:
+                typer.echo(f"已重渲 HTML 报告：{rerendered}")
         if not (md or json_out or into):
             typer.echo("")
             typer.echo(ledger)
@@ -1479,6 +1524,159 @@ def _resolve_runtime_report_path(capture_result: object, out: str) -> str:
             if isinstance(p, str) and Path(p).name == "runtime_report.json":
                 return p
     return str(Path(out) / "runtime_report.json")
+
+
+def _evidence_from_dict(d: object) -> object:
+    """report.json 里的一条 Evidence dict → Evidence（未知/异常字段容错取默认）。"""
+    from apkscan.core.models import Evidence
+
+    if not isinstance(d, dict):
+        return Evidence(source="", location="")
+    observed = d.get("observed_at")
+    return Evidence(
+        source=str(d.get("source", "")),
+        location=str(d.get("location", "")),
+        snippet=str(d.get("snippet", "")),
+        observed_at=observed if isinstance(observed, (int, float)) else None,
+    )
+
+
+def _report_from_json_dict(payload: dict) -> Report:
+    """把（--into 改后的）report.json dict 反序列化回 Report，供复用 report.html 渲染入口重渲。
+
+    report.html.render 需要结构化 Report（访问 ``lead.category`` 为 LeadCategory enum、
+    ``lead.confidence`` 为 Confidence enum、``lead.source_refs`` 为 Evidence 列表等）。
+    report.json 里 Enum 已序列化为 .value 字符串，这里逐字段重建：非法枚举值容错回退
+    （category 无法映射的 lead 跳过、confidence 非法回 MEDIUM、severity 非法回 INFO），
+    只重建渲染实际用到的字段（is_c2/is_runtime_seen 是 @property，重建后自动可用）。
+    """
+    from apkscan.core.models import (
+        Confidence,
+        Endpoint,
+        Finding,
+        Lead,
+        LeadCategory,
+        Severity,
+    )
+
+    def _str_list(v: object) -> list[str]:
+        return [str(x) for x in v] if isinstance(v, list) else []
+
+    def _evidences(v: object) -> list:
+        return [_evidence_from_dict(e) for e in v] if isinstance(v, list) else []
+
+    leads: list[Lead] = []
+    for item in payload.get("leads") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            category = LeadCategory(str(item.get("category")))
+        except ValueError:
+            # 未知分类（跨版本 / 手改）→ 跳过该 lead，不让重渲整体崩（宁缺毋崩）。
+            logger.warning("[cli] 重建 report.json 遇未知 LeadCategory，已跳过：%s", item.get("category"))
+            continue
+        try:
+            confidence = Confidence(str(item.get("confidence", "MEDIUM")))
+        except ValueError:
+            confidence = Confidence.MEDIUM
+        subject = item.get("subject")
+        where = item.get("where_to_request")
+        leads.append(
+            Lead(
+                category=category,
+                value=str(item.get("value", "")),
+                subject=str(subject) if subject is not None else None,
+                where_to_request=str(where) if where is not None else None,
+                evidence_to_obtain=_str_list(item.get("evidence_to_obtain")),
+                confidence=confidence,
+                source_refs=_evidences(item.get("source_refs")),
+                notes=str(item.get("notes", "")),
+                advice=str(item.get("advice", "")),
+            )
+        )
+
+    endpoints: list[Endpoint] = []
+    for item in payload.get("endpoints") or []:
+        if not isinstance(item, dict):
+            continue
+        enrichment = item.get("enrichment")
+        endpoints.append(
+            Endpoint(
+                value=str(item.get("value", "")),
+                kind=str(item.get("kind", "")),
+                evidences=_evidences(item.get("evidences")),
+                is_cleartext=bool(item.get("is_cleartext", False)),
+                is_private=bool(item.get("is_private", False)),
+                is_suspicious=bool(item.get("is_suspicious", False)),
+                enrichment=enrichment if isinstance(enrichment, dict) else {},
+            )
+        )
+
+    findings: list[Finding] = []
+    for item in payload.get("findings") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            severity = Severity(str(item.get("severity", "INFO")))
+        except ValueError:
+            severity = Severity.INFO
+        findings.append(
+            Finding(
+                id=str(item.get("id", "")),
+                title=str(item.get("title", "")),
+                severity=severity,
+                category=str(item.get("category", "")),
+                description=str(item.get("description", "")),
+                recommendation=str(item.get("recommendation", "")),
+                evidences=_evidences(item.get("evidences")),
+                references=_str_list(item.get("references")),
+            )
+        )
+
+    meta = payload.get("meta")
+    analyzer_status = payload.get("analyzer_status")
+    enricher_status = payload.get("enricher_status")
+    return Report(
+        package_name=str(payload.get("package_name", "")),
+        meta=meta if isinstance(meta, dict) else {},
+        leads=leads,
+        endpoints=endpoints,
+        findings=findings,
+        analyzer_status=[s for s in analyzer_status if isinstance(s, dict)]
+        if isinstance(analyzer_status, list)
+        else [],
+        enricher_status=[s for s in enricher_status if isinstance(s, dict)]
+        if isinstance(enricher_status, list)
+        else [],
+    )
+
+
+def _rerender_html_if_present(report_json_path: str) -> str:
+    """``--into`` 回灌改了 report.json 后：若**同目录同名** ``<base>.html`` 存在，则据改后的
+    report.json 复用 report.html 渲染入口重渲该 html，让台账新增线索同步进人读报告。
+
+    返回重渲的 html 路径；同目录无对应 html 则不重渲、不新建（返回空串）。绝不抛——读/解析/
+    渲染失败只 logging 并返回空串，不影响已回灌的 report.json（--into 主产物）。
+    """
+    import json as _json
+
+    rp = Path(report_json_path)
+    html_path = rp.with_suffix(".html")
+    if not html_path.is_file():
+        return ""  # 无对应 report.html：不主动生成（尊重用户只要 JSON 的场景）
+    try:
+        payload = _json.loads(rp.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            logger.warning("[cli] --into 重渲跳过：report.json 顶层非对象：%s", rp)
+            return ""
+        report = _report_from_json_dict(payload)
+        from apkscan.report import html as report_html
+
+        report_html.render(report, str(html_path))
+        return str(html_path)
+    except Exception:
+        logger.exception("[cli] --into 后重渲 report.html 失败（已忽略，不影响 report.json）：%s", html_path)
+        return ""
 
 
 def _print_dynamic_result(label: str, result: object) -> None:
