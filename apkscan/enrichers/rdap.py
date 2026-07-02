@@ -85,10 +85,40 @@ def _entity_name(entity: dict[str, Any]) -> str | None:
     return _vcard_field(vcard, "fn") or _vcard_field(vcard, "org")
 
 
+def _vcard_country(vcard_array: Any) -> str | None:
+    """从 vCard 的 ``adr`` 属性取归属国。
+
+    ``adr`` 形如 ``["adr", {"cc": "CN"}, "text", ["","","street","city","region","postcode","China"]]``：
+    - 优先取值数组第 7 段（index 6，RFC 6350 的 country-name）；
+    - 无国家段时退到参数里的 ``cc``（ISO 国家码，如 ``CN``）。
+    country 为空 → None（不虚构，交由下游 whois 兜底或标未知）。
+    """
+    if not isinstance(vcard_array, list) or len(vcard_array) < 2:
+        return None
+    props = vcard_array[1]
+    if not isinstance(props, list):
+        return None
+    for prop in props:
+        if not (isinstance(prop, list) and len(prop) >= 4 and prop[0] == "adr"):
+            continue
+        value = prop[3]
+        if isinstance(value, list) and len(value) >= 7:
+            country = _to_str(value[6])
+            if country:
+                return country
+        params = prop[1]
+        if isinstance(params, dict):
+            cc = _to_str(params.get("cc"))
+            if cc:
+                return cc
+    return None
+
+
 def _extract_rdap(payload: dict[str, Any]) -> dict[str, Any]:
     """从 rdap.org 域名响应 JSON 提取关心字段。"""
     registrar: str | None = None
     registrant: str | None = None
+    country: str | None = None
     entities = payload.get("entities")
     if isinstance(entities, list):
         for entity in entities:
@@ -101,6 +131,10 @@ def _extract_rdap(payload: dict[str, Any]) -> dict[str, Any]:
                 registrar = _entity_name(entity)
             if "registrant" in roles and registrant is None:
                 registrant = _entity_name(entity)
+            # 归属国优先取注册人 adr，其次任一实体（管理/技术联系人）的 adr——
+            # 与 whois 兜底的 country 对齐，供辖区分流用（成功路径此前丢弃了它）。
+            if country is None:
+                country = _vcard_country(entity.get("vcardArray"))
 
     created = expires = updated = None
     events = payload.get("events")
@@ -136,6 +170,7 @@ def _extract_rdap(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "registrar": registrar,
         "registrant": registrant,
+        "country": country,
         "created": created,
         "expires": expires,
         "updated": updated,

@@ -121,10 +121,42 @@ def forensic_path(jurisdiction: str) -> ForensicPath:
 
 #: 已知 CDN / 反向代理 / WAF 厂商标记（org / ASN 字符串里命中即判该 IP 为边缘节点、非真实源站）。
 #: 只收**会隐藏源站**的反代型 CDN；纯托管云（AWS EC2 / GCP / Azure 裸机）不在此列——那些 IP 可能就是源站。
+#: 含西方主流 + 国内主流（网宿 wangsu / 白山 baishan / 阿里 alicdn·kunlun / 腾讯 tcdn·dnsv1 /
+#: 字节 volccdn / 华为 hwcdn / 百度 bdydns / 又拍 upyun / 七牛 qiniu / 金山 ksyun 等）——诈骗后端
+#: 常挂国内 CDN 隐藏源站，漏国内 CDN 会把边缘 IP 误当源站。
 _CDN_ORG_MARKERS = (
+    # 西方主流
     "cloudflare", "akamai", "fastly", "incapsula", "imperva", "sucuri",
     "stackpath", "cdn77", "bunny", "gcore", "g-core", "edgio", "limelight",
     "cloudfront", "keycdn", "section.io", "ddos-guard", "qrator",
+    # 国内主流
+    "wangsu", "chinanetcenter", "baishan", "alicdn", "kunlun", "aliyun cdn",
+    "tcdn", "dnsv1", "cdntip", "volccdn", "volcgslb", "hwcdn", "huaweicloud cdn",
+    "bdydns", "yunjiasu", "upyun", "upaiyun", "qiniu", "qbox", "ksyun", "kingsoft cloud cdn",
+)
+
+#: CNAME 链里的国内/西方 CDN 域名后缀标记（诈骗后端常把 A 记录藏在 CDN 的 CNAME 之后，
+#: 解析 IP 归属看似普通 IDC，但 CNAME 直指 CDN 调度域名——这是最可靠的边缘信号之一）。
+_CDN_CNAME_MARKERS = (
+    "kunlun", "alicdn", "aliyuncs", "w.kunlungr.com", "tcdn", "dnsv1", "cdntip",
+    "qcloud", "volccdn", "volcgslb", "wangsu", "wscdns", "cdn20", "lxdns", "chinacache",
+    "baishan", "bsgslb", "bsclink", "upyun", "upaiyun", "qiniu", "qbox", "ksyuncdn",
+    "cloudflare", "akamai", "akamaized", "edgekey", "fastly", "cdn77", "bunnycdn", "gcdn",
+)
+
+#: 响应头里的 CDN 边缘信号（键或值命中即判边缘）。国内 CDN 常见：aliyun WAF/CDN 的 acw_tc
+#: cookie、via: ens-cache（阿里 ENS）、x-swift-*（阿里/淘系 Swift 缓存）、x-ser（网宿）；通用：
+#: x-cache / x-cdn / cf-ray / x-akamai-* 等。键统一转小写匹配。
+_CDN_HEADER_KEY_MARKERS = (
+    "x-swift-savetime", "x-swift-cachetime", "x-cache", "x-cache-lookup", "x-cdn",
+    "x-ser", "cf-ray", "x-akamai-transformed", "eagleid", "x-hcs-proxy-type",
+    "ali-swift-global-savetime", "x-tengine-error",
+)
+
+#: 响应头**值**里的 CDN 边缘信号子串（针对 Via / Set-Cookie 等值命中即判边缘）。
+_CDN_HEADER_VALUE_MARKERS = (
+    "acw_tc", "ens-cache", "ali-swift", "kunlun", "cache.51cdn", "wscache",
+    "cloudflare", "cloudfront", "akamai", "fastly", "varnish", "yunjiasu",
 )
 
 
@@ -151,23 +183,79 @@ def _hosting_units(*dicts: object) -> list[tuple[str, str]]:
     return units
 
 
-def cdn_vendor(dns: object = None, asn: object = None) -> str | None:
-    """若解析 IP / ASN 归属**全部**命中已知反代型 CDN，返回厂商名；否则 None（含混合/无信号）。
+def _cname_cdn_marker(dns: object) -> str | None:
+    """DNS 富化里的 CNAME 链是否指向已知 CDN；命中返回命中的标记（供展示），否则 None。
 
-    全 CDN ⇒ 当前看到的解析 IP 是边缘节点、**不是真实源站**——海外取证须先穿透 CDN 定位源站。
-    只要有一个解析 IP 的归属非 CDN（可能就是裸源站），即返回 None，不误判。
+    诈骗后端常把 A 记录藏在 CDN 调度域名之后：解析 IP 归属看似普通 IDC，但 CNAME 直指
+    ``*.w.kunlungr.com`` / ``*.alicdn.com`` 等——这是最可靠的边缘信号之一。
+    """
+    if not isinstance(dns, dict):
+        return None
+    chain = dns.get("cname")
+    names: list[str] = []
+    if isinstance(chain, str):
+        names = [chain]
+    elif isinstance(chain, list):
+        names = [str(c) for c in chain if c]
+    for name in names:
+        low = name.lower()
+        for marker in _CDN_CNAME_MARKERS:
+            if marker in low:
+                return marker
+    return None
+
+
+def _header_cdn_signal(dns: object) -> bool:
+    """DNS 富化里的响应头是否带 CDN 边缘信号（键或值命中即真）。
+
+    国内 CDN 常见：acw_tc cookie、via: ens-cache（阿里 ENS）、x-swift-*（阿里/淘系缓存）、
+    x-ser（网宿）等；通用 x-cache / cf-ray 等。键统一小写比对，值做子串包含。
+    """
+    if not isinstance(dns, dict):
+        return False
+    headers = dns.get("headers")
+    if not isinstance(headers, dict):
+        return False
+    for key, value in headers.items():
+        low_key = str(key).lower()
+        if any(m in low_key for m in _CDN_HEADER_KEY_MARKERS):
+            return True
+        low_val = str(value).lower()
+        if any(m in low_val for m in _CDN_HEADER_VALUE_MARKERS):
+            return True
+    return False
+
+
+def cdn_vendor(dns: object = None, asn: object = None) -> str | None:
+    """判断当前解析结果是否落在反代型 CDN 边缘（隐藏源站）；命中返回厂商名，否则 None。
+
+    三路信号（任一命中即判边缘，因国内 CDN 边缘 IP 常伪装成普通 IDC，单看 IP 归属会漏判）：
+    1. 解析 IP / ASN 归属**全部**命中已知 CDN org/asn 标记（含西方 + 国内主流）；
+    2. DNS CNAME 链指向已知 CDN 调度域名（即便 IP 归属看似普通 IDC）；
+    3. 响应头带 CDN 边缘信号（acw_tc / via: ens-cache / x-swift-* / x-cache / x-ser 等）。
+
+    命中 ⇒ 当前解析 IP 是边缘节点、**不是真实源站**——海外取证须先穿透 CDN 定位源站。
+    仅 org 全 CDN 时按 org 取厂商名；否则退到 CNAME 标记 / 通用「CDN」。绝不抛。
     """
     units = _hosting_units(dns, asn)
-    if not units:
-        return None
-    vendor: str | None = None
+    org_vendor: str | None = None
+    all_cdn = bool(units)
     for blob, org in units:
         low = blob.lower()
         if not any(m in low for m in _CDN_ORG_MARKERS):
-            return None  # 有非 CDN 归属 → 不算全 CDN（该 IP 可能就是源站）
-        if vendor is None:
-            vendor = org.split(",")[0].strip() or org
-    return vendor
+            all_cdn = False  # 有非 CDN 归属 → 不算全 CDN（该 IP 可能就是源站）
+        elif org_vendor is None:
+            org_vendor = org.split(",")[0].strip() or org
+    if all_cdn and org_vendor:
+        return org_vendor
+
+    # org 未全命中：退到 CNAME / 响应头旁证（国内 CDN 边缘 IP 常伪装普通 IDC）。
+    cname_marker = _cname_cdn_marker(dns)
+    if cname_marker:
+        return org_vendor or cname_marker
+    if _header_cdn_signal(dns):
+        return org_vendor or "CDN"
+    return None
 
 
 def render_origin_hint(dns: object = None, asn: object = None) -> list[str]:
