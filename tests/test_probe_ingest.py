@@ -165,3 +165,82 @@ def test_merge_into_report_json_appends_and_dedups(tmp_path) -> None:
     # 新 lead 带 source=runtime
     new_lead = next(l for l in out["leads"] if "ehahb5" in str(l.get("value", "")))
     assert new_lead["source_refs"][0]["source"].startswith("runtime")
+
+
+# ======================================================================
+# 原子写：写中途失败不留半截坏 JSON
+# ======================================================================
+
+
+def test_merge_atomic_keeps_old_content_when_write_fails(tmp_path, monkeypatch) -> None:
+    p = tmp_path / "report.json"
+    original = {"leads": [{"category": "PAYMENT", "value": "已存在 2088", "advice": "建议调证"}]}
+    p.write_text(json.dumps(original, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def boom(*_a, **_k):
+        raise OSError("disk full (simulated)")
+
+    monkeypatch.setattr(probe_ingest.atomic_write_text.__module__ + ".Path.write_text", boom, raising=True)
+
+    pls = probe_ingest.parse_probe_log(_SAMPLE_LOG)
+    added = probe_ingest.merge_into_report_json(str(p), pls)
+    assert added == 0
+    reloaded = json.loads(p.read_text(encoding="utf-8"))
+    assert reloaded == original
+
+
+# ======================================================================
+# runtime 确认合并（非 dedup 丢弃）
+# ======================================================================
+
+
+def test_merge_runtime_confirms_existing_static_lead(tmp_path) -> None:
+    """静态已有同 (category,value)，回灌 runtime 探针观测 → 合并升为活体确认，不丢 runtime 证据。"""
+    p = tmp_path / "report.json"
+    # OpenInstall appKey = ehahb5 → CONFIG_KEY / value 含 "ehahb5"
+    pls = probe_ingest.parse_probe_log("[sdk] OpenInstall appKey = ehahb5  [LEAD]")
+    runtime_lead = probe_ingest.to_report_leads(pls)[0]
+    static_lead = {
+        "category": runtime_lead.category.value,
+        "value": runtime_lead.value,
+        "advice": "建议调证",
+        "source_refs": [{"source": "dex", "location": "com/x/Cfg", "snippet": "静态硬编码"}],
+        "is_runtime_seen": False,
+    }
+    p.write_text(json.dumps({"leads": [static_lead]}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    probe_ingest.merge_into_report_json(str(p), pls)
+    out = json.loads(p.read_text(encoding="utf-8"))
+    same = [l for l in out["leads"] if l.get("value") == runtime_lead.value]
+    assert len(same) == 1  # 未新增重复
+    merged = same[0]
+    sources = [str(ev.get("source", "")) for ev in merged.get("source_refs", [])]
+    assert any(s.startswith("runtime") for s in sources)
+    assert any(s == "dex" for s in sources)
+    assert merged.get("is_runtime_seen") is True
+
+
+# ======================================================================
+# Evidence.observed_at 回灌落库
+# ======================================================================
+
+
+def test_parse_extracts_leading_timestamp() -> None:
+    """行首 ISO 时间戳被解析进 ProbeLead.observed_at（epoch 秒）；无则 None。"""
+    ts_line = "2026-07-02 10:30:00 [sdk] appKey = ehahb5 [LEAD]"
+    pls = probe_ingest.parse_probe_log(ts_line)
+    assert pls
+    assert pls[0].observed_at is not None
+    # 无时间戳的行 observed_at 为 None
+    plain = probe_ingest.parse_probe_log("[sdk] appKey = xyz [LEAD]")
+    assert plain and plain[0].observed_at is None
+
+
+def test_observed_at_落库_into_report_json(tmp_path) -> None:
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps({"leads": []}, ensure_ascii=False), encoding="utf-8")
+    pls = probe_ingest.parse_probe_log("2026-07-02 10:30:00 [sdk] appKey = ehahb5 [LEAD]")
+    probe_ingest.merge_into_report_json(str(p), pls)
+    out = json.loads(p.read_text(encoding="utf-8"))
+    lead = next(l for l in out["leads"] if "ehahb5" in str(l.get("value", "")))
+    assert lead["source_refs"][0].get("observed_at") is not None
