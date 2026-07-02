@@ -21,10 +21,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
-from collections.abc import Callable
-from typing import Any
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, NamedTuple
 
 from apkscan.core import infra, pipeline
 from apkscan.core.textutil import host_from_url
@@ -61,6 +65,63 @@ def _emit(on_progress: Callable[[str], None] | None, msg: str) -> None:
         on_progress(msg)
     except Exception:  # noqa: BLE001 - GUI 回调异常不得影响合并逻辑
         logger.exception("on_progress 回调异常（已忽略）：%s", msg)
+
+
+# ---------------------------------------------------------------------------
+# runtime_report.json 进程内单次解析缓存（去 IO：一次 merge 内同一路径只读+解析一次）
+# ---------------------------------------------------------------------------
+#
+# 历史坑：一次 merge_and_rerender 里 decrypt/traces/credentials/... 各消费者各自
+# read_text + json.loads 同一 runtime_report.json，同文件在一次 merge 内被读/解析约
+# 11 次。此处以「per-call 缓存」去重：merge_and_rerender 进入时用 _runtime_payload_cache()
+# 开一个作用域缓存，各 _load_* 走 _read_runtime_payload 共享同一次解析结果；作用域退出即清空，
+# 缓存绝不跨调用泄漏（文件在两次 merge 间可能变），单独调用 loader 时无缓存、行为与旧版一致。
+
+# 「文件缺失 / 读或解析失败」的缓存占位——把负结果也缓存，免得每个消费者都重试一遍读盘。
+_RUNTIME_PAYLOAD_MISSING: Any = object()
+
+# 线程本地：每个线程独立的作用域缓存栈顶（None 表示当前无活动作用域，不缓存）。
+_runtime_cache_state = threading.local()
+
+
+@contextmanager
+def _runtime_payload_cache() -> Iterator[None]:
+    """开一个 per-call 的 runtime_report.json 解析缓存作用域（退出即清空、可安全嵌套）。"""
+    prev = getattr(_runtime_cache_state, "cache", None)
+    _runtime_cache_state.cache = {}
+    try:
+        yield
+    finally:
+        _runtime_cache_state.cache = prev
+
+
+def _read_runtime_payload(runtime_report_path: str) -> Any:
+    """读并解析 runtime_report.json 一次，返回 payload dict / list / 标量。
+
+    - 文件缺失 或 read/解析失败 → 返回 ``_RUNTIME_PAYLOAD_MISSING`` 占位（调用方据此走各自的
+      缺文件 / 坏 JSON 分支，保持与旧 loader 完全一致的 logging 与返回）。
+    - 有活动缓存作用域（:func:`_runtime_payload_cache`）时，同一路径只真正读+解析一次，
+      后续消费者复用结果（含负结果）。无作用域时每次都真读（行为与旧版一致）。
+    """
+    cache = getattr(_runtime_cache_state, "cache", None)
+    key = str(Path(runtime_report_path))
+    if cache is not None and key in cache:
+        return cache[key]
+
+    path = Path(runtime_report_path)
+    if not path.exists():
+        result: Any = _RUNTIME_PAYLOAD_MISSING
+    else:
+        try:
+            result = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # 单次解析、单次记：不静默吞（logger.exception 带 traceback），且不再由各 loader 重复记。
+            logger.exception("[merge] 读取/解析 runtime 报告失败（相关运行时并回跳过）：%s", path)
+            result = _RUNTIME_PAYLOAD_MISSING
+
+    if cache is not None:
+        cache[key] = result
+    return result
 
 
 def load_runtime_endpoints(runtime_report_path: str) -> list[Endpoint]:
@@ -360,18 +421,13 @@ def decrypt_runtime_messages(report: Report, runtime_report_path: str) -> dict[s
 
 
 def _load_runtime_messages(runtime_report_path: str) -> list[dict[str, Any]]:
-    """读 runtime_report.json 的 messages 数组；缺文件/坏 JSON/无字段 → []（不抛）。"""
-    import json
-    from pathlib import Path
+    """读 runtime_report.json 的 messages 数组；缺文件/坏 JSON/无字段 → []（不抛）。
 
-    path = Path(runtime_report_path)
-    if not path.exists():
-        logger.info("[merge] runtime 报告不存在，无信封报文：%s", path)
-        return []
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        logger.exception("[merge] 读取/解析 runtime 报告失败（信封解密跳过）：%s", path)
+    经 :func:`_read_runtime_payload` 拿解析结果——在 merge_and_rerender 的缓存作用域内，
+    同一路径只读+解析一次（解析失败已由 reader 记 exception，此处不重复记）。
+    """
+    payload = _read_runtime_payload(runtime_report_path)
+    if payload is _RUNTIME_PAYLOAD_MISSING:
         return []
     raw = payload.get("messages") if isinstance(payload, dict) else None
     if not isinstance(raw, list):
@@ -397,18 +453,12 @@ def _decrypt_with_candidates(
 def _load_events_field(runtime_report_path: str, field: str) -> list[dict[str, Any]]:
     """读 runtime_report.json 里某个事件数组字段（crypto_events/jsbridge_events/…）。
 
-    缺文件/坏 JSON/无字段/旧版报告无该字段 → []（向后兼容，不抛）。
+    缺文件/坏 JSON/无字段/旧版报告无该字段 → []（向后兼容，不抛）。经
+    :func:`_read_runtime_payload` 共享单次解析——merge 作用域内同路径只读一次（解析失败
+    已由 reader 记 exception，此处不重复记）。
     """
-    import json
-    from pathlib import Path
-
-    path = Path(runtime_report_path)
-    if not path.exists():
-        return []
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        logger.exception("[merge] 读取/解析 runtime 报告失败（%s 跳过）：%s", field, path)
+    payload = _read_runtime_payload(runtime_report_path)
+    if payload is _RUNTIME_PAYLOAD_MISSING:
         return []
     raw = payload.get(field) if isinstance(payload, dict) else None
     if not isinstance(raw, list):
@@ -1982,6 +2032,79 @@ def _host_of_url(url: str) -> str:
     return host if "." in host else ""
 
 
+class _RuntimeMergeStep(NamedTuple):
+    """一条运行时并回步骤：进度文案 + 消费者函数 + 子统计→顶层 stats 的键映射。"""
+
+    progress: str
+    func: Callable[[Report, str], dict[str, int]]
+    # (顶层 stats 键, 子统计键)——子统计缺键按 0 补（与原手写 sub.get(k, 0) 一致）。
+    stat_map: tuple[tuple[str, str], ...]
+
+
+# merge_and_rerender 的运行时并回步骤表（表驱动，替代十几行手写 stats[x]=sub.get(x,0)）。
+# 顺序即执行顺序，务必保持不变：端点/解密在前，Dead-Drop 二级 C2 复用已并入端点须在其后跑。
+_RUNTIME_MERGE_STEPS: tuple[_RuntimeMergeStep, ...] = (
+    # C5b：用静态/实测配方解密运行时信封报文，把明文端点并入（在端点并入之后、重渲之前）。
+    _RuntimeMergeStep(
+        "解密运行时信封报文 ...",
+        decrypt_runtime_messages,
+        (
+            ("decrypted", "decrypted"),
+            ("decrypt_failed", "failed"),
+            ("plaintext_endpoints", "plaintext_endpoints"),
+            ("live_recipe", "live_recipe"),
+        ),
+    ),
+    # P1：运行时追踪（JS-bridge 暴露面/调用、敏感 API 实调）并回 + 确认静态发现。
+    _RuntimeMergeStep(
+        "并回运行时 JS-bridge / 敏感 API 追踪 ...",
+        merge_runtime_traces,
+        (("jsbridge_leads", "jsbridge_leads"), ("api_confirmed", "api_confirmed")),
+    ),
+    # P2：运行时登录态/明文凭据（OkHttp token/手机号、SharedPrefs 落地凭据）并回（含合规脱敏）。
+    _RuntimeMergeStep(
+        "并回运行时登录态/明文凭据 ...",
+        merge_runtime_credentials,
+        (
+            ("credential_leads", "credential_leads"),
+            ("credential_endpoints", "credential_endpoints"),
+        ),
+    ),
+    # P2：运行时落地库（SQLCipher/SQLite）导出 → VICTIM_DATA 受害人物证（含合规脱敏 + SHA256 留存）。
+    _RuntimeMergeStep(
+        "并回运行时落地库受害人物证 ...",
+        merge_runtime_databases,
+        (("victim_leads", "victim_leads"), ("victim_databases", "victim_databases")),
+    ),
+    # 第二波：运行时剪贴板链上地址 → PAYMENT 类 Lead（资金流起点·运行时确认，is_runtime_seen）。
+    _RuntimeMergeStep(
+        "并回运行时剪贴板链上地址 ...",
+        merge_runtime_clipboard,
+        (("clipboard_leads", "clipboard_leads"),),
+    ),
+    # 第二波（最后）：无障碍远控目标银行清单 → REMOTE_CONTROL Lead / 回传 host 走 infra /
+    # 手势序列产 Finding（不 Lead 化）。★ launch-only 抓不到，多数需引导式人工动态。
+    _RuntimeMergeStep(
+        "并回无障碍远控目标银行清单 ...",
+        merge_runtime_remote_control,
+        (("rc_leads", "rc_leads"), ("rc_gesture_count", "gesture_count")),
+    ),
+    # 第二波：Dead-Drop 二级真实 C2 从回包浮出（命令域名 → 回包 JSON）。在端点并回之后跑——
+    # 复用已并入的端点/Lead，对 config/信封回包做关系分析，把二级 C2 标 secondary、调高优先级。
+    _RuntimeMergeStep(
+        "浮出 Dead-Drop 二级真实 C2 ...",
+        resolve_dead_drop_c2,
+        (("secondary_c2", "secondary_c2"),),
+    ),
+    # 通信会话时序重建：把运行时报文按 flow 时间戳串成会话物证（App↔服务器交互时间线）。
+    _RuntimeMergeStep(
+        "重建运行时通信会话时序 ...",
+        merge_runtime_sessions,
+        (("comm_sessions", "sessions"),),
+    ),
+)
+
+
 def merge_and_rerender(
     report: Report,
     endpoints: list[Endpoint],
@@ -2016,62 +2139,19 @@ def merge_and_rerender(
         在 :func:`merge_runtime_endpoints` 统计基础上加 ``"report_paths"``（成功重渲的
         报告路径列表；单格式失败不计入、不致命）与 ``"decrypt_*"`` 解密统计。绝不抛。
     """
-    from pathlib import Path
-
     out_path = Path(out_dir)
 
     _emit(on_progress, "并入运行时端点 ...")
     stats: dict[str, Any] = dict(merge_runtime_endpoints(report, endpoints))
 
-    # C5b：用静态配方解密运行时信封报文，把明文端点并入（在端点并入之后、重渲之前）。
-    _emit(on_progress, "解密运行时信封报文 ...")
     rr_path = runtime_report_path or str(out_path / "runtime_report.json")
-    decrypt_stats = decrypt_runtime_messages(report, rr_path)
-    stats["decrypted"] = decrypt_stats.get("decrypted", 0)
-    stats["decrypt_failed"] = decrypt_stats.get("failed", 0)
-    stats["plaintext_endpoints"] = decrypt_stats.get("plaintext_endpoints", 0)
-    stats["live_recipe"] = decrypt_stats.get("live_recipe", 0)
-
-    # P1：运行时追踪（JS-bridge 暴露面/调用、敏感 API 实调）并回 + 确认静态发现。
-    _emit(on_progress, "并回运行时 JS-bridge / 敏感 API 追踪 ...")
-    trace_stats = merge_runtime_traces(report, rr_path)
-    stats["jsbridge_leads"] = trace_stats.get("jsbridge_leads", 0)
-    stats["api_confirmed"] = trace_stats.get("api_confirmed", 0)
-
-    # P2：运行时登录态/明文凭据（OkHttp token/手机号、SharedPrefs 落地凭据）并回（含合规脱敏）。
-    _emit(on_progress, "并回运行时登录态/明文凭据 ...")
-    cred_stats = merge_runtime_credentials(report, rr_path)
-    stats["credential_leads"] = cred_stats.get("credential_leads", 0)
-    stats["credential_endpoints"] = cred_stats.get("credential_endpoints", 0)
-
-    # P2：运行时落地库（SQLCipher/SQLite）导出 → VICTIM_DATA 受害人物证（含合规脱敏 + SHA256 留存）。
-    _emit(on_progress, "并回运行时落地库受害人物证 ...")
-    db_stats = merge_runtime_databases(report, rr_path)
-    stats["victim_leads"] = db_stats.get("victim_leads", 0)
-    stats["victim_databases"] = db_stats.get("victim_databases", 0)
-
-    # 第二波：运行时剪贴板链上地址 → PAYMENT 类 Lead（资金流起点·运行时确认，is_runtime_seen）。
-    _emit(on_progress, "并回运行时剪贴板链上地址 ...")
-    clip_stats = merge_runtime_clipboard(report, rr_path)
-    stats["clipboard_leads"] = clip_stats.get("clipboard_leads", 0)
-
-    # 第二波（最后）：无障碍远控目标银行清单 → REMOTE_CONTROL Lead / 回传 host 走 infra /
-    # 手势序列产 Finding（不 Lead 化）。★ launch-only 抓不到，多数需引导式人工动态。
-    _emit(on_progress, "并回无障碍远控目标银行清单 ...")
-    rc_stats = merge_runtime_remote_control(report, rr_path)
-    stats["rc_leads"] = rc_stats.get("rc_leads", 0)
-    stats["rc_gesture_count"] = rc_stats.get("gesture_count", 0)
-
-    # 第二波：Dead-Drop 二级真实 C2 从回包浮出（命令域名 → 回包 JSON）。在端点并回之后跑——
-    # 复用已并入的端点/Lead，对 config/信封回包做关系分析，把二级 C2 标 secondary、调高优先级。
-    _emit(on_progress, "浮出 Dead-Drop 二级真实 C2 ...")
-    dd_stats = resolve_dead_drop_c2(report, rr_path)
-    stats["secondary_c2"] = dd_stats.get("secondary_c2", 0)
-
-    # 通信会话时序重建：把运行时报文按 flow 时间戳串成会话物证（App↔服务器交互时间线）。
-    _emit(on_progress, "重建运行时通信会话时序 ...")
-    sess_stats = merge_runtime_sessions(report, rr_path)
-    stats["comm_sessions"] = sess_stats.get("sessions", 0)
+    # per-call 缓存作用域：下面各消费者对同一 runtime_report.json 只读+解析一次（去 11× IO）。
+    with _runtime_payload_cache():
+        for step in _RUNTIME_MERGE_STEPS:
+            _emit(on_progress, step.progress)
+            sub = step.func(report, rr_path)
+            for dest_key, src_key in step.stat_map:
+                stats[dest_key] = sub.get(src_key, 0)
 
     fmts = list(formats) if formats else list(_DEFAULT_FORMATS)
     try:
