@@ -56,6 +56,8 @@ include = ["apkscan*"]
 
 [tool.setuptools.package-data]
 apkscan = ["rules/*.yaml", "rules/*.txt", "report/templates/*.j2", "track/templates/*.html"]
+# 内置 Frida JS hook 脚本（cryptohook 经 importlib.resources 读取，注入真机）——装后仍可读。
+"apkscan.dynamic" = ["frida_js/*.js"]
 
 [tool.pytest.ini_options]
 markers = [

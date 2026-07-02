@@ -40,6 +40,7 @@ from apkscan.dynamic import (
     empty_result,
 )
 from apkscan.dynamic import cryptohook, provision
+from apkscan.dynamic.capture_plan import CaptureDecision, decide_capture
 from apkscan.report import json as report_json
 
 logger = logging.getLogger(__name__)
@@ -135,6 +136,7 @@ def run(
     *,
     out: str | None = None,
     serial: str | None = None,
+    report: Any = None,
 ) -> DynamicResult:
     """对运行中的目标应用做真机抓包，提取运行时端点。
 
@@ -147,6 +149,11 @@ def run(
         serial: 目标设备 serial（多设备/一机多 transport 下钉定那台，由 auto 选定后传入）。
                 所有 adb 命令带 ``-s <serial>``、frida 用 ``-D <serial>``；None 时不带 -s、
                 frida 用 ``-U``（向后兼容无设备选择的旧路径/测试）。
+        report: 静态分析报告（dict / Report / None）。据其规避信号经
+                ``capture_plan.decide_capture`` 产出 :class:`CaptureDecision`，
+                四条铁律（floor 优先 / 秒退熔断阈值 / 总预算时间盒 / native 预判）真正
+                驱动本引擎的行为——治『几小时零产出』。None → 用默认决策（floor 优先、
+                秒退阈值 3、预算 60min），向后兼容无 report 的旧路径/测试。
 
     Returns:
         DynamicResult 契约 dict。前置不满足 → status="skipped" + playbook；
@@ -155,6 +162,9 @@ def run(
     """
     if out is not None:
         out_dir = out
+
+    # 消费 decide_capture：把静态报告的规避信号落成引擎可读决策（绝不抛，坏 report→默认决策）。
+    decision = decide_capture(report)
 
     # 防御：包名源自样本 manifest（不可信）。畸形包名直接拒绝，不下发到 frida/adb。
     if not device.is_valid_package(package):
@@ -180,10 +190,12 @@ def run(
 
     # --- 前置满足：真·抓包编排 ------------------------------------------
     logger.info(
-        "[capture] 前置满足，开始真机抓包：package=%s duration=%ds serial=%s",
+        "[capture] 前置满足，开始真机抓包：package=%s duration=%ds serial=%s "
+        "decision(floor_first=%s, retreat_threshold=%d, budget=%ds)",
         package, duration, serial or "(未指定/-U)",
+        decision.floor_first, decision.frida_retreat_threshold, decision.total_budget_sec,
     )
-    return _capture(package, out_path, duration, serial)
+    return _capture(package, out_path, duration, serial, decision=decision)
 
 
 # ---------------------------------------------------------------------------
@@ -265,17 +277,37 @@ def _build_playbook(package: str, out_dir: str, duration: int) -> list[str]:
 
 
 def _capture(
-    package: str, out_path: Path, duration: int, serial: str | None = None
+    package: str,
+    out_path: Path,
+    duration: int,
+    serial: str | None = None,
+    *,
+    decision: CaptureDecision | None = None,
 ) -> DynamicResult:
     """编排 mitmdump + adb 代理 + frida unpinning + 启 app，到时停并解析流量。
 
     所有子进程在 finally 中清理（terminate→kill），proxy/reverse 在 finally 还原。
     serial 一路传给所有 adb 调用（reverse/proxy/CA/收尾 pull）与 frida 注入（-D 设备选择）；
     None 时全部退回旧行为（不带 -s、frida 用 -U），向后兼容。
+
+    ``decision``（:class:`CaptureDecision`）把 capture_plan 四律落到引擎行为：
+    ① floor_first → 起手先起带外 pcap 保底（``_start_floor_pcap``），收尾停之；
+    ② frida_retreat_threshold → frida 秒退累计达阈值即弃 frida、退 floor（不死磕明文）；
+    ③ total_budget_sec → 采集总耗时超预算即交付已捕获部分（budget_exceeded 标记）；
+    None → 用 ``decide_capture(None)`` 默认决策（floor 优先、阈值 3、预算 60min）。
     """
+    # TODO(real-device): 需真机验证后方可依赖——floor pcap 起停、frida 会话 liveness、
+    # 秒退熔断、预算超时交付部分，均在真机上才有真实副作用；单测一律 mock 这些接口。
+    if decision is None:
+        decision = decide_capture(None)
     result = empty_result(STATUS_DONE, "")
     playbook: list[str] = []
     flows_file = out_path / "flows.mitm"
+    # ③ 时间盒：采集起点（_monotonic 可 monkeypatch）。超 decision.total_budget_sec 交付部分。
+    capture_started_at = _monotonic()
+    budget_exceeded = False
+    # ① floor：带外 pcap 保底 runner 句柄（floor_first 时起手启动，finally 收尾停）。
+    floor_handle: Any = None
 
     mitm_proc: subprocess.Popen[bytes] | None = None
     frida_proc: subprocess.Popen[bytes] | None = None
@@ -348,31 +380,76 @@ def _capture(
         if proxy_set:
             playbook.append(f"adb 设全局代理 {_PROXY_HOST}:{_PROXY_PORT}")
 
+        # 2.5) ① floor 优先：不碰 App 本体先起带外 pcap 保底（decision.floor_first 恒 True）。
+        #      反 frida / pinning / native 协议对带外 pcap 全无效化——它保证不会『零产出』。
+        #      真机依赖封成可注入 runner（_start_floor_pcap/_stop_floor_pcap），单测 mock。
+        # TODO(real-device): 需真机验证后方可依赖——floor pcap 需设备侧 PCAPdroid/tcpdump。
+        if decision.floor_first:
+            floor_handle = _start_floor_pcap(package, out_path, serial)
+            if floor_handle is not None:
+                playbook.append("① floor 保底：已起带外 pcap（接入节点必有产出，零产出不可接受）")
+                logger.info("[capture] floor 带外 pcap 已启动（保底）")
+            else:
+                logger.info("[capture] floor 带外 pcap 未起（无设备侧 runner），仅靠主抓包链")
+
         # 3) frida 注入：优先 frida-core 通道（SSL unpinning + 运行时密钥 hook，可回传活体 key）；
         #    frida-core 不可用 / attach 失败 → 回退现有 subprocess 路径（仅 unpinning，无 key 回传）。
         #    两路都 best-effort、失败不阻断抓包（HTTP 仍可抓）。
-        frida_session, frida_script = _start_frida_session(
-            package,
-            crypto_events,
-            jsbridge_events,
-            sensitive_api_events,
-            antidetect_events,
-            credential_events,
-            sqlcipher_events,
-            clipboard_events,
-            remote_control_events,
-            serial=serial,
-        )
-        if frida_session is not None:
-            playbook.append(
-                f"frida-core 注入 SSL unpinning + 运行时密钥 hook 并启动 {package}（活体 key 回传）"
+        #    ② 秒退熔断：会话建立后做 liveness（resume 后进程是否秒退）；秒退累计达
+        #    decision.frida_retreat_threshold 即弃 frida、退 floor（不死磕明文）。
+        # TODO(real-device): 需真机验证后方可依赖——liveness/秒退计数只有真机才有真实副作用。
+        retreat_count = 0
+        while True:
+            frida_session, frida_script = _start_frida_session(
+                package,
+                crypto_events,
+                jsbridge_events,
+                sensitive_api_events,
+                antidetect_events,
+                credential_events,
+                sqlcipher_events,
+                clipboard_events,
+                remote_control_events,
+                serial=serial,
             )
-            logger.info("[capture] frida-core 会话已建立，运行时密钥 hook 生效")
-        else:
+            if frida_session is None:
+                break  # frida-core 不可用/注入失败 → 回退 subprocess（下方处理）。
+            # frida-core liveness（治默认路径假成功）：resume 后短暂等待再验进程存活；
+            # 死了就像 subprocess 秒退一样降级，绝不再报假成功。
+            _wait(_FRIDA_GRACE)
+            if _frida_session_alive(frida_session):
+                playbook.append(
+                    f"frida-core 注入 SSL unpinning + 运行时密钥 hook 并启动 {package}（活体 key 回传）"
+                )
+                logger.info("[capture] frida-core 会话已建立且存活，运行时密钥 hook 生效")
+                break
+            # 会话秒退：清理这次的死会话，计一次秒退。
+            _teardown_frida_session(frida_session, frida_script)
+            frida_session, frida_script = None, None
+            retreat_count += 1
+            warn = (
+                f"frida-core 会话秒退（第 {retreat_count}/{decision.frida_retreat_threshold} 次，"
+                "版本不匹配 / 反检测 / spawn 失败？）；HTTPS 可能仅密文"
+            )
+            logger.warning("[capture] %s", warn)
+            playbook.append(warn)
+            warnings.append(warn)
+            if retreat_count >= decision.frida_retreat_threshold:
+                # ② 达秒退阈值：弃 frida，退 floor（带外 pcap 已保底，别再死磕明文）。
+                fell = (
+                    "② 秒退熔断：frida 秒退累计达阈值，弃 frida、退 floor 带外 pcap 保底"
+                    "（接入节点已够调证，明文是上限不是底线）"
+                )
+                logger.warning("[capture] %s", fell)
+                playbook.append(fell)
+                warnings.append(fell)
+                break
+
+        if frida_session is None:
             frida_proc = _start_frida_unpinning(package, out_path, serial)
         if frida_session is None and frida_proc is None:
-            # 未起 frida（缺 frida / 写脚本失败）→ 无 unpinning，HTTPS 可能仅密文。
-            warn = "frida 未启动（缺 frida / 脚本写出失败），无 SSL unpinning，HTTPS 可能仅密文"
+            # 未起 frida（缺 frida / 写脚本失败 / 秒退熔断退 floor）→ 无 unpinning，HTTPS 可能仅密文。
+            warn = "frida 未启动（缺 frida / 脚本写出失败 / 秒退退 floor），无 SSL unpinning，HTTPS 可能仅密文"
             logger.warning("[capture] %s", warn)
             playbook.append(warn)
             warnings.append(warn)
@@ -394,9 +471,31 @@ def _capture(
                 playbook.append(warn)
                 warnings.append(warn)
 
-        # 4) 抓 duration 秒。
+        # 4) 抓 duration 秒——③ 时间盒：受 decision.total_budget_sec 约束，超预算交付已捕获部分。
         playbook.append(f"采集流量约 {duration} 秒")
-        _wait(duration)
+        budget_left = _budget_remaining(capture_started_at, decision.total_budget_sec)
+        if budget_left <= 0:
+            # 前置步骤（CA/frida 重试）已耗尽预算 → 不再采集，直接交付已捕获部分。
+            budget_exceeded = True
+            warn = (
+                f"③ 时间盒：抓包总预算 {decision.total_budget_sec}s 已耗尽，"
+                "交付已捕获部分（不无限磨）"
+            )
+            logger.warning("[capture] %s", warn)
+            playbook.append(warn)
+            warnings.append(warn)
+        else:
+            wait_for = min(duration, budget_left)
+            if wait_for < duration:
+                budget_exceeded = True
+                warn = (
+                    f"③ 时间盒：剩余预算 {int(budget_left)}s 不足 {duration}s，"
+                    "采集缩短并交付已捕获部分（不无限磨）"
+                )
+                logger.warning("[capture] %s", warn)
+                playbook.append(warn)
+                warnings.append(warn)
+            _wait(wait_for)
 
     except _MitmStartupError:
         # status/reason 已在抛出点设好；跳到 finally 清理（mitmdump 已死，其它子进程未起）。
@@ -415,6 +514,10 @@ def _capture(
         _pull_exported_databases(package, out_path, sqlcipher_events, serial)
         _terminate(frida_proc, "frida")
         _teardown_frida_session(frida_session, frida_script)
+        # ① floor：收尾停带外 pcap（起手起过才停；handle=None 说明没起、无需停）。
+        if floor_handle is not None:
+            _stop_floor_pcap(floor_handle, out_path)
+            playbook.append("① floor 保底：已停带外 pcap 并落盘")
         if proxy_set:
             _adb_clear_proxy(serial)
             playbook.append("还原：清除设备全局代理")
@@ -453,6 +556,7 @@ def _capture(
         sqlcipher_events=_clean(sqlcipher_events),
         clipboard_events=_clean(clipboard_events),
         remote_control_events=_clean(remote_control_events),
+        budget_exceeded=budget_exceeded,
     )
     report_paths = [report_path] if report_path else []
 
@@ -586,6 +690,22 @@ def _start_frida_unpinning(
 _FRIDA_USB_TIMEOUT = 10
 
 
+# 表驱动的运行时事件通道：(name, msg_type, normalize)。crypto 主通道单独走
+# make_message_handler（含 error 诊断），其余 7 路统一用 make_typed_handler 注册，避免 8 段
+# 近乎相同的 script.on 复制粘贴（改一处即全通道生效）。sink 由调用方按 name 顺序传入。
+CHANNELS: tuple[tuple[str, str, Any], ...] = (
+    ("jsbridge", cryptohook.JSBRIDGE_MSG_TYPE, cryptohook.normalize_jsbridge_event),
+    ("sensitive_api", cryptohook.SENSITIVE_API_MSG_TYPE, cryptohook.normalize_sensitive_api_event),
+    ("antidetect", cryptohook.ANTIDETECT_MSG_TYPE, cryptohook.normalize_antidetect_event),
+    ("credential", cryptohook.CREDENTIAL_MSG_TYPE, cryptohook.normalize_credential_event),
+    ("sqlcipher", cryptohook.SQLCIPHER_MSG_TYPE, cryptohook.normalize_sqlcipher_event),
+    # ★ 隐私护栏：normalize_clipboard_event 抽地址丢全文，sink 只留链上地址、绝不落剪贴板原文。
+    ("clipboard", cryptohook.CLIPBOARD_MSG_TYPE, cryptohook.normalize_clipboard_event),
+    # 无障碍远控：多数需引导式人工动态，launch-only 常为空——属预期。
+    ("remote_control", cryptohook.ACCESSIBILITY_MSG_TYPE, cryptohook.normalize_remote_control_event),
+)
+
+
 def _start_frida_session(
     package: str,
     sink: list[dict[str, Any]],
@@ -659,63 +779,30 @@ def _start_frida_session(
             device_handle = frida.get_usb_device(timeout=_FRIDA_USB_TIMEOUT)
         pid = device_handle.spawn([package])
         session = device_handle.attach(pid)
+        # 在会话上寄存 device 句柄，供 _frida_session_alive 用 enumerate_processes 复验 pid 存活。
+        try:
+            session._fxapk_device = device_handle  # type: ignore[attr-defined]
+        except Exception:
+            logger.debug("[capture] 无法在会话上寄存 device 句柄（忽略，liveness 退化为仅看 detached）", exc_info=True)
         script = session.create_script(source)
-        # 三通道：crypto（含 error 诊断）/ jsbridge / 敏感 API，各自规范化进对应 sink。
+        # crypto 主通道（含 error 诊断）单独走 make_message_handler。
         script.on("message", cryptohook.make_message_handler(sink))
-        if jsbridge_sink is not None:
+        # 其余 7 路运行时事件通道表驱动注册（sink 顺序与 CHANNELS 严格对齐；None 则跳过该通道）。
+        channel_sinks = (
+            jsbridge_sink,
+            api_sink,
+            antidetect_sink,
+            credential_sink,
+            sqlcipher_sink,
+            clipboard_sink,
+            remote_control_sink,
+        )
+        for (name, msg_type, normalize), chan_sink in zip(CHANNELS, channel_sinks):
+            if chan_sink is None:
+                continue
             script.on(
                 "message",
-                cryptohook.make_typed_handler(
-                    jsbridge_sink, cryptohook.JSBRIDGE_MSG_TYPE, cryptohook.normalize_jsbridge_event
-                ),
-            )
-        if api_sink is not None:
-            script.on(
-                "message",
-                cryptohook.make_typed_handler(
-                    api_sink, cryptohook.SENSITIVE_API_MSG_TYPE, cryptohook.normalize_sensitive_api_event
-                ),
-            )
-        if antidetect_sink is not None:
-            script.on(
-                "message",
-                cryptohook.make_typed_handler(
-                    antidetect_sink, cryptohook.ANTIDETECT_MSG_TYPE, cryptohook.normalize_antidetect_event
-                ),
-            )
-        if credential_sink is not None:
-            script.on(
-                "message",
-                cryptohook.make_typed_handler(
-                    credential_sink, cryptohook.CREDENTIAL_MSG_TYPE, cryptohook.normalize_credential_event
-                ),
-            )
-        if sqlcipher_sink is not None:
-            script.on(
-                "message",
-                cryptohook.make_typed_handler(
-                    sqlcipher_sink, cryptohook.SQLCIPHER_MSG_TYPE, cryptohook.normalize_sqlcipher_event
-                ),
-            )
-        if clipboard_sink is not None:
-            # ★ 隐私护栏：normalize_clipboard_event 收到剪贴板文本后立即抽地址丢全文，
-            # 写进 sink 的只有抽出的链上地址，剪贴板全文绝不落 sink/磁盘。
-            script.on(
-                "message",
-                cryptohook.make_typed_handler(
-                    clipboard_sink, cryptohook.CLIPBOARD_MSG_TYPE, cryptohook.normalize_clipboard_event
-                ),
-            )
-        if remote_control_sink is not None:
-            # 无障碍远控：被劫持目标银行/支付包名清单 + 远控手势/全局动作 + 屏幕录制。
-            # ★ launch-only 抓不到，多数需引导式人工动态——多数情况下此 sink 为空，属预期。
-            script.on(
-                "message",
-                cryptohook.make_typed_handler(
-                    remote_control_sink,
-                    cryptohook.ACCESSIBILITY_MSG_TYPE,
-                    cryptohook.normalize_remote_control_event,
-                ),
+                cryptohook.make_typed_handler(chan_sink, msg_type, normalize),
             )
         script.load()
         device_handle.resume(pid)
@@ -1196,9 +1283,99 @@ def _pull_exported_tmp_dir(dump_dir: Path, serial: str | None = None) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _wait(duration: int) -> None:
+def _wait(duration: float) -> None:
     """采集等待。隔离为函数便于测试 monkeypatch（避免真睡 duration 秒）。"""
-    time.sleep(max(0, duration))
+    time.sleep(max(0.0, duration))
+
+
+def _monotonic() -> float:
+    """单调时钟读数（秒）。隔离为函数便于测试 monkeypatch 预算超时，而无需真流逝时间。"""
+    return time.monotonic()
+
+
+def _budget_remaining(started_at: float, total_budget_sec: int) -> float:
+    """据采集起点与总预算算剩余可用秒数（≤0 表示预算已耗尽）。用 _monotonic 便于测试。"""
+    elapsed = _monotonic() - started_at
+    return float(total_budget_sec) - elapsed
+
+
+# ---------------------------------------------------------------------------
+# ② frida-core 会话 liveness（治默认路径假成功：resume 后进程秒退却报成功）
+# ---------------------------------------------------------------------------
+
+
+def _frida_session_alive(session: Any) -> bool:
+    """判定 frida-core 会话对应的 spawned 进程是否仍存活（resume 后未秒退）。
+
+    优先看 ``session.is_detached``（frida 在目标进程退出/崩溃时把会话标 detached）；
+    再尽力用会话的 device+pid 重新 ``enumerate_processes`` 确认 pid 仍在。任一确凿判死 →
+    False；拿不到判据（测试替身/接口缺失）→ 保守判 True（不误降级正常会话）。绝不抛。
+
+    真机上 detached / 进程消失才是"秒退"的确证；单测 monkeypatch 本函数直接给期望结果。
+    """
+    # TODO(real-device): 需真机验证后方可依赖——is_detached / enumerate_processes 只有真机可信。
+    if session is None:
+        return False
+    # 1) 会话是否已 detached（进程崩溃/退出时 frida 置位）。
+    is_detached = getattr(session, "is_detached", None)
+    try:
+        detached = is_detached() if callable(is_detached) else bool(is_detached)
+    except Exception:
+        logger.debug("[capture] 读取 session.is_detached 失败（忽略）", exc_info=True)
+        detached = False
+    if detached:
+        logger.warning("[capture] frida-core 会话已 detached（spawned 进程疑似秒退）")
+        return False
+    # 2) 重新 enumerate 确认 spawned pid 仍在（拿不到设备/pid → 不据此判死）。
+    pid = getattr(session, "pid", None)
+    device_handle = getattr(session, "_fxapk_device", None)
+    if isinstance(pid, int) and device_handle is not None:
+        enum = getattr(device_handle, "enumerate_processes", None)
+        if callable(enum):
+            try:
+                procs: Any = enum()
+                live_pids = {getattr(p, "pid", None) for p in procs}
+            except Exception:
+                logger.debug("[capture] enumerate_processes 失败（忽略，不据此判死）", exc_info=True)
+                return True
+            if pid not in live_pids:
+                logger.warning("[capture] spawned pid=%s 不在设备进程表（秒退）", pid)
+                return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# ① floor 自动化：设备侧带外 pcap 保底 runner（可注入/可 mock，真机部分封在此）
+# ---------------------------------------------------------------------------
+#
+# floor_first 决策恒 True：反 frida / pinning / native 协议对带外 pcap 全无效化，起手先起、
+# 收尾停，保证接入节点这条产出永远有——治"几小时零产出"。真机依赖（设备侧 tcpdump / PCAPdroid
+# 或旁路抓包）封在 _start_floor_pcap/_stop_floor_pcap，单测一律 mock，不触真机/真子进程。
+
+
+def _start_floor_pcap(
+    package: str, out_path: Path, serial: str | None = None
+) -> Any:
+    """起设备侧带外 pcap 保底（返回可传给 _stop_floor_pcap 的句柄；起不来 → None，不阻断抓包）。
+
+    ★ 真机实现（设备侧 tcpdump / PCAPdroid 起停）待真机验证后接线；当前默认返回 None
+    （无设备侧 runner），主抓包链照常，floor 保底在真机上点亮。绝不抛。
+    """
+    # TODO(real-device): 需真机验证后方可依赖——此处需接设备侧 tcpdump/PCAPdroid 起 pcap。
+    logger.debug(
+        "[capture] floor 带外 pcap runner 未接线（待真机验证）：package=%s serial=%s",
+        package, serial or "(未指定)",
+    )
+    return None
+
+
+def _stop_floor_pcap(handle: Any, out_path: Path) -> None:
+    """停设备侧带外 pcap 并把 pcap 落到 out_path（best-effort，绝不抛）。
+
+    ★ 与 _start_floor_pcap 对称，真机实现待接线；handle 为 None 时上层不会调本函数。
+    """
+    # TODO(real-device): 需真机验证后方可依赖——此处需停设备侧 pcap 并 adb pull 落盘。
+    logger.debug("[capture] floor 带外 pcap 收尾 runner 未接线（待真机验证）：handle=%r", handle)
 
 
 def _terminate(proc: subprocess.Popen[bytes] | None, label: str) -> None:
@@ -1687,6 +1864,7 @@ def _write_runtime_report(
     sqlcipher_events: list[dict[str, Any]] | None = None,
     clipboard_events: list[dict[str, Any]] | None = None,
     remote_control_events: list[dict[str, Any]] | None = None,
+    budget_exceeded: bool = False,
 ) -> str:
     """把运行时端点写成 out/runtime_report.json（复用 report.json 的序列化）。
 
@@ -1705,6 +1883,8 @@ def _write_runtime_report(
         "package_name": package,
         "source": "runtime",
         "capture_complete": complete,
+        # ③ 时间盒：采集因超总预算被缩短/中止 → True（下游据此知端点/事件可能不全）。
+        "budget_exceeded": budget_exceeded,
         "endpoint_total": len(endpoints),
         "endpoints": [report_json._to_jsonable(ep) for ep in endpoints],
         "messages": list(messages or []),

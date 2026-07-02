@@ -59,6 +59,9 @@ class Evidence:
     source: str  # dex|resource|native|manifest|cert|runtime
     location: str  # 文件路径 / 类名 / 资源名（可复现）
     snippet: str = ""
+    # 运行时观测的时间戳（Unix epoch 秒）：pcap Flow.first_ts / 探针行时间。静态证据无此概念留 None。
+    # 回灌 runtime 观测时填，让「何时抓到」进证据链（时间线还原 / 与网关日志对齐）。
+    observed_at: float | None = None
 
 
 @dataclass
@@ -108,6 +111,54 @@ class Lead:
         硬编码可信度更高——C2 若 ``is_runtime_seen`` 即「**已抓到通信的确认 C2**」。
         """
         return any(str(getattr(ev, "source", "")).startswith("runtime") for ev in self.source_refs)
+
+
+def merge_runtime_into_lead_dict(existing: dict, runtime_lead: dict) -> bool:
+    """把一条 **runtime** 观测（已序列化的 lead dict）并进已存在的 lead dict，升为活体确认。
+
+    回灌层（pcap_ingest / probe_ingest）在 ``report.json`` 上做原地字典合并：命中已存在
+    ``(category, value)`` 时不丢弃，而是把新 lead 里 source 以 ``runtime`` 开头的 Evidence
+    追加进已有 ``source_refs``（去重 by (source, location, snippet)），并据此重算
+    ``is_runtime_seen``。语义对齐 :func:`Lead.is_runtime_seen` 与 ``dynamic/merge.py`` 的
+    「静态命中同名 → 追加 runtime 证据、升活体确认」。
+
+    只搬 runtime Evidence（``existing`` 可能是静态 lead，静态证据原样保留）。
+
+    Args:
+        existing: report.json 里已存在的 lead dict（**原地**被改）。
+        runtime_lead: 新 runtime lead 的序列化 dict。
+
+    Returns:
+        本次是否真的并入了新的 runtime 证据（True=发生合并/确认；False=无新 runtime 证据可并）。
+    """
+    incoming = runtime_lead.get("source_refs")
+    if not isinstance(incoming, list):
+        return False
+    refs = existing.get("source_refs")
+    if not isinstance(refs, list):
+        refs = []
+        existing["source_refs"] = refs
+    seen = {
+        (str(r.get("source")), str(r.get("location")), str(r.get("snippet")))
+        for r in refs
+        if isinstance(r, dict)
+    }
+    merged = False
+    for ev in incoming:
+        if not isinstance(ev, dict):
+            continue
+        if not str(ev.get("source", "")).startswith("runtime"):
+            continue  # 只搬运行时证据，静态证据不动
+        sig = (str(ev.get("source")), str(ev.get("location")), str(ev.get("snippet")))
+        if sig in seen:
+            continue
+        seen.add(sig)
+        refs.append(ev)
+        merged = True
+    if merged:
+        # 有 runtime 证据 → 升为活体确认（与 Lead.is_runtime_seen 语义一致）。
+        existing["is_runtime_seen"] = True
+    return merged
 
 
 @dataclass
