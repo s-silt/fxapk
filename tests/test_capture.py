@@ -1795,3 +1795,299 @@ def test_parse_messages_config_channel_does_not_break_envelope(monkeypatch, tmp_
     assert by_url["https://api.fraud-gw.cn/post"].get("kind") != "config"
     # 配置流标 config。
     assert by_url["https://rest.apizza.net/api/webConfig"].get("kind") == "config"
+
+
+# ---------------------------------------------------------------------------
+# 组 C：capture 引擎闭环——消费 CaptureDecision 驱动行为
+# （liveness / 秒退熔断 / 时间盒预算 / floor 自动化 / 事件通道表）
+# 全 mock，禁止依赖真机；真机点需另行验证（见模块 TODO(real-device)）。
+# ---------------------------------------------------------------------------
+
+from apkscan.dynamic.capture_plan import CaptureDecision, decide_capture
+
+
+# --- 消费 decide_capture：capture.run(report=...) 让决策真正驱动引擎 ----------
+
+
+def test_run_consumes_decide_capture_from_report(monkeypatch, tmp_path):
+    """capture.run(report=...) → _capture 收到由 decide_capture(report) 产出的决策。"""
+    _set_capabilities(monkeypatch)
+    seen: dict[str, Any] = {}
+
+    def _spy_capture(package, out_path, duration, serial=None, *, decision=None):
+        seen["decision"] = decision
+        return capture.empty_result(STATUS_DONE, "ok")
+
+    monkeypatch.setattr(capture, "_capture", _spy_capture)
+
+    # 加固样本 → decide_capture 应把秒退阈值降到 2。
+    report = {"findings": [{"id": "PACK-DETECTED", "category": "packing"}]}
+    capture.run("com.test.app", out_dir=str(tmp_path), duration=1, report=report)
+
+    assert isinstance(seen["decision"], CaptureDecision)
+    assert seen["decision"].frida_retreat_threshold == 2
+    assert seen["decision"].floor_first is True
+
+
+def test_run_defaults_decision_when_no_report(monkeypatch, tmp_path):
+    """capture.run 不带 report → _capture 仍拿到默认决策（floor 优先、阈值 3、预算 3600）。"""
+    _set_capabilities(monkeypatch)
+    seen: dict[str, Any] = {}
+
+    def _spy_capture(package, out_path, duration, serial=None, *, decision=None):
+        seen["decision"] = decision
+        return capture.empty_result(STATUS_DONE, "ok")
+
+    monkeypatch.setattr(capture, "_capture", _spy_capture)
+    capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+
+    d = seen["decision"]
+    assert isinstance(d, CaptureDecision)
+    assert d.floor_first is True
+    assert d.frida_retreat_threshold == 3
+    assert d.total_budget_sec == 3600
+
+
+# --- frida-core liveness：死进程降级、不假成功 -------------------------------
+
+
+def test_session_liveness_dead_degrades_no_fake_success(monkeypatch, tmp_path):
+    """frida-core 会话 resume 后检测到进程已死 → 像 subprocess 秒退一样降级：
+    reason 点明 HTTPS 可能仅密文、不假成功（不静默当成功抓包）。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+
+    # 会话建立成功，但 liveness 检测判定进程已死。
+    monkeypatch.setattr(
+        capture, "_start_frida_session",
+        lambda *a, **k: (object(), object()),
+    )
+    monkeypatch.setattr(capture, "_frida_session_alive", lambda session: False)
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+
+    # 抓包不被阻断（HTTP 仍可抓），但 reason 必须诚实降级。
+    assert result["status"] == STATUS_DONE
+    assert "密文" in result["reason"]
+    pb = "\n".join(result["playbook"])
+    assert "秒退" in pb or "注入失败" in pb or "会话已死" in pb
+
+
+def test_session_liveness_alive_no_warning(monkeypatch, tmp_path):
+    """frida-core 会话存活 → 无降级告警（正常完成文案）。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(
+        capture, "_start_frida_session", lambda *a, **k: (object(), object())
+    )
+    monkeypatch.setattr(capture, "_frida_session_alive", lambda session: True)
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+    assert result["status"] == STATUS_DONE
+    assert "密文" not in result["reason"]
+    assert "抓包完成" in result["reason"]
+
+
+# --- 秒退熔断：秒退累计达阈值 → 弃 frida、退 floor -----------------------------
+
+
+def test_frida_retreat_threshold_reached_falls_to_floor(monkeypatch, tmp_path):
+    """frida 反复秒退累计达 decision.frida_retreat_threshold → 弃 frida、退 floor 保底。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+
+    attempts = {"n": 0}
+
+    def _always_dead_session(*a, **k):
+        attempts["n"] += 1
+        return object(), object()
+
+    monkeypatch.setattr(capture, "_start_frida_session", _always_dead_session)
+    monkeypatch.setattr(capture, "_frida_session_alive", lambda session: False)
+
+    floor = {"started": False}
+    monkeypatch.setattr(
+        capture, "_start_floor_pcap",
+        lambda package, out_path, serial=None: floor.__setitem__("started", True) or object(),
+    )
+    monkeypatch.setattr(capture, "_stop_floor_pcap", lambda handle, out_path: None)
+
+    # 加固样本阈值=2 → 秒退累计 2 次即退 floor。
+    report = {"findings": [{"id": "PACK-DETECTED"}]}
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1, report=report)
+
+    assert result["status"] == STATUS_DONE
+    # 秒退累计恰好到阈值（2 次），不无限重试。
+    assert attempts["n"] == 2
+    # 退 floor：带外 pcap 保底被启动。
+    assert floor["started"] is True
+    pb = "\n".join(result["playbook"])
+    assert "floor" in pb.lower() or "带外" in pb or "保底" in pb
+
+
+# --- 时间盒/总预算：超时交付已捕获部分 ---------------------------------------
+
+
+def test_total_budget_exceeded_delivers_partial(monkeypatch, tmp_path):
+    """采集总耗时超 decision.total_budget_sec → 交付已捕获部分并标 budget_exceeded。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+
+    # 假单调时钟：第一次读=0，之后每次读跳 +10000 秒（远超 3600 预算）。
+    ticks = {"t": 0.0}
+
+    def _fake_clock() -> float:
+        v = ticks["t"]
+        ticks["t"] += 10000.0
+        return v
+
+    monkeypatch.setattr(capture, "_monotonic", _fake_clock)
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+
+    # 仍交付（不无限磨），但报告标明预算超时。
+    assert result["status"] == STATUS_DONE
+    pb = "\n".join(result["playbook"])
+    assert "预算" in pb or "budget" in pb.lower() or "超时" in pb
+    payload = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    assert payload.get("budget_exceeded") is True
+
+
+def test_within_budget_no_budget_flag(monkeypatch, tmp_path):
+    """未超预算 → 报告不标 budget_exceeded（默认 False）。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_monotonic", lambda: 0.0)  # 时间不推进
+
+    capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+    payload = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    assert payload.get("budget_exceeded") in (False, None)
+
+
+# --- floor 自动化：floor_first 决策 → 设备侧起停带外 pcap 保底 -----------------
+
+
+def test_floor_first_starts_and_stops_pcap(monkeypatch, tmp_path):
+    """decision.floor_first=True → 起手先启带外 pcap 保底，收尾停之（真机部分封成可注入 runner）。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+
+    floor_calls: dict[str, Any] = {"started": False, "stopped": False, "handle": None}
+    handle = object()
+
+    def _start_floor(package, out_path, serial=None):
+        floor_calls["started"] = True
+        return handle
+
+    def _stop_floor(h, out_path):
+        floor_calls["stopped"] = True
+        floor_calls["handle"] = h
+
+    monkeypatch.setattr(capture, "_start_floor_pcap", _start_floor)
+    monkeypatch.setattr(capture, "_stop_floor_pcap", _stop_floor)
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+    assert result["status"] == STATUS_DONE
+    assert floor_calls["started"] is True
+    assert floor_calls["stopped"] is True
+    assert floor_calls["handle"] is handle  # 起手拿的 handle 收尾被停
+
+
+def test_floor_pcap_runner_failure_does_not_abort(monkeypatch, tmp_path):
+    """floor pcap runner 起不来（返回 None / 抛）→ 不阻断抓包（仍 done）。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_start_floor_pcap", lambda *a, **k: None)
+    stopped = {"called": False}
+    monkeypatch.setattr(
+        capture, "_stop_floor_pcap", lambda h, op: stopped.__setitem__("called", True)
+    )
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+    assert result["status"] == STATUS_DONE
+    # handle 为 None → 不该调 stop（无可停）。
+    assert stopped["called"] is False
+
+
+# --- 事件通道表驱动：8 路通道用 CHANNELS 表 + 循环注册 ------------------------
+
+
+def test_frida_session_channels_are_table_driven():
+    """CHANNELS 表覆盖全部 8 路运行时事件通道（表驱动，替代 8 段重复 script.on）。"""
+    names = {c[0] for c in capture.CHANNELS}
+    assert names == {
+        "jsbridge", "sensitive_api", "antidetect", "credential",
+        "sqlcipher", "clipboard", "remote_control",
+    }
+    # 每行是 (name, msg_type, normalize) 三元组。
+    for name, msg_type, normalize in capture.CHANNELS:
+        assert isinstance(name, str) and isinstance(msg_type, str)
+        assert callable(normalize)
+
+
+def test_frida_session_registers_all_channels_via_table(monkeypatch):
+    """会话路径按 CHANNELS 表逐路注册 on_message（crypto 主通道另计）。"""
+    import sys
+    import types
+
+    on_calls: list[Any] = []
+
+    class _FakeScript:
+        def __init__(self, source: str) -> None:
+            pass
+
+        def on(self, name: str, cb: Any) -> None:
+            on_calls.append(cb)
+
+        def load(self) -> None:
+            pass
+
+    class _FakeSession:
+        def create_script(self, source: str) -> _FakeScript:
+            return _FakeScript(source)
+
+        def detach(self) -> None:
+            pass
+
+    class _FakeDevice:
+        def spawn(self, argv: Any) -> int:
+            return 1
+
+        def attach(self, pid: int) -> _FakeSession:
+            return _FakeSession()
+
+        def resume(self, pid: int) -> None:
+            pass
+
+        def kill(self, pid: int) -> None:
+            pass
+
+    monkeypatch.setitem(
+        sys.modules, "frida",
+        types.SimpleNamespace(get_usb_device=lambda timeout=None: _FakeDevice()),
+    )
+    # 8 个 sink 全给非 None → crypto 主通道 + 7 路表通道 = 8 次 on()。
+    sinks = [[] for _ in range(8)]
+    capture._start_frida_session("com.x", *sinks)
+    assert len(on_calls) == 1 + len(capture.CHANNELS)
