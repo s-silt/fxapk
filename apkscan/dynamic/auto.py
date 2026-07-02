@@ -211,6 +211,7 @@ def run(
             duration=capture_duration,
             on_progress=on_progress,
             confirm=confirm,
+            report=report,
         )
         steps.append(capture_step)
 
@@ -552,10 +553,13 @@ def _run_capture(
     duration: int,
     on_progress: Callable[[str], None] | None,
     confirm: Callable[[str], None] | None,
+    report: object = None,
 ) -> tuple[dict, str]:
     """步骤 4：抓包（有设备 + 有包名才做）。先 confirm 提示用户操作 app 触发网络。
 
     serial 透传给 capture.run（多设备消歧）；None 时退回旧行为（-U）。
+    report（静态分析报告）透传给 capture.run，让 ``decide_capture`` 的四律决策
+    （floor 优先 / 秒退熔断阈值 / 总预算时间盒 / native 预判）真正驱动抓包引擎。
 
     Returns:
         (step, runtime_report_path)。runtime_report_path：抓包成功时 runtime_report.json
@@ -579,7 +583,9 @@ def _run_capture(
     try:
         from apkscan.dynamic import capture
 
-        result = capture.run(package_name, out=out_dir, duration=duration, serial=serial)
+        result = capture.run(
+            package_name, out=out_dir, duration=duration, serial=serial, report=report
+        )
         step, _ = _fold_dynamic_step(_STEP_CAPTURE, result)
         runtime_path = ""
         if step["status"] == _DONE:

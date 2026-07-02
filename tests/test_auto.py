@@ -790,6 +790,31 @@ def test_auto_selects_serial_and_threads_to_all_downstream(
     assert seen["capture_serial"] == "emulator-5554"
 
 
+def test_auto_threads_static_report_into_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """静态 report 被透传给 capture.run(report=...)，让 decide_capture 的四律决策驱动引擎。"""
+    import apkscan.dynamic.capture as capture_mod
+
+    _patch_doctor(monkeypatch, ok=True)
+    report = _patch_static_ok(monkeypatch, "com.fraud.app")
+    _set_device(monkeypatch, True)
+    _patch_unpack(monkeypatch, _dynamic_result(STATUS_DONE))
+    _patch_merge(monkeypatch)
+
+    seen: dict[str, Any] = {"report": "MISSING"}
+
+    def _fake_capture(package: str, *a: Any, **k: Any) -> dict:
+        seen["report"] = k.get("report", "MISSING")
+        return _dynamic_result(STATUS_DONE, report_paths=["out/runtime_report.json"])
+
+    monkeypatch.setattr(capture_mod, "run", _fake_capture)
+
+    auto.run("sample.apk", out_dir="out")
+    # capture 收到的正是静态阶段那个 report 对象（供 decide_capture 消费）。
+    assert seen["report"] is report
+
+
 def test_auto_no_serial_means_no_device_skips_dynamic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
