@@ -287,6 +287,109 @@ def test_failed_query_not_cached(
     assert not _isolated_cache.exists()
 
 
+# --- 缓存 TTL：过期触发重查 -----------------------------------------------
+
+
+def test_cache_entry_carries_cached_at(
+    fake_requests: _FakeRequests, fake_lookup: _FakeBatchLookup, _isolated_cache: Path
+) -> None:
+    """成功缓存条目带 _cached_at 时间戳，供 TTL 过期判断。"""
+    fake_requests.response = _FakeResponse(_doh_payload(["6.6.6.6"]))
+    fake_lookup.table["6.6.6.6"] = {"isp": "I", "org": "O", "asn": "AS6", "country": "US"}
+    DnsEnricher().enrich(_ep("stamp.com"))
+
+    cache = json.loads(_isolated_cache.read_text(encoding="utf-8"))
+    assert isinstance(cache["stamp.com"].get("_cached_at"), (int, float))
+
+
+def test_expired_cache_triggers_requery(
+    fake_requests: _FakeRequests,
+    fake_lookup: _FakeBatchLookup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """缓存 _cached_at 超过 TTL → 重新查询（拿到新结果），而非返回陈旧缓存。"""
+    fake_requests.response = _FakeResponse(_doh_payload(["7.7.7.7"]))
+    fake_lookup.table["7.7.7.7"] = {"isp": "I", "org": "O", "asn": "AS7", "country": "US"}
+    fake_lookup.table["8.8.8.8"] = {"isp": "I2", "org": "O2", "asn": "AS8", "country": "DE"}
+    enr = DnsEnricher()
+
+    # 冻结时刻 t0 写入缓存。
+    now = {"t": 1_000.0}
+    monkeypatch.setattr(dns_mod.time, "time", lambda: now["t"])
+
+    first = enr.enrich(_ep("ttl.com"))
+    assert first.ok is True
+    assert first.data["ips"] == ["7.7.7.7"]
+
+    # 时钟推进超过 TTL → 应重查（返回新 IP）。
+    now["t"] = 1_000.0 + dns_mod.CACHE_TTL_SECONDS + 1
+    fake_requests.response = _FakeResponse(_doh_payload(["8.8.8.8"]))
+    second = enr.enrich(_ep("ttl.com"))
+    assert second.ok is True
+    assert second.data["ips"] == ["8.8.8.8"]  # 拿到重查后的新结果
+    assert len(fake_requests.calls) == 2
+
+
+def test_fresh_cache_within_ttl_skips_network(
+    fake_requests: _FakeRequests,
+    fake_lookup: _FakeBatchLookup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TTL 内的缓存仍命中，不触网。"""
+    fake_requests.response = _FakeResponse(_doh_payload(["9.9.9.9"]))
+    fake_lookup.table["9.9.9.9"] = {"isp": "I", "org": "O", "asn": "AS9", "country": "US"}
+    enr = DnsEnricher()
+
+    now = {"t": 2_000.0}
+    monkeypatch.setattr(dns_mod.time, "time", lambda: now["t"])
+
+    enr.enrich(_ep("fresh.com"))
+    assert len(fake_requests.calls) == 1
+
+    now["t"] = 2_000.0 + dns_mod.CACHE_TTL_SECONDS - 1  # 仍在 TTL 内
+    second = enr.enrich(_ep("fresh.com"))
+    assert second.ok is True
+    assert len(fake_requests.calls) == 1  # 未重查
+
+
+# --- 限速/托管失败：不固化空 hosting -------------------------------------
+
+
+def test_hosting_ratelimit_marks_incomplete_and_not_cached(
+    fake_requests: _FakeRequests,
+    fake_lookup: _FakeBatchLookup,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolated_cache: Path,
+) -> None:
+    """托管批量查询因 429/限速抛错 → hosting 空但标 hosting_incomplete，且不写缓存（不冻结管辖判定）。"""
+    fake_requests.response = _FakeResponse(_doh_payload(["1.2.3.4"]))
+
+    def boom_batch(ips: list[str], **kwargs: object) -> dict:
+        raise RuntimeError("429 Too Many Requests")
+
+    monkeypatch.setattr(dns_mod, "lookup_ips_batch", boom_batch)
+
+    result = DnsEnricher().enrich(_ep("rl.com"))
+    assert result.ok is True
+    assert result.data["ips"] == ["1.2.3.4"]  # IP 列表仍在（有价值线索）
+    assert result.data["hosting"] == []
+    assert result.data.get("hosting_incomplete") is True
+    # 不固化：hosting 缺失的结果不写缓存，下次可重查补全归属。
+    assert not _isolated_cache.exists()
+
+
+def test_hosting_success_not_marked_incomplete(
+    fake_requests: _FakeRequests, fake_lookup: _FakeBatchLookup, _isolated_cache: Path
+) -> None:
+    """托管查询成功 → 不标 incomplete，正常写缓存。"""
+    fake_requests.response = _FakeResponse(_doh_payload(["1.1.1.1"]))
+    fake_lookup.table["1.1.1.1"] = {"isp": "I", "org": "O", "asn": "AS1", "country": "US"}
+    result = DnsEnricher().enrich(_ep("ok.com"))
+    assert result.ok is True
+    assert result.data.get("hosting_incomplete") is not True
+    assert _isolated_cache.is_file()
+
+
 # --- 托管查询走单次批量（非逐 IP）-----------------------------------------
 
 
