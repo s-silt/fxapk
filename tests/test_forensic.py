@@ -75,3 +75,59 @@ def test_ip_lead_foreign_gets_forensic_path() -> None:
     assert lead.advice == "建议调证"
     assert "国外服务器·取证为主" in (lead.notes or "")
     assert any("镜像" in e for e in lead.evidence_to_obtain)
+
+
+# --------------------------------------------------------------------------- 国内 CDN 边缘判定
+
+
+def test_cdn_vendor_domestic_org_marker() -> None:
+    """解析 IP 归属命中国内 CDN（网宿/白山/阿里/腾讯/字节）→ 判为边缘节点。"""
+    wangsu = {"hosting": [{"ip": "1.2.3.4", "org": "Wangsu Science & Technology", "asn": "AS4837"}]}
+    assert forensic.cdn_vendor(wangsu) is not None
+    alicdn = {"hosting": [{"ip": "1.2.3.4", "org": "Alibaba Cloud (Kunlun)", "asn": "AS37963"}]}
+    assert forensic.cdn_vendor(alicdn) is not None
+    tencent = {"hosting": [{"ip": "1.2.3.4", "org": "Tencent Tcdn", "asn": "AS132203"}]}
+    assert forensic.cdn_vendor(tencent) is not None
+
+
+def test_cdn_vendor_by_cname() -> None:
+    """CNAME 链指向国内 CDN（即便 IP 归属看似普通 IDC）→ 仍判边缘。"""
+    dns = {
+        "hosting": [{"ip": "1.2.3.4", "org": "Some IDC Ltd", "asn": "AS12345"}],
+        "cname": ["evil.com.w.kunlungr.com"],
+    }
+    assert forensic.cdn_vendor(dns) is not None
+
+
+def test_cdn_vendor_by_response_headers() -> None:
+    """响应头带国内 CDN 信号（acw_tc / via: ens-cache / x-swift-* / x-ser）→ 判边缘。"""
+    dns = {
+        "hosting": [{"ip": "1.2.3.4", "org": "Some IDC Ltd", "asn": "AS12345"}],
+        "headers": {"Set-Cookie": "acw_tc=abc123; path=/", "Via": "cache.51cdn.com"},
+    }
+    assert forensic.cdn_vendor(dns) is not None
+    dns2 = {
+        "hosting": [{"ip": "1.2.3.4", "org": "Some IDC Ltd", "asn": "AS12345"}],
+        "headers": {"Via": "ens-cache5.l2et2", "X-Swift-CacheTime": "0"},
+    }
+    assert forensic.cdn_vendor(dns2) is not None
+
+
+def test_cdn_vendor_non_cdn_headers_and_org_is_none() -> None:
+    """普通 IDC + 无 CDN CNAME/头 → 不误判为边缘（可能就是源站）。"""
+    dns = {
+        "hosting": [{"ip": "1.2.3.4", "org": "Some IDC Ltd", "asn": "AS12345"}],
+        "headers": {"Server": "nginx", "Content-Type": "text/html"},
+        "cname": ["direct.evil.com"],
+    }
+    assert forensic.cdn_vendor(dns) is None
+
+
+def test_render_origin_hint_domestic_cdn() -> None:
+    dns = {
+        "hosting": [{"ip": "1.2.3.4", "org": "Some IDC Ltd", "asn": "AS12345"}],
+        "headers": {"Set-Cookie": "acw_tc=abc123"},
+    }
+    lines = forensic.render_origin_hint(dns)
+    assert len(lines) == 1
+    assert "非真实源站" in lines[0] and "穿透" in lines[0]

@@ -189,6 +189,72 @@ def test_rdap_success_extracts_fields(
     assert fake_whois.calls == []
 
 
+def test_rdap_success_extracts_country_from_adr(
+    fake_requests: _FakeRequests, fake_whois: _FakeWhoisModule
+) -> None:
+    """成功路径下从 registrant vCard 的 adr 提取归属国落库（与 whois 兜底的 country 对齐）。"""
+    payload = {
+        "entities": [
+            {
+                "roles": ["registrant"],
+                "vcardArray": [
+                    "vcard",
+                    [
+                        ["version", {}, "text", "4.0"],
+                        ["fn", {}, "text", "Fraud Gateway Co"],
+                        [
+                            "adr",
+                            {"cc": "CN"},
+                            "text",
+                            ["", "", "1 Evil St", "Shanghai", "SH", "200000", "China"],
+                        ],
+                    ],
+                ],
+            }
+        ],
+    }
+    fake_requests.response = _FakeResponse(payload, status_code=200)
+    result = RdapEnricher().enrich(_ep())
+    assert result.ok is True
+    assert result.data["source"] == "rdap"
+    # 归属国从 adr 的国家段（或 cc 参数）提取。
+    assert result.data.get("country") in ("China", "CN")
+
+
+def test_rdap_success_country_from_adr_cc_param(
+    fake_requests: _FakeRequests, fake_whois: _FakeWhoisModule
+) -> None:
+    """adr 无国家段但带 cc 参数时，从参数取归属国。"""
+    payload = {
+        "entities": [
+            {
+                "roles": ["registrant"],
+                "vcardArray": [
+                    "vcard",
+                    [
+                        ["fn", {}, "text", "Foo Co"],
+                        ["adr", {"cc": "US"}, "text", ["", "", "", "", "", "", ""]],
+                    ],
+                ],
+            }
+        ],
+    }
+    fake_requests.response = _FakeResponse(payload, status_code=200)
+    result = RdapEnricher().enrich(_ep())
+    assert result.ok is True
+    assert result.data.get("country") == "US"
+
+
+def test_rdap_success_no_country_when_no_adr(
+    fake_requests: _FakeRequests, fake_whois: _FakeWhoisModule
+) -> None:
+    """无 adr 的成功响应 → country 为 None，不虚构。"""
+    fake_requests.response = _FakeResponse(_rdap_payload(), status_code=200)
+    result = RdapEnricher().enrich(_ep())
+    assert result.ok is True
+    assert result.data.get("country") is None
+
+
 def test_rdap_org_fallback_for_registrar(
     fake_requests: _FakeRequests, fake_whois: _FakeWhoisModule
 ) -> None:
