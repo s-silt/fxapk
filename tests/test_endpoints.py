@@ -601,3 +601,149 @@ def test_mqtt_url_extracted() -> None:
     url_ep = next((ep for ep in result.endpoints if ep.kind == "url"), None)
     assert url_ep is not None and url_ep.value.startswith("mqtt://")
     assert "broker.evil-trade.com" in _by_value(result)
+
+
+# ---------------------------------------------------------------------------
+# 组 F #1：_scan_text 的 _in_consumed 从线性扫改 bisect（结果须与旧实现完全一致）
+# ---------------------------------------------------------------------------
+
+
+def _linear_in_consumed(consumed: list[tuple[int, int]], pos: int) -> bool:
+    """旧实现（线性扫全部区间）的参照，供对照 bisect 版结果一致。"""
+    return any(start <= pos < end for start, end in consumed)
+
+
+def test_in_consumed_matches_linear_reference() -> None:
+    """bisect 版 _in_consumed 对每个位置的判定须与旧线性实现逐点一致。"""
+    from apkscan.analyzers.endpoints import _pos_in_consumed
+
+    # 非重叠、按 start 升序的区间（与 _scan_text 里 consumed 的构造不变量一致）。
+    consumed = [(5, 10), (20, 25), (40, 50), (100, 101)]
+    for pos in range(-5, 130):
+        assert _pos_in_consumed(consumed, pos) == _linear_in_consumed(
+            consumed, pos
+        ), f"pos={pos} bisect 与线性不一致"
+
+
+def test_in_consumed_empty_consumed() -> None:
+    from apkscan.analyzers.endpoints import _pos_in_consumed
+
+    assert _pos_in_consumed([], 0) is False
+    assert _pos_in_consumed([], 99999) is False
+
+
+def test_dense_urls_ip_domain_consistency() -> None:
+    """密集混合输入：URL 内的 host（IP/域名）不应再被裸 IP/域名通道重复抽出，
+    行为须与旧线性实现一致（用可观察的端点集合验证）。"""
+    text = (
+        "https://a.fraud-gw.cn/1 https://b.fraud-gw.cn/2 "
+        "http://139.59.12.34:80/x https://c.fraud-gw.cn/3 "
+        "8.8.8.8 raw.heika-pay.cn https://d.fraud-gw.cn/4"
+    )
+    result = _analyze(dex_strings=[text])
+    values = {e.value for e in result.endpoints}
+    # URL 全在
+    for u in (
+        "https://a.fraud-gw.cn/1",
+        "https://b.fraud-gw.cn/2",
+        "http://139.59.12.34:80/x",
+        "https://c.fraud-gw.cn/3",
+        "https://d.fraud-gw.cn/4",
+    ):
+        assert u in values
+    # URL host 派生的 domain/ip 也在
+    assert "a.fraud-gw.cn" in values
+    assert "139.59.12.34" in values
+    # URL 之外的裸 IP / 裸域名也应被抽到
+    assert "8.8.8.8" in values
+    assert "raw.heika-pay.cn" in values
+
+
+# ---------------------------------------------------------------------------
+# 组 F #2：DEX strings 截断在 meta 标记 dex_strings_truncated
+# ---------------------------------------------------------------------------
+
+
+def test_dex_truncation_marked_when_over_limit() -> None:
+    """dex_strings 超过 _MAX_DEX_STRINGS → meta['dex_strings_truncated'] 为 True。"""
+    limit = _ep_mod._MAX_DEX_STRINGS
+    # 超阈值：limit + 少量。用无端点的填充字符串（不产端点，仅测截断标记）。
+    strings = [f"label_{i}" for i in range(limit + 5)]
+    result = _analyze(dex_strings=strings)
+    assert result.meta.get("dex_strings_truncated") is True
+
+
+def test_dex_truncation_not_marked_when_under_limit() -> None:
+    """未超阈值 → dex_strings_truncated 不设或为 False。"""
+    result = _analyze(dex_strings=["https://pay.heika-gw.cn/n", "just a label"])
+    assert result.meta.get("dex_strings_truncated", False) is False
+
+
+def test_dex_truncation_flag_false_on_empty_dex() -> None:
+    result = _analyze(files={"assets/c.json": b'{"u":"https://x.heika-gw.cn"}'})
+    assert result.meta.get("dex_strings_truncated", False) is False
+
+
+# ---------------------------------------------------------------------------
+# 组 F #3：ApkContext._read_cache 单文件上限（大 .so 不常驻内存）
+# ---------------------------------------------------------------------------
+
+from apkscan.core.apk import ApkContext, _MAX_READ_CACHE_BYTES  # noqa: E402
+from apkscan.core.models import AnalysisConfig  # noqa: E402
+
+
+class _StubApk:
+    """最小 androguard.APK 桩：只实现 read_file 用到的 get_file(path)->bytes|None。"""
+
+    def __init__(self, files: dict[str, bytes]) -> None:
+        self._files = files
+        self.calls: list[str] = []
+
+    def get_file(self, path: str) -> bytes:
+        self.calls.append(path)
+        if path not in self._files:
+            raise KeyError(path)  # 模拟 androguard 对缺失文件抛异常
+        return self._files[path]
+
+
+def _apk_ctx(files: dict[str, bytes]) -> tuple[ApkContext, _StubApk]:
+    stub = _StubApk(files)
+    ctx = ApkContext(apk=stub, dex_objs=[], config=AnalysisConfig(online=False))
+    return ctx, stub
+
+
+def test_read_cache_caches_small_file() -> None:
+    """小文件读到后进缓存：第二次读命中缓存，不再回落 get_file。"""
+    ctx, stub = _apk_ctx({"assets/small.txt": b"hello"})
+    assert ctx.read_file("assets/small.txt") == b"hello"
+    assert ctx.read_file("assets/small.txt") == b"hello"
+    # 只调一次底层 get_file → 第二次命中缓存。
+    assert stub.calls == ["assets/small.txt"]
+
+
+def test_read_cache_skips_large_file() -> None:
+    """超上限的大文件不进缓存：每次读都回落 get_file（不常驻内存），字节仍完整。"""
+    big = b"\x00" * (_MAX_READ_CACHE_BYTES + 1)
+    ctx, stub = _apk_ctx({"lib/x/big.so": big})
+    assert ctx.read_file("lib/x/big.so") == big
+    assert ctx.read_file("lib/x/big.so") == big
+    # 两次读 → 两次底层调用（未缓存）。
+    assert stub.calls == ["lib/x/big.so", "lib/x/big.so"]
+
+
+def test_read_cache_at_limit_is_cached() -> None:
+    """恰好等于上限的文件仍进缓存（阈值为 <=）。"""
+    at_limit = b"\x00" * _MAX_READ_CACHE_BYTES
+    ctx, stub = _apk_ctx({"lib/x/edge.so": at_limit})
+    assert ctx.read_file("lib/x/edge.so") == at_limit
+    assert ctx.read_file("lib/x/edge.so") == at_limit
+    assert stub.calls == ["lib/x/edge.so"]
+
+
+def test_read_cache_caches_none_miss() -> None:
+    """未命中（None）仍缓存，避免对同一缺失路径重复查询底层。"""
+    ctx, stub = _apk_ctx({})
+    assert ctx.read_file("assets/missing.txt") is None
+    assert ctx.read_file("assets/missing.txt") is None
+    # 只调一次 → None 被缓存。
+    assert stub.calls == ["assets/missing.txt"]
