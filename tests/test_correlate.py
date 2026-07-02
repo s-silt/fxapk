@@ -109,6 +109,10 @@ def test_correlate_transitive_via_different_keys() -> None:
     )
     assert len(clusters) == 1
     assert set(clusters[0].members) == {"a", "b", "c"}
+    # shared 须精确列全两条并案依据（a~b 签名 + b~c uni），
+    # 只断言 >=2 会漏掉半数共享指纹却不报红——这里锁定精确集合。
+    shared = {(f.kind, f.value) for f in clusters[0].shared}
+    assert shared == {("sign", "S1"), ("uni_appid", "U1")}
 
 
 def test_correlate_singleton_excluded() -> None:

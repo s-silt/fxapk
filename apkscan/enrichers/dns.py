@@ -28,6 +28,7 @@ import logging
 import os
 import socket
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +62,15 @@ _DNS_TYPE_A = 1
 #: 本地缓存目录与文件。
 CACHE_DIR = Path(".apkscan_cache")
 CACHE_FILE = CACHE_DIR / "dns.json"
+
+#: DNS 富化缓存 TTL（秒）。DNS 解析（A 记录 + 托管归属）会随诈骗后端换 IP / 迁云而变，
+#: 无 TTL 的缓存会把首次解析永久固化，导致后续再查还看到旧 IP（辖区/托管判定失真）。
+#: 取 24h：既省掉同批次重复查询，又保证跨天/换基础设施时能重新解析。缓存条目写入时打
+#: ``_cached_at`` 时间戳，命中时超过本 TTL 即视为过期、丢弃并重查。
+CACHE_TTL_SECONDS = 24 * 60 * 60
+
+#: 缓存条目里记录写入时刻的字段名（epoch 秒）。旧缓存无此字段 → 视为过期、触发重查。
+_CACHED_AT_KEY = "_cached_at"
 
 
 def _extract_a_records(payload: dict) -> list[str]:
@@ -143,10 +153,19 @@ class DnsEnricher(BaseEnricher):
         with self._lock:
             return self._load_cache()
 
+    @staticmethod
+    def _cache_is_fresh(entry: dict[str, Any]) -> bool:
+        """缓存条目是否在 TTL 内（未过期）。无 ``_cached_at``（旧缓存）→ 判过期、触发重查。"""
+        stamped = entry.get(_CACHED_AT_KEY)
+        if not isinstance(stamped, (int, float)):
+            return False
+        return (time.time() - stamped) < CACHE_TTL_SECONDS
+
     def _save_cache_entry(self, domain: str, entry: dict[str, Any]) -> None:
         with self._lock:
             cache = self._load_cache()
-            cache[domain] = entry
+            # 打时间戳供 TTL 过期判断（见 CACHE_TTL_SECONDS）。
+            cache[domain] = {**entry, _CACHED_AT_KEY: time.time()}
             try:
                 CACHE_DIR.mkdir(parents=True, exist_ok=True)
                 tmp = CACHE_FILE.with_name(
@@ -158,19 +177,23 @@ class DnsEnricher(BaseEnricher):
                 logger.warning("DNS 缓存写入失败：%s", CACHE_FILE, exc_info=True)
 
     # ------------------------------------------------------------------ 托管
-    def _hosting(self, ips: list[str]) -> list[dict[str, Any]]:
+    def _hosting(self, ips: list[str]) -> tuple[list[dict[str, Any]], bool]:
         """对解析出的全部 IP **一次** 批量查托管归属（ip-api ``/batch``）。
 
         限速（/batch 专用 4.0s 闸）+ 去重 + 共享内存缓存均下沉到 ``_ipinfo.lookup_ips_batch``；
         本处只负责按原 IP 顺序拼出 ``hosting`` 列表。批量返回里查不到
         的 IP（网络/语义失败被跳过）不进 hosting，但其 IP 仍保留在 ``data["ips"]``——IP 列表
-        本身已是有价值的调证线索。整批异常向上不抛（吞成空 hosting，记 debug）。
+        本身已是有价值的调证线索。
+
+        返回 ``(hosting, incomplete)``：整批查询异常（如 429/限速、网络失败）→
+        ``incomplete=True`` 且 hosting 为空，供调用方**不固化**该结果（否则一次限速空响应会
+        被永久缓存，冻结托管/辖区判定）。整批异常向上不抛（吞成 incomplete，记 debug）。
         """
         try:
             table = lookup_ips_batch(ips, http=requests, timeout=HOSTING_TIMEOUT)
-        except Exception as exc:  # noqa: BLE001 — 托管整批失败不阻塞 IP 列表
-            logger.debug("DNS 托管批量查询失败：%s（%s）", ips, exc)
-            return []
+        except Exception as exc:  # noqa: BLE001 — 托管整批失败不阻塞 IP 列表，但标 incomplete
+            logger.debug("DNS 托管批量查询失败（限速/网络？不缓存该结果）：%s（%s）", ips, exc)
+            return [], True
         hosting: list[dict[str, Any]] = []
         for ip in ips:
             info = table.get(ip)
@@ -185,7 +208,7 @@ class DnsEnricher(BaseEnricher):
                     "isp": info.get("isp"),
                 }
             )
-        return hosting
+        return hosting, False
 
     # ------------------------------------------------------------------ 入口
     def enrich(self, ep: Endpoint) -> EnrichmentResult:
@@ -195,12 +218,15 @@ class DnsEnricher(BaseEnricher):
                 provider=self.name, ok=False, error="空域名，跳过 DNS 查询"
             )
 
-        # 1) 缓存命中直接返回（不消耗网络）。
+        # 1) 缓存命中且未过期直接返回（不消耗网络）。过期（超 TTL / 无时间戳的旧缓存）→ 重查。
         cache = self._load_cache_locked()
         cached = cache.get(domain)
-        if isinstance(cached, dict):
+        if isinstance(cached, dict) and self._cache_is_fresh(cached):
             logger.debug("DNS 缓存命中：%s", domain)
-            return EnrichmentResult(provider=self.name, ok=True, data=dict(cached))
+            data = {k: v for k, v in cached.items() if k != _CACHED_AT_KEY}
+            return EnrichmentResult(provider=self.name, ok=True, data=data)
+        if isinstance(cached, dict):
+            logger.debug("DNS 缓存过期，重查：%s", domain)
 
         # 2) DoH 优先解析 A 记录；失败回退本机解析器。
         ips: list[str] = []
@@ -227,9 +253,15 @@ class DnsEnricher(BaseEnricher):
             )
 
         # 3) 对每个 IP 查托管归属。
-        hosting = self._hosting(ips)
-        data = {"ips": ips, "hosting": hosting}
+        hosting, incomplete = self._hosting(ips)
+        data: dict[str, Any] = {"ips": ips, "hosting": hosting}
+        if incomplete:
+            # 托管整批因限速/网络失败 → 标不完整；返回结果仍带 IP 列表（有价值），但**不写缓存**，
+            # 避免把一次限速空响应永久固化、冻结托管/辖区判定，下次运行可重查补全。
+            data["hosting_incomplete"] = True
+            logger.debug("DNS 托管不完整（限速/网络），不缓存以便重查：%s", domain)
+            return EnrichmentResult(provider=self.name, ok=True, data=data)
 
-        # 4) 解析成功即缓存（即便托管查询部分失败，IP 列表本身已是有价值的线索）。
+        # 4) 解析成功且托管完整才缓存（即便个别 IP 托管查不到，整批未失败仍算完整）。
         self._save_cache_entry(domain, data)
         return EnrichmentResult(provider=self.name, ok=True, data=data)
