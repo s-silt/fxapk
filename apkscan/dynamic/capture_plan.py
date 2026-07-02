@@ -16,9 +16,15 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# 结构化决策的硬约束常量（把 capture_plan 的铁律落到引擎可读的字段）。
+_TOTAL_BUDGET_SEC = 3600  # 铁律：抓包总预算 ≤60min，到点交已有结果。
+_RETREAT_THRESHOLD_DEFAULT = 3  # frida 秒退累计达此数即弃明文、退 floor。
+_RETREAT_THRESHOLD_PACKED = 2  # 加固样本反检测秒退风险高 → 更早退 floor。
 
 # 铁律永远第一条——这是治"几小时零产出"的行为约束。
 _DIRECTIVES = (
@@ -85,6 +91,92 @@ def _telegram_hint(leads: list, findings: list) -> bool:
     return False
 
 
+@dataclass(frozen=True)
+class _Signals:
+    """从 report 抠出的规避信号（plan_capture 文本与 decide_capture 决策共用，杜绝漂移）。"""
+
+    packed: bool = False
+    zero_endpoints: bool = False
+    has_crypto_recipe: bool = False
+    self_hosted_im: bool = False
+    endpoint_count: int = 0
+
+
+def _extract_signals(report: Any) -> _Signals:
+    """从 report 提取规避信号，绝不抛（坏输入退化为全 False）。"""
+    try:
+        rep = _as_dict(report)
+        findings = _as_list(rep.get("findings"))
+        leads = _as_list(rep.get("leads"))
+        endpoints = _as_list(rep.get("endpoints"))
+        meta = _as_dict(rep.get("meta"))
+        ep_count = sum(1 for e in endpoints if isinstance(e, dict))
+        return _Signals(
+            packed=_is_packed(findings, leads),
+            zero_endpoints=ep_count == 0,
+            has_crypto_recipe=bool(meta.get("crypto_recipe") or meta.get("runtime_crypto_recipe")),
+            self_hosted_im=(
+                _telegram_hint(leads, findings) or _has_lead_category(leads, "SELF_HOSTED_IM")
+            ),
+            endpoint_count=ep_count,
+        )
+    except Exception:  # noqa: BLE001 - 信号提取不该抛，坏 report 退化为全 False
+        logger.exception("[capture-plan] 信号提取异常，退化为全 False")
+        return _Signals()
+
+
+@dataclass(frozen=True)
+class CaptureDecision:
+    """抓包引擎可消费的结构化决策（与 plan_capture 文本同源，见 _extract_signals）。
+
+    治『几小时零产出』：把 capture_plan 的四条铁律从建议文本落成引擎可读字段——
+    floor 优先恒开、有配方跳注入走离线解、endpoint=0/自建 IM 预判 native、加固下调秒退阈值。
+    """
+
+    floor_first: bool  # 先带外 pcap 保底拿接入节点（恒 True，零产出不可接受）。
+    prefer_offline_decrypt: bool  # 有配方 → 离线解密优先于任何 frida 注入。
+    skip_frida_plaintext: bool  # 有配方 → 可跳过 frida 明文注入路径。
+    expect_native_protocol: bool  # endpoint=0 / 自建 IM → native 直发，明文难抓。
+    frida_retreat_threshold: int  # frida 秒退累计达此数即弃明文、退 floor。
+    total_budget_sec: int  # 抓包总预算（铁律 ≤60min）。
+    signals: dict[str, bool]  # 原始信号，供上层透明展示 / 调试。
+    reasons: tuple[str, ...]  # 决策依据（人读）。
+
+
+def decide_capture(report: Any) -> CaptureDecision:
+    """据 report 规避信号产出结构化抓包决策（供引擎读），绝不抛。
+
+    与 plan_capture 共用 _extract_signals，保证『机器决策』与『人读打法』永不漂移。
+    """
+    s = _extract_signals(report)
+    reasons: list[str] = ["floor 优先：先带外 pcap 保底拿接入节点，零产出不可接受"]
+    if s.has_crypto_recipe:
+        reasons.append("命中加密配方 → 离线解密优先于任何 frida 注入，可跳过明文注入")
+    if s.zero_endpoints:
+        reasons.append("endpoint=0 → 疑 native 直发 / 自建协议，明文难抓，靠 floor(pcap) 拿接入节点")
+    if s.self_hosted_im:
+        reasons.append("自建 IM / Telegram 改包 → native 协议，接入节点靠旁路 pcap 兜底")
+    if s.packed:
+        reasons.append("已加固 → 反检测秒退风险高，秒退熔断阈值下调至 2")
+    return CaptureDecision(
+        floor_first=True,
+        prefer_offline_decrypt=s.has_crypto_recipe,
+        skip_frida_plaintext=s.has_crypto_recipe,
+        expect_native_protocol=s.zero_endpoints or s.self_hosted_im,
+        frida_retreat_threshold=(
+            _RETREAT_THRESHOLD_PACKED if s.packed else _RETREAT_THRESHOLD_DEFAULT
+        ),
+        total_budget_sec=_TOTAL_BUDGET_SEC,
+        signals={
+            "packed": s.packed,
+            "zero_endpoints": s.zero_endpoints,
+            "has_crypto_recipe": s.has_crypto_recipe,
+            "self_hosted_im": s.self_hosted_im,
+        },
+        reasons=tuple(reasons),
+    )
+
+
 def plan_capture(report: Any) -> list[str]:
     """据 report（dict）规避信号产出抓包打法步骤（有序、带时间盒/停止门）。
 
@@ -92,17 +184,13 @@ def plan_capture(report: Any) -> list[str]:
     """
     steps: list[str] = [_DIRECTIVES, _BASELINE]
     try:
-        rep = _as_dict(report)
-        findings = _as_list(rep.get("findings"))
-        leads = _as_list(rep.get("leads"))
-        endpoints = _as_list(rep.get("endpoints"))
-        meta = _as_dict(rep.get("meta"))
-
-        ep_count = sum(1 for e in endpoints if isinstance(e, dict))
-        packed = _is_packed(findings, leads)
-        zero_ep = ep_count == 0
-        has_recipe = bool(meta.get("crypto_recipe") or meta.get("runtime_crypto_recipe"))
-        telegram = _telegram_hint(leads, findings) or _has_lead_category(leads, "SELF_HOSTED_IM")
+        s = _extract_signals(report)
+        has_recipe, packed, zero_ep, telegram = (
+            s.has_crypto_recipe,
+            s.packed,
+            s.zero_endpoints,
+            s.self_hosted_im,
+        )
 
         # 零注入明文优先：配方已抠到 → 离线解，先于一切 frida 注入。
         if has_recipe:
