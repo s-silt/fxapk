@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 import struct
 
+import pytest
+
 from apkscan.core.models import LeadCategory
 from apkscan.dynamic import pcap_ingest
 
@@ -156,3 +158,96 @@ def test_merge_into_report_json_appends(tmp_path) -> None:
     out = json.loads(p.read_text(encoding="utf-8"))
     assert len(out["leads"]) == added
     assert any("106.53.21.146" in str(l.get("value", "")) for l in out["leads"])
+
+
+# ======================================================================
+# C. 原子写：写中途失败不留半截坏 JSON
+# ======================================================================
+
+
+def test_merge_atomic_keeps_old_content_when_write_fails(tmp_path, monkeypatch) -> None:
+    """回灌写盘中途抛异常 → report.json 保持旧内容完整、绝不留半截坏 JSON。"""
+    p = tmp_path / "report.json"
+    original = {"leads": [{"category": "DOMAIN", "value": "已存在.example", "advice": "建议调证"}]}
+    p.write_text(json.dumps(original, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # 让原子写在替换目标文件前爆掉（模拟磁盘满 / 进程被杀）。
+    def boom(*_a, **_k):
+        raise OSError("disk full (simulated)")
+
+    monkeypatch.setattr(pcap_ingest.atomic_write_text.__module__ + ".Path.write_text", boom, raising=True)
+
+    summary = pcap_ingest.parse_pcap_bytes(_sample_pcap())
+    added = pcap_ingest.merge_into_report_json(str(p), summary)
+    assert added == 0  # 写失败保底返 0
+    # 关键：原文件仍是可解析的完整旧内容，未被半截覆盖
+    reloaded = json.loads(p.read_text(encoding="utf-8"))
+    assert reloaded == original
+
+
+# ======================================================================
+# D. runtime 确认合并（非 dedup 丢弃）
+# ======================================================================
+
+
+def test_merge_runtime_confirms_existing_static_domain(tmp_path) -> None:
+    """静态已有 DOMAIN=evil-c2.example.com，回灌 runtime 观测同 domain → 合并为活体确认。"""
+    p = tmp_path / "report.json"
+    static_lead = {
+        "category": "DOMAIN",
+        "value": "evil-c2.example.com",
+        "advice": "建议调证",
+        "source_refs": [{"source": "dex", "location": "com/x/Api", "snippet": "静态硬编码"}],
+        "is_runtime_seen": False,
+    }
+    p.write_text(json.dumps({"leads": [static_lead]}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    summary = pcap_ingest.parse_pcap_bytes(_sample_pcap())
+    pcap_ingest.merge_into_report_json(str(p), summary)
+
+    out = json.loads(p.read_text(encoding="utf-8"))
+    merged = next(l for l in out["leads"] if l.get("value") == "evil-c2.example.com")
+    # 同键未被 continue 丢弃：runtime source_ref 已并入、升为活体确认
+    sources = [str(ev.get("source", "")) for ev in merged.get("source_refs", [])]
+    assert any(s.startswith("runtime") for s in sources)
+    assert any(s == "dex" for s in sources)  # 原静态证据保留
+    assert merged.get("is_runtime_seen") is True
+
+
+def test_merge_runtime_no_dup_lead_for_existing_key(tmp_path) -> None:
+    """命中已存在键不新增一条重复 lead（合并进原 lead 而非 append）。"""
+    p = tmp_path / "report.json"
+    static_lead = {"category": "DOMAIN", "value": "evil-c2.example.com", "advice": "建议调证"}
+    p.write_text(json.dumps({"leads": [static_lead]}, ensure_ascii=False, indent=2), encoding="utf-8")
+    summary = pcap_ingest.parse_pcap_bytes(_sample_pcap())
+    pcap_ingest.merge_into_report_json(str(p), summary)
+    out = json.loads(p.read_text(encoding="utf-8"))
+    same = [l for l in out["leads"] if l.get("value") == "evil-c2.example.com"]
+    assert len(same) == 1
+
+
+# ======================================================================
+# E. Evidence.observed_at 回灌落库
+# ======================================================================
+
+
+def test_observed_at_populated_for_ip_lead() -> None:
+    """IP 接入节点线索的 runtime Evidence 带 observed_at（来自 Flow.first_ts）。"""
+    summary = pcap_ingest.parse_pcap_bytes(_sample_pcap())
+    leads = pcap_ingest.to_report_leads(summary)
+    node = next(l for l in leads if l.category == LeadCategory.IP and "106.53.21.146" in l.value)
+    ev = node.source_refs[0]
+    assert ev.observed_at is not None
+    # native 包是第 3 个（index 2），pcap ts = 1700000000 + 2
+    assert ev.observed_at == pytest.approx(1700000002.0)
+
+
+def test_observed_at_落库_into_report_json(tmp_path) -> None:
+    """回灌后 observed_at 落进 report.json。"""
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps({"leads": []}, ensure_ascii=False), encoding="utf-8")
+    summary = pcap_ingest.parse_pcap_bytes(_sample_pcap())
+    pcap_ingest.merge_into_report_json(str(p), summary)
+    out = json.loads(p.read_text(encoding="utf-8"))
+    node = next(l for l in out["leads"] if "106.53.21.146" in str(l.get("value", "")))
+    assert node["source_refs"][0].get("observed_at") is not None
