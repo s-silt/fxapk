@@ -1,5 +1,5 @@
-// 用途: 只读取证——抓音视频 RTC 入会参数(裸聊/视频认证杀猪盘)。声网/腾讯/即构入会 token+房间号+uid 如实固证，绝不改写/外发。
-// 适用: 涉诈样本含声网 io.agora.rtc(2) / 腾讯 com.tencent.trtc.TRTCCloud / 即构 im.zego ZegoExpressEngine；真机 frida -U -f <pkg> -l rtc-join-hook.js --no-pause
+// 用途: 只读取证——抓音视频 RTC 入会参数(音视频社交/视频认证类目标样本)。声网/腾讯/即构入会 token+房间号+uid 如实固证，绝不改写/外发。
+// 适用: 目标样本含声网 io.agora.rtc(2) / 腾讯 com.tencent.trtc.TRTCCloud / 即构 im.zego ZegoExpressEngine；真机 frida -U -f <pkg> -l rtc-join-hook.js --no-pause
 // 跑:   frida -U -f <包名> -l rtc-join-hook.js  (或 attach 已启动进程)；落盘示例: frida ... -l rtc-join-hook.js -o /data/local/tmp/rtc.log
 // 改:   类名/方法被混淆或 SDK 版本不同→看下方各 hook 内的 enumerateLoadedClasses 注释自查回填；命中不到时按"未命中+下一步"提示扩查。
 
@@ -146,10 +146,10 @@ Java.perform(function () {
     // ════════════════════════════════════════════════════════════════════
     // 1) 声网 Agora —— io.agora.rtc.RtcEngine（rtc1 旧版）
     //    joinChannel(token, channelName, optionalInfo, uid) 等多 overload
-    //    抓到什么 → 调证线索：
-    //      · token 内含 appId(声网鉴权 token 前缀编码) → 持 token/appId 向声网(上海兆言)调实名/绑定主体(定人)
-    //      · channelName → 受害人与话务员同房间名 = 同一裸聊会话 → 绑双方(固证)
-    //      · joinChannel 时刻 = 裸聊/视频认证会话开始物证(配 logcat 时间轴)
+    //    抓到什么 → 溯源线索：
+    //      · token 内含 appId(声网鉴权 token 前缀编码) → 持 token/appId 向声网(上海兆言)溯源实名/绑定主体(归属)
+    //      · channelName → 敏感个人信息主体与对端同房间名 = 同一音视频会话 → 绑双方(固证)
+    //      · joinChannel 时刻 = 音视频/视频认证会话开始物证(配 logcat 时间轴)
     //    类名被加固壳重打包→ Java.enumerateLoadedClasses({onMatch:function(c){if(/agora\.rtc\./.test(c))console.log(c)},onComplete:function(){}}) 回填
     // ════════════════════════════════════════════════════════════════════
     (function hookAgoraRtc1() {
@@ -246,10 +246,10 @@ Java.perform(function () {
     // ════════════════════════════════════════════════════════════════════
     // 3) 腾讯 TRTC —— com.tencent.trtc.TRTCCloud.enterRoom(TRTCParams, scene)
     //    TRTCParams 字段: sdkAppId(int) / userId(String) / roomId(int)|strRoomId(String) / userSig(String) / role(int)
-    //    抓到什么 → 调证线索:
-    //      · sdkAppId → 腾讯云控制台主体(实名+支付绑卡) 调证(定人，穿透到注册主体)
-    //      · userId → 话务员/受害人在该 app 内的账号标识(绑人)
-    //      · roomId/strRoomId → 同房间 = 同一裸聊会话(绑双方·固证)
+    //    抓到什么 → 溯源线索:
+    //      · sdkAppId → 腾讯云控制台主体(实名+支付绑卡) 溯源(归属，穿透到注册主体)
+    //      · userId → 对端/敏感个人信息主体在该 app 内的账号标识(绑人)
+    //      · roomId/strRoomId → 同房间 = 同一音视频会话(绑双方·固证)
     //      · userSig → 该 userId 的鉴权签名(可证身份归属，配 sdkAppId 验签)
     //    反射读字段已用 readField() 上溯父类容错；字段缺失打 skip 不静默。
     // ════════════════════════════════════════════════════════════════════
@@ -313,8 +313,8 @@ Java.perform(function () {
     // ════════════════════════════════════════════════════════════════════
     // 4) 即构 ZEGO —— im.zego.zegoexpress.ZegoExpressEngine.loginRoom(roomID, user, config)
     //    user = ZegoUser{userID, userName}；roomID=房间号
-    //    抓到什么 → 调证线索:
-    //      · roomID → 同房间=同一裸聊会话(绑双方·固证)
+    //    抓到什么 → 溯源线索:
+    //      · roomID → 同房间=同一音视频会话(绑双方·固证)
     //      · ZegoUser.userID → 账号标识(绑人)
     //      · appID(在 createEngine 时传，loginRoom 拿不到)→ 见下方 createEngine hook
     //    反射读 ZegoUser 字段已用 readField() 上溯父类容错。
@@ -361,7 +361,7 @@ Java.perform(function () {
                 out('hooked ' + cn + '.loginRoom (' + Cls.loginRoom.overloads.length + ' overloads)');
                 hooked = true;
 
-                // appID 在 createEngine(appID, appSign|token, ...) 传入 → 向即构调主体实名(定人/穿透)
+                // appID 在 createEngine(appID, appSign|token, ...) 传入 → 向即构溯源主体实名(归属/穿透)
                 ['createEngine', 'createEngineWithProfile'].forEach(function (m) {
                     try {
                         // 静态方法在 Java.use 包装上以同名属性暴露；不存在则为 undefined
