@@ -99,6 +99,7 @@ class _Signals:
     zero_endpoints: bool = False
     has_crypto_recipe: bool = False
     self_hosted_im: bool = False
+    anti_frida: bool = False  # 样本内置反 frida 工具（直 syscall/内存加载）→ frida 抓包可能被击败
     endpoint_count: int = 0
 
 
@@ -118,6 +119,7 @@ def _extract_signals(report: Any) -> _Signals:
             self_hosted_im=(
                 _telegram_hint(leads, findings) or _has_lead_category(leads, "SELF_HOSTED_IM")
             ),
+            anti_frida=bool(meta.get("anti_frida")),
             endpoint_count=ep_count,
         )
     except Exception:  # noqa: BLE001 - 信号提取不该抛，坏 report 退化为全 False
@@ -158,13 +160,20 @@ def decide_capture(report: Any) -> CaptureDecision:
         reasons.append("自建 IM / Telegram 改包 → native 协议，接入节点靠旁路 pcap 兜底")
     if s.packed:
         reasons.append("已加固 → 反检测秒退风险高，秒退熔断阈值下调至 2")
+    if s.anti_frida:
+        reasons.append(
+            "命中反 frida 工具（直 syscall / 内存加载）→ frida hook 可能静默失效，"
+            "优先旁路 pcap / tls-keylog，秒退阈值下调、别把零产出当样本干净"
+        )
     return CaptureDecision(
         floor_first=True,
         prefer_offline_decrypt=s.has_crypto_recipe,
         skip_frida_plaintext=s.has_crypto_recipe,
         expect_native_protocol=s.zero_endpoints or s.self_hosted_im,
         frida_retreat_threshold=(
-            _RETREAT_THRESHOLD_PACKED if s.packed else _RETREAT_THRESHOLD_DEFAULT
+            _RETREAT_THRESHOLD_PACKED
+            if (s.packed or s.anti_frida)
+            else _RETREAT_THRESHOLD_DEFAULT
         ),
         total_budget_sec=_TOTAL_BUDGET_SEC,
         signals={
@@ -172,6 +181,7 @@ def decide_capture(report: Any) -> CaptureDecision:
             "zero_endpoints": s.zero_endpoints,
             "has_crypto_recipe": s.has_crypto_recipe,
             "self_hosted_im": s.self_hosted_im,
+            "anti_frida": s.anti_frida,
         },
         reasons=tuple(reasons),
     )
@@ -204,6 +214,12 @@ def plan_capture(report: Any) -> list[str]:
                 "【加固壳·≤20min】静态端点不完整：先 `fxapk auto` / `fxapk repackage` 脱壳去壳重打包（对真实 DEX 抓包）。"
                 "frida 易被反检测秒退 → 必配 anti-detection-hook(+native)；**秒退 ≤2 次就停 frida，换注入面一次**"
                 "（LSPosed + TrustMeAlready 或 改名 / 改端口的 strongR-frida / Florida），还不行 → 弃明文、交第0步 floor。"
+            )
+        if s.anti_frida:
+            steps.append(
+                "【反 frida 工具·先知悉·不设时间盒】样本内置直 syscall / 内存加载类反检测工具（如 LibcoreSyscall）："
+                "frida hook 可能被绕过而**静默失效**（抓不到≠没有）。别把 frida 零产出当『样本干净』——"
+                "直接走第0步旁路 pcap 拿接入节点 + tls-keylog 探针导主密钥离线解 TLS；秒退阈值已下调，别死磕注入。"
             )
         if zero_ep:
             steps.append(
