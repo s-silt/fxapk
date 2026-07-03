@@ -1,7 +1,7 @@
 """ShodanEnricher 单测：mock 网络（requests），不发真实请求。
 
 覆盖 opt-in 门控（未配 key → 跳过）、IP host 解析、domain→resolve→host、404 查无记录（缓存避免复查）、
-网络异常 ok=False、缓存命中跳过触网、Shodan 归属国喂 forensic 辖区判定、攻击面渲染。
+网络异常 ok=False、缓存命中跳过触网、Shodan 归属国喂 forensic 辖区判定、境外源站被动定位渲染。
 """
 
 from __future__ import annotations
@@ -108,7 +108,7 @@ def test_ip_host_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
     assert d["ports"] == [22, 80, 31337]  # 归一去重数值排序
     assert d["country"] == "United States"
     assert d["asn"] == "AS63949"
-    assert "CVE-2021-44790" in d["vulns"] and d["vuln_total"] == 2
+    assert "vulns" not in d and "vuln_total" not in d  # 被动归属：只识别真源站/归属，不采集漏洞字段
     assert d["hostnames"] == ["scanme.nmap.org"]
     svc80 = next(s for s in d["services"] if s["port"] == 80)
     assert svc80["product"] == "Apache httpd" and svc80["version"] == "2.4.7"
@@ -176,25 +176,30 @@ def test_forensic_uses_shodan_country() -> None:
     )
 
 
-def test_render_attack_surface() -> None:
-    lines = forensic.render_attack_surface({
+def test_render_overseas_targets() -> None:
+    # 境外源站被动定位：源站归属(IP/ASN/org/geo) + 开放端口/服务指纹 + 关联主机名(串案)；零漏洞/利用。
+    lines = forensic.render_overseas_targets({
+        "ip": "45.33.32.156",
+        "asn": "AS63949",
+        "org": "Linode",
+        "country": "United States",
         "ports": [22, 80],
         "services": [
             {"port": 80, "product": "Apache httpd", "version": "2.4.7"},
             {"port": 22, "product": "OpenSSH", "version": "6.6.1p1"},
         ],
-        "vulns": ["CVE-2021-44790", "CVE-2021-40438"],
-        "vuln_total": 2,
         "hostnames": ["a.example", "b.example"],
     })
     blob = "\n".join(lines)
+    assert "源站被动归属" in blob and "45.33.32.156" in blob and "Linode" in blob
     assert "80(Apache httpd 2.4.7)" in blob
     assert "22(OpenSSH 6.6.1p1)" in blob
-    assert "CVE-2021-44790" in blob and "非利用" in blob
+    # 纯被动定位：绝不含漏洞方向 / CVE / 利用。
+    assert "CVE" not in blob and "漏洞" not in blob and "利用" not in blob
     assert "a.example" in blob and "串案" in blob
 
 
-def test_render_attack_surface_empty_on_miss() -> None:
+def test_render_overseas_targets_empty_on_miss() -> None:
     # "查无记录"标记 / 非 dict → 不产证据行。
-    assert forensic.render_attack_surface({"note": "Shodan 库中无该主机记录", "source": "shodan"}) == []
-    assert forensic.render_attack_surface(None) == []
+    assert forensic.render_overseas_targets({"note": "Shodan 库中无该主机记录", "source": "shodan"}) == []
+    assert forensic.render_overseas_targets(None) == []
