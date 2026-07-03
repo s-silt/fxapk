@@ -34,7 +34,7 @@ def test_browsable_deeplink_yields_finding() -> None:
     body = _activity("com.x.JumpActivity", exported="true", filter_body=_BROWSABLE + '<data android:scheme="myapp" android:host="open"/>')
     r = _run(body)
     f = next(iter(r.findings))
-    assert f.category == "attack_surface"
+    assert f.category == "exported_surface"
     assert "myapp" in f.description
     assert r.meta["deeplinks"][0]["uri"] == "myapp://open"
     assert r.meta["browsable_deeplink_count"] == 1

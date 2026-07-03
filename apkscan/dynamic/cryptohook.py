@@ -1,5 +1,8 @@
 """apkscan.dynamic.cryptohook — 运行时密钥 hook（P0）：Frida 抓活体 AES key/明文。
 
+取证定位：对取证样本自身在分析机上做运行时观测，产出密钥/端点/独特串等可落地线索；
+仅作用于样本自身进程，不面向、不接触任何第三方基础设施。
+
 为什么需要它（补 C5a 静态配方之不足）：
   C5a（``analyzers/crypto_recipe.py``）从打包 JS 静态反查加密配方，但当 **key 在运行时
   计算/服务端下发**（而非硬编码）时，静态拿不到真实 key。本模块在真机抓包时用 Frida
@@ -56,7 +59,9 @@ CRYPTO_MSG_TYPE = "apkscan-crypto"
 JSBRIDGE_MSG_TYPE = "apkscan-jsbridge"
 #: P1 运行时敏感 API 追踪通道（hook TelephonyManager/SmsManager/… 实际调用）。
 SENSITIVE_API_MSG_TYPE = "apkscan-api"
-#: P3 反检测绕过通道（绕过 root/模拟器/frida 检测，并把检测尝试本身作为反分析行为上报）。
+#: P3 取证运行时兼容通道：中和样本对 root/模拟器/frida 的自我检测（使加固样本能在取证机上运行被观测），
+#: 同时把样本每次自我检测尝试作为反取证/反分析研判信号上报（对样本自身进程，不接触任何第三方）。
+#: ★ 符号名与消息 type 值保持不变（JS↔Py 契约）。
 ANTIDETECT_MSG_TYPE = "apkscan-antidetect"
 #: 第二波：运行时登录态/明文凭据采集通道（OkHttp 加密前明文 dump + SharedPrefs 落地凭据）。
 CREDENTIAL_MSG_TYPE = "apkscan-credential"
@@ -133,14 +138,15 @@ FRIDA_SENSITIVE_API_HOOK_JS: str = _load_frida_js("sensitive_api_hook.js")
 
 
 # ---------------------------------------------------------------------------
-# P3：反检测绕过 —— 绕过 root/模拟器/frida 检测让样本能跑，并把检测尝试作为反分析行为上报
+# P3：取证运行时兼容层 —— 中和样本对 root/模拟器/frida 的自我检测，使其在取证机上运行被观测
 # ---------------------------------------------------------------------------
 #
-# 双重价值：① 绕过让检测 MuMu/root/frida 的涉诈样本仍能动态分析（否则秒退、抓不到任何东西）；
-# ② 检测尝试本身就是「反取证/反分析」行为（正经 app 极少探测 su/qemu/frida），作为涉诈/木马
-# 的研判信号上报（kind=root|emulator|frida，probe=被探测的具体特征）。每个 hook best-effort
-# 独立 try/catch，单点失败不影响其它，绝不因绕过逻辑炸 app（绕过失败顶多样本照常秒退）。
-FRIDA_ANTIDETECT_JS: str = _load_frida_js("antidetect.js")
+# 取证用途（对取证样本自身在分析机上做运行时观测，不接触任何第三方基础设施）：
+# ① 中和让检测 MuMu/root/frida 的涉诈样本仍能正常运行（否则秒退、观测不到任何行为）；
+# ② 样本的自我检测尝试本身就是「反取证/反分析」行为（正经 app 极少探测 su/qemu/frida），作为涉诈/
+# 木马的研判信号上报（kind=root|emulator|frida，probe=被检测的具体特征）。每个 hook best-effort
+# 独立 try/catch，单点失败不影响其它，绝不因兼容逻辑炸 app（中和失败顶多样本照常秒退）。
+FRIDA_ANTIDETECT_JS: str = _load_frida_js("sample_runtime_compat.js")
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +412,10 @@ def normalize_sensitive_api_event(payload: Any) -> dict[str, Any] | None:
 
 
 def normalize_antidetect_event(payload: Any) -> dict[str, Any] | None:
-    """规范化反检测事件：kind（root|emulator|frida|debugger）+ probe（被探测的特征）。"""
+    """规范化样本自我检测事件：kind（root|emulator|frida|debugger）+ probe（被检测的特征）。
+
+    取证用途：记录样本对取证环境的自我检测尝试，作为反取证/反分析研判信号（对样本自身的观测）。
+    """
     if not isinstance(payload, dict):
         return None
     kind = _as_clean_str(payload.get("kind"))
@@ -1158,7 +1167,7 @@ def sensitive_api_hints_from_events(events: list[dict[str, Any]]) -> list[str]:
 
 
 def antidetect_kinds_from_events(events: list[dict[str, Any]]) -> dict[str, int]:
-    """统计反检测探测的种类计数（root/emulator/frida/…），供报告呈现反分析行为画像。"""
+    """统计样本自我检测的种类计数（root/emulator/frida/…），供报告呈现反取证/反分析行为画像。"""
     counts: dict[str, int] = {}
     for ev in events:
         if not isinstance(ev, dict):

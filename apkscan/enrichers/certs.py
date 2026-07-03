@@ -1,8 +1,8 @@
 """证书透明度（crt.sh）富化器：被动查 CT 日志拿历史/关联证书的 SAN/子域，**串案**。
 
-★ 定位：攻击面阶段（``phase="attack_surface"``）的**被动** enricher（``active=False``，
-对目标**零流量**——只查公共 CT 日志库 crt.sh，不向被查域名发任何连接）。免 key，与 ``cve``
-（同被动）/``recon``（主动）同阶段、互补：本模块产出"**关联主机名/子域**"情报，疑同团伙基础设施。
+★ 定位：境外归属阶段（``phase="overseas"``）的**被动** enricher（``active=False``，
+对目标**零流量**——只查公共 CT 日志库 crt.sh，不向被查域名发任何连接）。免 key：本模块产出
+"**关联主机名/子域**"情报，用于穿透 CDN **被动定位真实源站** + 疑同团伙基础设施串案。
 
 为什么有用（串案价值）：
 - 涉诈团伙批量给同一基础设施签证书——CT 日志（Certificate Transparency）公开记录了**每张**为
@@ -10,8 +10,8 @@
   ``issuer_name``（签发 CA）。被动拉取即得该域名**历史 + 当前**的全部关联主机名；
 - 这些子域常指向同团伙的其它后台 / API / 备用域，可**并簇串案**（与 Shodan ``hostnames``
   互补：CT 覆盖"曾经签过证但现在 DNS 已撤"的影子子域，Shodan 只看扫库时点的解析）；
-- 本组件**只产数据不主动连**——产出的子域可作为 ``recon`` 主动探测的额外目标，但是否探测由
-  ``recon`` 自身的 opt-in + 公网 IP + CDN 门控决定，本模块绝不触达它们。
+- 本组件**只产数据不主动连**——产出的子域是**被动线索**（供办案人手动在测绘 / 被动 OSINT 中反查、
+  穿透 CDN 定位源站 IP），本模块**绝不向这些子域发起任何连接 / 探测**。
 
 crt.sh JSON 接口（``https://crt.sh/?q=%25.{domain}&output=json``，``%25`` 即 URL 编码的 ``%``
 通配，匹配 ``*.{domain}``）：
@@ -152,15 +152,15 @@ def _parse_crtsh(payload: object, base_domain: str) -> dict[str, Any]:
 class CertsEnricher(BaseEnricher):
     """对域名查 crt.sh 证书透明度日志，产出关联子域（串案；被动、免 key）。
 
-    阶段标识 ``phase="attack_surface"`` + ``active=False``：攻击面阶段的**被动** enricher
-    （对被查域名零流量，只查公共 CT 库），与 ``recon``（主动探测）区分。免 key、无门控开关——
-    被动 OSINT 默认可跑（仅 ``--online`` 下随其它富化器在线程池里跑）。结果按 domain 本地缓存。
+    阶段标识 ``phase="overseas"`` + ``active=False``：境外归属阶段的**被动** enricher
+    （对被查域名零流量，只查公共 CT 库）。免 key、无门控开关——被动 OSINT 默认可跑
+    （仅 ``--online`` 下随其它富化器在线程池里跑）。结果按 domain 本地缓存。
     """
 
     name = "certs"
     applies_to = ["domain"]
-    #: 攻击面阶段（两遍富化的第二遍）；active=False 标记被动（不向目标发连接）。
-    phase = "attack_surface"
+    #: 境外归属阶段（两遍富化的第二遍）；active=False 标记被动（不向目标发连接）。
+    phase = "overseas"
     active = False
 
     def __init__(self) -> None:

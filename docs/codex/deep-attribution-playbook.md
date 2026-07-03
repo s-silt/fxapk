@@ -17,14 +17,14 @@
    - **web-check（操作机自托管，无需 key）= 实测级**，可直接取正文；
    - **Shodan 可实查**（Codex 环境有 `FXAPK_SHODAN_KEY`）；
    - Censys / FOFA / Hunter / ZoomEye / VirusTotal / 微步 等取不到正文时，**只给「建议调取语句」，绝不臆造结果**。
-4. **授权与留痕**：仅在授权范围内做轻量被动/主动侦察；直连源站可能被对方边缘日志记录，注意取证留痕风险。
+4. **授权与留痕**：优先**被动**侦察（RDAP/DNS/CT/被动 DNS/Shodan 查库，对目标零流量），**不主动探测、不利用**；如需轻量直连核验证书/响应头，控制在最小必要、只读，且注意可能被对方边缘日志记录的取证留痕风险。
 
 ## 工具与数据源（操作机已装两件套，优先用这俩，别空跑外部付费源）
 
-**① fxapk（本仓库 `s-silt/fxapk`）** — APK 取证主入口：`analyze`/`auto` 出端点 / IP / 标识符 + 富化（rdap/whois/icp/dns/asn/shodan/webcheck）；`digest` 取重点；`graph` 串案；`track` 台账。深度归因的输入来自它的 `report.json`（`endpoints[].enrichment`、`attack_surface`、`leads`）。
+**① fxapk（本仓库 `s-silt/fxapk`）** — APK 取证主入口：`analyze`/`auto` 出端点 / IP / 标识符 + 富化（rdap/whois/icp/dns/asn/shodan/webcheck）；`digest` 取重点；`graph` 串案；`track` 台账。深度归因的输入来自它的 `report.json`（`endpoints[].enrichment`、`overseas_targets`、`leads`）。
 
 **② web-check（`lissy93/web-check`，自托管，无需 key = 实测级）** — 对域名 / IP 一把抓 OSINT。两种用法：
-- **优先 · 经 fxapk 自动集成**：设 `FXAPK_WEBCHECK_URL=http://localhost:3000`（按本机实际端口），fxapk 的 webcheck 富化器即对「建议调证」端点自动跑 curated 检查（location/get-ip/whois/dns/dnssec/ssl/http-security/tech-stack/ports/mail-config/threats/subdomains/redirects/archives/firewall），结果直接进辖区分流 / 攻击面 / 串案 / `report.json`。→ **Codex 先把这个环境变量设上，跑 fxapk 就顺带拿到 web-check 数据。**
+- **优先 · 经 fxapk 自动集成**：设 `FXAPK_WEBCHECK_URL=http://localhost:3000`（按本机实际端口），fxapk 的 webcheck 富化器即对「建议调证」端点自动跑 curated 检查（location/get-ip/whois/dns/dnssec/ssl/http-security/tech-stack/ports/mail-config/threats/subdomains/redirects/archives/firewall），结果直接进辖区分流 / 境外源站归属 / 串案 / `report.json`。→ **Codex 先把这个环境变量设上，跑 fxapk 就顺带拿到 web-check 数据。**
 - **深挖 · 直接打 API**：对单个可疑目标逐项 `curl 'http://localhost:3000/api/<check>?url=<域名或IP>'`。
 
 **侦察动作 → 工具映射**：
@@ -79,7 +79,7 @@ fxapk pcap-leads capture.pcap --into report.json  # 回灌 report.leads（source
 - **被动DNS/历史**：urlscan、被动 DNS 库 → 历史解析 / 历史代理 / 关联站群。
 - **HTTP/TLS 指纹**：`curl -I` 看 `Server` / cookie / `via` / `x-*` 头识别 CDN/WAF/源站（见下表）。
 - **归属**：ASN/BGP（RIPEstat/RDAP）→ **持有方 vs 真实承租方**。省网整段分配里看不到具体租户，往往说明那段 IP 是云厂商作为租户向运营商租用的**边缘节点**，穿透真实运营者要回到云厂商后台。
-- **CDN 穿透找源站**：历史 DNS / CT 里的 SAN / 源站泄露 / SSRF / 错配 / 邮件头。
+- **CDN 穿透找源站（被动）**：历史 DNS / CT 里的 SAN / 源站泄露 / 错配 / 邮件头。
 
 ## CDN / 云识别特征表
 
@@ -105,7 +105,7 @@ fxapk pcap-leads capture.pcap --into report.json  # 回灌 report.leads（source
 | P4 | Cloudflare / AWS | 执法门户 + MLAT/OIA | 低-中（多为账户/付款，无流量日志；删桶后 content 不可得） |
 | P5 | 其它境外（关联站群所在国，如 MOACK/JT） | 对应国司法协助 | 低（跨境，关联案非主案） |
 
-★ 与 fxapk 一致：**国内登记/承租主体 = 最高调证价值**；境外服务器不走调证、走攻击面取证 + 找源站。即便某端点被 fxapk 标「无需调证」，只要其 ASN/ICP 登记主体是境内提供商，也要捞出来列为调证目标。
+★ 与 fxapk 一致：**国内登记/承租主体 = 最高调证价值**；境外服务器不走调证、走**被动 IP 归属 + 定位真实源站**。即便某端点被 fxapk 标「无需调证」，只要其 ASN/ICP 登记主体是境内提供商，也要捞出来列为调证目标。
 
 ## 标识符语义研判
 
@@ -130,4 +130,4 @@ fxapk pcap-leads capture.pcap --into report.json  # 回灌 report.leads（source
 
 编造 key-gated 源的结果；停留在表层复述上游；把边缘节点当真实源站；把可信度「高」乱标在单一来源/推断上；按技术显眼度而非现实可行性排调证优先级。
 
-**把「编码伪域名」当真实域名去调证 / 回溯**：base64 / hex / 随机串里夹了点会被误当域名（如 `aGVsbG8.d29ybGQ.example`），调证不可回溯、纯属噪音。fxapk 的 `classify_domain` 已把这类自动降级为「**待核**」并标原因（"疑似编码/hex/base64/随机串/伪域名"）；**遇到待核 + 该原因的目标，一律人工核、不主动探测、不写进调证目标**。严格只对 advice=「建议调证」的目标动作。
+**把「编码伪域名」当真实域名去调证 / 回溯**：base64 / hex / 随机串里夹了点会被误当域名（如 `aGVsbG8.d29ybGQ.example`），调证不可回溯、纯属噪音。fxapk 的 `classify_domain` 已把这类自动降级为「**待核**」并标原因（"疑似编码/hex/base64/随机串/伪域名"）；**遇到待核 + 该原因的目标，一律人工核、不反查、不写进调证目标**。严格只对 advice=「建议调证」的目标动作。

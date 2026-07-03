@@ -549,8 +549,8 @@ def effective_advice(domain: str, tier: object) -> str:
     （``tier`` ∈ {library-file, bulk-string}）且 classify 仍判"建议调证"时，降为"待核"——
     与 ``pipeline._domain_lead`` 的 C1 逻辑同口径。
 
-    ★ 用途：目标筛选 / 主动探测门控须与**最终 Lead 研判**用同一套判据，避免"被判待核（不建议调证）
-    的库内置档端点却被主动探测"的判据漂移（合规红线：主动探测仅对【建议调证】目标）。
+    ★ 用途：目标筛选须与**最终 Lead 研判**用同一套判据，避免"被判待核（不建议调证）的库内置档
+    端点"在下游被当作可调证目标的判据漂移。
     """
     advice, _reason = classify_domain(domain)
     if advice == ADVICE_INVESTIGATE and tier in (TIER_LIBRARY_FILE, TIER_BULK_STRING):
