@@ -1,5 +1,7 @@
 
-// apkscan 反检测绕过（best-effort）：绕过 root/模拟器/frida 检测 + 上报反分析探测行为。
+// apkscan 取证运行时兼容层（best-effort）：中和样本对 root/模拟器/frida 的自我检测，
+// 使加固/反分析样本能在取证机上正常运行并被观测；仅作用于样本自身进程，不接触任何第三方。
+// 副产物——样本每一次自我检测尝试都作为反取证/反分析研判信号上报（消息 type=apkscan-antidetect）。
 Java.perform(function () {
     var _ad_count = 0;
     function adEmit(kind, probe) {
@@ -22,7 +24,7 @@ Java.perform(function () {
         return '';
     }
 
-    // --- File.exists：对 su/root/模拟器/frida 特征路径返回 false（并上报探测）---
+    // --- File.exists：对 su/root/模拟器/frida 特征路径返回 false，中和样本自我检测（并记录该检测尝试）---
     try {
         var File = Java.use('java.io.File');
         File.exists.implementation = function () {
@@ -33,12 +35,12 @@ Java.perform(function () {
             } catch (e) {}
             return this.exists();
         };
-        console.log('[apkscan] File.exists anti-detect hooked');
+        console.log('[apkscan] File.exists runtime-compat hooked');
     } catch (e) {
         console.log('[apkscan] File.exists hook skip: ' + e);
     }
 
-    // --- Runtime.exec：拦 su / which su / mount 等 root 探测命令 ---
+    // --- Runtime.exec：拦 su / which su / mount 等 root 探测命令，中和样本自我检测 ---
     try {
         var Runtime = Java.use('java.lang.Runtime');
         Runtime.exec.overload('java.lang.String').implementation = function (cmd) {
@@ -52,7 +54,7 @@ Java.perform(function () {
             } catch (e) {}
             return this.exec(cmd);
         };
-        console.log('[apkscan] Runtime.exec anti-detect hooked');
+        console.log('[apkscan] Runtime.exec runtime-compat hooked');
     } catch (e) {
         console.log('[apkscan] Runtime.exec hook skip: ' + e);
     }
@@ -111,7 +113,7 @@ Java.perform(function () {
             } catch (e) {}
             return real;
         };
-        console.log('[apkscan] SystemProperties.get anti-detect hooked');
+        console.log('[apkscan] SystemProperties.get runtime-compat hooked');
     } catch (e) {
         console.log('[apkscan] SystemProperties hook skip: ' + e);
     }

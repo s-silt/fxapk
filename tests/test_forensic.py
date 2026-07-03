@@ -1,6 +1,6 @@
 """服务器辖区分流 + 取证路径测试。
 
-国内（ICP/.cn/归属国中国）→ 调证路径；国外（境外归属国）→ 取证路径（镜像/日志/漏洞方向）；
+国内（ICP/.cn/归属国中国）→ 调证路径；国外（境外归属国）→ 被动定位真实源站 IP + 提取归属标识；
 无归属信号 → 辖区未定。经 pipeline 的 _domain_lead/_ip_lead 验证真实接线。
 """
 
@@ -47,7 +47,7 @@ def test_forensic_path_contents() -> None:
     dom = forensic.forensic_path(forensic.JURIS_DOMESTIC)
     assert "调证" in dom.note and dom.evidence
     foreign = forensic.forensic_path(forensic.JURIS_FOREIGN)
-    assert "镜像" in " ".join(foreign.evidence) and "取证" in foreign.label
+    assert "被动定位" in " ".join(foreign.evidence) and "被动定位" in foreign.label
 
 
 def _ep(value: str, *, kind: str = "domain", is_private: bool = False, **enrichment) -> Endpoint:
@@ -58,8 +58,8 @@ def test_domain_lead_foreign_gets_forensic_path() -> None:
     ep = _ep("evilbackend.com", dns={"hosting": [{"ip": "5.6.7.8", "country": "United States"}]})
     lead = _domain_lead(ep, online=True)
     assert lead.advice == "建议调证"
-    assert "国外服务器·取证为主" in (lead.notes or "")
-    assert any("镜像" in e for e in lead.evidence_to_obtain)
+    assert "国外服务器·被动定位" in (lead.notes or "")
+    assert any("真实源站" in e for e in lead.evidence_to_obtain)
 
 
 def test_domain_lead_domestic_gets_investigation_path() -> None:
@@ -73,8 +73,8 @@ def test_ip_lead_foreign_gets_forensic_path() -> None:
     ep = _ep("8.8.8.8", kind="ip", asn={"country": "United States", "org": "Example LLC"})
     lead = _ip_lead(ep, online=True)
     assert lead.advice == "建议调证"
-    assert "国外服务器·取证为主" in (lead.notes or "")
-    assert any("镜像" in e for e in lead.evidence_to_obtain)
+    assert "国外服务器·被动定位" in (lead.notes or "")
+    assert any("真实源站" in e for e in lead.evidence_to_obtain)
 
 
 # --------------------------------------------------------------------------- 国内 CDN 边缘判定
