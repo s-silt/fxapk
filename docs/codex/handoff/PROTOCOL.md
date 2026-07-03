@@ -1,4 +1,4 @@
-<!-- 个人安全研究 / 测试用途；如发现涉诈线索可提供给相关部门依法处置。 -->
+<!-- 个人安全研究 / 测试用途；如发现异常线索可提供给授权方依规处置。 -->
 
 # fxapk · Claude ↔ Codex 异步信箱协议（飞书对讲 + OneDrive 附件）
 
@@ -10,7 +10,7 @@
 ## 分工
 
 - **Codex（机 B + 真机）**：真机取证 —— `fxapk analyze / capture`、frida / pcap / adb，产出 report.json + 散点线索 + pcap。
-- **Claude（机 A）**：核实 / 降噪 / 归属（RDAP·反查）/ 串案 / 出 PDF 报告 / 写下一步抓包任务。
+- **Claude（机 A）**：核实 / 降噪 / 归属（RDAP·反查）/ 跨样本关联 / 出 PDF 报告 / 写下一步抓包任务。
 
 ## 一个回合
 
@@ -18,7 +18,7 @@
    ```
    python docs/codex/handoff/feishu_handoff.py send --from CODEX "<案子> 取证完; 文件 OneDrive/fxapk-handoff/<案子>/; 需核实 8.x; 球→CLAUDE"
    ```
-2. **Claude（自己读本地 OneDrive 同步盘）** → 核实 / 串案 / 出报告 → 结果写回 OneDrive → 发飞书：
+2. **Claude（自己读本地 OneDrive 同步盘）** → 核实 / 跨样本关联 / 出报告 → 结果写回 OneDrive → 发飞书：
    ```
    python docs/codex/handoff/feishu_handoff.py read --limit 10
    # 读 OneDrive/fxapk-handoff/<案子>/ 里的 report.json、pcap ...
@@ -68,7 +68,7 @@ delfile  <token[,token2]>        删云空间
 4) 发交接给 Claude：
    python docs/codex/handoff/feishu_handoff.py send --from CODEX "<案子>进展; OneDrive文件路径; 需Claude核实啥; 球→CLAUDE"
 红线不变：探针只读、唯一出口 console.log、落盘仅设备临时目录；带外 pcap 不碰 App；
-待核 / 编码伪域名不调证、不回溯；主动探测仅对「建议调证」目标。
+待核 / 编码伪域名不溯源、不回溯；主动探测仅对「建议调证」目标。
 前置：本机 .env 要有飞书三件套(FXAPK_FEISHU_APP_ID/APP_SECRET/CHAT_ID)；
 OneDrive 要同步同一个 fxapk-handoff 文件夹(B 机首次登录若报无网络，临时关代理/梯子全局再登)。
 ```
