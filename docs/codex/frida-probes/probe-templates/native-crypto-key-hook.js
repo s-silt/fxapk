@@ -1,5 +1,5 @@
 // 用途：只读取证——hook native OpenSSL/BoringSSL 对称加密初始化，固证 AES key/iv（离线解密缴获流量/配置）。
-// 适用：涉诈样本把 AES 密钥下沉到 .so（libcrypto.so 或自有 native 库静态链接 BoringSSL），Java 层 Cipher hook 抓不到 key。
+// 适用：目标样本把 AES 密钥下沉到 .so（libcrypto.so 或自有 native 库静态链接 BoringSSL），Java 层 Cipher hook 抓不到 key。
 // 跑：frida -U -f <包名> -l native-crypto-key-hook.js   或   frida -U <包名> -l native-crypto-key-hook.js（落盘只往 /data/local/tmp）。
 // 改：符号被 strip → 把下方 LIBS 换成真实 so 名；静态链接进 app 自有 .so → 看「未命中」提示用 enumerateModules/enumerateExports 回填地址。
 'use strict';
@@ -144,7 +144,7 @@ function cipherName(evpCipherPtr) {
 //   arg0=ctx  arg1=type(算法→定 key 长 16/24/32B)  arg2=engine  arg3=key  arg4=iv  (CipherInit 多一个 arg5=enc 方向)
 // 关键：分步 Init——先 EVP_*Init_ex(ctx,type,impl,NULL,NULL) 建上下文，再 EVP_*Init_ex(ctx,NULL,NULL,key,iv) 补 key。
 //      补 key 那次 type(arg1)=NULL，必须先 isNull 守卫，绝不可把 NULL 传进 EVP_CIPHER_*_length（否则 native 解引用崩）。
-// 抓到什么 → 调证线索：对称 key+iv 当场固证 → 离线解密缴获的加密流量/本地加密配置 →
+// 抓到什么 → 溯源线索：对称 key+iv 当场固证 → 离线解密缴获的加密流量/本地加密配置 →
 //            复原真后端域名/IP/接口锚点（定人、资金穿透、固证三合一）。
 function hookEvpInit(sym, kind) {
     var addr = resolveExport(sym);
@@ -198,8 +198,8 @@ function hookEvpInit(sym, kind) {
 // ── hook 2：AES_set_encrypt_key / AES_set_decrypt_key（低层 AES 直用，绕过 EVP）──
 // 签名：int AES_set_*crypt_key(const unsigned char *userKey, const int bits, AES_KEY *key)
 //   arg0=userKey(原始 key)  arg1=bits(128/192/256 字面量→定长度)  arg2=AES_KEY(展开后轮密钥表，非原始)
-// 抓到什么 → 调证线索：原始对称 key 当场固证 → 同上离线解密 → 锚定真后端。
-// 注意：必须读 arg0(userKey)，arg2 是轮密钥扩展表不可直接当 key（否则固证错误密钥，办案侧解不开）。
+// 抓到什么 → 溯源线索：原始对称 key 当场固证 → 同上离线解密 → 锚定真后端。
+// 注意：必须读 arg0(userKey)，arg2 是轮密钥扩展表不可直接当 key（否则固证错误密钥，分析侧解不开）。
 function hookAesSetKey(sym, kind) {
     var addr = resolveExport(sym);
     if (!addr) {

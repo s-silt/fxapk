@@ -1,6 +1,6 @@
 /*
- * 用途: 反诈取证-在 protobuf 序列化边界只读截获 gRPC/protobuf 明文 body，手写浅解析打印 field号/wiretype/hex(固证，不改写不外发)
- * 适用: 用 gRPC(over HTTP2) / protobuf-lite 通信的安卓涉诈样本；动态抓包只见 HTTP2 二进制帧/protobuf 乱码时用本探针在内存边界取明文
+ * 用途: 目标取证-在 protobuf 序列化边界只读截获 gRPC/protobuf 明文 body，手写浅解析打印 field号/wiretype/hex(固证，不改写不外发)
+ * 适用: 用 gRPC(over HTTP2) / protobuf-lite 通信的安卓目标样本；动态抓包只见 HTTP2 二进制帧/protobuf 乱码时用本探针在内存边界取明文
  * 跑:   frida -U -f <包名> -l protobuf-grpc-hook.js  (或 attach: frida -U <包名> -l protobuf-grpc-hook.js)；落盘 frida ... -l x.js -o /data/local/tmp/proto.log
  * 改:   类被 R8/混淆改名→看末尾"未命中下一步"用 enumerateLoadedClasses 找 toByteArray/parseFrom 宿主回填 TARGETS；只想看上行→把 SCAN_SUBCLASS_PARSE 置 false 并注掉 hookParseHelpers
  */

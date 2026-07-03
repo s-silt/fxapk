@@ -1,5 +1,5 @@
 // sdk-appkey-hook.js — hook 安装归因/统计/推送 SDK 初始化，抓 appKey/租户标识 + 绑定包名 + 回调/host（OpenInstall/DeepInstall/友盟/Firebase/个推/极光）
-// 适用：杀猪盘改包常挂安装归因(OpenInstall)做分发追踪、挂统计/推送做留存——appKey 是平台内唯一租户标识，凭它向 SDK 服务商调开发者账户/绑定包名/渠道/安装日志=分发链定人
+// 适用：目标样本改包常挂安装归因(OpenInstall)做分发追踪、挂统计/推送做留存——appKey 是平台内唯一租户标识，凭它向 SDK 服务商溯源开发者账户/绑定包名/渠道/安装日志=分发链归属
 // 跑：frida -U -f <包名> -l sdk-appkey-hook.js -q   （必须 -f spawn：SDK init 在 Application.onCreate 极早期，attach 已起进程会漏）
 // 改：各 SDK 类名/方法名随版本与混淆变；本脚本按"类存在性"逐个 try，命中即 hook、不命中打未命中。改时按报告里实际 SDK 包名增删 BLOCK；混淆样本类名被改 → 退回 cipher-hook/sharedprefs-hook 看落盘的 appKey
 'use strict';
@@ -13,7 +13,7 @@ function _once(key) {
     SEEN[key] = 1;
     return true;
 }
-// 记一条调证锚点：sdk=哪个SDK，kind=appKey/channel/packageName/host/callback...，value=值，note=调证线索
+// 记一条溯源锚点：sdk=哪个SDK，kind=appKey/channel/packageName/host/callback...，value=值，note=溯源线索
 function _anchor(sdk, kind, value, note) {
     var v = (value === null || value === undefined) ? '<null>' : ('' + value);
     if (!_once(sdk + '|' + kind + '|' + v)) return;
@@ -25,7 +25,7 @@ function _anchor(sdk, kind, value, note) {
 function _s(x) {
     try { return (x === null || x === undefined) ? '<null>' : ('' + x); } catch (e) { return '<tostr-fail>'; }
 }
-// 当前进程包名（用于把 appKey 绑定到具体包名 = 调证时核验 SDK 后台登记的绑定包名是否一致）
+// 当前进程包名（用于把 appKey 绑定到具体包名 = 溯源时核验 SDK 后台登记的绑定包名是否一致）
 // 注意：spawn 极早期 currentApplication() 可能尚为 null，已 try 兜底返回 <pkg-unknown>，不影响后续 hook。
 function _pkg() {
     try {
@@ -99,8 +99,8 @@ Java.perform(function () {
     console.log('[sdk] 当前包名: ' + PKG + '   (调证时核验 SDK 后台登记的绑定包名是否与此一致)');
 
     // ============ A. OpenInstall（安装归因/渠道追踪）——本案命中 appKey ehahb5 ============
-    // OpenInstall：知道每个受害人从哪个渠道/短链来 → appKey 是平台唯一租户标识。
-    // 调证：凭 appKey 向 openinstall.com 运营方调开发者账户实名/注册手机号邮箱/付款/绑定包名/渠道包/短链落地页/回调URL/安装点击日志=分发链定人。
+    // OpenInstall：知道每个敏感个人信息主体从哪个渠道/短链来 → appKey 是平台唯一租户标识。
+    // 溯源：凭 appKey 向 openinstall.com 运营方溯源开发者账户实名/注册手机号邮箱/付款/绑定包名/渠道包/短链落地页/回调URL/安装点击日志=分发链归属。
     // 抓到 appKey → 这就是"P1 实调"的锚点(报告 H2)；本案 ehahb5，其它案见 wfjmj8。
     (function hookOpenInstall() {
         // (1) OpenInstall.init(Context) / init(Context, Configuration[, AppInstallAdapter])：appKey 可能从 manifest 的 meta-data 读，也可能在 Configuration 里
@@ -195,7 +195,7 @@ Java.perform(function () {
 
     // ============ C. 友盟 UMeng（统计 SDK）——抓 appKey/channel ============
     // UMConfigure.init(Context, appKey, channel, deviceType, pushSecret)：友盟 appKey 是友盟后台唯一应用标识，channel=渠道。
-    // 调证：凭 appKey 向友盟(及阿里，友盟属阿里)调应用注册者实名/绑定包名/渠道分布/日活设备 → 渠道分布可佐证分发规模与人群。
+    // 溯源：凭 appKey 向友盟(及阿里，友盟属阿里)溯源应用注册者实名/绑定包名/渠道分布/日活设备 → 渠道分布可佐证分发规模与人群。
     (function hookUMeng() {
         if (_has('com.umeng.commonsdk.UMConfigure')) {
             try {
@@ -226,7 +226,7 @@ Java.perform(function () {
 
     // ============ D. Firebase（境外）——抓 apiKey/applicationId/projectId ============
     // FirebaseOptions 持 apiKey/applicationId/projectId/gcmSenderId/storageBucket：projectId 是 Google 项目唯一标识。
-    // 调证：凭 projectId/applicationId 对 Google/Firebase 发保全(境外协查)，调项目创建者/管理员/账单/登录IP(报告 P2)。本案见 nebulachat3。
+    // 溯源：凭 projectId/applicationId 对 Google/Firebase 发保全(境外分析)，溯源项目创建者/管理员/账单/登录IP(报告 P2)。本案见 nebulachat3。
     (function hookFirebase() {
         // (1) FirebaseOptions.Builder.setApiKey/setApplicationId/setProjectId（手动构造时）
         if (_has('com.google.firebase.FirebaseOptions$Builder')) {
@@ -269,7 +269,7 @@ Java.perform(function () {
 
     // ============ E. 个推 com.igexin（推送 SDK）——抓 appId/appKey/appSecret ============
     // 个推 PushManager.initialize(Context)，appId/appKey/appSecret 多走 manifest meta-data。
-    // 调证：凭个推 appId 向个推(每日互动)调注册应用实名/绑定包名/推送下发记录 → 谁在给这批设备推内容。
+    // 溯源：凭个推 appId 向个推(每日互动)溯源注册应用实名/绑定包名/推送下发记录 → 谁在给这批设备推内容。
     (function hookGetui() {
         var cands = ['com.igexin.sdk.PushManager', 'com.igexin.sdk.PushService'];
         var any = false;
@@ -290,7 +290,7 @@ Java.perform(function () {
 
     // ============ F. 极光 cn.jpush（推送 SDK）——抓 appKey ============
     // 极光 JPushInterface.init(Context)，appKey 走 manifest meta-data "JPUSH_APPKEY"。
-    // 调证：凭极光 appKey 向极光(和讯)调注册应用实名/绑定包名/推送记录。
+    // 溯源：凭极光 appKey 向极光(和讯)溯源注册应用实名/绑定包名/推送记录。
     (function hookJpush() {
         if (_has('cn.jpush.android.api.JPushInterface')) {
             try {
@@ -358,7 +358,7 @@ Java.perform(function () {
         } catch (e) { console.log('[sdk][meta] Bundle meta-data hook skip: ' + e); }
     })();
 
-    // ============ 汇总：收尾把所有抓到的租户锚点打一遍（一眼出调证清单）============
+    // ============ 汇总：收尾把所有抓到的租户锚点打一遍（一眼出溯源清单）============
     function dumpAnchors() {
         console.log('\n========== [sdk] 安装归因/统计/推送 SDK 租户锚点汇总（调证清单） ==========');
         console.log('[sdk][SUMMARY] 绑定包名: ' + PKG + '   (向各 SDK 服务商核验后台登记的绑定包名是否一致)');

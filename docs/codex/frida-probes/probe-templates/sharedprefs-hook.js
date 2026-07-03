@@ -42,7 +42,7 @@ Java.perform(function () {
       var vs = (val == null) ? 'null' : ('' + val);
       if (vs.length > 4000) vs = vs.slice(0, 4000) + '…(截断)';
       console.log('[' + tag + '] ' + op + ' key=' + k + '  val=' + vs);
-      // base_url / host / agent 类直接点名，方便回灌调证
+      // base_url / host / agent 类直接点名，方便回灌溯源
       var lk = lc(k);
       if (lk.indexOf('url') !== -1 || lk.indexOf('host') !== -1 || lk.indexOf('server') !== -1 ||
           lk.indexOf('domain') !== -1 || lk.indexOf('api') !== -1 || lk.indexOf('endpoint') !== -1 ||
@@ -58,6 +58,10 @@ Java.perform(function () {
           lk.indexOf('auth') !== -1 || lk.indexOf('jwt') !== -1) {
         console.log('[' + tag + '][LEAD->凭据] ' + k + ' = ' + vs);
       }
+      // secret/appKey 类 SDK 密钥材料同属高价值凭据锚点，补 LEAD 免入库漏掉
+      if (lk.indexOf('secret') !== -1 || lk.indexOf('appkey') !== -1 || lk.indexOf('app_key') !== -1) {
+        console.log('[' + tag + '][LEAD->凭据] ' + k + ' = ' + vs);
+      }
     } catch (e) {
       console.log('[' + tag + '] show skip: ' + e);
     }
@@ -67,11 +71,13 @@ Java.perform(function () {
   try {
     var SPImpl = Java.use('android.app.SharedPreferencesImpl');
 
-    SPImpl.getString.overload('java.lang.String', 'java.lang.String').implementation = function (key, def) {
-      var r = this.getString(key, def);
-      show('prefs', 'getString', key, r);
-      return r;
-    };
+    try {
+      SPImpl.getString.overload('java.lang.String', 'java.lang.String').implementation = function (key, def) {
+        var r = this.getString(key, def);
+        show('prefs', 'getString', key, r);
+        return r;
+      };
+    } catch (e) { console.log('[prefs] getString skip: ' + e); }
     try {
       SPImpl.getStringSet.overload('java.lang.String', 'java.util.Set').implementation = function (key, def) {
         var r = this.getStringSet(key, def);
@@ -81,19 +87,21 @@ Java.perform(function () {
     } catch (e) { console.log('[prefs] getStringSet skip: ' + e); }
 
     // getAll：一次性把整个 prefs 文件倒出来——冷启动后最值钱
-    SPImpl.getAll.implementation = function () {
-      var r = this.getAll();
-      try {
-        var it = r.entrySet().iterator();
-        console.log('[prefs] ===== getAll dump 开始 =====');
-        while (it.hasNext()) {
-          var ent = Java.cast(it.next(), Java.use('java.util.Map$Entry'));
-          show('prefs', 'getAll', ent.getKey(), ent.getValue());
-        }
-        console.log('[prefs] ===== getAll dump 结束 =====');
-      } catch (e) { console.log('[prefs] getAll dump skip: ' + e); }
-      return r;
-    };
+    try {
+      SPImpl.getAll.implementation = function () {
+        var r = this.getAll();
+        try {
+          var it = r.entrySet().iterator();
+          console.log('[prefs] ===== getAll dump 开始 =====');
+          while (it.hasNext()) {
+            var ent = Java.cast(it.next(), Java.use('java.util.Map$Entry'));
+            show('prefs', 'getAll', ent.getKey(), ent.getValue());
+          }
+          console.log('[prefs] ===== getAll dump 结束 =====');
+        } catch (e) { console.log('[prefs] getAll dump skip: ' + e); }
+        return r;
+      };
+    } catch (e) { console.log('[prefs] getAll hook skip: ' + e); }
   } catch (e) {
     console.log('[prefs] SharedPreferencesImpl(读) hook skip: ' + e);
   }
@@ -103,10 +111,12 @@ Java.perform(function () {
   try {
     var EditorImpl = Java.use('android.app.SharedPreferencesImpl$EditorImpl');
 
-    EditorImpl.putString.overload('java.lang.String', 'java.lang.String').implementation = function (key, val) {
-      show('prefs', 'putString', key, val);
-      return this.putString(key, val);
-    };
+    try {
+      EditorImpl.putString.overload('java.lang.String', 'java.lang.String').implementation = function (key, val) {
+        show('prefs', 'putString', key, val);
+        return this.putString(key, val);
+      };
+    } catch (e) { console.log('[prefs] putString skip: ' + e); }
     try {
       EditorImpl.putStringSet.overload('java.lang.String', 'java.util.Set').implementation = function (key, val) {
         show('prefs', 'putStringSet', key, val);
@@ -118,7 +128,7 @@ Java.perform(function () {
   }
 
   // —— 兜底：MMKV 等非标准存储 ——
-  // 很多诈骗 app 用 MMKV 存配置，标准 SP hook 一片空白时看这里。
+  // 很多目标 app 用 MMKV 存配置，标准 SP hook 一片空白时看这里。
   // 关键修正：MMKV 真实公开方法是 decodeString(1/2参) / getString(SharedPreferences适配) 读；
   //          encode(String,String) / putString(String,String[,int]) 写。
   //          没有公开的 encodeString(String,String)——java 层 encodeString 是 private native(long,String,String)，hook 不到也无业务意义，本版不挂。
