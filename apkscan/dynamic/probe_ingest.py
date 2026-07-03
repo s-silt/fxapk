@@ -1,5 +1,7 @@
 """apkscan.dynamic.probe_ingest — 独立 frida 探针(`-l` 注入)散点输出 → 调证台账 / report.leads。
 
+取证用途：对取证样本自身在分析机上做运行时观测，产出端点/密钥/独特串等线索，不面向任何第三方基础设施。
+
 反诈 frida 探针库(46 个)是**手注 `-l` 工具**，各自往 console 吐 `[tag][LEAD-...]` 标记的线索，
 散落在 `frida -o probe.log` 的文本里。本模块把这些散点**解析→按 LeadCategory 分类→去重→聚成
 调证台账(md/json)**，并可**追加进已有 report.json 的 leads 数组**——补上路线图「编排输出层」缺的

@@ -31,6 +31,7 @@ from apkscan.dynamic import (
     STATUS_SKIPPED,
 )
 from apkscan.dynamic import capture
+from apkscan.dynamic.capture_plan import CaptureDecision
 
 
 # ---------------------------------------------------------------------------
@@ -1802,9 +1803,6 @@ def test_parse_messages_config_channel_does_not_break_envelope(monkeypatch, tmp_
 # （liveness / 秒退熔断 / 时间盒预算 / floor 自动化 / 事件通道表）
 # 全 mock，禁止依赖真机；真机点需另行验证（见模块 TODO(real-device)）。
 # ---------------------------------------------------------------------------
-
-from apkscan.dynamic.capture_plan import CaptureDecision, decide_capture
-
 
 # --- 消费 decide_capture：capture.run(report=...) 让决策真正驱动引擎 ----------
 

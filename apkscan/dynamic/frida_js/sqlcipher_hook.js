@@ -1,4 +1,5 @@
 
+// 取证用途：对取证样本自身在分析机上做运行时观测，产出端点/密钥/独特串等线索，不面向任何第三方基础设施。
 // apkscan 运行时落地库导出（best-effort）：hook SQLCipher/SQLite openDatabase，导明文库回传。
 Java.perform(function () {
     var _db_count = 0;

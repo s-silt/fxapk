@@ -1,9 +1,11 @@
 """apkscan.dynamic.capture — 真·抓包：mitmproxy + frida SSL unpinning + adb 代理。
 
-目标：在**有真机 + frida + mitmproxy** 时，对运行中的目标应用做真实流量抓取，
-绕过证书绑定（cert pinning），从流量里提取运行时网络端点（source="runtime"），
-汇总写出 ``out/runtime_report.json``；缺任一前置条件时返回 status="skipped" + 手册
-（playbook，给出可手动复现的完整取证步骤），reason 写明缺什么。
+取证用途：对取证样本自身在分析机上做运行时观测，产出端点/密钥/独特串等线索，不面向任何第三方基础设施。
+
+目标：在**有真机 + frida + mitmproxy** 时，对运行中的样本自身做真实流量抓取，
+解除样本自身的证书绑定（cert pinning，SSL unpinning）以观测其加密流量，从流量里提取运行时
+网络端点（source="runtime"），汇总写出 ``out/runtime_report.json``；缺任一前置条件时返回
+status="skipped" + 手册（playbook，给出可手动复现的完整取证步骤），reason 写明缺什么。
 
 编排流程（前置满足时）::
 
@@ -259,7 +261,7 @@ def _build_playbook(package: str, out_dir: str, duration: int) -> list[str]:
         "3. 信任 mitmproxy CA：浏览器访问 http://mitm.it 下载 CA，"
         "推为系统级信任证书（Android 7+ 用户证书默认不被 app 信任，需 root 推到 /system/etc/security/cacerts/ "
         "并 chmod 644，按 subject_hash_old 命名 <hash>.0）。",
-        "4. 绕过证书绑定（cert pinning）：frida 注入通用 SSL unpinning 脚本并启动 app："
+        "4. 解除证书绑定（cert pinning）：frida 注入通用 SSL unpinning 脚本并启动 app："
         f"frida -U -f {package} -l unpinning.js -q  （老版 frida-tools<14 才加 --no-pause）"
         "（unpinning.js 内容见本模块 FRIDA_UNPINNING_JS：覆盖 OkHttp3 CertificatePinner / "
         "X509TrustManager / TrustManagerImpl）。",
@@ -318,7 +320,7 @@ def _capture(
     crypto_events: list[dict[str, Any]] = []
     jsbridge_events: list[dict[str, Any]] = []  # P1：运行时 JS-bridge 暴露面/调用
     sensitive_api_events: list[dict[str, Any]] = []  # P1：运行时敏感 API 调用
-    antidetect_events: list[dict[str, Any]] = []  # P3：反检测探测（root/模拟器/frida）
+    antidetect_events: list[dict[str, Any]] = []  # P3：样本自我检测（root/模拟器/frida）
     # P2：运行时凭据（OkHttp 加密前明文 token/手机号 + 收尾 adb pull shared_prefs 落地凭据）。
     credential_events: list[dict[str, Any]] = []
     # P2：运行时落地库导出（SQLCipher hook 导明文 .plain.db + 收尾 adb pull databases 回 dump_db/）。
@@ -429,7 +431,7 @@ def _capture(
             retreat_count += 1
             warn = (
                 f"frida-core 会话秒退（第 {retreat_count}/{decision.frida_retreat_threshold} 次，"
-                "版本不匹配 / 反检测 / spawn 失败？）；HTTPS 可能仅密文"
+                "版本不匹配 / 样本自我检测 / spawn 失败？）；HTTPS 可能仅密文"
             )
             logger.warning("[capture] %s", warn)
             playbook.append(warn)

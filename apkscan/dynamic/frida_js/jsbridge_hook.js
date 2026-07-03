@@ -1,4 +1,5 @@
 
+// 取证用途：对取证样本自身在分析机上做运行时观测，产出端点/密钥/独特串等线索，不面向任何第三方基础设施。
 // apkscan 运行时 JS-bridge 追踪（best-effort）：列出 H5 可调用的原生桥接面与实际调用。
 Java.perform(function () {
     var _jb_count = 0;
