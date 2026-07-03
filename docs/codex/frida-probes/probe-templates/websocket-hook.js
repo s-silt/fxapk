@@ -33,7 +33,7 @@ Java.perform(function () {
   try {
     var JWS = Java.use('org.java_websocket.client.WebSocketClient');
     JWS.send.overload('java.lang.String').implementation = function (t) {
-      console.log('[ws SEND][java_websocket] ' + t);
+      try { console.log('[ws SEND][java_websocket] ' + t); } catch (e) {}
       return this.send(t);
     };
     console.log('[ws] org.java_websocket hooked');
