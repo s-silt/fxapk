@@ -1,14 +1,14 @@
-"""疑 native 混淆/虚拟化启发式识别（熵 + 可提取字符串密度，不反汇编）。
+"""native 混淆/虚拟化启发式识别（熵 + 可提取字符串密度，不反汇编）。
 
-定位（务必守住边界）：这是**启发式信号**，不是线索抠取器，也不是精确加壳判定。
+定位（务必守住边界）：这是**启发式信号**，不是精确加壳判定。
 - 目标：对 App 自有 native ``.so`` 做轻量统计画像，标出「原生逻辑疑被加密 / 虚拟化 / 段加密」
-  的库——提示分析人**静态别在它上面费劲**（若 C2/加密逻辑在 native，转动态 cryptohook 抓运行时明文），
-  并作团伙技术画像 / 串案佐证（同款重混淆疑同团伙）。
-- 能抓：VMP（虚拟化）、加密壳、段加密（如 dpt-shell 的 SO RC4）——特征是**高熵 + 几乎无可读串**。
-- **抓不到纯 OLLVM 控制流平坦化**：它保留字符串、熵也不高，须反汇编做 CFG 分析（重依赖，不做）。
-- 天然有噪：合法 App（金融 / 游戏 DRM 防盗版）也用 VMP/OLLVM → 只报 MEDIUM，须结合其它信号。
+  的库——提示**静态分析在该库上不完整**（若关键 / 加密逻辑在 native，宜转运行时观测抓明文），
+  并作技术画像用于跨样本关联（同款重混淆特征可关联样本）。
+- 能抓：VMP（虚拟化）、加密壳、段加密（SO 段被加密）——特征是**高熵 + 几乎无可读串**。
+- **抓不到纯控制流平坦化混淆**：它保留字符串、熵也不高，须反汇编做 CFG 分析（重依赖，不做）。
+- 天然有噪：合法 App（金融 / 游戏 DRM 防盗版）也会混淆 native → 只报 MEDIUM，须结合其它信号。
 
-不产 Lead（不产调证目标），只产 Finding + ``meta["native_obfuscation"]`` 供 digest / 串案。
+不产 Lead，只产 Finding + ``meta["native_obfuscation"]`` 供 digest / 关联消费。
 
 约束：只依赖 AnalysisContext 公开接口（native_libs / list_files / read_file）；单库评估异常
 try/except + logging，不炸整个 analyze；全程 type hints。
@@ -182,14 +182,14 @@ class NativeObfuscationAnalyzer(BaseAnalyzer):
             category="anti_analysis",
             description=(
                 "以下 App 自有 native 库呈现【高熵 + 几乎无可读字符串】特征，疑原生逻辑被"
-                "虚拟化（VMP）/ 加密壳 / 段加密（如 dpt-shell SO RC4）保护：\n"
+                "虚拟化（VMP）/ 加密壳 / 段加密保护：\n"
                 + "\n".join(lines)
                 + "。★ 启发式信号，非精确判定——合法 App（金融 / 游戏 DRM）亦可能如此；"
-                "且本法抓不到纯 OLLVM 控制流平坦化（须反汇编）。"
+                "且本法抓不到纯控制流平坦化混淆（须反汇编）。"
             ),
             recommendation=(
-                "该 .so 的原生逻辑静态不可得：若 C2 / 加密逻辑在 native，转动态用 cryptohook "
-                "hook Cipher / 抓运行时明文；把「native 重混淆」作为团伙技术画像并簇串案。"
+                "该 .so 的原生逻辑静态不完整：若关键 / 加密逻辑在 native，宜转运行时观测 "
+                "hook Cipher / 抓运行时明文；把「native 重混淆」作为技术画像用于跨样本关联。"
             ),
             evidences=[
                 Evidence(source="native", location=s["lib"], snippet=f"entropy={s['entropy']}")
