@@ -76,7 +76,7 @@ Java.perform(function () {
 
     // ============ MMKV: com.tencent.mmkv.MMKV (mmkvWithID / defaultMMKV / reKey 携带 cryptKey) ============
     // 抓到什么: MMKV 实例的 cryptKey 明文(脱机用它解 mmkv/<id> 二进制文件, 还原 KV 会话/配置)
-    // 调证线索: key 即交付物→脱机解 MMKV 整库; 命中即确认用了 MMKV→腾讯系存储, 归属可调证
+    // 溯源线索: key 即交付物→脱机解 MMKV 整库; 命中即确认用了 MMKV→腾讯系存储, 归属可分析
     // 混淆/未命中: 类名被改→Java.enumerateLoadedClasses() 搜 'mmkv'(忽略大小写)回填类名;
     //              方法签名变动→jadx 看 mmkvWithID/defaultMMKV 重载, 对照下方 overload 参数回填。
     try {
@@ -134,7 +134,7 @@ Java.perform(function () {
 
     // ============ Realm: io.realm.RealmConfiguration$Builder.encryptionKey(byte[64]) ============
     // 抓到什么: Realm 库的 64 字节 encryptionKey(脱机用它打开 .realm 文件还原对象/记录)
-    // 调证线索: key 即交付物→脱机解 Realm 整库; 命中即确认用了 Realm 加密存储
+    // 溯源线索: key 即交付物→脱机解 Realm 整库; 命中即确认用了 Realm 加密存储
     // 混淆/未命中: 类名被 shrink→Java.enumerateLoadedClasses 搜 'RealmConfiguration';
     //              方法名混淆→jadx 找传入 byte[] 且校验 length==64 的 Builder 方法回填。
     try {
@@ -157,7 +157,7 @@ Java.perform(function () {
     // 注意: WCDB 的 com.tencent.wcdb.database.SQLiteDatabase 并【没有 setCipherKey 方法】, 密钥经
     //       openOrCreateDatabase 的 byte[]/char[] password 形参或 SQLiteOpenHelper(byte[]) 传入。
     // 抓到什么: WCDB 的 cipher key(脱机用它解 WCDB/SQLCipher 库, 还原 IM/转账表); 二进制 key 走 bytesToHex。
-    // 调证线索: key 即交付物→脱机解 WCDB 整库; 命中即确认腾讯 WCDB 加密存储
+    // 溯源线索: key 即交付物→脱机解 WCDB 整库; 命中即确认腾讯 WCDB 加密存储
     // 混淆/未命中: WCDB 类名/方法可能被改→Java.enumerateLoadedClasses 搜 'wcdb' 列真实类,
     //   再对目标类 Java.use(clz); var m = clz.class.getDeclaredMethods() 或 frida 的
     //   clz.<方法名>.overloads 看签名, 找形参含 byte[]/char[] password 的方法回填到下表。
@@ -206,7 +206,7 @@ Java.perform(function () {
 
 // ============ WCDB/SQLCipher native: sqlite3_key(db, pKey, nKey) / sqlite3_key_v2 ============
 // 抓到什么: 直达 SQLCipher 内核的原始密钥字节(arg=key 指针 + key 长度)
-// 调证线索: 这是最底层 key, 任何 WCDB/SQLCipher/MMKV(若走 sqlcipher) 封装最终都走它→脱机解整库, 交付物级证据, 必抓。
+// 溯源线索: 这是最底层 key, 任何 WCDB/SQLCipher/MMKV(若走 sqlcipher) 封装最终都走它→脱机解整库, 交付物级证据, 必抓。
 // 混淆/降级: 静态链接 + strip 时 Module.findExportByName(null,'sqlite3_key') 返 null→自动降级跳过。
 //   回填: 先 Process.enumerateModules() 找 libwcdb.so/libsqlcipher.so/app 自身 .so,
 //         再 Module.enumerateExports('<lib>.so') 搜 sqlite3_key / sqlite3_key_v2; 若全 strip,

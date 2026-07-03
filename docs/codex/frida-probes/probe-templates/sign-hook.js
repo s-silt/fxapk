@@ -237,7 +237,7 @@ Java.perform(function () {
     }
 
     // ===== java.security.Signature：RSA/ECDSA 数字签名(向服务器证明身份/防篡改) =====
-    // initSign 抓算法+(托管密钥)alias；update 攒被签明文；sign 出签名值。托管私钥不可导，但 alias 可凭以调证密钥用途/审计。
+    // initSign 抓算法+(托管密钥)alias；update 攒被签明文；sign 出签名值。托管私钥不可导，但 alias 可凭以分析密钥用途/审计。
     try {
         var Sig = Java.use('java.security.Signature');
         var SystemS = Java.use('java.lang.System');

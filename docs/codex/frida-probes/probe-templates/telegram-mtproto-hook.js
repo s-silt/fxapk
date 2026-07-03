@@ -1,5 +1,5 @@
 // telegram-mtproto-hook.js — 在 Telegram/TLRPC 层抓登录账号+聊天明文+MTProto 接入节点，不破 MTProto 加密
-// 适用：杀猪盘大量 Telegram/XIN 二开改包(im.xtvslvextn.* / im.rightkinghts.messenger 等)；普通抓包 endpoint=0(MTProto 自建协议、HTTP 代理看不见)
+// 适用：目标样本大量 Telegram/XIN 二开改包(im.xtvslvextn.* / im.rightkinghts.messenger 等)；普通抓包 endpoint=0(MTProto 自建协议、HTTP 代理看不见)
 // 跑：frida -U -f <包名> -l telegram-mtproto-hook.js -q   （改包加固时配 memdex-dump.js 先释放真实 DEX，类才挂得上）
 // 改：类名被混淆/换包名→脚本自动 enumerateLoadedClasses 匹配含 ConnectionsManager/TL_auth 的真实类；命中后把 console 里打印的真实类名填进 CAND_* 数组即可稳定复跑
 'use strict';
@@ -143,7 +143,7 @@ Java.perform(function () {
   }
 
   /* ========== 1) ConnectionsManager.sendRequest —— 所有出站 TL 请求的统一入口 ========== */
-  // 抓到：每个发出去的请求对象(登录/发消息/拉更新都从这过) → 调证锚点=登录账号/手机号、聊天内容
+  // 抓到：每个发出去的请求对象(登录/发消息/拉更新都从这过) → 溯源锚点=登录账号/手机号、聊天内容
   // 注意：原版 sendRequest 第 1 参恒为 TLObject 请求体；改包可能把方法重命名/拆出 sendRequestInternal，
   //       故除 sendRequest 外，再按方法名扫含 sendRequest 的混淆变体一并挂。
   function hookOneMethodByName(C, mn, tag) {
@@ -378,7 +378,7 @@ Java.perform(function () {
 /* ============================================================
  *  native 兜底：org.telegram.tgnet 的核心走 libtmessages.*.so(JNI)，
  *  Java 层 sendRequest 若被改包绕过，可在 native connect 抓接入节点 IP:port。
- *  这里只读对端地址(= 接入节点调证锚点)，不碰 MTProto 加密数据。
+ *  这里只读对端地址(= 接入节点溯源锚点)，不碰 MTProto 加密数据。
  *  接入节点 IP:port 的权威来源就是这里——任何真实出站连接(含连失败 SYN_SENT)都打。
  * ============================================================ */
 (function () {

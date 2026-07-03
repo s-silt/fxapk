@@ -1,6 +1,6 @@
 /*
- * 用途: 只读取证——hook MQTT(Paho/HiveMQ)与 XMPP(Smack) 私有 IM 客户端,固证 broker 地址/登录凭据/收发消息明文,供反诈调证(定人·穿透·固证)。仅打印,不改写不外发。
- * 适用: 涉诈 APK 用自建 MQTT(1883/8883)或 XMPP(5222/5223) 做指令下发/数据回传; 动态抓包见私有 TLS 长连接但 payload 不可读时点亮。
+ * 用途: 只读取证——hook MQTT(Paho/HiveMQ)与 XMPP(Smack) 私有 IM 客户端,固证 broker 地址/登录凭据/收发消息明文,供目标溯源分析(定人·穿透·固证)。仅打印,不改写不外发。
+ * 适用: 目标 APK 用自建 MQTT(1883/8883)或 XMPP(5222/5223) 做指令下发/数据回传; 动态抓包见私有 TLS 长连接但 payload 不可读时点亮。
  * 跑:   frida -U -f <包名> -l mqtt-xmpp-im-hook.js --no-pause   (落盘: frida ... -l mqtt-xmpp-im-hook.js 2>&1 | tee /data/local/tmp/im_evi.log)
  * 改:   类名被混淆 → 用文末 enumerateLoadedClasses 正则自查回填真实类名; HiveMQ API 面随版本变,未命中先跑 dump 自查可用方法名再补 hook。
  */
