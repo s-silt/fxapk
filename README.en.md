@@ -6,38 +6,39 @@
 
 *CLI command `fxapk` (alias `apkscan`); PyPI package `fxapk`.* · **中文**: [README.md](README.md)
 
-> An APK static-analysis CLI for **anti-fraud investigation** — instead of just dumping
-> IPs/domains, it produces an **investigation lead sheet**: every lead answers
-> "**what it is, which company owns it, and whom to subpoena for what evidence**".
+> An APK / iOS IPA **static + dynamic analysis CLI** — extracts app config, network
+> endpoints, third-party components and packer fingerprints, enriches domains/IPs with
+> ownership attribution, and outputs a **structured analysis report**; correlates across samples.
 
 Runs its core features with **zero environment** (`pip install`, no JDK / emulator / device).
-Built for forensics on fraudulent Android apps: it extracts the **real configured key values**
-(AppID / AppKey / AppSecret / channel IDs / uni-app app ID), maps third-party SDKs and packers
-to **subpoena-able owners**, grades domains/IPs by **"investigate vs. skip"**, and surfaces the
-real fraud servers out of hundreds of library/CDN noise entries.
+It extracts the **real configured key values** (AppID / AppKey / AppSecret / channel IDs /
+uni-app app ID), maps third-party SDKs and packers to **registered owners / service providers**,
+classifies domains/IPs by **ownership**, and separates app-owned backends from hundreds of
+library/CDN infrastructure noise entries.
 
-> Disclaimer: this project is for **personal security research / testing**. Any fraud-related findings may be handed to the **relevant authorities** for lawful handling. Terms like "investigate / case-handling / assistance request" only describe lawful evidence-collection paths and imply no official status.
+> Notice: this project is for **authorized security research / analysis** only. It performs
+> static / dynamic analysis and information extraction, and provides **no attack / exploitation /
+> active-probing capability against any third party**. Use only within lawful authorization.
 
 ---
 
 ## What it produces (the key difference)
 
-Ordinary tools tell you "GeTui SDK detected"; fxapk tells you **the value + the owner + the advice**:
+Ordinary tools just tell you "some push SDK detected"; fxapk gives you **the value + the owner + ownership class**:
 
 ```
-Plugins / Config keys (CONFIG_KEY)
-  GETUI_APPID    = aBcD1234EfGh5678   -> Getui (Each Interactive Co., Ltd.)   [INVESTIGATE]
-  PUSH_APPSECRET = zZ9yX8wV7uT6sR5q   -> Getui                                [INVESTIGATE, strong cred]
-  __UNI__        = __UNI__A1B2C3D     -> DCloud (Digital Heaven, Beijing)     [INVESTIGATE]
+Config keys (CONFIG_KEY)
+  PUSH_APPID     = aBcD1234EfGh5678   -> push provider (example)        [app-owned, focus]
+  PUSH_APPSECRET = zZ9yX8wV7uT6sR5q   -> push provider (example)        [strong cred]
+  UNIAPP_ID      = __UNI__A1B2C3D     -> cross-platform framework (ex.) [focus]
    (illustrative, redacted values)
 
-Main-control domains (INVESTIGATE -- app-owned / suspected C2)
-  *.api-xxxxx.vip   -> ask registrar / ICP filing / cloud provider for owner & tenant
-Associated domains / IPs (SKIP -- known infrastructure, collapsed)
-  api.map.baidu.com / *.myqcloud.com / getui.net ...
+App-owned / suspected backend domains (focus)
+  *.api-xxxxx.vip   -> owner via registrar / ICP filing / cloud provider
+Third-party infrastructure (skip, collapsed by default)
+  map / push / public CDN shared domains ...
 
-Advice: with the AppSecret above, ask [Getui] for the developer's real-name account,
-        app registration entity, and push delivery logs.
+Note: the config values above trace back to the provider-side registration entity and app info.
 ```
 
 Actual rendered HTML report (**demo, redacted data**):
@@ -96,7 +97,7 @@ fxapk auto app.apk --out out  # one command end to end; prompts you to operate t
 
 | Command | What it does |
 |---|---|
-| `analyze APK` | static analysis (zero-env) → investigation lead sheet; with `--dynamic` and a device, auto unpack+capture and **merge runtime endpoints back into the main report** |
+| `analyze APK` | static analysis (zero-env) → structured lead sheet; with `--dynamic` and a device, auto unpack+capture and **merge runtime endpoints back into the main report** |
 | `auto APK` | one-click: `doctor`→static→unpack→capture→merge into one report (dynamic steps skipped if no device) |
 | `doctor` | env health check: online device / root / ABI / host frida / device frida-server / mitmproxy / CA, per-item `[OK]`/`[FAIL]`; `--fix` auto-fixes (deploy frida-server, install CA); exits 1 when a critical item fails |
 | `unpack APK` | rooted-device unpack: frida-dexdump dumps hidden DEX, re-analyzed |
@@ -118,22 +119,28 @@ Output: `out/report.html` (self-contained), `out/report.json`, `out/report.pdf`.
 `config_keys` (★ real `key=value` + owner), `sdk_fingerprint` (SDK → vendor),
 `payment` (aggregators / merchant IDs / USDT / wallet addresses), `endpoints`
 (URLs/domains/IPs, strict denoise), `js_bundle` (extract from JS string literals in
-uni-app/H5/RN bundles), `jadx` (deep decompile, needs jadx), `packing` (hardening vendor;
+uni-app/H5/RN bundles), `crypto_recipe` (app-layer crypto recipe from bundled JS, for offline decryption),
+`re_toolkit` (identifies bundled runtime hook / anti-debug / anti-analysis capability — defensive
+detection, no exploitation — to gauge dynamic-observation feasibility and correlate),
+`native_obfuscation` (native `.so` encryption / virtualization heuristic: high entropy + few readable
+strings → native logic not statically recoverable, prefer runtime observation; heuristic signal, not exact),
+`jadx` (deep decompile, needs jadx), `packing` (packer identification;
 **evidence-tiered** — only a real `.so`/feature file marks it hardened, bare dex name strings
 are downgraded to a note, avoiding false positives),
 `certificate` (cross-sample dev correlation), `contacts` (QQ/WeChat/Telegram/email/phone),
-`permissions` / `components` / `manifest` / `crypto`.
+`permissions` / `components` / `manifest` / `crypto`, `ios_plist` (iOS IPA: Info.plist display name /
+URL scheme / ATS cleartext / permission usage).
 
 Enrichers (online, `--offline` to disable, cached, **concurrent** lookups for suspicious endpoints):
 `rdap` (HTTPS — registrar/dates/status/NS, more reliable than port-43 whois, falls back to `whois`),
 `whois`, `icp`, `dns` (DoH resolve domain→IP + hosting cloud lookup, to locate the real backend), `asn`.
-Investigate-vs-skip grading lives in `core/infra.py` (known infra/CDN/libs → skip).
+Ownership grading lives in `core/infra.py` (known infra/CDN/libs → skip).
 
 ---
 
 ## Dynamic completion (doctor / auto / unpack / capture)
 
-Real-hardened apps hide the true C2 from static analysis; you unpack + capture on a rooted
+Hardened apps hide the true backend from static analysis; you unpack + capture on a rooted
 device/emulator. **With a device attached, just use `fxapk auto`**; or run steps individually:
 
 ```bash
@@ -148,7 +155,7 @@ device ABI + host frida version (stdlib-only download) and **install the mitmpro
 system trust store** (root). When it can't, it degrades honestly with copy-paste commands —
 the HTTPS-decryption linchpin never fakes success.
 **Runtime endpoints merged back**: `auto` / `analyze --dynamic` fold captured runtime endpoints
-(the real C2, `source=runtime`) into the same lead sheet and re-render the report.
+(`source=runtime`) into the same lead sheet and re-render the report.
 **No device/tools** → those steps return `status=skipped` with a copy-paste playbook; the static
 report is still produced. See [docs/dynamic-setup.md](docs/dynamic-setup.md) for device/emulator
 setup (adb connect, root, ARM compatibility, frida version match, CA install).
@@ -157,12 +164,12 @@ setup (adb connect, root, ARM compatibility, frida version match, CA install).
 
 ## Compliance
 
-For **authorized anti-fraud investigation / security research** only. It performs analysis and
-lead extraction; it provides **no attack / exploitation / active-probing capability against any
+For **authorized security research / analysis** only. It performs analysis and information
+extraction; it provides **no attack / exploitation / active-probing capability against any
 third-party server**. Hardening is detected, not stripped (unpacking is an optional on-device step
-that observes the **sample itself** on your own authorized forensics device). Overseas servers are
+that observes the **sample itself** on your own authorized device). Overseas servers are
 only **passively attributed** (RDAP / WHOIS / ICP / ASN / DNS / certificate transparency) to locate
-the real origin IP and extract unique identifiers — **never actively probed or attacked**. Online
+the real origin IP and extract identifiers — **never actively probed or attacked**. Online
 enrichment only queries public WHOIS / ICP / ASN data.
 
 ## License

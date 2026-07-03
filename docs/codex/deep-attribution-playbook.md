@@ -1,10 +1,10 @@
-# Codex 深度归因与调证 Playbook —《技术侦查与调证建议报告》标准
+# Codex 深度归因与溯源 Playbook —《技术溯源与归属分析报告》标准
 
-> 给驱动 fxapk 的 agent（Codex）用：拿到 fxapk 报告里「建议调证」的后端**域名 / IP / 标识符**后，对服务器基础设施做**深度归因 + 调证建议**，产出一份《技术侦查与调证建议报告》。**向下挖，不复述** fxapk / 上游 PDF 的结论。
+> 给驱动 fxapk 的 agent（Codex）用：拿到 fxapk 报告里「建议调证」的后端**域名 / IP / 标识符**后，对服务器基础设施做**深度归因 + 溯源建议**，产出一份《技术溯源与归属分析报告》。**向下挖，不复述** fxapk / 上游 PDF 的结论。
 >
-> 何时触发：用户要"深挖某域名/IP""做归因/调证报告""找真实源站/运营主体"，或 fxapk 给出建议调证端点后要进一步落到**可调证对象**时。
+> 何时触发：用户要"深挖某域名/IP""做归因/溯源报告""找真实源站/运营主体"，或 fxapk 给出建议调证端点后要进一步落到**可溯源对象**时。
 >
-> 性质声明：本项目为**个人安全研究 / 测试**用途；分析中如发现涉诈线索，可提供给**相关部门**依法处置。文中"调证 / 协查 / 办案机关"等仅说明合法取证路径，不代表任何官方身份。
+> 性质声明：本项目为**个人安全研究 / 测试**用途；分析中如发现异常线索，可提供给**授权方**依规处置。文中"溯源 / 归属分析"等仅说明合规分析路径，不代表任何官方身份。
 
 ## 四条铁律（不可破）
 
@@ -21,10 +21,10 @@
 
 ## 工具与数据源（操作机已装两件套，优先用这俩，别空跑外部付费源）
 
-**① fxapk（本仓库 `s-silt/fxapk`）** — APK 取证主入口：`analyze`/`auto` 出端点 / IP / 标识符 + 富化（rdap/whois/icp/dns/asn/shodan/webcheck）；`digest` 取重点；`graph` 串案；`track` 台账。深度归因的输入来自它的 `report.json`（`endpoints[].enrichment`、`overseas_targets`、`leads`）。
+**① fxapk（本仓库 `s-silt/fxapk`）** — APK 取证主入口：`analyze`/`auto` 出端点 / IP / 标识符 + 富化（rdap/whois/icp/dns/asn/shodan/webcheck）；`digest` 取重点；`graph` 跨样本关联；`track` 台账。深度归因的输入来自它的 `report.json`（`endpoints[].enrichment`、`overseas_targets`、`leads`）。
 
 **② web-check（`lissy93/web-check`，自托管，无需 key = 实测级）** — 对域名 / IP 一把抓 OSINT。两种用法：
-- **优先 · 经 fxapk 自动集成**：设 `FXAPK_WEBCHECK_URL=http://localhost:3000`（按本机实际端口），fxapk 的 webcheck 富化器即对「建议调证」端点自动跑 curated 检查（location/get-ip/whois/dns/dnssec/ssl/http-security/tech-stack/ports/mail-config/threats/subdomains/redirects/archives/firewall），结果直接进辖区分流 / 境外源站归属 / 串案 / `report.json`。→ **Codex 先把这个环境变量设上，跑 fxapk 就顺带拿到 web-check 数据。**
+- **优先 · 经 fxapk 自动集成**：设 `FXAPK_WEBCHECK_URL=http://localhost:3000`（按本机实际端口），fxapk 的 webcheck 富化器即对「建议调证」端点自动跑 curated 检查（location/get-ip/whois/dns/dnssec/ssl/http-security/tech-stack/ports/mail-config/threats/subdomains/redirects/archives/firewall），结果直接进归属分流 / 境外源站归属 / 关联 / `report.json`。→ **Codex 先把这个环境变量设上，跑 fxapk 就顺带拿到 web-check 数据。**
 - **深挖 · 直接打 API**：对单个可疑目标逐项 `curl 'http://localhost:3000/api/<check>?url=<域名或IP>'`。
 
 **侦察动作 → 工具映射**：
@@ -56,19 +56,19 @@
 
 **写探针标准做法**：写一段 frida JS hook 上述方法，把**明文 URL / 参数 / WS 帧 / 解密后体**打到 console（探针在命中高价值锚点处打 `[tag][LEAD-...]` 标记）；`frida -U -f <包名> -l probe.js -o probe.log -q` 启动并触发对应功能、**落盘** `probe.log`。
 
-**回灌进调证线索（一条命令）**：
+**回灌进归属线索（一条命令）**：
 ```
-fxapk probe-leads probe.log                     # 聚成调证台账（按 LeadCategory 分组 + 调证落点 + 取证完备性诊断）
+fxapk probe-leads probe.log                     # 聚成归属台账（按 LeadCategory 分组 + 溯源落点 + 取证完备性诊断）
 fxapk probe-leads probe.log --into report.json  # 直接把探针线索回灌进 fxapk 报告的 leads（去重、source=runtime-probe）
 ```
-台账末尾的「**取证完备性**」会诊断**定人 / 穿透 / 固证**三轴哪类没抓到、该补跑哪个探针——照它补抓。回灌后探针线索与 fxapk 静态/动态线索同构，一起进报告渲染、串案、套打调证函（`fxapk letters`）。
+台账末尾的「**取证完备性**」会诊断**定人 / 穿透 / 固证**三轴哪类没抓到、该补跑哪个探针——照它补抓。回灌后探针线索与 fxapk 静态/动态线索同构，一起进报告渲染、跨样本关联、套打归属文书（`fxapk letters`）。
 
-**frida 上不去 / 解不开 → 带外 pcap（`fxapk pcap-leads`）**：反 frida 秒退、TLS pinning、MTProto 等自建协议（`endpoint_total=0`）时，**不碰 App 本体**抓一份带外 pcap（网关/旁路由 `tcpdump`、设备端 `PCAPdroid` 免 root 导出、Wireshark），照样能拿**真实接入节点 IP:port + TLS SNI + DNS**——这就是穿透真源站的调证锚点（**解不开密文也能办案**，北极星）：
+**frida 上不去 / 解不开 → 带外 pcap（`fxapk pcap-leads`）**：反 frida 秒退、TLS pinning、MTProto 等自建协议（`endpoint_total=0`）时，**不碰 App 本体**抓一份带外 pcap（网关/旁路由 `tcpdump`、设备端 `PCAPdroid` 免 root 导出、Wireshark），照样能拿**真实接入节点 IP:port + TLS SNI + DNS**——这就是穿透真源站的溯源锚点（**解不开密文也能溯源**，北极星）：
 ```
-fxapk pcap-leads capture.pcap                     # 台账：接入节点 IP:port + SNI + DNS（IP/DOMAIN 分组 + 调证落点）
+fxapk pcap-leads capture.pcap                     # 台账：接入节点 IP:port + SNI + DNS（IP/DOMAIN 分组 + 溯源落点）
 fxapk pcap-leads capture.pcap --into report.json  # 回灌 report.leads（source=runtime-pcap，去重）
 ```
-纯标准库解析（不需 dpkt/scapy/tshark）；公网接入节点→`IP` 线索、SNI/DNS→`DOMAIN`（经 infra 分级）、私网自动过滤。**与探针互补**：探针拿明文/落地数据（定人+固证），pcap 拿接入节点 IP/SNI（穿透），两边 `--into` 同一 report.json 合并串案。
+纯标准库解析（不需 dpkt/scapy/tshark）；公网接入节点→`IP` 线索、SNI/DNS→`DOMAIN`（经 infra 分级）、私网自动过滤。**与探针互补**：探针拿明文/落地数据（定人+固证），pcap 拿接入节点 IP/SNI（穿透），两边 `--into` 同一 report.json 合并跨样本关联。
 
 **循环**：选库探针/写探针 → 抓到明文 → `probe-leads` 看台账缺哪类 → 按完备性诊断补跑 → 直到三轴齐、拿到后端端点与聊天内容。**这是默认要求，不是可选**——标准抓包抓不到的客服系统/自建协议，就靠探针库 + 自写探针 hook 才拿下。
 
@@ -90,28 +90,28 @@ fxapk pcap-leads capture.pcap --into report.json  # 回灌 report.leads（source
 | 腾讯云 EdgeOne / 网宿 / 白山 / 华为云 CDN | 各自 HTTP 头特征 | 无对应特征即判"无证据" |
 | AWS CloudFront vs 裸 S3 | CloudFront：自定义证书 / `x-amz-cf-*`；S3：`Server: AmazonS3`、`x-amz-request-id`、404 体 `NoSuchBucket` | 区分加速层与静态桶；桶删则 content 不可得 |
 
-★ 核心：**识别"边缘/代理层"≠"真实源站"**。务必标注真实回源是否被屏蔽（被屏蔽则只能靠调证穿透）。
+★ 核心：**识别"边缘/代理层"≠"真实源站"**。务必标注真实回源是否被屏蔽（被屏蔽则只能靠溯源穿透）。
 
-## 调证优先级（辖区驱动——本办案核心口径）
+## 归属优先级（归属驱动——本分析核心口径）
 
-按"现实可行性 + 能否穿透隐源"排，**不是按技术显眼度**。每条注：调证对象 / 法律路径 / 现实可行性。
+按"现实可行性 + 能否穿透隐源"排，**不是按技术显眼度**。每条注：归属对象 / 处置路径 / 现实可行性。
 
-| 优先级 | 调证对象 | 法律路径 | 现实可行性 |
+| 优先级 | 归属对象 | 处置路径 | 现实可行性 |
 |---|---|---|---|
-| **P0** | **境内云/IDC 实例运营方 / 承租主体**（阿里云/腾讯云/华为云…，含 ESA/ENS/ECS） | 境内办案机关依《反电诈法》《网安法》协查函直接调取 | 高（境内直达；能解出**真实回源 IP + 实名账户 + 支付流水 + 全部轮换域 + 访问日志**——穿透隐源的钥匙） |
-| P1 | 境内 IDC / 运营商（电信·联通·移动省网） | 境内办案机关协查 IP 承租记录 | 高（承租方常指向云厂商，与 P0 联动穿透） |
-| P2 | 属地办案机关（经侦 / 反诈） | 受害人立即报案 | 高（启动一切刑事调证的前提） |
+| **P0** | **境内云/IDC 实例运营方 / 承租主体**（阿里云/腾讯云/华为云…，含 ESA/ENS/ECS） | 境内授权方依相关法规直接调取 | 高（境内直达；能解出**真实回源 IP + 实名账户 + 支付流水 + 全部轮换域 + 访问日志**——穿透隐源的钥匙） |
+| P1 | 境内 IDC / 运营商（电信·联通·移动省网） | 境内授权方追溯 IP 承租记录 | 高（承租方常指向云厂商，与 P0 联动穿透） |
+| P2 | 属地授权方 | 授权方受理 | 高（启动后续处置的前提） |
 | P3 | 境外注册商 / 客服平台（Gname / Amazon Registrar / Qiabot 等） | 滥用举报促下架 + 持租户 ID 调后台；实名披露走司法协助 | 举报高 / 披露中 |
-| P4 | Cloudflare / AWS | 执法门户 + MLAT/OIA | 低-中（多为账户/付款，无流量日志；删桶后 content 不可得） |
+| P4 | Cloudflare / AWS | 授权方门户 + MLAT/OIA | 低-中（多为账户/付款，无流量日志；删桶后 content 不可得） |
 | P5 | 其它境外（关联站群所在国，如 MOACK/JT） | 对应国司法协助 | 低（跨境，关联案非主案） |
 
-★ 与 fxapk 一致：**国内登记/承租主体 = 最高调证价值**；境外服务器不走调证、走**被动 IP 归属 + 定位真实源站**。即便某端点被 fxapk 标「无需调证」，只要其 ASN/ICP 登记主体是境内提供商，也要捞出来列为调证目标。
+★ 与 fxapk 一致：**国内登记/承租主体 = 最高归属价值**；境外服务器不主动调取、走**被动 IP 归属 + 定位真实源站**。即便某端点被 fxapk 标「无需调证」，只要其 ASN/ICP 登记主体是境内提供商，也要捞出来列为归属目标。
 
 ## 标识符语义研判
 
-`bid / eid / csBid / groupid / agentid` → 商户 / 租户 / 坐席 / 分组 / 渠道 ID。判定：GitHub code search + 搜索引擎**零命中 = 每次部署独立生成的一次性私有 token（反溯源），不是可复用库常量**。价值：持这些 ID 向客服/平台后台调取本租户的坐席账号、**完整聊天记录**（= 诈骗话术直接证据）、访客信息、登录 IP。
+`bid / eid / csBid / groupid / agentid` → 商户 / 租户 / 坐席 / 分组 / 渠道 ID。判定：GitHub code search + 搜索引擎**零命中 = 每次部署独立生成的一次性私有 token（反溯源），不是可复用库常量**。价值：持这些 ID 向客服/平台后台调取本租户的坐席账号、**完整聊天记录**（= 话术直接证据）、访客信息、登录 IP。
 
-## 固定输出结构《技术侦查与调证建议报告》
+## 固定输出结构《技术溯源与归属分析报告》
 
 开头：**证据层级说明** + **执行摘要**（相较上游有哪些深化/修正，≤3 条）。
 
@@ -121,13 +121,13 @@ fxapk pcap-leads capture.pcap --into report.json  # 回灌 report.leads（source
 - **D. 关联域名列表**　**E. 关联 IP 列表**（归属 + 角色：边缘 vs 回源）　**F. ASN 列表**（持有方 vs 真实运营商/承租方）。
 - **G. 系统架构判定**：自建 / 二开 / 第三方；含**对抗核验纠偏**段（写明推翻了哪些原判及依据）。
 - **H. 潜在运营主体 + 标识符语义**。
-- **I. 潜在调证对象 + 调证优先级**（P0–P5 + 法律路径 + 现实可行性）。
-- **J. 调证后最可能获得的数据**（来源 / 可得数据 / 价值星级 ★）。
+- **I. 潜在归属对象 + 归属优先级**（P0–P5 + 处置路径 + 现实可行性）。
+- **J. 溯源后最可能获得的数据**（来源 / 可得数据 / 价值星级 ★）。
 - **K. 建议调取语句**：FOFA / Hunter / ZoomEye / Shodan / Censys / crt.sh / VT / urlscan / 微步 + 指纹比对（**Shodan 有 key 可附实查结果**，其余给语句）。
-- **L. 没做到 / 风险 / 下一步**：风险重点写**证据灭失**（短效证书 / 每日轮换域 / 删桶 → 尽快固证）；下一步固定三条——① 立即报案并固证本报告 ② 向 P0（境内云）调证穿透隐源 ③ 持 ID 调聊天记录与坐席。
+- **L. 没做到 / 风险 / 下一步**：风险重点写**证据灭失**（短效证书 / 每日轮换域 / 删桶 → 尽快固证）；下一步固定三条——① 立即固证本报告并上报授权方 ② 向 P0（境内云）溯源穿透隐源 ③ 持 ID 调聊天记录与坐席。
 
 ## 禁止
 
-编造 key-gated 源的结果；停留在表层复述上游；把边缘节点当真实源站；把可信度「高」乱标在单一来源/推断上；按技术显眼度而非现实可行性排调证优先级。
+编造 key-gated 源的结果；停留在表层复述上游；把边缘节点当真实源站；把可信度「高」乱标在单一来源/推断上；按技术显眼度而非现实可行性排归属优先级。
 
-**把「编码伪域名」当真实域名去调证 / 回溯**：base64 / hex / 随机串里夹了点会被误当域名（如 `aGVsbG8.d29ybGQ.example`），调证不可回溯、纯属噪音。fxapk 的 `classify_domain` 已把这类自动降级为「**待核**」并标原因（"疑似编码/hex/base64/随机串/伪域名"）；**遇到待核 + 该原因的目标，一律人工核、不反查、不写进调证目标**。严格只对 advice=「建议调证」的目标动作。
+**把「编码伪域名」当真实域名去溯源 / 回溯**：base64 / hex / 随机串里夹了点会被误当域名（如 `aGVsbG8.d29ybGQ.example`），溯源不可回溯、纯属噪音。fxapk 的 `classify_domain` 已把这类自动降级为「**待核**」并标原因（"疑似编码/hex/base64/随机串/伪域名"）；**遇到待核 + 该原因的目标，一律人工核、不反查、不写进归属目标**。严格只对 advice=「建议调证」的目标动作。
