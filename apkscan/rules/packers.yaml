@@ -198,3 +198,16 @@ packers:
       - "com.kiwisec."
       - "com.payegis."
     note: "几维安全以 libkwscmm/libkwscr/libkwslinker.so 为典型特征。"
+
+  # ---- dpt-shell（开源 DEX 抽取壳，非商业厂商）-------------------------
+  - name: "dpt-shell 抽取壳 (开源)"
+    vendor: "开源自研壳（luoyesiqiu/dpt-shell，无第三方加固厂商——脱壳后静态补全 / 向开发者本人调证）"
+    so_names:
+      - "libdpt.so"
+    dex_prefixes:
+      - "com.luoyesiqiu"
+    note: >-
+      开源 DEX 抽取壳（抽取方法体 NOP 填充、运行时还原）；★ 内置主动反 frida（内存扫 frida-agent
+      命中即崩溃）+ ptrace 反调试 + SO 段 RC4 加密。命中 = 需脱壳（真实 DEX 不完整）且 frida
+      抓包会被主动击败——配 sample_runtime_compat 反检测或退旁路 pcap。其运行时依赖
+      libdobby.so + libbytehook.so（另由 re_toolkit 识别，可交叉佐证）。
