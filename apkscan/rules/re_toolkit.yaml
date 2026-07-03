@@ -1,0 +1,114 @@
+# 逆向 / Hook / 反检测工具链指纹库 —— 识别样本内置的 RE/hook/反分析能力。
+#
+# 由 apkscan.analyzers.re_toolkit 通过 registry.load_rules("re_toolkit") 读取。
+# 顶层为 dict，含两个键：
+#   tools : list[规则]，每个工具/框架一条
+#   meta  : 全局兜底文案
+#
+# ★ 定位与边界：本库是**防御性威胁情报**——识别样本内置了哪些 hook/反检测工具，
+#   用于研判「疑运行时劫持能力」并预判「fxapk 动态抓包是否会被反检测击败」，
+#   以及作为团伙工具链指纹并簇串案。**只识别、不利用**，绝不含任何攻击/利用代码。
+#
+# 每条 tool 规则字段：
+#   name         : 工具/框架展示名
+#   category     : hook_framework（运行时 hook 能力） | evasion（反检测/反分析） | instrumentation（插桩/注入）
+#   capability   : 该工具赋予样本的能力（人读，写入 Finding/notes）
+#   so_names     : .so 库名特征（匹配 native_libs()+list_files() 的 basename，大小写不敏感）→ 强证据
+#   files        : 资源/assets 特征路径子串（匹配 list_files()，大小写不敏感）→ 强证据
+#   dex_prefixes : DEX 类名包前缀/字符串特征（匹配 dex_strings()，子串比较）→ 中证据
+#   anti_frida   : true 表示该工具会**主动击败/规避 frida** → 触发 capture_plan 反 frida 告警（默认 false）
+#   note         : 补充说明（写入 Finding.notes）
+#
+# 置信度（分析器实现）：so/files 命中 = 强；仅 dex 包名命中 = 中。任一命中即产 Finding。
+
+meta:
+  reference: "https://developer.android.com/topic/security"
+
+tools:
+  # ======================================================================
+  # Hook 框架 —— 内置即具备运行时 hook 能力（结合无障碍权限 → 疑劫持银行/支付、无障碍远控）
+  # ======================================================================
+  - name: "ShadowHook (字节 Android inline hook)"
+    category: "hook_framework"
+    capability: "native inline hook（thumb/arm32/arm64）"
+    so_names:
+      - "libshadowhook.so"
+      - "libshadowhook_nothing.so"
+    dex_prefixes:
+      - "com.bytedance.shadowhook"
+    note: "字节开源 native inline hook；样本内置 = 具备原生层函数劫持能力，★ 结合无障碍/辅助功能权限疑运行时劫持。"
+
+  - name: "ByteHook (字节 PLT hook)"
+    category: "hook_framework"
+    capability: "native PLT/GOT hook"
+    so_names:
+      - "libbytehook.so"
+    dex_prefixes:
+      - "com.bytedance.android.bytehook"
+    note: "字节开源 PLT hook（bhook）；亦为 dpt-shell 抽取壳的运行时依赖，需结合加固识别综合研判。"
+
+  - name: "GlossHook (native hook)"
+    category: "hook_framework"
+    capability: "native inline/PLT/GOT hook"
+    so_names:
+      - "libGlossHook.so"
+    note: "开源 native hook 库；样本内置 = 具备原生层函数劫持能力。"
+
+  - name: "LSPlant (ART hook)"
+    category: "hook_framework"
+    capability: "ART Java 方法 hook（LSPosed 系）"
+    so_names:
+      - "liblsplant.so"
+    dex_prefixes:
+      - "org.lsposed.lsplant"
+    note: "LSPosed 系 ART 方法 hook 框架；样本内置 = 具备 Java 层方法劫持能力。"
+
+  - name: "pine (ART hook)"
+    category: "hook_framework"
+    capability: "ART Java 方法 hook（免 Xposed）"
+    dex_prefixes:
+      - "top.canyie.pine"
+    note: "免 Xposed 的 ART 方法 hook 框架；样本内置 = 具备 Java 层方法劫持能力。"
+
+  - name: "xDL (Android ELF 符号解析)"
+    category: "hook_framework"
+    capability: "绕过 linker namespace 解析 .so 符号（hook 前置能力）"
+    so_names:
+      - "libxdl.so"
+    note: "增强版 dlopen/dlsym，绕过 Android 7+ linker namespace 限制解析导出/导入符号；hook 框架常用前置。"
+
+  - name: "Dobby (inline hook 后端)"
+    category: "hook_framework"
+    capability: "native inline hook 后端引擎"
+    so_names:
+      - "libdobby.so"
+    note: "常见 native inline hook 引擎；亦为 dpt-shell 抽取壳依赖，需结合加固识别综合研判。"
+
+  # ======================================================================
+  # 反检测 / 反分析 —— 内置即可能击败 fxapk 的 frida 动态抓包
+  # ======================================================================
+  - name: "LibcoreSyscall (纯 Java 直 syscall)"
+    category: "evasion"
+    capability: "纯 Java 直接 Linux syscall + 内存加载 ELF（绕过 libc/Java hook 层）"
+    dex_prefixes:
+      - "dev.tmpfs.libcoresyscall"
+    anti_frida: true
+    note: "★ 直接 syscall 绕过 libc/Java hook 层，fxapk 的 frida hook 可能静默失效（抓不到≠没有）；内存加载 ELF 无落盘。检测到即应换打法（旁路 pcap / tls-keylog / 内核层）。"
+
+  - name: "AndroidHiddenApiBypass (LSPass)"
+    category: "evasion"
+    capability: "绕过 Android 非 SDK 接口（hidden-api）限制"
+    dex_prefixes:
+      - "org.lsposed.hiddenapibypass"
+    note: "LSPosed 系 hidden-api 绕过；反射调用系统隐藏接口，常与 hook/反检测配套出现。"
+
+  - name: "Frida Gadget (内嵌 frida)"
+    category: "instrumentation"
+    capability: "样本内嵌 frida gadget（自我插桩/注入）"
+    so_names:
+      - "libgadget.so"
+      - "libfrida-gadget.so"
+    files:
+      - "frida-gadget"
+      - "libfrida-gadget.config.so"
+    note: "样本自身内嵌 frida gadget = 具备运行时自我插桩/注入能力（疑用于劫持其它 app 或动态改包），强异常信号。"
