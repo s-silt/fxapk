@@ -1,5 +1,5 @@
 // objstore-config-hook.js — 识别多云对象存储(阿里OSS/百度BOS/天翼ZOS/腾讯COS)的「配置/资源下发」，抓 bucket名/账户锚点[OBJSTORE锚点] + 把下发配置正文打全 + 正则抽里头真后端域名/IP/wss[BACKEND]
-// 适用：杀猪盘改包冷启动从对象存储多云分散(抗封堵)拉配置/资源，真后端常只写在「下发配置正文」里；对象存储域是分发层≠源站，但 bucket名/账户=可调证锚点，配置正文=穿透到真源站
+// 适用：目标样本改包冷启动从对象存储多云分散(抗封堵)拉配置/资源，真后端常只写在「下发配置正文」里；对象存储域是分发层≠源站，但 bucket名/账户=可溯源锚点，配置正文=穿透到真源站
 // 跑：frida -U -f <包名> -l objstore-config-hook.js -q   （必须 -f spawn：配置下发在 Application 极早期，attach 会漏掉冷启动那几次拉取）
 // 改：(1) OBJSTORE_HOST_RE 现场按命中的对象存储域增删；(2) BACKEND_RE 按目标配置里的字段名(base_url/wss/line/node)调；(3) 响应读取兜底已覆盖 OkHttp/URLConnection/InputStream/String，仍空→配 native-ssl-hook.js(密文)/cipher-hook.js(配置加密)
 'use strict';
@@ -94,7 +94,7 @@ function _asText(bytes) {
 // ============================================================
 // 对象存储 host 识别：阿里OSS(含加速)、百度BOS、天翼ZOS、腾讯COS。现场命中新域照此增删。
 var OBJSTORE_HOST_RE = /(\.aliyuncs\.com|oss-accelerate|\.bcebos\.com|\.zos\.ctyun\.cn|\.myqcloud\.com|cos[.-][a-z0-9-]*\.myqcloud)/i;
-// 从对象存储 host 提取「bucket / 账户锚点」：<bucket>.<region>.<provider> 里最左段就是 bucket(=调证最关键锚点)。
+// 从对象存储 host 提取「bucket / 账户锚点」：<bucket>.<region>.<provider> 里最左段就是 bucket(=溯源最关键锚点)。
 // 例: f3f14c7c42079085.oss-accelerate.aliyuncs.com -> bucket=f3f14c7c42079085
 //     ba63692667a911cc.gz.bcebos.com               -> bucket=ba63692667a911cc
 //     206af95ca203dfe6.jiangsu-10.zos.ctyun.cn     -> bucket=206af95ca203dfe6
@@ -141,7 +141,7 @@ function _hostOf(u) {
 function _isObjStore(u) {
     try { return OBJSTORE_HOST_RE.test('' + u); } catch (e) { return false; }
 }
-// 命中一个对象存储 URL → 记 [OBJSTORE锚点]（bucket名/账户 = 向云厂商调 bucket 创建者实名/对象上传日志/访问 IP 的最关键锚点）
+// 命中一个对象存储 URL → 记 [OBJSTORE锚点]（bucket名/账户 = 向云厂商溯源 bucket 创建者实名/对象上传日志/访问 IP 的最关键锚点）
 function _noteObjStore(url, where) {
     try {
         if (!_isObjStore(url)) return false;
@@ -319,7 +319,7 @@ Java.perform(function () {
     } catch (e) { console.log('[objstore][strbody] String hook skip: ' + e); }
 
     // ============ E. DNS 兜底：对象存储域名 → 解析到的边缘 IP（标注分发层、非源站） ============
-    // 即使响应抓不到，命中对象存储域的 DNS 也固化了 bucket host = 调证锚点。
+    // 即使响应抓不到，命中对象存储域的 DNS 也固化了 bucket host = 溯源锚点。
     try {
         var InetAddress = Java.use('java.net.InetAddress');
         var dnsImpl = function (host) {

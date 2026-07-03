@@ -9,10 +9,12 @@ Java.perform(function () {
   try {
     var Rt = Java.use('java.lang.Runtime');
     Rt.exec.overloads.forEach(function (ov) {
-      ov.implementation = function () {
-        try { console.log('[exec][Runtime.exec] ' + arr2str(arguments[0])); } catch (e) {}
-        return ov.apply(this, arguments);
-      };
+      try {
+        ov.implementation = function () {
+          try { console.log('[exec][Runtime.exec] ' + arr2str(arguments[0])); } catch (e) {}
+          return ov.apply(this, arguments);
+        };
+      } catch (e) { console.log('[exec][Runtime.exec] overload skip: ' + e); }
     });
     console.log('[exec] Runtime.exec hooked');
   } catch (e) { console.log('[exec] Runtime.exec skip: ' + e); }
@@ -41,7 +43,7 @@ Java.perform(function () {
         }
       });
       console.log('[exec] native ' + name + ' hooked');
-    } catch (e) {}
+    } catch (e) { console.log('[exec] native ' + name + ' skip: ' + e); }
   });
 
   console.log('[exec] ready');

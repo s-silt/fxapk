@@ -20,7 +20,7 @@ Java.perform(function () {
         return ov.apply(this, arguments);
       };
     });
-  } catch (e) {}
+  } catch (e) { console.log('[loadlib] Runtime.loadLibrary0 skip: ' + e); }
 
   // native 层：dlopen / android_dlopen_ext —— 最全，含 app 内部 dlopen 释放的 .so
   ['dlopen', 'android_dlopen_ext'].forEach(function (name) {
@@ -35,7 +35,7 @@ Java.perform(function () {
         }
       });
       console.log('[loadlib] native ' + name + ' hooked');
-    } catch (e) {}
+    } catch (e) { console.log('[loadlib] native ' + name + ' skip: ' + e); }
   });
 
   console.log('[loadlib] ready —— 把承载加密/TLS 的 .so 名喂给 native-ssl-hook.js 的模块列表');
