@@ -1,5 +1,5 @@
 // coldstart-config-hook.js — 冷启动/无账号阶段聚合记录所有出站URL+响应体+DNS/SNI/connect目标+内嵌配置，专捞登录前可见域名/IP/配置端点并标注疑似租户配置端点
-// 适用：杀猪盘冷启动先拉一圈配置(CDN/OSS/配置中心)，真后端只在按企业号下发的配置响应里；无账号想把登录前能拿的域名/IP/配置端点一次抓全
+// 适用：目标样本冷启动先拉一圈配置(CDN/OSS/配置中心)，真后端只在按企业号下发的配置响应里；无账号想把登录前能拿的域名/IP/配置端点一次抓全
 // 跑：frida -U -f <包名> -l coldstart-config-hook.js -q   （必须 -f spawn，attach 已起进程会漏掉最早几个请求）
 // 改：(1) TENANT_HINT_RE/RESP_BACKEND_RE 现场按目标参数名调；(2) 纯Flutter/native看 [conn] socket兜底给IP；(3) 密文响应配 cipher-hook.js / native-ssl-hook.js；(4) ASSET_NAME_RE 放宽可全量dump assets；(5) OkHttp 类名按版本：3.x=okhttp3.RealCall，4.x=okhttp3.internal.connection.RealCall（本脚本两者都试）
 'use strict';
@@ -106,7 +106,9 @@ Java.perform(function () {
             console.log('[coldstart][http] OkHttp3 RealCall 未找到(试了 ' + candidates.join(' / ') + ')，可能非OkHttp栈，看下面 URLConnection / socket 兜底');
             return;
         }
-        var Buffer = Java.use('okio.Buffer');
+        var Buffer;
+        try { Buffer = Java.use('okio.Buffer'); }
+        catch (e) { console.log('[coldstart][http] okio.Buffer 不可用，跳过 OkHttp 段: ' + e); return; }
         function _reqBody(req) {
             try {
                 var body = req.body();

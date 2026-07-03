@@ -1,4 +1,4 @@
-// anti-detection-hook.js — 绕 root/frida/模拟器/调试检测,让秒退的涉诈样本能被动态分析(其它探针的前置)。
+// anti-detection-hook.js — 绕 root/frida/模拟器/调试检测,让秒退的目标样本能被动态分析(其它探针的前置)。
 // 适用:症状④——点开秒退/注入即死/弹"检测到风险环境"自杀,导致 5 个抓包探针全抓不到。
 // 跑:frida -U -f <包名> -l anti-detection-hook.js -q   (通常和 ssl-unpinning-hook.js 一起 -l 多文件注入)
 // 改:① classify() 的 token 表按现场样本补;② Build spoof 表改成你靶机真机机型;③ 纯 native 检测靠下面 native 段,符号现场可调;④ 绕过后仍秒退就先注释 ptrace 段二分定位。
