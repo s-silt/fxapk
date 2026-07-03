@@ -81,7 +81,7 @@ class _Deeplink:
 
 
 class DeeplinkSurfaceAnalyzer(BaseAnalyzer):
-    """枚举导出组件的 deeplink 外部入口，产 category=\"attack_surface\" 的 Finding。"""
+    """枚举导出组件的 deeplink 外部入口，产 category=\"exported_surface\" 的 Finding。"""
 
     name: str = "deeplink_surface"
     requires: list[str] = ["apk"]  # Android 专属；IPA 上 pipeline 自动 skipped
@@ -245,13 +245,13 @@ class DeeplinkSurfaceAnalyzer(BaseAnalyzer):
         description = (
             f"导出 {dl.kind} 「{dl.component}」注册了 BROWSABLE deeplink：{uri} 。"
             "可被网页 / 短信链接 / 其它 app 经该 scheme 从外部拉起并传入受控数据，"
-            "是 intent 注入 / scheme 劫持 / 诱导跳转的入口。" + hint_note
+            "是外部可控数据进入 App 的入口，取证需核查其如何处理传入 URI。" + hint_note
         )
         return Finding(
             id=f"DEEPLINK-{dl.scheme}".upper()[:48],
             title=f"外部可达 deeplink 入口 ({dl.scheme}://)",
             severity=severity,
-            category="attack_surface",
+            category="exported_surface",
             description=description,
             recommendation=(
                 "研判：jadx 跟踪该组件如何处理传入 URI（是否直接喂给 WebView.loadUrl / 拼接"

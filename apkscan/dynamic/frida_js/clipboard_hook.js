@@ -1,4 +1,5 @@
 
+// 取证用途：对取证样本自身在分析机上做运行时观测，产出端点/密钥/独特串等线索，不面向任何第三方基础设施。
 // apkscan 运行时剪贴板链上地址采集（best-effort）：hook ClipboardManager 抓实际剪贴板文本回传。
 Java.perform(function () {
     var _cb_count = 0;

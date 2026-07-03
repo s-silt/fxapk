@@ -1,4 +1,5 @@
 
+// 取证用途：对取证样本自身在分析机上做运行时观测，产出端点/密钥/独特串等线索，不面向任何第三方基础设施。
 // apkscan 运行时凭据采集（best-effort）：OkHttp 加密前明文 request dump（真实 host + token）。
 Java.perform(function () {
     var _cred_count = 0;

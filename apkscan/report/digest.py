@@ -66,10 +66,11 @@ def build_digest(report: object, *, redact: bool = False) -> dict[str, Any]:
     by_advice = Counter(str(lead.get("advice") or "未研判") for lead in leads)
     by_category = Counter(str(lead.get("category") or "?") for lead in leads)
 
-    # 结构化攻击面段（海外服务器：开放端口/服务/CVE/暴露后台/关联子域，按主机聚合，机器可读）。
-    # 由 pipeline 写入 meta["attack_surface"]，已做辖区门控（仅国外+未知）；此处原样透传供 agent 直查。
-    attack_surface = meta.get("attack_surface")
-    attack_surface = attack_surface if isinstance(attack_surface, list) else []
+    # 结构化境外源站段（被动定位的海外后端/控制者：IP 归属/ASN/开放端口/服务 banner/技术栈/关联子域，
+    # 按主机聚合，机器可读）。由 pipeline 写入 meta["overseas_targets"]，已做辖区门控（仅国外+未知）；
+    # 此处原样透传供 agent 直查——纯被动 OSINT 定位，对目标零流量。
+    overseas_targets = meta.get("overseas_targets")
+    overseas_targets = overseas_targets if isinstance(overseas_targets, list) else []
 
     return {
         "package": meta.get("package_name") or report.get("package_name"),
@@ -80,8 +81,8 @@ def build_digest(report: object, *, redact: bool = False) -> dict[str, Any]:
             "by_advice": dict(by_advice),
             "by_category": dict(by_category),
             "comm_sessions": len(meta.get("comm_sessions") or []),
-            "attack_surface_hosts": len(attack_surface),
+            "overseas_target_hosts": len(overseas_targets),
         },
         "leads": [_compact_lead(lead, redact) for lead in leads_sorted],
-        "attack_surface": attack_surface,
+        "overseas_targets": overseas_targets,
     }
