@@ -182,7 +182,7 @@
 - 配 fxapk：直接对接 repackage——脱壳去壳后在重打包阶段顺手注入 gadget + config（指向 capture 的 mitm CA 与 ssl-unpinning 脚本），产出"自带探针"包；listen 起来后 capture 走 `attach` 不变。
 - 坑：**签名校验/完整性自检是头号杀手**（涉诈加固包几乎都查）→改用 C2 Zygisk；加固包重打包可能脱壳不全崩溃；必须用**改名 gadget**否则线程名露馅；报告须标注"动态分析副本"。
 
-> 隐藏层（与注入正交，必配）：**NeoZygisk + Zygisk-Assistant（替代已归档 Shamiko/Zygisk Next）**对抗反root/反Zygisk/部分反模拟器/环境门控。它不产数据，但解锁后续——很多 `endpoint_total=0` 不是加密而是**环境门控没放行真实链路**；隐藏层让配置下发/登录回传真正发生才暴露接入节点与多云对象存储下发源。并入 fxapk doctor 的"环境就绪"前置检查。坑：Play Integrity strong/hardware、SafetyNet 强校验、TEE 绑定不是用户态隐藏能完全绕的。
+> 隐藏层（与注入正交，必配）：**NeoZygisk + Zygisk-Assistant（替代已归档 Shamiko/Zygisk Next）**对抗反root/反Zygisk/部分反模拟器/环境门控。它不产数据，但解锁后续——很多 `endpoint_total=0` 不是加密而是**环境门控没放行真实链路**；隐藏层让配置下发/登录回传真正发生，才能观测到样本自身的接入节点与多云对象存储下发源。并入 fxapk doctor 的"环境就绪"前置检查。坑：Play Integrity strong/hardware、SafetyNet 强校验、TEE 绑定不是用户态隐藏能完全绕的。
 
 ### D 层 · 非网络取证（完全在 frida 之外，反frida样本零影响）
 

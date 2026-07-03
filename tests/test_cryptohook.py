@@ -283,7 +283,7 @@ _FRIDA_JS_FILES: dict[str, str] = {
     "FRIDA_CRYPTO_HOOK_JS": "crypto_hook.js",
     "FRIDA_JSBRIDGE_HOOK_JS": "jsbridge_hook.js",
     "FRIDA_SENSITIVE_API_HOOK_JS": "sensitive_api_hook.js",
-    "FRIDA_ANTIDETECT_JS": "antidetect.js",
+    "FRIDA_ANTIDETECT_JS": "sample_runtime_compat.js",
     "FRIDA_OKHTTP_HOOK_JS": "okhttp_hook.js",
     "FRIDA_SQLCIPHER_HOOK_JS": "sqlcipher_hook.js",
     "FRIDA_CLIPBOARD_HOOK_JS": "clipboard_hook.js",

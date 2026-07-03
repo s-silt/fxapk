@@ -21,11 +21,11 @@ def _ids(result) -> set[str]:
     return {f.id for f in result.findings}
 
 
-def test_url_scheme_attack_surface():
+def test_url_scheme_exported_surface():
     r = _run({"CFBundleIdentifier": "com.x", "CFBundleURLTypes": [{"CFBundleURLSchemes": ["evilpay", "demoapp"]}]})
     assert "IOS-URL-SCHEME" in _ids(r)
     f = next(f for f in r.findings if f.id == "IOS-URL-SCHEME")
-    assert f.category == "attack_surface"
+    assert f.category == "exported_surface"
     assert "evilpay" in f.description
     assert r.meta["ios_url_schemes"] == ["evilpay", "demoapp"]
 

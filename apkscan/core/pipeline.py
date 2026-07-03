@@ -138,7 +138,7 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     #    判据：infra 分级为"建议调证"（疑似 App 自有服务/C2）的域名/IP 才查；已知第三方基础设施/
     #    SDK/CDN（无需调证）、私网/回环/行情代码（待核）一律跳过。省时 + 聚焦调证。
     #    ★ 两遍富化（见 _run_enrichment）：①归属(rdap/whois/dns/asn/icp/webcheck)定辖区 →
-    #      ②攻击面(shodan/recon/cve/certs)仅对【国外+未知】跑；主动探测(recon)仅对【国外】跑。
+    #      ②境外被动取证(shodan/certs)仅对【国外+未知】端点跑（全程被动 OSINT，对目标零流量）。
     enricher_status: list[dict] = []
     if config.online:
         targets = _enrichment_targets(endpoints)
@@ -162,10 +162,10 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     #      避免报告里出现空白的"是否调证"列。已自带 advice 的不覆盖。
     _apply_default_advice(leads)
 
-    # 4.6) 结构化攻击面段（按主机聚合 shodan/recon/cve/certs，机器可读）：供 digest/HTML/Codex
+    # 4.6) 结构化境外目标段（按主机聚合 shodan/certs 的被动定位信号，机器可读）：供 digest/HTML/Codex
     #      直接查询/聚合/交叉比对，免去从 evidence 自然语言串里解析。仅联网富化后有内容。
     if config.online:
-        meta["attack_surface"] = _build_attack_surface(endpoints)
+        meta["overseas_targets"] = _build_overseas_targets(endpoints)
 
     # 5) 组装 Report
     report = Report(
@@ -567,7 +567,7 @@ def _enrich_endpoints(
     """对每个端点按 applies_to 跑匹配的富化器，结果写入 endpoint.enrichment[provider]。
 
     ``gate``（可选）：额外的 (端点, 富化器)→bool 谓词，返回 False 则跳过该富化器（不计入统计）。
-    两遍富化用它把"主动探测（active=True）"门控到仅国外端点；不传则全跑（向后兼容）。
+    不传则对匹配 applies_to 的富化器全跑（向后兼容；本仓当前富化器全部为被动，对目标零流量）。
 
     按端点并发（``ThreadPoolExecutor``，worker 数 = ``ENRICH_MAX_WORKERS``）：富化是
     I/O 密集（whois/rdap 单次可达 ~30s 超时），串行双重循环单包可达 7 分钟，按端点并发
@@ -626,7 +626,7 @@ def _run_enrichers_on_endpoint(
         if ep.kind not in applies_to:
             continue
         if gate is not None and not gate(ep, enricher):
-            continue  # 门控：如主动探测仅国外（非国外端点跳过该富化器，不计统计）
+            continue  # 门控谓词返回 False：跳过该富化器，不计统计
         provider = getattr(enricher, "name", "") or enricher.__class__.__name__
 
         with stats_lock:
@@ -672,8 +672,8 @@ def _note_fail(st: dict, msg: str) -> None:
         st["typical_error"] = msg
 
 
-# attack_surface 阶段的组内顺序：cve 依赖同端点 shodan/recon 写入的指纹，故排在它们之后。
-_ATTACK_SURFACE_ORDER = {"shodan": 0, "recon": 0, "certs": 0, "cve": 1}
+# overseas 阶段的组内顺序（确定性排序；shodan/certs 均被动、互不依赖，固定序保证串行==并行逐字节一致）。
+_OVERSEAS_ORDER = {"shodan": 0, "certs": 1}
 
 
 def _enricher_phase(enricher: BaseEnricher) -> str:
@@ -694,24 +694,24 @@ def _classify_endpoint_jurisdiction(ep: Endpoint) -> str:
             asn=e.get("asn"),
             webcheck=e.get("webcheck"),
         )
-    except Exception:  # noqa: BLE001 — 辖区判定失败不得炸主流程；保守判未知（不触发主动探测）
+    except Exception:  # noqa: BLE001 — 辖区判定失败不得炸主流程；保守判未知（宁可漏归类也不误标辖区）
         logger.debug("辖区判定失败，按未知处理：%s", ep.value, exc_info=True)
         return forensic.JURIS_UNKNOWN
 
 
 def _run_enrichment(targets: list[Endpoint], enrichers: list[BaseEnricher]) -> list[dict]:
     """两遍富化编排（**单遍并发·每端点内两阶段**，无跨端点栅栏）：
-    每个端点在自己的 worker 里串行跑 ①归属(attribution) → 定辖区 → ②攻击面(attack_surface)，
-    端点之间互不等待——慢端点（如 30s WHOIS 超时）不再阻塞其它端点的攻击面（去掉旧版两遍之间的栅栏）。
+    每个端点在自己的 worker 里串行跑 ①归属(attribution) → 定辖区 → ②境外被动取证(overseas)，
+    端点之间互不等待——慢端点（如 30s WHOIS 超时）不再阻塞其它端点的第②阶段（去掉旧版两遍之间的栅栏）。
 
-    第②遍只对【国外 + 未知】端点跑（境内走调证、不做攻击面取证）；其中 **active=True 的主动探测
-    （recon）再收紧到仅【国外 + 建议调证】**。辖区结果仅为 worker 内局部变量，**绝不写入 ep.enrichment**
+    第②遍只对【国外 + 未知】端点跑（境内走调证、不做境外取证）；overseas 富化器全部**被动**
+    （shodan/certs 读公开库，对目标零流量）。辖区结果仅为 worker 内局部变量，**绝不写入 ep.enrichment**
     （避免 ``_jurisdiction`` 等内部键泄漏进 report.json）。
     """
     attribution = [e for e in enrichers if _enricher_phase(e) == "attribution"]
-    attack_surface = sorted(
-        (e for e in enrichers if _enricher_phase(e) == "attack_surface"),
-        key=lambda e: _ATTACK_SURFACE_ORDER.get(getattr(e, "name", ""), 0),
+    overseas = sorted(
+        (e for e in enrichers if _enricher_phase(e) == "overseas"),
+        key=lambda e: _OVERSEAS_ORDER.get(getattr(e, "name", ""), 0),
     )
 
     stats: dict[str, dict] = {}
@@ -720,26 +720,15 @@ def _run_enrichment(targets: list[Endpoint], enrichers: list[BaseEnricher]) -> l
     def _enrich_one_two_phase(ep: Endpoint) -> None:
         # ① 归属富化。
         _run_enrichers_on_endpoint(ep, attribution, stats, stats_lock)
-        if not attack_surface:
+        if not overseas:
             return
         # 定辖区（worker 内局部，绝不写回 ep.enrichment）。
         juris = _classify_endpoint_jurisdiction(ep)
         if juris not in (forensic.JURIS_FOREIGN, forensic.JURIS_UNKNOWN):
-            return  # 境内：走调证、不做攻击面取证
+            return  # 境内：走调证、不做境外被动取证
 
-        def _gate(e: Endpoint, enricher: BaseEnricher) -> bool:
-            # 主动探测（active=True）仅对【国外 + 最终建议调证】放行；被动攻击面对【国外+未知】均放行。
-            # ★ tier 判据：库内置档端点最终判"待核"，即便国外也不主动探测（与 Lead 研判同口径，合规红线）。
-            if getattr(enricher, "active", False):
-                return (
-                    juris == forensic.JURIS_FOREIGN
-                    and infra.effective_advice(e.value, e.enrichment.get("tier"))
-                    == infra.ADVICE_INVESTIGATE
-                )
-            return True
-
-        # ② 攻击面富化（同 worker 内串行，组内顺序由 attack_surface 排序保证 cve 在 shodan/recon 之后）。
-        _run_enrichers_on_endpoint(ep, attack_surface, stats, stats_lock, gate=_gate)
+        # ② 境外被动取证富化（同 worker 内串行，组内顺序由 overseas 排序保证确定性）。
+        _run_enrichers_on_endpoint(ep, overseas, stats, stats_lock)
 
     if targets:
         workers = max(1, min(ENRICH_MAX_WORKERS, len(targets)))
@@ -768,10 +757,8 @@ def build_endpoint_leads(endpoints: list[Endpoint], online: bool = True) -> list
     return leads
 
 
-# 结构化攻击面聚合的展示上限（防个别巨型主机塞爆 meta；完整原始数据仍在 endpoints[].enrichment）。
-_AS_MAX_CVES = 30
-_AS_MAX_PATHS = 30
-_AS_MAX_SUBDOMAINS = 50
+# 结构化境外目标聚合的展示上限（防个别巨型主机塞爆 meta；完整原始数据仍在 endpoints[].enrichment）。
+_OT_MAX_SUBDOMAINS = 50
 
 
 def _as_dict(value: object) -> dict:
@@ -779,13 +766,16 @@ def _as_dict(value: object) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _build_attack_surface(endpoints: list[Endpoint]) -> list[dict]:
-    """把各端点的攻击面富化(shodan/recon/cve/certs)聚合成**结构化、按主机**的列表，写 report.meta。
+def _build_overseas_targets(endpoints: list[Endpoint]) -> list[dict]:
+    """把各端点的境外被动富化(shodan/certs)聚合成**结构化、按主机**的列表，写 report.meta["overseas_targets"]。
 
-    供 digest / HTML / Codex **机器可读**地查询/聚合/交叉比对（端口/服务/CVE/暴露后台/关联子域），
-    免去从 evidence_to_obtain 的自然语言串里解析。辖区门控与渲染层同口径：只收【国外+未知】主机；
-    主动探测字段(exposed_paths/tls/http)只在【国外】收；境内主机不进（境内走调证、不呈现攻击面）。
-    绝不抛（坏字段安全跳过）。
+    供 digest / HTML / Codex **机器可读**地查询/聚合/交叉比对（源站归属/端口/服务/技术栈/关联子域），
+    免去从 evidence_to_obtain 的自然语言串里解析。全程被动 OSINT，对目标零流量。辖区门控与渲染层
+    同口径：只收【国外 + 未知】主机，境内主机不进（境内走调证）。绝不抛（坏字段安全跳过）。
+
+    每条结构（契约 D）：{host, ip, jurisdiction, asn, org, country, ports[],
+    services[{port, product, version}], tech_stack[], related_subdomains[]}
+    ——不含 cves / exposed_paths / active_probed。
     """
     out: list[dict] = []
     for ep in endpoints:
@@ -793,10 +783,9 @@ def _build_attack_surface(endpoints: list[Endpoint]) -> list[dict]:
             continue
         e = _as_dict(ep.enrichment)
         shodan = _as_dict(e.get("shodan"))
-        recon = _as_dict(e.get("recon"))
-        cve = _as_dict(e.get("cve"))
         certs = _as_dict(e.get("certs"))
-        if not (shodan or recon or cve or certs):
+        asn = _as_dict(e.get("asn"))
+        if not (shodan or certs):
             continue
 
         try:
@@ -806,32 +795,37 @@ def _build_attack_surface(endpoints: list[Endpoint]) -> list[dict]:
                 dns=e.get("dns"), asn=e.get("asn"), webcheck=e.get("webcheck"), shodan=shodan,
             )
         except Exception:  # noqa: BLE001 — 辖区判定失败不得炸主流程；保守判未知
-            logger.debug("[attack_surface] 辖区判定失败：%s", ep.value, exc_info=True)
+            logger.debug("[overseas_targets] 辖区判定失败：%s", ep.value, exc_info=True)
             juris = forensic.JURIS_UNKNOWN
         if juris == forensic.JURIS_DOMESTIC:
-            continue  # 境内不呈现攻击面（与渲染层一致）
-        is_foreign = juris == forensic.JURIS_FOREIGN
+            continue  # 境内不呈现境外目标（与渲染层一致）
 
-        entry: dict[str, object] = {"host": ep.value, "kind": ep.kind, "jurisdiction": juris}
+        entry: dict[str, object] = {"host": ep.value, "jurisdiction": juris}
 
-        # CDN 标记：解析 IP 全为反代型 CDN 时标厂商——告知下游/Codex 下列端口是**边缘节点非源站**，
-        # 真实源站需穿透 CDN 另行定位（见 forensic.render_origin_hint）。
-        cdn = forensic.cdn_vendor(e.get("dns"), e.get("asn"))
-        if cdn:
-            entry["cdn"] = cdn
+        # 源站被动归属（shodan 优先，IP 端点用自身值兜底，asn 富化再兜底）：识别真实源站、归属哪。
+        ip = shodan.get("ip") or (ep.value if ep.kind == "ip" else "") or asn.get("ip")
+        if ip:
+            entry["ip"] = ip
+        asn_no = shodan.get("asn") or asn.get("asn")
+        if asn_no:
+            entry["asn"] = asn_no
+        org = shodan.get("org") or shodan.get("isp") or asn.get("org") or asn.get("isp")
+        if org:
+            entry["org"] = org
+        country = shodan.get("country") or asn.get("country")
+        if country:
+            entry["country"] = country
 
-        # 端口（shodan + 主动 recon 开放端口的并集）。
-        ports = {p for p in (shodan.get("ports") or []) if isinstance(p, int)}
-        if is_foreign:
-            ports |= {p for p in (recon.get("open_ports") or []) if isinstance(p, int)}
+        # 端口（shodan 被动扫库）。
+        ports = sorted({p for p in (shodan.get("ports") or []) if isinstance(p, int)})
         if ports:
-            entry["ports"] = sorted(ports)
+            entry["ports"] = ports
 
-        # 服务指纹（shodan：product/version）。
+        # 服务指纹（shodan：port/product/version）。
         services: list[dict] = []
         for s in shodan.get("services") or []:
             if isinstance(s, dict) and s.get("port") is not None:
-                svc: dict[str, object] = {"port": s.get("port"), "source": "shodan"}
+                svc: dict[str, object] = {"port": s.get("port")}
                 if s.get("product"):
                     svc["product"] = s.get("product")
                 if s.get("version"):
@@ -840,61 +834,21 @@ def _build_attack_surface(endpoints: list[Endpoint]) -> list[dict]:
         if services:
             entry["services"] = services
 
-        # CVE 方向（cve 富化结构化 cvss/severity + shodan vulns 补 id；去重）。
-        cves: list[dict] = []
-        seen_cve: set[str] = set()
-        for r in cve.get("cves") or []:
-            if isinstance(r, dict) and isinstance(r.get("id"), str):
-                cid = r["id"].upper()
-                if cid in seen_cve:
-                    continue
-                seen_cve.add(cid)
-                row: dict[str, object] = {
-                    "id": cid, "source": "shodan+nvd" if r.get("reused_from_shodan") else "nvd"
-                }
-                if isinstance(r.get("cvss"), (int, float)):
-                    row["cvss"] = r["cvss"]
-                if r.get("severity"):
-                    row["severity"] = r["severity"]
-                cves.append(row)
-        for v in shodan.get("vulns") or []:
-            if isinstance(v, str) and v.upper() not in seen_cve:
-                seen_cve.add(v.upper())
-                cves.append({"id": v.upper(), "source": "shodan"})
-        if cves:
-            entry["cves"] = cves[:_AS_MAX_CVES]
+        # 技术栈/后台框架指纹（被动 banner → 同后台疑同团伙串案）。
+        tech = exposure.assess_tech_stack(shodan, e.get("webcheck"))
+        if tech:
+            entry["tech_stack"] = tech
 
-        # 主动探测字段（仅国外：recon 只对国外端点跑，此处再门控一次保一致）。
-        if is_foreign:
-            paths = [p for p in (recon.get("exposed_paths") or []) if isinstance(p, dict)]
-            if paths:
-                entry["exposed_paths"] = paths[:_AS_MAX_PATHS]
-            http = [h for h in (recon.get("http") or []) if isinstance(h, dict)]
-            if http:
-                entry["http_fingerprints"] = http
-            tls = recon.get("tls")
-            if isinstance(tls, dict) and tls:
-                entry["tls"] = list(tls.values())
-            # active_probed 仅当 recon **真正产出探测数据** 时为 True——不能只看 recon 键是否存在：
-            # 未开 FXAPK_ACTIVE_RECON 时 recon 富化是 {"error": "...跳过"} 占位，主动探测并未发生，
-            # 标 True 会误导分析员/审计以为做过主动侦查（合规上也是假声称）。
-            if recon.get("open_ports") or http or paths or (isinstance(tls, dict) and tls):
-                entry["active_probed"] = True
-
-        # 关联子域（crt.sh 证书透明度）。
+        # 关联子域（crt.sh CT 日志 + shodan 关联主机名；去重，疑同团伙 → 并簇串案）。
         subs = [h for h in (certs.get("related_hostnames") or []) if isinstance(h, str)]
+        for h in shodan.get("hostnames") or []:
+            if isinstance(h, str) and h not in subs:
+                subs.append(h)
         if subs:
-            entry["related_subdomains"] = subs[:_AS_MAX_SUBDOMAINS]
+            entry["related_subdomains"] = subs[:_OT_MAX_SUBDOMAINS]
 
-        # 暴露面研判（暴露敏感文件/误配 + 技术栈/后台框架指纹；纯映射、零网络、零 payload）。
-        exp = exposure.assess_exposure(shodan, recon)
-        if exp.get("exposed_files"):
-            entry["exposures"] = exp["exposed_files"]
-        if exp.get("tech_stack"):
-            entry["tech_stack"] = exp["tech_stack"]
-
-        # 仅在确实有攻击面内容时收（光 host/kind/jurisdiction 无意义）。
-        if len(entry) > 3:
+        # 仅在确实有实质内容时收（光 host/jurisdiction 无意义）。
+        if len(entry) > 2:
             out.append(entry)
     return out
 
@@ -948,33 +902,24 @@ def _apply_forensic(
     fp = forensic.forensic_path(juris)
     evidence_to_obtain.extend(fp.evidence)
 
-    # 海外取证第一步：解析 IP 全为 CDN/反代时，提示先穿透 CDN 定位真实源站（再打源站取镜像/日志）。
-    # 放在攻击面之前——给随后的 Shodan「暴露面」加上下文（那是 CDN 边缘端口、非源站）。
+    # 海外取证第一步：解析 IP 全为 CDN/反代时，提示先用公开情报被动穿透 CDN 定位真实源站 IP。
+    # 放在源站定位之前——给随后的 Shodan 端口/服务加上下文（那是 CDN 边缘端口、非源站）。
     if juris == forensic.JURIS_FOREIGN:
         evidence_to_obtain.extend(
             forensic.render_origin_hint(enr.get("dns"), enr.get("asn"))
         )
 
-    # ★ 攻击面/主动探测证据按**最终辖区**门控（与两遍富化 gate 同口径，落到渲染层）：
-    #   - 被动攻击面（Shodan/CVE/crt.sh）：仅【国外+未知】渲染；
-    #   - 主动探测（recon）：仅【国外】渲染；
-    #   - 国内（含 shodan country 把国外/未知翻成国内的情形）：一概不渲染——避免一条最终标
-    #     「国内·可调证」的 Lead 上挂着对它的攻击面/主动侦查痕迹（合规呈现自相矛盾、不可审计）。
+    # ★ 境外被动取证证据按**最终辖区**门控（与两遍富化同口径，落到渲染层）：仅【国外 + 未知】渲染；
+    #   国内（含 shodan country 把国外/未知翻成国内的情形）：一概不渲染——避免一条最终标
+    #   「国内·可调证」的 Lead 上挂着境外取证痕迹（合规呈现自相矛盾、不可审计）。全程被动 OSINT。
     if juris in (forensic.JURIS_FOREIGN, forensic.JURIS_UNKNOWN):
-        # Shodan 攻击面（被动）：开放端口/服务指纹/已知漏洞方向/关联主机。
-        evidence_to_obtain.extend(forensic.render_attack_surface(enr.get("shodan")))
-        # CVE 补查（被动 NVD）：补 Shodan 未覆盖指纹的已知漏洞方向（带 CVSS），仅情报方向、非利用。
-        evidence_to_obtain.extend(forensic.render_cve_surface(enr.get("cve")))
+        # 境外源站被动定位（Shodan）：源站归属(IP/ASN/geo) + 开放端口/服务指纹 + 关联主机名（串案）。
+        evidence_to_obtain.extend(forensic.render_overseas_targets(enr.get("shodan")))
         # 证书透明度（被动 crt.sh）：CT 日志关联子域（含历史/影子子域），疑同团伙基础设施→并簇串案。
         evidence_to_obtain.extend(forensic.render_related_subdomains(enr.get("certs")))
-        # 暴露面研判（纯映射·零 payload）：暴露的敏感文件/误配（直达源码/密钥/源站真IP）+ 技术栈/后台指纹
-        # （仅识别+方向+串案，无 RCE 靶单）。指引授权后人工取证，工具不自动利用。
-        _exp = exposure.assess_exposure(enr.get("shodan"), enr.get("recon"))
-        evidence_to_obtain.extend(forensic.render_exposures(_exp.get("exposed_files")))
-        evidence_to_obtain.extend(forensic.render_tech_stack(_exp.get("tech_stack")))
-    if juris == forensic.JURIS_FOREIGN:
-        # 主动探测（recon，opt-in/已授权）：实时侦查的开放端口/TLS证书/HTTP指纹/暴露后台路径。
-        evidence_to_obtain.extend(forensic.render_active_recon(enr.get("recon")))
+        # 技术栈/后台框架指纹（被动 banner，shodan/webcheck）：仅识别 → 同后台疑同团伙串案，不研判漏洞。
+        _tech = exposure.assess_tech_stack(enr.get("shodan"), enr.get("webcheck"))
+        evidence_to_obtain.extend(forensic.render_tech_stack(_tech))
     return f"{notes}；{fp.label}" if notes else fp.label
 
 
@@ -1031,7 +976,7 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
     #   library-file / bulk-string）且 classify 仍判"建议调证"（即非已知 infra/
     #   library-embedded、非私网）时，把 advice 降为"待核"并标低可信。★ 绝不降为"无需
     #   调证"（避免误杀真 C2）；已是 infra/私网档的不动（app tier 的真 C2 不受影响）。
-    #   用 infra.effective_advice 统一判据（与目标筛选/主动探测门控同口径，防判据漂移）。
+    #   用 infra.effective_advice 统一判据（与目标筛选同口径，防判据漂移）。
     tier = ep.enrichment.get("tier")
     if advice == infra.ADVICE_INVESTIGATE and infra.effective_advice(ep.value, tier) != infra.ADVICE_INVESTIGATE:
         advice = infra.ADVICE_REVIEW
@@ -1043,7 +988,6 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
         advice, ep.value, evidence_to_obtain, notes,
         icp=icp, rdap=rdap, whois=whois, dns=dns,
         webcheck=ep.enrichment.get("webcheck"), shodan=ep.enrichment.get("shodan"),
-        recon=ep.enrichment.get("recon"), cve=ep.enrichment.get("cve"),
         certs=ep.enrichment.get("certs"),
     )
     return Lead(
@@ -1082,7 +1026,6 @@ def _ip_lead(ep: Endpoint, online: bool = True) -> Lead:
     notes = _apply_forensic(
         advice, ep.value, evidence_to_obtain, _endpoint_notes(ep, online, enriched),
         asn=asn, webcheck=ep.enrichment.get("webcheck"), shodan=ep.enrichment.get("shodan"),
-        recon=ep.enrichment.get("recon"), cve=ep.enrichment.get("cve"),
         certs=ep.enrichment.get("certs"),
     )
     return Lead(

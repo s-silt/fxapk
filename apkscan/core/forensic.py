@@ -3,8 +3,8 @@
 默认有网（消费者 Codex 在联网环境），辖区以**富化归属国**为主信号、域名启发式兜底：
 
 - **国内服务器 → 调证路径**：向境内云厂商 / IDC / 工信部 ICP 调取访问日志、登录记录、租户实名。
-- **国外服务器 → 取证路径**：难直接调证；以拿到服务器**镜像 / 磁盘与日志**为目标，结合已识别的
-  后台 / 管理端、技术栈已知漏洞方向、暴露的敏感路径研判（**被动情报指引，非主动攻击 / 扫描**）。
+- **国外服务器 → 取证路径**：难直接调证；以**被动定位真实源站 IP**（穿透 CDN）、结合技术栈 /
+  后台框架指纹并簇串案为目标（**全程被动 OSINT，绝不主动探测 / 攻击 / 扫描**）。
 - **辖区未定 → 先定归属再分流**。
 
 判据优先级：ICP 备案存在 → 国内（ICP 仅境内）；host .cn/.gov.cn → 国内；富化归属国含中国大陆
@@ -52,8 +52,6 @@ def classify_jurisdiction(
     asn: object = None,
     webcheck: object = None,
     shodan: object = None,
-    recon: object = None,
-    cve: object = None,
     certs: object = None,
 ) -> str:
     """据富化归属国 + 域名启发式判服务器辖区。返回 国内 / 国外 / 未知。绝不抛。
@@ -61,11 +59,10 @@ def classify_jurisdiction(
     归属国信号来源：rdap/whois 注册国、dns 托管 country、asn 归属国、web-check ``location``
     归一化的 ``country``、Shodan 主机归属国（见 enrichers/shodan）。ICP 备案 / .cn 直判国内。
 
-    ``recon``（主动探测结果）/ ``cve``（CVE 方向补查）/ ``certs``（crt.sh 关联子域）目前不携带
-    归属国信号（仅暴露面 / 漏洞方向 / 关联主机名），故不参与辖区判定；作为参数接受是为兼容
-    pipeline ``_apply_forensic`` 的统一 ``**enr`` 透传（避免 TypeError）。
+    ``certs``（crt.sh 关联子域）目前不携带归属国信号（仅关联主机名），故不参与辖区判定；作为
+    参数接受是为兼容 pipeline ``_apply_forensic`` 的统一 ``**enr`` 透传（避免 TypeError）。
     """
-    _ = (recon, cve, certs)  # 当前不参与判定（无 country 字段）；显式消费以示有意忽略。
+    _ = certs  # 当前不参与判定（无 country 字段）；显式消费以示有意忽略。
     if isinstance(icp, dict) and (icp.get("subject") or icp.get("license_no")):
         return JURIS_DOMESTIC
     h = (host or "").lower().strip().rstrip(".")
@@ -98,12 +95,12 @@ _PATHS = {
     ),
     JURIS_FOREIGN: ForensicPath(
         JURIS_FOREIGN,
-        "国外服务器·取证为主（不调证）",
+        "国外服务器·被动定位（不调证、不攻击）",
         (
-            "海外不走调证：以定位**真实源站服务器**、对源站取镜像 / 磁盘与访问日志为目标",
-            "结合该服务器已识别的后台 / 管理端、技术栈已知漏洞方向、暴露的敏感路径研判取证落点（被动情报指引）",
+            "海外不走调证：以**被动定位真实源站 IP**（公开情报穿透 CDN）+ 提取归属标识为目标，供依授权途径处置",
+            "结合该服务器的技术栈 / 后台框架指纹与关联主机名并簇串案（全程被动 OSINT，不主动探测 / 不攻击）",
         ),
-        "国外服务器：不走调证——查真实源站、对源站取镜像 / 磁盘 / 访问日志",
+        "国外服务器：不走调证——被动定位真实源站 IP + 提取归属标识（ASN/org、证书透明度子域、技术栈指纹）",
     ),
     JURIS_UNKNOWN: ForensicPath(
         JURIS_UNKNOWN,
@@ -259,50 +256,60 @@ def cdn_vendor(dns: object = None, asn: object = None) -> str | None:
 
 
 def render_origin_hint(dns: object = None, asn: object = None) -> list[str]:
-    """解析 IP 全为反代型 CDN 时，渲一条「先穿透 CDN 定位真实源站」取证证据行（海外取证第一步）。
+    """解析 IP 全为反代型 CDN 时，渲一条「用公开情报被动定位真实源站 IP」取证证据行。
 
-    非全 CDN / 无信号 → 空列表。绝不抛。海外不走调证（含不向 CDN 调证）：直接技术穿透找源站。
+    非全 CDN / 无信号 → 空列表。绝不抛。境外只做被动定位：CDN 是边缘节点非源站，
+    用公开情报（历史 DNS / 证书透明度 / 邮件发信头）穿透找源站 IP，不主动攻击。
     """
     vendor = cdn_vendor(dns, asn)
     if not vendor:
         return []
     return [
-        f"⚠ 解析 IP 均为 CDN/反代（{vendor}），是边缘节点**非真实源站** → 海外取证不走调证："
-        "先穿透 CDN 定位真实源站 IP（历史 DNS 解析 / 证书透明度 SAN / 源站直连泄露 / SSRF / 错误配置 / "
-        "邮件发信头），再对**源站**取镜像 / 磁盘 / 访问日志"
+        f"⚠ 解析 IP 均为 CDN/反代（{vendor}），是边缘节点**非真实源站** → 境外不走调证："
+        "用公开情报被动穿透 CDN 定位真实源站 IP（历史 DNS 解析 / 证书透明度 SAN / 邮件发信头），"
+        "得到源站 IP 供归属研判与并簇串案（只做被动定位，不主动攻击）"
     ]
 
 
-# 攻击面渲染的展示上限（防个别巨型主机刷屏；完整数据仍在 report.json 的 enrichment 里）。
+# 境外源站被动定位渲染的展示上限（防个别巨型主机刷屏；完整数据仍在 report.json 的 enrichment 里）。
 _MAX_PORTS_SHOWN = 12
-_MAX_VULNS_SHOWN = 8
 _MAX_HOSTS_SHOWN = 8
-
-# 主动探测渲染上限（同上，防刷屏）。
-_MAX_RECON_PORTS_SHOWN = 16
-_MAX_RECON_PATHS_SHOWN = 12
-
-# CVE 补查渲染上限（同上，防刷屏；完整列表仍在 report.json 的 enrichment["cve"] 里）。
-_MAX_CVES_SHOWN = 10
 
 # crt.sh 关联子域渲染上限（同上，防刷屏；完整列表仍在 report.json 的 enrichment["certs"] 里）。
 _MAX_RELATED_HOSTS_SHOWN = 12
 
 
-def render_attack_surface(shodan: object) -> list[str]:
-    """把 Shodan 富化结果渲成「服务器攻击面」取证证据行（国外取证路径价值最高）。
+def render_overseas_targets(shodan: object) -> list[str]:
+    """把 Shodan 被动富化渲成「境外源站被动定位」取证证据行（海外取证：先被动定位真实源站）。
+
+    仅做**被动定位与识别**，对目标零流量：源站归属（IP / ASN / 归属国 / org）+ 开放端口与服务
+    指纹（识别这是不是真源站、跑什么服务）+ 关联主机名（同源站其它域名，疑同团伙 → 并簇串案）。
+    **不含漏洞方向、不含利用**。
 
     无数据 / 非 dict / 仅"查无记录"标记 → 返回空列表。绝不抛（纯函数，坏字段安全跳过）。
     输出形如：
-      - Shodan 暴露面：80(Apache httpd 2.4.7) 22(OpenSSH 6.6.1p1) 6379
-      - Shodan 已知漏洞方向(CPE→CVE 情报，非利用)：CVE-2021-44790、… 等共 N 个
-      - Shodan 关联主机名：a.com b.com（疑同团伙基础设施，建议并簇串案）
+      - 源站被动归属：IP 1.2.3.4 AS12345 EvilCorp US
+      - Shodan 开放端口 / 服务：80(Apache httpd 2.4.7) 22(OpenSSH 6.6.1p1) 6379
+      - Shodan 关联主机名：a.com b.com（同源站其它域名，疑同团伙基础设施，建议并簇串案）
     """
     if not isinstance(shodan, dict):
         return []
     lines: list[str] = []
 
-    # 1) 端口 + 服务指纹（product/version 标在端口后）。
+    # 1) 源站被动归属（IP / ASN / 归属国 / org）——识别真实源站、归属哪（对目标零流量）。
+    org = shodan.get("org") or shodan.get("isp")
+    attrib = " ".join(
+        str(x) for x in (
+            f"IP {shodan.get('ip')}" if shodan.get("ip") else "",
+            str(shodan.get("asn")) if shodan.get("asn") else "",
+            str(org) if org else "",
+            str(shodan.get("country")) if shodan.get("country") else "",
+        ) if x
+    ).strip()
+    if attrib:
+        lines.append("源站被动归属：" + attrib)
+
+    # 2) 端口 + 服务指纹（product/version 标在端口后）——识别真源站跑的服务。
     svc_by_port: dict[object, dict] = {}
     for svc in shodan.get("services") or []:
         if isinstance(svc, dict) and svc.get("port") is not None:
@@ -319,166 +326,25 @@ def render_attack_surface(shodan: object) -> list[str]:
             ).strip()
             parts.append(f"{p}({label})" if label else str(p))
         more = f" 等共 {len(ports)} 个" if len(ports) > _MAX_PORTS_SHOWN else ""
-        lines.append("Shodan 暴露面：" + " ".join(parts) + more)
+        lines.append("Shodan 开放端口 / 服务：" + " ".join(parts) + more)
 
-    # 2) 已知漏洞方向（Shodan 现成 CPE→CVE；情报方向，非利用）。
-    vulns = [v for v in (shodan.get("vulns") or []) if isinstance(v, str)]
-    if vulns:
-        total = shodan.get("vuln_total")
-        total = total if isinstance(total, int) and total >= len(vulns) else len(vulns)
-        shown = "、".join(vulns[:_MAX_VULNS_SHOWN])
-        more = f" 等共 {total} 个" if total > _MAX_VULNS_SHOWN else ""
-        lines.append(f"Shodan 已知漏洞方向(CPE→CVE 情报，非利用)：{shown}{more}")
-
-    # 3) 关联主机名（串案：疑同团伙基础设施）。
+    # 3) 关联主机名（串案：同源站其它域名，疑同团伙基础设施）。
     hostnames = [h for h in (shodan.get("hostnames") or []) if isinstance(h, str)]
     if hostnames:
         shown = " ".join(hostnames[:_MAX_HOSTS_SHOWN])
         more = f" 等共 {len(hostnames)} 个" if len(hostnames) > _MAX_HOSTS_SHOWN else ""
-        lines.append(f"Shodan 关联主机名：{shown}{more}（疑同团伙基础设施，建议并簇串案）")
+        lines.append(
+            f"Shodan 关联主机名：{shown}{more}（同源站其它域名，疑同团伙基础设施，建议并簇串案）"
+        )
 
     return lines
-
-
-def render_active_recon(recon: object) -> list[str]:
-    """把**主动探测**（recon enricher）结果渲成取证证据行，统一标注「主动探测·已授权」。
-
-    与 ``render_attack_surface``（被动 Shodan）区分：主动探测是对授权目标的**实时侦查**结果
-    （开放端口 / TLS 证书主体 / HTTP 指纹 / 暴露后台路径），证明力更强、时点更新。每行都带
-    「主动探测·已授权」前缀，让报告明确这是主动行为（与被动情报区分、可审计）。
-
-    无数据 / 非 dict / 无任何探测命中 → 返回空列表。绝不抛（纯函数，坏字段安全跳过）。
-    输出形如：
-      - 主动探测·已授权 开放端口：22(SSH) 80(HTTP) 6379(Redis) …
-      - 主动探测·已授权 HTTP 指纹：80 200 Server=nginx 标题「XX管理后台」
-      - 主动探测·已授权 TLS 证书：443 CN=evil.com 颁发者=Let's Encrypt
-      - 主动探测·已授权 暴露后台路径：/admin(200) /druid(200) /actuator(401) …
-    """
-    if not isinstance(recon, dict):
-        return []
-    prefix = "主动探测·已授权"
-    lines: list[str] = []
-
-    # 1) 开放端口 + 服务名。
-    services = recon.get("services") or []
-    svc_name: dict[object, str] = {}
-    for s in services:
-        if isinstance(s, dict) and s.get("port") is not None:
-            svc_name[s["port"]] = str(s.get("service") or "")
-    open_ports = [p for p in (recon.get("open_ports") or []) if isinstance(p, int)]
-    if open_ports:
-        parts: list[str] = []
-        for p in open_ports[:_MAX_RECON_PORTS_SHOWN]:
-            name = svc_name.get(p, "")
-            parts.append(f"{p}({name})" if name else str(p))
-        more = f" 等共 {len(open_ports)} 个" if len(open_ports) > _MAX_RECON_PORTS_SHOWN else ""
-        lines.append(f"{prefix} 开放端口：" + " ".join(parts) + more)
-
-    # 2) HTTP 指纹（Server / X-Powered-By / 标题 / 状态码）。
-    for h in recon.get("http") or []:
-        if not isinstance(h, dict):
-            continue
-        port = h.get("port")
-        status = h.get("status")
-        bits: list[str] = []
-        if h.get("server"):
-            bits.append(f"Server={h['server']}")
-        if h.get("x_powered_by"):
-            bits.append(f"X-Powered-By={h['x_powered_by']}")
-        if h.get("title"):
-            bits.append(f"标题「{h['title']}」")
-        # 状态行解析失败（status=0/None，如端口上跑的是 SSH/Redis 等非 HTTP 服务）且无任何有效指纹 →
-        # 跳过该行（'…HTTP 指纹：80 0' 既无信息量又会误导办案人，绝不渲染）。
-        valid_status = isinstance(status, int) and status > 0
-        if not valid_status and not bits:
-            continue
-        head = f"{prefix} HTTP 指纹：{port}"
-        if valid_status:
-            head += f" {status}"
-        tail = (" " + " ".join(bits)) if bits else ""
-        lines.append((head + tail).rstrip())
-
-    # 3) TLS 证书（CN/SAN/issuer/有效期）。
-    tls = recon.get("tls") or {}
-    if isinstance(tls, dict):
-        for port, cert in tls.items():
-            if not isinstance(cert, dict):
-                continue
-            bits = []
-            if cert.get("subject"):
-                bits.append(f"主体={cert['subject']}")
-            if cert.get("issuer"):
-                bits.append(f"颁发者={cert['issuer']}")
-            if cert.get("not_after"):
-                bits.append(f"有效期至={cert['not_after']}")
-            san = cert.get("san")
-            if isinstance(san, list) and san:
-                bits.append("SAN=" + " ".join(str(s) for s in san[:6]))
-            if bits:
-                lines.append(f"{prefix} TLS 证书：{port} " + " ".join(bits))
-
-    # 4) 暴露后台路径（只状态码+标题，证明入口存在）。
-    paths = [p for p in (recon.get("exposed_paths") or []) if isinstance(p, dict)]
-    if paths:
-        parts = []
-        for p in paths[:_MAX_RECON_PATHS_SHOWN]:
-            label = str(p.get("path", ""))
-            status = p.get("status")
-            title = p.get("title")
-            seg = f"{label}({status})" if status is not None else label
-            if title:
-                seg += f"「{title}」"
-            parts.append(seg)
-        more = f" 等共 {len(paths)} 个" if len(paths) > _MAX_RECON_PATHS_SHOWN else ""
-        lines.append(f"{prefix} 暴露后台路径：" + " ".join(parts) + more)
-
-    return lines
-
-
-def render_cve_surface(cve: object) -> list[str]:
-    """把 CVE 补查（cve enricher / NVD）结果渲成「已知漏洞方向」取证证据行。
-
-    与 ``render_attack_surface`` 的 Shodan ``vulns`` 互补：本行来自对 Shodan 未覆盖 CPE/指纹的
-    NVD 在线补查，带 CVSS/severity，**仅情报方向、非利用、不含 exploit**。复用 Shodan 已覆盖的
-    CVE 会标 ``(印证Shodan)``。无数据 / 非 dict / 无 CVE → 返回空列表。绝不抛（坏字段安全跳过）。
-
-    输出形如：
-      - NVD 补查·已知漏洞方向(指纹→CVE 情报，非利用)：CVE-2021-44790(9.8 CRITICAL) CVE-2017-15715(8.1 HIGH) … 等共 N 个
-    """
-    if not isinstance(cve, dict):
-        return []
-    rows = [r for r in (cve.get("cves") or []) if isinstance(r, dict)]
-    if not rows:
-        return []
-
-    parts: list[str] = []
-    for r in rows[:_MAX_CVES_SHOWN]:
-        cid = r.get("id")
-        if not isinstance(cid, str):
-            continue
-        score = r.get("cvss")
-        sev = r.get("severity")
-        tag_bits = " ".join(
-            str(x) for x in (score if isinstance(score, (int, float)) else None, sev) if x
-        ).strip()
-        seg = f"{cid}({tag_bits})" if tag_bits else cid
-        if r.get("reused_from_shodan"):
-            seg += "(印证Shodan)"
-        parts.append(seg)
-
-    if not parts:
-        return []
-    total = cve.get("cve_total")
-    total = total if isinstance(total, int) and total >= len(rows) else len(rows)
-    more = f" 等共 {total} 个" if total > _MAX_CVES_SHOWN else ""
-    return ["NVD 补查·已知漏洞方向(指纹→CVE 情报，非利用)：" + " ".join(parts) + more]
 
 
 def render_related_subdomains(certs: object) -> list[str]:
     """把 crt.sh 证书透明度结果渲成「关联子域(串案)」取证证据行。
 
     与 Shodan ``hostnames`` 互补：CT 日志覆盖该域名**历史 + 当前**被签过证的全部子域（含 DNS 已
-    撤的影子子域），疑同团伙基础设施——建议并簇串案（也可作为主动探测的额外目标，由 recon 自身门控决定）。
+    撤的影子子域），疑同团伙基础设施——建议并簇串案。全程被动 OSINT（读 crt.sh 公开库），对目标零流量。
 
     无数据 / 非 dict / 无关联主机名 → 返回空列表。绝不抛（纯函数，坏字段安全跳过）。
     输出形如：
@@ -498,34 +364,12 @@ def render_related_subdomains(certs: object) -> list[str]:
     ]
 
 
-# 暴露面研判渲染上限。
-_MAX_EXPOSURES_SHOWN = 12
+# 技术栈/后台指纹渲染上限。
 _MAX_STACK_SHOWN = 10
 
 
-def render_exposures(exposed_files: object) -> list[str]:
-    """把**暴露的敏感文件/误配**渲成取证证据行（暴露本身即直接取证价值：源码/密钥/源站真IP/数据）。
-
-    无数据 / 非 list → 空列表。绝不抛（坏字段安全跳过）。
-    输出形如：⚠ 暴露泄露：Git 源码仓库暴露 (/.git)（critical）→ 可还原源码+硬编码密钥+源站真实IP
-    """
-    if not isinstance(exposed_files, list):
-        return []
-    lines: list[str] = []
-    for e in exposed_files[:_MAX_EXPOSURES_SHOWN]:
-        if not isinstance(e, dict) or not e.get("name"):
-            continue
-        seg = f"⚠ 暴露泄露：{e['name']}"
-        if e.get("severity"):
-            seg += f"（{e['severity']}）"
-        if e.get("forensic_value"):
-            seg += f" → {e['forensic_value']}"
-        lines.append(seg)
-    return lines
-
-
 def render_tech_stack(tech_stack: object) -> list[str]:
-    """把识别到的**技术栈/后台框架**渲成证据行（仅识别 + 通用方向 + 串案；**不含 per-CVE RCE 靶单**）。
+    """把识别到的**技术栈/后台框架**渲成证据行（仅识别 + 串案；**不研判漏洞、不含利用方向**）。
 
     无数据 / 非 list → 空列表。绝不抛（坏字段安全跳过）。
     """
@@ -541,6 +385,6 @@ def render_tech_stack(tech_stack: object) -> list[str]:
     if not names:
         return []
     return [
-        "技术栈/后台指纹（仅识别·须授权后人工评估利用面，工具不自动利用）：" + "、".join(names),
+        "技术栈/后台框架指纹（仅识别·同后台疑同团伙 → 并簇串案）：" + "、".join(names),
         *notes,
     ]

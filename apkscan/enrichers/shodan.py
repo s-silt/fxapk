@@ -1,13 +1,15 @@
-"""Shodan 富化器：海外服务器**攻击面**被动取证（开放端口 / 服务 banner / 产品版本 / 已知漏洞方向）。
+"""Shodan 富化器：海外服务器**被动 IP 归属**取证（开放端口 / 服务 banner / 产品版本 / 归属）。
 
 对「建议调证」的 IP / 域名查 Shodan 已扫库（``/shodan/host/{ip}``）：对目标**零流量**——Shodan 早替我们
-扫过，我们只读它的库，属**被动 OSINT**。一次拿到：
+扫过，我们只读它的库，属**被动 OSINT**。用于识别「这是不是真实源站、归属在哪」，一次拿到：
 
-- 开放端口 ``ports`` + 每服务 ``product``/``version``/``cpe``/``http.server``/``http.title``（技术栈指纹）；
-- ``vulns``——Shodan 已把 CPE→CVE 映射好，即「技术栈→已知漏洞方向」现成（情报方向，**非利用，不含 exploit**）；
-- ``hostnames``（历史/关联主机名，疑同团伙基础设施，可并簇串案）、``org``/``isp``/``asn``/归属国（反哺辖区判定）。
+- 开放端口 ``ports`` + 每服务 ``product``/``version``/``cpe``/``http.server``/``http.title``（服务 banner
+  与技术栈指纹——同后台 / 同栈可作**串案**信号）；
+- ``hostnames``（历史 / 关联主机名，疑同团伙基础设施，可并簇串案）、``org``/``isp``/``asn``/归属国
+  （反哺辖区判定与源站归属识别）。
 
-★ 用途见 ``core/forensic`` 海外（国外）分支：难直接调证 → 以拿服务器镜像 / 磁盘为目标，本攻击面指引取证落点。
+★ 用途见 ``core/forensic`` 海外（国外）分支：难直接调证 → **被动定位真实源站 IP + 提取归属标识**
+（不主动探测 / 不接触任何第三方基础设施），据此并簇串案、指向可依法协作的落点。
 
 **opt-in**：仅当配置 ``FXAPK_SHODAN_KEY``（或 ``SHODAN_API_KEY``）时启用；未配置 → 跳过(ok=False)，
 核心分析不受影响。key 走项目根 ``.env``（见 ``core/dotenv``），不硬编码、不入库。仅在 ``--online`` 下
@@ -15,7 +17,7 @@
 
 domain 端点：先用 Shodan ``/dns/resolve`` 解析成 IP 再 host 查询（域名在 CDN 后会拿到 CDN IP，属已知局限）。
 
-合规：只查 Shodan 公开库（被动情报），不向目标发起任何连接 / 扫描。
+合规：只查 Shodan 公开库（被动情报），不向目标发起任何连接 / 扫描 / 探测。
 """
 
 from __future__ import annotations
@@ -43,7 +45,6 @@ SHODAN_TIMEOUT = 12
 
 #: 归一化截断上限（防止个别巨型主机塞爆缓存 / 报告）。
 _MAX_SERVICES = 40
-_MAX_VULNS = 60
 _MAX_HOSTNAMES = 30
 
 CACHE_DIR = Path(".apkscan_cache")
@@ -68,19 +69,13 @@ def _as_dict(value: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _as_cve_list(value: object) -> list[str]:
-    """Shodan ``vulns`` 可能是 list[CVE] 或 dict[CVE, 详情]；归一成 CVE 字符串列表。"""
-    if isinstance(value, dict):
-        return [k for k in value.keys() if isinstance(k, str)]
-    if isinstance(value, list):
-        return [v for v in value if isinstance(v, str)]
-    return []
-
-
 def _parse_host(payload: dict[str, Any]) -> dict[str, Any]:
-    """把 ``/shodan/host`` 原始 JSON 归一成稳定扁平字段（缺字段安全留空）。"""
+    """把 ``/shodan/host`` 原始 JSON 归一成稳定扁平字段（缺字段安全留空）。
+
+    只保留**被动归属 / 服务 banner / 技术栈指纹**字段（识别真实源站与归属、供同栈串案）；
+    不采集任何漏洞 / 利用向的字段。
+    """
     services: list[dict[str, Any]] = []
-    vulns: list[str] = list(_as_cve_list(payload.get("vulns")))
     for svc in payload.get("data") or []:
         if not isinstance(svc, dict):
             continue
@@ -93,15 +88,11 @@ def _parse_host(payload: dict[str, Any]) -> dict[str, Any]:
                 "module": shodan_meta.get("module"),
                 "product": svc.get("product"),
                 "version": svc.get("version"),
-                "cpe": svc.get("cpe") or svc.get("cpe23"),
+                "cpe": svc.get("cpe") or svc.get("cpe23"),  # 技术栈指纹（供 exposure 串案），非漏洞判定
                 "http_server": http.get("server"),
                 "http_title": http.get("title"),
             }
         )
-        # 个别服务自带 vulns（dict）也并入聚合，去重保序。
-        for cve in _as_cve_list(svc.get("vulns")):
-            if cve not in vulns:
-                vulns.append(cve)
         if len(services) >= _MAX_SERVICES:
             break
 
@@ -110,8 +101,6 @@ def _parse_host(payload: dict[str, Any]) -> dict[str, Any]:
         "ip": payload.get("ip_str") or payload.get("ip"),
         "ports": ports,
         "services": services,
-        "vulns": vulns[:_MAX_VULNS],
-        "vuln_total": len(vulns),
         "hostnames": [h for h in (payload.get("hostnames") or []) if isinstance(h, str)][
             :_MAX_HOSTNAMES
         ],
@@ -126,12 +115,15 @@ def _parse_host(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 class ShodanEnricher(BaseEnricher):
-    """对 IP / 域名查 Shodan 已扫库，产出服务器攻击面（opt-in，配 FXAPK_SHODAN_KEY 才启用）。"""
+    """对 IP / 域名查 Shodan 已扫库，产出服务器**被动归属画像**（opt-in，配 FXAPK_SHODAN_KEY 才启用）。
+
+    产出仅用于识别「是否真实源站、归属在哪、同栈可否串案」，对目标零流量、不做任何漏洞 / 利用判定。
+    """
 
     name = "shodan"
     applies_to = ["ip", "domain"]
-    #: 攻击面阶段（两遍富化第二遍）；被动（active=False，查 Shodan 库、对目标零流量），仅对国外(+未知)端点跑。
-    phase = "attack_surface"
+    #: 境外归属阶段（两遍富化第二遍）；被动（active=False，查 Shodan 库、对目标零流量），仅对国外(+未知)端点跑。
+    phase = "overseas"
     active = False
 
     def __init__(self) -> None:
