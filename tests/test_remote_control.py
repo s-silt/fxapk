@@ -269,11 +269,11 @@ def test_merge_rc_gestures_produce_finding_not_lead(monkeypatch, tmp_path) -> No
         if l.category == LeadCategory.REMOTE_CONTROL and "手势" in (l.notes or "")
     ]
     assert gesture_leads == []
-    # 产一条 attack_surface/runtime 类 Finding，描述实测无障碍远控行为。
+    # 产一条 runtime 类 Finding，描述实测无障碍远控行为。
     rc_findings = [f for f in report.findings if "远控" in f.title or "无障碍" in f.title]
     assert len(rc_findings) == 1
     finding = rc_findings[0]
-    assert finding.category in ("attack_surface", "runtime")
+    assert finding.category in ("exported_surface", "runtime")
     # 描述含下发手势数 / 劫持包名 / 屏幕录制开启。
     assert "3" in finding.description or "手势" in finding.description
     assert "屏幕" in finding.description or "录制" in finding.description

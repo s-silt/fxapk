@@ -1,4 +1,6 @@
-"""脱壳后重打包出「去壳」APK 并装回设备，使其能被重新动态抓包（绕过加固壳的反 frida/反调试）。
+"""脱壳后重打包出「去壳」APK 并装回设备，使其能被重新动态抓包（解除加固壳对 frida/调试的阻断以便观测）。
+
+取证用途：对取证样本自身在分析机上做运行时观测，产出端点/密钥/独特串等线索，不面向任何第三方基础设施。
 
 工作流（MVP，见设计 spec 2026-06-22-...；务实混合路线）::
 
@@ -167,7 +169,7 @@ def _repackage_impl(
         _degrade_reinstall_original(apk_path, package, serial)
         result = empty_result(
             STATUS_SKIPPED,
-            f"去壳包装上但未通过存活判定（{why}）；已重装原包，capture 将抓原版（疑 VMP/重native/反检测）。",
+            f"去壳包装上但未通过存活判定（{why}）；已重装原包，capture 将抓原版（疑 VMP/重native/样本自我检测）。",
         )
         result["artifacts"] = [str(signed)]
         result["playbook"] = playbook

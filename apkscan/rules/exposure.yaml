@@ -1,87 +1,17 @@
-# 暴露面研判规则：暴露的敏感文件/误配 + 技术栈/后台框架指纹。
+# 技术栈 / 后台框架指纹规则（串案用）。
 #
-# ★ 定位与边界（务必守住）：本库是**侦查/取证情报**，不是攻击工具。
-#   - 只描述「哪种指纹 = 暴露了什么 / 是什么栈」+「突破后能取到什么证据」+ 弱点类编号(CWE)。
-#   - **绝不含** exploit payload / PoC / 利用代码 / 注入串 / webshell / 具体命令。
-#   - **不内置 per-CVE 的 RCE 命中靶单**：技术栈只做识别 + 给「该框架有框架级已知漏洞、须授权人工评估」
-#     的通用方向，具体漏洞利用由授权操作者对单个确认目标自行评估，工具不替其编目、不自动执行。
+# ★ 定位与边界（务必守住）：本库是**取证串案情报**，不是攻击工具。
+#   - 只描述「哪种被动 banner 指纹 = 是什么技术栈 / 后台框架」，用于**同后台 = 疑同团伙**并簇串案。
+#   - **只识别、不研判漏洞、不给利用方向**；绝不含 exploit / PoC / 利用代码 / 注入串 / webshell / 具体命令。
 #
-# 指纹字段（对齐 enrichers 真实输出，小写子串匹配，任一命中即该条命中）：
-#   server / x_powered_by / title  ← recon.http[] 的 Server/X-Powered-By/<title>
-#   exposed_path                   ← recon.exposed_paths[].path（须在 recon 实际探测路径集内才会有数据）
-#   cookie                         ← recon.http[] 的 Set-Cookie 名（recon 已抓）
+# 指纹字段（对齐被动 enrichers 真实输出，小写子串匹配，任一命中即该条命中）：
+#   server / x_powered_by / title  ← 服务 banner 的 Server / X-Powered-By / <title>
+#   cookie                         ← Set-Cookie 名（离散 token，精确匹配）
 #   product / cpe / module         ← shodan.services[]（被动，对目标零流量）
+#   （title / product 亦并入 webcheck tech-stack 识别到的技术名，见 core/exposure.build_host_fingerprint）
 
 # -------------------------------------------------------------------------
-# 一、暴露的敏感文件 / 误配置（暴露本身即直接取证价值——源码/密钥/源站真IP/数据）
-# -------------------------------------------------------------------------
-exposed_files:
-  - name: "Git 源码仓库暴露 (/.git)"
-    exposed_path: ["/.git/config", "/.git/head", "/.git"]
-    forensic_value: "可还原完整源码 + 提交历史 + 硬编码密钥/凭据 + 常含源站真实 IP/内网地址"
-    refs: ["CWE-527 版本库暴露", "CWE-538 敏感信息暴露"]
-    severity: critical
-
-  - name: "环境变量配置暴露 (/.env)"
-    exposed_path: ["/.env"]
-    forensic_value: "DB 凭据 / APP_KEY / 第三方密钥 / 邮件与支付配置 / 源站直连地址"
-    refs: ["CWE-538 敏感信息暴露", "CWE-200 信息泄露"]
-    severity: critical
-
-  - name: "Subversion 工作副本暴露 (/.svn)"
-    exposed_path: ["/.svn/entries", "/.svn/wc.db", "/.svn"]
-    forensic_value: "可还原源码与历史版本、配置与凭据"
-    refs: ["CWE-527 版本库暴露"]
-    severity: high
-
-  - name: "站点备份 / 数据库导出文件暴露"
-    exposed_path: ["/www.zip", "/web.zip", "/backup.sql", "/database.sql", "/db.sql", "/www.tar.gz", "/wwwroot.zip"]
-    forensic_value: "整站源码打包 / 数据库全量导出（会员/流水/聊天/资金数据）"
-    refs: ["CWE-530 备份文件暴露", "CWE-538 敏感信息暴露"]
-    severity: critical
-
-  - name: "PHP 信息泄露页暴露 (phpinfo)"
-    exposed_path: ["/phpinfo.php", "/info.php", "/i.php", "/test.php"]
-    title: ["phpinfo()"]
-    forensic_value: "完整服务器环境 / 绝对路径 / 已加载扩展 / 环境变量（常含密钥）/ 真实内网信息"
-    refs: ["CWE-200 信息泄露"]
-    severity: high
-
-  - name: "目录列表开启 (Directory Listing)"
-    title: ["index of /"]
-    server: ["autoindex"]
-    forensic_value: "可遍历目录、发现备份/日志/上传文件与隐藏资源"
-    refs: ["CWE-548 目录列表信息暴露"]
-    severity: high
-
-  - name: "接口文档暴露 (Swagger / OpenAPI)"
-    exposed_path: ["/swagger-ui.html", "/swagger", "/api-docs", "/v2/api-docs", "/openapi.json"]
-    title: ["swagger"]
-    forensic_value: "完整接口清单与参数结构 → 还原后端接口契约、定位资金/会员/客服接口"
-    refs: ["CWE-200 信息泄露"]
-    severity: high
-
-  - name: "前端 Source Map 暴露 (.js.map)"
-    exposed_path: ["/.map"]
-    forensic_value: "还原前端打包源码 → 接口地址 / 硬编码密钥 / 业务逻辑"
-    refs: ["CWE-540 源码敏感信息", "CWE-200 信息泄露"]
-    severity: medium
-
-  - name: "macOS 目录索引文件暴露 (/.DS_Store)"
-    exposed_path: ["/.ds_store"]
-    forensic_value: "泄露目录结构与文件名，辅助发现隐藏资源"
-    refs: ["CWE-548 目录信息暴露"]
-    severity: medium
-
-  - name: ".well-known / 元数据误配暴露"
-    exposed_path: ["/.well-known/security.txt", "/.well-known/openid-configuration"]
-    forensic_value: "暴露联系人 / OIDC 配置 / 内部端点，辅助归属与攻击面研判"
-    refs: ["CWE-200 信息泄露"]
-    severity: medium
-
-# -------------------------------------------------------------------------
-# 二、技术栈 / 后台框架指纹（仅识别 → 给方向 + 串案；不内置 per-CVE RCE 靶单）
-#     note 统一给「框架级已知漏洞、须授权人工评估」的通用方向，具体利用由授权人工对确认目标自行评估。
+# 技术栈 / 后台框架指纹（仅识别 → 同后台串案；不含漏洞方向、不含利用靶单）
 # -------------------------------------------------------------------------
 tech_stack:
   - name: "PHP"
@@ -90,7 +20,7 @@ tech_stack:
     cookie: ["phpsessid"]
     product: ["php"]
     cpe: ["cpe:/a:php:php", "cpe:2.3:a:php:php"]
-    note: "后端为 PHP 语言栈（后续 PHP 框架/面板研判的前置锚点）"
+    note: "后端为 PHP 语言栈（后续 PHP 框架 / 面板研判的前置锚点）"
 
   - name: "ThinkPHP"
     server: ["thinkphp"]
@@ -98,23 +28,23 @@ tech_stack:
     product: ["thinkphp"]
     title: ["thinkphp"]
     cpe: ["cpe:2.3:a:thinkphp:thinkphp"]
-    note: "ThinkPHP 框架（涉诈后台高发）；该框架历史存在框架级 RCE/注入类漏洞，须授权后人工核版本与评估利用面"
+    note: "ThinkPHP 框架（涉诈 / 赌博后台高发）；★ 同后台疑同团伙基础设施，建议并簇串案"
 
   - name: "Laravel"
     cookie: ["laravel_session", "xsrf-token"]
     x_powered_by: ["laravel"]
     title: ["laravel"]
-    note: "Laravel 框架；如同时暴露 /.env(APP_KEY) 或 debug 页则取证价值高，须授权后人工评估"
+    note: "Laravel 框架；★ 同后台疑同团伙基础设施，建议并簇串案"
 
   - name: "CodeIgniter"
     cookie: ["ci_session"]
     title: ["codeigniter"]
-    note: "CodeIgniter 框架；框架历史存在已知漏洞，须授权后人工评估"
+    note: "CodeIgniter 框架；★ 同后台疑同团伙基础设施，建议并簇串案"
 
   - name: "Yii"
     cookie: ["_identity", "yii_csrf"]
     title: ["yii"]
-    note: "Yii 框架；框架历史存在已知漏洞，须授权后人工评估"
+    note: "Yii 框架；★ 同后台疑同团伙基础设施，建议并簇串案"
 
   - name: "Spring / Java"
     cookie: ["jsessionid"]
@@ -122,61 +52,57 @@ tech_stack:
     server: ["tomcat", "jetty"]
     product: ["tomcat", "spring", "jetty"]
     title: ["whitelabel error page"]
-    note: "Java/Spring 栈；如暴露 /actuator 等管理端点取证价值高，须授权后人工评估"
-
-  - name: "Spring Boot Actuator 暴露"
-    exposed_path: ["/actuator", "/actuator/health", "/actuator/env", "/actuator/heapdump"]
-    forensic_value_hint: "Actuator 端点可泄露配置/环境/内存转储（常含明文凭据与源站信息）"
-    note: "Spring Boot Actuator 管理端点暴露；须授权后人工评估其泄露面（env/heapdump 等）"
+    note: "Java / Spring 栈；★ 同后台疑同团伙基础设施，建议并簇串案"
 
   - name: "Python (Flask / Django / Werkzeug)"
     server: ["werkzeug", "gunicorn"]
     cookie: ["sessionid", "csrftoken", "session"]
     title: ["werkzeug", "django", "traceback (most recent call last)"]
-    note: "Python Web 栈；如 debug 模式上线(Werkzeug console / Django DEBUG)则信息泄露/取证价值高，须授权后人工评估"
+    note: "Python Web 栈（Flask / Django / Werkzeug）；★ 同后台疑同团伙基础设施，建议并簇串案"
 
   - name: "Node / Express"
     x_powered_by: ["express"]
-    note: "Node/Express 栈；如暴露源码/source map/.git 则可还原逻辑与密钥，须授权后人工评估"
+    product: ["express"]
+    title: ["express"]
+    note: "Node / Express 栈；★ 同后台疑同团伙基础设施，建议并簇串案"
 
   - name: "phpMyAdmin"
     title: ["phpmyadmin"]
     cookie: ["phpmyadmin", "pma"]
-    exposed_path: ["/phpmyadmin"]
-    note: "phpMyAdmin 数据库管理入口暴露；如弱口令/旧版本则可达库内数据，须授权后人工评估（勿爆破）"
+    note: "phpMyAdmin 数据库管理入口指纹；★ 同后台疑同团伙基础设施，建议并簇串案"
 
   - name: "宝塔面板 (BaoTa)"
     title: ["宝塔", "baota", "bt-panel"]
     cookie: ["bt_user_info"]
-    note: "宝塔服务器面板；常伴 phpMyAdmin/数据库暴露，须授权后人工评估暴露面"
+    note: "宝塔服务器面板指纹；★ 同后台疑同团伙基础设施，建议并簇串案"
 
   - name: "WordPress"
     x_powered_by: ["wordpress"]
     title: ["wordpress"]
     cookie: ["wordpress_", "wp-settings"]
-    note: "WordPress；核心/插件历史漏洞多，须授权后人工核版本与插件评估"
+    note: "WordPress 站点指纹；★ 同后台疑同团伙基础设施，建议并簇串案"
 
   - name: "Jeecg-Boot 低代码后台"
     title: ["jeecg"]
     cookie: ["jeecg"]
-    note: "Jeecg-Boot 低代码后台（涉诈/赌博后台高发）；框架历史存在未授权/RCE 类漏洞，须授权后人工评估；★ 同后台疑同团伙基础设施，建议并簇串案"
+    note: "Jeecg-Boot 低代码后台（涉诈 / 赌博后台高发）；★ 同后台疑同团伙基础设施，建议并簇串案"
 
   - name: "若依 RuoYi 后台"
     title: ["ruoyi", "若依"]
-    note: "若依 RuoYi 后台（涉诈后台高发）；框架历史存在已知漏洞，须授权后人工评估；★ 同后台疑同团伙基础设施，建议并簇串案"
+    note: "若依 RuoYi 后台（涉诈后台高发）；★ 同后台疑同团伙基础设施，建议并簇串案"
 
   - name: "通达 OA"
     title: ["通达", "tongda"]
-    note: "通达 OA（被涉诈/赌博团伙改造为后台高发）；历史存在已知漏洞，须授权后人工评估；★ 串案信号"
+    note: "通达 OA（被涉诈 / 赌博团伙改造为后台高发）；★ 同后台疑同团伙基础设施，建议并簇串案"
 
   - name: "泛微 e-cology / e-office"
     title: ["泛微", "weaver", "e-cology", "e-office"]
-    note: "泛微 OA；历史存在已知漏洞，须授权后人工评估；★ 串案信号"
+    note: "泛微 OA（e-cology / e-office）；★ 同后台疑同团伙基础设施，建议并簇串案"
 
   - name: "致远 OA (Seeyon)"
     title: ["致远", "seeyon"]
-    note: "致远 OA；历史存在已知漏洞，须授权后人工评估；★ 串案信号"
+    note: "致远 OA（Seeyon）；★ 同后台疑同团伙基础设施，建议并簇串案"
 
   - name: "ThinkAdmin"
     title: ["thinkadmin"]
-    note: "ThinkAdmin（ThinkPHP 系后台）；框架历史存在已知漏洞，须授权后人工评估"
+    note: "ThinkAdmin（ThinkPHP 系后台）；★ 同后台疑同团伙基础设施，建议并簇串案"

@@ -349,38 +349,36 @@
     {% endif %}
   </section>
 
-  {#- ============ ★ 海外服务器攻击面（结构化：端口/服务/CVE/暴露后台/关联子域） ============ -#}
-  {% set attack_surface = meta.get("attack_surface") or [] %}
-  {% if attack_surface %}
-  <section id="attack-surface">
-    <h2><span class="star">★</span> 🛰 海外服务器攻击面 <span class="muted" style="font-size:13px;font-weight:400">（被动 OSINT + 授权主动侦查：开放端口 / 服务 / 已知漏洞方向 / 暴露后台 / 关联子域；仅【国外 + 未知】服务器，国内走调证不在此列）</span></h2>
+  {#- ============ ★ 境外源站被动定位（结构化：源站归属 / 端口 / 服务 / 技术栈 / 关联子域） ============ -#}
+  {% set overseas_targets = meta.get("overseas_targets") or [] %}
+  {% if overseas_targets %}
+  <section id="overseas-targets">
+    <h2><span class="star">★</span> 🛰 境外源站被动定位 <span class="muted" style="font-size:13px;font-weight:400">（被动 OSINT，对目标零流量：源站归属 / 开放端口 / 服务 banner / 技术栈后台指纹 / 关联子域；仅【国外 + 未知】服务器，国内走调证不在此列）</span></h2>
     <table class="lead-table">
       <thead>
         <tr>
           <th class="c-val">主机</th>
           <th>辖区</th>
+          <th>源站归属（IP / ASN / 归属）</th>
           <th>开放端口 / 服务</th>
-          <th>已知漏洞方向（CVE）</th>
-          <th>暴露后台（主动·已授权）</th>
-          <th>暴露泄露 / 技术栈</th>
+          <th>技术栈 / 后台指纹</th>
           <th>关联子域（crt.sh）</th>
         </tr>
       </thead>
       <tbody>
-        {% for h in attack_surface %}
+        {% for h in overseas_targets %}
         <tr>
-          <td class="mono">{{ h.host }}{% if h.get("cdn") %} <span class="badge">CDN:{{ h.cdn }}·端口为边缘非源站</span>{% endif %}{% if h.get("active_probed") %} <span class="badge">主动探测</span>{% endif %}</td>
+          <td class="mono">{{ h.host }}</td>
           <td>{{ h.jurisdiction }}</td>
+          <td class="mono">{% if h.get("ip") %}{{ h.ip }}{% endif %}{% if h.get("asn") %} {{ h.asn }}{% endif %}{% if h.get("org") %} {{ h.org }}{% endif %}{% if h.get("country") %} {{ h.country }}{% endif %}</td>
           <td class="mono">{% for s in h.get("services") or [] %}{{ s.port }}{% if s.get("product") %}({{ s.product }}{% if s.get("version") %} {{ s.version }}{% endif %}){% endif %} {% endfor %}{% if not h.get("services") %}{{ (h.get("ports") or [])|join(" ") }}{% endif %}</td>
-          <td class="mono">{% for c in (h.get("cves") or [])[:8] %}{{ c.id }}{% if c.get("cvss") %}({{ c.cvss }}{% if c.get("severity") %} {{ c.severity }}{% endif %}){% endif %} {% endfor %}{% if (h.get("cves") or [])|length > 8 %}… 等 {{ h.get("cves")|length }} 个{% endif %}</td>
-          <td class="mono">{% for p in (h.get("exposed_paths") or [])[:8] %}{{ p.path }}({{ p.status }}) {% endfor %}{% if (h.get("exposed_paths") or [])|length > 8 %}…{% endif %}</td>
-          <td class="mono">{% for e in h.get("exposures") or [] %}<div>⚠ {{ e.name }}{% if e.get("severity") %}（{{ e.severity }}）{% endif %}</div>{% endfor %}{% if h.get("tech_stack") %}<div class="muted">栈：{% for t in h.tech_stack %}{{ t.name }}{% if not loop.last %}、{% endif %}{% endfor %}</div>{% endif %}</td>
+          <td class="mono">{% if h.get("tech_stack") %}{% for t in h.tech_stack %}{{ t.name }}{% if not loop.last %}、{% endif %}{% endfor %}{% endif %}</td>
           <td class="mono muted">{% for s in (h.get("related_subdomains") or [])[:8] %}{{ s }} {% endfor %}{% if (h.get("related_subdomains") or [])|length > 8 %}… 等 {{ h.get("related_subdomains")|length }} 个{% endif %}</td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
-    <div class="muted" style="font-size:12px;margin-top:6px">CVE / 后台路径仅为**情报方向**（非利用）；标「主动探测」者为对授权目标的实时侦查（仅侦查、不利用）。完整结构化数据见 report.json 的 endpoints[].enrichment 与摘要 digest 的 attack_surface 段。</div>
+    <div class="muted" style="font-size:12px;margin-top:6px">全程被动 OSINT（RDAP / DNS / ASN / 证书透明度 / Shodan 已扫库），对目标零流量、不主动探测；同源站 / 同后台指纹 → 疑同团伙基础设施，可并簇串案。完整结构化数据见 report.json 的 endpoints[].enrichment 与摘要 digest 的 overseas_targets 段。</div>
   </section>
   {% endif %}
 
