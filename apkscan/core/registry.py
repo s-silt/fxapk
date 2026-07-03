@@ -52,10 +52,9 @@ class BaseEnricher(ABC):
     phase:       富化阶段（两遍富化调度用）：
                  - ``"attribution"``（默认）：第①遍，查归属（rdap/whois/dns/asn/icp/webcheck），
                    定服务器辖区（国内/国外/未知）。
-                 - ``"attack_surface"``：第②遍，攻击面取证（shodan/recon/cve/certs），**仅对
-                   国外(+未知)端点跑**；其中 ``active=True`` 的（主动探测）仅对**国外**端点跑。
-    active:      是否**主动向目标发起连接**（recon=True）。主动 enricher 受最严门控：opt-in +
-                 仅国外 + 公网 IP。被动 enricher（默认 False）对目标零流量。
+                 - ``"overseas"``：第②遍，境外被动取证（shodan/certs），**仅对国外(+未知)端点跑**。
+    active:      **是否会向目标发起连接的标记**。本仓当前富化器全部为被动（``active=False``），
+                 只读第三方公开库 / OSINT，对目标零流量；保留该标记以便审计声明「不接触目标」。
     """
 
     name: str = ""

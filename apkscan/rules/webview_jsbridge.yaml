@@ -28,13 +28,13 @@ signals:
       - "https://developer.android.com/reference/android/webkit/WebView#addJavascriptInterface(java.lang.Object,%20java.lang.String)"
 
   - id: WV-DANGEROUS-WEBSETTINGS
-    title: "WebView 危险配置：file:// + JS 提权"
+    title: "WebView 危险配置：file:// 跨源访问"
     severity: HIGH
     all_tokens: ["setJavaScriptEnabled", "setAllowFileAccessFromFileURLs"]
     description: >-
       WebView 同时开启 JavaScript 与 file:// 协议跨源访问（setAllowFileAccessFromFileURLs /
       setAllowUniversalAccessFromFileURLs）。恶意/被劫持网页可借此读取本地文件（私有目录、
-      其它 app 数据），是本地文件窃取与提权的经典面。
+      其它 app 数据），是本地文件越权读取的经典风险面。
     recommendation: "研判：核查 WebView 是否加载远程/不可信内容，结合 file:// 访问评估本地数据泄露风险。"
     references:
       - "https://developer.android.com/reference/android/webkit/WebSettings#setAllowFileAccessFromFileURLs(boolean)"
