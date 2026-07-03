@@ -158,9 +158,12 @@ setup (adb connect, root, ARM compatibility, frida version match, CA install).
 ## Compliance
 
 For **authorized anti-fraud investigation / security research** only. It performs analysis and
-lead extraction; it provides no attack/bypass/evasion capability. Hardening is detected, not
-stripped (unpacking is an optional on-device step you must run in your own authorized
-environment). Online enrichment only queries public WHOIS / ICP / ASN data.
+lead extraction; it provides **no attack / exploitation / active-probing capability against any
+third-party server**. Hardening is detected, not stripped (unpacking is an optional on-device step
+that observes the **sample itself** on your own authorized forensics device). Overseas servers are
+only **passively attributed** (RDAP / WHOIS / ICP / ASN / DNS / certificate transparency) to locate
+the real origin IP and extract unique identifiers — **never actively probed or attacked**. Online
+enrichment only queries public WHOIS / ICP / ASN data.
 
 ## License
 

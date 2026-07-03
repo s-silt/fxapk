@@ -1,5 +1,7 @@
 """真机脱壳（unpack）：root 设备 + frida + frida-dexdump 自动 dump 解密 DEX 并回灌重分析。
 
+取证用途：对取证样本自身在分析机上做运行时观测，产出端点/密钥/独特串等线索，不面向任何第三方基础设施。
+
 工作流::
 
     1. 探测能力：device.has_device / has_frida / has_frida_dexdump / frida_server_running，

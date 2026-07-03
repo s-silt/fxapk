@@ -1,4 +1,5 @@
 
+// 取证用途：对取证样本自身在分析机上做运行时观测，产出端点/密钥/独特串等线索，不面向任何第三方基础设施。
 // apkscan 无障碍远控指令与目标银行清单采集（best-effort）：hook AccessibilityService 回调 +
 // dispatchGesture/performGlobalAction（远控指令，限流）+ MediaProjection（屏幕录制）。
 Java.perform(function () {

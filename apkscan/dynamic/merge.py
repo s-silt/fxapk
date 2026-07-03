@@ -536,7 +536,7 @@ def merge_runtime_traces(report: Report, runtime_report_path: str) -> dict[str, 
             report.meta["runtime_sensitive_apis"] = api_hints
             stats["api_confirmed"] = _confirm_sensitive_api_findings(report, api_hints)
 
-        # P3：反检测探测（root/模拟器/frida）→ 反分析行为 Finding + meta。
+        # P3：样本自我检测（root/模拟器/frida）→ 反取证/反分析行为 Finding + meta。
         ad_events = _load_events_field(runtime_report_path, "antidetect_events")
         ad_kinds = cryptohook.antidetect_kinds_from_events(ad_events)
         if ad_kinds:
@@ -772,7 +772,7 @@ def _add_anti_analysis_finding(
             severity=severity,
             category="anti_analysis",
             description=(
-                f"运行时实测：应用主动探测了 {kinds_label}（被 apkscan 绕过）。"
+                f"运行时实测：样本自我检测了 {kinds_label}（已由取证运行时兼容层中和）。"
                 "正经应用极少探测 su/qemu/frida——这类反取证/反沙箱行为是涉诈样本/木马规避"
                 "动态分析与风控的典型特征，应作为研判加权信号。"
             ),
@@ -1632,7 +1632,7 @@ def _add_remote_control_finding(
             description=(
                 f"运行时实测无障碍远控行为：下发 {len(gesture_actions)} 个自动手势/全局动作；"
                 f"劫持目标 app：{targets_text}；{screen_text}。"
-                "无障碍服务被用于劫持银行/支付 app 自动转账（远控盗刷），是涉诈木马的典型攻击面。"
+                "无障碍服务被用于劫持银行/支付 app 自动转账（远控盗刷），是涉诈木马的典型远控盗刷手法。"
             ),
             recommendation=(
                 f"研判：结合目标机构清单向对应银行/支付机构调取被害人流水；{_REMOTE_CONTROL_TIMING_NOTE}"

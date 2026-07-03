@@ -4,7 +4,7 @@
 技术栈 / 开放端口 / 邮件配置 / 威胁情报 / 子域 …），结果并进 ``endpoint.enrichment['webcheck']``。
 这一轮外部情报直接喂三处：
 - **辖区分流**：``location`` 的归属国 → forensic 判国内 / 国外（见 core/forensic）。
-- **国外取证攻击面**：``ports`` / ``tech-stack`` → 服务器暴露面与技术栈已知漏洞方向。
+- **国外被动定位**：``ports`` / ``tech-stack`` → 识别真实源站与技术栈 / 后台框架指纹（同后台疑同团伙 → 并簇串案）。
 - **图谱串案**：``subdomains`` / ``linked-pages`` → 关联主机（后续可纳入并簇键）。
 
 **opt-in**：仅当配置环境变量 ``FXAPK_WEBCHECK_URL``（自托管实例，如 ``http://localhost:3000``，

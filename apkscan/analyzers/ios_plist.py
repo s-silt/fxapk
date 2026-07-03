@@ -174,7 +174,7 @@ class IosPlistAnalyzer(BaseAnalyzer):
                 id="IOS-URL-SCHEME",
                 title=f"自定义 URL scheme（外部可拉起）：{('、'.join(schemes))[:120]}",
                 severity=Severity.MEDIUM,
-                category="attack_surface",
+                category="exported_surface",
                 description=(
                     f"应用注册了自定义 URL scheme：{('、'.join(schemes))}。"
                     "可被网页 / 短信链接 / 其它 app 经 `<scheme>://` 从外部拉起并传入受控数据，"
