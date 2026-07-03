@@ -16,54 +16,65 @@ Java.perform(function () {
     try { var r = []; for (var i = 0; i < len; i++) r.push(b[off + i]); return r; } catch (e) { return b; }
   }
 
-  var Cipher = Java.use('javax.crypto.Cipher');
+  var Cipher = null;
+  try { Cipher = Java.use('javax.crypto.Cipher'); }
+  catch (e) { console.log('[cipher] javax.crypto.Cipher 不可用: ' + e); }
 
   // 算法/模式/padding
   try { Cipher.getInstance.overload('java.lang.String').implementation = function (t) { console.log('[cipher] getInstance ' + t); return this.getInstance(t); }; } catch (e) {}
 
   // init：抓 opmode(1=ENCRYPT 2=DECRYPT) 标方向；从 Key dump key 字节
-  Cipher.init.overloads.forEach(function (ov) {
-    ov.implementation = function () {
+  try {
+    Cipher.init.overloads.forEach(function (ov) {
       try {
-        var mode = arguments[0];
-        this._fxDir = (mode === 1 ? 'ENC' : mode === 2 ? 'DEC' : ('m' + mode));
-        if (arguments.length > 1 && arguments[1]) {
-          var key = arguments[1];
+        ov.implementation = function () {
           try {
-            var enc = key.getEncoded();
-            if (enc) { console.log('[key@init ' + this._fxDir + ']'); dump('key', enc); }
-            else {
-              // 托管密钥（AndroidKeyStore RSA/EC）导不出字节，价值在 alias —— 持 alias 可查密钥用途/审计
-              var alias = '';
-              try { alias = key.getKeystoreAlias ? key.getKeystoreAlias() : ''; } catch (e) {}
-              if (!alias) { try { alias = '' + key.getClass().getName(); } catch (e) {} }
-              console.log('[key@init ' + this._fxDir + '] 托管密钥(不可导出) alias/类=' + alias);
+            var mode = arguments[0];
+            this._fxDir = (mode === 1 ? 'ENC' : mode === 2 ? 'DEC' : ('m' + mode));
+            if (arguments.length > 1 && arguments[1]) {
+              var key = arguments[1];
+              try {
+                var enc = key.getEncoded();
+                if (enc) { console.log('[key@init ' + this._fxDir + ']'); dump('key', enc); }
+                else {
+                  // 托管密钥（AndroidKeyStore RSA/EC）导不出字节，价值在 alias —— 持 alias 可查密钥用途/审计
+                  var alias = '';
+                  try { alias = key.getKeystoreAlias ? key.getKeystoreAlias() : ''; } catch (e) {}
+                  if (!alias) { try { alias = '' + key.getClass().getName(); } catch (e) {} }
+                  console.log('[key@init ' + this._fxDir + '] 托管密钥(不可导出) alias/类=' + alias);
+                }
+              } catch (e) {}
             }
           } catch (e) {}
-        }
-      } catch (e) {}
-      return ov.apply(this, arguments);
-    };
-  });
+          return ov.apply(this, arguments);
+        };
+      } catch (eOv) { console.log('[cipher] init overload bind skip: ' + eOv); }
+    });
+  } catch (e) { console.log('[cipher] Cipher.init hook 不可用: ' + e); }
 
   // doFinal / update 全重载：按 offset/len 切片，标方向
   ['doFinal', 'update'].forEach(function (m) {
-    Cipher[m].overloads.forEach(function (ov) {
-      ov.implementation = function () {
-        var ret = ov.apply(this, arguments);
+    try {
+      if (!Cipher[m] || !Cipher[m].overloads) { console.log('[cipher] Cipher.' + m + ' 不可用, skip'); return; }
+      Cipher[m].overloads.forEach(function (ov) {
         try {
-          var dir = this._fxDir || '?';
-          var inb = null;
-          if (arguments.length >= 3 && typeof arguments[1] === 'number' && typeof arguments[2] === 'number')
-            inb = sliceJ(arguments[0], arguments[1], arguments[2]);            // (byte[] in, int off, int len[, ...])
-          else if (arguments.length >= 1 && arguments[0] && arguments[0].length !== undefined)
-            inb = arguments[0];                                               // (byte[] in)
-          if (inb !== null) dump('cipher.' + m + '.IN[' + dir + ']', inb);
-          if (ret && ret.length !== undefined) dump('cipher.' + m + '.OUT[' + dir + ']', ret);
-        } catch (e) {}
-        return ret;
-      };
-    });
+          ov.implementation = function () {
+            var ret = ov.apply(this, arguments);
+            try {
+              var dir = this._fxDir || '?';
+              var inb = null;
+              if (arguments.length >= 3 && typeof arguments[1] === 'number' && typeof arguments[2] === 'number')
+                inb = sliceJ(arguments[0], arguments[1], arguments[2]);            // (byte[] in, int off, int len[, ...])
+              else if (arguments.length >= 1 && arguments[0] && arguments[0].length !== undefined)
+                inb = arguments[0];                                               // (byte[] in)
+              if (inb !== null) dump('cipher.' + m + '.IN[' + dir + ']', inb);
+              if (ret && ret.length !== undefined) dump('cipher.' + m + '.OUT[' + dir + ']', ret);
+            } catch (e) {}
+            return ret;
+          };
+        } catch (eOv) { console.log('[cipher] ' + m + ' overload bind skip: ' + eOv); }
+      });
+    } catch (e) { console.log('[cipher] Cipher.' + m + ' hook 不可用: ' + e); }
   });
   console.log('[cipher] Cipher init/doFinal/update hooked');
 
@@ -88,12 +99,16 @@ Java.perform(function () {
   } catch (e) {}
 
   // SecretKeySpec 两个重载
-  var SKS = Java.use('javax.crypto.spec.SecretKeySpec');
-  SKS.$init.overload('[B', 'java.lang.String').implementation = function (k, a) { console.log('[key] SecretKeySpec alg=' + a); dump('key', k); return this.$init(k, a); };
-  try { SKS.$init.overload('[B', 'int', 'int', 'java.lang.String').implementation = function (k, o, l, a) { console.log('[key] SecretKeySpec(off) alg=' + a); dump('key', sliceJ(k, o, l)); return this.$init(k, o, l, a); }; } catch (e) {}
+  try {
+    var SKS = Java.use('javax.crypto.spec.SecretKeySpec');
+    try { SKS.$init.overload('[B', 'java.lang.String').implementation = function (k, a) { console.log('[key] SecretKeySpec alg=' + a); dump('key', k); return this.$init(k, a); }; } catch (e) { console.log('[cipher] SecretKeySpec($init [B,String) skip: ' + e); }
+    try { SKS.$init.overload('[B', 'int', 'int', 'java.lang.String').implementation = function (k, o, l, a) { console.log('[key] SecretKeySpec(off) alg=' + a); dump('key', sliceJ(k, o, l)); return this.$init(k, o, l, a); }; } catch (e) {}
+  } catch (e) { console.log('[cipher] javax.crypto.spec.SecretKeySpec 不可用: ' + e); }
 
   // IvParameterSpec 两个重载
-  var IPS = Java.use('javax.crypto.spec.IvParameterSpec');
-  IPS.$init.overload('[B').implementation = function (iv) { dump('iv', iv); return this.$init(iv); };
-  try { IPS.$init.overload('[B', 'int', 'int').implementation = function (iv, o, l) { dump('iv', sliceJ(iv, o, l)); return this.$init(iv, o, l); }; } catch (e) {}
+  try {
+    var IPS = Java.use('javax.crypto.spec.IvParameterSpec');
+    try { IPS.$init.overload('[B').implementation = function (iv) { dump('iv', iv); return this.$init(iv); }; } catch (e) { console.log('[cipher] IvParameterSpec($init [B) skip: ' + e); }
+    try { IPS.$init.overload('[B', 'int', 'int').implementation = function (iv, o, l) { dump('iv', sliceJ(iv, o, l)); return this.$init(iv, o, l); }; } catch (e) {}
+  } catch (e) { console.log('[cipher] javax.crypto.spec.IvParameterSpec 不可用: ' + e); }
 });

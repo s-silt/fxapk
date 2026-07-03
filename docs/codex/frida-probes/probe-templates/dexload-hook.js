@@ -27,10 +27,12 @@ Java.perform(function () {
     try {
       var C = Java.use(cls);
       C.$init.overloads.forEach(function (ov) {
-        ov.implementation = function () {
-          try { console.log('[dexload] ' + cls + ' dexPath=' + arguments[0]); } catch (e) {}
-          return ov.apply(this, arguments);
-        };
+        try {
+          ov.implementation = function () {
+            try { console.log('[dexload] ' + cls + ' dexPath=' + arguments[0]); } catch (e) {}
+            return ov.apply(this, arguments);
+          };
+        } catch (e) { console.log('[dexload] ' + cls + ' overload skip: ' + e); }
       });
       console.log('[dexload] ' + cls + ' hooked');
     } catch (e) { console.log('[dexload] ' + cls + ' skip: ' + e); }
@@ -40,16 +42,18 @@ Java.perform(function () {
   try {
     var IM = Java.use('dalvik.system.InMemoryDexClassLoader');
     IM.$init.overloads.forEach(function (ov) {
-      ov.implementation = function () {
-        try {
-          var a0 = arguments[0];
-          if (a0 && a0.remaining) dumpBuffer(a0, 'inmem');                    // 单 ByteBuffer
-          else if (a0 && a0.length !== undefined) {                            // ByteBuffer[]
-            for (var i = 0; i < a0.length; i++) dumpBuffer(a0[i], 'inmem' + i);
-          }
-        } catch (e) { console.log('[dexload] InMemory dump skip: ' + e); }
-        return ov.apply(this, arguments);
-      };
+      try {
+        ov.implementation = function () {
+          try {
+            var a0 = arguments[0];
+            if (a0 && a0.remaining) dumpBuffer(a0, 'inmem');                    // 单 ByteBuffer
+            else if (a0 && a0.length !== undefined) {                            // ByteBuffer[]
+              for (var i = 0; i < a0.length; i++) dumpBuffer(a0[i], 'inmem' + i);
+            }
+          } catch (e) { console.log('[dexload] InMemory dump skip: ' + e); }
+          return ov.apply(this, arguments);
+        };
+      } catch (e) { console.log('[dexload] InMemoryDexClassLoader overload skip: ' + e); }
     });
     console.log('[dexload] InMemoryDexClassLoader hooked');
   } catch (e) { console.log('[dexload] InMemoryDexClassLoader skip: ' + e); }
@@ -62,7 +66,7 @@ Java.perform(function () {
       return this.loadDex(src, out, flags);
     };
     console.log('[dexload] DexFile.loadDex hooked');
-  } catch (e) {}
+  } catch (e) { console.log('[dexload] DexFile.loadDex skip: ' + e); }
 
   console.log('[dexload] ready —— 释放的 dex 路径/落盘后 adb pull 回灌：fxapk analyze <apk> --extra-dex <dex...>');
 });

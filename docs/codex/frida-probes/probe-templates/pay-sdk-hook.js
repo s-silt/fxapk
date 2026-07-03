@@ -1,5 +1,5 @@
 // pay-sdk-hook.js — P0① 资金链取证：hook 第三方支付 SDK 调起，抓资金接收方锚点(商户号/seller_id/notify_url)
-// 适用：涉诈样本拉起支付宝/微信/银联收款。纯只读检测仪——只 hook+console.log 记录调起参数，绝不发起/拦截/修改任何支付。
+// 适用：目标样本拉起支付宝/微信/银联收款。纯只读检测仪——只 hook+console.log 记录调起参数，绝不发起/拦截/修改任何支付。
 // 跑：frida -U -f <包名> -l pay-sdk-hook.js -q  （建议 spawn；进到支付/充值页触发一次调起）
 // 改：类名被混淆/换 SDK 版本→用 jadx 搜 'alipay/PayTask'、'opensdk/PayReq'、'UPPayAssistEx' 核对真实类名回填 CFG；微信走 IWXAPI 实现类，下方已枚举候选+遍历已加载类兜底
 'use strict';
@@ -31,7 +31,8 @@ function dumpAliOrder(orderInfo) {
             var m = re.exec('&' + orderInfo);
             if (m && m[1]) {
                 var tag = (k === 'seller_id' || k === 'pid' || k === 'partner') ? '  [LEAD-定人:收款主体→向支付宝调实名结算账户]'
-                        : (k === 'notify_url' || k === 'return_url') ? '  [LEAD-穿透:真后端]' : '';
+                        : (k === 'notify_url' || k === 'return_url') ? '  [LEAD-穿透:真后端]'
+                        : (k === 'app_id') ? '  [LEAD:支付宝开放平台 app_id→调注册主体]' : '';
                 emit('[pay][alipay]   ' + k + ' = ' + m[1] + tag);
             }
         }

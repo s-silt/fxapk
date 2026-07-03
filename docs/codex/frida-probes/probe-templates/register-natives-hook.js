@@ -52,7 +52,7 @@ function readCStr(p) {
 
 // ---- 核心：解析并落一张 RegisterNatives 注册表 -------------------------------
 // 抓到什么: 每条 (name, signature, fnPtr)；jclass 仅打句柄(早期无法即时解析类名)。
-// → 调证线索: name#signature 锚业务语义，fnPtr→so!offset 锚 native 真实现位置，
+// → 溯源线索: name#signature 锚业务语义，fnPtr→so!offset 锚 native 真实现位置，
 //   该 offset 直接作为 native-ssl/native-crypto-key 的 Interceptor.attach 落点(定逻辑/固证)。
 //   类名留待业务触发后用 Java.enumerateLoadedClasses 按 fnPtr/方法名 反查回填(见 notes)。
 function dumpRegistration(envPtr, clazz, methodsPtr, count) {

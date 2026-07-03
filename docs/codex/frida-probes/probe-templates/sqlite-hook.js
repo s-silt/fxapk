@@ -1,5 +1,5 @@
 // sqlite-hook.js — hook SQLite/SQLCipher 读写，抓聊天/交易落库明文 + 抠 SQLCipher 解库密钥(含 char[]/byte[] key)
-// 适用：聊天/交易不在流量里(写了本地库，常 SQLCipher 加密) / 要固定聊天内容、受害人PII、资金流水作物证 / 顺手拿解库 key
+// 适用：聊天/交易不在流量里(写了本地库，常 SQLCipher 加密) / 要固定聊天内容、敏感个人信息(PII)、资金流水作物证 / 顺手拿解库 key
 // 跑：frida -U -f <包名> -l sqlite-hook.js -q
 // 改：明文库=android.database.sqlite.SQLiteDatabase；加密库=net.sqlcipher.database.SQLiteDatabase(两套都挂)；密钥点在 openOrCreateDatabase/changePassword/rawExecSQL PRAGMA key
 
