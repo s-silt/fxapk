@@ -1,8 +1,8 @@
 /*
  * 用途: [只读取证] hook android.telephony.SmsManager(+遗留 android.telephony.gsm.SmsManager)的
- *       sendTextMessage / sendMultipartTextMessage,如实记录样本替受害人把验证码/银行 OTP 转发给
- *       "谁(收件号码)+什么正文",供办案固证。只 hook+console.log,绝不发送/拦截/修改/外发(过投毒安检)。
- * 适用: 卡农/接码类涉诈样本(P0⑥),OTP 实时倒卖人锚点取证;系统类 SmsManager 不混淆,通常即挂即用。
+ *       sendTextMessage / sendMultipartTextMessage,如实记录样本把敏感个人信息(验证码/银行 OTP)转发给
+ *       "谁(收件号码)+什么正文",供溯源固证。只 hook+console.log,绝不发送/拦截/修改/外发(过投毒安检)。
+ * 适用: 短信转发/接码类目标样本(P0⑥),OTP 实时倒卖人锚点取证;系统类 SmsManager 不混淆,通常即挂即用。
  * 跑:   frida -U -f <包名> -l sms-forward-outbound-hook.js   (推荐 launch-only,出站短信由业务流主动触发,多能抓)
  *       或   frida -U -n <进程名> -l sms-forward-outbound-hook.js   (attach 已运行进程)
  * 改:   1) 类名被混淆/样本自封装发送门面 → Java.perform 内先 enumerateLoadedClasses 定位真实类名,回填"可选:自封装门面"段;
@@ -89,7 +89,7 @@ Java.perform(function () {
             console.log(TAG + ' [BODY] utf8_hex=' + bd.hex + '  b64=' + bd.b64 + '  (hex/b64 同源 UTF-8,可互相解码核对)');
             if (extra) console.log(TAG + ' [INFO] ' + extra);
             if (otp !== null) {
-                // OTP 命中: 与"受害人同时刻收到银行 OTP"成对落盘 = 实时倒卖物证
+                // OTP 命中: 与"本机同时刻收到银行 OTP"成对落盘 = 实时倒卖物证
                 console.log(TAG + ' [LEAD-OTP] 正文命中6位验证码=' + otp +
                             '  → 与受害人收到银行/平台OTP时间戳交叉,固证OTP实时倒卖');
             }
@@ -139,20 +139,22 @@ Java.perform(function () {
         try {
             var ov1 = Cls.sendTextMessage.overloads;
             ov1.forEach(function (ov) {
-                ov.implementation = function () {
-                    try {
-                        var dest = (arguments.length > 0) ? arguments[0] : null;
-                        var text = (arguments.length > 2) ? arguments[2] : null;
-                        report('sendTextMessage(' + ov.argumentTypes.length + 'args)@' + className,
-                               dest === null ? null : String(dest),
-                               text === null ? null : String(text),
-                               null);
-                    } catch (e) {
-                        console.log(TAG + ' sendTextMessage read skip: ' + e);
-                    }
-                    // 只读: 原样放行,绝不修改参数/返回值;ov.apply 调原始避免递归
-                    return ov.apply(this, arguments);
-                };
+                try {
+                    ov.implementation = function () {
+                        try {
+                            var dest = (arguments.length > 0) ? arguments[0] : null;
+                            var text = (arguments.length > 2) ? arguments[2] : null;
+                            report('sendTextMessage(' + ov.argumentTypes.length + 'args)@' + className,
+                                   dest === null ? null : String(dest),
+                                   text === null ? null : String(text),
+                                   null);
+                        } catch (e) {
+                            console.log(TAG + ' sendTextMessage read skip: ' + e);
+                        }
+                        // 只读: 原样放行,绝不修改参数/返回值;ov.apply 调原始避免递归
+                        return ov.apply(this, arguments);
+                    };
+                } catch (eOv) { console.log(TAG + ' [' + className + '] sendTextMessage overload bind skip: ' + eOv); }
             });
             console.log(TAG + ' [' + className + '] sendTextMessage hooked (' + ov1.length + ' overloads)');
         } catch (e) {
@@ -163,21 +165,23 @@ Java.perform(function () {
         try {
             var ov2 = Cls.sendMultipartTextMessage.overloads;
             ov2.forEach(function (ov) {
-                ov.implementation = function () {
-                    try {
-                        var dest = (arguments.length > 0) ? arguments[0] : null;
-                        var parts = (arguments.length > 2) ? arguments[2] : null;
-                        var pt = partsToText(parts);
-                        report('sendMultipartTextMessage(' + ov.argumentTypes.length + 'args)@' + className,
-                               dest === null ? null : String(dest),
-                               pt.text,
-                               'multipart 原始分段数=' + pt.count + ' (已拼接为完整正文)');
-                    } catch (e) {
-                        console.log(TAG + ' sendMultipartTextMessage read skip: ' + e);
-                    }
-                    // 只读: 原样放行
-                    return ov.apply(this, arguments);
-                };
+                try {
+                    ov.implementation = function () {
+                        try {
+                            var dest = (arguments.length > 0) ? arguments[0] : null;
+                            var parts = (arguments.length > 2) ? arguments[2] : null;
+                            var pt = partsToText(parts);
+                            report('sendMultipartTextMessage(' + ov.argumentTypes.length + 'args)@' + className,
+                                   dest === null ? null : String(dest),
+                                   pt.text,
+                                   'multipart 原始分段数=' + pt.count + ' (已拼接为完整正文)');
+                        } catch (e) {
+                            console.log(TAG + ' sendMultipartTextMessage read skip: ' + e);
+                        }
+                        // 只读: 原样放行
+                        return ov.apply(this, arguments);
+                    };
+                } catch (eOv) { console.log(TAG + ' [' + className + '] sendMultipartTextMessage overload bind skip: ' + eOv); }
             });
             console.log(TAG + ' [' + className + '] sendMultipartTextMessage hooked (' + ov2.length + ' overloads)');
         } catch (e) {

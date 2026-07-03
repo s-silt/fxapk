@@ -154,7 +154,7 @@ Java.perform(function () {
         if (hookedOk) ok('okhttp3 OkHostnameVerifier.verify');
     } catch (e) { miss('OkHostnameVerifier', e); }
 
-    // --- 7) WebViewClient.onReceivedSslError:H5 端的证书错误(杀猪盘多是 WebView 壳)---
+    // --- 7) WebViewClient.onReceivedSslError:H5 端的证书错误(此类样本多是 WebView 壳)---
     // app 重写 onReceivedSslError 后若没 proceed,H5 站点 TLS 错误就白屏;这里强制 proceed() 放行。
     try {
         var WVClient = Java.use('android.webkit.WebViewClient');
@@ -168,7 +168,7 @@ Java.perform(function () {
         ok('android.webkit.WebViewClient.onReceivedSslError');
     } catch (e) { miss('WebViewClient.onReceivedSslError', e); }
 
-    // --- 8) TrustKit / 第三方 pinning 库(部分金融/诈骗 app 引入)---
+    // --- 8) TrustKit / 第三方 pinning 库(部分金融/目标 app 引入)---
     try {
         var TK = Java.use('com.datatheorem.android.trustkit.pinning.OkHostnameVerifier');
         TK.verify.overloads.forEach(function (ov) { try { ov.implementation = function () { return true; }; } catch (e) {} });

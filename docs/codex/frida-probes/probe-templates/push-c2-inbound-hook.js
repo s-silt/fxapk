@@ -1,5 +1,5 @@
 // push-c2-inbound-hook.js — P0② C2 指令反向入口：从推送 SDK 收消息回调抓服务器下发的指令/C2。
-// 适用：装死/无明显回连、C2 走 FCM/个推/极光下发的反诈样本；带 GMS/对应厂商推送框架的 root 真机。
+// 适用：装死/无明显回连、C2 走 FCM/个推/极光下发的目标样本；带 GMS/对应厂商推送框架的 root 真机。
 // 跑：frida -U -l push-c2-inbound-hook.js -f <包名>  （或 -F 附加已运行进程；建议样本完成推送注册后再注入）
 // 改：类名被混淆/SDK 版本漂移→改 CFG 里的类名/方法名（用 jadx 核对样本真实符号）；脚本已 enumerateLoadedClasses 兜底找 *MessagingService 子类回填。
 'use strict';

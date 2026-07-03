@@ -3,7 +3,7 @@
 // 跑：frida -U -f <包名> -l native-ssl-hook.js -q
 // 原理：BoringSSL（libssl.so，或编进 libflutter.so / app 自带 .so）的
 //   SSL_write(ssl, buf, num) 入参 buf 是出站明文；SSL_read(ssl, buf, num) 返回后 buf 是入站明文。
-//   再用 SSL_get_fd(ssl)+getpeername(fd) 把每段明文关联到真实对端 IP:port（= 直接调证线索）。
+//   再用 SSL_get_fd(ssl)+getpeername(fd) 把每段明文关联到真实对端 IP:port（= 直接溯源线索）。
 // 改：符号被 strip 见末尾提示；只要明文不要五元组可忽略 [peer] 段
 'use strict';
 
@@ -35,19 +35,23 @@ function hookPair(label, sslRead, sslWrite) {
   if (sslWrite) {
     Interceptor.attach(sslWrite, {
       onEnter: function (a) {
-        var len = a[2].toInt32();
-        if (len > 0) console.log('\n[native TLS][' + label + '][SSL_write len=' + len + ']' + peerOf(a[0]) + ' ' + preview(a[1], len));
+        try {
+          var len = a[2].toInt32();
+          if (len > 0) console.log('\n[native TLS][' + label + '][SSL_write len=' + len + ']' + peerOf(a[0]) + ' ' + preview(a[1], len));
+        } catch (e) { console.log('[native] SSL_write onEnter skip: ' + e); }
       }
     });
     console.log('[native] hooked SSL_write @ ' + label);
   }
   if (sslRead) {
     Interceptor.attach(sslRead, {
-      onEnter: function (a) { this.ssl = a[0]; this.buf = a[1]; },
+      onEnter: function (a) { try { this.ssl = a[0]; this.buf = a[1]; } catch (e) { this.ssl = null; this.buf = null; } },
       onLeave: function (ret) {
-        var n = ret.toInt32();
-        if (n > 0 && this.buf && !this.buf.isNull())
-          console.log('\n[native TLS][' + label + '][SSL_read len=' + n + ']' + peerOf(this.ssl) + ' ' + preview(this.buf, n));
+        try {
+          var n = ret.toInt32();
+          if (n > 0 && this.buf && !this.buf.isNull())
+            console.log('\n[native TLS][' + label + '][SSL_read len=' + n + ']' + peerOf(this.ssl) + ' ' + preview(this.buf, n));
+        } catch (e) { console.log('[native] SSL_read onLeave skip: ' + e); }
       }
     });
     console.log('[native] hooked SSL_read @ ' + label);
