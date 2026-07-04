@@ -441,13 +441,36 @@ def _analyze_serial(ctx: object, eligible: list) -> list[tuple]:
     return out
 
 
+#: 整批并行分析的总超时预算（秒）。防病态输入（如构造触发正则灾难性回溯的字符串）让某个分析器
+#: 的 worker 无限期卡住、拖住整批结果永久不返回。固定值而非按分析器数线性放大——各分析器都是
+#: 纯内存扫描（dex 字符串/manifest 正则，无网络 IO），正常情况下全部跑完通常数秒内，120s 是几十倍
+#: 安全余量。注意 ProcessPoolExecutor.map 的 timeout 语义是「整批累计」而非逐个 task 各自计时。
+_BATCH_TIMEOUT_SECONDS = 120.0
+
+
 def _run_pool(snapshot: object, names: list[str], workers: int) -> list[tuple]:
     """纯建池 + map（不含内存决策）。pool.map 保序。真 spawn 等价测试直接调本函数以绕过
-    _decide_workers，保证它永远真 spawn（否则低 RAM 机上等价测试会因回退串行而 serial==serial 假绿）。"""
+    _decide_workers，保证它永远真 spawn（否则低 RAM 机上等价测试会因回退串行而 serial==serial 假绿）。
+
+    超时防护：单个分析器卡死不应让整批并行结果永久挂起。超时 → 放弃等待、把该批标为失败
+    （抛出 TimeoutError，外层 `_analyze_eligible` 的 except Exception 会捕获并回退串行逐个执行，
+    至少能继续产出结果、定位是哪个分析器卡死）。已知局限：卡住的 worker 进程本身可能仍在后台
+    空转直到进程池随 with 块退出才被清理——concurrent.futures 无法强制中断已在执行中的 task；
+    这里换来的保证是"主流程不会被拖着无限期等下去"，不是"瞬间释放 CPU"。
+    """
     with ProcessPoolExecutor(
         max_workers=workers, initializer=_worker_init, initargs=(snapshot,)
     ) as pool:
-        return list(pool.map(_worker_analyze, names))
+        try:
+            return list(pool.map(_worker_analyze, names, timeout=_BATCH_TIMEOUT_SECONDS))
+        except TimeoutError:
+            logger.warning(
+                "并行分析批次超时（%d 个分析器，预算 %.0fs）：疑似病态输入导致某分析器卡死，"
+                "放弃本批结果，回退串行逐个执行（会更慢但能继续产出）",
+                len(names),
+                _BATCH_TIMEOUT_SECONDS,
+            )
+            raise
 
 
 def _analyze_parallel(ctx: object, eligible: list) -> list[tuple]:
