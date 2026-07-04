@@ -2,7 +2,7 @@
 
 分两层覆盖：
 - 轻量（始终跑）：可 pickle 快照往返、门控逻辑、worker 函数进程内驱动、输出确定性。
-- 重量（@pytest.mark.slow，需本地有真实 *.apk 样本，否则 skip）：真 ProcessPoolExecutor spawn
+- 重量（@pytest.mark.slow，需本地有真实 *.apk 样本，否则 skip）：真 multiprocessing.Pool spawn
   端到端，断言串行==并行**逐字节一致**——把原先"不在仓库的手动等价脚本"固化进测试套件。
 """
 
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import multiprocessing
 import os
 import pickle
 from pathlib import Path
@@ -371,7 +372,7 @@ def test_analyze_parallel_low_mem_falls_back_serial_without_pool(
         def __init__(self, *a, **k) -> None:  # type: ignore[no-untyped-def]
             raise AssertionError("workers<=1 不应建进程池")
 
-    monkeypatch.setattr(pipeline, "ProcessPoolExecutor", _NoPool)
+    monkeypatch.setattr(pipeline.multiprocessing, "Pool", _NoPool)
     out = pipeline._analyze_parallel(ctx, eligible)
     assert out == pipeline._analyze_serial(ctx, eligible)  # 回退串行结果
 
@@ -393,7 +394,7 @@ def test_env_max_workers_one_short_circuits_before_build_snapshot(
         def __init__(self, *a, **k) -> None:  # type: ignore[no-untyped-def]
             raise AssertionError("强制串行不应建进程池")
 
-    monkeypatch.setattr(pipeline, "ProcessPoolExecutor", _NoPool)
+    monkeypatch.setattr(pipeline.multiprocessing, "Pool", _NoPool)
     eligible = [("a", _Spy("a")), ("b", _Spy("b")), ("c", _Spy("c"))]
     out = pipeline._analyze_parallel(_fake(platform="android", apk_path="/x.apk"), eligible)
     assert built["flag"] is False  # 短路在 build_snapshot 之前，省 689ms 白跑
@@ -534,32 +535,49 @@ def test_should_parallelize_does_not_consult_memory(monkeypatch: pytest.MonkeyPa
 def test_run_pool_timeout_logs_and_reraises(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """mock ProcessPoolExecutor.map 直接抛 TimeoutError（不真 spawn 慢 worker）：worker 子进程是
-    全新 spawn 的解释器，主进程 monkeypatch 不会传递过去，没法用它让真实 worker 变慢；这里只验证
-    `_run_pool` 自身的异常处理链——捕获 TimeoutError、记录带诊断信息的 warning、重新 raise 供外层
-    `_analyze_eligible` 的 except Exception 捕获并回退串行。
+    """mock multiprocessing.Pool.map_async(...).get 直接抛 multiprocessing.TimeoutError（不真 spawn
+    慢 worker：worker 是全新 spawn 的解释器，主进程 monkeypatch 不传过去）：验证 `_run_pool` 的异常
+    处理链——捕获、记带诊断的 warning、**归一为内置 TimeoutError** 重新 raise 供外层 `_analyze_eligible`
+    的 except Exception 捕获回退串行；并断言走的是 with 退出即 __exit__（真实现=terminate() 强杀
+    worker、超时真 bound 住墙钟）的 multiprocessing.Pool。
     """
+    exited = {"called": False}
+
+    class _StuckAsync:
+        def get(self, timeout: float | None = None) -> object:
+            assert timeout == pipeline._BATCH_TIMEOUT_SECONDS  # 预算传给了 get()
+            raise multiprocessing.TimeoutError("worker 卡死（模拟）")
 
     class _FakePool:
         def __enter__(self) -> "_FakePool":
             return self
 
         def __exit__(self, *exc: object) -> bool:
+            exited["called"] = True  # 真 Pool.__exit__=terminate() 强杀 worker
             return False
 
-        def map(self, func: object, names: list[str], timeout: float | None = None) -> object:
-            assert timeout == pipeline._BATCH_TIMEOUT_SECONDS  # 确实把预算传给了 map
-            raise TimeoutError("worker 卡死（模拟）")
+        def map_async(self, func: object, names: list[str]) -> _StuckAsync:
+            return _StuckAsync()
 
-    monkeypatch.setattr(pipeline, "ProcessPoolExecutor", lambda **kw: _FakePool())
+    monkeypatch.setattr(pipeline.multiprocessing, "Pool", lambda **kw: _FakePool())
     with caplog.at_level(logging.WARNING):
-        with pytest.raises(TimeoutError):
+        with pytest.raises(TimeoutError) as excinfo:
             pipeline._run_pool(object(), ["a", "b", "c"], 2)
+    assert not isinstance(excinfo.value, multiprocessing.TimeoutError)  # 归一成内置 TimeoutError
+    assert exited["called"]  # with 退出触发 __exit__（真实现 terminate 强杀，墙钟被 bound）
     assert any("超时" in r.message and "3 个分析器" in r.message for r in caplog.records)
 
 
-def test_run_pool_normal_path_passes_timeout_to_map(monkeypatch: pytest.MonkeyPatch) -> None:
-    """正常（不超时）路径：timeout 参数被正确传给 map，结果原样返回，不受新增逻辑影响。"""
+def test_run_pool_normal_path_passes_timeout_to_get(monkeypatch: pytest.MonkeyPatch) -> None:
+    """正常（不超时）路径：timeout 预算被正确传给 map_async().get()，结果原样返回、保序。"""
+
+    class _OkAsync:
+        def __init__(self, names: list[str]) -> None:
+            self._names = names
+
+        def get(self, timeout: float | None = None) -> list:
+            assert timeout == pipeline._BATCH_TIMEOUT_SECONDS
+            return [(n, "ok", None) for n in self._names]
 
     class _FakePool:
         def __enter__(self) -> "_FakePool":
@@ -568,10 +586,9 @@ def test_run_pool_normal_path_passes_timeout_to_map(monkeypatch: pytest.MonkeyPa
         def __exit__(self, *exc: object) -> bool:
             return False
 
-        def map(self, func: object, names: list[str], timeout: float | None = None) -> list:
-            assert timeout == pipeline._BATCH_TIMEOUT_SECONDS
-            return [(n, "ok", None) for n in names]
+        def map_async(self, func: object, names: list[str]) -> _OkAsync:
+            return _OkAsync(names)
 
-    monkeypatch.setattr(pipeline, "ProcessPoolExecutor", lambda **kw: _FakePool())
+    monkeypatch.setattr(pipeline.multiprocessing, "Pool", lambda **kw: _FakePool())
     result = pipeline._run_pool(object(), ["x", "y"], 2)
     assert result == [("x", "ok", None), ("y", "ok", None)]
