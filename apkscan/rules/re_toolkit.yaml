@@ -84,6 +84,13 @@ tools:
       - "libdobby.so"
     note: "常见 native inline hook 引擎；亦为 dpt-shell 抽取壳依赖，需结合加固识别综合研判。"
 
+  - name: "Android-Mem-Kit (内存插桩)"
+    category: "hook_framework"
+    capability: "native 内存补丁/函数 hook/符号解析（含 IL2CPP 符号解析）"
+    so_names:
+      - "libmemkit.so"
+    note: "内存补丁/hook/符号解析工具；依赖 shadowhook 兼容层，需结合 ShadowHook 条目综合研判（同时命中 libmemkit.so 才计本条目，避免与纯 ShadowHook 样本重复计数）。"
+
   # ======================================================================
   # 反检测 / 反分析 —— 内置即可能击败 fxapk 的 frida 动态抓包
   # ======================================================================

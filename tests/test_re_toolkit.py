@@ -79,6 +79,26 @@ def test_shadowhook_so_hit_yields_medium_finding():
     assert result.meta["anti_frida"] is False
 
 
+# --- .so 命中内存插桩工具（Android-Mem-Kit）---------------------------------
+
+
+def test_android_mem_kit_so_hit_yields_medium_finding():
+    result = _analyze(native_libs=["lib/arm64-v8a/libmemkit.so"])
+    assert result.error is None
+    assert any("Android-Mem-Kit" in name for name in result.meta["hook_frameworks"])
+    assert result.findings[0].severity == Severity.MEDIUM
+
+
+def test_android_mem_kit_and_shadowhook_shim_both_detected():
+    # Android-Mem-Kit 依赖 shadowhook 兼容层，两条目应同时命中且不互相抵消。
+    result = _analyze(
+        native_libs=["lib/arm64-v8a/libmemkit.so", "lib/arm64-v8a/libshadowhook_nothing.so"]
+    )
+    names = [t["name"] for t in result.meta["re_toolkit"]]
+    assert any("Android-Mem-Kit" in n for n in names)
+    assert any("ShadowHook" in n for n in names)
+
+
 # --- dex 命中反 frida 工具（LibcoreSyscall）→ anti_frida=True ---------------
 
 
