@@ -36,6 +36,20 @@ logger = logging.getLogger(__name__)
 #: zip 炸弹）；IPA 侧独立定义，避免跨模块耦合私有常量。
 _MAX_DECOMPRESSED_FILE_BYTES = 500 * 1024 * 1024
 
+#: read_file 缓存的单文件上限：超过此值的文件（大 framework 二进制 / 大资源）读到后不进
+#: _read_cache，避免巨型二进制随分析常驻内存（缓存本意是让多个分析器重复读小文本资源命中，
+#: 大文件重复读罕见，收益远不抵内存代价）。与 apk.py 的 _MAX_READ_CACHE_BYTES 同口径 32MB，
+#: 保持 APK/IPA 缓存行为对称；IPA 侧独立定义，避免跨模块耦合私有常量。正确性不受影响——未
+#: 缓存只是每次重读，read_file 返回的字节完全一致。
+_MAX_READ_CACHE_BYTES = 32 * 1024 * 1024
+
+#: 单实例生命周期内 _read_cache 累计缓存总量上限：防"许多个体各自都在 _MAX_READ_CACHE_BYTES
+#: 以下"的文件累加撑爆内存——zip 炸弹的另一变体，不是单文件超大，是数量多（如几千个刚好卡在
+#: 32MB 以下的伪装文本资源）。单文件上限挡不住这种累加。与 apk.py 的 _MAX_TOTAL_CACHE_BYTES
+#: 同口径 256MB，保持 APK/IPA 对称；256MB 远超正常样本全部文本资源实测量级，只挡病态累加，
+#: 不误伤真实场景。
+_MAX_TOTAL_CACHE_BYTES = 256 * 1024 * 1024
+
 
 class IpaParseError(ApkParseError):
     """IPA 无法解析（损坏 / 非 IPA / 缺 Payload·Info.plist）。
@@ -89,6 +103,8 @@ class IpaContext:
         self.dex_available = False
         self.apk_validation_ok = True
         self._read_cache: dict[str, bytes | None] = {}
+        # _read_cache 累计已缓存字节数（防病态多文件累加撑爆内存，见 _MAX_TOTAL_CACHE_BYTES）。
+        self._cached_bytes = 0
 
     # ---- 资源生命周期 ---------------------------------------------------
     # IpaContext 持有一个打开的 ZipFile（ApkContext 用 androguard 已读进内存、无句柄）。成功路径
@@ -159,8 +175,9 @@ class IpaContext:
             return []
 
     def read_file(self, path: str) -> bytes | None:
-        if path in self._read_cache:
-            return self._read_cache[path]
+        cache = self._read_cache
+        if path in cache:
+            return cache[path]
         data: bytes | None
         try:
             info = self._zf.getinfo(path)
@@ -177,7 +194,30 @@ class IpaContext:
         except Exception:  # noqa: BLE001 — 缺失/读失败视为正常未命中
             logger.debug("[ipa] read_file 未命中：%s", path, exc_info=True)
             data = None
-        self._read_cache[path] = data
+        # 超大文件（大 framework 二进制/大资源）不进缓存，避免常驻内存。None（未命中/被拦）仍缓存
+        # 以避免重复未命中查询；小文件照常缓存供多分析器重复读命中。未缓存的文件（无论何种原因）
+        # 仍返回完整字节，只是每次重读——不缓存只影响性能，不影响正确性。口径对齐 apk.py。
+        if data is None:
+            cache[path] = data
+        elif len(data) > _MAX_READ_CACHE_BYTES:
+            logger.debug(
+                "[ipa] read_file 跳过缓存（超 %d 字节，避免常驻内存）：%s（%d 字节）",
+                _MAX_READ_CACHE_BYTES,
+                path,
+                len(data),
+            )
+        elif self._cached_bytes + len(data) > _MAX_TOTAL_CACHE_BYTES:
+            # 单文件不大，但累计缓存量将超总量上限——防"许多个体都在阈值以下"的病态累加。
+            logger.debug(
+                "[ipa] read_file 跳过缓存（累计缓存量将超总量上限 %d 字节）：%s（%d 字节，当前已缓存 %d 字节）",
+                _MAX_TOTAL_CACHE_BYTES,
+                path,
+                len(data),
+                self._cached_bytes,
+            )
+        else:
+            cache[path] = data
+            self._cached_bytes += len(data)
         return data
 
     def native_libs(self) -> list[str]:
