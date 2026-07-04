@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import zipfile
 from collections.abc import Iterator
 from functools import cached_property, lru_cache
 from pathlib import Path
@@ -172,6 +173,13 @@ class ApkParseError(RuntimeError):
 #: 同口径 32MB：两处都在挡"病态超大单文件把内存撑爆"，取相同阈值保持一致。正确性不受影响——
 #: 未缓存只是每次重读，read_file 返回的字节完全一致。
 _MAX_READ_CACHE_BYTES = 32 * 1024 * 1024
+
+#: 单文件解压后大小硬上限：防 zip 炸弹（zip 条目声明的解压后体积可与压缩体积严重不成比例，
+#: 恶意构造的样本可让单个条目声明解压到几 GB 甚至更大，真正读取时才会真正解压——"读"这个
+#: 动作本身就会把分析机内存打爆）。与 _MAX_READ_CACHE_BYTES（是否缓存的软阈值）不同，这是
+#: "允不允许读"的硬性红线，须远大于任何合法单文件（正常 APK 内最大的 .so/资源文件通常在几十
+#: 到一两百 MB 量级），故取 500MB：既能拦住典型 zip 炸弹，又不误伤合法大文件。
+_MAX_DECOMPRESSED_FILE_BYTES = 500 * 1024 * 1024
 
 
 class ApkContext:
@@ -361,10 +369,38 @@ class ApkContext:
         """
         return {}
 
+    @cached_property
+    def _declared_sizes(self) -> dict[str, int]:
+        """zip 中央目录里每个条目「声明的解压后大小」（不解压，纯元数据读取，代价小）。
+
+        供 read_file 读取前拦截 zip 炸弹用。androguard 的 ``self._apk.zip`` 是未文档化的内部
+        实现（可能是标准库 zipfile 或 androguard 自研 ZipEntry，视内部路径而定），不直接依赖它
+        ——改用标准库单独对 apk_path 开一次只读句柄，接口稳定。只在有 apk_path 时可用；打不开 /
+        无 apk_path 时返回空 dict（查不到视为「无法判断」，read_file 照原逻辑放行，不误伤）。
+        """
+        if not self.apk_path:
+            return {}
+        try:
+            with zipfile.ZipFile(self.apk_path) as zf:
+                return {info.filename: info.file_size for info in zf.infolist()}
+        except Exception:
+            logger.debug("[apk] 声明大小映射构建失败，跳过 zip 炸弹前置校验", exc_info=True)
+            return {}
+
     def read_file(self, path: str) -> bytes | None:
         cache = self._read_cache
         if path in cache:
             return cache[path]
+        declared = self._declared_sizes.get(path)
+        if declared is not None and declared > _MAX_DECOMPRESSED_FILE_BYTES:
+            logger.warning(
+                "read_file 跳过（声明解压后 %d 字节超过 %d 上限，疑 zip 炸弹）：%s",
+                declared,
+                _MAX_DECOMPRESSED_FILE_BYTES,
+                path,
+            )
+            cache[path] = None
+            return None
         try:
             data = self._apk.get_file(path)
         except Exception:
