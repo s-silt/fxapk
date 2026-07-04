@@ -1932,6 +1932,34 @@ def test_frida_retreat_threshold_reached_falls_to_floor(monkeypatch, tmp_path):
     assert "floor" in pb.lower() or "带外" in pb or "保底" in pb
 
 
+def test_retreat_does_not_retry_subprocess_frida(monkeypatch, tmp_path):
+    """★ 回归（codex review P2）：秒退达阈值退 floor 后，不得再起 subprocess frida
+    （_start_frida_unpinning）——否则反检测样本上又多磕一次 frida，重复失败 + 拖时间。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_start_frida_session", lambda *a, **k: (object(), object()))
+    monkeypatch.setattr(capture, "_frida_session_alive", lambda session: False)  # 每次都秒退
+    monkeypatch.setattr(capture, "_start_floor_pcap", lambda *a, **k: object())
+    monkeypatch.setattr(capture, "_stop_floor_pcap", lambda *a, **k: None)
+
+    unpin_calls = {"n": 0}
+
+    def _spy_unpin(package, out_path, serial=None):
+        unpin_calls["n"] += 1
+        return None
+
+    monkeypatch.setattr(capture, "_start_frida_unpinning", _spy_unpin)
+
+    report = {"findings": [{"id": "PACK-DETECTED"}]}  # 阈值=2
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1, report=report)
+
+    assert result["status"] == STATUS_DONE
+    assert unpin_calls["n"] == 0  # ★退 floor 后没有回退到 subprocess frida
+
+
 # --- 时间盒/总预算：超时交付已捕获部分 ---------------------------------------
 
 
