@@ -31,6 +31,11 @@ from apkscan.core.models import AnalysisConfig, CertInfo, ComponentSet
 
 logger = logging.getLogger(__name__)
 
+#: 单文件解压后大小硬上限：防 zip 炸弹（声明的解压体积可与压缩体积严重不成比例）。与
+#: apk.py 的 _MAX_DECOMPRESSED_FILE_BYTES 同口径 500MB，理由同（远超合法单文件、拦住典型
+#: zip 炸弹）；IPA 侧独立定义，避免跨模块耦合私有常量。
+_MAX_DECOMPRESSED_FILE_BYTES = 500 * 1024 * 1024
+
 
 class IpaParseError(ApkParseError):
     """IPA 无法解析（损坏 / 非 IPA / 缺 Payload·Info.plist）。
@@ -158,7 +163,17 @@ class IpaContext:
             return self._read_cache[path]
         data: bytes | None
         try:
-            data = self._zf.read(path)
+            info = self._zf.getinfo(path)
+            if info.file_size > _MAX_DECOMPRESSED_FILE_BYTES:
+                logger.warning(
+                    "[ipa] read_file 跳过（声明解压后 %d 字节超过 %d 上限，疑 zip 炸弹）：%s",
+                    info.file_size,
+                    _MAX_DECOMPRESSED_FILE_BYTES,
+                    path,
+                )
+                data = None
+            else:
+                data = self._zf.read(path)
         except Exception:  # noqa: BLE001 — 缺失/读失败视为正常未命中
             logger.debug("[ipa] read_file 未命中：%s", path, exc_info=True)
             data = None
