@@ -198,6 +198,65 @@ def test_title_present() -> None:
 
 
 # ---------------------------------------------------------------------------
+# markdown 注入防护 —— Lead.value/subject 抽取自不可信样本，不得污染文书结构
+# ---------------------------------------------------------------------------
+
+
+def _malicious_value_lead() -> dict:
+    """value 精心构造：换行 + 伪标题 + 伪字段行 + markdown 链接/加粗语法。"""
+    return {
+        "category": "PAYMENT",
+        "value": "真实值\n\n# 伪造标题\n\n**受文机关（候选）：** 被污染的机关\n[点我](http://evil.example.com)",
+        "subject": "**伪造加粗**",
+        "where_to_request": "支付宝（蚂蚁集团）",
+        "evidence_to_obtain": ["该收款账户实名信息"],
+        "advice": "建议调证",
+        "confidence": "HIGH",
+        "source_refs": [{"source": "dex", "location": "x.java", "evidence_id": "ev-1"}],
+    }
+
+
+def test_body_md_neutralizes_injected_markdown_structure() -> None:
+    """恶意 value 里的换行/标题/字段行/链接语法不得在 body_md 里变成真实 markdown 结构。
+
+    注：模板自身的真实受文机关行也会输出 "**受文机关（候选）：**"（来自固定文案，非注入），
+    故不能断言"全篇无裸星号"——须针对注入片段本身（含"被污染的机关"字样）精确断言已转义。
+    """
+    report = {"package_name": "com.fraud.app", "meta": {}, "leads": [_malicious_value_lead()]}
+    letter = letters.build_letters(report)[0]
+    body = letter["body_md"]
+
+    # 换行被折叠为空格：不会新起一行、不会被解析成独立的标题/字段结构。
+    assert "\n# 伪造标题" not in body
+    assert "\n\n# 伪造标题" not in body
+    # 内容完整保留（不丢证据），但结构字符（# ** [] ()）均被转义，渲染不出标题/加粗/链接。
+    assert "被污染的机关" in body
+    assert "\\# 伪造标题" in body
+    assert "\\*\\*受文机关（候选）：\\*\\* 被污染的机关" in body
+    assert "[点我](http://evil.example.com)" not in body  # 未转义的裸链接语法不应出现
+    assert "\\[点我\\]" in body
+
+
+def test_body_md_neutralizes_injected_subject() -> None:
+    report = {"package_name": "com.fraud.app", "meta": {}, "leads": [_malicious_value_lead()]}
+    letter = letters.build_letters(report)[0]
+    body = letter["body_md"]
+    assert "**伪造加粗**" not in body
+    assert "\\*\\*伪造加粗\\*\\*" in body
+
+
+def test_write_letters_index_neutralizes_injected_value(tmp_path: Path) -> None:
+    """index.md 的 [target](file) 链接文本同样要防注入（比 body_md 更危险的链接语法位置）。"""
+    report = {"package_name": "com.fraud.app", "meta": {}, "leads": [_malicious_value_lead()]}
+    letters_list = letters.build_letters(report)
+    letters.write_letters(letters_list, str(tmp_path))
+    index_text = (tmp_path / "letters" / "index.md").read_text(encoding="utf-8")
+    assert "\n\n# 伪造标题" not in index_text
+    assert "[点我](http://evil.example.com)" not in index_text
+    assert "\\[点我\\]" in index_text
+
+
+# ---------------------------------------------------------------------------
 # 严格过滤 —— 各类 Lead 被排除
 # ---------------------------------------------------------------------------
 

@@ -145,9 +145,9 @@
 **C2. Zygisk 注 gadget（ZygiskFrida / ksu-frida）——不改 APK、不破签名、不 ptrace（最干净的注入面）**
 - 工具：lico-n/ZygiskFrida（Magisk Zygisk 模块，含启动延迟/子进程 gating）、gmh5225/zygisk-ZygiskFrida 镜像、electrondefuser/ksu-frida（KernelSU 版）。Magisk(开Zygisk)/KSU install zip → 配目标包名 + 延迟 → 重启注入 gadget。
 - 破：①反frida（无端口/无ptrace/无APK改动）；**反篡改/签名完整性自检全过（相对重打包 gadget 的关键优势）**；可借延迟绕反frida 启动体检。不破 pinning/native 语义（仍需 hook）。
-- 拿到：进程内全量 hook——明文、密钥、connect/SNI 处 IP:port+SNI、JS bridge；可让主机 frida 远程 attach 跑全套 46 探针。
+- 拿到：进程内全量 hook——明文、密钥、connect/SNI 处 IP:port+SNI、JS bridge；可让主机 frida 远程 attach 跑全套探针库。
 - 溯源：**APK 一字未改（哈希不变），动态观测与"原样样本"对应清楚，证据链最干净**；IP/SNI 可直接调云厂商租户。
-- 配 fxapk：与 provision/device 层互补——provision 现只 push frida-server，**新增"Zygisk 路径"**：检测设备已装 Magisk+Zygisk（provision 已有 `_su_run` 兼容 Magisk）则部署 ZygiskFrida 模块 + 配目标包名，跳过 `/data/local/tmp/frida-server`；46 个探针脚本零改沿用；anti-detection 探针先探明 App 查不查签名完整性，查则优先此路而非重打包。
+- 配 fxapk：与 provision/device 层互补——provision 现只 push frida-server，**新增"Zygisk 路径"**：检测设备已装 Magisk+Zygisk（provision 已有 `_su_run` 兼容 Magisk）则部署 ZygiskFrida 模块 + 配目标包名，跳过 `/data/local/tmp/frida-server`；探针脚本零改沿用；anti-detection 探针先探明 App 查不查签名完整性，查则优先此路而非重打包。
 - 坑：依赖 root+Zygisk；gadget 仍需**改名版**（内置 gadget 建议替换为 hluda/strongR 产物）否则线程名 gmain/gum-js-loop 露馅；隐藏 root（DenyList）要配好；模块对 Android/Zygisk 版本有兼容窗口，搭 NeoZygisk 而非已归档 Zygisk Next。
 
 **C3. 改名/改符号的 anti-detection frida-server（strongR / Florida / hluda）——零脚本改造成本绕字符串级反frida**
