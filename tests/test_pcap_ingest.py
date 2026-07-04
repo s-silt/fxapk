@@ -251,3 +251,24 @@ def test_observed_at_落库_into_report_json(tmp_path) -> None:
     out = json.loads(p.read_text(encoding="utf-8"))
     node = next(l for l in out["leads"] if "106.53.21.146" in str(l.get("value", "")))
     assert node["source_refs"][0].get("observed_at") is not None
+
+
+def test_iter_frames_nanosecond_pcap_timestamp() -> None:
+    """★ 回归（codex review P2）：纳秒精度 pcap（magic a1b23c4d / 4d3cb2a1）的小数字段
+    须按 1e9 还原，不能一律 /1e6——否则 observed_at 偏移最多近千秒，和设备/网关日志对不上。"""
+
+    def _one_packet_pcap(magic: bytes, endian: str, ts_sec: int, ts_frac: int) -> bytes:
+        payload = b"\x00" * 14  # 占位帧，内容不影响时间戳解析
+        gh = magic + struct.pack(endian + "HHIIII", 2, 4, 0, 0, 65535, 1)  # linktype=1
+        rec = struct.pack(endian + "IIII", ts_sec, ts_frac, len(payload), len(payload))
+        return gh + rec + payload
+
+    # 纳秒 magic：500_000_000 ns = 0.5s → ts 应为 1000.5（修前误 /1e6 会得 1500.0）。
+    ns = _one_packet_pcap(b"\xa1\xb2\x3c\x4d", ">", 1000, 500_000_000)
+    assert list(pcap_ingest._iter_frames(ns))[0][0] == pytest.approx(1000.5)
+    # 微秒 magic：500_000 µs = 0.5s → 同为 1000.5（这条一直对，作对照）。
+    us = _one_packet_pcap(b"\xa1\xb2\xc3\xd4", ">", 1000, 500_000)
+    assert list(pcap_ingest._iter_frames(us))[0][0] == pytest.approx(1000.5)
+    # 小端纳秒 magic 也走 1e9。
+    le = _one_packet_pcap(b"\x4d\x3c\xb2\xa1", "<", 2000, 250_000_000)
+    assert list(pcap_ingest._iter_frames(le))[0][0] == pytest.approx(2000.25)
