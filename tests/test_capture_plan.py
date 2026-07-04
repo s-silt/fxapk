@@ -223,3 +223,27 @@ def test_decide_packed_and_recipe_combo() -> None:
     assert d.skip_frida_plaintext is True
     joined = " ".join(d.reasons)
     assert ("加固" in joined or "秒退" in joined) and ("配方" in joined or "离线" in joined)
+
+
+def test_decide_capture_reads_report_dataclass() -> None:
+    """★ 回归(codex review P2):fxapk auto 主流传入的是 Report dataclass 而非 dict。
+
+    修前 _as_dict 只认 dict、对 dataclass 返回 {} → packed/crypto_recipe 信号全丢、决策
+    静默退默认(接线空转)。此处断言决策真的从 Report dataclass 抽到了信号。
+    """
+    from apkscan.core.models import Lead, LeadCategory, Report
+
+    report = Report(
+        package_name="com.x",
+        meta={"crypto_recipe": {"algo": "AES", "key": "k"}},
+        leads=[Lead(category=LeadCategory.PACKER, value="某加固")],
+        endpoints=[],
+        findings=[],
+        analyzer_status=[],
+    )
+    d = capture_plan.decide_capture(report)
+    # packed 被抽到 → 秒退阈值下调至 2(与 dict 版同款);crypto_recipe 被抽到 → 跳明文注入。
+    assert d.frida_retreat_threshold == 2
+    assert d.signals["packed"] is True
+    assert d.skip_frida_plaintext is True
+    assert d.signals["has_crypto_recipe"] is True
