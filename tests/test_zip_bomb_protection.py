@@ -13,6 +13,8 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 
+import pytest
+
 from apkscan.core import apk as apk_mod
 from apkscan.core import ipa as ipa_mod
 from apkscan.core.apk import ApkContext
@@ -126,3 +128,122 @@ def test_ipa_read_file_rejects_when_declared_size_exceeds_threshold(
     ctx = load_ipa(path, AnalysisConfig(online=False))
     monkeypatch.setattr(ipa_mod, "_MAX_DECOMPRESSED_FILE_BYTES", 10)
     assert ctx.read_file("Payload/Demo.app/bomb.bin") is None
+
+
+# ---------------------------------------------------------------------------
+# 累计缓存总量上限（_MAX_TOTAL_CACHE_BYTES）：防"许多个体各自都在单文件阈值以下、但数量极多"
+# 的病态累加撑爆内存（单文件上限挡不住）。monkeypatch 把总量上限降到很小，精确验证：
+#   (a) 累计超上限后停止缓存（后续文件不进 _read_cache）；
+#   (b) 未缓存的文件仍返回正确全字节（不缓存只损性能、不损正确性）；
+#   (c) 重复读同一路径命中缓存提前返回，不重复计数。
+# ApkContext / IpaContext 两侧对称覆盖（缓存决策口径一致）。
+# 用 60 字节小文件（远在单文件阈值 32MB 以下），把总量上限压到 100 字节：
+# a(60) 先进缓存使累计=60；b(60) 使 60+60=120>100，触发"将超总量→不缓存"分支。
+# ---------------------------------------------------------------------------
+
+
+def test_apk_read_file_stops_caching_after_total_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    zip_path = _make_test_zip(
+        tmp_path, {"a.txt": b"a" * 60, "b.txt": b"b" * 60, "c.txt": b"c" * 60}
+    )
+    ctx = _make_ctx(zip_path)
+    monkeypatch.setattr(apk_mod, "_MAX_TOTAL_CACHE_BYTES", 100)
+
+    # a 在上限内 → 进缓存，计数累加。
+    assert ctx.read_file("a.txt") == b"a" * 60
+    assert "a.txt" in ctx._read_cache
+    assert ctx._cached_bytes == 60
+
+    # (a) 累计将超上限 → b 不进缓存；(b) 但仍返回正确全字节；计数不变。
+    assert ctx.read_file("b.txt") == b"b" * 60
+    assert "b.txt" not in ctx._read_cache
+    assert ctx._cached_bytes == 60
+
+    # 后续文件持续跳过缓存，仍返回全字节。
+    assert ctx.read_file("c.txt") == b"c" * 60
+    assert "c.txt" not in ctx._read_cache
+    assert ctx._cached_bytes == 60
+
+
+def test_apk_read_file_repeated_read_not_double_counted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    zip_path = _make_test_zip(tmp_path, {"a.txt": b"a" * 60})
+    ctx = _make_ctx(zip_path)
+    monkeypatch.setattr(apk_mod, "_MAX_TOTAL_CACHE_BYTES", 100)
+
+    assert ctx.read_file("a.txt") == b"a" * 60
+    assert ctx._cached_bytes == 60
+    # (c) 重复读同一路径：命中缓存提前返回，_cached_bytes 不重复累加。
+    assert ctx.read_file("a.txt") == b"a" * 60
+    assert ctx._cached_bytes == 60
+    assert ctx._read_cache["a.txt"] == b"a" * 60
+
+
+def test_ipa_read_file_stops_caching_after_total_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = "Payload/Demo.app/"
+    path = _make_ipa_zip(
+        tmp_path, {"a.txt": b"a" * 60, "b.txt": b"b" * 60, "c.txt": b"c" * 60}
+    )
+    ctx = load_ipa(path, AnalysisConfig(online=False))
+    monkeypatch.setattr(ipa_mod, "_MAX_TOTAL_CACHE_BYTES", 100)
+
+    assert ctx.read_file(root + "a.txt") == b"a" * 60
+    assert (root + "a.txt") in ctx._read_cache
+    assert ctx._cached_bytes == 60
+
+    # (a) 累计将超上限 → b 不进缓存；(b) 但仍返回正确全字节；计数不变。
+    assert ctx.read_file(root + "b.txt") == b"b" * 60
+    assert (root + "b.txt") not in ctx._read_cache
+    assert ctx._cached_bytes == 60
+
+    assert ctx.read_file(root + "c.txt") == b"c" * 60
+    assert (root + "c.txt") not in ctx._read_cache
+    assert ctx._cached_bytes == 60
+
+
+def test_ipa_read_file_repeated_read_not_double_counted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = "Payload/Demo.app/"
+    path = _make_ipa_zip(tmp_path, {"a.txt": b"a" * 60})
+    ctx = load_ipa(path, AnalysisConfig(online=False))
+    monkeypatch.setattr(ipa_mod, "_MAX_TOTAL_CACHE_BYTES", 100)
+
+    assert ctx.read_file(root + "a.txt") == b"a" * 60
+    assert ctx._cached_bytes == 60
+    # (c) 重复读同一路径：命中缓存提前返回，不重复累加。
+    assert ctx.read_file(root + "a.txt") == b"a" * 60
+    assert ctx._cached_bytes == 60
+    assert ctx._read_cache[root + "a.txt"] == b"a" * 60
+
+
+# ---------------------------------------------------------------------------
+# IPA 单文件缓存阈值（_MAX_READ_CACHE_BYTES）：apk 侧同名阈值已有测试
+# （test_endpoints.py 组 F #3：超阈值不缓存、==阈值仍缓存），此处补 ipa 侧对称覆盖。
+# monkeypatch 把阈值压到 100 字节，免造 32MB 大文件。
+# ---------------------------------------------------------------------------
+
+
+def test_ipa_read_file_skips_cache_over_per_file_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """超单文件阈值不缓存但仍返回全字节；恰等于阈值仍缓存（边界为 > 而非 >=，与 apk.py 一致）。"""
+    root = "Payload/Demo.app/"
+    path = _make_ipa_zip(tmp_path, {"big.bin": b"x" * 101, "edge.bin": b"e" * 100})
+    ctx = load_ipa(path, AnalysisConfig(online=False))
+    monkeypatch.setattr(ipa_mod, "_MAX_READ_CACHE_BYTES", 100)
+
+    # 超阈值（101 > 100）→ 不进缓存、_cached_bytes 不增，但仍返回完整字节。
+    assert ctx.read_file(root + "big.bin") == b"x" * 101
+    assert (root + "big.bin") not in ctx._read_cache
+    assert ctx._cached_bytes == 0
+
+    # 临界值（100 == 100）→ 仍进缓存并计数（验证边界是 > 而非 >=）。
+    assert ctx.read_file(root + "edge.bin") == b"e" * 100
+    assert ctx._read_cache[root + "edge.bin"] == b"e" * 100
+    assert ctx._cached_bytes == 100
