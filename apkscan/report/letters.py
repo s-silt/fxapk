@@ -55,12 +55,28 @@ DISCLAIMER: str = (
 # 文件名安全化：去掉文件系统非法字符 + 控制字符。
 _UNSAFE_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
 
+# markdown 中性化：折叠空白（含换行，堵住跳出单行结构造伪标题/伪字段的口子）+ 转义结构/行内语法字符。
+_MD_WHITESPACE_RUN = re.compile(r"\s+")
+_MD_SPECIAL_CHARS = re.compile(r"([\\`*_{}\[\]()#+\-.!|>&<])")
+
 
 def _str_or_empty(value: Any) -> str:
     """把字段值转成字符串；None / 缺失 → 空串。"""
     if value is None:
         return ""
     return str(value)
+
+
+def _md_safe(value: str) -> str:
+    """把可能来自不可信样本内容的字段值转成安全内嵌 markdown 文本。
+
+    只对**攻击者可控字段**（Lead.value / Lead.subject，抽取自样本）调用——分析器自身固定
+    文案（模板标题、evidence_to_obtain 等）不含样本内容，无需转义。
+    折叠所有空白（含换行）为单空格，堵住"值里塞换行伪造新标题/字段行"的口子；再转义
+    markdown 结构/行内语法字符，防止值被渲染成标题/加粗/链接/代码块而非纯文本。
+    """
+    collapsed = _MD_WHITESPACE_RUN.sub(" ", value).strip()
+    return _MD_SPECIAL_CHARS.sub(r"\\\1", collapsed)
 
 
 def _str_list(value: Any) -> list[str]:
@@ -220,9 +236,9 @@ def _lead_to_letter(
 
     body_md = _build_body_md(
         template=template,
-        recipient=recipient,
-        target=target,
-        subject=subject,
+        recipient=_md_safe(recipient),
+        target=_md_safe(target),
+        subject=_md_safe(subject),
         evidence_items=evidence_items,
         evidence_refs=evidence_refs,
     )
@@ -320,7 +336,9 @@ def write_letters(letters: list[dict[str, Any]], out_dir: str) -> list[str]:
         written.append(str(file_path))
 
         recipient = _str_or_empty(letter.get("recipient"))
-        index_lines.append(f"- [{target}]({filename}) — 受文机关（候选）：{recipient}")
+        index_lines.append(
+            f"- [{_md_safe(target)}]({filename}) — 受文机关（候选）：{_md_safe(recipient)}"
+        )
 
     if not letters:
         index_lines.append("（本样本无可套打的调证线索。）")
