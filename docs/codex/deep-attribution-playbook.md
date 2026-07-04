@@ -45,7 +45,7 @@
 
 `fxapk capture` 已内置 mitmproxy + frida SSL unpinning（OkHttp3 / SSLContext / TrustManagerImpl）+ frida-core 运行时密钥 hook + JS-bridge 事件 + OkHttp 加密前明文 token + SQLCipher 落库明文。**先确认这些已生效**（看 capture 日志的 hook 命中）。关键目标（客服后端 / 聊天会话 / 加密请求体）若仍没抓到——**不要停**。
 
-**先查现成探针库**（`git pull` 更新，别动手写重复轮子）：本仓库 `docs/codex/frida-probes/` 有 **46 个现成 frida 探针** + 指导书（`指导书.md`）。按指导书 §2「症状 → 选哪个探针」决策表挑，直接 `frida -U -f <包名> -l probe-templates/<探针>.js -q` 注入。覆盖：Telegram/MTProto 改包、QUIC/Cronet、RN/Flutter、MQTT/gRPC、RTC 裸聊、支付 SDK 商户号、推送 C2、短信马、AndroidKeyStore/MMKV 解密 key、native 接入节点、敏感数据窃取/无障碍远控/NFC 盗刷/毁证抢救/多开识别等。**确实没有覆盖的症状，再按下表诊断写针对性探针**：
+**先查现成探针库**（`git pull` 更新，别动手写重复轮子）：本仓库 `docs/codex/frida-probes/` 有**现成 frida 探针库**（数量随迭代变动，以目录实际文件 + 指导书 `指导书.md` 为准，不要死记数字）。按指导书 §2「症状 → 选哪个探针」决策表挑，直接 `frida -U -f <包名> -l probe-templates/<探针>.js -q` 注入。覆盖：Telegram/MTProto 改包、QUIC/Cronet、RN/Flutter、MQTT/gRPC、RTC 音视频、支付 SDK 商户号、推送控制端、短信转发、AndroidKeyStore/MMKV 解密 key、native 接入节点等。**确实没有覆盖的症状，再按下表诊断写针对性探针**：
 
 | 症状 | 大概率原因 | 探针怎么写 |
 |---|---|---|
