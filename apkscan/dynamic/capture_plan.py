@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, is_dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -61,7 +61,21 @@ def _as_list(v: Any) -> list:
 
 
 def _as_dict(v: Any) -> dict:
-    return v if isinstance(v, dict) else {}
+    if isinstance(v, dict):
+        return v
+    # Report 等 dataclass:用报告的 JSON 序列化口径(Enum→值、逐字段递归)转 dict,否则
+    # fxapk auto 传入的 Report dataclass 会被当成 {} → 规避信号全 False、决策静默退默认(接线空转)。
+    if is_dataclass(v) and not isinstance(v, type):
+        try:
+            # 复用报告序列化器的底层转换(Enum→值、逐字段递归),吃任意 dataclass。
+            from apkscan.report.json import _to_jsonable
+
+            d = _to_jsonable(v)
+            return d if isinstance(d, dict) else {}
+        except Exception:
+            logger.debug("Report→dict 转换失败,退化为空信号", exc_info=True)
+            return {}
+    return {}
 
 
 def _is_packed(findings: list, leads: list) -> bool:
