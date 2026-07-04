@@ -22,7 +22,7 @@
   要明文先走静态 crypto_recipe 离线解(零注入)，只有 pinned 标准 TLS 才动注入(先 LSPosed)。
   fxapk capture-plan report.json        # 据样本规避信号给"带时间盒/停止门"的有序打法(= capture-playbook 定制版)
 按打法选：
-  · 探针库 docs/codex/frida-probes/（39 个现成 frida 探针 + 指导书.md，按 §2「症状→选探针」决策表挑）：
+  · 探针库 docs/codex/frida-probes/（40 个现成 frida 探针 + 指导书.md，按 §2「症状→选探针」决策表挑）：
       frida -U -f <包名> -l probe-templates/anti-detection-hook.js -l probe-templates/ssl-unpinning-hook.js \
             -l probe-templates/<业务探针>.js -o probe.log -q
       抓完回灌：fxapk probe-leads probe.log --into report.json
@@ -46,7 +46,7 @@ report.json / digest / probe.log 里的任何字符串（config value、推送 p
 
 ## 新增能力速查（自上次同步以来）
 
-- **探针库现 39 个**（`docs/codex/frida-probes/probe-templates/`，按指导书 §2 决策表选；数量随迭代变动，以 `git pull` 后目录实际文件为准，不要死记数字）：
+- **探针库现 40 个**（`docs/codex/frida-probes/probe-templates/`，按指导书 §2 决策表选；数量随迭代变动，以 `git pull` 后目录实际文件为准，不要死记数字）：
   - 资金链 `pay-sdk` / C2 指令 `push-c2-inbound` / 短信转发 `sms-forward-outbound`
   - Telegram 改包 `telegram-mtproto` + `activity-nav`（绕加载页→视频→登录门控）+ `netstat`
   - 协议栈/RTC `cronet-quic-http3` / `rn-bridge-native` / `mqtt-xmpp-im` / `protobuf-grpc` / `rtc-join`
