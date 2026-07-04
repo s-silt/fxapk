@@ -181,6 +181,14 @@ _MAX_READ_CACHE_BYTES = 32 * 1024 * 1024
 #: 到一两百 MB 量级），故取 500MB：既能拦住典型 zip 炸弹，又不误伤合法大文件。
 _MAX_DECOMPRESSED_FILE_BYTES = 500 * 1024 * 1024
 
+#: 单实例生命周期内 _read_cache 累计缓存总量上限：防"许多个体各自都在
+#: _MAX_READ_CACHE_BYTES 以下"的文件累加撑爆内存——zip 炸弹的另一变体，不是单文件超大，
+#: 是数量多（如几千个刚好卡在 32MB 以下的伪装文本资源）。单文件上限挡不住这种累加。与
+#: snapshot.py 的 _MAX_SNAPSHOT_TOTAL_BYTES（64MB，那是"预读进快照"场景）同思路，这里
+#: 覆盖主路径；256MB 远超正常样本全部文本资源实测量级（snapshot.py 注释：实测整包文本
+#: ~8MB），只挡病态累加，不误伤真实场景。
+_MAX_TOTAL_CACHE_BYTES = 256 * 1024 * 1024
+
 
 class ApkContext:
     """AnalysisContext 的真实实现，由 androguard 驱动。
@@ -204,6 +212,8 @@ class ApkContext:
         # apk: androguard.core.apk.APK；dex_objs: list[DEX]
         self._apk = apk
         self._dex_objs = dex_objs
+        # _read_cache 累计已缓存字节数（防病态多文件累加撑爆内存，见 _MAX_TOTAL_CACHE_BYTES）。
+        self._cached_bytes = 0
         # extra_dex_objs: 脱壳 dump 出来、外部传入的额外 DEX（androguard DEX 实例）。
         # 其字符串并入 dex_strings() 产出，使脱壳后的隐藏端点/SDK 也能被静态分析命中。
         self._extra_dex_objs = list(extra_dex_objs or [])
@@ -408,16 +418,29 @@ class ApkContext:
             logger.debug("read_file 未命中：%s", path, exc_info=True)
             data = None
         # 超大文件（大 .so / 大资源）不进缓存，避免常驻内存。None（未命中）仍缓存以避免重复
-        # 未命中查询；小文件照常缓存供多分析器重复读命中。未缓存的大文件仍返回完整字节。
-        if data is None or len(data) <= _MAX_READ_CACHE_BYTES:
+        # 未命中查询；小文件照常缓存供多分析器重复读命中。未缓存的文件（无论何种原因）仍
+        # 返回完整字节，只是每次重读——不缓存只影响性能，不影响正确性。
+        if data is None:
             cache[path] = data
-        else:
+        elif len(data) > _MAX_READ_CACHE_BYTES:
             logger.debug(
                 "read_file 跳过缓存（超 %d 字节，避免常驻内存）：%s（%d 字节）",
                 _MAX_READ_CACHE_BYTES,
                 path,
                 len(data),
             )
+        elif self._cached_bytes + len(data) > _MAX_TOTAL_CACHE_BYTES:
+            # 单文件不大，但累计缓存量将超总量上限——防"许多个体都在阈值以下"的病态累加。
+            logger.debug(
+                "read_file 跳过缓存（累计缓存量将超总量上限 %d 字节）：%s（%d 字节，当前已缓存 %d 字节）",
+                _MAX_TOTAL_CACHE_BYTES,
+                path,
+                len(data),
+                self._cached_bytes,
+            )
+        else:
+            cache[path] = data
+            self._cached_bytes += len(data)
         return data
 
     def native_libs(self) -> list[str]:
