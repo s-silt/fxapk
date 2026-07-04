@@ -524,3 +524,54 @@ def test_should_parallelize_does_not_consult_memory(monkeypatch: pytest.MonkeyPa
     monkeypatch.delenv("FXAPK_NO_PARALLEL", raising=False)
     ctx = _fake(platform="android", apk_path="/x.apk")
     assert pipeline._should_parallelize(ctx, [("a", 1), ("b", 1), ("c", 1)]) is True
+
+
+# ---------------------------------------------------------------------------
+# _run_pool 超时防护 —— 病态输入卡死单个 worker 不应让整批并行结果永久挂起
+# ---------------------------------------------------------------------------
+
+
+def test_run_pool_timeout_logs_and_reraises(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """mock ProcessPoolExecutor.map 直接抛 TimeoutError（不真 spawn 慢 worker）：worker 子进程是
+    全新 spawn 的解释器，主进程 monkeypatch 不会传递过去，没法用它让真实 worker 变慢；这里只验证
+    `_run_pool` 自身的异常处理链——捕获 TimeoutError、记录带诊断信息的 warning、重新 raise 供外层
+    `_analyze_eligible` 的 except Exception 捕获并回退串行。
+    """
+
+    class _FakePool:
+        def __enter__(self) -> "_FakePool":
+            return self
+
+        def __exit__(self, *exc: object) -> bool:
+            return False
+
+        def map(self, func: object, names: list[str], timeout: float | None = None) -> object:
+            assert timeout == pipeline._BATCH_TIMEOUT_SECONDS  # 确实把预算传给了 map
+            raise TimeoutError("worker 卡死（模拟）")
+
+    monkeypatch.setattr(pipeline, "ProcessPoolExecutor", lambda **kw: _FakePool())
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(TimeoutError):
+            pipeline._run_pool(object(), ["a", "b", "c"], 2)
+    assert any("超时" in r.message and "3 个分析器" in r.message for r in caplog.records)
+
+
+def test_run_pool_normal_path_passes_timeout_to_map(monkeypatch: pytest.MonkeyPatch) -> None:
+    """正常（不超时）路径：timeout 参数被正确传给 map，结果原样返回，不受新增逻辑影响。"""
+
+    class _FakePool:
+        def __enter__(self) -> "_FakePool":
+            return self
+
+        def __exit__(self, *exc: object) -> bool:
+            return False
+
+        def map(self, func: object, names: list[str], timeout: float | None = None) -> list:
+            assert timeout == pipeline._BATCH_TIMEOUT_SECONDS
+            return [(n, "ok", None) for n in names]
+
+    monkeypatch.setattr(pipeline, "ProcessPoolExecutor", lambda **kw: _FakePool())
+    result = pipeline._run_pool(object(), ["x", "y"], 2)
+    assert result == [("x", "ok", None), ("y", "ok", None)]
