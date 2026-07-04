@@ -401,6 +401,7 @@ def _capture(
         #    decision.frida_retreat_threshold 即弃 frida、退 floor（不死磕明文）。
         # TODO(real-device): 需真机验证后方可依赖——liveness/秒退计数只有真机才有真实副作用。
         retreat_count = 0
+        retreated = False  # 达秒退阈值主动退 floor（区别于 frida-core 本就不可用→仍试 subprocess）
         while True:
             frida_session, frida_script = _start_frida_session(
                 package,
@@ -445,9 +446,11 @@ def _capture(
                 logger.warning("[capture] %s", fell)
                 playbook.append(fell)
                 warnings.append(fell)
+                retreated = True
                 break
 
-        if frida_session is None:
+        if frida_session is None and not retreated:
+            # 退 floor 后不再回退 subprocess frida：反检测样本上再磕一次只会重复失败 + 拖时间。
             frida_proc = _start_frida_unpinning(package, out_path, serial)
         if frida_session is None and frida_proc is None:
             # 未起 frida（缺 frida / 写脚本失败 / 秒退熔断退 floor）→ 无 unpinning，HTTPS 可能仅密文。
