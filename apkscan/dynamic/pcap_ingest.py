@@ -103,10 +103,16 @@ def _iter_frames(data: bytes) -> Iterator[tuple[float, int, bytes]]:
     if len(data) < 24:
         return
     magic = data[:4]
-    if magic in (b"\xa1\xb2\xc3\xd4", b"\xa1\xb2\x3c\x4d"):
-        endian = ">"
-    elif magic in (b"\xd4\xc3\xb2\xa1", b"\x4d\x3c\xb2\xa1"):
-        endian = "<"
+    # 经典 pcap 有微秒(a1b2c3d4 / d4c3b2a1)与纳秒(a1b23c4d / 4d3cb2a1)两种精度魔数,
+    # 小数字段除数不同:µs→1e6、ns→1e9。混用会让 observed_at 偏移最多近千秒。
+    if magic == b"\xa1\xb2\xc3\xd4":
+        endian, frac_div = ">", 1e6
+    elif magic == b"\xa1\xb2\x3c\x4d":
+        endian, frac_div = ">", 1e9
+    elif magic == b"\xd4\xc3\xb2\xa1":
+        endian, frac_div = "<", 1e6
+    elif magic == b"\x4d\x3c\xb2\xa1":
+        endian, frac_div = "<", 1e9
     elif magic == b"\x0a\x0d\x0d\x0a":
         yield from _iter_pcapng(data)
         return
@@ -123,7 +129,7 @@ def _iter_frames(data: bytes) -> Iterator[tuple[float, int, bytes]]:
             break
         frame = data[off : off + incl]
         off += incl
-        yield (float(ts_sec) + ts_usec_or_nsec / 1e6, linktype, frame)
+        yield (float(ts_sec) + ts_usec_or_nsec / frac_div, linktype, frame)
 
 
 def _iter_pcapng(data: bytes) -> Iterator[tuple[float, int, bytes]]:
