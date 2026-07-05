@@ -1942,7 +1942,7 @@ def test_retreat_does_not_retry_subprocess_frida(monkeypatch, tmp_path):
     monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
     monkeypatch.setattr(capture, "_start_frida_session", lambda *a, **k: (object(), object()))
     monkeypatch.setattr(capture, "_frida_session_alive", lambda session: False)  # 每次都秒退
-    monkeypatch.setattr(capture, "_start_floor_pcap", lambda *a, **k: object())
+    monkeypatch.setattr(capture, "_start_floor_pcap", lambda *a, **k: object())  # floor 真起来了
     monkeypatch.setattr(capture, "_stop_floor_pcap", lambda *a, **k: None)
 
     unpin_calls = {"n": 0}
@@ -1957,7 +1957,36 @@ def test_retreat_does_not_retry_subprocess_frida(monkeypatch, tmp_path):
     result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1, report=report)
 
     assert result["status"] == STATUS_DONE
-    assert unpin_calls["n"] == 0  # ★退 floor 后没有回退到 subprocess frida
+    assert unpin_calls["n"] == 0  # ★floor 真起来 → 退 floor 后不回退 subprocess frida
+
+
+def test_retreat_with_floor_unavailable_keeps_subprocess_frida(monkeypatch, tmp_path):
+    """★ 回归（codex review 复核 P2）：秒退退 floor 时若 floor 桩/设备侧不可用（handle=None），
+    并没真退成 floor——此时不能连 subprocess frida 兜底也丢掉，否则 pinned HTTPS 只剩密文。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_start_frida_session", lambda *a, **k: (object(), object()))
+    monkeypatch.setattr(capture, "_frida_session_alive", lambda session: False)  # 每次都秒退
+    monkeypatch.setattr(capture, "_start_floor_pcap", lambda *a, **k: None)  # floor 不可用（生产桩）
+    monkeypatch.setattr(capture, "_stop_floor_pcap", lambda *a, **k: None)
+
+    unpin_calls = {"n": 0}
+
+    def _spy_unpin2(package, out_path, serial=None):
+        unpin_calls["n"] += 1
+        return None
+
+    monkeypatch.setattr(capture, "_start_frida_unpinning", _spy_unpin2)
+
+    report = {"findings": [{"id": "PACK-DETECTED"}]}  # 阈值=2
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1, report=report)
+
+    assert result["status"] == STATUS_DONE
+    # ★floor 没真起来 → subprocess frida 兜底必须保留（不能被 retreated 跳过）。
+    assert unpin_calls["n"] == 1
 
 
 # --- 时间盒/总预算：超时交付已捕获部分 ---------------------------------------
