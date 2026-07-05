@@ -449,8 +449,10 @@ def _capture(
                 retreated = True
                 break
 
-        if frida_session is None and not retreated:
-            # 退 floor 后不再回退 subprocess frida：反检测样本上再磕一次只会重复失败 + 拖时间。
+        # 退 floor 后不回退 subprocess frida——但**仅当 floor 真起来了**(floor_handle 非 None)。
+        # floor 是桩 / 设备侧不可用时(handle=None)并没真退成 floor,subprocess frida 仍是唯一的
+        # unpinning 兜底,不能连它一起丢,否则 pinned HTTPS 只剩密文(codex review 复核 P2)。
+        if frida_session is None and not (retreated and floor_handle is not None):
             frida_proc = _start_frida_unpinning(package, out_path, serial)
         if frida_session is None and frida_proc is None:
             # 未起 frida（缺 frida / 写脚本失败 / 秒退熔断退 floor）→ 无 unpinning，HTTPS 可能仅密文。
