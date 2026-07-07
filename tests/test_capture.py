@@ -2146,3 +2146,96 @@ def test_frida_session_registers_all_channels_via_table(monkeypatch):
     sinks = [[] for _ in range(8)]
     capture._start_frida_session("com.x", *sinks)
     assert len(on_calls) == 1 + len(capture.CHANNELS)
+
+
+# ---------------------------------------------------------------------------
+# ① floor 带外 pcap runner（设备侧 tcpdump 起停 + adb pull）——真机依赖全 mock，
+#    禁止依赖真机；真机点见模块 TODO(real-device)。
+# ---------------------------------------------------------------------------
+
+
+def test_find_device_tcpdump_via_command_v(monkeypatch):
+    monkeypatch.setattr(
+        capture, "_adb_capture", lambda extra, serial=None: "/system/xbin/tcpdump\n"
+    )
+    assert capture._find_device_tcpdump(None) == "/system/xbin/tcpdump"
+
+
+def test_find_device_tcpdump_absent_returns_none(monkeypatch):
+    monkeypatch.setattr(capture, "_adb_capture", lambda extra, serial=None: None)
+    monkeypatch.setattr(capture, "_adb", lambda extra, serial=None: False)
+    assert capture._find_device_tcpdump(None) is None
+
+
+def test_start_floor_pcap_spawns_tcpdump(monkeypatch, tmp_path):
+    monkeypatch.setattr(capture.tools, "adb_path", lambda: "adb")
+    monkeypatch.setattr(capture, "_find_device_tcpdump", lambda serial: "/system/xbin/tcpdump")
+    monkeypatch.setattr(capture, "_adb", lambda extra, serial=None: True)
+    spawned: dict = {}
+
+    def fake_spawn(args, log_path):
+        spawned["args"] = args
+        return _FakeProc()
+
+    monkeypatch.setattr(capture, "_spawn_logged", fake_spawn)
+
+    handle = capture._start_floor_pcap("com.x", tmp_path, serial="emulator-5554")
+    assert handle is not None
+    assert handle.remote_path == capture._FLOOR_REMOTE_PCAP
+    assert handle.serial == "emulator-5554"
+    joined = " ".join(spawned["args"])
+    assert "tcpdump" in joined and capture._FLOOR_REMOTE_PCAP in joined
+    # serial 定向：args 里带 -s emulator-5554。
+    assert "-s" in spawned["args"] and "emulator-5554" in spawned["args"]
+
+
+def test_start_floor_pcap_none_without_tcpdump(monkeypatch, tmp_path):
+    monkeypatch.setattr(capture.tools, "adb_path", lambda: "adb")
+    monkeypatch.setattr(capture, "_find_device_tcpdump", lambda serial: None)
+    assert capture._start_floor_pcap("com.x", tmp_path) is None
+
+
+def test_start_floor_pcap_never_raises(monkeypatch, tmp_path):
+    def boom():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(capture.tools, "adb_path", boom)
+    assert capture._start_floor_pcap("com.x", tmp_path) is None  # 降级，不炸主流程
+
+
+def test_stop_floor_pcap_pulls_and_cleans(monkeypatch, tmp_path):
+    monkeypatch.setattr(capture, "_wait", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_terminate", lambda proc, label: None)
+    calls: list = []
+
+    def fake_adb(extra, serial=None):
+        calls.append(extra)
+        if extra and extra[0] == "pull":
+            Path(extra[2]).write_bytes(b"\xa1\xb2\xc3\xd4" + b"\x00" * 40)  # 落个最小 pcap
+        return True
+
+    monkeypatch.setattr(capture, "_adb", fake_adb)
+
+    handle = capture._FloorPcap(
+        proc=_FakeProc(), remote_path="/data/local/tmp/x.pcap", serial=None
+    )
+    out = capture._stop_floor_pcap(handle, tmp_path)
+
+    assert out is not None
+    assert out == tmp_path / capture._FLOOR_LOCAL_NAME
+    assert out.is_file()
+    flat = [" ".join(c) for c in calls]
+    assert any("pkill -INT tcpdump" in f for f in flat)  # SIGINT flush
+    assert any(c[0] == "pull" for c in calls)  # adb pull
+    assert any("rm -f /data/local/tmp/x.pcap" in f for f in flat)  # 清设备残留
+
+
+def test_stop_floor_pcap_none_on_pull_fail(monkeypatch, tmp_path):
+    monkeypatch.setattr(capture, "_wait", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_terminate", lambda proc, label: None)
+    # pull 失败（返回 False）→ 无本地文件 → None，且不抛。
+    monkeypatch.setattr(capture, "_adb", lambda extra, serial=None: extra[0] != "pull")
+    handle = capture._FloorPcap(
+        proc=_FakeProc(), remote_path="/data/local/tmp/x.pcap", serial=None
+    )
+    assert capture._stop_floor_pcap(handle, tmp_path) is None
