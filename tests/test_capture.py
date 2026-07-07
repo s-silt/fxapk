@@ -2336,3 +2336,25 @@ def test_stop_floor_pcap_none_on_pull_fail(monkeypatch, tmp_path):
         proc=_FakeProc(), remote_path="/data/local/tmp/x.pcap", serial=None
     )
     assert capture._stop_floor_pcap(handle, tmp_path) is None
+
+
+def test_floor_starts_before_proxy(monkeypatch, tmp_path):
+    """★ 回归（codex review P2）：floor tcpdump 必须在设全局代理【之前】起手——否则遵守代理的
+    app 连 127.0.0.1:8080，设备侧 tcpdump 只抓到 loopback 代理腿、拿不到真实后端 IP。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    order: list = []
+    monkeypatch.setattr(
+        capture, "_start_floor_pcap", lambda *a, **k: (order.append("floor"), None)[1]
+    )
+    monkeypatch.setattr(
+        capture, "_adb_set_proxy", lambda serial=None: (order.append("proxy"), True)[1]
+    )
+
+    capture.run("com.x", out_dir=str(tmp_path), duration=1)
+
+    assert "floor" in order and "proxy" in order
+    assert order.index("floor") < order.index("proxy")  # floor 先于代理起手

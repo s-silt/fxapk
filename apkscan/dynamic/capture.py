@@ -386,7 +386,22 @@ def _capture(
             result["reason"] = msg
             raise _MitmStartupError(msg)
 
-        # 2) adb 代理 + reverse，把设备流量回流到主机 mitmproxy。
+        # 2) ① floor 优先（**起手先起，必须在设全局代理之前**）：不碰 App 本体先起带外 pcap 保底。
+        #    为何在代理前：设全局代理后，遵守代理的 app 连的是 127.0.0.1:8080（代理腿），设备侧
+        #    tcpdump 只会抓到 loopback、抓不到真实后端 IP（pcap-leads 又过滤 loopback → floor 白抓）。
+        #    起手先起 → 捕获 app 的**直连**流量（反 frida/pinning/native、绕过代理的 app 正是 floor
+        #    的目标场景）。遵守代理的 app 其真实后端 IP 另由 mitm 的 server_conn.peername 在
+        #    _parse_flows 取得——两者互补，不重复。真机依赖封成可注入 runner，单测 mock。
+        # TODO(real-device): -i any 接口名 / tcpdump AF_PACKET 权限需真机对齐。
+        if decision.floor_first:
+            floor_handle = _start_floor_pcap(package, out_path, serial)
+            if floor_handle is not None:
+                playbook.append("① floor 保底：已起带外 pcap（代理前起手，抓直连后端 IP；零产出不可接受）")
+                logger.info("[capture] floor 带外 pcap 已启动（保底，代理前起手）")
+            else:
+                logger.info("[capture] floor 带外 pcap 未起（无设备侧 runner），仅靠主抓包链")
+
+        # 3) adb 代理 + reverse，把设备流量回流到主机 mitmproxy。
         reverse_set = _adb_reverse(serial)
         if reverse_set:
             playbook.append(f"adb reverse tcp:{_PROXY_PORT} tcp:{_PROXY_PORT}")
@@ -394,19 +409,7 @@ def _capture(
         if proxy_set:
             playbook.append(f"adb 设全局代理 {_PROXY_HOST}:{_PROXY_PORT}")
 
-        # 2.5) ① floor 优先：不碰 App 本体先起带外 pcap 保底（decision.floor_first 恒 True）。
-        #      反 frida / pinning / native 协议对带外 pcap 全无效化——它保证不会『零产出』。
-        #      真机依赖封成可注入 runner（_start_floor_pcap/_stop_floor_pcap），单测 mock。
-        # TODO(real-device): 需真机验证后方可依赖——floor pcap 需设备侧 PCAPdroid/tcpdump。
-        if decision.floor_first:
-            floor_handle = _start_floor_pcap(package, out_path, serial)
-            if floor_handle is not None:
-                playbook.append("① floor 保底：已起带外 pcap（接入节点必有产出，零产出不可接受）")
-                logger.info("[capture] floor 带外 pcap 已启动（保底）")
-            else:
-                logger.info("[capture] floor 带外 pcap 未起（无设备侧 runner），仅靠主抓包链")
-
-        # 3) frida 注入：优先 frida-core 通道（SSL unpinning + 运行时密钥 hook，可回传活体 key）；
+        # 4) frida 注入：优先 frida-core 通道（SSL unpinning + 运行时密钥 hook，可回传活体 key）；
         #    frida-core 不可用 / attach 失败 → 回退现有 subprocess 路径（仅 unpinning，无 key 回传）。
         #    两路都 best-effort、失败不阻断抓包（HTTP 仍可抓）。
         #    ② 秒退熔断：会话建立后做 liveness（resume 后进程是否秒退）；秒退累计达
