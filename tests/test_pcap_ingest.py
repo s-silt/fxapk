@@ -272,3 +272,17 @@ def test_iter_frames_nanosecond_pcap_timestamp() -> None:
     # 小端纳秒 magic 也走 1e9。
     le = _one_packet_pcap(b"\x4d\x3c\xb2\xa1", "<", 2000, 250_000_000)
     assert list(pcap_ingest._iter_frames(le))[0][0] == pytest.approx(2000.25)
+
+
+def test_strip_link_sll2_linktype_276() -> None:
+    """★ 回归（codex review P2）：`tcpdump -i any` 在新版 libpcap 下写 SLL2（linktype 276）；
+    _strip_link 须能剥它（20 字节头，EtherType 在 offset 0、IP 载荷从 offset 20 起），
+    否则设备侧 floor.pcap 被接受为产物却解析出 0 条流（pcap-leads 拿不到接入节点）。"""
+    ip_payload = b"IPPKT-PLACEHOLDER"
+    # SLL2 头：protocol(EtherType, 2B, BE) + 18B 其余头 = 20B。
+    frame = struct.pack("!H", 0x0800) + b"\x00" * 18 + ip_payload
+    et, payload = pcap_ingest._strip_link(276, frame)
+    assert et == 0x0800 and payload == ip_payload
+    # IPv6 EtherType + 太短的 SLL2 帧的安全边界。
+    assert pcap_ingest._strip_link(276, struct.pack("!H", 0x86DD) + b"\x00" * 18 + b"x")[0] == 0x86DD
+    assert pcap_ingest._strip_link(276, b"\x08\x00\x00") == (None, b"")
