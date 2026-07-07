@@ -29,6 +29,7 @@ import logging
 import re
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +64,13 @@ _STDERR_TAIL = 2000
 # frida 注入后短暂等待，用于检测进程是否秒退（版本不匹配/包名不存在/spawn 失败）。
 # 用 _wait 走同一计时入口，测试可 monkeypatch 避免真睡。
 _FRIDA_GRACE = 2
+
+# ① floor 带外 pcap（设备侧 tcpdump）保底相关常量。
+_FLOOR_FLUSH_GRACE = 1.5  # SIGINT tcpdump 后给它 flush + 落盘的等待秒数（走 _wait，测试可 patch）。
+_FLOOR_REMOTE_PCAP = "/data/local/tmp/fxapk_floor.pcap"  # 设备上 tcpdump 落盘路径。
+_FLOOR_LOCAL_NAME = "floor.pcap"  # adb pull 回本地 out/ 的文件名。
+# tcpdump 常见路径（command -v 找不到时逐个探）：多数生产机型无自带 tcpdump，运维可预先 push 一个。
+_TCPDUMP_KNOWN_PATHS = ("/system/xbin/tcpdump", "/system/bin/tcpdump", "/data/local/tmp/tcpdump")
 
 
 class _MitmStartupError(RuntimeError):
@@ -310,6 +318,7 @@ def _capture(
     budget_exceeded = False
     # ① floor：带外 pcap 保底 runner 句柄（floor_first 时起手启动，finally 收尾停）。
     floor_handle: Any = None
+    floor_pcap: Path | None = None  # 收尾 adb pull 落盘的本地 floor.pcap（供 artifacts / 后续 pcap-leads）。
 
     mitm_proc: subprocess.Popen[bytes] | None = None
     frida_proc: subprocess.Popen[bytes] | None = None
@@ -523,8 +532,11 @@ def _capture(
         _teardown_frida_session(frida_session, frida_script)
         # ① floor：收尾停带外 pcap（起手起过才停；handle=None 说明没起、无需停）。
         if floor_handle is not None:
-            _stop_floor_pcap(floor_handle, out_path)
-            playbook.append("① floor 保底：已停带外 pcap 并落盘")
+            floor_pcap = _stop_floor_pcap(floor_handle, out_path)
+            if floor_pcap is not None:
+                playbook.append(f"① floor 保底：带外 pcap 已停并落盘 {floor_pcap.name}")
+            else:
+                playbook.append("① floor 保底：带外 pcap 收尾未取到（降级，见日志）")
         if proxy_set:
             _adb_clear_proxy(serial)
             playbook.append("还原：清除设备全局代理")
@@ -537,6 +549,13 @@ def _capture(
     artifacts: list[str] = []
     if flows_file.exists():
         artifacts.append(str(flows_file))
+    if floor_pcap is not None and floor_pcap.is_file():
+        # ① floor 带外 pcap 作产物：mitm 明文之外的接入节点兜底（反 frida/pinning/native 时的穿透锚点）。
+        artifacts.append(str(floor_pcap))
+        playbook.append(
+            f"① floor：带外 pcap 落盘 {floor_pcap.name}——跑 "
+            f"`fxapk pcap-leads {floor_pcap} --into report.json` 并入接入节点（IP:port/SNI/DNS）"
+        )
 
     endpoints = _parse_flows(flows_file)
     # C5b：额外抽出报文体（请求/响应），供 merge 阶段对 {data,timestamp} 信封解密。
@@ -1360,29 +1379,84 @@ def _frida_session_alive(session: Any) -> bool:
 # 或旁路抓包）封在 _start_floor_pcap/_stop_floor_pcap，单测一律 mock，不触真机/真子进程。
 
 
-def _start_floor_pcap(
-    package: str, out_path: Path, serial: str | None = None
-) -> Any:
-    """起设备侧带外 pcap 保底（返回可传给 _stop_floor_pcap 的句柄；起不来 → None，不阻断抓包）。
+@dataclass
+class _FloorPcap:
+    """floor 带外 pcap 句柄：设备侧 tcpdump 的 adb-shell 长驻进程 + 设备落盘路径 + serial。"""
 
-    ★ 真机实现（设备侧 tcpdump / PCAPdroid 起停）待真机验证后接线；当前默认返回 None
-    （无设备侧 runner），主抓包链照常，floor 保底在真机上点亮。绝不抛。
+    proc: subprocess.Popen[bytes]
+    remote_path: str
+    serial: str | None
+
+
+def _find_device_tcpdump(serial: str | None) -> str | None:
+    """在设备上找可执行 tcpdump（经 su）；找不到 → None。绝不抛。
+
+    先 ``command -v tcpdump``，再逐个探常见路径。多数生产机型无 tcpdump（→ None → floor 优雅
+    降级，subprocess frida 兜底仍在）；部分环境需运维预先 push 一个 tcpdump 到 /data/local/tmp。
     """
-    # TODO(real-device): 需真机验证后方可依赖——此处需接设备侧 tcpdump/PCAPdroid 起 pcap。
-    logger.debug(
-        "[capture] floor 带外 pcap runner 未接线（待真机验证）：package=%s serial=%s",
-        package, serial or "(未指定)",
-    )
+    out = _adb_capture(["shell", "su", "-c", "command -v tcpdump"], serial)
+    if out and out.strip():
+        cand = out.strip().splitlines()[0].strip()
+        if cand:
+            return cand
+    for p in _TCPDUMP_KNOWN_PATHS:
+        if _adb(["shell", "su", "-c", f"test -x {p}"], serial):
+            return p
     return None
 
 
-def _stop_floor_pcap(handle: Any, out_path: Path) -> None:
-    """停设备侧带外 pcap 并把 pcap 落到 out_path（best-effort，绝不抛）。
+def _start_floor_pcap(
+    package: str, out_path: Path, serial: str | None = None
+) -> _FloorPcap | None:
+    """起设备侧带外 pcap 保底（tcpdump -w 到设备 tmp）。返回句柄；起不来 → None，绝不阻断抓包。
 
-    ★ 与 _start_floor_pcap 对称，真机实现待接线；handle 为 None 时上层不会调本函数。
+    带外 pcap 对反 frida / TLS pinning / native 自建协议全无效化——加固样本 frida/mitm 零产出
+    时它仍拿得到接入节点 IP:port（穿透锚点）。真机依赖封在此，单测 mock 掉 adb/tcpdump/spawn。
     """
-    # TODO(real-device): 需真机验证后方可依赖——此处需停设备侧 pcap 并 adb pull 落盘。
-    logger.debug("[capture] floor 带外 pcap 收尾 runner 未接线（待真机验证）：handle=%r", handle)
+    # TODO(real-device): tcpdump 存在性 / 接口名(-i any) / su 语法需真机对齐；无 tcpdump → 降级返 None。
+    try:
+        exe = tools.adb_path()
+        if not exe:
+            return None
+        tcpdump = _find_device_tcpdump(serial)
+        if not tcpdump:
+            logger.info("[capture] floor：设备无可用 tcpdump，带外 pcap 不可用（降级，不阻断）")
+            return None
+        _adb(["shell", "su", "-c", f"rm -f {_FLOOR_REMOTE_PCAP}"], serial)  # 清上次残留
+        # -U 每包即刷盘（中断/秒退不丢缓冲）；-i any 抓全部接口；-s 0 抓全长。
+        cmd = f"{tcpdump} -i any -s 0 -U -w {_FLOOR_REMOTE_PCAP}"
+        args = [exe, *(["-s", serial] if serial else []), "shell", "su", "-c", cmd]
+        proc = _spawn_logged(args, out_path / ".diag" / "floor_tcpdump.stderr.log")
+        logger.info("[capture] floor：设备侧 tcpdump 已起（%s → %s）", tcpdump, _FLOOR_REMOTE_PCAP)
+        return _FloorPcap(proc=proc, remote_path=_FLOOR_REMOTE_PCAP, serial=serial)
+    except Exception:
+        logger.exception("[capture] floor：起设备侧 tcpdump 失败（降级，不阻断）")
+        return None
+
+
+def _stop_floor_pcap(handle: _FloorPcap, out_path: Path) -> Path | None:
+    """停设备侧 tcpdump、adb pull 落盘 ``out/floor.pcap``、清设备残留。返回本地路径或 None。绝不抛。"""
+    try:
+        serial = handle.serial
+        # 1) SIGINT tcpdump 令其 flush 落盘（-INT 比直接 kill 更干净，留全 pcap 尾）。
+        _adb(["shell", "su", "-c", "pkill -INT tcpdump"], serial)
+        _wait(_FLOOR_FLUSH_GRACE)  # 给 flush + 落盘一点时间
+        _terminate(handle.proc, "floor-tcpdump")  # 2) 停 adb-shell 长驻进程
+        # 3) adb pull 落盘。
+        local = out_path / _FLOOR_LOCAL_NAME
+        if _adb(["pull", handle.remote_path, str(local)], serial) and local.is_file():
+            logger.info(
+                "[capture] floor：带外 pcap 已拉回 %s（%d 字节）", local, local.stat().st_size
+            )
+            pulled: Path | None = local
+        else:
+            logger.warning("[capture] floor：带外 pcap 拉回失败/为空（降级）")
+            pulled = None
+        _adb(["shell", "su", "-c", f"rm -f {handle.remote_path}"], serial)  # 4) 清设备残留
+        return pulled
+    except Exception:
+        logger.exception("[capture] floor：收尾设备侧 tcpdump 异常（忽略）")
+        return None
 
 
 def _terminate(proc: subprocess.Popen[bytes] | None, label: str) -> None:
