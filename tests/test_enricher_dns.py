@@ -113,7 +113,7 @@ def _ep(value: str = "pay.fraud-gw.com") -> Endpoint:
 def _doh_payload(ips: list[str]) -> dict[str, object]:
     """dns.google /resolve A 记录响应：Status=0，Answer 含 type=1（A）记录。"""
     answers = [{"name": "x.", "type": 1, "TTL": 300, "data": ip} for ip in ips]
-    # 掺一条 CNAME（type=5）应被忽略。
+    # 掺一条 CNAME（type=5）：不进 A 记录，但会被 _extract_cnames 捞进 data["cname"]。
     answers.insert(0, {"name": "x.", "type": 5, "TTL": 300, "data": "cdn.x."})
     return {"Status": 0, "Answer": answers}
 
@@ -433,3 +433,56 @@ def test_hosting_batch_partial_miss_keeps_ips(
     assert result.data["ips"] == ["1.1.1.1", "2.2.2.2"]  # IP 列表完整
     hosting_ips = [h["ip"] for h in result.data["hosting"]]
     assert hosting_ips == ["1.1.1.1"]  # 仅查到的入 hosting
+
+
+# --- CNAME 链捕获（被动接线，喂 forensic 的 CDN 边缘判定）--------------------
+
+
+def test_extract_cnames_from_doh_answer() -> None:
+    """_extract_cnames 抽 type=5 记录的 data（去 DNS 末点），忽略 A 记录；无 CNAME → 空。"""
+    payload = {
+        "Status": 0,
+        "Answer": [
+            {"name": "api.evil.com.", "type": 5, "data": "api.evil.com.w.kunlungr.com."},
+            {"name": "x.kunlungr.com.", "type": 1, "data": "1.2.3.4"},
+        ],
+    }
+    assert dns_mod._extract_cnames(payload) == ["api.evil.com.w.kunlungr.com"]
+    assert dns_mod._extract_cnames({"Answer": [{"type": 1, "data": "1.2.3.4"}]}) == []
+
+
+def test_enrich_populates_cname_from_doh(
+    fake_requests: _FakeRequests, fake_lookup: _FakeBatchLookup
+) -> None:
+    """★ 接线（此前是死代码）：DoH 响应里的 CNAME 落进 data["cname"]，CDN 边缘判定才拿得到。"""
+    fake_requests.response = _FakeResponse(_doh_payload(["1.1.1.1"]))
+    fake_lookup.table["1.1.1.1"] = {"isp": "I", "org": "O", "asn": "AS1", "country": "CN"}
+
+    result = DnsEnricher().enrich(_ep())
+
+    assert result.ok is True
+    assert result.data["cname"] == ["cdn.x"]  # _doh_payload 掺的 CNAME "cdn.x." 被捞进来
+    # 端到端：这样的 dns dict 现在真能触发 forensic 的 CNAME CDN 判定（曾因永无 cname 而是死代码）。
+    from apkscan.core import forensic
+
+    assert forensic._cname_cdn_marker({"cname": ["x.w.kunlungr.com"]}) is not None
+
+
+def test_enrich_populates_cname_from_socket_aliases(
+    fake_requests: _FakeRequests,
+    fake_lookup: _FakeBatchLookup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """socket 回退时 gethostbyname_ex 的 aliases（CNAME）也落进 data["cname"]（纯本地，被动）。"""
+    fake_requests.raises = TimeoutError("doh down")
+    fake_lookup.table["9.9.9.9"] = {"isp": "Q", "org": "Quad9", "asn": "AS999", "country": "US"}
+
+    def fake_gethostbyname_ex(name: str) -> tuple[str, list, list[str]]:
+        return (name, ["edge.alicdn.com"], ["9.9.9.9"])
+
+    monkeypatch.setattr(dns_mod.socket, "gethostbyname_ex", fake_gethostbyname_ex)
+
+    result = DnsEnricher().enrich(_ep())
+    assert result.ok is True
+    assert result.data["ips"] == ["9.9.9.9"]
+    assert result.data["cname"] == ["edge.alicdn.com"]
