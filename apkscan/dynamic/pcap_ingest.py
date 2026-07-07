@@ -184,10 +184,15 @@ def _strip_link(linktype: int, frame: bytes) -> tuple[int | None, bytes]:
             return None, b""
         ver = frame[0] >> 4
         return (0x0800 if ver == 4 else 0x86DD if ver == 6 else None), frame
-    if linktype == 113:  # Linux SLL
+    if linktype == 113:  # Linux SLL（v1，16 字节头）
         if len(frame) < 16:
             return None, b""
         return struct.unpack("!H", frame[14:16])[0], frame[16:]
+    if linktype == 276:  # Linux SLL2（-i any 在 libpcap>=1.10 / tcpdump>=4.99 下的产物，20 字节头）
+        if len(frame) < 20:
+            return None, b""
+        # SLL2：protocol(EtherType) 在头部 offset 0，IP 载荷从 offset 20 起。
+        return struct.unpack("!H", frame[0:2])[0], frame[20:]
     if linktype == 0:  # BSD loopback
         if len(frame) < 4:
             return None, b""
