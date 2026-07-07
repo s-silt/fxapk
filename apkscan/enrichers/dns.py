@@ -58,6 +58,7 @@ DOH_URLS: tuple[str, ...] = (
 
 #: DNS A 记录类型码（RFC 1035）。
 _DNS_TYPE_A = 1
+_DNS_TYPE_CNAME = 5  # CNAME 记录（DoH Answer 里 type=5），构成 CDN 边缘判定的链路信号。
 
 #: 本地缓存目录与文件。
 CACHE_DIR = Path(".apkscan_cache")
@@ -87,8 +88,27 @@ def _extract_a_records(payload: dict) -> list[str]:
     return ips
 
 
-def _resolve_doh(domain: str) -> list[str]:
-    """逐个 DoH 提供方解析 A 记录（**国内优先**），首个 HTTP 成功的响应即采用。
+def _extract_cnames(payload: dict) -> list[str]:
+    """从 DoH JSON 响应抽取 CNAME 链（type=5 记录的 data），供 CDN 边缘判定。
+
+    纯被动——CNAME 就在同一次 A 记录查询的响应里，**不额外发任何包、不碰目标**。诈骗后端
+    常把 A 记录藏在 CDN 调度域名之后（A 记录看似普通 IDC，CNAME 直指 ``*.kunlungr.com`` /
+    ``*.alicdn.com``），这条链是最可靠的边缘信号之一（见 ``forensic._cname_cdn_marker``）。
+    """
+    cnames: list[str] = []
+    answers = payload.get("Answer")
+    if isinstance(answers, list):
+        for ans in answers:
+            if not isinstance(ans, dict) or ans.get("type") != _DNS_TYPE_CNAME:
+                continue
+            c = ans.get("data")
+            if isinstance(c, str) and c.strip():
+                cnames.append(c.strip().rstrip("."))  # 去 DNS 末点，便于子串匹配
+    return cnames
+
+
+def _resolve_doh(domain: str) -> tuple[list[str], list[str]]:
+    """逐个 DoH 提供方解析（**国内优先**），返回 ``(A 记录 IP, CNAME 链)``，首个 HTTP 成功即采用。
 
     单个提供方网络/HTTP/解析失败 → 记 debug 后试下一个（国内 dns.google 常被墙，自动落到
     阿里/腾讯）。首个成功响应（即便 ``Answer`` 为空 = 该域无 A 记录）即返回，不再试其余。
@@ -107,20 +127,23 @@ def _resolve_doh(domain: str) -> list[str]:
             payload = resp.json()
             if not isinstance(payload, dict):
                 raise ValueError(f"DoH 返回非对象：{type(payload).__name__}")
-            return _extract_a_records(payload)
+            return _extract_a_records(payload), _extract_cnames(payload)
         except Exception as exc:  # noqa: BLE001 - 单提供方失败试下一个，不中断
             last_exc = exc
             logger.debug("DoH 提供方失败，试下一个：%s（%s: %s）", url, type(exc).__name__, exc)
             continue
     if last_exc is not None:
         raise last_exc
-    return []
+    return [], []
 
 
-def _resolve_socket(domain: str) -> list[str]:
-    """回退：本机系统解析器；异常向上抛由调用方兜底。"""
-    _name, _aliases, addrs = socket.gethostbyname_ex(domain)
-    return [a for a in addrs if a]
+def _resolve_socket(domain: str) -> tuple[list[str], list[str]]:
+    """回退：本机系统解析器；异常向上抛由调用方兜底。
+
+    ``gethostbyname_ex`` 的 aliases 即 CNAME 别名，一并回带供 CDN 边缘判定（纯本地解析，被动）。
+    """
+    _name, aliases, addrs = socket.gethostbyname_ex(domain)
+    return [a for a in addrs if a], [c for c in aliases if isinstance(c, str) and c]
 
 
 class DnsEnricher(BaseEnricher):
@@ -228,18 +251,19 @@ class DnsEnricher(BaseEnricher):
         if isinstance(cached, dict):
             logger.debug("DNS 缓存过期，重查：%s", domain)
 
-        # 2) DoH 优先解析 A 记录；失败回退本机解析器。
+        # 2) DoH 优先解析 A 记录（+同响应里的 CNAME 链）；失败回退本机解析器。
         ips: list[str] = []
+        cnames: list[str] = []
         doh_err: str | None = None
         try:
-            ips = _resolve_doh(domain)
+            ips, cnames = _resolve_doh(domain)
         except Exception as exc:  # noqa: BLE001 — 富化失败不得炸主流程
             doh_err = f"{type(exc).__name__}: {exc}"
             logger.debug("DoH 解析失败，回退系统解析器：%s（%s）", domain, exc)
 
         if not ips:
             try:
-                ips = _resolve_socket(domain)
+                ips, cnames = _resolve_socket(domain)
             except Exception as exc:  # noqa: BLE001 — 富化失败不得炸主流程
                 logger.debug("DNS 解析失败（DoH+系统解析器）：%s（%s）", domain, exc)
                 err = doh_err or f"{type(exc).__name__}: {exc}"
@@ -255,6 +279,9 @@ class DnsEnricher(BaseEnricher):
         # 3) 对每个 IP 查托管归属。
         hosting, incomplete = self._hosting(ips)
         data: dict[str, Any] = {"ips": ips, "hosting": hosting}
+        if cnames:
+            # CNAME 链（被动，同 DoH 响应/系统解析器 aliases）→ 喂 forensic 的 CDN 边缘判定。
+            data["cname"] = cnames
         if incomplete:
             # 托管整批因限速/网络失败 → 标不完整；返回结果仍带 IP 列表（有价值），但**不写缓存**，
             # 避免把一次限速空响应永久固化、冻结托管/辖区判定，下次运行可重查补全。
