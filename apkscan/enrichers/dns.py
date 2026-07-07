@@ -140,10 +140,16 @@ def _resolve_doh(domain: str) -> tuple[list[str], list[str]]:
 def _resolve_socket(domain: str) -> tuple[list[str], list[str]]:
     """回退：本机系统解析器；异常向上抛由调用方兜底。
 
-    ``gethostbyname_ex`` 的 aliases 即 CNAME 别名，一并回带供 CDN 边缘判定（纯本地解析，被动）。
+    ``gethostbyname_ex`` → ``(canonical_name, aliases, addrs)``，CNAME 链两处都可能出现：
+    **规范名(第一元素)常就是 CDN 落点**（``api.foo`` → ``api.foo.w.kunlungr.com``，此时 aliases
+    可能为空/只含原查询名），aliases 是其余别名。两者都回带供 CDN 边缘判定（纯本地解析，被动）。
     """
-    _name, aliases, addrs = socket.gethostbyname_ex(domain)
-    return [a for a in addrs if a], [c for c in aliases if isinstance(c, str) and c]
+    name, aliases, addrs = socket.gethostbyname_ex(domain)
+    cnames = [c for c in aliases if isinstance(c, str) and c]
+    # 规范名与查询域不同 → 它是 CNAME 目标，补进链首（codex review P2：只回 aliases 会漏掉它）。
+    if isinstance(name, str) and name and name.lower().rstrip(".") != domain.lower().rstrip("."):
+        cnames.insert(0, name)
+    return [a for a in addrs if a], cnames
 
 
 class DnsEnricher(BaseEnricher):
