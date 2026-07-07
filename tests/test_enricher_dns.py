@@ -486,3 +486,27 @@ def test_enrich_populates_cname_from_socket_aliases(
     assert result.ok is True
     assert result.data["ips"] == ["9.9.9.9"]
     assert result.data["cname"] == ["edge.alicdn.com"]
+
+
+def test_enrich_captures_canonical_name_from_socket(
+    fake_requests: _FakeRequests,
+    fake_lookup: _FakeBatchLookup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ 回归（codex review P2）：socket 回退时 CDN 落点常在规范名（gethostbyname_ex 第一元素），
+    aliases 可能为空——必须把与查询域不同的规范名也补进 data["cname"]，否则边缘判定漏它。"""
+    fake_requests.raises = TimeoutError("doh down")
+    fake_lookup.table["9.9.9.9"] = {"isp": "Q", "org": "Q9", "asn": "AS9", "country": "US"}
+
+    def fake_gethostbyname_ex(name: str) -> tuple[str, list, list[str]]:
+        # 规范名=CDN 落点，aliases 为空（真实系统解析器的常见形态）。
+        return ("pay.fraud-gw.com.w.kunlungr.com", [], ["9.9.9.9"])
+
+    monkeypatch.setattr(dns_mod.socket, "gethostbyname_ex", fake_gethostbyname_ex)
+
+    result = DnsEnricher().enrich(_ep())
+    assert result.ok is True
+    assert result.data["cname"] == ["pay.fraud-gw.com.w.kunlungr.com"]
+    from apkscan.core import forensic
+
+    assert forensic._cname_cdn_marker({"cname": result.data["cname"]}) is not None
