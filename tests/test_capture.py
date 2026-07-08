@@ -2286,6 +2286,9 @@ def test_stop_floor_pcap_kills_by_pid_pulls_and_cleans(monkeypatch, tmp_path):
     # 按 PID 精确 SIGINT（root）、pkill 兜底；收尾清 pcap + pidfile。
     assert any("kill -INT $(cat /data/local/tmp/x.pid" in c for c in root_cmds)
     assert any("rm -f /data/local/tmp/x.pcap /data/local/tmp/x.pid" in c for c in root_cmds)
+    # ★ codex 复测:kill 命令前置 root 守卫,非 root adb shell 直接退出(不打印 pkill Operation not permitted)。
+    kill_cmd = next(c for c in root_cmds if "kill -INT" in c)
+    assert 'id -u' in kill_cmd and "|| exit 1" in kill_cmd
 
 
 def test_stop_floor_pcap_none_on_pull_fail(monkeypatch, tmp_path):
