@@ -28,3 +28,7 @@ jobs:
           python -m build
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Idempotent: if the version already exists (e.g. a tag re-push /
+          # history rewrite re-triggers this run), skip instead of failing.
+          skip-existing: true
