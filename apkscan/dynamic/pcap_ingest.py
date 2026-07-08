@@ -26,6 +26,7 @@ from apkscan.core import infra
 from apkscan.core.atomic import atomic_write_text
 from apkscan.core.models import (
     Confidence,
+    Endpoint,
     Evidence,
     Lead,
     LeadCategory,
@@ -468,6 +469,71 @@ def to_report_leads(summary: PcapSummary) -> list[Lead]:
             )
         )
     return leads
+
+
+def to_runtime_endpoints(summary: PcapSummary) -> list[Endpoint]:
+    """把 pcap summary 转成 runtime_report 的 ``Endpoint``（公网接入节点 IP + SNI/DNS 域名，
+    ``source=runtime-pcap``）——供 capture 把带外 pcap 的接入节点【自动并入】``runtime_report.endpoints``，
+    随后经 merge → asn 富化 → infra 归属分级（Google/云 IP 自动判为第三方基础设施并在报告里折叠）。
+
+    与 :func:`to_report_leads` 同源（同样只收 public dst IP + SNI/DNS 域名），但产 ``Endpoint`` 而非
+    ``Lead``；**此处不做噪音判定**——IP 侧交下游 asn/infra 分级，域名侧的 OS/GMS/连通性噪音由调用方
+    （capture）按 host 名单折叠。绝不抛（坏 summary 退化为空列表由调用方兜底）。
+    """
+    endpoints: list[Endpoint] = []
+    seen: set[str] = set()
+    for f in summary.flows:
+        if not _ip_public(f.dst_ip) or f.dst_ip in seen:
+            continue
+        seen.add(f.dst_ip)
+        ja3 = ("，JA3=" + "/".join(sorted(f.ja3))) if f.ja3 else ""
+        sni = ("，SNI=" + "/".join(sorted(f.sni))) if f.sni else ""
+        endpoints.append(
+            Endpoint(
+                value=f.dst_ip,
+                kind="ip",
+                evidences=[
+                    Evidence(
+                        source=_SOURCE,
+                        location="pcap",
+                        snippet=(
+                            f"{f.src_ip}:{f.src_port}->{f.dst_ip}:{f.dst_port}/{f.proto} "
+                            f"pkts={f.packets}{sni}{ja3}"
+                        )[:200],
+                        observed_at=f.first_ts or None,
+                    )
+                ],
+            )
+        )
+    # SNI / DNS 域名端点（DNS 域名无 per-query ts，留 None）。
+    domain_ts: dict[str, float] = {}
+    domains: dict[str, str] = {}
+    for f in summary.flows:
+        for s in f.sni:
+            domains.setdefault(s, "TLS SNI")
+            if f.first_ts and (s not in domain_ts or f.first_ts < domain_ts[s]):
+                domain_ts[s] = f.first_ts
+    for q in summary.dns_queries:
+        domains.setdefault(q, "DNS 查询")
+    for dom, src in domains.items():
+        if dom in seen:
+            continue
+        seen.add(dom)
+        endpoints.append(
+            Endpoint(
+                value=dom,
+                kind="domain",
+                evidences=[
+                    Evidence(
+                        source=_SOURCE,
+                        location="pcap",
+                        snippet=f"{src}: {dom}",
+                        observed_at=domain_ts.get(dom),
+                    )
+                ],
+            )
+        )
+    return endpoints
 
 
 def build_ledger_md(summary: PcapSummary) -> str:
