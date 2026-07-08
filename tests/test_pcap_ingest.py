@@ -286,3 +286,18 @@ def test_strip_link_sll2_linktype_276() -> None:
     # IPv6 EtherType + 太短的 SLL2 帧的安全边界。
     assert pcap_ingest._strip_link(276, struct.pack("!H", 0x86DD) + b"\x00" * 18 + b"x")[0] == 0x86DD
     assert pcap_ingest._strip_link(276, b"\x08\x00\x00") == (None, b"")
+
+
+def test_to_runtime_endpoints_from_pcap() -> None:
+    """★ floor 自动并入的基础：pcap summary → runtime Endpoint（公网 IP + SNI/DNS 域名，
+    source=runtime-pcap），供 capture 并进 runtime_report.endpoints 走下游 asn/infra 分级。"""
+    summary = pcap_ingest.parse_pcap_bytes(_sample_pcap())
+    eps = pcap_ingest.to_runtime_endpoints(summary)
+    assert eps  # 非空
+    assert all(e.evidences and e.evidences[0].source == "runtime-pcap" for e in eps)
+    ip_vals = {e.value for e in eps if e.kind == "ip"}
+    assert "106.53.21.146" in ip_vals  # 公网接入节点作 IP 端点
+    # 私网/回环不作接入节点。
+    assert not any(
+        e.value.startswith(("192.168.", "127.", "10.")) for e in eps if e.kind == "ip"
+    )
