@@ -69,6 +69,7 @@ _FRIDA_GRACE = 2
 # ① floor 带外 pcap（设备侧 tcpdump）保底相关常量。
 _FLOOR_FLUSH_GRACE = 1.5  # SIGINT tcpdump 后给它 flush + 落盘的等待秒数（走 _wait，测试可 patch）。
 _FLOOR_REMOTE_PCAP = "/data/local/tmp/fxapk_floor.pcap"  # 设备上 tcpdump 落盘路径。
+_FLOOR_PID_PATH = "/data/local/tmp/fxapk_floor.pid"  # 记录 tcpdump PID 的文件（收尾按 PID 精确 SIGINT）。
 _FLOOR_LOCAL_NAME = "floor.pcap"  # adb pull 回本地 out/ 的文件名。
 _TCPDUMP_REMOTE = "/data/local/tmp/tcpdump"  # 设备无 tcpdump 时 push 上去的目标路径。
 _TCPDUMP_ENV = "FXAPK_TCPDUMP_BIN"  # 用户提供的、与设备 ABI 匹配的 tcpdump 二进制路径（可 push）。
@@ -1387,40 +1388,16 @@ def _frida_session_alive(session: Any) -> bool:
 
 @dataclass
 class _FloorPcap:
-    """floor 带外 pcap 句柄：设备侧 tcpdump 的 adb-shell 长驻进程 + 设备落盘路径 + serial。"""
+    """floor 带外 pcap 句柄：设备上 tcpdump 落盘路径 + 记录其 PID 的文件 + serial。
 
-    proc: subprocess.Popen[bytes]
+    tcpdump 以 ``nohup ... &`` 在设备后台运行（脱离 adb-shell 会话存活），PID 写进 ``pid_path``，
+    收尾按 PID 精确 SIGINT（root）——比 ``pkill -INT tcpdump`` 更可靠（真机实测：非 root 的
+    ``adb shell pkill`` 杀不动 root 的 tcpdump，报 Operation not permitted；且按名杀有误伤/漏杀风险）。
+    """
+
     remote_path: str
+    pid_path: str
     serial: str | None
-
-
-def _working_su_form(serial: str | None) -> str | None:
-    """探哪种 su 形态能拿到 uid=0（Magisk / Superuser.apk / KingUser 兼容）；都不行 → None。
-
-    与 ``provision`` 一致的多形态兼容，但**返回可用的形态字符串**（供 spawn 长驻进程用；
-    provision 的 ``_su_uid0`` 只回 bool，不够长驻场景用）。绝不抛。
-    """
-    for form in ("su -c", "su 0 -c", "su root -c"):
-        out = _adb_capture(["shell", f"{form} id"], serial)
-        if out and "uid=0" in out:
-            return form
-    return None
-
-
-def _root_spawn_args(exe: str, serial: str | None, cmd: str) -> list[str] | None:
-    """构造以 root **spawn 长驻**设备命令的 adb argv。拿不到 root → None。
-
-    - adbd 已 root（``adb root`` / AOSP rootful）→ ``adb shell <cmd>`` 即 root，最稳；
-    - 否则用能拿 uid=0 的 su 形态 + **单引号包裹整条 cmd**（``provision._shq``，躲开 adb 把
-      shell 之后 argv 重拼分词、令 cmd 的 flags/``&&`` 外泄给 su 的血泪坑）。
-    """
-    base = [exe, *(["-s", serial] if serial else []), "shell"]
-    if provision._adbd_is_root(serial):
-        return base + [cmd]
-    su = _working_su_form(serial)
-    if su is None:
-        return None
-    return base + [f"{su} {provision._shq(cmd)}"]
 
 
 def _find_device_tcpdump(serial: str | None) -> str | None:
@@ -1470,8 +1447,7 @@ def _start_floor_pcap(
     """
     # TODO(real-device): 接口名(-i any) 与部分机型 tcpdump/AF_PACKET 权限仍需真机对齐；无 tcpdump/root → 降级。
     try:
-        exe = tools.adb_path()
-        if not exe:
+        if not tools.adb_path():
             return None
         tcpdump = _find_device_tcpdump(serial) or _push_tcpdump(serial)
         if not tcpdump:
@@ -1480,16 +1456,19 @@ def _start_floor_pcap(
                 _TCPDUMP_ENV,
             )
             return None
-        # -U 每包即刷盘（中断/秒退不丢缓冲）；-i any 抓全部接口；-s 0 抓全长。
-        cmd = f"{tcpdump} -i any -s 0 -U -w {_FLOOR_REMOTE_PCAP}"
-        spawn_args = _root_spawn_args(exe, serial, cmd)
-        if spawn_args is None:
+        # 后台起 tcpdump（nohup + &，脱离 adb-shell 会话存活），PID 写文件供收尾精确 SIGINT。
+        # -U 每包即刷盘（中断不丢缓冲）；-i any 抓全部接口；-s 0 抓全长。整条经 provision._adb_root_shell
+        # 以 root 起（adbd-root 直执 / 多形态 su / 单引号包裹），detach 后立即返回。
+        launch = (
+            f"rm -f {_FLOOR_REMOTE_PCAP} {_FLOOR_PID_PATH}; "
+            f"nohup {tcpdump} -i any -s 0 -U -w {_FLOOR_REMOTE_PCAP} >/dev/null 2>&1 & "
+            f"echo $! > {_FLOOR_PID_PATH}"
+        )
+        if not provision._adb_root_shell(launch, serial):
             logger.info("[capture] floor：设备无可用 root（adb root / su 均不可用），带外 pcap 不可用（降级）")
             return None
-        provision._adb_root_shell(f"rm -f {_FLOOR_REMOTE_PCAP}", serial)  # 清上次残留
-        proc = _spawn_logged(spawn_args, out_path / ".diag" / "floor_tcpdump.stderr.log")
-        logger.info("[capture] floor：设备侧 tcpdump 已起（%s → %s）", tcpdump, _FLOOR_REMOTE_PCAP)
-        return _FloorPcap(proc=proc, remote_path=_FLOOR_REMOTE_PCAP, serial=serial)
+        logger.info("[capture] floor：设备侧 tcpdump 已起（%s → %s，后台+pidfile）", tcpdump, _FLOOR_REMOTE_PCAP)
+        return _FloorPcap(remote_path=_FLOOR_REMOTE_PCAP, pid_path=_FLOOR_PID_PATH, serial=serial)
     except Exception:
         logger.exception("[capture] floor：起设备侧 tcpdump 失败（降级，不阻断）")
         return None
@@ -1499,12 +1478,15 @@ def _stop_floor_pcap(handle: _FloorPcap, out_path: Path) -> Path | None:
     """停设备侧 tcpdump、adb pull 落盘 ``out/floor.pcap``、清设备残留。返回本地路径或 None。绝不抛。"""
     try:
         serial = handle.serial
-        # 1) SIGINT tcpdump 令其 flush 落盘（-INT 比直接 kill 更干净，留全 pcap 尾）。root 走
-        #    provision._adb_root_shell + 单引号包裹（否则 `-INT tcpdump` 被 su 当成自身选项，血泪坑）。
-        provision._adb_root_shell("pkill -INT tcpdump", serial)
+        # 1) 按 PID 精确 SIGINT（root）令 tcpdump flush 落盘并退出（-INT 留全 pcap 尾）；拿不到
+        #    PID 再退 pkill 兜底。真机实测：非 root 的 pkill 杀不动 root tcpdump（Operation not
+        #    permitted），故一律走 provision._adb_root_shell（adbd-root / 多形态 su）以 root 执行。
+        provision._adb_root_shell(
+            f"kill -INT $(cat {handle.pid_path} 2>/dev/null) 2>/dev/null || pkill -INT tcpdump",
+            serial,
+        )
         _wait(_FLOOR_FLUSH_GRACE)  # 给 flush + 落盘一点时间
-        _terminate(handle.proc, "floor-tcpdump")  # 2) 停 adb-shell 长驻进程
-        # 3) adb pull 落盘。
+        # 2) adb pull 落盘。
         local = out_path / _FLOOR_LOCAL_NAME
         if _adb(["pull", handle.remote_path, str(local)], serial) and local.is_file():
             logger.info(
@@ -1514,7 +1496,7 @@ def _stop_floor_pcap(handle: _FloorPcap, out_path: Path) -> Path | None:
         else:
             logger.warning("[capture] floor：带外 pcap 拉回失败/为空（降级）")
             pulled = None
-        provision._adb_root_shell(f"rm -f {handle.remote_path}", serial)  # 4) 清设备残留
+        provision._adb_root_shell(f"rm -f {handle.remote_path} {handle.pid_path}", serial)  # 3) 清残留
         return pulled
     except Exception:
         logger.exception("[capture] floor：收尾设备侧 tcpdump 异常（忽略）")
