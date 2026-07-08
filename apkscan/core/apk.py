@@ -11,12 +11,14 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import subprocess
 import zipfile
 from collections.abc import Iterator
 from functools import cached_property, lru_cache
 from pathlib import Path
 from typing import Any
 
+from apkscan.core import tools
 from apkscan.core.models import (
     AnalysisConfig,
     CertInfo,
@@ -28,6 +30,58 @@ logger = logging.getLogger(__name__)
 
 
 _ANDROGUARD_SILENCED = False
+
+# ---------------------------------------------------------------------------
+# 清单包名交叉校验（对抗“清单投毒”：构造 AndroidManifest 让 androguard 静默 mis-parse，
+# 而 aapt / Android 运行时照常识别 → fxapk 拿到错的包名，动态抓包/脱壳打错目标）。
+# ---------------------------------------------------------------------------
+_AAPT_TIMEOUT = 30.0
+# Android 包名形态：≥2 段、每段以字母/下划线起、只含 [A-Za-z0-9_]（用于识别 androguard 的畸形输出）。
+_PKG_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$")
+
+
+def _looks_like_package(s: str) -> bool:
+    """是否像合法 Android 包名（畸形/为空/含怪字符 → False）。"""
+    return bool(s) and len(s) <= 255 and bool(_PKG_RE.match(s))
+
+
+def _parse_aapt_package(stdout: str) -> str:
+    """从 ``aapt/aapt2 dump badging`` 输出解析 ``package: name='...'``；解不出 → ""。"""
+    m = re.search(r"package:\s*name='([^']*)'", stdout or "")
+    return m.group(1).strip() if m else ""
+
+
+def _decide_manifest_package(
+    andro: str, aapt: str | None, apk_valid: bool
+) -> tuple[str, str | None]:
+    """据 androguard 与 aapt 两个来源交叉校验包名，返回 (权威包名, 异常描述 or None)。
+
+    ``aapt is None`` = aapt 不可用（无第二意见）；``aapt == ""`` = aapt 跑了但没解出。
+    权威取值优先与 Android 安装/运行时一致的 aapt：androguard 畸形/为空、或与 aapt 不一致 → 采信 aapt。
+    绝不臆造：无 aapt 且 androguard 畸形时不改值，只出“解析不可靠”信号供人工核实。
+    """
+    andro = (andro or "").strip()
+    aapt_s = (aapt or "").strip()
+    andro_ok = _looks_like_package(andro)
+    if aapt is not None and aapt_s:  # 有第二意见
+        if andro and aapt_s != andro:
+            return aapt_s, (
+                f"androguard 解析包名={andro!r}、aapt={aapt_s!r} 不一致——疑清单投毒；"
+                "已采信 aapt（与安装/运行时一致）"
+            )
+        if not andro_ok and _looks_like_package(aapt_s):
+            return aapt_s, (
+                f"androguard 未解出合法包名（得 {andro!r}），aapt 得 {aapt_s!r}——"
+                "疑清单解析被投毒破坏；已采信 aapt"
+            )
+        return andro or aapt_s, None
+    # 无 aapt 第二意见：只能做 sanity 信号，不改值。
+    if apk_valid and not andro_ok:
+        return andro, (
+            f"androguard 解析包名={andro!r} 畸形/为空，而 APK 结构有效——"
+            "清单解析可能不可靠（疑清单投毒）；无 aapt 交叉校验，请人工核实"
+        )
+    return andro, None
 
 
 def _silence_androguard_logging() -> None:
@@ -228,12 +282,50 @@ class ApkContext:
     # ---- 标量属性 -------------------------------------------------------
 
     @cached_property
-    def package_name(self) -> str:
+    def _andro_package(self) -> str:
+        """androguard 直接解析出的原始包名（未交叉校验）。"""
         try:
             return self._apk.get_package() or ""
         except Exception:  # noqa: BLE001 - 协议要求始终返回值
             logger.exception("get_package 失败")
             return ""
+
+    @cached_property
+    def _aapt_package(self) -> str | None:
+        """用 aapt/aapt2 拿“第二意见”包名（与 Android 运行时一致）；aapt 不可用 → None（不改判）。"""
+        exe = tools.aapt_path()
+        if not exe or not self.apk_path:
+            return None
+        try:
+            proc = subprocess.run(
+                [exe, "dump", "badging", self.apk_path],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=_AAPT_TIMEOUT,
+                check=False,
+            )
+        except Exception:  # noqa: BLE001 - 第二意见拿不到不影响主流程
+            logger.debug("aapt dump badging 失败（忽略，无第二意见）", exc_info=True)
+            return None
+        return _parse_aapt_package(proc.stdout or "")
+
+    @cached_property
+    def _pkg_decision(self) -> tuple[str, str | None]:
+        return _decide_manifest_package(
+            self._andro_package, self._aapt_package, self.apk_validation_ok
+        )
+
+    @property
+    def package_name(self) -> str:
+        """权威包名（androguard × aapt 交叉校验后的值）——治清单投毒导致的错包名。"""
+        return self._pkg_decision[0]
+
+    @cached_property
+    def manifest_anomaly(self) -> str | None:
+        """清单解析异常描述（包名交叉校验不一致 / androguard 畸形）；正常 → None，供 manifest 分析器发 Finding。"""
+        return self._pkg_decision[1]
 
     @cached_property
     def manifest_xml(self) -> str:
