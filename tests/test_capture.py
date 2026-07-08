@@ -2216,6 +2216,9 @@ def test_start_floor_pcap_launches_detached_tcpdump(monkeypatch, tmp_path):
     cmd = launched["cmd"]
     assert "nohup" in cmd and "tcpdump" in cmd and capture._FLOOR_REMOTE_PCAP in cmd
     assert f"echo $! > {capture._FLOOR_PID_PATH}" in cmd
+    # ★ codex review P1:强制真 root（非 root 退出，逼 _adb_root_shell 走 su）+ 起后验活（tcpdump 秒退→失败）。
+    assert 'id -u' in cmd and "|| exit 1" in cmd
+    assert "kill -0" in cmd
 
 
 def test_start_floor_pcap_none_when_no_root(monkeypatch, tmp_path):
