@@ -121,3 +121,26 @@ def test_analyzer_no_anomaly_no_finding() -> None:
     result = ManifestAnalyzer().analyze(_ctx(None))
     assert all(f.id != "MANIFEST-PARSE-ANOMALY" for f in result.findings)
     assert "manifest_anomaly" not in result.meta
+
+
+def test_analyzer_anomaly_resets_meta_package_to_corrected() -> None:
+    # 投毒场景：manifest_xml 内嵌"诱饵"包名，但 ctx.package_name 已被 aapt 交叉校验纠正为真包名。
+    # _extract() 会先用诱饵覆盖 meta["package_name"]；异常分支须把它回正到已校验的权威值，
+    # 否则 digest/graph ingest（优先取 meta["package_name"]）仍按诱饵包名归档。
+    ctx = FakeContext(
+        package_name="com.real.app",  # 已交叉校验的权威包名
+        manifest_xml="<manifest package='com.decoy.evil'><application/></manifest>",
+        manifest_anomaly="androguard 解析包名=com.decoy.evil、aapt=com.real.app 不一致——疑清单投毒",
+    )
+    result = ManifestAnalyzer().analyze(ctx)
+    assert result.meta["package_name"] == "com.real.app"  # 不是 com.decoy.evil
+
+
+def test_analyzer_no_anomaly_keeps_manifest_package() -> None:
+    # 无异常时不改动 _extract 的既有行为：meta 仍取 manifest_xml 内声明的 package。
+    ctx = FakeContext(
+        package_name="com.real.app",
+        manifest_xml="<manifest package='com.real.app'><application/></manifest>",
+    )
+    result = ManifestAnalyzer().analyze(ctx)
+    assert result.meta["package_name"] == "com.real.app"
