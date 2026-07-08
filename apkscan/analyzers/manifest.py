@@ -143,6 +143,11 @@ class ManifestAnalyzer(BaseAnalyzer):
         anomaly = getattr(ctx, "manifest_anomaly", None)
         if anomaly:
             meta["manifest_anomaly"] = anomaly
+            # 关键：把 meta 包名回正到已交叉校验的权威值 ctx.package_name。上面 _extract() 会用
+            # manifest_xml 里（androguard 视角、可能被投毒的）package 覆盖 meta["package_name"]，
+            # 而 digest / graph ingest 都优先取 meta["package_name"]（`meta.get(...) or report...`）——
+            # 不回正则报告与图谱仍按诱饵包名归档，加固的主场景被绕过。
+            meta["package_name"] = ctx.package_name or None
             result.findings.append(
                 Finding(
                     id="MANIFEST-PARSE-ANOMALY",
