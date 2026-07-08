@@ -43,7 +43,7 @@ from apkscan.dynamic import (
     DynamicResult,
     empty_result,
 )
-from apkscan.dynamic import cryptohook, provision
+from apkscan.dynamic import cryptohook, pcap_ingest, provision
 from apkscan.dynamic.capture_plan import CaptureDecision, decide_capture
 from apkscan.report import json as report_json
 
@@ -557,14 +557,33 @@ def _capture(
     if flows_file.exists():
         artifacts.append(str(flows_file))
     if floor_pcap is not None and floor_pcap.is_file():
-        # ① floor 带外 pcap 作产物：mitm 明文之外的接入节点兜底（反 frida/pinning/native 时的穿透锚点）。
+        # ① floor 带外 pcap 作产物（mitm 明文之外的接入节点兜底：反 frida/pinning/native 时的穿透锚点）。
         artifacts.append(str(floor_pcap))
-        playbook.append(
-            f"① floor：带外 pcap 落盘 {floor_pcap.name}——跑 "
-            f"`fxapk pcap-leads {floor_pcap} --into report.json` 并入接入节点（IP:port/SNI/DNS）"
-        )
 
     endpoints = _parse_flows(flows_file)
+    # ① floor 自动并入：带外 pcap 的接入节点作 runtime 端点并进 endpoints（mitm 0 端点时靠它兜底，
+    #    治零产出）。IP 侧不在此判噪音——交下游 asn 富化 + infra 归属分级（Google/云 IP 自动判第三方
+    #    基础设施并在报告折叠）；域名侧（SNI/DNS）按 OS/GMS/连通性 host 名单折叠明显噪音。绝不因
+    #    floor 解析失败影响主报告（pcap 仍作产物留档）。
+    if floor_pcap is not None and floor_pcap.is_file():
+        try:
+            noise_patterns = _load_noise_patterns()
+            floor_eps = pcap_ingest.to_runtime_endpoints(pcap_ingest.parse_pcap(str(floor_pcap)))
+            seen_vals = {ep.value for ep in endpoints}
+            added = [
+                ep
+                for ep in floor_eps
+                if ep.value not in seen_vals
+                and not (ep.kind == "domain" and _is_noise_host(ep.value, noise_patterns))
+            ]
+            if added:
+                endpoints.extend(added)
+                playbook.append(
+                    f"① floor：带外 pcap 自动并入接入节点 {len(added)} 个"
+                    f"（走 asn/infra 分级，Google/云 IP 自动折叠为第三方基础设施；原始 {floor_pcap.name} 留档）"
+                )
+        except Exception:
+            logger.exception("[capture] floor：解析/并入 floor.pcap 失败（忽略，pcap 仍作产物）")
     # C5b：额外抽出报文体（请求/响应），供 merge 阶段对 {data,timestamp} 信封解密。
     # 失败/缺 mitmproxy 包 → 空列表（不影响端点提取与报告写出）。
     messages = _parse_messages(flows_file)
