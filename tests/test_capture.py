@@ -2316,3 +2316,43 @@ def test_floor_starts_before_proxy(monkeypatch, tmp_path):
 
     assert "floor" in order and "proxy" in order
     assert order.index("floor") < order.index("proxy")  # floor 先于代理起手
+
+
+def test_floor_pcap_auto_ingested_into_endpoints(monkeypatch, tmp_path):
+    """★ floor.pcap 接入节点自动并入 runtime endpoints（mitm 0 端点时兜底）；域名侧 GMS/连通性
+    噪音按名单折叠，IP 侧交下游 asn/infra 分级（此处验并入 + 域名噪音折叠）。"""
+    from apkscan.core.models import Endpoint, Evidence
+
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])  # mitm 0 端点（零产出）
+    monkeypatch.setattr(capture, "_parse_messages", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_start_floor_pcap", lambda *a, **k: object())
+
+    def fake_stop(handle, out_path):
+        p = out_path / "floor.pcap"
+        p.write_bytes(b"\xa1\xb2\xc3\xd4" + b"\x00" * 40)  # 存在即可（to_runtime_endpoints 被 mock）
+        return p
+
+    monkeypatch.setattr(capture, "_stop_floor_pcap", fake_stop)
+
+    def _ev():
+        return [Evidence(source="runtime-pcap", location="pcap", snippet="x")]
+
+    floor_eps = [
+        Endpoint(value="8.8.4.4", kind="ip", evidences=_ev()),
+        Endpoint(value="evil-c2.example.com", kind="domain", evidences=_ev()),
+        Endpoint(value="connectivitycheck.gstatic.com", kind="domain", evidences=_ev()),  # 噪音
+    ]
+    monkeypatch.setattr(capture.pcap_ingest, "parse_pcap", lambda p: object())
+    monkeypatch.setattr(capture.pcap_ingest, "to_runtime_endpoints", lambda s: floor_eps)
+
+    capture.run("com.x", out_dir=str(tmp_path), duration=1)
+
+    payload = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    vals = {e["value"] for e in payload["endpoints"]}
+    assert "8.8.4.4" in vals  # IP 接入节点并入（噪音判定交下游 asn）
+    assert "evil-c2.example.com" in vals  # 真 SNI 域名并入
+    assert "connectivitycheck.gstatic.com" not in vals  # GMS/连通性噪音域名被折叠
