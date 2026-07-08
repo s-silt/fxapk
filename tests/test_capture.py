@@ -2176,20 +2176,6 @@ def test_find_device_tcpdump_absent(monkeypatch):
     assert capture._find_device_tcpdump(None) is None
 
 
-def test_working_su_form_detects_uid0(monkeypatch):
-    # 只有 "su 0 -c id" 回 uid=0 → 选它（Magisk 变体兼容）。
-    monkeypatch.setattr(
-        capture, "_adb_capture",
-        lambda extra, serial=None: "uid=0(root)" if extra[-1].startswith("su 0 -c") else "uid=2000",
-    )
-    assert capture._working_su_form(None) == "su 0 -c"
-
-
-def test_working_su_form_none_when_no_root(monkeypatch):
-    monkeypatch.setattr(capture, "_adb_capture", lambda extra, serial=None: "uid=2000")
-    assert capture._working_su_form(None) is None
-
-
 def test_push_tcpdump_from_env(monkeypatch, tmp_path):
     binf = tmp_path / "tcpdump"
     binf.write_bytes(b"\x7fELF-fake")
@@ -2211,54 +2197,32 @@ def test_push_tcpdump_none_without_env(monkeypatch):
     assert capture._push_tcpdump(None) is None
 
 
-def test_start_floor_pcap_spawns_via_adbd_root(monkeypatch, tmp_path):
+def test_start_floor_pcap_launches_detached_tcpdump(monkeypatch, tmp_path):
     monkeypatch.setattr(capture.tools, "adb_path", lambda: "adb")
     monkeypatch.setattr(capture, "_find_device_tcpdump", lambda serial: "/system/xbin/tcpdump")
-    monkeypatch.setattr(capture.provision, "_adbd_is_root", lambda serial: True)  # adbd 已 root
-    monkeypatch.setattr(capture.provision, "_adb_root_shell", lambda cmd, serial=None: True)
-    spawned: dict = {}
+    launched: dict = {}
 
-    def fake_spawn(args, log_path):
-        spawned["args"] = args
-        return _FakeProc()
+    def fake_root_shell(cmd, serial=None):
+        launched["cmd"] = cmd
+        return True
 
-    monkeypatch.setattr(capture, "_spawn_logged", fake_spawn)
+    monkeypatch.setattr(capture.provision, "_adb_root_shell", fake_root_shell)
 
     handle = capture._start_floor_pcap("com.x", tmp_path, serial="dev1")
     assert handle is not None
-    assert handle.remote_path == capture._FLOOR_REMOTE_PCAP and handle.serial == "dev1"
-    joined = " ".join(spawned["args"])
-    assert "tcpdump" in joined and capture._FLOOR_REMOTE_PCAP in joined
-    assert "-s" in spawned["args"] and "dev1" in spawned["args"]  # serial 定向
-    assert "su" not in joined  # adbd root → adb shell <cmd> 直执，无 su
-
-
-def test_start_floor_pcap_spawns_via_su_when_not_adbd_root(monkeypatch, tmp_path):
-    monkeypatch.setattr(capture.tools, "adb_path", lambda: "adb")
-    monkeypatch.setattr(capture, "_find_device_tcpdump", lambda serial: "tcpdump")
-    monkeypatch.setattr(capture.provision, "_adbd_is_root", lambda serial: False)
-    monkeypatch.setattr(capture, "_working_su_form", lambda serial: "su -c")
-    monkeypatch.setattr(capture.provision, "_adb_root_shell", lambda cmd, serial=None: True)
-    spawned: dict = {}
-
-    def fake_spawn(args, log_path):
-        spawned["args"] = args
-        return _FakeProc()
-
-    monkeypatch.setattr(capture, "_spawn_logged", fake_spawn)
-
-    handle = capture._start_floor_pcap("com.x", tmp_path)
-    assert handle is not None
-    # 非 adbd-root → su -c '<单引号包裹的整条 cmd>' 作为单个 shell 参数（躲 adb 重拼分词）。
-    last = spawned["args"][-1]
-    assert last.startswith("su -c '") and "tcpdump" in last and capture._FLOOR_REMOTE_PCAP in last
+    assert handle.remote_path == capture._FLOOR_REMOTE_PCAP
+    assert handle.pid_path == capture._FLOOR_PID_PATH and handle.serial == "dev1"
+    # 后台起 tcpdump（nohup + &）+ PID 写文件；root 由 provision._adb_root_shell 兜底。
+    cmd = launched["cmd"]
+    assert "nohup" in cmd and "tcpdump" in cmd and capture._FLOOR_REMOTE_PCAP in cmd
+    assert f"echo $! > {capture._FLOOR_PID_PATH}" in cmd
 
 
 def test_start_floor_pcap_none_when_no_root(monkeypatch, tmp_path):
     monkeypatch.setattr(capture.tools, "adb_path", lambda: "adb")
     monkeypatch.setattr(capture, "_find_device_tcpdump", lambda serial: "tcpdump")
-    monkeypatch.setattr(capture.provision, "_adbd_is_root", lambda serial: False)
-    monkeypatch.setattr(capture, "_working_su_form", lambda serial: None)  # 无可用 root
+    # 起后台 tcpdump 失败（无可用 root）→ None。
+    monkeypatch.setattr(capture.provision, "_adb_root_shell", lambda cmd, serial=None: False)
     assert capture._start_floor_pcap("com.x", tmp_path) is None
 
 
@@ -2266,19 +2230,14 @@ def test_start_floor_pcap_pushes_when_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(capture.tools, "adb_path", lambda: "adb")
     monkeypatch.setattr(capture, "_find_device_tcpdump", lambda serial: None)  # 设备无 tcpdump
     monkeypatch.setattr(capture, "_push_tcpdump", lambda serial: capture._TCPDUMP_REMOTE)  # push 成功
-    monkeypatch.setattr(capture.provision, "_adbd_is_root", lambda serial: True)
-    monkeypatch.setattr(capture.provision, "_adb_root_shell", lambda cmd, serial=None: True)
-    spawned: dict = {}
-
-    def fake_spawn(args, log_path):
-        spawned["args"] = args
-        return _FakeProc()
-
-    monkeypatch.setattr(capture, "_spawn_logged", fake_spawn)
-
+    launched: dict = {}
+    monkeypatch.setattr(
+        capture.provision, "_adb_root_shell",
+        lambda cmd, serial=None: (launched.__setitem__("cmd", cmd), True)[1],
+    )
     handle = capture._start_floor_pcap("com.x", tmp_path)
     assert handle is not None
-    assert capture._TCPDUMP_REMOTE in " ".join(spawned["args"])  # 用 push 上去的 tcpdump
+    assert capture._TCPDUMP_REMOTE in launched["cmd"]  # 用 push 上去的 tcpdump
 
 
 def test_start_floor_pcap_none_without_tcpdump_or_push(monkeypatch, tmp_path):
@@ -2296,9 +2255,8 @@ def test_start_floor_pcap_never_raises(monkeypatch, tmp_path):
     assert capture._start_floor_pcap("com.x", tmp_path) is None  # 降级，不炸主流程
 
 
-def test_stop_floor_pcap_pulls_and_cleans(monkeypatch, tmp_path):
+def test_stop_floor_pcap_kills_by_pid_pulls_and_cleans(monkeypatch, tmp_path):
     monkeypatch.setattr(capture, "_wait", lambda *a, **k: None)
-    monkeypatch.setattr(capture, "_terminate", lambda proc, label: None)
     root_cmds: list = []
 
     def fake_root_shell(cmd, serial=None):
@@ -2315,25 +2273,25 @@ def test_stop_floor_pcap_pulls_and_cleans(monkeypatch, tmp_path):
     monkeypatch.setattr(capture, "_adb", fake_adb)
 
     handle = capture._FloorPcap(
-        proc=_FakeProc(), remote_path="/data/local/tmp/x.pcap", serial=None
+        remote_path="/data/local/tmp/x.pcap", pid_path="/data/local/tmp/x.pid", serial=None
     )
     out = capture._stop_floor_pcap(handle, tmp_path)
 
     assert out is not None
     assert out == tmp_path / capture._FLOOR_LOCAL_NAME
     assert out.is_file()
-    assert any("pkill -INT tcpdump" in c for c in root_cmds)  # SIGINT flush（root）
-    assert any("rm -f /data/local/tmp/x.pcap" in c for c in root_cmds)  # 清设备残留（root）
+    # 按 PID 精确 SIGINT（root）、pkill 兜底；收尾清 pcap + pidfile。
+    assert any("kill -INT $(cat /data/local/tmp/x.pid" in c for c in root_cmds)
+    assert any("rm -f /data/local/tmp/x.pcap /data/local/tmp/x.pid" in c for c in root_cmds)
 
 
 def test_stop_floor_pcap_none_on_pull_fail(monkeypatch, tmp_path):
     monkeypatch.setattr(capture, "_wait", lambda *a, **k: None)
-    monkeypatch.setattr(capture, "_terminate", lambda proc, label: None)
     monkeypatch.setattr(capture.provision, "_adb_root_shell", lambda cmd, serial=None: True)
     # pull 失败（返回 False）→ 无本地文件 → None，且不抛。
     monkeypatch.setattr(capture, "_adb", lambda extra, serial=None: extra[0] != "pull")
     handle = capture._FloorPcap(
-        proc=_FakeProc(), remote_path="/data/local/tmp/x.pcap", serial=None
+        remote_path="/data/local/tmp/x.pcap", pid_path="/data/local/tmp/x.pid", serial=None
     )
     assert capture._stop_floor_pcap(handle, tmp_path) is None
 
