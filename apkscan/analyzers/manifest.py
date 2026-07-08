@@ -137,6 +137,25 @@ class ManifestAnalyzer(BaseAnalyzer):
             if not result.error:
                 result.error = "manifest Finding 生成失败（详见日志）"
 
+        # 清单投毒 / 解析不可靠信号：apk.py 对包名做 androguard × aapt 交叉校验（或无 aapt 时的
+        # sanity）得出异常时，显式发一条 HIGH Finding + 落 meta，避免“错的核心事实（如包名）”被
+        # 静默采信（治构造 AndroidManifest 让 androguard mis-parse 而 aapt/运行时正常的清单投毒）。
+        anomaly = getattr(ctx, "manifest_anomaly", None)
+        if anomaly:
+            meta["manifest_anomaly"] = anomaly
+            result.findings.append(
+                Finding(
+                    id="MANIFEST-PARSE-ANOMALY",
+                    title="清单解析异常（疑清单投毒）",
+                    severity=Severity.HIGH,
+                    category="manifest",
+                    description=str(anomaly),
+                    recommendation=(
+                        "核心字段（包名等）可能被清单构造干扰；下游动态抓包/脱壳请以校验后的包名为准，必要时人工核实。"
+                    ),
+                )
+            )
+
         # 研判提示（不阻断），写入 meta 供报告参考。
         self._annotate_suspicious(meta, rules)
 
