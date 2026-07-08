@@ -63,6 +63,7 @@ class SnapshotContext:
         files: dict[str, bytes],
         dex_available: bool = True,
         apk_validation_ok: bool = True,
+        manifest_anomaly: str | None = None,
     ) -> None:
         # AnalysisContext 协议的 property/属性。
         self.package_name = package_name
@@ -72,6 +73,8 @@ class SnapshotContext:
         self.apk_path = apk_path
         self.dex_available = dex_available
         self.apk_validation_ok = apk_validation_ok
+        # 清单包名交叉校验异常（None=正常）；随快照过并行边界，供 manifest 分析器发 Finding。
+        self.manifest_anomaly = manifest_anomaly
         # 方法返回的数据。
         self._permissions = permissions
         self._components = components
@@ -209,4 +212,5 @@ def build_snapshot(ctx: Any) -> SnapshotContext:
         files=files,
         dex_available=getattr(ctx, "dex_available", True),
         apk_validation_ok=getattr(ctx, "apk_validation_ok", True),
+        manifest_anomaly=getattr(ctx, "manifest_anomaly", None),
     )
