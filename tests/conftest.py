@@ -65,12 +65,14 @@ class FakeContext:
         online: bool = False,
         apk_path: str = "",
         platform: str = "android",
+        manifest_anomaly: str | None = None,
     ) -> None:
         self.package_name = package_name
         self.manifest_xml = manifest_xml
         self.config = AnalysisConfig(online=online)
         self.apk_path = apk_path
         self.platform = platform
+        self.manifest_anomaly = manifest_anomaly
 
         self._permissions = list(permissions or [])
         self._files = dict(files or {})

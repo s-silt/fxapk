@@ -209,6 +209,16 @@ def has_keytool() -> bool:
     return resolve_keytool() is not None
 
 
+def aapt_path() -> str:
+    """aapt / aapt2 可执行路径（Android SDK build-tools）——PATH 优先，优选 aapt2。
+
+    用途：给清单包名做“第二意见”交叉校验（``aapt dump badging``，口径同 Android 安装/运行时），
+    对抗构造 AndroidManifest 让 androguard 静默 mis-parse 的“清单投毒”。找不到 → ""（不抛，
+    调用方据此降级为纯 sanity 信号，不改判）。
+    """
+    return shutil.which("aapt2") or shutil.which("aapt") or ""
+
+
 def kill_adb_server() -> bool:
     """收掉本工具自起的 adb server（仅当 adb 可用时）。绝不抛。
 
@@ -286,6 +296,7 @@ def has_mitmproxy() -> bool:
 
 __all__ = [
     "frozen",
+    "aapt_path",
     "adb_path",
     "frida_invocation",
     "has_adb",
