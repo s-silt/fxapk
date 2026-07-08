@@ -1505,9 +1505,11 @@ def _stop_floor_pcap(handle: _FloorPcap, out_path: Path) -> Path | None:
     try:
         serial = handle.serial
         # 1) 按 PID 精确 SIGINT（root）令 tcpdump flush 落盘并退出（-INT 留全 pcap 尾）；拿不到
-        #    PID 再退 pkill 兜底。真机实测：非 root 的 pkill 杀不动 root tcpdump（Operation not
-        #    permitted），故一律走 provision._adb_root_shell（adbd-root / 多形态 su）以 root 执行。
+        #    PID 再退 pkill 兜底。前置 `[ "$(id -u)" = 0 ] || exit 1` 守卫：非 root 的 adb shell 路径
+        #    直接退出，逼 _adb_root_shell 走 su（否则非 root 的 pkill 杀不动 root tcpdump 会打印
+        #    Operation not permitted——真机实测虽不留孤儿、但日志吓人，codex 复测建议优化）。
         provision._adb_root_shell(
+            '[ "$(id -u)" = 0 ] || exit 1; '
             f"kill -INT $(cat {handle.pid_path} 2>/dev/null) 2>/dev/null || pkill -INT tcpdump",
             serial,
         )
