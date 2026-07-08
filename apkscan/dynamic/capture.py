@@ -1476,15 +1476,22 @@ def _start_floor_pcap(
             )
             return None
         # 后台起 tcpdump（nohup + &，脱离 adb-shell 会话存活），PID 写文件供收尾精确 SIGINT。
-        # -U 每包即刷盘（中断不丢缓冲）；-i any 抓全部接口；-s 0 抓全长。整条经 provision._adb_root_shell
-        # 以 root 起（adbd-root 直执 / 多形态 su / 单引号包裹），detach 后立即返回。
+        # -U 每包即刷盘（中断不丢缓冲）；-i any 抓全部接口；-s 0 抓全长。经 provision._adb_root_shell
+        # 以 root 起（adbd-root 直执 / 多形态 su / 单引号包裹）。两处防"非 root 假成功"（codex review P1）:
+        #   ① `[ "$(id -u)" = 0 ] || exit 1`：非 root 的 adb shell 路径直接失败退出，逼 _adb_root_shell
+        #      改走 su（否则非 root shell 里 tcpdump 因无抓包权限秒退，但末尾 echo $! 仍 exit 0 → 假成功、
+        #      floor 报已起却产出空 pcap）。
+        #   ② 起后台后 `sleep 1; kill -0 <pid>`：验 tcpdump 仍活；死了（无 AF_PACKET/坏接口/无权限）→ 命令
+        #      非零 → floor 判失败降级，绝不假成功。
         launch = (
+            '[ "$(id -u)" = 0 ] || exit 1; '
             f"rm -f {_FLOOR_REMOTE_PCAP} {_FLOOR_PID_PATH}; "
             f"nohup {tcpdump} -i any -s 0 -U -w {_FLOOR_REMOTE_PCAP} >/dev/null 2>&1 & "
-            f"echo $! > {_FLOOR_PID_PATH}"
+            f"echo $! > {_FLOOR_PID_PATH}; "
+            f"sleep 1; kill -0 $(cat {_FLOOR_PID_PATH} 2>/dev/null) 2>/dev/null"
         )
         if not provision._adb_root_shell(launch, serial):
-            logger.info("[capture] floor：设备无可用 root（adb root / su 均不可用），带外 pcap 不可用（降级）")
+            logger.info("[capture] floor：tcpdump 未能以 root 起或起后即退（无 root / 无抓包权限），带外 pcap 不可用（降级）")
             return None
         logger.info("[capture] floor：设备侧 tcpdump 已起（%s → %s，后台+pidfile）", tcpdump, _FLOOR_REMOTE_PCAP)
         return _FloorPcap(remote_path=_FLOOR_REMOTE_PCAP, pid_path=_FLOOR_PID_PATH, serial=serial)
