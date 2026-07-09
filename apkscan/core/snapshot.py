@@ -144,11 +144,13 @@ class SnapshotContext:
         try:
             from androguard.core.apk import APK
 
-            from apkscan.core.apk import _silence_androguard_logging
+            from apkscan.core.apk import _install_axml_nsmap_shim, _silence_androguard_logging
 
             # 用 androguard 前先禁其 loguru（与 ApkContext.load_apk 同口径）：否则首次惰性重开会
             # 刷上百 MB DEBUG 到 worker stderr，淹没取证日志。
             _silence_androguard_logging()
+            # 与 load_apk 保持一致：worker 惰性重开 APK 也必须先装 AXML 投毒净化 shim。
+            _install_axml_nsmap_shim()
             self._worker_apk = APK(self.apk_path)
         except Exception:  # noqa: BLE001 — worker 内重开失败兜底为 None（极罕见非文本读才走到）
             logger.warning("snapshot worker 重开 APK 失败，非文本 read_file 将返 None", exc_info=True)

@@ -236,6 +236,19 @@ def test_shim_preserves_clean_nsmap(monkeypatch: pytest.MonkeyPatch) -> None:
     assert inst.nsmap == {"android": _ANDROID_URI}
 
 
+def test_shim_drops_bad_tag_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """坏 URI 出现在 START_TAG/attribute 的 namespace 字段时，也不能拼进 ``{uri}name``。"""
+    import apkscan.core.apk as apk_mod
+    from androguard.core.axml import AXMLPrinter
+
+    monkeypatch.setattr(apk_mod, "_AXML_NSMAP_PATCHED", False, raising=True)
+    _install_axml_nsmap_shim()
+
+    inst = AXMLPrinter.__new__(AXMLPrinter)
+    assert inst._print_namespace("ؚّۣ۪ۭۣۭۡۨؑۨۨۙؑٔۨۙۡٔؔ/ٌٌََُّۭۭۭۭؔۙؗؗٔۨؑۡ٘ۙؔۙۡ") == ""
+    assert inst._print_namespace(_ANDROID_URI) == f"{{{_ANDROID_URI}}}"
+
+
 # ======================================================================
 # C2. 端到端：AXMLPrinter.get_xml_obj() 不再因坏 URI fail-fast
 #     无二进制 fixture，通过 monkeypatch 注入坏 URI nsmap 复现根因并验证修复。
