@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import struct
 import subprocess
 import zipfile
 from collections.abc import Iterator
@@ -51,17 +52,117 @@ def _parse_aapt_package(stdout: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+# 二进制 AXML 结构常量（用于绕开 androguard 直读字符串池）。
+_AXML_TYPE = 0x0003  # RES_XML_TYPE（文件头）
+_RES_STRING_POOL = 0x0001  # RES_STRING_POOL_TYPE
+_RES_XML_START_ELEMENT = 0x0102  # RES_XML_START_ELEMENT_TYPE
+_UTF8_FLAG = 0x100  # 字符串池 flags：UTF-8 编码位
+
+
+def _axml_package_from_bytes(raw: bytes) -> str:
+    """容错：直接从二进制 AndroidManifest.xml 读 ``<manifest package=...>``，不经 androguard/lxml。
+
+    用途：清单投毒（把元素/属性命名空间或属性值的字符串引用构造成非法/越界）会让 androguard
+    解析出空包名，但 ``package`` 字符串本身仍在字符串池里。本函数按 AXML 二进制结构直读、
+    容错跳过畸形项，恢复真实包名；只返回形如合法包名的值（``_looks_like_package``）。
+
+    任何异常/越界/未命中 → 返回 ``""``（绝不抛、绝不臆造）。
+    """
+    try:
+        data = raw
+        n = len(data)
+        if n < 8 or struct.unpack_from("<H", data, 0)[0] != _AXML_TYPE:
+            return ""
+
+        def u16(o: int) -> int:
+            return struct.unpack_from("<H", data, o)[0]
+
+        def u32(o: int) -> int:
+            return struct.unpack_from("<I", data, o)[0]
+
+        # 字符串池 chunk 紧跟 8 字节文件头。
+        sp = 8
+        if sp + 28 > n or u16(sp) != _RES_STRING_POOL:
+            return ""
+        sp_size = u32(sp + 4)
+        str_count = u32(sp + 8)
+        utf8 = bool(u32(sp + 16) & _UTF8_FLAG)
+        strings_start = u32(sp + 20)
+        if not (0 < str_count <= 1_000_000):
+            return ""
+        offs_base = sp + 28
+        data_base = sp + strings_start
+        if offs_base + 4 * str_count > n:
+            return ""
+
+        def get_str(i: int) -> str:
+            if not (0 <= i < str_count):
+                return ""
+            p = data_base + u32(offs_base + 4 * i)
+            if not (0 <= p < n):
+                return ""
+            if utf8:
+                q = p + 1
+                if data[p] & 0x80:  # 字符数 varint 占 2 字节
+                    q += 1
+                b = data[q]
+                q += 1
+                if b & 0x80:  # 字节数 varint 占 2 字节
+                    b = ((b & 0x7F) << 8) | data[q]
+                    q += 1
+                return data[q:q + b].decode("utf-8", "ignore")
+            length = u16(p)
+            q = p + 2
+            if length & 0x8000:  # 字符数占 2 个 u16
+                length = ((length & 0x7FFF) << 16) | u16(q)
+                q += 2
+            return data[q:q + length * 2].decode("utf-16-le", "ignore")
+
+        # 跳过字符串池，遍历后续 chunk 找 <manifest> START_ELEMENT，取其 package 属性。
+        pos = sp + sp_size
+        guard = 0
+        while pos + 16 <= n and guard < 100_000:
+            guard += 1
+            ctype = u16(pos)
+            csize = u32(pos + 4)
+            if csize < 16:
+                break
+            if ctype == _RES_XML_START_ELEMENT and get_str(u32(pos + 20)) == "manifest":
+                attr_start = u16(pos + 24)
+                attr_count = u16(pos + 28)
+                base = pos + 16 + attr_start
+                for a in range(min(attr_count, 512)):
+                    ap = base + a * 20
+                    if ap + 20 > n:
+                        break
+                    if get_str(u32(ap + 4)) != "package":
+                        continue
+                    # 优先 rawValue（字符串索引）；投毒把 typedValue.data 打成 0xFFFFFFFF 时它仍有效。
+                    val = (get_str(u32(ap + 8)) or get_str(u32(ap + 16))).strip()
+                    return val if _looks_like_package(val) else ""
+                return ""  # 命中 manifest 但无合法 package
+            pos += csize
+        return ""
+    except Exception:  # noqa: BLE001 - 容错直读：任何异常都退回 ""，绝不影响主流程
+        logger.debug("AXML 字符串池直读包名失败（忽略）", exc_info=True)
+        return ""
+
+
 def _decide_manifest_package(
-    andro: str, aapt: str | None, apk_valid: bool
+    andro: str, aapt: str | None, apk_valid: bool, axml: str = ""
 ) -> tuple[str, str | None]:
-    """据 androguard 与 aapt 两个来源交叉校验包名，返回 (权威包名, 异常描述 or None)。
+    """据 androguard / aapt / AXML 字符串池三来源交叉校验包名，返回 (权威包名, 异常描述 or None)。
 
     ``aapt is None`` = aapt 不可用（无第二意见）；``aapt == ""`` = aapt 跑了但没解出。
+    ``axml`` = 直接从二进制 AndroidManifest 字符串池容错直读的包名（不经 androguard），仅在
+    androguard 畸形/为空且无 aapt 权威值时作最后兜底（治元素/属性命名空间或字符串引用投毒——
+    androguard 静默失败、aapt 又不可用的场景）。
     权威取值优先与 Android 安装/运行时一致的 aapt：androguard 畸形/为空、或与 aapt 不一致 → 采信 aapt。
-    绝不臆造：无 aapt 且 androguard 畸形时不改值，只出“解析不可靠”信号供人工核实。
+    绝不臆造：``axml`` 是对清单原始字节的真实读取（非构造），且仅在须恢复且形如合法包名时采用，同时发异常信号。
     """
     andro = (andro or "").strip()
     aapt_s = (aapt or "").strip()
+    axml_s = (axml or "").strip()
     andro_ok = _looks_like_package(andro)
     if aapt is not None and aapt_s:  # 有第二意见
         if andro and aapt_s != andro:
@@ -75,8 +176,15 @@ def _decide_manifest_package(
                 "疑清单解析被投毒破坏；已采信 aapt"
             )
         return andro or aapt_s, None
-    # 无 aapt 第二意见：只能做 sanity 信号，不改值。
+    # 无 aapt 第二意见（aapt 不可用，或跑了没解出）。
     if apk_valid and not andro_ok:
+        # androguard 畸形/空但 APK 结构有效 → 疑清单投毒。用 AXML 字符串池容错直读兜底。
+        if _looks_like_package(axml_s):
+            return axml_s, (
+                f"androguard 未解出合法包名（得 {andro!r}），已由 AndroidManifest 字符串池容错直读"
+                f"回退为包名={axml_s!r}——疑清单投毒（元素/属性命名空间或字符串引用被构造破坏），"
+                "已按容错解析恢复，请人工核实"
+            )
         return andro, (
             f"androguard 解析包名={andro!r} 畸形/为空，而 APK 结构有效——"
             "清单解析可能不可靠（疑清单投毒）；无 aapt 交叉校验，请人工核实"
@@ -184,10 +292,11 @@ _AXML_NSMAP_PATCHED = False
 
 
 def _install_axml_nsmap_shim() -> None:
-    """幂等 monkeypatch androguard ``AXMLParser.nsmap``（property），使其返回净化映射。
+    """幂等 monkeypatch androguard AXML 命名空间处理，使其返回净化映射。
 
     把原 property 取到的 {prefix: uri} 过 :func:`_sanitize_nsmap` 后再返回，让被加固壳投毒
-    的非法 namespace URI/前缀在抵达 ``etree.Element`` 前被剔除，避免 APK() 构造期崩溃。
+    的非法 namespace URI/前缀在抵达 ``etree.Element`` 前被剔除；同时把坏 namespace URI 从
+    tag / attribute name 的 ``{uri}name`` 拼接路径上剔除，避免 APK() 构造期崩溃。
 
     幂等：用模块级标记 ``_AXML_NSMAP_PATCHED`` 防重复包裹（否则多次 load_apk 会把 property
     层层套娃）。安装失败时 ``logging.exception`` 如实记录后回退原行为（不 swallow、不裸 pass）。
@@ -197,7 +306,7 @@ def _install_axml_nsmap_shim() -> None:
     if _AXML_NSMAP_PATCHED:
         return
     try:
-        from androguard.core.axml import AXMLParser
+        from androguard.core.axml import AXMLParser, AXMLPrinter
 
         original = AXMLParser.nsmap
         if not isinstance(original, property):
@@ -212,6 +321,15 @@ def _install_axml_nsmap_shim() -> None:
             return _sanitize_nsmap(original_fget(self))
 
         AXMLParser.nsmap = property(_sanitized_nsmap)  # type: ignore  # noqa: PGH003 - property 无 setter，monkeypatch 替换
+
+        original_print_namespace = AXMLPrinter._print_namespace
+
+        def _sanitized_print_namespace(self: Any, uri: str) -> str:
+            if uri and not _uri_lxml_ok(str(uri)):
+                return ""
+            return original_print_namespace(self, uri)
+
+        AXMLPrinter._print_namespace = _sanitized_print_namespace  # type: ignore[method-assign]
         _AXML_NSMAP_PATCHED = True
     except Exception:  # noqa: BLE001 - 装 shim 失败要如实记录后回退原行为，不阻塞加载
         logger.exception("安装 AXML nsmap 净化 shim 失败，回退原行为（坏命名空间可能仍致解析失败）")
@@ -312,9 +430,29 @@ class ApkContext:
         return _parse_aapt_package(proc.stdout or "")
 
     @cached_property
+    def _axml_package(self) -> str:
+        """AXML 字符串池容错直读的 package（不经 androguard，兜底清单投毒）；读不到 → ""。"""
+        raw = b""
+        try:
+            raw = self._apk.get_file("AndroidManifest.xml") or b""
+        except Exception:  # noqa: BLE001 - 拿不到原始字节则退回 apk_path
+            raw = b""
+        if not raw and self.apk_path:
+            try:
+                with zipfile.ZipFile(self.apk_path) as zf:
+                    raw = zf.read("AndroidManifest.xml")
+            except Exception:  # noqa: BLE001 - 读不到就放弃兜底
+                logger.debug("读取 AndroidManifest.xml 原始字节失败（忽略）", exc_info=True)
+                raw = b""
+        return _axml_package_from_bytes(raw) if raw else ""
+
+    @cached_property
     def _pkg_decision(self) -> tuple[str, str | None]:
         return _decide_manifest_package(
-            self._andro_package, self._aapt_package, self.apk_validation_ok
+            self._andro_package,
+            self._aapt_package,
+            self.apk_validation_ok,
+            axml=self._axml_package,
         )
 
     @property
