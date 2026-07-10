@@ -324,6 +324,7 @@ def _capture(
     # ① floor：带外 pcap 保底 runner 句柄（floor_first 时起手启动，finally 收尾停）。
     floor_handle: Any = None
     floor_pcap: Path | None = None  # 收尾 adb pull 落盘的本地 floor.pcap（供 artifacts / 后续 pcap-leads）。
+    uid_snapshot: Path | None = None  # ★P1(#10)：抓包窗口末抓的目标 UID socket 快照（供把 pcap 接入节点绑 app）。
 
     mitm_proc: subprocess.Popen[bytes] | None = None
     frida_proc: subprocess.Popen[bytes] | None = None
@@ -527,6 +528,9 @@ def _capture(
                 playbook.append(warn)
                 warnings.append(warn)
             _wait(wait_for)
+        # ★P1(#10)：抓包窗口末、app 仍活、连接仍在时抓目标 UID 的 socket 快照——供把带外整机
+        #   pcap 的接入节点绑定到【本 app】的连接（整机 pcap 未绑 UID 时的锚）。best-effort、不阻断。
+        uid_snapshot = _capture_uid_socket_snapshot(package, out_path, serial)
 
     except _MitmStartupError:
         # status/reason 已在抛出点设好；跳到 finally 清理（mitmdump 已死，其它子进程未起）。
@@ -569,6 +573,10 @@ def _capture(
     if floor_pcap is not None and floor_pcap.is_file():
         # ① floor 带外 pcap 作产物（mitm 明文之外的接入节点兜底：反 frida/pinning/native 时的穿透锚点）。
         artifacts.append(str(floor_pcap))
+    if uid_snapshot is not None and uid_snapshot.is_file():
+        # ★P1(#10)：UID socket 快照作产物，供人工把 floor.pcap 接入节点绑定到本 app 的连接。
+        artifacts.append(str(uid_snapshot))
+        playbook.append(f"UID socket 快照：{uid_snapshot.name}（把带外 pcap 接入节点绑定到 app 连接）")
 
     endpoints = _parse_flows(flows_file)
     # ① floor 自动并入：带外 pcap 的接入节点作 runtime 端点并进 endpoints（mitm 0 端点时靠它兜底，
@@ -1179,6 +1187,45 @@ def _adb_capture(extra: list[str], serial: str | None = None) -> str | None:
         logger.debug("[capture] adb 取数非零退出（%s）：%s", proc.returncode, " ".join(extra))
         return None
     return proc.stdout or ""
+
+
+def _app_uid(package: str, serial: str | None = None) -> str:
+    """取目标 app 的 UID（``dumpsys package <pkg>`` 的 ``userId=``）。取不到返回空串。绝不抛。"""
+    out = _adb_capture(["shell", "dumpsys", "package", package], serial) or ""
+    m = re.search(r"userId=(\d+)", out)
+    return m.group(1) if m else ""
+
+
+def _capture_uid_socket_snapshot(package: str, out_path: Path, serial: str | None = None) -> Path | None:
+    """★P1(#10)：抓目标 app（按 UID）的 socket 快照存 ``out/uid_sockets.txt``——供把带外整机
+    pcap 的接入节点【绑定到本 app 的连接】（进程/UID→远端 IP:port），区分真后端 vs 背景噪音。
+
+    抓 ``ss -tunp``（需 root 才显进程/UID）+ ``/proc/net/tcp``、``/proc/net/tcp6``（含 uid 列、
+    地址端口十六进制）。任一取到即写文件；全空返回 None。best-effort、绝不抛。
+    """
+    try:
+        uid = _app_uid(package, serial)
+        parts = [f"# package={package} uid={uid or '(未取到)'}"]
+        got = False
+        ss = _adb_capture(["shell", "ss", "-tunp"], serial)
+        if ss and ss.strip():
+            parts.append("## ss -tunp（需 root 显进程/UID）\n" + ss.rstrip())
+            got = True
+        for procfs in ("/proc/net/tcp", "/proc/net/tcp6"):
+            raw = _adb_capture(["shell", "cat", procfs], serial)
+            if raw and raw.strip():
+                parts.append(f"## {procfs}（uid 在第 8 列，地址/端口十六进制）\n" + raw.rstrip())
+                got = True
+        if not got:
+            logger.debug("[capture] UID socket 快照：ss / /proc/net 均未取到（无 root / 无 adb）")
+            return None
+        dest = out_path / "uid_sockets.txt"
+        dest.write_text("\n\n".join(parts) + "\n", encoding="utf-8")
+        logger.info("[capture] UID socket 快照已存 %s（uid=%s）", dest, uid or "?")
+        return dest
+    except Exception:
+        logger.exception("[capture] 抓 UID socket 快照失败（忽略）")
+        return None
 
 
 # ---------------------------------------------------------------------------
