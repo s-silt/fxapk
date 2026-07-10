@@ -26,6 +26,7 @@ import pytest
 from apkscan.core import device
 from apkscan.core.models import Endpoint, Evidence
 from apkscan.dynamic import (
+    STATUS_DEGRADED,
     STATUS_DONE,
     STATUS_ERROR,
     STATUS_SKIPPED,
@@ -287,6 +288,44 @@ def test_capture_done_no_flows_still_done(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 # 异常 → error，且仍清理子进程
 # ---------------------------------------------------------------------------
+
+
+def test_capture_total_failure_is_degraded_not_fake_done(monkeypatch, tmp_path):
+    """★ P0-4：代理未起 + 无 floor + 0 端点 + MITM 0 字节（总失败组合）→ status=degraded、
+    capture_complete=False、capture_signals 记实——不得伪装成 done。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_adb_set_proxy", lambda serial=None: False)  # 代理起不来
+    monkeypatch.setattr(capture, "_start_floor_pcap", lambda *a, **k: None)  # 无 floor pcap
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+
+    assert result["status"] == STATUS_DEGRADED
+    assert "证据路径" in result["reason"]
+    data = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    assert data["capture_complete"] is False
+    sig = data["capture_signals"]
+    assert sig["proxy_set"] is False and sig["floor_pulled"] is False
+    assert sig["degraded"] is True
+
+
+def test_capture_proxy_ok_but_quiet_app_still_done(monkeypatch, tmp_path):
+    """★ P0-4 反向护栏：代理起了但 app 安静（0 flows/端点）→ 仍 done（证据路径成立），不误降级。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_adb_set_proxy", lambda serial=None: True)  # 代理起成功
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+    assert result["status"] == STATUS_DONE
+    data = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    assert data["capture_complete"] is True
+    assert data["capture_signals"]["proxy_set"] is True
 
 
 def test_capture_exception_yields_error_and_cleans_up(monkeypatch, tmp_path):

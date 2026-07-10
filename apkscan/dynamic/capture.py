@@ -37,6 +37,7 @@ from typing import Any
 from apkscan.core import device, infra, tools
 from apkscan.core.models import Endpoint, Evidence
 from apkscan.dynamic import (
+    STATUS_DEGRADED,
     STATUS_DONE,
     STATUS_ERROR,
     STATUS_SKIPPED,
@@ -587,9 +588,32 @@ def _capture(
     # C5b：额外抽出报文体（请求/响应），供 merge 阶段对 {data,timestamp} 信封解密。
     # 失败/缺 mitmproxy 包 → 空列表（不影响端点提取与报告写出）。
     messages = _parse_messages(flows_file)
-    # 抓包失败（mitmdump 没起来 / 编排异常）时，产出的 runtime_report 基于不完整/未抓全
-    # 的流量，必须在报告里标明，避免它伪装成正常结果被下游误用。
-    capture_ok = result["status"] != STATUS_ERROR
+    # P0-4：结构化采集信号——判这次抓包哪路成了。没有 error 但也没取到任何可用证据
+    # （代理未起 / MITM 0 字节 / floor 未拉回 / 端点 0）时降为 degraded，杜绝"假成功"。
+    try:
+        mitm_bytes = flows_file.stat().st_size if flows_file.exists() else 0
+    except OSError:
+        mitm_bytes = 0
+    capture_signals: dict[str, Any] = {
+        "proxy_set": bool(proxy_set),
+        "reverse_set": bool(reverse_set),
+        "floor_started": floor_handle is not None,
+        "floor_pulled": floor_pcap is not None,
+        "hook_ready": frida_session is not None,  # frida-core 会话建立（精确 hook 就绪属 P1）
+        "mitm_bytes": mitm_bytes,
+        "endpoint_total": len(endpoints),
+        "warnings": list(warnings),
+    }
+    # 降级判定：仅当**没有任何证据路径成立**——代理未起 且 无 floor pcap 且 MITM 0 字节 且 端点 0
+    # ——才降为 degraded（总失败组合）。只要代理起了 / floor 拉回了 / 抓到端点，即便 app 安静
+    # （0 flows）仍算 done（不阻断，降级细节走 reason/warnings，保持既有契约）。
+    evidence_path_ok = proxy_set or floor_pcap is not None or len(endpoints) > 0 or mitm_bytes > 0
+    if result["status"] == STATUS_DONE and not evidence_path_ok:
+        result["status"] = STATUS_DEGRADED
+        result["reason"] = "抓包降级：无任何证据路径（代理未起、无 floor pcap、MITM 0 字节、端点 0）"
+        capture_signals["degraded"] = True
+    # 抓包失败/降级时，产出的 runtime_report 基于不完整/未抓全的流量，必须标明，避免伪装成正常结果。
+    capture_ok = result["status"] == STATUS_DONE
     # P0/P1：把活体事件（去掉 sink 上限触发的 _capped 占位）一并写进 runtime_report.json。
     def _clean(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [e for e in events if not e.get("_capped")]
@@ -609,6 +633,7 @@ def _capture(
         clipboard_events=_clean(clipboard_events),
         remote_control_events=_clean(remote_control_events),
         budget_exceeded=budget_exceeded,
+        capture_signals=capture_signals,
     )
     report_paths = [report_path] if report_path else []
 
@@ -2050,6 +2075,7 @@ def _write_runtime_report(
     clipboard_events: list[dict[str, Any]] | None = None,
     remote_control_events: list[dict[str, Any]] | None = None,
     budget_exceeded: bool = False,
+    capture_signals: dict[str, Any] | None = None,
 ) -> str:
     """把运行时端点写成 out/runtime_report.json（复用 report.json 的序列化）。
 
@@ -2068,6 +2094,9 @@ def _write_runtime_report(
         "package_name": package,
         "source": "runtime",
         "capture_complete": complete,
+        # P0-4：结构化采集信号（proxy_set/floor_started/floor_pulled/hook_ready/mitm_bytes/
+        # endpoint_total/degraded），供下游/人工判这次抓包哪路成了、哪路降级，杜绝"假成功"。
+        "capture_signals": dict(capture_signals or {}),
         # ③ 时间盒：采集因超总预算被缩短/中止 → True（下游据此知端点/事件可能不全）。
         "budget_exceeded": budget_exceeded,
         "endpoint_total": len(endpoints),
