@@ -22,7 +22,7 @@ from typer.testing import CliRunner
 
 from apkscan import cli
 from apkscan.core.models import Report
-from apkscan.dynamic import STATUS_DONE, STATUS_ERROR, STATUS_SKIPPED
+from apkscan.dynamic import STATUS_DEGRADED, STATUS_DONE, STATUS_ERROR, STATUS_SKIPPED
 
 
 @pytest.fixture(autouse=True)
@@ -32,6 +32,11 @@ def _isolate_tracking(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import apkscan.track.autoingest as _ai
 
     monkeypatch.setattr(_ai, "_ingest_graph", lambda *a, **k: None)
+    # P0-5：默认起手无 adb server（本次自起、归我们收）——让 cleanup 的 kill 断言不依赖跑测
+    # 机器上是否恰好有 adb server 在 5037 监听；需测"外部已存在不杀"的用例在自身内覆写为 True。
+    from apkscan.core import tools
+
+    monkeypatch.setattr(tools, "adb_server_running", lambda *a, **k: False)
 
 runner = CliRunner()
 
@@ -149,6 +154,45 @@ def test_doctor_cleans_adb_on_exit(monkeypatch):
     res = runner.invoke(cli.app, ["doctor"])
     assert res.exit_code == 1
     assert calls["n"] == 1  # finally 收了一次（rc=1 也收）
+
+
+def test_raise_exit_degraded_is_code_3():
+    """★ 复审#5：status=degraded → 退出码 3（脚本调用方区分"降级无产出"，不当成功）；done 不抛。"""
+    import typer
+
+    with pytest.raises(typer.Exit) as ei:
+        cli._raise_exit_for_status(STATUS_DEGRADED)
+    assert ei.value.exit_code == 3
+    cli._raise_exit_for_status(STATUS_DONE)  # done 不抛（正常返回 0）
+
+
+def test_cleanup_adb_quiet_skips_kill_when_not_owned(monkeypatch):
+    """★ P0-5：owned=False（起手时已有外部/先前 server）→ 收尾【绝不】调 kill_adb_server。"""
+    from apkscan.core import tools
+
+    calls = {"n": 0}
+    monkeypatch.setattr(tools, "kill_adb_server", lambda: calls.__setitem__("n", calls["n"] + 1))
+    cli._cleanup_adb_quiet(owned=False)
+    assert calls["n"] == 0  # 不归我们、不杀
+    cli._cleanup_adb_quiet(owned=True)
+    assert calls["n"] == 1  # 归我们、收一次
+
+
+def test_command_does_not_kill_preexisting_external_adb(monkeypatch):
+    """★ P0-5：命令起手时已有外部 adb server（adb_server_running=True）→ 退出收尾不杀，
+    避免误杀外部或仍在 pull 落盘 floor.pcap 的 adb。"""
+    from apkscan.core import tools
+
+    monkeypatch.setattr(tools, "adb_server_running", lambda *a, **k: True)  # 外部已在跑
+    calls = {"n": 0}
+    monkeypatch.setattr(tools, "kill_adb_server", lambda: calls.__setitem__("n", calls["n"] + 1))
+    _patch_doctor_run(
+        monkeypatch,
+        {"ok": True, "items": [{"name": "在线设备", "ok": True, "detail": "x", "fix_cmd": []}]},
+    )
+    res = runner.invoke(cli.app, ["doctor"])
+    assert res.exit_code == 0
+    assert calls["n"] == 0  # 外部 server 未被杀
 
 
 def test_doctor_killserver_repair_cmd_unchanged(monkeypatch):

@@ -356,6 +356,35 @@ def test_kill_adb_server_swallows_timeout(monkeypatch, caplog):
     assert any("超时" in r.message for r in caplog.records)
 
 
+def test_adb_server_running_detects_listener_without_side_effects(monkeypatch):
+    """★ P0-5：adb_server_running 只 TCP 连一下判监听、【绝不】start-server。连得上→True、
+    连不上(OSError)→False。"""
+    import socket
+
+    class _CM:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    seen: dict = {}
+
+    def _connect(addr, timeout=None):
+        seen["addr"] = addr
+        return _CM()
+
+    monkeypatch.setattr(socket, "create_connection", _connect)
+    assert tools.adb_server_running() is True
+    assert seen["addr"] == ("127.0.0.1", 5037)  # 探 adb server 默认端口
+
+    def _refuse(*a, **k):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(socket, "create_connection", _refuse)
+    assert tools.adb_server_running() is False
+
+
 # ---------------------------------------------------------------------------
 # jadx 插件包解析（resolve_jadx / jadx_addon_dir / has_jadx）
 # ---------------------------------------------------------------------------
