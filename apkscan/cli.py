@@ -364,6 +364,14 @@ def capture(
         None, "--out", help="产物 / 报告输出目录（默认：当前目录下的 out/，绝对化）。"
     ),
     duration: int = typer.Option(60, "--duration", min=1, help="抓包时长（秒，下限 1）。"),
+    serial: str | None = typer.Option(
+        None, "--serial", help="目标设备 serial（多设备/一机多 transport 时钉定那台；不给则 -U/自动）。"
+    ),
+    mode: str = typer.Option(
+        "both",
+        "--mode",
+        help="抓包模式：both（默认，mitm 明文 + 带外 pcap）/ floor-only（不设代理、只带外抓，加固 IM/反 frida 更稳）/ mitm-only（不起 floor）。",
+    ),
 ) -> None:
     """真机抓包：对运行中的目标应用做流量抓取，提取动态端点。
 
@@ -380,8 +388,11 @@ def capture(
             typer.echo("该功能未安装：apkscan.dynamic.capture 不可用（动态抓包模块尚未就绪）。")
             raise typer.Exit(code=1) from None
 
+        if mode not in ("both", "floor-only", "mitm-only", "no-proxy"):
+            typer.echo(f"--mode 取值非法：{mode!r}（可选 both / floor-only / mitm-only）")
+            raise typer.Exit(code=2)
         out = _resolve_out_cwd(out)  # 未给 / 相对 → 绝对化到 cwd 下的 out/（口径确定）
-        result = _capture.run(package, out=out, duration=duration)
+        result = _capture.run(package, out=out, duration=duration, serial=serial, mode=mode)
         _print_dynamic_result("抓包", result)
         # 业务失败返回非零退出码（在 adb 清理 finally 之前抛，仍会穿过 finally 收 server）。
         _raise_exit_for_status(result.get("status") if isinstance(result, dict) else None)
