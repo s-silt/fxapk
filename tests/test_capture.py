@@ -364,6 +364,110 @@ def test_capture_clears_proxy_even_when_set_unconfirmed(monkeypatch, tmp_path):
     assert cleared["n"] == 1  # 尝试过写代理 → finally 仍清（不遗留死代理）
 
 
+def test_app_uid_parses_dumpsys(monkeypatch):
+    """★ P1(#10)：_app_uid 从 dumpsys package 解析 userId=；取不到→空串。"""
+    monkeypatch.setattr(capture, "_adb_capture", lambda extra, serial=None: "  x\n    userId=10234\n  y")
+    assert capture._app_uid("com.x") == "10234"
+    monkeypatch.setattr(capture, "_adb_capture", lambda extra, serial=None: None)
+    assert capture._app_uid("com.x") == ""
+
+
+def test_capture_uid_socket_snapshot_writes_artifact(monkeypatch, tmp_path):
+    """★ P1(#10)：抓到 ss / /proc/net → 写 uid_sockets.txt（含 uid + 远端）；全空 → None。"""
+
+    def fake_capture(extra, serial=None):
+        if "dumpsys" in extra:
+            return "userId=10234"
+        if extra[:2] == ["shell", "ss"]:
+            return 'tcp ESTAB 0 0 10.0.0.2:5000 47.98.207.14:7689 users:(("app",pid=1))'
+        if "cat" in extra:
+            return "  sl local rem ... uid ...\n 0: ... 10234 ..."
+        return None
+
+    monkeypatch.setattr(capture, "_adb_capture", fake_capture)
+    dest = capture._capture_uid_socket_snapshot("com.x", tmp_path)
+    assert dest is not None and dest.name == "uid_sockets.txt"
+    txt = dest.read_text(encoding="utf-8")
+    assert "uid=10234" in txt and "47.98.207.14:7689" in txt and "/proc/net/tcp" in txt
+
+    monkeypatch.setattr(capture, "_adb_capture", lambda extra, serial=None: None)
+    assert capture._capture_uid_socket_snapshot("com.x", tmp_path) is None
+
+
+def test_capture_run_includes_uid_snapshot_artifact(monkeypatch, tmp_path):
+    """★ P1(#10)：capture.run 把抓包窗口末的 UID socket 快照并进 artifacts。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    snap = tmp_path / "uid_sockets.txt"
+    monkeypatch.setattr(
+        capture, "_capture_uid_socket_snapshot",
+        lambda package, out_path, serial=None: (snap.write_text("x", encoding="utf-8"), snap)[1],
+    )
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+    assert str(snap) in result["artifacts"]
+
+
+def test_run_mode_maps_to_mitm_floor_flags(monkeypatch, tmp_path):
+    """★ P1(#8)：run(mode=...) 映射到 _capture 的 mitm/floor 门控。"""
+    _set_capabilities(monkeypatch)
+    seen: dict = {}
+    monkeypatch.setattr(
+        capture, "_capture",
+        lambda *a, **k: (seen.update(k), capture.empty_result(capture.STATUS_DONE))[1],
+    )
+    capture.run("com.x", out_dir=str(tmp_path), mode="floor-only")
+    assert seen["mitm"] is False and seen["floor"] is True
+    capture.run("com.x", out_dir=str(tmp_path), mode="mitm-only")
+    assert seen["mitm"] is True and seen["floor"] is False
+    capture.run("com.x", out_dir=str(tmp_path), mode="both")
+    assert seen["mitm"] is True and seen["floor"] is True
+
+
+def test_detect_missing_floor_only_does_not_require_mitmproxy(monkeypatch):
+    """★ 复审 P1-1：require_mitm=False（floor-only）时不把 mitmproxy 计入缺失——floor-only 只带外
+    抓、不需要 mitmproxy，缺它不该拦下抓包。"""
+    monkeypatch.setattr(capture.device, "has_device", lambda: True)
+    monkeypatch.setattr(capture.device, "has_frida", lambda: True)
+    monkeypatch.setattr(capture.device, "has_mitmproxy", lambda: False)  # 无 mitmproxy
+    monkeypatch.setattr(capture.device, "frida_server_running", lambda serial=None: True)
+    assert "mitmproxy" in capture._detect_missing(require_mitm=True)
+    assert "mitmproxy" not in capture._detect_missing(require_mitm=False)
+
+
+def test_run_rejects_invalid_mode(monkeypatch, tmp_path):
+    """★ 复审 P2：run(mode=非法) → error（不静默落 both）。"""
+    result = capture.run("com.x", out_dir=str(tmp_path), mode="bogus")
+    assert result["status"] == capture.STATUS_ERROR
+    assert "mode" in result["reason"]
+
+
+def test_capture_floor_only_skips_mitm_and_proxy(monkeypatch, tmp_path):
+    """★ P1(#8)：floor-only 模式不起 mitmdump、不设代理；floor 起并拉回 → 仍 done（有证据路径）。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_capture_uid_socket_snapshot", lambda *a, **k: None)
+    started = {"mitm": False, "proxy": False}
+    monkeypatch.setattr(capture, "_start_mitmdump", lambda f: started.__setitem__("mitm", True))
+    monkeypatch.setattr(
+        capture, "_adb_set_proxy", lambda serial=None: (started.__setitem__("proxy", True), True)[1]
+    )
+    monkeypatch.setattr(capture, "_start_floor_pcap", lambda *a, **k: object())
+    floorp = tmp_path / "floor.pcap"
+    floorp.write_bytes(b"\xa1\xb2\xc3\xd4" + b"\x00" * 40)
+    monkeypatch.setattr(capture, "_stop_floor_pcap", lambda h, op: floorp)
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), mode="floor-only", duration=1)
+    assert started["mitm"] is False  # floor-only 不起 mitmdump
+    assert started["proxy"] is False  # 不设代理
+    assert result["status"] == capture.STATUS_DONE  # floor 拉回 = 有证据路径
+
+
 def test_capture_exception_yields_error_and_cleans_up(monkeypatch, tmp_path):
     _set_capabilities(monkeypatch)
     mitm = _FakeProc()
@@ -1293,6 +1397,32 @@ def test_version_unreadable_enumerate_acceptance(monkeypatch):
     assert capture._check_frida_version_match() == (True, "")
 
 
+def test_frida_hook_status_three_states():
+    """★ P1(#7)：_frida_hook_status 三态——收到 True=confirmed / False=java-unavailable /
+    未收到=unconfirmed（不当已确认）/ 无会话=none。"""
+
+    class _S:
+        pass
+
+    assert capture._frida_hook_status(None) == "none"
+    s = _S()
+    s._fxapk_hook_ready = {"ready": True}
+    assert capture._frida_hook_status(s) == "confirmed"
+    s._fxapk_hook_ready = {"ready": False}
+    assert capture._frida_hook_status(s) == "java-unavailable"  # ART/Java 不可用 → 诚实降级
+    s._fxapk_hook_ready = {"ready": None}
+    assert capture._frida_hook_status(s) == "unconfirmed"  # 未收到 → 不当已确认
+    assert capture._frida_hook_status(_S()) == "unconfirmed"  # 无标志 → 未确认
+
+
+def test_frida_hook_ready_emitter_in_source():
+    """★ P1(#7)：hook-ready emitter 已定义、在 Java.perform 内 send fxapk_hook_ready（catch Java 不可用）。"""
+    js = capture._FRIDA_HOOK_READY_JS
+    assert "fxapk_hook_ready" in js
+    assert "Java.perform" in js
+    assert "java-unavailable" in js
+
+
 def test_version_match_true_when_equal(monkeypatch):
     monkeypatch.setattr(capture.provision, "host_frida_version", lambda: "16.5.9")
     monkeypatch.setattr(capture, "_device_frida_version", lambda serial=None: "16.5.9")
@@ -1932,7 +2062,7 @@ def test_run_consumes_decide_capture_from_report(monkeypatch, tmp_path):
     _set_capabilities(monkeypatch)
     seen: dict[str, Any] = {}
 
-    def _spy_capture(package, out_path, duration, serial=None, *, decision=None):
+    def _spy_capture(package, out_path, duration, serial=None, *, decision=None, mitm=True, floor=True):
         seen["decision"] = decision
         return capture.empty_result(STATUS_DONE, "ok")
 
@@ -1952,7 +2082,7 @@ def test_run_defaults_decision_when_no_report(monkeypatch, tmp_path):
     _set_capabilities(monkeypatch)
     seen: dict[str, Any] = {}
 
-    def _spy_capture(package, out_path, duration, serial=None, *, decision=None):
+    def _spy_capture(package, out_path, duration, serial=None, *, decision=None, mitm=True, floor=True):
         seen["decision"] = decision
         return capture.empty_result(STATUS_DONE, "ok")
 
@@ -2262,10 +2392,10 @@ def test_frida_session_registers_all_channels_via_table(monkeypatch):
         sys.modules, "frida",
         types.SimpleNamespace(get_usb_device=lambda timeout=None: _FakeDevice()),
     )
-    # 8 个 sink 全给非 None → crypto 主通道 + 7 路表通道 = 8 次 on()。
+    # 8 个 sink 全给非 None → hook_ready 通道(★#7) + crypto 主通道 + 7 路表通道。
     sinks = [[] for _ in range(8)]
     capture._start_frida_session("com.x", *sinks)
-    assert len(on_calls) == 1 + len(capture.CHANNELS)
+    assert len(on_calls) == 2 + len(capture.CHANNELS)  # +1 = hook_ready handler
 
 
 # ---------------------------------------------------------------------------
