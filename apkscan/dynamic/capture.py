@@ -152,6 +152,7 @@ def run(
     out: str | None = None,
     serial: str | None = None,
     report: Any = None,
+    mode: str = "both",
 ) -> DynamicResult:
     """对运行中的目标应用做真机抓包，提取运行时端点。
 
@@ -210,7 +211,12 @@ def run(
         package, duration, serial or "(未指定/-U)",
         decision.floor_first, decision.frida_retreat_threshold, decision.total_budget_sec,
     )
-    return _capture(package, out_path, duration, serial, decision=decision)
+    # ★#8 抓包模式 → mitm/floor 门控（both=默认；floor-only=不设代理只带外抓；mitm-only=不起 floor）。
+    use_mitm = mode not in ("floor-only", "no-proxy")
+    use_floor = mode != "mitm-only"
+    return _capture(
+        package, out_path, duration, serial, decision=decision, mitm=use_mitm, floor=use_floor
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -298,8 +304,13 @@ def _capture(
     serial: str | None = None,
     *,
     decision: CaptureDecision | None = None,
+    mitm: bool = True,
+    floor: bool = True,
 ) -> DynamicResult:
     """编排 mitmdump + adb 代理 + frida unpinning + 启 app，到时停并解析流量。
+
+    ★#8 抓包模式：``mitm``=False（floor-only）跳过 mitmdump+全局代理、只靠带外 pcap（加固 IM /
+    反 frida 场景不设代理更稳）；``floor``=False（mitm-only）不起 floor。默认两者都开（both）。
 
     所有子进程在 finally 中清理（terminate→kill），proxy/reverse 在 finally 还原。
     serial 一路传给所有 adb 调用（reverse/proxy/CA/收尾 pull）与 frida 注入（-D 设备选择）；
@@ -373,22 +384,26 @@ def _capture(
             playbook.append(match_msg)
             warnings.append(match_msg)
 
-        # 1) 起 mitmdump（-w flows.mitm）。超时 = duration + 缓冲。
-        mitm_proc = _start_mitmdump(flows_file)
-        playbook.append(f"启动 mitmdump -w {flows_file}（监听 {_PROXY_HOST}:{_PROXY_PORT}）")
-        # 存活确认：mitmdump 若因端口被占用 / 证书目录不可写 / 参数不支持而当场退出，
-        # Popen 本身不抛——必须主动检测，否则会照常 sleep 满 duration 并以"成功 0 端点"
-        # 收尾，把"代理根本没起来"静默成"真的没抓到"。
-        if mitm_proc is not None and mitm_proc.poll() is not None:
-            err = _read_proc_stderr(mitm_proc)
-            msg = (
-                f"mitmdump 启动后立即退出（端口 {_PROXY_PORT} 被占用 / 证书目录不可写 / "
-                f"参数不支持？）stderr 尾部：{err}"
-            )
-            logger.error("[capture] %s", msg)
-            result["status"] = STATUS_ERROR
-            result["reason"] = msg
-            raise _MitmStartupError(msg)
+        # 1) 起 mitmdump（-w flows.mitm）。超时 = duration + 缓冲。★#8：floor-only 模式跳过 mitm+代理，
+        #    只靠带外 pcap（加固 IM / 反 frida 场景常用：不设代理、直连流量交 floor 抓）。
+        if mitm:
+            mitm_proc = _start_mitmdump(flows_file)
+            playbook.append(f"启动 mitmdump -w {flows_file}（监听 {_PROXY_HOST}:{_PROXY_PORT}）")
+            # 存活确认：mitmdump 若因端口被占用 / 证书目录不可写 / 参数不支持而当场退出，
+            # Popen 本身不抛——必须主动检测，否则会照常 sleep 满 duration 并以"成功 0 端点"
+            # 收尾，把"代理根本没起来"静默成"真的没抓到"。
+            if mitm_proc is not None and mitm_proc.poll() is not None:
+                err = _read_proc_stderr(mitm_proc)
+                msg = (
+                    f"mitmdump 启动后立即退出（端口 {_PROXY_PORT} 被占用 / 证书目录不可写 / "
+                    f"参数不支持？）stderr 尾部：{err}"
+                )
+                logger.error("[capture] %s", msg)
+                result["status"] = STATUS_ERROR
+                result["reason"] = msg
+                raise _MitmStartupError(msg)
+        else:
+            playbook.append("floor-only 模式：跳过 mitmdump + 全局代理，仅靠带外 pcap")
 
         # 2) ① floor 优先（**起手先起，必须在设全局代理之前**）：不碰 App 本体先起带外 pcap 保底。
         #    为何在代理前：设全局代理后，遵守代理的 app 连的是 127.0.0.1:8080（代理腿），设备侧
@@ -397,7 +412,7 @@ def _capture(
         #    的目标场景）。遵守代理的 app 其真实后端 IP 另由 mitm 的 server_conn.peername 在
         #    _parse_flows 取得——两者互补，不重复。真机依赖封成可注入 runner，单测 mock。
         # TODO(real-device): -i any 接口名 / tcpdump AF_PACKET 权限需真机对齐。
-        if decision.floor_first:
+        if floor and decision.floor_first:  # ★#8：mitm-only 模式不起 floor
             floor_handle = _start_floor_pcap(package, out_path, serial)
             if floor_handle is not None:
                 playbook.append("① floor 保底：已起带外 pcap（代理前起手，抓直连后端 IP；零产出不可接受）")
@@ -405,19 +420,20 @@ def _capture(
             else:
                 logger.info("[capture] floor 带外 pcap 未起（无设备侧 runner），仅靠主抓包链")
 
-        # 3) adb 代理 + reverse，把设备流量回流到主机 mitmproxy。
-        reverse_set = _adb_reverse(serial)
-        if reverse_set:
-            playbook.append(f"adb reverse tcp:{_PROXY_PORT} tcp:{_PROXY_PORT}")
-        else:
-            # 无 reverse：设备代理指向本机 loopback 却无反向端口 → MITM 通道不可用（floor 兜底）。
-            warnings.append(
-                f"adb reverse tcp:{_PROXY_PORT} 失败——设备代理指向 loopback 但无反向端口，MITM 通道可能不可用"
-            )
-        proxy_attempted = True
-        proxy_set = _adb_set_proxy(serial)
-        if proxy_set:
-            playbook.append(f"adb 设全局代理 {_PROXY_HOST}:{_PROXY_PORT}")
+        # 3) adb 代理 + reverse，把设备流量回流到主机 mitmproxy。★#8：floor-only 模式跳过（无代理）。
+        if mitm:
+            reverse_set = _adb_reverse(serial)
+            if reverse_set:
+                playbook.append(f"adb reverse tcp:{_PROXY_PORT} tcp:{_PROXY_PORT}")
+            else:
+                # 无 reverse：设备代理指向本机 loopback 却无反向端口 → MITM 通道不可用（floor 兜底）。
+                warnings.append(
+                    f"adb reverse tcp:{_PROXY_PORT} 失败——设备代理指向 loopback 但无反向端口，MITM 通道可能不可用"
+                )
+            proxy_attempted = True
+            proxy_set = _adb_set_proxy(serial)
+            if proxy_set:
+                playbook.append(f"adb 设全局代理 {_PROXY_HOST}:{_PROXY_PORT}")
 
         # 4) frida 注入：优先 frida-core 通道（SSL unpinning + 运行时密钥 hook，可回传活体 key）；
         #    frida-core 不可用 / attach 失败 → 回退现有 subprocess 路径（仅 unpinning，无 key 回传）。
