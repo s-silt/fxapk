@@ -143,6 +143,9 @@ Java.perform(function () {
 });
 """
 
+# ★#8 合法抓包模式（both=mitm+floor；floor-only/no-proxy=不设代理只带外抓；mitm-only=不起 floor）。
+_CAPTURE_MODES = frozenset({"both", "floor-only", "mitm-only", "no-proxy"})
+
 
 def run(
     package: str,
@@ -182,6 +185,14 @@ def run(
     # 消费 decide_capture：把静态报告的规避信号落成引擎可读决策（绝不抛，坏 report→默认决策）。
     decision = decide_capture(report)
 
+    # ★#8 抓包模式 → mitm/floor 门控（both=默认；floor-only/no-proxy=不设代理只带外抓；mitm-only=不起
+    #    floor）。★须在能力探测之前算：floor-only 不该因缺 mitmproxy 被判缺前置。
+    if mode not in _CAPTURE_MODES:
+        logger.error("[capture] mode 取值非法：%r（可选 %s）", mode, "/".join(sorted(_CAPTURE_MODES)))
+        return empty_result(STATUS_ERROR, f"mode 取值非法：{mode!r}（可选 {'/'.join(sorted(_CAPTURE_MODES))}）")
+    use_mitm = mode not in ("floor-only", "no-proxy")
+    use_floor = mode != "mitm-only"
+
     # 防御：包名源自样本 manifest（不可信）。畸形包名直接拒绝，不下发到 frida/adb。
     if not device.is_valid_package(package):
         logger.error("[capture] 包名形态非法，拒绝抓包：%r", package)
@@ -195,8 +206,8 @@ def run(
         result = empty_result(STATUS_ERROR, f"无法创建输出目录 {out_dir}")
         return result
 
-    # --- 前置能力探测：缺任一 → skipped + 手册 ---------------------------
-    missing = _detect_missing(serial)
+    # --- 前置能力探测：缺任一 → skipped + 手册（floor-only 不要求 mitmproxy）------
+    missing = _detect_missing(serial, require_mitm=use_mitm)
     if missing:
         reason = "缺少前置条件：" + "、".join(missing)
         logger.info("[capture] %s；返回手册（playbook）", reason)
@@ -211,9 +222,6 @@ def run(
         package, duration, serial or "(未指定/-U)",
         decision.floor_first, decision.frida_retreat_threshold, decision.total_budget_sec,
     )
-    # ★#8 抓包模式 → mitm/floor 门控（both=默认；floor-only=不设代理只带外抓；mitm-only=不起 floor）。
-    use_mitm = mode not in ("floor-only", "no-proxy")
-    use_floor = mode != "mitm-only"
     return _capture(
         package, out_path, duration, serial, decision=decision, mitm=use_mitm, floor=use_floor
     )
@@ -224,11 +232,13 @@ def run(
 # ---------------------------------------------------------------------------
 
 
-def _detect_missing(serial: str | None = None) -> list[str]:
+def _detect_missing(serial: str | None = None, require_mitm: bool = True) -> list[str]:
     """返回缺失的前置条件名列表（空 = 全部就绪）。
 
     顺序：设备 / frida / mitmproxy。每项探测均走 device 模块（不抛）。
     serial 非空时 frida-server 运行探测钉定那台（多设备消歧）；None 退回旧行为。
+    ★#8：``require_mitm=False``（floor-only 模式）时不把 mitmproxy 计入缺失——floor-only 只带外
+    抓包、不需要 mitmproxy/代理，缺它不该拦下抓包。
     """
     missing: list[str] = []
     try:
@@ -246,11 +256,12 @@ def _detect_missing(serial: str | None = None) -> list[str]:
         missing.append("frida")
 
     try:
-        if not device.has_mitmproxy():
+        if require_mitm and not device.has_mitmproxy():
             missing.append("mitmproxy")
     except Exception:
         logger.exception("[capture] mitmproxy 探测异常，视为缺失")
-        missing.append("mitmproxy")
+        if require_mitm:
+            missing.append("mitmproxy")
 
     # 设备上 frida-server 是否在跑（与 unpack 口径一致）：host 有 frida CLI 但设备
     # frida-server 没起来时，注入会失败、抓包绕不过证书绑定，应提前判为缺失。
@@ -367,15 +378,16 @@ def _capture(
     try:
         # 0) HTTPS 命门：把 mitmproxy CA 装入设备系统信任库。失败不中止抓包
         #    （HTTP 仍可抓），但把降级原因写进 playbook + reason，确保不假成功。
-        ca = provision.ensure_mitm_ca(serial, on_progress=None)
-        if ca.get("ok"):
-            playbook.append(f"mitmproxy CA 已就绪（{ca.get('action', '')}）")
-        else:
-            ca_detail = str(ca.get("detail") or "CA 未装入系统信任库")
-            warn = f"CA 未装入系统信任库：{ca_detail}，HTTPS 可能仅密文"
-            logger.warning("[capture] %s", warn)
-            playbook.append(warn)
-            warnings.append(warn)
+        if mitm:  # ★#8：floor-only 不走 mitm，就不该往设备系统信任库装 mitmproxy CA。
+            ca = provision.ensure_mitm_ca(serial, on_progress=None)
+            if ca.get("ok"):
+                playbook.append(f"mitmproxy CA 已就绪（{ca.get('action', '')}）")
+            else:
+                ca_detail = str(ca.get("detail") or "CA 未装入系统信任库")
+                warn = f"CA 未装入系统信任库：{ca_detail}，HTTPS 可能仅密文"
+                logger.warning("[capture] %s", warn)
+                playbook.append(warn)
+                warnings.append(warn)
 
         # 0.5) frida 主机/设备版本一致性校验。不一致不阻断（仍注入），但写入告警。
         match_ok, match_msg = _check_frida_version_match(serial)
@@ -627,12 +639,20 @@ def _capture(
         mitm_bytes = flows_file.stat().st_size if flows_file.exists() else 0
     except OSError:
         mitm_bytes = 0
+    # ★#7：hook 就绪三态——只有收到显式 fxapk_hook_ready:true 才算 confirmed；未确认/Java 不可用
+    #   附告警，不把"未确认"上报成"已确认"掩盖 hook 没装上。
+    hook_status = _frida_hook_status(frida_session)
+    if hook_status in ("java-unavailable", "unconfirmed"):
+        warnings.append(
+            f"frida hook 未确认就绪（{hook_status}）——注入可能未生效（反检测样本常见），运行时事件可能不全，靠 floor/pcap 兜底"
+        )
     capture_signals: dict[str, Any] = {
         "proxy_set": bool(proxy_set),
         "reverse_set": bool(reverse_set),
         "floor_started": floor_handle is not None,
         "floor_pulled": floor_pcap is not None,
-        "hook_ready": _frida_hook_ready(frida_session),  # ★#7：JS 显式回传 fxapk_hook_ready 确认 hook 真装上
+        "hook_ready": hook_status == "confirmed",  # ★#7：仅收到显式 fxapk_hook_ready:true 才算已确认
+        "hook_ready_status": hook_status,  # confirmed / java-unavailable / unconfirmed / none
         "mitm_bytes": mitm_bytes,
         "endpoint_total": len(endpoints),
         "warnings": list(warnings),
@@ -1544,24 +1564,31 @@ def _budget_remaining(started_at: float, total_budget_sec: int) -> float:
 # ---------------------------------------------------------------------------
 
 
-def _frida_hook_ready(session: Any) -> bool:
-    """frida hook 是否就绪（★#7）。JS 装完 hook 后 send fxapk_hook_ready，落进
-    ``session._fxapk_hook_ready``：
+def _frida_hook_status(session: Any) -> str:
+    """frida hook 就绪状态（★#7，三态不混淆"已确认"与"未确认"）。JS 装完 hook 在 Java.perform
+    内 send fxapk_hook_ready，落进 ``session._fxapk_hook_ready``：
 
-    - 收到 True  → hook 真装上（返回 True）；
-    - 收到 False → ART/Java 不可用或异常（反检测样本假就绪，返回 False，据此诚实降级）；
-    - 未收到（None，时序未到/无该字段）→ 退化为"会话存活即视为就绪"（返回 session is not None），
-      避免因异步时序漏报。绝不抛。
+    - ``"confirmed"``        收到 True —— hook 真装上；
+    - ``"java-unavailable"`` 收到 False —— ART/Java 不可用或异常（反检测样本假就绪，据此诚实降级）；
+    - ``"unconfirmed"``      会话存活但未收到信号 —— 抓包窗内 JS 没跑到/时序未到（不当已确认）；
+    - ``"none"``             无会话。
+
+    绝不抛。``hook_ready`` 布尔只在 ``"confirmed"`` 为真；``unconfirmed``/``java-unavailable`` 由
+    调用方附告警，避免把"未确认"上报成"已确认"掩盖 hook 没装上。
     """
     if session is None:
-        return False
+        return "none"
     try:
         flag = getattr(session, "_fxapk_hook_ready", None)
-        if isinstance(flag, dict) and flag.get("ready") is not None:
-            return bool(flag["ready"])
+        if isinstance(flag, dict):
+            ready = flag.get("ready")
+            if ready is True:
+                return "confirmed"
+            if ready is False:
+                return "java-unavailable"
     except Exception:
-        logger.debug("[capture] 读 hook_ready 标志异常（退化为会话存活）", exc_info=True)
-    return True  # 未收到显式信号 → 退化：会话已建立即视为就绪（向后兼容，不因时序漏报）
+        logger.debug("[capture] 读 hook_ready 标志异常", exc_info=True)
+    return "unconfirmed"
 
 
 def _frida_session_alive(session: Any) -> bool:
