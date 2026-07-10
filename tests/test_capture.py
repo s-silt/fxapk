@@ -1379,6 +1379,32 @@ def test_version_unreadable_enumerate_acceptance(monkeypatch):
     assert capture._check_frida_version_match() == (True, "")
 
 
+def test_frida_hook_ready_reads_explicit_signal():
+    """★ P1(#7)：_frida_hook_ready 读 JS 显式回传的 fxapk_hook_ready——True/False 如实；
+    未收到→退化会话存活；None session→False。"""
+
+    class _S:
+        pass
+
+    assert capture._frida_hook_ready(None) is False
+    s = _S()
+    s._fxapk_hook_ready = {"ready": True}
+    assert capture._frida_hook_ready(s) is True
+    s._fxapk_hook_ready = {"ready": False}
+    assert capture._frida_hook_ready(s) is False  # ART/Java 不可用/假就绪 → 诚实 False
+    s._fxapk_hook_ready = {"ready": None}
+    assert capture._frida_hook_ready(s) is True  # 未收到显式信号 → 退化会话存活
+    assert capture._frida_hook_ready(_S()) is True  # 无标志 → 退化
+
+
+def test_frida_hook_ready_emitter_in_source():
+    """★ P1(#7)：hook-ready emitter 已定义、在 Java.perform 内 send fxapk_hook_ready（catch Java 不可用）。"""
+    js = capture._FRIDA_HOOK_READY_JS
+    assert "fxapk_hook_ready" in js
+    assert "Java.perform" in js
+    assert "java-unavailable" in js
+
+
 def test_version_match_true_when_equal(monkeypatch):
     monkeypatch.setattr(capture.provision, "host_frida_version", lambda: "16.5.9")
     monkeypatch.setattr(capture, "_device_frida_version", lambda serial=None: "16.5.9")
@@ -2348,10 +2374,10 @@ def test_frida_session_registers_all_channels_via_table(monkeypatch):
         sys.modules, "frida",
         types.SimpleNamespace(get_usb_device=lambda timeout=None: _FakeDevice()),
     )
-    # 8 个 sink 全给非 None → crypto 主通道 + 7 路表通道 = 8 次 on()。
+    # 8 个 sink 全给非 None → hook_ready 通道(★#7) + crypto 主通道 + 7 路表通道。
     sinks = [[] for _ in range(8)]
     capture._start_frida_session("com.x", *sinks)
-    assert len(on_calls) == 1 + len(capture.CHANNELS)
+    assert len(on_calls) == 2 + len(capture.CHANNELS)  # +1 = hook_ready handler
 
 
 # ---------------------------------------------------------------------------
