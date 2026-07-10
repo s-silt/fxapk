@@ -817,7 +817,7 @@ def test_capture_out_default_resolves_absolute(monkeypatch):
     monkeypatch.setattr(tools, "kill_adb_server", lambda: None)
     seen: dict[str, Any] = {}
 
-    def _fake_run(package: str, *, out: str, duration: int) -> dict[str, Any]:
+    def _fake_run(package: str, *, out: str, duration: int, serial=None, mode="both") -> dict[str, Any]:
         seen["out"] = out
         return _done_result()
 
