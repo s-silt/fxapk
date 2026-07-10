@@ -632,7 +632,7 @@ def _capture(
         "reverse_set": bool(reverse_set),
         "floor_started": floor_handle is not None,
         "floor_pulled": floor_pcap is not None,
-        "hook_ready": frida_session is not None,  # frida-core 会话建立（精确 hook 就绪属 P1）
+        "hook_ready": _frida_hook_ready(frida_session),  # ★#7：JS 显式回传 fxapk_hook_ready 确认 hook 真装上
         "mitm_bytes": mitm_bytes,
         "endpoint_total": len(endpoints),
         "warnings": list(warnings),
@@ -819,6 +819,20 @@ CHANNELS: tuple[tuple[str, str, Any], ...] = (
     ("remote_control", cryptohook.ACCESSIBILITY_MSG_TYPE, cryptohook.normalize_remote_control_event),
 )
 
+# ★#7 hook readiness：所有 hook 装完后由 JS 显式回传 fxapk_hook_ready——在 Java.perform 内确认 ART
+# 可用（catch 反检测样本下 script.load 成功但实际 "Java is not defined"/hook 没装上的假就绪）。
+_FRIDA_HOOK_READY_JS = (
+    ";(function () {"
+    "  try {"
+    "    if (typeof Java !== 'undefined' && Java.available) {"
+    "      Java.perform(function () { send({ fxapk_hook_ready: true }); });"
+    "    } else {"
+    "      send({ fxapk_hook_ready: false, reason: 'java-unavailable' });"
+    "    }"
+    "  } catch (e) { send({ fxapk_hook_ready: false, reason: String(e) }); }"
+    "})();"
+)
+
 
 def _start_frida_session(
     package: str,
@@ -881,6 +895,8 @@ def _start_frida_session(
         + cryptohook.FRIDA_CLIPBOARD_HOOK_JS
         + "\n"
         + cryptohook.FRIDA_ACCESSIBILITY_HOOK_JS
+        + "\n"
+        + _FRIDA_HOOK_READY_JS  # ★#7：所有 hook 装完后显式 send hook_ready（在 Java.perform 内确认 ART 可用）
     )
     device_handle: Any = None
     pid: Any = None
@@ -899,6 +915,24 @@ def _start_frida_session(
         except Exception:
             logger.debug("[capture] 无法在会话上寄存 device 句柄（忽略，liveness 退化为仅看 detached）", exc_info=True)
         script = session.create_script(source)
+        # ★#7：hook readiness 通道——JS 装完 hook 后 send fxapk_hook_ready，异步落进标志容器，
+        #   供收尾时读（capture_signals["hook_ready"]），把"会话建立"细化为"hook 真装上"。
+        hook_ready: dict[str, Any] = {"ready": None}
+
+        def _hook_ready_handler(message: Any, _data: Any) -> None:
+            try:
+                if isinstance(message, dict) and message.get("type") == "send":
+                    payload = message.get("payload")
+                    if isinstance(payload, dict) and "fxapk_hook_ready" in payload:
+                        hook_ready["ready"] = bool(payload.get("fxapk_hook_ready"))
+            except Exception:
+                logger.debug("[capture] hook_ready 消息处理异常（忽略）", exc_info=True)
+
+        script.on("message", _hook_ready_handler)
+        try:
+            session._fxapk_hook_ready = hook_ready  # type: ignore[attr-defined]
+        except Exception:
+            logger.debug("[capture] 无法在会话寄存 hook_ready 标志（忽略）", exc_info=True)
         # crypto 主通道（含 error 诊断）单独走 make_message_handler。
         script.on("message", cryptohook.make_message_handler(sink))
         # 其余 7 路运行时事件通道表驱动注册（sink 顺序与 CHANNELS 严格对齐；None 则跳过该通道）。
@@ -1508,6 +1542,26 @@ def _budget_remaining(started_at: float, total_budget_sec: int) -> float:
 # ---------------------------------------------------------------------------
 # ② frida-core 会话 liveness（治默认路径假成功：resume 后进程秒退却报成功）
 # ---------------------------------------------------------------------------
+
+
+def _frida_hook_ready(session: Any) -> bool:
+    """frida hook 是否就绪（★#7）。JS 装完 hook 后 send fxapk_hook_ready，落进
+    ``session._fxapk_hook_ready``：
+
+    - 收到 True  → hook 真装上（返回 True）；
+    - 收到 False → ART/Java 不可用或异常（反检测样本假就绪，返回 False，据此诚实降级）；
+    - 未收到（None，时序未到/无该字段）→ 退化为"会话存活即视为就绪"（返回 session is not None），
+      避免因异步时序漏报。绝不抛。
+    """
+    if session is None:
+        return False
+    try:
+        flag = getattr(session, "_fxapk_hook_ready", None)
+        if isinstance(flag, dict) and flag.get("ready") is not None:
+            return bool(flag["ready"])
+    except Exception:
+        logger.debug("[capture] 读 hook_ready 标志异常（退化为会话存活）", exc_info=True)
+    return True  # 未收到显式信号 → 退化：会话已建立即视为就绪（向后兼容，不因时序漏报）
 
 
 def _frida_session_alive(session: Any) -> bool:
