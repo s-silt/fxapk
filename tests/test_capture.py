@@ -320,12 +320,48 @@ def test_capture_proxy_ok_but_quiet_app_still_done(monkeypatch, tmp_path):
     monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
     monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
     monkeypatch.setattr(capture, "_adb_set_proxy", lambda serial=None: True)  # 代理起成功
+    monkeypatch.setattr(capture, "_adb_reverse", lambda serial=None: True)  # reverse 成 → MITM 通道通
 
     result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
     assert result["status"] == STATUS_DONE
     data = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
     assert data["capture_complete"] is True
     assert data["capture_signals"]["proxy_set"] is True
+    assert data["capture_signals"]["mitm_channel_ok"] is True
+
+
+def test_capture_proxy_up_but_reverse_fail_is_degraded(monkeypatch, tmp_path):
+    """★ 复审 P0：代理设了但 adb reverse 失败（设备代理指向死 loopback、MITM 通道不通）
+    + 无 floor + 0 端点 → degraded，不假成功。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_adb_set_proxy", lambda serial=None: True)  # 代理成
+    monkeypatch.setattr(capture, "_adb_reverse", lambda serial=None: False)  # reverse 失败
+    monkeypatch.setattr(capture, "_start_floor_pcap", lambda *a, **k: None)  # 无 floor
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+    assert result["status"] == STATUS_DEGRADED
+    data = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    assert data["capture_signals"]["mitm_channel_ok"] is False
+
+
+def test_capture_clears_proxy_even_when_set_unconfirmed(monkeypatch, tmp_path):
+    """★ 复审 P1：_adb_set_proxy 返回 False（读回未确认）时，finally 仍清代理——settings put
+    可能已生效，不把设备全局代理遗留成死的 127.0.0.1:8080。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_adb_set_proxy", lambda serial=None: False)  # 读回未确认
+    cleared = {"n": 0}
+    monkeypatch.setattr(capture, "_adb_clear_proxy", lambda serial=None: cleared.__setitem__("n", cleared["n"] + 1))
+
+    capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+    assert cleared["n"] == 1  # 尝试过写代理 → finally 仍清（不遗留死代理）
 
 
 def test_capture_exception_yields_error_and_cleans_up(monkeypatch, tmp_path):
