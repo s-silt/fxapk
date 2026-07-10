@@ -37,6 +37,7 @@ from typing import Any
 from apkscan.core import device, infra, tools
 from apkscan.core.models import Endpoint, Evidence
 from apkscan.dynamic import (
+    STATUS_DEGRADED,
     STATUS_DONE,
     STATUS_ERROR,
     STATUS_SKIPPED,
@@ -345,6 +346,7 @@ def _capture(
     # ★ launch-only 抓不到，多数需引导式人工动态——多数情况下此 sink 为空，属预期。
     remote_control_events: list[dict[str, Any]] = []
     proxy_set = False
+    proxy_attempted = False  # 是否尝试过写设备代理（读回未确认也要在 finally 清理，避免遗留死代理）
     reverse_set = False
     # 抓包加固产生的告警（CA 未装系统库 / frida 版本不一致），收尾并入 reason，
     # 不假成功——但都不阻断抓包（HTTP 仍可抓；frida 不匹配仍尝试注入）。
@@ -406,6 +408,12 @@ def _capture(
         reverse_set = _adb_reverse(serial)
         if reverse_set:
             playbook.append(f"adb reverse tcp:{_PROXY_PORT} tcp:{_PROXY_PORT}")
+        else:
+            # 无 reverse：设备代理指向本机 loopback 却无反向端口 → MITM 通道不可用（floor 兜底）。
+            warnings.append(
+                f"adb reverse tcp:{_PROXY_PORT} 失败——设备代理指向 loopback 但无反向端口，MITM 通道可能不可用"
+            )
+        proxy_attempted = True
         proxy_set = _adb_set_proxy(serial)
         if proxy_set:
             playbook.append(f"adb 设全局代理 {_PROXY_HOST}:{_PROXY_PORT}")
@@ -544,7 +552,9 @@ def _capture(
                 playbook.append(f"① floor 保底：带外 pcap 已停并落盘 {floor_pcap.name}")
             else:
                 playbook.append("① floor 保底：带外 pcap 收尾未取到（降级，见日志）")
-        if proxy_set:
+        if proxy_attempted:
+            # ★P1：只要尝试过写代理就清理——即便读回未确认（settings put 可能已生效），
+            # 也避免把设备全局代理遗留成死的 127.0.0.1:8080。
             _adb_clear_proxy(serial)
             playbook.append("还原：清除设备全局代理")
         if reverse_set:
@@ -587,9 +597,36 @@ def _capture(
     # C5b：额外抽出报文体（请求/响应），供 merge 阶段对 {data,timestamp} 信封解密。
     # 失败/缺 mitmproxy 包 → 空列表（不影响端点提取与报告写出）。
     messages = _parse_messages(flows_file)
-    # 抓包失败（mitmdump 没起来 / 编排异常）时，产出的 runtime_report 基于不完整/未抓全
-    # 的流量，必须在报告里标明，避免它伪装成正常结果被下游误用。
-    capture_ok = result["status"] != STATUS_ERROR
+    # P0-4：结构化采集信号——判这次抓包哪路成了。没有 error 但也没取到任何可用证据
+    # （代理未起 / MITM 0 字节 / floor 未拉回 / 端点 0）时降为 degraded，杜绝"假成功"。
+    try:
+        mitm_bytes = flows_file.stat().st_size if flows_file.exists() else 0
+    except OSError:
+        mitm_bytes = 0
+    capture_signals: dict[str, Any] = {
+        "proxy_set": bool(proxy_set),
+        "reverse_set": bool(reverse_set),
+        "floor_started": floor_handle is not None,
+        "floor_pulled": floor_pcap is not None,
+        "hook_ready": frida_session is not None,  # frida-core 会话建立（精确 hook 就绪属 P1）
+        "mitm_bytes": mitm_bytes,
+        "endpoint_total": len(endpoints),
+        "warnings": list(warnings),
+    }
+    # 降级判定：仅当**没有任何证据路径成立**——代理未起 且 无 floor pcap 且 MITM 0 字节 且 端点 0
+    # ——才降为 degraded（总失败组合）。只要代理起了 / floor 拉回了 / 抓到端点，即便 app 安静
+    # （0 flows）仍算 done（不阻断，降级细节走 reason/warnings，保持既有契约）。
+    # ★P0：MITM 通道需 代理【且】reverse 都成——只 proxy_set 不够（reverse 失败时设备代理
+    # 指向死的本机 loopback、MITM 不可用，等价无证据路径）。
+    mitm_channel_ok = proxy_set and reverse_set
+    capture_signals["mitm_channel_ok"] = mitm_channel_ok
+    evidence_path_ok = mitm_channel_ok or floor_pcap is not None or len(endpoints) > 0 or mitm_bytes > 0
+    if result["status"] == STATUS_DONE and not evidence_path_ok:
+        result["status"] = STATUS_DEGRADED
+        result["reason"] = "抓包降级：无任何证据路径（MITM 通道未通[代理/reverse]、无 floor pcap、MITM 0 字节、端点 0）"
+        capture_signals["degraded"] = True
+    # 抓包失败/降级时，产出的 runtime_report 基于不完整/未抓全的流量，必须标明，避免伪装成正常结果。
+    capture_ok = result["status"] == STATUS_DONE
     # P0/P1：把活体事件（去掉 sink 上限触发的 _capped 占位）一并写进 runtime_report.json。
     def _clean(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [e for e in events if not e.get("_capped")]
@@ -609,6 +646,7 @@ def _capture(
         clipboard_events=_clean(clipboard_events),
         remote_control_events=_clean(remote_control_events),
         budget_exceeded=budget_exceeded,
+        capture_signals=capture_signals,
     )
     report_paths = [report_path] if report_path else []
 
@@ -961,22 +999,59 @@ def _device_frida_version(serial: str | None = None) -> str:
     return match.group(1)
 
 
+def _frida_device_reachable(serial: str | None = None) -> bool | None:
+    """用 frida-core（``import frida``）连设备并 ``enumerate_processes()`` 实测验收 frida 是否真可用。
+
+    Returns: ``True``=可枚举进程（frida 就绪）/ ``False``=连上设备但枚举失败（frida-server 未起/
+    版本不配）/ ``None``=frida-core 不可用或连不上设备（无法判定）。best-effort、绝不抛。
+    """
+    try:
+        import frida  # type: ignore[import-not-found]  # lazy：缺库时无法验收
+    except Exception:
+        return None
+    try:
+        dev = (
+            frida.get_device(serial, timeout=_FRIDA_USB_TIMEOUT)
+            if serial
+            else frida.get_usb_device(timeout=_FRIDA_USB_TIMEOUT)
+        )
+    except Exception:
+        logger.debug("[capture] frida 连设备失败，无法枚举验收", exc_info=True)
+        return None
+    try:
+        dev.enumerate_processes()
+        return True
+    except Exception:
+        logger.debug("[capture] frida enumerate_processes 失败（frida-server 未起/版本不配）", exc_info=True)
+        return False
+
+
 def _check_frida_version_match(serial: str | None = None) -> tuple[bool, str]:
     """校验主机 frida 与设备 frida-server 版本是否一致（best-effort，不阻断注入）。
 
     Returns:
-        (ok, msg)。一致 / 无法比对（任一版本取不到）→ (True, '')；
-        明确不一致 → (False, 警告文案)。版本不一致时注入可能失败，但 capture 设计为
-        仍尝试注入，仅把告警写入 playbook/reason，由 _capture 决定如何呈现。
+        (ok, msg)。一致 → (True, '')；明确不一致 → (False, 警告文案)。
+        ★P1(#6)：任一版本取不到时不再静默按通过（PATH 混用/frida-server 未起会掩盖真不配），
+        改用 ``_frida_device_reachable`` 实测 ``enumerate_processes`` 验收：可枚举→静默通过；
+        连上但枚举失败→(False, 警告)；无法验收(缺 frida-core/连不上)→不阻断但只 debug。
     """
     host_ver = provision.host_frida_version()
     dev_ver = _device_frida_version(serial)
-    # 任一取不到 → 无法比对，按"通过"处理（只校在跑，不阻断）。
+    # 任一取不到 → 版本不可比对：用 frida 实测枚举验收，而非静默通过。
     if not host_ver or not dev_ver:
+        reachable = _frida_device_reachable(serial)
+        if reachable is False:
+            msg = (
+                "frida 版本无法比对，且设备进程枚举验收失败"
+                "（frida-server 可能未起或与主机版本不配），注入可能失败"
+            )
+            logger.warning("[capture] %s", msg)
+            return False, msg
         logger.debug(
-            "[capture] frida 版本无法比对（主机=%r 设备=%r），跳过版本校验",
+            "[capture] frida 版本无法比对（主机=%r 设备=%r），枚举验收=%r，不阻断",
             host_ver,
             dev_ver,
+            reachable,
         )
         return True, ""
     if host_ver != dev_ver:
@@ -994,15 +1069,31 @@ def _check_frida_version_match(serial: str | None = None) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 
 
+def _proxy_readback(serial: str | None = None) -> str:
+    """读回设备全局 HTTP 代理值（``settings get global http_proxy``，去空白）；取不到/未设返回空串。"""
+    out = _adb_capture(["shell", "settings", "get", "global", "http_proxy"], serial)
+    val = (out or "").strip()
+    return "" if val in ("", "null") else val
+
+
 def _adb_set_proxy(serial: str | None = None) -> bool:
-    """adb shell settings put global http_proxy 127.0.0.1:8080。成功返回 True。"""
-    ok = _adb(
-        ["shell", "settings", "put", "global", "http_proxy", f"{_PROXY_HOST}:{_PROXY_PORT}"],
-        serial,
-    )
-    if not ok:
-        logger.warning("[capture] 设置设备全局代理失败（不阻断抓包）")
-    return ok
+    """设设备全局 HTTP 代理并**读回确认**；普通 ``settings put`` 未生效则 root 兜底再读回。
+
+    ★P1：只有读回确认代理值 == 目标才返回 True——``settings put`` 返回 0 不代表真生效
+    （部分设备被策略拦 / 需 root）。返回 False 即明确降级，供 P0-4 capture_signals 如实标注，
+    不谎称 MITM 就绪。best-effort、不阻断抓包（floor pcap 仍可保底）。
+    """
+    target = f"{_PROXY_HOST}:{_PROXY_PORT}"
+    _adb(["shell", "settings", "put", "global", "http_proxy", target], serial)
+    if _proxy_readback(serial) == target:
+        return True
+    # 普通 put 未读回生效 → root 兜底（部分设备 settings 需 root / 或被策略限制）。
+    provision._adb_root_shell(f"settings put global http_proxy {target}", serial)
+    if _proxy_readback(serial) == target:
+        logger.info("[capture] 设备全局代理经 root 兜底设置成功（读回确认 %s）", target)
+        return True
+    logger.warning("[capture] 设置设备全局代理失败/读回未确认（降级：MITM 可能不可用）")
+    return False
 
 
 def _adb_clear_proxy(serial: str | None = None) -> None:
@@ -1500,32 +1591,81 @@ def _start_floor_pcap(
         return None
 
 
+# 有效 pcap/pcapng 文件的起始 magic（判本地 floor.pcap 是否真拉回、可解析）。
+_PCAP_MAGICS = (
+    b"\xa1\xb2\xc3\xd4",
+    b"\xa1\xb2\x3c\x4d",
+    b"\xd4\xc3\xb2\xa1",
+    b"\x4d\x3c\xb2\xa1",
+    b"\x0a\x0d\x0d\x0a",
+)
+
+
+def _floor_pcap_valid(local: Path) -> bool:
+    """本地 floor.pcap 是否有效——size ≥ pcap 头 + 起始 magic 认得（拉回 0 字节/半截不算数）。"""
+    try:
+        if not local.is_file() or local.stat().st_size < 24:
+            return False
+        with local.open("rb") as fh:
+            return fh.read(4) in _PCAP_MAGICS
+    except OSError:
+        return False
+
+
 def _stop_floor_pcap(handle: _FloorPcap, out_path: Path) -> Path | None:
-    """停设备侧 tcpdump、adb pull 落盘 ``out/floor.pcap``、清设备残留。返回本地路径或 None。绝不抛。"""
+    """停设备侧 tcpdump、adb pull 落盘 ``out/floor.pcap``、**仅在本地有效后**才清设备残留。绝不抛。
+
+    ★证据防丢（P0-3）：pull 失败 / 本地为空 / magic 不认（不可解析）时【绝不删除远端 pcap】——
+    保留在设备侧供手动重拉，只有本地文件 size 有效且 magic 认得后才 rm 远端 pcap。
+    """
     try:
         serial = handle.serial
         # 1) 按 PID 精确 SIGINT（root）令 tcpdump flush 落盘并退出（-INT 留全 pcap 尾）；拿不到
         #    PID 再退 pkill 兜底。前置 `[ "$(id -u)" = 0 ] || exit 1` 守卫：非 root 的 adb shell 路径
-        #    直接退出，逼 _adb_root_shell 走 su（否则非 root 的 pkill 杀不动 root tcpdump 会打印
-        #    Operation not permitted——真机实测虽不留孤儿、但日志吓人，codex 复测建议优化）。
+        #    直接退出，逼 _adb_root_shell 走 su。
         provision._adb_root_shell(
             '[ "$(id -u)" = 0 ] || exit 1; '
             f"kill -INT $(cat {handle.pid_path} 2>/dev/null) 2>/dev/null || pkill -INT tcpdump",
             serial,
         )
         _wait(_FLOOR_FLUSH_GRACE)  # 给 flush + 落盘一点时间
-        # 2) adb pull 落盘。
+        # 2) adb pull 到**唯一临时文件**：要求 _adb 返回成功【且】临时文件 magic/size 有效——
+        #    ★防旧证据误判（P0-3 复审）：若直接拉到固定 floor.pcap，本轮 pull 失败不覆盖旧文件时，
+        #    旧 floor.pcap 会被当本轮成功、随后误删本轮远端证据。临时文件+校验通过才原子替换。
         local = out_path / _FLOOR_LOCAL_NAME
-        if _adb(["pull", handle.remote_path, str(local)], serial) and local.is_file():
-            logger.info(
-                "[capture] floor：带外 pcap 已拉回 %s（%d 字节）", local, local.stat().st_size
-            )
-            pulled: Path | None = local
-        else:
-            logger.warning("[capture] floor：带外 pcap 拉回失败/为空（降级）")
-            pulled = None
-        provision._adb_root_shell(f"rm -f {handle.remote_path} {handle.pid_path}", serial)  # 3) 清残留
-        return pulled
+        tmp = out_path / (_FLOOR_LOCAL_NAME + ".tmp")
+        try:
+            tmp.unlink(missing_ok=True)  # 清掉上一轮可能残留的临时文件
+        except OSError:
+            logger.debug("[capture] floor：清临时文件失败（忽略）", exc_info=True)
+        pulled_ok = _adb(["pull", handle.remote_path, str(tmp)], serial) and _floor_pcap_valid(tmp)
+        if not pulled_ok:  # 首拉失败/无效 → chmod 644 兜底再拉（root tcpdump 写的文件常 0600 拉不动）
+            provision._adb_root_shell(f"chmod 644 {handle.remote_path} 2>/dev/null", serial)
+            pulled_ok = _adb(["pull", handle.remote_path, str(tmp)], serial) and _floor_pcap_valid(tmp)
+        # 3) 本轮确实拉到有效文件才原子替换 floor.pcap + 清远端；否则保留远端供手动重拉（绝不删证据）。
+        if pulled_ok:
+            try:
+                os.replace(tmp, local)
+            except OSError:
+                logger.exception("[capture] floor：替换 floor.pcap 失败（保留远端 pcap）")
+                provision._adb_root_shell(f"rm -f {handle.pid_path}", serial)
+                return None
+            logger.info("[capture] floor：带外 pcap 已拉回 %s（%d 字节）", local, local.stat().st_size)
+            provision._adb_root_shell(f"rm -f {handle.remote_path} {handle.pid_path}", serial)
+            return local
+        try:
+            tmp.unlink(missing_ok=True)  # 失败的临时文件不留
+        except OSError:
+            logger.debug("[capture] floor：清失败临时文件失败（忽略）", exc_info=True)
+        logger.warning(
+            "[capture] floor：带外 pcap 拉回失败/为空/不可解析——【已保留设备侧 %s 未删除】，"
+            "可手动 `adb -s %s pull %s`；仅清 pidfile。",
+            handle.remote_path,
+            serial,
+            handle.remote_path,
+        )
+        provision._adb_root_shell(f"rm -f {handle.pid_path}", serial)  # 只清 pidfile，保留远端 pcap
+        return None
     except Exception:
         logger.exception("[capture] floor：收尾设备侧 tcpdump 异常（忽略）")
         return None
@@ -2018,6 +2158,7 @@ def _write_runtime_report(
     clipboard_events: list[dict[str, Any]] | None = None,
     remote_control_events: list[dict[str, Any]] | None = None,
     budget_exceeded: bool = False,
+    capture_signals: dict[str, Any] | None = None,
 ) -> str:
     """把运行时端点写成 out/runtime_report.json（复用 report.json 的序列化）。
 
@@ -2036,6 +2177,9 @@ def _write_runtime_report(
         "package_name": package,
         "source": "runtime",
         "capture_complete": complete,
+        # P0-4：结构化采集信号（proxy_set/floor_started/floor_pulled/hook_ready/mitm_bytes/
+        # endpoint_total/degraded），供下游/人工判这次抓包哪路成了、哪路降级，杜绝"假成功"。
+        "capture_signals": dict(capture_signals or {}),
         # ③ 时间盒：采集因超总预算被缩短/中止 → True（下游据此知端点/事件可能不全）。
         "budget_exceeded": budget_exceeded,
         "endpoint_total": len(endpoints),

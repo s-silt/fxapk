@@ -26,6 +26,7 @@ import pytest
 from apkscan.core import device
 from apkscan.core.models import Endpoint, Evidence
 from apkscan.dynamic import (
+    STATUS_DEGRADED,
     STATUS_DONE,
     STATUS_ERROR,
     STATUS_SKIPPED,
@@ -287,6 +288,80 @@ def test_capture_done_no_flows_still_done(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 # 异常 → error，且仍清理子进程
 # ---------------------------------------------------------------------------
+
+
+def test_capture_total_failure_is_degraded_not_fake_done(monkeypatch, tmp_path):
+    """★ P0-4：代理未起 + 无 floor + 0 端点 + MITM 0 字节（总失败组合）→ status=degraded、
+    capture_complete=False、capture_signals 记实——不得伪装成 done。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_adb_set_proxy", lambda serial=None: False)  # 代理起不来
+    monkeypatch.setattr(capture, "_start_floor_pcap", lambda *a, **k: None)  # 无 floor pcap
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+
+    assert result["status"] == STATUS_DEGRADED
+    assert "证据路径" in result["reason"]
+    data = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    assert data["capture_complete"] is False
+    sig = data["capture_signals"]
+    assert sig["proxy_set"] is False and sig["floor_pulled"] is False
+    assert sig["degraded"] is True
+
+
+def test_capture_proxy_ok_but_quiet_app_still_done(monkeypatch, tmp_path):
+    """★ P0-4 反向护栏：代理起了但 app 安静（0 flows/端点）→ 仍 done（证据路径成立），不误降级。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_adb_set_proxy", lambda serial=None: True)  # 代理起成功
+    monkeypatch.setattr(capture, "_adb_reverse", lambda serial=None: True)  # reverse 成 → MITM 通道通
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+    assert result["status"] == STATUS_DONE
+    data = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    assert data["capture_complete"] is True
+    assert data["capture_signals"]["proxy_set"] is True
+    assert data["capture_signals"]["mitm_channel_ok"] is True
+
+
+def test_capture_proxy_up_but_reverse_fail_is_degraded(monkeypatch, tmp_path):
+    """★ 复审 P0：代理设了但 adb reverse 失败（设备代理指向死 loopback、MITM 通道不通）
+    + 无 floor + 0 端点 → degraded，不假成功。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_adb_set_proxy", lambda serial=None: True)  # 代理成
+    monkeypatch.setattr(capture, "_adb_reverse", lambda serial=None: False)  # reverse 失败
+    monkeypatch.setattr(capture, "_start_floor_pcap", lambda *a, **k: None)  # 无 floor
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+    assert result["status"] == STATUS_DEGRADED
+    data = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    assert data["capture_signals"]["mitm_channel_ok"] is False
+
+
+def test_capture_clears_proxy_even_when_set_unconfirmed(monkeypatch, tmp_path):
+    """★ 复审 P1：_adb_set_proxy 返回 False（读回未确认）时，finally 仍清代理——settings put
+    可能已生效，不把设备全局代理遗留成死的 127.0.0.1:8080。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_adb_set_proxy", lambda serial=None: False)  # 读回未确认
+    cleared = {"n": 0}
+    monkeypatch.setattr(capture, "_adb_clear_proxy", lambda serial=None: cleared.__setitem__("n", cleared["n"] + 1))
+
+    capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+    assert cleared["n"] == 1  # 尝试过写代理 → finally 仍清（不遗留死代理）
 
 
 def test_capture_exception_yields_error_and_cleans_up(monkeypatch, tmp_path):
@@ -1189,13 +1264,32 @@ def test_existing_done_test_still_passes_with_new_hooks_mocked(monkeypatch, tmp_
 
 
 def test_version_match_returns_true_when_either_version_missing(monkeypatch):
-    """任一版本取不到 → 无法比对 → (True, '')（只校在跑，不阻断）。"""
+    """任一版本取不到 → 无法比对：枚举验收无法判定(None)/可枚举(True) → (True, '')（不阻断）。"""
+    # 无法验收(缺 frida-core/连不上) → 不阻断（且不触发真 frida USB 扫描）。
+    monkeypatch.setattr(capture, "_frida_device_reachable", lambda serial=None: None)
     monkeypatch.setattr(capture.provision, "host_frida_version", lambda: "")
     monkeypatch.setattr(capture, "_device_frida_version", lambda serial=None: "16.5.9")
     assert capture._check_frida_version_match() == (True, "")
 
     monkeypatch.setattr(capture.provision, "host_frida_version", lambda: "16.5.9")
     monkeypatch.setattr(capture, "_device_frida_version", lambda serial=None: "")
+    assert capture._check_frida_version_match() == (True, "")
+
+
+def test_version_unreadable_enumerate_acceptance(monkeypatch):
+    """★ P1(#6)：版本读不到时用 frida enumerate_processes 实测验收——枚举失败→(False, 警告)、
+    可枚举→(True, '')、无法验收(None)→(True, '')（不静默按通过掩盖真不配）。"""
+    monkeypatch.setattr(capture.provision, "host_frida_version", lambda: "")
+    monkeypatch.setattr(capture, "_device_frida_version", lambda serial=None: "")
+    # 连上但枚举失败 → 明确警告
+    monkeypatch.setattr(capture, "_frida_device_reachable", lambda serial=None: False)
+    ok, msg = capture._check_frida_version_match()
+    assert ok is False and "枚举验收失败" in msg
+    # 可枚举 → 真可用、静默通过
+    monkeypatch.setattr(capture, "_frida_device_reachable", lambda serial=None: True)
+    assert capture._check_frida_version_match() == (True, "")
+    # 无法验收 → 不阻断
+    monkeypatch.setattr(capture, "_frida_device_reachable", lambda serial=None: None)
     assert capture._check_frida_version_match() == (True, "")
 
 
@@ -1439,6 +1533,11 @@ def test_adb_proxy_reverse_helpers_thread_serial(monkeypatch):
     """_adb_set_proxy/_adb_reverse/_adb_clear_proxy/_adb_remove_reverse 把 serial 透传给 _adb。"""
     seen: list[tuple[list[str], str | None]] = []
     monkeypatch.setattr(capture, "_adb", lambda extra, serial=None: seen.append((extra, serial)) or True)
+    # 代理读回确认（避免真 adb subprocess + 不走 root 兜底），返回目标值 = 已生效。
+    monkeypatch.setattr(
+        capture, "_adb_capture",
+        lambda extra, serial=None: f"{capture._PROXY_HOST}:{capture._PROXY_PORT}",
+    )
 
     capture._adb_set_proxy("emulator-5554")
     capture._adb_clear_proxy("emulator-5554")
@@ -1446,7 +1545,28 @@ def test_adb_proxy_reverse_helpers_thread_serial(monkeypatch):
     capture._adb_remove_reverse("emulator-5554")
 
     assert all(s == "emulator-5554" for _, s in seen)
-    assert len(seen) == 4
+    assert len(seen) == 4  # 每个 helper 各 1 次 _adb（set_proxy 读回确认后不走 root 兜底）
+
+
+def test_adb_set_proxy_requires_readback_confirmation(monkeypatch):
+    """★ P1(#9)：settings put 返回成功但读回未生效 → root 兜底；仍未确认 → 返回 False（明确降级，
+    不谎称 MITM 就绪）。读回确认目标值才 True。"""
+    monkeypatch.setattr(capture, "_adb", lambda extra, serial=None: True)  # put 总返回 0
+    root_calls: list = []
+    monkeypatch.setattr(
+        capture.provision, "_adb_root_shell",
+        lambda cmd, serial=None: (root_calls.append(cmd), True)[1],
+    )
+    target = f"{capture._PROXY_HOST}:{capture._PROXY_PORT}"
+
+    # 1) 读回始终 "null"（未生效）→ 走 root 兜底、仍未确认 → False
+    monkeypatch.setattr(capture, "_adb_capture", lambda extra, serial=None: "null")
+    assert capture._adb_set_proxy("emulator-5554") is False
+    assert any("settings put global http_proxy" in c for c in root_calls)  # root 兜底被调
+
+    # 2) 读回确认目标值 → True（且不需 root 兜底）
+    monkeypatch.setattr(capture, "_adb_capture", lambda extra, serial=None: target + "\n")
+    assert capture._adb_set_proxy("emulator-5554") is True
 
 
 def test_device_frida_version_uses_dash_s(monkeypatch):
@@ -2300,6 +2420,67 @@ def test_stop_floor_pcap_none_on_pull_fail(monkeypatch, tmp_path):
         remote_path="/data/local/tmp/x.pcap", pid_path="/data/local/tmp/x.pid", serial=None
     )
     assert capture._stop_floor_pcap(handle, tmp_path) is None
+
+
+def test_stop_floor_pcap_pull_failure_preserves_remote_evidence(monkeypatch, tmp_path):
+    """★ P0-3 证据防丢：pull 失败/本地无效时【绝不删除远端 pcap】——保留供手动重拉，只清 pidfile。"""
+    monkeypatch.setattr(capture, "_wait", lambda *a, **k: None)
+    root_cmds: list = []
+    monkeypatch.setattr(
+        capture.provision, "_adb_root_shell",
+        lambda cmd, serial=None: (root_cmds.append(cmd), True)[1],
+    )
+    # pull 始终失败（不写本地文件）。
+    monkeypatch.setattr(capture, "_adb", lambda extra, serial=None: extra[0] != "pull")
+    handle = capture._FloorPcap(
+        remote_path="/data/local/tmp/x.pcap", pid_path="/data/local/tmp/x.pid", serial=None
+    )
+    assert capture._stop_floor_pcap(handle, tmp_path) is None
+    rm_cmds = [c for c in root_cmds if c.startswith("rm -f")]
+    assert not any("x.pcap" in c for c in rm_cmds)  # 远端 pcap 未被删除
+    assert any("x.pid" in c for c in rm_cmds)  # 仅清 pidfile
+
+
+def test_stop_floor_pcap_empty_local_not_deleted(monkeypatch, tmp_path):
+    """★ P0-3：pull 返回成功但落地 0 字节/坏 magic（MITM 空/半截）→ 视为无效、保留远端、返回 None。"""
+    monkeypatch.setattr(capture, "_wait", lambda *a, **k: None)
+    root_cmds: list = []
+    monkeypatch.setattr(
+        capture.provision, "_adb_root_shell",
+        lambda cmd, serial=None: (root_cmds.append(cmd), True)[1],
+    )
+
+    def fake_adb(extra, serial=None):
+        if extra and extra[0] == "pull":
+            Path(extra[2]).write_bytes(b"")  # 0 字节
+        return True
+
+    monkeypatch.setattr(capture, "_adb", fake_adb)
+    handle = capture._FloorPcap(
+        remote_path="/data/local/tmp/x.pcap", pid_path="/data/local/tmp/x.pid", serial=None
+    )
+    assert capture._stop_floor_pcap(handle, tmp_path) is None
+    assert not any("x.pcap" in c for c in root_cmds if c.startswith("rm -f"))
+
+
+def test_stop_floor_pcap_stale_local_not_treated_as_success(monkeypatch, tmp_path):
+    """★ 复审#4：本地已有上一轮有效 floor.pcap，本轮 adb pull 失败（不覆盖）→ 不当本轮成功、
+    绝不删远端证据（改前：拉到固定 floor.pcap，旧文件校验通过被误判成功并删远端）。"""
+    monkeypatch.setattr(capture, "_wait", lambda *a, **k: None)
+    root_cmds: list = []
+    monkeypatch.setattr(
+        capture.provision, "_adb_root_shell",
+        lambda cmd, serial=None: (root_cmds.append(cmd), True)[1],
+    )
+    # 预置上一轮有效 floor.pcap（真 magic）。
+    (tmp_path / capture._FLOOR_LOCAL_NAME).write_bytes(b"\xa1\xb2\xc3\xd4" + b"\x00" * 40)
+    # 本轮 pull 全失败（不写 tmp 文件）。
+    monkeypatch.setattr(capture, "_adb", lambda extra, serial=None: extra[0] != "pull")
+    handle = capture._FloorPcap(
+        remote_path="/data/local/tmp/x.pcap", pid_path="/data/local/tmp/x.pid", serial=None
+    )
+    assert capture._stop_floor_pcap(handle, tmp_path) is None
+    assert not any("x.pcap" in c for c in root_cmds if c.startswith("rm -f"))  # 远端未删
 
 
 def test_floor_starts_before_proxy(monkeypatch, tmp_path):
