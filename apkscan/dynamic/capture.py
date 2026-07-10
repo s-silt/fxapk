@@ -143,6 +143,9 @@ Java.perform(function () {
 });
 """
 
+# ★#8 合法抓包模式（both=mitm+floor；floor-only/no-proxy=不设代理只带外抓；mitm-only=不起 floor）。
+_CAPTURE_MODES = frozenset({"both", "floor-only", "mitm-only", "no-proxy"})
+
 
 def run(
     package: str,
@@ -152,6 +155,7 @@ def run(
     out: str | None = None,
     serial: str | None = None,
     report: Any = None,
+    mode: str = "both",
 ) -> DynamicResult:
     """对运行中的目标应用做真机抓包，提取运行时端点。
 
@@ -181,6 +185,14 @@ def run(
     # 消费 decide_capture：把静态报告的规避信号落成引擎可读决策（绝不抛，坏 report→默认决策）。
     decision = decide_capture(report)
 
+    # ★#8 抓包模式 → mitm/floor 门控（both=默认；floor-only/no-proxy=不设代理只带外抓；mitm-only=不起
+    #    floor）。★须在能力探测之前算：floor-only 不该因缺 mitmproxy 被判缺前置。
+    if mode not in _CAPTURE_MODES:
+        logger.error("[capture] mode 取值非法：%r（可选 %s）", mode, "/".join(sorted(_CAPTURE_MODES)))
+        return empty_result(STATUS_ERROR, f"mode 取值非法：{mode!r}（可选 {'/'.join(sorted(_CAPTURE_MODES))}）")
+    use_mitm = mode not in ("floor-only", "no-proxy")
+    use_floor = mode != "mitm-only"
+
     # 防御：包名源自样本 manifest（不可信）。畸形包名直接拒绝，不下发到 frida/adb。
     if not device.is_valid_package(package):
         logger.error("[capture] 包名形态非法，拒绝抓包：%r", package)
@@ -194,8 +206,8 @@ def run(
         result = empty_result(STATUS_ERROR, f"无法创建输出目录 {out_dir}")
         return result
 
-    # --- 前置能力探测：缺任一 → skipped + 手册 ---------------------------
-    missing = _detect_missing(serial)
+    # --- 前置能力探测：缺任一 → skipped + 手册（floor-only 不要求 mitmproxy）------
+    missing = _detect_missing(serial, require_mitm=use_mitm)
     if missing:
         reason = "缺少前置条件：" + "、".join(missing)
         logger.info("[capture] %s；返回手册（playbook）", reason)
@@ -210,7 +222,9 @@ def run(
         package, duration, serial or "(未指定/-U)",
         decision.floor_first, decision.frida_retreat_threshold, decision.total_budget_sec,
     )
-    return _capture(package, out_path, duration, serial, decision=decision)
+    return _capture(
+        package, out_path, duration, serial, decision=decision, mitm=use_mitm, floor=use_floor
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -218,11 +232,13 @@ def run(
 # ---------------------------------------------------------------------------
 
 
-def _detect_missing(serial: str | None = None) -> list[str]:
+def _detect_missing(serial: str | None = None, require_mitm: bool = True) -> list[str]:
     """返回缺失的前置条件名列表（空 = 全部就绪）。
 
     顺序：设备 / frida / mitmproxy。每项探测均走 device 模块（不抛）。
     serial 非空时 frida-server 运行探测钉定那台（多设备消歧）；None 退回旧行为。
+    ★#8：``require_mitm=False``（floor-only 模式）时不把 mitmproxy 计入缺失——floor-only 只带外
+    抓包、不需要 mitmproxy/代理，缺它不该拦下抓包。
     """
     missing: list[str] = []
     try:
@@ -240,11 +256,12 @@ def _detect_missing(serial: str | None = None) -> list[str]:
         missing.append("frida")
 
     try:
-        if not device.has_mitmproxy():
+        if require_mitm and not device.has_mitmproxy():
             missing.append("mitmproxy")
     except Exception:
         logger.exception("[capture] mitmproxy 探测异常，视为缺失")
-        missing.append("mitmproxy")
+        if require_mitm:
+            missing.append("mitmproxy")
 
     # 设备上 frida-server 是否在跑（与 unpack 口径一致）：host 有 frida CLI 但设备
     # frida-server 没起来时，注入会失败、抓包绕不过证书绑定，应提前判为缺失。
@@ -298,8 +315,13 @@ def _capture(
     serial: str | None = None,
     *,
     decision: CaptureDecision | None = None,
+    mitm: bool = True,
+    floor: bool = True,
 ) -> DynamicResult:
     """编排 mitmdump + adb 代理 + frida unpinning + 启 app，到时停并解析流量。
+
+    ★#8 抓包模式：``mitm``=False（floor-only）跳过 mitmdump+全局代理、只靠带外 pcap（加固 IM /
+    反 frida 场景不设代理更稳）；``floor``=False（mitm-only）不起 floor。默认两者都开（both）。
 
     所有子进程在 finally 中清理（terminate→kill），proxy/reverse 在 finally 还原。
     serial 一路传给所有 adb 调用（reverse/proxy/CA/收尾 pull）与 frida 注入（-D 设备选择）；
@@ -324,6 +346,7 @@ def _capture(
     # ① floor：带外 pcap 保底 runner 句柄（floor_first 时起手启动，finally 收尾停）。
     floor_handle: Any = None
     floor_pcap: Path | None = None  # 收尾 adb pull 落盘的本地 floor.pcap（供 artifacts / 后续 pcap-leads）。
+    uid_snapshot: Path | None = None  # ★P1(#10)：抓包窗口末抓的目标 UID socket 快照（供把 pcap 接入节点绑 app）。
 
     mitm_proc: subprocess.Popen[bytes] | None = None
     frida_proc: subprocess.Popen[bytes] | None = None
@@ -355,15 +378,16 @@ def _capture(
     try:
         # 0) HTTPS 命门：把 mitmproxy CA 装入设备系统信任库。失败不中止抓包
         #    （HTTP 仍可抓），但把降级原因写进 playbook + reason，确保不假成功。
-        ca = provision.ensure_mitm_ca(serial, on_progress=None)
-        if ca.get("ok"):
-            playbook.append(f"mitmproxy CA 已就绪（{ca.get('action', '')}）")
-        else:
-            ca_detail = str(ca.get("detail") or "CA 未装入系统信任库")
-            warn = f"CA 未装入系统信任库：{ca_detail}，HTTPS 可能仅密文"
-            logger.warning("[capture] %s", warn)
-            playbook.append(warn)
-            warnings.append(warn)
+        if mitm:  # ★#8：floor-only 不走 mitm，就不该往设备系统信任库装 mitmproxy CA。
+            ca = provision.ensure_mitm_ca(serial, on_progress=None)
+            if ca.get("ok"):
+                playbook.append(f"mitmproxy CA 已就绪（{ca.get('action', '')}）")
+            else:
+                ca_detail = str(ca.get("detail") or "CA 未装入系统信任库")
+                warn = f"CA 未装入系统信任库：{ca_detail}，HTTPS 可能仅密文"
+                logger.warning("[capture] %s", warn)
+                playbook.append(warn)
+                warnings.append(warn)
 
         # 0.5) frida 主机/设备版本一致性校验。不一致不阻断（仍注入），但写入告警。
         match_ok, match_msg = _check_frida_version_match(serial)
@@ -372,22 +396,26 @@ def _capture(
             playbook.append(match_msg)
             warnings.append(match_msg)
 
-        # 1) 起 mitmdump（-w flows.mitm）。超时 = duration + 缓冲。
-        mitm_proc = _start_mitmdump(flows_file)
-        playbook.append(f"启动 mitmdump -w {flows_file}（监听 {_PROXY_HOST}:{_PROXY_PORT}）")
-        # 存活确认：mitmdump 若因端口被占用 / 证书目录不可写 / 参数不支持而当场退出，
-        # Popen 本身不抛——必须主动检测，否则会照常 sleep 满 duration 并以"成功 0 端点"
-        # 收尾，把"代理根本没起来"静默成"真的没抓到"。
-        if mitm_proc is not None and mitm_proc.poll() is not None:
-            err = _read_proc_stderr(mitm_proc)
-            msg = (
-                f"mitmdump 启动后立即退出（端口 {_PROXY_PORT} 被占用 / 证书目录不可写 / "
-                f"参数不支持？）stderr 尾部：{err}"
-            )
-            logger.error("[capture] %s", msg)
-            result["status"] = STATUS_ERROR
-            result["reason"] = msg
-            raise _MitmStartupError(msg)
+        # 1) 起 mitmdump（-w flows.mitm）。超时 = duration + 缓冲。★#8：floor-only 模式跳过 mitm+代理，
+        #    只靠带外 pcap（加固 IM / 反 frida 场景常用：不设代理、直连流量交 floor 抓）。
+        if mitm:
+            mitm_proc = _start_mitmdump(flows_file)
+            playbook.append(f"启动 mitmdump -w {flows_file}（监听 {_PROXY_HOST}:{_PROXY_PORT}）")
+            # 存活确认：mitmdump 若因端口被占用 / 证书目录不可写 / 参数不支持而当场退出，
+            # Popen 本身不抛——必须主动检测，否则会照常 sleep 满 duration 并以"成功 0 端点"
+            # 收尾，把"代理根本没起来"静默成"真的没抓到"。
+            if mitm_proc is not None and mitm_proc.poll() is not None:
+                err = _read_proc_stderr(mitm_proc)
+                msg = (
+                    f"mitmdump 启动后立即退出（端口 {_PROXY_PORT} 被占用 / 证书目录不可写 / "
+                    f"参数不支持？）stderr 尾部：{err}"
+                )
+                logger.error("[capture] %s", msg)
+                result["status"] = STATUS_ERROR
+                result["reason"] = msg
+                raise _MitmStartupError(msg)
+        else:
+            playbook.append("floor-only 模式：跳过 mitmdump + 全局代理，仅靠带外 pcap")
 
         # 2) ① floor 优先（**起手先起，必须在设全局代理之前**）：不碰 App 本体先起带外 pcap 保底。
         #    为何在代理前：设全局代理后，遵守代理的 app 连的是 127.0.0.1:8080（代理腿），设备侧
@@ -396,7 +424,7 @@ def _capture(
         #    的目标场景）。遵守代理的 app 其真实后端 IP 另由 mitm 的 server_conn.peername 在
         #    _parse_flows 取得——两者互补，不重复。真机依赖封成可注入 runner，单测 mock。
         # TODO(real-device): -i any 接口名 / tcpdump AF_PACKET 权限需真机对齐。
-        if decision.floor_first:
+        if floor and decision.floor_first:  # ★#8：mitm-only 模式不起 floor
             floor_handle = _start_floor_pcap(package, out_path, serial)
             if floor_handle is not None:
                 playbook.append("① floor 保底：已起带外 pcap（代理前起手，抓直连后端 IP；零产出不可接受）")
@@ -404,19 +432,20 @@ def _capture(
             else:
                 logger.info("[capture] floor 带外 pcap 未起（无设备侧 runner），仅靠主抓包链")
 
-        # 3) adb 代理 + reverse，把设备流量回流到主机 mitmproxy。
-        reverse_set = _adb_reverse(serial)
-        if reverse_set:
-            playbook.append(f"adb reverse tcp:{_PROXY_PORT} tcp:{_PROXY_PORT}")
-        else:
-            # 无 reverse：设备代理指向本机 loopback 却无反向端口 → MITM 通道不可用（floor 兜底）。
-            warnings.append(
-                f"adb reverse tcp:{_PROXY_PORT} 失败——设备代理指向 loopback 但无反向端口，MITM 通道可能不可用"
-            )
-        proxy_attempted = True
-        proxy_set = _adb_set_proxy(serial)
-        if proxy_set:
-            playbook.append(f"adb 设全局代理 {_PROXY_HOST}:{_PROXY_PORT}")
+        # 3) adb 代理 + reverse，把设备流量回流到主机 mitmproxy。★#8：floor-only 模式跳过（无代理）。
+        if mitm:
+            reverse_set = _adb_reverse(serial)
+            if reverse_set:
+                playbook.append(f"adb reverse tcp:{_PROXY_PORT} tcp:{_PROXY_PORT}")
+            else:
+                # 无 reverse：设备代理指向本机 loopback 却无反向端口 → MITM 通道不可用（floor 兜底）。
+                warnings.append(
+                    f"adb reverse tcp:{_PROXY_PORT} 失败——设备代理指向 loopback 但无反向端口，MITM 通道可能不可用"
+                )
+            proxy_attempted = True
+            proxy_set = _adb_set_proxy(serial)
+            if proxy_set:
+                playbook.append(f"adb 设全局代理 {_PROXY_HOST}:{_PROXY_PORT}")
 
         # 4) frida 注入：优先 frida-core 通道（SSL unpinning + 运行时密钥 hook，可回传活体 key）；
         #    frida-core 不可用 / attach 失败 → 回退现有 subprocess 路径（仅 unpinning，无 key 回传）。
@@ -527,6 +556,9 @@ def _capture(
                 playbook.append(warn)
                 warnings.append(warn)
             _wait(wait_for)
+        # ★P1(#10)：抓包窗口末、app 仍活、连接仍在时抓目标 UID 的 socket 快照——供把带外整机
+        #   pcap 的接入节点绑定到【本 app】的连接（整机 pcap 未绑 UID 时的锚）。best-effort、不阻断。
+        uid_snapshot = _capture_uid_socket_snapshot(package, out_path, serial)
 
     except _MitmStartupError:
         # status/reason 已在抛出点设好；跳到 finally 清理（mitmdump 已死，其它子进程未起）。
@@ -569,6 +601,10 @@ def _capture(
     if floor_pcap is not None and floor_pcap.is_file():
         # ① floor 带外 pcap 作产物（mitm 明文之外的接入节点兜底：反 frida/pinning/native 时的穿透锚点）。
         artifacts.append(str(floor_pcap))
+    if uid_snapshot is not None and uid_snapshot.is_file():
+        # ★P1(#10)：UID socket 快照作产物，供人工把 floor.pcap 接入节点绑定到本 app 的连接。
+        artifacts.append(str(uid_snapshot))
+        playbook.append(f"UID socket 快照：{uid_snapshot.name}（把带外 pcap 接入节点绑定到 app 连接）")
 
     endpoints = _parse_flows(flows_file)
     # ① floor 自动并入：带外 pcap 的接入节点作 runtime 端点并进 endpoints（mitm 0 端点时靠它兜底，
@@ -603,12 +639,20 @@ def _capture(
         mitm_bytes = flows_file.stat().st_size if flows_file.exists() else 0
     except OSError:
         mitm_bytes = 0
+    # ★#7：hook 就绪三态——只有收到显式 fxapk_hook_ready:true 才算 confirmed；未确认/Java 不可用
+    #   附告警，不把"未确认"上报成"已确认"掩盖 hook 没装上。
+    hook_status = _frida_hook_status(frida_session)
+    if hook_status in ("java-unavailable", "unconfirmed"):
+        warnings.append(
+            f"frida hook 未确认就绪（{hook_status}）——注入可能未生效（反检测样本常见），运行时事件可能不全，靠 floor/pcap 兜底"
+        )
     capture_signals: dict[str, Any] = {
         "proxy_set": bool(proxy_set),
         "reverse_set": bool(reverse_set),
         "floor_started": floor_handle is not None,
         "floor_pulled": floor_pcap is not None,
-        "hook_ready": frida_session is not None,  # frida-core 会话建立（精确 hook 就绪属 P1）
+        "hook_ready": hook_status == "confirmed",  # ★#7：仅收到显式 fxapk_hook_ready:true 才算已确认
+        "hook_ready_status": hook_status,  # confirmed / java-unavailable / unconfirmed / none
         "mitm_bytes": mitm_bytes,
         "endpoint_total": len(endpoints),
         "warnings": list(warnings),
@@ -795,6 +839,20 @@ CHANNELS: tuple[tuple[str, str, Any], ...] = (
     ("remote_control", cryptohook.ACCESSIBILITY_MSG_TYPE, cryptohook.normalize_remote_control_event),
 )
 
+# ★#7 hook readiness：所有 hook 装完后由 JS 显式回传 fxapk_hook_ready——在 Java.perform 内确认 ART
+# 可用（catch 反检测样本下 script.load 成功但实际 "Java is not defined"/hook 没装上的假就绪）。
+_FRIDA_HOOK_READY_JS = (
+    ";(function () {"
+    "  try {"
+    "    if (typeof Java !== 'undefined' && Java.available) {"
+    "      Java.perform(function () { send({ fxapk_hook_ready: true }); });"
+    "    } else {"
+    "      send({ fxapk_hook_ready: false, reason: 'java-unavailable' });"
+    "    }"
+    "  } catch (e) { send({ fxapk_hook_ready: false, reason: String(e) }); }"
+    "})();"
+)
+
 
 def _start_frida_session(
     package: str,
@@ -857,6 +915,8 @@ def _start_frida_session(
         + cryptohook.FRIDA_CLIPBOARD_HOOK_JS
         + "\n"
         + cryptohook.FRIDA_ACCESSIBILITY_HOOK_JS
+        + "\n"
+        + _FRIDA_HOOK_READY_JS  # ★#7：所有 hook 装完后显式 send hook_ready（在 Java.perform 内确认 ART 可用）
     )
     device_handle: Any = None
     pid: Any = None
@@ -875,6 +935,24 @@ def _start_frida_session(
         except Exception:
             logger.debug("[capture] 无法在会话上寄存 device 句柄（忽略，liveness 退化为仅看 detached）", exc_info=True)
         script = session.create_script(source)
+        # ★#7：hook readiness 通道——JS 装完 hook 后 send fxapk_hook_ready，异步落进标志容器，
+        #   供收尾时读（capture_signals["hook_ready"]），把"会话建立"细化为"hook 真装上"。
+        hook_ready: dict[str, Any] = {"ready": None}
+
+        def _hook_ready_handler(message: Any, _data: Any) -> None:
+            try:
+                if isinstance(message, dict) and message.get("type") == "send":
+                    payload = message.get("payload")
+                    if isinstance(payload, dict) and "fxapk_hook_ready" in payload:
+                        hook_ready["ready"] = bool(payload.get("fxapk_hook_ready"))
+            except Exception:
+                logger.debug("[capture] hook_ready 消息处理异常（忽略）", exc_info=True)
+
+        script.on("message", _hook_ready_handler)
+        try:
+            session._fxapk_hook_ready = hook_ready  # type: ignore[attr-defined]
+        except Exception:
+            logger.debug("[capture] 无法在会话寄存 hook_ready 标志（忽略）", exc_info=True)
         # crypto 主通道（含 error 诊断）单独走 make_message_handler。
         script.on("message", cryptohook.make_message_handler(sink))
         # 其余 7 路运行时事件通道表驱动注册（sink 顺序与 CHANNELS 严格对齐；None 则跳过该通道）。
@@ -1181,6 +1259,45 @@ def _adb_capture(extra: list[str], serial: str | None = None) -> str | None:
     return proc.stdout or ""
 
 
+def _app_uid(package: str, serial: str | None = None) -> str:
+    """取目标 app 的 UID（``dumpsys package <pkg>`` 的 ``userId=``）。取不到返回空串。绝不抛。"""
+    out = _adb_capture(["shell", "dumpsys", "package", package], serial) or ""
+    m = re.search(r"userId=(\d+)", out)
+    return m.group(1) if m else ""
+
+
+def _capture_uid_socket_snapshot(package: str, out_path: Path, serial: str | None = None) -> Path | None:
+    """★P1(#10)：抓目标 app（按 UID）的 socket 快照存 ``out/uid_sockets.txt``——供把带外整机
+    pcap 的接入节点【绑定到本 app 的连接】（进程/UID→远端 IP:port），区分真后端 vs 背景噪音。
+
+    抓 ``ss -tunp``（需 root 才显进程/UID）+ ``/proc/net/tcp``、``/proc/net/tcp6``（含 uid 列、
+    地址端口十六进制）。任一取到即写文件；全空返回 None。best-effort、绝不抛。
+    """
+    try:
+        uid = _app_uid(package, serial)
+        parts = [f"# package={package} uid={uid or '(未取到)'}"]
+        got = False
+        ss = _adb_capture(["shell", "ss", "-tunp"], serial)
+        if ss and ss.strip():
+            parts.append("## ss -tunp（需 root 显进程/UID）\n" + ss.rstrip())
+            got = True
+        for procfs in ("/proc/net/tcp", "/proc/net/tcp6"):
+            raw = _adb_capture(["shell", "cat", procfs], serial)
+            if raw and raw.strip():
+                parts.append(f"## {procfs}（uid 在第 8 列，地址/端口十六进制）\n" + raw.rstrip())
+                got = True
+        if not got:
+            logger.debug("[capture] UID socket 快照：ss / /proc/net 均未取到（无 root / 无 adb）")
+            return None
+        dest = out_path / "uid_sockets.txt"
+        dest.write_text("\n\n".join(parts) + "\n", encoding="utf-8")
+        logger.info("[capture] UID socket 快照已存 %s（uid=%s）", dest, uid or "?")
+        return dest
+    except Exception:
+        logger.exception("[capture] 抓 UID socket 快照失败（忽略）")
+        return None
+
+
 # ---------------------------------------------------------------------------
 # P2：收尾 adb pull shared_prefs，抠落地凭据（登录态/token/商户号/邀请码）
 # ---------------------------------------------------------------------------
@@ -1445,6 +1562,33 @@ def _budget_remaining(started_at: float, total_budget_sec: int) -> float:
 # ---------------------------------------------------------------------------
 # ② frida-core 会话 liveness（治默认路径假成功：resume 后进程秒退却报成功）
 # ---------------------------------------------------------------------------
+
+
+def _frida_hook_status(session: Any) -> str:
+    """frida hook 就绪状态（★#7，三态不混淆"已确认"与"未确认"）。JS 装完 hook 在 Java.perform
+    内 send fxapk_hook_ready，落进 ``session._fxapk_hook_ready``：
+
+    - ``"confirmed"``        收到 True —— hook 真装上；
+    - ``"java-unavailable"`` 收到 False —— ART/Java 不可用或异常（反检测样本假就绪，据此诚实降级）；
+    - ``"unconfirmed"``      会话存活但未收到信号 —— 抓包窗内 JS 没跑到/时序未到（不当已确认）；
+    - ``"none"``             无会话。
+
+    绝不抛。``hook_ready`` 布尔只在 ``"confirmed"`` 为真；``unconfirmed``/``java-unavailable`` 由
+    调用方附告警，避免把"未确认"上报成"已确认"掩盖 hook 没装上。
+    """
+    if session is None:
+        return "none"
+    try:
+        flag = getattr(session, "_fxapk_hook_ready", None)
+        if isinstance(flag, dict):
+            ready = flag.get("ready")
+            if ready is True:
+                return "confirmed"
+            if ready is False:
+                return "java-unavailable"
+    except Exception:
+        logger.debug("[capture] 读 hook_ready 标志异常", exc_info=True)
+    return "unconfirmed"
 
 
 def _frida_session_alive(session: Any) -> bool:
