@@ -84,15 +84,31 @@ def _close_ctx_quiet(ctx: object) -> None:
             logger.exception("[cli] 关闭分析上下文失败（已忽略）")
 
 
-def _cleanup_adb_quiet() -> None:
-    """命令收尾：收掉本次进程自起的 adb server（惰性 import tools，绝不抛）。
-
-    adb server 是 adb 全局单例：analyze 的设备探测（device.has_device）、doctor/auto/
-    capture 的动态动作都会经 adb 起一个常驻 adb server。GUI 分析走子进程，子进程跑的就是
-    这些 CLI 命令——退出时若不收，adb.exe 残留、下次重打 exe 被锁。每个 dynamic 命令体外
-    包 ``try/finally`` 调本函数，收掉子进程自己起的那个 server。kill-server 幂等、对未起
-    server 零副作用、且仅在 adb 可用时执行（见 tools.kill_adb_server），不会反而起 server。
+def _adb_owned_at_start() -> bool:
+    """命令**起手**判本次 adb server 是否归本进程收：起手时无 server 在跑 → 本次动态动作会起
+    一个、归我们收（True）；起手时已有 server（外部 / 先前已在跑，可能仍要用于 pull）→ 不归我们、
+    收尾不杀（False）。惰性 import、绝不抛（探测失败保守视作外部、不杀）。
     """
+    try:
+        from apkscan.core import tools
+
+        return not tools.adb_server_running()
+    except Exception:
+        logger.exception("[cli] 判定 adb server 归属失败（保守：收尾不杀）")
+        return False
+
+
+def _cleanup_adb_quiet(owned: bool = True) -> None:
+    """命令收尾：**仅当本次进程自起**的 adb server（owned=True）才收掉（惰性 import tools，绝不抛）。
+
+    adb server 是 adb 全局单例：analyze 的设备探测、doctor/auto/capture 的动态动作都会经 adb 起
+    一个常驻 server。GUI 分析走子进程，退出时若不收、adb.exe 残留下次重打 exe 被锁——故收尾要收。
+    但 ★P0-5：``owned=False``（命令起手时已有外部 / 先前 server 在跑，可能仍要用于 pull）时**绝不杀**，
+    避免误杀外部或仍在 pull 落盘 floor.pcap 的 adb。kill-server 幂等、仅在 adb 可用时执行。
+    """
+    if not owned:
+        logger.info("[cli] adb server 起手时已存在（外部/先前），收尾不杀（避免误杀外部或正在 pull 的 adb）")
+        return
     try:
         from apkscan.core import tools
 
@@ -185,6 +201,7 @@ def analyze(
     # 无条件 finally 收 adb server：analyze 的 device.has_device() 设备探测每次都会经
     # adb 起一个常驻 adb server（即便纯静态/离线），不收则 adb.exe 残留（GUI 子进程尤甚）。
     ctx: object = None  # 供 finally 关闭 IPA 句柄（IpaContext 持有打开的 ZipFile）
+    _adb_owned = _adb_owned_at_start()  # ★P0-5：起手判 adb server 归属（外部/先前存在则收尾不杀）
     try:
         formats = _parse_formats(fmt)
         out = _resolve_out(out, apk)  # 未给 --out → 默认落到 APK 同目录下的 out/
@@ -351,6 +368,7 @@ def capture(
     """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     # 抓包必经 adb（frida -U / mitmproxy 走设备），finally 收掉自起的 adb server。
+    _adb_owned = _adb_owned_at_start()  # ★P0-5：起手判 adb server 归属（外部/仍在 pull 则收尾不杀）
     try:
         try:
             from apkscan.dynamic import capture as _capture
@@ -364,7 +382,7 @@ def capture(
         # 业务失败返回非零退出码（在 adb 清理 finally 之前抛，仍会穿过 finally 收 server）。
         _raise_exit_for_status(result.get("status") if isinstance(result, dict) else None)
     finally:
-        _cleanup_adb_quiet()
+        _cleanup_adb_quiet(_adb_owned)
 
 
 @app.command()
@@ -386,6 +404,7 @@ def doctor(
     # doctor 体检会经 adb 探测设备/起 server，finally 收掉自起的 adb server。
     # 注意：doctor 给用户的 "adb kill-server && adb start-server" 是可复制的修复命令字符串
     # （结构化结果里的 fix_cmd），不是程序执行路径——本收尾不触碰它，语义不破坏。
+    _adb_owned = _adb_owned_at_start()  # ★P0-5：起手判 adb server 归属（外部/先前存在则收尾不杀）
     try:
         try:
             from apkscan.dynamic import doctor as _doctor
@@ -403,7 +422,7 @@ def doctor(
         if not result.get("ok", False):
             raise typer.Exit(code=1)
     finally:
-        _cleanup_adb_quiet()
+        _cleanup_adb_quiet(_adb_owned)
 
 
 @app.command()
@@ -452,6 +471,7 @@ def auto(
     """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     # auto 流水线含体检/脱壳/抓包，全经 adb；finally 收掉自起的 adb server。
+    _adb_owned = _adb_owned_at_start()  # ★P0-5：起手判 adb server 归属（外部/先前存在则收尾不杀）
     try:
         try:
             from apkscan.dynamic import auto as _auto
@@ -490,7 +510,7 @@ def auto(
         )
         _print_auto_result(result)
     finally:
-        _cleanup_adb_quiet()
+        _cleanup_adb_quiet(_adb_owned)
 
 
 @app.command()
@@ -528,6 +548,7 @@ def batch(
     """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     # 批量逐个走 auto（含体检/脱壳/抓包），全经 adb；finally 收掉自起的 adb server。
+    _adb_owned = _adb_owned_at_start()  # ★P0-5：起手判 adb server 归属（外部/先前存在则收尾不杀）
     try:
         try:
             from apkscan.dynamic import batch as _batch
@@ -548,7 +569,7 @@ def batch(
         )
         _print_batch_result(result)
     finally:
-        _cleanup_adb_quiet()
+        _cleanup_adb_quiet(_adb_owned)
 
 
 @app.command()
