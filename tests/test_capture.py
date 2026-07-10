@@ -426,6 +426,24 @@ def test_run_mode_maps_to_mitm_floor_flags(monkeypatch, tmp_path):
     assert seen["mitm"] is True and seen["floor"] is True
 
 
+def test_detect_missing_floor_only_does_not_require_mitmproxy(monkeypatch):
+    """★ 复审 P1-1：require_mitm=False（floor-only）时不把 mitmproxy 计入缺失——floor-only 只带外
+    抓、不需要 mitmproxy，缺它不该拦下抓包。"""
+    monkeypatch.setattr(capture.device, "has_device", lambda: True)
+    monkeypatch.setattr(capture.device, "has_frida", lambda: True)
+    monkeypatch.setattr(capture.device, "has_mitmproxy", lambda: False)  # 无 mitmproxy
+    monkeypatch.setattr(capture.device, "frida_server_running", lambda serial=None: True)
+    assert "mitmproxy" in capture._detect_missing(require_mitm=True)
+    assert "mitmproxy" not in capture._detect_missing(require_mitm=False)
+
+
+def test_run_rejects_invalid_mode(monkeypatch, tmp_path):
+    """★ 复审 P2：run(mode=非法) → error（不静默落 both）。"""
+    result = capture.run("com.x", out_dir=str(tmp_path), mode="bogus")
+    assert result["status"] == capture.STATUS_ERROR
+    assert "mode" in result["reason"]
+
+
 def test_capture_floor_only_skips_mitm_and_proxy(monkeypatch, tmp_path):
     """★ P1(#8)：floor-only 模式不起 mitmdump、不设代理；floor 起并拉回 → 仍 done（有证据路径）。"""
     _set_capabilities(monkeypatch)
@@ -1379,22 +1397,22 @@ def test_version_unreadable_enumerate_acceptance(monkeypatch):
     assert capture._check_frida_version_match() == (True, "")
 
 
-def test_frida_hook_ready_reads_explicit_signal():
-    """★ P1(#7)：_frida_hook_ready 读 JS 显式回传的 fxapk_hook_ready——True/False 如实；
-    未收到→退化会话存活；None session→False。"""
+def test_frida_hook_status_three_states():
+    """★ P1(#7)：_frida_hook_status 三态——收到 True=confirmed / False=java-unavailable /
+    未收到=unconfirmed（不当已确认）/ 无会话=none。"""
 
     class _S:
         pass
 
-    assert capture._frida_hook_ready(None) is False
+    assert capture._frida_hook_status(None) == "none"
     s = _S()
     s._fxapk_hook_ready = {"ready": True}
-    assert capture._frida_hook_ready(s) is True
+    assert capture._frida_hook_status(s) == "confirmed"
     s._fxapk_hook_ready = {"ready": False}
-    assert capture._frida_hook_ready(s) is False  # ART/Java 不可用/假就绪 → 诚实 False
+    assert capture._frida_hook_status(s) == "java-unavailable"  # ART/Java 不可用 → 诚实降级
     s._fxapk_hook_ready = {"ready": None}
-    assert capture._frida_hook_ready(s) is True  # 未收到显式信号 → 退化会话存活
-    assert capture._frida_hook_ready(_S()) is True  # 无标志 → 退化
+    assert capture._frida_hook_status(s) == "unconfirmed"  # 未收到 → 不当已确认
+    assert capture._frida_hook_status(_S()) == "unconfirmed"  # 无标志 → 未确认
 
 
 def test_frida_hook_ready_emitter_in_source():
