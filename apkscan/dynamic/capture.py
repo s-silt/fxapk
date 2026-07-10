@@ -1019,15 +1019,31 @@ def _check_frida_version_match(serial: str | None = None) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 
 
+def _proxy_readback(serial: str | None = None) -> str:
+    """读回设备全局 HTTP 代理值（``settings get global http_proxy``，去空白）；取不到/未设返回空串。"""
+    out = _adb_capture(["shell", "settings", "get", "global", "http_proxy"], serial)
+    val = (out or "").strip()
+    return "" if val in ("", "null") else val
+
+
 def _adb_set_proxy(serial: str | None = None) -> bool:
-    """adb shell settings put global http_proxy 127.0.0.1:8080。成功返回 True。"""
-    ok = _adb(
-        ["shell", "settings", "put", "global", "http_proxy", f"{_PROXY_HOST}:{_PROXY_PORT}"],
-        serial,
-    )
-    if not ok:
-        logger.warning("[capture] 设置设备全局代理失败（不阻断抓包）")
-    return ok
+    """设设备全局 HTTP 代理并**读回确认**；普通 ``settings put`` 未生效则 root 兜底再读回。
+
+    ★P1：只有读回确认代理值 == 目标才返回 True——``settings put`` 返回 0 不代表真生效
+    （部分设备被策略拦 / 需 root）。返回 False 即明确降级，供 P0-4 capture_signals 如实标注，
+    不谎称 MITM 就绪。best-effort、不阻断抓包（floor pcap 仍可保底）。
+    """
+    target = f"{_PROXY_HOST}:{_PROXY_PORT}"
+    _adb(["shell", "settings", "put", "global", "http_proxy", target], serial)
+    if _proxy_readback(serial) == target:
+        return True
+    # 普通 put 未读回生效 → root 兜底（部分设备 settings 需 root / 或被策略限制）。
+    provision._adb_root_shell(f"settings put global http_proxy {target}", serial)
+    if _proxy_readback(serial) == target:
+        logger.info("[capture] 设备全局代理经 root 兜底设置成功（读回确认 %s）", target)
+        return True
+    logger.warning("[capture] 设置设备全局代理失败/读回未确认（降级：MITM 可能不可用）")
+    return False
 
 
 def _adb_clear_proxy(serial: str | None = None) -> None:
