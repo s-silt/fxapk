@@ -266,6 +266,22 @@ def kill_adb_server() -> bool:
     return True
 
 
+def adb_server_running(host: str = "127.0.0.1", port: int = 5037, timeout: float = 0.3) -> bool:
+    """判本机是否已有 adb server 在监听（默认 127.0.0.1:5037）——**无副作用**：只 TCP 连一下，
+    绝不 ``start-server``。用于命令起手判 adb server 归属：起手已在跑 = 外部/先前存在、收尾不该杀。绝不抛。
+    """
+    import socket
+
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+    except Exception:
+        logger.exception("[tools] 探测 adb server 监听失败（保守视作在跑，收尾不杀）")
+        return True
+
+
 def _has_module(name: str) -> bool:
     """frozen 下判断内置库是否打进包（importlib.util.find_spec，不真 import 重模块）。"""
     import importlib.util
