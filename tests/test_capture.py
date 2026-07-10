@@ -1228,13 +1228,32 @@ def test_existing_done_test_still_passes_with_new_hooks_mocked(monkeypatch, tmp_
 
 
 def test_version_match_returns_true_when_either_version_missing(monkeypatch):
-    """任一版本取不到 → 无法比对 → (True, '')（只校在跑，不阻断）。"""
+    """任一版本取不到 → 无法比对：枚举验收无法判定(None)/可枚举(True) → (True, '')（不阻断）。"""
+    # 无法验收(缺 frida-core/连不上) → 不阻断（且不触发真 frida USB 扫描）。
+    monkeypatch.setattr(capture, "_frida_device_reachable", lambda serial=None: None)
     monkeypatch.setattr(capture.provision, "host_frida_version", lambda: "")
     monkeypatch.setattr(capture, "_device_frida_version", lambda serial=None: "16.5.9")
     assert capture._check_frida_version_match() == (True, "")
 
     monkeypatch.setattr(capture.provision, "host_frida_version", lambda: "16.5.9")
     monkeypatch.setattr(capture, "_device_frida_version", lambda serial=None: "")
+    assert capture._check_frida_version_match() == (True, "")
+
+
+def test_version_unreadable_enumerate_acceptance(monkeypatch):
+    """★ P1(#6)：版本读不到时用 frida enumerate_processes 实测验收——枚举失败→(False, 警告)、
+    可枚举→(True, '')、无法验收(None)→(True, '')（不静默按通过掩盖真不配）。"""
+    monkeypatch.setattr(capture.provision, "host_frida_version", lambda: "")
+    monkeypatch.setattr(capture, "_device_frida_version", lambda serial=None: "")
+    # 连上但枚举失败 → 明确警告
+    monkeypatch.setattr(capture, "_frida_device_reachable", lambda serial=None: False)
+    ok, msg = capture._check_frida_version_match()
+    assert ok is False and "枚举验收失败" in msg
+    # 可枚举 → 真可用、静默通过
+    monkeypatch.setattr(capture, "_frida_device_reachable", lambda serial=None: True)
+    assert capture._check_frida_version_match() == (True, "")
+    # 无法验收 → 不阻断
+    monkeypatch.setattr(capture, "_frida_device_reachable", lambda serial=None: None)
     assert capture._check_frida_version_match() == (True, "")
 
 
