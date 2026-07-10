@@ -1500,32 +1500,64 @@ def _start_floor_pcap(
         return None
 
 
+# 有效 pcap/pcapng 文件的起始 magic（判本地 floor.pcap 是否真拉回、可解析）。
+_PCAP_MAGICS = (
+    b"\xa1\xb2\xc3\xd4",
+    b"\xa1\xb2\x3c\x4d",
+    b"\xd4\xc3\xb2\xa1",
+    b"\x4d\x3c\xb2\xa1",
+    b"\x0a\x0d\x0d\x0a",
+)
+
+
+def _floor_pcap_valid(local: Path) -> bool:
+    """本地 floor.pcap 是否有效——size ≥ pcap 头 + 起始 magic 认得（拉回 0 字节/半截不算数）。"""
+    try:
+        if not local.is_file() or local.stat().st_size < 24:
+            return False
+        with local.open("rb") as fh:
+            return fh.read(4) in _PCAP_MAGICS
+    except OSError:
+        return False
+
+
 def _stop_floor_pcap(handle: _FloorPcap, out_path: Path) -> Path | None:
-    """停设备侧 tcpdump、adb pull 落盘 ``out/floor.pcap``、清设备残留。返回本地路径或 None。绝不抛。"""
+    """停设备侧 tcpdump、adb pull 落盘 ``out/floor.pcap``、**仅在本地有效后**才清设备残留。绝不抛。
+
+    ★证据防丢（P0-3）：pull 失败 / 本地为空 / magic 不认（不可解析）时【绝不删除远端 pcap】——
+    保留在设备侧供手动重拉，只有本地文件 size 有效且 magic 认得后才 rm 远端 pcap。
+    """
     try:
         serial = handle.serial
         # 1) 按 PID 精确 SIGINT（root）令 tcpdump flush 落盘并退出（-INT 留全 pcap 尾）；拿不到
         #    PID 再退 pkill 兜底。前置 `[ "$(id -u)" = 0 ] || exit 1` 守卫：非 root 的 adb shell 路径
-        #    直接退出，逼 _adb_root_shell 走 su（否则非 root 的 pkill 杀不动 root tcpdump 会打印
-        #    Operation not permitted——真机实测虽不留孤儿、但日志吓人，codex 复测建议优化）。
+        #    直接退出，逼 _adb_root_shell 走 su。
         provision._adb_root_shell(
             '[ "$(id -u)" = 0 ] || exit 1; '
             f"kill -INT $(cat {handle.pid_path} 2>/dev/null) 2>/dev/null || pkill -INT tcpdump",
             serial,
         )
         _wait(_FLOOR_FLUSH_GRACE)  # 给 flush + 落盘一点时间
-        # 2) adb pull 落盘。
+        # 2) adb pull 落盘；首拉失败/无效先 chmod 644 兜底再重拉（root tcpdump 写的文件常 0600 拉不动）。
         local = out_path / _FLOOR_LOCAL_NAME
-        if _adb(["pull", handle.remote_path, str(local)], serial) and local.is_file():
-            logger.info(
-                "[capture] floor：带外 pcap 已拉回 %s（%d 字节）", local, local.stat().st_size
-            )
-            pulled: Path | None = local
-        else:
-            logger.warning("[capture] floor：带外 pcap 拉回失败/为空（降级）")
-            pulled = None
-        provision._adb_root_shell(f"rm -f {handle.remote_path} {handle.pid_path}", serial)  # 3) 清残留
-        return pulled
+        _adb(["pull", handle.remote_path, str(local)], serial)
+        if not _floor_pcap_valid(local):
+            provision._adb_root_shell(f"chmod 644 {handle.remote_path} 2>/dev/null", serial)
+            _adb(["pull", handle.remote_path, str(local)], serial)
+        # 3) 仅本地有效才清远端 pcap；否则保留远端供手动重拉（绝不删证据）。
+        if _floor_pcap_valid(local):
+            logger.info("[capture] floor：带外 pcap 已拉回 %s（%d 字节）", local, local.stat().st_size)
+            provision._adb_root_shell(f"rm -f {handle.remote_path} {handle.pid_path}", serial)
+            return local
+        logger.warning(
+            "[capture] floor：带外 pcap 拉回失败/为空/不可解析——【已保留设备侧 %s 未删除】，"
+            "可手动 `adb -s %s pull %s`；仅清 pidfile。",
+            handle.remote_path,
+            serial,
+            handle.remote_path,
+        )
+        provision._adb_root_shell(f"rm -f {handle.pid_path}", serial)  # 只清 pidfile，保留远端 pcap
+        return None
     except Exception:
         logger.exception("[capture] floor：收尾设备侧 tcpdump 异常（忽略）")
         return None
