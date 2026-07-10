@@ -2382,6 +2382,26 @@ def test_stop_floor_pcap_empty_local_not_deleted(monkeypatch, tmp_path):
     assert not any("x.pcap" in c for c in root_cmds if c.startswith("rm -f"))
 
 
+def test_stop_floor_pcap_stale_local_not_treated_as_success(monkeypatch, tmp_path):
+    """★ 复审#4：本地已有上一轮有效 floor.pcap，本轮 adb pull 失败（不覆盖）→ 不当本轮成功、
+    绝不删远端证据（改前：拉到固定 floor.pcap，旧文件校验通过被误判成功并删远端）。"""
+    monkeypatch.setattr(capture, "_wait", lambda *a, **k: None)
+    root_cmds: list = []
+    monkeypatch.setattr(
+        capture.provision, "_adb_root_shell",
+        lambda cmd, serial=None: (root_cmds.append(cmd), True)[1],
+    )
+    # 预置上一轮有效 floor.pcap（真 magic）。
+    (tmp_path / capture._FLOOR_LOCAL_NAME).write_bytes(b"\xa1\xb2\xc3\xd4" + b"\x00" * 40)
+    # 本轮 pull 全失败（不写 tmp 文件）。
+    monkeypatch.setattr(capture, "_adb", lambda extra, serial=None: extra[0] != "pull")
+    handle = capture._FloorPcap(
+        remote_path="/data/local/tmp/x.pcap", pid_path="/data/local/tmp/x.pid", serial=None
+    )
+    assert capture._stop_floor_pcap(handle, tmp_path) is None
+    assert not any("x.pcap" in c for c in root_cmds if c.startswith("rm -f"))  # 远端未删
+
+
 def test_floor_starts_before_proxy(monkeypatch, tmp_path):
     """★ 回归（codex review P2）：floor tcpdump 必须在设全局代理【之前】起手——否则遵守代理的
     app 连 127.0.0.1:8080，设备侧 tcpdump 只抓到 loopback 代理腿、拿不到真实后端 IP。"""

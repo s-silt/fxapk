@@ -318,8 +318,8 @@ def _process_frame(ts: float, linktype: int, frame: bytes, flows: dict, summ: Pc
     f.packets += 1
     f.bytes_ += len(frame)
     f.last_ts = ts
+    f.payload_bytes += len(app)  # TCP/UDP 均计 L4 应用层载荷（UDP C2/QUIC 只有 UDP 载荷也算有载荷）
     if proto_num == 6:
-        f.payload_bytes += len(app)
         for name, bit in (("fin", 0x01), ("syn", 0x02), ("rst", 0x04), ("psh", 0x08), ("ack", 0x10)):
             if tcp_flags & bit:
                 f.flags.add(name)
@@ -589,7 +589,21 @@ def remote_endpoints(summary: PcapSummary) -> list[RemoteEndpoint]:
     for f in summary.flows:
         dst_pub = _ip_public(f.dst_ip)
         src_pub = _ip_public(f.src_ip)
-        if dst_pub and not src_pub:  # 本机(src)→远端(dst)：出站
+        if dst_pub and not src_pub:
+            remote_is_dst = True  # 本机(私)→远端(公)：出站
+        elif src_pub and not dst_pub:
+            remote_is_dst = False  # 远端(公)→本机(私)：入站
+        elif dst_pub and src_pub:
+            # 两端都公网（如移动网 IPv6 GUA 直连）——不丢弃：SYN 方向/端口启发式判哪端是远端。
+            if "syn" in f.flags and "synack" not in f.flags:
+                remote_is_dst = True  # 本机发起 SYN → dst 是远端
+            elif "synack" in f.flags:
+                remote_is_dst = False  # 见 SYN-ACK → src 是远端（服务端）
+            else:
+                remote_is_dst = f.dst_port <= f.src_port  # 端口小的一端更像服务端/远端
+        else:
+            continue  # 两端都私网：不产接入节点
+        if remote_is_dst:  # 本机→远端：出站
             key = (f.proto, f.dst_ip, f.dst_port)
             re = _touch(key, f.dst_ip, f.dst_port, f.proto)
             re.out_bytes += f.payload_bytes
@@ -597,7 +611,7 @@ def remote_endpoints(summary: PcapSummary) -> list[RemoteEndpoint]:
             re.sni |= f.sni
             re.ja3 |= f.ja3
             conn_src.setdefault(key, set()).add((f.src_ip, f.src_port))
-        elif src_pub and not dst_pub:  # 远端(src)→本机(dst)：入站
+        else:  # 远端→本机：入站
             key = (f.proto, f.src_ip, f.src_port)
             re = _touch(key, f.src_ip, f.src_port, f.proto)
             re.in_bytes += f.payload_bytes
@@ -606,8 +620,8 @@ def remote_endpoints(summary: PcapSummary) -> list[RemoteEndpoint]:
             if "rst" in f.flags:
                 re.flags.add("rst")
             re.sni |= f.sni
-        else:
-            continue
+            re.ja3 |= f.ja3
+            conn_src.setdefault(key, set()).add((f.dst_ip, f.dst_port))  # 入站方向也计本机端口(P1)
         re.packets += f.packets
         if f.first_ts and (re.first_ts == 0.0 or f.first_ts < re.first_ts):
             re.first_ts = f.first_ts
@@ -717,7 +731,14 @@ def to_runtime_endpoints(summary: PcapSummary) -> list[Endpoint]:
     """
     endpoints: list[Endpoint] = []
     seen: set[str] = set()
+    dropped = 0
     for re in remote_endpoints(summary):
+        # ★自动并入护栏：无载荷（SYN-only/reset/仅握手）节点不升为主报告"公网 IP 建议调证"——
+        # 下游 _ip_lead 对 pcap Endpoint 只按公私网给 advice、会绕过这里的态分级，故直接过滤；
+        # 它们仍在 pcap 台账（to_report_leads）与原始 floor.pcap 中作"待核"，不静默丢弃。
+        if not re.has_payload:
+            dropped += 1
+            continue
         if re.ip in seen:
             continue
         seen.add(re.ip)
@@ -739,6 +760,11 @@ def to_runtime_endpoints(summary: PcapSummary) -> list[Endpoint]:
                     )
                 ],
             )
+        )
+    if dropped:
+        logger.info(
+            "[pcap] 自动并入过滤无载荷接入节点 %d 个（SYN-only/连接尝试，留 pcap 台账作待核，不升'建议调证'）",
+            dropped,
         )
     # SNI / DNS 域名端点（DNS 域名无 per-query ts，留 None）。
     domain_ts: dict[str, float] = {}
