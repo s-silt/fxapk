@@ -410,6 +410,46 @@ def test_capture_run_includes_uid_snapshot_artifact(monkeypatch, tmp_path):
     assert str(snap) in result["artifacts"]
 
 
+def test_run_mode_maps_to_mitm_floor_flags(monkeypatch, tmp_path):
+    """★ P1(#8)：run(mode=...) 映射到 _capture 的 mitm/floor 门控。"""
+    _set_capabilities(monkeypatch)
+    seen: dict = {}
+    monkeypatch.setattr(
+        capture, "_capture",
+        lambda *a, **k: (seen.update(k), capture.empty_result(capture.STATUS_DONE))[1],
+    )
+    capture.run("com.x", out_dir=str(tmp_path), mode="floor-only")
+    assert seen["mitm"] is False and seen["floor"] is True
+    capture.run("com.x", out_dir=str(tmp_path), mode="mitm-only")
+    assert seen["mitm"] is True and seen["floor"] is False
+    capture.run("com.x", out_dir=str(tmp_path), mode="both")
+    assert seen["mitm"] is True and seen["floor"] is True
+
+
+def test_capture_floor_only_skips_mitm_and_proxy(monkeypatch, tmp_path):
+    """★ P1(#8)：floor-only 模式不起 mitmdump、不设代理；floor 起并拉回 → 仍 done（有证据路径）。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_capture_uid_socket_snapshot", lambda *a, **k: None)
+    started = {"mitm": False, "proxy": False}
+    monkeypatch.setattr(capture, "_start_mitmdump", lambda f: started.__setitem__("mitm", True))
+    monkeypatch.setattr(
+        capture, "_adb_set_proxy", lambda serial=None: (started.__setitem__("proxy", True), True)[1]
+    )
+    monkeypatch.setattr(capture, "_start_floor_pcap", lambda *a, **k: object())
+    floorp = tmp_path / "floor.pcap"
+    floorp.write_bytes(b"\xa1\xb2\xc3\xd4" + b"\x00" * 40)
+    monkeypatch.setattr(capture, "_stop_floor_pcap", lambda h, op: floorp)
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), mode="floor-only", duration=1)
+    assert started["mitm"] is False  # floor-only 不起 mitmdump
+    assert started["proxy"] is False  # 不设代理
+    assert result["status"] == capture.STATUS_DONE  # floor 拉回 = 有证据路径
+
+
 def test_capture_exception_yields_error_and_cleans_up(monkeypatch, tmp_path):
     _set_capabilities(monkeypatch)
     mitm = _FakeProc()
@@ -1978,7 +2018,7 @@ def test_run_consumes_decide_capture_from_report(monkeypatch, tmp_path):
     _set_capabilities(monkeypatch)
     seen: dict[str, Any] = {}
 
-    def _spy_capture(package, out_path, duration, serial=None, *, decision=None):
+    def _spy_capture(package, out_path, duration, serial=None, *, decision=None, mitm=True, floor=True):
         seen["decision"] = decision
         return capture.empty_result(STATUS_DONE, "ok")
 
@@ -1998,7 +2038,7 @@ def test_run_defaults_decision_when_no_report(monkeypatch, tmp_path):
     _set_capabilities(monkeypatch)
     seen: dict[str, Any] = {}
 
-    def _spy_capture(package, out_path, duration, serial=None, *, decision=None):
+    def _spy_capture(package, out_path, duration, serial=None, *, decision=None, mitm=True, floor=True):
         seen["decision"] = decision
         return capture.empty_result(STATUS_DONE, "ok")
 
