@@ -986,22 +986,59 @@ def _device_frida_version(serial: str | None = None) -> str:
     return match.group(1)
 
 
+def _frida_device_reachable(serial: str | None = None) -> bool | None:
+    """用 frida-core（``import frida``）连设备并 ``enumerate_processes()`` 实测验收 frida 是否真可用。
+
+    Returns: ``True``=可枚举进程（frida 就绪）/ ``False``=连上设备但枚举失败（frida-server 未起/
+    版本不配）/ ``None``=frida-core 不可用或连不上设备（无法判定）。best-effort、绝不抛。
+    """
+    try:
+        import frida  # type: ignore[import-not-found]  # lazy：缺库时无法验收
+    except Exception:
+        return None
+    try:
+        dev = (
+            frida.get_device(serial, timeout=_FRIDA_USB_TIMEOUT)
+            if serial
+            else frida.get_usb_device(timeout=_FRIDA_USB_TIMEOUT)
+        )
+    except Exception:
+        logger.debug("[capture] frida 连设备失败，无法枚举验收", exc_info=True)
+        return None
+    try:
+        dev.enumerate_processes()
+        return True
+    except Exception:
+        logger.debug("[capture] frida enumerate_processes 失败（frida-server 未起/版本不配）", exc_info=True)
+        return False
+
+
 def _check_frida_version_match(serial: str | None = None) -> tuple[bool, str]:
     """校验主机 frida 与设备 frida-server 版本是否一致（best-effort，不阻断注入）。
 
     Returns:
-        (ok, msg)。一致 / 无法比对（任一版本取不到）→ (True, '')；
-        明确不一致 → (False, 警告文案)。版本不一致时注入可能失败，但 capture 设计为
-        仍尝试注入，仅把告警写入 playbook/reason，由 _capture 决定如何呈现。
+        (ok, msg)。一致 → (True, '')；明确不一致 → (False, 警告文案)。
+        ★P1(#6)：任一版本取不到时不再静默按通过（PATH 混用/frida-server 未起会掩盖真不配），
+        改用 ``_frida_device_reachable`` 实测 ``enumerate_processes`` 验收：可枚举→静默通过；
+        连上但枚举失败→(False, 警告)；无法验收(缺 frida-core/连不上)→不阻断但只 debug。
     """
     host_ver = provision.host_frida_version()
     dev_ver = _device_frida_version(serial)
-    # 任一取不到 → 无法比对，按"通过"处理（只校在跑，不阻断）。
+    # 任一取不到 → 版本不可比对：用 frida 实测枚举验收，而非静默通过。
     if not host_ver or not dev_ver:
+        reachable = _frida_device_reachable(serial)
+        if reachable is False:
+            msg = (
+                "frida 版本无法比对，且设备进程枚举验收失败"
+                "（frida-server 可能未起或与主机版本不配），注入可能失败"
+            )
+            logger.warning("[capture] %s", msg)
+            return False, msg
         logger.debug(
-            "[capture] frida 版本无法比对（主机=%r 设备=%r），跳过版本校验",
+            "[capture] frida 版本无法比对（主机=%r 设备=%r），枚举验收=%r，不阻断",
             host_ver,
             dev_ver,
+            reachable,
         )
         return True, ""
     if host_ver != dev_ver:
