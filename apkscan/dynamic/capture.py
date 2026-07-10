@@ -346,6 +346,7 @@ def _capture(
     # ★ launch-only 抓不到，多数需引导式人工动态——多数情况下此 sink 为空，属预期。
     remote_control_events: list[dict[str, Any]] = []
     proxy_set = False
+    proxy_attempted = False  # 是否尝试过写设备代理（读回未确认也要在 finally 清理，避免遗留死代理）
     reverse_set = False
     # 抓包加固产生的告警（CA 未装系统库 / frida 版本不一致），收尾并入 reason，
     # 不假成功——但都不阻断抓包（HTTP 仍可抓；frida 不匹配仍尝试注入）。
@@ -407,6 +408,12 @@ def _capture(
         reverse_set = _adb_reverse(serial)
         if reverse_set:
             playbook.append(f"adb reverse tcp:{_PROXY_PORT} tcp:{_PROXY_PORT}")
+        else:
+            # 无 reverse：设备代理指向本机 loopback 却无反向端口 → MITM 通道不可用（floor 兜底）。
+            warnings.append(
+                f"adb reverse tcp:{_PROXY_PORT} 失败——设备代理指向 loopback 但无反向端口，MITM 通道可能不可用"
+            )
+        proxy_attempted = True
         proxy_set = _adb_set_proxy(serial)
         if proxy_set:
             playbook.append(f"adb 设全局代理 {_PROXY_HOST}:{_PROXY_PORT}")
@@ -545,7 +552,9 @@ def _capture(
                 playbook.append(f"① floor 保底：带外 pcap 已停并落盘 {floor_pcap.name}")
             else:
                 playbook.append("① floor 保底：带外 pcap 收尾未取到（降级，见日志）")
-        if proxy_set:
+        if proxy_attempted:
+            # ★P1：只要尝试过写代理就清理——即便读回未确认（settings put 可能已生效），
+            # 也避免把设备全局代理遗留成死的 127.0.0.1:8080。
             _adb_clear_proxy(serial)
             playbook.append("还原：清除设备全局代理")
         if reverse_set:
@@ -607,10 +616,14 @@ def _capture(
     # 降级判定：仅当**没有任何证据路径成立**——代理未起 且 无 floor pcap 且 MITM 0 字节 且 端点 0
     # ——才降为 degraded（总失败组合）。只要代理起了 / floor 拉回了 / 抓到端点，即便 app 安静
     # （0 flows）仍算 done（不阻断，降级细节走 reason/warnings，保持既有契约）。
-    evidence_path_ok = proxy_set or floor_pcap is not None or len(endpoints) > 0 or mitm_bytes > 0
+    # ★P0：MITM 通道需 代理【且】reverse 都成——只 proxy_set 不够（reverse 失败时设备代理
+    # 指向死的本机 loopback、MITM 不可用，等价无证据路径）。
+    mitm_channel_ok = proxy_set and reverse_set
+    capture_signals["mitm_channel_ok"] = mitm_channel_ok
+    evidence_path_ok = mitm_channel_ok or floor_pcap is not None or len(endpoints) > 0 or mitm_bytes > 0
     if result["status"] == STATUS_DONE and not evidence_path_ok:
         result["status"] = STATUS_DEGRADED
-        result["reason"] = "抓包降级：无任何证据路径（代理未起、无 floor pcap、MITM 0 字节、端点 0）"
+        result["reason"] = "抓包降级：无任何证据路径（MITM 通道未通[代理/reverse]、无 floor pcap、MITM 0 字节、端点 0）"
         capture_signals["degraded"] = True
     # 抓包失败/降级时，产出的 runtime_report 基于不完整/未抓全的流量，必须标明，避免伪装成正常结果。
     capture_ok = result["status"] == STATUS_DONE
