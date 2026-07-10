@@ -2302,6 +2302,47 @@ def test_stop_floor_pcap_none_on_pull_fail(monkeypatch, tmp_path):
     assert capture._stop_floor_pcap(handle, tmp_path) is None
 
 
+def test_stop_floor_pcap_pull_failure_preserves_remote_evidence(monkeypatch, tmp_path):
+    """★ P0-3 证据防丢：pull 失败/本地无效时【绝不删除远端 pcap】——保留供手动重拉，只清 pidfile。"""
+    monkeypatch.setattr(capture, "_wait", lambda *a, **k: None)
+    root_cmds: list = []
+    monkeypatch.setattr(
+        capture.provision, "_adb_root_shell",
+        lambda cmd, serial=None: (root_cmds.append(cmd), True)[1],
+    )
+    # pull 始终失败（不写本地文件）。
+    monkeypatch.setattr(capture, "_adb", lambda extra, serial=None: extra[0] != "pull")
+    handle = capture._FloorPcap(
+        remote_path="/data/local/tmp/x.pcap", pid_path="/data/local/tmp/x.pid", serial=None
+    )
+    assert capture._stop_floor_pcap(handle, tmp_path) is None
+    rm_cmds = [c for c in root_cmds if c.startswith("rm -f")]
+    assert not any("x.pcap" in c for c in rm_cmds)  # 远端 pcap 未被删除
+    assert any("x.pid" in c for c in rm_cmds)  # 仅清 pidfile
+
+
+def test_stop_floor_pcap_empty_local_not_deleted(monkeypatch, tmp_path):
+    """★ P0-3：pull 返回成功但落地 0 字节/坏 magic（MITM 空/半截）→ 视为无效、保留远端、返回 None。"""
+    monkeypatch.setattr(capture, "_wait", lambda *a, **k: None)
+    root_cmds: list = []
+    monkeypatch.setattr(
+        capture.provision, "_adb_root_shell",
+        lambda cmd, serial=None: (root_cmds.append(cmd), True)[1],
+    )
+
+    def fake_adb(extra, serial=None):
+        if extra and extra[0] == "pull":
+            Path(extra[2]).write_bytes(b"")  # 0 字节
+        return True
+
+    monkeypatch.setattr(capture, "_adb", fake_adb)
+    handle = capture._FloorPcap(
+        remote_path="/data/local/tmp/x.pcap", pid_path="/data/local/tmp/x.pid", serial=None
+    )
+    assert capture._stop_floor_pcap(handle, tmp_path) is None
+    assert not any("x.pcap" in c for c in root_cmds if c.startswith("rm -f"))
+
+
 def test_floor_starts_before_proxy(monkeypatch, tmp_path):
     """★ 回归（codex review P2）：floor tcpdump 必须在设全局代理【之前】起手——否则遵守代理的
     app 连 127.0.0.1:8080，设备侧 tcpdump 只抓到 loopback 代理腿、拿不到真实后端 IP。"""
