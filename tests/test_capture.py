@@ -364,6 +364,52 @@ def test_capture_clears_proxy_even_when_set_unconfirmed(monkeypatch, tmp_path):
     assert cleared["n"] == 1  # 尝试过写代理 → finally 仍清（不遗留死代理）
 
 
+def test_app_uid_parses_dumpsys(monkeypatch):
+    """★ P1(#10)：_app_uid 从 dumpsys package 解析 userId=；取不到→空串。"""
+    monkeypatch.setattr(capture, "_adb_capture", lambda extra, serial=None: "  x\n    userId=10234\n  y")
+    assert capture._app_uid("com.x") == "10234"
+    monkeypatch.setattr(capture, "_adb_capture", lambda extra, serial=None: None)
+    assert capture._app_uid("com.x") == ""
+
+
+def test_capture_uid_socket_snapshot_writes_artifact(monkeypatch, tmp_path):
+    """★ P1(#10)：抓到 ss / /proc/net → 写 uid_sockets.txt（含 uid + 远端）；全空 → None。"""
+
+    def fake_capture(extra, serial=None):
+        if "dumpsys" in extra:
+            return "userId=10234"
+        if extra[:2] == ["shell", "ss"]:
+            return 'tcp ESTAB 0 0 10.0.0.2:5000 47.98.207.14:7689 users:(("app",pid=1))'
+        if "cat" in extra:
+            return "  sl local rem ... uid ...\n 0: ... 10234 ..."
+        return None
+
+    monkeypatch.setattr(capture, "_adb_capture", fake_capture)
+    dest = capture._capture_uid_socket_snapshot("com.x", tmp_path)
+    assert dest is not None and dest.name == "uid_sockets.txt"
+    txt = dest.read_text(encoding="utf-8")
+    assert "uid=10234" in txt and "47.98.207.14:7689" in txt and "/proc/net/tcp" in txt
+
+    monkeypatch.setattr(capture, "_adb_capture", lambda extra, serial=None: None)
+    assert capture._capture_uid_socket_snapshot("com.x", tmp_path) is None
+
+
+def test_capture_run_includes_uid_snapshot_artifact(monkeypatch, tmp_path):
+    """★ P1(#10)：capture.run 把抓包窗口末的 UID socket 快照并进 artifacts。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    snap = tmp_path / "uid_sockets.txt"
+    monkeypatch.setattr(
+        capture, "_capture_uid_socket_snapshot",
+        lambda package, out_path, serial=None: (snap.write_text("x", encoding="utf-8"), snap)[1],
+    )
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+    assert str(snap) in result["artifacts"]
+
+
 def test_capture_exception_yields_error_and_cleans_up(monkeypatch, tmp_path):
     _set_capabilities(monkeypatch)
     mitm = _FakeProc()
