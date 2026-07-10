@@ -14,7 +14,7 @@ import struct
 
 import pytest
 
-from apkscan.core.models import LeadCategory
+from apkscan.core.models import Confidence, LeadCategory
 from apkscan.dynamic import pcap_ingest
 
 
@@ -68,6 +68,23 @@ def _dns_query(qname: str) -> bytes:
     q = b"".join(struct.pack("!B", len(p)) + p.encode() for p in qname.split(".")) + b"\x00"
     header = struct.pack("!HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)
     return header + q + struct.pack("!HH", 1, 1)  # qtype A, qclass IN
+
+
+def _tcp_flags(payload: bytes, sport: int, dport: int, flags: int) -> bytes:
+    """带指定 TCP 标志的 TCP 段（0x02=SYN、0x12=SYN+ACK、0x18=PSH+ACK、0x04=RST）。"""
+    hdr = struct.pack("!HHIIBBHHH", sport, dport, 0, 0, (5 << 4), flags, 65535, 0, 0)
+    return hdr + payload
+
+
+def _dns_response_txt(qname: str, txt: str, rcode: int = 0) -> bytes:
+    """最小 DNS 应答（QR=1，1 问 1 答，答为 TXT）——模拟 ClientCore 经 DNS TXT 下发配置。"""
+    q = b"".join(struct.pack("!B", len(p)) + p.encode() for p in qname.split(".")) + b"\x00"
+    header = struct.pack("!HHHHHH", 0x4321, 0x8000 | (rcode & 0x0F), 1, 1, 0, 0)  # QR=1 + rcode
+    question = q + struct.pack("!HH", 16, 1)  # qtype TXT(16) + IN
+    txt_b = txt.encode()
+    rdata = struct.pack("!B", len(txt_b)) + txt_b  # TXT rdata：长度前缀字符串
+    answer = b"\xc0\x0c" + struct.pack("!HHIH", 16, 1, 300, len(rdata)) + rdata  # name 指针→问题段
+    return header + question + answer
 
 
 def _pcap(packets: list[bytes], linktype: int = 1) -> bytes:
@@ -286,6 +303,65 @@ def test_strip_link_sll2_linktype_276() -> None:
     # IPv6 EtherType + 太短的 SLL2 帧的安全边界。
     assert pcap_ingest._strip_link(276, struct.pack("!H", 0x86DD) + b"\x00" * 18 + b"x")[0] == 0x86DD
     assert pcap_ingest._strip_link(276, b"\x08\x00\x00") == (None, b"")
+
+
+# ======================================================================
+# F. P0-1 远端聚合分级（established / syn_only）+ P0-2 DNS 结构化
+# ======================================================================
+
+
+def test_pcap_syn_only_is_pending_not_high_confidence() -> None:
+    """★ P0-1：仅 SYN、无 SYN-ACK、无载荷的连接尝试 → state=syn_only、advice=待核、非 HIGH——
+    不能把 ClientCore 轮询/容灾池的 SYN-only 节点写成"实测接入节点/建议调证"。"""
+    syn = _eth(_ipv4(_tcp_flags(b"", 55555, 9466, 0x02), 6, "10.0.0.2", "45.202.1.235"), 0x0800)
+    summary = pcap_ingest.parse_pcap_bytes(_pcap([syn]))
+    node = next(r for r in pcap_ingest.remote_endpoints(summary) if r.ip == "45.202.1.235")
+    assert node.state == "syn_only"
+    assert node.out_bytes == 0 and node.in_bytes == 0
+    lead = next(
+        l for l in pcap_ingest.to_report_leads(summary)
+        if l.category == LeadCategory.IP and "45.202.1.235" in l.value
+    )
+    assert lead.advice == "待核"
+    assert lead.confidence != Confidence.HIGH
+
+
+def test_pcap_aggregates_remote_endpoint_across_five_tuples() -> None:
+    """★ P0-1：同一远端的 本机→远端(出载荷) + 远端→本机(SYN-ACK+入载荷) 两条 5 元组聚成一个远端，
+    双向载荷 → established；out/in 字节与 connection_count 正确累计。"""
+    out1 = _eth(_ipv4(_tcp_flags(b"A" * 100, 50000, 7689, 0x18), 6, "10.0.0.2", "47.98.207.14"), 0x0800)
+    synack = _eth(_ipv4(_tcp_flags(b"", 7689, 50000, 0x12), 6, "47.98.207.14", "10.0.0.2"), 0x0800)
+    in1 = _eth(_ipv4(_tcp_flags(b"B" * 70, 7689, 50000, 0x18), 6, "47.98.207.14", "10.0.0.2"), 0x0800)
+    summary = pcap_ingest.parse_pcap_bytes(_pcap([out1, synack, in1]))
+    node = next(
+        r for r in pcap_ingest.remote_endpoints(summary) if r.ip == "47.98.207.14" and r.port == 7689
+    )
+    assert node.state == "established"
+    assert node.out_bytes == 100
+    assert node.in_bytes == 70
+    assert node.connection_count == 1
+    lead = next(
+        l for l in pcap_ingest.to_report_leads(summary)
+        if l.category == LeadCategory.IP and "47.98.207.14" in l.value
+    )
+    assert lead.advice == "建议调证" and lead.confidence == Confidence.HIGH
+
+
+def test_pcap_dns_txt_answer_is_preserved() -> None:
+    """★ P0-2：DNS TXT 应答（ClientCore 配置下发通道）须结构化保留 qtype=16/rcode/answer value，
+    不能只留 qname——sample案 TXT 内容要能直接进报告。"""
+    resp = _eth(
+        _ipv4(_udp(_dns_response_txt("7nf15vxk.yqdgtbq2xm.uk", "Io59QrTjne3mq19Yoc"), 53, 40000),
+              17, "10.0.0.1", "10.0.0.2"),
+        0x0800,
+    )
+    summary = pcap_ingest.parse_pcap_bytes(_pcap([resp]))
+    rec = next(r for r in summary.dns_records if r.qname == "7nf15vxk.yqdgtbq2xm.uk")
+    assert rec.qtype == 16 and rec.rcode == 0
+    assert any(a["type"] == 16 and "Io59QrTjne3mq19Yoc" in a["value"] for a in rec.answers)
+    led = pcap_ingest.to_ledger_dict(summary)
+    assert any(r["qtype"] == 16 for r in led["dns_records"])
+    assert "7nf15vxk.yqdgtbq2xm.uk" in summary.dns_queries  # 向后兼容仍保留 qname
 
 
 def test_to_runtime_endpoints_from_pcap() -> None:
