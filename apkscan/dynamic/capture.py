@@ -1563,17 +1563,34 @@ def _stop_floor_pcap(handle: _FloorPcap, out_path: Path) -> Path | None:
             serial,
         )
         _wait(_FLOOR_FLUSH_GRACE)  # 给 flush + 落盘一点时间
-        # 2) adb pull 落盘；首拉失败/无效先 chmod 644 兜底再重拉（root tcpdump 写的文件常 0600 拉不动）。
+        # 2) adb pull 到**唯一临时文件**：要求 _adb 返回成功【且】临时文件 magic/size 有效——
+        #    ★防旧证据误判（P0-3 复审）：若直接拉到固定 floor.pcap，本轮 pull 失败不覆盖旧文件时，
+        #    旧 floor.pcap 会被当本轮成功、随后误删本轮远端证据。临时文件+校验通过才原子替换。
         local = out_path / _FLOOR_LOCAL_NAME
-        _adb(["pull", handle.remote_path, str(local)], serial)
-        if not _floor_pcap_valid(local):
+        tmp = out_path / (_FLOOR_LOCAL_NAME + ".tmp")
+        try:
+            tmp.unlink(missing_ok=True)  # 清掉上一轮可能残留的临时文件
+        except OSError:
+            logger.debug("[capture] floor：清临时文件失败（忽略）", exc_info=True)
+        pulled_ok = _adb(["pull", handle.remote_path, str(tmp)], serial) and _floor_pcap_valid(tmp)
+        if not pulled_ok:  # 首拉失败/无效 → chmod 644 兜底再拉（root tcpdump 写的文件常 0600 拉不动）
             provision._adb_root_shell(f"chmod 644 {handle.remote_path} 2>/dev/null", serial)
-            _adb(["pull", handle.remote_path, str(local)], serial)
-        # 3) 仅本地有效才清远端 pcap；否则保留远端供手动重拉（绝不删证据）。
-        if _floor_pcap_valid(local):
+            pulled_ok = _adb(["pull", handle.remote_path, str(tmp)], serial) and _floor_pcap_valid(tmp)
+        # 3) 本轮确实拉到有效文件才原子替换 floor.pcap + 清远端；否则保留远端供手动重拉（绝不删证据）。
+        if pulled_ok:
+            try:
+                os.replace(tmp, local)
+            except OSError:
+                logger.exception("[capture] floor：替换 floor.pcap 失败（保留远端 pcap）")
+                provision._adb_root_shell(f"rm -f {handle.pid_path}", serial)
+                return None
             logger.info("[capture] floor：带外 pcap 已拉回 %s（%d 字节）", local, local.stat().st_size)
             provision._adb_root_shell(f"rm -f {handle.remote_path} {handle.pid_path}", serial)
             return local
+        try:
+            tmp.unlink(missing_ok=True)  # 失败的临时文件不留
+        except OSError:
+            logger.debug("[capture] floor：清失败临时文件失败（忽略）", exc_info=True)
         logger.warning(
             "[capture] floor：带外 pcap 拉回失败/为空/不可解析——【已保留设备侧 %s 未删除】，"
             "可手动 `adb -s %s pull %s`；仅清 pidfile。",

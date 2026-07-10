@@ -146,14 +146,18 @@ def _raise_exit_for_status(status: object) -> None:
     - ``STATUS_ERROR`` → ``typer.Exit(1)``（执行出错）；
     - ``STATUS_SKIPPED`` → ``typer.Exit(2)``（缺 frida/mitmproxy/root 等前置 → 零产出高发场景，
       与 error 分开，便于调用方/脚本区分「跑错了」与「没跑起来」）；
+    - ``STATUS_DEGRADED`` → ``typer.Exit(3)``（抓包跑完但无任何证据路径：代理未起/MITM 0 字节/
+      floor 未拉回/端点 0 → 脚本调用方不能当成功，独立码便于区分「降级无产出」）；
     - 其它（done/未知）→ 不抛，正常返回 0。
     """
-    from apkscan.dynamic import STATUS_ERROR, STATUS_SKIPPED
+    from apkscan.dynamic import STATUS_DEGRADED, STATUS_ERROR, STATUS_SKIPPED
 
     if status == STATUS_ERROR:
         raise typer.Exit(code=1)
     if status == STATUS_SKIPPED:
         raise typer.Exit(code=2)
+    if status == STATUS_DEGRADED:
+        raise typer.Exit(code=3)
 
 
 @app.command()
@@ -286,7 +290,7 @@ def analyze(
                 )
     finally:
         _close_ctx_quiet(ctx)  # IPA 的 ZipFile 句柄必须关（ApkContext 无 close 则 no-op）
-        _cleanup_adb_quiet()
+        _cleanup_adb_quiet(_adb_owned)
 
 
 @app.command()

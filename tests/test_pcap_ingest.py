@@ -70,6 +70,17 @@ def _dns_query(qname: str) -> bytes:
     return header + q + struct.pack("!HH", 1, 1)  # qtype A, qclass IN
 
 
+def _ipv6(payload: bytes, proto: int, src: str, dst: str) -> bytes:
+    import socket
+
+    hdr = (
+        struct.pack("!IHBB", 0x60000000, len(payload), proto, 64)
+        + socket.inet_pton(socket.AF_INET6, src)
+        + socket.inet_pton(socket.AF_INET6, dst)
+    )
+    return hdr + payload
+
+
 def _tcp_flags(payload: bytes, sport: int, dport: int, flags: int) -> bytes:
     """带指定 TCP 标志的 TCP 段（0x02=SYN、0x12=SYN+ACK、0x18=PSH+ACK、0x04=RST）。"""
     hdr = struct.pack("!HHIIBBHHH", sport, dport, 0, 0, (5 << 4), flags, 65535, 0, 0)
@@ -362,6 +373,45 @@ def test_pcap_dns_txt_answer_is_preserved() -> None:
     led = pcap_ingest.to_ledger_dict(summary)
     assert any(r["qtype"] == 16 for r in led["dns_records"])
     assert "7nf15vxk.yqdgtbq2xm.uk" in summary.dns_queries  # 向后兼容仍保留 qname
+
+
+def test_runtime_endpoints_filters_syn_only_no_payload() -> None:
+    """★ 复审#1：to_runtime_endpoints（自动并入主报告）过滤无载荷 SYN-only 节点——不让它绕过
+    态分级、走下游默认公网 IP"建议调证"；有载荷节点保留；SYN-only 仍在 pcap 台账作待核。"""
+    syn = _eth(_ipv4(_tcp_flags(b"", 55555, 9466, 0x02), 6, "10.0.0.2", "45.202.1.235"), 0x0800)
+    data = _eth(_ipv4(_tcp_flags(b"X" * 50, 50001, 30113, 0x18), 6, "10.0.0.2", "106.53.21.146"), 0x0800)
+    summary = pcap_ingest.parse_pcap_bytes(_pcap([syn, data]))
+    ip_vals = {e.value for e in pcap_ingest.to_runtime_endpoints(summary) if e.kind == "ip"}
+    assert "45.202.1.235" not in ip_vals  # SYN-only 无载荷 → 自动并入过滤
+    assert "106.53.21.146" in ip_vals  # 有载荷 → 保留
+    syn_lead = next(
+        l for l in pcap_ingest.to_report_leads(summary)
+        if l.category == LeadCategory.IP and "45.202.1.235" in l.value
+    )
+    assert syn_lead.advice == "待核"  # pcap 台账仍留作待核（不静默丢弃）
+
+
+def test_udp_payload_counts_as_evidence() -> None:
+    """★ 复审#2：UDP 载荷计入 payload_bytes——UDP C2/QUIC/HTTP3 真载荷不被误降为待核。"""
+    udp = _eth(_ipv4(_udp(b"\x00" * 40, 50000, 8443), 17, "10.0.0.2", "8.8.8.8"), 0x0800)
+    summary = pcap_ingest.parse_pcap_bytes(_pcap([udp]))
+    node = next(r for r in pcap_ingest.remote_endpoints(summary) if r.ip == "8.8.8.8")
+    assert node.out_bytes == 40 and node.has_payload
+    lead = next(
+        l for l in pcap_ingest.to_report_leads(summary)
+        if l.category == LeadCategory.IP and "8.8.8.8" in l.value
+    )
+    assert lead.advice == "建议调证"
+
+
+def test_public_to_public_ipv6_not_dropped() -> None:
+    """★ 复审#3：两端都公网（移动网 IPv6 GUA 直连）不丢弃——SYN 方向判远端。"""
+    syn = _eth(_ipv6(_tcp_flags(b"", 40000, 443, 0x02), 6, "2409:8a00::1", "2606:4700::1111"), 0x86DD)
+    dat = _eth(_ipv6(_tcp_flags(b"Z" * 30, 40000, 443, 0x18), 6, "2409:8a00::1", "2606:4700::1111"), 0x86DD)
+    summary = pcap_ingest.parse_pcap_bytes(_pcap([syn, dat]))
+    ips = {r.ip for r in pcap_ingest.remote_endpoints(summary)}
+    assert "2606:4700::1111" in ips  # 远端保留（未丢连接）
+    assert "2409:8a00::1" not in ips  # 本机端不作远端
 
 
 def test_to_runtime_endpoints_from_pcap() -> None:

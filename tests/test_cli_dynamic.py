@@ -22,7 +22,7 @@ from typer.testing import CliRunner
 
 from apkscan import cli
 from apkscan.core.models import Report
-from apkscan.dynamic import STATUS_DONE, STATUS_ERROR, STATUS_SKIPPED
+from apkscan.dynamic import STATUS_DEGRADED, STATUS_DONE, STATUS_ERROR, STATUS_SKIPPED
 
 
 @pytest.fixture(autouse=True)
@@ -154,6 +154,16 @@ def test_doctor_cleans_adb_on_exit(monkeypatch):
     res = runner.invoke(cli.app, ["doctor"])
     assert res.exit_code == 1
     assert calls["n"] == 1  # finally 收了一次（rc=1 也收）
+
+
+def test_raise_exit_degraded_is_code_3():
+    """★ 复审#5：status=degraded → 退出码 3（脚本调用方区分"降级无产出"，不当成功）；done 不抛。"""
+    import typer
+
+    with pytest.raises(typer.Exit) as ei:
+        cli._raise_exit_for_status(STATUS_DEGRADED)
+    assert ei.value.exit_code == 3
+    cli._raise_exit_for_status(STATUS_DONE)  # done 不抛（正常返回 0）
 
 
 def test_cleanup_adb_quiet_skips_kill_when_not_owned(monkeypatch):
