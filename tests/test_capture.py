@@ -1478,6 +1478,11 @@ def test_adb_proxy_reverse_helpers_thread_serial(monkeypatch):
     """_adb_set_proxy/_adb_reverse/_adb_clear_proxy/_adb_remove_reverse 把 serial 透传给 _adb。"""
     seen: list[tuple[list[str], str | None]] = []
     monkeypatch.setattr(capture, "_adb", lambda extra, serial=None: seen.append((extra, serial)) or True)
+    # 代理读回确认（避免真 adb subprocess + 不走 root 兜底），返回目标值 = 已生效。
+    monkeypatch.setattr(
+        capture, "_adb_capture",
+        lambda extra, serial=None: f"{capture._PROXY_HOST}:{capture._PROXY_PORT}",
+    )
 
     capture._adb_set_proxy("emulator-5554")
     capture._adb_clear_proxy("emulator-5554")
@@ -1485,7 +1490,28 @@ def test_adb_proxy_reverse_helpers_thread_serial(monkeypatch):
     capture._adb_remove_reverse("emulator-5554")
 
     assert all(s == "emulator-5554" for _, s in seen)
-    assert len(seen) == 4
+    assert len(seen) == 4  # 每个 helper 各 1 次 _adb（set_proxy 读回确认后不走 root 兜底）
+
+
+def test_adb_set_proxy_requires_readback_confirmation(monkeypatch):
+    """★ P1(#9)：settings put 返回成功但读回未生效 → root 兜底；仍未确认 → 返回 False（明确降级，
+    不谎称 MITM 就绪）。读回确认目标值才 True。"""
+    monkeypatch.setattr(capture, "_adb", lambda extra, serial=None: True)  # put 总返回 0
+    root_calls: list = []
+    monkeypatch.setattr(
+        capture.provision, "_adb_root_shell",
+        lambda cmd, serial=None: (root_calls.append(cmd), True)[1],
+    )
+    target = f"{capture._PROXY_HOST}:{capture._PROXY_PORT}"
+
+    # 1) 读回始终 "null"（未生效）→ 走 root 兜底、仍未确认 → False
+    monkeypatch.setattr(capture, "_adb_capture", lambda extra, serial=None: "null")
+    assert capture._adb_set_proxy("emulator-5554") is False
+    assert any("settings put global http_proxy" in c for c in root_calls)  # root 兜底被调
+
+    # 2) 读回确认目标值 → True（且不需 root 兜底）
+    monkeypatch.setattr(capture, "_adb_capture", lambda extra, serial=None: target + "\n")
+    assert capture._adb_set_proxy("emulator-5554") is True
 
 
 def test_device_frida_version_uses_dash_s(monkeypatch):
