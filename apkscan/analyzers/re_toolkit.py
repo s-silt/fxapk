@@ -97,7 +97,7 @@ class _ToolRule:
 class _Hit:
     """一条规则的命中证据集合。
 
-    strong：so 名 / 特征文件命中（工具运行时实证）；否则仅 dex 包名命中（中证据）。
+    strong：so 名 / 特征文件 / .so 内符号·字符串命中（工具运行时实证）；否则仅 dex 包名命中（中证据）。
     """
 
     rule: _ToolRule

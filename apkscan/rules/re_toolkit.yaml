@@ -116,9 +116,9 @@ tools:
       - "org.lsposed.hiddenapibypass"
     note: "LSPosed 系 hidden-api 绕过；反射调用系统隐藏接口，常与 hook/反检测配套出现。"
 
-  - name: "SignCheck (Binder-IPC 签名自校验/反重打包)"
+  - name: "Native Binder 签名自校验/反重打包（SignCheck 或同类壳）"
     category: "evasion"
-    capability: "native 手写 Parcel 直调 Binder IPC 取 APK 签名做重打包自校验，绕过 Java PackageManager 与签名 spoof 探针；内置反 frida/hook/多开检测"
+    capability: "native 手写 Parcel 直调 Binder IPC 取 APK 签名做重打包自校验，绕过 Java PackageManager 与签名 spoof 探针；常伴反 frida/hook/多开检测"
     so_names:
       - "libSignVerify.so"
     dex_prefixes:
@@ -128,7 +128,7 @@ tools:
       - "android.os.IServiceManager"
     so_strings_all: true
     anti_frida: true
-    note: "★ 反重打包：走 Binder IPC 底层取签名，fxapk repackage 重签会被其自校验识破、签名 spoof 探针(Java hook)打不到——需保留原签名或退旁路 pcap。so 名/包名可被改名规避，抗改名指纹=同一 .so 内同时出现 IPackageManager 与 IServiceManager 两 native 字面量（native 手写 Parcel 直调 PackageManager）。"
+    note: "★ 反重打包：走 Binder IPC 底层取签名，fxapk repackage 重签会被其自校验识破、签名 spoof 探针(Java hook)打不到——需保留原签名或退旁路 pcap。libSignVerify.so/littlewhitebear 命中=具体工具 SignCheck；仅 so_strings 命中(同一 .so 内 IPackageManager+IServiceManager 双 native 字面量)=该**技术**指纹——商业加固/完整性校验壳(jiagu/legu/梆梆类)也用同技术,故用技术级命名、串案时按弱锚点(同技术≠同工具/同团伙)对待。"
 
   - name: "InjectDetect (frida/xposed 反注入检测器)"
     category: "evasion"
