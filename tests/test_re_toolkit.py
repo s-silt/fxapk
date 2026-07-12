@@ -201,3 +201,37 @@ def test_dex_failure_still_detects_via_so():
     result = ReToolkitAnalyzer().analyze(ctx)
     assert result.error is None
     assert any("ShadowHook" in name for name in result.meta["hook_frameworks"])
+
+
+# --- 新增：反重打包 / 反注入 / 身份伪装 工具链(开源加固·反侦察) ---
+
+
+def test_signcheck_so_sets_anti_frida():
+    result = _analyze(native_libs=["lib/arm64-v8a/libSignVerify.so"])
+    assert result.error is None
+    assert result.meta["anti_frida"] is True
+    assert any("SignCheck" in t["name"] for t in result.meta["re_toolkit"])
+    assert result.findings[0].severity == Severity.HIGH
+
+
+def test_injectdetect_so_sets_anti_frida():
+    result = _analyze(native_libs=["lib/arm64-v8a/libcheck_env.so"])
+    assert result.meta["anti_frida"] is True
+    assert any("InjectDetect" in t["name"] for t in result.meta["re_toolkit"])
+
+
+def test_xposed_module_identity_via_file():
+    result = _analyze(files={"assets/xposed_init": b"com.evil.Hook"})
+    assert any("Xposed" in t["name"] for t in result.meta["re_toolkit"])
+
+
+def test_virtual_camera_via_dex():
+    result = _analyze(dex_strings=["com.zensu.camswap.MainHook", "com.example.A"])
+    assert any(("虚拟摄像头" in t["name"]) or ("CamSwap" in t["name"]) for t in result.meta["re_toolkit"])
+
+
+def test_benign_antixposed_string_not_flagged_as_module():
+    # ★FP 防回归：正规银行/支付 app 内嵌 de.robv.android.xposed 做反 Xposed 检测,
+    # 不得被误判为"Xposed 模块身份"(所以该条目只锚 assets/xposed_init、不加 de.robv 作 dex 前缀)。
+    result = _analyze(dex_strings=["de.robv.android.xposed.XposedHelpers", "com.bank.App"])
+    assert not any(t["name"] == "Xposed/LSPosed 模块身份" for t in result.meta["re_toolkit"])
