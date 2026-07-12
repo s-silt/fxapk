@@ -409,3 +409,23 @@ def test_strong_hit_with_extra_dex_noise_still_only_strong_vendor():
     assert "360" in (packer_leads[0].subject or "")
     # 强命中存在 → 不产 LOW INFO Finding（2b/2c 互斥）
     assert not any(f.id == "PACK-NAME-STRINGS-ONLY" for f in result.findings)
+
+
+# --- 新增：开源抽取壳 / DEX-VMP（抗随机化强证据） ---
+
+
+def test_dex_shell_detected_via_hardcoded_assets_constant():
+    # 新版/fork dpt-shell 的 so 名+包名随机化，靠 Const.java 硬编码 assets 常量命中（抗随机化强证据）。
+    result = _analyze(files={"assets/OoooooOooo": b"\x00"})
+    assert result.error is None
+    assert result.meta["is_hardened"] is True
+    assert result.meta["packed"] is not None
+    assert ("dpt-shell" in result.meta["packed"]) or ("dex-shell" in result.meta["packed"])
+    assert any(f.id == "PACK-DETECTED" for f in result.findings)
+
+
+def test_nmmp_dexvmp_detected_via_so():
+    result = _analyze(native_libs=["lib/arm64-v8a/libnmmvm.so"])
+    assert result.error is None
+    assert result.meta["is_hardened"] is True
+    assert "nmmp" in result.meta["packed"]
