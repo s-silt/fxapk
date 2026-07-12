@@ -45,7 +45,7 @@ tools:
       - "libbytehook.so"
     dex_prefixes:
       - "com.bytedance.android.bytehook"
-    note: "字节开源 PLT hook（bhook）；亦为 dpt-shell 抽取壳的运行时依赖，需结合加固识别综合研判。"
+    note: "字节开源 PLT hook（bhook）；样本内置 = 具备原生层函数劫持能力。"
 
   - name: "GlossHook (native hook)"
     category: "hook_framework"
@@ -82,7 +82,7 @@ tools:
     capability: "native inline hook 后端引擎"
     so_names:
       - "libdobby.so"
-    note: "常见 native inline hook 引擎；亦为 dpt-shell 抽取壳依赖，需结合加固识别综合研判。"
+    note: "常见 native inline hook 引擎；样本内置 = 具备原生层函数劫持能力。"
 
   - name: "Android-Mem-Kit (内存插桩)"
     category: "hook_framework"
@@ -108,6 +108,42 @@ tools:
     dex_prefixes:
       - "org.lsposed.hiddenapibypass"
     note: "LSPosed 系 hidden-api 绕过；反射调用系统隐藏接口，常与 hook/反检测配套出现。"
+
+  - name: "SignCheck (Binder-IPC 签名自校验/反重打包)"
+    category: "evasion"
+    capability: "native 手写 Parcel 直调 Binder IPC 取 APK 签名做重打包自校验，绕过 Java PackageManager 与签名 spoof 探针；内置反 frida/hook/多开检测"
+    so_names:
+      - "libSignVerify.so"
+    dex_prefixes:
+      - "littlewhitebear.signverification"
+    anti_frida: true
+    note: "★ 反重打包：走 Binder IPC 底层取签名，fxapk repackage 重签会被其自校验识破、签名 spoof 探针(Java hook)打不到——需保留原签名或退旁路 pcap。so 名/包名可被改名规避（抗改名的 native 双串指纹见 .so 内容扫描增强）。"
+
+  - name: "InjectDetect (frida/xposed 反注入检测器)"
+    category: "evasion"
+    capability: "运行时探测 frida/xposed 注入（扫 /proc maps·smaps·task + 内存段 + linker 敏感库 + CRC 完整性），命中令 App 退出"
+    so_names:
+      - "libcheck_env.so"
+    dex_prefixes:
+      - "com.yuuki.check_env"
+    anti_frida: true
+    note: "检测类而非逃逸类；命中即预判 frida attach 会被识别→秒退/零产出——frida 秒退应归因『被 detect』而非『样本干净』，需旁路 pcap/tls-keylog/内核抓包。so 名/包名可被改名规避。"
+
+  - name: "Xposed/LSPosed 模块身份"
+    category: "evasion"
+    capability: "本 APK 声明为 Xposed/LSPosed 模块 = 设计用于 hook 其它 app（远控/劫持/改包前置）"
+    files:
+      - "assets/xposed_init"
+    note: "★ 正常终端 app 绝不会把自己做成 Xposed 模块；内置 assets/xposed_init = 本包用于 hook 别的 app，强异常信号（远控/虚拟摄像头刷脸/改包类黑产工具常见）。注：仅用 manifest meta-data(xposedmodule) 声明、无 assets/xposed_init 的现代 LSPosed 模块由 manifest 分析器另行覆盖；未加 de.robv.android.xposed 作 dex 前缀，因正规银行/支付 app 也内嵌该串做反 Xposed 检测会误报。"
+
+  - name: "虚拟摄像头/刷脸绕过 (CamSwap 系)"
+    category: "evasion"
+    capability: "注入假视频流冒充摄像头 → 绕过人脸活体检测 / KYC 刷脸（实名认证/开户/解冻）"
+    files:
+      - "cs_config.json"
+    dex_prefixes:
+      - "camswap"
+    note: "★★ 高涉诈价值：具备『冒用他人人脸过活体检测』能力，是绕过实名认证、盗开账户、过 KYC 洗白的核心黑产环节；调证指向被绕过的实名核验平台/人脸服务商（取绕过时间戳+被冒用身份）。签名为 CamSwap 系工具特征、best-effort（真实包名可能定制），配合上面 Xposed 模块身份共现更可信。"
 
   - name: "Frida Gadget (内嵌 frida)"
     category: "instrumentation"

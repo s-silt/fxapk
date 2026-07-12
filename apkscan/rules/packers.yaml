@@ -199,15 +199,36 @@ packers:
       - "com.payegis."
     note: "几维安全以 libkwscmm/libkwscr/libkwslinker.so 为典型特征。"
 
-  # ---- dpt-shell（开源 DEX 抽取壳，非商业厂商）-------------------------
-  - name: "dpt-shell 抽取壳 (开源)"
-    vendor: "开源自研壳（luoyesiqiu/dpt-shell，无第三方加固厂商——脱壳后静态补全 / 向开发者本人调证）"
+  # ---- dpt-shell / dex-shell（开源 DEX 抽取壳，非商业厂商）---------------
+  - name: "dpt-shell / dex-shell 抽取壳 (开源)"
+    vendor: "开源自研壳（luoyesiqiu/dpt-shell 及其 fork，无第三方加固厂商——脱壳后静态补全 / 向开发者本人调证）"
     so_names:
       - "libdpt.so"
+    files:
+      - "assets/i11111i111.zip"
+      - "assets/OoooooOooo"
+      - "assets/d_shell_data_001"
+      - "assets/vwwwwwvwww"
     dex_prefixes:
       - "com.luoyesiqiu"
+      - "com.luoyesiqiu.shell"
     note: >-
       开源 DEX 抽取壳（抽取方法体 NOP 填充、运行时还原）；★ 内置主动反 frida（内存扫 frida-agent
       命中即崩溃）+ ptrace 反调试 + SO 段 RC4 加密。命中 = 需脱壳（真实 DEX 不完整）且 frida
-      抓包会被主动击败——配 sample_runtime_compat 反检测或退旁路 pcap。其运行时依赖
-      libdobby.so + libbytehook.so（另由 re_toolkit 识别，可交叉佐证）。
+      抓包会被主动击败——配 sample_runtime_compat 反检测或退旁路 pcap。★ so 名(libdpt.so)与包名
+      (com.luoyesiqiu)均随构建随机化、新版/fork 会击穿；上面四个 assets 是 Const.java 硬编码常量、
+      不随构建变，为抗随机化的强锚点。注：dobby/bytehook 静态链入壳 so、APK 内无独立 libdobby/libbytehook.so。
+
+  # ---- nmmp / dex2c（开源 DEX 方法级虚拟机保护，非商业厂商）---------------
+  - name: "nmmp / dex2c DEX-VMP (开源)"
+    vendor: "开源自研壳（maoabc/nmmp，DEX 方法转 native 自定义 VM——脱壳/dump 得空壳、向开发者本人调证）"
+    so_names:
+      - "libnmmp.so"
+      - "libnmmvm.so"
+    dex_prefixes:
+      - "com/nmmedit/protect"
+    note: >-
+      开源 DEX 方法级虚拟化保护（dex2c：选中方法体转成 native 自定义字节码由 VM 解释执行）；★ 受保护方法
+      静态反编译 / 脱壳 / dump 均得空壳，须对具体业务逻辑做运行时 hook（vmInterpret 或目标 native 方法）或人工还原。
+      正常 App 罕见方法级虚拟化，命中 = 主动把核心逻辑(收款路由/C2/转账/远控编排)虚拟化隐藏、对抗静态取证的强反分析信号。
+      注：com/nmmedit/protect 为 dex 字符串池中类型描述符形式；loadLibrary("nmmp") 必伴随上面 so 强证据共现。
