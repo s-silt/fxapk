@@ -29,6 +29,9 @@ from apkscan.analyzers._common import (
     as_str_list as _as_str_list,
 )
 from apkscan.analyzers._common import (
+    collect_app_so_string_blobs as _collect_app_so_string_blobs,
+)
+from apkscan.analyzers._common import (
     collect_dex_strings as _collect_dex_strings_shared,
 )
 from apkscan.analyzers._common import (
@@ -80,6 +83,12 @@ class _ToolRule:
     so_names: list[str] = field(default_factory=list)
     files: list[str] = field(default_factory=list)
     dex_prefixes: list[str] = field(default_factory=list)
+    # .so 内符号/字符串子串（大小写不敏感）→ 强证据；识别以静态库编入宿主 .so、无独立 so 名/
+    # dex 包名的工具（ArtHook），或抗改名的反检测特征串（SignCheck/InjectDetect）。
+    so_strings: list[str] = field(default_factory=list)
+    # true = 要求 so_strings 列全部在同一 .so 内共现（如 SignCheck 的 IPackageManager+IServiceManager）；
+    # false = 任一命中即可（默认）。
+    so_strings_all: bool = False
     anti_frida: bool = False
     note: str = ""
 
@@ -112,17 +121,24 @@ class ReToolkitAnalyzer(BaseAnalyzer):
             self._set_empty_meta(result)
             return result
 
-        # 三路数据源各自 try/except，单源失败不影响其余。
+        # 四路数据源各自 try/except，单源失败不影响其余。
         so_basenames = _collect_so_basenames_shared(ctx, self.name)
         file_paths = _collect_file_paths_shared(ctx, self.name)
         _dex_ok, dex_strings = _collect_dex_strings_shared(
             ctx, self.name, max_strings=_MAX_DEX_STRINGS
         )
+        # .so 内容采样取串——仅当有规则用 so_strings 时才做（否则零额外 IO）。
+        so_blobs: list[tuple[str, str]] = []
+        if any(r.so_strings for r in rules):
+            try:
+                so_blobs = _collect_app_so_string_blobs(ctx, self.name)
+            except Exception:
+                logger.exception("[%s] 采样 .so 字符串失败，跳过该路匹配", self.name)
 
         hits: list[_Hit] = []
         for rule in rules:
             try:
-                hit = self._match_rule(rule, so_basenames, file_paths, dex_strings)
+                hit = self._match_rule(rule, so_basenames, file_paths, dex_strings, so_blobs)
             except Exception:
                 logger.exception("[%s] 规则匹配失败，跳过：%s", self.name, rule.name)
                 continue
@@ -167,6 +183,7 @@ class ReToolkitAnalyzer(BaseAnalyzer):
         so_basenames: dict[str, str],
         file_paths: list[str],
         dex_strings: list[str],
+        so_blobs: list[tuple[str, str]],
     ) -> _Hit:
         hit = _Hit(rule=rule)
 
@@ -199,6 +216,24 @@ class ReToolkitAnalyzer(BaseAnalyzer):
                     hit.evidences.append(ev)
                     hit.matched_features.append(f"dex:{prefix}")
                     break
+
+        # 4) .so 内符号/字符串（子串匹配，大小写不敏感）→ 强证据（抗 so 名/包名改名）
+        if rule.so_strings:
+            needles = [s.lower() for s in rule.so_strings]
+            for path, blob in so_blobs:
+                if rule.so_strings_all:
+                    hit_needles = needles if all(n in blob for n in needles) else []
+                else:
+                    hit_needles = [n for n in needles if n in blob]
+                if hit_needles:
+                    joiner = "&" if rule.so_strings_all else "|"
+                    tag = joiner.join(hit_needles)
+                    ev = Evidence(source="native", location=path,
+                                  snippet=_truncate(f"so_str~={tag}"))
+                    hit.evidences.append(ev)
+                    hit.matched_features.append(f"so_str:{tag}")
+                    hit.strong = True
+                    break  # 单个 .so 命中即足以佐证本规则
 
         return hit
 
@@ -306,6 +341,8 @@ class ReToolkitAnalyzer(BaseAnalyzer):
                     so_names=_as_str_list(entry.get("so_names")),
                     files=_as_str_list(entry.get("files")),
                     dex_prefixes=_as_str_list(entry.get("dex_prefixes")),
+                    so_strings=_as_str_list(entry.get("so_strings")),
+                    so_strings_all=bool(entry.get("so_strings_all", False)),
                     anti_frida=bool(entry.get("anti_frida", False)),
                     note=_str_or_empty(entry.get("note")),
                 )

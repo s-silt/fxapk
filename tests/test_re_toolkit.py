@@ -235,3 +235,50 @@ def test_benign_antixposed_string_not_flagged_as_module():
     # 不得被误判为"Xposed 模块身份"(所以该条目只锚 assets/xposed_init、不加 de.robv 作 dex 前缀)。
     result = _analyze(dex_strings=["de.robv.android.xposed.XposedHelpers", "com.bank.App"])
     assert not any(t["name"] == "Xposed/LSPosed 模块身份" for t in result.meta["re_toolkit"])
+
+
+# --- 新增：native .so 符号/字符串扫描(抗 so 名/包名改名) ---------------------
+
+
+def test_arthook_via_native_symbol_string():
+    # ArtHook 静态库编入宿主 .so、无独立 so/dex，靠 .so 内 mangled 符号 _ZN7arthook 识别。
+    result = _analyze(files={"lib/arm64-v8a/libnative.so": b"xxx _ZN7arthook9InitializeEv yyy"})
+    assert result.error is None
+    assert any("ArtHook" in t["name"] for t in result.meta["re_toolkit"])
+    assert any("ArtHook" in n for n in result.meta["hook_frameworks"])
+    # so_strings 命中 = 强证据
+    assert any(t["strong"] for t in result.meta["re_toolkit"] if "ArtHook" in t["name"])
+
+
+def test_signcheck_renamed_so_via_double_string():
+    # so 改名为 libfoo.so、无原包名，但 .so 内同含两 native 字面量 → all_of 命中(抗改名)。
+    blob = b"aa android.content.pm.IPackageManager bb android.os.IServiceManager cc"
+    result = _analyze(files={"lib/arm64-v8a/libfoo.so": blob})
+    assert any("SignCheck" in t["name"] for t in result.meta["re_toolkit"])
+    assert result.meta["anti_frida"] is True
+
+
+def test_signcheck_all_of_needs_both_strings():
+    # ★FP 防回归：只含 IServiceManager(单独常见)不该触发 SignCheck 的 all_of。
+    result = _analyze(files={"lib/arm64-v8a/libfoo.so": b"only android.os.IServiceManager here"})
+    assert not any("SignCheck" in t["name"] for t in result.meta["re_toolkit"])
+
+
+def test_injectdetect_renamed_via_misspelled_string():
+    # 改名后靠 .so 内特征串(原作拼写错 bean≠been)识别。
+    result = _analyze(files={"lib/arm64-v8a/librenamed.so": b".... detect lib has bean hooked ...."})
+    assert any("InjectDetect" in t["name"] for t in result.meta["re_toolkit"])
+    assert result.meta["anti_frida"] is True
+
+
+def test_so_with_no_target_strings_not_flagged():
+    # 普通 .so 无任何 so_strings 命中 → 不误报 ArtHook/SignCheck/InjectDetect。
+    result = _analyze(files={"lib/arm64-v8a/libapp.so": b"hello world some ordinary strings here"})
+    flagged = {t["name"] for t in result.meta["re_toolkit"]}
+    assert not any(("ArtHook" in n) or ("SignCheck" in n) or ("InjectDetect" in n) for n in flagged)
+
+
+def test_benign_so_skipped_by_whitelist():
+    # 白名单库(libflutter.so)即便含特征串也不扫(排除以省 IO/降 FP)。
+    result = _analyze(files={"lib/arm64-v8a/libflutter.so": b"_ZN7arthook9InitializeEv"})
+    assert not any("ArtHook" in t["name"] for t in result.meta["re_toolkit"])

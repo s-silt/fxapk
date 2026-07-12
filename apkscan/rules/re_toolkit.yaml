@@ -70,6 +70,13 @@ tools:
       - "top.canyie.pine"
     note: "免 Xposed 的 ART 方法 hook 框架；样本内置 = 具备 Java 层方法劫持能力。"
 
+  - name: "ArtHook (ART 方法级 hook)"
+    category: "hook_framework"
+    capability: "ArtMethod 级 Java 方法 hook（静态库编入宿主 .so，无独立 so/dex）"
+    so_strings:
+      - "_ZN7arthook"
+    note: "ArtHook 以静态库编入 App 自有 .so、无独立 libarthook.so、无 Java 包名，三路(so名/文件/dex)全落空，靠 .so 内 mangled C++ 符号 _ZN7arthook（namespace arthook 长度前缀 7）识别；release 完全 strip 符号则静态无痕，须靠运行时兜底。"
+
   - name: "xDL (Android ELF 符号解析)"
     category: "hook_framework"
     capability: "绕过 linker namespace 解析 .so 符号（hook 前置能力）"
@@ -116,8 +123,12 @@ tools:
       - "libSignVerify.so"
     dex_prefixes:
       - "littlewhitebear.signverification"
+    so_strings:
+      - "android.content.pm.IPackageManager"
+      - "android.os.IServiceManager"
+    so_strings_all: true
     anti_frida: true
-    note: "★ 反重打包：走 Binder IPC 底层取签名，fxapk repackage 重签会被其自校验识破、签名 spoof 探针(Java hook)打不到——需保留原签名或退旁路 pcap。so 名/包名可被改名规避（抗改名的 native 双串指纹见 .so 内容扫描增强）。"
+    note: "★ 反重打包：走 Binder IPC 底层取签名，fxapk repackage 重签会被其自校验识破、签名 spoof 探针(Java hook)打不到——需保留原签名或退旁路 pcap。so 名/包名可被改名规避，抗改名指纹=同一 .so 内同时出现 IPackageManager 与 IServiceManager 两 native 字面量（native 手写 Parcel 直调 PackageManager）。"
 
   - name: "InjectDetect (frida/xposed 反注入检测器)"
     category: "evasion"
@@ -126,8 +137,10 @@ tools:
       - "libcheck_env.so"
     dex_prefixes:
       - "com.yuuki.check_env"
+    so_strings:
+      - "detect lib has bean hooked"
     anti_frida: true
-    note: "检测类而非逃逸类；命中即预判 frida attach 会被识别→秒退/零产出——frida 秒退应归因『被 detect』而非『样本干净』，需旁路 pcap/tls-keylog/内核抓包。so 名/包名可被改名规避。"
+    note: "检测类而非逃逸类；命中即预判 frida attach 会被识别→秒退/零产出——frida 秒退应归因『被 detect』而非『样本干净』，需旁路 pcap/tls-keylog/内核抓包。so 名/包名可被改名规避，抗改名指纹=.so 内特征串（含原作拼写错 bean≠been）。"
 
   - name: "Xposed/LSPosed 模块身份"
     category: "evasion"
