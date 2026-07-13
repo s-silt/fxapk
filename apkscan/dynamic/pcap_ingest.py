@@ -132,14 +132,22 @@ def parse_pcap_bytes(data: bytes) -> PcapSummary:
     """解析 pcap/pcapng 字节，聚合出 flows + DNS 查询。绝不抛。"""
     summ = PcapSummary()
     flows: dict[tuple, Flow] = {}
+    asm = _HelloReassembler()  # 每份 pcap 独立、无模块级态（并行分析器安全）
     try:
         for ts, linktype, frame in _iter_frames(data):
             try:
-                _process_frame(ts, linktype, frame, flows, summ)
+                _process_frame(ts, linktype, frame, flows, summ, asm)
             except Exception:  # noqa: BLE001 - 单包坏不影响其余
                 logger.debug("[pcap] 跳过坏包", exc_info=True)
     except Exception:  # noqa: BLE001 - 整体解析异常也不抛
         logger.exception("[pcap] 解析异常")
+    # 收尾：对未凑齐的 stitch（snaplen 截断/丢续段）best-effort 捞 SNI 回填对应 Flow（复审 #2：
+    # 恢复旧代码对截断 record 能捞出 SNI 的行为，弃 JA3 以不产出算错值）。
+    asm.drain()
+    for dkey, sni in asm.salvaged:
+        f = flows.get(("tcp", *dkey))
+        if f is not None:
+            f.sni.add(sni)
     summ.flows = list(flows.values())
     return summ
 
@@ -268,15 +276,16 @@ def _parse_ipv6(b: bytes) -> tuple[int, str, str, bytes] | None:
     return b[6], src, dst, b[40:]  # next-header；扩展头从简（非 6/17 即跳过）
 
 
-def _parse_tcp(b: bytes) -> tuple[int, int, int, bytes] | None:
+def _parse_tcp(b: bytes) -> tuple[int, int, int, int, bytes] | None:
     if len(b) < 20:
         return None
     sport, dport = struct.unpack("!HH", b[:4])
+    seq = struct.unpack("!I", b[4:8])[0]  # 序列号：跨段 TLS 握手重组用
     flags = b[13]  # TCP 标志字节（FIN/SYN/RST/PSH/ACK…）
     off = (b[12] >> 4) * 4
     if off < 20 or len(b) < off:
-        return sport, dport, flags, b""
-    return sport, dport, flags, b[off:]
+        return sport, dport, seq, flags, b""
+    return sport, dport, seq, flags, b[off:]
 
 
 def _parse_udp(b: bytes) -> tuple[int, int, bytes] | None:
@@ -286,7 +295,9 @@ def _parse_udp(b: bytes) -> tuple[int, int, bytes] | None:
     return sport, dport, b[8:]
 
 
-def _process_frame(ts: float, linktype: int, frame: bytes, flows: dict, summ: PcapSummary) -> None:
+def _process_frame(
+    ts: float, linktype: int, frame: bytes, flows: dict, summ: PcapSummary, asm: _HelloReassembler
+) -> None:
     et, ipp = _strip_link(linktype, frame)
     if not ipp:
         return
@@ -304,7 +315,7 @@ def _process_frame(ts: float, linktype: int, frame: bytes, flows: dict, summ: Pc
         tcp_parsed = _parse_tcp(l4)
         if tcp_parsed is None:
             return
-        sport, dport, tcp_flags, app = tcp_parsed
+        sport, dport, seq, tcp_flags, app = tcp_parsed
         proto = "tcp"
     elif proto_num == 17:
         udp_parsed = _parse_udp(l4)
@@ -329,8 +340,24 @@ def _process_frame(ts: float, linktype: int, frame: bytes, flows: dict, summ: Pc
                 f.flags.add(name)
         if (tcp_flags & 0x02) and (tcp_flags & 0x10):  # SYN+ACK = 本流方向为"远端→本机"的握手应答
             f.flags.add("synack")
-        if app[:1] == b"\x16":  # TLS handshake record
-            sni, ja3 = _parse_client_hello(app)
+        dkey = (src_ip, sport, dst_ip, dport)
+        if (tcp_flags & 0x02) and not (tcp_flags & 0x10):
+            # 纯 SYN = 新连接：四元组复用则清该方向旧 stitch/tombstone。否则残留态会把新连接完整落
+            # 单段的 ClientHello 引流进重组、按随机 ISN 算错偏移丢弃 → 破坏现有单段解析（复审 #1/#5）。
+            asm.reset(dkey)
+        # TLS 握手 record：完整落在本段内 → 走今天原样快路径（现有用例字节级不变）；不完整或该方向
+        # 已在跨段 stitch 中 → 交定向重组器凑齐 record 再解，让跨段 ClientHello 的 SNI/JA3 不丢。
+        r: tuple[str | None, str | None] | None = None
+        if app[:1] == b"\x16":
+            rec_len = struct.unpack("!H", app[3:5])[0] if len(app) >= 5 else -1
+            if rec_len >= 0 and len(app) >= 5 + rec_len and dkey not in asm.pending:
+                r = _parse_client_hello(app)
+            else:
+                r = asm.feed(dkey, seq, app, f.payload_bytes)
+        elif app and dkey in asm.pending:  # continuation 段（非 0x16、非空）→ 补洞（空段不入，复审 #6）
+            r = asm.feed(dkey, seq, app, f.payload_bytes)
+        if r is not None:
+            sni, ja3 = r
             if sni:
                 f.sni.add(sni)
             if ja3:
@@ -422,6 +449,178 @@ def _parse_client_hello(rec: bytes) -> tuple[str | None, str | None]:
         return sni, _ja3(client_ver, ciphers, ext_types, curves, formats)
     except Exception:  # noqa: BLE001 - 解析坏 ClientHello 不抛
         return None, None
+
+
+# ---------------------------------------------------------------------------
+# ClientHello 跨段重组（P0 PCAP-first）
+# ---------------------------------------------------------------------------
+# 现代 Chrome/Cronet 的 ClientHello 常带 post-quantum key_share，超 1460B MSS 跨 2 个 TCP 段 —— 今天
+# 逐包解析必丢 SNI/JA3。定向重组器：只在某方向**首个** TLS record 是 client_hello 且跨段时开有界缓冲，
+# 按 seq 拼到 record 完整再喂 _parse_client_hello。纯解析、状态有界、绝不抛/绝不 OOM，不动 Flow schema，
+# 不碰五元组聚合 / _KNOWN_FANZHA / netstate。顺带修掉：现有 _parse_client_hello 对截断 record 会静默算
+# **错** JA3（扩展区没读全就提前退出），凑齐才解析天然消除之。
+# ★不做（P1/授权动态分析）：通用双向流重组、HTTP 明文、跨多 record 的握手分片、ServerHello、QUIC。
+
+_MAX_HELLO_BUF = 5 + 16384       # 单 stitch 缓冲上限（TLS 明文 record 上限；buf+ooo 合并计费）
+_MAX_OOO_CHUNKS = 64             # 单 stitch 乱序段数上限（防碎段洪水撑 dict）
+_MAX_STITCH_PKTS = 256           # 单 stitch 喂段数上限（封死慢速滴灌占坑；MSS≥536 时最大 record ~31 段）
+_MAX_PENDING = 512               # 并发 stitch 上限（超出按插入序 FIFO 淘汰最老）
+_MAX_DONE = 4096                 # tombstone 上限（防百万连接 pcap 撑爆）
+_ANCHOR_MAX_PAYLOAD = 64 * 1024  # 锚窗：某方向累计载荷超此不再当锚（握手只在连接头部，挡长流密文伪锚）
+
+
+@dataclass
+class _HelloState:
+    """某方向 ClientHello 跨段重组的暂存态：自 first_seq 起的连续前缀 buf + 乱序段 ooo 补洞。"""
+
+    first_seq: int
+    buf: bytearray
+    needed: int | None = None  # 5 + rec_len；锚段不足 5 字节读不到时暂 None
+    ooo: dict[int, bytes] = field(default_factory=dict)  # 乱序段：相对偏移 → payload
+    ooo_bytes: int = 0
+    pkts: int = 0
+
+
+class _HelloReassembler:
+    """按方向四元组 (src_ip,sport,dst_ip,dport) 重组跨 TCP 段的 TLS ClientHello（每份 pcap 一个实例）。
+
+    唯一入口 :meth:`feed`：完整落在单段内的 CH 不进这里（调用方走快路径）；只有 record 不完整、或该方向
+    已在 stitch 时才进来。重叠段 **first-writer-wins**（取证口径：确定性优先；重传内容一致，构造性不一致
+    重叠只让本连接解析失败、不外溢）。任一上限超出 → 判死该状态、退回今天的单段行为，绝不抛、绝不 OOM。
+    """
+
+    def __init__(self) -> None:
+        self.pending: dict[tuple, _HelloState] = {}
+        self.done: dict[tuple, None] = {}
+        self.salvaged: list[tuple[tuple, str]] = []  # 判死/EOF 对截断缓冲 best-effort 捞出的 SNI
+
+    def reset(self, key: tuple) -> None:
+        """纯 SYN 见新连接 → 清该方向重组残留（四元组复用，旧 stitch/tombstone 必失效，复审 #1/#5）。"""
+        self.pending.pop(key, None)
+        self.done.pop(key, None)
+
+    def _kill(self, key: tuple) -> None:
+        """杀死某方向的 stitch 并落 tombstone（一方向只试一次；tombstone 有上限、满则 FIFO 丢最老）。"""
+        self.pending.pop(key, None)
+        self.done[key] = None
+        if len(self.done) > _MAX_DONE:
+            self.done.pop(next(iter(self.done)), None)
+
+    def _salvage(self, key: tuple, st: _HelloState) -> None:
+        """record 凑不齐（snaplen 截断/丢续段）前，对已缓冲字节 best-effort 捞 SNI（弃 JA3，避免算错）。"""
+        try:
+            sni, _ja3 = _parse_client_hello(bytes(st.buf))
+        except Exception:  # noqa: BLE001 - 捞 SNI 失败不影响主流程
+            sni = None
+        if sni:
+            self.salvaged.append((key, sni))
+
+    def _abandon(self, key: tuple, st: _HelloState) -> None:
+        """判死未完成的 stitch：先 best-effort 捞 SNI 再落 tombstone（超限/丢段路径用）。"""
+        self._salvage(key, st)
+        self._kill(key)
+
+    def drain(self) -> None:
+        """解析结束：对 pending 里所有未完成 stitch best-effort 捞 SNI（不再落 tombstone）。"""
+        for key, st in list(self.pending.items()):
+            self._salvage(key, st)
+        self.pending.clear()
+
+    def feed(
+        self, key: tuple, seq: int, app: bytes, flow_payload_bytes: int
+    ) -> tuple[str | None, str | None] | None:
+        """喂一个 TCP 段。返回 (sni, ja3)（record 凑齐并解析）或 None（还没齐/判死/非 CH）。绝不抛。"""
+        try:
+            if key in self.done:
+                return None  # tombstone 短路：防长流密文里的 0x16 反复重开
+            st = self.pending.get(key)
+            if st is None:
+                return self._anchor(key, seq, app, flow_payload_bytes)
+            return self._absorb(key, st, seq, app)
+        except Exception:  # noqa: BLE001 - 重组坏包不抛（外层已双保险，这里再兜一层）
+            logger.debug("[pcap] ClientHello 重组异常（弃该方向）", exc_info=True)
+            self._kill(key)
+            return None
+
+    def _anchor(
+        self, key: tuple, seq: int, app: bytes, flow_payload_bytes: int
+    ) -> tuple[str | None, str | None] | None:
+        """锚门：仅当本段是某方向首个 TLS client_hello record（且跨段放不下）才建 stitch。"""
+        if len(app) < 2 or app[0] != 0x16 or app[1] != 0x03:
+            return None
+        # 锚窗：握手只发生在连接头部；本段之前该方向累计载荷已超阈值 → 长流密文伪 0x16，不锚。
+        if flow_payload_bytes - len(app) > _ANCHOR_MAX_PAYLOAD:
+            return None
+        if len(app) >= 6 and app[5] != 0x01:  # 非 client_hello（ServerHello/证书等）从不缓冲
+            return None
+        needed: int | None = None
+        if len(app) >= 5:
+            rec_len = struct.unpack("!H", app[3:5])[0]
+            if rec_len > 16384:
+                return None
+            needed = 5 + rec_len
+        if len(self.pending) >= _MAX_PENDING:
+            old_key = next(iter(self.pending))  # FIFO 淘汰最老 stitch（淘汰前 best-effort 捞 SNI）
+            self._salvage(old_key, self.pending.pop(old_key))
+        st = _HelloState(first_seq=seq, buf=bytearray(app), needed=needed, pkts=1)
+        self.pending[key] = st
+        return self._try_complete(key, st)
+
+    def _absorb(
+        self, key: tuple, st: _HelloState, seq: int, app: bytes
+    ) -> tuple[str | None, str | None] | None:
+        """吸收续段/重传/乱序段。"""
+        st.pkts += 1
+        if st.pkts > _MAX_STITCH_PKTS:
+            self._abandon(key, st)
+            return None
+        rel = (seq - st.first_seq) & 0xFFFFFFFF  # mod 2^32 天然处理 seq 回绕
+        self._place(st, rel, app)
+        # 补洞：弹出所有起点已被 buf 覆盖/衔接的乱序段（≤ 而非 ==；重叠前缀由 _place 的 rel<blen 掐掉，
+        # 否则 repacketize 重传使 buf 一步越过某 ooo key 时该段永不 drain → 记账泄漏/永久洞，复审 #3）。
+        while st.ooo:
+            k = min(st.ooo)
+            if k > len(st.buf):
+                break
+            seg = st.ooo.pop(k)
+            st.ooo_bytes -= len(seg)
+            self._place(st, k, seg)
+        # 先试完成：本次 feed 已凑齐则切 record 解析，绝不因补洞后总账越限把已完整的 CH 误杀（复审 #4）。
+        r = self._try_complete(key, st)
+        if r is None and st.ooo_bytes + len(st.buf) > _MAX_HELLO_BUF:
+            self._abandon(key, st)
+        return r
+
+    def _place(self, st: _HelloState, rel: int, app: bytes) -> None:
+        """把一段按相对偏移放入缓冲：contiguous 追加 / 重叠掐前缀 / 超前存 ooo / 窗外丢弃。"""
+        blen = len(st.buf)
+        if rel == blen:
+            st.buf += app
+        elif rel < blen:  # 重传/重叠：first-writer-wins，掐掉已覆盖前缀
+            extra = app[blen - rel:]
+            if extra:
+                st.buf += extra
+        elif rel <= _MAX_HELLO_BUF and app:  # 乱序超前段：暂存补洞（空段不占坑，否则挡真数据，复审 #6）
+            if rel not in st.ooo and len(st.ooo) < _MAX_OOO_CHUNKS:
+                st.ooo[rel] = app
+                st.ooo_bytes += len(app)
+        # rel > _MAX_HELLO_BUF：垃圾/窗外/回绕旧段 → 丢弃
+
+    def _try_complete(
+        self, key: tuple, st: _HelloState
+    ) -> tuple[str | None, str | None] | None:
+        """buf 够长即读 needed、凑齐即切完整 record 喂 _parse_client_hello（一方向只试一次）。"""
+        if st.needed is None and len(st.buf) >= 5:
+            rec_len = struct.unpack("!H", bytes(st.buf[3:5]))[0]
+            if rec_len > 16384:
+                self._kill(key)
+                return None
+            st.needed = 5 + rec_len
+        if st.needed is not None and len(st.buf) >= st.needed:
+            rec = bytes(st.buf[: st.needed])
+            self._kill(key)  # 重协商/多 CH 不管：现实客户端 CH 是一个大 record 跨多段
+            return _parse_client_hello(rec)
+        return None
 
 
 def _parse_dns_qname(b: bytes) -> str | None:
