@@ -282,3 +282,43 @@ def test_benign_so_skipped_by_whitelist():
     # 白名单库(libflutter.so)即便含特征串也不扫(排除以省 IO/降 FP)。
     result = _analyze(files={"lib/arm64-v8a/libflutter.so": b"_ZN7arthook9InitializeEv"})
     assert not any("ArtHook" in t["name"] for t in result.meta["re_toolkit"])
+
+
+# --- 新增:加固圈次世代 hook / 反检测器(taisuii 圈子) -------------------------
+
+
+def test_albatross_hook_via_so_string_rename_resistant():
+    # so 改名，靠导出 C/JNI 符号串识别。
+    result = _analyze(files={"lib/arm64-v8a/librenamed.so": b"xx AlbatrossHookInstrument yy"})
+    assert any("Albatross" in t["name"] for t in result.meta["re_toolkit"])
+    assert any("Albatross" in n for n in result.meta["hook_frameworks"])
+
+
+def test_albatross_hook_via_so_name():
+    result = _analyze(native_libs=["lib/arm64-v8a/libalbatross_base.so"])
+    assert any("Albatross" in t["name"] for t in result.meta["re_toolkit"])
+
+
+def test_sentry_rusda_via_package_sets_anti_frida():
+    result = _analyze(dex_strings=["anti.rusda.SentryApp", "com.example.A"])
+    assert result.meta["anti_frida"] is True
+    assert any("sentry" in t["name"] for t in result.meta["re_toolkit"])
+
+
+def test_applist_detector_via_package_sets_anti_frida():
+    result = _analyze(dex_strings=["icu.nullptr.applistdetector.AbnormalEnvironment"])
+    assert result.meta["anti_frida"] is True
+    assert any("ApplistDetector" in t["name"] for t in result.meta["re_toolkit"])
+
+
+def test_generic_antidebug_so_not_flagged_as_sentry():
+    # ★FP 防回归:libantidebug.so 是通用反调试 so 名(商业加固/游戏 DRM 亦用),
+    # 已从 sentry 规则剔除,不得误命中(否则误报 HIGH anti_frida)。
+    result = _analyze(native_libs=["lib/arm64-v8a/libantidebug.so"])
+    assert not any("sentry" in t["name"] for t in result.meta["re_toolkit"])
+
+
+def test_generic_stub_apk_not_flagged_as_applistdetector():
+    # ★FP 防回归:assets/stub.apk 是通用文件名,已从 ApplistDetector 规则剔除。
+    result = _analyze(files={"assets/stub.apk": b"PK\x03\x04"})
+    assert not any("ApplistDetector" in t["name"] for t in result.meta["re_toolkit"])
