@@ -161,6 +161,20 @@ def merge_runtime_into_lead_dict(existing: dict, runtime_lead: dict) -> bool:
     return merged
 
 
+#: Finding 的**主张类型**（复核 / Agent 据此区分「看到的」与「推断的」，别把弱推断当铁证）：
+#: - observation：直接观测到的**原始事实**（运行时实测行为、清单里明写的标志等），无推理成分。
+#: - inference（默认）：规则 / 启发式**推导**出的判断（多数静态 finding）。
+#: - analyst_conclusion：人工研判结论（当前无自动来源，留给人工回灌 / 报告复核阶段填）。
+FINDING_KIND_OBSERVATION = "observation"
+FINDING_KIND_INFERENCE = "inference"
+FINDING_KIND_ANALYST_CONCLUSION = "analyst_conclusion"
+FINDING_KINDS: tuple[str, ...] = (
+    FINDING_KIND_OBSERVATION,
+    FINDING_KIND_INFERENCE,
+    FINDING_KIND_ANALYST_CONCLUSION,
+)
+
+
 @dataclass
 class Finding:
     """技术发现（报告附录用）。
@@ -178,13 +192,16 @@ class Finding:
     recommendation: str = ""
     evidences: list[Evidence] = field(default_factory=list)
     references: list[str] = field(default_factory=list)
-    # ---- 溯源（谁、以多大把握产出这条发现）----
+    # ---- 溯源（谁、以多大把握、以什么性质产出这条发现）----
     #: 产出该发现的分析器名。在 pipeline 聚合处**集中盖章**（见 pipeline.run），分析器无需逐个改；
     #: 分析器若要标更细的子来源可自行赋值，集中盖章不覆盖已有值。
     analyzer: str = ""
     #: 置信度（多稳、多不像误报），与 severity（多严重）**正交**。默认 MEDIUM；纯启发式 / 统计类
     #: 发现应显式降为 LOW，供消费方（研判 / Agent）据此加权、抑制噪声。
     confidence: Confidence = Confidence.MEDIUM
+    #: 主张类型（见 FINDING_KINDS）：observation（直接观测事实）| inference（规则推导，默认）|
+    #: analyst_conclusion（人工结论）。运行时实测行为标 observation，静态规则推导默认 inference。
+    kind: str = FINDING_KIND_INFERENCE
 
 
 @dataclass
