@@ -87,6 +87,62 @@ def test_snapshot_read_file_missing_no_apk_returns_none() -> None:
     assert snap.read_file("nope/missing.bin") is None
 
 
+def _snap_with_declared(declared: dict[str, int]) -> SnapshotContext:
+    snap = SnapshotContext(
+        package_name="", manifest_xml="", platform="android", config=None,
+        apk_path="/x.apk", permissions=[], components=None, dex_strings=(), file_list=[],
+        native_libs=[], certificates=[], files={},
+    )
+    snap._worker_declared_sizes = declared
+    return snap
+
+
+def test_lazy_read_skips_zip_bomb_by_declared_size() -> None:
+    # ★并行 worker 惰性读:声明解压后大小超上限(500MB)→ 前置拦截、根本不开 APK/不解压 → None。
+    snap = _snap_with_declared({"lib/arm64-v8a/bomb.so": 600 * 1024 * 1024})
+    called = {"apk": False}
+
+    def _spy() -> None:
+        called["apk"] = True
+        return None
+
+    snap._ensure_worker_apk = _spy  # type: ignore[method-assign]
+    assert snap.read_file("lib/arm64-v8a/bomb.so") is None
+    assert called["apk"] is False  # 超上限 → 拦在解压前,未去开 APK
+
+
+def test_lazy_read_passes_normal_declared_size() -> None:
+    # 声明大小正常 → 过闸、进入惰性开 APK 路径（此处返 None 仅因 apk 打不开）。
+    snap = _snap_with_declared({"assets/normal.bin": 1024})
+    called = {"apk": False}
+
+    def _spy() -> None:
+        called["apk"] = True
+        return None
+
+    snap._ensure_worker_apk = _spy  # type: ignore[method-assign]
+    assert snap.read_file("assets/normal.bin") is None
+    assert called["apk"] is True  # 正常大小 → 过闸,去开 APK
+
+
+def test_ensure_declared_sizes_reads_real_zip(tmp_path: object) -> None:
+    import zipfile as _zip
+
+    apk = tmp_path / "x.apk"  # type: ignore[attr-defined]
+    with _zip.ZipFile(apk, "w") as zf:
+        zf.writestr("assets/a.txt", b"hello")
+        zf.writestr("lib/x.so", b"y" * 4096)
+    snap = SnapshotContext(
+        package_name="", manifest_xml="", platform="android", config=None,
+        apk_path=str(apk), permissions=[], components=None, dex_strings=(), file_list=[],
+        native_libs=[], certificates=[], files={},
+    )
+    sizes = snap._ensure_declared_sizes()
+    assert sizes["assets/a.txt"] == 5
+    assert sizes["lib/x.so"] == 4096
+    assert snap._ensure_declared_sizes() is sizes  # 缓存:同一对象
+
+
 def test_should_parallelize_gating(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pipeline.os, "cpu_count", lambda: 8)
     monkeypatch.delenv("FXAPK_NO_PARALLEL", raising=False)
