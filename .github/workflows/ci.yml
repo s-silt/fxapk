@@ -95,12 +95,22 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install runtime deps + pip-audit
+      # 审计**仅 fxapk 的依赖树**：把 fxapk[graph,track] 装进隔离 venv，不含 pip-audit 自身及其
+      # 依赖 / CI 工具——否则那些无关上游漏洞会让审计误红（pip-audit 的传递依赖爆 CVE 与本项目无关）。
+      - name: Install fxapk deps into an isolated venv
+        run: |
+          python -m venv /tmp/auditenv
+          /tmp/auditenv/bin/python -m pip install --upgrade pip
+          /tmp/auditenv/bin/python -m pip install ".[graph,track]"
+      # pip-audit 装在 runner python（与被审 venv 隔离），--path 只审那个 venv 的 site-packages。
+      # 当前干净 → 阻断式门禁，只在**新**漏洞出现时变红；某上游漏洞暂无修复版时用 `--ignore-vuln <ID>`
+      # 显式豁免。不加 --strict：非 PyPI 的本地 fxapk 包会被跳过、--strict 会因此误红。
+      - name: Audit only the fxapk dependency tree
         run: |
           python -m pip install --upgrade pip pip-audit
-          python -m pip install -e ".[graph,track]"
-      # 审计 fxapk 真实依赖树（clean runner，不含开发机全局环境噪音）。当前干净 → 阻断式门禁，
-      # 只在**新**漏洞出现时变红。若某上游漏洞暂无修复版，用 `--ignore-vuln <ID>` 显式豁免。
-      # 不加 --strict：本地 editable fxapk 无法在 PyPI 审计，--strict 会因它被跳过而误红。
-      - name: Audit dependencies for known vulnerabilities
-        run: python -m pip_audit
+          # sysconfig purelib = 真正的 site-packages（跨平台可靠；site.getsitepackages()[0] 在不同
+          # 平台可能是 venv 根，会让 --path 审到空目录、"无漏洞"假绿）。
+          SITE=$(/tmp/auditenv/bin/python -c "import sysconfig; print(sysconfig.get_path('purelib'))")
+          echo "auditing: $SITE"
+          test -d "$SITE" || { echo "site-packages 路径无效：$SITE"; exit 1; }
+          python -m pip_audit --path "$SITE"
