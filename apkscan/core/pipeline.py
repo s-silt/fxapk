@@ -12,6 +12,7 @@ import os
 import pickle
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -114,6 +115,9 @@ class _PipelineState:
     findings: list = field(default_factory=list)
     analyzer_status: list[dict] = field(default_factory=list)
     enricher_status: list[dict] = field(default_factory=list)
+    #: 每个 pipeline 阶段的执行状态：{name, status: ran|error, error?}。阶段级故障不中断流水线
+    #: （延续「绝不让单点故障中断整条流水线」到阶段粒度），记于此供报告审计 + 反馈 analysis_status。
+    stage_status: list[dict] = field(default_factory=list)
     analysis_status: str = ANALYSIS_STATUS_COMPLETE
     completeness: float = 1.0
     critical_failures: list = field(default_factory=list)
@@ -329,24 +333,63 @@ def _assemble_report(state: _PipelineState) -> Report:
     )
 
 
+def _run_stage(state: _PipelineState, name: str, fn: "Callable[[_PipelineState], None]") -> None:
+    """跑一个 pipeline 阶段并捕获异常：把 ``{name, status, error?}`` 记入 ``state.stage_status``，
+    **绝不让单阶段故障中断整条流水线**（把模块「单点故障不中断流水线」的铁律从分析器/富化器粒度
+    延伸到阶段粒度：一个阶段崩了，其余阶段照跑、仍产出部分报告，而非整个分析炸掉丢全部产出）。
+
+    计时只记 log、**不入报告**（timing 非确定，入报告会破坏串行==并行逐字节一致的不变量）。
+    """
+    t0 = time.perf_counter()
+    try:
+        fn(state)
+        entry: dict = {"name": name, "status": "ran"}
+    except Exception as exc:  # noqa: BLE001 — 阶段级兜底：记录后继续，绝不炸整条流水线
+        logger.exception("pipeline 阶段异常：%s", name)
+        entry = {"name": name, "status": "error", "error": f"{type(exc).__name__}: {exc}"}
+    logger.info(
+        "pipeline 阶段 %s：%s（%dms）", name, entry["status"], int((time.perf_counter() - t0) * 1000)
+    )
+    state.stage_status.append(entry)
+
+
+def _apply_stage_failures(state: _PipelineState) -> None:
+    """阶段级故障反馈 ``analysis_status`` / ``completeness``，让 --strict / 完整度也能反映阶段崩溃
+    （而非只看分析器）：``analyze`` 阶段崩 → failed **且 completeness 归零**（analyze 崩时
+    analyzer_status 为空、_analysis_health 会按"无可跑→1.0"算出误导性的满完整度，须校正）；其它阶段崩
+    → 至少 partial（分析器已跑完，completeness 仍如实反映分析器层，partial 表征后续阶段故障）。
+    不上调已判 failed 的结果。"""
+    errored = [s["name"] for s in state.stage_status if s.get("status") == "error"]
+    if not errored:
+        return
+    if "analyze" in errored:
+        state.analysis_status = ANALYSIS_STATUS_FAILED
+        state.completeness = 0.0  # analyze 崩 → 无分析器完成，完整度归零（校正 eligible=0 的假 1.0）
+    elif state.analysis_status == ANALYSIS_STATUS_COMPLETE:
+        state.analysis_status = ANALYSIS_STATUS_PARTIAL
+
+
 def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     """执行完整流水线，返回 Report。
 
-    结构为一串按序执行的 stage（见各 ``_stage_*``），共享 ``_PipelineState`` 累积态。行为与历史内联
-    实现**逐字一致**（纯结构重构），仅让阶段边界显式、便于后续为每阶段加状态/指标/超时。
+    结构为一串按序执行的 stage（见各 ``_stage_*``），共享 ``_PipelineState`` 累积态，每个核心阶段
+    经 ``_run_stage`` 执行——**阶段级故障被捕获记入 stage_status、不中断后续**，并反馈 analysis_status。
+    各阶段业务逻辑与历史内联实现逐字一致（结构重构），仅新增阶段边界的状态捕获与韧性。
     """
     _canonicalize_ctx_config(ctx, config)
     state = _init_pipeline_state(ctx, config)
-    _stage_run_analyzers(state)      # 1) 分析器执行 + 按序聚合 + 端点去重
-    _stage_degradation_flags(state)  # 2) 降级标志入 meta
-    _stage_enrich(state)             # 3) 联网富化（两遍，主动/被动硬隔离）
-    _stage_build_leads(state)        # 4) 端点 → Lead + advice 兜底
-    _stage_overseas_targets(state)   # 5) 境外目标结构化段
-    _stage_credibility(state)        # 6) 完整度 / 工具版本 / 规则摘要
-    report = _assemble_report(state)  # 7) 组装 Report
-    # 8) App 类型聚合分类（在所有分析器跑完 + build_endpoint_leads 之后调用一次）：聚合现成
-    #    meta/leads/endpoints/findings 信号加权定类，并据类型**追加**针对性调证 Lead（只追加、不改
-    #    已有 Lead）。classify_app 整体 try/except 兜底，分类失败时 report 原样返回，绝不炸流水线。
+    _run_stage(state, "analyze", _stage_run_analyzers)              # 分析器执行 + 聚合 + 端点去重
+    _run_stage(state, "degradation_flags", _stage_degradation_flags)  # 降级标志入 meta
+    _run_stage(state, "enrich", _stage_enrich)                     # 联网富化（两遍，主动/被动硬隔离）
+    _run_stage(state, "build_leads", _stage_build_leads)           # 端点 → Lead + advice 兜底
+    _run_stage(state, "overseas_targets", _stage_overseas_targets)  # 境外目标结构化段
+    _run_stage(state, "credibility", _stage_credibility)           # 完整度 / 工具版本 / 规则摘要
+    _apply_stage_failures(state)          # 阶段级故障反馈 analysis_status
+    state.meta["stage_status"] = state.stage_status
+    report = _assemble_report(state)
+    # App 类型聚合分类（在所有分析器跑完 + build_endpoint_leads 之后调用一次）：聚合现成
+    # meta/leads/endpoints/findings 信号加权定类，并据类型**追加**针对性调证 Lead（只追加、不改已有
+    # Lead）。已自带 try/except 兜底、属组装后增强，不纳入核心阶段状态。
     classify_app(report)
     return report
 
