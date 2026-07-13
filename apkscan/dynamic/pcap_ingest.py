@@ -58,6 +58,11 @@ class Flow:
     ja3: set[str] = field(default_factory=set)
     flags: set[str] = field(default_factory=set)  # 本方向见到的 TCP 标志：syn/ack/synack/rst/fin/psh
     payload_bytes: int = 0  # 本方向 L4 应用层载荷累计字节（TCP：TCP 头之后）
+    # QUIC（HTTP/3）长包头明文元数据（RFC 9000 §17.2，纯 stdlib、无需解密）——供 h3 归因 + 按连接 ID
+    # 跨 IP 迁移/NAT 重绑关联（五元组聚合做不到）。各 set 有 per-flow 上限（见 _MAX_QUIC_CIDS）。
+    quic_versions: set[str] = field(default_factory=set)
+    quic_dcids: set[str] = field(default_factory=set)
+    quic_scids: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -100,6 +105,7 @@ class RemoteEndpoint:
     first_ts: float = 0.0
     last_ts: float = 0.0
     state: str = STATE_UNKNOWN
+    quic_versions: set[str] = field(default_factory=set)  # 该远端观测到的 QUIC 版本（h3 归因）
 
     @property
     def has_payload(self) -> bool:
@@ -295,6 +301,73 @@ def _parse_udp(b: bytes) -> tuple[int, int, bytes] | None:
     return sport, dport, b[8:]
 
 
+# ---------------------------------------------------------------------------
+# QUIC（HTTP/3）长包头元数据（RFC 9000 §17.2）——纯 stdlib、零解密
+# ---------------------------------------------------------------------------
+# 现代 App 大量走 QUIC（UDP/443），mitm/frida 全看不到。长包头的 version/DCID/SCID 是**明文**，无需
+# 任何密钥即可抽取：拿来做 h3 归因、按连接 ID 跨 IP 迁移/NAT 重绑关联（五元组做不到）、发现 QUIC-only
+# 后端。★Initial 解密→SNI 是下一步（需惰性 cryptography），本层只做明文元数据、保住模块"零依赖"承诺。
+
+_MAX_QUIC_CIDS = 8  # 每 Flow 各 QUIC set 上限（防海量连接 ID 撑内存）
+#: 已知 QUIC 版本：v1(RFC 9000) / vneg(0) / v2(RFC 9369) / GREASE 样例。
+_QUIC_KNOWN_VERSIONS = frozenset({0x00000001, 0x00000000, 0x6B3343CF})
+
+
+def _is_quic_version(v: int) -> bool:
+    """v 是否像合法 QUIC 版本（挡随机 UDP 假阳）：已知版本 / draft(0xff0000xx) / GREASE(0x?a?a?a?a)。"""
+    if v in _QUIC_KNOWN_VERSIONS:
+        return True
+    if (v & 0xFFFFFF00) == 0xFF000000:  # draft-ietf-quic-transport-xx
+        return True
+    return (v & 0x0F0F0F0F) == 0x0A0A0A0A  # GREASE（强制版本协商的保留版本）
+
+
+def _parse_quic_long_header(app: bytes) -> tuple[str, str, str] | None:
+    """解析 QUIC 长包头 → (version_hex, dcid_hex, scid_hex)；非 QUIC 长包头 → None。绝不抛。
+
+    只读明文字段（version + 单字节 CID 长度 + CID）——token/length/包号/frame 是解密层的事（本层不碰）。
+    """
+    try:
+        if len(app) < 7:
+            return None
+        if (app[0] & 0xC0) != 0xC0:  # QUIC 长包头恒 11xxxxxx（长包头位 0x80 + fixed bit 0x40）
+            return None
+        version = int.from_bytes(app[1:5], "big")
+        if not _is_quic_version(version):  # 挡随机 UDP 假阳
+            return None
+        p = 5
+        dcid_len = app[p]
+        if dcid_len > 20 or p + 1 + dcid_len > len(app):  # RFC 9000：CID ≤ 20 字节
+            return None
+        p += 1
+        dcid = app[p : p + dcid_len]
+        p += dcid_len
+        if p >= len(app):
+            return None
+        scid_len = app[p]
+        if scid_len > 20 or p + 1 + scid_len > len(app):
+            return None
+        p += 1
+        scid = app[p : p + scid_len]
+        return f"{version:08x}", dcid.hex(), scid.hex()
+    except Exception:  # noqa: BLE001 - 坏 QUIC 头不抛
+        return None
+
+
+def _ingest_quic(app: bytes, f: Flow) -> None:
+    """从 UDP 载荷抽 QUIC 长包头元数据填进 Flow（version/DCID/SCID，各 set 有上限）。非 QUIC → 无操作。"""
+    meta = _parse_quic_long_header(app)
+    if meta is None:
+        return
+    version, dcid, scid = meta
+    if len(f.quic_versions) < _MAX_QUIC_CIDS:
+        f.quic_versions.add(version)
+    if dcid and len(f.quic_dcids) < _MAX_QUIC_CIDS:
+        f.quic_dcids.add(dcid)
+    if scid and len(f.quic_scids) < _MAX_QUIC_CIDS:
+        f.quic_scids.add(scid)
+
+
 def _process_frame(
     ts: float, linktype: int, frame: bytes, flows: dict, summ: PcapSummary, asm: _HelloReassembler
 ) -> None:
@@ -369,6 +442,8 @@ def _process_frame(
         rec = _parse_dns(app, ts)
         if rec is not None:
             summ.dns_records.append(rec)
+    elif proto_num == 17 and app:  # 非 DNS 的 UDP：探 QUIC 长包头元数据（h3 归因/连接关联）
+        _ingest_quic(app, f)
 
 
 # ---------------------------------------------------------------------------
@@ -826,6 +901,7 @@ def remote_endpoints(summary: PcapSummary) -> list[RemoteEndpoint]:
             re.ja3 |= f.ja3
             conn_src.setdefault(key, set()).add((f.dst_ip, f.dst_port))  # 入站方向也计本机端口(P1)
         re.packets += f.packets
+        re.quic_versions |= f.quic_versions  # QUIC 版本聚合到远端（两方向共用）
         if f.first_ts and (re.first_ts == 0.0 or f.first_ts < re.first_ts):
             re.first_ts = f.first_ts
         if f.last_ts > re.last_ts:
@@ -850,6 +926,7 @@ def to_report_leads(summary: PcapSummary) -> list[Lead]:
         seen.add(key)
         ja3 = ("，JA3=" + "/".join(sorted(re.ja3))) if re.ja3 else ""
         sni = ("，SNI=" + "/".join(sorted(re.sni))) if re.sni else ""
+        quic = ("，QUIC=" + "/".join(sorted(re.quic_versions))) if re.quic_versions else ""
         if re.ip in _KNOWN_FANZHA:
             # 反诈拦截节点即便有双向载荷（拦截页会回数据）也非业务接入/落地机——标『无需调证』，
             # 不静默丢（仍留台账作拦截证据），但严禁当接入节点升"建议调证"、污染归因。
@@ -880,7 +957,7 @@ def to_report_leads(summary: PcapSummary) -> list[Lead]:
                         location="pcap",
                         snippet=(
                             f"->{value} state={re.state} out={re.out_bytes}B in={re.in_bytes}B "
-                            f"conns={re.connection_count} pkts={re.packets}{sni}{ja3}"
+                            f"conns={re.connection_count} pkts={re.packets}{sni}{ja3}{quic}"
                         )[:200],
                         observed_at=re.first_ts or None,  # 首包时间 → 观测时刻（0.0 视作未知留 None）
                     )
@@ -957,6 +1034,7 @@ def to_runtime_endpoints(summary: PcapSummary) -> list[Endpoint]:
         seen.add(re.ip)
         ja3 = ("，JA3=" + "/".join(sorted(re.ja3))) if re.ja3 else ""
         sni = ("，SNI=" + "/".join(sorted(re.sni))) if re.sni else ""
+        quic = ("，QUIC=" + "/".join(sorted(re.quic_versions))) if re.quic_versions else ""
         endpoints.append(
             Endpoint(
                 value=re.ip,
@@ -967,7 +1045,7 @@ def to_runtime_endpoints(summary: PcapSummary) -> list[Endpoint]:
                         location="pcap",
                         snippet=(
                             f"->{re.ip}:{re.port}/{re.proto} state={re.state} "
-                            f"out={re.out_bytes}B in={re.in_bytes}B pkts={re.packets}{sni}{ja3}"
+                            f"out={re.out_bytes}B in={re.in_bytes}B pkts={re.packets}{sni}{ja3}{quic}"
                         )[:200],
                         observed_at=re.first_ts or None,
                     )
@@ -1053,6 +1131,7 @@ def to_ledger_dict(summary: PcapSummary) -> dict[str, object]:
             "connection_count": re.connection_count,
             "sni": sorted(re.sni),
             "no_sni": not re.sni,
+            "quic_versions": sorted(re.quic_versions),  # h3 归因（明文长包头元数据）
         }
         for re in res
     ]

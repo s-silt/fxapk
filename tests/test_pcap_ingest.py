@@ -649,3 +649,63 @@ def test_midstream_ciphertext_not_anchored() -> None:
     fake = _incomplete_anchor()
     assert asm.feed(key, 1000, fake, 70 * 1024) is None  # flow_payload_bytes 远超 64KiB 锚窗
     assert key not in asm.pending
+
+
+# --- QUIC（HTTP/3）长包头元数据（P0，纯 stdlib、零解密）----------------------
+
+
+def _quic_long_header(version: int = 0x00000001, dcid: bytes = bytes(range(8)),
+                      scid: bytes = b"\xaa\xbb\xcc", ptype: int = 0) -> bytes:
+    """构造 QUIC v1 长包头（RFC 9000 §17.2）：首字节 11|type|.. + version + CID 长度/CID + 占位尾。"""
+    b0 = 0xC0 | ((ptype & 0x03) << 4)
+    return (bytes([b0]) + struct.pack("!I", version) + bytes([len(dcid)]) + dcid
+            + bytes([len(scid)]) + scid + b"\x00" * 24)  # token/length/pn/payload 占位（PR1 不解析）
+
+
+def _quic_pcap(payload: bytes, dst: str = "45.202.1.235", dport: int = 443) -> bytes:
+    return _pcap([_eth(_ipv4(_udp(payload, 51000, dport), 17, "10.0.0.2", dst), 0x0800)])
+
+
+def test_quic_long_header_metadata_extracted() -> None:
+    """QUIC Initial 长包头 → version/DCID/SCID 明文抽取，落 Flow + 远端聚合 + lead snippet（h3 归因）。"""
+    summary = pcap_ingest.parse_pcap_bytes(_quic_pcap(_quic_long_header()))
+    f = next(fl for fl in summary.flows if fl.dst_ip == "45.202.1.235")
+    assert "00000001" in f.quic_versions
+    assert bytes(range(8)).hex() in f.quic_dcids and "aabbcc" in f.quic_scids
+    lead = next(l for l in pcap_ingest.to_report_leads(summary)
+                if l.category == LeadCategory.IP and "45.202.1.235" in l.value)
+    assert "QUIC=00000001" in lead.source_refs[0].snippet
+    led = pcap_ingest.to_ledger_dict(summary)
+    assert any("00000001" in e["quic_versions"] for e in led["remote_endpoints"])
+
+
+def test_quic_dcid_survives_ip_migration_correlation() -> None:
+    """同一 QUIC 连接 ID 出现在不同五元组（IP 迁移/NAT 重绑）→ 各 Flow 都记录该 DCID（供跨流关联，
+    五元组聚合做不到的能力）。"""
+    dcid = b"\xde\xad\xbe\xef\x11\x22"
+    s1 = pcap_ingest.parse_pcap_bytes(_quic_pcap(_quic_long_header(dcid=dcid), dst="45.202.1.235"))
+    s2 = pcap_ingest.parse_pcap_bytes(_quic_pcap(_quic_long_header(dcid=dcid), dst="106.53.21.146"))
+    assert dcid.hex() in s1.flows[0].quic_dcids
+    assert dcid.hex() in s2.flows[0].quic_dcids
+
+
+def test_non_quic_udp_not_tagged() -> None:
+    """随机 UDP / 非 QUIC 版本 → 不误标 QUIC（挡假阳）。"""
+    s1 = pcap_ingest.parse_pcap_bytes(_quic_pcap(b"\x00 random udp payload not quic"))
+    assert all(not fl.quic_versions for fl in s1.flows)
+    s2 = pcap_ingest.parse_pcap_bytes(_quic_pcap(_quic_long_header(version=0x12345678)))
+    assert all(not fl.quic_versions for fl in s2.flows)  # 长包头位对但 version 不像 QUIC → 不认
+
+
+def test_quic_malformed_header_no_crash() -> None:
+    """畸形 QUIC 头（超长 CID len / 截断 / 空）→ 不崩、不误标。"""
+    assert pcap_ingest._parse_quic_long_header(b"\xc0\x00\x00\x00\x01\xff") is None  # dcid_len=255>20
+    assert pcap_ingest._parse_quic_long_header(b"\xc0\x00\x00\x00\x01") is None       # 截断（无 CID）
+    assert pcap_ingest._parse_quic_long_header(b"") is None
+    pcap_ingest.parse_pcap_bytes(_quic_pcap(b"\xc0\x00\x00\x00\x01\x14" + b"\x00" * 2))  # 端到端不崩
+
+
+def test_quic_probe_does_not_break_dns() -> None:
+    """QUIC 探测挂在非 53 UDP 上，DNS（53）仍走原路径、不被 QUIC 分支吞。"""
+    summary = pcap_ingest.parse_pcap_bytes(_sample_pcap())
+    assert "tracker.example.org" in summary.dns_queries
