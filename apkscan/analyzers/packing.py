@@ -282,6 +282,7 @@ class PackingAnalyzer(BaseAnalyzer):
             id="PACK-NAME-STRINGS-ONLY",
             title="检测到加固厂商名称字符串，未见加固运行时特征（疑似内嵌加固检测/风控库）",
             severity=Severity.LOW,
+            confidence=Confidence.LOW,  # 仅 dex 名称串、无运行时特征 → 弱信号，低置信
             category="packing",
             description="".join(description_parts),
             recommendation=(

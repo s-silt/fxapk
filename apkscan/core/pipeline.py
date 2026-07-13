@@ -151,6 +151,11 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
 
         endpoints.extend(result.endpoints)
         leads.extend(result.leads)
+        # 溯源：集中给每条 finding 盖上产出它的分析器名（此处 analyzer 归属仍在；一旦 extend 进
+        # report.findings 就丢了）。分析器已自标更细来源的不覆盖。
+        for finding in result.findings:
+            if not finding.analyzer:
+                finding.analyzer = name
         findings.extend(result.findings)
         if result.meta:
             # 同名 meta key 冲突时记 warning，避免后跑分析器静默覆盖前者的结果。
