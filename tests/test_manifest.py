@@ -307,3 +307,53 @@ def test_bool_parsing_variants(value: str, expected: bool) -> None:
     )
     result = _run(xml)
     assert result.meta["debuggable"] is expected
+
+
+# ---------------------------------------------------------------------------
+# Xposed/LSPosed 模块身份（现代 LSPosed 模块只用 manifest meta-data 声明）
+# ---------------------------------------------------------------------------
+
+
+def _manifest_with_metadata(metadata_xml: str, package: str = "com.evil.mod") -> str:
+    return (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        f'<manifest xmlns:android="{ANDROID_NS}" package="{package}">\n'
+        "  <application>\n"
+        f"{metadata_xml}"
+        "  </application>\n"
+        "</manifest>\n"
+    )
+
+
+def test_xposed_module_flagged_high_anti_analysis():
+    md = (
+        '    <meta-data android:name="xposedmodule" android:value="true"/>\n'
+        '    <meta-data android:name="xposedminversion" android:value="93"/>\n'
+        '    <meta-data android:name="xposedscope" android:resource="@array/scope"/>\n'
+    )
+    result = _run(_manifest_with_metadata(md))
+    assert result.meta.get("xposed_module") is True
+    xf = [f for f in result.findings if f.id == "MANIFEST-XPOSED-MODULE"]
+    assert len(xf) == 1
+    assert xf[0].severity == Severity.HIGH
+    assert xf[0].category == "anti_analysis"
+    assert result.meta["xposed_markers"] == ["xposedminversion", "xposedmodule", "xposedscope"]
+
+
+def test_single_xposed_marker_flagged():
+    # 仅 xposedminversion（每个 Xposed 模块必带）即足以判定。
+    md = '    <meta-data android:name="xposedminversion" android:value="82"/>\n'
+    result = _run(_manifest_with_metadata(md))
+    assert result.meta.get("xposed_module") is True
+    assert any(f.id == "MANIFEST-XPOSED-MODULE" for f in result.findings)
+
+
+def test_normal_metadata_not_flagged_as_xposed():
+    # ★FP 防回归：正常 app 的 meta-data（GMS 版本等）不得被判为 Xposed 模块。
+    md = (
+        '    <meta-data android:name="com.google.android.gms.version" android:value="12451000"/>\n'
+        '    <meta-data android:name="firebase_analytics_collection_enabled" android:value="true"/>\n'
+    )
+    result = _run(_manifest_with_metadata(md, package="com.normal.app"))
+    assert result.meta.get("xposed_module") is None
+    assert not any(f.id == "MANIFEST-XPOSED-MODULE" for f in result.findings)

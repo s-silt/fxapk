@@ -39,6 +39,13 @@ logger = logging.getLogger(__name__)
 
 _SEVERITY_BY_NAME = {s.name: s for s in Severity}
 
+# Xposed / LSPosed 模块的 <application> 内特征 meta-data name（小写比较）。
+# 现代 LSPosed 模块可只用这些声明、不带 assets/xposed_init（re_toolkit 读不到 manifest，须在此覆盖）。
+# ★低 FP：正常终端 app（含做反 Xposed 检测的 RASP）绝不会把自己声明为 Xposed 模块。
+_XPOSED_META_NAMES = frozenset(
+    {"xposedmodule", "xposedminversion", "xposeddescription", "xposedscope"}
+)
+
 
 def _parse_bool(value: str | None) -> bool | None:
     """把 Android manifest 的布尔属性字符串解析为 bool；无法判定返回 None。"""
@@ -226,6 +233,16 @@ class ManifestAnalyzer(BaseAnalyzer):
             if nsc:
                 meta["network_security_config"] = nsc
 
+            # Xposed/LSPosed 模块身份：<application> 内的特征 meta-data。
+            markers: list[str] = []
+            for md in app.findall("meta-data"):
+                nm = _android_attr(md, "name")
+                if nm and nm.strip().lower() in _XPOSED_META_NAMES:
+                    markers.append(nm.strip())
+            if markers:
+                meta["xposed_module"] = True
+                meta["xposed_markers"] = sorted(set(markers))
+
     # ------------------------------------------------------------------
     # Finding 生成
     # ------------------------------------------------------------------
@@ -308,6 +325,47 @@ class ManifestAnalyzer(BaseAnalyzer):
 
         # targetSdk 偏低 → LOW
         self._emit_low_target_sdk(meta, rules, templates, result)
+
+        # Xposed/LSPosed 模块身份 → HIGH（anti_analysis）
+        self._emit_xposed_module(meta, result)
+
+    def _emit_xposed_module(self, meta: dict[str, Any], result: AnalyzerResult) -> None:
+        """<application> 声明为 Xposed/LSPosed 模块 → HIGH anti_analysis Finding。
+
+        直接构造（非 manifest 模板，因 category=anti_analysis 而非 manifest，与 re_toolkit 的
+        hook/反检测工具链归为同类，供 digest / 串案统一消费）。
+        """
+        if not meta.get("xposed_module"):
+            return
+        markers = meta.get("xposed_markers") or []
+        ev = [
+            Evidence(
+                source="manifest",
+                location="application/meta-data[@android:name]",
+                snippet="、".join(str(m) for m in markers)[:200],
+            )
+        ]
+        result.findings.append(
+            Finding(
+                id="MANIFEST-XPOSED-MODULE",
+                title="APK 声明为 Xposed/LSPosed 模块（疑用于 hook 其它 app）",
+                severity=Severity.HIGH,
+                category="anti_analysis",
+                description=(
+                    "AndroidManifest 的 <application> 内含 Xposed 模块声明 meta-data（"
+                    + "、".join(str(m) for m in markers)
+                    + "）——本 APK 是一个 Xposed/LSPosed 模块，设计用于在设备上 hook / 篡改其它 app。"
+                    "★ 正常终端 app 绝不会把自己做成 Xposed 模块；常见于远控 / 虚拟摄像头刷脸 / "
+                    "改包 / 劫持银行·支付类黑产工具。"
+                ),
+                recommendation=(
+                    "研判其 hook 目标（xposedscope 指定的目标包名）与 AccessibilityService / 无障碍权限，"
+                    "确认是否劫持第三方 app；把 Xposed 模块身份作为团伙工具链指纹并簇串案。"
+                ),
+                evidences=ev,
+                references=["https://developer.android.com/topic/security"],
+            )
+        )
 
     def _emit_low_target_sdk(
         self,
