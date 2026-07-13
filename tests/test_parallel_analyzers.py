@@ -71,10 +71,12 @@ def test_snapshot_pickle_roundtrip_excludes_worker_apk() -> None:
         certificates=[], files={"f.json": b"x"},
     )
     snap._worker_apk = object()  # 模拟 worker 内已建句柄
+    snap._worker_declared_sizes = {"f.json": 1}  # 模拟 worker 内已建声明大小表
     restored = pickle.loads(pickle.dumps(snap))
     assert list(restored.dex_strings()) == ["a", "b"]
     assert restored.read_file("f.json") == b"x"
     assert restored._worker_apk is None  # 句柄不随 pickle 传，unpickle 后重置
+    assert restored._worker_declared_sizes is None  # 声明大小表同样每 worker 重建，不随 pickle 传
 
 
 def test_snapshot_read_file_missing_no_apk_returns_none() -> None:
