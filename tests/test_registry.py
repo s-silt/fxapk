@@ -53,6 +53,64 @@ def test_detect_capabilities_online_true_no_network(monkeypatch: pytest.MonkeyPa
     assert "online" not in detect_capabilities(online=True)
 
 
+# ---------------------------------------------------------------------------
+# _has_network：出网连通性探测（境内+境外混合锚点，任一 443 可达即在线）
+# ---------------------------------------------------------------------------
+
+
+class _FakeConn:
+    def __enter__(self) -> "_FakeConn":
+        return self
+
+    def __exit__(self, *_a: object) -> bool:
+        return False
+
+
+def _patch_connect(monkeypatch: pytest.MonkeyPatch, reachable: set[str]) -> list[str]:
+    """打桩 socket.create_connection：仅当 host ∈ reachable 才"连通"。返回被尝试 host 的顺序表。"""
+    tried: list[str] = []
+
+    def fake(addr: tuple[str, int], timeout: float | None = None) -> _FakeConn:
+        host, _port = addr
+        tried.append(host)
+        if host in reachable:
+            return _FakeConn()
+        raise OSError("unreachable")
+
+    monkeypatch.setattr(registry.socket, "create_connection", fake)
+    return tried
+
+
+def test_has_network_all_unreachable_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    tried = _patch_connect(monkeypatch, reachable=set())
+    assert registry._has_network(timeout=0.01) is False
+    assert tried == [h for h, _ in registry._NETWORK_PROBE_HOSTS]  # 全不可达：逐个都试过
+
+
+def test_has_network_first_anchor_short_circuits(monkeypatch: pytest.MonkeyPatch) -> None:
+    first_host = registry._NETWORK_PROBE_HOSTS[0][0]
+    tried = _patch_connect(monkeypatch, reachable={first_host})
+    assert registry._has_network(timeout=0.01) is True
+    assert tried == [first_host]  # 命中即短路，不再试后续锚点
+
+
+def test_has_network_domestic_up_foreign_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
+    # ★核心回归：境外锚点全被阻断（GFW 场景），只要任一境内锚点可达即判在线——
+    # 不再像旧版单锚 1.1.1.1/8.8.8.8 那样假阴性、误关本可用的境内富化。
+    foreign = {"rdap.org", "1.1.1.1", "8.8.8.8", "dns.google"}
+    domestic = {h for h, _ in registry._NETWORK_PROBE_HOSTS} - foreign
+    assert domestic, "探测锚点集应含境内 host"
+    _patch_connect(monkeypatch, reachable=domestic)
+    assert registry._has_network(timeout=0.01) is True
+
+
+def test_has_network_anchor_set_includes_domestic(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 防回归：锚点集不得退化成"只有境外 host"，否则又回到受限网络下假阴性的老问题。
+    known_foreign = {"1.1.1.1", "8.8.8.8", "9.9.9.9", "rdap.org", "dns.google", "dns.quad9.net"}
+    hosts = {h for h, _ in registry._NETWORK_PROBE_HOSTS}
+    assert hosts - known_foreign, "探测锚点必须含至少一个境内 host"
+
+
 def test_detect_capabilities_jadx_and_adb(monkeypatch: pytest.MonkeyPatch) -> None:
     _stub_all_absent(monkeypatch)
     monkeypatch.setattr(registry.tools, "has_jadx", lambda: True)
