@@ -27,12 +27,19 @@ jobs:
         run: python -m pyright apkscan
 
   test:
-    name: pytest (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    name: pytest (${{ matrix.os }} / py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        # Linux 跑全 Python 版本；macOS / Windows 各跑一版验跨平台（路径/编码/换行等平台差异）。
+        os: [ubuntu-latest]
         python-version: ["3.11", "3.12"]
+        include:
+          - os: macos-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -43,6 +50,57 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[graph,track]"
-          python -m pip install pytest
-      - name: Run tests
+          python -m pip install pytest pytest-cov
+      # 覆盖率门禁只在 Linux 跑（基线 83%，阈值 80 留 3% 余量）。macOS/Windows 覆盖到的行不同
+      # （平台分支），共用一个阈值会假红；那两个 job 只验跨平台正确性，不做覆盖率门禁。
+      - name: Run tests + coverage gate (Linux)
+        if: runner.os == 'Linux'
+        run: >-
+          python -m pytest -q
+          --cov=apkscan --cov-report=term-missing:skip-covered --cov-fail-under=80
+      - name: Run tests (macOS / Windows)
+        if: runner.os != 'Linux'
         run: python -m pytest -q
+
+  package-smoke:
+    name: package smoke (wheel install)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+      - name: Install built wheel in a clean venv and smoke-test
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/python -m pip install --upgrade pip
+          /tmp/smoke/bin/python -m pip install dist/*.whl
+          # 入口 console_script 装包后可用。
+          /tmp/smoke/bin/fxapk --version
+          # ★关键：rules/*.yaml 等 package-data 真打进 wheel 且可被 importlib.resources 读到。
+          #   纯源码测试跑不出这类“忘打数据文件 → pip 装完加载不了规则”的发布事故。
+          /tmp/smoke/bin/python -c "from apkscan.core.registry import load_rules; assert all(load_rules(n) for n in ('packers','re_toolkit','app_types')), 'packaged rules missing from wheel'; print('packaged rules load OK')"
+
+  audit:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install runtime deps + pip-audit
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          python -m pip install -e ".[graph,track]"
+      # 审计 fxapk 真实依赖树（clean runner，不含开发机全局环境噪音）。当前干净 → 阻断式门禁，
+      # 只在**新**漏洞出现时变红。若某上游漏洞暂无修复版，用 `--ignore-vuln <ID>` 显式豁免。
+      # 不加 --strict：本地 editable fxapk 无法在 PyPI 审计，--strict 会因它被跳过而误红。
+      - name: Audit dependencies for known vulnerabilities
+        run: python -m pip_audit

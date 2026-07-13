@@ -1,0 +1,5 @@
+# 换行策略：Frida hook 脚本（apkscan/dynamic/frida_js/*.js）被按字节读取并**原样推到设备**，
+# 必须在所有平台保持 LF。否则 Windows 上 git autocrlf 会在 checkout 时把它们转成 CRLF，破坏
+# 运行时行为，并让 test_cryptohook 的 LF-only 断言在 Windows CI 上失败。
+# 仓内所有 .js 一律 LF（既覆盖 frida 资源，也避免将来新增 JS 资源重蹈覆辙）。
+*.js text eol=lf
