@@ -163,7 +163,12 @@ def merge_runtime_into_lead_dict(existing: dict, runtime_lead: dict) -> bool:
 
 @dataclass
 class Finding:
-    """技术发现（报告附录用）。"""
+    """技术发现（报告附录用）。
+
+    ``id`` 即该发现的**规则标识**（rule id）：规则驱动的分析器用 YAML 里的 ``id:``，代码内启发式
+    用稳定常量。配合 report.meta 的 ``ruleset_digest`` / ``tool_version``，可回答「这条发现由哪条
+    规则、哪套规则集、哪个版本的工具产出」——溯源闭环。
+    """
 
     id: str
     title: str
@@ -173,6 +178,13 @@ class Finding:
     recommendation: str = ""
     evidences: list[Evidence] = field(default_factory=list)
     references: list[str] = field(default_factory=list)
+    # ---- 溯源（谁、以多大把握产出这条发现）----
+    #: 产出该发现的分析器名。在 pipeline 聚合处**集中盖章**（见 pipeline.run），分析器无需逐个改；
+    #: 分析器若要标更细的子来源可自行赋值，集中盖章不覆盖已有值。
+    analyzer: str = ""
+    #: 置信度（多稳、多不像误报），与 severity（多严重）**正交**。默认 MEDIUM；纯启发式 / 统计类
+    #: 发现应显式降为 LOW，供消费方（研判 / Agent）据此加权、抑制噪声。
+    confidence: Confidence = Confidence.MEDIUM
 
 
 @dataclass
