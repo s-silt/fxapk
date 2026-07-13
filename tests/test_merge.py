@@ -1017,6 +1017,7 @@ def test_merge_runtime_traces_anti_analysis_finding(tmp_path) -> None:
     aa = [f for f in report.findings if f.category == "anti_analysis"]
     assert len(aa) == 1
     assert aa[0].severity == Severity.HIGH  # 含 root/frida
+    assert aa[0].analyzer == "runtime-merge"  # 运行时合入的 finding 显式归属，非空串
     assert report.meta["runtime_antidetect"] == {"root": 1, "emulator": 1, "frida": 1}
     assert report.meta["runtime_traced"] is True
 

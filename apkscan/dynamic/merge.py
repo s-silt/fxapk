@@ -770,6 +770,8 @@ def _add_anti_analysis_finding(
             id="RUNTIME-ANTI-ANALYSIS",
             title="运行时反分析行为：探测 root/模拟器/frida",
             severity=severity,
+            # 运行时观测合入，无静态分析器归属 → 显式标 runtime-merge（区别于"未归因"的空串）。
+            analyzer="runtime-merge",
             category="anti_analysis",
             description=(
                 f"运行时实测：样本自我检测了 {kinds_label}（已由取证运行时兼容层中和）。"
@@ -1628,6 +1630,8 @@ def _add_remote_control_finding(
             id="RUNTIME-REMOTE-CONTROL",
             title="运行时无障碍远控行为：自动手势 / 屏幕录制劫持银行支付",
             severity=Severity.HIGH,
+            # 运行时观测合入，无静态分析器归属 → 显式标 runtime-merge（区别于"未归因"的空串）。
+            analyzer="runtime-merge",
             category="runtime",
             description=(
                 f"运行时实测无障碍远控行为：下发 {len(gesture_actions)} 个自动手势/全局动作；"

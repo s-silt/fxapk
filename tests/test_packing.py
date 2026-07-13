@@ -165,6 +165,8 @@ def test_dex_only_match_not_hardened_yields_info_finding():
         and f.category == "packing"
     ]
     assert len(info) == 1
+    # 溯源：弱 dex-only 信号 → 低置信度（供消费方抑制噪声）。
+    assert info[0].confidence == Confidence.LOW
     # 不产 HIGH PACK-DETECTED
     assert not any(f.id == "PACK-DETECTED" for f in result.findings)
     # evidences 透明保留 dex 来源证据
