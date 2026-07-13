@@ -176,6 +176,8 @@ class NativeObfuscationAnalyzer(BaseAnalyzer):
         if len(data) < 64 or data[:4] != b"\x7fELF":
             return None
         ei_class = data[4]  # 1=ELF32, 2=ELF64
+        if data[5] not in (1, 2):  # EI_DATA 非 1(LE)/2(BE) = 非法头,拒
+            return None
         endian = "<" if data[5] == 1 else ">"
         try:
             if ei_class == 2:  # ELF64: p_type@0 p_flags@4 p_filesz@32
@@ -210,8 +212,9 @@ class NativeObfuscationAnalyzer(BaseAnalyzer):
         return None
 
     def _has_local_high_entropy_block(self, data: bytes) -> bool:
-        """全量分窗（有界 ≤_MAX_LOCAL_WINDOWS）：任一窗高熵（≥7.8）且窗内局部可读串密度<0.05
-        → 内嵌加密/VM 字节码块（选择性虚拟化：只核心函数进 VM，全局 .rodata 串密度仍正常）。"""
+        """全量分窗（有界 ≤_MAX_LOCAL_WINDOWS）：任一窗高熵（≥7.8）且窗内局部可读串密度<0.07
+        → 内嵌加密/VM 字节码块（选择性虚拟化：只核心函数进 VM，全局 .rodata 串密度仍正常）。
+        注：统计信号，内嵌大块压缩资产（zip/图片等）同样高熵低串、会命中，故须结合其它信号研判。"""
         n = len(data)
         step = max(_WINDOW, -(-n // _MAX_LOCAL_WINDOWS))  # 窗数超上限则步进跨采,保证覆盖有界
         for i in range(0, n, step):
@@ -278,8 +281,8 @@ class NativeObfuscationAnalyzer(BaseAnalyzer):
                 "等特征，疑原生逻辑被虚拟化（VMP，含选择性函数虚拟化）/ 加密壳 / 段加密保护：\n"
                 + "\n".join(lines)
                 + "。★ 启发式信号，非精确判定——合法 App（金融 / 游戏 DRM）亦可能高熵；"
-                "PT_NOTE 异常与局部高熵块是更结构化的低 FP 信号，但仍须结合其它信号研判；"
-                "本法抓不到纯控制流平坦化混淆（须反汇编）。"
+                "PT_NOTE 段异常是结构化低 FP 信号；局部高熵块是统计信号，内嵌大块压缩资产"
+                "（zip/图片等）亦会命中，须结合其它信号研判；本法抓不到纯控制流平坦化混淆（须反汇编）。"
             ),
             recommendation=(
                 "该 .so 的原生逻辑静态不完整：若关键 / 加密逻辑在 native，宜转运行时观测 "

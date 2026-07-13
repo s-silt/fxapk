@@ -150,3 +150,32 @@ def test_local_high_entropy_block_flagged():
     assert sus and any("局部高熵块" in s for s in sus[0]["signals"])
     # 全局串密度仍高（整库门未触发，靠局部门）
     assert sus[0]["string_density"] >= 0.08
+
+
+def _elf32_with_ptnote(*, p_flags: int, p_filesz: int) -> bytes:
+    """最小 ELF32（armeabi-v7a），含一个 PT_NOTE 段——覆盖 ELF32 的 filesz@16/flags@24 偏移路径。"""
+    hdr = bytearray(52)
+    hdr[0:4] = b"\x7fELF"
+    hdr[4] = 1  # ELF32
+    hdr[5] = 1  # little-endian
+    struct.pack_into("<I", hdr, 28, 52)  # e_phoff（紧接 52B 头）
+    struct.pack_into("<H", hdr, 42, 32)  # e_phentsize
+    struct.pack_into("<H", hdr, 44, 1)   # e_phnum
+    ph = bytearray(32)
+    struct.pack_into("<I", ph, 0, 4)          # p_type = PT_NOTE
+    struct.pack_into("<I", ph, 16, p_filesz)  # p_filesz@16（ELF32）
+    struct.pack_into("<I", ph, 24, p_flags)   # p_flags@24（ELF32）
+    return bytes(hdr) + bytes(ph) + b"\x00" * (96 * 1024)
+
+
+def test_pt_note_executable_flagged_elf32():
+    # ELF32 偏移路径（p_filesz@16 / p_flags@24 与 ELF64 不同）防回归。
+    result = _analyze(files={"lib/armeabi-v7a/libvmp.so": _elf32_with_ptnote(p_flags=0x5, p_filesz=200)})
+    sus = result.meta["native_obfuscation"]
+    assert sus and any("PT_NOTE" in s for s in sus[0]["signals"])
+
+
+def test_pt_note_oversized_flagged_elf32():
+    result = _analyze(files={"lib/armeabi-v7a/libvmp.so": _elf32_with_ptnote(p_flags=0x4, p_filesz=50_000)})
+    sus = result.meta["native_obfuscation"]
+    assert sus and any("PT_NOTE" in s for s in sus[0]["signals"])
