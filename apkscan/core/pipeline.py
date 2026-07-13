@@ -13,6 +13,7 @@ import pickle
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import psutil
@@ -95,34 +96,67 @@ def _analysis_health(analyzer_status: list[dict]) -> tuple[str, float, list[str]
     return status, completeness, critical, skipped
 
 
-def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
-    """执行完整流水线，返回 Report。"""
-    # 规范化「有效配置」为单一来源：分析器读 ``ctx.config``，而 pipeline 门控 / 报告标注读 ``config``
-    # 参数——二者本应同一对象（load_app 传入同一 config），但程序化调用方可能传入不一致的两个，导致
-    # 分析器的主动探测门控（如 contacts getMe 读 ctx.config.mode）与报告标注的 mode 分叉，出现「报告
-    # 标 passive 但分析器按 authorized-active 主动探测」的错配。以 pipeline 的 config 为准对齐 ctx。
+@dataclass
+class _PipelineState:
+    """一次 pipeline 运行的可变累积态：各 ``_stage_*`` 就地读写，run() 末尾据此组装 Report。
+
+    引入它是为把原先 run() 里一长串内联阶段拆成命名清晰的 stage 函数（**纯结构、行为逐字不变**），
+    让阶段边界显式、并为后续「每阶段状态/指标/超时」留骨架。字段与 Report 的对应产出一一对应。
+    """
+
+    ctx: "AnalysisContext"
+    config: AnalysisConfig
+    platform: str
+    capabilities: set[str]
+    meta: dict = field(default_factory=dict)
+    leads: list = field(default_factory=list)
+    endpoints: list = field(default_factory=list)
+    findings: list = field(default_factory=list)
+    analyzer_status: list[dict] = field(default_factory=list)
+    enricher_status: list[dict] = field(default_factory=list)
+    analysis_status: str = ANALYSIS_STATUS_COMPLETE
+    completeness: float = 1.0
+    critical_failures: list = field(default_factory=list)
+    skipped_analyzers: list = field(default_factory=list)
+
+
+def _canonicalize_ctx_config(ctx: "AnalysisContext", config: AnalysisConfig) -> None:
+    """规范化「有效配置」为单一来源：分析器读 ``ctx.config``，而 pipeline 门控 / 报告标注读 ``config``
+    参数——二者本应同一对象（load_app 传入同一 config），但程序化调用方可能传入不一致的两个，导致
+    分析器的主动探测门控（如 contacts getMe 读 ctx.config.mode）与报告标注的 mode 分叉，出现「报告
+    标 passive 但分析器按 authorized-active 主动探测」的错配。以 pipeline 的 config 为准对齐 ctx。"""
     if getattr(ctx, "config", None) is not config:
         try:
             ctx.config = config  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001 — 只读上下文兜底：无法对齐则不阻断，仅记 debug
             logger.debug("无法规范化 ctx.config（只读上下文？）", exc_info=True)
 
+
+def _init_pipeline_state(ctx: "AnalysisContext", config: AnalysisConfig) -> _PipelineState:
+    """探测能力 + 平台并播种 meta，返回初始累积态。
+
+    平台能力：让 requires=["apk"] 的 Android 专属 analyzer 在 IPA 上自动 skipped、requires=["ipa"]
+    的 iOS analyzer 在 APK 上 skipped（复用既有 requires 门控）。meta 播种 package_name/platform +
+    网络模式留痕（passive / authorized-active，供报告审计声明是否纯被动）。"""
     capabilities = detect_capabilities(online=config.online)
-    # 平台能力：让 requires=["apk"] 的 Android 专属 analyzer 在 IPA 上自动 skipped、
-    # requires=["ipa"] 的 iOS analyzer 在 APK 上 skipped（复用既有 requires 门控，pipeline 主体不变）。
     platform = getattr(ctx, "platform", "android")
     capabilities.add("apk" if platform == "android" else "ipa")
-
-    leads: list[Lead] = []
-    endpoints: list[Endpoint] = []
-    findings: list = []
     meta: dict = {"package_name": ctx.package_name, "platform": platform}
-    # 网络模式留痕（passive / authorized-active）：报告可审计声明本次是否纯被动、是否放行了主动探测。
     meta["mode"] = getattr(config, "mode", ANALYSIS_MODE_PASSIVE)
-    analyzer_status: list[dict] = []
+    return _PipelineState(
+        ctx=ctx, config=config, platform=platform, capabilities=capabilities, meta=meta
+    )
 
-    # 1) 跑分析器（android 多核走进程池并行，否则串行；按 requires 门控）。
-    #    ★ 结果**按发现顺序聚合**（meta last-writer / endpoints 顺序与串行逐字节一致）。
+
+def _stage_run_analyzers(state: _PipelineState) -> None:
+    """跑分析器（android 多核走进程池并行，否则串行；按 requires 门控）→ **按发现顺序聚合**
+    endpoints/leads/findings/meta + 记 status + finding 溯源盖章 → 端点按 value 去重。
+
+    去重必须在富化与 build_endpoint_leads 之前，避免重复 DOMAIN/IP Lead 与重复富化查询。
+    """
+    ctx = state.ctx
+    capabilities = state.capabilities
+    meta = state.meta
     discovered = discover_analyzers()
     eligible: list[tuple[str, object]] = []  # (name, analyzer)，requires 已满足，发现顺序
     for analyzer in discovered:
@@ -136,7 +170,7 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
         name: (result, error) for name, result, error in _analyze_eligible(ctx, eligible)
     }
 
-    # 2) 按发现顺序聚合 + 记 status（与串行行为一致）。
+    # 按发现顺序聚合 + 记 status（与串行行为一致）。
     for analyzer in discovered:
         name = getattr(analyzer, "name", "") or analyzer.__class__.__name__
         requires = list(getattr(analyzer, "requires", []) or [])
@@ -144,29 +178,29 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
         if missing:
             reason = f"缺少能力：{', '.join(missing)}"
             logger.info("跳过分析器 %s：%s", name, reason)
-            analyzer_status.append({"name": name, "status": "skipped", "reason": reason})
+            state.analyzer_status.append({"name": name, "status": "skipped", "reason": reason})
             continue
 
         result, error = results_map.get(name, (None, "分析器未返回结果"))
         if error is not None:
             logger.warning("分析器执行异常：%s（%s）", name, error)
-            analyzer_status.append({"name": name, "status": "error", "reason": error})
+            state.analyzer_status.append({"name": name, "status": "error", "reason": error})
             continue
         if result is None:
             logger.warning("分析器 %s 返回 None，按空结果处理", name)
-            analyzer_status.append(
+            state.analyzer_status.append(
                 {"name": name, "status": "error", "reason": "analyze 返回 None"}
             )
             continue
 
-        endpoints.extend(result.endpoints)
-        leads.extend(result.leads)
+        state.endpoints.extend(result.endpoints)
+        state.leads.extend(result.leads)
         # 溯源：集中给每条 finding 盖上产出它的分析器名（此处 analyzer 归属仍在；一旦 extend 进
         # report.findings 就丢了）。分析器已自标更细来源的不覆盖。
         for finding in result.findings:
             if not finding.analyzer:
                 finding.analyzer = name
-        findings.extend(result.findings)
+        state.findings.extend(result.findings)
         if result.meta:
             # 同名 meta key 冲突时记 warning，避免后跑分析器静默覆盖前者的结果。
             for k, v in result.meta.items():
@@ -178,19 +212,22 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
 
         if result.error:
             logger.warning("分析器 %s 自报错误：%s", name, result.error)
-            analyzer_status.append(
+            state.analyzer_status.append(
                 {"name": name, "status": "error", "reason": result.error}
             )
         else:
-            analyzer_status.append({"name": name, "status": "ran", "reason": ""})
+            state.analyzer_status.append({"name": name, "status": "ran", "reason": ""})
 
-    # 2.4) 端点按 value 去重合并（不同分析器可能产出同一 value 的 Endpoint）。
-    # 必须在富化与 build_endpoint_leads 之前，避免重复 DOMAIN/IP Lead 与重复富化查询。
-    endpoints = _dedup_endpoints(endpoints)
+    # 端点按 value 去重合并（不同分析器可能产出同一 value 的 Endpoint）。
+    state.endpoints = _dedup_endpoints(state.endpoints)
 
-    # 2.5) 把上下文的降级标志显式带入报告，避免"未采集"被静默当成"采集为空"。
+
+def _stage_degradation_flags(state: _PipelineState) -> None:
+    """把上下文的降级标志显式带入 meta，避免"未采集"被静默当成"采集为空"。"""
+    ctx = state.ctx
+    meta = state.meta
     if getattr(ctx, "dex_available", True) is False:
-        if platform == "ios":
+        if state.platform == "ios":
             # iOS 本就无 DEX，不是"加固"——H5 端点在 www JS 资源里命中，这不是降级告警。
             meta["dex_parse_failed"] = False
         else:
@@ -199,90 +236,118 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     if getattr(ctx, "apk_validation_ok", True) is False:
         meta["apk_validation_warning"] = "APK 合法性校验异常，分析结果可能不可靠（详见日志）"
 
-    # 3) 联网富化（两遍）——**只对"高度可疑"端点（建议调证）查**，不再有一个查一个。
-    #    判据：infra 分级为"建议调证"（疑似 App 自有服务/C2）的域名/IP 才查；已知第三方基础设施/
-    #    SDK/CDN（无需调证）、私网/回环/行情代码（待核）一律跳过。省时 + 聚焦调证。
-    #    ★ 两遍富化（见 _run_enrichment）：①归属(rdap/whois/dns/asn/icp/webcheck)定辖区 →
-    #      ②境外被动取证(shodan/certs)仅对【国外+未知】端点跑（全程被动 OSINT，对目标零流量）。
-    enricher_status: list[dict] = []
-    if config.online:
-        targets = _enrichment_targets(endpoints)
-        discovered = discover_enrichers()
-        # ★ 主动/被动模式硬隔离（代码层，非仅文档声明）：passive（默认）下屏蔽会**向目标发流量**的
-        #   主动富化器（active=True，如 webcheck 经 SaaS live 探测目标）；authorized-active 才放行。
-        #   被屏蔽项记入 meta 供审计（非静默丢弃）；放行主动探测时发 WARNING 留痕。
-        mode = getattr(config, "mode", ANALYSIS_MODE_PASSIVE)
-        active_enrichers = [e for e in discovered if getattr(e, "active", False)]
-        if mode == ANALYSIS_MODE_AUTHORIZED_ACTIVE:
-            if active_enrichers:
-                names = [getattr(e, "name", "") or type(e).__name__ for e in active_enrichers]
-                meta["active_enrichers_enabled"] = names
-                logger.warning(
-                    "authorized-active 模式：放行 %d 个**主动**富化器（将向目标发起 live 探测，"
-                    "请确认已获授权）：%s",
-                    len(names),
-                    names,
-                )
-        elif active_enrichers:
+
+def _stage_enrich(state: _PipelineState) -> None:
+    """联网富化（两遍）——**只对"高度可疑"端点（建议调证）查**，不再有一个查一个。
+
+    判据：infra 分级为"建议调证"（疑似 App 自有服务/C2）的域名/IP 才查；已知第三方基础设施/SDK/CDN
+    （无需调证）、私网/回环/行情代码（待核）一律跳过。★ 两遍富化（见 _run_enrichment）：①归属定辖区
+    → ②境外被动取证仅对【国外+未知】端点跑。主动/被动模式硬隔离：passive（默认）屏蔽会**向目标发
+    流量**的主动富化器（active=True，如 webcheck），authorized-active 才放行；被屏蔽/放行项记入 meta
+    供审计。offline → 仅记跳过标志。"""
+    config = state.config
+    meta = state.meta
+    if not config.online:
+        meta["enrichment_skipped_offline"] = True
+        logger.info("offline 模式：跳过全部富化器（归属信息未查询，非查无结果）")
+        return
+
+    targets = _enrichment_targets(state.endpoints)
+    discovered = discover_enrichers()
+    mode = getattr(config, "mode", ANALYSIS_MODE_PASSIVE)
+    active_enrichers = [e for e in discovered if getattr(e, "active", False)]
+    if mode == ANALYSIS_MODE_AUTHORIZED_ACTIVE:
+        if active_enrichers:
             names = [getattr(e, "name", "") or type(e).__name__ for e in active_enrichers]
-            meta["active_enrichers_skipped_passive_mode"] = names
-            logger.info(
-                "passive 模式：已屏蔽 %d 个主动富化器（对目标发流量）：%s；如确需主动探测请显式"
-                " --mode authorized-active",
+            meta["active_enrichers_enabled"] = names
+            logger.warning(
+                "authorized-active 模式：放行 %d 个**主动**富化器（将向目标发起 live 探测，"
+                "请确认已获授权）：%s",
                 len(names),
                 names,
             )
-        enricher_status = _run_enrichment(targets, discovered, gate=_mode_gate(mode))
-        meta["enriched_target_count"] = len(targets)
-        net_eps = sum(1 for ep in endpoints if ep.kind in ("domain", "ip"))
+    elif active_enrichers:
+        names = [getattr(e, "name", "") or type(e).__name__ for e in active_enrichers]
+        meta["active_enrichers_skipped_passive_mode"] = names
         logger.info(
-            "联网富化：仅对 %d 个高度可疑端点（建议调证）查归属，跳过其余 %d 个域名/IP（infra/已知/私网）",
-            len(targets),
-            max(0, net_eps - len(targets)),
+            "passive 模式：已屏蔽 %d 个主动富化器（对目标发流量）：%s；如确需主动探测请显式"
+            " --mode authorized-active",
+            len(names),
+            names,
         )
-    else:
-        meta["enrichment_skipped_offline"] = True
-        logger.info("offline 模式：跳过全部富化器（归属信息未查询，非查无结果）")
-
-    # 4) 端点 → DOMAIN/IP Lead（分析器本身不产 DOMAIN/IP Lead，统一在此生成）
-    #    DOMAIN/IP Lead 的 advice 已在 build_endpoint_leads 内按 infra 分级赋值。
-    leads.extend(build_endpoint_leads(endpoints, online=config.online))
-
-    # 4.5) advice 兜底：分析器若未自带研判建议，按线索类别给默认值，
-    #      避免报告里出现空白的"是否调证"列。已自带 advice 的不覆盖。
-    _apply_default_advice(leads)
-
-    # 4.6) 结构化境外目标段（按主机聚合 shodan/certs 的被动定位信号，机器可读）：供 digest/HTML/Codex
-    #      直接查询/聚合/交叉比对，免去从 evidence 自然语言串里解析。仅联网富化后有内容。
-    if config.online:
-        meta["overseas_targets"] = _build_overseas_targets(endpoints)
-
-    # 5) 结果可信度地基：据 analyzer_status 聚合完整度 + 记录工具版本 / 规则摘要（可复现锚点）。
-    status, completeness, critical_failures, skipped_analyzers = _analysis_health(analyzer_status)
-    meta["tool_version"] = _tool_version()
-    meta["ruleset_digest"] = ruleset_digest()
-
-    # 6) 组装 Report
-    report = Report(
-        package_name=ctx.package_name,
-        meta=meta,
-        leads=leads,
-        endpoints=endpoints,
-        findings=findings,
-        analyzer_status=analyzer_status,
-        enricher_status=enricher_status,
-        analysis_status=status,
-        completeness=completeness,
-        critical_failures=critical_failures,
-        skipped_analyzers=skipped_analyzers,
+    state.enricher_status = _run_enrichment(targets, discovered, gate=_mode_gate(mode))
+    meta["enriched_target_count"] = len(targets)
+    net_eps = sum(1 for ep in state.endpoints if ep.kind in ("domain", "ip"))
+    logger.info(
+        "联网富化：仅对 %d 个高度可疑端点（建议调证）查归属，跳过其余 %d 个域名/IP（infra/已知/私网）",
+        len(targets),
+        max(0, net_eps - len(targets)),
     )
 
-    # 6) App 类型聚合分类（在所有分析器跑完 + build_endpoint_leads 之后调用一次）。
-    #    聚合 report 现成 meta/leads/endpoints/findings 信号，加权定类，并据类型**追加**
-    #    针对性调证 Lead（只追加、不改已有 Lead）。classify_app 整体 try/except 兜底，
-    #    分类失败时 report 原样返回，绝不炸流水线。
-    classify_app(report)
 
+def _stage_build_leads(state: _PipelineState) -> None:
+    """端点 → DOMAIN/IP Lead（分析器本身不产 DOMAIN/IP Lead，统一在此生成；advice 已在
+    build_endpoint_leads 内按 infra 分级赋值）+ advice 兜底（分析器未自带研判建议时按线索类别给默认值，
+    避免报告出现空白"是否调证"列；已自带 advice 的不覆盖）。"""
+    state.leads.extend(build_endpoint_leads(state.endpoints, online=state.config.online))
+    _apply_default_advice(state.leads)
+
+
+def _stage_overseas_targets(state: _PipelineState) -> None:
+    """结构化境外目标段（按主机聚合 shodan/certs 的被动定位信号，机器可读）：供 digest/HTML/Codex
+    直接查询/聚合/交叉比对，免去从 evidence 自然语言串里解析。仅联网富化后有内容。"""
+    if state.config.online:
+        state.meta["overseas_targets"] = _build_overseas_targets(state.endpoints)
+
+
+def _stage_credibility(state: _PipelineState) -> None:
+    """结果可信度地基：据 analyzer_status 聚合完整度 + 记录工具版本 / 规则摘要（可复现锚点）。"""
+    (
+        state.analysis_status,
+        state.completeness,
+        state.critical_failures,
+        state.skipped_analyzers,
+    ) = _analysis_health(state.analyzer_status)
+    state.meta["tool_version"] = _tool_version()
+    state.meta["ruleset_digest"] = ruleset_digest()
+
+
+def _assemble_report(state: _PipelineState) -> Report:
+    """据累积态组装 Report（字段一一对应）。"""
+    return Report(
+        package_name=state.ctx.package_name,
+        meta=state.meta,
+        leads=state.leads,
+        endpoints=state.endpoints,
+        findings=state.findings,
+        analyzer_status=state.analyzer_status,
+        enricher_status=state.enricher_status,
+        analysis_status=state.analysis_status,
+        completeness=state.completeness,
+        critical_failures=state.critical_failures,
+        skipped_analyzers=state.skipped_analyzers,
+    )
+
+
+def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
+    """执行完整流水线，返回 Report。
+
+    结构为一串按序执行的 stage（见各 ``_stage_*``），共享 ``_PipelineState`` 累积态。行为与历史内联
+    实现**逐字一致**（纯结构重构），仅让阶段边界显式、便于后续为每阶段加状态/指标/超时。
+    """
+    _canonicalize_ctx_config(ctx, config)
+    state = _init_pipeline_state(ctx, config)
+    _stage_run_analyzers(state)      # 1) 分析器执行 + 按序聚合 + 端点去重
+    _stage_degradation_flags(state)  # 2) 降级标志入 meta
+    _stage_enrich(state)             # 3) 联网富化（两遍，主动/被动硬隔离）
+    _stage_build_leads(state)        # 4) 端点 → Lead + advice 兜底
+    _stage_overseas_targets(state)   # 5) 境外目标结构化段
+    _stage_credibility(state)        # 6) 完整度 / 工具版本 / 规则摘要
+    report = _assemble_report(state)  # 7) 组装 Report
+    # 8) App 类型聚合分类（在所有分析器跑完 + build_endpoint_leads 之后调用一次）：聚合现成
+    #    meta/leads/endpoints/findings 信号加权定类，并据类型**追加**针对性调证 Lead（只追加、不改
+    #    已有 Lead）。classify_app 整体 try/except 兜底，分类失败时 report 原样返回，绝不炸流水线。
+    classify_app(report)
     return report
 
 
