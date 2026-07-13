@@ -20,6 +20,8 @@ import psutil
 from apkscan.analyzers.classify import classify_app
 from apkscan.core import exposure, forensic, infra
 from apkscan.core.models import (
+    ANALYSIS_MODE_AUTHORIZED_ACTIVE,
+    ANALYSIS_MODE_PASSIVE,
     AnalysisConfig,
     Confidence,
     Endpoint,
@@ -60,6 +62,8 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     endpoints: list[Endpoint] = []
     findings: list = []
     meta: dict = {"package_name": ctx.package_name, "platform": platform}
+    # 网络模式留痕（passive / authorized-active）：报告可审计声明本次是否纯被动、是否放行了主动探测。
+    meta["mode"] = getattr(config, "mode", ANALYSIS_MODE_PASSIVE)
     analyzer_status: list[dict] = []
 
     # 1) 跑分析器（android 多核走进程池并行，否则串行；按 requires 门控）。
@@ -143,7 +147,32 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     enricher_status: list[dict] = []
     if config.online:
         targets = _enrichment_targets(endpoints)
-        enricher_status = _run_enrichment(targets, discover_enrichers())
+        discovered = discover_enrichers()
+        # ★ 主动/被动模式硬隔离（代码层，非仅文档声明）：passive（默认）下屏蔽会**向目标发流量**的
+        #   主动富化器（active=True，如 webcheck 经 SaaS live 探测目标）；authorized-active 才放行。
+        #   被屏蔽项记入 meta 供审计（非静默丢弃）；放行主动探测时发 WARNING 留痕。
+        mode = getattr(config, "mode", ANALYSIS_MODE_PASSIVE)
+        active_enrichers = [e for e in discovered if getattr(e, "active", False)]
+        if mode == ANALYSIS_MODE_AUTHORIZED_ACTIVE:
+            if active_enrichers:
+                names = [getattr(e, "name", "") or type(e).__name__ for e in active_enrichers]
+                meta["active_enrichers_enabled"] = names
+                logger.warning(
+                    "authorized-active 模式：放行 %d 个**主动**富化器（将向目标发起 live 探测，"
+                    "请确认已获授权）：%s",
+                    len(names),
+                    names,
+                )
+        elif active_enrichers:
+            names = [getattr(e, "name", "") or type(e).__name__ for e in active_enrichers]
+            meta["active_enrichers_skipped_passive_mode"] = names
+            logger.info(
+                "passive 模式：已屏蔽 %d 个主动富化器（对目标发流量）：%s；如确需主动探测请显式"
+                " --mode authorized-active",
+                len(names),
+                names,
+            )
+        enricher_status = _run_enrichment(targets, discovered, gate=_mode_gate(mode))
         meta["enriched_target_count"] = len(targets)
         net_eps = sum(1 for ep in endpoints if ep.kind in ("domain", "ip"))
         logger.info(
@@ -728,7 +757,22 @@ def _classify_endpoint_jurisdiction(ep: Endpoint) -> str:
         return forensic.JURIS_UNKNOWN
 
 
-def _run_enrichment(targets: list[Endpoint], enrichers: list[BaseEnricher]) -> list[dict]:
+def _mode_gate(mode: str) -> "Callable[[Endpoint, BaseEnricher], bool]":
+    """按网络模式生成富化器门控谓词（防御纵深：真正在**调用点**拦，任何富化路径都过此闸）。
+
+    - ``authorized-active``：全放行（含 active=True 的主动富化器）。
+    - 其它（含默认 ``passive`` 及任何非法值 → 保守当被动）：只放行被动富化器（active 为假）。
+    """
+    if mode == ANALYSIS_MODE_AUTHORIZED_ACTIVE:
+        return lambda _ep, _e: True
+    return lambda _ep, enricher: not getattr(enricher, "active", False)
+
+
+def _run_enrichment(
+    targets: list[Endpoint],
+    enrichers: list[BaseEnricher],
+    gate: "Callable[[Endpoint, BaseEnricher], bool] | None" = None,
+) -> list[dict]:
     """两遍富化编排（**单遍并发·每端点内两阶段**，无跨端点栅栏）：
     每个端点在自己的 worker 里串行跑 ①归属(attribution) → 定辖区 → ②境外被动取证(overseas)，
     端点之间互不等待——慢端点（如 30s WHOIS 超时）不再阻塞其它端点的第②阶段（去掉旧版两遍之间的栅栏）。
@@ -736,7 +780,13 @@ def _run_enrichment(targets: list[Endpoint], enrichers: list[BaseEnricher]) -> l
     第②遍只对【国外 + 未知】端点跑（境内走调证、不做境外取证）；overseas 富化器全部**被动**
     （shodan/certs 读公开库，对目标零流量）。辖区结果仅为 worker 内局部变量，**绝不写入 ep.enrichment**
     （避免 ``_jurisdiction`` 等内部键泄漏进 report.json）。
+
+    ``gate=None`` **fail-closed**：缺省按 passive 门控（拦 active 富化器）。这样任何调用方（现在或
+    将来）漏传 gate 都得到**安全**行为，绝不会静默把 webcheck 等主动富化器放进被动运行。要全放行须
+    显式传 ``gate=_mode_gate("authorized-active")``。
     """
+    if gate is None:
+        gate = _mode_gate(ANALYSIS_MODE_PASSIVE)
     attribution = [e for e in enrichers if _enricher_phase(e) == "attribution"]
     overseas = sorted(
         (e for e in enrichers if _enricher_phase(e) == "overseas"),
@@ -748,7 +798,7 @@ def _run_enrichment(targets: list[Endpoint], enrichers: list[BaseEnricher]) -> l
 
     def _enrich_one_two_phase(ep: Endpoint) -> None:
         # ① 归属富化。
-        _run_enrichers_on_endpoint(ep, attribution, stats, stats_lock)
+        _run_enrichers_on_endpoint(ep, attribution, stats, stats_lock, gate)
         if not overseas:
             return
         # 定辖区（worker 内局部，绝不写回 ep.enrichment）。
@@ -757,7 +807,7 @@ def _run_enrichment(targets: list[Endpoint], enrichers: list[BaseEnricher]) -> l
             return  # 境内：走调证、不做境外被动取证
 
         # ② 境外被动取证富化（同 worker 内串行，组内顺序由 overseas 排序保证确定性）。
-        _run_enrichers_on_endpoint(ep, overseas, stats, stats_lock)
+        _run_enrichers_on_endpoint(ep, overseas, stats, stats_lock, gate)
 
     if targets:
         workers = max(1, min(ENRICH_MAX_WORKERS, len(targets)))

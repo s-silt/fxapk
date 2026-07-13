@@ -91,10 +91,18 @@ def _extract_country(location: object) -> str:
 
 
 class WebCheckEnricher(BaseEnricher):
-    """对域名 / IP 调 web-check 多项检查（opt-in，配 FXAPK_WEBCHECK_URL 才启用）。"""
+    """对域名 / IP 调 web-check 多项检查（opt-in，配 FXAPK_WEBCHECK_URL 才启用）。
+
+    ★ **本仓唯一的主动富化器**（``active = True``）：把目标 URL 交给 web-check（lissy93/web-check）
+    实例，实例据默认检查集（ports/ssl/http-security/tech-stack/redirects/firewall 等）对目标发起
+    **live 探测**——目标本身会收到流量。故默认 ``passive`` 模式下被 pipeline 代码层硬屏蔽，仅
+    ``--mode authorized-active`` 放行（须操作者明确授权，报告留痕）。其余富化器均为被动 OSINT。
+    """
 
     name = "webcheck"
     applies_to = ["domain", "ip"]
+    #: ★ 主动：经 web-check SaaS 对目标 live 探测（非被动 OSINT）。passive 模式据此被屏蔽。
+    active = True
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
