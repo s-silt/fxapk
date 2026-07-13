@@ -25,12 +25,17 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def _max_decompressed_file_bytes() -> int:
-    """惰性取 ApkContext 的 zip 炸弹上限（与串行路同一常量，避免 drift）；模块已缓存、调用开销可忽略。
-    惰性 import 保持 snapshot 轻量：避免 top-level 拉 apk.py/androguard 进 pickle-load 路径。"""
-    from apkscan.core.apk import _MAX_DECOMPRESSED_FILE_BYTES
+def _zipbomb_guard() -> tuple[int, int, Any]:
+    """惰性取串行路径的 (解压上限, deflate 最大膨胀比, stdlib 有界解压函数)——与 apk.py 同一定义、
+    不 drift。惰性 import 保持 snapshot 轻量：避免 top-level 拉 apk.py/androguard 进 pickle-load 路径。
+    模块首次后即 sys.modules 命中，调用开销可忽略。"""
+    from apkscan.core.apk import (
+        _DEFLATE_MAX_RATIO,
+        _MAX_DECOMPRESSED_FILE_BYTES,
+        _read_zip_entry_capped,
+    )
 
-    return _MAX_DECOMPRESSED_FILE_BYTES
+    return _MAX_DECOMPRESSED_FILE_BYTES, _DEFLATE_MAX_RATIO, _read_zip_entry_capped
 
 #: 预读进快照的文本资源后缀（分析器实际扫描的；二进制不收以控快照体积）。
 _TEXT_SUFFIXES: tuple[str, ...] = (
@@ -94,14 +99,16 @@ class SnapshotContext:
         self._files = files  # 预读文本资源 path→bytes
         # worker 内惰性 APK 句柄（不 pickle）：None=未建，False=建过但失败，否则为 APK 实例。
         self._worker_apk: Any = None
-        # worker 内惰性 zip 声明大小表（不 pickle，每 worker 从 apk_path 重建）：None=未建。
+        # worker 内惰性 zip 大小表（不 pickle，每 worker 从 apk_path 重建）：None=未建。
         self._worker_declared_sizes: dict[str, int] | None = None
+        self._worker_compress_sizes: dict[str, int] | None = None
 
-    # ---- pickle：排除 worker 惰性态（androguard 句柄不可 pickle；声明大小表每 worker 重建）----
+    # ---- pickle：排除 worker 惰性态（androguard 句柄不可 pickle；大小表每 worker 重建）----
     def __getstate__(self) -> dict:
         state = self.__dict__.copy()
         state["_worker_apk"] = None
         state["_worker_declared_sizes"] = None
+        state["_worker_compress_sizes"] = None
         return state
 
     # ---- AnalysisContext 协议方法 ----
@@ -130,17 +137,25 @@ class SnapshotContext:
         return self._lazy_read(path)
 
     def _lazy_read(self, path: str) -> bytes | None:
-        # zip 炸弹前置拦截（与串行 ApkContext.read_file 同口径）：声明解压后大小超上限即跳过、不解压。
-        # 并行 worker 惰性读 .so（native_obfuscation / re_toolkit 的 .so 扫描）走本路，必须复刻此闸——
-        # 否则 zip 炸弹 .so（小压缩、巨解压）会在 worker 内被 androguard get_file 全量解压致 OOM。
+        # zip 炸弹前置拦截（与串行 ApkContext.read_file 同口径）。并行 worker 惰性读 .so
+        # （native_obfuscation / re_toolkit 的 .so 扫描）走本路，必须复刻此闸——否则 zip 炸弹 .so
+        # （小压缩、巨解压）会在 worker 内被 androguard get_file 全量解压致 OOM。
+        cap, ratio, capped_read = _zipbomb_guard()
+        # (1) 中央目录声明解压后大小超上限 → 直接跳过、不解压（拦如实声明的炸弹）。
         declared = self._ensure_declared_sizes().get(path)
-        if declared is not None and declared > _max_decompressed_file_bytes():
+        if declared is not None and declared > cap:
             logger.warning(
                 "snapshot 惰性 read_file 跳过（声明解压后 %d 字节超上限，疑 zip 炸弹）：%s",
                 declared,
                 path,
             )
             return None
+        # (2) 中央目录声明可能撒谎（androguard get_file 按 local header 无上限解压）：压缩流大到
+        #     理论可膨胀超上限时，改走 stdlib 有界解压兜底，堵 local-header 撒谎的构造炸弹。
+        compress = self._ensure_compress_sizes().get(path)
+        if self.apk_path and compress is not None and compress * ratio > cap:
+            return capped_read(self.apk_path, path, cap)
+        # (3) 压缩流小到再膨胀也超不过上限 → androguard 快路径（99% 条目，无行为变化）。
         apk = self._ensure_worker_apk()
         if apk is None:
             return None
@@ -167,6 +182,22 @@ class SnapshotContext:
                 logger.debug("snapshot worker 声明大小表构建失败，跳过 zip 炸弹前置校验", exc_info=True)
                 sizes = {}
         self._worker_declared_sizes = sizes
+        return sizes
+
+    def _ensure_compress_sizes(self) -> dict[str, int]:
+        """worker 内惰性建 zip 压缩后大小表（中央目录元数据、不解压），缓存。供 _lazy_read 判某条目
+        是否需走 stdlib 有界解压兜底（压缩流大到理论可膨胀超上限）。打不开/无 apk_path → 空表。绝不抛。"""
+        if self._worker_compress_sizes is not None:
+            return self._worker_compress_sizes
+        sizes: dict[str, int] = {}
+        if self.apk_path:
+            try:
+                with zipfile.ZipFile(self.apk_path) as zf:
+                    sizes = {info.filename: info.compress_size for info in zf.infolist()}
+            except Exception:  # noqa: BLE001 — 打不开/损坏 zip → 空表，放行（不误伤合法读）
+                logger.debug("snapshot worker 压缩大小表构建失败，跳过 local-header 兜底", exc_info=True)
+                sizes = {}
+        self._worker_compress_sizes = sizes
         return sizes
 
     def _ensure_worker_apk(self) -> Any:

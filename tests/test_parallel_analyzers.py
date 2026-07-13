@@ -72,11 +72,13 @@ def test_snapshot_pickle_roundtrip_excludes_worker_apk() -> None:
     )
     snap._worker_apk = object()  # 模拟 worker 内已建句柄
     snap._worker_declared_sizes = {"f.json": 1}  # 模拟 worker 内已建声明大小表
+    snap._worker_compress_sizes = {"f.json": 1}  # 模拟 worker 内已建压缩大小表
     restored = pickle.loads(pickle.dumps(snap))
     assert list(restored.dex_strings()) == ["a", "b"]
     assert restored.read_file("f.json") == b"x"
     assert restored._worker_apk is None  # 句柄不随 pickle 传，unpickle 后重置
-    assert restored._worker_declared_sizes is None  # 声明大小表同样每 worker 重建，不随 pickle 传
+    assert restored._worker_declared_sizes is None  # 大小表同样每 worker 重建，不随 pickle 传
+    assert restored._worker_compress_sizes is None
 
 
 def test_snapshot_read_file_missing_no_apk_returns_none() -> None:
@@ -143,6 +145,62 @@ def test_ensure_declared_sizes_reads_real_zip(tmp_path: object) -> None:
     assert sizes["assets/a.txt"] == 5
     assert sizes["lib/x.so"] == 4096
     assert snap._ensure_declared_sizes() is sizes  # 缓存:同一对象
+
+
+def test_read_zip_entry_capped_bounds_decompression(tmp_path: object) -> None:
+    # stdlib 有界解压 helper:解压过程本身封顶 cap+1 字节 → 超上限即 None(不信头部声明的大小)。
+    import zipfile as _zip
+
+    from apkscan.core.apk import _read_zip_entry_capped
+
+    apk = tmp_path / "x.apk"  # type: ignore[attr-defined]
+    with _zip.ZipFile(apk, "w", _zip.ZIP_DEFLATED) as zf:
+        zf.writestr("a.txt", b"A" * 5000)
+    assert _read_zip_entry_capped(str(apk), "a.txt", 4999) is None  # cap<真实 → 拦
+    assert _read_zip_entry_capped(str(apk), "a.txt", 5000) == b"A" * 5000
+    assert _read_zip_entry_capped(str(apk), "missing", 5000) is None  # 缺失
+    assert _read_zip_entry_capped("/nonexistent.apk", "a.txt", 5000) is None  # 打不开
+
+
+def test_lazy_read_lying_cd_routes_to_bounded_read(tmp_path: object) -> None:
+    # ★核心:模拟 local-header 撒谎——中央目录声明小(过声明闸),但压缩流大(触发 stdlib 有界兜底),
+    # 不走 androguard 无上限解压。
+    import zipfile as _zip
+
+    apk = tmp_path / "x.apk"  # type: ignore[attr-defined]
+    with _zip.ZipFile(apk, "w") as zf:
+        zf.writestr("assets/a.bin", b"real content")
+    snap = SnapshotContext(
+        package_name="", manifest_xml="", platform="android", config=None,
+        apk_path=str(apk), permissions=[], components=None, dex_strings=(), file_list=[],
+        native_libs=[], certificates=[], files={},
+    )
+    snap._worker_declared_sizes = {"assets/a.bin": 100}                 # 声明小 → 过声明闸
+    snap._worker_compress_sizes = {"assets/a.bin": 10 * 1024 * 1024}    # 压缩大 → 触发有界兜底
+    called = {"apk": False}
+
+    def _spy() -> None:
+        called["apk"] = True
+        return None
+
+    snap._ensure_worker_apk = _spy  # type: ignore[method-assign]
+    assert snap.read_file("assets/a.bin") == b"real content"  # stdlib 有界读拿真实内容
+    assert called["apk"] is False  # 未走 androguard = 确实进了有界兜底路径
+
+
+def test_lazy_read_small_compressed_uses_fast_path() -> None:
+    # 压缩流小到再膨胀也超不过上限 → androguard 快路径(无行为变化)。
+    snap = _snap_with_declared({"assets/small.bin": 2048})
+    snap._worker_compress_sizes = {"assets/small.bin": 2048}
+    called = {"apk": False}
+
+    def _spy() -> None:
+        called["apk"] = True
+        return None
+
+    snap._ensure_worker_apk = _spy  # type: ignore[method-assign]
+    assert snap.read_file("assets/small.bin") is None
+    assert called["apk"] is True  # 小压缩流 → androguard 快路径(spy 被调)
 
 
 def test_should_parallelize_gating(monkeypatch: pytest.MonkeyPatch) -> None:

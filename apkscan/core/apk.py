@@ -353,6 +353,12 @@ _MAX_READ_CACHE_BYTES = 32 * 1024 * 1024
 #: 到一两百 MB 量级），故取 500MB：既能拦住典型 zip 炸弹，又不误伤合法大文件。
 _MAX_DECOMPRESSED_FILE_BYTES = 500 * 1024 * 1024
 
+#: deflate 单流理论最大膨胀比（~1032:1）。压缩后大小 × 此值 < 上限 → 该条目再怎么膨胀也超不过
+#: 上限、可信 androguard 快路径读；否则中央目录声明可能撒谎（androguard get_file 实际按 local
+#: header 大小做**无上限** zlib 解压），改走 stdlib 有界解压兜底，堵"中央目录声明小、local header
+#: 指向真炸弹流"的构造样本。
+_DEFLATE_MAX_RATIO = 1032
+
 #: 单实例生命周期内 _read_cache 累计缓存总量上限：防"许多个体各自都在
 #: _MAX_READ_CACHE_BYTES 以下"的文件累加撑爆内存——zip 炸弹的另一变体，不是单文件超大，
 #: 是数量多（如几千个刚好卡在 32MB 以下的伪装文本资源）。单文件上限挡不住这种累加。与
@@ -360,6 +366,29 @@ _MAX_DECOMPRESSED_FILE_BYTES = 500 * 1024 * 1024
 #: 覆盖主路径；256MB 远超正常样本全部文本资源实测量级（snapshot.py 注释：实测整包文本
 #: ~8MB），只挡病态累加，不误伤真实场景。
 _MAX_TOTAL_CACHE_BYTES = 256 * 1024 * 1024
+
+
+def _read_zip_entry_capped(apk_path: str, name: str, cap: int) -> bytes | None:
+    """用 stdlib zipfile 有界解压读单条目：解压过程本身封顶 ``cap+1`` 字节，输出超 ``cap`` 即判疑
+    zip 炸弹返 None（不信头部声明的大小，堵"中央目录声明小、local header 撒谎"的构造炸弹）。
+
+    ``ZipExtFile.read(n)`` 只解压至多 n 字节输出 → 解压过程有界，不会像 androguard get_file 那样
+    先全量解压再返回。缺失 / 打不开 / 损坏 / CRC 错一律返 None，绝不抛。
+    """
+    try:
+        with zipfile.ZipFile(apk_path) as zf, zf.open(name) as f:
+            data = f.read(cap + 1)
+    except Exception:
+        logger.debug("[apk] stdlib 有界读条目失败：%s", name, exc_info=True)
+        return None
+    if len(data) > cap:
+        logger.warning(
+            "read_file 跳过（stdlib 有界解压已超 %d 字节，疑 zip 炸弹/local header 撒谎）：%s",
+            cap,
+            name,
+        )
+        return None
+    return data
 
 
 class ApkContext:
@@ -610,11 +639,10 @@ class ApkContext:
         return {}
 
     @cached_property
-    def _declared_sizes(self) -> dict[str, int]:
-        """zip 中央目录里每个条目「声明的解压后大小」（不解压，纯元数据读取，代价小）。
+    def _zip_entry_meta(self) -> dict[str, tuple[int, int]]:
+        """zip 中央目录里每条目 ``(声明解压后大小, 压缩后大小)``（不解压，纯元数据读取，代价小）。
 
-        供 read_file 读取前拦截 zip 炸弹用。androguard 的 ``self._apk.zip`` 是未文档化的内部
-        实现（可能是标准库 zipfile 或 androguard 自研 ZipEntry，视内部路径而定），不直接依赖它
+        供 read_file 拦 zip 炸弹用。androguard 的 ``self._apk.zip`` 是未文档化内部实现，不直接依赖
         ——改用标准库单独对 apk_path 开一次只读句柄，接口稳定。只在有 apk_path 时可用；打不开 /
         无 apk_path 时返回空 dict（查不到视为「无法判断」，read_file 照原逻辑放行，不误伤）。
         """
@@ -622,10 +650,20 @@ class ApkContext:
             return {}
         try:
             with zipfile.ZipFile(self.apk_path) as zf:
-                return {info.filename: info.file_size for info in zf.infolist()}
+                return {i.filename: (i.file_size, i.compress_size) for i in zf.infolist()}
         except Exception:
-            logger.debug("[apk] 声明大小映射构建失败，跳过 zip 炸弹前置校验", exc_info=True)
+            logger.debug("[apk] zip 条目大小映射构建失败，跳过 zip 炸弹前置校验", exc_info=True)
             return {}
+
+    @cached_property
+    def _declared_sizes(self) -> dict[str, int]:
+        """每条目声明的解压后大小（派生自 _zip_entry_meta）。"""
+        return {k: v[0] for k, v in self._zip_entry_meta.items()}
+
+    @cached_property
+    def _compress_sizes(self) -> dict[str, int]:
+        """每条目压缩后大小（派生自 _zip_entry_meta）。"""
+        return {k: v[1] for k, v in self._zip_entry_meta.items()}
 
     def read_file(self, path: str) -> bytes | None:
         cache = self._read_cache
@@ -641,12 +679,7 @@ class ApkContext:
             )
             cache[path] = None
             return None
-        try:
-            data = self._apk.get_file(path)
-        except Exception:
-            # androguard 对缺失文件抛 FileNotPresent；视为正常缺失但仍记录
-            logger.debug("read_file 未命中：%s", path, exc_info=True)
-            data = None
+        data = self._read_entry_guarded(path)
         # 超大文件（大 .so / 大资源）不进缓存，避免常驻内存。None（未命中）仍缓存以避免重复
         # 未命中查询；小文件照常缓存供多分析器重复读命中。未缓存的文件（无论何种原因）仍
         # 返回完整字节，只是每次重读——不缓存只影响性能，不影响正确性。
@@ -672,6 +705,25 @@ class ApkContext:
             cache[path] = data
             self._cached_bytes += len(data)
         return data
+
+    def _read_entry_guarded(self, path: str) -> bytes | None:
+        """读单条目：压缩流小到再膨胀也超不过上限 → androguard 快路径（99% 条目，无行为变化）；
+        否则（中央目录声明可能撒谎、androguard get_file 按 local header 无上限解压）→ stdlib
+        有界解压兜底，堵 local-header 撒谎的构造炸弹。查不到压缩大小（无 apk_path 等）→ 保守走
+        androguard（与既有 fail-open 语义一致）。"""
+        compress = self._compress_sizes.get(path)
+        if (
+            self.apk_path
+            and compress is not None
+            and compress * _DEFLATE_MAX_RATIO > _MAX_DECOMPRESSED_FILE_BYTES
+        ):
+            return _read_zip_entry_capped(self.apk_path, path, _MAX_DECOMPRESSED_FILE_BYTES)
+        try:
+            return self._apk.get_file(path)
+        except Exception:
+            # androguard 对缺失文件抛 FileNotPresent；视为正常缺失但仍记录
+            logger.debug("read_file 未命中：%s", path, exc_info=True)
+            return None
 
     def native_libs(self) -> list[str]:
         """APK 内所有 .so 路径（含 lib/<abi>/ 下）。"""
