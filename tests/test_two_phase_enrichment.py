@@ -93,7 +93,7 @@ def test_apply_forensic_domestic_flip_suppresses_overseas_evidence() -> None:
     # ★ 回归：shodan country 把端点最终翻成「国内」时，该 Lead 不得再挂任何境外被动定位证据行
     #   （合规呈现自洽、可审计）。
     from apkscan.core import infra
-    from apkscan.core.pipeline import _apply_forensic
+    from apkscan.core.leads import _apply_forensic
 
     ev: list[str] = []
     notes = _apply_forensic(
