@@ -249,6 +249,16 @@ class AnalysisConfig:
     mode: str = ANALYSIS_MODE_PASSIVE
 
 
+#: report.json 结构版本。消费方（AI / CI / 第三方工具）据此判断字段布局；发生破坏性字段变更时 bump。
+REPORT_SCHEMA_VERSION = "1.0"
+
+#: 分析完整度状态（Report.analysis_status）。
+#: complete=无分析器报错；partial=有分析器报错但仍有成功产出；failed=无任何分析器成功跑完。
+ANALYSIS_STATUS_COMPLETE = "complete"
+ANALYSIS_STATUS_PARTIAL = "partial"
+ANALYSIS_STATUS_FAILED = "failed"
+
+
 @dataclass
 class Report:
     """最终报告：聚合全部线索/端点/发现/分析器状态。"""
@@ -262,3 +272,14 @@ class Report:
     # 每个富化器的聚合状态：provider/attempted/ok/failed/typical_error。
     # 默认空，便于离线/无富化时仍可构造。
     enricher_status: list[dict] = field(default_factory=list)
+    # ---- 结果可信度地基（消费方据此判断这份报告有多可信 / 是否完整）----
+    #: 报告结构版本（见 REPORT_SCHEMA_VERSION）。
+    schema_version: str = REPORT_SCHEMA_VERSION
+    #: 分析完整度：complete | partial | failed（据 analyzer_status 聚合，见 pipeline._analysis_health）。
+    analysis_status: str = ANALYSIS_STATUS_COMPLETE
+    #: 完整度比例 0..1 = 成功跑完 ÷ (成功 + 报错) 的分析器数（能力/平台跳过的不计入分母）。
+    completeness: float = 1.0
+    #: 报错的**关键**分析器名（失败即报告核心不可信；--strict 据此非零退出）。
+    critical_failures: list[str] = field(default_factory=list)
+    #: 因缺能力 / 平台不适用被跳过的分析器名（环境门控，非故障；仅信息性、不计入 completeness）。
+    skipped_analyzers: list[str] = field(default_factory=list)

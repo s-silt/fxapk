@@ -253,6 +253,40 @@ def _has_network(timeout: float = 1.5) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def ruleset_digest() -> str:
+    """对全部内置规则文件内容算稳定摘要（sha256 前 16 hex）：同一套规则 → 同一 digest。
+
+    供报告标注「本次结果由哪套规则产出」，是可复现性 / 回归对比的锚点（规则一改 digest 就变）。
+    只哈希 rules/ 下的 .yaml/.txt（文件名 + 内容，按名排序保证稳定）。任何读取失败 → "unknown"
+    （绝不抛，不得影响主流程）。
+
+    ★换行归一化（CRLF/CR → LF）后再哈希：规则文件在 Windows（autocrlf）与 Linux 上 checkout 出的
+    字节 EOL 不同，若直接哈希会让**同一套规则**在不同平台/安装形态算出不同 digest，违背"同规则→
+    同 digest"。归一化使 digest 只随规则**内容**变，与 checkout 的换行风格无关。
+    """
+    import hashlib
+
+    try:
+        rules_dir = importlib.resources.files("apkscan") / "rules"
+        entries = sorted(
+            (e for e in rules_dir.iterdir() if e.name.endswith((".yaml", ".txt"))),
+            key=lambda e: e.name,
+        )
+        if not entries:
+            return "unknown"
+        h = hashlib.sha256()
+        for entry in entries:
+            content = entry.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+            h.update(entry.name.encode("utf-8"))
+            h.update(b"\0")
+            h.update(content)
+            h.update(b"\0")
+        return h.hexdigest()[:16]
+    except Exception:
+        logger.debug("ruleset_digest 计算失败，返回 unknown", exc_info=True)
+        return "unknown"
+
+
 def load_rules(name: str) -> dict | list:
     """读取 apkscan/rules/<name>.yaml。
 

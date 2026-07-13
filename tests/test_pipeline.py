@@ -123,6 +123,15 @@ def test_pipeline_runs_and_records_errors(monkeypatch, fake_ctx):
     assert status["needs_adb"]["status"] == "skipped"
     assert "adb" in status["needs_adb"]["reason"]
 
+    # 结果可信度地基：good=ran + crashing=error → partial；completeness=1/2（needs_adb 跳过不计分母）。
+    assert report.analysis_status == "partial"
+    assert report.completeness == 0.5
+    assert report.critical_failures == []  # good/crashing 非关键分析器（manifest/endpoints）
+    assert "needs_adb" in report.skipped_analyzers
+    assert report.schema_version == "1.0"
+    assert report.meta["tool_version"]  # 工具版本落 meta（非空）
+    assert len(report.meta["ruleset_digest"]) == 16  # 规则内容摘要（可复现锚点）
+
 
 def test_endpoint_leads_built_from_domains_and_ips(monkeypatch, fake_ctx):
     monkeypatch.setattr(pipeline, "discover_analyzers", lambda: [_GoodAnalyzer()])
