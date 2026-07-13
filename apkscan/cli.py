@@ -183,6 +183,15 @@ def _strict_exit_code(report: Report) -> int | None:
     return None
 
 
+def _validate_mode(mode: str) -> None:
+    """校验 --mode 值合法（analyze / auto / batch 共用）；非法值 → typer.Exit(2)。"""
+    if mode not in ANALYSIS_MODES:
+        typer.echo(
+            f"错误：--mode 只能是 {' | '.join(ANALYSIS_MODES)}（收到 {mode!r}）", err=True
+        )
+        raise typer.Exit(code=2)
+
+
 @app.command()
 def analyze(
     apk: Path = typer.Argument(
@@ -247,11 +256,7 @@ def analyze(
     _adb_owned = _adb_owned_at_start()  # ★P0-5：起手判 adb server 归属（外部/先前存在则收尾不杀）
     try:
         formats = _parse_formats(fmt)
-        if mode not in ANALYSIS_MODES:
-            typer.echo(
-                f"错误：--mode 只能是 {' | '.join(ANALYSIS_MODES)}（收到 {mode!r}）", err=True
-            )
-            raise typer.Exit(code=2)
+        _validate_mode(mode)
         out = _resolve_out(out, apk)  # 未给 --out → 默认落到 APK 同目录下的 out/
         config = AnalysisConfig(online=online, out_dir=out, formats=formats, mode=mode)
 
@@ -535,6 +540,11 @@ def auto(
         help="脱壳后把去壳版重打包装回设备供 capture 抓（绕壳反 frida）。默认开；"
         "--no-repackage 关（重签必卸原包会清 app 数据/登录态）。",
     ),
+    mode: str = typer.Option(
+        ANALYSIS_MODE_PASSIVE,
+        "--mode",
+        help="网络模式：passive（默认，静态富化只跑被动 OSINT）| authorized-active（显式授权下才放行主动富化器）。",
+    ),
 ) -> None:
     """一键全自动：体检 → 静态分析 → 脱壳 → 抓包 → 合并，串成确定性流水线产出总报告。
 
@@ -552,6 +562,7 @@ def auto(
             raise typer.Exit(code=1) from None
 
         formats = _parse_formats(fmt)
+        _validate_mode(mode)
 
         def _confirm(msg: str) -> None:
             """抓包前提示用户操作 app 触发网络，并等回车（CLI 落点；GUI 用弹窗）。
@@ -576,6 +587,7 @@ def auto(
             capture_duration=duration,
             formats=formats,
             track=track,
+            mode=mode,
             repackage=repackage,
             on_progress=lambda m: typer.echo(f"... {m}"),
             confirm=_confirm,
@@ -610,6 +622,11 @@ def batch(
     force: bool = typer.Option(
         False, "--force", help="无视去重台账、文件夹内全部重跑。"
     ),
+    mode: str = typer.Option(
+        ANALYSIS_MODE_PASSIVE,
+        "--mode",
+        help="网络模式：passive（默认，静态富化只跑被动 OSINT）| authorized-active（显式授权下才放行主动富化器）。",
+    ),
 ) -> None:
     """批量分析文件夹：扫描没分析过的 APK，逐个「静态 + launch-only 动态」产出报告。
 
@@ -629,6 +646,7 @@ def batch(
             raise typer.Exit(code=1) from None
 
         formats = _parse_formats(fmt)
+        _validate_mode(mode)
         typer.echo(f"===== 批量分析文件夹：{folder} =====")
         result = _batch.run_folder(
             str(folder),
@@ -637,6 +655,7 @@ def batch(
             capture_duration=duration,
             formats=formats,
             force=force,
+            mode=mode,
             on_progress=lambda m: typer.echo(f"... {m}"),
         )
         _print_batch_result(result)
