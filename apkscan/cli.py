@@ -22,6 +22,7 @@ from apkscan.core.loader import load_app
 from apkscan.core.models import (
     ANALYSIS_MODE_PASSIVE,
     ANALYSIS_MODES,
+    ANALYSIS_STATUS_COMPLETE,
     AnalysisConfig,
     LeadCategory,
     Report,
@@ -166,6 +167,22 @@ def _raise_exit_for_status(status: object) -> None:
         raise typer.Exit(code=3)
 
 
+def _strict_exit_code(report: Report) -> int | None:
+    """analyze --strict 的退出码判定（与 capture 的 _raise_exit_for_status 是不同命令、各自命名空间）：
+
+    - 关键分析器失败（report.critical_failures 非空）→ 4（报告核心不可信）；
+    - 其它不完整（analysis_status != complete，即 partial/failed）→ 3；
+    - 完整 → None（调用方退 0）。
+
+    纯函数，便于单测；analyze 仅在 --strict 时消费其结果。
+    """
+    if report.critical_failures:
+        return 4
+    if report.analysis_status != ANALYSIS_STATUS_COMPLETE:
+        return 3
+    return None
+
+
 @app.command()
 def analyze(
     apk: Path = typer.Argument(
@@ -207,6 +224,14 @@ def analyze(
         help=(
             "网络模式：passive（默认，只跑被动 OSINT 富化、对目标零流量）| "
             "authorized-active（显式授权下才放行会向目标 live 探测的主动富化器，如 webcheck）。"
+        ),
+    ),
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help=(
+            "严格模式：分析不完整时非零退出（关键分析器失败=退出码 4，其它分析器报错=3）。"
+            "默认关（尽力而为、退出码 0），适合 CI / 批量 / Agent 判定。"
         ),
     ),
 ) -> None:
@@ -307,6 +332,19 @@ def analyze(
                 _run_dynamic_after_static(
                     str(apk), ctx.package_name or "", out, report, formats, base, track=track
                 )
+
+        # --strict：所有工作（写报告 / 入账 / 动态）完成后，据完整度决定退出码，供 CI / Agent 判定。
+        # 非严格默认退 0（尽力而为，向后兼容）。退出穿过 finally 正常收尾（与 capture 同范式）。
+        if strict:
+            code = _strict_exit_code(report)
+            if code is not None:
+                typer.echo(
+                    f"[strict] 分析不完整：status={report.analysis_status}"
+                    f"，completeness={report.completeness}"
+                    f"，critical_failures={report.critical_failures}",
+                    err=True,
+                )
+                raise typer.Exit(code=code)
     finally:
         _close_ctx_quiet(ctx)  # IPA 的 ZipFile 句柄必须关（ApkContext 无 close 则 no-op）
         _cleanup_adb_quiet(_adb_owned)
