@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core import pipeline
+from apkscan.core import parallel
 from apkscan.core.snapshot import SnapshotContext, build_snapshot
 from tests.conftest import FakeContext
 
@@ -146,32 +146,32 @@ def test_ensure_declared_sizes_reads_real_zip(tmp_path: object) -> None:
 
 
 def test_should_parallelize_gating(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(pipeline.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(parallel.os, "cpu_count", lambda: 8)
     monkeypatch.delenv("FXAPK_NO_PARALLEL", raising=False)
     eligible = [("a", object()), ("b", object()), ("c", object())]
 
     ok = _fake(platform="android", apk_path="/x.apk")
-    assert pipeline._should_parallelize(ok, eligible) is True
+    assert parallel._should_parallelize(ok, eligible) is True
 
     # 逃生开关。
     monkeypatch.setenv("FXAPK_NO_PARALLEL", "1")
-    assert pipeline._should_parallelize(ok, eligible) is False
+    assert parallel._should_parallelize(ok, eligible) is False
     monkeypatch.delenv("FXAPK_NO_PARALLEL", raising=False)
 
     # IPA(非 android) → 串行。
-    assert pipeline._should_parallelize(_fake(platform="ios", apk_path="/x.ipa"), eligible) is False
+    assert parallel._should_parallelize(_fake(platform="ios", apk_path="/x.ipa"), eligible) is False
     # 无 apk_path（worker 无法惰性兜底 read_file）→ 串行。
-    assert pipeline._should_parallelize(_fake(platform="android", apk_path=""), eligible) is False
+    assert parallel._should_parallelize(_fake(platform="android", apk_path=""), eligible) is False
     # 分析器太少 → 串行。
-    assert pipeline._should_parallelize(ok, eligible[:2]) is False
+    assert parallel._should_parallelize(ok, eligible[:2]) is False
     # 单核 → 串行。
-    monkeypatch.setattr(pipeline.os, "cpu_count", lambda: 1)
-    assert pipeline._should_parallelize(ok, eligible) is False
+    monkeypatch.setattr(parallel.os, "cpu_count", lambda: 1)
+    assert parallel._should_parallelize(ok, eligible) is False
 
 
 def test_analyze_eligible_falls_back_to_serial_without_apk(monkeypatch: pytest.MonkeyPatch) -> None:
     # 无 apk_path → 不满足并行门控 → 走串行，结果正常。
-    monkeypatch.setattr(pipeline.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(parallel.os, "cpu_count", lambda: 8)
 
     class _A:
         name = "spy"
@@ -183,7 +183,7 @@ def test_analyze_eligible_falls_back_to_serial_without_apk(monkeypatch: pytest.M
             return r
 
     ctx = _fake(package_name="com.evil", platform="android", apk_path="")
-    out = pipeline._analyze_eligible(ctx, [("spy", _A()), ("spy2", _A()), ("spy3", _A())])
+    out = parallel._analyze_eligible(ctx, [("spy", _A()), ("spy2", _A()), ("spy3", _A())])
     assert len(out) == 3
     assert all(err is None and res is not None for _n, res, err in out)
     assert out[0][1].meta["saw"] == "com.evil"
@@ -232,15 +232,15 @@ def test_worker_init_and_analyze_resolve_run_and_error(
 
     snap = build_snapshot(_fake(package_name="com.evil", platform="android", apk_path=""))
 
-    monkeypatch.setattr(pipeline, "discover_analyzers", lambda: [_Spy()])
-    pipeline._worker_init(snap)
+    monkeypatch.setattr(parallel, "discover_analyzers", lambda: [_Spy()])
+    parallel._worker_init(snap)
 
-    name, res, err = pipeline._worker_analyze("spy")
+    name, res, err = parallel._worker_analyze("spy")
     assert name == "spy" and err is None and res is not None
     assert res.meta["pkg"] == "com.evil"  # 快照经 _worker_init 缓存后被分析器读到
 
     # 未知分析器 → 明确错误，不抛。
-    assert pipeline._worker_analyze("ghost")[2] == "worker 未发现该分析器"
+    assert parallel._worker_analyze("ghost")[2] == "worker 未发现该分析器"
 
     # 分析器内部异常 → 捕获成错误字符串回传（堆栈由 logger.exception 落 worker stderr）。
     class _Boom:
@@ -249,9 +249,9 @@ def test_worker_init_and_analyze_resolve_run_and_error(
         def analyze(self, ctx):  # type: ignore[no-untyped-def]
             raise ValueError("kaboom")
 
-    monkeypatch.setattr(pipeline, "discover_analyzers", lambda: [_Boom()])
-    pipeline._worker_init(snap)
-    _, bres, berr = pipeline._worker_analyze("boom")
+    monkeypatch.setattr(parallel, "discover_analyzers", lambda: [_Boom()])
+    parallel._worker_init(snap)
+    _, bres, berr = parallel._worker_analyze("boom")
     assert bres is None and berr is not None
     assert "ValueError" in berr and "kaboom" in berr
 
@@ -303,15 +303,15 @@ def test_serial_parallel_byte_identical_real_apk() -> None:
     eligible = _eligible_for(ctx)
     assert len(eligible) >= 3  # 真实 APK 上常态满足并行门控
 
-    serial = pipeline._analyze_serial(ctx, eligible)
+    serial = parallel._analyze_serial(ctx, eligible)
     # ★ 直接调 _run_pool（满核 worker）绕过 _decide_workers 的内存封顶：否则低 RAM 机上
     #   _analyze_parallel 会回退串行 → serial==serial 假绿、悄悄不再真 spawn，掏空本不变量。
     names = [name for name, _ in eligible]
     cpu_cap = max(1, min(len(names), os.cpu_count() or 2))
-    parallel = pipeline._run_pool(build_snapshot(ctx), names, cpu_cap)
+    par = parallel._run_pool(build_snapshot(ctx), names, cpu_cap)
 
-    assert {n for n, _, _ in parallel} == {n for n, _ in eligible}  # pool.map 无遗漏
-    assert _canon(serial) == _canon(parallel)  # 逐字段（含 findings/endpoints/leads/meta）一致
+    assert {n for n, _, _ in par} == {n for n, _ in eligible}  # pool.map 无遗漏
+    assert _canon(serial) == _canon(par)  # 逐字段（含 findings/endpoints/leads/meta）一致
 
 
 # ----------------------------------------------------------------------------
@@ -337,8 +337,8 @@ class _Spy:
 
 def _set_mem(monkeypatch: pytest.MonkeyPatch, *, cpu: int, avail: int) -> None:
     """固定 cpu 数与可用内存（绕过 psutil/cgroup），清掉相关 env，隔离 _decide_workers 逻辑。"""
-    monkeypatch.setattr(pipeline.os, "cpu_count", lambda: cpu)
-    monkeypatch.setattr(pipeline, "_available_bytes", lambda: avail)
+    monkeypatch.setattr(parallel.os, "cpu_count", lambda: cpu)
+    monkeypatch.setattr(parallel, "_available_bytes", lambda: avail)
     for e in ("FXAPK_MAX_WORKERS", "FXAPK_WORKER_BASE_MB", "FXAPK_MEM_SAFETY"):
         monkeypatch.delenv(e, raising=False)
 
@@ -356,7 +356,7 @@ def test_decide_workers_memory_cap(
     monkeypatch: pytest.MonkeyPatch, cpu: int, avail_mb: int, names: int, snap_mb: int, expect: int
 ) -> None:
     _set_mem(monkeypatch, cpu=cpu, avail=avail_mb * _MB)
-    assert pipeline._decide_workers(snap_mb * _MB, names) == expect
+    assert parallel._decide_workers(snap_mb * _MB, names) == expect
 
 
 @pytest.mark.parametrize(
@@ -376,44 +376,44 @@ def test_decide_workers_env_max_workers(
 ) -> None:
     _set_mem(monkeypatch, cpu=cpu, avail=64 * 1024 * _MB)  # 充足内存：非 env 路径给 cpu_cap
     monkeypatch.setenv("FXAPK_MAX_WORKERS", env)
-    assert pipeline._decide_workers(12 * _MB, 20) == expect
+    assert parallel._decide_workers(12 * _MB, 20) == expect
 
 
 def test_decide_workers_snapshot_tier_halves(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_mem(monkeypatch, cpu=8, avail=16 * 1024 * _MB)
     # 快照 50MB > 40MB 阈值：内存路径先算 8，超阈再砍半 → 4。
-    assert pipeline._decide_workers(50 * _MB, 25) == 4
+    assert parallel._decide_workers(50 * _MB, 25) == 4
 
 
 def test_decide_workers_psutil_failure_falls_back_and_never_raises(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setattr(pipeline.os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(parallel.os, "cpu_count", lambda: 16)
     for e in ("FXAPK_MAX_WORKERS", "FXAPK_WORKER_BASE_MB", "FXAPK_MEM_SAFETY"):
         monkeypatch.delenv(e, raising=False)
 
     def _boom() -> int:
         raise RuntimeError("psutil 炸了")
 
-    monkeypatch.setattr(pipeline, "_available_bytes", _boom)
-    with caplog.at_level(logging.WARNING, logger=pipeline.logger.name):
+    monkeypatch.setattr(parallel, "_available_bytes", _boom)
+    with caplog.at_level(logging.WARNING, logger=parallel.logger.name):
         # 不向上抛 + 返回 min(16, 4)=4（否则会被外层误记为"并行执行失败"）。
-        assert pipeline._decide_workers(12 * _MB, 25) == 4
+        assert parallel._decide_workers(12 * _MB, 25) == 4
     assert any("固定兜底" in r.message for r in caplog.records)
 
 
 def test_decide_workers_cpu_count_none(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_mem(monkeypatch, cpu=None, avail=64 * 1024 * _MB)  # type: ignore[arg-type]
     # os.cpu_count()=None → `or 2` → cpu_cap=min(10,2)=2。
-    assert pipeline._decide_workers(12 * _MB, 10) == 2
+    assert parallel._decide_workers(12 * _MB, 10) == 2
 
 
 def test_decide_workers_memory_reduced_logs_info(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     _set_mem(monkeypatch, cpu=16, avail=3072 * _MB)
-    with caplog.at_level(logging.INFO, logger=pipeline.logger.name):
-        assert pipeline._decide_workers(12 * _MB, 25) == 8
+    with caplog.at_level(logging.INFO, logger=parallel.logger.name):
+        assert parallel._decide_workers(12 * _MB, 25) == 8
     assert any("内存受限" in r.message for r in caplog.records)
 
 
@@ -424,22 +424,22 @@ def test_analyze_parallel_low_mem_falls_back_serial_without_pool(
     ctx = _fake(package_name="com.evil", platform="android", apk_path="/x.apk")
     monkeypatch.delenv("FXAPK_MAX_WORKERS", raising=False)
     monkeypatch.setattr("apkscan.core.snapshot.build_snapshot", lambda c: object())
-    monkeypatch.setattr(pipeline, "_decide_workers", lambda *a, **k: 1)
+    monkeypatch.setattr(parallel, "_decide_workers", lambda *a, **k: 1)
 
     class _NoPool:
         def __init__(self, *a, **k) -> None:  # type: ignore[no-untyped-def]
             raise AssertionError("workers<=1 不应建进程池")
 
-    monkeypatch.setattr(pipeline.multiprocessing, "Pool", _NoPool)
-    out = pipeline._analyze_parallel(ctx, eligible)
-    assert out == pipeline._analyze_serial(ctx, eligible)  # 回退串行结果
+    monkeypatch.setattr(parallel.multiprocessing, "Pool", _NoPool)
+    out = parallel._analyze_parallel(ctx, eligible)
+    assert out == parallel._analyze_serial(ctx, eligible)  # 回退串行结果
 
 
 def test_env_max_workers_one_short_circuits_before_build_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("FXAPK_MAX_WORKERS", "1")
-    monkeypatch.setattr(pipeline.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(parallel.os, "cpu_count", lambda: 8)
     built = {"flag": False}
 
     def _spy_build(c):  # type: ignore[no-untyped-def]
@@ -452,73 +452,73 @@ def test_env_max_workers_one_short_circuits_before_build_snapshot(
         def __init__(self, *a, **k) -> None:  # type: ignore[no-untyped-def]
             raise AssertionError("强制串行不应建进程池")
 
-    monkeypatch.setattr(pipeline.multiprocessing, "Pool", _NoPool)
+    monkeypatch.setattr(parallel.multiprocessing, "Pool", _NoPool)
     eligible = [("a", _Spy("a")), ("b", _Spy("b")), ("c", _Spy("c"))]
-    out = pipeline._analyze_parallel(_fake(platform="android", apk_path="/x.apk"), eligible)
+    out = parallel._analyze_parallel(_fake(platform="android", apk_path="/x.apk"), eligible)
     assert built["flag"] is False  # 短路在 build_snapshot 之前，省 689ms 白跑
     assert len(out) == 3
 
 
 def test_cgroup_v2_limit_caps(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(pipeline.sys, "platform", "linux")
+    monkeypatch.setattr(parallel.sys, "platform", "linux")
     v2 = ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current")
-    monkeypatch.setattr(pipeline.os.path, "exists", lambda p: p in v2)
+    monkeypatch.setattr(parallel.os.path, "exists", lambda p: p in v2)
     files = {
         "/sys/fs/cgroup/memory.max": "536870912",      # 512MB
         "/sys/fs/cgroup/memory.current": "100000000",  # ~95MB
     }
-    monkeypatch.setattr(pipeline, "_read_cgroup_file", lambda p: files[p])
-    assert pipeline._cgroup_available_bytes() == 536870912 - 100000000
+    monkeypatch.setattr(parallel, "_read_cgroup_file", lambda p: files[p])
+    assert parallel._cgroup_available_bytes() == 536870912 - 100000000
 
 
 def test_cgroup_v1_limit_caps(monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
 
-    monkeypatch.setattr(pipeline.sys, "platform", "linux")
+    monkeypatch.setattr(parallel.sys, "platform", "linux")
     v1l = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
     v1u = "/sys/fs/cgroup/memory/memory.usage_in_bytes"
-    monkeypatch.setattr(pipeline.os.path, "exists", lambda p: p in (v1l, v1u))
+    monkeypatch.setattr(parallel.os.path, "exists", lambda p: p in (v1l, v1u))
     monkeypatch.setattr(
-        pipeline.psutil, "virtual_memory", lambda: SimpleNamespace(available=10**12, total=8 * 1024 * _MB)
+        parallel.psutil, "virtual_memory", lambda: SimpleNamespace(available=10**12, total=8 * 1024 * _MB)
     )
     files = {v1l: str(512 * _MB), v1u: str(100 * _MB)}
-    monkeypatch.setattr(pipeline, "_read_cgroup_file", lambda p: files[p])
-    assert pipeline._cgroup_available_bytes() == 512 * _MB - 100 * _MB
+    monkeypatch.setattr(parallel, "_read_cgroup_file", lambda p: files[p])
+    assert parallel._cgroup_available_bytes() == 512 * _MB - 100 * _MB
 
 
 def test_cgroup_v1_unlimited_sentinel_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
 
-    monkeypatch.setattr(pipeline.sys, "platform", "linux")
+    monkeypatch.setattr(parallel.sys, "platform", "linux")
     v1l = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
-    monkeypatch.setattr(pipeline.os.path, "exists", lambda p: p == v1l)
+    monkeypatch.setattr(parallel.os.path, "exists", lambda p: p == v1l)
     monkeypatch.setattr(
-        pipeline.psutil, "virtual_memory", lambda: SimpleNamespace(available=10**12, total=8 * 1024 * _MB)
+        parallel.psutil, "virtual_memory", lambda: SimpleNamespace(available=10**12, total=8 * 1024 * _MB)
     )
-    monkeypatch.setattr(pipeline, "_read_cgroup_file", lambda p: str(0x7FFFFFFFFFFFF000))
-    assert pipeline._cgroup_available_bytes() is None  # 经典哨兵 → 视为未设限
+    monkeypatch.setattr(parallel, "_read_cgroup_file", lambda p: str(0x7FFFFFFFFFFFF000))
+    assert parallel._cgroup_available_bytes() is None  # 经典哨兵 → 视为未设限
 
 
 def test_cgroup_v1_usage_unreadable_falls_back_to_limit_not_host(monkeypatch: pytest.MonkeyPatch) -> None:
     # ★ 安全回退：limit 已知但 usage 文件不存在/读失败 → 返回 limit（受容器上限约束），绝不退回宿主机内存。
     from types import SimpleNamespace
 
-    monkeypatch.setattr(pipeline.sys, "platform", "linux")
+    monkeypatch.setattr(parallel.sys, "platform", "linux")
     v1l = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
-    monkeypatch.setattr(pipeline.os.path, "exists", lambda p: p == v1l)  # usage 文件缺失
+    monkeypatch.setattr(parallel.os.path, "exists", lambda p: p == v1l)  # usage 文件缺失
     monkeypatch.setattr(
-        pipeline.psutil, "virtual_memory", lambda: SimpleNamespace(available=10**12, total=8 * 1024 * _MB)
+        parallel.psutil, "virtual_memory", lambda: SimpleNamespace(available=10**12, total=8 * 1024 * _MB)
     )
-    monkeypatch.setattr(pipeline, "_read_cgroup_file", lambda p: str(512 * _MB))
-    assert pipeline._cgroup_available_bytes() == 512 * _MB  # 退回 limit，非宿主机 10**12
+    monkeypatch.setattr(parallel, "_read_cgroup_file", lambda p: str(512 * _MB))
+    assert parallel._cgroup_available_bytes() == 512 * _MB  # 退回 limit，非宿主机 10**12
 
 
 def test_decide_workers_per_worker_scales_with_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
     # 钉死 per_worker 的线性项 int(_SNAPSHOT_FACTOR * snapshot_size)：固定 cpu/avail，只增大快照
     # （均 <40MB 避开超阈砍半分支）→ per_worker 增大 → worker 数下降。
     _set_mem(monkeypatch, cpu=16, avail=3072 * _MB)
-    small = pipeline._decide_workers(1 * _MB, 25)
-    large = pipeline._decide_workers(35 * _MB, 25)
+    small = parallel._decide_workers(1 * _MB, 25)
+    large = parallel._decide_workers(35 * _MB, 25)
     assert large < small
 
 
@@ -535,41 +535,41 @@ def test_build_snapshot_total_budget_stops_preread(monkeypatch: pytest.MonkeyPat
 
 
 def test_cgroup_v2_unlimited_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(pipeline.sys, "platform", "linux")
-    monkeypatch.setattr(pipeline.os.path, "exists", lambda p: p == "/sys/fs/cgroup/memory.max")
-    monkeypatch.setattr(pipeline, "_read_cgroup_file", lambda p: "max")
-    assert pipeline._cgroup_available_bytes() is None
+    monkeypatch.setattr(parallel.sys, "platform", "linux")
+    monkeypatch.setattr(parallel.os.path, "exists", lambda p: p == "/sys/fs/cgroup/memory.max")
+    monkeypatch.setattr(parallel, "_read_cgroup_file", lambda p: "max")
+    assert parallel._cgroup_available_bytes() is None
 
 
 def test_cgroup_non_linux_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(pipeline.sys, "platform", "win32")
-    assert pipeline._cgroup_available_bytes() is None
+    monkeypatch.setattr(parallel.sys, "platform", "win32")
+    assert parallel._cgroup_available_bytes() is None
 
 
 def test_available_bytes_takes_min_with_cgroup(monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
 
     monkeypatch.setattr(
-        pipeline.psutil, "virtual_memory", lambda: SimpleNamespace(available=10**12, total=10**12)
+        parallel.psutil, "virtual_memory", lambda: SimpleNamespace(available=10**12, total=10**12)
     )
-    monkeypatch.setattr(pipeline, "_cgroup_available_bytes", lambda: 500 * _MB)
-    assert pipeline._available_bytes() == 500 * _MB  # cgroup 更小 → 取 cgroup
-    monkeypatch.setattr(pipeline, "_cgroup_available_bytes", lambda: None)
-    assert pipeline._available_bytes() == 10**12  # 无 cgroup → 取 psutil
+    monkeypatch.setattr(parallel, "_cgroup_available_bytes", lambda: 500 * _MB)
+    assert parallel._available_bytes() == 500 * _MB  # cgroup 更小 → 取 cgroup
+    monkeypatch.setattr(parallel, "_cgroup_available_bytes", lambda: None)
+    assert parallel._available_bytes() == 10**12  # 无 cgroup → 取 psutil
 
 
 def test_worker_base_and_mem_safety_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FXAPK_WORKER_BASE_MB", "100")
-    assert pipeline._worker_base_bytes() == 100 * _MB
+    assert parallel._worker_base_bytes() == 100 * _MB
     monkeypatch.delenv("FXAPK_WORKER_BASE_MB", raising=False)
-    assert pipeline._worker_base_bytes() == pipeline._WORKER_BASE_BYTES
+    assert parallel._worker_base_bytes() == parallel._WORKER_BASE_BYTES
 
     monkeypatch.setenv("FXAPK_MEM_SAFETY", "0.5")
-    assert pipeline._mem_safety() == 0.5
+    assert parallel._mem_safety() == 0.5
     monkeypatch.setenv("FXAPK_MEM_SAFETY", "2")  # 越界 (0,1]
-    assert pipeline._mem_safety() == pipeline._MEM_SAFETY
+    assert parallel._mem_safety() == parallel._MEM_SAFETY
     monkeypatch.setenv("FXAPK_MEM_SAFETY", "abc")  # 非浮点
-    assert pipeline._mem_safety() == pipeline._MEM_SAFETY
+    assert parallel._mem_safety() == parallel._MEM_SAFETY
 
 
 def test_should_parallelize_does_not_consult_memory(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -577,12 +577,12 @@ def test_should_parallelize_does_not_consult_memory(monkeypatch: pytest.MonkeyPa
     def _boom() -> int:
         raise AssertionError("门控不应查内存")
 
-    monkeypatch.setattr(pipeline, "_available_bytes", _boom)
-    monkeypatch.setattr(pipeline.psutil, "virtual_memory", _boom)
-    monkeypatch.setattr(pipeline.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(parallel, "_available_bytes", _boom)
+    monkeypatch.setattr(parallel.psutil, "virtual_memory", _boom)
+    monkeypatch.setattr(parallel.os, "cpu_count", lambda: 8)
     monkeypatch.delenv("FXAPK_NO_PARALLEL", raising=False)
     ctx = _fake(platform="android", apk_path="/x.apk")
-    assert pipeline._should_parallelize(ctx, [("a", 1), ("b", 1), ("c", 1)]) is True
+    assert parallel._should_parallelize(ctx, [("a", 1), ("b", 1), ("c", 1)]) is True
 
 
 # ---------------------------------------------------------------------------
@@ -603,7 +603,7 @@ def test_run_pool_timeout_logs_and_reraises(
 
     class _StuckAsync:
         def get(self, timeout: float | None = None) -> object:
-            assert timeout == pipeline._BATCH_TIMEOUT_SECONDS  # 预算传给了 get()
+            assert timeout == parallel._BATCH_TIMEOUT_SECONDS  # 预算传给了 get()
             raise multiprocessing.TimeoutError("worker 卡死（模拟）")
 
     class _FakePool:
@@ -617,10 +617,10 @@ def test_run_pool_timeout_logs_and_reraises(
         def map_async(self, func: object, names: list[str]) -> _StuckAsync:
             return _StuckAsync()
 
-    monkeypatch.setattr(pipeline.multiprocessing, "Pool", lambda **kw: _FakePool())
+    monkeypatch.setattr(parallel.multiprocessing, "Pool", lambda **kw: _FakePool())
     with caplog.at_level(logging.WARNING):
         with pytest.raises(TimeoutError) as excinfo:
-            pipeline._run_pool(object(), ["a", "b", "c"], 2)
+            parallel._run_pool(object(), ["a", "b", "c"], 2)
     assert not isinstance(excinfo.value, multiprocessing.TimeoutError)  # 归一成内置 TimeoutError
     assert exited["called"]  # with 退出触发 __exit__（真实现 terminate 强杀，墙钟被 bound）
     assert any("超时" in r.message and "3 个分析器" in r.message for r in caplog.records)
@@ -634,7 +634,7 @@ def test_run_pool_normal_path_passes_timeout_to_get(monkeypatch: pytest.MonkeyPa
             self._names = names
 
         def get(self, timeout: float | None = None) -> list:
-            assert timeout == pipeline._BATCH_TIMEOUT_SECONDS
+            assert timeout == parallel._BATCH_TIMEOUT_SECONDS
             return [(n, "ok", None) for n in self._names]
 
     class _FakePool:
@@ -647,6 +647,6 @@ def test_run_pool_normal_path_passes_timeout_to_get(monkeypatch: pytest.MonkeyPa
         def map_async(self, func: object, names: list[str]) -> _OkAsync:
             return _OkAsync(names)
 
-    monkeypatch.setattr(pipeline.multiprocessing, "Pool", lambda **kw: _FakePool())
-    result = pipeline._run_pool(object(), ["x", "y"], 2)
+    monkeypatch.setattr(parallel.multiprocessing, "Pool", lambda **kw: _FakePool())
+    result = parallel._run_pool(object(), ["x", "y"], 2)
     assert result == [("x", "ok", None), ("y", "ok", None)]
