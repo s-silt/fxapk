@@ -706,6 +706,25 @@ def test_quic_malformed_header_no_crash() -> None:
 
 
 def test_quic_probe_does_not_break_dns() -> None:
-    """QUIC 探测挂在非 53 UDP 上，DNS（53）仍走原路径、不被 QUIC 分支吞。"""
+    """QUIC 探测挂在 UDP 分支，真 DNS（53）仍走原路径解出（内容优先派发：非 QUIC 才当 DNS）。"""
     summary = pcap_ingest.parse_pcap_bytes(_sample_pcap())
     assert "tracker.example.org" in summary.dns_queries
+
+
+def test_quic_over_udp53_still_detected() -> None:
+    """★复审 #2：QUIC 伪装到 UDP/53（防火墙常放行）仍被抽 QUIC 元数据，不因端口=53 被当 DNS 漏掉。"""
+    summary = pcap_ingest.parse_pcap_bytes(_quic_pcap(_quic_long_header(), dport=53))
+    f = next(fl for fl in summary.flows if fl.dst_ip == "45.202.1.235")
+    assert "00000001" in f.quic_versions
+    # 且不把 QUIC 字节误当 DNS 查询污染 dns_queries
+    assert summary.dns_queries == set()
+
+
+def test_ntp_style_zerofill_not_quic() -> None:
+    """★复审 #1/#3：NTP/SNTP 风格全零填充包（首字节 0xE3/0xDB + 全零）不因 vneg(0) 被误标 QUIC。"""
+    assert pcap_ingest._parse_quic_long_header(bytes([0xE3]) + bytes(47)) is None
+    assert pcap_ingest._parse_quic_long_header(bytes([0xDB]) + bytes(47)) is None
+    # version=0 的 vneg 也不再收（无 h3 增量）
+    assert pcap_ingest._parse_quic_long_header(
+        b"\xc0\x00\x00\x00\x00\x08" + bytes(range(8)) + b"\x03\xaa\xbb\xcc"
+    ) is None

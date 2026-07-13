@@ -309,8 +309,9 @@ def _parse_udp(b: bytes) -> tuple[int, int, bytes] | None:
 # 后端。★Initial 解密→SNI 是下一步（需惰性 cryptography），本层只做明文元数据、保住模块"零依赖"承诺。
 
 _MAX_QUIC_CIDS = 8  # 每 Flow 各 QUIC set 上限（防海量连接 ID 撑内存）
-#: 已知 QUIC 版本：v1(RFC 9000) / vneg(0) / v2(RFC 9369) / GREASE 样例。
-_QUIC_KNOWN_VERSIONS = frozenset({0x00000001, 0x00000000, 0x6B3343CF})
+#: 已知 QUIC 版本：v1(RFC 9000) / v2(RFC 9369)。★不收 vneg(0)：它由服务端在版本不匹配时回、无 h3 归因
+#: 增量（同连接的客户端 Initial 是 v1、照样标 QUIC），且收录 0 会让 NTP 等全零填充协议包假阳（复审 #1/#3）。
+_QUIC_KNOWN_VERSIONS = frozenset({0x00000001, 0x6B3343CF})
 
 
 def _is_quic_version(v: int) -> bool:
@@ -354,11 +355,12 @@ def _parse_quic_long_header(app: bytes) -> tuple[str, str, str] | None:
         return None
 
 
-def _ingest_quic(app: bytes, f: Flow) -> None:
-    """从 UDP 载荷抽 QUIC 长包头元数据填进 Flow（version/DCID/SCID，各 set 有上限）。非 QUIC → 无操作。"""
+def _ingest_quic(app: bytes, f: Flow) -> bool:
+    """是 QUIC 长包头则抽元数据（version/DCID/SCID，各 set 有上限）填进 Flow、返回 True；否则返回 False
+    （供调用方决定是否再当 DNS 解——内容优先派发）。"""
     meta = _parse_quic_long_header(app)
     if meta is None:
-        return
+        return False
     version, dcid, scid = meta
     if len(f.quic_versions) < _MAX_QUIC_CIDS:
         f.quic_versions.add(version)
@@ -366,6 +368,7 @@ def _ingest_quic(app: bytes, f: Flow) -> None:
         f.quic_dcids.add(dcid)
     if scid and len(f.quic_scids) < _MAX_QUIC_CIDS:
         f.quic_scids.add(scid)
+    return True
 
 
 def _process_frame(
@@ -435,15 +438,17 @@ def _process_frame(
                 f.sni.add(sni)
             if ja3:
                 f.ja3.add(ja3)
-    if proto_num == 17 and (dport == 53 or sport == 53):
-        qn = _parse_dns_qname(app)
-        if qn:
-            summ.dns_queries.add(qn)
-        rec = _parse_dns(app, ts)
-        if rec is not None:
-            summ.dns_records.append(rec)
-    elif proto_num == 17 and app:  # 非 DNS 的 UDP：探 QUIC 长包头元数据（h3 归因/连接关联）
-        _ingest_quic(app, f)
+    if proto_num == 17 and app:
+        # 内容优先派发：先看是不是 QUIC 长包头（严格 0xC0 门 + 版本白名单，真 DNS 命不中）——是则抽 QUIC
+        # 元数据、**不**再当 DNS（哪怕在 UDP/53：反取证 C2 常把 QUIC 伪装到防火墙放行的 53，复审 #2）；
+        # 否则若在 53 端口才当 DNS 解。
+        if not _ingest_quic(app, f) and (dport == 53 or sport == 53):
+            qn = _parse_dns_qname(app)
+            if qn:
+                summ.dns_queries.add(qn)
+            rec = _parse_dns(app, ts)
+            if rec is not None:
+                summ.dns_records.append(rec)
 
 
 # ---------------------------------------------------------------------------
