@@ -46,6 +46,13 @@ out_chk/
 out_review/
 /out_*/
 
+# 样本库/案件数据(含真实 IOC 与案件号，只能经 FXAPK_CORPUS 存 OneDrive，绝不入 git；CI 亦有守卫)
+# ★真正的 PII 载荷是报告全文 *.report.json，不止派生索引——三者都挡。
+*.report.json
+manifest.jsonl
+ioc_index.jsonl
+corpus/
+
 # 样本数据与工作产物(不入库)
 ybku/
 /run_real.py

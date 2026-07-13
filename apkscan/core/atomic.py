@@ -38,7 +38,10 @@ def atomic_write_text(path: str | os.PathLike[str], data: str) -> None:
     tmp = target.with_suffix(target.suffix + f".{os.getpid()}.{uuid4().hex}.tmp")
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(data, encoding="utf-8")
+        # newline=""：禁用文本模式的换行翻译。否则 Windows 把 "\n" 写成 "\r\n"，落盘字节 ≠ 入参
+        # 字节——破坏证据字节保真（corpus add 原样存证）、且让同一内容跨平台产生不同 sha（与 #105 抓
+        # 的 frida JS CRLF 同类）。恒按 data 原样字节落盘，跨平台确定。
+        tmp.write_text(data, encoding="utf-8", newline="")
         os.replace(tmp, target)  # 同目录原子替换，不留半截坏文件
     except OSError:
         # 目标文件在 os.replace 成功前从未被触碰，故此刻仍是旧内容完整。

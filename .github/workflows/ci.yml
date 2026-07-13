@@ -12,6 +12,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      # ★PII 硬防线：语料库/案件数据只能经 FXAPK_CORPUS 存在 OneDrive，绝不入 git。真正的 PII 载荷是
+      #   报告全文 reports/<sha>/<tv>_<digest>.report.json（含真实 IOC/案件线索），不止派生索引
+      #   manifest.jsonl / ioc_index.jsonl——三者任一被跟踪即视为误提交、CI 红。
+      - name: Guard — no corpus/case data committed
+        run: |
+          if git ls-files | grep -E '(^|/)(manifest\.jsonl|ioc_index\.jsonl)$|\.report\.json$'; then
+            echo "::error::corpus/case data (*.report.json / manifest.jsonl / ioc_index.jsonl) must never be committed — it belongs in OneDrive via FXAPK_CORPUS"
+            exit 1
+          fi
+          echo "no corpus data files tracked — OK"
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
