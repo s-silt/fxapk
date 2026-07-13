@@ -51,11 +51,19 @@ def _diff_collection(old_items: object, new_items: object, keyfn) -> dict:  # ty
     return {"added": added, "removed": removed}
 
 
+def _finding_key(f: dict) -> tuple[str, str]:
+    """发现配对键 = (id, description)。★id 是**规则**标识不是实例标识：同一规则可命中多条（如
+    jadx 每个硬编码密钥都共用常量 id ``JADX-HARDCODED-SECRET``），单用 id 会把多条塌缩、静默吞掉
+    "新增密钥"这类核心调证增量。加 description 作实例区分（同规则的不同命中 description 不同）。"""
+    return (str(f.get("id", "")), str(f.get("description", "")))
+
+
 def _diff_findings(old_items: object, new_items: object) -> dict:
-    """发现按 id 配对：{added, removed, changed}；changed = 同 id 但 severity/confidence/kind 变了。"""
-    old_map = {str(f.get("id", "")): f for f in old_items if isinstance(f, dict)} \
+    """发现按 (id, description) 配对：{added, removed, changed}；changed = 同键但 severity/
+    confidence/kind 变了（即同一条发现的属性升降级）。"""
+    old_map = {_finding_key(f): f for f in old_items if isinstance(f, dict)} \
         if isinstance(old_items, list) else {}
-    new_map = {str(f.get("id", "")): f for f in new_items if isinstance(f, dict)} \
+    new_map = {_finding_key(f): f for f in new_items if isinstance(f, dict)} \
         if isinstance(new_items, list) else {}
     added = [new_map[k] for k in new_map if k not in old_map]
     removed = [old_map[k] for k in old_map if k not in new_map]
@@ -70,7 +78,9 @@ def _diff_findings(old_items: object, new_items: object) -> dict:
             if o.get(attr) != n.get(attr)
         }
         if deltas:
-            changed.append({"id": k, "title": str(n.get("title", "")), "changes": deltas})
+            changed.append(
+                {"id": str(n.get("id", "")), "title": str(n.get("title", "")), "changes": deltas}
+            )
     return {"added": added, "removed": removed, "changed": changed}
 
 
