@@ -85,6 +85,24 @@ def test_diff_findings_added_removed_changed() -> None:
     assert "confidence" not in changed[0]["changes"]  # 没变的不列
 
 
+def test_diff_findings_same_id_multiple_not_collapsed() -> None:
+    # ★复审修复：id 是**规则**标识，同规则多命中（如 jadx 每个硬编码密钥都共用常量
+    #   JADX-HARDCODED-SECRET）不能因 id 相同塌缩，否则"新增密钥"这类核心增量被静默吞掉。
+    #   靠 (id, description) 区分实例。
+    old = _report(findings=[{"id": "JADX-HARDCODED-SECRET", "description": "secret in A.java"}])
+    new = _report(findings=[
+        {"id": "JADX-HARDCODED-SECRET", "description": "secret in A.java"},  # 保留
+        {"id": "JADX-HARDCODED-SECRET", "description": "secret in B.java"},  # 新增（同 id）
+        {"id": "JADX-HARDCODED-SECRET", "description": "secret in C.java"},  # 新增（同 id）
+    ])
+    d = diff_reports(old, new)
+    assert len(d["findings"]["added"]) == 2  # 两条新增密钥不被塌缩吞掉
+    assert {f["description"] for f in d["findings"]["added"]} == {
+        "secret in B.java", "secret in C.java",
+    }
+    assert d["findings"]["removed"] == []
+
+
 # --- meta 变化（身份/加固/分类）--------------------------------------------
 
 

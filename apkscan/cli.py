@@ -369,7 +369,9 @@ def _report_dict_for(path: Path, *, online: bool) -> dict:
 
     if path.suffix.lower() == ".json":
         try:
-            data = _json.loads(path.read_text(encoding="utf-8"))
+            # parse_constant：把 NaN/Infinity（json.loads 默认接受、但非 RFC-8259 合法）归一化为
+            # None，保证 diff/jsonl 后续 dumps 出的每行都是严格合法 JSON（jq / JSON.parse 不炸）。
+            data = _json.loads(path.read_text(encoding="utf-8"), parse_constant=lambda _c: None)
         except Exception as exc:  # noqa: BLE001 — 坏 JSON → 友好报错而非 traceback
             typer.echo(f"错误：无法读取报告 JSON：{path}（{exc}）", err=True)
             raise typer.Exit(code=3) from exc
@@ -385,8 +387,34 @@ def _report_dict_for(path: Path, *, online: bool) -> dict:
     except ApkParseError as exc:
         typer.echo(f"错误：{exc}", err=True)
         raise typer.Exit(code=2) from exc
-    report = pipeline.run(ctx, config)  # type: ignore[arg-type]
-    return report_json.to_dict(report)
+    try:
+        report = pipeline.run(ctx, config)  # type: ignore[arg-type]
+        data = report_json.to_dict(report)
+    finally:
+        _close_ctx_quiet(ctx)  # IPA 的 ZipFile 句柄必须关（与 analyze 同纪律，避免读取型 diff 泄漏句柄）
+    # ★现算 sample_sha256 填回 meta：pipeline.run 不算它（只 analyze 的证据 manifest 步骤算），
+    #   否则 `diff old.json new.apk` 会报虚假的 sample_sha256 变化（旧有哈希、新为 None）。
+    meta = data.get("meta")
+    if isinstance(meta, dict) and not meta.get("sample_sha256"):
+        digest = _file_sha256(path)
+        if digest:
+            meta["sample_sha256"] = digest
+    return data
+
+
+def _file_sha256(path: Path) -> str:
+    """流式算文件 sha256（大文件不占内存）。读失败 → 空串（不抛，diff 不因哈希失败中断）。"""
+    import hashlib
+
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        logger.warning("[cli] 算 sample_sha256 失败（已忽略）：%s", path, exc_info=True)
+        return ""
 
 
 @app.command()
@@ -425,7 +453,8 @@ def jsonl(
     from apkscan.core.jsonl import report_to_events
 
     try:
-        data = _json.loads(report.read_text(encoding="utf-8"))
+        # parse_constant：NaN/Infinity → None，保证每行输出严格合法 JSON（见 _report_dict_for）。
+        data = _json.loads(report.read_text(encoding="utf-8"), parse_constant=lambda _c: None)
     except Exception as exc:  # noqa: BLE001 — 坏 JSON → 友好报错而非 traceback
         typer.echo(f"错误：无法读取报告 JSON：{report}（{exc}）", err=True)
         raise typer.Exit(code=3) from exc
