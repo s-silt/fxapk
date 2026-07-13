@@ -43,6 +43,9 @@ __all__ = [
     "collect_file_paths",
     "collect_dex_strings",
     "present_tokens",
+    "NATIVE_LIB_BENIGN_SUBSTR",
+    "app_so_paths",
+    "collect_app_so_string_blobs",
 ]
 
 # DEX 字符串扫描上限：样本字符串池可能很大，避免极端情况下扫描过久。
@@ -262,6 +265,101 @@ def collect_dex_strings(
         logger.exception("[%s] 遍历 dex_strings 失败", analyzer_name)
         return False, strings
     return True, strings
+
+
+# ---------------------------------------------------------------------------
+# App 自有 .so 内容采样 / 字符串提取（re_toolkit 的 native 符号·串扫描等复用）
+# ---------------------------------------------------------------------------
+
+# 系统 / 引擎 / 常见三方库白名单（子串小写匹配）——扫描 .so 内容前排除，降 IO 与 FP。
+# 注：native_obfuscation 有一份等价私有副本 `_BENIGN_SUBSTR`（历史原因），后续可统一到本处。
+NATIVE_LIB_BENIGN_SUBSTR: frozenset[str] = frozenset(
+    {
+        "libc++_shared", "libc++.", "libc.so", "libm.so", "libz.so", "libdl.",
+        "liblog.so", "libjsc", "libhermes", "libv8", "libflutter", "libmonosgen",
+        "libmono", "libunity", "libil2cpp", "libreactnativejni", "libfbjni",
+        "libfolly", "libskia", "libavcodec", "libavformat", "libavutil",
+        "libcrypto", "libssl", "libopus", "libwebp", "libjpeg", "libpng",
+        "libtensorflow", "libpytorch", "libtorch", "libglog", "libmarsxlog",
+        "libwcdb", "libsqlite", "libcronet", "libmmkv",
+    }
+)
+
+# .so 内容采样：≥4 连续可打印 ASCII 视为一条串；head/mid/tail 各一窗（超大 .so 不全量扫）。
+_SO_STRING_RE = re.compile(rb"[\x20-\x7e]{4,}")
+_SO_SCAN_WINDOW = 256 * 1024
+_SO_SCAN_MAX_LIBS = 60
+
+
+def app_so_paths(
+    ctx: "AnalysisContext", analyzer_name: str, *, max_libs: int = _SO_SCAN_MAX_LIBS
+) -> list[str]:
+    """枚举 App 自有（非白名单）``.so`` 路径，保序去重，上限 ``max_libs``。绝不抛。"""
+    seen: dict[str, None] = {}
+    try:
+        libs = list(ctx.native_libs() or [])
+    except Exception:
+        logger.exception("[%s] 读取 native_libs 失败（app .so 枚举）", analyzer_name)
+        libs = []
+    try:
+        files = list(ctx.list_files() or [])
+    except Exception:
+        logger.exception("[%s] 读取 list_files 失败（app .so 枚举）", analyzer_name)
+        files = []
+    for p in libs + files:
+        if isinstance(p, str) and p.lower().endswith(".so"):
+            seen.setdefault(p, None)
+    out: list[str] = []
+    for p in seen:
+        base = posixpath.basename(p.replace("\\", "/")).lower()
+        if any(b in base for b in NATIVE_LIB_BENIGN_SUBSTR):
+            continue
+        out.append(p)
+        if len(out) >= max_libs:
+            break
+    return out
+
+
+def _sample_so(data: bytes, window: int) -> bytes:
+    """取 head/mid/tail 三窗（超大 .so 不全量扫；覆盖 .dynstr/.rodata/.comment/.symtab 常见落点）。"""
+    n = len(data)
+    if n <= 3 * window:
+        return data
+    mid = n // 2
+    return data[:window] + data[mid : mid + window] + data[-window:]
+
+
+def collect_app_so_string_blobs(
+    ctx: "AnalysisContext",
+    analyzer_name: str,
+    *,
+    max_libs: int = _SO_SCAN_MAX_LIBS,
+    window: int = _SO_SCAN_WINDOW,
+) -> list[tuple[str, str]]:
+    """读 App 自有 ``.so``（采样），提取可打印 ASCII 串拼成一坨（小写），返回 ``[(so路径, 串坨)]``。
+
+    供需要匹配 ``.so`` 内符号 / 字符串的分析器复用（如识别以静态库编入宿主 .so、无独立
+    so 名 / dex 包名的 hook 框架，或抗改名的反检测特征串）。单库读取 / 提取异常 try/except
+    跳过、绝不炸整个 analyze。
+    """
+    blobs: list[tuple[str, str]] = []
+    for path in app_so_paths(ctx, analyzer_name, max_libs=max_libs):
+        try:
+            data = ctx.read_file(path)
+        except Exception:
+            logger.exception("[%s] 读取 .so 失败：%s", analyzer_name, path)
+            continue
+        if not data:
+            continue
+        try:
+            sample = _sample_so(data, window)
+            blob = b"\n".join(_SO_STRING_RE.findall(sample)).decode("ascii", "replace").lower()
+        except Exception:
+            logger.exception("[%s] 提取 .so 字符串失败：%s", analyzer_name, path)
+            continue
+        if blob:
+            blobs.append((path, blob))
+    return blobs
 
 
 def present_tokens(tokens: set[str], strings: list[str]) -> set[str]:
