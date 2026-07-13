@@ -33,6 +33,7 @@ from typing import Any, NamedTuple
 from apkscan.core import infra, pipeline
 from apkscan.core.textutil import host_from_url
 from apkscan.core.models import (
+    FINDING_KIND_OBSERVATION,
     Confidence,
     Endpoint,
     Evidence,
@@ -772,6 +773,7 @@ def _add_anti_analysis_finding(
             severity=severity,
             # 运行时观测合入，无静态分析器归属 → 显式标 runtime-merge（区别于"未归因"的空串）。
             analyzer="runtime-merge",
+            kind=FINDING_KIND_OBSERVATION,  # 运行时**实测**行为，非规则推导 → observation
             category="anti_analysis",
             description=(
                 f"运行时实测：样本自我检测了 {kinds_label}（已由取证运行时兼容层中和）。"
@@ -1632,6 +1634,7 @@ def _add_remote_control_finding(
             severity=Severity.HIGH,
             # 运行时观测合入，无静态分析器归属 → 显式标 runtime-merge（区别于"未归因"的空串）。
             analyzer="runtime-merge",
+            kind=FINDING_KIND_OBSERVATION,  # 运行时**实测**行为，非规则推导 → observation
             category="runtime",
             description=(
                 f"运行时实测无障碍远控行为：下发 {len(gesture_actions)} 个自动手势/全局动作；"
