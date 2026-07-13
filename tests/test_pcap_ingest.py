@@ -391,6 +391,28 @@ def test_runtime_endpoints_filters_syn_only_no_payload() -> None:
     assert syn_lead.advice == "待核"  # pcap 台账仍留作待核（不静默丢弃）
 
 
+def test_fanzha_interception_node_excluded() -> None:
+    """★ Codex fengzhixin 案抓包交接 §6：反诈拦截节点（183.192.65.101）即便有双向载荷（拦截页
+    返回），也标『无需调证·反诈拦截』、不升入 runtime 端点（会污染归因）；业务接入节点正常保留。"""
+    fanzha, biz = "183.192.65.101", "43.230.113.177"
+    # fanzha：双向载荷（拦截页会回数据）——本应被"反诈拦截"排除，而非因"有载荷"被当业务后端保留。
+    out1 = _eth(_ipv4(_tcp_flags(b"GET /", 50001, 443, 0x18), 6, "10.0.0.2", fanzha), 0x0800)
+    in1 = _eth(_ipv4(_tcp_flags(b"HTTP 302", 443, 50001, 0x18), 6, fanzha, "10.0.0.2"), 0x0800)
+    biz = _eth(_ipv4(_tcp_flags(b"X" * 40, 50002, 443, 0x18), 6, "10.0.0.2", biz), 0x0800)
+    summary = pcap_ingest.parse_pcap_bytes(_pcap([out1, in1, biz]))
+
+    ip_vals = {e.value for e in pcap_ingest.to_runtime_endpoints(summary) if e.kind == "ip"}
+    assert "183.192.65.101" not in ip_vals  # 反诈拦截节点排除，绝不升 runtime 端点污染归因
+    assert "43.230.113.177" in ip_vals  # 业务接入节点正常保留
+
+    fz_lead = next(
+        l for l in pcap_ingest.to_report_leads(summary)
+        if l.category == LeadCategory.IP and "183.192.65.101" in l.value
+    )
+    assert fz_lead.advice == "无需调证"  # 台账仍留（作拦截证据），但标『无需调证·反诈拦截』
+    assert "反诈拦截" in (fz_lead.notes or "")
+
+
 def test_udp_payload_counts_as_evidence() -> None:
     """★ 复审#2：UDP 载荷计入 payload_bytes——UDP C2/QUIC/HTTP3 真载荷不被误降为待核。"""
     udp = _eth(_ipv4(_udp(b"\x00" * 40, 50000, 8443), 17, "10.0.0.2", "8.8.8.8"), 0x0800)
