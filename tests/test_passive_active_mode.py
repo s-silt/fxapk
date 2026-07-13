@@ -131,6 +131,27 @@ def test_all_other_enrichers_are_passive() -> None:
     assert active_names == {"webcheck"}, f"意外的主动富化器：{active_names - {'webcheck'}}"
 
 
+# --- ctx.config 与 pipeline config 一致性（codex 复审加固）------------------
+
+
+def test_pipeline_canonicalizes_ctx_config_to_run_config(fake_ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # ★分析器读 ctx.config、pipeline 门控/报告读 config 参数——二者不一致时以 pipeline 的 config 为准
+    #   对齐 ctx，防"报告标 passive 但分析器（contacts getMe）按 ctx.config 的 authorized-active 主动
+    #   探测"的错配。
+    from apkscan.core.models import AnalysisConfig
+
+    monkeypatch.setattr(pipeline, "discover_analyzers", lambda: [])
+    monkeypatch.setattr(pipeline, "discover_enrichers", lambda: [])
+    monkeypatch.setattr(pipeline, "detect_capabilities", lambda online=True: set())
+
+    fake_ctx.config = AnalysisConfig(online=False, mode=ANALYSIS_MODE_AUTHORIZED_ACTIVE)  # ctx 侧不一致
+    run_cfg = AnalysisConfig(online=False, mode=ANALYSIS_MODE_PASSIVE)
+    report = pipeline.run(fake_ctx, run_cfg)
+
+    assert fake_ctx.config is run_cfg  # 已对齐：分析器现在看到 pipeline 的 config
+    assert report.meta["mode"] == ANALYSIS_MODE_PASSIVE  # 报告与分析器 mode 一致，无分叉
+
+
 # --- contacts.py Telegram getMe：主动探测同样受 mode 门控 ------------------
 
 
