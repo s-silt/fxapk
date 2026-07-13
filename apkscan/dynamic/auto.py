@@ -41,7 +41,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from apkscan.core import device
-from apkscan.core.models import AnalysisConfig
+from apkscan.core.models import ANALYSIS_MODE_PASSIVE, AnalysisConfig
 from apkscan.core.report_naming import report_base
 
 logger = logging.getLogger(__name__)
@@ -100,6 +100,7 @@ def run(
     capture_duration: int = 60,
     formats: list[str] | None = None,
     track: bool = True,
+    mode: str = ANALYSIS_MODE_PASSIVE,
     repackage: bool = True,
     on_progress: Callable[[str], None] | None = None,
     confirm: Callable[[str], None] | None = None,
@@ -155,7 +156,7 @@ def run(
 
         # 2) 静态分析（load_apk → pipeline.run → 写报告）。
         static_step, report, package_name, static_paths, base = _run_static(
-            apk_path, out_dir=out_dir, online=online, formats=fmts, track=track,
+            apk_path, out_dir=out_dir, online=online, formats=fmts, track=track, mode=mode,
             on_progress=on_progress,
         )
         steps.append(static_step)
@@ -261,6 +262,7 @@ def analyze_static(
     online: bool = True,
     formats: list[str] | None = None,
     track: bool = True,
+    mode: str = ANALYSIS_MODE_PASSIVE,
     on_progress: Callable[[str], None] | None = None,
 ) -> dict:
     """仅静态分析（无 doctor / 无设备 / 无动态）：load_apk → pipeline.run → 写报告。绝不抛。
@@ -287,7 +289,7 @@ def analyze_static(
     fmts = list(formats) if formats else list(_DEFAULT_FORMATS)
     try:
         static_step, _report, package_name, static_paths, _base = _run_static(
-            apk_path, out_dir=out_dir, online=online, formats=fmts, track=track,
+            apk_path, out_dir=out_dir, online=online, formats=fmts, track=track, mode=mode,
             on_progress=on_progress,
         )
         return {
@@ -345,6 +347,7 @@ def _run_static(
     online: bool,
     formats: list[str],
     track: bool = True,
+    mode: str = ANALYSIS_MODE_PASSIVE,
     on_progress: Callable[[str], None] | None,
 ) -> tuple[dict, object | None, str, list[str], str]:
     """步骤 2：静态分析 load_apk → pipeline.run → 写报告。
@@ -362,7 +365,7 @@ def _run_static(
         from apkscan.core import pipeline
         from apkscan.core.apk import load_apk
 
-        config = AnalysisConfig(online=online, out_dir=out_dir, formats=list(formats))
+        config = AnalysisConfig(online=online, out_dir=out_dir, formats=list(formats), mode=mode)
         ctx = load_apk(apk_path, config)
         package_name = ctx.package_name or ""
         # base 升级：拿到包名后用「APK 名→包名」回退链重算，覆盖 apk 名清理后为空的边界。
