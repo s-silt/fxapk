@@ -218,25 +218,30 @@ def detect_capabilities(online: bool = True) -> set[str]:
     return caps
 
 
-# 连通性探测锚点（host, port）：混合**境内**（阿里/腾讯 DoH）+ **境外**（RDAP / Cloudflare）。
-# 只做 TCP:443 连接、不发任何请求（不泄露探测意图、不在 provider 侧留日志）；任一可达即判在线。
-# ★不再单锚境外 DNS（旧版 1.1.1.1:53 / 8.8.8.8:53）：这类境外锚点在部分网络（如 GFW）会被
-#   阻断/污染，探测假阴性"无网" → 把本可正常工作的**境内** provider（DoH / ICP 备案查询等）
-#   富化整体误关。境内锚点在前：常见部署环境下最可能命中，命中即短路，联网场景近乎零延迟。
+# 连通性探测锚点（IP, port）：混合**境内**（阿里/腾讯公共 DNS 的 DoH 端点）+ **境外**（Cloudflare）。
+# ★全部用**数字 IP**（非主机名）：避免探测本身依赖 DNS 解析——主机名锚点的 getaddrinfo 不受
+#   create_connection 的 timeout 约束、且可能多地址重试，会让最坏耗时超出预期；数字 IP 单地址、
+#   零解析，每次尝试严格 ≤ timeout。只做 TCP:443 连接、不发任何请求（不泄露探测意图、不留 provider
+#   日志）；任一可达即判在线。
+# ★不单锚境外 DNS（旧版 1.1.1.1:53 / 8.8.8.8:53）：境外锚点在部分网络（如 GFW）被阻断/污染 →
+#   探测假阴性"无网" → 把本可用的**境内** provider 富化整体误关。境内锚点在前：常见部署下最可能
+#   命中、命中即短路，联网场景近乎零延迟。
+#   - 223.5.5.5 = 阿里公共 DNS（AliDNS，dns.alidns.com 的 DoH 落地 IP，:443 承载 DoH）
+#   - 120.53.53.53 = 腾讯 DNSPod（doh.pub 的 DoH 落地 IP，:443 承载 DoH）
+#   - 1.1.1.1 = Cloudflare，境外兜底（:443 而非易被污染的 :53）
 _NETWORK_PROBE_HOSTS: tuple[tuple[str, int], ...] = (
-    ("dns.alidns.com", 443),  # 阿里 DoH，境内高可用
-    ("doh.pub", 443),         # 腾讯 DoH，境内高可用
-    ("rdap.org", 443),        # RDAP，境外（境内通常亦可达）
-    ("1.1.1.1", 443),         # Cloudflare，境外兜底（用 443 而非易被污染的 53）
+    ("223.5.5.5", 443),      # 阿里 AliDNS，境内高可用（数字 IP，无需解析）
+    ("120.53.53.53", 443),   # 腾讯 DNSPod，境内高可用（数字 IP，无需解析）
+    ("1.1.1.1", 443),        # Cloudflare，境外兜底
 )
 
 
 def _has_network(timeout: float = 1.5) -> bool:
     """探测出网连通性：对代表性 provider 锚点做 TCP:443 连接（不发请求），任一可达即在线。
 
-    锚点混合境内 + 境外，避免单靠境外 DNS 在受限网络下假阴性、误关整个富化层（见
-    ``_NETWORK_PROBE_HOSTS`` 说明）。命中即短路返回；全不可达（真离线）最坏付
-    ``len(hosts) × timeout``（默认 4 × 1.5s）。绝不抛。
+    锚点混合境内 + 境外且**全为数字 IP**，避免单靠境外 DNS 在受限网络下假阴性、误关整个富化层，
+    并避免探测自身受 DNS 解析拖累（见 ``_NETWORK_PROBE_HOSTS`` 说明）。命中即短路返回；全不可达
+    （真离线）最坏付 ``len(hosts) × timeout``（默认 3 × 1.5s，数字 IP 无额外解析开销）。绝不抛。
     """
     for host, port in _NETWORK_PROBE_HOSTS:
         try:
