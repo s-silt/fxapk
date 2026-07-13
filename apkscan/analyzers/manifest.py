@@ -238,7 +238,9 @@ class ManifestAnalyzer(BaseAnalyzer):
             for md in app.findall("meta-data"):
                 nm = _android_attr(md, "name")
                 if nm and nm.strip().lower() in _XPOSED_META_NAMES:
-                    markers.append(nm.strip())
+                    # 存小写:集合硬性封顶 ≤4 项（防恶意清单塞海量大小写变体 meta-data 撑爆
+                    # Finding description）；markers 本就是这 4 个已知名,小写无信息损失。
+                    markers.append(nm.strip().lower())
             if markers:
                 meta["xposed_module"] = True
                 meta["xposed_markers"] = sorted(set(markers))

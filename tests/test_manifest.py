@@ -357,3 +357,21 @@ def test_normal_metadata_not_flagged_as_xposed():
     result = _run(_manifest_with_metadata(md, package="com.normal.app"))
     assert result.meta.get("xposed_module") is None
     assert not any(f.id == "MANIFEST-XPOSED-MODULE" for f in result.findings)
+
+
+def test_xposed_markers_capped_against_case_variant_flood():
+    # ★对抗性防回归：恶意清单塞大量大小写变体 meta-data，marker 集合仍硬性 ≤4（不膨胀 description）。
+    import itertools
+
+    variants = []
+    base = "xposedminversion"
+    # 造 200 条大小写变体（够证明去重按小写、集合不随输入线性膨胀）。
+    for i, bits in enumerate(itertools.product("ab", repeat=8)):
+        if i >= 200:
+            break
+        name = "".join(c.upper() if b == "a" else c for c, b in zip(base, bits))
+        variants.append(f'    <meta-data android:name="{name}" android:value="1"/>\n')
+    result = _run(_manifest_with_metadata("".join(variants)))
+    assert result.meta.get("xposed_module") is True
+    assert result.meta["xposed_markers"] == ["xposedminversion"]  # 200 变体 → 去重成 1
+    assert len(result.meta["xposed_markers"]) <= 4
