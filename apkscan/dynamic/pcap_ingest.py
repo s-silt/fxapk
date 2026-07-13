@@ -78,6 +78,10 @@ STATE_SYN_ONLY = "syn_only"  # 仅本机 SYN、无 SYN-ACK、无任何载荷 —
 STATE_RESET = "reset"  # 见 RST 且无载荷 —— 连接被拒/待核
 STATE_UNKNOWN = "unknown"  # 其它（单向载荷、握手无数据等）
 
+# 已知反诈拦截节点（Codex fengzhixin 案抓包交接 §6）：涉诈域名被拦后解析至此的拦截页 IP——非业务
+# 接入/落地机。即便有双向载荷（拦截页会回数据）也必须与待核业务接入池严格区分、勿据此调证。
+_KNOWN_FANZHA = frozenset({"183.192.65.101"})
+
 
 @dataclass
 class RemoteEndpoint:
@@ -647,7 +651,12 @@ def to_report_leads(summary: PcapSummary) -> list[Lead]:
         seen.add(key)
         ja3 = ("，JA3=" + "/".join(sorted(re.ja3))) if re.ja3 else ""
         sni = ("，SNI=" + "/".join(sorted(re.sni))) if re.sni else ""
-        if re.has_payload:
+        if re.ip in _KNOWN_FANZHA:
+            # 反诈拦截节点即便有双向载荷（拦截页会回数据）也非业务接入/落地机——标『无需调证』，
+            # 不静默丢（仍留台账作拦截证据），但严禁当接入节点升"建议调证"、污染归因。
+            advice, confidence = infra.ADVICE_SKIP, Confidence.HIGH
+            notes = "反诈拦截节点（涉诈域名被拦后解析至此的拦截页）——非业务接入/落地机，排除，勿据此调证。"
+        elif re.has_payload:
             advice, confidence = infra.ADVICE_INVESTIGATE, Confidence.HIGH
             if re.state == STATE_ESTABLISHED:
                 notes = "带外 pcap 实测接入节点（双向载荷=已通信后端）；凭此 IP 调证穿透真源站。"
@@ -733,6 +742,11 @@ def to_runtime_endpoints(summary: PcapSummary) -> list[Endpoint]:
     seen: set[str] = set()
     dropped = 0
     for re in remote_endpoints(summary):
+        # ★反诈拦截节点排除（Codex fengzhixin 案抓包交接 §6）：涉诈域名被拦后解析至此的拦截页，即便
+        #   有双向载荷也非业务接入/落地机，绝不升为 runtime 端点（会污染归因）；仍在 pcap 台账留证。
+        if re.ip in _KNOWN_FANZHA:
+            dropped += 1
+            continue
         # ★自动并入护栏：无载荷（SYN-only/reset/仅握手）节点不升为主报告"公网 IP 建议调证"——
         # 下游 _ip_lead 对 pcap Endpoint 只按公私网给 advice、会绕过这里的态分级，故直接过滤；
         # 它们仍在 pcap 台账（to_report_leads）与原始 floor.pcap 中作"待核"，不静默丢弃。
