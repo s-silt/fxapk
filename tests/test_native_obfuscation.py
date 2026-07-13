@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import random
+import struct
 
 from apkscan.analyzers.native_obfuscation import NativeObfuscationAnalyzer
 from apkscan.core.models import AnalyzerResult, Severity
@@ -93,3 +94,88 @@ def test_read_file_failure_does_not_crash():
     # 单库读失败被吞并记录，整体不炸、无误报
     assert result.error is None
     assert result.meta["native_obfuscation"] == []
+
+
+# --- ELF PT_NOTE 结构签名（VMPacker 类劫持 note 段承载 stub） -----------------
+
+
+def _elf64_with_ptnote(*, p_flags: int, p_filesz: int) -> bytes:
+    """最小 ELF64，含一个可设 flags/filesz 的 PT_NOTE 段；零填充凑够 _MIN_SIZE（零→熵/串密度均低，
+    隔离出仅 PT_NOTE 信号，不夹带熵信号）。"""
+    hdr = bytearray(64)
+    hdr[0:4] = b"\x7fELF"
+    hdr[4] = 2  # ELF64
+    hdr[5] = 1  # little-endian
+    struct.pack_into("<Q", hdr, 32, 64)  # e_phoff
+    struct.pack_into("<H", hdr, 54, 56)  # e_phentsize
+    struct.pack_into("<H", hdr, 56, 1)   # e_phnum
+    ph = bytearray(56)
+    struct.pack_into("<I", ph, 0, 4)          # p_type = PT_NOTE
+    struct.pack_into("<I", ph, 4, p_flags)    # p_flags
+    struct.pack_into("<Q", ph, 32, p_filesz)  # p_filesz
+    return bytes(hdr) + bytes(ph) + b"\x00" * (96 * 1024)
+
+
+def test_pt_note_executable_flagged():
+    # PT_NOTE 段带 PF_X（可执行）→ 疑劫持。
+    result = _analyze(files={"lib/arm64-v8a/libvmp.so": _elf64_with_ptnote(p_flags=0x5, p_filesz=200)})
+    assert result.error is None
+    sus = result.meta["native_obfuscation"]
+    assert sus and any("PT_NOTE" in s for s in sus[0]["signals"])
+    assert result.findings[0].id == "NATIVE-OBFUSCATION-SUSPECTED"
+
+
+def test_pt_note_oversized_flagged():
+    # PT_NOTE 段异常大（>4KB）→ 疑承载解释器 stub。
+    result = _analyze(files={"lib/arm64-v8a/libvmp.so": _elf64_with_ptnote(p_flags=0x4, p_filesz=100_000)})
+    sus = result.meta["native_obfuscation"]
+    assert sus and any("PT_NOTE" in s for s in sus[0]["signals"])
+
+
+def test_pt_note_normal_not_flagged():
+    # ★FP 防回归：正规小 note 段（只读、几百字节）不该触发 PT_NOTE 信号（零填充也无熵信号）→ 空。
+    result = _analyze(files={"lib/arm64-v8a/libok.so": _elf64_with_ptnote(p_flags=0x4, p_filesz=300)})
+    assert result.meta["native_obfuscation"] == []
+
+
+# --- 选择性虚拟化：内嵌局部高熵块（整库串密度仍正常，整库门漏判、局部门补上） ---
+
+
+def test_local_high_entropy_block_flagged():
+    pad = b"readable padding string here " * 2000  # ~58KB 可读（高密度、低熵）
+    block = random.Random(99).randbytes(600 * 1024)  # 确定性高熵块（≥1 整窗）
+    result = _analyze(files={"lib/arm64-v8a/libsel.so": pad + block + pad})
+    assert result.error is None
+    sus = result.meta["native_obfuscation"]
+    assert sus and any("局部高熵块" in s for s in sus[0]["signals"])
+    # 全局串密度仍高（整库门未触发，靠局部门）
+    assert sus[0]["string_density"] >= 0.08
+
+
+def _elf32_with_ptnote(*, p_flags: int, p_filesz: int) -> bytes:
+    """最小 ELF32（armeabi-v7a），含一个 PT_NOTE 段——覆盖 ELF32 的 filesz@16/flags@24 偏移路径。"""
+    hdr = bytearray(52)
+    hdr[0:4] = b"\x7fELF"
+    hdr[4] = 1  # ELF32
+    hdr[5] = 1  # little-endian
+    struct.pack_into("<I", hdr, 28, 52)  # e_phoff（紧接 52B 头）
+    struct.pack_into("<H", hdr, 42, 32)  # e_phentsize
+    struct.pack_into("<H", hdr, 44, 1)   # e_phnum
+    ph = bytearray(32)
+    struct.pack_into("<I", ph, 0, 4)          # p_type = PT_NOTE
+    struct.pack_into("<I", ph, 16, p_filesz)  # p_filesz@16（ELF32）
+    struct.pack_into("<I", ph, 24, p_flags)   # p_flags@24（ELF32）
+    return bytes(hdr) + bytes(ph) + b"\x00" * (96 * 1024)
+
+
+def test_pt_note_executable_flagged_elf32():
+    # ELF32 偏移路径（p_filesz@16 / p_flags@24 与 ELF64 不同）防回归。
+    result = _analyze(files={"lib/armeabi-v7a/libvmp.so": _elf32_with_ptnote(p_flags=0x5, p_filesz=200)})
+    sus = result.meta["native_obfuscation"]
+    assert sus and any("PT_NOTE" in s for s in sus[0]["signals"])
+
+
+def test_pt_note_oversized_flagged_elf32():
+    result = _analyze(files={"lib/armeabi-v7a/libvmp.so": _elf32_with_ptnote(p_flags=0x4, p_filesz=50_000)})
+    sus = result.meta["native_obfuscation"]
+    assert sus and any("PT_NOTE" in s for s in sus[0]["signals"])
