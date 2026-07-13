@@ -360,6 +360,58 @@ def analyze(
         _cleanup_adb_quiet(_adb_owned)
 
 
+def _report_dict_for(path: Path, *, online: bool) -> dict:
+    """把 diff 的一个参数解析成 report dict：``.json`` → 直接读；否则当 APK → 现分析成报告 dict。
+
+    JSON 读取 / APK 解析失败 → 友好报错 + 非零退出（3=坏输入 JSON，2=APK 解析失败），不打 traceback。
+    """
+    import json as _json
+
+    if path.suffix.lower() == ".json":
+        try:
+            data = _json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001 — 坏 JSON → 友好报错而非 traceback
+            typer.echo(f"错误：无法读取报告 JSON：{path}（{exc}）", err=True)
+            raise typer.Exit(code=3) from exc
+        return data if isinstance(data, dict) else {}
+
+    # 非 .json → 当 APK 现分析（离线默认：diff 通常不需联网富化，也让结果确定/快）。
+    from apkscan.core import pipeline
+    from apkscan.report import json as report_json
+
+    config = AnalysisConfig(online=online, out_dir=str(path.parent), formats=[])
+    try:
+        ctx = load_app(str(path), config)
+    except ApkParseError as exc:
+        typer.echo(f"错误：{exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    report = pipeline.run(ctx, config)  # type: ignore[arg-type]
+    return report_json.to_dict(report)
+
+
+@app.command()
+def diff(
+    old: Path = typer.Argument(..., exists=True, help="旧版：report.json 或 APK。"),
+    new: Path = typer.Argument(..., exists=True, help="新版：report.json 或 APK。"),
+    online: bool = typer.Option(
+        False,
+        "--online/--offline",
+        help="参数是 APK 时是否联网富化（默认离线：diff 通常只看结构变化、更快更确定）。",
+    ),
+) -> None:
+    """对比两份分析结果，输出**调证增量**的稳定 JSON：新增 / 删除的线索、端点、发现，加身份 /
+    加固 / 分类变化。每个参数可是 report.json（直接读）或 APK（现分析）——适合追踪同一 App 跨版本
+    新增了哪些支付通道 / 钱包 / 后台入口、加固是否升级、SDK 是否变了。
+    """
+    import json as _json
+
+    from apkscan.core.diff import diff_reports
+
+    old_dict = _report_dict_for(old, online=online)
+    new_dict = _report_dict_for(new, online=online)
+    typer.echo(_json.dumps(diff_reports(old_dict, new_dict), ensure_ascii=False, indent=2))
+
+
 @app.command()
 def unpack(
     apk: Path = typer.Argument(
