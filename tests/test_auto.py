@@ -87,6 +87,32 @@ def _patch_static_ok(
     return report
 
 
+def test_analyze_static_threads_mode_to_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 网络模式经 analyze_static → _run_static → AnalysisConfig 透传（默认 passive；可开 authorized-active）。
+    import apkscan.core.apk as apk_mod
+    import apkscan.core.pipeline as pipeline_mod
+
+    captured: dict[str, str] = {}
+    report = _make_report("com.x")
+    monkeypatch.setattr(apk_mod, "load_apk", lambda *a, **k: _FakeCtx("com.x"))
+
+    def _run(ctx: object, config: Any) -> Report:
+        captured["mode"] = config.mode
+        return report
+
+    monkeypatch.setattr(pipeline_mod, "run", _run)
+    monkeypatch.setattr(
+        auto, "_write_reports", lambda report, *, out_dir, formats, base: [f"{out_dir}/{base}.html"]
+    )
+
+    auto.analyze_static("sample.apk", out_dir="out", mode="authorized-active")
+    assert captured["mode"] == "authorized-active"
+
+    captured.clear()
+    auto.analyze_static("sample.apk", out_dir="out")  # 不传 → 默认 passive
+    assert captured["mode"] == "passive"
+
+
 def _patch_doctor(monkeypatch: pytest.MonkeyPatch, ok: bool = True) -> dict[str, Any]:
     """打桩 doctor.run，记录被调与 on_progress 透传。"""
     import apkscan.dynamic.doctor as doctor_mod

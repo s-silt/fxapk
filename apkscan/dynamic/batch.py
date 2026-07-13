@@ -34,6 +34,7 @@ import json
 from pathlib import Path
 
 from apkscan.core import device
+from apkscan.core.models import ANALYSIS_MODE_PASSIVE
 from apkscan.dynamic import auto, correlate, provision
 from apkscan.dynamic.ledger import AnalyzedLedger, apk_sha256
 
@@ -106,6 +107,7 @@ def run_folder(
     capture_duration: int = _DEFAULT_DURATION,
     formats: list[str] | None = None,
     force: bool = False,
+    mode: str = ANALYSIS_MODE_PASSIVE,
     ledger_path: str | Path | None = None,
     on_progress: Callable[[str], None] | None = None,
 ) -> dict:
@@ -164,6 +166,7 @@ def run_folder(
                 online=online,
                 capture_duration=capture_duration,
                 formats=formats,
+                mode=mode,
                 on_progress=on_progress,
                 confirm=None,  # launch-only：只启动 app，不等人操作
             )

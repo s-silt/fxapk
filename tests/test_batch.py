@@ -43,6 +43,30 @@ def no_device(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def test_run_folder_threads_mode_to_auto(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_device: None
+) -> None:
+    # 网络模式经 run_folder → auto.run 透传（默认 passive；可显式 authorized-active）。
+    seen: dict[str, object] = {}
+
+    def _run(apk_path: str, **kwargs: object) -> dict:
+        seen["mode"] = kwargs.get("mode")
+        return _ok_result(str(kwargs["out_dir"]))
+
+    monkeypatch.setattr(batch.auto, "run", _run)
+
+    f1 = tmp_path / "s1"
+    _make_apk(f1, "a.apk")
+    batch.run_folder(str(f1), out_dir=str(tmp_path / "o1"), mode="authorized-active")
+    assert seen["mode"] == "authorized-active"
+
+    seen.clear()
+    f2 = tmp_path / "s2"
+    _make_apk(f2, "b.apk")
+    batch.run_folder(str(f2), out_dir=str(tmp_path / "o2"))  # 不传 → 默认 passive
+    assert seen["mode"] == "passive"
+
+
 def test_run_folder_analyzes_each_apk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_device: None
 ) -> None:
