@@ -132,6 +132,12 @@ def test_pipeline_runs_and_records_errors(monkeypatch, fake_ctx):
     assert report.meta["tool_version"]  # 工具版本落 meta（非空）
     assert len(report.meta["ruleset_digest"]) == 16  # 规则内容摘要（可复现锚点）
 
+    # finding 溯源：聚合处集中盖上产出它的分析器名；置信度默认 MEDIUM。
+    f1 = report.findings[0]
+    assert f1.id == "F1"
+    assert f1.analyzer == "good"  # 集中盖章（_GoodAnalyzer 未自标 → 盖成分析器名）
+    assert f1.confidence == Confidence.MEDIUM
+
 
 def test_endpoint_leads_built_from_domains_and_ips(monkeypatch, fake_ctx):
     monkeypatch.setattr(pipeline, "discover_analyzers", lambda: [_GoodAnalyzer()])

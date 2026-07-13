@@ -25,7 +25,7 @@ import struct
 from collections import Counter
 from typing import TYPE_CHECKING, Any
 
-from apkscan.core.models import AnalyzerResult, Evidence, Finding, Severity
+from apkscan.core.models import AnalyzerResult, Confidence, Evidence, Finding, Severity
 from apkscan.core.registry import BaseAnalyzer
 
 if TYPE_CHECKING:
@@ -275,6 +275,7 @@ class NativeObfuscationAnalyzer(BaseAnalyzer):
             id="NATIVE-OBFUSCATION-SUSPECTED",
             title="native .so 疑加密 / 虚拟化（VMP / 加密壳 / PT_NOTE 劫持启发式，非精确判定）",
             severity=Severity.MEDIUM,
+            confidence=Confidence.LOW,  # 熵/串密度启发式，合法金融/游戏 DRM 亦命中 → 低置信
             category="anti_analysis",
             description=(
                 "以下 App 自有 native 库呈现【高熵 + 几乎无可读串】/【局部高熵 VM 块】/【PT_NOTE 段被劫持】"
