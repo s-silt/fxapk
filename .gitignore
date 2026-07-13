@@ -4,6 +4,11 @@ __pycache__/
 venv/
 *.egg-info/
 .pytest_cache/
+# 覆盖率产物(pytest-cov / coverage.py，绝不入库)
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
 *.apk
 out/
 .apkscan_cache/
