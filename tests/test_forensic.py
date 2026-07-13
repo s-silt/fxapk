@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from apkscan.core import forensic
 from apkscan.core.models import Endpoint
-from apkscan.core.pipeline import _domain_lead, _ip_lead
+from apkscan.core.leads import _domain_lead, _ip_lead
 
 
 def test_classify_icp_is_domestic() -> None:
