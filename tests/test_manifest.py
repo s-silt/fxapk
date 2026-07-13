@@ -365,8 +365,8 @@ def test_xposed_markers_capped_against_case_variant_flood():
 
     variants = []
     base = "xposedminversion"
-    # 造 200 条大小写变体（够证明去重按小写、集合不随输入线性膨胀）。
-    for i, bits in enumerate(itertools.product("ab", repeat=8)):
+    # 造 200 条大小写变体（repeat=len(base) 保证全长名；够证明去重按小写、集合不随输入线性膨胀）。
+    for i, bits in enumerate(itertools.product("ab", repeat=len(base))):
         if i >= 200:
             break
         name = "".join(c.upper() if b == "a" else c for c, b in zip(base, bits))
