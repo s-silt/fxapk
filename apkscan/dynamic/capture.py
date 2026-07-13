@@ -1652,6 +1652,94 @@ class _FloorPcap:
     remote_path: str
     pid_path: str
     serial: str | None
+    net_start: dict[str, str] | None = None  # 开抓时的出站网络态快照（漂移检测基线）。
+
+
+# 网络态漂移检测（Codex fengzhixin 案抓包交接 §5.1）：开抓/停抓各快照一次出站网络态，跨网络/接口
+# 漂移则本轮带外 pcap 掺入非目标网络流量、接入节点须按污染核。比对字段（两端都采到才参与判定）。
+_NET_FIELDS = ("iface", "src", "gateway", "ssid")
+_FLOOR_NETSTATE_NAME = "floor.netstate.json"  # 网络态留痕 + 漂移判定 sidecar（与 floor.pcap 同目录）。
+
+
+def _snapshot_netstate(serial: str | None = None) -> dict[str, str]:
+    """快照设备出站网络态：默认路由 iface/src/gateway（``ip route get``）+ 当前 SSID（best-effort）。
+
+    非 root 即可取；取不到的字段留空。绝不抛（失败返回已采到的部分/空 dict，调用方据空判"未采集"）。
+    """
+    state: dict[str, str] = {}
+    try:
+        route = _adb_capture(["shell", "ip", "route", "get", "8.8.8.8"], serial) or ""
+        for name, pat in (
+            ("iface", r"\bdev\s+(\S+)"),
+            ("src", r"\bsrc\s+(\S+)"),
+            ("gateway", r"\bvia\s+(\S+)"),
+        ):
+            m = re.search(pat, route)
+            if m:
+                state[name] = m.group(1)
+    except Exception:  # noqa: BLE001 - 网络态快照失败不影响抓包
+        logger.debug("[capture] floor：ip route 网络态快照失败（忽略）", exc_info=True)
+    try:
+        wifi = _adb_capture(["shell", "dumpsys", "wifi"], serial) or ""
+        m = re.search(r'SSID:\s*"?([^",\r\n]+)', wifi)
+        if m:
+            ssid = m.group(1).strip()
+            if ssid and ssid.lower() not in ("<unknown ssid>", "unknown ssid", "none", "null"):
+                state["ssid"] = ssid
+    except Exception:  # noqa: BLE001 - SSID 取不到（新版 Android 限制）属预期降级
+        logger.debug("[capture] floor：SSID 快照失败（忽略）", exc_info=True)
+    return state
+
+
+def _write_floor_netstate(
+    out_path: Path, net_start: dict[str, str] | None, net_end: dict[str, str]
+) -> bool:
+    """写 floor 网络态留痕 + 漂移检测 sidecar（``floor.netstate.json``）；漂移则 WARNING。返回是否漂移。
+
+    只比对两端**都采到**的字段（避免"未采集"误报漂移）。绝不抛。
+    """
+    import json
+
+    from apkscan.core.atomic import atomic_write_text
+
+    start = net_start or {}
+    end = net_end or {}
+    changed = (
+        sorted(f for f in _NET_FIELDS if f in start and f in end and start[f] != end[f])
+        if start and end
+        else []
+    )
+    drifted = bool(changed)
+    if not (start and end):
+        note = "网络态未完整采集（设备/命令不支持时留空），本轮不做漂移判定。"
+    elif drifted:
+        note = (
+            "开抓与停抓的出站网络态不一致（默认路由/源IP/SSID 变化）——本轮 floor pcap 可能跨网络/"
+            "接口、掺入非目标网络流量；接入节点须按『网络漂移污染』核，勿直接当目标 App 真实链路。"
+        )
+    else:
+        note = "开抓与停抓出站网络态一致（未见漂移）。"
+    payload = {
+        "drifted": drifted,
+        "changed_fields": changed,
+        "start": start,
+        "end": end,
+        "note": note,
+    }
+    try:
+        atomic_write_text(
+            out_path / _FLOOR_NETSTATE_NAME,
+            json.dumps(payload, ensure_ascii=False, indent=2),
+        )
+    except OSError:
+        logger.warning("[capture] floor：写网络态 sidecar 失败（忽略）", exc_info=True)
+    if drifted:
+        logger.warning(
+            "[capture] floor：★网络漂移（%s）——开抓 %s → 停抓 %s；本轮带外 pcap 可能掺入其它网络流量，"
+            "接入节点须按污染核（见 %s）。",
+            changed, start, end, _FLOOR_NETSTATE_NAME,
+        )
+    return drifted
 
 
 def _find_device_tcpdump(serial: str | None) -> str | None:
@@ -1729,7 +1817,12 @@ def _start_floor_pcap(
             logger.info("[capture] floor：tcpdump 未能以 root 起或起后即退（无 root / 无抓包权限），带外 pcap 不可用（降级）")
             return None
         logger.info("[capture] floor：设备侧 tcpdump 已起（%s → %s，后台+pidfile）", tcpdump, _FLOOR_REMOTE_PCAP)
-        return _FloorPcap(remote_path=_FLOOR_REMOTE_PCAP, pid_path=_FLOOR_PID_PATH, serial=serial)
+        return _FloorPcap(
+            remote_path=_FLOOR_REMOTE_PCAP,
+            pid_path=_FLOOR_PID_PATH,
+            serial=serial,
+            net_start=_snapshot_netstate(serial),  # 开抓网络态基线（漂移检测）
+        )
     except Exception:
         logger.exception("[capture] floor：起设备侧 tcpdump 失败（降级，不阻断）")
         return None
@@ -1773,6 +1866,8 @@ def _stop_floor_pcap(handle: _FloorPcap, out_path: Path) -> Path | None:
             serial,
         )
         _wait(_FLOOR_FLUSH_GRACE)  # 给 flush + 落盘一点时间
+        # 停抓后再快照网络态，与开抓基线比对 → 漂移则本轮 pcap 可能掺入非目标网络流量（落 sidecar）。
+        _write_floor_netstate(out_path, handle.net_start, _snapshot_netstate(serial))
         # 2) adb pull 到**唯一临时文件**：要求 _adb 返回成功【且】临时文件 magic/size 有效——
         #    ★防旧证据误判（P0-3 复审）：若直接拉到固定 floor.pcap，本轮 pull 失败不覆盖旧文件时，
         #    旧 floor.pcap 会被当本轮成功、随后误删本轮远端证据。临时文件+校验通过才原子替换。
