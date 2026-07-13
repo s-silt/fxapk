@@ -413,6 +413,27 @@ def diff(
 
 
 @app.command()
+def jsonl(
+    report: Path = typer.Argument(..., exists=True, dir_okay=False, help="report.json 路径。"),
+) -> None:
+    """把 report.json 摊成 **JSONL 事件流**（每行一个 JSON：1 条 meta 头 + 每条线索 / 发现一个事件），
+    供 AI agent / 脚本逐条流式消费——据 finding 的 confidence/kind/analyzer 加权、逐条串案、生成文书，
+    无需先解析整份嵌套报告。坏 JSON → 退出码 3。
+    """
+    import json as _json
+
+    from apkscan.core.jsonl import report_to_events
+
+    try:
+        data = _json.loads(report.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001 — 坏 JSON → 友好报错而非 traceback
+        typer.echo(f"错误：无法读取报告 JSON：{report}（{exc}）", err=True)
+        raise typer.Exit(code=3) from exc
+    for event in report_to_events(data):
+        typer.echo(_json.dumps(event, ensure_ascii=False))
+
+
+@app.command()
 def unpack(
     apk: Path = typer.Argument(
         ...,
