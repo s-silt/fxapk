@@ -3,6 +3,37 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
+## Unreleased
+
+Theme: **资产沉淀主线 P0 —— 样本库骨架**。让 fxapk 把历次分析的 report.json
+累积成可查询、可回归、可重建的语料库，为后续回归门禁 / IOC 关联 / 规则目录打地基。
+
+### New — `fxapk corpus`（样本库）
+
+- **`corpus add REPORT... [--case] [--corpus]`** —— 把一份/多份 report.json
+  入库：报告原样字节存进 `reports/<sample_sha256>/<tool_version>_<ruleset_digest>.report.json`，
+  并登记进 `manifest.jsonl` 派生索引。库内主键 = `(sample_sha256, tool_version,
+  ruleset_digest)`：同样本同版本同规则重复入库**幂等跳过**，换版本/换规则则并存新报告
+  （天然做跨版本回归基线）。旧报告缺 `sample_sha256` 时按内容派生 `nosha-` 占位身份、不塌缩。
+- **`corpus seen VALUE [--by sample_sha256|package_name|sign_sha256]`** ——
+  「见过没」反查；`--by sign_sha256` 按共享签名证书一击串案。
+- **`corpus ls [--package|--case|--packer|--type]`** —— 过滤列举。
+- **`corpus reindex`** —— 扫 `reports/` 全量重建 manifest（自愈索引；report.json 是唯一
+  事实源，只从旧 manifest 继承人工 `case_id`）。
+- **`corpus events SHA256`** —— 复用 `report_to_events` 把库内报告吐成 JSONL 喂 agent。
+- 地基不引入任何新存储引擎/依赖（不复活图谱/SQLite 台账）；`manifest.jsonl` 是可重建缓存、
+  非事实源。
+
+### Safety
+
+- 语料库含真实案件数据（IOC/案件号），根目录**必须**经 `--corpus` 或环境变量
+  `FXAPK_CORPUS` 显式指向库外（OneDrive），二者皆缺即**拒跑**（exit 2），绝不默认 `./corpus`；
+  且根目录若落在 git 工作树内一律拒跑（防案件数据随 `git add` 混进公开仓库）。
+- CI 守卫 + `.gitignore` 覆盖真正的 PII 载荷 `*.report.json`（报告全文），而不仅是派生索引
+  `manifest.jsonl` / `ioc_index.jsonl`——git 跟踪的文件里出现任一即 CI 红。
+- **取证字节保真**：报告原样存证（`corpus add` 读侧 `read_bytes` + 原子写禁用换行翻译），
+  落盘字节 == 原文；不同主键净化后落同一路径时，写盘前**拒绝覆盖**已入库的取证字节（路径碰撞守卫）。
+
 ## 0.9.0 — 2026-07-13
 
 Theme: **result credibility, the passive/active network boundary, and
