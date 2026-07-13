@@ -99,3 +99,28 @@ def test_provenance_fields_serialize() -> None:
     f = d["findings"][0]
     assert f["analyzer"] == "myzer"
     assert f["confidence"] == "HIGH"  # Enum → .value
+    assert f["kind"] == "inference"  # 主张类型默认 inference
+
+
+# --- kind 主张类型轴 --------------------------------------------------------
+
+
+def test_finding_kind_defaults_inference() -> None:
+    # 静态规则 finding 默认 inference（规则推导）；运行时实测行为在 merge 侧标 observation。
+    assert _finding("X").kind == "inference"
+
+
+def test_finding_kinds_taxonomy() -> None:
+    from apkscan.core.models import (
+        FINDING_KIND_ANALYST_CONCLUSION,
+        FINDING_KIND_INFERENCE,
+        FINDING_KIND_OBSERVATION,
+        FINDING_KINDS,
+    )
+
+    assert set(FINDING_KINDS) == {
+        FINDING_KIND_OBSERVATION,
+        FINDING_KIND_INFERENCE,
+        FINDING_KIND_ANALYST_CONCLUSION,
+    }
+    assert FINDING_KIND_INFERENCE == "inference"
