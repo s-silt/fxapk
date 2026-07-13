@@ -229,6 +229,15 @@ class ComponentSet:
     providers: list[Component] = field(default_factory=list)
 
 
+#: 分析网络模式。``passive``（默认）：只跑**被动**富化器（查第三方 OSINT 库，对目标零流量）；
+#: ``authorized-active``：显式授权下才放行会**向目标发流量**的主动富化器（如 webcheck 经 web-check
+#: SaaS 实例 live 探测目标端口/SSL/HTTP）。默认被动，契合取证「不接触目标」定位——主动探测须操作者
+#: 明确授权、且在报告中留痕。
+ANALYSIS_MODE_PASSIVE = "passive"
+ANALYSIS_MODE_AUTHORIZED_ACTIVE = "authorized-active"
+ANALYSIS_MODES: tuple[str, ...] = (ANALYSIS_MODE_PASSIVE, ANALYSIS_MODE_AUTHORIZED_ACTIVE)
+
+
 @dataclass
 class AnalysisConfig:
     """一次分析的运行配置。"""
@@ -236,6 +245,8 @@ class AnalysisConfig:
     online: bool = True
     out_dir: str = "out"
     formats: list[str] = field(default_factory=lambda: ["html", "json"])
+    #: 网络模式（见 ANALYSIS_MODES）。默认 passive：主动富化器被 pipeline 代码层硬屏蔽。
+    mode: str = ANALYSIS_MODE_PASSIVE
 
 
 @dataclass

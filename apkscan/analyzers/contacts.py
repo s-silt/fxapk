@@ -51,6 +51,8 @@ from apkscan.analyzers._common import (
     truncate as _truncate_shared,
 )
 from apkscan.core.models import (
+    ANALYSIS_MODE_AUTHORIZED_ACTIVE,
+    ANALYSIS_MODE_PASSIVE,
     AnalyzerResult,
     Confidence,
     Evidence,
@@ -354,15 +356,24 @@ class ContactsAnalyzer(BaseAnalyzer):
     def _maybe_getme(self, token: str, ctx: "AnalysisContext") -> str:
         """Telegram bot token 在线验证（getMe）—— **默认 OFF**。
 
-        默认离线不发：主动打 api.telegram.org 会暴露侦查意图、可能惊动接料人致 token 失效
-        （对照 enrichers/asn.py 对明文 ip-api 的告警范式）。仅当 analyzer 具备 online 能力
-        （ctx.config.online 为真）时才尝试发 getMe；失败（token 失效 / 无网）优雅降级、保留
-        静态 token 线索不丢。返回写入 Lead.notes 的告警 / 验证结果片段。
+        默认不发：getMe 会用**接料人自己的 token** 主动触其 live bot，暴露侦查意图、可能惊动
+        接料人致 token 失效（对照 enrichers/asn.py 对明文 ip-api 的告警范式）。须**同时**满足
+        ①online 能力（ctx.config.online）②``authorized-active`` 模式（ctx.config.mode，操作者
+        明确授权主动探测）才尝试发 getMe——与 pipeline 对主动富化器的门控同一原则。失败（token
+        失效 / 无网）优雅降级、保留静态 token 线索不丢。返回写入 Lead.notes 的告警 / 验证结果片段。
         """
         if not _ctx_online(ctx):
             return (
                 "未验证：默认离线未发 getMe（主动打 api.telegram.org 会暴露侦查意图、"
                 "可能惊动接料人致 token 失效）；如需在线核验请显式启用 online 能力。"
+            )
+        if _ctx_mode(ctx) != ANALYSIS_MODE_AUTHORIZED_ACTIVE:
+            # ★ passive（默认）：getMe 会用**接料人自己的 token** 触其 live bot，属主动侦察
+            #   （暴露侦查意图、可能惊动嫌疑人），与被动取证定位冲突 → 不发，只留静态 token 线索。
+            #   须 --mode authorized-active（操作者明确授权）才在线核验。
+            return (
+                "未验证：passive 模式未发 getMe（用接料人 token 主动触其 live bot 会暴露侦查意图）；"
+                "如确需在线核验请显式 --mode authorized-active。"
             )
         username = self._getme_username(token)
         if username:
@@ -372,7 +383,8 @@ class ContactsAnalyzer(BaseAnalyzer):
     def _getme_username(self, token: str) -> str | None:
         """实际调 https://api.telegram.org/bot<token>/getMe 拿 bot username。
 
-        全异常吞掉（不抛、不静默——记 warning），失败返回 None。仅在 online 能力下被调用。
+        全异常吞掉（不抛、不静默——记 warning），失败返回 None。仅在 online **且**
+        authorized-active 模式下被调用（passive 默认不发，见调用点门控）。
         """
         try:
             import requests
@@ -529,6 +541,18 @@ def _ctx_online(ctx: "AnalysisContext") -> bool:
     except Exception:
         logger.debug("[contacts] 读取 ctx.config.online 失败，按离线处理", exc_info=True)
         return False
+
+
+def _ctx_mode(ctx: "AnalysisContext") -> str:
+    """analyzer 的网络模式（用于门控 getMe 这种**主动**探测）。
+
+    读 ctx.config.mode；读不到一律按 passive（保守：不发主动探测）。与 pipeline._mode_gate 同口径。
+    """
+    try:
+        return getattr(ctx.config, "mode", ANALYSIS_MODE_PASSIVE) or ANALYSIS_MODE_PASSIVE
+    except Exception:
+        logger.debug("[contacts] 读取 ctx.config.mode 失败，按 passive 处理", exc_info=True)
+        return ANALYSIS_MODE_PASSIVE
 
 
 # 邮箱后缀白名单：邮箱必须以真实 TLD 结尾，否则多为代码误报

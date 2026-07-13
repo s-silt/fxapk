@@ -19,7 +19,13 @@ import typer
 from apkscan.core import device
 from apkscan.core.apk import ApkParseError
 from apkscan.core.loader import load_app
-from apkscan.core.models import AnalysisConfig, LeadCategory, Report
+from apkscan.core.models import (
+    ANALYSIS_MODE_PASSIVE,
+    ANALYSIS_MODES,
+    AnalysisConfig,
+    LeadCategory,
+    Report,
+)
 from apkscan.core.report_naming import report_base
 
 logger = logging.getLogger(__name__)
@@ -195,6 +201,14 @@ def analyze(
         "--track/--no-track",
         help="写报告后自动把线索入追踪台账（+喂案件图谱）。默认开；--no-track 关闭。",
     ),
+    mode: str = typer.Option(
+        ANALYSIS_MODE_PASSIVE,
+        "--mode",
+        help=(
+            "网络模式：passive（默认，只跑被动 OSINT 富化、对目标零流量）| "
+            "authorized-active（显式授权下才放行会向目标 live 探测的主动富化器，如 webcheck）。"
+        ),
+    ),
 ) -> None:
     """分析一个 APK 并产出报告。"""
     logging.basicConfig(
@@ -208,8 +222,13 @@ def analyze(
     _adb_owned = _adb_owned_at_start()  # ★P0-5：起手判 adb server 归属（外部/先前存在则收尾不杀）
     try:
         formats = _parse_formats(fmt)
+        if mode not in ANALYSIS_MODES:
+            typer.echo(
+                f"错误：--mode 只能是 {' | '.join(ANALYSIS_MODES)}（收到 {mode!r}）", err=True
+            )
+            raise typer.Exit(code=2)
         out = _resolve_out(out, apk)  # 未给 --out → 默认落到 APK 同目录下的 out/
-        config = AnalysisConfig(online=online, out_dir=out, formats=formats)
+        config = AnalysisConfig(online=online, out_dir=out, formats=formats, mode=mode)
 
         extra_dex_files = _resolve_extra_dex(extra_dex)
         if extra_dex_files:
