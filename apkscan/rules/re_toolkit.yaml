@@ -77,6 +77,19 @@ tools:
       - "_ZN7arthook"
     note: "ArtHook 以静态库编入 App 自有 .so、无独立 libarthook.so、无 Java 包名，三路(so名/文件/dex)全落空，靠 .so 内 mangled C++ 符号 _ZN7arthook（namespace arthook 长度前缀 7）识别；release 完全 strip 符号则静态无痕，须靠运行时兜底。"
 
+  - name: "AlbatrossHook (次世代 ART hook + native 插桩)"
+    category: "hook_framework"
+    capability: "ART Java 方法 hook + native inline hook + 函数插桩（LSPosed 系外的次世代框架）"
+    so_names:
+      - "libalbatross_base.so"
+    dex_prefixes:
+      - "qing.albatross"
+    so_strings:
+      - "AlbatrossHookInstrument"
+      - "AlbatrossHookFunc"
+      - "AlbatrossAndroidInit"
+    note: "可打包进 app 做自我插桩（非外部 frida）；so 名可改，靠导出 C/JNI 符号串（release 不 strip 导出符号）兜底抗改名；样本内置 = 具备运行时 hook 能力，串案作团伙工具链指纹。"
+
   - name: "xDL (Android ELF 符号解析)"
     category: "hook_framework"
     capability: "绕过 linker namespace 解析 .so 符号（hook 前置能力）"
@@ -141,6 +154,26 @@ tools:
       - "detect lib has bean hooked"
     anti_frida: true
     note: "检测类而非逃逸类；命中即预判 frida attach 会被识别→秒退/零产出——frida 秒退应归因『被 detect』而非『样本干净』，需旁路 pcap/tls-keylog/内核抓包。so 名/包名可被改名规避，抗改名指纹=.so 内特征串（含原作拼写错 bean≠been）。"
+
+  - name: "sentry/rusda (native frida/环境检测器)"
+    category: "evasion"
+    capability: "native frida 检测 + 环境检测（zygisk 注入 / seccomp / apk fd 一致性等），命中令 App 秒退"
+    so_names:
+      - "libenvdetect.so"
+    dex_prefixes:
+      - "anti.rusda"
+    anti_frida: true
+    note: "检测类；命中即预判 frida attach 会被识别→秒退/零产出，需旁路 pcap/tls-keylog/内核抓包。以 anti.rusda 包前缀为主锚（reverse-domain、near-zero FP）+ libenvdetect.so；★不列 libantidebug.so——通用反调试 so 名，商业加固/游戏 DRM 亦用会误报 HIGH。"
+
+  - name: "ApplistDetector (反 root/Magisk/Xposed 环境检测)"
+    category: "evasion"
+    capability: "检测 Magisk / root / 可疑 app（Xposed/frida）等分析环境；App 内嵌 = 主动反 rooted 取证机"
+    so_names:
+      - "libapplist_detector.so"
+    dex_prefixes:
+      - "icu.nullptr.applistdetector"
+    anti_frida: true
+    note: "反 root/Magisk/Xposed 检测库（非字面 frida 检测）；命中 = 该样本会识破 Magisk-root 的 frida 取证机而秒退——抓包应退到未 root 原生镜像设备或旁路 pcap/tls-keylog/内核。以 icu.nullptr.applistdetector 包前缀为主锚（near-zero FP）+ libapplist_detector.so；★不列 assets/stub.apk——通用文件名会误报。"
 
   - name: "Xposed/LSPosed 模块身份"
     category: "evasion"
