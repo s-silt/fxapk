@@ -97,6 +97,16 @@ def _analysis_health(analyzer_status: list[dict]) -> tuple[str, float, list[str]
 
 def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     """执行完整流水线，返回 Report。"""
+    # 规范化「有效配置」为单一来源：分析器读 ``ctx.config``，而 pipeline 门控 / 报告标注读 ``config``
+    # 参数——二者本应同一对象（load_app 传入同一 config），但程序化调用方可能传入不一致的两个，导致
+    # 分析器的主动探测门控（如 contacts getMe 读 ctx.config.mode）与报告标注的 mode 分叉，出现「报告
+    # 标 passive 但分析器按 authorized-active 主动探测」的错配。以 pipeline 的 config 为准对齐 ctx。
+    if getattr(ctx, "config", None) is not config:
+        try:
+            ctx.config = config  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 — 只读上下文兜底：无法对齐则不阻断，仅记 debug
+            logger.debug("无法规范化 ctx.config（只读上下文？）", exc_info=True)
+
     capabilities = detect_capabilities(online=config.online)
     # 平台能力：让 requires=["apk"] 的 Android 专属 analyzer 在 IPA 上自动 skipped、
     # requires=["ipa"] 的 iOS analyzer 在 APK 上 skipped（复用既有 requires 门控，pipeline 主体不变）。
