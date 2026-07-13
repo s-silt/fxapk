@@ -26,7 +26,7 @@ import pytest
 
 import apkscan.enrichers._ipinfo as ipinfo_mod
 import apkscan.enrichers.asn as asn_mod
-from apkscan.core import pipeline
+from apkscan.core import enrichment, pipeline
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
 from apkscan.enrichers.asn import AsnEnricher
@@ -169,7 +169,7 @@ def test_concurrent_matches_serial_field_for_field(
     boom = {"d2.fraud.cn"}
 
     def run_once(workers: int) -> tuple[list[Endpoint], list[dict]]:
-        monkeypatch.setattr(pipeline, "ENRICH_MAX_WORKERS", workers)
+        monkeypatch.setattr(enrichment, "ENRICH_MAX_WORKERS", workers)
         eps = _domains(8)
         icp = _DelayEnricher("icp", ["domain"], delay=0.001)
         flaky = _FlakyEnricher(boom)
@@ -206,7 +206,7 @@ def test_concurrency_speeds_up(monkeypatch: pytest.MonkeyPatch) -> None:
     n = 8
 
     def elapsed(workers: int) -> float:
-        monkeypatch.setattr(pipeline, "ENRICH_MAX_WORKERS", workers)
+        monkeypatch.setattr(enrichment, "ENRICH_MAX_WORKERS", workers)
         eps = _domains(n)
         dom = _DelayEnricher("icp", ["domain"], delay=delay)
         t0 = time.monotonic()
