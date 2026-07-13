@@ -64,6 +64,30 @@ def _tls_client_hello(sni: str) -> bytes:
     return record
 
 
+def _big_client_hello(sni: str, pad: int = 2000) -> bytes:
+    """跨段用大 ClientHello：SNI 之外塞一个 padding 扩展(0x0015)使 record 超 MSS、必然跨 TCP 段。"""
+    sni_b = sni.encode()
+    server_name = b"\x00" + struct.pack("!H", len(sni_b)) + sni_b
+    snl = struct.pack("!H", len(server_name)) + server_name
+    sni_ext = struct.pack("!HH", 0x0000, len(snl)) + snl
+    pad_ext = struct.pack("!HH", 0x0015, pad) + b"\x00" * pad  # TLS padding 扩展
+    exts = sni_ext + pad_ext
+    body = (
+        b"\x03\x03" + b"\x00" * 32 + b"\x00"
+        + struct.pack("!H", 2) + b"\x13\x01"
+        + b"\x01\x00"
+        + struct.pack("!H", len(exts)) + exts
+    )
+    handshake = b"\x01" + struct.pack("!I", len(body))[1:] + body
+    return b"\x16\x03\x01" + struct.pack("!H", len(handshake)) + handshake
+
+
+def _tcp_seq(payload: bytes, sport: int, dport: int, seq: int, flags: int = 0x18) -> bytes:
+    """带真实 seq 的 TCP 段（现有 _tcp/_tcp_flags 硬编码 seq=0，跨段重组用例必须带序列号）。"""
+    hdr = struct.pack("!HHIIBBHHH", sport, dport, seq, 0, (5 << 4), flags, 65535, 0, 0)
+    return hdr + payload
+
+
 def _dns_query(qname: str) -> bytes:
     q = b"".join(struct.pack("!B", len(p)) + p.encode() for p in qname.split(".")) + b"\x00"
     header = struct.pack("!HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)
@@ -449,3 +473,179 @@ def test_to_runtime_endpoints_from_pcap() -> None:
     assert not any(
         e.value.startswith(("192.168.", "127.", "10.")) for e in eps if e.kind == "ip"
     )
+
+
+# --- ClientHello 跨段重组（P0 PCAP-first）------------------------------------
+
+
+def _split_ch_pcap(segments: list[tuple[int, bytes]], src="10.0.0.2", dst="203.0.113.9",
+                   sport=50000, dport=443) -> bytes:
+    """把 (seq, payload) 段列表按同一五元组封成 pcap（跨段 ClientHello 重组用）。"""
+    frames = [
+        _eth(_ipv4(_tcp_seq(payload, sport, dport, seq), 6, src, dst), 0x0800)
+        for seq, payload in segments
+    ]
+    return _pcap(frames)
+
+
+def _flow_sni_ja3(summary, ip="203.0.113.9"):  # type: ignore[no-untyped-def]
+    f = next(fl for fl in summary.flows if fl.dst_ip == ip)
+    return f.sni, f.ja3
+
+
+def test_client_hello_split_two_segments() -> None:
+    """核心：现代大 ClientHello 跨 2 个 TCP 段（Chrome/Cronet PQ key_share 超 MSS）→ 重组后 SNI/JA3 不丢，
+    且 JA3 与对完整 record 直接解析所得**一致**（正确性，而非仅存在）。"""
+    rec = _big_client_hello("split.evil-c2.com")
+    seg1, seg2 = rec[:1400], rec[1400:]
+    summary = pcap_ingest.parse_pcap_bytes(_split_ch_pcap([(1000, seg1), (1000 + len(seg1), seg2)]))
+    sni, ja3 = _flow_sni_ja3(summary)
+    exp_sni, exp_ja3 = pcap_ingest._parse_client_hello(rec)
+    assert "split.evil-c2.com" in sni and exp_sni in sni
+    assert ja3 == {exp_ja3}  # 重组后 JA3 == 完整 record 的 JA3
+
+
+def test_split_hello_retransmission_and_overlap() -> None:
+    """锚段重传（幂等）+ 尾段 100B 重叠（first-writer-wins）→ 仍正确解出。"""
+    rec = _big_client_hello("retx.evil-c2.com")
+    seg1, seg2 = rec[:1400], rec[1300:]  # seg2 与 seg1 重叠 100B
+    summary = pcap_ingest.parse_pcap_bytes(
+        _split_ch_pcap([(1000, seg1), (1000, seg1), (1000 + 1300, seg2)])  # seg1 重传一次
+    )
+    sni, _ja3 = _flow_sni_ja3(summary)
+    assert "retx.evil-c2.com" in sni
+
+
+def test_split_hello_gap_salvages_sni_but_no_wrong_ja3() -> None:
+    """★关键回归：缺中段（gap 永不闭合）→ SNI 靠 salvage 从锚段 best-effort 捞回（与旧 best-effort
+    一致，SNI 在靠前的锚段内），但 **JA3 弃掉**——绝不产出截断算错的 JA3。parse_pcap_bytes 不崩。"""
+    rec = _big_client_hello("gap.evil-c2.com")
+    seg1, seg3 = rec[:1000], rec[2000:]  # 缺 [1000:2000]
+    summary = pcap_ingest.parse_pcap_bytes(
+        _split_ch_pcap([(1000, seg1), (1000 + 2000, seg3)])
+    )
+    sni, ja3 = _flow_sni_ja3(summary)
+    assert "gap.evil-c2.com" in sni  # SNI 捞回（高价值、与旧行为一致）
+    assert not ja3  # 但 JA3 弃：绝不产出截断算错的 JA3（关键回归保护）
+
+
+def test_four_tuple_reuse_syn_resets_stitch() -> None:
+    """★复审 #1/#5：四元组复用——连接 A 留下不完整 stitch，连接 B（纯 SYN 后）完整单段 CH 仍解出，
+    不被旧 stitch 引流丢弃（守住"不破坏现有单段行为"）。"""
+    incomplete = _big_client_hello("stale-A.com")[:1200]  # 连接 A：锚段但永不闭合
+    fresh = _big_client_hello("reused-B.com")             # 连接 B：完整单段 CH
+    seg_a = _eth(_ipv4(_tcp_seq(incomplete, 50000, 443, 1000), 6, "10.0.0.2", "203.0.113.9"), 0x0800)
+    syn_b = _eth(_ipv4(_tcp_seq(b"", 50000, 443, 900000000, flags=0x02), 6, "10.0.0.2", "203.0.113.9"), 0x0800)
+    ch_b = _eth(_ipv4(_tcp_seq(fresh, 50000, 443, 900000001), 6, "10.0.0.2", "203.0.113.9"), 0x0800)
+    summary = pcap_ingest.parse_pcap_bytes(_pcap([seg_a, syn_b, ch_b]))
+    sni, _ = _flow_sni_ja3(summary)
+    assert "reused-B.com" in sni  # 复用元组上新连接的完整单段 CH 未被旧 stitch 吞掉
+
+
+def test_snaplen_truncation_salvages_sni() -> None:
+    """★复审 #2：snaplen 截断（record 头声明的长度 > 实捕字节，永不凑齐）→ 仍从缓冲 best-effort 捞回
+    SNI（旧代码本能捞出，是本模块目标场景），JA3 弃。"""
+    rec = _big_client_hello("snaplen.evil-c2.com")
+    # 只喂一个"看似跨段"的锚段（rec_len 声明大、实捕仅 600B、无续段）——模拟 tcpdump -s 截断
+    truncated = rec[:600]
+    summary = pcap_ingest.parse_pcap_bytes(_split_ch_pcap([(1000, truncated)]))
+    sni, ja3 = _flow_sni_ja3(summary)
+    assert "snaplen.evil-c2.com" in sni and not ja3
+
+
+def test_empty_segment_does_not_block_ooo() -> None:
+    """★复审 #6：空载荷段（纯 ACK）不得以 first-writer-wins 占住未来偏移、挡掉随后到达的真数据。"""
+    asm = pcap_ingest._HelloReassembler()
+    key = ("10.0.0.2", 50000, "1.2.3.4", 443)
+    rec = _big_client_hello("empty-seg.com")
+    seg1, seg2 = rec[:1400], rec[1400:]
+    asm.feed(key, 1000, seg1, len(seg1))               # 锚段
+    asm.feed(key, 1000 + 1400, b"", 100)               # 空段落在续段偏移 → 不得占坑
+    r = asm.feed(key, 1000 + 1400, seg2, len(seg1) + len(seg2))  # 真续段补上 → 应完成
+    assert r is not None and r[0] == "empty-seg.com"
+
+
+def test_single_packet_big_hello_fast_path_identical() -> None:
+    """完整大 CH 落单段 → 走快路径，SNI/JA3 与直接解析完整 record 一致（现有行为不变）。"""
+    rec = _big_client_hello("single.evil-c2.com")
+    summary = pcap_ingest.parse_pcap_bytes(_split_ch_pcap([(1000, rec)]))
+    sni, ja3 = _flow_sni_ja3(summary)
+    exp_sni, exp_ja3 = pcap_ingest._parse_client_hello(rec)
+    assert exp_sni in sni and ja3 == {exp_ja3}
+
+
+def test_ipv6_split_hello() -> None:
+    """IPv6 链路上跨段 ClientHello 同样重组（方向键含 IPv6 文本地址）。"""
+    rec = _big_client_hello("v6.evil-c2.com")
+    seg1, seg2 = rec[:1400], rec[1400:]
+    frames = [
+        _eth(_ipv6(_tcp_seq(seg1, 40000, 443, 5000), 6, "2409:8a00::1", "2606:4700::1111"), 0x86DD),
+        _eth(_ipv6(_tcp_seq(seg2, 40000, 443, 5000 + len(seg1)), 6, "2409:8a00::1", "2606:4700::1111"), 0x86DD),
+    ]
+    summary = pcap_ingest.parse_pcap_bytes(_pcap(frames))
+    f = next(fl for fl in summary.flows if fl.dst_ip == "2606:4700::1111")
+    assert "v6.evil-c2.com" in f.sni
+
+
+def test_seq_wraparound_split() -> None:
+    """seq 32 位回绕处劈段 → 相对偏移 mod 2^32 仍正确，SNI 解出。"""
+    rec = _big_client_hello("wrap.evil-c2.com")
+    seg1, seg2 = rec[:1400], rec[1400:]
+    base = (0xFFFFFFFF - 200) & 0xFFFFFFFF  # 锚段后即回绕
+    summary = pcap_ingest.parse_pcap_bytes(
+        _split_ch_pcap([(base, seg1), ((base + len(seg1)) & 0xFFFFFFFF, seg2)])
+    )
+    sni, _ = _flow_sni_ja3(summary)
+    assert "wrap.evil-c2.com" in sni
+
+
+def _incomplete_anchor(rec_len: int = 2000) -> bytes:
+    """声称 rec_len 但只给约 16 字节的 client_hello 锚段（跨段、永不闭合）。"""
+    return b"\x16\x03\x01" + struct.pack("!H", rec_len) + b"\x01" + b"\x00" * 12
+
+
+def test_reassembler_conn_flood_bounded() -> None:
+    """白盒：10000 个不同方向键的不完整锚段 → pending≤512、done≤4096，不崩不 OOM。"""
+    asm = pcap_ingest._HelloReassembler()
+    anchor = _incomplete_anchor()
+    for i in range(10000):
+        key = (f"10.0.{i // 256}.{i % 256}", 50000, "1.2.3.4", 443)
+        asm.feed(key, 1000, anchor, len(anchor))
+    assert len(asm.pending) <= pcap_ingest._MAX_PENDING
+    assert len(asm.done) <= pcap_ingest._MAX_DONE
+
+
+def test_huge_rec_len_rejected() -> None:
+    """白盒：锚段声称 rec_len=0xFFFF(>16384) → 拒锚、不建 pending。"""
+    asm = pcap_ingest._HelloReassembler()
+    key = ("10.0.0.2", 50000, "1.2.3.4", 443)
+    assert asm.feed(key, 1000, _incomplete_anchor(0xFFFF), 100) is None
+    assert key not in asm.pending
+
+
+def test_chunk_flood_bounded_and_killed() -> None:
+    """白盒：单连接喂大量乱序小碎段 → 上限触发判死记 done，不崩不 OOM。"""
+    asm = pcap_ingest._HelloReassembler()
+    key = ("10.0.0.2", 50000, "1.2.3.4", 443)
+    asm.feed(key, 1000, _incomplete_anchor(), len(_incomplete_anchor()))  # 先锚
+    for i in range(500):  # 大量喂段 → pkts 上限判死
+        asm.feed(key, 1000 + 5000 + i * 7, b"\x00" * 3, 100)
+    assert key in asm.done and key not in asm.pending
+
+
+def test_server_flight_not_buffered() -> None:
+    """白盒：0x16 但 handshake type=0x02(ServerHello) 跨段 → 锚门拒，pending 不建（大证书链不占内存）。"""
+    asm = pcap_ingest._HelloReassembler()
+    key = ("1.2.3.4", 443, "10.0.0.2", 50000)
+    server = b"\x16\x03\x03" + struct.pack("!H", 3000) + b"\x02" + b"\x00" * 12  # type=2
+    assert asm.feed(key, 1000, server, len(server)) is None
+    assert key not in asm.pending
+
+
+def test_midstream_ciphertext_not_anchored() -> None:
+    """白盒：某方向累计载荷已 >64KiB 后才现 0x16 段 → 锚窗判定为长流密文伪锚，不建 stitch。"""
+    asm = pcap_ingest._HelloReassembler()
+    key = ("10.0.0.2", 50000, "1.2.3.4", 443)
+    fake = _incomplete_anchor()
+    assert asm.feed(key, 1000, fake, 70 * 1024) is None  # flow_payload_bytes 远超 64KiB 锚窗
+    assert key not in asm.pending
