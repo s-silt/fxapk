@@ -22,6 +22,9 @@ from apkscan.core import exposure, forensic, infra
 from apkscan.core.models import (
     ANALYSIS_MODE_AUTHORIZED_ACTIVE,
     ANALYSIS_MODE_PASSIVE,
+    ANALYSIS_STATUS_COMPLETE,
+    ANALYSIS_STATUS_FAILED,
+    ANALYSIS_STATUS_PARTIAL,
     AnalysisConfig,
     Confidence,
     Endpoint,
@@ -35,6 +38,7 @@ from apkscan.core.registry import (
     detect_capabilities,
     discover_analyzers,
     discover_enrichers,
+    ruleset_digest,
 )
 
 if TYPE_CHECKING:
@@ -48,6 +52,47 @@ logger = logging.getLogger(__name__)
 #: 默认 8 个 worker。每个端点由单一 worker 串行跑其匹配的全部富化器，故同一 ep.enrichment
 #: 无并发写竞争；只有跨端点共享的 provider 统计需加锁聚合。
 ENRICH_MAX_WORKERS = 8
+
+
+#: **关键**分析器：其失败即报告核心不可信（身份 + 网络调证线索）。--strict 据此非零退出。
+#: 保守取最小集——manifest（包名/权限/SDK/加固）与 endpoints（域名/IP 调证线索的核心提取）；
+#: 其余是特性分析器，失败只降级、不使整份报告无效。按需增删。
+_CRITICAL_ANALYZERS: frozenset[str] = frozenset({"manifest", "endpoints"})
+
+
+def _tool_version() -> str:
+    """当前 fxapk 版本（写进 report.meta，供审计 / 可复现）。取不到 → "unknown"（不抛）。"""
+    try:
+        from apkscan import __version__
+
+        return __version__
+    except Exception:  # noqa: BLE001 — 版本读取绝不得影响主流程
+        logger.debug("读取 __version__ 失败", exc_info=True)
+        return "unknown"
+
+
+def _analysis_health(analyzer_status: list[dict]) -> tuple[str, float, list[str], list[str]]:
+    """据 analyzer_status 聚合分析完整度，返回 (status, completeness, critical_failures, skipped)。
+
+    - completeness = 成功跑完 ÷ (成功 + 报错)（能力/平台跳过的**不计入分母**——环境门控非故障，
+      否则装了越多可选工具分母越大、completeness 越低，误导）。无任何可跑分析器 → 1.0。
+    - status：无报错=complete；有报错但仍有成功=partial；有报错且零成功=failed。
+    - critical_failures：报错分析器 ∩ _CRITICAL_ANALYZERS。
+    - skipped：被跳过的分析器名（仅信息性）。
+    """
+    errored = [s.get("name", "") for s in analyzer_status if s.get("status") == "error"]
+    ran = [s.get("name", "") for s in analyzer_status if s.get("status") == "ran"]
+    skipped = [s.get("name", "") for s in analyzer_status if s.get("status") == "skipped"]
+    eligible = len(ran) + len(errored)
+    completeness = 1.0 if eligible == 0 else round(len(ran) / eligible, 4)
+    if not errored:
+        status = ANALYSIS_STATUS_COMPLETE
+    elif ran:
+        status = ANALYSIS_STATUS_PARTIAL
+    else:
+        status = ANALYSIS_STATUS_FAILED
+    critical = sorted(n for n in errored if n in _CRITICAL_ANALYZERS)
+    return status, completeness, critical, skipped
 
 
 def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
@@ -197,7 +242,12 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     if config.online:
         meta["overseas_targets"] = _build_overseas_targets(endpoints)
 
-    # 5) 组装 Report
+    # 5) 结果可信度地基：据 analyzer_status 聚合完整度 + 记录工具版本 / 规则摘要（可复现锚点）。
+    status, completeness, critical_failures, skipped_analyzers = _analysis_health(analyzer_status)
+    meta["tool_version"] = _tool_version()
+    meta["ruleset_digest"] = ruleset_digest()
+
+    # 6) 组装 Report
     report = Report(
         package_name=ctx.package_name,
         meta=meta,
@@ -206,6 +256,10 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
         findings=findings,
         analyzer_status=analyzer_status,
         enricher_status=enricher_status,
+        analysis_status=status,
+        completeness=completeness,
+        critical_failures=critical_failures,
+        skipped_analyzers=skipped_analyzers,
     )
 
     # 6) App 类型聚合分类（在所有分析器跑完 + build_endpoint_leads 之后调用一次）。
