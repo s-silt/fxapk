@@ -19,12 +19,52 @@ from __future__ import annotations
 import hashlib
 import logging
 import platform
+import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 # 1 MiB 流式分块（与 dynamic/ledger.py 的 apk_sha256 同一范式）：大 APK 不一次性读进内存。
 _READ_CHUNK = 1 << 20
+
+#: git 溯源进程内缓存（一次运行不变，避免每份报告都 fork git）。
+_BUILD_PROVENANCE: dict | None = None
+
+
+def _build_provenance() -> dict:
+    """本次构建的 git 溯源：``{build_commit, build_dirty}``。装成 pip 包 / 无 git / 非源码树 → build_commit=None。绝不抛。
+
+    ★取证复现（外部复审）：master 的 ``tool_version``（如 0.10.0.dev0）区分不了具体 commit——同版本号可能对应
+    不同代码。附 commit SHA + 工作树是否 dirty，才能锁定"哪一版代码产的这份报告"。结果进程内缓存。
+    """
+    global _BUILD_PROVENANCE
+    if _BUILD_PROVENANCE is not None:
+        return _BUILD_PROVENANCE
+    commit: str | None = None
+    dirty: bool | None = None
+    repo = Path(__file__).resolve().parents[2]  # apkscan/core/integrity.py → 仓库根
+    try:
+        # ★复审 #2：encoding="utf-8"/errors="replace"——git status 含 UTF-8 文件名时 text=True 默认按 locale
+        #   解码，ASCII locale 下会抛 UnicodeDecodeError（不在 OSError/SubprocessError 内）。整段兜底 Exception。
+        rev = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5, check=False,
+        )
+        if rev.returncode == 0 and rev.stdout.strip():
+            commit = rev.stdout.strip()
+            st = subprocess.run(
+                ["git", "-C", str(repo), "status", "--porcelain"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5, check=False,
+            )
+            dirty = bool(st.stdout.strip()) if st.returncode == 0 else None
+    except Exception:  # noqa: BLE001 — 绝不抛：git/解码/任何异常 → build_commit=None
+        logger.debug("[integrity] git 溯源不可得（非源码树 / 无 git / 异常）→ build_commit=None", exc_info=True)
+    result = {"build_commit": commit, "build_dirty": dirty}
+    # ★复审 #1：只缓存成功探测；失败态（commit=None）不缓存 → 下次重探（git 临时不可用后恢复仍能取到）。
+    if commit is not None:
+        _BUILD_PROVENANCE = result
+    return result
 
 
 def sample_fingerprint(apk_path: str, *, tool_version: str) -> dict:
@@ -70,6 +110,8 @@ def sample_fingerprint(apk_path: str, *, tool_version: str) -> dict:
         "analyzed_at": analyzed_at,
         "tool_version": tool_version,
         "platform": plat,
+        # ★取证复现：tool_version 之外再钉 git commit + 工作树 dirty（源码树运行时；pip 包 → None）。
+        **_build_provenance(),
     }
 
 

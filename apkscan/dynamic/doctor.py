@@ -55,6 +55,10 @@ _NAME_HOST_FRIDA = "主机 frida 版本"
 _NAME_FRIDA_SERVER = "设备 frida-server 运行且版本匹配"
 _NAME_MITMPROXY = "mitmproxy 已安装"
 _NAME_CA = "CA 已信任"
+# PCAP-first 深度能力（信息性、非关键——不进 _CRITICAL、不影响整体 ok）。
+_NAME_QUIC_META = "QUIC 元数据解析"
+_NAME_QUIC_DECRYPT = "QUIC Initial 解密（cryptography）"
+_NAME_TSHARK = "tshark 深度后端"
 
 # 关键项：任一不 ok → 整体 ok=False。设备/ABI/frida/mitmproxy/CA 是抓包脱壳命门；
 # root 单列为非关键（部分形态可不 root 抓 HTTP），但 CA / frida-server 多依赖它，
@@ -449,6 +453,44 @@ def run(
         }
 
 
+def _check_pcap_capabilities() -> list[dict]:
+    """PCAP-first 深度能力可用性（信息性、非关键）——让用户知道『pcap 里没抓到 SNI』是样本没发，还是本机
+    缺依赖导致解不出（★外部复审：不要静默降级，否则易把"缺依赖"误读为"样本无此流量"）。
+
+    - QUIC 元数据解析：纯 stdlib，恒可用。
+    - QUIC Initial 解密：需 cryptography（androguard 已传递引入，但缺失时降级为仅元数据 → 缺 SNI/ALPN）。
+    - tshark 深度后端：PATH 有 tshark 才能抽明文 HTTP + 用 keylog 解密 TLS。
+    均非关键项（不进 _CRITICAL、不影响整体 ok），仅报告可用状态。
+    """
+    import shutil
+
+    items: list[dict] = [
+        _item(_NAME_QUIC_META, True, "可用（纯 stdlib：QUIC 长包头 / 版本 / DCID / SCID 解析）"),
+    ]
+    # ★复审 #3：查**实际用到的 AEAD 子模块**是否可用（复用 QUIC 解密同一探测），而非只 import 顶层
+    #   cryptography——部分损坏安装/后端加载失败时顶层能 import 但 aead 子模块不可用、会误报可用。
+    from apkscan.dynamic import pcap_ingest
+
+    if pcap_ingest._quic_crypto_available():
+        items.append(_item(_NAME_QUIC_DECRYPT, True, "可用（cryptography AEAD 就绪 → QUIC Initial 解密恢复 SNI/ALPN）"))
+    else:
+        items.append(
+            _item(
+                _NAME_QUIC_DECRYPT, False,
+                "不可用：cryptography AEAD 子模块不可用 → QUIC 仅解析元数据（无 SNI/ALPN）；"
+                "`pip install fxapk[pcap]` 启用解密",
+                ["pip install fxapk[pcap]"],
+            )
+        )
+    if shutil.which("tshark"):
+        items.append(_item(_NAME_TSHARK, True, "可用（tshark 在 PATH → 明文 HTTP 抽取 + TLS Key Log 解密）"))
+    else:
+        items.append(
+            _item(_NAME_TSHARK, False, "不可用：PATH 无 tshark（可选深度后端；装 Wireshark/tshark 启用明文 HTTP/解密）")
+        )
+    return items
+
+
 def _run_impl(
     *,
     serial: str | None,
@@ -481,6 +523,7 @@ def _run_impl(
 
     _emit(on_progress, "检查 CA 信任")
     items.append(_check_ca(serial, auto_fix=auto_fix, on_progress=on_progress))
+    items.extend(_check_pcap_capabilities())  # PCAP 深度能力可用性（信息性、非关键）
 
     ok = all(it["ok"] for it in items if it["name"] in _CRITICAL)
     return {"ok": ok, "items": items}
