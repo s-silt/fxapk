@@ -14,6 +14,7 @@ _EXPECTED_STAGES = [
     "analyze",
     "degradation_flags",
     "enrich",
+    "attribution",
     "build_leads",
     "overseas_targets",
     "credibility",

@@ -501,4 +501,66 @@ def attribution_from_enrichment(enrichment: dict[str, Any], ip: str = "") -> dic
     headers = wc.get("response_headers") or wc.get("headers")
     if isinstance(headers, dict):
         signals["response_headers"] = headers
+    # ★有效信号判据（不塞空壳）：子键非空但字段全 None（如 {"asn":{"asn":None}}）时，至少要有一个可解析
+    # ASN / 国家 / CNAME / 响应头，否则五层全 unknown 无归因价值 → 返回 None。
+    asn_num, _ = _parse_asn(signals["asn"].get("asn"))
+    if not (asn_num is not None or _s(signals.get("country"))
+            or signals.get("cname_chain") or signals.get("response_headers")):
+        return None
     return build_ip_attribution(ip, signals)
+
+
+def build_endpoint_attribution(kind: str, value: str, enrichment: dict[str, Any]) -> dict[str, Any] | None:
+    """端点级归因入口（pipeline 用）：把一个端点的 enrichment 映射成 **per-IP** 五层归因。无信号 → None。绝不抛。
+
+    ★不塌缩：域名常解析到多个 IP、各自 ASN/edge 可能不同，故按 IP 逐个产五层（``ips`` 列表），不合并成一份。
+    - IP 端点：``enrichment['asn']``（AsnEnricher applies_to=['ip']）→ 单条五层。
+    - 域名端点：``enrichment['dns']['hosting']``（每解析 IP 一条 {ip,asn,org,isp}）→ 每 IP 一条五层；
+      ``dns['cname']`` 是**域名级共享** edge 信号，喂给每个 IP 的 edge 层。hosting 缺时退化用 ``dns['ips']``
+      （ASN 未知，但 CNAME 仍可识别 edge）。
+    ★resource_holder 恒 unknown（asn 走 ip-api ISP、rdap 是域名注册方，均非 IP 资源登记方；待 IP-RDAP 富化器）。
+    """
+    if not isinstance(enrichment, dict):
+        return None
+    kind_s = _s(kind)
+    ips: list[dict[str, Any]] = []
+
+    if kind_s == "ip":
+        att = attribution_from_enrichment(enrichment, ip=str(value or ""))
+        if att is not None:
+            ips.append(att)
+    elif kind_s == "domain":
+        dns_e = enrichment.get("dns")
+        dns_e = dns_e if isinstance(dns_e, dict) else {}
+        cname_raw = dns_e.get("cname")
+        cname = cname_raw if isinstance(cname_raw, list) else None
+        # hosting 建 ip→info 映射（每 IP 的 asn/org/isp）。★hosting **常少于** ips——部分 IP 的托管查询限速/失败
+        # 被跳过（见 DnsEnricher._hosting），但 IP 仍留在 dns.ips。故不能只遍历 hosting，否则丢失只在 ips 里的 IP
+        # （per-IP 塌缩）。_as_list 兜坏容器（非 list 归空，绝不抛、不逐字符迭代成垃圾）。
+        host_by_ip: dict[str, dict[str, Any]] = {}
+        for h in _as_list(dns_e.get("hosting")):
+            if isinstance(h, dict):
+                hk = _s(h.get("ip"))
+                if hk:
+                    host_by_ip.setdefault(hk, h)
+        # 主列表 = dns.ips ∪ hosting 里的 IP（去重保序）——每个解析到的 IP 都产一条五层，一个不丢。
+        ordered: list[str] = []
+        seen_ip: set[str] = set()
+        for ip in list(_as_list(dns_e.get("ips"))) + list(host_by_ip):
+            k = _s(ip)
+            if k and k not in seen_ip:
+                seen_ip.add(k)
+                ordered.append(k)
+        for ip in ordered:
+            h = host_by_ip.get(ip, {})
+            signals: dict[str, Any] = {
+                "country": h.get("country"),
+                "asn": {"asn": h.get("asn"), "org": h.get("org") or h.get("isp")},
+            }
+            if cname:
+                signals["cname_chain"] = cname
+            ips.append(build_ip_attribution(ip, signals))
+
+    if not ips:
+        return None
+    return {"endpoint": str(value or ""), "kind": kind_s or "unknown", "ips": ips}
