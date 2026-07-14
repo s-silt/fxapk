@@ -11,6 +11,7 @@ capture 侧后续工作；本层只做「解析 + 关联」这一离线可测的
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import socket
@@ -162,6 +163,71 @@ def parse_uid_sockets(text: str) -> UidSockets:
             ss_lines.append(s)
     for s in ss_lines:  # /proc 索引已就绪，回填进程名/pid
         _apply_ss_line(s, res)
+    return res
+
+
+def _split_ip_port(value: object) -> tuple[str, int] | None:
+    """拆 JSONL 的 ``ip:port`` / ``[ipv6]:port``。坏值返回 None。"""
+    if not isinstance(value, str) or ":" not in value:
+        return None
+    ip, _, port_text = value.rpartition(":")
+    ip = ip.strip().strip("[]")
+    if not ip:
+        return None
+    try:
+        port = int(port_text)
+    except ValueError:
+        return None
+    if not 0 <= port <= 65535:
+        return None
+    return ip, port
+
+
+def parse_socket_timeline(text: str) -> UidSockets:
+    """解析周期采样的 ``socket_timeline.jsonl``，合并全部时刻的 socket 观测。绝不抛。
+
+    首行通常是 ``{type, package, target_uid}`` 元数据；其后每行是一条
+    ``{ts, proto, uid, local, remote, state}`` 观测。坏 JSON 或坏字段逐行跳过。
+    """
+    res = UidSockets()
+    if not isinstance(text, str):
+        return res
+    for line in text.splitlines():
+        try:
+            obj = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if obj.get("type") == "meta":
+            package = obj.get("package")
+            target_uid = obj.get("target_uid")
+            if isinstance(package, str) and package:
+                res.package = package
+            if isinstance(target_uid, int) and not isinstance(target_uid, bool):
+                res.target_uid = target_uid
+            continue
+
+        local = _split_ip_port(obj.get("local"))
+        remote = _split_ip_port(obj.get("remote"))
+        uid = obj.get("uid")
+        if local is None or remote is None or not isinstance(uid, int) or isinstance(uid, bool):
+            continue
+        process = obj.get("process")
+        pid = obj.get("pid")
+        entry = SocketEntry(
+            proto=str(obj.get("proto") or "tcp"),
+            local_ip=local[0],
+            local_port=local[1],
+            remote_ip=remote[0],
+            remote_port=remote[1],
+            state=str(obj.get("state") or ""),
+            uid=uid,
+            process=process if isinstance(process, str) else None,
+            pid=pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
+        )
+        res.entries.append(entry)
+        res.by_remote.setdefault((entry.remote_ip, entry.remote_port), []).append(entry)
     return res
 
 
