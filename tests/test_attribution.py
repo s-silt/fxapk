@@ -22,6 +22,7 @@ _RULES = {
             "signals": {
                 "http": {"headers": [{"name": "cf-ray", "weight": 6}]},
                 "dns": {"cname_suffix": [{"value": ".cloudflare.net", "weight": 8}]},
+                "tls": {"spki_sha256": [{"value": "deadbeef", "weight": 4}]},  # 中信号（非强），供负证据测试
                 "network": {"asns": [{"value": 13335, "weight": 2}]},
             },
         },
@@ -86,9 +87,83 @@ def test_edge_weak_only_below_threshold_returns_none() -> None:
 
 
 def test_edge_negative_public_cloud_only_dampens() -> None:
-    """只公共云 ASN 类别、无强信号 → public_cloud_only 负证据触发（防"租了公有云"当代理坐实）。"""
-    # 无任何正信号 → 直接 None
-    assert A.score_edge_provider({"origin_category": A.CAT_CLOUD}, rules=_RULES) is None
+    """★负证据真扣分：中信号命中达 possible，叠加"公共云 only 无强信号"→ 扣 2 → 跌破阈值 → None。"""
+    # 仅命中 TLS 中信号（weight 4，非强）→ 4 ≥ possible(3) → possible。
+    hit = A.score_edge_provider({"tls_spki": "deadbeef"}, rules=_RULES)
+    assert hit is not None and hit["tier"] == "possible" and hit["score"] == 4.0
+    # 叠加 origin 在公共云类别且无强信号 → public_cloud_only 扣 2 → 2 < possible(3) → 被抑制为 None。
+    damp = A.score_edge_provider({"tls_spki": "deadbeef", "origin_category": A.CAT_CLOUD}, rules=_RULES)
+    assert damp is None
+    # 反向对照：非公共云类别 → 负证据不触发 → 仍 possible（证明确是负证据而非别的原因把它压没）。
+    keep = A.score_edge_provider({"tls_spki": "deadbeef", "origin_category": A.CAT_TELECOM}, rules=_RULES)
+    assert keep is not None and keep["tier"] == "possible"
+
+
+def test_edge_negative_x_cache_and_nginx_only_dampen() -> None:
+    """x_cache_only / nginx_only 两类通用中间件负证据也真扣分。"""
+    base = {"tls_spki": "deadbeef"}
+    assert A.score_edge_provider({**base, "x_cache_only": True}, rules=_RULES) is None   # 4-2=2 → None
+    assert A.score_edge_provider({**base, "server_nginx_only": True}, rules=_RULES) is None  # 4-3=1 → None
+
+
+def test_edge_forged_suffix_not_confirmed() -> None:
+    """★P0：伪造域名把品牌根塞进**中间**（x.cloudflare.net.attacker.example）不得命中——标签边界匹配。"""
+    forged = A.score_edge_provider(
+        {"response_headers": {"CF-RAY": "forged"}, "cname_chain": ["x.cloudflare.net.attacker.example"]}, rules=_RULES)
+    # CNAME 不命中 → 只剩单 header 强信号 → 最多 probable，绝不 confirmed。
+    assert forged is not None and forged["tier"] == "probable"
+    assert not any(m.startswith("cname") for m in forged["matched_signals"])
+    # 真·子域仍 confirmed（header + cname = 2 强信号）。
+    genuine = A.score_edge_provider(
+        {"response_headers": {"CF-RAY": "ok"}, "cname_chain": ["edge.cloudflare.net"]}, rules=_RULES)
+    assert genuine is not None and genuine["tier"] == "confirmed"
+
+
+def test_origin_network_rejects_malformed_asn() -> None:
+    """★P0：畸形 ASN（负号/小数/前缀垃圾/越界）不得抠出数字冒充高置信 BGP 归属 → 一律 unknown。"""
+    for bad in ["-123 Tencent", "1.5 Tencent", "garbage123 Tencent", "AS4294967296 Tencent", "AS0", ""]:
+        o = A._origin_network({"asn": bad})
+        assert o["asn"] is None and o["confidence"] == A.CONF_UNKNOWN, f"bad asn {bad!r} 未被拒"
+        assert o["source"] is None
+    # 合法形式仍解析且带 source。
+    ok = A._origin_network({"asn": "AS45090", "org": "Tencent"})
+    assert ok["asn"] == 45090 and ok["confidence"] == A.CONF_HIGH and ok["source"] == "BGP/ASN"
+
+
+def test_never_raises_on_bad_input() -> None:
+    """★核心 invariant「绝不抛」：各类坏输入（None/错类型/畸形规则）都返回结构或 None，绝不异常。"""
+    assert A.score_edge_provider(None) is None                       # observed=None
+    assert A.score_edge_provider({}, rules=[]) is None               # rules 非 dict
+    assert A.score_edge_provider({}, rules={"edge_providers": "x"}) is None  # edges 非 list
+    # 列表字段被喂标量 → 不迭代崩溃。
+    for bad_field in ({"cname_chain": 123}, {"nameservers": 5}, {"cookies": "a=b"}, {"response_headers": [1, 2]}):
+        A.build_ip_attribution("1.2.3.4", bad_field)  # 不抛即通过
+    # 畸形 scoring/weights 不参与比较时崩溃。
+    r = A.score_edge_provider(
+        {"response_headers": {"cf-ray": "x"}, "cname_chain": ["a.cdn.cloudflare.net"]},
+        rules={"edge_providers": [{"id": "c", "name": "CF", "signals": {
+            "http": {"headers": [{"name": "cf-ray", "weight": 6}]},
+            "dns": {"cname_suffix": [{"value": ".cdn.cloudflare.net", "weight": 8}]}}}],
+            "scoring": {"probable": None, "confirmed": "x"}})
+    assert r is not None  # 阈值被 _num 清洗回默认，仍能定档
+
+
+def test_every_layer_has_source_field() -> None:
+    """★invariant：五层都带 source 键（未知即 None，已识别写明来源）。"""
+    att = A.build_ip_attribution("1.2.3.4", {"rdap": {"netname": "X"}, "asn": {"asn": "AS45090", "org": "Tencent"}})
+    for layer in ("resource_holder", "origin_network", "hosting_provider", "edge_provider", "service_operator"):
+        assert "source" in att[layer], f"{layer} 缺 source 键"
+    assert att["origin_network"]["source"] == "BGP/ASN"
+    assert att["hosting_provider"]["source"] == "origin_asn_category"
+
+
+def test_real_providers_yaml_confirmed_needs_two_signals() -> None:
+    """契约测试：用**真实 rules/providers.yaml**，Cloudflare 单头 probable、header+cname 才 confirmed。"""
+    one = A.score_edge_provider({"response_headers": {"CF-RAY": "abc"}})  # rules=None → 加载真实库
+    assert one is not None and one["tier"] == "probable"
+    two = A.score_edge_provider(
+        {"response_headers": {"CF-RAY": "abc"}, "cname_chain": ["e.cdn.cloudflare.net"]})
+    assert two is not None and two["tier"] == "confirmed" and two["name"] == "Cloudflare"
 
 
 def test_origin_network_parses_asn_string_forms() -> None:
@@ -131,3 +206,24 @@ def test_attribution_from_enrichment_edge_from_webcheck() -> None:
     assert att is not None
     assert att["origin_network"]["category"] == A.CAT_CDN
     assert att["edge_provider"].get("name") == "Cloudflare" and att["edge_provider"].get("tier") == "probable"
+
+
+def test_attribution_from_enrichment_reads_dns_cname() -> None:
+    """★P1-2：映射器须读 DnsEnricher 真实输出位置 enrichment['dns']['cname']（而非只看 webcheck）。
+
+    dns.cname（专属后缀，强信号）+ webcheck 响应头 CF-RAY（强信号）= 2 强信号 → confirmed。
+    """
+    att = A.attribution_from_enrichment({
+        "asn": {"asn": "AS13335", "org": "Cloudflare"},
+        "dns": {"cname": ["a.cdn.cloudflare.net"]},
+        "webcheck": {"response_headers": {"CF-RAY": "z"}},
+    })
+    assert att is not None
+    assert att["edge_provider"].get("name") == "Cloudflare"
+    assert att["edge_provider"].get("tier") == "confirmed"  # 若只读 webcheck、漏 dns.cname，则只会 probable
+
+
+def test_attribution_from_enrichment_none_on_dns_only_no_signal() -> None:
+    """只有 dns 但无 cname/asn 可用信号 → 仍返回结构（dns 子键存在即触发），edge 未识别。"""
+    att = A.attribution_from_enrichment({"dns": {"ips": ["1.2.3.4"]}})
+    assert att is not None and att["edge_provider"]["name"] is None

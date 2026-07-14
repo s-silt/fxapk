@@ -120,9 +120,13 @@ edge_providers:
           - {name: x-swift-cachetime, weight: 5}
           - {name: eagleid, weight: 5}
       dns:
+        # ★须为可注册后缀（引擎按标签边界匹配，'.kunlun' 这类半标签匹配不到 alikunlun.com）。
         cname_suffix:
           - {value: ".alikunlun.com", weight: 8}
-          - {value: ".kunlun", weight: 6}
+          - {value: ".kunlunca.com", weight: 8}
+          - {value: ".kunlunar.com", weight: 8}
+          - {value: ".kunlunaq.com", weight: 8}
+          - {value: ".kunlungr.com", weight: 8}
     provenance: {source: public_docs}
 
   - id: waf.jiasule
@@ -138,7 +142,8 @@ edge_providers:
           - {value: "jsluid", weight: 5}
     provenance: {source: awesome_waf}
 
-# 负证据默认在引擎内（public_cloud_only/x_cache_only/nginx_only）；此处按需给单个 provider 追加。
+# 负证据全局生效（无需 provider 配置）：引擎对最佳候选自动评估 public_cloud_only / x_cache_only / nginx_only
+# 三类公共基础设施特征并扣分（见 core/attribution._negative_adjustment）；可选 negative_weights 顶层块覆盖默认权重。
 scoring:
   confirmed: 10
   probable: 6

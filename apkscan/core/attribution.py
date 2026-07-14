@@ -55,15 +55,12 @@ _EDGE_WEIGHTS = {
     "asn": 1,                # 普通云厂商 ASN（最弱——大量共用）
     "geo": 0.5,
 }
-#: 负证据（公共基础设施特征——防止把"租了公有云/通用 nginx"当"代理商坐实"）。
+#: 负证据（公共基础设施特征——防止把"租了公有云/通用 nginx"当"代理商坐实"）。★仅列**已实现、会自动生效**的三类
+#: （见 _negative_adjustment，对最佳候选全局评估、不依赖 provider 配 negative_signals）；不声明未接线的能力。
 _EDGE_NEG_WEIGHTS = {
-    "public_cloud_only": -2,   # 只命中公共云 ASN
-    "x_cache_only": -2,        # 只命中通用 X-Cache（多家 CDN 共用）
-    "nginx_only": -3,          # 只命中 Server: nginx
-    "time_span_wide": -2,      # 证据时间跨度过大
-    "cname_changed_no_history": -2,
-    "generic_nginx_page": -2,
-    "shared_le_cert": -1,
+    "public_cloud_only": -2,   # 命中公共云/IDC 类别但无任何强信号（只是租户共用基础设施）
+    "x_cache_only": -2,        # 只命中通用 X-Cache（多家 CDN 共用，非专属）
+    "nginx_only": -3,          # 只命中 Server: nginx（通用中间件，无辨识力）
 }
 #: edge 判定阈值（rules 的 scoring 可覆盖）。confirmed 另要求 ≥2 独立强信号（见 _edge_tier）。
 _EDGE_THRESHOLDS = {"confirmed": 10, "probable": 6, "possible": 3}
@@ -124,6 +121,37 @@ def _s(value: Any) -> str:
         return ""
 
 
+def _as_list(value: Any) -> list[Any]:
+    """任意值 → list（list/tuple/set 原样成列，其余 → []）。防对整数/字符串等误迭代抛异常。"""
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+    return []
+
+
+def _num(value: Any, default: float) -> float:
+    """任意值 → float（bool/None/非数 → default）。用于清洗外部 weights/thresholds，防 None 参与比较抛异常。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    return float(value)
+
+
+def _host_hits_suffix(hosts: list[Any], suffix_val: str) -> bool:
+    """★标签边界匹配（防子串误判）：观测 host 命中规则后缀，当且仅当 host == 根 或 host 以 '.'+根 结尾。
+
+    ``suffix_val`` 形如 '.cdn.cloudflare.net'（前导点可有可无）；'x.cdn.cloudflare.net' 命中，
+    但伪造的 'x.cdn.cloudflare.net.attacker.example'（根出现在中间而非结尾）**不**命中。
+    """
+    root = _s(suffix_val).strip(".")
+    if not root:
+        return False
+    dotted = "." + root
+    for h in hosts:
+        host = _s(h).rstrip(".")
+        if host == root or host.endswith(dotted):
+            return True
+    return False
+
+
 def classify_network(org: str | None, asn: str | None = None) -> str:
     """按 org/ASN 名称关键字判网络类型（cloud/cdn/telecom/idc/security_proxy/...）。命不中 → unknown。绝不抛。"""
     blob = f"{_s(org)} {_s(asn)}"
@@ -142,8 +170,9 @@ def classify_network(org: str | None, asn: str | None = None) -> str:
 
 
 def _layer(**kw: Any) -> dict[str, Any]:
-    """构造一层（统一带 confidence，缺则 unknown）。"""
+    """构造一层（统一带 confidence + source，缺则 unknown/None）。★invariant：每层都有 source，未知即 None。"""
     kw.setdefault("confidence", CONF_UNKNOWN)
+    kw.setdefault("source", None)
     return kw
 
 
@@ -159,24 +188,46 @@ def _resource_holder(rdap: dict[str, Any] | None) -> dict[str, Any]:
     )
 
 
+#: 合法公开 ASN 范围（32-bit）。0 与 4294967295 为保留值，落域外/畸形一律判 unknown、不冒充 BGP 归属。
+_ASN_MIN, _ASN_MAX = 1, 4294967295
+
+
+def _parse_asn(raw: Any) -> tuple[int | None, str | None]:
+    """★严格解析 ASN：仅接受纯整数或**完整匹配** 'AS?<digits>[ <org>]' 的字符串，并校验 32-bit 范围。
+
+    返回 ``(asn_num, org_tail)``；畸形（'-123 x' / '1.5 x' / 'garbage123' / 越界）→ ``(None, None)``，
+    绝不用 re.search 从中间抠数字冒充高置信归属。
+    """
+    if isinstance(raw, bool) or raw is None:  # bool 是 int 子类，须排除
+        return None, None
+    if isinstance(raw, int):
+        n, org_tail = raw, None
+    else:
+        m = re.match(r"^\s*(?:AS)?(\d+)(?:\s+(.*))?$", str(raw), re.IGNORECASE)
+        if not m:
+            return None, None
+        n = int(m.group(1))
+        org_tail = (m.group(2) or "").strip() or None
+    if not (_ASN_MIN <= n <= _ASN_MAX):
+        return None, None
+    return n, org_tail
+
+
 def _origin_network(asn_info: dict[str, Any] | None) -> dict[str, Any]:
-    """第 2 层：BGP Origin ASN + 组织。``asn`` 形如 'AS12345 Some Org' 或 {asn, org}。"""
+    """第 2 层：BGP Origin ASN + 组织。``asn`` 形如 'AS12345 Some Org' / 12345 / {asn, org}。畸形 ASN → unknown。"""
     if not isinstance(asn_info, dict):
         return _layer(asn=None, organization=None, category=CAT_UNKNOWN)
     raw_as = asn_info.get("asn") or asn_info.get("as")
-    org = asn_info.get("org") or asn_info.get("organization") or asn_info.get("isp")
-    asn_num = None
-    if raw_as is not None:
-        m = re.search(r"(?:AS)?\s*(\d+)", str(raw_as), re.IGNORECASE)  # 'AS12345' / 'as12345' / 裸 '12345'
-        if m:
-            asn_num = int(m.group(1))
-        if not org:  # 'AS12345 Org Name' → 取号后的组织名
-            org = re.sub(r"^\s*(?:AS)?\s*\d+\s*", "", str(raw_as), flags=re.IGNORECASE).strip() or None
+    asn_num, org_tail = _parse_asn(raw_as)
+    org = asn_info.get("org") or asn_info.get("organization") or asn_info.get("isp") or org_tail
+    # ★仅在 ASN 解析成功时才把原始串喂给分类器——畸形串（如 '-123 Tencent'）不得反向驱动网络类别。
+    asn_hint = str(raw_as) if asn_num is not None else None
     return _layer(
         asn=asn_num,
         organization=str(org) if org else None,
-        category=classify_network(org, str(raw_as) if raw_as else None),
+        category=classify_network(org, asn_hint),
         confidence=CONF_HIGH if asn_num is not None else CONF_UNKNOWN,
+        source="BGP/ASN" if asn_num is not None else None,
     )
 
 
@@ -191,7 +242,8 @@ def _hosting_provider(origin: dict[str, Any], ptr: str | None) -> dict[str, Any]
         matched = ["origin_asn_category"]
         if ptr:
             matched.append("ptr")
-        return _layer(name=org, role=role, category=category, matched_signals=matched, confidence=CONF_MEDIUM)
+        return _layer(name=org, role=role, category=category, matched_signals=matched,
+                      confidence=CONF_MEDIUM, source="origin_asn_category")
     return _layer(name=None, role=None, category=category, matched_signals=[], confidence=CONF_UNKNOWN)
 
 
@@ -206,14 +258,23 @@ def score_edge_provider(observed: dict[str, Any], *, rules: dict[str, Any] | Non
     风格嵌套 schema：``signals.dns.{cname_suffix,ns_suffix}`` / ``signals.http.{headers,cookies,body_hashes,favicon}`` /
     ``signals.tls.{spki_sha256,ja4s}`` / ``signals.network.{asns,cidrs}`` + ``negative_signals[]`` + ``provenance{}``。
     """
-    rules = rules if rules is not None else _providers_rules()
+    observed = observed if isinstance(observed, dict) else {}   # ★绝不抛：坏 observed → 空信号
+    if rules is None:
+        rules = _providers_rules()
+    if not isinstance(rules, dict):                             # ★绝不抛：坏 rules → 未识别
+        return None
     edges = rules.get("edge_providers")
     if not isinstance(edges, list) or not edges:
         return None
     w_over = rules.get("weights")
     weights: dict[str, float] = {**_EDGE_WEIGHTS, **(w_over if isinstance(w_over, dict) else {})}
-    s_over = rules.get("scoring")
-    thresholds = {**_EDGE_THRESHOLDS, **(s_over if isinstance(s_over, dict) else {})}
+    # 清洗阈值/负权重：外部规则可能给 None/非数，逐键 _num 兜默认，防比较/相加时抛异常。
+    s_raw = rules.get("scoring")
+    s_over = s_raw if isinstance(s_raw, dict) else {}
+    thresholds = {k: _num(s_over.get(k), v) for k, v in _EDGE_THRESHOLDS.items()}
+    n_raw = rules.get("negative_weights")
+    n_over = n_raw if isinstance(n_raw, dict) else {}
+    neg_weights = {k: _num(n_over.get(k), v) for k, v in _EDGE_NEG_WEIGHTS.items()}
 
     best: dict[str, Any] | None = None
     for prov in edges:
@@ -230,10 +291,15 @@ def score_edge_provider(observed: dict[str, Any], *, rules: dict[str, Any] | Non
                 "category": prov.get("category") or CAT_SECURITY_PROXY,
                 "_score": score, "_strong": strong,
                 "matched_signals": matched, "weak_signals": weak,
+                "source": prov.get("id") or "edge_fingerprint",
                 "provenance": prov.get("provenance") if isinstance(prov.get("provenance"), dict) else None,
             }
     if best is None:
         return None
+    # ★负证据全局评估（不依赖 provider 配置）：命中公共云/IDC 却无强信号、或只有通用 X-Cache/nginx → 扣分抑制。
+    neg_adj, neg_fired = _negative_adjustment(observed, best["_strong"], neg_weights)
+    best["_score"] += neg_adj
+    best["weak_signals"] = list(best["weak_signals"]) + neg_fired
     tier = _edge_tier(best["_score"], len(best["_strong"]), thresholds)
     if tier is None:
         return None
@@ -242,6 +308,27 @@ def score_edge_provider(observed: dict[str, Any], *, rules: dict[str, Any] | Non
     best["score"] = round(best.pop("_score"), 1)
     best.pop("_strong", None)
     return best
+
+
+def _negative_adjustment(
+    observed: dict[str, Any], strong: set[str], neg_weights: dict[str, float]
+) -> tuple[float, list[str]]:
+    """全局负证据：对最佳候选评估三类公共基础设施特征，返回 (扣分, 触发标签)。绝不抛。
+
+    - public_cloud_only：origin 在云/CDN/IDC 类别却**无任何强信号**（只是共用租户，别当代理坐实）。
+    - x_cache_only / nginx_only：只命中多家共用的通用 X-Cache / Server:nginx（无专属辨识力）。
+    """
+    adj, fired = 0.0, []
+    if not strong and observed.get("origin_category") in _SHARED_INFRA_CATEGORIES:
+        adj += neg_weights["public_cloud_only"]
+        fired.append("neg:public_cloud_only")
+    if observed.get("x_cache_only"):
+        adj += neg_weights["x_cache_only"]
+        fired.append("neg:x_cache_only")
+    if observed.get("server_nginx_only"):
+        adj += neg_weights["nginx_only"]
+        fired.append("neg:nginx_only")
+    return adj, fired
 
 
 def _edge_tier(score: float, strong_count: int, thresholds: dict[str, float]) -> str | None:
@@ -290,15 +377,15 @@ def _score_one_edge(
 
     score_add = [score]  # 闭包可变累加器
 
-    # 强信号 —— DNS 专属 CNAME 后缀 / NS 后缀。
-    cname_blob = " ".join(_s(c) for c in (obs.get("cname_chain") or []))
+    # 强信号 —— DNS 专属 CNAME 后缀 / NS 后缀。★标签边界匹配（_host_hits_suffix）防伪造域名把根塞进中间蒙混。
+    cname_hosts = _as_list(obs.get("cname_chain"))
     for val, w, _e in _entries(sig, "dns", "cname_suffix"):
-        if val and val in cname_blob:
+        if val and _host_hits_suffix(cname_hosts, val):
             _add("cname_suffix", "cname_suffix", f"cname_suffix:{val}", w, strong_kind=True)
             break
-    ns_blob = " ".join(_s(n) for n in (obs.get("nameservers") or []))
+    ns_hosts = _as_list(obs.get("nameservers"))
     for val, w, _e in _entries(sig, "dns", "ns_suffix"):
-        if val and val in ns_blob:
+        if val and _host_hits_suffix(ns_hosts, val):
             _add("nameserver", "nameserver", f"nameserver:{val}", w, strong_kind=True)
             break
     # 强信号 —— HTTP 响应头（可带 regex）/ Cookie / body 哈希 / favicon mmh3。
@@ -314,7 +401,7 @@ def _score_one_edge(
                 continue
             _add("response_header", "response_header", f"response_header:{val}", w, strong_kind=True)
     # 观测 cookie 归一到**名**（剥 =value / 属性），与规则的 cookie 名精确比。
-    obs_cookies = {_s(c).split("=", 1)[0].strip() for c in (obs.get("cookies") or [])}
+    obs_cookies = {_s(c).split("=", 1)[0].strip() for c in _as_list(obs.get("cookies"))}
     for val, w, _e in _entries(sig, "http", "cookies"):
         if val and val in obs_cookies:
             _add("cookie", "cookie", f"cookie:{val}", w, strong_kind=True)
@@ -345,20 +432,7 @@ def _score_one_edge(
             except (ValueError, TypeError):
                 continue
 
-    # 负证据（防"租了公有云/通用 nginx"当代理坐实）。
-    for neg in prov.get("negative_signals") or []:
-        if not isinstance(neg, dict):
-            continue
-        ntype = _s(neg.get("type"))
-        fired = (
-            (ntype == "public_cloud_only" and obs.get("origin_category") in _SHARED_INFRA_CATEGORIES and not strong)
-            or (ntype == "x_cache_only" and obs.get("x_cache_only"))
-            or (ntype == "nginx_only" and obs.get("server_nginx_only"))
-        )
-        if fired:
-            nw = neg.get("weight")
-            score_add[0] += float(nw) if isinstance(nw, (int, float)) else _EDGE_NEG_WEIGHTS.get(ntype, 0)
-            weak.append(f"neg:{ntype}")
+    # 负证据不在此处按 provider 评估——统一在 score_edge_provider 对最佳候选全局评估（见 _negative_adjustment）。
     return score_add[0], strong, matched, weak
 
 
@@ -389,26 +463,31 @@ def build_ip_attribution(ip: str, signals: dict[str, Any]) -> dict[str, Any]:
 def attribution_from_enrichment(enrichment: dict[str, Any], ip: str = "") -> dict[str, Any] | None:
     """把端点既有扁平 ``enrichment``（asn/webcheck 等子键）映射到五层归因。无可用 IP 归属信号 → None。绝不抛。
 
-    映射（诚实、不塞满）：``asn`` 子键 {asn,org,isp,country} → origin_network + hosting_provider；
-    ``webcheck`` 子键的响应头/CNAME → edge_provider。★resource_holder 暂留 unknown——现有 asn 走 ip-api（ISP，
-    非 RDAP 登记方），不冒充权威登记方；接入 IP RDAP 富化器后再填（slice-1b）。origin/hosting 已比扁平"org"精确。
+    映射（诚实、按各富化器**真实 schema**）：``asn`` 子键 {asn,org,isp,country} → origin_network + hosting_provider；
+    ``dns`` 子键的 ``cname``（DnsEnricher 实际输出位置）→ edge 的 CNAME 强信号；``webcheck`` 若含扁平 response_headers
+    则一并喂 edge（PCAP-first 下响应头主要来自被动抓包，webcheck 按检查名嵌套、无扁平头时自然跳过）。
+    ★resource_holder 暂留 unknown——现有 rdap 富化器 applies_to=['domain']（域名注册方，非 IP 资源持有方），
+    asn 走 ip-api（ISP 非 RDAP 登记方）；两者都不冒充 IP 资源登记方，接入 IP RDAP 富化器后再填（slice-1b）。
     """
     if not isinstance(enrichment, dict):
         return None
     asn_e = enrichment.get("asn")
     asn_e = asn_e if isinstance(asn_e, dict) else {}
+    dns_e = enrichment.get("dns")
+    dns_e = dns_e if isinstance(dns_e, dict) else {}
     wc = enrichment.get("webcheck")
     wc = wc if isinstance(wc, dict) else {}
-    if not asn_e and not wc:
+    if not asn_e and not dns_e and not wc:
         return None
     signals: dict[str, Any] = {
         "country": asn_e.get("country"),
         "asn": {"asn": asn_e.get("asn"), "org": asn_e.get("org") or asn_e.get("isp")},
     }
+    # DnsEnricher 把 CNAME 链写在 enrichment['dns']['cname']（去了末点，便于后缀匹配）——edge 最可靠的强信号。
+    cname = dns_e.get("cname") or wc.get("cname") or wc.get("cnames") or wc.get("cname_chain")
+    if isinstance(cname, list):
+        signals["cname_chain"] = cname
     headers = wc.get("response_headers") or wc.get("headers")
     if isinstance(headers, dict):
         signals["response_headers"] = headers
-    cname = wc.get("cname") or wc.get("cnames") or wc.get("cname_chain")
-    if isinstance(cname, list):
-        signals["cname_chain"] = cname
     return build_ip_attribution(ip, signals)
