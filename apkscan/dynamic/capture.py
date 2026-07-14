@@ -202,6 +202,9 @@ def run(
         return empty_result(STATUS_ERROR, f"mode 取值非法：{mode!r}（可选 {'/'.join(sorted(_CAPTURE_MODES))}）")
     use_mitm = mode not in ("floor-only", "no-proxy")
     use_floor = mode != "mitm-only"
+    # ★floor-only=纯带外 pcap（反 frida/加固场景）→ 不需要也不注入 frida；其余模式靠 frida 做 SSL unpinning +
+    #   运行时 hook。据此条件化前置：floor-only 只要 adb+设备+tcpdump 就能跑，不因缺 frida 被判缺前置而跳过。
+    use_frida = mode != "floor-only"
 
     # 防御：包名源自样本 manifest（不可信）。畸形包名直接拒绝，不下发到 frida/adb。
     if not device.is_valid_package(package):
@@ -217,7 +220,7 @@ def run(
         return result
 
     # --- 前置能力探测：缺任一 → skipped + 手册（floor-only 不要求 mitmproxy）------
-    missing = _detect_missing(serial, require_mitm=use_mitm)
+    missing = _detect_missing(serial, require_mitm=use_mitm, require_frida=use_frida)
     if missing:
         reason = "缺少前置条件：" + "、".join(missing)
         logger.info("[capture] %s；返回手册（playbook）", reason)
@@ -233,7 +236,8 @@ def run(
         decision.floor_first, decision.frida_retreat_threshold, decision.total_budget_sec,
     )
     return _capture(
-        package, out_path, duration, serial, decision=decision, mitm=use_mitm, floor=use_floor
+        package, out_path, duration, serial, decision=decision, mitm=use_mitm, floor=use_floor,
+        frida=use_frida,
     )
 
 
@@ -242,13 +246,16 @@ def run(
 # ---------------------------------------------------------------------------
 
 
-def _detect_missing(serial: str | None = None, require_mitm: bool = True) -> list[str]:
+def _detect_missing(
+    serial: str | None = None, require_mitm: bool = True, require_frida: bool = True
+) -> list[str]:
     """返回缺失的前置条件名列表（空 = 全部就绪）。
 
     顺序：设备 / frida / mitmproxy。每项探测均走 device 模块（不抛）。
     serial 非空时 frida-server 运行探测钉定那台（多设备消歧）；None 退回旧行为。
-    ★#8：``require_mitm=False``（floor-only 模式）时不把 mitmproxy 计入缺失——floor-only 只带外
-    抓包、不需要 mitmproxy/代理，缺它不该拦下抓包。
+    ★#8：``require_mitm=False``（floor-only/no-proxy）时不把 mitmproxy 计入缺失。
+    ★floor-only：``require_frida=False`` 时不把 frida / 设备 frida-server 计入缺失——floor-only 是纯带外
+    tcpdump（反 frida/加固场景），只要 adb+设备+tcpdump 就能跑，不该因缺 frida 被判缺前置而整体跳过。
     """
     missing: list[str] = []
     try:
@@ -259,11 +266,12 @@ def _detect_missing(serial: str | None = None, require_mitm: bool = True) -> lis
         missing.append("在线 adb 设备")
 
     try:
-        if not device.has_frida():
+        if require_frida and not device.has_frida():
             missing.append("frida")
     except Exception:
         logger.exception("[capture] frida 探测异常，视为缺失")
-        missing.append("frida")
+        if require_frida:
+            missing.append("frida")
 
     try:
         if require_mitm and not device.has_mitmproxy():
@@ -274,13 +282,14 @@ def _detect_missing(serial: str | None = None, require_mitm: bool = True) -> lis
             missing.append("mitmproxy")
 
     # 设备上 frida-server 是否在跑（与 unpack 口径一致）：host 有 frida CLI 但设备
-    # frida-server 没起来时，注入会失败、抓包绕不过证书绑定，应提前判为缺失。
-    try:
-        if device.has_device() and not device.frida_server_running(serial):
+    # frida-server 没起来时，注入会失败、抓包绕不过证书绑定，应提前判为缺失。floor-only 不注入 frida → 不查。
+    if require_frida:
+        try:
+            if device.has_device() and not device.frida_server_running(serial):
+                missing.append("设备上运行中的 frida-server")
+        except Exception:
+            logger.exception("[capture] frida-server 运行状态探测异常")
             missing.append("设备上运行中的 frida-server")
-    except Exception:
-        logger.exception("[capture] frida-server 运行状态探测异常")
-        missing.append("设备上运行中的 frida-server")
 
     return missing
 
@@ -327,6 +336,7 @@ def _capture(
     decision: CaptureDecision | None = None,
     mitm: bool = True,
     floor: bool = True,
+    frida: bool = True,
 ) -> DynamicResult:
     """编排 mitmdump + adb 代理 + frida unpinning + 启 app，到时停并解析流量。
 
@@ -465,9 +475,11 @@ def _capture(
         #    ② 秒退熔断：会话建立后做 liveness（resume 后进程是否秒退）；秒退累计达
         #    decision.frida_retreat_threshold 即弃 frida、退 floor（不死磕明文）。
         # TODO(real-device): 需真机验证后方可依赖——liveness/秒退计数只有真机才有真实副作用。
+        if not frida:  # ★floor-only：纯带外 pcap，不注入 frida（契合反 frida/加固场景、不触发样本自检）。
+            playbook.append("floor-only 模式：跳过 frida 注入（仅带外 pcap，不触发反 frida 检测）")
         retreat_count = 0
         retreated = False  # 达秒退阈值主动退 floor（区别于 frida-core 本就不可用→仍试 subprocess）
-        while True:
+        while frida:  # floor-only（frida=False）跳过整段注入；其余模式等价 while True（靠内部 break 退出）
             frida_session, frida_script = _start_frida_session(
                 package,
                 crypto_events,
@@ -523,10 +535,11 @@ def _capture(
         # 退 floor 后不回退 subprocess frida——但**仅当 floor 真起来了**(floor_handle 非 None)。
         # floor 是桩 / 设备侧不可用时(handle=None)并没真退成 floor,subprocess frida 仍是唯一的
         # unpinning 兜底,不能连它一起丢,否则 pinned HTTPS 只剩密文(codex review 复核 P2)。
-        if frida_session is None and not (retreated and floor_handle is not None):
+        if frida and frida_session is None and not (retreated and floor_handle is not None):
             frida_proc = _start_frida_unpinning(package, out_path, serial)
-        if frida_session is None and frida_proc is None:
+        if frida and frida_session is None and frida_proc is None:
             # 未起 frida（缺 frida / 写脚本失败 / 秒退熔断退 floor）→ 无 unpinning，HTTPS 可能仅密文。
+            # ★floor-only（frida=False）本就不注入 frida、不该刷此告警——已由上方"跳过 frida 注入"说明覆盖。
             warn = "frida 未启动（缺 frida / 脚本写出失败 / 秒退退 floor），无 SSL unpinning，HTTPS 可能仅密文"
             logger.warning("[capture] %s", warn)
             playbook.append(warn)
