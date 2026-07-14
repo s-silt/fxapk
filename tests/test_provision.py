@@ -27,6 +27,21 @@ from apkscan.core import device, tools
 from apkscan.dynamic import provision
 
 
+@pytest.fixture(autouse=True)
+def _default_strict_frida_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """旧部署单测各自覆盖启动状态；默认把新增的严格验收隔离为通过。"""
+    monkeypatch.setattr(
+        device,
+        "frida_server_probe",
+        lambda serial=None, expected_version="": device.FridaServerProbe(
+            ok=True,
+            detail="root + version + attach ok",
+            pid=1234,
+            version=expected_version,
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # 测试替身
 # ---------------------------------------------------------------------------
@@ -909,6 +924,36 @@ def test_ensure_frida_server_restarts_non_root_as_root(
     assert res["ok"] is True
     assert res["action"] == "restarted_as_root"
     assert started  # 确实调了重启
+
+
+def test_ensure_frida_server_does_not_accept_enumeration_only_false_positive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """旧 BUG1：能枚举/磁盘版本存在，但没有可附加 root server 时必须自愈，不能 already_running。"""
+    monkeypatch.setattr(provision.device, "frida_server_running", lambda serial=None: True)
+    monkeypatch.setattr(provision.device, "frida_server_is_root", lambda serial=None: True)
+    probes = iter(
+        [
+            provision.device.FridaServerProbe(ok=False, detail="没有部署路径对应进程"),
+            provision.device.FridaServerProbe(
+                ok=True, detail="root + attach ok", pid=4321, version="17.15.3"
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        provision.device,
+        "frida_server_probe",
+        lambda serial=None, expected_version="": next(probes),
+    )
+    monkeypatch.setattr(provision, "_frida_binary_present", lambda serial=None: True)
+    monkeypatch.setattr(provision, "_start_frida_server_background", lambda serial=None: True)
+    monkeypatch.setattr(provision, "host_frida_version", lambda: "17.15.3")
+    monkeypatch.setattr(provision.time, "sleep", lambda *_a: None)
+
+    res = provision.ensure_frida_server()
+
+    assert res["ok"] is True
+    assert res["action"] == "restarted_as_root"
 
 
 def test_ensure_frida_server_running_not_root_reports_honestly(

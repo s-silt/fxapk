@@ -48,6 +48,16 @@ def _all_present(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(device, "has_device", lambda: True)
     monkeypatch.setattr(device, "has_mitmproxy", lambda: True)
     monkeypatch.setattr(device, "frida_server_running", lambda serial=None: True)
+    monkeypatch.setattr(
+        device,
+        "frida_server_probe",
+        lambda serial=None, expected_version="": device.FridaServerProbe(
+            ok=True,
+            detail="frida-server root 进程与附加验收通过",
+            pid=1234,
+            version=expected_version,
+        ),
+    )
     # adb 可用：_check_device 改用 tools.has_adb（取代旧 shutil.which mock）。
     monkeypatch.setattr(doctor.tools, "has_adb", lambda: True)
     monkeypatch.setattr(provision, "device_abi", lambda serial=None: "arm64-v8a")
@@ -205,7 +215,13 @@ def test_run_mitmproxy_missing_item_fail(monkeypatch):
 
 def test_run_frida_server_not_running_autofix_calls_ensure_frida_server(monkeypatch):
     _all_present(monkeypatch)
-    monkeypatch.setattr(device, "frida_server_running", lambda serial=None: False)
+    monkeypatch.setattr(
+        device,
+        "frida_server_probe",
+        lambda serial=None, expected_version="": device.FridaServerProbe(
+            ok=False, detail="设备 frida-server 未运行"
+        ),
+    )
     called: dict[str, Any] = {}
 
     def _ensure(serial=None, *, download=True, on_progress=None):
@@ -231,7 +247,13 @@ def test_run_frida_server_not_running_autofix_calls_ensure_frida_server(monkeypa
 
 def test_run_frida_server_autofix_failure_folded(monkeypatch):
     _all_present(monkeypatch)
-    monkeypatch.setattr(device, "frida_server_running", lambda serial=None: False)
+    monkeypatch.setattr(
+        device,
+        "frida_server_probe",
+        lambda serial=None, expected_version="": device.FridaServerProbe(
+            ok=False, detail="设备 frida-server 未运行"
+        ),
+    )
 
     def _ensure(serial=None, *, download=True, on_progress=None):
         return {
@@ -254,9 +276,16 @@ def test_run_frida_server_autofix_failure_folded(monkeypatch):
 
 def test_run_frida_version_mismatch_flagged(monkeypatch):
     _all_present(monkeypatch)
-    monkeypatch.setattr(device, "frida_server_running", lambda serial=None: True)
-    # 设备端 16.0.0 ≠ 主机 16.5.9，auto_fix=False → 仅标记不匹配。
-    monkeypatch.setattr(doctor, "_device_frida_version", lambda serial=None: "16.0.0")
+    monkeypatch.setattr(
+        device,
+        "frida_server_probe",
+        lambda serial=None, expected_version="": device.FridaServerProbe(
+            ok=False,
+            detail=f"运行中 frida-server 版本 16.0.0 与主机 {expected_version} 不一致",
+            pid=1234,
+            version="16.0.0",
+        ),
+    )
     res = doctor.run(auto_fix=False)
     item = _item_by_name(res, doctor._NAME_FRIDA_SERVER)
     assert item["ok"] is False
@@ -266,8 +295,16 @@ def test_run_frida_version_mismatch_flagged(monkeypatch):
 
 def test_run_frida_version_mismatch_autofix_redeploys(monkeypatch):
     _all_present(monkeypatch)
-    monkeypatch.setattr(device, "frida_server_running", lambda serial=None: True)
-    monkeypatch.setattr(doctor, "_device_frida_version", lambda serial=None: "16.0.0")
+    monkeypatch.setattr(
+        device,
+        "frida_server_probe",
+        lambda serial=None, expected_version="": device.FridaServerProbe(
+            ok=False,
+            detail=f"运行中 frida-server 版本 16.0.0 与主机 {expected_version} 不一致",
+            pid=1234,
+            version="16.0.0",
+        ),
+    )
     called: dict[str, bool] = {}
 
     def _ensure(serial=None, *, download=True, on_progress=None):
@@ -610,18 +647,30 @@ def test_module_has_no_forbidden_calls():
 
 
 def test_no_fix_uses_frida_ps_when_ps_heuristic_misses(monkeypatch):
-    """ps 进程名启发式漏判，但 frida-ps -U 能连 → --no-fix 仍报在跑（不误报未运行）。"""
-    monkeypatch.setattr(doctor.device, "frida_server_running", lambda serial=None: False)
-    monkeypatch.setattr(doctor, "_frida_ps_reachable", lambda serial=None: True)
-    monkeypatch.setattr(doctor, "_device_frida_version", lambda serial=None: "")
+    """仅 frida-ps 可枚举不够；没有 root 部署进程/attach 验收必须失败。"""
+    monkeypatch.setattr(
+        doctor.device,
+        "frida_server_probe",
+        lambda serial=None, expected_version="": device.FridaServerProbe(
+            ok=False,
+            detail="未找到 /data/local/tmp/frida-server 对应运行进程",
+        ),
+    )
     item = doctor._check_frida_server(None, "17.11.0", auto_fix=False, on_progress=None)
-    assert item["ok"] is True
+    assert item["ok"] is False
+    assert "进程" in item["detail"]
 
 
 def test_no_fix_reports_not_running_when_truly_down(monkeypatch):
-    """ps 与 frida-ps 都探测不到 → --no-fix 如实报未运行。"""
-    monkeypatch.setattr(doctor.device, "frida_server_running", lambda serial=None: False)
-    monkeypatch.setattr(doctor, "_frida_ps_reachable", lambda serial=None: False)
+    """严格探针失败 → --no-fix 如实报动态注入未就绪。"""
+    monkeypatch.setattr(
+        doctor.device,
+        "frida_server_probe",
+        lambda serial=None, expected_version="": device.FridaServerProbe(
+            ok=False,
+            detail="设备 frida-server 未运行",
+        ),
+    )
     item = doctor._check_frida_server(None, "17.11.0", auto_fix=False, on_progress=None)
     assert item["ok"] is False
     assert "未运行" in item["detail"]
