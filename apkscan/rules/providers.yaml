@@ -1,0 +1,150 @@
+# providers.yaml —— IP/域名基础设施归属规则（供 core/attribution.py）。
+#
+# 两部分：
+#   network_categories —— ASN org 关键字 → 网络类型（telecom/cloud/idc/cdn/security_proxy/...），供 layer2/3。
+#   edge_providers     —— CDN/WAF/防红代理的 FingerprintHub 风格多信号指纹，供 layer4（score_edge_provider）。
+#
+# ★纪律（用户要求）：单一 ASN/CIDR/响应头**不足以 confirmed**（引擎要求 ≥2 个不同强信号 + 分数达阈值；
+#   header 可被配置/删除/伪造）。名称落不实时聚成 unknown_cluster（后续 corpus slice）。此文件是**公开库风格
+#   底库**（cloud/cdn/waf，可从 cdncheck/Awesome-WAF 扩充）；fxapk 自有的 verified/suspected 防红指纹应另放
+#   providers/investigative/（后续 slice：需多文件加载器 + provenance/人工确认）。
+
+network_categories:
+  cloud:
+    org_keywords:
+      - tencent
+      - qcloud
+      - 腾讯
+      - alibaba
+      - aliyun
+      - 阿里
+      - 阿里云
+      - huawei cloud
+      - huaweicloud
+      - 华为云
+      - volcengine
+      - 火山引擎
+      - ucloud
+      - 优刻得
+      - amazon
+      - aws
+      - google cloud
+      - microsoft azure
+      - azure
+      - baidu
+      - 百度智能云
+      - kingsoft cloud
+      - 金山云
+  cdn:
+    org_keywords:
+      - cloudflare
+      - akamai
+      - fastly
+      - cloudfront
+      - edgeone
+      - stackpath
+      - bunnycdn
+      - keycdn
+  telecom:
+    org_keywords:
+      - chinanet
+      - china telecom
+      - 中国电信
+      - chinatelecom
+      - china unicom
+      - 中国联通
+      - cnc group
+      - china mobile
+      - 中国移动
+      - cmcc
+  idc:
+    org_keywords:
+      - idc
+      - data center
+      - datacenter
+      - 机房
+      - hosting
+  security_proxy:
+    org_keywords:
+      - 加速乐
+      - jiasule
+      - yunaq
+      - 知道创宇
+      - yundun
+      - 云盾
+
+# edge_providers：多信号加权识别。role: reverse_proxy/cdn/waf/anti_blocking_fronting。
+# signals 嵌套：dns.{cname_suffix,ns_suffix} / http.{headers,cookies,body_hashes,favicon.mmh3} /
+#   tls.{spki_sha256,ja4s} / network.{asns,cidrs}。每条可带 weight（覆盖默认）。
+edge_providers:
+  - id: cdn.cloudflare
+    name: Cloudflare
+    category: cdn
+    role: reverse_proxy
+    signals:
+      http:
+        headers:
+          - {name: cf-ray, weight: 6}         # 官方定义的请求标识
+          - {name: server, regex: "^cloudflare$", weight: 5}
+      dns:
+        cname_suffix:
+          - {value: ".cdn.cloudflare.net", weight: 8}
+      network:
+        asns:
+          - {value: 13335, weight: 2}
+    provenance: {source: public_docs, note: "CF-Ray 为官方标识；单头不判 confirmed"}
+
+  - id: cdn.tencent_edgeone
+    name: 腾讯 EdgeOne
+    category: cdn
+    role: reverse_proxy
+    signals:
+      http:
+        headers:
+          # 源站未提供 Server 时 EdgeOne 可能补 Server: TencentEdgeOne（可被源站配置改/删 → 需配合其它强信号）。
+          - {name: server, regex: "tencentedgeone", weight: 6}
+      dns:
+        cname_suffix:
+          - {value: ".eo.dnse.com", weight: 8}
+    provenance: {source: public_docs, note: "EdgeOne 官方支持增删改响应头，单 Server 头不足以 confirmed"}
+
+  - id: cdn.aliyun
+    name: 阿里云 CDN/DCDN
+    category: cdn
+    role: reverse_proxy
+    signals:
+      http:
+        headers:
+          # X-Cache / X-Swift-CacheTime 为阿里云 CDN 常见缓存字段——但 X-Cache 非独占（多家 CDN 共用），
+          # 故仅给中等权重、且靠 x_cache_only 负证据兜底防误判。
+          - {name: x-swift-cachetime, weight: 5}
+          - {name: eagleid, weight: 5}
+      dns:
+        # ★须为可注册后缀（引擎按标签边界匹配，'.kunlun' 这类半标签匹配不到 alikunlun.com）。
+        cname_suffix:
+          - {value: ".alikunlun.com", weight: 8}
+          - {value: ".kunlunca.com", weight: 8}
+          - {value: ".kunlunar.com", weight: 8}
+          - {value: ".kunlunaq.com", weight: 8}
+          - {value: ".kunlungr.com", weight: 8}
+    provenance: {source: public_docs}
+
+  - id: waf.jiasule
+    name: 加速乐（知道创宇）
+    category: security_proxy
+    role: waf
+    signals:
+      http:
+        headers:
+          - {name: server, regex: "jsl|jiasule", weight: 6}
+        cookies:
+          - {value: "__jsluid", weight: 5}
+          - {value: "jsluid", weight: 5}
+    provenance: {source: awesome_waf}
+
+# 负证据全局生效（无需 provider 配置）：引擎对最佳候选自动评估 public_cloud_only / x_cache_only / nginx_only
+# 三类公共基础设施特征并扣分（见 core/attribution._negative_adjustment）；可选 negative_weights 顶层块覆盖默认权重。
+scoring:
+  confirmed: 10
+  probable: 6
+  possible: 3
