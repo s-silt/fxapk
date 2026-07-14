@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -118,6 +119,22 @@ def _stub_orchestration(
     monkeypatch.setattr(capture, "_adb_set_proxy", lambda serial=None: (calls["adb"].append("proxy") or True))
     monkeypatch.setattr(capture, "_adb_clear_proxy", lambda serial=None: calls["adb"].append("clear_proxy"))
     monkeypatch.setattr(capture, "_adb_remove_reverse", lambda serial=None: calls["adb"].append("remove_reverse"))
+    # 设备在线时也必须保持单测零副作用；专项 floor / UID / timeline 用例会各自覆写。
+    monkeypatch.setattr(capture, "_start_floor_pcap", lambda *args, **kwargs: None)
+    monkeypatch.setattr(capture, "_stop_floor_pcap", lambda *args, **kwargs: None)
+    monkeypatch.setattr(capture, "_capture_uid_socket_snapshot", lambda *args, **kwargs: None)
+
+    class _NoopSocketSampler:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            return None
+
+    monkeypatch.setattr(capture, "_SocketSampler", _NoopSocketSampler)
 
     # 加固新调用：默认 CA 成功、版本匹配，无告警（避免污染既有用例的 reason 断言）。
     def _fake_ensure_ca(*args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -394,6 +411,44 @@ def test_capture_uid_socket_snapshot_writes_artifact(monkeypatch, tmp_path):
     assert capture._capture_uid_socket_snapshot("com.x", tmp_path) is None
 
 
+def test_socket_sampler_accumulates_short_lived_target_connections(monkeypatch, tmp_path):
+    """周期采样应保留首帧短连接，并过滤同机其它 UID 的 socket。"""
+    sample = {"round": 0}
+
+    def proc_line(remote_hex: str, remote_port: str, uid: int, inode: int) -> str:
+        return (
+            f" 0: 0F02000A:A852 {remote_hex}:{remote_port} 01 "
+            f"00000000:00000000 00:00000000 00000000 {uid} 0 {inode}\n"
+        )
+
+    def fake_capture(extra, serial=None):
+        procfs = extra[-1]
+        if procfs == "/proc/net/tcp":
+            if sample["round"] == 0:
+                return proc_line("04030201", "01BB", 10234, 1) + proc_line(
+                    "08080808", "0035", 1000, 2
+                )
+            return proc_line("09090909", "20FB", 10234, 3)
+        if procfs == "/proc/net/tcp6":
+            return ""
+        return None
+
+    monkeypatch.setattr(capture, "_app_uid", lambda package, serial=None: "10234")
+    monkeypatch.setattr(capture, "_adb_capture", fake_capture)
+    sampler = capture._SocketSampler("com.x", tmp_path, interval=0.25, max_observations=10)
+
+    sampler._sample_once()
+    sample["round"] = 1
+    sampler._sample_once()
+    timeline = sampler.stop()
+
+    assert timeline is not None and timeline.name == "socket_timeline.jsonl"
+    rows = [json.loads(line) for line in timeline.read_text(encoding="utf-8").splitlines()]
+    assert rows[0] == {"type": "meta", "package": "com.x", "target_uid": 10234}
+    assert {row["remote"] for row in rows[1:]} == {"1.2.3.4:443", "9.9.9.9:8443"}
+    assert all(row["uid"] == 10234 for row in rows[1:])
+
+
 def test_capture_run_includes_uid_snapshot_artifact(monkeypatch, tmp_path):
     """★ P1(#10)：capture.run 把抓包窗口末的 UID socket 快照并进 artifacts。"""
     _set_capabilities(monkeypatch)
@@ -408,6 +463,117 @@ def test_capture_run_includes_uid_snapshot_artifact(monkeypatch, tmp_path):
     )
     result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
     assert str(snap) in result["artifacts"]
+
+
+def test_capture_prefers_socket_timeline_for_pcap_attribution(monkeypatch, tmp_path):
+    """时间线存在时用其补短连接，不被窗口末旧快照替换。"""
+    _set_capabilities(monkeypatch)
+    calls = _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+
+    floor = tmp_path / "floor.pcap"
+    floor.write_bytes(b"pcap")
+    monkeypatch.setattr(capture, "_start_floor_pcap", lambda *a, **k: object())
+    monkeypatch.setattr(capture, "_stop_floor_pcap", lambda *a, **k: floor)
+    monkeypatch.setattr(capture.pcap_ingest, "parse_pcap", lambda path: object())
+    monkeypatch.setattr(capture.pcap_ingest, "to_runtime_endpoints", lambda summary: [])
+    monkeypatch.setattr(
+        capture.pcap_ingest,
+        "remote_endpoints",
+        lambda summary: [
+            SimpleNamespace(ip="1.2.3.4", port=443),
+            SimpleNamespace(ip="9.9.9.9", port=443),
+        ],
+    )
+
+    snapshot = tmp_path / "uid_sockets.txt"
+    snapshot.write_text(
+        "# package=com.test.app uid=10234\n## /proc/net/tcp\n"
+        " 0: 0F02000A:A852 09090909:01BB 01 0:0 0:0 0 10234 0 1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(capture, "_capture_uid_socket_snapshot", lambda *a, **k: snapshot)
+
+    timeline = tmp_path / "socket_timeline.jsonl"
+    timeline.write_text(
+        '{"type":"meta","package":"com.test.app","target_uid":10234}\n'
+        '{"ts":1,"proto":"tcp","uid":10234,"local":"10.0.2.15:43090",'
+        '"remote":"1.2.3.4:443","state":"established"}\n',
+        encoding="utf-8",
+    )
+    sampler_events: list[str] = []
+
+    class FakeSampler:
+        def __init__(self, *args, **kwargs):
+            sampler_events.append("init")
+
+        def start(self):
+            sampler_events.append("start")
+
+        def stop(self):
+            sampler_events.append("stop")
+            return timeline
+
+    monkeypatch.setattr(capture, "_SocketSampler", FakeSampler)
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+    report = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    attribution = report["capture_signals"]["pcap_app_attribution"]
+
+    assert sampler_events == ["init", "start", "stop"]
+    assert calls["waited"] is True
+    assert str(timeline) in result["artifacts"]
+    assert attribution["1.2.3.4:443"]["is_target_app"] is True
+    assert "9.9.9.9:443" not in attribution
+
+
+def test_capture_socket_attribution_falls_back_to_final_snapshot(monkeypatch, tmp_path):
+    """时间线没有有效产物时，旧 uid_sockets.txt 归因路径保持可用。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+
+    floor = tmp_path / "floor.pcap"
+    floor.write_bytes(b"pcap")
+    monkeypatch.setattr(capture, "_start_floor_pcap", lambda *a, **k: object())
+    monkeypatch.setattr(capture, "_stop_floor_pcap", lambda *a, **k: floor)
+    monkeypatch.setattr(capture.pcap_ingest, "parse_pcap", lambda path: object())
+    monkeypatch.setattr(capture.pcap_ingest, "to_runtime_endpoints", lambda summary: [])
+    monkeypatch.setattr(
+        capture.pcap_ingest,
+        "remote_endpoints",
+        lambda summary: [SimpleNamespace(ip="9.9.9.9", port=443)],
+    )
+    snapshot = tmp_path / "uid_sockets.txt"
+    snapshot.write_text(
+        "# package=com.test.app uid=10234\n## /proc/net/tcp\n"
+        " 0: 0F02000A:A852 09090909:01BB 01 0:0 0:0 0 10234 0 1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(capture, "_capture_uid_socket_snapshot", lambda *a, **k: snapshot)
+
+    class EmptySampler:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(capture, "_SocketSampler", EmptySampler)
+
+    capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+    report = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+
+    assert report["capture_signals"]["pcap_app_attribution"]["9.9.9.9:443"][
+        "is_target_app"
+    ] is True
 
 
 def test_run_mode_maps_to_mitm_floor_flags(monkeypatch, tmp_path):
