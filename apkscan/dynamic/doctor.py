@@ -9,7 +9,7 @@
     (2) 设备 root                      adb shell su -c id（uid=0）
     (3) 设备 ABI                       provision.device_abi
     (4) 主机 frida 版本                provision.host_frida_version
-    (5) 设备 frida-server 运行且版本匹配  device.frida_server_running + best-effort 版本比对，
+    (5) 设备 frida-server 可真实注入        /proc 进程路径 + root UID + 版本 + attach smoke，
                                        auto_fix → provision.ensure_frida_server
     (6) mitmproxy 已安装               device.has_mitmproxy
     (7) CA 已信任                      auto_fix → provision.ensure_mitm_ca（否则只读 best-effort）
@@ -284,55 +284,20 @@ def _check_frida_server(
     auto_fix: bool,
     on_progress: Callable[[str], None] | None,
 ) -> dict:
-    """(5) 设备 frida-server 在跑且版本与主机匹配；auto_fix 时调 ensure_frida_server。"""
+    """(5) 严格验收 root frida-server、版本与真实 attach；auto_fix 时自愈。"""
     try:
-        running = False
-        try:
-            running = device.frida_server_running(serial)
-        except Exception:
-            logger.exception("[doctor] frida_server_running 探测异常（按未运行处理）")
-        if not running:
-            # ps 进程名启发式可能漏判（名字被截断/改名）→ 用 frida-ps -U 权威探测：
-            # 能连上设备 frida-server 即确认在跑。修 --no-fix 对已在跑的 server 误报未运行。
-            running = _frida_ps_reachable(serial)
-
-        if running:
-            # best-effort 版本比对：拿不到设备端版本只 warning，不判失败。
-            dev_ver = _device_frida_version(serial)
-            if host_ver and dev_ver and host_ver != dev_ver:
-                if auto_fix:
-                    _emit(on_progress, "frida-server 版本与主机不一致，尝试重新部署匹配版本")
-                    fix = provision.ensure_frida_server(
-                        serial, download=True, on_progress=on_progress
-                    )
-                    return _fold_frida_fix(fix, host_ver)
-                return _item(
-                    _NAME_FRIDA_SERVER,
-                    False,
-                    f"frida-server 在跑但版本不匹配（设备 {dev_ver} ≠ 主机 {host_ver}），注入可能失败",
-                    ["adb shell su -c 'pkill frida-server'", "pip install frida-tools"],
-                )
-            if host_ver and dev_ver and host_ver == dev_ver:
-                return _item(
-                    _NAME_FRIDA_SERVER, True, f"frida-server 在跑且版本匹配（{dev_ver}）"
-                )
-            # 拿不到设备端版本：在跑即视作 ok，附带说明无法核实版本。
-            return _item(
-                _NAME_FRIDA_SERVER,
-                True,
-                "frida-server 在跑（设备端版本无法核实，best-effort 视作匹配）",
-            )
-
-        # 未在跑。
+        probe = device.frida_server_probe(serial, expected_version=host_ver)
+        if probe.ok:
+            return _item(_NAME_FRIDA_SERVER, True, probe.detail)
         if auto_fix:
-            _emit(on_progress, "frida-server 未运行，尝试自动部署/启动")
+            _emit(on_progress, f"frida-server 动态注入验收未通过，尝试自愈：{probe.detail}")
             fix = provision.ensure_frida_server(serial, download=True, on_progress=on_progress)
             return _fold_frida_fix(fix, host_ver)
         return _item(
             _NAME_FRIDA_SERVER,
             False,
-            "设备 frida-server 未运行（--no-fix 未自动部署）",
-            ["frida-ps -U  # 验证；或开启 --fix 自动部署"],
+            f"frida-server 动态注入未就绪：{probe.detail}（--no-fix 未自动修复）",
+            ["fxapk doctor --fix", "adb shell su -c 'pkill -f frida-server'"],
         )
     except Exception:
         logger.exception("[doctor] 检查 frida-server 异常")
