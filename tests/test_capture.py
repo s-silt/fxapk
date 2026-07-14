@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -2839,3 +2840,89 @@ def test_floor_pcap_auto_ingested_into_endpoints(monkeypatch, tmp_path):
     assert "8.8.4.4" in vals  # IP 接入节点并入（噪音判定交下游 asn）
     assert "evil-c2.example.com" in vals  # 真 SNI 域名并入
     assert "connectivitycheck.gstatic.com" not in vals  # GMS/连通性噪音域名被折叠
+
+
+# ---------------------------------------------------------------------------
+# ★codex 真机 BUG3：Windows 中文/OneDrive 路径 adb pull 失败 → _adb_pull_to 经 ASCII 暂存中转
+# ---------------------------------------------------------------------------
+def test_path_is_ascii() -> None:
+    assert capture._path_is_ascii(Path("C:/Users/sxl/out/floor.pcap")) is True
+    assert capture._path_is_ascii(Path("C:/Users/sxl/王箕旻/floor.pcap")) is False
+
+
+def test_adb_pull_to_ascii_dest_direct(monkeypatch, tmp_path) -> None:
+    """dest 纯 ASCII → 直接 pull 到 dest，不经暂存。"""
+    calls: list[list[str]] = []
+
+    def _fake_adb(extra, serial=None):  # noqa: ANN001, ANN202
+        calls.append(extra)
+        Path(extra[2]).write_bytes(b"\xd4\xc3\xb2\xa1PCAP")
+        return True
+
+    monkeypatch.setattr(capture, "_adb", _fake_adb)
+    dest = tmp_path / "floor.pcap"
+    assert capture._adb_pull_to("/data/local/tmp/x.pcap", dest, "serial1") is True
+    assert dest.read_bytes() == b"\xd4\xc3\xb2\xa1PCAP"
+    assert calls == [["pull", "/data/local/tmp/x.pcap", str(dest)]]  # 直连 dest、无暂存
+
+
+def test_adb_pull_to_non_ascii_dest_stages(monkeypatch, tmp_path) -> None:
+    """dest 含非 ASCII（中文/OneDrive）→ adb 只拉到 ASCII 暂存路径，再 move 到最终 dest。"""
+    targeted: list[str] = []
+
+    def _fake_adb(extra, serial=None):  # noqa: ANN001, ANN202
+        targeted.append(extra[2])
+        Path(extra[2]).write_bytes(b"PCAP")
+        return True
+
+    monkeypatch.setattr(capture, "_adb", _fake_adb)
+    dest = tmp_path / "王箕旻_案件" / "floor.pcap"  # 非 ASCII 目标目录
+    assert capture._adb_pull_to("/data/local/tmp/x.pcap", dest, None) is True
+    assert dest.read_bytes() == b"PCAP"  # 最终落在中文 dest
+    # ★核心保证：adb 拉取的目标不是非 ASCII 的 dest，而是 ASCII 占位暂存路径
+    assert targeted and targeted[0] != str(dest)
+    assert Path(targeted[0]).name == "pulled.bin"
+
+
+def test_adb_pull_to_failure_returns_false(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(capture, "_adb", lambda extra, serial=None: False)
+    dest = tmp_path / "王箕旻" / "floor.pcap"
+    assert capture._adb_pull_to("/data/local/tmp/x.pcap", dest, None) is False
+    assert not dest.exists()  # 失败不污染/创建 dest
+
+
+def test_ascii_staging_dir_uses_short_path_when_temp_non_ascii(monkeypatch, tmp_path) -> None:
+    """★复审加固：%TEMP% 非 ASCII（中文 Windows 账户名）→ 用 8.3 短路径兜底取 ASCII 暂存目录。"""
+    non_ascii = tmp_path / "用户临时"
+    non_ascii.mkdir()
+    ascii_short = tmp_path / "YHLS~1"
+    ascii_short.mkdir()
+    monkeypatch.setattr(capture.tempfile, "mkdtemp", lambda prefix="": str(non_ascii))
+    monkeypatch.setattr(capture, "_short_path_if_ascii", lambda p: ascii_short)
+    got = capture._ascii_staging_dir()
+    assert got == ascii_short and capture._path_is_ascii(got)
+
+
+def test_ascii_staging_dir_falls_back_with_warning_when_no_short_path(monkeypatch, tmp_path, caplog) -> None:
+    """8.3 短路径不可得（卷禁用 8.3）→ 记一次告警后优雅回落原路径，不抛。"""
+    non_ascii = tmp_path / "用户临时2"
+    non_ascii.mkdir()
+    monkeypatch.setattr(capture.tempfile, "mkdtemp", lambda prefix="": str(non_ascii))
+    monkeypatch.setattr(capture, "_short_path_if_ascii", lambda p: None)
+    with caplog.at_level(logging.WARNING, logger="apkscan.dynamic.capture"):
+        got = capture._ascii_staging_dir()
+    assert got == non_ascii  # 优雅回落、不抛
+    assert any("无 8.3 短路径" in r.getMessage() for r in caplog.records)
+
+
+def test_ascii_staging_dir_ascii_temp_passthrough(monkeypatch, tmp_path) -> None:
+    """%TEMP% 本就 ASCII（主流场景）→ 直接用 mkdtemp 结果，不触发短路径逻辑。"""
+    ascii_dir = tmp_path / "fxapk_pull_x"
+    ascii_dir.mkdir()
+
+    def _no_short(_p):  # 若被调用即失败——ASCII 路径不应触发短路径兜底
+        raise AssertionError("ASCII 暂存不应调用 _short_path_if_ascii")
+
+    monkeypatch.setattr(capture.tempfile, "mkdtemp", lambda prefix="": str(ascii_dir))
+    monkeypatch.setattr(capture, "_short_path_if_ascii", _no_short)
+    assert capture._ascii_staging_dir() == ascii_dir

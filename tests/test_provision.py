@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import io as _io
+import logging
 import lzma
 import subprocess
 import sys
@@ -263,7 +264,7 @@ def test_ensure_frida_server_download_uses_requests_and_lzma_mocked(monkeypatch,
     monkeypatch.setattr(provision, "host_frida_version", lambda: "16.5.9")
 
     monkeypatch.setattr(requests, "get", _fake_requests_get(_xz_bytes()))
-    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None: True)
+    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None, **_kw: True)
     monkeypatch.setattr(provision, "_adbd_is_root", lambda serial=None: True)
     monkeypatch.setattr(provision.time, "sleep", lambda s: None)
 
@@ -333,7 +334,7 @@ def test_ensure_frida_server_push_failure_no_root_error(monkeypatch):
     )
 
     # push 失败。
-    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None: False)
+    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None, **_kw: False)
     res = provision.ensure_frida_server()
     assert res["ok"] is False
     assert res["action"] == "error"
@@ -349,7 +350,7 @@ def test_ensure_frida_server_chmod_failure_points_to_no_root(monkeypatch):
     )
 
     # push 成功，chmod（含 su）失败。
-    def _adb_ok(extra: list[str], serial: str | None = None) -> bool:
+    def _adb_ok(extra: list[str], serial: str | None = None, **_kw: object) -> bool:
         return extra[0] == "push"
 
     monkeypatch.setattr(provision, "_adb_ok", _adb_ok)
@@ -365,7 +366,7 @@ def test_ensure_frida_server_verify_fail_returns_error(monkeypatch):
     monkeypatch.setattr(
         provision, "_download_and_extract", lambda url, dest, on_progress: ""
     )
-    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None: True)
+    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None, **_kw: True)
     monkeypatch.setattr(provision, "_adbd_is_root", lambda serial=None: True)
     monkeypatch.setattr(provision.time, "sleep", lambda s: None)
     # 始终 False → 验证轮询全失败。
@@ -383,7 +384,7 @@ def test_ensure_frida_server_success_deployed_ok(monkeypatch):
     monkeypatch.setattr(
         provision, "_download_and_extract", lambda url, dest, on_progress: ""
     )
-    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None: True)
+    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None, **_kw: True)
     monkeypatch.setattr(provision, "_adbd_is_root", lambda serial=None: True)
     monkeypatch.setattr(provision.time, "sleep", lambda s: None)
     res = provision.ensure_frida_server()
@@ -410,7 +411,7 @@ def test_ensure_frida_server_start_command_blocking_does_not_false_fail(monkeypa
 
     start_attempts: list[str] = []
 
-    def _adb_ok(extra: list[str], serial: str | None = None) -> bool:
+    def _adb_ok(extra: list[str], serial: str | None = None, **_kw: object) -> bool:
         joined = " ".join(extra)
         # 模拟后台启动命令被 adb shell 长驻进程管道阻塞 → 超时 → _adb_ok 返回 False。
         if extra[0] == "shell" and provision._FRIDA_SERVER_REMOTE in joined and (
@@ -445,7 +446,7 @@ def test_ensure_frida_server_start_uses_detached_redirected_command(monkeypatch)
 
     seen: list[list[str]] = []
 
-    def _adb_ok(extra: list[str], serial: str | None = None) -> bool:
+    def _adb_ok(extra: list[str], serial: str | None = None, **_kw: object) -> bool:
         seen.append(extra)
         return True
 
@@ -482,7 +483,7 @@ def test_start_frida_server_su_device_only_root_no_nonroot_race(monkeypatch):
         su_cmds.append(cmd)
         return True
 
-    def _fake_adb_ok(extra, serial=None):  # noqa: ANN001
+    def _fake_adb_ok(extra, serial=None, **_kw):  # noqa: ANN001
         joined = " ".join(extra)
         if (
             extra
@@ -509,7 +510,7 @@ def test_su_ok_single_quotes_command_as_one_adb_arg(monkeypatch):
     Superuser.apk/KingUser 型 su 会把 cmd 的 flags（如 pkill 的 -f）当成 su 自己的选项。"""
     seen: list[list[str]] = []
 
-    def _adb_ok(extra: list[str], serial: str | None = None) -> bool:
+    def _adb_ok(extra: list[str], serial: str | None = None, **_kw: object) -> bool:
         seen.append(extra)
         return False  # 全失败，强制把三种 su 形态都走一遍
 
@@ -529,7 +530,7 @@ def test_su_ok_single_quotes_command_as_one_adb_arg(monkeypatch):
 def test_su_ok_escapes_inner_single_quotes(monkeypatch):
     """cmd 内含单引号也能安全包裹（POSIX '\\'' 转义），不破坏引号配对。"""
     seen: list[str] = []
-    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None: seen.append(extra[1]) or False)
+    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None, **_kw: seen.append(extra[1]) or False)
     provision._su_ok("echo it's ok")
     assert seen
     assert "'echo it'\\''s ok'" in seen[0]
@@ -543,7 +544,7 @@ def test_ensure_frida_server_on_progress_called(monkeypatch):
     monkeypatch.setattr(
         provision, "_download_and_extract", lambda url, dest, on_progress: ""
     )
-    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None: True)
+    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None, **_kw: True)
     monkeypatch.setattr(provision, "_adbd_is_root", lambda serial=None: True)
     monkeypatch.setattr(provision.time, "sleep", lambda s: None)
 
@@ -696,7 +697,7 @@ def fake_ca(monkeypatch, tmp_path) -> Path:
 
 def test_ensure_mitm_ca_already_trusted_ok(monkeypatch, fake_ca):
     # 系统库 ls 命中 → already_trusted。
-    def _adb_ok(extra: list[str], serial: str | None = None) -> bool:
+    def _adb_ok(extra: list[str], serial: str | None = None, **_kw: object) -> bool:
         return extra[:2] == ["shell", "ls"]
 
     monkeypatch.setattr(provision, "_adb_ok", _adb_ok)
@@ -719,7 +720,7 @@ def test_ensure_mitm_ca_generates_when_missing(monkeypatch, tmp_path):
 
     monkeypatch.setattr(provision, "_generate_ca", _gen)
     # ls 命中（视作已装）以便走最短成功路径，重点验证"生成被触发"。
-    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None: extra[:2] == ["shell", "ls"])
+    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None, **_kw: extra[:2] == ["shell", "ls"])
     res = provision.ensure_mitm_ca()
     assert ca.exists()
     assert res["ca_path"] == str(ca)
@@ -745,7 +746,7 @@ def test_ensure_mitm_ca_hash_unavailable_error(monkeypatch, fake_ca):
 
 def test_ensure_mitm_ca_installs_system_store_ok(monkeypatch, fake_ca):
     # ls 不命中 → 走主路；root/remount/push/chmod 全成功。
-    def _adb_ok(extra: list[str], serial: str | None = None) -> bool:
+    def _adb_ok(extra: list[str], serial: str | None = None, **_kw: object) -> bool:
         if extra[:2] == ["shell", "ls"]:
             return False
         return True
@@ -762,7 +763,7 @@ def test_ensure_mitm_ca_falls_back_to_user_store_on_readonly_system(monkeypatch,
     # remount 失败 → 主路不通；用户库 push/cp 成功 → installed_user_store。
     # 关键：用户库路径**不算已信任**（Android 10+ 默认不生效，需 magisk/重启），
     # 故 ok=False、verified=False——避免 doctor 把"已写入待生效"误判为绿（不假成功）。
-    def _adb_ok(extra: list[str], serial: str | None = None) -> bool:
+    def _adb_ok(extra: list[str], serial: str | None = None, **_kw: object) -> bool:
         cmd = " ".join(extra)
         if extra[:2] == ["shell", "ls"]:
             return False  # 未已信任
@@ -788,7 +789,7 @@ def test_ensure_mitm_ca_falls_back_to_user_store_on_readonly_system(monkeypatch,
 
 def test_ensure_mitm_ca_no_root_returns_error_with_fix_cmd(monkeypatch, fake_ca):
     # 全部 adb_ok 失败（无 root / 离线）→ error + 完整手动命令。
-    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None: False)
+    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None, **_kw: False)
     res = provision.ensure_mitm_ca()
     assert res["ok"] is False
     assert res["action"] == "error"
@@ -800,7 +801,7 @@ def test_ensure_mitm_ca_no_root_returns_error_with_fix_cmd(monkeypatch, fake_ca)
 
 
 def test_ensure_mitm_ca_never_raises_on_adb_failure(monkeypatch, fake_ca):
-    def _boom(extra: list[str], serial: str | None = None) -> bool:
+    def _boom(extra: list[str], serial: str | None = None, **_kw: object) -> bool:
         raise RuntimeError("adb exploded")
 
     monkeypatch.setattr(provision, "_adb_ok", _boom)
@@ -814,7 +815,7 @@ def test_ensure_mitm_ca_never_raises_on_adb_failure(monkeypatch, fake_ca):
 
 
 def test_ensure_mitm_ca_on_progress_called(monkeypatch, fake_ca):
-    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None: extra[:2] == ["shell", "ls"])
+    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None, **_kw: extra[:2] == ["shell", "ls"])
     msgs: list[str] = []
     provision.ensure_mitm_ca(on_progress=msgs.append)
     assert msgs
@@ -829,7 +830,7 @@ def test_all_functions_return_structured_dict_no_print(monkeypatch, capsys, fake
     """抽样调用所有对外函数，断言返回结构化 dict 且无 stdout 输出。"""
     monkeypatch.setattr(provision, "_adb", lambda extra, serial=None: _FakeCompleted(0, "arm64-v8a"))
     monkeypatch.setattr(device, "frida_server_running", lambda serial=None: True)
-    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None: extra[:2] == ["shell", "ls"])
+    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None, **_kw: extra[:2] == ["shell", "ls"])
 
     abi = provision.device_abi()
     ver = provision.host_frida_version()
@@ -940,7 +941,7 @@ def test_ensure_frida_server_running_but_binary_absent_falls_through_to_deploy(
     monkeypatch.setattr(provision, "device_abi", lambda serial=None: "arm64-v8a")
     monkeypatch.setattr(provision, "host_frida_version", lambda: "16.5.9")
     monkeypatch.setattr(provision, "_download_and_extract", lambda url, dest, on_progress: "")
-    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None: True)
+    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None, **_kw: True)
     monkeypatch.setattr(provision, "_adbd_is_root", lambda serial=None: True)
     monkeypatch.setattr(provision.time, "sleep", lambda *_a: None)
 
@@ -1191,7 +1192,7 @@ def test_ensure_frida_server_prefers_bundled_no_download(
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("不应走下载兜底")),
     )
 
-    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None: True)
+    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None, **_kw: True)
     monkeypatch.setattr(provision, "_adbd_is_root", lambda serial=None: True)
     monkeypatch.setattr(provision.time, "sleep", lambda s: None)
 
@@ -1220,7 +1221,7 @@ def test_ensure_frida_server_falls_back_to_download_when_no_bundled(
         return ""  # 下载成功
 
     monkeypatch.setattr(provision, "_download_and_extract", _fake_dl)
-    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None: True)
+    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None, **_kw: True)
     monkeypatch.setattr(provision, "_adbd_is_root", lambda serial=None: True)
     monkeypatch.setattr(provision.time, "sleep", lambda s: None)
 
@@ -1229,3 +1230,41 @@ def test_ensure_frida_server_falls_back_to_download_when_no_bundled(
     assert res["action"] == "deployed"
     assert "url" in called  # 回退确实走了下载
     assert "android-arm64.xz" in called["url"]
+
+
+# ---------------------------------------------------------------------------
+# ★codex 真机 BUG4：su 型设备每条 root 命令因首探 adb shell 失败刷假的「adb 非零退出」告警；
+#   复审加固：adb-root 无 su 设备上首探是权威执行，其真 stderr 不能被降噪吞掉。
+# ---------------------------------------------------------------------------
+def test_adb_root_shell_no_false_warning_on_su_fallback(monkeypatch, caplog) -> None:
+    """首探 adb shell 失败（非 root adbd）→ su 成功；不刷任何告警（codex BUG4 核心降噪）。"""
+
+    def _fake_adb(extra, serial=None):  # noqa: ANN001, ANN202
+        # su 路径成功；直接 adb shell 首探返回非零（模拟 [ id -u ] || exit 1 非 root 退 1）。
+        if len(extra) >= 2 and extra[1].startswith("su"):
+            return _FakeCompleted(0, "", "")
+        return _FakeCompleted(1, "", "not root")
+
+    monkeypatch.setattr(provision, "_adb", _fake_adb)
+    with caplog.at_level(logging.WARNING, logger="apkscan.dynamic.provision"):
+        assert provision._adb_root_shell("kill -INT 123", None) is True
+    joined = " ".join(r.getMessage() for r in caplog.records)
+    assert "adb 非零退出" not in joined and "root 命令失败" not in joined  # 首探失败静默、su 成功
+
+
+def test_adb_root_shell_recovers_real_stderr_when_both_fail(monkeypatch, caplog) -> None:
+    """★复审加固：adb-root 无 su 设备——首探权威执行失败且 su 也失败。首探真 stderr 不被吞（留 DEBUG 可查），
+    两路皆败补一条 WARNING 指向它。"""
+
+    def _fake_adb(extra, serial=None):  # noqa: ANN001, ANN202
+        if len(extra) >= 2 and extra[1].startswith("su"):
+            return _FakeCompleted(127, "", "su: not found")  # 无 su → 误导性 su-not-found
+        return _FakeCompleted(1, "", "avc: denied write /system")  # 首探权威执行的真因
+
+    monkeypatch.setattr(provision, "_adb", _fake_adb)
+    with caplog.at_level(logging.DEBUG, logger="apkscan.dynamic.provision"):
+        assert provision._adb_root_shell("cp /a /system/b", None) is False
+    debug_txt = " ".join(r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG)
+    warn_txt = " ".join(r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)
+    assert "avc: denied write /system" in debug_txt  # 首探真 stderr 保留在 DEBUG、未被吞
+    assert "均失败" in warn_txt  # 两路皆败补 WARNING 指向 DEBUG

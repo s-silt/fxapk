@@ -139,8 +139,13 @@ def _adb(extra: list[str], serial: str | None = None) -> subprocess.CompletedPro
         return None
 
 
-def _adb_ok(extra: list[str], serial: str | None = None) -> bool:
-    """运行 adb 子命令，returncode==0 → True；否则 False（含命令缺失/超时/异常）。"""
+def _adb_ok(extra: list[str], serial: str | None = None, *, quiet: bool = False) -> bool:
+    """运行 adb 子命令，returncode==0 → True；否则 False（含命令缺失/超时/异常）。
+
+    ``quiet=True``：非零退出把「adb 非零退出」日志**降到 DEBUG**（而非 WARNING）——供 root 回退链的中途
+    探测用（失败是正常前奏，不该刷 warning 噪音），但真 stderr 仍**保留在 DEBUG 可查**、绝不吞掉（见
+    :func:`_adb_root_shell`：首探失败降噪、两路皆败再补一条 WARNING 指向此 DEBUG）。
+    """
     proc = _adb(extra, serial)
     if proc is None:
         return False
@@ -148,7 +153,7 @@ def _adb_ok(extra: list[str], serial: str | None = None) -> bool:
         # 带上 stderr 尾部：排障需要看到真因（如 "more than one device" / "device offline"
         # / "read-only file system"），否则只看到「非零退出」无从判断。
         err = (proc.stderr or "").strip()
-        logger.warning(
+        (logger.debug if quiet else logger.warning)(
             "[provision] adb 非零退出（%s）：%s%s",
             proc.returncode,
             " ".join(extra),
@@ -220,8 +225,22 @@ def _adb_root_shell(cmd: str, serial: str | None = None) -> bool:
     本身就是 root，根本不必 su；而 Superuser.apk/KingUser 型设备 ``adb root`` 不支持、必须 su。
     两条都试以兼容两类 root。su 路径经 :func:`_su_ok` 正确单引号包裹（否则 cmd 的选项/`&&`
     会外泄给 su 本身）。
+
+    ★codex 真机 BUG4 + 复审加固：首探 ``adb shell`` 在 su 型设备（``adb root`` 不支持、adbd 非 uid0）上
+    必失败，是走 su 回退前的正常前奏——故首探用 ``quiet=True`` 把其失败**降到 DEBUG**（避免每条 root 命令
+    刷一条假的「adb 非零退出」告警，如 tcpdump 停止的 kill 返回非零噪音），真 stderr 仍在 DEBUG 可查、不吞。
+    在 adb-root 且无 su 的设备上首探即**权威执行**：其真因已留在 DEBUG，且当 **su 回退也失败（两路皆败）**
+    时补一条 WARNING 指向该 DEBUG——恰在需要排障时提示，不掩盖真失败。首探成功 → True；首探败但 su 成 → True。
     """
-    return _adb_ok(["shell", cmd], serial) or _su_ok(cmd, serial)
+    if _adb_ok(["shell", cmd], serial, quiet=True):
+        return True
+    if _su_ok(cmd, serial):
+        return True
+    logger.warning(
+        "[provision] root 命令两路（adb shell 直执 + su -c）均失败：%s（首探真 stderr 见上方 DEBUG 日志）",
+        cmd,
+    )
+    return False
 
 
 # ---------------------------------------------------------------------------

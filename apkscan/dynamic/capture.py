@@ -29,7 +29,9 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -484,9 +486,15 @@ def _capture(
             _wait(_FRIDA_GRACE)
             if _frida_session_alive(frida_session):
                 playbook.append(
-                    f"frida-core 注入 SSL unpinning + 运行时密钥 hook 并启动 {package}（活体 key 回传）"
+                    f"frida-core 注入 SSL unpinning + 运行时密钥 hook 并启动 {package}"
+                    "（hook 就绪与活体 key 回传待收尾按 hook_ready_status 确认）"
                 )
-                logger.info("[capture] frida-core 会话已建立且存活，运行时密钥 hook 生效")
+                # ★codex 真机 BUG2：此处仅"会话存活"，hook 是否真装上要到收尾 _frida_hook_status 才知；
+                #   不预断"hook 生效"，以免日志与最终 hook_ready_status=unconfirmed 自相矛盾、误导使用者。
+                logger.info(
+                    "[capture] frida-core 会话已建立且存活；运行时密钥 hook 就绪状态待收尾确认"
+                    "（见 capture_signals.hook_ready_status）"
+                )
                 break
             # 会话秒退：清理这次的死会话，计一次秒退。
             _teardown_frida_session(frida_session, frida_script)
@@ -1321,6 +1329,91 @@ def _adb(extra: list[str], serial: str | None = None) -> bool:
     return True
 
 
+def _path_is_ascii(p: Path) -> bool:
+    """本地路径是否纯 ASCII。Windows 下 adb.exe 对含中文/非 ASCII 的本地目标路径 pull 会失败（argv 编码）。"""
+    try:
+        str(p).encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _short_path_if_ascii(p: Path) -> Path | None:
+    """Windows 上取 ``p`` 的 8.3 短路径；短路径纯 ASCII 才返回，否则 None（非 Windows/取不到/仍非 ASCII → None）。
+
+    系统卷默认启用 8.3 短名，中文/非 ASCII 目录段会呈 ``XXXXXX~1`` 纯 ASCII 形式——用它做 adb pull 的
+    本地目标即可绕开非 ASCII 路径失败。指向的仍是同一物理目录（清理不受影响）。
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        fn = ctypes.windll.kernel32.GetShortPathNameW  # type: ignore[attr-defined]
+        fn.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+        fn.restype = wintypes.DWORD
+        buf = ctypes.create_unicode_buffer(512)
+        if fn(str(p), buf, 512) and buf.value:
+            short = Path(buf.value)
+            if _path_is_ascii(short):
+                return short
+    except Exception:
+        logger.debug("[capture] GetShortPathNameW 取 8.3 短路径失败（忽略）", exc_info=True)
+    return None
+
+
+def _ascii_staging_dir() -> Path:
+    """建一个**尽量 ASCII** 的临时暂存目录（供 _adb_pull_to 中转，规避 adb 对非 ASCII 本地路径失败）。
+
+    ★codex 真机 BUG3 复审加固：``tempfile.mkdtemp`` 跟随 ``%TEMP%``，而中文 Windows 账户下 ``%TEMP%``
+    （位于 ``%USERPROFILE%`` 内）本身非 ASCII——只靠它中转对**非 ASCII 用户名**机器仍失败。故 mkdtemp 后
+    若路径非 ASCII，用 8.3 短路径兜底（:func:`_short_path_if_ascii`，同一物理目录）；仍不可得（卷禁用 8.3）
+    则记一次告警后回落原路径（不抛、不比修复前更差）。
+    """
+    d = Path(tempfile.mkdtemp(prefix="fxapk_pull_"))
+    if _path_is_ascii(d):
+        return d
+    short = _short_path_if_ascii(d)
+    if short is not None:
+        return short
+    logger.warning(
+        "[capture] 临时暂存目录含非 ASCII 且无 8.3 短路径可用，adb pull 中转可能仍失败；"
+        "可设环境变量 TMP 指向纯 ASCII 目录规避。路径=%s",
+        d,
+    )
+    return d
+
+
+def _adb_pull_to(remote: str, dest: Path, serial: str | None = None) -> bool:
+    """adb pull 设备文件 ``remote`` → 本地 ``dest``（已含最终文件名）；成功 True，任何失败 → False（不抛）。
+
+    ★codex 真机 BUG3（Windows 中文/OneDrive 路径 adb pull 失败）：adb.exe 在 Windows 上对含非 ASCII
+    的本地目标路径 pull 会失败。故 ``dest`` 路径非 ASCII 时，先 pull 到**尽量 ASCII** 的临时暂存目录
+    （:func:`_ascii_staging_dir`，用 ASCII 占位文件名规避文件名本身非 ASCII），校验拉到后再 ``shutil.move``
+    到 ``dest``（Python 处理 Unicode 路径无碍）；``dest`` 纯 ASCII 时直接 pull。``dest`` 父目录按需创建。
+    """
+    if _path_is_ascii(dest):
+        return _adb(["pull", remote, str(dest)], serial)
+    staging = _ascii_staging_dir()
+    staged = staging / "pulled.bin"  # ASCII 占位名：暂存目录与文件名全 ASCII，adb 才拉得动
+    try:
+        if not (_adb(["pull", remote, str(staged)], serial) and staged.exists()):
+            return False
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            logger.exception("[capture] adb pull：创建目标目录失败 %s", dest.parent)
+            return False
+        shutil.move(str(staged), str(dest))
+        return True
+    except Exception:
+        logger.exception("[capture] adb pull 经 ASCII 暂存中转失败：%s → %s", remote, dest)
+        return False
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 def _adb_capture(extra: list[str], serial: str | None = None) -> str | None:
     """运行 adb 子命令并返回 stdout 文本；缺 adb / 非零退出 / 异常 → None（不抛）。
 
@@ -1685,8 +1778,7 @@ def _adb_pull_db(device_path: str, dump_dir: Path, serial: str | None = None) ->
     if size is not None and size > _DB_PULL_MAX_BYTES:
         logger.info("[capture] 落地库超大（%d 字节）跳过回拉：%s", size, device_path)
         return None
-    exe = tools.adb_path()
-    if not exe:
+    if not tools.adb_path():
         return None
     try:
         dump_dir.mkdir(parents=True, exist_ok=True)
@@ -1694,23 +1786,9 @@ def _adb_pull_db(device_path: str, dump_dir: Path, serial: str | None = None) ->
         logger.exception("[capture] 创建 dump_db 目录失败：%s", dump_dir)
         return None
     local = dump_dir / device_path.rsplit("/", 1)[-1]
-    try:
-        proc = subprocess.run(
-            [exe, *(["-s", serial] if serial else []), "pull", device_path, str(local)],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=device._DEFAULT_TIMEOUT,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        logger.warning("[capture] adb pull 落地库超时：%s", device_path)
-        return None
-    except Exception:
-        logger.exception("[capture] adb pull 落地库异常：%s", device_path)
-        return None
-    if proc.returncode != 0 or not local.exists():
+    # ★codex 真机 BUG3：dump_dir 可能落在中文/OneDrive 目录，经 _adb_pull_to 的 ASCII 暂存中转规避
+    #   Windows 下 adb 对非 ASCII 本地路径 pull 失败（超时/异常/非零退出均由 _adb 吞并记日志）。
+    if not (_adb_pull_to(device_path, local, serial) and local.exists()):
         logger.debug("[capture] adb pull 落地库失败（无 root/不存在）：%s", device_path)
         return None
     return local
@@ -2107,10 +2185,10 @@ def _stop_floor_pcap(handle: _FloorPcap, out_path: Path) -> Path | None:
             tmp.unlink(missing_ok=True)  # 清掉上一轮可能残留的临时文件
         except OSError:
             logger.debug("[capture] floor：清临时文件失败（忽略）", exc_info=True)
-        pulled_ok = _adb(["pull", handle.remote_path, str(tmp)], serial) and _floor_pcap_valid(tmp)
+        pulled_ok = _adb_pull_to(handle.remote_path, tmp, serial) and _floor_pcap_valid(tmp)
         if not pulled_ok:  # 首拉失败/无效 → chmod 644 兜底再拉（root tcpdump 写的文件常 0600 拉不动）
             provision._adb_root_shell(f"chmod 644 {handle.remote_path} 2>/dev/null", serial)
-            pulled_ok = _adb(["pull", handle.remote_path, str(tmp)], serial) and _floor_pcap_valid(tmp)
+            pulled_ok = _adb_pull_to(handle.remote_path, tmp, serial) and _floor_pcap_valid(tmp)
         # 3) 本轮确实拉到有效文件才原子替换 floor.pcap + 清远端；否则保留远端供手动重拉（绝不删证据）。
         if pulled_ok:
             try:
