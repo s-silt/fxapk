@@ -94,6 +94,45 @@ def test_normalize_credential_truncates_authorization_token() -> None:
     assert "…" in auth or "*" in auth
 
 
+def test_normalize_credential_tls_decrypted_source_preserved_and_desensitized() -> None:
+    """★P2：tls-decrypted 源（NSS keylog 解密还原的 HTTP 请求头）走 http 归一化——source 保留、高敏头整值脱敏。"""
+    ev = cryptohook.normalize_credential_event(
+        {
+            "type": cryptohook.CREDENTIAL_MSG_TYPE,
+            "source": "tls-decrypted",
+            "url": "https://api.fraud-c2.cn/zj/api/user_login",
+            "method": "POST",
+            "headers": {"Authorization": "Bearer " + "S" * 120, "Cookie": "sid=" + "C" * 80},
+        }
+    )
+    assert ev is not None
+    assert ev["source"] == "tls-decrypted"  # 源保留（报告区分 Frida 明文 vs TLS 解密）
+    assert ev["url"] == "https://api.fraud-c2.cn/zj/api/user_login"
+    auth = ev["headers"]["Authorization"]
+    assert auth.startswith("Bearer S") and ("…" in auth or "*" in auth)  # 保前后、中间省略
+    assert "S" * 120 not in auth  # ★token 全文不落
+    assert "C" * 80 not in ev["headers"]["Cookie"]  # Cookie 也脱敏
+
+
+def test_normalize_credential_url_query_token_desensitized() -> None:
+    """★复审 MEDIUM：URL query 里的 token（access_token 等常挂 query）也脱敏、不落全文；host/path/参数名保留供抽端点。"""
+    secret = "eyJhbGciOiJIUzI1NiJ9." + "A" * 120
+    ev = cryptohook.normalize_credential_event(
+        {
+            "type": cryptohook.CREDENTIAL_MSG_TYPE,
+            "source": "tls-decrypted",
+            "url": f"https://api.fraud-c2.cn/api/login?access_token={secret}&sid=abcd",
+            "method": "GET",
+            "headers": {"Cookie": "sid=x"},
+        }
+    )
+    assert ev is not None
+    assert secret not in ev["url"]  # ★token 全文不落（query 值截断）
+    assert ev["url"].startswith("https://api.fraud-c2.cn/api/login?access_token=")  # base+参数名保留
+    assert ("…" in ev["url"]) or ("..." in ev["url"])  # 长值被截断
+    assert "sid=abcd" in ev["url"]  # 短参数值（非高敏）保留可读
+
+
 def test_normalize_credential_masks_phone_number() -> None:
     """登录手机号是受害人高敏个人信息：中间打码。"""
     ev = cryptohook.normalize_credential_event(
@@ -255,6 +294,28 @@ def test_merge_credentials_okhttp_host_merged_as_endpoint_via_infra(tmp_path: An
         lead.value == "c2.fraud-gw.cn" and lead.advice == infra.ADVICE_INVESTIGATE
         for lead in domain_leads
     )
+
+
+def test_merge_credentials_tls_decrypted_lead_and_host_endpoint(tmp_path: Any) -> None:
+    """★P2：tls-decrypted 凭据（NSS keylog 解密还原）与 okhttp 同等待遇——产 RUNTIME_CREDENTIAL 线索
+    + host 复用 _endpoints_from_plaintext 并入端点走 infra 分级（修 merge 只认 okhttp 的下游漏洞）。"""
+    rr = _write_runtime_report(
+        tmp_path,
+        credential_events=[
+            {
+                "source": "tls-decrypted",
+                "url": "https://c2.fraud-gw.cn/zj/api/user_login",
+                "method": "POST",
+                "headers": {"Authorization": "Bearer A…ZZZ"},
+            }
+        ],
+    )
+    report = _make_report()
+    stats = merge.merge_runtime_credentials(report, rr)
+    cred_leads = [lead for lead in report.leads if lead.category == LeadCategory.RUNTIME_CREDENTIAL]
+    assert len(cred_leads) >= 1 and stats["credential_leads"] >= 1
+    assert any("TLS解密登录态" in lead.value for lead in cred_leads)  # 来源标签区分 okhttp vs 解密
+    assert "c2.fraud-gw.cn" in {ep.value for ep in report.endpoints}  # host 并入端点（下游漏洞已修）
 
 
 def test_merge_credentials_known_infra_host_marked_skip(tmp_path: Any) -> None:

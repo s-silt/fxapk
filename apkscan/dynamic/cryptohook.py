@@ -437,8 +437,11 @@ def normalize_antidetect_event(payload: Any) -> dict[str, Any] | None:
 # 合规护栏（横切硬要求）：token / 账号 / 手机号是受害人/高敏个人信息，回传与落盘必须截断、
 # 不留全文；手机号中间打码、token 只留前后几位。本模块的规范化与抽取统一执行这一脱敏口径。
 
-#: 凭据来源（与 JS 侧约定）：okhttp=加密前明文请求；sharedprefs=落地凭据 xml。
-_CREDENTIAL_SOURCES: frozenset[str] = frozenset({"okhttp", "sharedprefs"})
+#: 凭据来源：okhttp=加密前明文请求（Frida JS）；sharedprefs=落地凭据 xml；
+#: tls-decrypted=P2 用 NSS keylog 解密 floor.pcap 还原的 HTTP 请求头（与 okhttp 同 schema，走同一 http 归一化）。
+_CREDENTIAL_SOURCES: frozenset[str] = frozenset({"okhttp", "sharedprefs", "tls-decrypted"})
+#: 走 HTTP 请求归一化（url/method/headers/body）的来源。
+_HTTP_CREDENTIAL_SOURCES: frozenset[str] = frozenset({"okhttp", "tls-decrypted"})
 
 #: 高敏 header 名（命中即整值脱敏，只留前后片段）。
 _SENSITIVE_HEADER_KEYS: frozenset[str] = frozenset(
@@ -543,6 +546,24 @@ def _truncate_secret(value: str) -> str:
     return f"{v[:_CRED_VALUE_HEAD]}…{v[-_CRED_VALUE_TAIL:]}"
 
 
+def _desensitize_url(url: str) -> str:
+    """URL query 串里的**值**脱敏（access_token/sid 等常挂 query）：保留 base + 参数名，截断参数值。
+
+    无 query → 原样返回（host/path 完整，供 _host_of_url / _endpoints_from_plaintext 抽端点）。绝不抛。
+    ★与 header 脱敏同口径：query 里的 token 也是明文凭据，绝不落全文进报告。
+    """
+    if not isinstance(url, str):
+        return ""
+    base, sep, query = url.partition("?")
+    if not sep:
+        return url
+    masked = []
+    for pair in query.split("&"):
+        k, eq, v = pair.partition("=")
+        masked.append(f"{k}{eq}{_truncate_secret(v)}" if (eq and v) else pair)
+    return f"{base}?{'&'.join(masked)}"
+
+
 def _desensitize_header(name: str, value: str) -> str:
     """header 值脱敏：高敏头（Authorization/Cookie/token 类）整值截断；其余仅手机号打码。
 
@@ -578,16 +599,18 @@ def normalize_credential_event(payload: Any) -> dict[str, Any] | None:
     if source not in _CREDENTIAL_SOURCES:
         return None
 
-    if source == "okhttp":
-        return _normalize_okhttp_credential(payload)
+    if source in _HTTP_CREDENTIAL_SOURCES:
+        return _normalize_okhttp_credential(payload, source)
     return _normalize_sharedprefs_credential(payload)
 
 
-def _normalize_okhttp_credential(payload: dict[str, Any]) -> dict[str, Any] | None:
-    """规范化 OkHttp 明文请求事件：url 必有；headers 高敏脱敏、body 手机号打码 + 截断。"""
+def _normalize_okhttp_credential(payload: dict[str, Any], source: str = "okhttp") -> dict[str, Any] | None:
+    """规范化 HTTP 请求凭据事件（okhttp 明文请求 / tls-decrypted 解密还原）：url 必有；
+    headers 高敏脱敏、body 手机号打码 + 截断。``source`` 透传以在报告区分 Frida 明文 vs TLS 解密。"""
     url = _as_clean_str(payload.get("url"))
     if not url:
-        return None  # 无 url 的 okhttp 事件无取证价值
+        return None  # 无 url 的 HTTP 凭据事件无取证价值
+    url = _desensitize_url(url)  # ★query 串里的 token（access_token/sid 等）脱敏，绝不落全文（复审 MEDIUM）
 
     headers_raw = payload.get("headers")
     headers: dict[str, str] = {}
@@ -600,7 +623,7 @@ def _normalize_okhttp_credential(payload: dict[str, Any]) -> dict[str, Any] | No
     body = _mask_phone_numbers(body_raw) if body_raw else ""
 
     return {
-        "source": "okhttp",
+        "source": source,
         "url": url,
         "method": _as_clean_str(payload.get("method")) or "",
         "headers": headers,
