@@ -82,6 +82,10 @@ def _decode_proc_ipv6(hex_addr: str) -> str | None:
     except ValueError:
         return None
     netbytes = b"".join(raw[i : i + 4][::-1] for i in range(0, 16, 4))  # 每 32 位字内字节反转
+    # ★IPv4-mapped（::ffff:a.b.c.d）归一化为点分：Android Java/OkHttp 默认 AF_INET6 双栈，目标 app 的
+    #   IPv4 连接只现身 /proc/net/tcp6 且为 v4-mapped，而 pcap 侧是裸点分——不归一则主流量永不匹配（复审 #1）。
+    if netbytes[:12] == b"\x00" * 10 + b"\xff\xff":
+        return f"{netbytes[12]}.{netbytes[13]}.{netbytes[14]}.{netbytes[15]}"
     try:
         return socket.inet_ntop(socket.AF_INET6, netbytes)
     except (OSError, ValueError):
@@ -102,14 +106,16 @@ def _parse_proc_line(line: str, proto: str) -> SocketEntry | None:
         if lip is None or rip is None:
             return None
         uid = int(parts[7])
+        lport = int(lport_h, 16)  # ★端口转换须在 try 内：坏 hex（空/U+FFFD）逐行跳过、不逃逸（复审 #2/#3）
+        rport = int(rport_h, 16)
     except (ValueError, IndexError):
         return None
     return SocketEntry(
         proto=proto,
         local_ip=lip,
-        local_port=int(lport_h, 16),
+        local_port=lport,
         remote_ip=rip,
-        remote_port=int(rport_h, 16),
+        remote_port=rport,
         state=_TCP_STATES.get(parts[3].upper(), parts[3]),
         uid=uid,
     )
@@ -117,8 +123,8 @@ def _parse_proc_line(line: str, proto: str) -> SocketEntry | None:
 
 #: ss -tunp 的进程标注：``users:(("chrome",pid=1234,fd=56))``。
 _SS_PROC_RE = re.compile(r'\(\("([^"]+)",pid=(\d+)')
-#: ss 行里的 addr:port（IPv4/IPv6 都取最后一个冒号后为 port）。
-_SS_ADDR_RE = re.compile(r"(\[?[0-9a-fA-F:.]+\]?):(\d+)")
+#: ss 行里的 addr:port——方括号整体捕获（容纳带 %scope 的链路本地 IPv6，如 [fe80::1%wlan0]:443）。
+_SS_ADDR_RE = re.compile(r"(\[[^\]]+\]|[0-9a-fA-F:.]+):(\d+)")
 
 
 def parse_uid_sockets(text: str) -> UidSockets:
@@ -168,7 +174,9 @@ def _apply_ss_line(line: str, res: UidSockets) -> None:
     if len(addrs) < 2:
         return
     rip, rport_s = addrs[-1]  # ss 行末通常是 peer（远端）地址
-    rip = rip.strip("[]")
+    rip = rip.strip("[]").split("%", 1)[0]  # 剥方括号 + %scope（/proc 解出的 IPv6 不带 scope，须对齐）
+    if rip.lower().startswith("::ffff:") and "." in rip:  # v4-mapped 归一化（与 _decode_proc_ipv6 一致）
+        rip = rip.rsplit(":", 1)[-1]
     try:
         rport = int(rport_s)
     except ValueError:

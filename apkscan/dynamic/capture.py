@@ -611,10 +611,12 @@ def _capture(
     #    治零产出）。IP 侧不在此判噪音——交下游 asn 富化 + infra 归属分级（Google/云 IP 自动判第三方
     #    基础设施并在报告折叠）；域名侧（SNI/DNS）按 OS/GMS/连通性 host 名单折叠明显噪音。绝不因
     #    floor 解析失败影响主报告（pcap 仍作产物留档）。
+    floor_summary = None  # 解析一次，供并入端点与 UID 归因复用（复审 #5：避免重复全量解析大 pcap）
     if floor_pcap is not None and floor_pcap.is_file():
         try:
             noise_patterns = _load_noise_patterns()
-            floor_eps = pcap_ingest.to_runtime_endpoints(pcap_ingest.parse_pcap(str(floor_pcap)))
+            floor_summary = pcap_ingest.parse_pcap(str(floor_pcap))
+            floor_eps = pcap_ingest.to_runtime_endpoints(floor_summary)
             seen_vals = {ep.value for ep in endpoints}
             added = [
                 ep
@@ -634,12 +636,12 @@ def _capture(
     # 哪个 UID/进程、是否 == 目标 app——自动区分真后端 vs 背景噪音（此前 uid_sockets.txt 只供人工比对）。
     # best-effort、绝不影响主流程（floor pcap 与 uid 快照都在才做；失败忽略）。
     pcap_app_attr: dict[str, Any] = {}
-    if floor_pcap is not None and floor_pcap.is_file() and uid_snapshot is not None and uid_snapshot.is_file():
+    if floor_summary is not None and uid_snapshot is not None and uid_snapshot.is_file():
         try:
             from apkscan.dynamic import socket_attr
 
             table = socket_attr.parse_uid_sockets(uid_snapshot.read_text(encoding="utf-8", errors="replace"))
-            res = pcap_ingest.remote_endpoints(pcap_ingest.parse_pcap(str(floor_pcap)))
+            res = pcap_ingest.remote_endpoints(floor_summary)  # 复用已解析的 summary，不重复解析
             attr = socket_attr.attribute_endpoints([(r.ip, r.port) for r in res], table)
             pcap_app_attr = {f"{ip}:{port}": v for (ip, port), v in attr.items()}
             if pcap_app_attr:
