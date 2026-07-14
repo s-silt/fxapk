@@ -6,7 +6,7 @@
 
 *CLI command `fxapk` (alias `apkscan`) · PyPI package `fxapk`* · **中文**: [README.md](README.md)
 
-An APK / iOS IPA **static + dynamic analysis CLI**: extracts real app config (AppID / AppKey / channel IDs / uni-app app ID, etc.), network endpoints, third-party components and packer fingerprints, enriches domains / IPs with ownership attribution, outputs a **structured HTML / JSON report**, and correlates across samples.
+An APK / iOS IPA **static + dynamic analysis CLI**: extracts real app config (AppID / AppKey / channel IDs / uni-app app ID, etc.), network endpoints, third-party components and packer fingerprints; attributes domains / IPs with a **five-layer, non-collapsing infrastructure model** (resource holder → BGP ASN → cloud / IDC → CDN / edge proxy → operator — each layer carries its source and confidence, and is marked unknown when not found); captures traffic **PCAP-first** (TLS / QUIC handshake parsing + five-tuple socket attribution); and outputs a **structured HTML / JSON report**.
 
 Runs its core analysis with **zero environment** (`pip install`, no JDK / emulator / device). Unpacking and traffic capture of hardened apps are optional on-device steps.
 
@@ -21,7 +21,7 @@ pip install fxapk
 git clone https://github.com/s-silt/fxapk.git && cd fxapk && pip install -e .
 ```
 
-Dynamic unpack / capture, the relationship graph and the web dashboard need optional deps installed on demand; when missing, the relevant command prints a hint and core analysis is unaffected.
+Dynamic unpack / capture, the sample corpus and other features need optional deps installed on demand; when missing, the relevant command prints a hint and core analysis is unaffected.
 
 ## Usage
 
@@ -34,7 +34,7 @@ fxapk analyze app.apk --out out
 fxapk auto app.apk --out out       # no device? dynamic steps are skipped, static report still produced
 ```
 
-Main commands: `analyze` (static), `auto` (one-click), `doctor` (device env check + auto-fix), `graph` (cross-sample correlation), `track` (local web page to follow up on leads). Full commands and flags: `fxapk --help`.
+Main commands: `analyze` (static), `auto` (one-click: static + dynamic when a device is present), `capture` (on-device capture), `doctor` (device env check + auto-fix), `corpus` (sample library: ingest past reports, cross-version regression, look up a value across samples). Full commands and flags: `fxapk --help`.
 
 When not installed as a command, use `python -m apkscan.cli <…>`.
 
