@@ -199,16 +199,18 @@ def _endpoint_from_jsonable(item: Any) -> Endpoint | None:
 
 
 def _evidences_from_jsonable(raw: Any, value: str) -> list[Evidence]:
-    """还原 evidences 列表，强制 source="runtime"；缺失则合成一条最小 runtime 证据。"""
+    """还原 evidences 列表，强制 source 为 runtime*；缺失则合成一条最小 runtime 证据。"""
     evidences: list[Evidence] = []
     if isinstance(raw, list):
         for ev in raw:
             if not isinstance(ev, dict):
                 continue
+            raw_source = str(ev.get("source", ""))
             evidences.append(
                 Evidence(
-                    # 来源统一钉为 runtime：哪怕原 JSON 写串了，并入主报告也应标运行时。
-                    source=_RUNTIME_SOURCE,
+                    # 保留 runtime* 子来源（runtime-tshark / runtime-tls-decrypted / runtime-decrypted 等），
+                    # 便于报告区分"密文抓到 / 明文 HTTP / TLS 解密还原"；非 runtime* 一律钉 runtime（并入主报告应标运行时）。
+                    source=raw_source if raw_source.startswith("runtime") else _RUNTIME_SOURCE,
                     location=str(ev.get("location", "")),
                     snippet=str(ev.get("snippet", "")),
                 )
@@ -219,14 +221,15 @@ def _evidences_from_jsonable(raw: Any, value: str) -> list[Evidence]:
 
 
 def _force_runtime_source(endpoints: list[Endpoint]) -> None:
-    """就地确保运行时端点的每条 evidence source="runtime"（合并语义靠 source 区分来源）。
+    """就地确保运行时端点的每条 evidence source 为 runtime*（合并语义靠 source 区分来源）。
 
-    C5b：已标 "runtime-decrypted"（解密出的明文端点）的 evidence 放行——它本就是运行时
-    来源的一种，需保留更精确的来源标记，便于报告区分"密文抓到"与"解密还原"。
+    任何 ``runtime*`` 子来源（runtime / runtime-decrypted / runtime-tshark / runtime-tls-decrypted）
+    放行——都属运行时来源，保留更精确的标记便于报告区分"密文抓到 / 明文 HTTP / TLS 解密还原"；
+    仅非 runtime* 的（哪怕原 JSON 写串了）才钉回 runtime。
     """
     for ep in endpoints:
         for ev in ep.evidences:
-            if ev.source not in (_RUNTIME_SOURCE, _RUNTIME_DECRYPTED_SOURCE):
+            if not ev.source.startswith("runtime"):
                 ev.source = _RUNTIME_SOURCE
 
 

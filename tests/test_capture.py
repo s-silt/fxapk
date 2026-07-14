@@ -530,6 +530,57 @@ def test_capture_prefers_socket_timeline_for_pcap_attribution(monkeypatch, tmp_p
     assert "9.9.9.9:443" not in attribution
 
 
+def test_capture_tls_keylog_decrypts_and_merges_endpoints(monkeypatch, tmp_path):
+    """★P2：floor.pcap 旁存在 tls.keys（NSS Key Log）+ tshark 可用 → 解密还原的 HTTP/2 后端并入端点，
+    标 is_cleartext=False、source=runtime-tls-decrypted。"""
+    from apkscan.dynamic import tshark_backend as tsb
+
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_capture_uid_socket_snapshot", lambda *a, **k: None)
+
+    floor = tmp_path / "floor.pcap"
+    floor.write_bytes(b"pcap")
+    monkeypatch.setattr(capture, "_start_floor_pcap", lambda *a, **k: object())
+    monkeypatch.setattr(capture, "_stop_floor_pcap", lambda *a, **k: floor)
+    monkeypatch.setattr(capture.pcap_ingest, "parse_pcap", lambda path: object())
+    monkeypatch.setattr(capture.pcap_ingest, "to_runtime_endpoints", lambda summary: [])
+    monkeypatch.setattr(capture.pcap_ingest, "remote_endpoints", lambda summary: [])
+
+    # 授权插桩落下的 keylog（约定路径 out/tls.keys）
+    (tmp_path / "tls.keys").write_text("CLIENT_RANDOM aa bb\n", encoding="utf-8")
+    # tshark 可用；明文路径无产出、解密路径还原一个 h2 后端
+    monkeypatch.setattr(tsb, "has_tshark", lambda: True)
+    monkeypatch.setattr(tsb, "extract_http", lambda pcap: [])
+    monkeypatch.setattr(
+        tsb, "extract_decrypted_http",
+        lambda pcap, keylog: [tsb.HttpRequest(
+            host="api.evil.com", method="POST", uri="/zj/api/user_login", dst_ip="1.2.3.4", dst_port="443")],
+    )
+
+    class EmptySampler:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(capture, "_SocketSampler", EmptySampler)
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+    report = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    eps = {ep["value"]: ep for ep in report["endpoints"]}
+    assert "api.evil.com" in eps  # 解密还原的后端并入
+    assert eps["api.evil.com"]["is_cleartext"] is False  # ★标记为解密（非明文）
+    assert str(tmp_path / "tls.keys") in result["artifacts"]  # keylog 作产物留档
+
+
 def test_capture_socket_attribution_falls_back_to_final_snapshot(monkeypatch, tmp_path):
     """时间线没有有效产物时，旧 uid_sockets.txt 归因路径保持可用。"""
     _set_capabilities(monkeypatch)

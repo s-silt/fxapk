@@ -110,6 +110,21 @@ def test_merge_runtime_evidence_source_is_runtime() -> None:
     assert all(ev.source == "runtime" for ev in merged.evidences)
 
 
+def test_merge_preserves_runtime_subsource_markers() -> None:
+    """★复审 Finding1：in-process 合并保留 runtime* 子来源（runtime-tls-decrypted 等），仅非 runtime* 钉 runtime。"""
+    report = _make_report()
+    eps = [
+        Endpoint(value="dec.fraud-c2.cn", kind="domain",
+                 evidences=[Evidence(source="runtime-tls-decrypted", location="tls-http", snippet="TLS 解密")]),
+        Endpoint(value="static.fraud-c2.cn", kind="domain",
+                 evidences=[Evidence(source="static-dex", location="x", snippet="y")]),  # 非 runtime* → 钉回
+    ]
+    merge.merge_runtime_endpoints(report, eps)
+    by = {e.value: e for e in report.endpoints}
+    assert by["dec.fraud-c2.cn"].evidences[0].source == "runtime-tls-decrypted"
+    assert by["static.fraud-c2.cn"].evidences[0].source == "runtime"
+
+
 # ---------------------------------------------------------------------------
 # merge_runtime_endpoints：infra 分级生成线索
 # ---------------------------------------------------------------------------
@@ -333,6 +348,29 @@ def test_load_runtime_endpoints_rebuilds_from_json(tmp_path) -> None:
     # source 一律 runtime
     for ep in eps:
         assert all(ev.source == "runtime" for ev in ep.evidences)
+
+
+def test_load_runtime_endpoints_preserves_runtime_subsource(tmp_path) -> None:
+    """★复审 Finding1（主路径）：从 runtime_report.json reload 时保留 runtime* 子来源，非 runtime* → runtime。
+
+    这是 P2 解密标记进最终报告的关键：capture 写 runtime-tls-decrypted → cli reload 不能把它抹成 runtime。
+    """
+    report_file = tmp_path / "runtime_report.json"
+    _write_runtime_report(
+        report_file,
+        [
+            {"value": "dec.fraud-c2.cn", "kind": "domain",
+             "evidences": [{"source": "runtime-tls-decrypted", "location": "tls-http", "snippet": "TLS 解密"}]},
+            {"value": "http.fraud-c2.cn", "kind": "domain",
+             "evidences": [{"source": "runtime-tshark", "location": "http", "snippet": "明文 HTTP"}]},
+            {"value": "junk.fraud-c2.cn", "kind": "domain",
+             "evidences": [{"source": "dex", "location": "x", "snippet": "y"}]},
+        ],
+    )
+    by = {ep.value: ep for ep in merge.load_runtime_endpoints(str(report_file))}
+    assert by["dec.fraud-c2.cn"].evidences[0].source == "runtime-tls-decrypted"  # 解密标记保住
+    assert by["http.fraud-c2.cn"].evidences[0].source == "runtime-tshark"  # 明文 tshark 标记保住
+    assert by["junk.fraud-c2.cn"].evidences[0].source == "runtime"  # 非 runtime* 钉回
 
 
 def test_load_runtime_endpoints_missing_file_returns_empty(tmp_path) -> None:
