@@ -466,8 +466,9 @@ def test_capture_run_includes_uid_snapshot_artifact(monkeypatch, tmp_path):
     assert str(snap) in result["artifacts"]
 
 
-def test_capture_prefers_socket_timeline_for_pcap_attribution(monkeypatch, tmp_path):
-    """时间线存在时用其补短连接，不被窗口末旧快照替换。"""
+def test_capture_merges_timeline_and_snapshot_for_pcap_attribution(monkeypatch, tmp_path):
+    """★codex 复审 P0：归因合并【时间线】（补目标短连）+【窗口末快照】（含全 UID 竞争视图）——
+    时间线的短连（1.2.3.4）与快照的目标连接（9.9.9.9）都应归因到目标，不再互相替换掉。"""
     _set_capabilities(monkeypatch)
     calls = _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
     monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
@@ -526,8 +527,8 @@ def test_capture_prefers_socket_timeline_for_pcap_attribution(monkeypatch, tmp_p
     assert sampler_events == ["init", "start", "stop"]
     assert calls["waited"] is True
     assert str(timeline) in result["artifacts"]
-    assert attribution["1.2.3.4:443"]["is_target_app"] is True
-    assert "9.9.9.9:443" not in attribution
+    assert attribution["1.2.3.4:443"]["is_target_app"] is True  # 时间线补的目标短连
+    assert attribution["9.9.9.9:443"]["is_target_app"] is True  # 末快照的目标连接（merge：不再被时间线替换掉）
 
 
 def test_capture_tls_keylog_decrypts_and_merges_endpoints(monkeypatch, tmp_path):

@@ -759,31 +759,40 @@ def _capture(
         try:
             from apkscan.dynamic import socket_attr
 
-            table = None
-            attribution_source = ""
+            parsed: list = []
+            names: list[str] = []
             if socket_timeline is not None and socket_timeline.is_file():
-                candidate = socket_attr.parse_socket_timeline(
+                tl = socket_attr.parse_socket_timeline(
                     socket_timeline.read_text(encoding="utf-8", errors="replace")
                 )
-                if candidate.entries:
-                    table = candidate
-                    attribution_source = socket_timeline.name
-            if table is None and uid_snapshot is not None and uid_snapshot.is_file():
-                table = socket_attr.parse_uid_sockets(
+                if tl.entries:
+                    parsed.append(tl)
+                    names.append(socket_timeline.name)
+            if uid_snapshot is not None and uid_snapshot.is_file():
+                snap = socket_attr.parse_uid_sockets(
                     uid_snapshot.read_text(encoding="utf-8", errors="replace")
                 )
-                attribution_source = uid_snapshot.name
-            if table is None:
+                if snap.entries:
+                    parsed.append(snap)
+                    names.append(uid_snapshot.name)
+            if not parsed:
                 raise ValueError("socket 时间线与窗口末快照均无可解析记录")
+            # ★codex 复审 P0：合并【时间线】（_SocketSampler 只采目标 UID、补短连）+【窗口末快照】（含全 UID，
+            #   是歧义判定必需的竞争视图）——不能只用 target-only 时间线，否则同远端多 UID 时会误判 confident。
+            table = parsed[0] if len(parsed) == 1 else socket_attr.merge_uid_sockets(*parsed)
+            attribution_source = "+".join(names)
             res = pcap_ingest.remote_endpoints(floor_summary)  # 复用已解析的 summary，不重复解析
             attr = socket_attr.attribute_endpoints([(r.ip, r.port) for r in res], table)
             pcap_app_attr = {f"{ip}:{port}": v for (ip, port), v in attr.items()}
             if pcap_app_attr:
-                _n_app = sum(1 for v in pcap_app_attr.values() if v.get("is_target_app"))
+                # ★codex 复审 P1：三类分开计数——歧义(is_target_app=None)不能被当 falsy 归入"背景噪音"。
+                n_target = sum(1 for v in pcap_app_attr.values() if v.get("is_target_app") is True)
+                n_ambiguous = sum(1 for v in pcap_app_attr.values() if v.get("attribution") == "ambiguous")
+                n_other = len(pcap_app_attr) - n_target - n_ambiguous
                 playbook.append(
-                    f"UID 归因：把 floor pcap 接入节点绑到 app——{len(pcap_app_attr)} 个已归因、"
-                    f"其中 {_n_app} 个属目标 app（uid={table.target_uid}），余为背景噪音"
-                    f"（来源 {attribution_source}）"
+                    f"UID 归因：floor pcap 接入节点绑到 app——{len(pcap_app_attr)} 个已归因："
+                    f"{n_target} 属目标 app（uid={table.target_uid}）、{n_other} 属其它 UID（背景噪音）、"
+                    f"{n_ambiguous} 歧义（同远端多进程、未强选目标，见 candidates）（来源 {attribution_source}）"
                 )
         except Exception:
             logger.exception("[capture] floor：pcap↔app UID 归因失败（忽略，不影响主流程）")
@@ -1525,7 +1534,8 @@ def _capture_uid_socket_snapshot(package: str, out_path: Path, serial: str | Non
         if ss and ss.strip():
             parts.append("## ss -tunp（需 root 显进程/UID）\n" + ss.rstrip())
             got = True
-        for procfs in ("/proc/net/tcp", "/proc/net/tcp6"):
+        # tcp{,6}=长连后端；udp{,6}=QUIC/HTTP3 的 socket（UDP/443），补上才能给 QUIC 流做 UID 归因。
+        for procfs in ("/proc/net/tcp", "/proc/net/tcp6", "/proc/net/udp", "/proc/net/udp6"):
             raw = _adb_capture(["shell", "cat", procfs], serial)
             if raw and raw.strip():
                 parts.append(f"## {procfs}（uid 在第 8 列，地址/端口十六进制）\n" + raw.rstrip())
@@ -1607,7 +1617,10 @@ class _SocketSampler:
         from apkscan.dynamic import socket_attr
 
         ts = time.time()
-        for procfs, proto in (("/proc/net/tcp", "tcp"), ("/proc/net/tcp6", "tcp6")):
+        for procfs, proto in (
+            ("/proc/net/tcp", "tcp"), ("/proc/net/tcp6", "tcp6"),
+            ("/proc/net/udp", "udp"), ("/proc/net/udp6", "udp6"),  # QUIC/HTTP3 = UDP，补归因
+        ):
             raw = _adb_capture(["shell", "cat", procfs], self.serial) or ""
             for line in raw.splitlines():
                 entry = socket_attr._parse_proc_line(line, proto)
