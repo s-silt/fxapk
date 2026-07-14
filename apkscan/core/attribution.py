@@ -213,8 +213,8 @@ def _parse_asn(raw: Any) -> tuple[int | None, str | None]:
         n, org_tail = raw, None
     else:
         m = re.match(r"^\s*(?:AS)?(\d+)(?:\s+(.*))?$", str(raw), re.IGNORECASE)
-        if not m:
-            return None, None
+        if not m or len(m.group(1)) > 10:  # 合法 ASN ≤ 4294967294（10 位）；超长数字串直接判非法，
+            return None, None             # ★避免 int() 触达 CPython 4300 位限制抛 ValueError（绝不抛）
         n = int(m.group(1))
         org_tail = (m.group(2) or "").strip() or None
     if not (_ASN_MIN <= n <= _ASN_MAX):
@@ -298,6 +298,8 @@ def score_edge_provider(observed: dict[str, Any], *, rules: dict[str, Any] | Non
             continue
         neg_adj, neg_fired = _negative_adjustment(observed, strong, neg_weights)
         final = score + neg_adj
+        if not math.isfinite(final):   # ★分数有限总闸：坏规则权重累加成 inf/-inf/nan → 候选作废，不泄漏非有限分
+            continue
         tier = _edge_tier(final, len(strong), thresholds)
         if tier is None:
             continue
@@ -430,26 +432,16 @@ def _score_one_edge(
             if val and val == _s(obs.get(key)):
                 _add("tls", "tls_fingerprint", f"tls:{path_[1]}", w, strong_kind=False)
                 break
-    # 弱信号 —— ASN。★先把观测 ASN 归一到**可路由整数**（同 _parse_asn 纪律：range 外/保留值/inf/畸形不采纳），
-    # 再与规则比对——否则保留值 4294967295 等会被当证据坐实。
-    obs_asn = None
-    raw_asn = obs.get("asn")
-    if raw_asn is not None and not isinstance(raw_asn, bool):
-        try:
-            n = int(raw_asn)  # inf/nan/超大浮点 → OverflowError，一并吞掉
-            if _ASN_MIN <= n <= _ASN_MAX:
-                obs_asn = n
-        except (ValueError, TypeError, OverflowError):
-            obs_asn = None
+    # 弱信号 —— ASN。★观测与规则两侧**都过 _parse_asn**（统一纪律：非整数 float/保留值/越界/超长数字串一律不采纳，
+    # 且 _parse_asn 绝不抛）——避免手写 int() 在 13335.9 被截断、或 '9'*10000 抛 ValueError。
+    obs_asn, _ = _parse_asn(obs.get("asn"))
     if obs_asn is not None:
         for val, w, _e in _entries(sig, "network", "asns"):
-            try:
-                if int(val) == obs_asn:
-                    _add("asn", "asn", f"asn:{obs_asn}", w, strong_kind=False)
-                    weak.append(f"asn:{obs_asn}")
-                    break
-            except (ValueError, TypeError, OverflowError):
-                continue
+            rule_asn, _ = _parse_asn(val)
+            if rule_asn is not None and rule_asn == obs_asn:
+                _add("asn", "asn", f"asn:{obs_asn}", w, strong_kind=False)
+                weak.append(f"asn:{obs_asn}")
+                break
 
     # 负证据不在此处按 provider 评估——统一在 score_edge_provider 对最佳候选全局评估（见 _negative_adjustment）。
     return score_add[0], strong, matched, weak

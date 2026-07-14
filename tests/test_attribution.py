@@ -219,6 +219,30 @@ def test_edge_asn_signal_rejects_reserved_and_out_of_range() -> None:
     # 合法可路由 ASN 仍正常匹配 → possible。
     ok = A.score_edge_provider({"asn": 13335}, rules=_rule(13335))
     assert ok is not None and ok["tier"] == "possible" and ok["score"] == 3.0
+    # 非整数 float ASN（13335.9）不得被截断采纳；规则侧超长数字串不得抛。
+    assert A.score_edge_provider({"asn": 13335.9}, rules=_rule(13335)) is None
+    assert A.score_edge_provider({"asn": 13335}, rules=_rule("9" * 10000)) is None  # type: ignore[arg-type]
+
+
+def test_parse_asn_oversized_digit_string_no_raise() -> None:
+    """★超长数字串（>10 位）在 int() 触达 CPython 4300 位限制前即判非法 → (None, None)，绝不抛。"""
+    assert A._parse_asn("9" * 10000) == (None, None)
+    assert A._parse_asn("AS" + "1" * 5000) == (None, None)
+    assert A._parse_asn("13335.9") == (None, None)  # 非整数字符串
+    assert A._parse_asn(13335.9) == (None, None)    # 非整数 float
+
+
+def test_edge_score_always_finite() -> None:
+    """★分数有限总闸：即便规则权重是有限大数（1e308）累加溢出成 inf，也不得泄漏非有限分 → 候选作废。"""
+    r = A.score_edge_provider(
+        {"response_headers": {"cf-ray": "x"}, "cname_chain": ["a.cf.net"]},
+        rules={"edge_providers": [{"id": "c", "name": "C", "signals": {
+            "http": {"headers": [{"name": "cf-ray", "weight": 1e308}]},
+            "dns": {"cname_suffix": [{"value": ".cf.net", "weight": 1e308}]}}}]})
+    assert r is None  # inf 分被 isfinite 闸拦下
+    # 合法权重仍产出有限分。
+    ok = A.score_edge_provider({"response_headers": {"cf-ray": "x"}}, rules=_RULES)
+    assert ok is not None and math.isfinite(ok["score"])
 
 
 def test_every_layer_has_source_field() -> None:
