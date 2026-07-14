@@ -630,6 +630,26 @@ def _capture(
                 )
         except Exception:
             logger.exception("[capture] floor：解析/并入 floor.pcap 失败（忽略，pcap 仍作产物）")
+    # floor pcap 接入节点【绑定到目标 app】：消费 uid_sockets.txt 快照，按远端 IP:port 关联出该连接属
+    # 哪个 UID/进程、是否 == 目标 app——自动区分真后端 vs 背景噪音（此前 uid_sockets.txt 只供人工比对）。
+    # best-effort、绝不影响主流程（floor pcap 与 uid 快照都在才做；失败忽略）。
+    pcap_app_attr: dict[str, Any] = {}
+    if floor_pcap is not None and floor_pcap.is_file() and uid_snapshot is not None and uid_snapshot.is_file():
+        try:
+            from apkscan.dynamic import socket_attr
+
+            table = socket_attr.parse_uid_sockets(uid_snapshot.read_text(encoding="utf-8", errors="replace"))
+            res = pcap_ingest.remote_endpoints(pcap_ingest.parse_pcap(str(floor_pcap)))
+            attr = socket_attr.attribute_endpoints([(r.ip, r.port) for r in res], table)
+            pcap_app_attr = {f"{ip}:{port}": v for (ip, port), v in attr.items()}
+            if pcap_app_attr:
+                _n_app = sum(1 for v in pcap_app_attr.values() if v.get("is_target_app"))
+                playbook.append(
+                    f"UID 归因：把 floor pcap 接入节点绑到 app——{len(pcap_app_attr)} 个已归因、"
+                    f"其中 {_n_app} 个属目标 app（uid={table.target_uid}），余为背景噪音"
+                )
+        except Exception:
+            logger.exception("[capture] floor：pcap↔app UID 归因失败（忽略，不影响主流程）")
     # C5b：额外抽出报文体（请求/响应），供 merge 阶段对 {data,timestamp} 信封解密。
     # 失败/缺 mitmproxy 包 → 空列表（不影响端点提取与报告写出）。
     messages = _parse_messages(flows_file)
@@ -657,6 +677,8 @@ def _capture(
         "endpoint_total": len(endpoints),
         "warnings": list(warnings),
     }
+    if pcap_app_attr:  # floor pcap 接入节点→app UID/进程 归因（真后端 vs 背景噪音）
+        capture_signals["pcap_app_attribution"] = pcap_app_attr
     # 降级判定：仅当**没有任何证据路径成立**——代理未起 且 无 floor pcap 且 MITM 0 字节 且 端点 0
     # ——才降为 degraded（总失败组合）。只要代理起了 / floor 拉回了 / 抓到端点，即便 app 安静
     # （0 flows）仍算 done（不阻断，降级细节走 reason/warnings，保持既有契约）。
