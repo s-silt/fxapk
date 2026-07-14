@@ -3,10 +3,31 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
-## Unreleased
+## Unreleased（0.10.0 开发中）
 
-Theme: **资产沉淀主线 P0 —— 样本库骨架**。让 fxapk 把历次分析的 report.json
-累积成可查询、可回归、可重建的语料库，为后续回归门禁 / IOC 关联 / 规则目录打地基。
+Theme: **PCAP-first 网络证据 + 五层基础设施归属 + 资产沉淀**——动态从"HTTP 代理式抓包"
+转向零注入的 PCAP 底座解析；把"IP 归属"从扁平的所属公司升级为五层不塌缩的归因链；
+把历次分析的 report.json 沉淀成可查询、可回归、可重建的语料库。
+
+### New — 五层基础设施归属（`core/attribution`）
+
+- 每个域名 / IP 端点富化后组装成**五层不塌缩**归因链，写进 `endpoints[].enrichment["attribution"]`：
+  `resource_holder`（IP 资源登记方，IP-RDAP）→ `origin_network`（BGP Origin ASN）→ `hosting_provider`
+  （云 / IDC）→ `edge_provider`（CDN / WAF / 边缘代理，多信号加权指纹）→ `service_operator`
+  （实际运营者，**恒 unknown，绝不从 ASN / RDAP 推断**）。域名按解析到的每个 IP 逐个产链（per-IP，不合并）。
+- edge 指纹为多信号加权：`confirmed` 须 ≥2 个独立强信号（单一响应头可伪造，最多 `probable`），
+  负证据（只命中公有云 ASN / 通用 X-Cache / nginx）抑制"租了公有云就当代理坐实"的误判。
+- 新增 `ip_rdap` 富化器（`rdap.org/ip` 查网段登记方）填 `resource_holder`——仅认 RDAP `registrant` 实体，
+  不拿 abuse / technical 联系人或域名注册方冒充 IP 资源持有方。
+- 调证函（`fxapk letters`）新增「基础设施归属链」段，按落地 IP 分层展示，直接支撑"向谁调证"。
+
+### New — 动态 PCAP-first 网络证据
+
+- 零注入 PCAP 解析：TLS ClientHello 跨 TCP 段恢复 + SNI / ALPN 提取、QUIC v1 Initial 解密与 SNI 提取。
+- socket 精确归因：TCP / UDP / IPv4 / IPv6、持续 socket 时间线、多 UID 候选时输出**歧义**而非硬猜一个。
+- TLS Key Log + tshark 解密链路；HTTP/1.1 · HTTP/2 凭据（Authorization / Cookie）提取与脱敏。
+- `floor-only` 模式不再误依赖 Frida；`doctor` 体检覆盖 PCAP 深度能力（QUIC 元数据 / 解密 / tshark 就绪度）；
+  报告记录 `build_commit` 溯源。
 
 ### New — `fxapk corpus`（样本库）
 
