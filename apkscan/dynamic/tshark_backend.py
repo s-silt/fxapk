@@ -18,6 +18,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from apkscan.core.models import Endpoint, Evidence
 
@@ -181,11 +182,31 @@ def _looks_like_keylog(keylog_path: Path) -> bool:
     return False
 
 
-def run_tshark_decrypt(pcap_path: str, keylog_path: str, timeout: float = _TSHARK_TIMEOUT) -> str | None:
-    """用 NSS Key Log 解密 pcap 的 TLS，跑 ``tshark -o tls.keylog_file:<keys> -Y "http.request or http2..."``
-    抽解密后 HTTP/1.1+HTTP/2 请求 → TSV。tshark 缺 / keylog 无效或非 NSS / 超时 / 出错 → None（绝不抛）。
+_DECRYPT_FILTER = "http.request or http2.headers.method"
 
-    内存/超时/截断防护同 :func:`run_tshark_http`。keylog 校验：文件存在、非空、且确含 NSS 标签才放行。
+#: 凭据抽取 display filter：只取带 Authorization/Cookie（登录态/token）的解密请求。
+_CRED_FILTER = "http.authorization or http.cookie or http2.headers.authorization or http2.headers.cookie"
+#: 凭据字段：url host + method + uri（h1/h2 成对）+ Authorization/Cookie（h1/h2 成对）。列序即 TSV 列序。
+_CRED_FIELDS = (
+    "http.host",                    # 0
+    "http2.headers.authority",      # 1
+    "http.request.method",          # 2
+    "http2.headers.method",         # 3
+    "http.request.uri",             # 4
+    "http2.headers.path",           # 5
+    "http.authorization",           # 6
+    "http2.headers.authorization",  # 7
+    "http.cookie",                  # 8
+    "http2.headers.cookie",         # 9
+)
+
+
+def _run_tshark_decrypt(
+    pcap_path: str, keylog_path: str, display_filter: str, fields: tuple[str, ...], timeout: float
+) -> str | None:
+    """keylog 门控 + tls/ssl 回退，用指定 ``display_filter``/``fields`` 解密抽取 → TSV 文本 or None（绝不抛）。
+
+    keylog 校验：文件存在、非空、且确含 NSS 标签才放行（门控：无密钥不动 TLS）。内存/超时/截断防护见 _run_decrypt_once。
     """
     bin_ = shutil.which("tshark")
     if not bin_:
@@ -193,19 +214,19 @@ def run_tshark_decrypt(pcap_path: str, keylog_path: str, timeout: float = _TSHAR
     kp = Path(keylog_path)
     try:
         if not kp.is_file() or kp.stat().st_size == 0 or not _looks_like_keylog(kp):
-            return None  # 无有效 NSS keylog → 不解密（门控：无密钥不动 TLS）
+            return None
     except OSError:
         return None
     # ★-o pref 值用正斜杠：tshark 在 Windows 上对反斜杠的 pref 值可能解析异常（-r 是普通文件参数、反斜杠无碍）。
     keylog_arg = kp.as_posix()
     # 先试 tls.keylog_file（Wireshark 3.0+）；旧版（<3.0，协议名还是 ssl，tls.keylog_file 为未知 pref →
     # 非零退出且空产出）回退试 ssl.keylog_file。不与 tls 并传，避免现代 Wireshark 因未知 ssl 别名破功。
-    rc, raw = _run_decrypt_once(bin_, pcap_path, "tls.keylog_file", keylog_arg, timeout)
+    rc, raw = _run_decrypt_once(bin_, pcap_path, "tls.keylog_file", keylog_arg, timeout, display_filter, fields)
     if rc is None:
         return None  # 超时/子进程失败 → 降级为空
     if rc != 0 and not raw:
         logger.warning("[tshark] tls.keylog_file 非零且空产出，回退试 ssl.keylog_file（疑似 Wireshark <3.0）")
-        rc2, raw2 = _run_decrypt_once(bin_, pcap_path, "ssl.keylog_file", keylog_arg, timeout)
+        rc2, raw2 = _run_decrypt_once(bin_, pcap_path, "ssl.keylog_file", keylog_arg, timeout, display_filter, fields)
         if rc2 is not None and raw2:
             rc, raw = rc2, raw2
     if rc != 0:
@@ -216,20 +237,29 @@ def run_tshark_decrypt(pcap_path: str, keylog_path: str, timeout: float = _TSHAR
     return text
 
 
-def _run_decrypt_once(
-    bin_: str, pcap_path: str, pref_name: str, keylog_arg: str, timeout: float
-) -> tuple[int | None, bytes]:
-    """跑一次解密 tshark（``-o <pref_name>:<keylog>``）→ (returncode, raw_bytes)；超时/OSError → (None, b"")。
+def run_tshark_decrypt(pcap_path: str, keylog_path: str, timeout: float = _TSHARK_TIMEOUT) -> str | None:
+    """用 NSS Key Log 解密 pcap 的 TLS，抽解密后 HTTP/1.1+HTTP/2 请求（端点）→ TSV。缺/无效/超时/出错 → None。"""
+    return _run_tshark_decrypt(pcap_path, keylog_path, _DECRYPT_FILTER, _DECRYPT_FIELDS, timeout)
 
-    stdout 落临时文件、读侧封顶 _MAX_OUTPUT（内存有界）。绝不抛。供 tls/ssl 两种 keylog pref 名复用。
-    """
+
+def run_tshark_decrypt_creds(pcap_path: str, keylog_path: str, timeout: float = _TSHARK_TIMEOUT) -> str | None:
+    """用 NSS Key Log 解密抽带 Authorization/Cookie（登录态/token）的 HTTP 请求 → TSV。缺/无效/超时/出错 → None。"""
+    return _run_tshark_decrypt(pcap_path, keylog_path, _CRED_FILTER, _CRED_FIELDS, timeout)
+
+
+def _run_decrypt_once(
+    bin_: str, pcap_path: str, pref_name: str, keylog_arg: str, timeout: float,
+    display_filter: str, fields: tuple[str, ...],
+) -> tuple[int | None, bytes]:
+    """跑一次解密 tshark（``-o <pref_name>:<keylog> -Y <filter> -e <fields...>``）→ (returncode, raw_bytes)；
+    超时/OSError → (None, b"")。stdout 落临时文件、读侧封顶 _MAX_OUTPUT（内存有界）。绝不抛。"""
     cmd = [
         bin_, "-r", str(pcap_path),
         "-o", f"{pref_name}:{keylog_arg}",
-        "-Y", "http.request or http2.headers.method",
+        "-Y", display_filter,
         "-T", "fields", "-E", "occurrence=f",
     ]
-    for f in _DECRYPT_FIELDS:
+    for f in fields:
         cmd += ["-e", f]
     try:
         with tempfile.TemporaryFile() as tmp:
@@ -291,6 +321,54 @@ def extract_decrypted_http(pcap_path: str, keylog_path: str) -> list[HttpRequest
     if text is None:
         return []
     return parse_decrypted_fields(text)
+
+
+def parse_decrypted_credentials(text: str) -> list[dict[str, Any]]:
+    """解析凭据 TSV（列序见 _CRED_FIELDS）→ **未脱敏**的 raw credential payload 列表（source=tls-decrypted）。绝不抛。
+
+    ★脱敏不在此做（本模块不依赖 cryptohook）：caller（capture）须对每条 payload 调
+    ``cryptohook.normalize_credential_event`` 脱敏后再落库/落报告，绝不把明文 token 写进 runtime_report.json。
+    headers 只收 Authorization / Cookie（登录态/token）；无凭据头的行丢弃。
+    """
+    out: list[dict[str, Any]] = []
+    if not isinstance(text, str):
+        return out
+    n = len(_CRED_FIELDS)
+    for line in text.splitlines():
+        if len(out) >= _MAX_REQUESTS:
+            break
+        if not line.strip():
+            continue
+        cols = line.split("\t")
+        host = _col(cols, 0) or _col(cols, 1)
+        if not host or len(cols) != n:  # 无 host / 列数≠预期（tab 溢出，凭据头值不可信）→ 丢弃
+            continue
+        method = _col(cols, 2) or _col(cols, 3)
+        uri = _col(cols, 4) or _col(cols, 5)
+        headers: dict[str, str] = {}
+        authz = _col(cols, 6) or _col(cols, 7)
+        cookie = _col(cols, 8) or _col(cols, 9)
+        if authz:
+            headers["Authorization"] = authz
+        if cookie:
+            headers["Cookie"] = cookie
+        if not headers:  # 无凭据头 → 无取证价值
+            continue
+        out.append({
+            "source": "tls-decrypted",
+            "url": f"https://{host}{uri}" if uri.startswith("/") else f"https://{host}",
+            "method": method,
+            "headers": headers,
+        })
+    return out
+
+
+def extract_decrypted_credentials(pcap_path: str, keylog_path: str) -> list[dict[str, Any]]:
+    """用 keylog 解密抽带 Authorization/Cookie 的 HTTP 请求 → **未脱敏** raw payload 列表（脱敏由 caller 做）。绝不抛。"""
+    text = run_tshark_decrypt_creds(pcap_path, keylog_path)
+    if text is None:
+        return []
+    return parse_decrypted_credentials(text)
 
 
 def _normalize_host(raw: str) -> tuple[str, str]:

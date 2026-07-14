@@ -656,12 +656,14 @@ def _add_runtime_credential_leads(report: Report, events: list[dict[str, Any]]) 
 def _credential_lead_fields(ev: dict[str, Any]) -> tuple[str, str, str]:
     """从规范化凭据事件产 (lead_value, evidence_snippet, where_to_request)。
 
-    okhttp：value=登录/请求的真实 host + 路径；snippet=脱敏 token/body 摘要；where=凭 token
-      以受害人身份向平台调登录 IP/设备。
+    HTTP 请求（okhttp 明文 / tls-decrypted 解密还原）：value=登录/请求的真实 host + 路径；
+      snippet=脱敏 token/body 摘要；where=凭 token 以受害人身份向平台调登录 IP/设备。
     sharedprefs：value=``凭据键名=脱敏值``；where=凭手机号向运营商调号主实名 / 凭 token 向平台调登录态。
     """
     source = str(ev.get("source", ""))
-    if source == "okhttp":
+    # HTTP 请求凭据源（url/headers schema）：okhttp 明文 + tls-decrypted 解密还原
+    # （权威定义见 cryptohook._HTTP_CREDENTIAL_SOURCES；此处内联避免函数内跨模块导入）。
+    if source in ("okhttp", "tls-decrypted"):
         url = str(ev.get("url", ""))
         host = _host_of_url(url) or url
         headers = ev.get("headers") if isinstance(ev.get("headers"), dict) else {}
@@ -670,7 +672,8 @@ def _credential_lead_fields(ev: dict[str, Any]) -> tuple[str, str, str]:
             if str(k).strip().lower() in ("authorization", "token", "cookie"):
                 auth = f"{k}={v}"
                 break
-        value = f"OkHttp登录态:{host}"
+        label = "TLS解密登录态" if source == "tls-decrypted" else "OkHttp登录态"
+        value = f"{label}:{host}"
         body = str(ev.get("body", ""))
         snippet = f"{ev.get('method', '')} {url} | {auth} | body={body[:80]}".strip(" |")
         where = (
@@ -703,7 +706,7 @@ def _credential_host_endpoints(events: list[dict[str, Any]]) -> list[Endpoint]:
     """
     found: dict[str, Endpoint] = {}
     for ev in events:
-        if str(ev.get("source", "")) != "okhttp":
+        if str(ev.get("source", "")) not in ("okhttp", "tls-decrypted"):  # HTTP 请求凭据源（含解密还原）
             continue
         url = str(ev.get("url", ""))
         if not url:

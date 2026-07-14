@@ -246,3 +246,49 @@ def test_run_tshark_decrypt_no_fallback_when_tls_ok(monkeypatch, tmp_path) -> No
     monkeypatch.setattr(tshark_backend.subprocess, "run", _fake_run)
     tshark_backend.extract_decrypted_http("x.pcap", str(kl))
     assert len(calls) == 1 and "tls.keylog_file:" in calls[0]  # 只跑一次、tls 路径
+
+
+# ---------------------------------------------------------------------------
+# P2 续：解密后凭据头（Authorization/Cookie=登录态/token）抽取（未脱敏，脱敏由 caller 做）
+# ---------------------------------------------------------------------------
+# 凭据 TSV 列序（10）：host, authority, method, h2method, uri, h2path, http.authz, h2.authz, http.cookie, h2.cookie。
+_CRED_TSV = "\n".join([
+    # HTTP/2 登录请求：Authorization 在 http2.headers.authorization（col7）
+    "\t".join(["", "api.evil.com", "", "POST", "", "/zj/api/user_login", "", "Bearer secrettoken1234567890", "", ""]),
+    # HTTP/1.1 请求：Cookie 在 http.cookie（col8）
+    "\t".join(["secure.evil.com", "", "GET", "", "/config", "", "", "", "sid=abc; token=xyz", ""]),
+    # 无凭据头（filter 理论不产出，防御性）→ 丢弃
+    "\t".join(["nohdr.evil.com", "", "GET", "", "/x", "", "", "", "", ""]),
+    "",
+])
+
+
+def test_parse_decrypted_credentials() -> None:
+    creds = tshark_backend.parse_decrypted_credentials(_CRED_TSV)
+    assert len(creds) == 2  # 无凭据头行不计
+    assert creds[0]["source"] == "tls-decrypted"
+    assert creds[0]["url"] == "https://api.evil.com/zj/api/user_login" and creds[0]["method"] == "POST"
+    assert creds[0]["headers"]["Authorization"] == "Bearer secrettoken1234567890"  # 未脱敏（脱敏在 caller）
+    assert "Cookie" not in creds[0]["headers"]
+    assert creds[1]["headers"]["Cookie"] == "sid=abc; token=xyz" and "Authorization" not in creds[1]["headers"]
+
+
+def test_parse_decrypted_credentials_robust() -> None:
+    assert tshark_backend.parse_decrypted_credentials("") == []
+    assert tshark_backend.parse_decrypted_credentials(None) == []  # type: ignore[arg-type]
+    assert tshark_backend.parse_decrypted_credentials("a\tb\tc") == []  # 列数≠10（tab 溢出）→ 丢弃、不产错
+
+
+def test_extract_decrypted_credentials_mocked(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(tshark_backend.shutil, "which", lambda _n: "/usr/bin/tshark")
+    kl = tmp_path / "tls.keys"
+    kl.write_text("CLIENT_RANDOM aa bb\n", encoding="utf-8")
+
+    def _fake_run(cmd, **kw):  # noqa: ANN001, ANN202
+        assert "http.authorization" in " ".join(str(c) for c in cmd)  # 用了凭据 filter/字段
+        kw["stdout"].write(_CRED_TSV.encode("utf-8"))
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(tshark_backend.subprocess, "run", _fake_run)
+    creds = tshark_backend.extract_decrypted_credentials("x.pcap", str(kl))
+    assert len(creds) == 2 and creds[0]["headers"]["Authorization"].startswith("Bearer")
