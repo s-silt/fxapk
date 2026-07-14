@@ -719,6 +719,20 @@ def _capture(
                             f"P2 NSS TLS Key Log 解密：还原 TLS 应用层接入域名 {len(dec_added)} 个"
                             "（加密流量解密后才可见的真实业务后端）"
                         )
+                    # P2 续：抠解密 HTTP 请求的凭据头（Authorization/Cookie=登录态/token）→ credential_events。
+                    #   ★脱敏：每条经 cryptohook.normalize_credential_event（高敏头整值截断），绝不把明文 token 落报告。
+                    cred_added = 0
+                    for raw_cred in tshark_backend.extract_decrypted_credentials(str(floor_pcap), str(keylog)):
+                        ev = cryptohook.normalize_credential_event(raw_cred)
+                        if ev:
+                            credential_events.append(ev)
+                            cred_added += 1
+                    if cred_added:
+                        if str(keylog) not in artifacts:
+                            artifacts.append(str(keylog))
+                        playbook.append(
+                            f"P2 NSS TLS Key Log 解密：抠出 TLS 请求的登录态/token 头 {cred_added} 条（已脱敏）"
+                        )
             except Exception:
                 logger.exception("[capture] TLS keylog 解密抽取失败（忽略，不影响主流程）")
     # floor pcap 接入节点【绑定到目标 app】：消费 uid_sockets.txt 快照，按远端 IP:port 关联出该连接属
