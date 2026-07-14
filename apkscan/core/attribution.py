@@ -502,3 +502,53 @@ def attribution_from_enrichment(enrichment: dict[str, Any], ip: str = "") -> dic
     if isinstance(headers, dict):
         signals["response_headers"] = headers
     return build_ip_attribution(ip, signals)
+
+
+def build_endpoint_attribution(kind: str, value: str, enrichment: dict[str, Any]) -> dict[str, Any] | None:
+    """端点级归因入口（pipeline 用）：把一个端点的 enrichment 映射成 **per-IP** 五层归因。无信号 → None。绝不抛。
+
+    ★不塌缩：域名常解析到多个 IP、各自 ASN/edge 可能不同，故按 IP 逐个产五层（``ips`` 列表），不合并成一份。
+    - IP 端点：``enrichment['asn']``（AsnEnricher applies_to=['ip']）→ 单条五层。
+    - 域名端点：``enrichment['dns']['hosting']``（每解析 IP 一条 {ip,asn,org,isp}）→ 每 IP 一条五层；
+      ``dns['cname']`` 是**域名级共享** edge 信号，喂给每个 IP 的 edge 层。hosting 缺时退化用 ``dns['ips']``
+      （ASN 未知，但 CNAME 仍可识别 edge）。
+    ★resource_holder 恒 unknown（asn 走 ip-api ISP、rdap 是域名注册方，均非 IP 资源登记方；待 IP-RDAP 富化器）。
+    """
+    if not isinstance(enrichment, dict):
+        return None
+    kind_s = _s(kind)
+    ips: list[dict[str, Any]] = []
+
+    if kind_s == "ip":
+        att = attribution_from_enrichment(enrichment, ip=str(value or ""))
+        if att is not None:
+            ips.append(att)
+    elif kind_s == "domain":
+        dns_e = enrichment.get("dns")
+        dns_e = dns_e if isinstance(dns_e, dict) else {}
+        cname_raw = dns_e.get("cname")
+        cname = cname_raw if isinstance(cname_raw, list) else None
+        hosting = dns_e.get("hosting")
+        hosting = hosting if isinstance(hosting, list) else []
+        if hosting:
+            for h in hosting:
+                if not isinstance(h, dict):
+                    continue
+                signals: dict[str, Any] = {
+                    "country": h.get("country"),
+                    "asn": {"asn": h.get("asn"), "org": h.get("org") or h.get("isp")},
+                }
+                if cname:
+                    signals["cname_chain"] = cname
+                ips.append(build_ip_attribution(_s(h.get("ip")) or "", signals))
+        else:
+            # hosting 缺（限速/查不到）但已解析到 IP：ASN 未知，CNAME 仍可识别 edge。
+            for ip in dns_e.get("ips") or []:
+                signals = {"asn": {}}
+                if cname:
+                    signals["cname_chain"] = cname
+                ips.append(build_ip_attribution(_s(ip) or "", signals))
+
+    if not ips:
+        return None
+    return {"endpoint": str(value or ""), "kind": kind_s or "unknown", "ips": ips}

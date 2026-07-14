@@ -324,3 +324,54 @@ def test_attribution_from_enrichment_none_on_dns_only_no_signal() -> None:
     """只有 dns 但无 cname/asn 可用信号 → 仍返回结构（dns 子键存在即触发），edge 未识别。"""
     att = A.attribution_from_enrichment({"dns": {"ips": ["1.2.3.4"]}})
     assert att is not None and att["edge_provider"]["name"] is None
+
+
+def test_build_endpoint_attribution_ip() -> None:
+    """IP 端点：用 enrichment['asn'] → 单条五层归因。"""
+    att = A.build_endpoint_attribution("ip", "1.2.3.4", {"asn": {"asn": "AS45090", "org": "Tencent cloud"}})
+    assert att is not None and att["kind"] == "ip" and att["endpoint"] == "1.2.3.4"
+    assert len(att["ips"]) == 1
+    assert att["ips"][0]["origin_network"]["category"] == A.CAT_CLOUD
+    assert att["ips"][0]["resource_holder"]["name"] is None  # 未接 IP-RDAP，不冒充登记方
+
+
+def test_build_endpoint_attribution_domain_per_ip_never_collapses() -> None:
+    """★域名解析到多 IP（异构 ASN）→ 逐 IP 五层、绝不合并；域名级 CNAME 喂每个 IP 的 edge。"""
+    att = A.build_endpoint_attribution("domain", "pay.example.com", {
+        "dns": {
+            "ips": ["1.1.1.1", "2.2.2.2"],
+            "hosting": [
+                {"ip": "1.1.1.1", "asn": "AS13335", "org": "Cloudflare", "country": "US"},
+                {"ip": "2.2.2.2", "asn": "AS45090", "org": "Tencent", "country": "CN"},
+            ],
+            "cname": ["pay.example.com.cdn.cloudflare.net"],
+        },
+    })
+    assert att is not None and att["kind"] == "domain" and len(att["ips"]) == 2
+    by_ip = {layer["ip"]: layer for layer in att["ips"]}
+    # ★两个 IP 的 origin 各不相同（不塌缩）：一个 cdn、一个 cloud。
+    assert by_ip["1.1.1.1"]["origin_network"]["category"] == A.CAT_CDN
+    assert by_ip["2.2.2.2"]["origin_network"]["category"] == A.CAT_CLOUD
+    # 域名级 CNAME 共享给每个 IP 的 edge（单强信号 → probable）。
+    assert by_ip["1.1.1.1"]["edge_provider"]["name"] == "Cloudflare"
+    assert by_ip["2.2.2.2"]["edge_provider"]["name"] == "Cloudflare"
+
+
+def test_build_endpoint_attribution_domain_hosting_missing_degrades() -> None:
+    """域名 hosting 缺（限速）但有 ips+cname → 退化：origin unknown，但 CNAME 仍识别 edge。"""
+    att = A.build_endpoint_attribution("domain", "x.com", {
+        "dns": {"ips": ["3.3.3.3"], "cname": ["x.com.cdn.cloudflare.net"]}})
+    assert att is not None and len(att["ips"]) == 1
+    assert att["ips"][0]["origin_network"]["category"] == A.CAT_UNKNOWN
+    assert att["ips"][0]["edge_provider"]["name"] == "Cloudflare"
+
+
+def test_build_endpoint_attribution_none_and_robust() -> None:
+    """无归属信号 → None；坏输入/未知 kind → None，绝不抛。"""
+    assert A.build_endpoint_attribution("domain", "y.com", {}) is None
+    assert A.build_endpoint_attribution("ip", "5.5.5.5", {"tier": "app"}) is None
+    assert A.build_endpoint_attribution("ip", "x", None) is None  # type: ignore[arg-type]
+    assert A.build_endpoint_attribution("weird", "x", {"asn": {"asn": "AS1"}}) is None  # 未知 kind → 无 per-IP
+    # 域名 hosting 列表里混入坏元素不抛。
+    att = A.build_endpoint_attribution("domain", "z.com", {"dns": {"hosting": [None, {"ip": "9.9.9.9", "asn": "AS45090"}]}})
+    assert att is not None and len(att["ips"]) == 1 and att["ips"][0]["ip"] == "9.9.9.9"

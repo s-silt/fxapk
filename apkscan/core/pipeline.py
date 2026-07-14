@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from apkscan.analyzers.classify import classify_app
 from apkscan.core import infra
+from apkscan.core.attribution import build_endpoint_attribution
 from apkscan.core.models import (
     ANALYSIS_MODE_AUTHORIZED_ACTIVE,
     ANALYSIS_MODE_PASSIVE,
@@ -296,6 +297,18 @@ def _stage_enrich(state: _PipelineState) -> None:
     )
 
 
+def _stage_attribution(state: _PipelineState) -> None:
+    """把富化好的 enrichment 映射成**五层不塌缩**基础设施归因，写入 ``endpoint.enrichment['attribution']``。
+
+    ★必须在 enrich 之后（此时 asn/dns 子键已填）、build_leads 之前。域名按解析到的每个 IP 逐条产五层
+    （per-IP，不合并）。build_endpoint_attribution 绝不抛；无归属信号的端点不写该键（不塞空归因）。
+    """
+    for ep in state.endpoints:
+        att = build_endpoint_attribution(ep.kind, ep.value, ep.enrichment)
+        if att is not None:
+            ep.enrichment["attribution"] = att
+
+
 def _stage_build_leads(state: _PipelineState) -> None:
     """端点 → DOMAIN/IP Lead（分析器本身不产 DOMAIN/IP Lead，统一在此生成；advice 已在
     build_endpoint_leads 内按 infra 分级赋值）+ advice 兜底（分析器未自带研判建议时按线索类别给默认值，
@@ -388,6 +401,7 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     _run_stage(state, "analyze", _stage_run_analyzers)              # 分析器执行 + 聚合 + 端点去重
     _run_stage(state, "degradation_flags", _stage_degradation_flags)  # 降级标志入 meta
     _run_stage(state, "enrich", _stage_enrich)                     # 联网富化（两遍，主动/被动硬隔离）
+    _run_stage(state, "attribution", _stage_attribution)           # 五层不塌缩基础设施归因（per-IP）
     _run_stage(state, "build_leads", _stage_build_leads)           # 端点 → Lead + advice 兜底
     _run_stage(state, "overseas_targets", _stage_overseas_targets)  # 境外目标结构化段
     _run_stage(state, "credibility", _stage_credibility)           # 完整度 / 工具版本 / 规则摘要
