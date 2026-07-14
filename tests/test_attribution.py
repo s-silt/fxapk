@@ -321,6 +321,99 @@ def test_attribution_from_enrichment_reads_dns_cname() -> None:
 
 
 def test_attribution_from_enrichment_none_on_dns_only_no_signal() -> None:
-    """只有 dns 但无 cname/asn 可用信号 → 仍返回结构（dns 子键存在即触发），edge 未识别。"""
-    att = A.attribution_from_enrichment({"dns": {"ips": ["1.2.3.4"]}})
-    assert att is not None and att["edge_provider"]["name"] is None
+    """只有 dns.ips 但无 cname/asn 可用信号 → 无归因价值 → None（不产全 unknown 空壳）。"""
+    assert A.attribution_from_enrichment({"dns": {"ips": ["1.2.3.4"]}}) is None
+    # 但有 CNAME（可识别 edge）就该产出。
+    att = A.attribution_from_enrichment({"dns": {"cname": ["a.cdn.cloudflare.net"]}})
+    assert att is not None and att["edge_provider"]["name"] == "Cloudflare"
+
+
+def test_build_endpoint_attribution_ip() -> None:
+    """IP 端点：用 enrichment['asn'] → 单条五层归因。"""
+    att = A.build_endpoint_attribution("ip", "1.2.3.4", {"asn": {"asn": "AS45090", "org": "Tencent cloud"}})
+    assert att is not None and att["kind"] == "ip" and att["endpoint"] == "1.2.3.4"
+    assert len(att["ips"]) == 1
+    assert att["ips"][0]["origin_network"]["category"] == A.CAT_CLOUD
+    assert att["ips"][0]["resource_holder"]["name"] is None  # 未接 IP-RDAP，不冒充登记方
+
+
+def test_build_endpoint_attribution_domain_per_ip_never_collapses() -> None:
+    """★域名解析到多 IP（异构 ASN）→ 逐 IP 五层、绝不合并；域名级 CNAME 喂每个 IP 的 edge。"""
+    att = A.build_endpoint_attribution("domain", "pay.example.com", {
+        "dns": {
+            "ips": ["1.1.1.1", "2.2.2.2"],
+            "hosting": [
+                {"ip": "1.1.1.1", "asn": "AS13335", "org": "Cloudflare", "country": "US"},
+                {"ip": "2.2.2.2", "asn": "AS45090", "org": "Tencent", "country": "CN"},
+            ],
+            "cname": ["pay.example.com.cdn.cloudflare.net"],
+        },
+    })
+    assert att is not None and att["kind"] == "domain" and len(att["ips"]) == 2
+    by_ip = {layer["ip"]: layer for layer in att["ips"]}
+    # ★两个 IP 的 origin 各不相同（不塌缩）：一个 cdn、一个 cloud。
+    assert by_ip["1.1.1.1"]["origin_network"]["category"] == A.CAT_CDN
+    assert by_ip["2.2.2.2"]["origin_network"]["category"] == A.CAT_CLOUD
+    # 域名级 CNAME 共享给每个 IP 的 edge（单强信号 → probable）。
+    assert by_ip["1.1.1.1"]["edge_provider"]["name"] == "Cloudflare"
+    assert by_ip["2.2.2.2"]["edge_provider"]["name"] == "Cloudflare"
+
+
+def test_build_endpoint_attribution_domain_hosting_missing_degrades() -> None:
+    """域名 hosting 缺（限速）但有 ips+cname → 退化：origin unknown，但 CNAME 仍识别 edge。"""
+    att = A.build_endpoint_attribution("domain", "x.com", {
+        "dns": {"ips": ["3.3.3.3"], "cname": ["x.com.cdn.cloudflare.net"]}})
+    assert att is not None and len(att["ips"]) == 1
+    assert att["ips"][0]["origin_network"]["category"] == A.CAT_UNKNOWN
+    assert att["ips"][0]["edge_provider"]["name"] == "Cloudflare"
+
+
+def test_build_endpoint_attribution_partial_hosting_keeps_all_ips() -> None:
+    """★P0 回归（不塌缩）：hosting 常少于 ips（部分 IP 托管查询限速被跳过）——每个解析 IP 都须产一条，
+    只在 ips 里、hosting 缺的 IP 用 unknown ASN，绝不因只遍历 hosting 而丢失。"""
+    att = A.build_endpoint_attribution("domain", "pay.x.com", {
+        "dns": {
+            "ips": ["1.1.1.1", "2.2.2.2", "3.3.3.3"],  # 解析到 3 个
+            "hosting": [{"ip": "1.1.1.1", "asn": "AS13335", "org": "Cloudflare"}],  # 仅 1 个查到托管
+        },
+    })
+    assert att is not None
+    by_ip = {layer["ip"]: layer for layer in att["ips"]}
+    assert set(by_ip) == {"1.1.1.1", "2.2.2.2", "3.3.3.3"}, "只在 ips 里的 IP 被丢失 = per-IP 塌缩"
+    assert by_ip["1.1.1.1"]["origin_network"]["asn"] == 13335  # hosting 命中 → 有 ASN
+    assert by_ip["2.2.2.2"]["origin_network"]["asn"] is None   # hosting 缺 → unknown ASN，但 IP 保留
+    assert by_ip["3.3.3.3"]["origin_network"]["asn"] is None
+
+
+def test_build_endpoint_attribution_hosting_ip_not_in_ips_kept() -> None:
+    """hosting 里出现 ips 未列的 IP（数据不一致）→ 也纳入，一个不丢（ips ∪ hosting.ip）。"""
+    att = A.build_endpoint_attribution("domain", "y.com", {
+        "dns": {"ips": ["1.1.1.1"], "hosting": [{"ip": "9.9.9.9", "asn": "AS45090", "org": "Tencent"}]}})
+    assert att is not None
+    assert {layer["ip"] for layer in att["ips"]} == {"1.1.1.1", "9.9.9.9"}
+
+
+def test_build_endpoint_attribution_no_empty_shell() -> None:
+    """★P2：非空但字段全 None 的子键不得产全 unknown 空壳 → None（IP 端点空 asn / 域名空 hosting 元素）。"""
+    assert A.build_endpoint_attribution("ip", "1.2.3.4", {"asn": {"asn": None, "org": None, "isp": None}}) is None
+    assert A.build_endpoint_attribution("ip", "1.2.3.4", {"asn": {"unexpected": "v"}}) is None
+    assert A.build_endpoint_attribution("ip", "1.2.3.4", {"webcheck": {"unrelated": True}}) is None
+    assert A.build_endpoint_attribution("domain", "z.com", {"dns": {"hosting": [{}]}}) is None  # 无有效 IP
+    assert A.build_endpoint_attribution("domain", "z.com", {"dns": {"ips": [""]}}) is None       # 空 IP 串
+
+
+def test_build_endpoint_attribution_none_and_robust() -> None:
+    """无归属信号 → None；坏输入/未知 kind → None，绝不抛。"""
+    assert A.build_endpoint_attribution("domain", "y.com", {}) is None
+    assert A.build_endpoint_attribution("ip", "5.5.5.5", {"tier": "app"}) is None
+    assert A.build_endpoint_attribution("ip", "x", None) is None  # type: ignore[arg-type]
+    assert A.build_endpoint_attribution("weird", "x", {"asn": {"asn": "AS1"}}) is None  # 未知 kind → 无 per-IP
+    # 域名 hosting 列表里混入坏元素不抛。
+    att = A.build_endpoint_attribution("domain", "z.com", {"dns": {"hosting": [None, {"ip": "9.9.9.9", "asn": "AS45090"}]}})
+    assert att is not None and len(att["ips"]) == 1 and att["ips"][0]["ip"] == "9.9.9.9"
+    # ★退化分支 ips 非 list：int 不得抛（不可迭代）、str 不得被逐字符迭代成垃圾 per-IP → 一律 None。
+    for bad_ips in (123, "1.2.3.4", None, {"a": 1}):
+        assert A.build_endpoint_attribution("domain", "x", {"dns": {"ips": bad_ips}}) is None, f"ips={bad_ips!r} 未安全归空"
+    # dns 子键本身非 dict 也不抛。
+    assert A.build_endpoint_attribution("domain", "x", {"dns": []}) is None
+    assert A.build_endpoint_attribution("domain", "x", {"dns": "garbage"}) is None
