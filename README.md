@@ -6,7 +6,7 @@
 
 *CLI 命令 `fxapk`（保留 `apkscan` 别名）· PyPI 包名 `fxapk`* · **English**: [README.en.md](README.en.md)
 
-APK / iOS IPA **静态 + 动态分析 CLI**：抠出应用真实配置（AppID / AppKey / 渠道号 / uni-app 应用 ID 等）、网络端点、第三方组件与加固指纹，对域名 / IP 做归属富化，输出**结构化 HTML / JSON 报告**，并可跨样本关联聚类。
+APK / iOS IPA **静态 + 动态分析 CLI**：抠出应用真实配置（AppID / AppKey / 渠道号 / uni-app 应用 ID 等）、网络端点、第三方组件与加固指纹；对域名 / IP 做**五层不塌缩的基础设施归属**（资源登记方 → BGP ASN → 云 / IDC → CDN / 边缘代理 → 运营者，每层带来源与置信、查不到即标未知）；动态走 **PCAP-first** 抓包（TLS / QUIC 握手解析 + 按五元组的 socket 精确归因），输出**结构化 HTML / JSON 报告**。
 
 `pip install` 即可跑核心分析，**零环境**（不需要 JDK / 模拟器 / 真机）。加固样本的脱壳、抓包是可选的真机步骤。
 
@@ -21,7 +21,7 @@ pip install fxapk
 git clone https://github.com/s-silt/fxapk.git && cd fxapk && pip install -e .
 ```
 
-动态脱壳 / 抓包、关系图谱、网页看板等能力按需安装可选依赖；缺失时对应命令给出提示，核心分析不受影响。
+动态脱壳 / 抓包、样本库等能力按需安装可选依赖；缺失时对应命令给出提示，核心分析不受影响。
 
 ## 用法
 
@@ -33,7 +33,7 @@ fxapk analyze app.apk --out out
 fxapk auto app.apk --out out       # 无设备则自动跳过动态步骤，仍产出静态报告
 ```
 
-主要命令：`analyze`（静态）、`auto`（一键）、`doctor`（设备环境体检 + 自动修）、`graph`（跨样本关联聚类）、`track`（本地网页跟进线索）。完整命令与参数见 `fxapk --help`。
+主要命令：`analyze`（静态）、`auto`（一键：静态 +（有设备则）动态）、`capture`（真机抓包）、`doctor`（设备环境体检 + 自动修）、`corpus`（样本库：历次报告入库、跨版本回归、按值反查串案）。完整命令与参数见 `fxapk --help`。
 
 未安装为命令时用 `python -m apkscan.cli <…>` 等价调用。
 
