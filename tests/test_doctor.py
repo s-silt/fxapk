@@ -520,7 +520,7 @@ def test_run_never_prints_or_raises(monkeypatch, capsys):
     except Exception as exc:  # pragma: no cover
         pytest.fail(f"doctor.run raised: {exc}")
     assert res["ok"] is False
-    assert len(res["items"]) == 7
+    assert len(res["items"]) == 10  # 7 既有 + 3 PCAP 深度能力（信息性、非关键）
     captured = capsys.readouterr()
     assert captured.out == ""
 
@@ -691,3 +691,22 @@ def test_frida_ps_reachable_false_when_tool_missing(monkeypatch):
     """frida-ps 不可用 → False（不抛）。"""
     monkeypatch.setattr(doctor.tools, "frida_invocation", lambda tool: [])
     assert doctor._frida_ps_reachable() is False
+
+
+def test_check_pcap_capabilities_informational_non_critical(monkeypatch) -> None:
+    """★外部复审：doctor surface QUIC 解密 / tshark 可用性（信息性、非关键——不影响整体 ok）。"""
+    items = doctor._check_pcap_capabilities()
+    names = {it["name"] for it in items}
+    assert names == {doctor._NAME_QUIC_META, doctor._NAME_QUIC_DECRYPT, doctor._NAME_TSHARK}
+    # QUIC 元数据解析恒可用（纯 stdlib）
+    meta = next(it for it in items if it["name"] == doctor._NAME_QUIC_META)
+    assert meta["ok"] is True
+    # 三者都不进 _CRITICAL（非关键、不拖垮整体 ok）
+    assert not (names & doctor._CRITICAL)
+    # tshark 缺失 → 不可用 + 提示（不静默降级）
+    import shutil as _sh
+
+    monkeypatch.setattr(_sh, "which", lambda _n: None)
+    items2 = doctor._check_pcap_capabilities()
+    tshark = next(it for it in items2 if it["name"] == doctor._NAME_TSHARK)
+    assert tshark["ok"] is False and "tshark" in tshark["detail"]
