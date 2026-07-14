@@ -251,25 +251,63 @@ def parse_socket_timeline(text: str) -> UidSockets:
     return res
 
 
+def _norm_ss_ip(ip: str) -> str:
+    """ss 地址归一化到与 /proc 解出的 IP 对齐：剥方括号 + %scope；v4-mapped ::ffff:a.b.c.d → 点分。"""
+    ip = ip.strip("[]").split("%", 1)[0]
+    if ip.lower().startswith("::ffff:") and "." in ip:
+        ip = ip.rsplit(":", 1)[-1]
+    return ip
+
+
 def _apply_ss_line(line: str, res: UidSockets) -> None:
-    """从一行 ss -tunp 抽 (进程名,pid) + 远端 addr:port，回填到已有 /proc 记录的 process/pid。绝不抛。"""
+    """从一行 ss -tunp 抽 (进程名,pid) + 本端/远端 addr:port，按**四元组**精确回填到那一条 /proc 记录。绝不抛。
+
+    ★codex 复审 P1：旧实现只按远端 (ip,port) 回填 → 同一远端被多 UID 连时，进程/pid 会被最后处理的 ss 行
+    统一覆盖到所有候选记录（张冠李戴、污染 candidates[].process/pid）。改按 (local_ip,local_port,remote_ip,
+    remote_port) 唯一定位那条 socket；无唯一对应则不回填（宁缺勿错）。
+    """
     proc = _SS_PROC_RE.search(line)
     if proc is None:
         return
     addrs = _SS_ADDR_RE.findall(line)
     if len(addrs) < 2:
         return
-    rip, rport_s = addrs[-1]  # ss 行末通常是 peer（远端）地址
-    rip = rip.strip("[]").split("%", 1)[0]  # 剥方括号 + %scope（/proc 解出的 IPv6 不带 scope，须对齐）
-    if rip.lower().startswith("::ffff:") and "." in rip:  # v4-mapped 归一化（与 _decode_proc_ipv6 一致）
-        rip = rip.rsplit(":", 1)[-1]
+    lip, lport_s = addrs[-2]  # ss 行倒数第二 = 本端（local）
+    rip, rport_s = addrs[-1]  # 行末 = peer（远端）
+    lip, rip = _norm_ss_ip(lip), _norm_ss_ip(rip)
     try:
-        rport = int(rport_s)
+        lport, rport = int(lport_s), int(rport_s)
     except ValueError:
         return
     for e in res.by_remote.get((rip, rport), []):
-        e.process = proc.group(1)
-        e.pid = int(proc.group(2))
+        if e.local_ip == lip and e.local_port == lport:  # 四元组唯一匹配 → 只回填这一条
+            e.process = proc.group(1)
+            e.pid = int(proc.group(2))
+
+
+def merge_uid_sockets(*tables: UidSockets) -> UidSockets:
+    """合并多份 UidSockets（去重、重建 by_remote），target_uid/package 取首个非空。绝不抛。
+
+    ★codex 复审 P0：归因**必须含竞争 UID**。持续时间线（_SocketSampler）**只采目标 UID**——单用它做归因，
+    目标与其它 UID 连同一远端时时间线只见目标 UID，会误判 confident、歧义失效。故须与**窗口末快照**（含全
+    UID）合并：快照给竞争视图、时间线补目标短连。按 (proto,local,remote,uid) 五元组+uid 去重（同一 socket
+    在时间线多时刻/快照里重复只记一次，避免 candidates 连接数虚高）。
+    """
+    out = UidSockets()
+    seen: set[tuple[str, str, int, str, int, int]] = set()
+    for t in tables:
+        if out.target_uid is None and t.target_uid is not None:
+            out.target_uid = t.target_uid
+        if not out.package and t.package:
+            out.package = t.package
+        for e in t.entries:
+            key = (e.proto, e.local_ip, e.local_port, e.remote_ip, e.remote_port, e.uid)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.entries.append(e)
+            out.by_remote.setdefault((e.remote_ip, e.remote_port), []).append(e)
+    return out
 
 
 def attribute_endpoints(
