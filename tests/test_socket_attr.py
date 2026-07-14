@@ -124,3 +124,33 @@ def test_scoped_ipv6_ss_backfill() -> None:
     )
     s = socket_attr.parse_uid_sockets(txt)  # 不抛即可（scope 剥离逻辑走通）
     assert isinstance(s.entries, list)
+
+
+def test_parse_socket_timeline_unions_observations_and_skips_bad_lines() -> None:
+    """周期采样跨时刻合并远端；坏 JSON / 坏字段只跳过，不清空已有观测。"""
+    text = "\n".join(
+        [
+            '{"type":"meta","package":"com.fraud.app","target_uid":10234}',
+            '{"ts":1.0,"proto":"tcp","uid":10234,"local":"10.0.2.15:43090",'
+            '"remote":"1.2.3.4:443","state":"established"}',
+            "not-json",
+            '{"ts":1.2,"proto":"tcp6","uid":10234,"local":"[::1]:43091",'
+            '"remote":"[2001:db8::5]:8443","state":"syn_sent"}',
+            '{"ts":1.3,"proto":"tcp","uid":"bad","local":"10.0.2.15:1",'
+            '"remote":"9.9.9.9:443","state":"established"}',
+        ]
+    )
+
+    sockets = socket_attr.parse_socket_timeline(text)
+
+    assert sockets.package == "com.fraud.app"
+    assert sockets.target_uid == 10234
+    assert len(sockets.entries) == 2
+    assert sockets.owner_of("1.2.3.4", 443) is not None
+    ipv6 = sockets.owner_of("2001:db8::5", 8443)
+    assert ipv6 is not None and ipv6.proto == "tcp6" and ipv6.state == "syn_sent"
+
+
+def test_parse_socket_timeline_robust_bad_input() -> None:
+    assert socket_attr.parse_socket_timeline("").entries == []
+    assert socket_attr.parse_socket_timeline(None).entries == []  # type: ignore[arg-type]
