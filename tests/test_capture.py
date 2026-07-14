@@ -703,6 +703,59 @@ def test_detect_missing_floor_only_does_not_require_mitmproxy(monkeypatch):
     assert "mitmproxy" not in capture._detect_missing(require_mitm=False)
 
 
+def test_detect_missing_floor_only_does_not_require_frida(monkeypatch):
+    """★复审 P0：require_frida=False（floor-only）时 frida / 设备 frida-server 缺失不计入缺失——
+    floor-only 纯带外 tcpdump、不注入 frida，只要 adb+设备就够，不该因缺 frida 被整体跳过。"""
+    monkeypatch.setattr(capture.device, "has_device", lambda: True)
+    monkeypatch.setattr(capture.device, "has_frida", lambda: False)  # 无 host frida
+    monkeypatch.setattr(capture.device, "has_mitmproxy", lambda: True)
+    monkeypatch.setattr(capture.device, "frida_server_running", lambda serial=None: False)  # 设备 frida-server 未跑
+    # both（require_frida=True）：仍要求 frida
+    both = capture._detect_missing(require_mitm=False, require_frida=True)
+    assert "frida" in both and "设备上运行中的 frida-server" in both
+    # floor-only（require_frida=False）：frida 相关不计入 → 设备在即为空
+    assert capture._detect_missing(require_mitm=False, require_frida=False) == []
+
+
+def test_capture_floor_only_runs_without_frida(monkeypatch, tmp_path):
+    """★复审 P0 端到端：floor-only 缺 frida 也不被判缺前置——status=done（有 floor pcap），且全程不注入 frida。"""
+    _set_capabilities(monkeypatch, has_frida=False, frida_server_running=False, has_mitmproxy=False)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_capture_uid_socket_snapshot", lambda *a, **k: None)
+    frida_called = {"session": False, "unpin": False}
+    monkeypatch.setattr(
+        capture, "_start_frida_session",
+        lambda *a, **k: (frida_called.__setitem__("session", True), (None, None))[1],
+    )
+    monkeypatch.setattr(
+        capture, "_start_frida_unpinning",
+        lambda *a, **k: (frida_called.__setitem__("unpin", True), None)[1],
+    )
+    monkeypatch.setattr(capture, "_start_floor_pcap", lambda *a, **k: object())
+    floorp = tmp_path / "floor.pcap"
+    floorp.write_bytes(b"\xa1\xb2\xc3\xd4" + b"\x00" * 40)
+    monkeypatch.setattr(capture, "_stop_floor_pcap", lambda h, op: floorp)
+
+    class EmptySampler:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(capture, "_SocketSampler", EmptySampler)
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), mode="floor-only", duration=1)
+    assert result["status"] == capture.STATUS_DONE  # ★不再因缺 frida 被 SKIPPED
+    assert frida_called["session"] is False and frida_called["unpin"] is False  # floor-only 全程不注入 frida
+
+
 def test_run_rejects_invalid_mode(monkeypatch, tmp_path):
     """★ 复审 P2：run(mode=非法) → error（不静默落 both）。"""
     result = capture.run("com.x", out_dir=str(tmp_path), mode="bogus")
@@ -2328,7 +2381,7 @@ def test_run_consumes_decide_capture_from_report(monkeypatch, tmp_path):
     _set_capabilities(monkeypatch)
     seen: dict[str, Any] = {}
 
-    def _spy_capture(package, out_path, duration, serial=None, *, decision=None, mitm=True, floor=True):
+    def _spy_capture(package, out_path, duration, serial=None, *, decision=None, mitm=True, floor=True, frida=True):
         seen["decision"] = decision
         return capture.empty_result(STATUS_DONE, "ok")
 
@@ -2348,7 +2401,7 @@ def test_run_defaults_decision_when_no_report(monkeypatch, tmp_path):
     _set_capabilities(monkeypatch)
     seen: dict[str, Any] = {}
 
-    def _spy_capture(package, out_path, duration, serial=None, *, decision=None, mitm=True, floor=True):
+    def _spy_capture(package, out_path, duration, serial=None, *, decision=None, mitm=True, floor=True, frida=True):
         seen["decision"] = decision
         return capture.empty_result(STATUS_DONE, "ok")
 
