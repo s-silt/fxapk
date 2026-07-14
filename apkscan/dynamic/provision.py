@@ -614,10 +614,18 @@ def _ensure_frida_server_impl(
     try:
         if device.frida_server_running(serial):
             if device.frida_server_is_root(serial):
-                result.update(
-                    ok=True, action="already_running", detail="设备上 frida-server 已在运行（root）"
-                )
-                return result
+                expected_ver = host_frida_version()
+                probe = device.frida_server_probe(serial, expected_version=expected_ver)
+                if probe.ok:
+                    result.update(
+                        ok=True,
+                        action="already_running",
+                        detail=probe.detail,
+                        version=probe.version or expected_ver,
+                    )
+                    return result
+                _emit(on_progress, f"已有 frida-server 严格验收失败，尝试以 root 重启：{probe.detail}")
+                logger.warning("[provision] 已有 frida-server 严格验收失败：%s", probe.detail)
             # 未确认 root（含 ps 看不到 frida-server 行的 MuMu 等）。
             # **关键（真机实测教训）**：``frida_server_running`` 可能**误判"在跑"**——MuMu 上即便
             # ``/data/local/tmp/frida-server`` 根本不存在、27042 端口也没人监听，它仍可能返回 True。
@@ -639,12 +647,17 @@ def _ensure_frida_server_impl(
                         logger.exception("[provision] root 重启后验证轮询异常")
                         running = False
                     if running and root_started:
-                        result.update(
-                            ok=True,
-                            action="restarted_as_root",
-                            detail="未确认 root，已杀掉并以 root（su -c）重启 frida-server",
-                        )
-                        return result
+                        expected_ver = host_frida_version()
+                        probe = device.frida_server_probe(serial, expected_version=expected_ver)
+                        if probe.ok:
+                            result.update(
+                                ok=True,
+                                action="restarted_as_root",
+                                detail=f"已以 root 重启并通过真实附加验收：{probe.detail}",
+                                version=probe.version or expected_ver,
+                            )
+                            return result
+                        logger.warning("[provision] root 重启后严格验收未通过：%s", probe.detail)
                     if running and not root_started:
                         su_uid0 = _su_uid0(serial)
                         detail = (
@@ -768,12 +781,17 @@ def _ensure_frida_server_impl(
                 logger.exception("[provision] frida_server_running 验证轮询异常")
                 running = False
             if running and root_started:
-                result.update(
-                    ok=True,
-                    action="deployed",
-                    detail=f"已部署并以 root 启动 frida-server {ver}（abi {fabi}）",
-                )
-                return result
+                probe = device.frida_server_probe(serial, expected_version=ver)
+                if probe.ok:
+                    result.update(
+                        ok=True,
+                        action="deployed",
+                        detail=(
+                            f"已部署并以 root 启动 frida-server {ver}（abi {fabi}），真实附加验收通过"
+                        ),
+                    )
+                    return result
+                logger.warning("[provision] 部署后严格验收未通过：%s", probe.detail)
             if running and not root_started:
                 # 部署成功且在跑，但 su 没把它起成 root（spawn 会 jailed）→ 如实报告、不假成功。
                 detail = (
