@@ -641,7 +641,11 @@ def _capture(
             if tshark_backend.has_tshark():
                 http_eps = tshark_backend.to_endpoints(tshark_backend.extract_http(str(floor_pcap)))
                 seen_http = {ep.value for ep in endpoints}
-                http_added = [ep for ep in http_eps if ep.value not in seen_http]
+                http_noise = _load_noise_patterns()  # tshark 路径同样过噪音名单（复审 #1：captive-portal/遥测污染）
+                http_added = [
+                    ep for ep in http_eps
+                    if ep.value not in seen_http and not _is_noise_host(ep.value, http_noise)
+                ]
                 if http_added:
                     endpoints.extend(http_added)
                     playbook.append(
