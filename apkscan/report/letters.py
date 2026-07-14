@@ -169,6 +169,112 @@ def _template_for(category: str, templates: dict[str, dict[str, str]]) -> dict[s
     }
 
 
+# 五层归因置信度 / edge 档位 → 中文。
+_CONF_CN = {"high": "高", "medium": "中", "low": "低", "unknown": "未知"}
+_EDGE_TIER_CN = {"confirmed": "确认", "probable": "较可能", "possible": "可能", "clustered": "聚类"}
+# 调证函里每个标的最多展示的落地 IP 数（防 CDN 多 IP 把文书撑爆；完整见 report.json）。
+_MAX_ATTR_IPS = 5
+
+
+def _conf_cn(layer: dict[str, Any]) -> str:
+    return _CONF_CN.get(str(layer.get("confidence") or "unknown"), "未知")
+
+
+def _sub_dict(d: dict[str, Any], key: str) -> dict[str, Any]:
+    """取子 dict（非 dict → 空 dict）。集中做类型收窄，供渲染层安全 .get，绝不抛。"""
+    v = d.get(key)
+    return v if isinstance(v, dict) else {}
+
+
+def _attribution_index(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """从 ``report['endpoints']`` 建 ``{端点 value: attribution}``（仅含真有五层归因的端点）。坏形状容错、绝不抛。"""
+    index: dict[str, dict[str, Any]] = {}
+    endpoints = report.get("endpoints")
+    if not isinstance(endpoints, list):
+        return index
+    for ep in endpoints:
+        if not isinstance(ep, dict):
+            continue
+        value = ep.get("value")
+        enr = ep.get("enrichment")
+        if not (isinstance(value, str) and isinstance(enr, dict)):
+            continue
+        att = enr.get("attribution")
+        if isinstance(att, dict) and isinstance(att.get("ips"), list) and att["ips"]:
+            index[value] = att
+    return index
+
+
+def _render_ip_chain(layer: dict[str, Any]) -> list[str]:
+    """把单个落地 IP 的五层渲染成 markdown 行：外部 RDAP/ASN 数据 _md_safe 转义防注入，未知层显式标注，
+    ★service_operator 恒标「不从基础设施推断」——防办案人把某层基础设施持有方误当 App 运营者。"""
+    if not isinstance(layer, dict):
+        return []
+    lines: list[str] = []
+    ip = _str_or_empty(layer.get("ip")).strip()
+    lines.append(f"- 落地 IP `{_md_safe(ip)}`：" if ip else "- 落地 IP（未知）：")
+
+    rh = _sub_dict(layer, "resource_holder")
+    rh_name = _str_or_empty(rh.get("name")).strip()
+    if rh_name:
+        src = _md_safe(_str_or_empty(rh.get("source")) or "RDAP")
+        lines.append(f"  - 资源登记方：{_md_safe(rh_name)}（{src}，置信{_conf_cn(rh)}）")
+    else:
+        lines.append("  - 资源登记方：未知")
+
+    on = _sub_dict(layer, "origin_network")
+    asn = on.get("asn")
+    if isinstance(asn, int):
+        org = _str_or_empty(on.get("organization")).strip()
+        cat = _str_or_empty(on.get("category")).strip()
+        org_part = f" {_md_safe(org)}" if org else ""
+        cat_part = f"，{_md_safe(cat)}" if cat and cat != "unknown" else ""
+        lines.append(f"  - 网络运营方(BGP ASN)：AS{asn}{org_part}{cat_part}（置信{_conf_cn(on)}）")
+    else:
+        lines.append("  - 网络运营方(BGP ASN)：未知")
+
+    hp = _sub_dict(layer, "hosting_provider")
+    hp_name = _str_or_empty(hp.get("name")).strip()
+    if hp_name:
+        role = _md_safe(_str_or_empty(hp.get("role")))
+        lines.append(f"  - 托管商/IDC：{_md_safe(hp_name)}（{role}，置信{_conf_cn(hp)}）")
+    else:
+        lines.append("  - 托管商/IDC：未知")
+
+    edge = _sub_dict(layer, "edge_provider")
+    edge_name = _str_or_empty(edge.get("name")).strip()
+    if edge_name:
+        tier = _EDGE_TIER_CN.get(str(edge.get("tier") or ""), "")
+        role = _md_safe(_str_or_empty(edge.get("role")))
+        tail = f"，{tier}" if tier else ""
+        lines.append(f"  - 边缘/CDN/代理：{_md_safe(edge_name)}（{role}{tail}）")
+    else:
+        lines.append("  - 边缘/CDN/代理：未识别专属特征")
+
+    lines.append("  - 实际运营者：未知（★不从基础设施归属推断，须另行落查）")
+    return lines
+
+
+def _render_attribution_chain(attribution: dict[str, Any]) -> list[str]:
+    """把端点五层归因渲染成调证函「基础设施归属链」段的 markdown 行；空/坏输入 → 空 list，绝不抛。"""
+    if not isinstance(attribution, dict):
+        return []
+    ips = attribution.get("ips")
+    if not isinstance(ips, list) or not ips:
+        return []
+    valid = [x for x in ips if isinstance(x, dict)]
+    if not valid:
+        return []
+    lines = ["**基础设施归属链（待核，按落地 IP 分层，勿据此认定 App 运营者）：**", ""]
+    for layer in valid[:_MAX_ATTR_IPS]:
+        lines.extend(_render_ip_chain(layer))
+    remaining = len(valid) - min(len(valid), _MAX_ATTR_IPS)
+    if remaining > 0:
+        lines.append(f"- （另有 {remaining} 个解析 IP 未列，完整见 report.json 的 enrichment.attribution）")
+    lines.append("")
+    return lines
+
+
 def _build_body_md(
     *,
     template: dict[str, str],
@@ -177,6 +283,7 @@ def _build_body_md(
     subject: str,
     evidence_items: list[str],
     evidence_refs: list[str],
+    attribution_lines: list[str] | None = None,
 ) -> str:
     """套打 markdown 正文：顶部固定免责声明 → 受文机关 → 标的 → 待调取证据 → 出处。"""
     title = template.get("title", "协查函")
@@ -197,10 +304,14 @@ def _build_body_md(
         lines.append("")
         lines.append(recipient_hint)
     lines.append("")
-    # 4) 标的归属
+    # 4) 标的归属（ICP/RDAP 域名注册方 = 公司/人）
     if subject:
         lines.append(f"**标的归属（待核）：** {subject}")
         lines.append("")
+    # 4.5) 基础设施归属链（五层不塌缩：资源登记方→ASN→托管→边缘→运营者）——与"标的归属"互补，
+    #      前者是域名注册方，后者是"IP 落在谁的网段/经谁家 CDN"。已在渲染层各自 _md_safe 转义。
+    if attribution_lines:
+        lines.extend(attribution_lines)
     lines.append(f"**调证标的：** {target}")
     if target_desc:
         lines.append("")
@@ -223,9 +334,15 @@ def _build_body_md(
 
 
 def _lead_to_letter(
-    lead: dict[str, Any], templates: dict[str, dict[str, str]]
+    lead: dict[str, Any],
+    templates: dict[str, dict[str, str]],
+    attr_index: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """把单条可办案化 Lead 套打成文书 dict（字段见模块 docstring）。"""
+    """把单条可办案化 Lead 套打成文书 dict（字段见模块 docstring）。
+
+    ``attr_index``：``{端点 value: 五层归因}``（见 _attribution_index）。按 Lead.value 关联，套进正文
+    「基础设施归属链」段并作结构化字段 ``attribution`` 回带。缺/无匹配 → 不渲染该段。
+    """
     category = _str_or_empty(lead.get("category"))
     recipient = _str_or_empty(lead.get("where_to_request")).strip()
     target = _str_or_empty(lead.get("value"))
@@ -234,6 +351,9 @@ def _lead_to_letter(
     evidence_refs = _evidence_refs(lead)
     template = _template_for(category, templates)
 
+    attribution = attr_index.get(target) if isinstance(attr_index, dict) else None
+    attribution_lines = _render_attribution_chain(attribution) if isinstance(attribution, dict) else []
+
     body_md = _build_body_md(
         template=template,
         recipient=_md_safe(recipient),
@@ -241,6 +361,7 @@ def _lead_to_letter(
         subject=_md_safe(subject),
         evidence_items=evidence_items,
         evidence_refs=evidence_refs,
+        attribution_lines=attribution_lines,
     )
     return {
         "category": category,
@@ -249,6 +370,7 @@ def _lead_to_letter(
         "target": target,  # 标的 = Lead.value
         "evidence_items": evidence_items,  # = evidence_to_obtain
         "evidence_refs": evidence_refs,  # evidence_id 优先、降级 source:location
+        "attribution": attribution,  # 五层基础设施归属链（结构化，无匹配为 None）
         "title": f"{template.get('title', '协查函')}（标的：{target}）",
         "body_md": body_md,
     }
@@ -271,6 +393,7 @@ def build_letters(report: dict[str, Any]) -> list[dict[str, Any]]:
         return []
 
     templates = _load_templates()
+    attr_index = _attribution_index(report)  # {端点 value: 五层归因}，按 Lead.value 关联进正文
     out: list[dict[str, Any]] = []
     for lead in leads:
         if not isinstance(lead, dict):
@@ -278,7 +401,7 @@ def build_letters(report: dict[str, Any]) -> list[dict[str, Any]]:
         if not _is_actionable(lead):
             continue  # 严格过滤：不可办案化的不套打
         try:
-            out.append(_lead_to_letter(lead, templates))
+            out.append(_lead_to_letter(lead, templates, attr_index))
         except Exception:  # 单条套打异常不应炸掉整体；记录后跳过。
             logger.exception("套打单条文书失败：value=%r", lead.get("value"))
     return out
