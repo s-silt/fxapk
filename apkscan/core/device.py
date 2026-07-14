@@ -14,6 +14,8 @@ import logging
 import re
 import shutil
 import subprocess
+import time
+from dataclasses import dataclass
 
 from apkscan.core import tools
 
@@ -41,6 +43,29 @@ _EMULATOR_ADB_ENDPOINTS: tuple[str, ...] = (
 
 # 合法 Android 包名形态：仅字母/数字/下划线/点。
 _PACKAGE_RE = re.compile(r"^[A-Za-z0-9_.]+$")
+
+_FRIDA_SERVER_REMOTE = "/data/local/tmp/frida-server"
+_FRIDA_ATTACH_TIMEOUT = 5
+_FRIDA_HELPER_SECONDS = 30
+
+
+@dataclass(frozen=True)
+class FridaServerProcess:
+    """已确认由 fxapk 部署路径启动的 frida-server 进程。"""
+
+    pid: int
+    uid: int
+    version: str
+
+
+@dataclass(frozen=True)
+class FridaServerProbe:
+    """动态注入就绪探测结果。"""
+
+    ok: bool
+    detail: str
+    pid: int = 0
+    version: str = ""
 
 
 def is_valid_package(package: str) -> bool:
@@ -333,6 +358,221 @@ def frida_server_is_root(serial: str | None = None) -> bool:
         logger.exception("解析 ps 判定 frida-server 属主失败")
         return False
     return False  # 没找到 frida-server 行（进程改名/ps 不认）→ 未确认 root → 触发以 root 重启
+
+
+def _shq(cmd: str) -> str:
+    """POSIX 单引号包裹整条命令，使其经 adb shell 重拼 + 设备 shell 再分词后作为**单个参数**交给 ``su -c``。
+
+    否则 ``su -c ls -l /proc/... 2>/dev/null`` 里的 ``-l`` / 路径 / 重定向会被 su 本身当成自己的选项/用户名
+    （严格 su：Superuser.apk/KingUser）。与 provision._shq 同口径（device 为 core 层、不能反向 import dynamic）。
+    """
+    return "'" + cmd.replace("'", "'\\''") + "'"
+
+
+def _adb_root_command(command: str, serial: str | None = None) -> subprocess.CompletedProcess | None:
+    """以 root 跑一条设备命令并返回 CompletedProcess（含 stdout，供严格探针解析）。
+
+    ★复审 #3/#4：优先 ``su -c '<单引号包裹>'``（多数生产设备）；su 二进制缺失（adb-root 型设备：AOSP
+    rootful / AVD Google APIs 镜像，adbd 本身 uid0、根本无 su）→ 回退**直接 adb shell**（即以 root 执行），
+    否则严格探针会在 adb-root 设备上假报「未找到运行进程」。绝不抛（_run 已吞异常/超时 → None）。
+    """
+    base = ["adb"] + (["-s", serial] if serial else []) + ["shell"]
+    su = _run(base + ["su", "-c", _shq(command)])
+    if su is not None:
+        blob = (su.stdout or "") + (getattr(su, "stderr", "") or "")  # CompletedProcess/替身可能无 stderr
+        # su 存在即用其结果（命令本身 rc!=0 也可能有效，如 toybox ls 枚举 /proc 期间 PID 退出返回 1）；
+        # 仅当 shell 报 su 二进制缺失（not found / inaccessible）才判 adb-root、回退直执。
+        if not re.search(r"\bsu:\s.*(not found|inaccessible)", blob):
+            return su
+    return _run(base + [command])  # su 缺失 → adb-root 直执兜底
+
+
+def _deployed_frida_server_process(serial: str | None = None) -> FridaServerProcess | None:
+    """按 ``/proc/<pid>/exe`` 精确找 fxapk 部署的 server，并读取真实 UID/版本。"""
+    proc = _adb_root_command("ls -l /proc/[0-9]*/exe 2>/dev/null", serial)
+    # /proc 在枚举期间会有 PID 退出，toybox ls 因单个条目消失返回 1，但 stdout 中其余
+    # 条目仍有效；这里只按可解析输出判断，不能因整体 returncode 丢掉真实 server。
+    if proc is None or not proc.stdout:
+        return None
+    pids: list[int] = []
+    for line in proc.stdout.splitlines():
+        match = re.search(
+            rf"/proc/(\d+)/exe\s+->\s+{re.escape(_FRIDA_SERVER_REMOTE)}(?:\s+\(deleted\))?$",
+            line.strip(),
+        )
+        if match is not None:
+            pids.append(int(match.group(1)))
+    for pid in sorted(set(pids)):
+        status = _adb_root_command(f"cat /proc/{pid}/status", serial)
+        if status is None or status.returncode != 0:
+            continue
+        uid_match = re.search(r"^Uid:\s+(\d+)", status.stdout, re.MULTILINE)
+        if uid_match is None:
+            continue
+        version_proc = _adb_root_command(f"/proc/{pid}/exe --version", serial)
+        version_text = ""
+        if version_proc is not None:
+            text = (getattr(version_proc, "stdout", "") or "") + "\n" + (
+                getattr(version_proc, "stderr", "") or ""
+            )
+            version_match = re.search(r"(\d+\.\d+\.\d+)", text)
+            if version_match is not None:
+                version_text = version_match.group(1)
+        return FridaServerProcess(pid=pid, uid=int(uid_match.group(1)), version=version_text)
+    return None
+
+
+def _root_sleep_pids(serial: str | None = None) -> set[int]:
+    proc = _adb_root_command("pidof sleep", serial)
+    if proc is None or proc.returncode != 0:
+        return set()
+    root_pids: set[int] = set()
+    for value in proc.stdout.split():
+        if not value.isdigit():
+            continue
+        pid = int(value)
+        status = _adb_root_command(f"cat /proc/{pid}/status", serial)
+        if status is None or status.returncode != 0:
+            continue
+        if re.search(r"^Uid:\s+0\s", status.stdout, re.MULTILINE):
+            root_pids.add(pid)
+    return root_pids
+
+
+def _start_root_attach_helper(
+    serial: str | None = None,
+) -> tuple[subprocess.Popen | None, int]:
+    """启动一次性 root sleep，返回宿主 adb 进程和设备 PID。"""
+    adb = tools.adb_path()
+    if not adb:
+        return None, 0
+    before = _root_sleep_pids(serial)
+    args = [adb]
+    if serial:
+        args += ["-s", serial]
+    args += ["shell", "su", "-c", f"sleep {_FRIDA_HELPER_SECONDS}"]
+    try:
+        host = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        logger.exception("启动 Frida attach 验收辅助进程失败")
+        return None, 0
+    for _ in range(20):
+        new_pids = _root_sleep_pids(serial) - before
+        if new_pids:
+            return host, min(new_pids)
+        if host.poll() is not None:
+            break
+        time.sleep(0.1)
+    # ★复审 #1：未定位到 helper PID → best-effort 杀掉这期间新增的 root sleep（多为晚注册、没被 20 轮窗口
+    #   抓到 PID 的本 helper），避免残留设备侧 root 进程（sleep 虽 30s 自愈，但不依赖自愈）。
+    for leaked in _root_sleep_pids(serial) - before:
+        _adb_root_command(f"kill -9 {leaked} 2>/dev/null || true", serial)
+    try:
+        host.terminate()
+        host.wait(timeout=1.0)
+    except Exception:
+        logger.debug("清理未就绪的 Frida attach 辅助进程失败", exc_info=True)
+    return None, 0
+
+
+def _stop_root_attach_helper(host: object, pid: int, serial: str | None = None) -> None:
+    if pid > 0:
+        _adb_root_command(f"kill -9 {pid} 2>/dev/null || true", serial)
+    if not isinstance(host, subprocess.Popen):
+        return
+    try:
+        host.terminate()
+        host.wait(timeout=1.0)
+    except Exception:
+        try:
+            host.kill()
+        except Exception:
+            logger.debug("清理 Frida attach 辅助 adb 进程失败", exc_info=True)
+
+
+def _frida_attach_smoke(serial: str | None = None) -> tuple[bool, str]:
+    """对一次性 root 进程做真实 attach/detach；枚举进程不能替代这项验收。"""
+    host, pid = _start_root_attach_helper(serial)
+    if host is None or pid <= 0:
+        return False, "无法启动 root 附加验收辅助进程"
+    session = None
+    try:
+        import frida  # type: ignore[import-not-found]
+
+        frida_device = (
+            frida.get_device(serial, timeout=_FRIDA_ATTACH_TIMEOUT)
+            if serial
+            else frida.get_usb_device(timeout=_FRIDA_ATTACH_TIMEOUT)
+        )
+        session = frida_device.attach(pid)
+        session.detach()
+        session = None
+        return True, ""
+    except Exception as exc:
+        logger.debug("Frida attach 验收失败", exc_info=True)
+        return False, f"真实附加验收失败：{type(exc).__name__}: {exc}"
+    finally:
+        if session is not None:
+            try:
+                session.detach()
+            except Exception:
+                logger.debug("Frida attach 验收 session 分离失败", exc_info=True)
+        _stop_root_attach_helper(host, pid, serial)
+
+
+def frida_server_probe(
+    serial: str | None = None,
+    expected_version: str = "",
+) -> FridaServerProbe:
+    """严格验收动态注入：部署路径进程 + root + 版本 + 真实 attach，绝不抛。"""
+    try:
+        process = _deployed_frida_server_process(serial)
+        if process is None:
+            return FridaServerProbe(
+                ok=False,
+                detail=f"未找到 {_FRIDA_SERVER_REMOTE} 对应运行进程（仅能枚举不算通过）",
+            )
+        if process.uid != 0:
+            return FridaServerProbe(
+                ok=False,
+                detail=f"frida-server PID {process.pid} 不是 root（uid={process.uid}）",
+                pid=process.pid,
+                version=process.version,
+            )
+        if not process.version:
+            return FridaServerProbe(
+                ok=False,
+                detail=f"无法核实运行中 frida-server PID {process.pid} 的版本",
+                pid=process.pid,
+            )
+        if expected_version and process.version != expected_version:
+            return FridaServerProbe(
+                ok=False,
+                detail=(
+                    f"运行中 frida-server 版本 {process.version} 与主机 {expected_version} 不一致"
+                ),
+                pid=process.pid,
+                version=process.version,
+            )
+        attach_ok, attach_detail = _frida_attach_smoke(serial)
+        if not attach_ok:
+            return FridaServerProbe(
+                ok=False,
+                detail=attach_detail,
+                pid=process.pid,
+                version=process.version,
+            )
+        return FridaServerProbe(
+            ok=True,
+            detail=(
+                f"frida-server PID {process.pid} 为 root，版本 {process.version}，真实附加验收通过"
+            ),
+            pid=process.pid,
+            version=process.version,
+        )
+    except Exception as exc:
+        logger.exception("严格验收 frida-server 异常")
+        return FridaServerProbe(ok=False, detail=f"严格验收异常：{type(exc).__name__}: {exc}")
 
 
 def frida_server_running(serial: str | None = None) -> bool:
