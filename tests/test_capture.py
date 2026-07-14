@@ -581,6 +581,54 @@ def test_capture_tls_keylog_decrypts_and_merges_endpoints(monkeypatch, tmp_path)
     assert str(tmp_path / "tls.keys") in result["artifacts"]  # keylog 作产物留档
 
 
+def test_capture_tls_keylog_extracts_credentials_desensitized(monkeypatch, tmp_path):
+    """★P2 续：解密 HTTP 的 Authorization/Cookie → credential_events，经 cryptohook 脱敏（明文 token 不落报告）。"""
+    from apkscan.dynamic import tshark_backend as tsb
+
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_capture_uid_socket_snapshot", lambda *a, **k: None)
+    floor = tmp_path / "floor.pcap"
+    floor.write_bytes(b"pcap")
+    monkeypatch.setattr(capture, "_start_floor_pcap", lambda *a, **k: object())
+    monkeypatch.setattr(capture, "_stop_floor_pcap", lambda *a, **k: floor)
+    monkeypatch.setattr(capture.pcap_ingest, "parse_pcap", lambda path: object())
+    monkeypatch.setattr(capture.pcap_ingest, "to_runtime_endpoints", lambda summary: [])
+    monkeypatch.setattr(capture.pcap_ingest, "remote_endpoints", lambda summary: [])
+    (tmp_path / "tls.keys").write_text("CLIENT_RANDOM aa bb\n", encoding="utf-8")
+    monkeypatch.setattr(tsb, "has_tshark", lambda: True)
+    monkeypatch.setattr(tsb, "extract_decrypted_http", lambda pcap, keylog: [])
+    monkeypatch.setattr(
+        tsb, "extract_decrypted_credentials",
+        lambda pcap, keylog: [{
+            "source": "tls-decrypted", "url": "https://api.evil.com/zj/api/user_login",
+            "method": "POST", "headers": {"Authorization": "Bearer " + "S" * 100},
+        }],
+    )
+
+    class EmptySampler:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(capture, "_SocketSampler", EmptySampler)
+
+    capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+    report = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    tls_creds = [c for c in report["credential_events"] if c.get("source") == "tls-decrypted"]
+    assert len(tls_creds) == 1
+    assert "S" * 100 not in json.dumps(tls_creds[0], ensure_ascii=False)  # ★明文 token 不落报告（已脱敏）
+    assert tls_creds[0]["headers"]["Authorization"].startswith("Bearer S")
+
+
 def test_capture_socket_attribution_falls_back_to_final_snapshot(monkeypatch, tmp_path):
     """时间线没有有效产物时，旧 uid_sockets.txt 归因路径保持可用。"""
     _set_capabilities(monkeypatch)
