@@ -103,7 +103,7 @@ def test_ipv4_mapped_v6_normalized_and_attributed() -> None:
         "## ss -tunp\n"
         'tcp ESTAB 0 0 [::ffff:10.0.2.15]:43090 [::ffff:1.2.3.4]:443 users:(("com.fraud.app",pid=5678,fd=9))\n'
         "## /proc/net/tcp6（uid 在第 8 列）\n"
-        "   0: 000000000000000000000000FFFF020F:A852 0000000000000000FFFF000004030201:01BB 01"
+        "   0: 0000000000000000FFFF00000F02000A:A852 0000000000000000FFFF000004030201:01BB 01"
         " 00000000:00000000 00:00000000 00000000 10234 0 111\n"
     )
     s = socket_attr.parse_uid_sockets(txt)
@@ -154,3 +154,108 @@ def test_parse_socket_timeline_unions_observations_and_skips_bad_lines() -> None
 def test_parse_socket_timeline_robust_bad_input() -> None:
     assert socket_attr.parse_socket_timeline("").entries == []
     assert socket_attr.parse_socket_timeline(None).entries == []  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# ★外部复审：归因准确性——共享远端多 UID 标 ambiguous（不强选目标）+ UDP/udp6 归因（QUIC）
+# ---------------------------------------------------------------------------
+def test_attribute_endpoints_confident_single_uid_schema() -> None:
+    """单一 UID 拥有该远端 → attribution=confident + matched_by=[remote_ip_port]，is_target_app 仍确定。"""
+    s = socket_attr.parse_uid_sockets(_SAMPLE)
+    a = socket_attr.attribute_endpoints([("1.2.3.4", 443)], s)[("1.2.3.4", 443)]
+    assert a["attribution"] == "confident" and a["matched_by"] == ["remote_ip_port"]
+    assert a["is_target_app"] is True and a["uid"] == 10234
+
+
+def test_attribute_endpoints_ambiguous_on_shared_remote_multiuid() -> None:
+    """★同一远端(CDN/大型网关/公有云)被目标 app 与其它进程各连 → 不默认强选目标，标 ambiguous + candidates。"""
+    txt = (
+        "# package=com.x uid=10001\n## /proc/net/tcp\n"
+        "   0: 0100000A:1000 04030201:01BB 01 00000000:00000000 00:00000000 00000000     0 0 1\n"  # 系统 uid 0
+        "   1: 0100000A:1001 04030201:01BB 01 00000000:00000000 00:00000000 00000000 10001 0 2\n"  # 目标
+        "   2: 0100000A:1002 04030201:01BB 01 00000000:00000000 00:00000000 00000000 10001 0 3\n"  # 目标再一条
+    )
+    s = socket_attr.parse_uid_sockets(txt)
+    a = socket_attr.attribute_endpoints([("1.2.3.4", 443)], s)[("1.2.3.4", 443)]
+    assert a["attribution"] == "ambiguous"
+    assert a["is_target_app"] is None  # ★仅远端无法定夺——不把混连流量归给目标
+    assert a["target_uid_among_candidates"] is True
+    assert {c["uid"] for c in a["candidates"]} == {0, 10001}
+    assert a["candidates"][0]["uid"] == 10001 and a["candidates"][0]["connections"] == 2  # 连接数降序
+
+
+def test_udp_section_parsed_and_attributed() -> None:
+    """★/proc/net/udp 也解析（QUIC/HTTP3 = UDP）→ 给 UDP/443 流做 UID 归因（此前只覆盖 TCP）。"""
+    txt = (
+        "# package=com.q uid=10055\n## /proc/net/udp（uid 在第 8 列）\n"
+        "  sl  local_address rem_address st ...\n"
+        "   0: 0100000A:C000 04030201:01BB 07 00000000:00000000 00:00000000 00000000 10055 0 9\n"
+    )
+    s = socket_attr.parse_uid_sockets(txt)
+    assert len(s.entries) == 1 and s.entries[0].proto == "udp"
+    a = socket_attr.attribute_endpoints([("1.2.3.4", 443)], s)[("1.2.3.4", 443)]
+    assert a["uid"] == 10055 and a["is_target_app"] is True and a["attribution"] == "confident"
+
+
+def test_udp6_v4mapped_parsed_and_normalized() -> None:
+    """/proc/net/udp6 的 v4-mapped 也按 tcp6 同法解码归一为点分。"""
+    txt = (
+        "# package=com.q uid=10055\n## /proc/net/udp6\n"
+        "   0: 000000000000000000000000FFFF020F:C000 0000000000000000FFFF000004030201:01BB 07"
+        " 00000000:00000000 00:00000000 00000000 10055 0 9\n"
+    )
+    s = socket_attr.parse_uid_sockets(txt)
+    assert len(s.entries) == 1 and s.entries[0].proto == "udp6" and s.entries[0].remote_ip == "1.2.3.4"
+
+
+# ---------------------------------------------------------------------------
+# ★codex CLI 复核坐实的 P0/P1：merge(时间线+快照) 才能触发歧义；ss 回填按四元组不跨 UID
+# ---------------------------------------------------------------------------
+def test_merge_timeline_and_snapshot_enables_ambiguity() -> None:
+    """★codex P0：target-only 时间线单用会误判 confident；与含竞争 UID 的末快照 merge 后才触发 ambiguity。"""
+    tl = socket_attr.parse_socket_timeline(
+        '{"type":"meta","package":"com.x","target_uid":10001}\n'
+        '{"ts":1,"proto":"tcp","uid":10001,"local":"10.0.2.15:1000","remote":"1.2.3.4:443","state":"established"}\n'
+    )
+    snap = socket_attr.parse_uid_sockets(
+        "# package=com.x uid=10001\n## /proc/net/tcp\n"
+        "   0: 0F02000A:03E8 04030201:01BB 01 00000000:00000000 00:00000000 00000000 10001 0 1\n"
+        "   1: 0F02000A:03E9 04030201:01BB 01 00000000:00000000 00:00000000 00000000     0 0 2\n"  # 系统 uid 0 竞争
+    )
+    only_tl = socket_attr.attribute_endpoints([("1.2.3.4", 443)], tl)[("1.2.3.4", 443)]
+    assert only_tl["attribution"] == "confident"  # 单用 target-only 时间线看不到竞争 UID（codex 指出的失效）
+    merged = socket_attr.merge_uid_sockets(tl, snap)
+    a = socket_attr.attribute_endpoints([("1.2.3.4", 443)], merged)[("1.2.3.4", 443)]
+    assert a["attribution"] == "ambiguous" and a["is_target_app"] is None  # merge 后见竞争 → 歧义
+    assert {c["uid"] for c in a["candidates"]} == {0, 10001}
+
+
+def test_merge_dedups_same_socket_across_tables() -> None:
+    """merge 按五元组+uid 去重：同一 socket 在时间线多时刻/快照重复，连接数不虚高。"""
+    tl = socket_attr.parse_socket_timeline(
+        '{"type":"meta","package":"com.x","target_uid":10001}\n'
+        '{"ts":1,"proto":"tcp","uid":10001,"local":"10.0.2.15:1000","remote":"1.2.3.4:443","state":"established"}\n'
+        '{"ts":2,"proto":"tcp","uid":10001,"local":"10.0.2.15:1000","remote":"1.2.3.4:443","state":"established"}\n'
+    )
+    snap = socket_attr.parse_uid_sockets(
+        "# package=com.x uid=10001\n## /proc/net/tcp\n"
+        "   0: 0F02000A:03E8 04030201:01BB 01 00000000:00000000 00:00000000 00000000 10001 0 1\n"  # 同一 socket
+    )
+    merged = socket_attr.merge_uid_sockets(tl, snap)
+    assert len(merged.by_remote[("1.2.3.4", 443)]) == 1  # 三处重复 → 去重成一条
+
+
+def test_ss_backfill_by_four_tuple_not_across_uids() -> None:
+    """★codex P1：同远端多 UID 时 ss 进程回填按四元组只落到匹配 local 的那条，不污染其它 UID 的记录。"""
+    txt = (
+        "# package=com.x uid=10001\n"
+        "## ss -tunp\n"
+        'tcp ESTAB 0 0 10.0.2.15:1001 1.2.3.4:443 users:(("com.x",pid=555,fd=9))\n'
+        "## /proc/net/tcp\n"
+        "   0: 0F02000A:03E8 04030201:01BB 01 00000000:00000000 00:00000000 00000000     0 0 1\n"  # local:1000 uid 0
+        "   1: 0F02000A:03E9 04030201:01BB 01 00000000:00000000 00:00000000 00000000 10001 0 2\n"  # local:1001 uid 10001
+    )
+    s = socket_attr.parse_uid_sockets(txt)
+    by_uid = {e.uid: e for e in s.by_remote[("1.2.3.4", 443)]}
+    assert by_uid[10001].process == "com.x" and by_uid[10001].pid == 555  # 匹配 local:1001 → 回填
+    assert by_uid[0].process is None and by_uid[0].pid is None  # 另一 UID（local:1000）不被污染

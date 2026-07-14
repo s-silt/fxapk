@@ -52,7 +52,11 @@ class UidSockets:
     by_remote: dict[tuple[str, int], list[SocketEntry]] = field(default_factory=dict)
 
     def owner_of(self, ip: str, port: int) -> SocketEntry | None:
-        """按远端 (ip, port) 找拥有该连接的 socket 记录；优先返回目标 UID 的那条。无 → None。"""
+        """按远端 (ip, port) 找拥有该连接的 socket 记录；优先返回目标 UID 的那条。无 → None。
+
+        ★低层访问器（会偏向目标 UID）：归因请用 :func:`attribute_endpoints`——它对同一远端多 UID
+        判 ambiguous、不默认强选目标（CDN/网关误归因）。owner_of 仅供需要"某条代表记录"的场景。
+        """
         hits = self.by_remote.get((ip, port))
         if not hits:
             return None
@@ -94,14 +98,18 @@ def _decode_proc_ipv6(hex_addr: str) -> str | None:
 
 
 def _parse_proc_line(line: str, proto: str) -> SocketEntry | None:
-    """解析 /proc/net/tcp{,6} 的一行数据 → SocketEntry。表头/坏行 → None。"""
+    """解析 /proc/net/{tcp,tcp6,udp,udp6} 的一行数据 → SocketEntry。表头/坏行 → None。
+
+    四者列格式一致（uid 在第 8 列、地址端口十六进制）；udp/udp6 的 st 列语义弱（多为 07 未连接），
+    经 _TCP_STATES 未命中则原样保留。proto 以 "6" 结尾 → IPv6 解码（tcp6/udp6）。
+    """
     parts = line.split()
     if len(parts) < 8 or ":" not in parts[1] or ":" not in parts[2]:
         return None  # 表头（sl local_address ...）或残行
     try:
         laddr, lport_h = parts[1].rsplit(":", 1)
         raddr, rport_h = parts[2].rsplit(":", 1)
-        decode = _decode_proc_ipv6 if proto == "tcp6" else _decode_proc_ipv4
+        decode = _decode_proc_ipv6 if proto.endswith("6") else _decode_proc_ipv4
         lip = decode(laddr)
         rip = decode(raddr)
         if lip is None or rip is None:
@@ -150,11 +158,23 @@ def parse_uid_sockets(text: str) -> UidSockets:
                 res.target_uid = int(mu.group(1))
             continue
         if s.startswith("## "):
-            section = "tcp6" if "tcp6" in s else ("tcp" if "/proc/net/tcp" in s else ("ss" if "ss " in s else ""))
+            # 顺序要紧：/proc/net/tcp6 含子串 "tcp"、udp6 含 "udp"——先判带 6 的。
+            if "/proc/net/udp6" in s:
+                section = "udp6"
+            elif "/proc/net/udp" in s:
+                section = "udp"
+            elif "tcp6" in s:
+                section = "tcp6"
+            elif "/proc/net/tcp" in s:
+                section = "tcp"
+            elif "ss " in s:
+                section = "ss"
+            else:
+                section = ""
             continue
         if not s:
             continue
-        if section in ("tcp", "tcp6"):
+        if section in ("tcp", "tcp6", "udp", "udp6"):
             e = _parse_proc_line(s, section)
             if e is not None:
                 res.entries.append(e)
@@ -231,43 +251,118 @@ def parse_socket_timeline(text: str) -> UidSockets:
     return res
 
 
+def _norm_ss_ip(ip: str) -> str:
+    """ss 地址归一化到与 /proc 解出的 IP 对齐：剥方括号 + %scope；v4-mapped ::ffff:a.b.c.d → 点分。"""
+    ip = ip.strip("[]").split("%", 1)[0]
+    if ip.lower().startswith("::ffff:") and "." in ip:
+        ip = ip.rsplit(":", 1)[-1]
+    return ip
+
+
 def _apply_ss_line(line: str, res: UidSockets) -> None:
-    """从一行 ss -tunp 抽 (进程名,pid) + 远端 addr:port，回填到已有 /proc 记录的 process/pid。绝不抛。"""
+    """从一行 ss -tunp 抽 (进程名,pid) + 本端/远端 addr:port，按**四元组**精确回填到那一条 /proc 记录。绝不抛。
+
+    ★codex 复审 P1：旧实现只按远端 (ip,port) 回填 → 同一远端被多 UID 连时，进程/pid 会被最后处理的 ss 行
+    统一覆盖到所有候选记录（张冠李戴、污染 candidates[].process/pid）。改按 (local_ip,local_port,remote_ip,
+    remote_port) 唯一定位那条 socket；无唯一对应则不回填（宁缺勿错）。
+    """
     proc = _SS_PROC_RE.search(line)
     if proc is None:
         return
     addrs = _SS_ADDR_RE.findall(line)
     if len(addrs) < 2:
         return
-    rip, rport_s = addrs[-1]  # ss 行末通常是 peer（远端）地址
-    rip = rip.strip("[]").split("%", 1)[0]  # 剥方括号 + %scope（/proc 解出的 IPv6 不带 scope，须对齐）
-    if rip.lower().startswith("::ffff:") and "." in rip:  # v4-mapped 归一化（与 _decode_proc_ipv6 一致）
-        rip = rip.rsplit(":", 1)[-1]
+    lip, lport_s = addrs[-2]  # ss 行倒数第二 = 本端（local）
+    rip, rport_s = addrs[-1]  # 行末 = peer（远端）
+    lip, rip = _norm_ss_ip(lip), _norm_ss_ip(rip)
     try:
-        rport = int(rport_s)
+        lport, rport = int(lport_s), int(rport_s)
     except ValueError:
         return
     for e in res.by_remote.get((rip, rport), []):
-        e.process = proc.group(1)
-        e.pid = int(proc.group(2))
+        if e.local_ip == lip and e.local_port == lport:  # 四元组唯一匹配 → 只回填这一条
+            e.process = proc.group(1)
+            e.pid = int(proc.group(2))
+
+
+def merge_uid_sockets(*tables: UidSockets) -> UidSockets:
+    """合并多份 UidSockets（去重、重建 by_remote），target_uid/package 取首个非空。绝不抛。
+
+    ★codex 复审 P0：归因**必须含竞争 UID**。持续时间线（_SocketSampler）**只采目标 UID**——单用它做归因，
+    目标与其它 UID 连同一远端时时间线只见目标 UID，会误判 confident、歧义失效。故须与**窗口末快照**（含全
+    UID）合并：快照给竞争视图、时间线补目标短连。按 (proto,local,remote,uid) 五元组+uid 去重（同一 socket
+    在时间线多时刻/快照里重复只记一次，避免 candidates 连接数虚高）。
+    """
+    out = UidSockets()
+    seen: set[tuple[str, str, int, str, int, int]] = set()
+    for t in tables:
+        if out.target_uid is None and t.target_uid is not None:
+            out.target_uid = t.target_uid
+        if not out.package and t.package:
+            out.package = t.package
+        for e in t.entries:
+            key = (e.proto, e.local_ip, e.local_port, e.remote_ip, e.remote_port, e.uid)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.entries.append(e)
+            out.by_remote.setdefault((e.remote_ip, e.remote_port), []).append(e)
+    return out
 
 
 def attribute_endpoints(
     endpoints: list[tuple[str, int]], sockets: UidSockets
 ) -> dict[tuple[str, int], dict]:
-    """把 pcap 接入节点 (ip, port) 列表关联到 app：返回 {(ip,port): {uid, is_target_app, process, pid}}。
+    """把 pcap 接入节点 (ip, port) 列表关联到 app。未匹配到 socket 记录的端点不入结果。绝不抛。
 
-    未匹配到 socket 记录的端点不入结果（留给调用方按"未归因"处理）。绝不抛。
+    ★复审加固：**只有远端 (ip,port)** 时不能默认强选目标 UID——CDN / 大型 API 网关 / 公有云上目标 app、
+    系统 WebView、其它 app 常连**同一** remote:443。故按拥有该远端连接的**去重 UID 数**分两路：
+
+    - 单一 UID → ``attribution="confident"``：``{uid, is_target_app, process, pid, attribution, matched_by}``。
+    - ≥2 个 UID → ``attribution="ambiguous"``：``is_target_app=None``（仅远端无法定夺）+ ``candidates``
+      （按连接数降序，各含 uid/connections/is_target_app/process/pid）+ ``target_uid_among_candidates``，
+      **不把混连流量单独归给目标**。（五元组 proto+local:port + 时间窗可进一步消歧，属后续。）
+
+    ``matched_by=["remote_ip_port"]``：当前仅按远端匹配；后续加五元组/时间窗时并入该列表。
     """
     out: dict[tuple[str, int], dict] = {}
+    tgt = sockets.target_uid
     for ip, port in endpoints:
-        e = sockets.owner_of(ip, port)
-        if e is None:
+        hits = sockets.by_remote.get((ip, port))
+        if not hits:
             continue
-        out[(ip, port)] = {
-            "uid": e.uid,
-            "is_target_app": sockets.target_uid is not None and e.uid == sockets.target_uid,
-            "process": e.process,
-            "pid": e.pid,
-        }
+        by_uid: dict[int, SocketEntry] = {}
+        for e in hits:
+            by_uid.setdefault(e.uid, e)  # 每 UID 留首条作代表（进程/pid）
+        if len(by_uid) == 1:
+            uid, e = next(iter(by_uid.items()))
+            out[(ip, port)] = {
+                "uid": uid,
+                "is_target_app": tgt is not None and uid == tgt,
+                "process": e.process,
+                "pid": e.pid,
+                "attribution": "confident",
+                "matched_by": ["remote_ip_port"],
+            }
+        else:
+            candidates = sorted(
+                (
+                    {
+                        "uid": u,
+                        "connections": sum(1 for e in hits if e.uid == u),
+                        "is_target_app": tgt is not None and u == tgt,
+                        "process": e.process,
+                        "pid": e.pid,
+                    }
+                    for u, e in by_uid.items()
+                ),
+                key=lambda c: (-c["connections"], c["uid"]),
+            )
+            out[(ip, port)] = {
+                "attribution": "ambiguous",
+                "is_target_app": None,  # 仅远端无法定夺——不强选目标（复审：别把其它进程流量归给目标）
+                "target_uid_among_candidates": tgt is not None and tgt in by_uid,
+                "candidates": candidates,
+                "matched_by": ["remote_ip_port"],
+            }
     return out
