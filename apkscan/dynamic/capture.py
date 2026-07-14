@@ -83,6 +83,7 @@ _TCPDUMP_KNOWN_PATHS = ("/system/xbin/tcpdump", "/system/bin/tcpdump", _TCPDUMP_
 
 # 抓包窗口内按 UID 周期采样 socket，补窗口末单次快照会漏掉的短连接。
 _SOCKET_SAMPLE_INTERVAL = 0.25
+_TLS_KEYLOG_NAME = "tls.keys"  # P2：授权插桩落下的 NSS TLS Key Log 约定路径（out/tls.keys）→ 解密 floor.pcap。
 _SOCKET_MAX_OBSERVATIONS = 20_000
 _SOCKET_TIMELINE_NAME = "socket_timeline.jsonl"
 
@@ -691,6 +692,35 @@ def _capture(
                     )
         except Exception:
             logger.exception("[capture] tshark 明文 HTTP 抽取失败（忽略，不影响主流程）")
+    # P2：NSS TLS Key Log 解密——若 floor.pcap 旁存在授权插桩落下的 tls.keys（native agent / Frida SSL
+    # keylog / PCAPdroid / 分析者 SSLKEYLOGFILE），用它解密 TLS，抽出加密应用层 HTTP/2 端点：pcap_ingest 只
+    # 到 SNI、tshark 明文路径只到明文 HTTP，解密后才见 :authority/:path 的真实业务后端。★门控：仅当 keylog
+    # 文件显式存在且确是 NSS Key Log 时才解密——密钥出自授权设备/App 插桩，其存在即授权信号。缺/失败静默降级。
+    if floor_pcap is not None and floor_pcap.is_file():
+        keylog = out_path / _TLS_KEYLOG_NAME
+        if keylog.is_file():
+            try:
+                from apkscan.dynamic import tshark_backend
+
+                if tshark_backend.has_tshark():
+                    dec_eps = tshark_backend.decrypted_to_endpoints(
+                        tshark_backend.extract_decrypted_http(str(floor_pcap), str(keylog))
+                    )
+                    seen_dec = {ep.value for ep in endpoints}
+                    dec_noise = _load_noise_patterns()
+                    dec_added = [
+                        ep for ep in dec_eps
+                        if ep.value not in seen_dec and not _is_noise_host(ep.value, dec_noise)
+                    ]
+                    if dec_added:
+                        endpoints.extend(dec_added)
+                        artifacts.append(str(keylog))
+                        playbook.append(
+                            f"P2 NSS TLS Key Log 解密：还原 TLS 应用层接入域名 {len(dec_added)} 个"
+                            "（加密流量解密后才可见的真实业务后端）"
+                        )
+            except Exception:
+                logger.exception("[capture] TLS keylog 解密抽取失败（忽略，不影响主流程）")
     # floor pcap 接入节点【绑定到目标 app】：消费 uid_sockets.txt 快照，按远端 IP:port 关联出该连接属
     # 哪个 UID/进程、是否 == 目标 app——自动区分真后端 vs 背景噪音（此前 uid_sockets.txt 只供人工比对）。
     # best-effort、绝不影响主流程（floor pcap 与 uid 快照都在才做；失败忽略）。
