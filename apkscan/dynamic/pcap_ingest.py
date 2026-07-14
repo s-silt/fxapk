@@ -358,7 +358,7 @@ def _parse_quic_long_header(app: bytes) -> tuple[str, str, str] | None:
         return None
 
 
-def _ingest_quic(app: bytes, f: Flow, qdec: "_QuicDecryptor") -> bool:
+def _ingest_quic(app: bytes, f: Flow, qdec: "_QuicDecryptor", flow_key: tuple) -> bool:
     """是 QUIC 长包头则抽元数据（+ v1 Initial 尝试解密→SNI/ALPN）填进 Flow、返回 True；否则 False
     （供调用方决定是否再当 DNS 解——内容优先派发）。"""
     meta = _parse_quic_long_header(app)
@@ -374,7 +374,7 @@ def _ingest_quic(app: bytes, f: Flow, qdec: "_QuicDecryptor") -> bool:
     # v1 Initial（type 位 00）且 cryptography 可用 → 解密取 ClientHello 的 SNI/ALPN（QUIC 全密文时唯一
     # 应用层线索，与 TCP「SNI 不丢」对等）。Initial 密钥仅依赖明文 DCID，无需任何会话密钥。
     if version == "00000001" and (app[0] & 0x30) == 0 and qdec.available:
-        _ingest_quic_initial(app, f, qdec)
+        _ingest_quic_initial(app, f, qdec, flow_key)
     return True
 
 
@@ -389,6 +389,7 @@ _QUIC_INITIAL_SALT = bytes.fromhex("38762cf7f55934b34d179ae6a4c80cadccbb7f0a")  
 _MAX_QUIC_CRYPTO = 65536   # 单连接 CRYPTO 重组缓冲上限（真实 ClientHello <16KB，封 64KiB）
 _MAX_QUIC_PENDING = 512    # 并发 CRYPTO 重组连接上限（超出 FIFO 淘汰最老）
 _MAX_QUIC_DONE = 4096      # tombstone 上限
+_MAX_QUIC_KEYS = 4096      # Initial 密钥缓存上限（DCID 明文可随时重派生，FIFO 淘汰无正确性代价；防无界 DoS）
 
 
 def _quic_crypto_available() -> bool:
@@ -434,12 +435,48 @@ def _quic_client_initial_keys(dcid: bytes, cache: dict) -> tuple[bytes, bytes, b
         keys = (expand(cs, b"quic key", 16), expand(cs, b"quic iv", 12), expand(cs, b"quic hp", 16))
     except Exception:  # noqa: BLE001 - 密钥派生失败静默降级
         keys = None
+    if len(cache) >= _MAX_QUIC_KEYS:
+        cache.pop(next(iter(cache)), None)  # FIFO 淘汰最老（复审 #B：防唯一 DCID 洪水撑爆缓存）
     cache[dcid] = keys
     return keys
 
 
-def _decrypt_quic_initial(app: bytes, qdec: "_QuicDecryptor") -> tuple[str, bytes] | None:
-    """去头保护 + AES-128-GCM 解 v1 Initial → (dcid_hex, 明文 frames)。AEAD 失败/非 v1/坏包 → None。绝不抛。"""
+def _quic_try_decrypt(
+    app: bytes, pn_off: int, length: int, keys: tuple[bytes, bytes, bytes]
+) -> bytes | None:
+    """用给定 (key,iv,hp) 对一个 v1 Initial 去头保护 + AES-128-GCM 解密 → 明文 frames；tag 不符 → None。"""
+    try:
+        key, iv, hp = keys
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        sample = app[pn_off + 4 : pn_off + 4 + 16]
+        # ★AES-ECB 仅用于 RFC 9001 §5.4.1 规定的**头保护掩码**派生（对单个 16B sample 出 5B mask），
+        #   非数据加密——QUIC 协议要求，勿按"ECB 泄露结构"误报。
+        mask = Cipher(algorithms.AES(hp), modes.ECB()).encryptor().update(sample)[:5]  # noqa: S305
+        first = app[0] ^ (mask[0] & 0x0F)
+        pnl = (first & 0x03) + 1
+        if pn_off + pnl > len(app):
+            return None
+        pn_bytes = bytes(app[pn_off + i] ^ mask[1 + i] for i in range(pnl))
+        header = bytes([first]) + app[1:pn_off] + pn_bytes  # AAD = 去保护后的完整头
+        ct = app[pn_off + pnl : pn_off + length]
+        nonce = bytes(x ^ y for x, y in zip(iv, b"\x00" * (12 - pnl) + pn_bytes))
+        return AESGCM(key).decrypt(nonce, ct, header)  # tag 不符则抛 → None（天然过滤坏包/错密钥）
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _decrypt_quic_initial(
+    app: bytes, qdec: "_QuicDecryptor", flow_key: tuple
+) -> tuple[tuple, bytes] | None:
+    """解 v1 Initial → (重组桶键=flow_key, 明文 frames)。AEAD 失败/非 v1/坏包 → None。绝不抛。
+
+    ★RFC 9001 §5.2：整条连接的 Initial 密钥固定由客户端**首个** DCID 派生（DCID 切换后不变，仅 Retry
+    重算）。故按候选序试：已记录的连接原始 DCID 优先（覆盖 §7.2 服务端回包后切 DCID 的重传），回退本包
+    DCID（覆盖首包 / Retry 重派生）；某候选 AEAD 成功即记住它。重组按 flow_key 分桶（非 per-packet DCID，
+    否则切换后同连接被劈成两桶永不凑齐，复审 #A）。
+    """
     try:
         if len(app) < 7 or (app[0] & 0xC0) != 0xC0 or int.from_bytes(app[1:5], "big") != 1:
             return None
@@ -469,27 +506,22 @@ def _decrypt_quic_initial(app: bytes, qdec: "_QuicDecryptor") -> tuple[str, byte
         pn_off = p
         if pn_off + 4 + 16 > len(app) or pn_off + length > len(app) or length < 20:
             return None
-        keys = _quic_client_initial_keys(dcid, qdec.key_cache)
-        if keys is None:
-            return None
-        key, iv, hp = keys
-        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-        sample = app[pn_off + 4 : pn_off + 4 + 16]
-        # ★AES-ECB 仅用于 RFC 9001 §5.4.1 规定的**头保护掩码**派生（对单个 16B sample 出 5B mask），
-        #   非数据加密——QUIC 协议要求，勿按"ECB 泄露结构"误报。
-        mask = Cipher(algorithms.AES(hp), modes.ECB()).encryptor().update(sample)[:5]  # noqa: S305
-        first = app[0] ^ (mask[0] & 0x0F)
-        pnl = (first & 0x03) + 1
-        if pn_off + pnl > len(app):
-            return None
-        pn_bytes = bytes(app[pn_off + i] ^ mask[1 + i] for i in range(pnl))
-        header = bytes([first]) + app[1:pn_off] + pn_bytes  # AAD = 去保护后的完整头
-        ct = app[pn_off + pnl : pn_off + length]
-        nonce = bytes(x ^ y for x, y in zip(iv, b"\x00" * (12 - pnl) + pn_bytes))
-        plain = AESGCM(key).decrypt(nonce, ct, header)  # AEAD tag 不符则抛 → 下方 except（天然过滤坏包）
-        return dcid.hex(), plain
+        prior = qdec.conn_dcid.get(flow_key)
+        seen: set[bytes] = set()
+        for cand in (prior, dcid):  # 连接原始 DCID 优先，回退本包 DCID
+            if cand is None or cand in seen:
+                continue
+            seen.add(cand)
+            keys = _quic_client_initial_keys(cand, qdec.key_cache)
+            if keys is None:
+                continue
+            plain = _quic_try_decrypt(app, pn_off, length, keys)
+            if plain is not None:
+                if len(qdec.conn_dcid) >= _MAX_QUIC_PENDING:
+                    qdec.conn_dcid.pop(next(iter(qdec.conn_dcid)), None)  # FIFO 有界
+                qdec.conn_dcid[flow_key] = cand  # 记住成功的连接 DCID（Retry 回退成功时自动更新）
+                return flow_key, plain
+        return None
     except Exception:  # noqa: BLE001 - 解密失败（服务端包/非 v1/坏包/无 cryptography）静默 None
         return None
 
@@ -538,16 +570,16 @@ class _QuicCryptoReassembler:
     """按 DCID 重组跨 Initial 包/乱序的 CRYPTO 流 → 完整 ClientHello handshake。有界，绝不 OOM。"""
 
     def __init__(self) -> None:
-        self.pending: dict[str, _QuicCryptoState] = {}
-        self.done: dict[str, None] = {}
+        self.pending: dict[object, _QuicCryptoState] = {}
+        self.done: dict[object, None] = {}
 
-    def _kill(self, dcid: str) -> None:
+    def _kill(self, dcid: object) -> None:
         self.pending.pop(dcid, None)
         self.done[dcid] = None
         if len(self.done) > _MAX_QUIC_DONE:
             self.done.pop(next(iter(self.done)), None)
 
-    def feed(self, dcid: str, chunks: dict[int, bytes]) -> bytes | None:
+    def feed(self, dcid: object, chunks: dict[int, bytes]) -> bytes | None:
         """喂一个 Initial 解出的 CRYPTO 片段集；凑齐 ClientHello 返回其字节，否则 None。绝不抛。"""
         if not chunks or dcid in self.done:
             return None
@@ -581,7 +613,7 @@ class _QuicCryptoReassembler:
                 st.ooo[off] = data
                 st.ooo_bytes += len(data)
 
-    def _try_complete(self, dcid: str, st: _QuicCryptoState) -> bytes | None:
+    def _try_complete(self, dcid: object, st: _QuicCryptoState) -> bytes | None:
         if st.needed is None and len(st.buf) >= 4:
             if st.buf[0] != 0x01:  # 非 client_hello → 弃
                 self._kill(dcid)
@@ -602,18 +634,19 @@ class _QuicDecryptor:
 
     def __init__(self) -> None:
         self.key_cache: dict[bytes, tuple[bytes, bytes, bytes] | None] = {}
+        self.conn_dcid: dict[tuple, bytes] = {}  # 客户端→服务端流键 → 连接原始 DCID（RFC 9001 §5.2）
         self.reasm = _QuicCryptoReassembler()
         self.available = _quic_crypto_available()
 
 
-def _ingest_quic_initial(app: bytes, f: Flow, qdec: "_QuicDecryptor") -> None:
+def _ingest_quic_initial(app: bytes, f: Flow, qdec: "_QuicDecryptor", flow_key: tuple) -> None:
     """解 v1 Initial → CRYPTO 重组 → ClientHello 的 SNI/ALPN 填 Flow。任何失败静默降级（仍有元数据）。"""
     try:
-        dec = _decrypt_quic_initial(app, qdec)
+        dec = _decrypt_quic_initial(app, qdec, flow_key)
         if dec is None:
             return
-        dcid_hex, plain = dec
-        hs = qdec.reasm.feed(dcid_hex, _collect_crypto_frames(plain))
+        bucket, plain = dec
+        hs = qdec.reasm.feed(bucket, _collect_crypto_frames(plain))
         if hs is None:
             return
         sni, _ja3v, alpn = _parse_hs_client_hello(hs)
@@ -697,7 +730,7 @@ def _process_frame(
         # 内容优先派发：先看是不是 QUIC 长包头（严格 0xC0 门 + 版本白名单，真 DNS 命不中）——是则抽 QUIC
         # 元数据、**不**再当 DNS（哪怕在 UDP/53：反取证 C2 常把 QUIC 伪装到防火墙放行的 53，复审 #2）；
         # 否则若在 53 端口才当 DNS 解。
-        if not _ingest_quic(app, f, qdec) and (dport == 53 or sport == 53):
+        if not _ingest_quic(app, f, qdec, (src_ip, sport, dst_ip, dport)) and (dport == 53 or sport == 53):
             qn = _parse_dns_qname(app)
             if qn:
                 summ.dns_queries.add(qn)

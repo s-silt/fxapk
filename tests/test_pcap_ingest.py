@@ -757,14 +757,19 @@ def _tls_ch_alpn(sni: str, alpn: bytes = b"h3") -> bytes:
     return b"\x01" + struct.pack("!I", len(body))[1:] + body
 
 
-def _build_quic_initial(dcid: bytes, crypto_frames: bytes, scid: bytes = b"\xaa\xbb", pn: int = 0) -> bytes:
-    """独立实现 RFC 9001 加密造一个合法 client Initial（作 round-trip 的独立对照，不调生产解密码）。"""
+def _build_quic_initial(dcid: bytes, crypto_frames: bytes, scid: bytes = b"\xaa\xbb", pn: int = 0,
+                        key_dcid: bytes | None = None) -> bytes:
+    """独立实现 RFC 9001 加密造一个合法 client Initial（作 round-trip 的独立对照，不调生产解密码）。
+
+    key_dcid 给定时用它派生密钥、而包头 DCID 仍是 dcid——模拟 RFC 9001 §5.2/9000 §7.2：客户端收到
+    服务端首包后把 DCID 切成服务端 SCID，但 Initial 密钥仍由**原始** DCID 派生。
+    """
     import struct as _s
 
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-    key, iv, hp = pcap_ingest._quic_client_initial_keys(dcid, {})  # 生产密钥派生（已对 RFC 向量验证）
+    key, iv, hp = pcap_ingest._quic_client_initial_keys(key_dcid or dcid, {})  # 生产密钥派生（已对 RFC 向量验证）
     plaintext = crypto_frames
     pnl = 4
     length = pnl + len(plaintext) + 16
@@ -845,6 +850,36 @@ def test_quic_initial_aead_failure_no_sni_no_crash() -> None:
 def test_quic_malformed_initial_no_crash() -> None:
     """畸形 Initial（截断/坏 varint）→ 解密路径绝不抛。"""
     qdec = pcap_ingest._QuicDecryptor()
-    assert pcap_ingest._decrypt_quic_initial(b"\xc0\x00\x00\x00\x01\x08" + bytes(4), qdec) is None
-    assert pcap_ingest._decrypt_quic_initial(b"", qdec) is None
+    fk = ("10.0.0.2", 51000, "1.2.3.4", 443)
+    assert pcap_ingest._decrypt_quic_initial(b"\xc0\x00\x00\x00\x01\x08" + bytes(4), qdec, fk) is None
+    assert pcap_ingest._decrypt_quic_initial(b"", qdec, fk) is None
     pcap_ingest.parse_pcap_bytes(_quic_pcap(b"\xc0\x00\x00\x00\x01\x14" + b"\xff" * 60))  # 不崩
+
+
+def test_quic_dcid_switch_keeps_original_keys() -> None:
+    """★复审 #A（RFC 9001 §5.2 / 9000 §7.2）：服务端回包后客户端把 DCID 切成服务端 SCID 重传尾段 CRYPTO，
+    但密钥仍由**原始** DCID 派生 → 候选序 + 按流分桶后仍解出 SNI（旧 per-packet DCID 会必然失败）。"""
+    pytest.importorskip("cryptography")
+    d0 = bytes.fromhex("8394c8f03e515708")  # 客户端原始 DCID
+    ssid = bytes.fromhex("cafebabe")          # 服务端 SCID（切换后包头 DCID）
+    ch = _tls_ch_alpn("dcid-switch.evil.com")
+    cut = len(ch) // 2
+    f1 = b"\x06" + _enc_varint(0) + _enc_varint(cut) + ch[:cut]
+    f2 = b"\x06" + _enc_varint(cut) + _enc_varint(len(ch) - cut) + ch[cut:]
+    p1 = _build_quic_initial(d0, f1, pn=0)                      # 首包：头 DCID=D0、密钥 D0
+    p2 = _build_quic_initial(ssid, f2, pn=1, key_dcid=d0)       # 切换后重传：头 DCID=S、密钥仍 D0
+    summary = pcap_ingest.parse_pcap_bytes(_pcap([
+        _eth(_ipv4(_udp(p1, 51000, 443), 17, "10.0.0.2", "45.202.1.235"), 0x0800),
+        _eth(_ipv4(_udp(p2, 51000, 443), 17, "10.0.0.2", "45.202.1.235"), 0x0800),
+    ]))
+    f = next(fl for fl in summary.flows if fl.dst_ip == "45.202.1.235")
+    assert "dcid-switch.evil.com" in f.sni
+
+
+def test_quic_key_cache_bounded() -> None:
+    """★复审 #B：唯一 DCID 洪水 → 密钥缓存 FIFO 有界（≤ _MAX_QUIC_KEYS），绝不无界 OOM。"""
+    pytest.importorskip("cryptography")
+    cache: dict = {}
+    for i in range(pcap_ingest._MAX_QUIC_KEYS + 200):
+        pcap_ingest._quic_client_initial_keys(struct.pack("!Q", i), cache)
+    assert len(cache) <= pcap_ingest._MAX_QUIC_KEYS
