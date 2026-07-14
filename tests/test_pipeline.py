@@ -503,3 +503,28 @@ def test_load_rules_via_importlib_resources_reads_yaml():
 
     # 不存在的规则 → 空 dict（不抛）。
     assert registry.load_rules("__nope__") == {}
+
+
+def test_stage_attribution_writes_five_layers_after_enrich() -> None:
+    """★接线测试：_stage_attribution 把富化好的 enrichment 映射成五层写入 endpoint.enrichment['attribution']；
+    IP 端点用 asn、域名端点 per-IP 用 dns.hosting；无归属信号的端点不塞空 attribution 键。"""
+    from types import SimpleNamespace
+
+    from apkscan.core.pipeline import _stage_attribution
+
+    eps = [
+        Endpoint(value="9.9.9.9", kind="ip", enrichment={"asn": {"asn": "AS45090", "org": "Tencent"}}),
+        Endpoint(value="pay.x.com", kind="domain", enrichment={"dns": {
+            "hosting": [{"ip": "1.1.1.1", "asn": "AS13335", "org": "Cloudflare"}],
+            "cname": ["pay.x.com.cdn.cloudflare.net"]}}),
+        Endpoint(value="clean.com", kind="domain", enrichment={}),  # 无信号
+    ]
+    _stage_attribution(SimpleNamespace(endpoints=eps))
+
+    ip_att = eps[0].enrichment["attribution"]
+    assert ip_att["kind"] == "ip" and ip_att["ips"][0]["origin_network"]["category"] == "cloud"
+    dom_att = eps[1].enrichment["attribution"]
+    assert dom_att["kind"] == "domain" and dom_att["ips"][0]["edge_provider"]["name"] == "Cloudflare"
+    # ★service_operator 恒 unknown（不塌缩，pipeline 也不例外）。
+    assert ip_att["ips"][0]["service_operator"]["name"] is None
+    assert "attribution" not in eps[2].enrichment  # 无归属信号 → 不塞空键
