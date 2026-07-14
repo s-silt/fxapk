@@ -1525,7 +1525,8 @@ def _capture_uid_socket_snapshot(package: str, out_path: Path, serial: str | Non
         if ss and ss.strip():
             parts.append("## ss -tunp（需 root 显进程/UID）\n" + ss.rstrip())
             got = True
-        for procfs in ("/proc/net/tcp", "/proc/net/tcp6"):
+        # tcp{,6}=长连后端；udp{,6}=QUIC/HTTP3 的 socket（UDP/443），补上才能给 QUIC 流做 UID 归因。
+        for procfs in ("/proc/net/tcp", "/proc/net/tcp6", "/proc/net/udp", "/proc/net/udp6"):
             raw = _adb_capture(["shell", "cat", procfs], serial)
             if raw and raw.strip():
                 parts.append(f"## {procfs}（uid 在第 8 列，地址/端口十六进制）\n" + raw.rstrip())
@@ -1607,7 +1608,10 @@ class _SocketSampler:
         from apkscan.dynamic import socket_attr
 
         ts = time.time()
-        for procfs, proto in (("/proc/net/tcp", "tcp"), ("/proc/net/tcp6", "tcp6")):
+        for procfs, proto in (
+            ("/proc/net/tcp", "tcp"), ("/proc/net/tcp6", "tcp6"),
+            ("/proc/net/udp", "udp"), ("/proc/net/udp6", "udp6"),  # QUIC/HTTP3 = UDP，补归因
+        ):
             raw = _adb_capture(["shell", "cat", procfs], self.serial) or ""
             for line in raw.splitlines():
                 entry = socket_attr._parse_proc_line(line, proto)

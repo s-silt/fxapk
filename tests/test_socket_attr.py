@@ -154,3 +154,55 @@ def test_parse_socket_timeline_unions_observations_and_skips_bad_lines() -> None
 def test_parse_socket_timeline_robust_bad_input() -> None:
     assert socket_attr.parse_socket_timeline("").entries == []
     assert socket_attr.parse_socket_timeline(None).entries == []  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# ★外部复审：归因准确性——共享远端多 UID 标 ambiguous（不强选目标）+ UDP/udp6 归因（QUIC）
+# ---------------------------------------------------------------------------
+def test_attribute_endpoints_confident_single_uid_schema() -> None:
+    """单一 UID 拥有该远端 → attribution=confident + matched_by=[remote_ip_port]，is_target_app 仍确定。"""
+    s = socket_attr.parse_uid_sockets(_SAMPLE)
+    a = socket_attr.attribute_endpoints([("1.2.3.4", 443)], s)[("1.2.3.4", 443)]
+    assert a["attribution"] == "confident" and a["matched_by"] == ["remote_ip_port"]
+    assert a["is_target_app"] is True and a["uid"] == 10234
+
+
+def test_attribute_endpoints_ambiguous_on_shared_remote_multiuid() -> None:
+    """★同一远端(CDN/大型网关/公有云)被目标 app 与其它进程各连 → 不默认强选目标，标 ambiguous + candidates。"""
+    txt = (
+        "# package=com.x uid=10001\n## /proc/net/tcp\n"
+        "   0: 0100000A:1000 04030201:01BB 01 00000000:00000000 00:00000000 00000000     0 0 1\n"  # 系统 uid 0
+        "   1: 0100000A:1001 04030201:01BB 01 00000000:00000000 00:00000000 00000000 10001 0 2\n"  # 目标
+        "   2: 0100000A:1002 04030201:01BB 01 00000000:00000000 00:00000000 00000000 10001 0 3\n"  # 目标再一条
+    )
+    s = socket_attr.parse_uid_sockets(txt)
+    a = socket_attr.attribute_endpoints([("1.2.3.4", 443)], s)[("1.2.3.4", 443)]
+    assert a["attribution"] == "ambiguous"
+    assert a["is_target_app"] is None  # ★仅远端无法定夺——不把混连流量归给目标
+    assert a["target_uid_among_candidates"] is True
+    assert {c["uid"] for c in a["candidates"]} == {0, 10001}
+    assert a["candidates"][0]["uid"] == 10001 and a["candidates"][0]["connections"] == 2  # 连接数降序
+
+
+def test_udp_section_parsed_and_attributed() -> None:
+    """★/proc/net/udp 也解析（QUIC/HTTP3 = UDP）→ 给 UDP/443 流做 UID 归因（此前只覆盖 TCP）。"""
+    txt = (
+        "# package=com.q uid=10055\n## /proc/net/udp（uid 在第 8 列）\n"
+        "  sl  local_address rem_address st ...\n"
+        "   0: 0100000A:C000 04030201:01BB 07 00000000:00000000 00:00000000 00000000 10055 0 9\n"
+    )
+    s = socket_attr.parse_uid_sockets(txt)
+    assert len(s.entries) == 1 and s.entries[0].proto == "udp"
+    a = socket_attr.attribute_endpoints([("1.2.3.4", 443)], s)[("1.2.3.4", 443)]
+    assert a["uid"] == 10055 and a["is_target_app"] is True and a["attribution"] == "confident"
+
+
+def test_udp6_v4mapped_parsed_and_normalized() -> None:
+    """/proc/net/udp6 的 v4-mapped 也按 tcp6 同法解码归一为点分。"""
+    txt = (
+        "# package=com.q uid=10055\n## /proc/net/udp6\n"
+        "   0: 000000000000000000000000FFFF020F:C000 0000000000000000FFFF000004030201:01BB 07"
+        " 00000000:00000000 00:00000000 00000000 10055 0 9\n"
+    )
+    s = socket_attr.parse_uid_sockets(txt)
+    assert len(s.entries) == 1 and s.entries[0].proto == "udp6" and s.entries[0].remote_ip == "1.2.3.4"

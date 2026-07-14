@@ -52,7 +52,11 @@ class UidSockets:
     by_remote: dict[tuple[str, int], list[SocketEntry]] = field(default_factory=dict)
 
     def owner_of(self, ip: str, port: int) -> SocketEntry | None:
-        """按远端 (ip, port) 找拥有该连接的 socket 记录；优先返回目标 UID 的那条。无 → None。"""
+        """按远端 (ip, port) 找拥有该连接的 socket 记录；优先返回目标 UID 的那条。无 → None。
+
+        ★低层访问器（会偏向目标 UID）：归因请用 :func:`attribute_endpoints`——它对同一远端多 UID
+        判 ambiguous、不默认强选目标（CDN/网关误归因）。owner_of 仅供需要"某条代表记录"的场景。
+        """
         hits = self.by_remote.get((ip, port))
         if not hits:
             return None
@@ -94,14 +98,18 @@ def _decode_proc_ipv6(hex_addr: str) -> str | None:
 
 
 def _parse_proc_line(line: str, proto: str) -> SocketEntry | None:
-    """解析 /proc/net/tcp{,6} 的一行数据 → SocketEntry。表头/坏行 → None。"""
+    """解析 /proc/net/{tcp,tcp6,udp,udp6} 的一行数据 → SocketEntry。表头/坏行 → None。
+
+    四者列格式一致（uid 在第 8 列、地址端口十六进制）；udp/udp6 的 st 列语义弱（多为 07 未连接），
+    经 _TCP_STATES 未命中则原样保留。proto 以 "6" 结尾 → IPv6 解码（tcp6/udp6）。
+    """
     parts = line.split()
     if len(parts) < 8 or ":" not in parts[1] or ":" not in parts[2]:
         return None  # 表头（sl local_address ...）或残行
     try:
         laddr, lport_h = parts[1].rsplit(":", 1)
         raddr, rport_h = parts[2].rsplit(":", 1)
-        decode = _decode_proc_ipv6 if proto == "tcp6" else _decode_proc_ipv4
+        decode = _decode_proc_ipv6 if proto.endswith("6") else _decode_proc_ipv4
         lip = decode(laddr)
         rip = decode(raddr)
         if lip is None or rip is None:
@@ -150,11 +158,23 @@ def parse_uid_sockets(text: str) -> UidSockets:
                 res.target_uid = int(mu.group(1))
             continue
         if s.startswith("## "):
-            section = "tcp6" if "tcp6" in s else ("tcp" if "/proc/net/tcp" in s else ("ss" if "ss " in s else ""))
+            # 顺序要紧：/proc/net/tcp6 含子串 "tcp"、udp6 含 "udp"——先判带 6 的。
+            if "/proc/net/udp6" in s:
+                section = "udp6"
+            elif "/proc/net/udp" in s:
+                section = "udp"
+            elif "tcp6" in s:
+                section = "tcp6"
+            elif "/proc/net/tcp" in s:
+                section = "tcp"
+            elif "ss " in s:
+                section = "ss"
+            else:
+                section = ""
             continue
         if not s:
             continue
-        if section in ("tcp", "tcp6"):
+        if section in ("tcp", "tcp6", "udp", "udp6"):
             e = _parse_proc_line(s, section)
             if e is not None:
                 res.entries.append(e)
@@ -255,19 +275,56 @@ def _apply_ss_line(line: str, res: UidSockets) -> None:
 def attribute_endpoints(
     endpoints: list[tuple[str, int]], sockets: UidSockets
 ) -> dict[tuple[str, int], dict]:
-    """把 pcap 接入节点 (ip, port) 列表关联到 app：返回 {(ip,port): {uid, is_target_app, process, pid}}。
+    """把 pcap 接入节点 (ip, port) 列表关联到 app。未匹配到 socket 记录的端点不入结果。绝不抛。
 
-    未匹配到 socket 记录的端点不入结果（留给调用方按"未归因"处理）。绝不抛。
+    ★复审加固：**只有远端 (ip,port)** 时不能默认强选目标 UID——CDN / 大型 API 网关 / 公有云上目标 app、
+    系统 WebView、其它 app 常连**同一** remote:443。故按拥有该远端连接的**去重 UID 数**分两路：
+
+    - 单一 UID → ``attribution="confident"``：``{uid, is_target_app, process, pid, attribution, matched_by}``。
+    - ≥2 个 UID → ``attribution="ambiguous"``：``is_target_app=None``（仅远端无法定夺）+ ``candidates``
+      （按连接数降序，各含 uid/connections/is_target_app/process/pid）+ ``target_uid_among_candidates``，
+      **不把混连流量单独归给目标**。（五元组 proto+local:port + 时间窗可进一步消歧，属后续。）
+
+    ``matched_by=["remote_ip_port"]``：当前仅按远端匹配；后续加五元组/时间窗时并入该列表。
     """
     out: dict[tuple[str, int], dict] = {}
+    tgt = sockets.target_uid
     for ip, port in endpoints:
-        e = sockets.owner_of(ip, port)
-        if e is None:
+        hits = sockets.by_remote.get((ip, port))
+        if not hits:
             continue
-        out[(ip, port)] = {
-            "uid": e.uid,
-            "is_target_app": sockets.target_uid is not None and e.uid == sockets.target_uid,
-            "process": e.process,
-            "pid": e.pid,
-        }
+        by_uid: dict[int, SocketEntry] = {}
+        for e in hits:
+            by_uid.setdefault(e.uid, e)  # 每 UID 留首条作代表（进程/pid）
+        if len(by_uid) == 1:
+            uid, e = next(iter(by_uid.items()))
+            out[(ip, port)] = {
+                "uid": uid,
+                "is_target_app": tgt is not None and uid == tgt,
+                "process": e.process,
+                "pid": e.pid,
+                "attribution": "confident",
+                "matched_by": ["remote_ip_port"],
+            }
+        else:
+            candidates = sorted(
+                (
+                    {
+                        "uid": u,
+                        "connections": sum(1 for e in hits if e.uid == u),
+                        "is_target_app": tgt is not None and u == tgt,
+                        "process": e.process,
+                        "pid": e.pid,
+                    }
+                    for u, e in by_uid.items()
+                ),
+                key=lambda c: (-c["connections"], c["uid"]),
+            )
+            out[(ip, port)] = {
+                "attribution": "ambiguous",
+                "is_target_app": None,  # 仅远端无法定夺——不强选目标（复审：别把其它进程流量归给目标）
+                "target_uid_among_candidates": tgt is not None and tgt in by_uid,
+                "candidates": candidates,
+                "matched_by": ["remote_ip_port"],
+            }
     return out
