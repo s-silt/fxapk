@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import math
+
 from apkscan.core import attribution as A
 
 # 自造规则（不依赖 rules/providers.yaml，测引擎逻辑本身）。
@@ -191,6 +193,32 @@ def test_never_raises_on_bad_input() -> None:
         {"asn": float("inf")},
         rules={"edge_providers": [{"id": "c", "name": "C", "signals": {
             "network": {"asns": [{"value": 13335, "weight": 2}]}}}]}) is None
+    # 超大整数权重（float() OverflowError）与 inf 权重（非有限）→ _num 兜默认、不抛、不泄漏 inf 分。
+    huge = A.score_edge_provider(
+        {"response_headers": {"cf-ray": "x"}},
+        rules={"edge_providers": [{"id": "c", "name": "C", "signals": {"http": {"headers": [{"name": "cf-ray"}]}}}],
+               "weights": {"response_header": 10 ** 10000}})
+    assert huge is not None and huge["score"] == 6.0  # 脏权重回落默认 6
+    inf_w = A.score_edge_provider(
+        {"response_headers": {"cf-ray": "x"}, "cname_chain": ["a.cf.net"]},
+        rules={"edge_providers": [{"id": "c", "name": "C", "signals": {
+            "http": {"headers": [{"name": "cf-ray", "weight": float("inf")}]},
+            "dns": {"cname_suffix": [{"value": ".cf.net", "weight": 8}]}}}]})
+    assert inf_w is not None and math.isfinite(inf_w["score"]) and inf_w["score"] == 14.0
+
+
+def test_edge_asn_signal_rejects_reserved_and_out_of_range() -> None:
+    """★ASN 弱信号匹配前须过 range 校验：保留值/越界观测 ASN 不得被规则采纳为证据（与 _parse_asn 同纪律）。"""
+    def _rule(asn_val: int) -> dict:
+        return {"edge_providers": [{"id": "c", "name": "C", "signals": {
+            "network": {"asns": [{"value": asn_val, "weight": 3}]}}}],
+            "scoring": {"confirmed": 10, "probable": 6, "possible": 3}}
+    # 保留值 4294967295 / 0：即便规则恰好列了它，观测到也不采纳 → None。
+    assert A.score_edge_provider({"asn": 4294967295}, rules=_rule(4294967295)) is None
+    assert A.score_edge_provider({"asn": 0}, rules=_rule(0)) is None
+    # 合法可路由 ASN 仍正常匹配 → possible。
+    ok = A.score_edge_provider({"asn": 13335}, rules=_rule(13335))
+    assert ok is not None and ok["tier"] == "possible" and ok["score"] == 3.0
 
 
 def test_every_layer_has_source_field() -> None:

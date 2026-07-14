@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 from typing import Any
 
@@ -131,10 +132,14 @@ def _as_list(value: Any) -> list[Any]:
 
 
 def _num(value: Any, default: float) -> float:
-    """任意值 → float（bool/None/非数 → default）。用于清洗外部 weights/thresholds，防 None 参与比较抛异常。"""
+    """任意值 → **有限** float（bool/None/非数/超大整数/inf/nan → default）。清洗外部 weights/thresholds，绝不抛、不泄漏非有限分。"""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return default
-    return float(value)
+    try:
+        f = float(value)   # 超大 int（如 10**10000）→ OverflowError
+    except (OverflowError, ValueError):
+        return default
+    return f if math.isfinite(f) else default   # inf/nan → default，防非有限分泄漏进证据链
 
 
 def _host_hits_suffix(hosts: list[Any], suffix_val: str) -> bool:
@@ -425,14 +430,23 @@ def _score_one_edge(
             if val and val == _s(obs.get(key)):
                 _add("tls", "tls_fingerprint", f"tls:{path_[1]}", w, strong_kind=False)
                 break
-    # 弱信号 —— ASN / CIDR。
-    asn_obs = obs.get("asn")
-    if asn_obs is not None:
+    # 弱信号 —— ASN。★先把观测 ASN 归一到**可路由整数**（同 _parse_asn 纪律：range 外/保留值/inf/畸形不采纳），
+    # 再与规则比对——否则保留值 4294967295 等会被当证据坐实。
+    obs_asn = None
+    raw_asn = obs.get("asn")
+    if raw_asn is not None and not isinstance(raw_asn, bool):
+        try:
+            n = int(raw_asn)  # inf/nan/超大浮点 → OverflowError，一并吞掉
+            if _ASN_MIN <= n <= _ASN_MAX:
+                obs_asn = n
+        except (ValueError, TypeError, OverflowError):
+            obs_asn = None
+    if obs_asn is not None:
         for val, w, _e in _entries(sig, "network", "asns"):
             try:
-                if int(val) == int(asn_obs):  # inf/nan/超大浮点 → OverflowError，一并吞掉，绝不抛
-                    _add("asn", "asn", f"asn:{asn_obs}", w, strong_kind=False)
-                    weak.append(f"asn:{asn_obs}")
+                if int(val) == obs_asn:
+                    _add("asn", "asn", f"asn:{obs_asn}", w, strong_kind=False)
+                    weak.append(f"asn:{obs_asn}")
                     break
             except (ValueError, TypeError, OverflowError):
                 continue
