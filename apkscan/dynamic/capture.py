@@ -632,6 +632,27 @@ def _capture(
                 )
         except Exception:
             logger.exception("[capture] floor：解析/并入 floor.pcap 失败（忽略，pcap 仍作产物）")
+    # tshark 可选深度后端：明文 HTTP（Host/URL）——pcap_ingest 只抽 IP/SNI/DNS、不解 HTTP，涉诈 App 常用
+    # 明文 HTTP 下发配置/上报；tshark 在 PATH 时深抽接入域名并入端点。tshark 缺/失败静默降级、绝不影响主流程。
+    if floor_pcap is not None and floor_pcap.is_file():
+        try:
+            from apkscan.dynamic import tshark_backend
+
+            if tshark_backend.has_tshark():
+                http_eps = tshark_backend.to_endpoints(tshark_backend.extract_http(str(floor_pcap)))
+                seen_http = {ep.value for ep in endpoints}
+                http_noise = _load_noise_patterns()  # tshark 路径同样过噪音名单（复审 #1：captive-portal/遥测污染）
+                http_added = [
+                    ep for ep in http_eps
+                    if ep.value not in seen_http and not _is_noise_host(ep.value, http_noise)
+                ]
+                if http_added:
+                    endpoints.extend(http_added)
+                    playbook.append(
+                        f"tshark 深度后端：明文 HTTP 抽出接入域名 {len(http_added)} 个（pcap_ingest 不解 HTTP）"
+                    )
+        except Exception:
+            logger.exception("[capture] tshark 明文 HTTP 抽取失败（忽略，不影响主流程）")
     # floor pcap 接入节点【绑定到目标 app】：消费 uid_sockets.txt 快照，按远端 IP:port 关联出该连接属
     # 哪个 UID/进程、是否 == 目标 app——自动区分真后端 vs 背景噪音（此前 uid_sockets.txt 只供人工比对）。
     # best-effort、绝不影响主流程（floor pcap 与 uid 快照都在才做；失败忽略）。
