@@ -87,16 +87,35 @@ def test_edge_weak_only_below_threshold_returns_none() -> None:
 
 
 def test_edge_negative_public_cloud_only_dampens() -> None:
-    """★负证据真扣分：中信号命中达 possible，叠加"公共云 only 无强信号"→ 扣 2 → 跌破阈值 → None。"""
+    """★负证据**精确扣 2**（非随意扣分）：验证扣分前后分数差正好 2、且带 neg 标签、跨阈值时降档。"""
     # 仅命中 TLS 中信号（weight 4，非强）→ 4 ≥ possible(3) → possible。
     hit = A.score_edge_provider({"tls_spki": "deadbeef"}, rules=_RULES)
     assert hit is not None and hit["tier"] == "possible" and hit["score"] == 4.0
     # 叠加 origin 在公共云类别且无强信号 → public_cloud_only 扣 2 → 2 < possible(3) → 被抑制为 None。
     damp = A.score_edge_provider({"tls_spki": "deadbeef", "origin_category": A.CAT_CLOUD}, rules=_RULES)
     assert damp is None
-    # 反向对照：非公共云类别 → 负证据不触发 → 仍 possible（证明确是负证据而非别的原因把它压没）。
-    keep = A.score_edge_provider({"tls_spki": "deadbeef", "origin_category": A.CAT_TELECOM}, rules=_RULES)
-    assert keep is not None and keep["tier"] == "possible"
+    # ★精确性：TLS(4)+ASN(2)=6 probable，叠负证据 → 正好 4.0（差恰为 2，不是 3、不是 100）→ possible，且带 neg 标签。
+    exact = A.score_edge_provider({"tls_spki": "deadbeef", "asn": 13335, "origin_category": A.CAT_CLOUD}, rules=_RULES)
+    assert exact is not None and exact["score"] == 4.0 and exact["tier"] == "possible"
+    assert "neg:public_cloud_only" in exact["weak_signals"]
+    # 反向对照：非公共云类别 → 负证据不触发 → 6.0 probable（证明确是该负证据在起作用）。
+    keep = A.score_edge_provider({"tls_spki": "deadbeef", "asn": 13335, "origin_category": A.CAT_TELECOM}, rules=_RULES)
+    assert keep is not None and keep["score"] == 6.0 and keep["tier"] == "probable"
+
+
+def test_edge_reranks_by_tier_not_raw_score() -> None:
+    """★负证据后重排：原始分更高但只到 probable 的弱候选，不得压过分数略低却 confirmed（≥2 强信号）的候选。"""
+    rules = {"edge_providers": [
+        {"id": "A", "name": "ProvA", "category": "cdn",
+         "signals": {"tls": {"spki_sha256": [{"value": "aa", "weight": 15}]}}},   # 原始分 15、0 强信号 → 顶 probable
+        {"id": "B", "name": "ProvB", "category": "cdn", "signals": {              # 6+8=14、2 强信号 → confirmed
+            "http": {"headers": [{"name": "x-b", "weight": 6}]},
+            "dns": {"cname_suffix": [{"value": ".provb.net", "weight": 8}]}}},
+    ], "scoring": {"confirmed": 10, "probable": 6, "possible": 3}}
+    obs = {"tls_spki": "aa", "response_headers": {"x-b": "1"}, "cname_chain": ["e.provb.net"],
+           "origin_category": A.CAT_CLOUD}
+    best = A.score_edge_provider(obs, rules=rules)
+    assert best is not None and best["name"] == "ProvB" and best["tier"] == "confirmed"
 
 
 def test_edge_negative_x_cache_and_nginx_only_dampen() -> None:
@@ -107,7 +126,7 @@ def test_edge_negative_x_cache_and_nginx_only_dampen() -> None:
 
 
 def test_edge_forged_suffix_not_confirmed() -> None:
-    """★P0：伪造域名把品牌根塞进**中间**（x.cloudflare.net.attacker.example）不得命中——标签边界匹配。"""
+    """★P0：伪造域名把品牌根塞进**中间**（x.cloudflare.net.attacker.example）不得命中——标签级匹配。"""
     forged = A.score_edge_provider(
         {"response_headers": {"CF-RAY": "forged"}, "cname_chain": ["x.cloudflare.net.attacker.example"]}, rules=_RULES)
     # CNAME 不命中 → 只剩单 header 强信号 → 最多 probable，绝不 confirmed。
@@ -119,15 +138,35 @@ def test_edge_forged_suffix_not_confirmed() -> None:
     assert genuine is not None and genuine["tier"] == "confirmed"
 
 
+def test_host_suffix_match_boundaries() -> None:
+    """★标签级后缀匹配的边界：精确/子域/大小写/末点 命中；中间根/空标签/父域 不命中。"""
+    S = A._host_hits_suffix
+    assert S(["cloudflare.net"], ".cloudflare.net")            # 精确
+    assert S(["edge.cloudflare.net"], "cloudflare.net")        # 子域（后缀前导点可省）
+    assert S(["EDGE.CloudFlare.NET"], ".cloudflare.net")       # 大小写不敏感
+    assert S(["edge.cloudflare.net."], ".cloudflare.net")      # 末点归一
+    assert not S(["x.cloudflare.net.evil.com"], ".cloudflare.net")   # 根在中间
+    assert not S(["x..cloudflare.net"], ".cloudflare.net")     # 空标签畸形
+    assert not S(["notcloudflare.net"], ".cloudflare.net")     # 非标签边界（子串但非后缀标签）
+    assert not S(["net"], ".cloudflare.net")                   # 父域（比根短）
+    assert not S([], ".cloudflare.net") and not S(["a.b"], "")  # 空输入/空规则
+
+
 def test_origin_network_rejects_malformed_asn() -> None:
-    """★P0：畸形 ASN（负号/小数/前缀垃圾/越界）不得抠出数字冒充高置信 BGP 归属 → 一律 unknown。"""
-    for bad in ["-123 Tencent", "1.5 Tencent", "garbage123 Tencent", "AS4294967296 Tencent", "AS0", ""]:
+    """★P0：畸形 ASN（负号/小数/前缀垃圾/越界/保留值/bool）不得抠出数字冒充高置信 BGP 归属 → 一律 unknown。"""
+    bad_values: list[object] = [
+        "-123 Tencent", "1.5 Tencent", "garbage123 Tencent", "AS4294967296 Tencent",
+        "AS0", "AS4294967295",  # 0（RFC7607）与 0xFFFFFFFF（RFC7300）保留值
+        "", True, False,        # bool 是 int 子类，须显式排除，不得被当作 AS1/AS0
+    ]
+    for bad in bad_values:
         o = A._origin_network({"asn": bad})
         assert o["asn"] is None and o["confidence"] == A.CONF_UNKNOWN, f"bad asn {bad!r} 未被拒"
         assert o["source"] is None
-    # 合法形式仍解析且带 source。
-    ok = A._origin_network({"asn": "AS45090", "org": "Tencent"})
-    assert ok["asn"] == 45090 and ok["confidence"] == A.CONF_HIGH and ok["source"] == "BGP/ASN"
+    # 合法边界仍解析：可路由上界 4294967294、裸数字、AS 前缀带 org 尾。
+    for ok_val, want in [("AS45090", 45090), ("AS4294967294", 4294967294), (45090, 45090), ("AS12345 Org", 12345)]:
+        o = A._origin_network({"asn": ok_val})
+        assert o["asn"] == want and o["confidence"] == A.CONF_HIGH and o["source"] == "BGP/ASN", f"{ok_val!r} 应解析"
 
 
 def test_never_raises_on_bad_input() -> None:
@@ -138,14 +177,20 @@ def test_never_raises_on_bad_input() -> None:
     # 列表字段被喂标量 → 不迭代崩溃。
     for bad_field in ({"cname_chain": 123}, {"nameservers": 5}, {"cookies": "a=b"}, {"response_headers": [1, 2]}):
         A.build_ip_attribution("1.2.3.4", bad_field)  # 不抛即通过
-    # 畸形 scoring/weights 不参与比较时崩溃。
+    # 畸形 scoring/weights 不参与比较时崩溃（None/字符串阈值与权重都被 _num 清洗回默认）。
     r = A.score_edge_provider(
         {"response_headers": {"cf-ray": "x"}, "cname_chain": ["a.cdn.cloudflare.net"]},
         rules={"edge_providers": [{"id": "c", "name": "CF", "signals": {
             "http": {"headers": [{"name": "cf-ray", "weight": 6}]},
             "dns": {"cname_suffix": [{"value": ".cdn.cloudflare.net", "weight": 8}]}}}],
-            "scoring": {"probable": None, "confirmed": "x"}})
-    assert r is not None  # 阈值被 _num 清洗回默认，仍能定档
+            "scoring": {"probable": None, "confirmed": "x"},
+            "weights": {"response_header": "bad", "cname_suffix": None}})   # 脏正权重不得 0.0+str 抛
+    assert r is not None  # 阈值/权重被 _num 清洗回默认，仍能定档
+    # 观测 ASN 为无穷/极端浮点 → int() 转换 OverflowError 须被吞（绝不抛）。
+    assert A.score_edge_provider(
+        {"asn": float("inf")},
+        rules={"edge_providers": [{"id": "c", "name": "C", "signals": {
+            "network": {"asns": [{"value": 13335, "weight": 2}]}}}]}) is None
 
 
 def test_every_layer_has_source_field() -> None:

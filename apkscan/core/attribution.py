@@ -65,6 +65,8 @@ _EDGE_NEG_WEIGHTS = {
 #: edge 判定阈值（rules 的 scoring 可覆盖）。confirmed 另要求 ≥2 独立强信号（见 _edge_tier）。
 _EDGE_THRESHOLDS = {"confirmed": 10, "probable": 6, "possible": 3}
 _EDGE_CONF = {"confirmed": CONF_HIGH, "probable": CONF_MEDIUM, "possible": CONF_LOW, "clustered": CONF_HIGH}
+#: 档位优先级（选最佳候选时先比 tier 再比分——防高原始分但低档候选压过高档候选）。
+_TIER_RANK = {"confirmed": 3, "probable": 2, "possible": 1, "clustered": 2}
 #: 强信号种类（confirmed 需 ≥2 个不同强信号命中——单一强信号最多 probable）。
 _STRONG_SIGNAL_KINDS = frozenset({"cname_suffix", "response_header", "error_page_hash", "nameserver", "cookie"})
 
@@ -136,18 +138,20 @@ def _num(value: Any, default: float) -> float:
 
 
 def _host_hits_suffix(hosts: list[Any], suffix_val: str) -> bool:
-    """★标签边界匹配（防子串误判）：观测 host 命中规则后缀，当且仅当 host == 根 或 host 以 '.'+根 结尾。
+    """★标签级后缀匹配（防子串误判 + 拒空标签）：host 的**尾部标签序列**须完全等于规则根的标签序列。
 
-    ``suffix_val`` 形如 '.cdn.cloudflare.net'（前导点可有可无）；'x.cdn.cloudflare.net' 命中，
-    但伪造的 'x.cdn.cloudflare.net.attacker.example'（根出现在中间而非结尾）**不**命中。
+    ``suffix_val`` 形如 '.cdn.cloudflare.net'（前导点可有可无）。'x.cdn.cloudflare.net' 命中；伪造的
+    'x.cdn.cloudflare.net.attacker.example'（根在中间）不命中；畸形空标签 'x..cloudflare.net' 也不命中。
     """
-    root = _s(suffix_val).strip(".")
-    if not root:
+    root_labels = _s(suffix_val).strip(".").split(".")
+    if not root_labels or any(not lbl for lbl in root_labels):  # 规则后缀空/含空标签 → 无效
         return False
-    dotted = "." + root
+    n = len(root_labels)
     for h in hosts:
-        host = _s(h).rstrip(".")
-        if host == root or host.endswith(dotted):
+        labels = _s(h).strip(".").split(".")
+        if any(not lbl for lbl in labels):   # 观测 host 含空标签（畸形）→ 跳过，不蒙混命中
+            continue
+        if len(labels) >= n and labels[-n:] == root_labels:
             return True
     return False
 
@@ -188,8 +192,8 @@ def _resource_holder(rdap: dict[str, Any] | None) -> dict[str, Any]:
     )
 
 
-#: 合法公开 ASN 范围（32-bit）。0 与 4294967295 为保留值，落域外/畸形一律判 unknown、不冒充 BGP 归属。
-_ASN_MIN, _ASN_MAX = 1, 4294967295
+#: 合法可路由 ASN 范围。0（RFC 7607）与 4294967295=0xFFFFFFFF（RFC 7300 保留）均排除；落域外/畸形 → unknown。
+_ASN_MIN, _ASN_MAX = 1, 4294967294
 
 
 def _parse_asn(raw: Any) -> tuple[int | None, str | None]:
@@ -266,9 +270,10 @@ def score_edge_provider(observed: dict[str, Any], *, rules: dict[str, Any] | Non
     edges = rules.get("edge_providers")
     if not isinstance(edges, list) or not edges:
         return None
-    w_over = rules.get("weights")
-    weights: dict[str, float] = {**_EDGE_WEIGHTS, **(w_over if isinstance(w_over, dict) else {})}
-    # 清洗阈值/负权重：外部规则可能给 None/非数，逐键 _num 兜默认，防比较/相加时抛异常。
+    # 清洗权重/阈值/负权重：外部规则可能给 None/非数/字符串，逐键 _num 兜默认，防相加/比较时抛异常。
+    w_raw = rules.get("weights")
+    w_over = w_raw if isinstance(w_raw, dict) else {}
+    weights = {k: _num(w_over.get(k), v) for k, v in _EDGE_WEIGHTS.items()}
     s_raw = rules.get("scoring")
     s_over = s_raw if isinstance(s_raw, dict) else {}
     thresholds = {k: _num(s_over.get(k), v) for k, v in _EDGE_THRESHOLDS.items()}
@@ -276,37 +281,37 @@ def score_edge_provider(observed: dict[str, Any], *, rules: dict[str, Any] | Non
     n_over = n_raw if isinstance(n_raw, dict) else {}
     neg_weights = {k: _num(n_over.get(k), v) for k, v in _EDGE_NEG_WEIGHTS.items()}
 
+    # ★每个候选**先扣负证据、再定档**，最后按 (tier 优先级, 最终分) 排序——避免"原始分更高但只到 probable
+    # 的弱候选"压过"分数略低却有 ≥2 强信号、应 confirmed 的候选"（负证据在选定后才扣会漏这个重排）。
     best: dict[str, Any] | None = None
+    best_key: tuple[int, float] | None = None
     for prov in edges:
         if not isinstance(prov, dict):
             continue
         score, strong, matched, weak = _score_one_edge(prov, observed, weights)
         if score <= 0:
             continue
-        if best is None or score > best["_score"]:
+        neg_adj, neg_fired = _negative_adjustment(observed, strong, neg_weights)
+        final = score + neg_adj
+        tier = _edge_tier(final, len(strong), thresholds)
+        if tier is None:
+            continue
+        key = (_TIER_RANK[tier], final)
+        if best_key is None or key > best_key:
+            best_key = key
             best = {
                 "name": prov.get("name") or prov.get("id"),
                 "id": prov.get("id"),
                 "role": prov.get("role") or "reverse_proxy",
                 "category": prov.get("category") or CAT_SECURITY_PROXY,
-                "_score": score, "_strong": strong,
-                "matched_signals": matched, "weak_signals": weak,
                 "source": prov.get("id") or "edge_fingerprint",
                 "provenance": prov.get("provenance") if isinstance(prov.get("provenance"), dict) else None,
+                "matched_signals": matched,
+                "weak_signals": list(weak) + neg_fired,
+                "confidence": _EDGE_CONF[tier],
+                "tier": tier,
+                "score": round(final, 1),
             }
-    if best is None:
-        return None
-    # ★负证据全局评估（不依赖 provider 配置）：命中公共云/IDC 却无强信号、或只有通用 X-Cache/nginx → 扣分抑制。
-    neg_adj, neg_fired = _negative_adjustment(observed, best["_strong"], neg_weights)
-    best["_score"] += neg_adj
-    best["weak_signals"] = list(best["weak_signals"]) + neg_fired
-    tier = _edge_tier(best["_score"], len(best["_strong"]), thresholds)
-    if tier is None:
-        return None
-    best["confidence"] = _EDGE_CONF[tier]
-    best["tier"] = tier
-    best["score"] = round(best.pop("_score"), 1)
-    best.pop("_strong", None)
     return best
 
 
@@ -369,7 +374,7 @@ def _score_one_edge(
     sig: dict[str, Any] = sig_raw if isinstance(sig_raw, dict) else {}
 
     def _add(kind: str, weight_key: str, label: str, entry_w: Any, *, strong_kind: bool) -> None:
-        w = float(entry_w) if isinstance(entry_w, (int, float)) else weights.get(weight_key, 0)
+        w = _num(entry_w, weights.get(weight_key, 0.0))  # 条目权重非数（含外部规则脏值）→ 兜该类默认，绝不抛
         score_add[0] = score_add[0] + w
         matched.append(label)
         if strong_kind:
@@ -425,11 +430,11 @@ def _score_one_edge(
     if asn_obs is not None:
         for val, w, _e in _entries(sig, "network", "asns"):
             try:
-                if int(val) == int(asn_obs):
+                if int(val) == int(asn_obs):  # inf/nan/超大浮点 → OverflowError，一并吞掉，绝不抛
                     _add("asn", "asn", f"asn:{asn_obs}", w, strong_kind=False)
                     weak.append(f"asn:{asn_obs}")
                     break
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, OverflowError):
                 continue
 
     # 负证据不在此处按 provider 评估——统一在 score_edge_provider 对最佳候选全局评估（见 _negative_adjustment）。
