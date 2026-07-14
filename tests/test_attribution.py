@@ -417,3 +417,26 @@ def test_build_endpoint_attribution_none_and_robust() -> None:
     # dns 子键本身非 dict 也不抛。
     assert A.build_endpoint_attribution("domain", "x", {"dns": []}) is None
     assert A.build_endpoint_attribution("domain", "x", {"dns": "garbage"}) is None
+
+
+def test_ip_rdap_fills_resource_holder() -> None:
+    """★slice-1c：IP-RDAP 子键（资源登记方）→ resource_holder 层不再恒 unknown。"""
+    ip_rdap = {"netname": "VULTR-AS20473", "org": "Vultr Holdings", "country": "US", "source": "rdap-ip"}
+    att = A.build_endpoint_attribution("ip", "45.76.1.1", {"asn": {"asn": "AS20473", "org": "Vultr"}, "ip_rdap": ip_rdap})
+    rh = att["ips"][0]["resource_holder"]
+    assert rh["name"] == "VULTR-AS20473" and rh["confidence"] == A.CONF_HIGH and rh["source"] == "rdap-ip"
+
+
+def test_ip_rdap_only_is_valid_signal() -> None:
+    """仅有 ip_rdap（无 asn/dns）也算有效信号 → 产出（resource_holder 有值，其余层 unknown）。"""
+    att = A.build_endpoint_attribution("ip", "1.2.3.4", {"ip_rdap": {"netname": "SOME-NET", "source": "rdap-ip"}})
+    assert att is not None
+    assert att["ips"][0]["resource_holder"]["name"] == "SOME-NET"
+    assert att["ips"][0]["origin_network"]["category"] == A.CAT_UNKNOWN  # 无 ASN → origin 仍 unknown（不塌缩）
+
+
+def test_ip_rdap_empty_not_signal() -> None:
+    """ip_rdap 存在但无 netname/org（全空登记）→ 不算有效信号、不冒充 resource_holder。"""
+    assert A.build_endpoint_attribution("ip", "x", {"ip_rdap": {"source": "rdap-ip"}}) is None
+    # country 补全：ip_rdap 有 country 但无 netname/org 时不设 rdap，但 country 仍不足以单独成信号。
+    assert A.build_endpoint_attribution("ip", "x", {"ip_rdap": {"country": "US"}}) is None
