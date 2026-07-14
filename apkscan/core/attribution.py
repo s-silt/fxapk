@@ -477,8 +477,8 @@ def attribution_from_enrichment(enrichment: dict[str, Any], ip: str = "") -> dic
     映射（诚实、按各富化器**真实 schema**）：``asn`` 子键 {asn,org,isp,country} → origin_network + hosting_provider；
     ``dns`` 子键的 ``cname``（DnsEnricher 实际输出位置）→ edge 的 CNAME 强信号；``webcheck`` 若含扁平 response_headers
     则一并喂 edge（PCAP-first 下响应头主要来自被动抓包，webcheck 按检查名嵌套、无扁平头时自然跳过）。
-    ★resource_holder 暂留 unknown——现有 rdap 富化器 applies_to=['domain']（域名注册方，非 IP 资源持有方），
-    asn 走 ip-api（ISP 非 RDAP 登记方）；两者都不冒充 IP 资源登记方，接入 IP RDAP 富化器后再填（slice-1b）。
+    ★resource_holder **仅**由 ``ip_rdap`` 子键（IpRdapEnricher，IP 资源登记方）填——绝不用域名 rdap
+    （applies_to=['domain']，域名注册方）或 asn 的 ip-api ISP（网络运营方）冒充 IP 资源持有方。
     """
     if not isinstance(enrichment, dict):
         return None
@@ -488,12 +488,20 @@ def attribution_from_enrichment(enrichment: dict[str, Any], ip: str = "") -> dic
     dns_e = dns_e if isinstance(dns_e, dict) else {}
     wc = enrichment.get("webcheck")
     wc = wc if isinstance(wc, dict) else {}
-    if not asn_e and not dns_e and not wc:
+    ip_rdap = enrichment.get("ip_rdap")
+    ip_rdap = ip_rdap if isinstance(ip_rdap, dict) else {}
+    if not asn_e and not dns_e and not wc and not ip_rdap:
         return None
     signals: dict[str, Any] = {
         "country": asn_e.get("country"),
         "asn": {"asn": asn_e.get("asn"), "org": asn_e.get("org") or asn_e.get("isp")},
     }
+    # ★IP-RDAP（IpRdapEnricher，applies_to=['ip']）是 IP **资源登记方** → resource_holder（第 1 层）。
+    # 区别于域名 rdap（注册方）与 asn 的 ISP，故用它、不用那两者冒充 IP 资源持有方。
+    if ip_rdap.get("netname") or ip_rdap.get("org"):
+        signals["rdap"] = ip_rdap
+        if not signals["country"]:
+            signals["country"] = ip_rdap.get("country")
     # DnsEnricher 把 CNAME 链写在 enrichment['dns']['cname']（去了末点，便于后缀匹配）——edge 最可靠的强信号。
     cname = dns_e.get("cname") or wc.get("cname") or wc.get("cnames") or wc.get("cname_chain")
     if isinstance(cname, list):
@@ -502,9 +510,9 @@ def attribution_from_enrichment(enrichment: dict[str, Any], ip: str = "") -> dic
     if isinstance(headers, dict):
         signals["response_headers"] = headers
     # ★有效信号判据（不塞空壳）：子键非空但字段全 None（如 {"asn":{"asn":None}}）时，至少要有一个可解析
-    # ASN / 国家 / CNAME / 响应头，否则五层全 unknown 无归因价值 → 返回 None。
+    # ASN / 资源登记方 / 国家 / CNAME / 响应头，否则五层全 unknown 无归因价值 → 返回 None。
     asn_num, _ = _parse_asn(signals["asn"].get("asn"))
-    if not (asn_num is not None or _s(signals.get("country"))
+    if not (asn_num is not None or signals.get("rdap") or _s(signals.get("country"))
             or signals.get("cname_chain") or signals.get("response_headers")):
         return None
     return build_ip_attribution(ip, signals)
@@ -514,11 +522,12 @@ def build_endpoint_attribution(kind: str, value: str, enrichment: dict[str, Any]
     """端点级归因入口（pipeline 用）：把一个端点的 enrichment 映射成 **per-IP** 五层归因。无信号 → None。绝不抛。
 
     ★不塌缩：域名常解析到多个 IP、各自 ASN/edge 可能不同，故按 IP 逐个产五层（``ips`` 列表），不合并成一份。
-    - IP 端点：``enrichment['asn']``（AsnEnricher applies_to=['ip']）→ 单条五层。
+    - IP 端点：``enrichment['asn']``（AsnEnricher applies_to=['ip']）→ 单条五层；``enrichment['ip_rdap']``
+      （IpRdapEnricher）→ resource_holder。
     - 域名端点：``enrichment['dns']['hosting']``（每解析 IP 一条 {ip,asn,org,isp}）→ 每 IP 一条五层；
       ``dns['cname']`` 是**域名级共享** edge 信号，喂给每个 IP 的 edge 层。hosting 缺时退化用 ``dns['ips']``
       （ASN 未知，但 CNAME 仍可识别 edge）。
-    ★resource_holder 恒 unknown（asn 走 ip-api ISP、rdap 是域名注册方，均非 IP 资源登记方；待 IP-RDAP 富化器）。
+    ★域名端点的 per-IP resource_holder 仍 unknown——IP-RDAP 只对 IP 端点跑，域名解析 IP 未单独富化（后续增强）。
     """
     if not isinstance(enrichment, dict):
         return None
