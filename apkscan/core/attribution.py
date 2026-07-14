@@ -501,6 +501,12 @@ def attribution_from_enrichment(enrichment: dict[str, Any], ip: str = "") -> dic
     headers = wc.get("response_headers") or wc.get("headers")
     if isinstance(headers, dict):
         signals["response_headers"] = headers
+    # ★有效信号判据（不塞空壳）：子键非空但字段全 None（如 {"asn":{"asn":None}}）时，至少要有一个可解析
+    # ASN / 国家 / CNAME / 响应头，否则五层全 unknown 无归因价值 → 返回 None。
+    asn_num, _ = _parse_asn(signals["asn"].get("asn"))
+    if not (asn_num is not None or _s(signals.get("country"))
+            or signals.get("cname_chain") or signals.get("response_headers")):
+        return None
     return build_ip_attribution(ip, signals)
 
 
@@ -528,26 +534,32 @@ def build_endpoint_attribution(kind: str, value: str, enrichment: dict[str, Any]
         dns_e = dns_e if isinstance(dns_e, dict) else {}
         cname_raw = dns_e.get("cname")
         cname = cname_raw if isinstance(cname_raw, list) else None
-        hosting = dns_e.get("hosting")
-        hosting = hosting if isinstance(hosting, list) else []
-        if hosting:
-            for h in hosting:
-                if not isinstance(h, dict):
-                    continue
-                signals: dict[str, Any] = {
-                    "country": h.get("country"),
-                    "asn": {"asn": h.get("asn"), "org": h.get("org") or h.get("isp")},
-                }
-                if cname:
-                    signals["cname_chain"] = cname
-                ips.append(build_ip_attribution(_s(h.get("ip")) or "", signals))
-        else:
-            # hosting 缺（限速/查不到）但已解析到 IP：ASN 未知，CNAME 仍可识别 edge。
-            for ip in dns_e.get("ips") or []:
-                signals = {"asn": {}}
-                if cname:
-                    signals["cname_chain"] = cname
-                ips.append(build_ip_attribution(_s(ip) or "", signals))
+        # hosting 建 ip→info 映射（每 IP 的 asn/org/isp）。★hosting **常少于** ips——部分 IP 的托管查询限速/失败
+        # 被跳过（见 DnsEnricher._hosting），但 IP 仍留在 dns.ips。故不能只遍历 hosting，否则丢失只在 ips 里的 IP
+        # （per-IP 塌缩）。_as_list 兜坏容器（非 list 归空，绝不抛、不逐字符迭代成垃圾）。
+        host_by_ip: dict[str, dict[str, Any]] = {}
+        for h in _as_list(dns_e.get("hosting")):
+            if isinstance(h, dict):
+                hk = _s(h.get("ip"))
+                if hk:
+                    host_by_ip.setdefault(hk, h)
+        # 主列表 = dns.ips ∪ hosting 里的 IP（去重保序）——每个解析到的 IP 都产一条五层，一个不丢。
+        ordered: list[str] = []
+        seen_ip: set[str] = set()
+        for ip in list(_as_list(dns_e.get("ips"))) + list(host_by_ip):
+            k = _s(ip)
+            if k and k not in seen_ip:
+                seen_ip.add(k)
+                ordered.append(k)
+        for ip in ordered:
+            h = host_by_ip.get(ip, {})
+            signals: dict[str, Any] = {
+                "country": h.get("country"),
+                "asn": {"asn": h.get("asn"), "org": h.get("org") or h.get("isp")},
+            }
+            if cname:
+                signals["cname_chain"] = cname
+            ips.append(build_ip_attribution(ip, signals))
 
     if not ips:
         return None

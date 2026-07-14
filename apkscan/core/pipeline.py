@@ -304,7 +304,11 @@ def _stage_attribution(state: _PipelineState) -> None:
     （per-IP，不合并）。build_endpoint_attribution 绝不抛；无归属信号的端点不写该键（不塞空归因）。
     """
     for ep in state.endpoints:
-        att = build_endpoint_attribution(ep.kind, ep.value, ep.enrichment)
+        try:
+            att = build_endpoint_attribution(ep.kind, ep.value, ep.enrichment)
+        except Exception:  # noqa: BLE001 — 防御纵深：单端点归因失败不得拖累其它端点/整个阶段
+            logger.debug("端点归因失败，跳过：%s", ep.value, exc_info=True)
+            continue
         if att is not None:
             ep.enrichment["attribution"] = att
 
