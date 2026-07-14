@@ -445,3 +445,136 @@ def test_cli_letters_bad_json(tmp_path: Path) -> None:
     assert res.exit_code == 1
     assert res.exception is None or isinstance(res.exception, SystemExit)
     assert "错误" in res.output or "解析" in res.output or "JSON" in res.output
+
+
+# ---------------------------------------------------------------------------
+# 五层基础设施归属链渲染进调证函（slice-1c-2）
+# ---------------------------------------------------------------------------
+
+
+def _lead_for(value: str) -> dict:
+    """一条可办案化 Lead（advice=建议调证 + evidence + 真实受文机关），value 用于关联 endpoint。"""
+    return {
+        "category": "DOMAIN", "value": value, "subject": "某科技有限公司",
+        "where_to_request": "域名注册商 / 云厂商", "advice": "建议调证",
+        "evidence_to_obtain": ["注册人实名", "租户日志"],
+        "source_refs": [{"evidence_id": "E1"}],
+    }
+
+
+def _five_layer(ip: str, *, holder: str | None = None, asn: int | None = None,
+                asn_org: str = "", category: str = "unknown", edge: str | None = None) -> dict:
+    return {
+        "ip": ip,
+        "resource_holder": {"name": holder, "source": "rdap-ip" if holder else None,
+                            "confidence": "high" if holder else "unknown"},
+        "origin_network": {"asn": asn, "organization": asn_org or None, "category": category,
+                           "confidence": "high" if asn is not None else "unknown"},
+        "hosting_provider": {"name": asn_org or None, "role": "cloud_host" if asn_org else None,
+                             "confidence": "medium" if asn_org else "unknown"},
+        "edge_provider": {"name": edge, "role": "reverse_proxy" if edge else None,
+                          "tier": "probable" if edge else None},
+        "service_operator": {"name": None, "confidence": "unknown"},
+    }
+
+
+def _report_with_attr(value: str, ips: list[dict]) -> dict:
+    return {
+        "leads": [_lead_for(value)],
+        "endpoints": [{"value": value, "kind": "domain",
+                       "enrichment": {"attribution": {"endpoint": value, "kind": "domain", "ips": ips}}}],
+    }
+
+
+def test_attribution_chain_rendered_in_letter() -> None:
+    """★五层归属链套进调证函正文，且作结构化字段 attribution 回带。"""
+    ips = [_five_layer("45.76.1.1", holder="VULTR-AS20473", asn=20473, asn_org="Vultr",
+                       category="cloud", edge="Cloudflare")]
+    out = letters.build_letters(_report_with_attr("pay.x.com", ips))
+    assert len(out) == 1
+    body = out[0]["body_md"]
+    assert "基础设施归属链" in body
+    assert "落地 IP" in body and "45" in body
+    assert "VULTR-AS20473".replace("-", "\\-") in body  # 资源登记方（_md_safe 转义了 -）
+    assert "AS20473" in body and "cloud" in body        # 网络运营方
+    assert "Cloudflare" in body and "较可能" in body      # 边缘（tier=probable→较可能）
+    assert out[0]["attribution"] is not None and out[0]["attribution"]["ips"][0]["ip"] == "45.76.1.1"
+
+
+def test_attribution_unknown_layers_and_edge_labeled() -> None:
+    """未知层显式标「未知」、edge 未识别标「未识别专属特征」（不塞空、不冒充）。"""
+    ips = [_five_layer("1.1.1.1", holder=None, asn=13335, asn_org="Cloudflare", category="cdn", edge=None)]
+    body = letters.build_letters(_report_with_attr("x.com", ips))[0]["body_md"]
+    assert "资源登记方：未知" in body
+    assert "边缘/CDN/代理：未识别专属特征" in body
+
+
+def test_attribution_service_operator_never_inferred() -> None:
+    """★核心纪律：每个落地 IP 都标『实际运营者：未知（不从基础设施归属推断）』，防把持有方当运营者。"""
+    ips = [_five_layer("45.76.1.1", holder="X", asn=1, asn_org="Y", category="cloud", edge="Z")]
+    body = letters.build_letters(_report_with_attr("x.com", ips))[0]["body_md"]
+    assert body.count("实际运营者：未知") == 1
+    assert "不从基础设施归属推断" in body
+
+
+def test_attribution_absent_no_section() -> None:
+    """无 endpoints / 无匹配 value / 无 attribution → 不渲染该段，且不破坏既有正文。"""
+    # 无 endpoints
+    body1 = letters.build_letters({"leads": [_lead_for("x.com")]})[0]["body_md"]
+    assert "基础设施归属链" not in body1 and "拟调取证据" in body1
+    # endpoints 存在但 value 不匹配
+    rep = {"leads": [_lead_for("a.com")],
+           "endpoints": [{"value": "b.com", "enrichment": {"attribution": {"ips": [_five_layer("1.1.1.1")]}}}]}
+    out = letters.build_letters(rep)
+    assert "基础设施归属链" not in out[0]["body_md"] and out[0]["attribution"] is None
+
+
+def test_attribution_markdown_injection_escaped() -> None:
+    """★安全：RDAP/ASN org 是外部数据，恶意 markdown 被 _md_safe 转义，不破坏文书结构。"""
+    ips = [_five_layer("1.1.1.1", holder="Evil](http://x)", asn=1, asn_org="**bold** [x](y)",
+                       category="cloud", edge="a`code`b")]
+    body = letters.build_letters(_report_with_attr("x.com", ips))[0]["body_md"]
+    assert "](http://x)" not in body   # 链接语法被转义
+    assert "**bold**" not in body       # 加粗语法被转义
+    assert "`code`" not in body         # 行内代码被转义
+
+
+def test_attribution_many_ips_capped() -> None:
+    """域名解析到很多 IP → 只展示前 _MAX_ATTR_IPS 个 + 「另有 N 个」提示（防文书爆长）。"""
+    ips = [_five_layer(f"10.0.0.{i}", asn=i + 1, asn_org=f"Org{i}", category="cloud") for i in range(8)]
+    body = letters.build_letters(_report_with_attr("x.com", ips))[0]["body_md"]
+    assert body.count("- 落地 IP") == letters._MAX_ATTR_IPS  # 前缀区分标题里"按落地 IP 分层"
+    assert f"另有 {8 - letters._MAX_ATTR_IPS} 个解析 IP 未列" in body
+
+
+def test_attribution_robust_bad_shapes() -> None:
+    """坏形状（endpoints 非 list、ips 非 list、层非 dict、混入坏元素）→ 容错、绝不抛。"""
+    assert letters.build_letters({"leads": [_lead_for("x")], "endpoints": "nope"})  # 不抛
+    rep = {"leads": [_lead_for("x")],
+           "endpoints": [{"value": "x", "enrichment": {"attribution": {"ips": [None, 5, _five_layer("9.9.9.9", asn=1, asn_org="Z", category="cloud")]}}}]}
+    body = letters.build_letters(rep)[0]["body_md"]
+    assert "9.9.9.9".replace(".", "\\.") in body  # 坏元素跳过、有效的仍渲染
+
+
+def test_attribution_index_robust_bad_report() -> None:
+    """_attribution_index 坏顶层输入容错、绝不抛（模块铁律）。"""
+    assert letters._attribution_index(None) == {}
+    assert letters._attribution_index([]) == {}
+    assert letters._attribution_index({"endpoints": "nope"}) == {}
+
+
+def test_attribution_no_crossmatch_on_type_mismatch() -> None:
+    """Lead.value 与 endpoint.value 类型不同（123 vs "123"）不得串号关联。"""
+    rep = {
+        "leads": [dict(_lead_for("x"), value=123)],
+        "endpoints": [{"value": "123", "enrichment": {"attribution": {"ips": [_five_layer("10.0.0.9", asn=1)]}}}],
+    }
+    assert letters.build_letters(rep)[0]["attribution"] is None
+
+
+def test_attribution_empty_records_not_counted() -> None:
+    """无 IP 的空记录不占限长额度、不渲染成「落地 IP（未知）」垃圾。"""
+    ips = [{}] * 5 + [_five_layer("10.0.0.4", asn=1, asn_org="Z", category="cloud")]
+    body = letters.build_letters(_report_with_attr("x.com", ips))[0]["body_md"]
+    assert "10.0.0.4".replace(".", "\\.") in body
+    assert "落地 IP（未知）" not in body and "另有" not in body
