@@ -63,6 +63,7 @@ class Flow:
     quic_versions: set[str] = field(default_factory=set)
     quic_dcids: set[str] = field(default_factory=set)
     quic_scids: set[str] = field(default_factory=set)
+    alpn: set[str] = field(default_factory=set)  # ALPN 协商协议（h3/h2/http1.1）——QUIC Initial 解出
 
 
 @dataclass
@@ -106,6 +107,7 @@ class RemoteEndpoint:
     last_ts: float = 0.0
     state: str = STATE_UNKNOWN
     quic_versions: set[str] = field(default_factory=set)  # 该远端观测到的 QUIC 版本（h3 归因）
+    alpn: set[str] = field(default_factory=set)  # ALPN 协商协议（h3/h2）——QUIC Initial 解出
 
     @property
     def has_payload(self) -> bool:
@@ -139,10 +141,11 @@ def parse_pcap_bytes(data: bytes) -> PcapSummary:
     summ = PcapSummary()
     flows: dict[tuple, Flow] = {}
     asm = _HelloReassembler()  # 每份 pcap 独立、无模块级态（并行分析器安全）
+    qdec = _QuicDecryptor()    # QUIC Initial 解密态（密钥缓存 + CRYPTO 重组），同样每份 pcap 独立
     try:
         for ts, linktype, frame in _iter_frames(data):
             try:
-                _process_frame(ts, linktype, frame, flows, summ, asm)
+                _process_frame(ts, linktype, frame, flows, summ, asm, qdec)
             except Exception:  # noqa: BLE001 - 单包坏不影响其余
                 logger.debug("[pcap] 跳过坏包", exc_info=True)
     except Exception:  # noqa: BLE001 - 整体解析异常也不抛
@@ -355,8 +358,8 @@ def _parse_quic_long_header(app: bytes) -> tuple[str, str, str] | None:
         return None
 
 
-def _ingest_quic(app: bytes, f: Flow) -> bool:
-    """是 QUIC 长包头则抽元数据（version/DCID/SCID，各 set 有上限）填进 Flow、返回 True；否则返回 False
+def _ingest_quic(app: bytes, f: Flow, qdec: "_QuicDecryptor", flow_key: tuple) -> bool:
+    """是 QUIC 长包头则抽元数据（+ v1 Initial 尝试解密→SNI/ALPN）填进 Flow、返回 True；否则 False
     （供调用方决定是否再当 DNS 解——内容优先派发）。"""
     meta = _parse_quic_long_header(app)
     if meta is None:
@@ -368,11 +371,296 @@ def _ingest_quic(app: bytes, f: Flow) -> bool:
         f.quic_dcids.add(dcid)
     if scid and len(f.quic_scids) < _MAX_QUIC_CIDS:
         f.quic_scids.add(scid)
+    # v1 Initial（type 位 00）且 cryptography 可用 → 解密取 ClientHello 的 SNI/ALPN（QUIC 全密文时唯一
+    # 应用层线索，与 TCP「SNI 不丢」对等）。Initial 密钥仅依赖明文 DCID，无需任何会话密钥。
+    if version == "00000001" and (app[0] & 0x30) == 0 and qdec.available:
+        _ingest_quic_initial(app, f, qdec, flow_key)
     return True
 
 
+# ---------------------------------------------------------------------------
+# QUIC Initial 解密（RFC 9001）：Initial 密钥从公开 DCID 派生 → 去头保护 → AEAD → CRYPTO → ClientHello
+# ---------------------------------------------------------------------------
+# ★纯取证解析、零注入：Initial 密钥仅依赖**明文** DCID，无需任何会话密钥；1-RTT 应用数据不解（需会话
+# 密钥）。cryptography 惰性引入（非 fxapk 声明依赖）——缺库则本层静默禁用、只落 QUIC 元数据，模块其余
+# 保持零依赖、绝不抛。密钥派生已对 RFC 9001 §A.1 官方向量（iv/hp）逐字节验证。
+
+_QUIC_INITIAL_SALT = bytes.fromhex("38762cf7f55934b34d179ae6a4c80cadccbb7f0a")  # RFC 9001 §5.2 v1
+_MAX_QUIC_CRYPTO = 65536   # 单连接 CRYPTO 重组缓冲上限（真实 ClientHello <16KB，封 64KiB）
+_MAX_QUIC_PENDING = 512    # 并发 CRYPTO 重组连接上限（超出 FIFO 淘汰最老）
+_MAX_QUIC_DONE = 4096      # tombstone 上限
+_MAX_QUIC_KEYS = 4096      # Initial 密钥缓存上限（DCID 明文可随时重派生，FIFO 淘汰无正确性代价；防无界 DoS）
+
+
+def _quic_crypto_available() -> bool:
+    """探 cryptography 是否可用（一次性，缺库则 QUIC 解密静默禁用、只落元数据）。"""
+    try:
+        import cryptography.hazmat.primitives.ciphers.aead  # noqa: F401
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _read_quic_varint(b: bytes, p: int) -> tuple[int, int] | None:
+    """RFC 9000 §16 变长整数 → (value, new_offset)；越界 → None。"""
+    if p >= len(b):
+        return None
+    ln = 1 << (b[p] >> 6)
+    if p + ln > len(b):
+        return None
+    val = b[p] & 0x3F
+    for i in range(1, ln):
+        val = (val << 8) | b[p + i]
+    return val, p + ln
+
+
+def _quic_client_initial_keys(dcid: bytes, cache: dict) -> tuple[bytes, bytes, bytes] | None:
+    """RFC 9001 §5.2：客户端原始 DCID → client Initial (key, iv, hp)。缺 cryptography / 失败 → None。缓存。"""
+    if dcid in cache:
+        return cache[dcid]
+    keys: tuple[bytes, bytes, bytes] | None = None
+    try:
+        from cryptography.hazmat.primitives.hashes import SHA256
+        from cryptography.hazmat.primitives.hmac import HMAC
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
+
+        def expand(secret: bytes, label: bytes, length: int) -> bytes:
+            full = b"tls13 " + label  # RFC 8446 HKDF-Expand-Label 前缀
+            info = struct.pack("!H", length) + bytes([len(full)]) + full + b"\x00"
+            return HKDFExpand(algorithm=SHA256(), length=length, info=info).derive(secret)
+
+        h = HMAC(_QUIC_INITIAL_SALT, SHA256())
+        h.update(dcid)
+        cs = expand(h.finalize(), b"client in", 32)
+        keys = (expand(cs, b"quic key", 16), expand(cs, b"quic iv", 12), expand(cs, b"quic hp", 16))
+    except Exception:  # noqa: BLE001 - 密钥派生失败静默降级
+        keys = None
+    if len(cache) >= _MAX_QUIC_KEYS:
+        cache.pop(next(iter(cache)), None)  # FIFO 淘汰最老（复审 #B：防唯一 DCID 洪水撑爆缓存）
+    cache[dcid] = keys
+    return keys
+
+
+def _quic_try_decrypt(
+    app: bytes, pn_off: int, length: int, keys: tuple[bytes, bytes, bytes]
+) -> bytes | None:
+    """用给定 (key,iv,hp) 对一个 v1 Initial 去头保护 + AES-128-GCM 解密 → 明文 frames；tag 不符 → None。"""
+    try:
+        key, iv, hp = keys
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        sample = app[pn_off + 4 : pn_off + 4 + 16]
+        # ★AES-ECB 仅用于 RFC 9001 §5.4.1 规定的**头保护掩码**派生（对单个 16B sample 出 5B mask），
+        #   非数据加密——QUIC 协议要求，勿按"ECB 泄露结构"误报。
+        mask = Cipher(algorithms.AES(hp), modes.ECB()).encryptor().update(sample)[:5]  # noqa: S305
+        first = app[0] ^ (mask[0] & 0x0F)
+        pnl = (first & 0x03) + 1
+        if pn_off + pnl > len(app):
+            return None
+        pn_bytes = bytes(app[pn_off + i] ^ mask[1 + i] for i in range(pnl))
+        header = bytes([first]) + app[1:pn_off] + pn_bytes  # AAD = 去保护后的完整头
+        ct = app[pn_off + pnl : pn_off + length]
+        nonce = bytes(x ^ y for x, y in zip(iv, b"\x00" * (12 - pnl) + pn_bytes))
+        return AESGCM(key).decrypt(nonce, ct, header)  # tag 不符则抛 → None（天然过滤坏包/错密钥）
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _decrypt_quic_initial(
+    app: bytes, qdec: "_QuicDecryptor", flow_key: tuple
+) -> tuple[tuple, bytes] | None:
+    """解 v1 Initial → (重组桶键=flow_key, 明文 frames)。AEAD 失败/非 v1/坏包 → None。绝不抛。
+
+    ★RFC 9001 §5.2：整条连接的 Initial 密钥固定由客户端**首个** DCID 派生（DCID 切换后不变，仅 Retry
+    重算）。故按候选序试：已记录的连接原始 DCID 优先（覆盖 §7.2 服务端回包后切 DCID 的重传），回退本包
+    DCID（覆盖首包 / Retry 重派生）；某候选 AEAD 成功即记住它。重组按 flow_key 分桶（非 per-packet DCID，
+    否则切换后同连接被劈成两桶永不凑齐，复审 #A）。
+    """
+    try:
+        if len(app) < 7 or (app[0] & 0xC0) != 0xC0 or int.from_bytes(app[1:5], "big") != 1:
+            return None
+        p = 5
+        dl = app[p]
+        p += 1
+        if dl > 20 or p + dl > len(app):
+            return None
+        dcid = app[p : p + dl]
+        p += dl
+        if p >= len(app):
+            return None
+        sl = app[p]
+        p += 1
+        if sl > 20 or p + sl > len(app):
+            return None
+        p += sl  # 跳 SCID
+        tv = _read_quic_varint(app, p)  # token length
+        if tv is None:
+            return None
+        token_len, p = tv
+        p += token_len
+        lv = _read_quic_varint(app, p)  # length（= 包号 + 载荷含 16B AEAD tag）
+        if lv is None:
+            return None
+        length, p = lv
+        pn_off = p
+        if pn_off + 4 + 16 > len(app) or pn_off + length > len(app) or length < 20:
+            return None
+        prior = qdec.conn_dcid.get(flow_key)
+        seen: set[bytes] = set()
+        for cand in (prior, dcid):  # 连接原始 DCID 优先，回退本包 DCID
+            if cand is None or cand in seen:
+                continue
+            seen.add(cand)
+            keys = _quic_client_initial_keys(cand, qdec.key_cache)
+            if keys is None:
+                continue
+            plain = _quic_try_decrypt(app, pn_off, length, keys)
+            if plain is not None:
+                if len(qdec.conn_dcid) >= _MAX_QUIC_PENDING:
+                    qdec.conn_dcid.pop(next(iter(qdec.conn_dcid)), None)  # FIFO 有界
+                qdec.conn_dcid[flow_key] = cand  # 记住成功的连接 DCID（Retry 回退成功时自动更新）
+                return flow_key, plain
+        return None
+    except Exception:  # noqa: BLE001 - 解密失败（服务端包/非 v1/坏包/无 cryptography）静默 None
+        return None
+
+
+def _collect_crypto_frames(plain: bytes) -> dict[int, bytes]:
+    """遍历 QUIC frame 收 CRYPTO(0x06) → {offset: data}。PADDING/PING 跳；未知 frame 停。绝不抛。"""
+    chunks: dict[int, bytes] = {}
+    try:
+        p = 0
+        n = len(plain)
+        while p < n and len(chunks) < _MAX_OOO_CHUNKS:
+            ft = plain[p]
+            p += 1
+            if ft in (0x00, 0x01):  # PADDING / PING
+                continue
+            if ft != 0x06:  # 其它 frame（ACK 等结构复杂）→ 停（Initial 里 CRYPTO 通常靠前）
+                break
+            ov = _read_quic_varint(plain, p)
+            if ov is None:
+                break
+            off, p = ov
+            lv = _read_quic_varint(plain, p)
+            if lv is None:
+                break
+            clen, p = lv
+            if p + clen > n or clen > _MAX_QUIC_CRYPTO:
+                break
+            chunks[off] = plain[p : p + clen]
+            p += clen
+    except Exception:  # noqa: BLE001 - 坏 frame 不抛
+        return chunks
+    return chunks
+
+
+@dataclass
+class _QuicCryptoState:
+    """某 DCID 的 CRYPTO 流重组暂存：自 offset 0 起连续前缀 buf + 乱序段 ooo。"""
+
+    buf: bytearray = field(default_factory=bytearray)
+    ooo: dict[int, bytes] = field(default_factory=dict)
+    ooo_bytes: int = 0
+    needed: int | None = None
+
+
+class _QuicCryptoReassembler:
+    """按 DCID 重组跨 Initial 包/乱序的 CRYPTO 流 → 完整 ClientHello handshake。有界，绝不 OOM。"""
+
+    def __init__(self) -> None:
+        self.pending: dict[object, _QuicCryptoState] = {}
+        self.done: dict[object, None] = {}
+
+    def _kill(self, dcid: object) -> None:
+        self.pending.pop(dcid, None)
+        self.done[dcid] = None
+        if len(self.done) > _MAX_QUIC_DONE:
+            self.done.pop(next(iter(self.done)), None)
+
+    def feed(self, dcid: object, chunks: dict[int, bytes]) -> bytes | None:
+        """喂一个 Initial 解出的 CRYPTO 片段集；凑齐 ClientHello 返回其字节，否则 None。绝不抛。"""
+        if not chunks or dcid in self.done:
+            return None
+        st = self.pending.get(dcid)
+        if st is None:
+            if len(self.pending) >= _MAX_QUIC_PENDING:
+                self.pending.pop(next(iter(self.pending)), None)  # FIFO 淘汰最老
+            st = _QuicCryptoState()
+            self.pending[dcid] = st
+        for off in sorted(chunks):
+            self._place(st, off, chunks[off])
+            if st.ooo_bytes + len(st.buf) > _MAX_QUIC_CRYPTO:
+                self._kill(dcid)
+                return None
+        return self._try_complete(dcid, st)
+
+    def _place(self, st: _QuicCryptoState, off: int, data: bytes) -> None:
+        blen = len(st.buf)
+        if off == blen:
+            st.buf += data
+            while len(st.buf) in st.ooo:  # 补洞
+                seg = st.ooo.pop(len(st.buf))
+                st.ooo_bytes -= len(seg)
+                st.buf += seg
+        elif off < blen:  # 重叠：first-writer-wins，掐已覆盖前缀
+            extra = data[blen - off :]
+            if extra:
+                st.buf += extra
+        elif off <= _MAX_QUIC_CRYPTO and data:  # 乱序超前段（空段不占坑）
+            if off not in st.ooo and len(st.ooo) < _MAX_OOO_CHUNKS:
+                st.ooo[off] = data
+                st.ooo_bytes += len(data)
+
+    def _try_complete(self, dcid: object, st: _QuicCryptoState) -> bytes | None:
+        if st.needed is None and len(st.buf) >= 4:
+            if st.buf[0] != 0x01:  # 非 client_hello → 弃
+                self._kill(dcid)
+                return None
+            st.needed = 4 + int.from_bytes(bytes(st.buf[1:4]), "big")
+            if st.needed > _MAX_QUIC_CRYPTO:
+                self._kill(dcid)
+                return None
+        if st.needed is not None and len(st.buf) >= st.needed:
+            hs = bytes(st.buf[: st.needed])
+            self._kill(dcid)
+            return hs
+        return None
+
+
+class _QuicDecryptor:
+    """每份 pcap 一个：QUIC Initial 密钥缓存 + CRYPTO 重组器 + cryptography 可用性（无模块级态）。"""
+
+    def __init__(self) -> None:
+        self.key_cache: dict[bytes, tuple[bytes, bytes, bytes] | None] = {}
+        self.conn_dcid: dict[tuple, bytes] = {}  # 客户端→服务端流键 → 连接原始 DCID（RFC 9001 §5.2）
+        self.reasm = _QuicCryptoReassembler()
+        self.available = _quic_crypto_available()
+
+
+def _ingest_quic_initial(app: bytes, f: Flow, qdec: "_QuicDecryptor", flow_key: tuple) -> None:
+    """解 v1 Initial → CRYPTO 重组 → ClientHello 的 SNI/ALPN 填 Flow。任何失败静默降级（仍有元数据）。"""
+    try:
+        dec = _decrypt_quic_initial(app, qdec, flow_key)
+        if dec is None:
+            return
+        bucket, plain = dec
+        hs = qdec.reasm.feed(bucket, _collect_crypto_frames(plain))
+        if hs is None:
+            return
+        sni, _ja3v, alpn = _parse_hs_client_hello(hs)
+        if sni:
+            f.sni.add(sni)
+        for a in alpn[:8]:
+            f.alpn.add(a)
+    except Exception:  # noqa: BLE001 - QUIC 解密任何异常不抛
+        logger.debug("[pcap] QUIC Initial 处理异常（忽略）", exc_info=True)
+
+
 def _process_frame(
-    ts: float, linktype: int, frame: bytes, flows: dict, summ: PcapSummary, asm: _HelloReassembler
+    ts: float, linktype: int, frame: bytes, flows: dict, summ: PcapSummary,
+    asm: _HelloReassembler, qdec: "_QuicDecryptor",
 ) -> None:
     et, ipp = _strip_link(linktype, frame)
     if not ipp:
@@ -442,7 +730,7 @@ def _process_frame(
         # 内容优先派发：先看是不是 QUIC 长包头（严格 0xC0 门 + 版本白名单，真 DNS 命不中）——是则抽 QUIC
         # 元数据、**不**再当 DNS（哪怕在 UDP/53：反取证 C2 常把 QUIC 伪装到防火墙放行的 53，复审 #2）；
         # 否则若在 53 端口才当 DNS 解。
-        if not _ingest_quic(app, f) and (dport == 53 or sport == 53):
+        if not _ingest_quic(app, f, qdec, (src_ip, sport, dst_ip, dport)) and (dport == 53 or sport == 53):
             qn = _parse_dns_qname(app)
             if qn:
                 summ.dns_queries.add(qn)
@@ -485,14 +773,39 @@ def _ja3(ver: int, ciphers: list[int], exts: list[int], curves: list[int], forma
     return hashlib.md5(s.encode()).hexdigest()  # noqa: S324 - JA3 规范就是 md5，非安全用途
 
 
-def _parse_client_hello(rec: bytes) -> tuple[str | None, str | None]:
+def _parse_alpn_ext(ev: bytes) -> list[str]:
+    """解 ALPN 扩展（RFC 7301）ProtocolNameList → 协议名列表（如 ['h3','h2']）。绝不抛。"""
+    out: list[str] = []
     try:
-        if len(rec) < 5 or rec[0] != 0x16:
-            return None, None
-        rec_len = struct.unpack("!H", rec[3:5])[0]
-        hs = rec[5 : 5 + rec_len]
+        if len(ev) < 2:
+            return out
+        total = struct.unpack("!H", ev[:2])[0]
+        p = 2
+        end = min(2 + total, len(ev))
+        while p < end:
+            ln = ev[p]
+            p += 1
+            if ln == 0 or p + ln > end:
+                break
+            name = ev[p : p + ln].decode("ascii", "replace")
+            if name:
+                out.append(name)
+            p += ln
+            if len(out) >= 16:
+                break
+    except Exception:  # noqa: BLE001 - 坏 ALPN 不抛
+        return out
+    return out
+
+
+def _parse_hs_client_hello(hs: bytes) -> tuple[str | None, str | None, list[str]]:
+    """解析**裸** TLS handshake ClientHello 消息（无 5 字节 record 头）→ (sni, ja3, alpn)。绝不抛。
+
+    QUIC 的 CRYPTO 流里是裸 handshake（无 record 层）；TCP 侧剥掉 record 头后也复用此函数。
+    """
+    try:
         if len(hs) < 4 or hs[0] != 0x01:  # client_hello
-            return None, None
+            return None, None, []
         hs_len = int.from_bytes(hs[1:4], "big")
         body = hs[4 : 4 + hs_len]
         p = 0
@@ -507,6 +820,7 @@ def _parse_client_hello(rec: bytes) -> tuple[str | None, str | None]:
         comp_len = body[p]
         p += 1 + comp_len
         sni: str | None = None
+        alpn: list[str] = []
         curves: list[int] = []
         formats: list[int] = []
         ext_types: list[int] = []
@@ -522,12 +836,26 @@ def _parse_client_hello(rec: bytes) -> tuple[str | None, str | None]:
                 ext_types.append(et)
                 if et == 0x0000:
                     sni = _parse_sni_ext(ev)
+                elif et == 0x0010:  # ALPN（h3/h2 归因）
+                    alpn = _parse_alpn_ext(ev)
                 elif et == 0x000A and len(ev) >= 2:
                     curves = _u16_list(ev[2:])
                 elif et == 0x000B and ev:
                     formats = list(ev[1:])
-        return sni, _ja3(client_ver, ciphers, ext_types, curves, formats)
+        return sni, _ja3(client_ver, ciphers, ext_types, curves, formats), alpn
     except Exception:  # noqa: BLE001 - 解析坏 ClientHello 不抛
+        return None, None, []
+
+
+def _parse_client_hello(rec: bytes) -> tuple[str | None, str | None]:
+    """TLS **record** 层 ClientHello → (sni, ja3)（剥 5 字节 record 头后复用 _parse_hs_client_hello）。"""
+    try:
+        if len(rec) < 5 or rec[0] != 0x16:
+            return None, None
+        rec_len = struct.unpack("!H", rec[3:5])[0]
+        sni, ja3, _alpn = _parse_hs_client_hello(rec[5 : 5 + rec_len])
+        return sni, ja3
+    except Exception:  # noqa: BLE001 - 解析坏 record 不抛
         return None, None
 
 
@@ -907,6 +1235,7 @@ def remote_endpoints(summary: PcapSummary) -> list[RemoteEndpoint]:
             conn_src.setdefault(key, set()).add((f.dst_ip, f.dst_port))  # 入站方向也计本机端口(P1)
         re.packets += f.packets
         re.quic_versions |= f.quic_versions  # QUIC 版本聚合到远端（两方向共用）
+        re.alpn |= f.alpn  # ALPN 聚合到远端
         if f.first_ts and (re.first_ts == 0.0 or f.first_ts < re.first_ts):
             re.first_ts = f.first_ts
         if f.last_ts > re.last_ts:
@@ -932,6 +1261,8 @@ def to_report_leads(summary: PcapSummary) -> list[Lead]:
         ja3 = ("，JA3=" + "/".join(sorted(re.ja3))) if re.ja3 else ""
         sni = ("，SNI=" + "/".join(sorted(re.sni))) if re.sni else ""
         quic = ("，QUIC=" + "/".join(sorted(re.quic_versions))) if re.quic_versions else ""
+        if re.alpn:
+            quic += "，ALPN=" + "/".join(sorted(re.alpn))
         if re.ip in _KNOWN_FANZHA:
             # 反诈拦截节点即便有双向载荷（拦截页会回数据）也非业务接入/落地机——标『无需调证』，
             # 不静默丢（仍留台账作拦截证据），但严禁当接入节点升"建议调证"、污染归因。
@@ -1040,6 +1371,8 @@ def to_runtime_endpoints(summary: PcapSummary) -> list[Endpoint]:
         ja3 = ("，JA3=" + "/".join(sorted(re.ja3))) if re.ja3 else ""
         sni = ("，SNI=" + "/".join(sorted(re.sni))) if re.sni else ""
         quic = ("，QUIC=" + "/".join(sorted(re.quic_versions))) if re.quic_versions else ""
+        if re.alpn:
+            quic += "，ALPN=" + "/".join(sorted(re.alpn))
         endpoints.append(
             Endpoint(
                 value=re.ip,
@@ -1137,6 +1470,7 @@ def to_ledger_dict(summary: PcapSummary) -> dict[str, object]:
             "sni": sorted(re.sni),
             "no_sni": not re.sni,
             "quic_versions": sorted(re.quic_versions),  # h3 归因（明文长包头元数据）
+            "alpn": sorted(re.alpn),  # ALPN 协商协议（QUIC Initial 解出，h3/h2）
         }
         for re in res
     ]
