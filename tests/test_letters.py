@@ -554,3 +554,27 @@ def test_attribution_robust_bad_shapes() -> None:
            "endpoints": [{"value": "x", "enrichment": {"attribution": {"ips": [None, 5, _five_layer("9.9.9.9", asn=1, asn_org="Z", category="cloud")]}}}]}
     body = letters.build_letters(rep)[0]["body_md"]
     assert "9.9.9.9".replace(".", "\\.") in body  # 坏元素跳过、有效的仍渲染
+
+
+def test_attribution_index_robust_bad_report() -> None:
+    """_attribution_index 坏顶层输入容错、绝不抛（模块铁律）。"""
+    assert letters._attribution_index(None) == {}
+    assert letters._attribution_index([]) == {}
+    assert letters._attribution_index({"endpoints": "nope"}) == {}
+
+
+def test_attribution_no_crossmatch_on_type_mismatch() -> None:
+    """Lead.value 与 endpoint.value 类型不同（123 vs "123"）不得串号关联。"""
+    rep = {
+        "leads": [dict(_lead_for("x"), value=123)],
+        "endpoints": [{"value": "123", "enrichment": {"attribution": {"ips": [_five_layer("10.0.0.9", asn=1)]}}}],
+    }
+    assert letters.build_letters(rep)[0]["attribution"] is None
+
+
+def test_attribution_empty_records_not_counted() -> None:
+    """无 IP 的空记录不占限长额度、不渲染成「落地 IP（未知）」垃圾。"""
+    ips = [{}] * 5 + [_five_layer("10.0.0.4", asn=1, asn_org="Z", category="cloud")]
+    body = letters.build_letters(_report_with_attr("x.com", ips))[0]["body_md"]
+    assert "10.0.0.4".replace(".", "\\.") in body
+    assert "落地 IP（未知）" not in body and "另有" not in body

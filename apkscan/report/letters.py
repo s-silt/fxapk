@@ -189,6 +189,8 @@ def _sub_dict(d: dict[str, Any], key: str) -> dict[str, Any]:
 def _attribution_index(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """从 ``report['endpoints']`` 建 ``{端点 value: attribution}``（仅含真有五层归因的端点）。坏形状容错、绝不抛。"""
     index: dict[str, dict[str, Any]] = {}
+    if not isinstance(report, dict):
+        return index
     endpoints = report.get("endpoints")
     if not isinstance(endpoints, list):
         return index
@@ -262,7 +264,8 @@ def _render_attribution_chain(attribution: dict[str, Any]) -> list[str]:
     ips = attribution.get("ips")
     if not isinstance(ips, list) or not ips:
         return []
-    valid = [x for x in ips if isinstance(x, dict)]
+    # 只计有非空 IP 的落地记录（空 dict 等坏元素不占限长额度、不渲染垃圾）。
+    valid = [x for x in ips if isinstance(x, dict) and _str_or_empty(x.get("ip")).strip()]
     if not valid:
         return []
     lines = ["**基础设施归属链（待核，按落地 IP 分层，勿据此认定 App 运营者）：**", ""]
@@ -351,7 +354,11 @@ def _lead_to_letter(
     evidence_refs = _evidence_refs(lead)
     template = _template_for(category, templates)
 
-    attribution = attr_index.get(target) if isinstance(attr_index, dict) else None
+    # 关联用原始 value 且须为 str（endpoint 侧同样要求 str）——不字符串化，避免 123 与 "123" 串号。
+    raw_value = lead.get("value")
+    attribution = (
+        attr_index.get(raw_value) if isinstance(attr_index, dict) and isinstance(raw_value, str) else None
+    )
     attribution_lines = _render_attribution_chain(attribution) if isinstance(attribution, dict) else []
 
     body_md = _build_body_md(
