@@ -167,3 +167,30 @@ def test_build_provenance_returns_commit_and_dirty(monkeypatch, tmp_path: Path) 
     fp = sample_fingerprint(str(apk), tool_version="1.0.0")
     assert fp["build_commit"] == "abc123def456" and fp["build_dirty"] is True
     monkeypatch.setattr(integrity, "_BUILD_PROVENANCE", None)  # 复原缓存，免污染后续
+
+
+def test_build_provenance_failure_not_cached_reprobes(monkeypatch, tmp_path: Path) -> None:
+    """★codex 复核 #1：git 首次失败不缓存 → 同进程内 git 恢复后重探仍能取到 commit（不被 None 永久钉住）。"""
+    import types
+
+    from apkscan.core import integrity
+
+    monkeypatch.setattr(integrity, "_BUILD_PROVENANCE", None)
+    apk = tmp_path / "x.apk"
+    apk.write_bytes(b"z")
+
+    def _fail(*a, **k):  # noqa: ANN002, ANN003, ANN202
+        raise OSError("git gone")
+
+    monkeypatch.setattr(integrity.subprocess, "run", _fail)
+    assert sample_fingerprint(str(apk), tool_version="1.0.0")["build_commit"] is None
+    assert integrity._BUILD_PROVENANCE is None  # ★失败态未缓存
+
+    def _ok(args, **k):  # noqa: ANN001, ANN003, ANN202
+        if "rev-parse" in args:
+            return types.SimpleNamespace(returncode=0, stdout="deadbeef\n", stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(integrity.subprocess, "run", _ok)
+    assert sample_fingerprint(str(apk), tool_version="1.0.0")["build_commit"] == "deadbeef"  # 恢复后重探取到
+    monkeypatch.setattr(integrity, "_BUILD_PROVENANCE", None)  # 复原缓存，免污染后续

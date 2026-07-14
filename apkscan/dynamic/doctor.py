@@ -467,15 +467,18 @@ def _check_pcap_capabilities() -> list[dict]:
     items: list[dict] = [
         _item(_NAME_QUIC_META, True, "可用（纯 stdlib：QUIC 长包头 / 版本 / DCID / SCID 解析）"),
     ]
-    try:
-        import cryptography  # noqa: F401
+    # ★复审 #3：查**实际用到的 AEAD 子模块**是否可用（复用 QUIC 解密同一探测），而非只 import 顶层
+    #   cryptography——部分损坏安装/后端加载失败时顶层能 import 但 aead 子模块不可用、会误报可用。
+    from apkscan.dynamic import pcap_ingest
 
-        items.append(_item(_NAME_QUIC_DECRYPT, True, "可用（cryptography 已装 → QUIC Initial 解密恢复 SNI/ALPN）"))
-    except Exception:
+    if pcap_ingest._quic_crypto_available():
+        items.append(_item(_NAME_QUIC_DECRYPT, True, "可用（cryptography AEAD 就绪 → QUIC Initial 解密恢复 SNI/ALPN）"))
+    else:
         items.append(
             _item(
                 _NAME_QUIC_DECRYPT, False,
-                "不可用：缺 cryptography → QUIC 仅解析元数据（无 SNI/ALPN）；`pip install fxapk[pcap]` 启用解密",
+                "不可用：cryptography AEAD 子模块不可用 → QUIC 仅解析元数据（无 SNI/ALPN）；"
+                "`pip install fxapk[pcap]` 启用解密",
                 ["pip install fxapk[pcap]"],
             )
         )
