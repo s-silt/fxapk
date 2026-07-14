@@ -45,10 +45,21 @@ def _to_str(value: Any) -> str | None:
     return text or None
 
 
+def _vcard_value(value: Any) -> str | None:
+    """jCard 属性值 → 字符串。RFC 7095：值可为字符串或**结构化数组**（如 org 的 [机构, 部门]）；
+    数组只取其中的字符串组件、过滤空后用空格连接；dict/嵌套等非法类型 → None（不产 repr 垃圾）。"""
+    if isinstance(value, str):
+        return _to_str(value)
+    if isinstance(value, list):
+        parts = [p for p in (_to_str(v) for v in value if isinstance(v, str)) if p]
+        return " ".join(parts) or None
+    return None
+
+
 def _vcard_field(vcard_array: Any, field: str) -> str | None:
     """从 RDAP 实体的 ``vcardArray`` 取某属性（fn/org）的文本值。
 
-    vcardArray 形如 ``["vcard", [["fn", {}, "text", "APNIC Pty Ltd"], ...]]``。
+    vcardArray 形如 ``["vcard", [["fn", {}, "text", "APNIC Pty Ltd"], ...]]``；值可为字符串或结构化数组。
     """
     if not isinstance(vcard_array, list) or len(vcard_array) < 2:
         return None
@@ -57,29 +68,28 @@ def _vcard_field(vcard_array: Any, field: str) -> str | None:
         return None
     for prop in props:
         if isinstance(prop, list) and len(prop) >= 4 and prop[0] == field:
-            return _to_str(prop[3])
+            return _vcard_value(prop[3])
     return None
 
 
 def _registrant_org(payload: dict[str, Any]) -> str | None:
-    """取网段登记机构名：entities 中 role 含 registrant（其次任一实体）的 vcard fn/org。"""
+    """取网段**登记机构**名：★仅认 role 含 ``registrant`` 的实体（RFC 9083：abuse/technical/administrative
+    是联系人、**不是**资源持有方，绝不 fallback 到它们冒充持有方）。机构名优先 ``org``、其次 ``fn``。
+    无 registrant → None，交由顶层 ``name``(netname) 兜底。"""
     entities = payload.get("entities")
     if not isinstance(entities, list):
         return None
-    fallback: str | None = None
     for entity in entities:
         if not isinstance(entity, dict):
             continue
-        vcard = entity.get("vcardArray")
-        name = _vcard_field(vcard, "fn") or _vcard_field(vcard, "org")
-        if not name:
-            continue
         roles = entity.get("roles") or []
-        if isinstance(roles, list) and "registrant" in roles:
-            return name  # registrant 优先
-        if fallback is None:
-            fallback = name
-    return fallback
+        if not (isinstance(roles, list) and "registrant" in roles):
+            continue
+        vcard = entity.get("vcardArray")
+        name = _vcard_field(vcard, "org") or _vcard_field(vcard, "fn")  # 机构名(org)优先于联系人名(fn)
+        if name:
+            return name
+    return None
 
 
 def _extract_ip_rdap(payload: dict[str, Any]) -> dict[str, Any]:

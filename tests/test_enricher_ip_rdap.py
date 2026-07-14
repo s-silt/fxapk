@@ -85,6 +85,47 @@ def test_extract_registrant_preferred_over_other_entities() -> None:
     assert ext["country"] == "US" and ext["source"] == "rdap-ip"
 
 
+def test_extract_abuse_only_does_not_fill_org() -> None:
+    """★P0（RFC 9083）：只有 abuse/technical 等联系人、无 registrant → org 不填（绝不拿滥用联系人冒充
+    资源持有方）；netname 顶层仍保留作兜底标识。"""
+    payload = {
+        "name": "SOME-NET",
+        "entities": [
+            {"roles": ["abuse"], "vcardArray": ["vcard", [["fn", {}, "text", "Abuse Desk"]]]},
+            {"roles": ["technical"], "vcardArray": ["vcard", [["fn", {}, "text", "NOC"]]]},
+        ],
+    }
+    ext = _extract_ip_rdap(payload)
+    assert ext["org"] is None and ext["netname"] == "SOME-NET"
+
+
+def test_extract_registrant_org_preferred_over_fn() -> None:
+    """★P1：registrant 同时有联系人(fn)和机构(org) → 取机构名 org（资源持有方是机构、非个人）。"""
+    payload = {"name": "NET", "entities": [{"roles": ["registrant"], "vcardArray": ["vcard", [
+        ["fn", {}, "text", "Joe User"], ["org", {}, "text", "Example Networks"]]]}]}
+    assert _extract_ip_rdap(payload)["org"] == "Example Networks"
+
+
+def test_extract_vcard_structured_array_value() -> None:
+    """★P1（RFC 7095）：jCard 结构化数组值（[机构, 部门]）过滤空后空格连接，不产 Python repr 垃圾。"""
+    def _reg(org_value: object) -> dict:
+        vcard = ["vcard", [["org", {}, "text", org_value]]]
+        return {"name": "NET", "entities": [{"roles": ["registrant"], "vcardArray": vcard}]}
+
+    assert _extract_ip_rdap(_reg(["Example", "", "Network Unit"]))["org"] == "Example Network Unit"
+    assert _extract_ip_rdap(_reg({"weird": 1}))["org"] is None   # 非法 dict 值 → 跳过、不抛
+    assert _extract_ip_rdap(_reg("Plain Org"))["org"] == "Plain Org"  # 普通字符串仍正常
+
+
+def test_extract_registrant_after_abuse_still_matched() -> None:
+    """registrant 排在 abuse 之后也能命中（遍历所有实体、按 role 认，不因顺序漏）。"""
+    payload = {"name": "NET", "entities": [
+        {"roles": ["abuse"], "vcardArray": ["vcard", [["fn", {}, "text", "Abuse"]]]},
+        {"roles": ["registrant"], "vcardArray": ["vcard", [["fn", {}, "text", "Vultr Holdings"]]]},
+    ]}
+    assert _extract_ip_rdap(payload)["org"] == "Vultr Holdings"
+
+
 def test_success_path_writes_cache(fake_requests: _FakeRequests, _isolated_cache: Path) -> None:
     fake_requests.response = _FakeResponse(_ip_payload())
     res = IpRdapEnricher().enrich(Endpoint(value="45.76.1.1", kind="ip"))
