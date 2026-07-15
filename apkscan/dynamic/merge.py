@@ -25,7 +25,7 @@ import json
 import logging
 import re
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -123,6 +123,25 @@ def _read_runtime_payload(runtime_report_path: str) -> Any:
     if cache is not None:
         cache[key] = result
     return result
+
+
+def merge_capture_quality(report: Report, runtime_report_path: str) -> dict[str, object]:
+    """Copy normalized capture-quality evidence into the main report metadata."""
+    payload = _read_runtime_payload(runtime_report_path)
+    if not isinstance(payload, Mapping):
+        return {}
+    raw_signals = payload.get("capture_signals")
+    if not isinstance(raw_signals, Mapping):
+        return {}
+
+    from apkscan.core.closure import evaluate_capture_quality
+
+    signals = dict(raw_signals)
+    quality = evaluate_capture_quality(signals)
+    signals["quality"] = quality
+    report.meta["capture_signals"] = signals
+    report.meta["capture_quality"] = quality
+    return quality
 
 
 def load_runtime_endpoints(runtime_report_path: str) -> list[Endpoint]:
@@ -2160,6 +2179,9 @@ def merge_and_rerender(
     rr_path = runtime_report_path or str(out_path / "runtime_report.json")
     # per-call 缓存作用域：下面各消费者对同一 runtime_report.json 只读+解析一次（去 11× IO）。
     with _runtime_payload_cache():
+        quality = merge_capture_quality(report, rr_path)
+        if quality:
+            stats["capture_quality_status"] = quality.get("dynamic_status", "failed")
         for step in _RUNTIME_MERGE_STEPS:
             _emit(on_progress, step.progress)
             sub = step.func(report, rr_path)
@@ -2220,6 +2242,7 @@ def _rerender_html(
 
 __all__ = [
     "load_runtime_endpoints",
+    "merge_capture_quality",
     "merge_runtime_endpoints",
     "decrypt_runtime_messages",
     "merge_runtime_traces",

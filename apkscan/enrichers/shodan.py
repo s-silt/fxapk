@@ -125,6 +125,7 @@ class ShodanEnricher(BaseEnricher):
     #: 境外归属阶段（两遍富化第二遍）；被动（active=False，查 Shodan 库、对目标零流量），仅对国外(+未知)端点跑。
     phase = "overseas"
     active = False
+    required_env = _ENV_KEYS
 
     def __init__(self) -> None:
         # 缓存写入串行化，避免并发富化时写坏 JSON 文件。
@@ -230,11 +231,10 @@ class ShodanEnricher(BaseEnricher):
             self._save_cache_entry(value, entry)
             return EnrichmentResult(provider=self.name, ok=True, data=entry)
         except Exception as exc:  # noqa: BLE001 — 富化失败不得炸主流程
-            # 不带 exc_info：超时/限速/无应答很常见，整段 traceback 是噪音；消息已含异常摘要。
-            logger.debug("Shodan 查询失败：%s（%s）", value, exc)
-            return EnrichmentResult(
-                provider=self.name, ok=False, error=f"{type(exc).__name__}: {exc}"
-            )
+            # requests 的异常文本可能包含带 key 的完整 URL，只保留异常类型，避免密钥进日志/报告。
+            error_type = type(exc).__name__
+            logger.debug("Shodan 查询失败：%s（%s）", value, error_type)
+            return EnrichmentResult(provider=self.name, ok=False, error=error_type)
 
         # 3) 成功才写缓存（失败不缓存，便于后续重试）。
         self._save_cache_entry(value, data)

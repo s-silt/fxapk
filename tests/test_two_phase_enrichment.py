@@ -13,6 +13,7 @@ from __future__ import annotations
 import threading
 
 from apkscan.core.models import Endpoint, EnrichmentResult
+from apkscan.core.enrichment import enrich_selected_targets
 from apkscan.core.pipeline import _run_enrichment
 from apkscan.core.registry import BaseEnricher
 
@@ -87,6 +88,22 @@ def test_two_phase_no_overseas_enrichers_is_noop_beyond_attribution() -> None:
     assert any(s["provider"] == "asn" for s in stats)
     assert "asn" in foreign.enrichment
     assert "_jurisdiction" not in foreign.enrichment
+
+
+def test_plain_selected_enrichment_does_not_run_case_close_only_provider() -> None:
+    endpoint = _ep("evil-us.com")
+    case_only = _RecordingEnricher("case-only", phase="attribution", data={"hit": True})
+    case_only.case_close_only = True
+
+    enrich_selected_targets(
+        [endpoint],
+        [case_only],
+        mode="passive",
+        include_case_close=False,
+    )
+
+    assert case_only.seen == set()
+    assert "case-only" not in endpoint.enrichment
 
 
 def test_apply_forensic_domestic_flip_suppresses_overseas_evidence() -> None:

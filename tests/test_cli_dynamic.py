@@ -406,6 +406,7 @@ def _patch_merge(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         *,
         formats: Any = None,
         on_progress: Any = None,
+        runtime_report_path: str | None = None,
     ) -> dict[str, Any]:
         calls["rerender_called"] = True
         calls["rerender_args"] = {
@@ -414,6 +415,7 @@ def _patch_merge(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             "out_dir": out_dir,
             "base": base,
             "formats": formats,
+            "runtime_report_path": runtime_report_path,
         }
         if on_progress is not None:
             on_progress("并入运行时端点 ...")
@@ -491,6 +493,7 @@ def test_analyze_dynamic_merge_uses_runtime_report_json(monkeypatch):
     cli._run_dynamic_after_static("a.apk", "com.x", "outdir", _make_report("com.x"), ["json"], "demo")
 
     assert merge_calls["load_path"] == "outdir/runtime_report.json"
+    assert merge_calls["rerender_args"]["runtime_report_path"] == "outdir/runtime_report.json"
 
 
 def test_analyze_dynamic_merge_falls_back_to_out_dir_path(monkeypatch):

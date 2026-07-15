@@ -29,6 +29,17 @@ from apkscan.dynamic import auto
 runner = CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def _avoid_case_close_disk_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    from apkscan.core import report_io
+
+    monkeypatch.setattr(
+        report_io,
+        "write_report",
+        lambda report, path, **kwargs: [str(path)],
+    )
+
+
 # ---------------------------------------------------------------------------
 # 测试替身
 # ---------------------------------------------------------------------------
@@ -179,6 +190,7 @@ def _patch_merge(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         *,
         formats: Any = None,
         on_progress: Any = None,
+        runtime_report_path: str | None = None,
     ) -> dict[str, Any]:
         calls["rerender_called"] = True
         calls["rerender_args"] = {
@@ -187,6 +199,7 @@ def _patch_merge(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             "out_dir": out_dir,
             "base": base,
             "formats": formats,
+            "runtime_report_path": runtime_report_path,
         }
         if on_progress is not None:
             on_progress("并入运行时端点 ...")
@@ -270,6 +283,7 @@ def test_full_pipeline_happy_path_all_done(monkeypatch: pytest.MonkeyPatch) -> N
     assert progresses
     # merge 用 runtime_report.json 作并入来源，且 report 透传。
     assert merge_calls["load_path"] == "out/runtime_report.json"
+    assert merge_calls["rerender_args"]["runtime_report_path"] == "out/runtime_report.json"
     assert merge_calls["rerender_called"] is True
     # capture 用包名 + out= + duration。
     assert cap_calls["package"] == "com.fraud.app"
@@ -524,6 +538,40 @@ def test_report_paths_deduplicated(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result["report_paths"].count("out/report.json") == 1
 
 
+def test_auto_returns_case_closure_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_doctor(monkeypatch, ok=True)
+    _patch_static_ok(monkeypatch, "com.fraud.app")
+    _set_device(monkeypatch, True)
+    _patch_unpack(monkeypatch, _dynamic_result(STATUS_DONE))
+    _patch_capture(
+        monkeypatch,
+        _dynamic_result(STATUS_DONE, report_paths=["out/runtime_report.json"]),
+    )
+    _patch_merge(monkeypatch)
+    closure = {
+        "status": "partial",
+        "targets": [],
+        "gaps": ["target attribution incomplete"],
+        "next_actions": ["collect target-attributed traffic"],
+    }
+    monkeypatch.setattr(
+        auto,
+        "_run_closure",
+        lambda *args, **kwargs: (
+            {"name": "案件闭环", "status": STATUS_DONE, "detail": "闭环状态 partial"},
+            closure,
+            ["out/sample.json"],
+        ),
+        raising=False,
+    )
+
+    result = auto.run("sample.apk", out_dir="out", repackage=False)
+
+    assert result["status"] == "partial"
+    assert result["closure"] == closure
+    assert _status_of(result["steps"], "案件闭环") == STATUS_DONE
+
+
 # ---------------------------------------------------------------------------
 # CLI：fxapk auto（薄包装，参数透传 + 退出码）
 # ---------------------------------------------------------------------------
@@ -646,6 +694,35 @@ def test_cli_auto_repackage_flag_passthrough(monkeypatch: pytest.MonkeyPatch) ->
     assert calls["kwargs"]["repackage"] is False
     assert runner.invoke(cli.app, ["auto", apk, "--offline", "--no-fix"]).exit_code == 0
     assert calls["kwargs"]["repackage"] is True  # 默认开
+
+
+@pytest.mark.parametrize(("status", "exit_code"), [("partial", 5), ("failed", 6)])
+def test_cli_auto_strict_case_exit_codes(
+    monkeypatch: pytest.MonkeyPatch, status: str, exit_code: int
+) -> None:
+    import tempfile
+
+    calls = _patch_auto_run(
+        monkeypatch,
+        {
+            "status": status,
+            "closure": {"status": status, "targets": [], "gaps": ["gap"]},
+            "steps": [],
+            "report_paths": [],
+            "package_name": "com.x",
+            "out_dir": "out",
+        },
+    )
+    with tempfile.NamedTemporaryFile(suffix=".apk", delete=False) as fh:
+        apk = fh.name
+
+    result = runner.invoke(
+        cli.app,
+        ["auto", apk, "--strict-case", "--offline", "--no-fix", "--no-repackage"],
+    )
+
+    assert result.exit_code == exit_code
+    assert calls["kwargs"]["strict_case"] is True
 
 
 def test_run_repackage_no_device_skipped() -> None:
