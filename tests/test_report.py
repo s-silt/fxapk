@@ -326,6 +326,46 @@ def test_html_contains_section_titles(sample_report: Report, tmp_path: Path) -> 
         assert title in html, f"缺少小节标题: {title}"
 
 
+def test_html_renders_case_closure_status_layers_and_gaps(
+    sample_report: Report,
+    tmp_path: Path,
+) -> None:
+    sample_report.meta["closure"] = {
+        "status": "partial",
+        "targets": [
+            {
+                "value": "198.51.100.10",
+                "kind": "ip",
+                "status": "partial",
+                "layers": {
+                    "runtime_evidence": {"status": "complete"},
+                    "resource_registration": {"status": "complete"},
+                    "bgp_announcement": {"status": "complete"},
+                    "hosting_delivery": {"status": "partial"},
+                    "request_target": {
+                        "status": "partial",
+                        "evidence": {"provider": "Example Hosting Ltd"},
+                    },
+                },
+                "origin": {"required": True, "status": "missing"},
+            }
+        ],
+        "gaps": ["Origin is missing"],
+        "next_actions": ["request edge origin logs"],
+        "source_summary": {"hit": 3, "failed": 1},
+    }
+    path = tmp_path / "report.html"
+
+    report_html.render(sample_report, str(path))
+    rendered = path.read_text(encoding="utf-8")
+
+    assert "案件闭环" in rendered
+    assert "partial" in rendered
+    assert "198.51.100.10" in rendered
+    assert "Example Hosting Ltd" in rendered
+    assert "Origin is missing" in rendered
+
+
 def test_html_config_key_section_shows_key_and_advice(sample_report: Report, tmp_path: Path) -> None:
     """★ 调用插件/配置键值小节：含具体 key 值（mono 显著）与 advice 标记。"""
     path = tmp_path / "report.html"

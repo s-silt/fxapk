@@ -85,6 +85,25 @@ def test_extract_registrant_preferred_over_other_entities() -> None:
     assert ext["country"] == "US" and ext["source"] == "rdap-ip"
 
 
+def test_extract_network_range_cidr_and_remarks() -> None:
+    payload = {
+        "name": "EXAMPLE-NET",
+        "startAddress": "198.51.100.0",
+        "endAddress": "198.51.100.255",
+        "cidr0_cidrs": [{"v4prefix": "198.51.100.0", "length": 24}],
+        "remarks": [
+            {"title": "Registration", "description": ["Reassigned network record"]}
+        ],
+    }
+
+    ext = _extract_ip_rdap(payload)
+
+    assert ext["cidr"] == "198.51.100.0/24"
+    assert ext["start_address"] == "198.51.100.0"
+    assert ext["end_address"] == "198.51.100.255"
+    assert ext["remarks"] == ["Registration: Reassigned network record"]
+
+
 def test_extract_abuse_only_does_not_fill_org() -> None:
     """★P0（RFC 9083）：只有 abuse/technical 等联系人、无 registrant → org 不填（绝不拿滥用联系人冒充
     资源持有方）；netname 顶层仍保留作兜底标识。"""

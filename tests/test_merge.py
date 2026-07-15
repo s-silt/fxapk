@@ -451,6 +451,36 @@ def test_merge_and_rerender_only_json_format(tmp_path) -> None:
     assert stats["report_paths"] == [str(tmp_path / "report.json")]
 
 
+def test_merge_and_rerender_copies_capture_quality(tmp_path) -> None:
+    runtime_report = tmp_path / "runtime_report.json"
+    quality = {
+        "channel_ready": True,
+        "pcap_valid": True,
+        "packet_count": 4,
+        "business_candidate_count": 1,
+        "target_attributed_count": 1,
+        "dynamic_status": "complete",
+        "reason": "target-attributed public business candidate observed",
+    }
+    _write_runtime_report(
+        runtime_report,
+        [],
+        capture_signals={"quality": quality, "mitm_channel_ok": True},
+    )
+    report = _make_report()
+
+    merge.merge_and_rerender(
+        report,
+        [],
+        str(tmp_path),
+        formats=["json"],
+        runtime_report_path=str(runtime_report),
+    )
+
+    assert report.meta["capture_quality"] == quality
+    assert report.meta["capture_signals"]["quality"] == quality
+
+
 def test_merge_and_rerender_uses_same_base(tmp_path) -> None:
     """问题 2：merge 重渲用传入的 base（APK 名）写 <base>.{json,html}，不写死 report.*。
 

@@ -72,6 +72,23 @@ def build_digest(report: object, *, redact: bool = False) -> dict[str, Any]:
     overseas_targets = meta.get("overseas_targets")
     overseas_targets = overseas_targets if isinstance(overseas_targets, list) else []
 
+    raw_closure = meta.get("closure")
+    closure = raw_closure if isinstance(raw_closure, dict) else {}
+    closure_targets = closure.get("targets")
+    compact_closure = {
+        "status": closure.get("status"),
+        "target_count": len(closure_targets) if isinstance(closure_targets, list) else 0,
+        "gaps": [str(item) for item in closure.get("gaps", [])]
+        if isinstance(closure.get("gaps"), list)
+        else [],
+        "next_actions": [str(item) for item in closure.get("next_actions", [])]
+        if isinstance(closure.get("next_actions"), list)
+        else [],
+        "source_summary": closure.get("source_summary")
+        if isinstance(closure.get("source_summary"), dict)
+        else {},
+    }
+
     return {
         "package": meta.get("package_name") or report.get("package_name"),
         "sha256": meta.get("sample_sha256"),
@@ -85,4 +102,5 @@ def build_digest(report: object, *, redact: bool = False) -> dict[str, Any]:
         },
         "leads": [_compact_lead(lead, redact) for lead in leads_sorted],
         "overseas_targets": overseas_targets,
+        "closure": compact_closure,
     }

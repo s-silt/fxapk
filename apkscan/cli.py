@@ -30,6 +30,7 @@ from apkscan.core.report_naming import report_base
 
 # 图谱串案 / 追踪台账 / 样本库子命令已物理拆到 apkscan/commands/（纯搬移）；add_typer 留此处以引用主 app。
 from apkscan.commands.corpus import corpus_app
+from apkscan.commands.case import case_app, closure_exit_code
 from apkscan.commands.graph import graph_app
 from apkscan.commands.track import track_app
 
@@ -42,6 +43,7 @@ app = typer.Typer(
 app.add_typer(graph_app, name="graph")
 app.add_typer(track_app, name="track")
 app.add_typer(corpus_app, name="corpus")
+app.add_typer(case_app, name="case")
 
 # 合法输出格式（--fmt）。全非法时回退而非静默产出零报告。
 _VALID_FORMATS = ("html", "json", "pdf")
@@ -649,13 +651,18 @@ def auto(
         help="脱壳后把去壳版重打包装回设备供 capture 抓（绕壳反 frida）。默认开；"
         "--no-repackage 关（重签必卸原包会清 app 数据/登录态）。",
     ),
+    strict_case: bool = typer.Option(
+        False,
+        "--strict-case/--no-strict-case",
+        help="按案件闭环状态返回退出码：complete=0、partial=5、failed=6。默认只报告状态。",
+    ),
     mode: str = typer.Option(
         ANALYSIS_MODE_PASSIVE,
         "--mode",
         help="网络模式：passive（默认，静态富化只跑被动 OSINT）| authorized-active（显式授权下才放行主动富化器）。",
     ),
 ) -> None:
-    """一键全自动：体检 → 静态分析 → 脱壳 → 抓包 → 合并，串成确定性流水线产出总报告。
+    """一键全自动：体检 → 静态分析 → 脱壳 → 抓包 → 合并 → 案件闭环。
 
     无设备时优雅跳过脱壳/抓包，仍产出静态报告。实现由 apkscan.dynamic.auto 提供
     （纯结构化返回 + 回调）；本命令是唯一打印 / 交互（提示操作 app）的薄包装。
@@ -698,10 +705,16 @@ def auto(
             track=track,
             mode=mode,
             repackage=repackage,
+            strict_case=strict_case,
             on_progress=lambda m: typer.echo(f"... {m}"),
             confirm=_confirm,
         )
         _print_auto_result(result)
+        if strict_case:
+            status = result.get("status") if isinstance(result, dict) else "failed"
+            code = closure_exit_code(status)
+            if code:
+                raise typer.Exit(code=code)
     finally:
         _cleanup_adb_quiet(_adb_owned)
 
@@ -1186,6 +1199,16 @@ def _print_auto_result(result: object) -> None:
     else:
         typer.echo("未产出报告（详见步骤摘要）。")
 
+    closure = result.get("closure")
+    if isinstance(closure, dict):
+        typer.echo("")
+        typer.echo(f"案件闭环：{closure.get('status', 'failed')}")
+        gaps = closure.get("gaps")
+        if isinstance(gaps, list) and gaps:
+            typer.echo(f"未闭环项（{len(gaps)}）：")
+            for gap in gaps[:6]:
+                typer.echo(f"  - {gap}")
+
 
 def _print_batch_result(result: object) -> None:
     """打印 batch.run_folder 的结构化汇总：计数行 + 逐个 [OK]/[ERR]/[SKIP]。"""
@@ -1352,6 +1375,7 @@ def _merge_runtime_into_report(
             base,
             formats=formats,
             on_progress=lambda m: typer.echo(f"... {m}"),
+            runtime_report_path=runtime_path,
         )
         merged = stats.get("merged", 0)
         new_leads = stats.get("new_leads", 0)
@@ -1379,129 +1403,11 @@ def _resolve_runtime_report_path(capture_result: object, out: str) -> str:
     return str(Path(out) / "runtime_report.json")
 
 
-def _evidence_from_dict(d: object) -> object:
-    """report.json 里的一条 Evidence dict → Evidence（未知/异常字段容错取默认）。"""
-    from apkscan.core.models import Evidence
-
-    if not isinstance(d, dict):
-        return Evidence(source="", location="")
-    observed = d.get("observed_at")
-    return Evidence(
-        source=str(d.get("source", "")),
-        location=str(d.get("location", "")),
-        snippet=str(d.get("snippet", "")),
-        observed_at=observed if isinstance(observed, (int, float)) else None,
-    )
-
-
 def _report_from_json_dict(payload: dict) -> Report:
-    """把（--into 改后的）report.json dict 反序列化回 Report，供复用 report.html 渲染入口重渲。
+    """Backward-compatible wrapper around the shared report loader."""
+    from apkscan.core.report_io import report_from_dict
 
-    report.html.render 需要结构化 Report（访问 ``lead.category`` 为 LeadCategory enum、
-    ``lead.confidence`` 为 Confidence enum、``lead.source_refs`` 为 Evidence 列表等）。
-    report.json 里 Enum 已序列化为 .value 字符串，这里逐字段重建：非法枚举值容错回退
-    （category 无法映射的 lead 跳过、confidence 非法回 MEDIUM、severity 非法回 INFO），
-    只重建渲染实际用到的字段（is_c2/is_runtime_seen 是 @property，重建后自动可用）。
-    """
-    from apkscan.core.models import (
-        Confidence,
-        Endpoint,
-        Finding,
-        Lead,
-        LeadCategory,
-        Severity,
-    )
-
-    def _str_list(v: object) -> list[str]:
-        return [str(x) for x in v] if isinstance(v, list) else []
-
-    def _evidences(v: object) -> list:
-        return [_evidence_from_dict(e) for e in v] if isinstance(v, list) else []
-
-    leads: list[Lead] = []
-    for item in payload.get("leads") or []:
-        if not isinstance(item, dict):
-            continue
-        try:
-            category = LeadCategory(str(item.get("category")))
-        except ValueError:
-            # 未知分类（跨版本 / 手改）→ 跳过该 lead，不让重渲整体崩（宁缺毋崩）。
-            logger.warning("[cli] 重建 report.json 遇未知 LeadCategory，已跳过：%s", item.get("category"))
-            continue
-        try:
-            confidence = Confidence(str(item.get("confidence", "MEDIUM")))
-        except ValueError:
-            confidence = Confidence.MEDIUM
-        subject = item.get("subject")
-        where = item.get("where_to_request")
-        leads.append(
-            Lead(
-                category=category,
-                value=str(item.get("value", "")),
-                subject=str(subject) if subject is not None else None,
-                where_to_request=str(where) if where is not None else None,
-                evidence_to_obtain=_str_list(item.get("evidence_to_obtain")),
-                confidence=confidence,
-                source_refs=_evidences(item.get("source_refs")),
-                notes=str(item.get("notes", "")),
-                advice=str(item.get("advice", "")),
-            )
-        )
-
-    endpoints: list[Endpoint] = []
-    for item in payload.get("endpoints") or []:
-        if not isinstance(item, dict):
-            continue
-        enrichment = item.get("enrichment")
-        endpoints.append(
-            Endpoint(
-                value=str(item.get("value", "")),
-                kind=str(item.get("kind", "")),
-                evidences=_evidences(item.get("evidences")),
-                is_cleartext=bool(item.get("is_cleartext", False)),
-                is_private=bool(item.get("is_private", False)),
-                is_suspicious=bool(item.get("is_suspicious", False)),
-                enrichment=enrichment if isinstance(enrichment, dict) else {},
-            )
-        )
-
-    findings: list[Finding] = []
-    for item in payload.get("findings") or []:
-        if not isinstance(item, dict):
-            continue
-        try:
-            severity = Severity(str(item.get("severity", "INFO")))
-        except ValueError:
-            severity = Severity.INFO
-        findings.append(
-            Finding(
-                id=str(item.get("id", "")),
-                title=str(item.get("title", "")),
-                severity=severity,
-                category=str(item.get("category", "")),
-                description=str(item.get("description", "")),
-                recommendation=str(item.get("recommendation", "")),
-                evidences=_evidences(item.get("evidences")),
-                references=_str_list(item.get("references")),
-            )
-        )
-
-    meta = payload.get("meta")
-    analyzer_status = payload.get("analyzer_status")
-    enricher_status = payload.get("enricher_status")
-    return Report(
-        package_name=str(payload.get("package_name", "")),
-        meta=meta if isinstance(meta, dict) else {},
-        leads=leads,
-        endpoints=endpoints,
-        findings=findings,
-        analyzer_status=[s for s in analyzer_status if isinstance(s, dict)]
-        if isinstance(analyzer_status, list)
-        else [],
-        enricher_status=[s for s in enricher_status if isinstance(s, dict)]
-        if isinstance(enricher_status, list)
-        else [],
-    )
+    return report_from_dict(payload)
 
 
 def _rerender_html_if_present(report_json_path: str) -> str:
