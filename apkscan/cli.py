@@ -30,6 +30,7 @@ from apkscan.core.report_naming import report_base
 
 # 图谱串案 / 追踪台账 / 样本库子命令已物理拆到 apkscan/commands/（纯搬移）；add_typer 留此处以引用主 app。
 from apkscan.commands.corpus import corpus_app
+from apkscan.commands.case import case_app
 from apkscan.commands.graph import graph_app
 from apkscan.commands.track import track_app
 
@@ -42,6 +43,7 @@ app = typer.Typer(
 app.add_typer(graph_app, name="graph")
 app.add_typer(track_app, name="track")
 app.add_typer(corpus_app, name="corpus")
+app.add_typer(case_app, name="case")
 
 # 合法输出格式（--fmt）。全非法时回退而非静默产出零报告。
 _VALID_FORMATS = ("html", "json", "pdf")
