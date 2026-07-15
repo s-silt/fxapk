@@ -127,7 +127,7 @@ def run(
                  None 则不等待直接继续。
 
     Returns:
-        dict：{steps, report_paths, package_name, out_dir}。绝不抛异常给调用方。
+        dict：{status, closure, steps, report_paths, package_name, out_dir}。绝不抛异常给调用方。
     """
     fmts = list(formats) if formats else list(_DEFAULT_FORMATS)
     steps: list[dict] = []
