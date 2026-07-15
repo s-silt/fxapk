@@ -295,8 +295,7 @@ def _normalize_source_status(enrichment: Mapping[str, object]) -> dict[str, dict
     return normalized
 
 
-def assemble_target_closure(endpoint: Endpoint) -> dict[str, object]:
-    """Assemble the investigation five layers without claiming the app operator."""
+def _single_target_closure(endpoint: Endpoint) -> dict[str, object]:
     enrichment = endpoint.enrichment
     origin = _origin_status(enrichment)
     hosting = _hosting_layer(enrichment)
@@ -323,6 +322,267 @@ def assemble_target_closure(endpoint: Endpoint) -> dict[str, object]:
         "actual_service_operator": {"status": "unknown", "evidence": {}},
         "gaps": gaps,
     }
+
+
+def _aggregate_layer(
+    layer_name: str,
+    resolved: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    items: list[tuple[str, Mapping[str, object]]] = []
+    for target in resolved:
+        layers = target.get("layers")
+        if not isinstance(layers, Mapping):
+            continue
+        layer = layers.get(layer_name)
+        if isinstance(layer, Mapping):
+            items.append((str(target.get("value", "")), layer))
+    if not items:
+        return _layer(CLOSURE_FAILED, reason=f"{layer_name} is missing for resolved IPs")
+    statuses = [str(layer.get("status")) for _ip, layer in items]
+    if all(status == CLOSURE_COMPLETE for status in statuses):
+        status = CLOSURE_COMPLETE
+    elif any(status in {CLOSURE_COMPLETE, CLOSURE_PARTIAL} for status in statuses):
+        status = CLOSURE_PARTIAL
+    else:
+        status = CLOSURE_FAILED
+    per_ip = {ip: _mapping(layer.get("evidence")) for ip, layer in items}
+    evidence: dict[str, object] = {"per_ip": per_ip}
+    if layer_name == "request_target":
+        providers = {
+            str(data.get("provider"))
+            for data in per_ip.values()
+            if data.get("provider")
+        }
+        if len(providers) == 1:
+            evidence["provider"] = next(iter(providers))
+        fields = next(
+            (
+                data.get("evidence_fields")
+                for data in per_ip.values()
+                if isinstance(data.get("evidence_fields"), list)
+            ),
+            [],
+        )
+        evidence["evidence_fields"] = fields
+    return _layer(
+        status,
+        evidence,
+        reason="one or more resolved IP layers are incomplete" if status != CLOSURE_COMPLETE else "",
+    )
+
+
+def _aggregate_source_status(
+    parent: Mapping[str, dict[str, object]],
+    resolved: Sequence[Mapping[str, object]],
+) -> dict[str, dict[str, object]]:
+    grouped: dict[str, list[dict[str, object]]] = {
+        provider: [dict(item)] for provider, item in parent.items()
+    }
+    for target in resolved:
+        raw = target.get("source_status")
+        if not isinstance(raw, Mapping):
+            continue
+        for provider, item in raw.items():
+            if isinstance(item, Mapping):
+                grouped.setdefault(str(provider), []).append(dict(item))
+    rank = {"failed": 0, "skipped": 1, "hit": 2, "no_record": 3, "disabled": 4}
+    aggregated: dict[str, dict[str, object]] = {}
+    for provider in sorted(grouped):
+        entries = grouped[provider]
+        selected = min(entries, key=lambda item: rank.get(str(item.get("status")), 0))
+        aggregated[provider] = selected
+    return aggregated
+
+
+def assemble_target_closure(endpoint: Endpoint) -> dict[str, object]:
+    """Assemble five investigation layers and retain per-IP evidence for domains."""
+    raw_resolved = endpoint.enrichment.get("resolved_ip_enrichment")
+    if endpoint.kind != "domain" or not isinstance(raw_resolved, Mapping) or not raw_resolved:
+        return _single_target_closure(endpoint)
+
+    runtime = _mapping(endpoint.enrichment.get("runtime"))
+    resolved_targets: list[dict[str, object]] = []
+    for ip in sorted(str(value) for value in raw_resolved):
+        enrichment = raw_resolved.get(ip)
+        if not isinstance(enrichment, Mapping):
+            continue
+        merged = dict(enrichment)
+        if runtime:
+            merged["runtime"] = runtime
+        resolved_endpoint = Endpoint(
+            value=ip,
+            kind="ip",
+            evidences=list(endpoint.evidences),
+            is_suspicious=True,
+            enrichment=merged,
+        )
+        resolved_targets.append(_single_target_closure(resolved_endpoint))
+
+    layers = {"runtime_evidence": _runtime_layer(endpoint)}
+    for name in LAYER_NAMES[1:]:
+        layers[name] = _aggregate_layer(name, resolved_targets)
+    origins = [target.get("origin") for target in resolved_targets]
+    required_origins = [origin for origin in origins if isinstance(origin, Mapping) and origin.get("required")]
+    if not required_origins:
+        origin: dict[str, object] = {"required": False, "status": "not_applicable"}
+    elif all(item.get("status") == CLOSURE_COMPLETE for item in required_origins):
+        origin = {"required": True, "status": CLOSURE_COMPLETE}
+    else:
+        origin = {"required": True, "status": "missing"}
+    statuses = {str(layer.get("status")) for layer in layers.values()}
+    status = CLOSURE_COMPLETE if statuses == {CLOSURE_COMPLETE} else CLOSURE_PARTIAL
+    if origin.get("required") is True and origin.get("status") != CLOSURE_COMPLETE:
+        status = CLOSURE_PARTIAL
+    gaps = [name for name in LAYER_NAMES if layers[name].get("status") != CLOSURE_COMPLETE]
+    if origin.get("required") is True and origin.get("status") != CLOSURE_COMPLETE:
+        gaps.append("origin")
+    return {
+        "value": endpoint.value,
+        "kind": endpoint.kind,
+        "status": status,
+        "layers": layers,
+        "source_status": _aggregate_source_status(
+            _normalize_source_status(endpoint.enrichment),
+            resolved_targets,
+        ),
+        "origin": origin,
+        "resolved_ips": [str(target.get("value")) for target in resolved_targets],
+        "resolved_ip_targets": resolved_targets,
+        "actual_service_operator": {"status": "unknown", "evidence": {}},
+        "gaps": gaps,
+    }
+
+
+def _sources_are_terminal(endpoint: Endpoint, enrichers: Sequence[object]) -> bool:
+    applicable = [
+        enricher
+        for enricher in enrichers
+        if endpoint.kind in (getattr(enricher, "applies_to", []) or [])
+    ]
+    if not applicable:
+        return True
+    statuses = _normalize_source_status(endpoint.enrichment)
+    terminal = {"hit", "no_record", "disabled", "skipped"}
+    return all(
+        statuses.get(getattr(enricher, "name", ""), {}).get("status") in terminal
+        for enricher in applicable
+    )
+
+
+def _resolved_ips(endpoint: Endpoint) -> list[str]:
+    if endpoint.kind != "domain":
+        return []
+    dns = _mapping(endpoint.enrichment.get("dns"))
+    raw = dns.get("ips") or dns.get("addresses")
+    if not isinstance(raw, list):
+        return []
+    return sorted({str(value).strip() for value in raw if str(value).strip()})
+
+
+def _set_attribution(endpoint: Endpoint) -> None:
+    from apkscan.core.attribution import build_endpoint_attribution
+
+    attribution = build_endpoint_attribution(endpoint.kind, endpoint.value, endpoint.enrichment)
+    if attribution is not None:
+        endpoint.enrichment["attribution"] = attribution
+
+
+def _enrich_resolved_ips(
+    endpoint: Endpoint,
+    enrichers: Sequence[object],
+    config: ClosureConfig,
+) -> None:
+    from apkscan.core.enrichment import enrich_selected_targets
+
+    existing = _mapping(endpoint.enrichment.get("resolved_ip_enrichment"))
+    runtime = _mapping(endpoint.enrichment.get("runtime"))
+    resolved: dict[str, object] = {}
+    for ip in _resolved_ips(endpoint):
+        cached = existing.get(ip)
+        enrichment = dict(cached) if isinstance(cached, Mapping) else {}
+        if runtime:
+            enrichment["runtime"] = runtime
+        transient = Endpoint(
+            value=ip,
+            kind="ip",
+            evidences=list(endpoint.evidences),
+            is_suspicious=True,
+            enrichment=enrichment,
+        )
+        typed_enrichers = [enricher for enricher in enrichers if hasattr(enricher, "enrich")]
+        if config.online and (config.refresh or not _sources_are_terminal(transient, typed_enrichers)):
+            enrich_selected_targets(
+                [transient],
+                typed_enrichers,  # type: ignore[arg-type]
+                mode=config.mode,
+                include_case_close=True,
+            )
+        _set_attribution(transient)
+        transient.enrichment.pop("runtime", None)
+        resolved[ip] = transient.enrichment
+    if resolved:
+        endpoint.enrichment["resolved_ip_enrichment"] = resolved
+
+
+def _update_target_leads(report: Report, targets: Sequence[Mapping[str, object]]) -> None:
+    by_key = {(str(target.get("kind")), str(target.get("value")).lower()): target for target in targets}
+    for lead in report.leads:
+        kind = "domain" if lead.category.value == "DOMAIN" else "ip" if lead.category.value == "IP" else ""
+        target = by_key.get((kind, lead.value.lower()))
+        if target is None:
+            continue
+        layers = target.get("layers")
+        request = layers.get("request_target") if isinstance(layers, Mapping) else None
+        evidence = request.get("evidence") if isinstance(request, Mapping) else None
+        if isinstance(evidence, Mapping):
+            provider = evidence.get("provider")
+            if provider:
+                lead.where_to_request = str(provider)
+            fields = evidence.get("evidence_fields")
+            if isinstance(fields, list):
+                for field in fields:
+                    text = str(field)
+                    if text and text not in lead.evidence_to_obtain:
+                        lead.evidence_to_obtain.append(text)
+        marker = "[case-close]"
+        retained = [line for line in lead.notes.splitlines() if not line.startswith(marker)]
+        raw_gaps = target.get("gaps")
+        gaps = [str(gap) for gap in raw_gaps] if isinstance(raw_gaps, list) else []
+        summary = f"{marker} status={target.get('status')}; gaps={','.join(gaps) or 'none'}"
+        retained.append(summary)
+        lead.notes = "\n".join(line for line in retained if line).strip()
+
+
+def close_report(
+    report: Report,
+    config: ClosureConfig,
+    *,
+    enrichers: Sequence[object] | None = None,
+) -> dict[str, object]:
+    """Run bounded re-enrichment, five-layer assembly, and write ``meta.closure``."""
+    from apkscan.core.enrichment import enrich_selected_targets
+    from apkscan.core.registry import discover_enrichers
+
+    selected = select_targets(report, config.max_targets)
+    available = list(enrichers) if enrichers is not None else list(discover_enrichers())
+    typed_enrichers = [enricher for enricher in available if hasattr(enricher, "enrich")]
+    for endpoint in selected:
+        if config.online and (config.refresh or not _sources_are_terminal(endpoint, typed_enrichers)):
+            enrich_selected_targets(
+                [endpoint],
+                typed_enrichers,  # type: ignore[arg-type]
+                mode=config.mode,
+                include_case_close=True,
+            )
+        _set_attribution(endpoint)
+        if endpoint.kind == "domain":
+            _enrich_resolved_ips(endpoint, typed_enrichers, config)
+
+    targets = [assemble_target_closure(endpoint) for endpoint in selected]
+    closure = evaluate_closure(report, targets, require_dynamic=config.require_dynamic)
+    report.meta["closure"] = closure
+    _update_target_leads(report, targets)
+    return closure
 
 
 def _capture_meta(report: Report) -> dict[str, Any]:
@@ -422,7 +682,14 @@ def evaluate_closure(
             failed_sources = [
                 str(name)
                 for name, item in sources.items()
-                if isinstance(item, Mapping) and item.get("status") in {"failed", "skipped"}
+                if isinstance(item, Mapping)
+                and (
+                    item.get("status") == "failed"
+                    or (
+                        item.get("status") == "skipped"
+                        and item.get("reason") != "active_mode_blocked"
+                    )
+                )
             ]
             if failed_sources:
                 gaps.append(f"{value}: source lookup incomplete ({', '.join(sorted(failed_sources))})")
@@ -453,6 +720,7 @@ __all__ = [
     "SOURCE_STATUSES",
     "ClosureConfig",
     "assemble_target_closure",
+    "close_report",
     "evaluate_capture_quality",
     "evaluate_closure",
     "select_targets",

@@ -11,6 +11,7 @@ from apkscan.enrichers.multisource import (
     SourceOutcome,
     configured_case_close_enrichers,
 )
+from apkscan.enrichers.shodan import ShodanEnricher
 
 
 class _CaseOnlyEnricher(BaseEnricher):
@@ -151,3 +152,18 @@ def test_source_outcome_rejects_unknown_status() -> None:
         assert "status" in str(exc)
     else:
         raise AssertionError("SourceOutcome accepted an unknown status")
+
+
+def test_missing_shodan_key_is_disabled_not_failed(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.delenv("FXAPK_SHODAN_KEY", raising=False)
+    monkeypatch.delenv("SHODAN_API_KEY", raising=False)
+    endpoint = _ip()
+
+    enrich_selected_targets(
+        [endpoint],
+        [ShodanEnricher()],
+        mode="passive",
+        include_case_close=True,
+    )
+
+    assert endpoint.enrichment["source_status"]["shodan"]["status"] == "disabled"

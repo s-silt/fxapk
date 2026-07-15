@@ -125,6 +125,7 @@ class ShodanEnricher(BaseEnricher):
     #: 境外归属阶段（两遍富化第二遍）；被动（active=False，查 Shodan 库、对目标零流量），仅对国外(+未知)端点跑。
     phase = "overseas"
     active = False
+    required_env = _ENV_KEYS
 
     def __init__(self) -> None:
         # 缓存写入串行化，避免并发富化时写坏 JSON 文件。

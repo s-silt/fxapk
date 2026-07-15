@@ -7,11 +7,21 @@ from apkscan.core.closure import (
     LAYER_NAMES,
     ClosureConfig,
     assemble_target_closure,
+    close_report,
     evaluate_capture_quality,
     evaluate_closure,
     select_targets,
 )
-from apkscan.core.models import Confidence, Endpoint, Evidence, Lead, LeadCategory, Report
+from apkscan.core.models import (
+    Confidence,
+    Endpoint,
+    EnrichmentResult,
+    Evidence,
+    Lead,
+    LeadCategory,
+    Report,
+)
+from apkscan.core.registry import BaseEnricher
 
 
 def _endpoint(
@@ -200,6 +210,19 @@ def test_static_critical_failure_makes_closure_failed() -> None:
     assert closure["checks"][0]["status"] == "fail"
 
 
+def test_passive_mode_blocked_active_source_does_not_prevent_completion() -> None:
+    report = _report(_complete_endpoint())
+    target = assemble_target_closure(report.endpoints[0])
+    target["source_status"]["webcheck"] = {
+        "status": "skipped",
+        "reason": "active_mode_blocked",
+    }
+
+    closure = evaluate_closure(report, [target], require_dynamic=False)
+
+    assert closure["status"] == CLOSURE_COMPLETE
+
+
 def test_closure_config_rejects_non_positive_target_limit() -> None:
     try:
         ClosureConfig(max_targets=0)
@@ -207,3 +230,169 @@ def test_closure_config_rejects_non_positive_target_limit() -> None:
         assert "max_targets" in str(exc)
     else:
         raise AssertionError("ClosureConfig accepted max_targets=0")
+
+
+class _FakeEnricher(BaseEnricher):
+    def __init__(self, name: str, applies_to: list[str], data: dict) -> None:
+        self.name = name
+        self.applies_to = applies_to
+        self.data = data
+        self.calls: list[str] = []
+
+    def enrich(self, ep: Endpoint) -> EnrichmentResult:
+        self.calls.append(ep.value)
+        return EnrichmentResult(provider=self.name, ok=True, data=dict(self.data))
+
+
+def _full_ip_enrichers() -> list[_FakeEnricher]:
+    return [
+        _FakeEnricher(
+            "ip_rdap",
+            ["ip"],
+            {
+                "netname": "EXAMPLE-NET",
+                "org": "Example Registry Ltd",
+                "country": "US",
+                "handle": "NET-198-51-100-0-1",
+                "cidr": "198.51.100.0/24",
+            },
+        ),
+        _FakeEnricher(
+            "ripestat_bgp",
+            ["ip"],
+            {
+                "origin_asn": 64500,
+                "asn_holder": "Example Network Ltd",
+                "prefix": "198.51.100.0/24",
+            },
+        ),
+        _FakeEnricher(
+            "asn",
+            ["ip"],
+            {
+                "asn": "AS64500",
+                "org": "Example Hosting Ltd",
+                "country": "US",
+            },
+        ),
+        _FakeEnricher(
+            "shodan",
+            ["ip"],
+            {
+                "org": "Example Hosting Ltd",
+                "ports": [443],
+                "services": [{"port": 443, "product": "nginx"}],
+            },
+        ),
+    ]
+
+
+def test_close_report_reenriches_runtime_ip_and_writes_closure() -> None:
+    endpoint = _endpoint(
+        "198.51.100.10",
+        runtime=True,
+        target=True,
+        payload=True,
+    )
+    report = _report(endpoint)
+    enrichers = _full_ip_enrichers()
+
+    closure = close_report(
+        report,
+        ClosureConfig(online=True, require_dynamic=False),
+        enrichers=enrichers,
+    )
+
+    assert closure["status"] == CLOSURE_COMPLETE
+    assert report.meta["closure"] is closure
+    assert endpoint.enrichment["ip_rdap"]["netname"] == "EXAMPLE-NET"
+    assert endpoint.enrichment["ripestat_bgp"]["origin_asn"] == 64500
+    assert all(enricher.calls == ["198.51.100.10"] for enricher in enrichers)
+    assert report.leads[0].where_to_request == "Example Hosting Ltd"
+    assert "tenant identity" in report.leads[0].evidence_to_obtain
+
+
+def test_close_report_is_idempotent_and_preserves_analyst_notes() -> None:
+    endpoint = _complete_endpoint()
+    report = _report(endpoint)
+    report.leads[0].notes = "Analyst note must remain unchanged."
+
+    first = close_report(
+        report,
+        ClosureConfig(online=False, require_dynamic=False),
+        enrichers=[],
+    )
+    first_notes = report.leads[0].notes
+    first_evidence = list(report.leads[0].evidence_to_obtain)
+    second = close_report(
+        report,
+        ClosureConfig(online=False, require_dynamic=False),
+        enrichers=[],
+    )
+
+    assert second == first
+    assert report.leads[0].notes == first_notes
+    assert report.leads[0].notes.startswith("Analyst note must remain unchanged.")
+    assert report.leads[0].evidence_to_obtain == first_evidence
+
+
+def test_domain_target_enriches_each_resolved_ip() -> None:
+    domain = _endpoint(
+        "api.example.test",
+        kind="domain",
+        runtime=True,
+        target=True,
+        payload=True,
+    )
+    report = _report(domain)
+    dns = _FakeEnricher("dns", ["domain"], {"ips": ["198.51.100.10"], "cname": []})
+    ip_enrichers = _full_ip_enrichers()
+
+    closure = close_report(
+        report,
+        ClosureConfig(online=True, require_dynamic=False),
+        enrichers=[dns, *ip_enrichers],
+    )
+
+    resolved = domain.enrichment["resolved_ip_enrichment"]["198.51.100.10"]
+    assert resolved["ip_rdap"]["netname"] == "EXAMPLE-NET"
+    assert resolved["ripestat_bgp"]["origin_asn"] == 64500
+    assert closure["targets"][0]["resolved_ips"] == ["198.51.100.10"]
+    assert closure["targets"][0]["layers"]["resource_registration"]["status"] == CLOSURE_COMPLETE
+    assert all(enricher.calls == ["198.51.100.10"] for enricher in ip_enrichers)
+
+
+def test_close_report_reuses_completed_source_outcomes_without_refresh() -> None:
+    endpoint = _complete_endpoint()
+    report = _report(endpoint)
+    enricher = _FakeEnricher("shodan", ["ip"], {"org": "Changed Provider"})
+
+    close_report(
+        report,
+        ClosureConfig(online=True, refresh=False, require_dynamic=False),
+        enrichers=[enricher],
+    )
+
+    assert enricher.calls == []
+    assert endpoint.enrichment["shodan"]["org"] == "Example Hosting Ltd"
+
+
+def test_offline_close_does_not_enrich_previously_resolved_ip() -> None:
+    domain = _endpoint(
+        "api.example.test",
+        kind="domain",
+        runtime=True,
+        target=True,
+        payload=True,
+        enrichment={"dns": {"ips": ["198.51.100.10"]}},
+    )
+    report = _report(domain)
+    enricher = _FakeEnricher("ip_rdap", ["ip"], {"netname": "MUST-NOT-RUN"})
+
+    close_report(
+        report,
+        ClosureConfig(online=False, require_dynamic=False),
+        enrichers=[enricher],
+    )
+
+    assert enricher.calls == []
