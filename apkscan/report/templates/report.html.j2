@@ -165,6 +165,50 @@
     {% endif %}
   </section>
 
+  {#- ============ 案件闭环（只呈现规范化摘要，不展开第三方 API 原始响应） ============ -#}
+  {% set closure = meta.get("closure") %}
+  {% if closure %}
+  <section id="case-closure">
+    <h2>案件闭环 <span class="muted" style="font-size:13px;font-weight:400">（PCAP-first / 多源富化 / 五层归因）</span></h2>
+    <div class="cards">
+      <div class="stat"><div class="k">闭环状态</div><div class="v" style="font-size:20px">{{ closure.get("status") or "failed" }}</div></div>
+      <div class="stat"><div class="k">主目标</div><div class="v">{{ (closure.get("targets") or [])|length }}</div></div>
+      {% for source_status, count in (closure.get("source_summary") or {}).items() %}
+      <div class="stat"><div class="k">来源 {{ source_status }}</div><div class="v">{{ count }}</div></div>
+      {% endfor %}
+    </div>
+    {% if closure.get("targets") %}
+    <table class="lead-table">
+      <thead><tr><th>主目标</th><th>运行时</th><th>IP 登记</th><th>BGP</th><th>承载链</th><th>调证对象</th><th>Origin</th></tr></thead>
+      <tbody>
+      {% for target in closure.get("targets") %}
+        {% set layers = target.get("layers") or {} %}
+        {% set request_layer = layers.get("request_target") or {} %}
+        {% set request_evidence = request_layer.get("evidence") or {} %}
+        <tr>
+          <td><span class="mono-strong">{{ target.get("value") }}</span><div class="muted">{{ target.get("status") }}</div></td>
+          <td>{{ (layers.get("runtime_evidence") or {}).get("status") or "missing" }}</td>
+          <td>{{ (layers.get("resource_registration") or {}).get("status") or "missing" }}</td>
+          <td>{{ (layers.get("bgp_announcement") or {}).get("status") or "missing" }}</td>
+          <td>{{ (layers.get("hosting_delivery") or {}).get("status") or "missing" }}</td>
+          <td>{{ request_layer.get("status") or "missing" }}{% if request_evidence.get("provider") %}<div class="muted">{{ request_evidence.get("provider") }}</div>{% endif %}</td>
+          <td>{{ (target.get("origin") or {}).get("status") or "not_applicable" }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    {% if closure.get("gaps") %}
+    <h3>未闭环项</h3>
+    <ul class="tight">{% for gap in closure.get("gaps") %}<li>{{ gap }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% if closure.get("next_actions") %}
+    <h3>下一步</h3>
+    <ul class="tight">{% for action in closure.get("next_actions") %}<li>{{ action }}</li>{% endfor %}</ul>
+    {% endif %}
+  </section>
+  {% endif %}
+
   {#- ============ 证据完整性（可复现 / 可回溯 / 完整性校验背书层；措辞克制，不打包票） ============ -#}
   {% set manifest = meta.get("evidence_manifest") %}
   {% if manifest %}

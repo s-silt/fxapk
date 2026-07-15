@@ -92,6 +92,47 @@ def _registrant_org(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def _cidr_blocks(payload: dict[str, Any]) -> str | None:
+    raw = payload.get("cidr0_cidrs")
+    if not isinstance(raw, list):
+        return None
+    blocks: list[str] = []
+    for item in raw[:32]:
+        if not isinstance(item, dict):
+            continue
+        prefix = _to_str(item.get("v4prefix") or item.get("v6prefix"))
+        length = item.get("length")
+        if not prefix or isinstance(length, bool) or not isinstance(length, int):
+            continue
+        maximum = 128 if ":" in prefix else 32
+        if 0 <= length <= maximum:
+            block = f"{prefix}/{length}"
+            if block not in blocks:
+                blocks.append(block)
+    return ", ".join(blocks) or None
+
+
+def _remarks(payload: dict[str, Any]) -> list[str] | None:
+    raw = payload.get("remarks")
+    if not isinstance(raw, list):
+        return None
+    lines: list[str] = []
+    for item in raw[:20]:
+        if not isinstance(item, dict):
+            continue
+        title = _to_str(item.get("title"))
+        descriptions = item.get("description")
+        values = descriptions if isinstance(descriptions, list) else [descriptions]
+        for value in values[:20]:
+            description = _to_str(value) if isinstance(value, str) else None
+            if not description:
+                continue
+            line = f"{title}: {description}" if title else description
+            if line not in lines:
+                lines.append(line[:500])
+    return lines or None
+
+
 def _extract_ip_rdap(payload: dict[str, Any]) -> dict[str, Any]:
     """从 rdap.org IP 响应 JSON 提取资源登记方字段（netname/org/country/handle/网段）。"""
     return {
@@ -99,7 +140,10 @@ def _extract_ip_rdap(payload: dict[str, Any]) -> dict[str, Any]:
         "org": _registrant_org(payload),                   # 登记机构名
         "country": _to_str(payload.get("country")),        # RIR 提供的归属国
         "handle": _to_str(payload.get("handle")),
-        "cidr": _to_str(payload.get("startAddress")),      # 网段起始（便于人工核网段范围）
+        "cidr": _cidr_blocks(payload),
+        "start_address": _to_str(payload.get("startAddress")),
+        "end_address": _to_str(payload.get("endAddress")),
+        "remarks": _remarks(payload),
         "source": "rdap-ip",
     }
 

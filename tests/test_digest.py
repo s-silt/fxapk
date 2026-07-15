@@ -41,6 +41,29 @@ def test_build_digest_bad_input_never_throws() -> None:
     assert build_digest({})["leads"] == []
 
 
+def test_build_digest_exposes_compact_closure_without_raw_targets() -> None:
+    report = {
+        "meta": {
+            "closure": {
+                "status": "partial",
+                "targets": [{"value": "198.51.100.10", "raw": {"large": "payload"}}],
+                "gaps": ["Origin is missing"],
+                "next_actions": ["request edge origin logs"],
+                "source_summary": {"hit": 3, "failed": 1},
+            }
+        },
+        "leads": [],
+    }
+
+    digest = build_digest(report)
+
+    assert digest["closure"]["status"] == "partial"
+    assert digest["closure"]["target_count"] == 1
+    assert digest["closure"]["gaps"] == ["Origin is missing"]
+    assert "targets" not in digest["closure"]
+    assert "large" not in str(digest["closure"])
+
+
 def test_cli_digest_emits_json_stdout(tmp_path) -> None:
     rep = tmp_path / "report.json"
     rep.write_text(

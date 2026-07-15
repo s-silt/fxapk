@@ -61,6 +61,10 @@ class BaseEnricher(ABC):
     applies_to: list[str] = []
     phase: str = "attribution"
     active: bool = False
+    #: Expensive/key-gated providers that are reserved for the bounded case-close target set.
+    case_close_only: bool = False
+    #: Any one non-empty variable enables the provider. Empty means no credential is required.
+    required_env: tuple[str, ...] = ()
 
     @abstractmethod
     def enrich(self, ep: Endpoint) -> EnrichmentResult:
