@@ -134,6 +134,21 @@ def test_find_by_and_query(tmp_path: Path) -> None:
     assert len(corpus.query(entries, case_id="c1")) == 1
 
 
+def test_find_by_hash_case_insensitive(tmp_path: Path) -> None:
+    """★哈希（sample_sha256/sign_sha256）十六进制大小写等价：反查大写/小写都命中，避免传大写 SHA256 假阴性；
+    package_name 保持大小写敏感（com.Foo ≠ com.foo）。"""
+    corpus.add_report(tmp_path, _report(sha="abc123def", package="com.Foo.Bar"), "{}", case_id="c1")
+    entries = corpus.load_manifest(tmp_path)
+    # sample_sha256：库内小写，大写/小写反查都命中
+    assert len(corpus.find_by(entries, "ABC123DEF", by="sample_sha256")) == 1
+    assert len(corpus.find_by(entries, "abc123def", by="sample_sha256")) == 1
+    # sign_sha256：库内 "CERT-SHA"（含大写），小写反查也命中（双向归一）
+    assert len(corpus.find_by(entries, "cert-sha", by="sign_sha256")) == 1
+    # package_name：大小写敏感——变体不误命中，原样才命中
+    assert corpus.find_by(entries, "com.foo.bar", by="package_name") == []
+    assert len(corpus.find_by(entries, "com.Foo.Bar", by="package_name")) == 1
+
+
 # --- reindex 重建 + 保 case_id ----------------------------------------------
 
 
