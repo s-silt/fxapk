@@ -72,22 +72,12 @@ def _normalize_signals(value: object) -> tuple[RoleSignal, ...]:
     return tuple(sorted({_coerce_signal(item) for item in value}, key=lambda item: item.value))
 
 
-def _evidence_key(item: AttributionEvidence) -> tuple[str, str, str, str, str]:
-    return (
-        item.id,
-        item.source,
-        item.type,
-        item.target.kind.value,
-        item.target.value,
-    )
-
-
 def _normalize_evidence(
     value: object, *, target: NetworkEntity
 ) -> tuple[AttributionEvidence, ...]:
     if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
         raise TypeError("evidence must be a non-string iterable")
-    unique: dict[tuple[str, str, str, str, str], AttributionEvidence] = {}
+    unique: dict[str, AttributionEvidence] = {}
     for item in value:
         if not isinstance(item, AttributionEvidence):
             raise TypeError(
@@ -95,7 +85,13 @@ def _normalize_evidence(
             )
         if item.target != target:
             raise ValueError("assessment evidence target must equal assessment target")
-        unique[_evidence_key(item)] = item
+        existing = unique.get(item.id)
+        if existing is None:
+            unique[item.id] = item
+        elif existing.to_dict() != item.to_dict():
+            raise ValueError(
+                f"conflicting evidence for id {item.id!r}"
+            )
     return tuple(unique[key] for key in sorted(unique))
 
 
@@ -240,14 +236,20 @@ _ROLE_DEFINITIONS = (
 def _normalize_features(value: object) -> tuple[RoleFeature, ...]:
     if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
         raise TypeError("features must be a non-string iterable of RoleFeature")
-    unique: dict[tuple[str, str, str, str, str, str], RoleFeature] = {}
+    unique: dict[tuple[str, str], RoleFeature] = {}
     for item in value:
         if not isinstance(item, RoleFeature):
             raise TypeError(
                 f"features must contain RoleFeature, got {type(item).__name__}"
             )
-        key = (item.signal.value, *_evidence_key(item.evidence))
-        unique[key] = item
+        key = (item.signal.value, item.evidence.id)
+        existing = unique.get(key)
+        if existing is None:
+            unique[key] = item
+        elif existing.evidence.to_dict() != item.evidence.to_dict():
+            raise ValueError(
+                f"conflicting evidence for feature {key!r}"
+            )
     return tuple(unique[key] for key in sorted(unique))
 
 

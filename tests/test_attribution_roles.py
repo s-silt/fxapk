@@ -150,3 +150,88 @@ def test_assess_returns_ineligible_explanations_but_never_cloaking() -> None:
     assert InfrastructureRole.CLOAKING_EDGE_NODE not in {
         item.role for item in assessments
     }
+
+
+def _evidence_variant(
+    evidence_id: str,
+    *,
+    target: NetworkEntity | None = None,
+    value: str | int | float | bool | None = True,
+    raw_reference: str | None = None,
+) -> AttributionEvidence:
+    return AttributionEvidence(
+        id=evidence_id,
+        source="pcap",
+        type="role_signal",
+        target=target or _entity(),
+        value=value,
+        confidence=0.8,
+        raw_reference=raw_reference,
+    )
+
+
+def test_exact_duplicate_features_collapse_order_independent() -> None:
+    target = _entity()
+    first = _evidence_variant("ev-dup", target=target, value=True, raw_reference="ref")
+    second = _evidence_variant("ev-dup", target=target, value=True, raw_reference="ref")
+    assert first == second
+    feature_a = RoleFeature(signal=RoleSignal.DIRECT_CONNECTION, evidence=first)
+    feature_b = RoleFeature(signal=RoleSignal.DIRECT_CONNECTION, evidence=second)
+    classifier = RoleClassifier()
+    forward = [item.to_dict() for item in classifier.assess(target, [feature_a, feature_b])]
+    reverse = [item.to_dict() for item in classifier.assess(target, [feature_b, feature_a])]
+    assert forward == reverse
+    matched = [
+        evidence
+        for assessment in forward
+        for evidence in assessment["matched_evidence"]
+        if evidence["id"] == "ev-dup"
+    ]
+    assert matched and all(item == first.to_dict() for item in matched)
+
+
+@pytest.mark.parametrize(
+    ("first_payload", "second_payload"),
+    [
+        ({"value": True, "raw_reference": None}, {"value": False, "raw_reference": None}),
+        (
+            {"value": True, "raw_reference": "ref-a"},
+            {"value": True, "raw_reference": "ref-b"},
+        ),
+    ],
+)
+def test_conflicting_features_same_id_raise_value_error(
+    first_payload: dict[str, object], second_payload: dict[str, object]
+) -> None:
+    target = _entity()
+    first = _evidence_variant("ev-conflict", target=target, **first_payload)  # type: ignore[arg-type]
+    second = _evidence_variant("ev-conflict", target=target, **second_payload)  # type: ignore[arg-type]
+    feature_a = RoleFeature(signal=RoleSignal.DIRECT_CONNECTION, evidence=first)
+    feature_b = RoleFeature(signal=RoleSignal.DIRECT_CONNECTION, evidence=second)
+    classifier = RoleClassifier()
+    with pytest.raises(ValueError):
+        classifier.assess(target, [feature_a, feature_b])
+    with pytest.raises(ValueError):
+        classifier.assess(target, [feature_b, feature_a])
+
+
+def test_role_assessment_rejects_conflicting_matched_evidence() -> None:
+    target = _entity()
+    first = _evidence_variant("ev-shared", target=target, value=True)
+    second = _evidence_variant("ev-shared", target=target, value=False)
+    with pytest.raises(ValueError):
+        RoleAssessment(
+            target=target,
+            role=InfrastructureRole.ORIGIN_CANDIDATE,
+            eligible=False,
+            matched_signals=(RoleSignal.BUSINESS_API,),
+            matched_evidence=(first, second),
+        )
+    with pytest.raises(ValueError):
+        RoleAssessment(
+            target=target,
+            role=InfrastructureRole.ORIGIN_CANDIDATE,
+            eligible=False,
+            matched_signals=(RoleSignal.BUSINESS_API,),
+            matched_evidence=(second, first),
+        )
