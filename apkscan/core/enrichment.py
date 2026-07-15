@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
@@ -248,3 +249,92 @@ def _run_enrichment(
             list(pool.map(_enrich_one_two_phase, targets))
 
     return list(stats.values())
+
+
+def _provider_name(enricher: BaseEnricher) -> str:
+    return getattr(enricher, "name", "") or type(enricher).__name__
+
+
+def _provider_configured(enricher: BaseEnricher) -> bool:
+    raw_required = getattr(enricher, "required_env", ())
+    if not isinstance(raw_required, (list, tuple)):
+        return True
+    required = tuple(str(name) for name in raw_required if str(name))
+    return not required or any((os.environ.get(name) or "").strip() for name in required)
+
+
+def _source_status_from_payload(payload: object) -> tuple[str, str | None]:
+    if not isinstance(payload, dict):
+        return "failed", "missing_result"
+    marker = payload.pop("_source_status", None)
+    if marker in {"hit", "no_record", "failed", "skipped", "disabled"}:
+        error_type = payload.pop("_error_type", None)
+        return str(marker), str(error_type) if error_type else None
+    error = str(payload.get("error") or "")
+    note = str(payload.get("note") or "")
+    folded = f"{error} {note}".lower()
+    if error:
+        if any(token in folded for token in ("无记录", "无结果", "not found", "no record", "404")):
+            return "no_record", None
+        return "failed", error.split(":", 1)[0][:80] or "provider_error"
+    if not any(value not in (None, "", [], {}) for value in payload.values()):
+        return "no_record", None
+    return "hit", None
+
+
+def enrich_selected_targets(
+    endpoints: list[Endpoint],
+    enrichers: list[BaseEnricher],
+    *,
+    mode: str = ANALYSIS_MODE_PASSIVE,
+    include_case_close: bool = False,
+) -> list[dict]:
+    """Enrich an explicit bounded target set and record per-target source outcomes.
+
+    Ordinary analysis calls this with ``include_case_close=False`` so key-gated measurement
+    providers cannot multiply quota usage across every static endpoint. Case closure opts in.
+    """
+    selected = [
+        enricher
+        for enricher in enrichers
+        if include_case_close or not getattr(enricher, "case_close_only", False)
+    ]
+    if not selected:
+        return []
+    if not include_case_close:
+        return _run_enrichment(endpoints, selected, gate=_mode_gate(mode))
+
+    allowed_by_mode = _mode_gate(mode)
+
+    def gate(endpoint: Endpoint, enricher: BaseEnricher) -> bool:
+        provider = _provider_name(enricher)
+        source_status = endpoint.enrichment.setdefault("source_status", {})
+        if not isinstance(source_status, dict):
+            source_status = {}
+            endpoint.enrichment["source_status"] = source_status
+        if not allowed_by_mode(endpoint, enricher):
+            source_status[provider] = {"status": "skipped", "reason": "active_mode_blocked"}
+            return False
+        if not _provider_configured(enricher):
+            source_status[provider] = {"status": "disabled", "reason": "credential_not_configured"}
+            return False
+        return True
+
+    stats = _enrich_endpoints(endpoints, selected, gate=gate)
+    for endpoint in endpoints:
+        source_status = endpoint.enrichment.setdefault("source_status", {})
+        if not isinstance(source_status, dict):
+            source_status = {}
+            endpoint.enrichment["source_status"] = source_status
+        for enricher in selected:
+            if endpoint.kind not in (getattr(enricher, "applies_to", []) or []):
+                continue
+            provider = _provider_name(enricher)
+            if provider in source_status:
+                continue
+            status, error_type = _source_status_from_payload(endpoint.enrichment.get(provider))
+            entry: dict[str, str] = {"status": status}
+            if error_type:
+                entry["error_type"] = error_type
+            source_status[provider] = entry
+    return sorted(stats, key=lambda item: str(item.get("provider", "")))

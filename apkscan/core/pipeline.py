@@ -47,8 +47,9 @@ from apkscan.core.enrichment import (
     ENRICH_MAX_WORKERS,  # noqa: F401 — re-export：保 pipeline.ENRICH_MAX_WORKERS 测试访问路径
     _enrich_endpoints,  # noqa: F401 — re-export：保 pipeline._enrich_endpoints 测试访问路径
     _enrichment_targets,
-    _mode_gate,
-    _run_enrichment,
+    _mode_gate,  # noqa: F401 - compatibility re-export
+    _run_enrichment,  # noqa: F401 - compatibility re-export
+    enrich_selected_targets,
 )
 
 # 分析器进程池并行 + 内存封顶决策已物理拆到 apkscan/core/parallel.py（纯搬移）；_stage_run_analyzers
@@ -265,7 +266,11 @@ def _stage_enrich(state: _PipelineState) -> None:
         return
 
     targets = _enrichment_targets(state.endpoints)
-    discovered = discover_enrichers()
+    discovered = [
+        enricher
+        for enricher in discover_enrichers()
+        if not getattr(enricher, "case_close_only", False)
+    ]
     mode = getattr(config, "mode", ANALYSIS_MODE_PASSIVE)
     active_enrichers = [e for e in discovered if getattr(e, "active", False)]
     if mode == ANALYSIS_MODE_AUTHORIZED_ACTIVE:
@@ -287,7 +292,12 @@ def _stage_enrich(state: _PipelineState) -> None:
             len(names),
             names,
         )
-    state.enricher_status = _run_enrichment(targets, discovered, gate=_mode_gate(mode))
+    state.enricher_status = enrich_selected_targets(
+        targets,
+        discovered,
+        mode=mode,
+        include_case_close=False,
+    )
     meta["enriched_target_count"] = len(targets)
     net_eps = sum(1 for ep in state.endpoints if ep.kind in ("domain", "ip"))
     logger.info(
