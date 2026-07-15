@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from apkscan.core import closure as closure_module
 from apkscan.core.closure import (
     CLOSURE_COMPLETE,
     CLOSURE_FAILED,
@@ -183,6 +184,160 @@ def test_assemble_target_closure_builds_all_investigation_layers() -> None:
     assert target["status"] == CLOSURE_COMPLETE
 
 
+def test_registration_without_country_or_handle_stays_partial() -> None:
+    endpoint = _complete_endpoint()
+    endpoint.enrichment["ip_rdap"].pop("country")
+    endpoint.enrichment["ip_rdap"].pop("handle")
+
+    target = assemble_target_closure(endpoint)
+
+    assert target["layers"]["resource_registration"]["status"] == CLOSURE_PARTIAL
+    assert target["status"] == CLOSURE_PARTIAL
+
+
+def test_registration_does_not_treat_bare_start_address_as_cidr() -> None:
+    endpoint = _complete_endpoint()
+    endpoint.enrichment["ip_rdap"]["cidr"] = "198.51.100.0"
+
+    target = assemble_target_closure(endpoint)
+
+    assert target["layers"]["resource_registration"]["status"] == CLOSURE_PARTIAL
+    assert target["status"] == CLOSURE_PARTIAL
+
+
+def test_bgp_without_upstream_evidence_stays_partial() -> None:
+    endpoint = _complete_endpoint()
+    endpoint.enrichment["ripestat_bgp"].pop("upstreams")
+
+    target = assemble_target_closure(endpoint)
+
+    assert target["layers"]["bgp_announcement"]["status"] == CLOSURE_PARTIAL
+    assert target["status"] == CLOSURE_PARTIAL
+
+
+def test_parent_asn_and_bare_port_cannot_complete_hosting_or_request_layers() -> None:
+    endpoint = _complete_endpoint()
+    endpoint.enrichment["shodan"] = {
+        "org": "Example Hosting Ltd",
+        "ports": [443],
+        "services": [{"port": 443}],
+    }
+    endpoint.enrichment["attribution"] = {
+        "hosting_provider": {
+            "name": "Example Hosting Ltd",
+            "matched_signals": ["origin_asn_category"],
+        }
+    }
+
+    target = assemble_target_closure(endpoint)
+
+    assert target["layers"]["hosting_delivery"]["status"] == CLOSURE_PARTIAL
+    assert target["layers"]["request_target"]["status"] == CLOSURE_PARTIAL
+    assert target["status"] == CLOSURE_PARTIAL
+
+
+def test_fofa_product_evidence_can_complete_hosting_without_shodan() -> None:
+    endpoint = _complete_endpoint()
+    endpoint.enrichment.pop("shodan")
+    endpoint.enrichment["fofa"] = {
+        "records": [
+            [
+                "https://api.example.test",
+                "198.51.100.10",
+                443,
+                "https",
+                "Example API",
+                "nginx",
+                "US",
+                "California",
+                "Los Angeles",
+                64500,
+                "FOFA Hosting Ltd",
+            ]
+        ],
+        "count": 1,
+        "source": "fofa",
+    }
+
+    target = assemble_target_closure(endpoint)
+
+    hosting = target["layers"]["hosting_delivery"]
+    assert hosting["status"] == CLOSURE_COMPLETE
+    assert hosting["evidence"]["provider"] == "FOFA Hosting Ltd"
+    assert hosting["evidence"]["services"][0]["server"] == "nginx"
+    assert target["layers"]["request_target"]["status"] == CLOSURE_COMPLETE
+    assert target["status"] == CLOSURE_COMPLETE
+
+
+def test_unconfirmed_origin_candidate_cannot_satisfy_cdn_origin_gate() -> None:
+    endpoint = _complete_endpoint()
+    endpoint.enrichment["attribution"] = {
+        "edge_provider": {"name": "Example Edge"},
+        "hosting_provider": {
+            "name": "Example Hosting Ltd",
+            "matched_signals": ["shodan_org"],
+        },
+    }
+    endpoint.enrichment["origin_candidates"] = ["203.0.113.20"]
+
+    target = assemble_target_closure(endpoint)
+
+    assert target["origin"]["status"] == "missing"
+    assert target["layers"]["request_target"]["evidence"]["provider"] == "Example Edge"
+    assert "origin configuration" in target["layers"]["request_target"]["evidence"][
+        "evidence_fields"
+    ]
+    assert "origin" in target["gaps"]
+    assert target["status"] == CLOSURE_PARTIAL
+
+
+def test_confirmed_origin_without_origin_provider_keeps_request_partial() -> None:
+    endpoint = _complete_endpoint()
+    endpoint.enrichment["attribution"] = {
+        "edge_provider": {"name": "Example Edge"},
+        "hosting_provider": {
+            "name": "Example Hosting Ltd",
+            "matched_signals": ["shodan_org"],
+        },
+    }
+    endpoint.enrichment["origin"] = {
+        "ip": "203.0.113.20",
+        "confirmed": True,
+        "source": "passive_dns",
+    }
+
+    target = assemble_target_closure(endpoint)
+
+    assert target["origin"]["status"] == CLOSURE_COMPLETE
+    assert target["layers"]["request_target"]["status"] == CLOSURE_PARTIAL
+    assert target["status"] == CLOSURE_PARTIAL
+
+
+def test_confirmed_origin_uses_origin_provider_as_request_target() -> None:
+    endpoint = _complete_endpoint()
+    endpoint.enrichment["attribution"] = {
+        "edge_provider": {"name": "Example Edge"},
+        "hosting_provider": {
+            "name": "Example Hosting Ltd",
+            "matched_signals": ["shodan_org"],
+        },
+    }
+    endpoint.enrichment["origin"] = {
+        "ip": "203.0.113.20",
+        "confirmed": True,
+        "source": "passive_dns",
+        "provider": "Origin Host Ltd",
+    }
+
+    target = assemble_target_closure(endpoint)
+
+    request = target["layers"]["request_target"]
+    assert request["status"] == CLOSURE_COMPLETE
+    assert request["evidence"]["provider"] == "Origin Host Ltd"
+    assert request["evidence"]["origin_ip"] == "203.0.113.20"
+    assert target["status"] == CLOSURE_COMPLETE
+
+
 def test_cdn_without_origin_cannot_be_complete() -> None:
     report = _report(_complete_endpoint())
     target = assemble_target_closure(report.endpoints[0])
@@ -264,6 +419,7 @@ def _full_ip_enrichers() -> list[_FakeEnricher]:
                 "origin_asn": 64500,
                 "asn_holder": "Example Network Ltd",
                 "prefix": "198.51.100.0/24",
+                "upstreams": [64501],
             },
         ),
         _FakeEnricher(
@@ -336,7 +492,13 @@ def test_close_report_is_idempotent_and_preserves_analyst_notes() -> None:
     assert report.leads[0].evidence_to_obtain == first_evidence
 
 
-def test_domain_target_enriches_each_resolved_ip() -> None:
+def test_domain_target_enriches_each_resolved_ip(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(
+        closure_module,
+        "_normalized_public_ip",
+        lambda value: str(value).strip(),
+        raising=False,
+    )
     domain = _endpoint(
         "api.example.test",
         kind="domain",
@@ -362,6 +524,94 @@ def test_domain_target_enriches_each_resolved_ip() -> None:
     assert all(enricher.calls == ["198.51.100.10"] for enricher in ip_enrichers)
 
 
+def test_domain_resolved_ip_enrichment_is_bounded(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(
+        closure_module,
+        "_normalized_public_ip",
+        lambda value: str(value).strip(),
+        raising=False,
+    )
+    domain = _endpoint(
+        "api.example.test",
+        kind="domain",
+        runtime=True,
+        target=True,
+        payload=True,
+    )
+    report = _report(domain)
+    addresses = [f"198.51.100.{value}" for value in range(1, 13)]
+    dns = _FakeEnricher("dns", ["domain"], {"ips": addresses, "cname": []})
+    ip_enricher = _FakeEnricher("ip_rdap", ["ip"], {"netname": "EXAMPLE-NET"})
+
+    closure = close_report(
+        report,
+        ClosureConfig(online=True, require_dynamic=False),
+        enrichers=[dns, ip_enricher],
+    )
+
+    assert len(ip_enricher.calls) == 8
+    assert len(closure["targets"][0]["resolved_ips"]) == 8
+    assert closure["targets"][0]["resolved_ip_selection"]["truncated"] == 4
+    assert "resolved_ip_limit" in closure["targets"][0]["gaps"]
+    assert closure["status"] == CLOSURE_PARTIAL
+
+
+def test_domain_resolution_excludes_nonpublic_and_invalid_addresses() -> None:
+    domain = _endpoint(
+        "api.example.test",
+        kind="domain",
+        runtime=True,
+        target=True,
+        payload=True,
+        enrichment={"dns": {"ips": ["10.0.0.2", "not-an-ip"]}},
+    )
+    report = _report(domain)
+    enricher = _FakeEnricher("ip_rdap", ["ip"], {"netname": "MUST-NOT-RUN"})
+
+    close_report(
+        report,
+        ClosureConfig(online=True, require_dynamic=False),
+        enrichers=[enricher],
+    )
+
+    assert enricher.calls == []
+    assert domain.enrichment["resolved_ip_selection"]["excluded_nonpublic"] == 2
+
+
+def test_domain_resolution_excludes_known_intercept_address(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(
+        closure_module,
+        "_normalized_public_ip",
+        lambda value: str(value).strip(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        closure_module,
+        "_is_known_intercept_ip",
+        lambda value: value == "198.51.100.20",
+        raising=False,
+    )
+    domain = _endpoint(
+        "api.example.test",
+        kind="domain",
+        runtime=True,
+        target=True,
+        payload=True,
+        enrichment={"dns": {"ips": ["198.51.100.10", "198.51.100.20"]}},
+    )
+    report = _report(domain)
+    enricher = _FakeEnricher("ip_rdap", ["ip"], {"netname": "EXAMPLE-NET"})
+
+    close_report(
+        report,
+        ClosureConfig(online=True, require_dynamic=False),
+        enrichers=[enricher],
+    )
+
+    assert enricher.calls == ["198.51.100.10"]
+    assert domain.enrichment["resolved_ip_selection"]["excluded_intercept"] == 1
+
+
 def test_close_report_reuses_completed_source_outcomes_without_refresh() -> None:
     endpoint = _complete_endpoint()
     report = _report(endpoint)
@@ -375,6 +625,83 @@ def test_close_report_reuses_completed_source_outcomes_without_refresh() -> None
 
     assert enricher.calls == []
     assert endpoint.enrichment["shodan"]["org"] == "Example Hosting Ltd"
+
+
+def test_close_report_refreshes_completed_source_when_requested() -> None:
+    endpoint = _complete_endpoint()
+    report = _report(endpoint)
+    enricher = _FakeEnricher("shodan", ["ip"], {"org": "Refreshed Provider"})
+
+    close_report(
+        report,
+        ClosureConfig(online=True, refresh=True, require_dynamic=False),
+        enrichers=[enricher],
+    )
+
+    assert enricher.calls == ["198.51.100.10"]
+    assert endpoint.enrichment["shodan"]["org"] == "Refreshed Provider"
+
+
+def test_close_report_retries_only_nonterminal_sources_without_refresh() -> None:
+    endpoint = _complete_endpoint()
+    endpoint.enrichment["source_status"]["retry_fake"] = {
+        "status": "failed",
+        "error_type": "timeout",
+    }
+    report = _report(endpoint)
+    completed = _FakeEnricher("shodan", ["ip"], {"org": "MUST-NOT-REPLACE"})
+    retry = _FakeEnricher("retry_fake", ["ip"], {"record": "found"})
+
+    close_report(
+        report,
+        ClosureConfig(online=True, refresh=False, require_dynamic=False),
+        enrichers=[completed, retry],
+    )
+
+    assert completed.calls == []
+    assert retry.calls == ["198.51.100.10"]
+    assert endpoint.enrichment["shodan"]["org"] == "Example Hosting Ltd"
+    assert endpoint.enrichment["source_status"]["retry_fake"]["status"] == "hit"
+
+
+def test_close_report_retries_disabled_source_after_credential_is_configured(
+    monkeypatch,
+) -> None:
+    endpoint = _complete_endpoint()
+    endpoint.enrichment["source_status"] = {
+        "configured_fake": {"status": "disabled", "reason": "credential_not_configured"}
+    }
+    report = _report(endpoint)
+    enricher = _FakeEnricher("configured_fake", ["ip"], {"record": "found"})
+    enricher.required_env = ("FXAPK_SYNTHETIC_CASE_KEY",)
+    monkeypatch.setenv("FXAPK_SYNTHETIC_CASE_KEY", "configured-for-test")
+
+    close_report(
+        report,
+        ClosureConfig(online=True, refresh=False, require_dynamic=False),
+        enrichers=[enricher],
+    )
+
+    assert enricher.calls == ["198.51.100.10"]
+    assert endpoint.enrichment["source_status"]["configured_fake"]["status"] == "hit"
+
+
+def test_close_report_retries_source_that_was_skipped_offline() -> None:
+    endpoint = _complete_endpoint()
+    endpoint.enrichment["source_status"] = {
+        "configured_fake": {"status": "skipped", "reason": "offline"}
+    }
+    report = _report(endpoint)
+    enricher = _FakeEnricher("configured_fake", ["ip"], {"record": "found"})
+
+    close_report(
+        report,
+        ClosureConfig(online=True, refresh=False, require_dynamic=False),
+        enrichers=[enricher],
+    )
+
+    assert enricher.calls == ["198.51.100.10"]
+    assert endpoint.enrichment["source_status"]["configured_fake"]["status"] == "hit"
 
 
 def test_offline_close_does_not_enrich_previously_resolved_ip() -> None:
@@ -396,3 +723,41 @@ def test_offline_close_does_not_enrich_previously_resolved_ip() -> None:
     )
 
     assert enricher.calls == []
+
+
+def test_offline_close_marks_configured_source_without_cache_as_incomplete() -> None:
+    endpoint = _complete_endpoint()
+    report = _report(endpoint)
+    enricher = _FakeEnricher("configured_missing", ["ip"], {"record": "MUST-NOT-RUN"})
+
+    closure = close_report(
+        report,
+        ClosureConfig(online=False, require_dynamic=False),
+        enrichers=[enricher],
+    )
+
+    source = closure["targets"][0]["source_status"]["configured_missing"]
+    assert enricher.calls == []
+    assert source == {"status": "skipped", "reason": "offline"}
+    assert closure["status"] == CLOSURE_PARTIAL
+
+
+def test_unconfigured_source_is_disabled_without_blocking_offline_closure(
+    monkeypatch,
+) -> None:
+    endpoint = _complete_endpoint()
+    report = _report(endpoint)
+    enricher = _FakeEnricher("unconfigured_optional", ["ip"], {"record": "MUST-NOT-RUN"})
+    enricher.required_env = ("FXAPK_SYNTHETIC_OPTIONAL_KEY",)
+    monkeypatch.delenv("FXAPK_SYNTHETIC_OPTIONAL_KEY", raising=False)
+
+    closure = close_report(
+        report,
+        ClosureConfig(online=False, require_dynamic=False),
+        enrichers=[enricher],
+    )
+
+    source = closure["targets"][0]["source_status"]["unconfigured_optional"]
+    assert enricher.calls == []
+    assert source == {"status": "disabled", "reason": "credential_not_configured"}
+    assert closure["status"] == CLOSURE_COMPLETE

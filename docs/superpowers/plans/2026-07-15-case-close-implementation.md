@@ -74,7 +74,7 @@ def test_report_round_trip_preserves_health_and_closure(tmp_path):
 
 - [ ] **Step 2: Run the focused test and confirm it fails**
 
-Run: `python -m pytest -q tests/test_report_io.py --basetemp E:/fxapk-testtmp/case-close-report-io-red`
+Run: `python -m pytest -q tests/test_report_io.py --basetemp .pytest_cache/tmp/case-close-report-io-red`
 
 Expected: collection fails because `apkscan.core.report_io` does not exist.
 
@@ -115,7 +115,7 @@ Move the existing `_evidence_from_dict()` and `_report_from_json_dict()` reconst
 
 - [ ] **Step 4: Run focused and existing rerender tests**
 
-Run: `python -m pytest -q tests/test_report_io.py tests/test_cli_dynamic.py tests/test_report.py --basetemp E:/fxapk-testtmp/case-close-report-io-green`
+Run: `python -m pytest -q tests/test_report_io.py tests/test_cli_dynamic.py tests/test_report.py --basetemp .pytest_cache/tmp/case-close-report-io-green`
 
 Expected: all selected tests pass.
 
@@ -165,7 +165,7 @@ def test_cdn_without_origin_cannot_be_complete():
 
 - [ ] **Step 2: Run tests and confirm missing-module failure**
 
-Run: `python -m pytest -q tests/test_closure.py --basetemp E:/fxapk-testtmp/case-close-model-red`
+Run: `python -m pytest -q tests/test_closure.py --basetemp .pytest_cache/tmp/case-close-model-red`
 
 Expected: collection fails because `apkscan.core.closure` does not exist.
 
@@ -198,7 +198,7 @@ Implement target ranking from runtime evidence, payload/SNI hints, then static C
 
 - [ ] **Step 4: Run pure-function tests**
 
-Run: `python -m pytest -q tests/test_closure.py --basetemp E:/fxapk-testtmp/case-close-model-green`
+Run: `python -m pytest -q tests/test_closure.py --basetemp .pytest_cache/tmp/case-close-model-green`
 
 Expected: all tests pass.
 
@@ -248,7 +248,7 @@ def test_adapter_failure_never_contains_secret(monkeypatch):
 
 - [ ] **Step 2: Run focused tests and confirm failures**
 
-Run: `python -m pytest -q tests/test_multisource.py tests/test_two_phase_enrichment.py --basetemp E:/fxapk-testtmp/case-close-multisource-red`
+Run: `python -m pytest -q tests/test_multisource.py tests/test_two_phase_enrichment.py --basetemp .pytest_cache/tmp/case-close-multisource-red`
 
 Expected: imports/signatures fail before production changes.
 
@@ -275,7 +275,7 @@ Implement generic passive JSON lookup behavior with `requests.Session`, bounded 
 
 - [ ] **Step 4: Run focused enrichment tests**
 
-Run: `python -m pytest -q tests/test_multisource.py tests/test_two_phase_enrichment.py tests/test_enrich_concurrency.py --basetemp E:/fxapk-testtmp/case-close-multisource-green`
+Run: `python -m pytest -q tests/test_multisource.py tests/test_two_phase_enrichment.py tests/test_enrich_concurrency.py --basetemp .pytest_cache/tmp/case-close-multisource-green`
 
 Expected: all selected tests pass and ordinary enrichment does not call case-close-only providers.
 
@@ -323,7 +323,7 @@ def test_close_report_is_idempotent():
 
 - [ ] **Step 2: Run focused tests and verify they fail**
 
-Run: `python -m pytest -q tests/test_closure.py tests/test_attribution.py --basetemp E:/fxapk-testtmp/case-close-orchestrator-red`
+Run: `python -m pytest -q tests/test_closure.py tests/test_attribution.py --basetemp .pytest_cache/tmp/case-close-orchestrator-red`
 
 Expected: five-layer evidence and `close_report` assertions fail.
 
@@ -360,7 +360,7 @@ The layer assembler must not infer the actual app operator from an ASN or hostin
 
 - [ ] **Step 4: Run closure and attribution tests**
 
-Run: `python -m pytest -q tests/test_closure.py tests/test_attribution.py tests/test_enricher_ip_rdap.py --basetemp E:/fxapk-testtmp/case-close-orchestrator-green`
+Run: `python -m pytest -q tests/test_closure.py tests/test_attribution.py tests/test_enricher_ip_rdap.py --basetemp .pytest_cache/tmp/case-close-orchestrator-green`
 
 Expected: all selected tests pass.
 
@@ -421,7 +421,7 @@ def test_html_renders_closure_status_and_gaps(tmp_path):
 
 - [ ] **Step 2: Run tests and confirm command is absent**
 
-Run: `python -m pytest -q tests/test_case_cli.py tests/test_digest.py tests/test_report.py --basetemp E:/fxapk-testtmp/case-close-cli-red`
+Run: `python -m pytest -q tests/test_case_cli.py tests/test_digest.py tests/test_report.py --basetemp .pytest_cache/tmp/case-close-cli-red`
 
 Expected: `case` command/import assertions fail.
 
@@ -465,7 +465,7 @@ Add a compact HTML section that iterates only normalized closure fields and neve
 
 - [ ] **Step 4: Run CLI and digest tests**
 
-Run: `python -m pytest -q tests/test_case_cli.py tests/test_digest.py tests/test_report.py tests/test_cli_dynamic.py --basetemp E:/fxapk-testtmp/case-close-cli-green`
+Run: `python -m pytest -q tests/test_case_cli.py tests/test_digest.py tests/test_report.py tests/test_cli_dynamic.py --basetemp .pytest_cache/tmp/case-close-cli-green`
 
 Expected: all selected tests pass.
 
@@ -512,7 +512,7 @@ def test_auto_returns_partial_when_closure_is_partial(monkeypatch, tmp_path):
 
 - [ ] **Step 2: Run focused integration tests and verify failures**
 
-Run: `python -m pytest -q tests/test_capture.py tests/test_merge.py tests/test_auto.py tests/test_cli_dynamic.py --basetemp E:/fxapk-testtmp/case-close-auto-red`
+Run: `python -m pytest -q tests/test_capture.py tests/test_merge.py tests/test_auto.py tests/test_cli_dynamic.py --basetemp .pytest_cache/tmp/case-close-auto-red`
 
 Expected: quality fields, merge parameter, or top-level auto status assertions fail.
 
@@ -535,7 +535,7 @@ Keep existing `capture.run()` `done` semantics for command compatibility. Feed c
 
 - [ ] **Step 4: Run dynamic integration tests**
 
-Run: `python -m pytest -q tests/test_capture.py tests/test_merge.py tests/test_auto.py tests/test_cli_dynamic.py --basetemp E:/fxapk-testtmp/case-close-auto-green`
+Run: `python -m pytest -q tests/test_capture.py tests/test_merge.py tests/test_auto.py tests/test_cli_dynamic.py --basetemp .pytest_cache/tmp/case-close-auto-green`
 
 Expected: all selected tests pass, including the pre-existing quiet-app capture contract.
 
@@ -568,7 +568,7 @@ Describe exit codes `0/5/6`, source statuses, five-layer names, passive-only def
 
 - [ ] **Step 2: Run focused regression tests**
 
-Run: `python -m pytest -q -m "not slow" --basetemp E:/fxapk-testtmp/case-close-regression`
+Run: `python -m pytest -q -m "not slow" --basetemp .pytest_cache/tmp/case-close-regression`
 
 Expected: all non-slow tests pass.
 
@@ -577,7 +577,7 @@ Expected: all non-slow tests pass.
 ```text
 python -m ruff check apkscan tests
 python -m pyright apkscan
-python -m pytest -q --basetemp E:/fxapk-testtmp/case-close-full
+python -m pytest -q --basetemp .pytest_cache/tmp/case-close-full
 ```
 
 Expected: ruff and pyright exit `0`; pytest passes with only explicitly skipped environment-dependent tests.

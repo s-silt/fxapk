@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ipaddress
+import os
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
@@ -20,6 +22,7 @@ CLOSURE_PARTIAL = "partial"
 CLOSURE_FAILED = "failed"
 
 SOURCE_STATUSES = frozenset({"hit", "no_record", "failed", "skipped", "disabled"})
+_MAX_RESOLVED_IPS_PER_TARGET = 8
 LAYER_NAMES = (
     "runtime_evidence",
     "resource_registration",
@@ -165,15 +168,34 @@ def _layer(status: str, evidence: Mapping[str, object] | None = None, *, reason:
 def _registration_layer(enrichment: Mapping[str, object]) -> dict[str, object]:
     rdap = _mapping(enrichment.get("ip_rdap"))
     holder = rdap.get("org") or rdap.get("netname")
-    network = rdap.get("cidr") or rdap.get("start_address") or rdap.get("startAddress")
+    start_address = rdap.get("start_address") or rdap.get("startAddress")
+    end_address = rdap.get("end_address") or rdap.get("endAddress")
+    raw_cidr = rdap.get("cidr")
+    if isinstance(raw_cidr, str):
+        valid_cidr = raw_cidr if "/" in raw_cidr else None
+    elif isinstance(raw_cidr, list):
+        valid_cidr = [value for value in raw_cidr if isinstance(value, str) and "/" in value]
+    else:
+        valid_cidr = None
+    network = valid_cidr or (start_address and end_address)
+    administrative_ref = rdap.get("handle") or rdap.get("remarks")
     evidence = {
-        key: rdap.get(key)
-        for key in ("netname", "org", "country", "handle", "cidr", "start_address", "end_address")
-        if rdap.get(key) not in (None, "", [])
+        key: value
+        for key, value in {
+            "netname": rdap.get("netname"),
+            "org": rdap.get("org"),
+            "country": rdap.get("country"),
+            "handle": rdap.get("handle"),
+            "remarks": rdap.get("remarks"),
+            "cidr": rdap.get("cidr"),
+            "start_address": start_address,
+            "end_address": end_address,
+        }.items()
+        if value not in (None, "", [])
     }
-    if holder and network:
+    if holder and network and rdap.get("country") and administrative_ref:
         return _layer(CLOSURE_COMPLETE, evidence)
-    if holder or network:
+    if evidence:
         return _layer(CLOSURE_PARTIAL, evidence, reason="IP registration record is incomplete")
     return _layer(CLOSURE_FAILED, reason="IP registration record is missing")
 
@@ -185,7 +207,12 @@ def _bgp_layer(enrichment: Mapping[str, object]) -> dict[str, object]:
         for key in ("origin_asn", "asn_holder", "prefix", "upstreams")
         if bgp.get(key) not in (None, "", [])
     }
-    required = (bgp.get("origin_asn"), bgp.get("asn_holder"), bgp.get("prefix"))
+    required = (
+        bgp.get("origin_asn"),
+        bgp.get("asn_holder"),
+        bgp.get("prefix"),
+        bgp.get("upstreams"),
+    )
     if all(required):
         return _layer(CLOSURE_COMPLETE, evidence)
     if any(required):
@@ -214,10 +241,150 @@ def _origin_status(enrichment: Mapping[str, object]) -> dict[str, object]:
     if not edge:
         return {"required": False, "status": "not_applicable"}
     origin = _mapping(enrichment.get("origin"))
-    candidates = origin.get("ips") or enrichment.get("origin_candidates")
-    if origin.get("ip") or (isinstance(candidates, list) and candidates):
+    origin_ips = origin.get("ips")
+    has_origin = bool(origin.get("ip")) or (isinstance(origin_ips, list) and bool(origin_ips))
+    confirmed = origin.get("confirmed") is True or origin.get("status") == "confirmed"
+    if has_origin and confirmed:
         return {"required": True, "status": CLOSURE_COMPLETE, "evidence": origin}
-    return {"required": True, "status": "missing", "edge_provider": edge}
+    candidates = origin.get("candidates") or enrichment.get("origin_candidates")
+    missing: dict[str, object] = {
+        "required": True,
+        "status": "missing",
+        "edge_provider": edge,
+    }
+    if has_origin or (isinstance(candidates, list) and candidates):
+        missing["evidence"] = {
+            "candidates": origin_ips or candidates or [origin.get("ip")],
+            "confirmation_required": True,
+        }
+    return missing
+
+
+def _passive_hosting_evidence(
+    enrichment: Mapping[str, object],
+) -> tuple[list[dict[str, str]], list[dict[str, object]], list[dict[str, object]]]:
+    providers: list[dict[str, str]] = []
+    services: list[dict[str, object]] = []
+    locations: list[dict[str, object]] = []
+
+    def add_provider(source: str, value: object) -> None:
+        if not isinstance(value, str) or not value.strip():
+            return
+        entry = {"source": source, "name": value.strip()}
+        if entry not in providers:
+            providers.append(entry)
+
+    def add_service(source: str, *records: Mapping[str, object]) -> None:
+        fields = (
+            "port",
+            "protocol",
+            "transport",
+            "service_name",
+            "product",
+            "version",
+            "server",
+            "title",
+            "web_title",
+            "http_title",
+            "module",
+            "hostname",
+            "hostnames",
+        )
+        summary: dict[str, object] = {"source": source}
+        for record in records:
+            for field in fields:
+                value = record.get(field)
+                if field not in summary and value not in (None, "", [], {}):
+                    summary[field] = value
+        if len(summary) > 1 and summary not in services:
+            services.append(summary)
+
+    def add_location(source: str, record: Mapping[str, object]) -> None:
+        summary = {
+            key: record.get(key)
+            for key in ("country", "country_code", "region", "province", "city")
+            if record.get(key) not in (None, "", [], {})
+        }
+        if summary:
+            entry: dict[str, object] = {"source": source, **summary}
+            if entry not in locations:
+                locations.append(entry)
+
+    fofa = _mapping(enrichment.get("fofa"))
+    raw_fofa_records = fofa.get("records")
+    if isinstance(raw_fofa_records, list):
+        for row in raw_fofa_records[:20]:
+            if not isinstance(row, list):
+                continue
+            add_provider("fofa", row[10] if len(row) > 10 else None)
+            add_service(
+                "fofa",
+                {
+                    "port": row[2] if len(row) > 2 else None,
+                    "protocol": row[3] if len(row) > 3 else None,
+                    "title": row[4] if len(row) > 4 else None,
+                    "server": row[5] if len(row) > 5 else None,
+                },
+            )
+            add_location(
+                "fofa",
+                {
+                    "country": row[6] if len(row) > 6 else None,
+                    "region": row[7] if len(row) > 7 else None,
+                    "city": row[8] if len(row) > 8 else None,
+                },
+            )
+
+    for source in ("quake", "hunter", "zoomeye", "urlscan"):
+        payload = _mapping(enrichment.get(source))
+        raw_records = payload.get("records")
+        if not isinstance(raw_records, list):
+            continue
+        for raw_record in raw_records[:20]:
+            record = _mapping(raw_record)
+            if not record:
+                continue
+            autonomous_system = _mapping(record.get("autonomous_system"))
+            add_provider(
+                source,
+                record.get("as_organization")
+                or record.get("as_org")
+                or record.get("organization")
+                or record.get("org")
+                or record.get("isp")
+                or record.get("asnname")
+                or autonomous_system.get("organization")
+                or autonomous_system.get("org")
+                or autonomous_system.get("name"),
+            )
+            add_service(
+                source,
+                record,
+                _mapping(record.get("service")),
+                _mapping(record.get("portinfo")),
+            )
+            add_location(source, record)
+            add_location(source, _mapping(record.get("location") or record.get("geoinfo")))
+
+    censys = _mapping(enrichment.get("censys"))
+    censys_asn = _mapping(censys.get("autonomous_system"))
+    add_provider(
+        "censys",
+        censys_asn.get("organization") or censys_asn.get("org") or censys_asn.get("name"),
+    )
+    raw_censys_services = censys.get("services")
+    if isinstance(raw_censys_services, list):
+        for raw_service in raw_censys_services[:20]:
+            service = _mapping(raw_service)
+            if service:
+                add_service("censys", service)
+    add_location("censys", _mapping(censys.get("location")))
+
+    virustotal = _mapping(enrichment.get("virustotal"))
+    add_provider("virustotal", virustotal.get("as_owner"))
+    if virustotal.get("country") not in (None, ""):
+        add_location("virustotal", {"country": virustotal.get("country")})
+    return providers, services, locations
 
 
 def _hosting_layer(enrichment: Mapping[str, object]) -> dict[str, object]:
@@ -225,29 +392,79 @@ def _hosting_layer(enrichment: Mapping[str, object]) -> dict[str, object]:
     asn = _mapping(enrichment.get("asn"))
     attribution = _attribution_for_endpoint(enrichment)
     hosting = _mapping(attribution.get("hosting_provider"))
-    provider = shodan.get("org") or hosting.get("name") or asn.get("org") or asn.get("isp")
-    services = shodan.get("services") if isinstance(shodan.get("services"), list) else []
-    ports = shodan.get("ports") if isinstance(shodan.get("ports"), list) else []
+    passive_providers, passive_services, passive_locations = _passive_hosting_evidence(enrichment)
+    passive_provider = passive_providers[0] if passive_providers else {}
+    provider = (
+        shodan.get("org")
+        or passive_provider.get("name")
+        or hosting.get("name")
+        or asn.get("org")
+        or asn.get("isp")
+    )
+    provider_source = (
+        "shodan"
+        if shodan.get("org")
+        else passive_provider.get("source")
+        or hosting.get("source")
+        or "asn"
+    )
+    raw_services = shodan.get("services")
+    services = list(raw_services) if isinstance(raw_services, list) else []
+    services.extend(passive_services)
+    raw_ports = shodan.get("ports")
+    ports = raw_ports if isinstance(raw_ports, list) else []
+    matched_signals = (
+        [str(value) for value in hosting.get("matched_signals", [])]
+        if isinstance(hosting.get("matched_signals"), list)
+        else []
+    )
+    corroborating_signals = [value for value in matched_signals if value != "origin_asn_category"]
+    service_detail_fields = {
+        "product",
+        "version",
+        "server",
+        "title",
+        "web_title",
+        "http_title",
+        "module",
+    }
+    detailed_service = any(
+        isinstance(service, Mapping)
+        and any(service.get(field) not in (None, "", [], {}) for field in service_detail_fields)
+        for service in services
+    )
+    delivery_detail = any(
+        hosting.get(field) not in (None, "", [], {})
+        for field in ("facility", "datacenter", "region", "reassignment", "instance")
+    )
     evidence = {
         "provider": provider,
+        "provider_source": provider_source,
+        "provider_candidates": passive_providers,
         "asn": asn.get("asn") or shodan.get("asn"),
         "country": asn.get("country") or shodan.get("country"),
         "ports": ports,
         "services": services,
+        "locations": passive_locations,
+        "matched_signals": matched_signals,
     }
     evidence = {key: value for key, value in evidence.items() if value not in (None, "", [])}
-    if provider and (services or ports or hosting.get("matched_signals")):
+    if provider and (detailed_service or corroborating_signals or delivery_detail):
         return _layer(CLOSURE_COMPLETE, evidence)
     if provider:
-        return _layer(CLOSURE_PARTIAL, evidence, reason="provider found without product or facility evidence")
+        return _layer(
+            CLOSURE_PARTIAL,
+            evidence,
+            reason="provider found without corroborating product, facility, or reassignment evidence",
+        )
     return _layer(CLOSURE_FAILED, reason="hosting or delivery provider is missing")
 
 
 def _request_layer(hosting: Mapping[str, object], origin: Mapping[str, object]) -> dict[str, object]:
     evidence = _mapping(hosting.get("evidence"))
-    provider = evidence.get("provider")
+    infrastructure_provider = evidence.get("provider")
     request_evidence = {
-        "provider": provider,
+        "provider": infrastructure_provider,
         "evidence_fields": [
             "tenant identity",
             "instance binding",
@@ -259,11 +476,62 @@ def _request_layer(hosting: Mapping[str, object], origin: Mapping[str, object]) 
     if origin.get("required") is True and origin.get("status") != CLOSURE_COMPLETE:
         edge = origin.get("edge_provider")
         if edge:
+            if infrastructure_provider and infrastructure_provider != edge:
+                request_evidence["edge_infrastructure_provider"] = infrastructure_provider
+            request_evidence["provider"] = edge
             request_evidence["edge_provider"] = edge
+        request_evidence["evidence_fields"] = [
+            "customer identity",
+            "domain and account binding",
+            "payment records",
+            "control-plane login logs",
+            "origin configuration",
+            "access and origin logs",
+        ]
         return _layer(CLOSURE_PARTIAL, request_evidence, reason="Origin must be obtained first")
-    if provider and hosting.get("status") == CLOSURE_COMPLETE:
+    if origin.get("required") is True:
+        origin_evidence = _mapping(origin.get("evidence"))
+        raw_origin_provider = (
+            origin_evidence.get("request_target")
+            or origin_evidence.get("hosting_provider")
+            or origin_evidence.get("provider")
+        )
+        if isinstance(raw_origin_provider, Mapping):
+            origin_provider = (
+                raw_origin_provider.get("legal_entity")
+                or raw_origin_provider.get("name")
+                or raw_origin_provider.get("org")
+            )
+        else:
+            origin_provider = raw_origin_provider
+        origin_ips = origin_evidence.get("ips")
+        origin_ip = origin_evidence.get("ip")
+        if not origin_ip and isinstance(origin_ips, list) and origin_ips:
+            origin_ip = origin_ips[0]
+        request_evidence = {
+            "provider": origin_provider,
+            "origin_ip": origin_ip,
+            "evidence_fields": [
+                "tenant identity",
+                "instance binding",
+                "payment records",
+                "control-plane login logs",
+                "access and origin logs",
+            ],
+        }
+        request_evidence = {
+            key: value for key, value in request_evidence.items() if value not in (None, "", [])
+        }
+        if origin_provider:
+            return _layer(CLOSURE_COMPLETE, request_evidence)
+        return _layer(
+            CLOSURE_PARTIAL,
+            request_evidence,
+            reason="confirmed Origin lacks an executable server-provider request target",
+        )
+    if infrastructure_provider and hosting.get("status") == CLOSURE_COMPLETE:
         return _layer(CLOSURE_COMPLETE, request_evidence)
-    if provider:
+    if infrastructure_provider:
         return _layer(CLOSURE_PARTIAL, request_evidence, reason="request target lacks delivery evidence")
     return _layer(CLOSURE_FAILED, reason="no executable provider request target")
 
@@ -436,6 +704,10 @@ def assemble_target_closure(endpoint: Endpoint) -> dict[str, object]:
     gaps = [name for name in LAYER_NAMES if layers[name].get("status") != CLOSURE_COMPLETE]
     if origin.get("required") is True and origin.get("status") != CLOSURE_COMPLETE:
         gaps.append("origin")
+    resolved_ip_selection = _mapping(endpoint.enrichment.get("resolved_ip_selection"))
+    if _non_negative_int(resolved_ip_selection.get("truncated")) > 0:
+        status = CLOSURE_PARTIAL
+        gaps.append("resolved_ip_limit")
     return {
         "value": endpoint.value,
         "kind": endpoint.kind,
@@ -447,26 +719,115 @@ def assemble_target_closure(endpoint: Endpoint) -> dict[str, object]:
         ),
         "origin": origin,
         "resolved_ips": [str(target.get("value")) for target in resolved_targets],
+        "resolved_ip_selection": resolved_ip_selection,
         "resolved_ip_targets": resolved_targets,
         "actual_service_operator": {"status": "unknown", "evidence": {}},
         "gaps": gaps,
     }
 
 
-def _sources_are_terminal(endpoint: Endpoint, enrichers: Sequence[object]) -> bool:
+def _source_is_terminal(
+    enricher: object,
+    item: Mapping[str, object],
+    mode: str,
+) -> bool:
+    status = item.get("status")
+    if status in {"hit", "no_record"}:
+        return True
+    if status == "disabled":
+        return not _source_is_configured(enricher)
+    if status == "skipped":
+        return bool(
+            item.get("reason") == "active_mode_blocked"
+            and mode == ANALYSIS_MODE_PASSIVE
+            and getattr(enricher, "active", False)
+        )
+    return False
+
+
+def _enrichers_to_run(
+    endpoint: Endpoint,
+    enrichers: Sequence[object],
+    *,
+    mode: str,
+    refresh: bool,
+) -> list[object]:
     applicable = [
         enricher
         for enricher in enrichers
         if endpoint.kind in (getattr(enricher, "applies_to", []) or [])
     ]
-    if not applicable:
-        return True
+    if refresh:
+        return applicable
     statuses = _normalize_source_status(endpoint.enrichment)
-    terminal = {"hit", "no_record", "disabled", "skipped"}
-    return all(
-        statuses.get(getattr(enricher, "name", ""), {}).get("status") in terminal
+    return [
+        enricher
         for enricher in applicable
+        if not _source_is_terminal(
+            enricher,
+            statuses.get(str(getattr(enricher, "name", "")), {}),
+            mode,
+        )
+    ]
+
+
+def _source_is_configured(enricher: object) -> bool:
+    raw_required = getattr(enricher, "required_env", ())
+    required = (
+        [str(name) for name in raw_required]
+        if isinstance(raw_required, (list, tuple))
+        else []
     )
+    return not required or any((os.environ.get(name) or "").strip() for name in required)
+
+
+def _ensure_source_status_coverage(
+    endpoint: Endpoint,
+    enrichers: Sequence[object],
+    config: ClosureConfig,
+) -> None:
+    raw_statuses = endpoint.enrichment.setdefault("source_status", {})
+    if not isinstance(raw_statuses, dict):
+        raw_statuses = {}
+        endpoint.enrichment["source_status"] = raw_statuses
+    for enricher in enrichers:
+        if endpoint.kind not in (getattr(enricher, "applies_to", []) or []):
+            continue
+        provider = str(getattr(enricher, "name", "") or type(enricher).__name__)
+        current = _mapping(raw_statuses.get(provider))
+        if current.get("status") in {"hit", "no_record", "failed"}:
+            continue
+        if not _source_is_configured(enricher):
+            raw_statuses[provider] = {
+                "status": "disabled",
+                "reason": "credential_not_configured",
+            }
+        elif config.mode == ANALYSIS_MODE_PASSIVE and getattr(enricher, "active", False):
+            raw_statuses[provider] = {
+                "status": "skipped",
+                "reason": "active_mode_blocked",
+            }
+        elif not config.online:
+            raw_statuses[provider] = {"status": "skipped", "reason": "offline"}
+        else:
+            raw_statuses[provider] = {"status": "failed", "reason": "missing_outcome"}
+
+
+def _normalized_public_ip(value: object) -> str | None:
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        address = ipaddress.ip_address(text)
+    except ValueError:
+        return None
+    return str(address) if address.is_global else None
+
+
+def _is_known_intercept_ip(value: str) -> bool:
+    from apkscan.dynamic.pcap_ingest import is_known_intercept_ip
+
+    return is_known_intercept_ip(value)
 
 
 def _resolved_ips(endpoint: Endpoint) -> list[str]:
@@ -475,8 +836,41 @@ def _resolved_ips(endpoint: Endpoint) -> list[str]:
     dns = _mapping(endpoint.enrichment.get("dns"))
     raw = dns.get("ips") or dns.get("addresses")
     if not isinstance(raw, list):
+        endpoint.enrichment["resolved_ip_selection"] = {
+            "observed": 0,
+            "total": 0,
+            "selected": 0,
+            "limit": _MAX_RESOLVED_IPS_PER_TARGET,
+            "truncated": 0,
+            "excluded_nonpublic": 0,
+            "excluded_intercept": 0,
+        }
         return []
-    return sorted({str(value).strip() for value in raw if str(value).strip()})
+    observed = sorted({str(value).strip() for value in raw if str(value).strip()})
+    values: set[str] = set()
+    excluded_nonpublic = 0
+    excluded_intercept = 0
+    for value in observed:
+        normalized = _normalized_public_ip(value)
+        if normalized is None:
+            excluded_nonpublic += 1
+            continue
+        if _is_known_intercept_ip(normalized):
+            excluded_intercept += 1
+            continue
+        values.add(normalized)
+    ordered = sorted(values)
+    selected = ordered[:_MAX_RESOLVED_IPS_PER_TARGET]
+    endpoint.enrichment["resolved_ip_selection"] = {
+        "observed": len(observed),
+        "total": len(ordered),
+        "selected": len(selected),
+        "limit": _MAX_RESOLVED_IPS_PER_TARGET,
+        "truncated": max(0, len(ordered) - len(selected)),
+        "excluded_nonpublic": excluded_nonpublic,
+        "excluded_intercept": excluded_intercept,
+    }
+    return selected
 
 
 def _set_attribution(endpoint: Endpoint) -> None:
@@ -510,13 +904,20 @@ def _enrich_resolved_ips(
             enrichment=enrichment,
         )
         typed_enrichers = [enricher for enricher in enrichers if hasattr(enricher, "enrich")]
-        if config.online and (config.refresh or not _sources_are_terminal(transient, typed_enrichers)):
+        pending = _enrichers_to_run(
+            transient,
+            typed_enrichers,
+            mode=config.mode,
+            refresh=config.refresh,
+        )
+        if config.online and pending:
             enrich_selected_targets(
                 [transient],
-                typed_enrichers,  # type: ignore[arg-type]
+                pending,  # type: ignore[arg-type]
                 mode=config.mode,
                 include_case_close=True,
             )
+        _ensure_source_status_coverage(transient, typed_enrichers, config)
         _set_attribution(transient)
         transient.enrichment.pop("runtime", None)
         resolved[ip] = transient.enrichment
@@ -567,13 +968,20 @@ def close_report(
     available = list(enrichers) if enrichers is not None else list(discover_enrichers())
     typed_enrichers = [enricher for enricher in available if hasattr(enricher, "enrich")]
     for endpoint in selected:
-        if config.online and (config.refresh or not _sources_are_terminal(endpoint, typed_enrichers)):
+        pending = _enrichers_to_run(
+            endpoint,
+            typed_enrichers,
+            mode=config.mode,
+            refresh=config.refresh,
+        )
+        if config.online and pending:
             enrich_selected_targets(
                 [endpoint],
-                typed_enrichers,  # type: ignore[arg-type]
+                pending,  # type: ignore[arg-type]
                 mode=config.mode,
                 include_case_close=True,
             )
+        _ensure_source_status_coverage(endpoint, typed_enrichers, config)
         _set_attribution(endpoint)
         if endpoint.kind == "domain":
             _enrich_resolved_ips(endpoint, typed_enrichers, config)

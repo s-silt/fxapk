@@ -79,14 +79,46 @@ def test_case_close_no_strict_keeps_partial_exit_zero(monkeypatch, tmp_path) -> 
     assert "resolve it" in result.output
 
 
-def test_case_close_invalid_json_exits_one(tmp_path) -> None:  # noqa: ANN001
+def test_case_close_invalid_json_uses_strict_failure_exit(tmp_path) -> None:  # noqa: ANN001
     path = tmp_path / "broken.json"
     path.write_text("{broken", encoding="utf-8")
 
     result = runner.invoke(cli.app, ["case", "close", str(path), "--offline"])
 
+    assert result.exit_code == 6
+    assert "报告读取失败" in result.output
+
+
+def test_case_close_invalid_json_no_strict_remains_operational_error(tmp_path) -> None:  # noqa: ANN001
+    path = tmp_path / "broken.json"
+    path.write_text("{broken", encoding="utf-8")
+
+    result = runner.invoke(
+        cli.app,
+        ["case", "close", str(path), "--offline", "--no-strict"],
+    )
+
     assert result.exit_code == 1
     assert "报告读取失败" in result.output
+
+
+def test_case_close_internal_failure_uses_strict_failure_exit(
+    monkeypatch, tmp_path, caplog
+) -> None:  # noqa: ANN001
+    report_path = _write_report(tmp_path)
+
+    def fail_close(report, config):  # noqa: ANN001, ANN202
+        del report, config
+        raise RuntimeError("sensitive-provider-detail")
+
+    monkeypatch.setattr(case_command, "close_report", fail_close)
+
+    result = runner.invoke(cli.app, ["case", "close", str(report_path), "--offline"])
+
+    assert result.exit_code == 6
+    assert "案件闭环执行失败（RuntimeError）" in result.output
+    assert "sensitive-provider-detail" not in result.output
+    assert "sensitive-provider-detail" not in caplog.text
 
 
 def test_closure_exit_code_is_fail_closed() -> None:

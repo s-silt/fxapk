@@ -203,6 +203,66 @@ def _build_capture_quality(
     return evaluate_capture_quality(raw)
 
 
+def _annotate_runtime_endpoints(
+    endpoints: list[Endpoint],
+    floor_summary: pcap_ingest.PcapSummary | None,
+    pcap_app_attr: dict[str, Any],
+) -> None:
+    """Attach per-endpoint PCAP payload and UID attribution for five-layer closure."""
+    if floor_summary is None:
+        return
+    try:
+        remotes = pcap_ingest.remote_endpoints(floor_summary)
+    except Exception:  # noqa: BLE001 - annotation is evidence metadata, never a capture blocker
+        logger.exception("[capture] 无法把 floor UID 归因写回运行时端点")
+        return
+
+    for endpoint in endpoints:
+        if endpoint.kind == "ip":
+            matched = [remote for remote in remotes if remote.ip == endpoint.value]
+        elif endpoint.kind == "domain":
+            value = endpoint.value.lower().rstrip(".")
+            matched = [
+                remote
+                for remote in remotes
+                if value in {str(sni).lower().rstrip(".") for sni in getattr(remote, "sni", set())}
+            ]
+        else:
+            continue
+        if not matched:
+            continue
+
+        remote_keys = sorted({f"{remote.ip}:{remote.port}" for remote in matched})
+        attributed = [
+            pcap_app_attr[key]
+            for key in remote_keys
+            if isinstance(pcap_app_attr.get(key), dict)
+        ]
+        runtime = endpoint.enrichment.setdefault("runtime", {})
+        if not isinstance(runtime, dict):
+            runtime = {}
+            endpoint.enrichment["runtime"] = runtime
+        runtime.update(
+            {
+                "has_payload": any(bool(getattr(remote, "has_payload", False)) for remote in matched),
+                "target_attributed": any(item.get("is_target_app") is True for item in attributed),
+                "remote_endpoints": remote_keys,
+                "sni": sorted(
+                    {
+                        str(sni)
+                        for remote in matched
+                        for sni in getattr(remote, "sni", set())
+                        if str(sni)
+                    }
+                ),
+            }
+        )
+        if attributed:
+            runtime["attribution"] = sorted(
+                {str(item.get("attribution", "unknown")) for item in attributed}
+            )
+
+
 def run(
     package: str,
     out_dir: str = "out",
@@ -881,6 +941,7 @@ def _capture(
     # 指向死的本机 loopback、MITM 不可用，等价无证据路径）。
     mitm_channel_ok = proxy_set and reverse_set
     capture_signals["mitm_channel_ok"] = mitm_channel_ok
+    _annotate_runtime_endpoints(endpoints, floor_summary, pcap_app_attr)
     capture_signals["quality"] = _build_capture_quality(
         floor_summary,
         mitm_endpoints,

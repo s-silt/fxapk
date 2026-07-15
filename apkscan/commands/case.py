@@ -29,6 +29,10 @@ def closure_exit_code(status: object) -> int:
     return 6
 
 
+def _execution_failure_exit_code(*, strict: bool) -> int:
+    return closure_exit_code("failed") if strict else 1
+
+
 def _strings(value: object) -> list[str]:
     return [str(item) for item in value] if isinstance(value, list) else []
 
@@ -74,7 +78,7 @@ def close_command(
         report = load_report(report_json)
     except (OSError, ValueError, UnicodeError) as exc:
         typer.echo(f"错误：报告读取失败：{report_json}（{type(exc).__name__}）", err=True)
-        raise typer.Exit(code=1) from exc
+        raise typer.Exit(code=_execution_failure_exit_code(strict=strict)) from exc
 
     try:
         config = ClosureConfig(
@@ -91,9 +95,9 @@ def close_command(
         closure = close_report(report, config)
         write_report(report, report_json)
     except Exception as exc:  # noqa: BLE001 - command boundary prints a safe summary
-        logger.exception("[case close] closure failed")
+        logger.error("[case close] closure failed (%s)", type(exc).__name__)
         typer.echo(f"错误：案件闭环执行失败（{type(exc).__name__}）", err=True)
-        raise typer.Exit(code=1) from exc
+        raise typer.Exit(code=_execution_failure_exit_code(strict=strict)) from exc
 
     _print_closure_summary(closure)
     code = closure_exit_code(closure.get("status"))

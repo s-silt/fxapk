@@ -349,14 +349,17 @@ def test_capture_proxy_ok_but_quiet_app_still_done(monkeypatch, tmp_path):
     assert data["capture_signals"]["quality"]["dynamic_status"] == "failed"
 
 
-def test_build_capture_quality_requires_target_attributed_business_traffic() -> None:
+def test_build_capture_quality_requires_target_attributed_business_traffic(
+    monkeypatch,
+) -> None:  # noqa: ANN001
+    monkeypatch.setattr(pcap_ingest, "_ip_public", lambda value: value == "198.51.100.10")
     summary = pcap_ingest.PcapSummary(
         flows=[
             pcap_ingest.Flow(
                 proto="tcp",
                 src_ip="10.0.0.2",
                 src_port=50000,
-                dst_ip="9.9.9.9",
+                dst_ip="198.51.100.10",
                 dst_port=443,
                 packets=2,
                 payload_bytes=40,
@@ -367,8 +370,8 @@ def test_build_capture_quality_requires_target_attributed_business_traffic() -> 
 
     quality = capture._build_capture_quality(
         summary,
-        [Endpoint(value="9.9.9.9", kind="ip")],
-        {"9.9.9.9:443": {"is_target_app": True}},
+        [Endpoint(value="198.51.100.10", kind="ip")],
+        {"198.51.100.10:443": {"is_target_app": True}},
         channel_ready=True,
     )
 
@@ -383,14 +386,21 @@ def test_build_capture_quality_requires_target_attributed_business_traffic() -> 
     }
 
 
-def test_build_capture_quality_excludes_known_intercept_page() -> None:
+def test_build_capture_quality_excludes_known_intercept_page(monkeypatch) -> None:  # noqa: ANN001
+    intercept_ip = "198.51.100.99"
+    monkeypatch.setattr(
+        pcap_ingest,
+        "is_known_intercept_ip",
+        lambda value: value == intercept_ip,
+    )
+    monkeypatch.setattr(pcap_ingest, "_ip_public", lambda value: value == intercept_ip)
     summary = pcap_ingest.PcapSummary(
         flows=[
             pcap_ingest.Flow(
                 proto="tcp",
                 src_ip="10.0.0.2",
                 src_port=50001,
-                dst_ip="183.192.65.101",
+                dst_ip=intercept_ip,
                 dst_port=80,
                 packets=3,
                 payload_bytes=120,
@@ -401,13 +411,48 @@ def test_build_capture_quality_excludes_known_intercept_page() -> None:
     quality = capture._build_capture_quality(
         summary,
         [Endpoint(value="http://blocked.example.test", kind="url")],
-        {"183.192.65.101:80": {"is_target_app": True}},
+        {f"{intercept_ip}:80": {"is_target_app": True}},
         channel_ready=True,
     )
 
     assert quality["business_candidate_count"] == 0
     assert quality["target_attributed_count"] == 0
     assert quality["dynamic_status"] == "failed"
+
+
+def test_annotate_runtime_endpoints_maps_uid_attribution_to_ip_and_sni(
+    monkeypatch,
+) -> None:  # noqa: ANN001
+    monkeypatch.setattr(pcap_ingest, "_ip_public", lambda value: value == "198.51.100.10")
+    summary = pcap_ingest.PcapSummary(
+        flows=[
+            pcap_ingest.Flow(
+                proto="tcp",
+                src_ip="10.0.0.2",
+                src_port=50002,
+                dst_ip="198.51.100.10",
+                dst_port=443,
+                packets=2,
+                payload_bytes=80,
+                sni={"api.example.test"},
+            )
+        ]
+    )
+    endpoints = pcap_ingest.to_runtime_endpoints(summary)
+
+    capture._annotate_runtime_endpoints(
+        endpoints,
+        summary,
+        {"198.51.100.10:443": {"is_target_app": True, "attribution": "target_uid"}},
+    )
+
+    by_value = {endpoint.value: endpoint for endpoint in endpoints}
+    assert by_value["198.51.100.10"].enrichment["runtime"]["target_attributed"] is True
+    assert by_value["198.51.100.10"].enrichment["runtime"]["has_payload"] is True
+    assert by_value["api.example.test"].enrichment["runtime"]["target_attributed"] is True
+    assert by_value["api.example.test"].enrichment["runtime"]["remote_endpoints"] == [
+        "198.51.100.10:443"
+    ]
 
 
 def test_capture_proxy_up_but_reverse_fail_is_degraded(monkeypatch, tmp_path):

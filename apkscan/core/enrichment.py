@@ -318,6 +318,8 @@ def enrich_selected_targets(
         if not _provider_configured(enricher):
             source_status[provider] = {"status": "disabled", "reason": "credential_not_configured"}
             return False
+        # Provider will execute now; discard any cached status so the fresh payload decides hit/failure.
+        source_status.pop(provider, None)
         return True
 
     stats = _enrich_endpoints(endpoints, selected, gate=gate)

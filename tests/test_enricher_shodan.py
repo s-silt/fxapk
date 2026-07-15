@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -152,6 +153,26 @@ def test_network_error_ok_false_not_cached(monkeypatch: pytest.MonkeyPatch) -> N
     n = len(fake.calls)
     e.enrich(_ep("45.33.32.156", "ip"))  # 失败不缓存 → 再次触网
     assert len(fake.calls) > n
+
+
+def test_network_error_never_exposes_api_key(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    secret = "synthetic-shodan-secret"
+    monkeypatch.setenv("FXAPK_SHODAN_KEY", secret)
+
+    class _LeakyRequests:
+        @staticmethod
+        def get(*args: object, **kwargs: object) -> _Resp:
+            raise RuntimeError(f"request failed: https://api.example.test/?key={secret}")
+
+    monkeypatch.setattr(sh_mod, "requests", _LeakyRequests())
+    with caplog.at_level(logging.DEBUG):
+        result = ShodanEnricher().enrich(_ep("198.51.100.10", "ip"))
+
+    assert result.ok is False
+    assert secret not in str(result.error)
+    assert secret not in caplog.text
 
 
 def test_cache_hit_skips_network(monkeypatch: pytest.MonkeyPatch) -> None:
