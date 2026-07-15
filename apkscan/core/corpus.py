@@ -46,6 +46,9 @@ KEY_FIELDS: tuple[str, ...] = ("sample_sha256", "tool_version", "ruleset_digest"
 
 #: manifest 里能被 ``corpus seen --by`` 反查的字段（值 → 命中记录）。
 SEEN_FIELDS: tuple[str, ...] = ("sample_sha256", "package_name", "sign_sha256")
+#: 其中**哈希类**字段（十六进制、大小写等价）——find_by 比对前两侧归一小写，避免传大写 SHA256 假阴性；
+#: package_name 大小写敏感（com.Foo ≠ com.foo），**不归一**。
+_HASH_SEEN_FIELDS: frozenset[str] = frozenset({"sample_sha256", "sign_sha256"})
 
 #: key_iocs 每条报告最多摘取的高价值线索值数（供快速 grep，非全量）。
 _MAX_KEY_IOCS = 8
@@ -395,4 +398,9 @@ def find_by(entries: list[dict], value: str, by: str = "sample_sha256") -> list[
     target = _s(value).strip()
     if not target:
         return []
+    if by in _HASH_SEEN_FIELDS:
+        # ★哈希是十六进制、大小写等价：两侧归一小写再比，避免传大写 SHA256（或库内大写）漏报——
+        # seen 是权威口吻，假阴性取证致命。package_name 不归一（大小写敏感）。
+        target = target.lower()
+        return [e for e in entries if _s(e.get(by)).strip().lower() == target]
     return [e for e in entries if _s(e.get(by)).strip() == target]
