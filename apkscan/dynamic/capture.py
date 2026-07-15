@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from apkscan.core import device, infra, tools
+from apkscan.core.closure import evaluate_capture_quality
 from apkscan.core.models import Endpoint, Evidence
 from apkscan.dynamic import (
     STATUS_DEGRADED,
@@ -155,6 +156,51 @@ Java.perform(function () {
 
 # ★#8 合法抓包模式（both=mitm+floor；floor-only/no-proxy=不设代理只带外抓；mitm-only=不起 floor）。
 _CAPTURE_MODES = frozenset({"both", "floor-only", "mitm-only", "no-proxy"})
+
+
+def _build_capture_quality(
+    floor_summary: pcap_ingest.PcapSummary | None,
+    mitm_endpoints: list[Endpoint],
+    pcap_app_attr: dict[str, Any],
+    *,
+    channel_ready: bool,
+) -> dict[str, object]:
+    """Build strict business-evidence quality without changing capture step semantics."""
+    raw_flows = getattr(floor_summary, "flows", []) if floor_summary is not None else []
+    flows = raw_flows if isinstance(raw_flows, list) else []
+    packet_count = sum(max(0, int(getattr(flow, "packets", 0) or 0)) for flow in flows)
+    business_keys: set[str] = set()
+    intercept_observed = False
+    if floor_summary is not None:
+        try:
+            remotes = pcap_ingest.remote_endpoints(floor_summary)
+        except Exception:  # noqa: BLE001 - quality must not break capture on a degraded parser result
+            logger.exception("[capture] 无法从 floor 摘要计算业务流量质量")
+            remotes = []
+        for remote in remotes:
+            if pcap_ingest.is_known_intercept_ip(remote.ip):
+                intercept_observed = True
+                continue
+            if bool(getattr(remote, "has_payload", False)) or bool(getattr(remote, "sni", set())):
+                business_keys.add(f"{remote.ip}:{remote.port}")
+
+    target_count = sum(
+        1
+        for key in business_keys
+        if isinstance(pcap_app_attr.get(key), dict)
+        and pcap_app_attr[key].get("is_target_app") is True
+    )
+    raw = {
+        "channel_ready": channel_ready,
+        "pcap_valid": packet_count > 0,
+        "packet_count": packet_count,
+        "business_candidate_count": max(
+            len(business_keys),
+            0 if intercept_observed and not business_keys else len(mitm_endpoints),
+        ),
+        "target_attributed_count": target_count,
+    }
+    return evaluate_capture_quality(raw)
 
 
 def run(
@@ -659,6 +705,7 @@ def _capture(
         )
 
     endpoints = _parse_flows(flows_file)
+    mitm_endpoints = list(endpoints)
     # ① floor 自动并入：带外 pcap 的接入节点作 runtime 端点并进 endpoints（mitm 0 端点时靠它兜底，
     #    治零产出）。IP 侧不在此判噪音——交下游 asn 富化 + infra 归属分级（Google/云 IP 自动判第三方
     #    基础设施并在报告折叠）；域名侧（SNI/DNS）按 OS/GMS/连通性 host 名单折叠明显噪音。绝不因
@@ -700,6 +747,7 @@ def _capture(
                 ]
                 if http_added:
                     endpoints.extend(http_added)
+                    mitm_endpoints.extend(http_added)
                     playbook.append(
                         f"tshark 深度后端：明文 HTTP 抽出接入域名 {len(http_added)} 个（pcap_ingest 不解 HTTP）"
                     )
@@ -727,6 +775,7 @@ def _capture(
                     ]
                     if dec_added:
                         endpoints.extend(dec_added)
+                        mitm_endpoints.extend(dec_added)
                         artifacts.append(str(keylog))
                         playbook.append(
                             f"P2 NSS TLS Key Log 解密：还原 TLS 应用层接入域名 {len(dec_added)} 个"
@@ -832,6 +881,12 @@ def _capture(
     # 指向死的本机 loopback、MITM 不可用，等价无证据路径）。
     mitm_channel_ok = proxy_set and reverse_set
     capture_signals["mitm_channel_ok"] = mitm_channel_ok
+    capture_signals["quality"] = _build_capture_quality(
+        floor_summary,
+        mitm_endpoints,
+        pcap_app_attr,
+        channel_ready=mitm_channel_ok or floor_handle is not None,
+    )
     evidence_path_ok = mitm_channel_ok or floor_pcap is not None or len(endpoints) > 0 or mitm_bytes > 0
     if result["status"] == STATUS_DONE and not evidence_path_ok:
         result["status"] = STATUS_DEGRADED

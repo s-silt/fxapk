@@ -33,7 +33,7 @@ from apkscan.dynamic import (
     STATUS_ERROR,
     STATUS_SKIPPED,
 )
-from apkscan.dynamic import capture
+from apkscan.dynamic import capture, pcap_ingest
 from apkscan.dynamic.capture_plan import CaptureDecision
 
 
@@ -346,6 +346,68 @@ def test_capture_proxy_ok_but_quiet_app_still_done(monkeypatch, tmp_path):
     assert data["capture_complete"] is True
     assert data["capture_signals"]["proxy_set"] is True
     assert data["capture_signals"]["mitm_channel_ok"] is True
+    assert data["capture_signals"]["quality"]["dynamic_status"] == "failed"
+
+
+def test_build_capture_quality_requires_target_attributed_business_traffic() -> None:
+    summary = pcap_ingest.PcapSummary(
+        flows=[
+            pcap_ingest.Flow(
+                proto="tcp",
+                src_ip="10.0.0.2",
+                src_port=50000,
+                dst_ip="9.9.9.9",
+                dst_port=443,
+                packets=2,
+                payload_bytes=40,
+                sni={"api.example.test"},
+            )
+        ]
+    )
+
+    quality = capture._build_capture_quality(
+        summary,
+        [Endpoint(value="9.9.9.9", kind="ip")],
+        {"9.9.9.9:443": {"is_target_app": True}},
+        channel_ready=True,
+    )
+
+    assert quality == {
+        "channel_ready": True,
+        "pcap_valid": True,
+        "packet_count": 2,
+        "business_candidate_count": 1,
+        "target_attributed_count": 1,
+        "dynamic_status": "complete",
+        "reason": "target-attributed public business candidate observed",
+    }
+
+
+def test_build_capture_quality_excludes_known_intercept_page() -> None:
+    summary = pcap_ingest.PcapSummary(
+        flows=[
+            pcap_ingest.Flow(
+                proto="tcp",
+                src_ip="10.0.0.2",
+                src_port=50001,
+                dst_ip="183.192.65.101",
+                dst_port=80,
+                packets=3,
+                payload_bytes=120,
+            )
+        ]
+    )
+
+    quality = capture._build_capture_quality(
+        summary,
+        [Endpoint(value="http://blocked.example.test", kind="url")],
+        {"183.192.65.101:80": {"is_target_app": True}},
+        channel_ready=True,
+    )
+
+    assert quality["business_candidate_count"] == 0
+    assert quality["target_attributed_count"] == 0
+    assert quality["dynamic_status"] == "failed"
 
 
 def test_capture_proxy_up_but_reverse_fail_is_degraded(monkeypatch, tmp_path):
@@ -580,6 +642,8 @@ def test_capture_tls_keylog_decrypts_and_merges_endpoints(monkeypatch, tmp_path)
     assert "api.evil.com" in eps  # 解密还原的后端并入
     assert eps["api.evil.com"]["is_cleartext"] is False  # ★标记为解密（非明文）
     assert str(tmp_path / "tls.keys") in result["artifacts"]  # keylog 作产物留档
+    assert report["capture_signals"]["quality"]["business_candidate_count"] == 1
+    assert report["capture_signals"]["quality"]["dynamic_status"] == "partial"
 
 
 def test_capture_tls_keylog_extracts_credentials_desensitized(monkeypatch, tmp_path):

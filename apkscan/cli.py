@@ -30,7 +30,7 @@ from apkscan.core.report_naming import report_base
 
 # 图谱串案 / 追踪台账 / 样本库子命令已物理拆到 apkscan/commands/（纯搬移）；add_typer 留此处以引用主 app。
 from apkscan.commands.corpus import corpus_app
-from apkscan.commands.case import case_app
+from apkscan.commands.case import case_app, closure_exit_code
 from apkscan.commands.graph import graph_app
 from apkscan.commands.track import track_app
 
@@ -651,6 +651,11 @@ def auto(
         help="脱壳后把去壳版重打包装回设备供 capture 抓（绕壳反 frida）。默认开；"
         "--no-repackage 关（重签必卸原包会清 app 数据/登录态）。",
     ),
+    strict_case: bool = typer.Option(
+        False,
+        "--strict-case/--no-strict-case",
+        help="按案件闭环状态返回退出码：complete=0、partial=5、failed=6。默认只报告状态。",
+    ),
     mode: str = typer.Option(
         ANALYSIS_MODE_PASSIVE,
         "--mode",
@@ -700,10 +705,16 @@ def auto(
             track=track,
             mode=mode,
             repackage=repackage,
+            strict_case=strict_case,
             on_progress=lambda m: typer.echo(f"... {m}"),
             confirm=_confirm,
         )
         _print_auto_result(result)
+        if strict_case:
+            status = result.get("status") if isinstance(result, dict) else "failed"
+            code = closure_exit_code(status)
+            if code:
+                raise typer.Exit(code=code)
     finally:
         _cleanup_adb_quiet(_adb_owned)
 
@@ -1188,6 +1199,16 @@ def _print_auto_result(result: object) -> None:
     else:
         typer.echo("未产出报告（详见步骤摘要）。")
 
+    closure = result.get("closure")
+    if isinstance(closure, dict):
+        typer.echo("")
+        typer.echo(f"案件闭环：{closure.get('status', 'failed')}")
+        gaps = closure.get("gaps")
+        if isinstance(gaps, list) and gaps:
+            typer.echo(f"未闭环项（{len(gaps)}）：")
+            for gap in gaps[:6]:
+                typer.echo(f"  - {gap}")
+
 
 def _print_batch_result(result: object) -> None:
     """打印 batch.run_folder 的结构化汇总：计数行 + 逐个 [OK]/[ERR]/[SKIP]。"""
@@ -1354,6 +1375,7 @@ def _merge_runtime_into_report(
             base,
             formats=formats,
             on_progress=lambda m: typer.echo(f"... {m}"),
+            runtime_report_path=runtime_path,
         )
         merged = stats.get("merged", 0)
         new_leads = stats.get("new_leads", 0)

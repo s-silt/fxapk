@@ -89,6 +89,11 @@ STATE_UNKNOWN = "unknown"  # 其它（单向载荷、握手无数据等）
 _KNOWN_FANZHA = frozenset({"183.192.65.101"})
 
 
+def is_known_intercept_ip(ip: str) -> bool:
+    """Return whether an address is a known interception page, not a business server."""
+    return ip in _KNOWN_FANZHA
+
+
 @dataclass
 class RemoteEndpoint:
     """按公网远端 (ip:port/proto) 跨多条 5 元组聚合的接入节点——分级 established/syn_only/reset/unknown。"""

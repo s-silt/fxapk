@@ -10,6 +10,7 @@
     3. 脱壳 unpack   —— 有设备才跑（frida-dexdump dump 隐藏 DEX 并自动回灌重分析）。
     4. 抓包 capture  —— 有设备 + 有包名才跑；先经 confirm 回调提示用户操作 app 触发网络。
     5. 合并 merge    —— 抓包成功则把运行时端点并回主报告并重渲，真·C2 进主线索清单。
+    6. 案件闭环      —— 多源再富化 + 五层归因 + 动态证据质量验收，写回主报告。
 
 设计铁律（与 dynamic.__init__ / doctor / unpack / capture / merge 一致，GUI-ready / exe-ready）：
 
@@ -54,6 +55,7 @@ _STEP_UNPACK = "脱壳"
 _STEP_REPACKAGE = "去壳重打包"
 _STEP_CAPTURE = "抓包"
 _STEP_MERGE = "合并运行时端点"
+_STEP_CLOSE = "案件闭环"
 
 # 步骤状态常量（与 DynamicResult 的 status 取值口径一致）。
 _DONE = "done"
@@ -102,6 +104,7 @@ def run(
     track: bool = True,
     mode: str = ANALYSIS_MODE_PASSIVE,
     repackage: bool = True,
+    strict_case: bool = False,
     on_progress: Callable[[str], None] | None = None,
     confirm: Callable[[str], None] | None = None,
 ) -> dict:
@@ -118,6 +121,7 @@ def run(
         capture_duration: 抓包时长（秒）。
         formats: 报告格式，默认 ``["html", "json"]``。
         track: 静态分析写报告后是否自动入追踪台账（+喂案件图谱）。默认 True；CLI ``--no-track`` 关。
+        strict_case: 标记调用方要求严格闭环；核心仍结构化返回，不抛出或退出进程。
         on_progress: 可选进度回调（GUI 弹窗 / CLI echo；None → no-op）。
         confirm: 抓包前的「提示用户操作 app」钩子（GUI 弹窗 / CLI 等回车）；
                  None 则不等待直接继续。
@@ -131,6 +135,15 @@ def run(
     package_name = ""
     # 静态分析得到的 Report，供抓包后 merge 就地补全；任意类型（避免顶层 import pipeline/Report）。
     report: object | None = None
+    closure: dict[str, object] = {
+        "schema_version": "1.0",
+        "status": "failed",
+        "checks": [],
+        "targets": [],
+        "source_summary": {},
+        "gaps": ["case closure did not run"],
+        "next_actions": ["rerun case closure after static analysis succeeds"],
+    }
 
     try:
         # 0) 设备探测 + **钉定单台 serial**：必须在体检之前选定。多设备/一机多 transport
@@ -242,12 +255,33 @@ def run(
                     "抓包未成功或无静态报告，无运行时端点可并入",
                 )
             )
+
+        # 6) 案件闭环：无论动态是否完整，只要静态报告存在都执行并把缺口显式写入报告。
+        if report is not None:
+            close_step, closure, close_paths = _run_closure(
+                report,
+                out_dir=out_dir,
+                base=base,
+                online=online,
+                mode=mode,
+                require_dynamic=has_device,
+                on_progress=on_progress,
+            )
+            steps.append(close_step)
+            _extend_unique(report_paths, close_paths)
+            if close_step.get("status") == _DONE:
+                _auto_track(report, str(Path(out_dir) / f"{base}.json"), track=track)
+        else:
+            steps.append(_step(_STEP_CLOSE, _SKIPPED, "无有效静态报告，案件闭环失败"))
     except Exception:
         # 顶层兜底：任何未预期异常都转成结构化结果，绝不抛给调用方（GUI 单按钮要稳）。
         logger.exception("[auto] run 未预期异常（已转结构化结果）")
         steps.append(_step("一键全自动", _ERROR, "流水线发生未预期异常（详见日志）"))
 
     return {
+        "status": str(closure.get("status") or "failed"),
+        "closure": closure,
+        "strict_case": bool(strict_case),
         "steps": steps,
         "report_paths": report_paths,
         "package_name": package_name,
@@ -634,6 +668,7 @@ def _run_merge(
             base,
             formats=list(formats),
             on_progress=on_progress,
+            runtime_report_path=runtime_report_path,
         )
         merged = stats.get("merged", 0)
         new_leads = stats.get("new_leads", 0)
@@ -648,6 +683,64 @@ def _run_merge(
     except Exception as exc:  # noqa: BLE001 - 合并失败不破坏已产出静态报告
         logger.exception("[auto] 合并运行时端点步骤异常")
         return _step(_STEP_MERGE, _ERROR, f"合并运行时端点失败：{exc}"), []
+
+
+def _run_closure(
+    report: object,
+    *,
+    out_dir: str,
+    base: str,
+    online: bool,
+    mode: str,
+    require_dynamic: bool,
+    on_progress: Callable[[str], None] | None,
+) -> tuple[dict, dict[str, object], list[str]]:
+    """Run deterministic case gates and persist them without raising to callers."""
+    _emit(on_progress, "步骤 6/6：多源富化、五层归因与案件闭环验收")
+    try:
+        from apkscan.core import report_io
+        from apkscan.core.closure import ClosureConfig, close_report
+        from apkscan.core.models import Report
+
+        if not isinstance(report, Report):
+            closure = {
+                "schema_version": "1.0",
+                "status": "failed",
+                "targets": [],
+                "gaps": ["invalid static report"],
+                "next_actions": ["rerun static analysis"],
+            }
+            return _step(_STEP_CLOSE, _SKIPPED, "无有效静态报告，案件闭环失败"), closure, []
+
+        closure = close_report(
+            report,
+            ClosureConfig(
+                online=online,
+                mode=mode,
+                require_dynamic=require_dynamic,
+            ),
+        )
+        paths = report_io.write_report(report, Path(out_dir) / f"{base}.json")
+        targets = closure.get("targets")
+        gaps = closure.get("gaps")
+        target_count = len(targets) if isinstance(targets, list) else 0
+        gap_count = len(gaps) if isinstance(gaps, list) else 0
+        detail = (
+            f"闭环状态 {closure.get('status', 'failed')}；"
+            f"主目标 {target_count}；未闭环项 {gap_count}"
+        )
+        return _step(_STEP_CLOSE, _DONE, detail), closure, paths
+    except Exception as exc:  # noqa: BLE001 - auto core always returns structured failure
+        logger.exception("[auto] 案件闭环步骤异常")
+        reason = f"case closure execution failed ({type(exc).__name__})"
+        closure = {
+            "schema_version": "1.0",
+            "status": "failed",
+            "targets": [],
+            "gaps": [reason],
+            "next_actions": ["rerun fxapk case close against the static report"],
+        }
+        return _step(_STEP_CLOSE, _ERROR, reason), closure, []
 
 
 # ---------------------------------------------------------------------------
