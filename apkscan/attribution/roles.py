@@ -158,3 +158,159 @@ class RoleAssessment:
             "negative_signals": [item.value for item in self.negative_signals],
             "negative_evidence": [item.to_dict() for item in self.negative_evidence],
         }
+
+
+@dataclass(frozen=True)
+class _Requirement:
+    signals: frozenset[RoleSignal]
+    minimum: int = 1
+
+    def met_by(self, present: frozenset[RoleSignal]) -> bool:
+        return len(self.signals & present) >= self.minimum
+
+
+@dataclass(frozen=True)
+class _RoleDefinition:
+    role: InfrastructureRole
+    supporting: frozenset[RoleSignal]
+    requirements: tuple[_Requirement, ...]
+    blockers: frozenset[RoleSignal] = frozenset()
+
+
+_TRANSITION = frozenset(
+    {RoleSignal.REDIRECT, RoleSignal.SUBSEQUENT_OVERSEAS_CONNECTION}
+)
+_ORIGIN_CORRELATION = frozenset(
+    {
+        RoleSignal.LOGIN_ENDPOINT,
+        RoleSignal.STABLE_IP,
+        RoleSignal.HISTORICAL_DNS,
+        RoleSignal.BUSINESS_CERTIFICATE,
+    }
+)
+_EDGE_SIGNALS = frozenset(
+    {
+        RoleSignal.MANY_SHARED_DOMAINS,
+        RoleSignal.REDIRECT,
+        RoleSignal.COOKIE_CHALLENGE,
+        RoleSignal.SHARED_TLS,
+        RoleSignal.CONTENT_DIFFERENCE,
+    }
+)
+
+_ROLE_DEFINITIONS = (
+    _RoleDefinition(
+        role=InfrastructureRole.DOMESTIC_RELAY_CANDIDATE,
+        supporting=frozenset(
+            {
+                RoleSignal.DIRECT_CONNECTION,
+                RoleSignal.DOMESTIC_NETWORK,
+                RoleSignal.REDIRECT,
+                RoleSignal.SUBSEQUENT_OVERSEAS_CONNECTION,
+                RoleSignal.NON_PUBLIC_CDN,
+            }
+        ),
+        requirements=(
+            _Requirement(frozenset({RoleSignal.DIRECT_CONNECTION})),
+            _Requirement(frozenset({RoleSignal.DOMESTIC_NETWORK})),
+            _Requirement(_TRANSITION),
+        ),
+        blockers=frozenset({RoleSignal.PUBLIC_CDN}),
+    ),
+    _RoleDefinition(
+        role=InfrastructureRole.ORIGIN_CANDIDATE,
+        supporting=frozenset(
+            {RoleSignal.BUSINESS_API, RoleSignal.NON_PUBLIC_CDN}
+        )
+        | _ORIGIN_CORRELATION,
+        requirements=(
+            _Requirement(frozenset({RoleSignal.BUSINESS_API})),
+            _Requirement(_ORIGIN_CORRELATION),
+        ),
+        blockers=frozenset({RoleSignal.PUBLIC_CDN}),
+    ),
+    _RoleDefinition(
+        role=InfrastructureRole.EDGE_CANDIDATE,
+        supporting=_EDGE_SIGNALS,
+        requirements=(_Requirement(_EDGE_SIGNALS, minimum=2),),
+    ),
+)
+
+
+def _normalize_features(value: object) -> tuple[RoleFeature, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
+        raise TypeError("features must be a non-string iterable of RoleFeature")
+    unique: dict[tuple[str, str, str, str, str, str], RoleFeature] = {}
+    for item in value:
+        if not isinstance(item, RoleFeature):
+            raise TypeError(
+                f"features must contain RoleFeature, got {type(item).__name__}"
+            )
+        key = (item.signal.value, *_evidence_key(item.evidence))
+        unique[key] = item
+    return tuple(unique[key] for key in sorted(unique))
+
+
+class RoleClassifier:
+    """Evaluate explainable role eligibility without scores or confidence."""
+
+    def assess(
+        self,
+        target: NetworkEntity,
+        features: Iterable[RoleFeature],
+    ) -> tuple[RoleAssessment, ...]:
+        if not isinstance(target, NetworkEntity):
+            raise TypeError("target must be NetworkEntity")
+        normalized = tuple(
+            feature
+            for feature in _normalize_features(features)
+            if feature.evidence.target == target
+        )
+        present = frozenset(feature.signal for feature in normalized)
+        by_signal: dict[RoleSignal, list[AttributionEvidence]] = {}
+        for feature in normalized:
+            by_signal.setdefault(feature.signal, []).append(feature.evidence)
+        return tuple(
+            self._assess_definition(target, definition, present, by_signal)
+            for definition in _ROLE_DEFINITIONS
+        )
+
+    def classify(
+        self,
+        target: NetworkEntity,
+        features: Iterable[RoleFeature],
+    ) -> tuple[RoleAssessment, ...]:
+        return tuple(item for item in self.assess(target, features) if item.eligible)
+
+    @staticmethod
+    def _assess_definition(
+        target: NetworkEntity,
+        definition: _RoleDefinition,
+        present: frozenset[RoleSignal],
+        by_signal: dict[RoleSignal, list[AttributionEvidence]],
+    ) -> RoleAssessment:
+        matched = definition.supporting & present
+        negative = definition.blockers & present
+        matched_evidence = tuple(
+            evidence
+            for signal in matched
+            for evidence in by_signal.get(signal, ())
+        )
+        negative_evidence = tuple(
+            evidence
+            for signal in negative
+            for evidence in by_signal.get(signal, ())
+        )
+        eligible = not negative and all(
+            requirement.met_by(present) for requirement in definition.requirements
+        )
+        return RoleAssessment(
+            target=target,
+            role=definition.role,
+            eligible=eligible,
+            matched_signals=tuple(matched),
+            matched_evidence=matched_evidence,
+            missing_evidence=tuple(definition.supporting - present),
+            negative_signals=tuple(negative),
+            negative_evidence=negative_evidence,
+        )

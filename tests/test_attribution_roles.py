@@ -9,6 +9,7 @@ from apkscan.attribution.models import AttributionEvidence
 from apkscan.attribution.roles import (
     InfrastructureRole,
     RoleAssessment,
+    RoleClassifier,
     RoleFeature,
     RoleSignal,
 )
@@ -85,3 +86,67 @@ def test_role_assessment_is_json_safe_and_has_no_score_or_confidence() -> None:
     assert "confidence" not in payload
     assert not hasattr(assessment, "score")
     assert not hasattr(assessment, "confidence")
+
+
+def _features(*signals: RoleSignal) -> list[RoleFeature]:
+    return [_feature(signal, f"ev-{index}") for index, signal in enumerate(signals)]
+
+
+def test_domestic_relay_requires_location_connection_and_transition() -> None:
+    classifier = RoleClassifier()
+    features = _features(
+        RoleSignal.DIRECT_CONNECTION,
+        RoleSignal.DOMESTIC_NETWORK,
+        RoleSignal.SUBSEQUENT_OVERSEAS_CONNECTION,
+    )
+    result = classifier.classify(_entity(), features)
+    assert [item.role for item in result] == [
+        InfrastructureRole.DOMESTIC_RELAY_CANDIDATE
+    ]
+    assert result[0].eligible is True
+    assert result[0].missing_evidence == (
+        RoleSignal.NON_PUBLIC_CDN,
+        RoleSignal.REDIRECT,
+    )
+
+
+def test_origin_accepts_business_api_plus_independent_correlation() -> None:
+    result = RoleClassifier().classify(
+        _entity(),
+        _features(
+            RoleSignal.BUSINESS_API,
+            RoleSignal.LOGIN_ENDPOINT,
+            RoleSignal.HISTORICAL_DNS,
+            RoleSignal.NON_PUBLIC_CDN,
+        ),
+    )
+    assert [item.role for item in result] == [InfrastructureRole.ORIGIN_CANDIDATE]
+    assert result[0].missing_evidence == (
+        RoleSignal.BUSINESS_CERTIFICATE,
+        RoleSignal.STABLE_IP,
+    )
+
+
+def test_edge_requires_two_distinct_behavior_or_correlation_signals() -> None:
+    classifier = RoleClassifier()
+    assert classifier.classify(
+        _entity(), _features(RoleSignal.REDIRECT)
+    ) == ()
+    result = classifier.classify(
+        _entity(),
+        _features(RoleSignal.REDIRECT, RoleSignal.COOKIE_CHALLENGE),
+    )
+    assert [item.role for item in result] == [InfrastructureRole.EDGE_CANDIDATE]
+
+
+def test_assess_returns_ineligible_explanations_but_never_cloaking() -> None:
+    assessments = RoleClassifier().assess(_entity(), ())
+    assert [item.role for item in assessments] == [
+        InfrastructureRole.DOMESTIC_RELAY_CANDIDATE,
+        InfrastructureRole.ORIGIN_CANDIDATE,
+        InfrastructureRole.EDGE_CANDIDATE,
+    ]
+    assert all(not item.eligible for item in assessments)
+    assert InfrastructureRole.CLOAKING_EDGE_NODE not in {
+        item.role for item in assessments
+    }
