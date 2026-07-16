@@ -691,9 +691,17 @@ def test_public_api_exports_role_types() -> None:
     assert ExportedRoleScore is RoleScore
     assert ExportedContribution is ScoreContribution
 
+    # PR7 additively extends the attribution exports with the graph value model;
+    # the sorted-__all__ determinism invariant is preserved, never weakened.
     assert attribution.__all__ == [
         "AttributionEvidence",
         "EvidenceScorer",
+        "GraphEdge",
+        "GraphIssue",
+        "GraphNode",
+        "GraphNodeType",
+        "GraphRelation",
+        "InfrastructureGraph",
         "InfrastructureRole",
         "MissingScoreEvidence",
         "RoleAssessment",
@@ -702,4 +710,5 @@ def test_public_api_exports_role_types() -> None:
         "RoleScore",
         "RoleSignal",
         "ScoreContribution",
+        "build_infrastructure_graph",
     ]
