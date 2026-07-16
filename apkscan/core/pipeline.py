@@ -350,6 +350,18 @@ def _stage_credibility(state: _PipelineState) -> None:
     state.meta["ruleset_digest"] = ruleset_digest()
 
 
+def _stage_network_attribution(state: _PipelineState) -> None:
+    """附加视图：把**已收集的端点事实**组装成基础设施归因图谱 + 角色候选（PR3-PR8）。纯被动、
+    不新增网络/富化/文件 I/O、不反哺闭环/线索/退出码；仅写 meta["network_attribution"]。云/ASN/CDN
+    归属只是资源事实、非运营者指控。无可归因端点则省略该键。"""
+    from apkscan.attribution.assemble import build_network_attribution
+
+    artifact_id = str(state.meta.get("sample_sha256") or "") or f"pkg:{state.ctx.package_name or 'unknown'}"
+    blob = build_network_attribution(state.endpoints, artifact_id=artifact_id, phase="analyze")
+    if blob is not None:
+        state.meta["network_attribution"] = blob
+
+
 def _assemble_report(state: _PipelineState) -> Report:
     """据累积态组装 Report（字段一一对应）。"""
     return Report(
@@ -419,6 +431,7 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     _run_stage(state, "build_leads", _stage_build_leads)           # 端点 → Lead + advice 兜底
     _run_stage(state, "overseas_targets", _stage_overseas_targets)  # 境外目标结构化段
     _run_stage(state, "credibility", _stage_credibility)           # 完整度 / 工具版本 / 规则摘要
+    _run_stage(state, "network_attribution", _stage_network_attribution)  # 附加：基础设施归因图谱 + 角色候选（被动）
     _apply_stage_failures(state)          # 阶段级故障反馈 analysis_status
     state.meta["stage_status"] = state.stage_status
     report = _assemble_report(state)
