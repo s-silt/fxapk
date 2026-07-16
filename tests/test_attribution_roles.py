@@ -228,7 +228,10 @@ def test_edge_requires_two_distinct_behavior_or_correlation_signals() -> None:
         _entity(),
         _features(RoleSignal.REDIRECT, RoleSignal.COOKIE_CHALLENGE),
     )
-    assert [item.role for item in result] == [InfrastructureRole.EDGE_CANDIDATE]
+    assert [item.role for item in result] == [
+        InfrastructureRole.EDGE_CANDIDATE,
+        InfrastructureRole.CLOAKING_EDGE_NODE,  # redirect + cookie_challenge = 2 strong signals
+    ]
 
 
 def test_edge_public_cdn_is_context_only_not_matched_or_negative() -> None:
@@ -250,7 +253,10 @@ def test_edge_public_cdn_is_context_only_not_matched_or_negative() -> None:
         evidence=_evidence("ev-public-cdn", target=target),
     )
     result = RoleClassifier().classify(target, [redirect, cookie, public_cdn])
-    assert [item.role for item in result] == [InfrastructureRole.EDGE_CANDIDATE]
+    assert [item.role for item in result] == [
+        InfrastructureRole.EDGE_CANDIDATE,
+        InfrastructureRole.CLOAKING_EDGE_NODE,  # redirect + cookie_challenge = 2 strong signals
+    ]
     edge = result[0]
     assert edge.eligible is True
     # public_cdn lives only in the context lanes, mapped to its exact evidence.
@@ -295,23 +301,26 @@ def test_edge_without_public_cdn_does_not_report_it_missing() -> None:
         _entity(),
         _features(RoleSignal.REDIRECT, RoleSignal.COOKIE_CHALLENGE),
     )
-    assert [item.role for item in result] == [InfrastructureRole.EDGE_CANDIDATE]
+    assert [item.role for item in result] == [
+        InfrastructureRole.EDGE_CANDIDATE,
+        InfrastructureRole.CLOAKING_EDGE_NODE,  # redirect + cookie_challenge = 2 strong signals
+    ]
     edge = result[0]
     assert edge.context_signals == ()
     assert RoleSignal.PUBLIC_CDN not in edge.missing_evidence
 
 
-def test_assess_returns_ineligible_explanations_but_never_cloaking() -> None:
+def test_assess_returns_ineligible_explanations_including_cloaking() -> None:
     assessments = RoleClassifier().assess(_entity(), ())
     assert [item.role for item in assessments] == [
         InfrastructureRole.DOMESTIC_RELAY_CANDIDATE,
         InfrastructureRole.ORIGIN_CANDIDATE,
         InfrastructureRole.EDGE_CANDIDATE,
+        InfrastructureRole.CLOAKING_EDGE_NODE,
     ]
+    # cloaking is now emitted (last) but, like the others, ineligible on empty features
     assert all(not item.eligible for item in assessments)
-    assert InfrastructureRole.CLOAKING_EDGE_NODE not in {
-        item.role for item in assessments
-    }
+    assert InfrastructureRole.CLOAKING_EDGE_NODE in {item.role for item in assessments}
 
 
 def _evidence_variant(
@@ -577,7 +586,10 @@ def test_foreign_target_conflict_is_ignored_and_target_is_classified() -> None:
     result = RoleClassifier().classify(
         target, [target_redirect, target_cookie, foreign_conflict]
     )
-    assert [item.role for item in result] == [InfrastructureRole.EDGE_CANDIDATE]
+    assert [item.role for item in result] == [
+        InfrastructureRole.EDGE_CANDIDATE,
+        InfrastructureRole.CLOAKING_EDGE_NODE,  # redirect + cookie_challenge = 2 strong signals
+    ]
 
 
 def test_conflicting_foreign_features_are_ignored_not_raised() -> None:
