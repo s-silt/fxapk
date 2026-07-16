@@ -284,3 +284,72 @@ def test_non_role_feature_still_raises_type_error_with_foreign_features() -> Non
     )
     with pytest.raises(TypeError):
         RoleClassifier().assess(target, [foreign_feature, object()])  # type: ignore[list-item]
+
+
+def test_public_cdn_blocks_origin_and_is_reported_as_negative_evidence() -> None:
+    result = RoleClassifier().assess(
+        _entity(),
+        _features(
+            RoleSignal.BUSINESS_API,
+            RoleSignal.HISTORICAL_DNS,
+            RoleSignal.PUBLIC_CDN,
+        ),
+    )
+    origin = next(
+        item for item in result if item.role is InfrastructureRole.ORIGIN_CANDIDATE
+    )
+    assert origin.eligible is False
+    assert origin.negative_signals == (RoleSignal.PUBLIC_CDN,)
+    assert [item.id for item in origin.negative_evidence] == ["ev-2"]
+
+
+def test_generic_banner_and_shared_asn_alone_have_no_role_signal() -> None:
+    target = _entity()
+    generic_banner = _evidence(
+        "banner", target=target, evidence_type="generic_server_banner"
+    )
+    shared_asn = _evidence("asn", target=target, evidence_type="asn")
+    assert RoleClassifier().classify(target, ()) == ()
+    assert generic_banner.type == "generic_server_banner"
+    assert shared_asn.type == "asn"
+
+
+def test_features_for_other_targets_are_ignored() -> None:
+    target = _entity()
+    other = _entity("5.6.7.8")
+    features = [
+        RoleFeature(
+            signal=RoleSignal.BUSINESS_API,
+            evidence=_evidence("other-api", target=other),
+        ),
+        RoleFeature(
+            signal=RoleSignal.HISTORICAL_DNS,
+            evidence=_evidence("other-dns", target=other),
+        ),
+    ]
+    assert RoleClassifier().classify(target, features) == ()
+
+
+def test_duplicate_features_and_input_order_do_not_change_output() -> None:
+    first = _feature(RoleSignal.REDIRECT, "redirect")
+    second = _feature(RoleSignal.COOKIE_CHALLENGE, "cookie")
+    classifier = RoleClassifier()
+    left = [item.to_dict() for item in classifier.assess(_entity(), [first, second, first])]
+    right = [item.to_dict() for item in classifier.assess(_entity(), [second, first])]
+    assert left == right
+
+
+def test_public_api_exports_role_types() -> None:
+    from apkscan.attribution import (
+        InfrastructureRole as ExportedRole,
+        RoleAssessment as ExportedAssessment,
+        RoleClassifier as ExportedClassifier,
+        RoleFeature as ExportedFeature,
+        RoleSignal as ExportedSignal,
+    )
+
+    assert ExportedRole is InfrastructureRole
+    assert ExportedAssessment is RoleAssessment
+    assert ExportedClassifier is RoleClassifier
+    assert ExportedFeature is RoleFeature
+    assert ExportedSignal is RoleSignal
