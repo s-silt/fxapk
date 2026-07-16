@@ -233,7 +233,9 @@ _ROLE_DEFINITIONS = (
 )
 
 
-def _normalize_features(value: object) -> tuple[RoleFeature, ...]:
+def _normalize_features(
+    value: object, *, target: NetworkEntity
+) -> tuple[RoleFeature, ...]:
     if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
         raise TypeError("features must be a non-string iterable of RoleFeature")
     unique: dict[tuple[str, str], RoleFeature] = {}
@@ -242,6 +244,8 @@ def _normalize_features(value: object) -> tuple[RoleFeature, ...]:
             raise TypeError(
                 f"features must contain RoleFeature, got {type(item).__name__}"
             )
+        if item.evidence.target != target:
+            continue
         key = (item.signal.value, item.evidence.id)
         existing = unique.get(key)
         if existing is None:
@@ -263,11 +267,7 @@ class RoleClassifier:
     ) -> tuple[RoleAssessment, ...]:
         if not isinstance(target, NetworkEntity):
             raise TypeError("target must be NetworkEntity")
-        normalized = tuple(
-            feature
-            for feature in _normalize_features(features)
-            if feature.evidence.target == target
-        )
+        normalized = _normalize_features(features, target=target)
         present = frozenset(feature.signal for feature in normalized)
         by_signal: dict[RoleSignal, list[AttributionEvidence]] = {}
         for feature in normalized:
