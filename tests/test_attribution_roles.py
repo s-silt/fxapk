@@ -461,6 +461,69 @@ def test_role_assessment_conflicting_payload_across_feature_buckets_raise(
         )
 
 
+@pytest.mark.parametrize(
+    ("bucket_a", "bucket_b"),
+    [
+        ("matched_features", "context_features"),
+        ("matched_features", "negative_features"),
+        ("context_features", "negative_features"),
+    ],
+)
+@pytest.mark.parametrize("shared_evidence_id", [True, False])
+def test_role_assessment_rejects_same_signal_in_two_buckets(
+    bucket_a: str, bucket_b: str, shared_evidence_id: bool
+) -> None:
+    # A single RoleSignal must belong to exactly one bucket: it cannot be both
+    # matched and context (or negative) for the same target/role. This holds
+    # whether the two features share the exact same evidence id/payload (the
+    # exact same RoleFeature) or cite different evidence ids under that signal.
+    target = _entity()
+    signal = RoleSignal.REDIRECT
+    if shared_evidence_id:
+        first = _evidence("ev-overlap", target=target)
+        second = _evidence("ev-overlap", target=target)
+        assert first == second
+    else:
+        first = _evidence("ev-overlap-a", target=target)
+        second = _evidence("ev-overlap-b", target=target)
+    buckets: dict[str, tuple[RoleFeature, ...]] = {
+        bucket_a: (RoleFeature(signal=signal, evidence=first),),
+        bucket_b: (RoleFeature(signal=signal, evidence=second),),
+    }
+    with pytest.raises(ValueError):
+        RoleAssessment(
+            target=target,
+            role=InfrastructureRole.EDGE_CANDIDATE,
+            eligible=False,
+            **buckets,  # type: ignore[arg-type]
+        )
+
+
+def test_role_assessment_allows_shared_evidence_across_distinct_bucket_signals() -> None:
+    # Bucket exclusivity constrains signals, not evidence: two DIFFERENT signals
+    # living in different buckets may cite the exact same evidence id/payload
+    # without raising. This is the legal control for the exclusivity rule.
+    target = _entity()
+    shared = _evidence("ev-shared-bucket", target=target)
+    twin = _evidence("ev-shared-bucket", target=target)
+    assert shared == twin
+    assessment = RoleAssessment(
+        target=target,
+        role=InfrastructureRole.EDGE_CANDIDATE,
+        eligible=True,
+        matched_features=(
+            RoleFeature(signal=RoleSignal.REDIRECT, evidence=shared),
+        ),
+        context_features=(
+            RoleFeature(signal=RoleSignal.PUBLIC_CDN, evidence=twin),
+        ),
+    )
+    assert assessment.matched_signals == (RoleSignal.REDIRECT,)
+    assert assessment.context_signals == (RoleSignal.PUBLIC_CDN,)
+    assert [item.id for item in assessment.matched_evidence] == ["ev-shared-bucket"]
+    assert [item.id for item in assessment.context_evidence] == ["ev-shared-bucket"]
+
+
 def test_foreign_target_conflict_is_ignored_and_target_is_classified() -> None:
     target = _entity("1.2.3.4")
     foreign = _entity("9.9.9.9")
