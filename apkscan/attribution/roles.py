@@ -255,6 +255,19 @@ _EDGE_SIGNALS = frozenset(
         RoleSignal.CONTENT_DIFFERENCE,
     }
 )
+# Strong, behavioral cloaking signals (a strict subset of _EDGE_SIGNALS): different
+# content per client, a challenge cookie, and a redirect after the challenge. Each
+# requires the peer to actively implement it, unlike the merely-shared-hosting edge
+# facts (MANY_SHARED_DOMAINS / SHARED_TLS). >=2 of these is the "confirmed cloaking"
+# bar; because they are a subset of the edge signals with the same minimum, a
+# cloaking-eligible entity is always edge-eligible.
+_CLOAKING_STRONG = frozenset(
+    {
+        RoleSignal.CONTENT_DIFFERENCE,
+        RoleSignal.COOKIE_CHALLENGE,
+        RoleSignal.REDIRECT,
+    }
+)
 
 _ROLE_DEFINITIONS = (
     _RoleDefinition(
@@ -293,6 +306,20 @@ _ROLE_DEFINITIONS = (
         supporting=_EDGE_SIGNALS,
         requirements=(_Requirement(_EDGE_SIGNALS, minimum=2),),
         context=frozenset({RoleSignal.PUBLIC_CDN}),
+    ),
+    # cloaking_edge_node: a subtype of edge_candidate requiring >=2 STRONG behavioral
+    # signals. Weak edge facts (shared domains/TLS) and PUBLIC_CDN are context, never
+    # requirements, so an ordinary shared-hosting / OpenResty edge is not cloaking;
+    # a lone server banner is not a RoleSignal at all, so it can never solo-trigger.
+    # No blocker (mirrors the parent edge): a subtype only tightens the behavioral
+    # requirement, and anti-red fronts routinely ride public CDNs.
+    _RoleDefinition(
+        role=InfrastructureRole.CLOAKING_EDGE_NODE,
+        supporting=_CLOAKING_STRONG,
+        requirements=(_Requirement(_CLOAKING_STRONG, minimum=2),),
+        context=frozenset(
+            {RoleSignal.MANY_SHARED_DOMAINS, RoleSignal.SHARED_TLS, RoleSignal.PUBLIC_CDN}
+        ),
     ),
 )
 

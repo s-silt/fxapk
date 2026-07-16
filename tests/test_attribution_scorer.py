@@ -334,11 +334,18 @@ def test_role_score_coerces_role_string() -> None:
     assert RoleScore(**base).role is InfrastructureRole.ORIGIN_CANDIDATE  # type: ignore[arg-type]
 
 
-def test_role_score_rejects_cloaking_role() -> None:
+def test_role_score_rejects_off_policy_cloaking_trace() -> None:
+    # cloaking is a valid scored role as of PR8, but an off-policy trace (redirect
+    # scored 10 instead of its policy weight 20) is still rejected by conformance.
+    # eligible=False is the canonical verdict for a lone strong signal, so the
+    # weight mismatch is the SOLE non-conformance the ValueError can be attributed
+    # to (the match= pins that it is the policy-weight check, not eligibility).
     target = _entity()
     contribution = _contribution(RoleSignal.REDIRECT, 10, "ev-1", target=target)
-    base = _valid_role_score(target, (contribution,), role=InfrastructureRole.CLOAKING_EDGE_NODE)
-    with pytest.raises(ValueError):
+    base = _valid_role_score(
+        target, (contribution,), eligible=False, role=InfrastructureRole.CLOAKING_EDGE_NODE
+    )
+    with pytest.raises(ValueError, match="policy weight"):
         RoleScore(**base)  # type: ignore[arg-type]
 
 
@@ -633,6 +640,14 @@ _EDGE_WEIGHTS = {
     "content_difference": 25,
     "public_cdn": 0,
 }
+_CLOAKING_WEIGHTS = {
+    "content_difference": 40,
+    "cookie_challenge": 30,
+    "redirect": 20,
+    "many_shared_domains": 0,
+    "shared_tls": 0,
+    "public_cdn": 0,
+}
 
 
 @pytest.mark.parametrize(
@@ -641,6 +656,7 @@ _EDGE_WEIGHTS = {
         (InfrastructureRole.DOMESTIC_RELAY_CANDIDATE, _DOMESTIC_RELAY_WEIGHTS),
         (InfrastructureRole.ORIGIN_CANDIDATE, _ORIGIN_WEIGHTS),
         (InfrastructureRole.EDGE_CANDIDATE, _EDGE_WEIGHTS),
+        (InfrastructureRole.CLOAKING_EDGE_NODE, _CLOAKING_WEIGHTS),
     ],
 )
 def test_role_policy_weights_match_documented_table_exactly(
@@ -666,14 +682,15 @@ def test_negative_public_cdn_weights_only_on_relay_and_origin() -> None:
     assert origin.weight(RoleSignal.PUBLIC_CDN) == -60
 
 
-def test_policy_table_covers_exactly_the_three_scored_roles() -> None:
+def test_policy_table_covers_exactly_the_four_scored_roles() -> None:
     assert set(_ROLE_POLICIES) == {
         InfrastructureRole.DOMESTIC_RELAY_CANDIDATE,
         InfrastructureRole.ORIGIN_CANDIDATE,
         InfrastructureRole.EDGE_CANDIDATE,
+        InfrastructureRole.CLOAKING_EDGE_NODE,
     }
-    # cloaking_edge_node is reserved for PR8 and has no PR4 policy.
-    assert InfrastructureRole.CLOAKING_EDGE_NODE not in _ROLE_POLICIES
+    # cloaking_edge_node is scored as of PR8.
+    assert InfrastructureRole.CLOAKING_EDGE_NODE in _ROLE_POLICIES
 
 
 def test_policy_role_matches_its_table_key() -> None:
@@ -733,12 +750,17 @@ def test_policy_to_dict_is_a_fresh_copy() -> None:
     assert policy.weight(RoleSignal.PUBLIC_CDN) == 0
 
 
-def test_role_policy_rejects_cloaking_edge_node() -> None:
-    with pytest.raises(ValueError):
-        _RolePolicy(
-            role=InfrastructureRole.CLOAKING_EDGE_NODE,
-            weights={RoleSignal.PUBLIC_CDN: 0},
-        )
+def test_role_policy_accepts_cloaking_edge_node() -> None:
+    # cloaking_edge_node has a scoring policy as of PR8.
+    policy = _RolePolicy(
+        role=InfrastructureRole.CLOAKING_EDGE_NODE,
+        weights={
+            RoleSignal.CONTENT_DIFFERENCE: 40,
+            RoleSignal.COOKIE_CHALLENGE: 30,
+            RoleSignal.REDIRECT: 20,
+        },
+    )
+    assert policy.role is InfrastructureRole.CLOAKING_EDGE_NODE
 
 
 def test_role_policy_rejects_duplicate_and_non_int_weights() -> None:
@@ -1048,10 +1070,13 @@ def test_scorer_preserves_canonical_signal_omitted_from_policy_as_zero_context(
     assert score.to_dict()["context_evidence"] == baseline.to_dict()["context_evidence"]
 
 
-def test_scorer_rejects_non_assessment_and_cloaking_role() -> None:
+def test_scorer_rejects_non_assessment_and_non_canonical_cloaking() -> None:
     scorer = _require_scorer()
     with pytest.raises(TypeError):
         scorer.score(object())  # type: ignore[arg-type]
+    # cloaking is scored as of PR8, but a hand-built (non-canonical) cloaking
+    # assessment — here missing_evidence omitted for empty features — is still
+    # rejected because it does not equal the classifier's canonical reconstruction.
     cloaking = RoleAssessment(
         target=_entity(),
         role=InfrastructureRole.CLOAKING_EDGE_NODE,
