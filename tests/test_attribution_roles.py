@@ -235,3 +235,52 @@ def test_role_assessment_rejects_conflicting_matched_evidence() -> None:
             matched_signals=(RoleSignal.BUSINESS_API,),
             matched_evidence=(second, first),
         )
+
+
+def test_foreign_target_conflict_is_ignored_and_target_is_classified() -> None:
+    target = _entity("1.2.3.4")
+    foreign = _entity("9.9.9.9")
+    target_redirect = RoleFeature(
+        signal=RoleSignal.REDIRECT,
+        evidence=_evidence_variant("ev-shared", target=target, value=True),
+    )
+    target_cookie = RoleFeature(
+        signal=RoleSignal.COOKIE_CHALLENGE,
+        evidence=_evidence_variant("ev-cookie", target=target, value=True),
+    )
+    foreign_conflict = RoleFeature(
+        signal=RoleSignal.REDIRECT,
+        evidence=_evidence_variant("ev-shared", target=foreign, value=False),
+    )
+    result = RoleClassifier().classify(
+        target, [target_redirect, target_cookie, foreign_conflict]
+    )
+    assert [item.role for item in result] == [InfrastructureRole.EDGE_CANDIDATE]
+
+
+def test_conflicting_foreign_features_are_ignored_not_raised() -> None:
+    target = _entity("1.2.3.4")
+    foreign = _entity("9.9.9.9")
+    first = RoleFeature(
+        signal=RoleSignal.DIRECT_CONNECTION,
+        evidence=_evidence_variant("ev-foreign", target=foreign, value=True),
+    )
+    second = RoleFeature(
+        signal=RoleSignal.DIRECT_CONNECTION,
+        evidence=_evidence_variant("ev-foreign", target=foreign, value=False),
+    )
+    classifier = RoleClassifier()
+    assert classifier.classify(target, [first, second]) == ()
+    assessments = classifier.assess(target, [first, second])
+    assert all(not item.eligible for item in assessments)
+
+
+def test_non_role_feature_still_raises_type_error_with_foreign_features() -> None:
+    target = _entity("1.2.3.4")
+    foreign = _entity("9.9.9.9")
+    foreign_feature = RoleFeature(
+        signal=RoleSignal.REDIRECT,
+        evidence=_evidence_variant("ev-foreign", target=foreign, value=True),
+    )
+    with pytest.raises(TypeError):
+        RoleClassifier().assess(target, [foreign_feature, object()])  # type: ignore[list-item]
