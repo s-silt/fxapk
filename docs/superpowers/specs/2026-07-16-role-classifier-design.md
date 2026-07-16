@@ -1,6 +1,6 @@
 # Infrastructure Role Classifier Design
 
-**Date:** 2026-07-16  
+**Date:** 2026-07-16
 **Scope:** PR3 only
 
 ## Objective
@@ -157,4 +157,3 @@ PR3 adds focused pytest coverage for:
 - cloaking reservation without classification;
 - target isolation, duplicate handling, deterministic ordering, JSON safety,
   and validation.
-
