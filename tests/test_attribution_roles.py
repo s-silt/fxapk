@@ -340,6 +340,7 @@ def test_duplicate_features_and_input_order_do_not_change_output() -> None:
 
 
 def test_public_api_exports_role_types() -> None:
+    import apkscan.attribution as attribution
     from apkscan.attribution import (
         InfrastructureRole as ExportedRole,
         RoleAssessment as ExportedAssessment,
@@ -353,3 +354,12 @@ def test_public_api_exports_role_types() -> None:
     assert ExportedClassifier is RoleClassifier
     assert ExportedFeature is RoleFeature
     assert ExportedSignal is RoleSignal
+
+    assert attribution.__all__ == [
+        "AttributionEvidence",
+        "InfrastructureRole",
+        "RoleAssessment",
+        "RoleClassifier",
+        "RoleFeature",
+        "RoleSignal",
+    ]
