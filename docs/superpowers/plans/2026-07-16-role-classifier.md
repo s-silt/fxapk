@@ -19,6 +19,23 @@
 - Preserve deterministic ordering and JSON-safe serialization.
 - Use pytest, type hints, and the repository's three local gates before submission.
 
+## Final-review hardening amendment
+
+The final branch review supersedes the Task 1 `RoleAssessment` constructor
+snippet in three narrow ways:
+
+- structured `matched_features`, `context_features`, and `negative_features`
+  are the primary explanation fields; flattened signal/evidence accessors are
+  derived so the exact signal-to-evidence mapping cannot be lost;
+- one evidence ID must map to one complete payload per assessed target across
+  all signals and explanation buckets, while exact reuse across signals remains
+  legal;
+- `public_cdn` is retained as non-qualifying context for edge assessments and
+  never satisfies the two-signal edge eligibility gate.
+
+Regression tests for these requirements must fail before the implementation is
+changed, and all original PR3 false-positive and boundary tests must remain.
+
 ---
 
 ## File Structure
