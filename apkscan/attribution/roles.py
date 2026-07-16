@@ -72,29 +72,6 @@ def _normalize_signals(value: object) -> tuple[RoleSignal, ...]:
     return tuple(sorted({_coerce_signal(item) for item in value}, key=lambda item: item.value))
 
 
-def _normalize_evidence(
-    value: object, *, target: NetworkEntity
-) -> tuple[AttributionEvidence, ...]:
-    if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
-        raise TypeError("evidence must be a non-string iterable")
-    unique: dict[str, AttributionEvidence] = {}
-    for item in value:
-        if not isinstance(item, AttributionEvidence):
-            raise TypeError(
-                f"evidence must contain AttributionEvidence, got {type(item).__name__}"
-            )
-        if item.target != target:
-            raise ValueError("assessment evidence target must equal assessment target")
-        existing = unique.get(item.id)
-        if existing is None:
-            unique[item.id] = item
-        elif existing.to_dict() != item.to_dict():
-            raise ValueError(
-                f"conflicting evidence for id {item.id!r}"
-            )
-    return tuple(unique[key] for key in sorted(unique))
-
-
 @dataclass(frozen=True, kw_only=True)
 class RoleFeature:
     signal: RoleSignal
@@ -105,17 +82,60 @@ class RoleFeature:
         if not isinstance(self.evidence, AttributionEvidence):
             raise TypeError("evidence must be AttributionEvidence")
 
+    def to_dict(self) -> dict[str, Any]:
+        return {"signal": self.signal.value, "evidence": self.evidence.to_dict()}
+
+
+def _normalize_feature_bucket(
+    value: object,
+    *,
+    target: NetworkEntity,
+    seen_payloads: dict[str, dict[str, Any]],
+) -> tuple[RoleFeature, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
+        raise TypeError("features must be a non-string iterable of RoleFeature")
+    unique: dict[tuple[str, str], RoleFeature] = {}
+    for item in value:
+        if not isinstance(item, RoleFeature):
+            raise TypeError(
+                f"features must contain RoleFeature, got {type(item).__name__}"
+            )
+        if item.evidence.target != target:
+            raise ValueError("assessment feature target must equal assessment target")
+        payload = item.evidence.to_dict()
+        existing_payload = seen_payloads.get(item.evidence.id)
+        if existing_payload is None:
+            seen_payloads[item.evidence.id] = payload
+        elif existing_payload != payload:
+            raise ValueError(f"conflicting evidence for id {item.evidence.id!r}")
+        unique.setdefault((item.signal.value, item.evidence.id), item)
+    return tuple(unique[key] for key in sorted(unique))
+
+
+def _derive_signals(features: tuple[RoleFeature, ...]) -> tuple[RoleSignal, ...]:
+    return tuple(
+        sorted({feature.signal for feature in features}, key=lambda item: item.value)
+    )
+
+
+def _derive_evidence(
+    features: tuple[RoleFeature, ...]
+) -> tuple[AttributionEvidence, ...]:
+    unique: dict[str, AttributionEvidence] = {}
+    for feature in features:
+        unique.setdefault(feature.evidence.id, feature.evidence)
+    return tuple(unique[key] for key in sorted(unique))
+
 
 @dataclass(frozen=True, kw_only=True)
 class RoleAssessment:
     target: NetworkEntity
     role: InfrastructureRole
     eligible: bool
-    matched_signals: tuple[RoleSignal, ...] = ()
-    matched_evidence: tuple[AttributionEvidence, ...] = ()
+    matched_features: tuple[RoleFeature, ...] = ()
+    context_features: tuple[RoleFeature, ...] = ()
+    negative_features: tuple[RoleFeature, ...] = ()
     missing_evidence: tuple[RoleSignal, ...] = ()
-    negative_signals: tuple[RoleSignal, ...] = ()
-    negative_evidence: tuple[AttributionEvidence, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.target, NetworkEntity):
@@ -124,33 +144,58 @@ class RoleAssessment:
         if not isinstance(self.eligible, bool):
             raise TypeError("eligible must be bool")
         object.__setattr__(
-            self, "matched_signals", _normalize_signals(self.matched_signals)
-        )
-        object.__setattr__(
             self, "missing_evidence", _normalize_signals(self.missing_evidence)
         )
-        object.__setattr__(
-            self, "negative_signals", _normalize_signals(self.negative_signals)
-        )
-        object.__setattr__(
-            self,
-            "matched_evidence",
-            _normalize_evidence(self.matched_evidence, target=self.target),
-        )
-        object.__setattr__(
-            self,
-            "negative_evidence",
-            _normalize_evidence(self.negative_evidence, target=self.target),
-        )
+        # A single evidence.id must describe one fact across every bucket.
+        seen_payloads: dict[str, dict[str, Any]] = {}
+        for field in ("matched_features", "context_features", "negative_features"):
+            object.__setattr__(
+                self,
+                field,
+                _normalize_feature_bucket(
+                    getattr(self, field),
+                    target=self.target,
+                    seen_payloads=seen_payloads,
+                ),
+            )
+
+    @property
+    def matched_signals(self) -> tuple[RoleSignal, ...]:
+        return _derive_signals(self.matched_features)
+
+    @property
+    def matched_evidence(self) -> tuple[AttributionEvidence, ...]:
+        return _derive_evidence(self.matched_features)
+
+    @property
+    def context_signals(self) -> tuple[RoleSignal, ...]:
+        return _derive_signals(self.context_features)
+
+    @property
+    def context_evidence(self) -> tuple[AttributionEvidence, ...]:
+        return _derive_evidence(self.context_features)
+
+    @property
+    def negative_signals(self) -> tuple[RoleSignal, ...]:
+        return _derive_signals(self.negative_features)
+
+    @property
+    def negative_evidence(self) -> tuple[AttributionEvidence, ...]:
+        return _derive_evidence(self.negative_features)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "target": self.target.to_dict(),
             "role": self.role.value,
             "eligible": self.eligible,
+            "matched_features": [item.to_dict() for item in self.matched_features],
+            "context_features": [item.to_dict() for item in self.context_features],
+            "negative_features": [item.to_dict() for item in self.negative_features],
+            "missing_evidence": [item.value for item in self.missing_evidence],
             "matched_signals": [item.value for item in self.matched_signals],
             "matched_evidence": [item.to_dict() for item in self.matched_evidence],
-            "missing_evidence": [item.value for item in self.missing_evidence],
+            "context_signals": [item.value for item in self.context_signals],
+            "context_evidence": [item.to_dict() for item in self.context_evidence],
             "negative_signals": [item.value for item in self.negative_signals],
             "negative_evidence": [item.to_dict() for item in self.negative_evidence],
         }
@@ -171,6 +216,9 @@ class _RoleDefinition:
     supporting: frozenset[RoleSignal]
     requirements: tuple[_Requirement, ...]
     blockers: frozenset[RoleSignal] = frozenset()
+    # Signals preserved as explanatory context: they neither help a role match
+    # nor block it, and are never reported as missing evidence.
+    context: frozenset[RoleSignal] = frozenset()
 
 
 _TRANSITION = frozenset(
@@ -229,6 +277,7 @@ _ROLE_DEFINITIONS = (
         role=InfrastructureRole.EDGE_CANDIDATE,
         supporting=_EDGE_SIGNALS,
         requirements=(_Requirement(_EDGE_SIGNALS, minimum=2),),
+        context=frozenset({RoleSignal.PUBLIC_CDN}),
     ),
 )
 
@@ -239,6 +288,10 @@ def _normalize_features(
     if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
         raise TypeError("features must be a non-string iterable of RoleFeature")
     unique: dict[tuple[str, str], RoleFeature] = {}
+    # A single evidence.id must describe one fact for this target, regardless of
+    # which signal cites it; identical payload reuse across signals is allowed,
+    # but separate (signal, id) features are preserved individually.
+    seen_payloads: dict[str, dict[str, Any]] = {}
     for item in value:
         if not isinstance(item, RoleFeature):
             raise TypeError(
@@ -246,14 +299,15 @@ def _normalize_features(
             )
         if item.evidence.target != target:
             continue
-        key = (item.signal.value, item.evidence.id)
-        existing = unique.get(key)
-        if existing is None:
-            unique[key] = item
-        elif existing.evidence.to_dict() != item.evidence.to_dict():
+        payload = item.evidence.to_dict()
+        existing_payload = seen_payloads.get(item.evidence.id)
+        if existing_payload is None:
+            seen_payloads[item.evidence.id] = payload
+        elif existing_payload != payload:
             raise ValueError(
-                f"conflicting evidence for feature {key!r}"
+                f"conflicting evidence for id {item.evidence.id!r}"
             )
+        unique.setdefault((item.signal.value, item.evidence.id), item)
     return tuple(unique[key] for key in sorted(unique))
 
 
@@ -269,9 +323,9 @@ class RoleClassifier:
             raise TypeError("target must be NetworkEntity")
         normalized = _normalize_features(features, target=target)
         present = frozenset(feature.signal for feature in normalized)
-        by_signal: dict[RoleSignal, list[AttributionEvidence]] = {}
+        by_signal: dict[RoleSignal, list[RoleFeature]] = {}
         for feature in normalized:
-            by_signal.setdefault(feature.signal, []).append(feature.evidence)
+            by_signal.setdefault(feature.signal, []).append(feature)
         return tuple(
             self._assess_definition(target, definition, present, by_signal)
             for definition in _ROLE_DEFINITIONS
@@ -289,19 +343,25 @@ class RoleClassifier:
         target: NetworkEntity,
         definition: _RoleDefinition,
         present: frozenset[RoleSignal],
-        by_signal: dict[RoleSignal, list[AttributionEvidence]],
+        by_signal: dict[RoleSignal, list[RoleFeature]],
     ) -> RoleAssessment:
         matched = definition.supporting & present
+        context = definition.context & present
         negative = definition.blockers & present
-        matched_evidence = tuple(
-            evidence
+        matched_features = tuple(
+            feature
             for signal in matched
-            for evidence in by_signal.get(signal, ())
+            for feature in by_signal.get(signal, ())
         )
-        negative_evidence = tuple(
-            evidence
+        context_features = tuple(
+            feature
+            for signal in context
+            for feature in by_signal.get(signal, ())
+        )
+        negative_features = tuple(
+            feature
             for signal in negative
-            for evidence in by_signal.get(signal, ())
+            for feature in by_signal.get(signal, ())
         )
         eligible = not negative and all(
             requirement.met_by(present) for requirement in definition.requirements
@@ -310,9 +370,8 @@ class RoleClassifier:
             target=target,
             role=definition.role,
             eligible=eligible,
-            matched_signals=tuple(matched),
-            matched_evidence=matched_evidence,
+            matched_features=matched_features,
+            context_features=context_features,
+            negative_features=negative_features,
             missing_evidence=tuple(definition.supporting - present),
-            negative_signals=tuple(negative),
-            negative_evidence=negative_evidence,
         )
