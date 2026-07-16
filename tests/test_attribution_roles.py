@@ -162,9 +162,44 @@ def test_domestic_relay_requires_location_connection_and_transition() -> None:
     ]
     assert result[0].eligible is True
     assert result[0].missing_evidence == (
+        RoleSignal.HISTORICAL_DNS,
         RoleSignal.NON_PUBLIC_CDN,
         RoleSignal.REDIRECT,
     )
+
+
+def test_domestic_relay_retains_historical_dns_supporting_signal() -> None:
+    # historical_dns is a domestic-relay supporting signal: when present it is
+    # matched and never listed as missing; when absent it surfaces as a gap.
+    # Eligibility never depends on it (the three requirements are unchanged).
+    classifier = RoleClassifier()
+    with_dns = classifier.classify(
+        _entity(),
+        _features(
+            RoleSignal.DIRECT_CONNECTION,
+            RoleSignal.DOMESTIC_NETWORK,
+            RoleSignal.SUBSEQUENT_OVERSEAS_CONNECTION,
+            RoleSignal.HISTORICAL_DNS,
+        ),
+    )
+    assert [item.role for item in with_dns] == [
+        InfrastructureRole.DOMESTIC_RELAY_CANDIDATE
+    ]
+    assert with_dns[0].eligible is True
+    assert RoleSignal.HISTORICAL_DNS in with_dns[0].matched_signals
+    assert RoleSignal.HISTORICAL_DNS not in with_dns[0].missing_evidence
+
+    without_dns = classifier.classify(
+        _entity(),
+        _features(
+            RoleSignal.DIRECT_CONNECTION,
+            RoleSignal.DOMESTIC_NETWORK,
+            RoleSignal.SUBSEQUENT_OVERSEAS_CONNECTION,
+        ),
+    )
+    assert without_dns[0].eligible is True
+    assert RoleSignal.HISTORICAL_DNS in without_dns[0].missing_evidence
+    assert RoleSignal.HISTORICAL_DNS not in without_dns[0].matched_signals
 
 
 def test_origin_accepts_business_api_plus_independent_correlation() -> None:
@@ -629,11 +664,21 @@ def test_duplicate_features_and_input_order_do_not_change_output() -> None:
 def test_public_api_exports_role_types() -> None:
     import apkscan.attribution as attribution
     from apkscan.attribution import (
+        EvidenceScorer as ExportedScorer,
         InfrastructureRole as ExportedRole,
+        MissingScoreEvidence as ExportedMissing,
         RoleAssessment as ExportedAssessment,
         RoleClassifier as ExportedClassifier,
         RoleFeature as ExportedFeature,
+        RoleScore as ExportedRoleScore,
         RoleSignal as ExportedSignal,
+        ScoreContribution as ExportedContribution,
+    )
+    from apkscan.attribution.scorer import (
+        EvidenceScorer,
+        MissingScoreEvidence,
+        RoleScore,
+        ScoreContribution,
     )
 
     assert ExportedRole is InfrastructureRole
@@ -641,12 +686,20 @@ def test_public_api_exports_role_types() -> None:
     assert ExportedClassifier is RoleClassifier
     assert ExportedFeature is RoleFeature
     assert ExportedSignal is RoleSignal
+    assert ExportedScorer is EvidenceScorer
+    assert ExportedMissing is MissingScoreEvidence
+    assert ExportedRoleScore is RoleScore
+    assert ExportedContribution is ScoreContribution
 
     assert attribution.__all__ == [
         "AttributionEvidence",
+        "EvidenceScorer",
         "InfrastructureRole",
+        "MissingScoreEvidence",
         "RoleAssessment",
         "RoleClassifier",
         "RoleFeature",
+        "RoleScore",
         "RoleSignal",
+        "ScoreContribution",
     ]
