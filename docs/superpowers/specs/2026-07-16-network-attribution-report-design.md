@@ -59,13 +59,33 @@ failure is a bounded skip recorded under `bridge_issues`, never a crash.
 | `dns.cname` (per hop) | `dns_alias` | DOMAIN(endpoint) → DOMAIN(hop) | `dns` | 0.8 |
 | `asn.asn` / `dns.hosting[].asn` / `shodan.asn` / `attribution.ips[].origin_network.asn` | `asn` | IP → ASN(`AS<int>`) | `asn`/`dns`/`shodan`/`attribution` | 0.6 |
 | `certs.related_hostnames` / `shodan.hostnames` | `related_hostname` | (endpoint) → DOMAIN | `certs`/`shodan` | 0.7/0.6 |
+| a **domain** endpoint's `runtime.remote_endpoints[].ip`, guarded by the domain ∈ `runtime.sni` | `tls_sni` | DOMAIN(endpoint) → IP | `runtime` | 0.95 |
+| an **ip** endpoint with a peer-observing runtime source (`evidences[].source` ∈ {`runtime`, `runtime-pcap`}) | `network_flow` | IP(endpoint) target (APK contacted) | `runtime` | 0.95 |
 
-**Runtime bridging is deferred** (not in this PR): the `runtime.sni → tls_sni`
-(DOMAIN → IP) and `runtime`-observed → `network_flow` (observed-contact) edge rows
-are not emitted yet, and their `_CONFIDENCE` entries are intentionally absent —
-adding an observed-contact graph edge needs the runtime-enrichment shape wired and
-its own tests. The runtime-observed fact is still consumed for the
-`direct_connection` RoleSignal below; only the two graph edges wait on a follow-up.
+**Runtime bridging** (the last two rows) is the strongest signal — dynamic ground
+truth that the app actually spoke to this IP / sent this SNI to this IP at capture
+time. It reads ONLY the structured `enrichment["runtime"]` pairing written by
+`capture._annotate_runtime_endpoints` (`remote_endpoints` = sorted `"ip:port"`
+strings, IPv6-safe split on the last colon requiring a valid decimal port; `sni` =
+observed SNI names); the free-text evidence snippet is never parsed. `graph.py`
+already routes both types in its closed `_EDGE_HANDLERS` (`tls_sni` → APK `contacted`
+DOMAIN + DOMAIN `served_at` IP; `network_flow` → APK `contacted` IP, lazily minting
+the APK node), so no frozen-module change is needed. Four guards keep it passive and
+non-over-inferring: (1) `tls_sni` is emitted only from the **domain** side and only
+when the endpoint's own domain is among the observed SNI (so `remote_endpoints`
+really are IPs THIS domain's TLS went to — never a co-hosted third-party name listed
+on an ip endpoint); (2) `network_flow` and the
+`direct_connection` signal are licensed ONLY by a source that observed the actual
+peer IP — `runtime` (mitm upstream) / `runtime-pcap` (pcap `dst_ip`) — via an allowlist
+`_OBSERVED_CONTACT_SOURCES`; a value derived from an HTTP Host / `:authority` header
+(`runtime-tshark`), a decrypted request/body (`*-decrypted`), or a tool probe does not
+prove the app contacted THAT IP (a spoofed IP-literal `Host` header could otherwise mint
+a top-confidence false edge), so it is excluded — allowlist, so a new content-derived
+source is excluded by default; (3) known anti-fraud interception
+nodes (`is_known_intercept_ip`, hoisted to `network.fingerprints`) are excluded from
+both edges — an intercept page is never a domain's serving IP nor a business contact,
+matching the pcap ingest's own drop; (4) a mismatched / absent / malformed runtime
+pairing (e.g. mitm-only runs) simply yields no `tls_sni`.
 
 **Confidence is a constant per `(source, type)` and `timestamp` is `None`** — the
 fact-only id excludes them, so a varying confidence/timestamp would make two
