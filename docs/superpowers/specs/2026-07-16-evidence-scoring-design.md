@@ -171,6 +171,24 @@ when bypassing `EvidenceScorer`.
 - Ordinary public-CDN infrastructure remains blocked from origin/domestic role
   confidence, while public-CDN evidence may still explain an edge assessment.
 
+### Final-review hardening
+
+The public result model is also a semantic validation boundary, not merely an
+arithmetic container. Direct `RoleScore` construction must enforce the current
+role policy and PR3 classifier contract even when `EvidenceScorer` is bypassed:
+
+- every policy-known contribution has the exact documented weight;
+- policy-unknown canonical evidence is retained only as zero-point context;
+- missing evidence equals every absent positive policy signal with exact points;
+- eligibility and the complete contribution feature set equal the canonical
+  `RoleClassifier` result for the same target;
+- one evidence ID maps to one complete payload across every contribution;
+  identical payload reuse by different signals remains valid.
+
+`EvidenceScorer` additionally retains any future canonical signal omitted from
+the weight policy as a deterministic zero-point context contribution. A policy
+extension therefore cannot silently discard already normalized evidence.
+
 ## Tests
 
 PR4 adds focused pytest coverage for:
@@ -185,5 +203,7 @@ PR4 adds focused pytest coverage for:
 - deterministic JSON serialization and frozen-model validation;
 - contradictory score arithmetic and manually fabricated eligibility/bucket
   placement rejection;
+- direct-result policy/missing/classifier validation, cross-contribution
+  evidence-ID collision rejection, and unweighted canonical evidence retention;
 - rejection of unsupported cloaking scoring;
 - the domestic `historical_dns` retention regression.

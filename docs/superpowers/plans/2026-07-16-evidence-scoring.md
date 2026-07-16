@@ -29,6 +29,15 @@ never changes it.
 - Preserve deterministic ordering and JSON-safe serialization.
 - Complete Ruff, Pyright, pytest, and `git diff --check` before PR submission.
 
+## Final-review hardening amendment
+
+Before PR submission, the public `RoleScore` constructor must validate exact
+policy weights, complete positive missing evidence, PR3-derived eligibility,
+and canonical feature relevance. Evidence IDs must be globally consistent
+across contributions. `EvidenceScorer` must serialize canonical signals omitted
+from a policy as zero-point context instead of dropping them. These requirements
+supersede any earlier task snippet that treated `RoleScore` as arithmetic-only.
+
 ## File Structure
 
 - Create `apkscan/attribution/scorer.py`.
@@ -52,6 +61,11 @@ never changes it.
 - [ ] Add contradiction tests requiring `raw_score` to equal contribution sum,
   `score` to equal the clamped raw score, and `confidence` to follow eligibility
   and score exactly.
+- [ ] Add direct-construction adversarial tests for off-policy weights,
+  incomplete or wrong missing evidence, irrelevant role features, and fabricated
+  eligibility.
+- [ ] Reject conflicting reuse of one evidence ID across contributions in both
+  input orders while allowing identical payload reuse across signals.
 - [ ] Run `python -m pytest tests/test_attribution_scorer.py -q` and confirm the
   expected import/behavior failures.
 - [ ] Implement the smallest validated immutable models and rerun the tests.
@@ -80,6 +94,8 @@ never changes it.
   missing evidence before awarding points.
 - [ ] Derive missing weighted evidence from policy and preserve unweighted
   matched/context features.
+- [ ] Preserve a canonical signal omitted from the active policy as a
+  deterministic zero-point context contribution.
 - [ ] Reject unsupported cloaking assessments explicitly.
 - [ ] Rerun focused tests, Ruff, and Pyright.
 
