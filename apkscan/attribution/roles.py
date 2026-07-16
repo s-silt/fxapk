@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
+from itertools import combinations
 from typing import Any
 
 from apkscan.attribution.models import AttributionEvidence
@@ -148,7 +149,8 @@ class RoleAssessment:
         )
         # A single evidence.id must describe one fact across every bucket.
         seen_payloads: dict[str, dict[str, Any]] = {}
-        for field in ("matched_features", "context_features", "negative_features"):
+        buckets = ("matched_features", "context_features", "negative_features")
+        for field in buckets:
             object.__setattr__(
                 self,
                 field,
@@ -158,6 +160,18 @@ class RoleAssessment:
                     seen_payloads=seen_payloads,
                 ),
             )
+        # Each RoleSignal belongs to exactly one bucket: a signal cannot be
+        # simultaneously matched, contextual, and/or negative for one target.
+        bucket_signals = {
+            field: _derive_signals(getattr(self, field)) for field in buckets
+        }
+        for first, second in combinations(buckets, 2):
+            overlap = set(bucket_signals[first]) & set(bucket_signals[second])
+            if overlap:
+                shared = ", ".join(signal.value for signal in sorted(overlap, key=lambda item: item.value))
+                raise ValueError(
+                    f"signal(s) {shared} appear in both {first} and {second}"
+                )
 
     @property
     def matched_signals(self) -> tuple[RoleSignal, ...]:
