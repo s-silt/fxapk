@@ -821,9 +821,15 @@ def test_providers_subpackage_exports() -> None:
 
     assert providers.IntelProvider is IntelProvider
     assert ProviderContractErrorReexport is ProviderContractError
+    # PR6 extends the subpackage exports with the four concrete adapters; the
+    # sorted-__all__ determinism invariant is preserved, never weakened.
     assert providers.__all__ == [
+        "CensysIntelProvider",
+        "FofaIntelProvider",
+        "HunterIntelProvider",
         "IntelProvider",
         "ProviderContractError",
+        "ShodanIntelProvider",
     ]
     for name in providers.__all__:
         assert hasattr(providers, name)
