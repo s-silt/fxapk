@@ -34,7 +34,12 @@ from apkscan.attribution.roles import (
 )
 from apkscan.attribution.scorer import EvidenceScorer
 from apkscan.network import NetworkEntity, NetworkEntityType
-from apkscan.network.fingerprints import normalize_domain, normalize_ip, stable_digest
+from apkscan.network.fingerprints import (
+    is_known_intercept_ip,
+    normalize_domain,
+    normalize_ip,
+    stable_digest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +65,10 @@ _CONFIDENCE: MappingProxyType[tuple[str, str], float] = MappingProxyType(
         ("attribution", "asn"): 0.6,
         ("certs", "related_hostname"): 0.7,
         ("shodan", "related_hostname"): 0.6,
+        # runtime-observed edges (PCAP/mitm) — the strongest signal: the app
+        # actually spoke to this IP / sent this SNI to this IP at capture time.
+        ("runtime", "tls_sni"): 0.95,
+        ("runtime", "network_flow"): 0.95,
     }
 )
 #: CONSTANT confidence per role signal for the (provenance-only) licensing evidence.
@@ -146,10 +155,50 @@ def _evidence(
     )
 
 
-def _runtime_observed(endpoint: Any) -> bool:
+#: runtime evidence sub-sources that OBSERVED the actual network peer of an IP endpoint:
+#: pcap parses the real TCP/UDP dst_ip; mitm records the actual upstream server IP it
+#: connected to. Every OTHER runtime sub-source derives the IP endpoint's value from an
+#: HTTP Host / :authority header (``runtime-tshark``), a decrypted request/body
+#: (``*-decrypted``), or a tool-initiated probe — none of which prove the app contacted
+#: THAT IP — so they license no observed-contact edge/signal. Allowlist, not denylist: a
+#: new content-derived source is excluded by default (the safe direction for the
+#: no-over-inference contract).
+_OBSERVED_CONTACT_SOURCES = frozenset({"runtime", "runtime-pcap"})
+
+
+def _runtime_contact_observed(endpoint: Any) -> bool:
+    """Whether a runtime source OBSERVED a network flow to this endpoint's own peer IP
+    (pcap ``dst_ip`` / mitm upstream), as opposed to deriving the value from a Host /
+    :authority header, a decrypted body, or a tool probe — none of which prove a contact."""
     return any(
-        str(getattr(ev, "source", "")).startswith("runtime")
+        str(getattr(ev, "source", "")) in _OBSERVED_CONTACT_SOURCES
         for ev in getattr(endpoint, "evidences", []) or []
+    )
+
+
+def _ip_from_hostport(value: object) -> str | None:
+    """The IP half of an ``ip:port`` runtime ``remote_endpoints`` entry (the capture
+    writer always emits ``f"{ip}:{port}"``). IPv6-safe: split on the LAST colon and
+    require a valid decimal port suffix. Best-effort on malformed input: an entry whose
+    stripped head is not a valid address is skipped, but a hand-edited *port-less* IPv6
+    whose last group is decimal (e.g. ``2001:db8::aaaa:443``) is inherently ambiguous with
+    the ``ip:port`` form and may still be mis-split — real capture data always carries a
+    genuine port, and brackets would be needed to disambiguate hand-edited input."""
+    if not isinstance(value, str) or ":" not in value:
+        return None
+    head, _, port = value.rpartition(":")
+    if not head or not port.isdecimal() or not (1 <= int(port) <= 65535):
+        return None
+    return head
+
+
+def _domain_in_observed_sni(domain: NetworkEntity, runtime: dict[str, Any]) -> bool:
+    """The endpoint's own domain is among the runtime-observed SNI names, so its
+    ``remote_endpoints`` really are IPs THIS domain's TLS was sent to — a guard
+    against a hand-edited report pairing a domain with unrelated remote IPs."""
+    return any(
+        (host := _domain_entity(raw)) is not None and host.value == domain.value
+        for raw in _as_list(runtime.get("sni"))
     )
 
 
@@ -239,6 +288,31 @@ def _bridge_endpoint(endpoint: Any) -> tuple[list[AttributionEvidence], list[dic
             "_entry": entry,  # internal, stripped before serialization
         })
 
+    # runtime-observed edges (the strongest signal — dynamic ground truth). Reads
+    # ONLY the structured runtime pairing (capture._annotate_runtime_endpoints); the
+    # free-text evidence snippet is never parsed. graph.py already routes these two
+    # evidence types (tls_sni -> DOMAIN served_at IP + APK contacted DOMAIN;
+    # network_flow -> APK contacted IP), so no frozen-module change is needed. Known
+    # anti-fraud interception nodes are excluded — an intercept page is never a
+    # domain's serving IP nor a business contact (parity with the pcap ingest drop).
+    runtime = _as_dict(enrichment.get("runtime"))
+    if domain is not None and _domain_in_observed_sni(domain, runtime):
+        seen_ips: set[str] = set()
+        for raw in _as_list(runtime.get("remote_endpoints")):
+            ip = _ip_entity(_ip_from_hostport(raw))
+            if ip is not None and ip.value not in seen_ips and not is_known_intercept_ip(ip.value):
+                seen_ips.add(ip.value)
+                edges.append(_evidence(
+                    source="runtime", etype="tls_sni", target=domain, value=ip.value,
+                    raw_reference=f"{ref}.runtime", confidence=_CONFIDENCE[("runtime", "tls_sni")]))
+    if kind == "ip" and _runtime_contact_observed(endpoint):
+        ip = _ip_entity(value)
+        if ip is not None and not is_known_intercept_ip(ip.value):
+            edges.append(_evidence(
+                source="runtime", etype="network_flow", target=ip, value=True,
+                raw_reference=f"endpoints[{value}].evidences[runtime]",
+                confidence=_CONFIDENCE[("runtime", "network_flow")]))
+
     return edges, contexts
 
 
@@ -261,7 +335,11 @@ def _ip_signal_features(
         ))
 
     is_ip_endpoint = getattr(endpoint, "kind", None) == "ip" and _ip_entity(getattr(endpoint, "value", None))
-    if is_ip_endpoint is not None and getattr(is_ip_endpoint, "value", None) == ip.value and _runtime_observed(endpoint):
+    if (
+        is_ip_endpoint is not None
+        and getattr(is_ip_endpoint, "value", None) == ip.value
+        and _runtime_contact_observed(endpoint)
+    ):
         add(RoleSignal.DIRECT_CONNECTION, "runtime", True, f"endpoints[{ip.value}].evidences[runtime]")
 
     # domestic_network is a PER-IP jurisdiction fact: the IP's own attribution
