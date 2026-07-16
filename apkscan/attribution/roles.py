@@ -266,6 +266,7 @@ _ROLE_DEFINITIONS = (
                 RoleSignal.REDIRECT,
                 RoleSignal.SUBSEQUENT_OVERSEAS_CONNECTION,
                 RoleSignal.NON_PUBLIC_CDN,
+                RoleSignal.HISTORICAL_DNS,
             }
         ),
         requirements=(
