@@ -8,6 +8,8 @@ import json
 import urllib.parse
 
 __all__ = [
+    "KNOWN_INTERCEPT_IPS",
+    "is_known_intercept_ip",
     "normalize_authority",
     "normalize_domain",
     "normalize_ip",
@@ -19,6 +21,17 @@ __all__ = [
 _MAX_DOMAIN_LENGTH = 253
 _MAX_LABEL_LENGTH = 63
 _DEFAULT_PORTS = {"http": 80, "https": 443}
+
+#: Known non-business interception nodes. A domestically-blocked fraud domain resolves
+#: to an anti-fraud interception page IP — never a real serving/landing host — so it must
+#: be excluded from attribution (never surfaced as "the domain's serving IP"). Shared by
+#: the pcap ingest (drop as a runtime endpoint) and the attribution bridge (mint no edge).
+KNOWN_INTERCEPT_IPS: frozenset[str] = frozenset({"183.192.65.101"})
+
+
+def is_known_intercept_ip(value: str) -> bool:
+    """Whether ``value`` is a known interception page IP, not a business server."""
+    return value in KNOWN_INTERCEPT_IPS
 
 
 def _require_string(name: str, value: object) -> str:
