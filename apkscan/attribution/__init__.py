@@ -8,12 +8,22 @@ from apkscan.attribution.roles import (
     RoleFeature,
     RoleSignal,
 )
+from apkscan.attribution.scorer import (
+    EvidenceScorer,
+    MissingScoreEvidence,
+    RoleScore,
+    ScoreContribution,
+)
 
 __all__ = [
     "AttributionEvidence",
+    "EvidenceScorer",
     "InfrastructureRole",
+    "MissingScoreEvidence",
     "RoleAssessment",
     "RoleClassifier",
     "RoleFeature",
+    "RoleScore",
     "RoleSignal",
+    "ScoreContribution",
 ]
