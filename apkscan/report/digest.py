@@ -50,6 +50,78 @@ def _compact_lead(lead: dict[str, Any], redact: bool) -> dict[str, Any]:
     }
 
 
+#: role display order for the network_attribution digest block (behavioral-deception
+#: and origin findings first; edge last as it is closest to a mere resource fact).
+_ROLE_RANK = {
+    "cloaking_edge_node": 0,
+    "origin_candidate": 1,
+    "domestic_relay_candidate": 2,
+    "edge_candidate": 3,
+}
+
+
+def _list(value: object) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _neg_score(value: object) -> float:
+    """Negated score for a descending sort. A non-numeric / bool score (only
+    reachable from a hand-edited or version-skewed report.json) sorts as 0 so the
+    digest degrades rather than raising on the one arithmetic use of the field."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    return -float(value)
+
+
+def _compact_network_attribution(raw: Any) -> dict[str, Any] | None:
+    """Low-token projection of meta['network_attribution']: graph counts + the
+    ELIGIBLE role candidates only (ineligible are counted, not listed). Defensive
+    — any malformed shape degrades to an empty block; never raises, never the raw graph."""
+    if not isinstance(raw, dict):
+        return None
+    graph = raw.get("graph")
+    graph = graph if isinstance(graph, dict) else {}
+
+    candidates: list[dict[str, Any]] = []
+    eligible = ineligible = 0
+    by_role: Counter = Counter()
+    for endpoint in _list(raw.get("endpoints")):
+        if not isinstance(endpoint, dict):
+            continue
+        for ipv in _list(endpoint.get("ips")):
+            if not isinstance(ipv, dict):
+                continue
+            for role in _list(ipv.get("roles")):
+                if not isinstance(role, dict):
+                    continue
+                if role.get("eligible"):
+                    eligible += 1
+                    by_role[str(role.get("role"))] += 1
+                    candidates.append({
+                        "endpoint": endpoint.get("endpoint"),
+                        "ip": ipv.get("ip"),
+                        "role": role.get("role"),
+                        "score": role.get("score"),
+                        "confidence": role.get("confidence"),
+                    })
+                else:
+                    ineligible += 1
+    candidates.sort(
+        key=lambda c: (_ROLE_RANK.get(str(c.get("role")), 99), _neg_score(c.get("score")), str(c.get("ip")))
+    )
+    return {
+        "counts": {
+            "nodes": len(_list(graph.get("nodes"))),
+            "edges": len(_list(graph.get("edges"))),
+            "issues": len(_list(graph.get("issues"))),
+            "eligible": eligible,
+            "ineligible": ineligible,
+            "by_role": dict(by_role),
+        },
+        "role_candidates": candidates[:10],
+    }
+
+
 def build_digest(report: object, *, redact: bool = False) -> dict[str, Any]:
     """report.json 解析出的对象 → 紧凑摘要 dict（线索按优先级排序）。绝不抛。
 
@@ -89,7 +161,14 @@ def build_digest(report: object, *, redact: bool = False) -> dict[str, Any]:
         else {},
     }
 
-    return {
+    network_attribution = _compact_network_attribution(meta.get("network_attribution"))
+    role_candidate_count = (
+        network_attribution["counts"].get("eligible", 0)
+        if isinstance(network_attribution, dict)
+        else 0
+    )
+
+    digest: dict[str, Any] = {
         "package": meta.get("package_name") or report.get("package_name"),
         "sha256": meta.get("sample_sha256"),
         "app_classification": meta.get("app_classification"),
@@ -99,8 +178,12 @@ def build_digest(report: object, *, redact: bool = False) -> dict[str, Any]:
             "by_category": dict(by_category),
             "comm_sessions": len(meta.get("comm_sessions") or []),
             "overseas_target_hosts": len(overseas_targets),
+            "attributed_role_candidates": role_candidate_count,
         },
         "leads": [_compact_lead(lead, redact) for lead in leads_sorted],
         "overseas_targets": overseas_targets,
         "closure": compact_closure,
     }
+    if network_attribution is not None:
+        digest["network_attribution"] = network_attribution
+    return digest
