@@ -303,15 +303,15 @@ def test_public_cdn_blocks_origin_and_is_reported_as_negative_evidence() -> None
     assert [item.id for item in origin.negative_evidence] == ["ev-2"]
 
 
-def test_generic_banner_and_shared_asn_alone_have_no_role_signal() -> None:
+@pytest.mark.parametrize("weak_signal", ["generic_server_banner", "asn"])
+def test_generic_banner_and_shared_asn_alone_have_no_role_signal(
+    weak_signal: str,
+) -> None:
+    assert weak_signal not in {signal.value for signal in RoleSignal}
     target = _entity()
-    generic_banner = _evidence(
-        "banner", target=target, evidence_type="generic_server_banner"
-    )
-    shared_asn = _evidence("asn", target=target, evidence_type="asn")
-    assert RoleClassifier().classify(target, ()) == ()
-    assert generic_banner.type == "generic_server_banner"
-    assert shared_asn.type == "asn"
+    evidence = _evidence(weak_signal, target=target, evidence_type=weak_signal)
+    with pytest.raises(ValueError):
+        RoleFeature(signal=weak_signal, evidence=evidence)  # type: ignore[arg-type]
 
 
 def test_features_for_other_targets_are_ignored() -> None:
