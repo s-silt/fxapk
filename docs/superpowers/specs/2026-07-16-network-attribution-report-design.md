@@ -59,8 +59,13 @@ failure is a bounded skip recorded under `bridge_issues`, never a crash.
 | `dns.cname` (per hop) | `dns_alias` | DOMAIN(endpoint) → DOMAIN(hop) | `dns` | 0.8 |
 | `asn.asn` / `dns.hosting[].asn` / `shodan.asn` / `attribution.ips[].origin_network.asn` | `asn` | IP → ASN(`AS<int>`) | `asn`/`dns`/`shodan`/`attribution` | 0.6 |
 | `certs.related_hostnames` / `shodan.hostnames` | `related_hostname` | (endpoint) → DOMAIN | `certs`/`shodan` | 0.7/0.6 |
-| `runtime.sni` + a remote IP | `tls_sni` | DOMAIN → IP | `runtime` | 0.95 |
-| `runtime` observed, no remote IP | `network_flow` | IP(endpoint) target (contacted) | `runtime` | 0.95 |
+
+**Runtime bridging is deferred** (not in this PR): the `runtime.sni → tls_sni`
+(DOMAIN → IP) and `runtime`-observed → `network_flow` (observed-contact) edge rows
+are not emitted yet, and their `_CONFIDENCE` entries are intentionally absent —
+adding an observed-contact graph edge needs the runtime-enrichment shape wired and
+its own tests. The runtime-observed fact is still consumed for the
+`direct_connection` RoleSignal below; only the two graph edges wait on a follow-up.
 
 **Confidence is a constant per `(source, type)` and `timestamp` is `None`** — the
 fact-only id excludes them, so a varying confidence/timestamp would make two

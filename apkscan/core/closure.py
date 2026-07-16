@@ -989,8 +989,27 @@ def close_report(
     targets = [assemble_target_closure(endpoint) for endpoint in selected]
     closure = evaluate_closure(report, targets, require_dynamic=config.require_dynamic)
     report.meta["closure"] = closure
+    _populate_network_attribution(report)
     _update_target_leads(report, targets)
     return closure
+
+
+def _populate_network_attribution(report: Report) -> None:
+    """Assemble the additive network_attribution view from the (now refreshed) endpoint
+    facts. View-only, passive; its own guard so it never sinks case closure nor mutates
+    the returned closure. On failure a minimal deterministic error marker is recorded."""
+    import logging
+
+    try:
+        from apkscan.attribution.assemble import build_network_attribution
+
+        artifact_id = str(report.meta.get("sample_sha256") or "") or f"pkg:{report.package_name or 'unknown'}"
+        blob = build_network_attribution(report.endpoints, artifact_id=artifact_id, phase="close")
+        if blob is not None:
+            report.meta["network_attribution"] = blob
+    except Exception as exc:  # noqa: BLE001 - view-only; a failure never fails case closure
+        logging.getLogger(__name__).warning("network_attribution 组装失败：%s", type(exc).__name__)
+        report.meta["network_attribution"] = {"phase": "close", "error": type(exc).__name__}
 
 
 def _capture_meta(report: Report) -> dict[str, Any]:
