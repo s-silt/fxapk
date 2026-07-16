@@ -60,8 +60,10 @@ validation, parsing, and compatibility surface that PR3 does not need.
 - `RoleFeature`: an immutable pair of one `RoleSignal` and the exact
   `AttributionEvidence` that supports it.
 - `RoleAssessment`: an immutable explanation containing the target entity,
-  role, eligibility, matched signals and evidence, missing expected signals,
-  and negative signals and evidence. It deliberately has no score or
+  role, eligibility, structured matched/context/negative `RoleFeature`
+  collections, and missing expected signals. Derived signal and evidence
+  accessors remain available, but the structured collections preserve the
+  exact signal-to-evidence relationship. It deliberately has no score or
   confidence field.
 - `RoleClassifier`: a stateless deterministic evaluator with `assess()` and
   `classify()` entry points.
@@ -126,8 +128,9 @@ Requires at least two distinct signals from:
 - content difference.
 
 This avoids classifying a normal site from a single redirect or generic server
-banner. Public-CDN context is retained as evidence but does not independently
-make an edge candidate.
+banner. Public-CDN context is retained in a separate non-qualifying context
+collection and does not independently make an edge candidate or appear as
+missing evidence when absent.
 
 ### Cloaking edge node
 
@@ -138,7 +141,10 @@ The enum value and parent relationship exist for forward compatibility.
 
 - A feature is only considered when its evidence target equals the assessed
   entity by entity identity; `sources` do not affect entity equality.
-- Duplicate `(signal, evidence.id)` pairs are collapsed.
+- Duplicate `(signal, evidence.id)` pairs with identical full evidence payloads
+  are collapsed. For one assessed target, an evidence ID is globally bound to
+  one complete `AttributionEvidence.to_dict()` payload across all signals and
+  explanation buckets; conflicting reuse is rejected.
 - Output roles, signals, and evidence are sorted using stable explicit keys.
 - Invalid signal/evidence objects are rejected at model construction rather
   than silently converted.
@@ -157,3 +163,5 @@ PR3 adds focused pytest coverage for:
 - cloaking reservation without classification;
 - target isolation, duplicate handling, deterministic ordering, JSON safety,
   and validation.
+- exact signal-to-evidence mapping, cross-signal evidence-ID consistency, and
+  retention of non-qualifying public-CDN edge context.
