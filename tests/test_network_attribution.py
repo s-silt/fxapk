@@ -37,6 +37,10 @@ def _roles(blob, ip):
     return {}
 
 
+def _matched_signals(blob, ip):
+    return {s for r in _roles(blob, ip).values() for s in r["matched_signals"]}
+
+
 def _edges(blob):
     return {
         (e["relation"], e["source"]["value"], e["target"]["value"]) for e in blob["graph"]["edges"]
@@ -291,3 +295,181 @@ def test_assembly_touches_no_network() -> None:
         build_network_attribution([_cn_ip_endpoint()], artifact_id="s", phase="analyze")
     finally:
         socket.socket = real  # type: ignore[assignment]
+
+
+# --------------------------------------------------------------------------- #
+# Runtime bridge: dynamic ground-truth edges (tls_sni served_at, network_flow)
+# --------------------------------------------------------------------------- #
+def _runtime_dom(value="api.example.com", ips=("203.0.113.7:443",), sni=None):
+    return _ep(value, "domain", {"runtime": {"sni": list(sni or [value]), "remote_endpoints": list(ips)}})
+
+
+def _runtime_ip(value="203.0.113.7", source="runtime-pcap", enrichment=None):
+    return _ep(value, "ip", enrichment or {}, evidences=[Evidence(source=source, location="pcap")])
+
+
+def test_runtime_domain_becomes_tls_sni_served_at_plus_apk_contacted() -> None:
+    blob = _build(_runtime_dom(ips=["203.0.113.7:443"]))
+    edges = _edges(blob)
+    assert ("served_at", "api.example.com", "203.0.113.7") in edges  # DOMAIN -> IP, not resolves_to
+    assert ("contacted", "sha-test", "api.example.com") in edges  # APK -> DOMAIN (artifact_id source)
+    assert not any(rel == "resolves_to" for rel, _s, _t in edges)  # runtime SNI is served_at, not DNS
+
+
+def test_runtime_ip_becomes_network_flow_apk_contacted_and_mints_apk_node() -> None:
+    blob = _build(_runtime_ip("203.0.113.7"))
+    edges = _edges(blob)
+    assert ("contacted", "sha-test", "203.0.113.7") in edges  # APK -> IP
+    assert ("APK", "sha-test") in {(n["type"], n["value"]) for n in blob["graph"]["nodes"]}
+
+
+def test_tls_sni_requires_the_domain_to_be_an_observed_sni() -> None:
+    # a hand-edited report pairing a domain with unrelated remotes: the domain is NOT
+    # among the observed SNI names, so no DOMAIN -> IP edge is licensed. A dns fact
+    # keeps the endpoint bridged (blob non-None) to prove it is processed yet emits
+    # a resolves_to edge only, never a served_at from the mismatched runtime pairing.
+    ep = _ep("api.example.com", "domain", {
+        "dns": {"ips": ["1.2.3.4"]},
+        "runtime": {"sni": ["other.com"], "remote_endpoints": ["9.9.9.9:443"]}})
+    blob = _build(ep)
+    assert not any(e["type"] == "tls_sni" for e in blob["evidence"])
+    assert not any(rel == "served_at" for rel, _s, _t in _edges(blob))
+    assert ("resolves_to", "api.example.com", "1.2.3.4") in _edges(blob)  # still bridged
+
+
+def test_runtime_remote_endpoint_ipv6_port_is_stripped_on_last_colon() -> None:
+    blob = _build(_runtime_dom(ips=["2001:db8::1:443"]))
+    assert ("served_at", "api.example.com", "2001:db8::1") in _edges(blob)
+
+
+def test_tls_sni_dedups_one_ip_seen_on_multiple_ports() -> None:
+    blob = _build(_runtime_dom(ips=["203.0.113.7:443", "203.0.113.7:8443"]))
+    tls = [e for e in blob["evidence"] if e["type"] == "tls_sni"]
+    assert len(tls) == 1 and tls[0]["value"] == "203.0.113.7"
+
+
+def test_network_flow_fires_for_mitm_only_ip_without_runtime_dict() -> None:
+    # mitm-only run: an ip endpoint with a source="runtime" evidence but NO structured
+    # enrichment["runtime"] — the contact is still observed, so network_flow fires.
+    blob = _build(_runtime_ip("198.51.100.5", source="runtime", enrichment={}))
+    assert ("contacted", "sha-test", "198.51.100.5") in _edges(blob)
+
+
+def test_ip_endpoint_sni_list_makes_no_domain_ip_edge() -> None:
+    # runtime["sni"] on an IP endpoint may list co-hosted third-party names; the bridge
+    # must NOT pair them to the IP (tls_sni is emitted only from the domain-endpoint side).
+    ep = _ep("203.0.113.7", "ip",
+             {"runtime": {"sni": ["a.com", "b.com"], "remote_endpoints": ["203.0.113.7:443"]}},
+             evidences=[Evidence(source="runtime-pcap", location="pcap")])
+    blob = _build(ep)
+    assert not any(e["type"] == "tls_sni" for e in blob["evidence"])
+    assert not any(rel == "served_at" for rel, _s, _t in _edges(blob))
+
+
+def test_static_ip_without_runtime_yields_no_network_flow() -> None:
+    blob = _build(_ep("9.9.9.9", "ip", {"asn": {"asn": 4134}}))  # no runtime evidence
+    assert not any(e["type"] == "network_flow" for e in (blob["evidence"] if blob else []))
+
+
+def test_no_apk_node_without_a_runtime_contacted_edge() -> None:
+    # a purely static (DNS) report has no APK->* contacted edge, so no APK node is minted.
+    blob = _build(_ep("a.example.com", "domain", {"dns": {"ips": ["1.2.3.4"]}}))
+    assert not any(n["type"] == "APK" for n in blob["graph"]["nodes"])
+
+
+def test_runtime_edge_confidence_is_constant_0_95() -> None:
+    blob = _build(_runtime_dom(ips=["203.0.113.7:443"]), _runtime_ip("203.0.113.7"))
+    types = {e["type"] for e in blob["evidence"]}
+    assert {"tls_sni", "network_flow"} <= types  # both actually emitted, so the loop is not vacuous
+    for e in blob["evidence"]:
+        if e["type"] in ("tls_sni", "network_flow"):
+            assert e["confidence"] == 0.95
+            assert e["timestamp"] is None  # determinism contract
+
+
+def test_runtime_bridge_deterministic_under_shuffle() -> None:
+    a, b = _runtime_dom("api.example.com", ips=["203.0.113.7:443"]), _runtime_ip("203.0.113.7")
+    first = json.dumps(build_network_attribution([a, b], artifact_id="s", phase="analyze"), sort_keys=True)
+    second = json.dumps(build_network_attribution([b, a], artifact_id="s", phase="analyze"), sort_keys=True)
+    assert first == second
+
+
+def test_only_peer_observing_runtime_sources_license_network_flow() -> None:
+    # network_flow needs a source that observed the actual PEER IP. A value derived from a
+    # Host/:authority header (runtime-tshark) or a decrypted request/body (*-decrypted) is
+    # attacker-controllable (e.g. a spoofed IP-literal Host), so it mints no contacted edge.
+    for bad_source in ("runtime-decrypted", "runtime-tls-decrypted", "runtime-tshark", "runtime-probe"):
+        ep = _runtime_ip("203.0.113.99", source=bad_source, enrichment={})
+        assert _build(ep) is None, bad_source  # no observed-contact edge, nothing else to bridge
+    # control: the peer-observing sources still fire
+    for good_source in ("runtime", "runtime-pcap"):
+        blob = _build(_runtime_ip("203.0.113.99", source=good_source))
+        assert any(e["type"] == "network_flow" for e in blob["evidence"]), good_source
+
+
+def test_direct_connection_signal_also_gated_by_peer_observation() -> None:
+    # the peer-observed predicate gates BOTH the network_flow edge AND the PR9
+    # direct_connection RoleSignal — a Host/content-derived source must license neither,
+    # only a peer-observing source (runtime / runtime-pcap) does. (pins the signal path.)
+    def ip_ep(source):
+        return _ep("203.0.113.9", "ip", {
+            "attribution": {"ips": [{"ip": "203.0.113.9", "country": "CN",
+                                     "origin_network": {"asn": 4134, "category": "telecom"}}]}},
+            evidences=[Evidence(source=source, location="x")])
+    for bad in ("runtime-decrypted", "runtime-tls-decrypted", "runtime-tshark"):
+        assert "direct_connection" not in _matched_signals(_build(ip_ep(bad)), "203.0.113.9"), bad
+    for good in ("runtime", "runtime-pcap"):
+        assert "direct_connection" in _matched_signals(_build(ip_ep(good)), "203.0.113.9"), good
+
+
+def test_known_intercept_ip_is_never_served_at_nor_contacted() -> None:
+    # a domestically-blocked fraud domain's SNI genuinely reaches the anti-fraud intercept
+    # page (183.192.65.101) — but that node is not the domain's serving IP, so no served_at.
+    dom = _runtime_dom("fraud.example.com", ips=["183.192.65.101:443"])
+    assert _build(dom) is None  # the intercept remote is the only fact; nothing survives
+    # even a (hand-edited) intercept ip endpoint mints no APK->IP contacted edge
+    intercept_ip = _runtime_ip("183.192.65.101")
+    assert _build(intercept_ip) is None
+
+
+def test_tls_sni_guard_normalizes_case_and_trailing_dot() -> None:
+    # the wire SNI is stored raw (mixed case / trailing dot), the endpoint value may differ
+    # in case — the guard must normalize both, so the served_at edge is still emitted.
+    ep = _ep("API.Example.com", "domain",
+             {"runtime": {"sni": ["api.example.com."], "remote_endpoints": ["203.0.113.7:443"]}})
+    assert ("served_at", "api.example.com", "203.0.113.7") in _edges(_build(ep))
+
+
+def test_static_dns_and_runtime_tls_coexist_as_parallel_edges() -> None:
+    # the routine real-capture shape: a domain both resolves (DNS) and is TLS-observed at
+    # the same IP — both a resolves_to and a served_at edge, with distinct evidence entries.
+    ep = _ep("api.example.com", "domain", {
+        "dns": {"ips": ["203.0.113.7"]},
+        "runtime": {"sni": ["api.example.com"], "remote_endpoints": ["203.0.113.7:443"]}})
+    blob = _build(ep)
+    edges = _edges(blob)
+    assert ("resolves_to", "api.example.com", "203.0.113.7") in edges
+    assert ("served_at", "api.example.com", "203.0.113.7") in edges
+    assert {"resolved_ip", "tls_sni"} <= {e["type"] for e in blob["evidence"]}
+
+
+def test_malformed_remote_endpoints_are_skipped_not_crashing() -> None:
+    # non-strings, empties, port-less / bracketed / garbage entries must be skipped (never
+    # raise — a raise would drop the WHOLE endpoint incl. its valid edges).
+    ep = _ep("api.example.com", "domain", {"runtime": {"sni": ["api.example.com"], "remote_endpoints": [
+        443, None, {"ip": "x"}, "", ":", "garbage:443", "1.2.3.4:99999", "[2001:db8::1]:443",
+        "203.0.113.7:443"]}})
+    blob = _build(ep)
+    served = {t for rel, _s, t in _edges(blob) if rel == "served_at"}
+    assert served == {"203.0.113.7"}  # only the one well-formed entry survives
+    assert blob["skipped"] == []  # skipped-per-endpoint list stays empty (no raise)
+
+
+def test_mitm_only_domain_yields_no_contacted_edge_intended_asymmetry() -> None:
+    # network_flow is intentionally ip-only: a runtime-observed DOMAIN without a structured
+    # runtime pairing has no IP to contact, so it mints nothing (asymmetric with the ip case).
+    dom = _ep("api.example.com", "domain", {}, evidences=[Evidence(source="runtime", location="runtime")])
+    assert _build(dom) is None  # domain-only mitm observation bridges nothing
+    # the identically-observed ip endpoint DOES mint an APK->IP contacted edge
+    ip_edges = _edges(_build(_runtime_ip("203.0.113.7", source="runtime")))
+    assert ("contacted", "sha-test", "203.0.113.7") in ip_edges

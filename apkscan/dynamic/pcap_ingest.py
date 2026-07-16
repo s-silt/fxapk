@@ -32,6 +32,10 @@ from apkscan.core.models import (
     LeadCategory,
     merge_runtime_into_lead_dict,
 )
+from apkscan.network.fingerprints import KNOWN_INTERCEPT_IPS as _KNOWN_FANZHA
+from apkscan.network.fingerprints import (  # noqa: F401 — public re-export (capture/closure/tests use pcap_ingest.is_known_intercept_ip)
+    is_known_intercept_ip,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,12 +90,8 @@ STATE_UNKNOWN = "unknown"  # 其它（单向载荷、握手无数据等）
 
 # 已知反诈拦截节点（Codex fengzhixin 案抓包交接 §6）：涉诈域名被拦后解析至此的拦截页 IP——非业务
 # 接入/落地机。即便有双向载荷（拦截页会回数据）也必须与待核业务接入池严格区分、勿据此调证。
-_KNOWN_FANZHA = frozenset({"183.192.65.101"})
-
-
-def is_known_intercept_ip(ip: str) -> bool:
-    """Return whether an address is a known interception page, not a business server."""
-    return ip in _KNOWN_FANZHA
+# 常量与判定已上移至 apkscan.network.fingerprints（供 pcap ingest 与归因桥接共用），此处经上方
+# import 以 _KNOWN_FANZHA / is_known_intercept_ip 别名保留原有引用。
 
 
 @dataclass
