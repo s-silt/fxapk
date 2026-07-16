@@ -223,8 +223,6 @@ class RoleScore:
         if not isinstance(self.target, NetworkEntity):
             raise TypeError("target must be a NetworkEntity")
         object.__setattr__(self, "role", _coerce_role(self.role))
-        if self.role is InfrastructureRole.CLOAKING_EDGE_NODE:
-            raise ValueError("cloaking_edge_node is not scored in PR4")
         if not isinstance(self.eligible, bool):
             raise TypeError("eligible must be bool")
         object.__setattr__(
@@ -334,8 +332,6 @@ class _RolePolicy:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "role", _coerce_role(self.role))
-        if self.role is InfrastructureRole.CLOAKING_EDGE_NODE:
-            raise ValueError("cloaking_edge_node has no PR4 scoring policy")
         object.__setattr__(self, "weights", _normalize_weights(self.weights))
 
     @property
@@ -388,6 +384,21 @@ _ROLE_POLICIES: Mapping[InfrastructureRole, _RolePolicy] = MappingProxyType(
                 RoleSignal.CONTENT_DIFFERENCE: 25,
                 # Zero-point explanatory context: public-CDN evidence may
                 # explain an edge but cannot make one eligible on its own.
+                RoleSignal.PUBLIC_CDN: 0,
+            },
+        ),
+        # cloaking_edge_node: only the three strong behavioral signals score; the
+        # weak edge facts and public-CDN membership are zero-weight context. Keeps
+        # the codebase-wide convention positive-weight == supporting,
+        # zero-weight == context, negative-weight == blockers.
+        InfrastructureRole.CLOAKING_EDGE_NODE: _RolePolicy(
+            role=InfrastructureRole.CLOAKING_EDGE_NODE,
+            weights={
+                RoleSignal.CONTENT_DIFFERENCE: 40,
+                RoleSignal.COOKIE_CHALLENGE: 30,
+                RoleSignal.REDIRECT: 20,
+                RoleSignal.MANY_SHARED_DOMAINS: 0,
+                RoleSignal.SHARED_TLS: 0,
                 RoleSignal.PUBLIC_CDN: 0,
             },
         ),
@@ -533,8 +544,6 @@ class EvidenceScorer:
             raise TypeError(
                 f"assessment must be a RoleAssessment, got {type(assessment).__name__}"
             )
-        if assessment.role is InfrastructureRole.CLOAKING_EDGE_NODE:
-            raise ValueError("cloaking_edge_node is not scored in PR4")
         policy = _ROLE_POLICIES.get(assessment.role)
         if policy is None:
             raise ValueError(
