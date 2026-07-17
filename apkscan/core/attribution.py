@@ -517,7 +517,9 @@ def build_ip_attribution(ip: str, signals: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(signals, dict):
         signals = {}
     origin = _origin_network(signals.get("asn") if isinstance(signals.get("asn"), dict) else signals)
-    edge_signals = {**signals, "origin_category": origin.get("category"),
+    # ★被观测 IP 用入参 ip（权威）注入 edge 信号——否则 score_edge_provider 的 network.cidrs / ip_pool
+    # 弱信号在生产路径（IP 端点、域名 per-IP、直接调用都经此）永远拿不到 obs.ip、静默漏 CIDR 命中。
+    edge_signals = {**signals, "ip": ip, "origin_category": origin.get("category"),
                     "asn": origin.get("asn") if origin.get("asn") is not None else signals.get("asn")}
     edge = score_edge_provider(edge_signals)
     return {

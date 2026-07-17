@@ -496,3 +496,54 @@ def test_ip_in_cidr_helper_robust() -> None:
     assert A._ip_in_cidr("2001:db8::1", "2001:db8::/32") is True   # IPv6 也支持
     assert A._ip_in_cidr("bad-ip", "203.0.113.0/24") is False      # 坏 IP 不抛
     assert A._ip_in_cidr("1.2.3.4", "not-a-cidr") is False         # 坏 CIDR 不抛
+
+
+#: PR #165 P1 回归：生产入口用真 _providers_rules()、不注入 rules——若 build_ip_attribution 不把 ip 入参喂进
+#: edge_signals，score_edge_provider 永远看不到 obs.ip、network.cidrs / ip_pool 弱信号在真实 analyze/case-close
+#: 报告里静默失效。下列测试 monkeypatch _providers_rules 注入一条只含 cidrs 的规则，走生产入口验证 ip 已被注入。
+_CIDR_ONLY_RULES = {
+    "edge_providers": [{"id": "x.edge", "name": "X",
+                        "signals": {"network": {"cidrs": [{"value": "203.0.113.0/24"}]}}}],
+    "scoring": {"confirmed": 10, "probable": 6, "possible": 3},
+}
+
+
+def test_build_ip_attribution_injects_observed_ip_for_cidr_pool(monkeypatch) -> None:
+    """★回归(PR #165 P1)：build_ip_attribution 必须把 ip 入参注入 edge_signals，生产路径才看得到 ip_pool。"""
+    monkeypatch.setattr(A, "_providers_rules", lambda: _CIDR_ONLY_RULES)
+    ep = A.build_ip_attribution("203.0.113.9", {"country": "US"})["edge_provider"]
+    assert ep["name"] == "X" and ep["tier"] == "possible"
+    assert "ip_pool:203.0.113.0/24" in ep["matched_signals"]
+    # IP 不在池内 → 弱信号不命中，规则无其它信号 → edge 未识别（name=None）。
+    assert A.build_ip_attribution("8.8.8.8", {"country": "US"})["edge_provider"]["name"] is None
+
+
+def test_build_ip_attribution_ip_pool_never_escalates_to_confirmed(monkeypatch) -> None:
+    """★纯 IP 池是弱信号：即便 confirmed 阈值压到 1，缺 ≥2 强信号也绝不 confirmed（IP 段常运营商/云共享、仅佐证）。"""
+    rules = {**_CIDR_ONLY_RULES, "scoring": {"confirmed": 1, "probable": 100, "possible": 1}}
+    monkeypatch.setattr(A, "_providers_rules", lambda: rules)
+    ep = A.build_ip_attribution("203.0.113.9", {"country": "US"})["edge_provider"]
+    assert ep["tier"] == "possible"  # 分数已过 confirmed 阈值，但强信号数=0 → 被 _edge_tier 的 ≥2 强信号闸挡回
+
+
+def test_build_endpoint_attribution_ip_endpoint_injects_ip_for_cidr_pool(monkeypatch) -> None:
+    """★回归(PR #165 P1)：IP 端点 build_endpoint_attribution→attribution_from_enrichment→build_ip_attribution
+    整条链要把 ip 注入 edge_signals；用 ip_rdap 过'有效信号'闸、又不引入云 ASN（避开负证据混淆）。"""
+    monkeypatch.setattr(A, "_providers_rules", lambda: _CIDR_ONLY_RULES)
+    att = A.build_endpoint_attribution("ip", "203.0.113.9", {"ip_rdap": {"netname": "SOME-NET"}})
+    assert att is not None and len(att["ips"]) == 1
+    ep = att["ips"][0]["edge_provider"]
+    assert ep["name"] == "X" and ep["tier"] == "possible"
+    assert "ip_pool:203.0.113.0/24" in ep["matched_signals"]
+
+
+def test_build_endpoint_attribution_domain_per_ip_injects_ip_for_cidr_pool(monkeypatch) -> None:
+    """★回归(PR #165 P1)：域名 per-IP 路径逐 IP 调 build_ip_attribution，每个解析 IP 都要注入自身 ip——
+    命中 CIDR 的 IP ip_pool 生效(只到 possible)，另一 IP 不命中，绝不塌缩。"""
+    monkeypatch.setattr(A, "_providers_rules", lambda: _CIDR_ONLY_RULES)
+    att = A.build_endpoint_attribution("domain", "pay.example.com", {"dns": {"ips": ["203.0.113.9", "8.8.8.8"]}})
+    assert att is not None and len(att["ips"]) == 2
+    by_ip = {layer["ip"]: layer["edge_provider"] for layer in att["ips"]}
+    assert by_ip["203.0.113.9"]["name"] == "X" and by_ip["203.0.113.9"]["tier"] == "possible"
+    assert "ip_pool:203.0.113.0/24" in by_ip["203.0.113.9"]["matched_signals"]
+    assert by_ip["8.8.8.8"]["name"] is None
