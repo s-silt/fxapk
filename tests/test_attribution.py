@@ -474,3 +474,25 @@ def test_online_as_org_helper_priority_shape_and_fields() -> None:
     assert A._online_as_org({"shodan": {"as_organization": "S"}}) == "S"  # 顶层形态
     assert A._online_as_org({"fofa": {"records": [{"company": "C", "isp": "I", "org": "O"}]}}) is None  # 非 as_org 类不取
     assert A._online_as_org({}) is None
+
+
+def test_cidr_ip_pool_weak_signal_matches_and_stays_weak() -> None:
+    """★network.cidrs / ip_pool 匹配器（schema 此前有 ip_pool=3 权重但 _score_one_edge 无匹配代码）：观测 IP
+    落规则 CIDR → ip_pool 弱信号命中；弱信号（非强信号）单独至多 possible，不据 IP 池就 confirmed。"""
+    rules = {
+        "edge_providers": [{"id": "x.edge", "name": "X",
+                            "signals": {"network": {"cidrs": [{"value": "203.0.113.0/24"}]}}}],
+        "scoring": {"confirmed": 10, "probable": 6, "possible": 3},
+    }
+    ep = A.score_edge_provider({"ip": "203.0.113.9"}, rules=rules)
+    assert ep is not None and ep["id"] == "x.edge" and ep["tier"] == "possible"
+    assert "ip_pool:203.0.113.0/24" in ep["matched_signals"]
+    assert A.score_edge_provider({"ip": "8.8.8.8"}, rules=rules) is None  # 不在 CIDR → 无信号
+
+
+def test_ip_in_cidr_helper_robust() -> None:
+    assert A._ip_in_cidr("203.0.113.9", "203.0.113.0/24") is True
+    assert A._ip_in_cidr("8.8.8.8", "203.0.113.0/24") is False
+    assert A._ip_in_cidr("2001:db8::1", "2001:db8::/32") is True   # IPv6 也支持
+    assert A._ip_in_cidr("bad-ip", "203.0.113.0/24") is False      # 坏 IP 不抛
+    assert A._ip_in_cidr("1.2.3.4", "not-a-cidr") is False         # 坏 CIDR 不抛
