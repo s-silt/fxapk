@@ -55,14 +55,13 @@ _NAME_HOST_FRIDA = "主机 frida 版本"
 _NAME_FRIDA_SERVER = "设备 frida-server 运行且版本匹配"
 _NAME_MITMPROXY = "mitmproxy 已安装"
 _NAME_CA = "CA 已信任"
+_NAME_DEVICE_TCPDUMP = "设备 tcpdump（floor pcap 底座）"
 # PCAP-first 深度能力（信息性、非关键——不进 _CRITICAL、不影响整体 ok）。
 _NAME_QUIC_META = "QUIC 元数据解析"
 _NAME_QUIC_DECRYPT = "QUIC Initial 解密（cryptography）"
 _NAME_TSHARK = "tshark 深度后端"
 
-# 关键项：任一不 ok → 整体 ok=False。设备/ABI/frida/mitmproxy/CA 是抓包脱壳命门；
-# root 单列为非关键（部分形态可不 root 抓 HTTP），但 CA / frida-server 多依赖它，
-# 失败会通过这些关键项体现。
+# 关键项（full profile）：任一不 ok → 整体 ok=False。设备/ABI/frida/mitmproxy/CA 是完整抓包脱壳命门。
 _CRITICAL: frozenset[str] = frozenset(
     {
         _NAME_DEVICE,
@@ -73,6 +72,14 @@ _CRITICAL: frozenset[str] = frozenset(
         _NAME_CA,
     }
 )
+
+# ★floor-only profile 的关键项：只看 **floor pcap 底座**（设备 + root + 设备 tcpdump），**不含**
+# frida/mitmproxy/CA——PCAP-first 下只想 tcpdump 抓 pcap 的用户，不该被"主机没装 frida"判成环境不完整
+# （这正是外部评价 #1 点的问题）。缺 frida/mitm 时对应项仍体检、仅信息性，不拉整体 ok。
+_FLOOR_CRITICAL: frozenset[str] = frozenset({_NAME_DEVICE, _NAME_ROOT, _NAME_DEVICE_TCPDUMP})
+
+#: 支持的体检 profile。
+DOCTOR_PROFILES: tuple[str, ...] = ("full", "floor-only")
 
 
 def _emit(on_progress: Callable[[str], None] | None, msg: str) -> None:
@@ -423,6 +430,7 @@ def run(
     *,
     serial: str | None = None,
     auto_fix: bool = True,
+    profile: str = "full",
     on_progress: Callable[[str], None] | None = None,
 ) -> dict:
     """逐项体检动态抓包/脱壳前置环境，能自动修的调 provision，修不了给 fix_cmd。绝不抛。
@@ -430,18 +438,22 @@ def run(
     Args:
         serial: 目标设备序列号（None → adb 默认设备）。
         auto_fix: True 时对 frida-server / CA 调用 provision 自动修复。
+        profile: ``full``（默认，完整抓包栈：设备/ABI/frida/mitm/CA 都当关键项）| ``floor-only``
+            （只把 floor pcap 底座 设备/root/tcpdump 当关键项，缺 frida/mitm/CA 仍体检但不判整体失败）。
         on_progress: 可选进度回调（GUI-ready；None → no-op）。
 
     Returns:
-        dict：{ok: bool, items: list[{name, ok, detail, fix_cmd}]}。
-        ok = 所有关键项（_CRITICAL）均 ok。
+        dict：{ok: bool, profile, items: list[{name, ok, detail, fix_cmd}]}。
+        ok = 该 profile 的关键项均 ok。
     """
+    profile = profile if profile in DOCTOR_PROFILES else "full"
     try:
-        return _run_impl(serial=serial, auto_fix=auto_fix, on_progress=on_progress)
+        return _run_impl(serial=serial, auto_fix=auto_fix, profile=profile, on_progress=on_progress)
     except Exception:
         logger.exception("[doctor] run 未预期异常（已转结构化结果）")
         return {
             "ok": False,
+            "profile": profile,
             "items": [
                 _item(
                     "体检",
@@ -491,13 +503,39 @@ def _check_pcap_capabilities() -> list[dict]:
     return items
 
 
+def _check_device_tcpdump(serial: str | None = None) -> dict:
+    """floor pcap 底座：设备侧 tcpdump 可用（已装 command -v，或配了 FXAPK_TCPDUMP_BIN 可 push）。
+
+    ★floor-only 模式的核心前置——无 tcpdump 则 floor pcap 抓不了；与 frida/mitmproxy 无关。
+    """
+    try:
+        from apkscan.dynamic import capabilities as _caps
+        from apkscan.dynamic.capability_probe import _probe_device_side
+
+        # 无在线设备时不探 adb（否则 provision 会刷"root 命令失败"假告警）——直接判无法体检。
+        if not device.has_device():
+            return _item(_NAME_DEVICE_TCPDUMP, False, "无在线设备，无法体检 floor pcap 底座（先接设备）")
+        ok = _caps.CAP_DEVICE_TCPDUMP in _probe_device_side(serial)
+    except Exception:
+        logger.exception("[doctor] 检查设备 tcpdump 异常")
+        ok = False
+    if ok:
+        return _item(_NAME_DEVICE_TCPDUMP, True, "设备侧 tcpdump 可用（floor pcap 底座就绪）")
+    return _item(
+        _NAME_DEVICE_TCPDUMP,
+        False,
+        "设备无 tcpdump 且未配可 push 的二进制 → floor pcap 抓不了；请在设备装 tcpdump 或设 FXAPK_TCPDUMP_BIN",
+    )
+
+
 def _run_impl(
     *,
     serial: str | None,
     auto_fix: bool,
+    profile: str,
     on_progress: Callable[[str], None] | None,
 ) -> dict:
-    """run 的实际逻辑（异常由外层 run 兜底转结构化）。"""
+    """run 的实际逻辑（异常由外层 run 兜底转结构化）。profile=floor-only 时只把 floor 底座当关键项。"""
     items: list[dict] = []
 
     _emit(on_progress, "检查在线设备")
@@ -505,6 +543,9 @@ def _run_impl(
 
     _emit(on_progress, "检查设备 root")
     items.append(_check_root(serial))
+
+    _emit(on_progress, "检查设备 tcpdump（floor pcap 底座）")
+    items.append(_check_device_tcpdump(serial))
 
     _emit(on_progress, "检查设备 ABI")
     items.append(_check_abi(serial))
@@ -525,8 +566,10 @@ def _run_impl(
     items.append(_check_ca(serial, auto_fix=auto_fix, on_progress=on_progress))
     items.extend(_check_pcap_capabilities())  # PCAP 深度能力可用性（信息性、非关键）
 
-    ok = all(it["ok"] for it in items if it["name"] in _CRITICAL)
-    return {"ok": ok, "items": items}
+    # ★按 profile 选关键项集：floor-only 只看 floor pcap 底座（缺 frida/mitm/CA 不拉整体 ok）。
+    critical = _FLOOR_CRITICAL if profile == "floor-only" else _CRITICAL
+    ok = all(it["ok"] for it in items if it["name"] in critical)
+    return {"ok": ok, "items": items, "profile": profile}
 
 
 __all__ = ["run"]

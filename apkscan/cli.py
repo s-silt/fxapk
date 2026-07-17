@@ -583,6 +583,12 @@ def doctor(
         "--fix/--no-fix",
         help="对 frida-server / CA 等可自动修的项调 provision 自动修复（--no-fix 仅体检不动设备）。",
     ),
+    profile: str = typer.Option(
+        "full",
+        "--profile",
+        help="体检 profile：full（默认，完整抓包栈）| floor-only（只体检 floor pcap 底座 设备+root+tcpdump，"
+        "缺 frida/mitmproxy/CA 仍体检但不判环境失败——PCAP-first 只想 tcpdump 抓包时用）。",
+    ),
 ) -> None:
     """动态抓包/脱壳前置环境体检：设备/root/ABI/frida/mitmproxy/CA，逐项给出状态与可复制命令。
 
@@ -604,6 +610,7 @@ def doctor(
         result = _doctor.run(
             serial=serial or None,
             auto_fix=auto_fix,
+            profile=profile,
             on_progress=lambda m: typer.echo(f"... {m}"),
         )
         _print_doctor_result(result)
