@@ -22,6 +22,15 @@ import math
 import re
 from typing import Any
 
+from apkscan.network.categories import (  # 网络类别规范取值（与角色层同一份）
+    CAT_CDN,
+    CAT_CLOUD,
+    CAT_HOSTING_RESELLER,
+    CAT_IDC,
+    CAT_SECURITY_PROXY,
+    CAT_TELECOM,
+    CAT_UNKNOWN,
+)
 from apkscan.network.fingerprints import parse_asn as _parse_asn  # 共享 ASN 解析契约（与角色层同一份）
 
 logger = logging.getLogger(__name__)
@@ -32,16 +41,7 @@ CONF_MEDIUM = "medium"
 CONF_LOW = "low"
 CONF_UNKNOWN = "unknown"
 
-# 网络类型分类（origin_network / hosting_provider 用）。
-CAT_TELECOM = "telecom"
-CAT_CLOUD = "cloud"
-CAT_IDC = "idc"
-CAT_CDN = "cdn"
-CAT_SECURITY_PROXY = "security_proxy"
-CAT_HOSTING_RESELLER = "hosting_reseller"
-CAT_ENTERPRISE = "enterprise_network"
-CAT_UNKNOWN = "unknown"
-
+# 网络类型分类（origin_network / hosting_provider 用）——规范取值 import 自 network.categories（与角色层同一份）。
 #: 云/CDN 类别（这些类别下的 ASN 不足以独立坐实 edge——共享租户多，见 _score_edge 负证据）。
 _SHARED_INFRA_CATEGORIES = frozenset({CAT_CLOUD, CAT_CDN, CAT_IDC, CAT_HOSTING_RESELLER})
 
