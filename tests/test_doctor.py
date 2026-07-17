@@ -93,6 +93,16 @@ def _all_present(monkeypatch: pytest.MonkeyPatch) -> None:
             "fix_cmd": [],
         },
     )
+    # floor pcap 底座（设备 root + tcpdump）也 present——doctor 新增的 _check_device_tcpdump 走
+    # capability_probe，这里打桩成全可用，避免它真探 adb（无真机 → 假 WARNING）。
+    from apkscan.dynamic import capabilities as _caps
+    from apkscan.dynamic import capability_probe
+
+    monkeypatch.setattr(
+        capability_probe,
+        "_probe_device_side",
+        lambda serial=None: {_caps.CAP_ROOT_CAPTURE, _caps.CAP_DEVICE_TCPDUMP},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -520,7 +530,7 @@ def test_run_never_prints_or_raises(monkeypatch, capsys):
     except Exception as exc:  # pragma: no cover
         pytest.fail(f"doctor.run raised: {exc}")
     assert res["ok"] is False
-    assert len(res["items"]) == 10  # 7 既有 + 3 PCAP 深度能力（信息性、非关键）
+    assert len(res["items"]) == 11  # 8 既有（含新增设备 tcpdump floor 底座项）+ 3 PCAP 深度能力
     captured = capsys.readouterr()
     assert captured.out == ""
 
