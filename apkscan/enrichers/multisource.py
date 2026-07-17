@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import os
+import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Mapping
@@ -18,7 +19,7 @@ from apkscan.core.registry import BaseEnricher
 _TIMEOUT = 12
 _MAX_RECORDS = 20
 _MAX_TEXT = 500
-_METADATA_ONLY_KEYS = {"source", "count", "pulse_count"}
+_METADATA_ONLY_KEYS = {"source", "count", "pulse_count", "_via"}
 
 
 class _ProviderResponseError(RuntimeError):
@@ -230,9 +231,24 @@ class _PassiveLookupEnricher(BaseEnricher, ABC):
     case_close_only = True
     active = False
     required_env: tuple[str, ...] = ()
+    #: 境内直连源（如 hunter.qianxin.com）置 True → 会话 trust_env=False 强制直连、绕过系统/环境代理。
+    #: 用户跑工具常开境外代理，境内源经代理会 403/被封（见 hunter）；直连才通。国际源保持默认（随系统代理）。
+    bypass_system_proxy: bool = False
 
     def __init__(self, session: Any | None = None) -> None:
         self._http = session if session is not None else requests.Session()
+        if self.bypass_system_proxy:
+            self._http.trust_env = False  # 忽略 HTTP(S)_PROXY / 系统代理 → 直连（境内源必须）
+
+    def _egress_label(self) -> str:
+        """本富化器请求走的出口：绕代理直连 → 'direct'；否则随系统/环境代理（配了代理即 'system_proxy'）。
+        仅记策略、不额外探测出口 IP（零多余网络），供报告溯源"此结果来自哪个出口"。绝不抛。"""
+        if self.bypass_system_proxy:
+            return "direct"
+        try:
+            return "system_proxy" if urllib.request.getproxies() else "direct"
+        except Exception:  # noqa: BLE001 — 出口标注失败不得拖累富化
+            return "unknown"
 
     @abstractmethod
     def _lookup(self, endpoint: Endpoint, credential: str) -> object:
@@ -243,12 +259,13 @@ class _PassiveLookupEnricher(BaseEnricher, ABC):
         ...
 
     def enrich(self, ep: Endpoint) -> EnrichmentResult:
+        via = self._egress_label()  # 本次请求出口（direct=绕代理直连 / system_proxy=随系统代理）——记进每条结果溯源
         credential = _credential(self.required_env)
         if self.required_env and not credential:
             return EnrichmentResult(
                 provider=self.name,
                 ok=False,
-                data={"_source_status": "disabled"},
+                data={"_source_status": "disabled", "_via": via},
                 error="disabled",
             )
         try:
@@ -262,12 +279,12 @@ class _PassiveLookupEnricher(BaseEnricher, ABC):
                 return EnrichmentResult(
                     provider=self.name,
                     ok=True,
-                    data={"_source_status": "no_record", "_error_type": error_type},
+                    data={"_source_status": "no_record", "_error_type": error_type, "_via": via},
                 )
             return EnrichmentResult(
                 provider=self.name,
                 ok=False,
-                data={"_source_status": "failed", "_error_type": error_type},
+                data={"_source_status": "failed", "_error_type": error_type, "_via": via},
                 error=error_type,
             )
         has_values = any(
@@ -275,6 +292,7 @@ class _PassiveLookupEnricher(BaseEnricher, ABC):
             for key, value in data.items()
         )
         data["_source_status"] = "hit" if has_values else "no_record"
+        data["_via"] = via
         return EnrichmentResult(provider=self.name, ok=True, data=data)
 
 
@@ -436,6 +454,9 @@ class HunterPassiveEnricher(_PassiveLookupEnricher):
     applies_to = ["ip", "domain"]
     required_env = ("FXAPK_HUNTER_KEY",)
     _URL = "https://hunter.qianxin.com/openApi/search"
+    #: hunter.qianxin.com 须境内直连——经境外代理返 403（用户跑工具常开境外代理）。强制绕代理直连。
+    #: 它是境内定人最有用的源（ICP 备案 company + 机房城市），不能被代理静默打断。
+    bypass_system_proxy = True
 
     def _lookup(self, endpoint: Endpoint, credential: str) -> object:
         query = f'ip="{endpoint.value}"' if endpoint.kind == "ip" else f'domain="{endpoint.value}"'

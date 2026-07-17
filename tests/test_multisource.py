@@ -550,3 +550,36 @@ def test_missing_shodan_key_is_disabled_not_failed(monkeypatch) -> None:  # noqa
     )
 
     assert endpoint.enrichment["source_status"]["shodan"]["status"] == "disabled"
+
+
+# ── 代理感知：境内源绕系统代理 + 出口溯源标注 ─────────────────────────────────
+def test_hunter_domestic_source_bypasses_system_proxy() -> None:
+    """★境内直连源（hunter）强制 trust_env=False——绕系统/环境代理（用户常开境外代理→hunter 403）；
+    国际源保持默认（随系统代理）。"""
+    assert HunterPassiveEnricher()._http.trust_env is False
+    assert VirusTotalPassiveEnricher()._http.trust_env is True
+
+
+def test_egress_label_reflects_bypass_and_proxy_env(monkeypatch) -> None:  # noqa: ANN001
+    """出口标注：bypass 源恒 'direct'；国际源随系统代理——配了代理即 'system_proxy'，否则 'direct'。"""
+    assert HunterPassiveEnricher()._egress_label() == "direct"
+    intl = RipeStatBgpEnricher()
+    monkeypatch.setattr("urllib.request.getproxies", lambda: {})
+    assert intl._egress_label() == "direct"
+    monkeypatch.setattr("urllib.request.getproxies", lambda: {"https": "http://127.0.0.1:7890"})
+    assert intl._egress_label() == "system_proxy"
+
+
+def test_enrich_records_via_on_success_and_failure(monkeypatch) -> None:  # noqa: ANN001
+    """每条结果记 _via 出口（供报告溯源"此结果来自哪个出口"）；_via 是 metadata，不把空结果误判成 hit。"""
+    monkeypatch.setattr("urllib.request.getproxies", lambda: {})
+    hit = RipeStatBgpEnricher(session=_RipeSession()).enrich(_ip())
+    assert hit.ok and hit.data["_via"] == "direct" and hit.data["_source_status"] == "hit"
+    fail = RipeStatBgpEnricher(session=_FailingSession("x")).enrich(_ip())
+    assert not fail.ok and fail.data["_via"] == "direct"
+
+    class _EmptyRipe:
+        def get(self, url, **kwargs):  # noqa: ANN001, ANN003
+            return _Response({"data": {}})
+    empty = RipeStatBgpEnricher(session=_EmptyRipe()).enrich(_ip())
+    assert empty.ok and empty.data["_via"] == "direct" and empty.data["_source_status"] == "no_record"
