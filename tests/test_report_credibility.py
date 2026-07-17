@@ -90,20 +90,20 @@ def test_ruleset_digest_is_eol_invariant() -> None:
     import hashlib
     import importlib.resources
 
+    from apkscan.core import registry as _registry
+
     rules_dir = importlib.resources.files("apkscan") / "rules"
-    entries = sorted(
-        (e for e in rules_dir.iterdir() if e.name.endswith((".yaml", ".txt"))),
-        key=lambda e: e.name,
-    )
+    # 复刻 ruleset_digest 的递归遍历（含 providers/ 分目录）+ 相对路径作 key。
+    entries = sorted(_registry._walk_rule_files(rules_dir, ""), key=lambda kv: kv[0])
 
     def _digest(as_crlf: bool) -> str:
         h = hashlib.sha256()
-        for e in entries:
+        for rel, e in entries:
             content = e.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
             if as_crlf:
                 content = content.replace(b"\n", b"\r\n")  # 模拟 Windows CRLF checkout
             content = content.replace(b"\r\n", b"\n").replace(b"\r", b"\n")  # 复刻函数归一化
-            h.update(e.name.encode("utf-8"))
+            h.update(rel.encode("utf-8"))
             h.update(b"\0")
             h.update(content)
             h.update(b"\0")

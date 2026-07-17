@@ -1,0 +1,18 @@
+# rules/providers/waf.yaml —— 国内 WAF/安全代理 org 关键字（主 providers.yaml 的 security_proxy 已有加速乐/知道创宇/云盾）。
+# 补知道创宇系其余产品 + 其它国内 WAF 厂商（org 名子串，供 classify_network 定 security_proxy 类）。
+# ★不重复主文件的 yundun/云盾（与阿里云盾歧义），此处只加更专属的产品名。edge 级 CNAME 指纹待 B2 逐一核实后补。
+network_categories:
+  security_proxy:
+    org_keywords:
+      # 知道创宇系
+      - 创宇盾
+      - scanv
+      - 365cyd
+      # 其它国内 WAF
+      - safedog          # 安全狗
+      - 安全狗
+      - 网站卫士          # 360 网站卫士
+      - 360wzws
+      - 长亭科技          # 长亭科技（雷池 WAF）；用专属词形，不用裸"长亭"（地名）/"safeline"（多家无关公司通用词）
+      - chaitin
+      - 雷池waf

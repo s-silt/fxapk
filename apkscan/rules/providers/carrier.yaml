@@ -1,0 +1,27 @@
+# rules/providers/carrier.yaml —— 国内基础运营商（三大运营商 + 广电）。
+# 类别名沿用引擎既有的 telecom（classify_network 与 hosting 判类均按此名；文件名 carrier 仅组织用）。
+# 只补 org 关键字（org 名子串匹配，供 layer2/3 定 category）；ASN 数值保守不填（关键字已足够定类、避免不准）。
+network_categories:
+  telecom:
+    org_keywords:
+      # 中国电信
+      - chinanet
+      - china169
+      - ct-cn
+      - 电信
+      # 中国联通（不用裸 unicom——会撞 Unicomer Group/UNICOM Global 等无关公司）
+      - chinaunicom
+      - china unicom
+      - cnc group
+      - 联通
+      # 中国移动（不用裸 cmi——3 字符会跨词边界撞 macmillan 等；chinamobile/china mobile 已覆盖 CMI）
+      - chinamobile
+      - cmnet
+      - 移动
+      - 铁通
+      - tietong
+      # 中国广电（第四大运营商）
+      - china broadnet
+      - 中国广电
+      - cbn
+      - 广电

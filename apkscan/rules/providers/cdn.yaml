@@ -1,0 +1,22 @@
+# rules/providers/cdn.yaml —— 国内 CDN 厂商 org 关键字（把在线富化返回的 org / as_org 名归类为 cdn）。
+# ★定位（用户要求）：本地库**补在线 API 的不足**，不重造在线已能做的。通用 CDN 的**识别**靠在线富化
+#   （FOFA server / Hunter as_org / ip-api org / webcheck）已能认——本地不维护通用 CDN 的 CNAME 指纹
+#   （会过时、是维护负担）；本地只做 org→类别映射（在线给 org 名、不给"是不是 CDN"的分类，这是在线的不足）。
+#   在线认不出的国内涉诈**防红专属**指纹（a1.init 阿里云 ESA 命名空间、Lego 多租户高防等）另放
+#   providers/investigative/（B2）——那才是在线库/API 一律没有、只能 fxapk 自建的核心壁垒。
+network_categories:
+  cdn:
+    org_keywords:
+      - wangsu            # 网宿
+      - chinanetcenter
+      - 网宿
+      - baishancloud      # 白山云（专属词形，避免撞白山市运营商分公司）
+      - 白山云
+      - qiniu             # 七牛云
+      - 七牛
+      - upyun             # 又拍云
+      - 又拍
+      - dnion             # 帝联
+      - 帝联
+      - chinacache        # 蓝汛
+      - 蓝汛
