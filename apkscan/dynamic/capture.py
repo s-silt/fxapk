@@ -2672,6 +2672,26 @@ def _accum_runtime_path(runtime: dict, key: str, value: str) -> None:
         lst.append(value)
 
 
+_MAX_EDGE_HOSTS = 32  # 每 IP 记录边缘行为的请求 host 上限（防共享边缘上无限累积）
+
+
+def _accum_edge_host(runtime: dict, host: str, redirect: bool, cookie_challenge: bool) -> None:
+    """按**请求 host** 记录边缘行为（重定向/挑战 cookie）进 runtime['edge_hosts'][host]={r,c}。★per-host 而非 per-IP：
+    edge/cloaking 须**同一 host 同时**重定向+挑战才算（共享边缘上不同租户各出一个信号不得凑成 cloaking）。绝不抛。"""
+    hosts = runtime.setdefault("edge_hosts", {})
+    if not isinstance(hosts, dict):
+        return
+    key = str(host or "")[:120]
+    if key not in hosts and len(hosts) >= _MAX_EDGE_HOSTS:
+        return
+    entry = hosts.setdefault(key, {"r": False, "c": False})
+    if isinstance(entry, dict):
+        if redirect:
+            entry["r"] = True
+        if cookie_challenge:
+            entry["c"] = True
+
+
 def _is_ip_literal(host: str) -> bool:
     """host 是否为 IP 字面量（IPv4/IPv6）。绝不抛。"""
     try:
@@ -2679,6 +2699,77 @@ def _is_ip_literal(host: str) -> bool:
         return True
     except (ValueError, TypeError):
         return False
+
+
+_REDIRECT_STATUS = frozenset({301, 302, 303, 307, 308})
+#: 挑战**通过/清算**类 Cookie 名——只在 bot/WAF **挑战被解出后**经 Set-Cookie 下发（=确有挑战），
+#: 是服务端主动挑战的行为证据（供 COOKIE_CHALLENGE）。★严格只取清算类：
+#: - cf_clearance（Cloudflare 挑战通过）/ __jsl_clearance*（加速乐挑战通过）确经 Set-Cookie 下发；
+#: - acw_sc__v2/v3（阿里挑战）由客户端 JS 算出、**不走 Set-Cookie**，头部检测见不到，保留仅为语义完整（近死条目）。
+#: ★绝不取"每会话/每请求常设"的存在性 cookie（__cf_bm / acw_tc / aliyungf_tc / srv_id 等）——那只标"有该 WAF/LB"、
+#: 非挑战，混入会把合法阿里云/CF 前置的普通流量误判成 cloaking（复审 P0，本工具目标生态大量在阿里云）。
+_CHALLENGE_COOKIE_NAMES = frozenset({
+    "cf_clearance", "__jsl_clearance", "__jsl_clearance_s", "__jsl_clearance_ss",
+    "acw_sc__v2", "acw_sc__v3",
+})
+
+
+def _header_first(headers: object, name: str) -> str:
+    """从 mitm/dict 响应头取单值（大小写不敏感）。缺/坏 → ""。绝不抛。"""
+    try:
+        get = getattr(headers, "get", None)
+        if callable(get):
+            v = get(name) or get(name.title()) or get(name.upper())
+            return str(v) if v else ""
+    except Exception:  # noqa: BLE001
+        return ""
+    return ""
+
+
+def _header_all(headers: object, name: str) -> list[str]:
+    """从 mitm/dict 响应头取多值（如多条 Set-Cookie）。缺/坏 → []。绝不抛。"""
+    try:
+        get_all = getattr(headers, "get_all", None)
+        if callable(get_all):
+            result = get_all(name)
+            return [str(x) for x in result] if isinstance(result, (list, tuple)) else []
+        v = _header_first(headers, name)
+        return [v] if v else []
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _response_edge_signals(flow: object, request_host: object) -> tuple[bool, bool]:
+    """从运行时响应抽边缘行为信号：(跨 host 重定向, 挑战 cookie 下发)。供 edge_candidate / cloaking_edge_node。
+    REDIRECT=3xx 且 Location 指向与请求 host 不同的 host；COOKIE_CHALLENGE=Set-Cookie 命中挑战/清算 cookie 名。绝不抛。"""
+    resp = getattr(flow, "response", None)
+    if resp is None:
+        return False, False
+    headers = getattr(resp, "headers", None)
+    redirect = False
+    status = getattr(resp, "status_code", None)
+    if isinstance(status, int) and status in _REDIRECT_STATUS and headers is not None:
+        loc_host = ""
+        try:
+            from urllib.parse import urlsplit
+            loc = _header_first(headers, "location")
+            # schemeless "Location: other.com/x"（不合规但浏览器接受）→ 补 // 再解析，否则 hostname=None 漏报跨 host。
+            if loc and "://" not in loc and not loc.startswith(("/", "?", "#")):
+                loc = "//" + loc
+            loc_host = urlsplit(loc).hostname or ""
+        except (ValueError, TypeError):
+            loc_host = ""
+        lh, rh = loc_host.lower(), str(request_host or "").lower()
+        # ★同注册域（父子标签边界）豁免：www.foo.com↔foo.com、x.com→m.x.com 是良性规范化/移动版分流、非跨站前置；
+        #   evil-foo.com→foo.com（'-'边界非'.'边界）仍算跨站。避免把良性 canonical 重定向误当 cloaking 行为。
+        redirect = bool(lh) and lh != rh and not lh.endswith("." + rh) and not rh.endswith("." + lh)
+    cookie_challenge = False
+    if headers is not None:
+        for sc in _header_all(headers, "set-cookie"):
+            if sc.split("=", 1)[0].strip().lower() in _CHALLENGE_COOKIE_NAMES:
+                cookie_challenge = True
+                break
+    return redirect, cookie_challenge
 
 
 def _collect_flow_endpoints(
@@ -2731,13 +2822,17 @@ def _collect_flow_endpoints(
                 collector[ip] = ep
             # 该 IP 观测到的业务/登录路径类别（跨同 IP 多条流累积）——供 origin_candidate 的 BUSINESS_API/LOGIN_ENDPOINT。
             biz, login = _runtime_path_categories(url)
-            if biz or login:
+            # 该 IP 的响应边缘行为（跨 host 重定向 / 挑战 cookie 下发）——按请求 host 记，供 edge/cloaking 判同 host 共现。
+            redirect, cookie_challenge = _response_edge_signals(flow, host)
+            if biz or login or redirect or cookie_challenge:
                 rt = ep.enrichment.setdefault("runtime", {})
                 if isinstance(rt, dict):
                     if biz:
                         _accum_runtime_path(rt, "business_api_paths", biz)
                     if login:
                         _accum_runtime_path(rt, "login_paths", login)
+                    if redirect or cookie_challenge:
+                        _accum_edge_host(rt, host or ip, redirect, cookie_challenge)
 
 
 # ---------------------------------------------------------------------------
