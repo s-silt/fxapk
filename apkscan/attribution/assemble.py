@@ -40,6 +40,7 @@ from apkscan.network.fingerprints import (
     is_known_intercept_ip,
     normalize_domain,
     normalize_ip,
+    parse_asn,
     stable_digest,
 )
 
@@ -48,7 +49,6 @@ logger = logging.getLogger(__name__)
 __all__ = ["build_network_attribution"]
 
 _NS = "apkscan.attribution/report-bridge"
-_MAX_ASN = 4_294_967_294
 
 _DISCLAIMER = (
     "A cloud / ASN / CDN membership is a resource fact, not an operator claim; "
@@ -108,22 +108,9 @@ def _as_list(value: object) -> list[Any]:
 
 
 def _parse_asn(value: object) -> int | None:
-    """Strict full-match parse of an ASN: an int, or an ``AS<int>`` / ``AS<int> Org``
-    string. Never extracts digits from the middle of a malformed string."""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        number = value
-    elif isinstance(value, str):
-        head = value.strip().split(" ", 1)[0]
-        if head[:2].upper() == "AS":
-            head = head[2:]
-        if not head.isdecimal():
-            return None
-        number = int(head)
-    else:
-        return None
-    return number if 1 <= number <= _MAX_ASN else None
+    """角色层只要 ASN 数值——复用共享 ``fingerprints.parse_asn`` 契约（与五层同一份、绝不抛），取其 asn_num。
+    ★统一后顺带修旧实现的潜在 bug：旧 ``int(head)`` 对超长数字串会触达 CPython 4300 位限制抛异常。"""
+    return parse_asn(value)[0]
 
 
 def _ip_entity(value: object) -> NetworkEntity | None:
