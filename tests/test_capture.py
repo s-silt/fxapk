@@ -79,6 +79,23 @@ def _set_capabilities(
     monkeypatch.setattr(device, "has_mitmproxy", lambda: has_mitmproxy)
     # 与 unpack 口径一致：capture 也探测设备上 frida-server 是否在跑。
     monkeypatch.setattr(device, "frida_server_running", lambda serial=None: frida_server_running)
+    # A1-3：capture.run 起手会探能力矩阵（capability_probe.probe_available 碰 adb / 设备侧 IO）——
+    # 单测里替换成据上面 mock 的 flags 派生的纯逻辑能力集，既保持"不碰真机/真子进程"，又让
+    # report.meta.capture_capabilities 如实反映被 mock 的环境（floor 底座随 has_device 一并给全）。
+    from apkscan.dynamic import capabilities as _caps
+    from apkscan.dynamic import capability_probe as _cp
+
+    def _fake_probe(serial: str | None = None) -> set[str]:
+        avail: set[str] = set()
+        if has_device:
+            avail |= {_caps.CAP_ADB, _caps.CAP_DEVICE, _caps.CAP_DEVICE_TCPDUMP, _caps.CAP_ROOT_CAPTURE}
+        if has_frida:
+            avail.add(_caps.CAP_FRIDA)
+        if has_mitmproxy:
+            avail.add(_caps.CAP_MITMPROXY)
+        return avail
+
+    monkeypatch.setattr(_cp, "probe_available", _fake_probe)
 
 
 def _stub_orchestration(
@@ -871,6 +888,49 @@ def test_run_rejects_invalid_mode(monkeypatch, tmp_path):
     result = capture.run("com.x", out_dir=str(tmp_path), mode="bogus")
     assert result["status"] == capture.STATUS_ERROR
     assert "mode" in result["reason"]
+
+
+def test_capture_floor_only_writes_capability_plan_to_runtime_report(monkeypatch, tmp_path):
+    """★A1-3 端到端：只 adb+device+tcpdump+root（无 frida/mitm）→ floor-only 仍产 pcap + 报告，
+    且 runtime_report.json 落有机器可读的 capture_capabilities（mode=floor-only、ready、无明文层）。"""
+    _set_capabilities(monkeypatch, has_frida=False, frida_server_running=False, has_mitmproxy=False)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_start_floor_pcap", lambda *a, **k: object())
+    floorp = tmp_path / "floor.pcap"
+    floorp.write_bytes(b"\xa1\xb2\xc3\xd4" + b"\x00" * 40)
+    monkeypatch.setattr(capture, "_stop_floor_pcap", lambda h, op: floorp)
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), mode="floor-only", duration=1)
+    assert result["status"] == capture.STATUS_DONE  # floor pcap 拉回 → 有证据路径
+
+    data = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    caps = data["capture_capabilities"]
+    assert caps["mode"] == "floor-only" and caps["ready"] is True
+    assert caps["missing"] == [] and caps["degraded_to"] is None
+    assert caps["plaintext_best"] is None  # 无 frida/mitm → 无明文层，只有 floor 接入节点
+    assert "device_tcpdump" in caps["required"]
+
+
+def test_capture_both_missing_mitm_records_degraded_plan(monkeypatch, tmp_path):
+    """both 缺 mitmproxy（无 CA）→ 能力计划如实记 degraded_to=floor-only（可见性；不静默改写 skip 语义）。
+
+    ★注：本用例只验能力计划的**记录**；both 缺 mitmproxy 仍走既有 _detect_missing 判缺前置 → skipped，
+    能力计划挂在 result 之外不写 runtime_report——故这里直接对 resolve 出的计划断言其记录正确。
+    """
+    from apkscan.dynamic import capabilities as C
+    from apkscan.dynamic import capability_probe as cp
+
+    # both 底座就绪 + 有 mitmproxy 但（capability_probe 保守）无 CA → plan 记等效 floor-only。
+    monkeypatch.setattr(
+        cp, "probe_available",
+        lambda serial=None: {C.CAP_ADB, C.CAP_DEVICE, C.CAP_DEVICE_TCPDUMP, C.CAP_ROOT_CAPTURE, C.CAP_MITMPROXY},
+    )
+    plan = C.plan_as_dict(C.resolve("both", cp.probe_available()))
+    assert plan["mode"] == "both" and plan["ready"] is True
+    assert plan["degraded_to"] == "floor-only" and plan["plaintext_best"] is None
 
 
 def test_capture_floor_only_skips_mitm_and_proxy(monkeypatch, tmp_path):
@@ -2491,7 +2551,7 @@ def test_run_consumes_decide_capture_from_report(monkeypatch, tmp_path):
     _set_capabilities(monkeypatch)
     seen: dict[str, Any] = {}
 
-    def _spy_capture(package, out_path, duration, serial=None, *, decision=None, mitm=True, floor=True, frida=True):
+    def _spy_capture(package, out_path, duration, serial=None, *, decision=None, mitm=True, floor=True, frida=True, capabilities_plan=None):
         seen["decision"] = decision
         return capture.empty_result(STATUS_DONE, "ok")
 
@@ -2511,7 +2571,7 @@ def test_run_defaults_decision_when_no_report(monkeypatch, tmp_path):
     _set_capabilities(monkeypatch)
     seen: dict[str, Any] = {}
 
-    def _spy_capture(package, out_path, duration, serial=None, *, decision=None, mitm=True, floor=True, frida=True):
+    def _spy_capture(package, out_path, duration, serial=None, *, decision=None, mitm=True, floor=True, frida=True, capabilities_plan=None):
         seen["decision"] = decision
         return capture.empty_result(STATUS_DONE, "ok")
 

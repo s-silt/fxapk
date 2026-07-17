@@ -70,3 +70,50 @@ def test_invalid_profile_falls_back_to_full(monkeypatch: pytest.MonkeyPatch) -> 
     _stub_checks(monkeypatch, floor_ok=True, frida_ok=False, mitm_ok=True, ca_ok=True)
     res = doctor.run(profile="bogus")
     assert res["profile"] == "full" and res["ok"] is False  # 回退 full，frida 缺 → not ok
+
+
+def test_full_not_ok_when_root_and_tcpdump_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★codex 复审 P1-1：full profile 缺 root/tcpdump（floor 底座）→ 即便 frida/mitm/CA 全 ok 也判 not ok。
+
+    _CRITICAL 现已并入 _FLOOR_CRITICAL：both/full 的 PCAP 底座同样需要 root+device_tcpdump，
+    否则连 floor.pcap 都抓不到，不能报"完整环境可用"。设备仍在线，单独把 root/tcpdump 打回 fail。
+    """
+    _stub_checks(monkeypatch, floor_ok=True, frida_ok=True, mitm_ok=True, ca_ok=True)
+    monkeypatch.setattr(doctor, "_check_root", lambda s=None: doctor._item(doctor._NAME_ROOT, False, ""))
+    monkeypatch.setattr(
+        doctor, "_check_device_tcpdump", lambda s=None: doctor._item(doctor._NAME_DEVICE_TCPDUMP, False, "")
+    )
+    assert doctor.run(profile="full")["ok"] is False
+
+
+def _spy_enhancement_fix(monkeypatch: pytest.MonkeyPatch) -> dict[str, bool]:
+    """把 frida-server / CA 检查换成记录 auto_fix 入参的探针（覆写 _stub_checks 的桩）。"""
+    seen: dict[str, bool] = {}
+
+    def _spy_frida(serial: object, host_ver: object, *, auto_fix: bool, on_progress: object = None) -> dict:
+        seen["frida"] = auto_fix
+        return doctor._item(doctor._NAME_FRIDA_SERVER, False, "")
+
+    def _spy_ca(serial: object, *, auto_fix: bool, on_progress: object = None) -> dict:
+        seen["ca"] = auto_fix
+        return doctor._item(doctor._NAME_CA, False, "")
+
+    monkeypatch.setattr(doctor, "_check_frida_server", _spy_frida)
+    monkeypatch.setattr(doctor, "_check_ca", _spy_ca)
+    return seen
+
+
+def test_floor_only_does_not_autofix_frida_ca(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★codex 复审 P1-3：floor-only profile 即便 auto_fix=True，也只读体检 frida/CA，绝不触发部署/装 CA 副作用。"""
+    _stub_checks(monkeypatch, floor_ok=True)
+    seen = _spy_enhancement_fix(monkeypatch)
+    doctor.run(profile="floor-only", auto_fix=True)
+    assert seen == {"frida": False, "ca": False}
+
+
+def test_full_still_autofixes_frida_ca(monkeypatch: pytest.MonkeyPatch) -> None:
+    """full profile 现状不变：auto_fix=True → frida/CA 仍走自动修（enhancement_fix 只对 floor-only 关闭）。"""
+    _stub_checks(monkeypatch, floor_ok=True)
+    seen = _spy_enhancement_fix(monkeypatch)
+    doctor.run(profile="full", auto_fix=True)
+    assert seen == {"frida": True, "ca": True}
