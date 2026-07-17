@@ -98,7 +98,8 @@ def test_merge_dedups_runtime_endpoint_matching_static_value() -> None:
 
 
 def test_merge_runtime_evidence_source_is_runtime() -> None:
-    """哪怕传入端点 evidence 来源写串，并入后也钉为 runtime。"""
+    """非 runtime* 的来源（写串 / 手编）并入后钉成 ``runtime-derived``——仍 runtime*（is_runtime_seen 不变）、
+    但不是最强的 ``runtime``（非 observed-contact，不凭空授予运行时接触信任）。"""
     report = _make_report()
     ep = Endpoint(
         value="api.fraud-c2.cn",
@@ -107,7 +108,8 @@ def test_merge_runtime_evidence_source_is_runtime() -> None:
     )
     merge.merge_runtime_endpoints(report, [ep])
     merged = next(e for e in report.endpoints if e.value == "api.fraud-c2.cn")
-    assert all(ev.source == "runtime" for ev in merged.evidences)
+    assert all(ev.source == "runtime-derived" for ev in merged.evidences)
+    assert all(ev.source.startswith("runtime") for ev in merged.evidences)  # 仍属运行时来源
 
 
 def test_merge_preserves_runtime_subsource_markers() -> None:
@@ -117,12 +119,12 @@ def test_merge_preserves_runtime_subsource_markers() -> None:
         Endpoint(value="dec.fraud-c2.cn", kind="domain",
                  evidences=[Evidence(source="runtime-tls-decrypted", location="tls-http", snippet="TLS 解密")]),
         Endpoint(value="static.fraud-c2.cn", kind="domain",
-                 evidences=[Evidence(source="static-dex", location="x", snippet="y")]),  # 非 runtime* → 钉回
+                 evidences=[Evidence(source="static-dex", location="x", snippet="y")]),  # 非 runtime* → runtime-derived
     ]
     merge.merge_runtime_endpoints(report, eps)
     by = {e.value: e for e in report.endpoints}
     assert by["dec.fraud-c2.cn"].evidences[0].source == "runtime-tls-decrypted"
-    assert by["static.fraud-c2.cn"].evidences[0].source == "runtime"
+    assert by["static.fraud-c2.cn"].evidences[0].source == "runtime-derived"  # 非 runtime* → 弱兜底、非 observed-contact
 
 
 # ---------------------------------------------------------------------------
@@ -370,7 +372,7 @@ def test_load_runtime_endpoints_preserves_runtime_subsource(tmp_path) -> None:
     by = {ep.value: ep for ep in merge.load_runtime_endpoints(str(report_file))}
     assert by["dec.fraud-c2.cn"].evidences[0].source == "runtime-tls-decrypted"  # 解密标记保住
     assert by["http.fraud-c2.cn"].evidences[0].source == "runtime-tshark"  # 明文 tshark 标记保住
-    assert by["junk.fraud-c2.cn"].evidences[0].source == "runtime"  # 非 runtime* 钉回
+    assert by["junk.fraud-c2.cn"].evidences[0].source == "runtime-derived"  # 非 runtime* → 弱兜底（非 observed-contact）
 
 
 def test_load_runtime_endpoints_missing_file_returns_empty(tmp_path) -> None:
@@ -410,7 +412,10 @@ def test_load_runtime_endpoints_skips_bad_entries(tmp_path) -> None:
 
 
 def test_load_runtime_endpoints_synthesizes_evidence_when_missing(tmp_path) -> None:
-    """端点无 evidences 时合成一条 runtime 证据，保证下游分级有据可依。"""
+    """端点无 evidences 时合成一条 ``runtime-derived`` 证据，保证下游分级有据可依。
+
+    合成证据只证明"该值出现在 runtime 报告里"、不证明运行时真接触，故钉 ``runtime-derived``（非
+    observed-contact）而非最强的 ``runtime``——否则手编端点凭空拿到运行时接触信任。"""
     report_file = tmp_path / "runtime_report.json"
     _write_runtime_report(
         report_file,
@@ -419,7 +424,8 @@ def test_load_runtime_endpoints_synthesizes_evidence_when_missing(tmp_path) -> N
     eps = merge.load_runtime_endpoints(str(report_file))
     assert len(eps) == 1
     assert len(eps[0].evidences) == 1
-    assert eps[0].evidences[0].source == "runtime"
+    assert eps[0].evidences[0].source == "runtime-derived"
+    assert eps[0].evidences[0].source.startswith("runtime")  # 仍属运行时来源（is_runtime_seen 不变）
 
 
 # ---------------------------------------------------------------------------
