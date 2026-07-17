@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import math
 import re
@@ -413,6 +414,14 @@ def _entries(sig: dict[str, Any], *path: str) -> list[tuple[str, Any, dict]]:
     return out
 
 
+def _ip_in_cidr(ip: str, cidr: str) -> bool:
+    """被观测 IP 是否落在规则 CIDR 内（供 network.cidrs / ip_pool 弱信号匹配）。坏 IP/CIDR → False，绝不抛。"""
+    try:
+        return ipaddress.ip_address(ip) in ipaddress.ip_network(cidr, strict=False)
+    except (ValueError, TypeError):
+        return False
+
+
 def _score_one_edge(
     prov: dict[str, Any], obs: dict[str, Any], weights: dict[str, float]
 ) -> tuple[float, set[str], list[str], list[str]]:
@@ -485,6 +494,14 @@ def _score_one_edge(
             if rule_asn is not None and rule_asn == obs_asn:
                 _add("asn", "asn", f"asn:{obs_asn}", w, strong_kind=False)
                 weak.append(f"asn:{obs_asn}")
+                break
+    # 弱信号 —— IP 池 / 专属 CIDR。观测 IP 落在规则 network.cidrs 内 → ip_pool（弱信号：IP 段常运营商/云共享、仅佐证）。
+    obs_ip = _s(obs.get("ip"))
+    if obs_ip:
+        for val, w, _e in _entries(sig, "network", "cidrs"):
+            if val and _ip_in_cidr(obs_ip, val):
+                _add("ip_pool", "ip_pool", f"ip_pool:{val}", w, strong_kind=False)
+                weak.append(f"ip_pool:{val}")
                 break
 
     # 负证据不在此处按 provider 评估——统一在 score_edge_provider 对最佳候选全局评估（见 _negative_adjustment）。
