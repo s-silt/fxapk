@@ -440,3 +440,37 @@ def test_ip_rdap_empty_not_signal() -> None:
     assert A.build_endpoint_attribution("ip", "x", {"ip_rdap": {"source": "rdap-ip"}}) is None
     # country 补全：ip_rdap 有 country 但无 netname/org 时不设 rdap，但 country 仍不足以单独成信号。
     assert A.build_endpoint_attribution("ip", "x", {"ip_rdap": {"country": "US"}}) is None
+
+
+def test_online_as_org_fills_origin_network_from_case_close_sources() -> None:
+    """★case-close 增强：ip-api 无 org 时，FOFA/Hunter 等在线源的 as_org 补 origin_network 网络运营方。"""
+    a = A.attribution_from_enrichment({"fofa": {"records": [{"as_organization": "Chinanet Jilin"}]}}, ip="1.2.3.4")
+    assert a is not None
+    assert a["origin_network"]["organization"] == "Chinanet Jilin"
+    assert a["origin_network"]["category"] == "telecom"  # org 归类到 origin_network
+
+
+def test_online_as_org_ignores_hunter_company() -> None:
+    """★纪律：只取 as_org（网络运营方），绝不取 Hunter 的 company（ICP 备案主体=服务运营方，恒 unknown）。"""
+    a = A.attribution_from_enrichment(
+        {"hunter": {"records": [{"company": "某ICP备案主体", "as_org": "Aliyun"}]}}, ip="1.2.3.4"
+    )
+    assert a is not None and a["origin_network"]["organization"] == "Aliyun"  # 取 as_org，非 company
+    assert a["service_operator"]["name"] is None  # company 不进任何归因层
+
+
+def test_online_as_org_only_when_ipapi_missing_and_no_empty_shell() -> None:
+    """ip-api org 优先于在线补充；两者都无 org（只非 org 字段）→ 不塞空壳、返回 None。"""
+    a = A.attribution_from_enrichment(
+        {"asn": {"org": "ip-api-org"}, "fofa": {"records": [{"as_organization": "FOFA-org"}]}}, ip="1.2.3.4"
+    )
+    assert a["origin_network"]["organization"] == "ip-api-org"  # ip-api 优先
+    assert A.attribution_from_enrichment({"fofa": {"records": [{"title": "x"}]}}, ip="1.2.3.4") is None
+
+
+def test_online_as_org_helper_priority_shape_and_fields() -> None:
+    """_online_as_org：多源按优先级、records 列表与顶层两种形态、只认 as_org 类字段（不取 company/isp/org）。"""
+    assert A._online_as_org({"fofa": {"records": [{"as_org": "F"}]}, "hunter": {"records": [{"as_org": "H"}]}}) == "F"
+    assert A._online_as_org({"shodan": {"as_organization": "S"}}) == "S"  # 顶层形态
+    assert A._online_as_org({"fofa": {"records": [{"company": "C", "isp": "I", "org": "O"}]}}) is None  # 非 as_org 类不取
+    assert A._online_as_org({}) is None
