@@ -250,6 +250,41 @@ def test_merge_rc_upload_host_into_endpoints_infra(monkeypatch, tmp_path) -> Non
     assert cdn_lead.advice == infra.ADVICE_SKIP
 
 
+def test_merge_rc_upload_host_source_not_observed_contact(monkeypatch, tmp_path) -> None:
+    """回归（信任边界）：远控回传 host 端点的 evidence source 必须是 ``runtime-derived``
+    （非 observed-contact allowlist），不得钉成最强的 ``source="runtime"``。
+
+    回传 host 是 Frida 无障碍 hook **上报**的字符串（经规整），非 pcap dst_ip / mitm upstream，
+    不证明"运行时真观测到连去该 peer IP"。若钉 observed-contact 源，手编 runtime_report.json 的
+    ``remote_control_events:[{"event":"screen_upload","host":"attacker.example"}]`` 即可经此路径
+    伪造 attribution 视作"运行时真接触了该 peer"的端点——与 assemble 的 observed-contact
+    allowlist 注释"内容/hook 推导值不授 observed-contact"自相矛盾。今天没漏成 attribution
+    运行时行为角色只因该路径产 kind="domain"、而 ``_runtime_contact_observed`` 全部调用点门在
+    kind=="ip"——边界靠巧合站着；本测试钉死来源边界，消除该巧合依赖。与 dead-drop 派生端点
+    （commit ad0b762 / test_dead_drop_derived_endpoint_source_not_observed_contact）同法。
+
+    无修复即失败（旧钉 ``source="runtime"`` 时 ``"runtime" not in sources`` 断言失败）。
+    """
+    from apkscan.attribution import assemble
+
+    report = _make_report()
+    events = [{"event": "screen_upload", "host": _C2_HOST}]
+    monkeypatch.setattr(merge, "_load_events_field", _rc_events(events))
+    merge.merge_runtime_remote_control(report, str(tmp_path / "rr.json"))
+
+    ep = next(e for e in report.endpoints if e.value == _C2_HOST)
+    sources = {ev.source for ev in ep.evidences}
+    # hook 上报值不得钉成 observed-contact allowlist 里的最强来源 "runtime"。
+    assert "runtime" not in sources
+    assert merge._RUNTIME_DERIVED_SOURCE in sources
+    # 与 assemble 的信任边界对齐：runtime-derived 明确不在 observed-contact allowlist。
+    assert merge._RUNTIME_DERIVED_SOURCE not in assemble._OBSERVED_CONTACT_SOURCES
+    # 但仍属 runtime*：is_runtime_seen / 报告"运行时观测"语义不变（宽口径信号）。
+    assert merge._RUNTIME_DERIVED_SOURCE.startswith("runtime")
+    lead = next(l for l in report.leads if l.value == _C2_HOST)
+    assert lead.is_runtime_seen is True
+
+
 def test_merge_rc_gestures_produce_finding_not_lead(monkeypatch, tmp_path) -> None:
     """远控手势序列 + MediaProjection 开启 → 产 Finding（severity 高），不 Lead 化。"""
     report = _make_report()
