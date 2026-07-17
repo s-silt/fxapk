@@ -73,6 +73,19 @@ def test_empty_or_bad_input() -> None:
     assert decode_config_blob("not bytes").decoded is False  # type: ignore[arg-type]
 
 
+def test_gzip_bomb_rejected_without_oom() -> None:
+    """复审 P1 回归：gzip 炸弹（几 KB 压缩 → 超 cap 解压）被**有界解压**拒之，绝不全量解压 OOM。
+
+    直接断言 _gunzip 返回 None（可判别：修前 gzip.decompress(...)[:cap] 会先全量解压再切片、返回 5MB 字节
+    而非 None，本断言在修前必失败）。"""
+    from apkscan.config.decode import _gunzip
+
+    bomb = gzip.compress(b"\x00" * (6 * 1024 * 1024))  # 解压后 6MB > 5MB 上限
+    assert len(bomb) < 64 * 1024  # 压缩后仅几 KB（真炸弹形态）
+    assert _gunzip(bomb) is None  # 有界解压：超帽即拒，不返回 5MB 截断结果
+    assert decode_config_blob(bomb).decoded is False
+
+
 def test_aes_envelope_json() -> None:
     """AES-CBC/PKCS7 信封（fixed iv）解密链——复用 core.appcrypto 的 decrypt_envelope。缺 cryptography → skip。"""
     pytest.importorskip("cryptography")
