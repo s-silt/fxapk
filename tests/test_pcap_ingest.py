@@ -883,3 +883,18 @@ def test_quic_key_cache_bounded() -> None:
     for i in range(pcap_ingest._MAX_QUIC_KEYS + 200):
         pcap_ingest._quic_client_initial_keys(struct.pack("!Q", i), cache)
     assert len(cache) <= pcap_ingest._MAX_QUIC_KEYS
+
+
+def test_remote_endpoints_exposes_per_connection_local_port_and_window(monkeypatch) -> None:
+    """★A2：remote_endpoints 暴露每本机端口一条连接观测（本地端口 + 两方向时间区间并集），供五元组归因。"""
+    monkeypatch.setattr(pcap_ingest, "_ip_public", lambda v: v == "1.2.3.4")
+    summary = pcap_ingest.PcapSummary(flows=[
+        pcap_ingest.Flow("tcp", "10.0.0.2", 50002, "1.2.3.4", 443, packets=2, payload_bytes=80, first_ts=1.0, last_ts=2.0),   # 出站
+        pcap_ingest.Flow("tcp", "1.2.3.4", 443, "10.0.0.2", 50002, packets=3, payload_bytes=200, first_ts=1.1, last_ts=2.5),  # 入站反向
+    ])
+    res = {(r.ip, r.port): r for r in pcap_ingest.remote_endpoints(summary)}
+    re = res[("1.2.3.4", 443)]
+    assert len(re.connections) == 1
+    c = re.connections[0]
+    assert c.local_port == 50002                   # 本机临时端口（出站 src_port = 入站 dst_port）
+    assert c.first_ts == 1.0 and c.last_ts == 2.5  # 两方向时间区间并集
