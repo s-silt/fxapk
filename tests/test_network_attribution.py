@@ -709,3 +709,57 @@ def test_origin_candidate_single_login_path_not_eligible() -> None:
     assert "business_api" not in all_sig  # 无独立业务路径
     r = roles.get("origin_candidate")
     assert r is None or r["eligible"] is False
+
+
+# --------------------------------------------------------------------------- #
+# P0-3: REDIRECT + COOKIE_CHALLENGE → edge_candidate / cloaking_edge_node（运行时响应行为）
+# --------------------------------------------------------------------------- #
+def _edge_ip(value, *, redirect=True, cookie=True, source="runtime", tier=None, country="US"):
+    rt = {}
+    if redirect:
+        rt["redirect_observed"] = True
+    if cookie:
+        rt["cookie_challenge_observed"] = True
+    return _ep(value, "ip", {
+        "attribution": {"ips": [{"ip": value, "country": country,
+                                 "origin_network": {"asn": 64500, "category": "cloud"},
+                                 "hosting_provider": {"category": None}, "edge_provider": {"tier": tier}}]},
+        "runtime": rt,
+    }, evidences=[Evidence(source=source, location="x")])
+
+
+def test_edge_candidate_eligible_from_runtime_redirect_and_cookie() -> None:
+    r = _roles(_build(_edge_ip("5.5.5.5")), "5.5.5.5")["edge_candidate"]
+    assert r["eligible"] is True
+    assert {"redirect", "cookie_challenge"} <= set(r["matched_signals"])
+    assert r["evidence"]
+
+
+def test_cloaking_edge_node_eligible_from_redirect_and_cookie() -> None:
+    r = _roles(_build(_edge_ip("5.5.5.5")), "5.5.5.5")["cloaking_edge_node"]
+    assert r["eligible"] is True  # COOKIE_CHALLENGE + REDIRECT = ≥2 强行为信号
+
+
+def test_edge_and_cloaking_not_eligible_single_signal() -> None:
+    roles = _roles(_build(_edge_ip("5.5.5.5", cookie=False)), "5.5.5.5")  # 仅 redirect
+    for role in ("edge_candidate", "cloaking_edge_node"):
+        r = roles.get(role)
+        assert r is None or r["eligible"] is False, role
+
+
+def test_edge_signals_need_runtime_evidence_not_just_flags() -> None:
+    # ★守不变量：手注 redirect/cookie 标志但无 runtime 证据 → 不产信号。
+    roles = _roles(_build(_edge_ip("5.5.5.5", source="static")), "5.5.5.5")
+    all_sig = {s for role in roles.values() for s in role["matched_signals"]}
+    assert not ({"redirect", "cookie_challenge"} & all_sig)
+
+
+def test_intercept_node_never_edge_signals() -> None:
+    ep = _ep("183.192.65.101", "ip", {
+        "attribution": {"ips": [{"ip": "183.192.65.101", "country": "CN",
+                                 "origin_network": {"asn": 4134, "category": "telecom"},
+                                 "hosting_provider": {"category": None}, "edge_provider": {"tier": None}}]},
+        "runtime": {"redirect_observed": True, "cookie_challenge_observed": True},
+    }, evidences=[Evidence(source="runtime", location="x")])
+    all_sig = {s for role in _roles(_build(ep), "183.192.65.101").values() for s in role["matched_signals"]}
+    assert not ({"redirect", "cookie_challenge"} & all_sig)

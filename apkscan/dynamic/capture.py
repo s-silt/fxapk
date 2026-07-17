@@ -2681,6 +2681,65 @@ def _is_ip_literal(host: str) -> bool:
         return False
 
 
+_REDIRECT_STATUS = frozenset({301, 302, 303, 307, 308})
+#: 挑战/清算类 Cookie 名——服务端**下发过挑战**（bot/WAF 拦截并要求通过）的行为证据（供 COOKIE_CHALLENGE）。
+#: 取"挑战通过/清算"类（cf_clearance/__jsl_clearance/acw_sc…），不取每请求常设的 __cf_bm（那只是 CDN 存在、非挑战）。
+_CHALLENGE_COOKIE_NAMES = frozenset({
+    "cf_clearance", "__jsl_clearance", "__jsl_clearance_s", "__jsl_clearance_ss",
+    "acw_sc__v2", "acw_sc__v3", "acw_tc", "aliyungf_tc", "yunsuo_session", "srv_id",
+})
+
+
+def _header_first(headers: object, name: str) -> str:
+    """从 mitm/dict 响应头取单值（大小写不敏感）。缺/坏 → ""。绝不抛。"""
+    try:
+        get = getattr(headers, "get", None)
+        if callable(get):
+            v = get(name) or get(name.title()) or get(name.upper())
+            return str(v) if v else ""
+    except Exception:  # noqa: BLE001
+        return ""
+    return ""
+
+
+def _header_all(headers: object, name: str) -> list[str]:
+    """从 mitm/dict 响应头取多值（如多条 Set-Cookie）。缺/坏 → []。绝不抛。"""
+    try:
+        get_all = getattr(headers, "get_all", None)
+        if callable(get_all):
+            return [str(x) for x in get_all(name)]
+        v = _header_first(headers, name)
+        return [v] if v else []
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _response_edge_signals(flow: object, request_host: object) -> tuple[bool, bool]:
+    """从运行时响应抽边缘行为信号：(跨 host 重定向, 挑战 cookie 下发)。供 edge_candidate / cloaking_edge_node。
+    REDIRECT=3xx 且 Location 指向与请求 host 不同的 host；COOKIE_CHALLENGE=Set-Cookie 命中挑战/清算 cookie 名。绝不抛。"""
+    resp = getattr(flow, "response", None)
+    if resp is None:
+        return False, False
+    headers = getattr(resp, "headers", None)
+    redirect = False
+    status = getattr(resp, "status_code", None)
+    if isinstance(status, int) and status in _REDIRECT_STATUS and headers is not None:
+        loc_host = ""
+        try:
+            from urllib.parse import urlsplit
+            loc_host = urlsplit(_header_first(headers, "location")).hostname or ""
+        except (ValueError, TypeError):
+            loc_host = ""
+        redirect = bool(loc_host) and loc_host.lower() != str(request_host or "").lower()
+    cookie_challenge = False
+    if headers is not None:
+        for sc in _header_all(headers, "set-cookie"):
+            if sc.split("=", 1)[0].strip().lower() in _CHALLENGE_COOKIE_NAMES:
+                cookie_challenge = True
+                break
+    return redirect, cookie_challenge
+
+
 def _collect_flow_endpoints(
     flow: object, location: str, collector: dict[str, Endpoint]
 ) -> None:
@@ -2731,13 +2790,19 @@ def _collect_flow_endpoints(
                 collector[ip] = ep
             # 该 IP 观测到的业务/登录路径类别（跨同 IP 多条流累积）——供 origin_candidate 的 BUSINESS_API/LOGIN_ENDPOINT。
             biz, login = _runtime_path_categories(url)
-            if biz or login:
+            # 该 IP 的响应边缘行为（跨 host 重定向 / 挑战 cookie 下发）——供 edge_candidate / cloaking_edge_node。
+            redirect, cookie_challenge = _response_edge_signals(flow, host)
+            if biz or login or redirect or cookie_challenge:
                 rt = ep.enrichment.setdefault("runtime", {})
                 if isinstance(rt, dict):
                     if biz:
                         _accum_runtime_path(rt, "business_api_paths", biz)
                     if login:
                         _accum_runtime_path(rt, "login_paths", login)
+                    if redirect:
+                        rt["redirect_observed"] = True
+                    if cookie_challenge:
+                        rt["cookie_challenge_observed"] = True
 
 
 # ---------------------------------------------------------------------------

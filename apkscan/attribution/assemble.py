@@ -84,6 +84,9 @@ _SIGNAL_CONFIDENCE: MappingProxyType[RoleSignal, float] = MappingProxyType(
         # 运行时行为信号（P0-2）：该 IP 被观测服务业务/登录 API 路径——origin_candidate 证据（像真后端源站）。
         RoleSignal.BUSINESS_API: 0.75,
         RoleSignal.LOGIN_ENDPOINT: 0.7,
+        # 运行时行为信号（P0-3）：跨 host 重定向 / 挑战 cookie 下发——edge_candidate / cloaking_edge_node 证据。
+        RoleSignal.REDIRECT: 0.7,
+        RoleSignal.COOKIE_CHALLENGE: 0.75,
     }
 )
 
@@ -409,6 +412,18 @@ def _ip_signal_features(
         if login_paths:
             add(RoleSignal.LOGIN_ENDPOINT, "runtime", True,
                 f"endpoints[{ip.value}].enrichment.runtime.login_paths")
+
+    # REDIRECT / COOKIE_CHALLENGE（运行时行为信号，P0-3）：该 IP 响应观测到跨 host 重定向 / 挑战 cookie 下发
+    #   = edge_candidate / cloaking_edge_node 证据（前置/隐匿边缘的主动行为）。须真运行时接触 + 非拦截节点；
+    #   ★不加 edge.tier 门——边缘行为信号与"该 IP 是前置/CDN"一致（edge 角色 PUBLIC_CDN 只作 context 不阻断）。
+    if endpoint_is_this_ip and runtime_signal_ok and _runtime_contact_observed(endpoint):
+        rt2 = _as_dict(_as_dict(getattr(endpoint, "enrichment", None)).get("runtime"))
+        if rt2.get("redirect_observed") is True:
+            add(RoleSignal.REDIRECT, "runtime", True,
+                f"endpoints[{ip.value}].enrichment.runtime.redirect_observed")
+        if rt2.get("cookie_challenge_observed") is True:
+            add(RoleSignal.COOKIE_CHALLENGE, "runtime", True,
+                f"endpoints[{ip.value}].enrichment.runtime.cookie_challenge_observed")
 
     tier = edge.get("tier")
     if (

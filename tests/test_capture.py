@@ -3396,3 +3396,31 @@ def test_collect_flow_endpoints_accumulates_biz_login_paths_per_ip() -> None:
     rt = collector["1.2.3.4"].enrichment["runtime"]
     assert "/api/user/login" in rt["login_paths"]
     assert set(rt["business_api_paths"]) == {"/api/user/login", "/v1/pay/order"}  # 跨流累积去重
+
+
+class _FakeHeaders:
+    def __init__(self, single=None, multi=None) -> None:
+        self._single = {k.lower(): v for k, v in (single or {}).items()}
+        self._multi = {k.lower(): v for k, v in (multi or {}).items()}
+
+    def get(self, name):  # noqa: ANN001, ANN201
+        return self._single.get(name.lower())
+
+    def get_all(self, name):  # noqa: ANN001, ANN201
+        return self._multi.get(name.lower(), [])
+
+
+def test_response_edge_signals_redirect_and_challenge_cookie() -> None:
+    """P0-3：响应边缘信号——跨 host 3xx 重定向 + 挑战 cookie 命中；同 host 重定向/普通 cookie 不命中。"""
+    f = capture._response_edge_signals
+    xhost = SimpleNamespace(response=SimpleNamespace(
+        status_code=302, headers=_FakeHeaders({"location": "https://other.com/x"},
+                                              {"set-cookie": ["cf_clearance=abc; Path=/"]})))
+    assert f(xhost, "pay.x.com") == (True, True)
+    same = SimpleNamespace(response=SimpleNamespace(
+        status_code=302, headers=_FakeHeaders({"location": "https://pay.x.com/login"}, {})))
+    assert f(same, "pay.x.com") == (False, False)              # 同 host 重定向不算
+    normal = SimpleNamespace(response=SimpleNamespace(
+        status_code=200, headers=_FakeHeaders({}, {"set-cookie": ["sessionid=xyz"]})))
+    assert f(normal, "pay.x.com") == (False, False)            # 普通 cookie 非挑战
+    assert f(SimpleNamespace(response=None), "x") == (False, False)  # 无响应
