@@ -99,6 +99,7 @@ def _compact_network_attribution(raw: Any) -> dict[str, Any] | None:
                     by_role[str(role.get("role"))] += 1
                     candidates.append({
                         "endpoint": endpoint.get("endpoint"),
+                        "kind": endpoint.get("kind"),  # domain / ip（对齐设计 schema role_candidates 字段）
                         "ip": ipv.get("ip"),
                         "role": role.get("role"),
                         "score": role.get("score"),
