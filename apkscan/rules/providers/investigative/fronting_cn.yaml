@@ -1,0 +1,25 @@
+# rules/providers/investigative/ —— fxapk 自有的"共享前置 / 防红分发"CNAME 命名空间指纹。
+# ★定位：公开在线库/API（cdncheck / ip-api as_org 等）**认不出**这类国内共享前端——它们只会说"阿里云 ESA
+#   边缘"，认不出这是一个把大量互不相关域名前置到同一分发平台的 CNAME 命名空间。这正是本地库该补的"在线不足"。
+# ★命中语义：接入节点是**共享分发前端**（遮蔽回源真源站），**不是独占源站**——归属/线索应指回源 + 平台运营方，
+#   勿把共享边缘当真后端。★中性描述：不对任何具体平台运营方做定性（合法分发平台不排除下游被滥用，属中间节点）；
+#   运营方归属与调证方向不写进公开规则库。
+# ★纪律：单条 CNAME 后缀 = 1 个强信号 → 至多 probable（confirmed 须 ≥2 不同强信号 + 阈值，引擎强制），
+#   不会据一条 CNAME 就把某接入节点判死为防红前端。
+
+edge_providers:
+  - id: fronting.cn.a1init
+    name: "a1.init shared-fronting namespace"
+    category: security_proxy
+    role: anti_blocking_fronting
+    signals:
+      dns:
+        cname_suffix:
+          # CNAME 模板 all.<root>.a1.init{uu,cc,nn}.com —— 大量域名共前置的同一分发命名空间（标签级后缀匹配）。
+          - {value: ".a1.inituu.com", weight: 8}
+          - {value: ".a1.initcc.com", weight: 8}
+          - {value: ".a1.initnn.com", weight: 8}
+    provenance:
+      source: fxapk_investigative
+      confidence: verified   # CNAME 命名空间本身坐实（共享前置分发的 CNAME 模板，over Alibaba ESA edge）
+      note: "Shared reverse-proxy / fronting CNAME namespace over Alibaba ESA edge; a match means the endpoint is a shared front, not the origin — pivot to origin + platform operator."

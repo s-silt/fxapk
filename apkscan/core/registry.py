@@ -315,12 +315,15 @@ def _walk_rule_files(node: Any, prefix: str) -> "list[tuple[str, Any]]":
 def load_rules_dir(subdir: str) -> list[dict]:
     """加载 rules/<subdir>/ 下所有 *.yaml（非递归），返回各文件解析出的 dict 列表（按文件名排序）。
 
-    供 attribution 的分目录 provider 专库（rules/providers/{cloud,idc,cdn,waf,carrier}.yaml）合并加载。
+    供 attribution 的分目录 provider 专库（rules/providers/{cloud,idc,cdn,waf,carrier}.yaml）与 fxapk 自有
+    防红指纹（rules/providers/investigative/）合并加载。subdir 支持多级（如 "providers/investigative"）。
     目录不存在 / 空 / 单文件解析失败 → 跳过该文件；整体绝不抛（坏文件不拖垮其余）。
     """
     out: list[dict] = []
     try:
-        base = importlib.resources.files("apkscan") / "rules" / subdir
+        base = importlib.resources.files("apkscan") / "rules"
+        for part in subdir.split("/"):  # 逐级定位，支持多级 subdir（Traversable / 逐级安全）
+            base = base / part
         if not base.is_dir():
             return []
         for entry in sorted(base.iterdir(), key=lambda e: e.name):
