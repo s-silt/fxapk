@@ -3329,3 +3329,70 @@ def test_ascii_staging_dir_ascii_temp_passthrough(monkeypatch, tmp_path) -> None
     monkeypatch.setattr(capture.tempfile, "mkdtemp", lambda prefix="": str(ascii_dir))
     monkeypatch.setattr(capture, "_short_path_if_ascii", _no_short)
     assert capture._ascii_staging_dir() == ascii_dir
+
+
+def test_runtime_path_categories_classifies_business_and_login() -> None:
+    """P0-2：运行时请求路径分类器——业务/登录段命中（含嵌套段），无关路径/前缀伪命中不采。"""
+    f = capture._runtime_path_categories
+    assert f("https://1.2.3.4/api/user/login") == ("/api/user/login", "/api/user/login")
+    assert f("https://x/login") == (None, "/login")
+    assert f("https://x/v1/pay/order") == ("/v1/pay/order", None)
+    assert f("https://x/static/img.png") == (None, None)   # 无关路径不采
+    assert f("https://x/myapi/x") == (None, None)           # /myapi 不误命中 api
+    assert f("https://x/loginhelper") == (None, None)       # /loginhelper 不误命中 login
+    assert f(None) == (None, None) and f("") == (None, None)
+
+
+def test_runtime_path_categories_rejects_static_assets() -> None:
+    """★复审 P1：静态资源文件名（app.js/login.png/app.apk/register.html）不得当业务/登录 API——
+    否则落地页拉 SPA 包就把防红/共享前端误判成 origin_candidate 源站。"""
+    f = capture._runtime_path_categories
+    for u in ["https://x/app.js", "https://x/static/js/app.min.js", "https://x/css/app.css",
+              "https://x/js/auth.min.js", "https://x/sso.css", "https://x/img/login.png",
+              "https://x/download/app.apk", "https://x/assets/user.svg", "https://x/register.html",
+              "https://x/pay.png"]:
+        assert f(u) == (None, None), u
+    # 动态脚本后缀仍认（.do/.php）
+    assert f("https://x/login.do")[1] == "/login.do"
+    assert f("https://x/api.php")[0] == "/api.php"
+
+
+def test_runtime_path_categories_covers_common_forms() -> None:
+    """★复审 P2：REST 复数 / 登录别名 / ;jsessinid 等常见真实形态不漏。"""
+    f = capture._runtime_path_categories
+    assert f("https://x/v2/orders/create")[0]     # REST 复数 orders
+    assert f("https://x/users/sign_in")[1]        # Devise 复数+下划线
+    assert f("https://x/signup")[1]               # signup 别名
+    assert f("https://x/oauth2/token")[1]         # oauth2
+    assert f("https://x/login;jsessionid=ABC")[1] == "/login;jsessionid=ABC"[:80] or f("https://x/login;jsessionid=ABC")[1]
+    # 无 scheme（host 混入 path）不采
+    assert f("1.2.3.4/login") == (None, None)
+
+
+def test_collect_flow_endpoints_bare_ip_host_makes_ip_endpoint() -> None:
+    """★复审 P1：app 直连裸 IP（host=IP）时须建 kind='ip' 端点承载路径，别被 host 分支收成 domain 丢弃。"""
+    flow = SimpleNamespace(
+        request=SimpleNamespace(pretty_url="https://45.1.2.3/api/user/login", url="https://45.1.2.3/api/user/login",
+                                pretty_host="45.1.2.3", host="45.1.2.3", scheme="https"),
+        server_conn=SimpleNamespace(peername=("45.1.2.3", 443)),
+    )
+    collector: dict = {}
+    capture._collect_flow_endpoints(flow, "loc", collector)
+    ep = collector["45.1.2.3"]
+    assert ep.kind == "ip"  # 不是 domain
+    assert "/api/user/login" in ep.enrichment["runtime"]["login_paths"]
+
+
+def test_collect_flow_endpoints_accumulates_biz_login_paths_per_ip() -> None:
+    """P0-2：同一实连 IP 跨多条流累积业务/登录路径进 runtime enrichment（供 origin_candidate）。"""
+    def _flow(url, ip):
+        return SimpleNamespace(
+            request=SimpleNamespace(pretty_url=url, url=url, pretty_host="pay.x.com", host="pay.x.com", scheme="https"),
+            server_conn=SimpleNamespace(peername=(ip, 443)),
+        )
+    collector: dict = {}
+    capture._collect_flow_endpoints(_flow("https://pay.x.com/api/user/login", "1.2.3.4"), "loc", collector)
+    capture._collect_flow_endpoints(_flow("https://pay.x.com/v1/pay/order", "1.2.3.4"), "loc", collector)
+    rt = collector["1.2.3.4"].enrichment["runtime"]
+    assert "/api/user/login" in rt["login_paths"]
+    assert set(rt["business_api_paths"]) == {"/api/user/login", "/v1/pay/order"}  # 跨流累积去重
