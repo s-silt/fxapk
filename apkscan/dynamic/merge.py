@@ -50,6 +50,14 @@ logger = logging.getLogger(__name__)
 _RUNTIME_SOURCE = "runtime"
 # C5b：运行时解密出的明文端点来源标记（与抓包原始端点 "runtime" 区分，便于报告标注来源）。
 _RUNTIME_DECRYPTED_SOURCE = "runtime-decrypted"
+# 合成 / 非 runtime* 来源的兜底标记。仍是 runtime*（``startswith("runtime")`` → is_runtime_seen /
+# 报告"标运行时"语义不变），但**刻意不叫 "runtime"**：它不在 attribution 的 observed-contact allowlist
+# （``assemble._OBSERVED_CONTACT_SOURCES == {"runtime", "runtime-pcap"}``）里。语义边界——它只证明"该值出现在
+# runtime 报告里"，不证明"运行时真观测到连去该 peer IP"。故手编 / 回灌的 runtime_report.json（只有
+# ``enrichment.runtime`` 标志、无真实 observed-contact 证据）不能凭空过 network_attribution 的运行时行为角色
+# （domestic_relay / origin / edge / cloaking——本只需两只布尔就过 cloaking 档）。真 capture 产物本就带
+# 正确的 ``source="runtime"``（capture.py 的 _collect_flow_endpoints），不经此兜底、不受影响、无回归。
+_RUNTIME_DERIVED_SOURCE = "runtime-derived"
 
 # 重渲支持的报告格式（默认全产出，覆盖 analyze 首次写出的静态报告）。
 _DEFAULT_FORMATS = ["html", "json"]
@@ -176,7 +184,9 @@ def load_runtime_endpoints(runtime_report_path: str) -> list[Endpoint]:
 
     Returns:
         重建出的运行时 Endpoint 列表；文件缺失 / JSON 解析失败 / 结构异常 → ``[]``
-        （记 logging，绝不抛）。每个 Endpoint 的 evidences 强制 source="runtime"。
+        （记 logging，绝不抛）。每个 Endpoint 的 evidences 钉成 runtime* 来源：原 runtime* 子来源
+        （runtime / runtime-pcap / runtime-tls-decrypted 等）原样保留，非 runtime* 与合成的钉
+        ``runtime-derived``（非 observed-contact，见 :func:`_evidences_from_jsonable`）。
     """
     import json
     from pathlib import Path
@@ -237,7 +247,15 @@ def _endpoint_from_jsonable(item: Any) -> Endpoint | None:
 
 
 def _evidences_from_jsonable(raw: Any, value: str) -> list[Evidence]:
-    """还原 evidences 列表，强制 source 为 runtime*；缺失则合成一条最小 runtime 证据。"""
+    """还原 evidences 列表，钉成 runtime* 来源；缺失则合成一条最小 ``runtime-derived`` 证据。
+
+    保留原 JSON 里真实的 runtime* 子来源（runtime / runtime-pcap / runtime-tshark /
+    runtime-tls-decrypted / runtime-decrypted）——capture 各语义来源不能被抹平。非 runtime* 的
+    （手编 / 写串）与"无 evidences 时合成的"一律钉成 ``runtime-derived`` 而非最强的 ``runtime``：
+    仍是 runtime*（下游 is_runtime_seen / 报告"标运行时"不变），但**不是** observed-contact
+    （不在 ``assemble._OBSERVED_CONTACT_SOURCES``），故不凭空授予"运行时真接触该 peer IP"的信任，
+    守住 network_attribution 运行时行为角色的信任边界（见 ``_RUNTIME_DERIVED_SOURCE``）。
+    """
     evidences: list[Evidence] = []
     if isinstance(raw, list):
         for ev in raw:
@@ -246,29 +264,31 @@ def _evidences_from_jsonable(raw: Any, value: str) -> list[Evidence]:
             raw_source = str(ev.get("source", ""))
             evidences.append(
                 Evidence(
-                    # 保留 runtime* 子来源（runtime-tshark / runtime-tls-decrypted / runtime-decrypted 等），
-                    # 便于报告区分"密文抓到 / 明文 HTTP / TLS 解密还原"；非 runtime* 一律钉 runtime（并入主报告应标运行时）。
-                    source=raw_source if raw_source.startswith("runtime") else _RUNTIME_SOURCE,
+                    source=raw_source if raw_source.startswith("runtime") else _RUNTIME_DERIVED_SOURCE,
                     location=str(ev.get("location", "")),
                     snippet=str(ev.get("snippet", "")),
                 )
             )
     if not evidences:
-        evidences.append(Evidence(source=_RUNTIME_SOURCE, location="runtime_report.json", snippet=value))
+        evidences.append(
+            Evidence(source=_RUNTIME_DERIVED_SOURCE, location="runtime_report.json", snippet=value)
+        )
     return evidences
 
 
 def _force_runtime_source(endpoints: list[Endpoint]) -> None:
     """就地确保运行时端点的每条 evidence source 为 runtime*（合并语义靠 source 区分来源）。
 
-    任何 ``runtime*`` 子来源（runtime / runtime-decrypted / runtime-tshark / runtime-tls-decrypted）
-    放行——都属运行时来源，保留更精确的标记便于报告区分"密文抓到 / 明文 HTTP / TLS 解密还原"；
-    仅非 runtime* 的（哪怕原 JSON 写串了）才钉回 runtime。
+    任何 ``runtime*`` 子来源（runtime / runtime-pcap / runtime-decrypted / runtime-tshark /
+    runtime-tls-decrypted）放行——都属运行时来源，保留更精确的标记便于报告区分"密文抓到 / 明文 HTTP /
+    TLS 解密还原"；仅非 runtime* 的（哪怕原 JSON 写串了）才钉成 ``runtime-derived`` 而非最强的 ``runtime``：
+    仍 runtime*（is_runtime_seen 不变），但不是 observed-contact（见 ``_RUNTIME_DERIVED_SOURCE``），
+    绝不因"写串成 dex → 钉回 runtime"而凭空授予运行时接触信任。
     """
     for ep in endpoints:
         for ev in ep.evidences:
             if not ev.source.startswith("runtime"):
-                ev.source = _RUNTIME_SOURCE
+                ev.source = _RUNTIME_DERIVED_SOURCE
 
 
 def merge_runtime_endpoints(report: Report, endpoints: list[Endpoint]) -> dict[str, int]:
@@ -277,7 +297,9 @@ def merge_runtime_endpoints(report: Report, endpoints: list[Endpoint]) -> dict[s
     就地修改 ``report``（不重渲——重渲交 :func:`merge_and_rerender`）。合并语义完全复用
     pipeline 的 ``_dedup_endpoints``，与静态侧一致：
 
-    1. 运行时 evidence 强制 source="runtime"。
+    1. 运行时 evidence 钉成 runtime* 来源（``_force_runtime_source``）：真 runtime* 子来源
+       原样保留，非 runtime* 的钉成 ``runtime-derived``（非 observed-contact，见
+       :func:`_evidences_from_jsonable`）——不再一律钉最强的 ``"runtime"``。
     2. ``_dedup_endpoints(report.endpoints + endpoints)`` 去重合并：evidences 按
        (source, location, snippet) 去重并集、is_cleartext/is_private/is_suspicious 取 OR、
        enrichment 浅合并、kind 首现为准、保持首现顺序；写回 report.endpoints。运行时端点
