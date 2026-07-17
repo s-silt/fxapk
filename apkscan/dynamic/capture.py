@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -240,6 +241,14 @@ def _annotate_runtime_endpoints(
         attr_keys = [f"{remote.proto}/{remote.ip}:{remote.port}" for remote in matched]
         attributed = [pcap_app_attr[k] for k in attr_keys if isinstance(pcap_app_attr.get(k), dict)]
         endpoint_keys = sorted({f"{remote.ip}:{remote.port}" for remote in matched})
+        # A2 时序穿透（供 network_attribution 的 SUBSEQUENT_OVERSEAS 时序关联）：该端点最早被接触的时刻。
+        #   0.0 视作未知（pcap_ingest first_ts 默认 0.0）→ 过滤；只收有限正值（防 NaN/inf 让下游 max() 顺序敏感
+        #   或垃圾值恒产信号）；全未知则 None。不改 remote_endpoints 契约。
+        _contact_ts = [
+            remote.first_ts for remote in matched
+            if isinstance(getattr(remote, "first_ts", None), (int, float))
+            and math.isfinite(remote.first_ts) and remote.first_ts > 0
+        ]
         runtime = endpoint.enrichment.setdefault("runtime", {})
         if not isinstance(runtime, dict):
             runtime = {}
@@ -249,6 +258,7 @@ def _annotate_runtime_endpoints(
                 "has_payload": any(bool(getattr(remote, "has_payload", False)) for remote in matched),
                 "target_attributed": any(item.get("is_target_app") is True for item in attributed),
                 "remote_endpoints": endpoint_keys,
+                "first_contact_ts": min(_contact_ts) if _contact_ts else None,
                 "sni": sorted(
                     {
                         str(sni)

@@ -21,6 +21,7 @@ guard), and fully sorted output.
 from __future__ import annotations
 
 import logging
+import math
 from types import MappingProxyType
 from typing import Any, Sequence
 
@@ -78,6 +79,8 @@ _SIGNAL_CONFIDENCE: MappingProxyType[RoleSignal, float] = MappingProxyType(
         RoleSignal.DOMESTIC_NETWORK: 0.7,
         RoleSignal.PUBLIC_CDN: 0.8,
         RoleSignal.NON_PUBLIC_CDN: 0.5,
+        # 运行时行为信号（P0）：接触该境内 IP 后随后又连境外——中继候选，correlational（非 relay 铁证）。
+        RoleSignal.SUBSEQUENT_OVERSEAS_CONNECTION: 0.7,
     }
 )
 
@@ -317,9 +320,14 @@ def _bridge_endpoint(endpoint: Any) -> tuple[list[AttributionEvidence], list[dic
 
 
 def _ip_signal_features(
-    ip: NetworkEntity, entry: dict[str, Any], *, endpoint: Any
+    ip: NetworkEntity, entry: dict[str, Any], *, endpoint: Any, max_overseas_ts: float | None = None
 ) -> list[RoleFeature]:
-    """The conservative fact->RoleSignal compiler for one IP (one fact -> one signal)."""
+    """The conservative fact->RoleSignal compiler for one IP (one fact -> one signal).
+
+    ``max_overseas_ts``: latest runtime contact time to any OVERSEAS IP endpoint in the
+    report (pre-scanned across all endpoints) — licenses SUBSEQUENT_OVERSEAS_CONNECTION on a
+    domestic relay-candidate IP when the app contacted overseas AFTER contacting this IP.
+    """
     origin = _as_dict(entry.get("origin_network"))
     hosting = _as_dict(entry.get("hosting_provider"))
     edge = _as_dict(entry.get("edge_provider"))
@@ -335,10 +343,15 @@ def _ip_signal_features(
         ))
 
     is_ip_endpoint = getattr(endpoint, "kind", None) == "ip" and _ip_entity(getattr(endpoint, "value", None))
+    # ★已知反诈拦截节点的"被接触"是反诈拦截事实、非业务/中继接触——绝不授权任何运行时行为信号
+    #   （与 _bridge_endpoint 对 tls_sni/network_flow 边的 is_known_intercept_ip 排除一致；DOMESTIC_NETWORK
+    #   是纯资源事实可留、且单独不足以 eligible）。防拦截页被升格为中继候选进线索输出。
+    runtime_signal_ok = not is_known_intercept_ip(ip.value)
     if (
         is_ip_endpoint is not None
         and getattr(is_ip_endpoint, "value", None) == ip.value
         and _runtime_contact_observed(endpoint)
+        and runtime_signal_ok
     ):
         add(RoleSignal.DIRECT_CONNECTION, "runtime", True, f"endpoints[{ip.value}].evidences[runtime]")
 
@@ -358,6 +371,22 @@ def _ip_signal_features(
     elif endpoint_is_this_ip and ip_asn_country == "CN":
         add(RoleSignal.DOMESTIC_NETWORK, "asn", "CN",
             f"endpoints[{getattr(endpoint, 'value', '')}].enrichment.asn.country")
+
+    # SUBSEQUENT_OVERSEAS_CONNECTION（运行时行为信号，P0）：接触该境内 IP 后随后又连境外 = 中继候选行为。
+    #   时序判据：本端点最早接触时刻 t_dom < 报告内任一境外 IP 接触时刻（预扫 max_overseas_ts）。仅对**境内
+    #   IP 端点自身**、且该 IP 有运行时接触时成立。correlational（同会话先后，非 relay 铁证）→ 支撑 *_candidate。
+    is_domestic = country == "CN" or (endpoint_is_this_ip and ip_asn_country == "CN")
+    if (
+        endpoint_is_this_ip
+        and is_domestic
+        and max_overseas_ts is not None
+        and _runtime_contact_observed(endpoint)
+        and runtime_signal_ok  # 拦截节点不产该运行时行为信号（见上）
+    ):
+        t_dom = _runtime_first_contact_ts(endpoint)
+        if t_dom is not None and max_overseas_ts > t_dom:
+            add(RoleSignal.SUBSEQUENT_OVERSEAS_CONNECTION, "runtime", True,
+                f"endpoints[{ip.value}].enrichment.runtime.first_contact_ts<overseas_contact")
 
     tier = edge.get("tier")
     if (
@@ -411,6 +440,60 @@ def _score_ip_roles(ip: NetworkEntity, features: list[RoleFeature]) -> tuple[lis
     return summaries, eligible_scores
 
 
+def _ip_endpoint_country(ep: Any) -> str | None:
+    """IP 端点自身的归因国家：attribution 里 ip==端点值（**双侧 _ip_entity 归一化**，与编译器 endpoint_is_this_ip
+    对齐）的条目 country——命中但缺/坏 → None（不回落）；无命中条目 → 回落 asn.country。仅采信非空字符串
+    （坏值如 True/dict/list → None，别把垃圾当境外）。端点值不可归一化 → None。绝不抛。"""
+    enr = _as_dict(getattr(ep, "enrichment", None))
+    self_ip = _ip_entity(getattr(ep, "value", None))
+    if self_ip is None:
+        return None
+    for entry in _as_list(_as_dict(enr.get("attribution")).get("ips")):
+        e = _as_dict(entry)
+        entry_ip = _ip_entity(e.get("ip"))
+        if entry_ip is not None and entry_ip.value == self_ip.value:
+            c = e.get("country")
+            return c if isinstance(c, str) and c else None
+    c = _as_dict(enr.get("asn")).get("country")
+    return c if isinstance(c, str) and c else None
+
+
+def _endpoint_asn_country(ep: Any) -> str | None:
+    """端点自身 asn 富化里的国家（仅采信非空字符串）。绝不抛。"""
+    c = _as_dict(_as_dict(getattr(ep, "enrichment", None)).get("asn")).get("country")
+    return c if isinstance(c, str) and c else None
+
+
+def _runtime_first_contact_ts(ep: Any) -> float | None:
+    """端点被运行时最早接触的时刻（capture 写的 runtime.first_contact_ts）。缺/坏/非有限(NaN/±inf)/≤0/bool
+    → None（NaN 会让 max() 顺序敏感、inf 会让垃圾值恒产信号，故一并拒）。绝不抛。"""
+    ts = _as_dict(_as_dict(getattr(ep, "enrichment", None)).get("runtime")).get("first_contact_ts")
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not math.isfinite(ts) or ts <= 0:
+        return None
+    return float(ts)
+
+
+def _overseas_contact_timestamps(endpoints: Sequence[Any]) -> list[float]:
+    """被运行时接触过的**明确境外** IP 端点的接触时刻列表（供 SUBSEQUENT_OVERSEAS 跨端点时序关联）。
+    仅取：IP 端点 + 有运行时接触 + 非已知反诈拦截节点 + first_contact_ts 可用 + 归因国家已知且非 CN
+    + **端点自身 asn 口径非 CN**。★后一条使本池与 is_domestic **互斥**：任一口径判境内（含 asn 回落路径）
+    即排除，防国别冲突 IP（如电信出海段 attribution=US 但 asn=CN）同时充当"境内主体"与"境外接触"自我授信。绝不抛。"""
+    out: list[float] = []
+    for ep in endpoints:
+        try:
+            if getattr(ep, "kind", None) != "ip" or not _runtime_contact_observed(ep):
+                continue
+            if is_known_intercept_ip(str(getattr(ep, "value", ""))):
+                continue  # 反诈拦截节点不是业务接触、绝不入时序池
+            ts = _runtime_first_contact_ts(ep)
+            country = _ip_endpoint_country(ep)
+            if ts is not None and country and country != "CN" and _endpoint_asn_country(ep) != "CN":
+                out.append(ts)
+        except Exception:  # noqa: BLE001 - 一个坏端点不得沉掉时序预扫
+            continue
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # The public assembler                                                        #
 # --------------------------------------------------------------------------- #
@@ -423,6 +506,10 @@ def build_network_attribution(
     role_scores: list[Any] = []
     endpoint_views: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
+
+    # 预扫：报告内被运行时接触过的境外 IP 端点的最晚接触时刻——供境内 IP 的 SUBSEQUENT_OVERSEAS 时序判据。
+    _overseas_ts = _overseas_contact_timestamps(endpoints)
+    max_overseas_ts = max(_overseas_ts) if _overseas_ts else None
 
     for endpoint in endpoints:
         if getattr(endpoint, "kind", None) not in ("domain", "ip"):
@@ -443,7 +530,8 @@ def build_network_attribution(
                 ip = _ip_entity(context["ip"])
                 if ip is None:
                     continue
-                features = _ip_signal_features(ip, context["_entry"], endpoint=endpoint)
+                features = _ip_signal_features(ip, context["_entry"], endpoint=endpoint,
+                                               max_overseas_ts=max_overseas_ts)
                 roles, eligible = _score_ip_roles(ip, features)
                 role_scores.extend(eligible)
                 ip_views.append({
