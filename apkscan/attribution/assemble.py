@@ -36,6 +36,7 @@ from apkscan.attribution.roles import (
 from apkscan.attribution.scorer import EvidenceScorer
 from apkscan.core.models import OBSERVED_CONTACT_SOURCES
 from apkscan.network import NetworkEntity, NetworkEntityType
+from apkscan.network.categories import CAT_CDN, CAT_CLOUD, CAT_IDC, CAT_TELECOM  # 网络类别规范取值（与五层同一份）
 from apkscan.network.fingerprints import (
     is_known_intercept_ip,
     normalize_domain,
@@ -91,8 +92,8 @@ _SIGNAL_CONFIDENCE: MappingProxyType[RoleSignal, float] = MappingProxyType(
     }
 )
 
-_CDN_CATEGORIES = frozenset({"cdn"})
-_NON_PUBLIC_CDN_HOSTING = frozenset({"cloud", "idc"})
+_CDN_CATEGORIES = frozenset({CAT_CDN})
+_NON_PUBLIC_CDN_HOSTING = frozenset({CAT_CLOUD, CAT_IDC})
 _CONFIRMED_EDGE_TIERS = frozenset({"confirmed", "probable"})
 
 
@@ -363,7 +364,7 @@ def _ip_signal_features(
     endpoint_is_this_ip = (
         is_ip_endpoint is not None and getattr(is_ip_endpoint, "value", None) == ip.value
     )
-    if country == "CN" or (origin.get("category") == "telecom" and country == "CN"):
+    if country == "CN" or (origin.get("category") == CAT_TELECOM and country == "CN"):
         add(RoleSignal.DOMESTIC_NETWORK, "attribution", "CN", f"{ref}.country")
     elif endpoint_is_this_ip and ip_asn_country == "CN":
         add(RoleSignal.DOMESTIC_NETWORK, "asn", "CN",
@@ -425,7 +426,7 @@ def _ip_signal_features(
         or hosting.get("category") in _CDN_CATEGORIES
         or origin.get("category") in _CDN_CATEGORIES
     ):
-        add(RoleSignal.PUBLIC_CDN, "attribution", str(edge.get("name") or hosting.get("category") or "cdn"),
+        add(RoleSignal.PUBLIC_CDN, "attribution", str(edge.get("name") or hosting.get("category") or CAT_CDN),
             f"{ref}.edge_provider")
     elif hosting.get("category") in _NON_PUBLIC_CDN_HOSTING and tier is None:
         add(RoleSignal.NON_PUBLIC_CDN, "attribution", str(hosting.get("category")),

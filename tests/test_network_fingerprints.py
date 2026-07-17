@@ -117,3 +117,16 @@ def test_parse_asn_shared_contract() -> None:
     assert parse_asn("garbage") == (None, None)
     assert parse_asn(None) == (None, None)
     assert parse_asn("9" * 5000) == (None, None)    # ★超长数字串按位数拒、不触 int() 4300 位限制抛
+
+
+def test_network_category_shared_contract() -> None:
+    """P1：网络类别规范取值单一来源——五层(core)与角色层(assemble)的类别集合都由 network.categories 构建、不漂移。"""
+    from apkscan.attribution import assemble
+    from apkscan.core import attribution as core
+    from apkscan.network import categories as cat
+    assert cat.CAT_CLOUD == "cloud" and cat.CAT_IDC == "idc" and cat.CAT_CDN == "cdn"
+    # core 的 CAT_* 就是共享常量（re-export）
+    assert core.CAT_CLOUD is cat.CAT_CLOUD and core.CAT_CDN is cat.CAT_CDN
+    # assemble 的语义集合由共享常量构建（不再硬编码字符串）
+    assert assemble._CDN_CATEGORIES == frozenset({cat.CAT_CDN})
+    assert assemble._NON_PUBLIC_CDN_HOSTING == frozenset({cat.CAT_CLOUD, cat.CAT_IDC})
