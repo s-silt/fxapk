@@ -9,6 +9,7 @@ import sys
 
 from apkscan.attribution.assemble import _parse_asn, build_network_attribution
 from apkscan.core.models import Endpoint, Evidence
+from apkscan.dynamic.merge import load_runtime_endpoints
 
 
 def _ep(value, kind, enrichment=None, evidences=None):
@@ -762,6 +763,77 @@ def test_redirect_does_not_leak_into_domestic_relay() -> None:
     roles = _roles(_build(_edge_ip("203.0.113.9", country="CN")), "203.0.113.9")
     r = roles.get("domestic_relay_candidate")
     assert r is None or r["eligible"] is False
+
+
+# --------------------------------------------------------------------------- #
+# P0-3 加固：手编 / 回灌的 runtime_report.json 无真实 observed-contact 证据，经
+# load_runtime_endpoints 重建后不得凭"两只布尔"过运行时行为角色（信任边界回归）。
+# --------------------------------------------------------------------------- #
+def _write_runtime_report(tmp_path, endpoint: dict) -> str:
+    path = tmp_path / "runtime_report.json"
+    path.write_text(
+        json.dumps({"package_name": "com.test.app", "source": "runtime", "endpoints": [endpoint]},
+                   ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def _cloaking_ip_payload(evidences) -> dict:
+    # 一个 IP 端点：带 cloaking 触发所需的 enrichment（同 host redirect+cookie=两只布尔就过 cloaking 档）
+    # 与 attribution 事实，evidences 由参数决定（无 / 非 runtime* / 真 runtime）。
+    ep: dict = {
+        "value": "5.5.5.5",
+        "kind": "ip",
+        "enrichment": {
+            "attribution": {"ips": [{"ip": "5.5.5.5", "country": "US",
+                                     "origin_network": {"asn": 64500, "category": "cloud"},
+                                     "hosting_provider": {"category": None},
+                                     "edge_provider": {"tier": None}}]},
+            "runtime": {"edge_hosts": {"pay.x.com": {"r": True, "c": True}}},
+        },
+    }
+    if evidences is not None:
+        ep["evidences"] = evidences
+    return ep
+
+
+def test_handinjected_runtime_report_without_contact_evidence_licenses_no_role(tmp_path) -> None:
+    # ★信任边界：runtime_report.json 里一个只有 enrichment.runtime 标志、**无 evidences** 的 IP 端点，
+    #   经 load_runtime_endpoints 合成的证据被钉成 runtime-derived（非 observed-contact），故
+    #   build_network_attribution 不产运行时行为信号、cloaking/edge 角色不 eligible。无修复即失败：
+    #   旧逻辑合成 source="runtime" 会命中 observed-contact allowlist、两只布尔直接过 cloaking 档。
+    eps = load_runtime_endpoints(_write_runtime_report(tmp_path, _cloaking_ip_payload(evidences=None)))
+    assert eps and all(ev.source == "runtime-derived" for ev in eps[0].evidences)
+    roles = _roles(_build(*eps), "5.5.5.5")
+    all_sig = {s for role in roles.values() for s in role["matched_signals"]}
+    assert not ({"redirect", "cookie_challenge"} & all_sig)
+    for role in ("edge_candidate", "cloaking_edge_node"):
+        r = roles.get(role)
+        assert r is None or r["eligible"] is False, role
+
+
+def test_handinjected_runtime_report_with_static_evidence_licenses_no_role(tmp_path) -> None:
+    # 同上，但 evidences 显式写了非 runtime* 来源（source=static，手编/写串）→ 也钉 runtime-derived → 不授信。
+    static_ev = [{"source": "static", "location": "x", "snippet": "s"}]
+    eps = load_runtime_endpoints(_write_runtime_report(tmp_path, _cloaking_ip_payload(evidences=static_ev)))
+    assert eps and all(ev.source == "runtime-derived" for ev in eps[0].evidences)
+    roles = _roles(_build(*eps), "5.5.5.5")
+    all_sig = {s for role in roles.values() for s in role["matched_signals"]}
+    assert not ({"redirect", "cookie_challenge"} & all_sig)
+    for role in ("edge_candidate", "cloaking_edge_node"):
+        r = roles.get(role)
+        assert r is None or r["eligible"] is False, role
+
+
+def test_genuine_capture_runtime_evidence_still_licenses_cloaking(tmp_path) -> None:
+    # 控制组 / 无回归：真 capture 产物本就带 source="runtime"（observed-contact），reload 后保持 "runtime"，
+    #   cloaking 仍如常 eligible——证明上面两条不是因整条路径失灵才通过。
+    real_ev = [{"source": "runtime", "location": "flows.mitm", "snippet": "5.5.5.5:443"}]
+    eps = load_runtime_endpoints(_write_runtime_report(tmp_path, _cloaking_ip_payload(evidences=real_ev)))
+    assert eps and eps[0].evidences[0].source == "runtime"
+    r = _roles(_build(*eps), "5.5.5.5")["cloaking_edge_node"]
+    assert r["eligible"] is True
 
 
 def test_edge_signals_need_runtime_evidence_not_just_flags() -> None:
