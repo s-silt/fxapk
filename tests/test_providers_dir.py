@@ -83,7 +83,8 @@ def test_cn_cdn_org_keyword_classifies_without_local_cname_fingerprint() -> None
     """★定位校准（补在线不足、不重造在线已能做的）：本地库不再维护通用 CDN CNAME 指纹（靠在线富化
     as_org/server 识别）；只保留 org→类别映射。edge_providers 只剩主 providers.yaml 既有 4 条。"""
     ids = {e["id"] for e in attribution._providers_rules()["edge_providers"]}
-    assert ids == {"cdn.cloudflare", "cdn.tencent_edgeone", "cdn.aliyun", "waf.jiasule"}  # 无 cdn.tencent_cdn 等
+    assert "cdn.tencent_cdn" not in ids and "cdn.huawei_cdn" not in ids  # 不维护通用 CDN CNAME 指纹（靠在线富化）
+    assert ids >= {"cdn.cloudflare", "cdn.tencent_edgeone", "cdn.aliyun", "waf.jiasule"}  # 主文件既有 4 条仍在
     assert attribution.classify_network("Qiniu Cloud Storage") == "cdn"  # org 关键字仍把国内 CDN 厂商归类
 
 
@@ -93,3 +94,23 @@ def test_ruleset_digest_covers_subdir_files() -> None:
     assert digest != "unknown" and len(digest) == 16
     walked = {rel for rel, _ in registry._walk_rule_files(importlib.resources.files("apkscan") / "rules", "")}
     assert any(rel.startswith("providers/") and rel.endswith(".yaml") for rel in walked)  # 子目录文件被递归收进
+    assert any(rel.startswith("providers/investigative/") for rel in walked)  # investigative 深层子目录也入 digest
+
+
+def test_load_rules_dir_multilevel_subdir() -> None:
+    """load_rules_dir 支持多级 subdir（providers/investigative）——加载 fxapk 自有防红指纹目录。"""
+    parts = registry.load_rules_dir("providers/investigative")
+    assert len(parts) >= 1 and any("edge_providers" in p for p in parts)
+    assert registry.load_rules_dir("providers/does-not-exist") == []  # 缺子目录 → []，不抛
+
+
+def test_investigative_fronting_fingerprint_loaded_and_probable() -> None:
+    """★B2：fxapk 自有防红指纹（providers/investigative/）加载 + a1.init 共享前置 CNAME 命名空间命中——
+    这是公开在线库/API 认不出、只能自建的核心壁垒。★单条 CNAME=1 强信号 → 至多 probable（不据一条判死
+    confirmed）；标签级后缀防伪造。"""
+    ids = {e["id"] for e in attribution._providers_rules()["edge_providers"]}
+    assert "fronting.cn.a1init" in ids  # investigative 子目录被加载合并进 edge_providers
+    ep = attribution.score_edge_provider({"cname_chain": ["all.foo-site.a1.inituu.com"]})
+    assert ep is not None and ep["id"] == "fronting.cn.a1init"
+    assert ep["role"] == "anti_blocking_fronting" and ep["tier"] == "probable"
+    assert attribution.score_edge_provider({"cname_chain": ["a1.inituu.com.attacker.example"]}) is None  # 防伪造

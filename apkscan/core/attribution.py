@@ -85,9 +85,9 @@ def _providers_rules() -> dict[str, Any]:
         from apkscan.core.registry import load_rules, load_rules_dir
 
         base = load_rules("providers")
-        merged = _merge_provider_rules(
-            base if isinstance(base, dict) else {}, load_rules_dir("providers")
-        )
+        # 分目录（cloud/idc/cdn/waf/carrier）+ fxapk 自有共享前置/分发指纹（investigative，在线库认不出的国内防红类前端）。
+        parts = load_rules_dir("providers") + load_rules_dir("providers/investigative")
+        merged = _merge_provider_rules(base if isinstance(base, dict) else {}, parts)
     except Exception:
         logger.debug("[attribution] providers 规则加载失败，用内置兜底", exc_info=True)
     # 合并后无 network_categories（主文件缺失 + 分目录空）→ 内置兜底（五大云/CDN/电信关键字最小可用）。
