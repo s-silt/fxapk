@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from apkscan.analyzers.classify import classify_app
 from apkscan.core import infra
-from apkscan.core.attribution import build_endpoint_attribution
+from apkscan.core.attribution import build_endpoint_attribution, cluster_fronting
 from apkscan.core.models import (
     ANALYSIS_MODE_AUTHORIZED_ACTIVE,
     ANALYSIS_MODE_PASSIVE,
@@ -321,6 +321,15 @@ def _stage_attribution(state: _PipelineState) -> None:
             continue
         if att is not None:
             ep.enrichment["attribution"] = att
+    # ★跨端点：认不出名但带同一高区分度前置指纹的 IP 归因聚成 fronting-cluster-NNNN（B2-b，就地改 edge_provider）。
+    try:
+        all_ips = [ipv
+                   for ep in state.endpoints
+                   for ipv in ((ep.enrichment.get("attribution") or {}).get("ips") or [])
+                   if isinstance(ipv, dict)]
+        cluster_fronting(all_ips)
+    except Exception:  # noqa: BLE001 — 聚类失败不得拖累整个阶段（归因已写、纯增强）
+        logger.debug("fronting-cluster 跨端点聚类失败，跳过", exc_info=True)
 
 
 def _stage_build_leads(state: _PipelineState) -> None:
