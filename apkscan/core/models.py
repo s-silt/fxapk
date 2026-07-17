@@ -77,6 +77,17 @@ class Endpoint:
     enrichment: dict = field(default_factory=dict)  # whois/icp/asn 结果
 
 
+#: 运行时证据里 **真观测到「连去该端点自身 peer IP」** 的 observed-contact 子来源：``runtime``
+#: （mitm 实测上游服务器 IP）/ ``runtime-pcap``（pcap 解出的真实 dst_ip）。其余 ``runtime*`` 子来源
+#: ——手编 / 合成兜底的 ``runtime-derived``（见 ``dynamic.merge._RUNTIME_DERIVED_SOURCE``）、
+#: ``*-decrypted``、``runtime-tshark`` 等——只证明「该值出现在 runtime 报告里」，不证明真接触。
+#: **信任边界的单一真源**：办案人面的 :attr:`Lead.is_runtime_contact`「实连/确认 C2」徽标与机器面的
+#: attribution 运行时行为角色门（``attribution.assemble`` 引用本常量）共用它，两面同口径、不各判一套。
+#: allowlist 而非 denylist：新出现的 content-derived 来源默认**不算** observed-contact（守 no-over-
+#: inference 契约的安全方向）。
+OBSERVED_CONTACT_SOURCES: frozenset[str] = frozenset({"runtime", "runtime-pcap"})
+
+
 @dataclass
 class Lead:
     """★ 报告的核心产出单元：一条可落地的调证线索。"""
@@ -105,16 +116,35 @@ class Lead:
 
     @property
     def is_runtime_seen(self) -> bool:
-        """是否在**真机抓包**中被实际观测到（运行时真连了它 / 带回了加密信封）。
+        """是否在动态侧**出现过**（宽口径）：source 以 ``runtime`` 开头（runtime / runtime-pcap /
+        runtime-decrypted / runtime-derived / …）即命中，比纯静态硬编码可信度更高。
 
-        来源 source 以 ``runtime`` 开头（runtime / runtime-pcap / runtime-decrypted / …）= 动态
-        侧出现，比纯静态硬编码可信度更高。**注意**子来源强弱有别：``runtime`` / ``runtime-pcap``
-        才是「真观测到连去该 peer IP」的 observed-contact（见 ``attribution.assemble
-        ._OBSERVED_CONTACT_SOURCES``）；``runtime-derived``（合成 / 非 runtime* 来源的兜底，
-        见 ``dynamic.merge._RUNTIME_DERIVED_SOURCE``）只表示「该值出现在 runtime 报告里」，
-        不证明真接触。故本属性为「动态侧出现」的宽口径信号，不等同于 observed-contact 级确认。
+        **注意**这是「动态侧出现」的宽口径信号，**不**等同于 observed-contact 级确认：手编 / 合成
+        兜底的 ``runtime-derived`` 也 startswith ``runtime``、也命中本属性，但它只表示「该值出现在
+        runtime 报告里」、不证明真接触。要「已抓到通信的确认 C2」这档最强断言，用严一档的
+        :attr:`is_runtime_contact`（仅 :data:`OBSERVED_CONTACT_SOURCES`）。徽标分层即据此二者分档，
+        避免把「出现在报告里」误呈成「实连」。
         """
         return any(str(getattr(ev, "source", "")).startswith("runtime") for ev in self.source_refs)
+
+    @property
+    def is_runtime_contact(self) -> bool:
+        """是否**真机运行时观测到连去该端点自身 peer IP**（observed-contact，严于 is_runtime_seen）。
+
+        仅当某条证据 source ∈ :data:`OBSERVED_CONTACT_SOURCES`（``runtime`` = mitm 实测上游 /
+        ``runtime-pcap`` = pcap 解出真实 dst_ip）才为真——即真观测到了到该端点的网络流；``runtime-derived``
+        （合成 / 非 runtime* 兜底）、``*-decrypted``、``runtime-tshark`` 等只算 :attr:`is_runtime_seen`
+        的「运行时出现」、**不**算接触。C2 若 ``is_runtime_contact`` 即「**已抓到通信的确认 C2**」；
+        仅 ``is_runtime_seen`` 而非 contact 只到「运行时出现、未确认接触」。与 attribution 运行时行为
+        角色的信任门（``attribution.assemble`` 引用同一 :data:`OBSERVED_CONTACT_SOURCES`）**同口径**：
+        办案人徽标与机器面角色统一以 observed-contact 源标签为准、不再各判一套。注意本属性只据 source
+        **标签**分档——标签本身的诚实性由 producer 侧保证：合成 / 派生路径须钉 ``runtime-derived`` 等非
+        contact 源（见 ``dynamic.merge._RUNTIME_DERIVED_SOURCE``），凡仍盖裸 ``runtime`` 的进程内生产者
+        （如 dead-drop 从回包体抽出、App 未直连的二级 C2）会绕过本档、属 producer 侧待收紧项，非本属性能判。
+        """
+        return any(
+            str(getattr(ev, "source", "")) in OBSERVED_CONTACT_SOURCES for ev in self.source_refs
+        )
 
 
 def merge_runtime_into_lead_dict(existing: dict, runtime_lead: dict) -> bool:
@@ -123,8 +153,11 @@ def merge_runtime_into_lead_dict(existing: dict, runtime_lead: dict) -> bool:
     回灌层（pcap_ingest / probe_ingest）在 ``report.json`` 上做原地字典合并：命中已存在
     ``(category, value)`` 时不丢弃，而是把新 lead 里 source 以 ``runtime`` 开头的 Evidence
     追加进已有 ``source_refs``（去重 by (source, location, snippet)），并据此重算
-    ``is_runtime_seen``。语义对齐 :func:`Lead.is_runtime_seen` 与 ``dynamic/merge.py`` 的
-    「静态命中同名 → 追加 runtime 证据、升活体确认」。
+    ``is_runtime_seen``；若并入 / 已有任一 :data:`OBSERVED_CONTACT_SOURCES`（runtime / runtime-pcap）
+    证据，同步升 ``is_runtime_contact``——否则 pcap 实抓（``runtime-pcap``）并进旧静态 lead 后，dict
+    上的 ``is_runtime_contact`` 会陈旧为 ``false``，与 :attr:`Lead.is_runtime_contact` 属性重算值矛盾、
+    下游按该字段筛「确认接触」会漏掉真确认的 C2。语义对齐 :attr:`Lead.is_runtime_seen` /
+    :attr:`Lead.is_runtime_contact` 与 ``dynamic/merge.py`` 的「静态命中同名 → 追加 runtime 证据、升活体确认」。
 
     只搬 runtime Evidence（``existing`` 可能是静态 lead，静态证据原样保留）。
 
@@ -160,8 +193,14 @@ def merge_runtime_into_lead_dict(existing: dict, runtime_lead: dict) -> bool:
         refs.append(ev)
         merged = True
     if merged:
-        # 有 runtime 证据 → 升为活体确认（与 Lead.is_runtime_seen 语义一致）。
+        # 有 runtime 证据 → 升为「运行时出现」（宽口径，与 Lead.is_runtime_seen 一致）。
         existing["is_runtime_seen"] = True
+        # 若并入 / 已有任一 observed-contact 源（runtime / runtime-pcap），据全量 source_refs 重算并
+        # 单调升 is_runtime_contact——与 Lead.is_runtime_contact 属性同口径，防 dict 上字段陈旧失真。
+        if any(
+            isinstance(r, dict) and str(r.get("source")) in OBSERVED_CONTACT_SOURCES for r in refs
+        ):
+            existing["is_runtime_contact"] = True
     return merged
 
 
