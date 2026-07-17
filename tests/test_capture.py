@@ -388,7 +388,7 @@ def test_build_capture_quality_requires_target_attributed_business_traffic(
     quality = capture._build_capture_quality(
         summary,
         [Endpoint(value="198.51.100.10", kind="ip")],
-        {"198.51.100.10:443": {"is_target_app": True}},
+        {"tcp/198.51.100.10:443": {"is_target_app": True}},  # A2：键含 proto 族（对齐 pcap_app_attribution）
         channel_ready=True,
     )
 
@@ -397,7 +397,7 @@ def test_build_capture_quality_requires_target_attributed_business_traffic(
         "pcap_valid": True,
         "packet_count": 2,
         "business_candidate_count": 1,
-        "target_attributed_count": 1,
+        "target_attributed_count": 1,  # ★proto 键对齐后 target 正确计入（此前恒 0 → 误判 partial）
         "dynamic_status": "complete",
         "reason": "target-attributed public business candidate observed",
     }
@@ -460,16 +460,43 @@ def test_annotate_runtime_endpoints_maps_uid_attribution_to_ip_and_sni(
     capture._annotate_runtime_endpoints(
         endpoints,
         summary,
-        {"198.51.100.10:443": {"is_target_app": True, "attribution": "target_uid"}},
+        {"tcp/198.51.100.10:443": {"is_target_app": True, "attribution": "confirmed"}},  # A2：键含 proto 族
     )
 
     by_value = {endpoint.value: endpoint for endpoint in endpoints}
+    # 归因用 proto 键（传入 "tcp/…"）命中 → target_attributed True；但 remote_endpoints 写回 "ip:port"
+    # （给下游 assemble 的 tls_sni 边解析，不含 proto 前缀）。
     assert by_value["198.51.100.10"].enrichment["runtime"]["target_attributed"] is True
     assert by_value["198.51.100.10"].enrichment["runtime"]["has_payload"] is True
     assert by_value["api.example.test"].enrichment["runtime"]["target_attributed"] is True
     assert by_value["api.example.test"].enrichment["runtime"]["remote_endpoints"] == [
         "198.51.100.10:443"
     ]
+
+
+def test_annotate_remote_endpoints_parseable_by_assemble(monkeypatch) -> None:  # noqa: ANN001
+    """★Fable 复审 HIGH：_annotate 写回的 remote_endpoints 必须是 assemble 能解析的 "ip:port"（不带 proto
+    前缀）——否则 assemble 的 tls_sni（域名→落地 IP，最强运行时真值边）会因解析失败而静默丢失。"""
+    from apkscan.attribution.assemble import _ip_from_hostport
+
+    monkeypatch.setattr(pcap_ingest, "_ip_public", lambda value: value == "203.0.113.7")
+    summary = pcap_ingest.PcapSummary(
+        flows=[
+            pcap_ingest.Flow(
+                proto="tcp", src_ip="10.0.0.2", src_port=50002, dst_ip="203.0.113.7", dst_port=443,
+                packets=2, payload_bytes=80, sni={"api.example.test"},
+            )
+        ]
+    )
+    endpoints = pcap_ingest.to_runtime_endpoints(summary)
+    capture._annotate_runtime_endpoints(
+        endpoints, summary, {"tcp/203.0.113.7:443": {"is_target_app": True, "attribution": "confirmed"}}
+    )
+    dom = {e.value: e for e in endpoints}.get("api.example.test")
+    assert dom is not None
+    keys = dom.enrichment["runtime"]["remote_endpoints"]
+    assert keys == ["203.0.113.7:443"] and "/" not in keys[0]  # 无 proto 前缀
+    assert _ip_from_hostport(keys[0]) == "203.0.113.7"  # assemble 能解出落地 IP → tls_sni 边不丢
 
 
 def test_capture_proxy_up_but_reverse_fail_is_degraded(monkeypatch, tmp_path):
@@ -609,8 +636,8 @@ def test_capture_merges_timeline_and_snapshot_for_pcap_attribution(monkeypatch, 
         capture.pcap_ingest,
         "remote_endpoints",
         lambda summary: [
-            SimpleNamespace(ip="1.2.3.4", port=443),
-            SimpleNamespace(ip="9.9.9.9", port=443),
+            SimpleNamespace(ip="1.2.3.4", port=443, proto="tcp", connections=[]),
+            SimpleNamespace(ip="9.9.9.9", port=443, proto="tcp", connections=[]),
         ],
     )
 
@@ -651,8 +678,9 @@ def test_capture_merges_timeline_and_snapshot_for_pcap_attribution(monkeypatch, 
     assert sampler_events == ["init", "start", "stop"]
     assert calls["waited"] is True
     assert str(timeline) in result["artifacts"]
-    assert attribution["1.2.3.4:443"]["is_target_app"] is True  # 时间线补的目标短连
-    assert attribution["9.9.9.9:443"]["is_target_app"] is True  # 末快照的目标连接（merge：不再被时间线替换掉）
+    # A2：键含 proto 族；pcap 无本地端口明细（connections=[]）→ 远端单 UID 归 probable、is_target_app 仍 True
+    assert attribution["tcp/1.2.3.4:443"]["is_target_app"] is True  # 时间线补的目标短连
+    assert attribution["tcp/9.9.9.9:443"]["is_target_app"] is True  # 末快照的目标连接（merge：不再被时间线替换掉）
 
 
 def test_capture_tls_keylog_decrypts_and_merges_endpoints(monkeypatch, tmp_path):
@@ -773,7 +801,7 @@ def test_capture_socket_attribution_falls_back_to_final_snapshot(monkeypatch, tm
     monkeypatch.setattr(
         capture.pcap_ingest,
         "remote_endpoints",
-        lambda summary: [SimpleNamespace(ip="9.9.9.9", port=443)],
+        lambda summary: [SimpleNamespace(ip="9.9.9.9", port=443, proto="tcp", connections=[])],
     )
     snapshot = tmp_path / "uid_sockets.txt"
     snapshot.write_text(
@@ -798,9 +826,62 @@ def test_capture_socket_attribution_falls_back_to_final_snapshot(monkeypatch, tm
     capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
     report = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
 
-    assert report["capture_signals"]["pcap_app_attribution"]["9.9.9.9:443"][
+    assert report["capture_signals"]["pcap_app_attribution"]["tcp/9.9.9.9:443"][  # A2：键含 proto 族
         "is_target_app"
     ] is True
+
+
+def test_capture_pcap_attribution_confirmed_via_local_port(monkeypatch, tmp_path):
+    """★A2-2 端到端：pcap 连接的本地临时端口 + 设备 socket 本地端口精确匹配 → pcap_app_attribution 标 confirmed
+    （键含 proto 族、matched_by 含 local_port）——五元组归因接线到 capture 生效。"""
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+
+    floor = tmp_path / "floor.pcap"
+    floor.write_bytes(b"pcap")
+    monkeypatch.setattr(capture, "_start_floor_pcap", lambda *a, **k: object())
+    monkeypatch.setattr(capture, "_stop_floor_pcap", lambda *a, **k: floor)
+    monkeypatch.setattr(capture.pcap_ingest, "parse_pcap", lambda path: object())
+    monkeypatch.setattr(capture.pcap_ingest, "to_runtime_endpoints", lambda summary: [])
+    monkeypatch.setattr(
+        capture.pcap_ingest,
+        "remote_endpoints",
+        lambda summary: [
+            SimpleNamespace(
+                ip="1.2.3.4", port=443, proto="tcp",
+                connections=[SimpleNamespace(local_port=43090, first_ts=1.0, last_ts=2.0)],
+            )
+        ],
+    )
+    snapshot = tmp_path / "uid_sockets.txt"  # 设备 socket：目标 uid 10234 本地端口 43090(0xA852) → 1.2.3.4:443
+    snapshot.write_text(
+        "# package=com.test.app uid=10234\n## /proc/net/tcp\n"
+        " 0: 0F02000A:A852 04030201:01BB 01 0:0 0:0 0 10234 0 1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(capture, "_capture_uid_socket_snapshot", lambda *a, **k: snapshot)
+
+    class EmptySampler:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(capture, "_SocketSampler", EmptySampler)
+
+    capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+    report = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    attr = report["capture_signals"]["pcap_app_attribution"]["tcp/1.2.3.4:443"]
+    assert attr["attribution"] == "confirmed"  # 本地端口精确命中单一 UID
+    assert attr["uid"] == 10234 and attr["is_target_app"] is True
+    assert "local_port" in attr["matched_by"]
 
 
 def test_run_mode_maps_to_mitm_floor_flags(monkeypatch, tmp_path):
