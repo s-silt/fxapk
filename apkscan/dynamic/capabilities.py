@@ -40,8 +40,9 @@ MODE_FLOOR_CAPS: dict[str, frozenset[str]] = {
     "mitm-only": frozenset({CAP_ADB, CAP_DEVICE, CAP_MITMPROXY}),
 }
 
-#: both 模式的**增强能力**（缺则降级为等效 floor-only：仍抓 pcap，只是没代理明文）。
-_BOTH_ENHANCEMENT: frozenset[str] = frozenset({CAP_MITMPROXY})
+#: both 模式的**增强能力**（缺则降级为等效 floor-only：仍抓 pcap，只是没代理明文）。★须含 CA_TRUSTED——
+#: 代理明文实际需要 CA 已装进设备信任库，只有 mitmproxy 没 CA 时 mitm 明文拿不到，等效 floor-only。
+_BOTH_ENHANCEMENT: frozenset[str] = frozenset({CAP_MITMPROXY, CAP_CA_TRUSTED})
 
 #: 明文获取降级阶梯（从强到弱）：(层名, 该层所需能力)。上级不可达 → 降下级；floor pcap 是底座、不入阶梯
 #: （它给的是"接入节点 IP:port"而非应用层明文）。对应明文路线文档的 both→keylog→SSL hook→Cipher hook。
@@ -73,6 +74,22 @@ def _plaintext_layers(available: frozenset[str]) -> tuple[str, ...]:
     return tuple(name for name, need in PLAINTEXT_LADDER if need <= available)
 
 
+#: 底座不满足时的降级候选优先级（PCAP-first：floor pcap 底座优先于无 pcap 的纯代理 mitm-only）。
+_FALLBACK_ORDER: tuple[str, ...] = ("floor-only", "mitm-only")
+
+
+def _best_fallback(mode: str, available: frozenset[str]) -> str | None:
+    """底座不满足时，按 PCAP-first 优先级找**其它**底座能满足的模式；都不满足 → None。
+
+    ★覆盖"缺设备 tcpdump/root（floor 跑不了）但有 mitmproxy+CA"——此时可退 mitm-only（纯代理抓明文、
+    无 pcap 底座），而非误判"无法抓包"。
+    """
+    for cand in _FALLBACK_ORDER:
+        if cand != mode and MODE_FLOOR_CAPS[cand] <= available:
+            return cand
+    return None
+
+
 def resolve(mode: str, available: set[str] | frozenset[str]) -> CapabilityPlan:
     """据模式 + 当前能力集产出结构化能力计划。未知模式回退按 floor-only 处理（保底、不抛）。"""
     avail = frozenset(available)
@@ -92,17 +109,12 @@ def resolve(mode: str, available: set[str] | frozenset[str]) -> CapabilityPlan:
             notes.append("both 缺 mitmproxy/CA 增强 → 等效 floor-only：仍抓 floor.pcap，无代理明文")
         notes.append(f"{m} 底座就绪：可产出核心产物（floor.pcap / 接入节点 / 报告）")
     else:
-        # 底座不满足：能不能退到 floor-only？（floor-only 底座是所有模式的最低公共要求）
-        floor_missing = MODE_FLOOR_CAPS["floor-only"] - avail
-        if not floor_missing and m != "floor-only":
-            degraded_to = "floor-only"
-            notes.append(f"{m} 底座缺 {_join(missing)} → 可降级到 floor-only")
+        # 底座不满足：按 PCAP-first 优先级找**其它**底座能满足的模式（floor-only 优先于纯代理 mitm-only）。
+        degraded_to = _best_fallback(m, avail)
+        if degraded_to:
+            notes.append(f"{m} 底座缺 {_join(missing)} → 可降级到 {degraded_to}")
         else:
-            notes.append(
-                f"{m} 底座缺 {_join(missing)}；floor-only 也缺 {_join(floor_missing)} → 无法抓包"
-                if floor_missing
-                else f"{m} 底座缺 {_join(missing)}"
-            )
+            notes.append(f"{m} 底座缺 {_join(missing)}，无其它模式的底座可满足 → 无法抓包")
     if best:
         notes.append(f"明文最强可达层：{best}（阶梯：{' → '.join(reachable)}）")
     else:

@@ -70,3 +70,18 @@ def test_plan_fields_and_notes_present() -> None:
     assert p.required == C.MODE_FLOOR_CAPS["both"]
     assert p.available >= frozenset(_FLOOR)
     assert isinstance(p.notes, tuple) and p.notes  # 有人读决策依据
+
+
+def test_missing_floor_base_but_has_mitm_degrades_to_mitm_only() -> None:
+    """★缺设备 tcpdump/root（floor 跑不了）但有 mitm+CA → 退 mitm-only（纯代理明文、无 pcap），
+    不该误判"无法抓包"。"""
+    p = C.resolve("both", {C.CAP_ADB, C.CAP_DEVICE, C.CAP_MITMPROXY, C.CAP_CA_TRUSTED})
+    assert not p.ready and p.degraded_to == "mitm-only"
+    assert p.plaintext_best == "mitm"  # 代理明文可达
+
+
+def test_both_with_mitmproxy_but_no_ca_is_effective_floor_only() -> None:
+    """★both 有 mitmproxy 但无 CA → mitm 明文实际拿不到（缺 CA）→ 判等效 floor-only，不偏乐观当完整 both。"""
+    p = C.resolve("both", _FLOOR | {C.CAP_MITMPROXY})
+    assert p.ready and p.degraded_to == "floor-only"  # floor 底座在但 mitm 增强不全
+    assert p.plaintext_best is None  # 缺 CA → mitm 层不可达
