@@ -418,12 +418,15 @@ def _ip_signal_features(
     #   ★不加 edge.tier 门——边缘行为信号与"该 IP 是前置/CDN"一致（edge 角色 PUBLIC_CDN 只作 context 不阻断）。
     if endpoint_is_this_ip and runtime_signal_ok and _runtime_contact_observed(endpoint):
         rt2 = _as_dict(_as_dict(getattr(endpoint, "enrichment", None)).get("runtime"))
-        if rt2.get("redirect_observed") is True:
+        edge_hosts = _as_dict(rt2.get("edge_hosts"))
+        # ★同 host 共现才发这对信号：某单个请求 host 同时被重定向 + 挑战 = 该前置对该 host 的 cloaking 行为。
+        #   共享边缘上不同租户各出一个信号（A 重定向 / B 挑战）绝不凑成 cloaking（复审 P1：跨租户混淆）。
+        #   两信号成对发出——edge_candidate 需 ≥2 edge 信号、cloaking_edge_node 需 ≥2 强行为，均由这对满足。
+        if any(isinstance(h, dict) and h.get("r") and h.get("c") for h in edge_hosts.values()):
             add(RoleSignal.REDIRECT, "runtime", True,
-                f"endpoints[{ip.value}].enrichment.runtime.redirect_observed")
-        if rt2.get("cookie_challenge_observed") is True:
+                f"endpoints[{ip.value}].enrichment.runtime.edge_hosts")
             add(RoleSignal.COOKIE_CHALLENGE, "runtime", True,
-                f"endpoints[{ip.value}].enrichment.runtime.cookie_challenge_observed")
+                f"endpoints[{ip.value}].enrichment.runtime.edge_hosts")
 
     tier = edge.get("tier")
     if (

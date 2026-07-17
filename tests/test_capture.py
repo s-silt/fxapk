@@ -3410,17 +3410,30 @@ class _FakeHeaders:
         return self._multi.get(name.lower(), [])
 
 
+def _resp(status, location=None, cookies=None):
+    single = {"location": location} if location else {}
+    multi = {"set-cookie": cookies} if cookies else {}
+    return SimpleNamespace(response=SimpleNamespace(status_code=status, headers=_FakeHeaders(single, multi)))
+
+
 def test_response_edge_signals_redirect_and_challenge_cookie() -> None:
-    """P0-3：响应边缘信号——跨 host 3xx 重定向 + 挑战 cookie 命中；同 host 重定向/普通 cookie 不命中。"""
+    """P0-3：跨 host 3xx + 挑战/清算 cookie 命中；同 host/同注册域重定向、常设 cookie、普通 cookie 不命中。"""
     f = capture._response_edge_signals
-    xhost = SimpleNamespace(response=SimpleNamespace(
-        status_code=302, headers=_FakeHeaders({"location": "https://other.com/x"},
-                                              {"set-cookie": ["cf_clearance=abc; Path=/"]})))
-    assert f(xhost, "pay.x.com") == (True, True)
-    same = SimpleNamespace(response=SimpleNamespace(
-        status_code=302, headers=_FakeHeaders({"location": "https://pay.x.com/login"}, {})))
-    assert f(same, "pay.x.com") == (False, False)              # 同 host 重定向不算
-    normal = SimpleNamespace(response=SimpleNamespace(
-        status_code=200, headers=_FakeHeaders({}, {"set-cookie": ["sessionid=xyz"]})))
-    assert f(normal, "pay.x.com") == (False, False)            # 普通 cookie 非挑战
-    assert f(SimpleNamespace(response=None), "x") == (False, False)  # 无响应
+    assert f(_resp(302, "https://other.com/x", ["cf_clearance=abc; Path=/"]), "pay.x.com") == (True, True)
+    assert f(_resp(302, "https://pay.x.com/login"), "pay.x.com") == (False, False)   # 同 host 不算
+    assert f(_resp(200, cookies=["sessionid=xyz"]), "pay.x.com") == (False, False)   # 普通 cookie 非挑战
+    assert f(SimpleNamespace(response=None), "x") == (False, False)                  # 无响应
+
+
+def test_response_edge_signals_no_false_positive_on_benign_infra() -> None:
+    """★复审 P0/P1：合法基础设施不误报——acw_tc(阿里 WAF 常设)非挑战；www↔apex/m. 规范化重定向非跨站。"""
+    f = capture._response_edge_signals
+    # acw_tc / aliyungf_tc / srv_id 是每会话常设 cookie（非挑战）→ 不命中 COOKIE_CHALLENGE
+    for name in ("acw_tc=x", "aliyungf_tc=x", "srv_id=s1", "__cf_bm=x"):
+        assert f(_resp(200, cookies=[name]), "foo.com")[1] is False, name
+    # www↔apex / m. 移动版 = 同注册域良性规范化 → 非跨 host REDIRECT
+    assert f(_resp(301, "https://foo.com/"), "www.foo.com")[0] is False
+    assert f(_resp(302, "https://m.x.com/"), "x.com")[0] is False
+    assert f(_resp(301, "https://www.foo.com/"), "foo.com")[0] is False
+    # 真跨站（'-'边界非'.'边界）仍命中
+    assert f(_resp(302, "https://evil-foo.com/"), "foo.com")[0] is True

@@ -854,7 +854,8 @@ def test_scorer_domestic_relay_historical_dns_is_retained_and_scores() -> None:
     features = (
         _feature(RoleSignal.DIRECT_CONNECTION, "ev-direct", target=target),
         _feature(RoleSignal.DOMESTIC_NETWORK, "ev-domestic", target=target),
-        _feature(RoleSignal.REDIRECT, "ev-redirect", target=target),
+        # 中继过渡须 SUBSEQUENT_OVERSEAS（REDIRECT 单独不再满足 relay 要件——见 roles.py）。
+        _feature(RoleSignal.SUBSEQUENT_OVERSEAS_CONNECTION, "ev-subseq", target=target),
         _feature(RoleSignal.HISTORICAL_DNS, "ev-dns", target=target),
     )
     assessment = _assessment_for(
@@ -864,8 +865,8 @@ def test_scorer_domestic_relay_historical_dns_is_retained_and_scores() -> None:
 
     assert score.eligible is True
     assert _points_by_signal(score)[RoleSignal.HISTORICAL_DNS] == 15
-    # direct(40) + domestic(15) + redirect(15) + historical_dns(15) == 85.
-    assert score.raw_score == 85
+    # direct(40) + domestic(15) + subsequent_overseas(20) + historical_dns(15) == 90.
+    assert score.raw_score == 90
     # Present evidence is never also reported as missing.
     assert RoleSignal.HISTORICAL_DNS not in _missing_points_by_signal(score)
 
@@ -877,7 +878,7 @@ def test_scorer_domestic_relay_historical_dns_missing_when_absent() -> None:
     features = (
         _feature(RoleSignal.DIRECT_CONNECTION, "ev-direct", target=target),
         _feature(RoleSignal.DOMESTIC_NETWORK, "ev-domestic", target=target),
-        _feature(RoleSignal.REDIRECT, "ev-redirect", target=target),
+        _feature(RoleSignal.SUBSEQUENT_OVERSEAS_CONNECTION, "ev-subseq", target=target),
     )
     assessment = _assessment_for(
         InfrastructureRole.DOMESTIC_RELAY_CANDIDATE, features, target=target

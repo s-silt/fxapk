@@ -714,17 +714,16 @@ def test_origin_candidate_single_login_path_not_eligible() -> None:
 # --------------------------------------------------------------------------- #
 # P0-3: REDIRECT + COOKIE_CHALLENGE → edge_candidate / cloaking_edge_node（运行时响应行为）
 # --------------------------------------------------------------------------- #
-def _edge_ip(value, *, redirect=True, cookie=True, source="runtime", tier=None, country="US"):
-    rt = {}
-    if redirect:
-        rt["redirect_observed"] = True
-    if cookie:
-        rt["cookie_challenge_observed"] = True
+def _edge_ip(value, *, host_signals=None, source="runtime", tier=None, country="US"):
+    # host_signals: {host: (redirect, cookie)}; 默认一个 host 同时重定向+挑战（cloaking 行为）。
+    if host_signals is None:
+        host_signals = {"pay.x.com": (True, True)}
+    edge_hosts = {h: {"r": bool(r), "c": bool(c)} for h, (r, c) in host_signals.items()}
     return _ep(value, "ip", {
         "attribution": {"ips": [{"ip": value, "country": country,
                                  "origin_network": {"asn": 64500, "category": "cloud"},
                                  "hosting_provider": {"category": None}, "edge_provider": {"tier": tier}}]},
-        "runtime": rt,
+        "runtime": {"edge_hosts": edge_hosts},
     }, evidences=[Evidence(source=source, location="x")])
 
 
@@ -737,29 +736,49 @@ def test_edge_candidate_eligible_from_runtime_redirect_and_cookie() -> None:
 
 def test_cloaking_edge_node_eligible_from_redirect_and_cookie() -> None:
     r = _roles(_build(_edge_ip("5.5.5.5")), "5.5.5.5")["cloaking_edge_node"]
-    assert r["eligible"] is True  # COOKIE_CHALLENGE + REDIRECT = ≥2 强行为信号
+    assert r["eligible"] is True  # 同 host 的 COOKIE_CHALLENGE + REDIRECT = ≥2 强行为信号
 
 
 def test_edge_and_cloaking_not_eligible_single_signal() -> None:
-    roles = _roles(_build(_edge_ip("5.5.5.5", cookie=False)), "5.5.5.5")  # 仅 redirect
+    # 某 host 仅重定向（无挑战）→ 无 host 双命中 → 不产信号 → 不 eligible。
+    roles = _roles(_build(_edge_ip("5.5.5.5", host_signals={"pay.x.com": (True, False)})), "5.5.5.5")
     for role in ("edge_candidate", "cloaking_edge_node"):
         r = roles.get(role)
         assert r is None or r["eligible"] is False, role
 
 
+def test_edge_cross_tenant_shared_edge_not_eligible() -> None:
+    # ★复审 P1：共享边缘上不同 host（不同租户）各出一个信号，不得凑成 cloaking——须同一 host 双命中。
+    roles = _roles(_build(_edge_ip("5.5.5.5", host_signals={"a.com": (True, False), "b.com": (False, True)})), "5.5.5.5")
+    all_sig = {s for role in roles.values() for s in role["matched_signals"]}
+    assert not ({"redirect", "cookie_challenge"} & all_sig)
+    for role in ("edge_candidate", "cloaking_edge_node"):
+        r = roles.get(role)
+        assert r is None or r["eligible"] is False, role
+
+
+def test_redirect_does_not_leak_into_domestic_relay() -> None:
+    # ★复审 P1：REDIRECT 不满足 relay 的过渡要件（须 SUBSEQUENT_OVERSEAS）——境内 IP 有跨host重定向不等于中继。
+    roles = _roles(_build(_edge_ip("203.0.113.9", country="CN")), "203.0.113.9")
+    r = roles.get("domestic_relay_candidate")
+    assert r is None or r["eligible"] is False
+
+
 def test_edge_signals_need_runtime_evidence_not_just_flags() -> None:
-    # ★守不变量：手注 redirect/cookie 标志但无 runtime 证据 → 不产信号。
+    # ★守不变量：手注 edge_hosts 但无 runtime 证据 → 不产信号。
     roles = _roles(_build(_edge_ip("5.5.5.5", source="static")), "5.5.5.5")
     all_sig = {s for role in roles.values() for s in role["matched_signals"]}
     assert not ({"redirect", "cookie_challenge"} & all_sig)
 
 
 def test_intercept_node_never_edge_signals() -> None:
-    ep = _ep("183.192.65.101", "ip", {
-        "attribution": {"ips": [{"ip": "183.192.65.101", "country": "CN",
-                                 "origin_network": {"asn": 4134, "category": "telecom"},
-                                 "hosting_provider": {"category": None}, "edge_provider": {"tier": None}}]},
-        "runtime": {"redirect_observed": True, "cookie_challenge_observed": True},
-    }, evidences=[Evidence(source="runtime", location="x")])
-    all_sig = {s for role in _roles(_build(ep), "183.192.65.101").values() for s in role["matched_signals"]}
-    assert not ({"redirect", "cookie_challenge"} & all_sig)
+    # 规范写法与 IPv4-mapped IPv6 写法都须被拦（复审 P2：::ffff: 绕过）。
+    for value in ("183.192.65.101", "::ffff:183.192.65.101"):
+        ep = _ep(value, "ip", {
+            "attribution": {"ips": [{"ip": value, "country": "CN",
+                                     "origin_network": {"asn": 4134, "category": "telecom"},
+                                     "hosting_provider": {"category": None}, "edge_provider": {"tier": None}}]},
+            "runtime": {"edge_hosts": {"h": {"r": True, "c": True}}},
+        }, evidences=[Evidence(source="runtime", location="x")])
+        all_sig = {s for role in _roles(_build(ep), value).values() for s in role["matched_signals"]}
+        assert not ({"redirect", "cookie_challenge", "direct_connection"} & all_sig), value
