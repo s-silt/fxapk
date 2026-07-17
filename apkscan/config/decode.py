@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import gzip
 import json
 import logging
 import re
@@ -113,10 +112,17 @@ def _peels(
 
 
 def _gunzip(data: bytes) -> bytes | None:
+    """★有界解压：增量解压、输出超 _MAX_BLOB_BYTES 即拒——防 gzip 炸弹（几 KB 压缩→数 GB 解压）。
+
+    绝不用 ``gzip.decompress(data)[:cap]``（那是**先全量解压进内存再切片**，切片发生在 OOM 之后 = 没切）。
+    ``decompressobj(wbits=31)`` 是 gzip 格式；``decompress(data, cap+1)`` 至多产出 cap+1 字节（其余留在
+    unconsumed_tail、不分配），故峰值内存被 cap 住；长度过界即判压缩炸弹拒之。
+    """
     try:
-        return gzip.decompress(data)[:_MAX_BLOB_BYTES]
+        out = zlib.decompressobj(wbits=31).decompress(data, _MAX_BLOB_BYTES + 1)
     except (OSError, EOFError, zlib.error):
         return None
+    return None if len(out) > _MAX_BLOB_BYTES else out
 
 
 def _b64(text: str) -> bytes | None:
