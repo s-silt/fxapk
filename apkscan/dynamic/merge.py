@@ -1762,7 +1762,8 @@ def resolve_dead_drop_c2(report: Report, runtime_report_path: str) -> dict[str, 
          （无需调证）或私网/无效（待核）→ 不升、不标 C2（避免误升 CDN/SDK 回调）。
       4. 命令域名保留并在 notes 标与二级 C2 的关系。
       5. **只调优先级排序与 notes，不改 advice 终判**（advice 仍由 infra 分级决定）。
-      6. 二级 C2 若同时 is_runtime_seen（已有 runtime 端点）→ 高可信。
+      6. 二级 C2 若在 dead-drop 端点**并入之前**就已是运行时端点（真实连过）→ 高可信；仅由本次
+         回包内容推导浮出的派生端点（source=runtime-derived），绝不因自身把每个二级 C2 恒升 HIGH。
 
     Returns:
         ``{"secondary_c2", "command_domains"}``。内部 try/except，绝不抛。
@@ -1794,13 +1795,23 @@ def resolve_dead_drop_c2(report: Report, runtime_report_path: str) -> dict[str, 
 
         # 先把二级 C2 域名作为运行时端点并入（去重 + infra 分级产 DOMAIN Lead），再标 secondary。
         secondary_domains = _unique_secondaries(relations)
+        # ★升 HIGH 的判据 = 二级 C2 域名在 dead-drop 端点并入**之前**就已是运行时端点（真实连过）。
+        #   必须在 merge_runtime_endpoints 之前取快照：dead-drop 自身端点 source 也 startswith("runtime")，
+        #   若并入后再算「已见运行时」会把每个二级 C2 都误判成 is_runtime_seen → 恒升 HIGH（时序 bug）。
+        runtime_seen_before = {
+            ep.value
+            for ep in report.endpoints
+            if any(str(getattr(ev, "source", "")).startswith("runtime") for ev in ep.evidences)
+        }
         endpoints = [
             Endpoint(
                 value=d,
                 kind="domain",
                 evidences=[
                     Evidence(
-                        source=_RUNTIME_SOURCE,
+                        # 二级 C2 是从明文回包 body **推导**出的值（非真实连接的 peer）→ 钉 runtime-derived
+                        # （仍 runtime*、不在 observed-contact allowlist），堵手编 messages 伪造运行时真接触。
+                        source=_RUNTIME_DERIVED_SOURCE,
                         location="runtime-deaddrop",
                         snippet=f"回包关系分析浮出二级 C2：{d}",
                     )
@@ -1810,7 +1821,7 @@ def resolve_dead_drop_c2(report: Report, runtime_report_path: str) -> dict[str, 
         ]
         merge_runtime_endpoints(report, endpoints)
 
-        stats["secondary_c2"] = _mark_secondary_c2_leads(report, relations)
+        stats["secondary_c2"] = _mark_secondary_c2_leads(report, relations, runtime_seen_before)
         stats["command_domains"] = _note_command_domains(report, relations)
         _prioritize_secondary_c2(report, secondary_domains)
 
@@ -1858,12 +1869,19 @@ def _unique_secondaries(relations: dict[str, list[str]]) -> list[str]:
     return out
 
 
-def _mark_secondary_c2_leads(report: Report, relations: dict[str, list[str]]) -> int:
+def _mark_secondary_c2_leads(
+    report: Report, relations: dict[str, list[str]], runtime_seen: set[str]
+) -> int:
     """给浮出的二级 C2 域名 Lead 标 secondary（notes + 高可信），**不改 advice**。返回标记数。
 
     每个二级 C2 找到对应 DOMAIN Lead（merge_runtime_endpoints 已产/已有）：追加二级下发 notes
-    + launch-only 诚实标注；若已有 runtime 端点（is_runtime_seen）→ 升 Confidence.HIGH。
-    advice 一律不动（终判归 infra 分级，避免误杀/误升）。
+    + launch-only 诚实标注；若该域名在 dead-drop 端点**并入前**就已是运行时端点（``runtime_seen``
+    快照，真实连过）→ 升 Confidence.HIGH。advice 一律不动（终判归 infra 分级，避免误杀/误升）。
+
+    Args:
+        runtime_seen: **并入前**的运行时端点 value 快照（由调用方在 merge_runtime_endpoints 之前
+            取好传入）。绝不在此就地重算——dead-drop 自身派生端点 source 也 startswith("runtime")，
+            并入后再算会把每个二级 C2 恒判 is_runtime_seen → 恒升 HIGH（时序 bug）。
     """
     # 二级 C2 → 携带它的命令域名集合（用于 notes 标关系）。
     carriers: dict[str, list[str]] = {}
@@ -1873,11 +1891,6 @@ def _mark_secondary_c2_leads(report: Report, relations: dict[str, list[str]]) ->
             if cmd and cmd not in carriers[d]:
                 carriers[d].append(cmd)
 
-    runtime_seen = {
-        ep.value
-        for ep in report.endpoints
-        if any(str(getattr(ev, "source", "")).startswith("runtime") for ev in ep.evidences)
-    }
     existing_keys = {(l.category.value, l.value) for l in report.leads}
     marked = 0
     for domain, cmds in carriers.items():
@@ -1897,7 +1910,8 @@ def _mark_secondary_c2_leads(report: Report, relations: dict[str, list[str]]) ->
                 advice=advice,
                 source_refs=[
                     Evidence(
-                        source=_RUNTIME_SOURCE,
+                        # 内容推导值 → runtime-derived（不授 observed-contact，见 _RUNTIME_DERIVED_SOURCE）。
+                        source=_RUNTIME_DERIVED_SOURCE,
                         location="runtime-deaddrop",
                         snippet=f"回包关系分析浮出二级 C2：{domain}",
                     )
@@ -1912,7 +1926,7 @@ def _mark_secondary_c2_leads(report: Report, relations: dict[str, list[str]]) ->
         # 追加二级下发关系 + 诚实标注（保留原 notes，幂等：已标过不重复）。
         if "二级下发" not in lead.notes:
             lead.notes = f"{lead.notes}；{note} {_DEAD_DROP_TIMING_NOTE}".lstrip("；")
-        # 二级 C2 同时运行时实连 → 高可信（不改 advice）。
+        # 二级 C2 在 dead-drop 端点并入前就已被运行时实连（runtime_seen 快照）→ 高可信（不改 advice）。
         if domain in runtime_seen:
             lead.confidence = Confidence.HIGH
         marked += 1
