@@ -1504,7 +1504,9 @@ def merge_runtime_remote_control(report: Report, runtime_report_path: str) -> di
            向目标机构调被害人流水、evidence_to_obtain=[被害账户交易流水/异常转账记录/设备登录指纹]、
            notes 带 launch-only 诚实标注）。去重。
          - **未知包名** → 不产 Lead，收集进 Finding 描述/notes（不滥产 Lead）。
-      4. 屏幕/控件树回传 host → 并入端点走 ``merge_runtime_endpoints``（infra 分级，CDN 不升 C2）。
+      4. 屏幕/控件树回传 host → 并入端点走 ``merge_runtime_endpoints``（infra 分级，CDN 不升 C2）；
+         该 host 是 hook **上报**串（非 pcap dst_ip / mitm upstream）→ 钉 ``runtime-derived``
+         （非 observed-contact，见 ``_RUNTIME_DERIVED_SOURCE``），不凭空授予运行时接触信任。
       5. 远控手势/指令序列 + MediaProjection 开启 → 产 Finding（severity 高，描述实测无障碍远控
          行为：下发 N 个自动手势 / 劫持包名 X / 屏幕录制开启），**不 Lead 化**。
       6. meta 打标 runtime_remote_control。
@@ -1578,7 +1580,14 @@ def merge_runtime_remote_control(report: Report, runtime_report_path: str) -> di
                     kind="domain",
                     evidences=[
                         Evidence(
-                            source=_RUNTIME_SOURCE,
+                            # 回传 host 是 Frida 无障碍 hook **上报**的字符串（经规整），非 pcap dst_ip /
+                            # mitm upstream——不是"运行时真观测到连去该 peer IP"的 observed-contact。故钉
+                            # runtime-derived（仍 runtime*、is_runtime_seen 不变，但不在 assemble 的
+                            # observed-contact allowlist，见 _RUNTIME_DERIVED_SOURCE），与 dead-drop 从
+                            # 回包内容推导的二级 C2（commit ad0b762）同法：堵手编 runtime_report 的
+                            # remote_control_events[].host 借此路径伪造 source="runtime" 端点，并消除
+                            # "仅因 kind==domain 才没漏成 attribution 运行时行为角色"的巧合边界。
+                            source=_RUNTIME_DERIVED_SOURCE,
                             location="runtime-remote-control",
                             snippet=f"无障碍远控屏幕/控件树回传 host：{h}",
                         )
