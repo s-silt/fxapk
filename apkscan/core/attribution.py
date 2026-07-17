@@ -75,20 +75,64 @@ _PROVIDERS_CACHE: dict[str, Any] | None = None
 
 
 def _providers_rules() -> dict[str, Any]:
-    """加载 rules/providers.yaml（网络类别关键字 + edge 指纹库）。缺失/异常 → 内置兜底。绝不抛。"""
+    """加载 provider 归属规则：主 rules/providers.yaml + 分目录 rules/providers/{cloud,idc,cdn,waf,carrier}.yaml
+    合并（B1 国内专库）。缺失/异常 → 内置兜底。绝不抛。"""
     global _PROVIDERS_CACHE
     if _PROVIDERS_CACHE is not None:
         return _PROVIDERS_CACHE
-    data: Any = None
+    merged: dict[str, Any] = {}
     try:
-        from apkscan.core.registry import load_rules
+        from apkscan.core.registry import load_rules, load_rules_dir
 
-        data = load_rules("providers")
+        base = load_rules("providers")
+        merged = _merge_provider_rules(
+            base if isinstance(base, dict) else {}, load_rules_dir("providers")
+        )
     except Exception:
-        logger.debug("[attribution] providers.yaml 加载失败，用内置兜底", exc_info=True)
-    # load_rules 对缺失文件返回 {}（非 None）——故须查关键字段：无 network_categories 即视为未提供、用兜底。
-    _PROVIDERS_CACHE = data if (isinstance(data, dict) and data.get("network_categories")) else _FALLBACK_PROVIDERS
+        logger.debug("[attribution] providers 规则加载失败，用内置兜底", exc_info=True)
+    # 合并后无 network_categories（主文件缺失 + 分目录空）→ 内置兜底（五大云/CDN/电信关键字最小可用）。
+    _PROVIDERS_CACHE = merged if merged.get("network_categories") else _FALLBACK_PROVIDERS
     return _PROVIDERS_CACHE
+
+
+def _merge_provider_rules(base: dict[str, Any], parts: list[dict[str, Any]]) -> dict[str, Any]:
+    """合并主 providers.yaml 与分目录各文件（B1）：network_categories 按类别并 org_keywords（去重保序）、
+    edge_providers 按 id 去重拼接（先出现者优先、主文件在前）、scoring/weights/negative_weights 以主文件为准。绝不抛。"""
+    cats: dict[str, dict[str, list[Any]]] = {}
+    edge_by_id: dict[str, dict[str, Any]] = {}
+    edge_order: list[str] = []
+    for src in [base, *parts]:
+        if not isinstance(src, dict):
+            continue
+        nc = src.get("network_categories")
+        if isinstance(nc, dict):
+            for cat, body in nc.items():
+                kws = body.get("org_keywords") if isinstance(body, dict) else None
+                if not isinstance(kws, list):
+                    continue
+                bucket = cats.setdefault(str(cat), {"org_keywords": []})["org_keywords"]
+                for kw in kws:
+                    if kw not in bucket:
+                        bucket.append(kw)
+        eps = src.get("edge_providers")
+        if isinstance(eps, list):
+            for ep in eps:
+                if isinstance(ep, dict) and ep.get("id") and ep["id"] not in edge_by_id:
+                    edge_by_id[str(ep["id"])] = ep
+                    edge_order.append(str(ep["id"]))
+    merged: dict[str, Any] = {
+        "network_categories": cats,
+        "edge_providers": [edge_by_id[i] for i in edge_order],
+    }
+    for key in ("scoring", "weights", "negative_weights"):
+        if isinstance(base.get(key), dict):
+            merged[key] = base[key]
+    # 分目录文件里的 scoring/weights/negative_weights 被忽略（只认主文件）——静默失效易踩坑，记一条 debug。
+    for part in parts:
+        if isinstance(part, dict) and any(k in part for k in ("scoring", "weights", "negative_weights")):
+            logger.debug("[attribution] 分目录 provider 文件的 scoring/weights 被忽略（仅主 providers.yaml 生效）")
+            break
+    return merged
 
 
 #: 内置兜底（规则缺失时最小可用）：五大云 + 主流 CDN/电信的 org 关键字。

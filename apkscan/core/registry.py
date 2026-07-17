@@ -14,7 +14,7 @@ import pkgutil
 import socket
 from abc import ABC, abstractmethod
 from types import ModuleType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
@@ -277,16 +277,16 @@ def ruleset_digest() -> str:
 
     try:
         rules_dir = importlib.resources.files("apkscan") / "rules"
-        entries = sorted(
-            (e for e in rules_dir.iterdir() if e.name.endswith((".yaml", ".txt"))),
-            key=lambda e: e.name,
-        )
+        # ★递归：providers/ 等分目录下的规则文件也须入 digest，否则分目录扩库后规则变了 digest 却不变、
+        #   破坏"同规则→同 digest"。用**相对路径**作 key（顶层文件 rel==name，向后兼容既有 digest；子目录
+        #   文件 rel=subdir/name，避免跨目录同名冲突），按 rel 排序保证跨平台稳定。
+        entries = sorted(_walk_rule_files(rules_dir, ""), key=lambda kv: kv[0])
         if not entries:
             return "unknown"
         h = hashlib.sha256()
-        for entry in entries:
+        for rel, entry in entries:
             content = entry.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-            h.update(entry.name.encode("utf-8"))
+            h.update(rel.encode("utf-8"))
             h.update(b"\0")
             h.update(content)
             h.update(b"\0")
@@ -294,6 +294,50 @@ def ruleset_digest() -> str:
     except Exception:
         logger.debug("ruleset_digest 计算失败，返回 unknown", exc_info=True)
         return "unknown"
+
+
+def _walk_rule_files(node: Any, prefix: str) -> "list[tuple[str, Any]]":
+    """递归收集 node 下所有 .yaml/.txt（Traversable），返回 (相对路径, entry) 列表，按 name 排序。
+
+    ★不吞遍历异常：让调用方 :func:`ruleset_digest` 的外层 try 捕获后返回 ``"unknown"``——若某子目录中途
+    权限错只返回部分列表，会产出"看似有效但内容不全"的 digest，破坏"同规则→同 digest"锚点（宁 unknown 不半份）。
+    """
+    out: list[tuple[str, Any]] = []
+    for e in sorted(node.iterdir(), key=lambda x: x.name):
+        rel = f"{prefix}{e.name}"
+        if e.is_dir():
+            out.extend(_walk_rule_files(e, rel + "/"))
+        elif e.name.endswith((".yaml", ".txt")):
+            out.append((rel, e))
+    return out
+
+
+def load_rules_dir(subdir: str) -> list[dict]:
+    """加载 rules/<subdir>/ 下所有 *.yaml（非递归），返回各文件解析出的 dict 列表（按文件名排序）。
+
+    供 attribution 的分目录 provider 专库（rules/providers/{cloud,idc,cdn,waf,carrier}.yaml）合并加载。
+    目录不存在 / 空 / 单文件解析失败 → 跳过该文件；整体绝不抛（坏文件不拖垮其余）。
+    """
+    out: list[dict] = []
+    try:
+        base = importlib.resources.files("apkscan") / "rules" / subdir
+        if not base.is_dir():
+            return []
+        for entry in sorted(base.iterdir(), key=lambda e: e.name):
+            if not entry.name.endswith(".yaml"):
+                continue
+            try:
+                data = yaml.safe_load(entry.read_text(encoding="utf-8"))
+            except Exception:
+                logger.exception("解析规则失败：rules/%s/%s", subdir, entry.name)
+                continue
+            if isinstance(data, dict):
+                out.append(data)
+            elif data is not None:
+                logger.warning("规则文件顶层应为 dict，跳过：rules/%s/%s", subdir, entry.name)
+    except Exception:
+        logger.exception("加载规则目录失败：rules/%s", subdir)
+    return out
 
 
 def load_rules(name: str) -> dict | list:
