@@ -135,21 +135,72 @@ def test_fetch_rejects_non_http_url() -> None:
     assert r.ok is False and r.raw is None
 
 
+_PUB = "https://8.8.8.8/y"  # 公网 IP 字面量：过 SSRF 检查（免真 DNS），requests 仍被 mock、不打真网
+
+
 def test_fetch_ok_and_status_and_size_cap(monkeypatch) -> None:
     pytest.importorskip("requests")
     import requests
 
     monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResp(200, {}, (b"abc", b"def")))
-    r = fetch_config_object("https://x/y")
+    r = fetch_config_object(_PUB)
     assert r.ok is True and r.raw == b"abcdef"
 
     monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResp(404))
-    assert fetch_config_object("https://x/y").ok is False
+    assert fetch_config_object(_PUB).ok is False
 
     # Content-Length 预检超帽
     monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResp(200, {"Content-Length": "999999"}))
-    assert fetch_config_object("https://x/y", max_bytes=1024).ok is False
+    assert fetch_config_object(_PUB, max_bytes=1024).ok is False
 
     # 流式累计超帽
     monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResp(200, {}, (b"x" * 800, b"y" * 800)))
-    assert fetch_config_object("https://x/y", max_bytes=1024).ok is False
+    assert fetch_config_object(_PUB, max_bytes=1024).ok is False
+
+
+def test_target_is_safe_blocks_internal_and_metadata() -> None:
+    from apkscan.config.fetch import _target_is_safe
+
+    for bad in (
+        "http://169.254.169.254/latest/meta-data/iam/",  # 云元数据（链路本地）
+        "http://127.0.0.1/x", "http://10.0.0.1/x", "http://192.168.1.1/x", "http://172.16.0.1/x",
+    ):
+        assert _target_is_safe(bad)[0] is False, bad
+    assert _target_is_safe("https://8.8.8.8/x")[0] is True  # 公网放行
+
+
+def test_fetch_blocks_ssrf_before_request(monkeypatch) -> None:
+    pytest.importorskip("requests")
+    import requests
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: pytest.fail("SSRF 目标绝不应发起请求"))
+    r = fetch_config_object("http://169.254.169.254/appconfig/x.json")
+    assert r.ok is False and "SSRF" in (r.error or "")
+
+
+def test_fetch_disables_redirects(monkeypatch) -> None:
+    pytest.importorskip("requests")
+    import requests
+
+    captured: dict = {}
+
+    def _get(url, **kwargs):
+        captured.update(kwargs)
+        return _FakeResp(200, {}, (b"ok",))
+
+    monkeypatch.setattr(requests, "get", _get)
+    fetch_config_object(_PUB)
+    assert captured.get("allow_redirects") is False  # 禁跟随重定向（防 302→内网 SSRF）
+
+
+def test_fetch_wall_clock_deadline_aborts(monkeypatch) -> None:
+    pytest.importorskip("requests")
+    import requests
+
+    from apkscan.config import fetch as fetchmod
+
+    times = iter([0.0, 1e9, 1e9, 1e9])  # deadline 计算=0 → 30；循环内 monotonic=1e9 远超 → 立即中止
+    monkeypatch.setattr(fetchmod.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResp(200, {}, (b"x" * 10, b"y" * 10)))
+    r = fetch_config_object(_PUB)
+    assert r.ok is False and "总时限" in (r.error or "")
