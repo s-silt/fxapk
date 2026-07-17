@@ -65,6 +65,18 @@ def test_unknown_mode_falls_back_floor_only_no_raise() -> None:
     assert p.mode == "floor-only" and p.ready
 
 
+def test_no_proxy_mode_kept_and_allows_frida_plaintext() -> None:
+    """★no-proxy 单列（不回退 floor-only 标签）：底座同 floor-only，但允许 frida → 明文可达 frida 层。
+
+    否则能力计划 mode='floor-only' 却记录 frida 明文层，自相矛盾（Fable 对抗复审低危项）。
+    """
+    p = C.resolve("no-proxy", _FLOOR | {C.CAP_FRIDA})
+    assert p.mode == "no-proxy" and p.ready and p.degraded_to is None
+    assert p.plaintext_best == "ssl_hook"  # frida 在 → SSL hook 明文层可达（no-proxy 用 frida）
+    # 对照：floor-only 按定义不注入 frida，即便 frida 在，其能力计划语义仍是"只有 floor 接入节点"——
+    # 但阶梯计算是能力驱动、mode 无关，故此处仅验证 no-proxy 的 mode 标签不再被吞成 floor-only。
+
+
 def test_plan_fields_and_notes_present() -> None:
     p = C.resolve("both", _FLOOR | {C.CAP_MITMPROXY, C.CAP_CA_TRUSTED})
     assert p.required == C.MODE_FLOOR_CAPS["both"]
@@ -85,3 +97,28 @@ def test_both_with_mitmproxy_but_no_ca_is_effective_floor_only() -> None:
     p = C.resolve("both", _FLOOR | {C.CAP_MITMPROXY})
     assert p.ready and p.degraded_to == "floor-only"  # floor 底座在但 mitm 增强不全
     assert p.plaintext_best is None  # 缺 CA → mitm 层不可达
+
+
+# ---- A1-3：plan_as_dict 序列化（写进 runtime_report.json / report.meta.capture_capabilities）----
+
+
+def test_plan_as_dict_json_serializable_floor_only() -> None:
+    """plan_as_dict：frozenset→稳定排序 list、字段稳定、JSON 可序列化；floor-only 无明文层。"""
+    import json
+
+    d = C.plan_as_dict(C.resolve("floor-only", _FLOOR))
+    json.dumps(d)  # 必须 JSON 可序列化（不抛）
+    assert d["mode"] == "floor-only" and d["ready"] is True
+    assert d["required"] == sorted(["adb", "device", "device_tcpdump", "root_capture"])
+    assert d["available"] == d["required"] and d["missing"] == []
+    assert d["degraded_to"] is None and d["plaintext_best"] is None
+    assert d["plaintext_reachable"] == [] and isinstance(d["notes"], list) and d["notes"]
+
+
+def test_plan_as_dict_records_plaintext_best_and_missing() -> None:
+    """both 全栈 → 记录 plaintext_best=mitm；缺增强 → missing 如实列出（机器可读"为何没明文"）。"""
+    full = C.plan_as_dict(C.resolve("both", _FLOOR | {C.CAP_MITMPROXY, C.CAP_CA_TRUSTED}))
+    assert full["plaintext_best"] == "mitm" and "mitm" in full["plaintext_reachable"]
+
+    degraded = C.plan_as_dict(C.resolve("mitm-only", _FLOOR))  # 缺 mitmproxy
+    assert "mitmproxy" in degraded["missing"] and degraded["degraded_to"] == "floor-only"

@@ -29,14 +29,18 @@ CAP_CA_TRUSTED = "ca_trusted"      # mitm CA 已装进设备系统信任库
 CAP_TSHARK = "tshark"              # 主机侧 tshark 可用（keylog 深度解密）
 CAP_TLS_KEYS = "tls_keys"          # 抓包产出了 NSS TLS Key Log
 
-#: 支持的 capture 模式（与 cli.py capture --mode 对齐）。
-CAPTURE_MODES: tuple[str, ...] = ("floor-only", "both", "mitm-only")
+#: 支持的 capture 模式（与 cli.py capture --mode / capture._CAPTURE_MODES 对齐）。
+CAPTURE_MODES: tuple[str, ...] = ("floor-only", "both", "mitm-only", "no-proxy")
 
 #: 每种模式的**底座能力**——全满足即该模式能产出核心产物（floor.pcap / 代理明文流）。
 #: ★both 的底座 = floor（mitm 是增强）：缺 mitm/CA 时 both 自动等效降级为 floor-only，仍抓 pcap。
+#: ★no-proxy 底座 = floor（同 floor-only），但它**允许 frida**（capture 里 use_frida=True）→ 明文阶梯可达
+#:   frida 层（ssl_hook/cipher_hook/keylog）；须单列、不能回退当 floor-only 标签（floor-only 按定义不注入
+#:   frida、明文阶梯只有 floor 接入节点），否则能力计划的 mode 字段与实际明文层自相矛盾。
 MODE_FLOOR_CAPS: dict[str, frozenset[str]] = {
     "floor-only": frozenset({CAP_ADB, CAP_DEVICE, CAP_DEVICE_TCPDUMP, CAP_ROOT_CAPTURE}),
     "both": frozenset({CAP_ADB, CAP_DEVICE, CAP_DEVICE_TCPDUMP, CAP_ROOT_CAPTURE}),
+    "no-proxy": frozenset({CAP_ADB, CAP_DEVICE, CAP_DEVICE_TCPDUMP, CAP_ROOT_CAPTURE}),
     "mitm-only": frozenset({CAP_ADB, CAP_DEVICE, CAP_MITMPROXY}),
 }
 
@@ -136,3 +140,23 @@ def resolve(mode: str, available: set[str] | frozenset[str]) -> CapabilityPlan:
 def _join(caps: frozenset[str] | set[str]) -> str:
     """能力集 → 稳定排序的可读串（空集 → '无'）。"""
     return ", ".join(sorted(caps)) if caps else "无"
+
+
+def plan_as_dict(plan: CapabilityPlan) -> dict[str, object]:
+    """把 :class:`CapabilityPlan` 摊平成 JSON 可序列化 dict（frozenset → 稳定排序 list）。
+
+    供 A1-3 把能力计划写进 ``runtime_report.json`` → ``report.meta['capture_capabilities']``：
+    让"floor 底座就绪没有 / 明文最强可达层 / 为何没明文（缺哪些增强）"从散落日志变成机器可读字段
+    （明文路线文档的判断表机器可读化）。键序与字段名稳定，供下游/报告直接消费。
+    """
+    return {
+        "mode": plan.mode,
+        "ready": plan.ready,
+        "required": sorted(plan.required),
+        "available": sorted(plan.available),
+        "missing": sorted(plan.missing),
+        "degraded_to": plan.degraded_to,
+        "plaintext_reachable": list(plan.plaintext_reachable),
+        "plaintext_best": plan.plaintext_best,
+        "notes": list(plan.notes),
+    }
