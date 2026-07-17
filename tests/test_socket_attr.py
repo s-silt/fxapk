@@ -259,3 +259,174 @@ def test_ss_backfill_by_four_tuple_not_across_uids() -> None:
     by_uid = {e.uid: e for e in s.by_remote[("1.2.3.4", 443)]}
     assert by_uid[10001].process == "com.x" and by_uid[10001].pid == 555  # 匹配 local:1001 → 回填
     assert by_uid[0].process is None and by_uid[0].pid is None  # 另一 UID（local:1000）不被污染
+
+
+# ---------------------------------------------------------------------------
+# ★A2：五元组（本地临时端口）+ pcap 流时间窗归因，四级评分 confirmed/probable/ambiguous/unattributed
+# ---------------------------------------------------------------------------
+
+# 同远端 1.2.3.4:443 被目标 uid 10234（本地端口 43090=0xA852）与系统 uid 0（本地端口 40000=0x9C40）各连一条。
+_SHARED_REMOTE = (
+    "# package=com.x uid=10234\n## /proc/net/tcp\n"
+    "   0: 0F02000A:A852 04030201:01BB 01 00000000:00000000 00:00000000 00000000 10234 0 1\n"
+    "   1: 0F02000A:9C40 04030201:01BB 01 00000000:00000000 00:00000000 00000000     0 0 2\n"
+)
+
+
+def _ep(ip: str, port: int, *conns: socket_attr.PcapConn) -> socket_attr.PcapEndpoint:
+    return socket_attr.PcapEndpoint(remote_ip=ip, remote_port=port, conns=list(conns))
+
+
+def test_attribute_connections_confirms_via_local_port_disambiguation() -> None:
+    """★A2 核心：远端多 UID（旧 attribute_endpoints 判 ambiguous），但 pcap 流的本地临时端口精确命中
+    目标 UID → confirmed（五元组把歧义消解到具体连接）。"""
+    s = socket_attr.parse_uid_sockets(_SHARED_REMOTE)
+    # 旧远端-only 归因：多 UID → ambiguous
+    assert socket_attr.attribute_endpoints([("1.2.3.4", 443)], s)[("1.2.3.4", 443)]["attribution"] == "ambiguous"
+    # A2：pcap 连接本地端口 43090 → 精确命中 uid 10234 → confirmed（结果键含 proto 族）
+    a = socket_attr.attribute_connections([_ep("1.2.3.4", 443, socket_attr.PcapConn(43090))], s)[("tcp", "1.2.3.4", 443)]
+    assert a["attribution"] == "confirmed" and a["uid"] == 10234 and a["is_target_app"] is True
+    assert a["matched_by"] == ["remote_ip_port", "local_port"] and a["score"] == 0.7  # 无时间戳 → 未加时间窗分
+
+
+def test_attribute_connections_time_window_boosts_score() -> None:
+    """本地端口命中 + socket 观测时间区间与 pcap 流时间窗重叠 → confirmed + matched_by 含 time_window + score 升。"""
+    s = socket_attr.parse_socket_timeline(
+        '{"type":"meta","package":"com.x","target_uid":10234}\n'
+        '{"ts":1.0,"proto":"tcp","uid":10234,"local":"10.0.2.15:43090","remote":"1.2.3.4:443","state":"syn_sent"}\n'
+        '{"ts":3.0,"proto":"tcp","uid":10234,"local":"10.0.2.15:43090","remote":"1.2.3.4:443","state":"established"}\n'
+    )
+    a = socket_attr.attribute_connections(
+        [_ep("1.2.3.4", 443, socket_attr.PcapConn(43090, first_ts=1.5, last_ts=2.5))], s
+    )[("tcp", "1.2.3.4", 443)]
+    assert a["attribution"] == "confirmed" and a["score"] == 0.95
+    assert a["matched_by"] == ["remote_ip_port", "local_port", "time_window"]
+
+
+def test_attribute_connections_time_window_miss_stays_local_only() -> None:
+    """本地端口命中但时间窗不重叠（socket 观测远早于 pcap 流）→ 仍 confirmed（本地端口够强），但不加时间窗分。"""
+    s = socket_attr.parse_socket_timeline(
+        '{"type":"meta","package":"com.x","target_uid":10234}\n'
+        '{"ts":1.0,"proto":"tcp","uid":10234,"local":"10.0.2.15:43090","remote":"1.2.3.4:443","state":"established"}\n'
+    )
+    a = socket_attr.attribute_connections(
+        [_ep("1.2.3.4", 443, socket_attr.PcapConn(43090, first_ts=100.0, last_ts=200.0))], s
+    )[("tcp", "1.2.3.4", 443)]
+    assert a["attribution"] == "confirmed" and a["score"] == 0.7 and "time_window" not in a["matched_by"]
+
+
+def test_attribute_connections_probable_single_remote_uid_no_local() -> None:
+    """远端仅一个 UID、pcap 无本地端口明细（conns 为空）→ probable（远端唯一但未经本地端口确证）。"""
+    s = socket_attr.parse_uid_sockets(_SAMPLE)  # 1.2.3.4:443 仅 uid 10234
+    a = socket_attr.attribute_connections([_ep("1.2.3.4", 443)], s)[("tcp", "1.2.3.4", 443)]
+    assert a["attribution"] == "probable" and a["uid"] == 10234 and a["is_target_app"] is True
+    assert a["score"] == 0.5 and a["matched_by"] == ["remote_ip_port"]
+
+
+def test_attribute_connections_ambiguous_when_local_port_unknown() -> None:
+    """远端多 UID、pcap 本地端口对不上任何 socket → ambiguous + 带 score 的 candidates，不强选目标。"""
+    s = socket_attr.parse_uid_sockets(_SHARED_REMOTE)
+    a = socket_attr.attribute_connections([_ep("1.2.3.4", 443, socket_attr.PcapConn(59999))], s)[("tcp", "1.2.3.4", 443)]
+    assert a["attribution"] == "ambiguous" and a["is_target_app"] is None
+    assert a["target_uid_among_candidates"] is True
+    assert {c["uid"] for c in a["candidates"]} == {0, 10234}
+    assert all("score" in c for c in a["candidates"])  # 每候选带评分
+    assert "local_port" not in a["matched_by"]  # 本地端口未命中 → 不标 local_port
+
+
+def test_attribute_connections_unattributed_explicit() -> None:
+    """pcap 有接入节点但 socket 表无对应记录 → 显式 unattributed 条目（不再静默丢弃）。"""
+    s = socket_attr.parse_uid_sockets(_SAMPLE)
+    a = socket_attr.attribute_connections([_ep("9.9.9.9", 443, socket_attr.PcapConn(50000))], s)[("tcp", "9.9.9.9", 443)]
+    assert a["attribution"] == "unattributed" and a["is_target_app"] is None
+    assert a["score"] == 0.0 and a["matched_by"] == []
+
+
+def test_parse_socket_timeline_aggregates_ts_and_fills_by_conn() -> None:
+    """同一 socket 多时刻观测聚成一条 entry + first_ts/last_ts 区间；by_conn 本地端口索引已填。"""
+    s = socket_attr.parse_socket_timeline(
+        '{"type":"meta","package":"com.x","target_uid":10234}\n'
+        '{"ts":1.0,"proto":"tcp","uid":10234,"local":"10.0.2.15:43090","remote":"1.2.3.4:443","state":"syn_sent"}\n'
+        '{"ts":3.0,"proto":"tcp","uid":10234,"local":"10.0.2.15:43090","remote":"1.2.3.4:443","state":"established"}\n'
+    )
+    assert len(s.entries) == 1  # 同 socket 多观测聚成一条
+    e = s.entries[0]
+    assert e.first_ts == 1.0 and e.last_ts == 3.0  # 区间取 min/max
+    assert s.by_conn[("tcp", 43090, "1.2.3.4", 443)] == [e]  # (proto族,本地端口,远端) 索引已填
+
+
+def test_ts_overlap_helper() -> None:
+    """时间窗重叠判定：含容差、任一侧无时间戳 → False（不佐证也不否定）。"""
+    e = socket_attr.SocketEntry("tcp", "10.0.0.1", 1, "1.2.3.4", 443, "established", 10234, first_ts=1.0, last_ts=3.0)
+    assert socket_attr._ts_overlap(e, socket_attr.PcapConn(1, 2.0, 2.5), 2.0) is True   # 区间内
+    assert socket_attr._ts_overlap(e, socket_attr.PcapConn(1, 4.5, 5.0), 2.0) is True   # 差 1.5 < 容差
+    assert socket_attr._ts_overlap(e, socket_attr.PcapConn(1, 10.0, 11.0), 2.0) is False  # 远超容差
+    assert socket_attr._ts_overlap(e, socket_attr.PcapConn(1, None, None), 2.0) is False  # 无 pcap 时间
+
+
+def test_attribute_connections_udp_flow_does_not_confirm_via_tcp_socket() -> None:
+    """★Fable 复审 P1-1：tcp/udp 本地端口空间独立可同号——一条 UDP 流不得撞上同号 TCP socket 被误 confirmed。"""
+    s = socket_attr.parse_uid_sockets(_SAMPLE)  # 1.2.3.4:443 是目标 uid 10234 的 **TCP** socket，本地端口 43090
+    # pcap 侧一条 **UDP** 流，本地端口恰好也 43090（合法同号，属别的 app 的 QUIC）
+    a = socket_attr.attribute_connections(
+        [socket_attr.PcapEndpoint("1.2.3.4", 443, proto="udp", conns=[socket_attr.PcapConn(43090)])], s
+    )
+    assert a[("udp", "1.2.3.4", 443)]["attribution"] == "unattributed"  # udp 无对应 socket → 不误确证成目标
+    assert ("tcp", "1.2.3.4", 443) not in a  # 也没混进 tcp 结果
+
+
+def test_attribute_connections_tcp_and_udp_same_ipport_do_not_overwrite() -> None:
+    """★Fable 复审 P1-2：同 ip:port 的 tcp 与 udp 接入节点结果键含 proto 族，互不覆盖。"""
+    s = socket_attr.parse_uid_sockets(_SAMPLE)  # tcp 1.2.3.4:443 → uid 10234
+    a = socket_attr.attribute_connections(
+        [
+            socket_attr.PcapEndpoint("1.2.3.4", 443, proto="tcp", conns=[socket_attr.PcapConn(43090)]),
+            socket_attr.PcapEndpoint("1.2.3.4", 443, proto="udp", conns=[socket_attr.PcapConn(50000)]),
+        ],
+        s,
+    )
+    assert a[("tcp", "1.2.3.4", 443)]["attribution"] == "confirmed"  # tcp 判决未被 udp 覆盖
+    assert a[("udp", "1.2.3.4", 443)]["attribution"] == "unattributed"  # 两条独立并存
+
+
+def test_attribute_connections_confirmed_nontarget_keeps_target_hint() -> None:
+    """★Fable 复审 P2-1：某条流 confirmed 到非目标 UID，但"目标 app 也连过该远端"须保留提示，避免假阴性漏线索。"""
+    s = socket_attr.parse_uid_sockets(_SHARED_REMOTE)  # 目标 10234(本地 43090) 与 uid 0(本地 40000) 都连 1.2.3.4:443
+    # pcap 只覆盖到 uid 0 那条流（本地端口 40000=0x9C40）
+    a = socket_attr.attribute_connections([_ep("1.2.3.4", 443, socket_attr.PcapConn(40000))], s)[("tcp", "1.2.3.4", 443)]
+    assert a["attribution"] == "confirmed" and a["uid"] == 0 and a["is_target_app"] is False
+    assert a["target_uid_among_candidates"] is True  # ★保留"目标也连过"提示（下游不至于整段当噪音丢）
+
+
+def test_merge_uid_sockets_does_not_mutate_input_tables() -> None:
+    """★Fable 复审 P2-2：merge 就地扩时间区间/补 process 时须拷贝，绝不改输入表的 entry（保纯函数）。"""
+    tl = socket_attr.parse_socket_timeline(
+        '{"type":"meta","package":"com.x","target_uid":10001}\n'
+        '{"ts":1,"proto":"tcp","uid":10001,"local":"10.0.2.15:1000","remote":"1.2.3.4:443","state":"established"}\n'
+    )
+    snap = socket_attr.parse_uid_sockets(
+        "# package=com.x uid=10001\n## ss -tunp\n"
+        'tcp ESTAB 0 0 10.0.2.15:1000 1.2.3.4:443 users:(("com.x",pid=77,fd=9))\n'
+        "## /proc/net/tcp\n"
+        "   0: 0F02000A:03E8 04030201:01BB 01 00000000:00000000 00:00000000 00000000 10001 0 1\n"
+    )
+    merged = socket_attr.merge_uid_sockets(tl, snap)
+    assert merged.entries[0].process == "com.x" and merged.entries[0].pid == 77  # 合并结果补上了进程
+    assert tl.entries[0].process is None and tl.entries[0].pid is None  # ★输入表 entry 未被污染
+    assert merged.entries[0] is not tl.entries[0]  # 是拷贝、非共享对象
+
+
+def test_attribute_connections_tcp_pcap_matches_tcp6_vmapped_socket() -> None:
+    """★proto 分族不误伤主路径：Android v4-mapped 目标连接只现身 /proc/net/tcp6（proto=tcp6），pcap 侧是
+    裸点分 tcp——tcp/tcp6 同归 'tcp' 族，by_conn 仍能互配（分族只隔开 tcp↔udp，不隔 tcp↔tcp6）。"""
+    txt = (  # tcp6 v4-mapped：local ::ffff:10.0.2.15:43090 / remote ::ffff:1.2.3.4:443 → 归一点分
+        "# package=com.x uid=10234\n## /proc/net/tcp6\n"
+        "   0: 0000000000000000FFFF00000F02000A:A852 0000000000000000FFFF000004030201:01BB 01"
+        " 00000000:00000000 00:00000000 00000000 10234 0 1\n"
+    )
+    s = socket_attr.parse_uid_sockets(txt)
+    assert s.entries[0].proto == "tcp6" and s.entries[0].remote_ip == "1.2.3.4" and s.entries[0].local_port == 43090
+    a = socket_attr.attribute_connections(
+        [socket_attr.PcapEndpoint("1.2.3.4", 443, proto="tcp", conns=[socket_attr.PcapConn(43090)])], s
+    )[("tcp", "1.2.3.4", 443)]
+    assert a["attribution"] == "confirmed" and a["uid"] == 10234  # tcp pcap 命中 tcp6 socket（同 tcp 族）
