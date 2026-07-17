@@ -515,6 +515,32 @@ def build_ip_attribution(ip: str, signals: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+#: case-close 富化源（multisource 被动查询，均 case_close_only）里承载 AS 组织名的子键，按优先级。
+_ONLINE_ASORG_SOURCES = ("fofa", "hunter", "quake", "virustotal", "shodan", "ripestat_bgp")
+#: 从资产记录里取"网络运营方"的字段——★只取 as_org 类，绝不取 company（Hunter 的 ICP 备案主体=服务运营方，
+#: service_operator 恒 unknown，不得从数据推断）。
+_ONLINE_ASORG_FIELDS = ("as_organization", "as_org")
+
+
+def _online_as_org(enrichment: dict[str, Any]) -> str | None:
+    """ip-api 未给 org 时，从 case-close 在线源（FOFA/Hunter/Shodan/Quake…）的资产记录回落取 AS 组织名，
+    补 origin_network 的网络运营方。只在结案路径（这些源为 case_close_only）有数据；绝不取 company/ICP 主体。"""
+    for src in _ONLINE_ASORG_SOURCES:
+        node = enrichment.get(src)
+        if not isinstance(node, dict):
+            continue
+        records = node.get("records")
+        recs = records if isinstance(records, list) else [node]  # 有的源（如 shodan）字段在顶层
+        for rec in recs:
+            if not isinstance(rec, dict):
+                continue
+            for key in _ONLINE_ASORG_FIELDS:
+                val = rec.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+    return None
+
+
 def attribution_from_enrichment(enrichment: dict[str, Any], ip: str = "") -> dict[str, Any] | None:
     """把端点既有扁平 ``enrichment``（asn/webcheck 等子键）映射到五层归因。无可用 IP 归属信号 → None。绝不抛。
 
@@ -534,11 +560,14 @@ def attribution_from_enrichment(enrichment: dict[str, Any], ip: str = "") -> dic
     wc = wc if isinstance(wc, dict) else {}
     ip_rdap = enrichment.get("ip_rdap")
     ip_rdap = ip_rdap if isinstance(ip_rdap, dict) else {}
-    if not asn_e and not dns_e and not wc and not ip_rdap:
+    # ip-api org/isp 优先；均空时回落 case-close 在线源（FOFA/Hunter/Shodan…）的 as_org 补网络运营方。
+    # 提前算并纳入早期返回判据——否则只有 fofa/hunter（无 asn/dns/wc/ip_rdap）时会在提取 as_org 前误返回 None。
+    online_org = _online_as_org(enrichment)
+    if not asn_e and not dns_e and not wc and not ip_rdap and not online_org:
         return None
     signals: dict[str, Any] = {
         "country": asn_e.get("country"),
-        "asn": {"asn": asn_e.get("asn"), "org": asn_e.get("org") or asn_e.get("isp")},
+        "asn": {"asn": asn_e.get("asn"), "org": asn_e.get("org") or asn_e.get("isp") or online_org},
     }
     # ★IP-RDAP（IpRdapEnricher，applies_to=['ip']）是 IP **资源登记方** → resource_holder（第 1 层）。
     # 区别于域名 rdap（注册方）与 asn 的 ISP，故用它、不用那两者冒充 IP 资源持有方。
@@ -557,7 +586,8 @@ def attribution_from_enrichment(enrichment: dict[str, Any], ip: str = "") -> dic
     # ASN / 资源登记方 / 国家 / CNAME / 响应头，否则五层全 unknown 无归因价值 → 返回 None。
     asn_num, _ = _parse_asn(signals["asn"].get("asn"))
     if not (asn_num is not None or signals.get("rdap") or _s(signals.get("country"))
-            or signals.get("cname_chain") or signals.get("response_headers")):
+            or signals.get("cname_chain") or signals.get("response_headers")
+            or _s(signals["asn"].get("org"))):  # ★仅在线 as_org（无 asn 数值）也算有效——能把 org 归类定 origin_network
         return None
     return build_ip_attribution(ip, signals)
 
