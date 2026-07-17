@@ -547,3 +547,64 @@ def test_build_endpoint_attribution_domain_per_ip_injects_ip_for_cidr_pool(monke
     assert by_ip["203.0.113.9"]["name"] == "X" and by_ip["203.0.113.9"]["tier"] == "possible"
     assert "ip_pool:203.0.113.0/24" in by_ip["203.0.113.9"]["matched_signals"]
     assert by_ip["8.8.8.8"]["name"] is None
+
+
+# ── B2-b fronting-cluster：认不出名的高区分度前置指纹跨端点聚簇 ─────────────────────────
+
+def test_fronting_fingerprint_extracts_only_distinctive_hashes() -> None:
+    """只取高区分度哈希/指纹（spki/ja4s/body/favicon），不取可通用的 asn/cname/header。"""
+    assert A._fronting_fingerprint({"tls_spki": "ab", "favicon_mmh3": "9", "asn": 42,
+                                    "cname_chain": ["x"], "response_headers": {"a": "b"}}) == ["favicon:9", "spki:ab"]
+    assert A._fronting_fingerprint({"asn": 42, "cname_chain": ["x"]}) == []
+    assert A._fronting_fingerprint({}) == []
+    assert A._fronting_fingerprint(None) == []  # type: ignore[arg-type]
+
+
+def test_build_ip_attribution_preserves_unnamed_fronting_signal() -> None:
+    """★edge 认不出名但有高区分度前置指纹 → clustered 候选保留证据（tier=clustered、cluster_id 待编号）；
+    彻底无信号 → 空 edge 层（无 tier）——解决"有信号叫不出名"与"无信号"不可区分。"""
+    ep = A.build_ip_attribution("1.2.3.4", {"tls_spki": "deadbeef"})["edge_provider"]
+    assert ep["tier"] == "clustered" and ep["name"] is None and ep["cluster_id"] is None
+    assert ep["matched_signals"] == ["spki:deadbeef"]
+    ep2 = A.build_ip_attribution("1.2.3.4", {"country": "US"})["edge_provider"]
+    assert ep2["name"] is None and ep2.get("tier") is None and ep2["matched_signals"] == []
+
+
+def _fronting_view(ip: str, sig: dict) -> dict:
+    return {"ip": ip, "edge_provider": A.build_ip_attribution(ip, sig)["edge_provider"]}
+
+
+def test_cluster_fronting_groups_shared_fingerprint_and_spares_singletons() -> None:
+    """跨端点共享同一 SPKI 的 clustered 候选 → fronting-cluster-0001；孤点保留证据但不编号。"""
+    a = _fronting_view("1.1.1.1", {"tls_spki": "shared"})
+    b = _fronting_view("2.2.2.2", {"tls_spki": "shared"})
+    lone = _fronting_view("3.3.3.3", {"favicon_mmh3": "solo"})
+    assert A.cluster_fronting([a, b, lone]) == 1
+    assert a["edge_provider"]["cluster_id"] == b["edge_provider"]["cluster_id"] == "fronting-cluster-0001"
+    assert a["edge_provider"]["name"] == "fronting-cluster-0001"
+    assert a["edge_provider"]["cluster_shared"] == ["spki:shared"]
+    assert a["edge_provider"]["confidence"] == A._EDGE_CONF["clustered"]
+    assert lone["edge_provider"]["cluster_id"] is None  # 孤点不编号
+
+
+def test_cluster_fronting_deterministic_numbering_and_robust() -> None:
+    """两独立簇 → 0001/0002 按 ip 序确定性；坏输入/命名 edge 不参与、绝不抛。"""
+    views = [_fronting_view("9.9.9.9", {"tls_spki": "g2"}), _fronting_view("8.8.8.8", {"tls_spki": "g2"}),
+             _fronting_view("1.1.1.1", {"favicon_mmh3": "g1"}), _fronting_view("2.2.2.2", {"favicon_mmh3": "g1"})]
+    assert A.cluster_fronting(views) == 2
+    by_ip = {v["ip"]: v["edge_provider"]["cluster_id"] for v in views}
+    assert by_ip["1.1.1.1"] == by_ip["2.2.2.2"] == "fronting-cluster-0001"  # ip 更小的组先编号
+    assert by_ip["8.8.8.8"] == by_ip["9.9.9.9"] == "fronting-cluster-0002"
+    assert A.cluster_fronting([]) == 0
+    assert A.cluster_fronting("garbage") == 0  # type: ignore[arg-type]
+    assert A.cluster_fronting([{"edge_provider": None}, {}, None]) == 0  # type: ignore[list-item]
+    named = {"ip": "5.5.5.5", "edge_provider": {"tier": "probable", "matched_signals": ["spki:X"]}}
+    assert A.cluster_fronting([named, dict(named)]) == 0  # 命名 edge（非 clustered）不聚类
+
+
+def test_attribution_from_enrichment_wires_tls_fronting_signal() -> None:
+    """★enrichment 接线（B2-b）：tls 子键 SPKI 进 edge 信号 → 认不出名时产 clustered 候选；lone TLS 也算有效。"""
+    att = A.attribution_from_enrichment({"tls": {"spki_sha256": "zz"}}, ip="4.4.4.4")
+    assert att is not None
+    ep = att["edge_provider"]
+    assert ep["tier"] == "clustered" and "spki:zz" in ep["matched_signals"] and ep["cluster_id"] is None
