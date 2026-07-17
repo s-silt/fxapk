@@ -508,6 +508,36 @@ def _score_one_edge(
     return score_add[0], strong, matched, weak
 
 
+#: 高区分度「前置指纹」观测键 → 标签前缀。TLS SPKI / JA4S / 默认页 body 哈希 / favicon mmh3 都是天然唯一
+#: 的服务端指纹——即便 score_edge_provider 认不出是哪家 CDN/防红，跨端点共享同一枚即证同一（未命名）前置。
+#: 仅取哈希/指纹类（不取可通用的 header/cookie/asn/cidr，那些多家共用、单独不足以证同一前置）。
+_FRONTING_SIGNAL_KEYS: tuple[tuple[str, str], ...] = (
+    ("tls_spki", "spki"),
+    ("tls_ja4s", "ja4s"),
+    ("body_sha256", "body_hash"),
+    ("favicon_mmh3", "favicon"),
+)
+
+
+def _fronting_fingerprint(observed: dict[str, Any]) -> list[str]:
+    """从观测信号抽高区分度前置指纹（见 _FRONTING_SIGNAL_KEYS），排序去重。缺/坏 → []。绝不抛。"""
+    if not isinstance(observed, dict):
+        return []
+    fp = [f"{prefix}:{v}" for key, prefix in _FRONTING_SIGNAL_KEYS if (v := _s(observed.get(key)))]
+    return sorted(set(fp))
+
+
+def _fronting_candidate(observed: dict[str, Any]) -> dict[str, Any]:
+    """edge 认不出名时的兜底：有高区分度前置指纹 → clustered 候选（保留证据，cluster_id 待
+    cluster_fronting 跨端点编号）；无 → 空 edge 层。★解决「有信号叫不出名」与「无信号」不可区分。"""
+    fp = _fronting_fingerprint(observed)
+    if not fp:
+        return _layer(name=None, role=None, matched_signals=[])
+    return _layer(name=None, id=None, role="reverse_proxy", category=CAT_SECURITY_PROXY,
+                  source="fronting_fingerprint", matched_signals=fp, weak_signals=[],
+                  tier="clustered", cluster_id=None, confidence=CONF_LOW)
+
+
 def build_ip_attribution(ip: str, signals: dict[str, Any]) -> dict[str, Any]:
     """把一个 IP 的多源信号组装成五层归因（不塌缩）。``signals`` 见各层 + score_edge_provider。绝不抛。
 
@@ -528,10 +558,74 @@ def build_ip_attribution(ip: str, signals: dict[str, Any]) -> dict[str, Any]:
         "resource_holder": _resource_holder(signals.get("rdap")),
         "origin_network": origin,
         "hosting_provider": _hosting_provider(origin, signals.get("ptr")),
-        "edge_provider": edge if edge is not None else _layer(name=None, role=None, matched_signals=[]),
+        # 命名 edge → 用之；认不出名但有前置指纹 → clustered 候选保留证据；都没有 → 空 edge 层。
+        "edge_provider": edge if edge is not None else _fronting_candidate(edge_signals),
         # ★第 5 层：实际站点运营者——绝不从 ASN/RDAP 推断（那只是基础设施持有方，不是运营者）。
         "service_operator": _layer(name=None),
     }
+
+
+def cluster_fronting(ip_views: list[dict[str, Any]]) -> int:
+    """跨端点把**认不出名但带同一高区分度前置指纹**的 IP 归因聚成 ``fronting-cluster-NNNN``（成员≥2）。
+
+    只作用于 ``edge_provider.tier=='clustered'`` 且未编号（``cluster_id is None``）的候选——即
+    build_ip_attribution 对 score_edge_provider 认不出、但存在前置指纹的 IP 产的标记。按共享指纹用并查集
+    连边，连通分量成员≥2 者编号 ``fronting-cluster-NNNN``（从 1、确定性），就地写回各成员 edge_provider 的
+    ``cluster_id`` / ``name`` / ``confidence`` / ``cluster_shared``。孤点保留证据但不编号。绝不抛，返回簇数。
+    命名先例见 dynamic/correlate.py（cluster_id 从 1）；此处是**单份报告内跨端点**视角。
+    """
+    cand: list[tuple[str, dict[str, Any], frozenset[str]]] = []
+    for view in ip_views if isinstance(ip_views, list) else []:
+        if not isinstance(view, dict):
+            continue
+        edge = view.get("edge_provider")
+        if not isinstance(edge, dict) or edge.get("tier") != "clustered" or edge.get("cluster_id"):
+            continue
+        fps = frozenset(s for s in (edge.get("matched_signals") or []) if isinstance(s, str) and s)
+        if fps:
+            cand.append((_s(view.get("ip")), edge, fps))
+    if len(cand) < 2:
+        return 0
+    cand.sort(key=lambda t: (t[0], sorted(t[2])))          # 确定性：先按 ip、再按指纹排序 → NNNN 稳定
+
+    index: dict[str, list[int]] = {}                        # 倒排：指纹 → [候选下标]
+    for i, (_ip, _edge, fps) in enumerate(cand):
+        for fp in fps:
+            index.setdefault(fp, []).append(i)
+
+    parent = list(range(len(cand)))                         # 并查集（root=分量内最小下标 → 确定性编号）
+    def _find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    for idxs in index.values():
+        for other in idxs[1:]:
+            ra, rb = _find(idxs[0]), _find(other)
+            if ra != rb:
+                parent[max(ra, rb)] = min(ra, rb)
+
+    groups: dict[int, list[int]] = {}
+    for i in range(len(cand)):
+        groups.setdefault(_find(i), []).append(i)
+
+    n = 0
+    for root in sorted(groups):
+        members = groups[root]
+        if len(members) < 2:
+            continue                                        # 孤点：指纹已保留在 edge，不编号
+        n += 1
+        cid = f"fronting-cluster-{n:04d}"
+        member_fps = [cand[i][2] for i in members]
+        shared = sorted(fp for fp in frozenset().union(*member_fps)
+                        if sum(fp in fps for fps in member_fps) >= 2)   # 只列真正共享（≥2 成员）的指纹
+        for i in members:
+            edge = cand[i][1]
+            edge["cluster_id"] = cid
+            edge["name"] = cid
+            edge["confidence"] = _EDGE_CONF["clustered"]
+            edge["cluster_shared"] = shared
+    return n
 
 
 #: case-close 富化源（multisource 被动查询，均 case_close_only）里承载 AS 组织名的子键，按优先级。
@@ -579,10 +673,12 @@ def attribution_from_enrichment(enrichment: dict[str, Any], ip: str = "") -> dic
     wc = wc if isinstance(wc, dict) else {}
     ip_rdap = enrichment.get("ip_rdap")
     ip_rdap = ip_rdap if isinstance(ip_rdap, dict) else {}
+    tls_e = enrichment.get("tls")
+    tls_e = tls_e if isinstance(tls_e, dict) else {}
     # ip-api org/isp 优先；均空时回落 case-close 在线源（FOFA/Hunter/Shodan…）的 as_org 补网络运营方。
     # 提前算并纳入早期返回判据——否则只有 fofa/hunter（无 asn/dns/wc/ip_rdap）时会在提取 as_org 前误返回 None。
     online_org = _online_as_org(enrichment)
-    if not asn_e and not dns_e and not wc and not ip_rdap and not online_org:
+    if not asn_e and not dns_e and not wc and not ip_rdap and not online_org and not tls_e:
         return None
     signals: dict[str, Any] = {
         "country": asn_e.get("country"),
@@ -601,11 +697,20 @@ def attribution_from_enrichment(enrichment: dict[str, Any], ip: str = "") -> dic
     headers = wc.get("response_headers") or wc.get("headers")
     if isinstance(headers, dict):
         signals["response_headers"] = headers
+    # ★前置指纹接线（B2-b）：TLS SPKI/JA4S（tls 子键）+ 默认页/favicon 哈希（webcheck）——高区分度服务端指纹，
+    # 认不出名的前置靠它跨端点聚 fronting-cluster。当前无生产富化器写入即为空、纯前向兼容（数据源见 C 阶段网络流引擎）。
+    for skey, sval in (("tls_spki", tls_e.get("spki_sha256") or tls_e.get("spki")),
+                       ("tls_ja4s", tls_e.get("ja4s") or tls_e.get("ja4s_hash")),
+                       ("favicon_mmh3", wc.get("favicon_mmh3") or wc.get("favicon")),
+                       ("body_sha256", wc.get("body_sha256") or wc.get("body_hash"))):
+        if _s(sval):
+            signals[skey] = _s(sval)
     # ★有效信号判据（不塞空壳）：子键非空但字段全 None（如 {"asn":{"asn":None}}）时，至少要有一个可解析
-    # ASN / 资源登记方 / 国家 / CNAME / 响应头，否则五层全 unknown 无归因价值 → 返回 None。
+    # ASN / 资源登记方 / 国家 / CNAME / 响应头 / 前置指纹，否则五层全 unknown 无归因价值 → 返回 None。
     asn_num, _ = _parse_asn(signals["asn"].get("asn"))
     if not (asn_num is not None or signals.get("rdap") or _s(signals.get("country"))
             or signals.get("cname_chain") or signals.get("response_headers")
+            or _fronting_fingerprint(signals)          # 高区分度前置指纹单独也算有效（可聚 fronting-cluster）
             or _s(signals["asn"].get("org"))):  # ★仅在线 as_org（无 asn 数值）也算有效——能把 org 归类定 origin_network
         return None
     return build_ip_attribution(ip, signals)

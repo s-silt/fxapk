@@ -150,3 +150,27 @@ def test_apply_stage_failures_exempts_additive_stages() -> None:
     state.stage_status = [{"name": "network_attribution", "status": "error", "error": "x"}]
     pipeline._apply_stage_failures(state)
     assert state.analysis_status == ANALYSIS_STATUS_COMPLETE  # 附加阶段崩不降级
+
+
+def test_stage_attribution_forms_fronting_cluster_across_endpoints() -> None:
+    """★B2-b 生产入口触发：_stage_attribution 跑完后，两个认不出名但共享同一 SPKI 前置指纹的 IP 端点
+    被跨端点聚成 fronting-cluster-0001；孤点保留证据但不编号。验证接线端到端生效（非仅单测）。"""
+    from apkscan.core.models import Endpoint
+
+    state = pipeline._PipelineState(
+        ctx=object(), config=AnalysisConfig(), platform="android", capabilities=set()
+    )
+    state.endpoints = [
+        Endpoint(value="1.1.1.1", kind="ip", enrichment={"tls": {"spki_sha256": "sharedspki"}}),
+        Endpoint(value="2.2.2.2", kind="ip", enrichment={"tls": {"spki_sha256": "sharedspki"}}),
+        Endpoint(value="3.3.3.3", kind="ip", enrichment={"tls": {"spki_sha256": "solo"}}),
+    ]
+    pipeline._stage_attribution(state)
+
+    def _edge(ep: object) -> dict:
+        return ep.enrichment["attribution"]["ips"][0]["edge_provider"]  # type: ignore[attr-defined]
+
+    e1, e2, e3 = (_edge(ep) for ep in state.endpoints)
+    assert e1["tier"] == "clustered" and "spki:sharedspki" in e1["matched_signals"]
+    assert e1["cluster_id"] == e2["cluster_id"] == "fronting-cluster-0001"
+    assert e3["cluster_id"] is None  # 孤点：指纹已保留，不编号
