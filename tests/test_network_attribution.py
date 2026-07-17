@@ -943,3 +943,55 @@ def test_role_feature_adapter_decoupled_from_dict_schema() -> None:
     assert blocked == {"domestic_network", "non_public_cdn"}  # 仅资源事实，无一行为信号
     assert not ({"direct_connection", "business_api", "login_endpoint",
                  "subsequent_overseas_connection", "redirect", "cookie_challenge"} & blocked)
+
+
+# --------------------------------------------------------------------------- #
+# 复审回归：eager 求值放大既有潜伏 bug 的爆炸半径（first_contact_ts 巨整数 → OverflowError）
+# 修：_runtime_first_contact_ts 受控 float()（越界拒 None）+ from_endpoint 运行时行为字段按 is_this_ip 门控
+# --------------------------------------------------------------------------- #
+def test_runtime_first_contact_ts_rejects_overflowing_int_without_raising() -> None:
+    """根因回归：first_contact_ts 为超 float 域巨整数（手编/投毒 report.json 的任意精度整数）→ None、绝不抛。
+    修前 math.isfinite(huge_int) 在内部转 float 时抛 OverflowError，令 helper 食言'绝不抛'。"""
+    from types import SimpleNamespace
+
+    from apkscan.attribution.assemble import _runtime_first_contact_ts
+
+    boom = SimpleNamespace(enrichment={"runtime": {"first_contact_ts": 10**400}})
+    assert _runtime_first_contact_ts(boom) is None  # 不抛
+    ok = SimpleNamespace(enrichment={"runtime": {"first_contact_ts": 1_700_000_000.0}})
+    assert _runtime_first_contact_ts(ok) == 1_700_000_000.0  # 正常 epoch 秒照常
+
+
+def test_giant_first_contact_ts_on_domain_endpoint_keeps_resource_signals() -> None:
+    """端到端回归（is_this_ip=False 分支）：域名端点带越界巨整数 first_contact_ts，绝不能让该端点整组信号被吞、
+    视图塌成 None。修前 from_endpoint 无条件 eager 调 _runtime_first_contact_ts → OverflowError → per-endpoint
+    except 吞掉 → public_cdn 等纯资源信号连累丢失。"""
+    ep = _ep("cdn.example.com", "domain", {
+        "dns": {"ips": ["104.16.0.1"]},
+        "runtime": {"first_contact_ts": 10**400},  # 越界垃圾时间戳
+        "attribution": {"ips": [{"ip": "104.16.0.1", "country": "US",
+                                 "origin_network": {"asn": 13335, "category": "cdn"},
+                                 "hosting_provider": {"category": "cdn"},
+                                 "edge_provider": {"name": "Cloudflare", "tier": "confirmed"}}]},
+    })
+    blob = _build(ep)
+    assert blob is not None  # 视图未塌
+    roles = _roles(blob, "104.16.0.1")
+    assert "public_cdn" in roles["domestic_relay_candidate"]["negative_signals"]  # 资源信号仍在
+
+
+def test_giant_first_contact_ts_on_own_ip_endpoint_no_raise() -> None:
+    """端到端回归（is_this_ip=True 分支，走根因 helper 修复）：本 IP 端点带越界巨整数 ts——不抛、SUBSEQUENT 不误发、
+    domestic_network 等其余信号照常。"""
+    ep = _ep("203.0.113.9", "ip", {
+        "asn": {"country": "CN"},
+        "runtime": {"first_contact_ts": 10**400},
+        "attribution": {"ips": [{"ip": "203.0.113.9", "country": "CN",
+                                 "origin_network": {"asn": 4134, "category": "telecom"},
+                                 "hosting_provider": {"category": "idc"}, "edge_provider": {"tier": None}}]},
+    }, evidences=[Evidence(source="runtime", location="pcap")])
+    blob = _build(ep)
+    assert blob is not None
+    relay = _roles(blob, "203.0.113.9").get("domestic_relay_candidate")
+    assert relay is not None and "domestic_network" in relay["matched_signals"]
+    assert "subsequent_overseas_connection" not in relay["matched_signals"]  # 越界 ts→None→不误发

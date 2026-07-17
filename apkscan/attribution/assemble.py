@@ -355,7 +355,9 @@ class NetworkObservations:
     只承载"该归属条目 IP 对应端点"的运行时行为事实；端点 ``enrichment`` / ``evidences`` 的读取全收敛进
     ``from_endpoint``，发射逻辑读 typed 字段。跨端点的 ``max_overseas_ts``（报告内任一境外 IP 最晚接触时刻，
     ``build_network_attribution`` 预扫得出）也归入此视图，作 SUBSEQUENT_OVERSEAS_CONNECTION 的时序上界。
-    纯读、无副作用，故各字段可 eager 解析（不改变旧惰性求值的行为）。
+    ★运行时**行为**字段仅在 ``is_this_ip`` 时才从端点读取（见 ``from_endpoint``）——与旧惰性求值逐位一致，
+    避免对无关端点 eager 求值放大潜在异常的爆炸半径；纯 dict/字符串读的字段（``is_intercept``/``asn_country``）
+    绝不抛，恒 eager。
     """
 
     endpoint_value: str
@@ -375,25 +377,40 @@ class NetworkObservations:
     ) -> NetworkObservations:
         # is_this_ip：端点须是 IP 端点、且其归一化 IP == 本归属条目 IP（与旧 endpoint_is_this_ip 逐位对齐）。
         matched = getattr(endpoint, "kind", None) == "ip" and _ip_entity(getattr(endpoint, "value", None))
+        is_this_ip = matched is not None and getattr(matched, "value", None) == ip.value
         enrichment = _as_dict(getattr(endpoint, "enrichment", None))
-        runtime = _as_dict(enrichment.get("runtime"))
-        edge_hosts = _as_dict(runtime.get("edge_hosts"))
+        # ★运行时**行为**字段（接触/时刻/业务登录路径/cloaking）仅在发射侧 is_this_ip 门内被消费——旧
+        #   _ip_signal_features 也只在该门内惰性求值。故这些字段仅当 is_this_ip 才读取：既与旧惰性求值逐位一致，
+        #   又不把这些读取（畸形 evidences / 超 float 域 first_contact_ts 等潜在异常）的爆炸半径扩到无关端点
+        #   （复审 CONFIRMED：无条件 eager 会让域名端点等的资源信号被 per-endpoint except 连累丢失）。
+        if is_this_ip:
+            runtime = _as_dict(enrichment.get("runtime"))
+            edge_hosts = _as_dict(runtime.get("edge_hosts"))
+            contact_observed = _runtime_contact_observed(endpoint)
+            first_contact_ts = _runtime_first_contact_ts(endpoint)
+            business_api_paths = frozenset(
+                p for p in _as_list(runtime.get("business_api_paths")) if isinstance(p, str) and p
+            )
+            login_paths = frozenset(
+                p for p in _as_list(runtime.get("login_paths")) if isinstance(p, str) and p
+            )
+            has_cloaking_host = any(
+                isinstance(h, dict) and h.get("r") and h.get("c") for h in edge_hosts.values()
+            )
+        else:
+            contact_observed = has_cloaking_host = False
+            first_contact_ts = None
+            business_api_paths = login_paths = frozenset()
         return cls(
             endpoint_value=str(getattr(endpoint, "value", "")),
-            is_this_ip=matched is not None and getattr(matched, "value", None) == ip.value,
-            is_intercept=is_known_intercept_ip(ip.value),
-            contact_observed=_runtime_contact_observed(endpoint),
-            asn_country=_as_dict(enrichment.get("asn")).get("country"),
-            first_contact_ts=_runtime_first_contact_ts(endpoint),
-            business_api_paths=frozenset(
-                p for p in _as_list(runtime.get("business_api_paths")) if isinstance(p, str) and p
-            ),
-            login_paths=frozenset(
-                p for p in _as_list(runtime.get("login_paths")) if isinstance(p, str) and p
-            ),
-            has_cloaking_host=any(
-                isinstance(h, dict) and h.get("r") and h.get("c") for h in edge_hosts.values()
-            ),
+            is_this_ip=is_this_ip,
+            is_intercept=is_known_intercept_ip(ip.value),  # 纯字符串判定、绝不抛
+            contact_observed=contact_observed,
+            asn_country=_as_dict(enrichment.get("asn")).get("country"),  # 纯 dict 读、绝不抛
+            first_contact_ts=first_contact_ts,
+            business_api_paths=business_api_paths,
+            login_paths=login_paths,
+            has_cloaking_host=has_cloaking_host,
             max_overseas_ts=max_overseas_ts,
         )
 
@@ -587,11 +604,21 @@ def _endpoint_asn_country(ep: Any) -> str | None:
 
 def _runtime_first_contact_ts(ep: Any) -> float | None:
     """端点被运行时最早接触的时刻（capture 写的 runtime.first_contact_ts）。缺/坏/非有限(NaN/±inf)/≤0/bool
-    → None（NaN 会让 max() 顺序敏感、inf 会让垃圾值恒产信号，故一并拒）。绝不抛。"""
+    → None（NaN 会让 max() 顺序敏感、inf 会让垃圾值恒产信号，故一并拒）。绝不抛。
+
+    ★超 float 域的巨整数（手编/被投毒 report.json 的任意精度整数字面量，如 10**400）按**越界拒为 None**：
+    先受控 float() 吞 OverflowError，再判 isfinite/≤0——否则 math.isfinite(huge_int) 会在内部转 float 时抛
+    OverflowError，令本 helper 食言"绝不抛"、把整端点信号连累丢失（复审 CONFIRMED）。"""
     ts = _as_dict(_as_dict(getattr(ep, "enrichment", None)).get("runtime")).get("first_contact_ts")
-    if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not math.isfinite(ts) or ts <= 0:
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
         return None
-    return float(ts)
+    try:
+        value = float(ts)  # 巨整数（>1024bit）超 float 域 → OverflowError，按越界拒
+    except (OverflowError, ValueError):
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return value
 
 
 def _overseas_contact_timestamps(endpoints: Sequence[Any]) -> list[float]:
