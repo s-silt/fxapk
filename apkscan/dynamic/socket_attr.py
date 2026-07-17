@@ -15,7 +15,7 @@ import json
 import logging
 import re
 import socket
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 logger = logging.getLogger(__name__)
 
@@ -39,17 +39,26 @@ class SocketEntry:
     uid: int
     process: str | None = None  # 由 ss -tunp 补（best-effort）
     pid: int | None = None
+    #: A2：该 socket 被观测到的时间区间（socket_timeline 周期采样各时刻聚合的 min/max；窗口末快照无
+    #: 时间 → None）。供 :func:`attribute_connections` 与 pcap 流的 [first_ts,last_ts] 做时间窗对齐——
+    #: floor pcap（设备侧 tcpdump）与 socket 时间线（设备侧 /proc 采样）同设备时钟，可直接区间比较。
+    first_ts: float | None = None
+    last_ts: float | None = None
 
 
 @dataclass
 class UidSockets:
-    """一份 uid_sockets.txt 的解析结果：目标 app UID + 全部 socket 记录 + 远端倒排索引。"""
+    """一份 uid_sockets.txt 的解析结果：目标 app UID + 全部 socket 记录 + 倒排索引（远端 / 本地端口连接）。"""
 
     target_uid: int | None = None
     package: str | None = None
     entries: list[SocketEntry] = field(default_factory=list)
     #: (remote_ip, remote_port) → 命中的 SocketEntry 列表（同远端可有多条连接）。
     by_remote: dict[tuple[str, int], list[SocketEntry]] = field(default_factory=dict)
+    #: A2：(proto_family, local_port, remote_ip, remote_port) → SocketEntry 列表。本地临时端口精确定位单条
+    #: 连接——同远端多 UID（CDN/网关）时用它把 pcap 流消歧到具体 UID（五元组归因核心）。proto 按 tcp/udp 族
+    #: 归一入键：tcp/udp 本地端口空间独立可同号，须分族避免 UDP 流撞 TCP socket 误确证。
+    by_conn: dict[tuple[str, int, str, int], list[SocketEntry]] = field(default_factory=dict)
 
     def owner_of(self, ip: str, port: int) -> SocketEntry | None:
         """按远端 (ip, port) 找拥有该连接的 socket 记录；优先返回目标 UID 的那条。无 → None。
@@ -130,6 +139,22 @@ def _parse_proc_line(line: str, proto: str) -> SocketEntry | None:
     )
 
 
+def _proto_family(proto: str) -> str:
+    """把 proto 归一到族：``udp``/``udp6`` → ``"udp"``，其余（tcp/tcp6）→ ``"tcp"``。
+
+    ★两点都是取证正确性刚需：①tcp↔tcp6（Android v4-mapped 主路径）须能互配，故不能按精确串匹配；
+    ②tcp 与 udp 的本地端口空间**独立、可合法同号**（HTTPS/TCP-443 与 QUIC/UDP-443 常同连一个 CDN IP），
+    故必须分族——否则一条 UDP 流会撞上同号 TCP socket 被误"confirmed"成目标（Fable 复审 P1-1）。
+    """
+    return "udp" if proto.lower().startswith("udp") else "tcp"
+
+
+def _index_entry(res: UidSockets, e: SocketEntry) -> None:
+    """把一条 SocketEntry 挂进两个倒排索引：by_remote（远端二元组）+ by_conn（proto族+本地端口+远端，A2 五元组消歧）。"""
+    res.by_remote.setdefault((e.remote_ip, e.remote_port), []).append(e)
+    res.by_conn.setdefault((_proto_family(e.proto), e.local_port, e.remote_ip, e.remote_port), []).append(e)
+
+
 #: ss -tunp 的进程标注：``users:(("chrome",pid=1234,fd=56))``。
 _SS_PROC_RE = re.compile(r'\(\("([^"]+)",pid=(\d+)')
 #: ss 行里的 addr:port——方括号整体捕获（容纳带 %scope 的链路本地 IPv6，如 [fe80::1%wlan0]:443）。
@@ -178,7 +203,7 @@ def parse_uid_sockets(text: str) -> UidSockets:
             e = _parse_proc_line(s, section)
             if e is not None:
                 res.entries.append(e)
-                res.by_remote.setdefault((e.remote_ip, e.remote_port), []).append(e)
+                _index_entry(res, e)
         elif section == "ss":
             ss_lines.append(s)
     for s in ss_lines:  # /proc 索引已就绪，回填进程名/pid
@@ -212,6 +237,9 @@ def parse_socket_timeline(text: str) -> UidSockets:
     res = UidSockets()
     if not isinstance(text, str):
         return res
+    #: 同一 socket（proto+本地+远端+uid）跨时刻的多次观测聚成一条 entry，first_ts/last_ts 取 min/max
+    #: 形成观测时间区间（A2 时间窗匹配所需）。多 state（syn_sent→established）也归并为一条。
+    agg: dict[tuple[str, str, int, str, int, int], SocketEntry] = {}
     for line in text.splitlines():
         try:
             obj = json.loads(line)
@@ -235,20 +263,43 @@ def parse_socket_timeline(text: str) -> UidSockets:
             continue
         process = obj.get("process")
         pid = obj.get("pid")
-        entry = SocketEntry(
-            proto=str(obj.get("proto") or "tcp"),
-            local_ip=local[0],
-            local_port=local[1],
-            remote_ip=remote[0],
-            remote_port=remote[1],
-            state=str(obj.get("state") or ""),
-            uid=uid,
-            process=process if isinstance(process, str) else None,
-            pid=pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
-        )
-        res.entries.append(entry)
-        res.by_remote.setdefault((entry.remote_ip, entry.remote_port), []).append(entry)
+        raw_ts = obj.get("ts")
+        ts = float(raw_ts) if isinstance(raw_ts, (int, float)) and not isinstance(raw_ts, bool) else None
+        proto = str(obj.get("proto") or "tcp")
+        key = (proto, local[0], local[1], remote[0], remote[1], uid)
+        entry = agg.get(key)
+        if entry is None:
+            entry = SocketEntry(
+                proto=proto,
+                local_ip=local[0],
+                local_port=local[1],
+                remote_ip=remote[0],
+                remote_port=remote[1],
+                state=str(obj.get("state") or ""),
+                uid=uid,
+                process=process if isinstance(process, str) else None,
+                pid=pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
+                first_ts=ts,
+                last_ts=ts,
+            )
+            agg[key] = entry
+            res.entries.append(entry)
+            _index_entry(res, entry)
+        else:  # 同一 socket 的后续观测：扩时间区间 + 补齐缺失的 process/pid（宁全勿缺）
+            _extend_ts(entry, ts, ts)
+            if entry.process is None and isinstance(process, str):
+                entry.process = process
+            if entry.pid is None and isinstance(pid, int) and not isinstance(pid, bool):
+                entry.pid = pid
     return res
+
+
+def _extend_ts(entry: SocketEntry, first_ts: float | None, last_ts: float | None) -> None:
+    """把一段观测时间区间并入 entry 的 [first_ts,last_ts]（None 侧忽略）。"""
+    if first_ts is not None:
+        entry.first_ts = first_ts if entry.first_ts is None else min(entry.first_ts, first_ts)
+    if last_ts is not None:
+        entry.last_ts = last_ts if entry.last_ts is None else max(entry.last_ts, last_ts)
 
 
 def _norm_ss_ip(ip: str) -> str:
@@ -294,7 +345,7 @@ def merge_uid_sockets(*tables: UidSockets) -> UidSockets:
     在时间线多时刻/快照里重复只记一次，避免 candidates 连接数虚高）。
     """
     out = UidSockets()
-    seen: set[tuple[str, str, int, str, int, int]] = set()
+    seen: dict[tuple[str, str, int, str, int, int], SocketEntry] = {}
     for t in tables:
         if out.target_uid is None and t.target_uid is not None:
             out.target_uid = t.target_uid
@@ -302,11 +353,18 @@ def merge_uid_sockets(*tables: UidSockets) -> UidSockets:
             out.package = t.package
         for e in t.entries:
             key = (e.proto, e.local_ip, e.local_port, e.remote_ip, e.remote_port, e.uid)
-            if key in seen:
-                continue
-            seen.add(key)
-            out.entries.append(e)
-            out.by_remote.setdefault((e.remote_ip, e.remote_port), []).append(e)
+            kept = seen.get(key)
+            if kept is None:
+                kept = replace(e)  # ★拷贝：下面会就地扩时间区间/补 process，绝不能改到输入表的 entry（保"纯函数"，Fable 复审 P2-2）
+                seen[key] = kept
+                out.entries.append(kept)
+                _index_entry(out, kept)
+            else:  # 同一 socket 跨源/跨时刻重复：并入时间区间 + 补缺失 process/pid，别让一源无时间戳丢掉另一源的
+                _extend_ts(kept, e.first_ts, e.last_ts)
+                if kept.process is None and e.process:
+                    kept.process = e.process
+                if kept.pid is None and e.pid is not None:
+                    kept.pid = e.pid
     return out
 
 
@@ -365,4 +423,152 @@ def attribute_endpoints(
                 "candidates": candidates,
                 "matched_by": ["remote_ip_port"],
             }
+    return out
+
+
+# ---------------------------------------------------------------------------
+# A2：五元组（本地临时端口）+ pcap 流时间窗归因，四级评分
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PcapConn:
+    """pcap 侧一条本机→远端连接的观测：本地临时端口 + 流时间区间（floor pcap 帧时钟 = 设备时钟）。"""
+
+    local_port: int
+    first_ts: float | None = None
+    last_ts: float | None = None
+
+
+@dataclass
+class PcapEndpoint:
+    """pcap 侧一个远端接入节点 + 它的全部本机连接（供 A2 五元组+时间窗归因；由 pcap_ingest 侧构造）。"""
+
+    remote_ip: str
+    remote_port: int
+    proto: str = "tcp"  # tcp / udp：按 _proto_family 归族参与匹配（tcp↔tcp6 互配、tcp/udp 分族防撞号误确证）
+    conns: list[PcapConn] = field(default_factory=list)
+
+
+#: 时间窗重叠默认容差（秒）：socket 采样时刻与 pcap 流首/末包时间的抖动 + 采样周期。
+_TIME_TOLERANCE = 2.0
+
+
+def _ts_overlap(entry: SocketEntry, conn: PcapConn, tol: float) -> bool:
+    """socket 观测区间与 pcap 流时间区间是否重叠（含容差）。任一侧无时间戳 → False（无法佐证，不否定）。"""
+    e0, e1 = entry.first_ts, entry.last_ts
+    c0, c1 = conn.first_ts, conn.last_ts
+    if e0 is None or e1 is None or c0 is None or c1 is None:
+        return False
+    return (e1 + tol) >= c0 and (c1 + tol) >= e0
+
+
+def attribute_connections(
+    endpoints: list[PcapEndpoint],
+    sockets: UidSockets,
+    *,
+    time_tolerance: float = _TIME_TOLERANCE,
+) -> dict[tuple[str, str, int], dict]:
+    """A2：用**五元组（本地临时端口）+ pcap 流时间窗**把 pcap 接入节点归因到 app/UID，四级评分。绝不抛。
+
+    承接 :func:`attribute_endpoints`（仅远端二元组）：pcap 流带本机源端口 + 时间区间（``PcapEndpoint.conns``），
+    与设备侧 socket 时间线（本地端口 + 观测时间区间）对齐，把同一远端多 UID（CDN/网关/公有云）的歧义
+    尽量消解到具体连接。四级 ``attribution``：
+
+    - ``confirmed``：某 pcap 连接的本地端口在 socket 表精确命中**单一** UID（time_window 命中再加分）——
+      该连接由五元组唯一定位到该 UID。
+    - ``probable``：远端仅一个 UID 连、但无本地端口精确确证（如仅窗口末快照、pcap 无连接明细）。
+    - ``ambiguous``：远端多 UID，本地端口/时间窗仍无法收敛到单一 winner——给带 ``score`` 的 candidates，不强选目标。
+    - ``unattributed``：pcap 有该接入节点，但 socket 表无任何对应记录——**显式记录**而非静默丢弃。
+
+    结果 dict 键 ``(proto_family, remote_ip, remote_port)``——含 proto 族，避免同 ip:port 的 tcp/udp 接入节点
+    互相覆盖（Fable 复审 P1-2）。``score`` 为 0–1 置信度（ambiguous 为 None，分数在各 candidate 上）。
+    """
+    out: dict[tuple[str, str, int], dict] = {}
+    tgt = sockets.target_uid
+    for ep in endpoints:
+        fam = _proto_family(ep.proto)
+        key = (fam, ep.remote_ip, ep.remote_port)
+        # 远端命中后按 proto 族过滤：tcp 接入节点只认 tcp/tcp6 socket、udp 只认 udp/udp6——tcp/udp 本地端口
+        # 空间独立可同号，不分族会把别的 app 的 UDP 流撞进目标 TCP socket 误确证（Fable 复审 P1-1）。
+        hits = [e for e in (sockets.by_remote.get((ep.remote_ip, ep.remote_port)) or []) if _proto_family(e.proto) == fam]
+        if not hits:
+            out[key] = {"attribution": "unattributed", "is_target_app": None, "score": 0.0, "matched_by": []}
+            continue
+        by_uid: dict[int, SocketEntry] = {}
+        for e in hits:
+            by_uid.setdefault(e.uid, e)
+        target_among = tgt is not None and tgt in by_uid
+        # ① 本地临时端口精确匹配：逐 pcap 连接用 by_conn（同 proto 族）定位 socket，按 UID 汇总时间窗命中。
+        precise: dict[int, dict] = {}
+        for conn in ep.conns:
+            for e in sockets.by_conn.get((fam, conn.local_port, ep.remote_ip, ep.remote_port), []):
+                rec = precise.setdefault(e.uid, {"entry": e, "time_hits": 0})
+                if _ts_overlap(e, conn, time_tolerance):
+                    rec["time_hits"] += 1
+        if len(precise) == 1:  # 本地端口唯一定位到单一 UID → confirmed
+            uid, rec = next(iter(precise.items()))
+            e = rec["entry"]
+            matched_by = ["remote_ip_port", "local_port"]
+            score = 0.7
+            if rec["time_hits"]:
+                matched_by.append("time_window")
+                score = 0.95
+            out[key] = {
+                "uid": uid,
+                "is_target_app": tgt is not None and uid == tgt,
+                "process": e.process,
+                "pid": e.pid,
+                "attribution": "confirmed",
+                "score": score,
+                # ★即便这条流确属某非目标 UID，也保留"目标 app 也连过该远端"的提示——否则下游按 is_target_app
+                #   分拣会把"目标也连的真后端"整段当背景噪音丢掉（Fable 复审 P2-1 取证假阴性）。
+                "target_uid_among_candidates": target_among,
+                "matched_by": matched_by,
+            }
+            continue
+        # ② 无本地端口命中 + 远端仅一个 UID → probable（远端唯一但未经本地端口确证）。
+        if not precise and len(by_uid) == 1:
+            uid, e = next(iter(by_uid.items()))
+            out[key] = {
+                "uid": uid,
+                "is_target_app": tgt is not None and uid == tgt,
+                "process": e.process,
+                "pid": e.pid,
+                "attribution": "probable",
+                "score": 0.5,
+                "matched_by": ["remote_ip_port"],
+            }
+            continue
+        # ③ 多 UID（含"多本地端口分属不同 UID"）→ ambiguous + 带 score 的 candidates，不强选目标。
+        total = len(hits)
+        candidates: list[dict] = []
+        for u, e in by_uid.items():
+            conns = sum(1 for h in hits if h.uid == u)
+            rec = precise.get(u)
+            score = 0.2 + 0.2 * (conns / total if total else 0.0)
+            if rec:
+                score += 0.4
+                if rec["time_hits"]:
+                    score += 0.2
+            candidates.append({
+                "uid": u,
+                "connections": conns,
+                "is_target_app": tgt is not None and u == tgt,
+                "process": e.process,
+                "pid": e.pid,
+                "score": round(min(score, 1.0), 2),
+            })
+        candidates.sort(key=lambda c: (-c["score"], -c["connections"], c["uid"]))
+        matched_by = ["remote_ip_port"]
+        if precise:
+            matched_by.append("local_port")
+        out[key] = {
+            "attribution": "ambiguous",
+            "is_target_app": None,
+            "target_uid_among_candidates": target_among,
+            "candidates": candidates,
+            "score": None,
+            "matched_by": matched_by,
+        }
     return out
