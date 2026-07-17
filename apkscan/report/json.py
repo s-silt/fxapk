@@ -31,10 +31,13 @@ def _to_jsonable(obj: Any) -> Any:
         return obj.value
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         d = {f.name: _to_jsonable(getattr(obj, f.name)) for f in dataclasses.fields(obj)}
-        # Lead 的派生标注（C2 / 实连）也落 JSON，便于下游程序化筛选「诈骗后端服务器」。
+        # Lead 的派生标注（C2 / 运行时出现 / 实连）也落 JSON，便于下游程序化筛选「诈骗后端服务器」。
+        # is_runtime_seen（宽口径·动态侧出现）与 is_runtime_contact（严·observed-contact 真接触）分档，
+        # 下游据此分层，勿把「出现在 runtime 报告里」当「实连/确认 C2」。
         if isinstance(obj, Lead):
             d["is_c2"] = obj.is_c2
             d["is_runtime_seen"] = obj.is_runtime_seen
+            d["is_runtime_contact"] = obj.is_runtime_contact
         # Evidence 注入确定性 evidence_id（仅 source|location，不含 snippet），让每条证据带
         # 可回溯锚点 —— 同条证据跨报告 / 跨文件 id 稳定（取证完整性背书层）。
         if isinstance(obj, Evidence):
