@@ -209,7 +209,7 @@ def test_dead_drop_secondary_c2_sorted_ahead(tmp_path):
 
 
 def test_dead_drop_secondary_runtime_seen_high_confidence(tmp_path):
-    """二级 C2 同时被运行时实连（已有 runtime 端点）→ 高可信（is_runtime_seen=True）。"""
+    """二级 C2 在 dead-drop 端点并入**前**就已被运行时实连（已有 runtime 端点）→ 高可信。"""
     runtime_seen = Endpoint(
         value="evil-c2.shop",
         kind="domain",
@@ -226,6 +226,71 @@ def test_dead_drop_secondary_runtime_seen_high_confidence(tmp_path):
     lead = next(l for l in report.leads if l.value == "evil-c2.shop")
     assert lead.confidence == Confidence.HIGH
     assert lead.is_runtime_seen is True  # source_refs 带 runtime
+
+
+# ---------------------------------------------------------------------------
+# 回归 bug a：内容推导值不得钉最强 observed-contact 源
+# ---------------------------------------------------------------------------
+
+
+def test_dead_drop_derived_endpoint_source_not_observed_contact(tmp_path):
+    """dead-drop 从回包**内容**推导的二级 C2 端点，其 evidence source 必须是 runtime-derived
+    （非 observed-contact allowlist），不得钉成最强的 source="runtime"。
+
+    否则手编 runtime_report.json 的 messages（明文 response_body 里塞任意域名）即可经此路径伪造
+    attribution 视作"运行时真接触了该 peer"的域名端点——与 assemble 的 observed-contact allowlist
+    注释"内容推导 body 值不授 observed-contact"自相矛盾。无修复即失败（旧钉 source="runtime"）。
+    """
+    from apkscan.attribution import assemble
+
+    rr = _write_runtime_report(
+        tmp_path,
+        [_config_msg("https://rest.apizza.net/api/webConfig",
+                     '{"backend":"https://evil-c2.shop/in"}')],
+    )
+    report = _make_report()
+    merge.resolve_dead_drop_c2(report, rr)
+
+    ep = next(e for e in report.endpoints if e.value == "evil-c2.shop")
+    sources = {ev.source for ev in ep.evidences}
+    # 派生值不得钉成 observed-contact allowlist 里的最强来源 "runtime"。
+    assert "runtime" not in sources
+    assert merge._RUNTIME_DERIVED_SOURCE in sources
+    # 与 assemble 的信任边界对齐：runtime-derived 明确不在 observed-contact allowlist。
+    assert merge._RUNTIME_DERIVED_SOURCE not in assemble._OBSERVED_CONTACT_SOURCES
+    # 但仍属 runtime*：is_runtime_seen / 报告"运行时观测"语义不变。
+    assert merge._RUNTIME_DERIVED_SOURCE.startswith("runtime")
+    lead = next(l for l in report.leads if l.value == "evil-c2.shop")
+    assert lead.is_runtime_seen is True
+
+
+# ---------------------------------------------------------------------------
+# 回归 bug b：仅内容推导的二级 C2 不得被时序 bug 恒升 HIGH
+# ---------------------------------------------------------------------------
+
+
+def test_dead_drop_secondary_derived_only_stays_medium(tmp_path):
+    """二级 C2 仅由回包内容推导浮出（并入前无独立的真实 runtime 端点）→ 不得升 HIGH。
+
+    旧实现在 dead-drop 派生端点**并入之后**才计算 runtime_seen，而派生端点自身 source 也
+    startswith("runtime") → ``domain in runtime_seen`` 恒真 → 每个二级 C2 恒升 HIGH。修复取并入
+    前快照 → 派生-only 保持 build_endpoint_leads 的 MEDIUM 基线。无修复即失败（旧恒判 HIGH）。
+    """
+    rr = _write_runtime_report(
+        tmp_path,
+        [_config_msg("https://rest.apizza.net/api/webConfig",
+                     '{"backend":"https://evil-c2.shop/in"}')],
+    )
+    report = _make_report()  # 并入前无任何预置 runtime 端点
+    merge.resolve_dead_drop_c2(report, rr)
+
+    lead = next(l for l in report.leads if l.value == "evil-c2.shop")
+    # 核心不变量（bug b）：仅推导浮出、并入前未被真实连过 → 绝不被时序 bug 抬到 HIGH。
+    #   与 build_endpoint_leads 基线解耦——这条直接锁"派生-only 不升 HIGH"，回归时必被抓。
+    assert lead.confidence != Confidence.HIGH
+    # 并保持 build_endpoint_leads 对无富化域名的 MEDIUM 基线（leads._domain_lead：subject 缺→MEDIUM）。
+    #   若他日基线变动，此行会安全地 false-fail 提醒，不会对 bug b 假过。
+    assert lead.confidence == Confidence.MEDIUM
 
 
 # ---------------------------------------------------------------------------
