@@ -279,7 +279,33 @@ def test_digest_degrades_on_malformed_network_attribution() -> None:
     digest = build_digest(malformed)
     assert digest["network_attribution"]["counts"]["eligible"] == 1
     assert digest["summary"]["attributed_role_candidates"] == 1
-    assert [c["role"] for c in digest["network_attribution"]["role_candidates"]] == ["edge_candidate"]
+    cand = digest["network_attribution"]["role_candidates"][0]
+    assert cand["role"] == "edge_candidate"
+    assert cand["kind"] is None  # ★codex P2-4：endpoint 无 kind → kind 降级为 None（defensive .get），不抛
+
+
+def test_digest_role_candidates_have_exact_keys_including_kind() -> None:
+    """★codex 复审 P2-4：role_candidates 每项键集须 == 设计 schema {endpoint,kind,ip,role,score,confidence}，
+    kind（domain/ip）如实透传，排序按 role_rank——此前实现漏 kind，与 spec 漂移且无测试锁定。"""
+    from apkscan.report.digest import _ROLE_RANK, build_digest
+
+    blob = {"endpoints": [
+        {"endpoint": "c2.fraud-gw.cn", "kind": "domain", "ips": [
+            {"ip": "1.2.3.4", "roles": [
+                {"role": "origin_candidate", "eligible": True, "score": 0.9, "confidence": "high"}]}]},
+        {"endpoint": "5.6.7.8", "kind": "ip", "ips": [
+            {"ip": "5.6.7.8", "roles": [
+                {"role": "edge_candidate", "eligible": True, "score": 0.5, "confidence": "medium"}]}]},
+    ]}
+    cands = build_digest({"meta": {"network_attribution": blob}, "leads": []})["network_attribution"]["role_candidates"]
+    assert len(cands) == 2
+    for c in cands:
+        assert set(c) == {"endpoint", "kind", "ip", "role", "score", "confidence"}  # exact key set
+    by_ep = {c["endpoint"]: c for c in cands}
+    assert by_ep["c2.fraud-gw.cn"]["kind"] == "domain"  # domain 端点 kind 透传
+    assert by_ep["5.6.7.8"]["kind"] == "ip"             # ip 端点 kind 透传
+    ranks = [_ROLE_RANK.get(str(c["role"]), 99) for c in cands]
+    assert ranks == sorted(ranks)  # 排序仍按 role_rank 优先
 
 
 def test_assembly_touches_no_network() -> None:
