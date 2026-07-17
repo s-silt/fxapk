@@ -34,6 +34,7 @@ from apkscan.attribution.roles import (
     _ROLE_DEFINITIONS,
 )
 from apkscan.attribution.scorer import EvidenceScorer
+from apkscan.core.models import OBSERVED_CONTACT_SOURCES
 from apkscan.network import NetworkEntity, NetworkEntityType
 from apkscan.network.fingerprints import (
     is_known_intercept_ip,
@@ -168,11 +169,14 @@ def _evidence(
 #: pcap parses the real TCP/UDP dst_ip; mitm records the actual upstream server IP it
 #: connected to. Every OTHER runtime sub-source derives the IP endpoint's value from an
 #: HTTP Host / :authority header (``runtime-tshark``), a decrypted request/body
-#: (``*-decrypted``), or a tool-initiated probe — none of which prove the app contacted
-#: THAT IP — so they license no observed-contact edge/signal. Allowlist, not denylist: a
-#: new content-derived source is excluded by default (the safe direction for the
-#: no-over-inference contract).
-_OBSERVED_CONTACT_SOURCES = frozenset({"runtime", "runtime-pcap"})
+#: (``*-decrypted``), a synthetic / non-runtime* fallback (``runtime-derived``), or a
+#: tool-initiated probe — none of which prove the app contacted THAT IP — so they license
+#: no observed-contact edge/signal. Allowlist, not denylist: a new content-derived source
+#: is excluded by default (the safe direction for the no-over-inference contract).
+#: Single source of truth lives in ``core.models.OBSERVED_CONTACT_SOURCES`` so the
+#: machine-facing role gate here and the case-officer-facing ``Lead.is_runtime_contact``
+#: "confirmed C2" badge stay one口径 (never drift apart).
+_OBSERVED_CONTACT_SOURCES = OBSERVED_CONTACT_SOURCES
 
 
 def _runtime_contact_observed(endpoint: Any) -> bool:

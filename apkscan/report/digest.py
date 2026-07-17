@@ -43,7 +43,10 @@ def _compact_lead(lead: dict[str, Any], redact: bool) -> dict[str, Any]:
         "advice": lead.get("advice"),
         "confidence": lead.get("confidence"),
         "is_c2": bool(lead.get("is_c2")),
+        # 宽口径「动态侧出现」；严一档的「observed-contact 真接触」另给 is_runtime_contact，
+        # 供下游筛选/研判分层——勿把仅 is_runtime_seen（含手编 runtime-derived）当「实连/确认 C2」。
         "is_runtime_seen": bool(lead.get("is_runtime_seen")),
+        "is_runtime_contact": bool(lead.get("is_runtime_contact")),
         "where_to_request": lead.get("where_to_request"),
         "evidence_to_obtain": lead.get("evidence_to_obtain") or [],
         "notes": lead.get("notes") or "",

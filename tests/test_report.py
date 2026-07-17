@@ -644,6 +644,78 @@ def test_lead_is_runtime_seen() -> None:
     assert static.is_runtime_seen is False
 
 
+def test_lead_is_runtime_contact_tiers_observed_vs_derived() -> None:
+    """observed-contact（runtime / runtime-pcap）才 is_runtime_contact；runtime-derived 等其余
+    runtime* 只算 is_runtime_seen（动态侧出现）、不算接触——办案人徽标据此分档，勿把「出现在
+    runtime 报告里」误当「实连/确认 C2」。"""
+    from apkscan.core.models import (
+        OBSERVED_CONTACT_SOURCES,
+        Evidence,
+        Lead,
+        LeadCategory,
+    )
+
+    def _lead(source: str) -> Lead:
+        return Lead(
+            category=LeadCategory.IP, value="203.0.113.9", advice="建议调证",
+            source_refs=[Evidence(source=source, location="flows", snippet="x")],
+        )
+
+    # observed-contact：真观测到连去该 peer IP → seen + contact 皆真
+    for good in OBSERVED_CONTACT_SOURCES:  # {"runtime", "runtime-pcap"}
+        lead = _lead(good)
+        assert lead.is_runtime_seen is True, good
+        assert lead.is_runtime_contact is True, good
+
+    # runtime* 但非 observed-contact（含手编 / 合成兜底 runtime-derived）→ 只 seen、不 contact
+    for derived in ("runtime-derived", "runtime-decrypted", "runtime-tshark", "runtime-probe"):
+        lead = _lead(derived)
+        assert lead.is_runtime_seen is True, derived
+        assert lead.is_runtime_contact is False, derived
+
+    # 纯静态 → 两者皆假
+    static = _lead("dex")
+    assert static.is_runtime_seen is False
+    assert static.is_runtime_contact is False
+
+
+def test_merge_runtime_into_lead_dict_upgrades_contact_on_observed_source() -> None:
+    """report.json 原地回灌合并升活体确认时，dict 派生标志须与 Lead 属性同口径：observed-contact
+    源（runtime-pcap）并入 → is_runtime_contact 升 True；仅派生源（runtime-derived）并入 → 只
+    is_runtime_seen、不 is_runtime_contact。
+
+    无修复即失败：旧实现只翻 is_runtime_seen，pcap 实抓确认的 C2 在 dict 上被降级为「未确认接触」，
+    与属性重算值矛盾、下游按新字段筛「确认接触」会漏掉真确认端点。"""
+    from apkscan.core.models import merge_runtime_into_lead_dict
+
+    def _static_lead_dict() -> dict:
+        # 序列化态静态 lead：is_runtime_seen / is_runtime_contact 均为 False。
+        return {
+            "category": "IP", "value": "203.0.113.9", "advice": "建议调证",
+            "is_runtime_seen": False, "is_runtime_contact": False,
+            "source_refs": [{"source": "dex", "location": "classes.dex", "snippet": "x"}],
+        }
+
+    # observed-contact（runtime-pcap = pcap 真 dst_ip）并入 → 同步升 is_runtime_contact
+    observed = _static_lead_dict()
+    merged = merge_runtime_into_lead_dict(
+        observed,
+        {"source_refs": [{"source": "runtime-pcap", "location": "pcap", "snippet": "y"}]},
+    )
+    assert merged is True
+    assert observed["is_runtime_seen"] is True
+    assert observed["is_runtime_contact"] is True  # ← 无修复即失败
+
+    # 仅派生源（runtime-derived，非 observed-contact）并入 → 只「运行时出现」，不升接触
+    derived = _static_lead_dict()
+    merge_runtime_into_lead_dict(
+        derived,
+        {"source_refs": [{"source": "runtime-derived", "location": "runtime_report.json", "snippet": "y"}]},
+    )
+    assert derived["is_runtime_seen"] is True
+    assert derived["is_runtime_contact"] is False
+
+
 def test_json_includes_c2_flags(sample_report: Report, tmp_path: Path) -> None:
     import json as _json
 
@@ -655,6 +727,7 @@ def test_json_includes_c2_flags(sample_report: Report, tmp_path: Path) -> None:
     for lead in data["leads"]:
         assert "is_c2" in lead
         assert "is_runtime_seen" in lead
+        assert "is_runtime_contact" in lead
 
 
 def test_html_marks_c2_servers(tmp_path: Path) -> None:
@@ -680,6 +753,100 @@ def test_html_marks_c2_servers(tmp_path: Path) -> None:
     text = out.read_text(encoding="utf-8")
     assert "C2" in text  # C2 标注出现
     assert "c2.fraud-gw.cn" in text
+
+
+def test_html_c2_badge_tiers_by_contact(tmp_path: Path) -> None:
+    """C2 徽标三档按观测强弱分层：observed-contact → 深红「实连」(badge-c2-live)；仅动态出现的
+    runtime-derived → 橙「运行时」(badge-c2-runtime)、**绝不实连**；纯静态 → 红「C2」(badge-c2)。
+
+    无修复即失败：旧模板把 runtime-derived 也当 is_runtime_seen 渲成 badge-c2-live——本测试对
+    ``runtime-derived`` 断言 `badge-c2-live` 不出现，即钉住「手编 / 合成来源不得升『实连』」。
+    断言用 ``class="badge badge-c2-*"`` span 标记（CSS 规则 `.badge-c2-*{}` / 注释里也含中文标签，
+    故不能只按可见文字判定）。"""
+    from apkscan.core.models import Evidence, Lead, LeadCategory, Report
+    from apkscan.report import html as report_html
+
+    def _render(source: str | None) -> str:
+        refs = [Evidence(source=source, location="flows", snippet="x")] if source else []
+        rpt = Report(
+            package_name="com.x", meta={},
+            leads=[Lead(category=LeadCategory.DOMAIN, value="c2.fraud.cn",
+                        advice="建议调证", source_refs=refs)],
+            endpoints=[], findings=[], analyzer_status=[],
+        )
+        out = tmp_path / f"{source or 'static'}.html"
+        report_html.render(rpt, str(out))
+        return out.read_text(encoding="utf-8")
+
+    # observed-contact（runtime-pcap）→ 实连
+    live = _render("runtime-pcap")
+    assert 'class="badge badge-c2-live"' in live
+
+    # 手编 / 合成 runtime-derived：只动态出现、未确认接触 → 运行时（中档），绝不实连
+    derived = _render("runtime-derived")
+    assert 'class="badge badge-c2-runtime"' in derived
+    assert 'class="badge badge-c2-live"' not in derived  # ← 无修复即失败
+
+    # 纯静态 → 普通 C2，既非实连也非运行时
+    static = _render(None)
+    assert 'class="badge badge-c2"' in static
+    assert 'class="badge badge-c2-live"' not in static
+    assert 'class="badge badge-c2-runtime"' not in static
+
+
+def test_runtime_report_derived_endpoint_not_confirmed_c2(tmp_path: Path) -> None:
+    """信任边界·端到端：手编 / 回灌 runtime_report.json（无 observed-contact 证据的 IP 端点）经
+    load_runtime_endpoints → merge_runtime_endpoints，其 Lead 只 is_runtime_seen、不 is_runtime_contact，
+    渲染为「C2·运行时」而非「C2·实连」。
+
+    无修复即失败：合成 / 非 runtime* 来源被钉成 ``runtime-derived``（仍 startswith runtime），旧徽标
+    据宽口径 is_runtime_seen 会把它误呈成「实连/确认 C2」——办案人面的活体确认信任边界漏点。"""
+    import json as _json
+
+    from apkscan.core.models import Report
+    from apkscan.dynamic.merge import load_runtime_endpoints, merge_runtime_endpoints
+    from apkscan.report import html as report_html
+
+    # 手编 runtime 报告：公网 IP 端点，evidence 用非 runtime* 来源（模拟无真实 observed-contact 证据）；
+    # merge 会把它钉成 runtime-derived（非 observed-contact），而非最强的 runtime。
+    runtime_report = {
+        "endpoints": [
+            {
+                "value": "203.0.113.77",
+                "kind": "ip",
+                "evidences": [
+                    {"source": "static", "location": "hand-edited", "snippet": "203.0.113.77"}
+                ],
+            }
+        ]
+    }
+    path = tmp_path / "runtime_report.json"
+    path.write_text(_json.dumps(runtime_report), encoding="utf-8")
+
+    endpoints = load_runtime_endpoints(str(path))
+    assert endpoints, "应重建出运行时端点"
+    assert all(
+        ev.source == "runtime-derived" for ep in endpoints for ev in ep.evidences
+    ), "非 runtime* 来源应被钉成 runtime-derived（非 observed-contact）"
+
+    report = Report(
+        package_name="com.x", meta={}, leads=[], endpoints=[],
+        findings=[], analyzer_status=[],
+    )
+    merge_runtime_endpoints(report, endpoints)
+
+    ip_leads = [ld for ld in report.leads if ld.value == "203.0.113.77"]
+    assert ip_leads, "应为运行时引入的公网 IP 生成 Lead"
+    lead = ip_leads[0]
+    assert lead.is_c2 is True  # 公网 IP + 建议调证
+    assert lead.is_runtime_seen is True  # 宽口径：动态侧出现
+    assert lead.is_runtime_contact is False  # 严口径：非 observed-contact
+
+    out = tmp_path / "r.html"
+    report_html.render(report, str(out))
+    text = out.read_text(encoding="utf-8")
+    assert 'class="badge badge-c2-runtime"' in text
+    assert 'class="badge badge-c2-live"' not in text  # ← 无修复即失败
 
 
 # ---------------------------------------------------------------------------
