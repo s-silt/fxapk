@@ -94,3 +94,59 @@ def test_apply_stage_failures_does_not_upgrade_failed() -> None:
     state.stage_status = [{"name": "enrich", "status": "error", "error": "x"}]  # 非 analyze 崩
     pipeline._apply_stage_failures(state)
     assert state.analysis_status == ANALYSIS_STATUS_FAILED  # 不被上调回 partial
+
+
+def _boom(_state: object) -> None:
+    raise RuntimeError("assemble boom")
+
+
+def test_network_attribution_failure_is_additive_no_degrade(fake_ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # ★codex 复审 P1-2：network_attribution 是纯被动附加视图（_ADDITIVE_STAGES）——其组装故障只记
+    #   stage_status 供审计、**不反哺 analysis_status**，附加视图崩不该把整份报告降 partial。
+    _stub_discovery(monkeypatch)
+    baseline = pipeline.run(fake_ctx, AnalysisConfig(online=False))  # 未 patch 的干净基线
+
+    monkeypatch.setattr(pipeline, "_stage_network_attribution", _boom)
+    report = pipeline.run(fake_ctx, AnalysisConfig(online=False))
+
+    ss = {s["name"]: s for s in report.meta["stage_status"]}
+    assert ss["network_attribution"]["status"] == "error"  # error 审计痕迹保留
+    assert "assemble boom" in ss["network_attribution"]["error"]
+    assert report.analysis_status == "complete"  # 附加视图崩不降级
+    assert report.completeness == baseline.completeness  # 分析器层完整度不受附加视图影响
+
+
+def test_network_attribution_failure_does_not_touch_strict_exit(fake_ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # ★codex 复审 P1-2：附加视图崩不得污染 --strict 退出码（analysis_status 仍 complete → 无错误退出码）。
+    from apkscan.cli import _strict_exit_code
+
+    _stub_discovery(monkeypatch)
+    monkeypatch.setattr(pipeline, "_stage_network_attribution", _boom)
+    report = pipeline.run(fake_ctx, AnalysisConfig(online=False))
+    assert _strict_exit_code(report) is None
+
+
+def test_additive_exemption_does_not_mask_real_stage_failure(fake_ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # ★豁免只对 _ADDITIVE_STAGES：非附加阶段（enrich）崩仍照常降 partial，即便 network_attribution 同时崩。
+    _stub_discovery(monkeypatch)
+
+    def _boom_enrich(_state: object) -> None:
+        raise RuntimeError("enrich boom")
+
+    monkeypatch.setattr(pipeline, "_stage_enrich", _boom_enrich)
+    monkeypatch.setattr(pipeline, "_stage_network_attribution", _boom)
+    report = pipeline.run(fake_ctx, AnalysisConfig(online=True))
+    assert report.analysis_status == "partial"  # enrich 崩（非附加）→ 仍降级，附加豁免不掩盖真故障
+
+
+def test_apply_stage_failures_exempts_additive_stages() -> None:
+    # 单元：stage_status 只有附加阶段 network_attribution error → analysis_status 不从 complete 降级。
+    from apkscan.core.models import ANALYSIS_STATUS_COMPLETE
+
+    state = pipeline._PipelineState(
+        ctx=object(), config=AnalysisConfig(), platform="android", capabilities=set()
+    )
+    state.analysis_status = ANALYSIS_STATUS_COMPLETE
+    state.stage_status = [{"name": "network_attribution", "status": "error", "error": "x"}]
+    pipeline._apply_stage_failures(state)
+    assert state.analysis_status == ANALYSIS_STATUS_COMPLETE  # 附加阶段崩不降级

@@ -197,7 +197,13 @@ class JadxAnalyzer(BaseAnalyzer):
                 data = data[:_MAX_FILE_BYTES]
             n_files += 1
             text = data.decode("utf-8", errors="ignore")
-            rel = str(java.relative_to(root))
+            # ★确定性：规范化相对路径为「正斜杠 + 全小写」再作 evidence.location。jadx 多线程反编译混淆
+            # APK 时，仅大小写不同的包/类名（v/V）在 NTFS 大小写不敏感盘上的落地大小写由线程竞争决定，
+            # 同一样本两次运行可产 sources\v\... 或 sources\V\...；location 直接吃磁盘大小写会让 evidence_id
+            # 跨运行漂移（破坏 core/integrity.evidence_id 的「稳定坐标」承诺 + 串行==并行逐字节一致不变式）。
+            # as_posix().lower() 使 location 跨运行、跨 OS 确定。代价：Linux 上仅大小写不同的孪生混淆类会
+            # 并到同一 location（去重合并一条）——但二者是同端点/同凭据值的孪生，且 Windows 本就已坍缩，取证无损。
+            rel = java.relative_to(root).as_posix().lower()
             try:
                 self._scan_text(text, rel, collector, secret_hits)
             except Exception:
