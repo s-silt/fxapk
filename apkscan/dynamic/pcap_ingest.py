@@ -95,6 +95,16 @@ STATE_UNKNOWN = "unknown"  # 其它（单向载荷、握手无数据等）
 
 
 @dataclass
+class ConnObs:
+    """A2：一条本机↔远端连接的观测——本机临时端口 + pcap 流时间区间。供 socket_attr 五元组+时间窗归因
+    把该远端消歧到具体 UID（floor pcap 帧时钟 = 设备时钟，可与设备侧 socket 观测区间直接比对）。"""
+
+    local_port: int
+    first_ts: float = 0.0
+    last_ts: float = 0.0
+
+
+@dataclass
 class RemoteEndpoint:
     """按公网远端 (ip:port/proto) 跨多条 5 元组聚合的接入节点——分级 established/syn_only/reset/unknown。"""
 
@@ -113,6 +123,9 @@ class RemoteEndpoint:
     state: str = STATE_UNKNOWN
     quic_versions: set[str] = field(default_factory=set)  # 该远端观测到的 QUIC 版本（h3 归因）
     alpn: set[str] = field(default_factory=set)  # ALPN 协商协议（h3/h2）——QUIC Initial 解出
+    #: A2：每本机端口一条连接观测（本地端口 + 时间窗），供五元组归因消歧到 UID。connection_count 仍是
+    #: 计数（可含同端口不同本机 IP），connections 按本地端口聚合两方向的时间区间。
+    connections: list[ConnObs] = field(default_factory=list)
 
     @property
     def has_payload(self) -> bool:
@@ -1194,6 +1207,8 @@ def remote_endpoints(summary: PcapSummary) -> list[RemoteEndpoint]:
     """
     agg: dict[tuple[str, str, int], RemoteEndpoint] = {}
     conn_src: dict[tuple[str, str, int], set[tuple[str, int]]] = {}
+    #: A2：key → {本机端口: [first_ts, last_ts]}——按本机临时端口聚合两方向 Flow 的时间区间。
+    conn_win: dict[tuple[str, str, int], dict[int, list[float]]] = {}
 
     def _touch(key: tuple[str, str, int], ip: str, port: int, proto: str) -> RemoteEndpoint:
         re = agg.get(key)
@@ -1201,6 +1216,16 @@ def remote_endpoints(summary: PcapSummary) -> list[RemoteEndpoint]:
             re = RemoteEndpoint(ip=ip, port=port, proto=proto)
             agg[key] = re
         return re
+
+    def _touch_win(key: tuple[str, str, int], local_port: int, first_ts: float, last_ts: float) -> None:
+        w = conn_win.setdefault(key, {}).get(local_port)
+        if w is None:
+            conn_win[key][local_port] = [first_ts, last_ts]
+            return
+        if first_ts and (w[0] == 0.0 or first_ts < w[0]):
+            w[0] = first_ts
+        if last_ts > w[1]:
+            w[1] = last_ts
 
     for f in summary.flows:
         dst_pub = _ip_public(f.dst_ip)
@@ -1227,6 +1252,7 @@ def remote_endpoints(summary: PcapSummary) -> list[RemoteEndpoint]:
             re.sni |= f.sni
             re.ja3 |= f.ja3
             conn_src.setdefault(key, set()).add((f.src_ip, f.src_port))
+            _touch_win(key, f.src_port, f.first_ts, f.last_ts)  # 出站：本机端口 = src_port
         else:  # 远端→本机：入站
             key = (f.proto, f.src_ip, f.src_port)
             re = _touch(key, f.src_ip, f.src_port, f.proto)
@@ -1238,6 +1264,7 @@ def remote_endpoints(summary: PcapSummary) -> list[RemoteEndpoint]:
             re.sni |= f.sni
             re.ja3 |= f.ja3
             conn_src.setdefault(key, set()).add((f.dst_ip, f.dst_port))  # 入站方向也计本机端口(P1)
+            _touch_win(key, f.dst_port, f.first_ts, f.last_ts)  # 入站：本机端口 = dst_port
         re.packets += f.packets
         re.quic_versions |= f.quic_versions  # QUIC 版本聚合到远端（两方向共用）
         re.alpn |= f.alpn  # ALPN 聚合到远端
@@ -1248,6 +1275,10 @@ def remote_endpoints(summary: PcapSummary) -> list[RemoteEndpoint]:
 
     for key, re in agg.items():
         re.connection_count = len(conn_src.get(key, set()))
+        re.connections = [
+            ConnObs(local_port=p, first_ts=w[0], last_ts=w[1])
+            for p, w in sorted(conn_win.get(key, {}).items())
+        ]
         re.state = _classify_state(re)
     return list(agg.values())
 
