@@ -40,6 +40,7 @@ class LeadCategory(Enum):
     CHANNEL = "CHANNEL"
     CONFIG_KEY = "CONFIG_KEY"  # 调用插件 / 配置键值（具体 key=value，如 GETUI_APPID）
     CRYPTO_RECIPE = "CRYPTO_RECIPE"  # 应用层加密配方（算法/key/iv 推导/信封字段，凭此可解全部加密流量）
+    REMOTE_CONFIG = "REMOTE_CONFIG"  # 远程配置对象（App 运行时拉取的 OSS/COS/CDN 配置文件，多为加密；解开可得动态域名/IP 池）
     RUNTIME_CREDENTIAL = "RUNTIME_CREDENTIAL"  # 运行时实测登录态/凭据（OkHttp 明文 token/手机号、SharedPrefs 落地凭据；含高敏个人信息）
     VICTIM_DATA = "VICTIM_DATA"  # 运行时落地库（SQLCipher/SQLite）导出的受害人物证（IM 账号/手机号/订单/商户号；含受害人高敏个人信息）
     REMOTE_CONTROL = "REMOTE_CONTROL"  # 无障碍远控劫持的目标银行/支付 app（映射机构主体，指明向哪些银行调被害人流水）
