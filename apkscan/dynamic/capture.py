@@ -2621,6 +2621,40 @@ def _parse_flows(flows_file: Path) -> list[Endpoint]:
     return endpoints
 
 
+# 运行时请求路径分类（供 network_attribution 的 origin_candidate：BUSINESS_API / LOGIN_ENDPOINT 信号）。
+#   只认业务/登录两类、别的路径不采；源自运行时 mitm 请求（守"静态不产 eligible"不变量：静态报告无此数据）。
+_RUNTIME_LOGIN_PATH_RE = re.compile(
+    r"/(?:login|logon|signin|sign-in|auth|oauth|sso|register)(?:[/?.]|$)", re.IGNORECASE)
+_RUNTIME_BIZ_PATH_RE = re.compile(
+    r"/(?:api|app|gateway|service|interface|mobile|client|user|member|account|order|pay|"
+    r"wallet|recharge|withdraw|trade|fund)(?:[/?.]|$)", re.IGNORECASE)
+_MAX_RUNTIME_PATHS = 8  # 每 IP 每类保留的路径样本上限（证据用，防无限累积）
+
+
+def _runtime_path_categories(url: object) -> tuple[str | None, str | None]:
+    """从运行时请求 URL 的**路径部分**分类：返回 (业务路径样本, 登录路径样本)，命中该类才非 None。绝不抛。
+    只看 path（不看 host/query 值，避免把域名/参数误当路径）。截断留证。"""
+    if not isinstance(url, str) or not url:
+        return None, None
+    try:
+        from urllib.parse import urlsplit
+        path = urlsplit(url).path or ""
+    except (ValueError, TypeError):
+        return None, None
+    if not path:
+        return None, None
+    biz = path[:80] if _RUNTIME_BIZ_PATH_RE.search(path) else None
+    login = path[:80] if _RUNTIME_LOGIN_PATH_RE.search(path) else None
+    return biz, login
+
+
+def _accum_runtime_path(runtime: dict, key: str, value: str) -> None:
+    """把观测到的业务/登录路径样本去重累积进 runtime[key]（有序、去重、截上限）。绝不抛。"""
+    lst = runtime.setdefault(key, [])
+    if isinstance(lst, list) and value not in lst and len(lst) < _MAX_RUNTIME_PATHS:
+        lst.append(value)
+
+
 def _collect_flow_endpoints(
     flow: object, location: str, collector: dict[str, Endpoint]
 ) -> None:
@@ -2632,6 +2666,7 @@ def _collect_flow_endpoints(
     """
     request = getattr(flow, "request", None)
     host: str | None = None
+    url: object = None
     if request is not None:
         url = getattr(request, "pretty_url", None) or getattr(request, "url", None)
         host = getattr(request, "pretty_host", None) or getattr(request, "host", None)
@@ -2655,13 +2690,25 @@ def _collect_flow_endpoints(
     peername = getattr(server_conn, "peername", None) if server_conn is not None else None
     if isinstance(peername, (tuple, list)) and len(peername) >= 1:
         ip = peername[0]
-        if isinstance(ip, str) and ip and ip not in collector:
-            note = f"{ip}（{host} 实连服务器 IP）" if isinstance(host, str) and host else f"{ip}（实连服务器 IP）"
-            collector[ip] = Endpoint(
-                value=ip,
-                kind="ip",
-                evidences=[Evidence(source="runtime", location=location, snippet=note)],
-            )
+        if isinstance(ip, str) and ip:
+            ep = collector.get(ip)
+            if ep is None:
+                note = f"{ip}（{host} 实连服务器 IP）" if isinstance(host, str) and host else f"{ip}（实连服务器 IP）"
+                ep = Endpoint(
+                    value=ip,
+                    kind="ip",
+                    evidences=[Evidence(source="runtime", location=location, snippet=note)],
+                )
+                collector[ip] = ep
+            # 该 IP 观测到的业务/登录路径类别（跨同 IP 多条流累积）——供 origin_candidate 的 BUSINESS_API/LOGIN_ENDPOINT。
+            biz, login = _runtime_path_categories(url)
+            if biz or login:
+                rt = ep.enrichment.setdefault("runtime", {})
+                if isinstance(rt, dict):
+                    if biz:
+                        _accum_runtime_path(rt, "business_api_paths", biz)
+                    if login:
+                        _accum_runtime_path(rt, "login_paths", login)
 
 
 # ---------------------------------------------------------------------------

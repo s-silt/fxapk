@@ -3329,3 +3329,30 @@ def test_ascii_staging_dir_ascii_temp_passthrough(monkeypatch, tmp_path) -> None
     monkeypatch.setattr(capture.tempfile, "mkdtemp", lambda prefix="": str(ascii_dir))
     monkeypatch.setattr(capture, "_short_path_if_ascii", _no_short)
     assert capture._ascii_staging_dir() == ascii_dir
+
+
+def test_runtime_path_categories_classifies_business_and_login() -> None:
+    """P0-2：运行时请求路径分类器——业务/登录段命中（含嵌套段），无关路径/前缀伪命中不采。"""
+    f = capture._runtime_path_categories
+    assert f("https://1.2.3.4/api/user/login") == ("/api/user/login", "/api/user/login")
+    assert f("https://x/login") == (None, "/login")
+    assert f("https://x/v1/pay/order") == ("/v1/pay/order", None)
+    assert f("https://x/static/img.png") == (None, None)   # 无关路径不采
+    assert f("https://x/myapi/x") == (None, None)           # /myapi 不误命中 api
+    assert f("https://x/loginhelper") == (None, None)       # /loginhelper 不误命中 login
+    assert f(None) == (None, None) and f("") == (None, None)
+
+
+def test_collect_flow_endpoints_accumulates_biz_login_paths_per_ip() -> None:
+    """P0-2：同一实连 IP 跨多条流累积业务/登录路径进 runtime enrichment（供 origin_candidate）。"""
+    def _flow(url, ip):
+        return SimpleNamespace(
+            request=SimpleNamespace(pretty_url=url, url=url, pretty_host="pay.x.com", host="pay.x.com", scheme="https"),
+            server_conn=SimpleNamespace(peername=(ip, 443)),
+        )
+    collector: dict = {}
+    capture._collect_flow_endpoints(_flow("https://pay.x.com/api/user/login", "1.2.3.4"), "loc", collector)
+    capture._collect_flow_endpoints(_flow("https://pay.x.com/v1/pay/order", "1.2.3.4"), "loc", collector)
+    rt = collector["1.2.3.4"].enrichment["runtime"]
+    assert "/api/user/login" in rt["login_paths"]
+    assert set(rt["business_api_paths"]) == {"/api/user/login", "/v1/pay/order"}  # 跨流累积去重
