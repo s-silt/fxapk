@@ -22,6 +22,8 @@ import math
 import re
 from typing import Any
 
+from apkscan.network.fingerprints import parse_asn as _parse_asn  # 共享 ASN 解析契约（与角色层同一份）
+
 logger = logging.getLogger(__name__)
 
 # 置信度档。
@@ -243,30 +245,6 @@ def _resource_holder(rdap: dict[str, Any] | None) -> dict[str, Any]:
 
 
 #: 合法可路由 ASN 范围。0（RFC 7607）与 4294967295=0xFFFFFFFF（RFC 7300 保留）均排除；落域外/畸形 → unknown。
-_ASN_MIN, _ASN_MAX = 1, 4294967294
-
-
-def _parse_asn(raw: Any) -> tuple[int | None, str | None]:
-    """★严格解析 ASN：仅接受纯整数或**完整匹配** 'AS?<digits>[ <org>]' 的字符串，并校验 32-bit 范围。
-
-    返回 ``(asn_num, org_tail)``；畸形（'-123 x' / '1.5 x' / 'garbage123' / 越界）→ ``(None, None)``，
-    绝不用 re.search 从中间抠数字冒充高置信归属。
-    """
-    if isinstance(raw, bool) or raw is None:  # bool 是 int 子类，须排除
-        return None, None
-    if isinstance(raw, int):
-        n, org_tail = raw, None
-    else:
-        m = re.match(r"^\s*(?:AS)?(\d+)(?:\s+(.*))?$", str(raw), re.IGNORECASE)
-        if not m or len(m.group(1)) > 10:  # 合法 ASN ≤ 4294967294（10 位）；超长数字串直接判非法，
-            return None, None             # ★避免 int() 触达 CPython 4300 位限制抛 ValueError（绝不抛）
-        n = int(m.group(1))
-        org_tail = (m.group(2) or "").strip() or None
-    if not (_ASN_MIN <= n <= _ASN_MAX):
-        return None, None
-    return n, org_tail
-
-
 def _origin_network(asn_info: dict[str, Any] | None) -> dict[str, Any]:
     """第 2 层：BGP Origin ASN + 组织。``asn`` 形如 'AS12345 Some Org' / 12345 / {asn, org}。畸形 ASN → unknown。"""
     if not isinstance(asn_info, dict):

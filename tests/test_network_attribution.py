@@ -60,6 +60,8 @@ def test_parse_asn_strict() -> None:
     assert _parse_asn(0) is None
     assert _parse_asn("ASN-bad") is None
     assert _parse_asn("Cloudflare 13335") is None  # never extract digits from the middle
+    assert _parse_asn(4_294_967_295) is None       # 越界(max+1)
+    assert _parse_asn("9" * 5000) is None          # ★超长数字串不抛（统一到共享 parse_asn 顺带修的潜在 bug）
 
 
 # --------------------------------------------------------------------------- #

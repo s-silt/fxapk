@@ -101,3 +101,19 @@ def test_stable_digest_is_canonical_namespaced_and_full_sha256() -> None:
 def test_stable_digest_rejects_noncanonical_json(payload: object) -> None:
     with pytest.raises(ValueError):
         stable_digest("fact", payload)
+
+
+def test_parse_asn_shared_contract() -> None:
+    """P1：共享 ASN 解析契约（core 五层 + assemble 角色共用同一份）——返回 (asn, org_tail)，严格全匹配、绝不抛。"""
+    from apkscan.network.fingerprints import parse_asn
+    assert parse_asn(13335) == (13335, None)
+    assert parse_asn("AS13335") == (13335, None)
+    assert parse_asn("AS13335 Cloudflare, Inc.") == (13335, "Cloudflare, Inc.")
+    assert parse_asn("13335 Org Ltd") == (13335, "Org Ltd")
+    assert parse_asn(True) == (None, None)          # bool 是 int 子类须排除
+    assert parse_asn(0) == (None, None)             # 越界(下)
+    assert parse_asn(4_294_967_295) == (None, None)  # 越界(上)
+    assert parse_asn("Cloudflare 13335") == (None, None)  # 绝不从中间抠数字
+    assert parse_asn("garbage") == (None, None)
+    assert parse_asn(None) == (None, None)
+    assert parse_asn("9" * 5000) == (None, None)    # ★超长数字串按位数拒、不触 int() 4300 位限制抛
