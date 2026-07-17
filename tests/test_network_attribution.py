@@ -150,7 +150,8 @@ def test_domain_icp_does_not_make_resolved_ips_domestic() -> None:
 def test_no_behavioral_signal_is_synthesized_statically() -> None:
     blob = _build(_cn_ip_endpoint())
     forbidden = {"redirect", "cookie_challenge", "content_difference", "shared_tls",
-                 "subsequent_overseas_connection", "historical_dns", "stable_ip", "many_shared_domains"}
+                 "subsequent_overseas_connection", "historical_dns", "stable_ip", "many_shared_domains",
+                 "business_api", "login_endpoint"}
     for role in _roles(blob, "203.0.113.9").values():
         assert not (set(role["matched_signals"]) & forbidden)
 
@@ -680,5 +681,31 @@ def test_intercept_node_never_origin_candidate() -> None:
     roles = _roles(_build(ep), "183.192.65.101")
     all_sig = {s for role in roles.values() for s in role["matched_signals"]}
     assert not ({"business_api", "login_endpoint", "direct_connection"} & all_sig)
+    r = roles.get("origin_candidate")
+    assert r is None or r["eligible"] is False
+
+
+def test_origin_candidate_not_eligible_when_edge_fingerprinted() -> None:
+    # ★复审 P1：IP 带 edge 指纹（possible/clustered=像前置/防红共享前端）→ 不产 origin 信号、不 eligible
+    #   （补 PUBLIC_CDN blocker 只认 confirmed/probable 的负证据缺口）。
+    for tier in ("possible", "clustered"):
+        roles = _roles(_build(_biz_ip("1.2.3.4", tier=tier)), "1.2.3.4")
+        all_sig = {s for role in roles.values() for s in role["matched_signals"]}
+        assert not ({"business_api", "login_endpoint"} & all_sig), tier
+        r = roles.get("origin_candidate")
+        assert r is None or r["eligible"] is False
+
+
+def test_origin_candidate_single_login_path_not_eligible() -> None:
+    # ★复审 P2：单条 /api/user/login 同为业务+登录路径 → 不授 BUSINESS_API（第二要件须来自不同事实）→ 不 eligible。
+    ep = _ep("1.2.3.4", "ip", {
+        "attribution": {"ips": [{"ip": "1.2.3.4", "country": "US",
+                                 "origin_network": {"asn": 64500, "category": "cloud"},
+                                 "hosting_provider": {"category": None}, "edge_provider": {"tier": None}}]},
+        "runtime": {"business_api_paths": ["/api/user/login"], "login_paths": ["/api/user/login"]},
+    }, evidences=[Evidence(source="runtime", location="x")])
+    roles = _roles(_build(ep), "1.2.3.4")
+    all_sig = {s for role in roles.values() for s in role["matched_signals"]}
+    assert "business_api" not in all_sig  # 无独立业务路径
     r = roles.get("origin_candidate")
     assert r is None or r["eligible"] is False

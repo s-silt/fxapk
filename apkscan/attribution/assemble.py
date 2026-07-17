@@ -394,12 +394,19 @@ def _ip_signal_features(
     # BUSINESS_API / LOGIN_ENDPOINT（运行时行为信号，P0-2）：该 IP 在运行时被观测服务业务/登录 API 路径
     #   （capture 从 mitm 请求路径 per-IP 累积）→ origin_candidate 证据（app 直连该 IP 打 /api、/login=像真后端
     #   源站）。须真运行时接触（守不变量：手注 path 字典无 runtime 证据不授信）+ 非拦截节点。
-    if endpoint_is_this_ip and runtime_signal_ok and _runtime_contact_observed(endpoint):
+    #   ★有任何 edge 指纹（clustered/possible/probable/confirmed=像前置/CDN/防红共享前端）→ 不当源站、不产
+    #   origin 信号：confirmed/probable 另有 PUBLIC_CDN 阻断，此处兜住 possible/clustered 的负证据缺口
+    #   （防红前置带高区分度指纹产 fronting-cluster=clustered，穿透它的业务/登录流量必落其上，绝不能升为源站）。
+    if endpoint_is_this_ip and runtime_signal_ok and not edge.get("tier") and _runtime_contact_observed(endpoint):
         rt = _as_dict(_as_dict(getattr(endpoint, "enrichment", None)).get("runtime"))
-        if _as_list(rt.get("business_api_paths")):
+        biz_paths = {p for p in _as_list(rt.get("business_api_paths")) if isinstance(p, str) and p}
+        login_paths = {p for p in _as_list(rt.get("login_paths")) if isinstance(p, str) and p}
+        # ★BUSINESS_API 须有**非登录类**业务路径——防单条 /api/user/login 同授两信号、把"BUSINESS_API+独立佐证"
+        #   塌缩成一条请求（origin 第二要件须来自不同事实）。
+        if biz_paths - login_paths:
             add(RoleSignal.BUSINESS_API, "runtime", True,
                 f"endpoints[{ip.value}].enrichment.runtime.business_api_paths")
-        if _as_list(rt.get("login_paths")):
+        if login_paths:
             add(RoleSignal.LOGIN_ENDPOINT, "runtime", True,
                 f"endpoints[{ip.value}].enrichment.runtime.login_paths")
 
