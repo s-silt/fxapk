@@ -499,3 +499,127 @@ def test_mitm_only_domain_yields_no_contacted_edge_intended_asymmetry() -> None:
     # the identically-observed ip endpoint DOES mint an APK->IP contacted edge
     ip_edges = _edges(_build(_runtime_ip("203.0.113.7", source="runtime")))
     assert ("contacted", "sha-test", "203.0.113.7") in ip_edges
+
+
+# --------------------------------------------------------------------------- #
+# P0: SUBSEQUENT_OVERSEAS_CONNECTION → domestic_relay_candidate 端到端资格
+# （运行时行为信号，保留"静态/被动不产 eligible"不变量：只在有真运行时时序时成立）
+# --------------------------------------------------------------------------- #
+def _rt_ip(value, country, ts, *, tier=None, hosting_cat=None):
+    origin_cat = "telecom" if country == "CN" else "cloud"
+    return _ep(value, "ip", {
+        "attribution": {"ips": [{"ip": value, "country": country,
+                                 "origin_network": {"asn": 4134, "category": origin_cat},
+                                 "hosting_provider": {"category": hosting_cat},
+                                 "edge_provider": {"tier": tier}}]},
+        "runtime": {"first_contact_ts": ts},
+    }, evidences=[Evidence(source="runtime", location="pcap")])
+
+
+def test_domestic_relay_eligible_from_subsequent_overseas_runtime() -> None:
+    # 境内 IP 被接触(t=100) → 随后接触境外 IP(t=200) = DIRECT+DOMESTIC+SUBSEQUENT_OVERSEAS → eligible。
+    blob = _build(_rt_ip("203.0.113.9", "CN", 100.0), _rt_ip("198.51.100.7", "US", 200.0))
+    r = _roles(blob, "203.0.113.9")["domestic_relay_candidate"]
+    assert r["eligible"] is True
+    assert set(r["matched_signals"]) >= {"direct_connection", "domestic_network", "subsequent_overseas_connection"}
+    # 证据可回溯：角色带证据 id，且 SUBSEQUENT_OVERSEAS 的 raw_reference（运行时时序对比）在报告图谱里可查。
+    assert r["evidence"]
+    assert "first_contact_ts" in json.dumps(blob)
+
+
+def test_domestic_relay_not_eligible_without_later_overseas() -> None:
+    # 境外接触在**前**(t=100 < 境内 t=200) → 非 subsequent → 不 eligible。
+    early = _build(_rt_ip("203.0.113.9", "CN", 200.0), _rt_ip("198.51.100.7", "US", 100.0))
+    assert _roles(early, "203.0.113.9")["domestic_relay_candidate"]["eligible"] is False
+    # 根本没有境外端点 → 不 eligible（保留"无真信号不成立"）。
+    solo = _build(_rt_ip("203.0.113.9", "CN", 100.0))
+    r = _roles(solo, "203.0.113.9")["domestic_relay_candidate"]
+    assert r["eligible"] is False and "subsequent_overseas_connection" not in r["matched_signals"]
+
+
+def test_domestic_relay_blocked_by_public_cdn_even_with_subsequent_overseas() -> None:
+    # 境内 IP 命中 confirmed edge → PUBLIC_CDN blocker：即便有 SUBSEQUENT_OVERSEAS 也被阻断。
+    blob = _build(_rt_ip("203.0.113.9", "CN", 100.0, tier="confirmed"), _rt_ip("198.51.100.7", "US", 200.0))
+    r = _roles(blob, "203.0.113.9")["domestic_relay_candidate"]
+    assert r["eligible"] is False and "public_cdn" in r["negative_signals"]
+
+
+# --------------------------------------------------------------------------- #
+# P0 复审修复回归（Fable 对抗式复审 CONFIRMED 项）
+# --------------------------------------------------------------------------- #
+def _blob_json(eps):
+    return json.dumps(build_network_attribution(list(eps), artifact_id="s", phase="analyze"), sort_keys=True)
+
+
+def _ip_ep(value, entry_country, ts, *, asn_country=None, source="runtime", tier=None):
+    enr = {
+        "attribution": {"ips": [{"ip": value, "country": entry_country,
+                                 "origin_network": {"asn": 4134, "category": "telecom"},
+                                 "hosting_provider": {"category": None}, "edge_provider": {"tier": tier}}]},
+        "runtime": {"first_contact_ts": ts},
+    }
+    if asn_country is not None:
+        enr["asn"] = {"country": asn_country}
+    return _ep(value, "ip", enr, evidences=[Evidence(source=source, location="x")])
+
+
+def test_no_subsequent_from_country_conflict_entry_vs_asn() -> None:
+    # ★口径互斥：entry country=US/HK 但 asn.country=CN（电信出海段）——两侧都算境内-capable，不得进境外池自我授信。
+    e1 = _ip_ep("203.0.113.9", "US", 100.0, asn_country="CN")
+    e2 = _ip_ep("198.51.100.7", "HK", 200.0, asn_country="CN")
+    r = _roles(_build(e1, e2), "203.0.113.9")["domestic_relay_candidate"]
+    assert r["eligible"] is False and "subsequent_overseas_connection" not in r["matched_signals"]
+
+
+def test_intercept_node_never_relay_candidate_even_with_subsequent_overseas() -> None:
+    # ★已知反诈拦截节点不产运行时行为信号（与 _bridge_endpoint 排除一致；办案约定：拦截节点勿入线索）。
+    r = _roles(_build(_rt_ip("183.192.65.101", "CN", 100.0), _rt_ip("198.51.100.7", "US", 200.0)),
+               "183.192.65.101")["domestic_relay_candidate"]
+    assert r["eligible"] is False
+    assert not ({"direct_connection", "subsequent_overseas_connection"} & set(r["matched_signals"]))
+
+
+def test_nan_inf_first_contact_ts_rejected_and_order_stable() -> None:
+    dom, ok = _rt_ip("203.0.113.9", "CN", 100.0), _rt_ip("198.51.100.7", "US", 200.0)
+    nan = _rt_ip("198.51.100.8", "US", float("nan"))
+    assert _blob_json([dom, nan, ok]) == _blob_json([dom, ok, nan])  # NaN 不引入顺序敏感
+    assert _roles(build_network_attribution([dom, nan, ok], artifact_id="s", phase="analyze"),
+                  "203.0.113.9")["domestic_relay_candidate"]["eligible"] is True  # 有效端点(200>100)仍成立
+    # +inf 垃圾值不铸信号
+    assert _roles(_build(_rt_ip("203.0.113.9", "CN", 100.0), _rt_ip("198.51.100.7", "US", float("inf"))),
+                  "203.0.113.9")["domestic_relay_candidate"]["eligible"] is False
+
+
+def test_tie_timestamp_not_subsequent_strict_gt() -> None:
+    # 同时刻 co-occurrence ≠ subsequent（严格 >）。
+    r = _roles(_build(_rt_ip("203.0.113.9", "CN", 100.0), _rt_ip("198.51.100.7", "US", 100.0)),
+               "203.0.113.9")["domestic_relay_candidate"]
+    assert r["eligible"] is False and "subsequent_overseas_connection" not in r["matched_signals"]
+
+
+def test_subsequent_overseas_permutation_deterministic() -> None:
+    eps = [_rt_ip("203.0.113.9", "CN", 100.0), _rt_ip("198.51.100.7", "US", 200.0), _rt_ip("198.51.100.8", "US", 150.0)]
+    assert _blob_json(eps) == _blob_json(list(reversed(eps)))
+
+
+def test_ts_dict_without_runtime_evidence_licenses_nothing() -> None:
+    # 境内带 ts 字典但无 runtime 证据（合并/手编） + 真运行时境外 → 不产 subsequent。
+    r1 = _roles(_build(_ip_ep("203.0.113.9", "CN", 100.0, source="static"), _rt_ip("198.51.100.7", "US", 200.0)),
+                "203.0.113.9")["domestic_relay_candidate"]
+    assert r1["eligible"] is False and "subsequent_overseas_connection" not in r1["matched_signals"]
+    # 境外带 ts 字典但无 runtime 证据 → 不入境外池。
+    r2 = _roles(_build(_rt_ip("203.0.113.9", "CN", 100.0), _ip_ep("198.51.100.7", "US", 200.0, source="static")),
+                "203.0.113.9")["domestic_relay_candidate"]
+    assert r2["eligible"] is False and "subsequent_overseas_connection" not in r2["matched_signals"]
+
+
+def test_truthy_nonstring_country_not_treated_overseas() -> None:
+    # 坏 country（True/dict/list）不得当境外把境内 IP 授信成 eligible。
+    bad = _ep("198.51.100.7", "ip", {
+        "attribution": {"ips": [{"ip": "198.51.100.7", "country": True,
+                                 "origin_network": {"asn": 64500, "category": "cloud"},
+                                 "hosting_provider": {"category": None}, "edge_provider": {"tier": None}}]},
+        "runtime": {"first_contact_ts": 200.0},
+    }, evidences=[Evidence(source="runtime", location="pcap")])
+    r = _roles(_build(_rt_ip("203.0.113.9", "CN", 100.0), bad), "203.0.113.9")["domestic_relay_candidate"]
+    assert r["eligible"] is False and "subsequent_overseas_connection" not in r["matched_signals"]
