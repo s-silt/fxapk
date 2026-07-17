@@ -182,7 +182,9 @@ def _build_capture_quality(
                 intercept_observed = True
                 continue
             if bool(getattr(remote, "has_payload", False)) or bool(getattr(remote, "sni", set())):
-                business_keys.add(f"{remote.ip}:{remote.port}")
+                # A2：键含 proto 族，对齐 pcap_app_attr 的 "proto/ip:port"——否则 target_count 恒 0
+                #   （落盘 runtime_report.json 的 pre-merge quality 块误判 partial；Fable 复审 LOW-MED）。
+                business_keys.add(f"{remote.proto}/{remote.ip}:{remote.port}")
 
     target_count = sum(
         1
@@ -232,12 +234,12 @@ def _annotate_runtime_endpoints(
         if not matched:
             continue
 
-        remote_keys = sorted({f"{remote.ip}:{remote.port}" for remote in matched})
-        attributed = [
-            pcap_app_attr[key]
-            for key in remote_keys
-            if isinstance(pcap_app_attr.get(key), dict)
-        ]
+        # A2：查归因用含 proto 族的键（"proto/ip:port"，对齐 pcap_app_attribution，避免 tcp/udp 同 ip:port
+        #   覆盖）；但写回 remote_endpoints 仍用 "ip:port"——下游 assemble 的 tls_sni/network_flow 边（域名→落地
+        #   IP，最强运行时真值信号）按 "ip:port" 解析该列表，不能改其契约（Fable 复审 HIGH：否则真值边被静默丢）。
+        attr_keys = [f"{remote.proto}/{remote.ip}:{remote.port}" for remote in matched]
+        attributed = [pcap_app_attr[k] for k in attr_keys if isinstance(pcap_app_attr.get(k), dict)]
+        endpoint_keys = sorted({f"{remote.ip}:{remote.port}" for remote in matched})
         runtime = endpoint.enrichment.setdefault("runtime", {})
         if not isinstance(runtime, dict):
             runtime = {}
@@ -246,7 +248,7 @@ def _annotate_runtime_endpoints(
             {
                 "has_payload": any(bool(getattr(remote, "has_payload", False)) for remote in matched),
                 "target_attributed": any(item.get("is_target_app") is True for item in attributed),
-                "remote_endpoints": remote_keys,
+                "remote_endpoints": endpoint_keys,
                 "sni": sorted(
                     {
                         str(sni)
@@ -261,6 +263,10 @@ def _annotate_runtime_endpoints(
             runtime["attribution"] = sorted(
                 {str(item.get("attribution", "unknown")) for item in attributed}
             )
+            # A2：某流 confirmed 到非目标 UID 但"目标 app 也连过该远端"时，透出提示——避免这条目标线索
+            #   在 target_attributed（仅按 is_target_app）里被当背景噪音整段丢掉（供人工/报告复核）。
+            if any(item.get("target_uid_among_candidates") is True for item in attributed):
+                runtime["target_among_candidates"] = True
 
 
 def run(
@@ -904,17 +910,33 @@ def _capture(
             table = parsed[0] if len(parsed) == 1 else socket_attr.merge_uid_sockets(*parsed)
             attribution_source = "+".join(names)
             res = pcap_ingest.remote_endpoints(floor_summary)  # 复用已解析的 summary，不重复解析
-            attr = socket_attr.attribute_endpoints([(r.ip, r.port) for r in res], table)
-            pcap_app_attr = {f"{ip}:{port}": v for (ip, port), v in attr.items()}
+            # A2：把每个远端接入节点连同其本机连接明细（本地端口 + pcap 流时间窗）喂给五元组归因引擎——
+            #   同远端多 UID（CDN/网关）时用本地端口/时间窗消歧到 confirmed/probable，四级评分。键含 proto 族。
+            eps = [
+                socket_attr.PcapEndpoint(
+                    remote_ip=r.ip,
+                    remote_port=r.port,
+                    proto=r.proto,
+                    conns=[socket_attr.PcapConn(c.local_port, c.first_ts, c.last_ts) for c in r.connections],
+                )
+                for r in res
+            ]
+            attr = socket_attr.attribute_connections(eps, table)
+            pcap_app_attr = {f"{proto}/{ip}:{port}": v for (proto, ip, port), v in attr.items()}
             if pcap_app_attr:
-                # ★codex 复审 P1：三类分开计数——歧义(is_target_app=None)不能被当 falsy 归入"背景噪音"。
-                n_target = sum(1 for v in pcap_app_attr.values() if v.get("is_target_app") is True)
-                n_ambiguous = sum(1 for v in pcap_app_attr.values() if v.get("attribution") == "ambiguous")
-                n_other = len(pcap_app_attr) - n_target - n_ambiguous
+                # ★A2 四级计数：confirmed/probable/ambiguous/unattributed；is_target_app=None（歧义/未归因）
+                #   不能被当 falsy 归入"背景噪音"（承 codex 复审 P1 三类不塌缩纪律）。
+                vals = list(pcap_app_attr.values())
+                n_target = sum(1 for v in vals if v.get("is_target_app") is True)
+
+                def _n(kind: str) -> int:
+                    return sum(1 for v in vals if v.get("attribution") == kind)
+
                 playbook.append(
-                    f"UID 归因：floor pcap 接入节点绑到 app——{len(pcap_app_attr)} 个已归因："
-                    f"{n_target} 属目标 app（uid={table.target_uid}）、{n_other} 属其它 UID（背景噪音）、"
-                    f"{n_ambiguous} 歧义（同远端多进程、未强选目标，见 candidates）（来源 {attribution_source}）"
+                    f"UID 归因（五元组+时间窗）：floor pcap 接入节点绑到 app——{len(vals)} 个已归因："
+                    f"confirmed {_n('confirmed')} / probable {_n('probable')} / ambiguous {_n('ambiguous')} / "
+                    f"unattributed {_n('unattributed')}；其中 {n_target} 属目标 app（uid={table.target_uid}）"
+                    f"（来源 {attribution_source}）"
                 )
         except Exception:
             logger.exception("[capture] floor：pcap↔app UID 归因失败（忽略，不影响主流程）")
