@@ -107,8 +107,12 @@ class Lead:
     def is_runtime_seen(self) -> bool:
         """是否在**真机抓包**中被实际观测到（运行时真连了它 / 带回了加密信封）。
 
-        来源 source 以 ``runtime`` 开头（runtime / runtime-decrypted）= 动态确认，比纯静态
-        硬编码可信度更高——C2 若 ``is_runtime_seen`` 即「**已抓到通信的确认 C2**」。
+        来源 source 以 ``runtime`` 开头（runtime / runtime-pcap / runtime-decrypted / …）= 动态
+        侧出现，比纯静态硬编码可信度更高。**注意**子来源强弱有别：``runtime`` / ``runtime-pcap``
+        才是「真观测到连去该 peer IP」的 observed-contact（见 ``attribution.assemble
+        ._OBSERVED_CONTACT_SOURCES``）；``runtime-derived``（合成 / 非 runtime* 来源的兜底，
+        见 ``dynamic.merge._RUNTIME_DERIVED_SOURCE``）只表示「该值出现在 runtime 报告里」，
+        不证明真接触。故本属性为「动态侧出现」的宽口径信号，不等同于 observed-contact 级确认。
         """
         return any(str(getattr(ev, "source", "")).startswith("runtime") for ev in self.source_refs)
 
