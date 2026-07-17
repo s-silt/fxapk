@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 
 from apkscan.analyzers.classify import classify_app
+from apkscan.config.chain import build_control_chains
 from apkscan.config.decode import decode_config_blob
 from apkscan.config.fetch import fetch_config_object
 from apkscan.core import infra
@@ -457,6 +458,21 @@ def _stage_network_attribution(state: _PipelineState) -> None:
         state.meta["network_attribution"] = blob
 
 
+def _stage_control_chain(state: _PipelineState) -> None:
+    """附加视图：把 config-chain 各段拼成**单一控制链对象**写 meta["control_chains"]——远程配置对象 →
+    加密配方 → 解码 → 后端域名/IP + 五层归因（→ IDC）。纯从报告已有数据（remote_config_artifacts +
+    端点 attribution + crypto_recipe）组装，不改 leads / closure / service_operator。无下载解码产物（passive
+    /无候选/未授权下载）则省略该键——候选仍在 REMOTE_CONFIG 线索里。在 attribution 之后跑（后端归因已就绪）。
+    """
+    chains = build_control_chains(
+        state.meta.get("remote_config_artifacts"),
+        state.meta.get("crypto_recipe"),
+        state.endpoints,
+    )
+    if chains:
+        state.meta["control_chains"] = chains
+
+
 def _assemble_report(state: _PipelineState) -> Report:
     """据累积态组装 Report（字段一一对应）。"""
     return Report(
@@ -499,7 +515,7 @@ def _run_stage(state: _PipelineState, name: str, fn: "Callable[[_PipelineState],
 # PR9 不 create/mutate 任何 Lead/advice/exit code），其组装故障不该污染 --strict 门禁——与 closure.py 里
 # close 阶段同一视图已自带 guard、不下沉 case closure 的既定语义对齐（只有 analyze 侧接线漏了这层豁免）。
 # 故障仍完整记录于 meta.stage_status（保留 error 审计痕迹），仅切断降级传导。
-_ADDITIVE_STAGES: frozenset[str] = frozenset({"network_attribution"})
+_ADDITIVE_STAGES: frozenset[str] = frozenset({"network_attribution", "control_chain"})
 
 
 def _apply_stage_failures(state: _PipelineState) -> None:
@@ -541,6 +557,7 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     _run_stage(state, "overseas_targets", _stage_overseas_targets)  # 境外目标结构化段
     _run_stage(state, "credibility", _stage_credibility)           # 完整度 / 工具版本 / 规则摘要
     _run_stage(state, "network_attribution", _stage_network_attribution)  # 附加：基础设施归因图谱 + 角色候选（被动）
+    _run_stage(state, "control_chain", _stage_control_chain)        # 附加：config-chain 控制链对象（组装现有数据）
     _apply_stage_failures(state)          # 阶段级故障反馈 analysis_status
     state.meta["stage_status"] = state.stage_status
     report = _assemble_report(state)

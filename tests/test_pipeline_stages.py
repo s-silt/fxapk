@@ -20,6 +20,7 @@ _EXPECTED_STAGES = [
     "overseas_targets",
     "credibility",
     "network_attribution",
+    "control_chain",
 ]
 
 
@@ -33,7 +34,7 @@ def test_stage_status_recorded_in_order_happy_path(fake_ctx, monkeypatch) -> Non
     _stub_discovery(monkeypatch)
     report = pipeline.run(fake_ctx, AnalysisConfig(online=False))
     ss = report.meta["stage_status"]
-    assert [s["name"] for s in ss] == _EXPECTED_STAGES  # 9 核心阶段，固定顺序
+    assert [s["name"] for s in ss] == _EXPECTED_STAGES  # 10 核心阶段，固定顺序
     assert all(s["status"] == "ran" for s in ss)
     assert all("error" not in s for s in ss)  # 无故障时不带 error 键
     assert report.analysis_status == "complete"
