@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import re
 import urllib.parse
 
 __all__ = [
@@ -13,6 +14,7 @@ __all__ = [
     "normalize_authority",
     "normalize_domain",
     "normalize_ip",
+    "parse_asn",
     "sanitize_absolute_url",
     "sanitize_http_path",
     "stable_digest",
@@ -53,6 +55,28 @@ def _require_string(name: str, value: object) -> str:
     if not value:
         raise ValueError(f"{name} must not be empty")
     return value
+
+
+_ASN_MIN, _ASN_MAX = 1, 4_294_967_294  # 合法 32-bit ASN 范围（RFC 6996/7300 私有段不在此另判）
+
+
+def parse_asn(value: object) -> tuple[int | None, str | None]:
+    """★共享数据契约：严格解析 ASN——仅接受纯整数或**完整匹配** ``AS?<digits>[ <org>]`` 的字符串，校验 32-bit 范围。
+
+    返回 ``(asn_num, org_tail)``；畸形（``-123 x`` / ``1.5 x`` / ``garbage123`` / 越界 / 超长数字串）→ ``(None, None)``。
+    绝不用 ``re.search`` 从中间抠数字冒充高置信归属；★绝不抛（超长数字串按位数在 ``int()`` 前拒，避开 CPython
+    4300 位限制）。core/attribution（五层）与 attribution/assemble（角色）共用此一份，消除两处口径漂移。"""
+    if isinstance(value, bool) or value is None:  # bool 是 int 子类，须排除
+        return None, None
+    if isinstance(value, int):
+        n, org_tail = value, None
+    else:
+        m = re.match(r"^\s*(?:AS)?(\d+)(?:\s+(.*))?$", str(value), re.IGNORECASE)
+        if not m or len(m.group(1)) > 10:  # 合法 ASN ≤ 10 位；超长直接拒，避免 int() 触达 4300 位限制抛
+            return None, None
+        n = int(m.group(1))
+        org_tail = (m.group(2) or "").strip() or None
+    return (n, org_tail) if _ASN_MIN <= n <= _ASN_MAX else (None, None)
 
 
 def normalize_ip(value: str) -> str:
