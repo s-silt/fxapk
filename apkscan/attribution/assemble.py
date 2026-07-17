@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import math
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Sequence
 
@@ -317,122 +318,227 @@ def _bridge_endpoint(endpoint: Any) -> tuple[list[AttributionEvidence], list[dic
     return edges, contexts
 
 
-def _ip_signal_features(
-    ip: NetworkEntity, entry: dict[str, Any], *, endpoint: Any, max_overseas_ts: float | None = None
-) -> list[RoleFeature]:
-    """The conservative fact->RoleSignal compiler for one IP (one fact -> one signal).
+@dataclass(frozen=True)
+class InfrastructureAttribution:
+    """★system-1 五层归属 → system-2 角色层的 typed 契约视图（一 IP 一条）。
 
-    ``max_overseas_ts``: latest runtime contact time to any OVERSEAS IP endpoint in the
-    report (pre-scanned across all endpoints) — licenses SUBSEQUENT_OVERSEAS_CONNECTION on a
-    domestic relay-candidate IP when the app contacted overseas AFTER contacting this IP.
+    ``RoleFeatureAdapter`` 曾（作为 ``_ip_signal_features``）到处直读 ``entry["origin_network"]["category"]``
+    / ``entry["edge_provider"]["tier"]``——五层 dict schema 一变、角色信号逻辑静默失配。这里把"读 system-1
+    裸 dict"全收敛进 ``from_entry`` 一处：五层字段改名只改此方法，发射逻辑读 typed 字段不动。值原样透传
+    （不清洗），保证与旧逐字段读 byte-identical（畸形值如 ``123`` 仍走 ``== "CN"`` 判 False，行为不变）。
     """
-    origin = _as_dict(entry.get("origin_network"))
-    hosting = _as_dict(entry.get("hosting_provider"))
-    edge = _as_dict(entry.get("edge_provider"))
-    country = entry.get("country")
-    ref = f"endpoints[{getattr(endpoint, 'value', '')}].enrichment.attribution"
-    features: list[RoleFeature] = []
 
-    def add(signal: RoleSignal, source: str, value: Any, raw_reference: str) -> None:
-        features.append(RoleFeature(
-            signal=signal,
-            evidence=_evidence(source=source, etype=signal.value, target=ip, value=value,
-                               raw_reference=raw_reference, confidence=_SIGNAL_CONFIDENCE[signal]),
-        ))
+    country: str | None
+    origin_category: str | None
+    hosting_category: str | None
+    edge_tier: str | None
+    edge_name: str | None
 
-    is_ip_endpoint = getattr(endpoint, "kind", None) == "ip" and _ip_entity(getattr(endpoint, "value", None))
-    # ★已知反诈拦截节点的"被接触"是反诈拦截事实、非业务/中继接触——绝不授权任何运行时行为信号
-    #   （与 _bridge_endpoint 对 tls_sni/network_flow 边的 is_known_intercept_ip 排除一致；DOMESTIC_NETWORK
-    #   是纯资源事实可留、且单独不足以 eligible）。防拦截页被升格为中继候选进线索输出。
-    runtime_signal_ok = not is_known_intercept_ip(ip.value)
-    if (
-        is_ip_endpoint is not None
-        and getattr(is_ip_endpoint, "value", None) == ip.value
-        and _runtime_contact_observed(endpoint)
-        and runtime_signal_ok
-    ):
-        add(RoleSignal.DIRECT_CONNECTION, "runtime", True, f"endpoints[{ip.value}].evidences[runtime]")
+    @classmethod
+    def from_entry(cls, entry: dict[str, Any]) -> InfrastructureAttribution:
+        origin = _as_dict(entry.get("origin_network"))
+        hosting = _as_dict(entry.get("hosting_provider"))
+        edge = _as_dict(entry.get("edge_provider"))
+        return cls(
+            country=entry.get("country"),
+            origin_category=origin.get("category"),
+            hosting_category=hosting.get("category"),
+            edge_tier=edge.get("tier"),
+            edge_name=edge.get("name"),
+        )
 
-    # domestic_network is a PER-IP jurisdiction fact: the IP's own attribution
-    # country / telecom category, or an IP endpoint's own ASN country. A domain's
-    # ICP filing is a domain-registration fact — it does NOT make a resolved edge
-    # IP (e.g. a US Cloudflare node) domestic, so it licenses no per-IP signal.
-    # The endpoint-level asn.country belongs to the endpoint's OWN IP, so (like
-    # direct_connection above) it may only license a signal when this attribution
-    # entry IS that endpoint IP — never a different IP listed in its attribution.
-    ip_asn_country = _as_dict(_as_dict(getattr(endpoint, "enrichment", None)).get("asn")).get("country")
-    endpoint_is_this_ip = (
-        is_ip_endpoint is not None and getattr(is_ip_endpoint, "value", None) == ip.value
-    )
-    if country == "CN" or (origin.get("category") == CAT_TELECOM and country == "CN"):
-        add(RoleSignal.DOMESTIC_NETWORK, "attribution", "CN", f"{ref}.country")
-    elif endpoint_is_this_ip and ip_asn_country == "CN":
-        add(RoleSignal.DOMESTIC_NETWORK, "asn", "CN",
-            f"endpoints[{getattr(endpoint, 'value', '')}].enrichment.asn.country")
 
-    # SUBSEQUENT_OVERSEAS_CONNECTION（运行时行为信号，P0）：接触该境内 IP 后随后又连境外 = 中继候选行为。
-    #   时序判据：本端点最早接触时刻 t_dom < 报告内任一境外 IP 接触时刻（预扫 max_overseas_ts）。仅对**境内
-    #   IP 端点自身**、且该 IP 有运行时接触时成立。correlational（同会话先后，非 relay 铁证）→ 支撑 *_candidate。
-    is_domestic = country == "CN" or (endpoint_is_this_ip and ip_asn_country == "CN")
-    if (
-        endpoint_is_this_ip
-        and is_domestic
-        and max_overseas_ts is not None
-        and _runtime_contact_observed(endpoint)
-        and runtime_signal_ok  # 拦截节点不产该运行时行为信号（见上）
-    ):
-        t_dom = _runtime_first_contact_ts(endpoint)
-        if t_dom is not None and max_overseas_ts > t_dom:
-            add(RoleSignal.SUBSEQUENT_OVERSEAS_CONNECTION, "runtime", True,
-                f"endpoints[{ip.value}].enrichment.runtime.first_contact_ts<overseas_contact")
+@dataclass(frozen=True)
+class NetworkObservations:
+    """★system-2 端点运行时观测的 typed 视图——供角色信号发射消费，与端点 dict/attr 读点解耦。
 
-    # BUSINESS_API / LOGIN_ENDPOINT（运行时行为信号，P0-2）：该 IP 在运行时被观测服务业务/登录 API 路径
-    #   （capture 从 mitm 请求路径 per-IP 累积）→ origin_candidate 证据（app 直连该 IP 打 /api、/login=像真后端
-    #   源站）。须真运行时接触（守不变量：手注 path 字典无 runtime 证据不授信）+ 非拦截节点。
-    #   ★有任何 edge 指纹（clustered/possible/probable/confirmed=像前置/CDN/防红共享前端）→ 不当源站、不产
-    #   origin 信号：confirmed/probable 另有 PUBLIC_CDN 阻断，此处兜住 possible/clustered 的负证据缺口
-    #   （防红前置带高区分度指纹产 fronting-cluster=clustered，穿透它的业务/登录流量必落其上，绝不能升为源站）。
-    if endpoint_is_this_ip and runtime_signal_ok and not edge.get("tier") and _runtime_contact_observed(endpoint):
-        rt = _as_dict(_as_dict(getattr(endpoint, "enrichment", None)).get("runtime"))
-        biz_paths = {p for p in _as_list(rt.get("business_api_paths")) if isinstance(p, str) and p}
-        login_paths = {p for p in _as_list(rt.get("login_paths")) if isinstance(p, str) and p}
-        # ★BUSINESS_API 须有**非登录类**业务路径——防单条 /api/user/login 同授两信号、把"BUSINESS_API+独立佐证"
-        #   塌缩成一条请求（origin 第二要件须来自不同事实）。
-        if biz_paths - login_paths:
-            add(RoleSignal.BUSINESS_API, "runtime", True,
-                f"endpoints[{ip.value}].enrichment.runtime.business_api_paths")
-        if login_paths:
-            add(RoleSignal.LOGIN_ENDPOINT, "runtime", True,
-                f"endpoints[{ip.value}].enrichment.runtime.login_paths")
+    只承载"该归属条目 IP 对应端点"的运行时行为事实；端点 ``enrichment`` / ``evidences`` 的读取全收敛进
+    ``from_endpoint``，发射逻辑读 typed 字段。跨端点的 ``max_overseas_ts``（报告内任一境外 IP 最晚接触时刻，
+    ``build_network_attribution`` 预扫得出）也归入此视图，作 SUBSEQUENT_OVERSEAS_CONNECTION 的时序上界。
+    ★运行时**行为**字段仅在 ``is_this_ip`` 时才从端点读取（见 ``from_endpoint``）——与旧惰性求值逐位一致，
+    避免对无关端点 eager 求值放大潜在异常的爆炸半径；纯 dict/字符串读的字段（``is_intercept``/``asn_country``）
+    绝不抛，恒 eager。
+    """
 
-    # REDIRECT / COOKIE_CHALLENGE（运行时行为信号，P0-3）：该 IP 响应观测到跨 host 重定向 / 挑战 cookie 下发
-    #   = edge_candidate / cloaking_edge_node 证据（前置/隐匿边缘的主动行为）。须真运行时接触 + 非拦截节点；
-    #   ★不加 edge.tier 门——边缘行为信号与"该 IP 是前置/CDN"一致（edge 角色 PUBLIC_CDN 只作 context 不阻断）。
-    if endpoint_is_this_ip and runtime_signal_ok and _runtime_contact_observed(endpoint):
-        rt2 = _as_dict(_as_dict(getattr(endpoint, "enrichment", None)).get("runtime"))
-        edge_hosts = _as_dict(rt2.get("edge_hosts"))
-        # ★同 host 共现才发这对信号：某单个请求 host 同时被重定向 + 挑战 = 该前置对该 host 的 cloaking 行为。
-        #   共享边缘上不同租户各出一个信号（A 重定向 / B 挑战）绝不凑成 cloaking（复审 P1：跨租户混淆）。
+    endpoint_value: str
+    is_this_ip: bool          # 该归属条目 IP == 端点自身 IP（旧 endpoint_is_this_ip）
+    is_intercept: bool        # ip 是已知反诈拦截节点——绝不产任何运行时行为信号
+    contact_observed: bool    # 运行时真观测到到该端点 peer IP 的网络流（非 Host 头/解密体/探针派生）
+    asn_country: str | None   # 端点自身 IP 的 enrichment.asn.country
+    first_contact_ts: float | None
+    business_api_paths: frozenset[str]
+    login_paths: frozenset[str]
+    has_cloaking_host: bool   # 任一请求 host 同时被重定向 + 挑战（同租户 cloaking 共现，非跨租户拼凑）
+    max_overseas_ts: float | None
+
+    @classmethod
+    def from_endpoint(
+        cls, ip: NetworkEntity, endpoint: Any, *, max_overseas_ts: float | None
+    ) -> NetworkObservations:
+        # is_this_ip：端点须是 IP 端点、且其归一化 IP == 本归属条目 IP（与旧 endpoint_is_this_ip 逐位对齐）。
+        matched = getattr(endpoint, "kind", None) == "ip" and _ip_entity(getattr(endpoint, "value", None))
+        is_this_ip = matched is not None and getattr(matched, "value", None) == ip.value
+        enrichment = _as_dict(getattr(endpoint, "enrichment", None))
+        # ★运行时**行为**字段（接触/时刻/业务登录路径/cloaking）仅在发射侧 is_this_ip 门内被消费——旧
+        #   _ip_signal_features 也只在该门内惰性求值。故这些字段仅当 is_this_ip 才读取：既与旧惰性求值逐位一致，
+        #   又不把这些读取（畸形 evidences / 超 float 域 first_contact_ts 等潜在异常）的爆炸半径扩到无关端点
+        #   （复审 CONFIRMED：无条件 eager 会让域名端点等的资源信号被 per-endpoint except 连累丢失）。
+        if is_this_ip:
+            runtime = _as_dict(enrichment.get("runtime"))
+            edge_hosts = _as_dict(runtime.get("edge_hosts"))
+            contact_observed = _runtime_contact_observed(endpoint)
+            first_contact_ts = _runtime_first_contact_ts(endpoint)
+            business_api_paths = frozenset(
+                p for p in _as_list(runtime.get("business_api_paths")) if isinstance(p, str) and p
+            )
+            login_paths = frozenset(
+                p for p in _as_list(runtime.get("login_paths")) if isinstance(p, str) and p
+            )
+            has_cloaking_host = any(
+                isinstance(h, dict) and h.get("r") and h.get("c") for h in edge_hosts.values()
+            )
+        else:
+            contact_observed = has_cloaking_host = False
+            first_contact_ts = None
+            business_api_paths = login_paths = frozenset()
+        return cls(
+            endpoint_value=str(getattr(endpoint, "value", "")),
+            is_this_ip=is_this_ip,
+            is_intercept=is_known_intercept_ip(ip.value),  # 纯字符串判定、绝不抛
+            contact_observed=contact_observed,
+            asn_country=_as_dict(enrichment.get("asn")).get("country"),  # 纯 dict 读、绝不抛
+            first_contact_ts=first_contact_ts,
+            business_api_paths=business_api_paths,
+            login_paths=login_paths,
+            has_cloaking_host=has_cloaking_host,
+            max_overseas_ts=max_overseas_ts,
+        )
+
+
+class RoleFeatureAdapter:
+    """保守的 事实→RoleSignal 编译器（一事实一信号）——只读 typed 归属/观测契约发射角色特征。
+
+    ``InfrastructureAttribution`` 收敛全部 system-1 五层 dict 读点、``NetworkObservations`` 收敛全部端点运行
+    时读点；本编译器不再触碰任何裸 dict，五层 / 端点 schema 变更只波及两个 ``from_*``、不波及信号逻辑。
+    """
+
+    @classmethod
+    def from_attribution(
+        cls, ip: NetworkEntity, attribution: InfrastructureAttribution, observations: NetworkObservations
+    ) -> list[RoleFeature]:
+        ref = f"endpoints[{observations.endpoint_value}].enrichment.attribution"
+        features: list[RoleFeature] = []
+
+        def add(signal: RoleSignal, source: str, value: Any, raw_reference: str) -> None:
+            features.append(RoleFeature(
+                signal=signal,
+                evidence=_evidence(source=source, etype=signal.value, target=ip, value=value,
+                                   raw_reference=raw_reference, confidence=_SIGNAL_CONFIDENCE[signal]),
+            ))
+
+        # ★已知反诈拦截节点的"被接触"是反诈拦截事实、非业务/中继接触——绝不授权任何运行时行为信号
+        #   （与 _bridge_endpoint 对 tls_sni/network_flow 边的 is_known_intercept_ip 排除一致；DOMESTIC_NETWORK
+        #   是纯资源事实可留、且单独不足以 eligible）。防拦截页被升格为中继候选进线索输出。
+        runtime_signal_ok = not observations.is_intercept
+
+        if observations.is_this_ip and observations.contact_observed and runtime_signal_ok:
+            add(RoleSignal.DIRECT_CONNECTION, "runtime", True, f"endpoints[{ip.value}].evidences[runtime]")
+
+        # domestic_network is a PER-IP jurisdiction fact: the IP's own attribution country /
+        # telecom category, or an IP endpoint's own ASN country. A domain's ICP filing is a
+        # domain-registration fact — it does NOT make a resolved edge IP (e.g. a US Cloudflare
+        # node) domestic, so it licenses no per-IP signal. The endpoint-level asn.country
+        # belongs to the endpoint's OWN IP, so (like direct_connection) it may only license a
+        # signal when this attribution entry IS that endpoint IP — never a different listed IP.
+        country = attribution.country
+        if country == "CN" or (attribution.origin_category == CAT_TELECOM and country == "CN"):
+            add(RoleSignal.DOMESTIC_NETWORK, "attribution", "CN", f"{ref}.country")
+        elif observations.is_this_ip and observations.asn_country == "CN":
+            add(RoleSignal.DOMESTIC_NETWORK, "asn", "CN",
+                f"endpoints[{observations.endpoint_value}].enrichment.asn.country")
+
+        # SUBSEQUENT_OVERSEAS_CONNECTION（运行时行为信号，P0）：接触该境内 IP 后随后又连境外 = 中继候选行为。
+        #   时序判据：本端点最早接触时刻 t_dom < 报告内任一境外 IP 接触时刻（预扫 max_overseas_ts）。仅对**境内
+        #   IP 端点自身**、且该 IP 有运行时接触时成立。correlational（同会话先后，非 relay 铁证）→ 支撑 *_candidate。
+        is_domestic = country == "CN" or (observations.is_this_ip and observations.asn_country == "CN")
+        if (
+            observations.is_this_ip
+            and is_domestic
+            and observations.max_overseas_ts is not None
+            and observations.contact_observed
+            and runtime_signal_ok  # 拦截节点不产该运行时行为信号（见上）
+        ):
+            t_dom = observations.first_contact_ts
+            if t_dom is not None and observations.max_overseas_ts > t_dom:
+                add(RoleSignal.SUBSEQUENT_OVERSEAS_CONNECTION, "runtime", True,
+                    f"endpoints[{ip.value}].enrichment.runtime.first_contact_ts<overseas_contact")
+
+        # BUSINESS_API / LOGIN_ENDPOINT（运行时行为信号，P0-2）：该 IP 在运行时被观测服务业务/登录 API 路径
+        #   （capture 从 mitm 请求路径 per-IP 累积）→ origin_candidate 证据（app 直连该 IP 打 /api、/login=像真后端
+        #   源站）。须真运行时接触（守不变量：手注 path 字典无 runtime 证据不授信）+ 非拦截节点。
+        #   ★有任何 edge 指纹（clustered/possible/probable/confirmed=像前置/CDN/防红共享前端）→ 不当源站、不产
+        #   origin 信号：confirmed/probable 另有 PUBLIC_CDN 阻断，此处兜住 possible/clustered 的负证据缺口
+        #   （防红前置带高区分度指纹产 fronting-cluster=clustered，穿透它的业务/登录流量必落其上，绝不能升为源站）。
+        if (
+            observations.is_this_ip
+            and runtime_signal_ok
+            and not attribution.edge_tier
+            and observations.contact_observed
+        ):
+            # ★BUSINESS_API 须有**非登录类**业务路径——防单条 /api/user/login 同授两信号、把"BUSINESS_API+独立佐证"
+            #   塌缩成一条请求（origin 第二要件须来自不同事实）。
+            if observations.business_api_paths - observations.login_paths:
+                add(RoleSignal.BUSINESS_API, "runtime", True,
+                    f"endpoints[{ip.value}].enrichment.runtime.business_api_paths")
+            if observations.login_paths:
+                add(RoleSignal.LOGIN_ENDPOINT, "runtime", True,
+                    f"endpoints[{ip.value}].enrichment.runtime.login_paths")
+
+        # REDIRECT / COOKIE_CHALLENGE（运行时行为信号，P0-3）：该 IP 响应观测到跨 host 重定向 / 挑战 cookie 下发
+        #   = edge_candidate / cloaking_edge_node 证据（前置/隐匿边缘的主动行为）。须真运行时接触 + 非拦截节点；
+        #   ★不加 edge.tier 门——边缘行为信号与"该 IP 是前置/CDN"一致（edge 角色 PUBLIC_CDN 只作 context 不阻断）。
+        #   ★同 host 共现才发这对信号（has_cloaking_host）：某单个请求 host 同时被重定向 + 挑战 = 该前置对该 host
+        #   的 cloaking；共享边缘上不同租户各出一个信号（A 重定向 / B 挑战）绝不凑成 cloaking（复审 P1：跨租户混淆）。
         #   两信号成对发出——edge_candidate 需 ≥2 edge 信号、cloaking_edge_node 需 ≥2 强行为，均由这对满足。
-        if any(isinstance(h, dict) and h.get("r") and h.get("c") for h in edge_hosts.values()):
+        if (
+            observations.is_this_ip
+            and runtime_signal_ok
+            and observations.contact_observed
+            and observations.has_cloaking_host
+        ):
             add(RoleSignal.REDIRECT, "runtime", True,
                 f"endpoints[{ip.value}].enrichment.runtime.edge_hosts")
             add(RoleSignal.COOKIE_CHALLENGE, "runtime", True,
                 f"endpoints[{ip.value}].enrichment.runtime.edge_hosts")
 
-    tier = edge.get("tier")
-    if (
-        tier in _CONFIRMED_EDGE_TIERS
-        or hosting.get("category") in _CDN_CATEGORIES
-        or origin.get("category") in _CDN_CATEGORIES
-    ):
-        add(RoleSignal.PUBLIC_CDN, "attribution", str(edge.get("name") or hosting.get("category") or CAT_CDN),
-            f"{ref}.edge_provider")
-    elif hosting.get("category") in _NON_PUBLIC_CDN_HOSTING and tier is None:
-        add(RoleSignal.NON_PUBLIC_CDN, "attribution", str(hosting.get("category")),
-            f"{ref}.hosting_provider")
+        tier = attribution.edge_tier
+        if (
+            tier in _CONFIRMED_EDGE_TIERS
+            or attribution.hosting_category in _CDN_CATEGORIES
+            or attribution.origin_category in _CDN_CATEGORIES
+        ):
+            add(RoleSignal.PUBLIC_CDN, "attribution",
+                str(attribution.edge_name or attribution.hosting_category or CAT_CDN), f"{ref}.edge_provider")
+        elif attribution.hosting_category in _NON_PUBLIC_CDN_HOSTING and tier is None:
+            add(RoleSignal.NON_PUBLIC_CDN, "attribution", str(attribution.hosting_category),
+                f"{ref}.hosting_provider")
 
-    return features
+        return features
+
+
+def _ip_signal_features(
+    ip: NetworkEntity, entry: dict[str, Any], *, endpoint: Any, max_overseas_ts: float | None = None
+) -> list[RoleFeature]:
+    """保守的 事实→RoleSignal 编译器入口（一事实一信号）：把 system-1 五层 ``entry`` 与端点运行时观测各自
+    解析成 typed 契约，再由 ``RoleFeatureAdapter`` 从 typed 字段发射角色特征——dict 读点全收敛进两个 ``from_*``。
+
+    ``max_overseas_ts``: latest runtime contact time to any OVERSEAS IP endpoint in the report
+    (pre-scanned across all endpoints) — licenses SUBSEQUENT_OVERSEAS_CONNECTION on a domestic
+    relay-candidate IP when the app contacted overseas AFTER contacting this IP.
+    """
+    attribution = InfrastructureAttribution.from_entry(entry)
+    observations = NetworkObservations.from_endpoint(ip, endpoint, max_overseas_ts=max_overseas_ts)
+    return RoleFeatureAdapter.from_attribution(ip, attribution, observations)
 
 
 def _score_ip_roles(ip: NetworkEntity, features: list[RoleFeature]) -> tuple[list[dict[str, Any]], list[Any]]:
@@ -498,11 +604,21 @@ def _endpoint_asn_country(ep: Any) -> str | None:
 
 def _runtime_first_contact_ts(ep: Any) -> float | None:
     """端点被运行时最早接触的时刻（capture 写的 runtime.first_contact_ts）。缺/坏/非有限(NaN/±inf)/≤0/bool
-    → None（NaN 会让 max() 顺序敏感、inf 会让垃圾值恒产信号，故一并拒）。绝不抛。"""
+    → None（NaN 会让 max() 顺序敏感、inf 会让垃圾值恒产信号，故一并拒）。绝不抛。
+
+    ★超 float 域的巨整数（手编/被投毒 report.json 的任意精度整数字面量，如 10**400）按**越界拒为 None**：
+    先受控 float() 吞 OverflowError，再判 isfinite/≤0——否则 math.isfinite(huge_int) 会在内部转 float 时抛
+    OverflowError，令本 helper 食言"绝不抛"、把整端点信号连累丢失（复审 CONFIRMED）。"""
     ts = _as_dict(_as_dict(getattr(ep, "enrichment", None)).get("runtime")).get("first_contact_ts")
-    if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not math.isfinite(ts) or ts <= 0:
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
         return None
-    return float(ts)
+    try:
+        value = float(ts)  # 巨整数（>1024bit）超 float 域 → OverflowError，按越界拒
+    except (OverflowError, ValueError):
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return value
 
 
 def _overseas_contact_timestamps(endpoints: Sequence[Any]) -> list[float]:

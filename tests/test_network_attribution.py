@@ -856,3 +856,142 @@ def test_intercept_node_never_edge_signals() -> None:
         }, evidences=[Evidence(source="runtime", location="x")])
         all_sig = {s for role in _roles(_build(ep), value).values() for s in role["matched_signals"]}
         assert not ({"redirect", "cookie_challenge", "direct_connection"} & all_sig), value
+
+
+# --------------------------------------------------------------------------- #
+# P1: RoleFeatureAdapter 契约——五层/端点 dict 读点收敛进 typed from_*，发射逻辑读 typed 字段
+# --------------------------------------------------------------------------- #
+def test_infrastructure_attribution_from_entry_maps_five_layer_dict() -> None:
+    """from_entry 把嵌套五层 dict 拍平成 typed 字段（系统一 schema 读点单一收敛点）。"""
+    from apkscan.attribution.assemble import InfrastructureAttribution
+
+    attr = InfrastructureAttribution.from_entry({
+        "country": "CN",
+        "origin_network": {"asn": 4134, "category": "telecom"},
+        "hosting_provider": {"category": "idc"},
+        "edge_provider": {"name": "Cloudflare", "tier": "confirmed"},
+    })
+    assert attr.country == "CN"
+    assert attr.origin_category == "telecom"
+    assert attr.hosting_category == "idc"
+    assert attr.edge_tier == "confirmed"
+    assert attr.edge_name == "Cloudflare"
+    # 缺层 → None，绝不抛（畸形/半截 entry 是常态）
+    empty = InfrastructureAttribution.from_entry({})
+    assert (empty.country, empty.origin_category, empty.edge_tier) == (None, None, None)
+
+
+def test_network_observations_from_endpoint_reads_runtime() -> None:
+    """from_endpoint 把端点 enrichment/evidences 收敛成 typed 观测（is_this_ip / asn_country / 路径 / cloaking）。"""
+    from apkscan.attribution.assemble import NetworkObservations
+    from apkscan.network import NetworkEntity, NetworkEntityType
+
+    ip = NetworkEntity(kind=NetworkEntityType.IP, value="203.0.113.9")
+    ep = _ep("203.0.113.9", "ip", {
+        "asn": {"country": "CN"},
+        "runtime": {"business_api_paths": ["/api/order"], "login_paths": ["/login"],
+                    "first_contact_ts": 100.0,
+                    "edge_hosts": {"h1": {"r": True, "c": True}}},
+    }, evidences=[Evidence(source="runtime", location="pcap")])
+    obs = NetworkObservations.from_endpoint(ip, ep, max_overseas_ts=200.0)
+    assert obs.is_this_ip is True
+    assert obs.is_intercept is False
+    assert obs.contact_observed is True
+    assert obs.asn_country == "CN"
+    assert obs.first_contact_ts == 100.0
+    assert obs.business_api_paths == frozenset({"/api/order"})
+    assert obs.login_paths == frozenset({"/login"})
+    assert obs.has_cloaking_host is True
+    assert obs.max_overseas_ts == 200.0
+    # 不同 IP 的归属条目 → is_this_ip False（端点级 asn/runtime 不外溢到别的 IP）
+    other = NetworkObservations.from_endpoint(
+        NetworkEntity(kind=NetworkEntityType.IP, value="8.8.8.8"), ep, max_overseas_ts=None)
+    assert other.is_this_ip is False
+
+
+def test_role_feature_adapter_decoupled_from_dict_schema() -> None:
+    """RoleFeatureAdapter.from_attribution 只吃 typed 契约、不碰任何裸 dict——直接构造 typed 视图即可发射信号。"""
+    from apkscan.attribution.assemble import (
+        InfrastructureAttribution,
+        NetworkObservations,
+        RoleFeatureAdapter,
+    )
+    from apkscan.network import NetworkEntity, NetworkEntityType
+
+    ip = NetworkEntity(kind=NetworkEntityType.IP, value="203.0.113.9")
+    attribution = InfrastructureAttribution(
+        country="CN", origin_category="telecom", hosting_category="idc",
+        edge_tier=None, edge_name=None)
+    observations = NetworkObservations(
+        endpoint_value="203.0.113.9", is_this_ip=True, is_intercept=False,
+        contact_observed=True, asn_country="CN", first_contact_ts=100.0,
+        business_api_paths=frozenset({"/api/order"}), login_paths=frozenset({"/login"}),
+        has_cloaking_host=False, max_overseas_ts=200.0)
+    signals = {f.signal.value for f in RoleFeatureAdapter.from_attribution(ip, attribution, observations)}
+    # 境内直连 + 业务/登录 + 随后连境外——全从 typed 字段派生，无 dict 参与
+    assert {"direct_connection", "domestic_network", "business_api",
+            "login_endpoint", "subsequent_overseas_connection"} <= signals
+
+    # 拦截节点：runtime_signal_ok=False → 一切**运行时行为**信号被抑制；纯归属**资源事实**（domestic_network /
+    #   non_public_cdn=idc 无 tier）不受影响照发——区分"行为"与"资源"正是不变量核心。
+    intercepted = NetworkObservations(
+        endpoint_value="183.192.65.101", is_this_ip=True, is_intercept=True,
+        contact_observed=True, asn_country="CN", first_contact_ts=100.0,
+        business_api_paths=frozenset({"/api/order"}), login_paths=frozenset(),
+        has_cloaking_host=True, max_overseas_ts=200.0)
+    blocked = {f.signal.value for f in RoleFeatureAdapter.from_attribution(ip, attribution, intercepted)}
+    assert blocked == {"domestic_network", "non_public_cdn"}  # 仅资源事实，无一行为信号
+    assert not ({"direct_connection", "business_api", "login_endpoint",
+                 "subsequent_overseas_connection", "redirect", "cookie_challenge"} & blocked)
+
+
+# --------------------------------------------------------------------------- #
+# 复审回归：eager 求值放大既有潜伏 bug 的爆炸半径（first_contact_ts 巨整数 → OverflowError）
+# 修：_runtime_first_contact_ts 受控 float()（越界拒 None）+ from_endpoint 运行时行为字段按 is_this_ip 门控
+# --------------------------------------------------------------------------- #
+def test_runtime_first_contact_ts_rejects_overflowing_int_without_raising() -> None:
+    """根因回归：first_contact_ts 为超 float 域巨整数（手编/投毒 report.json 的任意精度整数）→ None、绝不抛。
+    修前 math.isfinite(huge_int) 在内部转 float 时抛 OverflowError，令 helper 食言'绝不抛'。"""
+    from types import SimpleNamespace
+
+    from apkscan.attribution.assemble import _runtime_first_contact_ts
+
+    boom = SimpleNamespace(enrichment={"runtime": {"first_contact_ts": 10**400}})
+    assert _runtime_first_contact_ts(boom) is None  # 不抛
+    ok = SimpleNamespace(enrichment={"runtime": {"first_contact_ts": 1_700_000_000.0}})
+    assert _runtime_first_contact_ts(ok) == 1_700_000_000.0  # 正常 epoch 秒照常
+
+
+def test_giant_first_contact_ts_on_domain_endpoint_keeps_resource_signals() -> None:
+    """端到端回归（is_this_ip=False 分支）：域名端点带越界巨整数 first_contact_ts，绝不能让该端点整组信号被吞、
+    视图塌成 None。修前 from_endpoint 无条件 eager 调 _runtime_first_contact_ts → OverflowError → per-endpoint
+    except 吞掉 → public_cdn 等纯资源信号连累丢失。"""
+    ep = _ep("cdn.example.com", "domain", {
+        "dns": {"ips": ["104.16.0.1"]},
+        "runtime": {"first_contact_ts": 10**400},  # 越界垃圾时间戳
+        "attribution": {"ips": [{"ip": "104.16.0.1", "country": "US",
+                                 "origin_network": {"asn": 13335, "category": "cdn"},
+                                 "hosting_provider": {"category": "cdn"},
+                                 "edge_provider": {"name": "Cloudflare", "tier": "confirmed"}}]},
+    })
+    blob = _build(ep)
+    assert blob is not None  # 视图未塌
+    roles = _roles(blob, "104.16.0.1")
+    assert "public_cdn" in roles["domestic_relay_candidate"]["negative_signals"]  # 资源信号仍在
+
+
+def test_giant_first_contact_ts_on_own_ip_endpoint_no_raise() -> None:
+    """端到端回归（is_this_ip=True 分支，走根因 helper 修复）：本 IP 端点带越界巨整数 ts——不抛、SUBSEQUENT 不误发、
+    domestic_network 等其余信号照常。"""
+    ep = _ep("203.0.113.9", "ip", {
+        "asn": {"country": "CN"},
+        "runtime": {"first_contact_ts": 10**400},
+        "attribution": {"ips": [{"ip": "203.0.113.9", "country": "CN",
+                                 "origin_network": {"asn": 4134, "category": "telecom"},
+                                 "hosting_provider": {"category": "idc"}, "edge_provider": {"tier": None}}]},
+    }, evidences=[Evidence(source="runtime", location="pcap")])
+    blob = _build(ep)
+    assert blob is not None
+    relay = _roles(blob, "203.0.113.9").get("domestic_relay_candidate")
+    assert relay is not None and "domestic_network" in relay["matched_signals"]
+    assert "subsequent_overseas_connection" not in relay["matched_signals"]  # 越界 ts→None→不误发
