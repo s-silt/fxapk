@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from dataclasses import dataclass, field
@@ -13,7 +14,10 @@ from typing import TYPE_CHECKING
 
 
 from apkscan.analyzers.classify import classify_app
+from apkscan.config.decode import decode_config_blob
+from apkscan.config.fetch import fetch_config_object
 from apkscan.core import infra
+from apkscan.core.appcrypto import CryptoRecipe
 from apkscan.core.attribution import build_endpoint_attribution, cluster_fronting
 from apkscan.core.models import (
     ANALYSIS_MODE_AUTHORIZED_ACTIVE,
@@ -24,6 +28,7 @@ from apkscan.core.models import (
     AnalysisConfig,
     Endpoint,
     Evidence,
+    LeadCategory,
     Report,
 )
 from apkscan.core.registry import (
@@ -250,6 +255,87 @@ def _stage_degradation_flags(state: _PipelineState) -> None:
         meta["apk_validation_warning"] = "APK 合法性校验异常，分析结果可能不可靠（详见日志）"
 
 
+def _stage_remote_config_fetch(state: _PipelineState) -> None:
+    """（授权档）下载 REMOTE_CONFIG 候选 → 多层解码 → 把解出的域名/IP 回灌端点集（供后续富化 + 归因）。
+
+    主被动硬隔离：仅 online **且** mode==authorized-active 才下载（fail-closed，复刻 _stage_enrich /
+    contacts getMe 口径）；passive（默认）/ offline 只记 meta、保留候选静态线索、绝不联网。放行/跳过写
+    meta 审计。★回灌端点标 source='remote-config'（**非 runtime***）：不进 OBSERVED_CONTACT_SOURCES、
+    也不 startswith('runtime')，故既非"确认 C2"（is_runtime_contact）也不算"运行时出现"（is_runtime_seen）
+    ——它是"配置里出现的动态域名/IP"线索，非运行时实测接触。原始 blob 落盘作后续（stored_path=None）。
+    本阶段在 endpoints 去重之后、enrich 之前跑，故回灌端点会吃到完整富化 + 五层归因 + 建线索。
+    """
+    config = state.config
+    meta = state.meta
+    candidates = [
+        lead for lead in state.leads
+        if getattr(lead, "category", None) is LeadCategory.REMOTE_CONFIG
+    ]
+    if not candidates:
+        return
+    if not config.online:
+        meta["remote_config_fetch_skipped"] = "offline"
+        return
+    if getattr(config, "mode", ANALYSIS_MODE_PASSIVE) != ANALYSIS_MODE_AUTHORIZED_ACTIVE:
+        meta["remote_config_fetch_skipped_passive_mode"] = len(candidates)
+        logger.info(
+            "passive 模式：%d 个远程配置候选未下载（默认不向目标发流量）；如确需下载请显式 "
+            "--mode authorized-active",
+            len(candidates),
+        )
+        return
+
+    logger.warning(
+        "authorized-active 模式：将下载 %d 个远程配置对象（向目标发起 live 请求，请确认已获授权）",
+        len(candidates),
+    )
+    recipe = CryptoRecipe.from_meta(meta.get("crypto_recipe"))
+    new_endpoints: list[Endpoint] = []
+    artifacts = [_fetch_decode_one(getattr(lead, "value", ""), recipe, new_endpoints)
+                 for lead in candidates]
+    meta["remote_config_artifacts"] = artifacts
+    meta["remote_config_fetched"] = sum(1 for a in artifacts if a.get("decoded"))
+    if new_endpoints:
+        state.endpoints.extend(new_endpoints)
+        state.endpoints = _dedup_endpoints(state.endpoints)  # 与已有端点按 value 合并
+
+
+def _fetch_decode_one(url: str, recipe: "CryptoRecipe | None", sink: list[Endpoint]) -> dict:
+    """下载并多层解码一个候选，解出的域名/IP 追加进 sink（端点集）。返回 ConfigArtifact 的 meta dict。"""
+    fetched = fetch_config_object(url)
+    if not fetched.ok or fetched.raw is None:
+        return {"source_url": url, "decoded": False, "error": fetched.error}
+    blob = fetched.raw
+    result = decode_config_blob(blob, recipe=recipe)
+    for domain in result.domains:
+        sink.append(_config_endpoint(domain, "domain", url))
+    for ip in result.ips:
+        sink.append(_config_endpoint(ip, "ip", url))
+    return {
+        "source_url": url,
+        "sha256": hashlib.sha256(blob).hexdigest(),
+        "size": len(blob),
+        "decoded": result.decoded,
+        "decode_chain": list(result.decode_chain),
+        "domains": list(result.domains),
+        "ips": list(result.ips),
+        "stored_path": None,  # 原始 blob 落盘 reports/<sha>/remote_config/ 作后续
+    }
+
+
+def _config_endpoint(value: str, kind: str, source_url: str) -> Endpoint:
+    """从解密配置回灌的端点。★source='remote-config'（非 runtime*）：不进 observed-contact、不误升徽标。"""
+    return Endpoint(
+        value=value,
+        kind=kind,
+        evidences=[Evidence(
+            source="remote-config",
+            location=f"remote_config:{source_url}",
+            snippet=f"decoded from remote config object {source_url}"[:200],
+        )],
+    )
+
+
 def _stage_enrich(state: _PipelineState) -> None:
     """联网富化（两遍）——**只对"高度可疑"端点（建议调证）查**，不再有一个查一个。
 
@@ -448,6 +534,7 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     state = _init_pipeline_state(ctx, config)
     _run_stage(state, "analyze", _stage_run_analyzers)              # 分析器执行 + 聚合 + 端点去重
     _run_stage(state, "degradation_flags", _stage_degradation_flags)  # 降级标志入 meta
+    _run_stage(state, "remote_config_fetch", _stage_remote_config_fetch)  # 授权档：下载+解码远程配置，回灌端点
     _run_stage(state, "enrich", _stage_enrich)                     # 联网富化（两遍，主动/被动硬隔离）
     _run_stage(state, "attribution", _stage_attribution)           # 五层不塌缩基础设施归因（per-IP）
     _run_stage(state, "build_leads", _stage_build_leads)           # 端点 → Lead + advice 兜底
