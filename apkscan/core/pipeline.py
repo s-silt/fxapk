@@ -399,13 +399,26 @@ def _run_stage(state: _PipelineState, name: str, fn: "Callable[[_PipelineState],
     state.stage_status.append(entry)
 
 
+# 附加/纯视图阶段：故障只记入 stage_status 供审计，**不反哺 analysis_status / --strict 退出码**。
+# network_attribution 是纯被动附加视图（见 _stage_network_attribution docstring 与设计 spec Boundaries：
+# PR9 不 create/mutate 任何 Lead/advice/exit code），其组装故障不该污染 --strict 门禁——与 closure.py 里
+# close 阶段同一视图已自带 guard、不下沉 case closure 的既定语义对齐（只有 analyze 侧接线漏了这层豁免）。
+# 故障仍完整记录于 meta.stage_status（保留 error 审计痕迹），仅切断降级传导。
+_ADDITIVE_STAGES: frozenset[str] = frozenset({"network_attribution"})
+
+
 def _apply_stage_failures(state: _PipelineState) -> None:
     """阶段级故障反馈 ``analysis_status`` / ``completeness``，让 --strict / 完整度也能反映阶段崩溃
     （而非只看分析器）：``analyze`` 阶段崩 → failed **且 completeness 归零**（analyze 崩时
     analyzer_status 为空、_analysis_health 会按"无可跑→1.0"算出误导性的满完整度，须校正）；其它阶段崩
     → 至少 partial（分析器已跑完，completeness 仍如实反映分析器层，partial 表征后续阶段故障）。
-    不上调已判 failed 的结果。"""
-    errored = [s["name"] for s in state.stage_status if s.get("status") == "error"]
+    ★``_ADDITIVE_STAGES``（附加/纯视图阶段，如 network_attribution）例外：其故障只记 stage_status、
+    不参与降级判定，避免纯被动视图的组装故障污染 analysis_status / --strict 退出码。不上调已判 failed 的结果。"""
+    errored = [
+        s["name"]
+        for s in state.stage_status
+        if s.get("status") == "error" and s["name"] not in _ADDITIVE_STAGES
+    ]
     if not errored:
         return
     if "analyze" in errored:

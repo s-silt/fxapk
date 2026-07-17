@@ -206,8 +206,8 @@ id. The whole payload round-trips `json.dumps`.
 - **digest** (`report/digest.py`): a compact block via `meta.get("network_attribution")`
   (mirroring the `closure` compaction, defensive `.get` + isinstance guards, never
   the raw graph): `{"counts": {nodes, edges, issues, eligible, ineligible, by_role},
-  "role_candidates": [ {entity, kind, role, score, confidence} for eligible only,
-  sorted by (role_rank, -score, entity), capped ]}`, plus one
+  "role_candidates": [ {endpoint, kind, ip, role, score, confidence} for eligible only,
+  sorted by (role_rank, -score, ip), capped ]}`, plus one
   `summary.attributed_role_candidates` counter. Degrades to an empty block on any
   malformed input; never raises.
 - **CLI**: no new flag. The stage is cheap (no network) and `_run_stage`-guarded;
