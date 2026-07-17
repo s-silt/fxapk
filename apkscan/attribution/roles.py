@@ -235,9 +235,6 @@ class _RoleDefinition:
     context: frozenset[RoleSignal] = frozenset()
 
 
-_TRANSITION = frozenset(
-    {RoleSignal.REDIRECT, RoleSignal.SUBSEQUENT_OVERSEAS_CONNECTION}
-)
 _ORIGIN_CORRELATION = frozenset(
     {
         RoleSignal.LOGIN_ENDPOINT,
@@ -285,7 +282,9 @@ _ROLE_DEFINITIONS = (
         requirements=(
             _Requirement(frozenset({RoleSignal.DIRECT_CONNECTION})),
             _Requirement(frozenset({RoleSignal.DOMESTIC_NETWORK})),
-            _Requirement(_TRANSITION),
+            # ★中继过渡须"境内→境外"时序证据（SUBSEQUENT_OVERSEAS）。REDIRECT（跨 host 重定向）单独不证明中继——
+            #   一条良性 canonical/支付跳转即会误判"境内中继"，故不放进中继要件（仍在 supporting 作 context 展示）。
+            _Requirement(frozenset({RoleSignal.SUBSEQUENT_OVERSEAS_CONNECTION})),
         ),
         blockers=frozenset({RoleSignal.PUBLIC_CDN}),
     ),

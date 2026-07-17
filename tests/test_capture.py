@@ -3396,3 +3396,44 @@ def test_collect_flow_endpoints_accumulates_biz_login_paths_per_ip() -> None:
     rt = collector["1.2.3.4"].enrichment["runtime"]
     assert "/api/user/login" in rt["login_paths"]
     assert set(rt["business_api_paths"]) == {"/api/user/login", "/v1/pay/order"}  # 跨流累积去重
+
+
+class _FakeHeaders:
+    def __init__(self, single=None, multi=None) -> None:
+        self._single = {k.lower(): v for k, v in (single or {}).items()}
+        self._multi = {k.lower(): v for k, v in (multi or {}).items()}
+
+    def get(self, name):  # noqa: ANN001, ANN201
+        return self._single.get(name.lower())
+
+    def get_all(self, name):  # noqa: ANN001, ANN201
+        return self._multi.get(name.lower(), [])
+
+
+def _resp(status, location=None, cookies=None):
+    single = {"location": location} if location else {}
+    multi = {"set-cookie": cookies} if cookies else {}
+    return SimpleNamespace(response=SimpleNamespace(status_code=status, headers=_FakeHeaders(single, multi)))
+
+
+def test_response_edge_signals_redirect_and_challenge_cookie() -> None:
+    """P0-3：跨 host 3xx + 挑战/清算 cookie 命中；同 host/同注册域重定向、常设 cookie、普通 cookie 不命中。"""
+    f = capture._response_edge_signals
+    assert f(_resp(302, "https://other.com/x", ["cf_clearance=abc; Path=/"]), "pay.x.com") == (True, True)
+    assert f(_resp(302, "https://pay.x.com/login"), "pay.x.com") == (False, False)   # 同 host 不算
+    assert f(_resp(200, cookies=["sessionid=xyz"]), "pay.x.com") == (False, False)   # 普通 cookie 非挑战
+    assert f(SimpleNamespace(response=None), "x") == (False, False)                  # 无响应
+
+
+def test_response_edge_signals_no_false_positive_on_benign_infra() -> None:
+    """★复审 P0/P1：合法基础设施不误报——acw_tc(阿里 WAF 常设)非挑战；www↔apex/m. 规范化重定向非跨站。"""
+    f = capture._response_edge_signals
+    # acw_tc / aliyungf_tc / srv_id 是每会话常设 cookie（非挑战）→ 不命中 COOKIE_CHALLENGE
+    for name in ("acw_tc=x", "aliyungf_tc=x", "srv_id=s1", "__cf_bm=x"):
+        assert f(_resp(200, cookies=[name]), "foo.com")[1] is False, name
+    # www↔apex / m. 移动版 = 同注册域良性规范化 → 非跨 host REDIRECT
+    assert f(_resp(301, "https://foo.com/"), "www.foo.com")[0] is False
+    assert f(_resp(302, "https://m.x.com/"), "x.com")[0] is False
+    assert f(_resp(301, "https://www.foo.com/"), "foo.com")[0] is False
+    # 真跨站（'-'边界非'.'边界）仍命中
+    assert f(_resp(302, "https://evil-foo.com/"), "foo.com")[0] is True

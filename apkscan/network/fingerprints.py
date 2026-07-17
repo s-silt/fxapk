@@ -30,8 +30,21 @@ KNOWN_INTERCEPT_IPS: frozenset[str] = frozenset({"183.192.65.101"})
 
 
 def is_known_intercept_ip(value: str) -> bool:
-    """Whether ``value`` is a known interception page IP, not a business server."""
-    return value in KNOWN_INTERCEPT_IPS
+    """Whether ``value`` is a known interception page IP, not a business server.
+
+    ★先规范化再比：IPv4-mapped IPv6（``::ffff:183.192.65.101``）与压缩写法都折回同一形式，
+    防拦截节点被 ``::ffff:...`` 等写法绕过（绕过后会被运行时行为信号误升为中继/边缘候选）。坏输入 → False。"""
+    if not isinstance(value, str):
+        return False
+    if value in KNOWN_INTERCEPT_IPS:
+        return True
+    try:
+        addr = ipaddress.ip_address(value.strip())
+    except ValueError:
+        return False
+    mapped = getattr(addr, "ipv4_mapped", None)
+    canonical = str(mapped) if mapped is not None else addr.compressed
+    return canonical in KNOWN_INTERCEPT_IPS
 
 
 def _require_string(name: str, value: object) -> str:
