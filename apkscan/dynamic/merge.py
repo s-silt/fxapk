@@ -144,6 +144,25 @@ def merge_capture_quality(report: Report, runtime_report_path: str) -> dict[str,
     return quality
 
 
+def merge_capture_capabilities(report: Report, runtime_report_path: str) -> dict[str, object]:
+    """把 ``runtime_report.json`` 的 ``capture_capabilities``（A1-3 抓包能力计划快照）拷进
+    ``report.meta['capture_capabilities']``。
+
+    让"floor 底座就绪没有 / 明文最强可达层 / 为何没明文（缺哪些增强）"成为机器可读的报告字段
+    （与只反映抓包**结果**的 ``capture_signals`` 互补：能力计划是抓包**起手**的能力快照）。
+    缺失 / 结构异常 / 空 → 不写、返回 ``{}``（不抛）。
+    """
+    payload = _read_runtime_payload(runtime_report_path)
+    if not isinstance(payload, Mapping):
+        return {}
+    caps = payload.get("capture_capabilities")
+    if not isinstance(caps, Mapping) or not caps:
+        return {}
+    caps_dict = dict(caps)
+    report.meta["capture_capabilities"] = caps_dict
+    return caps_dict
+
+
 def load_runtime_endpoints(runtime_report_path: str) -> list[Endpoint]:
     """从 capture 写出的 ``runtime_report.json`` 重建运行时端点列表。
 
@@ -2182,6 +2201,9 @@ def merge_and_rerender(
         quality = merge_capture_quality(report, rr_path)
         if quality:
             stats["capture_quality_status"] = quality.get("dynamic_status", "failed")
+        caps = merge_capture_capabilities(report, rr_path)  # A1-3：能力计划快照 → report.meta
+        if caps:
+            stats["capture_capabilities_mode"] = caps.get("mode")
         for step in _RUNTIME_MERGE_STEPS:
             _emit(on_progress, step.progress)
             sub = step.func(report, rr_path)
@@ -2242,6 +2264,7 @@ def _rerender_html(
 
 __all__ = [
     "load_runtime_endpoints",
+    "merge_capture_capabilities",
     "merge_capture_quality",
     "merge_runtime_endpoints",
     "decrypt_runtime_messages",

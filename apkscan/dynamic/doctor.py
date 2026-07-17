@@ -61,10 +61,17 @@ _NAME_QUIC_META = "QUIC 元数据解析"
 _NAME_QUIC_DECRYPT = "QUIC Initial 解密（cryptography）"
 _NAME_TSHARK = "tshark 深度后端"
 
-# 关键项（full profile）：任一不 ok → 整体 ok=False。设备/ABI/frida/mitmproxy/CA 是完整抓包脱壳命门。
-_CRITICAL: frozenset[str] = frozenset(
+# ★floor-only profile 的关键项：只看 **floor pcap 底座**（设备 + root + 设备 tcpdump），**不含**
+# frida/mitmproxy/CA——PCAP-first 下只想 tcpdump 抓 pcap 的用户，不该被"主机没装 frida"判成环境不完整
+# （这正是外部评价 #1 点的问题）。缺 frida/mitm 时对应项仍体检、仅信息性，不拉整体 ok。
+_FLOOR_CRITICAL: frozenset[str] = frozenset({_NAME_DEVICE, _NAME_ROOT, _NAME_DEVICE_TCPDUMP})
+
+# 关键项（full profile）= floor pcap 底座 ∪ 完整明文栈（ABI/frida/mitmproxy/CA）。任一不 ok → 整体 ok=False。
+# ★须并入 _FLOOR_CRITICAL（codex 复审 P1-1）：能力矩阵规定 both/full 的 PCAP 底座同样需要
+# adb+device+root+device_tcpdump，缺 root/tcpdump 时 full 也抓不到 floor.pcap——不能因 _CRITICAL 漏了
+# root/device_tcpdump 而在缺 floor 底座时误报"完整环境可用"（frida/mitm/CA 全 ok 也不行）。
+_CRITICAL: frozenset[str] = _FLOOR_CRITICAL | frozenset(
     {
-        _NAME_DEVICE,
         _NAME_ABI,
         _NAME_HOST_FRIDA,
         _NAME_FRIDA_SERVER,
@@ -72,11 +79,6 @@ _CRITICAL: frozenset[str] = frozenset(
         _NAME_CA,
     }
 )
-
-# ★floor-only profile 的关键项：只看 **floor pcap 底座**（设备 + root + 设备 tcpdump），**不含**
-# frida/mitmproxy/CA——PCAP-first 下只想 tcpdump 抓 pcap 的用户，不该被"主机没装 frida"判成环境不完整
-# （这正是外部评价 #1 点的问题）。缺 frida/mitm 时对应项仍体检、仅信息性，不拉整体 ok。
-_FLOOR_CRITICAL: frozenset[str] = frozenset({_NAME_DEVICE, _NAME_ROOT, _NAME_DEVICE_TCPDUMP})
 
 #: 支持的体检 profile。
 DOCTOR_PROFILES: tuple[str, ...] = ("full", "floor-only")
@@ -538,6 +540,11 @@ def _run_impl(
     """run 的实际逻辑（异常由外层 run 兜底转结构化）。profile=floor-only 时只把 floor 底座当关键项。"""
     items: list[dict] = []
 
+    # ★floor-only profile 只要求 PCAP 底座——对增强项（frida-server / CA）只做只读体检，绝不因默认
+    #   --fix 就下载部署 frida-server、往设备系统信任库装 CA（codex 复审 P1-3：floor-only 抓 pcap
+    #   不该有 frida/CA 的写副作用；full profile 现状不变，仍自动修）。
+    enhancement_fix = auto_fix and profile != "floor-only"
+
     _emit(on_progress, "检查在线设备")
     items.append(_check_device(serial))
 
@@ -556,14 +563,14 @@ def _run_impl(
 
     _emit(on_progress, "检查设备 frida-server")
     items.append(
-        _check_frida_server(serial, host_ver, auto_fix=auto_fix, on_progress=on_progress)
+        _check_frida_server(serial, host_ver, auto_fix=enhancement_fix, on_progress=on_progress)
     )
 
     _emit(on_progress, "检查 mitmproxy")
     items.append(_check_mitmproxy())
 
     _emit(on_progress, "检查 CA 信任")
-    items.append(_check_ca(serial, auto_fix=auto_fix, on_progress=on_progress))
+    items.append(_check_ca(serial, auto_fix=enhancement_fix, on_progress=on_progress))
     items.extend(_check_pcap_capabilities())  # PCAP 深度能力可用性（信息性、非关键）
 
     # ★按 profile 选关键项集：floor-only 只看 floor pcap 底座（缺 frida/mitm/CA 不拉整体 ok）。
