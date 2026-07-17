@@ -49,7 +49,7 @@ from apkscan.dynamic import (
     DynamicResult,
     empty_result,
 )
-from apkscan.dynamic import cryptohook, pcap_ingest, provision
+from apkscan.dynamic import capabilities, capability_probe, cryptohook, pcap_ingest, provision
 from apkscan.dynamic.capture_plan import CaptureDecision, decide_capture
 from apkscan.report import json as report_json
 
@@ -325,6 +325,18 @@ def run(
         result = empty_result(STATUS_ERROR, f"无法创建输出目录 {out_dir}")
         return result
 
+    # --- A1-3：起手用能力矩阵解析本次抓包的能力计划（机器可读的抓包能力快照）----------------
+    # 探本次实际可用能力（主机 adb/frida/mitm/tshark + 设备 root/tcpdump）→ resolve(mode) → CapabilityPlan，
+    # 序列化后随 runtime_report.json 落进 report.meta['capture_capabilities']。让"floor 底座就绪没有 /
+    # 明文最强可达层 / 为何没明文（缺哪些增强）"从散落日志变机器可读。★纯可见性：门控降级仍由下面
+    # _detect_missing 兜底（保守、不改既有 skip 语义）；能力探测碰 adb IO，best-effort、异常记空计划、绝不挡抓包。
+    plan_dict: dict[str, Any] | None = None
+    try:
+        available = capability_probe.probe_available(serial)
+        plan_dict = capabilities.plan_as_dict(capabilities.resolve(mode, available))
+    except Exception:
+        logger.exception("[capture] 能力计划解析异常（不影响抓包，记为空计划）")
+
     # --- 前置能力探测：缺任一 → skipped + 手册（floor-only 不要求 mitmproxy）------
     missing = _detect_missing(serial, require_mitm=use_mitm, require_frida=use_frida)
     if missing:
@@ -343,7 +355,7 @@ def run(
     )
     return _capture(
         package, out_path, duration, serial, decision=decision, mitm=use_mitm, floor=use_floor,
-        frida=use_frida,
+        frida=use_frida, capabilities_plan=plan_dict,
     )
 
 
@@ -443,6 +455,7 @@ def _capture(
     mitm: bool = True,
     floor: bool = True,
     frida: bool = True,
+    capabilities_plan: dict[str, Any] | None = None,
 ) -> DynamicResult:
     """编排 mitmdump + adb 代理 + frida unpinning + 启 app，到时停并解析流量。
 
@@ -975,6 +988,7 @@ def _capture(
         remote_control_events=_clean(remote_control_events),
         budget_exceeded=budget_exceeded,
         capture_signals=capture_signals,
+        capture_capabilities=capabilities_plan,
     )
     report_paths = [report_path] if report_path else []
 
@@ -2892,6 +2906,7 @@ def _write_runtime_report(
     remote_control_events: list[dict[str, Any]] | None = None,
     budget_exceeded: bool = False,
     capture_signals: dict[str, Any] | None = None,
+    capture_capabilities: dict[str, Any] | None = None,
 ) -> str:
     """把运行时端点写成 out/runtime_report.json（复用 report.json 的序列化）。
 
@@ -2913,6 +2928,9 @@ def _write_runtime_report(
         # P0-4：结构化采集信号（proxy_set/floor_started/floor_pulled/hook_ready/mitm_bytes/
         # endpoint_total/degraded），供下游/人工判这次抓包哪路成了、哪路降级，杜绝"假成功"。
         "capture_signals": dict(capture_signals or {}),
+        # A1-3：抓包能力计划快照（mode / floor 底座就绪否 / 缺哪些增强 / 明文最强可达层），
+        # 供 merge 拷进 report.meta['capture_capabilities']——机器可读的"这次抓包能到哪、为何没明文"。
+        "capture_capabilities": dict(capture_capabilities or {}),
         # ③ 时间盒：采集因超总预算被缩短/中止 → True（下游据此知端点/事件可能不全）。
         "budget_exceeded": budget_exceeded,
         "endpoint_total": len(endpoints),

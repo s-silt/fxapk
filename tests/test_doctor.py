@@ -168,8 +168,9 @@ def test_run_no_root_item_fail(monkeypatch):
     item = _item_by_name(res, doctor._NAME_ROOT)
     assert item["ok"] is False
     assert item["fix_cmd"]
-    # root 非关键项：整体 ok 不应仅因 root 失败而失败（其它关键项都 ok）。
-    assert res["ok"] is True
+    # ★P1-1：root 自能力矩阵起并入 full 关键集（both/full 的 PCAP 底座需要 root+tcpdump）——
+    #   缺 root 时 full 也抓不到 floor.pcap，整体应判 not ok。
+    assert res["ok"] is False
 
 
 def test_run_abi_item_uses_provision(monkeypatch):
@@ -441,10 +442,15 @@ def test_run_overall_ok_false_when_critical_item_fails(monkeypatch):
 
 def test_run_overall_ok_true_when_only_noncritical_fails(monkeypatch):
     _all_present(monkeypatch)
-    # 仅 root（非关键项）失败，其它关键项全 ok → 整体 ok=True。
-    monkeypatch.setattr(provision, "_adb", lambda extra, serial=None: _FakeCompleted(1, ""))
+    # 仅非关键项（PCAP 深度能力，如 tshark 后端）失败，其它关键项全 ok → 整体 ok=True。
+    # ★root/tcpdump 自 P1-1 起并入 full 关键集，已不是"非关键"示例；改用恒非关键的 PCAP 深度能力项。
+    monkeypatch.setattr(
+        doctor,
+        "_check_pcap_capabilities",
+        lambda: [doctor._item(doctor._NAME_TSHARK, False, "PATH 无 tshark（可选深度后端）")],
+    )
     res = doctor.run()
-    assert _item_by_name(res, doctor._NAME_ROOT)["ok"] is False
+    assert _item_by_name(res, doctor._NAME_TSHARK)["ok"] is False
     assert res["ok"] is True
 
 

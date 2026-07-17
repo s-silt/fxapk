@@ -481,6 +481,44 @@ def test_merge_and_rerender_copies_capture_quality(tmp_path) -> None:
     assert report.meta["capture_signals"]["quality"] == quality
 
 
+def test_merge_and_rerender_copies_capture_capabilities(tmp_path) -> None:
+    """A1-3：runtime_report.json 的 capture_capabilities（能力计划快照）拷进 report.meta。"""
+    runtime_report = tmp_path / "runtime_report.json"
+    caps = {
+        "mode": "floor-only",
+        "ready": True,
+        "required": ["adb", "device", "device_tcpdump", "root_capture"],
+        "available": ["adb", "device", "device_tcpdump", "root_capture"],
+        "missing": [],
+        "degraded_to": None,
+        "plaintext_reachable": [],
+        "plaintext_best": None,
+        "notes": ["floor-only 底座就绪"],
+    }
+    _write_runtime_report(runtime_report, [], capture_capabilities=caps)
+    report = _make_report()
+
+    stats = merge.merge_and_rerender(
+        report,
+        [],
+        str(tmp_path),
+        formats=["json"],
+        runtime_report_path=str(runtime_report),
+    )
+
+    assert report.meta["capture_capabilities"] == caps
+    assert stats["capture_capabilities_mode"] == "floor-only"
+
+
+def test_merge_capture_capabilities_absent_is_noop(tmp_path) -> None:
+    """无 capture_capabilities（旧 runtime_report / 抓包未跑）→ 不写 meta、返回 {}，不抛。"""
+    runtime_report = tmp_path / "runtime_report.json"
+    _write_runtime_report(runtime_report, [])  # 无 capture_capabilities 键
+    report = _make_report()
+    assert merge.merge_capture_capabilities(report, str(runtime_report)) == {}
+    assert "capture_capabilities" not in report.meta
+
+
 def test_merge_and_rerender_uses_same_base(tmp_path) -> None:
     """问题 2：merge 重渲用传入的 base（APK 名）写 <base>.{json,html}，不写死 report.*。
 
