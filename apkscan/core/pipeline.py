@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 
 from apkscan.analyzers.classify import classify_app
+from apkscan.config.asset_score import rank_assets
 from apkscan.config.chain import build_control_chains
 from apkscan.config.decode import decode_config_blob
 from apkscan.config.fetch import fetch_config_object
@@ -503,6 +504,18 @@ def _stage_control_chain(state: _PipelineState) -> None:
         state.meta["control_chains"] = chains
 
 
+def _stage_asset_score(state: _PipelineState) -> None:
+    """附加视图：给每个后端域名/IP 打加权 ``asset_score`` 并按分降序写 meta["asset_scores"]——解密后几十个
+    域名据此排序，让办案人先看最像 App 自有后端的。纯从端点已有事实（证据来源 / runtime 业务路径 / 五层归因
+    / infra 公共域判据）派生、不联网、不改 leads / closure。在 attribution 之后跑（IP 公共边缘判据需归因）。"""
+    scores = rank_assets(state.endpoints)
+    if scores:
+        state.meta["asset_scores"] = [
+            {"value": s.value, "kind": s.kind, "score": s.score, "reasons": list(s.reasons)}
+            for s in scores
+        ]
+
+
 def _assemble_report(state: _PipelineState) -> Report:
     """据累积态组装 Report（字段一一对应）。"""
     return Report(
@@ -545,7 +558,7 @@ def _run_stage(state: _PipelineState, name: str, fn: "Callable[[_PipelineState],
 # PR9 不 create/mutate 任何 Lead/advice/exit code），其组装故障不该污染 --strict 门禁——与 closure.py 里
 # close 阶段同一视图已自带 guard、不下沉 case closure 的既定语义对齐（只有 analyze 侧接线漏了这层豁免）。
 # 故障仍完整记录于 meta.stage_status（保留 error 审计痕迹），仅切断降级传导。
-_ADDITIVE_STAGES: frozenset[str] = frozenset({"network_attribution", "control_chain"})
+_ADDITIVE_STAGES: frozenset[str] = frozenset({"network_attribution", "control_chain", "asset_score"})
 
 
 def _apply_stage_failures(state: _PipelineState) -> None:
@@ -588,6 +601,7 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     _run_stage(state, "credibility", _stage_credibility)           # 完整度 / 工具版本 / 规则摘要
     _run_stage(state, "network_attribution", _stage_network_attribution)  # 附加：基础设施归因图谱 + 角色候选（被动）
     _run_stage(state, "control_chain", _stage_control_chain)        # 附加：config-chain 控制链对象（组装现有数据）
+    _run_stage(state, "asset_score", _stage_asset_score)            # 附加：后端域名/IP 第一方资产加权排序
     _apply_stage_failures(state)          # 阶段级故障反馈 analysis_status
     state.meta["stage_status"] = state.stage_status
     report = _assemble_report(state)
