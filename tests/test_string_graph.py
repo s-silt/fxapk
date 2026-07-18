@@ -217,8 +217,8 @@ _CT = "aB3xK9mP2qR7sT5vW1yZ4nL6jH8gF0dS/cV+eXbMkQwErTyUiOpAsDfGhJkLzXcVbNm=="  #
 
 
 def test_camelcase_identifier_not_ciphertext() -> None:
-    """全月语料回归：纯字母 camelCase 标识符（无数字无 +/=）不当密文——李素云案 showMethodErrorToast(\"方法名\")
-    那类误报（onDeleteLikeDDApplication / getUserDisplayNameAVChatKit …落 base64 字母表但非密文）。"""
+    """全月语料回归：纯字母 camelCase 标识符（无数字无 +/=）不当密文——某混淆样本 showMethodErrorToast(\"方法名\")
+    那类误报（标识符如 getUserDisplayNameAVChatKit …落 base64 字母表但非密文）。"""
     for ident in (
         "getUserDisplayNameAVChatKit", "isRunningInsideShellClose", "onViewInitFinishedDDApplication",
         "getTeamMemberDisplayNameAVChatKit",
