@@ -114,6 +114,55 @@ def _complete_endpoint() -> Endpoint:
     )
 
 
+def _complete_ip_endpoint(value: str) -> Endpoint:
+    """A five-layer-complete IP endpoint at ``value`` (fresh enrichment tree per call)."""
+    template = _complete_endpoint()
+    return _endpoint(value, runtime=True, target=True, payload=True, enrichment=template.enrichment)
+
+
+def test_select_targets_with_stats_reports_truncation() -> None:
+    report = _report(*[_complete_ip_endpoint(f"198.51.100.1{n}") for n in range(7)])
+
+    selected, stats = closure_module._select_targets_with_stats(report, 6)
+
+    assert [ep.value for ep in selected] == [f"198.51.100.1{n}" for n in range(6)]
+    assert stats == {
+        "candidate_total": 7,
+        "selected": 6,
+        "limit": 6,
+        "truncated": 1,
+        "dropped": ["198.51.100.16"],
+    }
+
+
+def test_close_report_truncated_targets_yield_partial_with_gap() -> None:
+    report = _report(*[_complete_ip_endpoint(f"198.51.100.1{n}") for n in range(7)])
+
+    closure = close_report(report, ClosureConfig(online=False, require_dynamic=False), enrichers=[])
+
+    assert closure["status"] == CLOSURE_PARTIAL
+    assert len(closure["targets"]) == 6
+    assert closure["target_selection"] == {
+        "candidate_total": 7,
+        "selected": 6,
+        "limit": 6,
+        "truncated": 1,
+        "dropped": ["198.51.100.16"],
+    }
+    assert any("198.51.100.16" in str(gap) for gap in closure["gaps"])
+
+
+def test_close_report_untruncated_targets_stay_complete() -> None:
+    report = _report(_complete_ip_endpoint("198.51.100.10"), _complete_ip_endpoint("198.51.100.11"))
+
+    closure = close_report(report, ClosureConfig(online=False, require_dynamic=False), enrichers=[])
+
+    assert closure["status"] == CLOSURE_COMPLETE
+    assert closure["gaps"] == []
+    assert closure["target_selection"]["truncated"] == 0
+    assert closure["target_selection"]["candidate_total"] == closure["target_selection"]["selected"] == 2
+
+
 def test_select_targets_prioritizes_target_attributed_runtime_endpoint() -> None:
     report = _report(
         _endpoint("198.51.100.30", runtime=False),
