@@ -21,6 +21,9 @@ out/
 # CodeGraph 本地索引(生成物，类似 .git，绝不入库)
 /.codegraph/
 
+# Understand-Anything 知识图谱(本地生成物，重跑 /understand 即可重建，绝不入库)
+/.ua/
+
 # PyInstaller 构建产物(大，绝不入库)
 /build/
 /dist/
