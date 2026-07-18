@@ -1039,7 +1039,13 @@ def _populate_network_attribution(report: Report) -> None:
             report.meta["network_attribution"] = blob
     except Exception as exc:  # noqa: BLE001 - view-only; a failure never fails case closure
         logging.getLogger(__name__).warning("network_attribution 组装失败：%s", type(exc).__name__)
-        report.meta["network_attribution"] = {"phase": "close", "error": type(exc).__name__}
+        # close 期重组失败不得覆盖 analyze 期已有的有效视图——保留旧视图、只在其上附 close_error；
+        # 无旧视图才写纯错误标记（否则会损失展示证据，见 codex 审计 P2）。
+        existing = report.meta.get("network_attribution")
+        if isinstance(existing, dict):
+            existing["close_error"] = type(exc).__name__
+        else:
+            report.meta["network_attribution"] = {"phase": "close", "error": type(exc).__name__}
 
 
 def _capture_meta(report: Report) -> dict[str, Any]:
