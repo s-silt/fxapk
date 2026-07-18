@@ -137,6 +137,11 @@ class PcapSummary:
     flows: list[Flow] = field(default_factory=list)
     dns_queries: set[str] = field(default_factory=set)
     dns_records: list[DnsRecord] = field(default_factory=list)
+    #: 解析状态——让调用方区分「采集/解析失败」与「真实零业务流量」（二者过去都是空 flows）。
+    #: ok=正常解析（flows 可为空=真零流量）；read_error=文件读失败；unparseable=非 pcap/pcapng（坏 magic/过短）；
+    #: parse_error=解析中途异常。失败态时 flows 通常为空但**不代表**零流量，closure/pcap-leads 据此不误判。
+    parse_status: str = "ok"
+    error: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -144,30 +149,51 @@ class PcapSummary:
 # ---------------------------------------------------------------------------
 
 
+def _has_pcap_magic(data: bytes) -> bool:
+    """前 4 字节是否 pcap/pcapng magic（经典 µs/ns 大小端 + pcapng SHB）。"""
+    return len(data) >= 4 and data[:4] in (
+        b"\xa1\xb2\xc3\xd4", b"\xa1\xb2\x3c\x4d", b"\xd4\xc3\xb2\xa1", b"\x4d\x3c\xb2\xa1", b"\x0a\x0d\x0d\x0a",
+    )
+
+
 def parse_pcap(path: str) -> PcapSummary:
-    """读 pcap 文件并解析；文件缺失/坏 → 空 summary（不抛）。"""
+    """读 pcap 文件并解析；文件缺失/坏 → **带失败态**的 summary（不抛）。"""
     try:
         data = Path(path).read_bytes()
-    except OSError:
+    except OSError as exc:
         logger.exception("[pcap] 读取 pcap 失败：%s", path)
-        return PcapSummary()
+        return PcapSummary(parse_status="read_error", error=f"{type(exc).__name__}: {exc}")
     return parse_pcap_bytes(data)
 
 
 def parse_pcap_bytes(data: bytes) -> PcapSummary:
-    """解析 pcap/pcapng 字节，聚合出 flows + DNS 查询。绝不抛。"""
+    """解析 pcap/pcapng 字节，聚合出 flows + DNS 查询。绝不抛。失败态写 parse_status/error。"""
     summ = PcapSummary()
+    if not _has_pcap_magic(data):
+        # 坏 magic / 过短 = 非 pcap/pcapng：显式标失败，不与「合法零流量」混同（否则 pcap-leads 误判采集成功）。
+        summ.parse_status = "unparseable"
+        summ.error = f"unrecognized magic {data[:4].hex()}" if data else "empty input"
+        return summ
+    # 有效 magic 但连头都放不下 = 截断文件：也标失败，别当「零流量」（经典全局头 24B、pcapng 最小 SHB 28B）。
+    min_len = 28 if data[:4] == b"\x0a\x0d\x0d\x0a" else 24
+    if len(data) < min_len:
+        summ.parse_status = "unparseable"
+        summ.error = f"truncated header: {len(data)} bytes (< {min_len})"
+        return summ
     flows: dict[tuple, Flow] = {}
     asm = _HelloReassembler()  # 每份 pcap 独立、无模块级态（并行分析器安全）
     qdec = _QuicDecryptor()    # QUIC Initial 解密态（密钥缓存 + CRYPTO 重组），同样每份 pcap 独立
+    diag: dict[str, object] = {}  # 迭代器回传：某记录/块声明字节数超出实际 → 文件中途截断
     try:
-        for ts, linktype, frame in _iter_frames(data):
+        for ts, linktype, frame in _iter_frames(data, diag):
             try:
                 _process_frame(ts, linktype, frame, flows, summ, asm, qdec)
             except Exception:  # noqa: BLE001 - 单包坏不影响其余
                 logger.debug("[pcap] 跳过坏包", exc_info=True)
-    except Exception:  # noqa: BLE001 - 整体解析异常也不抛
+    except Exception as exc:  # noqa: BLE001 - 整体解析异常也不抛
         logger.exception("[pcap] 解析异常")
+        summ.parse_status = "parse_error"
+        summ.error = f"{type(exc).__name__}: {exc}"
     # 收尾：对未凑齐的 stitch（snaplen 截断/丢续段）best-effort 捞 SNI 回填对应 Flow（复审 #2：
     # 恢复旧代码对截断 record 能捞出 SNI 的行为，弃 JA3 以不产出算错值）。
     asm.drain()
@@ -176,6 +202,11 @@ def parse_pcap_bytes(data: bytes) -> PcapSummary:
         if f is not None:
             f.sni.add(sni)
     summ.flows = list(flows.values())
+    if summ.parse_status == "ok" and diag.get("truncated"):
+        # 有效头但文件中途截断（某记录/块声明字节数超出实际）：flows 可能不全——显式标 truncated，
+        # 不当「ok 零/完整流量」，操作员据此知道要重抓（区别于干净零流量或完整解析）。
+        summ.parse_status = "truncated"
+        summ.error = "capture truncated mid-file (a record/block claims more bytes than present)"
     return summ
 
 
@@ -184,7 +215,7 @@ def parse_pcap_bytes(data: bytes) -> PcapSummary:
 # ---------------------------------------------------------------------------
 
 
-def _iter_frames(data: bytes) -> Iterator[tuple[float, int, bytes]]:
+def _iter_frames(data: bytes, diag: dict[str, object] | None = None) -> Iterator[tuple[float, int, bytes]]:
     if len(data) < 24:
         return
     magic = data[:4]
@@ -199,7 +230,7 @@ def _iter_frames(data: bytes) -> Iterator[tuple[float, int, bytes]]:
     elif magic == b"\x4d\x3c\xb2\xa1":
         endian, frac_div = "<", 1e9
     elif magic == b"\x0a\x0d\x0d\x0a":
-        yield from _iter_pcapng(data)
+        yield from _iter_pcapng(data, diag)
         return
     else:
         logger.info("[pcap] 非 pcap/pcapng（magic=%s），跳过", magic.hex())
@@ -211,37 +242,74 @@ def _iter_frames(data: bytes) -> Iterator[tuple[float, int, bytes]]:
         ts_sec, ts_usec_or_nsec, incl, _orig = struct.unpack(endian + "IIII", data[off : off + 16])
         off += 16
         if incl < 0 or off + incl > n:
+            if diag is not None:  # 记录声明字节数超出实际 = 文件中途截断（有效头、非坏 magic）
+                diag["truncated"] = True
             break
         frame = data[off : off + incl]
         off += incl
         yield (float(ts_sec) + ts_usec_or_nsec / frac_div, linktype, frame)
 
 
-def _iter_pcapng(data: bytes) -> Iterator[tuple[float, int, bytes]]:
-    """最小 pcapng：跟踪 IDB 的 linktype，产出 Enhanced/Simple Packet Block 的帧。"""
+def _pcapng_if_tsresol(idb_body: bytes, endian: str) -> float:
+    """从 IDB 选项解析 if_tsresol(code 9) → 时间戳除数。缺省 1e6（微秒）。
+
+    值字节 v：MSB=0 → 10^(v&0x7f) 秒的负幂（如 v=6→µs=1e6、v=9→ns=1e9）；MSB=1 → 2^(v&0x7f)。
+    没有它就默认微秒——旧代码对所有 EPB 硬编码 /1e6，遇纳秒(if_tsresol=9)的 pcapng 会把时间戳放大 1000×，
+    与 socket 时间线形成假「已知冲突」、把本应 confirmed 的五元组归因误降级。
+    """
+    # IDB body: linktype(2) reserved(2) snaplen(4) 之后是 options(TLV: code(2) len(2) value 4字节对齐)。
+    opt = 8
+    while opt + 4 <= len(idb_body):
+        code, length = struct.unpack(endian + "HH", idb_body[opt : opt + 4])
+        opt += 4
+        if code == 0:  # opt_endofopt
+            break
+        if code == 9 and length >= 1:  # if_tsresol
+            v = idb_body[opt]
+            return float(2 ** (v & 0x7F)) if (v & 0x80) else float(10 ** (v & 0x7F))
+        opt += (length + 3) & ~3  # 4 字节对齐
+    return 1e6
+
+
+def _iter_pcapng(data: bytes, diag: dict[str, object] | None = None) -> Iterator[tuple[float, int, bytes]]:
+    """最小 pcapng：按 section 跟踪字节序 + 每接口 linktype/if_tsresol，产出 Enhanced/Simple Packet Block 的帧。"""
     n = len(data)
     if n < 12:
         return
-    # SHB 的 byte-order magic 在 offset 8（0x1A2B3C4D）。
-    endian = "<" if data[8:12] == b"\x4d\x3c\x2b\x1a" else ">"
+    endian = "<"  # 占位，遇首个 SHB 即按其 byte-order magic 重定
     linktypes: list[int] = []
+    tsresols: list[float] = []
     off = 0
     while off + 8 <= n:
+        # SHB 的 block type 0x0A0D0D0A 字节序无关（回文）——每遇 SHB 重定本 section 字节序 + 重置接口表
+        # （pcapng 允许多 section 用不同字节序；旧代码只在首个 SHB 判一次，后续异序 section 被误解或停止）。
+        if data[off : off + 4] == b"\x0a\x0d\x0d\x0a":
+            if off + 12 > n:
+                if diag is not None:
+                    diag["truncated"] = True
+                break
+            endian = "<" if data[off + 8 : off + 12] == b"\x4d\x3c\x2b\x1a" else ">"
+            linktypes = []
+            tsresols = []
         btype, blen = struct.unpack(endian + "II", data[off : off + 8])
         if blen < 12 or off + blen > n:
+            if diag is not None and off + blen > n:  # 块长越界=中途截断（blen<12 是坏块结构，非截断，不误标）
+                diag["truncated"] = True
             break
         body = data[off + 8 : off + blen - 4]
-        if btype == 0x00000001:  # IDB
+        if btype == 0x00000001:  # IDB: linktype(2) reserved(2) snaplen(4) options...
             if len(body) >= 2:
                 linktypes.append(struct.unpack(endian + "H", body[:2])[0])
+                tsresols.append(_pcapng_if_tsresol(body, endian))
         elif btype == 0x00000006:  # EPB: interface_id(4) ts_hi(4) ts_lo(4) caplen(4) origlen(4) data
             if len(body) >= 20:
                 if_id, ts_hi, ts_lo, caplen, _orig = struct.unpack(endian + "IIIII", body[:20])
-                frame = body[20 : 20 + caplen]
-                lt = linktypes[if_id] if if_id < len(linktypes) else (linktypes[0] if linktypes else 1)
-                ts = ((ts_hi << 32) | ts_lo) / 1e6
-                yield (ts, lt, frame)
-        elif btype == 0x00000003:  # Simple Packet Block
+                # 非法 interface_id（越界或尚无 IDB）= malformed 块：跳过，不借用接口 0 的 linktype/tsresol 误解。
+                # linktypes/tsresols 逐 IDB 成对追加，len 一致，故 if_id 合法即两者都可安全索引。
+                if if_id < len(linktypes):
+                    frame = body[20 : 20 + caplen]
+                    yield (((ts_hi << 32) | ts_lo) / tsresols[if_id], linktypes[if_id], frame)
+        elif btype == 0x00000003:  # Simple Packet Block：无时间戳 → 0.0（下游按 <=0 = 未知处理，不当真时刻）
             lt = linktypes[0] if linktypes else 1
             if len(body) >= 4:
                 yield (0.0, lt, body[4:])
@@ -1462,6 +1530,18 @@ def to_runtime_endpoints(summary: PcapSummary) -> list[Endpoint]:
     return endpoints
 
 
+#: markdown 结构/行内语法字符：嵌不可信字段前逐字符反斜杠转义（含反引号，堵逃逸 inline-code 注入 HTML/链接）。
+#: 无正则实现——本模块把 `re` 用作 RemoteEndpoint 循环变量，不引入 re 模块避免撞名。
+_MD_SPECIAL_CHARS = frozenset("\\`*_{}[]()#+-.!|>&<~")
+
+
+def _md_escape(value: object) -> str:
+    """markdown 台账里嵌可能含不可信内容的字段（如 error 里的文件路径/解析异常串）前转义：折叠空白 +
+    反斜杠转义 markdown 结构/行内语法字符（含反引号），防被渲染成结构/链接或逃逸注入原始 HTML。"""
+    collapsed = " ".join(str(value).split())  # 折叠所有空白（含换行）为单空格，堵伪造新行/标题
+    return "".join("\\" + ch if ch in _MD_SPECIAL_CHARS else ch for ch in collapsed)
+
+
 def build_ledger_md(summary: PcapSummary) -> str:
     """把 pcap 线索聚成调证台账（markdown），按 IP 接入节点 / 域名 分组。"""
     leads = to_report_leads(summary)
@@ -1470,6 +1550,15 @@ def build_ledger_md(summary: PcapSummary) -> str:
     lines: list[str] = [
         "# pcap 调证台账（带外抓包线索聚合）",
         "",
+    ]
+    if summary.parse_status != "ok":
+        # error 可能含文件路径/解析异常串（潜在不可信）→ 转义后再嵌 markdown，别自己开注入面（同 probe-leads 的教训）。
+        lines += [
+            f"> ⚠ pcap 解析未成功（{_md_escape(summary.parse_status)}：{_md_escape(summary.error)}）——"
+            "空结果**不代表零流量**，请核对 pcap 文件完整性/格式后重抓。",
+            "",
+        ]
+    lines += [
         f"接入节点 {len(ips)} 个、域名 {len(doms)} 个、DNS 查询 {len(summary.dns_queries)} 条。",
         "解不开密文也能办案：下列接入节点 IP/SNI 即穿透真源站的调证锚点。",
         "",
@@ -1511,6 +1600,9 @@ def to_ledger_dict(summary: PcapSummary) -> dict[str, object]:
         for re in res
     ]
     return {
+        # 解析状态先行：程序化消费者据此区分「解析/采集失败」与「真实零业务流量」（失败态空 endpoints 不当零流量）。
+        "parse_status": summary.parse_status,
+        "error": summary.error,
         "endpoints": [
             {"value": l.value, "advice": l.advice, "snippet": (l.source_refs[0].snippet if l.source_refs else "")}
             for l in leads

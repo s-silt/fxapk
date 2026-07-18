@@ -390,6 +390,20 @@ def test_ts_overlap_helper() -> None:
     assert socket_attr._ts_overlap(e, socket_attr.PcapConn(1, None, None), 2.0) is False  # 无 pcap 时间
 
 
+def test_ts_helpers_treat_nonpositive_timestamp_as_unknown() -> None:
+    """★回归（codex 全库审计 P1）：0.0/负值/NaN/inf 时间戳（pcap flow 未知哨兵、pcapng SPB）按未知处理，
+    不当 epoch 真时刻与 socket 时钟(~1.7e9)误判「已知冲突」把归因降级。"""
+    e = socket_attr.SocketEntry("tcp", "10.0.0.2", 43090, "1.2.3.4", 443, "established", 10234,
+                                first_ts=1.7e9, last_ts=1.7e9)
+    zero = socket_attr.PcapConn(43090, first_ts=0.0, last_ts=0.0)
+    assert socket_attr._ts_known_conflict(e, zero, 2.0) is False  # 0.0 未知 → 不判「已知冲突」
+    assert socket_attr._ts_overlap(e, zero, 2.0) is False         # 也不佐证
+    neg = socket_attr.PcapConn(43090, first_ts=-1.0, last_ts=-1.0)
+    assert socket_attr._ts_known_conflict(e, neg, 2.0) is False
+    nan = socket_attr.PcapConn(43090, first_ts=float("nan"), last_ts=float("inf"))
+    assert socket_attr._ts_known_conflict(e, nan, 2.0) is False
+
+
 def test_attribute_connections_udp_flow_does_not_confirm_via_tcp_socket() -> None:
     """★Fable 复审 P1-1：tcp/udp 本地端口空间独立可同号——一条 UDP 流不得撞上同号 TCP socket 被误 confirmed。"""
     s = socket_attr.parse_uid_sockets(_SAMPLE)  # 1.2.3.4:443 是目标 uid 10234 的 **TCP** socket，本地端口 43090

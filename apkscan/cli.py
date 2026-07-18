@@ -1081,7 +1081,13 @@ def pcap_leads(
             f"解析出 {len(summary.flows)} 条流、{n_ip} 个公网接入节点、{n_dom} 个域名、"
             f"{len(summary.dns_queries)} 条 DNS 查询。"
         )
-        if not summary.flows and not summary.dns_queries:
+        if getattr(summary, "parse_status", "ok") != "ok":
+            typer.echo(
+                f"警告：pcap 解析未成功（{summary.parse_status}：{summary.error}）——"
+                "空结果**不代表零流量**，请核对文件完整性/格式后重抓。",
+                err=True,
+            )
+        elif not summary.flows and not summary.dns_queries:
             typer.echo("提示：没解析出流量——确认是 pcap/pcapng、且为 Ethernet/RAW/Linux-SLL 链路（pcapng 也支持）。")
 
         ledger = pcap_ingest.build_ledger_md(summary)
