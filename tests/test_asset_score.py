@@ -26,11 +26,24 @@ def test_all_signals_accumulate_for_own_backend() -> None:
         enrichment={"runtime": {"business_api_paths": ["/api/order"]}},
     )
     s = score_asset(ep)
-    # 30(apk) + 20(runtime) + 15(config) + 10(business) + 10(own-backend/建议调证) = 85
+    # 30(apk) + 20(runtime) + 15(config) + 10(business) + 10(not-known-infra/建议调证) = 85
     assert s.score == 85
     joined = " ".join(s.reasons)
     assert "apk-code-ref+30" in joined and "runtime-access+20" in joined
-    assert "config-appearance+15" in joined and "business-path+10" in joined and "own-backend+10" in joined
+    assert "config-appearance+15" in joined and "business-path+10" in joined
+    # reason 如实叫 not-known-infra：这是"未命中已知第三方名单"，不是"识别为自有后端"。
+    assert "not-known-infra+10" in joined
+
+
+def test_unknown_domain_without_any_positive_signal_gets_no_bonus() -> None:
+    """★纯 denylist 的兜底"建议调证"不构成正向证据：没有任何正向信号时不发 +10。
+
+    真实样本里 ``www.slf4j.org``（日志库官网）与一个被误抽成域名的 Java 类名，正是靠这条白拿的
+    +10 登顶 asset_scores 排序——除此之外它们没有任何证据。
+    """
+    s = score_asset(_ep("some-unknown-host.example", "domain", sources=("jadx",)))
+    assert s.score == 0
+    assert s.reasons == ()
 
 
 def test_public_sdk_cdn_domain_penalized() -> None:
