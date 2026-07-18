@@ -149,24 +149,46 @@ def corpus_ls(
     _print({"count": len(rows), "samples": rows})
 
 
+#: seen --by 的列表维度取值（非标量 SEEN_FIELDS，走专用列表反查）。
+_CONFIG_OBJECT_BY = "config-object"
+
+
 @corpus_app.command("seen")
 def corpus_seen(
-    value: str = typer.Argument(..., help="要反查的值（样本哈希 / 包名 / 签名证书摘要）。"),
+    value: str = typer.Argument(..., help="要反查的值（样本哈希 / 包名 / 签名证书摘要 / 配置对象 url|sha256）。"),
     by: str = typer.Option(
-        "sample_sha256", "--by", help="按哪个字段查：sample_sha256 | package_name | sign_sha256。"
+        "sample_sha256", "--by",
+        help="按哪个字段查：sample_sha256 | package_name | sign_sha256 | config-object。",
     ),
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
-    """见过没？按样本哈希 / 包名 / 共享签名证书一击反查库内记录。"""
+    """见过没？按样本哈希 / 包名 / 共享签名证书 / 共享远程配置对象一击反查库内记录。"""
     root = _resolve_corpus(corpus)
+    if by == _CONFIG_OBJECT_BY:
+        # 远程配置对象是列表维度（一样本可引用多个）：按 url 或 sha256 反查引用它的样本。
+        hits = _corpus.find_by_config_object(_corpus.load_manifest(root), value)
+        _print({"seen": bool(hits), "by": by, "value": value, "count": len(hits), "hits": hits})
+        return
     # 拼错 --by 不能静默返回 seen=false（那是权威口吻的假阴性，取证致命）——直接拒跑。
     if by not in _corpus.SEEN_FIELDS:
         typer.echo(
-            f"错误：--by 不支持的字段 {by!r}（支持：{' | '.join(_corpus.SEEN_FIELDS)}）。", err=True
+            f"错误：--by 不支持的字段 {by!r}"
+            f"（支持：{' | '.join(_corpus.SEEN_FIELDS)} | {_CONFIG_OBJECT_BY}）。",
+            err=True,
         )
         raise typer.Exit(code=2)
     hits = _corpus.find_by(_corpus.load_manifest(root), value, by=by)
     _print({"seen": bool(hits), "by": by, "value": value, "count": len(hits), "hits": hits})
+
+
+@corpus_app.command("shared-config")
+def corpus_shared_config(
+    corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
+) -> None:
+    """跨样本共享的远程配置对象簇：同一 OSS 对象(url) 或同一配置内容(sha256) 被 ≥2 样本引用——串案强锚。"""
+    root = _resolve_corpus(corpus)
+    clusters = _corpus.shared_config_objects(_corpus.load_manifest(root))
+    _print({"count": len(clusters), "clusters": clusters})
 
 
 @corpus_app.command("reindex")
