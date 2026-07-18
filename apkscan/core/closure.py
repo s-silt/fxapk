@@ -954,10 +954,17 @@ def _enrich_resolved_ips(
 
 def _update_target_leads(report: Report, targets: Sequence[Mapping[str, object]]) -> None:
     by_key = {(str(target.get("kind")), str(target.get("value")).lower()): target for target in targets}
+    marker = "[case-close]"
     for lead in report.leads:
         kind = "domain" if lead.category.value == "DOMAIN" else "ip" if lead.category.value == "IP" else ""
+        if not kind:
+            continue  # 非 DOMAIN/IP 线索：从不贴 case-close marker，不碰
+        # 先清本线索所有旧 [case-close] 注记——含上一轮更大 max_targets 时给现已被截断/未选的 lead 写的陈旧状态
+        # （codex 审计 P1-1 B 面：否则缩小上限后 dropped lead 会残留与本轮 closure 不一致的旧状态）。
+        retained = [line for line in lead.notes.splitlines() if not line.startswith(marker)]
         target = by_key.get((kind, lead.value.lower()))
         if target is None:
+            lead.notes = "\n".join(line for line in retained if line).strip()  # 本轮未评估：只清旧 marker
             continue
         layers = target.get("layers")
         request = layers.get("request_target") if isinstance(layers, Mapping) else None
@@ -972,8 +979,6 @@ def _update_target_leads(report: Report, targets: Sequence[Mapping[str, object]]
                     text = str(field)
                     if text and text not in lead.evidence_to_obtain:
                         lead.evidence_to_obtain.append(text)
-        marker = "[case-close]"
-        retained = [line for line in lead.notes.splitlines() if not line.startswith(marker)]
         raw_gaps = target.get("gaps")
         gaps = [str(gap) for gap in raw_gaps] if isinstance(raw_gaps, list) else []
         summary = f"{marker} status={target.get('status')}; gaps={','.join(gaps) or 'none'}"
@@ -1019,7 +1024,7 @@ def close_report(
         report, targets, require_dynamic=config.require_dynamic, target_selection=target_selection
     )
     report.meta["closure"] = closure
-    _populate_network_attribution(report)
+    _refresh_derived_views(report, online=config.online)
     _update_target_leads(report, targets)
     return closure
 
@@ -1046,6 +1051,60 @@ def _populate_network_attribution(report: Report) -> None:
             existing["close_error"] = type(exc).__name__
         else:
             report.meta["network_attribution"] = {"phase": "close", "error": type(exc).__name__}
+
+
+def _refresh_derived_views(report: Report, *, online: bool) -> None:
+    """close 重建选中端点 attribution 后，重跑依赖 attribution 的派生视图——否则它们停留在 analyze 期而陈旧
+    （codex 审计"已知边界"）。全 view-only、各自 try/except、绝不 sink closure；空产物不覆盖既有有效视图。"""
+    import logging
+
+    log = logging.getLogger(__name__)
+    # ① fronting-cluster：close 的单端点 _set_attribution 重建冲掉了 analyze 期写进端点 edge_provider 的
+    #   cluster_id，须对全报告重聚类恢复（codex 具体点名的 correctness 回归）。
+    try:
+        from apkscan.core.attribution import cluster_fronting
+
+        all_ips = [
+            ipv
+            for ep in report.endpoints
+            for ipv in ((ep.enrichment.get("attribution") or {}).get("ips") or [])
+            if isinstance(ipv, dict)
+        ]
+        cluster_fronting(all_ips)
+    except Exception:  # noqa: BLE001 — 聚类失败不得拖累 closure
+        log.debug("[closure] close 后 fronting-cluster 重聚类失败，跳过", exc_info=True)
+    # ② network_attribution（沿用既有逻辑，含失败保留旧视图）。
+    _populate_network_attribution(report)
+    # ③ control_chains（远程配置对象→配方→解码→后端→五层归因；仅非空才覆盖，空不清既有）。
+    try:
+        from apkscan.config.chain import build_control_chains
+
+        chains = build_control_chains(
+            report.meta.get("remote_config_artifacts"), report.meta.get("crypto_recipe"), report.endpoints
+        )
+        if chains:
+            report.meta["control_chains"] = chains
+    except Exception:  # noqa: BLE001
+        log.debug("[closure] close 后 control_chains 刷新失败，跳过", exc_info=True)
+    # ④ asset_scores（后端资产按分排序；仅非空才覆盖）。
+    try:
+        from apkscan.config.asset_score import rank_assets
+
+        scores = rank_assets(report.endpoints)
+        if scores:
+            report.meta["asset_scores"] = [
+                {"value": s.value, "kind": s.kind, "score": s.score, "reasons": list(s.reasons)} for s in scores
+            ]
+    except Exception:  # noqa: BLE001
+        log.debug("[closure] close 后 asset_scores 刷新失败，跳过", exc_info=True)
+    # ⑤ overseas_targets（境外被动定位结构化；与 analyze 期同门控——仅联网富化后有内容）。
+    if online:
+        try:
+            from apkscan.core.leads import _build_overseas_targets
+
+            report.meta["overseas_targets"] = _build_overseas_targets(report.endpoints)
+        except Exception:  # noqa: BLE001
+            log.debug("[closure] close 后 overseas_targets 刷新失败，跳过", exc_info=True)
 
 
 def _capture_meta(report: Report) -> dict[str, Any]:
