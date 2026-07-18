@@ -23,8 +23,11 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from apkscan.config.string_graph import StringChain, scan_java_source
 from apkscan.core.models import (
+    FINDING_KIND_INFERENCE,
     AnalyzerResult,
+    Confidence,
     Endpoint,
     Evidence,
     Finding,
@@ -94,6 +97,8 @@ _PLACEHOLDER: frozenset[str] = frozenset(
 )
 
 _FINDING_SECRET = "JADX-HARDCODED-SECRET"
+#: config-chain 层②：方法内 密文→解密(→sink) 共现链（启发式、非数据流证明）。
+_FINDING_STRING_CHAIN = "STRING-CHAIN-DECRYPT"
 
 
 class JadxAnalyzer(BaseAnalyzer):
@@ -181,6 +186,7 @@ class JadxAnalyzer(BaseAnalyzer):
         """扫 root 下所有 .java，从字符串字面量抽端点，从键值抽密钥。"""
         collector: dict[str, Endpoint] = {}
         secret_hits: dict[tuple[str, str], Finding] = {}
+        chain_hits: dict[tuple[str, str, str], Finding] = {}  # config-chain 层②：方法内共现链
         n_files = 0
         for java in root.rglob("*.java"):
             if n_files >= _MAX_JAVA_FILES:
@@ -208,7 +214,15 @@ class JadxAnalyzer(BaseAnalyzer):
                 self._scan_text(text, rel, collector, secret_hits)
             except Exception:
                 logger.exception("[jadx] 扫描 .java 失败，跳过：%s", rel)
-        return list(collector.values()), list(secret_hits.values()), n_files
+            # config-chain 层②：方法作用域内 密文→解密(→sink) 共现链（启发式、独立 try 不连累端点/密钥扫描）。
+            try:
+                for chain in scan_java_source(text, rel):
+                    key = (chain.location, chain.method, chain.secret[:64])
+                    chain_hits.setdefault(key, _chain_finding(chain))
+            except Exception:
+                logger.exception("[jadx] string_graph 扫描失败，跳过：%s", rel)
+        findings = list(secret_hits.values()) + list(chain_hits.values())
+        return list(collector.values()), findings, n_files
 
     def _scan_text(
         self,
@@ -407,6 +421,28 @@ def _strip_tail(url: str) -> str:
     while url and url[-1] in ".,;:'\")]}>":
         url = url[:-1]
     return url
+
+
+def _chain_finding(chain: StringChain) -> Finding:
+    """把方法内共现链转成一条 Finding（config-chain 层②）。★启发式共现、非数据流证明 → LOW + inference。"""
+    sink_part = f"；下游 sink：{', '.join(chain.sinks)}" if chain.sinks else ""
+    return Finding(
+        id=_FINDING_STRING_CHAIN,
+        title="jadx 反编译发现 密文→解密 方法内共现链（疑似运行时解密配置/后端地址）",
+        severity=Severity.MEDIUM,
+        category="config-chain",
+        description=(
+            f"方法 {chain.method} 内共现硬编码密文候选串与解密调用（{', '.join(chain.decrypt_calls)}）{sink_part}。"
+            "疑似运行时解密出配置 / 后端地址。★方法作用域内的**启发式共现**（非数据流证明），须人工复核。"
+        ),
+        recommendation=(
+            "人工核该方法：确认解密配方(key/iv/mode)与解出内容；若解出后端地址/配置对象，纳入 config-chain 归因。"
+        ),
+        evidences=[Evidence(source="jadx", location=chain.location, snippet=_short(chain.secret))],
+        references=["CWE-798"],
+        confidence=Confidence.LOW,
+        kind=FINDING_KIND_INFERENCE,
+    )
 
 
 def _short(text: str, limit: int = _SNIPPET_MAX) -> str:
