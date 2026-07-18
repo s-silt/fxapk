@@ -216,6 +216,19 @@ def test_pure_base64_c2_config_still_chains() -> None:
 _CT = "aB3xK9mP2qR7sT5vW1yZ4nL6jH8gF0dS/cV+eXbMkQwErTyUiOpAsDfGhJkLzXcVbNm=="  # base64 密文形态
 
 
+def test_camelcase_identifier_not_ciphertext() -> None:
+    """全月语料回归：纯字母 camelCase 标识符（无数字无 +/=）不当密文——李素云案 showMethodErrorToast(\"方法名\")
+    那类误报（onDeleteLikeDDApplication / getUserDisplayNameAVChatKit …落 base64 字母表但非密文）。"""
+    for ident in (
+        "getUserDisplayNameAVChatKit", "isRunningInsideShellClose", "onViewInitFinishedDDApplication",
+        "getTeamMemberDisplayNameAVChatKit",
+    ):
+        assert _looks_ciphertext(ident) is False, ident
+    assert _looks_ciphertext("z3G2E737gj6gbdUZ4uR2zw==") is True  # 真 base64 密文（含数字+==）仍认
+    # 端到端：标识符传进函数不绑链（否则每个混淆 app 冒几十条假链）
+    assert scan_java_source('void a(){ showMethodErrorToast("getUserDisplayNameAVChatKit"); }', "loc") == []
+
+
 def test_obfuscated_decrypt_helper_binds_as_ai_lead() -> None:
     """密文被直接传进改名 helper m1136x() → 绑链(consumer=m1136x, 无标准解密)，完整密文保留供 AI 解密。"""
     src = f'public void run() {{ String u = AbstractC0421d.m1136x("{_CT}"); conn.get(u); }}'
