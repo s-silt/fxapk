@@ -210,6 +210,59 @@ def test_pure_base64_c2_config_still_chains() -> None:
     assert len(chains) == 1 and chains[0].secret == b64
 
 
+# --------------------------------------------------------------------------- #
+# AI 辅助解密线索：密文被直接传进改名的解密 helper（重度混淆样本，真机验证过）
+# --------------------------------------------------------------------------- #
+_CT = "aB3xK9mP2qR7sT5vW1yZ4nL6jH8gF0dS/cV+eXbMkQwErTyUiOpAsDfGhJkLzXcVbNm=="  # base64 密文形态
+
+
+def test_obfuscated_decrypt_helper_binds_as_ai_lead() -> None:
+    """密文被直接传进改名 helper m1136x() → 绑链(consumer=m1136x, 无标准解密)，完整密文保留供 AI 解密。"""
+    src = f'public void run() {{ String u = AbstractC0421d.m1136x("{_CT}"); conn.get(u); }}'
+    chains = scan_java_source(src, "loc")
+    assert len(chains) == 1
+    c = chains[0]
+    assert c.consumer == "m1136x"
+    assert c.decrypt_calls == ()  # 混淆改名 → 认不出标准 crypto API
+    assert c.secret == _CT  # ★完整密文保留（不截断），供下游 AI/appcrypto 解密
+
+
+def test_ciphertext_to_denylisted_consumer_not_bound() -> None:
+    """密文传进 equals/Log/put/append 等明显非解密方法 → 不绑（denylist 降 AI 线索误报）。"""
+    for fn in ("equals", "d", "put", "append", "valueOf"):
+        assert scan_java_source(f'void m() {{ x.{fn}("{_CT}"); }}', "loc") == [], fn
+
+
+def test_ciphertext_only_stored_still_not_bound() -> None:
+    """密文只是赋值存着、既没被消费也没解密 → 不绑（避免纯常量误报）。"""
+    assert scan_java_source(f'void m() {{ String k = "{_CT}"; }}', "loc") == []
+
+
+def test_full_ciphertext_not_truncated() -> None:
+    """完整密文保留（旧版截断到 120 会丢解密载荷）：>120 的密文经改名 helper 仍全量带出。"""
+    long_ct = "aB3xK9mP2qR7sT5vW1yZ4nL6jH8gF0dS" * 7  # 224 chars, 无 / 高熵形态
+    chains = scan_java_source(f'void run() {{ dec.x("{long_ct}"); }}', "loc")
+    assert len(chains) == 1 and chains[0].secret == long_ct and len(chains[0].secret) == 224
+
+
+def test_ai_decrypt_lead_finding_and_meta_candidates(tmp_path) -> None:
+    """jadx 集成：改名 helper 案例 → 'AI 辅助解密线索' Finding（证据带完整密文）+ meta.decrypt_candidates。"""
+    from apkscan.analyzers.jadx import _FINDING_STRING_CHAIN, JadxAnalyzer
+
+    (tmp_path / "C.java").write_text(
+        f'public void run() {{ String u = AbstractC0421d.m1136x("{_CT}"); }}', encoding="utf-8")
+    _eps, findings, _n, candidates = JadxAnalyzer()._scan_java(tmp_path)
+    chain = [f for f in findings if f.id == _FINDING_STRING_CHAIN]
+    assert len(chain) == 1
+    assert "AI 辅助解密" in chain[0].title
+    assert "m1136x" in chain[0].description
+    assert chain[0].evidences[0].snippet == _CT  # 证据带完整密文（AI 可直接解）
+    assert len(candidates) == 1
+    assert candidates[0]["ciphertext"] == _CT
+    assert candidates[0]["consumer"] == "m1136x"
+    assert candidates[0]["standard_decrypt"] == []
+
+
 def test_jadx_scan_java_emits_string_chain_finding(tmp_path) -> None:
     """jadx 集成：喂 .java 给 _scan_java（不跑真 jadx），产 STRING-CHAIN-DECRYPT Finding 且诚实标注。"""
     from apkscan.analyzers.jadx import _FINDING_STRING_CHAIN, JadxAnalyzer
@@ -220,7 +273,7 @@ def test_jadx_scan_java_emits_string_chain_finding(tmp_path) -> None:
         f'return new String(cipher.doFinal(Base64.decode(x, 0))); }} }}',
         encoding="utf-8",
     )
-    _eps, findings, _n = JadxAnalyzer()._scan_java(tmp_path)
+    _eps, findings, _n, _cand = JadxAnalyzer()._scan_java(tmp_path)
     chain = [f for f in findings if f.id == _FINDING_STRING_CHAIN]
     assert len(chain) == 1
     assert chain[0].confidence is Confidence.LOW  # 启发式 → 低置信

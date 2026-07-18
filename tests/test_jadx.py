@@ -210,8 +210,8 @@ def test_scan_java_location_case_deterministic(tmp_path) -> None:
     随机大小写目录，两次运行 evidence.location 漂移（破坏 evidence_id 稳定 + 串行==并行逐字节一致）。
     修法把 location 规范化为小写正斜杠 → 两次（v 与 V）产逐字段一致的端点证据、location 确定。"""
     java = 'class C { String u = "https://c2.jadx-case.cn/report"; }'
-    eps_lower, _, _ = JadxAnalyzer()._scan_java(_tree_with_pkg_case(tmp_path, "v", java))
-    eps_upper, _, _ = JadxAnalyzer()._scan_java(_tree_with_pkg_case(tmp_path, "V", java))
+    eps_lower, _, _, _ = JadxAnalyzer()._scan_java(_tree_with_pkg_case(tmp_path, "v", java))
+    eps_upper, _, _, _ = JadxAnalyzer()._scan_java(_tree_with_pkg_case(tmp_path, "V", java))
 
     # 包目录大小写不同（v vs V），但规范化后 location 逐字节一致 → 两次运行端点证据完全相等。
     assert _endpoint_locations(eps_lower) == _endpoint_locations(eps_upper)
