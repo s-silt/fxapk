@@ -103,7 +103,7 @@ def scan_java_source(text: str, location: str) -> list[StringChain]:
     seen: set[tuple[str, str]] = set()
     for name, body in _extract_methods(text):
         candidates = [
-            (lit, _consumer_before(body, m.start()))
+            (lit, _consumer_before(body, m.start()) or _consumer_via_var(body, m.start()))
             for m in _STR_LIT_RE.finditer(body)
             if _looks_ciphertext(lit := m.group(1))
         ]
@@ -140,6 +140,31 @@ def _consumer_before(body: str, quote_pos: int) -> str | None:
     if name in _CONTROL_KW or name.lower() in _CONSUMER_DENY:
         return None
     return name
+
+
+# 密文被**先赋值给局部变量、再解密**：``var = "<密文>"; … helper(var)``——混淆代码最常见写法（比直接实参更常见）。
+# 方法内轻量 def-use（非全 taint）：抓赋值目标变量名，再看它是否作某调用的实参。单个 ``=`` 才算赋值（``==`` 因
+# 尾随第二个 ``=`` 破坏 ``\s*$`` 天然不匹配）。
+_ASSIGN_RE = re.compile(r"(\w+)\s*=\s*$")
+_CALL_ARGS_RE = re.compile(r"(\w+)\s*\(([^;{}]*)\)")
+
+
+def _consumer_via_var(body: str, quote_pos: int) -> str | None:
+    """密文字面量若 ``var = "…"`` 赋给局部变量、且该变量随后被当某调用实参，返回被调函数名；否则 None。"""
+    assign = _ASSIGN_RE.search(body[max(0, quote_pos - 48):quote_pos])
+    if assign is None:
+        return None
+    var = assign.group(1)
+    if var in _CONTROL_KW:
+        return None
+    var_re = re.compile(r"\b" + re.escape(var) + r"\b")
+    for call in _CALL_ARGS_RE.finditer(body):
+        callee = call.group(1)
+        if callee in _CONTROL_KW or callee.lower() in _CONSUMER_DENY:
+            continue
+        if var_re.search(call.group(2)):  # 该变量出现在这个调用的实参里
+            return callee
+    return None
 
 
 def _looks_ciphertext(value: str) -> bool:
