@@ -14,7 +14,6 @@ _EXPECTED_STAGES = [
     "analyze",
     "degradation_flags",
     "remote_config_fetch",
-    "decrypt_candidates",
     "enrich",
     "attribution",
     "build_leads",

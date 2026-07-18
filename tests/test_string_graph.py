@@ -440,3 +440,79 @@ def test_identifier_constants_with_digits_are_not_ciphertext() -> None:
 def test_unpadded_base64url_payload_still_recognised() -> None:
     """无 ``=`` 填充的 base64url 载荷没有 base64 标记，靠熵（5.0+）仍被收下——不能被上一条误杀。"""
     assert _looks_ciphertext("aB3-dEf_GhIjKl9mNoPqR2sTuV5wXyZ0-bC_dE") is True
+
+
+# ── 噪音压制：实测噪音高度聚集于两类可机械识别的来源 ──────────────────────────────
+# 跨 4 个静态可见样本的实测：修复后仍留存 230 条候选，其中 45 条在第三方库路径下、
+# 180 条来自 4 个密码学参数表文件（被混淆器改了包名的 BouncyCastle），2 条算法串/字母表，
+# 只有 2 条是真的 App 自有密文。以下三条规则把 230 压到 3。
+
+
+def test_third_party_package_paths_are_suppressed() -> None:
+    """第三方 SDK 自带的混淆串（遥测地址、内置常量）非涉案主体资产，整文件丢弃。
+    真实样本里 DCloud SDK 一家就贡献了 44 条 base64+XOR 混淆的自家上报地址。"""
+    src = f'public void m() {{ String s = x("{_SECRET}"); }}'
+    assert scan_java_source(src, "sources/io/dcloud/p/d0.java") == []
+    assert scan_java_source(src, "sources/okhttp3/internal/Util.java") == []
+    assert scan_java_source(src, "sources/androidx/core/view/ViewCompat.java") == []
+    assert scan_java_source(src, "sources/com/networkbench/agent/impl/util/a/e.java") == []
+    # App 自有路径不受影响
+    assert len(scan_java_source(src, "sources/nfc/share/nfcshare/App.java")) == 1
+
+
+def test_crypto_parameter_table_file_is_suppressed() -> None:
+    """★按**文件**判而非按串：混淆器会把 BouncyCastle 的包名改成随机串（路径认不出），
+    但"一个类里躺着几十条定长 hex 常量"的形态改不掉——那是 RFC3526 素数 / 曲线参数。"""
+    consts = [
+        "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E08",  # RFC3526 MODP 素数
+        "AD107E1E9123A9D0D660FAA79559C51FA20D64E5683B9FD1B54B1597",  # RFC5114
+        "8CF83642A709A097B447997640129DA299B1A47D1EB3750BA308B0FE",
+        "A4D1CBD5C3FD34126765A442EFB99905F8104DD258AC507FD6406CFF",
+        "AC4032EF4F2D9AE39DF30B5C8FFDAC506CDEBE7B89998CAF74866A08",
+    ]
+    body = " ".join(f'p({c!r});'.replace("'", '"') for c in consts)
+    src = f"public void params() {{ {body} }}"
+    # 随机名混淆包：路径规则认不出，靠 hex 聚集形态识别
+    assert scan_java_source(src, "sources/q3NiMVrzuIx9Q7lciPla/C6892.java") == []
+    # 少于阈值则不误杀（正常方法里偶有一条 hex 密文仍要报）
+    few = f'public void m() {{ p("{consts[0]}"); }}'
+    assert len(scan_java_source(few, "sources/app/A.java")) == 1
+
+
+def test_algorithm_transformation_string_is_not_ciphertext() -> None:
+    """``RSA/ECB/OAEPWithSHA-1AndMGF1Padding`` 这类算法 transformation 串是常量非密文。"""
+    for spec in (
+        "RSA/ECB/OAEPWITHSHA-1ANDMGF1PADDING",
+        "AES/CBC/PKCS5Padding",
+        "DESede/ECB/NoPadding",
+    ):
+        assert _looks_ciphertext(spec) is False, spec
+
+
+def test_lookup_table_constant_is_not_ciphertext() -> None:
+    """字符两两不同 = 字母表/置换表的定义特征；真密文（随机字节编码）必然重复字符。
+    比枚举具体字母表通用：覆盖 base62、自定义置换表与任意字符顺序。"""
+    for table in (
+        "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRST",
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
+    ):
+        assert _looks_ciphertext(table) is False, table
+
+
+def test_sequential_byte_test_vector_is_not_ciphertext() -> None:
+    """``000102…1E1F`` = 标准 AES 测试向量/填充表，非密文。"""
+    assert _looks_ciphertext("000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F") is False
+    assert _looks_ciphertext("0102030405060708090A0B0C0D0E0F10") is False
+
+
+def test_real_app_ciphertext_survives_all_suppression() -> None:
+    """★防过度压制：真实样本里那 2 条自有密文（解出 C2 域名与阿里云 OSS 配置对象）
+    必须穿过全部三条规则——它们是该样本唯一的自有网络指标。"""
+    for secret in ("z3G2E737gj6gbdUZ4uR2zw==",
+                   "iKZGmV5javjz4SVEg22YXUSIfF9ENCuJrwoq/iK7MQflPvAn5JTQe+E63qiIkLtmEt2FBrWUw=="):
+        assert _looks_ciphertext(secret) is True, secret
+        src = f'public void onCreate() {{ String s = x("{secret}"); }}'
+        chains = scan_java_source(src, "sources/nfc/share/nfcshare/App.java")
+        assert len(chains) == 1, secret
+        assert chains[0].consumer == "x"
