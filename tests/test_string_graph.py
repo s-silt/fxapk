@@ -147,13 +147,13 @@ def test_anonymous_class_field_initializer_not_phantom_method() -> None:
     src = f'''
     public class C {{
         private WebViewClient client = new WebViewClient() {{
-            public void onPageFinished(WebView v, String u) {{ String d = "{_SECRET}"; store(d); }}
+            public void onPageFinished(WebView v, String u) {{ String d = "{_SECRET}"; }}
             private void other() {{ byte[] o = cipher.doFinal(k); }}
         }};
     }}
     '''
     chains = scan_java_source(src, "loc")
-    assert chains == []  # onPageFinished 有密文无解密、other 有解密无密文；无伪方法误绑
+    assert chains == []  # onPageFinished 密文仅存不消费、other 有解密无密文；无伪方法误绑
     assert not any(c.method == "WebViewClient" for c in chains)
 
 
@@ -236,6 +236,21 @@ def test_ciphertext_to_denylisted_consumer_not_bound() -> None:
 def test_ciphertext_only_stored_still_not_bound() -> None:
     """密文只是赋值存着、既没被消费也没解密 → 不绑（避免纯常量误报）。"""
     assert scan_java_source(f'void m() {{ String k = "{_CT}"; }}', "loc") == []
+
+
+def test_assign_then_decrypt_local_var_bound() -> None:
+    """召回补强：``var = 密文; helper(var)``（先赋值再解密，混淆最常见写法）→ 绑链，consumer=被调函数。"""
+    chains = scan_java_source(f'void a() {{ String s = "{_CT}"; String u = dec(s); }}', "loc")
+    assert len(chains) == 1 and chains[0].consumer == "dec"
+    # 多参也认（密文变量在实参列表里）
+    chains2 = scan_java_source(f'void a() {{ String s = "{_CT}"; String u = decrypt(ctx, s, 0); }}', "loc")
+    assert len(chains2) == 1 and chains2[0].consumer == "decrypt"
+
+
+def test_assign_then_denylisted_or_unused_not_bound() -> None:
+    """赋值后只传给 denylist 方法（存储/日志）或根本没用到 → 不绑。"""
+    assert scan_java_source(f'void a() {{ String s = "{_CT}"; map.put("k", s); }}', "loc") == []
+    assert scan_java_source(f'void a() {{ String s = "{_CT}"; return; }}', "loc") == []
 
 
 def test_full_ciphertext_not_truncated() -> None:
