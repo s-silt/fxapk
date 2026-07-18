@@ -289,6 +289,8 @@ def _replace_dex_in_zip(base_apk: Path, mapping: dict[Path, str], out_apk: Path)
 
     新签名由后续 apksigner 重签生成。异常上抛由调用方转 error。
     """
+    from apkscan.core.apk import _MAX_DECOMPRESSED_FILE_BYTES  # 复用同口径 zip 炸弹解压上限
+
     new_names = set(mapping.values())
     with zipfile.ZipFile(base_apk, "r") as zin, zipfile.ZipFile(
         out_apk, "w", zipfile.ZIP_DEFLATED
@@ -304,6 +306,13 @@ def _replace_dex_in_zip(base_apk: Path, mapping: dict[Path, str], out_apk: Path)
                 or low.endswith(".ec") or low == "meta-inf/manifest.mf"
             ):
                 continue
+            # zip 炸弹前置拦截：某条目声明解压体积超上限 → 中止重打包（zin.read 会全量解压致 OOM；
+            # 且 partial repack 本就无效，宁停不炸）。与 read_file 同口径信任声明大小（Level 1）。
+            if item.file_size > _MAX_DECOMPRESSED_FILE_BYTES:
+                raise ValueError(
+                    f"重打包中止：原 APK 条目 {name} 声明解压 {item.file_size} 字节超 "
+                    f"{_MAX_DECOMPRESSED_FILE_BYTES} 上限（疑 zip 炸弹）"
+                )
             zout.writestr(item, zin.read(name))
         # 写入新 DEX。
         for src, arc in mapping.items():
