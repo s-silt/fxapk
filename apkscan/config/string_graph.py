@@ -54,27 +54,46 @@ _SINK_RE = re.compile(
 _B64_RE = re.compile(r"^[A-Za-z0-9+/]{24,}={0,2}$")
 _HEX_RE = re.compile(r"^[A-Fa-f0-9]{32,}$")
 
+# 密文字面量**被直接当函数调用实参**：``ident("<密文>")``——覆盖**改名的解密 helper**（重度混淆样本里
+# 解密函数被 jadx 改成 m1136x 之类，认不出标准 crypto API，但"密文被传进某函数"这一事实是确定的）。
+_CONSUMER_RE = re.compile(r"(\w+)\s*\(\s*$")
+# 明显非解密的常见方法名（密文传进这些多是存储/比较/日志，非解密）——降 AI 解密线索误报。混淆改名的
+# helper 不在此列、照样命中（交 AI 试解密收敛）。
+_CONSUMER_DENY = frozenset({  # 全小写（比对时 name.lower()）
+    "equals", "contains", "startswith", "endswith", "indexof", "valueof", "println", "print",
+    "format", "length", "hashcode", "compareto", "split", "replace", "matches", "put", "add",
+    "get", "append", "log", "d", "e", "w", "i", "v",
+})
+
 _MAX_SECRETS_PER_METHOD = 8
 _MAX_CHAINS_PER_FILE = 200
 _MAX_TEXT_BYTES = 4 * 1024 * 1024  # 与 jadx.py 单文件上限一致
+_MAX_SECRET_LEN = 2048  # 保留完整密文供 AI 解密（大多数配置密文 <2KB；仅防畸形超长字面量）
 
 
 @dataclass(frozen=True)
 class StringChain:
-    """一条方法内共现链：某方法体里硬编码密文候选串 + 解密调用 (+ 下游 sink) 同现。启发式、非证明。"""
+    """一条方法内共现链：某方法体里硬编码密文候选串 + 解密调用/被消费 (+ 下游 sink) 同现。启发式、非证明。
 
-    secret: str  # 密文候选串（截断）
+    两档：``decrypt_calls`` 非空 = 识别到标准解密 API（较强）；仅 ``consumer`` 非空 = 密文被传进某函数（疑似
+    改名的解密 helper，弱，作 **AI 辅助解密线索**）。``secret`` 保留较完整密文供下游 AI/appcrypto 尝试解密。
+    """
+
+    secret: str  # 密文候选串（保留至 _MAX_SECRET_LEN 供解密）
     method: str  # 所在方法名（best-effort）
-    decrypt_calls: tuple[str, ...]  # 命中的解密调用形态
+    decrypt_calls: tuple[str, ...]  # 命中的**标准**解密调用形态（可空）
     sinks: tuple[str, ...]  # 同方法内的下游 sink（可空）
     location: str  # 源文件相对路径
+    consumer: str | None = None  # 密文被直接传进的函数名（疑似改名的解密 helper；None=未被直接消费）
 
 
 def scan_java_source(text: str, location: str) -> list[StringChain]:
-    """扫一份 Java 源码文本，产方法作用域内的 string→decrypt(→sink) 共现链。绝不抛。
+    """扫一份 Java 源码文本，产方法作用域内的 密文→解密/消费(→sink) 共现链。绝不抛。
 
-    绑链**硬门**：某方法体内**既有**密文候选串字面量**又有**解密调用——二者缺一不绑（这正是"方法级"相对
-    盲窗的意义：跨方法不误绑）。sink 为可选上下文（增强，非必需）。
+    绑链门（二档，均在**同一方法体内**——方法级作用域，跨方法不误绑）：某密文候选串字面量满足其一即绑——
+      ①方法内识别到**标准解密 API**（Cipher/doFinal/Base64.decode…，较强）；或
+      ②该密文**被直接当函数调用实参** ``ident("<密文>")``（弱，疑似**改名的解密 helper**，作 AI 辅助解密线索）。
+    只是**存着**没被消费、也没识别到解密的密文 → 不绑（避免纯常量误报）。sink 为可选上下文。
     """
     if not isinstance(text, str) or not text:
         return []
@@ -83,28 +102,44 @@ def scan_java_source(text: str, location: str) -> list[StringChain]:
     chains: list[StringChain] = []
     seen: set[tuple[str, str]] = set()
     for name, body in _extract_methods(text):
-        secrets = [
-            lit for m in _STR_LIT_RE.finditer(body)
+        candidates = [
+            (lit, _consumer_before(body, m.start()))
+            for m in _STR_LIT_RE.finditer(body)
             if _looks_ciphertext(lit := m.group(1))
         ]
-        if not secrets:
+        if not candidates:
             continue
         decrypts = tuple(sorted({m.group(0).strip() for m in _DECRYPT_RE.finditer(body)}))
-        if not decrypts:  # ★核心门：无解密调用 → 不绑链
-            continue
         sinks = tuple(sorted({m.group(0).strip() for m in _SINK_RE.finditer(body)}))
-        for secret in secrets[:_MAX_SECRETS_PER_METHOD]:
+        for secret, consumer in candidates[:_MAX_SECRETS_PER_METHOD]:
+            if not decrypts and consumer is None:  # 既无标准解密、又没被消费 → 不绑
+                continue
             key = (name, secret[:64])
             if key in seen:
                 continue
             seen.add(key)
             chains.append(StringChain(
-                secret=secret[:120], method=name, decrypt_calls=decrypts,
-                sinks=sinks, location=location,
+                secret=secret[:_MAX_SECRET_LEN], method=name, decrypt_calls=decrypts,
+                sinks=sinks, location=location, consumer=consumer,
             ))
             if len(chains) >= _MAX_CHAINS_PER_FILE:
                 return chains
     return chains
+
+
+def _consumer_before(body: str, quote_pos: int) -> str | None:
+    """密文字面量若被**直接当函数实参**（``ident("…"``），返回被调函数名；否则 None。
+
+    有界回看（引号前 64 字符内匹配 ``ident(``）；命中控制关键字或明显非解密的常见方法名（存储/比较/日志）→
+    None（降误报）。改名的解密 helper（m1136x 之类）不在 denylist、照常返回，作 AI 解密线索。
+    """
+    match = _CONSUMER_RE.search(body[max(0, quote_pos - 64):quote_pos])
+    if match is None:
+        return None
+    name = match.group(1)
+    if name in _CONTROL_KW or name.lower() in _CONSUMER_DENY:
+        return None
+    return name
 
 
 def _looks_ciphertext(value: str) -> bool:
