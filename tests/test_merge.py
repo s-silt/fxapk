@@ -467,6 +467,7 @@ def test_merge_and_rerender_copies_capture_quality(tmp_path) -> None:
         "target_attributed_count": 1,
         "dynamic_status": "complete",
         "reason": "target-attributed public business candidate observed",
+        "floor_parse_status": "ok",
     }
     _write_runtime_report(
         runtime_report,

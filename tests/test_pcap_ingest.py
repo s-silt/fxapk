@@ -326,6 +326,86 @@ def test_iter_frames_nanosecond_pcap_timestamp() -> None:
     assert list(pcap_ingest._iter_frames(le))[0][0] == pytest.approx(2000.25)
 
 
+def test_parse_status_distinguishes_failure_from_zero_traffic(tmp_path) -> None:
+    """★回归（codex 全库审计 P1）：坏 magic / 读失败 与「真实零业务流量」要能区分——空 flows 不都等于零流量，
+    否则 pcap-leads/closure 把采集失败误判成"抓到零业务流量"。"""
+    bad = pcap_ingest.parse_pcap_bytes(b"not a pcap at all")
+    assert bad.parse_status == "unparseable" and bad.flows == [] and bad.error
+    empty_ok = pcap_ingest.parse_pcap_bytes(_pcap([]))  # 合法但零包的经典 pcap（仅全局头）
+    assert empty_ok.parse_status == "ok" and empty_ok.flows == []
+    missing = pcap_ingest.parse_pcap(str(tmp_path / "no-such-file.pcap"))  # 读失败（文件不存在）
+    assert missing.parse_status == "read_error" and missing.error
+    # 出口透出：JSON 台账带 parse_status（程序化消费者据此判），MD 台账带告警。
+    assert pcap_ingest.to_ledger_dict(bad)["parse_status"] == "unparseable"
+    assert "解析未成功" in pcap_ingest.build_ledger_md(bad)
+
+
+def _pcapng_one_epb(endian: str, tsresol: int, ts64: int, frame: bytes = b"\x00" * 14, if_id: int = 0) -> bytes:
+    """一个 pcapng section：SHB + IDB(if_tsresol) + 单条 EPB(64bit 时间戳)。endian: '<' 或 '>'。"""
+    def block(btype: int, body: bytes) -> bytes:
+        body = body + b"\x00" * ((4 - len(body) % 4) % 4)
+        blen = 12 + len(body)
+        return struct.pack(endian + "II", btype, blen) + body + struct.pack(endian + "I", blen)
+
+    shb = block(0x0A0D0D0A, struct.pack(endian + "IHHq", 0x1A2B3C4D, 1, 0, -1))
+    idb_opts = struct.pack(endian + "HH", 9, 1) + bytes([tsresol]) + b"\x00" * 3 + struct.pack(endian + "HH", 0, 0)
+    idb = block(0x00000001, struct.pack(endian + "HHI", 1, 0, 0xFFFF) + idb_opts)
+    epb_body = struct.pack(endian + "IIIII", if_id, (ts64 >> 32) & 0xFFFFFFFF, ts64 & 0xFFFFFFFF, len(frame), len(frame)) + frame
+    epb = block(0x00000006, epb_body)
+    return shb + idb + epb
+
+
+def test_parse_status_flags_truncated_header() -> None:
+    """★回归（codex 复核 P1）：有效 magic 但连全局头都放不下 = 截断文件，标 unparseable，不当「零流量」。"""
+    trunc = pcap_ingest.parse_pcap_bytes(b"\xd4\xc3\xb2\xa1" + b"\x00" * 10)  # 经典 magic，仅 14B < 24
+    assert trunc.parse_status == "unparseable" and trunc.error
+
+
+def test_parse_status_flags_mid_file_truncation() -> None:
+    """★回归（codex 第3轮复核）：有效全局头但某记录声明字节数超出实际（文件中途截断）→ 标 truncated，
+    不当 ok 零/完整流量——操作员据此知道要重抓（而非误判抓到零业务流量）。"""
+    header = struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1)  # 经典 pcap 全局头（24B）
+    rec = struct.pack("<IIII", 1_700_000_000, 0, 1000, 1000) + b"\x00" * 4  # 记录头声明 incl=1000，实际只跟 4B
+    summ = pcap_ingest.parse_pcap_bytes(header + rec)
+    assert summ.parse_status == "truncated" and summ.error
+
+
+def test_iter_pcapng_rejects_out_of_range_interface_id() -> None:
+    """★回归（codex 复核 P1）：非法 EPB interface_id 越界须跳过该块，不借用接口 0 的 linktype/tsresol 误解。"""
+    ng = _pcapng_one_epb(">", 6, 1_000_000_000, if_id=5)  # 只声明 1 个接口(0)，if_id=5 越界
+    assert list(pcap_ingest._iter_frames(ng)) == []  # 越界 EPB 被跳过、不产帧（修前会借接口0）
+
+
+def test_build_ledger_md_escapes_error_field() -> None:
+    """★回归（codex 复核 P1，修 #2 时自引入的注入面）：失败态 error 可能含路径/异常串，markdown 台账须转义。"""
+    summ = pcap_ingest.PcapSummary(parse_status="read_error", error="x` <img src=x onerror=alert(1)> `")
+    md = pcap_ingest.build_ledger_md(summ)
+    assert "<img" not in md.replace("\\<img", "")  # 无裸 <img
+    assert "\\`" in md  # 反引号被转义
+
+
+def test_iter_pcapng_respects_if_tsresol_nanoseconds() -> None:
+    """★回归（codex 全库审计 P1）：pcapng EPB 时间戳须按 IDB 的 if_tsresol 还原，不能一律 /1e6——
+    纳秒(if_tsresol=9)会被放大 1000×，与 socket 时间线成假「已知冲突」把五元组归因误降级。"""
+    ns = _pcapng_one_epb(">", 9, 1_000_500_000_000)  # 1000.5s in ns，tsresol=9→/1e9
+    assert list(pcap_ingest._iter_frames(ns))[0][0] == pytest.approx(1000.5)
+    us = _pcapng_one_epb(">", 6, 1_000_500_000)  # 1000.5s in µs，tsresol=6→/1e6（对照，修前也对）
+    assert list(pcap_ingest._iter_frames(us))[0][0] == pytest.approx(1000.5)
+    le_ns = _pcapng_one_epb("<", 9, 2_000_250_000_000)  # 小端纳秒
+    assert list(pcap_ingest._iter_frames(le_ns))[0][0] == pytest.approx(2000.25)
+
+
+def test_iter_pcapng_multi_section_different_endian() -> None:
+    """★回归（codex 全库审计 P1）：pcapng 允许多 section 用不同字节序；须每遇 SHB 重定字节序，
+    否则异序的后续 section 被误解或直接停止解析、其流量静默丢失。"""
+    be = _pcapng_one_epb(">", 6, 1_000_000_000)  # 大端 section（1000.0s）
+    le = _pcapng_one_epb("<", 6, 2_000_000_000)  # 小端 section（2000.0s）
+    frames = list(pcap_ingest._iter_frames(be + le))
+    assert len(frames) == 2  # 两 section 的帧都要在（修前只出第一段）
+    assert frames[0][0] == pytest.approx(1000.0)
+    assert frames[1][0] == pytest.approx(2000.0)
+
+
 def test_strip_link_sll2_linktype_276() -> None:
     """★ 回归（codex review P2）：`tcpdump -i any` 在新版 libpcap 下写 SLL2（linktype 276）；
     _strip_link 须能剥它（20 字节头，EtherType 在 offset 0、IP 载荷从 offset 20 起），

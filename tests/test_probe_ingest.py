@@ -151,6 +151,18 @@ def test_ledger_md_includes_coverage_section() -> None:
     assert "定人" in md and "穿透" in md and "固证" in md
 
 
+def test_build_ledger_md_escapes_injection_in_value() -> None:
+    """★回归（codex 全库审计 P1）：探针 value/probe 样本可控，markdown 台账须转义反引号/HTML/链接，
+    不裸包 inline-code 让载荷逃逸注入（主 HTML 报告另走 Jinja 自动转义、不受此路径影响）。"""
+    from apkscan.core.models import LeadCategory
+
+    payload = "x` <img src=x onerror=alert(document.domain)> `"
+    lead = probe_ingest.ProbeLead(category=LeadCategory.PAYMENT, value=payload, probe="pay", raw=payload)
+    md = probe_ingest.build_ledger_md([lead])
+    assert "<img" not in md.replace("\\<img", "")  # 无裸 <img（只余被转义的 \<img）
+    assert "\\`" in md  # 反引号被转义，载荷无法逃逸 inline-code
+
+
 def test_merge_into_report_json_appends_and_dedups(tmp_path) -> None:
     report = {"leads": [{"category": "PAYMENT", "value": "已存在 2088", "advice": "建议调证"}]}
     p = tmp_path / "report.json"

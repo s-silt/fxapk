@@ -203,6 +203,9 @@ def _build_capture_quality(
             0 if intercept_observed and not business_keys else len(mitm_endpoints),
         ),
         "target_attributed_count": target_count,
+        # floor 解析状态入结构化质量：让 closure/case-close 区分「解析/采集失败」与「真实零业务流量」
+        # （二者都空 flows，但前者要重抓、后者是真无业务流量）。None=无 floor pcap。
+        "floor_parse_status": getattr(floor_summary, "parse_status", "ok") if floor_summary is not None else "absent",
     }
     return evaluate_capture_quality(raw)
 
@@ -805,6 +808,12 @@ def _capture(
         try:
             noise_patterns = _load_noise_patterns()
             floor_summary = pcap_ingest.parse_pcap(str(floor_pcap))
+            if getattr(floor_summary, "parse_status", "ok") != "ok":
+                # 解析/采集失败：空结果不代表零流量——显式记入 playbook，别让下游把它当"抓到零业务流量"。
+                playbook.append(
+                    f"① floor：带外 pcap 解析未成功（{floor_summary.parse_status}）——"
+                    f"空结果不代表零流量，{floor_pcap.name} 留档待核"
+                )
             floor_eps = pcap_ingest.to_runtime_endpoints(floor_summary)
             seen_vals = {ep.value for ep in endpoints}
             added = [
