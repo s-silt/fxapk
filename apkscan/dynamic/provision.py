@@ -53,6 +53,12 @@ _FRIDA_ABI_MAP: dict[str, str] = {
 # 解压后 frida-server 的体积下限（字节）：真实 frida-server ELF 数十 MB，远超此值；用于挡住
 # 截断/损坏/投毒的下载（非密码学校验，见 _download_and_extract 注释）。
 _FRIDA_MIN_SERVER_BYTES = 1_000_000
+# 解压后体积上限（字节）：真实 frida-server 各 ABI 未超 ~150MB；超此值疑 XZ 炸弹（小压缩体积解压出巨量）→ 拒绝。
+_FRIDA_MAX_SERVER_BYTES = 300 * 1024 * 1024
+# 下载 .xz 体积上限（字节）：压缩后各 ABI 未超 ~50MB；超此值疑异常/被替换资产 → 中止下载（防无界 .content）。
+_FRIDA_MAX_DOWNLOAD_BYTES = 150 * 1024 * 1024
+# 可选完整性 pin：设 FXAPK_FRIDA_SERVER_SHA256=<解压后 ELF 的 sha256> → 部署前按此校验，不匹配拒绝（防同尺寸替换）。
+_FRIDA_SHA256_ENV = "FXAPK_FRIDA_SERVER_SHA256"
 
 # frida releases 下载地址模板。
 _FRIDA_RELEASE_URL = (
@@ -339,17 +345,34 @@ def _bundled_frida_server_xz(ver: str, fabi: str) -> Path | None:
     return None
 
 
+def _bounded_lzma_decompress(compressed: bytes, max_bytes: int) -> bytes:
+    """有界 lzma 解压：累计输出超 max_bytes 即抛 ValueError（防 XZ 炸弹——小压缩体积解压出巨量致 OOM，
+    以 root 部署链尤须防）。分块从解压器缓冲取，绝不一次性 lzma.decompress 无界物化。"""
+    dec = lzma.LZMADecompressor()
+    out = bytearray(dec.decompress(compressed, 1 << 20))
+    while not dec.eof and not dec.needs_input:
+        if len(out) > max_bytes:
+            raise ValueError(f"解压后超上限 {max_bytes} 字节（疑 XZ 炸弹），中止")
+        out += dec.decompress(b"", 1 << 20)
+    if len(out) > max_bytes:
+        raise ValueError(f"解压后超上限 {max_bytes} 字节（疑 XZ 炸弹），中止")
+    return bytes(out)
+
+
 def _extract_xz_to(compressed: bytes, dest: Path) -> str:
-    """把 .xz 字节 lzma 解压并写到 dest。成功 → ''；失败 → 错误说明字符串（不抛）。
+    """把 .xz 字节有界 lzma 解压并写到 dest。成功 → ''；失败 → 错误说明字符串（不抛）。
 
-    抽自 :func:`_download_and_extract` 的解压段，供下载兜底与内置 .xz（免下载）共用，
-    保证两条路径行为一致：含 lzma 解压、:data:`_FRIDA_MIN_SERVER_BYTES` 体积下限兜底、写盘。
+    抽自 :func:`_download_and_extract` 的解压段，供下载兜底与内置 .xz（免下载）共用，保证两条路径行为一致：
+    含**有界** lzma 解压（防 XZ 炸弹）、:data:`_FRIDA_MIN_SERVER_BYTES` 体积下限兜底、可选 SHA256 pin 校验、写盘。
 
-    体积下限非密码学校验（同尺寸恶意替换挡不住——理想是随包固定 SHA256 清单按 ver+abi
-    比对），但能挡住 truncated/empty/错误文件，避免把坏二进制以 root 推到取证设备执行。
+    体积下限非密码学校验（同尺寸恶意替换挡不住）；真正的防替换靠 :data:`_FRIDA_SHA256_ENV` 提供期望
+    SHA256 时的比对（未提供则记录实际 SHA256 供审计/pin）。两者都挡不住时仍有 HTTPS 传输完整性兜底。
     """
     try:
-        raw = lzma.decompress(compressed)
+        raw = _bounded_lzma_decompress(compressed, _FRIDA_MAX_SERVER_BYTES)
+    except ValueError as exc:
+        logger.error("[provision] frida-server 解压超上限：%s", exc)
+        return str(exc)
     except lzma.LZMAError:
         logger.exception("[provision] frida-server lzma 解压失败")
         return "内容不是有效的 .xz（lzma 解压失败）"
@@ -363,6 +386,17 @@ def _extract_xz_to(compressed: bytes, dest: Path) -> str:
             len(raw), _FRIDA_MIN_SERVER_BYTES,
         )
         return f"解压后体积异常（{len(raw)} 字节），拒绝部署疑似损坏的 frida-server"
+
+    # 完整性：记录解压后 SHA256（可审计/可 pin）；若 env 提供期望值则按此校验，不匹配拒绝部署（防同尺寸替换）。
+    digest = hashlib.sha256(raw).hexdigest()
+    logger.info("[provision] frida-server 解压后 SHA256=%s（%d 字节）", digest, len(raw))
+    expected = (os.environ.get(_FRIDA_SHA256_ENV) or "").strip().lower()
+    if expected and digest != expected:
+        logger.error(
+            "[provision] frida-server SHA256 不匹配（期望 %s / 实际 %s），拒绝部署",
+            expected, digest,
+        )
+        return f"frida-server SHA256 校验失败（期望 {expected[:12]}…、实际 {digest[:12]}…），拒绝部署"
 
     try:
         dest.write_bytes(raw)
@@ -384,9 +418,19 @@ def _download_and_extract(url: str, dest: Path, on_progress: Callable[[str], Non
     try:
         import requests
 
-        resp = requests.get(url, timeout=_DOWNLOAD_TIMEOUT)
+        resp = requests.get(url, timeout=_DOWNLOAD_TIMEOUT, stream=True)
         resp.raise_for_status()
-        compressed = resp.content
+        # 流式有界下载：累计超上限即中止（防无界 .content 把异常/被替换的巨型资产全量载入内存）。
+        buf = bytearray()
+        for chunk in resp.iter_content(1 << 16):
+            buf += chunk
+            if len(buf) > _FRIDA_MAX_DOWNLOAD_BYTES:
+                resp.close()
+                logger.error(
+                    "[provision] frida-server 下载体积超上限 %d 字节，中止：%s", _FRIDA_MAX_DOWNLOAD_BYTES, url
+                )
+                return f"下载体积超上限 {_FRIDA_MAX_DOWNLOAD_BYTES} 字节，中止（疑异常/被替换资产）：{url}"
+        compressed = bytes(buf)
     except requests.exceptions.HTTPError as exc:
         code = getattr(exc.response, "status_code", "?")
         logger.exception("[provision] frida-server 下载 HTTP 错误（%s）：%s", code, url)

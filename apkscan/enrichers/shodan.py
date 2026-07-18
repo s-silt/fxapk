@@ -29,7 +29,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
-import requests
+
+from apkscan.enrichers import _http
 
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
@@ -172,7 +173,7 @@ class ShodanEnricher(BaseEnricher):
     # ------------------------------------------------------------------ 查询
     def _resolve(self, domain: str, key: str) -> str | None:
         """用 Shodan dns/resolve 把域名解析成 IP；解析不到返回 None。网络异常向上抛由 enrich 兜底。"""
-        resp = requests.get(
+        resp = _http.capped_get(
             RESOLVE_URL, params={"hostnames": domain, "key": key}, timeout=SHODAN_TIMEOUT
         )
         resp.raise_for_status()
@@ -192,7 +193,7 @@ class ShodanEnricher(BaseEnricher):
         else:
             ip = value
 
-        resp = requests.get(HOST_URL.format(ip=ip), params={"key": key}, timeout=SHODAN_TIMEOUT)
+        resp = _http.capped_get(HOST_URL.format(ip=ip), params={"key": key}, timeout=SHODAN_TIMEOUT)
         if resp.status_code == 404:
             raise _ShodanMiss(f"Shodan 库中无该主机记录：{ip}")
         resp.raise_for_status()

@@ -271,10 +271,22 @@ def load_ipa(path: str, config: AnalysisConfig) -> IpaContext:
 
     plist_name = app_root + "Info.plist"
     try:
+        info = zf.getinfo(plist_name)
+    except KeyError as exc:
+        zf.close()
+        raise IpaParseError(f"非法 IPA（缺 Info.plist）：{path}") from exc
+    # zip 炸弹前置拦截（与 IpaContext.read_file 同口径）：入口必读的 Info.plist 也走声明大小检查，
+    # 否则 load_ipa 直接 zf.read 会在上下文创建阶段就被高压缩比 Info.plist 全量解压致 OOM（绕过 read_file）。
+    if info.file_size > _MAX_DECOMPRESSED_FILE_BYTES:
+        zf.close()
+        raise IpaParseError(
+            f"非法 IPA（Info.plist 声明解压 {info.file_size} 字节超 {_MAX_DECOMPRESSED_FILE_BYTES} 上限，疑 zip 炸弹）：{path}"
+        )
+    try:
         raw = zf.read(plist_name)
     except Exception as exc:  # noqa: BLE001
         zf.close()
-        raise IpaParseError(f"非法 IPA（缺 Info.plist）：{path}（{exc}）") from exc
+        raise IpaParseError(f"非法 IPA（读 Info.plist 失败）：{path}（{exc}）") from exc
 
     plist = _parse_plist(raw)
     if plist is None:
