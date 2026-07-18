@@ -224,7 +224,7 @@ def test_camelcase_identifier_not_ciphertext() -> None:
         "getTeamMemberDisplayNameAVChatKit",
     ):
         assert _looks_ciphertext(ident) is False, ident
-    assert _looks_ciphertext("z3G2E737gj6gbdUZ4uR2zw==") is True  # 真 base64 密文（含数字+==）仍认
+    assert _looks_ciphertext("M2qVUg9kf5w9G8QmqX51vw==") is True  # 真 base64 密文（含数字+==）仍认
     # 端到端：标识符传进函数不绑链（否则每个混淆 app 冒几十条假链）
     assert scan_java_source('void a(){ showMethodErrorToast("getUserDisplayNameAVChatKit"); }', "loc") == []
 
@@ -382,11 +382,12 @@ def test_resource_path_and_name_not_ciphertext() -> None:
 
 
 def test_real_ciphertext_survives_precision_guards() -> None:
-    """★护栏不得误杀真密文：这两条来自同一真实样本，consumer 均为混淆改名的单字母方法。
-    第二条只有 22+2 字符（短于 _B64_RE 的 24 门槛），过去正是靠兜底分支才被收进来。"""
-    assert _looks_ciphertext("z3G2E737gj6gbdUZ4uR2zw==") is True
+    """★护栏不得误杀真密文。两条**合成**向量，结构对齐真实样本中观测到的形态（不写入真实案件值）：
+    短的 16 字节载荷 → 22+2 字符（短于 _B64_RE 的 24 门槛，靠 ``=`` 填充标记过兜底档）；
+    长的 54 字节载荷 → 含 ``+``/``/``、熵 5.2+。真实样本里这两种形态的 consumer 都是混淆改名的单字母方法。"""
+    assert _looks_ciphertext("M2qVUg9kf5w9G8QmqX51vw==") is True
     assert _looks_ciphertext(
-        "iKZGmV5javjz4SVEg22YXUSIfF9ENCuJrwoq/iK7MQflPvAn5JTQe+E63qiIkLtmEt2FBrWUw=="
+        "66tZeNOgkkeAQMWSvhcxvjTZMXvgx99ztucFdEWiV00lLn4yc24/is+BOx3i9LIZtMQ6ilZq"
     ) is True
 
 
@@ -507,10 +508,12 @@ def test_sequential_byte_test_vector_is_not_ciphertext() -> None:
 
 
 def test_real_app_ciphertext_survives_all_suppression() -> None:
-    """★防过度压制：真实样本里那 2 条自有密文（解出 C2 域名与阿里云 OSS 配置对象）
-    必须穿过全部三条规则——它们是该样本唯一的自有网络指标。"""
-    for secret in ("z3G2E737gj6gbdUZ4uR2zw==",
-                   "iKZGmV5javjz4SVEg22YXUSIfF9ENCuJrwoq/iK7MQflPvAn5JTQe+E63qiIkLtmEt2FBrWUw=="):
+    """★防过度压制：App 自有密文必须穿过全部压制规则。
+
+    形态取自真实样本（那两条解出的是该样本**唯一**的自有网络指标，其余端点全是日志库文档 URL），
+    但此处用**合成**向量——真实案件值不写进仓库。"""
+    for secret in ("M2qVUg9kf5w9G8QmqX51vw==",
+                   "66tZeNOgkkeAQMWSvhcxvjTZMXvgx99ztucFdEWiV00lLn4yc24/is+BOx3i9LIZtMQ6ilZq"):
         assert _looks_ciphertext(secret) is True, secret
         src = f'public void onCreate() {{ String s = x("{secret}"); }}'
         chains = scan_java_source(src, "sources/nfc/share/nfcshare/App.java")
