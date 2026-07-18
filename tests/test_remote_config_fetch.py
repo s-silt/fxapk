@@ -139,31 +139,37 @@ class _FakeResp:
         pass
 
 
+def _patch_session_get(monkeypatch, fn) -> None:
+    """monkeypatch requests.Session.get（fetch 走 IP 钉定会话、非 requests.get）；fn 接 (self, url, **kw)。"""
+    import requests
+
+    monkeypatch.setattr(requests.Session, "get", fn)
+
+
 def test_fetch_rejects_non_http_url() -> None:
     r = fetch_config_object("ftp://x/y")
     assert r.ok is False and r.raw is None
 
 
-_PUB = "https://8.8.8.8/y"  # 公网 IP 字面量：过 SSRF 检查（免真 DNS），requests 仍被 mock、不打真网
+_PUB = "https://8.8.8.8/y"  # 公网 IP 字面量：过 SSRF 检查（免真 DNS），Session.get 仍被 mock、不打真网
 
 
 def test_fetch_ok_and_status_and_size_cap(monkeypatch) -> None:
     pytest.importorskip("requests")
-    import requests
 
-    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResp(200, {}, (b"abc", b"def")))
+    _patch_session_get(monkeypatch, lambda self, *a, **k: _FakeResp(200, {}, (b"abc", b"def")))
     r = fetch_config_object(_PUB)
     assert r.ok is True and r.raw == b"abcdef"
 
-    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResp(404))
+    _patch_session_get(monkeypatch, lambda self, *a, **k: _FakeResp(404))
     assert fetch_config_object(_PUB).ok is False
 
     # Content-Length 预检超帽
-    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResp(200, {"Content-Length": "999999"}))
+    _patch_session_get(monkeypatch, lambda self, *a, **k: _FakeResp(200, {"Content-Length": "999999"}))
     assert fetch_config_object(_PUB, max_bytes=1024).ok is False
 
     # 流式累计超帽
-    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResp(200, {}, (b"x" * 800, b"y" * 800)))
+    _patch_session_get(monkeypatch, lambda self, *a, **k: _FakeResp(200, {}, (b"x" * 800, b"y" * 800)))
     assert fetch_config_object(_PUB, max_bytes=1024).ok is False
 
 
@@ -180,36 +186,103 @@ def test_target_is_safe_blocks_internal_and_metadata() -> None:
 
 def test_fetch_blocks_ssrf_before_request(monkeypatch) -> None:
     pytest.importorskip("requests")
-    import requests
 
-    monkeypatch.setattr(requests, "get", lambda *a, **k: pytest.fail("SSRF 目标绝不应发起请求"))
+    _patch_session_get(monkeypatch, lambda self, *a, **k: pytest.fail("SSRF 目标绝不应发起请求"))
     r = fetch_config_object("http://169.254.169.254/appconfig/x.json")
     assert r.ok is False and "SSRF" in (r.error or "")
 
 
 def test_fetch_disables_redirects(monkeypatch) -> None:
     pytest.importorskip("requests")
-    import requests
 
     captured: dict = {}
 
-    def _get(url, **kwargs):
+    def _get(self, url, **kwargs):
         captured.update(kwargs)
         return _FakeResp(200, {}, (b"ok",))
 
-    monkeypatch.setattr(requests, "get", _get)
+    _patch_session_get(monkeypatch, _get)
     fetch_config_object(_PUB)
     assert captured.get("allow_redirects") is False  # 禁跟随重定向（防 302→内网 SSRF）
 
 
 def test_fetch_wall_clock_deadline_aborts(monkeypatch) -> None:
     pytest.importorskip("requests")
-    import requests
 
     from apkscan.config import fetch as fetchmod
 
     times = iter([0.0, 1e9, 1e9, 1e9])  # deadline 计算=0 → 30；循环内 monotonic=1e9 远超 → 立即中止
     monkeypatch.setattr(fetchmod.time, "monotonic", lambda: next(times))
-    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResp(200, {}, (b"x" * 10, b"y" * 10)))
+    _patch_session_get(monkeypatch, lambda self, *a, **k: _FakeResp(200, {}, (b"x" * 10, b"y" * 10)))
     r = fetch_config_object(_PUB)
     assert r.ok is False and "总时限" in (r.error or "")
+
+
+# --------------------------------------------------------------------------- #
+# DNS-rebinding 防护：连接层实连 peer IP 校验（在 TLS/HTTP 之前掐断）
+# --------------------------------------------------------------------------- #
+class _FakeSock:
+    def __init__(self, ip: str) -> None:
+        self._ip = ip
+        self.closed = False
+
+    def getpeername(self):
+        return (self._ip, 443)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_assert_peer_public_blocks_internal_and_closes() -> None:
+    from apkscan.config.fetch import _assert_peer_public, _BlockedPeerError
+
+    for bad in ("169.254.169.254", "127.0.0.1", "10.0.0.1", "192.168.1.1", "172.16.0.1", "::1"):
+        sock = _FakeSock(bad)
+        with pytest.raises(_BlockedPeerError):
+            _assert_peer_public(sock)
+        assert sock.closed is True, bad  # 掐断：关闭 socket，TLS/HTTP 前
+
+    ok = _FakeSock("8.8.8.8")
+    _assert_peer_public(ok)  # 公网 peer 放行、不抛
+    assert ok.closed is False
+
+
+def test_assert_peer_public_tolerates_unresolvable_peer() -> None:
+    from apkscan.config.fetch import _assert_peer_public
+
+    class _NoPeer:
+        def getpeername(self):
+            raise OSError("not connected")
+
+    _assert_peer_public(_NoPeer())  # 拿不到 peer → 不阻断、不抛（预解析校验已把关）
+
+
+def test_guarded_session_mounts_peer_validating_adapter() -> None:
+    pytest.importorskip("requests")
+    from apkscan.config.fetch import _GUARDED_ADAPTER_CLS, _build_guarded_session
+
+    session = _build_guarded_session()
+    assert session is not None
+    try:
+        if _GUARDED_ADAPTER_CLS is not None:  # urllib3 API 匹配时应挂上钉定 adapter
+            assert isinstance(session.get_adapter("https://example.com"), _GUARDED_ADAPTER_CLS)
+            assert isinstance(session.get_adapter("http://example.com"), _GUARDED_ADAPTER_CLS)
+    finally:
+        session.close()
+
+
+def test_peer_guard_mixin_invokes_check_on_new_conn() -> None:
+    """接线证明：mixin 的 _new_conn 会对 super() 建立的 socket 调 peer 校验（内网 peer → 建连即掐断）。"""
+    from apkscan.config import fetch as fetchmod
+
+    mixin = getattr(fetchmod, "_PeerGuardMixin", None)
+    if mixin is None:  # urllib3 API 不匹配、降级路径
+        pytest.skip("IP 钉定传输不可用（urllib3 API 变动）")
+
+    class _Base:
+        def _new_conn(self):
+            return _FakeSock("169.254.169.254")  # super 返回连到内网的 socket
+
+    guarded = type("_G", (mixin, _Base), {})
+    with pytest.raises(fetchmod._BlockedPeerError):
+        guarded()._new_conn()
