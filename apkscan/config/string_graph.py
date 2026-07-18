@@ -100,7 +100,7 @@ def scan_java_source(text: str, location: str) -> list[StringChain]:
     if len(text) > _MAX_TEXT_BYTES:
         text = text[:_MAX_TEXT_BYTES]
     chains: list[StringChain] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[str] = set()  # 按**密文**去重（本文件内）：嵌套方法/匿名类里的同串只出一条（外层方法先命中即保留）
     for name, body in _extract_methods(text):
         candidates = [
             (lit, _consumer_before(body, m.start()) or _consumer_via_var(body, m.start()))
@@ -114,7 +114,7 @@ def scan_java_source(text: str, location: str) -> list[StringChain]:
         for secret, consumer in candidates[:_MAX_SECRETS_PER_METHOD]:
             if not decrypts and consumer is None:  # 既无标准解密、又没被消费 → 不绑
                 continue
-            key = (name, secret[:64])
+            key = secret[:64]
             if key in seen:
                 continue
             seen.add(key)
