@@ -869,3 +869,30 @@ def test_populate_network_attribution_failure_marks_when_no_prior_view(monkeypat
     report = _report(_complete_endpoint())
     closure_module._populate_network_attribution(report)
     assert report.meta["network_attribution"] == {"phase": "close", "error": "RuntimeError"}
+
+
+def test_close_report_refreshes_fronting_cluster(monkeypatch) -> None:
+    """★回归（codex 审计"已知边界"）：close 后重跑 fronting-cluster——单端点 _set_attribution 重建冲掉的
+    cluster_id 被全报告重聚类恢复，不再停留在 analyze 期/丢失。"""
+    monkeypatch.setattr(closure_module, "_normalized_public_ip", lambda value: str(value).strip(), raising=False)
+    e1 = _endpoint("1.1.1.1", runtime=True, target=True, enrichment={"tls": {"spki_sha256": "sharedspki"}})
+    e2 = _endpoint("2.2.2.2", runtime=True, target=True, enrichment={"tls": {"spki_sha256": "sharedspki"}})
+    report = _report(e1, e2)
+    close_report(report, ClosureConfig(online=False, require_dynamic=False), enrichers=[])
+    edge1 = e1.enrichment["attribution"]["ips"][0]["edge_provider"]
+    edge2 = e2.enrichment["attribution"]["ips"][0]["edge_provider"]
+    assert edge1["cluster_id"] == edge2["cluster_id"] == "fronting-cluster-0001"  # close 后重聚类恢复编号
+
+
+def test_close_report_clears_stale_case_close_marker_on_unselected_lead() -> None:
+    """★回归（codex 审计 P1-1 B 面）：上一轮更大 max_targets 给现已未选/被截断的 lead 写的旧 [case-close] 注记，
+    本轮 close 须清掉，不残留与本轮 closure 不一致的陈旧状态。"""
+    report = _report(_complete_endpoint())  # 198.51.100.10 会被选中
+    stale = Lead(
+        category=LeadCategory.IP, value="203.0.113.99", confidence=Confidence.HIGH,
+        source_refs=[], advice="建议调证",
+    )
+    stale.notes = "[case-close] status=complete; gaps=none"  # 模拟上一轮它曾是 target 的陈旧注记
+    report.leads.append(stale)  # 无对应端点 → 本轮不被选为 target
+    close_report(report, ClosureConfig(online=False, require_dynamic=False), enrichers=[])
+    assert "[case-close]" not in stale.notes  # 未选中 lead 的旧 marker 被清
