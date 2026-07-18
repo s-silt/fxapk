@@ -28,8 +28,8 @@ _JSON = json.dumps(_CONFIG).encode()
 _URL = "https://cfg.oss-cn-hangzhou.aliyuncs.com/app/domain.dat"
 
 
-def _state(*, online: bool, mode: str, urls: list[str]):
-    cfg = AnalysisConfig(online=online, mode=mode)
+def _state(*, online: bool, mode: str, urls: list[str], out_dir: str = "out"):
+    cfg = AnalysisConfig(online=online, mode=mode, out_dir=out_dir)
     st = pipeline._PipelineState(ctx=None, config=cfg, platform="android", capabilities=set())  # type: ignore[arg-type]
     st.leads = [Lead(category=LeadCategory.REMOTE_CONFIG, value=u) for u in urls]
     return st
@@ -67,12 +67,13 @@ def test_no_candidates_is_noop() -> None:
 # --------------------------------------------------------------------------- #
 # 授权档：下载 → 解码 → 端点回灌
 # --------------------------------------------------------------------------- #
-def test_authorized_active_fetches_decodes_and_feeds_back(monkeypatch) -> None:
+def test_authorized_active_fetches_decodes_and_feeds_back(monkeypatch, tmp_path) -> None:
+    blob = gzip.compress(_JSON)
     monkeypatch.setattr(
         pipeline, "fetch_config_object",
-        lambda url, **k: FetchResult(url, True, gzip.compress(_JSON), 200, None),
+        lambda url, **k: FetchResult(url, True, blob, 200, None),
     )
-    st = _state(online=True, mode=ANALYSIS_MODE_AUTHORIZED_ACTIVE, urls=[_URL])
+    st = _state(online=True, mode=ANALYSIS_MODE_AUTHORIZED_ACTIVE, urls=[_URL], out_dir=str(tmp_path))
     pipeline._stage_remote_config_fetch(st)
 
     values = {ep.value for ep in st.endpoints}
@@ -83,14 +84,22 @@ def test_authorized_active_fetches_decodes_and_feeds_back(monkeypatch) -> None:
     assert art[0]["domains"] == ["api.evil-c2.com"] and art[0]["ips"] == ["45.11.22.33"]
     assert st.meta["remote_config_fetched"] == 1
 
+    # ★原始 blob 落盘：stored_path 相对、文件存在、字节原样保真
+    import hashlib
+    sha = hashlib.sha256(blob).hexdigest()
+    assert art[0]["stored_path"] == f"remote_config/{sha}.bin"
+    archived = tmp_path / "remote_config" / f"{sha}.bin"
+    assert archived.read_bytes() == blob  # 原始字节完整
+    assert st.meta["remote_config_archived"] == 1
 
-def test_fed_back_endpoints_are_not_observed_contact(monkeypatch) -> None:
+
+def test_fed_back_endpoints_are_not_observed_contact(monkeypatch, tmp_path) -> None:
     """信任边界：回灌端点 source='remote-config'——既非 observed-contact（确认 C2），也不 startswith('runtime')。"""
     monkeypatch.setattr(
         pipeline, "fetch_config_object",
         lambda url, **k: FetchResult(url, True, base64.b64encode(_JSON), 200, None),
     )
-    st = _state(online=True, mode=ANALYSIS_MODE_AUTHORIZED_ACTIVE, urls=[_URL])
+    st = _state(online=True, mode=ANALYSIS_MODE_AUTHORIZED_ACTIVE, urls=[_URL], out_dir=str(tmp_path))
     pipeline._stage_remote_config_fetch(st)
 
     ep = next(ep for ep in st.endpoints if ep.value == "api.evil-c2.com")

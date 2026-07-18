@@ -10,6 +10,7 @@ import hashlib
 import logging
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 
@@ -19,6 +20,7 @@ from apkscan.config.decode import decode_config_blob
 from apkscan.config.fetch import fetch_config_object
 from apkscan.core import infra
 from apkscan.core.appcrypto import CryptoRecipe
+from apkscan.core.atomic import atomic_write_bytes
 from apkscan.core.attribution import build_endpoint_attribution, cluster_fronting
 from apkscan.core.models import (
     ANALYSIS_MODE_AUTHORIZED_ACTIVE,
@@ -291,22 +293,34 @@ def _stage_remote_config_fetch(state: _PipelineState) -> None:
         len(candidates),
     )
     recipe = CryptoRecipe.from_meta(meta.get("crypto_recipe"))
+    # 原始 blob 落盘目录：输出目录下的 remote_config/（与 report.json 同处，报告可相对引用）。
+    out_dir = getattr(config, "out_dir", None)
+    archive_dir = Path(out_dir) / _REMOTE_CONFIG_SUBDIR if out_dir else None
     new_endpoints: list[Endpoint] = []
-    artifacts = [_fetch_decode_one(getattr(lead, "value", ""), recipe, new_endpoints)
+    artifacts = [_fetch_decode_one(getattr(lead, "value", ""), recipe, new_endpoints, archive_dir)
                  for lead in candidates]
     meta["remote_config_artifacts"] = artifacts
     meta["remote_config_fetched"] = sum(1 for a in artifacts if a.get("decoded"))
+    meta["remote_config_archived"] = sum(1 for a in artifacts if a.get("stored_path"))
     if new_endpoints:
         state.endpoints.extend(new_endpoints)
         state.endpoints = _dedup_endpoints(state.endpoints)  # 与已有端点按 value 合并
 
 
-def _fetch_decode_one(url: str, recipe: "CryptoRecipe | None", sink: list[Endpoint]) -> dict:
-    """下载并多层解码一个候选，解出的域名/IP 追加进 sink（端点集）。返回 ConfigArtifact 的 meta dict。"""
+#: 原始配置对象落盘子目录名（相对输出目录）。报告里 stored_path 用相对路径，保报告可迁移。
+_REMOTE_CONFIG_SUBDIR = "remote_config"
+
+
+def _fetch_decode_one(
+    url: str, recipe: "CryptoRecipe | None", sink: list[Endpoint], archive_dir: "Path | None"
+) -> dict:
+    """下载→（落盘原始 blob）→多层解码一个候选，解出的域名/IP 追加进 sink。返回 ConfigArtifact 的 meta dict。"""
     fetched = fetch_config_object(url)
     if not fetched.ok or fetched.raw is None:
         return {"source_url": url, "decoded": False, "error": fetched.error}
     blob = fetched.raw
+    sha = hashlib.sha256(blob).hexdigest()
+    stored_path = _archive_blob(archive_dir, sha, blob)  # 抓到即落盘（先于解码，防下游失败丢原始证据）
     result = decode_config_blob(blob, recipe=recipe)
     for domain in result.domains:
         sink.append(_config_endpoint(domain, "domain", url))
@@ -314,14 +328,30 @@ def _fetch_decode_one(url: str, recipe: "CryptoRecipe | None", sink: list[Endpoi
         sink.append(_config_endpoint(ip, "ip", url))
     return {
         "source_url": url,
-        "sha256": hashlib.sha256(blob).hexdigest(),
+        "sha256": sha,
         "size": len(blob),
         "decoded": result.decoded,
         "decode_chain": list(result.decode_chain),
         "domains": list(result.domains),
         "ips": list(result.ips),
-        "stored_path": None,  # 原始 blob 落盘 reports/<sha>/remote_config/ 作后续
+        "stored_path": stored_path,
     }
+
+
+def _archive_blob(archive_dir: "Path | None", sha: str, blob: bytes) -> str | None:
+    """把原始配置对象字节原子落盘 ``<out_dir>/remote_config/<sha>.bin``；返回**相对** stored_path。
+
+    落盘失败（磁盘满/只读）不得连累已解出的域名/IP 线索——记 warning、返回 None（stored_path 缺失但线索仍在）。
+    sha 命名幂等：同内容重复下载覆写同一文件、字节相同。
+    """
+    if archive_dir is None:
+        return None
+    try:
+        atomic_write_bytes(archive_dir / f"{sha}.bin", blob)
+    except OSError:
+        logger.warning("[remote_config] 原始配置对象落盘失败（已解出的线索不受影响）：%s", sha, exc_info=True)
+        return None
+    return f"{_REMOTE_CONFIG_SUBDIR}/{sha}.bin"
 
 
 def _config_endpoint(value: str, kind: str, source_url: str) -> Endpoint:
