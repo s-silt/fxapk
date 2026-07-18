@@ -150,6 +150,28 @@ def _key_iocs(report: dict) -> list[str]:
     return out
 
 
+def _remote_config_objects(report: dict) -> list[dict]:
+    """报告引用的远程配置对象，供跨样本串联「同一 OSS 对象 / 同一份配置」。
+
+    取下载解码产物的 ``(source_url, sha256)``（meta["remote_config_artifacts"]，authorized-active 才有 sha）
+    并上 ``REMOTE_CONFIG`` 候选线索的 url（passive 也有）。按 url 去重（下载产物优先保留其 sha256），按 url
+    排序确定。空/无则空列表。绝不抛。
+    """
+    objects: dict[str, dict] = {}
+    for art in _meta(report).get("remote_config_artifacts") or []:
+        if not isinstance(art, dict):
+            continue
+        url = _s(art.get("source_url")).strip()
+        if url:
+            objects.setdefault(url, {"url": url, "sha256": _s(art.get("sha256")).strip().lower() or None})
+    for lead in report.get("leads") or []:
+        if isinstance(lead, dict) and lead.get("category") == "REMOTE_CONFIG":
+            url = _s(lead.get("value")).strip()
+            if url:
+                objects.setdefault(url, {"url": url, "sha256": None})
+    return [objects[url] for url in sorted(objects)]
+
+
 def _finding_ids(report: dict) -> list[str]:
     """报告命中的规则 id 去重排序（供规则库命中反查，Finding.id 即规则 id）。"""
     findings = report.get("findings")
@@ -213,6 +235,8 @@ def manifest_entry(report: dict, case_id: str | None = None) -> dict:
         },
         "finding_ids": _finding_ids(report),
         "key_iocs": _key_iocs(report),
+        # ---- config-chain 跨样本串联维度（同 OSS 对象 / 同配置内容）----
+        "remote_config_objects": _remote_config_objects(report),
     }
 
 
@@ -404,3 +428,55 @@ def find_by(entries: list[dict], value: str, by: str = "sample_sha256") -> list[
         target = target.lower()
         return [e for e in entries if _s(e.get(by)).strip().lower() == target]
     return [e for e in entries if _s(e.get(by)).strip() == target]
+
+
+def find_by_config_object(entries: list[dict], value: str) -> list[dict]:
+    """反查引用了某远程配置对象的样本：``value`` 匹配任一对象的 url（精确）或 sha256（大小写归一）。
+
+    config-chain 层⑧ 的列表维度反查（``remote_config_objects`` 是列表，非 :func:`find_by` 的标量字段）。
+    空值 → 空列表。绝不抛。
+    """
+    target = _s(value).strip()
+    if not target:
+        return []
+    target_lower = target.lower()
+    out: list[dict] = []
+    for entry in entries:
+        for obj in entry.get("remote_config_objects") or []:
+            if not isinstance(obj, dict):
+                continue
+            sha = _s(obj.get("sha256")).strip().lower()
+            if _s(obj.get("url")).strip() == target or (sha and sha == target_lower):
+                out.append(entry)
+                break
+    return out
+
+
+def shared_config_objects(entries: list[dict]) -> list[dict]:
+    """跨样本共享的远程配置对象簇：同一 url（同一 OSS 对象）或同一 sha256（配置内容字节相同）被 **≥2 个
+    不同样本** 引用——串案强锚（"样本 A 与 B 拉同一 bucket/config.dat" 或 "配置内容完全一致"）。
+
+    返回按样本数降序的簇 ``[{key_type: url|sha256, key, samples: [sample_sha256...]}]``（url 与 sha256 各成
+    簇：内容一致的 sha256 簇是比 url 更强的佐证）。绝不抛。
+    """
+    groups: dict[tuple[str, str], set[str]] = {}
+    for entry in entries:
+        sample = _s(entry.get("sample_sha256")).strip().lower()
+        if not sample:
+            continue
+        for obj in entry.get("remote_config_objects") or []:
+            if not isinstance(obj, dict):
+                continue
+            url = _s(obj.get("url")).strip()
+            sha = _s(obj.get("sha256")).strip().lower()
+            if url:
+                groups.setdefault(("url", url), set()).add(sample)
+            if sha:
+                groups.setdefault(("sha256", sha), set()).add(sample)
+    clusters = [
+        {"key_type": key_type, "key": key, "samples": sorted(samples)}
+        for (key_type, key), samples in groups.items()
+        if len(samples) >= 2
+    ]
+    clusters.sort(key=lambda c: (-len(c["samples"]), c["key_type"], c["key"]))
+    return clusters
