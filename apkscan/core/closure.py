@@ -156,12 +156,19 @@ def evaluate_capture_quality(meta: Mapping[str, object]) -> dict[str, object]:
         or raw.get("floor_started")
     )
 
+    floor_parse_status = str(raw.get("floor_parse_status") or "ok")
+    floor_parse_failed = floor_parse_status not in ("ok", "absent", "")
+
     if target_count > 0 and business_count > 0:
         status = CLOSURE_COMPLETE
         reason = "target-attributed public business candidate observed"
     elif business_count > 0:
         status = CLOSURE_PARTIAL
         reason = "public business candidate observed without unique target attribution"
+    elif floor_parse_failed:
+        # floor pcap 解析/采集失败：空结果**不代表零流量**——与「真实零业务流量」显式区分，提示重抓而非结案。
+        status = CLOSURE_FAILED
+        reason = f"floor pcap parse failed ({floor_parse_status}); empty result does not imply zero traffic"
     else:
         status = CLOSURE_FAILED
         reason = "no target business candidate observed"
@@ -174,6 +181,7 @@ def evaluate_capture_quality(meta: Mapping[str, object]) -> dict[str, object]:
         "target_attributed_count": target_count,
         "dynamic_status": status,
         "reason": reason,
+        "floor_parse_status": floor_parse_status,
     }
 
 

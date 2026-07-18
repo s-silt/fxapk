@@ -209,6 +209,20 @@ def test_capture_business_candidate_without_target_attribution_is_partial() -> N
     assert quality["dynamic_status"] == CLOSURE_PARTIAL
 
 
+def test_capture_quality_distinguishes_floor_parse_failure_from_zero_traffic() -> None:
+    """★回归（codex 复核 P1）：floor pcap 解析失败要在动态质量里与真实零业务流量区分（reason + floor_parse_status），
+    否则 case-close/操作员无法区分「要重抓」与「真无业务流量」。"""
+    failed = evaluate_capture_quality(
+        {"channel_ready": True, "packet_count": 0, "business_candidate_count": 0, "floor_parse_status": "parse_error"}
+    )
+    assert failed["dynamic_status"] == CLOSURE_FAILED
+    assert "parse failed" in str(failed["reason"]) and failed["floor_parse_status"] == "parse_error"
+    zero = evaluate_capture_quality(
+        {"channel_ready": True, "packet_count": 0, "business_candidate_count": 0, "floor_parse_status": "ok"}
+    )
+    assert zero["dynamic_status"] == CLOSURE_FAILED and "parse failed" not in str(zero["reason"])
+
+
 def test_capture_target_attributed_candidate_is_complete() -> None:
     quality = evaluate_capture_quality(
         {

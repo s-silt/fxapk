@@ -18,6 +18,7 @@ SENSITIVE_CATEGORIES = frozenset(
         "RUNTIME_CREDENTIAL",  # 运行时登录态 / 凭据
         "VICTIM_DATA",  # 受害人物证（PII）
         "CRYPTO_RECIPE",  # 应用层加密配方（含 key/iv，凭此可解全部加密流量）
+        "REMOTE_CONTROL",  # 无障碍远控劫持的被害人银行/支付 app（含被害人关联；动态侧已标高敏，须同步脱敏）
     }
 )
 

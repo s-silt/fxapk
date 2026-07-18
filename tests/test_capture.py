@@ -400,6 +400,7 @@ def test_build_capture_quality_requires_target_attributed_business_traffic(
         "target_attributed_count": 1,  # ★proto 键对齐后 target 正确计入（此前恒 0 → 误判 partial）
         "dynamic_status": "complete",
         "reason": "target-attributed public business candidate observed",
+        "floor_parse_status": "ok",
     }
 
 
