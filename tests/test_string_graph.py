@@ -247,6 +247,20 @@ def test_assign_then_decrypt_local_var_bound() -> None:
     assert len(chains2) == 1 and chains2[0].consumer == "decrypt"
 
 
+def test_nested_method_same_ciphertext_deduped_to_one() -> None:
+    """嵌套方法/匿名类里同一串密文只出一条（按密文去重，而非按方法）——避免同串重复进 decrypt 清单。"""
+    src = f'''
+    void outer() {{
+        new Runnable() {{
+            public void run() {{ String u = dec("{_CT}"); }}
+        }}.run();
+    }}
+    '''
+    chains = scan_java_source(src, "loc")
+    assert len(chains) == 1  # outer + run 两个作用域都含该密文，去重后一条
+    assert chains[0].secret == _CT
+
+
 def test_assign_then_denylisted_or_unused_not_bound() -> None:
     """赋值后只传给 denylist 方法（存储/日志）或根本没用到 → 不绑。"""
     assert scan_java_source(f'void a() {{ String s = "{_CT}"; map.put("k", s); }}', "loc") == []
