@@ -35,6 +35,21 @@ def test_build_digest_sorts_and_summarizes() -> None:
     assert d["summary"]["by_advice"]["建议调证"] == 1
 
 
+def test_build_digest_redacts_remote_control_value() -> None:
+    """★回归（codex 全库审计 P1）：REMOTE_CONTROL 被动态侧标为高敏（含被害人关联），`digest --redact` 须脱敏
+    其 value（与脱敏表同步）；非高敏类（IP）仍明文。"""
+    report = {
+        "leads": [
+            {"category": "REMOTE_CONTROL", "value": "com.icbc.bank 被害人账户 6222abcd", "advice": "建议调证", "confidence": "HIGH"},
+            {"category": "IP", "value": "1.2.3.4", "advice": "建议调证", "confidence": "HIGH"},
+        ],
+    }
+    d = build_digest(report, redact=True)
+    by_cat = {lead["category"]: lead["value"] for lead in d["leads"]}
+    assert "6222" not in by_cat["REMOTE_CONTROL"] and "已脱敏" in by_cat["REMOTE_CONTROL"]
+    assert by_cat["IP"] == "1.2.3.4"  # 非高敏类不脱敏
+
+
 def test_build_digest_bad_input_never_throws() -> None:
     assert build_digest(["not a dict"])["leads"] == []
     assert build_digest(None)["leads"] == []
