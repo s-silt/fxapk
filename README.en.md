@@ -44,8 +44,6 @@ When not installed as a command, use `python -m apkscan.cli <…>`.
 - `out/report.json` — full structured data (machine-readable)
 - `--fmt pdf` — optional PDF export (needs local Chrome / Edge)
 
-![fxapk report example](docs/images/report-demo.png)
-
 ## Compliance
 
 For **authorized security research / analysis** only. It performs static / dynamic analysis and information extraction, and provides **no attack / exploitation / active-probing capability against any third party**. **Passive by default**: overseas servers are only passively attributed (RDAP / WHOIS / DNS / ASN / certificate transparency), with zero active traffic to the target; the few capabilities that do reach the target (e.g. retrieving a config object the sample itself references) are off by default and only enabled under an explicit `--mode authorized-active`. Unpacking observes the **sample itself** on your own authorized analysis machine. Use only within lawful authorization.
