@@ -87,7 +87,7 @@ def _ep(value: str = "evil.example") -> Endpoint:
 
 def test_parses_and_normalizes_related_hosts(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeRequests(200, _CRTSH_PAYLOAD)
-    monkeypatch.setattr(certs_mod, "requests", fake)
+    monkeypatch.setattr(certs_mod._http, "capped_get", fake.get)
     res = CertsEnricher().enrich(_ep())
     assert res.ok is True
     hosts = res.data["related_hostnames"]
@@ -112,7 +112,7 @@ def test_parses_and_normalizes_related_hosts(monkeypatch: pytest.MonkeyPatch) ->
 def test_timeout_ok_false_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     """crt.sh 超时（requests 抛）→ ok=False，不缓存，便于重试。"""
     fake = _FakeRequests(200, None, exc=TimeoutError("read timed out"))
-    monkeypatch.setattr(certs_mod, "requests", fake)
+    monkeypatch.setattr(certs_mod._http, "capped_get", fake.get)
     e = CertsEnricher()
     res = e.enrich(_ep())
     assert res.ok is False
@@ -125,7 +125,7 @@ def test_timeout_ok_false_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_http_error_ok_false(monkeypatch: pytest.MonkeyPatch) -> None:
     """crt.sh 502/503（raise_for_status 抛）→ ok=False。"""
     fake = _FakeRequests(502, {})
-    monkeypatch.setattr(certs_mod, "requests", fake)
+    monkeypatch.setattr(certs_mod._http, "capped_get", fake.get)
     res = CertsEnricher().enrich(_ep())
     assert res.ok is False
 
@@ -133,7 +133,7 @@ def test_http_error_ok_false(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_empty_result_ok_true_and_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     """crt.sh 返回空列表（无证书）→ ok=True 无关联主机名，且缓存（避免对慢接口复查）。"""
     fake = _FakeRequests(200, [])
-    monkeypatch.setattr(certs_mod, "requests", fake)
+    monkeypatch.setattr(certs_mod._http, "capped_get", fake.get)
     e = CertsEnricher()
     res = e.enrich(_ep())
     assert res.ok is True
@@ -147,7 +147,7 @@ def test_empty_result_ok_true_and_cached(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_empty_body_treated_as_no_result(monkeypatch: pytest.MonkeyPatch) -> None:
     """crt.sh 偶发返回空体（非 JSON）→ 按无结果归一，不抛、不调 json()。"""
     fake = _FakeRequests(200, None, text="")  # payload=None 但走不到 json()
-    monkeypatch.setattr(certs_mod, "requests", fake)
+    monkeypatch.setattr(certs_mod._http, "capped_get", fake.get)
     res = CertsEnricher().enrich(_ep())
     assert res.ok is True
     assert res.data["related_hostnames"] == []
@@ -155,7 +155,7 @@ def test_empty_body_treated_as_no_result(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_cache_hit_skips_network(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeRequests(200, _CRTSH_PAYLOAD)
-    monkeypatch.setattr(certs_mod, "requests", fake)
+    monkeypatch.setattr(certs_mod._http, "capped_get", fake.get)
     e = CertsEnricher()
     e.enrich(_ep())
     n = len(fake.calls)
@@ -165,7 +165,7 @@ def test_cache_hit_skips_network(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_empty_value_skips(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeRequests(200, _CRTSH_PAYLOAD)
-    monkeypatch.setattr(certs_mod, "requests", fake)
+    monkeypatch.setattr(certs_mod._http, "capped_get", fake.get)
     res = CertsEnricher().enrich(Endpoint(value="   ", kind="domain", evidences=[]))
     assert res.ok is False
     assert not fake.calls  # 空值绝不触网

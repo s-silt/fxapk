@@ -19,7 +19,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
-import requests
+
+from apkscan.enrichers import _http
 
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
@@ -204,7 +205,7 @@ class IpRdapEnricher(BaseEnricher):
     # ------------------------------------------------------------------ 查询
     def _query(self, ip: str) -> dict[str, Any]:
         """RDAP 网络查询；网络/HTTP/解析异常向上抛由 enrich() 兜底。"""
-        resp = requests.get(IP_RDAP_URL.format(ip=ip), timeout=IP_RDAP_TIMEOUT)
+        resp = _http.capped_get(IP_RDAP_URL.format(ip=ip), timeout=IP_RDAP_TIMEOUT)
         resp.raise_for_status()
         payload = resp.json()
         if not isinstance(payload, dict):

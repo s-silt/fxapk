@@ -53,7 +53,7 @@ class _FakeRequests:
 @pytest.fixture
 def fake_requests(monkeypatch: pytest.MonkeyPatch) -> _FakeRequests:
     fake = _FakeRequests()
-    monkeypatch.setattr(ip_rdap_mod, "requests", fake)
+    monkeypatch.setattr(ip_rdap_mod._http, "capped_get", fake.get)
     return fake
 
 
