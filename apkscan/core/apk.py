@@ -844,6 +844,27 @@ def _dt(value: Any) -> str:
     return str(value)
 
 
+def _reject_if_zip_bomb(path: str) -> None:
+    """把 APK 交给 androguard 全量解析前的 zip 炸弹前置拦截（与 read_file 同口径，Level 1：信声明大小）。
+
+    androguard 的 ``APK(path)`` 会在构造期解压内部 DEX/manifest——绕过 read_file 的 file_size 检查，
+    某条目声明解压超上限时可被炸出 OOM。故先扫中央目录声明大小、有超上限项即 fail-fast。
+    打不开/非 zip → 不在此判死，交由 androguard 报既有领域错误。
+    """
+    try:
+        with zipfile.ZipFile(path) as zf:
+            for info in zf.infolist():
+                if info.file_size > _MAX_DECOMPRESSED_FILE_BYTES:
+                    raise ApkParseError(
+                        f"拒绝加载 APK（条目 {info.filename} 声明解压 {info.file_size} 字节 > "
+                        f"{_MAX_DECOMPRESSED_FILE_BYTES} 上限，疑 zip 炸弹）：{path}"
+                    )
+    except ApkParseError:
+        raise
+    except Exception:  # noqa: BLE001 - 打不开/非 zip：交 androguard 走既有错误路径，不在此提前判死
+        logger.debug("[apk] zip 炸弹前置扫描失败（忽略，交 androguard）：%s", path, exc_info=True)
+
+
 def load_apk(
     path: str,
     config: AnalysisConfig,
@@ -862,6 +883,8 @@ def load_apk(
     # 的 lxml etree.Element 抛 ValueError 致整体 fail-fast。装幂等 shim 净化 nsmap，对齐
     # apktool 的宽容降级，让 manifest 可解（包名/组件/权限/证书等不再因此全丢）。
     _install_axml_nsmap_shim()
+    # zip 炸弹前置拦截：在 androguard 全量解析（内部解压 DEX/manifest）前先按声明大小拒炸弹。
+    _reject_if_zip_bomb(path)
     from androguard.core.apk import APK
     from androguard.core.dex import DEX
 
