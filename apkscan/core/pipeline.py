@@ -20,7 +20,7 @@ from apkscan.config.chain import build_control_chains
 from apkscan.config.decode import decode_config_blob
 from apkscan.config.fetch import fetch_config_object
 from apkscan.core import infra
-from apkscan.core.appcrypto import CryptoRecipe, decrypt_envelope
+from apkscan.core.appcrypto import CryptoRecipe
 from apkscan.core.atomic import atomic_write_bytes
 from apkscan.core.attribution import build_endpoint_attribution, cluster_fronting
 from apkscan.core.models import (
@@ -355,67 +355,18 @@ def _archive_blob(archive_dir: "Path | None", sha: str, blob: bytes) -> str | No
     return f"{_REMOTE_CONFIG_SUBDIR}/{sha}.bin"
 
 
-def _config_endpoint(
-    value: str, kind: str, ref: str, *, source: str = "remote-config"
-) -> Endpoint:
-    """从远程配置/解密回灌的端点。★source 恒非 runtime*（remote-config / config-decrypted）：不进
-    observed-contact、也不 startswith('runtime')，故不误升"确认 C2"/"运行时出现"徽标——是"配置里出现的域名"线索。"""
+def _config_endpoint(value: str, kind: str, ref: str) -> Endpoint:
+    """从远程配置解码回灌的端点。★source 恒为 ``remote-config``（非 runtime*）：不进 observed-contact、
+    也不 startswith('runtime')，故不误升"确认 C2"/"运行时出现"徽标——是"配置里出现的域名"线索。"""
     return Endpoint(
         value=value,
         kind=kind,
         evidences=[Evidence(
-            source=source,
-            location=f"{source}:{ref}",
-            snippet=f"from {source} {ref}"[:200],
+            source="remote-config",
+            location=f"remote-config:{ref}",
+            snippet=f"from remote-config {ref}"[:200],
         )],
     )
-
-
-def _stage_decrypt_candidates(state: _PipelineState) -> None:
-    """确定性自动解（Tier A，纯本地零网络零 AI）：对 jadx 产的 ``decrypt_candidates``，若已提取到 crypto_recipe
-    就用 ``appcrypto`` 试解每条密文，解出的 URL/域名/IP 回灌端点集（走完整富化+归因）。
-
-    配方已知即机器解；配方缺失 / iv 依赖运行时 ts / 解不出（UTF-8 校验失败）→ 优雅跳过，留给 AI（Tier B）。
-    解密全走 ``decrypt_envelope``（绝不抛、失败返 None）；回灌端点标 source='config-decrypted'（非 runtime*）。
-    在 analyze 之后、enrich 之前跑，故解出的端点吃到完整下游。
-    """
-    candidates = state.meta.get("decrypt_candidates")
-    if not isinstance(candidates, list) or not candidates:
-        return
-    recipe = CryptoRecipe.from_meta(state.meta.get("crypto_recipe"))
-    if recipe is None:  # 无配方 → 无法确定性解，全留给 Tier B（AI）
-        state.meta["decrypt_candidates_auto"] = {"attempted": 0, "decrypted": 0, "reason": "no crypto_recipe"}
-        return
-
-    new_endpoints: list[Endpoint] = []
-    results: list[dict] = []
-    for cand in candidates:
-        ciphertext = cand.get("ciphertext") if isinstance(cand, dict) else None
-        if not isinstance(ciphertext, str) or not ciphertext:
-            continue
-        ref = str(cand.get("location") or "") if isinstance(cand, dict) else ""
-        # 静态密文无运行时 ts：试 0（iv_derive=fixed/none/same_as_key 可解；md5(key+ts) 依赖 ts 则解不出→跳过）。
-        plaintext = decrypt_envelope(ciphertext, recipe, 0)
-        if plaintext is None:
-            results.append({"ciphertext": ciphertext[:48], "decrypted": False})
-            continue
-        decoded = decode_config_blob(plaintext.encode("utf-8", "replace"))  # 明文再抽域名/IP（可能还套 base64/json）
-        for domain in decoded.domains:
-            new_endpoints.append(_config_endpoint(domain, "domain", ref, source="config-decrypted"))
-        for ip in decoded.ips:
-            new_endpoints.append(_config_endpoint(ip, "ip", ref, source="config-decrypted"))
-        results.append({
-            "ciphertext": ciphertext[:48], "decrypted": True, "plaintext": plaintext[:512],
-            "domains": list(decoded.domains), "ips": list(decoded.ips),
-        })
-    state.meta["decrypt_candidates_auto"] = {
-        "attempted": len(results),
-        "decrypted": sum(1 for r in results if r.get("decrypted")),
-        "results": results,
-    }
-    if new_endpoints:
-        state.endpoints.extend(new_endpoints)
-        state.endpoints = _dedup_endpoints(state.endpoints)
 
 
 def _stage_enrich(state: _PipelineState) -> None:
@@ -644,7 +595,6 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     _run_stage(state, "analyze", _stage_run_analyzers)              # 分析器执行 + 聚合 + 端点去重
     _run_stage(state, "degradation_flags", _stage_degradation_flags)  # 降级标志入 meta
     _run_stage(state, "remote_config_fetch", _stage_remote_config_fetch)  # 授权档：下载+解码远程配置，回灌端点
-    _run_stage(state, "decrypt_candidates", _stage_decrypt_candidates)  # Tier A：配方已知则本地自动解密文候选，回灌端点
     _run_stage(state, "enrich", _stage_enrich)                     # 联网富化（两遍，主动/被动硬隔离）
     _run_stage(state, "attribution", _stage_attribution)           # 五层不塌缩基础设施归因（per-IP）
     _run_stage(state, "build_leads", _stage_build_leads)           # 端点 → Lead + advice 兜底
