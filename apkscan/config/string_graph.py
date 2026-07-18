@@ -32,6 +32,9 @@ _CONTROL_KW = frozenset({
 })
 # 前邻 ``new`` → 匿名类体（``new X(){...}``），不当方法作用域（其内部真方法各自成体，不误并兄弟方法）。
 _NEW_PREFIX_RE = re.compile(r"\bnew\s+$")
+# 类/枚举/接口体：额外当一个作用域扫——**字段常量密文召回**（``static K="密文"`` 在方法体外、``decrypt(K)`` 在
+# 某方法里，两者同在类体内 → 复用"赋值再消费"逻辑绑上；同串在方法内已绑的按密文去重、不重复）。
+_CLASS_START_RE = re.compile(r"\b(?:class|interface|enum)\s+(\w+)[^{;]*\{")
 
 # 解密调用（Java crypto API + 通用 decrypt/base64 解码）。★不含裸 ``AES/`` transformation 串——那是常量非
 # 调用（``Cipher.getInstance("AES/…")`` 已由 Cipher.getInstance 覆盖真解密点），单列它会把常量表方法误判有解密。
@@ -101,7 +104,7 @@ def scan_java_source(text: str, location: str) -> list[StringChain]:
         text = text[:_MAX_TEXT_BYTES]
     chains: list[StringChain] = []
     seen: set[str] = set()  # 按**密文**去重（本文件内）：嵌套方法/匿名类里的同串只出一条（外层方法先命中即保留）
-    for name, body in _extract_methods(text):
+    for name, body, is_class in _extract_scopes(text):
         candidates = [
             (lit, _consumer_before(body, m.start()) or _consumer_via_var(body, m.start()))
             for m in _STR_LIT_RE.finditer(body)
@@ -109,8 +112,9 @@ def scan_java_source(text: str, location: str) -> list[StringChain]:
         ]
         if not candidates:
             continue
-        decrypts = tuple(sorted({m.group(0).strip() for m in _DECRYPT_RE.finditer(body)}))
-        sinks = tuple(sorted({m.group(0).strip() for m in _SINK_RE.finditer(body)}))
+        # ★类作用域（is_class）**不看类级 decrypts / sinks**（太粗、会跨方法误绑）——只走"该密文被 consumer 消费"档。
+        decrypts = () if is_class else tuple(sorted({m.group(0).strip() for m in _DECRYPT_RE.finditer(body)}))
+        sinks = () if is_class else tuple(sorted({m.group(0).strip() for m in _SINK_RE.finditer(body)}))
         for secret, consumer in candidates[:_MAX_SECRETS_PER_METHOD]:
             if not decrypts and consumer is None:  # 既无标准解密、又没被消费 → 不绑
                 continue
@@ -197,16 +201,15 @@ def _entropy(s: str) -> float:
     return -sum((c / n) * math.log2(c / n) for c in Counter(s).values())
 
 
-def _extract_methods(text: str) -> list[tuple[str, str]]:
-    """把源码切成 [(方法名, 方法体文本)]。
+def _extract_scopes(text: str) -> list[tuple[str, str, bool]]:
+    """把源码切成 ``[(作用域名, 体文本, is_class)]``——方法体（is_class=False）+ 类/枚举/接口体（is_class=True）。
 
-    ★先 _mask 出等长掩码文本（注释/字符串内容置空），在**掩码文本**上定位方法起点与括号配对——从根上封死
-    「注释里的 ``name(){`` 被当方法起点」「字符串里的花括号破坏配对」两类跨方法误绑；方法体则从**原文**按同一
-    下标切出（保留字符串里的密文内容供后续提取）。前邻 ``new`` 的匿名类体不当方法作用域；控制关键字块排除；
-    配对失败（不平衡）的块跳过。
+    ★先 _mask 出等长掩码文本（注释/字符串内容置空），在**掩码文本**上定位起点与括号配对——从根上封死「注释里的
+    ``name(){`` 被当方法起点」「字符串里的花括号破坏配对」两类误绑；体则从**原文**按同一下标切出（保留密文内容）。
+    前邻 ``new`` 的匿名类体不当方法作用域；控制关键字块排除；配对失败（不平衡）的块跳过。类体额外成域用于字段常量召回。
     """
     masked = _mask(text)
-    methods: list[tuple[str, str]] = []
+    scopes: list[tuple[str, str, bool]] = []  # (作用域名, 体文本, is_class)
     for match in _BLOCK_START_RE.finditer(masked):
         if match.group(1) in _CONTROL_KW:
             continue
@@ -215,8 +218,16 @@ def _extract_methods(text: str) -> list[tuple[str, str]]:
         open_idx = match.end() - 1  # 指向 '{'（掩码与原文同下标）
         end_idx = _match_block(masked, open_idx)
         if end_idx is not None:
-            methods.append((match.group(1), text[open_idx + 1:end_idx]))  # body 从原文切，保留密文内容
-    return methods
+            scopes.append((match.group(1), text[open_idx + 1:end_idx], False))  # body 从原文切、保留密文内容
+    # 类/枚举/接口体也各成一个作用域（is_class=True）：召回"字段常量密文 + 方法内解密"（方法作用域切不到的类级
+    # 字段）。★类作用域**只走"该密文被某调用消费"档**、不走"类里有某解密"档——否则类里任一 decrypt 会把无关密文
+    # 全绑上（盲窗在类粒度复活、跨方法误绑）。放在方法之后 → 方法内已绑的同串按密文去重先保留（标签更精确）。
+    for match in _CLASS_START_RE.finditer(masked):
+        open_idx = match.end() - 1
+        end_idx = _match_block(masked, open_idx)
+        if end_idx is not None:
+            scopes.append((f"class:{match.group(1)}", text[open_idx + 1:end_idx], True))
+    return scopes
 
 
 def _mask(text: str) -> str:
