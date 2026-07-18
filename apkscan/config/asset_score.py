@@ -70,7 +70,10 @@ def score_asset(endpoint: Any) -> AssetScore:
         score += _W_BUSINESS
         reasons.append(f"business-path+{_W_BUSINESS}")
 
-    delta, reason = _infra_signal(value, kind, endpoint)
+    # ★正分门槛：此前累计的四项全是正向证据。infra 的"建议调证"只是**没命中黑名单**的兜底态，
+    #   本身不构成"这是自有后端"的证据——没有任何一项正向信号时不给分（否则库官网/被误抽的类名
+    #   都能凭"未知"登顶排序）。
+    delta, reason = _infra_signal(value, kind, endpoint, has_positive_signal=score > 0)
     if delta:
         score += delta
         reasons.append(reason)
@@ -91,15 +94,22 @@ def _has_business_path(endpoint: Any) -> bool:
     return False
 
 
-def _infra_signal(value: str, kind: str, endpoint: Any) -> tuple[int, str]:
-    """公共基础设施判据：域名走 infra.classify_domain；IP 看五层归因 edge_provider。返回 (加减分, reason)。"""
+def _infra_signal(
+    value: str, kind: str, endpoint: Any, *, has_positive_signal: bool = True
+) -> tuple[int, str]:
+    """公共基础设施判据：域名走 infra.classify_domain；IP 看五层归因 edge_provider。返回 (加减分, reason)。
+
+    ``has_positive_signal=False``（该端点没有任何正向证据）时不发正分——classify_domain 是纯 denylist，
+    "建议调证"只表示**未命中已知第三方名单**，不是"识别为自有后端"。reason 串同样如实叫 ``not-known-infra``
+    而非 ``own-backend``，免得报告把"名单没收录"读成"确认是自有后端"误导办案人。
+    """
     if kind == "domain" and value:
         advice, _reason = infra.classify_domain(value)
         if advice == infra.ADVICE_SKIP:
             return _W_PUBLIC_INFRA, f"public-infra{_W_PUBLIC_INFRA}"
-        if advice == infra.ADVICE_INVESTIGATE:
-            return _W_OWN_BACKEND, f"own-backend+{_W_OWN_BACKEND}"
-        return 0, ""  # 待核 → 中性
+        if advice == infra.ADVICE_INVESTIGATE and has_positive_signal:
+            return _W_OWN_BACKEND, f"not-known-infra+{_W_OWN_BACKEND}"
+        return 0, ""  # 待核 / 无正向证据 → 中性
     if kind == "ip" and _is_public_edge_ip(endpoint):
         return _W_PUBLIC_INFRA, f"public-edge{_W_PUBLIC_INFRA}"
     return 0, ""

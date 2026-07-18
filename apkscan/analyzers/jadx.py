@@ -65,7 +65,10 @@ _SAFE_BARE_TLDS: frozenset[str] = frozenset(
 )
 _PACKAGE_ROOTS: frozenset[str] = frozenset(
     {"com", "cn", "org", "net", "io", "edu", "android", "androidx",
-     "java", "javax", "kotlin", "kotlinx", "dalvik"}
+     "java", "javax", "kotlin", "kotlinx", "dalvik",
+     # AOSP / JDK 内部包根：``Class.forName("libcore.icu.ICU")`` 末标签恰是真实 gTLD（.icu），
+     # 不列进来就会被裸域名正则当域名端点收走。
+     "libcore", "sun", "jdk"}
 )
 _CODE_WORDS: frozenset[str] = frozenset(
     {"this", "self", "length", "value", "name", "type", "style", "path",

@@ -107,6 +107,9 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         "whatwg.org",
         "schemas.android.com",
         "apache.org",
+        # slf4j / logback：Java 日志门面，报错文档 URL 内嵌在库里（非 App 自有后端）。
+        "slf4j.org",
+        "qos.ch",
         # ---- 浏览器引擎 / 厂商 ----
         "mozilla.org",
         "webkit.org",

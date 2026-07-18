@@ -338,3 +338,105 @@ def test_jadx_scan_java_emits_string_chain_finding(tmp_path) -> None:
     assert chain[0].confidence is Confidence.LOW  # 启发式 → 低置信
     assert chain[0].kind == FINDING_KIND_INFERENCE  # 非数据流证明 → inference
     assert "d" in chain[0].description  # 方法名进描述
+
+
+# ── 精度回归：真实 jadx 输出形态的四类误报 ───────────────────────────────────────
+# 一次真实样本跑出 36 条 decrypt_candidates，其中 34 条不是密文；换个样本 31 条全错。
+# 四类误报里 3 类经 _looks_ciphertext 的 infra.looks_like_encoding 兜底放行——那个函数
+# 是给「点分域名逐 label 找编码伪域名」写的，按 `.` 切标签后只看单个标签，于是整串含
+# 空格/冒号也不设防，长 camelCase 类名（熵 4.0-4.2）必然过门。#191 的 binary-hint+熵
+# 护栏只挂在 _B64_RE 整串分支上，管不到兜底路径。
+
+
+def test_jadx_not_decompiled_placeholder_is_not_ciphertext() -> None:
+    """jadx 对每个反编译失败的方法都吐 ``throw new UnsupportedOperationException("Method not
+    decompiled: …")``——密文侧与 consumer 侧同源自这一行错误，是反编译器噪音而非密文。"""
+    ph = "Method not decompiled: e.LayoutInflaterFactory2C0126E.G(e.D, android.view.KeyEvent):void"
+    assert _looks_ciphertext(ph) is False
+
+
+def test_dotted_java_qualified_name_is_not_ciphertext() -> None:
+    """点分 Java 限定名（框架 Bundle key 常量、Class.forName 目标）不是密文。"""
+    for s in (
+        "androidx.view.accessibility.AccessibilityNodeInfoCompat.PANE_TITLE_KEY",
+        "org.bouncycastle.jsse.provider.BouncyCastleJsseProvider",
+        "org/slf4j/impl/StaticLoggerBinder.class",
+    ):
+        assert _looks_ciphertext(s) is False, s
+
+
+def test_base64_alphabet_constant_is_not_ciphertext() -> None:
+    """base64 标准/URL-safe 字母表常量本身：熵恰为最大值 6.0——满熵是字母表的特征、不是
+    密文的特征，熵下限护栏数学上不可能拦住它，必须显式排除。"""
+    for alphabet in (
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
+    ):
+        assert _looks_ciphertext(alphabet) is False, alphabet
+
+
+def test_resource_path_and_name_not_ciphertext() -> None:
+    """classpath 资源路径与 Android 资源名（无二进制特征）不是密文。"""
+    assert _looks_ciphertext("/okhttp3/internal/publicsuffix/") is False
+    assert _looks_ciphertext("config_showMenuShortcutsWhenKeyboardPresent") is False
+
+
+def test_real_ciphertext_survives_precision_guards() -> None:
+    """★护栏不得误杀真密文：这两条来自同一真实样本，consumer 均为混淆改名的单字母方法。
+    第二条只有 22+2 字符（短于 _B64_RE 的 24 门槛），过去正是靠兜底分支才被收进来。"""
+    assert _looks_ciphertext("z3G2E737gj6gbdUZ4uR2zw==") is True
+    assert _looks_ciphertext(
+        "iKZGmV5javjz4SVEg22YXUSIfF9ENCuJrwoq/iK7MQflPvAn5JTQe+E63qiIkLtmEt2FBrWUw=="
+    ) is True
+
+
+def test_end_to_end_jadx_noise_does_not_bind() -> None:
+    """端到端：喂逐字复刻的真实 jadx 输出形态，一条链都不该产。"""
+    src = """
+    public void G(D d, KeyEvent e) {
+        throw new UnsupportedOperationException("Method not decompiled: e.LayoutInflaterFactory2C0126E.G(e.D, android.view.KeyEvent):void");
+    }
+    public void load() {
+        Class<?> c = Class.forName("org.bouncycastle.jsse.provider.BouncyCastleJsseProvider");
+    }
+    public void bundle(Bundle b) {
+        b.putCharSequence("androidx.view.accessibility.AccessibilityNodeInfoCompat.PANE_TITLE_KEY", s);
+    }
+    """
+    assert scan_java_source(src, "loc") == []
+
+
+def test_exception_constructor_is_never_a_decrypt_consumer() -> None:
+    """纵深：异常构造器不是解密 helper——即便实参真的像密文也不绑。"""
+    src = f'''
+    public void boom() {{
+        throw new IllegalStateException("{_SECRET}");
+    }}
+    '''
+    assert scan_java_source(src, "loc") == []
+
+
+def test_framework_accessor_is_not_a_decrypt_consumer() -> None:
+    """纵深：getX/putX/setX 形态的框架访问器是存取不是解密；混淆改名的 helper 通常是
+    1-3 字符（本样本两条真密文的 consumer 都是 ``x``），不受此规则影响。"""
+    for call in ("putCharSequence", "getCharSequence", "getInt", "getParcelable", "getIdentifier"):
+        src = f'public void m() {{ b.{call}("{_SECRET}"); }}'
+        assert scan_java_source(src, "loc") == [], call
+    src_ok = f'public void m() {{ x("{_SECRET}"); }}'
+    assert len(scan_java_source(src_ok, "loc")) == 1  # 单字母改名 helper 仍照常命中
+
+
+def test_identifier_constants_with_digits_are_not_ciphertext() -> None:
+    """SCREAMING_SNAKE / 扩展名常量靠内嵌数字擦过 binary-hint，但既无 base64 标记、熵也只有 4.1-4.3。
+    ★这类与短真密文（熵 4.08）的熵完全重叠，只卡熵会误杀真密文——须靠 base64 标记区分。"""
+    for const in (
+        "EGL_EXT_gl_colorspace_bt2020_hlg",
+        "EGL_EXT_gl_colorspace_bt2020_pq",
+        "TEMORARILY_DISABLE_PROTOBUF_VERSION_CHECK",
+    ):
+        assert _looks_ciphertext(const) is False, const
+
+
+def test_unpadded_base64url_payload_still_recognised() -> None:
+    """无 ``=`` 填充的 base64url 载荷没有 base64 标记，靠熵（5.0+）仍被收下——不能被上一条误杀。"""
+    assert _looks_ciphertext("aB3-dEf_GhIjKl9mNoPqR2sTuV5wXyZ0-bC_dE") is True
