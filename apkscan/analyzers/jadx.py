@@ -194,7 +194,7 @@ class JadxAnalyzer(BaseAnalyzer):
         """
         collector: dict[str, Endpoint] = {}
         secret_hits: dict[tuple[str, str], Finding] = {}
-        chain_objs: dict[tuple[str, str, str], StringChain] = {}  # config-chain 层②：方法内共现链（去重）
+        chain_objs: dict[tuple[str, str], StringChain] = {}  # config-chain 层②：按 (文件, 密文) 去重（嵌套不重复）
         n_files = 0
         for java in root.rglob("*.java"):
             if n_files >= _MAX_JAVA_FILES:
@@ -225,7 +225,7 @@ class JadxAnalyzer(BaseAnalyzer):
             # config-chain 层②：方法作用域内 密文→解密/消费(→sink) 共现链（启发式、独立 try 不连累端点/密钥扫描）。
             try:
                 for chain in scan_java_source(text, rel):
-                    key = (chain.location, chain.method, chain.secret[:64])
+                    key = (chain.location, chain.secret[:64])
                     chain_objs.setdefault(key, chain)
             except Exception:
                 logger.exception("[jadx] string_graph 扫描失败，跳过：%s", rel)
