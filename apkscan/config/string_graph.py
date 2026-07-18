@@ -68,6 +68,31 @@ _PATH_SLASH_MIN = 2
 _PATH_ENTROPY_MIN = 4.5
 # 兜底档（收 ``_``/``-``）无 base64 标记时的熵下限：常量名实测 4.1-4.3、无填充 base64url 载荷 5.0+。
 _TOKEN_ENTROPY_MIN = 4.5
+# 字符两两不同的最短长度：短串偶然全不重复很常见，32 起才是"表"而非巧合。
+_ALPHABET_MIN_LEN = 32
+# 算法 transformation 串（``AES/CBC/PKCS5Padding`` / ``RSA/ECB/OAEPWithSHA-1AndMGF1Padding``）：常量非密文。
+_TRANSFORMATION_RE = re.compile(r"^[A-Za-z0-9]+/[A-Za-z0-9]+(?:/[A-Za-z0-9-]+)?$")
+
+# ---------------------------------------------------------------------------
+# 文件级压制：实测噪音高度聚集于两类**可机械识别**的来源，且都不是 App 自有配置。
+# ---------------------------------------------------------------------------
+# ① 第三方库路径：SDK 自带的混淆串（遥测地址、内置常量），非涉案主体资产。
+_THIRD_PARTY_PREFIXES: tuple[str, ...] = (
+    "io/dcloud/", "okhttp3/", "androidx/", "android/support/", "kotlin/", "kotlinx/",
+    "com/google/", "com/android/", "org/bouncycastle/", "org/slf4j/", "org/apache/",
+    "com/squareup/", "io/reactivex/", "com/tencent/", "com/alibaba/", "retrofit2/",
+    "com/networkbench/", "org/json/", "javax/", "java/",
+)
+# ② 密码学参数表文件：单文件聚集多条纯 hex 常量 = 曲线参数/素数表（RFC3526、NIST/SM2 曲线、测试向量）。
+#    ★按**文件**而非按串判：混淆器会把 BouncyCastle 的包名也改成随机串，路径认不出来，但"一个类里
+#    躺着几十条定长 hex 常量"这个形态改不掉。命中即压制该文件全部候选。
+_PARAM_TABLE_HEX_MIN = 5
+
+
+def _is_third_party(location: str) -> bool:
+    """源文件是否位于已知第三方库包路径下。"""
+    low = location.replace("\\", "/").lower()
+    return any(("/" + p.lower()) in ("/" + low) for p in _THIRD_PARTY_PREFIXES)
 
 # 密文字面量**被直接当函数调用实参**：``ident("<密文>")``——覆盖**改名的解密 helper**（重度混淆样本里
 # 解密函数被 jadx 改成 m1136x 之类，认不出标准 crypto API，但"密文被传进某函数"这一事实是确定的）。
@@ -113,9 +138,14 @@ def scan_java_source(text: str, location: str) -> list[StringChain]:
       ①方法内识别到**标准解密 API**（Cipher/doFinal/Base64.decode…，较强）；或
       ②该密文**被直接当函数调用实参** ``ident("<密文>")``（弱，疑似**改名的解密 helper**，作 AI 辅助解密线索）。
     只是**存着**没被消费、也没识别到解密的密文 → 不绑（避免纯常量误报）。sink 为可选上下文。
+
+    两道**文件级**压制（见 :func:`_is_third_party` 与 :data:`_PARAM_TABLE_HEX_MIN`）：第三方库路径下的命中、
+    以及聚集大量 hex 常量的密码学参数表文件，整体丢弃——实测这两类占噪音的绝大部分且都非 App 自有资产。
     """
     if not isinstance(text, str) or not text:
         return []
+    if _is_third_party(location):
+        return []  # 第三方 SDK 自带的混淆串，非涉案主体资产
     if len(text) > _MAX_TEXT_BYTES:
         text = text[:_MAX_TEXT_BYTES]
     chains: list[StringChain] = []
@@ -143,7 +173,19 @@ def scan_java_source(text: str, location: str) -> list[StringChain]:
                 sinks=sinks, location=location, consumer=consumer,
             ))
             if len(chains) >= _MAX_CHAINS_PER_FILE:
-                return chains
+                return _drop_if_param_table(chains)
+    return _drop_if_param_table(chains)
+
+
+def _drop_if_param_table(chains: list[StringChain]) -> list[StringChain]:
+    """本文件若是密码学参数表（聚集 ≥``_PARAM_TABLE_HEX_MIN`` 条纯 hex 常量）→ 整体丢弃。
+
+    真实样本里 BouncyCastle 被混淆器改了包名后路径认不出，但"一个类里躺着几十条定长 hex 常量"的形态
+    改不掉——那是 RFC3526 素数 / NIST·SM2 曲线参数 / 测试向量，公开常量，不是 App 自有密文。
+    ★整文件丢弃而非逐条判：同一张表里混着长短不一的常量，逐条设阈值会漏掉短的那些。
+    """
+    if sum(1 for c in chains if _HEX_RE.match(c.secret)) >= _PARAM_TABLE_HEX_MIN:
+        return []
     return chains
 
 
@@ -214,8 +256,12 @@ def _looks_ciphertext(value: str) -> bool:
         return False
     if "://" in s or s.startswith(_NON_CIPHERTEXT_PREFIXES):
         return False
-    if _B64_ALPHABET_RUN in s:
-        return False  # base64 字母表常量本身（满熵，熵护栏拦不住）
+    if _B64_ALPHABET_RUN in s or _looks_alphabet_table(s):
+        return False  # 字母表/查找表常量（满熵，熵护栏数学上拦不住）
+    if _TRANSFORMATION_RE.match(s):
+        return False  # ``RSA/ECB/OAEPWithSHA-1AndMGF1Padding`` 这类算法 transformation 串是常量非密文
+    if _looks_sequential_bytes(s):
+        return False  # ``000102…1E1F`` 这类顺序字节 = 标准测试向量
     if _HEX_RE.match(s):
         return True  # 定长 hex 串是二进制/密文；标识符不会全 hex
     if _B64_RE.match(s):
@@ -238,6 +284,28 @@ def _looks_ciphertext(value: str) -> bool:
 def _has_b64_marker(s: str) -> bool:
     """含 base64 专属字符（``=`` 填充 / ``+`` / ``/``）——标识符常量不会有。"""
     return any(c in s for c in "=+/")
+
+
+def _looks_alphabet_table(s: str) -> bool:
+    """字母表/查找表常量：够长且**字符两两不同**。
+
+    ★这是密文的反面特征：随机字节编码出的串必然重复字符（64 字符全不重复的概率趋近 0），而 base64 /
+    base62 / 自定义置换表按定义每个字符恰好出现一次。比枚举具体字母表更通用（覆盖任意顺序与自定义表）。
+    """
+    return len(s) >= _ALPHABET_MIN_LEN and len(set(s)) == len(s)
+
+
+def _looks_sequential_bytes(s: str) -> bool:
+    """顺序字节的 hex（``000102…1E1F``）= 标准测试向量/填充表，非密文。"""
+    if not _HEX_RE.match(s) or len(s) % 2:
+        return False
+    try:
+        raw = bytes.fromhex(s)
+    except ValueError:
+        return False
+    if len(raw) < 8:
+        return False
+    return all((raw[i] - raw[i - 1]) % 256 == 1 for i in range(1, len(raw)))
 
 
 def _has_binary_hint(s: str) -> bool:
