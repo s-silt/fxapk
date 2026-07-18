@@ -43,6 +43,12 @@ getfile  <token[,token2]> --out x.pcap
 delfile  <token[,token2]>        删云空间
 ```
 
+## 相关手册
+
+- **抓包**：`docs/codex/capture-playbook.md`（配套 `fxapk capture-plan`）。
+- **归属**：`docs/codex/deep-attribution-playbook.md`。
+- **待解密线索**：`docs/codex/handoff/decrypt-candidates-playbook.md` —— 报告里 `meta["decrypt_candidates"]`（加密配置串 + 疑似改名的解密 helper）怎么一条条解成后端配置；任意模型通用、静态解不出转 Codex 真机 hook。
+
 ## 两台机要配的
 
 1. **`.env`（各自本地，不入库）** 放同一份飞书凭据：
