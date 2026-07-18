@@ -19,7 +19,6 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 
-from apkscan.core import infra
 
 # Java 字符串字面量（含转义）。
 _STR_LIT_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
@@ -56,6 +55,19 @@ _SINK_RE = re.compile(
 
 _B64_RE = re.compile(r"^[A-Za-z0-9+/]{24,}={0,2}$")
 _HEX_RE = re.compile(r"^[A-Fa-f0-9]{32,}$")
+# 兜底档只受理**整串 token 形**（base64/base64url/hex 的字符集，无点、无空白、无括号冒号）。密文是编码后的
+# 字节串，不会长成点分限定名（``a.b.C.KEY``）、含空格的句子（jadx 的 ``Method not decompiled: …`` 占位串）
+# 或路径。★这一条是把「域名用的 looks_like_encoding」从密文判据里摘掉后的替代——后者按 ``.`` 切标签、只看
+# 单个标签，于是整串含空格冒号也不设防，长 camelCase 类名（熵 4.0-4.2）必然过门。
+_TOKEN_RE = re.compile(r"^[A-Za-z0-9+/=_-]{16,}$")
+# base64 标准/URL-safe 字母表常量（codec 类里必有）：**满熵**（恰 6.0 bit/char）是字母表的特征、不是密文的
+# 特征——熵下限护栏对它数学上不可能生效，只能显式排除。两种字母表共享这 62 字符前缀。
+_B64_ALPHABET_RUN = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+# 多段路径（``/okhttp3/internal/publicsuffix/`` 熵 4.07）会擦过通用 4.0 下限；真 base64 密文实测 5.5+。
+_PATH_SLASH_MIN = 2
+_PATH_ENTROPY_MIN = 4.5
+# 兜底档（收 ``_``/``-``）无 base64 标记时的熵下限：常量名实测 4.1-4.3、无填充 base64url 载荷 5.0+。
+_TOKEN_ENTROPY_MIN = 4.5
 
 # 密文字面量**被直接当函数调用实参**：``ident("<密文>")``——覆盖**改名的解密 helper**（重度混淆样本里
 # 解密函数被 jadx 改成 m1136x 之类，认不出标准 crypto API，但"密文被传进某函数"这一事实是确定的）。
@@ -66,7 +78,11 @@ _CONSUMER_DENY = frozenset({  # 全小写（比对时 name.lower()）
     "equals", "contains", "startswith", "endswith", "indexof", "valueof", "println", "print",
     "format", "length", "hashcode", "compareto", "split", "replace", "matches", "put", "add",
     "get", "append", "log", "d", "e", "w", "i", "v",
+    "remove", "forname",  # Map/Bundle 删键、Class.forName 反射加载——都不是解密
 })
+# 框架访问器形态（``getInt`` / ``putCharSequence`` / ``setTitle``）：存取而非解密。★混淆改名的解密 helper
+# 实测是 1-3 字符（真实样本里两条真密文的 consumer 都是 ``x``），不长成 getXxx，故此规则不误伤它们。
+_FRAMEWORK_ACCESSOR_RE = re.compile(r"^(?:get|put|set)[A-Z]")
 
 _MAX_SECRETS_PER_METHOD = 8
 _MAX_CHAINS_PER_FILE = 200
@@ -134,16 +150,31 @@ def scan_java_source(text: str, location: str) -> list[StringChain]:
 def _consumer_before(body: str, quote_pos: int) -> str | None:
     """密文字面量若被**直接当函数实参**（``ident("…"``），返回被调函数名；否则 None。
 
-    有界回看（引号前 64 字符内匹配 ``ident(``）；命中控制关键字或明显非解密的常见方法名（存储/比较/日志）→
-    None（降误报）。改名的解密 helper（m1136x 之类）不在 denylist、照常返回，作 AI 解密线索。
+    有界回看（引号前 64 字符内匹配 ``ident(``）；命中控制关键字、明显非解密的常见方法名（存储/比较/日志）、
+    框架访问器或**构造器**→ None（降误报）。改名的解密 helper（m1136x 之类）不在 denylist、照常返回，作
+    AI 解密线索。
+
+    ★构造器排除是纵深：jadx 对反编译失败的方法吐 ``throw new UnsupportedOperationException("Method not
+    decompiled: …")``，密文侧与 consumer 侧同源自这一行错误，自己跟自己成链。
     """
-    match = _CONSUMER_RE.search(body[max(0, quote_pos - 64):quote_pos])
+    window = body[max(0, quote_pos - 64):quote_pos]
+    match = _CONSUMER_RE.search(window)
     if match is None:
         return None
     name = match.group(1)
-    if name in _CONTROL_KW or name.lower() in _CONSUMER_DENY:
+    if _is_non_decrypt_consumer(name) or _NEW_PREFIX_RE.search(window[:match.start()]):
         return None
     return name
+
+
+def _is_non_decrypt_consumer(name: str) -> bool:
+    """被调函数名是否明显不是解密 helper（控制关键字 / denylist / 框架访问器 / 异常构造器）。"""
+    return (
+        name in _CONTROL_KW
+        or name.lower() in _CONSUMER_DENY
+        or bool(_FRAMEWORK_ACCESSOR_RE.match(name))
+        or name.endswith(("Exception", "Error"))
+    )
 
 
 # 密文被**先赋值给局部变量、再解密**：``var = "<密文>"; … helper(var)``——混淆代码最常见写法（比直接实参更常见）。
@@ -164,7 +195,7 @@ def _consumer_via_var(body: str, quote_pos: int) -> str | None:
     var_re = re.compile(r"\b" + re.escape(var) + r"\b")
     for call in _CALL_ARGS_RE.finditer(body):
         callee = call.group(1)
-        if callee in _CONTROL_KW or callee.lower() in _CONSUMER_DENY:
+        if _is_non_decrypt_consumer(callee):
             continue
         if var_re.search(call.group(2)):  # 该变量出现在这个调用的实参里
             return callee
@@ -174,23 +205,49 @@ def _consumer_via_var(body: str, quote_pos: int) -> str | None:
 def _looks_ciphertext(value: str) -> bool:
     """字符串是否像硬编码密文/编码载荷：base64/hex 定长且够熵，或高熵编码串。
 
-    收紧防误报：排除 URL（含 ``://``）与无歧义非密文前缀（证书/公钥/图片/cert-pin）；含 ``/`` 的 base64/hex
-    命中补香农熵下限，杀掉类路径/文件路径（如 ``com/google/android/gms/common`` 熵低）而保留真密文（熵高）。
+    收紧防误报：排除 URL（含 ``://``）、无歧义非密文前缀（证书/公钥/图片/cert-pin）与 base64 字母表常量；
+    含 ``/`` 的 base64/hex 命中补香农熵下限，杀掉类路径/文件路径（如 ``com/google/android/gms/common`` 熵低）
+    而保留真密文（熵高）；兜底档只受理整串 token 形（见 :data:`_TOKEN_RE`）。
     """
     s = value.strip()
     if not (16 <= len(s) <= 4096):
         return False
     if "://" in s or s.startswith(_NON_CIPHERTEXT_PREFIXES):
         return False
+    if _B64_ALPHABET_RUN in s:
+        return False  # base64 字母表常量本身（满熵，熵护栏拦不住）
     if _HEX_RE.match(s):
         return True  # 定长 hex 串是二进制/密文；标识符不会全 hex
     if _B64_RE.match(s):
-        # ★真 base64 密文=随机字节编码，几乎必含**数字或 +/=**；纯字母 camelCase 标识符（如
-        #   getUserDisplayNameAVChatKit / 类路径 com/google/...）落 base64 字母表但无此特征、且熵偏低——
-        #   两道一起排除（某混淆样本里 showMethodErrorToast("方法名") 那类误报）。
-        has_binary_hint = any(c.isdigit() for c in s) or "+" in s or "=" in s
-        return has_binary_hint and _entropy(s) >= 4.0
-    return bool(infra.looks_like_encoding(s))
+        if s.count("/") >= _PATH_SLASH_MIN and _entropy(s) < _PATH_ENTROPY_MIN:
+            return False  # 多段 classpath/资源路径：落 base64 字母表但熵不够
+        return _has_binary_hint(s)
+    # 兜底：整串 token 形才判。★不再转发 infra.looks_like_encoding——那是「点分域名逐 label 找编码伪域名」
+    # 的启发式，用在任意 Java 字面量上属语义误用。
+    if not _TOKEN_RE.match(s):
+        return False
+    if not _has_binary_hint(s):
+        return False
+    # 兜底档比 _B64_RE 档宽（收 ``_`` ``-``，即 base64url 与各种常量名），故再加一道：要么带 base64 标记
+    # （``=`` 填充 / ``+`` / ``/``），要么熵够高。实测这两类恰好分得开——真密文 z3G2E…zw== 熵仅 4.08 但有
+    # ``=``；EGL_EXT_gl_colorspace_bt2020_hlg / TEMORARILY_DISABLE_… 这类常量名熵 4.1-4.3 且无标记；无填充的
+    # 真 base64url 载荷熵 5.0+。只卡熵会连真密文一起杀，只看标记会放过无填充载荷，两者取或。
+    return _has_b64_marker(s) or _entropy(s) >= _TOKEN_ENTROPY_MIN
+
+
+def _has_b64_marker(s: str) -> bool:
+    """含 base64 专属字符（``=`` 填充 / ``+`` / ``/``）——标识符常量不会有。"""
+    return any(c in s for c in "=+/")
+
+
+def _has_binary_hint(s: str) -> bool:
+    """真 base64/编码密文=随机字节编码，几乎必含**数字或 +/=** 且熵够高。
+
+    纯字母 camelCase 标识符（``getUserDisplayNameAVChatKit``）、类路径、资源名（``config_showMenu…``）落在
+    base64 字母表内但无此特征、熵也偏低——两道一起排除。
+    """
+    has_hint = any(c.isdigit() for c in s) or "+" in s or "=" in s
+    return has_hint and _entropy(s) >= 4.0
 
 
 def _entropy(s: str) -> float:
