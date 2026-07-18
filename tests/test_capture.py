@@ -601,6 +601,38 @@ def test_socket_sampler_accumulates_short_lived_target_connections(monkeypatch, 
     assert all(row["uid"] == 10234 for row in rows[1:])
 
 
+def test_socket_sampler_forms_interval_for_stable_socket(monkeypatch, tmp_path):
+    """稳定态长连接（established 全程不变、5 元组不变）跨轮采样应形成 first_ts<last_ts 的观测区间，
+    而非只留首次观测的点（P1-2：去重键去掉 state、就地扩 last_ts，时间窗匹配才对真实长连接有效）。"""
+    from apkscan.dynamic import socket_attr
+
+    def fake_capture(extra, serial=None):
+        procfs = extra[-1]
+        if procfs == "/proc/net/tcp":
+            return (
+                " 0: 0F02000A:A852 04030201:01BB 01 "
+                "00000000:00000000 00:00000000 00000000 10234 0 1\n"
+            )
+        return "" if procfs == "/proc/net/tcp6" else None
+
+    clock = {"t": 100.0}
+    monkeypatch.setattr(capture, "_app_uid", lambda package, serial=None: "10234")
+    monkeypatch.setattr(capture, "_adb_capture", fake_capture)
+    monkeypatch.setattr(capture.time, "time", lambda: clock["t"])
+    sampler = capture._SocketSampler("com.x", tmp_path, interval=0.25, max_observations=10)
+
+    sampler._sample_once()   # 首次观测 @100.0
+    clock["t"] = 105.0
+    sampler._sample_once()   # 同一 socket @105.0 → 就地扩 last_ts（不新增列表项）
+    timeline = sampler.stop()
+
+    assert timeline is not None
+    s = socket_attr.parse_socket_timeline(timeline.read_text(encoding="utf-8"))
+    assert len(s.entries) == 1
+    entry = s.entries[0]
+    assert entry.first_ts == 100.0 and entry.last_ts == 105.0  # 区间而非点（last_ts 严格晚于 first_ts）
+
+
 def test_capture_run_includes_uid_snapshot_artifact(monkeypatch, tmp_path):
     """★ P1(#10)：capture.run 把抓包窗口末的 UID socket 快照并进 artifacts。"""
     _set_capabilities(monkeypatch)

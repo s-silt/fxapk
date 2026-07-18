@@ -1735,7 +1735,9 @@ class _SocketSampler:
         self.interval = max(0.05, float(interval))
         self.max_observations = max(1, int(max_observations))
         self._observations: list[dict[str, Any]] = []
-        self._seen: set[tuple[Any, ...]] = set()
+        # 键=5 元组(proto,uid,本地,远端)，值=该 socket 的观测 dict（含就地更新的 last_ts）——
+        # 不含 state，稳定态长连接才能跨轮扩成时间区间，而非只留首次观测的点。
+        self._seen: dict[tuple[Any, ...], dict[str, Any]] = {}
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._written: Path | None = None
@@ -1774,7 +1776,7 @@ class _SocketSampler:
         return f"[{ip}]:{port}" if ":" in ip else f"{ip}:{port}"
 
     def _sample_once(self) -> None:
-        """采一轮 /proc/net/tcp{,6}，只保留目标 UID 的首次唯一观测。"""
+        """采一轮 /proc/net/tcp{,6}；同一 socket（5 元组，不含 state）首见记 first ts、重现就地扩 last_ts，形成观测区间。"""
         if self.target_uid is None:
             return
         from apkscan.dynamic import socket_attr
@@ -1796,22 +1798,25 @@ class _SocketSampler:
                     entry.local_port,
                     entry.remote_ip,
                     entry.remote_port,
-                    entry.state,
                 )
                 with self._lock:
-                    if key in self._seen or len(self._observations) >= self.max_observations:
+                    existing = self._seen.get(key)
+                    if existing is not None:
+                        existing["last_ts"] = ts  # 就地扩展观测区间，不新增列表项（仍受 max_observations 约束）
                         continue
-                    self._seen.add(key)
-                    self._observations.append(
-                        {
-                            "ts": ts,
-                            "proto": entry.proto,
-                            "uid": entry.uid,
-                            "local": self._endpoint(entry.local_ip, entry.local_port),
-                            "remote": self._endpoint(entry.remote_ip, entry.remote_port),
-                            "state": entry.state,
-                        }
-                    )
+                    if len(self._observations) >= self.max_observations:
+                        continue
+                    observation = {
+                        "ts": ts,
+                        "last_ts": ts,
+                        "proto": entry.proto,
+                        "uid": entry.uid,
+                        "local": self._endpoint(entry.local_ip, entry.local_port),
+                        "remote": self._endpoint(entry.remote_ip, entry.remote_port),
+                        "state": entry.state,
+                    }
+                    self._seen[key] = observation
+                    self._observations.append(observation)
 
     def stop(self) -> Path | None:
         """停止采样并原子写 JSONL；无有效观测或失败返回 None。"""
@@ -1832,9 +1837,17 @@ class _SocketSampler:
             self.out_path.mkdir(parents=True, exist_ok=True)
             dest = self.out_path / _SOCKET_TIMELINE_NAME
             temp = self.out_path / f".{_SOCKET_TIMELINE_NAME}.tmp"
+            def _interval_rows(obs: dict[str, Any]) -> list[dict[str, Any]]:
+                # 落盘不含内部 last_ts 字段；last_ts>first 时补一行末观测，parse_socket_timeline 按 ts min/max 重建区间。
+                first = {k: v for k, v in obs.items() if k != "last_ts"}
+                last_ts = obs.get("last_ts")
+                if isinstance(last_ts, (int, float)) and not isinstance(last_ts, bool) and last_ts > first["ts"]:
+                    return [first, {**first, "ts": last_ts}]
+                return [first]
+
             rows = [
                 {"type": "meta", "package": self.package, "target_uid": self.target_uid},
-                *observations,
+                *(row for obs in observations for row in _interval_rows(obs)),
             ]
             temp.write_text(
                 "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows),
