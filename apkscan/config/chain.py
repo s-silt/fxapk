@@ -46,6 +46,7 @@ def build_control_chains(
                 backends.append(_backend("ip", ip, ep_by_value.get(ip)))
         chains.append({
             "source_url": url,
+            "stored_path": art.get("stored_path"),  # 落盘的原始配置对象（相对 out_dir）；未落盘 → None
             "crypto_recipe": recipe_summary,
             "decoded": bool(art.get("decoded")),
             "decode_chain": list(art.get("decode_chain") or []),
