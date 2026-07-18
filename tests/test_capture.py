@@ -624,12 +624,12 @@ def test_socket_sampler_forms_interval_and_keeps_latest_state(monkeypatch, tmp_p
     monkeypatch.setattr(capture.time, "time", lambda: clock["t"])
     sampler = capture._SocketSampler("com.x", tmp_path, interval=0.25, max_observations=10)
 
-    sampler._sample_once()                    # @100.0 syn_sent
+    sampler._sample_once()                    # 轮1 @100.0 syn_sent
     clock["t"] = 100.25
     st["hex"] = "01"
-    sampler._sample_once()                    # @100.25 established（连续，gap 0.25 <= segment_gap 0.5 → 扩段）
+    sampler._sample_once()                    # 轮2 @100.25 established（相邻轮 → 扩段）
     clock["t"] = 100.5
-    sampler._sample_once()                    # @100.5 established
+    sampler._sample_once()                    # 轮3 @100.5 established
     timeline = sampler.stop()
 
     assert timeline is not None
@@ -659,13 +659,13 @@ def test_socket_sampler_segments_on_gap_no_false_interval(monkeypatch, tmp_path)
     monkeypatch.setattr(capture.time, "time", lambda: clock["t"])
     sampler = capture._SocketSampler("com.x", tmp_path, interval=0.25, max_observations=10)
 
-    sampler._sample_once()                       # @100.0 出现（旧连接）
+    sampler._sample_once()                       # 轮1 @100.0 出现（旧连接）
     present["on"] = False
     clock["t"] = 100.5
-    sampler._sample_once()                        # 缺席
+    sampler._sample_once()                        # 轮2 缺席（整轮不见）
     present["on"] = True
     clock["t"] = 200.0
-    sampler._sample_once()                        # @200.0 同五元组复用（gap 100 > 0.5）→ 起新段、重置到 200
+    sampler._sample_once()                        # 轮3 @200.0 同五元组复用（缺席过轮2）→ 起新段、重置到 200
     timeline = sampler.stop()
 
     assert timeline is not None
@@ -677,6 +677,37 @@ def test_socket_sampler_segments_on_gap_no_false_interval(monkeypatch, tmp_path)
     # 空窗中点 150 的 pcap 流对该 socket 应判「已知时间冲突」，不得因假区间误确证
     conn = socket_attr.PcapConn(0xA852, first_ts=150.0, last_ts=150.5)
     assert socket_attr._ts_known_conflict(entry, conn, socket_attr._TIME_TOLERANCE) is True
+
+
+def test_socket_sampler_slow_cycle_does_not_missegment_persistent_socket(monkeypatch, tmp_path):
+    """单轮采样耗时远大于 interval（慢 adb / 调度抖动）但 socket 每轮都在 → 仍是一条连续区间，不因墙钟差被误切段
+    （P1-2 加固：按采样轮次相邻判连续，而非墙钟差；Codex 复核指出的边界）。"""
+    from apkscan.dynamic import socket_attr
+
+    def fake_capture(extra, serial=None):
+        procfs = extra[-1]
+        if procfs == "/proc/net/tcp":
+            return _socket_line("01")
+        return "" if procfs == "/proc/net/tcp6" else None
+
+    clock = {"t": 100.0}
+    monkeypatch.setattr(capture, "_app_uid", lambda package, serial=None: "10234")
+    monkeypatch.setattr(capture, "_adb_capture", fake_capture)
+    monkeypatch.setattr(capture.time, "time", lambda: clock["t"])
+    sampler = capture._SocketSampler("com.x", tmp_path, interval=0.25, max_observations=10)
+
+    sampler._sample_once()   # 轮1 @100.0
+    clock["t"] = 130.0       # 单轮耗时 30s >> interval*2，但 socket 仍在
+    sampler._sample_once()   # 轮2 @130.0（相邻轮 + 仍在 → 扩段，不因墙钟差重置）
+    clock["t"] = 160.0
+    sampler._sample_once()   # 轮3 @160.0
+    timeline = sampler.stop()
+
+    assert timeline is not None
+    s = socket_attr.parse_socket_timeline(timeline.read_text(encoding="utf-8"))
+    assert len(s.entries) == 1
+    entry = s.entries[0]
+    assert entry.first_ts == 100.0 and entry.last_ts == 160.0  # 一条连续区间，未被墙钟差误切段
 
 
 def test_capture_run_includes_uid_snapshot_artifact(monkeypatch, tmp_path):

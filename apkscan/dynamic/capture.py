@@ -1733,13 +1733,14 @@ class _SocketSampler:
         uid_text = _app_uid(package, serial)
         self.target_uid = int(uid_text) if uid_text.isdigit() else None
         self.interval = max(0.05, float(interval))
-        # 缺席超过约一个采样周期即视为「区间断裂」：同五元组再现按新连接生命期起段，不跨空窗延展旧区间
-        # （否则临时端口被后续连接复用会伪造连续存续期，让空窗里的 pcap 流误过时间窗匹配）。
-        self._segment_gap = self.interval * 2.0
+        # 采样轮次计数：靠同五元组是否在**相邻轮**出现来判连续/断裂，比墙钟差更抗 _sample_once 实际耗时与调度抖动
+        # （四次 adb 读取顺序执行，慢时墙钟差会超 interval）。缺席≥1 整轮＝端口被新连接复用 → 按新段重置，
+        # 不跨空窗延展旧区间（否则伪造连续存续期，让空窗里的 pcap 流误过时间窗匹配）。
+        self._round = 0
         self.max_observations = max(1, int(max_observations))
         self._observations: list[dict[str, Any]] = []
-        # 键=5 元组(proto,uid,本地,远端)，值=该 socket 当前连续存续段的观测 dict（含就地更新的 last_ts / state）——
-        # 不含 state，稳定态长连接才能跨轮扩成时间区间，而非只留首次观测的点；跨空窗则按新段重置。
+        # 键=5 元组(proto,uid,本地,远端)，值=该 socket 当前连续存续段的观测 dict（含就地更新的 last_ts / state /
+        # 内部 last_round）——稳定态长连接跨相邻轮扩成时间区间，而非只留首次观测的点；缺席整轮后再现按新段重置。
         self._seen: dict[tuple[Any, ...], dict[str, Any]] = {}
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -1779,12 +1780,16 @@ class _SocketSampler:
         return f"[{ip}]:{port}" if ":" in ip else f"{ip}:{port}"
 
     def _sample_once(self) -> None:
-        """采一轮 /proc/net/tcp{,6}；同一 socket（5 元组，不含 state）首见记 first ts、重现就地扩 last_ts，形成观测区间。"""
+        """采一轮 /proc/net/tcp{,6}；同一 socket（5 元组，不含 state）相邻轮出现则扩 last_ts / 更新最新 state 成区间，
+        缺席≥1 整轮后再现按新段就地重置（相邻轮判定，不用墙钟差，抗采样耗时/抖动）。"""
         if self.target_uid is None:
             return
         from apkscan.dynamic import socket_attr
 
         ts = time.time()
+        with self._lock:
+            self._round += 1
+            current_round = self._round
         for procfs, proto in (
             ("/proc/net/tcp", "tcp"), ("/proc/net/tcp6", "tcp6"),
             ("/proc/net/udp", "udp"), ("/proc/net/udp6", "udp6"),  # QUIC/HTTP3 = UDP，补归因
@@ -1805,23 +1810,25 @@ class _SocketSampler:
                 with self._lock:
                     existing = self._seen.get(key)
                     if existing is not None:
-                        if ts - existing["last_ts"] <= self._segment_gap:
-                            # 同一连续存续段：就地扩 last_ts + 更新到最新 state（保留 established 等末态）。
+                        if existing["last_round"] >= current_round - 1:
+                            # 相邻轮出现＝同一连续存续段：就地扩 last_ts + 更新到最新 state（保留 established 等末态）。
                             existing["last_ts"] = ts
                             existing["state"] = entry.state
                         else:
-                            # 缺席超过一个采样周期后同五元组再现＝端口被新连接复用：就地重置区间到当下、只留最近连续段。
+                            # 缺席≥1 整轮后同五元组再现＝端口被新连接复用：就地重置区间到当下、只留最近连续段。
                             # 不跨空窗延展（parse 按五元组 min/max，若保留旧段会把空窗并进区间，正是要避免的伪造存续期）；
                             # 换来的是保守取舍：跨空窗的旧段被丢弃（完整多段留存需改 parser，留作后续）。
                             existing["ts"] = ts
                             existing["last_ts"] = ts
                             existing["state"] = entry.state
+                        existing["last_round"] = current_round
                         continue
                     if len(self._observations) >= self.max_observations:
                         continue
                     observation = {
                         "ts": ts,
                         "last_ts": ts,
+                        "last_round": current_round,
                         "proto": entry.proto,
                         "uid": entry.uid,
                         "local": self._endpoint(entry.local_ip, entry.local_port),
@@ -1850,9 +1857,10 @@ class _SocketSampler:
             self.out_path.mkdir(parents=True, exist_ok=True)
             dest = self.out_path / _SOCKET_TIMELINE_NAME
             temp = self.out_path / f".{_SOCKET_TIMELINE_NAME}.tmp"
+            _internal = {"last_ts", "last_round"}
             def _interval_rows(obs: dict[str, Any]) -> list[dict[str, Any]]:
-                # 落盘不含内部 last_ts 字段；last_ts>first 时补一行末观测，parse_socket_timeline 按 ts min/max 重建区间。
-                first = {k: v for k, v in obs.items() if k != "last_ts"}
+                # 落盘不含内部 last_ts/last_round 字段；last_ts>first 时补一行末观测，parse_socket_timeline 按 ts min/max 重建区间。
+                first = {k: v for k, v in obs.items() if k not in _internal}
                 last_ts = obs.get("last_ts")
                 if isinstance(last_ts, (int, float)) and not isinstance(last_ts, bool) and last_ts > first["ts"]:
                     return [first, {**first, "ts": last_ts}]
