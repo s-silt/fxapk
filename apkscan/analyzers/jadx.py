@@ -130,11 +130,13 @@ class JadxAnalyzer(BaseAnalyzer):
             status = self._run_jadx(apk_path, tmp)
             result.meta["jadx_status"] = status
             # timeout/failed 仍尽量扫已生成产物（jadx 常非零退出但已产出部分源码）。
-            eps, findings, n_files = self._scan_java(Path(tmp))
+            eps, findings, n_files, decrypt_candidates = self._scan_java(Path(tmp))
             result.endpoints = eps
             result.findings = findings
             result.meta["jadx_java_files"] = n_files
             result.meta["jadx_endpoint_count"] = len(eps)
+            if decrypt_candidates:  # 机器可读「待 AI 解密」清单（疑似加密配置串 + 疑似解密 helper）
+                result.meta["decrypt_candidates"] = decrypt_candidates
             logger.info(
                 "[jadx] status=%s java=%d 端点=%d 密钥Finding=%d",
                 status, n_files, len(eps), len(findings),
@@ -182,11 +184,17 @@ class JadxAnalyzer(BaseAnalyzer):
             return "partial"
         return "ok"
 
-    def _scan_java(self, root: Path) -> tuple[list[Endpoint], list[Finding], int]:
-        """扫 root 下所有 .java，从字符串字面量抽端点，从键值抽密钥。"""
+    def _scan_java(
+        self, root: Path
+    ) -> tuple[list[Endpoint], list[Finding], int, list[dict]]:
+        """扫 root 下所有 .java，从字符串字面量抽端点、从键值抽密钥、产 config-chain 层② 共现链。
+
+        返回 ``(endpoints, findings, n_files, decrypt_candidates)``——最后一项是机器可读的「待 AI 解密」清单
+        （疑似加密配置串 + 疑似解密 helper + 位置），供下游 AI/appcrypto 拾取尝试解密。
+        """
         collector: dict[str, Endpoint] = {}
         secret_hits: dict[tuple[str, str], Finding] = {}
-        chain_hits: dict[tuple[str, str, str], Finding] = {}  # config-chain 层②：方法内共现链
+        chain_objs: dict[tuple[str, str, str], StringChain] = {}  # config-chain 层②：方法内共现链（去重）
         n_files = 0
         for java in root.rglob("*.java"):
             if n_files >= _MAX_JAVA_FILES:
@@ -214,15 +222,17 @@ class JadxAnalyzer(BaseAnalyzer):
                 self._scan_text(text, rel, collector, secret_hits)
             except Exception:
                 logger.exception("[jadx] 扫描 .java 失败，跳过：%s", rel)
-            # config-chain 层②：方法作用域内 密文→解密(→sink) 共现链（启发式、独立 try 不连累端点/密钥扫描）。
+            # config-chain 层②：方法作用域内 密文→解密/消费(→sink) 共现链（启发式、独立 try 不连累端点/密钥扫描）。
             try:
                 for chain in scan_java_source(text, rel):
                     key = (chain.location, chain.method, chain.secret[:64])
-                    chain_hits.setdefault(key, _chain_finding(chain))
+                    chain_objs.setdefault(key, chain)
             except Exception:
                 logger.exception("[jadx] string_graph 扫描失败，跳过：%s", rel)
-        findings = list(secret_hits.values()) + list(chain_hits.values())
-        return list(collector.values()), findings, n_files
+        chains = list(chain_objs.values())
+        findings = list(secret_hits.values()) + [_chain_finding(c) for c in chains]
+        candidates = [_chain_candidate(c) for c in chains]
+        return list(collector.values()), findings, n_files, candidates
 
     def _scan_text(
         self,
@@ -424,25 +434,57 @@ def _strip_tail(url: str) -> str:
 
 
 def _chain_finding(chain: StringChain) -> Finding:
-    """把方法内共现链转成一条 Finding（config-chain 层②）。★启发式共现、非数据流证明 → LOW + inference。"""
+    """把方法内共现链转成一条 Finding（config-chain 层②）。★启发式共现、非数据流证明 → LOW + inference。
+
+    两档：识别到**标准解密 API** → "密文→解密 共现链"；仅**被某函数消费**（疑似改名的解密 helper）→
+    "疑似加密配置串（AI 辅助解密线索）"。两档都在 evidence.snippet 里带**完整密文**，供下游 AI/appcrypto 试解密。
+    """
     sink_part = f"；下游 sink：{', '.join(chain.sinks)}" if chain.sinks else ""
-    return Finding(
-        id=_FINDING_STRING_CHAIN,
-        title="jadx 反编译发现 密文→解密 方法内共现链（疑似运行时解密配置/后端地址）",
-        severity=Severity.MEDIUM,
-        category="config-chain",
-        description=(
+    if chain.decrypt_calls:
+        title = "jadx 反编译发现 密文→解密 方法内共现链（疑似运行时解密配置/后端地址）"
+        description = (
             f"方法 {chain.method} 内共现硬编码密文候选串与解密调用（{', '.join(chain.decrypt_calls)}）{sink_part}。"
             "疑似运行时解密出配置 / 后端地址。★方法作用域内的**启发式共现**（非数据流证明），须人工复核。"
-        ),
-        recommendation=(
-            "人工核该方法：确认解密配方(key/iv/mode)与解出内容；若解出后端地址/配置对象，纳入 config-chain 归因。"
-        ),
-        evidences=[Evidence(source="jadx", location=chain.location, snippet=_short(chain.secret))],
+        )
+        recommendation = (
+            "AI 辅助解密：结合本 app crypto 证据（crypto_recipe / 硬编码 key）对证据里的完整密文尝试解密，"
+            "看是否解出 URL / 域名 / 配置；解出则纳入 config-chain 归因。"
+        )
+    else:
+        title = "jadx 反编译发现 疑似加密配置串（AI 辅助解密线索）"
+        description = (
+            f"方法 {chain.method} 内硬编码密文候选串被直接传入 {chain.consumer}()（疑似**改名的解密函数**——重度"
+            f"混淆下认不出标准 crypto API，但『密文被传进某函数』是确定事实）{sink_part}。★方法级启发式（非证明）。"
+        )
+        recommendation = (
+            f"AI 辅助解密：证据里是完整密文，{chain.consumer}() 疑似解密 helper；结合本 app crypto 证据尝试解密，"
+            "看是否解出 URL / 域名 / 配置（如远程配置 OSS 地址）；解不出则判需动态/native 恢复。见 meta.decrypt_candidates。"
+        )
+    return Finding(
+        id=_FINDING_STRING_CHAIN,
+        title=title,
+        severity=Severity.MEDIUM,
+        category="config-chain",
+        description=description,
+        recommendation=recommendation,
+        # ★带完整密文（不截断）：这是 AI/appcrypto 试解密的 actionable 载荷。
+        evidences=[Evidence(source="jadx", location=chain.location, snippet=chain.secret)],
         references=["CWE-798"],
         confidence=Confidence.LOW,
         kind=FINDING_KIND_INFERENCE,
     )
+
+
+def _chain_candidate(chain: StringChain) -> dict:
+    """把共现链转成机器可读的「待 AI 解密」候选（供 meta.decrypt_candidates 供下游 AI/appcrypto 拾取）。"""
+    return {
+        "ciphertext": chain.secret,  # 完整密文
+        "consumer": chain.consumer,  # 疑似解密 helper（改名）；None=识别到标准解密 API
+        "method": chain.method,
+        "location": chain.location,
+        "standard_decrypt": list(chain.decrypt_calls),
+        "sinks": list(chain.sinks),
+    }
 
 
 def _short(text: str, limit: int = _SNIPPET_MAX) -> str:
