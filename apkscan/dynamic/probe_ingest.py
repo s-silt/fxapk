@@ -281,6 +281,18 @@ def coverage_axes(leads: list[ProbeLead]) -> dict[str, dict[str, object]]:
     return out
 
 
+# markdown 台账里嵌样本可控字段（探针 value/probe 抽自 Frida console，样本可影响其文本）前必转义：
+# 折叠空白（堵"值里塞换行伪造新标题/字段行"）+ 转义 markdown 结构/行内语法字符（含反引号——堵逃逸
+# inline-code 注入原始 HTML/链接）。主 HTML 报告另走 Jinja 自动转义、不受此路径影响。
+_MD_SPECIAL_CHARS = re.compile(r"([\\`*_{}\[\]()#+\-.!|>&<~])")
+_MD_WS_RUN = re.compile(r"\s+")
+
+
+def _md_escape(value: object) -> str:
+    """把样本可控字段转成安全内嵌 markdown 文本（只对攻击者可控字段调用；固定文案无需转义）。"""
+    return _MD_SPECIAL_CHARS.sub(r"\\\1", _MD_WS_RUN.sub(" ", str(value)).strip())
+
+
 def build_ledger_md(leads: list[ProbeLead]) -> str:
     """把线索聚成调证台账（markdown），按 LeadCategory 分组、每组带 where_to_request，
     末尾附「取证完备性」三轴诊断（定人/穿透/固证覆盖 + 缺轴补跑建议）。
@@ -303,7 +315,8 @@ def build_ledger_md(leads: list[ProbeLead]) -> str:
             lines.append(f"> 调证落点：{where}")
         lines.append("")
         for pl in items:
-            lines.append(f"- `{pl.value}`  ← 探针 [{pl.probe}]")
+            # value/probe 样本可控 → 转义（含反引号）后作纯文本嵌入，绝不裸包 inline-code 让载荷逃逸注入。
+            lines.append(f"- {_md_escape(pl.value)}  ← 探针 {_md_escape(pl.probe)}")
         lines.append("")
 
     # 取证完备性：三类调证价值轴的覆盖诊断（闭环——告诉办案人还差哪类、补跑什么）。
