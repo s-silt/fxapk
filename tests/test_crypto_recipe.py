@@ -322,3 +322,14 @@ def test_large_file_no_truncation_warning(caplog: pytest.LogCaptureFixture) -> N
     assert not any(
         "仅扫前段" in r.message or "文件超过上限" in r.message for r in caplog.records
     )
+
+
+def test_read_text_truncates_oversized_file(monkeypatch) -> None:
+    """★回归（codex 全库审计 P1）：超扫描上限的 JS/HTML 只 decode+扫前 N 字节，不整解码 ≤500MB 打爆内存/CPU。"""
+
+    class _Ctx:
+        def read_file(self, path: str) -> bytes:
+            return b"A" * 100
+
+    monkeypatch.setattr(cr, "_MAX_SCAN_BYTES", 10)
+    assert CryptoRecipeAnalyzer()._read_text(_Ctx(), "x.js") == "A" * 10  # 截断到 10 字节（无修复则返回 100 字符）

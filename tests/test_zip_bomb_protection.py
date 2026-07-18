@@ -247,3 +247,51 @@ def test_ipa_read_file_skips_cache_over_per_file_limit(
     assert ctx.read_file(root + "edge.bin") == b"e" * 100
     assert ctx._read_cache[root + "edge.bin"] == b"e" * 100
     assert ctx._cached_bytes == 100
+
+
+# ---------------------------------------------------------------------------
+# 绕过 read_file 的直接 zf.read() 路径（codex 全库审计）：入口/兜底/重打包也须查声明大小
+# ---------------------------------------------------------------------------
+
+
+class _NoGetFileApk:
+    """假 androguard APK：get_file 恒空 → 强制走 AXML 清单兜底直读路径。"""
+
+    def get_file(self, path: str) -> bytes:
+        return b""
+
+
+def test_ipa_load_rejects_bomb_info_plist(tmp_path: Path, monkeypatch) -> None:
+    """★回归（codex 全库审计 P1）：load_ipa 入口必读的 Info.plist 也走声明大小检查——
+    高压缩比 Info.plist 不能绕过 read_file 在上下文创建阶段全量解压致 OOM。"""
+    path = _make_ipa_zip(tmp_path, {"a.txt": b"x"})  # Info.plist 实际约百字节
+    monkeypatch.setattr(ipa_mod, "_MAX_DECOMPRESSED_FILE_BYTES", 10)
+    with pytest.raises(ipa_mod.IpaParseError, match="zip 炸弹"):
+        load_ipa(path, AnalysisConfig(online=False))
+
+
+def test_repackage_rejects_bomb_entry(tmp_path: Path, monkeypatch) -> None:
+    """★回归（codex 全库审计 P1）：重打包逐条目复制前查声明大小，超上限中止，不无界解压致 OOM。"""
+    from apkscan.dynamic import repackage
+
+    base = tmp_path / "base.apk"
+    with zipfile.ZipFile(base, "w") as zf:
+        zf.writestr("classes.dex", b"dex")
+        zf.writestr("assets/big.bin", b"z" * 100)
+    monkeypatch.setattr(apk_mod, "_MAX_DECOMPRESSED_FILE_BYTES", 10)
+    with pytest.raises(ValueError, match="zip 炸弹"):
+        repackage._replace_dex_in_zip(base, {}, tmp_path / "out.apk")
+
+
+def test_apk_axml_fallback_respects_size_limit(tmp_path: Path, monkeypatch, caplog) -> None:
+    """★回归（codex 全库审计 P1）：AndroidManifest.xml 清单兜底直读也走声明大小检查——
+    高压缩比清单不绕过 read_file 被全量解压。"""
+    apk = tmp_path / "m.apk"
+    with zipfile.ZipFile(apk, "w") as zf:
+        zf.writestr("AndroidManifest.xml", b"z" * 100)
+    ctx = ApkContext(_NoGetFileApk(), [], AnalysisConfig(online=False), apk_path=str(apk))
+    monkeypatch.setattr(apk_mod, "_MAX_DECOMPRESSED_FILE_BYTES", 10)
+    with caplog.at_level("WARNING"):
+        result = ctx._axml_package
+    assert result == ""  # 超上限 → 放弃兜底、不解析
+    assert any("zip 炸弹" in rec.getMessage() for rec in caplog.records)  # 无修复则无此告警

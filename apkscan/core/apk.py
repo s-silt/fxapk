@@ -440,7 +440,18 @@ class ApkContext:
         if not raw and self.apk_path:
             try:
                 with zipfile.ZipFile(self.apk_path) as zf:
-                    raw = zf.read("AndroidManifest.xml")
+                    # zip 炸弹前置拦截（与 read_file 同口径）：清单兜底直读也查声明大小，
+                    # 否则高压缩比 AndroidManifest.xml 会绕过 read_file 被全量解压致 OOM。
+                    mf_info = zf.getinfo("AndroidManifest.xml")
+                    if mf_info.file_size > _MAX_DECOMPRESSED_FILE_BYTES:
+                        logger.warning(
+                            "AndroidManifest.xml 声明解压 %d 字节超 %d 上限（疑 zip 炸弹），放弃兜底直读",
+                            mf_info.file_size,
+                            _MAX_DECOMPRESSED_FILE_BYTES,
+                        )
+                        raw = b""
+                    else:
+                        raw = zf.read("AndroidManifest.xml")
             except Exception:  # noqa: BLE001 - 读不到就放弃兜底
                 logger.debug("读取 AndroidManifest.xml 原始字节失败（忽略）", exc_info=True)
                 raw = b""

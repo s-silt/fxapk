@@ -58,6 +58,9 @@ _RULES_NAME = "crypto_recipe"
 # 信号相关性聚合配方，三者在文件内可能相距很远，分块会切断相关性（调用在块 0、key 在块 2 →
 # 漏配方），故整文件一次扫完（read_file 已把整文件载入内存，不增额外整文件读取峰值）。
 _MAX_FILES = 3000
+#: 单 JS/HTML 扫描字节上限：合法配置 bundle 远小于此；超此只扫前 _MAX_SCAN_BYTES（防巨型/炸弹文件把
+#: utf-8 解码 + 全文正则打爆内存/CPU）。配置串通常在文件靠前的 crypto 调用附近，截断对合法样本近乎无损。
+_MAX_SCAN_BYTES = 64 * 1024 * 1024
 _DEFAULT_SNIPPET_MAX = 200
 
 _RN_BUNDLE_NAME = "index.android.bundle"
@@ -599,8 +602,16 @@ class CryptoRecipeAnalyzer(BaseAnalyzer):
             return None
         if not raw:
             return None
+        data = bytes(raw)
+        if len(data) > _MAX_SCAN_BYTES:
+            # 巨型/炸弹文件：截断到扫描上限再 decode+正则，绝不整解码 ≤500MB 打爆内存/CPU（合法 bundle 无损）。
+            logger.warning(
+                "[%s] 文件 %d 字节超扫描上限 %d，只扫前 %d 字节：%s",
+                self.name, len(data), _MAX_SCAN_BYTES, _MAX_SCAN_BYTES, path,
+            )
+            data = data[:_MAX_SCAN_BYTES]
         try:
-            return bytes(raw).decode("utf-8", errors="ignore")
+            return data.decode("utf-8", errors="ignore")
         except Exception:  # noqa: BLE001 — utf-8 errors=ignore 几乎不抛，仅防御
             logger.exception("[%s] utf-8 解码失败，跳过：%s", self.name, path)
             return None

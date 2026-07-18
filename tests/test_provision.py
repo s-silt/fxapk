@@ -253,7 +253,7 @@ def _xz_bytes(payload: bytes | None = None) -> bytes:
 
 
 def _fake_requests_get(content: bytes):
-    """构造 requests 风格的假响应工厂（.content + .raise_for_status no-op）。"""
+    """构造 requests 风格的假响应工厂（.content + .raise_for_status + 流式 iter_content + close）。"""
 
     class _Resp:
         content = b""
@@ -261,7 +261,14 @@ def _fake_requests_get(content: bytes):
         def raise_for_status(self) -> None:
             return None
 
-    def _get(url: str, timeout: float = 0):
+        def iter_content(self, chunk_size: int = 65536):  # noqa: ANN201 - 假响应
+            for i in range(0, len(self.content), chunk_size):
+                yield self.content[i : i + chunk_size]
+
+        def close(self) -> None:
+            return None
+
+    def _get(url: str, timeout: float = 0, stream: bool = False):
         r = _Resp()
         r.content = content
         return r
@@ -296,7 +303,7 @@ def test_ensure_frida_server_network_error_returns_error_not_raise(monkeypatch):
     monkeypatch.setattr(provision, "device_abi", lambda serial=None: "arm64-v8a")
     monkeypatch.setattr(provision, "host_frida_version", lambda: "16.5.9")
 
-    def _raise_conn(url: str, timeout: float = 0) -> None:
+    def _raise_conn(url: str, timeout: float = 0, **_kw: object) -> None:
         raise requests.exceptions.ConnectionError("no route to host")
 
     monkeypatch.setattr(requests, "get", _raise_conn)
@@ -314,7 +321,7 @@ def test_ensure_frida_server_http_404_returns_version_not_found(monkeypatch):
     monkeypatch.setattr(provision, "device_abi", lambda serial=None: "arm64-v8a")
     monkeypatch.setattr(provision, "host_frida_version", lambda: "99.99.99")
 
-    def _raise_404(url: str, timeout: float = 0) -> None:
+    def _raise_404(url: str, timeout: float = 0, **_kw: object) -> None:
         resp = requests.Response()
         resp.status_code = 404
         raise requests.exceptions.HTTPError("404", response=resp)
@@ -337,6 +344,27 @@ def test_ensure_frida_server_lzma_error_returns_error(monkeypatch):
     assert res["ok"] is False
     assert res["action"] == "error"
     assert "lzma" in res["detail"]
+
+
+def test_bounded_lzma_decompress_rejects_bomb() -> None:
+    """★回归（codex 全库审计 P1）：有界解压——小压缩体积解压出巨量时超上限即中止（防 XZ 炸弹 OOM，root 部署链尤须防）。"""
+    bomb = lzma.compress(b"\x00" * 200_000)  # 压缩后极小、解压 200KB
+    with pytest.raises(ValueError, match="XZ 炸弹"):
+        provision._bounded_lzma_decompress(bomb, 1000)  # 上限 1000 < 200KB → 拒绝
+    assert provision._bounded_lzma_decompress(bomb, 1_000_000) == b"\x00" * 200_000  # 限内正常
+
+
+def test_extract_xz_sha256_pin(monkeypatch, tmp_path) -> None:
+    """★回归（codex 全库审计 P1）：FXAPK_FRIDA_SERVER_SHA256 提供期望值时——不匹配拒绝部署、匹配放行（防同尺寸替换）。"""
+    payload = b"\x7fELF" + b"\x00" * 1_100_000  # > _FRIDA_MIN_SERVER_BYTES，过体积下限进到 SHA 校验
+    xz = _xz_bytes(payload)
+    dest = tmp_path / "frida-server"
+    monkeypatch.setenv("FXAPK_FRIDA_SERVER_SHA256", "0" * 64)  # 错误期望 → 拒绝
+    err = provision._extract_xz_to(xz, dest)
+    assert "SHA256" in err and not dest.exists()
+    monkeypatch.setenv("FXAPK_FRIDA_SERVER_SHA256", hashlib.sha256(payload).hexdigest())  # 正确 → 放行
+    assert provision._extract_xz_to(xz, dest) == ""
+    assert dest.read_bytes() == payload
 
 
 def test_ensure_frida_server_push_failure_no_root_error(monkeypatch):
