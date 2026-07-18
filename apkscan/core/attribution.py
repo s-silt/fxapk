@@ -736,8 +736,36 @@ def build_endpoint_attribution(kind: str, value: str, enrichment: dict[str, Any]
             if k and k not in seen_ip:
                 seen_ip.add(k)
                 ordered.append(k)
+        # case close 会对每个解析 IP 单独富化（ip_rdap 资源登记方 / asn / 在线源 as_org），落在
+        # enrichment['resolved_ip_enrichment'][ip]。顶层域名归因吸收它，否则这些证据只留在嵌套结构，
+        # 顶层五层的 resource_holder 恒 unknown，文书/摘要（只读顶层 attribution）漏掉闭环后的 RDAP/BGP 证据（P1-3）。
+        resolved_all = enrichment.get("resolved_ip_enrichment")
+        resolved_all = resolved_all if isinstance(resolved_all, dict) else {}
         for ip in ordered:
             h = host_by_ip.get(ip, {})
+            resolved_ip = resolved_all.get(ip)
+            if isinstance(resolved_ip, dict):
+                merged = dict(resolved_ip)
+                # 域名级 CNAME 字段级注入：resolved 无 dns.cname 时补（含 resolved 有 dns dict 但缺 cname 的情形）。
+                merged_dns = merged.get("dns")
+                if cname and not (isinstance(merged_dns, dict) and merged_dns.get("cname")):
+                    merged["dns"] = {**merged_dns, "cname": cname} if isinstance(merged_dns, dict) else {"cname": cname}
+                # hosting 兜底按**有效字段**判（非键存在）：resolved 的 asn 缺失或只有 error/note 等控制字段
+                # （如富化失败写的 {"error": "..."}）时，用 dns.hosting 的 ASN 补，防 origin/hosting 层退化丢证据。
+                merged_asn = merged.get("asn")
+                asn_has_value = isinstance(merged_asn, dict) and (
+                    merged_asn.get("asn") or merged_asn.get("org") or merged_asn.get("isp")
+                )
+                if not asn_has_value and (h.get("asn") or h.get("org") or h.get("isp")):
+                    merged["asn"] = {
+                        "asn": h.get("asn"),
+                        "org": h.get("org") or h.get("isp"),
+                        "country": h.get("country"),
+                    }
+                att = attribution_from_enrichment(merged, ip=ip)
+                if att is not None:
+                    ips.append(att)
+                    continue
             signals: dict[str, Any] = {
                 "country": h.get("country"),
                 "asn": {"asn": h.get("asn"), "org": h.get("org") or h.get("isp")},

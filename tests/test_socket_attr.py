@@ -303,8 +303,9 @@ def test_attribute_connections_time_window_boosts_score() -> None:
     assert a["matched_by"] == ["remote_ip_port", "local_port", "time_window"]
 
 
-def test_attribute_connections_time_window_miss_stays_local_only() -> None:
-    """本地端口命中但时间窗不重叠（socket 观测远早于 pcap 流）→ 仍 confirmed（本地端口够强），但不加时间窗分。"""
+def test_attribute_connections_time_window_known_conflict_not_confirmed() -> None:
+    """本地端口命中，但 socket 与 pcap 时间戳都在且区间**已知不相交**（socket 观测远早于 pcap 流）→
+    端口复用巧合，不得确证；远端仅此 UID → 降级 probable（P1-2：已知冲突不再误判 confirmed）。"""
     s = socket_attr.parse_socket_timeline(
         '{"type":"meta","package":"com.x","target_uid":10234}\n'
         '{"ts":1.0,"proto":"tcp","uid":10234,"local":"10.0.2.15:43090","remote":"1.2.3.4:443","state":"established"}\n'
@@ -312,7 +313,32 @@ def test_attribute_connections_time_window_miss_stays_local_only() -> None:
     a = socket_attr.attribute_connections(
         [_ep("1.2.3.4", 443, socket_attr.PcapConn(43090, first_ts=100.0, last_ts=200.0))], s
     )[("tcp", "1.2.3.4", 443)]
-    assert a["attribution"] == "confirmed" and a["score"] == 0.7 and "time_window" not in a["matched_by"]
+    assert a["attribution"] == "probable" and a["is_target_app"] is True
+    assert a["score"] == 0.5 and "time_window" not in a["matched_by"]
+
+
+def test_attribute_connections_converges_to_unique_time_overlap() -> None:
+    """同远端两 UID、两条 pcap 连接：一条本地端口命中目标 UID 且时间重叠、另一条命中他 UID 但时间已知冲突
+    → 收敛到唯一时间重叠者（目标 UID）confirmed，不因第二条冲突匹配落 ambiguous（P1-2 消歧）。"""
+    s = socket_attr.parse_socket_timeline(
+        '{"type":"meta","package":"com.x","target_uid":10234}\n'
+        '{"ts":1.0,"proto":"tcp","uid":10234,"local":"10.0.2.15:43090","remote":"1.2.3.4:443","state":"syn_sent"}\n'
+        '{"ts":3.0,"proto":"tcp","uid":10234,"local":"10.0.2.15:43090","remote":"1.2.3.4:443","state":"established"}\n'
+        '{"ts":1.0,"proto":"tcp","uid":10999,"local":"10.0.2.15:44000","remote":"1.2.3.4:443","state":"established"}\n'
+    )
+    a = socket_attr.attribute_connections(
+        [
+            _ep(
+                "1.2.3.4",
+                443,
+                socket_attr.PcapConn(43090, first_ts=1.5, last_ts=2.5),   # 命中目标 UID，时间重叠
+                socket_attr.PcapConn(44000, first_ts=100.0, last_ts=200.0),  # 命中他 UID，时间已知冲突
+            )
+        ],
+        s,
+    )[("tcp", "1.2.3.4", 443)]
+    assert a["attribution"] == "confirmed" and a["uid"] == 10234 and a["is_target_app"] is True
+    assert "time_window" in a["matched_by"]
 
 
 def test_attribute_connections_probable_single_remote_uid_no_local() -> None:
