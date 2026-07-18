@@ -137,6 +137,11 @@ class PcapSummary:
     flows: list[Flow] = field(default_factory=list)
     dns_queries: set[str] = field(default_factory=set)
     dns_records: list[DnsRecord] = field(default_factory=list)
+    #: 解析状态——让调用方区分「采集/解析失败」与「真实零业务流量」（二者过去都是空 flows）。
+    #: ok=正常解析（flows 可为空=真零流量）；read_error=文件读失败；unparseable=非 pcap/pcapng（坏 magic/过短）；
+    #: parse_error=解析中途异常。失败态时 flows 通常为空但**不代表**零流量，closure/pcap-leads 据此不误判。
+    parse_status: str = "ok"
+    error: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -144,19 +149,31 @@ class PcapSummary:
 # ---------------------------------------------------------------------------
 
 
+def _has_pcap_magic(data: bytes) -> bool:
+    """前 4 字节是否 pcap/pcapng magic（经典 µs/ns 大小端 + pcapng SHB）。"""
+    return len(data) >= 4 and data[:4] in (
+        b"\xa1\xb2\xc3\xd4", b"\xa1\xb2\x3c\x4d", b"\xd4\xc3\xb2\xa1", b"\x4d\x3c\xb2\xa1", b"\x0a\x0d\x0d\x0a",
+    )
+
+
 def parse_pcap(path: str) -> PcapSummary:
-    """读 pcap 文件并解析；文件缺失/坏 → 空 summary（不抛）。"""
+    """读 pcap 文件并解析；文件缺失/坏 → **带失败态**的 summary（不抛）。"""
     try:
         data = Path(path).read_bytes()
-    except OSError:
+    except OSError as exc:
         logger.exception("[pcap] 读取 pcap 失败：%s", path)
-        return PcapSummary()
+        return PcapSummary(parse_status="read_error", error=f"{type(exc).__name__}: {exc}")
     return parse_pcap_bytes(data)
 
 
 def parse_pcap_bytes(data: bytes) -> PcapSummary:
-    """解析 pcap/pcapng 字节，聚合出 flows + DNS 查询。绝不抛。"""
+    """解析 pcap/pcapng 字节，聚合出 flows + DNS 查询。绝不抛。失败态写 parse_status/error。"""
     summ = PcapSummary()
+    if not _has_pcap_magic(data):
+        # 坏 magic / 过短 = 非 pcap/pcapng：显式标失败，不与「合法零流量」混同（否则 pcap-leads 误判采集成功）。
+        summ.parse_status = "unparseable"
+        summ.error = f"unrecognized magic {data[:4].hex()}" if data else "empty input"
+        return summ
     flows: dict[tuple, Flow] = {}
     asm = _HelloReassembler()  # 每份 pcap 独立、无模块级态（并行分析器安全）
     qdec = _QuicDecryptor()    # QUIC Initial 解密态（密钥缓存 + CRYPTO 重组），同样每份 pcap 独立
@@ -166,8 +183,10 @@ def parse_pcap_bytes(data: bytes) -> PcapSummary:
                 _process_frame(ts, linktype, frame, flows, summ, asm, qdec)
             except Exception:  # noqa: BLE001 - 单包坏不影响其余
                 logger.debug("[pcap] 跳过坏包", exc_info=True)
-    except Exception:  # noqa: BLE001 - 整体解析异常也不抛
+    except Exception as exc:  # noqa: BLE001 - 整体解析异常也不抛
         logger.exception("[pcap] 解析异常")
+        summ.parse_status = "parse_error"
+        summ.error = f"{type(exc).__name__}: {exc}"
     # 收尾：对未凑齐的 stitch（snaplen 截断/丢续段）best-effort 捞 SNI 回填对应 Flow（复审 #2：
     # 恢复旧代码对截断 record 能捞出 SNI 的行为，弃 JA3 以不产出算错值）。
     asm.drain()
@@ -1500,6 +1519,14 @@ def build_ledger_md(summary: PcapSummary) -> str:
     lines: list[str] = [
         "# pcap 调证台账（带外抓包线索聚合）",
         "",
+    ]
+    if summary.parse_status != "ok":
+        lines += [
+            f"> ⚠ pcap 解析未成功（{summary.parse_status}：{summary.error}）——空结果**不代表零流量**，"
+            "请核对 pcap 文件完整性/格式后重抓。",
+            "",
+        ]
+    lines += [
         f"接入节点 {len(ips)} 个、域名 {len(doms)} 个、DNS 查询 {len(summary.dns_queries)} 条。",
         "解不开密文也能办案：下列接入节点 IP/SNI 即穿透真源站的调证锚点。",
         "",
@@ -1541,6 +1568,9 @@ def to_ledger_dict(summary: PcapSummary) -> dict[str, object]:
         for re in res
     ]
     return {
+        # 解析状态先行：程序化消费者据此区分「解析/采集失败」与「真实零业务流量」（失败态空 endpoints 不当零流量）。
+        "parse_status": summary.parse_status,
+        "error": summary.error,
         "endpoints": [
             {"value": l.value, "advice": l.advice, "snippet": (l.source_refs[0].snippet if l.source_refs else "")}
             for l in leads

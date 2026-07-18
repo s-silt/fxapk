@@ -326,6 +326,20 @@ def test_iter_frames_nanosecond_pcap_timestamp() -> None:
     assert list(pcap_ingest._iter_frames(le))[0][0] == pytest.approx(2000.25)
 
 
+def test_parse_status_distinguishes_failure_from_zero_traffic() -> None:
+    """★回归（codex 全库审计 P1）：坏 magic / 读失败 与「真实零业务流量」要能区分——空 flows 不都等于零流量，
+    否则 pcap-leads/closure 把采集失败误判成"抓到零业务流量"。"""
+    bad = pcap_ingest.parse_pcap_bytes(b"not a pcap at all")
+    assert bad.parse_status == "unparseable" and bad.flows == [] and bad.error
+    empty_ok = pcap_ingest.parse_pcap_bytes(_pcap([]))  # 合法但零包的经典 pcap（仅全局头）
+    assert empty_ok.parse_status == "ok" and empty_ok.flows == []
+    missing = pcap_ingest.parse_pcap("fxapk-no-such-file-xyz.pcap")  # 读失败（文件不存在）
+    assert missing.parse_status == "read_error" and missing.error
+    # 出口透出：JSON 台账带 parse_status（程序化消费者据此判），MD 台账带告警。
+    assert pcap_ingest.to_ledger_dict(bad)["parse_status"] == "unparseable"
+    assert "解析未成功" in pcap_ingest.build_ledger_md(bad)
+
+
 def _pcapng_one_epb(endian: str, tsresol: int, ts64: int, frame: bytes = b"\x00" * 14) -> bytes:
     """一个 pcapng section：SHB + IDB(if_tsresol) + 单条 EPB(64bit 时间戳)。endian: '<' 或 '>'。"""
     def block(btype: int, body: bytes) -> bytes:
