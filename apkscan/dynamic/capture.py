@@ -1733,10 +1733,13 @@ class _SocketSampler:
         uid_text = _app_uid(package, serial)
         self.target_uid = int(uid_text) if uid_text.isdigit() else None
         self.interval = max(0.05, float(interval))
+        # 缺席超过约一个采样周期即视为「区间断裂」：同五元组再现按新连接生命期起段，不跨空窗延展旧区间
+        # （否则临时端口被后续连接复用会伪造连续存续期，让空窗里的 pcap 流误过时间窗匹配）。
+        self._segment_gap = self.interval * 2.0
         self.max_observations = max(1, int(max_observations))
         self._observations: list[dict[str, Any]] = []
-        # 键=5 元组(proto,uid,本地,远端)，值=该 socket 的观测 dict（含就地更新的 last_ts）——
-        # 不含 state，稳定态长连接才能跨轮扩成时间区间，而非只留首次观测的点。
+        # 键=5 元组(proto,uid,本地,远端)，值=该 socket 当前连续存续段的观测 dict（含就地更新的 last_ts / state）——
+        # 不含 state，稳定态长连接才能跨轮扩成时间区间，而非只留首次观测的点；跨空窗则按新段重置。
         self._seen: dict[tuple[Any, ...], dict[str, Any]] = {}
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -1802,7 +1805,17 @@ class _SocketSampler:
                 with self._lock:
                     existing = self._seen.get(key)
                     if existing is not None:
-                        existing["last_ts"] = ts  # 就地扩展观测区间，不新增列表项（仍受 max_observations 约束）
+                        if ts - existing["last_ts"] <= self._segment_gap:
+                            # 同一连续存续段：就地扩 last_ts + 更新到最新 state（保留 established 等末态）。
+                            existing["last_ts"] = ts
+                            existing["state"] = entry.state
+                        else:
+                            # 缺席超过一个采样周期后同五元组再现＝端口被新连接复用：就地重置区间到当下、只留最近连续段。
+                            # 不跨空窗延展（parse 按五元组 min/max，若保留旧段会把空窗并进区间，正是要避免的伪造存续期）；
+                            # 换来的是保守取舍：跨空窗的旧段被丢弃（完整多段留存需改 parser，留作后续）。
+                            existing["ts"] = ts
+                            existing["last_ts"] = ts
+                            existing["state"] = entry.state
                         continue
                     if len(self._observations) >= self.max_observations:
                         continue

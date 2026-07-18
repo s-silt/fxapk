@@ -601,18 +601,21 @@ def test_socket_sampler_accumulates_short_lived_target_connections(monkeypatch, 
     assert all(row["uid"] == 10234 for row in rows[1:])
 
 
-def test_socket_sampler_forms_interval_for_stable_socket(monkeypatch, tmp_path):
-    """稳定态长连接（established 全程不变、5 元组不变）跨轮采样应形成 first_ts<last_ts 的观测区间，
-    而非只留首次观测的点（P1-2：去重键去掉 state、就地扩 last_ts，时间窗匹配才对真实长连接有效）。"""
+def _socket_line(state_hex: str) -> str:
+    return f" 0: 0F02000A:A852 04030201:01BB {state_hex} 00000000:00000000 00:00000000 00000000 10234 0 1\n"
+
+
+def test_socket_sampler_forms_interval_and_keeps_latest_state(monkeypatch, tmp_path):
+    """连续存续的长连接跨轮采样形成 first_ts<last_ts 的观测区间，并保留最新 state（syn_sent→established
+    记 established），而非只留首次观测的点/首态（P1-2：就地扩 last_ts + 更新最新 state）。"""
     from apkscan.dynamic import socket_attr
+
+    st = {"hex": "02"}  # 首轮 syn_sent（02），后续 established（01）
 
     def fake_capture(extra, serial=None):
         procfs = extra[-1]
         if procfs == "/proc/net/tcp":
-            return (
-                " 0: 0F02000A:A852 04030201:01BB 01 "
-                "00000000:00000000 00:00000000 00000000 10234 0 1\n"
-            )
+            return _socket_line(st["hex"])
         return "" if procfs == "/proc/net/tcp6" else None
 
     clock = {"t": 100.0}
@@ -621,16 +624,59 @@ def test_socket_sampler_forms_interval_for_stable_socket(monkeypatch, tmp_path):
     monkeypatch.setattr(capture.time, "time", lambda: clock["t"])
     sampler = capture._SocketSampler("com.x", tmp_path, interval=0.25, max_observations=10)
 
-    sampler._sample_once()   # 首次观测 @100.0
-    clock["t"] = 105.0
-    sampler._sample_once()   # 同一 socket @105.0 → 就地扩 last_ts（不新增列表项）
+    sampler._sample_once()                    # @100.0 syn_sent
+    clock["t"] = 100.25
+    st["hex"] = "01"
+    sampler._sample_once()                    # @100.25 established（连续，gap 0.25 <= segment_gap 0.5 → 扩段）
+    clock["t"] = 100.5
+    sampler._sample_once()                    # @100.5 established
     timeline = sampler.stop()
 
     assert timeline is not None
     s = socket_attr.parse_socket_timeline(timeline.read_text(encoding="utf-8"))
     assert len(s.entries) == 1
     entry = s.entries[0]
-    assert entry.first_ts == 100.0 and entry.last_ts == 105.0  # 区间而非点（last_ts 严格晚于 first_ts）
+    assert entry.first_ts == 100.0 and entry.last_ts == 100.5  # 连续区间（非点）
+    assert entry.state == "established"  # 保留最新 state，非首轮 syn_sent
+
+
+def test_socket_sampler_segments_on_gap_no_false_interval(monkeypatch, tmp_path):
+    """同一五元组缺席超过一个采样周期后再现（临时端口被新连接复用）→ 就地起新段、不跨空窗延展，
+    避免把空窗伪造成 socket 存续期让空窗内 pcap 流误过时间窗匹配（P1-2 B 面）。"""
+    from apkscan.dynamic import socket_attr
+
+    present = {"on": True}
+
+    def fake_capture(extra, serial=None):
+        procfs = extra[-1]
+        if procfs == "/proc/net/tcp":
+            return _socket_line("01") if present["on"] else ""
+        return "" if procfs == "/proc/net/tcp6" else None
+
+    clock = {"t": 100.0}
+    monkeypatch.setattr(capture, "_app_uid", lambda package, serial=None: "10234")
+    monkeypatch.setattr(capture, "_adb_capture", fake_capture)
+    monkeypatch.setattr(capture.time, "time", lambda: clock["t"])
+    sampler = capture._SocketSampler("com.x", tmp_path, interval=0.25, max_observations=10)
+
+    sampler._sample_once()                       # @100.0 出现（旧连接）
+    present["on"] = False
+    clock["t"] = 100.5
+    sampler._sample_once()                        # 缺席
+    present["on"] = True
+    clock["t"] = 200.0
+    sampler._sample_once()                        # @200.0 同五元组复用（gap 100 > 0.5）→ 起新段、重置到 200
+    timeline = sampler.stop()
+
+    assert timeline is not None
+    s = socket_attr.parse_socket_timeline(timeline.read_text(encoding="utf-8"))
+    assert len(s.entries) == 1
+    entry = s.entries[0]
+    # 关键：区间是最近连续段 [200,200]，绝不是跨空窗的假 [100,200]
+    assert entry.first_ts == 200.0 and entry.last_ts == 200.0
+    # 空窗中点 150 的 pcap 流对该 socket 应判「已知时间冲突」，不得因假区间误确证
+    conn = socket_attr.PcapConn(0xA852, first_ts=150.0, last_ts=150.5)
+    assert socket_attr._ts_known_conflict(entry, conn, socket_attr._TIME_TOLERANCE) is True
 
 
 def test_capture_run_includes_uid_snapshot_artifact(monkeypatch, tmp_path):
