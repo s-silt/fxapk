@@ -391,7 +391,7 @@ def _check_ca(
             _NAME_CA,
             False,
             "CA 未确认装入设备信任库（--no-fix 未自动安装；HTTPS 可能只抓密文）",
-            ["# 开启 --fix 自动安装，或参考 docs/dynamic-setup.md 手动装 CA"],
+            ["# 开启 --fix 自动安装，或手动把 CA 装入设备系统信任库"],
         )
     except Exception:
         logger.exception("[doctor] 检查 CA 异常")
@@ -399,7 +399,7 @@ def _check_ca(
             _NAME_CA,
             False,
             "检查 CA 时发生异常（详见日志）",
-            ["# 参考 docs/dynamic-setup.md 手动装 CA"],
+            ["# 手动把 CA 装入设备系统信任库"],
         )
 
 
