@@ -183,8 +183,9 @@ def parse_pcap_bytes(data: bytes) -> PcapSummary:
     flows: dict[tuple, Flow] = {}
     asm = _HelloReassembler()  # 每份 pcap 独立、无模块级态（并行分析器安全）
     qdec = _QuicDecryptor()    # QUIC Initial 解密态（密钥缓存 + CRYPTO 重组），同样每份 pcap 独立
+    diag: dict[str, object] = {}  # 迭代器回传：某记录/块声明字节数超出实际 → 文件中途截断
     try:
-        for ts, linktype, frame in _iter_frames(data):
+        for ts, linktype, frame in _iter_frames(data, diag):
             try:
                 _process_frame(ts, linktype, frame, flows, summ, asm, qdec)
             except Exception:  # noqa: BLE001 - 单包坏不影响其余
@@ -201,6 +202,11 @@ def parse_pcap_bytes(data: bytes) -> PcapSummary:
         if f is not None:
             f.sni.add(sni)
     summ.flows = list(flows.values())
+    if summ.parse_status == "ok" and diag.get("truncated"):
+        # 有效头但文件中途截断（某记录/块声明字节数超出实际）：flows 可能不全——显式标 truncated，
+        # 不当「ok 零/完整流量」，操作员据此知道要重抓（区别于干净零流量或完整解析）。
+        summ.parse_status = "truncated"
+        summ.error = "capture truncated mid-file (a record/block claims more bytes than present)"
     return summ
 
 
@@ -209,7 +215,7 @@ def parse_pcap_bytes(data: bytes) -> PcapSummary:
 # ---------------------------------------------------------------------------
 
 
-def _iter_frames(data: bytes) -> Iterator[tuple[float, int, bytes]]:
+def _iter_frames(data: bytes, diag: dict[str, object] | None = None) -> Iterator[tuple[float, int, bytes]]:
     if len(data) < 24:
         return
     magic = data[:4]
@@ -224,7 +230,7 @@ def _iter_frames(data: bytes) -> Iterator[tuple[float, int, bytes]]:
     elif magic == b"\x4d\x3c\xb2\xa1":
         endian, frac_div = "<", 1e9
     elif magic == b"\x0a\x0d\x0d\x0a":
-        yield from _iter_pcapng(data)
+        yield from _iter_pcapng(data, diag)
         return
     else:
         logger.info("[pcap] 非 pcap/pcapng（magic=%s），跳过", magic.hex())
@@ -236,6 +242,8 @@ def _iter_frames(data: bytes) -> Iterator[tuple[float, int, bytes]]:
         ts_sec, ts_usec_or_nsec, incl, _orig = struct.unpack(endian + "IIII", data[off : off + 16])
         off += 16
         if incl < 0 or off + incl > n:
+            if diag is not None:  # 记录声明字节数超出实际 = 文件中途截断（有效头、非坏 magic）
+                diag["truncated"] = True
             break
         frame = data[off : off + incl]
         off += incl
@@ -263,7 +271,7 @@ def _pcapng_if_tsresol(idb_body: bytes, endian: str) -> float:
     return 1e6
 
 
-def _iter_pcapng(data: bytes) -> Iterator[tuple[float, int, bytes]]:
+def _iter_pcapng(data: bytes, diag: dict[str, object] | None = None) -> Iterator[tuple[float, int, bytes]]:
     """最小 pcapng：按 section 跟踪字节序 + 每接口 linktype/if_tsresol，产出 Enhanced/Simple Packet Block 的帧。"""
     n = len(data)
     if n < 12:
@@ -277,12 +285,16 @@ def _iter_pcapng(data: bytes) -> Iterator[tuple[float, int, bytes]]:
         # （pcapng 允许多 section 用不同字节序；旧代码只在首个 SHB 判一次，后续异序 section 被误解或停止）。
         if data[off : off + 4] == b"\x0a\x0d\x0d\x0a":
             if off + 12 > n:
+                if diag is not None:
+                    diag["truncated"] = True
                 break
             endian = "<" if data[off + 8 : off + 12] == b"\x4d\x3c\x2b\x1a" else ">"
             linktypes = []
             tsresols = []
         btype, blen = struct.unpack(endian + "II", data[off : off + 8])
         if blen < 12 or off + blen > n:
+            if diag is not None and off + blen > n:  # 块长越界=中途截断（blen<12 是坏块结构，非截断，不误标）
+                diag["truncated"] = True
             break
         body = data[off + 8 : off + blen - 4]
         if btype == 0x00000001:  # IDB: linktype(2) reserved(2) snaplen(4) options...

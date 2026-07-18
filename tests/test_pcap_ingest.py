@@ -361,6 +361,15 @@ def test_parse_status_flags_truncated_header() -> None:
     assert trunc.parse_status == "unparseable" and trunc.error
 
 
+def test_parse_status_flags_mid_file_truncation() -> None:
+    """★回归（codex 第3轮复核）：有效全局头但某记录声明字节数超出实际（文件中途截断）→ 标 truncated，
+    不当 ok 零/完整流量——操作员据此知道要重抓（而非误判抓到零业务流量）。"""
+    header = struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 1)  # 经典 pcap 全局头（24B）
+    rec = struct.pack("<IIII", 1_700_000_000, 0, 1000, 1000) + b"\x00" * 4  # 记录头声明 incl=1000，实际只跟 4B
+    summ = pcap_ingest.parse_pcap_bytes(header + rec)
+    assert summ.parse_status == "truncated" and summ.error
+
+
 def test_iter_pcapng_rejects_out_of_range_interface_id() -> None:
     """★回归（codex 复核 P1）：非法 EPB interface_id 越界须跳过该块，不借用接口 0 的 linktype/tsresol 误解。"""
     ng = _pcapng_one_epb(">", 6, 1_000_000_000, if_id=5)  # 只声明 1 个接口(0)，if_id=5 越界
