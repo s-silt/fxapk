@@ -178,9 +178,14 @@ def _looks_ciphertext(value: str) -> bool:
         return False
     if "://" in s or s.startswith(_NON_CIPHERTEXT_PREFIXES):
         return False
-    if _B64_RE.match(s) or _HEX_RE.match(s):
-        # 含 '/' 的（类路径/文件路径也落 base64 字符类）须熵够高才算密文；不含 '/' 的定长 hex/base64 直接算。
-        return "/" not in s or _entropy(s) >= 4.0
+    if _HEX_RE.match(s):
+        return True  # 定长 hex 串是二进制/密文；标识符不会全 hex
+    if _B64_RE.match(s):
+        # ★真 base64 密文=随机字节编码，几乎必含**数字或 +/=**；纯字母 camelCase 标识符（如
+        #   getUserDisplayNameAVChatKit / 类路径 com/google/...）落 base64 字母表但无此特征、且熵偏低——
+        #   两道一起排除（sample案 showMethodErrorToast("方法名") 那类误报）。
+        has_binary_hint = any(c.isdigit() for c in s) or "+" in s or "=" in s
+        return has_binary_hint and _entropy(s) >= 4.0
     return bool(infra.looks_like_encoding(s))
 
 
