@@ -183,7 +183,7 @@ def _looks_ciphertext(value: str) -> bool:
     if _B64_RE.match(s):
         # ★真 base64 密文=随机字节编码，几乎必含**数字或 +/=**；纯字母 camelCase 标识符（如
         #   getUserDisplayNameAVChatKit / 类路径 com/google/...）落 base64 字母表但无此特征、且熵偏低——
-        #   两道一起排除（sample案 showMethodErrorToast("方法名") 那类误报）。
+        #   两道一起排除（某混淆样本里 showMethodErrorToast("方法名") 那类误报）。
         has_binary_hint = any(c.isdigit() for c in s) or "+" in s or "=" in s
         return has_binary_hint and _entropy(s) >= 4.0
     return bool(infra.looks_like_encoding(s))
