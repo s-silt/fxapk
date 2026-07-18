@@ -12,6 +12,8 @@ from urllib.parse import urlsplit
 
 import requests
 
+from apkscan.enrichers import _http
+
 from apkscan.core.closure import SOURCE_STATUSES
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
@@ -236,7 +238,8 @@ class _PassiveLookupEnricher(BaseEnricher, ABC):
     bypass_system_proxy: bool = False
 
     def __init__(self, session: Any | None = None) -> None:
-        self._http = session if session is not None else requests.Session()
+        # 默认用有界 session（响应体硬帽，防被劫持/异常源返回巨型 JSON 撑爆内存）；注入的假 session 不受影响。
+        self._http = session if session is not None else _http.CappedSession()
         if self.bypass_system_proxy:
             self._http.trust_env = False  # 忽略 HTTP(S)_PROXY / 系统代理 → 直连（境内源必须）
 

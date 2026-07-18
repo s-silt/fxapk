@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import posixpath
 import re
+import zipfile
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, TypeGuard
 
@@ -329,6 +330,41 @@ def _sample_so(data: bytes, window: int) -> bytes:
     return data[:window] + data[mid : mid + window] + data[-window:]
 
 
+def _discard(fp: "object", n: int) -> None:
+    """从 forward-only 流丢弃 n 字节（分块读，内存 O(chunk)——压缩条目不可 seek，只能读穿）。"""
+    remaining = max(0, n)
+    while remaining > 0:
+        chunk = fp.read(min(remaining, 1 << 16))  # type: ignore[attr-defined]
+        if not chunk:
+            break
+        remaining -= len(chunk)
+
+
+def _read_so_windows(zip_path: str, entry: str, window: int) -> bytes | None:
+    """流式读 zip 内 entry 的 head/mid/tail 三窗，内存 O(window)——不把 ≤500MB 大 .so 整解压进内存
+    （只为取 3 个小窗做字符串扫描）。窗口口径与 :func:`_sample_so` 一致。坏/缺/超上限 → None（调用方回退整读）。"""
+    from apkscan.core.apk import _MAX_DECOMPRESSED_FILE_BYTES  # 复用同口径 zip 炸弹上限
+
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            size = zf.getinfo(entry).file_size
+            if size > _MAX_DECOMPRESSED_FILE_BYTES:  # 同 read_file 的前置拦截：超上限不解压
+                return None
+            with zf.open(entry) as fp:
+                if size <= 3 * window:  # 小 .so 直接全读（本就 ≤3 窗，与 _sample_so 返回 data 等价）
+                    return fp.read(size)
+                head = fp.read(window)
+                mid_start = size // 2
+                _discard(fp, mid_start - len(head))  # 读穿到 mid
+                mid = fp.read(window)
+                _discard(fp, (size - window) - (mid_start + len(mid)))  # 读穿到 tail
+                tail = fp.read(window)
+                return head + mid + tail
+    except Exception:
+        logger.debug("[so] 流式三窗读失败，回退整读：%s!%s", zip_path, entry, exc_info=True)
+        return None
+
+
 def collect_app_so_string_blobs(
     ctx: "AnalysisContext",
     analyzer_name: str,
@@ -343,16 +379,24 @@ def collect_app_so_string_blobs(
     跳过、绝不炸整个 analyze。
     """
     blobs: list[tuple[str, str]] = []
+    zip_path = getattr(ctx, "apk_path", "") or ""
     for path in app_so_paths(ctx, analyzer_name, max_libs=max_libs):
+        # 优先流式三窗读（内存 O(window)，不把大 .so 整解压）；无 apk_path / 流式读失败 → 回退整读+采样。
+        sample = _read_so_windows(zip_path, path, window) if zip_path else None
+        if sample is None:
+            try:
+                data = ctx.read_file(path)
+            except Exception:
+                logger.exception("[%s] 读取 .so 失败：%s", analyzer_name, path)
+                continue
+            if not data:
+                continue
+            try:
+                sample = _sample_so(data, window)
+            except Exception:
+                logger.exception("[%s] 采样 .so 失败：%s", analyzer_name, path)
+                continue
         try:
-            data = ctx.read_file(path)
-        except Exception:
-            logger.exception("[%s] 读取 .so 失败：%s", analyzer_name, path)
-            continue
-        if not data:
-            continue
-        try:
-            sample = _sample_so(data, window)
             blob = b"\n".join(_SO_STRING_RE.findall(sample)).decode("ascii", "replace").lower()
         except Exception:
             logger.exception("[%s] 提取 .so 字符串失败：%s", analyzer_name, path)

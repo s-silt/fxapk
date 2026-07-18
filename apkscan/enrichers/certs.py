@@ -34,7 +34,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-import requests
+
+from apkscan.enrichers import _http
 
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
@@ -208,7 +209,7 @@ class CertsEnricher(BaseEnricher):
         _throttle()  # 礼貌限速：相邻请求间隔下限（进程级全局闸）
         # ★ 传**字面** % 通配（匹配 *.{domain}）；requests 会自动编码成 %25 → 最终请求 ?q=%25.{domain}。
         #   切勿把这里改成 "%25.{domain}"，否则被二次编码成 %2525（错误）。docstring 示例是已编码的 wire 形态。
-        resp = requests.get(
+        resp = _http.capped_get(
             CRTSH_URL,
             params={"q": f"%.{domain}", "output": "json"},
             timeout=CRTSH_TIMEOUT,

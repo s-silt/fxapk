@@ -93,7 +93,7 @@ def _ep(value: str, kind: str) -> Endpoint:
 
 def test_disabled_without_key(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeRequests({})
-    monkeypatch.setattr(sh_mod, "requests", fake)
+    monkeypatch.setattr(sh_mod._http, "capped_get", fake.get)
     res = ShodanEnricher().enrich(_ep("45.33.32.156", "ip"))
     assert res.ok is False
     assert not fake.calls  # opt-in 未开，绝不触网
@@ -102,7 +102,7 @@ def test_disabled_without_key(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_ip_host_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FXAPK_SHODAN_KEY", "testkey")
     fake = _FakeRequests({"/shodan/host/45.33.32.156": (200, _HOST_PAYLOAD)})
-    monkeypatch.setattr(sh_mod, "requests", fake)
+    monkeypatch.setattr(sh_mod._http, "capped_get", fake.get)
     res = ShodanEnricher().enrich(_ep("45.33.32.156", "ip"))
     assert res.ok is True
     d = res.data
@@ -122,7 +122,7 @@ def test_domain_resolves_then_host(monkeypatch: pytest.MonkeyPatch) -> None:
         "/dns/resolve": (200, {"evil.example": "45.33.32.156"}),
         "/shodan/host/45.33.32.156": (200, _HOST_PAYLOAD),
     })
-    monkeypatch.setattr(sh_mod, "requests", fake)
+    monkeypatch.setattr(sh_mod._http, "capped_get", fake.get)
     res = ShodanEnricher().enrich(_ep("evil.example", "domain"))
     assert res.ok is True
     assert res.data["country"] == "United States"
@@ -133,7 +133,7 @@ def test_domain_resolves_then_host(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_host_404_miss_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FXAPK_SHODAN_KEY", "testkey")
     fake = _FakeRequests({})  # 全 404 → 库中无记录
-    monkeypatch.setattr(sh_mod, "requests", fake)
+    monkeypatch.setattr(sh_mod._http, "capped_get", fake.get)
     e = ShodanEnricher()
     res = e.enrich(_ep("1.2.3.4", "ip"))
     assert res.ok is True  # 查无记录是 ok=True 空结果（非错误）
@@ -146,7 +146,7 @@ def test_host_404_miss_cached(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_network_error_ok_false_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FXAPK_SHODAN_KEY", "testkey")
     fake = _FakeRequests({"/shodan/host/45.33.32.156": (500, {})})  # 500 → raise_for_status 抛
-    monkeypatch.setattr(sh_mod, "requests", fake)
+    monkeypatch.setattr(sh_mod._http, "capped_get", fake.get)
     e = ShodanEnricher()
     res = e.enrich(_ep("45.33.32.156", "ip"))
     assert res.ok is False
@@ -166,7 +166,7 @@ def test_network_error_never_exposes_api_key(
         def get(*args: object, **kwargs: object) -> _Resp:
             raise RuntimeError(f"request failed: https://api.example.test/?key={secret}")
 
-    monkeypatch.setattr(sh_mod, "requests", _LeakyRequests())
+    monkeypatch.setattr(sh_mod._http, "capped_get", _LeakyRequests().get)
     with caplog.at_level(logging.DEBUG):
         result = ShodanEnricher().enrich(_ep("198.51.100.10", "ip"))
 
@@ -178,7 +178,7 @@ def test_network_error_never_exposes_api_key(
 def test_cache_hit_skips_network(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FXAPK_SHODAN_KEY", "testkey")
     fake = _FakeRequests({"/shodan/host/45.33.32.156": (200, _HOST_PAYLOAD)})
-    monkeypatch.setattr(sh_mod, "requests", fake)
+    monkeypatch.setattr(sh_mod._http, "capped_get", fake.get)
     e = ShodanEnricher()
     e.enrich(_ep("45.33.32.156", "ip"))
     n = len(fake.calls)
