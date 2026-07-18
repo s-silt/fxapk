@@ -174,6 +174,12 @@ def parse_pcap_bytes(data: bytes) -> PcapSummary:
         summ.parse_status = "unparseable"
         summ.error = f"unrecognized magic {data[:4].hex()}" if data else "empty input"
         return summ
+    # 有效 magic 但连头都放不下 = 截断文件：也标失败，别当「零流量」（经典全局头 24B、pcapng 最小 SHB 28B）。
+    min_len = 28 if data[:4] == b"\x0a\x0d\x0d\x0a" else 24
+    if len(data) < min_len:
+        summ.parse_status = "unparseable"
+        summ.error = f"truncated header: {len(data)} bytes (< {min_len})"
+        return summ
     flows: dict[tuple, Flow] = {}
     asm = _HelloReassembler()  # 每份 pcap 独立、无模块级态（并行分析器安全）
     qdec = _QuicDecryptor()    # QUIC Initial 解密态（密钥缓存 + CRYPTO 重组），同样每份 pcap 独立
@@ -286,10 +292,11 @@ def _iter_pcapng(data: bytes) -> Iterator[tuple[float, int, bytes]]:
         elif btype == 0x00000006:  # EPB: interface_id(4) ts_hi(4) ts_lo(4) caplen(4) origlen(4) data
             if len(body) >= 20:
                 if_id, ts_hi, ts_lo, caplen, _orig = struct.unpack(endian + "IIIII", body[:20])
-                frame = body[20 : 20 + caplen]
-                lt = linktypes[if_id] if if_id < len(linktypes) else (linktypes[0] if linktypes else 1)
-                div = tsresols[if_id] if if_id < len(tsresols) else (tsresols[0] if tsresols else 1e6)
-                yield (((ts_hi << 32) | ts_lo) / div, lt, frame)
+                # 非法 interface_id（越界或尚无 IDB）= malformed 块：跳过，不借用接口 0 的 linktype/tsresol 误解。
+                # linktypes/tsresols 逐 IDB 成对追加，len 一致，故 if_id 合法即两者都可安全索引。
+                if if_id < len(linktypes):
+                    frame = body[20 : 20 + caplen]
+                    yield (((ts_hi << 32) | ts_lo) / tsresols[if_id], linktypes[if_id], frame)
         elif btype == 0x00000003:  # Simple Packet Block：无时间戳 → 0.0（下游按 <=0 = 未知处理，不当真时刻）
             lt = linktypes[0] if linktypes else 1
             if len(body) >= 4:
@@ -1511,6 +1518,18 @@ def to_runtime_endpoints(summary: PcapSummary) -> list[Endpoint]:
     return endpoints
 
 
+#: markdown 结构/行内语法字符：嵌不可信字段前逐字符反斜杠转义（含反引号，堵逃逸 inline-code 注入 HTML/链接）。
+#: 无正则实现——本模块把 `re` 用作 RemoteEndpoint 循环变量，不引入 re 模块避免撞名。
+_MD_SPECIAL_CHARS = frozenset("\\`*_{}[]()#+-.!|>&<~")
+
+
+def _md_escape(value: object) -> str:
+    """markdown 台账里嵌可能含不可信内容的字段（如 error 里的文件路径/解析异常串）前转义：折叠空白 +
+    反斜杠转义 markdown 结构/行内语法字符（含反引号），防被渲染成结构/链接或逃逸注入原始 HTML。"""
+    collapsed = " ".join(str(value).split())  # 折叠所有空白（含换行）为单空格，堵伪造新行/标题
+    return "".join("\\" + ch if ch in _MD_SPECIAL_CHARS else ch for ch in collapsed)
+
+
 def build_ledger_md(summary: PcapSummary) -> str:
     """把 pcap 线索聚成调证台账（markdown），按 IP 接入节点 / 域名 分组。"""
     leads = to_report_leads(summary)
@@ -1521,9 +1540,10 @@ def build_ledger_md(summary: PcapSummary) -> str:
         "",
     ]
     if summary.parse_status != "ok":
+        # error 可能含文件路径/解析异常串（潜在不可信）→ 转义后再嵌 markdown，别自己开注入面（同 probe-leads 的教训）。
         lines += [
-            f"> ⚠ pcap 解析未成功（{summary.parse_status}：{summary.error}）——空结果**不代表零流量**，"
-            "请核对 pcap 文件完整性/格式后重抓。",
+            f"> ⚠ pcap 解析未成功（{_md_escape(summary.parse_status)}：{_md_escape(summary.error)}）——"
+            "空结果**不代表零流量**，请核对 pcap 文件完整性/格式后重抓。",
             "",
         ]
     lines += [

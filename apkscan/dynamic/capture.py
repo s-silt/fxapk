@@ -203,6 +203,9 @@ def _build_capture_quality(
             0 if intercept_observed and not business_keys else len(mitm_endpoints),
         ),
         "target_attributed_count": target_count,
+        # floor 解析状态入结构化质量：让 closure/case-close 区分「解析/采集失败」与「真实零业务流量」
+        # （二者都空 flows，但前者要重抓、后者是真无业务流量）。None=无 floor pcap。
+        "floor_parse_status": getattr(floor_summary, "parse_status", "ok") if floor_summary is not None else "absent",
     }
     return evaluate_capture_quality(raw)
 
