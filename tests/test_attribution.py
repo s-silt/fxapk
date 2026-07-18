@@ -359,6 +359,47 @@ def test_build_endpoint_attribution_domain_per_ip_never_collapses() -> None:
     assert by_ip["2.2.2.2"]["edge_provider"]["name"] == "Cloudflare"
 
 
+def test_build_endpoint_attribution_domain_absorbs_resolved_ip_enrichment() -> None:
+    """★P1-3：域名端点吸收 case-close 逐 IP 富化（resolved_ip_enrichment[ip] 的 ip_rdap 资源登记方）→
+    顶层五层的 resource_holder 有值而非恒 unknown；域名级 cname 与 hosting asn 兜底不退化。"""
+    att = A.build_endpoint_attribution("domain", "pay.example.com", {
+        "dns": {
+            "ips": ["45.76.100.10"],
+            "hosting": [{"ip": "45.76.100.10", "asn": "AS20473", "org": "AS-CHOOPA", "country": "US"}],
+            "cname": ["pay.example.com.cdn.cloudflare.net"],
+        },
+        "resolved_ip_enrichment": {
+            "45.76.100.10": {"ip_rdap": {"netname": "VULTR-NET", "org": "The Constant Company", "country": "US"}},
+        },
+    })
+    assert att is not None and len(att["ips"]) == 1
+    ip_layer = att["ips"][0]
+    assert ip_layer["resource_holder"]["name"] == "VULTR-NET"     # 来自 resolved 的 ip_rdap（域名分支原本不读）
+    assert ip_layer["origin_network"]["asn"] == 20473            # hosting 兜底：origin 层未退化
+    assert ip_layer["edge_provider"]["name"] == "Cloudflare"     # 域名级 cname 注入 edge 未丢
+
+
+def test_build_endpoint_attribution_domain_resolved_asn_error_falls_back_to_hosting() -> None:
+    """★P1-3 兜底（Codex 复审）：resolved 的 asn 是失败 payload({"error":...}，富化失败也写 asn 键)时，
+    按"有效字段"而非"键存在"回落 dns.hosting 的 ASN → origin/hosting 层不退化；resource_holder 仍取 ip_rdap。"""
+    att = A.build_endpoint_attribution("domain", "pay.example.com", {
+        "dns": {
+            "ips": ["45.76.100.10"],
+            "hosting": [{"ip": "45.76.100.10", "asn": "AS20473", "org": "AS-CHOOPA", "country": "US"}],
+        },
+        "resolved_ip_enrichment": {
+            "45.76.100.10": {
+                "ip_rdap": {"netname": "VULTR-NET", "org": "The Constant Company", "country": "US"},
+                "asn": {"error": "Timeout contacting ip-api"},  # 富化失败的控制字段，非有效 ASN
+            },
+        },
+    })
+    assert att is not None
+    ip_layer = att["ips"][0]
+    assert ip_layer["resource_holder"]["name"] == "VULTR-NET"  # ip_rdap 仍生效
+    assert ip_layer["origin_network"]["asn"] == 20473          # asn={"error"} 不阻断 hosting 兜底
+
+
 def test_build_endpoint_attribution_domain_hosting_missing_degrades() -> None:
     """域名 hosting 缺（限速）但有 ips+cname → 退化：origin unknown，但 CNAME 仍识别 edge。"""
     att = A.build_endpoint_attribution("domain", "x.com", {

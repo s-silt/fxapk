@@ -70,8 +70,14 @@ def _target_rank(endpoint: Endpoint, confidence_rank: int) -> tuple[int, int, in
     )
 
 
-def select_targets(report: Report, max_targets: int = 6) -> list[Endpoint]:
-    """Select suspicious domain/IP leads in stable runtime-first order."""
+def _select_targets_with_stats(report: Report, max_targets: int) -> tuple[list[Endpoint], dict[str, object]]:
+    """Order suspicious domain/IP leads (runtime-first) and split at ``max_targets``.
+
+    Returns the selected endpoints plus a selection-stats mapping mirroring
+    ``resolved_ip_selection`` so top-level target truncation is never silent: the
+    caller records ``candidate_total``/``truncated``/``dropped`` and downgrades
+    closure to partial when advisable candidates were dropped past the limit.
+    """
     if max_targets <= 0:
         raise ValueError("max_targets must be greater than zero")
 
@@ -92,7 +98,7 @@ def select_targets(report: Report, max_targets: int = 6) -> list[Endpoint]:
         candidates.append((endpoint, lead_rank[key]))
 
     candidates.sort(key=lambda item: _target_rank(item[0], item[1]))
-    selected: list[Endpoint] = []
+    ordered: list[Endpoint] = []
     seen: set[tuple[str, str]] = set()
     for endpoint, _rank in candidates:
         value = endpoint.value.lower() if endpoint.kind == "domain" else endpoint.value
@@ -100,10 +106,23 @@ def select_targets(report: Report, max_targets: int = 6) -> list[Endpoint]:
         if key in seen:
             continue
         seen.add(key)
-        selected.append(endpoint)
-        if len(selected) >= max_targets:
-            break
-    return selected
+        ordered.append(endpoint)
+
+    selected = ordered[:max_targets]
+    dropped = ordered[max_targets:]
+    stats: dict[str, object] = {
+        "candidate_total": len(ordered),
+        "selected": len(selected),
+        "limit": max_targets,
+        "truncated": len(dropped),
+        "dropped": [endpoint.value for endpoint in dropped],
+    }
+    return selected, stats
+
+
+def select_targets(report: Report, max_targets: int = 6) -> list[Endpoint]:
+    """Select suspicious domain/IP leads in stable runtime-first order."""
+    return _select_targets_with_stats(report, max_targets)[0]
 
 
 def _non_negative_int(value: object) -> int:
@@ -964,7 +983,7 @@ def close_report(
     from apkscan.core.enrichment import enrich_selected_targets
     from apkscan.core.registry import discover_enrichers
 
-    selected = select_targets(report, config.max_targets)
+    selected, target_selection = _select_targets_with_stats(report, config.max_targets)
     available = list(enrichers) if enrichers is not None else list(discover_enrichers())
     typed_enrichers = [enricher for enricher in available if hasattr(enricher, "enrich")]
     for endpoint in selected:
@@ -982,12 +1001,15 @@ def close_report(
                 include_case_close=True,
             )
         _ensure_source_status_coverage(endpoint, typed_enrichers, config)
-        _set_attribution(endpoint)
         if endpoint.kind == "domain":
             _enrich_resolved_ips(endpoint, typed_enrichers, config)
+        # 顶层归因在逐 IP 富化之后再建，才能吸收 resolved_ip_enrichment（P1-3：否则文书/摘要读顶层恒 unknown）。
+        _set_attribution(endpoint)
 
     targets = [assemble_target_closure(endpoint) for endpoint in selected]
-    closure = evaluate_closure(report, targets, require_dynamic=config.require_dynamic)
+    closure = evaluate_closure(
+        report, targets, require_dynamic=config.require_dynamic, target_selection=target_selection
+    )
     report.meta["closure"] = closure
     _populate_network_attribution(report)
     _update_target_leads(report, targets)
@@ -1037,6 +1059,7 @@ def evaluate_closure(
     targets: Sequence[Mapping[str, object]],
     *,
     require_dynamic: bool | None,
+    target_selection: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Calculate complete/partial/failed from explicit static, dynamic, and target gates."""
     checks: list[dict[str, object]] = []
@@ -1121,6 +1144,17 @@ def evaluate_closure(
             if failed_sources:
                 gaps.append(f"{value}: source lookup incomplete ({', '.join(sorted(failed_sources))})")
 
+    selection = _mapping(target_selection)
+    truncated = _non_negative_int(selection.get("truncated"))
+    if truncated > 0:
+        dropped = selection.get("dropped")
+        dropped_values = [str(value) for value in dropped] if isinstance(dropped, (list, tuple)) else []
+        detail = f" ({', '.join(dropped_values)})" if dropped_values else ""
+        gaps.append(
+            f"investigation target list truncated: {truncated} advisable candidate(s) beyond "
+            f"max_targets={_non_negative_int(selection.get('limit'))} not evaluated{detail}"
+        )
+
     gaps = list(dict.fromkeys(gaps))
     if fatal:
         status = CLOSURE_FAILED
@@ -1134,6 +1168,7 @@ def evaluate_closure(
         "checks": checks,
         "targets": [dict(target) for target in targets],
         "source_summary": _source_summary(targets),
+        "target_selection": dict(selection),
         "gaps": gaps,
         "next_actions": [f"Resolve closure gap: {gap}" for gap in gaps],
     }

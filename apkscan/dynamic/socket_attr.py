@@ -463,6 +463,20 @@ def _ts_overlap(entry: SocketEntry, conn: PcapConn, tol: float) -> bool:
     return (e1 + tol) >= c0 and (c1 + tol) >= e0
 
 
+def _ts_known_conflict(entry: SocketEntry, conn: PcapConn, tol: float) -> bool:
+    """socket 观测区间与 pcap 流区间是否**已知**不相交（两侧都有时间戳、加容差后仍不重叠）。
+
+    任一侧无时间戳 → False（未知，不能据此否定）。仅当四个时间戳都在且区间明确错开时才 True——
+    这才是「已知冲突」，用于把「一条早期一次性 socket 观测凭临时端口复用被误确证为一条晚得多的 pcap 流」
+    从 confirmed 降级（本地临时端口会被后续连接复用，端口相同 + 时间已知错开 = 巧合，不是同一条连接）。
+    """
+    e0, e1 = entry.first_ts, entry.last_ts
+    c0, c1 = conn.first_ts, conn.last_ts
+    if e0 is None or e1 is None or c0 is None or c1 is None:
+        return False
+    return not ((e1 + tol) >= c0 and (c1 + tol) >= e0)
+
+
 def attribute_connections(
     endpoints: list[PcapEndpoint],
     sockets: UidSockets,
@@ -476,7 +490,8 @@ def attribute_connections(
     尽量消解到具体连接。四级 ``attribution``：
 
     - ``confirmed``：某 pcap 连接的本地端口在 socket 表精确命中**单一** UID（time_window 命中再加分）——
-      该连接由五元组唯一定位到该 UID。
+      该连接由五元组唯一定位到该 UID。**socket 与 pcap 时间戳都在且区间已知不相交的匹配不算数**
+      （本地临时端口会被后续连接复用，端口相同但时间已知错开 = 巧合，降级 probable/ambiguous）。
     - ``probable``：远端仅一个 UID 连、但无本地端口精确确证（如仅窗口末快照、pcap 无连接明细）。
     - ``ambiguous``：远端多 UID，本地端口/时间窗仍无法收敛到单一 winner——给带 ``score`` 的 candidates，不强选目标。
     - ``unattributed``：pcap 有该接入节点，但 socket 表无任何对应记录——**显式记录**而非静默丢弃。
@@ -499,15 +514,21 @@ def attribute_connections(
         for e in hits:
             by_uid.setdefault(e.uid, e)
         target_among = tgt is not None and tgt in by_uid
-        # ① 本地临时端口精确匹配：逐 pcap 连接用 by_conn（同 proto 族）定位 socket，按 UID 汇总时间窗命中。
+        # ① 本地临时端口精确匹配：逐 pcap 连接用 by_conn（同 proto 族）定位 socket，按 UID 汇总时间命中。
+        #   区分三态——「时间重叠」加分、「时间未知」不否定、「时间已知冲突」（端口复用巧合）不算有效确证。
         precise: dict[int, dict] = {}
         for conn in ep.conns:
             for e in sockets.by_conn.get((fam, conn.local_port, ep.remote_ip, ep.remote_port), []):
-                rec = precise.setdefault(e.uid, {"entry": e, "time_hits": 0})
+                rec = precise.setdefault(e.uid, {"entry": e, "time_hits": 0, "nonconflict_hits": 0})
                 if _ts_overlap(e, conn, time_tolerance):
                     rec["time_hits"] += 1
-        if len(precise) == 1:  # 本地端口唯一定位到单一 UID → confirmed
-            uid, rec = next(iter(precise.items()))
+                    rec["nonconflict_hits"] += 1
+                elif not _ts_known_conflict(e, conn, time_tolerance):
+                    rec["nonconflict_hits"] += 1
+        # 仅"时间重叠"或"时间未知"的本地端口匹配才算有效确证；某 UID 的全部匹配都是已知时间冲突 → 不得作 winner。
+        precise_valid = {uid: rec for uid, rec in precise.items() if rec["nonconflict_hits"] > 0}
+        if len(precise_valid) == 1:  # 本地端口唯一定位到单一 UID（且非已知时间冲突）→ confirmed
+            uid, rec = next(iter(precise_valid.items()))
             e = rec["entry"]
             matched_by = ["remote_ip_port", "local_port"]
             score = 0.7
@@ -527,8 +548,8 @@ def attribute_connections(
                 "matched_by": matched_by,
             }
             continue
-        # ② 无本地端口命中 + 远端仅一个 UID → probable（远端唯一但未经本地端口确证）。
-        if not precise and len(by_uid) == 1:
+        # ② 无有效本地端口确证（无命中，或命中均为已知时间冲突）+ 远端仅一个 UID → probable。
+        if not precise_valid and len(by_uid) == 1:
             uid, e = next(iter(by_uid.items()))
             out[key] = {
                 "uid": uid,
@@ -545,7 +566,7 @@ def attribute_connections(
         candidates: list[dict] = []
         for u, e in by_uid.items():
             conns = sum(1 for h in hits if h.uid == u)
-            rec = precise.get(u)
+            rec = precise_valid.get(u)
             score = 0.2 + 0.2 * (conns / total if total else 0.0)
             if rec:
                 score += 0.4
@@ -561,7 +582,7 @@ def attribute_connections(
             })
         candidates.sort(key=lambda c: (-c["score"], -c["connections"], c["uid"]))
         matched_by = ["remote_ip_port"]
-        if precise:
+        if precise_valid:
             matched_by.append("local_port")
         out[key] = {
             "attribution": "ambiguous",
