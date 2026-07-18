@@ -116,6 +116,100 @@ def test_bad_input() -> None:
     assert scan_java_source("no methods here just text", "loc") == []
 
 
+# --------------------------------------------------------------------------- #
+# 复审回归：掩码 / 匿名类 / 证书-路径-URL 误报 / AES 常量表
+# --------------------------------------------------------------------------- #
+def test_comment_pseudo_method_does_not_create_phantom_scope() -> None:
+    """复审 P2：注释里的 name(){ 曾被当方法起点、幻影作用域吞真方法致跨方法误绑。掩码后 → 0 链。"""
+    src = f'''
+    public class C {{
+        /* legacy (disabled):
+        private String decode(String s) {{
+        */
+        private void store() {{ String data = "{_SECRET}"; }}
+        private void net() {{ byte[] out = cipher.doFinal(key); }}
+    }}
+    '''
+    assert scan_java_source(src, "loc") == []  # store 有密文无解密、net 有解密无密文，不跨方法误绑
+
+
+def test_line_comment_pseudo_method_masked() -> None:
+    src = f'''
+    // TODO restore: init(ctx) {{
+    void store() {{ String d = "{_SECRET}"; }}
+    void net() {{ cipher.doFinal(k); }}
+    '''
+    assert scan_java_source(src, "loc") == []
+
+
+def test_anonymous_class_field_initializer_not_phantom_method() -> None:
+    """复审 P2：字段初始化器匿名类 new X(){ 曾被当伪方法（名=类型名）、误并兄弟方法。前邻 new 排除后 → 0 链。"""
+    src = f'''
+    public class C {{
+        private WebViewClient client = new WebViewClient() {{
+            public void onPageFinished(WebView v, String u) {{ String d = "{_SECRET}"; store(d); }}
+            private void other() {{ byte[] o = cipher.doFinal(k); }}
+        }};
+    }}
+    '''
+    chains = scan_java_source(src, "loc")
+    assert chains == []  # onPageFinished 有密文无解密、other 有解密无密文；无伪方法误绑
+    assert not any(c.method == "WebViewClient" for c in chains)
+
+
+def test_embedded_certificate_not_flagged_as_ciphertext() -> None:
+    """复审 P2：内嵌证书(MII…)+Base64.decode+sink 曾产完整假链。MII 前缀免疫后 → 0 链。"""
+    cert = "MIIDdzCCAl8gAwIBAgIERnd0aGlzSXNBRmFrZUNlcnRCYXNlNjRTdHJpbmcxMjM0NTY3ODkw"
+    src = f'''
+    public java.net.URLConnection load() {{
+        String certB64 = "{cert}";
+        byte[] der = Base64.decode(certB64, 0);
+        return new URL(base).openConnection();
+    }}
+    '''
+    assert scan_java_source(src, "loc") == []
+
+
+def test_class_path_and_url_not_ciphertext() -> None:
+    """复审 P2：类路径(含 / 落 base64 字符类)/URL 曾被判密文。补熵下限 + 排 :// 后不判密文。"""
+    assert _looks_ciphertext("com/google/android/gms/common/api/internal/Handler") is False  # 低熵路径
+    assert _looks_ciphertext("https://api.example.com/user/AbCdEf123456/profile") is False  # URL
+    # 端到端：类路径 + Base64.decode 同方法 → 不绑链
+    src = '''
+    public void reflect() {
+        String cls = "com/google/android/gms/common/api/internal/HandlerImpl";
+        Object x = Base64.decode(cls, 0);
+    }
+    '''
+    assert scan_java_source(src, "loc") == []
+
+
+def test_algorithm_constant_table_not_a_decrypt_call() -> None:
+    """复审 nit：仅存放 "AES/CBC/PKCS5Padding" 常量的方法曾被 AES/ 误判有解密。移除 AES/ 后 → 0 链。"""
+    src = f'''
+    public String algoTable() {{
+        String algo = "AES/CBC/PKCS5Padding";
+        String seed = "{_SECRET}";
+        return algo + seed;
+    }}
+    '''
+    assert scan_java_source(src, "loc") == []
+
+
+def test_pure_base64_c2_config_still_chains() -> None:
+    """正向回归：真 base64 密文（无 / 高熵、非免疫前缀）+ 解密 仍绑链——修误报没误杀真阳性。"""
+    b64 = "QUFCQkNDRERFRUZHSElKS0xNTk9QUVJTVFVWV1hZWjEyMzQ1Njc4OQ=="
+    src = f'''
+    public String c2() {{
+        String data = "{b64}";
+        byte[] p = cipher.doFinal(Base64.decode(data, 0));
+        return new String(p);
+    }}
+    '''
+    chains = scan_java_source(src, "loc")
+    assert len(chains) == 1 and chains[0].secret == b64
+
+
 def test_jadx_scan_java_emits_string_chain_finding(tmp_path) -> None:
     """jadx 集成：喂 .java 给 _scan_java（不跑真 jadx），产 STRING-CHAIN-DECRYPT Finding 且诚实标注。"""
     from apkscan.analyzers.jadx import _FINDING_STRING_CHAIN, JadxAnalyzer
