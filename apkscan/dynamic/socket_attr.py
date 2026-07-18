@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import socket
 from dataclasses import dataclass, field, replace
@@ -454,24 +455,30 @@ class PcapEndpoint:
 _TIME_TOLERANCE = 2.0
 
 
+def _known_ts(v: float | None) -> float | None:
+    """有效观测时刻：有限正数才算已知。None / <=0（0.0 是 pcap flow / pcapng SPB 的"未知"哨兵）/
+    NaN / inf → None——避免把 epoch 0 之类的占位当真时刻，与真实 socket 时钟(约 1.7e9)误判「已知冲突」。"""
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 and math.isfinite(v) else None
+
+
 def _ts_overlap(entry: SocketEntry, conn: PcapConn, tol: float) -> bool:
-    """socket 观测区间与 pcap 流时间区间是否重叠（含容差）。任一侧无时间戳 → False（无法佐证，不否定）。"""
-    e0, e1 = entry.first_ts, entry.last_ts
-    c0, c1 = conn.first_ts, conn.last_ts
+    """socket 观测区间与 pcap 流时间区间是否重叠（含容差）。任一侧时刻未知 → False（无法佐证，不否定）。"""
+    e0, e1 = _known_ts(entry.first_ts), _known_ts(entry.last_ts)
+    c0, c1 = _known_ts(conn.first_ts), _known_ts(conn.last_ts)
     if e0 is None or e1 is None or c0 is None or c1 is None:
         return False
     return (e1 + tol) >= c0 and (c1 + tol) >= e0
 
 
 def _ts_known_conflict(entry: SocketEntry, conn: PcapConn, tol: float) -> bool:
-    """socket 观测区间与 pcap 流区间是否**已知**不相交（两侧都有时间戳、加容差后仍不重叠）。
+    """socket 观测区间与 pcap 流区间是否**已知**不相交（两侧都有有效时间戳、加容差后仍不重叠）。
 
-    任一侧无时间戳 → False（未知，不能据此否定）。仅当四个时间戳都在且区间明确错开时才 True——
-    这才是「已知冲突」，用于把「一条早期一次性 socket 观测凭临时端口复用被误确证为一条晚得多的 pcap 流」
-    从 confirmed 降级（本地临时端口会被后续连接复用，端口相同 + 时间已知错开 = 巧合，不是同一条连接）。
+    任一侧时刻未知（None 或 <=0 哨兵）→ False（未知，不能据此否定）。仅当四个时间戳都有效且区间明确错开时
+    才 True——这才是「已知冲突」，用于把「一条早期一次性 socket 观测凭临时端口复用被误确证为一条晚得多的
+    pcap 流」从 confirmed 降级（本地临时端口会被后续连接复用，端口相同 + 时间已知错开 = 巧合，非同一连接）。
     """
-    e0, e1 = entry.first_ts, entry.last_ts
-    c0, c1 = conn.first_ts, conn.last_ts
+    e0, e1 = _known_ts(entry.first_ts), _known_ts(entry.last_ts)
+    c0, c1 = _known_ts(conn.first_ts), _known_ts(conn.last_ts)
     if e0 is None or e1 is None or c0 is None or c1 is None:
         return False
     return not ((e1 + tol) >= c0 and (c1 + tol) >= e0)

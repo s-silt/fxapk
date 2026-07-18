@@ -217,31 +217,61 @@ def _iter_frames(data: bytes) -> Iterator[tuple[float, int, bytes]]:
         yield (float(ts_sec) + ts_usec_or_nsec / frac_div, linktype, frame)
 
 
+def _pcapng_if_tsresol(idb_body: bytes, endian: str) -> float:
+    """从 IDB 选项解析 if_tsresol(code 9) → 时间戳除数。缺省 1e6（微秒）。
+
+    值字节 v：MSB=0 → 10^(v&0x7f) 秒的负幂（如 v=6→µs=1e6、v=9→ns=1e9）；MSB=1 → 2^(v&0x7f)。
+    没有它就默认微秒——旧代码对所有 EPB 硬编码 /1e6，遇纳秒(if_tsresol=9)的 pcapng 会把时间戳放大 1000×，
+    与 socket 时间线形成假「已知冲突」、把本应 confirmed 的五元组归因误降级。
+    """
+    # IDB body: linktype(2) reserved(2) snaplen(4) 之后是 options(TLV: code(2) len(2) value 4字节对齐)。
+    opt = 8
+    while opt + 4 <= len(idb_body):
+        code, length = struct.unpack(endian + "HH", idb_body[opt : opt + 4])
+        opt += 4
+        if code == 0:  # opt_endofopt
+            break
+        if code == 9 and length >= 1:  # if_tsresol
+            v = idb_body[opt]
+            return float(2 ** (v & 0x7F)) if (v & 0x80) else float(10 ** (v & 0x7F))
+        opt += (length + 3) & ~3  # 4 字节对齐
+    return 1e6
+
+
 def _iter_pcapng(data: bytes) -> Iterator[tuple[float, int, bytes]]:
-    """最小 pcapng：跟踪 IDB 的 linktype，产出 Enhanced/Simple Packet Block 的帧。"""
+    """最小 pcapng：按 section 跟踪字节序 + 每接口 linktype/if_tsresol，产出 Enhanced/Simple Packet Block 的帧。"""
     n = len(data)
     if n < 12:
         return
-    # SHB 的 byte-order magic 在 offset 8（0x1A2B3C4D）。
-    endian = "<" if data[8:12] == b"\x4d\x3c\x2b\x1a" else ">"
+    endian = "<"  # 占位，遇首个 SHB 即按其 byte-order magic 重定
     linktypes: list[int] = []
+    tsresols: list[float] = []
     off = 0
     while off + 8 <= n:
+        # SHB 的 block type 0x0A0D0D0A 字节序无关（回文）——每遇 SHB 重定本 section 字节序 + 重置接口表
+        # （pcapng 允许多 section 用不同字节序；旧代码只在首个 SHB 判一次，后续异序 section 被误解或停止）。
+        if data[off : off + 4] == b"\x0a\x0d\x0d\x0a":
+            if off + 12 > n:
+                break
+            endian = "<" if data[off + 8 : off + 12] == b"\x4d\x3c\x2b\x1a" else ">"
+            linktypes = []
+            tsresols = []
         btype, blen = struct.unpack(endian + "II", data[off : off + 8])
         if blen < 12 or off + blen > n:
             break
         body = data[off + 8 : off + blen - 4]
-        if btype == 0x00000001:  # IDB
+        if btype == 0x00000001:  # IDB: linktype(2) reserved(2) snaplen(4) options...
             if len(body) >= 2:
                 linktypes.append(struct.unpack(endian + "H", body[:2])[0])
+                tsresols.append(_pcapng_if_tsresol(body, endian))
         elif btype == 0x00000006:  # EPB: interface_id(4) ts_hi(4) ts_lo(4) caplen(4) origlen(4) data
             if len(body) >= 20:
                 if_id, ts_hi, ts_lo, caplen, _orig = struct.unpack(endian + "IIIII", body[:20])
                 frame = body[20 : 20 + caplen]
                 lt = linktypes[if_id] if if_id < len(linktypes) else (linktypes[0] if linktypes else 1)
-                ts = ((ts_hi << 32) | ts_lo) / 1e6
-                yield (ts, lt, frame)
-        elif btype == 0x00000003:  # Simple Packet Block
+                div = tsresols[if_id] if if_id < len(tsresols) else (tsresols[0] if tsresols else 1e6)
+                yield (((ts_hi << 32) | ts_lo) / div, lt, frame)
+        elif btype == 0x00000003:  # Simple Packet Block：无时间戳 → 0.0（下游按 <=0 = 未知处理，不当真时刻）
             lt = linktypes[0] if linktypes else 1
             if len(body) >= 4:
                 yield (0.0, lt, body[4:])

@@ -326,6 +326,43 @@ def test_iter_frames_nanosecond_pcap_timestamp() -> None:
     assert list(pcap_ingest._iter_frames(le))[0][0] == pytest.approx(2000.25)
 
 
+def _pcapng_one_epb(endian: str, tsresol: int, ts64: int, frame: bytes = b"\x00" * 14) -> bytes:
+    """一个 pcapng section：SHB + IDB(if_tsresol) + 单条 EPB(64bit 时间戳)。endian: '<' 或 '>'。"""
+    def block(btype: int, body: bytes) -> bytes:
+        body = body + b"\x00" * ((4 - len(body) % 4) % 4)
+        blen = 12 + len(body)
+        return struct.pack(endian + "II", btype, blen) + body + struct.pack(endian + "I", blen)
+
+    shb = block(0x0A0D0D0A, struct.pack(endian + "IHHq", 0x1A2B3C4D, 1, 0, -1))
+    idb_opts = struct.pack(endian + "HH", 9, 1) + bytes([tsresol]) + b"\x00" * 3 + struct.pack(endian + "HH", 0, 0)
+    idb = block(0x00000001, struct.pack(endian + "HHI", 1, 0, 0xFFFF) + idb_opts)
+    epb_body = struct.pack(endian + "IIIII", 0, (ts64 >> 32) & 0xFFFFFFFF, ts64 & 0xFFFFFFFF, len(frame), len(frame)) + frame
+    epb = block(0x00000006, epb_body)
+    return shb + idb + epb
+
+
+def test_iter_pcapng_respects_if_tsresol_nanoseconds() -> None:
+    """★回归（codex 全库审计 P1）：pcapng EPB 时间戳须按 IDB 的 if_tsresol 还原，不能一律 /1e6——
+    纳秒(if_tsresol=9)会被放大 1000×，与 socket 时间线成假「已知冲突」把五元组归因误降级。"""
+    ns = _pcapng_one_epb(">", 9, 1_000_500_000_000)  # 1000.5s in ns，tsresol=9→/1e9
+    assert list(pcap_ingest._iter_frames(ns))[0][0] == pytest.approx(1000.5)
+    us = _pcapng_one_epb(">", 6, 1_000_500_000)  # 1000.5s in µs，tsresol=6→/1e6（对照，修前也对）
+    assert list(pcap_ingest._iter_frames(us))[0][0] == pytest.approx(1000.5)
+    le_ns = _pcapng_one_epb("<", 9, 2_000_250_000_000)  # 小端纳秒
+    assert list(pcap_ingest._iter_frames(le_ns))[0][0] == pytest.approx(2000.25)
+
+
+def test_iter_pcapng_multi_section_different_endian() -> None:
+    """★回归（codex 全库审计 P1）：pcapng 允许多 section 用不同字节序；须每遇 SHB 重定字节序，
+    否则异序的后续 section 被误解或直接停止解析、其流量静默丢失。"""
+    be = _pcapng_one_epb(">", 6, 1_000_000_000)  # 大端 section（1000.0s）
+    le = _pcapng_one_epb("<", 6, 2_000_000_000)  # 小端 section（2000.0s）
+    frames = list(pcap_ingest._iter_frames(be + le))
+    assert len(frames) == 2  # 两 section 的帧都要在（修前只出第一段）
+    assert frames[0][0] == pytest.approx(1000.0)
+    assert frames[1][0] == pytest.approx(2000.0)
+
+
 def test_strip_link_sll2_linktype_276() -> None:
     """★ 回归（codex review P2）：`tcpdump -i any` 在新版 libpcap 下写 SLL2（linktype 276）；
     _strip_link 须能剥它（20 字节头，EtherType 在 offset 0、IP 载荷从 offset 20 起），
