@@ -736,8 +736,28 @@ def build_endpoint_attribution(kind: str, value: str, enrichment: dict[str, Any]
             if k and k not in seen_ip:
                 seen_ip.add(k)
                 ordered.append(k)
+        # case close 会对每个解析 IP 单独富化（ip_rdap 资源登记方 / asn / 在线源 as_org），落在
+        # enrichment['resolved_ip_enrichment'][ip]。顶层域名归因吸收它，否则这些证据只留在嵌套结构，
+        # 顶层五层的 resource_holder 恒 unknown，文书/摘要（只读顶层 attribution）漏掉闭环后的 RDAP/BGP 证据（P1-3）。
+        resolved_all = enrichment.get("resolved_ip_enrichment")
+        resolved_all = resolved_all if isinstance(resolved_all, dict) else {}
         for ip in ordered:
             h = host_by_ip.get(ip, {})
+            resolved_ip = resolved_all.get(ip)
+            if isinstance(resolved_ip, dict):
+                merged = dict(resolved_ip)
+                if cname and "dns" not in merged:
+                    merged["dns"] = {"cname": cname}  # 注入域名级共享 CNAME edge 信号（per-IP 富化无 dns 子键）
+                if "asn" not in merged and (h.get("asn") or h.get("org") or h.get("isp")):
+                    merged["asn"] = {  # hosting 兜底：防 resolved 只有 ip_rdap 时 origin/hosting 层反而退化
+                        "asn": h.get("asn"),
+                        "org": h.get("org") or h.get("isp"),
+                        "country": h.get("country"),
+                    }
+                att = attribution_from_enrichment(merged, ip=ip)
+                if att is not None:
+                    ips.append(att)
+                    continue
             signals: dict[str, Any] = {
                 "country": h.get("country"),
                 "asn": {"asn": h.get("asn"), "org": h.get("org") or h.get("isp")},

@@ -1001,9 +1001,10 @@ def close_report(
                 include_case_close=True,
             )
         _ensure_source_status_coverage(endpoint, typed_enrichers, config)
-        _set_attribution(endpoint)
         if endpoint.kind == "domain":
             _enrich_resolved_ips(endpoint, typed_enrichers, config)
+        # 顶层归因在逐 IP 富化之后再建，才能吸收 resolved_ip_enrichment（P1-3：否则文书/摘要读顶层恒 unknown）。
+        _set_attribution(endpoint)
 
     targets = [assemble_target_closure(endpoint) for endpoint in selected]
     closure = evaluate_closure(

@@ -138,6 +138,46 @@ def test_payment_lead_produces_one_letter() -> None:
     assert out[0]["category"] == "PAYMENT"
 
 
+def test_letter_body_contains_case_close_resolved_evidence() -> None:
+    """★P1-3 端到端：域名端点带缓存 resolved_ip_enrichment(ip_rdap 资源登记方 VULTR-NET) → close_report
+    重建顶层归因吸收它 → 文书「基础设施归属链」渲染资源登记方，而非漏证据渲染「未知」。"""
+    from apkscan.core.closure import ClosureConfig, close_report
+    from apkscan.core.models import Confidence, Endpoint, Lead, LeadCategory, Report
+    from apkscan.report.json import to_dict
+
+    ip = "45.76.100.10"
+    endpoint = Endpoint(
+        value="evil-example.com",
+        kind="domain",
+        is_suspicious=True,
+        enrichment={
+            "dns": {"ips": [ip], "hosting": [{"ip": ip, "asn": 20473, "org": "AS-CHOOPA", "country": "US"}]},
+            "resolved_ip_enrichment": {
+                ip: {"ip_rdap": {"netname": "VULTR-NET", "org": "The Constant Company, LLC", "country": "US"}}
+            },
+        },
+    )
+    lead = Lead(
+        category=LeadCategory.DOMAIN,
+        value="evil-example.com",
+        subject=None,
+        where_to_request="域名注册商",
+        evidence_to_obtain=["注册实名信息"],
+        confidence=Confidence.HIGH,
+        advice="建议调证",
+    )
+    report = Report(
+        package_name="com.test", meta={}, leads=[lead], endpoints=[endpoint], findings=[], analyzer_status=[]
+    )
+
+    close_report(report, ClosureConfig(online=False, require_dynamic=False), enrichers=[])
+    out = letters.build_letters(to_dict(report))
+
+    assert out, "域名 建议调证 lead 应产文书"
+    body = out[0]["body_md"].replace("\\", "")  # markdown 转义把 VULTR-NET 写成 VULTR\-NET，去反斜杠后比对
+    assert "资源登记方：VULTR-NET" in body  # 吸收闭环后 RDAP 证据，而非「资源登记方：未知」
+
+
 def test_letter_core_fields() -> None:
     letter = letters.build_letters(_make_report())[0]
     assert letter["recipient"] == "支付宝（蚂蚁集团）"

@@ -573,6 +573,26 @@ def test_domain_target_enriches_each_resolved_ip(monkeypatch) -> None:  # noqa: 
     assert all(enricher.calls == ["198.51.100.10"] for enricher in ip_enrichers)
 
 
+def test_close_report_top_level_attribution_absorbs_resolved_evidence(monkeypatch) -> None:  # noqa: ANN001
+    """close_report 后顶层 enrichment.attribution 吸收逐 IP 富化的 resource_holder（P1-3：顶层归因在
+    _enrich_resolved_ips 之后重建，且 build_endpoint_attribution 域名分支读 resolved_ip_enrichment，
+    否则闭环后拿到的 RDAP/BGP 证据只留在嵌套结构，文书/摘要读顶层 attribution 恒 unknown）。"""
+    monkeypatch.setattr(
+        closure_module, "_normalized_public_ip", lambda value: str(value).strip(), raising=False
+    )
+    domain = _endpoint("api.example.test", kind="domain", runtime=True, target=True, payload=True)
+    report = _report(domain)
+    dns = _FakeEnricher("dns", ["domain"], {"ips": ["198.51.100.10"], "cname": []})
+    ip_enrichers = _full_ip_enrichers()
+
+    close_report(report, ClosureConfig(online=True, require_dynamic=False), enrichers=[dns, *ip_enrichers])
+
+    ip_layer = domain.enrichment["attribution"]["ips"][0]
+    assert ip_layer["resource_holder"]["name"] == "EXAMPLE-NET"  # 来自 resolved 的 ip_rdap，吸收进顶层
+    assert ip_layer["resource_holder"]["confidence"] == "high"
+    assert ip_layer["origin_network"]["asn"] == 64500  # origin/hosting 层未退化
+
+
 def test_domain_resolved_ip_enrichment_is_bounded(monkeypatch) -> None:  # noqa: ANN001
     monkeypatch.setattr(
         closure_module,
