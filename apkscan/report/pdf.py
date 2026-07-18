@@ -13,8 +13,10 @@ PDF 派生自 HTML：先有自包含 HTML 报告，再用 Chromium 系浏览器
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -72,6 +74,17 @@ def find_browser() -> str | None:
     return None
 
 
+def _needs_no_sandbox() -> bool:
+    """是否需要传 --no-sandbox：root（Chromium 拒绝以 root 带沙箱运行）/ Windows（沙箱形态不同、保守保留既有行为）/
+    FXAPK_PDF_NO_SANDBOX（受限容器逃生口）。非 root POSIX 默认返回 False → 启用浏览器沙箱（纵深防御）。"""
+    if (os.environ.get("FXAPK_PDF_NO_SANDBOX") or "").strip().lower() in ("1", "true", "yes"):
+        return True
+    if sys.platform == "win32":
+        return True
+    geteuid = getattr(os, "geteuid", None)
+    return geteuid is not None and geteuid() == 0
+
+
 def html_to_pdf(html_path: str, pdf_path: str, *, timeout: float = _PRINT_TIMEOUT) -> bool:
     """用无头浏览器把 html_path 打印成 pdf_path。成功 True，否则 False（不抛）。"""
     browser = find_browser()
@@ -101,7 +114,13 @@ def html_to_pdf(html_path: str, pdf_path: str, *, timeout: float = _PRINT_TIMEOU
         browser,
         "--headless=new",
         "--disable-gpu",
-        "--no-sandbox",
+    ]
+    # --no-sandbox 弱化浏览器沙箱（纵深防御）：渲染的是本项目自产、Jinja 自动转义的报告 HTML（无不可信内容），
+    # 故默认在非 root POSIX 上**启用沙箱**；仅在 root（Chromium 拒绝以 root 带沙箱运行）/ Windows（沙箱形态不同，
+    # 保守保留既有行为）/ FXAPK_PDF_NO_SANDBOX（受限容器逃生口）时才加 --no-sandbox。
+    if _needs_no_sandbox():
+        cmd.append("--no-sandbox")
+    cmd += [
         "--no-pdf-header-footer",
         f"--user-data-dir={udd}",
         f"--print-to-pdf={out}",
