@@ -3250,7 +3250,7 @@ def test_floor_pcap_auto_ingested_into_endpoints(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 def test_path_is_ascii() -> None:
     assert capture._path_is_ascii(Path("C:/Users/sxl/out/floor.pcap")) is True
-    assert capture._path_is_ascii(Path("C:/Users/sxl/王箕旻/floor.pcap")) is False
+    assert capture._path_is_ascii(Path("C:/Users/sxl/样本案件/floor.pcap")) is False
 
 
 def test_adb_pull_to_ascii_dest_direct(monkeypatch, tmp_path) -> None:
@@ -3279,7 +3279,7 @@ def test_adb_pull_to_non_ascii_dest_stages(monkeypatch, tmp_path) -> None:
         return True
 
     monkeypatch.setattr(capture, "_adb", _fake_adb)
-    dest = tmp_path / "王箕旻_案件" / "floor.pcap"  # 非 ASCII 目标目录
+    dest = tmp_path / "样本_案件" / "floor.pcap"  # 非 ASCII 目标目录
     assert capture._adb_pull_to("/data/local/tmp/x.pcap", dest, None) is True
     assert dest.read_bytes() == b"PCAP"  # 最终落在中文 dest
     # ★核心保证：adb 拉取的目标不是非 ASCII 的 dest，而是 ASCII 占位暂存路径
@@ -3289,7 +3289,7 @@ def test_adb_pull_to_non_ascii_dest_stages(monkeypatch, tmp_path) -> None:
 
 def test_adb_pull_to_failure_returns_false(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(capture, "_adb", lambda extra, serial=None: False)
-    dest = tmp_path / "王箕旻" / "floor.pcap"
+    dest = tmp_path / "样本案件" / "floor.pcap"
     assert capture._adb_pull_to("/data/local/tmp/x.pcap", dest, None) is False
     assert not dest.exists()  # 失败不污染/创建 dest
 

@@ -384,7 +384,7 @@ def test_pcap_aggregates_remote_endpoint_across_five_tuples() -> None:
 
 def test_pcap_dns_txt_answer_is_preserved() -> None:
     """★ P0-2：DNS TXT 应答（ClientCore 配置下发通道）须结构化保留 qtype=16/rcode/answer value，
-    不能只留 qname——徐康案 TXT 内容要能直接进报告。"""
+    不能只留 qname——某案 TXT 内容要能直接进报告。"""
     resp = _eth(
         _ipv4(_udp(_dns_response_txt("7nf15vxk.yqdgtbq2xm.uk", "Io59QrTjne3mq19Yoc"), 53, 40000),
               17, "10.0.0.1", "10.0.0.2"),
