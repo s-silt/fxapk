@@ -295,3 +295,25 @@ def test_apk_axml_fallback_respects_size_limit(tmp_path: Path, monkeypatch, capl
         result = ctx._axml_package
     assert result == ""  # 超上限 → 放弃兜底、不解析
     assert any("zip 炸弹" in rec.getMessage() for rec in caplog.records)  # 无修复则无此告警
+
+
+def test_reject_if_zip_bomb_raises_on_oversized_entry(tmp_path: Path, monkeypatch) -> None:
+    """★回归（codex 审计 needs-confirm）：交 androguard 全量解析前，声明解压超上限的条目 fail-fast，
+    不让 androguard 内部解压 bomb DEX/manifest 致 OOM。"""
+    p = tmp_path / "bomb.apk"
+    with zipfile.ZipFile(p, "w") as zf:
+        zf.writestr("classes.dex", b"x" * 100)
+    monkeypatch.setattr(apk_mod, "_MAX_DECOMPRESSED_FILE_BYTES", 10)
+    with pytest.raises(apk_mod.ApkParseError, match="zip 炸弹"):
+        apk_mod._reject_if_zip_bomb(str(p))
+
+
+def test_reject_if_zip_bomb_passes_normal_and_nonzip(tmp_path: Path) -> None:
+    """正常 APK 不拦；打不开/非 zip 不在此判死（交 androguard 走既有错误路径）。"""
+    ok = tmp_path / "ok.apk"
+    with zipfile.ZipFile(ok, "w") as zf:
+        zf.writestr("classes.dex", b"x" * 100)
+    apk_mod._reject_if_zip_bomb(str(ok))  # 不抛
+    bad = tmp_path / "not.apk"
+    bad.write_bytes(b"not a zip at all")
+    apk_mod._reject_if_zip_bomb(str(bad))  # 打不开 → 不抛

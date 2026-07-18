@@ -106,3 +106,49 @@ def test_render_falls_back_to_temp_html(monkeypatch, tmp_path):
     ok = pdf.render(report=object(), pdf_path=str(out), html_source=None)
     assert ok is True
     assert out.is_file()
+
+
+# --- --no-sandbox 条件化（codex 审计 P2）-----------------------------------
+
+
+def test_needs_no_sandbox_env_and_root(monkeypatch):
+    """★回归（codex 审计 P2）：默认非 root POSIX 启用浏览器沙箱；root / env 覆盖 才加 --no-sandbox。"""
+    monkeypatch.setattr(pdf.sys, "platform", "linux")
+    monkeypatch.delenv("FXAPK_PDF_NO_SANDBOX", raising=False)
+    monkeypatch.setattr(pdf.os, "geteuid", lambda: 1000, raising=False)
+    assert pdf._needs_no_sandbox() is False  # 非 root POSIX → 启用沙箱
+    monkeypatch.setattr(pdf.os, "geteuid", lambda: 0, raising=False)
+    assert pdf._needs_no_sandbox() is True  # root → 必须 --no-sandbox
+    monkeypatch.setattr(pdf.os, "geteuid", lambda: 1000, raising=False)
+    monkeypatch.setenv("FXAPK_PDF_NO_SANDBOX", "1")
+    assert pdf._needs_no_sandbox() is True  # env 逃生口
+
+
+def test_html_to_pdf_omits_no_sandbox_for_nonroot_posix(monkeypatch, tmp_path):
+    """非 root POSIX：导出命令不含 --no-sandbox（启用沙箱，纵深防御）。"""
+    captured: dict = {}
+
+    def _capture(cmd, **kwargs):  # noqa: ANN001
+        captured["cmd"] = list(cmd)
+        return _run_writes_pdf(cmd, **kwargs)
+
+    monkeypatch.setattr(pdf, "find_browser", lambda: "fake-chrome")
+    monkeypatch.setattr(pdf, "_needs_no_sandbox", lambda: False)
+    monkeypatch.setattr(pdf.subprocess, "run", _capture)
+    assert pdf.html_to_pdf(str(_src_html(tmp_path)), str(tmp_path / "out.pdf")) is True
+    assert "--no-sandbox" not in captured["cmd"]
+
+
+def test_html_to_pdf_includes_no_sandbox_when_needed(monkeypatch, tmp_path):
+    """root / Windows / env：导出命令含 --no-sandbox。"""
+    captured: dict = {}
+
+    def _capture(cmd, **kwargs):  # noqa: ANN001
+        captured["cmd"] = list(cmd)
+        return _run_writes_pdf(cmd, **kwargs)
+
+    monkeypatch.setattr(pdf, "find_browser", lambda: "fake-chrome")
+    monkeypatch.setattr(pdf, "_needs_no_sandbox", lambda: True)
+    monkeypatch.setattr(pdf.subprocess, "run", _capture)
+    assert pdf.html_to_pdf(str(_src_html(tmp_path)), str(tmp_path / "out.pdf")) is True
+    assert "--no-sandbox" in captured["cmd"]

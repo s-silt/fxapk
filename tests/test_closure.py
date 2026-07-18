@@ -844,3 +844,28 @@ def test_unconfigured_source_is_disabled_without_blocking_offline_closure(
     assert enricher.calls == []
     assert source == {"status": "disabled", "reason": "credential_not_configured"}
     assert closure["status"] == CLOSURE_COMPLETE
+
+
+def test_populate_network_attribution_failure_preserves_existing_view(monkeypatch) -> None:
+    """★回归（codex 审计 P2）：close 期 network_attribution 组装失败不覆盖 analyze 期已有的有效视图，只附 close_error。"""
+    def _boom(*_a, **_k):
+        raise RuntimeError("assemble failed")
+
+    monkeypatch.setattr("apkscan.attribution.assemble.build_network_attribution", _boom)
+    report = _report(_complete_endpoint())
+    report.meta["network_attribution"] = {"phase": "analyze", "roles": ["x"]}  # analyze 期已有有效视图
+    closure_module._populate_network_attribution(report)
+    view = report.meta["network_attribution"]
+    assert view["phase"] == "analyze" and view["roles"] == ["x"]  # 旧视图保留
+    assert view["close_error"] == "RuntimeError"  # 只附错误标记
+
+
+def test_populate_network_attribution_failure_marks_when_no_prior_view(monkeypatch) -> None:
+    """无 analyze 期视图时，组装失败仍写纯错误标记（保持既有行为）。"""
+    def _boom(*_a, **_k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("apkscan.attribution.assemble.build_network_attribution", _boom)
+    report = _report(_complete_endpoint())
+    closure_module._populate_network_attribution(report)
+    assert report.meta["network_attribution"] == {"phase": "close", "error": "RuntimeError"}
