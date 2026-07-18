@@ -229,6 +229,23 @@ def test_camelcase_identifier_not_ciphertext() -> None:
     assert scan_java_source('void a(){ showMethodErrorToast("getUserDisplayNameAVChatKit"); }', "loc") == []
 
 
+def test_field_constant_ciphertext_recall() -> None:
+    """字段常量召回：``static K = 密文``（类级、方法体外）+ 某方法里 ``dec(K)`` → 类作用域绑上，method=class:名。"""
+    src = f'class C {{ static String K = "{_CT}"; void m() {{ String u = dec(K); }} }}'
+    chains = scan_java_source(src, "x")
+    assert len(chains) == 1
+    assert chains[0].method == "class:C" and chains[0].consumer == "dec"
+    assert chains[0].secret == _CT
+
+
+def test_class_scope_no_cross_method_false_bind_via_decrypts() -> None:
+    """精度：类里有某解密调用**不**把无关的字段密文全绑上——类作用域只走"该密文被消费"、不看类级 decrypts。
+    否则盲窗在类粒度复活（跨方法误绑）。"""
+    # bg 是密文字段但**没被任何调用消费**；另有方法含 doFinal → 不绑（类作用域忽略 decrypts）
+    src = f'class C {{ String bg = "{_CT}"; void x() {{ byte[] o = cipher.doFinal(y); }} }}'
+    assert scan_java_source(src, "x") == []
+
+
 def test_obfuscated_decrypt_helper_binds_as_ai_lead() -> None:
     """密文被直接传进改名 helper m1136x() → 绑链(consumer=m1136x, 无标准解密)，完整密文保留供 AI 解密。"""
     src = f'public void run() {{ String u = AbstractC0421d.m1136x("{_CT}"); conn.get(u); }}'
