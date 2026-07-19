@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import traceback
 from pathlib import Path
 from typing import Mapping
 
@@ -95,7 +97,13 @@ def close_command(
         closure = close_report(report, config)
         write_report(report, report_json)
     except Exception as exc:  # noqa: BLE001 - command boundary prints a safe summary
-        logger.error("[case close] closure failed (%s)", type(exc).__name__)
+        # 记异常**调用栈位置**（文件:行:函数，末 5 帧），但**不含异常消息/源码行**——闭环会处理
+        # provider 响应，异常消息可能夹带敏感响应片段/带 key 的 URL，``logger.exception`` 会把它
+        # 连同 traceback 写进日志（有专门测试守此不外泄）。只记帧位置：既恢复「在哪一行、经什么
+        # 调用路径失败」的排障线索，又不泄露载荷。用户可见串仍只给类型名。
+        frames = traceback.extract_tb(exc.__traceback__)[-5:]
+        where = " <- ".join(f"{os.path.basename(f.filename)}:{f.lineno}:{f.name}" for f in frames)
+        logger.error("[case close] closure failed (%s) at %s", type(exc).__name__, where)
         typer.echo(f"错误：案件闭环执行失败（{type(exc).__name__}）", err=True)
         raise typer.Exit(code=_execution_failure_exit_code(strict=strict)) from exc
 

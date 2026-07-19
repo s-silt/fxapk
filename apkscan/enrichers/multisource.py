@@ -216,6 +216,11 @@ def _safe_error_type(exc: Exception) -> str:
         return "timeout"
     if isinstance(exc, _ProviderResponseError):
         return "provider_response_error"
+    # ★UnicodeError（UnicodeEncodeError 等）是 ValueError 子类，但语义是**请求侧**编码失败
+    #   （如非 latin-1 的 key/header 塞进 HTTP 头），不是响应解析失败——须在 ValueError 前甄别，
+    #   否则误报成 parse_error，把病根（密钥/参数被污染）指向错误方向。
+    if isinstance(exc, UnicodeError):
+        return "request_encoding_error"
     if isinstance(exc, ValueError):
         return "parse_error"
     return type(exc).__name__

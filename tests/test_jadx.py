@@ -38,6 +38,23 @@ def _fake_run_writing(java_body: str, returncode: int = 0, stderr: str = ""):
     return _run
 
 
+def test_run_jadx_decodes_output_as_utf8(monkeypatch, tmp_path) -> None:
+    """★subprocess.run 须显式 encoding=utf-8 + errors=replace：中文 Windows 默认 GBK 解码，
+    jadx 输出的 UTF-8（含中文类名/字符串）会让读取线程 UnicodeDecodeError 崩溃、丢光 stderr。"""
+    captured: dict = {}
+
+    def _spy_run(cmd, **kwargs):  # noqa: ANN001
+        captured.update(kwargs)
+        out_dir = Path(cmd[cmd.index("-d") + 1])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        return subprocess.CompletedProcess(cmd, 0, stdout="done", stderr="")
+
+    monkeypatch.setattr(jadx.subprocess, "run", _spy_run)
+    JadxAnalyzer().analyze(_ctx(tmp_path))
+    assert captured.get("encoding") == "utf-8"
+    assert captured.get("errors") == "replace"
+
+
 def test_no_apk_path_skips_cleanly() -> None:
     result = JadxAnalyzer().analyze(FakeContext())
     assert result.meta["jadx_status"] == "no_apk_path"
