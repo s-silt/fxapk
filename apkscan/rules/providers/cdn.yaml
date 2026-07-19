@@ -1,6 +1,6 @@
 # rules/providers/cdn.yaml —— 国内 CDN 厂商 org 关键字（把在线富化返回的 org / as_org 名归类为 cdn）。
 # ★定位（用户要求）：本地库**补在线 API 的不足**，不重造在线已能做的。通用 CDN 的**识别**靠在线富化
-#   （FOFA server / Hunter as_org / ip-api org / webcheck）已能认——本地不维护通用 CDN 的 CNAME 指纹
+#   （FOFA server / Hunter as_org / ip-api org）已能认——本地不维护通用 CDN 的 CNAME 指纹
 #   （会过时、是维护负担）；本地只做 org→类别映射（在线给 org 名、不给"是不是 CDN"的分类，这是在线的不足）。
 #   在线认不出的国内共享前置/防红类前端指纹（fxapk 自建）另放 providers/investigative/——那才是
 #   在线库/API 一律没有、只能 fxapk 自建的核心壁垒。

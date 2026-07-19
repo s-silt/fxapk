@@ -241,7 +241,7 @@ def analyze(
         "--mode",
         help=(
             "网络模式：passive（默认，只跑被动 OSINT 富化、对目标零流量）| "
-            "authorized-active（显式授权下才放行会向目标 live 探测的主动富化器，如 webcheck）。"
+            "authorized-active（显式授权下才放行会向目标 live 探测的主动富化器）。"
         ),
     ),
     strict: bool = typer.Option(
@@ -907,16 +907,16 @@ def digest(
 @app.command()
 def selfcheck(
     online: bool = typer.Option(
-        True, "--online/--offline", help="是否探测联网富化 / web-check 连通性。"
+        True, "--online/--offline", help="是否探测联网富化就绪度。"
     ),
     probe: bool = typer.Option(
-        True, "--probe/--no-probe", help="是否实际发起网络探测（web-check 等）；--no-probe 只看配置。"
+        True, "--probe/--no-probe", help="是否实际发起网络探测；--no-probe 只看配置。"
     ),
 ) -> None:
     """自检诊断：逐项报告**哪个能力通 / 不通 / 怎么修**，输出稳定 JSON（供任意 AI agent 驱动前自检）。
 
     覆盖：核心、可选依赖（图谱 kuzu / 解密）、外部工具（jadx/adb）、动态（frida/mitmproxy/设备）、
-    联网富化、web-check。每项给 status（ok/missing/disabled/unreachable）+ 一句话修复指引。绝不抛。
+    联网富化。每项给 status（ok/missing/disabled/unreachable）+ 一句话修复指引。绝不抛。
     """
     import json as _json
 

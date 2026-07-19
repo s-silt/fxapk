@@ -50,7 +50,7 @@ class BaseEnricher(ABC):
     name:        稳定标识。
     applies_to:  适用的端点类型，元素为 "domain" / "ip"。
     phase:       富化阶段（两遍富化调度用）：
-                 - ``"attribution"``（默认）：第①遍，查归属（rdap/whois/dns/asn/icp/webcheck），
+                 - ``"attribution"``（默认）：第①遍，查归属（rdap/whois/dns/asn/icp），
                    定服务器辖区（国内/国外/未知）。
                  - ``"overseas"``：第②遍，境外被动取证（shodan/certs），**仅对国外(+未知)端点跑**。
     active:      **是否会向目标发起连接的标记**。本仓当前富化器全部为被动（``active=False``），

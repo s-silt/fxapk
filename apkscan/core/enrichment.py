@@ -184,7 +184,6 @@ def _classify_endpoint_jurisdiction(ep: Endpoint) -> str:
             whois=e.get("whois"),
             dns=e.get("dns"),
             asn=e.get("asn"),
-            webcheck=e.get("webcheck"),
         )
     except Exception:  # noqa: BLE001 — 辖区判定失败不得炸主流程；保守判未知（宁可漏归类也不误标辖区）
         logger.debug("辖区判定失败，按未知处理：%s", ep.value, exc_info=True)
@@ -216,7 +215,7 @@ def _run_enrichment(
     （避免 ``_jurisdiction`` 等内部键泄漏进 report.json）。
 
     ``gate=None`` **fail-closed**：缺省按 passive 门控（拦 active 富化器）。这样任何调用方（现在或
-    将来）漏传 gate 都得到**安全**行为，绝不会静默把 webcheck 等主动富化器放进被动运行。要全放行须
+    将来）漏传 gate 都得到**安全**行为，绝不会静默把主动富化器放进被动运行。要全放行须
     显式传 ``gate=_mode_gate("authorized-active")``。
     """
     if gate is None:
