@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 from apkscan.config.string_graph import (
+    SUPPRESSION_PARAM_TABLE,
+    SUPPRESSION_THIRD_PARTY,
     StringChain,
     _looks_ciphertext,
     _match_block,
@@ -310,7 +312,7 @@ def test_ai_decrypt_lead_finding_and_meta_candidates(tmp_path) -> None:
 
     (tmp_path / "C.java").write_text(
         f'public void run() {{ String u = AbstractC0421d.m1136x("{_CT}"); }}', encoding="utf-8")
-    _eps, findings, _n, candidates = JadxAnalyzer()._scan_java(tmp_path)
+    _eps, findings, _n, candidates, _sup = JadxAnalyzer()._scan_java(tmp_path)
     chain = [f for f in findings if f.id == _FINDING_STRING_CHAIN]
     assert len(chain) == 1
     assert "AI 辅助解密" in chain[0].title
@@ -332,7 +334,7 @@ def test_jadx_scan_java_emits_string_chain_finding(tmp_path) -> None:
         f'return new String(cipher.doFinal(Base64.decode(x, 0))); }} }}',
         encoding="utf-8",
     )
-    _eps, findings, _n, _cand = JadxAnalyzer()._scan_java(tmp_path)
+    _eps, findings, _n, _cand, _sup = JadxAnalyzer()._scan_java(tmp_path)
     chain = [f for f in findings if f.id == _FINDING_STRING_CHAIN]
     assert len(chain) == 1
     assert chain[0].confidence is Confidence.LOW  # 启发式 → 低置信
@@ -461,23 +463,83 @@ def test_third_party_package_paths_are_suppressed() -> None:
     assert len(scan_java_source(src, "sources/nfc/share/nfcshare/App.java")) == 1
 
 
+_PARAM_TABLE_CONSTS = [
+    "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E08",  # RFC3526 MODP 素数
+    "AD107E1E9123A9D0D660FAA79559C51FA20D64E5683B9FD1B54B1597",  # RFC5114
+    "8CF83642A709A097B447997640129DA299B1A47D1EB3750BA308B0FE",
+    "A4D1CBD5C3FD34126765A442EFB99905F8104DD258AC507FD6406CFF",
+    "AC4032EF4F2D9AE39DF30B5C8FFDAC506CDEBE7B89998CAF74866A08",
+]
+
+
+def _shown(chains: list[StringChain]) -> list[StringChain]:
+    """调用方口径：``suppressed`` 非空的链不进报告（见 analyzers/jadx.py）。"""
+    return [c for c in chains if c.suppressed is None]
+
+
 def test_crypto_parameter_table_file_is_suppressed() -> None:
-    """★按**文件**判而非按串：混淆器会把 BouncyCastle 的包名改成随机串（路径认不出），
+    """★按**文件**数 hex 条数而非按串判：混淆器会把 BouncyCastle 的包名改成随机串（路径认不出），
     但"一个类里躺着几十条定长 hex 常量"的形态改不掉——那是 RFC3526 素数 / 曲线参数。"""
-    consts = [
-        "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E08",  # RFC3526 MODP 素数
-        "AD107E1E9123A9D0D660FAA79559C51FA20D64E5683B9FD1B54B1597",  # RFC5114
-        "8CF83642A709A097B447997640129DA299B1A47D1EB3750BA308B0FE",
-        "A4D1CBD5C3FD34126765A442EFB99905F8104DD258AC507FD6406CFF",
-        "AC4032EF4F2D9AE39DF30B5C8FFDAC506CDEBE7B89998CAF74866A08",
-    ]
-    body = " ".join(f'p({c!r});'.replace("'", '"') for c in consts)
+    body = " ".join(f'p("{c}");' for c in _PARAM_TABLE_CONSTS)
     src = f"public void params() {{ {body} }}"
     # 随机名混淆包：路径规则认不出，靠 hex 聚集形态识别
-    assert scan_java_source(src, "sources/q3NiMVrzuIx9Q7lciPla/C6892.java") == []
+    chains = scan_java_source(src, "sources/q3NiMVrzuIx9Q7lciPla/C6892.java")
+    assert _shown(chains) == []
+    assert [c.suppressed for c in chains] == [SUPPRESSION_PARAM_TABLE] * len(_PARAM_TABLE_CONSTS)
     # 少于阈值则不误杀（正常方法里偶有一条 hex 密文仍要报）
-    few = f'public void m() {{ p("{consts[0]}"); }}'
-    assert len(scan_java_source(few, "sources/app/A.java")) == 1
+    few = f'public void m() {{ p("{_PARAM_TABLE_CONSTS[0]}"); }}'
+    assert len(_shown(scan_java_source(few, "sources/app/A.java"))) == 1
+
+
+# ── 压制的机制边界：两条规则的 key 都落在**样本可控**的输入上（源文件路径由包名决定、hex 常量条数由
+# 字面量决定）。静默返回 [] 会让规避手法既生效又无痕，所以压制改成"打标不丢弃"+ 范围收窄到规则解释得了
+# 的那部分。以下三条是 2026-07-19 对抗审计复现出的场景。
+
+
+def test_param_table_padding_does_not_swallow_base64_ciphertext() -> None:
+    """★对抗回归：往含真密文的方法里掺 5 条裸 hex 常量，曾使整文件（含 base64 真密文）一起被丢。
+
+    参数表按定义全是 hex，同方法里的 base64 密文不属于这张表——hex 链照压，base64 链必须留下。
+    """
+    body = " ".join(f'p("{c}");' for c in _PARAM_TABLE_CONSTS)
+    src = (
+        f'public void init() {{ Cipher.getInstance("AES/CBC/PKCS5Padding"); '
+        f'{body} String u = "{_CT}"; }}'
+    )
+    shown = _shown(scan_java_source(src, "sources/app/net/Cfg.java"))
+    assert [c.secret for c in shown] == [_CT], "掺 hex 常量不得压掉同文件的 base64 真密文"
+    assert shown[0].decrypt_calls  # 标准解密 API 绑定仍在
+
+
+def test_relocated_app_class_under_third_party_path_is_marked_not_dropped() -> None:
+    """★对抗回归：ProGuard ``-repackageclasses`` 能把自有解密类重定位进 ``com/google/…``。
+
+    路径由样本自己控制，所以第三方路径压制不能是"静默失明"：链照样产出，只是带 ``suppressed`` 标由
+    调用方决定不呈现——压制量因此可计数、可复核（``meta.decrypt_candidates_suppressed``）。
+    """
+    src = (
+        f'public void load() {{ Cipher c = Cipher.getInstance("AES/CBC/PKCS5Padding"); '
+        f'String u = decrypt("{_SECRET}"); }}'
+    )
+    own = scan_java_source(src, "sources/com/fraudapp/net/Cfg.java")
+    assert len(_shown(own)) == 1  # 自有路径：正常候选
+
+    relocated = scan_java_source(src, "sources/com/google/android/gms/internal/zzab.java")
+    assert _shown(relocated) == []  # 呈现口径不变：第三方路径仍不进报告
+    assert [c.suppressed for c in relocated] == [SUPPRESSION_THIRD_PARTY]  # 但不再无痕
+    assert relocated[0].secret == _SECRET
+
+
+def test_third_party_file_without_decrypt_api_returns_early() -> None:
+    """第三方路径 + 全文无标准解密 API 迹象 → 早退（真实 APK 里这是绝大多数文件，性能前提）。
+
+    这一档的代价是这些文件里仅靠 consumer 成立的**弱档**链不被计数——那一档本就是噪音主源。
+    """
+    src = f'public void m() {{ String s = x("{_SECRET}"); }}'  # 只有改名 helper，无标准 crypto API
+    assert scan_java_source(src, "sources/io/dcloud/p/d0.java") == []
+    assert scan_java_source(src, "sources/androidx/core/view/ViewCompat.java") == []
+    # 同样的源码在自有路径下照常出链（证明返回 [] 来自路径规则而非源码本身不成链）
+    assert len(_shown(scan_java_source(src, "sources/app/A.java"))) == 1
 
 
 def test_algorithm_transformation_string_is_not_ciphertext() -> None:

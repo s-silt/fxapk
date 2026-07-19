@@ -29,6 +29,27 @@ jadx 反编译的 **Java** 代码，而配方只从 **JS bundle** 逆出（`cryp
 BouncyCastle 的包名，但"一个类里躺着几十条定长 hex 常量"的形态改不掉）；算法
 transformation 串、字符两两不同的字母表/置换表、顺序字节测试向量不再判为密文。
 
+### Changed — 压制改为"打标不丢弃"，范围收窄（`config/string_graph`）
+
+上一条的两道**文件级**压制，其判据都落在**样本可控的输入**上——源文件路径由包名决定，
+hex 常量条数由字面量决定——而命中即静默返回 `[]`。对抗审计复现出两条规避路径：
+
+- ProGuard `-repackageclasses`（或任意混淆器）把自有解密类重定位进 `com/google/android/gms/internal/`，
+  同一个 `{Cipher.getInstance + 真密文}` 类在自有路径下出 1 条链、在第三方路径下出 0 条。
+- 往含真密文的方法里掺 5 条裸 32 字符 hex 字面量，即可让该文件连同真密文一起被丢。
+
+两条都改掉：压制不再丢弃候选，而是在 `StringChain.suppressed` 上打原因标
+（`third-party` / `param-table`），由调用方决定不呈现；参数表规则的标记只落在**hex 链**上，
+同文件里的 base64 密文链不再被牵连（参数表按定义全是 hex，规则解释不了非 hex 的那部分）。
+`analyzers/jadx` 把压制量按原因计数写进 `report.meta["decrypt_candidates_suppressed"]`——
+压制因此可计数、可复核，规避手法至少是可见的。
+
+第三方路径保留一处早退：路径命中**且**全文无任何标准解密 API 迹象时不扫（真实 APK 里这是
+绝大多数文件，是这条路径的性能前提）；代价是这些文件里仅靠 consumer 成立的弱档链不被计数。
+
+**对 agent / CI 调用方的影响**：新增条件性 meta 键 `decrypt_candidates_suppressed`（无压制时不写）。
+`decrypt_candidates` 的内容不变——14 个真实样本的呈现候选逐条一致（+0 −0），`schema_version` 不变。
+
 ## 1.0.0 — 2026-07-18
 
 Theme: **PCAP-first 网络证据 + 五层基础设施归属 + 资产沉淀**——动态从"HTTP 代理式抓包"
