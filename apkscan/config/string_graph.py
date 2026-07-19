@@ -71,7 +71,14 @@ _TOKEN_ENTROPY_MIN = 4.5
 # 字符两两不同的最短长度：短串偶然全不重复很常见，32 起才是"表"而非巧合。
 _ALPHABET_MIN_LEN = 32
 # 算法 transformation 串（``AES/CBC/PKCS5Padding`` / ``RSA/ECB/OAEPWithSHA-1AndMGF1Padding``）：常量非密文。
-_TRANSFORMATION_RE = re.compile(r"^[A-Za-z0-9]+/[A-Za-z0-9]+(?:/[A-Za-z0-9-]+)?$")
+# ★形状 + 首段算法名双重锚定：只匹配整串形状会误伤——无填充的 base64 载荷恰有 ~20% 落在 ``词/词`` 形状里
+# （3 的倍数字节、含 ``/``、不含 ``+``）。JCE transformation 恒以**算法名整段打头**（``AES/…``、``RSA/…``），
+# 故要求首段精确等于已知算法名——随机 base64 首段恰等于 ``AES`` 的概率极低，误命中降到 0%。
+_TRANSFORMATION_SHAPE = re.compile(r"^[A-Za-z][A-Za-z0-9]*(?:/[A-Za-z][A-Za-z0-9-]*){1,3}$")
+_TRANSFORMATION_ALGOS: frozenset[str] = frozenset({
+    "AES", "DES", "DESEDE", "RSA", "BLOWFISH", "RC2", "RC4", "ARCFOUR",
+    "CHACHA20", "SM2", "SM4", "TWOFISH", "IDEA", "CAST5", "CAST6", "SEED", "ARIA",
+})
 
 # ---------------------------------------------------------------------------
 # 文件级压制：实测噪音高度聚集于两类**可机械识别**的来源，且都不是 App 自有配置。
@@ -258,7 +265,7 @@ def _looks_ciphertext(value: str) -> bool:
         return False
     if _B64_ALPHABET_RUN in s or _looks_alphabet_table(s):
         return False  # 字母表/查找表常量（满熵，熵护栏数学上拦不住）
-    if _TRANSFORMATION_RE.match(s):
+    if _is_transformation(s):
         return False  # ``RSA/ECB/OAEPWithSHA-1AndMGF1Padding`` 这类算法 transformation 串是常量非密文
     if _looks_sequential_bytes(s):
         return False  # ``000102…1E1F`` 这类顺序字节 = 标准测试向量
@@ -293,6 +300,17 @@ def _looks_alphabet_table(s: str) -> bool:
     base62 / 自定义置换表按定义每个字符恰好出现一次。比枚举具体字母表更通用（覆盖任意顺序与自定义表）。
     """
     return len(s) >= _ALPHABET_MIN_LEN and len(set(s)) == len(s)
+
+
+def _is_transformation(s: str) -> bool:
+    """整串像 ``算法/模式[/填充]`` 且**首段是已知 JCE 算法名**——常量非密文。
+
+    首段锚定见 :data:`_TRANSFORMATION_ALGOS` 上方注释：只看形状会误伤 ~20% 的无填充 base64 载荷；
+    要求首段精确等于算法名后误命中降到 0%（transformation 恒以算法名整段打头）。
+    """
+    if not _TRANSFORMATION_SHAPE.match(s):
+        return False
+    return s.split("/", 1)[0].upper() in _TRANSFORMATION_ALGOS
 
 
 def _looks_sequential_bytes(s: str) -> bool:
