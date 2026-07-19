@@ -53,6 +53,22 @@ def test_html_to_pdf_success(monkeypatch, tmp_path):
     assert out.is_file() and out.stat().st_size > 0
 
 
+def test_html_to_pdf_decodes_output_as_utf8(monkeypatch, tmp_path):
+    """★subprocess.run 须显式 encoding=utf-8 + errors=replace：中文 Windows 默认 GBK 解码，
+    Chrome 的 UTF-8 stderr 会让读取线程崩溃、吞掉导出失败诊断。"""
+    captured: dict = {}
+
+    def _spy_run(cmd, **kwargs):  # noqa: ANN001
+        captured.update(kwargs)
+        return _run_writes_pdf(cmd, **kwargs)
+
+    monkeypatch.setattr(pdf, "find_browser", lambda: "fake-chrome")
+    monkeypatch.setattr(pdf.subprocess, "run", _spy_run)
+    pdf.html_to_pdf(str(_src_html(tmp_path)), str(tmp_path / "out.pdf"))
+    assert captured.get("encoding") == "utf-8"
+    assert captured.get("errors") == "replace"
+
+
 def test_html_to_pdf_browser_no_output(monkeypatch, tmp_path):
     monkeypatch.setattr(pdf, "find_browser", lambda: "fake-chrome")
     monkeypatch.setattr(pdf.subprocess, "run", _run_no_output)

@@ -1060,6 +1060,11 @@ def _norm_mode(raw: str) -> str:
     low = raw.strip().lower()
     for mode in ("cfb", "cbc", "ecb", "ctr", "ofb", "gcm"):
         if low.startswith(mode):
+            # ★保留尾随段位数字：``CFB8`` 与默认 ``CFB``(=128 整块反馈) 产出的密文不同，
+            #   折叠成 ``CFB`` 会让 appcrypto 按 128 解 CFB8 密文得到乱码。仅 CFB 有段位语义。
+            suffix = low[len(mode):]
+            if mode == "cfb" and suffix.isdigit():
+                return "CFB" + suffix
             return mode.upper()
     return raw.strip().upper()
 

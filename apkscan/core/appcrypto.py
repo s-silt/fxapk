@@ -24,6 +24,7 @@ import base64
 import binascii
 import hashlib
 import logging
+import re
 import warnings
 from dataclasses import dataclass
 from typing import Any
@@ -172,6 +173,18 @@ def _import_cfb() -> Any:
         return CFB
 
 
+def _import_cfb8() -> Any:
+    """前向兼容地拿到 CFB8 mode 类（同 CFB，48→49 从 primitives 移到 decrepit）。"""
+    try:
+        from cryptography.hazmat.decrepit.ciphers.modes import CFB8  # 新位置
+
+        return CFB8
+    except ImportError:
+        from cryptography.hazmat.primitives.ciphers.modes import CFB8  # 旧位置（≤48）
+
+        return CFB8
+
+
 # ---------------------------------------------------------------------------
 # 内部：key / iv / payload 解析
 # ---------------------------------------------------------------------------
@@ -286,14 +299,32 @@ def _build_algorithm(algo: str, key: bytes) -> Any:
     return None
 
 
+def _cfb_segment_bits(recipe: CryptoRecipe) -> int:
+    """CFB 段大小（bit）：优先 mode 名尾随数字（``CFB8``/``CFB128``），否则用 recipe.segment_size。
+
+    Java/BouncyCastle 的 ``AES/CFB8/...`` 与默认 ``CFB``（整块反馈=128）产出的密文**不同**，
+    段大小错配会整段解密成乱码。cryptography 只提供 CFB(128) 与 CFB8 两档。
+    """
+    m = re.search(r"CFB(\d+)$", recipe.mode.upper())
+    if m:
+        return int(m.group(1))
+    return recipe.segment_size
+
+
 def _build_mode(recipe: CryptoRecipe, iv: bytes) -> Any:
     """按 mode 名构造 cryptography 的模式对象。不支持 → None。"""
     from cryptography.hazmat.primitives.ciphers import modes
 
     name = recipe.mode.upper()
-    if name == "CFB":
-        cfb = _import_cfb()
-        return cfb(iv)
+    if name.startswith("CFB"):
+        seg = _cfb_segment_bits(recipe)
+        if seg == 8:
+            return _import_cfb8()(iv)
+        if seg not in (0, 128):
+            # cryptography 只有 CFB(128)/CFB8 两档；其余段位无法精确表达 → 拒而非静默按 128 解出乱码。
+            logger.warning("[appcrypto] 不支持的 CFB 段大小：%s bit（仅 8/128）", seg)
+            return None
+        return _import_cfb()(iv)  # CFB128（整块反馈）
     if name == "CBC":
         return modes.CBC(iv)
     if name == "ECB":

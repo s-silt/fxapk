@@ -19,6 +19,7 @@ from apkscan.enrichers.multisource import (
     UrlscanPassiveEnricher,
     VirusTotalPassiveEnricher,
     ZoomEyePassiveEnricher,
+    _safe_error_type,
     configured_case_close_enrichers,
 )
 from apkscan.enrichers.shodan import ShodanEnricher
@@ -392,6 +393,21 @@ def test_quake_accepts_secondary_configured_key(monkeypatch) -> None:  # noqa: A
 
     assert result.ok is True
     assert session.headers == {"X-QuakeToken": secret}
+
+
+def test_safe_error_type_distinguishes_request_encoding_from_parse() -> None:
+    """★UnicodeEncodeError 是 ValueError 子类，但语义是请求侧编码失败（非 latin-1 的 key/参数
+    塞进 HTTP 头），不能误报成 parse_error——否则把病根指向"响应坏"而非"入参被污染"。"""
+    try:
+        "深".encode("latin-1")  # 触发真实的 UnicodeEncodeError
+    except UnicodeEncodeError as exc:
+        assert _safe_error_type(exc) == "request_encoding_error"
+    else:
+        pytest.fail("预期 UnicodeEncodeError 未抛出")
+    # 真·解析错误仍归 parse_error（普通 ValueError）。
+    assert _safe_error_type(ValueError("bad json")) == "parse_error"
+    # 超时 / 其它类型不受影响。
+    assert _safe_error_type(requests.Timeout()) == "timeout"
 
 
 def test_http_200_provider_error_envelope_is_failed_and_sanitized(monkeypatch) -> None:  # noqa: ANN001
