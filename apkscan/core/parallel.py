@@ -249,7 +249,7 @@ def _should_parallelize(ctx: object, eligible: list) -> bool:
     if os.environ.get(_ENV_NO_PARALLEL):
         return False
     if getattr(ctx, "platform", "android") != "android":
-        return False  # IPA 等 read_file 语义不同 → 串行
+        return False  # 非 android 平台（防御式）→ 串行
     if (os.cpu_count() or 1) < 2 or len(eligible) < 3:
         return False  # 单核 / 分析器太少不值进程开销
     if not getattr(ctx, "apk_path", ""):

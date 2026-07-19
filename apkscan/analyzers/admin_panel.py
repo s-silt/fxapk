@@ -84,7 +84,7 @@ class AdminPanelAnalyzer(BaseAnalyzer):
     """识别后台管理系统入口，产出 category=ADMIN_PANEL 的调证线索。"""
 
     name: str = "admin_panel"
-    requires: list[str] = []  # URL 文本通用：APK（dex/H5）与 IPA（资源）皆可，缺数据自然空跑
+    requires: list[str] = []  # URL 文本通用（dex/H5），缺数据自然空跑
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
         result = AnalyzerResult(analyzer=self.name)

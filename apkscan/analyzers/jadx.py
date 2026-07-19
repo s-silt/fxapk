@@ -109,7 +109,7 @@ class JadxAnalyzer(BaseAnalyzer):
     """jadx 反编译后从 Java 字符串字面量补端点 / 密钥（requires=["jadx"]）。"""
 
     name: str = "jadx"
-    requires: list[str] = ["jadx", "apk"]  # jadx 反编 DEX，IPA 无 DEX → 缺 apk 能力 skipped
+    requires: list[str] = ["jadx", "apk"]  # jadx 反编 DEX
 
     def __init__(self) -> None:
         # 每次 analyze 重新加载（见下）；这里给默认值供类型检查与兜底。

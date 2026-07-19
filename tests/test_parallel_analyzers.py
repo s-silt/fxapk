@@ -158,8 +158,8 @@ def test_should_parallelize_gating(monkeypatch: pytest.MonkeyPatch) -> None:
     assert parallel._should_parallelize(ok, eligible) is False
     monkeypatch.delenv("FXAPK_NO_PARALLEL", raising=False)
 
-    # IPA(非 android) → 串行。
-    assert parallel._should_parallelize(_fake(platform="ios", apk_path="/x.ipa"), eligible) is False
+    # 非 android 平台（防御式）→ 串行。
+    assert parallel._should_parallelize(_fake(platform="other", apk_path="/x.apk"), eligible) is False
     # 无 apk_path（worker 无法惰性兜底 read_file）→ 串行。
     assert parallel._should_parallelize(_fake(platform="android", apk_path=""), eligible) is False
     # 分析器太少 → 串行。
@@ -261,7 +261,7 @@ def _eligible_for(ctx: object) -> list[tuple]:
     from apkscan.core.registry import detect_capabilities, discover_analyzers
 
     caps = detect_capabilities(online=False)
-    caps.add("apk" if getattr(ctx, "platform", "android") == "android" else "ipa")
+    caps.add("apk")
     out: list[tuple] = []
     for a in discover_analyzers():
         name = getattr(a, "name", "") or a.__class__.__name__

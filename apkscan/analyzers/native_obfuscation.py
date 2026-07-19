@@ -80,7 +80,7 @@ class NativeObfuscationAnalyzer(BaseAnalyzer):
     """启发式标出疑加密 / 虚拟化的 App 自有 native .so（信号，非精确判定）。"""
 
     name: str = "native_obfuscation"
-    requires: list[str] = ["apk"]  # Android 专属；IPA 上 pipeline 自动 skipped
+    requires: list[str] = ["apk"]  # Android 专属
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
         result = AnalyzerResult(analyzer=self.name)

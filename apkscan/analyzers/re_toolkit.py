@@ -110,7 +110,7 @@ class ReToolkitAnalyzer(BaseAnalyzer):
     """识别样本内置的 hook 框架 / 反检测工具，产 anti_analysis Finding + 抓包预判 meta。"""
 
     name: str = "re_toolkit"
-    requires: list[str] = ["apk"]  # Android 专属；IPA 上 pipeline 自动 skipped
+    requires: list[str] = ["apk"]  # Android 专属
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
         result = AnalyzerResult(analyzer=self.name)
