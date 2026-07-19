@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -133,13 +134,15 @@ class JadxAnalyzer(BaseAnalyzer):
             status = self._run_jadx(apk_path, tmp)
             result.meta["jadx_status"] = status
             # timeout/failed 仍尽量扫已生成产物（jadx 常非零退出但已产出部分源码）。
-            eps, findings, n_files, decrypt_candidates = self._scan_java(Path(tmp))
+            eps, findings, n_files, decrypt_candidates, suppressed = self._scan_java(Path(tmp))
             result.endpoints = eps
             result.findings = findings
             result.meta["jadx_java_files"] = n_files
             result.meta["jadx_endpoint_count"] = len(eps)
             if decrypt_candidates:  # 机器可读「待 AI 解密」清单（疑似加密配置串 + 疑似解密 helper）
                 result.meta["decrypt_candidates"] = decrypt_candidates
+            if suppressed:  # 被降噪规则压制的候选数（按原因），供复核"压制是否吃掉了自有密文"
+                result.meta["decrypt_candidates_suppressed"] = suppressed
             logger.info(
                 "[jadx] status=%s java=%d 端点=%d 密钥Finding=%d",
                 status, n_files, len(eps), len(findings),
@@ -189,15 +192,17 @@ class JadxAnalyzer(BaseAnalyzer):
 
     def _scan_java(
         self, root: Path
-    ) -> tuple[list[Endpoint], list[Finding], int, list[dict]]:
+    ) -> tuple[list[Endpoint], list[Finding], int, list[dict], dict[str, int]]:
         """扫 root 下所有 .java，从字符串字面量抽端点、从键值抽密钥、产 config-chain 层② 共现链。
 
-        返回 ``(endpoints, findings, n_files, decrypt_candidates)``——最后一项是机器可读的「待 AI 解密」清单
-        （疑似加密配置串 + 疑似解密 helper + 位置），供下游 AI/appcrypto 拾取尝试解密。
+        返回 ``(endpoints, findings, n_files, decrypt_candidates, suppressed)``——``decrypt_candidates`` 是机器
+        可读的「待 AI 解密」清单（疑似加密配置串 + 疑似解密 helper + 位置），供下游 AI/appcrypto 拾取尝试
+        解密；``suppressed`` 是被 string_graph 降噪规则压制的候选数（按原因分组），只计数、不进 Finding。
         """
         collector: dict[str, Endpoint] = {}
         secret_hits: dict[tuple[str, str], Finding] = {}
         chain_objs: dict[tuple[str, str], StringChain] = {}  # config-chain 层②：按 (文件, 密文) 去重（嵌套不重复）
+        suppressed: Counter[str] = Counter()  # 压制原因 → 条数（同样按 (文件, 密文) 去重后计）
         n_files = 0
         for java in root.rglob("*.java"):
             if n_files >= _MAX_JAVA_FILES:
@@ -232,10 +237,17 @@ class JadxAnalyzer(BaseAnalyzer):
                     chain_objs.setdefault(key, chain)
             except Exception:
                 logger.exception("[jadx] string_graph 扫描失败，跳过：%s", rel)
-        chains = list(chain_objs.values())
+        # 压制链（第三方库路径 / 密码学参数表）只计数、不进 Finding 与待解密清单：它们是降噪规则的产物，
+        # 但规则的 key 落在样本可控输入上，所以条数要留痕——压制量突然变大本身就是值得复核的信号。
+        chains = []
+        for chain in chain_objs.values():
+            if chain.suppressed:
+                suppressed[chain.suppressed] += 1
+            else:
+                chains.append(chain)
         findings = list(secret_hits.values()) + [_chain_finding(c) for c in chains]
         candidates = [_chain_candidate(c) for c in chains]
-        return list(collector.values()), findings, n_files, candidates
+        return list(collector.values()), findings, n_files, candidates, dict(suppressed)
 
     def _scan_text(
         self,
