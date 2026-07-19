@@ -125,11 +125,11 @@ def _instantiate_subclasses(modules: list[ModuleType], base: type) -> list:
     return instances
 
 
-# requires 可声明的已知能力名：detect_capabilities() 探测的 + pipeline 按平台注入的 apk/ipa。
+# requires 可声明的已知能力名：detect_capabilities() 探测的 + pipeline 注入的 apk。
 # 分析器 requires 里出现此集合外的名字（如把 "jadx" 拼成 "jdax"）会让它永久被 skip，且
 # skipped 理由像"环境缺工具"而非代码 bug——极难发现，故自动发现期校验并点名告警。
 _KNOWN_CAPABILITIES: frozenset[str] = frozenset(
-    {"apk", "ipa", "jadx", "adb", "online", "frida", "frida-dexdump", "mitmproxy", "device"}
+    {"apk", "jadx", "adb", "online", "frida", "frida-dexdump", "mitmproxy", "device"}
 )
 
 

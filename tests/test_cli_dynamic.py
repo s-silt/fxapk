@@ -230,7 +230,7 @@ def test_analyze_cleans_adb_on_exit(monkeypatch):
     monkeypatch.setattr(tools, "kill_adb_server", lambda: calls.__setitem__("n", calls["n"] + 1))
     monkeypatch.setattr(cli.device, "has_device", lambda: False)
     monkeypatch.setattr("apkscan.core.pipeline.run", lambda ctx, config: _make_report("com.x"))
-    monkeypatch.setattr(cli, "load_app", lambda *a, **k: _FakeCtx())
+    monkeypatch.setattr(cli, "load_apk", lambda *a, **k: _FakeCtx())
     monkeypatch.setattr(cli, "_write_reports", lambda *a, **k: None)
 
     import tempfile
@@ -255,7 +255,7 @@ def _stub_analyze_static(monkeypatch: pytest.MonkeyPatch, report: Report) -> Non
     monkeypatch.setattr(tools, "kill_adb_server", lambda: None)
     monkeypatch.setattr(cli.device, "has_device", lambda: False)
     monkeypatch.setattr("apkscan.core.pipeline.run", lambda ctx, config: report)
-    monkeypatch.setattr(cli, "load_app", lambda *a, **k: _FakeCtx())
+    monkeypatch.setattr(cli, "load_apk", lambda *a, **k: _FakeCtx())
 
 
 def test_analyze_writes_evidence_manifest_and_sample_sha256(monkeypatch, tmp_path):
@@ -450,7 +450,7 @@ def test_analyze_dynamic_no_device_skips(monkeypatch):
     monkeypatch.setattr(
         "apkscan.core.pipeline.run", lambda ctx, config: _make_report("com.x")
     )
-    monkeypatch.setattr(cli, "load_app", lambda *a, **k: _FakeCtx())
+    monkeypatch.setattr(cli, "load_apk", lambda *a, **k: _FakeCtx())
     monkeypatch.setattr(cli, "_write_reports", lambda *a, **k: None)
 
     # 用一个临时存在的文件冒充 apk（analyze 的 Argument exists=True）。
@@ -694,7 +694,7 @@ def test_capture_plan_default_still_prints_text_steps(tmp_path: Path) -> None:
 
 
 class _FakeCtx:
-    """load_app 返回值的最小替身（analyze 用到 package_name / platform）。"""
+    """load_apk 返回值的最小替身（analyze 用到 package_name / platform）。"""
 
     package_name = "com.x"
     platform = "android"

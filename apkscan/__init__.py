@@ -1,4 +1,4 @@
-"""apkscan — 涉诈 APK / iOS IPA 调证分析 CLI。"""
+"""apkscan — 涉诈 APK 调证分析 CLI。"""
 
 from __future__ import annotations
 
