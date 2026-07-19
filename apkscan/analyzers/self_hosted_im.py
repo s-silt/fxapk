@@ -92,7 +92,7 @@ class SelfHostedImAnalyzer(BaseAnalyzer):
     """识别自建 IM / C2 控制信道，产出 category=SELF_HOSTED_IM 的调证线索。"""
 
     name: str = "self_hosted_im"
-    # 信道 URL 走文本（dex/H5/资源），库指纹走 dex 字符串：APK/IPA 皆可，缺数据自然空跑。
+    # 信道 URL 走文本（dex/H5/资源），库指纹走 dex 字符串；缺数据自然空跑。
     requires: list[str] = []
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

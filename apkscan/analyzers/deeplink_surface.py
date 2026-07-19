@@ -84,7 +84,7 @@ class DeeplinkSurfaceAnalyzer(BaseAnalyzer):
     """枚举导出组件的 deeplink 外部入口，产 category=\"exported_surface\" 的 Finding。"""
 
     name: str = "deeplink_surface"
-    requires: list[str] = ["apk"]  # Android 专属；IPA 上 pipeline 自动 skipped
+    requires: list[str] = ["apk"]  # Android 专属
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
         result = AnalyzerResult(analyzer=self.name)

@@ -108,7 +108,7 @@ class CardMerchantAnalyzer(BaseAnalyzer):
     """识别卡商 / 料商 / 开户供应链关键词，产出 category=CARD_MERCHANT 的研判线索。"""
 
     name: str = "card_merchant"
-    requires: list[str] = []  # 关键词文本通用：APK（dex/H5）与 IPA（资源）皆可，缺数据自然空跑
+    requires: list[str] = []  # 关键词文本通用（dex/H5），缺数据自然空跑
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
         result = AnalyzerResult(analyzer=self.name)

@@ -71,7 +71,7 @@ class FaviconAnalyzer(BaseAnalyzer):
     """从应用图标 / favicon 抽 mmh3 指纹，产测绘 pivot 锚点线索。"""
 
     name: str = "favicon"
-    requires: list[str] = []  # 纯文件读取，APK/IPA 通用，永远可用
+    requires: list[str] = []  # 纯文件读取，永远可用
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
         result = AnalyzerResult(analyzer=self.name)
