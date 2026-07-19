@@ -50,6 +50,25 @@ def test_base64_gzip_json() -> None:
     assert r.domains == _EXPECT_DOMAINS
 
 
+def test_base64_json_with_trailing_newline() -> None:
+    """★远程配置常带尾随换行；validate=True 见空白即抛。判形/解码须先规范化同一文本，
+    否则整份配置静默解不开（decoded=False, chain=()）。"""
+    r = decode_config_blob(base64.b64encode(_JSON_BYTES) + b"\n")
+    assert r.decoded is True
+    assert r.decode_chain == ("base64", "json")
+    assert r.domains == _EXPECT_DOMAINS
+
+
+def test_base64_json_with_mime_line_folding() -> None:
+    """★MIME 76 列折行（CRLF 内插）的 base64 也须解开——OSS/邮件系统导出的配置常见此形。"""
+    raw = base64.b64encode(gzip.compress(_JSON_BYTES))
+    folded = b"\r\n".join(raw[i:i + 76] for i in range(0, len(raw), 76))
+    r = decode_config_blob(folded)
+    assert r.decoded is True
+    assert r.decode_chain == ("base64", "gzip", "json")
+    assert r.domains == _EXPECT_DOMAINS
+
+
 def test_plain_text_domain_list() -> None:
     r = decode_config_blob(b"api.evil-c2.com\nbackup.evil-c2.com\n45.11.22.33\n")
     assert r.decoded is True
