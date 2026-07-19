@@ -3,6 +3,62 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
+## Unreleased — 待发布（拟 1.2.0）
+
+Theme: **1.1.0 之后的功能收敛 + 静默损坏类修复**——移除从未真正落地的 iOS 与 webcheck 两条支线，
+并修一批「不报错但结果悄悄错」的缺陷（.env 加载 / 远程配置解码 / 子进程编码 / CFB8 解密 / IOC 导出）。
+
+### Removed
+
+- **iOS IPA 支持**（#215）：工具收敛为**仅分析 Android APK**。删除 `core/ipa.py`、`core/macho.py`、
+  `analyzers/ios_plist.py` 与 `core/loader.py` 的文件类型分流（CLI 直接 `load_apk`），pipeline 恒注入
+  `apk` 能力、去掉 `ipa` 能力与 iOS 降级分支。IPA 路径从未超出静态 Info.plist / Mach-O 字符串提取、无真实用例。
+  - **对调用方影响**：CLI 只收 APK——传 `.ipa` 报解析错误退出码 2；`ipa` 能力消失（`requires=["ipa"]`
+    的分析器永不运行）；输出不再有「类型：IPA(iOS)/APK(Android)」行。
+- **webcheck 富化器**（#214）：它是全仓**唯一 `active=True` 富化器**；其信号改由被动源 / PCAP 管线覆盖。
+  `exposure.build_host_fingerprint` / `assess_tech_stack` 与 `forensic.classify_jurisdiction` 收敛掉
+  webcheck 形参，attribution 不再读 webcheck 子键（保留 `signals["response_headers"]` 契约），selfcheck
+  去掉 webcheck 组件。
+  - **对调用方影响**：`FXAPK_WEBCHECK_URL` / `FXAPK_WEBCHECK_CHECKS` / `FXAPK_WEBCHECK_TIMEOUT` 三个环境
+    变量不再读取；`--mode authorized-active` 当前不再放行任何「主动富化器」（模式门保留、fail-closed，
+    未来新增主动富化器须显式 `active=True`），该模式现放行的是远程配置对象下载与 Telegram getMe 在线核验；
+    上述 exposure/forensic helper 去掉第二个参数。
+
+### Fixed
+
+- **.env 加载**（#212、#213、#216）：未加引号值按首个「空白+`#`」剥行内注释（避免中文备注并入 key 后当
+  HTTP 头触发 UnicodeEncodeError），空白判定用 `str.isspace()` 覆盖全角空格 U+3000 / NBSP；带行尾注释的
+  引号值按**配对收尾引号**切分；改用 `utf-8-sig` 读并剥 BOM；非 UTF-8 文件从静默跳过改 **WARNING** 明示整份
+  未加载；空占位行（`KEY=` 及引号空串 `KEY=""`）不再注入，以免高优先级 .env 的空值**静默掩蔽**低优先级
+  文件里配好的真实值；注入以 debug 记「键名←来源文件」（不回显值）。新增 `tests/test_dotenv.py`。
+  - **对调用方影响**：未加引号 `.env` 值在首个「空白+`#`」处截断（值若含字面 ` #` 须加引号）；空占位行不再
+    把环境变量置空（要空串请用真实环境变量）。
+- **远程配置 base64 解码**（#217）：判形前 strip 而解码用原文 + `validate=True`，带尾随换行 / MIME 76 列
+  折行的 base64 配置会**静默解不开**（`decoded=False, chain=()`）。改为判形与解码共用同一份去空白的规范化文本。
+- **子进程编码 / CFB8 解密 / 错误归类 / 不泄密诊断**（#218，六处，各配「无修复即失败」回归测试）：
+  - `appcrypto._build_mode` 按段位构造 CFB8 / CFB128（此前忽略 `segment_size` 恒按 CFB128、把 `AES/CFB8`
+    密文解成乱码；不支持的段位改为拒绝而非静默出错）；`cryptohook._norm_mode` 保留 CFB 尾随段位数字，使
+    recipe 端到端携带段位。
+  - `multisource._safe_error_type` 把 `UnicodeError` 归 `request_encoding_error`（此前落进 `ValueError`
+    分支误报 `parse_error`）。
+  - `case close` 失败日志补记末 5 帧调用位置（文件:行:函数），仍**不写异常消息**以防 provider 敏感响应片段入日志。
+  - `jadx` / `pdf` 的 `subprocess.run` 显式 `encoding="utf-8", errors="replace"`，避免 GBK 默认编码的中文
+    Windows 上读取线程崩溃、丢光 stderr。
+  - **对调用方影响**：富化 `error_type` 新增取值 `request_encoding_error`（匹配该字段的脚本 / CI 需更新）；
+    解密配方 `mode` 值可能从恒 `CFB` 变为 `CFB8` / `CFB128`（精确匹配 mode 串的消费方注意）。
+- **IOC CSV 公式注入**（#219）：`report/ioc.py` 的 `write_csv` 在写入层对首字符为 `= + - @`、Tab、CR 的
+  单元格前置单引号（IOC 值直接来自不可信样本，未转义会在 Excel/WPS 被当公式执行）；改为按 `IOC_COLUMNS`
+  投影写入，任何拼行路径都无法绕过。
+  - **对调用方影响**：如 `+86…` 联系号会写成 `'+86…`；机器精确匹配 `ioc.csv` 值的脚本，应**仅当**剥掉的首
+    字符确为上述触发符时才剥一个前导单引号（合法值本身以 `'` 开头不受转义、不可无条件剥）；列 schema / 表头不变。
+
+### Chore
+
+- `.env.example` 增补 `FXAPK_DAYDAYMAP_KEY` / `FXAPK_DAYDAYMAP_KEY2` 槽位与 DayDayMap 调用要点（POST /
+  标准而非 urlsafe base64 keyword / API-KEY 请求头 / 响应仅含请求 fields）+ 多账号轮换规则（KEY→KEY2，
+  仅配额/限频错误才切换）+ IP 维度返回的 ICP 备案属该 IP 上共同托管站点、非 IP 持有人的语义差异（#210、#211）。
+  DayDayMap 由 OneDrive 多源富化工具消费，主仓 `analyze` 不直接调用。
+
 ## 1.1.0 — 2026-07-19
 
 Theme: **1.0.0 后的安全与精度加固**——一轮全项目审计 + 对抗式复审后的正确性 / 输出安全
