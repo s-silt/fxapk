@@ -172,7 +172,8 @@ class JadxAnalyzer(BaseAnalyzer):
         logger.info("[jadx] 执行：%s", " ".join(cmd))
         try:
             proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=_TIMEOUT, check=False, env=env
+                cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=_TIMEOUT, check=False, env=env,
             )
         except subprocess.TimeoutExpired:
             logger.warning("[jadx] 反编译超时（%ss）：%s", _TIMEOUT, apk_path)

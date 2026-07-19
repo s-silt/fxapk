@@ -129,7 +129,8 @@ def html_to_pdf(html_path: str, pdf_path: str, *, timeout: float = _PRINT_TIMEOU
     logger.info("导出 PDF：%s → %s（%s）", src.name, out.name, Path(browser).name)
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, check=False
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout, check=False,
         )
     except subprocess.TimeoutExpired:
         logger.warning("浏览器导出 PDF 超时（%ss）：%s", timeout, src)
