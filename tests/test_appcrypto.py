@@ -85,6 +85,31 @@ def test_decrypt_envelope_roundtrip_success() -> None:
     assert out == _PLAINTEXT
 
 
+def test_decrypt_cfb8_segment_size_honored() -> None:
+    """★CFB8：段大小必须被尊重。``AES/CFB8`` 密文用默认 CFB(128) 解会得到乱码；
+    修前 _build_mode 忽略 segment_size 恒用 CFB128 → 本用例失败。"""
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    kb = _KEY.encode("utf-8")
+    ts = _TS
+    iv = hashlib.md5(kb + str(ts).encode()).hexdigest()[:16].encode("utf-8")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        enc = Cipher(algorithms.AES(kb), modes.CFB8(iv)).encryptor()  # 8-bit 段
+        ct = enc.update(_pkcs7_pad(_PLAINTEXT.encode("utf-8"))) + enc.finalize()
+    payload = base64.b64encode(ct).decode("ascii")
+
+    # 段位经 mode 名 CFB8 携带。
+    recipe = CryptoRecipe(key=_KEY, mode="CFB8")
+    assert decrypt_envelope(payload, recipe, ts) == _PLAINTEXT
+    # 段位经 segment_size 字段携带（mode 仍写 CFB）也须生效。
+    recipe2 = CryptoRecipe(key=_KEY, mode="CFB", segment_size=8)
+    assert decrypt_envelope(payload, recipe2, ts) == _PLAINTEXT
+    # 反证：默认 CFB(128) 解 CFB8 密文 → 绝不还原出原文。
+    recipe_wrong = CryptoRecipe(key=_KEY, mode="CFB")  # segment_size 默认 128
+    assert decrypt_envelope(payload, recipe_wrong, ts) != _PLAINTEXT
+
+
 def test_decrypt_envelope_timestamp_as_str() -> None:
     """timestamp 以 str 传入也能正确派生 iv。"""
     payload = _encrypt_envelope_b64(_PLAINTEXT)

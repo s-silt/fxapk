@@ -118,7 +118,11 @@ def test_case_close_internal_failure_uses_strict_failure_exit(
     assert result.exit_code == 6
     assert "案件闭环执行失败（RuntimeError）" in result.output
     assert "sensitive-provider-detail" not in result.output
+    # ★脱敏不变量：异常消息（可能夹带 provider 敏感响应片段）绝不进日志。
     assert "sensitive-provider-detail" not in caplog.text
+    # ★但排障线索必须留：日志记异常调用栈位置（文件:行:函数），而非只有类型名。
+    assert "closure failed (RuntimeError) at" in caplog.text
+    assert "case.py:" in caplog.text  # 抛出点所在文件出现在帧位置里
 
 
 def test_closure_exit_code_is_fail_closed() -> None:

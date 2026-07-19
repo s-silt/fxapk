@@ -225,6 +225,16 @@ def test_transformation_parts_algo_only() -> None:
     assert cryptohook.transformation_parts("") == ("", "", "")
 
 
+def test_transformation_parts_preserves_cfb_segment() -> None:
+    """★CFB8 段位不得被折叠成 CFB——两者密文不同，折叠后 appcrypto 按 128 解会得乱码。"""
+    assert cryptohook.transformation_parts("AES/CFB8/NoPadding") == ("AES", "CFB8", "NoPadding")
+    assert cryptohook.transformation_parts("AES/CFB128/PKCS5Padding") == ("AES", "CFB128", "Pkcs7")
+    # 无段位后缀的 CFB 保持不变（默认整块反馈）。
+    assert cryptohook.transformation_parts("AES/CFB/PKCS5Padding") == ("AES", "CFB", "Pkcs7")
+    # 其余模式不受影响（段位语义只属 CFB）。
+    assert cryptohook._norm_mode("CBC") == "CBC"
+
+
 # ---------------------------------------------------------------------------
 # brand_hints_from_events
 # ---------------------------------------------------------------------------
