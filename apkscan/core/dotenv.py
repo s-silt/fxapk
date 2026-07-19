@@ -58,8 +58,16 @@ def _parse_line(raw: str) -> "tuple[str, str] | None":
     if not key:
         return None
     val = val.strip()
-    if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
-        return key, val[1:-1]  # 引号内原样保留：# 是值的一部分，不当注释
+    # 引号包裹：按**配对的收尾引号**切，其后一律视为注释丢弃。
+    # ★不能用 ``val[0] == val[-1]`` 判：``KEY="abc"  # 注释`` 的末字符属注释，判不出是引号包裹，
+    #   会掉进下面的剥注释分支，把字面引号留在值里；更糟的是 ``KEY="a # b"  # 注释`` 会从引号**内部**
+    #   的 ``# `` 切断，得到 ``"a``。
+    if val[:1] in ("'", '"'):
+        quote = val[0]
+        end = val.find(quote, 1)
+        if end != -1:
+            return key, val[1:end]  # 引号内原样保留：# 是值的一部分，不当注释
+        # 引号未闭合：退化为按未加引号处理，不猜。
     # 未加引号才剥行内注释。★不剥的话，``KEY=<密钥>  # 备注`` 会把备注并进密钥——真实踩过：
     # 一个带中文备注的 API key 被塞进 HTTP 头，latin-1 编码不了而 UnicodeEncodeError。
     return key, _strip_inline_comment(val)
@@ -72,7 +80,16 @@ def load_dotenv(path: "str | os.PathLike[str] | None" = None) -> int:
         try:
             if not p.is_file():
                 continue
-            text = p.read_text(encoding="utf-8")
+            # utf-8-sig：编辑器存的 .env 常带 BOM，用 utf-8 读会让**首个键名**变成 "﻿FXAPK_..."，
+            # 于是"注入成功 1 条"但真实键查不到，且毫无告警——最难查的那种静默损坏。
+            text = p.read_text(encoding="utf-8-sig")
+        except UnicodeDecodeError:
+            # 非 UTF-8（如 GBK）会让**整个文件**被丢弃、所有密钥凭空消失。这必须让用户看见，
+            # 不能只留 debug 级日志：症状是"所有源都说没配密钥"，离病根极远。
+            logger.warning(
+                ".env 不是 UTF-8 编码，整份已跳过（所有密钥都不会加载）：%s；请另存为 UTF-8", p
+            )
+            continue
         except Exception:
             logger.debug(".env 读取失败，跳过：%s", p, exc_info=True)
             continue
