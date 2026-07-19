@@ -633,11 +633,11 @@ def _online_as_org(enrichment: dict[str, Any]) -> str | None:
 
 
 def attribution_from_enrichment(enrichment: dict[str, Any], ip: str = "") -> dict[str, Any] | None:
-    """把端点既有扁平 ``enrichment``（asn/webcheck 等子键）映射到五层归因。无可用 IP 归属信号 → None。绝不抛。
+    """把端点既有扁平 ``enrichment``（asn/dns/ip_rdap 等子键）映射到五层归因。无可用 IP 归属信号 → None。绝不抛。
 
     映射（诚实、按各富化器**真实 schema**）：``asn`` 子键 {asn,org,isp,country} → origin_network + hosting_provider；
-    ``dns`` 子键的 ``cname``（DnsEnricher 实际输出位置）→ edge 的 CNAME 强信号；``webcheck`` 若含扁平 response_headers
-    则一并喂 edge（PCAP-first 下响应头主要来自被动抓包，webcheck 按检查名嵌套、无扁平头时自然跳过）。
+    ``dns`` 子键的 ``cname``（DnsEnricher 实际输出位置）→ edge 的 CNAME 强信号。响应头信号保留在
+    ``signals["response_headers"]`` 契约里（PCAP-first 下响应头来自被动抓包），当前无富化器写入即为空。
     ★resource_holder **仅**由 ``ip_rdap`` 子键（IpRdapEnricher，IP 资源登记方）填——绝不用域名 rdap
     （applies_to=['domain']，域名注册方）或 asn 的 ip-api ISP（网络运营方）冒充 IP 资源持有方。
     """
@@ -647,16 +647,14 @@ def attribution_from_enrichment(enrichment: dict[str, Any], ip: str = "") -> dic
     asn_e = asn_e if isinstance(asn_e, dict) else {}
     dns_e = enrichment.get("dns")
     dns_e = dns_e if isinstance(dns_e, dict) else {}
-    wc = enrichment.get("webcheck")
-    wc = wc if isinstance(wc, dict) else {}
     ip_rdap = enrichment.get("ip_rdap")
     ip_rdap = ip_rdap if isinstance(ip_rdap, dict) else {}
     tls_e = enrichment.get("tls")
     tls_e = tls_e if isinstance(tls_e, dict) else {}
     # ip-api org/isp 优先；均空时回落 case-close 在线源（FOFA/Hunter/Shodan…）的 as_org 补网络运营方。
-    # 提前算并纳入早期返回判据——否则只有 fofa/hunter（无 asn/dns/wc/ip_rdap）时会在提取 as_org 前误返回 None。
+    # 提前算并纳入早期返回判据——否则只有 fofa/hunter（无 asn/dns/ip_rdap）时会在提取 as_org 前误返回 None。
     online_org = _online_as_org(enrichment)
-    if not asn_e and not dns_e and not wc and not ip_rdap and not online_org and not tls_e:
+    if not asn_e and not dns_e and not ip_rdap and not online_org and not tls_e:
         return None
     signals: dict[str, Any] = {
         "country": asn_e.get("country"),
@@ -669,18 +667,14 @@ def attribution_from_enrichment(enrichment: dict[str, Any], ip: str = "") -> dic
         if not signals["country"]:
             signals["country"] = ip_rdap.get("country")
     # DnsEnricher 把 CNAME 链写在 enrichment['dns']['cname']（去了末点，便于后缀匹配）——edge 最可靠的强信号。
-    cname = dns_e.get("cname") or wc.get("cname") or wc.get("cnames") or wc.get("cname_chain")
+    cname = dns_e.get("cname")
     if isinstance(cname, list):
         signals["cname_chain"] = cname
-    headers = wc.get("response_headers") or wc.get("headers")
-    if isinstance(headers, dict):
-        signals["response_headers"] = headers
-    # ★前置指纹接线（B2-b）：TLS SPKI/JA4S（tls 子键）+ 默认页/favicon 哈希（webcheck）——高区分度服务端指纹，
+    # ★前置指纹接线（B2-b）：TLS SPKI/JA4S（tls 子键）——高区分度服务端指纹，
     # 认不出名的前置靠它跨端点聚 fronting-cluster。当前无生产富化器写入即为空、纯前向兼容（数据源见 C 阶段网络流引擎）。
     for skey, sval in (("tls_spki", tls_e.get("spki_sha256") or tls_e.get("spki")),
                        ("tls_ja4s", tls_e.get("ja4s") or tls_e.get("ja4s_hash")),
-                       ("favicon_mmh3", wc.get("favicon_mmh3") or wc.get("favicon")),
-                       ("body_sha256", wc.get("body_sha256") or wc.get("body_hash"))):
+                       ):
         if _s(sval):
             signals[skey] = _s(sval)
     # ★有效信号判据（不塞空壳）：子键非空但字段全 None（如 {"asn":{"asn":None}}）时，至少要有一个可解析

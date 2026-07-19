@@ -1,7 +1,7 @@
 """自检诊断（AI 友好）：逐项报告**哪个能力通 / 不通 / 怎么修**，输出稳定 JSON。
 
 供任意 AI agent（Codex / Claude / 其它）在驱动 fxapk 前先 ``fxapk selfcheck`` 自检：知道图谱串案、
-解密、jadx、动态脱壳抓包、联网富化、web-check 等可选能力哪些就绪、哪些缺、各自一句话修复指引——
+解密、jadx、动态脱壳抓包、联网富化等可选能力哪些就绪、哪些缺、各自一句话修复指引——
 agent 据此决定走哪条路 / 提示用户装什么，而非试错。纯结构化输出、绝不抛、不暴露任何敏感数据。
 """
 
@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import importlib.util
 import logging
-import os
 from collections import Counter
 from typing import Any
 
@@ -53,32 +52,6 @@ def _dep_component(label: str, module: str, fix: str, why: str) -> dict[str, str
     )
 
 
-def _webcheck_component(probe: bool) -> dict[str, str]:
-    url = (os.environ.get("FXAPK_WEBCHECK_URL") or "").strip().rstrip("/")
-    if not url:
-        return _component(
-            "webcheck", "network", _STATUS_DISABLED,
-            "web-check OSINT 再查一轮（域名/IP 地理/SSL/端口/技术栈/威胁/子域）",
-            "设环境变量 FXAPK_WEBCHECK_URL 指向本地 web-check 实例（docker run -p 3000:3000 lissy93/web-check）",
-        )
-    if not probe:
-        return _component("webcheck", "network", _STATUS_OK, f"已配置：{url}（未探测连通）", "")
-    reachable = False
-    try:
-        import requests
-
-        requests.get(url, timeout=4)
-        reachable = True
-    except Exception as exc:  # noqa: BLE001 — 探测失败=不可达，给修复指引，不抛
-        logger.debug("webcheck 探测失败：%s（%s）", url, exc)
-    return _component(
-        "webcheck", "network",
-        _STATUS_OK if reachable else _STATUS_UNREACHABLE,
-        f"web-check 实例：{url}",
-        "" if reachable else f"实例不可达，确认已启动并监听该地址：{url}",
-    )
-
-
 def run_selfcheck(*, online: bool = True, probe_network: bool = True) -> dict[str, Any]:
     """逐项自检，返回 {components:[{name,category,status,detail,fix}], summary, ok}。绝不抛。"""
     from apkscan.core.registry import detect_capabilities
@@ -108,7 +81,6 @@ def run_selfcheck(*, online: bool = True, probe_network: bool = True) -> dict[st
             "" if net_ok else "确保本机可出网且用 --online（注意 whois 走 DNS，部分环境不可用）",
         )
     )
-    components.append(_webcheck_component(probe_network and online))
 
     summary = Counter(c["status"] for c in components)
     # 整体 ok：核心就绪 + 无「配了却连不上」的硬故障（missing/disabled 是可选能力未启用，可接受）。

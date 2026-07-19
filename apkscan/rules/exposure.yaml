@@ -8,7 +8,6 @@
 #   server / x_powered_by / title  ← 服务 banner 的 Server / X-Powered-By / <title>
 #   cookie                         ← Set-Cookie 名（离散 token，精确匹配）
 #   product / cpe / module         ← shodan.services[]（被动，对目标零流量）
-#   （title / product 亦并入 webcheck tech-stack 识别到的技术名，见 core/exposure.build_host_fingerprint）
 
 # -------------------------------------------------------------------------
 # 技术栈 / 后台框架指纹（仅识别 → 同后台串案；不含漏洞方向、不含利用靶单）

@@ -69,7 +69,7 @@ def _build_overseas_targets(endpoints: list[Endpoint]) -> list[dict]:
             juris = forensic.classify_jurisdiction(
                 ep.value,
                 icp=e.get("icp"), rdap=e.get("rdap"), whois=e.get("whois"),
-                dns=e.get("dns"), asn=e.get("asn"), webcheck=e.get("webcheck"), shodan=shodan,
+                dns=e.get("dns"), asn=e.get("asn"), shodan=shodan,
             )
         except Exception:  # noqa: BLE001 — 辖区判定失败不得炸主流程；保守判未知
             logger.debug("[overseas_targets] 辖区判定失败：%s", ep.value, exc_info=True)
@@ -112,7 +112,7 @@ def _build_overseas_targets(endpoints: list[Endpoint]) -> list[dict]:
             entry["services"] = services
 
         # 技术栈/后台框架指纹（被动 banner → 同后台疑同团伙串案）。
-        tech = exposure.assess_tech_stack(shodan, e.get("webcheck"))
+        tech = exposure.assess_tech_stack(shodan)
         if tech:
             entry["tech_stack"] = tech
 
@@ -194,8 +194,8 @@ def _apply_forensic(
         evidence_to_obtain.extend(forensic.render_overseas_targets(enr.get("shodan")))
         # 证书透明度（被动 crt.sh）：CT 日志关联子域（含历史/影子子域），疑同团伙基础设施→并簇串案。
         evidence_to_obtain.extend(forensic.render_related_subdomains(enr.get("certs")))
-        # 技术栈/后台框架指纹（被动 banner，shodan/webcheck）：仅识别 → 同后台疑同团伙串案，不研判漏洞。
-        _tech = exposure.assess_tech_stack(enr.get("shodan"), enr.get("webcheck"))
+        # 技术栈/后台框架指纹（被动 banner，shodan）：仅识别 → 同后台疑同团伙串案，不研判漏洞。
+        _tech = exposure.assess_tech_stack(enr.get("shodan"))
         evidence_to_obtain.extend(forensic.render_tech_stack(_tech))
     return f"{notes}；{fp.label}" if notes else fp.label
 
@@ -264,7 +264,7 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
     notes = _apply_forensic(
         advice, ep.value, evidence_to_obtain, notes,
         icp=icp, rdap=rdap, whois=whois, dns=dns,
-        webcheck=ep.enrichment.get("webcheck"), shodan=ep.enrichment.get("shodan"),
+        shodan=ep.enrichment.get("shodan"),
         certs=ep.enrichment.get("certs"),
     )
     return Lead(
@@ -302,7 +302,7 @@ def _ip_lead(ep: Endpoint, online: bool = True) -> Lead:
 
     notes = _apply_forensic(
         advice, ep.value, evidence_to_obtain, _endpoint_notes(ep, online, enriched),
-        asn=asn, webcheck=ep.enrichment.get("webcheck"), shodan=ep.enrichment.get("shodan"),
+        asn=asn, shodan=ep.enrichment.get("shodan"),
         certs=ep.enrichment.get("certs"),
     )
     return Lead(
