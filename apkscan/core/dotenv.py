@@ -32,8 +32,22 @@ def _candidate_paths(explicit: "str | os.PathLike[str] | None") -> list[Path]:
     return out
 
 
+def _strip_inline_comment(val: str) -> str:
+    """剥掉**未加引号**值尾部的行内注释（``KEY=abc  # 说明`` → ``abc``）。
+
+    按 dotenv 惯例，只有**空白 + ``#``** 才起注释（``abc#def`` 里的 ``#`` 是值的一部分），
+    故密钥本身含 ``#`` 不会被截断。取最早出现的那个分隔位。
+    """
+    cut = len(val)
+    for sep in (" #", "\t#"):
+        idx = val.find(sep)
+        if idx != -1:
+            cut = min(cut, idx)
+    return val[:cut].rstrip()
+
+
 def _parse_line(raw: str) -> "tuple[str, str] | None":
-    """解析一行 ``KEY=VALUE``（支持 ``export KEY=...`` 与引号包裹）；非法行返回 None。"""
+    """解析一行 ``KEY=VALUE``（支持 ``export KEY=...``、引号包裹与行内注释）；非法行返回 None。"""
     line = raw.strip()
     if not line or line.startswith("#") or "=" not in line:
         return None
@@ -45,8 +59,10 @@ def _parse_line(raw: str) -> "tuple[str, str] | None":
         return None
     val = val.strip()
     if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
-        val = val[1:-1]
-    return key, val
+        return key, val[1:-1]  # 引号内原样保留：# 是值的一部分，不当注释
+    # 未加引号才剥行内注释。★不剥的话，``KEY=<密钥>  # 备注`` 会把备注并进密钥——真实踩过：
+    # 一个带中文备注的 API key 被塞进 HTTP 头，latin-1 编码不了而 UnicodeEncodeError。
+    return key, _strip_inline_comment(val)
 
 
 def load_dotenv(path: "str | os.PathLike[str] | None" = None) -> int:
