@@ -90,6 +90,46 @@ def test_bom_does_not_corrupt_first_key(tmp_path, monkeypatch) -> None:
     assert not [k for k in os.environ if k.startswith("﻿")]
 
 
+def test_fullwidth_space_and_nbsp_start_comment() -> None:
+    """★全角空格 U+3000 / NBSP U+00A0 + ``#`` 也起注释——从中文文档粘贴的注释常带这类空白，
+    只认 ``" #"``/``"\\t#"`` 会把注释整个并进密钥。"""
+    assert _parse_line("FXAPK_A=abc123　# 全角空格注释") == ("FXAPK_A", "abc123")
+    assert _parse_line("FXAPK_A=abc123\xa0# NBSP 注释") == ("FXAPK_A", "abc123")
+    # 无前导空白的 # 仍是值的一部分（语义不变）。
+    assert _parse_line("FXAPK_A=abc#def") == ("FXAPK_A", "abc#def")
+
+
+def test_empty_placeholder_does_not_mask_lower_priority(tmp_path, monkeypatch) -> None:
+    """★空占位掩蔽：cwd .env 抄了模板行 ``KEY=``（空），仓库根 .env 配了真实值——
+    空占位不得注入，否则真实值被静默掩蔽成空串。"""
+    cwd_dir = tmp_path / "cwd"
+    cwd_dir.mkdir()
+    (cwd_dir / ".env").write_text("FXAPK_TEST_MASK=\n", encoding="utf-8")
+    repo_env = tmp_path / "repo.env"
+    repo_env.write_text("FXAPK_TEST_MASK=realvalue\n", encoding="utf-8")
+    monkeypatch.delenv("FXAPK_TEST_MASK", raising=False)
+    monkeypatch.chdir(cwd_dir)
+    # 模拟查找顺序：cwd .env 先注入（空占位应跳过）、仓库根后注入（真实值应落地）。
+    from apkscan.core import dotenv as dotenv_mod
+
+    monkeypatch.setattr(dotenv_mod, "_REPO_ROOT", tmp_path)
+    (tmp_path / ".env").write_text("FXAPK_TEST_MASK=realvalue\n", encoding="utf-8")
+    assert load_dotenv() >= 1
+    assert os.environ["FXAPK_TEST_MASK"] == "realvalue"  # 无修复：空串掩蔽
+
+
+def test_injection_logs_source_file(tmp_path, monkeypatch, caplog) -> None:
+    """注入时记「键名 ← 来源文件」（debug 级、绝不回显值）——多 .env 并存时排障第一问。"""
+    env = tmp_path / ".env"
+    env.write_text("FXAPK_TEST_SRC=abc123\n", encoding="utf-8")
+    monkeypatch.delenv("FXAPK_TEST_SRC", raising=False)
+    with caplog.at_level("DEBUG", logger="apkscan.core.dotenv"):
+        assert load_dotenv(env) == 1
+    hits = [r.message for r in caplog.records if "FXAPK_TEST_SRC" in r.message]
+    assert hits and any(str(env) in m for m in hits)
+    assert not any("abc123" in m for m in hits), "日志绝不回显密钥值"
+
+
 def test_non_utf8_file_warns_not_silent(tmp_path, caplog) -> None:
     """★非 UTF-8(如 GBK):整份文件被丢弃、所有密钥消失。必须 WARNING 可见,
     否则症状是"所有源都说没配密钥",离病根极远。"""

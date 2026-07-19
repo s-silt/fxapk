@@ -37,13 +37,13 @@ def _strip_inline_comment(val: str) -> str:
 
     按 dotenv 惯例，只有**空白 + ``#``** 才起注释（``abc#def`` 里的 ``#`` 是值的一部分），
     故密钥本身含 ``#`` 不会被截断。取最早出现的那个分隔位。
+    ★空白判定用 ``str.isspace()`` 而非硬编码空格/制表符——从中文文档/聊天粘贴的注释常带
+    **全角空格 U+3000 或 NBSP U+00A0**，只认 ``" #"``/``"\\t#"`` 会把注释整个并进密钥。
     """
-    cut = len(val)
-    for sep in (" #", "\t#"):
-        idx = val.find(sep)
-        if idx != -1:
-            cut = min(cut, idx)
-    return val[:cut].rstrip()
+    for idx, ch in enumerate(val):
+        if ch == "#" and idx > 0 and val[idx - 1].isspace():
+            return val[:idx].rstrip()
+    return val.rstrip()
 
 
 def _parse_line(raw: str) -> "tuple[str, str] | None":
@@ -98,10 +98,19 @@ def load_dotenv(path: "str | os.PathLike[str] | None" = None) -> int:
             if parsed is None:
                 continue
             key, val = parsed
+            if not val:
+                # ★空占位（``KEY=``，常见于从 .env.example 抄来的模板行）不注入：一旦注入，
+                # 高优先 .env 的空占位会**静默掩蔽**低优先 .env 里配好的真实值——症状是
+                # "明明配了 key 却说没配"，离病根极远。想显式置空请用真实环境变量。
+                logger.debug(".env 空占位跳过（不掩蔽低优先级来源）：%s（%s）", key, p)
+                continue
             if key in os.environ:  # 真实环境变量 / cwd 已注入的优先，不覆盖
                 continue
             os.environ[key] = val
             injected += 1
+            # 只记键名与来源文件，绝不回显值——多 .env 并存时"这个值到底来自哪份文件"
+            # 是排障第一问，此前零信号。
+            logger.debug(".env 注入 %s ← %s", key, p)
     if injected:
-        logger.debug(".env 注入 %d 个键到环境变量", injected)
+        logger.debug(".env 共注入 %d 个键到环境变量", injected)
     return injected
