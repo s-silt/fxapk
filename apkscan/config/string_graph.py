@@ -17,7 +17,7 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 # Java 字符串字面量（含转义）。
@@ -81,8 +81,17 @@ _TRANSFORMATION_ALGOS: frozenset[str] = frozenset({
 })
 
 # ---------------------------------------------------------------------------
-# 文件级压制：实测噪音高度聚集于两类**可机械识别**的来源，且都不是 App 自有配置。
+# 压制：实测噪音高度聚集于两类**可机械识别**的来源，且都不是 App 自有配置。
+#
+# ★压制 = **打标不丢弃**（``StringChain.suppressed``），由调用方决定是否呈现。两条规则的 key 都落在
+#   **样本可控的输入**上（源文件路径由包名决定、hex 常量条数由字面量决定），静默返回 [] 会让"样本作者
+#   把自有解密类重定位进 com/google/android/gms/internal/"或"往真密文的方法里掺 5 条裸 hex"直接换来
+#   检测器对整个文件失明，且失明本身不留痕。打标后压制量可计数、可复核，规避手法至少是**可见**的。
 # ---------------------------------------------------------------------------
+#: 压制原因（``StringChain.suppressed`` 取值）。
+SUPPRESSION_THIRD_PARTY = "third-party"
+SUPPRESSION_PARAM_TABLE = "param-table"
+
 # ① 第三方库路径：SDK 自带的混淆串（遥测地址、内置常量），非涉案主体资产。
 _THIRD_PARTY_PREFIXES: tuple[str, ...] = (
     "io/dcloud/", "okhttp3/", "androidx/", "android/support/", "kotlin/", "kotlinx/",
@@ -91,15 +100,28 @@ _THIRD_PARTY_PREFIXES: tuple[str, ...] = (
     "com/networkbench/", "org/json/", "javax/", "java/",
 )
 # ② 密码学参数表文件：单文件聚集多条纯 hex 常量 = 曲线参数/素数表（RFC3526、NIST/SM2 曲线、测试向量）。
-#    ★按**文件**而非按串判：混淆器会把 BouncyCastle 的包名也改成随机串，路径认不出来，但"一个类里
-#    躺着几十条定长 hex 常量"这个形态改不掉。命中即压制该文件全部候选。
+#    ★按**文件**判条数、但**只标 hex 那些链**：混淆器会把 BouncyCastle 的包名也改成随机串，路径认不出来，
+#    但"一个类里躺着几十条定长 hex 常量"这个形态改不掉——参数表按定义全是 hex，同文件里的 base64 密文链
+#    不在"表"里，没有理由跟着一起压制（否则往真密文的方法掺 5 条裸 hex 就能整文件失明）。
 _PARAM_TABLE_HEX_MIN = 5
+
+# 第三方路径文件的**廉价预筛**：全文连一点标准解密 API 的影子都没有 → 不可能是"被重定位进第三方包名下的
+# 自有解密类"，直接早退省掉整轮扫描。子串判比 _DECRYPT_RE 便宜 ~200 倍（实测 0.28 vs 54 ms/100KB），而
+# 第三方目录在真实 APK 里占绝大多数文件，早退是这条路径的性能前提。
+# ★去掉首字符 = 同时覆盖大小写两种写法（``Cipher``/``cipher``），与 _DECRYPT_RE 的 IGNORECASE 对齐；宁松勿紧
+# （多放进来的只是多扫一遍，漏掉才是失明）。仅是预筛，判定仍由 _DECRYPT_RE 做。
+_DECRYPT_HINTS: tuple[str, ...] = ("ipher", "oFinal", "ase64", "ecrypt", "ecretKeySpec", "arameterSpec")
 
 
 def _is_third_party(location: str) -> bool:
     """源文件是否位于已知第三方库包路径下。"""
     low = location.replace("\\", "/").lower()
     return any(("/" + p.lower()) in ("/" + low) for p in _THIRD_PARTY_PREFIXES)
+
+
+def _has_decrypt_hint(text: str) -> bool:
+    """全文是否有标准解密 API 的迹象（廉价子串预筛，见 :data:`_DECRYPT_HINTS`）。"""
+    return any(h in text for h in _DECRYPT_HINTS)
 
 # 密文字面量**被直接当函数调用实参**：``ident("<密文>")``——覆盖**改名的解密 helper**（重度混淆样本里
 # 解密函数被 jadx 改成 m1136x 之类，认不出标准 crypto API，但"密文被传进某函数"这一事实是确定的）。
@@ -128,6 +150,9 @@ class StringChain:
 
     两档：``decrypt_calls`` 非空 = 识别到标准解密 API（较强）；仅 ``consumer`` 非空 = 密文被传进某函数（疑似
     改名的解密 helper，弱，作 **AI 辅助解密线索**）。``secret`` 保留较完整密文供下游 AI/appcrypto 尝试解密。
+
+    ``suppressed`` 非 None = 命中降噪规则（见模块内"压制"一节），调用方**默认不应呈现**，但拿得到条数与
+    原因——压制是可计数、可复核的，不是静默丢弃。
     """
 
     secret: str  # 密文候选串（保留至 _MAX_SECRET_LEN 供解密）
@@ -136,6 +161,7 @@ class StringChain:
     sinks: tuple[str, ...]  # 同方法内的下游 sink（可空）
     location: str  # 源文件相对路径
     consumer: str | None = None  # 密文被直接传进的函数名（疑似改名的解密 helper；None=未被直接消费）
+    suppressed: str | None = None  # 压制原因（SUPPRESSION_*）；None=正常候选
 
 
 def scan_java_source(text: str, location: str) -> list[StringChain]:
@@ -146,13 +172,19 @@ def scan_java_source(text: str, location: str) -> list[StringChain]:
       ②该密文**被直接当函数调用实参** ``ident("<密文>")``（弱，疑似**改名的解密 helper**，作 AI 辅助解密线索）。
     只是**存着**没被消费、也没识别到解密的密文 → 不绑（避免纯常量误报）。sink 为可选上下文。
 
-    两道**文件级**压制（见 :func:`_is_third_party` 与 :data:`_PARAM_TABLE_HEX_MIN`）：第三方库路径下的命中、
-    以及聚集大量 hex 常量的密码学参数表文件，整体丢弃——实测这两类占噪音的绝大部分且都非 App 自有资产。
+    两道降噪规则（见模块内"压制"一节）：第三方库路径下的命中、以及密码学参数表里的 hex 常量，产出时打
+    ``suppressed`` 标而**不丢弃**——实测这两类占噪音的绝大部分且都非 App 自有资产，但两条规则的 key 都在
+    样本可控的输入上，静默丢弃等于给规避手法留一条无痕通道。调用方默认不呈现 ``suppressed`` 非空的链。
+
+    ★唯一的真早退：第三方路径**且**全文无任何标准解密 API 迹象（:func:`_has_decrypt_hint`）——这类文件既
+    藏不住"标准解密绑定的密文"，又占真实 APK 文件数的绝大多数，扫它们纯是浪费。代价是这些文件里仅靠
+    ``consumer`` 成立的**弱档**链不再被计数（那一档本就是噪音主源），换来第三方目录不必全量扫。
     """
     if not isinstance(text, str) or not text:
         return []
-    if _is_third_party(location):
-        return []  # 第三方 SDK 自带的混淆串，非涉案主体资产
+    third_party = _is_third_party(location)
+    if third_party and not _has_decrypt_hint(text):
+        return []
     if len(text) > _MAX_TEXT_BYTES:
         text = text[:_MAX_TEXT_BYTES]
     chains: list[StringChain] = []
@@ -178,22 +210,30 @@ def scan_java_source(text: str, location: str) -> list[StringChain]:
             chains.append(StringChain(
                 secret=secret[:_MAX_SECRET_LEN], method=name, decrypt_calls=decrypts,
                 sinks=sinks, location=location, consumer=consumer,
+                suppressed=SUPPRESSION_THIRD_PARTY if third_party else None,
             ))
             if len(chains) >= _MAX_CHAINS_PER_FILE:
-                return _drop_if_param_table(chains)
-    return _drop_if_param_table(chains)
+                return _mark_param_table(chains)
+    return _mark_param_table(chains)
 
 
-def _drop_if_param_table(chains: list[StringChain]) -> list[StringChain]:
-    """本文件若是密码学参数表（聚集 ≥``_PARAM_TABLE_HEX_MIN`` 条纯 hex 常量）→ 整体丢弃。
+def _mark_param_table(chains: list[StringChain]) -> list[StringChain]:
+    """本文件若是密码学参数表（聚集 ≥``_PARAM_TABLE_HEX_MIN`` 条纯 hex 常量）→ 给**那些 hex 链**打压制标。
 
     真实样本里 BouncyCastle 被混淆器改了包名后路径认不出，但"一个类里躺着几十条定长 hex 常量"的形态
     改不掉——那是 RFC3526 素数 / NIST·SM2 曲线参数 / 测试向量，公开常量，不是 App 自有密文。
-    ★整文件丢弃而非逐条判：同一张表里混着长短不一的常量，逐条设阈值会漏掉短的那些。
+    ★条数按**文件**数、标记只落在 **hex 链**上：参数表按定义全是 hex，同文件里的 base64 密文不属于这张表。
+    整文件压制会让"往真密文所在的方法里掺 5 条裸 hex 常量"直接换来该文件失明——阈值 key 在样本可控输入上，
+    压制范围就必须收窄到规则真正解释得了的那部分。已有压制原因（第三方路径）的链保持原因不变。
     """
-    if sum(1 for c in chains if _HEX_RE.match(c.secret)) >= _PARAM_TABLE_HEX_MIN:
-        return []
-    return chains
+    if sum(1 for c in chains if _HEX_RE.match(c.secret)) < _PARAM_TABLE_HEX_MIN:
+        return chains
+    return [
+        replace(c, suppressed=SUPPRESSION_PARAM_TABLE)
+        if c.suppressed is None and _HEX_RE.match(c.secret)
+        else c
+        for c in chains
+    ]
 
 
 def _consumer_before(body: str, quote_pos: int) -> str | None:
@@ -475,4 +515,9 @@ def _skip_string(text: str, i: int, quote: str) -> int:
     return n
 
 
-__all__ = ["StringChain", "scan_java_source"]
+__all__ = [
+    "SUPPRESSION_PARAM_TABLE",
+    "SUPPRESSION_THIRD_PARTY",
+    "StringChain",
+    "scan_java_source",
+]
