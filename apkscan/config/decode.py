@@ -99,10 +99,15 @@ def _peels(
         unzipped = _gunzip(data)
         if unzipped is not None:
             out.append((unzipped, "gzip"))
-    if text is not None and _looks_base64(text):
-        decoded = _b64(text)
-        if decoded is not None:
-            out.append((decoded, "base64"))
+    if text is not None:
+        # ★判形与解码用**同一份**规范化文本：远程配置常带尾随换行 / MIME 76 列折行，
+        # 若判形先 strip 而解码用原文（validate=True 见空白即抛），整份配置会静默解不开
+        # （decoded=False, chain=()），症状离病根极远。
+        b64_text = _b64_normalize(text)
+        if _looks_base64(b64_text):
+            decoded = _b64(b64_text)
+            if decoded is not None:
+                out.append((decoded, "base64"))
     if recipe is not None and text is not None:
         # AES/信封：把当前文本当密文载荷（decrypt_envelope 内部按 recipe.payload_encoding 自解 base64/hex）。
         plain = decrypt_envelope(text.strip(), recipe, timestamp if timestamp is not None else 0)
@@ -125,6 +130,11 @@ def _gunzip(data: bytes) -> bytes | None:
     return None if len(out) > _MAX_BLOB_BYTES else out
 
 
+def _b64_normalize(text: str) -> str:
+    """去掉首尾与内部 ASCII 空白（尾随换行 / MIME 折行的 CRLF），供判形与解码共用同一文本。"""
+    return "".join(text.split())
+
+
 def _b64(text: str) -> bytes | None:
     try:
         return base64.b64decode(text, validate=True)[:_MAX_BLOB_BYTES]
@@ -132,9 +142,9 @@ def _b64(text: str) -> bytes | None:
         return None
 
 
-def _looks_base64(text: str) -> bool:
-    s = text.strip()
+def _looks_base64(s: str) -> bool:
     # 足够长、长度为 4 的倍数、仅 base64 字母表——避免把普通短串/JSON 当 base64 徒劳解码。
+    # 入参应已经 _b64_normalize（本模块唯一调用点如此）；不再自行 strip，避免判形/解码文本分叉。
     return len(s) >= 16 and len(s) % 4 == 0 and _BASE64_RE.match(s) is not None
 
 
