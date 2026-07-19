@@ -247,6 +247,30 @@ def test_write_csv_roundtrip(tmp_path: Path) -> None:
     assert read[1]["value"] == "支付宝 2088xxx"
 
 
+def test_write_csv_neutralizes_formula_injection(tmp_path: Path) -> None:
+    """★CSV 公式注入：IOC 值来自不可信样本，``=``/``+``/``-``/``@`` 开头的值须前置单引号，
+    否则 Excel/WPS 打开就把它当公式执行。断言写出的原始文本已被中性化。"""
+    rows = [
+        {"type": "CONFIG_KEY", "value": "=cmd|'/c calc'!A1", "subject": "@SUM(1+1)",
+         "where_to_request": "-2+3", "advice": "+危险", "confidence": "HIGH",
+         "is_c2": False, "sample_sha256": "", "source": "js:x"},
+    ]
+    out = tmp_path / "inj.ioc.csv"
+    ioc.write_csv(rows, str(out))
+    raw = out.read_text(encoding="utf-8-sig")
+    # 每个公式触发值都被前置单引号（读回原文校验，不经 csv 解析剥引号）。
+    assert "'=cmd|" in raw
+    assert "'@SUM(1+1)" in raw
+    assert "'-2+3" in raw
+    assert "'+危险" in raw
+    # 未加引号的裸公式绝不出现在行文本里。
+    assert ",=cmd|" not in raw and ",@SUM" not in raw
+    # 值语义仍可经 csv 正常读回（去掉展示用单引号后即原值）。
+    with out.open("r", encoding="utf-8-sig", newline="") as f:
+        read = list(csv.DictReader(f))
+    assert read[0]["value"] == "'=cmd|'/c calc'!A1"
+
+
 def test_write_csv_empty_rows_writes_header_only(tmp_path: Path) -> None:
     out = tmp_path / "empty.ioc.csv"
     ioc.write_csv([], str(out))

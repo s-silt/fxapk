@@ -45,6 +45,19 @@ IOC_COLUMNS: list[str] = [
 # 研判建议中代表「应进情报平台当 IOC」的取值（only_investigate 过滤依据）。
 _ADVICE_INVESTIGATE = "建议调证"
 
+#: Excel 公式注入触发字符：单元格首字符 ∈ 此集合时，Excel/WPS 会把整格当公式求值。
+#: IOC 值（域名/配置键/联系串）直接来自不可信样本内容，攻击者可构造 ``=cmd|...`` 等载荷，
+#: 分析员一打开导出的 CSV 就触发。与 OneDrive 富化工具的 csv_safe 同口径。
+_CSV_FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_safe(value: Any) -> str:
+    """防 Excel/WPS 公式注入：首字符是公式触发符时前置单引号（值本身不变、只加显示转义）。"""
+    s = _str_or_empty(value)
+    if s and s[0] in _CSV_FORMULA_TRIGGERS:
+        return "'" + s
+    return s
+
 
 def _str_or_empty(value: Any) -> str:
     """把字段值转成字符串；None / 缺失 → 空串（CSV 列不留 None）。"""
@@ -134,9 +147,12 @@ def write_csv(rows: list[dict[str, Any]], path: str) -> None:
 
     表头恒为 IOC_COLUMNS（即使 rows 为空也只写表头），保证下游 schema 稳定。绝不抛由调用
     方（cli）负责的 IO 异常——本函数只做写入。
+
+    ★公式注入中性化：每个单元格经 _csv_safe——IOC 值直接来自不可信样本，未转义的
+    ``=``/``+``/``-``/``@`` 开头值在 Excel/WPS 里会被当公式执行（CSV 注入）。
     """
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=IOC_COLUMNS)
         writer.writeheader()
         for row in rows:
-            writer.writerow(row)
+            writer.writerow({col: _csv_safe(row.get(col)) for col in IOC_COLUMNS})
