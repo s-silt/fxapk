@@ -1,10 +1,9 @@
 """主动/被动模式硬隔离（代码层强制，非仅文档声明）。
 
-安全边界：passive（默认）绝不调用会**向目标发流量**的主动富化器（active=True，如 webcheck 经
-web-check SaaS 对目标 live 探测）；authorized-active 才放行。本测试锁死：
+安全边界：passive（默认）绝不调用会**向目标发流量**的主动富化器（active=True）；
+authorized-active 才放行。本测试锁死：
 - _mode_gate 谓词：passive/非法值 → 拦 active、放行被动；authorized-active → 全放行。
 - _run_enrichment 端到端：passive gate 下 active 富化器**根本不被调用**、也不进 enrichment/统计。
-- webcheck 确实声明 active=True（此前错标为继承 False，本修复的核心）。
 - CLI --mode 非法值被拒（退出码 2）。
 """
 
@@ -24,7 +23,6 @@ from apkscan.core.models import (
     EnrichmentResult,
 )
 from apkscan.core.registry import BaseEnricher
-from apkscan.enrichers.webcheck import WebCheckEnricher
 
 
 class _SpyEnricher(BaseEnricher):
@@ -72,7 +70,7 @@ def test_mode_gate_unknown_mode_is_conservatively_passive() -> None:
 
 def test_run_enrichment_passive_never_invokes_active() -> None:
     passive = _SpyEnricher("dns_fake", active=False)
-    active = _SpyEnricher("webcheck_fake", active=True)
+    active = _SpyEnricher("active_fake", active=True)
     ep = Endpoint(value="d0.fraud.cn", kind="domain")
 
     stats = pipeline._run_enrichment(
@@ -81,15 +79,15 @@ def test_run_enrichment_passive_never_invokes_active() -> None:
 
     assert passive.seen == ["d0.fraud.cn"]  # 被动照跑
     assert active.seen == []  # ★主动**根本没被调用**（零流量到目标）
-    assert "webcheck_fake" not in ep.enrichment  # 未写入富化结果
+    assert "active_fake" not in ep.enrichment  # 未写入富化结果
     providers = {s["provider"] for s in stats}
-    assert "webcheck_fake" not in providers  # gate-skip 不计统计
+    assert "active_fake" not in providers  # gate-skip 不计统计
     assert "dns_fake" in providers
 
 
 def test_run_enrichment_authorized_active_invokes_active() -> None:
     passive = _SpyEnricher("dns_fake", active=False)
-    active = _SpyEnricher("webcheck_fake", active=True)
+    active = _SpyEnricher("active_fake", active=True)
     ep = Endpoint(value="d0.fraud.cn", kind="domain")
 
     pipeline._run_enrichment(
@@ -97,38 +95,32 @@ def test_run_enrichment_authorized_active_invokes_active() -> None:
     )
 
     assert active.seen == ["d0.fraud.cn"]  # 显式授权下主动富化器放行
-    assert ep.enrichment["webcheck_fake"]["who"] == "d0.fraud.cn"
+    assert ep.enrichment["active_fake"]["who"] == "d0.fraud.cn"
 
 
 def test_run_enrichment_no_gate_defaults_passive_fail_closed() -> None:
     # ★fail-closed：缺 gate → 默认按 passive 拦 active（将来漏传 gate 也得到安全行为，
     #   绝不静默把主动富化器放进被动运行）。
     passive = _SpyEnricher("dns_fake", active=False)
-    active = _SpyEnricher("webcheck_fake", active=True)
+    active = _SpyEnricher("active_fake", active=True)
     ep = Endpoint(value="d0.fraud.cn", kind="domain")
     pipeline._run_enrichment([ep], [passive, active])  # 不传 gate
     assert passive.seen == ["d0.fraud.cn"]
     assert active.seen == []  # 缺 gate 也拦住 active
 
 
-# --- webcheck 错标修复 -----------------------------------------------------
+# --- 全仓富化器均为被动 -----------------------------------------------------
 
 
-def test_webcheck_declares_active_true() -> None:
-    # ★本修复核心：webcheck 经 SaaS 对目标 live 探测，是本仓唯一主动富化器，必须 active=True
-    #   （此前继承 BaseEnricher 默认 False，被 passive 模式误放行）。
-    assert WebCheckEnricher().active is True
-
-
-def test_all_other_enrichers_are_passive() -> None:
-    # 防回归：除 webcheck 外，自动发现的富化器都应是被动（active 为假）。若将来新增主动富化器，
+def test_all_enrichers_are_passive() -> None:
+    # 防回归：自动发现的富化器**全部**应是被动（active 为假）。若将来新增主动富化器，
     # 必须显式 active=True 并在此更新白名单——强制作者对"是否碰目标"表态。
     from apkscan.core.registry import discover_enrichers
 
     active_names = {
         e.name for e in discover_enrichers() if getattr(e, "active", False)
     }
-    assert active_names == {"webcheck"}, f"意外的主动富化器：{active_names - {'webcheck'}}"
+    assert active_names == set(), f"意外的主动富化器：{active_names}"
 
 
 # --- ctx.config 与 pipeline config 一致性（codex 复审加固）------------------

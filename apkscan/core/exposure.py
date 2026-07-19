@@ -1,7 +1,7 @@
 """后台框架/技术栈指纹研判（纯函数）：把被动采集的服务器 banner 映射到「技术栈 / 后台框架」。
 
 ★ 定位与边界：本模块是**取证串案情报**，用于团伙串并，不是攻击工具。
-- 只做：从 shodan / webcheck **被动采集的服务 banner 指纹**匹配 ``rules/exposure.yaml`` 的技术栈
+- 只做：从 shodan **被动采集的服务 banner 指纹**匹配 ``rules/exposure.yaml`` 的技术栈
   规则 → 识别「这台服务器是什么栈 / 什么后台框架」（PHP / Laravel / ThinkPHP / Spring / 致远 /
   泛微 / 通达 OA…）。**零网络、零 payload**，对目标零流量，绝不发起任何动作。
 - 用途：**同后台框架 = 疑同团伙基础设施**——多个样本命中同一后台 / 面板指纹，可并簇串案。仅做识别，
@@ -50,14 +50,13 @@ def _add(fp: dict[str, set[str]], field: str, value: object) -> None:
         fp[field].add(value.strip().lower())
 
 
-def build_host_fingerprint(shodan: object, webcheck: object) -> dict[str, set[str]]:
-    """把一台主机的 shodan + webcheck **被动 banner** 拍平成小写字符串集合（供规则子串匹配）。
+def build_host_fingerprint(shodan: object) -> dict[str, set[str]]:
+    """把一台主机的 shodan **被动 banner** 拍平成小写字符串集合（供规则子串匹配）。
 
-    数据全部来自对目标**零流量**的被动采集：Shodan 已扫库的服务 banner（product / version /
-    http.server / http.title / cpe / module）、webcheck 的技术栈识别（tech-stack）。坏字段安全跳过。
+    数据来自对目标**零流量**的被动采集：Shodan 已扫库的服务 banner（product / version /
+    http.server / http.title / cpe / module）。坏字段安全跳过。
     """
     sh = shodan if isinstance(shodan, dict) else {}
-    wc = webcheck if isinstance(webcheck, dict) else {}
     fp: dict[str, set[str]] = {k: set() for k in _FP_KEYS}
 
     for svc in sh.get("services") or []:
@@ -71,15 +70,6 @@ def build_host_fingerprint(shodan: object, webcheck: object) -> dict[str, set[st
         cpe = svc.get("cpe")
         for c in cpe if isinstance(cpe, list) else [cpe]:
             _add(fp, "cpe", c)
-
-    # webcheck 技术栈识别（Wappalyzer 类，被动）：把识别到的技术名并入 product / title 桶，
-    # 让后台框架规则（Laravel / ThinkPHP…）也能据被动技术栈命中。
-    tech = wc.get("tech-stack")
-    techs = tech.get("technologies") if isinstance(tech, dict) else tech
-    for t in techs if isinstance(techs, list) else []:
-        name = t.get("name") if isinstance(t, dict) else t
-        _add(fp, "product", name)
-        _add(fp, "title", name)
 
     return fp
 
@@ -110,13 +100,13 @@ def _matches(rule: dict[str, Any], fp: dict[str, set[str]]) -> bool:
     return False
 
 
-def assess_tech_stack(shodan: object, webcheck: object) -> list[dict[str, Any]]:
+def assess_tech_stack(shodan: object) -> list[dict[str, Any]]:
     """据被动 banner 指纹识别技术栈 / 后台框架，返回 [{name, note}]。绝不抛（坏规则 / 坏字段安全跳过）。
 
     仅识别栈 / 后台框架，用作**同后台 = 疑同团伙**的串案信号；不研判漏洞、不给利用方向。
     """
     rules = _rules()
-    fp = build_host_fingerprint(shodan, webcheck)
+    fp = build_host_fingerprint(shodan)
 
     stacks: list[dict[str, Any]] = []
     for rule in rules.get("tech_stack") or []:

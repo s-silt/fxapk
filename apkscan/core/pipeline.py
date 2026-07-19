@@ -375,7 +375,7 @@ def _stage_enrich(state: _PipelineState) -> None:
     判据：infra 分级为"建议调证"（疑似 App 自有服务/C2）的域名/IP 才查；已知第三方基础设施/SDK/CDN
     （无需调证）、私网/回环/行情代码（待核）一律跳过。★ 两遍富化（见 _run_enrichment）：①归属定辖区
     → ②境外被动取证仅对【国外+未知】端点跑。主动/被动模式硬隔离：passive（默认）屏蔽会**向目标发
-    流量**的主动富化器（active=True，如 webcheck），authorized-active 才放行；被屏蔽/放行项记入 meta
+    流量**的主动富化器（active=True），authorized-active 才放行；被屏蔽/放行项记入 meta
     供审计。offline → 仅记跳过标志。"""
     config = state.config
     meta = state.meta

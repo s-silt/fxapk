@@ -431,7 +431,7 @@ def test_static_critical_failure_makes_closure_failed() -> None:
 def test_passive_mode_blocked_active_source_does_not_prevent_completion() -> None:
     report = _report(_complete_endpoint())
     target = assemble_target_closure(report.endpoints[0])
-    target["source_status"]["webcheck"] = {
+    target["source_status"]["active_fake"] = {
         "status": "skipped",
         "reason": "active_mode_blocked",
     }

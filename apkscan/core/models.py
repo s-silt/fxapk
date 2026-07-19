@@ -303,7 +303,7 @@ class ComponentSet:
 
 
 #: 分析网络模式。``passive``（默认）：只跑**被动**富化器（查第三方 OSINT 库，对目标零流量）；
-#: ``authorized-active``：显式授权下才放行会**向目标发流量**的主动富化器（如 webcheck 经 web-check
+#: ``authorized-active``：显式授权下才放行会**向目标发流量**的主动富化器（经
 #: SaaS 实例 live 探测目标端口/SSL/HTTP）。默认被动，契合取证「不接触目标」定位——主动探测须操作者
 #: 明确授权、且在报告中留痕。
 ANALYSIS_MODE_PASSIVE = "passive"
