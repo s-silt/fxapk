@@ -290,34 +290,23 @@ def test_attribution_from_enrichment_maps_asn_layers() -> None:
 
 def test_attribution_from_enrichment_none_without_signals() -> None:
     assert A.attribution_from_enrichment({}) is None
-    assert A.attribution_from_enrichment({"tier": "app"}) is None  # 无 asn/webcheck → None
+    assert A.attribution_from_enrichment({"tier": "app"}) is None  # 无 asn/dns 等归属信号 → None
     assert A.attribution_from_enrichment(None) is None  # type: ignore[arg-type]
 
 
-def test_attribution_from_enrichment_edge_from_webcheck() -> None:
-    """webcheck 的响应头 → edge 层（此处只 1 强信号 → 最多 probable）。"""
-    att = A.attribution_from_enrichment({
-        "asn": {"asn": "AS13335", "org": "Cloudflare"},
-        "webcheck": {"response_headers": {"CF-RAY": "abc123"}},
-    })
-    assert att is not None
-    assert att["origin_network"]["category"] == A.CAT_CDN
-    assert att["edge_provider"].get("name") == "Cloudflare" and att["edge_provider"].get("tier") == "probable"
-
-
 def test_attribution_from_enrichment_reads_dns_cname() -> None:
-    """★P1-2：映射器须读 DnsEnricher 真实输出位置 enrichment['dns']['cname']（而非只看 webcheck）。
+    """★P1-2：映射器须读 DnsEnricher 真实输出位置 enrichment['dns']['cname']。
 
-    dns.cname（专属后缀，强信号）+ webcheck 响应头 CF-RAY（强信号）= 2 强信号 → confirmed。
+    dns.cname（专属后缀）是强信号，但单信号最多 probable（confirmed 须 ≥2 强信号）。
     """
     att = A.attribution_from_enrichment({
         "asn": {"asn": "AS13335", "org": "Cloudflare"},
         "dns": {"cname": ["a.cdn.cloudflare.net"]},
-        "webcheck": {"response_headers": {"CF-RAY": "z"}},
     })
     assert att is not None
+    assert att["origin_network"]["category"] == A.CAT_CDN
     assert att["edge_provider"].get("name") == "Cloudflare"
-    assert att["edge_provider"].get("tier") == "confirmed"  # 若只读 webcheck、漏 dns.cname，则只会 probable
+    assert att["edge_provider"].get("tier") == "probable"  # 若漏读 dns.cname 则识别不出 edge
 
 
 def test_attribution_from_enrichment_none_on_dns_only_no_signal() -> None:
@@ -438,7 +427,7 @@ def test_build_endpoint_attribution_no_empty_shell() -> None:
     """★P2：非空但字段全 None 的子键不得产全 unknown 空壳 → None（IP 端点空 asn / 域名空 hosting 元素）。"""
     assert A.build_endpoint_attribution("ip", "1.2.3.4", {"asn": {"asn": None, "org": None, "isp": None}}) is None
     assert A.build_endpoint_attribution("ip", "1.2.3.4", {"asn": {"unexpected": "v"}}) is None
-    assert A.build_endpoint_attribution("ip", "1.2.3.4", {"webcheck": {"unrelated": True}}) is None
+    assert A.build_endpoint_attribution("ip", "1.2.3.4", {"unrelated": {"x": True}}) is None
     assert A.build_endpoint_attribution("domain", "z.com", {"dns": {"hosting": [{}]}}) is None  # 无有效 IP
     assert A.build_endpoint_attribution("domain", "z.com", {"dns": {"ips": [""]}}) is None       # 空 IP 串
 

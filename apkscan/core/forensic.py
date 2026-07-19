@@ -50,13 +50,12 @@ def classify_jurisdiction(
     whois: object = None,
     dns: object = None,
     asn: object = None,
-    webcheck: object = None,
     shodan: object = None,
     certs: object = None,
 ) -> str:
     """据富化归属国 + 域名启发式判服务器辖区。返回 国内 / 国外 / 未知。绝不抛。
 
-    归属国信号来源：rdap/whois 注册国、dns 托管 country、asn 归属国、web-check ``location``
+    归属国信号来源：rdap/whois 注册国、dns 托管 country、asn 归属国
     归一化的 ``country``、Shodan 主机归属国（见 enrichers/shodan）。ICP 备案 / .cn 直判国内。
 
     ``certs``（crt.sh 关联子域）目前不携带归属国信号（仅关联主机名），故不参与辖区判定；作为
@@ -68,7 +67,7 @@ def classify_jurisdiction(
     h = (host or "").lower().strip().rstrip(".")
     if h.endswith(".cn") or h.endswith(".gov.cn") or h.endswith(".中国"):
         return JURIS_DOMESTIC
-    countries = _countries(rdap, whois, dns, asn, webcheck, shodan)
+    countries = _countries(rdap, whois, dns, asn, shodan)
     if any(_country_is_domestic(c) for c in countries):
         return JURIS_DOMESTIC
     if countries:
