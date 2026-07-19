@@ -16,7 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      id-token: write  # Trusted Publishing 必需
+      id-token: write   # Trusted Publishing 必需
+      contents: write   # 建 GitHub Release 必需
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -32,3 +33,19 @@ jobs:
           # Idempotent: if the version already exists (e.g. a tag re-push /
           # history rewrite re-triggers this run), skip instead of failing.
           skip-existing: true
+      # 打 tag 时顺带建 GitHub Release（正文自动从上个 Release 以来的 PR 生成）。
+      # ★ 幂等：Release 已存在（tag 重推）则跳过，不失败——与上面 skip-existing 同philosophy。
+      # 历史上 v1.0.0 只发了 PyPI、漏建 Release 就是因为这步以前靠手动。
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists, skipping."
+            exit 0
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag
