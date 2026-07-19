@@ -231,7 +231,8 @@ def analyze(
         "--mode",
         help=(
             "网络模式：passive（默认，只跑被动 OSINT 富化、对目标零流量）| "
-            "authorized-active（显式授权下才放行会向目标 live 探测的主动富化器）。"
+            "authorized-active（显式授权下才放行会向目标 / 其基础设施发起请求的动作："
+            "下载样本引用的远程配置对象、Telegram getMe 在线核验等）。"
         ),
     ),
     strict: bool = typer.Option(
@@ -643,7 +644,7 @@ def auto(
     mode: str = typer.Option(
         ANALYSIS_MODE_PASSIVE,
         "--mode",
-        help="网络模式：passive（默认，静态富化只跑被动 OSINT）| authorized-active（显式授权下才放行主动富化器）。",
+        help="网络模式：passive（默认，静态富化只跑被动 OSINT）| authorized-active（显式授权下才放行会向目标发起请求的动作，如远程配置对象下载、Telegram getMe 核验）。",
     ),
 ) -> None:
     """一键全自动：体检 → 静态分析 → 脱壳 → 抓包 → 合并 → 案件闭环。
@@ -731,7 +732,7 @@ def batch(
     mode: str = typer.Option(
         ANALYSIS_MODE_PASSIVE,
         "--mode",
-        help="网络模式：passive（默认，静态富化只跑被动 OSINT）| authorized-active（显式授权下才放行主动富化器）。",
+        help="网络模式：passive（默认，静态富化只跑被动 OSINT）| authorized-active（显式授权下才放行会向目标发起请求的动作，如远程配置对象下载、Telegram getMe 核验）。",
     ),
 ) -> None:
     """批量分析文件夹：扫描没分析过的 APK，逐个「静态 + launch-only 动态」产出报告。
