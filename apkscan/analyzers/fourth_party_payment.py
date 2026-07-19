@@ -113,7 +113,7 @@ class FourthPartyPaymentAnalyzer(BaseAnalyzer):
     """识别四方支付 / 跑分平台，产出 category=FOURTH_PARTY_PAYMENT 的调证线索。"""
 
     name: str = "fourth_party_payment"
-    requires: list[str] = []  # URL / 文本通用：APK（dex/H5）与 IPA（资源）皆可，缺数据自然空跑
+    requires: list[str] = []  # URL / 文本通用（dex/H5），缺数据自然空跑
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
         result = AnalyzerResult(analyzer=self.name)

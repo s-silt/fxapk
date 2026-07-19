@@ -144,7 +144,7 @@ class _PipelineState:
 
 def _canonicalize_ctx_config(ctx: "AnalysisContext", config: AnalysisConfig) -> None:
     """规范化「有效配置」为单一来源：分析器读 ``ctx.config``，而 pipeline 门控 / 报告标注读 ``config``
-    参数——二者本应同一对象（load_app 传入同一 config），但程序化调用方可能传入不一致的两个，导致
+    参数——二者本应同一对象（load_apk 传入同一 config），但程序化调用方可能传入不一致的两个，导致
     分析器的主动探测门控（如 contacts getMe 读 ctx.config.mode）与报告标注的 mode 分叉，出现「报告
     标 passive 但分析器按 authorized-active 主动探测」的错配。以 pipeline 的 config 为准对齐 ctx。"""
     if getattr(ctx, "config", None) is not config:
@@ -157,12 +157,11 @@ def _canonicalize_ctx_config(ctx: "AnalysisContext", config: AnalysisConfig) -> 
 def _init_pipeline_state(ctx: "AnalysisContext", config: AnalysisConfig) -> _PipelineState:
     """探测能力 + 平台并播种 meta，返回初始累积态。
 
-    平台能力：让 requires=["apk"] 的 Android 专属 analyzer 在 IPA 上自动 skipped、requires=["ipa"]
-    的 iOS analyzer 在 APK 上 skipped（复用既有 requires 门控）。meta 播种 package_name/platform +
+    平台能力：注入 ``apk``（requires=["apk"] 的 analyzer 门控用）。meta 播种 package_name/platform +
     网络模式留痕（passive / authorized-active，供报告审计声明是否纯被动）。"""
     capabilities = detect_capabilities(online=config.online)
     platform = getattr(ctx, "platform", "android")
-    capabilities.add("apk" if platform == "android" else "ipa")
+    capabilities.add("apk")
     meta: dict = {"package_name": ctx.package_name, "platform": platform}
     meta["mode"] = getattr(config, "mode", ANALYSIS_MODE_PASSIVE)
     return _PipelineState(
@@ -249,12 +248,8 @@ def _stage_degradation_flags(state: _PipelineState) -> None:
     ctx = state.ctx
     meta = state.meta
     if getattr(ctx, "dex_available", True) is False:
-        if state.platform == "ios":
-            # iOS 本就无 DEX，不是"加固"——H5 端点在 www JS 资源里命中，这不是降级告警。
-            meta["dex_parse_failed"] = False
-        else:
-            meta["dex_parse_failed"] = True
-            logger.warning("DEX 不可用（加固/无 dex），静态端点/SDK/支付线索严重不完整")
+        meta["dex_parse_failed"] = True
+        logger.warning("DEX 不可用（加固/无 dex），静态端点/SDK/支付线索严重不完整")
     if getattr(ctx, "apk_validation_ok", True) is False:
         meta["apk_validation_warning"] = "APK 合法性校验异常，分析结果可能不可靠（详见日志）"
 

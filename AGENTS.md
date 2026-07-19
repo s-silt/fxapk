@@ -1,6 +1,6 @@
 # AGENTS.md — fxapk 操作指南（给 AI agent / Codex）
 
-本仓库是 **fxapk（apkscan）**：涉诈 APK/IPA **调证取证分析 CLI**。你（agent）通过命令行驱动它对样本做
+本仓库是 **fxapk（apkscan）**：涉诈 APK **调证取证分析 CLI**。你（agent）通过命令行驱动它对样本做
 全套静态/动态分析 + 境外源站 IP 被动归属，产出**可办案化的调证线索（leads）**。本文件让你在新机
 clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件只讲**怎么跑**。
 

@@ -272,11 +272,11 @@ def test_analyze_static_ingest_failure_does_not_break_report(
 
 
 def _patch_cli_analyze(monkeypatch: pytest.MonkeyPatch, report: Report) -> None:
-    """打桩 cli.analyze 链路：load_app / pipeline.run / 写报告 / 设备探测，全 no-op。"""
+    """打桩 cli.analyze 链路：load_apk / pipeline.run / 写报告 / 设备探测，全 no-op。"""
     import apkscan.core.pipeline as pipeline_mod
 
-    # cli.py 顶层 `from apkscan.core.loader import load_app`，名字绑定在 cli 命名空间 → 在此打桩。
-    monkeypatch.setattr(cli, "load_app", lambda *a, **k: _FakeCtx(report.package_name))
+    # cli.py 顶层 `from apkscan.core.apk import load_apk`，名字绑定在 cli 命名空间 → 在此打桩。
+    monkeypatch.setattr(cli, "load_apk", lambda *a, **k: _FakeCtx(report.package_name))
     monkeypatch.setattr(pipeline_mod, "run", lambda ctx, config: report)
     monkeypatch.setattr(cli, "_write_reports", lambda *a, **k: None)
     monkeypatch.setattr(cli.device, "has_device", lambda *a, **k: False)

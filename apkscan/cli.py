@@ -17,7 +17,7 @@ import typer
 
 from apkscan.core import device
 from apkscan.core.apk import ApkParseError
-from apkscan.core.loader import load_app
+from apkscan.core.apk import load_apk
 from apkscan.core.models import (
     ANALYSIS_MODE_PASSIVE,
     ANALYSIS_MODES,
@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 app = typer.Typer(
     add_completion=False,
-    help="涉诈 APK / iOS IPA 调证分析 CLI：静态分析 + 端点/服务归属提取，产出调证线索清单。",
+    help="涉诈 APK 调证分析 CLI：静态分析 + 端点/服务归属提取，产出调证线索清单。",
 )
 app.add_typer(graph_app, name="graph")
 app.add_typer(track_app, name="track")
@@ -67,7 +67,7 @@ def _main(
         is_eager=True,
     ),
 ) -> None:
-    """涉诈 APK / iOS IPA 调证分析 CLI。"""
+    """涉诈 APK 调证分析 CLI。"""
 
 
 def _parse_formats(fmt: str) -> list[str]:
@@ -88,16 +88,6 @@ def _parse_formats(fmt: str) -> list[str]:
         typer.echo("未指定任何合法输出格式，回退为 html,json。", err=True)
         formats = ["html", "json"]
     return formats
-
-
-def _close_ctx_quiet(ctx: object) -> None:
-    """关闭分析上下文的底层资源（IPA 的 ZipFile 句柄）；ApkContext 无 close 则 no-op。绝不抛。"""
-    close = getattr(ctx, "close", None)
-    if callable(close):
-        try:
-            close()
-        except Exception:
-            logger.exception("[cli] 关闭分析上下文失败（已忽略）")
 
 
 def _adb_owned_at_start() -> bool:
@@ -261,7 +251,6 @@ def analyze(
 
     # 无条件 finally 收 adb server：analyze 的 device.has_device() 设备探测每次都会经
     # adb 起一个常驻 adb server（即便纯静态/离线），不收则 adb.exe 残留（GUI 子进程尤甚）。
-    ctx: object = None  # 供 finally 关闭 IPA 句柄（IpaContext 持有打开的 ZipFile）
     _adb_owned = _adb_owned_at_start()  # ★P0-5：起手判 adb server 归属（外部/先前存在则收尾不杀）
     try:
         formats = _parse_formats(fmt)
@@ -275,17 +264,12 @@ def analyze(
 
         typer.echo(f"加载：{apk}")
         try:
-            # load_app 按文件类型分流：.ipa / 含 Payload 的 ZIP → IPA（纯静态），否则 → APK。
-            ctx = load_app(str(apk), config, extra_dex=extra_dex_files or None)
-        except ApkParseError as exc:  # IpaParseError 继承 ApkParseError，一并兜住
+            ctx = load_apk(str(apk), config, extra_dex=extra_dex_files or None)
+        except ApkParseError as exc:
             typer.echo(f"错误：{exc}", err=True)
             raise typer.Exit(code=2) from exc
 
-        is_ios = getattr(ctx, "platform", "android") == "ios"
-        if is_ios and extra_dex_files:
-            typer.echo("IPA 无 DEX，已忽略 --extra-dex。")
-        kind = "IPA(iOS)" if is_ios else "APK(Android)"
-        typer.echo(f"类型：{kind}  包名：{ctx.package_name or '(未知)'}  联网富化：{'是' if online else '否'}")
+        typer.echo(f"包名：{ctx.package_name or '(未知)'}  联网富化：{'是' if online else '否'}")
         typer.echo("运行分析流水线 ...")
         # 启动提速：pipeline（→registry）延迟到真正分析时才 import；--version/doctor/gui
         # 等不分析的命令不再付这份导入开销。
@@ -315,8 +299,7 @@ def analyze(
             logger.exception("[cli] 写入取证完整性元数据失败（已忽略，不影响报告产出）")
 
         # 设备探测：有在线设备则提示并写入 meta，便于报告/后续动态补全感知。
-        # IPA 无 Android 动态（adb/frida 不适用），跳过设备探测。
-        device_detected = False if is_ios else device.has_device()
+        device_detected = device.has_device()
         if device_detected:
             report.meta["device_detected"] = True
             typer.echo("检测到在线 adb 设备：可用 --dynamic 做真机脱壳/抓包补全静态盲区。")
@@ -335,9 +318,7 @@ def analyze(
         _auto_track(report, str(out_dir / f"{base}.json"), track=track)
 
         # --dynamic：静态完成后，若有设备则自动 unpack + capture（实现由 dynamic 模块 agent 完成）。
-        if dynamic and is_ios:
-            typer.echo("IPA 仅静态分析（iOS 动态需越狱设备 + frida-iOS，本工具不支持），跳过 --dynamic。")
-        elif dynamic:
+        if dynamic:
             if not device_detected:
                 typer.echo("未检测到在线设备，跳过 --dynamic（动态脱壳/抓包需真机）。")
             else:
@@ -360,7 +341,6 @@ def analyze(
                 )
                 raise typer.Exit(code=code)
     finally:
-        _close_ctx_quiet(ctx)  # IPA 的 ZipFile 句柄必须关（ApkContext 无 close 则 no-op）
         _cleanup_adb_quiet(_adb_owned)
 
 
@@ -387,15 +367,12 @@ def _report_dict_for(path: Path, *, online: bool) -> dict:
 
     config = AnalysisConfig(online=online, out_dir=str(path.parent), formats=[])
     try:
-        ctx = load_app(str(path), config)
+        ctx = load_apk(str(path), config)
     except ApkParseError as exc:
         typer.echo(f"错误：{exc}", err=True)
         raise typer.Exit(code=2) from exc
-    try:
-        report = pipeline.run(ctx, config)  # type: ignore[arg-type]
-        data = report_json.to_dict(report)
-    finally:
-        _close_ctx_quiet(ctx)  # IPA 的 ZipFile 句柄必须关（与 analyze 同纪律，避免读取型 diff 泄漏句柄）
+    report = pipeline.run(ctx, config)  # type: ignore[arg-type]
+    data = report_json.to_dict(report)
     # ★现算 sample_sha256 填回 meta：pipeline.run 不算它（只 analyze 的证据 manifest 步骤算），
     #   否则 `diff old.json new.apk` 会报虚假的 sample_sha256 变化（旧有哈希、新为 None）。
     meta = data.get("meta")
