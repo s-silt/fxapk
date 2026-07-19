@@ -486,8 +486,40 @@ def test_algorithm_transformation_string_is_not_ciphertext() -> None:
         "RSA/ECB/OAEPWITHSHA-1ANDMGF1PADDING",
         "AES/CBC/PKCS5Padding",
         "DESede/ECB/NoPadding",
+        "AES/GCM/NoPadding",
+        "ChaCha20/Poly1305",
     ):
         assert _looks_ciphertext(spec) is False, spec
+
+
+def test_transformation_rule_does_not_swallow_base64_payloads() -> None:
+    """★回归：算法串规则曾只匹配 ``词/词`` 形状（``_TRANSFORMATION_RE``），把无填充 base64 载荷里
+    恰含 1 个 ``/`` 的那批误判成算法串丢弃。加白名单 token 锚定后（``_is_transformation``）必须不再命中。
+
+    只测本规则本身：多段路径规则（≥2 个 ``/`` 且低熵）与熵门槛是 #204 的既有行为，不在此断言范围。
+    """
+    import base64
+    import hashlib
+
+    from apkscan.config.string_graph import _is_transformation
+
+    caught = []
+    checked = 0
+    for nbytes in (18, 24, 27, 33, 36, 45):
+        for i in range(400):
+            b = hashlib.sha256(f"{nbytes}-{i}".encode()).digest()
+            while len(b) < nbytes:
+                b += hashlib.sha256(b).digest()
+            s = base64.b64encode(b[:nbytes]).decode()
+            # 只挑会撞旧正则形状的：含恰 1 个 / 、不含 + / =（形状 ``词/词`` 的 2 段串）。
+            if s.count("/") != 1 or "+" in s or "=" in s:
+                continue
+            checked += 1
+            if _is_transformation(s):
+                caught.append(s)
+    assert checked >= 200, f"样本量不足（{checked}），无法验证回归"
+    # 首段算法名精确锚定后，随机 base64 首段恰等于 AES/DES/RSA 的概率极低 —— 实测 0 误命中。
+    assert caught == [], f"误命中 {len(caught)}/{checked} 条 base64 载荷：{caught[:3]}"
 
 
 def test_lookup_table_constant_is_not_ciphertext() -> None:
