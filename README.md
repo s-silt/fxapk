@@ -23,6 +23,8 @@ git clone https://github.com/s-silt/fxapk.git && cd fxapk && pip install -e .
 
 动态脱壳 / 抓包、样本库等能力按需安装可选依赖；缺失时对应命令给出提示，核心分析不受影响。
 
+> 在线富化的 API Key、动态分析外部工具、以及围绕报告的配套脚本 / MCP / 探针库均**自备、本项目不提供**——见 [COMPANION-TOOLS.md](COMPANION-TOOLS.md)。
+
 ## 用法
 
 ```bash
