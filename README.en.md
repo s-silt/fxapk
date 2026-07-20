@@ -23,6 +23,8 @@ git clone https://github.com/s-silt/fxapk.git && cd fxapk && pip install -e .
 
 Dynamic unpack / capture, the sample corpus and other features need optional deps installed on demand; when missing, the relevant command prints a hint and core analysis is unaffected.
 
+> Online-enrichment API keys, dynamic-analysis external tools, and companion scripts / MCP servers / probe libraries around the reports are all **bring-your-own — not shipped by this project**. See [COMPANION-TOOLS.en.md](COMPANION-TOOLS.en.md).
+
 ## Usage
 
 ```bash
