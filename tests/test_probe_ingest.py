@@ -1,6 +1,6 @@
 """apkscan.dynamic.probe_ingest 的单测。
 
-probe_ingest 把 46 个独立 frida 探针(`-l` 注入)吐到 console 的 `[tag][LEAD-...]` 散点输出，
+probe_ingest 把独立 frida 探针(自备，`-l` 注入)吐到 console 的 `[tag][LEAD-...]` 散点输出，
 解析→按 LeadCategory 分类→去重→聚成调证台账(md/json)，并可追加进 report.json。
 本套测试覆盖：解析只取含 [LEAD 的行、tag→category 分类、去重、台账分组、report.json 追加。
 """
