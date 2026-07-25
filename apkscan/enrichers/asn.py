@@ -17,14 +17,17 @@ import json
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
-import requests
-
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
-from apkscan.enrichers import _ipinfo
+from apkscan.enrichers import _http, _ipinfo
+
+#: 本模块 ``requests`` 符号 = 有界 shim（get/post 流式限体，防被劫持上游灌爆内存，codex B1）。
+#: 生产走此 shim；测试仍可 ``monkeypatch.setattr(asn, "requests", fake)`` 覆盖注入假响应。
+requests = _http.capped_requests
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +45,13 @@ ASN_FIELDS = _ipinfo.IPINFO_FIELDS
 #: 本地缓存目录与文件。
 CACHE_DIR = Path(".apkscan_cache")
 CACHE_FILE = CACHE_DIR / "asn.json"
+
+#: ASN 富化缓存 TTL（秒）。IP→ASN 映射会随 IP 被重分配/回收而变（虽比 DNS 稳）——无 TTL 会把首次
+#: 归属永久固化，IP 迁到新 ASN 后仍返回旧归属（辖区/网络运营方判定失真、串案锚点用旧归属）。取 7 天：
+#: ASN 重分配远慢于 DNS 换 IP，7 天既省同批次重复查询、又保证跨基础设施变更能重查（对齐 dns.py TTL 纪律）。
+CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
+#: 缓存条目里记录写入时刻的字段名（epoch 秒）。旧缓存无此字段 → 视为过期、触发重查。
+_CACHED_AT_KEY = "_cached_at"
 
 
 class AsnEnricher(BaseEnricher):
@@ -77,10 +87,19 @@ class AsnEnricher(BaseEnricher):
         with self._lock:
             return self._load_cache()
 
+    @staticmethod
+    def _cache_is_fresh(entry: dict[str, Any]) -> bool:
+        """缓存条目是否在 TTL 内（未过期）。无 ``_cached_at``（旧缓存）→ 判过期、触发重查。"""
+        stamped = entry.get(_CACHED_AT_KEY)
+        if not isinstance(stamped, (int, float)):
+            return False
+        return (time.time() - stamped) < CACHE_TTL_SECONDS
+
     def _save_cache_entry(self, ip: str, entry: dict[str, Any]) -> None:
         with self._lock:
             cache = self._load_cache()
-            cache[ip] = entry
+            # 打时间戳供 TTL 过期判断（见 CACHE_TTL_SECONDS）。
+            cache[ip] = {**entry, _CACHED_AT_KEY: time.time()}
             try:
                 CACHE_DIR.mkdir(parents=True, exist_ok=True)
                 # 原子写：先写临时文件再 replace，避免崩溃/并发时留半截坏缓存（读侧虽容忍坏文件
@@ -114,12 +133,16 @@ class AsnEnricher(BaseEnricher):
                 provider=self.name, ok=False, error="空 IP，跳过 ASN 查询"
             )
 
-        # 1) 缓存命中直接返回（不消耗网络）。持锁读，避免与并发写 os.replace 撞车（Windows race）。
+        # 1) 缓存命中且未过期直接返回（不消耗网络）。过期（超 TTL / 无时间戳的旧缓存）→ 重查，
+        #    避免 IP 迁到新 ASN 后永久返回旧归属。持锁读，避免与并发写 os.replace 撞车（Windows race）。
         cache = self._load_cache_locked()
         cached = cache.get(ip)
-        if isinstance(cached, dict):
+        if isinstance(cached, dict) and self._cache_is_fresh(cached):
             logger.debug("ASN 缓存命中：%s", ip)
-            return EnrichmentResult(provider=self.name, ok=True, data=dict(cached))
+            data = {k: v for k, v in cached.items() if k != _CACHED_AT_KEY}
+            return EnrichmentResult(provider=self.name, ok=True, data=data)
+        if isinstance(cached, dict):
+            logger.debug("ASN 缓存过期，重查：%s", ip)
 
         # 2) 网络查询，全部异常吞成 ok=False，绝不炸主流程。
         try:

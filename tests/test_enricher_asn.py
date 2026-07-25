@@ -259,3 +259,47 @@ def test_cache_dir_created_when_missing(
     AsnEnricher().enrich(_ep("7.7.7.7"))
     assert _isolated_cache.parent.is_dir()
     assert _isolated_cache.is_file()
+
+
+def test_expired_cache_triggers_requery(
+    fake_requests: _FakeRequests, _isolated_cache: Path
+) -> None:
+    """★codex B2：超 TTL 的缓存 → 重查，不返回旧归属（IP 迁到新 ASN 场景）。"""
+    fake_requests.response = _FakeResponse(_success_payload())
+    enr = AsnEnricher()
+    enr.enrich(_ep("8.8.8.8"))
+    assert len(fake_requests.calls) == 1
+    # 把 _cached_at 改成远古（超 7 天 TTL）→ 下次命中判过期
+    cache = json.loads(_isolated_cache.read_text(encoding="utf-8"))
+    assert cache["8.8.8.8"]["_cached_at"]  # 写入时已打戳
+    cache["8.8.8.8"]["_cached_at"] = 0.0
+    _isolated_cache.write_text(json.dumps(cache), encoding="utf-8")
+    # 清 _ipinfo 内层内存缓存，让 asn 磁盘缓存过期后的重查真正触网（否则被内层命中掩盖）
+    from apkscan.enrichers import _ipinfo
+    _ipinfo._cache.clear()
+    fake_requests.response = _FakeResponse(_success_payload())
+    enr.enrich(_ep("8.8.8.8"))
+    assert len(fake_requests.calls) == 2, "过期缓存未触发重查（永久固化旧归属）"
+
+
+def test_legacy_cache_without_timestamp_is_stale(
+    fake_requests: _FakeRequests, _isolated_cache: Path
+) -> None:
+    """★无 _cached_at 的旧缓存 → 判过期 → 重查，用新结果而非旧值。"""
+    _isolated_cache.parent.mkdir(parents=True, exist_ok=True)
+    _isolated_cache.write_text(
+        json.dumps({"1.2.3.4": {"isp": "OLD-ISP", "country": "X"}}), encoding="utf-8"
+    )
+    fake_requests.response = _FakeResponse(_success_payload())
+    r = AsnEnricher().enrich(_ep("1.2.3.4"))
+    assert len(fake_requests.calls) == 1  # 无戳→过期→触网
+    assert r.data["isp"] == "Alibaba.com LLC"  # 用新结果，非 OLD-ISP
+
+
+def test_cached_at_not_leaked_into_result_data(fake_requests: _FakeRequests) -> None:
+    """★_cached_at 只是内部 TTL 戳，不得泄进 result.data（否则进报告/归因）。"""
+    fake_requests.response = _FakeResponse(_success_payload())
+    enr = AsnEnricher()
+    enr.enrich(_ep("3.3.3.3"))
+    r = enr.enrich(_ep("3.3.3.3"))  # 命中未过期
+    assert "_cached_at" not in r.data
