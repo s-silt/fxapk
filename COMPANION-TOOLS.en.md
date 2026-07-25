@@ -61,7 +61,6 @@ still run, and unconfigured sources are recorded as `disabled` in the source-sta
 | Capability | Install | Use |
 |---|---|---|
 | Decrypt extra | `pip install cryptography` | Decrypt runtime `{data,timestamp}` encrypted envelopes |
-| Graph extra | `pip install fxapk[graph]` (kuzu) | Local case graph |
 
 ## 4. Dynamic-analysis external tools (install yourself)
 

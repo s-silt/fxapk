@@ -55,7 +55,6 @@ fxapk 内置了对若干**被动 OSINT / 网络空间测绘**源的接线（读�
 | 能力 | 安装 | 用途 |
 |---|---|---|
 | 解密扩展 | `pip install cryptography` | 解密运行时 `{data,timestamp}` 加密信封 |
-| 图谱扩展 | `pip install fxapk[graph]`（kuzu） | 本地案件图谱 |
 
 ## 4. 动态分析外部工具（自装）
 

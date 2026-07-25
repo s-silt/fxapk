@@ -22,7 +22,6 @@ _STATUS_UNREACHABLE = "unreachable"
 
 #: 可选 Python 依赖：(name, import 名, 修复, 用途)。
 _OPTIONAL_DEPS = (
-    ("graph", "kuzu", "pip install fxapk[graph]", "本地案件图谱串案（fxapk graph）"),
     ("decrypt", "cryptography", "pip install cryptography", "解密运行时 {data,timestamp} 加密信封"),
 )
 
