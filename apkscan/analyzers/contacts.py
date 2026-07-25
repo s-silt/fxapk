@@ -1,4 +1,4 @@
-"""联系方式分析器 — QQ / 微信 / Telegram / 邮箱 / 手机号 → CONTACT 调证线索。
+"""联系方式分析器 — QQ / 微信 / Telegram / 邮箱 → CONTACT 调证线索。
 
 职责（见设计文档 §4 contacts 行）：
 - 从 ctx.dex_strings() + 文本资源 + manifest_xml 用正则抽取联系方式。
@@ -7,7 +7,7 @@
   where_to_request, evidence_to_obtain, confidence, source_refs=Evidence)。
 - meta["contacts"] 记录按类型计数，供报告/调试。
 
-误报控制：手机号用前后非数字边界；QQ/微信要求上下文关键字（写在正则里）；
+误报控制：QQ/微信要求上下文关键字（写在正则里）；
 邮箱黑名单排除 @drawable/@string 等资源引用。
 
 约束：
@@ -101,8 +101,6 @@ class _ContactType:
     blacklist: list[str] = field(default_factory=list)
     evidence_to_obtain: list[str] = field(default_factory=list)
     note: str = ""
-    # 占位/测试手机号显式 denylist（仅 phone 类用；缺失走内置兜底）。
-    placeholder_numbers: set[str] = field(default_factory=set)
     # Lead 分类：联系方式默认 CONTACT；IM 回传通道（telegram_bot/im_webhook）声明 channel
     # → 走 CHANNEL（value 用裸 token/webhook，不带类型前缀）。
     category: LeadCategory = LeadCategory.CONTACT
@@ -118,7 +116,7 @@ class _ContactHit:
 
 
 class ContactsAnalyzer(BaseAnalyzer):
-    """提取 QQ/微信/Telegram/邮箱/手机号，产出 CONTACT 调证线索。"""
+    """提取 QQ/微信/Telegram/邮箱，产出 CONTACT 调证线索。"""
 
     name: str = "contacts"
     requires: list[str] = []  # 纯静态，永远可用
@@ -248,15 +246,6 @@ class ContactsAnalyzer(BaseAnalyzer):
                         continue
                     low_conf = False
                     low_conf_note = ""
-                    if ctype.kind == "phone":
-                        verdict = _classify_phone(value, ctype.placeholder_numbers)
-                        if verdict == _PHONE_DROP:
-                            continue  # 显式占位 denylist → drop（13800138000 等）。
-                        if verdict == _PHONE_SUSPECT:
-                            # vanity/长重复-run（18888888888 等）：保留但降 LOW（评审 C3，
-                            # 杀猪盘客服常用靓号，不可一票误杀）。
-                            low_conf = True
-                            low_conf_note = "疑似 vanity/占位号（长重复数字段）；保留待人工核实。"
                     hit = by_value.get(value)
                     if hit is None:
                         if len(by_value) >= _MAX_LEADS_PER_TYPE:
@@ -455,9 +444,6 @@ class ContactsAnalyzer(BaseAnalyzer):
                     blacklist=[b.lower() for b in _as_str_list(entry.get("blacklist"))],
                     evidence_to_obtain=_as_str_list(entry.get("evidence_to_obtain")),
                     note=_str_or_empty(entry.get("note")),
-                    placeholder_numbers={
-                        n.strip() for n in _as_str_list(entry.get("placeholder_numbers"))
-                    },
                     category=_parse_category(entry.get("category")),
                 )
             )
@@ -591,52 +577,15 @@ def _valid_for_kind(kind: str, value: str) -> bool:
     return tld.isalpha() and tld.lower() in _EMAIL_TLDS
 
 
-# 占位手机号内置兜底（规则缺失时仍过滤最常见占位号）。
-_FALLBACK_PLACEHOLDER_PHONES: frozenset[str] = frozenset({"13800138000", "13888888801"})
-
-# 重复-run 阈值：最长连续相同数字 ≥ 此值视为"疑似 vanity/占位"（C3）。
-# 实测：13666666666 run=9、13700000000 run=8、18888888888 run=10、13966666660 run=7 命中；
-# 真号 13912345678 run=1、18612349999 run=4 不命中。
-# ★评审 C3 修复：run 启发式只"降可信"不"drop"——杀猪盘客服/引流常用靓号（连号/豹子号），
-#   一票误杀会丢真线索。真占位仍靠显式 denylist drop（13800138000 run 仅 3，无法靠 run 识别）。
-_MAX_REPEAT_RUN = 6
-
-# 手机号判定三态结果。
-_PHONE_KEEP = "keep"        # 正常保留（原 confidence）。
-_PHONE_SUSPECT = "suspect"  # 疑似 vanity/占位：保留但降 LOW。
-_PHONE_DROP = "drop"        # 显式占位 denylist：drop。
-
-
-def _longest_repeat_run(value: str) -> int:
-    """返回字符串中最长连续相同字符的长度。"""
-    if not value:
-        return 0
-    longest = 1
-    cur = 1
-    for prev, ch in zip(value, value[1:]):
-        if ch == prev:
-            cur += 1
-            longest = max(longest, cur)
-        else:
-            cur = 1
-    return longest
-
-
-def _classify_phone(value: str, placeholders: set[str]) -> str:
-    """手机号三态判定（C3 降噪，no-false-kill）：
-
-    - value ∈ placeholders（YAML denylist，缺失走内置兜底）→ _PHONE_DROP（确认占位，如
-      13800138000 run 仅 3，必须靠显式 denylist）。
-    - 最长连续相同数字 ≥ _MAX_REPEAT_RUN → _PHONE_SUSPECT（疑似 vanity/占位，**保留**但降
-      LOW；杀猪盘靓号客服号不可一票误杀）。
-    - 其它 → _PHONE_KEEP（真号 13912345678 run=1、18612349999 run=4 原样保留）。
-    """
-    deny = placeholders or _FALLBACK_PLACEHOLDER_PHONES
-    if value in deny:
-        return _PHONE_DROP
-    if _longest_repeat_run(value) >= _MAX_REPEAT_RUN:
-        return _PHONE_SUSPECT
-    return _PHONE_KEEP
+# ---------------------------------------------------------------------------
+# 手机号提取已于 2026-07-24 整类移除（详见 rules/contacts.yaml 的说明注释）。
+# 原 _classify_phone / _longest_repeat_run / 占位号 denylist / vanity-run 启发式
+# 一并删除：规则里没有 kind=phone 后它们永不被调用，留着是死代码。
+# 实证依据：语料库 15 样本提取的 12 个「手机号」经逐条回原文核验 12/12 全为误报
+#（矢量图坐标 / Lottie 数值 / π / SHA 常量 / 合约字节码 / 货币配置）。
+# ★短信转发分析器（sms_forwarding.py）的手机号提取是**上下文门控**的
+#  （须与转发关键词共现才记证据），属真线索，不受本次移除影响。
+# ---------------------------------------------------------------------------
 
 
 def _snippet_around(text: str, m: re.Match, radius: int = 40) -> str:
