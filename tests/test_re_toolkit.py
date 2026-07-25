@@ -114,6 +114,54 @@ def test_libcoresyscall_sets_anti_frida():
     assert result.meta["hook_frameworks"] == []
 
 
+# --- 抗改名锚点：包名被改后仍能靠字符串字面量命中 --------------------------
+
+#: LibcoreSyscall arm64 shellcode 的 base64 首段（2026-07-25 逐字节核于上游 main）。
+#: 它是 syscall 指令流本身，删了库不能工作；R8 只改符号不改串内容，故改名后仍在。
+_LCS_ARM64_B64 = "AAA+1MADX9boAwaq5gNA+eEDA6rgAwIq4gMEquMDBarkAwiq5QMHqgEAABQJfECT4AMBquEDAqri"
+
+
+def test_libcoresyscall_detected_after_package_rename():
+    """★无修复即失败：包名被 R8 改光（源码内联/重打包场景）→ 仅靠 base64 shellcode 锚点仍须命中。
+
+    修前只有 dex_prefixes，此处零包名痕迹 → 完全漏检。断言命中且为**强证据**。
+    """
+    result = _analyze(dex_strings=[
+        "a.b.c.d",                       # 包名已被改成无意义短名
+        f"{_LCS_ARM64_B64}\nAwOq4wMEquQ",  # 折叠后的大串里含该段（javac 常量折叠形态）
+    ])
+    names = [t["name"] for t in result.meta["re_toolkit"]]
+    assert any("LibcoreSyscall" in n for n in names)
+    hit = next(t for t in result.meta["re_toolkit"] if "LibcoreSyscall" in t["name"])
+    assert hit["strong"] is True  # 字符串内容命中 = 强证据（非仅包名的中证据）
+    assert result.meta["anti_frida"] is True
+
+
+def test_libcoresyscall_detected_by_unique_error_string() -> None:
+    """★错误串锚点（含上游拼写错误 heade）：包名全无时亦能命中。"""
+    result = _analyze(dex_strings=["x.y.z", "Invalid ELF heade: bad magic"])
+    names = [t["name"] for t in result.meta["re_toolkit"]]
+    assert any("LibcoreSyscall" in n for n in names)
+
+
+def test_dex_string_match_is_case_sensitive() -> None:
+    """★base64 区分大小写：全小写化的同长串**不得**命中（否则等于放宽成模糊匹配）。"""
+    result = _analyze(dex_strings=["a.b.c", _LCS_ARM64_B64.lower()])
+    names = [t["name"] for t in result.meta["re_toolkit"]]
+    assert not any("LibcoreSyscall" in n for n in names)
+
+
+def test_ordinary_app_strings_do_not_hit_libcoresyscall() -> None:
+    """普通 App 的常见字符串（含被明确否决的技术级串）不得命中——防技术级误报。"""
+    result = _analyze(dex_strings=[
+        "sun.misc.Unsafe", "theUnsafe", "java.lang.reflect.ArtMethod",
+        "libcore.io.Memory", "android.util.Base64",
+        "Invalid ELF header: bad magic",  # 拼写正确的版本 = 通用串，不是指纹
+    ])
+    names = [t["name"] for t in result.meta["re_toolkit"]]
+    assert not any("LibcoreSyscall" in n for n in names)
+
+
 # --- dex 命中 hook 框架（pine，仅弱证据）→ MEDIUM --------------------------
 
 
