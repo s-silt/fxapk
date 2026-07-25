@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 import os
 from collections import Counter
 from dataclasses import dataclass
@@ -31,6 +32,8 @@ LAYER_NAMES = (
     "request_target",
 )
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class ClosureConfig:
@@ -49,6 +52,32 @@ class ClosureConfig:
 
 def _mapping(value: object) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
+
+
+#: FOFA 数组行的字段顺序（与富化器 ``multisource.FOFA_QUERY_FIELDS`` 查询串**逐字段同序**——
+#  有漂移守卫测试比对二者，改一处必同步另一处）。FOFA 按数组返回，此前 closure 用魔数下标（row[10] 等）
+#  取值，一旦 FOFA 改字段序/富化器改查询就静默错位污染归属；改用命名解析 + 形状校验（codex #3）。
+_FOFA_FIELDS: tuple[str, ...] = (
+    "host", "ip", "port", "protocol", "title", "server",
+    "country", "region", "city", "as_number", "as_organization",
+)
+
+
+def _parse_fofa_row(row: object) -> dict[str, Any] | None:
+    """把一条 FOFA 数组行按 ``_FOFA_FIELDS`` 解析成命名 dict。
+
+    行长与字段数不符 → 记 warning 并**跳过该行**（形状漂移：FOFA 改列或富化器改查询，宁可少一条也不错位取值）。
+    非 list / 空 → None。绝不抛。
+    """
+    if not isinstance(row, list):
+        return None
+    if len(row) != len(_FOFA_FIELDS):
+        logger.warning(
+            "FOFA 行字段数 %d 与预期 %d 不符（疑 FOFA 改列 / 富化器查询漂移），跳过该行以免错位取值",
+            len(row), len(_FOFA_FIELDS),
+        )
+        return None
+    return dict(zip(_FOFA_FIELDS, row))
 
 
 def _runtime_info(endpoint: Endpoint) -> dict[str, Any]:
@@ -341,24 +370,25 @@ def _passive_hosting_evidence(
     raw_fofa_records = fofa.get("records")
     if isinstance(raw_fofa_records, list):
         for row in raw_fofa_records[:20]:
-            if not isinstance(row, list):
+            fields = _parse_fofa_row(row)  # 命名字段解析 + 形状校验（不再按魔数下标取值）
+            if fields is None:
                 continue
-            add_provider("fofa", row[10] if len(row) > 10 else None)
+            add_provider("fofa", fields["as_organization"])
             add_service(
                 "fofa",
                 {
-                    "port": row[2] if len(row) > 2 else None,
-                    "protocol": row[3] if len(row) > 3 else None,
-                    "title": row[4] if len(row) > 4 else None,
-                    "server": row[5] if len(row) > 5 else None,
+                    "port": fields["port"],
+                    "protocol": fields["protocol"],
+                    "title": fields["title"],
+                    "server": fields["server"],
                 },
             )
             add_location(
                 "fofa",
                 {
-                    "country": row[6] if len(row) > 6 else None,
-                    "region": row[7] if len(row) > 7 else None,
-                    "city": row[8] if len(row) > 8 else None,
+                    "country": fields["country"],
+                    "region": fields["region"],
+                    "city": fields["city"],
                 },
             )
 
