@@ -348,6 +348,45 @@ def test_build_endpoint_attribution_domain_per_ip_never_collapses() -> None:
     assert by_ip["2.2.2.2"]["edge_provider"]["name"] == "Cloudflare"
 
 
+def test_domain_analyze_ip_resource_holder_marked_deferred() -> None:
+    """★analyze 路径：域名解析 IP 无 resolved_ip_enrichment（IP-RDAP 未逐 IP 查）→ resource_holder
+    须显式标 deferred='case_close'，区分「未查询」与结案后 name=None 的「查无登记方」。"""
+    att = A.build_endpoint_attribution("domain", "pay.example.com", {
+        "dns": {
+            "ips": ["1.1.1.1", "2.2.2.2"],
+            "hosting": [
+                {"ip": "1.1.1.1", "asn": "AS13335", "org": "Cloudflare", "country": "US"},
+                {"ip": "2.2.2.2", "asn": "AS45090", "org": "Tencent", "country": "CN"},
+            ],
+        },
+    })
+    assert att is not None and len(att["ips"]) == 2
+    for ip_layer in att["ips"]:
+        rh = ip_layer["resource_holder"]
+        assert rh["name"] is None
+        assert rh["deferred"] == "case_close", "analyze 域名 IP 的第1层须标待补，不能静默当作查无"
+
+
+def test_domain_resolved_ip_with_rdap_not_deferred() -> None:
+    """★对照：结案已补 ip_rdap 有登记方 → resource_holder 有 name、绝不带 deferred 标记。"""
+    att = A.build_endpoint_attribution("domain", "pay.example.com", {
+        "dns": {"ips": ["45.76.100.10"], "hosting": [{"ip": "45.76.100.10", "asn": "AS20473"}]},
+        "resolved_ip_enrichment": {
+            "45.76.100.10": {"ip_rdap": {"netname": "VULTR-NET", "org": "The Constant Company"}},
+        },
+    })
+    rh = att["ips"][0]["resource_holder"]
+    assert rh["name"] == "VULTR-NET"
+    assert "deferred" not in rh
+
+
+def test_ip_endpoint_resource_holder_never_deferred() -> None:
+    """★IP 端点 analyze 就跑 IP-RDAP（applies_to=['ip']），其 resource_holder 无论有无值都不该标 deferred
+    （deferred 仅限域名解析 IP 这条真未查询的分支）。"""
+    att = A.build_endpoint_attribution("ip", "1.2.3.4", {"asn": {"asn": "AS45090", "org": "Tencent cloud"}})
+    assert "deferred" not in att["ips"][0]["resource_holder"]
+
+
 def test_build_endpoint_attribution_domain_absorbs_resolved_ip_enrichment() -> None:
     """★P1-3：域名端点吸收 case-close 逐 IP 富化（resolved_ip_enrichment[ip] 的 ip_rdap 资源登记方）→
     顶层五层的 resource_holder 有值而非恒 unknown；域名级 cname 与 hosting asn 兜底不退化。"""

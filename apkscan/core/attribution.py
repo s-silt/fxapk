@@ -766,7 +766,15 @@ def build_endpoint_attribution(kind: str, value: str, enrichment: dict[str, Any]
             }
             if cname:
                 signals["cname_chain"] = cname
-            ips.append(build_ip_attribution(ip, signals))
+            att = build_ip_attribution(ip, signals)
+            # ★resource_holder（第1层=IP-RDAP 资源登记方）在此分支必为空：走到这里说明本解析 IP 无
+            #   resolved_ip_enrichment，即 IP-RDAP 尚**未对它查询**（IpRdapEnricher applies_to=['ip']，
+            #   域名解析 IP 的 RDAP 结案时才逐个补）。显式标 deferred='case_close'，让下游区分「未查询」与
+            #   结案后 name=None 的「查无登记方」——避免把待补层读成已核实为空（provenance 纪律）。
+            rh = att.get("resource_holder")
+            if isinstance(rh, dict) and not rh.get("name"):
+                rh["deferred"] = "case_close"
+            ips.append(att)
 
     if not ips:
         return None

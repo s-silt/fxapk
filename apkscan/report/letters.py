@@ -221,6 +221,10 @@ def _render_ip_chain(layer: dict[str, Any]) -> list[str]:
     if rh_name:
         src = _md_safe(_str_or_empty(rh.get("source")) or "RDAP")
         lines.append(f"  - 资源登记方：{_md_safe(rh_name)}（{src}，置信{_conf_cn(rh)}）")
+    elif rh.get("deferred") == "case_close":
+        # ★analyze 阶段域名解析 IP 未查 IP-RDAP（结案逐个补）。显式标注"待补"而非静默省略，
+        #   免得读者把空第1层当成"已核实无登记方"（未查询 ≠ 查无）。
+        lines.append("  - 资源登记方：待结案 RDAP 补全（analyze 阶段未逐 IP 查询）")
     else:
         lines.append("  - 资源登记方：未知")
 
