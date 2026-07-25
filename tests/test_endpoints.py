@@ -112,6 +112,30 @@ def test_standard_localhost_not_flagged():
     assert all(f.id != "NATIVE-RUNTIME-ADDRESSING-PLACEHOLDER" for f in result.findings)
 
 
+def test_loopback_manifest_only_evidence_source_is_manifest():
+    """★P1 无修复即失败：回环 IP **只**来自 manifest 原文 → 证据 source 须为 "manifest"（不再恒记 "dex"）。"""
+    result = _analyze(
+        dex_strings=["nothing.here"],  # dex 无回环
+        manifest_xml='<manifest><meta-data android:value="127.0.209.162"/></manifest>',
+        native_libs=["lib/arm64-v8a/libclientcore.so"],
+    )
+    f = next(f for f in result.findings if f.id == "NATIVE-RUNTIME-ADDRESSING-PLACEHOLDER")
+    srcs = {e.source for e in f.evidences}
+    assert srcs == {"manifest"}  # 修前恒 "dex" → 此断言必失败
+
+
+def test_loopback_regex_rejects_dotted_version_prefix():
+    """★P1 无修复即失败：形如 127.2.3.4.5 的版本/多段串**不得**被当回环 IP（\\b 会误取前缀 127.2.3.4）。
+
+    仅此一条"回环样"串 + native 库：修前正则取到 127.2.3.4 → 误产 Finding；修后独立性前后瞻拒之 → 无 Finding。
+    """
+    result = _analyze(
+        dex_strings=["build.version=127.2.3.4.5"],
+        native_libs=["lib/arm64-v8a/libclientcore.so"],
+    )
+    assert all(f.id != "NATIVE-RUNTIME-ADDRESSING-PLACEHOLDER" for f in result.findings)
+
+
 # --- dex 来源：URL / IP / 域名 -------------------------------------------
 
 
