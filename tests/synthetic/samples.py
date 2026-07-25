@@ -22,6 +22,28 @@ class SyntheticSample:
     expected_categories: frozenset[str] = frozenset()
 
 
+#: BIP-39 测试向量助记词（公开测试向量，非任何真实钱包）——触发 WALLET_SECRET。
+_TEST_MNEMONIC = "legal winner thank year wave sausage worth useful legal winner thank yellow"
+
+#: 合成 JS：CryptoJS AES-CFB + 硬编码 key + iv=MD5(key+ts) + {timestamp,data} 信封——触发 CRYPTO_RECIPE。
+#: 形态复刻真样本，**值全为合成**（key 是 0123456789abcdef 重复串，非任何真实密钥）。
+_SYNTHETIC_CRYPTO_JS = """
+var cu = CryptoJS;
+var wl = "0123456789abcdef0123456789abcdef";
+function vu(e){ return cu.MD5(e).toString().substring(0,16); }
+function yu(e,t,n){
+  const i=cu.enc.Utf8.parse(t), o=cu.enc.Utf8.parse(n);
+  return cu.AES.decrypt(e,i,{iv:o,mode:cu.mode.CFB,padding:cu.pad.Pkcs7}).toString(cu.enc.Utf8);
+}
+request.use((async e=>{
+  const t=function(e,t){
+    const n=(new Date).getTime(), i=vu(t+n), o=cu.enc.Utf8.parse(t), r=cu.enc.Utf8.parse(i);
+    return {timestamp:n, data:cu.AES.encrypt(e,o,{iv:r,mode:cu.mode.CFB,padding:cu.pad.Pkcs7}).toString()};
+  }(JSON.stringify(e.data), wl);
+  e.data={data:t.data, timestamp:t.timestamp};
+}));
+"""
+
 #: 合成样本清单。刻意小而稳：每个样本只植入触发**一类**线索的最小合成内容。
 SAMPLES: tuple[SyntheticSample, ...] = (
     SyntheticSample(
@@ -38,5 +60,30 @@ SAMPLES: tuple[SyntheticSample, ...] = (
         name="self-hosted-im-websocket",
         dex_strings=['url="wss://im.evilbroker-synthetic.test/socket"'],
         expected_categories=frozenset({"SELF_HOSTED_IM"}),
+    ),
+    SyntheticSample(
+        name="wallet-secret-mnemonic",
+        dex_strings=[f"backup seed = {_TEST_MNEMONIC} ;"],
+        expected_categories=frozenset({"WALLET_SECRET"}),
+    ),
+    SyntheticSample(
+        name="fourth-party-payment-gateway",
+        dex_strings=["跑分平台下单 https://pay.evilgw-synthetic.test/api/pay/notify?mch_id=8801"],
+        expected_categories=frozenset({"FOURTH_PARTY_PAYMENT"}),
+    ),
+    SyntheticSample(
+        name="crypto-recipe-cryptojs-envelope",
+        files={"assets/apps/__UNI__X/www/app-service.js": _SYNTHETIC_CRYPTO_JS.encode("utf-8")},
+        expected_categories=frozenset({"CRYPTO_RECIPE"}),
+    ),
+    SyntheticSample(
+        name="card-merchant-keyword",
+        dex_strings=["欢迎光临本站，专业卡商一手货源"],
+        expected_categories=frozenset({"CARD_MERCHANT"}),
+    ),
+    SyntheticSample(
+        name="payment-sdk-alipay",
+        dex_strings=["com.alipay.sdk.app.PayTask", "随便一条无关字符串"],
+        expected_categories=frozenset({"PAYMENT"}),
     ),
 )
