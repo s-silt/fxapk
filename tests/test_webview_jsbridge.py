@@ -181,6 +181,18 @@ def test_read_file_error_does_not_crash() -> None:
     assert isinstance(r.findings, list)
 
 
+def test_resource_cumulative_budget_stops_reading(monkeypatch) -> None:
+    """★codex C3：资源累计读入达上限即停止读剩余文件（防 500×4MB≈2GB 累计撑爆内存）。"""
+    import apkscan.analyzers.webview_jsbridge as wv
+    monkeypatch.setattr(wv, "_MAX_TOTAL_RESOURCE_BYTES", 10)  # 极小预算
+    ctx = FakeContext(files={
+        "assets/www/a.js": b"x" * 100,          # 100 字节 > 预算
+        "assets/www/b.js": b"window.bridge",     # 应因预算耗尽被跳过
+    })
+    texts = wv.WebViewJsBridgeAnalyzer()._collect_resource_texts(ctx)
+    assert len(texts) <= 1, "累计预算未阻止读入后续资源"
+
+
 def test_rules_missing_uses_no_findings(monkeypatch) -> None:
     monkeypatch.setattr(webview_jsbridge, "load_rules", lambda name: {})
     r = _run(dex_strings=["addJavascriptInterface"])
