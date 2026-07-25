@@ -3,6 +3,22 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
+## Unreleased
+
+### Added
+
+- **DEX 字符串池不透明度（可信度信号）**：新增 `dex_obfuscation` 分析器（自动跑），度量字符串池中
+  「结构性不可读」串的占比，命中产 `DEX-STRING-POOL-OPAQUE`。
+  - **解决的是静默失明**：编译期字符串混淆器把 dex 字面量整体加密后，`endpoints` / `contacts` /
+    `config_keys` 等依赖字符串池的分析器会集体抽空，报告于是干净地写着「未发现网络端点」——而真相是
+    看不见。本 Finding 明说「此处的『未发现』不可解读为『不存在』」，并指向运行时取证。
+  - **不指名任何工具、不产任何端点或线索**，只度量输入的可读性；画像恒写进 `meta["dex_string_pool"]`
+    （不论是否命中），使「我们究竟看到了多少」可复核。
+  - **假阳防线**：只认结构性不可读（控制字符 / 私用区 / 代理码位 / 近随机码位分布），
+    **CJK・西里尔・阿拉伯・假名一律算可读内容**——中文 App 的非 ASCII 字符串不会被误判；
+    另需样本量达标 + 「不透明占比高」与「可读占比低」双边同时成立才报，类型描述符与方法签名
+    （恒存在、不随混淆消失）排除出统计以免稀释比例。
+
 ## 1.2.0 — 2026-07-25
 
 Theme: **功能收敛 + 结果可信度**。三条线：①**收敛**——移除从未真正落地或半弃用的支线
