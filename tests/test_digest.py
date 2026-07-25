@@ -118,6 +118,33 @@ def test_integrity_reliable_when_healthy() -> None:
     assert integ["warnings"] == []
 
 
+def test_integrity_dirty_counts_never_throw() -> None:
+    """★codex P0：脏 enricher_status（attempted="bad"/列表/负数）→ 不抛，跳过并降可靠性告警。"""
+    report = {
+        "leads": [], "analysis_status": "partial", "completeness": 1.0, "critical_failures": [],
+        "enricher_status": [
+            {"provider": "asn", "attempted": "bad", "ok": 1},        # 脏字符串
+            {"provider": "rdap", "attempted": [1, 2], "ok": 0},       # 脏列表
+            {"provider": "x", "attempted": 3, "ok": 5},               # ok>attempted
+            {"provider": "y", "attempted": 10, "ok": 9},              # 正常
+        ],
+    }
+    d = build_digest(report)  # 绝不抛
+    integ = d["integrity"]
+    assert integ["enrichment_ok_rate"] == round(9 / 10, 4)  # 仅正常条目
+    assert any("异常条目" in w for w in integ["warnings"])
+
+
+def test_integrity_nan_completeness_not_reliable() -> None:
+    """★codex P1：NaN/越界 completeness 不得绕过阈值伪装 reliable=True。"""
+    d1 = build_digest({"leads": [], "completeness": float("nan"), "enricher_status": []})
+    assert d1["integrity"]["reliable"] is False
+    d2 = build_digest({"leads": [], "completeness": 1.5, "enricher_status": []})
+    assert d2["integrity"]["reliable"] is False
+    d3 = build_digest({"leads": [], "completeness": -0.1, "enricher_status": []})
+    assert d3["integrity"]["reliable"] is False
+
+
 def test_integrity_no_enrichment_attempts_not_flagged() -> None:
     """零富化尝试（离线/无端点）→ enrichment_ok_rate=None，不因此告警（不是失败）。"""
     report = {"leads": [], "analysis_status": "complete", "completeness": 1.0,

@@ -213,6 +213,10 @@ def manifest_entry(report: dict, case_id: str | None = None) -> dict:
         "package_name": _s(report.get("package_name") or meta.get("package_name")) or None,
         "version_name": meta.get("version_name"),
         "version_code": meta.get("version_code"),
+        # 依赖版本（androguard 等）复现锚点：不入主键（避免改 corpus 路径 schema 冲击既有证据库），
+        # 但登记于此，供 upsert 检出「同主键不同依赖版本」时告警（codex P1，不静默丢 dep 变体报告）。
+        "dependency_versions": meta.get("dependency_versions")
+        if isinstance(meta.get("dependency_versions"), dict) else None,
         "sign_sha256": meta.get("sign_sha256"),  # 签名证书摘要 = 共享证书串案强锚
         # ---- 加固 / 分类 ----
         "packer": meta.get("packer"),
@@ -297,9 +301,19 @@ def upsert(entries: list[dict], entry: dict) -> tuple[list[dict], bool]:
     返回 added=True。返回新列表（不原地改入参）。
     """
     key = _key_of(entry)
-    existing = {_key_of(e) for e in entries}
-    if key in existing:
-        return list(entries), False
+    for e in entries:
+        if _key_of(e) == key:
+            # ★同主键不同依赖版本（codex P1）：主键 (样本,版本,规则) 不含依赖版本，androguard 小版本变更
+            #   可能产出不同报告，幂等跳过会静默丢这份 dep 变体。主键不变（不冲击 corpus 路径 schema），
+            #   但此处告警让操作者知悉——需保留变体则手工换 tool_version/另库入库。
+            old_dep = e.get("dependency_versions")
+            new_dep = entry.get("dependency_versions")
+            if old_dep != new_dep:
+                logger.warning(
+                    "corpus 幂等跳过：同主键 %s 但依赖版本不同（库内 %s / 本次 %s）——"
+                    "该依赖变体报告未入库", key, old_dep, new_dep,
+                )
+            return list(entries), False
     return [*entries, entry], True
 
 
