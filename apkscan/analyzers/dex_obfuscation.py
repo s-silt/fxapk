@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import unicodedata
 from collections import Counter
 from typing import TYPE_CHECKING, Any
@@ -41,6 +42,10 @@ _MIN_LEN = 4
 #: 判定所需的最少**有效样本**数：样本太少任何比例都不稳，宁可不报。
 _MIN_SAMPLE = 300
 
+#: 参与统计的总字符量上限：条数上限管不住"少量超长串"的对抗构造，而逐字符分析的开销与
+#: 总字符量成正比，故按字符量另设硬顶。触顶会 warning（截断必须可见，不静默）。
+_MAX_TOTAL_CHARS = 20_000_000
+
 #: 不透明串占比阈值：超过即认为池中存在成规模的加密串。
 _OPAQUE_RATIO = 0.15
 
@@ -58,31 +63,46 @@ _RANDOM_MIN_LEN = 16
 _EVIDENCE_SAMPLES = 3
 _SNIPPET_LEN = 40
 
-#: JVM/DEX 类型描述符与签名的起始字符——它们恒存在于字符串池（不随字符串混淆消失），
-#: 计入统计会稀释比例、掩盖失明，故整体排除。
-_DESCRIPTOR_PREFIXES = ("L", "[", "(")
+#: JVM/DEX 类型描述符与方法签名——它们恒存在于字符串池（不随字符串混淆消失），计入统计会稀释比例、
+#: 掩盖失明，故排除。★须按**完整语法**匹配：仅"首字符 L/[/( + 含分号"会把普通业务文案误当描述符。
+#:   单类型：``[`` * n + （基元 BCDFIJSZV | ``L``包名/类名``;``）
+#:   方法签名：``(`` 参数* ``)`` 返回型（返回型另可为 ``V``）
+#: 不计入「不可读」的格式字符：排版空白，以及 emoji 合成部件——ZWJ(U+200D) 与变体选择符
+#: (U+FE0E/U+FE0F)。它们类别虽是 Cf，却是正常文本的构成部件，计入会把 emoji 多的 App 判成混淆。
+_TEXT_FORMAT_EXEMPT = frozenset("\t\n\r‍︎️")
+
+_TYPE_DESC = r"\[*(?:[BCDFIJSZV]|L[A-Za-z0-9_$/]+;)"
+_DESCRIPTOR_RE = re.compile(rf"(?:{_TYPE_DESC}|\((?:{_TYPE_DESC})*\)(?:{_TYPE_DESC}|V))")
 
 
 def _is_descriptor(s: str) -> bool:
-    """粗判类型描述符 / 方法签名（``Landroid/app/Activity;`` / ``()V`` / ``[B``）。"""
+    """判类型描述符 / 方法签名（``Landroid/app/Activity;`` / ``()V`` / ``[B``）。
+
+    ★按 JVM 描述符**语法**判，不能只看首字符 + 含分号（复审 P2）：那样会把
+    ``Login failed; retry later`` / ``(optional) phone number`` / ``(点击重试)`` 这类**普通业务文案**
+    当描述符排除掉——被排除的串不进分母，反而抬高不透明占比、把正常 App 推向误报。
+    """
     if not s:
         return False
-    if s[0] in _DESCRIPTOR_PREFIXES and (";" in s or ")" in s or len(s) <= 3):
-        return True
-    return False
+    return bool(_DESCRIPTOR_RE.fullmatch(s))
 
 
 def _unreadable_char_ratio(s: str) -> float:
-    """结构性不可读字符占比：控制字符(Cc/Cf)、私用区(Co)、代理码位(Cs)、未分配(Cn)。
+    """结构性不可读字符占比：控制字符(Cc)、格式字符(Cf)、私用区(Co)、代理码位(Cs)、未分配(Cn)。
 
-    ★ 只认这几类。CJK / 西里尔 / 阿拉伯 / 假名等**有语义的文字**属 Lo/Ll/Lu 等类别，
-    不在此列——中文 App 的字符串因此不会被误判。
+    ★ 只认这几类。CJK / 西里尔 / 阿拉伯 / 假名等**有语义的文字**属 Lo/Ll/Lu 等类别，不在此列
+    ——中文 App 的字符串因此不会被误判。
+
+    ★ emoji 例外（复审 P1）：合成 emoji 用 **ZWJ（U+200D）** 连接，其类别正是 ``Cf``。实测
+    「👨‍👩‍👧‍👦」ZWJ 占比达 43%、「👩‍💻」达 33%，都会越过不可读阈值——于是一个 emoji 用得多的
+    正常 App 会被判成"字符串池整体混淆"。故 ZWJ 与变体选择符（U+FE0E/U+FE0F）不计入不可读：
+    它们是**正常文本的构成部件**，不是加密痕迹。
     """
     if not s:
         return 0.0
     bad = 0
     for ch in s:
-        if ch in "\t\n\r":  # 常见排版空白，正常内容里合法
+        if ch in _TEXT_FORMAT_EXEMPT:  # 排版空白 + emoji 组合部件：正常内容里合法
             continue
         if unicodedata.category(ch) in ("Cc", "Cf", "Co", "Cs", "Cn"):
             bad += 1
@@ -110,13 +130,19 @@ def _is_opaque(s: str) -> bool:
 
 
 def _is_readable(s: str) -> bool:
-    """该串是否含人类可读内容：存在 ≥3 个连续的「文字类」字符（任何语系）。
+    """该串是否含人类可读内容：≥3 个连续「文字类」字符（任何语系），或含 emoji / 图形符号。
 
     用 unicodedata 的字母类判定而非 ASCII 白名单——中文/日文/俄文内容同样算可读。
+    ★ emoji（类别 So）与肤色修饰符（Sk）也算**可读内容**（复审 P1）：贴纸描述、聊天模板、
+    无障碍标签这类正常字符串常以 emoji 为主、字母很少，若不算可读，它们会同时踩中
+    「不透明占比高 + 可读占比低」两条，把正常 App 判成整体混淆。
     """
     run = 0
     for ch in s:
-        if unicodedata.category(ch).startswith("L"):
+        cat = unicodedata.category(ch)
+        if cat in ("So", "Sk"):  # emoji / 图形符号 / 修饰符：有语义的内容
+            return True
+        if cat.startswith("L"):
             run += 1
             if run >= 3:
                 return True
@@ -134,10 +160,23 @@ def assess_string_pool(strings: list[str]) -> dict[str, Any]:
         单边条件极易误报（小 App 串少、资源类 App 串多但短），故取双边。
     """
     considered: list[str] = []
+    budget = _MAX_TOTAL_CHARS
+    truncated = False
     for s in strings:
         if not isinstance(s, str) or len(s) < _MIN_LEN or _is_descriptor(s):
             continue
+        # ★总字符量上限（复审 P2）：条数上限约束不住"少量超长串"的对抗构造；逐字符跑
+        # unicodedata.category + Counter 的开销与总字符量成正比，故按字符量硬封顶。
+        if budget <= 0:
+            truncated = True
+            break
+        budget -= len(s)
         considered.append(s)
+    if truncated:
+        logger.warning(
+            "[dex_obfuscation] 字符串总量超 %d 字符上限，仅据前 %d 条统计——比例可能不代表全池",
+            _MAX_TOTAL_CHARS, len(considered),
+        )
 
     sampled = len(considered)
     opaque_list = [s for s in considered if _is_opaque(s)]

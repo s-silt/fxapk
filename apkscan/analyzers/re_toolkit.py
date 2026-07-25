@@ -72,12 +72,21 @@ _SNIPPET_MAX = 200
 _MIN_STUB_B64_CHARS = 512
 #: 解码后最小字节数：太短不足以是一段可用的 syscall 桩。
 _MIN_STUB_BYTES = 128
-#: 最多尝试解码的候选串数 / 累计解码字节上限——防大 APK 上开销炸开。
-_MAX_STUB_CANDIDATES = 200
+#: ★单个载荷解码上限：实测真实 syscall 桩仅 1.8~3.4KB，取 64KB 已是 20 倍余量。作用有二——
+#:   ① 硬性封住单候选的内存/CPU 峰值（**解码前**按 base64 长度预估即跳过，不先分配再判）；
+#:   ② 把每候选的扫描位置从百万级压到万级，使「随机数据撞上 syscall 编码」的概率保持在可忽略量级
+#:      （扫描位置越多，随机碰撞机会线性增长——这是原注释只写 1/2³² 的疏漏）。
+_MAX_STUB_PAYLOAD_BYTES = 64 * 1024
+#: 超过此大小的载荷已远大于任何真实 syscall 桩，要求更多命中数以抵消其扫描位置增多带来的碰撞概率。
+_LARGE_STUB_BYTES = 8 * 1024
+#: 候选数与累计解码量上限。累计量是**硬上限**（解码前预估、超了就停），候选数是兜底。
+#: 触顶会 logger.warning——截断必须可见，不能静默漏检（本项目硬规则）。
+_MAX_STUB_CANDIDATES = 2000
 _MAX_STUB_DECODE_BYTES = 8 * 1024 * 1024
-#: 需要的对齐 syscall 指令数下限。实测各架构载荷含 1~4 处（arm64 全部 syscall 走同一个 stub → 仅 1 处），
-#: 故取 1；4 字节指令 × 4 字节对齐下随机命中概率 ~1/2³²（2000 次随机数据实测零命中）。
+#: 需要的对齐 syscall 指令数下限：小载荷（≤_LARGE_STUB_BYTES，覆盖全部真实样本）取 1——实测
+#: arm64 全部 syscall 走同一 stub、仅 1 处；大载荷取 2，抵消扫描位置增多的碰撞概率。
 _MIN_SYSCALL_INSN = 1
+_MIN_SYSCALL_INSN_LARGE = 2
 #: 仅纯 base64 字符（已去空白）才尝试解码。
 _B64_ONLY_RE = re.compile(r"[A-Za-z0-9+/=]+")
 #: 已知容器格式魔数：解码结果是这些即正常内嵌资源（证书/图片/压缩包/动态库），不是裸机器码。
@@ -267,34 +276,64 @@ class ReToolkitAnalyzer(BaseAnalyzer):
 
     @staticmethod
     def _scan_syscall_stub_strings(dex_strings: list[str]) -> list[tuple[str, int, str]]:
-        """扫描候选串，返回 ``[(架构, 对齐 syscall 指令数, 载荷首段十六进制)]``。纯函数，便于单测。"""
+        """扫描候选串，返回 ``[(架构, 对齐 syscall 指令数, 载荷首段十六进制)]``。纯函数，便于单测。
+
+        ★额度记账的三条纪律（复审 P1）：
+          ① **解码前**按 base64 长度预估解码后大小 → 超单载荷上限直接跳过，绝不"先分配再判"；
+          ② 累计解码量是**硬上限**，同样在解码前扣减，单个巨串不能突破它；
+          ③ ``checked`` 只统计**真正解码过**的候选——否则海量无关长 base64 会占满额度，
+             把排在后面的真载荷静默挤掉（正是本项目最忌的"抓不到≠没有"）。触顶一律 warning。
+        """
         out: list[tuple[str, int, str]] = []
         decoded_budget = _MAX_STUB_DECODE_BYTES
         checked = 0
+        skipped_oversize = 0
+        exhausted = False
         for s in dex_strings:
             if checked >= _MAX_STUB_CANDIDATES or decoded_budget <= 0:
+                exhausted = True
                 break
             if not isinstance(s, str) or len(s) < _MIN_STUB_B64_CHARS:
                 continue
             compact = "".join(s.split())  # 折叠串内含真实换行（javac 常量折叠形态）
             if len(compact) < _MIN_STUB_B64_CHARS or not _B64_ONLY_RE.fullmatch(compact):
                 continue
+            # ①②解码前的两道闸：预估解码后字节数 = base64 长度 × 3/4（上界，忽略 padding）。
+            est = len(compact) * 3 // 4
+            if est > _MAX_STUB_PAYLOAD_BYTES:
+                skipped_oversize += 1
+                continue  # 远大于任何真实 syscall 桩；跳过且不扣预算（未解码 = 未耗内存）
+            if est > decoded_budget:
+                exhausted = True
+                break
+            decoded_budget -= est
             checked += 1
             try:
                 data = base64.b64decode(compact + "=" * (-len(compact) % 4), validate=False)
-            except Exception:  # noqa: BLE001 — 非法 base64 跳过
+            except Exception:  # noqa: BLE001 — 非法 base64（非候选输入，非内部故障）跳过
                 continue
-            decoded_budget -= len(data)
             if len(data) < _MIN_STUB_BYTES or data.startswith(_CONTAINER_MAGICS):
                 continue
+            need = _MIN_SYSCALL_INSN if len(data) <= _LARGE_STUB_BYTES else _MIN_SYSCALL_INSN_LARGE
             for arch, (insn, align) in _SYSCALL_INSNS.items():
                 count = sum(
                     1 for i in range(0, len(data) - len(insn) + 1, align)
                     if data[i:i + len(insn)] == insn
                 )
-                if count >= _MIN_SYSCALL_INSN:
+                if count >= need:
                     out.append((arch, count, data[:12].hex(" ")))
                     break
+        if exhausted:
+            logger.warning(
+                "[re_toolkit] 内嵌 syscall 载荷扫描触顶（已查 %d 个候选、剩余预算 %d 字节），"
+                "后续候选未检查——本次「未命中」不等于样本无此特征",
+                checked, max(0, decoded_budget),
+            )
+        if skipped_oversize:
+            logger.info(
+                "[re_toolkit] 跳过 %d 个超 %d 字节的 base64 载荷（远大于真实 syscall 桩，不参与判定）",
+                skipped_oversize, _MAX_STUB_PAYLOAD_BYTES,
+            )
         return out
 
     # ------------------------------------------------------------------
