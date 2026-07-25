@@ -3,10 +3,21 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
-## Unreleased — 待发布（拟 1.2.0）
+## 1.2.0 — 2026-07-25
 
-Theme: **1.1.0 之后的功能收敛 + 静默损坏类修复**——移除从未真正落地的 iOS 与 webcheck 两条支线，
-并修一批「不报错但结果悄悄错」的缺陷（.env 加载 / 远程配置解码 / 子进程编码 / CFB8 解密 / IOC 导出）。
+Theme: **功能收敛 + 结果可信度**。三条线：①**收敛**——移除从未真正落地或半弃用的支线
+（iOS / webcheck / graph / track / intel），以及一个 12/12 全为误报的检测类型（contacts 手机号）；
+②**修静默损坏**——一批「不报错但结果悄悄错」的缺陷（.env 加载 / 远程配置解码 / 子进程编码 /
+CFB8 解密 / IOC 导出 / 富化器内存与 SSRF / 报告转义与脱敏）；③**家族取证**——新增 native 库家族
+指纹与反查、算法下发通道枚举、端口归一化反推（静态×动态交叉校验）。
+
+> ⚠ **含破坏性变更**（详见下方 Removed 各条的「对调用方影响」）：`fxapk graph` / `fxapk track`
+> 子命令与 `--track/--no-track` 开关移除、`[graph]`/`[track]` extras 移除、`.ipa` 不再受理、
+> webcheck 的 3 个环境变量不再读取、`report.meta["contacts"]` 不再有 `phone` 键。
+>
+> 贯穿本版的一条原则：**宁可漏，不可造**——静态/被动路径上，若某启发式能凭随机字节产出看似权威的
+> 调证目标（IP / 域名 / 端点），一律不做。已评估并否决的方案记录在 `AGENTS.md` §6，含否决理由与
+> 「前提何时才算变了」，避免被反复重提。
 
 ### Added
 
