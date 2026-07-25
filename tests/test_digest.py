@@ -50,6 +50,41 @@ def test_build_digest_redacts_remote_control_value() -> None:
     assert by_cat["IP"] == "1.2.3.4"  # 非高敏类不脱敏
 
 
+def test_redact_scrubs_pii_from_freetext_fields() -> None:
+    """★codex C1：redact 时 subject/notes/where_to_request/evidence_to_obtain 自由文本里的结构化 PII
+    （手机号/证件号/邮箱/卡号）被抹除，不再绕过脱敏进云端摘要；并置 redaction_warning 告警。"""
+    report = {
+        "leads": [{
+            "category": "VICTIM_DATA",
+            "value": "受害人物证",
+            "subject": "受害人 张三 手机 13800138000",
+            "notes": "身份证 11010119900307391X，邮箱 victim@example.com",
+            "where_to_request": "向 6222021234567890123 开户行调证",
+            "evidence_to_obtain": ["联系电话 13900139000 的通话记录"],
+            "advice": "建议调证", "confidence": "HIGH",
+        }],
+    }
+    d = build_digest(report, redact=True)
+    lead = d["leads"][0]
+    blob = f"{lead['subject']} {lead['notes']} {lead['where_to_request']} {lead['evidence_to_obtain']}"
+    assert "13800138000" not in blob and "13900139000" not in blob  # 手机号
+    assert "11010119900307391X" not in blob                          # 身份证
+    assert "victim@example.com" not in blob                          # 邮箱
+    assert "6222021234567890123" not in blob                         # 卡号
+    assert "PII已脱敏" in blob                                        # 有替换标记
+    assert "张三" in lead["subject"]  # 非结构化姓名保留（如实局限）：仅证明结构化 PII 被抹
+    assert d.get("redaction_warning")  # 告警不静默
+
+
+def test_no_redact_keeps_freetext_plaintext() -> None:
+    """默认（redact=False）自由文本原样，取证查看需要看到实际值；无告警。"""
+    report = {"leads": [{"category": "VICTIM_DATA", "value": "x",
+                         "notes": "手机 13800138000", "advice": "待核", "confidence": "LOW"}]}
+    d = build_digest(report)
+    assert d["leads"][0]["notes"] == "手机 13800138000"
+    assert "redaction_warning" not in d
+
+
 def test_build_digest_bad_input_never_throws() -> None:
     assert build_digest(["not a dict"])["leads"] == []
     assert build_digest(None)["leads"] == []

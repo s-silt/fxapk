@@ -549,6 +549,38 @@ def test_attribution_unknown_layers_and_edge_labeled() -> None:
     assert "边缘/CDN/代理：未识别专属特征" in body
 
 
+def test_evidence_ref_backtick_location_neutralized() -> None:
+    """★codex C2：source_refs 降级 source:location，location 为样本派生路径含反引号/换行时，
+    渲染到 `code span` 前须中和反引号（防逃逸破坏 md）+ 折叠换行（防伪造结构）。"""
+    lead = {
+        "category": "PAYMENT", "value": "x", "subject": "s",
+        "where_to_request": "某支付", "evidence_to_obtain": ["实名信息"],
+        "advice": "建议调证", "confidence": "HIGH",
+        # 无 evidence_id → 降级 source:location；location 塞反引号+换行注入
+        "source_refs": [{"source": "dex", "location": "a`b`c\n## 伪标题"}],
+    }
+    report = {"leads": [lead]}
+    body = letters.build_letters(report)[0]["body_md"]
+    # 证据出处行不含裸反引号对逃逸（原始 location 的反引号已被中和）
+    assert "a`b`c" not in body
+    assert "\n## 伪标题" not in body  # 换行被折叠，未在行首伪造出真标题
+    assert "ˋ" in body  # 反引号被替换为安全近似字符
+
+
+def test_evidence_item_newline_collapsed() -> None:
+    """★evidence_to_obtain 文案里的换行折叠为空格，防伪造新列表项/标题。"""
+    lead = {
+        "category": "PAYMENT", "value": "x", "subject": "s",
+        "where_to_request": "某支付",
+        "evidence_to_obtain": ["实名信息\n## 注入标题\n- 伪造项"],
+        "advice": "建议调证", "confidence": "HIGH",
+        "source_refs": [{"source": "dex", "location": "x", "evidence_id": "ev-1"}],
+    }
+    body = letters.build_letters({"leads": [lead]})[0]["body_md"]
+    assert "\n## 注入标题" not in body  # 未在行首伪造出真标题
+    assert "实名信息 ## 注入标题 - 伪造项" in body  # 折叠为单行（行内、无害）
+
+
 def test_attribution_deferred_resource_holder_rendered_as_pending() -> None:
     """★deferred='case_close'（analyze 未逐 IP 查 RDAP）→ 文书渲染「待结案 RDAP 补全」，
     与真正查无的「未知」区分开（codex P1：渲染分支须有直接测试）。"""

@@ -8,6 +8,8 @@ fxapk 会提取受害人 PII / 钱包私钥助记词 / 后端凭据 / 运行时�
 
 from __future__ import annotations
 
+import re
+
 #: 高敏类别：其 value 在 agent 摘要里默认脱敏（明文只留本地完整报告）。
 #: ★ 须与 models.LeadCategory 的高敏类目**同步维护**：新增「可直接控资金 / 登录 / 含受害人 PII /
 #: 可解全部流量」的类别时务必加进来，否则会绕过 digest 脱敏。
@@ -42,3 +44,32 @@ def redact_value(category: object, value: object) -> object:
     if str(category or "") in SENSITIVE_CATEGORIES and value is not None:
         return mask(value if isinstance(value, str) else str(value))
     return value
+
+
+#: 结构化 PII 模式（用于自由文本兜底脱敏）：邮箱 / 中国手机号 / 18 位身份证 / 银行卡等长数字串。
+#: ★顺序有意：先邮箱，再身份证(18)，再手机(11)，最后泛长数字(13-19)——避免长数字规则先吞掉身份证/卡号的语义。
+_PII_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"),        # email
+    re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)"),        # 18 位身份证
+    re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)"),         # 中国大陆手机号
+    re.compile(r"(?<!\d)\d{13,19}(?!\d)"),           # 银行卡 / 其它长数字串
+)
+_PII_MASK = "***（PII已脱敏）"
+
+
+def scrub_pii(text: object) -> tuple[str, bool]:
+    """从**自由文本**里抹除结构化 PII（邮箱/手机号/身份证/银行卡长数字），返回 ``(脱敏后文本, 是否命中)``。
+
+    用于 digest --redact 对 subject/notes/where_to_request/evidence_to_obtain 等自由文本兜底——
+    这些字段不经 value 的类别脱敏，动态侧一旦把受害人手机号/证件号写进去，会绕过脱敏带进云端 agent。
+    ★局限（如实标注）：只抹**结构化**模式；姓名、地址等非模式化 PII 无法可靠正则识别，须靠上游不写入明文。
+    """
+    s = str(text or "")
+    if not s:
+        return s, False
+    hit = False
+    for pat in _PII_PATTERNS:
+        s, n = pat.subn(_PII_MASK, s)
+        if n:
+            hit = True
+    return s, hit

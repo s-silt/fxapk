@@ -84,6 +84,27 @@ def test_small_so_skipped():
     assert result.meta["native_obfuscation"] == []
 
 
+def test_oversized_so_skipped(monkeypatch) -> None:
+    """★codex C3：超单文件上限的 .so 被跳过、不参与统计（防超大/zip-bomb .so 撑爆内存）。"""
+    import apkscan.analyzers.native_obfuscation as nobf
+    monkeypatch.setattr(nobf, "_MAX_LIB_BYTES", 100 * 1024)  # 上限 100KB
+    # 200KB 加密样（>_MIN_SIZE 64KB 且 >上限）→ 无上限时会被判混淆，有上限时应跳过
+    result = _analyze(files={"lib/arm64-v8a/libbig.so": _encrypted_like(200 * 1024)})
+    assert result.meta["native_obfuscation"] == [], "超单文件上限的 .so 未被跳过"
+
+
+def test_cumulative_budget_stops_scanning(monkeypatch) -> None:
+    """★累计预算达上限即停止扫描剩余 .so（对齐 backend_credential 累计预算范式）。"""
+    import apkscan.analyzers.native_obfuscation as nobf
+    monkeypatch.setattr(nobf, "_MAX_TOTAL_LIB_BYTES", 50 * 1024)  # 预算 50KB
+    result = _analyze(files={
+        "lib/arm64-v8a/lib1.so": _encrypted_like(96 * 1024),
+        "lib/arm64-v8a/lib2.so": _encrypted_like(96 * 1024),
+    })
+    # lib1 读入即达/超预算 → lib2 前 break；至多 1 个被评估
+    assert len(result.meta["native_obfuscation"]) <= 1
+
+
 def test_read_file_failure_does_not_crash():
     class _Ctx(FakeContext):
         def read_file(self, path: str) -> bytes | None:  # type: ignore[override]
