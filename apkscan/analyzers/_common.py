@@ -236,6 +236,30 @@ def collect_so_basenames(
     return result
 
 
+def collect_so_paths(ctx: "AnalysisContext", analyzer_name: str) -> list[str]:
+    """所有 .so **完整路径**（native_libs + list_files 合并，去重、稳定排序）。
+
+    与 :func:`collect_so_basenames` 的关键区别：**不按 basename 塌缩**。同名多 ABI 变体
+    （``lib/arm64-v8a/libfoo.so`` 与 ``lib/armeabi-v7a/libfoo.so``）字节不同、sha256 不同，
+    须各自保留；basename 塌缩会把它们并成一个、令家族反查漏掉部分构建（native_fingerprint 用本函数）。
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for getter_name in ("native_libs", "list_files"):
+        try:
+            items = list(getattr(ctx, getter_name)())
+        except Exception:
+            logger.exception("[%s] 读取 %s 失败（.so 路径采集）", analyzer_name, getter_name)
+            items = []
+        for path in items:
+            if not isinstance(path, str):
+                continue
+            if path.replace("\\", "/").lower().endswith(".so") and path not in seen:
+                seen.add(path)
+                out.append(path)
+    return sorted(out)
+
+
 def collect_file_paths(ctx: "AnalysisContext", analyzer_name: str) -> list[str]:
     """APK 内全部文件路径（仅保留 str 条目）。"""
     try:

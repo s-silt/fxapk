@@ -36,6 +36,74 @@ def test_analyzer_dedups_identical_so() -> None:
     assert len([h for h in hashes if h["sha256"] == _sha(_SO_A)]) == 1
 
 
+_SO_ARM64 = b"\x7fELF" + b"arm64-core" * 80
+_SO_ARMV7 = b"\x7fELF" + b"armv7-core" * 80  # 同 basename、不同 ABI → 字节不同、sha256 不同
+
+
+def test_hashes_all_abi_variants_same_basename() -> None:
+    """★P1 无修复即失败：同名多 ABI 变体（libclientcore.so × arm64/armeabi）字节不同 → **各自**哈希。
+
+    修前按 basename 塌缩（collect_so_basenames）会把两变体并成一条、漏掉另一个构建；本测试断言两个
+    sha256 都在，修前必失败。
+    """
+    ctx = FakeContext(files={
+        "lib/arm64-v8a/libclientcore.so": _SO_ARM64,
+        "lib/armeabi-v7a/libclientcore.so": _SO_ARMV7,
+    }, native_libs=["lib/arm64-v8a/libclientcore.so", "lib/armeabi-v7a/libclientcore.so"])
+    hashes = NativeFingerprintAnalyzer().analyze(ctx).meta["native_lib_hashes"]
+    shas = {h["sha256"] for h in hashes}
+    assert _sha(_SO_ARM64) in shas and _sha(_SO_ARMV7) in shas
+    assert len(hashes) == 2  # 两 ABI 变体各一条，未塌缩
+
+
+def test_declared_size_gate_skips_oversized_so() -> None:
+    """★P0-5 无修复即失败：声明解压后 > 64MB 的 .so 在 read_file **前**被拦——绝不 read。
+
+    模拟「小压缩、巨解压」炸弹 .so：实际字节很小但 zip 声明 200MB。修前无前置 size 门 → read_file
+    会被调用（并在真 APK 上让 androguard 全量膨胀进内存）；本测试断言该路径从未进入 reads，修前必失败。
+    """
+    class _Recording(FakeContext):
+        def __init__(self, **kw) -> None:
+            super().__init__(**kw)
+            self.reads: list[str] = []
+
+        def read_file(self, path: str) -> bytes | None:  # type: ignore[override]
+            self.reads.append(path)
+            return super().read_file(path)
+
+    big, ok = "lib/arm64-v8a/libbomb.so", "lib/arm64-v8a/libok.so"
+    ctx = _Recording(
+        files={big: b"\x7fELF" + b"x" * 100, ok: _SO_A},
+        native_libs=[big, ok],
+        declared_sizes={big: 200 * 1024 * 1024},  # 声明 200MB（> 64MB 上限），实际字节仅百余字节
+    )
+    hashes = NativeFingerprintAnalyzer().analyze(ctx).meta["native_lib_hashes"]
+    shas = {h["sha256"] for h in hashes}
+    assert big not in ctx.reads  # 前置门拦下：从未 read（不膨胀）
+    assert _sha(_SO_A) in shas  # 正常 .so 照常哈希
+    assert not any(h["name"] == "libbomb.so" for h in hashes)
+
+
+def test_native_lib_hashes_rejects_malformed_sha256() -> None:
+    """★P2 无修复即失败：meta 里 sha256 非 64 位十六进制（截断/非 hex/占位）→ 丢弃，不造假家族簇。
+
+    修前只判 `if sha`（任意非空串即收录），坏/导入的旧报告能凭 "deadbeef" 这类串造出假簇。断言坏形状被丢、
+    负 size 归 None，修前必失败。
+    """
+    report = {"meta": {"native_lib_hashes": [
+        {"name": "good.so", "sha256": _sha(_SO_A), "size": len(_SO_A)},
+        {"name": "trunc.so", "sha256": "deadbeef", "size": 10},   # 太短（8 位）
+        {"name": "nonhex.so", "sha256": "z" * 64, "size": 10},     # 64 位但非十六进制
+        {"name": "neg.so", "sha256": _sha(_SO_B), "size": -5},     # 合法 sha 但 size 负
+    ]}}
+    out = corpus._native_lib_hashes(report)
+    shas = {h["sha256"] for h in out}
+    assert _sha(_SO_A) in shas
+    assert "deadbeef" not in shas and "z" * 64 not in shas  # 坏形状丢弃
+    neg = next(h for h in out if h["sha256"] == _sha(_SO_B))
+    assert neg["size"] is None  # 负 size 归 None
+
+
 def _entry(sample_sha: str, *so_bytes: bytes) -> dict:
     """构造一条 manifest 记录（经 manifest_entry，模拟报告有 native_lib_hashes）。"""
     report = {
