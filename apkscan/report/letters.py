@@ -67,6 +67,22 @@ def _str_or_empty(value: Any) -> str:
     return str(value)
 
 
+def _md_collapse(value: str) -> str:
+    """折叠所有空白（含换行）为单空格——堵住值里塞换行伪造新列表项/标题行的结构注入。
+    用于本身是静态文案、无需字符级转义、但仍须防结构注入的字段（evidence_to_obtain）。"""
+    return _MD_WHITESPACE_RUN.sub(" ", str(value)).strip()
+
+
+def _code_safe(value: str) -> str:
+    """把值安全嵌入单反引号 code span：折叠空白 + 中和反引号（防 code span 逃逸破坏 md）。
+
+    用于 evidence_refs——其降级形态 ``source:location`` 的 location 是**样本派生路径**、攻击者可控，
+    含反引号的路径会逃出 ``` `...` ``` 破坏生成的调证函草稿（codex C2）。反引号替为视觉近似的
+    U+02CB(ˋ)，既杜绝逃逸又保留可读的锚点形态。
+    """
+    return _md_collapse(value).replace("`", "ˋ")
+
+
 def _md_safe(value: str) -> str:
     """把可能来自不可信样本内容的字段值转成安全内嵌 markdown 文本。
 
@@ -328,14 +344,14 @@ def _build_body_md(
     lines.append(f"## 拟调取证据\n\n{evidence_lead_in}")
     lines.append("")
     for item in evidence_items:
-        lines.append(f"- {item}")
+        lines.append(f"- {_md_collapse(item)}")  # 静态文案，折叠空白防结构注入
     lines.append("")
     # 6) 证据出处（可回溯锚点）
     if evidence_refs:
         lines.append("## 证据出处（样本内锚点）")
         lines.append("")
         for ref in evidence_refs:
-            lines.append(f"- `{ref}`")
+            lines.append(f"- `{_code_safe(ref)}`")  # location 样本派生，中和反引号防 code span 逃逸
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 

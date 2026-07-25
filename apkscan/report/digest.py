@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
-from apkscan.core.redact import redact_value
+from apkscan.core.redact import redact_value, scrub_pii
 
 # 排序优先级：建议调证 > 待核 > 无需调证；同档高可信在前；C2 在前。
 _ADVICE_RANK = {"建议调证": 0, "待核": 1, "无需调证": 2}
@@ -26,20 +26,39 @@ def _lead_sort_key(lead: dict[str, Any]) -> tuple[int, int, int, str]:
     )
 
 
-def _compact_lead(lead: dict[str, Any], redact: bool) -> dict[str, Any]:
+def _scrub_field(text: object, flag: list[bool]) -> object:
+    """redact 模式下对单个自由文本字段抹结构化 PII；命中即置 flag。None 保持 None（不改结构）。"""
+    if text is None:
+        return None
+    scrubbed, hit = scrub_pii(text)
+    if hit:
+        flag[0] = True
+    return scrubbed
+
+
+def _compact_lead(lead: dict[str, Any], redact: bool, pii_flag: list[bool]) -> dict[str, Any]:
     """单条线索压成扁平稳定字段（去掉 source_refs 等冗长内部结构）。
 
-    redact=True（可选）：高敏类别（钱包私钥/凭据/受害人 PII/加密配方）的 value 脱敏。默认 False
-    （取证查看需要看到实际值）。
+    redact=True（可选）：高敏类别（钱包私钥/凭据/受害人 PII/加密配方）的 value 按类别脱敏；
+    并对 subject/notes/where_to_request/evidence_to_obtain 等**自由文本**兜底抹结构化 PII
+    （不依赖类别标注是否正确，防受害人手机号/证件号绕过脱敏进云端 agent，codex C1）。默认 False。
     """
     category = lead.get("category")
     value = lead.get("value")
+    subject = lead.get("subject")
+    where = lead.get("where_to_request")
+    notes = lead.get("notes") or ""
+    evidence = lead.get("evidence_to_obtain") or []
     if redact:
         value = redact_value(category, value)
+        subject = _scrub_field(subject, pii_flag)
+        where = _scrub_field(where, pii_flag)
+        notes = _scrub_field(notes, pii_flag)
+        evidence = [_scrub_field(item, pii_flag) for item in evidence]
     return {
         "category": category,
         "value": value,
-        "subject": lead.get("subject"),
+        "subject": subject,
         "advice": lead.get("advice"),
         "confidence": lead.get("confidence"),
         "is_c2": bool(lead.get("is_c2")),
@@ -47,9 +66,9 @@ def _compact_lead(lead: dict[str, Any], redact: bool) -> dict[str, Any]:
         # 供下游筛选/研判分层——勿把仅 is_runtime_seen（含手编 runtime-derived）当「实连/确认 C2」。
         "is_runtime_seen": bool(lead.get("is_runtime_seen")),
         "is_runtime_contact": bool(lead.get("is_runtime_contact")),
-        "where_to_request": lead.get("where_to_request"),
-        "evidence_to_obtain": lead.get("evidence_to_obtain") or [],
-        "notes": lead.get("notes") or "",
+        "where_to_request": where,
+        "evidence_to_obtain": evidence,
+        "notes": notes,
     }
 
 
@@ -138,6 +157,7 @@ def build_digest(report: object, *, redact: bool = False) -> dict[str, Any]:
     meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
     leads = [lead for lead in (report.get("leads") or []) if isinstance(lead, dict)]
     leads_sorted = sorted(leads, key=_lead_sort_key)
+    pii_flag = [False]  # 单元素可变标记：任一 lead 自由文本抹掉 PII 即置 True（见 _compact_lead）
 
     by_advice = Counter(str(lead.get("advice") or "未研判") for lead in leads)
     by_category = Counter(str(lead.get("category") or "?") for lead in leads)
@@ -184,10 +204,14 @@ def build_digest(report: object, *, redact: bool = False) -> dict[str, Any]:
             "overseas_target_hosts": len(overseas_targets),
             "attributed_role_candidates": role_candidate_count,
         },
-        "leads": [_compact_lead(lead, redact) for lead in leads_sorted],
+        "leads": [_compact_lead(lead, redact, pii_flag) for lead in leads_sorted],
         "overseas_targets": overseas_targets,
         "closure": compact_closure,
     }
     if network_attribution is not None:
         digest["network_attribution"] = network_attribution
+    # ★告警（codex C1）：redact 模式下自由文本命中并抹掉了结构化 PII → 显式标记，不静默
+    #   （提醒操作者上游把受害人 PII 写进了 subject/notes 等自由文本，脱敏虽已兜底但源头应修）。
+    if redact and pii_flag[0]:
+        digest["redaction_warning"] = "自由文本字段命中并抹除了结构化 PII（手机号/证件号/邮箱/卡号）；上游不应把受害人 PII 写入自由文本"
     return digest
