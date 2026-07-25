@@ -46,6 +46,43 @@ def test_chinese_app_not_flagged() -> None:
     assert stats["readable_ratio"] > 0.9  # 中文被正确识别为「可读」
 
 
+def test_emoji_heavy_app_not_flagged() -> None:
+    """★复审 P1 无修复即失败：emoji 用得多的正常 App 不得被判成字符串池整体混淆。
+
+    合成 emoji 用 ZWJ(U+200D) 连接，其 unicodedata 类别正是 Cf；修前把全部 Cf 计入"不可读"，
+    实测「👨‍👩‍👧‍👦」ZWJ 占比 43%、「👩‍💻」33%，双双越过 30% 阈值；而 emoji 又不算"可读"
+    （非字母），于是同时踩中「不透明高 + 可读低」两条 → 正常 App 被污蔑。
+    """
+    pool = ["👨‍👩‍👧‍👦 家庭合影贴纸", "👩‍💻 程序员表情", "🎉🎊✨ 庆祝动画", "👍🏽 点赞手势"] * 100
+    result = _analyze(pool)
+    assert _FINDING not in _finding_ids(result)
+    stats = result.meta["dex_string_pool"]
+    assert stats["suspicious"] is False
+    assert stats["readable_ratio"] > 0.9   # emoji 被正确识别为可读内容
+
+
+def test_zwj_and_variation_selectors_not_unreadable() -> None:
+    """ZWJ / 变体选择符是正常文本构成部件，不计入不可读。"""
+    from apkscan.analyzers.dex_obfuscation import _unreadable_char_ratio
+    for s in ("👨‍👩‍👧‍👦", "👩‍💻", "👍🏽", "☺️"):
+        assert _unreadable_char_ratio(s) == 0.0, s
+
+
+def test_descriptor_detection_does_not_eat_business_text() -> None:
+    """★复审 P2 无修复即失败：普通业务文案不得被当成类型描述符排除。
+
+    修前只判「首字符 L/[/( + 含 ; 或 )」，`Login failed; retry later`、`(optional) phone number`、
+    `(点击重试)` 全被误排——被排除的串不进分母，反而抬高不透明占比、把正常 App 推向误报。
+    """
+    from apkscan.analyzers.dex_obfuscation import _is_descriptor
+    for text in ("Login failed; retry later", "(optional) phone number",
+                 "List; of items", "(点击重试)"):
+        assert _is_descriptor(text) is False, text
+    for desc in ("Landroid/app/Activity;", "()V", "[B",
+                 "(Ljava/lang/String;)Ljava/lang/Object;"):
+        assert _is_descriptor(desc) is True, desc
+
+
 def test_mixed_cjk_and_latin_not_flagged() -> None:
     """中英混排 + 日文/俄文同样算可读内容。"""
     strings = [f"ログイン失敗 {i}" for i in range(150)]
