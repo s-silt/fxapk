@@ -66,10 +66,10 @@ def test_no_network_strings_yields_no_endpoints():
     assert result.meta["endpoint_total"] == 0
 
 
-# --- ★ 契约：只产 Endpoint，不产 Lead ------------------------------------
+# --- ★ 契约：只产 Endpoint，不产 Lead（普通输入不产 Finding） ---------------
 
 
-def test_never_emits_leads_or_findings():
+def test_ordinary_endpoints_emit_no_lead_or_finding():
     result = _analyze(
         dex_strings=[
             "https://pay.fraud-gw.cn/notify",
@@ -77,10 +77,39 @@ def test_never_emits_leads_or_findings():
             "139.59.12.34",
         ]
     )
-    # 端点应有，但绝不产 Lead / Finding（DOMAIN/IP Lead 由 pipeline 富化后统一建）
+    # 端点应有，但绝不产 Lead（DOMAIN/IP Lead 由 pipeline 富化后统一建）；
+    # 无「非标准回环 + native」组合 → 也不产回环占位 Finding。
     assert result.endpoints
     assert result.leads == []
     assert result.findings == []
+
+
+# --- ★ 回环占位启发式（A3）：native 运行时取址架构 ------------------------
+
+
+def test_nonstandard_loopback_plus_native_emits_placeholder_finding():
+    """★硬编码非标准回环 IP（127.0.209.162）+ native 库 → 产「native 运行时取址占位」Finding。"""
+    result = _analyze(
+        dex_strings=["backend=127.0.209.162", "some.label"],
+        native_libs=["lib/arm64-v8a/libclientcore.so"],
+    )
+    fids = [f.id for f in result.findings]
+    assert "NATIVE-RUNTIME-ADDRESSING-PLACEHOLDER" in fids
+    f = next(f for f in result.findings if f.id == "NATIVE-RUNTIME-ADDRESSING-PLACEHOLDER")
+    assert f.category == "anti_analysis"
+    assert "127.0.209.162" in f.description
+
+
+def test_loopback_without_native_no_finding():
+    """★无 native 库 → 不产 Finding（缺架构前提，不误报）。"""
+    result = _analyze(dex_strings=["backend=127.0.209.162"], native_libs=[])
+    assert all(f.id != "NATIVE-RUNTIME-ADDRESSING-PLACEHOLDER" for f in result.findings)
+
+
+def test_standard_localhost_not_flagged():
+    """★标准 127.0.0.1（localhost）+ native → 不产 Finding（常见本地引用，噪声大不采）。"""
+    result = _analyze(dex_strings=["proxy=127.0.0.1"], native_libs=["lib/arm64-v8a/libx.so"])
+    assert all(f.id != "NATIVE-RUNTIME-ADDRESSING-PLACEHOLDER" for f in result.findings)
 
 
 # --- dex 来源：URL / IP / 域名 -------------------------------------------
