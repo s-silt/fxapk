@@ -10,6 +10,12 @@ Theme: **1.1.0 之后的功能收敛 + 静默损坏类修复**——移除从未
 
 ### Added
 
+- **端口归一化反推 / 静态×动态交叉校验**（A2）：新增 `fxapk port-normalize` 与 `config/port_norm.py`。
+  部分家族配置里存 raw 端口、运行时才按固定规则算真实端口；本命令把**解密所得的声明端口**与
+  **fxapk 实测到的连接端口**（`endpoints[].enrichment.runtime.remote_endpoints`）按 IP 配对，在有界假设
+  空间（identity / +常量 / +IP末段+常量）里反推能解释全部配对的最简变换，并给出支持与反例明细。
+  不产生任何端点；同一 IP 多个实测端口判 `ambiguous` 不擅自选；配对不足或数据过于齐整（声明端口全同 /
+  IP 末段全同）判 `degenerate` 拒给结论。声明端口由调用方提供，**不入仓**。
 - **native 库家族指纹**（#234、#239）：新增 `native_fingerprint` 分析器，对 App 自有 `.so` 逐个算 sha256
   写入 `report.meta["native_lib_hashes"]`（同族样本核心 `.so` 常逐字节相同，是比签名证书更硬的家族锚点）。
   corpus 新增 `seen <sha> --by so_sha256` 家族反查与 `corpus shared-native` 跨样本共享库聚簇。
