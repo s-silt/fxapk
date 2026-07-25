@@ -1171,6 +1171,87 @@ def config_channel_cmd(
         ensure_ascii=False, indent=2))
 
 
+@app.command(name="port-normalize")
+def port_normalize_cmd(
+    declared_path: str = typer.Option(..., "--declared", help='声明端口 JSON：{"IP": 端口} 或 [{"ip":…,"port":…}]（解密所得，本命令只读不存）。'),
+    report_path: str = typer.Option("", "--report", help="report.json：从中取实测端口（enrichment.runtime.remote_endpoints）。"),
+    observed_path: str = typer.Option("", "--observed", help='实测端口 JSON（替代 --report）：{"IP": [端口,…]}。'),
+    min_support: int = typer.Option(3, "--min-support", help="最少配对数，低于此不给确认结论。"),
+) -> None:
+    """用实测端口反推「配置声明端口 → 真实连接端口」的归一化变换（A2 静态×动态交叉校验）。
+
+    部分家族配置里存的是 raw 端口，运行时再按固定规则算真实端口。本命令把**解密所得的声明端口**与
+    **fxapk 实测到的连接端口**按 IP 配对，在有界假设空间里找能解释全部配对的最简变换，并给出支持/反例明细。
+
+    ★ 不产生任何端点：observed 侧全是实测值，输出是**可证伪的变换假设**。配对太少或过于齐整时判
+    degenerate、拒绝给结论——宁可说数据不足，也不给凑出来的公式。纯离线，绝不联网。
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    from apkscan.config.port_norm import (
+        build_pairs,
+        infer_port_transform,
+        observed_ports_from_report,
+    )
+
+    def _load(path: str, what: str) -> object:
+        try:
+            return _json.loads(_Path(path).read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001 — CLI 边界：坏输入give 明确退出码
+            typer.echo(f"错误：读取{what}失败（{path}）：{exc}", err=True)
+            raise typer.Exit(code=2) from None
+
+    raw_declared = _load(declared_path, "--declared")
+    declared: dict[str, int] = {}
+    if isinstance(raw_declared, dict):
+        declared = {str(k): v for k, v in raw_declared.items() if isinstance(v, int)}
+    elif isinstance(raw_declared, list):
+        for item in raw_declared:
+            if isinstance(item, dict) and isinstance(item.get("port"), int):
+                declared[str(item.get("ip") or "")] = item["port"]
+    if not declared:
+        typer.echo('错误：--declared 应为 {"IP": 端口} 或 [{"ip":…,"port":…}]，且端口为整数。', err=True)
+        raise typer.Exit(code=2)
+
+    if observed_path:
+        raw_obs = _load(observed_path, "--observed")
+        observed = {
+            str(k): {p for p in v if isinstance(p, int)}
+            for k, v in (raw_obs or {}).items()
+            if isinstance(v, list)
+        } if isinstance(raw_obs, dict) else {}
+    elif report_path:
+        observed = observed_ports_from_report(_load(report_path, "--report"))
+    else:
+        typer.echo("错误：须给 --report 或 --observed 之一（实测端口来源）。", err=True)
+        raise typer.Exit(code=2)
+
+    pairs, ambiguous, unmatched = build_pairs(declared, observed)
+    res = infer_port_transform(pairs, min_support=min_support)
+    best = res.best
+    typer.echo(_json.dumps({
+        "pair_count": len(res.pairs),
+        "degenerate": res.degenerate,
+        "degenerate_reason": res.degenerate_reason,
+        "ambiguous_ips": ambiguous,
+        "unmatched_ips": unmatched,
+        "notes": res.notes,
+        "confirmed": None if best is None else {
+            "form": best.form, "constant": best.constant,
+            "formula": best.formula, "support": best.support_count,
+        },
+        "candidates": [
+            {
+                "form": c.form, "constant": c.constant, "formula": c.formula,
+                "support": c.support_count, "contradicted": len(c.contradicted),
+                "confirmed": c.confirmed,
+            }
+            for c in res.candidates
+        ],
+    }, ensure_ascii=False, indent=2))
+
+
 def _print_auto_result(result: object) -> None:
     """打印 auto.run 的结构化结果：逐步状态 + 报告路径。"""
     if not isinstance(result, dict):
