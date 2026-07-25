@@ -7,7 +7,7 @@
 （回灌层已有 try/except + logging）能感知失败并保底 return 0；**关键不变式：无论成功或失败，
 目标文件要么是旧内容完整、要么是新内容完整，绝不留半截。**
 
-设计对齐 ``apkscan/track/ledger.py`` 与 ``apkscan/dynamic/ledger.py`` 的原子落盘习惯。
+设计对齐 ``apkscan/dynamic/ledger.py`` 的原子落盘习惯。
 """
 
 from __future__ import annotations
