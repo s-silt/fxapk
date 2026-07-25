@@ -74,6 +74,39 @@ def test_manifest_entry_extracts_key_fields() -> None:
     assert set(e["key_iocs"]) == {"pay.x.com", "c2.x.com"}
 
 
+def test_upsert_warns_on_same_key_different_dep_versions(caplog) -> None:
+    """★codex P1：同主键但依赖版本不同 → 幂等跳过但告警（不静默丢 dep 变体报告）。"""
+    import logging
+
+    base = corpus.manifest_entry(_report(), case_id="c1")
+    base = {**base, "dependency_versions": {"androguard": "4.1.4"}}
+    other = corpus.manifest_entry(_report(), case_id="c2")
+    other = {**other, "dependency_versions": {"androguard": "4.1.9"}}  # 同主键、不同 androguard
+    with caplog.at_level(logging.WARNING):
+        merged, added = corpus.upsert([base], other)
+    assert added is False and len(merged) == 1  # 主键相同 → 幂等跳过
+    assert any("依赖版本不同" in r.message for r in caplog.records), "同主键不同依赖版本未告警"
+
+
+def test_upsert_same_key_same_deps_no_warning(caplog) -> None:
+    """同主键同依赖版本 → 幂等跳过、无告警（正常重复入库）。"""
+    import logging
+
+    e = {**corpus.manifest_entry(_report()), "dependency_versions": {"androguard": "4.1.4"}}
+    with caplog.at_level(logging.WARNING):
+        _merged, added = corpus.upsert([e], dict(e))
+    assert added is False
+    assert not any("依赖版本不同" in r.message for r in caplog.records)
+
+
+def test_manifest_entry_records_dependency_versions() -> None:
+    """依赖版本登记进 manifest（复现锚点，供 upsert 冲突检测）。"""
+    rep = _report()
+    rep["meta"]["dependency_versions"] = {"androguard": "4.1.4", "requests": "2.32.0"}
+    e = corpus.manifest_entry(rep)
+    assert e["dependency_versions"] == {"androguard": "4.1.4", "requests": "2.32.0"}
+
+
 def test_manifest_entry_robust_to_junk() -> None:
     # 坏输入容错、绝不抛。
     e = corpus.manifest_entry({}, case_id=None)
