@@ -56,7 +56,9 @@ _RULES_NAME = "endpoints"
 _MAX_DEX_STRINGS = 200_000
 
 #: 回环 IPv4 字面（127.0.0.0/8）——供回环占位启发式扫原文。宽松匹配 4 段，具体回环判定交 ipaddress。
-_LOOPBACK_IPV4_RE = re.compile(r"\b127\.\d{1,3}\.\d{1,3}\.\d{1,3}\b")
+# 前后都不接 [.数字]：``\b`` 会把 "127.2.3.4.5"（版本号 / 5 段串）里的前缀 "127.2.3.4" 误当回环 IP。
+# 负向前后瞻确保匹配是**独立**的四段点分串，不是更长点分数字的一截。八位段值域由后续 ip_address 解析兜底。
+_LOOPBACK_IPV4_RE = re.compile(r"(?<![\d.])127(?:\.\d{1,3}){3}(?![\d.])")
 
 # 大文件分块扫描参数（替代旧的「截断到前 8MB」语义——反诈调证最忌漏端点/漏真 C2，
 # 大 .so / 大资源后段的端点不能丢，故改为分块扫完整个文件）。
@@ -440,8 +442,11 @@ class EndpointsAnalyzer(BaseAnalyzer):
     # 回环占位启发式：native 运行时取址架构识别
     # ------------------------------------------------------------------
 
-    def _nonstandard_loopback_ips(self, ctx: "AnalysisContext") -> list[str]:
+    def _nonstandard_loopback_ips(self, ctx: "AnalysisContext") -> list[tuple[str, str]]:
         """扫 dex 字符串 + manifest **原文**，找"非 127.0.0.1 的回环 IP"字面（127.0.0.0/8、排除 localhost）。
+
+        返回 ``[(ip, source)]``，``source ∈ {"dex", "manifest"}`` 为该字面**首见来源**——供 Finding 证据
+        如实溯源（manifest-only 命中不再被误记为 dex）。
 
         ★不走已抽取的 endpoints：回环/保留段 IP 在端点抽取时被"裸 IP 去噪"当噪音丢了（正是要识破的
         「静默丢」）。标准 127.0.0.1 是常见 localhost 引用（开发/代理），噪声大不采；把**具体的**非标准回环
@@ -449,10 +454,10 @@ class EndpointsAnalyzer(BaseAnalyzer):
         扫描按 _MAX_DEX_STRINGS 封顶、结果去重限量，绝不抛。
         """
         import ipaddress
-        out: list[str] = []
+        out: list[tuple[str, str]] = []
         seen: set[str] = set()
 
-        def _harvest(text: str) -> None:
+        def _harvest(text: str, source: str) -> None:
             for m in _LOOPBACK_IPV4_RE.findall(text or ""):
                 if m in seen:
                     continue
@@ -462,7 +467,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
                     continue
                 if ip.version == 4 and ip.is_loopback and m != "127.0.0.1":
                     seen.add(m)
-                    out.append(m)
+                    out.append((m, source))
                     if len(out) >= 20:  # 限量：够作证据即止
                         return
 
@@ -471,13 +476,13 @@ class EndpointsAnalyzer(BaseAnalyzer):
                 if idx >= _MAX_DEX_STRINGS or len(out) >= 20:
                     break
                 if isinstance(s, str) and "127." in s:
-                    _harvest(s)
+                    _harvest(s, "dex")
         except Exception:  # noqa: BLE001 — 单源扫描失败不影响启发式整体
             logger.debug("[%s] 扫 dex 找回环 IP 失败", self.name, exc_info=True)
         try:
             mx = getattr(ctx, "manifest_xml", "") or ""
             if "127." in mx:
-                _harvest(mx)
+                _harvest(mx, "manifest")
         except Exception:  # noqa: BLE001
             logger.debug("[%s] 扫 manifest 找回环 IP 失败", self.name, exc_info=True)
         return out
@@ -500,7 +505,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
             return None
         if not has_native:
             return None
-        shown = "、".join(loopbacks[:5])
+        shown = "、".join(ip for ip, _ in loopbacks[:5])
         return Finding(
             id="NATIVE-RUNTIME-ADDRESSING-PLACEHOLDER",
             title="疑似 native 运行时取址占位架构（硬编码回环地址 + native 库）",
@@ -519,8 +524,8 @@ class EndpointsAnalyzer(BaseAnalyzer):
                 "远程配置解密）取真实后端；把该占位架构作为技术画像用于跨样本家族关联。"
             ),
             evidences=[
-                Evidence(source="dex", location="hardcoded-endpoint", snippet=ip)
-                for ip in loopbacks[:5]
+                Evidence(source=source, location="hardcoded-endpoint", snippet=ip)
+                for ip, source in loopbacks[:5]
             ],
         )
 
