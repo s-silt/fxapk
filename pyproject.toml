@@ -25,7 +25,9 @@ classifiers = [
     "Intended Audience :: Information Technology",
 ]
 dependencies = [
-    "androguard>=4.1",
+    # ★上界钉住 androguard 大版本：axml/dex 解析在大版本间会变（仓内 axml_nsmap_shim 即踩过坑），
+    #   取证的"同样本同版本→同结果"承诺不能被上游大版本漂移打破；升 5.x 须先验证解析一致再放开。
+    "androguard>=4.1,<5",
     "jinja2",
     "typer",
     "python-whois",

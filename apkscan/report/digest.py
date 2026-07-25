@@ -86,6 +86,52 @@ def _list(value: object) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+#: 完整性红旗阈值（低于即在 digest 顶部告警）。取值是判断权衡：
+#:  · 分析完整度 <0.8 = 超两成分析器报错，结论基础明显残缺；
+#:  · 富化命中率 <0.5 = 过半富化尝试失败（限速/源没跑全），AGENTS.md 明言此时勿据残缺证据下结论。
+_COMPLETENESS_WARN = 0.8
+_ENRICH_WARN = 0.5
+
+
+def _num_or_none(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _integrity(report: dict[str, Any]) -> dict[str, Any]:
+    """run 级完整性红旗（codex #4）：聚合分析完整度 / 关键分析器失败 / 富化命中率，低于阈值即出 warnings。
+
+    ★把此前只散在 analyzer_status/enricher_status 里、靠人肉判断的「本次结果是否可信」升为**工具级主动告警**——
+    ``reliable=False`` + ``warnings`` 让消费方（Agent/研判）不再据残缺证据下结论。纯读既有 status，不新增采集。
+    """
+    warnings: list[str] = []
+    status = report.get("analysis_status")
+    completeness = _num_or_none(report.get("completeness"))
+    if completeness is not None and completeness < _COMPLETENESS_WARN:
+        warnings.append(f"分析完整度 {completeness} 低于 {_COMPLETENESS_WARN}：部分分析器失败，结论基础可能残缺")
+    crit = [str(c) for c in _list(report.get("critical_failures")) if str(c)]
+    if crit:
+        warnings.append(f"关键分析器失败：{'、'.join(crit)}")
+
+    es = [s for s in _list(report.get("enricher_status")) if isinstance(s, dict)]
+    attempted = sum(int(s.get("attempted") or 0) for s in es)
+    ok = sum(int(s.get("ok") or 0) for s in es)
+    enrich_rate = round(ok / attempted, 4) if attempted else None
+    if enrich_rate is not None and enrich_rate < _ENRICH_WARN:
+        warnings.append(
+            f"富化命中率 {enrich_rate} 低于 {_ENRICH_WARN}：富化源可能未跑全（限速/密钥/网络），勿据残缺证据下结论"
+        )
+    return {
+        "analysis_status": status,
+        "completeness": completeness,
+        "critical_failures": crit,
+        "enrichment_ok_rate": enrich_rate,
+        "reliable": not warnings,
+        "warnings": warnings,
+    }
+
+
 def _neg_score(value: object) -> float:
     """Negated score for a descending sort. A non-numeric / bool score (only
     reachable from a hand-edited or version-skewed report.json) sorts as 0 so the
@@ -204,6 +250,7 @@ def build_digest(report: object, *, redact: bool = False) -> dict[str, Any]:
             "overseas_target_hosts": len(overseas_targets),
             "attributed_role_candidates": role_candidate_count,
         },
+        "integrity": _integrity(report),  # run 级完整性红旗（reliable=False 时结果可能不可信）
         "leads": [_compact_lead(lead, redact, pii_flag) for lead in leads_sorted],
         "overseas_targets": overseas_targets,
         "closure": compact_closure,

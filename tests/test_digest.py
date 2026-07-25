@@ -85,6 +85,48 @@ def test_no_redact_keeps_freetext_plaintext() -> None:
     assert "redaction_warning" not in d
 
 
+def test_integrity_flags_low_completeness_and_enrichment() -> None:
+    """★codex #4：分析完整度/富化命中率低 + 关键分析器失败 → integrity.reliable=False + warnings。"""
+    report = {
+        "leads": [],
+        "analysis_status": "partial",
+        "completeness": 0.5,
+        "critical_failures": ["endpoints"],
+        "enricher_status": [
+            {"provider": "asn", "attempted": 10, "ok": 2, "failed": 8},
+            {"provider": "rdap", "attempted": 4, "ok": 1, "failed": 3},
+        ],
+    }
+    d = build_digest(report)
+    integ = d["integrity"]
+    assert integ["reliable"] is False
+    assert integ["enrichment_ok_rate"] == round(3 / 14, 4)
+    assert any("完整度" in w for w in integ["warnings"])
+    assert any("关键分析器失败" in w for w in integ["warnings"])
+    assert any("富化命中率" in w for w in integ["warnings"])
+
+
+def test_integrity_reliable_when_healthy() -> None:
+    """完整度高 + 富化命中率高 + 无关键失败 → reliable=True、无 warnings。"""
+    report = {
+        "leads": [], "analysis_status": "complete", "completeness": 1.0,
+        "critical_failures": [],
+        "enricher_status": [{"provider": "asn", "attempted": 10, "ok": 9, "failed": 1}],
+    }
+    integ = build_digest(report)["integrity"]
+    assert integ["reliable"] is True
+    assert integ["warnings"] == []
+
+
+def test_integrity_no_enrichment_attempts_not_flagged() -> None:
+    """零富化尝试（离线/无端点）→ enrichment_ok_rate=None，不因此告警（不是失败）。"""
+    report = {"leads": [], "analysis_status": "complete", "completeness": 1.0,
+              "critical_failures": [], "enricher_status": []}
+    integ = build_digest(report)["integrity"]
+    assert integ["enrichment_ok_rate"] is None
+    assert integ["reliable"] is True
+
+
 def test_build_digest_bad_input_never_throws() -> None:
     assert build_digest(["not a dict"])["leads"] == []
     assert build_digest(None)["leads"] == []
