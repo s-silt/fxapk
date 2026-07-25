@@ -10,6 +10,14 @@ Theme: **1.1.0 之后的功能收敛 + 静默损坏类修复**——移除从未
 
 ### Removed
 
+- **半弃用组件 graph / track / intel**：删除 `apkscan/graph/`（Kuzu 案件图谱串案）、`apkscan/track/`
+  （flask 网页台账）、`apkscan/intel/`（未接线的 intel providers），及 `commands/graph.py` /
+  `commands/track.py`。串案已转 corpus 反查 + 上下文关联；这三者「仍可跑但不再迭代」，留着只增维护面与
+  可选依赖（kuzu / flask）。`config/string_graph.py`（jadx 串链降噪）与 `attribution/graph.py`（五层归因）
+  是同名但**活跃**组件，保留不动。
+  - **对调用方影响**：`fxapk graph ...` / `fxapk track` 子命令消失；`analyze` / 静态命令去掉
+    `--track/--no-track` 开关（写报告后不再自动入台账/喂图谱——脚本传 `--no-track` 需移除该参数）；
+    `pip install fxapk[graph]` / `fxapk[track]` extras 与 kuzu / flask 依赖移除；batch 不再喂图谱。
 - **iOS IPA 支持**（#215）：工具收敛为**仅分析 Android APK**。删除 `core/ipa.py`、`core/macho.py`、
   `analyzers/ios_plist.py` 与 `core/loader.py` 的文件类型分流（CLI 直接 `load_apk`），pipeline 恒注入
   `apk` 能力、去掉 `ipa` 能力与 iOS 降级分支。IPA 路径从未超出静态 Info.plist / Mach-O 字符串提取、无真实用例。

@@ -47,10 +47,6 @@ dev = ["pytest", "ruff", "pyright"]
 # 但正常安装不保证；显式声明使 `pip install fxapk[pcap]` 明确锁定该能力）。惰性引入，缺失则优雅降级为仅元数据。
 pcap = ["cryptography>=42.0"]
 dynamic = ["cryptography>=42.0"]
-# 本地案件图谱串案（嵌入式 Kuzu，离线、无第三方依赖）。可选——核心命令不依赖它。
-graph = ["kuzu==0.11.3"]
-# 线索追踪 + 办案进度的局域网网页（flask）。可选——台账数据层不依赖它，核心命令不依赖它。
-track = ["flask"]
 
 [project.scripts]
 fxapk = "apkscan.cli:main"
@@ -61,7 +57,7 @@ where = ["."]
 include = ["apkscan*"]
 
 [tool.setuptools.package-data]
-apkscan = ["rules/*.yaml", "rules/*.txt", "rules/**/*.yaml", "report/templates/*.j2", "track/templates/*.html"]
+apkscan = ["rules/*.yaml", "rules/*.txt", "rules/**/*.yaml", "report/templates/*.j2"]
 # 内置 Frida JS hook 脚本（cryptohook 经 importlib.resources 读取，注入真机）——装后仍可读。
 "apkscan.dynamic" = ["frida_js/*.js"]
 
