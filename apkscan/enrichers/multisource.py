@@ -20,6 +20,10 @@ from apkscan.core.registry import BaseEnricher
 
 _TIMEOUT = 12
 _MAX_RECORDS = 20
+
+#: ★FOFA `fields` 查询字段顺序（权威）。FOFA 按数组返回、字段序=本串序；下游 closure 用同序解析（命名字段）。
+#  改此串**必须**同步 closure._FOFA_FIELDS（有漂移守卫测试兜底），否则 closure 会按错位取值静默污染归属。
+FOFA_QUERY_FIELDS = "host,ip,port,protocol,title,server,country,region,city,as_number,as_organization"
 _MAX_TEXT = 500
 _METADATA_ONLY_KEYS = {"source", "count", "pulse_count", "_via"}
 
@@ -410,7 +414,7 @@ class FofaPassiveEnricher(_PassiveLookupEnricher):
             params={
                 "key": credential,
                 "qbase64": base64.b64encode(query.encode("utf-8")).decode("ascii"),
-                "fields": "host,ip,port,protocol,title,server,country,region,city,as_number,as_organization",
+                "fields": FOFA_QUERY_FIELDS,
                 "size": _MAX_RECORDS,
             },
             timeout=_TIMEOUT,

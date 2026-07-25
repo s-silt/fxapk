@@ -332,6 +332,39 @@ def test_fofa_product_evidence_can_complete_hosting_without_shodan() -> None:
     assert target["status"] == CLOSURE_COMPLETE
 
 
+def test_fofa_fields_match_enricher_query_no_drift() -> None:
+    """★codex #3 漂移守卫：closure 的 FOFA 字段序必须与富化器查询串逐字段一致，否则命名解析会错位。"""
+    from apkscan.core import closure as _closure
+    from apkscan.enrichers.multisource import FOFA_QUERY_FIELDS
+
+    assert ",".join(_closure._FOFA_FIELDS) == FOFA_QUERY_FIELDS
+
+
+def test_fofa_malformed_row_skipped_not_misparsed() -> None:
+    """★FOFA 行字段数与预期不符（改列/查询漂移）→ 跳过该行，不按错位下标取值污染归属。"""
+    from apkscan.core.closure import _parse_fofa_row
+
+    assert _parse_fofa_row(["only", "three", "fields"]) is None      # 太短
+    assert _parse_fofa_row(list(range(20))) is None                   # 太长
+    assert _parse_fofa_row("not a list") is None
+    ok = _parse_fofa_row([
+        "h", "1.2.3.4", 443, "https", "t", "nginx", "US", "CA", "LA", 64500, "Org Ltd",
+    ])
+    assert ok is not None
+    assert ok["as_organization"] == "Org Ltd" and ok["port"] == 443 and ok["server"] == "nginx"
+
+
+def test_fofa_malformed_row_does_not_pollute_closure() -> None:
+    """畸形 FOFA 行不得让归属层拿到错位的 provider/port。"""
+    endpoint = _complete_endpoint()
+    endpoint.enrichment.pop("shodan")
+    endpoint.enrichment["fofa"] = {"records": [["h", "1.2.3.4", 443]], "count": 1}  # 只有 3 字段
+    target = assemble_target_closure(endpoint)
+    # 畸形行被跳过 → hosting 不会拿到错位 provider（回到无 fofa 证据的状态）
+    hosting = target["layers"]["hosting_delivery"]
+    assert hosting["evidence"].get("provider") != 443  # 绝不把 port 当 provider
+
+
 def test_unconfirmed_origin_candidate_cannot_satisfy_cdn_origin_gate() -> None:
     endpoint = _complete_endpoint()
     endpoint.enrichment["attribution"] = {
