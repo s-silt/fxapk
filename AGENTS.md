@@ -115,6 +115,11 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
   `真实 = 声明 + IP末段 + 常量`）。用 `port-normalize` 把**你解密的声明端口**与**报告里的实测端口**
   （`endpoints[].enrichment.runtime.remote_endpoints`）配对反推该规则——规则一致是很强的家族证据，
   规则不一致说明不是同一支。配对不足或过于齐整时它会判 `degenerate` 拒给结论，**别硬套**。
+- **`DEX-STRING-POOL-OPAQUE`（字符串池疑被整体混淆）**：★ 这条是**关于报告本身可信度**的警告，不是样本
+  的一条罪状。命中意味着 dex 字符串常量疑被编译期整体加密 → `endpoints` / `contacts` / `config_keys`
+  这些全靠字符串池的分析器会集体抽空。**此时本报告里这些项的「未发现」不可解读为「不存在」**，
+  别据此判样本干净。真实端点转运行时取：floor PCAP 拿实际连接的 IP:端口 + socket 归因。
+  画像恒写进 `meta["dex_string_pool"]`（不论是否命中），可复核「我们究竟看到了多少」。
 - **闭环状态 `partial` / `failed`**：原样汇报 `gaps` 与 `next_actions`，绝不表述成"已闭环"。
 
 ---
