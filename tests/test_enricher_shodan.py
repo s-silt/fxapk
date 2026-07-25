@@ -186,6 +186,34 @@ def test_cache_hit_skips_network(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(fake.calls) == n
 
 
+def test_expired_cache_triggers_requery(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★codex B2：超 TTL 的缓存 → 重查，不返回旧主机画像（主机换服务/下线场景）。"""
+    import json as _json
+    monkeypatch.setenv("FXAPK_SHODAN_KEY", "testkey")
+    fake = _FakeRequests({"/shodan/host/45.33.32.156": (200, _HOST_PAYLOAD)})
+    monkeypatch.setattr(sh_mod._http, "capped_get", fake.get)
+    e = ShodanEnricher()
+    e.enrich(_ep("45.33.32.156", "ip"))
+    n = len(fake.calls)
+    cache = _json.loads(sh_mod.CACHE_FILE.read_text(encoding="utf-8"))
+    assert cache["45.33.32.156"]["_cached_at"]
+    cache["45.33.32.156"]["_cached_at"] = 0.0
+    sh_mod.CACHE_FILE.write_text(_json.dumps(cache), encoding="utf-8")
+    e.enrich(_ep("45.33.32.156", "ip"))
+    assert len(fake.calls) == n + 1, "过期 Shodan 缓存未触发重查"
+
+
+def test_cached_at_not_leaked_into_data(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★_cached_at 只是内部 TTL 戳，不得泄进 result.data。"""
+    monkeypatch.setenv("FXAPK_SHODAN_KEY", "testkey")
+    fake = _FakeRequests({"/shodan/host/45.33.32.156": (200, _HOST_PAYLOAD)})
+    monkeypatch.setattr(sh_mod._http, "capped_get", fake.get)
+    e = ShodanEnricher()
+    e.enrich(_ep("45.33.32.156", "ip"))
+    r = e.enrich(_ep("45.33.32.156", "ip"))  # 命中未过期
+    assert "_cached_at" not in r.data
+
+
 def test_forensic_uses_shodan_country() -> None:
     assert (
         forensic.classify_jurisdiction("1.2.3.4", shodan={"country": "United States"})

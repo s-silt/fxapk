@@ -26,14 +26,18 @@ import json
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
-import requests
-
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
+from apkscan.enrichers import _http
 from apkscan.enrichers.whois import query_whois
+
+#: 本模块 ``requests`` 符号 = 有界 shim（get 流式限体，codex B1）。RDAP 查询另叠重定向 SSRF 守卫（B3）。
+#: 生产走此 shim；测试仍可 ``monkeypatch.setattr(rdap, "requests", fake)`` 覆盖。
+requests = _http.capped_requests
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +50,13 @@ RDAP_URL = "https://rdap.org/domain/{domain}"
 #: 本地缓存目录与文件。
 CACHE_DIR = Path(".apkscan_cache")
 CACHE_FILE = CACHE_DIR / "rdap.json"
+
+#: RDAP 富化缓存 TTL（秒）。域名注册方会随过户/转移而变——无 TTL 会把首次注册人永久固化，
+#: 域名易主后仍返回旧注册方（归属/串案锚点失真）。取 7 天：注册信息变更远慢于 DNS，兼顾省查与时效
+#: （对齐 dns.py TTL 纪律）。
+CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
+#: 缓存条目里记录写入时刻的字段名（epoch 秒）。旧缓存无此字段 → 视为过期、触发重查。
+_CACHED_AT_KEY = "_cached_at"
 
 #: RDAP event action → 我方字段名映射。
 _EVENT_MAP = {
@@ -223,10 +234,19 @@ class RdapEnricher(BaseEnricher):
         with self._lock:
             return self._load_cache()
 
+    @staticmethod
+    def _cache_is_fresh(entry: dict[str, Any]) -> bool:
+        """缓存条目是否在 TTL 内（未过期）。无 ``_cached_at``（旧缓存）→ 判过期、触发重查。"""
+        stamped = entry.get(_CACHED_AT_KEY)
+        if not isinstance(stamped, (int, float)):
+            return False
+        return (time.time() - stamped) < CACHE_TTL_SECONDS
+
     def _save_cache_entry(self, domain: str, entry: dict[str, Any]) -> None:
         with self._lock:
             cache = self._load_cache()
-            cache[domain] = entry
+            # 打时间戳供 TTL 过期判断（见 CACHE_TTL_SECONDS）。
+            cache[domain] = {**entry, _CACHED_AT_KEY: time.time()}
             try:
                 CACHE_DIR.mkdir(parents=True, exist_ok=True)
                 # 原子写：临时文件 + replace，避免崩溃/并发留半截坏缓存。
@@ -241,9 +261,13 @@ class RdapEnricher(BaseEnricher):
 
     # ------------------------------------------------------------------ 查询
     def _query_rdap(self, domain: str) -> dict[str, Any]:
-        """RDAP 网络查询；网络/HTTP/解析异常向上抛由 enrich() 的兜底逻辑处理。"""
+        """RDAP 网络查询；网络/HTTP/解析异常向上抛由 enrich() 的兜底逻辑处理。
+
+        ★经 ``_http.guarded_get`` 手动跟随 rdap.org bootstrap 的 3xx referral，跟随前逐跳校验目标 host
+        非私网/保留地址（SSRF 防护，codex B3）——敌意 referral 无法把请求引向内网/云元数据端点。
+        """
         url = RDAP_URL.format(domain=domain)
-        resp = requests.get(url, timeout=RDAP_TIMEOUT)
+        resp = _http.guarded_get(requests, url, timeout=RDAP_TIMEOUT)
         resp.raise_for_status()
         payload = resp.json()
         if not isinstance(payload, dict):
@@ -274,12 +298,16 @@ class RdapEnricher(BaseEnricher):
                 provider=self.name, ok=False, error="空域名，跳过 RDAP 查询"
             )
 
-        # 1) 缓存命中直接返回（不消耗网络）。持锁读，避免与并发写 os.replace 撞车。
+        # 1) 缓存命中且未过期直接返回（不消耗网络）。过期（超 TTL / 无时间戳的旧缓存）→ 重查，
+        #    避免域名易主后永久返回旧注册方。持锁读，避免与并发写 os.replace 撞车。
         cache = self._load_cache_locked()
         cached = cache.get(domain)
-        if isinstance(cached, dict):
+        if isinstance(cached, dict) and self._cache_is_fresh(cached):
             logger.debug("RDAP 缓存命中：%s", domain)
-            return EnrichmentResult(provider=self.name, ok=True, data=dict(cached))
+            data = {k: v for k, v in cached.items() if k != _CACHED_AT_KEY}
+            return EnrichmentResult(provider=self.name, ok=True, data=data)
+        if isinstance(cached, dict):
+            logger.debug("RDAP 缓存过期，重查：%s", domain)
 
         # 2) RDAP 优先；失败（404 / TLD 无 RDAP / 网络）记一次 warning 后回退 whois。
         rdap_err: str | None = None

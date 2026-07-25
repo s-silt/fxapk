@@ -28,10 +28,13 @@ import threading
 from pathlib import Path
 from typing import Any
 
-import requests
-
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
+from apkscan.enrichers import _http
+
+#: 本模块 ``requests`` 符号 = 有界 shim（get 流式限体，防被劫持上游灌爆内存，codex B1）。
+#: 生产走此 shim；测试仍可 ``monkeypatch.setattr(icp, "requests", fake)`` 覆盖。
+requests = _http.capped_requests
 
 logger = logging.getLogger(__name__)
 
