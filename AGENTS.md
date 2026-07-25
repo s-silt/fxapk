@@ -24,7 +24,6 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 | 准备真机环境 / 排查动态为什么跑不起来 | `fxapk doctor --fix` |
 | 真机脱壳 / 去壳重打包 / 抓包（单步） | `fxapk unpack <apk>` / `fxapk repackage <apk>` / `fxapk capture <pkg>` |
 | 串案 / 资产沉淀 /「这值见过没」反查 | `fxapk corpus add <report.json...>`（历次报告入库、跨版本回归）；`fxapk corpus seen <值> [--by sign_sha256]`（跨样本反查、按共享签名证书一击串案）；`fxapk corpus ls` 过滤列举 |
-| （旧组件，不再投入开发）图谱串案 / 网页台账 | `fxapk graph ...` / `fxapk track` 仍可跑但不再迭代；串案优先走 corpus 反查 + 上下文关联 |
 
 - 决策只读 `fxapk digest <report.json>`（低 token、已按"建议调证 > 待核"排序）；要细节再读 `out/<名>.json` 全量。
 - 命令失败/缺前置 → 看它打印的 `playbook`（每条是可直接复制的修复命令），照着修，**别自己另起炉灶手搓**。
