@@ -66,6 +66,7 @@ class FakeContext:
         apk_path: str = "",
         platform: str = "android",
         manifest_anomaly: str | None = None,
+        declared_sizes: dict[str, int] | None = None,
     ) -> None:
         self.package_name = package_name
         self.manifest_xml = manifest_xml
@@ -76,6 +77,8 @@ class FakeContext:
 
         self._permissions = list(permissions or [])
         self._files = dict(files or {})
+        # 显式声明大小（模拟 zip 中央目录元数据；用于测 read_file 前置 size 门：可与实际字节脱钩造「小压缩巨解压」）
+        self._declared_sizes = dict(declared_sizes or {})
         self._dex_strings = list(dex_strings or [])
         self._native_libs = list(native_libs or [])
         self._certificates = list(certificates or [])
@@ -95,6 +98,13 @@ class FakeContext:
 
     def read_file(self, path: str) -> bytes | None:
         return self._files.get(path)
+
+    def declared_size(self, path: str) -> int | None:
+        """显式声明大小优先（测 size 门用）；否则退回实际字节长度；查不到 → None。"""
+        if path in self._declared_sizes:
+            return self._declared_sizes[path]
+        b = self._files.get(path)
+        return len(b) if b is not None else None
 
     def native_libs(self) -> list[str]:
         return list(self._native_libs)
