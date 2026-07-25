@@ -29,6 +29,12 @@ _MAX_BLOB_BYTES = 5 * 1024 * 1024
 _MAX_DEPTH = 5
 _MAX_FRONTIER = 24
 
+# 二进制端点数组提取：连续 ≥N 个 6 字节记录 [IPv4(4) + port(2)] 才算命中（随机字节难连成 N 条 → 降假阳）。
+# 家族实例是 5 记录/30 字节（见 ClientCore TXT 明文格式）；要求 ≥3 兼顾"真数组"与"抗噪"。
+_MIN_BIN_RECORDS = 3
+# 二进制提取只扫 leaf 的前若干字节（配置很小；避免对大 leaf 做 O(n) 扫描的边际浪费）。
+_MAX_BIN_SCAN = 64 * 1024
+
 _URL_RE = re.compile(r"""(?:https?|wss?|mqtt)://[^\s"'`<>()\[\]{}\\^|,;]+""", re.IGNORECASE)
 _DOMAIN_RE = re.compile(
     r"""(?<![\w@./-])((?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,24})(?![\w.-])"""
@@ -79,7 +85,14 @@ def decode_config_blob(
                     step = "json" if is_json else "text"
                     return DecodeResult(True, text, chain + (step,), domains, ips)
 
-            for peeled, name in _peels(data, text, recipe, timestamp):
+            peels = _peels(data, text, recipe, timestamp)
+            if not peels:
+                # ★剥不动的 leaf：试二进制紧凑端点数组（IP+port 成组）。放在 gzip/base64/aes 试尽**之后**
+                #   （codex #16 纠正）——否则 4字节任意公网 IP + 2字节端口的假阳会抢在正确的 gunzip 路径前。
+                bin_ips = _extract_binary_endpoints(data)
+                if bin_ips:
+                    return DecodeResult(True, None, chain + ("binary",), (), bin_ips)
+            for peeled, name in peels:
                 if len(nxt) >= _MAX_FRONTIER:
                     break
                 nxt.append((peeled, chain + (name,)))
@@ -88,6 +101,36 @@ def decode_config_blob(
         frontier = nxt
 
     return DecodeResult(False, None, frontier[0][1] if frontier else (), (), ())
+
+
+def _extract_binary_endpoints(data: bytes) -> tuple[str, ...]:
+    """从二进制 leaf 里提取**紧凑端点数组**：整段 leaf 是 ``≥_MIN_BIN_RECORDS`` 个连续 6 字节记录
+    ``[IPv4(4) + port(2)]``（每条须 公网非噪音 IP + port∈[1,65535]、同一字节序），尾部残留 <6 字节。
+
+    ★纯文本正则抽不到这类"4字节紧凑 IPv4 + 相邻2字节端口"的二进制配置（原 _extract_endpoints 只对文本）。
+    ★强判据（抗假阳，codex #16）：要求**从偏移 0 起、记录几乎铺满整个 leaf**——家族实例正是"纯 N×6 数组、
+    无头尾"（30 字节 = 5 记录）。随机字节 / AES 密文 / 压缩残块整体不会恰好是连续合法记录，故不误判。
+    只处理 ≤ _MAX_BIN_SCAN 的 leaf；大端 / 小端各试。绝不抛。★低置信：命中记入 decode_chain 的 "binary"。
+    """
+    n = len(data)
+    if n < _MIN_BIN_RECORDS * 6 or n > _MAX_BIN_SCAN:
+        return ()
+    for endian in ("big", "little"):
+        run: list[str] = []
+        j = 0
+        while j + 6 <= n:
+            dotted = ".".join(str(b) for b in data[j:j + 4])
+            port = int.from_bytes(data[j + 4:j + 6], endian)  # type: ignore[arg-type]
+            ip = textutil.parse_ipv4(dotted)
+            if (not (1 <= port <= 65535) or ip is None
+                    or textutil.ip_is_private(ip) or textutil.is_noise_bare_ip(dotted)):
+                break
+            run.append(dotted)
+            j += 6
+        # 记录须几乎铺满整段 leaf（尾部残 <6 字节 = 不足一条记录），且条数达标 → 纯端点数组。
+        if len(run) >= _MIN_BIN_RECORDS and n - j < 6:
+            return tuple(sorted(set(run)))
+    return ()
 
 
 def _peels(
