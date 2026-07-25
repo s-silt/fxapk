@@ -129,3 +129,56 @@ def test_aes_envelope_json() -> None:
     assert r.decoded is True
     assert r.decode_chain == ("aes", "json")
     assert r.domains == _EXPECT_DOMAINS and r.ips == _EXPECT_IPS
+
+
+# --- 二进制紧凑端点数组提取（codex #16 / A3）--------------------------------
+
+
+def _bin_records(pairs: list, endian: str = ">") -> bytes:
+    """把 [(ip, port)] 编成连续 6 字节记录 [IPv4(4) + port(2)]（默认大端）。"""
+    import socket
+    import struct
+
+    out = b""
+    for ip, port in pairs:
+        out += socket.inet_aton(ip) + struct.pack(endian + "H", port)
+    return out
+
+
+def test_binary_endpoint_array_big_endian() -> None:
+    """★5 记录二进制数组（非 UTF-8 leaf）→ 抽出 5 个公网 IP，chain=('binary',)。"""
+    pairs = [("45.11.22.33", 40009), ("8.8.8.8", 33033), ("1.1.1.1", 50505),
+             ("9.9.9.9", 44044), ("208.67.222.222", 53000)]
+    r = decode_config_blob(_bin_records(pairs))
+    assert r.decoded is True
+    assert r.decode_chain == ("binary",)
+    assert set(r.ips) == {ip for ip, _ in pairs}
+    assert r.domains == ()
+
+
+def test_binary_endpoint_array_little_endian() -> None:
+    pairs = [("45.11.22.33", 40009), ("8.8.8.8", 33033), ("1.1.1.1", 50505)]
+    r = decode_config_blob(_bin_records(pairs, endian="<"))
+    assert r.decoded is True and r.decode_chain == ("binary",)
+    assert set(r.ips) == {ip for ip, _ in pairs}
+
+
+def test_binary_below_min_records_not_matched() -> None:
+    """★仅 2 条记录（< _MIN_BIN_RECORDS=3）→ 不命中（抗假阳），decoded=False。"""
+    r = decode_config_blob(_bin_records([("45.11.22.33", 40009), ("8.8.8.8", 33033)]))
+    assert r.decoded is False
+
+
+def test_random_bytes_no_false_positive() -> None:
+    """★随机字节 leaf → 不误判出二进制端点（连续 ≥3 条合法记录概率极低）。"""
+    import hashlib
+
+    blob = b"".join(hashlib.sha256(bytes([i])).digest() for i in range(20))  # 640 字节确定性"随机"
+    r = decode_config_blob(blob)
+    assert r.decode_chain != ("binary",)  # 不得误抽二进制端点
+
+
+def test_gzip_json_not_preempted_by_binary() -> None:
+    """★不抢 gzip 路径：gzip'd JSON 仍走 gzip→json，不被二进制提取抢先（二进制只在剥不动的 leaf 跑）。"""
+    r = decode_config_blob(gzip.compress(_JSON_BYTES))
+    assert r.decode_chain == ("gzip", "json")  # 非 ('binary',)
