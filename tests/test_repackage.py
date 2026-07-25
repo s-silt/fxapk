@@ -251,3 +251,69 @@ def test_run_tool_no_pipe_has_timeout_stdin_devnull(
     assert kw.get("stderr") == subprocess.STDOUT
     assert kw.get("stdin") == subprocess.DEVNULL
     assert kw.get("timeout") == repackage._TOOL_TIMEOUT
+
+
+# --- A1: logcat FATAL 崩溃块窗口匹配（不误判无关 FATAL） -----------------------
+
+def test_logcat_fatal_ignores_unrelated_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★codex A1：无关进程的 FATAL + 本包名出现在 buffer 别处 → 不误判本包崩溃。"""
+    buf = "\n".join([
+        "01-01 E AndroidRuntime: FATAL EXCEPTION: main",
+        "01-01 E AndroidRuntime: Process: com.other.app, PID: 999",
+        "01-01 E AndroidRuntime:   at com.other.Foo",
+        "01-01 I ActivityManager: Start com.fraud.app normally",  # 本包名，但不在崩溃块内
+    ])
+    monkeypatch.setattr(repackage, "_adb", lambda sub, serial: buf)
+    assert repackage._logcat_has_fatal("com.fraud.app", None) is False
+
+
+def test_logcat_fatal_detects_own_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """本包名在 FATAL 崩溃块窗口内 → 判崩溃。"""
+    buf = "\n".join([
+        "01-01 E AndroidRuntime: FATAL EXCEPTION: main",
+        "01-01 E AndroidRuntime: Process: com.fraud.app, PID: 123",
+        "01-01 E AndroidRuntime:   at com.fraud.Bar",
+    ])
+    monkeypatch.setattr(repackage, "_adb", lambda sub, serial: buf)
+    assert repackage._logcat_has_fatal("com.fraud.app", None) is True
+
+
+# --- A3: 真实 launcher 解析 + 启动前清 logcat + 可打桩 _wait -------------------
+
+def test_resolve_launcher_component(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★codex A3：从 resolve-activity --brief 解析真实 launcher 组件（不硬编码 .MainActivity）。"""
+    monkeypatch.setattr(
+        repackage, "_adb",
+        lambda sub, serial: "priority=0\ncom.fraud.app/com.fraud.app.SplashActivity\n",
+    )
+    assert repackage._resolve_launcher_component("com.fraud.app", None) == \
+        "com.fraud.app/com.fraud.app.SplashActivity"
+
+
+def test_resolve_launcher_none_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(repackage, "_adb", lambda sub, serial: "no match\n")
+    assert repackage._resolve_launcher_component("com.fraud.app", None) is None
+
+
+def test_verdict_clears_logcat_before_launch_and_uses_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★A1：启动前先 logcat -c 清残留；★A3：等待走可打桩 _wait，单测不真睡。"""
+    calls: list[list[str]] = []
+
+    def _rec_adb(sub: list[str], serial: object) -> str:
+        calls.append(sub)
+        return ""
+
+    monkeypatch.setattr(repackage, "_adb", _rec_adb)
+    monkeypatch.setattr(repackage, "_resolve_launcher_component", lambda p, s: "com.fraud.app/.A")
+    monkeypatch.setattr(repackage, "_process_alive", lambda p, s: True)
+    monkeypatch.setattr(repackage, "_logcat_has_fatal", lambda p, s: False)
+    monkeypatch.setattr(repackage, "_frida_attachable", lambda p, s: True)
+    waited: list[float] = []
+    monkeypatch.setattr(repackage, "_wait", lambda d: waited.append(d))
+
+    ok, _msg = repackage._verdict_app_alive("com.fraud.app", None)
+    assert ok is True
+    assert calls[0] == ["logcat", "-c"], "启动前未先清 logcat"
+    assert waited == [repackage._SPAWN_GRACE], "未走可打桩 _wait（单测会真睡）"
