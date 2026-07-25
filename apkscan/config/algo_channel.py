@@ -7,9 +7,11 @@
 本模块是**纯生成器框架**：给定组件（办案 agent 从样本里抠出、或从案件资料提供），按日期窗口枚举候选子域/URL，
 供被动查询历史解析 / passive DNS / 证书透明度反查。**不含任何具体前缀/域名**（那是案件数据）。
 
-★week-year 坑（务必）：Java ``SimpleDateFormat("YYYYMMdd")`` 的大写 ``YYYY`` 是**周年（ISO week-year）**，
-在跨年周（12 月底 / 1 月初）与日历年不同。样本实际拼的是周年；为不漏，本模块对每个日期**同时**产日历年
-（``%Y%m%d``）与周年（``<isoyear>%m%d``）两种前缀串、去重。纯函数、绝不联网、绝不抛。
+★week-year 坑（务必）：Java ``SimpleDateFormat("YYYYMMdd")`` 的大写 ``YYYY`` 是**周年（week-year）**，
+在跨年周（12 月底 / 1 月初）与日历年不同，且其值取决于 formatter 所用 Calendar 的 **locale**——ISO
+（周一起、首周 ≥4 天）与美式默认（周日起、首周 ≥1 天）在同一跨年日可能给出**不同**周年（如 2027-12-31：
+ISO 记 2027、美式记 2028）。本模块无法预知样本 locale，故对**临近年界**的日期在日历年之外额外产**相邻年**
+前缀（周年恒在 日历年 ±1 内），over-cover 所有 locale。纯函数、绝不联网、绝不抛。
 """
 from __future__ import annotations
 
@@ -18,11 +20,26 @@ from datetime import date, timedelta
 
 
 def _date_tokens(day: date) -> list[str]:
-    """一个日期的 yyyyMMdd 串：日历年 + ISO 周年两种（跨年周不同，都产，去重保序）。"""
-    cal = f"{day.year:04d}{day.month:02d}{day.day:02d}"
-    iso_year = day.isocalendar()[0]
-    wk = f"{iso_year:04d}{day.month:02d}{day.day:02d}"
-    return [cal] if wk == cal else [cal, wk]
+    """一个日期的 yyyyMMdd 串候选：日历年在前；距年界 ≤7 天再加**相邻年**（覆盖任意 locale 的 week-year）。
+
+    大写 YYYY 是周年、跨年周随 locale 而变（见模块 docstring）。周年恒为 日历年 或 日历年 ±1，故：年初
+    （1 月前 7 天）补上一年、年末（12 月后 7 天）补下一年——即覆盖 ISO / 美式 / 任意 locale 的周年取值。
+    过量生成廉价（临界期多一个候选），漏则假阴，取前者。日历年恒居首（idx 0），去重保序。
+    """
+    mmdd = f"{day.month:02d}{day.day:02d}"
+    years = [day.year]
+    if day.month == 1 and day.day <= 7:       # 年初：周年可能落到上一年
+        years.append(day.year - 1)
+    elif day.month == 12 and day.day >= 25:   # 年末：周年可能落到下一年
+        years.append(day.year + 1)
+    out: list[str] = []
+    seen: set[str] = set()
+    for y in years:
+        tok = f"{y:04d}{mmdd}"
+        if tok not in seen:
+            seen.add(tok)
+            out.append(tok)
+    return out
 
 
 def md5_date_subdomains(
@@ -35,7 +52,7 @@ def md5_date_subdomains(
 ) -> list[dict[str, str]]:
     """枚举 ``MD5(prefix + yyyyMMdd)`` 子域候选。
 
-    每个日期产 ``{date, year_kind, subdomain, url}``：``year_kind`` 为 ``calendar`` / ``iso-week``（跨年周才有第二种）。
+    每个日期产 ``{date, year_kind, subdomain, url}``：``year_kind`` 为 ``calendar`` / ``week-year``（临近年界才有第二种）。
     ``base_domain`` 去前导点归一；``path`` 空则 url 只到域名。按 (date, year_kind) 稳定排序、按 subdomain 去重。绝不抛。
 
     ★组件（prefix / base_domain）由调用方提供——本函数不判定"哪个常量是前缀"，那是案件/逆向所得。
@@ -54,14 +71,18 @@ def md5_date_subdomains(
     for day in sorted(set(days)):
         tokens = _date_tokens(day)
         for idx, tok in enumerate(tokens):
-            sub = hashlib.md5((pfx + tok).encode("utf-8")).hexdigest()  # noqa: S324 — 复刻样本算法，非安全用途
+            # usedforsecurity=False：复刻样本算法、非安全用途；FIPS 受限的 Python 上不加此参数会直接抛
+            # （违背本模块"绝不抛"契约、令候选枚举整体失败）。
+            sub = hashlib.md5(  # noqa: S324 — 复刻样本算法，非安全用途
+                (pfx + tok).encode("utf-8"), usedforsecurity=False
+            ).hexdigest()
             fqdn = f"{sub}.{base}"
             if fqdn in seen:
                 continue
             seen.add(fqdn)
             out.append({
                 "date": day.isoformat(),
-                "year_kind": "calendar" if idx == 0 else "iso-week",
+                "year_kind": "calendar" if idx == 0 else "week-year",
                 "subdomain": fqdn,
                 "url": f"{sch}://{fqdn}{p}",
             })
