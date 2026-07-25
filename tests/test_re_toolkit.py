@@ -227,6 +227,47 @@ def test_short_base64_not_flagged():
     assert not any("syscall" in n for n in names)
 
 
+def test_real_payload_found_after_many_unrelated_candidates():
+    """★复审 P1 无修复即失败：大量无关长 base64 排在**前面**时，真载荷不得被静默挤掉。
+
+    修前 checked 在解码前自增、200 个候选即 break → 真载荷排在后面就永远查不到（"抓不到≠没有"）。
+    """
+    import base64
+    import hashlib
+    noise = [base64.b64encode(hashlib.sha512(str(i).encode()).digest() * 12).decode()
+             for i in range(300)]           # 300 个无关长 base64（各 768B）
+    result = _analyze(dex_strings=[*noise, _b64_of(_arm64_stub())])
+    assert any("内嵌 syscall" in t["name"] for t in result.meta["re_toolkit"])
+
+
+def test_oversize_candidate_does_not_consume_budget():
+    """★复审 P1 无修复即失败：单个超大 base64 不得先被整体解码、也不得吃掉后续预算。
+
+    修前先 b64decode 再扣预算 → 一个几 MB 的串会先完成分配；且扣完预算后真载荷被跳过。
+    """
+    import base64
+    huge = base64.b64encode(b"\x00" * (2 * 1024 * 1024)).decode()  # 2MB > 单载荷上限
+    result = _analyze(dex_strings=[huge, _b64_of(_arm64_stub())])
+    assert any("内嵌 syscall" in t["name"] for t in result.meta["re_toolkit"])
+
+
+def test_large_payload_requires_more_syscall_hits():
+    """★复审 P1：载荷越大扫描位置越多、随机碰撞机会线性增长 → 大载荷要求 ≥2 处命中。"""
+    nop, svc = b"\x1f\x20\x03\xd5", b"\x01\x00\x00\xd4"
+    one = _b64_of(nop * 3000 + svc + nop * 3000)          # 24KB，仅 1 处
+    two = _b64_of(nop * 1500 + svc + nop * 1500 + svc + nop * 1500)  # 同量级，2 处
+    assert not any("内嵌 syscall" in t["name"] for t in _analyze(dex_strings=[one]).meta["re_toolkit"])
+    assert any("内嵌 syscall" in t["name"] for t in _analyze(dex_strings=[two]).meta["re_toolkit"])
+
+
+def test_malformed_base64_does_not_crash_or_hit():
+    """畸形 base64（中间含 =、超量 padding）不得崩、不得误命中。"""
+    stub = _b64_of(_arm64_stub())
+    for bad in (stub[:200] + "=" + stub[200:], stub + "====", "=" * 600):
+        result = _analyze(dex_strings=[bad])
+        assert isinstance(result.meta["re_toolkit"], list)  # 不崩
+
+
 def test_ordinary_app_with_long_base64_config_not_flagged():
     """普通 App 常见的长 base64 配置串（可打印文本编码而来）不得命中。"""
     text = ("{'endpoint':'https://api.example-synthetic.test','timeout':30}" * 40).encode()
