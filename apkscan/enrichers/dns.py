@@ -32,11 +32,14 @@ import time
 from pathlib import Path
 from typing import Any
 
-import requests
-
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
+from apkscan.enrichers import _http
 from apkscan.enrichers._ipinfo import lookup_ips_batch
+
+#: 本模块 ``requests`` 符号 = 有界 shim（DoH get + 转发给 /batch 的 post 均流式限体，codex B1）。
+#: 生产走此 shim；测试仍可 ``monkeypatch.setattr(dns, "requests", fake)`` 覆盖。
+requests = _http.capped_requests
 
 logger = logging.getLogger(__name__)
 

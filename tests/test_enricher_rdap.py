@@ -380,6 +380,38 @@ def test_rdap_cache_hit_skips_network(
     assert len(fake_requests.calls) == 1
 
 
+def test_rdap_expired_cache_triggers_requery(
+    fake_requests: _FakeRequests, fake_whois: _FakeWhoisModule, _isolated_cache: Path
+) -> None:
+    """★codex B2：超 TTL 的缓存 → 重查，不永久返回旧注册方（域名易主场景）。"""
+    fake_requests.response = _FakeResponse(_rdap_payload(), status_code=200)
+    enr = RdapEnricher()
+    enr.enrich(_ep("transfer.com"))
+    assert len(fake_requests.calls) == 1
+    cache = json.loads(_isolated_cache.read_text(encoding="utf-8"))
+    assert cache["transfer.com"]["_cached_at"]
+    cache["transfer.com"]["_cached_at"] = 0.0
+    _isolated_cache.write_text(json.dumps(cache), encoding="utf-8")
+    fake_requests.response = _FakeResponse(_rdap_payload(), status_code=200)
+    enr.enrich(_ep("transfer.com"))
+    assert len(fake_requests.calls) == 2, "过期 RDAP 缓存未触发重查"
+
+
+def test_rdap_legacy_cache_without_timestamp_is_stale(
+    fake_requests: _FakeRequests, fake_whois: _FakeWhoisModule, _isolated_cache: Path
+) -> None:
+    """★无 _cached_at 的旧缓存 → 判过期 → 重查；且 _cached_at 不泄进 result.data。"""
+    _isolated_cache.parent.mkdir(parents=True, exist_ok=True)
+    _isolated_cache.write_text(
+        json.dumps({"old.com": {"registrar": "OLD-REG", "source": "rdap"}}), encoding="utf-8"
+    )
+    fake_requests.response = _FakeResponse(_rdap_payload(), status_code=200)
+    r = RdapEnricher().enrich(_ep("old.com"))
+    assert len(fake_requests.calls) == 1
+    assert r.data["registrar"] == "GoDaddy.com, LLC"
+    assert "_cached_at" not in r.data
+
+
 def test_failed_query_not_cached(
     fake_requests: _FakeRequests, fake_whois: _FakeWhoisModule, _isolated_cache: Path
 ) -> None:

@@ -25,7 +25,11 @@ import threading
 import time
 from typing import Any
 
-import requests
+from apkscan.enrichers import _http
+
+#: 本模块 ``requests`` 符号 = 有界 shim（http=None 默认路径的 get/post 均流式限体，codex B1）。
+#: 生产走此 shim；测试仍可 ``monkeypatch.setattr(_ipinfo, "requests", fake)`` 覆盖。
+requests = _http.capped_requests
 
 logger = logging.getLogger(__name__)
 

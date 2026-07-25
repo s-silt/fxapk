@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,12 @@ _MAX_HOSTNAMES = 30
 
 CACHE_DIR = Path(".apkscan_cache")
 CACHE_FILE = CACHE_DIR / "shodan.json"
+
+#: Shodan 富化缓存 TTL（秒）。主机开放端口/服务/banner 变化快（比 ASN/注册人频繁得多）——无 TTL 会把
+#: 首次探测结果永久固化，主机换服务/下线后仍返回旧画像。取 24h：与 dns.py 同档，贴合主机态高波动性。
+CACHE_TTL_SECONDS = 24 * 60 * 60
+#: 缓存条目里记录写入时刻的字段名（epoch 秒）。旧缓存无此字段 → 视为过期、触发重查。
+_CACHED_AT_KEY = "_cached_at"
 
 
 def _api_key() -> str:
@@ -154,10 +161,19 @@ class ShodanEnricher(BaseEnricher):
         with self._lock:
             return self._load_cache()
 
+    @staticmethod
+    def _cache_is_fresh(entry: dict[str, Any]) -> bool:
+        """缓存条目是否在 TTL 内（未过期）。无 ``_cached_at``（旧缓存）→ 判过期、触发重查。"""
+        stamped = entry.get(_CACHED_AT_KEY)
+        if not isinstance(stamped, (int, float)):
+            return False
+        return (time.time() - stamped) < CACHE_TTL_SECONDS
+
     def _save_cache_entry(self, value: str, entry: dict[str, Any]) -> None:
         with self._lock:
             cache = self._load_cache()
-            cache[value] = entry
+            # 打时间戳供 TTL 过期判断（见 CACHE_TTL_SECONDS）。
+            cache[value] = {**entry, _CACHED_AT_KEY: time.time()}
             try:
                 CACHE_DIR.mkdir(parents=True, exist_ok=True)
                 # 原子写：临时文件 + replace，避免崩溃/并发留半截坏缓存。
@@ -216,12 +232,16 @@ class ShodanEnricher(BaseEnricher):
                 error=f"未配置 {_ENV_KEYS[0]}，跳过 Shodan（opt-in）",
             )
 
-        # 1) 缓存命中直接返回（不消耗 query 额度）。持锁读，避免与并发写 os.replace 撞车（Windows race）。
+        # 1) 缓存命中且未过期直接返回（不消耗 query 额度）。过期（超 TTL / 无时间戳的旧缓存）→ 重查，
+        #    避免主机换服务/下线后永久返回旧画像。持锁读，避免与并发写 os.replace 撞车（Windows race）。
         cache = self._load_cache_locked()
         cached = cache.get(value)
-        if isinstance(cached, dict):
+        if isinstance(cached, dict) and self._cache_is_fresh(cached):
             logger.debug("Shodan 缓存命中：%s", value)
-            return EnrichmentResult(provider=self.name, ok=True, data=dict(cached))
+            data = {k: v for k, v in cached.items() if k != _CACHED_AT_KEY}
+            return EnrichmentResult(provider=self.name, ok=True, data=data)
+        if isinstance(cached, dict):
+            logger.debug("Shodan 缓存过期，重查：%s", value)
 
         # 2) 网络查询。
         try:
