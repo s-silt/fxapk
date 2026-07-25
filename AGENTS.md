@@ -98,7 +98,7 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 |---|---|---|
 | `fxapk corpus add out/<名>.json` | 库根含案件数据，须显式 `--corpus`／`FXAPK_CORPUS` 指向**工作树外** | **每次分析完都做**，否则串案/家族反查没有数据 |
 | `fxapk corpus seen <值> --by so_sha256` / `corpus shared-native` | 跨样本操作，要先有库 | 想确认"这个样本属于哪个家族"时 |
-| `fxapk config-channel --prefix … --domain …` | 前缀常量与基域要从样本里**人工判断**哪个是 | 报告显示配置下发但静态无 URL 时 |
+| `fxapk config-channel --prefix … --domain …` | 前缀常量与基域**要你自己从样本常量里判断**哪个是 | 报告显示配置下发但静态无 URL 时 |
 | `fxapk port-normalize --declared … --report …` | 声明端口来自**你的解密结果**，工具自己拿不到 | 解出配置里的 raw 端口后 |
 
 ### 0.6.2 ★ 顺着报告里的信号继续走（别停在"命令跑完"）
@@ -203,7 +203,7 @@ fxapk digest out/<样本名>.json
 
 **结果在哪看**：境外归属证据并进对应 Lead 的 `evidence_to_obtain`/`notes`（自动进 `digest`），例如
 `Shodan 归属：ASN4134 / 80(nginx 1.18) …`、`技术栈/后台指纹（仅识别·串案用）：PHP、Jeecg-Boot…`、`关联子域(crt.sh)：…建议并簇串案`。
-结构化 `overseas_targets` 段每主机带 `tech_stack[]` / `related_subdomains[]` 字段供 Codex 直读。
+结构化 `overseas_targets` 段每主机带 `tech_stack[]` / `related_subdomains[]` 字段供 agent 直读。
 
 **取证原则（辖区分流）**：
 - **国内服务器** → 走「调证」：向境内云厂商/IDC/ICP 依法调取日志/租户实名。
