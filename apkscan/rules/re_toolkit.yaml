@@ -119,8 +119,41 @@ tools:
     capability: "纯 Java 直接 Linux syscall + 内存加载 ELF（绕过 libc/Java hook 层）"
     dex_prefixes:
       - "dev.tmpfs.libcoresyscall"
+    # ★抗改名锚点（2026-07-25 逐字节核实 upstream main 分支源码）：R8/ProGuard 只重命名符号、
+    #   **从不改字符串内容**，故下列字面量可扛住改名 + 重打包 + 源码内联（包前缀失效的那些场景）。
+    dex_strings:
+      # (1) 各架构 shellcode 的 base64 首段（76 字符）——**它就是 syscall 指令流本身**，
+      #     经 Base64.decode() 进 RWX 页执行；删了库不能工作，是唯一"删不掉"的锚点。
+      #     源码形如 "seg\n" + "seg\n"…，javac 折叠成单个含换行的大串 → 单段子串匹配仍命中。
+      - "AAA+1MADX9boAwaq5gNA+eEDA6rgAwIq4gMEquMDBarkAwiq5QMHqgEAABQJfECT4AMBquEDAqri"   # arm64
+      - "cAAg4R7/L+EQTC3pCLCN4hDQTeICAKDhCBCb5RAgm+UYMJvlIMCb5TBAm+Uo4JvlAFCN6AhAjeUC"   # arm32
+      - "VUiJ5cxdw2YPH4QAAAAAAFVIieVIg+wQTYnKTInAiddMi0UQTItNGEiLVSBIiRQkSInOSInCTInR"   # x86_64
+      - "VYnlg+T8zInsXcOQkJCQkFWJ5VOD5PCD7BDoAAAAAFuBwzkMAACD7AT/dTz/dTT/dSz/dST/dRz/"   # x86
+      - "ApCCgIJitoUyhTqGvoZCh8aHFogJoKqILoWyhTaGuoY+h8KHcwAAAIKAMoWzhcYAkwgwEAFGcwAA"   # riscv64
+      - "DQAAAAAAH9g7CAJ8DQBA2CsIhQAGACDYAAAAAAAAnwQtIIIAKwiFAPz/P/gAAAAADwAAAAMAIOwJ"   # mips32el
+      - "DQAAAAgA4AMAAAAAOwgCfAMAQBQAAAAACADgAwAAAAANAAAA+P+9JwQAsK8YAKOPJQiAACAAvI8c"   # mips64el
+      # (2) 本项目独有措辞的错误串（含一处**上游拼写错误** heade，拼错正是指纹价值所在）。
+      #     ★ 位于错误路径 → 有心重打包者可删改：**在则近乎确证，不在不说明任何问题**。
+      - "mmap failed with EACCES. Please check SELinux policy for execmem permission."
+      - "unable to get ArtMethod::entry_point_from_jni_ offset"
+      - "Invalid ELF heade: bad magic"
     anti_frida: true
-    note: "★ 直接 syscall 绕过 libc/Java hook 层，fxapk 的 frida hook 可能静默失效（抓不到≠没有）；内存加载 ELF 无落盘。检测到即应换打法（旁路 pcap / tls-keylog / 内核层）。"
+    note: |
+      ★ 直接 syscall 绕过 libc/Java hook 层，fxapk 的 frida hook 可能静默失效（抓不到≠没有）；内存加载 ELF
+      无落盘。检测到即应换打法（旁路 pcap / tls-keylog / 内核层）。
+      ★ 包前缀为何仍有效：该库自带 consumer ProGuard 规则
+      `-keep,includedescriptorclasses class dev.tmpfs.libcoresyscall.core.** { native <methods>; }`，
+      R8 自动合并 → 正常引 AAR 的 App 里 core.** 包名**不被改名**。前缀失效仅发生在源码内联/手工重打包/
+      App 覆盖该规则/仅 elfloader.** 被改名（keep 未覆盖 elfloader）——上面 dex_strings 正是补这几种。
+      ★ 全库纯 Java：无 .so、无 assets、无资源载荷（已核实上游文件树），故 so_names/files 三路必然落空。
+      ★ 已评估否决（勿再加）：svc/syscall 机器码字节（shellcode 静态是 base64 文本、运行时才成机器码，
+      扫字节必然落空）、trampoline 字节与 syscall 号常量（通用 ABI 原语，任何 packer/anti-debug 都有）、
+      sun.misc.Unsafe / ArtMethod 反射簇（Netty·RxJava·Gson 与 Pine·YAHFA·SandHook 等广泛使用，
+      国内大量正常 App 会中，属**技术级**非工具级）。
+      ★ 局限：以上均**扛不住 DEX 字符串加密**（DexGuard 类）。样本若被字符串加密，dex_obfuscation 分析器
+      会产 DEX-STRING-POOL-OPAQUE 提示"静态抽取可能失明"，此时正确结论是"静态不可判定"而非"未使用"。
+      ★ 版本漂移：base64 锚点随上游重新编译而变（记录：2026-07-25 核于 main 分支）；主检测器可能悄悄过期，
+      长期未再命中时应回源复核。
 
   - name: "AndroidHiddenApiBypass (LSPass)"
     category: "evasion"

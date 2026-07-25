@@ -89,6 +89,11 @@ class _ToolRule:
     # true = 要求 so_strings 列全部在同一 .so 内共现（如 SignCheck 的 IPackageManager+IServiceManager）；
     # false = 任一命中即可（默认）。
     so_strings_all: bool = False
+    # DEX 字符串**内容**子串（★大小写敏感——base64 载荷区分大小写）→ 强证据。
+    # 与 dex_prefixes 的区别：后者匹的是包名（R8 改名即失效），本字段匹的是**字面量内容**——
+    # R8/ProGuard 只重命名符号、从不改字符串内容，故可扛住改名与重打包。
+    # 只放「删了工具就不能工作」或「本项目独有措辞」的串；技术级通用串（框架类名、syscall 号）绝不入此列。
+    dex_strings: list[str] = field(default_factory=list)
     anti_frida: bool = False
     note: str = ""
 
@@ -217,6 +222,17 @@ class ReToolkitAnalyzer(BaseAnalyzer):
                     hit.matched_features.append(f"dex:{prefix}")
                     break
 
+        # 3b) DEX 字符串**内容**子串（大小写敏感）→ 强证据（抗 R8 改名/重打包：只改符号不改串内容）
+        for needle in rule.dex_strings:
+            for s in dex_strings:
+                if needle in s:
+                    ev = Evidence(source="dex", location="string-literal",
+                                  snippet=_truncate(f"dex_str~={needle}"))
+                    hit.evidences.append(ev)
+                    hit.matched_features.append(f"dex_str:{_truncate(needle, 24)}")
+                    hit.strong = True
+                    break
+
         # 4) .so 内符号/字符串（子串匹配，大小写不敏感）→ 强证据（抗 so 名/包名改名）
         if rule.so_strings:
             needles = [s.lower() for s in rule.so_strings]
@@ -343,6 +359,7 @@ class ReToolkitAnalyzer(BaseAnalyzer):
                     dex_prefixes=_as_str_list(entry.get("dex_prefixes")),
                     so_strings=_as_str_list(entry.get("so_strings")),
                     so_strings_all=bool(entry.get("so_strings_all", False)),
+                    dex_strings=_as_str_list(entry.get("dex_strings")),
                     anti_frida=bool(entry.get("anti_frida", False)),
                     note=_str_or_empty(entry.get("note")),
                 )
