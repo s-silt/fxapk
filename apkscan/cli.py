@@ -28,11 +28,9 @@ from apkscan.core.models import (
 )
 from apkscan.core.report_naming import report_base
 
-# 图谱串案 / 追踪台账 / 样本库子命令已物理拆到 apkscan/commands/（纯搬移）；add_typer 留此处以引用主 app。
+# 样本库 / 案件子命令已物理拆到 apkscan/commands/（纯搬移）；add_typer 留此处以引用主 app。
 from apkscan.commands.corpus import corpus_app
 from apkscan.commands.case import case_app, closure_exit_code
-from apkscan.commands.graph import graph_app
-from apkscan.commands.track import track_app
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +38,6 @@ app = typer.Typer(
     add_completion=False,
     help="涉诈 APK 调证分析 CLI：静态分析 + 端点/服务归属提取，产出调证线索清单。",
 )
-app.add_typer(graph_app, name="graph")
-app.add_typer(track_app, name="track")
 app.add_typer(corpus_app, name="corpus")
 app.add_typer(case_app, name="case")
 
@@ -221,11 +217,6 @@ def analyze(
         "--dynamic",
         help="静态分析后，若探测到在线设备则自动执行真机 unpack + capture（需设备/工具）。",
     ),
-    track: bool = typer.Option(
-        True,
-        "--track/--no-track",
-        help="写报告后自动把线索入追踪台账（+喂案件图谱）。默认开；--no-track 关闭。",
-    ),
     mode: str = typer.Option(
         ANALYSIS_MODE_PASSIVE,
         "--mode",
@@ -314,10 +305,6 @@ def analyze(
 
         _print_summary(report)
 
-        # 自动入账 + 喂图谱（best-effort 旁路，绝不影响已产出报告）。默认开，--no-track 关。
-        # 报告路径用主 JSON 报告（<base>.json，溯源用）；台账主键是 sha256，路径仅展示。
-        _auto_track(report, str(out_dir / f"{base}.json"), track=track)
-
         # --dynamic：静态完成后，若有设备则自动 unpack + capture（实现由 dynamic 模块 agent 完成）。
         if dynamic:
             if not device_detected:
@@ -326,7 +313,7 @@ def analyze(
                 # base 透传：merge 重渲必须用与静态写出同一 base，否则静态写 <apk>.* 而
                 # 重渲写 report.* 产两套报告。
                 _run_dynamic_after_static(
-                    str(apk), ctx.package_name or "", out, report, formats, base, track=track
+                    str(apk), ctx.package_name or "", out, report, formats, base
                 )
 
         # --strict：所有工作（写报告 / 入账 / 动态）完成后，据完整度决定退出码，供 CI / Agent 判定。
@@ -625,11 +612,6 @@ def auto(
         "--fmt",
         help="输出格式，逗号分隔：html,json,pdf。",
     ),
-    track: bool = typer.Option(
-        True,
-        "--track/--no-track",
-        help="静态分析写报告后自动把线索入追踪台账（+喂案件图谱）。默认开；--no-track 关闭。",
-    ),
     repackage: bool = typer.Option(
         True,
         "--repackage/--no-repackage",
@@ -687,7 +669,6 @@ def auto(
             auto_fix=auto_fix,
             capture_duration=duration,
             formats=formats,
-            track=track,
             mode=mode,
             repackage=repackage,
             strict_case=strict_case,
@@ -1158,7 +1139,6 @@ def capture_plan_cmd(
         raise typer.Exit(code=1) from exc
 
 
-# ===== track 子命令：线索追踪 / 办案进度（裸 track → 起网页；track ingest → 回填台账） =====
 def _print_auto_result(result: object) -> None:
     """打印 auto.run 的结构化结果：逐步状态 + 报告路径。"""
     if not isinstance(result, dict):
@@ -1291,7 +1271,6 @@ def _resolve_extra_dex(spec: str) -> list[str]:
 
 def _run_dynamic_after_static(
     apk_path: str, package: str, out: str, report: Report, formats: list[str], base: str,
-    *, track: bool = True,
 ) -> None:
     """--dynamic：静态完成且有设备时，顺序执行 unpack + capture，并把运行时端点并回主报告。
 
@@ -1340,12 +1319,11 @@ def _run_dynamic_after_static(
     if status != STATUS_DONE:
         return
 
-    _merge_runtime_into_report(capture_result, out, report, formats, base, track=track)
+    _merge_runtime_into_report(capture_result, out, report, formats, base)
 
 
 def _merge_runtime_into_report(
     capture_result: object, out: str, report: Report, formats: list[str], base: str,
-    *, track: bool = True,
 ) -> None:
     """把 capture 抓到的运行时端点并回主报告并重渲；任何失败不破坏已产出的静态报告。"""
     try:
@@ -1377,9 +1355,6 @@ def _merge_runtime_into_report(
         )
         for p in report_paths:
             typer.echo(f"  - {p}")
-        # 动态富化后 report 已就地并入运行时线索 → 重新入账：upsert 合并安全（新增运行时线索、
-        # 保留人工改过的进度）。报告路径用主 JSON（与静态入账同口径）。best-effort，绝不抛。
-        _auto_track(report, str(Path(out) / f"{base}.json"), track=track)
     except Exception:
         logger.exception("运行时端点并入/重渲异常（不影响已产出的静态报告）")
         typer.echo("运行时端点并入异常（详见日志），静态报告不受影响。")
@@ -1527,20 +1502,6 @@ def _write_sha256_sidecar(out_dir: Path, base: str, products: list[Path]) -> Non
         typer.echo(f"已写出完整性校验旁文件：{sidecar}")
     except Exception:
         logger.exception("[cli] 写出 .sha256 旁文件失败（已忽略，不影响报告产出）")
-
-
-def _auto_track(report: Report, report_path: str, *, track: bool) -> None:
-    """写报告后自动入账 + 喂图谱（best-effort 旁路）。绝不抛——失败只 logging，不影响报告。
-
-    薄包装：委托 :func:`apkscan.track.autoingest.auto_track_and_ingest`（never-throw）。
-    --no-track 时 ``track=False``，整体跳过。
-    """
-    try:
-        from apkscan.track.autoingest import auto_track_and_ingest
-
-        auto_track_and_ingest(report, report_path, track=track)
-    except Exception:  # noqa: BLE001 — 入账旁路绝不抛：连 import 异常也吞，不影响报告产出
-        logger.warning("[track] 自动入账/喂图谱调用异常（已忽略，不影响报告产出）", exc_info=True)
 
 
 def _print_summary(report: Report) -> None:
