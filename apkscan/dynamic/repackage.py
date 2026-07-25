@@ -49,6 +49,12 @@ from apkscan.dynamic import (
 
 logger = logging.getLogger(__name__)
 
+
+def _wait(duration: float) -> None:
+    """可打桩的等待（对齐 capture._wait 约定）：单测 monkeypatch 本函数即不真睡（codex A3）。"""
+    time.sleep(duration)
+
+
 # 外部工具超时（秒）：apksigner/zipalign 通常秒级，给足余量。
 _TOOL_TIMEOUT = 120.0
 # am start 后判进程存活的宽限（秒，仿 capture._FRIDA_GRACE）。
@@ -429,16 +435,37 @@ def _read_tail(log_path: str, limit: int = _STDOUT_TAIL) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_launcher_component(package: str, serial: str | None) -> str | None:
+    """解析该包**真实**的 launcher activity 组件（``pkg/act``）。
+
+    ★不再硬编码 ``.MainActivity``（codex A3）——真实 app 的入口极少字面叫 MainActivity，硬编码近乎必失、
+    存活判定实际全靠 monkey 兜底。用 ``cmd package resolve-activity --brief`` 拿 LAUNCHER 真实组件；
+    拿不到（老机型/无输出）返回 None，调用方回退 monkey。
+    """
+    out = _adb(["shell", "cmd", "package", "resolve-activity", "--brief", package], serial)
+    for line in out.splitlines():
+        line = line.strip()
+        # --brief 末行形如 "com.pkg/com.pkg.RealLauncher"；取含 '/' 且以包名起头的组件。
+        if "/" in line and line.split("/", 1)[0] == package:
+            return line
+    return None
+
+
 def _verdict_app_alive(package: str, serial: str | None) -> tuple[bool, str]:
-    """去壳真伪四联判定：am start → 宽限后进程存活(非秒退) → frida 可附（+best-effort logcat FATAL）。
+    """去壳真伪四联判定：启动 → 宽限后进程存活(非秒退) → frida 可附（+best-effort logcat FATAL）。
 
     全过 (True, 说明)；任一不过 (False, 失败关+疑因)。绝不抛（探测失败按不通过保守处理）。
     install Success 由调用方在此之前已确认。
     """
     try:
-        _adb(["shell", "am", "start", "-n", f"{package}/.MainActivity"], serial)  # best-effort
+        # ★先清 logcat（codex A1）：不清则上一轮/无关进程的残留 FATAL 会污染本次崩溃判定。
+        _adb(["logcat", "-c"], serial)  # best-effort
+        # 启动入口：优先真实 launcher 组件，拿不到再用 monkey 的 LAUNCHER category 兜底。
+        component = _resolve_launcher_component(package, serial)
+        if component:
+            _adb(["shell", "am", "start", "-n", component], serial)  # best-effort
         _adb(["shell", "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1"], serial)
-        time.sleep(_SPAWN_GRACE)
+        _wait(_SPAWN_GRACE)
         if not _process_alive(package, serial):
             return False, "进程未存活（秒退/未起来）"
         if _logcat_has_fatal(package, serial):
@@ -482,14 +509,27 @@ def _process_alive(package: str, serial: str | None) -> bool:
 
 
 def _logcat_has_fatal(package: str, serial: str | None) -> bool:
-    """best-effort 读 logcat 看是否有该包的 FATAL EXCEPTION / 致命崩溃迹象。"""
+    """best-effort 读 logcat 看是否有**该包**的 FATAL EXCEPTION / 致命崩溃迹象。
+
+    ★只在崩溃块窗口内认包名（codex A1）：Android 崩溃格式里包名在 FATAL 行紧邻的 ``Process: <pkg>, PID:``
+    行，而非 FATAL 行本身。原实现命中 FATAL 后查 ``package in out``（整段 200 行 buffer），任何无关进程的
+    FATAL + 包名出现在 buffer 任意位置就误判本包崩溃 → 白丢一次真去壳。此处改为：找到 FATAL 标记行后，
+    仅在其后数行（崩溃 stanza）内确认包名。配合调用方启动前 ``logcat -c`` 清缓存，排除上一轮残留 FATAL。
+    """
     out = _adb(["logcat", "-d", "-t", "200"], serial)
     if not out:
         return False
-    for line in out.splitlines():
-        if "FATAL EXCEPTION" in line or "E AndroidRuntime" in line:
-            if package in out:  # 粗匹配：该包出现在近期 logcat 且有 FATAL
+    lines = out.splitlines()
+    for i, line in enumerate(lines):
+        # 只锚定 FATAL EXCEPTION 崩溃头（"E AndroidRuntime" 标每一行、不能当锚点，否则从任一崩溃行
+        # 再开窗会吞进相邻的无关日志）。归属包认在 FATAL 头后紧邻的 "Process: <pkg>, PID:" 行。
+        if "FATAL EXCEPTION" not in line:
+            continue
+        for probe in lines[i:i + 3]:
+            if "Process:" in probe and package in probe:
                 return True
+        if package in line:  # 兜底：少数格式包名直接在 FATAL 头行
+            return True
     return False
 
 
