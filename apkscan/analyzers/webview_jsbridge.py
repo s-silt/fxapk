@@ -58,6 +58,9 @@ _MAX_DEX_STRINGS = 200_000
 # 资源扫描上限：避免极端样本读太多/太大文件。
 _MAX_RESOURCE_FILES = 500
 _MAX_RESOURCE_BYTES = 4 * 1024 * 1024
+# 全部资源累计读入预算（字节）：达此停止读剩余文件。单文件上限 4MB×500 文件≈2GB 无累计封顶会 OOM，
+# 补累计预算对齐 backend_credential/wallet_secret 的 _MAX_TOTAL_RESOURCE_BYTES 范式。
+_MAX_TOTAL_RESOURCE_BYTES = 64 * 1024 * 1024
 _RESOURCE_SUFFIXES = (".js", ".html", ".htm")
 _SNIPPET_MAX = 200
 
@@ -146,7 +149,12 @@ class WebViewJsBridgeAnalyzer(BaseAnalyzer):
         """读 assets/www 下 .js/.html 文本（带文件数/大小上限）。失败/缺失 → []，不抛。"""
         out: list[tuple[str, str]] = []
         paths = [p for p in _collect_file_paths(ctx, self.name) if _is_h5_resource(p)]
+        total_bytes = 0
         for path in paths[:_MAX_RESOURCE_FILES]:
+            # ★累计预算：达上限即停止读剩余资源（防 500×4MB≈2GB 累计撑爆内存）。
+            if total_bytes >= _MAX_TOTAL_RESOURCE_BYTES:
+                logger.info("[%s] 累计读入达上限 %d 字节，跳过剩余资源", self.name, _MAX_TOTAL_RESOURCE_BYTES)
+                break
             try:
                 raw = ctx.read_file(path)
             except Exception:  # noqa: BLE001 — 单文件读取失败不影响其余
@@ -162,6 +170,7 @@ class WebViewJsBridgeAnalyzer(BaseAnalyzer):
                     path,
                 )
                 raw = bytes(raw[:_MAX_RESOURCE_BYTES])
+            total_bytes += len(raw)  # 累计已读（截断后）字节，供上方预算判断
             try:
                 out.append((path, bytes(raw).decode("utf-8", errors="ignore")))
             except Exception:  # noqa: BLE001 — errors=ignore 几乎不抛，仅防御

@@ -45,6 +45,10 @@ _MIN_SIZE = 64 * 1024
 _WINDOW = 256 * 1024
 # 单样本最多评估的 .so 数（防极端多库样本拖慢）。
 _MAX_LIBS = 60
+# 单个 .so 读入上限（字节）：超此跳过（防超大/zip-bomb .so 撑爆内存）。.so 可合法较大，故高于资源类 4MB。
+_MAX_LIB_BYTES = 64 * 1024 * 1024
+# 全部 .so 累计读入预算（字节）：达此停止扫描剩余库。对齐 backend_credential/wallet_secret 的累计预算范式。
+_MAX_TOTAL_LIB_BYTES = 256 * 1024 * 1024
 # 可提取字符串：≥4 连续可打印 ASCII。
 _STRING_RE = re.compile(rb"[\x20-\x7e]{4,}")
 
@@ -93,9 +97,26 @@ class NativeObfuscationAnalyzer(BaseAnalyzer):
             return result
 
         suspects: list[dict[str, Any]] = []
+        total_bytes = 0
         for path in so_paths[:_MAX_LIBS]:
+            # ★累计预算：达上限即停止扫描剩余 .so（防多库累计撑爆内存，对齐 backend_credential 范式）。
+            if total_bytes >= _MAX_TOTAL_LIB_BYTES:
+                logger.info("[%s] 累计读入达上限 %d 字节，跳过剩余 .so", self.name, _MAX_TOTAL_LIB_BYTES)
+                break
             try:
-                info = self._assess_lib(ctx, path)
+                data = ctx.read_file(path)
+            except Exception:
+                logger.exception("[%s] 读入失败，跳过：%s", self.name, path)
+                continue
+            if not data:
+                continue
+            # ★单文件上限：超大/zip-bomb .so 跳过、不参与统计（读后判长；与仓内有界读范式一致）。
+            if len(data) > _MAX_LIB_BYTES:
+                logger.info("[%s] .so 超单文件上限 %d 字节，跳过：%s", self.name, _MAX_LIB_BYTES, path)
+                continue
+            total_bytes += len(data)
+            try:
+                info = self._assess_lib(data, path)
             except Exception:
                 logger.exception("[%s] 评估失败，跳过：%s", self.name, path)
                 continue
@@ -131,8 +152,8 @@ class NativeObfuscationAnalyzer(BaseAnalyzer):
     # 单库统计画像
     # ------------------------------------------------------------------
 
-    def _assess_lib(self, ctx: "AnalysisContext", path: str) -> dict[str, Any] | None:
-        data = ctx.read_file(path)
+    def _assess_lib(self, data: bytes, path: str) -> dict[str, Any] | None:
+        """对已读入且经上限过滤的单库字节做统计画像（读入/上限由 analyze 循环负责）。"""
         if not data or len(data) < _MIN_SIZE:
             return None
         signals: list[str] = []
