@@ -133,7 +133,11 @@ fxapk digest out/<样本名>.json
 - `fxapk case close <report.json>`：对已有报告执行主目标选择、有限重富化、五层归因与严格验收；默认原地写回 JSON，并刷新已存在的同名 HTML。
 - `fxapk unpack` / `fxapk capture`：真机脱壳 / 抓包（需 adb 设备 + frida；`analyze --dynamic` 会自动接力）。
 - `fxapk repackage <apk>`：脱壳后把**去壳版**重打包（zip 替 DEX + apksigner 重签）装回设备，使 capture 抓去壳版（绕壳反 frida）。需 apksigner/zipalign + 设备；auto 默认含此步（`--no-repackage` 关；重签必卸原包会清 app 数据）。能力边界：治不了 VMP/重 native/反模拟器壳，多数样本预期降级、capture 仍跑原版。
-- `fxapk corpus`（**资产沉淀主线**）：`corpus add <report.json...>` 把历次报告入库——主键 `(sample_sha256, tool_version, ruleset_digest)`，同版本同规则幂等跳过、换版本并存做**跨版本回归基线**；`corpus seen <值> [--by sample_sha256|package_name|sign_sha256]`「这值见过没」反查（`--by sign_sha256` 按共享签名证书一击串案）；另有 `corpus ls`（过滤列举）/ `reindex`（自愈索引）/ `events`（吐 JSONL 喂 agent）。★库根须 `--corpus` 或环境变量 `FXAPK_CORPUS` 显式指向 **git 工作树外**（含真实案件数据），否则拒跑（exit 2）。
+- `fxapk corpus`（**资产沉淀主线**）：`corpus add <report.json...>` 把历次报告入库——主键 `(sample_sha256, tool_version, ruleset_digest)`，同版本同规则幂等跳过、换版本并存做**跨版本回归基线**；`corpus seen <值> [--by sample_sha256|package_name|sign_sha256|so_sha256]`「这值见过没」反查（`--by sign_sha256` 按共享签名证书一击串案；`--by so_sha256` 按 native 库哈希一击拉全家族——同族核心 `.so` 常逐字节相同，比签名更硬）；`corpus shared-native` 列出被 ≥2 样本共享的 `.so`（家族簇）；另有 `corpus ls`（过滤列举）/ `reindex`（自愈索引）/ `events`（吐 JSONL 喂 agent）。★库根须 `--corpus` 或环境变量 `FXAPK_CORPUS` 显式指向 **git 工作树外**（含真实案件数据），否则拒跑（exit 2）。
+- `fxapk config-channel --prefix <常量前缀> --domain <基域> [--path /x.txt] [--date YYYY-MM-DD] [--back N] [--fwd N]`：枚举
+  `MD5(前缀 + yyyyMMdd) + "." + 基域` 这类**运行时算法生成**的配置下发子域候选。此类 URL 静态不存在（跑起来才拼），
+  常规端点抽取认不出——但前缀常量、基域、MD5+日期格式都是可从样本里提取的静态事实。产出候选喂被动查询
+  （passive DNS / 证书透明度）看哪个真解析过。**纯离线生成、绝不联网**；前缀与基域由你提供（案件/逆向所得，不入仓）。
 
 ---
 
@@ -197,3 +201,18 @@ fxapk digest out/<样本名>.json
 - **CI 环境对齐**：CI 装的是 `pip install -e "."`。新增**可选依赖**必须进 `pyproject` 对应 extra（如 pcap 深度解析→`pcap`/`dynamic`），且 ci.yml 两个 job 都要装上它，否则 CI 缺包报 `ModuleNotFoundError`/pyright 解析失败。依赖某可选 extra 的测试在模块顶部 `pytest.importorskip("<pkg>")`，未装该 extra 的环境优雅跳过。
 - **合并前等 CI 绿**：开 PR 后 `gh run watch <id> --exit-status` 等 CI 跑完再 `gh pr merge`——别本地绿就盲合（本地与 CI 环境/依赖/平台不一致，本地缺 ruff、CI 缺可选依赖都坑过）。
 - commit：conventional commits OK，中文 OK；**不要** `--no-verify` / 不要 force push 到 master；未经指示不主动 commit。
+
+## 6. 已评估否决的方案（**别再提，除非前提变了**）
+
+以下都是**实现过、复审后撤掉**的，不是"还没做"。再提之前先看这里的否决理由是否已被推翻。
+
+- **❌ 二进制紧凑端点数组提取**（`decode_config_blob` 里从剥不动的 leaf 抠 `[IPv4(4)+port(2)]` 连续记录）—— 曾为 #237，已 revert（#238）。
+  - **否决理由 1（致命·假阳）**：逐记录判据"公网非噪音 IPv4 + 非零端口"会放行约 **85%** 的随机 6 字节。实测（20 万随机/密文样本）即便要求整段 `len % 6 == 0` 且 ≥5 条记录，**30 字节随机/密文 leaf 仍有约 47% 被判成"5 个端点 IP"**。抬阈值救不了——只要长度是 6 的倍数就照样凭空造 IP。**取证工具伪造 IP 证据 = 一票否决**。
+  - **否决理由 2（够不到）**：解码 BFS 只剥 gzip/base64/AES，**没有**家族专属的 XOR/首次破解步骤（密钥是案件数据、不入仓）。真样本上该提取器拿到的是**密文**而非解密后的数组，所以它产出的 IP 必然是假的。曾经"6 条真明文全过"的验证是把**已解密明文**直接喂进去测的，集成管线永远产不出那份明文。
+  - **前提何时才算变了**：解码链里真出现了能**独立验证**的端点数组格式（如带 magic/长度头/校验和），或有可信的非启发式判据。仅仅"提高最小记录数"不算。
+- **❌ Brotli 剥层进解码 BFS** —— 曾在 `feat/decode-brotli-layer` 分支，未合并即弃。
+  - **否决理由**：Python `brotli` 包的 `Decompressor` 只有 `process/is_finished/can_accept_more_data`，**没有 zlib 那样的 `max_length` 输出上限**。分块喂输入也**不能**限住峰值内存——单次 `process()` 就能吐出远超上限的输出（检查发生在分配之后）。另外增量流的完整性要另查 `is_finished()`，截断流会被当成功剥层。为一个边际收益的层留内存安全洞不值。
+  - **另注**：真族样本里 brotli 出现在 RSA 解密**之后**，而 RSA 私钥/首次破解不入仓，所以这一层在仓内管线上本就够不到。
+  - **前提何时才算变了**：换用能限定输出上限的 brotli 绑定（或自带有界解压的实现），且能同时查流完整性。
+
+> 通则：**宁可漏，不可造。** 静态/被动路径上，"看起来像"不等于"是"——启发式若能凭随机字节产出**看似权威的调证目标**（IP / 域名 / 端点），一律不做。
