@@ -1,8 +1,12 @@
-# AGENTS.md — fxapk 操作指南（给 AI agent / Codex）
+# AGENTS.md — fxapk 操作指南（给 AI agent）
 
-本仓库是 **fxapk（apkscan）**：涉诈 APK **调证取证分析 CLI**。你（agent）通过命令行驱动它对样本做
+本仓库是 **fxapk（apkscan）**：APK **调证取证分析 CLI**。你（agent）通过命令行驱动它对样本做
 全套静态/动态分析 + 境外源站 IP 被动归属，产出**可办案化的调证线索（leads）**。本文件让你在新机
 clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件只讲**怎么跑**。
+
+> **本文件假定：一个 agent 独立跑完全程。** 没有第二个 agent 接力、没有外部私有目录兜底——
+> 从体检、分析、动态取证到串案与结论，**全部由你一个人走完并自检**。凡本文提到的资料，
+> 要么在本仓库内、要么由用户提供；**不要依赖任何仓库外的交接文件**（不存在就按本文所述原则自己做）。
 
 > 设计取向：本项目由人直接跑源码 + agent 驱动，**不打包 exe/GUI**。密钥走项目根 `.env`（已 gitignore）。
 > 输出刻意做成 **agent 友好**：核心调证信息进 `evidence_to_obtain`/`notes`/`report.meta`，并由 `digest` 命令压成低 token 摘要。
@@ -23,7 +27,8 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 | 批量整个文件夹 | `fxapk batch <dir>` |
 | 准备真机环境 / 排查动态为什么跑不起来 | `fxapk doctor --fix` |
 | 真机脱壳 / 去壳重打包 / 抓包（单步） | `fxapk unpack <apk>` / `fxapk repackage <apk>` / `fxapk capture <pkg>` |
-| 串案 / 资产沉淀 /「这值见过没」反查 | `fxapk corpus add <report.json...>`（历次报告入库、跨版本回归）；`fxapk corpus seen <值> [--by sign_sha256]`（跨样本反查、按共享签名证书一击串案）；`fxapk corpus ls` 过滤列举 |
+| 串案 / 资产沉淀 /「这值见过没」反查 | `fxapk corpus add <report.json...>`（历次报告入库、跨版本回归）；`fxapk corpus seen <值> [--by sign_sha256\|so_sha256]`（按共享签名证书或 native 库哈希一击串案）；`fxapk corpus shared-native`（跨样本共享 .so = 家族簇）；`fxapk corpus ls` 过滤列举 |
+| 反推配置端口的运行时归一化规则 | `fxapk port-normalize --declared <声明端口.json> --report <report.json>`（详见 §0.6.2） |
 
 - 决策只读 `fxapk digest <report.json>`（低 token、已按"建议调证 > 待核"排序）；要细节再读 `out/<名>.json` 全量。
 - 命令失败/缺前置 → 看它打印的 `playbook`（每条是可直接复制的修复命令），照着修，**别自己另起炉灶手搓**。
@@ -60,7 +65,10 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 
 **动态：PCAP-first 保底，明文优先被动解密，探针是可选旁路（非必做）**：动态已转向**零注入 PCAP 底座**——`fxapk capture/auto` 起 floor PCAP，拿到接入节点 / SNI / QUIC Initial / socket 归因等被动证据即算**有观测产出**（不再以"抓到明文"为唯一成功标准）。但 `capture status=done` 只表示采集流程完成，不等于案件动态证据闭环：`case close` 只有观测到公网业务候选且能通过 socket/UID 归到目标 App 才把动态层判为 `complete`；有业务候选但归因不唯一为 `partial`；仅通道就绪或零业务流量为 `failed`。已知反诈拦截页不计业务候选。要明文时**优先走被动链路**：TLS Key Log + tshark 解密、socket 归因把流量落到进程 / UID / PID。Frida / native hook 降为**可选旁路**，仅当被动手段确实不够、且在 `--mode authorized-active` 授权下按需用。
 
-**深度归因（拿到后端域名/IP/标识符后做服务器归因 + 调证报告）**：按深度归因打法执行——证据分级 + 对抗式核验 + 绝不编造（Shodan 可实查，其余 key-gated 给语句）+ 辖区驱动 P0–P5 调证优先级 + 固定输出《技术侦查与调证建议报告》A–L。（手册在私有 handoff 目录 `fxapk-handoff/claude/doc/打法/deep-attribution-playbook.md`，不入库。）
+**深度归因（拿到后端域名/IP/标识符后做服务器归因 + 调证报告）**：证据分级 + 对抗式核验 + **绝不编造**
+（Shodan 等可实查的源据实查；无 key 的源只给"应向谁查什么"的语句，不臆造结果）+ 辖区驱动的调证优先级
++ 固定结构输出研判报告。**这些原则本身就是全部要求**——不需要额外手册；若用户另给了打法文档就照它，
+没有就按此执行。
 
 **禁止**：dump 全 report；手搓逆向；逐步复述工具过程；铺开"无需调证"的 SDK/CDN 噪音；把钱包/收款当重点。
 
@@ -79,6 +87,35 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 7. **状态验收**：只有 `report.meta.closure.status=complete` 才能称完成。`partial` / `failed` 必须原样汇报 `gaps` 和 `next_actions`，不能把“命令跑完”表述成“案件闭环”。自动流程用 `fxapk auto <apk> --strict-case`，退出码 `0/5/6` 分别对应 `complete/partial/failed`。
 
 收工必说清 **做了什么 / 没做什么（为什么）/ 风险 / 下一步**——别把半程当终点、别自认为完成。
+
+### 0.6.1 ★ 哪些自动跑、哪些必须你手动补（最常见的"以为跑全了"）
+
+`analyze` / `auto` 会自动跑**全部 30 个分析器**（`native_fingerprint`、`endpoints`、`crypto_recipe`、
+`contacts`、`sms_forwarding` … 全在内，无需开关）。但**下面这些永远不会自动发生**——它们要么需要你
+提供工具拿不到的输入，要么是跨样本操作。跑完 `analyze` 就收工 = 漏掉半个系统：
+
+| 必须手动补 | 为什么不能自动 | 什么时候做 |
+|---|---|---|
+| `fxapk corpus add out/<名>.json` | 库根含案件数据，须显式 `--corpus`／`FXAPK_CORPUS` 指向**工作树外** | **每次分析完都做**，否则串案/家族反查没有数据 |
+| `fxapk corpus seen <值> --by so_sha256` / `corpus shared-native` | 跨样本操作，要先有库 | 想确认"这个样本属于哪个家族"时 |
+| `fxapk config-channel --prefix … --domain …` | 前缀常量与基域要从样本里**人工判断**哪个是 | 报告显示配置下发但静态无 URL 时 |
+| `fxapk port-normalize --declared … --report …` | 声明端口来自**你的解密结果**，工具自己拿不到 | 解出配置里的 raw 端口后 |
+
+### 0.6.2 ★ 顺着报告里的信号继续走（别停在"命令跑完"）
+
+报告里出现下列信号时，**它就是在告诉你下一步该干什么**，不是结论：
+
+- **`NATIVE-RUNTIME-ADDRESSING-PLACEHOLDER`（回环占位架构）**：样本把非标准回环地址（如 `127.0.x.x`）
+  硬编码成后端地址 + 存在 native 库 → **别对这个 127.x 调证**（对内网空调证）。真后端由 `.so` 运行时
+  经下发通道（DNS TXT / 远程配置 / OSS 对象）决定。转去：① 动态抓包拿实际连接的公网 `IP:端口`；
+  ② 或逆向 `.so` 的下发通道解出配置。
+- **`meta.native_lib_hashes` 有值**：核心 `.so` 的 sha256 是**比签名证书更硬的家族锚点**（同族常逐字节
+  相同）。入库后用 `corpus seen <sha> --by so_sha256` 一击拉出全家族样本。
+- **解出了配置里的 raw 端口**：先别当成真实端口。部分家族运行时按固定规则归一化（如
+  `真实 = 声明 + IP末段 + 常量`）。用 `port-normalize` 把**你解密的声明端口**与**报告里的实测端口**
+  （`endpoints[].enrichment.runtime.remote_endpoints`）配对反推该规则——规则一致是很强的家族证据，
+  规则不一致说明不是同一支。配对不足或过于齐整时它会判 `degenerate` 拒给结论，**别硬套**。
+- **闭环状态 `partial` / `failed`**：原样汇报 `gaps` 与 `next_actions`，绝不表述成"已闭环"。
 
 ---
 
