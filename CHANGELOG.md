@@ -8,6 +8,21 @@ affect automated / CI / agent callers are called out explicitly**.
 Theme: **1.1.0 之后的功能收敛 + 静默损坏类修复**——移除从未真正落地的 iOS 与 webcheck 两条支线，
 并修一批「不报错但结果悄悄错」的缺陷（.env 加载 / 远程配置解码 / 子进程编码 / CFB8 解密 / IOC 导出）。
 
+### Added
+
+- **native 库家族指纹**（#234、#239）：新增 `native_fingerprint` 分析器，对 App 自有 `.so` 逐个算 sha256
+  写入 `report.meta["native_lib_hashes"]`（同族样本核心 `.so` 常逐字节相同，是比签名证书更硬的家族锚点）。
+  corpus 新增 `seen <sha> --by so_sha256` 家族反查与 `corpus shared-native` 跨样本共享库聚簇。
+  读取前先查 zip 声明的解压后大小、超 64MB 直接跳过（不膨胀进内存）；同名多 ABI 变体各自哈希，不按 basename 塌缩。
+- **算法下发通道枚举**（#235、#241）：新增 `fxapk config-channel` 与 `config/algo_channel.py`，按
+  `MD5(前缀 + yyyyMMdd) + "." + 基域` 枚举**运行时算法生成**的配置子域候选（静态不存在、跑起来才拼，
+  常规 URL 抽取认不出）。前缀/基域由调用方提供，模块内**不含任何具体前缀或域名**。日期临近年界时同时产
+  相邻年候选，覆盖 Java `SimpleDateFormat("YYYYMMdd")` 大写 `YYYY` 的 locale 相关周年语义。
+- **native 运行时取址占位 Finding**（#233、#240）：硬编码**非标准**回环地址（非 127.0.0.1）+ 存在 native 库
+  → 产 `NATIVE-RUNTIME-ADDRESSING-PLACEHOLDER`（低置信启发式）。此前这类 127.x 被"裸 IP 去噪"静默丢弃，
+  丢掉了「真后端由 .so 运行时决定、127.x 只是本地代理占位」这一家族级架构信号。证据按实际来源
+  （dex / manifest）标注。
+
 ### Removed
 
 - **半弃用组件 graph / track / intel**：删除 `apkscan/graph/`（Kuzu 案件图谱串案）、`apkscan/track/`
