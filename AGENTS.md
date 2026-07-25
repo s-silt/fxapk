@@ -11,7 +11,7 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 
 ## 0. 行为铁律：直接用 fxapk 跑，别空想 / 别手搓
 
-你是来**驱动 fxapk 出结果**的，不是来手动逆向、读源码猜结论、或大段推演的。收到「分析这个 APK / 查这些线索 / 准备设备 / 为什么动态跑不起来」一类请求时——**先跑对应 fxapk 命令，再据产物决策**。命令产物（`report.json` / `digest` / track 台账）才是事实来源，不是你的推测。
+你是来**驱动 fxapk 出结果**的，不是来手动逆向、读源码猜结论、或大段推演的。收到「分析这个 APK / 查这些线索 / 准备设备 / 为什么动态跑不起来」一类请求时——**先跑对应 fxapk 命令，再据产物决策**。命令产物（`report.json` / `digest` / `corpus` 台账）才是事实来源，不是你的推测。
 
 按意图直接选一条执行（别在跑命令前就长篇分析）：
 
@@ -33,7 +33,7 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 
 ## 0.5 分析 APK：标准动作 + 调证重点 + 汇报模板（核心办案逻辑）
 
-**主工具（操作机已装，优先用，别空跑外部付费源）**：`fxapk`（本仓库，APK 取证→端点/IP/标识符+富化+图谱+台账）。富化全被动（rdap/whois/dns/asn/icp/shodan 等），对目标零主动流量。
+**主工具（操作机已装，优先用，别空跑外部付费源）**：`fxapk`（本仓库，APK 取证→端点/IP/标识符+富化+corpus 反查台账）。富化全被动（rdap/whois/dns/asn/icp/shodan 等），对目标零主动流量。
 
 **标准动作（先跑命令、据产物决策，别空想）**
 1. 有设备优先 `fxapk auto <apk> --online --out out --strict-case`；纯静态则先 `fxapk analyze <apk> --online --out out`。
@@ -134,7 +134,6 @@ fxapk digest out/<样本名>.json
 - `fxapk unpack` / `fxapk capture`：真机脱壳 / 抓包（需 adb 设备 + frida；`analyze --dynamic` 会自动接力）。
 - `fxapk repackage <apk>`：脱壳后把**去壳版**重打包（zip 替 DEX + apksigner 重签）装回设备，使 capture 抓去壳版（绕壳反 frida）。需 apksigner/zipalign + 设备；auto 默认含此步（`--no-repackage` 关；重签必卸原包会清 app 数据）。能力边界：治不了 VMP/重 native/反模拟器壳，多数样本预期降级、capture 仍跑原版。
 - `fxapk corpus`（**资产沉淀主线**）：`corpus add <report.json...>` 把历次报告入库——主键 `(sample_sha256, tool_version, ruleset_digest)`，同版本同规则幂等跳过、换版本并存做**跨版本回归基线**；`corpus seen <值> [--by sample_sha256|package_name|sign_sha256]`「这值见过没」反查（`--by sign_sha256` 按共享签名证书一击串案）；另有 `corpus ls`（过滤列举）/ `reindex`（自愈索引）/ `events`（吐 JSONL 喂 agent）。★库根须 `--corpus` 或环境变量 `FXAPK_CORPUS` 显式指向 **git 工作树外**（含真实案件数据），否则拒跑（exit 2）。
-- `fxapk graph` / `fxapk track`：旧的图谱串案 / 网页台账组件，**仍可跑但不再投入开发**；串案 / 资产沉淀请优先用 `corpus` 反查 + 上下文关联。
 
 ---
 
@@ -195,6 +194,6 @@ fxapk digest out/<样本名>.json
   - `FXAPK_WORKER_BASE_MB` / `FXAPK_MEM_SAFETY`（0<v≤1）现场覆盖内存封顶的标定（单 worker 估算 / 安全系数）。
   - ★ 改并行或快照路径须守不变量 **「串行 == 并行 逐字节一致」**（由 slow 等价测试背书）；分析器输出须确定（跨进程 PYTHONHASHSEED 不同，set 派生的顺序要显式排序）。
 - **合并前必过三关（本地）**：`python -m ruff check apkscan tests` + `python -m pyright apkscan` + `python -m pytest -q`——CI（`.github/workflows/ci.yml`）这三样都跑，**只跑 pytest/pyright 不够，ruff 必跑**（曾因一个未用 import F401 把 CI 刷红）。
-- **CI 环境对齐**：CI 装的是 `pip install -e ".[graph,track]"`（含 kuzu + flask）。新增**可选依赖**必须进对应 extra（如 web→`track`、图谱→`graph`），且 ci.yml 两个 job 都要装上它，否则 CI 缺包报 `ModuleNotFoundError`/pyright 解析失败。依赖某可选 extra 的测试在模块顶部 `pytest.importorskip("<pkg>")`，未装该 extra 的环境优雅跳过。
+- **CI 环境对齐**：CI 装的是 `pip install -e "."`。新增**可选依赖**必须进 `pyproject` 对应 extra（如 pcap 深度解析→`pcap`/`dynamic`），且 ci.yml 两个 job 都要装上它，否则 CI 缺包报 `ModuleNotFoundError`/pyright 解析失败。依赖某可选 extra 的测试在模块顶部 `pytest.importorskip("<pkg>")`，未装该 extra 的环境优雅跳过。
 - **合并前等 CI 绿**：开 PR 后 `gh run watch <id> --exit-status` 等 CI 跑完再 `gh pr merge`——别本地绿就盲合（本地与 CI 环境/依赖/平台不一致，本地缺 ruff、CI 缺可选依赖都坑过）。
 - commit：conventional commits OK，中文 OK；**不要** `--no-verify` / 不要 force push 到 master；未经指示不主动 commit。

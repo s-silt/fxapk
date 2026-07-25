@@ -226,7 +226,7 @@ def test_analyzer_no_anomaly_no_finding() -> None:
 def test_analyzer_anomaly_resets_meta_package_to_corrected() -> None:
     # 投毒场景：manifest_xml 内嵌"诱饵"包名，但 ctx.package_name 已被 aapt 交叉校验纠正为真包名。
     # _extract() 会先用诱饵覆盖 meta["package_name"]；异常分支须把它回正到已校验的权威值，
-    # 否则 digest/graph ingest（优先取 meta["package_name"]）仍按诱饵包名归档。
+    # 否则 digest/corpus 入库（优先取 meta["package_name"]）仍按诱饵包名归档。
     ctx = FakeContext(
         package_name="com.real.app",  # 已交叉校验的权威包名
         manifest_xml="<manifest package='com.decoy.evil'><application/></manifest>",
