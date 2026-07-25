@@ -84,6 +84,18 @@ def test_ruleset_digest_stable_and_formatted() -> None:
     assert len(d1) == 16 and all(c in "0123456789abcdef" for c in d1)
 
 
+def test_dependency_versions_recorded() -> None:
+    """★codex #2：关键依赖版本进 report.meta 复现锚点（androguard 大版本漂移会改解析结果，须可追）。"""
+    from apkscan.core.pipeline import _dependency_versions
+
+    deps = _dependency_versions()
+    assert isinstance(deps, dict)
+    # 已装的核心依赖须在其中且为版本串
+    for name in ("androguard", "requests", "pyyaml"):
+        assert name in deps, f"缺依赖版本锚点：{name}"
+        assert isinstance(deps[name], str) and deps[name]
+
+
 def test_ruleset_digest_is_eol_invariant() -> None:
     # ★可复现锚点的核心：Windows(CRLF)与 Linux(LF) checkout 的**同一套规则**必须算出**同一** digest。
     # 复刻函数内的换行归一化，模拟两种 checkout，证明 digest 只随内容变、与 EOL 风格无关，且等于实际输出。

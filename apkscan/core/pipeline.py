@@ -91,6 +91,31 @@ def _tool_version() -> str:
         return "unknown"
 
 
+#: 写进 report.meta 复现锚点的关键依赖（解析/富化结果与其版本强相关）。名字按分发名（importlib 会归一）。
+_TRACKED_DEPS = ("androguard", "requests", "pyyaml", "typer", "jinja2", "python-whois", "psutil")
+
+
+def _dependency_versions() -> dict[str, str]:
+    """关键依赖的已安装版本 → report.meta 复现锚点。
+
+    tool_version + ruleset_digest 之外还须记依赖版本：androguard 大版本变更（axml/dex 解析）会改解析
+    结果甚至崩，两台机装同版 fxapk 但 androguard 小版本不同可能产出不同报告，而原锚点看不出差异。
+    取不到某依赖（未安装/元数据缺失）→ 跳过，绝不抛。
+    """
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _pkg_version
+
+    out: dict[str, str] = {}
+    for dep in _TRACKED_DEPS:
+        try:
+            out[dep] = _pkg_version(dep)
+        except PackageNotFoundError:
+            continue
+        except Exception:  # noqa: BLE001 — 版本读取绝不影响主流程
+            logger.debug("读取依赖版本失败：%s", dep, exc_info=True)
+    return out
+
+
 def _analysis_health(analyzer_status: list[dict]) -> tuple[str, float, list[str], list[str]]:
     """据 analyzer_status 聚合分析完整度，返回 (status, completeness, critical_failures, skipped)。
 
@@ -471,6 +496,7 @@ def _stage_credibility(state: _PipelineState) -> None:
     ) = _analysis_health(state.analyzer_status)
     state.meta["tool_version"] = _tool_version()
     state.meta["ruleset_digest"] = ruleset_digest()
+    state.meta["dependency_versions"] = _dependency_versions()  # 依赖版本复现锚点（androguard 等）
 
 
 def _stage_network_attribution(state: _PipelineState) -> None:
