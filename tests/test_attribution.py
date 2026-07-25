@@ -367,6 +367,38 @@ def test_domain_analyze_ip_resource_holder_marked_deferred() -> None:
         assert rh["deferred"] == "case_close", "analyze 域名 IP 的第1层须标待补，不能静默当作查无"
 
 
+def test_domain_resolved_ip_queried_but_empty_not_deferred() -> None:
+    """★codex P0 回归：resolved_ip_enrichment 里**有**该 IP（结案已查）但条目无有效信号、
+    归因生成失败**落回 fallback** 时，绝不能标 deferred——那是「已查、查无有效信号」，不是「未查询」。
+
+    ★场景须真正 fall through：该 IP 无 hosting 有效字段（否则 merged 被兜底注入 asn → 走 continue、
+    测不到 fallback 分支）。resolved 条目空 → attribution_from_enrichment 返回 None → 进 fallback。"""
+    # 条目为空 dict、无 hosting → merged 全空 → attribution_from_enrichment None → fallback；但 key 存在 → 不标
+    att = A.build_endpoint_attribution("domain", "pay.example.com", {
+        "dns": {"ips": ["1.1.1.1"]},
+        "resolved_ip_enrichment": {"1.1.1.1": {}},
+    })
+    rh = att["ips"][0]["resource_holder"]
+    assert rh["name"] is None
+    assert "deferred" not in rh, "结案已查（条目空）落回 fallback 被误标成未查询"
+    # 条目仅错误/状态字段 → 同样无有效信号落回 fallback，key 存在 → 不标
+    att2 = A.build_endpoint_attribution("domain", "pay.example.com", {
+        "dns": {"ips": ["2.2.2.2"]},
+        "resolved_ip_enrichment": {"2.2.2.2": {"ip_rdap": {"error": "timeout"}}},
+    })
+    rh2 = att2["ips"][0]["resource_holder"]
+    assert rh2["name"] is None
+    assert "deferred" not in rh2, "结案已查（仅 error 字段）落回 fallback 被误标成未查询"
+    # 对照混合：同域名下未查的 IP（不在 resolved）标 deferred、已查空的 IP（在 resolved）不标
+    att3 = A.build_endpoint_attribution("domain", "pay.example.com", {
+        "dns": {"ips": ["1.1.1.1", "3.3.3.3"]},
+        "resolved_ip_enrichment": {"1.1.1.1": {}},
+    })
+    by_ip = {layer["ip"]: layer["resource_holder"] for layer in att3["ips"]}
+    assert "deferred" not in by_ip["1.1.1.1"], "已查空的 IP 不该标未查询"
+    assert by_ip["3.3.3.3"].get("deferred") == "case_close", "未查的 IP 应标待补"
+
+
 def test_domain_resolved_ip_with_rdap_not_deferred() -> None:
     """★对照：结案已补 ip_rdap 有登记方 → resource_holder 有 name、绝不带 deferred 标记。"""
     att = A.build_endpoint_attribution("domain", "pay.example.com", {
