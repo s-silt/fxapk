@@ -129,6 +129,20 @@ class SnapshotContext:
             return self._files[path]
         return self._lazy_read(path)
 
+    def declared_size(self, path: str) -> int | None:
+        """预读命中返回其字节数；否则查 worker 惰性声明大小表（不解压）。查不到 → None。
+
+        与串行 ApkContext.declared_size 同口径，供分析器在 read_file 前拦截超大 .so。
+        """
+        pre = self._files.get(path)
+        if pre is not None:
+            return len(pre)
+        try:
+            return self._ensure_declared_sizes().get(path)
+        except Exception:  # noqa: BLE001 — 声明大小表构建失败退回「无法判断」
+            logger.debug("snapshot 查声明大小失败：%s", path, exc_info=True)
+            return None
+
     def _lazy_read(self, path: str) -> bytes | None:
         # zip 炸弹前置拦截（与串行 ApkContext.read_file 同口径）：声明解压后大小超上限即跳过、不解压。
         # 并行 worker 惰性读 .so（native_obfuscation / re_toolkit 的 .so 扫描）走本路，必须复刻此闸——

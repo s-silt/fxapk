@@ -64,6 +64,14 @@ class AnalysisContext(Protocol):
         """按路径读取 APK 内文件，缺失返回 None。"""
         ...
 
+    def declared_size(self, path: str) -> int | None:
+        """zip 中央目录声明的解压后大小（纯元数据、不解压）；查不到/不适用返回 None。
+
+        供分析器在 ``read_file`` 前拦截超大/zip 炸弹条目——避免把「小压缩、巨解压」的文件
+        先膨胀进内存再判长。返回 None 表示「无法判断」，调用方应保守放行、退回读后判长。
+        """
+        ...
+
     def native_libs(self) -> list[str]:
         """.so 原生库路径列表。"""
         ...
