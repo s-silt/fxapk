@@ -697,7 +697,8 @@ def build_endpoint_attribution(kind: str, value: str, enrichment: dict[str, Any]
     - 域名端点：``enrichment['dns']['hosting']``（每解析 IP 一条 {ip,asn,org,isp}）→ 每 IP 一条五层；
       ``dns['cname']`` 是**域名级共享** edge 信号，喂给每个 IP 的 edge 层。hosting 缺时退化用 ``dns['ips']``
       （ASN 未知，但 CNAME 仍可识别 edge）。
-    ★域名端点的 per-IP resource_holder 仍 unknown——IP-RDAP 只对 IP 端点跑，域名解析 IP 未单独富化（后续增强）。
+    ★域名端点的 per-IP resource_holder 分两级：结案后 ``resolved_ip_enrichment[ip]`` 的 ip_rdap 补全（吸收
+    进顶层归因）；纯 analyze 未逐 IP 查 RDAP 的解析 IP 标 ``deferred='case_close'``（区分「未查询」与「查无」）。
     """
     if not isinstance(enrichment, dict):
         return None
@@ -766,7 +767,17 @@ def build_endpoint_attribution(kind: str, value: str, enrichment: dict[str, Any]
             }
             if cname:
                 signals["cname_chain"] = cname
-            ips.append(build_ip_attribution(ip, signals))
+            att = build_ip_attribution(ip, signals)
+            # ★resource_holder（第1层=IP-RDAP 资源登记方）待补标记：仅当本解析 IP **不在**
+            #   resolved_ip_enrichment（IP-RDAP 尚未对它查询——IpRdapEnricher applies_to=['ip']，
+            #   域名解析 IP 的 RDAP 结案时才逐个补）时标 deferred='case_close'，让下游区分「未查询」
+            #   与「查无登记方」（provenance 纪律）。判据是 **key 是否存在**、不是归因是否生成成功——
+            #   resolved 条目存在但信号无效（{}/仅 error 字段）也会走到本 fallback，那是「结案已查、
+            #   查无有效信号」，绝不能标成未查询（codex P0）。
+            rh = att.get("resource_holder")
+            if isinstance(rh, dict) and not rh.get("name") and ip not in resolved_all:
+                rh["deferred"] = "case_close"
+            ips.append(att)
 
     if not ips:
         return None
