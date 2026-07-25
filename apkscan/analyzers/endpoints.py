@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from apkscan.core import infra
-from apkscan.core.models import AnalyzerResult, Evidence
+from apkscan.core.models import AnalyzerResult, Confidence, Evidence, Finding, Severity
 from apkscan.core.registry import BaseAnalyzer, load_rules
 from apkscan.analyzers._common import EndpointCollector
 from apkscan.core.textutil import as_str_list as _as_str_list
@@ -54,6 +54,9 @@ _RULES_NAME = "endpoints"
 # DEX 字符串扫描上限：加固/大型样本字符串池可能很大，避免极端情况扫描过久。
 # （注意：dex 字符串走 ctx.dex_strings() 独立通道，不经下面的文件级分块，故此限额与本次无关。）
 _MAX_DEX_STRINGS = 200_000
+
+#: 回环 IPv4 字面（127.0.0.0/8）——供回环占位启发式扫原文。宽松匹配 4 段，具体回环判定交 ipaddress。
+_LOOPBACK_IPV4_RE = re.compile(r"\b127\.\d{1,3}\.\d{1,3}\.\d{1,3}\b")
 
 # 大文件分块扫描参数（替代旧的「截断到前 8MB」语义——反诈调证最忌漏端点/漏真 C2，
 # 大 .so / 大资源后段的端点不能丢，故改为分块扫完整个文件）。
@@ -382,7 +385,8 @@ def _pos_in_consumed(consumed: list[tuple[int, int]], pos: int) -> bool:
 
 
 class EndpointsAnalyzer(BaseAnalyzer):
-    """从 dex/resource/native/manifest 提取 URL/域名/IP 端点（只产 Endpoint）。"""
+    """从 dex/resource/native/manifest 提取 URL/域名/IP 端点；另产一条回环占位启发式 Finding
+    （硬编码非标准回环 IP + native 库 → 疑似 native 运行时取址占位架构，见 _native_runtime_addressing_finding）。"""
 
     name: str = "endpoints"
     requires: list[str] = []  # 纯静态，永远可用
@@ -427,7 +431,98 @@ class EndpointsAnalyzer(BaseAnalyzer):
             kinds.get("domain", 0),
             kinds.get("ip", 0),
         )
+        finding = self._native_runtime_addressing_finding(ctx)
+        if finding is not None:
+            result.findings.append(finding)
         return result
+
+    # ------------------------------------------------------------------
+    # 回环占位启发式：native 运行时取址架构识别
+    # ------------------------------------------------------------------
+
+    def _nonstandard_loopback_ips(self, ctx: "AnalysisContext") -> list[str]:
+        """扫 dex 字符串 + manifest **原文**，找"非 127.0.0.1 的回环 IP"字面（127.0.0.0/8、排除 localhost）。
+
+        ★不走已抽取的 endpoints：回环/保留段 IP 在端点抽取时被"裸 IP 去噪"当噪音丢了（正是要识破的
+        「静默丢」）。标准 127.0.0.1 是常见 localhost 引用（开发/代理），噪声大不采；把**具体的**非标准回环
+        地址（如 127.0.209.162）硬编码成后端连接地址才是反常信号——多见于 native 运行时取址占位架构。
+        扫描按 _MAX_DEX_STRINGS 封顶、结果去重限量，绝不抛。
+        """
+        import ipaddress
+        out: list[str] = []
+        seen: set[str] = set()
+
+        def _harvest(text: str) -> None:
+            for m in _LOOPBACK_IPV4_RE.findall(text or ""):
+                if m in seen:
+                    continue
+                try:
+                    ip = ipaddress.ip_address(m)
+                except ValueError:
+                    continue
+                if ip.version == 4 and ip.is_loopback and m != "127.0.0.1":
+                    seen.add(m)
+                    out.append(m)
+                    if len(out) >= 20:  # 限量：够作证据即止
+                        return
+
+        try:
+            for idx, s in enumerate(ctx.dex_strings()):
+                if idx >= _MAX_DEX_STRINGS or len(out) >= 20:
+                    break
+                if isinstance(s, str) and "127." in s:
+                    _harvest(s)
+        except Exception:  # noqa: BLE001 — 单源扫描失败不影响启发式整体
+            logger.debug("[%s] 扫 dex 找回环 IP 失败", self.name, exc_info=True)
+        try:
+            mx = getattr(ctx, "manifest_xml", "") or ""
+            if "127." in mx:
+                _harvest(mx)
+        except Exception:  # noqa: BLE001
+            logger.debug("[%s] 扫 manifest 找回环 IP 失败", self.name, exc_info=True)
+        return out
+
+    def _native_runtime_addressing_finding(self, ctx: "AnalysisContext") -> "Finding | None":
+        """★回环占位启发式（A3，识破诱饵地址）：硬编码的非标准回环 IP + 存在 native 库 →
+        疑似"native 运行时取址占位"架构——127.x 是本地代理占位、真后端由 .so 解密下发通道后运行时决定。
+
+        此前这类 127.x 端点被一律当私网静默丢，丢掉了这个家族级架构信号。产 Finding 而非丢：明确
+        提示"别对该回环地址空调证，真后端在 native / DNS TXT 等下发通道，须动态抓包或逆向 .so 取"。
+        无非标准回环 IP 或无 native 库 → None（不误报）。
+        """
+        loopbacks = self._nonstandard_loopback_ips(ctx)
+        if not loopbacks:
+            return None
+        try:
+            has_native = bool(self._collect_so_paths(ctx))
+        except Exception:  # noqa: BLE001 — 启发式旁路，采集失败即保守不产 Finding
+            logger.debug("[%s] 采集 .so 判定 native 存在性失败", self.name, exc_info=True)
+            return None
+        if not has_native:
+            return None
+        shown = "、".join(loopbacks[:5])
+        return Finding(
+            id="NATIVE-RUNTIME-ADDRESSING-PLACEHOLDER",
+            title="疑似 native 运行时取址占位架构（硬编码回环地址 + native 库）",
+            severity=Severity.MEDIUM,
+            confidence=Confidence.LOW,  # 启发式：合法本地代理/调试亦可能用非标准回环
+            category="anti_analysis",
+            description=(
+                f"App 把非标准回环地址硬编码成后端连接地址（{shown}），且存在 native 库。这常见于"
+                "「native 起本地监听、App 连本地端口、真实后端由 .so 运行时（解密下发通道 / DNS TXT / "
+                "远程配置）决定」的取址占位架构——该 127.x 是**本地代理占位、非真实服务器**。"
+                "★ 启发式信号：合法本地代理 / 调试转发亦可能用非标准回环，须结合 native 混淆 / 下发通道研判。"
+            ),
+            recommendation=(
+                "别把该回环地址当调证目标（对内网空调证）。真实后端由 native 运行时决定：宜动态抓包"
+                "（floor PCAP / socket 归因拿实际连接的公网 IP:端口），或逆向 .so 的下发通道（DNS TXT / "
+                "远程配置解密）取真实后端；把该占位架构作为技术画像用于跨样本家族关联。"
+            ),
+            evidences=[
+                Evidence(source="dex", location="hardcoded-endpoint", snippet=ip)
+                for ip in loopbacks[:5]
+            ],
+        )
 
     # ------------------------------------------------------------------
     # 数据源扫描
