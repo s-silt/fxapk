@@ -874,7 +874,7 @@ def selfcheck(
 ) -> None:
     """自检诊断：逐项报告**哪个能力通 / 不通 / 怎么修**，输出稳定 JSON（供任意 AI agent 驱动前自检）。
 
-    覆盖：核心、可选依赖（图谱 kuzu / 解密）、外部工具（jadx/adb）、动态（frida/mitmproxy/设备）、
+    覆盖：核心、可选依赖（解密 cryptography）、外部工具（jadx/adb）、动态（frida/mitmproxy/设备）、
     联网富化。每项给 status（ok/missing/disabled/unreachable）+ 一句话修复指引。绝不抛。
     """
     import json as _json

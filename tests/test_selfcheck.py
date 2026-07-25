@@ -20,7 +20,7 @@ def test_selfcheck_structure() -> None:
         assert set(c) >= {"name", "category", "status", "detail", "fix"}
         assert c["status"] in {"ok", "missing", "disabled", "unreachable"}
     names = {c["name"] for c in res["components"]}
-    assert {"core", "graph", "online-enrichment"} <= names
+    assert {"core", "decrypt", "online-enrichment"} <= names
 
 
 def test_core_always_ok() -> None:
