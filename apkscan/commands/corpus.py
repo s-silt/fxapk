@@ -1,7 +1,7 @@
 """样本库 CLI 子命令（``corpus_app``）：累积 report.json → 查询 / 见过没 / 重建 / 喂 agent。
 
 ``corpus_app`` 由 cli.py ``app.add_typer(corpus_app, name="corpus")`` 挂到主 app（add_typer 留 cli.py
-以引用主 app、避免本模块反向 import cli 造成循环，沿 graph/track 先例）。纯逻辑在 core/corpus.py，
+以引用主 app、避免本模块反向 import cli 造成循环）。纯逻辑在 core/corpus.py，
 本层只做 IO / 打印 / 退出码。
 
 ★PII 硬防线：语料库含真实案件数据（IOC/案件号），路径**必须**由用户经 --corpus 或环境变量
