@@ -179,7 +179,7 @@ def corpus_seen(
     if by not in _corpus.SEEN_FIELDS:
         typer.echo(
             f"错误：--by 不支持的字段 {by!r}"
-            f"（支持：{' | '.join(_corpus.SEEN_FIELDS)} | {_CONFIG_OBJECT_BY}）。",
+            f"（支持：{' | '.join(_corpus.SEEN_FIELDS)} | {_CONFIG_OBJECT_BY} | {_SO_SHA256_BY}）。",
             err=True,
         )
         raise typer.Exit(code=2)
@@ -194,6 +194,16 @@ def corpus_shared_config(
     """跨样本共享的远程配置对象簇：同一 OSS 对象(url) 或同一配置内容(sha256) 被 ≥2 样本引用——串案强锚。"""
     root = _resolve_corpus(corpus)
     clusters = _corpus.shared_config_objects(_corpus.load_manifest(root))
+    _print({"count": len(clusters), "clusters": clusters})
+
+
+@corpus_app.command("shared-native")
+def corpus_shared_native(
+    corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
+) -> None:
+    """跨样本共享同一 .so（sha256 逐字节相同）被 ≥2 样本引用——家族串案强锚（核心业务库同构=同族）。"""
+    root = _resolve_corpus(corpus)
+    clusters = _corpus.shared_native_libs(_corpus.load_manifest(root))
     _print({"count": len(clusters), "clusters": clusters})
 
 

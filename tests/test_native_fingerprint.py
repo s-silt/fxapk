@@ -106,3 +106,15 @@ def test_cli_seen_by_so_sha256(tmp_path) -> None:
     assert seen.exit_code == 0, seen.stdout
     payload = json.loads(seen.stdout)
     assert payload["seen"] is True and payload["count"] == 2  # fam1 + fam2，不含 other
+
+    # ★shared-native：核心 .so 被 2 样本共享 → 家族簇
+    shared = runner.invoke(cli.app, ["corpus", "shared-native", "--corpus", str(corpus_dir)])
+    assert shared.exit_code == 0, shared.stdout
+    clusters = json.loads(shared.stdout)["clusters"]
+    core = next(c for c in clusters if c["sha256"] == _sha(_SO_A))
+    assert sorted(core["samples"]) == ["fam1", "fam2"]
+
+    # ★拼错 --by 拒跑（exit 2），且错误信息里列出 so_sha256（help 完整、不静默假阴性）
+    bad = runner.invoke(cli.app, ["corpus", "seen", "x", "--by", "so_sh256", "--corpus", str(corpus_dir)])
+    assert bad.exit_code == 2
+    assert "so_sha256" in bad.stdout + str(bad.stderr or "")
