@@ -172,6 +172,26 @@ def _remote_config_objects(report: dict) -> list[dict]:
     return [objects[url] for url in sorted(objects)]
 
 
+def _native_lib_hashes(report: dict) -> list[dict]:
+    """报告登记的 App .so 指纹（meta["native_lib_hashes"]，由 native_fingerprint 分析器产）。
+
+    每项 ``{name, sha256, size}``——同族样本核心 .so 常逐字节相同，其 sha256 是家族级硬指纹，供
+    ``corpus seen <sha> --by so_sha256`` 一击反查全家族。按 sha256 去重排序确定；空/坏 → 空列表。绝不抛。
+    """
+    objects: dict[str, dict] = {}
+    for h in _meta(report).get("native_lib_hashes") or []:
+        if not isinstance(h, dict):
+            continue
+        sha = _s(h.get("sha256")).strip().lower()
+        if sha:
+            objects.setdefault(sha, {
+                "name": _s(h.get("name")).strip() or None,
+                "sha256": sha,
+                "size": h.get("size") if isinstance(h.get("size"), int) else None,
+            })
+    return [objects[sha] for sha in sorted(objects)]
+
+
 def _finding_ids(report: dict) -> list[str]:
     """报告命中的规则 id 去重排序（供规则库命中反查，Finding.id 即规则 id）。"""
     findings = report.get("findings")
@@ -217,6 +237,8 @@ def manifest_entry(report: dict, case_id: str | None = None) -> dict:
         # 但登记于此，供 upsert 检出「同主键不同依赖版本」时告警（codex P1，不静默丢 dep 变体报告）。
         "dependency_versions": meta.get("dependency_versions")
         if isinstance(meta.get("dependency_versions"), dict) else None,
+        # App .so 家族级硬指纹（列表维度）：供 corpus seen --by so_sha256 一击反查全家族。
+        "native_lib_hashes": _native_lib_hashes(report),
         "sign_sha256": meta.get("sign_sha256"),  # 签名证书摘要 = 共享证书串案强锚
         # ---- 加固 / 分类 ----
         "packer": meta.get("packer"),
@@ -493,4 +515,54 @@ def shared_config_objects(entries: list[dict]) -> list[dict]:
         if len(samples) >= 2
     ]
     clusters.sort(key=lambda c: (-len(c["samples"]), c["key_type"], c["key"]))
+    return clusters
+
+
+def find_by_native_lib(entries: list[dict], value: str) -> list[dict]:
+    """按 .so 家族硬指纹反查样本：``value`` 匹配任一 native lib 的 sha256（大小写归一）或精确 name。
+
+    A1 家族配方库的反查基石——核心业务 .so 逐字节相同即同族，一击拉出全家族样本。列表维度
+    （``native_lib_hashes`` 是列表，非 :func:`find_by` 的标量字段）。空值 → 空列表。绝不抛。
+    """
+    target = _s(value).strip()
+    if not target:
+        return []
+    target_lower = target.lower()
+    out: list[dict] = []
+    for entry in entries:
+        for h in entry.get("native_lib_hashes") or []:
+            if not isinstance(h, dict):
+                continue
+            sha = _s(h.get("sha256")).strip().lower()
+            if (sha and sha == target_lower) or _s(h.get("name")).strip() == target:
+                out.append(entry)
+                break
+    return out
+
+
+def shared_native_libs(entries: list[dict]) -> list[dict]:
+    """跨样本共享同一 .so（sha256 逐字节相同）被 **≥2 个不同样本** 引用——家族串案强锚。
+
+    返回按样本数降序的簇 ``[{sha256, name, samples: [sample_sha256...]}]``。绝不抛。
+    """
+    groups: dict[str, set[str]] = {}
+    names: dict[str, str] = {}
+    for entry in entries:
+        sample = _s(entry.get("sample_sha256")).strip().lower()
+        if not sample:
+            continue
+        for h in entry.get("native_lib_hashes") or []:
+            if not isinstance(h, dict):
+                continue
+            sha = _s(h.get("sha256")).strip().lower()
+            if not sha:
+                continue
+            groups.setdefault(sha, set()).add(sample)
+            names.setdefault(sha, _s(h.get("name")).strip())
+    clusters = [
+        {"sha256": sha, "name": names.get(sha) or None, "samples": sorted(samples)}
+        for sha, samples in groups.items()
+        if len(samples) >= 2
+    ]
+    clusters.sort(key=lambda c: (-len(c["samples"]), c["sha256"]))
     return clusters

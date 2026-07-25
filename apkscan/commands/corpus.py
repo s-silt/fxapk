@@ -151,22 +151,28 @@ def corpus_ls(
 
 #: seen --by 的列表维度取值（非标量 SEEN_FIELDS，走专用列表反查）。
 _CONFIG_OBJECT_BY = "config-object"
+_SO_SHA256_BY = "so_sha256"
 
 
 @corpus_app.command("seen")
 def corpus_seen(
-    value: str = typer.Argument(..., help="要反查的值（样本哈希 / 包名 / 签名证书摘要 / 配置对象 url|sha256）。"),
+    value: str = typer.Argument(..., help="要反查的值（样本哈希 / 包名 / 签名证书摘要 / 配置对象 url|sha256 / .so sha256）。"),
     by: str = typer.Option(
         "sample_sha256", "--by",
-        help="按哪个字段查：sample_sha256 | package_name | sign_sha256 | config-object。",
+        help="按哪个字段查：sample_sha256 | package_name | sign_sha256 | config-object | so_sha256。",
     ),
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
-    """见过没？按样本哈希 / 包名 / 共享签名证书 / 共享远程配置对象一击反查库内记录。"""
+    """见过没？按样本哈希 / 包名 / 共享签名证书 / 共享远程配置对象 / **共享 .so 家族指纹** 一击反查库内记录。"""
     root = _resolve_corpus(corpus)
     if by == _CONFIG_OBJECT_BY:
         # 远程配置对象是列表维度（一样本可引用多个）：按 url 或 sha256 反查引用它的样本。
         hits = _corpus.find_by_config_object(_corpus.load_manifest(root), value)
+        _print({"seen": bool(hits), "by": by, "value": value, "count": len(hits), "hits": hits})
+        return
+    if by == _SO_SHA256_BY:
+        # .so 家族硬指纹是列表维度（一样本多 .so）：按 sha256/name 反查同族样本（A1 家族反查基石）。
+        hits = _corpus.find_by_native_lib(_corpus.load_manifest(root), value)
         _print({"seen": bool(hits), "by": by, "value": value, "count": len(hits), "hits": hits})
         return
     # 拼错 --by 不能静默返回 seen=false（那是权威口吻的假阴性，取证致命）——直接拒跑。
