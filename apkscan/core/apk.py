@@ -638,6 +638,14 @@ class ApkContext:
             logger.debug("[apk] 声明大小映射构建失败，跳过 zip 炸弹前置校验", exc_info=True)
             return {}
 
+    def declared_size(self, path: str) -> int | None:
+        """zip 声明的解压后大小（读中央目录元数据、不解压）；无 apk_path/查不到 → None。
+
+        供分析器（如 native_fingerprint）在 read_file 前拦截超大 .so——read_file 自身的 500MB
+        上限远高于单分析器的按需阈值，故须让调用方拿到声明大小自行卡更严的门。
+        """
+        return self._declared_sizes.get(path)
+
     def read_file(self, path: str) -> bytes | None:
         cache = self._read_cache
         if path in cache:

@@ -14,7 +14,7 @@ import logging
 import posixpath
 from typing import TYPE_CHECKING
 
-from apkscan.analyzers._common import collect_so_basenames
+from apkscan.analyzers._common import collect_so_paths
 from apkscan.core.models import AnalyzerResult
 from apkscan.core.registry import BaseAnalyzer
 
@@ -40,25 +40,35 @@ class NativeFingerprintAnalyzer(BaseAnalyzer):
         hashes: list[dict[str, object]] = []
         seen: set[str] = set()
 
-        # {basename: path}；按 basename 稳定排序，确定性。
-        by_base = collect_so_basenames(ctx, self.name)
-        for base in sorted(by_base):
+        # 全 .so 完整路径（**不按 basename 塌缩**：同名多 ABI 变体字节不同、须各自哈希）。稳定排序、确定性。
+        for path in collect_so_paths(ctx, self.name):
             if len(hashes) >= _MAX_LIBS:
                 break
-            path = by_base[base]
+            # ★P0-5：read_file 前先查 zip 声明的解压后大小——超阈值直接跳过、绝不 read。read_file 自身
+            #   上限是 500MB（远高于本 64MB 阈值），若不前置拦截，一个「小压缩、巨解压」的 .so 会被
+            #   androguard 全量膨胀进内存后才被判超限。declared_size 返回 None（无法判断）时保守放行、退回读后判长。
+            try:
+                declared = ctx.declared_size(path)
+            except Exception:  # noqa: BLE001 — 访问器异常不阻断，退回读后判长
+                logger.debug("[%s] 查 .so 声明大小失败：%s", self.name, path, exc_info=True)
+                declared = None
+            if declared is not None and declared > _MAX_LIB_BYTES:
+                logger.debug("[%s] 跳过超大 .so（声明 %d 字节 > %d 上限，不读）：%s",
+                             self.name, declared, _MAX_LIB_BYTES, path)
+                continue
             try:
                 data = ctx.read_file(path)
             except Exception:  # noqa: BLE001 — 单库读失败不影响其余
                 logger.debug("[%s] 读 .so 失败，跳过：%s", self.name, path, exc_info=True)
                 continue
-            if not data or len(data) > _MAX_LIB_BYTES:
+            if not data or len(data) > _MAX_LIB_BYTES:  # 声明大小不可得时的兜底
                 continue
             sha = hashlib.sha256(data).hexdigest()
             if sha in seen:
                 continue
             seen.add(sha)
             hashes.append({
-                "name": posixpath.basename(str(path).replace("\\", "/")),
+                "name": posixpath.basename(path.replace("\\", "/")),
                 "sha256": sha,
                 "size": len(data),
             })

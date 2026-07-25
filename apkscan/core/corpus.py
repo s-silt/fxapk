@@ -183,12 +183,16 @@ def _native_lib_hashes(report: dict) -> list[dict]:
         if not isinstance(h, dict):
             continue
         sha = _s(h.get("sha256")).strip().lower()
-        if sha:
-            objects.setdefault(sha, {
-                "name": _s(h.get("name")).strip() or None,
-                "sha256": sha,
-                "size": h.get("size") if isinstance(h.get("size"), int) else None,
-            })
+        # ★形状校验：sha256 须 64 位十六进制——否则坏/导入的旧报告能凭任意串（截断哈希 / 占位符 / 路径）
+        #   造出假家族簇。size 须非负 int，否则记 None。不合形状即丢，绝不索引。
+        if len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha):
+            continue
+        size = h.get("size")
+        objects.setdefault(sha, {
+            "name": _s(h.get("name")).strip() or None,
+            "sha256": sha,
+            "size": size if isinstance(size, int) and size >= 0 else None,
+        })
     return [objects[sha] for sha in sorted(objects)]
 
 
