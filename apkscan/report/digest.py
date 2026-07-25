@@ -7,6 +7,7 @@ token 又难抓重点。本模块抽出**可办案化的核心**：按优先级�
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from typing import Any
 
@@ -84,6 +85,84 @@ _ROLE_RANK = {
 
 def _list(value: object) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+#: 完整性红旗阈值（低于即在 digest 顶部告警）。取值是判断权衡：
+#:  · 分析完整度 <0.8 = 超两成分析器报错，结论基础明显残缺；
+#:  · 富化命中率 <0.5 = 过半富化尝试失败（限速/源没跑全），AGENTS.md 明言此时勿据残缺证据下结论。
+_COMPLETENESS_WARN = 0.8
+_ENRICH_WARN = 0.5
+
+
+def _finite_num_or_none(value: object) -> float | None:
+    """有限实数 → float；bool / 非数 / NaN / inf → None（codex P1：NaN 不得绕过阈值伪装可靠）。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    f = float(value)
+    return f if math.isfinite(f) else None
+
+
+def _nonneg_count(value: object) -> int | None:
+    """非负有限整数计数；bool / 负 / 非有限 / 非整 / 脏类型（如 "bad"）→ None（跳过，绝不 int() 抛，codex P0）。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float):
+        if not math.isfinite(value) or value < 0 or value != int(value):
+            return None
+        return int(value)
+    return None  # 字符串等脏类型：跳过而非 int() 抛（守 build_digest「绝不抛」契约）
+
+
+def _integrity(report: dict[str, Any]) -> dict[str, Any]:
+    """run 级完整性红旗（codex #4）：聚合分析完整度 / 关键分析器失败 / 富化命中率，低于阈值即出 warnings。
+
+    ★把此前只散在 analyzer_status/enricher_status 里、靠人肉判断的「本次结果是否可信」升为**工具级主动告警**——
+    ``reliable=False`` + ``warnings`` 让消费方（Agent/研判）不再据残缺证据下结论。纯读既有 status，不新增采集。
+    ★绝不抛（codex P0/P1）：脏报告（``attempted:"bad"`` / NaN completeness / ``ok>attempted``）降低可靠性并告警，
+      而非崩溃或伪装可靠。
+    """
+    warnings: list[str] = []
+    status = report.get("analysis_status")
+    raw_completeness = report.get("completeness")
+    completeness = _finite_num_or_none(raw_completeness)
+    if completeness is not None:
+        if not (0.0 <= completeness <= 1.0):
+            warnings.append(f"分析完整度 {completeness} 越界（应在 [0,1]）：报告数据异常，结果不可信")
+        elif completeness < _COMPLETENESS_WARN:
+            warnings.append(f"分析完整度 {completeness} 低于 {_COMPLETENESS_WARN}：部分分析器失败，结论基础可能残缺")
+    elif raw_completeness is not None:
+        warnings.append("分析完整度字段异常（非有限数）：报告数据异常，结果不可信")
+    crit = [str(c) for c in _list(report.get("critical_failures")) if str(c)]
+    if crit:
+        warnings.append(f"关键分析器失败：{'、'.join(crit)}")
+
+    es = [s for s in _list(report.get("enricher_status")) if isinstance(s, dict)]
+    attempted = ok = 0
+    dirty = False
+    for s in es:
+        a, o = _nonneg_count(s.get("attempted")), _nonneg_count(s.get("ok"))
+        if a is None or o is None or o > a:  # 脏条目 / ok>attempted 无意义 → 跳过并标数据质量问题
+            dirty = True
+            continue
+        attempted += a
+        ok += o
+    enrich_rate = round(ok / attempted, 4) if attempted else None
+    if dirty:
+        warnings.append("富化统计含异常条目（计数非法/ok>attempted）：命中率仅据可解析条目，结果可能不可信")
+    if enrich_rate is not None and enrich_rate < _ENRICH_WARN:
+        warnings.append(
+            f"富化命中率 {enrich_rate} 低于 {_ENRICH_WARN}：富化源可能未跑全（限速/密钥/网络），勿据残缺证据下结论"
+        )
+    return {
+        "analysis_status": status,
+        "completeness": completeness,
+        "critical_failures": crit,
+        "enrichment_ok_rate": enrich_rate,
+        "reliable": not warnings,
+        "warnings": warnings,
+    }
 
 
 def _neg_score(value: object) -> float:
@@ -204,6 +283,7 @@ def build_digest(report: object, *, redact: bool = False) -> dict[str, Any]:
             "overseas_target_hosts": len(overseas_targets),
             "attributed_role_candidates": role_candidate_count,
         },
+        "integrity": _integrity(report),  # run 级完整性红旗（reliable=False 时结果可能不可信）
         "leads": [_compact_lead(lead, redact, pii_flag) for lead in leads_sorted],
         "overseas_targets": overseas_targets,
         "closure": compact_closure,
