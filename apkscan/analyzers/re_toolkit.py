@@ -21,7 +21,9 @@
 
 from __future__ import annotations
 
+import base64
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -64,6 +66,36 @@ _RULES_NAME = "re_toolkit"
 # DEX 字符串扫描上限（与 packing 一致，避免极端样本扫描过久）。
 _MAX_DEX_STRINGS = 200_000
 _SNIPPET_MAX = 200
+
+# --- 内嵌 syscall 机器码结构检测（抗 fork）的常量 -------------------------------
+#: 候选 base64 串最短字符数：真实 shellcode 载荷是数千字符；下限压掉海量短 base64（token/ID/短密钥）。
+_MIN_STUB_B64_CHARS = 512
+#: 解码后最小字节数：太短不足以是一段可用的 syscall 桩。
+_MIN_STUB_BYTES = 128
+#: 最多尝试解码的候选串数 / 累计解码字节上限——防大 APK 上开销炸开。
+_MAX_STUB_CANDIDATES = 200
+_MAX_STUB_DECODE_BYTES = 8 * 1024 * 1024
+#: 需要的对齐 syscall 指令数下限。实测各架构载荷含 1~4 处（arm64 全部 syscall 走同一个 stub → 仅 1 处），
+#: 故取 1；4 字节指令 × 4 字节对齐下随机命中概率 ~1/2³²（2000 次随机数据实测零命中）。
+_MIN_SYSCALL_INSN = 1
+#: 仅纯 base64 字符（已去空白）才尝试解码。
+_B64_ONLY_RE = re.compile(r"[A-Za-z0-9+/=]+")
+#: 已知容器格式魔数：解码结果是这些即正常内嵌资源（证书/图片/压缩包/动态库），不是裸机器码。
+_CONTAINER_MAGICS: tuple[bytes, ...] = (
+    b"\x7fELF", b"PK\x03\x04", b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"\x1f\x8b",
+    b"%PDF", b"BM", b"RIFF", b"dex\n", b"\x30\x82", b"OggS", b"\x00\x00\x01\x00",
+)
+#: 定长 4 字节指令集的 syscall 编码（小端）+ 指令对齐。**只用这些**——x86 的 0f 05 / cd 80 仅 1~2 字节，
+#: 在随机噪声里常见，单独作判据会误报，故不列入。
+_SYSCALL_INSNS: dict[str, tuple[bytes, int]] = {
+    "arm64": (b"\x01\x00\x00\xd4", 4),      # svc #0
+    "arm32": (b"\x00\x00\x00\xef", 4),      # svc #0（ARM 模式）
+    "riscv64": (b"\x73\x00\x00\x00", 2),    # ecall（含压缩指令 → 2 字节对齐）
+    "mips": (b"\x0c\x00\x00\x00", 4),       # syscall
+}
+# ★已知局限（有意为之）：**仅 x86/x86_64 载荷的样本检不出**——其 syscall 编码是 0f 05 / cd 80，
+#   仅 1~2 字节，在任意随机数据里都常见，单独作判据必误报。真实移动样本压倒性是 arm；上游库亦
+#   七架构全带（arm64 必在），故该局限在实务上影响极小。宁可漏，不可造。
 
 # category → 人读分组名。
 _CATEGORY_LABELS: dict[str, str] = {
@@ -150,6 +182,17 @@ class ReToolkitAnalyzer(BaseAnalyzer):
             if hit.evidences:
                 hits.append(hit)
 
+        # ★结构性检测（抗 fork）：上面全是「认得出是哪个库」的字面量锚点，fork 改包名 / 删错误串 /
+        #   重编译 shellcode 后就全废。本检测只认**手法本身**——DEX 里带一段 base64 文本、解码后是
+        #   含 syscall 指令的原始机器码——这一点任何 fork 都改不掉（改了功能就没了）。
+        try:
+            shellcode_hit = self._detect_embedded_syscall_stub(dex_strings)
+        except Exception:
+            logger.exception("[%s] 内嵌 syscall 载荷结构检测失败，跳过", self.name)
+            shellcode_hit = None
+        if shellcode_hit is not None:
+            hits.append(shellcode_hit)
+
         if not hits:
             logger.info("[%s] 未识别到已知 hook/反检测工具特征", self.name)
             self._set_empty_meta(result)
@@ -177,6 +220,82 @@ class ReToolkitAnalyzer(BaseAnalyzer):
         result.meta["re_toolkit"] = []
         result.meta["hook_frameworks"] = []
         result.meta["anti_frida"] = False
+
+    # ------------------------------------------------------------------
+    # 结构性检测：内嵌 syscall 机器码（base64 文本载荷）——抗 fork
+    # ------------------------------------------------------------------
+
+    def _detect_embedded_syscall_stub(self, dex_strings: list[str]) -> "_Hit | None":
+        """在 DEX 字符串里找「base64 文本 → 解码后是含 syscall 指令的原始机器码」。
+
+        ★为什么这条抗 fork：字面量锚点（包名 / 错误串 / 具体 base64 值）在 fork 改名、改措辞、
+        重新编译 shellcode 后全部失效；但「把可执行的 syscall 桩当文本字面量塞进 DEX」是这套手法的
+        **必要构造**——纯 Java 进不了内核，必须先有一段机器码再 mmap 成 RWX 执行。改不掉。
+
+        判据（逐条都为压假阳）：
+          1. 候选串足够长且是合法 base64（长度/数量/总解码量三重封顶，防大 APK 上炸开销）；
+          2. 解码结果**不是**已知容器格式（ELF / ZIP / PNG / gzip 等）——那是正常的内嵌资源；
+          3. 解码字节里存在**指令对齐**的 syscall 指令编码。只用 4 字节定长指令集
+             （arm64/arm32/riscv64/mips），随机数据命中概率 ~1/2³²，实测 2000 次随机零命中；
+             x86 的 ``0f 05`` / ``cd 80`` 仅 1~2 字节，随机噪声里常见，**不单独作判据**。
+
+        命中即合成一条**技术级**（非工具级）命中：只说"存在这一手法"，不指名是哪个库。
+        """
+        matches = self._scan_syscall_stub_strings(dex_strings)
+        if not matches:
+            return None
+        rule = _ToolRule(
+            name="内嵌 syscall 机器码（base64 文本载荷，技术级）",
+            category="evasion",
+            capability="把可执行 syscall 桩以 base64 文本嵌在 DEX，运行时解码进 RWX 页执行（绕过 libc/Java hook 层）",
+            anti_frida=True,
+            note=(
+                "★技术级指纹（非工具级）：不指名具体库，抗 fork——改包名 / 删错误串 / 重编译 shellcode "
+                "都不影响，因为「机器码以文本形式随 DEX 分发」是这套手法的必要构造。"
+                "命中即说明 frida / Java 层 hook 可能被绕过（抓不到≠没有），应退旁路 pcap / tls-keylog。"
+            ),
+        )
+        hit = _Hit(rule=rule)
+        hit.strong = True
+        for arch, count, preview in matches[:3]:
+            hit.evidences.append(Evidence(
+                source="dex", location="string-literal",
+                snippet=_truncate(f"base64→机器码：{arch} syscall×{count}；载荷首段 {preview}"),
+            ))
+            hit.matched_features.append(f"syscall_stub:{arch}")
+        return hit
+
+    @staticmethod
+    def _scan_syscall_stub_strings(dex_strings: list[str]) -> list[tuple[str, int, str]]:
+        """扫描候选串，返回 ``[(架构, 对齐 syscall 指令数, 载荷首段十六进制)]``。纯函数，便于单测。"""
+        out: list[tuple[str, int, str]] = []
+        decoded_budget = _MAX_STUB_DECODE_BYTES
+        checked = 0
+        for s in dex_strings:
+            if checked >= _MAX_STUB_CANDIDATES or decoded_budget <= 0:
+                break
+            if not isinstance(s, str) or len(s) < _MIN_STUB_B64_CHARS:
+                continue
+            compact = "".join(s.split())  # 折叠串内含真实换行（javac 常量折叠形态）
+            if len(compact) < _MIN_STUB_B64_CHARS or not _B64_ONLY_RE.fullmatch(compact):
+                continue
+            checked += 1
+            try:
+                data = base64.b64decode(compact + "=" * (-len(compact) % 4), validate=False)
+            except Exception:  # noqa: BLE001 — 非法 base64 跳过
+                continue
+            decoded_budget -= len(data)
+            if len(data) < _MIN_STUB_BYTES or data.startswith(_CONTAINER_MAGICS):
+                continue
+            for arch, (insn, align) in _SYSCALL_INSNS.items():
+                count = sum(
+                    1 for i in range(0, len(data) - len(insn) + 1, align)
+                    if data[i:i + len(insn)] == insn
+                )
+                if count >= _MIN_SYSCALL_INSN:
+                    out.append((arch, count, data[:12].hex(" ")))
+                    break
+        return out
 
     # ------------------------------------------------------------------
     # 单规则匹配

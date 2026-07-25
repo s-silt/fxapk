@@ -162,6 +162,79 @@ def test_ordinary_app_strings_do_not_hit_libcoresyscall() -> None:
     assert not any("LibcoreSyscall" in n for n in names)
 
 
+# --- 结构性检测（抗 fork）：内嵌 syscall 机器码 -----------------------------
+
+
+def _b64_of(code: bytes) -> str:
+    import base64
+    return base64.b64encode(code).decode()
+
+
+def _arm64_stub(nop_words: int = 200) -> bytes:
+    """合成一段 arm64「机器码」：大量 NOP + 一处 svc #0（真实载荷正是全部 syscall 走同一 stub）。"""
+    nop = b"\x1f\x20\x03\xd5"          # nop
+    svc = b"\x01\x00\x00\xd4"          # svc #0
+    return nop * (nop_words // 2) + svc + nop * (nop_words // 2)
+
+
+def test_embedded_syscall_stub_detected_without_any_library_identity():
+    """★抗 fork 的核心断言：包名、错误串、原库特有 base64 值**一个都没有**，仅凭
+    「base64 文本解码后是含 syscall 指令的裸机器码」这一手法本身即命中。
+
+    fork 改包名 / 删错误串 / 重新编译 shellcode 后，前面所有字面量锚点都失效——本条是最后防线。
+    """
+    result = _analyze(dex_strings=["a.b.C", "onCreate", _b64_of(_arm64_stub())])
+    names = [t["name"] for t in result.meta["re_toolkit"]]
+    assert any("syscall" in n for n in names), names
+    hit = next(t for t in result.meta["re_toolkit"] if "syscall" in t["name"])
+    assert hit["strong"] is True
+    assert result.meta["anti_frida"] is True   # 手法直接后果：Java 层 hook 可能被绕过
+
+
+def test_stub_detected_when_folded_with_newlines():
+    """javac 常量折叠形态（段间含真实换行）同样识别——去空白后再判 base64。"""
+    b64 = _b64_of(_arm64_stub())
+    folded = "\n".join(b64[i:i + 76] for i in range(0, len(b64), 76))
+    result = _analyze(dex_strings=[folded])
+    assert any("syscall" in t["name"] for t in result.meta["re_toolkit"])
+
+
+def test_container_payloads_not_flagged():
+    """★内嵌合法资源（ELF/ZIP/PNG/证书）不得命中——那是正常 App 的常见做法。"""
+    import base64
+    stub = _arm64_stub()
+    for magic in (b"\x7fELF", b"PK\x03\x04", b"\x89PNG", b"\x30\x82"):
+        payload = magic + stub          # 带容器魔数 → 应被排除
+        result = _analyze(dex_strings=[base64.b64encode(payload).decode()])
+        names = [t["name"] for t in result.meta["re_toolkit"]]
+        assert not any("syscall" in n for n in names), f"{magic!r} 误命中"
+
+
+def test_random_base64_not_flagged():
+    """★随机/加密载荷不得命中（4 字节指令 × 4 字节对齐，随机命中概率约 1/2^32）。"""
+    import hashlib
+    blob = b"".join(hashlib.sha256(bytes([i])).digest() for i in range(120))  # 确定性伪随机 3840B
+    result = _analyze(dex_strings=[_b64_of(blob)])
+    names = [t["name"] for t in result.meta["re_toolkit"]]
+    assert not any("syscall" in n for n in names)
+
+
+def test_short_base64_not_flagged():
+    """短 base64（token / 短密钥 / ID）不进入解码——避免在海量短串上空转与误报。"""
+    short = _b64_of(_arm64_stub(nop_words=8))   # 解码后仅几十字节
+    result = _analyze(dex_strings=[short])
+    names = [t["name"] for t in result.meta["re_toolkit"]]
+    assert not any("syscall" in n for n in names)
+
+
+def test_ordinary_app_with_long_base64_config_not_flagged():
+    """普通 App 常见的长 base64 配置串（可打印文本编码而来）不得命中。"""
+    text = ("{'endpoint':'https://api.example-synthetic.test','timeout':30}" * 40).encode()
+    result = _analyze(dex_strings=[_b64_of(text)])
+    names = [t["name"] for t in result.meta["re_toolkit"]]
+    assert not any("syscall" in n for n in names)
+
+
 # --- dex 命中 hook 框架（pine，仅弱证据）→ MEDIUM --------------------------
 
 
