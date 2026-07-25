@@ -549,6 +549,25 @@ def test_attribution_unknown_layers_and_edge_labeled() -> None:
     assert "边缘/CDN/代理：未识别专属特征" in body
 
 
+def test_attribution_deferred_resource_holder_rendered_as_pending() -> None:
+    """★deferred='case_close'（analyze 未逐 IP 查 RDAP）→ 文书渲染「待结案 RDAP 补全」，
+    与真正查无的「未知」区分开（codex P1：渲染分支须有直接测试）。"""
+    layer = _five_layer("1.1.1.1", holder=None, asn=13335, asn_org="Cloudflare", category="cdn")
+    layer["resource_holder"]["deferred"] = "case_close"
+    body = letters.build_letters(_report_with_attr("x.com", [layer]))[0]["body_md"]
+    assert "资源登记方：待结案 RDAP 补全" in body
+    assert "资源登记方：未知" not in body       # 待补态不再笼统标未知
+
+
+def test_attribution_deferred_not_shown_when_holder_known() -> None:
+    """holder 有值时即使残留 deferred 键也渲染真实登记方，不显示待补（name 优先）。"""
+    layer = _five_layer("45.76.1.1", holder="VULTR-NET", asn=20473, asn_org="Vultr", category="cloud")
+    layer["resource_holder"]["deferred"] = "case_close"   # 不应出现的残留，渲染须免疫
+    body = letters.build_letters(_report_with_attr("x.com", [layer]))[0]["body_md"]
+    assert "VULTR" in body.replace("\\-", "-")
+    assert "待结案 RDAP 补全" not in body
+
+
 def test_attribution_service_operator_never_inferred() -> None:
     """★核心纪律：每个落地 IP 都标『实际运营者：未知（不从基础设施归属推断）』，防把持有方当运营者。"""
     ips = [_five_layer("45.76.1.1", holder="X", asn=1, asn_org="Y", category="cloud", edge="Z")]
