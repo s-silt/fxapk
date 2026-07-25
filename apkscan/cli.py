@@ -1139,6 +1139,38 @@ def capture_plan_cmd(
         raise typer.Exit(code=1) from exc
 
 
+@app.command(name="config-channel")
+def config_channel_cmd(
+    prefix: str = typer.Option(..., "--prefix", help="算法前缀常量（样本里抠出的 ENABLE_SETTING 类常量，如 PREFIX-000-）。"),
+    domain: str = typer.Option(..., "--domain", help="基域（OSS_URL 类常量，如 example-cfg.invalid）。"),
+    path: str = typer.Option("", "--path", help="配置对象路径（如 /config.txt）；空则只到域名。"),
+    day: str = typer.Option("", "--date", help="中心日期 YYYY-MM-DD；默认今天。"),
+    back: int = typer.Option(3, "--back", help="往前枚举天数。"),
+    fwd: int = typer.Option(1, "--fwd", help="往后枚举天数。"),
+) -> None:
+    """枚举「MD5(前缀+日期)+.基域」算法生成的下发通道候选子域（A4）。
+
+    这类下发 URL 运行时才拼、静态不存在，analyze 发现不了。给定从样本抠出的前缀 + 基域，本命令按日期窗口
+    枚举候选子域/URL（**同时**产日历年与 ISO 周年两种，堵 Java SimpleDateFormat 大写 YYYY 的 week-year 坑），
+    供被动查历史解析 / passive DNS / 证书透明度反查真实下发。纯离线生成，绝不联网。
+    """
+    import json as _json
+    from datetime import date as _date
+
+    from apkscan.config.algo_channel import date_window, md5_date_subdomains
+
+    try:
+        center = _date.fromisoformat(day.strip()) if day.strip() else _date.today()
+    except ValueError:
+        typer.echo(f"错误：--date 格式应为 YYYY-MM-DD：{day!r}", err=True)
+        raise typer.Exit(code=2) from None
+    days = date_window(center, back=back, fwd=fwd)
+    candidates = md5_date_subdomains(prefix, domain, days, path=path)
+    typer.echo(_json.dumps(
+        {"center": center.isoformat(), "count": len(candidates), "candidates": candidates},
+        ensure_ascii=False, indent=2))
+
+
 def _print_auto_result(result: object) -> None:
     """打印 auto.run 的结构化结果：逐步状态 + 报告路径。"""
     if not isinstance(result, dict):
