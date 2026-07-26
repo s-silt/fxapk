@@ -49,6 +49,16 @@ affect automated / CI / agent callers are called out explicitly**.
   ★ 局限已记入规则注释：上述锚点**扛不住 DEX 字符串加密**；那种样本会由 `dex_obfuscation` 报
   `DEX-STRING-POOL-OPAQUE`，正确结论是「静态不可判定」而非「未使用」。
 
+- **★ 未知壳的结构判据**：`packing` 新增 `PACK-UNIDENTIFIED-STUB-DEX`——DEX 只剩壳桩
+  （字符串数远低于真实 App）且存在 App 自有 `.so` 时，即便**未命中任何厂商特征**也判「疑已加固」，
+  并明说静态端点不完整、需脱壳或转运行时。
+  - **解决的问题**：厂商识别靠 so 名/特征文件/包名等已知特征，遇未知壳或自研壳全部落空、报「未加固」
+    ——而真相是 Java 侧几乎什么都没抽到，报告却让人以为静态结果完整。实测三个真样本正是如此：
+    `classes.dex` 仅 1~3KB、DEX 字符串 15~57 条，却被判「未加固」。
+  - **阈值有实测依据**：24 样本标定，加固样本 DEX 字符串 15~440 条、正常 App 12867~299356 条，
+    相差 29 倍，故取 1000 有充足余量；端到端 **命中 8/8、正常 App 误报 0/9**，厂商已识别的 7 个不重复报。
+  - **只报手法不认厂商**：不写 `packed`（那是厂商归属，写了会误导「向该厂商调证」），
+    只置 `is_hardened` 与 `meta["hardening_structural"]`。
 - **自带域名解析检测（取证可见性信号）**：新增 `dns_bypass` 分析器，检出 App 内含 DoH 客户端
   （RFC 8484 的 `application/dns-message` 线格式 / `/dns-query` 路径）或商用 HTTPDNS SDK，
   命中产 `APP-MANAGED-DNS-RESOLUTION`。
