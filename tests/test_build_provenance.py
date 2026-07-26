@@ -212,6 +212,48 @@ def test_declared_size_gate_skips_oversized_so() -> None:
     assert result.findings == []
 
 
+@pytest.mark.parametrize(
+    "path,origin",
+    [
+        ("/workspace/src/grpc/src/core/lib/surface/call.cc", "Google Cloud Build 默认工作目录"),
+        ("/workspace/onertc/alirtc-ci-auto/src/rtc.cc", "商用 RTC SDK 的 CI"),
+        ("/workspace/.gradle/caches/transforms/x/jni/y.c", "Gradle 缓存"),
+        ("/build/src/openssl/crypto/mem.c", "Docker 构建镜像惯用目录"),
+        ("/srv/jenkins/workspace/sdk-release/src/a.cpp", "厂商自建 Jenkins"),
+        ("/opt/jenkins/workspace/vendor-sdk/jni/x.cpp", "厂商 Jenkins"),
+        ("/opt/buildkite-agent/builds/host/proj/x.cc", "Buildkite"),
+        ("/opt/gitlab-runner/builds/abc/0/grp/proj/x.c", "GitLab Runner"),
+        ("/opt/teamcity/buildAgent/work/abc/src/x.cpp", "TeamCity"),
+        ("/opt/atlassian/pipelines/agent/build/src/x.c", "Bitbucket Pipelines"),
+    ],
+)
+def test_public_ci_paths_never_judged_self_hosted(path: str, origin: str) -> None:
+    """★公共 CI / 容器构建目录不得判成「自建构建环境」。
+
+    这些是通用、公开的构建环境默认路径——正常 App 里的合法 SDK 只要在这类环境上编译过就会
+    带上它们。实测这 10 条曾**全部**被判 self_hosted：干净 App 会凭空多出一条取证结论。
+    两条判据各管一半：``/workspace`` ``/build`` 是公共约定目录（不给私有工作区资格），
+    其余靠构建根里的 CI 标志物识别（安装位各家不同，逐个列根是打地鼠）。
+    """
+    assert bp.classify_path(path).tier != bp.TIER_SELF_HOSTED, f"{origin} 被误判为自建"
+
+
+def test_private_workspace_still_self_hosted() -> None:
+    """对照：真·私有工作区不得被上面那条误伤（否则修误报的代价是丢掉全部检出）。"""
+    c = bp.classify_path("/opt/work/Env1877-Lxiao-AV/Proj/jni/x.cc")
+    assert c.tier == bp.TIER_SELF_HOSTED
+    assert c.identifier == "Env1877-Lxiao-AV"
+
+
+def test_ci_marker_matched_on_root_only_not_whole_path() -> None:
+    """★CI 标志物只在**构建根**上匹配：私有工作区下面挂个叫 gradle 的目录不该让整条路径改判。
+
+    与「只看构建根、不看整条路径」是同一条纪律——上一次栽在它上面是把私有平台误判成第三方。
+    """
+    c = bp.classify_path("/opt/work/Env1877-Lxiao-AV/Proj/gradle/caches/x.c")
+    assert c.tier == bp.TIER_SELF_HOSTED
+
+
 def test_total_budget_stops_scanning_remaining_libs(monkeypatch: pytest.MonkeyPatch) -> None:
     # 第一库耗尽累计预算 → 第二库不读（其中的第三方路径不出现在 meta）。
     lib_a = b"\x00" * 64 + _SYN_SELF_HOSTED.encode() + b"\x00"

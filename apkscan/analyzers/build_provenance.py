@@ -132,10 +132,26 @@ _KNOWN_THIRD_PARTY_ROOTS: tuple[tuple[str, str], ...] = (
     ("/opt/rh/", "RHEL/CentOS devtoolset 安装位（大量第三方预编译库的构建环境）"),
 )
 
-#: 具备"私有构建工作区"结构资格的根家族：``/opt`` ``/build`` ``/workspace`` ``/srv``
-#: 是服务器上自管目录的惯用位。个人主目录（/home /Users）**不**入此列——不在已知
-#: 第三方清单的主目录同样可能来自未收录的 SDK 开发者，宁降级 unknown 不冒进。
-_SELF_HOSTED_FAMILIES = frozenset({"opt", "build", "workspace", "srv"})
+#: 具备"私有构建工作区"结构资格的根家族。
+#:
+#: ★``/workspace`` 与 ``/build`` **不在此列**：它们是公共约定目录而非自管位——
+#: ``/workspace`` 是 Google Cloud Build 的默认工作目录、也是多数 CI 容器的挂载点，
+#: ``/build`` 是构建镜像的惯用目录。实测把它们当私有工作区时，
+#: ``/workspace/src/grpc/...``（任何在 Cloud Build 上编译的合法 SDK）会被判成"自建构建环境"，
+#: 让干净 App 凭空多出一条取证结论。这类路径降级 unknown：拿不准就别下判断。
+_SELF_HOSTED_FAMILIES = frozenset({"opt", "srv"})
+
+#: CI / 构建代理的标志物：出现在**构建根**里即说明该目录属某个持续集成系统，
+#: 不是"某人自管的工作区"。做成关键词而非根路径清单——CI 的安装位各家各异
+#: （``/opt/jenkins`` ``/srv/jenkins`` ``/var/lib/jenkins`` 都常见），逐个列举是打地鼠。
+#: ★只在**构建根**上匹配，不在完整路径上：私有工作区下面挂个名叫 jenkins 的目录
+#: 不该让整条路径改判（同"只看构建根"那条纪律）。
+_CI_MARKERS: tuple[str, ...] = (
+    "jenkins", "gitlab-runner", "buildkite", "teamcity", "bamboo", "atlassian",
+    "circleci", "travis", "drone", "woodpecker", "concourse", "gocd", "bitrise",
+    "codebuild", "cloudbuild", "azure-pipelines", "actions-runner", "buildagent",
+    "hostedtoolcache", "toolcache", "gradle", "maven", "conan", "vcpkg",
+)
 
 
 @dataclass
@@ -196,9 +212,16 @@ def _split_root(path: str) -> tuple[str, str | None, str | None, bool]:
         root = f"/opt/{segs[1].lower()}" if len(segs) >= 2 else "/opt"
         identifier = segs[2] if len(segs) >= 3 else None
         return root, identifier, None, len(segs) >= 4
-    if head in ("build", "workspace", "srv"):
-        identifier = segs[1] if len(segs) >= 2 else None
-        return f"/{head}", identifier, None, len(segs) >= 3
+    if head == "srv":
+        # 与 /opt 同构：根取到二级（``/srv/<工作区>``），标识取三级。二级并入根，CI 标志物
+        # 才检得到（``/srv/jenkins/…`` 的 jenkins 在二级；只取 ``/srv`` 会让它漏网）。
+        root = f"/srv/{segs[1].lower()}" if len(segs) >= 2 else "/srv"
+        identifier = segs[2] if len(segs) >= 3 else None
+        return root, identifier, None, len(segs) >= 4
+    if head in ("build", "workspace"):
+        # 公共约定目录（Cloud Build 默认工作区 / 构建镜像惯用位）：仍记录路径，但不给
+        # 私有工作区资格——见 _SELF_HOSTED_FAMILIES 处的说明。
+        return f"/{head}", segs[1] if len(segs) >= 2 else None, None, False
     if head in ("mnt", "volumes"):
         root = f"/{head}/{segs[1].lower()}" if len(segs) >= 2 else f"/{head}"
         return root, None, None, False
@@ -214,6 +237,11 @@ def classify_path(path: str) -> ClassifiedPath:
             return ClassifiedPath(
                 path=path, tier=TIER_THIRD_PARTY, root=root, username=username, origin=origin
             )
+    # CI/构建代理的安装位不是"某人自管的工作区"。只在**构建根**上匹配，不看整条路径——
+    # 私有工作区下面挂个叫 gradle 的目录不该让整条路径改判（同"只看构建根"那条纪律）。
+    if any(marker in root for marker in _CI_MARKERS):
+        return ClassifiedPath(path=path, tier=TIER_UNKNOWN, root=root, username=username)
+
     family = root.lstrip("/").split("/", 1)[0]
     if eligible and identifier and family in _SELF_HOSTED_FAMILIES:
         return ClassifiedPath(
