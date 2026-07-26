@@ -50,6 +50,27 @@ def test_classify_network() -> None:
     assert A.classify_network("Some Random Ltd", "AS99999") == A.CAT_UNKNOWN
 
 
+def test_classify_network_prefers_most_specific_keyword() -> None:
+    """★同时命中多类时取**最具体**（最长）的关键字，而不是 YAML 里排在前面的那类。
+
+    实测 "Amazon CloudFront" 曾被判成 cloud：cloud 类的 "amazon" 与 cdn 类的 "cloudfront" 都命中，
+    而遍历按类别书写顺序、首个命中即返回。判成 cloud 的后果是方向性的——CDN 边缘不再触发
+    PUBLIC_CDN 阻断，反而落进「云/IDC 自建托管」，边缘节点被当成源站去调证。
+    """
+    assert A.classify_network("Amazon CloudFront") == A.CAT_CDN
+    assert A.classify_network("Amazon Technologies Inc.") == A.CAT_CLOUD  # 不含 cdn 关键字仍是云
+
+
+def test_classify_network_knows_cdn_orgs_by_real_whois_form() -> None:
+    """★CDN 厂商要按**实际 org 形态**认得出来，而不是只认连写商标名。
+
+    45.202.x 那批 IP 的 Shodan org 是 "Bunny Technology LLC"——表里只有连写的 "bunnycdn" 时
+    匹配不上，归属落 unknown，边缘 IP 被当成托管商查了半天。
+    """
+    for org in ("Bunny Technology LLC", "bunny.net", "CDN77 Ltd", "G-Core Labs S.A."):
+        assert A.classify_network(org) == A.CAT_CDN, f"CDN 组织名认不出：{org}"
+
+
 def test_five_layers_never_collapse() -> None:
     """★五层各自独立、不塌缩：service_operator 恒未知、hosting 不等于 website_owner。"""
     att = A.build_ip_attribution("1.2.3.4", {

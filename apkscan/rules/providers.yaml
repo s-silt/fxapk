@@ -36,6 +36,9 @@ network_categories:
       - kingsoft cloud
       - 金山云
   cdn:
+    # ★关键字要匹配 WHOIS/Shodan 里的**实际 org 形态**，不是商标连写名。实测 45.202.x 段的
+    #   Shodan org 是 "Bunny Technology LLC"——只收 "bunnycdn" 时匹配不上，归属落 unknown，
+    #   边缘 IP 被当成托管商查。分类取最长命中关键字，故 "cloudfront" 稳压 cloud 的 "amazon"。
     org_keywords:
       - cloudflare
       - akamai
@@ -44,7 +47,15 @@ network_categories:
       - edgeone
       - stackpath
       - bunnycdn
+      - bunny         # Bunny Technology LLC / bunny.net
       - keycdn
+      - cdn77
+      - gcore         # G-Core Labs
+      - g-core
+      - edgio
+      - limelight
+      - qrator
+      - ddos-guard
   telecom:
     org_keywords:
       - chinanet

@@ -209,20 +209,32 @@ def _host_hits_suffix(hosts: list[Any], suffix_val: str) -> bool:
 
 
 def classify_network(org: str | None, asn: str | None = None) -> str:
-    """按 org/ASN 名称关键字判网络类型（cloud/cdn/telecom/idc/security_proxy/...）。命不中 → unknown。绝不抛。"""
+    """按 org/ASN 名称关键字判网络类型（cloud/cdn/telecom/idc/security_proxy/...）。命不中 → unknown。绝不抛。
+
+    ★多类同时命中时取**最长**（最具体）的关键字，而非 YAML 里排在前面的那类。曾按书写顺序首个
+    命中即返回，于是 "Amazon CloudFront" 撞上 cloud 的 ``amazon`` 就返回 cloud，永远轮不到 cdn 的
+    ``cloudfront``——后果是方向性的：CDN 边缘不再触发 PUBLIC_CDN 阻断，反被当成「云/IDC 自建托管」，
+    边缘节点被当源站去调证。长度是这里最朴素也最稳的具体性度量：能匹配更长的串就是知道得更多。
+    平局按类别名排序，保证同一输入永远得到同一结果（分类会进报告，不能随字典顺序漂移）。
+    """
     blob = f"{_s(org)} {_s(asn)}"
     if not blob.strip():
         return CAT_UNKNOWN
     cats = _providers_rules().get("network_categories")
     if not isinstance(cats, dict):
         return CAT_UNKNOWN
+    best: tuple[int, str] | None = None
     for category, spec in cats.items():
         if not isinstance(spec, dict):
             continue
         for kw in spec.get("org_keywords") or []:
-            if _s(kw) and _s(kw) in blob:
-                return str(category)
-    return CAT_UNKNOWN
+            token = _s(kw)
+            if not token or token not in blob:
+                continue
+            cand = (len(token), str(category))
+            if best is None or cand[0] > best[0] or (cand[0] == best[0] and cand[1] < best[1]):
+                best = cand
+    return best[1] if best else CAT_UNKNOWN
 
 
 def _layer(**kw: Any) -> dict[str, Any]:

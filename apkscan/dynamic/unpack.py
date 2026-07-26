@@ -23,7 +23,9 @@ from __future__ import annotations
 import logging
 import subprocess
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from apkscan.core import device, tools
 from apkscan.core.models import AnalysisConfig
@@ -51,6 +53,7 @@ def run(
     *,
     out: str | None = None,
     serial: str | None = None,
+    on_reanalyzed: Callable[[Any], None] | None = None,
 ) -> DynamicResult:
     """真机脱壳主入口（见模块 docstring）。
 
@@ -59,6 +62,8 @@ def run(
         out_dir: 产物 / 报告输出目录（dump 落到 ``out_dir/dump``）。
         reanalyze: 脱壳得到额外 DEX 后是否自动 load_apk(extra_dex=...) 重新静态分析。
         out: ``out_dir`` 的关键字别名（CLI 以 ``out=`` 调用，二者取其一，out 优先）。
+        on_reanalyzed: 回灌成功时以**回灌后的 Report 对象**回调一次。流水线（auto）据此把后续
+                       merge/closure/最终报告切到脱壳版；不传则行为不变（仅落盘）。
         serial: 目标设备 serial（多设备/一机多 transport 下钉定那台，由 auto 选定后传入）。
                 frida-dexdump 用 ``-F -D <serial>``、frida-server 探测带 serial；None 时退回
                 ``-FU``（向后兼容无设备选择的旧路径/测试）。
@@ -120,7 +125,9 @@ def run(
         # 4) 回灌：load_apk(extra_dex=dumped) + pipeline.run + 写报告。失败不致命，
         #    脱壳产物已在 artifacts，仅在 reason 标注重分析失败。
         try:
-            report_paths = _reanalyze(apk_path, artifacts, out_dir)
+            report_paths, reanalyzed = _reanalyze(apk_path, artifacts, out_dir)
+            if on_reanalyzed is not None:
+                on_reanalyzed(reanalyzed)
             playbook.append(
                 f"apkscan analyze {apk_path} --extra-dex {dump_dir} "
                 "（脱壳产物已自动回灌重分析）"
@@ -339,10 +346,15 @@ def _collect_dex(dump_dir: Path) -> list[Path]:
     return sorted(dump_dir.rglob("*.dex"))
 
 
-def _reanalyze(apk_path: str, extra_dex: list[str], out_dir: str) -> list[str]:
+def _reanalyze(apk_path: str, extra_dex: list[str], out_dir: str) -> tuple[list[str], object]:
     """load_apk(extra_dex=dumped) + pipeline.run + 写 unpacked_report.{json,html}。
 
-    返回写出的报告路径列表。任何异常向上抛，由调用方转 DynamicResult（不在此吞错）。
+    返回 ``(报告路径列表, 回灌后的 Report 对象)``。任何异常向上抛，由调用方转 DynamicResult
+    （不在此吞错）。
+
+    ★为什么要把 Report **对象**带回来而不只是路径：脱壳的全部价值在于让隐藏 DEX 里的端点/配置
+    进入后续 merge/closure/最终报告。Report → JSON 是单向的（没有反序列化器），只回传路径的话
+    调用方拿不回内存对象，脱壳结果就只能躺在 unpacked_report.json 里，主线仍在壳桩上跑完全程。
     """
     # 惰性导入：重分析才需要 androguard / pipeline / report，避免无谓加载。
     from apkscan.core import pipeline
@@ -367,7 +379,7 @@ def _reanalyze(apk_path: str, extra_dex: list[str], out_dir: str) -> list[str]:
     json_report.dump(report, str(json_path))
     html_report.render(report, str(html_path))
     logger.info("脱壳后重分析报告已写出：%s / %s", json_path, html_path)
-    return [str(json_path), str(html_path)]
+    return [str(json_path), str(html_path)], report
 
 
 __all__ = ["run"]
