@@ -208,14 +208,59 @@ def _host_hits_suffix(hosts: list[Any], suffix_val: str) -> bool:
     return False
 
 
+#: 类别**专指度**：多个类别同时命中时，命中更专指的那个胜出（数字大者优先）。
+#:
+#: ★为什么不能用「关键字长度」当具体性：长度只是拼写长短，与语义专指度无关，且在中文里直接反转。
+#: 实测 ``中国移动云能力中心``——telecom 的 ``中国移动``(4 字) 长于 cloud 的 ``移动云``(3 字)，于是
+#: 运营商系云被判成运营商；英文形态靠 ``china mobile cloud``(18 字符) 侥幸保住，中文没有对应加长词。
+#: 后果是方向性的：hosting 层整层落 None，调证方向从**云商（有租户实名）**错指到运营商。
+#: 同理 idc 的泛词 ``hosting``(7)/``data center``(11) 长于几乎所有品牌词，``fastly hosting`` 会判成
+#: 自建机房，CDN 边缘反而拿到源站支持分——正是本函数要防的错误在另一条边上复现。
+#:
+#: 排序依据是**该类别关键字的专指程度**：CDN/防护厂商名与安全代理最专指（只有那家用）；云厂商品牌次之；
+#: 运营商名常常只是 AS 持有者（云/CDN 也可能落在运营商 AS 下），故低于云；idc 全是 ``hosting``/``机房``
+#: 这类泛词，最弱、只作兜底。
+_CATEGORY_SPECIFICITY: dict[str, int] = {
+    CAT_SECURITY_PROXY: 50,
+    CAT_CDN: 40,
+    CAT_CLOUD: 30,
+    CAT_TELECOM: 20,
+    CAT_IDC: 10,
+}
+
+#: ASCII 关键字两侧的"词边界"字符集之外即视为粘连（不算命中）。中文无词边界概念，故只对纯 ASCII 词生效。
+_WORD_CHARS = set("abcdefghijklmnopqrstuvwxyz0123456789")
+
+
+def _keyword_hits(blob: str, token: str) -> bool:
+    """token 是否在 blob 里以**独立词**出现。
+
+    ★纯子串匹配会把无关公司名误判成厂商：实测 ``Kingcore Electronics`` 因含 ``gcore`` 被判成 CDN，
+    进而触发 PUBLIC_CDN 阻断、把可能的真源站压掉。对纯 ASCII 关键字要求两侧非字母数字即可挡住这类
+    粘连；含中文的关键字不做边界要求（中文本就无词边界，且 ``中国移动`` 这类词不会粘进别的词里）。
+    """
+    if not token:
+        return False
+    if any(ch not in _WORD_CHARS and not ch.isspace() and ch not in ".-_" for ch in token):
+        return token in blob            # 含 CJK 等非 ASCII → 退回子串匹配
+    start = 0
+    while True:
+        i = blob.find(token, start)
+        if i < 0:
+            return False
+        before_ok = i == 0 or blob[i - 1] not in _WORD_CHARS
+        j = i + len(token)
+        after_ok = j >= len(blob) or blob[j] not in _WORD_CHARS
+        if before_ok and after_ok:
+            return True
+        start = i + 1
+
+
 def classify_network(org: str | None, asn: str | None = None) -> str:
     """按 org/ASN 名称关键字判网络类型（cloud/cdn/telecom/idc/security_proxy/...）。命不中 → unknown。绝不抛。
 
-    ★多类同时命中时取**最长**（最具体）的关键字，而非 YAML 里排在前面的那类。曾按书写顺序首个
-    命中即返回，于是 "Amazon CloudFront" 撞上 cloud 的 ``amazon`` 就返回 cloud，永远轮不到 cdn 的
-    ``cloudfront``——后果是方向性的：CDN 边缘不再触发 PUBLIC_CDN 阻断，反被当成「云/IDC 自建托管」，
-    边缘节点被当源站去调证。长度是这里最朴素也最稳的具体性度量：能匹配更长的串就是知道得更多。
-    平局按类别名排序，保证同一输入永远得到同一结果（分类会进报告，不能随字典顺序漂移）。
+    多类同时命中时按 :data:`_CATEGORY_SPECIFICITY` 取**更专指的类别**（见该常量处的说明：为什么不是
+    「关键字更长」，也不是「YAML 里排在前面」）。同类别内再取最长命中，保证同一输入结果确定。
     """
     blob = f"{_s(org)} {_s(asn)}"
     if not blob.strip():
@@ -223,18 +268,22 @@ def classify_network(org: str | None, asn: str | None = None) -> str:
     cats = _providers_rules().get("network_categories")
     if not isinstance(cats, dict):
         return CAT_UNKNOWN
-    best: tuple[int, str] | None = None
+    best: tuple[int, int, str] | None = None
     for category, spec in cats.items():
         if not isinstance(spec, dict):
             continue
+        name = str(category)
+        # 未登记专指度的自定义类别落在 idc 与 telecom 之间：比泛词强，但不越过已知的语义分层。
+        rank = _CATEGORY_SPECIFICITY.get(name, 15)
         for kw in spec.get("org_keywords") or []:
             token = _s(kw)
-            if not token or token not in blob:
+            if not token or not _keyword_hits(blob, token):
                 continue
-            cand = (len(token), str(category))
-            if best is None or cand[0] > best[0] or (cand[0] == best[0] and cand[1] < best[1]):
+            # 末位放类别名只为消除等价平局时的字典顺序漂移，不承担任何语义。
+            cand = (rank, len(token), name)
+            if best is None or cand[:2] > best[:2] or (cand[:2] == best[:2] and name < best[2]):
                 best = cand
-    return best[1] if best else CAT_UNKNOWN
+    return best[2] if best else CAT_UNKNOWN
 
 
 def _layer(**kw: Any) -> dict[str, Any]:

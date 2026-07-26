@@ -354,6 +354,67 @@ def test_unpacked_report_becomes_active_input_for_merge_and_closure(
     assert lineage["superseded_static_hardened"] is True
 
 
+def test_adopted_report_inherits_run_context_not_sample_facts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★换报告必须带上**运行上下文**，但绝不能带样本结论。
+
+    ``_reanalyze`` 固定以 online=False 跑（回灌只做静态重解），产出的报告里没有 ``online`` 键；
+    而 merge 读 ``meta.get("online", True)`` 决定运行时线索要不要标「离线扫描，归属未查询」。
+    不继承的话，一次 --offline 运行在脱壳成功后会把「压根没查」渲染成「查过」——正是该字段
+    存在意义的反面。反过来 is_hardened 这类**样本**结论脱壳后本就该重算，照搬会把壳桩结论
+    糊到去壳报告上。
+    """
+    _patch_doctor(monkeypatch, ok=True)
+    static = _patch_static_ok(monkeypatch, "com.fraud.app")
+    static.meta.update({"online": False, "mode": "passive", "is_hardened": True,
+                        "packed": "some-packer"})
+
+    unpacked = _make_report("com.fraud.app")
+    unpacked.meta["is_hardened"] = False        # 脱壳后重算的样本结论
+
+    _set_device(monkeypatch, True)
+    _patch_unpack_reanalyzing(monkeypatch, unpacked, dex_count=2)
+    _patch_capture(
+        monkeypatch,
+        _dynamic_result(STATUS_DONE, "抓包完成", report_paths=["out/runtime_report.json"]),
+    )
+    merge_calls = _patch_merge(monkeypatch)
+
+    auto.run("sample.apk", out_dir="out", online=False, confirm=lambda _m: None)
+
+    got = merge_calls["rerender_args"]["report"]
+    assert got is unpacked
+    # 运行上下文：继承
+    assert got.meta["online"] is False, "离线运行的上下文丢了 → 线索会被当成已联网核实过"
+    assert got.meta["mode"] == "passive"
+    # 样本结论：不继承（脱壳后已重算）
+    assert got.meta["is_hardened"] is False, "壳桩的加固结论不该糊到去壳报告上"
+    assert "packed" not in got.meta
+    # 继承了什么要可查
+    assert set(got.meta["artifact_lineage"]["inherited_run_context"]) >= {"online", "mode"}
+
+
+def test_adopted_report_keeps_target_serial(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★换报告后仍要知道「本次在哪台设备上分析」——多设备下这是排查的唯一线索。"""
+    _patch_doctor(monkeypatch, ok=True)
+    _patch_static_ok(monkeypatch, "com.fraud.app")
+    unpacked = _make_report("com.fraud.app")
+
+    _set_device(monkeypatch, True)
+    _patch_unpack_reanalyzing(monkeypatch, unpacked)
+    _patch_capture(
+        monkeypatch,
+        _dynamic_result(STATUS_DONE, "抓包完成", report_paths=["out/runtime_report.json"]),
+    )
+    merge_calls = _patch_merge(monkeypatch)
+
+    auto.run("sample.apk", out_dir="out", confirm=lambda _m: None)
+
+    got = merge_calls["rerender_args"]["report"]
+    assert got.meta.get("target_serial"), "换报告后设备 serial 丢失，多设备下无从排查"
+
+
 def test_unpack_without_reanalysis_keeps_static_report(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

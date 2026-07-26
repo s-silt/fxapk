@@ -109,15 +109,71 @@ def test_only_in_one_version_not_counted_as_change(tmp_path):
     assert len(diffs) == 1
 
 
-def test_available_versions_and_missing_report_tolerated(tmp_path):
-    root = _seed(tmp_path, [_report("s1", "1.0.0"), _report("s1", "1.1.0")])
+def test_available_versions_follows_insertion_order(tmp_path):
+    """★修订版按**入库顺序**返回，不是字典序。
+
+    字典序里 "1.10.0" 排在 "1.9.0" 前面，取最后一个当「最新版」会拿到 1.9——方向直接反了。
+    manifest 没有任何时间戳字段，而 corpus.upsert 是纯追加，行序即入库顺序，这是唯一能代表新旧的信号。
+    """
+    root = _seed(tmp_path, [_report("s1", "1.9.0"), _report("s1", "1.10.0")])
     entries = corpus.load_manifest(root)
-    assert regress.available_versions(entries) == ["1.0.0@dd", "1.1.0@dd"]
-    # 报告文件被删 → advice 统计退化为空，但不抛
-    for f in (root / "reports").rglob("*.json"):
-        f.unlink()
+    revs = regress.available_versions(entries)
+    assert revs == ["1.9.0@dd", "1.10.0@dd"], "修订版顺序必须跟入库顺序，不能按字符串排"
+    assert revs[-1].startswith("1.10.0"), "后入库的才是最新版"
+
+
+def test_missing_report_never_reads_as_zero_leads(tmp_path):
+    """★报告读不到 ≠ 零线索——这正是本模块存在的理由，不能在它内部先犯这个错。
+
+    曾把「读不到」和「读到了但零线索」都折叠成 {}，于是一份报告文件缺失就会渲染出
+    「建议调证 8 → 0（降噪）」和「闭环 complete → None（降级）」，凭空捏造并不存在的改进。
+    """
+    root = _seed(tmp_path, [
+        _report("s1", "1.0.0", leads=["建议调证"] * 8, closure="complete"),
+        _report("s1", "1.1.0", leads=["建议调证"] * 8, closure="complete"),
+    ])
+    # 只删新版那份报告全文（manifest 记录仍在）
+    victim = next(p for p in (root / "reports").rglob("*.json") if "1.1.0" in p.name)
+    victim.unlink()
+
+    diffs, summary = regress.load_and_diff(root, "1.0.0@dd", "1.1.0@dd")
+    d = diffs[0]
+    assert d.advice_to is None, "读不到必须是 None，不能是 {}（那等于断言零线索）"
+    assert d.advice_from is not None
+    assert any("读不到" in n for n in d.notes)
+    assert not any("降噪" in n for n in d.notes), "不得凭空断言降噪"
+    assert not any("→" in n for n in d.notes), f"读不到时不得给出任何 A→B 结论：{d.notes}"
+    # 汇总不得把读不到的样本算成 0 条
+    assert summary["advice_investigate_from"] == 0, "该样本不可比，不该进合计"
+    assert summary["advice_comparable"] == 0
+    assert summary["advice_unreadable"] == 1
+    assert summary["closure_downgraded"] == 0
+
+
+def test_empty_leads_distinguished_from_unreadable(tmp_path):
+    """对照：报告读得到、leads 确实为空 → {} 而非 None，降噪结论正常产出。"""
+    root = _seed(tmp_path, [
+        _report("s1", "1.0.0", leads=["建议调证"] * 3),
+        _report("s1", "1.1.0", leads=[]),
+    ])
+    diffs, summary = regress.load_and_diff(root, "1.0.0@dd", "1.1.0@dd")
+    assert diffs[0].advice_to == {}
+    assert summary["advice_comparable"] == 1 and summary["advice_unreadable"] == 0
+    assert any("建议调证 3 → 0" in n for n in diffs[0].notes)
+
+
+def test_malformed_manifest_does_not_raise(tmp_path):
+    """★「绝不抛」要对畸形 manifest 也成立：手编/旧 schema 的坏值不得炸到调用方。"""
+    root = _seed(tmp_path, [_report("s1", "1.0.0"), _report("s1", "1.1.0")])
+    mpath = next((root).rglob("manifest.jsonl"))
+    rows = [json.loads(x) for x in mpath.read_text(encoding="utf-8").splitlines() if x.strip()]
+    rows[0]["counts"] = "not-a-dict"
+    rows[1]["finding_ids"] = [{"nested": "dict"}, "OK-ID"]
+    mpath.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8")
+
     diffs, _summary = regress.load_and_diff(root, "1.0.0@dd", "1.1.0@dd")
-    assert diffs[0].advice_from == {} and diffs[0].advice_to == {}
+    assert diffs[0].counts_from == {}
+    assert diffs[0].findings_added == ["OK-ID"]  # 畸形元素跳过，合法的仍算
 
 
 def test_same_tool_version_different_ruleset_is_comparable(tmp_path):
@@ -132,7 +188,7 @@ def test_same_tool_version_different_ruleset_is_comparable(tmp_path):
     ])
     entries = corpus.load_manifest(root)
     revs = regress.available_versions(entries)
-    assert revs == ["1.2.0@aaaaaaaa", "1.2.0@bbbbbbbb"]
+    assert revs == ["1.2.0@aaaaaaaa11", "1.2.0@bbbbbbbb22"]
     diffs, summary = regress.load_and_diff(root, revs[0], revs[1])
     assert summary["compared"] == 1, "同版本不同规则集必须能对上，否则本轮改动量不出来"
     assert diffs[0].findings_added == ["B"]
@@ -142,11 +198,41 @@ def test_resolve_revision_refuses_ambiguous_version():
     """★版本号下有多个规则集时拒绝猜：猜错会把两次不同规则集的结果错当同一版对比。"""
     revs = ["1.1.0@aaaa1111", "1.2.0@bbbb2222", "1.2.0@cccc3333"]
     assert regress.resolve_revision("1.2.0@bbbb2222", revs)[0] == "1.2.0@bbbb2222"
-    assert regress.resolve_revision("1.1.0", revs)[0] == "1.1.0@aaaa1111"  # 唯一前缀可省
+    assert regress.resolve_revision("1.1.0", revs)[0] == "1.1.0@aaaa1111"  # 该版唯一，可省摘要
+    assert regress.resolve_revision("1.2.0@bbbb", revs)[0] == "1.2.0@bbbb2222"  # 摘要可写前缀
     got, err = regress.resolve_revision("1.2.0", revs)
     assert got is None and "多个规则集" in err
     got, err = regress.resolve_revision("9.9.9", revs)
     assert got is None and "不在库内" in err
+
+
+def test_resolve_revision_does_not_cross_version_boundary():
+    """★版本段要**精确相等**，不能整串前缀匹配：否则 "1.1.0" 会静默解析成 "1.1.0-rc"。"""
+    got, err = regress.resolve_revision("1.1.0", ["1.1.0-rc@abcd1234"])
+    assert got is None, f"稳定版输入被解析成了预发布版：{got}"
+    assert "不在库内" in err
+    # 两者并存时也不得把稳定版输入配到 rc
+    revs = ["1.1.0@aaaa1111", "1.1.0-rc@bbbb2222"]
+    assert regress.resolve_revision("1.1.0", revs)[0] == "1.1.0@aaaa1111"
+    assert regress.resolve_revision("1.1.0-rc", revs)[0] == "1.1.0-rc@bbbb2222"
+
+
+def test_revision_uses_full_digest_not_prefix(tmp_path):
+    """★修订版键用**完整** ruleset_digest。
+
+    corpus 主键用的是完整 digest，两份「完整值不同、前 8 位相同」的报告是合法共存的两条记录；
+    若按前 8 位切版，它们会被压成同一版——两套不同规则集的结果被当成同一版互相对比。
+    """
+    root = _seed(tmp_path, [
+        _report("s1", "1.2.0", ruleset="abcdef1200000000", findings=["A"]),
+        _report("s1", "1.2.0", ruleset="abcdef1299999999", findings=["A", "B"]),
+    ])
+    revs = regress.available_versions(corpus.load_manifest(root))
+    assert len(revs) == 2, f"前 8 位相同的两套规则集被压成了同一版：{revs}"
+    # 人读形态仍截断显示
+    assert regress.short_revision(revs[0]) == "1.2.0@abcdef12"
+    diffs, summary = regress.load_and_diff(root, revs[0], revs[1])
+    assert summary["compared"] == 1 and diffs[0].findings_added == ["B"]
 
 
 def test_cli_regress_requires_two_versions(tmp_path):

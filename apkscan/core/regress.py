@@ -51,8 +51,9 @@ class SampleDiff:
     # 计数类（None 表示该版无此样本）
     counts_from: dict[str, int] = field(default_factory=dict)
     counts_to: dict[str, int] = field(default_factory=dict)
-    advice_from: dict[str, int] = field(default_factory=dict)
-    advice_to: dict[str, int] = field(default_factory=dict)
+    #: None = 该版报告读不到（缺文件/坏 JSON），与「读到了但零线索」的 {} 严格区分。
+    advice_from: dict[str, int] | None = None
+    advice_to: dict[str, int] | None = None
     # 检出类
     findings_added: list[str] = field(default_factory=list)
     findings_removed: list[str] = field(default_factory=list)
@@ -84,18 +85,22 @@ def _load_report(corpus_dir: Path, entry: dict) -> dict | None:
         return None
 
 
-def advice_counts(report: dict | None) -> dict[str, int]:
-    """报告里各 advice 档的线索条数。★这是判断「降噪是否有效」的核心指标。
+def advice_counts(report: dict | None) -> dict[str, int] | None:
+    """报告里各 advice 档的线索条数；**报告不可读时返回 None**。★这是判断「降噪是否有效」的核心指标。
 
     manifest 只存线索总数，不分档；而「建议调证」条数才是办案人实际面对的清单长度——
     实测一次降噪把它从 89 压到 24，总数却只从 107 降到 87，只看总数完全看不出来。
+
+    ★``None`` 与 ``{}`` 必须分开：前者是「这份报告读不到」，后者是「读到了，确实零线索」。曾把
+    两者都折叠成 ``{}``，于是报告文件缺失会被渲染成「建议调证 24 → 0（降噪）」——凭空捏造一个
+    并不存在的改进。本模块的立意就是别把缺失当不存在，不能在自己内部先犯这个错。
     """
     if not isinstance(report, dict):
-        return {}
+        return None
     leads = report.get("leads")
     if not isinstance(leads, list):
-        return {}
-    c = Counter()
+        return None
+    c: Counter[str] = Counter()
     for ld in leads:
         if isinstance(ld, dict):
             c[str(ld.get("advice") or "(空)")] += 1
@@ -110,15 +115,25 @@ def _closure_status(report: dict | None) -> str | None:
 
 
 def revision_of(entry: dict) -> str:
-    """一条 manifest 记录的「修订版」标识：``tool_version@ruleset前8位``。
+    """一条 manifest 记录的「修订版」标识：``tool_version@完整 ruleset_digest``。
 
     ★为什么不只用 tool_version：实测语料库 14 个样本里，**被重跑过的三个全部是同 tool_version、
     不同 ruleset_digest**——真实迭代节奏是「版本号不动、规则集天天在动」。只按版本号切版，
     一整轮规则改动的效果一份都量不出来。规则集变了检出就可能变，它必须进版本坐标。
+
+    ★用**完整** digest 而不是前 8 位：corpus 主键用的是完整 digest，两份「完整值不同、前 8 位相同」
+    的报告是合法共存的两条记录；按前缀切版会把它们压成同一版，于是两套不同规则集的结果被当成
+    同一版互相对比。显示时才截断（见 :func:`short_revision`）。
     """
     tv = str(entry.get("tool_version") or "?")
     rd = str(entry.get("ruleset_digest") or "")
-    return f"{tv}@{rd[:8]}" if rd else tv
+    return f"{tv}@{rd}" if rd else tv
+
+
+def short_revision(revision: str, width: int = 8) -> str:
+    """修订版的人读形态：规则摘要截断到前 ``width`` 位。仅供显示，不作为键。"""
+    tv, sep, rd = revision.partition("@")
+    return f"{tv}{sep}{rd[:width]}" if sep else tv
 
 
 def _index_by_sample(entries: list[dict], revision: str) -> dict[str, dict]:
@@ -137,31 +152,49 @@ def _index_by_sample(entries: list[dict], revision: str) -> dict[str, dict]:
 
 
 def available_versions(entries: list[dict]) -> list[str]:
-    """库内出现过的修订版（``版本@规则摘要``，去重、稳定排序）。"""
-    return sorted({
-        revision_of(e) for e in entries
-        if isinstance(e, dict) and e.get("tool_version")
-    })
+    """库内出现过的修订版，**按入库顺序**（首次出现的先后）去重返回。
+
+    ★不能按字符串排序：字典序里 ``1.10.0`` 排在 ``1.9.0`` 前面，取「最后一个」当最新会拿到 1.9；
+    同版本下多个规则摘要之间的字典序更是毫无时间含义。manifest 无任何时间戳字段，而 ``upsert``
+    是纯追加（见 ``corpus.upsert``），所以**行序即入库顺序**——这是库里唯一能代表新旧的信号。
+    """
+    seen: dict[str, None] = {}
+    for e in entries:
+        if isinstance(e, dict) and e.get("tool_version"):
+            seen.setdefault(revision_of(e), None)
+    return list(seen)
 
 
 def resolve_revision(spec: str, revisions: list[str]) -> tuple[str | None, str]:
     """把用户输入解析成一个确切修订版。返回 ``(修订版 或 None, 出错说明)``。
 
-    接受三种写法：完整 ``1.2.0@8bcab574``、纯版本号 ``1.2.0``（该版本下只有一个规则集时）、
-    以及唯一前缀。**版本号下有多个规则集时拒绝猜**——猜错会把两次不同规则集的结果错当同一版对比。
+    接受：完整 ``1.2.0@<摘要>``、摘要写前缀 ``1.2.0@8bcab574``、以及纯版本号 ``1.2.0``
+    （该版本下只有一个规则集时）。**版本号下有多个规则集时拒绝猜**——猜错会把两次不同规则集的
+    结果错当同一版对比。
+
+    ★版本段按**精确相等**匹配、不做前缀：曾用整串 ``startswith``，于是库里只有 ``1.1.0-rc@…``
+    时输入 ``1.1.0`` 会被静默解析成那个预发布版，报错文案还误称「对应多个规则集」。
     """
     spec = (spec or "").strip()
     if not spec:
         return None, "版本不能为空"
     if spec in revisions:
         return spec, ""
-    hits = [r for r in revisions if r.startswith(spec)]
+
+    want_ver, sep, want_digest = spec.partition("@")
+    hits = [
+        r for r in revisions
+        if r.partition("@")[0] == want_ver
+        and (not sep or r.partition("@")[2].startswith(want_digest))
+    ]
+    shown = [short_revision(r) for r in revisions]
     if len(hits) == 1:
         return hits[0], ""
     if not hits:
-        return None, f"{spec!r} 不在库内。可选：{revisions}"
+        return None, f"{spec!r} 不在库内。可选：{shown}"
     return None, (
-        f"{spec!r} 对应多个规则集：{hits}。规则集变了检出就可能变，请写全（如 {hits[0]}）。"
+        f"{spec!r} 对应多个规则集：{[short_revision(h) for h in hits]}。"
+        f"规则集变了检出就可能变，请写全（如 {short_revision(hits[0])}）。"
     )
 
 
@@ -183,8 +216,6 @@ def diff_versions(
     for sha in both:
         ea, eb = idx_a[sha], idx_b[sha]
         ra, rb = _load_report(root, ea), _load_report(root, eb)
-        fa = set(ea.get("finding_ids") or [])
-        fb = set(eb.get("finding_ids") or [])
         d = SampleDiff(
             sample_sha256=sha,
             package_name=eb.get("package_name") or ea.get("package_name"),
@@ -195,13 +226,14 @@ def diff_versions(
             closure_to=_closure_status(rb),
             hardened_from=ea.get("is_hardened"),
             hardened_to=eb.get("is_hardened"),
-            counts_from=dict(ea.get("counts") or {}),
-            counts_to=dict(eb.get("counts") or {}),
+            counts_from=_safe_counts(ea),
+            counts_to=_safe_counts(eb),
             advice_from=advice_counts(ra),
             advice_to=advice_counts(rb),
-            findings_added=sorted(fb - fa),
-            findings_removed=sorted(fa - fb),
         )
+        fa, fb = _safe_finding_ids(ea), _safe_finding_ids(eb)
+        d.findings_added = sorted(fb - fa)
+        d.findings_removed = sorted(fa - fb)
         d.notes = _direction_notes(d)
         diffs.append(d)
 
@@ -209,9 +241,38 @@ def diff_versions(
     return diffs, summary
 
 
+def _safe_counts(entry: dict) -> dict[str, int]:
+    """manifest 的 counts 取成 ``{str: int}``；畸形（字符串/列表/嵌套）→ 空 dict。
+
+    ★不能直接 ``dict(entry["counts"])``：manifest 可能被手工编辑或来自旧 schema，畸形值会让
+    ``dict()``/``set()`` 抛到调用方，违背本模块「绝不抛」的承诺。
+    """
+    raw = entry.get("counts")
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): v for k, v in raw.items() if isinstance(v, int)}
+
+
+def _safe_finding_ids(entry: dict) -> set[str]:
+    """manifest 的 finding_ids 取成字符串集合；畸形元素（dict/list）跳过而非抛。"""
+    raw = entry.get("finding_ids")
+    if not isinstance(raw, list):
+        return set()
+    return {x for x in raw if isinstance(x, str)}
+
+
 def _direction_notes(d: SampleDiff) -> list[str]:
     """只对**方向明确**的变化下判断；其余一律不评价（避免把降噪误判成劣化，反之亦然）。"""
     notes: list[str] = []
+    # ★任一侧报告读不到 → 这两版之间的「线索/闭环」根本无从比较，只如实说读不到，绝不下结论。
+    #   曾把读不到折叠成空值，于是缺一份报告就会渲染出「建议调证 24 → 0（降噪）」和
+    #   「闭环 complete → None（降级）」——凭空捏造并不存在的改进与劣化。
+    unreadable = [
+        label for label, adv in (("旧版", d.advice_from), ("新版", d.advice_to)) if adv is None
+    ]
+    if unreadable:
+        return [f"⚠ {'、'.join(unreadable)}报告读不到（缺文件或坏 JSON），线索与闭环无法对比"]
+
     # 载入失败 → 成功：方向明确的改善（实测两个样本正是从整包被拒变为可分析）
     if d.status_from in ("failed", "error") and d.status_to not in ("failed", "error", None):
         notes.append("★ 由分析失败转为可分析")
@@ -228,8 +289,8 @@ def _direction_notes(d: SampleDiff) -> list[str]:
     if d.closure_from != "complete" and d.closure_to == "complete":
         notes.append(f"闭环 {d.closure_from} → complete（须人核：是否证据确实变足）")
     # 建议调证条数：只报变化幅度，不判好坏
-    a = d.advice_from.get(ADVICE_INVESTIGATE, 0)
-    b = d.advice_to.get(ADVICE_INVESTIGATE, 0)
+    a = (d.advice_from or {}).get(ADVICE_INVESTIGATE, 0)
+    b = (d.advice_to or {}).get(ADVICE_INVESTIGATE, 0)
     if a != b:
         notes.append(f"建议调证 {a} → {b}（{'降噪' if b < a else '新增'}，须抽样核对是否误杀/误报）")
     return notes
@@ -242,22 +303,37 @@ def _summarize(
     changed = [d for d in diffs if d.changed]
     added = Counter(f for d in diffs for f in d.findings_added)
     removed = Counter(f for d in diffs for f in d.findings_removed)
-    inv_from = sum(d.advice_from.get(ADVICE_INVESTIGATE, 0) for d in diffs)
-    inv_to = sum(d.advice_to.get(ADVICE_INVESTIGATE, 0) for d in diffs)
+    # ★只统计**两侧都读得到**的样本：把读不到当 0 会凭空做出一份「降噪」战绩。
+    comparable = [d for d in diffs if d.advice_from is not None and d.advice_to is not None]
+    unreadable = len(diffs) - len(comparable)
+    inv_from = sum((d.advice_from or {}).get(ADVICE_INVESTIGATE, 0) for d in comparable)
+    inv_to = sum((d.advice_to or {}).get(ADVICE_INVESTIGATE, 0) for d in comparable)
     return {
         "version_from": version_from,
         "version_to": version_to,
+        "version_from_short": short_revision(version_from),
+        "version_to_short": short_revision(version_to),
         "compared": len(diffs),
         "changed": len(changed),
         "only_in_from": len(only_a),
         "only_in_to": len(only_b),
+        "only_in_from_samples": list(only_a),
+        "only_in_to_samples": list(only_b),
         "findings_added_total": dict(added.most_common()),
         "findings_removed_total": dict(removed.most_common()),
+        # 建议调证合计的分母：仅两侧报告都可读的样本数（其余样本不参与合计）
+        "advice_comparable": len(comparable),
+        "advice_unreadable": unreadable,
         "advice_investigate_from": inv_from,
         "advice_investigate_to": inv_to,
         "became_analyzable": sum(1 for d in diffs if any("由分析失败转为可分析" in n for n in d.notes)),
         "became_unanalyzable": sum(1 for d in diffs if any("由可分析转为分析失败" in n for n in d.notes)),
-        "closure_downgraded": sum(1 for d in diffs if d.closure_from == "complete" and d.closure_to != "complete"),
+        # 闭环状态取自报告全文，读不到时 closure_* 恒为 None，不得计入降级
+        "closure_downgraded": sum(
+            1 for d in diffs
+            if d.advice_from is not None and d.advice_to is not None
+            and d.closure_from == "complete" and d.closure_to != "complete"
+        ),
         "hardening_newly_detected": sum(1 for d in diffs if not d.hardened_from and d.hardened_to),
     }
 
@@ -276,4 +352,7 @@ __all__ = [
     "available_versions",
     "diff_versions",
     "load_and_diff",
+    "resolve_revision",
+    "revision_of",
+    "short_revision",
 ]

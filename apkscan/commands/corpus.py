@@ -344,31 +344,46 @@ def corpus_regress_cmd(
         return
 
     s = summary
-    typer.echo(f"跨版本回归：{s['version_from']} → {s['version_to']}")
+    typer.echo(f"跨版本回归：{s['version_from_short']} → {s['version_to_short']}")
     typer.echo(
         f"  两版都有的样本 {s['compared']} 个，其中有变化 {s['changed']} 个；"
         f"仅旧版有 {s['only_in_from']}、仅新版有 {s['only_in_to']}"
     )
+    for label, key in (("仅旧版有", "only_in_from_samples"), ("仅新版有", "only_in_to_samples")):
+        if s[key]:
+            typer.echo(f"    {label}（未参与对比）：{', '.join(x[:12] for x in s[key])}")
     typer.echo(
         f"  ★由失败转为可分析 {s['became_analyzable']}；由可分析转为失败 {s['became_unanalyzable']}；"
         f"加固新检出 {s['hardening_newly_detected']}；闭环降级 {s['closure_downgraded']}"
     )
     typer.echo(
         f"  建议调证线索合计 {s['advice_investigate_from']} → {s['advice_investigate_to']}"
+        f"（基于两版报告都读得到的 {s['advice_comparable']} 个样本）"
     )
+    if s["advice_unreadable"]:
+        # 读不到的样本不参与任何线索/闭环结论——不说出来，用户会以为合计覆盖了全部样本。
+        typer.echo(
+            f"  ⚠ 另有 {s['advice_unreadable']} 个样本至少一版报告读不到，未计入上面的合计"
+        )
     if s["findings_added_total"]:
         typer.echo(f"  新增检出（按 id）：{s['findings_added_total']}")
     if s["findings_removed_total"]:
         typer.echo(f"  消失检出（按 id）：{s['findings_removed_total']}")
 
     shown = [d for d in diffs if (d.changed or not changed_only)]
-    typer.echo(f"\n逐样本（{len(shown)} 个）：")
+    hidden = len(diffs) - len(shown)
+    tail = f"，另有 {hidden} 个无变化未列出（--all 全列）" if hidden else ""
+    typer.echo(f"\n逐样本（{len(shown)} 个{tail}）：")
     for d in shown:
         typer.echo(f"\n  [{d.sample_sha256[:12]}] {d.package_name or '?'}  案={d.case_id or '—'}")
         if d.status_from != d.status_to:
             typer.echo(f"    状态 {d.status_from} → {d.status_to}")
         if d.counts_from != d.counts_to:
             typer.echo(f"    计数 {d.counts_from} → {d.counts_to}")
+        if d.advice_from != d.advice_to:
+            typer.echo(f"    线索分档 {d.advice_from} → {d.advice_to}")
+        if d.hardened_from != d.hardened_to:
+            typer.echo(f"    加固判定 {d.hardened_from} → {d.hardened_to}")
         if d.findings_added:
             typer.echo(f"    + {', '.join(d.findings_added)}")
         if d.findings_removed:

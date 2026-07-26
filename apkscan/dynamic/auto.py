@@ -535,10 +535,23 @@ def _run_unpack(
         return _step(_STEP_UNPACK, _ERROR, f"脱壳异常：{exc}"), [], None
 
 
+#: 描述**本次运行**而非样本内容的 meta 键。脱壳回灌报告由 unpack 自己跑一遍 pipeline 产出，
+#: 拿不到这些，必须从被它取代的静态报告继承过来。
+#:
+#: ★为什么是白名单而不是整体 merge：其余 meta 键（is_hardened / packed / dex_* …）描述的是**样本**，
+#: 脱壳后本就该重新计算，照搬会把壳桩的结论糊到去壳报告上。
+#:
+#: ★``online`` 漏继承的后果是方向性的：``_reanalyze`` 固定以 ``AnalysisConfig(online=False)`` 跑
+#: （回灌只做静态重解，富化留给后续 closure），产出的报告里根本没有这个键；而 ``merge`` 读
+#: ``meta.get("online", True)`` 决定运行时线索要不要标「离线扫描，归属未查询」。于是一次 ``--offline``
+#: 运行在脱壳成功后，会把「压根没查」渲染成「查过」——正是这个字段存在的意义所反。
+_RUN_SCOPED_META_KEYS = ("online", "mode", "target_serial")
+
+
 def _adopt_unpacked_report(
     static_report: Report | None, unpacked: Report, *, apk_path: str
 ) -> Report:
-    """把脱壳回灌后的报告立为后续流程的**当前报告**，并留下可核查的血缘。
+    """把脱壳回灌后的报告立为后续流程的**当前报告**，继承运行上下文，并留下可核查的血缘。
 
     ★「脱壳成功」与「脱壳结果已成为当前报告的输入」是两件事，必须分开记录：前者只说 DEX dump
     出来了，后者才说明最终报告/闭环看到了那些 DEX。二者混为一谈时，「步骤显示脱壳成功、报告却
@@ -548,16 +561,20 @@ def _adopt_unpacked_report(
     prior = static_report.meta if static_report is not None and isinstance(
         static_report.meta, dict
     ) else {}
+    inherited = [k for k in _RUN_SCOPED_META_KEYS if k in prior and k not in meta]
+    for key in inherited:
+        meta[key] = prior[key]
     meta["artifact_lineage"] = {
         "active_input": "unpacked",           # 当前报告基于脱壳回灌的 DEX
         "apk_path": apk_path,
         "unpacked_dex_count": meta.get("unpacked_dex_count", 0),
         "superseded_static_hardened": bool(prior.get("is_hardened")),
         "superseded_static_packed": prior.get("packed"),
+        "inherited_run_context": inherited,   # 哪些运行上下文是从被取代的静态报告接过来的
     }
     logger.info(
-        "[auto] 后续流程切换到脱壳回灌报告（%s 个 DEX）：%s",
-        meta.get("unpacked_dex_count", 0), apk_path,
+        "[auto] 后续流程切换到脱壳回灌报告（%s 个 DEX，继承运行上下文 %s）：%s",
+        meta.get("unpacked_dex_count", 0), inherited or "无", apk_path,
     )
     return unpacked
 
