@@ -431,3 +431,71 @@ def test_nmmp_dexvmp_detected_via_so():
     assert result.error is None
     assert result.meta["is_hardened"] is True
     assert "nmmp" in result.meta["packed"]
+
+
+# --- 容器级诱饵条目（冒充核心文件名的绝对路径条目）-------------------------
+
+_DECOY_FINDING = "APK-CORE-NAME-DECOY-ENTRIES"
+
+
+def _finding_ids(result: AnalyzerResult) -> list[str]:
+    return [f.id for f in result.findings]
+
+
+def test_core_name_decoy_entries_flagged():
+    """★真实样本形态：以 / 开头、首段恰为核心文件名的条目 → 产 Finding 并记 meta。
+
+    实测 24 个样本中 7 个有此构造、共 411 条，首段无一例外只有 AndroidManifest.xml /
+    classes.dex / resources.arsc 三种——精确瞄准每个 APK 解析器必找的文件。
+    """
+    files = {
+        "/AndroidManifest.xml///.png": b"x",
+        "/resources.arsc/////.png": b"x",
+        "/classes.dex/abc.json": b"x",
+        "AndroidManifest.xml": b"<manifest/>",
+        "classes.dex": b"dex\n035",
+    }
+    result = _analyze(files=files)
+    assert _DECOY_FINDING in _finding_ids(result)
+    meta = result.meta["container_decoy_entries"]
+    assert meta["absolute_path_entries"] == 3
+    assert meta["impersonating_core_names"] == {
+        "AndroidManifest.xml": 1, "resources.arsc": 1, "classes.dex": 1,
+    }
+
+
+def test_normal_apk_has_no_decoy_finding():
+    """★正常 APK（无绝对路径条目）不得命中——语料中 17/24 样本一条都没有。"""
+    files = {
+        "AndroidManifest.xml": b"<manifest/>", "classes.dex": b"dex\n035",
+        "resources.arsc": b"x", "res/layout/main.xml": b"x", "assets/config.json": b"{}",
+    }
+    result = _analyze(files=files)
+    assert _DECOY_FINDING not in _finding_ids(result)
+    assert "container_decoy_entries" not in result.meta
+
+
+def test_absolute_entry_not_impersonating_core_name_records_meta_only():
+    """绝对路径但不冒充核心名：异常但意图不明 → 只记 meta、不产 Finding（宁可漏不可造）。"""
+    result = _analyze(files={"/tmp/whatever.txt": b"x", "classes.dex": b"dex\n035"})
+    assert _DECOY_FINDING not in _finding_ids(result)
+    assert result.meta["container_decoy_entries"]["absolute_path_entries"] == 1
+    assert result.meta["container_decoy_entries"]["impersonating_core_names"] == {}
+
+
+def test_multidex_names_also_covered():
+    """多 dex 的 classes2.dex / classes3.dex 同属核心文件名。"""
+    result = _analyze(files={"/classes2.dex/x.png": b"x", "/classes3.dex/y.png": b"x"})
+    meta = result.meta["container_decoy_entries"]
+    assert meta["impersonating_core_names"] == {"classes2.dex": 1, "classes3.dex": 1}
+    assert _DECOY_FINDING in _finding_ids(result)
+
+
+def test_decoy_finding_emitted_even_when_packer_rules_hit():
+    """★容器异常与加固命中互不影响：命中加固分支时诱饵 Finding 仍须在（提前 append 对所有 return 生效）。"""
+    result = _analyze(
+        native_libs=["lib/arm64-v8a/libnmmvm.so"],       # 触发加固强命中分支
+        files={"/AndroidManifest.xml///.png": b"x"},
+    )
+    assert result.meta["is_hardened"] is True
+    assert _DECOY_FINDING in _finding_ids(result)
