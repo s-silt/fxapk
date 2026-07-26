@@ -203,6 +203,13 @@ _FILE_EXT_TLDS: frozenset[str] = frozenset(
 # 常见 TLD：末段命中即认可为域名（不再走类名/包名启发式）。
 _COMMON_TLDS: frozenset[str] = frozenset(
     {
+        # RFC 2606 / RFC 6761 保留 TLD：永不进入根区、永不解析，故零误报风险。
+        # 收进来是为了让「刻意用保留 TLD 保证绝不撞真实域名」的测试夹具与文档示例照常被识别为域名。
+        "test",
+        "example",
+        "invalid",
+        "localhost",
+
         "com",
         "cn",
         "net",
@@ -767,7 +774,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
                     Evidence(source=source, location=location, snippet=host_snippet),
                     is_private=_ip_is_private(host_ip),
                 )
-            elif _looks_like_domain(host):
+            elif _looks_like_domain(host) and _url_host_tld_ok(host):
                 collector.add(
                     host,
                     "domain",
@@ -969,6 +976,22 @@ def _is_strict_bare_domain(domain: str) -> bool:
     if labels[0] in _PACKAGE_ROOTS:
         return False
     return True
+
+
+def _url_host_tld_ok(host: str) -> bool:
+    """URL 派生 host 是否有**可信的 TLD**——专治 .so 里被截断的 URL 残片。
+
+    ★实测理由（2026-07-26 两案）：native ASCII 串被按块切分时，``http://www.<词>...`` 会在中途断掉，
+    留下 ``http://www.hortcut`` / ``http://www.years`` / ``http://www.wencodeuricomponent`` 这种残片。
+    裸域名通道有 :func:`_is_strict_bare_domain` 的 TLD 白名单挡着，**URL 通道却没有**，于是
+    ``http://www.任意小写词`` 都能派生出一个"域名端点"，还带着 tier=app 被判"建议调证"，直接污染调证清单。
+
+    判据用 ``_COMMON_TLDS``（61 条，含 top/cc/info/me/online/xyz 等真 C2 常用 TLD）而**不用**更窄的
+    ``_SAFE_BARE_TLDS``（35 条，缺 top/cc/info）——后者会把真 C2 误杀，与"宁可漏、不可造"里更该守的
+    "不可误杀真线索"冲突。多段 host 只看末段。
+    """
+    labels = host.lower().rsplit(".", 1)
+    return len(labels) == 2 and labels[-1] in _COMMON_TLDS
 
 
 def _looks_like_domain(domain: str) -> bool:

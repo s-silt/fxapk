@@ -140,11 +140,13 @@ def test_real_secret_still_flagged(monkeypatch, tmp_path) -> None:
 
 
 def test_version_ip_filtered_real_ip_kept(monkeypatch, tmp_path) -> None:
-    # C4：jadx 路径裸 IP 与 endpoints 共享判定——版本号 13.3.3.7 过滤，真 IP 8.8.8.8 保留。
+    # C4：jadx 路径裸 IP 与 endpoints 共享判定——版本号 13.3.3.7 过滤，真 IP 保留。
+    # 注：原用 8.8.8.8 作"真 IP"，但它是公共 DNS 解析器、已入 noise_ips（见 test_endpoints 的
+    #     test_public_dns_resolver_ips_filtered），故换普通公网 IP，本意不变。
     java = (
         "class C {\n"
         '  String ver = "13.3.3.7";\n'
-        '  String dns = "8.8.8.8";\n'
+        '  String backend = "139.59.12.34";\n'
         '  String lan = "192.168.0.1";\n'
         "}\n"
     )
@@ -153,7 +155,7 @@ def test_version_ip_filtered_real_ip_kept(monkeypatch, tmp_path) -> None:
     vals = {e.value for e in result.endpoints}
     assert "13.3.3.7" not in vals
     assert "192.168.0.1" not in vals
-    assert "8.8.8.8" in vals
+    assert "139.59.12.34" in vals
 
 
 def test_run_jadx_uses_resolved_full_path(monkeypatch, tmp_path) -> None:
