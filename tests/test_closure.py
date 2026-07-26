@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from apkscan.core import closure as closure_module
+from apkscan.core.closure import sources as closure_sources
 from apkscan.core.closure import (
     CLOSURE_COMPLETE,
     CLOSURE_FAILED,
@@ -546,6 +547,63 @@ def test_old_report_without_visibility_is_not_applicable() -> None:
     assert closure["status"] == CLOSURE_COMPLETE
 
 
+def test_monkeypatch_target_differs_by_caller() -> None:
+    """★拆包后 monkeypatch 打哪里分两类、方向相反，打错一边会**静默失效**（测试仍绿却不测了）。
+
+    判据是「谁调用它」：被 __init__ 的 close_report 直调的，调用时按 __init__ 的模块命名空间
+    解析，必须 patch 包；只在子模块内部互调的，必须 patch 定义它的子模块。
+    本测试把这个分界钉住——注释被改坏或函数被挪到另一类时，这里会红。
+    """
+    from apkscan.core import closure as pkg
+    from apkscan.core.closure import gates, layers, sources, targets
+
+    # close_report 的 co_names 含该名 = 它经 __init__ 命名空间解析 → 须 patch 包
+    called_by_close_report = set(pkg.close_report.__code__.co_names)
+
+    patch_package = {
+        "_select_targets_with_stats", "assemble_target_closure",
+        "_ensure_source_status_coverage", "_enrich_resolved_ips",
+        "_set_attribution", "evaluate_closure",
+    }
+    patch_submodule = {
+        "_normalized_public_ip", "_resolved_ips", "_is_known_intercept_ip",
+        "_normalize_source_status", "_runtime_info", "evaluate_capture_quality",
+    }
+
+    for name in patch_package:
+        assert name in called_by_close_report, (
+            f"{name} 已不再被 close_report 直调；它的 patch 方式变了，"
+            f"__init__.py 顶部的指引注释与本测试都要同步更新"
+        )
+    for name in patch_submodule:
+        assert name not in called_by_close_report, (
+            f"{name} 现在被 close_report 直调了 → patch 子模块会失效，须改 patch 包"
+        )
+
+    # 两类名字都必须仍能从包导入（re-export 面不得回退）
+    for name in patch_package | patch_submodule:
+        assert hasattr(pkg, name), f"包的属性面丢了 {name}，既有测试的 patch 会 AttributeError"
+    for mod in (sources, layers, targets, gates):
+        assert mod.__name__.startswith("apkscan.core.closure.")
+
+
+def test_incidentally_imported_names_stay_off_the_package_surface() -> None:
+    """★原模块"顺带导入"的名字不再从包可见——这是**有意的**，别当遗漏补回来。
+
+    拆分前 `from apkscan.core.closure import os` 之类能用，纯属旧单文件模块的 import 副作用。
+    从别人模块借 import 是坏习惯，re-export 回来等于把它固化成契约。实测全仓零处这样用。
+    """
+    from apkscan.core import closure as pkg
+
+    for name in ("os", "ipaddress", "Counter", "dataclass", "Any", "Endpoint",
+                 "ANALYSIS_MODES", "ANALYSIS_MODE_PASSIVE",
+                 "ANALYSIS_STATUS_COMPLETE", "ANALYSIS_STATUS_FAILED"):
+        assert not hasattr(pkg, name), (
+            f"{name} 又出现在包的属性面上了——它不是 closure 的 API，"
+            f"若确需使用请从其定义处导入"
+        )
+
+
 def test_closure_config_rejects_non_positive_target_limit() -> None:
     try:
         ClosureConfig(max_targets=0)
@@ -661,11 +719,12 @@ def test_close_report_is_idempotent_and_preserves_analyst_notes() -> None:
 
 
 def test_domain_target_enriches_each_resolved_ip(monkeypatch) -> None:  # noqa: ANN001
+    # patch 定义 _normalized_public_ip 的子模块（closure.sources）——patch 包属性改不到实际调用点；
+    # 不带 raising=False：函数若再被挪走，这里立刻 AttributeError 变红，而非静默失效。
     monkeypatch.setattr(
-        closure_module,
+        closure_sources,
         "_normalized_public_ip",
         lambda value: str(value).strip(),
-        raising=False,
     )
     domain = _endpoint(
         "api.example.test",
@@ -697,7 +756,7 @@ def test_close_report_top_level_attribution_absorbs_resolved_evidence(monkeypatc
     _enrich_resolved_ips 之后重建，且 build_endpoint_attribution 域名分支读 resolved_ip_enrichment，
     否则闭环后拿到的 RDAP/BGP 证据只留在嵌套结构，文书/摘要读顶层 attribution 恒 unknown）。"""
     monkeypatch.setattr(
-        closure_module, "_normalized_public_ip", lambda value: str(value).strip(), raising=False
+        closure_sources, "_normalized_public_ip", lambda value: str(value).strip()
     )
     domain = _endpoint("api.example.test", kind="domain", runtime=True, target=True, payload=True)
     report = _report(domain)
@@ -713,11 +772,12 @@ def test_close_report_top_level_attribution_absorbs_resolved_evidence(monkeypatc
 
 
 def test_domain_resolved_ip_enrichment_is_bounded(monkeypatch) -> None:  # noqa: ANN001
+    # patch 定义 _normalized_public_ip 的子模块（closure.sources）——patch 包属性改不到实际调用点；
+    # 不带 raising=False：函数若再被挪走，这里立刻 AttributeError 变红，而非静默失效。
     monkeypatch.setattr(
-        closure_module,
+        closure_sources,
         "_normalized_public_ip",
         lambda value: str(value).strip(),
-        raising=False,
     )
     domain = _endpoint(
         "api.example.test",
@@ -767,17 +827,17 @@ def test_domain_resolution_excludes_nonpublic_and_invalid_addresses() -> None:
 
 
 def test_domain_resolution_excludes_known_intercept_address(monkeypatch) -> None:  # noqa: ANN001
+    # patch 定义 _normalized_public_ip 的子模块（closure.sources）——patch 包属性改不到实际调用点；
+    # 不带 raising=False：函数若再被挪走，这里立刻 AttributeError 变红，而非静默失效。
     monkeypatch.setattr(
-        closure_module,
+        closure_sources,
         "_normalized_public_ip",
         lambda value: str(value).strip(),
-        raising=False,
     )
     monkeypatch.setattr(
-        closure_module,
+        closure_sources,
         "_is_known_intercept_ip",
         lambda value: value == "198.51.100.20",
-        raising=False,
     )
     domain = _endpoint(
         "api.example.test",
@@ -979,7 +1039,12 @@ def test_populate_network_attribution_failure_marks_when_no_prior_view(monkeypat
 def test_close_report_refreshes_fronting_cluster(monkeypatch) -> None:
     """★回归（codex 审计"已知边界"）：close 后重跑 fronting-cluster——单端点 _set_attribution 重建冲掉的
     cluster_id 被全报告重聚类恢复，不再停留在 analyze 期/丢失。"""
-    monkeypatch.setattr(closure_module, "_normalized_public_ip", lambda value: str(value).strip(), raising=False)
+    # patch 定义模块（closure.sources），不带 raising=False——函数被挪走时立刻红，不再静默失效。
+    monkeypatch.setattr(closure_sources, "_normalized_public_ip", lambda value: str(value).strip())
+    # patch 生效自证：真实现会把 TEST-NET 文档段 IP 判非公网（is_global=False）剔除；经 patch 后原样
+    # 保留 → 证明 patch 命中了 _resolved_ips 的实际调用点。将来再拆分若 patch 失效，这里立刻红。
+    probe = _endpoint("probe.example.test", kind="domain", enrichment={"dns": {"ips": ["198.51.100.77"]}})
+    assert closure_sources._resolved_ips(probe) == ["198.51.100.77"]
     e1 = _endpoint("1.1.1.1", runtime=True, target=True, enrichment={"tls": {"spki_sha256": "sharedspki"}})
     e2 = _endpoint("2.2.2.2", runtime=True, target=True, enrichment={"tls": {"spki_sha256": "sharedspki"}})
     report = _report(e1, e2)
