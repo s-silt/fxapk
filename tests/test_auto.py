@@ -22,7 +22,7 @@ import pytest
 from typer.testing import CliRunner
 
 from apkscan import cli
-from apkscan.core.models import Report
+from apkscan.core.models import Endpoint, Report
 from apkscan.dynamic import STATUS_DONE, STATUS_ERROR, STATUS_SKIPPED
 from apkscan.dynamic import auto
 
@@ -287,6 +287,152 @@ def test_full_pipeline_happy_path_all_done(monkeypatch: pytest.MonkeyPatch) -> N
     assert merge_calls["rerender_called"] is True
     # capture 用包名 + out= + duration。
     assert cap_calls["package"] == "com.fraud.app"
+
+
+# ---------------------------------------------------------------------------
+# 1.5) ★脱壳回灌后，后续全程必须切到脱壳版报告
+# ---------------------------------------------------------------------------
+
+
+def _patch_unpack_reanalyzing(
+    monkeypatch: pytest.MonkeyPatch, unpacked: Report, dex_count: int = 3
+) -> None:
+    """打桩 unpack.run：模拟脱壳成功并回灌，通过 on_reanalyzed 交出回灌后的报告。"""
+    import apkscan.dynamic.unpack as unpack_mod
+
+    def _fake_run(apk_path: str, *a: Any, **k: Any) -> dict:
+        unpacked.meta["unpacked"] = True
+        unpacked.meta["unpacked_dex_count"] = dex_count
+        cb = k.get("on_reanalyzed")
+        if cb is not None:
+            cb(unpacked)
+        return _dynamic_result(
+            STATUS_DONE, f"脱壳成功，dump 出 {dex_count} 个 DEX。",
+            report_paths=["out/unpacked_report.json"],
+        )
+
+    monkeypatch.setattr(unpack_mod, "run", _fake_run)
+
+
+def test_unpacked_report_becomes_active_input_for_merge_and_closure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★脱壳成功但主报告没换 = 脱壳白做。
+
+    unpack 内部 reanalyze 产出的是**另一份** Report 对象（写成 unpacked_report.json）。若 auto
+    只收下路径、不替换手里的 report，则 capture/merge/closure 与最终写出的报告全都还在壳桩上跑：
+    步骤显示「脱壳成功」，报告里却一条隐藏端点都没有——一个从数据上看不出来的坑。
+    """
+    _patch_doctor(monkeypatch, ok=True)
+    static = _patch_static_ok(monkeypatch, "com.fraud.app")
+    static.meta["is_hardened"] = True          # 壳桩：加固、DEX 里看不到东西
+    static.endpoints = []
+
+    unpacked = _make_report("com.fraud.app")   # 脱壳后才看得见的端点
+    hidden = Endpoint(value="hidden-c2.example", kind="domain")
+    unpacked.endpoints = [hidden]
+
+    _set_device(monkeypatch, True)
+    _patch_unpack_reanalyzing(monkeypatch, unpacked, dex_count=3)
+    _patch_capture(
+        monkeypatch,
+        _dynamic_result(STATUS_DONE, "抓包完成", report_paths=["out/runtime_report.json"]),
+    )
+    merge_calls = _patch_merge(monkeypatch)
+
+    auto.run("sample.apk", out_dir="out", confirm=lambda _m: None)
+
+    got = merge_calls["rerender_args"]["report"]
+    assert got is unpacked, "merge/closure 必须拿到脱壳回灌后的报告，而不是壳桩静态报告"
+    assert got.endpoints == [hidden]
+
+    # 血缘：「脱壳成功」与「脱壳结果已成为当前输入」是两件事，必须分别可查。
+    lineage = got.meta.get("artifact_lineage")
+    assert lineage is not None, "切换了当前报告却不留血缘，事后无法核查最终报告基于什么输入"
+    assert lineage["active_input"] == "unpacked"
+    assert lineage["unpacked_dex_count"] == 3
+    assert lineage["superseded_static_hardened"] is True
+
+
+def test_adopted_report_inherits_run_context_not_sample_facts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★换报告必须带上**运行上下文**，但绝不能带样本结论。
+
+    ``_reanalyze`` 固定以 online=False 跑（回灌只做静态重解），产出的报告里没有 ``online`` 键；
+    而 merge 读 ``meta.get("online", True)`` 决定运行时线索要不要标「离线扫描，归属未查询」。
+    不继承的话，一次 --offline 运行在脱壳成功后会把「压根没查」渲染成「查过」——正是该字段
+    存在意义的反面。反过来 is_hardened 这类**样本**结论脱壳后本就该重算，照搬会把壳桩结论
+    糊到去壳报告上。
+    """
+    _patch_doctor(monkeypatch, ok=True)
+    static = _patch_static_ok(monkeypatch, "com.fraud.app")
+    static.meta.update({"online": False, "mode": "passive", "is_hardened": True,
+                        "packed": "some-packer"})
+
+    unpacked = _make_report("com.fraud.app")
+    unpacked.meta["is_hardened"] = False        # 脱壳后重算的样本结论
+
+    _set_device(monkeypatch, True)
+    _patch_unpack_reanalyzing(monkeypatch, unpacked, dex_count=2)
+    _patch_capture(
+        monkeypatch,
+        _dynamic_result(STATUS_DONE, "抓包完成", report_paths=["out/runtime_report.json"]),
+    )
+    merge_calls = _patch_merge(monkeypatch)
+
+    auto.run("sample.apk", out_dir="out", online=False, confirm=lambda _m: None)
+
+    got = merge_calls["rerender_args"]["report"]
+    assert got is unpacked
+    # 运行上下文：继承
+    assert got.meta["online"] is False, "离线运行的上下文丢了 → 线索会被当成已联网核实过"
+    assert got.meta["mode"] == "passive"
+    # 样本结论：不继承（脱壳后已重算）
+    assert got.meta["is_hardened"] is False, "壳桩的加固结论不该糊到去壳报告上"
+    assert "packed" not in got.meta
+    # 继承了什么要可查
+    assert set(got.meta["artifact_lineage"]["inherited_run_context"]) >= {"online", "mode"}
+
+
+def test_adopted_report_keeps_target_serial(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★换报告后仍要知道「本次在哪台设备上分析」——多设备下这是排查的唯一线索。"""
+    _patch_doctor(monkeypatch, ok=True)
+    _patch_static_ok(monkeypatch, "com.fraud.app")
+    unpacked = _make_report("com.fraud.app")
+
+    _set_device(monkeypatch, True)
+    _patch_unpack_reanalyzing(monkeypatch, unpacked)
+    _patch_capture(
+        monkeypatch,
+        _dynamic_result(STATUS_DONE, "抓包完成", report_paths=["out/runtime_report.json"]),
+    )
+    merge_calls = _patch_merge(monkeypatch)
+
+    auto.run("sample.apk", out_dir="out", confirm=lambda _m: None)
+
+    got = merge_calls["rerender_args"]["report"]
+    assert got.meta.get("target_serial"), "换报告后设备 serial 丢失，多设备下无从排查"
+
+
+def test_unpack_without_reanalysis_keeps_static_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """脱壳没回灌（reanalyze 失败/未产出报告）→ 不得凭空切换，仍用静态报告且不留假血缘。"""
+    _patch_doctor(monkeypatch, ok=True)
+    static = _patch_static_ok(monkeypatch, "com.fraud.app")
+    _set_device(monkeypatch, True)
+    _patch_unpack(monkeypatch, _dynamic_result(STATUS_DONE, "脱壳成功但重分析失败"))
+    _patch_capture(
+        monkeypatch,
+        _dynamic_result(STATUS_DONE, "抓包完成", report_paths=["out/runtime_report.json"]),
+    )
+    merge_calls = _patch_merge(monkeypatch)
+
+    auto.run("sample.apk", out_dir="out", confirm=lambda _m: None)
+
+    assert merge_calls["rerender_args"]["report"] is static
+    assert "artifact_lineage" not in static.meta
 
 
 # ---------------------------------------------------------------------------

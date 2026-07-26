@@ -499,6 +499,21 @@ def _stage_credibility(state: _PipelineState) -> None:
     state.meta["dependency_versions"] = _dependency_versions()  # 依赖版本复现锚点（androguard 等）
 
 
+def _stage_visibility(state: _PipelineState) -> None:
+    """把各分析器散落的可见性事实归一成「哪些结论有资格下」，写 meta["visibility"]。
+
+    ★这些事实（dex_available / is_hardened / hardening_structural / dex_string_pool /
+    native_obfuscation / artifact_lineage）此前**产出了却无人消费**：一份壳桩样本的报告会平静地
+    写「未发现网络端点」，读的人无从分辨那是「扫过了确实没有」还是「压根看不见」。
+
+    与 analysis_status 正交：那个字段是**工具执行**健康度，样本加固是**样本**属性，不该混。
+    本阶段只标注、不封顶 closure、不改退出码——由消费方按主张相关性各取所需。
+    """
+    from apkscan.core import visibility
+
+    state.meta["visibility"] = visibility.assess({"meta": state.meta})
+
+
 def _stage_network_attribution(state: _PipelineState) -> None:
     """附加视图：把**已收集的端点事实**组装成基础设施归因图谱 + 角色候选（PR3-PR8）。纯被动、
     不新增网络/富化/文件 I/O、不反哺闭环/线索/退出码；仅写 meta["network_attribution"]。云/ASN/CDN
@@ -536,6 +551,25 @@ def _stage_asset_score(state: _PipelineState) -> None:
             {"value": s.value, "kind": s.kind, "score": s.score, "reasons": list(s.reasons)}
             for s in scores
         ]
+
+
+def _stage_config_probe_plan(state: _PipelineState) -> None:
+    """附加视图：把配置接口路径 × 靠前的后端域名拼成候选 URL，写 meta["config_probe_plan"]。
+
+    ★补的是 config-chain 断掉的中间一环：api_surface 提得到配置接口**路径**、
+    :func:`_stage_remote_config_fetch` 早就能下载解码，但前者没有 host、拼不成能取的 URL。
+
+    ★时序：本阶段在 asset_score 之后（需要"最像自有后端"的排序），而下载阶段在它之前——
+    故**本轮只出预案，取不取要下一轮**。这是有意的：主动请求属不可逆的外部动作，让它跨一轮、
+    由人看过预案再决定，比在同一轮里自动打出去稳妥。预案里的 URL 绝大多数并不真实存在。
+
+    纯组装、不联网。passive（默认）模式下这份预案只是给人看的清单。
+    """
+    from apkscan.core.config_probe import build_plan
+
+    plan = build_plan(state.meta)
+    if plan is not None:
+        state.meta["config_probe_plan"] = plan
 
 
 def _assemble_report(state: _PipelineState) -> Report:
@@ -624,6 +658,11 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     _run_stage(state, "network_attribution", _stage_network_attribution)  # 附加：基础设施归因图谱 + 角色候选（被动）
     _run_stage(state, "control_chain", _stage_control_chain)        # 附加：config-chain 控制链对象（组装现有数据）
     _run_stage(state, "asset_score", _stage_asset_score)            # 附加：后端域名/IP 第一方资产加权排序
+    _run_stage(state, "config_probe_plan", _stage_config_probe_plan)  # 附加：配置接口 × 后端域名 → 候选 URL 预案
+    # ★可见性求值放在**所有事实收集完之后**：它要读遍各阶段写下的信号（含 config_probe_plan，
+    #   补法建议要据此告诉人"授权后重跑可取回配置"）。曾排在 config_probe_plan 之前，于是
+    #   求值时那份预案还不存在——预案生成了 16 条候选、补法建议却是空的。
+    _run_stage(state, "visibility", _stage_visibility)             # 证据可见性 → 哪些「未发现」不可下
     _apply_stage_failures(state)          # 阶段级故障反馈 analysis_status
     state.meta["stage_status"] = state.stage_status
     report = _assemble_report(state)

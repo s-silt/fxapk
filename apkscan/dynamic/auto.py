@@ -42,7 +42,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from apkscan.core import device
-from apkscan.core.models import ANALYSIS_MODE_PASSIVE, AnalysisConfig
+from apkscan.core.models import ANALYSIS_MODE_PASSIVE, AnalysisConfig, Report
 from apkscan.core.report_naming import report_base
 
 logger = logging.getLogger(__name__)
@@ -193,7 +193,7 @@ def run(
             )
 
         # 3) 脱壳：仅有设备才做（产出 dex 由 unpack 内部 reanalyze 回灌）。
-        unpack_step, unpack_paths = _run_unpack(
+        unpack_step, unpack_paths, unpacked_report = _run_unpack(
             apk_path,
             out_dir=out_dir,
             has_device=has_device,
@@ -202,6 +202,14 @@ def run(
         )
         steps.append(unpack_step)
         _extend_unique(report_paths, unpack_paths)
+
+        # 3.5) ★把后续全程切到脱壳版报告。
+        #      脱壳的**全部价值**在于隐藏 DEX 里的端点/配置能进最终报告与闭环；若这里不换，
+        #      capture/merge/closure 与最终写出的报告全都还在壳桩上跑，脱壳等于白做——
+        #      结果是「步骤显示脱壳成功、报告里却一条隐藏端点都没有」。
+        if unpacked_report is not None:
+            report = _adopt_unpacked_report(report, unpacked_report, apk_path=apk_path)
+            package_name = report.package_name or package_name
 
         # 3.6) 去壳重打包：把脱壳 DEX 装回去壳版，使 capture 抓去壳版（绕壳反 frida）。默认开，
         #      --no-repackage 关。失败/无料优雅降级（重装原包），capture 仍跑原版，不中断流水线。
@@ -372,7 +380,7 @@ def _run_static(
     formats: list[str],
     mode: str = ANALYSIS_MODE_PASSIVE,
     on_progress: Callable[[str], None] | None,
-) -> tuple[dict, object | None, str, list[str], str]:
+) -> tuple[dict, Report | None, str, list[str], str]:
     """步骤 2：静态分析 load_apk → pipeline.run → 写报告。
 
     Returns:
@@ -498,27 +506,77 @@ def _run_unpack(
     has_device: bool,
     serial: str | None = None,
     on_progress: Callable[[str], None] | None,
-) -> tuple[dict, list[str]]:
+) -> tuple[dict, list[str], Report | None]:
     """步骤 3：脱壳（仅有设备才做）。无设备 → skipped；失败 → error，均不中断。
 
     serial 透传给 unpack.run（多设备消歧）；None 时退回旧行为（-FU）。
 
     Returns:
-        (step, report_paths)。脱壳内部 reanalyze 默认回灌，report_paths 来自其产出。
+        ``(step, report_paths, 回灌后的 Report 或 None)``。第三项非空表示脱壳 DEX 已重分析完成，
+        调用方**必须**把后续流程切到它——否则 capture/merge/closure 仍在壳桩报告上跑。
     """
     if not has_device:
         _emit(on_progress, "步骤 3/5：脱壳（无设备，优雅跳过）")
-        return _step(_STEP_UNPACK, _SKIPPED, "未检测到在线设备，跳过真机脱壳"), []
+        return _step(_STEP_UNPACK, _SKIPPED, "未检测到在线设备，跳过真机脱壳"), [], None
 
     _emit(on_progress, "步骤 3/5：脱壳（frida-dexdump dump 隐藏 DEX 并回灌重分析）")
+    holder: list[Report] = []
     try:
         from apkscan.dynamic import unpack
 
-        result = unpack.run(apk_path, out=out_dir, reanalyze=True, serial=serial)
-        return _fold_dynamic_step(_STEP_UNPACK, result)
+        result = unpack.run(
+            apk_path, out=out_dir, reanalyze=True, serial=serial,
+            on_reanalyzed=holder.append,
+        )
+        step, paths = _fold_dynamic_step(_STEP_UNPACK, result)
+        return step, paths, holder[0] if holder else None
     except Exception as exc:  # noqa: BLE001 - 脱壳失败不中断流水线
         logger.exception("[auto] 脱壳步骤异常：%s", apk_path)
-        return _step(_STEP_UNPACK, _ERROR, f"脱壳异常：{exc}"), []
+        return _step(_STEP_UNPACK, _ERROR, f"脱壳异常：{exc}"), [], None
+
+
+#: 描述**本次运行**而非样本内容的 meta 键。脱壳回灌报告由 unpack 自己跑一遍 pipeline 产出，
+#: 拿不到这些，必须从被它取代的静态报告继承过来。
+#:
+#: ★为什么是白名单而不是整体 merge：其余 meta 键（is_hardened / packed / dex_* …）描述的是**样本**，
+#: 脱壳后本就该重新计算，照搬会把壳桩的结论糊到去壳报告上。
+#:
+#: ★``online`` 漏继承的后果是方向性的：``_reanalyze`` 固定以 ``AnalysisConfig(online=False)`` 跑
+#: （回灌只做静态重解，富化留给后续 closure），产出的报告里根本没有这个键；而 ``merge`` 读
+#: ``meta.get("online", True)`` 决定运行时线索要不要标「离线扫描，归属未查询」。于是一次 ``--offline``
+#: 运行在脱壳成功后，会把「压根没查」渲染成「查过」——正是这个字段存在的意义所反。
+_RUN_SCOPED_META_KEYS = ("online", "mode", "target_serial")
+
+
+def _adopt_unpacked_report(
+    static_report: Report | None, unpacked: Report, *, apk_path: str
+) -> Report:
+    """把脱壳回灌后的报告立为后续流程的**当前报告**，继承运行上下文，并留下可核查的血缘。
+
+    ★「脱壳成功」与「脱壳结果已成为当前报告的输入」是两件事，必须分开记录：前者只说 DEX dump
+    出来了，后者才说明最终报告/闭环看到了那些 DEX。二者混为一谈时，「步骤显示脱壳成功、报告却
+    还是壳桩」这种情况从数据上根本看不出来。
+    """
+    meta = unpacked.meta if isinstance(unpacked.meta, dict) else {}
+    prior = static_report.meta if static_report is not None and isinstance(
+        static_report.meta, dict
+    ) else {}
+    inherited = [k for k in _RUN_SCOPED_META_KEYS if k in prior and k not in meta]
+    for key in inherited:
+        meta[key] = prior[key]
+    meta["artifact_lineage"] = {
+        "active_input": "unpacked",           # 当前报告基于脱壳回灌的 DEX
+        "apk_path": apk_path,
+        "unpacked_dex_count": meta.get("unpacked_dex_count", 0),
+        "superseded_static_hardened": bool(prior.get("is_hardened")),
+        "superseded_static_packed": prior.get("packed"),
+        "inherited_run_context": inherited,   # 哪些运行上下文是从被取代的静态报告接过来的
+    }
+    logger.info(
+        "[auto] 后续流程切换到脱壳回灌报告（%s 个 DEX，继承运行上下文 %s）：%s",
+        meta.get("unpacked_dex_count", 0), inherited or "无", apk_path,
+    )
+    return unpacked
 
 
 def _run_repackage(

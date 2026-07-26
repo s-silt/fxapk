@@ -1,0 +1,228 @@
+"""证据可见性求值：壳桩样本的「未发现」不得被读成「不存在」。零真实数据。"""
+from __future__ import annotations
+
+from apkscan.core import visibility as V
+from apkscan.report.digest import build_digest
+
+
+def _report(**meta) -> dict:
+    return {"meta": meta, "leads": [], "endpoints": [], "findings": [], "analysis_status": "complete"}
+
+
+def test_clean_static_run_blocks_no_static_claim():
+    """静态输入完整 → 静态那几条结论全部有资格下。
+
+    ``runtime_contact_observed`` 仍被阻断且 degraded=True：纯静态分析确实没资格说
+    「已掌握运行时实连去向」，这是如实标注而非缺陷（见动态侧那组测试）。
+    """
+    a = V.assess(_report(dex_available=True))
+    assert a["sources"]["dex"]["visibility"] == V.VIS_COMPLETE
+    static_claims = [c for c in a["blocked_claims"] if c != "runtime_contact_observed"]
+    assert static_claims == []
+
+
+def test_stub_dex_blocks_exhaustiveness_claims():
+    """★壳桩样本：依赖 DEX 的穷尽性结论一律无资格下。
+
+    这是本模块存在的理由——没有它，一份壳桩报告会平静地写「未发现网络端点」，
+    读的人（尤其是 AI）无从分辨那是「扫过了确实没有」还是「压根看不见」。
+    """
+    a = V.assess(_report(is_hardened=True, packed=None,
+                         hardening_structural={"reason": "stub-dex"}))
+    assert a["sources"]["dex"]["visibility"] == V.VIS_STUB_ONLY
+    assert "static_endpoint_exhaustive" in a["blocked_claims"]
+    assert "no_contact_harvesting" in a["blocked_claims"]
+    assert a["degraded"] is True
+    assert any("不能解读为不存在" in n for n in a["notes"])
+
+
+def test_packed_none_does_not_mean_unhardened():
+    """★`packed` 为空 ≠ 未加固：结构判据命中时厂商未识别，但 DEX 照样不可见。
+
+    以 `packed` 是否有值判加固，会漏掉全部未识别厂商的壳——那恰恰是最需要标注的一类。
+    """
+    a = V.assess(_report(is_hardened=True, packed=None))
+    assert a["sources"]["dex"]["visibility"] == V.VIS_STUB_ONLY
+    assert a["blocked_claims"]
+
+
+def test_unpack_reanalysis_restores_dex_visibility():
+    """★脱壳回灌已生效 → DEX 重新可见；此时的 is_hardened 描述的是**被取代的原包**。
+
+    不做这层区分，脱壳成功的样本会永远背着原包的加固结论，白白损失一整轮可见性。
+    """
+    a = V.assess(_report(
+        is_hardened=True,
+        artifact_lineage={"active_input": "unpacked", "unpacked_dex_count": 3},
+    ))
+    assert a["remediation"] == V.REM_REANALYZED
+    assert a["sources"]["dex"]["visibility"] == V.VIS_COMPLETE
+    assert "no_contact_harvesting" not in a["blocked_claims"]
+
+
+def test_opaque_string_pool_blocks_dex_claims():
+    """编译期字符串混淆：DEX 读得到字节，但 endpoints/contacts 依赖的字符串池是空的。"""
+    a = V.assess(_report(dex_string_pool={"suspicious": True, "sampled": 800}))
+    assert a["sources"]["dex"]["visibility"] == V.VIS_OPAQUE
+    assert "static_endpoint_exhaustive" in a["blocked_claims"]
+
+
+def test_native_obfuscation_only_blocks_claims_needing_native():
+    """★可见性落到**主张**而非分析器：native 不可见不该牵连纯 DEX 的结论。
+
+    endpoints 同时扫 DEX/manifest/资源/native，一刀切会把 manifest 里明摆着的域名也标成不可信。
+    """
+    a = V.assess(_report(native_obfuscation={"suspected": ["libx.so"]}))
+    assert a["sources"]["native"]["visibility"] == V.VIS_OPAQUE
+    assert "static_endpoint_exhaustive" in a["blocked_claims"]   # 需要 native
+    assert "no_contact_harvesting" not in a["blocked_claims"]    # 只需要 dex
+
+
+def test_truncated_scan_blocks_exhaustiveness():
+    """★扫描截断是最隐蔽的可见性缺口：分析器跑成功、状态全绿，只是没扫完。
+
+    实测一个 100MB 样本的 DEX 字符串超 20 万条上限被截断——此时「未发现某接口」完全可能只是
+    因为它排在截断线之后。上限本身必要（防内存爆），但截断这个**事实**必须传下去。
+    """
+    a = V.assess(_report(dex_strings_truncated=True))
+    assert a["sources"]["dex"]["visibility"] == V.VIS_PARTIAL
+    assert "static_endpoint_exhaustive" in a["blocked_claims"]
+    assert any("截断" in n for n in a["notes"])
+
+
+def test_dex_not_scanned_is_unavailable():
+    a = V.assess(_report(dex_scanned=False))
+    assert a["sources"]["dex"]["visibility"] == V.VIS_UNAVAILABLE
+    assert a["blocked_claims"]
+
+
+def test_repack_suspected_raises_attribution_caveat():
+    """★重打包件的接口/域名归**被仿冒的正版厂商**，照单列进清单会向无关企业发函。
+
+    这是归属问题不是可见性问题，但后果同样方向性、同样此前无人消费，故一并在此告警。
+    """
+    a = V.assess(_report(repack_identity={"verdict": "repack_suspected"}))
+    assert any("重打包" in n and "官方同版本包差分" in n for n in a["notes"])
+    # 自研件不得触发该告警（否则每份报告都挂一条，等于没有）
+    b = V.assess(_report(repack_identity={"verdict": "self_built"}))
+    assert not any("重打包" in n for n in b["notes"])
+
+
+# ---------------------------------------------------------------------------
+# 动态侧：运行时观测是静态盲区的独立补救渠道
+# ---------------------------------------------------------------------------
+
+
+def test_static_only_run_cannot_claim_runtime_contact():
+    """★纯静态分析没资格说「已掌握运行时实连去向」——静态再完整也证不了跑起来连了谁。
+
+    加固样本尤其如此：真实后端往往只在运行时由配置下发，静态里根本不存在。
+    """
+    a = V.assess(_report(dex_available=True))
+    assert a["sources"]["runtime"]["visibility"] == V.VIS_UNAVAILABLE
+    assert "runtime_contact_observed" in a["blocked_claims"]
+    # 但纯静态不该因此把静态那几条也一起阻断
+    assert "no_contact_harvesting" not in a["blocked_claims"]
+
+
+def test_complete_capture_unblocks_runtime_claim():
+    a = V.assess(_report(
+        runtime_merged=True,
+        capture_quality={"dynamic_status": "complete", "reason": "ok"},
+    ))
+    assert a["sources"]["runtime"]["visibility"] == V.VIS_COMPLETE
+    assert "runtime_contact_observed" not in a["blocked_claims"]
+
+
+def test_degraded_capture_is_partial_not_complete():
+    a = V.assess(_report(
+        runtime_merged=True,
+        capture_quality={"dynamic_status": "degraded", "reason": "no business candidate"},
+    ))
+    assert a["sources"]["runtime"]["visibility"] == V.VIS_PARTIAL
+    assert "runtime_contact_observed" in a["blocked_claims"]
+
+
+def test_next_actions_tell_you_how_to_fix_the_gap():
+    """★只报「哪里瞎了」不给补法等于半截活：消费方拿到 degraded 报告得知道下一步做什么。"""
+    a = V.assess(_report(is_hardened=True))          # 壳桩 + 未脱壳 + 未做动态
+    joined = " ".join(a["next_actions"])
+    assert "unpack" in joined, "壳桩未回灌却没提示脱壳"
+    assert "capture" in joined, "静态受限且无动态证据却没提示抓包"
+
+
+def test_next_actions_do_not_suggest_unpack_after_successful_reanalysis():
+    """已脱壳回灌就别再劝脱壳——重复建议会让人不再看这个字段。"""
+    a = V.assess(_report(
+        is_hardened=True,
+        artifact_lineage={"active_input": "unpacked", "unpacked_dex_count": 3},
+    ))
+    assert not any("unpack" in x for x in a["next_actions"])
+
+
+def test_next_actions_surface_config_probe_plan():
+    """配置探测预案生成后要告诉人怎么用它（授权后重跑可取回下发的域名/IP 池）。"""
+    a = V.assess(_report(
+        is_hardened=True,
+        config_probe_plan={"candidates": [{"url": "https://h.test/api/home/config"}]},
+    ))
+    joined = " ".join(a["next_actions"])
+    assert "authorized-active" in joined and "config_probe_plan" in joined
+
+
+def test_digest_carries_next_actions():
+    rep = _report(is_hardened=True)
+    rep["meta"]["visibility"] = V.assess(rep)
+    d = build_digest(rep)
+    assert d["visibility"]["next_actions"], "补法没传到 digest，AI 消费面看不到"
+
+
+def test_assess_never_raises_on_garbage():
+    for bad in (None, [], "x", {"meta": "not-a-dict"}, {"meta": {"dex_string_pool": 7}}):
+        got = V.assess(bad)
+        assert isinstance(got, dict) and "blocked_claims" in got
+
+
+def test_blocks_claim_helper():
+    a = V.assess(_report(is_hardened=True))
+    assert V.blocks_claim(a, "static_endpoint_exhaustive") is True
+    assert V.blocks_claim(a, "some_unrelated_claim") is False
+    assert V.blocks_claim(None, "x") is False
+
+
+# ---------------------------------------------------------------------------
+# 接线：求值结果必须真的到达消费方，否则等于没做
+# ---------------------------------------------------------------------------
+
+
+def test_digest_surfaces_visibility_before_leads():
+    """★digest 必须把可见性放在 leads **之前**——消费方要先知道哪里没看见。"""
+    rep = _report(is_hardened=True, hardening_structural={"reason": "stub-dex"})
+    rep["meta"]["visibility"] = V.assess(rep)
+    d = build_digest(rep)
+    keys = list(d)
+    assert "visibility" in keys, "digest 未透出可见性，AI 会把空线索读成样本干净"
+    assert keys.index("visibility") < keys.index("leads")
+    assert d["visibility"]["degraded"] is True
+    assert d["visibility"]["blocked_claims"], "被阻断的主张没进 digest"
+    assert any("端点" in b["label"] for b in d["visibility"]["blocked_claims"])
+
+
+def test_digest_old_report_degrades_to_unknown_not_complete():
+    """★旧报告没有该字段时降级方向必须是「未知」，不是「输入都看得见」。
+
+    把缺失当成完整，正是本模块要防的那类误读——在它自己身上犯就更荒唐。
+    """
+    d = build_digest(_report(is_hardened=True))
+    assert d["visibility"]["available"] is False
+    assert "未知" in d["visibility"]["note"]
+
+
+def test_pipeline_stage_registered():
+    """可见性阶段必须在 pipeline 里真的被调用（只写模块不接线 = 没做）。"""
+    import inspect
+
+    from apkscan.core import pipeline
+
+    src = inspect.getsource(pipeline)
+    assert '_run_stage(state, "visibility"' in src

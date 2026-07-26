@@ -145,15 +145,29 @@ def test_dump_success_done_with_artifacts(
     # reanalyze：避免真实 androguard/pipeline，断言收到的 extra_dex 是 dump 产物。
     captured: dict[str, Any] = {}
 
-    def _fake_reanalyze(apk_path: str, extra_dex: list[str], out: str) -> list[str]:
+    fake_report = object()  # 代表回灌后的 Report，只验证它被原样交出去
+
+    def _fake_reanalyze(
+        apk_path: str, extra_dex: list[str], out: str
+    ) -> tuple[list[str], object]:
         captured["apk_path"] = apk_path
         captured["extra_dex"] = list(extra_dex)
         captured["out"] = out
-        return [str(Path(out) / "unpacked_report.json"), str(Path(out) / "unpacked_report.html")]
+        paths = [
+            str(Path(out) / "unpacked_report.json"),
+            str(Path(out) / "unpacked_report.html"),
+        ]
+        return paths, fake_report
 
     monkeypatch.setattr(unpack, "_reanalyze", _fake_reanalyze)
 
-    result = unpack.run("sample.apk", out_dir=str(out_dir), reanalyze=True)
+    handed: list[object] = []
+    result = unpack.run(
+        "sample.apk", out_dir=str(out_dir), reanalyze=True, on_reanalyzed=handed.append
+    )
+
+    # ★回灌后的 Report **对象**必须交给调用方：只落盘不交人，auto 就会继续在壳桩报告上跑完全程。
+    assert handed == [fake_report]
 
     assert result["status"] == STATUS_DONE
     assert len(result["artifacts"]) == 2

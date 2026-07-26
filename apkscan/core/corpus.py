@@ -172,6 +172,82 @@ def _remote_config_objects(report: dict) -> list[dict]:
     return [objects[url] for url in sorted(objects)]
 
 
+#: 构建标识的合法形态：编译器写进 ``__FILE__`` 的路径段，长度与字符集都有限。
+#: 过长/含路径分隔符的一律丢——那是提取没切干净，不是标识。
+_MAX_BUILD_ID = 80
+_BUILD_ID_BAD = frozenset("/\\\n\r\t")
+
+
+def _build_environments(report: dict) -> list[dict]:
+    """报告登记的**自建构建环境标识**（meta["build_provenance"]，由 build_provenance 分析器产）。
+
+    ★为什么这是比 .so 哈希更耐用的串案锚：同族样本的 ``.so`` 文件名逐份随机、sha256 逐份不同
+    （实测 11 份同源库无一重复），文件名锚与 :func:`_native_lib_hashes` 家族反查**双双失效**；
+    而构建路径是编译器写进 ``__FILE__`` 的，改文件名、重打包、重签名都动不了它。实测一个构建
+    环境标识横跨 3 个不同案件——同标识即同一下游客户，是并案依据。
+
+    ★只收 ``self_hosted`` 那层：第三方 SDK 的构建路径会随源码继承进来（如某开源客户端作者的
+    开发机目录出现在 13 个样本里），拿它串案会把互不相干的样本串成一团，还会把无关的开源作者
+    卷进来。分层由分析器负责，这里只信它的 self_hosted 分类。
+    """
+    out: dict[str, dict] = {}
+    prov = _meta(report).get("build_provenance")
+    if not isinstance(prov, dict):
+        return []
+    for item in prov.get("self_hosted") or []:
+        if isinstance(item, dict):
+            ident = _s(item.get("identifier") or item.get("root")).strip()
+            root = _s(item.get("root")).strip() or None
+        else:
+            ident, root = _s(item).strip(), None
+        if not ident or len(ident) > _MAX_BUILD_ID or any(c in _BUILD_ID_BAD for c in ident):
+            continue
+        out.setdefault(ident, {"identifier": ident, "root": root})
+    return [out[k] for k in sorted(out)]
+
+
+def find_by_build_env(entries: list[dict], value: str) -> list[dict]:
+    """反查用同一构建环境打出来的样本（列表维度，故不走 :func:`find_by`）。
+
+    大小写敏感：构建标识是开发方自己写的字面量，``Env0000-Aaaa`` 与 ``env0000-aaaa`` 不应等同。
+    空值 → 空列表。绝不抛。
+    """
+    target = _s(value).strip()
+    if not target:
+        return []
+    return [
+        e for e in entries
+        if any(_s(b.get("identifier")).strip() == target
+               for b in (e.get("build_environments") or []) if isinstance(b, dict))
+    ]
+
+
+def shared_build_environments(entries: list[dict]) -> list[dict]:
+    """跨样本共享的构建环境簇：同一标识被 **≥2 个不同样本** 使用 —— 同一打包方/同一下游客户。
+
+    返回按样本数降序的 ``[{identifier, root, samples: [...]}]``。绝不抛。
+    """
+    groups: dict[str, set[str]] = {}
+    roots: dict[str, str | None] = {}
+    for entry in entries:
+        sample = _s(entry.get("sample_sha256")).strip().lower()
+        if not sample:
+            continue
+        for b in entry.get("build_environments") or []:
+            if not isinstance(b, dict):
+                continue
+            ident = _s(b.get("identifier")).strip()
+            if ident:
+                groups.setdefault(ident, set()).add(sample)
+                roots.setdefault(ident, b.get("root"))
+    out = [
+        {"identifier": k, "root": roots.get(k), "samples": sorted(v)}
+        for k, v in groups.items() if len(v) >= 2
+    ]
+    out.sort(key=lambda c: (-len(c["samples"]), c["identifier"]))
+    return out
+
+
 def _native_lib_hashes(report: dict) -> list[dict]:
     """报告登记的 App .so 指纹（meta["native_lib_hashes"]，由 native_fingerprint 分析器产）。
 
@@ -243,6 +319,8 @@ def manifest_entry(report: dict, case_id: str | None = None) -> dict:
         if isinstance(meta.get("dependency_versions"), dict) else None,
         # App .so 家族级硬指纹（列表维度）：供 corpus seen --by so_sha256 一击反查全家族。
         "native_lib_hashes": _native_lib_hashes(report),
+        # 自建构建环境标识（列表维度）：.so 名与 sha256 都随机化时仍能串案的锚，见 _build_environments。
+        "build_environments": _build_environments(report),
         "sign_sha256": meta.get("sign_sha256"),  # 签名证书摘要 = 共享证书串案强锚
         # ---- 加固 / 分类 ----
         "packer": meta.get("packer"),

@@ -474,6 +474,78 @@ def test_passive_mode_blocked_active_source_does_not_prevent_completion() -> Non
     assert closure["status"] == CLOSURE_COMPLETE
 
 
+def _blind_assessment() -> dict:
+    """壳桩样本的可见性求值（DEX 只看得到壳桩 → 端点穷尽性无资格下）。"""
+    from apkscan.core import visibility
+
+    return visibility.assess({"meta": {"is_hardened": True}})
+
+
+def test_static_only_targets_blocked_when_dex_invisible() -> None:
+    """★目标靠静态提取、而静态输入不可见 → 目标集合可能压根不全，说"闭环完成"站不住。
+
+    真 C2 可能就藏在看不见的 DEX 里，此时选出的目标只是"看得见的那部分"。
+    """
+    report = _report(_complete_endpoint())
+    report.meta["visibility"] = _blind_assessment()
+
+    closure = evaluate_closure(
+        report, [assemble_target_closure(report.endpoints[0])], require_dynamic=False
+    )
+
+    assert closure["status"] == CLOSURE_PARTIAL
+    assert any("target set may be incomplete" in g for g in closure["gaps"])
+    vis_check = next(c for c in closure["checks"] if c["id"] == "evidence_visibility")
+    assert vis_check["status"] == "warn"
+
+
+def test_runtime_attributed_targets_not_downgraded_by_static_blindness() -> None:
+    """★★不为一个穷尽性疑问，把已坐实的动态证据降级。
+
+    目标由运行时唯一归因确认（pcap 实测连接 + socket/UID 归到本 app）时，DEX 看不看得见
+    都不影响这个目标本身。全局一刀切封顶会把真实、可办案的动态证据一起拖下水——
+    这正是"按主张相关性消费"要防的。
+    """
+    report = _report(_complete_endpoint())
+    report.meta["visibility"] = _blind_assessment()
+    target = assemble_target_closure(report.endpoints[0])
+    target["runtime"] = {"status": CLOSURE_COMPLETE, "evidence": {"target_attributed": True}}
+
+    closure = evaluate_closure(report, [target], require_dynamic=False)
+
+    assert closure["status"] == CLOSURE_COMPLETE, "运行时已坐实的目标被静态盲区误伤了"
+    assert not any("target set may be incomplete" in g for g in closure["gaps"])
+    vis_check = next(c for c in closure["checks"] if c["id"] == "evidence_visibility")
+    assert vis_check["status"] == "warn"           # 仍如实告知盲区
+    assert "runtime-attributed" in vis_check["reason"]
+
+
+def test_visible_report_passes_visibility_check() -> None:
+    from apkscan.core import visibility
+
+    report = _report(_complete_endpoint())
+    report.meta["visibility"] = visibility.assess({"meta": {"dex_available": True}})
+
+    closure = evaluate_closure(
+        report, [assemble_target_closure(report.endpoints[0])], require_dynamic=False
+    )
+
+    assert closure["status"] == CLOSURE_COMPLETE
+    vis_check = next(c for c in closure["checks"] if c["id"] == "evidence_visibility")
+    assert vis_check["status"] == "pass"
+
+
+def test_old_report_without_visibility_is_not_applicable() -> None:
+    """旧报告没有该字段 → not_applicable，不得凭空降级（也不得凭空放行成 pass）。"""
+    report = _report(_complete_endpoint())
+    closure = evaluate_closure(
+        report, [assemble_target_closure(report.endpoints[0])], require_dynamic=False
+    )
+    vis_check = next(c for c in closure["checks"] if c["id"] == "evidence_visibility")
+    assert vis_check["status"] == "not_applicable"
+    assert closure["status"] == CLOSURE_COMPLETE
+
+
 def test_closure_config_rejects_non_positive_target_limit() -> None:
     try:
         ClosureConfig(max_targets=0)
