@@ -9,11 +9,16 @@ def _report(**meta) -> dict:
     return {"meta": meta, "leads": [], "endpoints": [], "findings": [], "analysis_status": "complete"}
 
 
-def test_clean_sample_blocks_nothing():
+def test_clean_static_run_blocks_no_static_claim():
+    """静态输入完整 → 静态那几条结论全部有资格下。
+
+    ``runtime_contact_observed`` 仍被阻断且 degraded=True：纯静态分析确实没资格说
+    「已掌握运行时实连去向」，这是如实标注而非缺陷（见动态侧那组测试）。
+    """
     a = V.assess(_report(dex_available=True))
     assert a["sources"]["dex"]["visibility"] == V.VIS_COMPLETE
-    assert a["blocked_claims"] == []
-    assert a["degraded"] is False
+    static_claims = [c for c in a["blocked_claims"] if c != "runtime_contact_observed"]
+    assert static_claims == []
 
 
 def test_stub_dex_blocks_exhaustiveness_claims():
@@ -101,6 +106,75 @@ def test_repack_suspected_raises_attribution_caveat():
     # 自研件不得触发该告警（否则每份报告都挂一条，等于没有）
     b = V.assess(_report(repack_identity={"verdict": "self_built"}))
     assert not any("重打包" in n for n in b["notes"])
+
+
+# ---------------------------------------------------------------------------
+# 动态侧：运行时观测是静态盲区的独立补救渠道
+# ---------------------------------------------------------------------------
+
+
+def test_static_only_run_cannot_claim_runtime_contact():
+    """★纯静态分析没资格说「已掌握运行时实连去向」——静态再完整也证不了跑起来连了谁。
+
+    加固样本尤其如此：真实后端往往只在运行时由配置下发，静态里根本不存在。
+    """
+    a = V.assess(_report(dex_available=True))
+    assert a["sources"]["runtime"]["visibility"] == V.VIS_UNAVAILABLE
+    assert "runtime_contact_observed" in a["blocked_claims"]
+    # 但纯静态不该因此把静态那几条也一起阻断
+    assert "no_contact_harvesting" not in a["blocked_claims"]
+
+
+def test_complete_capture_unblocks_runtime_claim():
+    a = V.assess(_report(
+        runtime_merged=True,
+        capture_quality={"dynamic_status": "complete", "reason": "ok"},
+    ))
+    assert a["sources"]["runtime"]["visibility"] == V.VIS_COMPLETE
+    assert "runtime_contact_observed" not in a["blocked_claims"]
+
+
+def test_degraded_capture_is_partial_not_complete():
+    a = V.assess(_report(
+        runtime_merged=True,
+        capture_quality={"dynamic_status": "degraded", "reason": "no business candidate"},
+    ))
+    assert a["sources"]["runtime"]["visibility"] == V.VIS_PARTIAL
+    assert "runtime_contact_observed" in a["blocked_claims"]
+
+
+def test_next_actions_tell_you_how_to_fix_the_gap():
+    """★只报「哪里瞎了」不给补法等于半截活：消费方拿到 degraded 报告得知道下一步做什么。"""
+    a = V.assess(_report(is_hardened=True))          # 壳桩 + 未脱壳 + 未做动态
+    joined = " ".join(a["next_actions"])
+    assert "unpack" in joined, "壳桩未回灌却没提示脱壳"
+    assert "capture" in joined, "静态受限且无动态证据却没提示抓包"
+
+
+def test_next_actions_do_not_suggest_unpack_after_successful_reanalysis():
+    """已脱壳回灌就别再劝脱壳——重复建议会让人不再看这个字段。"""
+    a = V.assess(_report(
+        is_hardened=True,
+        artifact_lineage={"active_input": "unpacked", "unpacked_dex_count": 3},
+    ))
+    assert not any("unpack" in x for x in a["next_actions"])
+
+
+def test_next_actions_surface_config_probe_plan():
+    """配置探测预案生成后要告诉人怎么用它（授权后重跑可取回下发的域名/IP 池）。"""
+    a = V.assess(_report(
+        is_hardened=True,
+        config_probe_plan={"candidates": [{"url": "https://h.test/api/home/config"}]},
+    ))
+    joined = " ".join(a["next_actions"])
+    assert "authorized-active" in joined and "config_probe_plan" in joined
+
+
+def test_digest_carries_next_actions():
+    rep = _report(is_hardened=True)
+    rep["meta"]["visibility"] = V.assess(rep)
+    d = build_digest(rep)
+    assert d["visibility"]["next_actions"], "补法没传到 digest，AI 消费面看不到"
 
 
 def test_assess_never_raises_on_garbage():

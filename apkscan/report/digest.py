@@ -259,6 +259,8 @@ def _compact_visibility(raw: object) -> dict[str, Any]:
             for c in blocked
         ],
         "notes": [str(n) for n in (raw.get("notes") or [])],
+        # 只说"哪里瞎了"是半截活：消费方还需要知道怎么补，否则拿到 degraded 报告也只能干看着。
+        "next_actions": [str(a) for a in (raw.get("next_actions") or [])],
     }
 
 

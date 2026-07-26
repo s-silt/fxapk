@@ -56,6 +56,9 @@ _CLAIM_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "no_remote_config": ("dex", "resource"),
     "config_chain_complete": ("dex", "resource"),
     "no_hardcoded_credential": ("dex", "native", "resource"),
+    # ★动态独有：静态再完整也证不了「跑起来到底连了谁」。加固样本尤其如此——真实后端往往
+    #   只在运行时由配置下发，静态里根本不存在。没做运行时观测就下这个结论是空口。
+    "runtime_contact_observed": ("runtime",),
 }
 
 #: 主张的人读名（进报告/digest 给人看）。
@@ -66,6 +69,7 @@ _CLAIM_LABELS: dict[str, str] = {
     "no_remote_config": "未发现远程配置下发",
     "config_chain_complete": "配置链已追全",
     "no_hardcoded_credential": "未发现硬编码凭据",
+    "runtime_contact_observed": "已掌握运行时实连去向",
 }
 
 #: 视为「不足以支撑穷尽性主张」的可见性取值。
@@ -145,6 +149,33 @@ def _attribution_caveat(meta: dict) -> list[str]:
     return notes
 
 
+def _runtime_visibility(meta: dict) -> tuple[str, list[str]]:
+    """运行时观测这条路走到哪一步 —— 它是静态盲区的**独立补救渠道**。
+
+    ★为什么要单列这一维：静态看不见时，唯一还能拿到真实后端的路子就是运行时观测（字符串在
+    被使用的那一刻必然以明文存在于内存、连接必然出现在网络上）。若不记录"动态跑了没有、
+    拿到了什么"，一份壳桩样本的报告只会说"静态瞎了"，读的人无从判断**这个缺口补没补**。
+
+    与 DEX/native 那两维不同，这里 ``unavailable`` 不代表出错，而是"这条路没走"——
+    纯静态分析本就没有运行时证据，那是选择不是故障。
+    """
+    why: list[str] = []
+    if not (meta.get("runtime_merged") or meta.get("capture_quality") or meta.get("capture_signals")):
+        return VIS_UNAVAILABLE, ["未做运行时观测（纯静态分析）"]
+
+    quality = meta.get("capture_quality")
+    if isinstance(quality, dict):
+        status = str(quality.get("dynamic_status") or "")
+        if status == "complete":
+            why.append("运行时采集完整且有目标归因的业务候选")
+            return VIS_COMPLETE, why
+        if status:
+            why.append(f"运行时采集质量：{status}（{quality.get('reason') or '无说明'}）")
+            return VIS_PARTIAL, why
+    why.append("已并入运行时数据，但采集质量未评估")
+    return VIS_PARTIAL, why
+
+
 def _remediation(meta: dict) -> tuple[str, list[str]]:
     """脱壳补救到了哪一步。
 
@@ -158,6 +189,37 @@ def _remediation(meta: dict) -> tuple[str, list[str]]:
     if meta.get("unpacked"):
         return REM_REANALYZED, ["报告自身即脱壳回灌产物"]
     return REM_NOT_ATTEMPTED, []
+
+
+def _next_actions(sources: dict, remediation: str, meta: dict) -> list[str]:
+    """针对每个盲区给出**可执行的**补法。
+
+    ★只说"这里瞎了"是半截活：读的人（尤其是 AI）拿到一份 degraded 报告，需要知道下一步该做
+    什么才能把缺口补上。补法按缺口类型分——静态看不见就转运行时，配置链断了就去取配置。
+    """
+    actions: list[str] = []
+    dex = sources.get("dex", {}).get("visibility")
+    runtime = sources.get("runtime", {}).get("visibility")
+
+    if dex in (VIS_STUB_ONLY, VIS_UNAVAILABLE) and remediation != REM_REANALYZED:
+        actions.append(
+            "DEX 不可见且未脱壳回灌：跑 `fxapk unpack <apk>`（真机 + frida-dexdump）后重新分析——"
+            "字符串在被使用时必然以明文存在于内存，这是静态看不见时唯一能拿到真实后端的路"
+        )
+    if dex == VIS_PARTIAL:
+        actions.append("DEX 字符串被截断：调高扫描上限或分片重跑，确认截断段内无遗漏端点")
+    if dex in _INSUFFICIENT and runtime == VIS_UNAVAILABLE:
+        actions.append(
+            "静态受限且未做运行时观测：跑 `fxapk capture <包名>` 抓包——"
+            "真实后端往往只在运行时由配置下发，静态里根本不存在"
+        )
+    plan = meta.get("config_probe_plan")
+    if isinstance(plan, dict) and plan.get("candidates"):
+        actions.append(
+            f"已生成 {len(plan['candidates'])} 条配置接口候选 URL（meta.config_probe_plan）："
+            "确认授权后以 `--mode authorized-active` 重跑可下载解码，取回下发的域名/IP 池"
+        )
+    return actions
 
 
 def assess(report: Any) -> dict[str, Any]:
@@ -178,12 +240,14 @@ def assess(report: Any) -> dict[str, Any]:
             dex_vis = VIS_COMPLETE
             dex_why.append("★上述加固结论属被取代的原包；当前输入为脱壳回灌产物")
 
+        rt_vis, rt_why = _runtime_visibility(meta)
         sources = {
             "dex": {"visibility": dex_vis, "why": dex_why},
             "native": {"visibility": nat_vis, "why": nat_why},
             # 资源层目前无专门的不可见信号；显式记 unknown 而非默认 complete——
             # 「没有信号」不等于「已确认完整」，这正是本模块要防的那类误读。
             "resource": {"visibility": VIS_UNKNOWN, "why": []},
+            "runtime": {"visibility": rt_vis, "why": rt_why},
         }
 
         claims: dict[str, dict] = {}
@@ -206,6 +270,7 @@ def assess(report: Any) -> dict[str, Any]:
                 notes.append(f"[{src}] {w}")
         notes.extend(rem_why)
         notes.extend(_attribution_caveat(meta))
+        next_actions = _next_actions(sources, rem, meta)
         if blocked:
             labels = "、".join(_CLAIM_LABELS.get(c, c) for c in blocked)
             notes.append(
@@ -220,6 +285,7 @@ def assess(report: Any) -> dict[str, Any]:
             "blocked_claims": sorted(blocked),
             "remediation": rem,
             "notes": notes,
+            "next_actions": next_actions,
             "degraded": bool(blocked),
         }
     except Exception:  # noqa: BLE001 — 求值失败不得影响主流程；返回保守的"全未知"
@@ -231,6 +297,7 @@ def assess(report: Any) -> dict[str, Any]:
             "claims": {}, "blocked_claims": sorted(_CLAIM_REQUIREMENTS),
             "remediation": REM_NOT_ATTEMPTED,
             "notes": ["可见性求值异常，全部穷尽性结论按无资格处理"],
+            "next_actions": [],
             "degraded": True,
         }
 
