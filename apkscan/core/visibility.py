@@ -69,7 +69,9 @@ _CLAIM_LABELS: dict[str, str] = {
 }
 
 #: 视为「不足以支撑穷尽性主张」的可见性取值。
-_INSUFFICIENT = frozenset({VIS_STUB_ONLY, VIS_OPAQUE, VIS_UNAVAILABLE})
+#: ★``partial``（扫描被截断）也在内：本表里的主张**全部是穷尽性/否定性**的，"扫了一半"支撑不了
+#: "已穷尽"。这条最容易被放过——分析器跑成功、状态全绿，只是没扫完。
+_INSUFFICIENT = frozenset({VIS_PARTIAL, VIS_STUB_ONLY, VIS_OPAQUE, VIS_UNAVAILABLE})
 
 
 def _meta(report: Any) -> dict:
@@ -102,6 +104,16 @@ def _dex_visibility(meta: dict) -> tuple[str, list[str]]:
     if isinstance(pool, dict) and pool.get("suspicious"):
         why.append("字符串池不透明度超阈（编译期字符串混淆）")
         return VIS_OPAQUE, why
+
+    # ★扫描截断同样是可见性缺口，而且最隐蔽：分析器"跑成功了"、状态一切正常，只是没扫完。
+    #   实测一个 100MB 样本的 DEX 字符串超过 20 万条上限被截断——此时"未发现某接口"完全可能
+    #   只是因为它排在截断线之后。上限本身是必要的（防内存爆），但截断的**事实**必须传下去。
+    if meta.get("dex_strings_truncated"):
+        why.append("DEX 字符串数超上限被截断，后段未扫（分析器成功但未扫全）")
+        return VIS_PARTIAL, why
+    if meta.get("dex_scanned") is False:
+        why.append("DEX 未被扫描（dex_scanned=False）")
+        return VIS_UNAVAILABLE, why
     return VIS_COMPLETE, why
 
 
@@ -114,6 +126,23 @@ def _native_visibility(meta: dict) -> tuple[str, list[str]]:
             why.append(f"{len(libs)} 个 .so 疑加密/虚拟化，其中字符串不可读")
             return VIS_OPAQUE, why
     return VIS_COMPLETE, why
+
+
+def _attribution_caveat(meta: dict) -> list[str]:
+    """归属层的告警：本样本的端点/域名到底归不归得到嫌疑方。
+
+    ★这不是"可见性"问题而是"归属"问题，但后果同样是方向性的，且同样此前无人消费：
+    正版应用被重打包时，它的接口与域名属于**被仿冒的正版厂商**，照单列进调证清单会向无关企业
+    发函。仅凭样本自身只能确定"被重签名"，确定注入物必须与官方同版本包做差分。
+    """
+    notes: list[str] = []
+    rid = meta.get("repack_identity")
+    if isinstance(rid, dict) and rid.get("verdict") == "repack_suspected":
+        notes.append(
+            "⚠ 疑似正版应用重打包：本样本的接口/域名可能属于被仿冒的正版厂商，"
+            "作为调证线索前须与官方同版本包差分核实（仅凭样本自身只能确定被重签名）"
+        )
+    return notes
 
 
 def _remediation(meta: dict) -> tuple[str, list[str]]:
@@ -176,6 +205,7 @@ def assess(report: Any) -> dict[str, Any]:
             for w in info["why"]:
                 notes.append(f"[{src}] {w}")
         notes.extend(rem_why)
+        notes.extend(_attribution_caveat(meta))
         if blocked:
             labels = "、".join(_CLAIM_LABELS.get(c, c) for c in blocked)
             notes.append(

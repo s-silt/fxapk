@@ -73,6 +73,36 @@ def test_native_obfuscation_only_blocks_claims_needing_native():
     assert "no_contact_harvesting" not in a["blocked_claims"]    # 只需要 dex
 
 
+def test_truncated_scan_blocks_exhaustiveness():
+    """★扫描截断是最隐蔽的可见性缺口：分析器跑成功、状态全绿，只是没扫完。
+
+    实测一个 100MB 样本的 DEX 字符串超 20 万条上限被截断——此时「未发现某接口」完全可能只是
+    因为它排在截断线之后。上限本身必要（防内存爆），但截断这个**事实**必须传下去。
+    """
+    a = V.assess(_report(dex_strings_truncated=True))
+    assert a["sources"]["dex"]["visibility"] == V.VIS_PARTIAL
+    assert "static_endpoint_exhaustive" in a["blocked_claims"]
+    assert any("截断" in n for n in a["notes"])
+
+
+def test_dex_not_scanned_is_unavailable():
+    a = V.assess(_report(dex_scanned=False))
+    assert a["sources"]["dex"]["visibility"] == V.VIS_UNAVAILABLE
+    assert a["blocked_claims"]
+
+
+def test_repack_suspected_raises_attribution_caveat():
+    """★重打包件的接口/域名归**被仿冒的正版厂商**，照单列进清单会向无关企业发函。
+
+    这是归属问题不是可见性问题，但后果同样方向性、同样此前无人消费，故一并在此告警。
+    """
+    a = V.assess(_report(repack_identity={"verdict": "repack_suspected"}))
+    assert any("重打包" in n and "官方同版本包差分" in n for n in a["notes"])
+    # 自研件不得触发该告警（否则每份报告都挂一条，等于没有）
+    b = V.assess(_report(repack_identity={"verdict": "self_built"}))
+    assert not any("重打包" in n for n in b["notes"])
+
+
 def test_assess_never_raises_on_garbage():
     for bad in (None, [], "x", {"meta": "not-a-dict"}, {"meta": {"dex_string_pool": 7}}):
         got = V.assess(bad)

@@ -1,0 +1,225 @@
+"""build_provenance 分析器测试——全部合成数据，零真实案件信息。
+
+覆盖点与"无修复即失败"对应关系：
+- 提取：lookbehind 排 URL 内嵌 / 最小深度 / 设备挂载点排除 / Windows 形态 / .so 二进制提取；
+- 分层：只看构建根（私有根下挂已知第三方目录名的踩坑回归）/ 已知第三方前缀 /
+  公共工具链 /opt 不误判 / 主目录保守降 unknown；
+- 标识解析：三段拆 批次-代号-业务、多余段并入业务、不足三段原样保留；
+- 边界：声明大小前置门、累计预算、用户名不进 Finding 正文只进 meta、不产 Lead。
+"""
+from __future__ import annotations
+
+import pytest
+
+import apkscan.analyzers.build_provenance as bp
+from apkscan.analyzers.build_provenance import (
+    TIER_SELF_HOSTED,
+    TIER_THIRD_PARTY,
+    TIER_UNKNOWN,
+    BuildProvenanceAnalyzer,
+    classify_path,
+    extract_paths,
+    parse_build_identifier,
+)
+from apkscan.core.models import AnalyzerResult, Severity
+from tests.conftest import FakeContext
+
+# 合成的私有构建平台路径（结构仿真实形态，标识/项目名均为编造）。
+_SYN_SELF_HOSTED = "/opt/work/Env9901-Zdemo-Wallet/Android-Gray/DemoPrj/jni/voip/audio.cc"
+_SYN_THIRD_PARTY = "/Users/drklo/Documents/telega/jni/audio/echo.c"
+
+
+def _run(dex_strings: list[str] | None = None, files: dict[str, bytes] | None = None,
+         native_libs: list[str] | None = None, **kw) -> AnalyzerResult:
+    ctx = FakeContext(dex_strings=dex_strings or [], files=files or {},
+                      native_libs=native_libs or [], **kw)
+    return BuildProvenanceAnalyzer().analyze(ctx)
+
+
+def _all_finding_text(result: AnalyzerResult) -> str:
+    parts: list[str] = []
+    for f in result.findings:
+        parts.extend([f.title, f.description, f.recommendation])
+        parts.extend(ev.snippet + ev.location for ev in f.evidences)
+    return " ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# 提取（extract_paths 纯函数）
+# ---------------------------------------------------------------------------
+
+
+def test_extract_unix_path_from_binary_blob() -> None:
+    blob = b"\x00garbage\x00" + _SYN_SELF_HOSTED.encode() + b"\x00more"
+    assert extract_paths(blob) == [_SYN_SELF_HOSTED]
+
+
+def test_extract_rejects_url_embedded_segment() -> None:
+    # URL 路径段里的 /home、/opt 前一个字符是路径字符 → lookbehind 排除。
+    blob = b"https://cdn.example/home/pano/index.html \x00 com/foo/opt/work/x/y/z"
+    assert extract_paths(blob) == []
+
+
+def test_extract_min_depth_filters_shallow_paths() -> None:
+    assert extract_paths(b"\x00/opt/tmp\x00/root/x.c\x00") == []
+
+
+def test_extract_windows_path_normalized() -> None:
+    blob = b"\x00C:\\Users\\dev9x\\proj\\app\\main.c\x00"
+    assert extract_paths(blob) == ["C:/Users/dev9x/proj/app/main.c"]
+
+
+def test_extract_excludes_device_runtime_mounts() -> None:
+    # /mnt/sdcard 是设备运行时路径，不是构建机路径。
+    assert extract_paths(b"\x00/mnt/sdcard/Download/pkg.apk\x00") == []
+
+
+def test_extract_dedups_case_insensitively() -> None:
+    blob = _SYN_SELF_HOSTED.encode() + b"\x00" + _SYN_SELF_HOSTED.upper().encode()
+    assert len(extract_paths(blob)) == 1
+
+
+# ---------------------------------------------------------------------------
+# 分层（classify_path 纯函数）
+# ---------------------------------------------------------------------------
+
+
+def test_classify_self_hosted_workspace() -> None:
+    cp = classify_path(_SYN_SELF_HOSTED)
+    assert cp.tier == TIER_SELF_HOSTED
+    assert cp.root == "/opt/work"
+    assert cp.identifier == "Env9901-Zdemo-Wallet"
+
+
+def test_classify_judges_root_only_not_full_path() -> None:
+    # ★踩坑回归：私有构建根下挂着已知第三方来源的目录名（home/pano、webrtc）。
+    # 判据只看构建根 → 仍是 self_hosted；若实现改成整条路径子串匹配第三方清单即红。
+    trap = "/opt/work/Env9901-Zdemo-Wallet/Prj/jni/libvoip/home/pano/webrtc_dsp/ns.cc"
+    assert classify_path(trap).tier == TIER_SELF_HOSTED
+
+
+def test_classify_known_third_party_prefix() -> None:
+    cp = classify_path(_SYN_THIRD_PARTY)
+    assert cp.tier == TIER_THIRD_PARTY
+    assert cp.origin  # 附标定依据说明
+    assert cp.username == "drklo"
+
+
+def test_classify_public_toolchain_opt_is_not_self_hosted() -> None:
+    # /opt 下的公共工具链安装位形似私有工作区但零身份信息（实测验真补录的 FP 类）。
+    for p in (
+        "/opt/hostedtoolcache/Python/3.11.9/x64/lib/abc.py",
+        "/opt/android-sdk/ndk/25.2.9519653/sysroot/usr/include/errno.h",
+    ):
+        assert classify_path(p).tier == TIER_THIRD_PARTY, p
+
+
+def test_classify_unlisted_home_dir_stays_unknown() -> None:
+    # 未收录的个人主目录不冒进判 self_hosted（可能是未收录的 SDK 开发者）。
+    cp = classify_path("/Users/zhangsan9/dev/proj/native/x.c")
+    assert cp.tier == TIER_UNKNOWN
+    assert cp.username == "zhangsan9"
+
+
+# ---------------------------------------------------------------------------
+# 标识解析
+# ---------------------------------------------------------------------------
+
+
+def test_identifier_parse_three_parts() -> None:
+    info = parse_build_identifier("Env9901-Zdemo-Wallet")
+    assert info == {"raw": "Env9901-Zdemo-Wallet", "batch": "Env9901",
+                    "code": "Zdemo", "business": "Wallet"}
+
+
+def test_identifier_parse_extra_parts_join_business() -> None:
+    assert parse_build_identifier("BB07-Xdemo-AV-EXTRA-MM")["business"] == "AV-EXTRA-MM"
+
+
+def test_identifier_parse_unstructured_kept_raw() -> None:
+    info = parse_build_identifier("myserver")
+    assert info["raw"] == "myserver"
+    assert info["batch"] is None
+
+
+# ---------------------------------------------------------------------------
+# 分析器端到端
+# ---------------------------------------------------------------------------
+
+
+def test_analyze_self_hosted_from_dex_produces_finding_and_meta() -> None:
+    result = _run(dex_strings=["assert failed: " + _SYN_SELF_HOSTED + ":120"])
+    ids = [f.id for f in result.findings]
+    assert "BUILD-PROVENANCE-SELF-HOSTED" in ids
+    assert "BUILD-PROVENANCE-PATHS" in ids
+    meta = result.meta["build_provenance"]
+    assert meta["self_hosted"][0]["identifier"] == "Env9901-Zdemo-Wallet"
+    assert meta["identifiers"][0]["batch"] == "Env9901"
+
+
+def test_analyze_extracts_from_native_so() -> None:
+    so = b"\x7fELF\x00\x00" + _SYN_SELF_HOSTED.encode() + b"\x00"
+    result = _run(files={"lib/arm64-v8a/libdemo.so": so},
+                  native_libs=["lib/arm64-v8a/libdemo.so"])
+    sh = [f for f in result.findings if f.id == "BUILD-PROVENANCE-SELF-HOSTED"]
+    assert sh and sh[0].evidences[0].source == "native"
+    assert sh[0].evidences[0].location == "lib/arm64-v8a/libdemo.so"
+
+
+def test_analyze_third_party_only_no_self_hosted_finding() -> None:
+    result = _run(dex_strings=[_SYN_THIRD_PARTY])
+    ids = [f.id for f in result.findings]
+    assert ids == ["BUILD-PROVENANCE-PATHS"]
+    meta = result.meta["build_provenance"]
+    assert meta["self_hosted"] == []
+    assert meta["third_party"][0]["root"] == "/users/drklo"
+
+
+def test_analyze_usernames_only_in_meta_not_in_findings() -> None:
+    result = _run(dex_strings=["/Users/zhangsan9/dev/proj/native/x.c", _SYN_SELF_HOSTED])
+    assert "zhangsan9" not in _all_finding_text(result)
+    names = {u["name"]: u["classification"]
+             for u in result.meta["build_provenance"]["usernames"]}
+    assert names == {"zhangsan9": TIER_UNKNOWN}
+
+
+def test_analyze_severities_are_informational() -> None:
+    result = _run(dex_strings=[_SYN_SELF_HOSTED])
+    by_id = {f.id: f for f in result.findings}
+    assert by_id["BUILD-PROVENANCE-PATHS"].severity == Severity.INFO
+    assert by_id["BUILD-PROVENANCE-SELF-HOSTED"].severity == Severity.LOW
+
+
+def test_analyze_produces_no_leads() -> None:
+    result = _run(dex_strings=[_SYN_SELF_HOSTED, _SYN_THIRD_PARTY])
+    assert result.leads == []
+
+
+def test_analyze_empty_sample_no_findings_meta_present() -> None:
+    result = _run()
+    assert result.findings == []
+    assert result.meta["build_provenance"]["self_hosted"] == []
+
+
+def test_declared_size_gate_skips_oversized_so() -> None:
+    # 声明大小超单库上限 → 读前拦截：即使实际内容很小且含路径也不得被提取。
+    so = _SYN_SELF_HOSTED.encode() + b"\x00"
+    result = _run(
+        files={"lib/arm64-v8a/libbig.so": so},
+        native_libs=["lib/arm64-v8a/libbig.so"],
+        declared_sizes={"lib/arm64-v8a/libbig.so": bp._MAX_LIB_BYTES + 1},
+    )
+    assert result.findings == []
+
+
+def test_total_budget_stops_scanning_remaining_libs(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 第一库耗尽累计预算 → 第二库不读（其中的第三方路径不出现在 meta）。
+    lib_a = b"\x00" * 64 + _SYN_SELF_HOSTED.encode() + b"\x00"
+    lib_b = _SYN_THIRD_PARTY.encode() + b"\x00"
+    monkeypatch.setattr(bp, "_MAX_TOTAL_LIB_BYTES", len(lib_a))
+    result = _run(
+        files={"lib/arm64-v8a/liba.so": lib_a, "lib/arm64-v8a/libb.so": lib_b},
+        native_libs=["lib/arm64-v8a/liba.so", "lib/arm64-v8a/libb.so"],
+    )
+    meta = result.meta["build_provenance"]
+    assert meta["self_hosted"] and meta["third_party"] == []
