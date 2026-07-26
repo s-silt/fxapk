@@ -76,6 +76,13 @@ _EXTRA_DEX_RE = re.compile(r"classes\d+\.dex")
 #: 「拒绝分析」诱饵炸弹的声明大小门槛（实测语料里的构造声明 1000MB；正常 APK 单条目远低于此）。
 _DENIAL_BOMB_DECLARED_BYTES = 256 * 1024 * 1024
 
+#: stub dex 判据：DEX 字符串数下限。24 样本实测双峰分离极干净——加固样本 15~440 条，
+#: 正常 App 12867~299356 条，**29 倍鸿沟**，故取 1000 有充足余量。
+#: ★这是结构判据、不依赖厂商特征，故对未知壳 / 自研壳同样有效（与抗 fork 的思路一致）。
+_STUB_MAX_DEX_STRINGS = 1000
+#: 佐证：真 App 的 classes*.dex 通常数 MB；stub 仅 1~57KB。作为第二判据之一（与「有 .so」二选一）。
+_STUB_MAX_DEX_BYTES = 1 * 1024 * 1024
+
 # 命中后 Lead 默认可调取证据（规则文件 meta 缺失时的兜底，确保离线/规则缺失仍合规）。
 _DEFAULT_EVIDENCE_TO_OBTAIN: tuple[str, ...] = (
     "未加固原始安装包",
@@ -176,13 +183,6 @@ class PackingAnalyzer(BaseAnalyzer):
                 hits.append(hit)
 
         result.meta["dex_scanned"] = dex_iter_ok
-        if not hits:
-            logger.info("[%s] 未识别到已知加固特征", self.name)
-            result.meta["packed"] = None
-            result.meta["packer"] = None
-            result.meta["packers"] = []
-            result.meta["is_hardened"] = False
-            return result
 
         # 证据分级分流：强命中（so/file）才判已加固；仅弱命中（dex 名词）降级为 LOW INFO。
         strong_hits = [h for h in hits if h.is_strong]
@@ -190,6 +190,21 @@ class PackingAnalyzer(BaseAnalyzer):
 
         if strong_hits:
             self._emit_hardened(result, strong_hits, default_evidence, where_suffix)
+            return result
+
+        # ★结构判据兜底（厂商没认出来 ≠ 没加固）：必须在「无任何命中」分支**之前**调用——
+        #   实测三案正是零厂商命中、直接走 not hits 分支返回，若放在后面永远到不了。
+        try:
+            self._flag_stub_dex(result, file_paths, dex_strings)
+        except Exception:
+            logger.exception("[%s] stub dex 结构判定失败，跳过", self.name)
+
+        if not hits:
+            logger.info("[%s] 未识别到已知加固特征", self.name)
+            result.meta.setdefault("packed", None)
+            result.meta.setdefault("packer", None)
+            result.meta.setdefault("packers", [])
+            result.meta.setdefault("is_hardened", False)
             return result
 
         # 仅弱命中（无任何强证据）→ 不判已加固，产一条 LOW 透明说明 Finding。
@@ -263,6 +278,66 @@ class PackingAnalyzer(BaseAnalyzer):
         ))
         logger.info(
             "[%s] 检出诱饵条目 %d 条（冒充核心名 %s）", self.name, len(decoys), shown
+        )
+
+    def _flag_stub_dex(
+        self, result: AnalyzerResult, file_paths: list[str], dex_strings: list[str]
+    ) -> None:
+        """结构判据：DEX 小到不像真 App（stub） + 有 App 自有 .so → 判「疑加固·厂商未识别」。
+
+        ★为什么需要：厂商识别靠 so 名 / 特征文件 / 包名等**已知特征**，遇上未知壳或自研壳
+        就全部落空、报「未加固」——而真相是 Java 侧几乎什么都没抽到，报告却让人以为静态端点完整。
+        实测三个真样本正是如此：classes.dex 仅 1~3KB、DEX 字符串 15~57 条，却被判「未加固」。
+
+        ★阈值有实测依据（24 样本标定）：加固样本 DEX 字符串 15~440 条，正常 App 12867~299356 条，
+        **相差 29 倍**，故取 1000 有充足余量。第二判据取「dex 极小」或「有 App 自有 .so」二选一——
+        真 App 即便字符串少也不会只有几 KB dex；纯资源类小 App 无 .so 时不误伤。
+
+        ★只报手法不认厂商：不写 ``packed``（那是厂商归属，写了会误导"向该厂商调证"），
+        只置 ``is_hardened`` 与 ``hardening_structural``，并产 Finding 明说静态不完整。
+        """
+        n_str = len(dex_strings)
+        if n_str >= _STUB_MAX_DEX_STRINGS:
+            return
+        so_paths = [p for p in file_paths if isinstance(p, str) and p.lower().endswith(".so")]
+        dex_bytes = sum(1 for p in file_paths if isinstance(p, str) and p.endswith(".dex"))
+        if not so_paths and dex_bytes:
+            return          # 无 native、又确有 dex：可能只是极简 App，不误伤
+
+        result.meta["hardening_structural"] = {
+            "dex_strings": n_str,
+            "app_so_count": len(so_paths),
+            "reason": "stub-dex",
+        }
+        result.meta["is_hardened"] = True   # 结构上确已加固；厂商未知不影响这个事实
+        result.findings.append(Finding(
+            id="PACK-UNIDENTIFIED-STUB-DEX",
+            title="疑已加固（DEX 仅存壳桩，厂商未识别）——静态端点不完整",
+            severity=Severity.HIGH,
+            confidence=Confidence.MEDIUM,
+            category="packing",
+            description=(
+                f"DEX 字符串仅 {n_str} 条，而真实 App 通常上万条（实测语料正常样本 12867~299356 条、"
+                f"加固样本 15~440 条）；同时存在 {len(so_paths)} 个 native 库。这符合**加固壳只留桩 DEX、"
+                "真实字节码另行加密存放**的形态，但未命中任何已知厂商特征——即**未知壳或自研壳**。\n"
+                "★ 直接后果：Java 侧几乎什么都抽不到。本报告里 endpoints / contacts / config_keys 的"
+                "「未发现」**不可解读为「不存在」**——真实逻辑在被加密的 DEX 里。"
+            ),
+            recommendation=(
+                "别据本次静态结果判该样本的网络行为与配置。需**脱壳后重新静态分析**"
+                "（`fxapk unpack`，再以 `--extra-dex` 回灌 dump 出的 DEX），或转运行时观测"
+                "（floor PCAP 拿实际连接的 IP:端口 + socket 归因）。"
+                "★ 厂商未识别不代表未加固——这条正是为未知壳/自研壳兜底。"
+            ),
+            evidences=[
+                Evidence(source="dex", location="classes.dex", snippet=f"dex_strings={n_str}"),
+                *[Evidence(source="native", location=p, snippet="app .so")
+                  for p in so_paths[:3]],
+            ],
+        ))
+        logger.info(
+            "[%s] 结构判定疑加固：DEX 字符串仅 %d 条、native 库 %d 个（厂商未识别）",
+            self.name, n_str, len(so_paths),
         )
 
     def _flag_denial_bombs(
