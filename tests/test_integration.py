@@ -47,7 +47,9 @@ def _rich_ctx() -> FakeContext:
         },
         dex_strings=[
             "https://pay.fraud.cn/notify",
-            "http://1.2.3.4:8080/api",
+            # 注：原用 1.2.3.4，但它是公认占位 IP、本就在 noise_ips 里，此前仅因走 URL 通道
+            #     才漏过过滤；两条通道口径统一后需换成真实形态的公网 IP。
+            "http://139.59.12.34:8080/api",
             "cn.jpush.android.api.JPushInterface",
             "com.alipay.sdk.app.PayTask",
             '{"mch_id":"1900000109"}',
