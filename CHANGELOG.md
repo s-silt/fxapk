@@ -7,6 +7,15 @@ affect automated / CI / agent callers are called out explicitly**.
 
 ### Added
 
+- **容器级诱饵条目检测**：`packing` 分析器新增 `APK-CORE-NAME-DECOY-ENTRIES`——检出以 `/` 开头
+  （ZIP 规范禁止的绝对路径）且首段恰为 `AndroidManifest.xml` / `classes.dex` / `resources.arsc`
+  的条目，即精确冒充每个 APK 解析器必找的核心文件、意在让解析器撞上假条目。
+  - **实测定标**：24 个真实样本中 7 个含此构造、共 411 条，首段无一例外只有那三种；端到端
+    检出 7/7、误报 0/14。fxapk 自身经真样本验证不受影响（包名/清单/DEX 均正常解出）。
+  - **提示的是下一步动作**：别用会落盘解压的工具直接展开该样本，绝对路径条目在不同工具下行为不一。
+  - **不做家族归属**：实测各样本扩展名分布逐构建随机化，细粒度签名当不了家族键，故只报手法、
+    不指名工具；明细写入 `meta["container_decoy_entries"]` 供跨样本比对。
+
 - **DEX 字符串池不透明度（可信度信号）**：新增 `dex_obfuscation` 分析器（自动跑），度量字符串池中
   「结构性不可读」串的占比，命中产 `DEX-STRING-POOL-OPAQUE`。
   - **解决的是静默失明**：编译期字符串混淆器把 dex 字面量整体加密后，`endpoints` / `contacts` /
