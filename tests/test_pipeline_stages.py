@@ -22,6 +22,12 @@ _EXPECTED_STAGES = [
     "network_attribution",
     "control_chain",
     "asset_score",
+    # 配置探测预案要用 asset_score 的"最像自有后端"排序挑 host，故必须排在它之后。
+    "config_probe_plan",
+    # ★可见性求值必须是**最后一个**：它读遍前面各阶段写下的事实（is_hardened /
+    # dex_string_pool / artifact_lineage / repack_identity / config_probe_plan）。
+    # 曾排在 config_probe_plan 之前，结果预案生成了 16 条候选而补法建议是空的。
+    "visibility",
 ]
 
 
