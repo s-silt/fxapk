@@ -69,6 +69,22 @@ def test_framework_infra_subdomains_skip():
         assert advice == infra.ADVICE_SKIP, f"{dom} 子域应命中框架基础设施"
 
 
+def test_resolver_stun_ca_infra_skip():
+    """★无修复即失败（2026-07-26 真案实测）：公共 DNS / DoH / STUN / 证书链域名不得判"建议调证"。
+
+    修前两案报告把 dns.alidns.com、doh.pub、stun.*、crl.comodoca.com、entrust.net 等一并标成
+    建议调证，还把闭环仅有的 6 个调证目标名额全占了，真候选 54 个一个没评估——办案人拿到的
+    是一份指向证书吊销列表和公共 DNS 的"调证清单"。
+    """
+    for dom in ("dns.alidns.com", "doh.pub", "doh.360.cn", "myip.opendns.com",
+                "resolvers-cn.httpdns.aliyuncs.com",
+                "stun.cloudflare.com", "stun.freeswitch.org", "stun.voipbuster.com",
+                "crl.comodoca.com", "crl.usertrust.com", "crl.globalsign.net",
+                "entrust.net", "godaddy.com", "logo.verisign.com", "curl.haxx.se"):
+        advice, _reason = infra.classify_domain(dom)
+        assert advice == infra.ADVICE_SKIP, f"{dom} 应判基础设施 无需调证"
+
+
 def test_real_c2_not_killed_by_framework_infra():
     # ★ 守卫：真可疑 C2 域名不得被新增条目误降为无需调证。
     for dom in ("aqecw.com", "mmybp.com", "bubdm.com", "91669.lol"):
