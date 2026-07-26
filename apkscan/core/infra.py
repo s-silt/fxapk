@@ -264,6 +264,41 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         "openxmlformats.org",       # OOXML 命名空间
         "dispatchers.io",           # Kotlin Dispatchers.IO 被误当域名
         "locale.us",                # Java Locale.US 被误当域名
+
+        # ---- 公共 DNS / DoH 解析器（2026-07-26 实测：两案报告里它们被判"建议调证"，
+        #      还把闭环仅有的 6 个调证目标名额全占了，真候选 54 个一个没评估）----
+        #      这些是**解析基础设施**，向其运营方调证毫无意义。
+        "alidns.com",               # 阿里公共 DNS / DoH（dns.alidns.com、223.5.5.5）
+        "doh.pub",                  # 腾讯 DoH
+        "dnspod.cn",                # 腾讯 DNSPod
+        "doh.360.cn",               # 360 DoH
+        "opendns.com",              # Cisco OpenDNS（含 myip.opendns.com 探测端点）
+        "cloudflare-dns.com",
+        "dns.google",
+        "quad9.net",
+        "httpdns.aliyuncs.com",     # 阿里 HTTPDNS 解析服务
+
+        # ---- STUN / TURN（WebRTC NAT 穿透公共服务器，非案件后端）----
+        "stun.cloudflare.com",
+        "stun.freeswitch.org",
+        "stun.nextcloud.com",
+        "stun.voipbuster.com",
+        "stunprotocol.org",
+
+        # ---- 证书链基础设施：CA 官网 / CRL 吊销列表 / OCSP（TLS 校验用，恒出现在任何
+        #      带 HTTPS 的 App 里，向 CA 调证与案件无关）----
+        "comodoca.com",
+        "comodo.net",
+        "usertrust.com",
+        "globalsign.net",
+        "globalsign.com",
+        "entrust.net",
+        "digicert.com",
+        "verisign.com",
+        "godaddy.com",
+        "letsencrypt.org",
+        "sectigo.com",
+        "curl.haxx.se",             # libcurl 证书包来源说明 URL
     }
 )
 
