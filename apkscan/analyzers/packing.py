@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -66,6 +67,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _RULES_NAME = "packers"
+
+#: APK 核心文件名——每个解析器必找的三个。诱饵条目精确冒充它们（24 样本实测：411 条诱饵首段无一例外）。
+_CORE_APK_NAMES = frozenset({"AndroidManifest.xml", "classes.dex", "resources.arsc"})
+#: 多 dex 的 classes2.dex / classes3.dex …（与 _CORE_APK_NAMES 同等对待）。
+_EXTRA_DEX_RE = re.compile(r"classes\d+\.dex")
 
 # 命中后 Lead 默认可调取证据（规则文件 meta 缺失时的兜底，确保离线/规则缺失仍合规）。
 _DEFAULT_EVIDENCE_TO_OBTAIN: tuple[str, ...] = (
@@ -145,6 +151,13 @@ class PackingAnalyzer(BaseAnalyzer):
         file_paths = self._collect_file_paths(ctx)
         dex_iter_ok, dex_strings = self._collect_dex_strings(ctx)
 
+        # 容器结构异常与加固规则命中与否无关，故在此提前判定——下方各分支的 return 都返回同一个
+        # result 对象，提前 append 对所有路径生效。
+        try:
+            self._flag_core_name_decoys(result, file_paths)
+        except Exception:
+            logger.exception("[%s] 诱饵条目检测失败，跳过", self.name)
+
         hits: list[_Hit] = []
         for rule in rules:
             try:
@@ -184,6 +197,66 @@ class PackingAnalyzer(BaseAnalyzer):
         result.meta["is_hardened"] = False
         result.findings.append(self._build_weak_finding(weak_only_hits))
         return result
+
+    # ------------------------------------------------------------------
+    # 容器结构异常：冒充核心文件名的绝对路径诱饵条目
+    # ------------------------------------------------------------------
+
+    def _flag_core_name_decoys(self, result: AnalyzerResult, file_paths: list[str]) -> None:
+        """检出「以 ``/`` 开头、首段恰为 APK 核心文件名」的诱饵条目，写 meta 并产 Finding。
+
+        ★依据（24 个真实样本实测）：7 个样本共 411 条此类条目，**首段无一例外**只有三种——
+        ``AndroidManifest.xml``×153、``classes.dex``×153、``resources.arsc``×105，即精确瞄准每个
+        APK 解析器必找的那三个文件。形如 ``/AndroidManifest.xml///.png``、``/classes.dex/<乱码>.json``。
+
+        ★为什么近乎零假阳：ZIP 规范明确要求条目名**不得以斜杠开头**（不得为绝对路径），Android
+        构建工具也从不产生这种条目。出现即人为构造。语料中 17 个样本一条都没有。
+
+        ★不做的事：不据此判定"是哪个加固工具"——实测各样本的扩展名分布逐构建随机化，细粒度签名
+        每样本都不同，当不了家族键（与 dpt-shell「so 名随机、assets 常量固定」同理）。只报手法。
+        """
+        decoys = [p for p in file_paths if isinstance(p, str) and p.startswith("/")]
+        if not decoys:
+            return
+        impersonated: dict[str, int] = {}
+        for path in decoys:
+            head = path[1:].split("/", 1)[0]
+            if head in _CORE_APK_NAMES or _EXTRA_DEX_RE.fullmatch(head):
+                impersonated[head] = impersonated.get(head, 0) + 1
+        result.meta["container_decoy_entries"] = {
+            "absolute_path_entries": len(decoys),
+            "impersonating_core_names": impersonated,
+        }
+        if not impersonated:
+            return  # 有绝对路径但不冒充核心名：异常但意图不明，只记 meta 不产 Finding
+
+        shown = "、".join(f"{name}×{n}" for name, n in sorted(impersonated.items()))
+        result.findings.append(Finding(
+            id="APK-CORE-NAME-DECOY-ENTRIES",
+            title="APK 内含冒充核心文件名的诱饵条目（容器级反分析构造）",
+            severity=Severity.MEDIUM,
+            confidence=Confidence.HIGH,  # 结构性事实：条目名违反 ZIP 规范，非统计启发式
+            category="anti_analysis",
+            description=(
+                f"压缩包内有 {len(decoys)} 条**以 / 开头的绝对路径条目**，其中 {sum(impersonated.values())} 条的"
+                f"首段恰为 APK 核心文件名（{shown}）。ZIP 规范要求条目名不得为绝对路径，Android 构建工具"
+                "也从不产生此类条目——出现即人为构造，意在让解析器在定位这三个核心文件时撞上假条目。\n"
+                "★ 已实测：fxapk 自身不受影响（真样本上包名/清单/DEX 均正常解出，诱饵未遮蔽真文件）。"
+            ),
+            recommendation=(
+                "别用会**落盘解压**的工具直接展开该样本（apktool / unzip / 部分反编译器）："
+                "绝对路径条目在不同工具下行为不一，可能写到预期外位置或直接报错中断。"
+                "宜继续用内存读取方式分析；若必须解压，先剥掉以 / 开头的条目。"
+                "该构造可作技术画像用于跨样本关联，但**不宜单独作家族锚点**——实测其细节逐构建随机化。"
+            ),
+            evidences=[
+                Evidence(source="resource", location="zip-entry", snippet=_truncate(p))
+                for p in decoys[:5]
+            ],
+        ))
+        logger.info(
+            "[%s] 检出诱饵条目 %d 条（冒充核心名 %s）", self.name, len(decoys), shown
+        )
 
     def _emit_hardened(
         self,
