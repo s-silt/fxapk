@@ -269,3 +269,109 @@ def corpus_events(
 
     for event in report_to_events(report):
         typer.echo(_json.dumps(event, ensure_ascii=False))
+
+
+@corpus_app.command("regress")
+def corpus_regress_cmd(
+    version_from: str = typer.Option(
+        "", "--from", help="旧修订版 版本@规则摘要（如 1.1.0@fdd06596）；留空取倒数第二个。"),
+    version_to: str = typer.Option(
+        "", "--to", help="新修订版；留空取最新一个。"),
+    corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
+    changed_only: bool = typer.Option(True, "--changed-only/--all", help="只列有变化的样本。"),
+    as_json: bool = typer.Option(False, "--json", help="输出结构化 JSON 而非人读表。"),
+) -> None:
+    """跨版本回归对比：同一批**真实样本**换版后检出到底变好还是变坏。
+
+    合成基线（tests/synthetic）防的是"改坏"、进 CI；**发现问题**靠真样本——实测六个真缺陷
+    没有一个是合成测试发现的。corpus 主键含 (样本, 版本, 规则集)，重跑自动并存多份报告，
+    本命令把这批数据用起来，不必每次手写一次性脚本。
+
+    版本坐标是「``tool_version@ruleset前8位``」而非光是版本号：实测库里被重跑过的样本**全部**
+    是同版本号、不同规则集，只按版本号切版会把一整轮规则改动的效果量成 0。
+
+    ★只忠实呈现 + 对**方向明确**的变化加注（载入失败↔可分析、加固漏判↔检出、闭环降级、
+    建议调证增减），**绝不给"优化/劣化"总评分**——检出变多可能是误报涨了，变少可能是降噪。
+    """
+    from apkscan.core import regress as _regress
+
+    root = _resolve_corpus(corpus)
+    entries = _corpus.load_manifest(root)
+    versions = _regress.available_versions(entries)
+    if len(versions) < 2:
+        typer.echo(
+            f"错误：库内只有 {len(versions)} 个修订版（{versions}），无法跨版本对比。"
+            "请用新版 fxapk 重跑同批样本并 corpus add 后再试。",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    v_from, v_to = versions[-2], versions[-1]
+    for spec, label in ((version_from, "--from"), (version_to, "--to")):
+        if not spec:
+            continue
+        resolved, err = _regress.resolve_revision(spec, versions)
+        if resolved is None:
+            typer.echo(f"错误：{label} {err}", err=True)
+            raise typer.Exit(code=2)
+        if label == "--from":
+            v_from = resolved
+        else:
+            v_to = resolved
+
+    diffs, summary = _regress.load_and_diff(root, v_from, v_to)
+
+    if as_json:
+        payload = {
+            "summary": summary,
+            "diffs": [
+                {
+                    "sample_sha256": d.sample_sha256, "package_name": d.package_name,
+                    "case_id": d.case_id,
+                    "status": [d.status_from, d.status_to],
+                    "closure": [d.closure_from, d.closure_to],
+                    "is_hardened": [d.hardened_from, d.hardened_to],
+                    "counts": [d.counts_from, d.counts_to],
+                    "advice": [d.advice_from, d.advice_to],
+                    "findings_added": d.findings_added,
+                    "findings_removed": d.findings_removed,
+                    "notes": d.notes,
+                }
+                for d in diffs if (d.changed or not changed_only)
+            ],
+        }
+        typer.echo(_json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+
+    s = summary
+    typer.echo(f"跨版本回归：{s['version_from']} → {s['version_to']}")
+    typer.echo(
+        f"  两版都有的样本 {s['compared']} 个，其中有变化 {s['changed']} 个；"
+        f"仅旧版有 {s['only_in_from']}、仅新版有 {s['only_in_to']}"
+    )
+    typer.echo(
+        f"  ★由失败转为可分析 {s['became_analyzable']}；由可分析转为失败 {s['became_unanalyzable']}；"
+        f"加固新检出 {s['hardening_newly_detected']}；闭环降级 {s['closure_downgraded']}"
+    )
+    typer.echo(
+        f"  建议调证线索合计 {s['advice_investigate_from']} → {s['advice_investigate_to']}"
+    )
+    if s["findings_added_total"]:
+        typer.echo(f"  新增检出（按 id）：{s['findings_added_total']}")
+    if s["findings_removed_total"]:
+        typer.echo(f"  消失检出（按 id）：{s['findings_removed_total']}")
+
+    shown = [d for d in diffs if (d.changed or not changed_only)]
+    typer.echo(f"\n逐样本（{len(shown)} 个）：")
+    for d in shown:
+        typer.echo(f"\n  [{d.sample_sha256[:12]}] {d.package_name or '?'}  案={d.case_id or '—'}")
+        if d.status_from != d.status_to:
+            typer.echo(f"    状态 {d.status_from} → {d.status_to}")
+        if d.counts_from != d.counts_to:
+            typer.echo(f"    计数 {d.counts_from} → {d.counts_to}")
+        if d.findings_added:
+            typer.echo(f"    + {', '.join(d.findings_added)}")
+        if d.findings_removed:
+            typer.echo(f"    - {', '.join(d.findings_removed)}")
+        for n in d.notes:
+            typer.echo(f"    {n}")
