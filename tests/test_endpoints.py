@@ -234,6 +234,22 @@ def test_real_public_ips_kept():
     assert eps["139.59.12.34"].is_private is False
 
 
+def test_url_derived_resolver_ip_also_filtered():
+    """★无修复即失败：URL 里的解析器 IP 同样要过 noise_ips。
+
+    实测两案：`https://1.12.12.12/dns-query`（公共 DoH）从 URL 通道绕过了裸 IP 的 denylist，
+    仍被判"建议调证"并占用闭环调证名额。同一个值不能因来源不同而结论不一致。
+    """
+    result = _analyze(dex_strings=[
+        "https://1.12.12.12/dns-query", "https://1.1.1.1/dns-query",
+        "http://139.59.12.34:8080/api",
+    ])
+    vals = {e.value for e in result.endpoints}
+    assert "1.12.12.12" not in vals and "1.1.1.1" not in vals
+    assert "139.59.12.34" in vals, "真后端 IP 不得被误杀"
+    assert "http://139.59.12.34:8080/api" in vals, "URL 本身仍应保留"
+
+
 def test_url_host_with_bogus_tld_not_emitted_as_domain():
     """★无修复即失败（2026-07-26 真案实测）：URL 里 host 的 TLD 不可信 → 不派生 domain 端点。
 
