@@ -196,6 +196,36 @@ def test_reject_if_zip_bomb_raises_on_oversized_entry(tmp_path: Path, monkeypatc
         apk_mod._reject_if_zip_bomb(str(p))
 
 
+def test_reject_if_zip_bomb_allows_oversized_noncore_entry(tmp_path: Path, monkeypatch, caplog) -> None:
+    """★无修复即失败：**非核心**条目声明超上限时，不得判死整个 APK。
+
+    实测语料 3 个样本各塞了一对 res/1.xml + assets/1.xml，声明 1000MB、压缩仅 5.5MB——它们不是
+    androguard 急切解压的对象，却让原实现拒绝整个样本、什么都分析不到，即用我们自己的防护达成
+    「拒绝分析」。修前此处会抛 ApkParseError。这些条目仍由 read_file 的逐条闸拒读，不会被真解压。
+    """
+    p = tmp_path / "denial.apk"
+    with zipfile.ZipFile(p, "w") as zf:
+        zf.writestr("classes.dex", b"x" * 5)      # 核心条目正常
+        zf.writestr("res/1.xml", b"x" * 100)      # 非核心、声明超限
+        zf.writestr("assets/1.xml", b"x" * 100)
+    monkeypatch.setattr(apk_mod, "_MAX_DECOMPRESSED_FILE_BYTES", 10)
+    with caplog.at_level("WARNING"):
+        apk_mod._reject_if_zip_bomb(str(p))       # 不得抛
+    assert any("拒绝分析" in r.message or "非核心条目" in r.message for r in caplog.records), \
+        "跳过超限非核心条目必须留 warning，不能静默"
+
+
+def test_reject_if_zip_bomb_still_raises_on_oversized_core_entries(tmp_path: Path, monkeypatch) -> None:
+    """★核心条目（manifest / arsc / 各 classes*.dex）超限仍须 fail-fast——它们才是真 OOM 路径。"""
+    for core in ("AndroidManifest.xml", "resources.arsc", "classes2.dex"):
+        p = tmp_path / f"bomb_{core}.apk"
+        with zipfile.ZipFile(p, "w") as zf:
+            zf.writestr(core, b"x" * 100)
+        monkeypatch.setattr(apk_mod, "_MAX_DECOMPRESSED_FILE_BYTES", 10)
+        with pytest.raises(apk_mod.ApkParseError, match="zip 炸弹"):
+            apk_mod._reject_if_zip_bomb(str(p))
+
+
 def test_reject_if_zip_bomb_passes_normal_and_nonzip(tmp_path: Path) -> None:
     """正常 APK 不拦；打不开/非 zip 不在此判死（交 androguard 走既有错误路径）。"""
     ok = tmp_path / "ok.apk"
