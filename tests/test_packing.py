@@ -53,11 +53,16 @@ def test_analyzer_name_and_requires():
 # --- 不命中 ---------------------------------------------------------------
 
 
+#: 让夹具的 DEX 字符串量像真 App（实测正常样本 12867~299356 条），否则会命中
+#: PACK-UNIDENTIFIED-STUB-DEX 的结构判据——那条判据正是要抓「串数极少 + 有 .so」的壳桩形态。
+_NORMAL_DEX_STRINGS = [f"com.example.app.Class{i}" for i in range(1200)]
+
+
 def test_no_packing_yields_empty():
     result = _analyze(
         native_libs=["lib/arm64-v8a/libnative.so", "lib/armeabi-v7a/libc++_shared.so"],
         files={"assets/config.json": b"{}", "res/layout/main.xml": b""},
-        dex_strings=["com.example.app.MainActivity", "https://example.com"],
+        dex_strings=["com.example.app.MainActivity", *_NORMAL_DEX_STRINGS],
     )
     assert result.error is None
     assert result.leads == []
@@ -298,6 +303,9 @@ def test_list_files_failure_still_detects_via_native_libs():
 
 def test_fixture_ctx_not_flagged_as_packed(fake_ctx):
     # conftest 的样例 ctx（libnative.so + 普通 dex 字符串）不应被判为加固。
+    # 注：该夹具的 dex 字符串本就很少，会命中 stub-dex 结构判据（那条判据正是抓这个形态），
+    #     故补足到真 App 量级再断言"不判加固"，保持本用例原意。
+    fake_ctx._dex_strings = list(fake_ctx._dex_strings) + _NORMAL_DEX_STRINGS
     result = PackingAnalyzer().analyze(fake_ctx)
     assert result.error is None
     assert result.meta["packed"] is None
@@ -489,6 +497,52 @@ def test_multidex_names_also_covered():
     meta = result.meta["container_decoy_entries"]
     assert meta["impersonating_core_names"] == {"classes2.dex": 1, "classes3.dex": 1}
     assert _DECOY_FINDING in _finding_ids(result)
+
+
+def test_unidentified_stub_dex_flagged():
+    """★无修复即失败（2026-07-26 三案实测）：DEX 只剩壳桩 + 有 .so → 判疑加固，即便厂商未识别。
+
+    修前这三案 classes.dex 仅 1~3KB、DEX 字符串 15~57 条，却因未命中任何厂商特征而被报
+    「未加固」，办案人会以为静态端点完整——而真相是 Java 侧几乎什么都没抽到。
+    """
+    result = _analyze(
+        # 用不撞任何已知厂商特征的库名——本用例要测的正是「厂商认不出但确已加固」
+        native_libs=["lib/arm64-v8a/libclientcore.so", "lib/arm64-v8a/libRLXICYRXkILo.so"],
+        dex_strings=["a.b.C", "onCreate", "Landroid/app/Activity;"],   # 壳桩量级
+    )
+    assert "PACK-UNIDENTIFIED-STUB-DEX" in _finding_ids(result)
+    assert result.meta["is_hardened"] is True
+    assert result.meta["hardening_structural"]["reason"] == "stub-dex"
+    f = next(f for f in result.findings if f.id == "PACK-UNIDENTIFIED-STUB-DEX")
+    assert "不可解读为" in f.description          # 明确否定「未发现=不存在」
+    assert "脱壳" in f.recommendation
+    # ★不认厂商：packed 必须留空，否则会误导"向该厂商调证"
+    assert result.meta.get("packed") is None
+
+
+def test_stub_dex_not_flagged_when_vendor_identified():
+    """厂商已识别时不重复报——那条路径已有自己的加固 Finding。"""
+    result = _analyze(
+        native_libs=["lib/arm64-v8a/libnmmvm.so"],
+        dex_strings=["a.b.C"],
+    )
+    assert result.meta["is_hardened"] is True
+    assert "PACK-UNIDENTIFIED-STUB-DEX" not in _finding_ids(result)
+
+
+def test_tiny_app_without_native_not_flagged():
+    """★无 native 的极简 App 不误伤：字符串少可能只是应用本身小。"""
+    result = _analyze(files={"classes.dex": b"dex\n035"}, dex_strings=["a.b.C", "onCreate"])
+    assert "PACK-UNIDENTIFIED-STUB-DEX" not in _finding_ids(result)
+
+
+def test_normal_app_with_many_strings_not_flagged():
+    """真 App 量级的字符串数（实测正常样本 12867+ 条）不得命中。"""
+    result = _analyze(
+        native_libs=["lib/arm64-v8a/libnative.so"],
+        dex_strings=_NORMAL_DEX_STRINGS,
+    )
+    assert "PACK-UNIDENTIFIED-STUB-DEX" not in _finding_ids(result)
 
 
 def test_denial_of_analysis_bomb_flagged():
