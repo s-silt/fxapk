@@ -768,12 +768,16 @@ class EndpointsAnalyzer(BaseAnalyzer):
             host_snippet = _truncate(raw, rules.snippet_max)
             host_ip = _parse_ipv4(host)
             if host_ip is not None:
-                collector.add(
-                    host,
-                    "ip",
-                    Evidence(source=source, location=location, snippet=host_snippet),
-                    is_private=_ip_is_private(host_ip),
-                )
+                # ★ URL 派生的 IP 也要过 noise_ips（实测：`https://1.12.12.12/dns-query` 里的
+                #   公共 DoH 解析器 IP 从这条路绕过了裸 IP 的 denylist，仍被判"建议调证"）。
+                #   与裸 IP 通道同口径，避免同一个值因来源不同而结论不一致。
+                if host not in rules.noise_ips:
+                    collector.add(
+                        host,
+                        "ip",
+                        Evidence(source=source, location=location, snippet=host_snippet),
+                        is_private=_ip_is_private(host_ip),
+                    )
             elif _looks_like_domain(host) and _url_host_tld_ok(host):
                 collector.add(
                     host,
