@@ -50,6 +50,71 @@ def test_classify_network() -> None:
     assert A.classify_network("Some Random Ltd", "AS99999") == A.CAT_UNKNOWN
 
 
+def test_classify_network_prefers_more_specific_category() -> None:
+    """★同时命中多类时按**类别专指度**裁决，而不是 YAML 书写顺序、也不是关键字长度。
+
+    三段历史都在这条测试里钉住：
+    - 曾按书写顺序首个命中即返回 → "Amazon CloudFront" 撞上 cloud 的 amazon 就再也轮不到 cdn 的
+      cloudfront，CDN 边缘不触发 PUBLIC_CDN 阻断、反落进「云/IDC 自建托管」被当源站调证。
+    - 改成「最长关键字优先」后中文直接反转 → telecom 的 "中国移动"(4 字) 压过 cloud 的 "移动云"(3 字)，
+      运营商系云被判成运营商，hosting 层整层落 None，调证方向从云商（有租户实名）错指运营商。
+    - 同样是长度惹的祸：idc 的泛词 "hosting"/"data center" 长于几乎所有品牌词。
+    """
+    # 云 vs CDN：CDN 更专指
+    assert A.classify_network("Amazon CloudFront") == A.CAT_CDN
+    assert A.classify_network("Tencent EdgeOne") == A.CAT_CDN
+    assert A.classify_network("Amazon Technologies Inc.") == A.CAT_CLOUD  # 不含 cdn 关键字仍是云
+
+    # ★运营商系云：中文形态不得反转成 telecom（英文形态本来就靠加长词侥幸保住，一并钉住）
+    for org in (
+        "中国移动云能力中心",
+        "中国联通云数据有限公司",
+        "中国电信天翼云科技有限公司",
+        "China Mobile Cloud Computing Center",
+    ):
+        assert A.classify_network(org) == A.CAT_CLOUD, f"运营商系云被判成运营商：{org}"
+    # 不带云品牌的纯运营商仍是 telecom
+    assert A.classify_network("China Mobile Communications Group") == A.CAT_TELECOM
+
+    # ★idc 泛词不得压过品牌词：厂商名在场时泛词只是描述，不是归属
+    assert A.classify_network("Fastly hosting") == A.CAT_CDN
+    assert A.classify_network("Cloudflare data center") == A.CAT_CDN
+    assert A.classify_network("aliyun hosting") == A.CAT_CLOUD
+    assert A.classify_network("Some Hosting Ltd") == A.CAT_IDC  # 只有泛词时才落 idc
+
+
+def test_classify_network_knows_cdn_orgs_by_real_whois_form() -> None:
+    """★CDN 厂商要按**实际 org 形态**认得出来，而不是只认连写商标名。
+
+    45.202.x 那批 IP 的 Shodan org 是 "Bunny Technology LLC"——表里只有连写的 "bunnycdn" 时
+    匹配不上，归属落 unknown，边缘 IP 被当成托管商查了半天。
+    """
+    for org in ("Bunny Technology LLC", "bunny.net", "CDN77 Ltd", "G-Core Labs S.A.",
+                "Gcore S.A.", "Edgio Inc.", "Limelight Networks, Inc."):
+        assert A.classify_network(org) == A.CAT_CDN, f"CDN 组织名认不出：{org}"
+
+
+def test_classify_network_does_not_match_substrings_of_other_names() -> None:
+    """★关键字不得粘进无关公司名：误判成 CDN 会触发 PUBLIC_CDN 阻断，把可能的真源站压掉。
+
+    实测的三类假阳：``Kingcore Electronics`` 含 gcore（词边界可挡）；``Limelight Health``、
+    ``Bunny Studio`` 是真·同名公司（边界挡不住，只能把规则写成专指形态）。
+    """
+    for org in (
+        "Kingcore Electronics Corp.",
+        "Limelight Health, Inc.",
+        "The Limelight Hotel Aspen",
+        "Bunny Studio Inc.",
+        "Bunnyshell SRL",
+    ):
+        assert A.classify_network(org) != A.CAT_CDN, f"无关公司被判成 CDN：{org}"
+
+    # 词边界的代价：纯连写无分隔的形态会漏判（落 unknown）。这是有意的取舍——漏判不指错人，
+    # 而误判会触发 PUBLIC_CDN 阻断把真源站压掉。ASN 名里的连字符本就是边界，故不受影响。
+    assert A.classify_network("TencentEdgeOne") == A.CAT_UNKNOWN
+    assert A.classify_network("AS45090 TENCENT-NET-AP-Shenzhen") == A.CAT_CLOUD
+
+
 def test_five_layers_never_collapse() -> None:
     """★五层各自独立、不塌缩：service_operator 恒未知、hosting 不等于 website_owner。"""
     att = A.build_ip_attribution("1.2.3.4", {

@@ -1157,6 +1157,72 @@ def _source_summary(targets: Sequence[Mapping[str, object]]) -> dict[str, int]:
     return {status: counts.get(status, 0) for status in sorted(SOURCE_STATUSES)}
 
 
+def _visibility_check(
+    report: Report, targets: Sequence[Mapping[str, object]], gaps: list[str]
+) -> dict[str, object]:
+    """证据可见性对闭环的影响 —— **按主张相关性**，不是全局封顶。
+
+    可见性求值（``core.visibility``）说的是「哪些输入没看见」。它对闭环的影响取决于**目标从哪来**：
+
+    - 目标由运行时唯一归因确认（pcap 实测连接 + socket/UID 归到本 app）→ DEX 看不看得见都不影响
+      这个目标本身。硬把闭环降级会把真实、可办案的动态证据一起拖下水，这正是要避免的。
+    - 目标全靠静态提取，而静态输入不可见 → 目标集合可能压根不全（真 C2 藏在看不见的 DEX 里），
+      此时说「闭环完成」站不住，记 gap。
+
+    两种情况都写进 checks 供人核；只有后者进 gaps（进 gaps 即封顶 partial）。
+    """
+    from apkscan.core import visibility as _vis
+
+    assessment = report.meta.get("visibility")
+    if not isinstance(assessment, dict):
+        return {
+            "id": "evidence_visibility",
+            "status": "not_applicable",
+            "reason": "no visibility assessment in report (older analysis)",
+            "evidence_refs": [],
+        }
+    if not _vis.blocks_claim(assessment, "static_endpoint_exhaustive"):
+        return {
+            "id": "evidence_visibility",
+            "status": "pass",
+            "reason": "static inputs were fully visible",
+            "evidence_refs": [],
+        }
+
+    blind = sorted(
+        src for src, info in (assessment.get("sources") or {}).items()
+        if isinstance(info, dict)
+        and info.get("visibility") not in (_vis.VIS_COMPLETE, _vis.VIS_UNKNOWN)
+    )
+    runtime_backed = [
+        t for t in targets
+        if isinstance(_mapping(t.get("runtime")).get("status"), str)
+        and _mapping(t.get("runtime")).get("status") == CLOSURE_COMPLETE
+    ]
+    detail = f"static inputs not fully visible ({', '.join(blind) or 'unspecified'})"
+
+    if runtime_backed and len(runtime_backed) == len(list(targets)):
+        # 全部目标都有运行时唯一归因：这些目标本身不受静态盲区影响，只是「有没有漏掉别的目标」存疑。
+        # 记 warn 不记 gap —— 不为一个穷尽性疑问把已坐实的动态证据降级。
+        return {
+            "id": "evidence_visibility",
+            "status": "warn",
+            "reason": (
+                f"{detail}; all selected targets are runtime-attributed, so they stand, "
+                "but the target set may be incomplete"
+            ),
+            "evidence_refs": [],
+        }
+
+    gaps.append(f"target set may be incomplete: {detail}")
+    return {
+        "id": "evidence_visibility",
+        "status": "warn",
+        "reason": f"{detail}; targets rely on static extraction",
+        "evidence_refs": [],
+    }
+
+
 def evaluate_closure(
     report: Report,
     targets: Sequence[Mapping[str, object]],
@@ -1246,6 +1312,8 @@ def evaluate_closure(
             ]
             if failed_sources:
                 gaps.append(f"{value}: source lookup incomplete ({', '.join(sorted(failed_sources))})")
+
+    checks.append(_visibility_check(report, targets, gaps))
 
     selection = _mapping(target_selection)
     truncated = _non_negative_int(selection.get("truncated"))
