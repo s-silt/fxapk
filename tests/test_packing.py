@@ -491,6 +491,30 @@ def test_multidex_names_also_covered():
     assert _DECOY_FINDING in _finding_ids(result)
 
 
+def test_denial_of_analysis_bomb_flagged():
+    """★真实样本形态：声明解压极大的非核心垃圾条目 → 产 Finding 并记 meta。
+
+    实测语料 3 个样本各含一对 res/1.xml + assets/1.xml，声明 1000MB、压缩 5.5MB（180 倍），
+    三样本参数完全一致。作用是让带 zip 炸弹防护的工具拒绝整个样本 = 用防护达成分析拒绝。
+    """
+    ctx = FakeContext(
+        files={"res/1.xml": b"x", "assets/1.xml": b"x", "classes.dex": b"dex\n035"},
+        declared_sizes={"res/1.xml": 1_048_573_022, "assets/1.xml": 1_048_573_022},
+    )
+    result = PackingAnalyzer().analyze(ctx)
+    assert "APK-DENIAL-OF-ANALYSIS-BOMB" in [f.id for f in result.findings]
+    paths = {e["path"] for e in result.meta["denial_bomb_entries"]}
+    assert paths == {"res/1.xml", "assets/1.xml"}
+
+
+def test_normal_sizes_no_bomb_finding():
+    """正常体积条目不得命中。"""
+    ctx = FakeContext(files={"res/a.xml": b"x" * 100, "classes.dex": b"dex\n035"})
+    result = PackingAnalyzer().analyze(ctx)
+    assert "APK-DENIAL-OF-ANALYSIS-BOMB" not in [f.id for f in result.findings]
+    assert "denial_bomb_entries" not in result.meta
+
+
 def test_decoy_finding_emitted_even_when_packer_rules_hit():
     """★容器异常与加固命中互不影响：命中加固分支时诱饵 Finding 仍须在（提前 append 对所有 return 生效）。"""
     result = _analyze(

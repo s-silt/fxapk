@@ -852,25 +852,47 @@ def _dt(value: Any) -> str:
     return str(value)
 
 
-def _reject_if_zip_bomb(path: str) -> None:
-    """把 APK 交给 androguard 全量解析前的 zip 炸弹前置拦截（与 read_file 同口径，Level 1：信声明大小）。
+#: androguard 的 ``APK(path)`` 构造期 / ``get_all_dex()`` 会**急切解压**的条目。只有这些条目声明
+#: 超上限才真能把我们炸出 OOM；其余条目由 read_file 的逐条闸拦住即可。
+_EAGERLY_DECOMPRESSED_RE = re.compile(r"^(AndroidManifest\.xml|resources\.arsc|classes\d*\.dex)$")
 
-    androguard 的 ``APK(path)`` 会在构造期解压内部 DEX/manifest——绕过 read_file 的 file_size 检查，
-    某条目声明解压超上限时可被炸出 OOM。故先扫中央目录声明大小、有超上限项即 fail-fast。
+
+def _reject_if_zip_bomb(path: str) -> None:
+    """交给 androguard 全量解析前的 zip 炸弹前置拦截（Level 1：信中央目录声明大小）。
+
+    androguard 的 ``APK(path)`` 在构造期解压 manifest / resources.arsc，``get_all_dex()`` 解压各 dex
+    ——这些绕过 read_file 的逐条 file_size 闸，声明超上限时能炸出 OOM，故对**这些条目**仍 fail-fast。
+
+    ★但只对它们（实测修正）：原实现对**任意**条目超限就拒绝整个 APK，反被当成「拒绝分析」式反制——
+    真实语料里 3 个样本各塞了一对 ``res/1.xml`` + ``assets/1.xml``，声明 1000MB、压缩仅 5.5MB（180 倍），
+    参数三样本完全一致，显然是同一工具注入的诱饵炸弹。它们不是 androguard 急切解压的对象，却让整个
+    样本被判死、什么都分析不到——攻击者用我们的防护达成了完全的分析拒绝。现改为：非急切解压的超限
+    条目只 **warning + 跳过**（read_file 的逐条闸本就拒读它们），分析照常进行。
+
     打不开/非 zip → 不在此判死，交由 androguard 报既有领域错误。
     """
     try:
         with zipfile.ZipFile(path) as zf:
-            for info in zf.infolist():
-                if info.file_size > _MAX_DECOMPRESSED_FILE_BYTES:
-                    raise ApkParseError(
-                        f"拒绝加载 APK（条目 {info.filename} 声明解压 {info.file_size} 字节 > "
-                        f"{_MAX_DECOMPRESSED_FILE_BYTES} 上限，疑 zip 炸弹）：{path}"
-                    )
-    except ApkParseError:
-        raise
+            infos = zf.infolist()
     except Exception:  # noqa: BLE001 - 打不开/非 zip：交 androguard 走既有错误路径，不在此提前判死
         logger.debug("[apk] zip 炸弹前置扫描失败（忽略，交 androguard）：%s", path, exc_info=True)
+        return
+
+    deferred: list[str] = []
+    for info in infos:
+        if info.file_size <= _MAX_DECOMPRESSED_FILE_BYTES:
+            continue
+        if _EAGERLY_DECOMPRESSED_RE.match(info.filename):
+            raise ApkParseError(
+                f"拒绝加载 APK（核心条目 {info.filename} 声明解压 {info.file_size} 字节 > "
+                f"{_MAX_DECOMPRESSED_FILE_BYTES} 上限，疑 zip 炸弹）：{path}"
+            )
+        deferred.append(f"{info.filename}({info.file_size}B)")
+    if deferred:
+        logger.warning(
+            "[apk] %d 个非核心条目声明解压超 %d 上限，已跳过该条目、继续分析（疑「拒绝分析」式诱饵炸弹）：%s",
+            len(deferred), _MAX_DECOMPRESSED_FILE_BYTES, "、".join(deferred[:5]),
+        )
 
 
 def load_apk(

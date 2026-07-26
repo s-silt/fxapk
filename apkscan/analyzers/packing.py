@@ -73,6 +73,9 @@ _CORE_APK_NAMES = frozenset({"AndroidManifest.xml", "classes.dex", "resources.ar
 #: 多 dex 的 classes2.dex / classes3.dex …（与 _CORE_APK_NAMES 同等对待）。
 _EXTRA_DEX_RE = re.compile(r"classes\d+\.dex")
 
+#: 「拒绝分析」诱饵炸弹的声明大小门槛（实测语料里的构造声明 1000MB；正常 APK 单条目远低于此）。
+_DENIAL_BOMB_DECLARED_BYTES = 256 * 1024 * 1024
+
 # 命中后 Lead 默认可调取证据（规则文件 meta 缺失时的兜底，确保离线/规则缺失仍合规）。
 _DEFAULT_EVIDENCE_TO_OBTAIN: tuple[str, ...] = (
     "未加固原始安装包",
@@ -157,6 +160,10 @@ class PackingAnalyzer(BaseAnalyzer):
             self._flag_core_name_decoys(result, file_paths)
         except Exception:
             logger.exception("[%s] 诱饵条目检测失败，跳过", self.name)
+        try:
+            self._flag_denial_bombs(result, ctx, file_paths)
+        except Exception:
+            logger.exception("[%s] 诱饵炸弹条目检测失败，跳过", self.name)
 
         hits: list[_Hit] = []
         for rule in rules:
@@ -257,6 +264,59 @@ class PackingAnalyzer(BaseAnalyzer):
         logger.info(
             "[%s] 检出诱饵条目 %d 条（冒充核心名 %s）", self.name, len(decoys), shown
         )
+
+    def _flag_denial_bombs(
+        self, result: AnalyzerResult, ctx: "AnalysisContext", file_paths: list[str]
+    ) -> None:
+        """检出「声明解压极大、实际压缩很小」的**非核心**条目——「拒绝分析」式诱饵炸弹。
+
+        ★手法：塞一两个声明 1GB、实际只有几 MB 的垃圾条目（如 ``res/1.xml``），任何带 zip 炸弹
+        防护的工具见了就拒绝**整个**样本 → 攻击者用我们的防护达成完全的分析拒绝。实测语料 3 个样本
+        各有一对 ``res/1.xml`` + ``assets/1.xml``，声明 1000MB / 压缩 5.5MB（180 倍），三样本参数一致。
+
+        ★fxapk 已不再因此判死整包（见 core.apk._reject_if_zip_bomb）：非核心超限条目只跳过该条目、
+        分析照常。此处把它作为**反分析信号**报出来，并提示其它工具可能因此整包失败。
+        """
+        bombs: list[tuple[str, int]] = []
+        for path in file_paths:
+            if not isinstance(path, str):
+                continue
+            try:
+                declared = ctx.declared_size(path)
+            except Exception:  # noqa: BLE001 — 访问器异常不阻断整体
+                logger.debug("[%s] 查声明大小失败：%s", self.name, path, exc_info=True)
+                continue
+            if declared is not None and declared > _DENIAL_BOMB_DECLARED_BYTES:
+                bombs.append((path, declared))
+        if not bombs:
+            return
+        result.meta["denial_bomb_entries"] = [
+            {"path": p, "declared_bytes": d} for p, d in sorted(bombs)[:20]
+        ]
+        shown = "、".join(f"{p}（声明 {d // 1024 // 1024}MB）" for p, d in sorted(bombs)[:3])
+        result.findings.append(Finding(
+            id="APK-DENIAL-OF-ANALYSIS-BOMB",
+            title="APK 内含「拒绝分析」式诱饵炸弹条目（声明解压极大的垃圾条目）",
+            severity=Severity.MEDIUM,
+            confidence=Confidence.HIGH,  # 结构性事实：中央目录声明值可直接读出
+            category="anti_analysis",
+            description=(
+                f"压缩包内有 {len(bombs)} 个条目声明解压后极大（{shown}），而实际压缩体积很小。"
+                "这类条目对 App 运行毫无用处，作用是让**带 zip 炸弹防护的分析工具直接拒绝整个样本**"
+                "——用防护本身达成分析拒绝。\n"
+                "★ fxapk 已针对性放行：这些非核心条目只被跳过（绝不读取），样本其余部分照常分析。"
+            ),
+            recommendation=(
+                "别因其它工具报「zip 炸弹/ 文件过大」就判该样本无法分析——那正是构造者想要的结果。"
+                "换用逐条目按需读取的工具（如本工具），或先剥掉这些条目再交给其它工具。"
+                "★ 绝不要真去解压这些条目。"
+            ),
+            evidences=[
+                Evidence(source="resource", location=p, snippet=f"declared={d}")
+                for p, d in sorted(bombs)[:5]
+            ],
+        ))
+        logger.info("[%s] 检出「拒绝分析」诱饵炸弹条目 %d 个", self.name, len(bombs))
 
     def _emit_hardened(
         self,
