@@ -499,6 +499,21 @@ def _stage_credibility(state: _PipelineState) -> None:
     state.meta["dependency_versions"] = _dependency_versions()  # 依赖版本复现锚点（androguard 等）
 
 
+def _stage_visibility(state: _PipelineState) -> None:
+    """把各分析器散落的可见性事实归一成「哪些结论有资格下」，写 meta["visibility"]。
+
+    ★这些事实（dex_available / is_hardened / hardening_structural / dex_string_pool /
+    native_obfuscation / artifact_lineage）此前**产出了却无人消费**：一份壳桩样本的报告会平静地
+    写「未发现网络端点」，读的人无从分辨那是「扫过了确实没有」还是「压根看不见」。
+
+    与 analysis_status 正交：那个字段是**工具执行**健康度，样本加固是**样本**属性，不该混。
+    本阶段只标注、不封顶 closure、不改退出码——由消费方按主张相关性各取所需。
+    """
+    from apkscan.core import visibility
+
+    state.meta["visibility"] = visibility.assess({"meta": state.meta})
+
+
 def _stage_network_attribution(state: _PipelineState) -> None:
     """附加视图：把**已收集的端点事实**组装成基础设施归因图谱 + 角色候选（PR3-PR8）。纯被动、
     不新增网络/富化/文件 I/O、不反哺闭环/线索/退出码；仅写 meta["network_attribution"]。云/ASN/CDN
@@ -621,6 +636,7 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     _run_stage(state, "build_leads", _stage_build_leads)           # 端点 → Lead + advice 兜底
     _run_stage(state, "overseas_targets", _stage_overseas_targets)  # 境外目标结构化段
     _run_stage(state, "credibility", _stage_credibility)           # 完整度 / 工具版本 / 规则摘要
+    _run_stage(state, "visibility", _stage_visibility)             # 证据可见性 → 哪些「未发现」不可下
     _run_stage(state, "network_attribution", _stage_network_attribution)  # 附加：基础设施归因图谱 + 角色候选（被动）
     _run_stage(state, "control_chain", _stage_control_chain)        # 附加：config-chain 控制链对象（组装现有数据）
     _run_stage(state, "asset_score", _stage_asset_score)            # 附加：后端域名/IP 第一方资产加权排序

@@ -224,6 +224,44 @@ def _compact_network_attribution(raw: Any) -> dict[str, Any] | None:
     }
 
 
+def _claim_field(claims: dict, claim: str, key: str, fallback: Any) -> Any:
+    """从 claims 表里取某条主张的字段；结构不合预期 → fallback（不抛）。"""
+    entry = claims.get(claim)
+    return entry.get(key, fallback) if isinstance(entry, dict) else fallback
+
+
+def _compact_visibility(raw: object) -> dict[str, Any]:
+    """可见性求值 → digest 紧凑段。缺失（旧报告）→ unknown 而非"完整"。
+
+    ★对旧报告的降级方向必须是 unknown：把"没有这个字段"当成"输入都看得见"，正是本段要防的
+    那类误读——缺失被读成不存在。
+    """
+    if not isinstance(raw, dict):
+        return {"available": False, "note": "本报告无可见性求值（旧版本产出）；输入完整性未知"}
+    blocked = [c for c in (raw.get("blocked_claims") or []) if isinstance(c, str)]
+    raw_claims = raw.get("claims")
+    claims: dict = raw_claims if isinstance(raw_claims, dict) else {}
+    return {
+        "available": True,
+        "degraded": bool(raw.get("degraded")),
+        "sources": {
+            k: (v.get("visibility") if isinstance(v, dict) else None)
+            for k, v in (raw.get("sources") or {}).items()
+        },
+        "remediation": raw.get("remediation"),
+        # 无资格下的结论：AI 读到这些名字时，不得把对应的"未发现"当成"不存在"
+        "blocked_claims": [
+            {
+                "claim": c,
+                "label": _claim_field(claims, c, "label", c),
+                "missing_sources": _claim_field(claims, c, "missing_sources", []),
+            }
+            for c in blocked
+        ],
+        "notes": [str(n) for n in (raw.get("notes") or [])],
+    }
+
+
 def build_digest(report: object, *, redact: bool = False) -> dict[str, Any]:
     """report.json 解析出的对象 → 紧凑摘要 dict（线索按优先级排序）。绝不抛。
 
@@ -284,6 +322,9 @@ def build_digest(report: object, *, redact: bool = False) -> dict[str, Any]:
             "attributed_role_candidates": role_candidate_count,
         },
         "integrity": _integrity(report),  # run 级完整性红旗（reliable=False 时结果可能不可信）
+        # ★证据可见性放在 leads **之前**：消费方（尤其是 AI）必须先知道「哪些输入没看见」，
+        #   否则会把一份壳桩样本的空线索列表读成「该样本干净」。见 core/visibility.py。
+        "visibility": _compact_visibility(meta.get("visibility")),
         "leads": [_compact_lead(lead, redact, pii_flag) for lead in leads_sorted],
         "overseas_targets": overseas_targets,
         "closure": compact_closure,

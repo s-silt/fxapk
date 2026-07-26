@@ -19,6 +19,9 @@ _EXPECTED_STAGES = [
     "build_leads",
     "overseas_targets",
     "credibility",
+    # 可见性求值必须排在 credibility **之后**：它要读 credibility 阶段之前各分析器写下的
+    # is_hardened / dex_string_pool / artifact_lineage 等事实，提前跑会读到半成品。
+    "visibility",
     "network_attribution",
     "control_chain",
     "asset_score",
