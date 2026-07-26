@@ -49,8 +49,30 @@ affect automated / CI / agent callers are called out explicitly**.
   ★ 局限已记入规则注释：上述锚点**扛不住 DEX 字符串加密**；那种样本会由 `dex_obfuscation` 报
   `DEX-STRING-POOL-OPAQUE`，正确结论是「静态不可判定」而非「未使用」。
 
+- **自带域名解析检测（取证可见性信号）**：新增 `dns_bypass` 分析器，检出 App 内含 DoH 客户端
+  （RFC 8484 的 `application/dns-message` 线格式 / `/dns-query` 路径）或商用 HTTPDNS SDK，
+  命中产 `APP-MANAGED-DNS-RESOLUTION`。
+  - **解决的问题**：这类实现把 DNS 查询封进 HTTPS 发给指定解析器、**不经过系统 DNS**，于是
+    PCAP 只看得到一条到解析器的 TLS 连接、看不到查了哪些域名，设备/网关 DNS 日志同样为空。
+    Finding 明说「DNS 日志里没有某域名**不能**推出该 App 没访问过它」，并给出替代取证路径
+    （TLS SNI / keylog 解密后的 Host 头 / 直接看连了哪些 IP）。
+  - **是能力信号不是罪状**：商用 HTTPDNS 合法常见，实测 24 个真样本中 13 个具备该能力，
+    故严重度定 LOW；仅出现公共解析器主机名（可能只是配置默认值）**不单独触发**。
+  - **.so 全量扫而非采样**：共享的 .so 采样助手按头/中/尾窗口取样，会漏掉大库中段的标记
+    ——实测采样版只命中 6 个、全量版命中 13 个。可见性信号漏检等于错误地告诉办案人
+    「DNS 是可见的」，比误报更糟，故这里按字节全量搜（单库 64MB / 累计 256MB 上限，
+    读前先查声明大小，触顶留日志）。
+
 ### Fixed
 
+- **★ 调证清单不再被解析器 / 证书链基础设施和 URL 残片污染**：实测两案时发现调证清单里塞满公共
+  DNS、STUN 与证书吊销列表，且闭环仅有的 6 个调证目标名额被以 `1.` 开头的解析器 IP 占满
+  （纯静态报告上目标排序会塌缩成字典序），真候选 54 个一个没评估。三处修：`KNOWN_INFRA` 补公共
+  DNS/DoH、STUN、CA/CRL/OCSP 域名；`noise_ips` 补公共解析器 IP；**URL 派生 host 现在也要求 TLD 可信**
+  ——`.so` 的 ASCII 串被分块切分会留下 `http://www.hortcut` 这类残片，裸域名通道有 TLD 白名单挡着、
+  URL 通道却没有。判据用 `_COMMON_TLDS`（含 top/cc/info/me/online 等真 C2 常用 TLD）而非更窄的
+  `_SAFE_BARE_TLDS`，避免误杀真线索；另把 RFC 2606/6761 保留 TLD 收进白名单（永不解析、零误报风险）。
+  - **不是新引入的缺陷**：相关代码来自首个提交，旧样本同样含此类残片，只是淹没在上百条端点里未被注意。
 - **★ 一个垃圾条目不再判死整个样本**（「拒绝分析」式诱饵炸弹）：zip 炸弹前置拦截原本对**任意**
   声明超限的条目就拒绝整个 APK。但 androguard 急切解压的只有 `AndroidManifest.xml` /
   `resources.arsc` / `classes*.dex`——真实语料里 3 个样本各塞了一对 `res/1.xml` + `assets/1.xml`，

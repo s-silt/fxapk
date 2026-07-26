@@ -225,16 +225,57 @@ def test_version_and_placeholder_ips_filtered():
 
 def test_real_public_ips_kept():
     # C4 回归锁：真实公网 IP 不在 denylist、非保留段 → 保留（不得误杀）。
-    result = _analyze(dex_strings=["dns 8.8.8.8", "c2 139.59.12.34"])
+    # 注：原用例拿 8.8.8.8 当"真实公网 IP"的例子，但它是公共 DNS 解析器、已入 noise_ips
+    #     （见下条测试的实测理由），故换成不具解析器身份的公网 IP，本意不变。
+    result = _analyze(dex_strings=["c2 139.59.12.34", "backend 45.11.22.33"])
     eps = _by_value(result)
-    assert "8.8.8.8" in eps
     assert "139.59.12.34" in eps
-    assert eps["8.8.8.8"].is_private is False
+    assert "45.11.22.33" in eps
+    assert eps["139.59.12.34"].is_private is False
+
+
+def test_url_host_with_bogus_tld_not_emitted_as_domain():
+    """★无修复即失败（2026-07-26 真案实测）：URL 里 host 的 TLD 不可信 → 不派生 domain 端点。
+
+    .so 的 ASCII 串被分块切分时，`http://www.<词>…` 会在中途断掉，留下 `http://www.hortcut`
+    这种残片。裸域名通道有 TLD 白名单挡着、URL 通道却没有，于是 `http://www.任意小写词` 都能
+    派生出"域名端点"，还带 tier=app 被判"建议调证"，直接污染调证清单。
+    """
+    result = _analyze(dex_strings=[
+        "http://www.hortcut", "http://www.years", "http://www.wencodeuricomponent",
+        "http://www.interpretation", "http://www.recent",
+        "https://real-c2.top/api", "http://backend.example-c2.cc/x",
+    ])
+    vals = {e.value for e in result.endpoints}
+    for bogus in ("www.hortcut", "www.years", "www.wencodeuricomponent",
+                  "www.interpretation", "www.recent"):
+        assert bogus not in vals, f"{bogus} 的 TLD 不可信，不应派生 domain 端点"
+    # ★真 C2 常用 TLD（.top / .cc）必须保留——判据用 _COMMON_TLDS 而非更窄的 _SAFE_BARE_TLDS
+    assert "real-c2.top" in vals, ".top 是真 C2 常用 TLD，不得误杀"
+    assert "backend.example-c2.cc" in vals, ".cc 是真 C2 常用 TLD，不得误杀"
+
+
+def test_public_dns_resolver_ips_filtered():
+    """★无修复即失败（2026-07-26 真案实测）：公共 DNS 解析器 IP 裸出现 → 不产端点。
+
+    修前两案报告把 1.1.1.1 / 1.12.12.12 / 203.107.1.1 等判成"建议调证"，且因闭环目标排序在
+    纯静态报告上塌缩为按字符串排，这些以 "1." 开头的解析器 IP 恰好排最前，把仅有的 6 个调证
+    目标名额全占了，真候选 54 个一个没评估。向解析器运营方调证毫无意义。
+    """
+    result = _analyze(dex_strings=[
+        "dns 8.8.8.8", "dns 1.1.1.1", "dns 114.114.114.114", "dns 223.5.5.5",
+        "dns 119.29.29.29", "dns 1.12.12.12", "httpdns 203.107.1.1", "c2 139.59.12.34",
+    ])
+    eps = _by_value(result)
+    for ip in ("8.8.8.8", "1.1.1.1", "114.114.114.114", "223.5.5.5",
+               "119.29.29.29", "1.12.12.12", "203.107.1.1"):
+        assert ip not in eps, f"{ip} 是公共 DNS 解析器，应被 noise_ips 过滤"
+    assert "139.59.12.34" in eps, "真 C2 不得被这批 denylist 误杀"
 
 
 def test_public_ip_not_private():
-    result = _analyze(dex_strings=["8.8.8.8 dns"])
-    assert _by_value(result)["8.8.8.8"].is_private is False
+    result = _analyze(dex_strings=["139.59.12.34 backend"])
+    assert _by_value(result)["139.59.12.34"].is_private is False
 
 
 def test_cleartext_url_with_private_host_flags_both():
@@ -314,8 +355,8 @@ def test_dedup_merges_evidences_across_sources():
 
 
 def test_flags_union_on_merge():
-    # 用公网 IP（私网裸 IP 已被 C4 过滤）验证同 value 去重合并。
-    ip = "8.8.4.4"
+    # 用公网 IP（私网裸 IP 已被 C4 过滤；解析器 IP 亦已入 noise_ips，故取普通公网 IP）验证同 value 去重合并。
+    ip = "45.11.22.33"
     result = _analyze(dex_strings=[f"a {ip}", f"b {ip}"])
     matches = [e for e in result.endpoints if e.value == ip]
     assert len(matches) == 1
@@ -691,7 +732,7 @@ def test_dense_urls_ip_domain_consistency() -> None:
     text = (
         "https://a.fraud-gw.cn/1 https://b.fraud-gw.cn/2 "
         "http://139.59.12.34:80/x https://c.fraud-gw.cn/3 "
-        "8.8.8.8 raw.heika-pay.cn https://d.fraud-gw.cn/4"
+        "45.11.22.33 raw.heika-pay.cn https://d.fraud-gw.cn/4"
     )
     result = _analyze(dex_strings=[text])
     values = {e.value for e in result.endpoints}
@@ -707,8 +748,8 @@ def test_dense_urls_ip_domain_consistency() -> None:
     # URL host 派生的 domain/ip 也在
     assert "a.fraud-gw.cn" in values
     assert "139.59.12.34" in values
-    # URL 之外的裸 IP / 裸域名也应被抽到
-    assert "8.8.8.8" in values
+    # URL 之外的裸 IP / 裸域名也应被抽到（用非解析器公网 IP——8.8.8.8 已入 noise_ips）
+    assert "45.11.22.33" in values
     assert "raw.heika-pay.cn" in values
 
 
