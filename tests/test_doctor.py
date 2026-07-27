@@ -536,7 +536,7 @@ def test_run_never_prints_or_raises(monkeypatch, capsys):
     except Exception as exc:  # pragma: no cover
         pytest.fail(f"doctor.run raised: {exc}")
     assert res["ok"] is False
-    assert len(res["items"]) == 11  # 8 既有（含新增设备 tcpdump floor 底座项）+ 3 PCAP 深度能力
+    assert len(res["items"]) == 12  # 9 既有（含设备 tcpdump 与设备联网基线）+ 3 PCAP 深度能力
     captured = capsys.readouterr()
     assert captured.out == ""
 
@@ -672,7 +672,7 @@ def test_no_fix_uses_frida_ps_when_ps_heuristic_misses(monkeypatch):
             detail="未找到 /data/local/tmp/frida-server 对应运行进程",
         ),
     )
-    item = doctor._check_frida_server(None, "17.11.0", auto_fix=False, on_progress=None)
+    item, _net = doctor._check_frida_server(None, "17.11.0", auto_fix=False, on_progress=None)
     assert item["ok"] is False
     assert "进程" in item["detail"]
 
@@ -687,7 +687,7 @@ def test_no_fix_reports_not_running_when_truly_down(monkeypatch):
             detail="设备 frida-server 未运行",
         ),
     )
-    item = doctor._check_frida_server(None, "17.11.0", auto_fix=False, on_progress=None)
+    item, _net = doctor._check_frida_server(None, "17.11.0", auto_fix=False, on_progress=None)
     assert item["ok"] is False
     assert "未运行" in item["detail"]
 
