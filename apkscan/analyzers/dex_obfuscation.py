@@ -209,7 +209,7 @@ class DexObfuscationAnalyzer(BaseAnalyzer):
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
         result = AnalyzerResult(analyzer=self.name)
-        ok, strings = collect_dex_strings(ctx, self.name, max_strings=_MAX_DEX_STRINGS)
+        ok, strings = collect_dex_strings(ctx, self.name, max_strings=_MAX_DEX_STRINGS, result=result)
         if not ok and not strings:
             logger.info("[%s] 无 dex 字符串可评估，跳过", self.name)
             return result

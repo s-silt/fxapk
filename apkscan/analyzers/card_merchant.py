@@ -125,7 +125,7 @@ class CardMerchantAnalyzer(BaseAnalyzer):
         prefilter = re.compile("|".join(re.escape(k.text) for k in keywords))
 
         # 1) DEX 字符串（代码内硬编码文案）。
-        _ok, dex_strings = collect_dex_strings(ctx, self.name, max_strings=_MAX_DEX_STRINGS)
+        _ok, dex_strings = collect_dex_strings(ctx, self.name, max_strings=_MAX_DEX_STRINGS, result=result)
         for s in dex_strings:
             if prefilter.search(s):
                 self._scan_text(s, "dex", "dex_strings", keywords, whitelist, hit)

@@ -146,7 +146,7 @@ class SmsForwardingAnalyzer(BaseAnalyzer):
         findings = _Findings()
 
         # 1) DEX 字符串（代码内关键词 / 方法引用 / 转发配置）。
-        _ok, dex_strings = collect_dex_strings(ctx, self.name, max_strings=_MAX_DEX_STRINGS)
+        _ok, dex_strings = collect_dex_strings(ctx, self.name, max_strings=_MAX_DEX_STRINGS, result=result)
 
         # FP 收敛：若样本仅含正规短信"发送" SDK 标识且无任何转发/接收信号，整体放弃。
         sender_only = self._is_sender_sdk_present(dex_strings, rules)

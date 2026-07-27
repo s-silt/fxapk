@@ -113,7 +113,9 @@ def _dex_visibility(meta: dict) -> tuple[str, list[str]]:
     #   实测一个 100MB 样本的 DEX 字符串超过 20 万条上限被截断——此时"未发现某接口"完全可能
     #   只是因为它排在截断线之后。上限本身是必要的（防内存爆），但截断的**事实**必须传下去。
     if meta.get("dex_strings_truncated"):
-        why.append("DEX 字符串数超上限被截断，后段未扫（分析器成功但未扫全）")
+        by = meta.get("dex_strings_truncated_by")
+        who = f"（{', '.join(str(x) for x in by[:6])}）" if isinstance(by, list) and by else ""
+        why.append(f"DEX 字符串数超上限被截断，后段未扫（分析器成功但未扫全）{who}")
         return VIS_PARTIAL, why
     if meta.get("dex_scanned") is False:
         why.append("DEX 未被扫描（dex_scanned=False）")

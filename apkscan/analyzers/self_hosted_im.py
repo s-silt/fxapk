@@ -103,7 +103,7 @@ class SelfHostedImAnalyzer(BaseAnalyzer):
         hits: dict[str, _Hit] = {}
 
         # 1) DEX 字符串：硬编码控制信道 URL + IM 库包名指纹。
-        _ok, dex_strings = collect_dex_strings(ctx, self.name, max_strings=_MAX_DEX_STRINGS)
+        _ok, dex_strings = collect_dex_strings(ctx, self.name, max_strings=_MAX_DEX_STRINGS, result=result)
         for s in dex_strings:
             self._scan_channel(s, "dex", "dex_strings", hits)
 
