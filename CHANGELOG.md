@@ -5,7 +5,66 @@ affect automated / CI / agent callers are called out explicitly**.
 
 ## Unreleased
 
-## 1.3.0 — 2026-07-27
+## 1.3.1 — 2026-07-27
+
+**这一版全部来自 1.3.0 在真实样本上被复现出来的问题。**
+
+1.3.0 发布后立即用两个新样本做了端到端复跑，暴露出的不是漏检，而是**方向性错判**——
+报告不是少说了什么，而是把读的人往错的方向指。三类：把"只观测到基础设施流量"当成业务闭环、
+把版本号与协议标识符当成待调证的地址、把第三方开源作者的构建机当成样本作者的。
+这类错误比漏检更贵，因为它们看起来像结论。
+
+面向调证的三处关键变化：
+
+- **建议调证的目标数量可能大幅下降，这是修复不是回退**：两个实测样本的建议调证 IP/域名
+  从 41 条降到 0 条——该样本的真实后端在 native 控制面里，静态面本就没有可调证目标。
+  此前那 41 条是版本号、序号与 ASN.1 协议标识符被当成了 IP。
+- **闭环判定收紧**：只观测到单向的公共 DNS 查询不再算业务闭环；缺少双向载荷字段时按
+  fail-closed 降为 partial。
+- **构建路径的归属判定更保守**：新增"撤回"层——查过但证据不足以判第三方的构建根显式停在
+  `unknown` 并带撤回理由，而不是悄悄消失在未知堆里。共现不足以证明作者身份。
+
+### Fixed
+
+- **单向公共 DNS 被判为业务闭环**（`network/fingerprints.py`、`dynamic/capture.py`、
+  `core/closure/gates.py`）：新增公共解析器名单与 `is_infrastructure_endpoint`，
+  按「IP 名单 ∩ DNS 端口」判定而非单纯按端口——后者会误杀自建 DNS。
+  `complete` 现要求双向业务载荷 > 0。
+- **closure 的候选被非地址串占满**（`core/infra.py`）：新增 `classify_ip`，与 `classify_domain` 对称。
+  四段皆 ≤32 且无端口/URL 语境、ASN.1 OID 弧前缀、非全局地址一律降为待核。
+  阈值以线索台账中 180 个已确认目标标定（最小 max-octet = 99）。
+- **抓包工具的尾部元数据被当成载荷**（`dynamic/pcap_ingest.py`）：IPv4 按 `total_length`、
+  IPv6 按 `40 + payload_length` 截断，字段不可信时回退实际字节。此前会凭空造出并不存在的 SNI。
+- **源码文件路径被当成 API 端点**（`analyzers/api_surface.py`）：新增编译型源码扩展与
+  代码符号形态两层过滤；语义标记改为按词边界对齐（驼峰在小写前切），
+  避免 `logout` 命中 `auth`。实测候选从 54 条收到 1 条。
+- **自建构建根整库未被扫到**（`analyzers/build_provenance.py`）：per-root 配额下沉到提取阶段。
+  此前单个库内排在前面的噪声根会吃满全局预算，导致后面的自建根根本到不了收集侧——
+  同批的另外两项修复因此在真实管线里全然无效。
+- **部分 DEX 解析失败被汇总成全部成功**（`core/*`、CLI）：额外 DEX 的加载失败明细进
+  `meta.extra_dex_visibility`，`visibility.dex` 相应降为 partial。
+- **资源解析错误刷屏且计数为零**（`config/config_keys.py`）：候选匹配改为路径尾锚定，
+  解析错误按类型聚合进 meta 而非逐条 traceback。
+- **root attach 辅助命令的参数被重新分词**（`core/device.py`）。
+
+### Added
+
+- **native 控制面通道分析器**（`analyzers/native_config_channel.py`、`core/gobuildinfo.py`）：
+  还原内嵌于 native 库中的对象存储模板与控制面符号，产出 Finding 与 `next_actions`，不产 Lead。
+  Go buildinfo 以哨兵法解析；经 `-ldflags -X` 注入的凭据**只记指纹、原值绝不进任何输出**。
+- **设备网络归因门控**（`core/device.py`、`dynamic/doctor.py`）：区分「样本反 Frida」与
+  「设备本身网络不通」。★ CI 在此发现一个同类错误：无设备时 adb 写 stderr，
+  旧解析会据此判定默认路由缺失——正是这个模块要防的错误，只是低了一层。
+- **版本遮蔽自诊断**：`fxapk --version-verbose` 与 selfcheck 版本项，导入路径与分发版本
+  不一致时退出码 1。
+
+### Changed
+
+- **构建根撤回层**（`analyzers/build_provenance.py`）：新增 `_WITHDRAWN_THIRD_PARTY_ROOTS`。
+  经全样本实证，某构建根仅出现在携带同一套私有符号的样本中、该组之外零命中，
+  原「第三方 SDK」依据不成立，予以撤回。**但不改判为自建**——同批样本中另一个个人根
+  分布完全相同，却属真实的上游开源贡献者。撤回理由随分层结果进
+  `meta.build_provenance.unknown`，不进用户可见正文。
 
 **这一版的主题不是「多认出几种样本」，而是让报告说得出自己哪里没看见。**
 
