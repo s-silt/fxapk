@@ -109,6 +109,24 @@ def _dex_visibility(meta: dict) -> tuple[str, list[str]]:
         why.append("字符串池不透明度超阈（编译期字符串混淆）")
         return VIS_OPAQUE, why
 
+    # ★脱壳产物没全并进来，同样是 DEX 面的缺口，而且极易被读成"已完整分析"：
+    #   实测两个样本各 dump 33 个 DEX，androguard 因不认 Android 10+ 的 hidden-api flag
+    #   各只解析成功 10 个，而控制台写的是"33 个并入静态分析"、分析器状态 error=0。
+    #   ——先于截断判定，因为"两成输入没进来"比"字符串扫到一半"缺得更多。
+    extra = meta.get("extra_dex_visibility")
+    if isinstance(extra, dict) and int(extra.get("failed") or 0) > 0:
+        by_error = extra.get("failures_by_error")
+        kinds = (
+            "，".join(f"{k}×{v}" for k, v in list(by_error.items())[:3])
+            if isinstance(by_error, dict) and by_error
+            else ""
+        )
+        why.append(
+            f"额外 DEX 请求 {extra.get('requested')} 个、仅并入 {extra.get('loaded')} 个，"
+            f"{extra.get('failed')} 个解析失败（{kinds}）——脱壳产物未全部进入分析"
+        )
+        return VIS_PARTIAL, why
+
     # ★扫描截断同样是可见性缺口，而且最隐蔽：分析器"跑成功了"、状态一切正常，只是没扫完。
     #   实测一个 100MB 样本的 DEX 字符串超过 20 万条上限被截断——此时"未发现某接口"完全可能
     #   只是因为它排在截断线之后。上限本身是必要的（防内存爆），但截断的**事实**必须传下去。

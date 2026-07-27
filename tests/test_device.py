@@ -311,6 +311,48 @@ def test_frida_attach_smoke_detaches_and_kills_helper(monkeypatch: Any) -> None:
     assert calls == [("attach", 4321), ("detach", 4321), ("stop", 4321)]
 
 
+def test_root_attach_helper_passes_remote_command_as_one_quoted_argument(
+    monkeypatch: Any,
+) -> None:
+    """★真机实测：拆开传 ``["su", "-c", "sleep 30"]`` 到设备后 su 只收到 ``-c sleep``。
+
+    adb 把 shell 之后的参数拼成一条命令串发给设备，设备 shell 再分词一次——``sleep`` 与
+    ``30`` 就此分家，su 执行了无参数的 sleep，设备日志是 ``sleep: Needs 1 argument``，
+    helper 立刻退出而 PID 永远等不到，probe 白等约 80 秒。远端命令必须整条引用。
+    """
+    seen: list[list[str]] = []
+
+    class _Popen:
+        def poll(self) -> int | None:
+            return None
+
+        def terminate(self) -> None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    def _fake_popen(args: list[str], **_kwargs: Any) -> _Popen:
+        seen.append(list(args))
+        return _Popen()
+
+    monkeypatch.setattr(device.tools, "adb_path", lambda: "adb")
+    monkeypatch.setattr(device.subprocess, "Popen", _fake_popen)
+    # 第一次枚举无 sleep，第二次出现 helper PID。
+    pids = iter([set(), {7788}])
+    monkeypatch.setattr(device, "_root_sleep_pids", lambda serial=None: next(pids, {7788}))
+
+    host, pid = device._start_root_attach_helper("dev1")
+
+    assert pid == 7788 and host is not None
+    args = seen[0]
+    assert args[:4] == ["adb", "-s", "dev1", "shell"]
+    # ★关键断言：shell 之后只有一个参数，且 sleep 的参数在同一层引用里。
+    remote = args[4:]
+    assert len(remote) == 1, f"远端命令必须是单个参数，实得 {remote}"
+    assert remote[0] == f"su -c 'sleep {device._FRIDA_HELPER_SECONDS}'"
+
+
 def test_ensure_adb_server_connects_common_emulator_ports(monkeypatch: Any) -> None:
     """真机实测(MuMu 12)：ensure_adb_server 应 best-effort connect 常见模拟器端口
     （16384 等），否则 server 重启后 MuMu 掉线、命令 exit 1。"""

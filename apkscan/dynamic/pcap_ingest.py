@@ -356,20 +356,42 @@ def _strip_link(linktype: int, frame: bytes) -> tuple[int | None, bytes]:
 
 
 def _parse_ipv4(b: bytes) -> tuple[int, str, str, bytes] | None:
+    """解析 IPv4 头，返回 ``(protocol, src, dst, L4 载荷)``。
+
+    ★载荷必须按头里的 ``total_length`` 截断，不能一路切到帧尾：抓包工具会在 IP 数据之后
+    追加自己的元数据（PCAPdroid 的 ``dump_extensions`` 就在帧尾附 UID/包名），那段字节
+    若继续喂给 TCP/TLS 解析，碰上 ``0x16`` 开头就会被读成 ClientHello，解出**伪 SNI**。
+    实测两案里团伙的 30124/30139 后端因此被绑上了 zhihu.com / bilibili.com。
+
+    ``total_length`` 不可信（小于头长，或大于实际字节）时退回按实际字节切——宁可少截
+    也不能因为一个坏字段把整包丢掉。
+    """
     if len(b) < 20:
         return None
     ihl = (b[0] & 0x0F) * 4
     if ihl < 20 or len(b) < ihl:
         return None
-    return b[9], socket.inet_ntoa(b[12:16]), socket.inet_ntoa(b[16:20]), b[ihl:]
+    total_length = struct.unpack("!H", b[2:4])[0]
+    end = total_length if ihl <= total_length <= len(b) else len(b)
+    return b[9], socket.inet_ntoa(b[12:16]), socket.inet_ntoa(b[16:20]), b[ihl:end]
 
 
 def _parse_ipv6(b: bytes) -> tuple[int, str, str, bytes] | None:
+    """解析 IPv6 头，返回 ``(next-header, src, dst, L4 载荷)``；扩展头从简（非 6/17 即跳过）。
+
+    与 IPv4 同理按 ``payload_length`` 截断——见 :func:`_parse_ipv4` 的说明。
+    """
     if len(b) < 40:
         return None
     src = socket.inet_ntop(socket.AF_INET6, b[8:24])
     dst = socket.inet_ntop(socket.AF_INET6, b[24:40])
-    return b[6], src, dst, b[40:]  # next-header；扩展头从简（非 6/17 即跳过）
+    payload_length = struct.unpack("!H", b[4:6])[0]
+    end = 40 + payload_length
+    # payload_length==0 是 Jumbogram（RFC 2675，逐跳选项带真实长度）——本层不解扩展头，
+    # 退回按实际字节切；超出实际长度同样退回（抓包截断或字段坏）。
+    if payload_length == 0 or end > len(b):
+        end = len(b)
+    return b[6], src, dst, b[40:end]
 
 
 def _parse_tcp(b: bytes) -> tuple[int, int, int, int, bytes] | None:
