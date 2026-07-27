@@ -7,6 +7,97 @@ affect automated / CI / agent callers are called out explicitly**.
 
 ### Added
 
+- **★ 证据可见性层（`meta["visibility"]`）**：新增 `apkscan/core/visibility.py`，把散落各处的可见性
+  事实归一成「基于本次实际看到的输入，**哪些结论有资格下**」。
+  - **解决的是最隐蔽的一类失真**：`dex_available` / `is_hardened` / `hardening_structural` /
+    `dex_string_pool` / `native_obfuscation` / `artifact_lineage` 此前**产出了却无人消费**——
+    一份壳桩样本的报告平静地输出几十条线索、零条警示，读的人（尤其 AI）无从分辨
+    「扫过了确实没有」与「压根看不见」。
+  - **四维来源** dex / native / resource / runtime，各自 complete·partial·stub_only·opaque·
+    unavailable·unknown；**主张资格** `blocked_claims` 列出无资格下的穷尽性结论（静态端点已穷尽、
+    未发现通讯录窃取、配置链已追全…）；**补法建议** `next_actions` 直接给出该跑 `unpack` 还是
+    `capture`、或授权后重跑取配置。
+  - **与 `analysis_status` 正交**：那是**工具执行**健康度，样本加固是**样本**属性；混同会让正常
+    跑完的加固样本表现成「分析失败」，并冲击既有基线与 `--strict` 退出码。
+  - **落到「主张」而非「分析器」**：`endpoints` 同时扫 DEX/manifest/资源/native，DEX 不可见时
+    manifest 里声明的域名、pcap 实测的连接照样成立——被阻断的只是需要完整可见性的那几条。
+  - **实测**：语料库 40 份报告中 14 份 DEX 为壳桩，各阻断 6 条结论。最能说明问题的是同包对照：
+    同一样本、同样 87 条线索 99 个端点，旧版报告说 `complete`、新版说 `stub_only`。
+
+- **★ 真样本跨修订版回归对比**：新增 `fxapk corpus regress`，比对同一批**真实样本**换版后的检出变化。
+  - **为什么需要**：合成基线（`tests/synthetic`）防的是「改坏」并进 CI，但实测中六个真缺陷
+    **没有一个是合成测试发现的**，全部来自跑真样本。corpus 早已按 `(样本, 版本, 规则集)` 并存多份
+    报告，缺的只是「拿它做对比」这一步。
+  - **版本坐标是 `tool_version@完整 ruleset_digest`**：实测语料库里被重跑过的样本**全部**是同版本号、
+    不同规则集——只按版本号切版会把一整轮规则改动量成「两版零重叠」。修订版按**入库顺序**排
+    （manifest 无时间戳，字典序会让 `1.10.0` 排在 `1.9.0` 前面）。
+  - **只忠实呈现 + 对方向明确的变化加注**，绝不给「优化 / 劣化」总评分——检出变多可能是误报涨了，
+    变少可能是降噪，方向要人判。报告读不到时明确报「读不到」，**不当成零线索**。
+
+- **构建来源 / 后端接口面 / 重打包判别三个分析器**（判据均先在 24 个真实样本上实证再写码）：
+  - `build_provenance`：提取编译器写进 `__FILE__` 的构建路径并分层（第三方继承 / 疑似自建 / 未知）。
+    自建构建标识进 corpus 作**串案维度**——同族 `.so` 文件名逐份随机、sha256 逐份不同，文件名锚与
+    `native_lib_hashes` 家族反查双双失效，而构建路径改名、重打包、重签名都动不了。
+    **分层只看构建根、只做前缀匹配**：私有构建根下常挂第三方源码，看整条路径会把私有平台误判成第三方。
+    公共 CI 目录（Cloud Build 的 `/workspace`、Docker 惯用的 `/build`、Jenkins/GitLab Runner/
+    TeamCity/Buildkite 等）一律不给「私有工作区」资格——否则任何在这些环境编译过的合法 SDK
+    都会让干净 App 凭空多出一条取证结论。**用户名只进 `meta`、不进 Finding 正文**。
+  - `api_surface`：提取后端 HTTP 接口路径并做功能语义标注（通讯录窃取 / 域名存活上报 / 远程配置下发 /
+    对象存储 / 资金充提…）。三层过滤各自对应一类实测误报：段首大写＝Java 类名（实测拦下 42484 次
+    命中）、`zza`/`zzb` 形态＝R8 混淆类名、已知第三方 SDK 固定段。**不产 Lead**——URL path 没有
+    归属主体、无处发函。配置类路径单列 `config_endpoints` 供下游拼探测 URL。
+  - `repack_identity`：判别**自研马甲包 vs 正版应用被重打包**。二者的接口 / 域名 / 构建路径归属
+    **完全相反**：正版重打包件的这些资产属于**被仿冒的厂商**，列为线索会向无关企业发函。
+    verdict 三态；措辞刻意克制——样本自身只能证明「被重签名」，**永远证不了「注入了什么」**
+    （那需要与官方同版本包逐文件差分），故 Finding 不得出现「后门 / 植入 / 注入」字样，有测试把守。
+
+- **配置探测预案（`meta["config_probe_plan"]`）**：把 `api_surface` 提取的配置接口路径 ×
+  `asset_score` 靠前的后端域名拼成候选 URL，补上 config-chain 断掉的中间一环——此前有路径没 host、
+  有下载能力没目标地址。**不做笛卡尔积**：host 取排序靠前的、总数封顶、**截断量如实上报**。
+  passive（默认）只出预案、对目标零流量；authorized-active 才交给既有的下载解码链路。
+
+### Fixed
+
+- **★ 脱壳成功但结果没进主报告**：`unpack` 的回灌重分析产出的是**另一份** Report 对象（写成
+  `unpacked_report.json`），而 `auto` 只收下路径、不替换手里的 report——于是 capture / merge /
+  closure 与最终报告全都还在壳桩静态报告上跑：**步骤显示「脱壳成功」、报告里一条隐藏端点都没有**。
+  现由 `unpack.run(on_reanalyzed=…)` 交出回灌后的 Report，`auto` 立为当前输入并写 `artifact_lineage`
+  ——「脱壳成功」与「脱壳结果已成为当前输入」是两件事，必须分别可查。
+  运行上下文（`online` / `mode` / `target_serial`）按白名单继承；`is_hardened` 这类**样本**结论不继承
+  （脱壳后本就该重算）。★`online` 漏继承的后果是方向性的：`merge` 据它决定运行时线索要不要标
+  「离线扫描，归属未查询」，一次 `--offline` 运行会把「压根没查」渲染成「查过」。
+
+- **★ 基础设施分类依赖 YAML 键顺序**：`classify_network` 原为首个命中即返回，`Amazon CloudFront`
+  撞上 cloud 的 `amazon` 就再也轮不到 cdn 的 `cloudfront`。误判方向是反的——CDN 边缘不触发
+  `PUBLIC_CDN` 阻断、反落进「云 / IDC 自建托管」，**边缘节点被当成源站去调证**。
+  改为按**类别专指度**裁决（不是关键字长度：实测中文形态直接反转，telecom 的「中国移动」长于
+  cloud 的「移动云」，运营商系云被判成运营商、hosting 层整层落 None、调证方向从云商错指运营商）。
+  ASCII 关键字加词边界（`Kingcore Electronics` 曾因含 `gcore` 被判 CDN，进而压掉可能的真源站）；
+  通用英文品牌词换成专指形态（`limelight` → `limelight networks`）。
+
+- **★ digest 完全不透 findings**：digest 是喂 AI agent 的低 token 消费面，此前只有 leads / closure /
+  attribution / visibility——实测一个样本 **31 条 Finding 对消费方全不可见**，其中包括 HIGH 级结论，
+  以及那条专为拦住「向被仿冒厂商发函」的重打包警示。现 findings 排在 visibility 与 leads 之间
+  （顺序即研判次序：哪里没看见 → 看见了什么 → 该向谁调证），只列 CRITICAL/HIGH/MEDIUM 保住低 token，
+  但**省略数与严重度分布一并输出**——静默丢弃会被读成「只有这些」。
+
+- **★ 扫描截断只落日志**：实测一个 100MB 样本上 **11 个分析器同时截断 DEX 字符串扫描**，而 23 处
+  调用里只有 1 处把这个事实写进 meta。截断是最隐蔽的可见性缺口——分析器「跑成功了」、状态全绿，
+  只是没扫完，于是「未发现某接口」完全可能只是它排在截断线之后；而**日志不是数据面**，
+  digest / closure / AI 都读不到。现共享 helper 把标记写进调用方 `result`（那是唯一能跨进程边界
+  回来的东西），pipeline 按**或运算**合并而非覆盖（11 个都截断时，最后一个写 `False` 的会把事实
+  整个抹掉），并记下是哪些分析器截断的。19 个读 DEX 的分析器全部上报。
+
+### Changed
+
+- **`closure.py`（1360 行）按职责拆成包**：targets（选靶）/ layers（五层组装）/ sources（富化源）/
+  gates（验收），主流程与 re-export 面留在 `__init__`。生产行为不变（40 个顶层定义逐个比对
+  函数体 AST，零差异；8 个模块常量零变化）。
+  **两处有意的不兼容**：① 原模块「顺带导入」的名字（`os`/`ipaddress`/`Endpoint`/`ANALYSIS_*` 等）
+  不再从包可见——它们本就不是本模块的 API；② 包级 monkeypatch 语义变化，打桩方向**分两类且相反**
+  （被 `close_report` 直调的 patch 包、只在子模块互调的 patch 子模块），已在 `__init__` 顶部写明
+  并有测试钉住分界。
+
 - **容器级诱饵条目检测**：`packing` 分析器新增 `APK-CORE-NAME-DECOY-ENTRIES`——检出以 `/` 开头
   （ZIP 规范禁止的绝对路径）且首段恰为 `AndroidManifest.xml` / `classes.dex` / `resources.arsc`
   的条目，即精确冒充每个 APK 解析器必找的核心文件、意在让解析器撞上假条目。
