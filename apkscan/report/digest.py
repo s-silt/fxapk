@@ -230,6 +230,69 @@ def _claim_field(claims: dict, claim: str, key: str, fallback: Any) -> Any:
     return entry.get(key, fallback) if isinstance(entry, dict) else fallback
 
 
+#: 进 digest 的 Finding 严重度（按分析器实际使用的取值大小写不敏感匹配）。
+#: LOW/INFO 不进——digest 的立身之本是低 token，几十条信息级条目会把它撑成第二份报告。
+_DIGEST_FINDING_SEVERITIES = frozenset({"critical", "high", "medium"})
+
+
+def _compact_findings(report: dict) -> dict[str, Any]:
+    """Finding → digest 紧凑段：只带 id / 严重度 / 标题，不带证据明细。
+
+    ★为什么必须有这一段：digest 是喂 AI agent 的消费面，而 Finding 承载的是 **leads 不表达的
+    事实判断**——"后端有通讯录窃取接口"「疑似正版重打包，接口不能直接作线索」「未知壳、DEX 只剩
+    壳桩」。此前 digest 完全不透 findings，实测一个样本 31 条 Finding 对 AI 全部不可见，
+    其中包括 HIGH 级结论。这就是"提取出来却在最后一环沉默"。
+
+    ★省略必须说出来：只带 CRITICAL/HIGH/MEDIUM，但把省略数与分布写进 counts。静默丢弃会被
+    读成"只有这些"——与本项目反复要防的"缺失被当不存在"是同一个错。
+    """
+    raw = report.get("findings")
+    items = [f for f in raw if isinstance(f, dict)] if isinstance(raw, list) else []
+    kept: list[dict[str, Any]] = []
+    by_sev: Counter[str] = Counter()
+    for f in items:
+        sev = _severity_name(f.get("severity"))
+        by_sev[sev] += 1
+        if sev.lower() in _DIGEST_FINDING_SEVERITIES:
+            kept.append({
+                "id": str(f.get("id") or ""),
+                "severity": sev,
+                "title": str(f.get("title") or "")[:160],
+            })
+    kept.sort(key=lambda x: (x["severity"], x["id"]))
+    return {
+        "items": kept,
+        "counts": {
+            "total": len(items),
+            "shown": len(kept),
+            "omitted": len(items) - len(kept),
+            "by_severity": dict(by_sev),
+        },
+        "note": "只列 CRITICAL/HIGH/MEDIUM；完整条目与证据见 report.json 的 findings",
+    }
+
+
+def _severity_name(value: object) -> str:
+    """把 Severity 取出成字符串——报告可能是 Enum、dict（序列化后）或裸字符串。
+
+    ★不能只 str()：Enum 经 json 往返后是 ``{"_name_": "HIGH", ...}`` 这类 dict，
+    直接 str 会得到一大坨对象文本，既污染 digest 又让严重度筛选全部失效。
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("_name_", "name", "_value_", "value"):
+            got = value.get(key)
+            if isinstance(got, str):
+                return got
+        return "UNKNOWN"
+    name = getattr(value, "name", None)
+    if isinstance(name, str):
+        return name
+    got = getattr(value, "value", None)
+    return got if isinstance(got, str) else "UNKNOWN"
+
+
 def _compact_visibility(raw: object) -> dict[str, Any]:
     """可见性求值 → digest 紧凑段。缺失（旧报告）→ unknown 而非"完整"。
 
@@ -327,6 +390,10 @@ def build_digest(report: object, *, redact: bool = False) -> dict[str, Any]:
         # ★证据可见性放在 leads **之前**：消费方（尤其是 AI）必须先知道「哪些输入没看见」，
         #   否则会把一份壳桩样本的空线索列表读成「该样本干净」。见 core/visibility.py。
         "visibility": _compact_visibility(meta.get("visibility")),
+        # ★三段的顺序即研判次序：哪里没看见 → 看见了什么事实 → 该向谁调证。
+        #   findings 承载 leads 不表达的判断（重打包警示、通讯录窃取接口、未知壳…），
+        #   此前完全不透出，对 AI 等于不存在。
+        "findings": _compact_findings(report),
         "leads": [_compact_lead(lead, redact, pii_flag) for lead in leads_sorted],
         "overseas_targets": overseas_targets,
         "closure": compact_closure,

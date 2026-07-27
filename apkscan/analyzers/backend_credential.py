@@ -71,7 +71,7 @@ class BackendCredentialAnalyzer(BaseAnalyzer):
 
         # value -> (title, source, location)
         hits: dict[str, tuple[str, str, str]] = {}
-        _ok, dex_strings = collect_dex_strings(ctx, self.name, max_strings=_MAX_DEX_STRINGS)
+        _ok, dex_strings = collect_dex_strings(ctx, self.name, max_strings=_MAX_DEX_STRINGS, result=result)
         for s in dex_strings:
             self._scan_text(s, "dex", "dex_strings", patterns, hits)
         self._scan_resources(ctx, patterns, hits)

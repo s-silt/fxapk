@@ -74,6 +74,12 @@ logger = logging.getLogger(__name__)
 
 
 
+#: DEX 字符串扫描截断的标记键与"谁截断了"清单键。
+#: 前者与 analyzers/_common.DEX_TRUNCATED_META_KEY 同名——它是分析器与 pipeline 之间的约定，
+#: 此处不 import 那个常量以免核心模块反向依赖 analyzers 包。
+_DEX_TRUNCATED_KEY = "dex_strings_truncated"
+_DEX_TRUNCATED_BY_KEY = "dex_strings_truncated_by"
+
 #: **关键**分析器：其失败即报告核心不可信（身份 + 网络调证线索）。--strict 据此非零退出。
 #: 保守取最小集——manifest（包名/权限/SDK/加固）与 endpoints（域名/IP 调证线索的核心提取）；
 #: 其余是特性分析器，失败只降级、不使整份报告无效。按需增删。
@@ -248,13 +254,23 @@ def _stage_run_analyzers(state: _PipelineState) -> None:
                 finding.analyzer = name
         state.findings.extend(result.findings)
         if result.meta:
+            # ★截断标记是**或运算**，不是覆盖：实测一个样本上 11 个分析器同时截断，若按普通
+            #   meta 合并，最后一个写 False 的会把前面的 True 抹掉——"没扫全"这件事就此消失。
+            #   顺带记下是谁截断的，让人能定位到具体哪块没扫完。
+            if result.meta.get(_DEX_TRUNCATED_KEY):
+                meta[_DEX_TRUNCATED_KEY] = True
+                truncated = meta.setdefault(_DEX_TRUNCATED_BY_KEY, [])
+                if isinstance(truncated, list) and name not in truncated:
+                    truncated.append(name)
             # 同名 meta key 冲突时记 warning，避免后跑分析器静默覆盖前者的结果。
             for k, v in result.meta.items():
+                if k == _DEX_TRUNCATED_KEY:
+                    continue                      # 已按或运算处理，不参与覆盖式合并
                 if k in meta and meta[k] != v:
                     logger.warning(
                         "meta key 冲突，分析器 %s 覆盖了 %r：%r → %r", name, k, meta[k], v
                     )
-            meta.update(result.meta)
+                meta[k] = v
 
         if result.error:
             logger.warning("分析器 %s 自报错误：%s", name, result.error)

@@ -98,7 +98,7 @@ class AdminPanelAnalyzer(BaseAnalyzer):
         hits: dict[str, _Hit] = {}
 
         # 1) DEX 字符串（代码内硬编码 URL）。
-        _ok, dex_strings = collect_dex_strings(ctx, self.name, max_strings=_MAX_DEX_STRINGS)
+        _ok, dex_strings = collect_dex_strings(ctx, self.name, max_strings=_MAX_DEX_STRINGS, result=result)
         for s in dex_strings:
             self._scan_text(s, "dex", "dex_strings", patterns, hits)
 

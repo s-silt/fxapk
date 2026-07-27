@@ -15,7 +15,7 @@ import posixpath
 import re
 import zipfile
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, TypeGuard
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 from apkscan.core.models import Confidence, Endpoint, Evidence
 
@@ -269,13 +269,31 @@ def collect_file_paths(ctx: "AnalysisContext", analyzer_name: str) -> list[str]:
         return []
 
 
+#: 分析器 meta 里标记"本分析器的 DEX 字符串扫描被截断"的键。
+#:
+#: ★为什么必须进 meta 而不是只打日志：截断是最隐蔽的可见性缺口——分析器"跑成功了"、状态全绿，
+#: 只是没扫完，于是"未发现某接口"完全可能只是它排在截断线之后。实测一个 100MB 样本上
+#: **11 个分析器同时截断**，而此前只有 endpoints 把这个事实写进 meta；可见性层碰巧靠它感知到，
+#: 一旦 endpoints 没截断而别的截断了就彻底沉默。日志不是数据面——digest / closure / AI 读不到日志。
+#:
+#: ★为什么不用模块级集合收集：分析器可能跑在**子进程**里（见 core/parallel.py），worker 只回传
+#: (name, result, error)，模块级状态留在子进程随之丢弃。截断事实必须搭 AnalyzerResult 回来。
+DEX_TRUNCATED_META_KEY = "dex_strings_truncated"
+
+
 def collect_dex_strings(
     ctx: "AnalysisContext",
     analyzer_name: str,
     *,
     max_strings: int = _MAX_DEX_STRINGS,
+    result: Any = None,
 ) -> tuple[bool, list[str]]:
-    """收集 DEX 字符串（带上限）。返回 (是否成功遍历, 字符串列表)。"""
+    """收集 DEX 字符串（带上限）。返回 ``(是否成功遍历, 字符串列表)``。
+
+    传入 ``result``（AnalyzerResult）时，截断会写 ``result.meta[DEX_TRUNCATED_META_KEY]=True``，
+    让"没扫全"成为**数据**而非只是一行日志——见该常量处关于为何不能只打日志、也不能用模块级
+    集合收集的说明。不传则行为不变（只告警），便于逐个分析器渐进接入。
+    """
     strings: list[str] = []
     try:
         for idx, s in enumerate(ctx.dex_strings()):
@@ -283,6 +301,9 @@ def collect_dex_strings(
                 logger.warning(
                     "[%s] DEX 字符串超过上限 %d，截断扫描", analyzer_name, max_strings
                 )
+                meta = getattr(result, "meta", None)
+                if isinstance(meta, dict):
+                    meta[DEX_TRUNCATED_META_KEY] = True
                 break
             if isinstance(s, str) and s:
                 strings.append(s)
