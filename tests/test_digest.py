@@ -183,6 +183,79 @@ def test_build_digest_exposes_compact_closure_without_raw_targets() -> None:
     assert "large" not in str(digest["closure"])
 
 
+def test_findings_reach_the_digest() -> None:
+    """★Finding 必须进 digest —— 它承载 leads 不表达的判断。
+
+    实测一个真实样本产 31 条 Finding，而 digest 此前完全不透 findings：那些结论对 AI
+    消费方等于不存在。丢的包括「疑似正版重打包，接口不能直接作线索」这种防误伤的警示，
+    以及 HIGH 级的通讯录窃取接口。这正是"提取出来却在最后一环沉默"。
+    """
+    report = {
+        "meta": {"package_name": "com.x"},
+        "leads": [],
+        "findings": [
+            {"id": "API-SEMANTIC-CONTACT-THEFT", "severity": "HIGH", "title": "通讯录窃取接口"},
+            {"id": "REPACK-IDENTITY-SUSPECTED", "severity": "MEDIUM", "title": "疑似正版重打包"},
+            {"id": "BUILD-PROVENANCE-PATHS", "severity": "INFO", "title": "构建来源"},
+        ],
+    }
+    d = build_digest(report)
+    ids = {f["id"] for f in d["findings"]["items"]}
+    assert "API-SEMANTIC-CONTACT-THEFT" in ids
+    assert "REPACK-IDENTITY-SUSPECTED" in ids
+    # findings 排在 leads 之前：研判次序是「哪里没看见 → 看见了什么 → 向谁调证」
+    keys = list(d)
+    assert keys.index("visibility") < keys.index("findings") < keys.index("leads")
+
+
+def test_omitted_findings_are_counted_not_silently_dropped() -> None:
+    """★省略必须说出来：只列 CRITICAL/HIGH/MEDIUM，但省了几条、什么分布要写清楚。
+
+    静默丢弃会被读成"只有这些"——与本项目反复要防的"缺失被当不存在"是同一个错。
+    """
+    report = {
+        "meta": {},
+        "leads": [],
+        "findings": [
+            {"id": "A", "severity": "HIGH", "title": "x"},
+            {"id": "B", "severity": "INFO", "title": "y"},
+            {"id": "C", "severity": "LOW", "title": "z"},
+        ],
+    }
+    c = build_digest(report)["findings"]["counts"]
+    assert c["total"] == 3 and c["shown"] == 1 and c["omitted"] == 2
+    assert c["by_severity"] == {"HIGH": 1, "INFO": 1, "LOW": 1}
+
+
+def test_severity_survives_enum_serialization() -> None:
+    """★严重度经 JSON 往返会变成 dict（Enum 的 __dict__），不能只 str()。
+
+    直接 str 会得到一大坨对象文本，既污染 digest 又让严重度筛选整个失效——
+    结果是 HIGH 级结论被当成未知级别丢掉。
+    """
+    report = {
+        "meta": {},
+        "leads": [],
+        "findings": [
+            {"id": "X", "severity": {"_name_": "HIGH", "_value_": "HIGH"}, "title": "枚举序列化形态"},
+            {"id": "Y", "severity": None, "title": "缺失"},
+        ],
+    }
+    d = build_digest(report)
+    items = {f["id"]: f["severity"] for f in d["findings"]["items"]}
+    assert items.get("X") == "HIGH", "枚举序列化后的严重度没认出来，HIGH 结论会被丢掉"
+    assert "Y" not in items  # severity 缺失 → UNKNOWN → 不进（但计数里有）
+    assert d["findings"]["counts"]["by_severity"].get("UNKNOWN") == 1
+
+
+def test_findings_absent_or_malformed_never_throws() -> None:
+    for bad in ({"meta": {}, "leads": []},
+                {"meta": {}, "leads": [], "findings": "x"},
+                {"meta": {}, "leads": [], "findings": [None, 7, {"id": "ok", "severity": "HIGH"}]}):
+        d = build_digest(bad)
+        assert isinstance(d["findings"]["items"], list)
+
+
 def test_cli_digest_emits_json_stdout(tmp_path) -> None:
     rep = tmp_path / "report.json"
     rep.write_text(
