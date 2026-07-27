@@ -145,11 +145,45 @@ def test_self_built_on_short_alias_and_thin_stack():
     assert f.severity == Severity.INFO
 
 
-def test_debug_cert_counts_as_self_built_marker():
-    """调试证书是自研正向标记：无签名块文件也能凭它 + 薄栈判 self_built。"""
+def test_debug_cert_blocks_self_built_verdict():
+    """★调试证书是判自研的**阻断项**，不是正向标记。
+
+    它只证"非原厂正式发布签名"，而自研批量打包与第三方 apktool 重签正版都会留下它——
+    方向双向兼容。再叠加 v2/v3-only 包天然没有签名别名（本用例即无 META-INF 签名块），
+    "无随机别名"对这类包恒成立、是盲区而非证据。两者相乘，最常见的
+    `apktool + debug 重签` 工作流会被反判 self_built，进而提示"其接口/域名可按样本
+    自有后端方向研判"——把被仿冒厂商的资产写成嫌疑资产。
+
+    退回 decide_verdict 里的 `not has_debug_cert`，本测试即红。
+    """
     result = _analyze(
         {"lib/arm64-v8a/libnative.so": _ELF},
         certificates=[_cert(is_debug=True)],
+    )
+    assert _meta(result)["verdict"] == "unknown"
+    assert _SELF_ID not in _ids(result), "不得产出「自研马甲包」Finding"
+
+
+def test_debug_cert_signal_is_recorded_but_directionless():
+    """信号仍记录（供人核），但 direction 必须是 neutral——不许暗示方向。"""
+    result = _analyze(
+        {"lib/arm64-v8a/libnative.so": _ELF},
+        certificates=[_cert(is_debug=True)],
+    )
+    sig = next(
+        s for s in _meta(result)["signals"] if s["id"] == "debug-certificate"
+    )
+    assert sig["direction"] == "neutral"
+
+
+def test_short_alias_still_yields_self_built_without_debug_cert():
+    """守恒：真自研件（品牌缩写别名 + 薄栈 + 非 debug 证书）仍判 self_built。
+
+    收紧 debug 判据不该把真自研件也推进 unknown——那会漏掉真线索。
+    """
+    result = _analyze(
+        {"META-INF/HXK.RSA": b"\x30\x82", "lib/arm64-v8a/libflutter.so": _ELF},
+        certificates=[_cert(is_debug=False)],
     )
     assert _meta(result)["verdict"] == "self_built"
 
