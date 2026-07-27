@@ -296,6 +296,51 @@ def test_analyze_third_party_only_no_self_hosted_finding() -> None:
     assert meta["third_party"][0]["root"] == "/users/drklo"
 
 
+def test_withdrawn_third_party_root_falls_back_to_unknown() -> None:
+    """撤回名单：证据不足以判第三方的构建根停在 unknown，且**带上撤回理由**。
+
+    退回任一环节本测试必红：
+      · 把该根放回 _KNOWN_THIRD_PARTY_ROOTS → tier 变 third_party；
+      · 只把它从名单删掉、不进撤回名单 → origin 为空，分析员无从分辨"查过"与"没查过"。
+    """
+    cp = classify_path("/Users/dhmac/StudioProjects/proj/jni/voip/x.cpp")
+    assert cp.tier == TIER_UNKNOWN
+    assert cp.origin and "撤回" in cp.origin
+    assert cp.username == "dhmac"
+
+
+def test_withdrawn_root_not_promoted_to_self_hosted() -> None:
+    """撤回≠改判自建：共现证明不了作者身份，冒进判自建会把开源作者写成嫌疑人。"""
+    for p in (
+        "/Users/dhmac/StudioProjects/proj/jni/a.cpp",
+        "/Users/dhmac/go/src/app/main.go",
+    ):
+        assert classify_path(p).tier != TIER_SELF_HOSTED, p
+
+
+def test_withdrawal_does_not_leak_to_neighbouring_roots() -> None:
+    """撤回只作用于被撤那一条：同批样本里分布相同的其它个人根不受影响。
+
+    ``/users/dkaraush/`` 与被撤根出现在完全相同的样本集合里，却是真实的开源贡献者——
+    若实现按"与自建符号共现"之类的模糊条件批量撤回，这条即红。
+    """
+    assert classify_path("/Users/dkaraush/projects/tmessages-ffmpeg/x.c").tier == TIER_THIRD_PARTY
+    assert classify_path("/Users/jbrateman/proj/src/y.c").tier == TIER_THIRD_PARTY
+
+
+def test_analyze_withdrawn_root_origin_reaches_meta() -> None:
+    """★接线：撤回理由要真的出现在 report 的 meta 里，不能只活在 classify_path 的返回值上。
+
+    只改 classify_path、不改 _summarize 的 unknown 投影，本测试即红（origin 被丢掉）。
+    """
+    result = _run(dex_strings=["/Users/dhmac/StudioProjects/proj/jni/voip/x.cpp"])
+    unknown = result.meta["build_provenance"]["unknown"]
+    entry = next(u for u in unknown if u["root"] == "/users/dhmac")
+    assert "撤回" in entry["origin"]
+    # 撤回理由属分层依据，不进用户可见 Finding 正文（同用户名的处理口径）。
+    assert "dhmac" not in _all_finding_text(result)
+
+
 def test_analyze_usernames_only_in_meta_not_in_findings() -> None:
     result = _run(dex_strings=["/Users/zhangsan9/dev/proj/native/x.c", _SYN_SELF_HOSTED])
     assert "zhangsan9" not in _all_finding_text(result)
