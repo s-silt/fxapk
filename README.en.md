@@ -34,11 +34,39 @@ fxapk analyze app.apk --out out
 # One-click full pipeline (rooted device / emulator attached):
 #   doctor → static → unpack → capture → merge into one report
 fxapk auto app.apk --out out       # no device? dynamic steps are skipped, static report still produced
+
+# Did detection get better or worse across versions, on the same real samples?
+# (ingest both versions' reports with `corpus add` first)
+fxapk corpus regress --corpus <library-dir>
 ```
 
 Main commands: `analyze` (static), `auto` (one-click: static + dynamic when a device is present), `capture` (on-device capture), `doctor` (device env check + auto-fix), `corpus` (sample library: ingest past reports, cross-version regression, look up a value across samples). Full commands and flags: `fxapk --help`.
 
 When not installed as a command, use `python -m apkscan.cli <…>`.
+
+### Read "what we could not see" before reading conclusions
+
+Reports and `fxapk digest` carry a `visibility` section, placed **ahead of the leads**. It answers one
+question: given what this run actually saw, which conclusions are eligible. A hardened sample often
+leaves nothing but a stub DEX, and there "no network endpoints found" means *we could not see*, not
+*there are none*. `blocked_claims` names the exhaustiveness claims that cannot be made, and
+`next_actions` says how to close the gap — unpack, capture, or rerun under authorization to fetch
+remote config.
+
+This is orthogonal to `analysis_status`: that one reports whether the **tooling** ran healthy, this one
+whether the **sample's content** was visible. Every analyzer succeeding and the DEX being a stub are
+both true at once.
+
+### Self-built shell vs. a repackaged legitimate app
+
+`repack_identity` returns a three-state verdict, and it needs reading first: interface, domain and
+build-path **ownership inverts** between the two. A self-built app's belong to its operator; a
+repackaged one's belong to the **impersonated vendor**, so listing them as investigation leads points
+at an uninvolved company.
+
+When a sample looks repackaged, the tool states only that it appears **resigned** — never that
+something was injected. Establishing that requires a file-by-file diff against the official build of
+the same version, which the sample alone cannot provide.
 
 ## Output
 
