@@ -201,6 +201,79 @@ def test_semantics_avoid_overtagging():
     assert "短信窃取" not in semantics_for("/api/sms/send")
 
 
+def test_compiled_source_paths_are_not_backend_apis():
+    """★真样本回归：WebRTC 的 __FILE__ 调试串被编进 .so，形如 /api/…/xxx.cc。
+
+    两案（2026-07-23 / 07-24）的报告里这类路径被整片当成后端接口面。段字符集含 `.`，
+    正则天然吃得下扩展名，故必须显式排除编译型源码/头文件叶子。
+    """
+    for path in (
+        "/api/audio/audio_frame.cc",
+        "/api/video/video_frame.cc",
+        "/api/rtc_event_log_output_file.cc",
+        "/client/basic_port_allocator.cc",
+        "/api/audio_codecs/audio_decoder.h",
+        "/api/task_queue/task_queue_base.hpp",
+    ):
+        assert rejection_reason(path) == "source_file", path
+
+    # 真实后端接口形态不受影响——.php/.jsp/.do 是接口，不是源码。
+    assert rejection_reason("/api/user/login.php") is None
+    assert rejection_reason("/api/order/submit.do") is None
+    assert rejection_reason("/api/home/config") is None
+
+
+def test_go_symbol_table_is_not_backend_api():
+    """★真样本回归：gomobile 绑定层符号（golang.org/x/mobile/bind）命中 `mobile` 前缀，
+    整片被收成 /mobile/bind/seq.Delete 这类"接口"。两案剔掉 .cc 后剩下的 10 条全是这个。
+    """
+    for path in (
+        "/mobile/bind/seq.Delete",
+        "/mobile/bind/seq.FromRefNum",
+        "/mobile/bind/seq.UTF16Encode",
+        "/mobile/bind/seq.countedObj",
+        "/mobile/bind/java.setContext",
+        "/mobile/bind/seq.init.0",
+        "/mobile/bind/seq.Delete.deferwrap1",
+        "/mobile/bind/seq.",
+    ):
+        assert rejection_reason(path) == "code_symbol", path
+
+    # ★不得误伤真实接口：/mobile/bind/card 是绑卡接口，不能因前缀被一刀切。
+    assert rejection_reason("/mobile/bind/card") is None
+    assert rejection_reason("/mobile/bind/phone") is None
+    assert rejection_reason("/api/user/login.php") is None
+    assert rejection_reason("/api/v1/config.json") is None
+
+
+def test_auth_marker_requires_word_boundary():
+    """★真样本回归：/api/rtc_event_log_output_file.cc 去分隔符后 log+output 粘出 logout，
+    被标成「账号认证」。marker 必须整词对齐，跨词粘连不算命中。
+    """
+    assert "账号认证" not in semantics_for("/api/rtc_event_log_output_file")
+    assert "账号认证" not in semantics_for("/api/event/log_output/file")
+    assert "账号认证" not in semantics_for("/api/logOutputFile")
+    # 真的登出/登录接口仍须命中（词边界判据不得损召回）
+    assert "账号认证" in semantics_for("/api/user/logout")
+    assert "账号认证" in semantics_for("/api/user/login")
+    assert "账号认证" in semantics_for("/api/auth/resetPassword")
+
+
+def test_word_boundary_keeps_cross_separator_markers():
+    """词边界判据不得损召回：marker 本就设计成跨分隔符匹配（get_contact_list / getContactList）。"""
+    for path in (
+        "/api/home/getContactList",
+        "/api/home/get_contact_list",
+        "/api/home/get-contact-list",
+        "/api/upload/uploadContactList",
+        "/api/home/domainCheckReport",
+        "/api/home/r2upload_info",
+    ):
+        assert semantics_for(path), f"{path} 应至少命中一条语义"
+    assert "通讯录窃取" in semantics_for("/api/upload/uploadContactList")
+    assert "域名存活上报" in semantics_for("/api/home/domainCheckReport")
+
+
 def test_weak_semantics_do_not_spawn_standalone_finding():
     """弱语义（账号认证等）只进 meta，不单独产 Finding（否则每个 App 都刷一堆噪声）。"""
     result = _analyze(dex_strings=["/api/user/login"])
