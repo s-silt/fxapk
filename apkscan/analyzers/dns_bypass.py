@@ -82,7 +82,7 @@ class DnsBypassAnalyzer(BaseAnalyzer):
         result = AnalyzerResult(analyzer=self.name)
         parts: list[str] = []
         try:
-            _ok, dex_strings = collect_dex_strings(ctx, self.name, max_strings=_MAX_DEX_STRINGS)
+            _ok, dex_strings = collect_dex_strings(ctx, self.name, max_strings=_MAX_DEX_STRINGS, result=result)
             parts.append(" ".join(dex_strings))
         except Exception:
             logger.exception("[%s] 收集 dex 字符串失败，仅据 .so 判定", self.name)

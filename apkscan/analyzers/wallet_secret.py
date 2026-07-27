@@ -65,7 +65,7 @@ class WalletSecretAnalyzer(BaseAnalyzer):
         # value -> (kind, source, location)
         hits: dict[str, tuple[str, str, str]] = {}
 
-        _ok, dex_strings = collect_dex_strings(ctx, self.name, max_strings=_MAX_DEX_STRINGS)
+        _ok, dex_strings = collect_dex_strings(ctx, self.name, max_strings=_MAX_DEX_STRINGS, result=result)
         for s in dex_strings:
             self._scan_text(s, "dex", "dex_strings", hits)
         self._scan_resources(ctx, hits)

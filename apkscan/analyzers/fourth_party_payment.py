@@ -127,7 +127,7 @@ class FourthPartyPaymentAnalyzer(BaseAnalyzer):
         hits: dict[str, _Hit] = {}
 
         # 1) DEX 字符串（代码内硬编码网关 URL / 中文黑话）。
-        _ok, dex_strings = collect_dex_strings(ctx, self.name, max_strings=_MAX_DEX_STRINGS)
+        _ok, dex_strings = collect_dex_strings(ctx, self.name, max_strings=_MAX_DEX_STRINGS, result=result)
         for s in dex_strings:
             self._scan_text(s, "dex", "dex_strings", endpoints, keywords, hits)
 
