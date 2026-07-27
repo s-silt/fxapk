@@ -24,6 +24,9 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from apkscan.analyzers._common import (
+    DEX_TRUNCATED_META_KEY,
+)
+from apkscan.analyzers._common import (
     TEXT_RESOURCE_PREFIXES as _TEXT_PREFIXES,
 )
 from apkscan.analyzers._common import (
@@ -130,7 +133,7 @@ class ContactsAnalyzer(BaseAnalyzer):
             result.meta["contacts"] = {}
             return result
 
-        corpus = self._build_corpus(ctx)
+        corpus = self._build_corpus(ctx, result)
         counts: dict[str, int] = {}
         telegram_bot_tokens: list[str] = []
 
@@ -162,8 +165,14 @@ class ContactsAnalyzer(BaseAnalyzer):
     # 语料
     # ------------------------------------------------------------------
 
-    def _build_corpus(self, ctx: "AnalysisContext") -> list[tuple[str, str, str]]:
-        """[(source, location, text)]：dex 字符串 + manifest + 文本资源。"""
+    def _build_corpus(
+        self, ctx: "AnalysisContext", result: AnalyzerResult | None = None
+    ) -> list[tuple[str, str, str]]:
+        """[(source, location, text)]：dex 字符串 + manifest + 文本资源。
+
+        ★``result`` 用来把"扫描被截断"带回去：本分析器提取的是联系方式，截断意味着
+        "未提取到联系方式线索"可能只是没扫到那一段——而那两件事对办案完全不同。
+        """
         corpus: list[tuple[str, str, str]] = []
 
         # dex 字符串
@@ -171,6 +180,9 @@ class ContactsAnalyzer(BaseAnalyzer):
             for idx, s in enumerate(ctx.dex_strings()):
                 if idx >= _MAX_DEX_STRINGS:
                     logger.warning("[%s] DEX 字符串超过上限 %d，截断扫描", self.name, _MAX_DEX_STRINGS)
+                    meta = getattr(result, "meta", None)
+                    if isinstance(meta, dict):
+                        meta[DEX_TRUNCATED_META_KEY] = True
                     break
                 if isinstance(s, str) and s:
                     corpus.append(("dex", _truncate(s), s))

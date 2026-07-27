@@ -31,7 +31,11 @@ from apkscan.core.models import (
     Finding,
     Severity,
 )
-from apkscan.analyzers._common import TEXT_RESOURCE_PREFIXES, is_text_resource
+from apkscan.analyzers._common import (
+    DEX_TRUNCATED_META_KEY,
+    TEXT_RESOURCE_PREFIXES,
+    is_text_resource,
+)
 from apkscan.core.registry import BaseAnalyzer, load_rules
 
 if TYPE_CHECKING:
@@ -169,7 +173,7 @@ class CryptoAnalyzer(BaseAnalyzer):
             return result
 
         # 收集待扫描的 (来源标签, location, 文本) 三元组。各数据源各自 try/except。
-        dex_items, dex_count = self._collect_dex_strings(ctx)
+        dex_items, dex_count = self._collect_dex_strings(ctx, result)
         res_items, res_count = self._collect_resource_texts(ctx)
         scan_items = dex_items + res_items
 
@@ -196,12 +200,14 @@ class CryptoAnalyzer(BaseAnalyzer):
                 logger.exception("[%s] Base64 大块常量扫描失败", self.name)
                 self._record_error(result, "Base64 大块常量扫描失败（详见日志）")
 
-        result.meta = {
+        # ★用 update 而非整体赋值：扫描过程中已写入的键（如 DEX 截断标记）不能被冲掉——
+        #   整体赋值会让"没扫全"这个事实在最后一步凭空消失。
+        result.meta.update({
             "strings_scanned": dex_count,
             "resources_scanned": res_count,
             "findings": len(result.findings),
             "finding_ids": sorted({f.id for f in result.findings}),
-        }
+        })
         return result
 
     # ------------------------------------------------------------------
@@ -209,9 +215,13 @@ class CryptoAnalyzer(BaseAnalyzer):
     # ------------------------------------------------------------------
 
     def _collect_dex_strings(
-        self, ctx: "AnalysisContext"
+        self, ctx: "AnalysisContext", result: AnalyzerResult | None = None
     ) -> tuple[list[tuple[str, str, str]], int]:
-        """收集 DEX 字符串。返回 ([(source, location, text)], 扫描计数)。"""
+        """收集 DEX 字符串。返回 ([(source, location, text)], 扫描计数)。
+
+        ★``result`` 用来把截断带回去：本分析器找的是弱加密特征，截断意味着"未发现"
+        可能只是没扫到那一段。
+        """
         items: list[tuple[str, str, str]] = []
         count = 0
         try:
@@ -220,6 +230,9 @@ class CryptoAnalyzer(BaseAnalyzer):
                     logger.warning(
                         "[%s] DEX 字符串超过上限 %d，截断扫描", self.name, _MAX_STRINGS
                     )
+                    meta = getattr(result, "meta", None)
+                    if isinstance(meta, dict):
+                        meta[DEX_TRUNCATED_META_KEY] = True
                     break
                 if isinstance(s, str) and s:
                     items.append(("dex", "dex_strings", s))
