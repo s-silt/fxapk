@@ -398,10 +398,80 @@ def test_build_capture_quality_requires_target_attributed_business_traffic(
         "packet_count": 2,
         "business_candidate_count": 1,
         "target_attributed_count": 1,  # ★proto 键对齐后 target 正确计入（此前恒 0 → 误判 partial）
+        # mitm 侧拿到的是经代理的完整请求-响应，本身即双向证据。
+        "bidirectional_business_count": 1,
+        "infrastructure_excluded_count": 0,
         "dynamic_status": "complete",
-        "reason": "target-attributed public business candidate observed",
+        "reason": "target-attributed public business candidate observed with bidirectional payload",
         "floor_parse_status": "ok",
     }
+
+
+def test_build_capture_quality_excludes_public_dns_resolvers(monkeypatch) -> None:  # noqa: ANN001
+    """★真样本回归（2026-07-23 / 07-24 两案）：floor-only 抓 90 秒，目标 UID 只向三个公共
+    解析器发过 DNS query —— 仅出站约 6KB、入站 0B，却被计成 3 条业务候选并判 complete。
+
+    公共解析器上的 DNS 是基础设施流量，不构成"与后端通信"的证据。
+    """
+    monkeypatch.setattr(pcap_ingest, "_ip_public", lambda value: True)
+    summary = pcap_ingest.PcapSummary(
+        flows=[
+            pcap_ingest.Flow(
+                proto="udp",
+                src_ip="10.0.0.2",
+                src_port=40000 + i,
+                dst_ip=resolver,
+                dst_port=53,
+                packets=20,
+                payload_bytes=6000,   # 只出不进：DNS query 的载荷
+            )
+            for i, resolver in enumerate(("223.5.5.5", "114.114.114.114", "119.29.29.29"))
+        ]
+    )
+
+    quality = capture._build_capture_quality(
+        summary,
+        [],  # floor-only：无 mitm 端点
+        {f"udp/{ip}:53": {"is_target_app": True} for ip in
+         ("223.5.5.5", "114.114.114.114", "119.29.29.29")},
+        channel_ready=True,
+    )
+
+    assert quality["business_candidate_count"] == 0
+    assert quality["target_attributed_count"] == 0
+    assert quality["infrastructure_excluded_count"] == 3
+    assert quality["dynamic_status"] != "complete"
+
+
+def test_build_capture_quality_keeps_unknown_dns_server(monkeypatch) -> None:  # noqa: ANN001
+    """★不得反向误杀：团伙自建的 DNS 同样在 53 端口，那是真线索。
+
+    判据按 IP 名单而非端口——未知 IP 的 53 端口对端必须留在业务候选里给人工核。
+    """
+    monkeypatch.setattr(pcap_ingest, "_ip_public", lambda value: True)
+    summary = pcap_ingest.PcapSummary(
+        flows=[
+            pcap_ingest.Flow(
+                proto="udp",
+                src_ip="10.0.0.2",
+                src_port=40001,
+                dst_ip="198.51.100.77",   # 不在公共解析器名单里
+                dst_port=53,
+                packets=8,
+                payload_bytes=900,
+            )
+        ]
+    )
+
+    quality = capture._build_capture_quality(
+        summary,
+        [],
+        {"udp/198.51.100.77:53": {"is_target_app": True}},
+        channel_ready=True,
+    )
+
+    assert quality["business_candidate_count"] == 1
+    assert quality["infrastructure_excluded_count"] == 0
 
 
 def test_build_capture_quality_excludes_known_intercept_page(monkeypatch) -> None:  # noqa: ANN001

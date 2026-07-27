@@ -59,9 +59,23 @@ def evaluate_capture_quality(meta: Mapping[str, object]) -> dict[str, object]:
     floor_parse_status = str(raw.get("floor_parse_status") or "ok")
     floor_parse_failed = floor_parse_status not in ("ok", "absent", "")
 
-    if target_count > 0 and business_count > 0:
+    # 双向业务证据：出站与入站均有应用层载荷的、且归因到目标 App 的对端数量。
+    # ★为什么必须单列：单向流量（DNS query、SYN-only、发出去没人应）证明不了"与后端通信过"，
+    #   而闭环 complete 的含义正是"拿到了真实通信去向"。实测两案上，目标 UID 只向公共解析器
+    #   发过 DNS query（入站 0B），却被判 complete —— 人工结论是动态未闭环。
+    # ★字段缺失（老 runtime_report / 未提供该统计）时按 0 处理，即 fail-closed 降级为 partial：
+    #   宁可把已闭环说成未闭环（多跑一次采集），不可把未闭环说成已闭环（据以结案）。
+    bidirectional_count = _non_negative_int(raw.get("bidirectional_business_count"))
+
+    if target_count > 0 and business_count > 0 and bidirectional_count > 0:
         status = CLOSURE_COMPLETE
-        reason = "target-attributed public business candidate observed"
+        reason = "target-attributed public business candidate observed with bidirectional payload"
+    elif target_count > 0 and business_count > 0:
+        status = CLOSURE_PARTIAL
+        reason = (
+            "target-attributed candidate observed but no bidirectional payload "
+            "(one-way traffic does not establish a reached backend)"
+        )
     elif business_count > 0:
         status = CLOSURE_PARTIAL
         reason = "public business candidate observed without unique target attribution"
@@ -79,6 +93,10 @@ def evaluate_capture_quality(meta: Mapping[str, object]) -> dict[str, object]:
         "packet_count": packet_count,
         "business_candidate_count": business_count,
         "target_attributed_count": target_count,
+        "bidirectional_business_count": bidirectional_count,
+        # 因基础设施判据被排除的对端数（公共解析器上的 DNS 等）。单列出来，
+        # 免得"排除了噪音"与"本来就没流量"在读报告时长得一样。
+        "infrastructure_excluded_count": _non_negative_int(raw.get("infrastructure_excluded_count")),
         "dynamic_status": status,
         "reason": reason,
         "floor_parse_status": floor_parse_status,

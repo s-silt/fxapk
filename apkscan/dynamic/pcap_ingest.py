@@ -34,6 +34,7 @@ from apkscan.core.models import (
 )
 from apkscan.network.fingerprints import KNOWN_INTERCEPT_IPS as _KNOWN_FANZHA
 from apkscan.network.fingerprints import (  # noqa: F401 — public re-export (capture/closure/tests use pcap_ingest.is_known_intercept_ip)
+    is_infrastructure_endpoint,
     is_known_intercept_ip,
 )
 
