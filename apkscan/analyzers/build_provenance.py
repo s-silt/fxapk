@@ -133,8 +133,7 @@ _KNOWN_THIRD_PARTY_ROOTS: tuple[tuple[str, str], ...] = (
     ("/home/pano/", "第三方 RTC SDK 的 CI 构建账号（jenkins/onertc 等构建产物）"),
     ("/users/pano/", "同上 RTC SDK 的 macOS 构建机（与 /home/pano 同一 SDK 来源，实测同批出现）"),
     ("/users/scw/", "Go 工具链构建机（Go runtime 编译产物内嵌路径）"),
-    ("/users/dhmac/", "第三方 SDK 构建机（实测语料人工核对）"),
-    ("/users/jbrateman/", "第三方 SDK 构建机（实测语料人工核对）"),
+    ("/users/jbrateman/", "第三方 SDK 构建机（实测：只随被重打包的正版应用出现）"),
     ("/home/runner/work/", "GitHub Actions 公共 CI 默认工作目录"),
     ("/home/vcloudqa/", "商用 RTC SDK 厂商 CI 构建账号"),
     ("/volumes/android/buildbot/", "Android NDK 官方发布构建机"),
@@ -149,6 +148,26 @@ _KNOWN_THIRD_PARTY_ROOTS: tuple[tuple[str, str], ...] = (
     ("/opt/android/", "Android SDK/NDK 常用安装位变体"),
     ("/opt/ndk/", "Android NDK 常用安装位变体"),
     ("/opt/rh/", "RHEL/CentOS devtoolset 安装位（大量第三方预编译库的构建环境）"),
+)
+
+#: 曾列入第三方名单、后经实证**撤回**的构建根：证据不足以继续判第三方，也不足以判自建，
+#: 显式停在 ``unknown`` 并带上撤回理由。
+#:
+#: ★为什么显式列出而不是直接删掉那一行：``unknown`` 里有几十条路径，删掉后分析员无从分辨
+#:   哪条是"查过、证据不足"、哪条是"根本没查过"；更要紧的是，下一个看到
+#:   ``/Users/dhmac/StudioProjects/teamgram`` 的人还会凭"teamgram 是开源项目"把它再加回
+#:   第三方名单——撤回理由必须和判据长在一起。
+#: ★为什么撤回后不顺势判自建：判据是"与自建控制面符号严格共现且家族外零命中"，而同一批
+#:   样本里的 ``/users/dkaraush/`` 分布**完全相同**，却是真实的开源贡献者（其代码随
+#:   上游分支一起被引入）。共现证明不了作者身份，"未知"比"第三方"和"自研"都诚实。
+_WITHDRAWN_THIRD_PARTY_ROOTS: tuple[tuple[str, str], ...] = (
+    (
+        "/users/dhmac/",
+        "曾列第三方 SDK 构建机，经全样本实证撤回：现存样本中仅少数命中，且命中集合与"
+        "自建控制面符号的分布完全重合、该家族外零命中，原“第三方”依据不成立；"
+        "但共现不足以证明作者身份（同批样本的 /users/dkaraush/ 分布相同却确为开源贡献者），"
+        "故停在未知，待语料扩大后再判。",
+    ),
 )
 
 #: 包管理器的依赖缓存布局。命中即判第三方：这些目录下**全部**是下载来的依赖源码，
@@ -218,7 +237,7 @@ class ClassifiedPath:
     root: str
     identifier: str | None = None
     username: str | None = None
-    origin: str | None = None  # 第三方清单命中时的依据说明
+    origin: str | None = None  # 分层依据说明（第三方命中依据，或 unknown 的撤回理由）
 
 
 def extract_paths(
@@ -312,6 +331,13 @@ def classify_path(path: str) -> ClassifiedPath:
     """按**构建根**分层（绝不看整条路径里的项目名——见模块 docstring 的踩坑记录）。"""
     low = path.lower()
     root, identifier, username, eligible = _split_root(path)
+    # 撤回名单先于一切判据：这些根查过且结论是"证据不足"，不该再被任何下游规则拾起来
+    # 改判（无论改判成第三方还是自建）。
+    for prefix, note in _WITHDRAWN_THIRD_PARTY_ROOTS:
+        if low.startswith(prefix):
+            return ClassifiedPath(
+                path=path, tier=TIER_UNKNOWN, root=root, username=username, origin=note
+            )
     for prefix, origin in _KNOWN_THIRD_PARTY_ROOTS:
         if low.startswith(prefix):
             return ClassifiedPath(
@@ -572,7 +598,12 @@ class BuildProvenanceAnalyzer(BaseAnalyzer):
             ],
             "identifiers": [identifiers[k] for k in sorted(identifiers)],
             "unknown": [
-                {"root": g["root"], "count": g["count"], "paths": g["paths"]}
+                # 撤回理由（有则）必须随分层结果一起出报告：否则"查过、证据不足"与
+                # "根本没查过"在 unknown 里长得一模一样，撤回这个动作等于没做。
+                {
+                    "root": g["root"], "count": g["count"], "paths": g["paths"],
+                    **({"origin": g["origin"]} if g.get("origin") else {}),
+                }
                 for (tier, _r, _i), g in sorted(groups.items())
                 if tier == TIER_UNKNOWN
             ],
