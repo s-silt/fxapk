@@ -34,8 +34,33 @@ _MAX_FIELD = 4 * 1024
 #: Go 版本串（廉价、恒在，与 modinfo 是否可解无关）。
 _GO_VERSION_RE = re.compile(rb"go1\.\d+(?:\.\d+)?")
 
-#: ``-ldflags`` 里的 ``-X <pkg>.<Var>=<value>`` 注入。
-_LDFLAGS_X_RE = re.compile(r"-X\s+(?:'|\")?([^\s'\"=]+)=([^\s'\"]*)")
+#: ``-ldflags`` 里的 ``-X`` 注入。Go 接受多种等价写法，全部要认——漏掉一种，
+#: 该注入值就拿不到指纹，且原文会留在 build_settings 里（"解析处即脱敏"的契约就破了）：
+#:   -X main.Var=value        -X=main.Var=value
+#:   -X 'main.Var=value'      -X="main.Var=value"
+#:   -X main.Var='value'      （值本身带引号）
+#: 变量名不含空格与等号；值可被单/双引号包裹，引号内允许空格。
+_LDFLAGS_X_RE = re.compile(
+    r"""-X[\s=]+                 # -X 后跟空格或等号
+        (?:'|")?                 # 可选的整体开引号
+        ([^\s'"=]+)              # 变量名 pkg.Var
+        =
+        (?:                      # 值：带引号则取引号内（可含空格），否则取到空白为止
+            '([^']*)'
+          | "([^"]*)"
+          | ([^\s'"]*)
+        )
+    """,
+    re.VERBOSE,
+)
+
+
+def _iter_ldflags_x(setting: str):
+    """产出 ``(var, value)``；值的三种引号形态归一。"""
+    for m in _LDFLAGS_X_RE.finditer(setting):
+        var = m.group(1)
+        value = next((g for g in m.group(2, 3, 4) if g is not None), "")
+        yield var, value
 
 #: 变量名看起来像凭据时，即便值不是 PEM 也只留指纹。
 _SENSITIVE_VAR_RE = re.compile(r"(?i)(priv|secret|key|token|password|passwd|credential|cert)")
@@ -137,7 +162,7 @@ def parse_go_buildinfo(blob: bytes) -> GoBuildInfo | None:
                 setting = "\t".join(parts[1:])
                 key, _, val = setting.partition("=")
                 redacted = val.strip()
-                for var, raw_value in _LDFLAGS_X_RE.findall(setting):
+                for var, raw_value in _iter_ldflags_x(setting):
                     fp = fingerprint_embedded_secret(var, raw_value)
                     # 非敏感的注入值（版本号、构建号）留明文有用；敏感的只留指纹。
                     if not _is_sensitive(str(fp["kind"])):

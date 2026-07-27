@@ -616,9 +616,12 @@ def classify_domain(domain: str) -> tuple[str, str]:
 
     sticky = _sticky_variant_of_known(domain)
     if sticky is not None:
-        return ADVICE_SKIP, (
-            f"native 字符串表边界产物：剥掉前导字节后即已知基础设施域 {sticky}，"
-            "不是一个独立域名"
+        # ★只降"待核"，不判"无需调证"：2github.com 语法合法、可被注册和控制，
+        #   仅凭"剥掉前导数字后像已知域"证不了它一定是字符串表粘连产物。
+        #   判 SKIP 会把一个真 C2 直接藏起来——这个代价换不来那点降噪收益。
+        return ADVICE_REVIEW, (
+            f"疑为 native 字符串表边界产物（剥掉前导字节后即已知基础设施域 {sticky}），"
+            "但该写法本身可注册，需人工核实是否真实存在"
         )
 
     # library-embedded：打包库内置的全球站点库（amazon / 各国银行 / 新闻 / 成人站），

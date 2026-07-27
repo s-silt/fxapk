@@ -204,6 +204,24 @@ def test_per_root_quota_stops_one_library_starving_the_rest() -> None:
     assert noisy_group["count"] <= 32, f"单根应受配额限制，实得 {noisy_group['count']}"
 
 
+def test_per_root_quota_applies_within_a_single_source() -> None:
+    """★配额必须在**提取时**生效，不能只在收集侧做。
+
+    调用方对每个 .so 各调一次 extract_paths；若提取层先按 limit 取满 400 条，
+    同一个库里排在前面的噪声根就能把名额吃光，后面的自建根根本到不了收集侧的配额逻辑。
+    上一版只测了"两个独立 .so"，覆盖不到这条单源路径。
+    """
+    blob = b"\x00".join(
+        [f"/opt/vendorci/build{i:04d}/src/file{i:04d}.cpp".encode() for i in range(500)]
+        + [b"D:\\my_workspace\\my_project\\sdk\\core.go"]
+    )
+    paths = extract_paths(blob)
+    roots = [p for p in paths if p.lower().startswith("d:/my_workspace")]
+    assert roots, "同一个 blob 里排在噪声之后的自建根必须仍能被提取到"
+    noisy = [p for p in paths if p.startswith("/opt/vendorci")]
+    assert len(noisy) <= 32, f"单根在提取层就该受配额限制，实得 {len(noisy)}"
+
+
 def test_classify_dependency_cache_is_third_party() -> None:
     """★这条防的是把开源作者当嫌疑人：依赖缓存在作者机器上，内容却全是下载来的第三方源码。
 

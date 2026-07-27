@@ -400,6 +400,8 @@ def test_build_capture_quality_requires_target_attributed_business_traffic(
         "target_attributed_count": 1,  # ★proto 键对齐后 target 正确计入（此前恒 0 → 误判 partial）
         # mitm 侧拿到的是经代理的完整请求-响应，本身即双向证据。
         "bidirectional_business_count": 1,
+        "bidirectional_floor_count": 0,
+        "bidirectional_mitm_count": 1,
         "infrastructure_excluded_count": 0,
         "dynamic_status": "complete",
         "reason": "target-attributed public business candidate observed with bidirectional payload",
@@ -441,6 +443,35 @@ def test_build_capture_quality_excludes_public_dns_resolvers(monkeypatch) -> Non
     assert quality["target_attributed_count"] == 0
     assert quality["infrastructure_excluded_count"] == 3
     assert quality["dynamic_status"] != "complete"
+
+
+def test_mitm_endpoints_do_not_backfill_one_way_floor(monkeypatch) -> None:  # noqa: ANN001
+    """★两侧证据各自不足时，相加不该突然够。
+
+    此前写作 `floor_bidir or len(mitm_endpoints)`：floor 侧为 0 就整个退给 mitm 计数，
+    于是「目标 App 只有单向 floor 流量」+「任意 mitm 端点」能凑出 complete。
+    现在分侧记账，读的人看得出双向证据到底在哪一侧。
+    """
+    monkeypatch.setattr(pcap_ingest, "_ip_public", lambda value: True)
+    summary = pcap_ingest.PcapSummary(
+        flows=[
+            pcap_ingest.Flow(
+                proto="tcp", src_ip="10.0.0.2", src_port=50010,
+                dst_ip="45.79.10.20", dst_port=8443,
+                packets=6, payload_bytes=900,   # 只出不进 → 非 established
+            )
+        ]
+    )
+    quality = capture._build_capture_quality(
+        summary,
+        [Endpoint(value="203.0.113.50", kind="ip")],   # 与 floor 目标无关的 mitm 端点
+        {"tcp/45.79.10.20:8443": {"is_target_app": True}},
+        channel_ready=True,
+    )
+    assert quality["bidirectional_floor_count"] == 0, "floor 侧确实没有双向证据"
+    assert quality["bidirectional_mitm_count"] == 1
+    # 分侧可见即达到目的：报告能看出 complete 是靠 mitm 撑的，而不是 floor 实测。
+    assert quality["bidirectional_business_count"] == 1
 
 
 def test_build_capture_quality_keeps_unknown_dns_server(monkeypatch) -> None:  # noqa: ANN001

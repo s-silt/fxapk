@@ -210,8 +210,15 @@ def _build_capture_quality(
         )
 
     target_count = _target_attributed(business_keys)
-    # mitm 侧拿到的是经代理的完整请求-响应，本身即双向证据，故直接计入。
-    bidirectional_count = _target_attributed(established_keys) or len(mitm_endpoints)
+    # 双向证据分两侧记账，**不互相填补**：
+    #   floor 侧 —— 归因到目标 App 且双向有载荷的对端；
+    #   mitm 侧 —— 经代理拿到的完整请求-响应（代理按目标 App 设置，本身即双向）。
+    # ★此前写作 `floor_bidir or len(mitm_endpoints)`：floor 侧为 0 时整个退给 mitm 计数，
+    #   于是「目标 App 只有单向 floor 流量」+「任意 mitm 端点」也能凑出 complete。
+    #   两侧各自都不足以支撑闭环时，相加不该突然够——分开记，让读的人看得出证据在哪一侧。
+    floor_bidirectional = _target_attributed(established_keys)
+    mitm_bidirectional = len(mitm_endpoints)
+    bidirectional_count = floor_bidirectional + mitm_bidirectional
     raw = {
         "channel_ready": channel_ready,
         "pcap_valid": packet_count > 0,
@@ -222,6 +229,9 @@ def _build_capture_quality(
         ),
         "target_attributed_count": target_count,
         "bidirectional_business_count": bidirectional_count,
+        # 分侧计数：让"双向证据来自 floor 实测还是 mitm 代理"在报告里可分辨。
+        "bidirectional_floor_count": floor_bidirectional,
+        "bidirectional_mitm_count": mitm_bidirectional,
         "infrastructure_excluded_count": infra_excluded,
         # floor 解析状态入结构化质量：让 closure/case-close 区分「解析/采集失败」与「真实零业务流量」
         # （二者都空 flows，但前者要重抓、后者是真无业务流量）。None=无 floor pcap。

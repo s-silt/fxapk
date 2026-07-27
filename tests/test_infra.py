@@ -38,15 +38,19 @@ def test_protocol_identifier_urls_are_not_endpoints():
         assert "标识符" in reason or "基础设施" in reason
 
 
-def test_sticky_prefix_variants_resolve_to_known_domain():
+def test_sticky_prefix_variants_are_demoted_not_dropped():
     """★真样本回归：native 字符串表里域名前面粘着别的字节。
 
     2github.com 来自 Go 模块路径前的类型描述符数字，剥掉后就是 github.com 本身。
+
+    ★但只降"待核"，不判"无需调证"：2github.com 语法合法、可被注册和控制，
+    仅凭"剥掉前导数字后像已知域"证不了它一定是粘连产物。判 SKIP 会把一个真 C2
+    直接藏起来——这个代价换不来那点降噪收益。
     """
     for dom in ("2github.com", "3github.com", "4github.com"):
         advice, reason = infra.classify_domain(dom)
-        assert advice == infra.ADVICE_SKIP, dom
-        assert "边界产物" in reason
+        assert advice == infra.ADVICE_REVIEW, dom
+        assert "边界产物" in reason and "人工核实" in reason
 
     # ★不得反噬：真域名前面不该被乱剥。数字开头的合法域仍按常规判。
     advice, _ = infra.classify_domain("360buy.com")

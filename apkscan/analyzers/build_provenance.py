@@ -221,10 +221,18 @@ class ClassifiedPath:
     origin: str | None = None  # 第三方清单命中时的依据说明
 
 
-def extract_paths(blob: bytes, *, limit: int = _MAX_PATHS) -> list[str]:
-    """从二进制/文本坨中提取候选构建路径（反斜杠归一为 ``/``、剥尾部 ``./``、去重保序）。"""
+def extract_paths(
+    blob: bytes, *, limit: int = _MAX_PATHS, per_root: int = _MAX_PATHS_PER_ROOT
+) -> list[str]:
+    """从二进制/文本坨中提取候选构建路径（反斜杠归一为 ``/``、剥尾部 ``./``、去重保序）。
+
+    ★``per_root`` 配额必须在**提取时**就生效，不能只在收集侧做：调用方对每个 .so 各调一次
+    本函数，若这里先按 ``limit`` 取满 400 条，同一个库里排在前面的噪声根就能把名额吃光，
+    后面的自建根根本到不了调用方的配额逻辑。传 0 关闭本层配额。
+    """
     out: list[str] = []
     seen: set[str] = set()
+    counts: dict[str, int] = {}
     for regex in (_UNIX_RE, _WIN_RE):
         for m in regex.finditer(blob):
             if len(out) >= limit:
@@ -238,6 +246,11 @@ def extract_paths(blob: bytes, *, limit: int = _MAX_PATHS) -> list[str]:
                 continue
             if low in seen:
                 continue
+            if per_root:
+                root = _split_root(norm)[0]
+                if counts.get(root, 0) >= per_root:
+                    continue
+                counts[root] = counts.get(root, 0) + 1
             seen.add(low)
             out.append(norm)
     return out

@@ -111,6 +111,30 @@ def test_sensitive_by_variable_name_even_when_value_is_opaque() -> None:
     assert "zzzz1111" not in info.build_settings["-ldflags"]
 
 
+def test_all_ldflags_x_spellings_are_fingerprinted() -> None:
+    """★Go 接受多种 -X 写法，漏认一种，该注入值就拿不到指纹、原文还留在 build_settings。
+
+    「所有注入值在解析处即脱敏」是这一层的契约，不能只对最常见的写法成立。
+    """
+    variants = [
+        f'build\t-ldflags="-X sdk.KeyA={_FAKE_B64}"\n',           # -X 空格分隔
+        f'build\t-ldflags=-X=sdk.KeyB={_FAKE_B64}\n',              # -X= 等号分隔
+        f"build\t-ldflags=-X 'sdk.KeyC={_FAKE_B64}'\n",            # 整体单引号
+        f'build\t-ldflags=-X "sdk.KeyD={_FAKE_B64}"\n',            # 整体双引号
+        f"build\t-ldflags=-X sdk.KeyE='{_FAKE_B64}'\n",            # 值带单引号
+    ]
+    for i, modinfo in enumerate(variants):
+        info = parse_go_buildinfo(_make_blob(modinfo))
+        assert info is not None, i
+        assert info.ldflags_x, f"写法 {i} 未被识别，注入值静默漏掉指纹"
+        entry = info.ldflags_x[0]
+        assert entry["kind"] == "private_key_pem_base64", (i, entry)
+        assert entry["length"] == len(_FAKE_B64), (i, entry["length"])
+        assert "value" not in entry, i
+        blob = repr(info.build_settings) + repr(info.ldflags_x)
+        assert _FAKE_B64 not in blob, f"写法 {i} 的原值泄露到 build_settings"
+
+
 def test_non_go_binary_returns_none() -> None:
     assert parse_go_buildinfo(b"\x7fELF" + b"\x00" * 512) is None
 

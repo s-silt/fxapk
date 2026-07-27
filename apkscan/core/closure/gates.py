@@ -94,6 +94,9 @@ def evaluate_capture_quality(meta: Mapping[str, object]) -> dict[str, object]:
         "business_candidate_count": business_count,
         "target_attributed_count": target_count,
         "bidirectional_business_count": bidirectional_count,
+        # 分侧计数原样透传：双向证据来自 floor 实测还是 mitm 代理，读报告的人要分得清。
+        "bidirectional_floor_count": _non_negative_int(raw.get("bidirectional_floor_count")),
+        "bidirectional_mitm_count": _non_negative_int(raw.get("bidirectional_mitm_count")),
         # 因基础设施判据被排除的对端数（公共解析器上的 DNS 等）。单列出来，
         # 免得"排除了噪音"与"本来就没流量"在读报告时长得一样。
         "infrastructure_excluded_count": _non_negative_int(raw.get("infrastructure_excluded_count")),

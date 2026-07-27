@@ -385,13 +385,20 @@ def _parse_ipv6(b: bytes) -> tuple[int, str, str, bytes] | None:
         return None
     src = socket.inet_ntop(socket.AF_INET6, b[8:24])
     dst = socket.inet_ntop(socket.AF_INET6, b[24:40])
+    next_header = b[6]
     payload_length = struct.unpack("!H", b[4:6])[0]
     end = 40 + payload_length
-    # payload_length==0 是 Jumbogram（RFC 2675，逐跳选项带真实长度）——本层不解扩展头，
-    # 退回按实际字节切；超出实际长度同样退回（抓包截断或字段坏）。
-    if payload_length == 0 or end > len(b):
-        end = len(b)
-    return b[6], src, dst, b[40:end]
+    # ★payload_length==0 只在 next-header 是 Hop-by-Hop(0) 时才可能是 Jumbogram
+    #   （RFC 2675：真实长度在逐跳选项里）。普通的零载荷 IPv6 包同样合法且常见，
+    #   把它一律当 Jumbogram 退回全帧，等于又把抓包工具的帧尾元数据喂回给 L4 解析。
+    if payload_length == 0:
+        if next_header == 0:
+            end = len(b)          # 可能是 Jumbogram，本层不解扩展头，保守取全部
+        else:
+            end = 40              # 确实没有载荷
+    elif end > len(b):
+        end = len(b)              # 抓包截断或字段坏 → 退回实际字节
+    return next_header, src, dst, b[40:end]
 
 
 def _parse_tcp(b: bytes) -> tuple[int, int, int, int, bytes] | None:

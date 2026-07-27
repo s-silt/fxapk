@@ -468,6 +468,8 @@ def test_merge_and_rerender_copies_capture_quality(tmp_path) -> None:
         "business_candidate_count": 1,
         "target_attributed_count": 1,
         "bidirectional_business_count": 1,
+        "bidirectional_floor_count": 1,
+        "bidirectional_mitm_count": 0,
         "infrastructure_excluded_count": 0,
         "dynamic_status": "complete",
         "reason": "target-attributed public business candidate observed with bidirectional payload",

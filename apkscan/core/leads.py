@@ -10,7 +10,13 @@ from __future__ import annotations
 import logging
 
 from apkscan.core import exposure, forensic, infra
-from apkscan.core.models import Confidence, Endpoint, Lead, LeadCategory
+from apkscan.core.models import (
+    OBSERVED_CONTACT_SOURCES,
+    Confidence,
+    Endpoint,
+    Lead,
+    LeadCategory,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -164,9 +170,6 @@ def _apply_default_advice(leads: list[Lead]) -> None:
 # 离线扫描时附加到归属为空的端点 Lead 的说明。
 _OFFLINE_NOTE = "离线扫描：未做 WHOIS/ICP/ASN 归属查询，归属待联网或人工核（非查无结果）"
 
-#: 判 IP 是否"当地址用"时取多少条证据的 snippet 作上下文。取头几条够判形态，
-#: 全量拼接在证据数上千的样本上是白费的字符串开销。
-_IP_CONTEXT_EVIDENCE_LIMIT = 8
 
 
 def _apply_forensic(
@@ -308,13 +311,18 @@ def _ip_lead(ep: Endpoint, online: bool = True) -> Lead:
     if ep.is_private:
         advice = infra.ADVICE_SKIP
     else:
-        context = " ".join(
-            (ev.snippet or "") for ev in ep.evidences[:_IP_CONTEXT_EVIDENCE_LIMIT]
-        )
+        # ★全量扫证据、不截前 N 条：带端口/URL 的那条可能排在任何位置，
+        #   漏看一条就可能把真实后端降成待核。snippet 有长度上限，全量拼接开销可控。
+        context = " ".join((ev.snippet or "") for ev in ep.evidences)
         advice, _ip_reason = infra.classify_ip(
             ep.value,
             context=context,
-            runtime_observed=any(ev.source.startswith("runtime") for ev in ep.evidences),
+            # ★用 OBSERVED_CONTACT_SOURCES 而非 startswith("runtime")：后者会把
+            #   runtime-derived（手编/回灌，只证明"出现在 runtime 报告里"）与解密派生值
+            #   也当成实连证据。豁免形态判据这种事，必须用严格口径，与 attribution 侧同源。
+            runtime_observed=any(
+                str(ev.source) in OBSERVED_CONTACT_SOURCES for ev in ep.evidences
+            ),
         )
 
     notes = _apply_forensic(
