@@ -18,6 +18,7 @@ import logging
 import re
 from typing import TYPE_CHECKING
 
+from apkscan.analyzers._common import DEX_TRUNCATED_META_KEY
 from apkscan.config.discover import DiscoveryRules, classify_config_url
 from apkscan.config.models import RemoteConfigCandidate
 from apkscan.core.models import AnalyzerResult, Confidence, Evidence, Lead, LeadCategory
@@ -49,12 +50,17 @@ class RemoteConfigAnalyzer(BaseAnalyzer):
         rules = DiscoveryRules.load()
         candidates: dict[str, RemoteConfigCandidate] = {}
 
+        # ★截断先记局部量：本分析器最后才构造 AnalyzerResult，没法边扫边写 meta。
+        #   这条特别要紧——remote_config 找的就是配置对象候选，而配置链是取真实后端的入口；
+        #   截断导致"未发现候选"时若不吭声，读的人会以为这个样本不走远程配置。
+        truncated = False
         try:
             for idx, s in enumerate(ctx.dex_strings()):
                 if idx >= _MAX_DEX_STRINGS:
                     logger.warning(
                         "[remote_config] dex 字符串超上限 %d，其余未扫（大型/加固样本）", _MAX_DEX_STRINGS
                     )
+                    truncated = True
                     break
                 if not isinstance(s, str) or "://" not in s:
                     continue
@@ -70,14 +76,13 @@ class RemoteConfigAnalyzer(BaseAnalyzer):
             return AnalyzerResult(analyzer=self.name, error="dex 字符串扫描失败")
 
         leads = [self._to_lead(c) for c in candidates.values()]
-        return AnalyzerResult(
-            analyzer=self.name,
-            leads=leads,
-            meta={
-                "remote_config_candidate_count": len(leads),
-                "remote_config_source_scope": "dex-strings",  # 显式声明已扫范围（非静默截断）
-            },
-        )
+        meta: dict = {
+            "remote_config_candidate_count": len(leads),
+            "remote_config_source_scope": "dex-strings",  # 显式声明已扫范围（非静默截断）
+        }
+        if truncated:
+            meta[DEX_TRUNCATED_META_KEY] = True
+        return AnalyzerResult(analyzer=self.name, leads=leads, meta=meta)
 
     def _to_lead(self, cand: RemoteConfigCandidate) -> Lead:
         notes = (

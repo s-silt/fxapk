@@ -232,7 +232,7 @@ class RepackIdentityAnalyzer(BaseAnalyzer):
             signature = self._signature_view(ctx, files)
             so_map = collect_so_basenames(ctx, self.name)
             stack_hits = profile_stack(so_map.keys())
-            api_view = self._api_path_view(ctx)
+            api_view = self._api_path_view(ctx, result)
 
             verdict = decide_verdict(
                 has_random_alias=bool(signature["random_aliases"]),
@@ -299,9 +299,15 @@ class RepackIdentityAnalyzer(BaseAnalyzer):
             "debug_cert": any(getattr(c, "is_debug", False) for c in certs),
         }
 
-    def _api_path_view(self, ctx: "AnalysisContext") -> dict:
-        """版本化接口路径统计（弱信号，仅记录）。collect_dex_strings 自带条数上限与异常兜底。"""
-        _ok, strings = collect_dex_strings(ctx, self.name, max_strings=_MAX_DEX_STRINGS)
+    def _api_path_view(self, ctx: "AnalysisContext", result: AnalyzerResult) -> dict:
+        """版本化接口路径统计（弱信号，仅记录）。collect_dex_strings 自带条数上限与异常兜底。
+
+        ★传 ``result`` 是为了把"扫描被截断"带回去：本视图数的是版本化接口路径条数，截断会让
+        计数偏低，而它参与 verdict 的弱信号判断——没扫全却不吭声，等于用不完整的计数下判断。
+        """
+        _ok, strings = collect_dex_strings(
+            ctx, self.name, max_strings=_MAX_DEX_STRINGS, result=result
+        )
         found: set[str] = set()
         for s in strings:
             if len(found) >= _MAX_API_PATHS:

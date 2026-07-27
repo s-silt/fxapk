@@ -278,7 +278,7 @@ class BuildProvenanceAnalyzer(BaseAnalyzer):
         # 去重键 = 归一化小写路径；值保留首见 (原样路径, source, location) 供证据引用。
         hits: dict[str, tuple[str, str, str]] = {}
         try:
-            self._collect_dex(ctx, hits)
+            self._collect_dex(ctx, hits, result)
         except Exception:
             logger.exception("[%s] DEX 侧构建路径提取失败，仅据 .so 判定", self.name)
         try:
@@ -300,8 +300,21 @@ class BuildProvenanceAnalyzer(BaseAnalyzer):
 
     # ---- 采集 ----
 
-    def _collect_dex(self, ctx: "AnalysisContext", hits: dict[str, tuple[str, str, str]]) -> None:
-        _ok, strings = collect_dex_strings(ctx, self.name, max_strings=_MAX_DEX_STRINGS)
+    def _collect_dex(
+        self,
+        ctx: "AnalysisContext",
+        hits: dict[str, tuple[str, str, str]],
+        result: AnalyzerResult,
+    ) -> None:
+        """从 DEX 字符串里捞构建路径。
+
+        ★``result`` 是为了把"扫描被截断"这个事实带回去：本分析器扫 DEX 正是为了找构建标识，
+        截断意味着可能漏掉跨案锚点——而漏掉时报告若不吭声，读的人会以为"这个样本没有自建构建
+        路径"，实际只是没扫到那一段。
+        """
+        _ok, strings = collect_dex_strings(
+            ctx, self.name, max_strings=_MAX_DEX_STRINGS, result=result
+        )
         # 预筛含分隔符的串再拼坨：字符串池绝大多数与路径无关，先筛掉省一遍正则扫描量。
         blob = "\n".join(s for s in strings if "/" in s or "\\" in s).encode("utf-8", "replace")
         for path in extract_paths(blob, limit=max(0, _MAX_PATHS - len(hits))):

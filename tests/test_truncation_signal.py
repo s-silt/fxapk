@@ -61,6 +61,101 @@ def test_pipeline_merges_truncation_as_or_not_overwrite():
     )
 
 
+def test_every_dex_reading_analyzer_reports_truncation():
+    """★全量实跑：凡是读 DEX 字符串的分析器，截断时都必须上报。
+
+    这条是拿实跑当判据，因为静态审计骗过我三次：正则不认 `.get(`、AST 不认位置参数、
+    改模块变量对**函数默认参数**无效（默认值在定义时就绑定了）。唯一可信的是——
+    把上限压到 1 真跑一遍，看 meta 里有没有标记。
+
+    新增分析器若读 DEX 却不上报，这条会红。
+    """
+    from apkscan.analyzers import _common
+    from apkscan.core.registry import discover_analyzers
+
+    analyzers = list(discover_analyzers())
+
+    class _Ctx:
+        package_name = "com.probe"
+        platform = "android"
+        apk_path = ""
+        manifest_xml = None
+        permissions: list = []
+        components: list = []
+        config = None
+        dex_available = True
+
+        def dex_strings(self):
+            # 兼具路径形态与接口形态，让各类分析器都走到自己的提取分支
+            return (f"/opt/work/e{i}/p/a.cc /api/v1/x{i}/get" for i in range(50))
+
+        def list_files(self):
+            return []
+
+        def native_libs(self):
+            return []
+
+        def read_file(self, _path):
+            return None
+
+        def declared_size(self, _path):
+            return None
+
+        def certificates(self):
+            return []
+
+    # ★同时压两处：模块级常量（显式传 max_strings 的调用）与函数默认值（无参调用）。
+    #   只改前者会漏掉走默认值的分析器——api_surface 就这样被漏判过一次。
+    originals: list = []
+    kwdefaults = _common.collect_dex_strings.__kwdefaults__
+    if kwdefaults and "max_strings" in kwdefaults:
+        originals.append((kwdefaults, "max_strings", kwdefaults["max_strings"]))
+        kwdefaults["max_strings"] = 1
+    import sys as _sys
+    for mod in list(_sys.modules.values()):
+        mod_name = getattr(mod, "__name__", "")
+        if not mod_name.startswith("apkscan.analyzers"):
+            continue
+        for attr in ("_MAX_DEX_STRINGS", "_MAX_STRINGS"):
+            if hasattr(mod, attr):
+                originals.append((mod, attr, getattr(mod, attr)))
+                setattr(mod, attr, 1)
+
+    # ★"读没读 DEX"必须直接观测，不能靠 meta 里有没有某几个键去猜——猜法漏过突变验证：
+    #   把 wallet_secret 的上报去掉后测试仍绿，因为它的 meta 里没有那几个键。
+    #   改为在 ctx 上记录 dex_strings() 是否真被调用过。
+    class _CountingCtx(_Ctx):
+        def __init__(self) -> None:
+            self.dex_read = False
+
+        def dex_strings(self):
+            self.dex_read = True
+            return super().dex_strings()
+
+    try:
+        silent: list[str] = []
+        for analyzer in analyzers:
+            name = getattr(analyzer, "name", type(analyzer).__name__)
+            ctx = _CountingCtx()
+            try:
+                res = analyzer.analyze(ctx)  # type: ignore[arg-type]
+            except Exception:  # noqa: BLE001 — 本测试只关心截断上报，分析器自身异常另有测试覆盖
+                continue
+            meta = getattr(res, "meta", {}) or {}
+            if ctx.dex_read and not meta.get(DEX_TRUNCATED_META_KEY):
+                silent.append(name)
+        assert not silent, (
+            f"这些分析器读了 DEX 却在截断时不吭声：{silent}。"
+            f"截断意味着'未发现'可能只是没扫到那一段——报告必须说出来"
+        )
+    finally:
+        for holder, attr, value in originals:
+            if isinstance(holder, dict):
+                holder[attr] = value
+            else:
+                setattr(holder, attr, value)
+
+
 def test_visibility_reads_truncation_from_any_analyzer():
     """可见性层读顶层聚合键，而非某个特定分析器的 —— 谁截断都算数，并说出是谁。"""
     a = visibility.assess({"meta": {

@@ -171,7 +171,7 @@ class ReToolkitAnalyzer(BaseAnalyzer):
         so_basenames = _collect_so_basenames_shared(ctx, self.name)
         file_paths = _collect_file_paths_shared(ctx, self.name)
         _dex_ok, dex_strings = _collect_dex_strings_shared(
-            ctx, self.name, max_strings=_MAX_DEX_STRINGS
+            ctx, self.name, max_strings=_MAX_DEX_STRINGS, result=result
         )
         # .so 内容采样取串——仅当有规则用 so_strings 时才做（否则零额外 IO）。
         so_blobs: list[tuple[str, str]] = []

@@ -124,7 +124,7 @@ class SensitiveApiAnalyzer(BaseAnalyzer):
             return result
 
         dex_ok, dex_strings = _collect_dex_strings(
-            ctx, self.name, max_strings=_MAX_DEX_STRINGS
+            ctx, self.name, max_strings=_MAX_DEX_STRINGS, result=result
         )
         result.meta["dex_scanned"] = dex_ok
 

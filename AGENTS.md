@@ -234,6 +234,41 @@ fxapk digest out/<样本名>.json
 ---
 
 ## 4. 读结果（给 agent 的要点）
+
+### 4.0 ★★ 读线索**之前**先过两道闸（顺序不能反）
+
+**① `visibility` —— 这次到底看见了什么**（`digest` 与报告里都有，**排在 leads 之前**）
+
+它回答的不是"发现了什么"，而是"**基于本次实际看到的输入，哪些结论有资格下**"。加固样本的 DEX
+常常只剩壳桩，此时报告里的「未发现网络端点 / 未发现通讯录窃取」说明的是**没看见**，不是不存在。
+
+- `sources`：dex / native / resource / runtime 各自的可见性（`complete` / `partial`(扫描被截断) /
+  `stub_only`(壳桩) / `opaque`(字符串被混淆) / `unavailable` / `unknown`）。
+- `blocked_claims`：**无资格下的穷尽性结论**清单。看到它们时，对应的"未发现"一律不得写成"不存在"，
+  也不得据此下"该样本干净"的判断。
+- `next_actions`：怎么补——该 `fxapk unpack` 还是 `fxapk capture`，或授权后重跑取远程配置。
+- **与 `analysis_status` 是两码事**：那个说的是**工具**跑没跑好，这个说的是**样本内容**看没看见。
+  「分析器全成功 + DEX 是壳桩 + 六条结论没资格下」完全可以同时成立。
+
+**② `repack_identity` —— 这是自研马甲包，还是正版被重打包**
+
+两种形态的**接口 / 域名 / 构建路径归属完全相反**：
+
+| verdict | 这些资产属于谁 | 能否作线索 |
+|---|---|---|
+| `self_built` | 团伙自建 | 可以 |
+| `repack_suspected` | **被仿冒的正版厂商** | **不可以**——列进清单＝向无关企业发函 |
+| `unknown` | 未定 | 先人工核 |
+
+判为 `repack_suspected` 时，工具只声明「疑似被重签名」，**永远不会说「植入了什么」**——那必须与
+官方同版本包逐文件差分才能认定。你也不要替它下这个结论。
+
+**③ 顺带**：`findings` 段（排在 visibility 与 leads 之间）承载 leads 不表达的事实判断——
+通讯录窃取接口、域名轮换机制、未知壳、重打包警示。只列 CRITICAL/HIGH/MEDIUM，
+`counts.omitted` 会告诉你省了多少条。
+
+### 4.1 线索与归属
+
 - 一切以 **leads** 为中心：每条带 `category`/`value`/`subject`/`advice`(建议调证/待核/无需调证)/
   `where_to_request`/`evidence_to_obtain`/`notes`。**优先看 advice=建议调证 的**。
 - **结构化境外源站归属**：`digest` 输出含顶层 `overseas_targets`（也在 `report.meta["overseas_targets"]`），
