@@ -177,6 +177,9 @@ def _build_capture_quality(
     established_keys: set[str] = set()
     intercept_observed = False
     infra_excluded = 0
+    #: 归因到目标 App 的对端的 IP 与 SNI —— 用来判断某个 mitm 端点是不是同一个目标端点。
+    #: 代理是**整机**级的（adb 全局代理），抓到的流量不都属于目标 App。
+    sni_by_key: dict[str, set[str]] = {}
     if floor_summary is not None:
         try:
             remotes = pcap_ingest.remote_endpoints(floor_summary)
@@ -198,6 +201,9 @@ def _build_capture_quality(
                 #   （落盘 runtime_report.json 的 pre-merge quality 块误判 partial；Fable 复审 LOW-MED）。
                 key = f"{remote.proto}/{remote.ip}:{remote.port}"
                 business_keys.add(key)
+                sni_by_key.setdefault(key, set()).update(
+                    str(s).lower().rstrip(".") for s in (getattr(remote, "sni", None) or ())
+                )
                 if getattr(remote, "state", "") == pcap_ingest.STATE_ESTABLISHED:
                     established_keys.add(key)
 
@@ -210,15 +216,42 @@ def _build_capture_quality(
         )
 
     target_count = _target_attributed(business_keys)
+
+    def _is_target_key(key: str) -> bool:
+        attr = pcap_app_attr.get(key)
+        return isinstance(attr, dict) and attr.get("is_target_app") is True
+
+    #: 归因到目标 App 的对端的 IP / SNI —— mitm 端点靠它反查自己属不属于目标。
+    attributed_ips = {
+        key.split("/", 1)[-1].rsplit(":", 1)[0] for key in business_keys if _is_target_key(key)
+    }
+    attributed_hosts = {
+        host for key in business_keys if _is_target_key(key) for host in sni_by_key.get(key, ())
+    }
+
+    def _mitm_is_target(ep: Endpoint) -> bool:
+        """该 mitm 端点能否对上一个**已归因到目标 App** 的 floor 端点。"""
+        if ep.kind == "ip":
+            return ep.value in attributed_ips
+        if ep.kind == "domain":
+            return ep.value.lower().rstrip(".") in attributed_hosts
+        return False
+
     # 双向证据分两侧记账，**不互相填补**：
     #   floor 侧 —— 归因到目标 App 且双向有载荷的对端；
-    #   mitm 侧 —— 经代理拿到的完整请求-响应（代理按目标 App 设置，本身即双向）。
-    # ★此前写作 `floor_bidir or len(mitm_endpoints)`：floor 侧为 0 时整个退给 mitm 计数，
-    #   于是「目标 App 只有单向 floor 流量」+「任意 mitm 端点」也能凑出 complete。
-    #   两侧各自都不足以支撑闭环时，相加不该突然够——分开记，让读的人看得出证据在哪一侧。
+    #   mitm 侧 —— 经代理拿到的完整请求-响应。
+    # ★★ 代理是**整机**级的（adb 全局代理把全设备流量都回流 mitmproxy），所以「有 mitm 端点」
+    #    绝不等于「目标 App 有双向通信」——那可能是系统连通性检查或别的 App。此前
+    #    `floor_bidir or len(mitm)`、以及后来改成的 `floor_bidir + len(mitm)`，都让
+    #    「目标 App 只有单向 floor 流量」+「任意无关 mitm 端点」凑出了 complete：
+    #    两个计数各自都不足以支撑闭环，相加/回退不该突然够。
+    #    真正要问的是「**同一个端点**上既归因到目标、又有双向载荷」，故单列
+    #    ``bidirectional_target_count`` 供门控消费；旧的合计值仅保留作分侧可见性。
     floor_bidirectional = _target_attributed(established_keys)
     mitm_bidirectional = len(mitm_endpoints)
+    mitm_attr_bidirectional = sum(1 for ep in mitm_endpoints if _mitm_is_target(ep))
     bidirectional_count = floor_bidirectional + mitm_bidirectional
+    bidirectional_target_count = floor_bidirectional + mitm_attr_bidirectional
     raw = {
         "channel_ready": channel_ready,
         "pcap_valid": packet_count > 0,
@@ -228,10 +261,14 @@ def _build_capture_quality(
             0 if intercept_observed and not business_keys else len(mitm_endpoints),
         ),
         "target_attributed_count": target_count,
+        # ★门控消费这一个：同一端点上既归因到目标 App、又有双向载荷。
+        "bidirectional_target_count": bidirectional_target_count,
         "bidirectional_business_count": bidirectional_count,
         # 分侧计数：让"双向证据来自 floor 实测还是 mitm 代理"在报告里可分辨。
         "bidirectional_floor_count": floor_bidirectional,
         "bidirectional_mitm_count": mitm_bidirectional,
+        # mitm 侧能对上目标端点的那部分（其余是整机代理抓到的旁人流量）。
+        "bidirectional_mitm_attributed_count": mitm_attr_bidirectional,
         "infrastructure_excluded_count": infra_excluded,
         # floor 解析状态入结构化质量：让 closure/case-close 区分「解析/采集失败」与「真实零业务流量」
         # （二者都空 flows，但前者要重抓、后者是真无业务流量）。None=无 floor pcap。
