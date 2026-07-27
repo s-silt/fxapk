@@ -154,6 +154,56 @@ def test_classify_windows_toolchain_is_not_self_hosted() -> None:
     assert extract_paths(b"\x00C:\\Program Files\\Java\\jdk-17\\include\\jni.h\x00") == []
 
 
+def test_per_root_quota_stops_one_library_starving_the_rest() -> None:
+    """★真样本回归：一个第三方库的近重复路径吃光全局预算，团伙自建的库一条都轮不到。
+
+    实测两个样本里，同 APK 打包的 Telegram 分支 .so 产出 397 条同根路径占满 400 名额，
+    后面的 Go 控制面库整库没被扫——报告 self_hosted 是空的，读的人会当成"没有自建路径"。
+    这个缺陷只在跑**完整分析器**时暴露：直接调 extract_paths 是绕过预算的，测不出来。
+    """
+    from apkscan.analyzers.build_provenance import BuildProvenanceAnalyzer
+
+    noisy = b"\x00".join(
+        f"/Users/thirdparty/Projects/vendor/src/module{i:03d}/file{i:03d}.cpp".encode()
+        for i in range(400)
+    )
+    mine = b"\x00".join(
+        f"D:\\my_workspace\\my_project\\sdk\\unit{i:02d}.go".encode() for i in range(20)
+    )
+
+    class _Ctx:
+        platform = "android"
+
+        def native_libs(self) -> list[str]:
+            return ["lib/arm64-v8a/libvendor.so", "lib/arm64-v8a/libmine.so"]
+
+        def list_files(self) -> list[str]:
+            return ["lib/arm64-v8a/libvendor.so", "lib/arm64-v8a/libmine.so"]
+
+        def declared_size(self, path: str) -> int:
+            return len(noisy) if "vendor" in path else len(mine)
+
+        def read_file(self, path: str) -> bytes:
+            return noisy if "vendor" in path else mine
+
+        def dex_strings(self) -> list[str]:
+            return []
+
+    result = BuildProvenanceAnalyzer().analyze(_Ctx())  # type: ignore[arg-type]
+    meta = result.meta["build_provenance"]
+
+    assert meta["self_hosted"], "自建根必须被扫到，不能被第三方根的重复路径挤掉"
+    roots = {g["root"] for g in meta["self_hosted"]}
+    assert "d:/my_workspace" in roots
+
+    # 噪声根被配额压住，而不是占满整个预算
+    noisy_group = next(
+        (g for g in meta["third_party"] + meta["unknown"] if "thirdparty" in g["root"]), None
+    )
+    assert noisy_group is not None
+    assert noisy_group["count"] <= 32, f"单根应受配额限制，实得 {noisy_group['count']}"
+
+
 def test_classify_dependency_cache_is_third_party() -> None:
     """★这条防的是把开源作者当嫌疑人：依赖缓存在作者机器上，内容却全是下载来的第三方源码。
 

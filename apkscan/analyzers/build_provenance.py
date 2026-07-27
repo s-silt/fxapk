@@ -54,6 +54,15 @@ _MAX_TOTAL_LIB_BYTES = 256 * 1024 * 1024
 _MAX_LIBS = 60
 #: 全样本保留的**去重后**路径上限：构建路径按构建根聚合后信息趋同，超此只是重复噪声。
 _MAX_PATHS = 400
+
+#: 单个构建根保留的路径数上限。
+#:
+#: ★这条是防"漏杀"而不是防膨胀：实测两个真实样本里，同 APK 打包的 Telegram 分支 .so
+#: 一口气产出 397 条同根近重复路径（``/Users/<第三方>/StudioProjects/…``），把 400 的全局
+#: 预算吃光，导致**团伙自建的 Go 控制面库整库没被扫**——报告里 self_hosted 是空的，
+#: 读的人会以为"这个样本没有自建构建路径"，实际是没轮到扫它。
+#: 同根路径信息高度趋同（同一台机器同一个项目），留 32 条足够代表，剩下的名额要留给别的根。
+_MAX_PATHS_PER_ROOT = 32
 #: Finding 附带证据条数上限 / meta 各分组展示的示例路径上限（全量太长，人核看代表即可）。
 _MAX_EVIDENCE = 5
 _MAX_GROUP_PATHS = 5
@@ -356,12 +365,14 @@ class BuildProvenanceAnalyzer(BaseAnalyzer):
         result = AnalyzerResult(analyzer=self.name)
         # 去重键 = 归一化小写路径；值保留首见 (原样路径, source, location) 供证据引用。
         hits: dict[str, tuple[str, str, str]] = {}
+        # per-root 配额跨 DEX/native 两侧共享：预算是全样本一份的，配额也该是。
+        per_root: dict[str, int] = {}
         try:
-            self._collect_dex(ctx, hits, result)
+            self._collect_dex(ctx, hits, result, per_root)
         except Exception:
             logger.exception("[%s] DEX 侧构建路径提取失败，仅据 .so 判定", self.name)
         try:
-            self._collect_native(ctx, hits)
+            self._collect_native(ctx, hits, per_root)
         except Exception:
             logger.exception("[%s] native 侧构建路径提取失败", self.name)
 
@@ -379,11 +390,34 @@ class BuildProvenanceAnalyzer(BaseAnalyzer):
 
     # ---- 采集 ----
 
+    @staticmethod
+    def _accept(
+        hits: dict[str, tuple[str, str, str]],
+        per_root: dict[str, int],
+        path: str,
+        source: str,
+        location: str,
+    ) -> None:
+        """按 per-root 配额收路径：同根收够 ``_MAX_PATHS_PER_ROOT`` 条后不再收该根的。
+
+        没有这道闸，一个第三方库的近重复路径就能吃光全局预算，让后面的库（可能正是
+        团伙自建的那个）一条都轮不到。
+        """
+        key = path.lower()
+        if key in hits:
+            return
+        root = _split_root(path)[0]
+        if per_root.get(root, 0) >= _MAX_PATHS_PER_ROOT:
+            return
+        per_root[root] = per_root.get(root, 0) + 1
+        hits[key] = (path, source, location)
+
     def _collect_dex(
         self,
         ctx: "AnalysisContext",
         hits: dict[str, tuple[str, str, str]],
         result: AnalyzerResult,
+        per_root: dict[str, int] | None = None,
     ) -> None:
         """从 DEX 字符串里捞构建路径。
 
@@ -396,17 +430,26 @@ class BuildProvenanceAnalyzer(BaseAnalyzer):
         )
         # 预筛含分隔符的串再拼坨：字符串池绝大多数与路径无关，先筛掉省一遍正则扫描量。
         blob = "\n".join(s for s in strings if "/" in s or "\\" in s).encode("utf-8", "replace")
-        for path in extract_paths(blob, limit=max(0, _MAX_PATHS - len(hits))):
-            hits.setdefault(path.lower(), (path, "dex", "dex-strings"))
+        counts = per_root if per_root is not None else {}
+        # 提取时不再按剩余全局名额收紧：per-root 配额才是决定收哪些的闸，
+        # 这里给足量以免同根前 N 条把别的根挤掉。
+        for path in extract_paths(blob, limit=_MAX_PATHS):
+            if len(hits) >= _MAX_PATHS:
+                break
+            self._accept(hits, counts, path, "dex", "dex-strings")
 
     def _collect_native(
-        self, ctx: "AnalysisContext", hits: dict[str, tuple[str, str, str]]
+        self,
+        ctx: "AnalysisContext",
+        hits: dict[str, tuple[str, str, str]],
+        per_root: dict[str, int] | None = None,
     ) -> None:
         """全量（非采样）扫 App 自有 .so：__FILE__ 串散布于 .rodata 各处，三窗采样会漏。
 
         有界：单库 ``_MAX_LIB_BYTES``（读前先查 zip 声明大小拦截炸弹）、累计
         ``_MAX_TOTAL_LIB_BYTES``、库数 ``_MAX_LIBS``、路径总数 ``_MAX_PATHS``。绝不抛。
         """
+        counts = per_root if per_root is not None else {}
         budget = _MAX_TOTAL_LIB_BYTES
         for so_path in app_so_paths(ctx, self.name, max_libs=_MAX_LIBS):
             if len(hits) >= _MAX_PATHS:
@@ -429,8 +472,10 @@ class BuildProvenanceAnalyzer(BaseAnalyzer):
             if not data or len(data) > _MAX_LIB_BYTES:
                 continue
             budget -= len(data)
-            for path in extract_paths(data, limit=max(0, _MAX_PATHS - len(hits))):
-                hits.setdefault(path.lower(), (path, "native", so_path))
+            for path in extract_paths(data, limit=_MAX_PATHS):
+                if len(hits) >= _MAX_PATHS:
+                    break
+                self._accept(hits, counts, path, "native", so_path)
 
     # ---- 聚合 ----
 

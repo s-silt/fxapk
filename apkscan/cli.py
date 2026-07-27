@@ -53,6 +53,28 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+def _version_verbose_callback(value: bool) -> None:
+    """``--version-verbose``：报告实际导入的是哪份代码，被遮蔽时非零退出。
+
+    ★为什么单列一个开关而不是只在 selfcheck 里报：在旧源码目录下跑 ``python -m apkscan.cli``
+    时，当前目录的 apkscan 包会遮蔽已安装版本，报告里的 tool_version 写的是旧版号，
+    而 ``--version`` 与 ``pip show`` 都显示新版——读报告的人无从察觉自己看的是旧版结果。
+    这一项要能被脚本单独调用、且不一致时退出码非零，才挡得住批量流程里误用旧代码。
+    """
+    if not value:
+        return
+    from apkscan.selfcheck import build_version_component
+
+    item = build_version_component()
+    typer.echo(item["detail"].replace(" ", "\n"))
+    if item["status"] != "ok":
+        typer.echo("", err=True)
+        typer.echo(f"★ {item['detail'].split('★')[-1]}", err=True)
+        typer.echo(f"  {item['fix']}", err=True)
+        raise typer.Exit(code=1)
+    raise typer.Exit()
+
+
 @app.callback()
 def _main(
     version: bool = typer.Option(  # noqa: ARG001 - eager callback 内即退出，形参仅供 typer 注册
@@ -60,6 +82,13 @@ def _main(
         "--version",
         help="显示版本号并退出。",
         callback=_version_callback,
+        is_eager=True,
+    ),
+    version_verbose: bool = typer.Option(  # noqa: ARG001 - 同上
+        False,
+        "--version-verbose",
+        help="显示版本 + 实际导入路径 + 分发位置 + git HEAD；版本被遮蔽时退出码 1。",
+        callback=_version_verbose_callback,
         is_eager=True,
     ),
 ) -> None:
