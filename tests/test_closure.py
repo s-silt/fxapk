@@ -233,6 +233,73 @@ def test_capture_target_attributed_candidate_is_complete() -> None:
             "business_candidate_count": 2,
             "target_attributed_count": 1,
             "bidirectional_business_count": 1,
+            # 双向载荷就落在那个已归因到目标 App 的端点上——这才是闭环。
+            "bidirectional_target_count": 1,
+        }
+    )
+
+    assert quality["dynamic_status"] == CLOSURE_COMPLETE
+
+
+def test_capture_bidirectional_on_a_different_endpoint_is_not_complete() -> None:
+    """★有双向载荷、也有归因端点，但两者不是同一个 → 不算闭环。
+
+    代理是整机级的，所以「有往返」可能来自别的 App。分别判断两个汇总值 > 0 时，
+    目标 App 的单向端点 + 无关端点的往返会拼出一个假 complete。
+    """
+    quality = evaluate_capture_quality(
+        {
+            "channel_ready": True,
+            "pcap_valid": True,
+            "packet_count": 12,
+            "business_candidate_count": 2,
+            "target_attributed_count": 1,
+            "bidirectional_business_count": 1,   # 有往返
+            "bidirectional_target_count": 0,     # 但不在归因端点上
+        }
+    )
+
+    assert quality["dynamic_status"] == CLOSURE_PARTIAL
+    assert "same endpoint" in str(quality["reason"])
+
+
+def test_capture_missing_target_bidirectional_field_fails_closed() -> None:
+    """★两个可信字段都缺时按 0 处理，降 partial 而非放行。
+
+    延续本模块既有纪律：宁可把已闭环说成未闭环（多跑一次采集），
+    不可把未闭环说成已闭环（据以结案）。这也堵住了"手编三个旧汇总字段即 complete"的口子——
+    bidirectional_business_count 含未归因的 mitm 端点，**不能**用作回退依据。
+    """
+    quality = evaluate_capture_quality(
+        {
+            "channel_ready": True,
+            "pcap_valid": True,
+            "packet_count": 12,
+            "business_candidate_count": 2,
+            "target_attributed_count": 1,
+            "bidirectional_business_count": 1,
+            # 既无 bidirectional_target_count，也无 bidirectional_floor_count
+        }
+    )
+
+    assert quality["dynamic_status"] == CLOSURE_PARTIAL
+
+
+def test_capture_legacy_floor_count_still_completes() -> None:
+    """兼容早于新字段的 runtime_report：floor 侧计数口径与新字段一致，可安全回退。
+
+    floor_bidirectional 本就是「归因到目标 **且** 双向有载荷」，即同一端点上两条件都成立。
+    不做这层回退，存量运行时报告会被整体误降为未闭环，逼人重跑本已成功的采集。
+    """
+    quality = evaluate_capture_quality(
+        {
+            "channel_ready": True,
+            "pcap_valid": True,
+            "packet_count": 12,
+            "business_candidate_count": 2,
+            "target_attributed_count": 1,
+            "bidirectional_business_count": 1,
+            "bidirectional_floor_count": 1,   # 旧字段，语义等价
         }
     )
 
