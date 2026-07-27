@@ -56,6 +56,7 @@ _NAME_FRIDA_SERVER = "设备 frida-server 运行且版本匹配"
 _NAME_MITMPROXY = "mitmproxy 已安装"
 _NAME_CA = "CA 已信任"
 _NAME_DEVICE_TCPDUMP = "设备 tcpdump（floor pcap 底座）"
+_NAME_DEVICE_NETWORK = "设备联网基线"
 # PCAP-first 深度能力（信息性、非关键——不进 _CRITICAL、不影响整体 ok）。
 _NAME_QUIC_META = "QUIC 元数据解析"
 _NAME_QUIC_DECRYPT = "QUIC Initial 解密（cryptography）"
@@ -64,7 +65,12 @@ _NAME_TSHARK = "tshark 深度后端"
 # ★floor-only profile 的关键项：只看 **floor pcap 底座**（设备 + root + 设备 tcpdump），**不含**
 # frida/mitmproxy/CA——PCAP-first 下只想 tcpdump 抓 pcap 的用户，不该被"主机没装 frida"判成环境不完整
 # （这正是外部评价 #1 点的问题）。缺 frida/mitm 时对应项仍体检、仅信息性，不拉整体 ok。
-_FLOOR_CRITICAL: frozenset[str] = frozenset({_NAME_DEVICE, _NAME_ROOT, _NAME_DEVICE_TCPDUMP})
+# ★设备联网基线并入两个 profile 的关键项：设备不通公网时抓不到有效业务流量，
+#   floor-only 也一样。判不出来时该项按通过处理（见 _check_device_network），
+#   所以不会在不支持 dumpsys 的设备上假失败。
+_FLOOR_CRITICAL: frozenset[str] = frozenset(
+    {_NAME_DEVICE, _NAME_ROOT, _NAME_DEVICE_TCPDUMP, _NAME_DEVICE_NETWORK}
+)
 
 # 关键项（full profile）= floor pcap 底座 ∪ 完整明文栈（ABI/frida/mitmproxy/CA）。任一不 ok → 整体 ok=False。
 # ★须并入 _FLOOR_CRITICAL（codex 复审 P1-1）：能力矩阵规定 both/full 的 PCAP 底座同样需要
@@ -290,36 +296,117 @@ def _check_host_frida() -> tuple[dict, str]:
         )
 
 
+#: 网络归因的四种结局。写成常量是为了让 doctor 的 detail 文案与测试断言同一口径。
+_ATTR_BASELINE_BAD = "基线异常"
+_ATTR_DEGRADED = "验收后退化"
+_ATTR_STABLE = "前后正常"
+_ATTR_UNKNOWN = "无法判定"
+
+
+def _attribute_network(
+    before: "device.DeviceNetworkState", after: "device.DeviceNetworkState"
+) -> tuple[str, str]:
+    """据前后快照判断网络问题该不该算到 Frida 头上。返回 ``(结局, 说明)``。
+
+    ★这一层存在的全部意义是挡住一类误判：真机上「脱壳后全机断网」曾被记成样本反 Frida，
+    实测根因是 Wi-Fi 静态地址导致 Android 网络验证失败并临时拉黑 BSSID —— 与 Frida 无关。
+    基线本来就坏的，事后再坏也不能归因于 Frida。
+    """
+    b, a = before.healthy, after.healthy
+    if b is False:
+        return _ATTR_BASELINE_BAD, (
+            "Frida 验收**之前**网络已异常，本次网络问题不得归因于 Frida 或样本反 Frida；"
+            f"请先修设备网络（基线：{before.detail}）"
+        )
+    if b is True and a is False:
+        return _ATTR_DEGRADED, (
+            "Frida 验收后网络退化（验收前正常）；建议停 frida-server 并人工恢复网络后复测，"
+            f"再判断是否与注入相关（验收后：{after.detail}）"
+        )
+    if b is True and a is True:
+        return _ATTR_STABLE, "Frida 验收前后设备网络均正常"
+    return _ATTR_UNKNOWN, (
+        "无法可靠判定设备网络状态（设备不支持 dumpsys / 解析失败）；"
+        "不将其计为 Frida 导致的问题"
+    )
+
+
+def _check_device_network(
+    before: "device.DeviceNetworkState", after: "device.DeviceNetworkState", outcome: str
+) -> dict:
+    """独立的「设备联网基线」检查项。unknown 判通过但带警告——不在不支持的设备上假失败。"""
+    if outcome == _ATTR_BASELINE_BAD:
+        return _item(
+            _NAME_DEVICE_NETWORK, False,
+            f"动态采集前设备网络已异常：{before.detail}",
+            [
+                "在设备 Wi-Fi 设置里改用 DHCP（勿手工静态地址）",
+                "确认无 VPN / 代理 / 策略路由干扰",
+                "adb shell ip route show table all  # 应有 default via",
+            ],
+        )
+    if outcome == _ATTR_DEGRADED:
+        return _item(
+            _NAME_DEVICE_NETWORK, False,
+            f"动态采集后设备网络退化：采集前 {before.detail}；采集后 {after.detail}",
+            [
+                "adb shell su -c 'pkill -f frida-server'",
+                "在设备上手工重连 Wi-Fi 后复测（工具不会自动改网络设置）",
+            ],
+        )
+    if outcome == _ATTR_STABLE:
+        return _item(_NAME_DEVICE_NETWORK, True, f"设备网络正常：{after.detail}")
+    return _item(
+        _NAME_DEVICE_NETWORK, True,
+        f"设备网络状态未知（不判失败）：{after.detail or before.detail or '无可用信息'}",
+        ["adb shell dumpsys connectivity | head -40"],
+    )
+
+
 def _check_frida_server(
     serial: str | None,
     host_ver: str,
     *,
     auto_fix: bool,
     on_progress: Callable[[str], None] | None,
-) -> dict:
-    """(5) 严格验收 root frida-server、版本与真实 attach；auto_fix 时自愈。"""
+) -> tuple[dict, dict]:
+    """(5) 严格验收 root frida-server、版本与真实 attach；auto_fix 时自愈。
+
+    返回 ``(frida 项, 设备联网基线项)``：验收前后各采一次网络状态，把「网络本来就坏」
+    与「验收后才坏」分开——否则前者会被记成样本反 Frida。
+    """
+    before = device.read_network_state(serial)
     try:
         probe = device.frida_server_probe(serial, expected_version=host_ver)
         if probe.ok:
-            return _item(_NAME_FRIDA_SERVER, True, probe.detail)
-        if auto_fix:
+            frida_item = _item(_NAME_FRIDA_SERVER, True, probe.detail)
+        elif auto_fix:
             _emit(on_progress, f"frida-server 动态注入验收未通过，尝试自愈：{probe.detail}")
             fix = provision.ensure_frida_server(serial, download=True, on_progress=on_progress)
-            return _fold_frida_fix(fix, host_ver)
-        return _item(
-            _NAME_FRIDA_SERVER,
-            False,
-            f"frida-server 动态注入未就绪：{probe.detail}（--no-fix 未自动修复）",
-            ["fxapk doctor --fix", "adb shell su -c 'pkill -f frida-server'"],
-        )
+            frida_item = _fold_frida_fix(fix, host_ver)
+        else:
+            frida_item = _item(
+                _NAME_FRIDA_SERVER,
+                False,
+                f"frida-server 动态注入未就绪：{probe.detail}（--no-fix 未自动修复）",
+                ["fxapk doctor --fix", "adb shell su -c 'pkill -f frida-server'"],
+            )
     except Exception:
         logger.exception("[doctor] 检查 frida-server 异常")
-        return _item(
+        frida_item = _item(
             _NAME_FRIDA_SERVER,
             False,
             "检查 frida-server 时发生异常（详见日志）",
             ["frida-ps -U"],
         )
+
+    after = device.read_network_state(serial)
+    outcome, note = _attribute_network(before, after)
+    frida_item["detail"] = f"{frida_item['detail']}　[网络归因：{outcome}] {note}"
+    # 基线异常时不让 Frida 项背锅：它的失败可能只是网络不通的结果。
+    if outcome == _ATTR_BASELINE_BAD and not frida_item["ok"]:
+        frida_item["detail"] += "　★该失败可能由基线网络问题导致，先修网络再判 Frida。"
+    return frida_item, _check_device_network(before, after, outcome)
 
 
 def _fold_frida_fix(fix: dict, host_ver: str) -> dict:
@@ -561,10 +648,12 @@ def _run_impl(
     host_item, host_ver = _check_host_frida()
     items.append(host_item)
 
-    _emit(on_progress, "检查设备 frida-server")
-    items.append(
-        _check_frida_server(serial, host_ver, auto_fix=enhancement_fix, on_progress=on_progress)
+    _emit(on_progress, "检查设备 frida-server（含前后网络归因）")
+    frida_item, network_item = _check_frida_server(
+        serial, host_ver, auto_fix=enhancement_fix, on_progress=on_progress
     )
+    items.append(frida_item)
+    items.append(network_item)
 
     _emit(on_progress, "检查 mitmproxy")
     items.append(_check_mitmproxy())
