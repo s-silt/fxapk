@@ -20,6 +20,8 @@ import re
 from collections import Counter
 from fnmatch import fnmatch
 
+from apkscan.network.fingerprints import is_public_dns_resolver
+
 logger = logging.getLogger(__name__)
 
 # 研判建议三态（与 Lead.advice 取值约定一致）。
@@ -578,6 +580,95 @@ def classify_domain(domain: str) -> tuple[str, str]:
         return ADVICE_REVIEW, "无效域名或私网/回环字面，无法对外调证，需人工核"
 
     return ADVICE_INVESTIGATE, "疑似 App 自有服务，建议落地核查归属"
+
+
+#: 点分四段字面被当成 IP 的两大来源，实测语料 40 份报告统计：
+#:   - 版本号 / 序号（``1.3.1.1``、``1.4.1.14``——同一混淆资源里成**连续递增序列**出现）
+#:   - ASN.1 OID（X.509 证书与加密库常量：``1.3.101.112`` Ed25519、``2.5.4.3`` CN、
+#:     ``2.5.29.17`` SAN、``1.3.6.1`` iso.org.dod.internet、``1.3.36.3`` Teletrust）
+#: 二者都不是网络地址，却带 confidence=HIGH 进"建议调证"，把闭环预算与外部富化额度吃光。
+#:
+#: ★判据只**降级为待核**，绝不排除：真实团伙后端确有低段位 IP（如 8.x/47.x 阿里云段），
+#:   而"1 开头且四段都小"这种形态在真 IP 里罕见、在版本号里普遍——把握不到十成的事只降不杀。
+_OID_ARC_PREFIXES: tuple[str, ...] = (
+    "1.3.6.1.",      # iso.org.dod.internet（SNMP/PKIX 全家）
+    "1.3.101.",      # EdDSA / X25519 系列
+    "1.3.36.",       # Teletrust（德国标准，BSI 曲线）
+    "2.5.4.",        # X.500 属性类型（CN/O/OU/C…）
+    "2.5.29.",       # X.509 v3 扩展（SAN/keyUsage/CRL…）
+    "1.2.840.",      # ANSI/RSA/PKCS 系列
+    "2.16.840.",     # 美国 ANSI 组织分支（含 NIST 曲线）
+    "2.23.140.",     # CA/Browser Forum 证书策略
+)
+
+#: 低值四段的段上限。标定：语料里真实被采纳为 IOC 的 IP，四段全部 ≤32 的一例也没有；
+#: 而版本号/序号几乎全在此区间内。
+_LOW_OCTET_MAX = 32
+
+#: "裸字面"判据：真实网络地址在样本里通常带端口、出现在 URL 里、或有协议前缀。
+#: 命中任一即视为**用作地址**，不降级。
+_ADDRESSY_RE = re.compile(r":\d{1,5}\b|//|https?", re.IGNORECASE)
+
+
+def _strip_port_suffix(value: str) -> str:
+    """剥掉 lead 值上的 ``:port`` / ``:port/proto`` 尾缀，取回裸 IP 字面。
+
+    ★不剥就会绕过一切精确匹配：实测两案的动态线索值形如 ``223.5.5.5:53/udp``，
+    与名单里的 ``223.5.5.5`` 比不上，公共解析器照样进"建议调证"。
+    """
+    head = value.split("/", 1)[0].strip()
+    if head.count(":") == 1:                       # IPv6 有多个冒号，不动
+        head = head.rsplit(":", 1)[0]
+    return head
+
+
+def classify_ip(
+    value: str, *, context: str = "", runtime_observed: bool = False
+) -> tuple[str, str]:
+    """对 IP 字面做调证研判分级，返回 ``(advice, reason)``——与 :func:`classify_domain` 对称。
+
+    ``context`` 传该端点的证据片段拼接串，用于判断这个字面在样本里是否**当地址用**
+    （带端口 / 在 URL 里）。拿不准就不降级。
+
+    ``runtime_observed`` 为真（证据里有 runtime* 来源）时，形态判据一律豁免：
+    设备上真发生过到这个地址的连接，它就是地址，四段再小也不是版本号。
+    """
+    bare = _strip_port_suffix(value)
+    try:
+        addr = ipaddress.ip_address(bare)
+    except ValueError:
+        # 非法字面里含四段以上的点分数字 —— OID 的典型形态（1.3.101.112.1）。
+        if bare.startswith(_OID_ARC_PREFIXES):
+            return ADVICE_REVIEW, f"ASN.1 OID 而非网络地址（{bare}），需人工核"
+        return ADVICE_REVIEW, "无法解析为 IP 地址，需人工核"
+
+    if not addr.is_global:
+        # 私网、回环、链路本地、文档段（TEST-NET）、组播、保留段——对外调证无从下手。
+        return ADVICE_SKIP, "非全球可路由地址（私网/回环/文档/保留段），无调证对象"
+
+    if is_public_dns_resolver(bare):
+        # 公共递归解析器：归属是公开的（Google/阿里/腾讯…），向它们调证拿不到任何
+        # 与本案有关的东西。样本里硬编码了公共 DNS 是个事实（另有 dns_bypass 通道记录），
+        # 但它不是调证对象，不该占 closure 预算与外部富化额度。
+        return ADVICE_SKIP, "公共递归解析器（归属公开），非调证对象"
+
+    if runtime_observed:
+        # 设备上真连过 —— 形态判据一概不适用。
+        return ADVICE_INVESTIGATE, "运行时观测到的实连地址，建议落地核查归属"
+
+    if bare.startswith(_OID_ARC_PREFIXES):
+        return ADVICE_REVIEW, f"ASN.1 OID 而非网络地址（{bare}），需人工核"
+
+    if _ADDRESSY_RE.search(context or ""):
+        return ADVICE_INVESTIGATE, "疑似 App 后端地址，建议落地核查归属"
+
+    if addr.version == 4 and all(int(p) <= _LOW_OCTET_MAX for p in bare.split(".")):
+        return ADVICE_REVIEW, (
+            "四段值均偏低且样本里未当地址使用（无端口/无 URL 上下文），"
+            "疑为版本号或序号被当成 IP，需人工核"
+        )
+
+    return ADVICE_INVESTIGATE, "疑似 App 后端地址，建议落地核查归属"
 
 
 def effective_advice(domain: str, tier: object) -> str:

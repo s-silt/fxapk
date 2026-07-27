@@ -164,6 +164,10 @@ def _apply_default_advice(leads: list[Lead]) -> None:
 # 离线扫描时附加到归属为空的端点 Lead 的说明。
 _OFFLINE_NOTE = "离线扫描：未做 WHOIS/ICP/ASN 归属查询，归属待联网或人工核（非查无结果）"
 
+#: 判 IP 是否"当地址用"时取多少条证据的 snippet 作上下文。取头几条够判形态，
+#: 全量拼接在证据数上千的样本上是白费的字符串开销。
+_IP_CONTEXT_EVIDENCE_LIMIT = 8
+
 
 def _apply_forensic(
     advice: str, host: str, evidence_to_obtain: list[str], notes: str, **enr: object
@@ -297,8 +301,21 @@ def _ip_lead(ep: Endpoint, online: bool = True) -> Lead:
 
     confidence = Confidence.HIGH if subject else Confidence.MEDIUM
 
-    # IP 研判：内网/回环（端点已标 is_private）无需调证；公网 IP 默认建议调证。
-    advice = infra.ADVICE_SKIP if ep.is_private else infra.ADVICE_INVESTIGATE
+    # IP 研判：内网/回环（端点已标 is_private）无需调证；其余交 classify_ip 分级——
+    # 点分四段字面未必是地址，实测语料里版本号与 ASN.1 OID 大量以 confidence=HIGH
+    # 混进"建议调证"，把闭环预算与外部富化额度吃光。判据用得着证据片段来判断
+    # 这个字面在样本里是否当地址使用（带端口 / 在 URL 里），故把 snippet 拼给它。
+    if ep.is_private:
+        advice = infra.ADVICE_SKIP
+    else:
+        context = " ".join(
+            (ev.snippet or "") for ev in ep.evidences[:_IP_CONTEXT_EVIDENCE_LIMIT]
+        )
+        advice, _ip_reason = infra.classify_ip(
+            ep.value,
+            context=context,
+            runtime_observed=any(ev.source.startswith("runtime") for ev in ep.evidences),
+        )
 
     notes = _apply_forensic(
         advice, ep.value, evidence_to_obtain, _endpoint_notes(ep, online, enriched),

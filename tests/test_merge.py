@@ -205,12 +205,14 @@ def test_merge_does_not_duplicate_existing_static_lead() -> None:
 
 def test_merge_ip_lead_generated_for_runtime_ip() -> None:
     report = _make_report()
-    eps = [_runtime_ep("203.0.113.9", "ip")]
+    # ★占位不能用 203.0.113.x（TEST-NET-3 文档段）：classify_ip 判它无需调证，
+    #   因为文档段永远不会是真实后端。要测"公网 IP 建议调证"就得用真能路由的段。
+    eps = [_runtime_ep("45.79.10.20", "ip")]
     merge.merge_runtime_endpoints(report, eps)
 
     ip_leads = [lead for lead in report.leads if lead.category == LeadCategory.IP]
     assert len(ip_leads) == 1
-    assert ip_leads[0].value == "203.0.113.9"
+    assert ip_leads[0].value == "45.79.10.20"
     # 公网 IP 默认建议调证
     assert ip_leads[0].advice == infra.ADVICE_INVESTIGATE
 

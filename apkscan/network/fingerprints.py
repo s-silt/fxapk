@@ -68,6 +68,7 @@ PUBLIC_DNS_RESOLVERS: frozenset[str] = frozenset({
     "223.5.5.5", "223.6.6.6",                       # 阿里 AliDNS
     "114.114.114.114", "114.114.115.115",           # 114DNS
     "119.29.29.29", "182.254.116.116",              # 腾讯 DNSPod
+    "1.12.12.12", "120.53.53.53",                   # 腾讯 DNSPod（新段，实测语料里出现）
     "180.76.76.76",                                 # 百度
     "117.50.10.10", "52.80.66.66",                  # OneDNS
     "1.2.4.8", "210.2.4.8",                         # CNNIC sDNS
@@ -115,11 +116,16 @@ def is_infrastructure_endpoint(ip: str, port: object) -> bool:
     """
     if not is_public_dns_resolver(ip):
         return False
-    try:
-        port_num = int(port)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    if isinstance(port, bool):          # bool 是 int 的子类，先挡掉
         return False
-    return port_num in DNS_SERVICE_PORTS
+    if isinstance(port, int):
+        return port in DNS_SERVICE_PORTS
+    if isinstance(port, str):
+        try:
+            return int(port) in DNS_SERVICE_PORTS
+        except ValueError:
+            return False
+    return False
 
 
 def _require_string(name: str, value: object) -> str:
