@@ -45,8 +45,10 @@ from apkscan.core.registry import (
 # 端点 → Lead 生成已物理拆到 apkscan/core/leads.py（纯搬移）；在此 re-export 供 stage 调用，
 # 并保持既有 `pipeline.build_endpoint_leads` 等测试访问路径不变。
 from apkscan.core.leads import (
+    _VERDICT_REPACK_SUSPECTED,
     _apply_default_advice,
     _build_overseas_targets,
+    apply_repack_quarantine,
     build_endpoint_leads,
 )
 
@@ -505,6 +507,15 @@ def _stage_build_leads(state: _PipelineState) -> None:
     避免报告出现空白"是否调证"列；已自带 advice 的不覆盖）。"""
     state.leads.extend(build_endpoint_leads(state.endpoints, online=state.config.online))
     _apply_default_advice(state.leads)
+    # 正版重打包件的端点属被仿冒厂商，不能进调证出口。必须在 advice 定型之后立刻做——
+    # 下游的 closure 目标选择 / letters / ioc / HTML 红标区块全以 advice 为闸门。
+    quarantined = apply_repack_quarantine(state.leads, state.meta)
+    if quarantined:
+        state.meta["repack_quarantine"] = {
+            "reason": _VERDICT_REPACK_SUSPECTED,
+            "count": len(quarantined),
+            "values": quarantined,
+        }
 
 
 def _stage_overseas_targets(state: _PipelineState) -> None:
