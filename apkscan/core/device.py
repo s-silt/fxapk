@@ -425,6 +425,15 @@ def _adb_root_command(command: str, serial: str | None = None) -> subprocess.Com
 
 #: 默认路由的判据（``ip route show table all`` 输出里）。
 _DEFAULT_ROUTE_RE = re.compile(r"^\s*default\s+via\s+", re.MULTILINE)
+#: 输出确实像一张路由表（含 ``dev <iface>`` 或 ``via <ip>``）。
+#: ★没有这道校验，adb 的错误输出（``error: no devices/emulators found``）会被当成
+#:   "路由表里没有 default" → 判成断网。那正是本模块要避免的「把读不到当成坏了」。
+_ROUTE_SHAPE_RE = re.compile(r"\bdev\s+\S+|\bvia\s+\d+\.\d+\.\d+\.\d+")
+#: adb 侧的失败特征——出现即说明这次根本没读到设备。
+_ADB_ERROR_RE = re.compile(
+    r"no devices/emulators found|device .*not found|error:|adb:\s|不是内部或外部命令",
+    re.IGNORECASE,
+)
 #: 设备 IPv4（排除回环与各类虚拟接口地址）。
 _IPV4_ADDR_RE = re.compile(r"inet\s+(\d+\.\d+\.\d+\.\d+)/\d+")
 #: Android 把当前网络标为已验证/未验证的痕迹（dumpsys connectivity）。
@@ -459,7 +468,16 @@ def read_network_state(serial: str | None = None) -> DeviceNetworkState:
         logger.debug("[device] 采集网络状态失败", exc_info=True)
         return DeviceNetworkState(detail="采集失败，状态未知")
 
-    if not any((addr_out.strip(), route_out.strip(), conn_out.strip())):
+    def _usable(out: str) -> str:
+        """adb 报错 / 空输出一律当作"没读到"，返回空串。"""
+        if not out.strip() or _ADB_ERROR_RE.search(out):
+            return ""
+        return out
+
+    addr_out, route_out = _usable(addr_out), _usable(route_out)
+    conn_out, wifi_out = _usable(conn_out), _usable(wifi_out)
+
+    if not any((addr_out, route_out, conn_out)):
         return DeviceNetworkState(detail="设备未响应网络状态查询，状态未知")
 
     ipv4 = ""
@@ -470,18 +488,20 @@ def read_network_state(serial: str | None = None) -> DeviceNetworkState:
             break
 
     connected: bool | None = None
-    if route_out.strip():
+    # ★只有当输出**确实是一张路由表**时，"没有 default" 才意味着断网。
+    #   否则（adb 报错、命令不存在、输出被截断）一律 unknown。
+    if route_out and _ROUTE_SHAPE_RE.search(route_out):
         connected = bool(_DEFAULT_ROUTE_RE.search(route_out))
 
     validated: bool | None = None
-    if conn_out.strip():
+    if conn_out:
         if _VALIDATION_FAILED_RE.search(conn_out):
             validated = False
         elif _VALIDATED_RE.search(conn_out):
             validated = True
 
     assignment = NET_ASSIGN_UNKNOWN
-    if wifi_out.strip():
+    if wifi_out:
         if _DHCP_IP_RE.search(wifi_out):
             assignment = NET_ASSIGN_DHCP
         elif _STATIC_IP_RE.search(wifi_out):

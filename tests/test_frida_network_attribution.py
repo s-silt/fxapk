@@ -148,6 +148,51 @@ def test_read_network_state_never_raises_on_dead_device(monkeypatch: Any) -> Non
     assert "未知" in state.detail
 
 
+def test_adb_error_output_is_not_read_as_a_broken_network(monkeypatch: Any) -> None:
+    """★CI 抓到的真 bug：无设备时 adb 打印 error 到 stdout/stderr，那是非空字符串。
+
+    早先的实现只看"输出非空"就去正则找 default 路由，找不到便判断网——于是任何一台
+    没插设备的机器都会被报成"基线网络异常"，doctor 整体判不可用。
+    这正是本模块要避免的「把读不到当成坏了」，栽在自己手里。
+    """
+    class _P:
+        def __init__(self, out: str) -> None:
+            self.stdout = ""
+            self.stderr = out
+            self.returncode = 1
+
+    for err in (
+        "error: no devices/emulators found",
+        "adb: device 'xyz' not found",
+        "error: device offline",
+    ):
+        monkeypatch.setattr(device, "_adb_root_command", lambda cmd, serial=None, _e=err: _P(_e))
+        state = device.read_network_state("dev1")
+        assert state.healthy is None, f"{err!r} 必须判 unknown，不能判断网"
+        assert state.connected is None
+
+
+def test_non_route_output_does_not_imply_disconnected(monkeypatch: Any) -> None:
+    """输出不像路由表时（命令不存在、被截断），不得据此判"没有默认路由"。"""
+    class _P:
+        def __init__(self, out: str) -> None:
+            self.stdout = out
+            self.stderr = ""
+            self.returncode = 0
+
+    def _fake(cmd: str, serial: str | None = None) -> Any:
+        if cmd.startswith("ip -4 addr"):
+            return _P("inet 192.168.1.5/24 scope global wlan0")
+        if cmd.startswith("ip route"):
+            return _P("/system/bin/sh: ip: inaccessible or not found")
+        return _P("")
+
+    monkeypatch.setattr(device, "_adb_root_command", _fake)
+    state = device.read_network_state("dev1")
+    assert state.connected is None
+    assert state.healthy is None
+
+
 def test_read_network_state_parses_static_validation_failure(monkeypatch: Any) -> None:
     """★复现真机那台：静态地址 + 网络验证失败。"""
     class _P:
