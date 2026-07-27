@@ -298,7 +298,9 @@ class ApiSurfaceAnalyzer(BaseAnalyzer):
             (self._scan_assets, "assets"),
         ):
             try:
-                scan(ctx, raw)
+                # 三个扫描器统一签名 (ctx, raw, result)：result 只被 _scan_dex 用来上报截断，
+                # 但签名一致才能这样循环分派，也免得将来加源时忘了传。
+                scan(ctx, raw, result)
             except Exception:
                 logger.exception("[%s] 扫描 %s 失败，跳过该源", self.name, label)
 
@@ -364,15 +366,23 @@ class ApiSurfaceAnalyzer(BaseAnalyzer):
     # 提取源
     # ------------------------------------------------------------------
 
-    def _scan_dex(self, ctx: "AnalysisContext", raw: dict[str, set[str]]) -> None:
-        """DEX 字符串池：含类型描述符（`Lcom/…;`）——第 1 层过滤即为此而设。"""
-        _ok, strings = collect_dex_strings(ctx, self.name)
+    def _scan_dex(
+        self, ctx: "AnalysisContext", raw: dict[str, set[str]], result: AnalyzerResult
+    ) -> None:
+        """DEX 字符串池：含类型描述符（`Lcom/…;`）——第 1 层过滤即为此而设。
+
+        ★传 ``result`` 让截断可被观察到：本分析器提的是后端接口面，截断意味着可能漏掉接口，
+        而"没提到某接口"与"没扫到那段"对读报告的人是完全不同的两件事。
+        """
+        _ok, strings = collect_dex_strings(ctx, self.name, result=result)
         for s in strings:
             for m in _PATH_RE.findall(s):
                 raw.setdefault(m, set()).add("dex")
 
-    def _scan_native(self, ctx: "AnalysisContext", raw: dict[str, set[str]]) -> None:
-        """App 自有 ``.so``：**整库读**后按字节找路径。
+    def _scan_native(
+        self, ctx: "AnalysisContext", raw: dict[str, set[str]], result: AnalyzerResult
+    ) -> None:
+        """App 自有 ``.so``：**整库读**后按字节找路径。（``result`` 未用，仅为统一分派签名。）
 
         ★为何整库读、不用共享的 head/mid/tail 采样助手：Flutter 的 ``libapp.so``（Dart AOT 快照）
         是接口富矿，接口串**散布全库**、大量在中段；采样窗只覆盖头/中/尾各 256KB，会漏掉绝大多数——
@@ -406,8 +416,13 @@ class ApiSurfaceAnalyzer(BaseAnalyzer):
                 except UnicodeDecodeError:
                     continue  # 段字符类限 ASCII，理论不至；防御性跳过
 
-    def _scan_assets(self, ctx: "AnalysisContext", raw: dict[str, set[str]]) -> None:
-        """assets 等文本小文件（配置/JS/JSON 常内嵌接口串）。二进制资源由 is_text_resource 排除。"""
+    def _scan_assets(
+        self, ctx: "AnalysisContext", raw: dict[str, set[str]], result: AnalyzerResult
+    ) -> None:
+        """assets 等文本小文件（配置/JS/JSON 常内嵌接口串）。二进制资源由 is_text_resource 排除。
+
+        （``result`` 未用，仅为统一分派签名。）
+        """
         try:
             files = ctx.list_files()
         except Exception:

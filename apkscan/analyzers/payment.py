@@ -182,7 +182,7 @@ class PaymentAnalyzer(BaseAnalyzer):
         # 数据源（各自 try/except，单源失败不影响其余）。
         so_basenames = self._collect_so_basenames(ctx)
         file_paths = self._collect_file_paths(ctx)
-        dex_ok, dex_strings = self._collect_dex_strings(ctx)
+        dex_ok, dex_strings = self._collect_dex_strings(ctx, result)
         result.meta["dex_scanned"] = dex_ok
         # 关键字匹配的语料：dex 字符串 + 文本资源（带来源标注）。
         corpus = self._build_corpus(ctx, dex_strings, file_paths)
@@ -258,8 +258,12 @@ class PaymentAnalyzer(BaseAnalyzer):
     def _collect_file_paths(self, ctx: "AnalysisContext") -> list[str]:
         return _collect_file_paths_shared(ctx, self.name)
 
-    def _collect_dex_strings(self, ctx: "AnalysisContext") -> tuple[bool, list[str]]:
-        return _collect_dex_strings_shared(ctx, self.name, max_strings=_MAX_DEX_STRINGS)
+    def _collect_dex_strings(
+        self, ctx: "AnalysisContext", result: AnalyzerResult | None = None
+    ) -> tuple[bool, list[str]]:
+        return _collect_dex_strings_shared(
+            ctx, self.name, max_strings=_MAX_DEX_STRINGS, result=result
+        )
 
     def _build_corpus(
         self,

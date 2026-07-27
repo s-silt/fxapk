@@ -133,7 +133,7 @@ class SdkFingerprintAnalyzer(BaseAnalyzer):
         # 三路数据源各自 try/except，单源失败不影响其余。
         so_basenames = self._collect_so_basenames(ctx)
         file_paths = self._collect_file_paths(ctx)
-        dex_iter_ok, dex_strings = self._collect_dex_strings(ctx)
+        dex_iter_ok, dex_strings = self._collect_dex_strings(ctx, result)
         result.meta["dex_scanned"] = dex_iter_ok
 
         hits: list[_Hit] = []
@@ -200,9 +200,13 @@ class SdkFingerprintAnalyzer(BaseAnalyzer):
         """APK 内全部文件路径。"""
         return _collect_file_paths_shared(ctx, self.name)
 
-    def _collect_dex_strings(self, ctx: "AnalysisContext") -> tuple[bool, list[str]]:
+    def _collect_dex_strings(
+        self, ctx: "AnalysisContext", result: AnalyzerResult | None = None
+    ) -> tuple[bool, list[str]]:
         """收集 DEX 字符串（带上限）。返回 (是否成功遍历, 字符串列表)。"""
-        return _collect_dex_strings_shared(ctx, self.name, max_strings=_MAX_DEX_STRINGS)
+        return _collect_dex_strings_shared(
+            ctx, self.name, max_strings=_MAX_DEX_STRINGS, result=result
+        )
 
     # ------------------------------------------------------------------
     # 单规则匹配
