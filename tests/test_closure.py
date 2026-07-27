@@ -557,8 +557,21 @@ def test_monkeypatch_target_differs_by_caller() -> None:
     from apkscan.core import closure as pkg
     from apkscan.core.closure import gates, layers, sources, targets
 
-    # close_report 的 co_names 含该名 = 它经 __init__ 命名空间解析 → 须 patch 包
-    called_by_close_report = set(pkg.close_report.__code__.co_names)
+    def _global_names(code: object) -> set[str]:
+        """收集 code 对象及其**嵌套** code 对象引用的全局名。
+
+        ★必须递归：Python 3.12 起（PEP 709）把推导式内联进外层函数，其引用的名字会出现在外层
+        co_names 里；3.11 仍为推导式建独立 code object，同一份代码两版结果不同。只读顶层
+        co_names 会让本测试的判据跟解释器版本走——本地 3.12 绿、CI 的 3.11 红。
+        """
+        names = set(getattr(code, "co_names", ()))
+        for const in getattr(code, "co_consts", ()):
+            if hasattr(const, "co_names"):
+                names |= _global_names(const)
+        return names
+
+    # 名字出现在 close_report（含其推导式）引用的全局名里 = 经 __init__ 命名空间解析 → 须 patch 包
+    called_by_close_report = _global_names(pkg.close_report.__code__)
 
     patch_package = {
         "_select_targets_with_stats", "assemble_target_closure",
