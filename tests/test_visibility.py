@@ -15,10 +15,41 @@ def test_clean_static_run_blocks_no_static_claim():
     ``runtime_contact_observed`` 仍被阻断且 degraded=True：纯静态分析确实没资格说
     「已掌握运行时实连去向」，这是如实标注而非缺陷（见动态侧那组测试）。
     """
-    a = V.assess(_report(dex_available=True))
+    a = V.assess(_report(dex_available=True, resource_files_scanned=42))
     assert a["sources"]["dex"]["visibility"] == V.VIS_COMPLETE
+    assert a["sources"]["resource"]["visibility"] == V.VIS_COMPLETE
     static_claims = [c for c in a["blocked_claims"] if c != "runtime_contact_observed"]
     assert static_claims == []
+
+
+def test_unassessed_resource_layer_blocks_exhaustiveness_claims():
+    """★「这一维没评估过」不等于「已确认完整」——但要与「查过、看不见」分开记。
+
+    资源层此前恒为 unknown，而资格判定只拦 _INSUFFICIENT，于是一个从未被评估的
+    资源面照样能签发「静态端点已穷尽」「未发现远程配置」。本域最典型的手法之一
+    正是把接口藏在加密资源里。
+    """
+    a = V.assess(_report(dex_available=True))          # 无任何资源层信号
+    assert a["sources"]["resource"]["visibility"] == V.VIS_UNKNOWN
+    assert "static_endpoint_exhaustive" in a["blocked_claims"]
+    claim = a["claims"]["static_endpoint_exhaustive"]
+    assert claim["unassessed_sources"] == ["resource"]
+    assert claim["missing_sources"] == [], "未评估不该被记成确证不可见"
+
+
+def test_encrypted_resources_are_opaque_not_unknown():
+    """uni-app 代码加密：资源层确证不可读，属实测缺口而非未评估。"""
+    a = V.assess(_report(dex_available=True, uni_encrypted=True))
+    assert a["sources"]["resource"]["visibility"] == V.VIS_OPAQUE
+    assert "static_endpoint_exhaustive" in a["blocked_claims"]
+    assert a["claims"]["static_endpoint_exhaustive"]["missing_sources"] == ["resource"]
+
+
+def test_identified_crypto_recipe_makes_resource_partial():
+    """识别出加密配置文件但尚未解密并入 → 资源层部分不可读。"""
+    a = V.assess(_report(dex_available=True, crypto_recipe={"algo": "AES/CBC"}))
+    assert a["sources"]["resource"]["visibility"] == V.VIS_PARTIAL
+    assert "static_endpoint_exhaustive" in a["blocked_claims"]
 
 
 def test_stub_dex_blocks_exhaustiveness_claims():

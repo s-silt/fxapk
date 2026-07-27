@@ -185,6 +185,33 @@ def _attribution_caveat(meta: dict) -> list[str]:
     return notes
 
 
+def _resource_visibility(meta: dict) -> tuple[str, list[str]]:
+    """资源层（assets/res 里的配置、JS、加密配置文件）看到了多少。
+
+    ★此前这一维是**硬编码 unknown**，注释写着"没有信号不等于已确认完整"，
+      但资格判定只拦 ``_INSUFFICIENT``、不拦 unknown——于是「从未评估过资源面」
+      照样能签发「静态端点已穷尽」「未发现远程配置」。本域最典型的手法之一正是
+      把接口藏在加密资源里，那恰恰是这一维该说话的地方。
+
+    判据按保守优先级排：确证不可读 > 部分不可读 > 扫过了 > 没信号。
+    """
+    why: list[str] = []
+    if meta.get("uni_encrypted"):
+        why.append("uni-app 代码加密（confusion）：业务 JS 与接口在资源层不可读")
+        return VIS_OPAQUE, why
+    recipe = meta.get("crypto_recipe")
+    if isinstance(recipe, dict) and recipe:
+        why.append("资源层存在已识别的加密配置文件；在解密并入之前该部分不可读")
+        return VIS_PARTIAL, why
+    scanned = meta.get("resource_files_scanned")
+    if isinstance(scanned, int) and scanned > 0:
+        # 措辞只认领**文本**资源：二进制资产（图片/字体/so 之外的 blob）本就不在文本扫描面内，
+        # 说成"资源层完整可见"会把没扫的那部分也算进已穷尽。
+        why.append(f"文本资源文件已扫描 {scanned} 个（二进制资产不在文本扫描面内）")
+        return VIS_COMPLETE, why
+    return VIS_UNKNOWN, ["资源层无扫描信号（旧报告，或资源扫描未运行）"]
+
+
 def _runtime_visibility(meta: dict) -> tuple[str, list[str]]:
     """运行时观测这条路走到哪一步 —— 它是静态盲区的**独立补救渠道**。
 
@@ -294,25 +321,33 @@ def assess(report: Any) -> dict[str, Any]:
             dex_why.append("★上述加固结论属被取代的原包；当前输入为脱壳回灌产物")
 
         rt_vis, rt_why = _runtime_visibility(meta)
+        res_vis, res_why = _resource_visibility(meta)
         sources = {
             "dex": {"visibility": dex_vis, "why": dex_why},
             "native": {"visibility": nat_vis, "why": nat_why},
-            # 资源层目前无专门的不可见信号；显式记 unknown 而非默认 complete——
-            # 「没有信号」不等于「已确认完整」，这正是本模块要防的那类误读。
-            "resource": {"visibility": VIS_UNKNOWN, "why": []},
+            "resource": {"visibility": res_vis, "why": res_why},
             "runtime": {"visibility": rt_vis, "why": rt_why},
         }
 
         claims: dict[str, dict] = {}
         blocked: list[str] = []
         for claim, needs in _CLAIM_REQUIREMENTS.items():
-            missing = [s for s in needs
-                       if sources.get(s, {}).get("visibility") in _INSUFFICIENT]
-            eligible = not missing
+            def _vis(src: str) -> str | None:
+                return sources.get(src, {}).get("visibility")
+
+            missing = [s for s in needs if _vis(s) in _INSUFFICIENT]
+            # ★「未评估」单列，不并进 missing：两者都不足以支撑穷尽性主张，
+            #   但在报告措辞与 closure 封顶决策上必须分得开——
+            #   「查过、确实看不见」是本次分析的实际缺口，该封顶 partial；
+            #   「这一维压根没评估」不该让整份报告为之降级（同 runtime 那条豁免）。
+            #   此前 unknown 既不进 missing 也不阻断，等于被当成 complete 放行了。
+            unassessed = [s for s in needs if _vis(s) == VIS_UNKNOWN]
+            eligible = not missing and not unassessed
             claims[claim] = {
                 "label": _CLAIM_LABELS.get(claim, claim),
                 "eligible": eligible,
                 "missing_sources": missing,
+                "unassessed_sources": unassessed,
             }
             if not eligible:
                 blocked.append(claim)
