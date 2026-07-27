@@ -172,7 +172,11 @@ def _build_capture_quality(
     flows = raw_flows if isinstance(raw_flows, list) else []
     packet_count = sum(max(0, int(getattr(flow, "packets", 0) or 0)) for flow in flows)
     business_keys: set[str] = set()
+    #: business_keys 的子集：双向均有应用层载荷（``STATE_ESTABLISHED``）。
+    #: 「App 发出了字节」与「对端回了字节」是两件事，只有后者成立才谈得上"与后端通信过"。
+    established_keys: set[str] = set()
     intercept_observed = False
+    infra_excluded = 0
     if floor_summary is not None:
         try:
             remotes = pcap_ingest.remote_endpoints(floor_summary)
@@ -183,17 +187,38 @@ def _build_capture_quality(
             if pcap_ingest.is_known_intercept_ip(remote.ip):
                 intercept_observed = True
                 continue
+            if pcap_ingest.is_infrastructure_endpoint(remote.ip, remote.port):
+                # 公共解析器上的 DNS query：App 在解析域名而已，不是业务通信。实测两案各 3 条
+                # （223.5.5.5 / 114.114.114.114 / 119.29.29.29，均仅出站 ~6KB、入站 0B）被
+                # 计为业务候选，把"动态未闭环"写成了 complete。
+                infra_excluded += 1
+                continue
             if bool(getattr(remote, "has_payload", False)) or bool(getattr(remote, "sni", set())):
                 # A2：键含 proto 族，对齐 pcap_app_attr 的 "proto/ip:port"——否则 target_count 恒 0
                 #   （落盘 runtime_report.json 的 pre-merge quality 块误判 partial；Fable 复审 LOW-MED）。
-                business_keys.add(f"{remote.proto}/{remote.ip}:{remote.port}")
+                key = f"{remote.proto}/{remote.ip}:{remote.port}"
+                business_keys.add(key)
+                if getattr(remote, "state", "") == pcap_ingest.STATE_ESTABLISHED:
+                    established_keys.add(key)
 
-    target_count = sum(
-        1
-        for key in business_keys
-        if isinstance(pcap_app_attr.get(key), dict)
-        and pcap_app_attr[key].get("is_target_app") is True
-    )
+    def _target_attributed(keys: set[str]) -> int:
+        return sum(
+            1
+            for key in keys
+            if isinstance(pcap_app_attr.get(key), dict)
+            and pcap_app_attr[key].get("is_target_app") is True
+        )
+
+    target_count = _target_attributed(business_keys)
+    # 双向证据分两侧记账，**不互相填补**：
+    #   floor 侧 —— 归因到目标 App 且双向有载荷的对端；
+    #   mitm 侧 —— 经代理拿到的完整请求-响应（代理按目标 App 设置，本身即双向）。
+    # ★此前写作 `floor_bidir or len(mitm_endpoints)`：floor 侧为 0 时整个退给 mitm 计数，
+    #   于是「目标 App 只有单向 floor 流量」+「任意 mitm 端点」也能凑出 complete。
+    #   两侧各自都不足以支撑闭环时，相加不该突然够——分开记，让读的人看得出证据在哪一侧。
+    floor_bidirectional = _target_attributed(established_keys)
+    mitm_bidirectional = len(mitm_endpoints)
+    bidirectional_count = floor_bidirectional + mitm_bidirectional
     raw = {
         "channel_ready": channel_ready,
         "pcap_valid": packet_count > 0,
@@ -203,6 +228,11 @@ def _build_capture_quality(
             0 if intercept_observed and not business_keys else len(mitm_endpoints),
         ),
         "target_attributed_count": target_count,
+        "bidirectional_business_count": bidirectional_count,
+        # 分侧计数：让"双向证据来自 floor 实测还是 mitm 代理"在报告里可分辨。
+        "bidirectional_floor_count": floor_bidirectional,
+        "bidirectional_mitm_count": mitm_bidirectional,
+        "infrastructure_excluded_count": infra_excluded,
         # floor 解析状态入结构化质量：让 closure/case-close 区分「解析/采集失败」与「真实零业务流量」
         # （二者都空 flows，但前者要重抓、后者是真无业务流量）。None=无 floor pcap。
         "floor_parse_status": getattr(floor_summary, "parse_status", "ok") if floor_summary is not None else "absent",

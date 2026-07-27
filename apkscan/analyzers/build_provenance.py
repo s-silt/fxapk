@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from apkscan.analyzers._common import app_so_paths, collect_dex_strings
+from apkscan.core.gobuildinfo import parse_go_buildinfo
 from apkscan.core.models import (
     AnalyzerResult,
     Confidence,
@@ -54,6 +55,15 @@ _MAX_TOTAL_LIB_BYTES = 256 * 1024 * 1024
 _MAX_LIBS = 60
 #: 全样本保留的**去重后**路径上限：构建路径按构建根聚合后信息趋同，超此只是重复噪声。
 _MAX_PATHS = 400
+
+#: 单个构建根保留的路径数上限。
+#:
+#: ★这条是防"漏杀"而不是防膨胀：实测两个真实样本里，同 APK 打包的 Telegram 分支 .so
+#: 一口气产出 397 条同根近重复路径（``/Users/<第三方>/StudioProjects/…``），把 400 的全局
+#: 预算吃光，导致**团伙自建的 Go 控制面库整库没被扫**——报告里 self_hosted 是空的，
+#: 读的人会以为"这个样本没有自建构建路径"，实际是没轮到扫它。
+#: 同根路径信息高度趋同（同一台机器同一个项目），留 32 条足够代表，剩下的名额要留给别的根。
+_MAX_PATHS_PER_ROOT = 32
 #: Finding 附带证据条数上限 / meta 各分组展示的示例路径上限（全量太长，人核看代表即可）。
 _MAX_EVIDENCE = 5
 _MAX_GROUP_PATHS = 5
@@ -76,16 +86,25 @@ _UNIX_RE = re.compile(
     re.IGNORECASE,
 )
 
-#: Windows 形态（``C:\\Users\\<user>\\…`` 及正斜杠变体）。不吃空格：带空格的构建路径少见，
-#: 吃空格会把后续日志文本整段吞进来（宁截断不误吞）。
+#: Windows 形态：任意盘符根，不再限定 ``Users``——实测 Go 的 module replace 指令里
+#: 内嵌的开发机项目根是 ``D:\buildroot\appsdk`` 这种自定义盘符目录，旧正则整类漏掉。
+#: 不吃空格：带空格的构建路径少见，吃空格会把后续日志文本整段吞进来（宁截断不误吞），
+#: 顺带让 ``C:\Program Files\…`` 在 ``Program`` 处自然断开、不会被当成深层项目路径。
 _WIN_RE = re.compile(
-    rb"(?<![A-Za-z0-9_\-.\\/+~])[A-Za-z]:[\\/]Users[\\/][A-Za-z0-9_\-.\\/+~]+",
+    rb"(?<![A-Za-z0-9_\-.\\/+~])[A-Za-z]:[\\/][A-Za-z0-9_\-.\\/+~]+",
     re.IGNORECASE,
 )
 
 #: 最少 ``/`` 数（归一化后）：``/root/x.c`` 这类两段路径信息量太低且易撞设备路径，
 #: 要求根下至少还有两段（如 ``/home/u/proj``），实测构建路径远深于此、不损召回。
 _MIN_SLASHES = 3
+
+#: Windows 路径的等价门槛：``D:/x/y`` 与 ``/home/u/proj`` 段数相同，但前者没有前导斜杠，
+#: 用同一个 ``_MIN_SLASHES`` 会把 Windows 项目根整类挡掉。
+_MIN_SLASHES_WIN = _MIN_SLASHES - 1
+
+#: 盘符根形态（归一化后），用于挑出该用哪个斜杠门槛。
+_WIN_DRIVE_RE = re.compile(r"^[a-z]:/", re.IGNORECASE)
 
 #: Android **设备运行时**挂载点前缀（小写）——这些是 App 跑在手机上访问的路径，
 #: 不是构建机路径，形态却同为 ``/mnt/…``，必须排除（否则把存储目录当"构建来源"）。
@@ -132,6 +151,42 @@ _KNOWN_THIRD_PARTY_ROOTS: tuple[tuple[str, str], ...] = (
     ("/opt/rh/", "RHEL/CentOS devtoolset 安装位（大量第三方预编译库的构建环境）"),
 )
 
+#: 包管理器的依赖缓存布局。命中即判第三方：这些目录下**全部**是下载来的依赖源码，
+#: 路径里的名字是依赖作者的，与样本作者无关。
+#:
+#: ★这是本模块唯一允许的**子串**匹配，与 ``_KNOWN_THIRD_PARTY_ROOTS`` 只许前缀匹配的
+#:   纪律不冲突——那条纪律防的是"私有构建根下挂了第三方源码"（``/opt/work/<id>/…/webrtc_dsp/``
+#:   会被子串匹配误归第三方），而这里的情形正相反：缓存目录下没有一行作者自己的代码。
+#: ★为什么非做不可：实测样本里有 ``/Users/1/go/pkg/mod/github.com/refraction-networking/utls``，
+#:   若它停在 unknown 而被谁当成线索，指向的是一位真实的开源项目作者。
+_DEPENDENCY_CACHE_MARKERS: tuple[tuple[str, str], ...] = (
+    ("/go/pkg/mod/", "Go 模块缓存（下载的依赖源码，路径里的名字属依赖作者）"),
+    ("/.cargo/registry/", "Cargo 依赖缓存"),
+    ("/.m2/repository/", "Maven 本地仓库"),
+    ("/.gradle/caches/", "Gradle 依赖缓存"),
+    ("/node_modules/", "npm 依赖目录"),
+    ("/.pub-cache/", "Dart/Flutter 依赖缓存"),
+    ("/site-packages/", "Python 依赖安装位"),
+    ("/vendor/github.com/", "Go vendor 目录（依赖随源码一起提交）"),
+)
+
+#: Windows 工具链 / 系统安装位（盘符归一为小写后按 ``<drive>:/<段>/`` 匹配的**第二段**）。
+#: 放开非 ``Users`` 的盘符根后必须同时立这道墙：``D:\go\src\…``、``C:\msys64\…`` 这类
+#: 是编译器与包管理器的默认位、人人相同、零身份信息，若被判成"自建构建环境"，
+#: 干净样本会凭空多出一条归属结论——与本模块要防的方向正相反。
+#: ★匹配的是盘符后的**首段**而非整条路径：私有工作区下挂个 ``tools`` 子目录不该整条改判。
+_WIN_TOOLCHAIN_SEGMENTS: frozenset[str] = frozenset({
+    "windows", "winnt", "program files", "program files (x86)", "programdata",
+    "go", "golang", "gopath", "goroot",
+    "msys64", "msys32", "mingw", "mingw64", "mingw32", "cygwin", "cygwin64",
+    "python", "python27", "python3", "python310", "python311", "python312", "python313",
+    "ruby", "perl", "strawberry", "tdm-gcc", "llvm", "cmake", "ninja",
+    "androidsdk", "android-sdk", "android-ndk", "androidstudio",
+    "jdk", "jre", "java", "gradle", "maven", "tools", "toolchains", "sdk", "ndk",
+    "vcpkg", "conan", "chocolatey", "scoop", "hostedtoolcache",
+    "buildtools", "buildagent", "agent", "jenkins", "actions-runner",
+})
+
 #: 具备"私有构建工作区"结构资格的根家族。
 #:
 #: ★``/workspace`` 与 ``/build`` **不在此列**：它们是公共约定目录而非自管位——
@@ -166,22 +221,36 @@ class ClassifiedPath:
     origin: str | None = None  # 第三方清单命中时的依据说明
 
 
-def extract_paths(blob: bytes, *, limit: int = _MAX_PATHS) -> list[str]:
-    """从二进制/文本坨中提取候选构建路径（反斜杠归一为 ``/``、剥尾部 ``./``、去重保序）。"""
+def extract_paths(
+    blob: bytes, *, limit: int = _MAX_PATHS, per_root: int = _MAX_PATHS_PER_ROOT
+) -> list[str]:
+    """从二进制/文本坨中提取候选构建路径（反斜杠归一为 ``/``、剥尾部 ``./``、去重保序）。
+
+    ★``per_root`` 配额必须在**提取时**就生效，不能只在收集侧做：调用方对每个 .so 各调一次
+    本函数，若这里先按 ``limit`` 取满 400 条，同一个库里排在前面的噪声根就能把名额吃光，
+    后面的自建根根本到不了调用方的配额逻辑。传 0 关闭本层配额。
+    """
     out: list[str] = []
     seen: set[str] = set()
+    counts: dict[str, int] = {}
     for regex in (_UNIX_RE, _WIN_RE):
         for m in regex.finditer(blob):
             if len(out) >= limit:
                 return out
             norm = m.group(0).decode("ascii").replace("\\", "/").rstrip("./")
-            if norm.count("/") < _MIN_SLASHES:
+            floor = _MIN_SLASHES_WIN if _WIN_DRIVE_RE.match(norm) else _MIN_SLASHES
+            if norm.count("/") < floor:
                 continue
             low = norm.lower()
             if low.startswith(_DEVICE_RUNTIME_PREFIXES):
                 continue
             if low in seen:
                 continue
+            if per_root:
+                root = _split_root(norm)[0]
+                if counts.get(root, 0) >= per_root:
+                    continue
+                counts[root] = counts.get(root, 0) + 1
             seen.add(low)
             out.append(norm)
     return out
@@ -198,10 +267,21 @@ def _split_root(path: str) -> tuple[str, str | None, str | None, bool]:
     if not segs:
         return "", None, None, False
     head = segs[0].lower()
-    if head.endswith(":"):  # Windows 盘符（提取正则限定了 <drive>:/Users/ 形态）
-        if len(segs) >= 3:
-            return f"{head}/users/{segs[2].lower()}", None, segs[2], False
-        return head, None, None, False
+    if head.endswith(":"):  # Windows 盘符
+        if len(segs) < 2:
+            return head, None, None, False
+        second = segs[1].lower()
+        if second == "users":
+            # ``C:\Users\<user>\…``：根取到用户目录，用户名即身份线索本身，
+            # 不另给"私有工作区"资格（与 Unix 的 /home/<user> 同构）。
+            if len(segs) >= 3:
+                return f"{head}/users/{segs[2].lower()}", None, segs[2], False
+            return f"{head}/users", None, None, False
+        # 非 Users 的盘符根：``D:\buildroot\appsdk`` 这类自定义项目根。工具链/系统位
+        # 单独挡在 classify_path 里（此处只负责拆），标识取根下第一段。
+        root = f"{head}/{second}"
+        identifier = segs[2] if len(segs) >= 3 else None
+        return root, identifier, None, len(segs) >= 3
     if head in ("home", "users"):
         if len(segs) >= 2:
             return f"/{head}/{segs[1].lower()}", None, segs[1], False
@@ -237,9 +317,31 @@ def classify_path(path: str) -> ClassifiedPath:
             return ClassifiedPath(
                 path=path, tier=TIER_THIRD_PARTY, root=root, username=username, origin=origin
             )
+    # 依赖缓存：路径本身在作者机器上，但内容全是下载来的依赖，里面的名字属依赖作者。
+    for marker, origin in _DEPENDENCY_CACHE_MARKERS:
+        if marker in low:
+            return ClassifiedPath(
+                path=path, tier=TIER_THIRD_PARTY, root=root, username=username, origin=origin
+            )
     # CI/构建代理的安装位不是"某人自管的工作区"。只在**构建根**上匹配，不看整条路径——
     # 私有工作区下面挂个叫 gradle 的目录不该让整条路径改判（同"只看构建根"那条纪律）。
     if any(marker in root for marker in _CI_MARKERS):
+        return ClassifiedPath(path=path, tier=TIER_UNKNOWN, root=root, username=username)
+
+    if root[:1].isalpha() and root[1:2] == ":":
+        # Windows 盘符根。工具链/系统安装位人人相同、零身份信息 → 第三方（=非本样本作者），
+        # 否则自定义项目根（``D:/buildroot/…``）具私有工作区资格。
+        second = root.split("/", 1)[1] if "/" in root else ""
+        if second in _WIN_TOOLCHAIN_SEGMENTS:
+            return ClassifiedPath(
+                path=path, tier=TIER_THIRD_PARTY, root=root, username=username,
+                origin="Windows 工具链/系统安装位（编译器、SDK、包管理器默认位，非作者工作区）",
+            )
+        if eligible and identifier:
+            return ClassifiedPath(
+                path=path, tier=TIER_SELF_HOSTED, root=root,
+                identifier=identifier, username=username,
+            )
         return ClassifiedPath(path=path, tier=TIER_UNKNOWN, root=root, username=username)
 
     family = root.lstrip("/").split("/", 1)[0]
@@ -277,12 +379,14 @@ class BuildProvenanceAnalyzer(BaseAnalyzer):
         result = AnalyzerResult(analyzer=self.name)
         # 去重键 = 归一化小写路径；值保留首见 (原样路径, source, location) 供证据引用。
         hits: dict[str, tuple[str, str, str]] = {}
+        # per-root 配额跨 DEX/native 两侧共享：预算是全样本一份的，配额也该是。
+        per_root: dict[str, int] = {}
         try:
-            self._collect_dex(ctx, hits, result)
+            self._collect_dex(ctx, hits, result, per_root)
         except Exception:
             logger.exception("[%s] DEX 侧构建路径提取失败，仅据 .so 判定", self.name)
         try:
-            self._collect_native(ctx, hits)
+            self._collect_native(ctx, hits, per_root)
         except Exception:
             logger.exception("[%s] native 侧构建路径提取失败", self.name)
 
@@ -300,11 +404,34 @@ class BuildProvenanceAnalyzer(BaseAnalyzer):
 
     # ---- 采集 ----
 
+    @staticmethod
+    def _accept(
+        hits: dict[str, tuple[str, str, str]],
+        per_root: dict[str, int],
+        path: str,
+        source: str,
+        location: str,
+    ) -> None:
+        """按 per-root 配额收路径：同根收够 ``_MAX_PATHS_PER_ROOT`` 条后不再收该根的。
+
+        没有这道闸，一个第三方库的近重复路径就能吃光全局预算，让后面的库（可能正是
+        团伙自建的那个）一条都轮不到。
+        """
+        key = path.lower()
+        if key in hits:
+            return
+        root = _split_root(path)[0]
+        if per_root.get(root, 0) >= _MAX_PATHS_PER_ROOT:
+            return
+        per_root[root] = per_root.get(root, 0) + 1
+        hits[key] = (path, source, location)
+
     def _collect_dex(
         self,
         ctx: "AnalysisContext",
         hits: dict[str, tuple[str, str, str]],
         result: AnalyzerResult,
+        per_root: dict[str, int] | None = None,
     ) -> None:
         """从 DEX 字符串里捞构建路径。
 
@@ -317,17 +444,26 @@ class BuildProvenanceAnalyzer(BaseAnalyzer):
         )
         # 预筛含分隔符的串再拼坨：字符串池绝大多数与路径无关，先筛掉省一遍正则扫描量。
         blob = "\n".join(s for s in strings if "/" in s or "\\" in s).encode("utf-8", "replace")
-        for path in extract_paths(blob, limit=max(0, _MAX_PATHS - len(hits))):
-            hits.setdefault(path.lower(), (path, "dex", "dex-strings"))
+        counts = per_root if per_root is not None else {}
+        # 提取时不再按剩余全局名额收紧：per-root 配额才是决定收哪些的闸，
+        # 这里给足量以免同根前 N 条把别的根挤掉。
+        for path in extract_paths(blob, limit=_MAX_PATHS):
+            if len(hits) >= _MAX_PATHS:
+                break
+            self._accept(hits, counts, path, "dex", "dex-strings")
 
     def _collect_native(
-        self, ctx: "AnalysisContext", hits: dict[str, tuple[str, str, str]]
+        self,
+        ctx: "AnalysisContext",
+        hits: dict[str, tuple[str, str, str]],
+        per_root: dict[str, int] | None = None,
     ) -> None:
         """全量（非采样）扫 App 自有 .so：__FILE__ 串散布于 .rodata 各处，三窗采样会漏。
 
         有界：单库 ``_MAX_LIB_BYTES``（读前先查 zip 声明大小拦截炸弹）、累计
         ``_MAX_TOTAL_LIB_BYTES``、库数 ``_MAX_LIBS``、路径总数 ``_MAX_PATHS``。绝不抛。
         """
+        counts = per_root if per_root is not None else {}
         budget = _MAX_TOTAL_LIB_BYTES
         for so_path in app_so_paths(ctx, self.name, max_libs=_MAX_LIBS):
             if len(hits) >= _MAX_PATHS:
@@ -350,8 +486,43 @@ class BuildProvenanceAnalyzer(BaseAnalyzer):
             if not data or len(data) > _MAX_LIB_BYTES:
                 continue
             budget -= len(data)
-            for path in extract_paths(data, limit=max(0, _MAX_PATHS - len(hits))):
-                hits.setdefault(path.lower(), (path, "native", so_path))
+            for path in extract_paths(data, limit=_MAX_PATHS):
+                if len(hits) >= _MAX_PATHS:
+                    break
+                self._accept(hits, counts, path, "native", so_path)
+            # Go 产物：buildinfo 的 replace 指令直接给出开发机项目根。这条与 __FILE__ 提取
+            # 互为兜底——__FILE__ 可能被配额或截断挡掉，replace 只有一条、永远进得来。
+            self._collect_go_buildinfo(data, so_path, hits, counts)
+
+    def _collect_go_buildinfo(
+        self,
+        data: bytes,
+        so_path: str,
+        hits: dict[str, tuple[str, str, str]],
+        per_root: dict[str, int],
+    ) -> None:
+        """Go 产物的 buildinfo：把 ``replace`` 指令里的本地路径收成构建路径。
+
+        ``replace => <本地目录>`` 只在开发者用本地模块替换依赖时出现，那个目录**就是**
+        开发机上的项目根。它比 ``__FILE__`` 稳：只有一条、不受路径配额与字符串截断影响。
+        """
+        try:
+            info = parse_go_buildinfo(data)
+        except Exception:  # noqa: BLE001 - 解析器本身已 never-throw，这里是双保险
+            logger.debug("[%s] buildinfo 解析异常：%s", self.name, so_path, exc_info=True)
+            return
+        if info is None:
+            return
+        for raw in info.replaces:
+            path = raw.replace("\\", "/").rstrip("./")
+            if not path or path.startswith("."):
+                continue  # 相对路径（./x、../x）不含身份信息
+            floor = _MIN_SLASHES_WIN if _WIN_DRIVE_RE.match(path) else _MIN_SLASHES
+            if path.count("/") < floor - 1:
+                # buildinfo 的 replace 常只到项目根（D:/a/b，比 __FILE__ 少一层），
+                # 放宽一层：它是显式声明的目录，不像正则提取那样需要深度做真伪判据。
+                continue
+            self._accept(hits, per_root, path, "native", f"{so_path}#go.buildinfo")
 
     # ---- 聚合 ----
 

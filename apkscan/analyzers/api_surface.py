@@ -80,7 +80,42 @@ _SDK_FIRST_SEGMENTS: frozenset[str] = frozenset(
     }
 )
 
-_NON_ALNUM = re.compile(r"[^a-z0-9]")
+# 第 4 层：叶子是**编译型语言源码/头文件**——那是被编进 .so 的 `__FILE__` 断言串与调试路径
+# （WebRTC 的 `/api/audio/audio_frame.cc`、`/client/basic_port_allocator.cc`），不是后端接口。
+# 段字符集含 `.`，正则天然吃得下扩展名，故必须在此显式排除。
+# ★只列**编译型**扩展：`.php`/`.jsp`/`.do`/`.action`/`.aspx` 是真实后端接口形态，绝不能进；
+#   `.py`/`.js`/`.ts` 两可（既可能是源码路径也可能是真实 web 路由），取召回不排除。
+_SOURCE_FILE_EXTS: frozenset[str] = frozenset(
+    {
+        ".c", ".cc", ".cpp", ".cxx", ".c++",
+        ".h", ".hh", ".hpp", ".hxx", ".h++", ".inc", ".ipp",
+        ".m", ".mm", ".java", ".kt", ".kts", ".go", ".rs", ".swift",
+        ".s", ".asm", ".proto", ".pb", ".idl", ".aidl",
+    }
+)
+
+# 第 5 层：段内含 `.` 的**代码符号**（Go/Java 符号表被当接口路径）。实测两案 .so 里
+# gomobile 的绑定层符号 `golang.org/x/mobile/bind` 整片被收录成 `/mobile/bind/seq.Delete`、
+# `/mobile/bind/java.setContext` —— 命中 `mobile` 前缀但根本不是后端接口。
+# ★不能按 `/mobile/bind/` 前缀一刀切：`/mobile/bind/card`（绑卡）是完全可能的真实接口。
+#   判据落在**点后串的形态**上：真实 web 路径的扩展名恒为小写字母（php/jsp/do/json/html），
+#   而代码符号的点后是导出名（含大写）、编译器生成后缀或序号。
+_GO_GENERATED_SUFFIX = re.compile(r"^(?:init|func|deferwrap|gowrap|glob|stub)\d*$")
+
+
+def _looks_like_code_symbol(seg: str) -> bool:
+    """段形如 ``pkg.Symbol`` / ``pkg.`` / ``pkg.init.0`` → 代码符号而非接口路径段。"""
+    dot = seg.rfind(".")
+    if dot < 0:
+        return False
+    tail = seg[dot + 1:]
+    if not tail:                       # 尾点：字符串表边界截断产物（`seq.`）
+        return True
+    if tail.isdigit():                 # `seq.init.0`
+        return True
+    if any("A" <= c <= "Z" for c in tail):   # 导出名 / 驼峰（Delete、setContext、countedObj）
+        return True
+    return bool(_GO_GENERATED_SUFFIX.match(tail))
 
 # --- 读取上限 / 预算（对齐 native_obfuscation 范式）--------------------------
 _MAX_LIBS = 60
@@ -200,18 +235,62 @@ _SEMANTIC_META: dict[str, tuple[str, Severity, str, str]] = {
 }
 
 
+#: 驼峰切分点：小写/数字→大写（``uploadContact``），或大写连缀后接大写+小写（``getSMSList``）。
+#: 在 lower() **之前**切，否则驼峰边界丢失、词边界判据会把 ``uploadContactList`` 误判成一个词。
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+
+
+def _squash_with_word_bounds(path: str) -> tuple[str, frozenset[int], frozenset[int]]:
+    """把路径压成 squashed 形，并给出**词首/词尾**在 squashed 中的下标集合。
+
+    词 = 按 ``/``、``_``、``-``、``.`` 等非字母数字分隔，外加驼峰边界切出的片段。
+    返回 ``(squashed, 词首下标集, 词尾下标集)``。
+
+    为什么需要它：marker 此前在 squashed 上做**裸子串**搜索，会跨词粘出假词——实测
+    ``/api/rtc_event_log_output_file.cc`` 压成 ``…logoutputfile…``，``logout`` 落在
+    ``log`` 尾 + ``output`` 头之间，被标成「账号认证」。要求 marker 的起点是某词词首、
+    终点是某词词尾，即可整类消除跨词粘连，且对 ``upload_contact_list`` /
+    ``uploadContactList`` 这类**真**跨词组合零损召回（它们的起止本就落在词边界上）。
+    """
+    marked = _CAMEL_BOUNDARY.sub("\x00", path).lower()
+    out: list[str] = []
+    starts: set[int] = set()
+    ends: set[int] = set()
+    at_word_start = True
+    for ch in marked:
+        if ch.isascii() and (ch.isalpha() or ch.isdigit()):
+            if at_word_start:
+                starts.add(len(out))
+                at_word_start = False
+            out.append(ch)
+        else:
+            if not at_word_start:
+                ends.add(len(out) - 1)
+            at_word_start = True
+    if not at_word_start and out:
+        ends.add(len(out) - 1)
+    return "".join(out), frozenset(starts), frozenset(ends)
+
+
 def semantics_for(path: str) -> list[str]:
     """对一条接口路径做功能语义标注，返回命中的中文标签列表（可空；纯函数便于单测）。
 
     只对**强特征**下判断（宁可不标不误标）：判据均为具体动作词/组合，不用裸 sms/contact/report。
+    marker 须**整词对齐**（起点是词首、终点是词尾），不接受跨词粘出来的子串。
     """
     low = path.lower()
     segs = [s for s in low.split("/") if s]
     leaf = segs[-1] if segs else ""
-    squashed = _NON_ALNUM.sub("", low)
+    squashed, word_starts, word_ends = _squash_with_word_bounds(path)
 
     def hit(markers: tuple[str, ...]) -> bool:
-        return any(m in squashed for m in markers)
+        for m in markers:
+            start = squashed.find(m)
+            while start != -1:
+                if start in word_starts and (start + len(m) - 1) in word_ends:
+                    return True
+                start = squashed.find(m, start + 1)
+        return False
 
     out: list[str] = []
     if hit(_CONTACT_MARKERS):
@@ -242,9 +321,11 @@ def semantics_for(path: str) -> list[str]:
 
 
 def rejection_reason(path: str) -> str | None:
-    """三层误报过滤：返回弃用原因（``class_name`` / ``obfuscated`` / ``sdk``），保留则 ``None``。
+    """四层误报过滤：返回弃用原因（``class_name`` / ``obfuscated`` / ``sdk`` / ``source_file``），
+    保留则 ``None``。
 
-    多层可同时命中时按 class_name → obfuscated → sdk 的顺序归因（首个命中层记账）。纯函数便于单测。
+    多层可同时命中时按 class_name → obfuscated → sdk → source_file 的顺序归因（首个命中层记账）。
+    纯函数便于单测。
     """
     segs = [s for s in path.split("/") if s]
     if len(segs) < 2:
@@ -268,6 +349,16 @@ def rejection_reason(path: str) -> str | None:
     # 第 3 层：紧跟前缀的首段是已知第三方 SDK 命名空间（gms/firebase 等库自带、非团伙自有）。
     if rest[0].lower() in _SDK_FIRST_SEGMENTS:
         return "sdk"
+
+    # 第 4 层：叶子是编译型语言源码/头文件 = .so 里的 __FILE__ 调试串，不是后端接口。
+    leaf = segs[-1].lower()
+    dot = leaf.rfind(".")
+    if dot > 0 and leaf[dot:] in _SOURCE_FILE_EXTS:
+        return "source_file"
+
+    # 第 5 层：任一段是代码符号形态（Go/Java 符号表被当路径收进来）。
+    if any(_looks_like_code_symbol(s) for s in segs):
+        return "code_symbol"
 
     return None
 
@@ -311,6 +402,8 @@ class ApiSurfaceAnalyzer(BaseAnalyzer):
             "filtered_class_name": 0,
             "filtered_obfuscated": 0,
             "filtered_sdk": 0,
+            "filtered_source_file": 0,
+            "filtered_code_symbol": 0,
         }
         endpoints: list[dict] = []
         config_endpoints: list[str] = []
@@ -327,6 +420,12 @@ class ApiSurfaceAnalyzer(BaseAnalyzer):
                 continue
             if reason == "sdk":
                 counts["filtered_sdk"] += 1
+                continue
+            if reason == "source_file":
+                counts["filtered_source_file"] += 1
+                continue
+            if reason == "code_symbol":
+                counts["filtered_code_symbol"] += 1
                 continue
 
             sems = semantics_for(path)

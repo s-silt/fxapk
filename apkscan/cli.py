@@ -53,6 +53,28 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+def _version_verbose_callback(value: bool) -> None:
+    """``--version-verbose``：报告实际导入的是哪份代码，被遮蔽时非零退出。
+
+    ★为什么单列一个开关而不是只在 selfcheck 里报：在旧源码目录下跑 ``python -m apkscan.cli``
+    时，当前目录的 apkscan 包会遮蔽已安装版本，报告里的 tool_version 写的是旧版号，
+    而 ``--version`` 与 ``pip show`` 都显示新版——读报告的人无从察觉自己看的是旧版结果。
+    这一项要能被脚本单独调用、且不一致时退出码非零，才挡得住批量流程里误用旧代码。
+    """
+    if not value:
+        return
+    from apkscan.selfcheck import build_version_component
+
+    item = build_version_component()
+    typer.echo(item["detail"].replace(" ", "\n"))
+    if item["status"] != "ok":
+        typer.echo("", err=True)
+        typer.echo(f"★ {item['detail'].split('★')[-1]}", err=True)
+        typer.echo(f"  {item['fix']}", err=True)
+        raise typer.Exit(code=1)
+    raise typer.Exit()
+
+
 @app.callback()
 def _main(
     version: bool = typer.Option(  # noqa: ARG001 - eager callback 内即退出，形参仅供 typer 注册
@@ -60,6 +82,13 @@ def _main(
         "--version",
         help="显示版本号并退出。",
         callback=_version_callback,
+        is_eager=True,
+    ),
+    version_verbose: bool = typer.Option(  # noqa: ARG001 - 同上
+        False,
+        "--version-verbose",
+        help="显示版本 + 实际导入路径 + 分发位置 + git HEAD；版本被遮蔽时退出码 1。",
+        callback=_version_verbose_callback,
         is_eager=True,
     ),
 ) -> None:
@@ -252,7 +281,7 @@ def analyze(
 
         extra_dex_files = _resolve_extra_dex(extra_dex)
         if extra_dex_files:
-            typer.echo(f"额外 DEX：{len(extra_dex_files)} 个并入静态分析")
+            typer.echo(f"额外 DEX：发现 {len(extra_dex_files)} 个，加载中 ...")
 
         typer.echo(f"加载：{apk}")
         try:
@@ -260,6 +289,10 @@ def analyze(
         except ApkParseError as exc:
             typer.echo(f"错误：{exc}", err=True)
             raise typer.Exit(code=2) from exc
+
+        # ★加载**之后**才报数：脱壳 dump 的 DEX 成批不被 androguard 接受是常态，
+        #   在加载前写"N 个并入"等于替结果打包票。实测 33 个只成功 10 个。
+        _echo_extra_dex_result(getattr(ctx, "extra_dex_report", None))
 
         typer.echo(f"包名：{ctx.package_name or '(未知)'}  联网富化：{'是' if online else '否'}")
         typer.echo("运行分析流水线 ...")
@@ -1354,6 +1387,34 @@ def _print_doctor_result(result: object) -> None:
     typer.echo("")
     overall = "全部关键项通过" if result.get("ok", False) else "存在未通过的关键项（详见上方 [FAIL]）"
     typer.echo(f"体检结论：{overall}")
+
+
+def _echo_extra_dex_result(report: object) -> None:
+    """加载完额外 DEX 后如实报数：发现几个、成功并入几个、失败几个。
+
+    ★不能在加载前只报"发现 N 个并入分析"——脱壳 dump 的 DEX 成批不被 androguard 接受
+    是常态（Android 10+ hidden-api flag），实测 33 个只成功 10 个，而读到的却是
+    "33 个并入" + 分析器 error=0，等于把"没看见"说成"看过了"。
+    """
+    if not isinstance(report, dict) or not report:
+        return
+    requested = report.get("requested")
+    loaded = report.get("loaded")
+    failed = int(report.get("failed") or 0)
+    if not failed:
+        typer.echo(f"额外 DEX：{loaded} 个已并入静态分析")
+        return
+    by_error = report.get("failures_by_error")
+    kinds = (
+        "；".join(f"{k} ×{v}" for k, v in list(by_error.items())[:3])
+        if isinstance(by_error, dict) and by_error
+        else ""
+    )
+    typer.echo(
+        f"额外 DEX：发现 {requested} 个，成功并入 {loaded} 个，失败 {failed} 个"
+        + (f"（{kinds}）" if kinds else "")
+    )
+    typer.echo("       ★静态 DEX 面不完整，报告 visibility.dex 已标 partial")
 
 
 def _resolve_extra_dex(spec: str) -> list[str]:

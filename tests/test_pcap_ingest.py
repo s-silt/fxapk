@@ -163,6 +163,88 @@ def test_parse_bad_bytes_returns_empty_not_crash() -> None:
     assert pcap_ingest.parse_pcap_bytes(b"not a pcap").flows == []
 
 
+# --- IP 层长度裁剪：抓包工具的帧尾元数据不得被读成应用载荷 ------------------
+
+
+def test_ipv4_payload_truncated_at_total_length() -> None:
+    """★真样本回归：PCAPdroid 的 dump_extensions 在 IP 数据之后追加 UID/包名元数据。
+
+    帧尾那段字节若继续喂给 TCP/TLS 解析，碰上 0x16 开头就被读成 ClientHello，
+    解出的 SNI 会被绑到真实的业务连接上——实测两案的团伙后端 30124/30139
+    因此挂上了 zhihu.com / bilibili.com。
+    """
+    # 真实业务连接：一个**无应用载荷**的 ACK 包（PCAPdroid 对每个包都追加元数据，
+    # 包括纯 ACK——此时追加区就成了 TCP 头之后的第一段字节，正对上 TLS 解析的入口）。
+    real = _tcp(b"", 50001, 30124)
+    ip_packet = _ipv4(real, 6, "10.0.0.2", "8.134.204.167")
+    trailer = _tls_client_hello("static.zhihu.com") + b"\x00com.example.app\x00"
+    frame = _eth(ip_packet + trailer, 0x0800)
+
+    summary = pcap_ingest.parse_pcap_bytes(_pcap([frame]))
+    peers = {(f.dst_ip, f.dst_port) for f in summary.flows}
+    assert ("8.134.204.167", 30124) in peers, "真实连接必须保留"
+    snis = {s for f in summary.flows for s in f.sni}
+    assert "static.zhihu.com" not in snis, "帧尾元数据不得被读成 SNI"
+    assert not snis, f"该连接不该有任何 SNI，实得 {snis}"
+
+
+def test_ipv4_payload_byte_count_excludes_trailer() -> None:
+    """字节计数也不能把帧尾元数据算进去——它会虚高业务流量、误导闭环判定。"""
+    real = _tcp(b"\xaa" * 16, 50001, 30124)
+    frame = _eth(
+        _ipv4(real, 6, "10.0.0.2", "8.134.204.167") + b"\xff" * 512, 0x0800
+    )
+    summary = pcap_ingest.parse_pcap_bytes(_pcap([frame]))
+    flow = next(f for f in summary.flows if f.dst_port == 30124)
+    assert flow.payload_bytes == 16, f"应只算 IP total_length 内的 16 字节，实得 {flow.payload_bytes}"
+
+
+def test_ipv6_payload_truncated_at_payload_length() -> None:
+    real = _tcp(b"", 50002, 30139)
+    trailer = _tls_client_hello("www.bilibili.com")
+    frame = _eth(
+        _ipv6(real, 6, "2001:db8::2", "2001:db8::1") + trailer, 0x86DD
+    )
+    summary = pcap_ingest.parse_pcap_bytes(_pcap([frame]))
+    snis = {s for f in summary.flows for s in f.sni}
+    assert "www.bilibili.com" not in snis
+    assert not snis
+
+
+def test_ipv4_trailer_does_not_forge_dns_records() -> None:
+    """帧尾元数据同样不得被读成 DNS —— 伪域名会直接进线索清单。
+
+    构造成真到 53 端口的空 UDP 包：不裁剪时 trailer 就是 DNS 解析看到的第一段字节。
+    """
+    real = _udp(b"", 40000, 53)
+    trailer = _dns_query("static.zhihu.com")
+    frame = _eth(_ipv4(real, 17, "10.0.0.2", "8.134.204.167") + trailer, 0x0800)
+    summary = pcap_ingest.parse_pcap_bytes(_pcap([frame]))
+    assert "static.zhihu.com" not in summary.dns_queries
+
+
+def test_normal_tls_sni_still_extracted_after_truncation() -> None:
+    """★裁剪不得损召回：没有帧尾元数据的普通 443 TLS，SNI 照常提取。"""
+    frame = _eth(
+        _ipv4(_tcp(_tls_client_hello("bucket.oss-accelerate.aliyuncs.com"), 50003, 443),
+              6, "10.0.0.2", "47.246.1.1"),
+        0x0800,
+    )
+    summary = pcap_ingest.parse_pcap_bytes(_pcap([frame]))
+    snis = {s for f in summary.flows for s in f.sni}
+    assert "bucket.oss-accelerate.aliyuncs.com" in snis
+
+
+def test_bogus_total_length_falls_back_to_actual_bytes() -> None:
+    """total_length 坏掉（大于实际字节）时退回按实际切——不能因一个坏字段把整包丢了。"""
+    real = _tcp(_tls_client_hello("real-c2.example.com"), 50004, 443)
+    ip_packet = bytearray(_ipv4(real, 6, "10.0.0.2", "45.79.10.20"))
+    struct.pack_into("!H", ip_packet, 2, 65535)  # total_length 谎报 65535
+    summary = pcap_ingest.parse_pcap_bytes(_pcap([_eth(bytes(ip_packet), 0x0800)]))
+    snis = {s for f in summary.flows for s in f.sni}
+    assert "real-c2.example.com" in snis
+
+
 # ======================================================================
 # B. 线索映射
 # ======================================================================

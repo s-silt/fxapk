@@ -90,6 +90,46 @@ def test_truncated_scan_blocks_exhaustiveness():
     assert any("截断" in n for n in a["notes"])
 
 
+def test_native_config_channel_surfaces_as_next_action():
+    """★接线断言：控制面通道被识别出来，就得出现在"下一步怎么补"里。
+
+    地址按算法逐日生成，静态端点集里本来就不会有它——不把这条摆出来，
+    读的人会继续在静态里挖一个根本不存在的域名。
+    """
+    a = V.assess(_report(native_config_channel={
+        "templates": [{"url_template": "https://%s.example-oss.com/%s.dat"}],
+        "missing_inputs": ["AppName", "SDKVersion"],
+        "next_actions": ["..."],
+    }))
+    assert any("native 侧发现控制面通道" in x for x in a["next_actions"])
+    assert any("AppName" in x for x in a["next_actions"])
+
+
+def test_extra_dex_partial_load_blocks_exhaustiveness():
+    """★真样本回归：脱壳 dump 出 33 个 DEX，androguard 只吃下 10 个。
+
+    控制台原本写"33 个并入静态分析"、分析器状态 error=0，读的人会以为 33 个都分析过。
+    两成输入没进来比字符串扫到一半缺得更多，必须先于截断判定。
+    """
+    a = V.assess(_report(extra_dex_visibility={
+        "requested": 33, "loaded": 10, "failed": 23, "complete": False,
+        "failures_by_error": {"ValueError": 23},
+        "failure_samples": [],
+    }))
+    assert a["sources"]["dex"]["visibility"] == V.VIS_PARTIAL
+    assert "static_endpoint_exhaustive" in a["blocked_claims"]
+    assert any("脱壳产物未全部进入分析" in n for n in a["notes"])
+
+
+def test_extra_dex_fully_loaded_does_not_degrade():
+    """全部并入成功时不得因为"用了 extra-dex"就降级——那会把干净的完整分析说成残缺。"""
+    a = V.assess(_report(extra_dex_visibility={
+        "requested": 33, "loaded": 33, "failed": 0, "complete": True,
+        "failures_by_error": {}, "failure_samples": [],
+    }))
+    assert a["sources"]["dex"]["visibility"] == V.VIS_COMPLETE
+
+
 def test_dex_not_scanned_is_unavailable():
     a = V.assess(_report(dex_scanned=False))
     assert a["sources"]["dex"]["visibility"] == V.VIS_UNAVAILABLE

@@ -20,6 +20,8 @@ import re
 from collections import Counter
 from fnmatch import fnmatch
 
+from apkscan.network.fingerprints import is_public_dns_resolver
+
 logger = logging.getLogger(__name__)
 
 # 研判建议三态（与 Lead.advice 取值约定一致）。
@@ -72,6 +74,10 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         "umeng.com",
         "umengcloud",
         "umsns.com",
+        # ---- 崩溃上报 / 证书 / 多媒体库自带域（实测两案里被误当调证目标）----
+        "traces.hk",            # crash 上报 SDK（libucrash.so）
+        "public-trust.com",     # DigiCert 证书状态服务（DER 里的 OCSP/CRL URL）
+        "videolan.org",         # VLC/libvlc 测试流地址
         # ---- 高德 ----
         "amap.com",
         "autonavi",
@@ -543,6 +549,56 @@ def looks_like_encoding(domain: str) -> str | None:
     return None
 
 
+#: 规范/协议里用作**标识符**的 URL host。这类 URL 写在协议实现里当常量名用，
+#: App 从不去连它们（WebRTC 的 RTP 头扩展 URI 就是典型：
+#: ``http://www.webrtc.org/experiments/rtp-hdrext/transport-wide-cc-02``）。
+_PROTOCOL_ID_HOSTS: frozenset[str] = frozenset({
+    "www.webrtc.org", "webrtc.org",
+    "www.w3.org", "w3.org",
+    "www.ietf.org", "ietf.org", "tools.ietf.org", "datatracker.ietf.org",
+    "schemas.android.com", "xmlpull.org", "www.xmlpull.org",
+    "purl.org", "xmlns.com", "www.iana.org", "iana.org",
+})
+
+#: 前导垃圾字符 + 已知域：native 字符串表里域名前面常粘着别的字节。
+#: 实测 ``2github.com`` / ``3github.com`` 来自 Go 模块路径 ``…/klauspost/compress`` 前的
+#: 类型描述符数字，``0www.entrust.net`` 来自证书 DER 的结构字节。剥掉前导数字/单字母后
+#: 若正好是已知基础设施域，那它就是那个域被截断的产物，不是一个新域名。
+_STICKY_PREFIX_RE = re.compile(r"^[0-9]{1,3}(?=[a-z])|^[a-z](?=(?:www|github|gitlab)\.)")
+
+#: 单个常见英文词 + 通用 TLD。这类"域名"绝大多数是 native 字符串表里的句子被切出来的
+#: （``the.com`` / ``log.com`` / ``tos.org`` 实测均来自 libgojni.so 的 HTML 模板词料区）。
+#: ★只降"待核"不排除：团伙确实可能注册短域名，判错的代价必须可回捞。
+_COMMON_WORD_SLDS: frozenset[str] = frozenset({
+    "the", "log", "tos", "out", "and", "for", "you", "all", "new", "get", "set",
+    "use", "one", "two", "our", "not", "but", "can", "has", "was", "are", "his",
+    "her", "its", "may", "now", "any", "how", "who", "why", "did", "yes", "off",
+    "own", "too", "via", "www", "this", "that", "with", "from", "have", "were",
+    "test", "demo", "true", "false", "null", "none", "type", "name", "text",
+})
+_GENERIC_TLDS: frozenset[str] = frozenset({"com", "org", "net", "info", "xyz", "top"})
+
+
+def _sticky_variant_of_known(domain: str) -> str | None:
+    """域名是否为「已知基础设施域被粘上前导字节」的产物；是则返回被粘的那个域。"""
+    d = _normalize_domain(domain)
+    if not d or _matched_infra(d) is not None:
+        return None  # 本身就是已知域，不走这条
+    stripped = _STICKY_PREFIX_RE.sub("", d, count=1)
+    if stripped == d or not stripped:
+        return None
+    return stripped if _matched_infra(stripped) is not None else None
+
+
+def _is_common_word_sld(domain: str) -> bool:
+    """``<常见英文词>.<通用 TLD>`` 且无子域 —— 极可能是句子被切出来的伪域。"""
+    d = _normalize_domain(domain)
+    parts = d.split(".")
+    if len(parts) != 2:
+        return False
+    return parts[0] in _COMMON_WORD_SLDS and parts[1] in _GENERIC_TLDS
+
+
 def classify_domain(domain: str) -> tuple[str, str]:
     """对域名做调证研判分级，返回 (advice, reason)。
 
@@ -554,6 +610,19 @@ def classify_domain(domain: str) -> tuple[str, str]:
     matched = _matched_infra(domain)
     if matched is not None:
         return ADVICE_SKIP, f"已知第三方基础设施/库：{matched}"
+
+    if _normalize_domain(domain) in _PROTOCOL_ID_HOSTS:
+        return ADVICE_SKIP, "规范/协议里的标识符 URL（如 RTP 头扩展 URI），App 从不连它"
+
+    sticky = _sticky_variant_of_known(domain)
+    if sticky is not None:
+        # ★只降"待核"，不判"无需调证"：2github.com 语法合法、可被注册和控制，
+        #   仅凭"剥掉前导数字后像已知域"证不了它一定是字符串表粘连产物。
+        #   判 SKIP 会把一个真 C2 直接藏起来——这个代价换不来那点降噪收益。
+        return ADVICE_REVIEW, (
+            f"疑为 native 字符串表边界产物（剥掉前导字节后即已知基础设施域 {sticky}），"
+            "但该写法本身可注册，需人工核实是否真实存在"
+        )
 
     # library-embedded：打包库内置的全球站点库（amazon / 各国银行 / 新闻 / 成人站），
     # 非 App 后端，调证无意义。★ 仅精确后缀，绝不碰真 C2 的任意 .vip/.com SLD。
@@ -577,7 +646,101 @@ def classify_domain(domain: str) -> tuple[str, str]:
     if _is_invalid_or_private_domain(domain):
         return ADVICE_REVIEW, "无效域名或私网/回环字面，无法对外调证，需人工核"
 
+    if _is_common_word_sld(domain):
+        return ADVICE_REVIEW, (
+            "单个常见英文词 + 通用 TLD 且无子域，疑为二进制里的句子被切出的伪域名，需人工核"
+        )
+
     return ADVICE_INVESTIGATE, "疑似 App 自有服务，建议落地核查归属"
+
+
+#: 点分四段字面被当成 IP 的两大来源，实测语料 40 份报告统计：
+#:   - 版本号 / 序号（``1.3.1.1``、``1.4.1.14``——同一混淆资源里成**连续递增序列**出现）
+#:   - ASN.1 OID（X.509 证书与加密库常量：``1.3.101.112`` Ed25519、``2.5.4.3`` CN、
+#:     ``2.5.29.17`` SAN、``1.3.6.1`` iso.org.dod.internet、``1.3.36.3`` Teletrust）
+#: 二者都不是网络地址，却带 confidence=HIGH 进"建议调证"，把闭环预算与外部富化额度吃光。
+#:
+#: ★判据只**降级为待核**，绝不排除：真实团伙后端确有低段位 IP（如 8.x/47.x 阿里云段），
+#:   而"1 开头且四段都小"这种形态在真 IP 里罕见、在版本号里普遍——把握不到十成的事只降不杀。
+_OID_ARC_PREFIXES: tuple[str, ...] = (
+    "1.3.6.1.",      # iso.org.dod.internet（SNMP/PKIX 全家）
+    "1.3.101.",      # EdDSA / X25519 系列
+    "1.3.36.",       # Teletrust（德国标准，BSI 曲线）
+    "2.5.4.",        # X.500 属性类型（CN/O/OU/C…）
+    "2.5.29.",       # X.509 v3 扩展（SAN/keyUsage/CRL…）
+    "1.2.840.",      # ANSI/RSA/PKCS 系列
+    "2.16.840.",     # 美国 ANSI 组织分支（含 NIST 曲线）
+    "2.23.140.",     # CA/Browser Forum 证书策略
+)
+
+#: 低值四段的段上限。标定：语料里真实被采纳为 IOC 的 IP，四段全部 ≤32 的一例也没有；
+#: 而版本号/序号几乎全在此区间内。
+_LOW_OCTET_MAX = 32
+
+#: "裸字面"判据：真实网络地址在样本里通常带端口、出现在 URL 里、或有协议前缀。
+#: 命中任一即视为**用作地址**，不降级。
+_ADDRESSY_RE = re.compile(r":\d{1,5}\b|//|https?", re.IGNORECASE)
+
+
+def _strip_port_suffix(value: str) -> str:
+    """剥掉 lead 值上的 ``:port`` / ``:port/proto`` 尾缀，取回裸 IP 字面。
+
+    ★不剥就会绕过一切精确匹配：实测两案的动态线索值形如 ``223.5.5.5:53/udp``，
+    与名单里的 ``223.5.5.5`` 比不上，公共解析器照样进"建议调证"。
+    """
+    head = value.split("/", 1)[0].strip()
+    if head.count(":") == 1:                       # IPv6 有多个冒号，不动
+        head = head.rsplit(":", 1)[0]
+    return head
+
+
+def classify_ip(
+    value: str, *, context: str = "", runtime_observed: bool = False
+) -> tuple[str, str]:
+    """对 IP 字面做调证研判分级，返回 ``(advice, reason)``——与 :func:`classify_domain` 对称。
+
+    ``context`` 传该端点的证据片段拼接串，用于判断这个字面在样本里是否**当地址用**
+    （带端口 / 在 URL 里）。拿不准就不降级。
+
+    ``runtime_observed`` 为真（证据里有 runtime* 来源）时，形态判据一律豁免：
+    设备上真发生过到这个地址的连接，它就是地址，四段再小也不是版本号。
+    """
+    bare = _strip_port_suffix(value)
+    try:
+        addr = ipaddress.ip_address(bare)
+    except ValueError:
+        # 非法字面里含四段以上的点分数字 —— OID 的典型形态（1.3.101.112.1）。
+        if bare.startswith(_OID_ARC_PREFIXES):
+            return ADVICE_REVIEW, f"ASN.1 OID 而非网络地址（{bare}），需人工核"
+        return ADVICE_REVIEW, "无法解析为 IP 地址，需人工核"
+
+    if not addr.is_global:
+        # 私网、回环、链路本地、文档段（TEST-NET）、组播、保留段——对外调证无从下手。
+        return ADVICE_SKIP, "非全球可路由地址（私网/回环/文档/保留段），无调证对象"
+
+    if is_public_dns_resolver(bare):
+        # 公共递归解析器：归属是公开的（Google/阿里/腾讯…），向它们调证拿不到任何
+        # 与本案有关的东西。样本里硬编码了公共 DNS 是个事实（另有 dns_bypass 通道记录），
+        # 但它不是调证对象，不该占 closure 预算与外部富化额度。
+        return ADVICE_SKIP, "公共递归解析器（归属公开），非调证对象"
+
+    if runtime_observed:
+        # 设备上真连过 —— 形态判据一概不适用。
+        return ADVICE_INVESTIGATE, "运行时观测到的实连地址，建议落地核查归属"
+
+    if bare.startswith(_OID_ARC_PREFIXES):
+        return ADVICE_REVIEW, f"ASN.1 OID 而非网络地址（{bare}），需人工核"
+
+    if _ADDRESSY_RE.search(context or ""):
+        return ADVICE_INVESTIGATE, "疑似 App 后端地址，建议落地核查归属"
+
+    if addr.version == 4 and all(int(p) <= _LOW_OCTET_MAX for p in bare.split(".")):
+        return ADVICE_REVIEW, (
+            "四段值均偏低且样本里未当地址使用（无端口/无 URL 上下文），"
+            "疑为版本号或序号被当成 IP，需人工核"
+        )
+
+    return ADVICE_INVESTIGATE, "疑似 App 后端地址，建议落地核查归属"
 
 
 def effective_advice(domain: str, tier: object) -> str:

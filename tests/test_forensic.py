@@ -70,7 +70,9 @@ def test_domain_lead_domestic_gets_investigation_path() -> None:
 
 
 def test_ip_lead_foreign_gets_forensic_path() -> None:
-    ep = _ep("8.8.8.8", kind="ip", asn={"country": "United States", "org": "Example LLC"})
+    # ★占位地址不能用 8.8.8.8（公共解析器）或 203.0.113.x（TEST-NET 文档段）——
+    #   两者都会被 classify_ip 判无需调证，那正是该判据存在的意义。
+    ep = _ep("45.79.10.20", kind="ip", asn={"country": "United States", "org": "Example LLC"})
     lead = _ip_lead(ep, online=True)
     assert lead.advice == "建议调证"
     assert "国外服务器·被动定位" in (lead.notes or "")
