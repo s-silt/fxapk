@@ -76,16 +76,25 @@ _UNIX_RE = re.compile(
     re.IGNORECASE,
 )
 
-#: Windows 形态（``C:\\Users\\<user>\\…`` 及正斜杠变体）。不吃空格：带空格的构建路径少见，
-#: 吃空格会把后续日志文本整段吞进来（宁截断不误吞）。
+#: Windows 形态：任意盘符根，不再限定 ``Users``——实测 Go 的 module replace 指令里
+#: 内嵌的开发机项目根是 ``D:\im_sdk2\sdk_app2`` 这种自定义盘符目录，旧正则整类漏掉。
+#: 不吃空格：带空格的构建路径少见，吃空格会把后续日志文本整段吞进来（宁截断不误吞），
+#: 顺带让 ``C:\Program Files\…`` 在 ``Program`` 处自然断开、不会被当成深层项目路径。
 _WIN_RE = re.compile(
-    rb"(?<![A-Za-z0-9_\-.\\/+~])[A-Za-z]:[\\/]Users[\\/][A-Za-z0-9_\-.\\/+~]+",
+    rb"(?<![A-Za-z0-9_\-.\\/+~])[A-Za-z]:[\\/][A-Za-z0-9_\-.\\/+~]+",
     re.IGNORECASE,
 )
 
 #: 最少 ``/`` 数（归一化后）：``/root/x.c`` 这类两段路径信息量太低且易撞设备路径，
 #: 要求根下至少还有两段（如 ``/home/u/proj``），实测构建路径远深于此、不损召回。
 _MIN_SLASHES = 3
+
+#: Windows 路径的等价门槛：``D:/x/y`` 与 ``/home/u/proj`` 段数相同，但前者没有前导斜杠，
+#: 用同一个 ``_MIN_SLASHES`` 会把 Windows 项目根整类挡掉。
+_MIN_SLASHES_WIN = _MIN_SLASHES - 1
+
+#: 盘符根形态（归一化后），用于挑出该用哪个斜杠门槛。
+_WIN_DRIVE_RE = re.compile(r"^[a-z]:/", re.IGNORECASE)
 
 #: Android **设备运行时**挂载点前缀（小写）——这些是 App 跑在手机上访问的路径，
 #: 不是构建机路径，形态却同为 ``/mnt/…``，必须排除（否则把存储目录当"构建来源"）。
@@ -132,6 +141,42 @@ _KNOWN_THIRD_PARTY_ROOTS: tuple[tuple[str, str], ...] = (
     ("/opt/rh/", "RHEL/CentOS devtoolset 安装位（大量第三方预编译库的构建环境）"),
 )
 
+#: 包管理器的依赖缓存布局。命中即判第三方：这些目录下**全部**是下载来的依赖源码，
+#: 路径里的名字是依赖作者的，与样本作者无关。
+#:
+#: ★这是本模块唯一允许的**子串**匹配，与 ``_KNOWN_THIRD_PARTY_ROOTS`` 只许前缀匹配的
+#:   纪律不冲突——那条纪律防的是"私有构建根下挂了第三方源码"（``/opt/work/<id>/…/webrtc_dsp/``
+#:   会被子串匹配误归第三方），而这里的情形正相反：缓存目录下没有一行作者自己的代码。
+#: ★为什么非做不可：实测样本里有 ``/Users/1/go/pkg/mod/github.com/refraction-networking/utls``，
+#:   若它停在 unknown 而被谁当成线索，指向的是一位真实的开源项目作者。
+_DEPENDENCY_CACHE_MARKERS: tuple[tuple[str, str], ...] = (
+    ("/go/pkg/mod/", "Go 模块缓存（下载的依赖源码，路径里的名字属依赖作者）"),
+    ("/.cargo/registry/", "Cargo 依赖缓存"),
+    ("/.m2/repository/", "Maven 本地仓库"),
+    ("/.gradle/caches/", "Gradle 依赖缓存"),
+    ("/node_modules/", "npm 依赖目录"),
+    ("/.pub-cache/", "Dart/Flutter 依赖缓存"),
+    ("/site-packages/", "Python 依赖安装位"),
+    ("/vendor/github.com/", "Go vendor 目录（依赖随源码一起提交）"),
+)
+
+#: Windows 工具链 / 系统安装位（盘符归一为小写后按 ``<drive>:/<段>/`` 匹配的**第二段**）。
+#: 放开非 ``Users`` 的盘符根后必须同时立这道墙：``D:\go\src\…``、``C:\msys64\…`` 这类
+#: 是编译器与包管理器的默认位、人人相同、零身份信息，若被判成"自建构建环境"，
+#: 干净样本会凭空多出一条归属结论——与本模块要防的方向正相反。
+#: ★匹配的是盘符后的**首段**而非整条路径：私有工作区下挂个 ``tools`` 子目录不该整条改判。
+_WIN_TOOLCHAIN_SEGMENTS: frozenset[str] = frozenset({
+    "windows", "winnt", "program files", "program files (x86)", "programdata",
+    "go", "golang", "gopath", "goroot",
+    "msys64", "msys32", "mingw", "mingw64", "mingw32", "cygwin", "cygwin64",
+    "python", "python27", "python3", "python310", "python311", "python312", "python313",
+    "ruby", "perl", "strawberry", "tdm-gcc", "llvm", "cmake", "ninja",
+    "androidsdk", "android-sdk", "android-ndk", "androidstudio",
+    "jdk", "jre", "java", "gradle", "maven", "tools", "toolchains", "sdk", "ndk",
+    "vcpkg", "conan", "chocolatey", "scoop", "hostedtoolcache",
+    "buildtools", "buildagent", "agent", "jenkins", "actions-runner",
+})
+
 #: 具备"私有构建工作区"结构资格的根家族。
 #:
 #: ★``/workspace`` 与 ``/build`` **不在此列**：它们是公共约定目录而非自管位——
@@ -175,7 +220,8 @@ def extract_paths(blob: bytes, *, limit: int = _MAX_PATHS) -> list[str]:
             if len(out) >= limit:
                 return out
             norm = m.group(0).decode("ascii").replace("\\", "/").rstrip("./")
-            if norm.count("/") < _MIN_SLASHES:
+            floor = _MIN_SLASHES_WIN if _WIN_DRIVE_RE.match(norm) else _MIN_SLASHES
+            if norm.count("/") < floor:
                 continue
             low = norm.lower()
             if low.startswith(_DEVICE_RUNTIME_PREFIXES):
@@ -198,10 +244,21 @@ def _split_root(path: str) -> tuple[str, str | None, str | None, bool]:
     if not segs:
         return "", None, None, False
     head = segs[0].lower()
-    if head.endswith(":"):  # Windows 盘符（提取正则限定了 <drive>:/Users/ 形态）
-        if len(segs) >= 3:
-            return f"{head}/users/{segs[2].lower()}", None, segs[2], False
-        return head, None, None, False
+    if head.endswith(":"):  # Windows 盘符
+        if len(segs) < 2:
+            return head, None, None, False
+        second = segs[1].lower()
+        if second == "users":
+            # ``C:\Users\<user>\…``：根取到用户目录，用户名即身份线索本身，
+            # 不另给"私有工作区"资格（与 Unix 的 /home/<user> 同构）。
+            if len(segs) >= 3:
+                return f"{head}/users/{segs[2].lower()}", None, segs[2], False
+            return f"{head}/users", None, None, False
+        # 非 Users 的盘符根：``D:\im_sdk2\sdk_app2`` 这类自定义项目根。工具链/系统位
+        # 单独挡在 classify_path 里（此处只负责拆），标识取根下第一段。
+        root = f"{head}/{second}"
+        identifier = segs[2] if len(segs) >= 3 else None
+        return root, identifier, None, len(segs) >= 3
     if head in ("home", "users"):
         if len(segs) >= 2:
             return f"/{head}/{segs[1].lower()}", None, segs[1], False
@@ -237,9 +294,31 @@ def classify_path(path: str) -> ClassifiedPath:
             return ClassifiedPath(
                 path=path, tier=TIER_THIRD_PARTY, root=root, username=username, origin=origin
             )
+    # 依赖缓存：路径本身在作者机器上，但内容全是下载来的依赖，里面的名字属依赖作者。
+    for marker, origin in _DEPENDENCY_CACHE_MARKERS:
+        if marker in low:
+            return ClassifiedPath(
+                path=path, tier=TIER_THIRD_PARTY, root=root, username=username, origin=origin
+            )
     # CI/构建代理的安装位不是"某人自管的工作区"。只在**构建根**上匹配，不看整条路径——
     # 私有工作区下面挂个叫 gradle 的目录不该让整条路径改判（同"只看构建根"那条纪律）。
     if any(marker in root for marker in _CI_MARKERS):
+        return ClassifiedPath(path=path, tier=TIER_UNKNOWN, root=root, username=username)
+
+    if root[:1].isalpha() and root[1:2] == ":":
+        # Windows 盘符根。工具链/系统安装位人人相同、零身份信息 → 第三方（=非本样本作者），
+        # 否则自定义项目根（``D:/im_sdk2/…``）具私有工作区资格。
+        second = root.split("/", 1)[1] if "/" in root else ""
+        if second in _WIN_TOOLCHAIN_SEGMENTS:
+            return ClassifiedPath(
+                path=path, tier=TIER_THIRD_PARTY, root=root, username=username,
+                origin="Windows 工具链/系统安装位（编译器、SDK、包管理器默认位，非作者工作区）",
+            )
+        if eligible and identifier:
+            return ClassifiedPath(
+                path=path, tier=TIER_SELF_HOSTED, root=root,
+                identifier=identifier, username=username,
+            )
         return ClassifiedPath(path=path, tier=TIER_UNKNOWN, root=root, username=username)
 
     family = root.lstrip("/").split("/", 1)[0]

@@ -121,6 +121,59 @@ def test_classify_unlisted_home_dir_stays_unknown() -> None:
     assert cp.username == "zhangsan9"
 
 
+def test_extract_windows_project_root_outside_users() -> None:
+    """★真样本回归：Go 的 module replace 把开发机项目根编进二进制，形如 D:\\<工作区>\\<项目>。
+
+    旧正则只认 <盘符>:\\Users\\，这类自定义盘符根整类漏掉；且 D:/x/y 只有两个斜杠，
+    与 Unix 共用 _MIN_SLASHES 会再被深度门槛挡一次。
+    """
+    blob = b"\x00D:\\im_demo2\\sdk_app2\\sdk\\pool.go\x00"
+    assert extract_paths(blob) == ["D:/im_demo2/sdk_app2/sdk/pool.go"]
+    # 两段的项目根本身也要留下（它就是身份线索）
+    assert extract_paths(b"\x00D:\\im_demo2\\sdk_app2\x00") == ["D:/im_demo2/sdk_app2"]
+
+    cp = classify_path("D:/im_demo2/sdk_app2/sdk/pool.go")
+    assert cp.tier == TIER_SELF_HOSTED
+    assert cp.root == "d:/im_demo2"
+    assert cp.identifier == "sdk_app2"
+
+
+def test_classify_windows_toolchain_is_not_self_hosted() -> None:
+    """放开非 Users 盘符根后必须同时立墙：编译器/SDK/包管理器默认位人人相同、零身份信息。"""
+    for p in (
+        "D:/go/src/runtime/proc.go",
+        "C:/ProgramData/chocolatey/lib/x/y.c",
+        "C:/msys64/mingw64/include/stdio.h",
+        "E:/android-sdk/ndk/25.2.9519653/sysroot/usr/include/errno.h",
+        "C:/Windows/System32/drivers/x.sys",
+    ):
+        assert classify_path(p).tier == TIER_THIRD_PARTY, p
+
+    # `C:\Program Files\...` 走不到分层——正则不吃空格，截断成 `C:/Program`（深度 1）后
+    # 被深度门槛挡掉。这里把该前提钉住，免得将来放开空格时悄悄多出一类误判。
+    assert extract_paths(b"\x00C:\\Program Files\\Java\\jdk-17\\include\\jni.h\x00") == []
+
+
+def test_classify_dependency_cache_is_third_party() -> None:
+    """★这条防的是把开源作者当嫌疑人：依赖缓存在作者机器上，内容却全是下载来的第三方源码。
+
+    实测样本里有 /Users/<u>/go/pkg/mod/github.com/<开源组织>/<库>，若停在 unknown 而被
+    当成线索，指向的是一位真实的开源项目作者。
+    """
+    for p in (
+        "/Users/1/go/pkg/mod/github.com/someorg/somelib",
+        "C:/Users/1/go/pkg/mod/golang.org/x/crypto",
+        "/home/dev/.cargo/registry/src/index.crates.io/foo-1.0/lib.rs",
+        "/home/dev/proj/node_modules/left-pad/index.js",
+    ):
+        cp = classify_path(p)
+        assert cp.tier == TIER_THIRD_PARTY, p
+        assert cp.origin, p
+
+    # ★不得反噬：作者自己的源码目录不含依赖缓存标志，仍是 self_hosted。
+    assert classify_path("D:/im_demo2/sdk_app2/sdk/pool.go").tier == TIER_SELF_HOSTED
+
+
 # ---------------------------------------------------------------------------
 # 标识解析
 # ---------------------------------------------------------------------------
