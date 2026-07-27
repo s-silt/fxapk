@@ -30,6 +30,42 @@ def test_real_c2_domains_still_investigate():
         assert advice == infra.ADVICE_INVESTIGATE, f"{dom} 应建议调证（真 C2 不得误杀）"
 
 
+def test_protocol_identifier_urls_are_not_endpoints():
+    """★真样本回归：WebRTC 的 RTP 头扩展 URI 里 host 是标识符，App 从不去连它。"""
+    for dom in ("www.webrtc.org", "webrtc.org", "www.w3.org", "schemas.android.com"):
+        advice, reason = infra.classify_domain(dom)
+        assert advice == infra.ADVICE_SKIP, dom
+        assert "标识符" in reason or "基础设施" in reason
+
+
+def test_sticky_prefix_variants_resolve_to_known_domain():
+    """★真样本回归：native 字符串表里域名前面粘着别的字节。
+
+    2github.com 来自 Go 模块路径前的类型描述符数字，剥掉后就是 github.com 本身。
+    """
+    for dom in ("2github.com", "3github.com", "4github.com"):
+        advice, reason = infra.classify_domain(dom)
+        assert advice == infra.ADVICE_SKIP, dom
+        assert "边界产物" in reason
+
+    # ★不得反噬：真域名前面不该被乱剥。数字开头的合法域仍按常规判。
+    advice, _ = infra.classify_domain("360buy.com")
+    assert advice == infra.ADVICE_INVESTIGATE
+
+
+def test_common_word_slds_are_demoted_not_dropped():
+    """the.com / log.com / tos.org 实测来自二进制里的 HTML 词料，但只降待核不排除。"""
+    for dom in ("the.com", "log.com", "tos.org", "out.xyz"):
+        advice, reason = infra.classify_domain(dom)
+        assert advice == infra.ADVICE_REVIEW, dom
+        assert "伪域名" in reason
+
+    # 有子域的、或非常见词的，不受影响
+    assert infra.classify_domain("api.the.com")[0] == infra.ADVICE_INVESTIGATE
+    assert infra.classify_domain("hxhcapi.vip")[0] == infra.ADVICE_INVESTIGATE
+    assert infra.classify_domain("hcrsex.com")[0] == infra.ADVICE_INVESTIGATE
+
+
 # --- classify_ip：点分四段字面未必是网络地址 ------------------------------
 
 

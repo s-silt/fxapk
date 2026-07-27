@@ -239,6 +239,23 @@ def _next_actions(sources: dict, remediation: str, meta: dict) -> list[str]:
             f"已生成 {len(plan['candidates'])} 条配置接口候选 URL（meta.config_probe_plan）："
             "确认授权后以 `--mode authorized-active` 重跑可下载解码，取回下发的域名/IP 池"
         )
+
+    # native 控制面：地址是按算法逐日算出来的，静态端点集里本来就不会有它。
+    # 缺运行时输入时这条是**最有价值的补法**——比继续挖静态划算得多。
+    channel = meta.get("native_config_channel")
+    if isinstance(channel, dict) and channel.get("templates"):
+        missing = channel.get("missing_inputs") or []
+        if missing:
+            actions.append(
+                f"native 侧发现控制面通道（{len(channel['templates'])} 条对象存储模板），"
+                f"但当日地址算不出来：缺 {'、'.join(str(m) for m in missing)}——"
+                "这些值由宿主运行时注入，须动态取或从 DEX 常量补齐"
+                "（详见 meta.native_config_channel.next_actions）"
+            )
+        else:
+            actions.append(
+                "native 控制面模板与输入齐备：授权后可按算法推出当日对象地址并取回配置"
+            )
     return actions
 
 

@@ -90,6 +90,21 @@ def test_truncated_scan_blocks_exhaustiveness():
     assert any("截断" in n for n in a["notes"])
 
 
+def test_native_config_channel_surfaces_as_next_action():
+    """★接线断言：控制面通道被识别出来，就得出现在"下一步怎么补"里。
+
+    地址按算法逐日生成，静态端点集里本来就不会有它——不把这条摆出来，
+    读的人会继续在静态里挖一个根本不存在的域名。
+    """
+    a = V.assess(_report(native_config_channel={
+        "templates": [{"url_template": "https://%s.example-oss.com/%s.dat"}],
+        "missing_inputs": ["AppName", "SDKVersion"],
+        "next_actions": ["..."],
+    }))
+    assert any("native 侧发现控制面通道" in x for x in a["next_actions"])
+    assert any("AppName" in x for x in a["next_actions"])
+
+
 def test_extra_dex_partial_load_blocks_exhaustiveness():
     """★真样本回归：脱壳 dump 出 33 个 DEX，androguard 只吃下 10 个。
 

@@ -74,6 +74,10 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         "umeng.com",
         "umengcloud",
         "umsns.com",
+        # ---- 崩溃上报 / 证书 / 多媒体库自带域（实测两案里被误当调证目标）----
+        "traces.hk",            # crash 上报 SDK（libucrash.so）
+        "public-trust.com",     # DigiCert 证书状态服务（DER 里的 OCSP/CRL URL）
+        "videolan.org",         # VLC/libvlc 测试流地址
         # ---- 高德 ----
         "amap.com",
         "autonavi",
@@ -545,6 +549,56 @@ def looks_like_encoding(domain: str) -> str | None:
     return None
 
 
+#: 规范/协议里用作**标识符**的 URL host。这类 URL 写在协议实现里当常量名用，
+#: App 从不去连它们（WebRTC 的 RTP 头扩展 URI 就是典型：
+#: ``http://www.webrtc.org/experiments/rtp-hdrext/transport-wide-cc-02``）。
+_PROTOCOL_ID_HOSTS: frozenset[str] = frozenset({
+    "www.webrtc.org", "webrtc.org",
+    "www.w3.org", "w3.org",
+    "www.ietf.org", "ietf.org", "tools.ietf.org", "datatracker.ietf.org",
+    "schemas.android.com", "xmlpull.org", "www.xmlpull.org",
+    "purl.org", "xmlns.com", "www.iana.org", "iana.org",
+})
+
+#: 前导垃圾字符 + 已知域：native 字符串表里域名前面常粘着别的字节。
+#: 实测 ``2github.com`` / ``3github.com`` 来自 Go 模块路径 ``…/klauspost/compress`` 前的
+#: 类型描述符数字，``0www.entrust.net`` 来自证书 DER 的结构字节。剥掉前导数字/单字母后
+#: 若正好是已知基础设施域，那它就是那个域被截断的产物，不是一个新域名。
+_STICKY_PREFIX_RE = re.compile(r"^[0-9]{1,3}(?=[a-z])|^[a-z](?=(?:www|github|gitlab)\.)")
+
+#: 单个常见英文词 + 通用 TLD。这类"域名"绝大多数是 native 字符串表里的句子被切出来的
+#: （``the.com`` / ``log.com`` / ``tos.org`` 实测均来自 libgojni.so 的 HTML 模板词料区）。
+#: ★只降"待核"不排除：团伙确实可能注册短域名，判错的代价必须可回捞。
+_COMMON_WORD_SLDS: frozenset[str] = frozenset({
+    "the", "log", "tos", "out", "and", "for", "you", "all", "new", "get", "set",
+    "use", "one", "two", "our", "not", "but", "can", "has", "was", "are", "his",
+    "her", "its", "may", "now", "any", "how", "who", "why", "did", "yes", "off",
+    "own", "too", "via", "www", "this", "that", "with", "from", "have", "were",
+    "test", "demo", "true", "false", "null", "none", "type", "name", "text",
+})
+_GENERIC_TLDS: frozenset[str] = frozenset({"com", "org", "net", "info", "xyz", "top"})
+
+
+def _sticky_variant_of_known(domain: str) -> str | None:
+    """域名是否为「已知基础设施域被粘上前导字节」的产物；是则返回被粘的那个域。"""
+    d = _normalize_domain(domain)
+    if not d or _matched_infra(d) is not None:
+        return None  # 本身就是已知域，不走这条
+    stripped = _STICKY_PREFIX_RE.sub("", d, count=1)
+    if stripped == d or not stripped:
+        return None
+    return stripped if _matched_infra(stripped) is not None else None
+
+
+def _is_common_word_sld(domain: str) -> bool:
+    """``<常见英文词>.<通用 TLD>`` 且无子域 —— 极可能是句子被切出来的伪域。"""
+    d = _normalize_domain(domain)
+    parts = d.split(".")
+    if len(parts) != 2:
+        return False
+    return parts[0] in _COMMON_WORD_SLDS and parts[1] in _GENERIC_TLDS
+
+
 def classify_domain(domain: str) -> tuple[str, str]:
     """对域名做调证研判分级，返回 (advice, reason)。
 
@@ -556,6 +610,16 @@ def classify_domain(domain: str) -> tuple[str, str]:
     matched = _matched_infra(domain)
     if matched is not None:
         return ADVICE_SKIP, f"已知第三方基础设施/库：{matched}"
+
+    if _normalize_domain(domain) in _PROTOCOL_ID_HOSTS:
+        return ADVICE_SKIP, "规范/协议里的标识符 URL（如 RTP 头扩展 URI），App 从不连它"
+
+    sticky = _sticky_variant_of_known(domain)
+    if sticky is not None:
+        return ADVICE_SKIP, (
+            f"native 字符串表边界产物：剥掉前导字节后即已知基础设施域 {sticky}，"
+            "不是一个独立域名"
+        )
 
     # library-embedded：打包库内置的全球站点库（amazon / 各国银行 / 新闻 / 成人站），
     # 非 App 后端，调证无意义。★ 仅精确后缀，绝不碰真 C2 的任意 .vip/.com SLD。
@@ -578,6 +642,11 @@ def classify_domain(domain: str) -> tuple[str, str]:
 
     if _is_invalid_or_private_domain(domain):
         return ADVICE_REVIEW, "无效域名或私网/回环字面，无法对外调证，需人工核"
+
+    if _is_common_word_sld(domain):
+        return ADVICE_REVIEW, (
+            "单个常见英文词 + 通用 TLD 且无子域，疑为二进制里的句子被切出的伪域名，需人工核"
+        )
 
     return ADVICE_INVESTIGATE, "疑似 App 自有服务，建议落地核查归属"
 

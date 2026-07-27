@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from apkscan.analyzers._common import app_so_paths, collect_dex_strings
+from apkscan.core.gobuildinfo import parse_go_buildinfo
 from apkscan.core.models import (
     AnalyzerResult,
     Confidence,
@@ -476,6 +477,39 @@ class BuildProvenanceAnalyzer(BaseAnalyzer):
                 if len(hits) >= _MAX_PATHS:
                     break
                 self._accept(hits, counts, path, "native", so_path)
+            # Go 产物：buildinfo 的 replace 指令直接给出开发机项目根。这条与 __FILE__ 提取
+            # 互为兜底——__FILE__ 可能被配额或截断挡掉，replace 只有一条、永远进得来。
+            self._collect_go_buildinfo(data, so_path, hits, counts)
+
+    def _collect_go_buildinfo(
+        self,
+        data: bytes,
+        so_path: str,
+        hits: dict[str, tuple[str, str, str]],
+        per_root: dict[str, int],
+    ) -> None:
+        """Go 产物的 buildinfo：把 ``replace`` 指令里的本地路径收成构建路径。
+
+        ``replace => <本地目录>`` 只在开发者用本地模块替换依赖时出现，那个目录**就是**
+        开发机上的项目根。它比 ``__FILE__`` 稳：只有一条、不受路径配额与字符串截断影响。
+        """
+        try:
+            info = parse_go_buildinfo(data)
+        except Exception:  # noqa: BLE001 - 解析器本身已 never-throw，这里是双保险
+            logger.debug("[%s] buildinfo 解析异常：%s", self.name, so_path, exc_info=True)
+            return
+        if info is None:
+            return
+        for raw in info.replaces:
+            path = raw.replace("\\", "/").rstrip("./")
+            if not path or path.startswith("."):
+                continue  # 相对路径（./x、../x）不含身份信息
+            floor = _MIN_SLASHES_WIN if _WIN_DRIVE_RE.match(path) else _MIN_SLASHES
+            if path.count("/") < floor - 1:
+                # buildinfo 的 replace 常只到项目根（D:/a/b，比 __FILE__ 少一层），
+                # 放宽一层：它是显式声明的目录，不像正则提取那样需要深度做真伪判据。
+                continue
+            self._accept(hits, per_root, path, "native", f"{so_path}#go.buildinfo")
 
     # ---- 聚合 ----
 
