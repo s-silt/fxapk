@@ -68,6 +68,42 @@ class FridaServerProbe:
     version: str = ""
 
 
+#: 网络地址取得方式。``unknown`` = 读不出来，**不等于**有问题。
+NET_ASSIGN_DHCP = "dhcp"
+NET_ASSIGN_STATIC = "static"
+NET_ASSIGN_UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class DeviceNetworkState:
+    """设备联网状态的只读快照。
+
+    存在的理由：真机上「脱壳后全机断网」曾被当成样本反 Frida，实测根因却是 Wi-Fi 用了
+    静态地址、Android 网络验证失败并临时拉黑 BSSID —— 与 Frida 无关。要区分这两者，
+    唯一办法是在动作**之前**也测一次：基线本来就坏的，事后再坏也不能算到 Frida 头上。
+
+    ``healthy`` 为 None 表示判不出来（设备不支持 dumpsys、解析失败等），
+    调用方必须把它当"未知"而不是"有问题"。
+    """
+
+    connected: bool | None = None      # 有当前网络与默认路由
+    validated: bool | None = None      # Android 认为该网络已通过联网验证
+    assignment: str = NET_ASSIGN_UNKNOWN
+    ipv4: str = ""
+    detail: str = ""
+
+    @property
+    def healthy(self) -> bool | None:
+        """网络是否健康。判不出来返回 None —— 绝不把"读不到"说成"坏了"。"""
+        if self.connected is False:
+            return False
+        if self.validated is False:
+            return False
+        if self.connected is None and self.validated is None:
+            return None
+        return True
+
+
 def is_valid_package(package: str) -> bool:
     """包名是否形态合法（仅字母/数字/下划线/点）。
 
@@ -385,6 +421,105 @@ def _adb_root_command(command: str, serial: str | None = None) -> subprocess.Com
         if not re.search(r"\bsu:\s.*(not found|inaccessible)", blob):
             return su
     return _run(base + [command])  # su 缺失 → adb-root 直执兜底
+
+
+#: 默认路由的判据（``ip route show table all`` 输出里）。
+_DEFAULT_ROUTE_RE = re.compile(r"^\s*default\s+via\s+", re.MULTILINE)
+#: 输出确实像一张路由表（含 ``dev <iface>`` 或 ``via <ip>``）。
+#: ★没有这道校验，adb 的错误输出（``error: no devices/emulators found``）会被当成
+#:   "路由表里没有 default" → 判成断网。那正是本模块要避免的「把读不到当成坏了」。
+_ROUTE_SHAPE_RE = re.compile(r"\bdev\s+\S+|\bvia\s+\d+\.\d+\.\d+\.\d+")
+#: adb 侧的失败特征——出现即说明这次根本没读到设备。
+_ADB_ERROR_RE = re.compile(
+    r"no devices/emulators found|device .*not found|error:|adb:\s|不是内部或外部命令",
+    re.IGNORECASE,
+)
+#: 设备 IPv4（排除回环与各类虚拟接口地址）。
+_IPV4_ADDR_RE = re.compile(r"inet\s+(\d+\.\d+\.\d+\.\d+)/\d+")
+#: Android 把当前网络标为已验证/未验证的痕迹（dumpsys connectivity）。
+_VALIDATED_RE = re.compile(r"NET_CAPABILITY_VALIDATED", re.IGNORECASE)
+_VALIDATION_FAILED_RE = re.compile(
+    r"NETWORK_SELECTION_DISABLED_NO_INTERNET|REASON_NETWORK_VALIDATION_FAILURE"
+    r"|NO_INTERNET_TEMPORARY",
+    re.IGNORECASE,
+)
+#: Wi-Fi 是否用静态地址（dumpsys wifi）。静态本身**不判失败**，只作诊断信息。
+_STATIC_IP_RE = re.compile(r"STATIC|ipAssignment\s*[:=]\s*STATIC", re.IGNORECASE)
+_DHCP_IP_RE = re.compile(r"ipAssignment\s*[:=]\s*DHCP|DHCP\s+results", re.IGNORECASE)
+
+
+def read_network_state(serial: str | None = None) -> DeviceNetworkState:
+    """采集设备联网状态快照。**只读**：不改 Wi-Fi、代理、VPN、飞行模式，不重启任何东西。
+
+    读不到就返回 unknown，绝不抛 —— 这是个诊断辅助，不该让它把主流程带崩。
+    """
+    def _run_shell(cmd: str) -> str:
+        proc = _adb_root_command(cmd, serial)
+        if proc is None:
+            return ""
+        return (proc.stdout or "") + "\n" + (getattr(proc, "stderr", "") or "")
+
+    try:
+        addr_out = _run_shell("ip -4 addr")
+        route_out = _run_shell("ip route show table all")
+        conn_out = _run_shell("dumpsys connectivity")
+        wifi_out = _run_shell("dumpsys wifi")
+    except Exception:  # noqa: BLE001 — 诊断项绝不抛
+        logger.debug("[device] 采集网络状态失败", exc_info=True)
+        return DeviceNetworkState(detail="采集失败，状态未知")
+
+    def _usable(out: str) -> str:
+        """adb 报错 / 空输出一律当作"没读到"，返回空串。"""
+        if not out.strip() or _ADB_ERROR_RE.search(out):
+            return ""
+        return out
+
+    addr_out, route_out = _usable(addr_out), _usable(route_out)
+    conn_out, wifi_out = _usable(conn_out), _usable(wifi_out)
+
+    if not any((addr_out, route_out, conn_out)):
+        return DeviceNetworkState(detail="设备未响应网络状态查询，状态未知")
+
+    ipv4 = ""
+    for m in _IPV4_ADDR_RE.finditer(addr_out):
+        cand = m.group(1)
+        if not cand.startswith("127."):
+            ipv4 = cand
+            break
+
+    connected: bool | None = None
+    # ★只有当输出**确实是一张路由表**时，"没有 default" 才意味着断网。
+    #   否则（adb 报错、命令不存在、输出被截断）一律 unknown。
+    if route_out and _ROUTE_SHAPE_RE.search(route_out):
+        connected = bool(_DEFAULT_ROUTE_RE.search(route_out))
+
+    validated: bool | None = None
+    if conn_out:
+        if _VALIDATION_FAILED_RE.search(conn_out):
+            validated = False
+        elif _VALIDATED_RE.search(conn_out):
+            validated = True
+
+    assignment = NET_ASSIGN_UNKNOWN
+    if wifi_out:
+        if _DHCP_IP_RE.search(wifi_out):
+            assignment = NET_ASSIGN_DHCP
+        elif _STATIC_IP_RE.search(wifi_out):
+            assignment = NET_ASSIGN_STATIC
+
+    bits = [
+        f"IPv4={ipv4 or '未知'}",
+        f"默认路由={'有' if connected else ('无' if connected is False else '未知')}",
+        f"网络验证={'通过' if validated else ('失败' if validated is False else '未知')}",
+        f"地址方式={assignment}",
+    ]
+    return DeviceNetworkState(
+        connected=connected,
+        validated=validated,
+        assignment=assignment,
+        ipv4=ipv4,
+        detail="；".join(bits),
+    )
 
 
 def _deployed_frida_server_process(serial: str | None = None) -> FridaServerProcess | None:
