@@ -74,9 +74,26 @@ def _select_targets_with_stats(report: Report, max_targets: int) -> tuple[list[E
     if max_targets <= 0:
         raise ValueError("max_targets must be greater than zero")
 
+    # 兜底门：判为「正版重打包」且这份报告从未跑过隔离（meta 无审计块）时，其网络端点一律
+    # 不进闭环目标——那些域名属被仿冒的正版厂商。主修复在生成 Lead 时降档，此处只防
+    # **旧版本产出的 / 手工编辑过的** report.json 绕过主修复。
+    # ★审计块存在 = 隔离跑过 = 残余的「建议调证」是人工差分核实后有意恢复的，予以尊重，
+    #   不做无条件硬清空——否则人工核实确认属注入的真 C2 也会被永久挡在闭环之外。
+    meta = report.meta if isinstance(report.meta, dict) else {}
+    rid = meta.get("repack_identity")
+    repack_unquarantined = (
+        isinstance(rid, dict)
+        and rid.get("verdict") == "repack_suspected"
+        and not meta.get("repack_quarantine")
+    )
+    repack_excluded = 0
+
     lead_rank: dict[tuple[str, str], int] = {}
     for lead in report.leads:
         if lead.advice != "建议调证" or lead.category.value not in {"DOMAIN", "IP"}:
+            continue
+        if repack_unquarantined:
+            repack_excluded += 1
             continue
         key = (lead.category.value.lower(), lead.value.lower())
         lead_rank[key] = min(lead_rank.get(key, 9), {"HIGH": 0, "MEDIUM": 1, "LOW": 2}.get(lead.confidence.value, 3))
@@ -110,6 +127,9 @@ def _select_targets_with_stats(report: Report, max_targets: int) -> tuple[list[E
         "truncated": len(dropped),
         "dropped": [endpoint.value for endpoint in dropped],
     }
+    if repack_excluded:
+        # 排除不静默：让读报告的人看得出"闭环目标为空"是因为隔离，而非样本真没有端点。
+        stats["repack_excluded"] = repack_excluded
     return selected, stats
 
 
