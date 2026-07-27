@@ -40,6 +40,90 @@ def _component(name: str, category: str, status: str, detail: str, fix: str = ""
     return {"name": name, "category": category, "status": status, "detail": detail, "fix": fix}
 
 
+def _git_head(package_dir: str) -> str:
+    """若包目录位于 git 工作树内，返回 HEAD 短哈希；否则空串。绝不抛。"""
+    from pathlib import Path
+
+    try:
+        here = Path(package_dir).resolve()
+    except Exception:  # noqa: BLE001 — 路径解析失败按"不在工作树"处理
+        return ""
+    for parent in [here, *here.parents]:
+        git_dir = parent / ".git"
+        if not git_dir.exists():
+            continue
+        try:
+            head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+            if head.startswith("ref: "):
+                ref_path = git_dir / head[5:].strip()
+                if ref_path.exists():
+                    return ref_path.read_text(encoding="utf-8").strip()[:12]
+                packed = git_dir / "packed-refs"
+                if packed.exists():
+                    target = head[5:].strip()
+                    for line in packed.read_text(encoding="utf-8").splitlines():
+                        parts = line.split()
+                        if len(parts) == 2 and parts[1] == target:
+                            return parts[0][:12]
+                return ""
+            return head[:12]
+        except Exception:  # noqa: BLE001 — 读不到就当没有，诊断项不该炸
+            logger.debug("[selfcheck] 读 git HEAD 失败：%s", git_dir, exc_info=True)
+            return ""
+    return ""
+
+
+def build_version_component() -> dict[str, str]:
+    """版本自诊断：报告实际导入的是哪份代码，并在被遮蔽时 fail-closed 告警。
+
+    ★为什么需要它：在旧源码目录下跑 ``python -m apkscan.cli`` 时，当前目录的 ``apkscan``
+    包会遮蔽 editable 安装的那份，报告写出的 ``tool_version`` 是旧版本号（实测写成
+    0.10.0.dev0），而 ``pip show`` 与 ``fxapk --version`` 都显示新版本。这是 Python 的
+    导入规则使然、不是算法错误，但读报告的人无从察觉自己看的是旧版结果——
+    取证工具的"同版本同结果"承诺正是栽在这种地方。
+    """
+    import importlib.metadata as _md
+    from pathlib import Path
+
+    import apkscan
+
+    imported_version = getattr(apkscan, "__version__", "") or ""
+    import_path = ""
+    try:
+        import_path = str(Path(apkscan.__file__).resolve().parent)
+    except Exception:  # noqa: BLE001
+        logger.debug("[selfcheck] 解析 apkscan 包路径失败", exc_info=True)
+
+    dist_version = ""
+    dist_location = ""
+    try:
+        dist = _md.distribution("fxapk")
+        dist_version = dist.version
+        located = getattr(dist, "_path", None) or dist.locate_file("")
+        dist_location = str(located)
+    except Exception:  # noqa: BLE001 — 未安装（直接跑源码树）是合法情形
+        logger.debug("[selfcheck] 未找到已安装的 fxapk 分发", exc_info=True)
+
+    head = _git_head(import_path) if import_path else ""
+    detail = (
+        f"version={imported_version or '未知'} "
+        f"import_path={import_path or '未知'} "
+        f"distribution={dist_version or '未安装'} "
+        f"distribution_location={dist_location or '-'} "
+        f"git_head={head or '-'}"
+    )
+
+    # 只有"两边都拿到了版本号且不一致"才算故障——未安装时对不上是正常的。
+    if dist_version and imported_version and dist_version != imported_version:
+        return _component(
+            "version", "core", _STATUS_UNREACHABLE,
+            detail + f"　★不一致：已安装 {dist_version}，实际导入 {imported_version}",
+            "当前目录下有同名 apkscan 包遮蔽了已安装版本。换个工作目录再跑，"
+            "或用 `python -m pip install -e .` 重装后确认 import_path 指向预期位置。",
+        )
+    return _component("version", "core", _STATUS_OK, detail)
+
+
 def _dep_component(label: str, module: str, fix: str, why: str) -> dict[str, str]:
     installed = importlib.util.find_spec(module) is not None
     return _component(
@@ -63,6 +147,8 @@ def run_selfcheck(*, online: bool = True, probe_network: bool = True) -> dict[st
 
     components: list[dict[str, str]] = [
         _component("core", "core", _STATUS_OK, "静态分析核心（零环境，always-on）"),
+        # ★放在核心项之后、任何能力项之前：其它项全绿也挡不住"你跑的根本不是这份代码"。
+        build_version_component(),
     ]
     components += [_dep_component(label, mod, fix, why) for label, mod, fix, why in _OPTIONAL_DEPS]
     for cap, category, fix, why in _CAP_COMPONENTS:

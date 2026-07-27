@@ -380,6 +380,7 @@ class ApkContext:
         extra_dex_objs: list[Any] | None = None,
         dex_available: bool = True,
         apk_validation_ok: bool = True,
+        extra_dex_report: dict[str, object] | None = None,
     ) -> None:
         # apk: androguard.core.apk.APK；dex_objs: list[DEX]
         self._apk = apk
@@ -396,6 +397,10 @@ class ApkContext:
         # 这类降级在报告里显式可见，而非静默当成"扫描完毕无命中"。
         self.dex_available = dex_available
         self.apk_validation_ok = apk_validation_ok
+        # 额外 DEX 的加载账目（requested/loaded/failed + 失败样例）。脱壳产物成批不兼容
+        # 是常态，"请求了几个"与"真解析成功几个"必须分开呈现，否则报告会把"没看见"
+        # 说成"看过了没有"。pipeline 写进 meta.extra_dex_visibility。
+        self.extra_dex_report: dict[str, object] = dict(extra_dex_report or {})
 
     # ---- 标量属性 -------------------------------------------------------
 
@@ -791,8 +796,16 @@ def _iter_dex_strings(dex: Any) -> Iterator[str]:
         return
 
 
-def _load_extra_dex(extra_dex: list[str]) -> list:
+def _load_extra_dex(extra_dex: list[str]) -> tuple[list, list[dict[str, str]]]:
     """把 extra_dex 路径列表（脱壳 dump 的 .dex 文件）解析为 androguard DEX 实例列表。
+
+    返回 ``(DEX 实例列表, 失败明细列表)``。失败明细每项含 ``path`` / ``sha256`` /
+    ``error_type`` / ``error``。
+
+    ★为什么要把失败带出去：脱壳产物成批不兼容是常态——实测两个样本各 dump 33 个 DEX，
+    androguard 因不认 Android 10+ 的 hidden-api flag 抛 ValueError，各只解析成功 10 个。
+    只记 warning 的话，报告里看到的是"33 个并入 + 分析器 0 error"，读的人会以为
+    33 个都分析过了。失败数必须走到 meta 与 visibility，否则"没看见"会被当成"没有"。
 
     - 单个文件读取/解析失败 → try/except + logging 跳过，不影响主流程（不裸 pass、不吞错）。
     - androguard 的 import 只允许出现在本文件。
@@ -801,9 +814,12 @@ def _load_extra_dex(extra_dex: list[str]) -> list:
     from androguard.core.dex import DEX
 
     out: list = []
+    failures: list[dict[str, str]] = []
     for path in extra_dex:
+        digest = ""
         try:
             buff = Path(path).read_bytes()
+            digest = hashlib.sha256(buff).hexdigest()
             out.append(DEX(buff))
         except Exception as exc:  # noqa: BLE001 - 坏/不兼容 DEX 跳过即可，不炸主流程
             # 收敛成一行 warning + 异常摘要（不打整坨 traceback）：frida-dexdump dump 的
@@ -811,7 +827,40 @@ def _load_extra_dex(extra_dex: list[str]) -> list:
             # （HiddenApiClassDataItem.*ApiFlag），是已知库限制、会成批出现，整坨 traceback
             # 纯噪音。仍如实记录（不 swallow），只是不再刷屏。
             logger.warning("解析额外 DEX 失败，跳过：%s（%s: %s）", path, type(exc).__name__, exc)
-    return out
+            failures.append({
+                "path": str(path),
+                "sha256": digest,
+                "error_type": type(exc).__name__,
+                "error": str(exc)[:200],
+            })
+    return out, failures
+
+
+#: meta.extra_dex_visibility 里保留的失败明细上限——成批不兼容时逐条列会把 meta 撑肿，
+#: 失败**总数**与错误类型分布才是判读要用的，逐条只留头几条做样例。
+_MAX_EXTRA_DEX_FAILURE_SAMPLES = 10
+
+
+def build_extra_dex_report(
+    requested: list[str], loaded: int, failures: list[dict[str, str]]
+) -> dict[str, object]:
+    """把额外 DEX 的加载结果整理成可写进 ``meta.extra_dex_visibility`` 的结构。
+
+    ``complete`` 表示请求的 DEX 全部解析成功——只有它为真时，"额外 DEX 已并入分析"
+    才是一句完整的话。
+    """
+    by_error: dict[str, int] = {}
+    for item in failures:
+        key = item.get("error_type") or "Unknown"
+        by_error[key] = by_error.get(key, 0) + 1
+    return {
+        "requested": len(requested),
+        "loaded": loaded,
+        "failed": len(failures),
+        "complete": bool(requested) and not failures,
+        "failures_by_error": by_error,
+        "failure_samples": failures[:_MAX_EXTRA_DEX_FAILURE_SAMPLES],
+    }
 
 
 def _resolve_name(name: str, pkg: str) -> str:
@@ -949,8 +998,12 @@ def load_apk(
         # DEX 不可见（加固）不应使整体失败：manifest/资源/证书仍可用
         logger.exception("DEX 解析失败（可能加固），降级为无 DEX 字符串：%s", path)
         dex_objs = []
-    # 额外 DEX（脱壳 dump）解析；失败的单个 dex 已在 _load_extra_dex 内跳过。
-    extra_dex_objs = _load_extra_dex(list(extra_dex or [])) if extra_dex else []
+    # 额外 DEX（脱壳 dump）解析；失败的单个 dex 已在 _load_extra_dex 内跳过，
+    # 失败明细随 context 带出，最终落到 meta.extra_dex_visibility 与 visibility.dex。
+    requested_extra = list(extra_dex or [])
+    extra_dex_objs, extra_dex_failures = (
+        _load_extra_dex(requested_extra) if requested_extra else ([], [])
+    )
 
     # DEX 解析成功但为空（典型加固/无 dex）同样视为"静态 DEX 不可用"，需在报告显式告警。
     # 注意：仅主 DEX 为空时才告警；若 extra dex（脱壳）补回了字符串，则视为可用。
@@ -971,4 +1024,7 @@ def load_apk(
         extra_dex_objs=extra_dex_objs,
         dex_available=dex_available,
         apk_validation_ok=apk_validation_ok,
+        extra_dex_report=build_extra_dex_report(
+            requested_extra, len(extra_dex_objs), extra_dex_failures
+        ),
     )

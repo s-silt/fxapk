@@ -61,12 +61,37 @@ _SNIPPET_MAX = 200
 # uni-app manifest.json 路径模式（assets/apps/<__UNI__xxx>/www/manifest.json）。
 _UNI_MANIFEST_GLOB = "assets/apps/*/www/manifest.json"
 
-# 额外探查的疑似配置文件（路径子串，大小写不敏感）。
+# 额外探查的疑似配置文件（大小写不敏感）。
+#
+# ★匹配必须锚在**路径末尾**，绝不能用子串：脱壳产物里见过投毒资源
+# ``res/values/strings.xml/<畸形 Unicode 路径>.png``——子串匹配会把它当成 strings.xml
+# 送进 XML parser，每个文件刷一整坨 ExpatError traceback，而汇总仍写 error=0。
+# 目录名恰好叫 strings.xml 是合法 zip 条目，投毒方正是利用了这一点。
 _EXTRA_CONFIG_FILES: tuple[str, ...] = (
     "assets/data/dcloud_control.xml",
     "assets/data/dcloud_uniplugins.json",
     "res/values/strings.xml",
 )
+
+
+def _match_extra_config(path: str) -> str | None:
+    """路径是否为待探查的额外配置文件；是则返回命中的目标名，否则 None。
+
+    严格结尾匹配（整条路径相等，或以 ``/<目标>`` 结尾）。同时拒绝含 ``..``、
+    空路径段、NUL 的畸形路径——那些不是正常打包能产出的形态。
+    """
+    if not isinstance(path, str) or not path:
+        return None
+    low = path.replace("\\", "/").lower()
+    if "\x00" in low:
+        return None
+    segments = low.split("/")
+    if any(seg in ("", ".", "..") for seg in segments):
+        return None
+    for target in _EXTRA_CONFIG_FILES:
+        if low == target or low.endswith("/" + target):
+            return target
+    return None
 
 # 敏感凭据 key 名特征（命中 → 额外 Finding(HIGH, secret)）。
 _SECRET_TOKENS: tuple[str, ...] = (
@@ -190,10 +215,21 @@ class ConfigKeysAnalyzer(BaseAnalyzer):
             logger.exception("[%s] 解析 uni-app manifest.json 失败", self.name)
 
         # 3) 额外配置文件（dcloud_control.xml / dcloud_uniplugins.json / strings.xml）。
+        #    单文件解析错误按类型聚合，最终进 meta——"部分输入不可解析"不能被
+        #    "分析器 ran / error=0" 盖过去（分析器确实跑完了，但有输入没读懂）。
+        input_errors: dict[str, int] = {}
         try:
-            keys.extend(self._from_extra_files(ctx))
+            keys.extend(self._from_extra_files(ctx, input_errors))
         except Exception:
             logger.exception("[%s] 解析额外配置文件失败", self.name)
+        if input_errors:
+            result.meta["config_keys_input_errors"] = dict(input_errors)
+            logger.warning(
+                "[%s] %d 份候选配置文件无法解析（%s）——该层输入不完整",
+                self.name,
+                sum(input_errors.values()),
+                "，".join(f"{k}×{v}" for k, v in sorted(input_errors.items())),
+            )
 
         # 去重（同 name+value+location 只保留一条）。
         keys = self._dedup(keys)
@@ -377,7 +413,11 @@ class ConfigKeysAnalyzer(BaseAnalyzer):
     # 数据源 3：额外配置文件
     # ------------------------------------------------------------------
 
-    def _from_extra_files(self, ctx: "AnalysisContext") -> list[_ConfigKey]:
+    def _from_extra_files(
+        self, ctx: "AnalysisContext", errors: dict[str, int] | None = None
+    ) -> list[_ConfigKey]:
+        """扫额外配置文件；解析错误按**类型**聚合进 ``errors``，不逐文件打 traceback。"""
+        sink = errors if errors is not None else {}
         try:
             all_files = [p for p in ctx.list_files() if isinstance(p, str)]
         except Exception:
@@ -386,13 +426,14 @@ class ConfigKeysAnalyzer(BaseAnalyzer):
 
         keys: list[_ConfigKey] = []
         for path in all_files:
-            low = path.replace("\\", "/").lower()
-            if not any(target in low for target in _EXTRA_CONFIG_FILES):
+            if _match_extra_config(path) is None:
                 continue
+            low = path.replace("\\", "/").lower()
             try:
                 raw = ctx.read_file(path)
-            except Exception:
-                logger.exception("[%s] 读取配置文件失败：%s", self.name, path)
+            except Exception as exc:  # noqa: BLE001 - 单文件读失败不影响其余
+                logger.warning("[%s] 读取配置文件失败：%s（%s）", self.name, path, type(exc).__name__)
+                sink[type(exc).__name__] = sink.get(type(exc).__name__, 0) + 1
                 continue
             if not raw:
                 continue
@@ -401,26 +442,42 @@ class ConfigKeysAnalyzer(BaseAnalyzer):
                 if low.endswith(".json"):
                     keys.extend(self._parse_json_kvs(text, path))
                 else:
-                    keys.extend(self._parse_xml_kvs(text, path))
-            except Exception:
-                logger.exception("[%s] 解析配置文件键值失败：%s", self.name, path)
+                    keys.extend(self._parse_xml_kvs(text, path, sink))
+            except Exception as exc:  # noqa: BLE001 - 单文件解析失败不影响其余
+                # ★不打整坨 traceback：投毒资源会成批出现（实测一个样本刷出几十屏），
+                #   traceback 淹没真实输出且无增量信息。按类型计数 + 一行摘要即可，
+                #   计数最终进 meta，"部分输入不可解析"这个事实不会丢。
+                logger.warning(
+                    "[%s] 解析配置文件键值失败：%s（%s: %s）",
+                    self.name, path, type(exc).__name__, str(exc)[:120],
+                )
+                sink[type(exc).__name__] = sink.get(type(exc).__name__, 0) + 1
         return keys
 
-    def _parse_xml_kvs(self, text: str, path: str) -> list[_ConfigKey]:
+    def _parse_xml_kvs(
+        self, text: str, path: str, errors: dict[str, int] | None = None
+    ) -> list[_ConfigKey]:
         """从 strings.xml / dcloud_control.xml 等抠 name=value 键值。
 
         strings.xml：<string name="X">value</string>
         其它 XML：取带 name 属性的元素，value 取其 text 或 value/android:value 属性。
         """
+        sink = errors if errors is not None else {}
         if not text.strip():
             return []
         try:
             root = _safe_fromstring(text)
         except _UnsafeXmlError:
             logger.warning("[%s] 配置 XML 含 DTD/实体声明，已拒绝解析：%s", self.name, path)
+            sink["UnsafeXmlError"] = sink.get("UnsafeXmlError", 0) + 1
             return []
-        except expat.ExpatError:
-            logger.exception("[%s] 配置 XML 解析失败：%s", self.name, path)
+        except expat.ExpatError as exc:
+            # 不打 traceback：ExpatError 随投毒资源成批出现，逐条整坨会把真实输出淹掉，
+            # 且每条 traceback 都一样、无增量信息。计数进 meta，事实不丢。
+            logger.warning(
+                "[%s] 配置 XML 解析失败：%s（%s）", self.name, path, str(exc)[:120]
+            )
+            sink["ExpatError"] = sink.get("ExpatError", 0) + 1
             return []
 
         keys: list[_ConfigKey] = []

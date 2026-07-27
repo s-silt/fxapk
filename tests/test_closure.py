@@ -232,10 +232,45 @@ def test_capture_target_attributed_candidate_is_complete() -> None:
             "packet_count": 12,
             "business_candidate_count": 2,
             "target_attributed_count": 1,
+            "bidirectional_business_count": 1,
         }
     )
 
     assert quality["dynamic_status"] == CLOSURE_COMPLETE
+
+
+def test_capture_one_way_traffic_is_not_complete() -> None:
+    """★真样本回归：目标 UID 只向公共解析器发过 DNS query（出站 ~6KB、入站 0B），
+    两案都被判 complete —— 人工结论是动态未闭环。归因到目标 ≠ 与后端通信过。
+    """
+    quality = evaluate_capture_quality(
+        {
+            "channel_ready": True,
+            "pcap_valid": True,
+            "packet_count": 42,
+            "business_candidate_count": 3,
+            "target_attributed_count": 3,
+            "bidirectional_business_count": 0,
+        }
+    )
+
+    assert quality["dynamic_status"] == CLOSURE_PARTIAL
+    assert "bidirectional" in str(quality["reason"])
+
+
+def test_capture_quality_missing_bidirectional_field_fails_closed() -> None:
+    """字段缺失（老 runtime_report）不得当成"有双向证据"——宁可降级 partial 也不误判闭环。"""
+    quality = evaluate_capture_quality(
+        {
+            "channel_ready": True,
+            "pcap_valid": True,
+            "packet_count": 12,
+            "business_candidate_count": 2,
+            "target_attributed_count": 1,
+        }
+    )
+
+    assert quality["dynamic_status"] == CLOSURE_PARTIAL
 
 
 def test_assemble_target_closure_builds_all_investigation_layers() -> None:

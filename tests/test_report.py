@@ -812,10 +812,10 @@ def test_runtime_report_derived_endpoint_not_confirmed_c2(tmp_path: Path) -> Non
     runtime_report = {
         "endpoints": [
             {
-                "value": "203.0.113.77",
+                "value": "45.79.10.77",
                 "kind": "ip",
                 "evidences": [
-                    {"source": "static", "location": "hand-edited", "snippet": "203.0.113.77"}
+                    {"source": "static", "location": "hand-edited", "snippet": "45.79.10.77"}
                 ],
             }
         ]
@@ -835,7 +835,7 @@ def test_runtime_report_derived_endpoint_not_confirmed_c2(tmp_path: Path) -> Non
     )
     merge_runtime_endpoints(report, endpoints)
 
-    ip_leads = [ld for ld in report.leads if ld.value == "203.0.113.77"]
+    ip_leads = [ld for ld in report.leads if ld.value == "45.79.10.77"]
     assert ip_leads, "应为运行时引入的公网 IP 生成 Lead"
     lead = ip_leads[0]
     assert lead.is_c2 is True  # 公网 IP + 建议调证

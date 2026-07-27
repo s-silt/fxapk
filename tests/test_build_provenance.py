@@ -121,6 +121,127 @@ def test_classify_unlisted_home_dir_stays_unknown() -> None:
     assert cp.username == "zhangsan9"
 
 
+def test_extract_windows_project_root_outside_users() -> None:
+    """★真样本回归：Go 的 module replace 把开发机项目根编进二进制，形如 D:\\<工作区>\\<项目>。
+
+    旧正则只认 <盘符>:\\Users\\，这类自定义盘符根整类漏掉；且 D:/x/y 只有两个斜杠，
+    与 Unix 共用 _MIN_SLASHES 会再被深度门槛挡一次。
+    """
+    blob = b"\x00D:\\im_demo2\\sdk_app2\\sdk\\pool.go\x00"
+    assert extract_paths(blob) == ["D:/im_demo2/sdk_app2/sdk/pool.go"]
+    # 两段的项目根本身也要留下（它就是身份线索）
+    assert extract_paths(b"\x00D:\\im_demo2\\sdk_app2\x00") == ["D:/im_demo2/sdk_app2"]
+
+    cp = classify_path("D:/im_demo2/sdk_app2/sdk/pool.go")
+    assert cp.tier == TIER_SELF_HOSTED
+    assert cp.root == "d:/im_demo2"
+    assert cp.identifier == "sdk_app2"
+
+
+def test_classify_windows_toolchain_is_not_self_hosted() -> None:
+    """放开非 Users 盘符根后必须同时立墙：编译器/SDK/包管理器默认位人人相同、零身份信息。"""
+    for p in (
+        "D:/go/src/runtime/proc.go",
+        "C:/ProgramData/chocolatey/lib/x/y.c",
+        "C:/msys64/mingw64/include/stdio.h",
+        "E:/android-sdk/ndk/25.2.9519653/sysroot/usr/include/errno.h",
+        "C:/Windows/System32/drivers/x.sys",
+    ):
+        assert classify_path(p).tier == TIER_THIRD_PARTY, p
+
+    # `C:\Program Files\...` 走不到分层——正则不吃空格，截断成 `C:/Program`（深度 1）后
+    # 被深度门槛挡掉。这里把该前提钉住，免得将来放开空格时悄悄多出一类误判。
+    assert extract_paths(b"\x00C:\\Program Files\\Java\\jdk-17\\include\\jni.h\x00") == []
+
+
+def test_per_root_quota_stops_one_library_starving_the_rest() -> None:
+    """★真样本回归：一个第三方库的近重复路径吃光全局预算，团伙自建的库一条都轮不到。
+
+    实测两个样本里，同 APK 打包的 Telegram 分支 .so 产出 397 条同根路径占满 400 名额，
+    后面的 Go 控制面库整库没被扫——报告 self_hosted 是空的，读的人会当成"没有自建路径"。
+    这个缺陷只在跑**完整分析器**时暴露：直接调 extract_paths 是绕过预算的，测不出来。
+    """
+    from apkscan.analyzers.build_provenance import BuildProvenanceAnalyzer
+
+    noisy = b"\x00".join(
+        f"/Users/thirdparty/Projects/vendor/src/module{i:03d}/file{i:03d}.cpp".encode()
+        for i in range(400)
+    )
+    mine = b"\x00".join(
+        f"D:\\my_workspace\\my_project\\sdk\\unit{i:02d}.go".encode() for i in range(20)
+    )
+
+    class _Ctx:
+        platform = "android"
+
+        def native_libs(self) -> list[str]:
+            return ["lib/arm64-v8a/libvendor.so", "lib/arm64-v8a/libmine.so"]
+
+        def list_files(self) -> list[str]:
+            return ["lib/arm64-v8a/libvendor.so", "lib/arm64-v8a/libmine.so"]
+
+        def declared_size(self, path: str) -> int:
+            return len(noisy) if "vendor" in path else len(mine)
+
+        def read_file(self, path: str) -> bytes:
+            return noisy if "vendor" in path else mine
+
+        def dex_strings(self) -> list[str]:
+            return []
+
+    result = BuildProvenanceAnalyzer().analyze(_Ctx())  # type: ignore[arg-type]
+    meta = result.meta["build_provenance"]
+
+    assert meta["self_hosted"], "自建根必须被扫到，不能被第三方根的重复路径挤掉"
+    roots = {g["root"] for g in meta["self_hosted"]}
+    assert "d:/my_workspace" in roots
+
+    # 噪声根被配额压住，而不是占满整个预算
+    noisy_group = next(
+        (g for g in meta["third_party"] + meta["unknown"] if "thirdparty" in g["root"]), None
+    )
+    assert noisy_group is not None
+    assert noisy_group["count"] <= 32, f"单根应受配额限制，实得 {noisy_group['count']}"
+
+
+def test_per_root_quota_applies_within_a_single_source() -> None:
+    """★配额必须在**提取时**生效，不能只在收集侧做。
+
+    调用方对每个 .so 各调一次 extract_paths；若提取层先按 limit 取满 400 条，
+    同一个库里排在前面的噪声根就能把名额吃光，后面的自建根根本到不了收集侧的配额逻辑。
+    上一版只测了"两个独立 .so"，覆盖不到这条单源路径。
+    """
+    blob = b"\x00".join(
+        [f"/opt/vendorci/build{i:04d}/src/file{i:04d}.cpp".encode() for i in range(500)]
+        + [b"D:\\my_workspace\\my_project\\sdk\\core.go"]
+    )
+    paths = extract_paths(blob)
+    roots = [p for p in paths if p.lower().startswith("d:/my_workspace")]
+    assert roots, "同一个 blob 里排在噪声之后的自建根必须仍能被提取到"
+    noisy = [p for p in paths if p.startswith("/opt/vendorci")]
+    assert len(noisy) <= 32, f"单根在提取层就该受配额限制，实得 {len(noisy)}"
+
+
+def test_classify_dependency_cache_is_third_party() -> None:
+    """★这条防的是把开源作者当嫌疑人：依赖缓存在作者机器上，内容却全是下载来的第三方源码。
+
+    实测样本里有 /Users/<u>/go/pkg/mod/github.com/<开源组织>/<库>，若停在 unknown 而被
+    当成线索，指向的是一位真实的开源项目作者。
+    """
+    for p in (
+        "/Users/1/go/pkg/mod/github.com/someorg/somelib",
+        "C:/Users/1/go/pkg/mod/golang.org/x/crypto",
+        "/home/dev/.cargo/registry/src/index.crates.io/foo-1.0/lib.rs",
+        "/home/dev/proj/node_modules/left-pad/index.js",
+    ):
+        cp = classify_path(p)
+        assert cp.tier == TIER_THIRD_PARTY, p
+        assert cp.origin, p
+
+    # ★不得反噬：作者自己的源码目录不含依赖缓存标志，仍是 self_hosted。
+    assert classify_path("D:/im_demo2/sdk_app2/sdk/pool.go").tier == TIER_SELF_HOSTED
+
+
 # ---------------------------------------------------------------------------
 # 标识解析
 # ---------------------------------------------------------------------------
