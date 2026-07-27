@@ -398,13 +398,17 @@ def test_build_capture_quality_requires_target_attributed_business_traffic(
         "packet_count": 2,
         "business_candidate_count": 1,
         "target_attributed_count": 1,  # ★proto 键对齐后 target 正确计入（此前恒 0 → 误判 partial）
+        # 本用例的 mitm 端点（198.51.100.10）正是 floor 侧已归因到目标的那个对端，
+        # 故它算作目标自己的双向证据 → complete。
+        "bidirectional_target_count": 1,
+        "bidirectional_mitm_attributed_count": 1,
         # mitm 侧拿到的是经代理的完整请求-响应，本身即双向证据。
         "bidirectional_business_count": 1,
         "bidirectional_floor_count": 0,
         "bidirectional_mitm_count": 1,
         "infrastructure_excluded_count": 0,
         "dynamic_status": "complete",
-        "reason": "target-attributed public business candidate observed with bidirectional payload",
+        "reason": "target-attributed endpoint observed with bidirectional payload on that same endpoint",
         "floor_parse_status": "ok",
     }
 
@@ -445,12 +449,17 @@ def test_build_capture_quality_excludes_public_dns_resolvers(monkeypatch) -> Non
     assert quality["dynamic_status"] != "complete"
 
 
-def test_mitm_endpoints_do_not_backfill_one_way_floor(monkeypatch) -> None:  # noqa: ANN001
-    """★两侧证据各自不足时，相加不该突然够。
+def test_unrelated_mitm_endpoint_does_not_complete_one_way_target(monkeypatch) -> None:  # noqa: ANN001
+    """★归因与双向必须落在**同一个端点**上，否则不算闭环。
 
-    此前写作 `floor_bidir or len(mitm_endpoints)`：floor 侧为 0 就整个退给 mitm 计数，
-    于是「目标 App 只有单向 floor 流量」+「任意 mitm 端点」能凑出 complete。
-    现在分侧记账，读的人看得出双向证据到底在哪一侧。
+    场景即缺陷本身：目标 App 对 45.79.10.20 只有单向出站（对端从未应答），
+    而代理另外抓到一个与目标无关的 203.0.113.50 的完整往返。
+    分别看"有归因端点"和"有双向载荷"两个汇总值，两者都 > 0；但把它们拼起来说
+    "目标 App 已与后端通信过"是假的——代理是**整机**级的，那个往返可能是别的 App。
+
+    此前两版实现（`floor_bidir or len(mitm)`、`floor_bidir + len(mitm)`）在本场景下
+    都给出 complete；旧测试只断言了分侧计数、**从不断言最终状态**，于是把错误固化成了预期。
+    退回 gates 里对 bidirectional_target_count 的消费，本测试即红。
     """
     monkeypatch.setattr(pcap_ingest, "_ip_public", lambda value: True)
     summary = pcap_ingest.PcapSummary(
@@ -470,8 +479,40 @@ def test_mitm_endpoints_do_not_backfill_one_way_floor(monkeypatch) -> None:  # n
     )
     assert quality["bidirectional_floor_count"] == 0, "floor 侧确实没有双向证据"
     assert quality["bidirectional_mitm_count"] == 1
-    # 分侧可见即达到目的：报告能看出 complete 是靠 mitm 撑的，而不是 floor 实测。
-    assert quality["bidirectional_business_count"] == 1
+    assert quality["bidirectional_business_count"] == 1  # 分侧可见性字段保持原样
+    # ★真正要断言的：那个 mitm 端点对不上任何已归因端点，故不构成目标的双向证据
+    assert quality["bidirectional_mitm_attributed_count"] == 0
+    assert quality["bidirectional_target_count"] == 0
+    assert quality["dynamic_status"] == "partial", "目标 App 从未收到应答，不该判为已闭环"
+    assert "same endpoint" in str(quality["reason"])
+
+
+def test_mitm_endpoint_matching_target_sni_counts_as_bidirectional(monkeypatch) -> None:  # noqa: ANN001
+    """守恒：mitm 端点若**对得上**已归因端点（按 SNI 匹配域名），仍应支撑 complete。
+
+    收紧判据不能把"代理确实抓到了目标 App 的完整往返"这一真实闭环也挡掉——
+    那会逼人重抓一次本已成功的采集。
+    """
+    monkeypatch.setattr(pcap_ingest, "_ip_public", lambda value: True)
+    summary = pcap_ingest.PcapSummary(
+        flows=[
+            pcap_ingest.Flow(
+                proto="tcp", src_ip="10.0.0.2", src_port=50010,
+                dst_ip="45.79.10.20", dst_port=443,
+                packets=6, payload_bytes=900,
+                sni={"api.target.test"},
+            )
+        ]
+    )
+    quality = capture._build_capture_quality(
+        summary,
+        [Endpoint(value="api.target.test", kind="domain")],  # 与 floor 归因端点同一 SNI
+        {"tcp/45.79.10.20:443": {"is_target_app": True}},
+        channel_ready=True,
+    )
+    assert quality["bidirectional_mitm_attributed_count"] == 1
+    assert quality["bidirectional_target_count"] == 1
+    assert quality["dynamic_status"] == "complete"
 
 
 def test_build_capture_quality_keeps_unknown_dns_server(monkeypatch) -> None:  # noqa: ANN001

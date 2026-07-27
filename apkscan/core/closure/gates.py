@@ -66,10 +66,30 @@ def evaluate_capture_quality(meta: Mapping[str, object]) -> dict[str, object]:
     # ★字段缺失（老 runtime_report / 未提供该统计）时按 0 处理，即 fail-closed 降级为 partial：
     #   宁可把已闭环说成未闭环（多跑一次采集），不可把未闭环说成已闭环（据以结案）。
     bidirectional_count = _non_negative_int(raw.get("bidirectional_business_count"))
+    # ★★ 归因与双向必须落在**同一个端点**上。分别判断两个汇总值 > 0 是不够的：
+    #    代理是整机级的，于是「目标 App 有个单向端点 A」＋「无关背景端点 B 有完整往返」
+    #    会让两个计数各自 > 0，凑出一个目标 App 其实从未收到过应答的 complete。
+    #    capture 侧因此单列 bidirectional_target_count（floor 侧已归因且 established +
+    #    mitm 侧能对上已归因端点的），门控只认它。
+    target_bidirectional = _non_negative_int(raw.get("bidirectional_target_count"))
+    if not target_bidirectional:
+        # 兼容早于该字段的 runtime_report：floor 侧计数的口径本就是「归因到目标 **且**
+        # 双向有载荷」，即同一端点上两个条件都成立，与新字段语义一致，可安全回退。
+        # 注意**不能**回退到 bidirectional_business_count——那个含未归因的 mitm 端点，
+        # 正是本次要堵的洞；两者都缺时按 0 → partial（fail-closed）。
+        target_bidirectional = _non_negative_int(raw.get("bidirectional_floor_count"))
 
-    if target_count > 0 and business_count > 0 and bidirectional_count > 0:
+    if target_count > 0 and business_count > 0 and target_bidirectional > 0:
         status = CLOSURE_COMPLETE
-        reason = "target-attributed public business candidate observed with bidirectional payload"
+        reason = "target-attributed endpoint observed with bidirectional payload on that same endpoint"
+    elif target_count > 0 and business_count > 0 and bidirectional_count > 0:
+        # 有双向载荷，但它不属于任何一个归因到目标 App 的端点——多半是整机代理抓到的旁人流量。
+        status = CLOSURE_PARTIAL
+        reason = (
+            "bidirectional payload present but not on a target-attributed endpoint "
+            "(the proxy captures whole-device traffic); attribution and bidirectionality "
+            "must hold on the same endpoint"
+        )
     elif target_count > 0 and business_count > 0:
         status = CLOSURE_PARTIAL
         reason = (
@@ -93,10 +113,16 @@ def evaluate_capture_quality(meta: Mapping[str, object]) -> dict[str, object]:
         "packet_count": packet_count,
         "business_candidate_count": business_count,
         "target_attributed_count": target_count,
+        # 门控实际消费的那个计数要出现在结果里——否则读报告的人看到 complete/partial
+        # 却查不到判据（信号必须接线：gate 消费 + 报告可见）。
+        "bidirectional_target_count": target_bidirectional,
         "bidirectional_business_count": bidirectional_count,
         # 分侧计数原样透传：双向证据来自 floor 实测还是 mitm 代理，读报告的人要分得清。
         "bidirectional_floor_count": _non_negative_int(raw.get("bidirectional_floor_count")),
         "bidirectional_mitm_count": _non_negative_int(raw.get("bidirectional_mitm_count")),
+        "bidirectional_mitm_attributed_count": _non_negative_int(
+            raw.get("bidirectional_mitm_attributed_count")
+        ),
         # 因基础设施判据被排除的对端数（公共解析器上的 DNS 等）。单列出来，
         # 免得"排除了噪音"与"本来就没流量"在读报告时长得一样。
         "infrastructure_excluded_count": _non_negative_int(raw.get("infrastructure_excluded_count")),
