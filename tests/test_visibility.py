@@ -148,6 +148,27 @@ def test_repack_suspected_raises_attribution_caveat():
     assert not any("重打包" in n for n in b["notes"])
 
 
+def test_debug_cert_raises_attribution_caveat_when_not_repack():
+    """★判不出重打包 ≠ 排除重打包：调试证书在场时仍须提醒差分核实。
+
+    调试证书对「自研批量打包」与「第三方重签正版」同样常见，方向双向兼容；
+    再叠加 v2/v3-only 包结构性没有签名别名，判据这时是**缺失**而非"查过没有"。
+    此前 self_built / unknown 两种 verdict 下归属告警完全缺席，报告里没有任何东西
+    把人往差分核实上拉——退回 _attribution_caveat 的这一分支，本测试即红。
+    """
+    for verdict in ("self_built", "unknown"):
+        a = V.assess(_report(
+            repack_identity={"verdict": verdict, "signature": {"debug_cert": True}}
+        ))
+        assert any("调试证书" in n and "差分核实" in n for n in a["notes"]), verdict
+
+    # 非 debug 证书不挂该提醒——否则每份报告都挂一条，等于没有
+    b = V.assess(_report(
+        repack_identity={"verdict": "self_built", "signature": {"debug_cert": False}}
+    ))
+    assert not any("调试证书" in n for n in b["notes"])
+
+
 # ---------------------------------------------------------------------------
 # 动态侧：运行时观测是静态盲区的独立补救渠道
 # ---------------------------------------------------------------------------

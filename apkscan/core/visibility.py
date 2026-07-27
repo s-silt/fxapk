@@ -161,10 +161,26 @@ def _attribution_caveat(meta: dict) -> list[str]:
     """
     notes: list[str] = []
     rid = meta.get("repack_identity")
-    if isinstance(rid, dict) and rid.get("verdict") == "repack_suspected":
+    if not isinstance(rid, dict):
+        return notes
+    verdict = rid.get("verdict")
+    if verdict == "repack_suspected":
         notes.append(
             "⚠ 疑似正版应用重打包：本样本的接口/域名可能属于被仿冒的正版厂商，"
             "作为调证线索前须与官方同版本包差分核实（仅凭样本自身只能确定被重签名）"
+        )
+        return notes
+
+    # ★判不出重打包 ≠ 排除重打包。调试证书在场时尤其要提醒：它只证"非原厂正式发布签名"，
+    #   自研批量打包与第三方 apktool 重签正版都会留下它；再叠加 v2/v3-only 包没有签名别名
+    #   （别名只能从 v1 签名块的文件名取），判据这时候是**结构性缺失**而非"查过没有"。
+    #   此前这两种 verdict 下归属告警完全缺席，报告里没有任何东西把人往差分核实上拉。
+    signature = rid.get("signature")
+    has_debug = isinstance(signature, dict) and bool(signature.get("debug_cert"))
+    if has_debug and verdict in ("self_built", "unknown"):
+        notes.append(
+            "⚠ 本样本以调试证书签名：该特征对「自研批量打包」与「第三方重签正版应用」同样常见，"
+            "不指示归属方向；若样本外观与某正版应用相似，作为调证线索前须与官方同版本包差分核实"
         )
     return notes
 

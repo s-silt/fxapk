@@ -18,7 +18,8 @@
 三态 verdict（不许二元塌缩）：
   - repack_suspected：随机重签别名 **且** 完整商业栈同时命中——单一信号都不足（随机别名也见于
     个别自研签名习惯；完整栈也可能是正主自己的正常发布件）；
-  - self_built：无重打包信号 + 技术栈单薄 + 至少一个自研正向标记（品牌缩写别名 / 调试证书）；
+  - self_built：无重打包信号 + 技术栈单薄 + 品牌缩写别名（唯一正向标记；调试证书**不算**——
+    它对自研与重签正版同样常见，方向双向兼容，见 decide_verdict 的说明）；
   - unknown：其余一律不判——两个方向的误判都伤（重打包判成自研 → 误伤正版厂商；
     自研判成重打包 → 漏掉真线索），宁 unknown 不硬判。
 
@@ -191,16 +192,27 @@ def decide_verdict(
 
     - repack_suspected 要求随机别名 **与** 完整商业栈同时命中：随机别名单独出现也见于自研签名
       习惯（语料中即有 8 位随机别名 + 单薄栈的样本），完整栈单独出现无法区分正主发布件；
-    - self_built 要求「无随机别名 + 栈单薄 + 至少一个正向标记」：单一框架的正版应用被常规名
-      重签后与自研不可分，故仅凭栈单薄不判自研；
+    - self_built 要求「无随机别名 + 栈单薄 + 品牌缩写别名」——正向标记只此一个；
     - 其余一律 unknown。
+
+    ★ 调试证书**不是**自研的正向标记，反而是判自研的**阻断项**。它只能证明"非原厂正式
+      发布签名"，而这个性质对两个方向同样成立：自研批量打包常用 debug keystore，
+      第三方拿 apktool 重签正版包更是默认落到 debug keystore。方向双向兼容的信号
+      不能用来定方向。
+
+      叠加一层可见性不对称使其更危险：别名只能从 v1 签名块（``META-INF/*.RSA|DSA|EC``）
+      的文件名提取，而 v2/v3-only 签名的包**天然没有别名**——于是"无随机别名"对这类包
+      恒成立，不是证据而是盲区。两者相乘，最常见的 `apktool + debug 重签` 工作流会被
+      判成 self_built，进而提示"其接口/域名可按样本自有后端方向研判"，
+      正是本模块开头声明要防住的归属反转。故 debug 证书在场时宁可 unknown。
     """
     if has_random_alias and family_count >= _RICH_STACK_MIN_FAMILIES:
         return VERDICT_REPACK_SUSPECTED
     if (
         not has_random_alias
+        and not has_debug_cert
         and family_count <= _THIN_STACK_MAX_FAMILIES
-        and (has_short_alias or has_debug_cert)
+        and has_short_alias
     ):
         return VERDICT_SELF_BUILT
     return VERDICT_UNKNOWN
@@ -391,11 +403,11 @@ class RepackIdentityAnalyzer(BaseAnalyzer):
         )
 
     def _self_built_finding(self, signature: dict, stack_hits: dict[str, list[str]]) -> Finding:
+        # ★不把调试证书列为自研依据：它对自研与重签正版同样常见（decide_verdict 已将其
+        #   改为阻断项，此处与之保持一致，免得措辞上仍把它框架成"自研的证据"）。
         markers: list[str] = []
         if signature["short_aliases"]:
             markers.append("品牌缩写式签名别名（" + "、".join(signature["short_aliases"][:3]) + "）")
-        if signature["debug_cert"]:
-            markers.append("调试证书签名")
         detail = "；".join(markers) or "无"
         evidences = [
             Evidence(source="resource", location=p, snippet="签名块文件（品牌缩写式别名）")
@@ -472,7 +484,15 @@ def _build_signals(
             }
         )
     if signature["debug_cert"]:
-        signals.append({"id": "debug-certificate", "direction": "self_built", "detail": "is_debug"})
+        # direction=neutral：只证"非原厂正式发布签名"，自研批量打包与第三方重签正版都常见，
+        # 不指向任何一方。记录供人核，但**不参与也不暗示**方向（见 decide_verdict）。
+        signals.append(
+            {
+                "id": "debug-certificate",
+                "direction": "neutral",
+                "detail": "is_debug（仅证非原厂发布签名；自研与重签正版均常见，不指示归属方向）",
+            }
+        )
     if api_view.get("versioned_count", 0) >= _VERSIONED_API_MIN:
         # 弱信号：仅记录（加壳样本看不到业务串，缺席不说明什么），绝不参与 verdict。
         signals.append(
