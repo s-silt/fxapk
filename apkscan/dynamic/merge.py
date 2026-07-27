@@ -372,6 +372,17 @@ def _build_runtime_leads(report: Report, runtime_only: list[Endpoint]) -> int:
 
     # 兜底新 leads 的空 advice（DOMAIN/IP 的 advice 已由 build_endpoint_leads 按 infra 分级）。
     pipeline._apply_default_advice(new_leads)
+    # 与静态主路径同样做重打包隔离：正版重打包件在运行时连的也是**正版厂商的后端**，
+    # 若只在静态侧隔离，`capture --into` 新引入的厂商域名仍会以「建议调证」进调证出口。
+    quarantined = pipeline.apply_repack_quarantine(new_leads, report.meta)
+    if quarantined:
+        blob = report.meta.setdefault(
+            "repack_quarantine",
+            {"reason": pipeline._VERDICT_REPACK_SUSPECTED, "count": 0, "values": []},
+        )
+        merged_values = list(dict.fromkeys([*blob.get("values", []), *quarantined]))
+        blob["values"] = merged_values
+        blob["count"] = len(merged_values)
     report.leads.extend(new_leads)
     return len(new_leads)
 

@@ -157,6 +157,53 @@ _DEFAULT_ADVICE_BY_CATEGORY: dict[LeadCategory, str] = {
 }
 
 
+#: 与 ``analyzers/repack_identity.VERDICT_REPACK_SUSPECTED`` 同值。
+#: 这里刻意写字面量而不 import：core 层不该反向依赖 analyzers（分层倒置）。
+#: 两处一致性由 tests 里的一条断言钉住——改了一边另一边会红。
+_VERDICT_REPACK_SUSPECTED = "repack_suspected"
+
+_REPACK_QUARANTINE_NOTE = (
+    "疑似正版应用重打包：该端点可能属被仿冒的正版厂商，在与官方同版本包差分核实前"
+    "按疑似正版资产隔离（建议调证→待核）；差分确认属注入后可人工恢复"
+)
+
+
+def apply_repack_quarantine(leads: list[Lead], meta: dict) -> list[str]:
+    """样本判为「正版重打包」时，把其网络端点从调证出口隔离。返回被隔离的值。
+
+    **为什么必须机制化，而不能只发一条警告**：自研马甲包与正版重打包件的接口 / 域名
+    **归属完全相反**——后者属于被仿冒的正版厂商。而 ``advice == "建议调证"`` 是四个输出口
+    的共同闸门：closure 目标选择、letters 调证函套打、``ioc --only-investigate`` 导出、
+    HTML 的「C2/主控域名」红标区块。只要这一个字段不变，被仿冒厂商的官方域名就会一路走到
+    自动生成的调证函草稿里，全靠人工在几十条 finding 中读到一条 MEDIUM 警告才能拦下。
+    实测发生过同型错误：正版钱包的 156 条接口被整体错归为团伙资产。
+
+    **为什么是降档而不是删除**：重打包件里**确实可能**被注入了真的 C2，只是无法只凭本包
+    区分「原厂自带」与「注入」——那需要与官方同版本包做差分。删掉会漏掉真注入的；
+    留在「建议调证」会误伤正版厂商。故降为「待核」并写明理由，把判断交还给人，
+    人工差分核实后可改回。同理**绝不降到「无需调证」**——那等于替人下了"与本案无关"的结论。
+
+    幂等：已被降档的（advice 不再是「建议调证」）不会二次处理，故运行时回灌路径重复调用安全。
+    """
+    rid = meta.get("repack_identity") if isinstance(meta, dict) else None
+    if not (isinstance(rid, dict) and rid.get("verdict") == _VERDICT_REPACK_SUSPECTED):
+        return []
+    quarantined: list[str] = []
+    for lead in leads:
+        if lead.category not in (LeadCategory.DOMAIN, LeadCategory.IP):
+            continue
+        if lead.advice != infra.ADVICE_INVESTIGATE:
+            continue
+        lead.advice = infra.ADVICE_REVIEW
+        lead.confidence = Confidence.LOW
+        lead.notes = (
+            f"{lead.notes}；{_REPACK_QUARANTINE_NOTE}" if lead.notes
+            else _REPACK_QUARANTINE_NOTE
+        )
+        quarantined.append(lead.value)
+    return quarantined
+
+
 def _apply_default_advice(leads: list[Lead]) -> None:
     """给未自带 advice 的 Lead 按类别填默认研判建议（就地修改，不覆盖已有值）。"""
     for lead in leads:
