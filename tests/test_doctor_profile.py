@@ -26,7 +26,7 @@ def _stub_checks(
     monkeypatch.setattr(D, "_check_device_tcpdump", lambda s=None: D._item(D._NAME_DEVICE_TCPDUMP, floor_ok, ""))
     monkeypatch.setattr(D, "_check_abi", lambda s=None: D._item(D._NAME_ABI, True, ""))
     monkeypatch.setattr(D, "_check_host_frida", lambda: (D._item(D._NAME_HOST_FRIDA, frida_ok, ""), ""))
-    monkeypatch.setattr(D, "_check_frida_server", lambda *a, **k: D._item(D._NAME_FRIDA_SERVER, frida_ok, ""))
+    monkeypatch.setattr(D, "_check_frida_server", lambda *a, **k: (D._item(D._NAME_FRIDA_SERVER, frida_ok, ""), D._item(D._NAME_DEVICE_NETWORK, True, "网络状态未知（不判失败）")))
     monkeypatch.setattr(D, "_check_mitmproxy", lambda: D._item(D._NAME_MITMPROXY, mitm_ok, ""))
     monkeypatch.setattr(D, "_check_ca", lambda *a, **k: D._item(D._NAME_CA, ca_ok, ""))
     monkeypatch.setattr(D, "_check_pcap_capabilities", lambda: [])
@@ -92,7 +92,8 @@ def _spy_enhancement_fix(monkeypatch: pytest.MonkeyPatch) -> dict[str, bool]:
 
     def _spy_frida(serial: object, host_ver: object, *, auto_fix: bool, on_progress: object = None) -> dict:
         seen["frida"] = auto_fix
-        return doctor._item(doctor._NAME_FRIDA_SERVER, False, "")
+        return (doctor._item(doctor._NAME_FRIDA_SERVER, False, ""),
+                doctor._item(doctor._NAME_DEVICE_NETWORK, True, "网络状态未知（不判失败）"))
 
     def _spy_ca(serial: object, *, auto_fix: bool, on_progress: object = None) -> dict:
         seen["ca"] = auto_fix
