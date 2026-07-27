@@ -109,6 +109,24 @@ def _dex_visibility(meta: dict) -> tuple[str, list[str]]:
         why.append("字符串池不透明度超阈（编译期字符串混淆）")
         return VIS_OPAQUE, why
 
+    # ★脱壳产物没全并进来，同样是 DEX 面的缺口，而且极易被读成"已完整分析"：
+    #   实测两个样本各 dump 33 个 DEX，androguard 因不认 Android 10+ 的 hidden-api flag
+    #   各只解析成功 10 个，而控制台写的是"33 个并入静态分析"、分析器状态 error=0。
+    #   ——先于截断判定，因为"两成输入没进来"比"字符串扫到一半"缺得更多。
+    extra = meta.get("extra_dex_visibility")
+    if isinstance(extra, dict) and int(extra.get("failed") or 0) > 0:
+        by_error = extra.get("failures_by_error")
+        kinds = (
+            "，".join(f"{k}×{v}" for k, v in list(by_error.items())[:3])
+            if isinstance(by_error, dict) and by_error
+            else ""
+        )
+        why.append(
+            f"额外 DEX 请求 {extra.get('requested')} 个、仅并入 {extra.get('loaded')} 个，"
+            f"{extra.get('failed')} 个解析失败（{kinds}）——脱壳产物未全部进入分析"
+        )
+        return VIS_PARTIAL, why
+
     # ★扫描截断同样是可见性缺口，而且最隐蔽：分析器"跑成功了"、状态一切正常，只是没扫完。
     #   实测一个 100MB 样本的 DEX 字符串超过 20 万条上限被截断——此时"未发现某接口"完全可能
     #   只是因为它排在截断线之后。上限本身是必要的（防内存爆），但截断的**事实**必须传下去。
@@ -221,6 +239,23 @@ def _next_actions(sources: dict, remediation: str, meta: dict) -> list[str]:
             f"已生成 {len(plan['candidates'])} 条配置接口候选 URL（meta.config_probe_plan）："
             "确认授权后以 `--mode authorized-active` 重跑可下载解码，取回下发的域名/IP 池"
         )
+
+    # native 控制面：地址是按算法逐日算出来的，静态端点集里本来就不会有它。
+    # 缺运行时输入时这条是**最有价值的补法**——比继续挖静态划算得多。
+    channel = meta.get("native_config_channel")
+    if isinstance(channel, dict) and channel.get("templates"):
+        missing = channel.get("missing_inputs") or []
+        if missing:
+            actions.append(
+                f"native 侧发现控制面通道（{len(channel['templates'])} 条对象存储模板），"
+                f"但当日地址算不出来：缺 {'、'.join(str(m) for m in missing)}——"
+                "这些值由宿主运行时注入，须动态取或从 DEX 常量补齐"
+                "（详见 meta.native_config_channel.next_actions）"
+            )
+        else:
+            actions.append(
+                "native 控制面模板与输入齐备：授权后可按算法推出当日对象地址并取回配置"
+            )
     return actions
 
 

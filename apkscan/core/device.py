@@ -450,7 +450,11 @@ def _start_root_attach_helper(
     args = [adb]
     if serial:
         args += ["-s", serial]
-    args += ["shell", "su", "-c", f"sleep {_FRIDA_HELPER_SECONDS}"]
+    # ★远端命令整条引用，不能拆成 ["su", "-c", "sleep 30"]：adb 把 shell 之后的参数拼成
+    #   一条命令串发给设备，设备 shell 再分词一次，``sleep`` 与 ``30`` 就此分家 ——
+    #   su 执行的是无参数 sleep（设备日志 "sleep: Needs 1 argument"），helper 立刻退出，
+    #   PID 永远等不到，probe 白等约 80 秒。与 _adb_root_command 同口径，复用 _shq。
+    args += ["shell", f"su -c {_shq(f'sleep {_FRIDA_HELPER_SECONDS}')}"]
     try:
         host = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:

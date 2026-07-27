@@ -9,8 +9,12 @@ import re
 import urllib.parse
 
 __all__ = [
+    "DNS_SERVICE_PORTS",
     "KNOWN_INTERCEPT_IPS",
+    "PUBLIC_DNS_RESOLVERS",
+    "is_infrastructure_endpoint",
     "is_known_intercept_ip",
+    "is_public_dns_resolver",
     "normalize_authority",
     "normalize_domain",
     "normalize_ip",
@@ -47,6 +51,81 @@ def is_known_intercept_ip(value: str) -> bool:
     mapped = getattr(addr, "ipv4_mapped", None)
     canonical = str(mapped) if mapped is not None else addr.compressed
     return canonical in KNOWN_INTERCEPT_IPS
+
+
+#: DNS 服务端口：明文 53、DoT 853、mDNS 5353。DoH 走 443 与业务流量同端口，
+#: 靠端口分不出来，故本判据不覆盖 DoH（DoH 的排除只能靠域名侧的 infra 名单）。
+DNS_SERVICE_PORTS: frozenset[int] = frozenset({53, 853, 5353})
+
+#: 公共递归解析器。这些地址是**基础设施**：App 向它们发 DNS query 只说明"App 在解析域名"，
+#: 不说明"App 与业务后端通信"，因此不得计入业务候选、更不得据以判动态闭环。
+#:
+#: ★为什么只列名单、不把「凡 53 端口皆排除」当判据：团伙自建的 DNS/DoH 服务器同样在 53 端口，
+#:   而那是**真线索**（自建解析器往往就架在控制面同一台机器上）。按 IP 名单排除，能保证
+#:   未知的 53 端口对端仍被当作业务候选留给人工核 —— 宁可多留噪音，不可丢真节点。
+PUBLIC_DNS_RESOLVERS: frozenset[str] = frozenset({
+    # 中国大陆
+    "223.5.5.5", "223.6.6.6",                       # 阿里 AliDNS
+    "114.114.114.114", "114.114.115.115",           # 114DNS
+    "119.29.29.29", "182.254.116.116",              # 腾讯 DNSPod
+    "1.12.12.12", "120.53.53.53",                   # 腾讯 DNSPod（新段，实测语料里出现）
+    "180.76.76.76",                                 # 百度
+    "117.50.10.10", "52.80.66.66",                  # OneDNS
+    "1.2.4.8", "210.2.4.8",                         # CNNIC sDNS
+    "101.226.4.6", "218.30.118.6",                  # DNS 派
+    "123.125.81.6", "140.207.198.6",
+    # 国际
+    "8.8.8.8", "8.8.4.4",                           # Google
+    "1.1.1.1", "1.0.0.1", "1.1.1.2", "1.1.1.3",     # Cloudflare（.2/.3 为其家庭过滤档）
+    "9.9.9.9", "149.112.112.112",                   # Quad9
+    "208.67.222.222", "208.67.220.220",             # OpenDNS
+    "8.26.56.26", "8.20.247.20",                    # Comodo
+    "64.6.64.6", "64.6.65.6",                       # Verisign
+    "77.88.8.8", "77.88.8.1",                       # Yandex
+    "94.140.14.14", "94.140.15.15",                 # AdGuard
+    "76.76.2.0", "76.76.10.0",                      # Control D
+    "185.228.168.9", "185.228.169.9",               # CleanBrowsing
+})
+
+
+def is_public_dns_resolver(value: str) -> bool:
+    """``value`` 是否为已知公共递归解析器（非业务节点）。
+
+    与 :func:`is_known_intercept_ip` 同样先规范化 IPv4-mapped IPv6 再比，
+    免得 ``::ffff:223.5.5.5`` 这类写法绕过名单。坏输入 → False。
+    """
+    if not isinstance(value, str):
+        return False
+    if value in PUBLIC_DNS_RESOLVERS:
+        return True
+    try:
+        addr = ipaddress.ip_address(value.strip())
+    except ValueError:
+        return False
+    mapped = getattr(addr, "ipv4_mapped", None)
+    canonical = str(mapped) if mapped is not None else addr.compressed
+    return canonical in PUBLIC_DNS_RESOLVERS
+
+
+def is_infrastructure_endpoint(ip: str, port: object) -> bool:
+    """该 (ip, port) 是否为**基础设施**对端 —— 观测到它不构成业务通信证据。
+
+    当前判据：已知公共解析器 + DNS 服务端口。两个条件都要满足 ——
+    单看端口会误杀团伙自建 DNS，单看 IP 会漏掉"公共解析器同时提供别的服务"这种理论情形
+    （实践中不存在，但两条件与的写法让判据的含义留在代码里）。
+    """
+    if not is_public_dns_resolver(ip):
+        return False
+    if isinstance(port, bool):          # bool 是 int 的子类，先挡掉
+        return False
+    if isinstance(port, int):
+        return port in DNS_SERVICE_PORTS
+    if isinstance(port, str):
+        try:
+            return int(port) in DNS_SERVICE_PORTS
+        except ValueError:
+            return False
+    return False
 
 
 def _require_string(name: str, value: object) -> str:

@@ -338,8 +338,9 @@ def test_advice_assigned_by_infra_and_category(monkeypatch, fake_ctx):
     # DOMAIN：infra 分级
     assert by_value[(LeadCategory.DOMAIN, "sdk.getui.com")] == "无需调证"
     assert by_value[(LeadCategory.DOMAIN, "pay.evil-app.com")] == "建议调证"
-    # IP：公网 vs 内网
-    assert by_value[(LeadCategory.IP, "8.8.8.8")] == "建议调证"
+    # IP：8.8.8.8 是公共递归解析器 —— 归属公开，向 Google 调证拿不到与本案有关的东西，
+    # 故与内网同判无需调证（此前它以 HIGH 置信度进"建议调证"，占掉闭环预算）。
+    assert by_value[(LeadCategory.IP, "8.8.8.8")] == "无需调证"
     assert by_value[(LeadCategory.IP, "192.168.0.1")] == "无需调证"
     # 类别兜底，且不覆盖分析器自带值
     assert by_value[(LeadCategory.SDK_SERVICE, "个推")] == "无需调证"

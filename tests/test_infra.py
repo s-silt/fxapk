@@ -30,6 +30,124 @@ def test_real_c2_domains_still_investigate():
         assert advice == infra.ADVICE_INVESTIGATE, f"{dom} 应建议调证（真 C2 不得误杀）"
 
 
+def test_protocol_identifier_urls_are_not_endpoints():
+    """★真样本回归：WebRTC 的 RTP 头扩展 URI 里 host 是标识符，App 从不去连它。"""
+    for dom in ("www.webrtc.org", "webrtc.org", "www.w3.org", "schemas.android.com"):
+        advice, reason = infra.classify_domain(dom)
+        assert advice == infra.ADVICE_SKIP, dom
+        assert "标识符" in reason or "基础设施" in reason
+
+
+def test_sticky_prefix_variants_are_demoted_not_dropped():
+    """★真样本回归：native 字符串表里域名前面粘着别的字节。
+
+    2github.com 来自 Go 模块路径前的类型描述符数字，剥掉后就是 github.com 本身。
+
+    ★但只降"待核"，不判"无需调证"：2github.com 语法合法、可被注册和控制，
+    仅凭"剥掉前导数字后像已知域"证不了它一定是粘连产物。判 SKIP 会把一个真 C2
+    直接藏起来——这个代价换不来那点降噪收益。
+    """
+    for dom in ("2github.com", "3github.com", "4github.com"):
+        advice, reason = infra.classify_domain(dom)
+        assert advice == infra.ADVICE_REVIEW, dom
+        assert "边界产物" in reason and "人工核实" in reason
+
+    # ★不得反噬：真域名前面不该被乱剥。数字开头的合法域仍按常规判。
+    advice, _ = infra.classify_domain("360buy.com")
+    assert advice == infra.ADVICE_INVESTIGATE
+
+
+def test_common_word_slds_are_demoted_not_dropped():
+    """the.com / log.com / tos.org 实测来自二进制里的 HTML 词料，但只降待核不排除。"""
+    for dom in ("the.com", "log.com", "tos.org", "out.xyz"):
+        advice, reason = infra.classify_domain(dom)
+        assert advice == infra.ADVICE_REVIEW, dom
+        assert "伪域名" in reason
+
+    # 有子域的、或非常见词的，不受影响
+    assert infra.classify_domain("api.the.com")[0] == infra.ADVICE_INVESTIGATE
+    assert infra.classify_domain("hxhcapi.vip")[0] == infra.ADVICE_INVESTIGATE
+    assert infra.classify_domain("hcrsex.com")[0] == infra.ADVICE_INVESTIGATE
+
+
+# --- classify_ip：点分四段字面未必是网络地址 ------------------------------
+
+
+def test_classify_ip_real_backends_still_investigate():
+    """★最重要的一条：真实团伙后端不得被任何降级判据碰到。
+
+    取自实测语料里已进调证清单的形态：境外 IDC 段、带高位端口的裸后端。
+    """
+    for value in (
+        "103.36.167.109:443/tcp",
+        "134.175.85.26:30147/tcp",
+        "154.206.232.17",
+        "45.202.1.163",
+        "65.75.210.121",
+        "15.204.18.128",
+        "222.167.33.27",
+        "8.210.13.45",
+    ):
+        advice, _reason = infra.classify_ip(value)
+        assert advice == infra.ADVICE_INVESTIGATE, f"{value} 应建议调证（真后端不得误杀）"
+
+
+def test_classify_ip_version_numbers_demoted_not_dropped():
+    """★真样本回归：混淆资源里的连续递增编号被 IP 正则吃掉，以 HIGH 置信度占满闭环 Top6。
+
+    只降"待核"不排除——四段皆小在真 IP 里罕见但不是不可能。
+    """
+    for value in ("1.3.1.1", "1.3.1.6", "1.4.1.14", "1.2.0.4"):
+        advice, reason = infra.classify_ip(value)
+        assert advice == infra.ADVICE_REVIEW, value
+        assert "版本号" in reason or "序号" in reason
+
+
+def test_classify_ip_low_octets_with_address_context_kept():
+    """同样的字面，若样本里带端口或出现在 URL 中，就是当地址用的 → 不降。"""
+    advice, _ = infra.classify_ip("1.2.3.4", context="connect to 1.2.3.4:8443 now")
+    assert advice == infra.ADVICE_INVESTIGATE
+    advice, _ = infra.classify_ip("1.2.3.4", context="http://1.2.3.4/api/login")
+    assert advice == infra.ADVICE_INVESTIGATE
+
+
+def test_classify_ip_asn1_oids_demoted():
+    """X.509 / 加密库常量：1.3.101.112 是 Ed25519 的 OID，不是地址。"""
+    for value in ("1.3.101.112", "2.5.29.17", "2.5.4.3", "1.2.840.113549"):
+        advice, reason = infra.classify_ip(value)
+        assert advice == infra.ADVICE_REVIEW, value
+        assert "OID" in reason
+
+
+def test_classify_ip_public_resolvers_skip():
+    """公共递归解析器归属公开，向它们调证拿不到与本案有关的任何东西 → 不占预算。"""
+    for value in ("223.5.5.5", "114.114.114.114", "8.8.8.8", "119.29.29.29", "120.53.53.53"):
+        advice, _reason = infra.classify_ip(value)
+        assert advice == infra.ADVICE_SKIP, value
+
+
+def test_classify_ip_strips_port_suffix():
+    """★不剥 ':port/proto' 尾缀，一切精确匹配都会被绕过（实测动态线索值就是这个形态）。"""
+    assert infra.classify_ip("223.5.5.5:53/udp")[0] == infra.ADVICE_SKIP
+    assert infra.classify_ip("114.114.114.114:53/udp")[0] == infra.ADVICE_SKIP
+    assert infra.classify_ip("1.3.1.1:0/tcp")[0] == infra.ADVICE_REVIEW
+
+
+def test_classify_ip_runtime_observed_exempts_shape_rules():
+    """★设备上真连过就是地址，四段再小也不是版本号——形态判据一律让位于观测事实。"""
+    advice, reason = infra.classify_ip("1.3.1.1", runtime_observed=True)
+    assert advice == infra.ADVICE_INVESTIGATE
+    assert "运行时" in reason
+    # 但公共解析器与非全球地址仍先行判定（观测到不等于该调证）
+    assert infra.classify_ip("223.5.5.5", runtime_observed=True)[0] == infra.ADVICE_SKIP
+    assert infra.classify_ip("10.0.0.5", runtime_observed=True)[0] == infra.ADVICE_SKIP
+
+
+def test_classify_ip_non_global_skips():
+    for value in ("10.0.0.5", "127.0.0.1", "192.0.2.10", "198.18.0.8", "169.254.1.1"):
+        assert infra.classify_ip(value)[0] == infra.ADVICE_SKIP, value
+
+
 def test_m3w_cn_is_infra_skip():
     advice, reason = infra.classify_domain("m3w.cn")
     assert advice == infra.ADVICE_SKIP

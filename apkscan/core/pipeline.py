@@ -293,6 +293,18 @@ def _stage_degradation_flags(state: _PipelineState) -> None:
         logger.warning("DEX 不可用（加固/无 dex），静态端点/SDK/支付线索严重不完整")
     if getattr(ctx, "apk_validation_ok", True) is False:
         meta["apk_validation_warning"] = "APK 合法性校验异常，分析结果可能不可靠（详见日志）"
+    # 额外 DEX（脱壳产物）的加载账目：requested/loaded/failed。脱壳 dump 的 DEX 成批
+    # 不被 androguard 接受是常态（Android 10+ hidden-api flag），只有把失败数带进 meta，
+    # 下游（visibility / 报告 / 读报告的人）才分得清"并入了 N 个"与"请求了 N 个"。
+    extra_report = getattr(ctx, "extra_dex_report", None)
+    if isinstance(extra_report, dict) and extra_report:
+        meta["extra_dex_visibility"] = dict(extra_report)
+        failed = int(extra_report.get("failed") or 0)
+        if failed:
+            logger.warning(
+                "额外 DEX：请求 %s 个，成功并入 %s 个，失败 %s 个——静态 DEX 面不完整",
+                extra_report.get("requested"), extra_report.get("loaded"), failed,
+            )
 
 
 def _stage_remote_config_fetch(state: _PipelineState) -> None:
