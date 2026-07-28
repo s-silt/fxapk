@@ -627,7 +627,10 @@ def test_visible_report_passes_visibility_check() -> None:
     from apkscan.core import visibility
 
     report = _report(_complete_endpoint())
-    report.meta["visibility"] = visibility.assess({"meta": {"dex_available": True}})
+    # 资源层也要有扫描信号，否则它是"未评估"而非"已确认完整"（见下一条测试）。
+    report.meta["visibility"] = visibility.assess(
+        {"meta": {"dex_available": True, "resource_files_scanned": 12}}
+    )
 
     closure = evaluate_closure(
         report, [assemble_target_closure(report.endpoints[0])], require_dynamic=False
@@ -636,6 +639,102 @@ def test_visible_report_passes_visibility_check() -> None:
     assert closure["status"] == CLOSURE_COMPLETE
     vis_check = next(c for c in closure["checks"] if c["id"] == "evidence_visibility")
     assert vis_check["status"] == "pass"
+
+
+def test_close_refreshes_stale_visibility_snapshot() -> None:
+    """★快照是派生视图：分析期算完之后 meta 又变了，结案前必须重算。
+
+    实际场景：analyze 时还没跑动态 → runtime=unavailable；随后 capture --into 写入
+    runtime_merged / capture_quality。不重算，最终报告会一边写着"已成功抓包"、
+    一边在可见性里说"未做运行时观测、建议去抓包"。
+    退回 close_report 里的 _refresh_visibility 调用，本测试即红。
+    """
+    from apkscan.core import visibility
+
+    report = _report(_complete_endpoint())
+    # 分析期快照：那时没有运行时证据
+    report.meta["visibility"] = visibility.assess({"meta": {"dex_available": True}})
+    assert report.meta["visibility"]["sources"]["runtime"]["visibility"] == visibility.VIS_UNAVAILABLE
+    # 之后动态合并写入了运行时证据
+    report.meta["runtime_merged"] = True
+    report.meta["capture_quality"] = {"dynamic_status": "complete", "reason": "ok"}
+
+    closure_module._refresh_visibility(report)
+
+    assert report.meta["visibility"]["sources"]["runtime"]["visibility"] == visibility.VIS_COMPLETE
+    assert "runtime_contact_observed" not in report.meta["visibility"]["blocked_claims"]
+
+
+def test_close_backfills_visibility_for_legacy_report() -> None:
+    """★旧报告没有快照，但原始信号还在 meta 里 → 补算，别让它从 not_applicable 旁路。
+
+    否则分析于该层落地之前的加壳样本，结案时拿不到「目标集可能不全」的封顶。
+    """
+    report = _report(_complete_endpoint())
+    report.meta.pop("visibility", None)
+    report.meta["is_hardened"] = True          # 旧报告里就有的原始信号
+
+    closure_module._refresh_visibility(report)
+
+    assert isinstance(report.meta.get("visibility"), dict)
+    assert "static_endpoint_exhaustive" in report.meta["visibility"]["blocked_claims"]
+
+
+def test_close_does_not_fabricate_visibility_without_signals() -> None:
+    """守恒：连原始信号都没有的远古报告不硬造快照。
+
+    「没有信号」≠「已确认完整」——凭空写一份 dex=complete 正是本层要防的误读。
+    """
+    report = _report(_complete_endpoint())
+    report.meta.pop("visibility", None)
+    for key in list(report.meta):
+        if key in closure_module._VISIBILITY_INPUT_KEYS:
+            report.meta.pop(key)
+
+    closure_module._refresh_visibility(report)
+
+    assert "visibility" not in report.meta
+
+
+def test_unassessed_source_warns_without_capping_closure() -> None:
+    """★「某一维没评估过」如实说明，但不为此把整份报告封顶 partial。
+
+    与「目标全由运行时归因」那条豁免同构：没评估不是实测到的缺口。
+    但也不能再说 "static inputs were fully visible" —— 那对未评估的维度是错误陈述。
+    """
+    from apkscan.core import visibility
+
+    report = _report(_complete_endpoint())
+    report.meta["visibility"] = visibility.assess({"meta": {"dex_available": True}})
+
+    closure = evaluate_closure(
+        report, [assemble_target_closure(report.endpoints[0])], require_dynamic=False
+    )
+
+    vis_check = next(c for c in closure["checks"] if c["id"] == "evidence_visibility")
+    assert vis_check["status"] == "warn"
+    assert "not assessed" in str(vis_check["reason"])
+    assert "fully visible" not in str(vis_check["reason"])
+    assert closure["status"] == CLOSURE_COMPLETE, "未评估不该封顶"
+
+
+def test_confirmed_blind_spot_still_caps_closure() -> None:
+    """守恒：**实测到**的静态盲区仍要封顶 partial —— 真 C2 可能就藏在看不见的那部分里。"""
+    from apkscan.core import visibility
+
+    report = _report(_complete_endpoint())
+    report.meta["visibility"] = visibility.assess(
+        {"meta": {"is_hardened": True, "resource_files_scanned": 12}}
+    )
+
+    closure = evaluate_closure(
+        report, [assemble_target_closure(report.endpoints[0])], require_dynamic=False
+    )
+
+    vis_check = next(c for c in closure["checks"] if c["id"] == "evidence_visibility")
+    assert vis_check["status"] == "warn"
+    assert "not fully visible" in str(vis_check["reason"])
+    assert closure["status"] == CLOSURE_PARTIAL
 
 
 def test_old_report_without_visibility_is_not_applicable() -> None:

@@ -496,6 +496,57 @@ def test_merge_and_rerender_copies_capture_quality(tmp_path) -> None:
     assert report.meta["capture_signals"]["quality"] == quality
 
 
+def test_merge_and_rerender_refreshes_visibility(tmp_path) -> None:
+    """★接线：合并写入运行时证据后必须重算可见性快照。
+
+    快照是派生视图。analyze 期算它时还没有动态证据（runtime=unavailable）；
+    合并刚写进 runtime_merged / capture_quality，不重算就会出现同一份报告里
+    「已成功抓包」与「未做运行时观测、建议去抓包」并存。
+
+    退回 merge_and_rerender 里的那段重算，本测试即红。
+    """
+    from apkscan.core import visibility
+
+    runtime_report = tmp_path / "runtime_report.json"
+    _write_runtime_report(
+        runtime_report,
+        [],
+        capture_signals={
+            "quality": {
+                "channel_ready": True,
+                "pcap_valid": True,
+                "packet_count": 4,
+                "business_candidate_count": 1,
+                "target_attributed_count": 1,
+                "bidirectional_target_count": 1,
+                "bidirectional_business_count": 1,
+                "bidirectional_floor_count": 1,
+                "bidirectional_mitm_count": 0,
+                "infrastructure_excluded_count": 0,
+                "dynamic_status": "complete",
+                "reason": "ok",
+                "floor_parse_status": "ok",
+            },
+            "mitm_channel_ok": True,
+        },
+    )
+    report = _make_report(meta={"dex_available": True})
+    # 分析期快照：那时确实还没有运行时证据
+    report.meta["visibility"] = visibility.assess({"meta": {"dex_available": True}})
+    assert report.meta["visibility"]["sources"]["runtime"]["visibility"] == visibility.VIS_UNAVAILABLE
+
+    merge.merge_and_rerender(
+        report, [], str(tmp_path), formats=["json"], runtime_report_path=str(runtime_report)
+    )
+
+    vis = report.meta["visibility"]
+    assert vis["sources"]["runtime"]["visibility"] == visibility.VIS_COMPLETE, (
+        "合并后未重算：报告会一边说抓包成功、一边说没做运行时观测"
+    )
+    assert "runtime_contact_observed" not in vis["blocked_claims"]
+    assert not any("capture" in x for x in vis["next_actions"]), "已抓过包就别再劝去抓包"
+
+
 def test_merge_and_rerender_copies_capture_capabilities(tmp_path) -> None:
     """A1-3：runtime_report.json 的 capture_capabilities（能力计划快照）拷进 report.meta。"""
     runtime_report = tmp_path / "runtime_report.json"

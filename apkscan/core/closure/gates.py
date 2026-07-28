@@ -184,11 +184,28 @@ def _visibility_check(
             "evidence_refs": [],
         }
 
-    blind = sorted(
-        src for src, info in (assessment.get("sources") or {}).items()
-        if isinstance(info, dict)
-        and info.get("visibility") not in (_vis.VIS_COMPLETE, _vis.VIS_UNKNOWN)
-    )
+    # ★只看 static_endpoint_exhaustive **这条主张实际依赖的**源，不要全局扫。
+    #   全局扫会把 runtime=unavailable（纯静态分析的正常状态、与静态穷尽性无关）
+    #   也算成"静态盲区"，于是每份没跑动态的报告都被记 gap 封顶 partial——
+    #   与本函数开头声明的「按主张相关性，不是全局封顶」相悖。
+    # 「确证不可见」与「未评估」再分开：都不足以支撑穷尽性主张，
+    #   但只有前者是本次分析实测到的缺口，该把闭环封顶 partial。
+    _claim = _mapping((assessment.get("claims") or {}).get("static_endpoint_exhaustive"))
+    blind = sorted(str(s) for s in (_claim.get("missing_sources") or []))
+    unassessed = sorted(str(s) for s in (_claim.get("unassessed_sources") or []))
+    if not blind:
+        # 仅因某一维从未评估而被阻：如实说明，但不为此把整份报告降级——
+        # 与上面「目标全由运行时归因」那条豁免同构。★但也**不能**再说
+        # "static inputs were fully visible"：那对一个没评估过的维度是错误陈述。
+        return {
+            "id": "evidence_visibility",
+            "status": "warn",
+            "reason": (
+                f"static inputs not assessed for: {', '.join(unassessed) or 'unspecified'}; "
+                "exhaustiveness claims withheld, but no confirmed blind spot"
+            ),
+            "evidence_refs": [],
+        }
     runtime_backed = [
         t for t in targets
         if isinstance(_mapping(t.get("runtime")).get("status"), str)
