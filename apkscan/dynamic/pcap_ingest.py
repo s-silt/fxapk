@@ -1889,10 +1889,6 @@ def _merge_runtime_endpoint_dicts(payload: dict, fresh: list[dict]) -> int:
     return added
 
 
-#: ``meta["runtime_pcap_merges"]`` 保留的指纹条数上限（每条 64 字符）。
-_MAX_MERGE_FINGERPRINTS = 64
-
-
 def summary_merge_fingerprint(summary: PcapSummary) -> str:
     """这份采集结果的内容指纹，用于「同一份 pcap 别并第二次」。
 
@@ -1901,11 +1897,19 @@ def summary_merge_fingerprint(summary: PcapSummary) -> str:
       报告不幂等，而字节数正是闭环判"有无双向载荷"的输入。指纹按内容算（不按文件路径），
       所以两份**不同**的采集仍会正常累加，只挡住重复导入同一份。
 
-    ★指纹必须覆盖**这次合并会写进报告的全部内容**，不只是计数。此前只收统计量，于是
-      「端点与字节数完全相同、但第二次多解出了 SNI」被误判成重复：Lead 侧不受闸控制、照常
-      拿到 ``sni_masquerade``，端点侧却被整体跳过、``runtime.sni`` 一片空白——两边说法不一致。
-      DNS-only 的采集更明显：查询数量相同而内容不同，旧指纹分不出来。故 SNI / JA3 / ALPN /
-      QUIC 版本与 DNS 查询名全部入指纹。**漏收一个字段，就等于把那个字段的更新静默丢掉。**
+    ★判据：指纹覆盖的必须**正好**是 :func:`merge_into_report_json` 会写的东西——不多也不少。
+      两个方向都会出错，方向相反：
+
+      - **收少了** → 两份不同的采集撞指纹、第二份被整体跳过，那些字段的更新静默丢失。
+        （实测过：端点与字节数相同、只是第二次多解出 SNI，Lead 侧照常拿到 ``sni_masquerade``、
+        端点侧却连 ``runtime.sni`` 都没有，同一份报告两种说法。）
+      - **收多了** → 两份采集因为一个**根本不落盘**的差异被判为不同，于是端点计数又累加一遍，
+        凭空长出观测强度。曾把 ``dns_records`` 收进来，而这条路径只消费 ``dns_queries``
+        （``dns_records`` 明细走 :func:`to_ledger_dict`，不进 report.json）——已移除。
+
+      故本函数收：每个远端端点的统计量与 SNI/JA3/ALPN/QUIC、``dns_queries`` 全部查询名、
+      flows 计数与 ``parse_status``（后两者进 ``meta.runtime_pcap_inventory``）。
+      **改动 merge_into_report_json 写什么，就必须同步改这里。**
     """
     parts = [
         f"{re_.ip}|{re_.port}|{re_.proto}|{re_.state}|{re_.out_bytes}|{re_.in_bytes}|"
@@ -1917,13 +1921,7 @@ def summary_merge_fingerprint(summary: PcapSummary) -> str:
         for re_ in remote_endpoints(summary)
     ]
     parts.append("dnsq=" + ",".join(sorted(str(q) for q in summary.dns_queries)))
-    # DnsRecord 的 answers 会作为 TXT 配置下发通道等证据入报告，内容变了就不是同一份采集。
-    parts.append("dnsr=" + ",".join(sorted(
-        f"{r.qname}/{r.qtype}/{r.rcode}/"
-        + "+".join(f"{a.get('type')}:{a.get('value')}" for a in (r.answers or []))
-        for r in summary.dns_records
-    )))
-    parts.append(f"flows={len(summary.flows)}")
+    parts.append(f"flows={len(summary.flows)}|parse={summary.parse_status}")
     blob = "\n".join(sorted(parts)).encode("utf-8", "replace")
     return hashlib.sha256(blob).hexdigest()
 
@@ -2075,11 +2073,10 @@ def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:
         else:
             ep_added = _merge_runtime_endpoint_dicts(payload, fresh_eps)
             merged_fps.append(fingerprint)
-            # 有上限：只留最近 _MAX_MERGE_FINGERPRINTS 条。反复往同一份报告回灌不同采集时，
-            # 这个列表会无界膨胀（每条 64 字符）。超出上限后最老的那几份"失忆"、重并会重复累加，
-            # 这是有意的取舍——真实用法是一份报告并几次，而不是几百次。
-            if len(merged_fps) > _MAX_MERGE_FINGERPRINTS:
-                merged_fps = merged_fps[-_MAX_MERGE_FINGERPRINTS:]
+            # ★这份名单**不截尾**。曾经加过 64 条上限来防 meta 膨胀，但截尾会让最老的采集"失忆"：
+            #   再次导入时 already=False，字节数与连接数照样求和，凭空长出观测强度——正是这道闸
+            #   要防的那件事，被防膨胀的措施自己放了回来。取证工具的取舍是**宁可漏、不可造**：
+            #   多留几条哈希只是几 KB，而伪造出来的"双向载荷"会直接改变闭环结论（codex 三轮 P1）。
             meta["runtime_pcap_merges"] = merged_fps
 
         # meta 侧：可见性据此判 runtime 这一维走没走过。不写就一直是"未做运行时观测"。

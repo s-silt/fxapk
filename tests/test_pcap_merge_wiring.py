@@ -366,6 +366,36 @@ def test_fingerprint_distinguishes_captures_that_differ_only_in_sni(tmp_path: Pa
     assert rt["sni_masquerade"] == ["player.mediastatic-cdn.com"], "端点侧没拿到伪装标记"
 
 
+def test_merge_history_is_never_truncated(tmp_path: Path) -> None:
+    """★并过很多份之后，最早那份重新导入仍不得累加计数。
+
+    曾给这份名单加过 64 条上限来防 meta 膨胀，结果截尾让最老的采集"失忆"——再次导入时
+    ``already=False``，字节数与连接数照样求和，凭空长出观测强度，正是这道闸要防的那件事
+    被防膨胀措施自己放了回来（codex 三轮 P1）。取证工具**宁可漏、不可造**：多留几条哈希只是
+    几 KB，伪造出来的"双向载荷"却会直接改变闭环结论。把截尾加回去，本测试即红。
+    """
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_STATIC, ensure_ascii=False), encoding="utf-8")
+
+    first = _one_flow_pair(out_b=1000, in_b=500)
+    pcap_ingest.merge_into_report_json(str(p), first)
+    baseline = _runtime_of(json.loads(p.read_text(encoding="utf-8")), "8.163.60.2")["out_bytes"]
+
+    # 再并 80 份互不相同的采集（每份字节数不同 → 指纹不同），把历史撑到远超任何合理上限
+    for n in range(80):
+        pcap_ingest.merge_into_report_json(str(p), _one_flow_pair(out_b=2000 + n, in_b=100 + n))
+    after_many = _runtime_of(json.loads(p.read_text(encoding="utf-8")), "8.163.60.2")["out_bytes"]
+
+    # 现在把**最早**那份再并一次——它必须仍被认出来
+    pcap_ingest.merge_into_report_json(str(p), first)
+    final = json.loads(p.read_text(encoding="utf-8"))
+    assert _runtime_of(final, "8.163.60.2")["out_bytes"] == after_many, \
+        "最早那份采集被历史截尾挤掉了，重并时又累加了一次"
+    assert final["meta"]["runtime_pcap_merges"][0] == pcap_ingest.summary_merge_fingerprint(first), \
+        "首条指纹不该被截掉"
+    assert baseline < after_many  # 中间那批确实累加了（否则上面的断言恒真）
+
+
 def test_fingerprint_distinguishes_dns_only_captures() -> None:
     """DNS-only 采集：查询数量相同、内容不同，也必须分得开（否则整批 DNS 证据被吞）。"""
     a = pcap_ingest.PcapSummary(dns_queries={"a.example.test"})
