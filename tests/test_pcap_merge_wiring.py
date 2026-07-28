@@ -57,6 +57,26 @@ def _bidirectional_summary(ip: str = "8.138.102.85", port: int = 31861) -> pcap_
     return pcap_ingest.PcapSummary(flows=[out, back])
 
 
+def _two_port_summary(ip: str = "8.163.60.2") -> pcap_ingest.PcapSummary:
+    """同一 IP 上两个业务端口（复刻实测形态：一台机 5479 主通道 ＋ 8796 心跳通道）。
+
+    实测三台后端各开两个端口，每台的两个端口一个流量大（约 1.7KB 上行）、
+    一个流量小（约 250B 上行）——若合并时相互覆盖，稳定漏掉一半调证标的。
+    """
+    flows: list[pcap_ingest.Flow] = []
+    for port, out_b, in_b, lport in ((5479, 1759, 546, 40001), (8796, 258, 447, 40002)):
+        flows.append(pcap_ingest.Flow(
+            proto="tcp", src_ip="192.168.10.233", src_port=lport,
+            dst_ip=ip, dst_port=port, packets=20, payload_bytes=out_b, flags={"syn"},
+        ))
+        flows.append(pcap_ingest.Flow(
+            proto="tcp", src_ip=ip, src_port=port,
+            dst_ip="192.168.10.233", dst_port=lport,
+            packets=17, payload_bytes=in_b, flags={"synack"},
+        ))
+    return pcap_ingest.PcapSummary(flows=flows)
+
+
 def _merge(tmp_path: Path, summary: pcap_ingest.PcapSummary) -> dict:
     p = tmp_path / "report.json"
     p.write_text(json.dumps(_STATIC, ensure_ascii=False), encoding="utf-8")
@@ -193,3 +213,535 @@ def test_private_remote_is_not_merged(tmp_path: Path) -> None:
     payload = _merge(tmp_path, pcap_ingest.PcapSummary(flows=[f]))
 
     assert "192.168.10.1" not in [e["value"] for e in payload["endpoints"]]
+
+
+# ---------------------------------------------------------------------------
+# 面四：同一 IP 多端口不得互相覆盖（codex P1-3）
+# ---------------------------------------------------------------------------
+
+
+def _runtime_of(payload: dict, ip: str) -> dict:
+    ep = next(e for e in payload["endpoints"] if e["value"] == ip)
+    return ep["enrichment"]["runtime"]
+
+
+def test_multi_port_backend_keeps_every_port(tmp_path: Path) -> None:
+    """★同一 IP 上的多个业务端口必须全部保留。
+
+    端点的 value 是裸 IP，此前每个端口各产一条同 key 的 dict、合并时 ``{**old, **new}``
+    把前一个端口的 runtime 整个压掉——报告里只剩最后一个端口。实测形态是
+    「一台机两个端口、一主一心跳」，等于稳定漏掉一半调证标的。
+    """
+    payload = _merge(tmp_path, _two_port_summary())
+    rt = _runtime_of(payload, "8.163.60.2")
+
+    assert sorted(rt["remote_endpoints"]) == ["8.163.60.2:5479", "8.163.60.2:8796"]
+    assert sorted(rt["ports"]) == [5479, 8796]
+
+
+def test_multi_port_counters_are_summed_not_overwritten(tmp_path: Path) -> None:
+    """★字节与连接数按端口累加，不是被后一个端口覆盖。"""
+    payload = _merge(tmp_path, _two_port_summary())
+    rt = _runtime_of(payload, "8.163.60.2")
+
+    assert rt["out_bytes"] == 1759 + 258, "上行字节没有跨端口累加"
+    assert rt["in_bytes"] == 546 + 447
+    assert rt["has_payload"] is True
+
+
+def test_representative_port_is_the_high_traffic_one(tmp_path: Path) -> None:
+    """代表端口取流量最大的那个（主通道），不是最后并入的那个。
+
+    实测形态是"一主一心跳"；心跳端口若当上代表值，展示与调证函会指向次要通道。
+    """
+    rt = _runtime_of(_merge(tmp_path, _two_port_summary()), "8.163.60.2")
+    assert rt["port"] == 5479, "代表端口指到了低流量的次要通道"
+
+
+def test_cross_source_merge_keeps_the_high_traffic_representative_port() -> None:
+    """跨来源合并同样按流量定代表端口——否则 docstring 承诺的规则只在单来源内成立。"""
+    heavy = {"port": 5479, "out_bytes": 1759, "in_bytes": 546, "ports": [5479]}
+    light = {"port": 8796, "out_bytes": 258, "in_bytes": 447, "ports": [8796]}
+
+    assert pcap_ingest._merge_runtime_blocks(heavy, light)["port"] == 5479
+    assert pcap_ingest._merge_runtime_blocks(light, heavy)["port"] == 5479
+
+
+def test_cross_source_merge_does_not_clobber_target_attribution() -> None:
+    """★pcap 路径做不了 UID 归因、从不写 target_attributed；合并不得把 capture 写的真归因冲掉。"""
+    from_capture = {"target_attributed": True, "out_bytes": 10, "in_bytes": 10}
+    from_pcap = {"out_bytes": 5, "in_bytes": 5, "ports": [443]}  # 无 target_attributed 键
+
+    merged = pcap_ingest._merge_runtime_blocks(from_capture, from_pcap)
+    assert merged["target_attributed"] is True, "capture 路径的 UID 归因被 pcap 合并冲掉了"
+
+
+# ---------------------------------------------------------------------------
+# 面五：重复导入同一份采集必须幂等（codex 二轮 P1）
+# ---------------------------------------------------------------------------
+
+
+def test_reimporting_the_same_pcap_does_not_double_count(tmp_path: Path) -> None:
+    """★同一份 pcap 并两次，字节数与连接数不得翻倍。
+
+    求和是跨端口累计所必需的语义，但重复导入时它变成凭空翻倍——而字节数正是闭环判
+    「有无双向载荷」的输入，翻倍等于伪造观测强度。去掉幂等闸，本测试即红。
+    """
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_STATIC, ensure_ascii=False), encoding="utf-8")
+    summary = _two_port_summary()
+
+    pcap_ingest.merge_into_report_json(str(p), summary)
+    first = json.loads(p.read_text(encoding="utf-8"))
+    rt_first = _runtime_of(first, "8.163.60.2")
+    out_once, conns_once = rt_first["out_bytes"], rt_first["connection_count"]
+
+    pcap_ingest.merge_into_report_json(str(p), summary)  # 同一份再并一次
+    second = json.loads(p.read_text(encoding="utf-8"))
+    rt = _runtime_of(second, "8.163.60.2")
+
+    assert rt["out_bytes"] == out_once, "重复导入把上行字节数累加了"
+    assert rt["connection_count"] == conns_once, "重复导入把连接数累加了"
+    assert sorted(rt["ports"]) == [5479, 8796]
+    ep = next(e for e in second["endpoints"] if e["value"] == "8.163.60.2")
+    sigs = [(e["source"], e["location"], e["snippet"]) for e in ep["evidences"]]
+    assert len(sigs) == len(set(sigs)), "重复导入把同样的证据又追加了一遍"
+
+
+def test_two_different_captures_still_accumulate(tmp_path: Path) -> None:
+    """幂等闸按**内容**指纹判，两份不同的采集仍要正常累加——别把闸修成"只认第一次"。"""
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_STATIC, ensure_ascii=False), encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(str(p), _two_port_summary())
+    before = _runtime_of(json.loads(p.read_text(encoding="utf-8")), "8.163.60.2")["out_bytes"]
+
+    # 第二份采集：同 IP 同端口，但字节数不同 → 是另一次观测，应当累加。
+    other = pcap_ingest.PcapSummary(flows=[
+        pcap_ingest.Flow(proto="tcp", src_ip="192.168.10.233", src_port=40009,
+                         dst_ip="8.163.60.2", dst_port=5479, packets=9,
+                         payload_bytes=777, flags={"syn"}),
+        pcap_ingest.Flow(proto="tcp", src_ip="8.163.60.2", src_port=5479,
+                         dst_ip="192.168.10.233", dst_port=40009, packets=8,
+                         payload_bytes=333, flags={"synack"}),
+    ])
+    pcap_ingest.merge_into_report_json(str(p), other)
+    after = _runtime_of(json.loads(p.read_text(encoding="utf-8")), "8.163.60.2")["out_bytes"]
+
+    assert after == before + 777, "不同的两份采集没有累加"
+
+
+def _one_flow_pair(sni: set[str] | None = None, out_b: int = 1200, in_b: int = 800):
+    """一对同端点的进出向 flow，统计量固定、只有 SNI 可变——用来单独考指纹的分辨力。"""
+    return pcap_ingest.PcapSummary(flows=[
+        pcap_ingest.Flow(proto="tcp", src_ip="192.168.10.233", src_port=41000,
+                         dst_ip="8.163.60.2", dst_port=5479, packets=20,
+                         payload_bytes=out_b, flags={"syn"}, sni=set(sni or ())),
+        pcap_ingest.Flow(proto="tcp", src_ip="8.163.60.2", src_port=5479,
+                         dst_ip="192.168.10.233", dst_port=41000, packets=17,
+                         payload_bytes=in_b, flags={"synack"}),
+    ])
+
+
+def test_fingerprint_distinguishes_captures_that_differ_only_in_sni(tmp_path: Path) -> None:
+    """★统计量完全相同、只是第二次多解出了 SNI —— 不得被幂等闸当成重复。
+
+    此前指纹只收端点统计与 flows/DNS 计数，这两份采集指纹相同，于是端点侧被整体跳过：
+    Lead 侧照常拿到 sni_masquerade，端点侧却连 runtime.sni 都没有，同一份报告两种说法
+    （codex 二轮 P1）。上一版之所以测试还绿，是因为我恰好改了字节数——那是巧合，不是判据。
+    """
+    plain = _one_flow_pair()
+    with_sni = _one_flow_pair({"player.mediastatic-cdn.com"})
+
+    assert pcap_ingest.summary_merge_fingerprint(plain) != \
+        pcap_ingest.summary_merge_fingerprint(with_sni), "只差 SNI 的两份采集指纹撞了"
+
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_STATIC, ensure_ascii=False), encoding="utf-8")
+    pcap_ingest.merge_into_report_json(str(p), plain)
+    pcap_ingest.merge_into_report_json(str(p), with_sni)
+
+    rt = _runtime_of(json.loads(p.read_text(encoding="utf-8")), "8.163.60.2")
+    assert rt["sni"] == ["player.mediastatic-cdn.com"], "第二次采集的 SNI 被幂等闸吞掉了"
+    assert rt["sni_masquerade"] == ["player.mediastatic-cdn.com"], "端点侧没拿到伪装标记"
+
+
+def test_merge_history_is_never_truncated(tmp_path: Path) -> None:
+    """★并过很多份之后，最早那份重新导入仍不得累加计数。
+
+    曾给这份名单加过 64 条上限来防 meta 膨胀，结果截尾让最老的采集"失忆"——再次导入时
+    ``already=False``，字节数与连接数照样求和，凭空长出观测强度，正是这道闸要防的那件事
+    被防膨胀措施自己放了回来（codex 三轮 P1）。取证工具**宁可漏、不可造**：多留几条哈希只是
+    几 KB，伪造出来的"双向载荷"却会直接改变闭环结论。把截尾加回去，本测试即红。
+    """
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_STATIC, ensure_ascii=False), encoding="utf-8")
+
+    first = _one_flow_pair(out_b=1000, in_b=500)
+    pcap_ingest.merge_into_report_json(str(p), first)
+    baseline = _runtime_of(json.loads(p.read_text(encoding="utf-8")), "8.163.60.2")["out_bytes"]
+
+    # 再并 80 份互不相同的采集（每份字节数不同 → 指纹不同），把历史撑到远超任何合理上限
+    for n in range(80):
+        pcap_ingest.merge_into_report_json(str(p), _one_flow_pair(out_b=2000 + n, in_b=100 + n))
+    after_many = _runtime_of(json.loads(p.read_text(encoding="utf-8")), "8.163.60.2")["out_bytes"]
+
+    # 现在把**最早**那份再并一次——它必须仍被认出来
+    pcap_ingest.merge_into_report_json(str(p), first)
+    final = json.loads(p.read_text(encoding="utf-8"))
+    assert _runtime_of(final, "8.163.60.2")["out_bytes"] == after_many, \
+        "最早那份采集被历史截尾挤掉了，重并时又累加了一次"
+    assert final["meta"]["runtime_pcap_merges"][0] == pcap_ingest.summary_merge_fingerprint(first), \
+        "首条指纹不该被截掉"
+    assert baseline < after_many  # 中间那批确实累加了（否则上面的断言恒真）
+
+
+def test_dns_only_captures_still_get_their_leads(tmp_path: Path) -> None:
+    """★DNS-only 采集的线索不受幂等闸影响——因为 Lead 合并在闸**外**。
+
+    上一版这条测试断言的是「两份 DNS-only 采集指纹必须不同」，**前提就错了**：
+    幂等闸只保护端点侧的累加，而 DNS 只产生 Lead，Lead 合并在闸外、自带证据签名去重。
+    把 dns_queries 塞进指纹反而会让「端点贡献相同、只差 DNS」的两份采集绕过闸、
+    把端点字节数再累加一遍（codex 四轮 P1）。
+
+    所以该钉的不是指纹差异，而是**结果**：两份 DNS-only 采集的域名线索都要进报告。
+    """
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_STATIC, ensure_ascii=False), encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(
+        str(p), pcap_ingest.PcapSummary(dns_queries={"a.example.test"}))
+    pcap_ingest.merge_into_report_json(
+        str(p), pcap_ingest.PcapSummary(dns_queries={"b.example.test"}))
+
+    values = {ld.get("value") for ld in json.loads(p.read_text(encoding="utf-8"))["leads"]}
+    assert {"a.example.test", "b.example.test"} <= values, "第二份 DNS 采集的线索丢了"
+
+
+def test_dns_only_capture_writes_runtime_meta(tmp_path: Path) -> None:
+    """★纯 DNS 采集也是**真观测**，必须写 runtime meta。
+
+    此前的写入条件是 ``fresh_eps or summary.flows``，纯 DNS 两者皆空 → 整个被挡在门外：
+    不产生 inventory、``runtime_merged`` 不置 True，可见性一直说"未做运行时观测"。
+    上一版那条 DNS 测试只查 Lead，**恰好绕过了这条路径**（codex 五轮 P1）。
+    """
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_STATIC, ensure_ascii=False), encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(
+        str(p), pcap_ingest.PcapSummary(dns_queries={"a.example.test"}))
+    meta = json.loads(p.read_text(encoding="utf-8"))["meta"]
+
+    assert meta.get("runtime_merged") is True, "纯 DNS 采集没被记成运行时观测"
+    inv = meta["runtime_pcap_inventory"]
+    # ★精确值，不用 >=：_STATIC 里没有任何 runtime-pcap 域名线索，所以只能是 1。
+    #   放宽成 >= 会同时放过「重复计数」和「把静态/capture 的线索也算进来」两类回归。
+    assert inv["domain_leads"] == 1, "inventory 的域名线索数不对"
+    assert inv["uid_attributed"] is False
+
+    # 再并一份不同的 DNS 采集 → 计数要反映累计结果，而不是停在第一份
+    pcap_ingest.merge_into_report_json(
+        str(p), pcap_ingest.PcapSummary(dns_queries={"b.example.test"}))
+    inv2 = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]
+    assert inv2["domain_leads"] == 2, "第二份 DNS 采集没进 inventory"
+
+
+def test_dns_only_merge_does_not_wipe_earlier_endpoint_inventory(tmp_path: Path) -> None:
+    """★放宽写入条件的直接副作用：inventory 是覆盖写的。
+
+    先并一份有端点的采集、再并一份纯 DNS 的，若 inventory 仍按「本次 summary 的快照」写，
+    ``remote_endpoints`` 会被清零——报告里凭空少掉一个已观测的后端。故计数改为从 payload
+    推导（天然幂等），而不是取本次快照。
+    """
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_STATIC, ensure_ascii=False), encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(str(p), _bidirectional_summary())
+    before = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]
+    assert before["remote_endpoints"] == 1
+
+    pcap_ingest.merge_into_report_json(
+        str(p), pcap_ingest.PcapSummary(dns_queries={"a.example.test"}))
+    after = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]
+
+    assert after["remote_endpoints"] == 1, "纯 DNS 采集把之前那份的端点数清零了"
+    assert after["domain_leads"] == 1
+
+
+# --- inventory 的归属边界：只数本路径自己的贡献 -----------------------------
+
+def _report_with(extra_endpoints=(), extra_leads=(), meta=None) -> dict:
+    payload = json.loads(json.dumps(_STATIC))
+    payload.setdefault("endpoints", []).extend(extra_endpoints)
+    payload.setdefault("leads", []).extend(extra_leads)
+    if meta:
+        payload.setdefault("meta", {}).update(meta)
+    return payload
+
+
+def test_capture_endpoints_do_not_count_as_pcap_inventory(tmp_path: Path) -> None:
+    """★capture 路径写的端点不得算进名为 *pcap* 的 inventory。
+
+    按 ``source == "runtime-pcap"`` 钉边界是**不够的**：capture 直接调用
+    ``pcap_ingest.to_runtime_endpoints()``，产出的也是 runtime-pcap 证据（正常生产路径，
+    不是边角）。共享 schema 判不了归属，只能各自在 meta 里记账（codex 六轮 P1）。
+    """
+    p = tmp_path / "report.json"
+    capture_ep = {
+        "value": "198.51.100.77", "kind": "ip", "is_private": False,
+        "evidences": [{"source": "runtime-pcap", "location": "pcap", "snippet": "capture 写的"}],
+        "enrichment": {"runtime": {"remote_endpoints": ["198.51.100.77:443"]}},
+    }
+    p.write_text(json.dumps(_report_with(extra_endpoints=[capture_ep]), ensure_ascii=False),
+                 encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(str(p), _bidirectional_summary())
+    inv = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]
+
+    assert inv["remote_endpoints"] == 1, "capture 的端点被算进了 pcap inventory"
+
+
+def test_capture_domain_leads_do_not_count_as_pcap_inventory(tmp_path: Path) -> None:
+    """同理：预先存在的 runtime-pcap 域名线索（capture 写的）不得算进本路径的 inventory。"""
+    p = tmp_path / "report.json"
+    capture_lead = {
+        "category": "DOMAIN", "value": "cap.example.test", "advice": "待核",
+        "confidence": "MEDIUM",
+        "source_refs": [{"source": "runtime-pcap", "location": "pcap", "snippet": "capture 写的"}],
+    }
+    p.write_text(json.dumps(_report_with(extra_leads=[capture_lead]), ensure_ascii=False),
+                 encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(
+        str(p), pcap_ingest.PcapSummary(dns_queries={"a.example.test"}))
+    inv = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]
+
+    assert inv["domain_leads"] == 1, "capture 的域名线索被算进了 pcap inventory"
+
+
+def test_static_endpoint_upgraded_by_pcap_still_counts(tmp_path: Path) -> None:
+    """反向：本路径命中一个**已存在的静态端点**（升级而非新增）时，仍要计入。
+
+    防止贡献集合只记「新增的端点」而漏掉「升级已有端点」这一半。
+    """
+    p = tmp_path / "report.json"
+    static_ep = {
+        "value": "8.138.102.85", "kind": "ip", "is_private": False,
+        "evidences": [{"source": "dex", "location": "classes.dex", "snippet": "静态抓到的"}],
+        "enrichment": {},
+    }
+    p.write_text(json.dumps(_report_with(extra_endpoints=[static_ep]), ensure_ascii=False),
+                 encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(str(p), _bidirectional_summary())
+    payload = json.loads(p.read_text(encoding="utf-8"))
+
+    assert len([e for e in payload["endpoints"] if e["value"] == "8.138.102.85"]) == 1, "端点重复了"
+    assert payload["meta"]["runtime_pcap_inventory"]["remote_endpoints"] == 1, \
+        "被升级的静态端点没计入贡献集合"
+
+
+def test_old_flows_key_migrates_without_losing_history(tmp_path: Path) -> None:
+    """★改名要带迁移：旧报告只有 ``flows``，只读新键会把历史计数静默清零。"""
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_report_with(meta={"runtime_pcap_inventory": {"flows": 7}}),
+                            ensure_ascii=False), encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(str(p), _bidirectional_summary())  # 2 条 flow
+    inv = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]
+
+    assert inv["flows_merged"] == 9, "旧 flows 计数没迁移过来"
+    assert "flows" not in inv, "旧键没被清掉，会长期两套并存"
+
+
+def test_old_report_parse_failure_survives_the_new_key(tmp_path: Path) -> None:
+    """★旧报告只有 `parse_status`、没有后加的 `parse_degraded`——降级历史不得被抹掉。
+
+    `bool(prev.get("parse_degraded"))` 对旧报告恒为 False，同时 `parse_status` 被本次的
+    "ok" 覆盖，于是「这份报告曾经解析失败」彻底消失（codex 八轮 P1）。缺键时要从旧
+    `parse_status` 反推。这是同一个元错误的第三次：修了兄弟键，又漏了这一个。
+    """
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_report_with(meta={"runtime_pcap_inventory": {
+        "parse_status": "parse_error",          # 旧 schema：没有 parse_degraded
+    }}), ensure_ascii=False), encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(str(p), _bidirectional_summary())   # 本次解析正常
+    inv = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]
+
+    assert inv["parse_status"] == "ok"          # 最近一次确实成功
+    assert inv["parse_degraded"] is True, "旧报告的解析失败历史被抹掉了"
+
+
+def test_old_endpoint_and_domain_counts_do_not_regress(tmp_path: Path) -> None:
+    """★旧报告有计数、却没有贡献集合（集合是后来才引入的）——不得被重置成本次的值数量。
+
+    最初只给 `flows` 写了迁移，忘了 `remote_endpoints` 与 `dns_queries` 是同一次改名的兄弟：
+    旧报告 `{remote_endpoints: 5, dns_queries: 7}` 并入一个端点一个域名后会写成 1、1
+    （codex 七轮 P1）。取 max 作单调下界——不能相加，因为无从判断新旧是否重叠。
+    """
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_report_with(meta={"runtime_pcap_inventory": {
+        "remote_endpoints": 5, "dns_queries": 7,
+    }}), ensure_ascii=False), encoding="utf-8")
+
+    # 这份采集只贡献 1 个端点、0 个域名
+    pcap_ingest.merge_into_report_json(str(p), _bidirectional_summary())
+    inv = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]
+
+    assert inv["remote_endpoints"] == 5, "旧端点计数被重置成本次贡献数"
+    assert inv["domain_leads"] == 7, "旧 dns_queries 没迁移到 domain_leads"
+    assert "dns_queries" not in inv, "旧键没被清掉"
+
+
+def test_migrated_counts_grow_once_the_set_overtakes_them(tmp_path: Path) -> None:
+    """单调下界只在迁移期起作用：贡献集合长过旧值之后，计数要跟着集合走。"""
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_report_with(meta={"runtime_pcap_inventory": {
+        "remote_endpoints": 1,
+    }}), ensure_ascii=False), encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(str(p), _bidirectional_summary())      # 8.138.102.85
+    pcap_ingest.merge_into_report_json(str(p), _two_port_summary())           # 8.163.60.2
+    inv = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]
+
+    assert inv["remote_endpoints"] == 2, "集合已有两个 IP，计数还卡在旧的下界上"
+    assert sorted(json.loads(p.read_text(encoding="utf-8"))["meta"]
+                  ["runtime_pcap_endpoint_values"]) == ["8.138.102.85", "8.163.60.2"]
+
+
+def test_new_and_old_flow_keys_are_not_double_counted(tmp_path: Path) -> None:
+    """迁移期两个键同时存在时**取新键**，绝不相加（相加会双计）。"""
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(
+        _report_with(meta={"runtime_pcap_inventory": {"flows": 7, "flows_merged": 9}}),
+        ensure_ascii=False), encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(str(p), _bidirectional_summary())  # 2 条 flow
+    inv = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]
+
+    assert inv["flows_merged"] == 11, "新旧键被相加了（应取新键 9 + 本次 2）"
+
+
+def test_record_only_summary_does_not_fake_an_observation(tmp_path: Path) -> None:
+    """★只有 dns_records、没有 flow/query 的采集不得声称"已观测"。
+
+    这条路径根本不落盘 record（明细走 to_ledger_dict），拿它当凭据就会造出
+    「runtime_merged=True 但报告里没有任何可审计证据」（codex 六轮 P1）。
+    """
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_STATIC, ensure_ascii=False), encoding="utf-8")
+
+    rec = pcap_ingest.DnsRecord(qname="x.example.test", qtype=1, rcode=0)
+    pcap_ingest.merge_into_report_json(str(p), pcap_ingest.PcapSummary(dns_records=[rec]))
+    meta = json.loads(p.read_text(encoding="utf-8")).get("meta", {})
+
+    assert "runtime_merged" not in meta, "只有 record 就声称做过运行时观测"
+    assert "runtime_pcap_inventory" not in meta
+
+
+def test_parse_failure_is_not_erased_by_a_later_success(tmp_path: Path) -> None:
+    """解析失败过这件事不该被下一次成功抹掉——覆盖写会让报告看起来一直是干净的。"""
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_STATIC, ensure_ascii=False), encoding="utf-8")
+
+    bad = pcap_ingest.PcapSummary(flows=list(_bidirectional_summary().flows),
+                                  parse_status="parse_error")
+    pcap_ingest.merge_into_report_json(str(p), bad)
+    assert json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]["parse_degraded"] is True
+
+    pcap_ingest.merge_into_report_json(str(p), _two_port_summary())   # 这次解析正常
+    inv = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]
+    assert inv["parse_degraded"] is True, "先前的解析失败被后一次成功抹掉了"
+
+
+# --- 闸的边界：只保护端点侧的累加，不受闸外字段影响 -------------------------
+
+def _pair_with(**kw):
+    """同一组端点贡献，只改 Flow 上某个**不进 runtime 端点**的字段。"""
+    base = dict(proto="tcp", packets=20, payload_bytes=1200)
+    out = {**base, **kw}
+    inb = {**base, "packets": 17, "payload_bytes": 800, **kw}
+    return pcap_ingest.PcapSummary(flows=[
+        pcap_ingest.Flow(src_ip="192.168.10.233", src_port=41000,
+                         dst_ip="8.163.60.2", dst_port=5479, flags={"syn"}, **out),
+        pcap_ingest.Flow(src_ip="8.163.60.2", src_port=5479,
+                         dst_ip="192.168.10.233", dst_port=41000, flags={"synack"}, **inb),
+    ])
+
+
+def test_gate_ignores_fields_that_never_reach_the_endpoint(tmp_path: Path) -> None:
+    """★端点贡献相同时，闸外字段的差异**不得**让端点计数再累加一遍。
+
+    ``parse_status`` 是 meta 覆盖写、``ja3``/``alpn``/``quic`` 只进 Lead 证据——三者都不在
+    ``_runtime_endpoint_dicts`` 写的端点里。把它们收进指纹，就会让「同一批端点、只差这些」
+    的两份采集绕过闸，``out_bytes`` 翻倍。这是「扩大判据范围」引入的伪造（codex 四轮 P1）。
+    """
+    first = _pair_with()
+    for label, second in (
+        ("parse_status", pcap_ingest.PcapSummary(flows=list(first.flows), parse_status="parse_error")),
+        ("ja3", _pair_with(ja3={"deadbeef"})),
+        ("alpn", _pair_with(alpn={"h2"})),
+        ("quic", _pair_with(quic_versions={"1"})),
+    ):
+        assert pcap_ingest.summary_merge_fingerprint(first) == \
+            pcap_ingest.summary_merge_fingerprint(second), f"{label} 不该改变端点侧指纹"
+
+        p = tmp_path / f"report_{label}.json"
+        p.write_text(json.dumps(_STATIC, ensure_ascii=False), encoding="utf-8")
+        pcap_ingest.merge_into_report_json(str(p), first)
+        once = _runtime_of(json.loads(p.read_text(encoding="utf-8")), "8.163.60.2")["out_bytes"]
+        pcap_ingest.merge_into_report_json(str(p), second)
+        twice = _runtime_of(json.loads(p.read_text(encoding="utf-8")), "8.163.60.2")["out_bytes"]
+        assert twice == once, f"只差 {label} 就让端点字节数累加了两次"
+
+
+def test_gate_still_separates_real_endpoint_differences() -> None:
+    """收窄之后不能矫枉过正：端点侧**真**有差异时，指纹仍必须分得开。"""
+    base = _pair_with()
+    assert pcap_ingest.summary_merge_fingerprint(base) != \
+        pcap_ingest.summary_merge_fingerprint(_pair_with(payload_bytes=9999)), "字节数差异被吞了"
+    assert pcap_ingest.summary_merge_fingerprint(base) != \
+        pcap_ingest.summary_merge_fingerprint(_pair_with(sni={"player.example.test"})), "SNI 差异被吞了"
+    # 同一份采集重复计算 → 指纹稳定（幂等闸成立的前提）
+    assert pcap_ingest.summary_merge_fingerprint(base) == \
+        pcap_ingest.summary_merge_fingerprint(_pair_with())
+
+
+def test_merge_never_downgrades_state_or_proto() -> None:
+    """★合并只应增加信息：已确证的 established / mixed 不得被后并入的弱观测冲掉。"""
+    strong = {"state": "established", "proto": "mixed", "out_bytes": 100, "in_bytes": 100}
+    weak = {"state": "syn_only", "proto": "tcp", "out_bytes": 1, "in_bytes": 0}
+
+    merged = pcap_ingest._merge_runtime_blocks(strong, weak)
+    assert merged["state"] == "established", "SYN-only 的补充采集把 established 降级了"
+    assert merged["proto"] == "mixed", "只含 TCP 的补充采集把 mixed 退回 tcp 了"
+
+    # 反向同理（谁先谁后都不该改变结论）
+    merged2 = pcap_ingest._merge_runtime_blocks(weak, strong)
+    assert merged2["state"] == "established"
+    assert merged2["proto"] == "mixed"
+
+    # 两种不同协议相遇 → 升 mixed（而非任一方胜出）
+    assert pcap_ingest._merge_runtime_blocks(
+        {"proto": "tcp"}, {"proto": "udp"}
+    )["proto"] == "mixed"
+    # reset 强于 syn_only（对端有反应），但弱于 established
+    assert pcap_ingest._merge_runtime_blocks(
+        {"state": "syn_only"}, {"state": "reset"}
+    )["state"] == "reset"
+
+
+def test_port_normalize_can_read_the_merged_endpoint(tmp_path: Path) -> None:
+    """★接线锁：port-normalize 的数据源必须真的被生成。
+
+    它读 ``endpoints[].enrichment["runtime"]["remote_endpoints"]``（``"ip:port"`` 形态）。
+    该字段此前根本没被 pcap 回灌生成，文档宣称的「报告实测端口交叉校验」对这类报告不可用——
+    只测端点建出来了，挡不住这种「字段名对不上、下游静默拿不到」。
+    """
+    from apkscan.config import port_norm
+
+    payload = _merge(tmp_path, _two_port_summary())
+    observed = port_norm.observed_ports_from_report(payload)
+
+    assert observed.get("8.163.60.2") == {5479, 8796}
