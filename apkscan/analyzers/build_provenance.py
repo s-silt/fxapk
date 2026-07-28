@@ -150,6 +150,20 @@ _KNOWN_THIRD_PARTY_ROOTS: tuple[tuple[str, str], ...] = (
     ("/opt/rh/", "RHEL/CentOS devtoolset 安装位（大量第三方预编译库的构建环境）"),
 )
 
+#: 已知第三方 SDK 的**项目根名**（盘符根下的第一段，小写比较）。
+#: 与 _KNOWN_THIRD_PARTY_ROOTS 的区别：那份按绝对前缀匹配（``/home/pano/`` 这类固定位置），
+#: 而 Windows 侧的第三方 SDK 源码树可以被开发者放在任意盘符下（``E:\``、``D:\`` 均实测出现过），
+#: 前缀匹配对它们无效，只能认项目根名本身。
+#: ★实测代价：``e:/tingyunandroid-oom`` 下的 ``koom-common`` / ``koom-fast-dump``
+#:   （听云 APM 集成的快手开源 OOM 监控库）被判为自建构建环境，进而进了跨案串案维度——
+#:   而它随 SDK 继承进任何接入该 APM 的 App，拿它串案会把互不相干的案件聚成一簇。
+_THIRD_PARTY_PROJECT_ROOTS: tuple[tuple[str, str], ...] = (
+    ("tingyunandroid", "听云 Android APM SDK 的源码树（含其集成的 KOOM 等开源库）"),
+    ("koom", "快手开源 OOM 监控库 KOOM（随 APM SDK 继承进样本）"),
+    ("bugly", "腾讯 Bugly 崩溃监控 SDK 源码树"),
+    ("matrix", "腾讯 Matrix 性能监控 SDK 源码树"),
+)
+
 #: 曾列入第三方名单、后经实证**撤回**的构建根：证据不足以继续判第三方，也不足以判自建，
 #: 显式停在 ``unknown`` 并带上撤回理由。
 #:
@@ -380,6 +394,13 @@ def classify_path(path: str) -> ClassifiedPath:
         # Windows 盘符根。工具链/系统安装位人人相同、零身份信息 → 第三方（=非本样本作者），
         # 否则自定义项目根（``D:/im_sdk2/…``）具私有工作区资格。
         second = root.split("/", 1)[1] if "/" in root else ""
+        # 已知第三方 SDK 的源码树可被放在任意盘符下，前缀匹配无效，只能认项目根名。
+        for marker, origin in _THIRD_PARTY_PROJECT_ROOTS:
+            if marker in second or (identifier and marker in identifier.lower()):
+                return ClassifiedPath(
+                    path=path, tier=TIER_THIRD_PARTY, root=root,
+                    username=username, origin=origin,
+                )
         if second in _WIN_TOOLCHAIN_SEGMENTS:
             return ClassifiedPath(
                 path=path, tier=TIER_THIRD_PARTY, root=root, username=username,

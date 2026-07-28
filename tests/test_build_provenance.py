@@ -448,6 +448,28 @@ def test_real_project_root_not_hit_by_asset_guard() -> None:
     assert c.identifier == "sdk_app2"
 
 
+@pytest.mark.parametrize("path, why", [
+    ("e:/tingyunandroid-oom/koom-common/src/main/cpp/x.cc", "听云 APM 源码树"),
+    ("E:/TingyunAndroid-OOM/koom-fast-dump/src/a.cpp", "同上，大小写不敏感"),
+    ("d:/bugly-android/src/main/jni/x.c", "腾讯 Bugly SDK 源码树"),
+    ("f:/matrix/matrix-android/x.cc", "腾讯 Matrix SDK 源码树"),
+])
+def test_third_party_sdk_source_trees_on_any_drive(path: str, why: str) -> None:
+    """★第三方 SDK 的源码树可以放在任意盘符下，前缀匹配对它们无效。
+
+    实测代价：``e:/tingyunandroid-oom`` 下的 KOOM 被判自建，进而进了跨案串案维度——
+    而它随 APM SDK 继承进任何接入方，拿它串案会把互不相干的案件聚成一簇。
+    """
+    c = classify_path(path)
+    assert c.tier == TIER_THIRD_PARTY, f"{why} 被当成了自建构建环境"
+
+
+def test_real_windows_project_root_still_self_hosted() -> None:
+    """对照：真·私有 Windows 项目根不得被上面那条误伤。"""
+    c = classify_path("D:/im_sdk2/sdk_app2/sdk/bootstrap.go")
+    assert c.tier == TIER_SELF_HOSTED and c.identifier == "sdk_app2"
+
+
 def test_corpus_build_env_lookup_is_reachable_from_cli() -> None:
     """★接线锁：构建环境反查必须有 CLI 出口。
 
@@ -462,6 +484,60 @@ def test_corpus_build_env_lookup_is_reachable_from_cli() -> None:
     src = inspect.getsource(cmd)
     assert "find_by_build_env" in src, "corpus seen 没有接构建环境反查"
     assert "shared_build_environments" in src, "没有跨样本构建环境簇的 CLI 出口"
+
+
+# ---------------------------------------------------------------------------
+# 串案维度的路径数门槛（corpus 侧）
+# ---------------------------------------------------------------------------
+
+
+def _env_report(items: list[dict]) -> dict:
+    return {"meta": {"build_provenance": {"self_hosted": items}}}
+
+
+def test_sparse_build_env_is_kept_out_of_cross_case_dimension() -> None:
+    """★只留一两条路径的「构建环境」不得进串案维度。
+
+    实测的三个噪音（HEVC 测试码流 1 条、JavaCC 语法文件 1 条、第三方 APM 2 条）
+    都靠这个挡；而真实构建环境实测 26–32 条，两侧中间是空的。
+    串案对假阳性最敏感——一条噪音就能把两个互不相干的案件聚成一簇。
+    """
+    from apkscan.core import corpus as C
+
+    got = C._build_environments(_env_report([
+        {"root": "c:/content", "identifier": "test-UHD.hvc", "count": 1},
+        {"root": "e:/x", "identifier": "koom-common", "count": 2},
+        {"root": "/opt/work", "identifier": "Env1877-Lxiao-AV", "count": 32},
+        {"root": "d:/im_sdk2", "identifier": "sdk_app2", "count": 26},
+    ]))
+
+    idents = [g["identifier"] for g in got]
+    assert idents == ["Env1877-Lxiao-AV", "sdk_app2"], f"门槛没生效：{idents}"
+
+
+def test_build_env_without_count_is_not_dropped() -> None:
+    """★缺 count 字段（旧报告）时放行——不因少个字段就丢掉已有数据。"""
+    from apkscan.core import corpus as C
+
+    got = C._build_environments(_env_report([
+        {"root": "/opt/work", "identifier": "Env1856-Gccc-Verify"},
+    ]))
+    assert [g["identifier"] for g in got] == ["Env1856-Gccc-Verify"]
+
+
+def test_analyzer_still_reports_sparse_paths_in_full() -> None:
+    """★门槛只作用于串案维度，分析器仍全量如实记录。
+
+    人核报告要看得到全部（包括弱证据），能不能拿去跨案聚簇是另一回事。
+    两者混为一谈，就会为了降噪而删掉人该看到的事实。
+    """
+    lib = (b"\x00" * 16 + b"z:/jc/units/javascript.jc\x00"
+           + _SYN_SELF_HOSTED.encode() + b"\x00")
+    result = _run(files={"lib/arm64-v8a/liba.so": lib},
+                  native_libs=["lib/arm64-v8a/liba.so"])
+    meta = result.meta["build_provenance"]
+    roots = {str(g.get("root")) for g in meta["self_hosted"]}
+    assert "z:/jc" in roots, "分析器把弱证据也滤掉了——那是串案维度该做的事，不是它"
 
 
 def test_total_budget_stops_scanning_remaining_libs(monkeypatch: pytest.MonkeyPatch) -> None:
