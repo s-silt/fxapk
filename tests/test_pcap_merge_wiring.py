@@ -276,6 +276,85 @@ def test_cross_source_merge_does_not_clobber_target_attribution() -> None:
     assert merged["target_attributed"] is True, "capture 路径的 UID 归因被 pcap 合并冲掉了"
 
 
+# ---------------------------------------------------------------------------
+# 面五：重复导入同一份采集必须幂等（codex 二轮 P1）
+# ---------------------------------------------------------------------------
+
+
+def test_reimporting_the_same_pcap_does_not_double_count(tmp_path: Path) -> None:
+    """★同一份 pcap 并两次，字节数与连接数不得翻倍。
+
+    求和是跨端口累计所必需的语义，但重复导入时它变成凭空翻倍——而字节数正是闭环判
+    「有无双向载荷」的输入，翻倍等于伪造观测强度。去掉幂等闸，本测试即红。
+    """
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_STATIC, ensure_ascii=False), encoding="utf-8")
+    summary = _two_port_summary()
+
+    pcap_ingest.merge_into_report_json(str(p), summary)
+    first = json.loads(p.read_text(encoding="utf-8"))
+    rt_first = _runtime_of(first, "8.163.60.2")
+    out_once, conns_once = rt_first["out_bytes"], rt_first["connection_count"]
+
+    pcap_ingest.merge_into_report_json(str(p), summary)  # 同一份再并一次
+    second = json.loads(p.read_text(encoding="utf-8"))
+    rt = _runtime_of(second, "8.163.60.2")
+
+    assert rt["out_bytes"] == out_once, "重复导入把上行字节数累加了"
+    assert rt["connection_count"] == conns_once, "重复导入把连接数累加了"
+    assert sorted(rt["ports"]) == [5479, 8796]
+    ep = next(e for e in second["endpoints"] if e["value"] == "8.163.60.2")
+    sigs = [(e["source"], e["location"], e["snippet"]) for e in ep["evidences"]]
+    assert len(sigs) == len(set(sigs)), "重复导入把同样的证据又追加了一遍"
+
+
+def test_two_different_captures_still_accumulate(tmp_path: Path) -> None:
+    """幂等闸按**内容**指纹判，两份不同的采集仍要正常累加——别把闸修成"只认第一次"。"""
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_STATIC, ensure_ascii=False), encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(str(p), _two_port_summary())
+    before = _runtime_of(json.loads(p.read_text(encoding="utf-8")), "8.163.60.2")["out_bytes"]
+
+    # 第二份采集：同 IP 同端口，但字节数不同 → 是另一次观测，应当累加。
+    other = pcap_ingest.PcapSummary(flows=[
+        pcap_ingest.Flow(proto="tcp", src_ip="192.168.10.233", src_port=40009,
+                         dst_ip="8.163.60.2", dst_port=5479, packets=9,
+                         payload_bytes=777, flags={"syn"}),
+        pcap_ingest.Flow(proto="tcp", src_ip="8.163.60.2", src_port=5479,
+                         dst_ip="192.168.10.233", dst_port=40009, packets=8,
+                         payload_bytes=333, flags={"synack"}),
+    ])
+    pcap_ingest.merge_into_report_json(str(p), other)
+    after = _runtime_of(json.loads(p.read_text(encoding="utf-8")), "8.163.60.2")["out_bytes"]
+
+    assert after == before + 777, "不同的两份采集没有累加"
+
+
+def test_merge_never_downgrades_state_or_proto() -> None:
+    """★合并只应增加信息：已确证的 established / mixed 不得被后并入的弱观测冲掉。"""
+    strong = {"state": "established", "proto": "mixed", "out_bytes": 100, "in_bytes": 100}
+    weak = {"state": "syn_only", "proto": "tcp", "out_bytes": 1, "in_bytes": 0}
+
+    merged = pcap_ingest._merge_runtime_blocks(strong, weak)
+    assert merged["state"] == "established", "SYN-only 的补充采集把 established 降级了"
+    assert merged["proto"] == "mixed", "只含 TCP 的补充采集把 mixed 退回 tcp 了"
+
+    # 反向同理（谁先谁后都不该改变结论）
+    merged2 = pcap_ingest._merge_runtime_blocks(weak, strong)
+    assert merged2["state"] == "established"
+    assert merged2["proto"] == "mixed"
+
+    # 两种不同协议相遇 → 升 mixed（而非任一方胜出）
+    assert pcap_ingest._merge_runtime_blocks(
+        {"proto": "tcp"}, {"proto": "udp"}
+    )["proto"] == "mixed"
+    # reset 强于 syn_only（对端有反应），但弱于 established
+    assert pcap_ingest._merge_runtime_blocks(
+        {"state": "syn_only"}, {"state": "reset"}
+    )["state"] == "reset"
+
+
 def test_port_normalize_can_read_the_merged_endpoint(tmp_path: Path) -> None:
     """★接线锁：port-normalize 的数据源必须真的被生成。
 

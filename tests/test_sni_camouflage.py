@@ -193,6 +193,50 @@ def test_no_masquerade_means_no_warning_in_letter() -> None:
     assert "切勿向其发函" not in body
 
 
+def test_masquerade_merges_into_an_existing_lead(tmp_path) -> None:
+    """★入口级：已存在同 (category,value) 的 Lead 时，后续才发现的伪装名必须并进去。
+
+    走真实入口 merge_into_report_json（不是手搓 dict）。此前 merge_runtime_into_lead_dict
+    只搬 Evidence、不碰 sni_masquerade，于是「先并了一份没 SNI 的采集、后来才抓到伪装」
+    这条最常见的路径上，结构化警示永远进不了报告，letters 也就渲染不出「切勿向其发函」——
+    正是本修复要避免的误发函风险。去掉并集逻辑，本测试即红。
+    """
+    import json
+
+    from apkscan.report import letters
+
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({"leads": [], "endpoints": [], "meta": {}}, ensure_ascii=False),
+                      encoding="utf-8")
+
+    # 第一次采集：同一个后端、同一个端口，但没抓到 SNI。
+    first = _summary(_flow(_BACKEND, 30135, set(), payload=1200),
+                     _flow(_BACKEND, 30135, set(), inbound=True, payload=800))
+    pcap_ingest.merge_into_report_json(str(report), first)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    lead = _lead_dict(payload, f"{_BACKEND}:30135/tcp")
+    assert not lead.get("sni_masquerade"), "第一次采集本就没有 SNI"
+
+    # 第二次采集：同一后端同一端口，这次抓到了伪装 SNI → 命中既有 Lead 走合并路径。
+    second = _summary(_flow(_BACKEND, 30135, {_FAKE_SNI}, payload=1500),
+                      _flow(_BACKEND, 30135, {_FAKE_SNI}, inbound=True, payload=900))
+    pcap_ingest.merge_into_report_json(str(report), second)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    lead = _lead_dict(payload, f"{_BACKEND}:30135/tcp")
+
+    assert lead.get("sni_masquerade") == [_FAKE_SNI], "伪装名没并进既有 Lead"
+
+    # 并且真的走到调证函正文里（这才是这个字段存在的意义）
+    lead = dict(lead)
+    lead["evidence_to_obtain"] = ["租户实名", "访问日志"]   # closure 回写才填，此处补上
+    body = letters.build_letters({"leads": [lead]})[0]["body_md"]
+    assert "切勿向其发函" in body
+
+
+def _lead_dict(payload: dict, value: str) -> dict:
+    return next(ld for ld in payload["leads"] if ld.get("value") == value)
+
+
 def test_known_third_party_domain_stays_skip() -> None:
     """已判「无需调证」的（jsDelivr 等在第三方名单里）不受影响——只降"本会出函"的那些。"""
     assert infra.classify_domain("cdn.jsdelivr.net")[0] == infra.ADVICE_SKIP

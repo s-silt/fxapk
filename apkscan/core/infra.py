@@ -759,11 +759,46 @@ def _strip_port_suffix(value: str) -> str:
 
     ★不剥就会绕过一切精确匹配：实测两案的动态线索值形如 ``223.5.5.5:53/udp``，
     与名单里的 ``223.5.5.5`` 比不上，公共解析器照样进"建议调证"。
+
+    IPv6 分三种形态，判据不同：
+
+    1. ``[2001:db8::1]:443/tcp`` —— RFC 3986 括号形态，**无歧义**，直接取括号内。
+       新产出一律走这个形态（见 ``pcap_ingest.format_peer``）。
+    2. ``2001:db8::1`` —— 裸地址，多冒号且无 ``/proto``。**绝不能剥**：末段 ``1`` 本身
+       就是个合法端口号，剥了会得到 ``2001:db8:``，把地址毁掉。
+    3. ``2001:db8::1:443/tcp`` —— 旧产物里的无括号拼接，字面上**真的有歧义**
+       （它既可以是「::1 上的 443 端口」，也可以是一个末段为 443 的裸地址）。
+       靠 ``/proto`` 尾缀消歧：那个后缀只由「拼过端口」的生产路径产生，所以它在场
+       就说明末段确实是端口。仅在此前提下、且剥完能解析成 IP 时才剥。
     """
-    head = value.split("/", 1)[0].strip()
-    if head.count(":") == 1:                       # IPv6 有多个冒号，不动
-        head = head.rsplit(":", 1)[0]
-    return head
+    head, proto_sep, _proto = value.partition("/")
+    head = head.strip()
+    if not head:
+        return head
+
+    if head.startswith("["):                       # 形态 1：括号形态，最可靠
+        inner, close, _rest = head[1:].partition("]")
+        if close:
+            return inner.strip()
+        return head                                # 只有左括号 —— 坏字面，不猜
+
+    colons = head.count(":")
+    if colons == 0:
+        return head
+    if colons == 1:                                # IPv4:port / host:port，历史行为不变
+        return head.rsplit(":", 1)[0]
+
+    # 多冒号 = IPv6 语境（形态 2 或 3）。默认不动，只有消歧成功才剥。
+    if not proto_sep:
+        return head                                # 形态 2：裸 IPv6，原样返回
+    bare, _, port_s = head.rpartition(":")
+    if not (port_s.isdigit() and 1 <= int(port_s) <= 65535):
+        return head
+    try:
+        ipaddress.ip_address(bare)
+    except ValueError:
+        return head                                # 剥完不是合法地址 → 本来就不是 addr:port
+    return bare
 
 
 def match_key(kind_or_category: str, value: str) -> str:

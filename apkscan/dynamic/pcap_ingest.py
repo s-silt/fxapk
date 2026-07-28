@@ -1394,6 +1394,18 @@ _STANDARD_TLS_PORTS: frozenset[int] = frozenset({
 })
 
 
+def format_peer(ip: str, port: int, proto: str = "") -> str:
+    """把 ``(ip, port[, proto])`` 拼成**无歧义**的端点字面。
+
+    ★IPv6 必须加方括号（RFC 3986）：裸拼出来的 ``2001:db8::1:443/tcp`` 在字面上无法与
+      「末段是 443 的裸地址」区分，下游 ``infra._strip_port_suffix`` 剥不掉端口，于是
+      IPv6 的运行时 Lead 永远匹配不上裸 IPv6 Endpoint —— target 选择、closure 回写、
+      letters 归属链三处同时击穿（codex P1）。IPv4 保持原样，不动既有形态。
+    """
+    host = f"[{ip}]" if ":" in str(ip) else str(ip)
+    return f"{host}:{port}/{proto}" if proto else f"{host}:{port}"
+
+
 def sni_camouflage_carriers(summary: PcapSummary) -> dict[str, list[str]]:
     """``{SNI 域名: [承载它的非标端点 ip:port/proto, ...]}``——只收**全部**承载端点都在非标端口的。
 
@@ -1419,7 +1431,7 @@ def sni_camouflage_carriers(summary: PcapSummary) -> dict[str, list[str]]:
     for name, eps in carriers.items():
         if any(port in _STANDARD_TLS_PORTS for _ip, port, _proto in eps):
             continue
-        out[name] = sorted(f"{ip}:{port}/{proto}" for ip, port, proto in eps)
+        out[name] = sorted(format_peer(ip, port, proto) for ip, port, proto in eps)
     return out
 
 
@@ -1430,7 +1442,7 @@ def to_report_leads(summary: PcapSummary) -> list[Lead]:
     camouflage = sni_camouflage_carriers(summary)
 
     for re in remote_endpoints(summary):
-        value = f"{re.ip}:{re.port}/{re.proto}"
+        value = format_peer(re.ip, re.port, re.proto)
         masked = sorted(s for s in re.sni if str(s).strip().lower().rstrip(".") in camouflage)
         key = (LeadCategory.IP.value, value)
         if key in seen:
@@ -1586,7 +1598,7 @@ def to_runtime_endpoints(summary: PcapSummary) -> list[Endpoint]:
                         source=_SOURCE,
                         location="pcap",
                         snippet=(
-                            f"->{re.ip}:{re.port}/{re.proto} state={re.state} "
+                            f"->{format_peer(re.ip, re.port, re.proto)} state={re.state} "
                             f"out={re.out_bytes}B in={re.in_bytes}B pkts={re.packets}{sni}{ja3}{quic}"
                         )[:200],
                         observed_at=re.first_ts or None,
@@ -1683,7 +1695,7 @@ def to_ledger_dict(summary: PcapSummary) -> dict[str, object]:
     res = remote_endpoints(summary)
     endpoints = [
         {
-            "value": f"{re.ip}:{re.port}/{re.proto}",
+            "value": format_peer(re.ip, re.port, re.proto),
             "ip": re.ip,
             "port": re.port,
             "proto": re.proto,
@@ -1753,7 +1765,7 @@ def _runtime_endpoint_dicts(summary: PcapSummary) -> list[dict]:
         # 这个端点打出来的 SNI 里，哪些是"非标端口上的"——即无法据以判定运营方的（见
         # sni_camouflage_carriers）。记在端点上，读报告的人能一眼看出这条连接在伪装成谁。
         masquerading = sorted(s for s in sni if s.strip().lower().rstrip(".") in camouflage)
-        peer = f"{re_.ip}:{re_.port}"
+        peer = format_peer(re_.ip, re_.port)
         snippet = (
             f"->{peer}/{re_.proto} state={re_.state} "
             f"out={re_.out_bytes}B in={re_.in_bytes}B conns={re_.connection_count}"
@@ -1862,14 +1874,53 @@ def _merge_runtime_endpoint_dicts(payload: dict, fresh: list[dict]) -> int:
             enr["runtime"] = _merge_runtime_blocks(enr.get("runtime"), ep["enrichment"]["runtime"])
         evs = hit.setdefault("evidences", [])
         if isinstance(evs, list):
-            evs.extend(ep["evidences"])
+            # ★去重：同一份 pcap 重复 --into 时，此前每次都把同样的证据再追加一遍，
+            #   报告里同一条连接被列 N 次，读的人以为观测到了 N 次。
+            seen = {
+                (str(e.get("source")), str(e.get("location")), str(e.get("snippet")))
+                for e in evs if isinstance(e, dict)
+            }
+            for e in ep["evidences"]:
+                sig = (str(e.get("source")), str(e.get("location")), str(e.get("snippet")))
+                if sig in seen:
+                    continue
+                seen.add(sig)
+                evs.append(e)
     return added
+
+
+def summary_merge_fingerprint(summary: PcapSummary) -> str:
+    """这份采集结果的内容指纹，用于「同一份 pcap 别并第二次」。
+
+    ★为什么需要它：``_merge_runtime_blocks`` 对字节数/连接数求和是**跨端口累计**的正确语义，
+      但同一份 pcap 重复 ``--into`` 同一个 report.json 时，这个求和就变成了凭空翻倍——
+      报告不幂等，而字节数正是闭环判"有无双向载荷"的输入。指纹按内容算（不按文件路径），
+      所以两份**不同**的采集仍会正常累加，只挡住重复导入同一份。
+    """
+    parts = [
+        f"{re_.ip}|{re_.port}|{re_.proto}|{re_.state}|{re_.out_bytes}|{re_.in_bytes}|"
+        f"{re_.connection_count}|{re_.packets}|{re_.first_ts}|{re_.last_ts}"
+        for re_ in remote_endpoints(summary)
+    ]
+    parts.append(f"flows={len(summary.flows)}|dns={len(summary.dns_queries)}")
+    blob = "\n".join(sorted(parts)).encode("utf-8", "replace")
+    return hashlib.sha256(blob).hexdigest()
 
 
 #: 端口级明细字段：合并时取并集，绝不覆盖（否则同 IP 多端口只剩最后一个）。
 _RUNTIME_UNION_KEYS = ("remote_endpoints", "ports", "sni", "sni_masquerade")
 #: 计数字段：合并时求和（跨端口累计）。
 _RUNTIME_SUM_KEYS = ("out_bytes", "in_bytes", "connection_count")
+
+#: 连接状态强度序（越大＝对"真发生过通信"的证据越强）。合并时取**最强**的那个，
+#: 而不是让最后并入的来源说了算——否则一次 SYN-only 的补充采集会把已确证的
+#: established 降级成"连接尝试待核"，闭环据此判优先级，等于把真后端降档。
+_STATE_RANK = {
+    STATE_UNKNOWN: 0,
+    STATE_SYN_ONLY: 1,
+    STATE_RESET: 2,      # 见 RST 说明对端有反应，强于纯 SYN-only
+    STATE_ESTABLISHED: 3,
+}
 
 
 def _merge_runtime_blocks(old: object, new: dict) -> dict:
@@ -1879,8 +1930,14 @@ def _merge_runtime_blocks(old: object, new: dict) -> dict:
       后并入的那个把端口、字节数、SNI 全盖掉，报告里只剩一半端口。实测样本里
       「一台机开两个端口、一主一心跳」是常见形态，等于稳定漏掉一半调证标的。
 
-    列表取并集、计数求和、时间取端点、``has_payload`` 取或、``established`` 优先。
-    未列出的键沿用 ``new`` 覆盖 ``old``——包括 ``target_attributed``：pcap 路径**从不写**该键
+    列表取并集、计数求和、时间取端点、``has_payload`` 取或。
+
+    ``state`` 取**强度最高**的（见 :data:`_STATE_RANK`），``proto`` 两侧不同即升 ``mixed``、
+    且 ``mixed`` 只升不降——此前这两个键都由 ``new`` 直接覆盖：一次只含 TCP 的补充采集会把
+    已经是 ``mixed`` 的记录退回 ``tcp``，一次 SYN-only 采集会把已确证的 ``established``
+    降成"连接尝试待核"。**合并只应增加信息，不应删除已确证的事实**（codex P1）。
+
+    其余未列出的键沿用 ``new`` 覆盖 ``old``——包括 ``target_attributed``：pcap 路径**从不写**该键
     （做不了 UID 归因，见 _runtime_endpoint_dicts），故它不在 ``new`` 里，capture 路径写下的真
     归因不会被这里冲掉。
 
@@ -1912,8 +1969,14 @@ def _merge_runtime_blocks(old: object, new: dict) -> dict:
             out[key] = a + b
     if base.get("has_payload") or new.get("has_payload"):
         out["has_payload"] = True
-    if base.get("state") == "established" or new.get("state") == "established":
-        out["state"] = "established"
+
+    states = [s for s in (base.get("state"), new.get("state")) if isinstance(s, str) and s]
+    if states:
+        out["state"] = max(states, key=lambda s: _STATE_RANK.get(s, 0))
+
+    protos = {p for p in (base.get("proto"), new.get("proto")) if isinstance(p, str) and p}
+    if protos:
+        out["proto"] = "mixed" if (len(protos) > 1 or "mixed" in protos) else protos.pop()
     for key, pick in (("first_ts", min), ("last_ts", max)):
         a, b = base.get(key), new.get(key)
         if isinstance(a, (int, float)) and isinstance(b, (int, float)):
@@ -1967,15 +2030,32 @@ def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:
             existing.append(lead_dict)
             added += 1
 
-        # 端点侧：闭环排序、五层归属、外部富化都以 endpoints 为对象，不补这一步等于白抓。
-        fresh_eps = _runtime_endpoint_dicts(summary)
-        ep_added = _merge_runtime_endpoint_dicts(payload, fresh_eps)
-
-        # meta 侧：可见性据此判 runtime 这一维走没走过。不写就一直是"未做运行时观测"。
         meta = payload.get("meta")
         if not isinstance(meta, dict):
             meta = {}
             payload["meta"] = meta
+
+        # ★幂等闸：同一份采集只并一次。Lead 侧本就按证据签名去重、天然幂等，但端点侧的
+        #   字节数/连接数是**求和**的（跨端口累计所必需），重复并入会让计数凭空翻倍——
+        #   而字节数正是闭环判"有无双向载荷"的输入，翻倍等于伪造观测强度。
+        fingerprint = summary_merge_fingerprint(summary)
+        merged_fps = meta.get("runtime_pcap_merges")
+        if not isinstance(merged_fps, list):
+            merged_fps = []
+        already = fingerprint in merged_fps
+
+        # 端点侧：闭环排序、五层归属、外部富化都以 endpoints 为对象，不补这一步等于白抓。
+        fresh_eps = _runtime_endpoint_dicts(summary)
+        if already:
+            ep_added = 0
+            logger.info("[pcap] 这份采集已并入过（fingerprint=%s…），跳过端点合并以保幂等",
+                        fingerprint[:12])
+        else:
+            ep_added = _merge_runtime_endpoint_dicts(payload, fresh_eps)
+            merged_fps.append(fingerprint)
+            meta["runtime_pcap_merges"] = merged_fps
+
+        # meta 侧：可见性据此判 runtime 这一维走没走过。不写就一直是"未做运行时观测"。
         if fresh_eps or summary.flows:
             meta["runtime_merged"] = True
             meta["runtime_pcap_inventory"] = {

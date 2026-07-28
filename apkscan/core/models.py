@@ -213,6 +213,22 @@ def merge_runtime_into_lead_dict(existing: dict, runtime_lead: dict) -> bool:
         seen.add(sig)
         refs.append(ev)
         merged = True
+    # ★sni_masquerade 取并集，且**独立于 merged**：新观测到的伪装名即便没带来新证据
+    #   （证据签名撞了）也必须并进去。它不是加分项、是「这封函不该发给谁」的硬警示，
+    #   丢了就等于把无关企业写成受文机关——本字段存在的全部意义就是防这个。
+    #   只搬运行时来源的 lead 的该字段（上面已按 runtime* 过滤证据，这里同一条 lead 语境）。
+    incoming_masq = [
+        str(name).strip()
+        for name in (runtime_lead.get("sni_masquerade") or [])
+        if isinstance(name, str) and str(name).strip()
+    ]
+    if incoming_masq:
+        current = existing.get("sni_masquerade")
+        current = [n for n in current if isinstance(n, str)] if isinstance(current, list) else []
+        union = sorted(set(current) | set(incoming_masq))
+        if union != current:
+            existing["sni_masquerade"] = union
+
     if merged:
         # 有 runtime 证据 → 升为「运行时出现」（宽口径，与 Lead.is_runtime_seen 一致）。
         existing["is_runtime_seen"] = True
