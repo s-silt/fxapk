@@ -103,6 +103,53 @@ def test_classify_ip_version_numbers_demoted_not_dropped():
         assert "版本号" in reason or "序号" in reason
 
 
+def test_classify_ip_low_octets_promoted_by_hosting_attribution():
+    """★裸字面的真后端只能靠外部佐证捞回：ASN 落托管段、且样本内无同形态编号序列。
+
+    低段位判据的代价是真实公网后端（AWS 3./23. 段能凑出四段全 ≤32 的地址）被降成待核，而裸
+    字面自己提不出端口/URL 上下文来自证。故开一条定向豁免——但佐证必须双重，reason 里保留
+    形态存疑的说明，让办案人发函前看得到。
+    """
+    for value in ("23.21.5.12", "3.15.20.4", "18.20.31.2"):
+        advice, reason = infra.classify_ip(value, hosting_attributed=True, low_octet_siblings=0)
+        assert advice == infra.ADVICE_INVESTIGATE, value
+        assert "托管段" in reason and "形态存疑" in reason
+
+
+def test_classify_ip_low_octets_default_stays_demoted():
+    """★默认关闭：无佐证 / 离线无富化时行为逐字不变，仍是待核。
+
+    钉死默认值方向——有人顺手把默认改成 True 就等于无差别取消这条判据。
+    """
+    advice, _ = infra.classify_ip("23.21.5.12")
+    assert advice == infra.ADVICE_REVIEW
+    # 只有 ASN 佐证、无兄弟池信息时也照样按默认走（两个参数都得由调用方明确给）
+    advice, _ = infra.classify_ip("23.21.5.12", low_octet_siblings=0)
+    assert advice == infra.ADVICE_REVIEW
+
+
+def test_classify_ip_low_octets_sequence_cluster_blocks_promotion():
+    """★簇守卫：同形态兄弟成簇 = 编号序列，纵有托管佐证也不升。
+
+    删掉这条守卫就把「误伤修复」扩成了无差别豁免，方向翻到代价高的一侧。
+    """
+    advice, reason = infra.classify_ip(
+        "1.3.1.1", hosting_attributed=True, low_octet_siblings=3
+    )
+    assert advice == infra.ADVICE_REVIEW
+    assert "版本号" in reason or "序号" in reason
+
+
+def test_is_low_octet_ipv4_shape_only():
+    """兄弟池判据只看形态：带端口要先剥、非 IPv4 与解析不了的一律 False。"""
+    assert infra.is_low_octet_ipv4("1.3.1.1") is True
+    assert infra.is_low_octet_ipv4("23.21.5.12:8080/tcp") is True
+    assert infra.is_low_octet_ipv4("192.88.99.109") is False
+    assert infra.is_low_octet_ipv4("2001:db8::1") is False
+    assert infra.is_low_octet_ipv4("1.3.101.112.1") is False
+    assert infra.is_low_octet_ipv4("") is False
+
+
 def test_classify_ip_low_octets_with_address_context_kept():
     """同样的字面，若样本里带端口或出现在 URL 中，就是当地址用的 → 不降。"""
     advice, _ = infra.classify_ip("1.2.3.4", context="connect to 1.2.3.4:8443 now")
