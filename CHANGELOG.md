@@ -5,6 +5,49 @@ affect automated / CI / agent callers are called out explicitly**.
 
 ## Unreleased
 
+## 1.3.2 — 2026-07-28
+
+**两件事：Frida 17 的 Java hook 终于真的能用；构建环境串案第一次接上出口。**
+
+1.3.1 里"供 Java bridge"只做了一半——宿主写了应答，注入端却从不发请求。
+真机上的表现是：注入成功、进程存活、事件全空，与样本反检测一模一样，
+一轮真实取参因此白跑，事后才从事件日志里残留的错误串认出根因。
+
+另一件更值得记：`corpus` 的构建环境反查（`find_by_build_env` /
+`shared_build_environments`）实现完备、注释里写着"实测一个构建标识横跨 3 个案件"，
+却**没有任何调用方**。提取、解析、入库、反查四步全做了，就是没人调，
+于是"这两个样本出自同一开发环境"始终得靠人工比对 JSON 才能发现。
+接上出口当天就发现了三个长期存在的假阳性——它们一直在报告里，只因没人消费而看不见。
+
+### Added
+
+- **构建环境跨案反查有了出口**（`commands/corpus.py`）：
+  `corpus seen --by build-env <标识>` 按构建标识反查同源样本；
+  `corpus shared-build-env` 列出被 ≥2 样本共用的构建环境簇。
+  构建路径是编译期烙进 native 库的，改文件名、重打包、重签名、换服务器都动不了它——
+  比 `.so` 哈希（同族样本逐份随机化）和服务器 IP（转租机器上多租户共存）都耐用。
+
+### Fixed
+
+- **Frida 17 的 Java bridge 只做了宿主一半**（`dynamic/capture.py`）：
+  Python `create_script()` 不会像 frida-tools REPL 那样安装语言桥的惰性全局，
+  于是脚本引用 `Java` 时根本不会发出 `frida:load-bridge`，宿主的应答器在等一个
+  永远不会到来的请求。现在在所有 Java hook 之前注入 REPL 的同款前导。
+- **doctor 凭文件存在就宣称 bridge 可用**（`dynamic/doctor.py`）：
+  出故障的真机上 `bridges/java.js` 自始至终都在，该检查会在整个故障期间报绿。
+  改为如实表述"源码可取得（尚未运行时验证 `Java.perform`）"——
+  运行时结论只能来自一次实际注入，看 `capture_signals.frida_bridges` 的三态。
+- **测试套依赖开发机装了 frida-tools**（`tests/`）：CI 上四个平台全红而本机全绿。
+  协议断言改为替身，真源码可读性单列一条按环境跳过。
+  与 1.3.1 那次"测试依赖 adb 在 PATH"同类。
+- **稀疏与第三方构建根污染跨案聚簇**（`core/corpus.py`、`analyzers/build_provenance.py`）：
+  一份编解码库内嵌的 HEVC 测试码流路径曾让两个**互不相干**的样本聚成一簇。
+  串案维度新增残留路径数下限——32 份真实检材实测，确认的构建环境集中在 26–32 条、
+  噪音在 1–2 条，中间是空的，阈值取 3（留余量，宁可放进弱证据也不挡真环境）。
+  该门槛**只作用于串案**，`meta.build_provenance` 仍全量如实记录：
+  人核报告该看到弱证据，能不能拿去跨案聚簇是另一回事。
+  另按项目根名识别放在任意盘符下的第三方 SDK 源码树（听云 / KOOM / Bugly / Matrix）。
+
 ## 1.3.1 — 2026-07-27
 
 **这一版全部来自 1.3.0 在真实样本上被复现出来的问题。**
