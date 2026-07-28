@@ -418,6 +418,69 @@ def test_dns_only_captures_still_get_their_leads(tmp_path: Path) -> None:
     assert {"a.example.test", "b.example.test"} <= values, "第二份 DNS 采集的线索丢了"
 
 
+def test_dns_only_capture_writes_runtime_meta(tmp_path: Path) -> None:
+    """★纯 DNS 采集也是**真观测**，必须写 runtime meta。
+
+    此前的写入条件是 ``fresh_eps or summary.flows``，纯 DNS 两者皆空 → 整个被挡在门外：
+    不产生 inventory、``runtime_merged`` 不置 True，可见性一直说"未做运行时观测"。
+    上一版那条 DNS 测试只查 Lead，**恰好绕过了这条路径**（codex 五轮 P1）。
+    """
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_STATIC, ensure_ascii=False), encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(
+        str(p), pcap_ingest.PcapSummary(dns_queries={"a.example.test"}))
+    meta = json.loads(p.read_text(encoding="utf-8"))["meta"]
+
+    assert meta.get("runtime_merged") is True, "纯 DNS 采集没被记成运行时观测"
+    inv = meta["runtime_pcap_inventory"]
+    assert inv["dns_queries"] >= 1, "inventory 没记下 DNS 查询"
+    assert inv["uid_attributed"] is False
+
+    # 再并一份不同的 DNS 采集 → 计数要反映累计结果，而不是停在第一份
+    pcap_ingest.merge_into_report_json(
+        str(p), pcap_ingest.PcapSummary(dns_queries={"b.example.test"}))
+    inv2 = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]
+    assert inv2["dns_queries"] >= 2, "第二份 DNS 采集没进 inventory"
+
+
+def test_dns_only_merge_does_not_wipe_earlier_endpoint_inventory(tmp_path: Path) -> None:
+    """★放宽写入条件的直接副作用：inventory 是覆盖写的。
+
+    先并一份有端点的采集、再并一份纯 DNS 的，若 inventory 仍按「本次 summary 的快照」写，
+    ``remote_endpoints`` 会被清零——报告里凭空少掉一个已观测的后端。故计数改为从 payload
+    推导（天然幂等），而不是取本次快照。
+    """
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_STATIC, ensure_ascii=False), encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(str(p), _bidirectional_summary())
+    before = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]
+    assert before["remote_endpoints"] == 1
+
+    pcap_ingest.merge_into_report_json(
+        str(p), pcap_ingest.PcapSummary(dns_queries={"a.example.test"}))
+    after = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]
+
+    assert after["remote_endpoints"] == 1, "纯 DNS 采集把之前那份的端点数清零了"
+    assert after["dns_queries"] >= 1
+
+
+def test_parse_failure_is_not_erased_by_a_later_success(tmp_path: Path) -> None:
+    """解析失败过这件事不该被下一次成功抹掉——覆盖写会让报告看起来一直是干净的。"""
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_STATIC, ensure_ascii=False), encoding="utf-8")
+
+    bad = pcap_ingest.PcapSummary(flows=list(_bidirectional_summary().flows),
+                                  parse_status="parse_error")
+    pcap_ingest.merge_into_report_json(str(p), bad)
+    assert json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]["parse_degraded"] is True
+
+    pcap_ingest.merge_into_report_json(str(p), _two_port_summary())   # 这次解析正常
+    inv = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]
+    assert inv["parse_degraded"] is True, "先前的解析失败被后一次成功抹掉了"
+
+
 # --- 闸的边界：只保护端点侧的累加，不受闸外字段影响 -------------------------
 
 def _pair_with(**kw):

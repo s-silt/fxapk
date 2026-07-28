@@ -2016,6 +2016,42 @@ def _merge_runtime_blocks(old: object, new: dict) -> dict:
     return out
 
 
+def _prev_count(prev: dict, key: str) -> int:
+    """读上一份 inventory 里的计数；缺失 / 坏类型 / 负数 → 0（绝不抛）。"""
+    value = prev.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _count_runtime_endpoints(payload: dict) -> int:
+    """报告里由本路径写入的运行时端点数——从 payload 推导，故重复合并不会翻倍。"""
+    endpoints = payload.get("endpoints")
+    if not isinstance(endpoints, list):
+        return 0
+    return sum(
+        1 for ep in endpoints
+        if isinstance(ep, dict)
+        and isinstance(ep.get("enrichment"), dict)
+        and isinstance(ep["enrichment"].get("runtime"), dict)
+        and ep["enrichment"]["runtime"].get("remote_endpoints")
+    )
+
+
+def _count_runtime_domain_leads(payload: dict) -> int:
+    """报告里由本路径写入的域名线索数（DNS/SNI 来源）——同样从 payload 推导，天然幂等。"""
+    leads = payload.get("leads")
+    if not isinstance(leads, list):
+        return 0
+    return sum(
+        1 for ld in leads
+        if isinstance(ld, dict)
+        and str(ld.get("category")) == LeadCategory.DOMAIN.value
+        and any(
+            isinstance(ref, dict) and str(ref.get("source")) == _SOURCE
+            for ref in (ld.get("source_refs") or [])
+        )
+    )
+
+
 def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:
     """把 pcap 线索合并进 report.json：``leads`` + ``endpoints`` + ``meta`` 的运行时信号。
 
@@ -2093,13 +2129,30 @@ def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:
             meta["runtime_pcap_merges"] = merged_fps
 
         # meta 侧：可见性据此判 runtime 这一维走没走过。不写就一直是"未做运行时观测"。
-        if fresh_eps or summary.flows:
+        #
+        # ★条件必须含 DNS：纯 DNS 采集（无 flow、无端点）同样是**真观测**，却曾被
+        #   ``fresh_eps or summary.flows`` 整个挡在门外——首次导入不产生 inventory、
+        #   ``runtime_merged`` 也不置 True，可见性一直显示"未做运行时观测"（codex 五轮 P1）。
+        observed = bool(
+            fresh_eps or summary.flows or summary.dns_queries or summary.dns_records
+        )
+        if observed:
             meta["runtime_merged"] = True
+            prev = meta.get("runtime_pcap_inventory")
+            prev = prev if isinstance(prev, dict) else {}
             meta["runtime_pcap_inventory"] = {
-                "flows": len(summary.flows),
-                "remote_endpoints": len(fresh_eps),
-                "dns_queries": len(summary.dns_queries),
+                # flows 无法从报告反推，只能累计；受幂等闸保护，重复导入不再加。
+                "flows": _prev_count(prev, "flows") + (0 if already else len(summary.flows)),
+                # ★端点数与 DNS 数从**报告本身**推导，不用本次 summary 的快照。覆盖写的必然后果
+                #   是「一份纯 DNS 采集并进来，把之前那份 flow 采集的端点数清零」——放宽上面那个
+                #   条件后这个坑立刻就会踩到。从 payload 推导天然幂等：并几次都是同一个数。
+                "remote_endpoints": _count_runtime_endpoints(payload),
+                "dns_queries": _count_runtime_domain_leads(payload),
                 "parse_status": summary.parse_status,
+                # 只要**任何一次**合并解析异常就置 True，且不被后续成功覆盖——
+                # 「这份报告有过解析失败」不该被下一次成功抹掉。
+                "parse_degraded": bool(prev.get("parse_degraded"))
+                or summary.parse_status != "ok",
                 # ★本路径无设备侧 socket 快照 → 做不了 UID 归因，如实记下来。消费方（closure /
                 #   digest）看得出"有运行时观测，但不知道这些流量属不属于目标 App"。
                 "uid_attributed": False,
