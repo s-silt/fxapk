@@ -275,12 +275,19 @@ def _major(ver: str) -> int | None:
 
 
 def _annotate_java_bridge(item: dict, host_ver: str) -> dict:
-    """★Frida 17+ 必须由宿主供 Java bridge，供不上就把这一项判为不就绪。
+    """★Frida 17+ 取不到 bridge 源码就把这一项判为不就绪。
 
-    Frida 17 起 GumJS 不再内置 Java bridge：脚本引用 ``Java`` 时运行时向宿主索取源码，
-    frida-tools 的 CLI/REPL 自带应答器、Python API 没有。宿主端拿不到 ``bridges/java.js``
-    时，注入会"成功"、进程会存活、**而所有 Java hook 静默失效、事件全空**——
-    现象与样本反检测一模一样。实测已有案件因此白跑一轮取参，事后才从错误串里认出根因。
+    Frida 17 起 GumJS 不再内置 Java bridge，须由注入端请求、宿主端回源码。
+    宿主端拿不到 ``bridges/java.js`` 时，注入会"成功"、进程会存活、
+    **而所有 Java hook 静默失效、事件全空**——现象与样本反检测一模一样。
+    实测已有案件因此白跑一轮取参，事后才从错误串里认出根因。
+
+    ★这里只验证**源码取得到**（必要条件），不等于运行时 ``Java.perform`` 真能跑：
+      注入端是否装了 lazy getter、目标进程有没有 ART，都不在本检查范围内。
+      detail 措辞据此收敛为「bridge 源码可取得」，**不写「可供给/已就绪」**——
+      本项曾因写成后者而成为假阳性（真机上源码在、请求却从未发出）。
+      真运行时验收须靠一次实际注入（见 capture 的 ``frida_bridges`` 信号：
+      ``requested``/``loaded``/``missing`` 三态）。
 
     只在主号 ≥ 17 时改判：更早的版本内置 bridge，不装 frida-tools 也能用。
     版本读不出来 → 不改判（与 :func:`_annotate_frida_uid` 同口径）。
@@ -291,7 +298,10 @@ def _annotate_java_bridge(item: dict, host_ver: str) -> dict:
     if major is None or major < 17:
         return item
     if capture._bridge_source("java") is not None:
-        item["detail"] = f"{item.get('detail', '')}；Java bridge 可供给"
+        item["detail"] = (
+            f"{item.get('detail', '')}；Java bridge 源码可取得"
+            "（尚未运行时验证 Java.perform 是否可用）"
+        )
         return item
     item["ok"] = False
     item["detail"] = (
