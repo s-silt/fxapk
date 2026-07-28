@@ -214,6 +214,63 @@ def _silence_androguard_logging() -> None:
         logger.debug("禁用 androguard loguru 失败（忽略）", exc_info=True)
 
 
+_HIDDENAPI_FLAGS_RELAXED = False
+#: 本次进程里放行过的未知 hidden-api flag 取值（供报告如实说明容错生效过）。
+_HIDDENAPI_UNKNOWN_FLAGS: set[str] = set()
+
+
+def _relax_hiddenapi_flags() -> None:
+    """让 androguard 容忍它不认识的 hidden-api flag 取值，而不是整个 DEX 拒载。
+
+    ★这是 androguard 的建模错误，不是 DEX 坏了。AOSP 的 hiddenapi flag 里，低三位是访问限制
+      档（0-6），**高位是可叠加的位掩码**（core-platform-api、test-api，新版本还在加）。
+      androguard 4.1.4 把高位建成了互斥 IntEnum（只有 0/1/2），于是 3/4/6 这些完全合法的
+      组合一律 ``ValueError``，整个 DEX 随之拒载。
+
+    ★实测代价：四次脱壳各抓到 33 个 DEX，只有 10 个载入，23 个卡在这里——静态可见性凭空
+      少了约七成，而报告里只是一行 warning。放行是安全的：本工具从不读这些 flag（要的是
+      字符串/类/方法），且 DEX 各 map 段按各自偏移独立解析，一个 hiddenapi 段不合预期不会
+      污染其余段。
+
+    容错生效过就记下来（``hiddenapi_flags_relaxed``），别让"载进来了"看着像"本来就没问题"。
+    幂等；androguard 结构变了（拿不到那两个枚举）则跳过并记 debug，绝不抛。
+    """
+    global _HIDDENAPI_FLAGS_RELAXED
+    if _HIDDENAPI_FLAGS_RELAXED:
+        return
+    try:
+        from androguard.core.dex import HiddenApiClassDataItem
+
+        for enum_name in ("RestrictionApiFlag", "DomapiApiFlag"):
+            enum_cls = getattr(HiddenApiClassDataItem, enum_name)
+
+            def _missing_(cls, value, _label: str = enum_name):  # noqa: ANN001
+                # 放宽的是"库还不认识的合法档位"，不是"什么都收"：非整数/负数仍走原来的
+                # ValueError——把解析错误也放行，等于把坏数据伪装成正常数据。
+                # （bool 不必单列：True/False 恒等于已有成员 1/0，压根到不了这里。）
+                if not isinstance(value, int) or value < 0:
+                    return None
+                _HIDDENAPI_UNKNOWN_FLAGS.add(f"{_label}={value}")
+                # 造伪成员保留原值：调用方拿到的仍是个 int，语义"未知档位"如实体现在名字里。
+                pseudo = int.__new__(cls, value)
+                pseudo._name_ = f"UNKNOWN_{value}"
+                pseudo._value_ = value
+                return pseudo
+
+            enum_cls._missing_ = classmethod(_missing_)
+        _HIDDENAPI_FLAGS_RELAXED = True
+    except Exception:  # noqa: BLE001 - 兼容垫失败不得影响主流程（大不了回到成批拒载）
+        logger.debug("放宽 androguard hidden-api flag 校验失败（忽略）", exc_info=True)
+
+
+def hiddenapi_relax_report() -> dict[str, object]:
+    """本次进程有没有用到 hidden-api flag 容错、放行了哪些取值。供 meta 如实登记。"""
+    return {
+        "applied": _HIDDENAPI_FLAGS_RELAXED,
+        "unknown_flags": sorted(_HIDDENAPI_UNKNOWN_FLAGS),
+    }
+
+
 # 合法 NCName：首字符字母/下划线，其余字母/数字/下划线/'-'/'.'（不含冒号）。
 _NCNAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.\-]*$")
 
@@ -811,6 +868,7 @@ def _load_extra_dex(extra_dex: list[str]) -> tuple[list, list[dict[str, str]]]:
     - androguard 的 import 只允许出现在本文件。
     """
     _silence_androguard_logging()  # 用 androguard 前才禁其 loguru（避免启动期白付 loguru）
+    _relax_hiddenapi_flags()  # 别让 androguard 不认识的 hidden-api flag 把整个 DEX 拒在门外
     from androguard.core.dex import DEX
 
     out: list = []
