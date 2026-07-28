@@ -271,6 +271,14 @@ def corpus_events(
         typer.echo(_json.dumps(event, ensure_ascii=False))
 
 
+def _vis_brief(vis: dict | None) -> str:
+    """可见性指纹的一行人读形态；``None``（该版无求值）显式说出来，不渲染成「无受限」。"""
+    if vis is None:
+        return "（无求值）"
+    blocked = vis.get("blocked_claims") or []
+    return f"[{'、'.join(blocked) if blocked else '无'}] 补法建议 {vis.get('next_actions', 0)} 条"
+
+
 @corpus_app.command("regress")
 def corpus_regress_cmd(
     version_from: str = typer.Option(
@@ -333,6 +341,7 @@ def corpus_regress_cmd(
                     "is_hardened": [d.hardened_from, d.hardened_to],
                     "counts": [d.counts_from, d.counts_to],
                     "advice": [d.advice_from, d.advice_to],
+                    "visibility": [d.visibility_from, d.visibility_to],
                     "findings_added": d.findings_added,
                     "findings_removed": d.findings_removed,
                     "notes": d.notes,
@@ -355,6 +364,11 @@ def corpus_regress_cmd(
     typer.echo(
         f"  ★由失败转为可分析 {s['became_analyzable']}；由可分析转为失败 {s['became_unanalyzable']}；"
         f"加固新检出 {s['hardening_newly_detected']}；闭环降级 {s['closure_downgraded']}"
+    )
+    typer.echo(
+        f"  可见性受限解除 {s['visibility_blocked_cleared']}（须人核）；"
+        f"新增受限 {s['visibility_blocked_added']}；求值丢失 {s['visibility_assessment_lost']}"
+        f"（基于两版都有可见性求值的 {s['visibility_comparable']} 个样本）"
     )
     typer.echo(
         f"  建议调证线索合计 {s['advice_investigate_from']} → {s['advice_investigate_to']}"
@@ -384,6 +398,8 @@ def corpus_regress_cmd(
             typer.echo(f"    线索分档 {d.advice_from} → {d.advice_to}")
         if d.hardened_from != d.hardened_to:
             typer.echo(f"    加固判定 {d.hardened_from} → {d.hardened_to}")
+        if d.visibility_from != d.visibility_to:
+            typer.echo(f"    可见性受限主张 {_vis_brief(d.visibility_from)} → {_vis_brief(d.visibility_to)}")
         if d.findings_added:
             typer.echo(f"    + {', '.join(d.findings_added)}")
         if d.findings_removed:

@@ -113,6 +113,55 @@ def test_manifest_entry_robust_to_junk() -> None:
     assert e["case_id"] is None
     assert e["counts"] == {"leads": 0, "endpoints": 0, "findings": 0}
     assert corpus.manifest_entry(None)["package_name"] is None  # type: ignore[arg-type]
+    assert e["visibility"] is None, "无可见性求值必须是 None，不能是空 dict（那等于断言无受限主张）"
+
+
+# --- 证据可见性投影 ---------------------------------------------------------
+
+
+def _vis_report(**over) -> dict:
+    r = _report()
+    r.setdefault("meta", {})["visibility"] = {
+        "sources": {"dex": {"visibility": "stub_only", "why": ["加固桩"]},
+                    "native": {"visibility": "complete", "why": []}},
+        "blocked_claims": ["static_endpoint_exhaustive"],
+        "remediation": "not_attempted",
+        "notes": ["人读文案"],
+        "next_actions": ["先脱壳"],
+        "degraded": True,
+        **over,
+    }
+    return r
+
+
+def test_visibility_summary_projects_structured_fields_only() -> None:
+    """指纹只收方向可判的结构化字段；notes/why 等人读文案不入（否则措辞一改全库都标"有变化"）。"""
+    s = corpus.visibility_summary(_vis_report())
+    assert s is not None
+    assert s["blocked_claims"] == ["static_endpoint_exhaustive"]
+    assert s["sources"]["dex"] == "stub_only"
+    assert s["degraded"] is True
+    assert s["remediation"] == "not_attempted"
+    assert s["next_actions"] == 1, "next_actions 只记条数，不记文案"
+    assert "notes" not in s and "why" not in json.dumps(s)
+
+
+def test_visibility_summary_missing_is_none_not_empty() -> None:
+    """★缺失 ≠ 无受限主张：没做求值必须返回 None，畸形值同样折到 None 而非静默吞成空。"""
+    assert corpus.visibility_summary(_report()) is None
+    assert corpus.visibility_summary({"meta": {"visibility": "坏值"}}) is None
+    assert corpus.visibility_summary({"meta": {"visibility": ["坏值"]}}) is None
+    assert corpus.visibility_summary(None) is None
+    # 求过值、确实无受限主张 → dict（与上面的 None 严格区分）
+    empty = corpus.visibility_summary(_vis_report(blocked_claims=[], degraded=False))
+    assert empty is not None and empty["blocked_claims"] == []
+
+
+def test_manifest_entry_carries_visibility() -> None:
+    e = corpus.manifest_entry(_vis_report(), case_id="c1")
+    assert e["visibility"]["blocked_claims"] == ["static_endpoint_exhaustive"]
+    assert e["visibility"]["sources"]["dex"] == "stub_only"
+    assert corpus.manifest_entry(_report())["visibility"] is None
 
 
 # --- 样本身份（真哈希 vs 旧报告占位）----------------------------------------

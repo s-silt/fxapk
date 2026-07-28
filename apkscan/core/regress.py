@@ -54,6 +54,10 @@ class SampleDiff:
     #: None = 该版报告读不到（缺文件/坏 JSON），与「读到了但零线索」的 {} 严格区分。
     advice_from: dict[str, int] | None = None
     advice_to: dict[str, int] | None = None
+    #: 证据可见性指纹（:func:`corpus.visibility_summary`）。None = 该版报告没有可见性求值——
+    #: 与「求过值、无受限主张」的 dict 严格区分，否则「整个求值阶段丢了」的退化会静默通过。
+    visibility_from: dict | None = None
+    visibility_to: dict | None = None
     # 检出类
     findings_added: list[str] = field(default_factory=list)
     findings_removed: list[str] = field(default_factory=list)
@@ -66,6 +70,7 @@ class SampleDiff:
             self.findings_added or self.findings_removed or self.notes
             or self.counts_from != self.counts_to
             or self.advice_from != self.advice_to
+            or self.visibility_from != self.visibility_to
             or self.status_from != self.status_to
             or self.closure_from != self.closure_to
             or self.hardened_from != self.hardened_to
@@ -230,6 +235,10 @@ def diff_versions(
             counts_to=_safe_counts(eb),
             advice_from=advice_counts(ra),
             advice_to=advice_counts(rb),
+            # ★读报告全文而非 manifest 投影：upsert 按主键幂等跳过，存量行在 reindex 前没有
+            #   visibility 字段，信投影会把「老行没记」读成「没有受限主张」。与 advice_counts 同路径。
+            visibility_from=corpus.visibility_summary(ra),
+            visibility_to=corpus.visibility_summary(rb),
         )
         fa, fb = _safe_finding_ids(ea), _safe_finding_ids(eb)
         d.findings_added = sorted(fb - fa)
@@ -293,6 +302,41 @@ def _direction_notes(d: SampleDiff) -> list[str]:
     b = (d.advice_to or {}).get(ADVICE_INVESTIGATE, 0)
     if a != b:
         notes.append(f"建议调证 {a} → {b}（{'降噪' if b < a else '新增'}，须抽样核对是否误杀/误报）")
+    notes.extend(_visibility_notes(d))
+    return notes
+
+
+def _visibility_notes(d: SampleDiff) -> list[str]:
+    """可见性维度的方向判断。★按取证代价不对称分档：**警示消失**比警示新增危险得多。
+
+    多一条「此处看不见」最多让人白核一遍；少一条会让办案人把「未发现」当成「已穷尽」——这正是
+    :mod:`apkscan.core.visibility` 存在的理由，所以它自己的退化必须被回归护网抓住。反过来，
+    新增受限主张多半是新约束在正确降级，记中性备注、不告警。
+    """
+    va, vb = d.visibility_from, d.visibility_to
+    if va is not None and vb is None:
+        return ["⚠ 新版报告缺失可见性求值（求值阶段丢失？须人核）"]
+    if va is None and vb is not None:
+        # 换版首次对比时全库都会走这条：旧报告产于可见性求值上线之前，不是退化。
+        return ["旧版报告无可见性求值（旧版本产物），可见性维度不作方向判断"]
+    if va is None or vb is None:
+        return []
+
+    notes: list[str] = []
+    blocked_a, blocked_b = set(va["blocked_claims"]), set(vb["blocked_claims"])
+    cleared = sorted(blocked_a - blocked_b)
+    added = sorted(blocked_b - blocked_a)
+    if cleared:
+        why = "（remediation=reanalyzed，可能是脱壳回灌生效）" if vb.get("remediation") == "reanalyzed" else ""
+        notes.append(
+            f"⚠ 可见性受限主张解除：{'、'.join(cleared)}{why}"
+            "（须人核：输入真的变可见了，还是求值退化把信号弄丢了）"
+        )
+    if added:
+        notes.append(f"可见性新增受限主张：{'、'.join(added)}（可能是新约束正确降级）")
+    # 仍瞎着、却不再给补法建议：有过先例的缺陷形态（可见性求值排在补法预案之前 → 建议恒空）。
+    if blocked_b and va["next_actions"] > 0 and vb["next_actions"] == 0:
+        notes.append("⚠ 仍有受限主张但补法建议清零（历史缺陷形态，须人核阶段顺序）")
     return notes
 
 
@@ -335,6 +379,27 @@ def _summarize(
             and d.closure_from == "complete" and d.closure_to != "complete"
         ),
         "hardening_newly_detected": sum(1 for d in diffs if not d.hardened_from and d.hardened_to),
+        # ---- 证据可见性（中性计数，不给总评）----
+        "visibility_comparable": sum(
+            1 for d in diffs if d.visibility_from is not None and d.visibility_to is not None
+        ),
+        # 受限主张解除 = 须人核重点（警示消失即漏报放大）
+        "visibility_blocked_cleared": sum(
+            1 for d in diffs
+            if d.visibility_from is not None and d.visibility_to is not None
+            and set(d.visibility_from["blocked_claims"]) - set(d.visibility_to["blocked_claims"])
+        ),
+        "visibility_blocked_added": sum(
+            1 for d in diffs
+            if d.visibility_from is not None and d.visibility_to is not None
+            and set(d.visibility_to["blocked_claims"]) - set(d.visibility_from["blocked_claims"])
+        ),
+        # ★只数「新版报告读得到、却没有可见性求值」；报告根本读不到走 advice_unreadable 口径，
+        #   不折进来。反方向（旧版无求值 → 新版有）是旧 schema 升级，绝不与本计数合并。
+        "visibility_assessment_lost": sum(
+            1 for d in diffs
+            if d.visibility_from is not None and d.visibility_to is None and d.advice_to is not None
+        ),
     }
 
 
