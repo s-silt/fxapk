@@ -3330,7 +3330,12 @@ def test_frida_session_registers_all_channels_via_table(monkeypatch):
     # 8 个 sink 全给非 None → hook_ready 通道(★#7) + crypto 主通道 + 7 路表通道。
     sinks = [[] for _ in range(8)]
     capture._start_frida_session("com.x", *sinks)
-    assert len(on_calls) == 2 + len(capture.CHANNELS)  # +1 = hook_ready handler
+    # 通道表之外还有三个固定处理器，逐个列明（别再用一个不透明的字面量数）：
+    #   ① Frida 17+ 的 Java bridge 应答器（必须先于 script.load 注册）
+    #   ② hook_ready 通道
+    #   ③ crypto 主通道
+    _FIXED_HANDLERS = 3
+    assert len(on_calls) == _FIXED_HANDLERS + len(capture.CHANNELS)
 
 
 # ---------------------------------------------------------------------------
