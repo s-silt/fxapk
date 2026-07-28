@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 
 from apkscan.core import exposure, forensic, infra
+from apkscan.core.attribution import classify_network
 from apkscan.core.models import (
     OBSERVED_CONTACT_SOURCES,
     Confidence,
@@ -17,6 +18,7 @@ from apkscan.core.models import (
     Lead,
     LeadCategory,
 )
+from apkscan.network.categories import CAT_CLOUD, CAT_HOSTING_RESELLER, CAT_IDC
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +33,19 @@ def build_endpoint_leads(endpoints: list[Endpoint], online: bool = True) -> list
     online=False 时在 Lead.notes 标明"离线扫描，归属未查询"，让报告能区分
     "查过查不到" 与 "压根没查"。
     """
+    # 样本内的低段位 IPv4 兄弟池：成簇（1.3.1.1 / 1.3.1.6 / 1.4.1.14）是版本号的主要产生形态，
+    # 用来压住 classify_ip 的托管佐证豁免。全样本一次算好，逐端点只做减法。
+    low_octet_pool = {
+        infra._strip_port_suffix(ep.value)
+        for ep in endpoints
+        if ep.kind == "ip" and infra.is_low_octet_ipv4(ep.value)
+    }
     leads: list[Lead] = []
     for ep in endpoints:
         if ep.kind == "domain":
             leads.append(_domain_lead(ep, online))
         elif ep.kind == "ip":
-            leads.append(_ip_lead(ep, online))
+            leads.append(_ip_lead(ep, online, low_octet_pool=low_octet_pool))
     return leads
 
 
@@ -334,7 +343,27 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
     )
 
 
-def _ip_lead(ep: Endpoint, online: bool = True) -> Lead:
+#: ASN 归属被判为这几类时，算「这个地址落在租户可查的托管段上」——用作低段位裸 IP 的升级佐证。
+#: ★刻意不含 CDN / security_proxy：CDN 边缘本就不该当源站进调证函（见线索清单约定）。
+_TENANT_HOSTING_CATEGORIES = frozenset({CAT_CLOUD, CAT_HOSTING_RESELLER, CAT_IDC})
+
+
+def _is_tenant_hosting_asn(asn: dict) -> bool:
+    """ASN 富化结果是否指向「租户可查的托管段」（云 / IDC / 托管转售）。
+
+    只在 :func:`infra.classify_ip` 的低段位豁免里当**佐证之一**用，不单独构成任何结论：
+    绝大多数全球 IP 都有 ASN，光"有数据"没有区分度。
+    """
+    if not isinstance(asn, dict):
+        return False
+    org = asn.get("org") or asn.get("isp") or ""
+    asn_no = str(asn.get("asn") or "") or None
+    return classify_network(str(org), asn_no) in _TENANT_HOSTING_CATEGORIES
+
+
+def _ip_lead(
+    ep: Endpoint, online: bool = True, *, low_octet_pool: set[str] | None = None
+) -> Lead:
     asn = ep.enrichment.get("asn") or {}
 
     subject = asn.get("org") or asn.get("isp") or asn.get("asn")
@@ -355,13 +384,15 @@ def _ip_lead(ep: Endpoint, online: bool = True) -> Lead:
     # 点分四段字面未必是地址，实测语料里版本号与 ASN.1 OID 大量以 confidence=HIGH
     # 混进"建议调证"，把闭环预算与外部富化额度吃光。判据用得着证据片段来判断
     # 这个字面在样本里是否当地址使用（带端口 / 在 URL 里），故把 snippet 拼给它。
+    ip_reason = ""
     if ep.is_private:
         advice = infra.ADVICE_SKIP
     else:
         # ★全量扫证据、不截前 N 条：带端口/URL 的那条可能排在任何位置，
         #   漏看一条就可能把真实后端降成待核。snippet 有长度上限，全量拼接开销可控。
         context = " ".join((ev.snippet or "") for ev in ep.evidences)
-        advice, _ip_reason = infra.classify_ip(
+        bare = infra._strip_port_suffix(ep.value)
+        advice, ip_reason = infra.classify_ip(
             ep.value,
             context=context,
             # ★用 OBSERVED_CONTACT_SOURCES 而非 startswith("runtime")：后者会把
@@ -370,10 +401,19 @@ def _ip_lead(ep: Endpoint, online: bool = True) -> Lead:
             runtime_observed=any(
                 str(ev.source) in OBSERVED_CONTACT_SOURCES for ev in ep.evidences
             ),
+            # 低段位裸 IP 的定向豁免佐证：ASN 落托管段 + 样本内无同形态编号序列。
+            hosting_attributed=_is_tenant_hosting_asn(asn),
+            low_octet_siblings=len((low_octet_pool or set()) - {bare}),
         )
 
+    endpoint_notes = _endpoint_notes(ep, online, enriched)
+    # 靠外部佐证把低段位裸 IP 捞回"建议调证"时，把保留意见落进 notes——办案人发函前该看到
+    # 「这个值的形态本身存疑，是 ASN 佐证把它升回来的」，而不是只看到一条干净的调证条目。
+    if advice == infra.ADVICE_INVESTIGATE and "四段值偏低" in ip_reason:
+        endpoint_notes = f"{endpoint_notes}；{ip_reason}" if endpoint_notes else ip_reason
+
     notes = _apply_forensic(
-        advice, ep.value, evidence_to_obtain, _endpoint_notes(ep, online, enriched),
+        advice, ep.value, evidence_to_obtain, endpoint_notes,
         asn=asn, shodan=ep.enrichment.get("shodan"),
         certs=ep.enrichment.get("certs"),
     )
