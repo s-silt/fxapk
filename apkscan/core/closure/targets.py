@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from apkscan.core import infra
 from apkscan.core.models import Endpoint, Report
 
 from apkscan.core.closure._shared import _mapping
@@ -48,6 +49,18 @@ def _runtime_info(endpoint: Endpoint) -> dict[str, Any]:
     runtime = _mapping(endpoint.enrichment.get("runtime"))
     runtime["observed"] = any(ev.source.startswith("runtime") for ev in endpoint.evidences)
     return runtime
+
+
+def _match_value(category_or_kind: str, value: str) -> str:
+    """Lead 与 Endpoint 配对用的规范化值。
+
+    ★IP 侧要剥 ``:port/proto``：运行时回灌产出的 Lead 值形如 ``8.138.102.85:31861/tcp``（端口是
+      调证函要写的东西，必须留在 Lead 上），而 Endpoint 一律是裸 IP（富化器、静态端点都按裸 IP
+      算）。不剥就永远配不上——实测后果是**实测双向通信的真后端连闭环候选都进不去**，闭环转而
+      挑满静态噪音，报告里 Lead 标着 is_runtime_contact=true、闭环却对它一无所知。
+    """
+    v = value.strip().lower()
+    return infra._strip_port_suffix(v) if category_or_kind.upper() == "IP" else v
 
 
 def _target_rank(
@@ -110,7 +123,7 @@ def _select_targets_with_stats(report: Report, max_targets: int) -> tuple[list[E
         if is_repack and lead.value.lower() not in restored_values:
             repack_excluded += 1
             continue
-        key = (lead.category.value.lower(), lead.value.lower())
+        key = (lead.category.value.lower(), _match_value(lead.category.value, lead.value))
         lead_rank[key] = min(lead_rank.get(key, 9), {"HIGH": 0, "MEDIUM": 1, "LOW": 2}.get(lead.confidence.value, 3))
         (shape_suspect if getattr(lead, "shape_uncertain", False) else shape_ok).add(key)
 
@@ -118,7 +131,7 @@ def _select_targets_with_stats(report: Report, max_targets: int) -> tuple[list[E
     for endpoint in report.endpoints:
         if endpoint.kind not in {"domain", "ip"} or endpoint.is_private:
             continue
-        key = (endpoint.kind, endpoint.value.lower())
+        key = (endpoint.kind, _match_value(endpoint.kind, endpoint.value))
         if key not in lead_rank:
             continue
         candidates.append((endpoint, lead_rank[key], key in shape_suspect and key not in shape_ok))
