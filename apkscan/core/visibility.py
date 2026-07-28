@@ -76,6 +76,8 @@ _CLAIM_LABELS: dict[str, str] = {
 #: ★``partial``（扫描被截断）也在内：本表里的主张**全部是穷尽性/否定性**的，"扫了一半"支撑不了
 #: "已穷尽"。这条最容易被放过——分析器跑成功、状态全绿，只是没扫完。
 _INSUFFICIENT = frozenset({VIS_PARTIAL, VIS_STUB_ONLY, VIS_OPAQUE, VIS_UNAVAILABLE})
+#: 公开别名：closure 判断「这一维是不是**确证盲区**」时用同一份定义，别各写各的。
+INSUFFICIENT = _INSUFFICIENT
 
 
 def _meta(report: Any) -> dict:
@@ -142,14 +144,25 @@ def _dex_visibility(meta: dict) -> tuple[str, list[str]]:
 
 
 def _native_visibility(meta: dict) -> tuple[str, list[str]]:
-    why: list[str] = []
+    """native 层可见性。
+
+    ★``meta["native_obfuscation"]`` 是 **list**（``native_obfuscation`` 分析器写的疑似库明细，
+      无命中时为空列表），不是 dict。此前这里判的是 ``isinstance(obf, dict)`` 并从中取
+      ``suspected``/``libraries`` 键——那个分支在生产里一次都没成立过，于是装着 5 个虚拟化
+      .so 的样本照样读作 native 完整可见。分析器辛苦标出来的疑似库，下游没人接。
+    """
     obf = meta.get("native_obfuscation")
+    if isinstance(obf, list):
+        if obf:
+            return VIS_OPAQUE, [f"{len(obf)} 个 .so 疑加密/虚拟化，其中字符串不可读"]
+        return VIS_COMPLETE, []
     if isinstance(obf, dict):
+        # 兼容曾出现过的 dict 形态（旧报告 / 手编）：取任一已知明细键。
         libs = obf.get("suspected") or obf.get("libraries") or []
         if libs:
-            why.append(f"{len(libs)} 个 .so 疑加密/虚拟化，其中字符串不可读")
-            return VIS_OPAQUE, why
-    return VIS_COMPLETE, why
+            return VIS_OPAQUE, [f"{len(libs)} 个 .so 疑加密/虚拟化，其中字符串不可读"]
+        return VIS_COMPLETE, []
+    return VIS_COMPLETE, []
 
 
 def _attribution_caveat(meta: dict) -> list[str]:
@@ -318,6 +331,65 @@ def _next_actions(sources: dict, remediation: str, meta: dict) -> list[str]:
     return actions
 
 
+def _derive_claims(sources: dict) -> tuple[dict[str, dict], list[str]]:
+    """由各源的可见性档位推出每条主张的资格。返回 ``(claims, blocked)``。
+
+    单列出来是因为它有两个调用方：:func:`assess` 正算，以及 closure 重算后回填了源值时的
+    重推——主张资格是 sources 的**派生值**，改了源不重推就会出现「dex 记着 stub_only、
+    却仍宣称静态端点已穷尽」这种自相矛盾的快照。
+    """
+    claims: dict[str, dict] = {}
+    blocked: list[str] = []
+    for claim, needs in _CLAIM_REQUIREMENTS.items():
+        def _vis(src: str, _s: dict = sources) -> str | None:
+            info = _s.get(src)
+            return info.get("visibility") if isinstance(info, dict) else None
+
+        missing = [s for s in needs if _vis(s) in _INSUFFICIENT]
+        # ★「未评估」单列，不并进 missing：两者都不足以支撑穷尽性主张，
+        #   但在报告措辞与 closure 封顶决策上必须分得开——
+        #   「查过、确实看不见」是本次分析的实际缺口，该封顶 partial；
+        #   「这一维压根没评估」不该让整份报告为之降级（同 runtime 那条豁免）。
+        #   此前 unknown 既不进 missing 也不阻断，等于被当成 complete 放行了。
+        unassessed = [s for s in needs if _vis(s) == VIS_UNKNOWN]
+        eligible = not missing and not unassessed
+        claims[claim] = {
+            "label": _CLAIM_LABELS.get(claim, claim),
+            "eligible": eligible,
+            "missing_sources": missing,
+            "unassessed_sources": unassessed,
+        }
+        if not eligible:
+            blocked.append(claim)
+    return claims, blocked
+
+
+def reassess_claims(assessment: dict) -> dict:
+    """按当前 ``sources`` 重推 claims / blocked_claims / degraded，返回新的 assessment。
+
+    供 closure 在回填了源值之后调用（见 ``closure._preserve_confirmed_gaps``）。
+    ``notes`` 里的人读结论一并按新的 blocked 集重写，免得措辞与结构化字段各说各话。
+    """
+    sources = assessment.get("sources")
+    if not isinstance(sources, dict):
+        return assessment
+    claims, blocked = _derive_claims(sources)
+    notes = [n for n in (assessment.get("notes") or []) if not str(n).startswith("★以下结论")]
+    if blocked:
+        labels = "、".join(_CLAIM_LABELS.get(c, c) for c in blocked)
+        notes.append(
+            f"★以下结论**无资格下**（相关输入不可见）：{labels}。"
+            "此处的「未发现」只说明本次没看到，不能解读为不存在。"
+        )
+    return {
+        **assessment,
+        "claims": claims,
+        "blocked_claims": sorted(blocked),
+        "notes": notes,
+        "degraded": bool(blocked),
+    }
+
+
 def assess(report: Any) -> dict[str, Any]:
     """求值一份报告的证据可见性与主张资格。绝不抛；坏输入 → 全 unknown 的保守结果。
 
@@ -345,28 +417,7 @@ def assess(report: Any) -> dict[str, Any]:
             "runtime": {"visibility": rt_vis, "why": rt_why},
         }
 
-        claims: dict[str, dict] = {}
-        blocked: list[str] = []
-        for claim, needs in _CLAIM_REQUIREMENTS.items():
-            def _vis(src: str) -> str | None:
-                return sources.get(src, {}).get("visibility")
-
-            missing = [s for s in needs if _vis(s) in _INSUFFICIENT]
-            # ★「未评估」单列，不并进 missing：两者都不足以支撑穷尽性主张，
-            #   但在报告措辞与 closure 封顶决策上必须分得开——
-            #   「查过、确实看不见」是本次分析的实际缺口，该封顶 partial；
-            #   「这一维压根没评估」不该让整份报告为之降级（同 runtime 那条豁免）。
-            #   此前 unknown 既不进 missing 也不阻断，等于被当成 complete 放行了。
-            unassessed = [s for s in needs if _vis(s) == VIS_UNKNOWN]
-            eligible = not missing and not unassessed
-            claims[claim] = {
-                "label": _CLAIM_LABELS.get(claim, claim),
-                "eligible": eligible,
-                "missing_sources": missing,
-                "unassessed_sources": unassessed,
-            }
-            if not eligible:
-                blocked.append(claim)
+        claims, blocked = _derive_claims(sources)
 
         notes: list[str] = []
         for src, info in sources.items():
@@ -418,6 +469,7 @@ def blocks_claim(assessment: Any, claim: str) -> bool:
 
 
 __all__ = [
+    "INSUFFICIENT",
     "REM_FAILED",
     "REM_NOT_ATTEMPTED",
     "REM_REANALYZED",

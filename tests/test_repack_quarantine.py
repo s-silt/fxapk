@@ -188,16 +188,62 @@ def test_closure_backstop_excludes_unquarantined_legacy_report() -> None:
 
 
 def test_closure_backstop_respects_manual_restore() -> None:
-    """审计块存在 = 隔离跑过 = 残余的「建议调证」是人工差分核实后恢复的，应予尊重。
+    """该值**曾被隔离**（在审计块 values 里）却仍是「建议调证」= 人工差分核实后放回的，应予尊重。
 
     否则人工确认属注入的真 C2 会被永久挡在闭环之外（漏报方向）。
     """
     ep = Endpoint(kind="domain", value="confirmed-injected.example")
     meta = {**_repack_meta(),
-            "repack_quarantine": {"reason": VERDICT_REPACK_SUSPECTED, "count": 3, "values": []}}
+            "repack_quarantine": {"reason": VERDICT_REPACK_SUSPECTED, "count": 1,
+                                  "values": ["confirmed-injected.example"]}}
     rep = _report_with([_lead("confirmed-injected.example")], [ep], meta)
 
     selected, stats = _select_targets_with_stats(rep, max_targets=6)
 
     assert [e.value for e in selected] == ["confirmed-injected.example"]
-    assert "repack_excluded" not in stats
+    assert stats.get("repack_excluded") is None
+
+
+@pytest.mark.parametrize(
+    "block, why",
+    [
+        ({"reason": VERDICT_REPACK_SUSPECTED, "count": 0, "values": []},
+         "空审计块：手编一个 {} 就能让整道兜底门失效"),
+        ({"reason": VERDICT_REPACK_SUSPECTED},
+         "只有 reason 的块，同样不含任何'这条被隔离过'的凭据"),
+        ({"reason": VERDICT_REPACK_SUSPECTED, "count": 2, "values": ["other-vendor.example"]},
+         "陈旧块：隔离跑完之后 dead-drop 又追加了从未经隔离的新 Lead"),
+        ("坏值", "非 dict 的块不得被当成'隔离跑过'"),
+    ],
+)
+def test_closure_backstop_needs_membership_not_mere_presence(block: object, why: str) -> None:
+    """★放行凭据是**成员资格**，不是审计块存在与否。
+
+    曾用「有块即视为人工恢复」，于是为防手编而设的门被一个手编的空块击穿；更常见的是
+    陈旧块——隔离跑过、随后 dead-drop 又补建了一批厂商域名，那批从未经隔离却一并放行。
+    """
+    ep = Endpoint(kind="domain", value="api.legit-vendor.com")
+    meta = {**_repack_meta(), "repack_quarantine": block}
+    rep = _report_with([_lead("api.legit-vendor.com")], [ep], meta)
+
+    selected, stats = _select_targets_with_stats(rep, max_targets=6)
+
+    assert selected == [], why
+    assert stats.get("repack_excluded") == 1
+
+
+def test_dead_drop_path_is_quarantined() -> None:
+    """★有机绕过路径：dead-drop 在隔离跑完之后补建 Lead，走的是 infra.classify_domain。
+
+    重打包件在运行时连的也是被仿冒厂商的后端；漏在这里，正版厂商域名就以「建议调证」
+    直接进闭环与调证函——正是这套隔离要防的那件事。
+    """
+    rep = _report_with([], [], _repack_meta())
+    rep.leads.append(_lead("secondary.legit-vendor.com"))
+
+    merge._quarantine_new_leads(rep)
+
+    assert all(x.advice != "建议调证" for x in rep.leads), "dead-drop 补建的 Lead 未经隔离"
+    blob = rep.meta["repack_quarantine"]
+    assert blob["values"] == ["secondary.legit-vendor.com"], "被隔离的值必须记进 values"
+    assert blob["count"] == 1
