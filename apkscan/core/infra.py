@@ -675,7 +675,16 @@ _OID_ARC_PREFIXES: tuple[str, ...] = (
 
 #: 低值四段的段上限。标定：语料里真实被采纳为 IOC 的 IP，四段全部 ≤32 的一例也没有；
 #: 而版本号/序号几乎全在此区间内。
+#:
+#: ★"零例"指的是**无佐证形态**——语料标定时判据只看字面。真实公网后端确有落在这个形态里的
+#:   （AWS 3./23.、Azure 20.、Meta 31.13 段都能凑出四段全 ≤32 的地址），而裸字面本身提不出
+#:   端口/URL 上下文来把自己捞回来。故 :func:`classify_ip` 另开一条**双重佐证**的定向豁免
+#:   （ASN 归属托管段 + 样本内无同形态编号序列），见下方参数说明；别照旧注释把它当 bug 删掉。
 _LOW_OCTET_MAX = 32
+
+#: 样本内同形态低段位兄弟值达到几个就按"编号序列"看待（1.3.1.1 / 1.3.1.6 / 1.4.1.14 成簇）。
+#: 成簇是版本号的主要产生形态，此时即便 ASN 佐证成立也不升级。
+_LOW_OCTET_SEQUENCE_SIBLINGS = 2
 
 #: "裸字面"判据：真实网络地址在样本里通常带端口、出现在 URL 里、或有协议前缀。
 #: 命中任一即视为**用作地址**，不降级。
@@ -694,8 +703,26 @@ def _strip_port_suffix(value: str) -> str:
     return head
 
 
+def is_low_octet_ipv4(value: str) -> bool:
+    """该字面是否为"四段全部 ≤ :data:`_LOW_OCTET_MAX`"的 IPv4（纯形态判断，不看 is_global）。
+
+    供调用方在样本内建"同形态兄弟池"，用来识别编号序列。解析不了 → False。
+    """
+    bare = _strip_port_suffix(value)
+    try:
+        addr = ipaddress.ip_address(bare)
+    except ValueError:
+        return False
+    return addr.version == 4 and all(int(p) <= _LOW_OCTET_MAX for p in bare.split("."))
+
+
 def classify_ip(
-    value: str, *, context: str = "", runtime_observed: bool = False
+    value: str,
+    *,
+    context: str = "",
+    runtime_observed: bool = False,
+    hosting_attributed: bool = False,
+    low_octet_siblings: int = 0,
 ) -> tuple[str, str]:
     """对 IP 字面做调证研判分级，返回 ``(advice, reason)``——与 :func:`classify_domain` 对称。
 
@@ -704,6 +731,16 @@ def classify_ip(
 
     ``runtime_observed`` 为真（证据里有 runtime* 来源）时，形态判据一律豁免：
     设备上真发生过到这个地址的连接，它就是地址，四段再小也不是版本号。
+
+    ``hosting_attributed`` / ``low_octet_siblings`` 是低段位降级的**定向豁免**：ASN 富化把这个
+    地址归到云/IDC/托管转售段（``hosting_attributed``），且样本里没有同形态的编号序列兄弟
+    （``low_octet_siblings`` 少于 :data:`_LOW_OCTET_SEQUENCE_SIBLINGS`）时升回"建议调证"。
+    裸字面自己提不出端口/URL 上下文，只能靠外部佐证捞——但佐证必须是**双重**的：
+    单看 ASN 无区分度（几乎每个全球 IP 都有 ASN），单看孤值又漏掉版本号最常见的成簇形态。
+
+    ★两参数默认关闭，离线 / 无富化路径行为逐字不变（仍是"待核 + 人工可捞回"）。
+    ★别把佐证放松成"有 asn 数据"或"Shodan 有开放端口"——前者无区分度，后者会把无关活主机
+      升成调证对象，两个都把错误翻到代价更高的方向。
     """
     bare = _strip_port_suffix(value)
     try:
@@ -735,6 +772,11 @@ def classify_ip(
         return ADVICE_INVESTIGATE, "疑似 App 后端地址，建议落地核查归属"
 
     if addr.version == 4 and all(int(p) <= _LOW_OCTET_MAX for p in bare.split(".")):
+        if hosting_attributed and low_octet_siblings < _LOW_OCTET_SEQUENCE_SIBLINGS:
+            return ADVICE_INVESTIGATE, (
+                "四段值偏低但 ASN 归属云/IDC 托管段、且样本内无同形态编号序列，"
+                "按后端地址处理，建议落地核查归属（★形态存疑，发函前请人工复核）"
+            )
         return ADVICE_REVIEW, (
             "四段值均偏低且样本里未当地址使用（无端口/无 URL 上下文），"
             "疑为版本号或序号被当成 IP，需人工核"
