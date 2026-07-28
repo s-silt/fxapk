@@ -13,12 +13,15 @@ from __future__ import annotations
 
 import pytest
 
+from apkscan.core import corpus
 from apkscan.core.attribution import classify_network
 from apkscan.core.closure.targets import _select_targets_with_stats
 from apkscan.core.infra import ADVICE_INVESTIGATE, ADVICE_REVIEW
 from apkscan.core.leads import _is_tenant_hosting_asn, build_endpoint_leads
-from apkscan.core.models import Endpoint, Evidence, Report
+from apkscan.core.models import Confidence, Endpoint, Evidence, Report
 from apkscan.network.categories import CAT_CLOUD, CAT_TELECOM
+from apkscan.report.json import _to_jsonable
+from apkscan.report.letters import build_letters
 
 #: 裸字面证据：值本身出现在字符串表里，既无端口也无 URL 语境——降级判据的触发前提。
 _BARE = "23.21.5.12"
@@ -132,3 +135,120 @@ def test_promoted_lead_reaches_closure_targets() -> None:
     selected, _stats = _select_targets_with_stats(rep, max_targets=6)
 
     assert [e.value for e in selected] == [_BARE]
+
+
+# ---------------------------------------------------------------------------
+# 保留意见必须走完全程：升上来的值不得以"干净的 HIGH 条目"示人
+#
+# 这一节是一次教训的回归锁。判据原本只把保留意见拼进 Lead.notes，并在提交说明里声称
+# "办案人发函前看得到"——而 letters 全文不读 notes。发出去的是一封干净的、HIGH 置信度、
+# 指名某云厂商的调证函，没有半点存疑提示。信号必须自己走到出口。
+# ---------------------------------------------------------------------------
+
+
+def test_promotion_is_marked_structurally_not_only_in_prose() -> None:
+    """★保留意见是结构化字段，不是 notes 里的一句话——散文没有下游能消费。"""
+    lead = build_endpoint_leads([_ip_ep(_BARE, _CLOUD_ASN)])[0]
+    assert lead.shape_uncertain is True
+    assert "形态存疑" in lead.notes, "人读通道也留着，但它不是唯一通道"
+
+
+def test_promotion_never_presents_as_high_confidence() -> None:
+    """★HIGH 是"这确实是个地址"的断言，而此处恰恰不确定。
+
+    ASN org 非空只说明"这串数字解释成 IP 后落在谁的网段"，不是地址性证据，不该驱动 HIGH。
+    """
+    lead = build_endpoint_leads([_ip_ep(_BARE, _CLOUD_ASN)])[0]
+    assert lead.subject, "前提：ASN 富化给了 subject，未修复时正是它把置信抬到 HIGH"
+    assert lead.confidence is Confidence.MEDIUM
+
+
+def test_letter_draft_carries_the_reservation() -> None:
+    """★出口锁（本条最重）：套打出来的调证函正文必须带着存疑警示。
+
+    退回 letters 的渲染，这里即红——而那正是"承诺写在 notes、出口不读 notes"的形态：
+    一封指名真实云厂商、要求提供租户实名的函，标的却可能只是个版本号字面。
+    """
+    lead = build_endpoint_leads([_ip_ep(_BARE, _CLOUD_ASN)])[0]
+    letters = build_letters({"leads": [_to_jsonable(lead)]})
+
+    assert len(letters) == 1, "仍应套打（值可能是真后端），但必须带警示"
+    body = letters[0]["body_md"]
+    assert "标的形态存疑" in body
+    assert "发函前请人工确认" in body
+    assert letters[0]["shape_uncertain"] is True
+    # 警示要排在受文机关**字段**之前——决定这封函发不发的，正是它
+    # （不能拿"受文机关"三字比：顶部免责声明里也有这三个字，会撞上）
+    assert body.index("标的形态存疑") < body.index("**受文机关（候选）：**")
+
+
+def test_normal_lead_letter_has_no_spurious_warning() -> None:
+    """反向护栏：正常线索的函不得平白多出存疑警示（否则警示贬值成噪声）。"""
+    ep = _ip_ep("103.36.167.109", _CLOUD_ASN)
+    ep.evidences[0].snippet = "https://103.36.167.109:8443/api"  # 当地址用，走正常路径
+    lead = build_endpoint_leads([ep])[0]
+
+    assert lead.shape_uncertain is False
+    body = build_letters({"leads": [_to_jsonable(lead)]})[0]["body_md"]
+    assert "标的形态存疑" not in body
+
+
+def test_shape_uncertain_does_not_crowd_out_solid_targets() -> None:
+    """★Top-N 名额有限：可能是版本号的字面不得挤掉确凿的后端地址。
+
+    两个候选刻意做成**其余排序维度全部打平**：同为 MEDIUM（存疑值被封顶、对照值无 ASN 富化）、
+    同无运行时观测，且存疑值的字面还排在字典序前面——只有形态存疑这一个排序键能把顺序扳过来。
+    不打平的话，这条测试会被置信度或字典序"顺便"通过，排序键删掉也不红。
+    """
+    suspect = _ip_ep("18.20.31.2", _CLOUD_ASN)          # 低段位 + 云 ASN + 裸字面 → 存疑
+    solid = _ip_ep("185.60.216.35")                      # 无 ASN 富化 → 同为 MEDIUM
+    solid.evidences[0].snippet = "https://185.60.216.35:8443/api"   # 当地址用 → 不存疑
+    assert "18.20.31.2" < "185.60.216.35", "前提：存疑值字典序在前，否则排序键不是唯一变量"
+
+    eps = [suspect, solid]
+    leads = build_endpoint_leads(eps)
+    assert {ld.confidence for ld in leads} == {Confidence.MEDIUM}, "前提：置信度打平"
+    rep = Report(
+        package_name="com.example.app", meta={},
+        leads=leads, endpoints=eps, findings=[], analyzer_status=[],
+    )
+
+    selected, _stats = _select_targets_with_stats(rep, max_targets=1)
+
+    assert [e.value for e in selected] == ["185.60.216.35"], "存疑候选应排在正常候选之后"
+
+
+def test_reservation_survives_report_round_trip() -> None:
+    """★往返锁：`case close` / `letters` 都从磁盘上的 report.json 走。
+
+    读侧不还原这个字段，保留意见就在落盘那一刻蒸发——分析时标了、发函时没了，
+    与"写进 notes 但出口不读 notes"是同一种断裂，只是断在另一处。
+    """
+    from apkscan.core.report_io import report_from_dict
+    from apkscan.report.json import to_dict
+
+    ep = _ip_ep(_BARE, _CLOUD_ASN)
+    rep = Report(
+        package_name="com.example.app", meta={},
+        leads=build_endpoint_leads([ep]), endpoints=[ep], findings=[], analyzer_status=[],
+    )
+    assert rep.leads[0].shape_uncertain is True
+
+    payload = to_dict(rep)
+    assert payload["leads"][0]["shape_uncertain"] is True, "写侧丢字段"
+
+    reloaded = report_from_dict(payload)
+    assert reloaded.leads[0].shape_uncertain is True, "读侧丢字段：落盘一趟保留意见就没了"
+    # 出口仍然带警示（而不是只有内存里那份带）
+    assert "标的形态存疑" in build_letters(payload)[0]["body_md"]
+
+
+def test_shape_uncertain_value_stays_out_of_cross_case_iocs() -> None:
+    """★串案出口：两个无关样本恰好含同一个版本号，不得被呈现成「共享基础设施」。"""
+    lead = build_endpoint_leads([_ip_ep(_BARE, _CLOUD_ASN)])[0]
+    assert corpus._key_iocs({"leads": [_to_jsonable(lead)]}) == []
+
+    solid = _ip_ep("103.36.167.109", _CLOUD_ASN)
+    solid.evidences[0].snippet = "https://103.36.167.109:8443/api"
+    ok = build_endpoint_leads([solid])[0]
+    assert corpus._key_iocs({"leads": [_to_jsonable(ok)]}) == ["103.36.167.109"]

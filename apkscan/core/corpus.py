@@ -130,7 +130,12 @@ def report_relpath(report: dict) -> str:
 
 
 def _key_iocs(report: dict) -> list[str]:
-    """从 leads 摘取高价值线索值（is_c2 或 advice=建议调证）供快速 grep，去重、限量。"""
+    """从 leads 摘取高价值线索值（is_c2 或 advice=建议调证）供快速 grep，去重、限量。
+
+    ★``shape_uncertain`` 的值不收：它们的地址性尚未确证（形态与版本号无法区分）。串案时
+    两个毫不相干的样本恰好含同一个版本号字面，会被呈现成「共享基础设施」——那是凭空造出
+    一条串案信号，方向上正是本项目最重的那类错误。要串案，先把它确证成地址。
+    """
     leads = report.get("leads")
     if not isinstance(leads, list):
         return []
@@ -140,6 +145,8 @@ def _key_iocs(report: dict) -> list[str]:
         if not isinstance(lead, dict):
             continue
         if not (lead.get("is_c2") or lead.get("advice") == _ADVICE_INVESTIGATE):
+            continue
+        if lead.get("shape_uncertain"):
             continue
         value = _s(lead.get("value")).strip()
         if value and value not in seen:
