@@ -42,9 +42,12 @@ fxapk case close out/app.json
 
 # 同一批样本换版后，检出到底变好还是变坏（先把两版报告都 corpus add 入库）
 fxapk corpus regress --corpus <库目录>
+
+# 哪些样本出自同一套开发环境（构建路径是编译期烙进 native 库的，改名/重打包/换服务器都动不了）
+fxapk corpus shared-build-env
 ```
 
-主要命令：`analyze`（静态）、`auto`（一键分析并闭环）、`case close`（已有报告严格闭环）、`capture`（真机抓包）、`doctor`（设备环境体检 + 自动修）、`corpus`（样本库：历次报告入库、跨版本回归、按值反查串案）。完整命令与参数见 `fxapk --help`。
+主要命令：`analyze`（静态）、`auto`（一键分析并闭环）、`case close`（已有报告严格闭环）、`capture`（真机抓包）、`doctor`（设备环境体检 + 自动修）、`corpus`（样本库：历次报告入库、跨版本回归、按值反查串案、按构建环境找同源样本）。完整命令与参数见 `fxapk --help`。
 
 闭环状态写入 `report.meta.closure`：`complete` 表示主目标的运行时证据、资源登记、BGP 宣告、托管/分发和最终调证对象五层均有证据；`partial` 表示仍有显式缺口；`failed` 表示静态关键失败、要求动态但没有业务流量，或没有可闭环主目标。CDN / 防红前端未定位 Origin 时不会判为 `complete`。
 
