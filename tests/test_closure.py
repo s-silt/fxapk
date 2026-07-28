@@ -1268,6 +1268,26 @@ def test_close_report_refreshes_fronting_cluster(monkeypatch) -> None:
     assert edge1["cluster_id"] == edge2["cluster_id"] == "fronting-cluster-0001"  # close 后重聚类恢复编号
 
 
+def test_runtime_lead_with_port_suffix_receives_closure_writeback() -> None:
+    """★回归：pcap 实测后端的 Lead 值带 ``:port/proto``，Endpoint 是裸 IP。
+
+    选闭环目标那侧一直剥端口（所以它**被选中了**），但结论回写这侧曾用裸 ``.lower()`` 精确匹配，
+    于是同一条线索"当上了 target 却收不到自己的结论"——拿不到 where_to_request / evidence_to_obtain，
+    连 [case-close] 状态都不落。把 _update_target_leads 退回 ``lead.value.lower()``，本测试即红。
+    """
+    endpoint = _complete_endpoint()  # 198.51.100.10，runtime + target_attributed + payload
+    report = _report(endpoint)
+    lead = report.leads[0]
+    lead.value = "198.51.100.10:31861/tcp"  # 运行时回灌的真实形态：端口留在 Lead 上供调证函写
+
+    close_report(report, ClosureConfig(online=False, require_dynamic=False), enrichers=[])
+
+    assert "[case-close]" in lead.notes, "被选为闭环目标的 Lead 没收到回写"
+    assert lead.where_to_request, "没拿到受文机关（调证函会渲染成空壳）"
+    assert lead.evidence_to_obtain, "没拿到拟调取证据清单"
+    assert lead.value == "198.51.100.10:31861/tcp"  # 端口不许被回写顺手抹掉
+
+
 def test_close_report_clears_stale_case_close_marker_on_unselected_lead() -> None:
     """★回归（codex 审计 P1-1 B 面）：上一轮更大 max_targets 给现已未选/被截断的 lead 写的旧 [case-close] 注记，
     本轮 close 须清掉，不残留与本轮 closure 不一致的陈旧状态。"""
