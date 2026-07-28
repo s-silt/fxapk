@@ -268,12 +268,48 @@ def _check_abi(serial: str | None) -> dict:
         )
 
 
+def _major(ver: str) -> int | None:
+    """取版本号主号；取不出返回 None（"不知道"不等于"坏了"）。"""
+    head = str(ver).strip().split(".", 1)[0]
+    return int(head) if head.isdigit() else None
+
+
+def _annotate_java_bridge(item: dict, host_ver: str) -> dict:
+    """★Frida 17+ 必须由宿主供 Java bridge，供不上就把这一项判为不就绪。
+
+    Frida 17 起 GumJS 不再内置 Java bridge：脚本引用 ``Java`` 时运行时向宿主索取源码，
+    frida-tools 的 CLI/REPL 自带应答器、Python API 没有。宿主端拿不到 ``bridges/java.js``
+    时，注入会"成功"、进程会存活、**而所有 Java hook 静默失效、事件全空**——
+    现象与样本反检测一模一样。实测已有案件因此白跑一轮取参，事后才从错误串里认出根因。
+
+    只在主号 ≥ 17 时改判：更早的版本内置 bridge，不装 frida-tools 也能用。
+    版本读不出来 → 不改判（与 :func:`_annotate_frida_uid` 同口径）。
+    """
+    from apkscan.dynamic import capture
+
+    major = _major(host_ver)
+    if major is None or major < 17:
+        return item
+    if capture._bridge_source("java") is not None:
+        item["detail"] = f"{item.get('detail', '')}；Java bridge 可供给"
+        return item
+    item["ok"] = False
+    item["detail"] = (
+        f"{item.get('detail', '')}；★Frida {major} 起 GumJS 不再内置 Java bridge，"
+        "而本机取不到 frida-tools 的 bridges/java.js —— "
+        "注入会「成功」但所有 Java hook 静默失效、事件全空（现象酷似样本反检测）"
+    )
+    item["fix_cmd"] = [*item.get("fix_cmd", []), "pip install -U frida-tools"]
+    return item
+
+
 def _check_host_frida() -> tuple[dict, str]:
     """(4) 主机 frida CLI 版本。返回 (item, host_ver)；host_ver 供 frida-server 项比对。"""
     try:
         ver = provision.host_frida_version()
         if ver:
-            return _item(_NAME_HOST_FRIDA, True, f"主机 frida CLI 版本：{ver}"), ver
+            item = _item(_NAME_HOST_FRIDA, True, f"主机 frida CLI 版本：{ver}")
+            return _annotate_java_bridge(item, ver), ver
         return (
             _item(
                 _NAME_HOST_FRIDA,
