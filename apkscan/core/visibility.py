@@ -194,14 +194,30 @@ def _resource_visibility(meta: dict) -> tuple[str, list[str]]:
       把接口藏在加密资源里，那恰恰是这一维该说话的地方。
 
     判据按保守优先级排：确证不可读 > 部分不可读 > 扫过了 > 没信号。
+
+    ★"扫过了"必须是"全扫过了"。此前只看成功计数 ``resource_files_scanned > 0``，于是
+      「命中 100 个资源目标、99 个因坏 CRC 读不出、只读成 1 个」与「100 个全读成」在数据上
+      完全一样，都判 complete。畸形 zip 条目是本域在用的反分析手法，不是偶发噪声——把被
+      跳读的那个 assets 当成"看过了"，正是"未发现"被读成"已穷尽"。
     """
     why: list[str] = []
     if meta.get("uni_encrypted"):
         why.append("uni-app 代码加密（confusion）：业务 JS 与接口在资源层不可读")
         return VIS_OPAQUE, why
+    # ★列举整体失败是**本次实测到的故障**，不是"没做这一维"：必须落进 _INSUFFICIENT 档去
+    #   封顶，而不是混进 unknown 那条专供旧报告/未评估的豁免通道。
+    if meta.get("resource_listing_failed"):
+        return VIS_UNAVAILABLE, ["资源列举失败：本次分析未能枚举包内资源，该层完全未看"]
     recipe = meta.get("crypto_recipe")
     if isinstance(recipe, dict) and recipe:
         why.append("资源层存在已识别的加密配置文件；在解密并入之前该部分不可读")
+        return VIS_PARTIAL, why
+    read_failed = meta.get("resource_files_read_failed")
+    if isinstance(read_failed, int) and read_failed > 0:
+        why.append(
+            f"{read_failed} 个文本资源命中扫描目标却读取失败（坏 CRC / 畸形条目 / 超尺寸），"
+            "其内容未进入本次分析"
+        )
         return VIS_PARTIAL, why
     scanned = meta.get("resource_files_scanned")
     if isinstance(scanned, int) and scanned > 0:
