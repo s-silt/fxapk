@@ -408,7 +408,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
         # 四路数据源各自 try/except，单源失败不影响其余。
         dex_ok, dex_truncated = self._scan_dex(ctx, collector, rules)
         self._scan_manifest(ctx, collector, rules)
-        res_count = self._scan_resources(ctx, collector, rules)
+        res_count, res_failed, res_list_failed = self._scan_resources(ctx, collector, rules)
         native_count = self._scan_native(ctx, collector, rules)
 
         # 稳定排序：kind(url<domain<ip) → value，便于报告/测试确定。
@@ -423,6 +423,10 @@ class EndpointsAnalyzer(BaseAnalyzer):
                 "dex_scanned": dex_ok,
                 "dex_strings_truncated": dex_truncated,
                 "resource_files_scanned": res_count,
+                # ★读失败与列举失败单独记：只有成功数时，「扫了 1 个漏了 99 个」与「扫全了」
+                #   在数据上不可分，可见性求值会据此签发「静态端点已穷尽」。
+                "resource_files_read_failed": res_failed,
+                "resource_listing_failed": res_list_failed,
                 "native_files_scanned": native_count,
                 "endpoint_total": len(endpoints),
                 "url_count": kinds.get("url", 0),
@@ -585,27 +589,41 @@ class EndpointsAnalyzer(BaseAnalyzer):
 
     def _scan_resources(
         self, ctx: "AnalysisContext", collector: EndpointCollector, rules: _Rules
-    ) -> int:
-        """扫资源文本文件（.xml/.json/assets/res/raw 等）。返回扫描文件数。"""
+    ) -> tuple[int, int, bool]:
+        """扫资源文本文件（.xml/.json/assets/res/raw 等）。
+
+        Returns:
+            ``(成功扫描数, 读取失败数, 列举是否整体失败)``。
+
+        ★三者必须分开报，不能只报一个成功数：下游 :mod:`apkscan.core.visibility` 要据此判断
+        「资源这一层到底看没看全」。读失败被静默跳过时，"扫了 1 个"与"扫全了"在数据上完全
+        一样，报告就会以「静态端点已穷尽」签发一份漏读了藏配置的 assets 的分析——而畸形
+        zip 条目正是本域对手盘在用的手法，跳读不是偶发噪声。
+        """
         try:
             files = [p for p in ctx.list_files() if isinstance(p, str)]
         except Exception:
             logger.exception("[%s] 读取 list_files 失败（资源扫描）", self.name)
-            return 0
+            # ★区别于「一个资源目标都没有」：那是 (0, 0, False)，这是"压根没能列举"。
+            return 0, 0, True
 
         scanned = 0
+        failed = 0
         for path in files:
             if not self._is_resource_target(path, rules):
                 continue
             data = self._safe_read(ctx, path)
             if data is None:
+                # 命中了资源目标却读不出来（坏 CRC / 畸形局部头 / 超尺寸闸）——这是本次分析的
+                # 实测缺口，必须计数，不能无痕 continue。
+                failed += 1
                 continue
             scanned += 1
             # 分块扫描：大文件按块解码 + 扫，块间重叠避免跨界漏匹配；小文件整体扫（行为不变）。
             self._scan_bytes_chunked(
                 data, "resource", path, collector, rules, self._decode_latin1
             )
-        return scanned
+        return scanned, failed, False
 
     def _scan_native(
         self, ctx: "AnalysisContext", collector: EndpointCollector, rules: _Rules
