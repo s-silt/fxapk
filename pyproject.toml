@@ -66,6 +66,7 @@ markers = [
     # 重型真 spawn 端到端校验（加载真实 APK + 起进程池，~40s）。默认仍跑（需本地有 *.apk 样本，
     # 否则 skip）；要提速可 `pytest -m "not slow"` 排除。
     "slow: 重型/慢测试（真实 APK + 进程池真 spawn）",
+    "real_adb_path: 需要 tools.adb_path 的真实行为（退出 conftest 的 _no_real_adb 夹具）",
 ]
 
 [tool.ruff]
