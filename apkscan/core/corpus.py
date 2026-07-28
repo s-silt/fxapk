@@ -291,6 +291,40 @@ def _count(report: dict, key: str) -> int:
     return len(v) if isinstance(v, list) else 0
 
 
+def visibility_summary(report: Any) -> dict | None:
+    """``meta.visibility`` 的可比结构化指纹；**无求值（旧版报告）→ None**，与「求过值但全空」严格区分。
+
+    给 ``corpus regress`` 用：换版后「受限主张凭空消失」是漏报放大器——办案人会把一句「未发现远程
+    配置」当成已穷尽，而真相可能只是求值退化把警示弄丢了。这类退化此前完全在回归护网之外。
+
+    ★只收**方向可判的结构化字段**。``notes``/``why``/``next_actions`` 的文案不入指纹：措辞一改
+    全库样本都会被标「有变化」，人很快就不看 regress 输出了，真退化反被淹没。``next_actions``
+    只记条数，因为「仍有受限主张、补法建议却归零」是有过先例的缺陷形态（见 pipeline 里可见性
+    求值排序那段注释），值得单独看得见。
+
+    ★字段缺失 / None 不得被读成「无受限主张」——那正是本函数要防的误读（同 :func:`advice_counts`
+    的 None-vs-{} 教训）。畸形值一律折到 None，表现同「求值丢失」、会被标出而非静默吞掉。
+    """
+    if not isinstance(report, dict):
+        return None
+    vis = _meta(report).get("visibility")
+    if not isinstance(vis, dict):
+        return None
+    raw_sources = vis.get("sources")
+    sources = raw_sources if isinstance(raw_sources, dict) else {}
+    blocked = vis.get("blocked_claims")
+    actions = vis.get("next_actions")
+    return {
+        "blocked_claims": sorted(str(b) for b in blocked) if isinstance(blocked, list) else [],
+        "sources": {
+            str(k): _s(v.get("visibility")) for k, v in sources.items() if isinstance(v, dict)
+        },
+        "degraded": bool(vis.get("degraded")),
+        "remediation": _s(vis.get("remediation")) or None,
+        "next_actions": len(actions) if isinstance(actions, list) else 0,
+    }
+
+
 def manifest_entry(report: dict, case_id: str | None = None) -> dict:
     """把一份 report dict 提炼成一条 manifest 记录（纯函数，坏输入容错，绝不抛）。
 
@@ -332,6 +366,9 @@ def manifest_entry(report: dict, case_id: str | None = None) -> dict:
         "analysis_status": report.get("analysis_status"),
         "completeness": report.get("completeness"),
         "schema_version": report.get("schema_version"),
+        # 证据可见性指纹（None = 该报告没做可见性求值，★不等于「没有受限主张」）。纯追加字段：
+        # upsert 按主键幂等跳过，存量行须经 corpus reindex 全量重建才补齐，消费方须把缺字段当未知。
+        "visibility": visibility_summary(report),
         # ---- 归属（唯一人工字段）+ 定位 ----
         "case_id": case_id or None,
         "report_path": report_relpath(report),

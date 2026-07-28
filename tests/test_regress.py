@@ -7,7 +7,8 @@ from apkscan.core import corpus, regress
 
 
 def _report(sha: str, version: str, *, status="complete", hardened=False,
-            findings=(), leads=(), closure=None, pkg="com.x", ruleset="dd") -> dict:
+            findings=(), leads=(), closure=None, pkg="com.x", ruleset="dd",
+            visibility=None) -> dict:
     return {
         "schema_version": "1.0",
         "analysis_status": status,
@@ -17,6 +18,7 @@ def _report(sha: str, version: str, *, status="complete", hardened=False,
             "sample_sha256": sha, "tool_version": version, "ruleset_digest": ruleset,
             "is_hardened": hardened,
             **({"closure": {"status": closure}} if closure else {}),
+            **({"visibility": visibility} if visibility is not None else {}),
         },
         "findings": [{"id": f} for f in findings],
         "leads": [{"category": "DOMAIN", "value": f"d{i}.test", "advice": a}
@@ -261,3 +263,194 @@ def test_cli_regress_json_output(tmp_path):
     payload = json.loads(r.stdout)
     assert payload["summary"]["became_analyzable"] == 1
     assert payload["diffs"][0]["findings_added"] == ["X"]
+
+
+# ---------------------------------------------------------------------------
+# 证据可见性维度：警示消失 = 漏报放大器，必须被回归护网抓住
+# ---------------------------------------------------------------------------
+
+
+def _vis(*, blocked=("static_endpoint_exhaustive",), dex="stub_only", actions=1,
+         degraded=True, remediation="not_attempted", notes=("原文案",)) -> dict:
+    """合成一份 meta.visibility（形状照 visibility.assess 的返回值）。"""
+    return {
+        "schema_version": "1.0",
+        "sources": {
+            "dex": {"visibility": dex, "why": ["合成"]},
+            "native": {"visibility": "complete", "why": []},
+            "resource": {"visibility": "complete", "why": []},
+            "runtime": {"visibility": "unavailable", "why": []},
+        },
+        "claims": {c: {"eligible": False} for c in blocked},
+        "blocked_claims": sorted(blocked),
+        "remediation": remediation,
+        "notes": list(notes),
+        "next_actions": [f"补法{i}" for i in range(actions)],
+        "degraded": degraded,
+    }
+
+
+def test_visibility_blocked_cleared_flagged_for_human_review(tmp_path):
+    """★核心回归锁：受限主张凭空解除必须标「须人核」，哪怕线索/检出/闭环全都没变。
+
+    这是漏报放大器的形态——办案人看到「未发现远程配置」会当成已穷尽，而真相可能只是
+    可见性求值退化把警示弄丢了。两版 closure 同为 partial（复刻「闭环早已因截断降级」的
+    盲区前提：closure 维度看不出任何变化）。
+    """
+    root = _seed(tmp_path, [
+        _report("s1", "1.0.0", closure="partial", leads=["建议调证"] * 3,
+                visibility=_vis(blocked=("static_endpoint_exhaustive",), dex="stub_only")),
+        _report("s1", "1.1.0", closure="partial", leads=["建议调证"] * 3,
+                visibility=_vis(blocked=(), dex="complete", actions=0, degraded=False)),
+        # 对照样本：两版可见性完全相同 → 不得被标为有变化（防「恒 True」的退化实现）
+        _report("s2", "1.0.0", closure="partial", visibility=_vis()),
+        _report("s2", "1.1.0", closure="partial", visibility=_vis()),
+    ])
+    diffs, summary = regress.load_and_diff(root, "1.0.0@dd", "1.1.0@dd")
+    by_sha = {d.sample_sha256[:2]: d for d in diffs}
+    changed = next(d for d in diffs if d.visibility_from != d.visibility_to)
+    assert changed.changed is True
+    assert summary["changed"] == 1, "只有 s1 该被标为有变化"
+    assert summary["visibility_blocked_cleared"] == 1
+    assert summary["visibility_comparable"] == 2
+    assert any("受限主张解除" in n and "须人核" in n for n in changed.notes), changed.notes
+    unchanged = next(d for d in diffs if d is not changed)
+    assert unchanged.changed is False, "可见性完全相同的样本不得被标为有变化"
+    assert by_sha  # 库内两个样本都在
+
+
+def test_visibility_next_actions_zeroed_while_still_blind(tmp_path):
+    """★历史缺陷形态锁：仍有受限主张、补法建议却清零（当年可见性求值排在补法预案之前）。"""
+    root = _seed(tmp_path, [
+        _report("s1", "1.0.0", visibility=_vis(actions=16)),
+        _report("s1", "1.1.0", visibility=_vis(actions=0)),
+    ])
+    diffs, _summary = regress.load_and_diff(root, "1.0.0@dd", "1.1.0@dd")
+    assert diffs[0].changed is True
+    assert any("补法建议清零" in n for n in diffs[0].notes), diffs[0].notes
+
+
+def test_visibility_assessment_lost_is_not_silence(tmp_path):
+    """★求值整体丢失锁（兼 None-vs-{} 纪律）：新版报告读得到、却没有可见性求值。
+
+    若把「缺失」折叠成 {}（重犯 advice_counts 当年的错），两侧就都是 {} → changed=False，
+    「pipeline 把整个可见性阶段丢了」这种退化又回到不可见。
+    """
+    root = _seed(tmp_path, [
+        _report("s1", "1.0.0", visibility=_vis()),
+        _report("s1", "1.1.0"),  # 新版无 meta.visibility
+    ])
+    diffs, summary = regress.load_and_diff(root, "1.0.0@dd", "1.1.0@dd")
+    assert diffs[0].visibility_to is None, "缺失必须是 None，不能折叠成 {}"
+    assert diffs[0].changed is True
+    assert summary["visibility_assessment_lost"] == 1
+    assert any("求值阶段丢失" in n for n in diffs[0].notes), diffs[0].notes
+
+
+def test_visibility_added_blocked_is_neutral_not_alarming(tmp_path):
+    """新增受限主张多半是新约束正确降级：记中性备注、不标 ⚠（取证代价不对称）。"""
+    root = _seed(tmp_path, [
+        _report("s1", "1.0.0", visibility=_vis(blocked=())),
+        _report("s1", "1.1.0", visibility=_vis(blocked=("no_remote_config",))),
+    ])
+    diffs, summary = regress.load_and_diff(root, "1.0.0@dd", "1.1.0@dd")
+    assert summary["visibility_blocked_added"] == 1
+    assert summary["visibility_blocked_cleared"] == 0
+    vis_notes = [n for n in diffs[0].notes if "可见性" in n]
+    assert vis_notes and all("⚠" not in n for n in vis_notes), vis_notes
+
+
+def test_visibility_change_without_any_note_still_counts_as_changed(tmp_path):
+    """★指纹变化本身就是变化，不能只靠「有没有产生 ⚠ 备注」来决定是否列出。
+
+    只有告警形态的变化才进 notes（受限主张增减、补法建议清零）；补法建议条数普通增减、
+    某一源的档位挪动都不告警。若 changed 只看 notes，这类变化在默认 --changed-only 下
+    整个消失——回归护网看不见的东西等于没护。
+    """
+    root = _seed(tmp_path, [
+        _report("s1", "1.0.0", visibility=_vis(actions=1)),
+        _report("s1", "1.1.0", visibility=_vis(actions=5)),
+    ])
+    diffs, summary = regress.load_and_diff(root, "1.0.0@dd", "1.1.0@dd")
+    assert diffs[0].notes == [], "本例不该触发任何告警备注"
+    assert diffs[0].changed is True, "notes 为空，但指纹变了 → 仍须列出"
+    assert summary["changed"] == 1
+
+
+def test_visibility_prose_changes_do_not_count_as_regression(tmp_path):
+    """★指纹边界锁：人读文案（notes）不入指纹。
+
+    收录文案 = 每次措辞微调全库样本都被标「有变化」，人很快不看 regress 输出，真退化反被淹没。
+    """
+    root = _seed(tmp_path, [
+        _report("s1", "1.0.0", visibility=_vis(notes=("旧措辞",))),
+        _report("s1", "1.1.0", visibility=_vis(notes=("新措辞，完全改写了这句话",))),
+    ])
+    diffs, summary = regress.load_and_diff(root, "1.0.0@dd", "1.1.0@dd")
+    assert diffs[0].changed is False, "只改文案不算回归"
+    assert summary["changed"] == 0
+
+
+def test_both_versions_without_visibility_is_not_a_change(tmp_path):
+    """两版都没有可见性求值（旧库）→ 无变化：锁「缺失返回 None 而非空 dict」。"""
+    root = _seed(tmp_path, [_report("s1", "1.0.0"), _report("s1", "1.1.0")])
+    diffs, summary = regress.load_and_diff(root, "1.0.0@dd", "1.1.0@dd")
+    assert diffs[0].visibility_from is None and diffs[0].visibility_to is None
+    assert diffs[0].changed is False
+    assert summary["visibility_comparable"] == 0
+    assert summary["visibility_assessment_lost"] == 0
+
+
+def test_legacy_to_new_schema_is_neutral_not_lost(tmp_path):
+    """旧版无求值 → 新版有：一次性的 schema 升级，中性备注，绝不计入「求值丢失」。"""
+    root = _seed(tmp_path, [
+        _report("s1", "1.0.0"),
+        _report("s1", "1.1.0", visibility=_vis()),
+    ])
+    diffs, summary = regress.load_and_diff(root, "1.0.0@dd", "1.1.0@dd")
+    assert summary["visibility_assessment_lost"] == 0
+    assert any("旧版本产物" in n for n in diffs[0].notes), diffs[0].notes
+    assert not any("⚠" in n for n in diffs[0].notes if "可见性" in n)
+
+
+def test_unreadable_report_suppresses_visibility_conclusions(tmp_path):
+    """★读不到时的早退优先级不被破坏：可见性 notes 必须排在 unreadable 早退之后。"""
+    root = _seed(tmp_path, [
+        _report("s1", "1.0.0", visibility=_vis()),
+        _report("s1", "1.1.0", visibility=_vis(blocked=())),
+    ])
+    victim = next(p for p in (root / "reports").rglob("*.json") if "1.1.0" in p.name)
+    victim.unlink()
+
+    diffs, summary = regress.load_and_diff(root, "1.0.0@dd", "1.1.0@dd")
+    d = diffs[0]
+    assert d.visibility_to is None
+    assert any("读不到" in n for n in d.notes)
+    assert not any("受限主张解除" in n for n in d.notes), f"读不到时不得下可见性结论：{d.notes}"
+    assert summary["visibility_blocked_cleared"] == 0
+    # 报告读不到 → 走 advice_unreadable 口径，不折进「求值丢失」
+    assert summary["visibility_assessment_lost"] == 0
+
+
+def test_cli_regress_renders_visibility(tmp_path):
+    """★CLI 接线锁：--json 与文本两路都要把可见性变化渲染到人眼前。"""
+    from typer.testing import CliRunner
+
+    from apkscan import cli
+
+    root = _seed(tmp_path, [
+        _report("s1", "1.0.0", visibility=_vis()),
+        _report("s1", "1.1.0", visibility=_vis(blocked=(), actions=0, degraded=False)),
+    ])
+    r = CliRunner().invoke(cli.app, ["corpus", "regress", "--corpus", str(root), "--json"])
+    assert r.exit_code == 0, r.stdout
+    payload = json.loads(r.stdout)
+    assert payload["diffs"], "仅可见性变化的样本必须出现在默认 --changed-only 输出里"
+    assert payload["diffs"][0]["visibility"][0]["blocked_claims"] == ["static_endpoint_exhaustive"]
+    assert payload["diffs"][0]["visibility"][1]["blocked_claims"] == []
+    assert payload["summary"]["visibility_blocked_cleared"] == 1
+
+    r2 = CliRunner().invoke(cli.app, ["corpus", "regress", "--corpus", str(root)])
+    assert r2.exit_code == 0, r2.stdout
+    assert "可见性受限解除 1" in r2.stdout
+    assert "受限主张解除" in r2.stdout
