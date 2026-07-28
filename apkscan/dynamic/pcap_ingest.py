@@ -12,6 +12,7 @@ pcapng 的 Enhanced Packet Block（best-effort）。**绝不抛**：坏包/坏�
 
 from __future__ import annotations
 
+import collections.abc as abc
 import hashlib
 import ipaddress
 import json
@@ -2022,34 +2023,36 @@ def _prev_count(prev: dict, key: str) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
-def _count_runtime_endpoints(payload: dict) -> int:
-    """报告里由本路径写入的运行时端点数——从 payload 推导，故重复合并不会翻倍。"""
-    endpoints = payload.get("endpoints")
-    if not isinstance(endpoints, list):
-        return 0
-    return sum(
-        1 for ep in endpoints
-        if isinstance(ep, dict)
-        and isinstance(ep.get("enrichment"), dict)
-        and isinstance(ep["enrichment"].get("runtime"), dict)
-        and ep["enrichment"]["runtime"].get("remote_endpoints")
-    )
+def _prev_flows(prev: dict) -> int:
+    """读上一份 inventory 里已累计的 flow 条数，兼容改名前的旧报告。
+
+    ★**新键优先、缺失才回退旧键，两者绝不相加**：旧报告只有 ``flows``，新代码只读
+      ``flows_merged`` 的话，历史计数会在下次合并时静默清零；而如果相加，迁移期同时存在新旧键的
+      报告又会双计。取一不相加（codex 六轮 P2）。新 inventory 是整块重建的，所以写回后旧键自然
+      消失，一次性完成迁移。
+    """
+    return _prev_count(prev, "flows_merged") if "flows_merged" in prev else _prev_count(prev, "flows")
 
 
-def _count_runtime_domain_leads(payload: dict) -> int:
-    """报告里由本路径写入的域名线索数（DNS/SNI 来源）——同样从 payload 推导，天然幂等。"""
-    leads = payload.get("leads")
-    if not isinstance(leads, list):
-        return 0
-    return sum(
-        1 for ld in leads
-        if isinstance(ld, dict)
-        and str(ld.get("category")) == LeadCategory.DOMAIN.value
-        and any(
-            isinstance(ref, dict) and str(ref.get("source")) == _SOURCE
-            for ref in (ld.get("source_refs") or [])
-        )
-    )
+def _accumulate_values(meta: dict, key: str, values: "abc.Iterable[str]") -> list[str]:
+    """把本次贡献的值并进 ``meta[key]`` 的集合，返回排序后的全集。
+
+    ★为什么要在 meta 里**自己记一份贡献集合**，而不是从 ``payload["endpoints"]`` /
+      ``payload["leads"]`` 反推：反推分不清是谁写的。曾试过按
+      ``source == "runtime-pcap"`` 钉边界，但 capture 路径会直接调用
+      :func:`to_runtime_endpoints`（见 ``dynamic/capture.py``），**产出的也是 runtime-pcap 证据**——
+      那是正常生产路径，不是边角情况。于是名为 *pcap* 的 inventory 会把 capture 的贡献一并算进去
+      （codex 六轮 P1）。共享 schema 判不了归属，只能各自记账。
+
+    集合语义天然幂等：同一份采集并几次，结果不变；静态端点被本路径命中后升级，也照样计入
+    （值一样，进集合即可）。坏结构一律跳过，绝不抛。
+    """
+    prev = meta.get(key)
+    merged = {v for v in prev if isinstance(v, str) and v} if isinstance(prev, list) else set()
+    merged.update(v for v in values if isinstance(v, str) and v)
+    ordered = sorted(merged)
+    meta[key] = ordered
+    return ordered
 
 
 def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:
@@ -2085,8 +2088,11 @@ def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:
         }
         added = 0
         confirmed = 0
+        pcap_domains: set[str] = set()   # 本次采集贡献的域名（用于 inventory，见下）
         for lead in to_report_leads(summary):
             key = (lead.category.value, lead.value)
+            if lead.category is LeadCategory.DOMAIN:
+                pcap_domains.add(lead.value)
             lead_dict = report_json._to_jsonable(lead)
             hit = existing_by_key.get(key)
             if hit is not None:
@@ -2133,21 +2139,31 @@ def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:
         # ★条件必须含 DNS：纯 DNS 采集（无 flow、无端点）同样是**真观测**，却曾被
         #   ``fresh_eps or summary.flows`` 整个挡在门外——首次导入不产生 inventory、
         #   ``runtime_merged`` 也不置 True，可见性一直显示"未做运行时观测"（codex 五轮 P1）。
-        observed = bool(
-            fresh_eps or summary.flows or summary.dns_queries or summary.dns_records
-        )
+        # ★``dns_records`` **不能**进这个条件：本路径只从 dns_queries 与 SNI 产域名线索，
+        #   record 明细走 to_ledger_dict、不进 report.json。拿它当"已观测"的凭据，会造出
+        #   「runtime_merged=True，但报告里没有任何可审计的观测证据」——正是"不可造"红线
+        #   （codex 六轮 P1）。要收 record，得先让它真的落盘。
+        observed = bool(fresh_eps or summary.flows or summary.dns_queries)
         if observed:
             meta["runtime_merged"] = True
             prev = meta.get("runtime_pcap_inventory")
             prev = prev if isinstance(prev, dict) else {}
             meta["runtime_pcap_inventory"] = {
-                # flows 无法从报告反推，只能累计；受幂等闸保护，重复导入不再加。
-                "flows": _prev_count(prev, "flows") + (0 if already else len(summary.flows)),
-                # ★端点数与 DNS 数从**报告本身**推导，不用本次 summary 的快照。覆盖写的必然后果
-                #   是「一份纯 DNS 采集并进来，把之前那份 flow 采集的端点数清零」——放宽上面那个
-                #   条件后这个坑立刻就会踩到。从 payload 推导天然幂等：并几次都是同一个数。
-                "remote_endpoints": _count_runtime_endpoints(payload),
-                "dns_queries": _count_runtime_domain_leads(payload),
+                # ★键名如实：这是「经本路径并入、且**未被端点指纹闸折叠**的 flow 条数」，
+                #   不是报告里的 flow 总数。闸只描述端点贡献，两份 flow 数不同但端点聚合相同的
+                #   采集会被判重复、第二份不计入（漏计，不伪造）。flows 无法从报告反推，
+                #   只能这样累计（codex 六轮 P2）。
+                "flows_merged": _prev_flows(prev) + (0 if already else len(summary.flows)),
+                # ★端点数与域名线索数取本路径**自己记的贡献集合**的大小，不从共享 payload 反推
+                #   （见 _accumulate_values 的说明）。集合语义天然幂等：一份纯 DNS 采集并进来也
+                #   不会把之前那份 flow 采集的端点数清零。
+                "remote_endpoints": len(_accumulate_values(
+                    meta, "runtime_pcap_endpoint_values",
+                    (str(ep.get("value", "")) for ep in fresh_eps),
+                )),
+                "domain_leads": len(_accumulate_values(
+                    meta, "runtime_pcap_domain_values", pcap_domains,
+                )),
                 "parse_status": summary.parse_status,
                 # 只要**任何一次**合并解析异常就置 True，且不被后续成功覆盖——
                 # 「这份报告有过解析失败」不该被下一次成功抹掉。

@@ -434,14 +434,16 @@ def test_dns_only_capture_writes_runtime_meta(tmp_path: Path) -> None:
 
     assert meta.get("runtime_merged") is True, "纯 DNS 采集没被记成运行时观测"
     inv = meta["runtime_pcap_inventory"]
-    assert inv["dns_queries"] >= 1, "inventory 没记下 DNS 查询"
+    # ★精确值，不用 >=：_STATIC 里没有任何 runtime-pcap 域名线索，所以只能是 1。
+    #   放宽成 >= 会同时放过「重复计数」和「把静态/capture 的线索也算进来」两类回归。
+    assert inv["domain_leads"] == 1, "inventory 的域名线索数不对"
     assert inv["uid_attributed"] is False
 
     # 再并一份不同的 DNS 采集 → 计数要反映累计结果，而不是停在第一份
     pcap_ingest.merge_into_report_json(
         str(p), pcap_ingest.PcapSummary(dns_queries={"b.example.test"}))
     inv2 = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]
-    assert inv2["dns_queries"] >= 2, "第二份 DNS 采集没进 inventory"
+    assert inv2["domain_leads"] == 2, "第二份 DNS 采集没进 inventory"
 
 
 def test_dns_only_merge_does_not_wipe_earlier_endpoint_inventory(tmp_path: Path) -> None:
@@ -463,7 +465,123 @@ def test_dns_only_merge_does_not_wipe_earlier_endpoint_inventory(tmp_path: Path)
     after = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]
 
     assert after["remote_endpoints"] == 1, "纯 DNS 采集把之前那份的端点数清零了"
-    assert after["dns_queries"] >= 1
+    assert after["domain_leads"] == 1
+
+
+# --- inventory 的归属边界：只数本路径自己的贡献 -----------------------------
+
+def _report_with(extra_endpoints=(), extra_leads=(), meta=None) -> dict:
+    payload = json.loads(json.dumps(_STATIC))
+    payload.setdefault("endpoints", []).extend(extra_endpoints)
+    payload.setdefault("leads", []).extend(extra_leads)
+    if meta:
+        payload.setdefault("meta", {}).update(meta)
+    return payload
+
+
+def test_capture_endpoints_do_not_count_as_pcap_inventory(tmp_path: Path) -> None:
+    """★capture 路径写的端点不得算进名为 *pcap* 的 inventory。
+
+    按 ``source == "runtime-pcap"`` 钉边界是**不够的**：capture 直接调用
+    ``pcap_ingest.to_runtime_endpoints()``，产出的也是 runtime-pcap 证据（正常生产路径，
+    不是边角）。共享 schema 判不了归属，只能各自在 meta 里记账（codex 六轮 P1）。
+    """
+    p = tmp_path / "report.json"
+    capture_ep = {
+        "value": "198.51.100.77", "kind": "ip", "is_private": False,
+        "evidences": [{"source": "runtime-pcap", "location": "pcap", "snippet": "capture 写的"}],
+        "enrichment": {"runtime": {"remote_endpoints": ["198.51.100.77:443"]}},
+    }
+    p.write_text(json.dumps(_report_with(extra_endpoints=[capture_ep]), ensure_ascii=False),
+                 encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(str(p), _bidirectional_summary())
+    inv = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]
+
+    assert inv["remote_endpoints"] == 1, "capture 的端点被算进了 pcap inventory"
+
+
+def test_capture_domain_leads_do_not_count_as_pcap_inventory(tmp_path: Path) -> None:
+    """同理：预先存在的 runtime-pcap 域名线索（capture 写的）不得算进本路径的 inventory。"""
+    p = tmp_path / "report.json"
+    capture_lead = {
+        "category": "DOMAIN", "value": "cap.example.test", "advice": "待核",
+        "confidence": "MEDIUM",
+        "source_refs": [{"source": "runtime-pcap", "location": "pcap", "snippet": "capture 写的"}],
+    }
+    p.write_text(json.dumps(_report_with(extra_leads=[capture_lead]), ensure_ascii=False),
+                 encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(
+        str(p), pcap_ingest.PcapSummary(dns_queries={"a.example.test"}))
+    inv = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]
+
+    assert inv["domain_leads"] == 1, "capture 的域名线索被算进了 pcap inventory"
+
+
+def test_static_endpoint_upgraded_by_pcap_still_counts(tmp_path: Path) -> None:
+    """反向：本路径命中一个**已存在的静态端点**（升级而非新增）时，仍要计入。
+
+    防止贡献集合只记「新增的端点」而漏掉「升级已有端点」这一半。
+    """
+    p = tmp_path / "report.json"
+    static_ep = {
+        "value": "8.138.102.85", "kind": "ip", "is_private": False,
+        "evidences": [{"source": "dex", "location": "classes.dex", "snippet": "静态抓到的"}],
+        "enrichment": {},
+    }
+    p.write_text(json.dumps(_report_with(extra_endpoints=[static_ep]), ensure_ascii=False),
+                 encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(str(p), _bidirectional_summary())
+    payload = json.loads(p.read_text(encoding="utf-8"))
+
+    assert len([e for e in payload["endpoints"] if e["value"] == "8.138.102.85"]) == 1, "端点重复了"
+    assert payload["meta"]["runtime_pcap_inventory"]["remote_endpoints"] == 1, \
+        "被升级的静态端点没计入贡献集合"
+
+
+def test_old_flows_key_migrates_without_losing_history(tmp_path: Path) -> None:
+    """★改名要带迁移：旧报告只有 ``flows``，只读新键会把历史计数静默清零。"""
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_report_with(meta={"runtime_pcap_inventory": {"flows": 7}}),
+                            ensure_ascii=False), encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(str(p), _bidirectional_summary())  # 2 条 flow
+    inv = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]
+
+    assert inv["flows_merged"] == 9, "旧 flows 计数没迁移过来"
+    assert "flows" not in inv, "旧键没被清掉，会长期两套并存"
+
+
+def test_new_and_old_flow_keys_are_not_double_counted(tmp_path: Path) -> None:
+    """迁移期两个键同时存在时**取新键**，绝不相加（相加会双计）。"""
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(
+        _report_with(meta={"runtime_pcap_inventory": {"flows": 7, "flows_merged": 9}}),
+        ensure_ascii=False), encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(str(p), _bidirectional_summary())  # 2 条 flow
+    inv = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]
+
+    assert inv["flows_merged"] == 11, "新旧键被相加了（应取新键 9 + 本次 2）"
+
+
+def test_record_only_summary_does_not_fake_an_observation(tmp_path: Path) -> None:
+    """★只有 dns_records、没有 flow/query 的采集不得声称"已观测"。
+
+    这条路径根本不落盘 record（明细走 to_ledger_dict），拿它当凭据就会造出
+    「runtime_merged=True 但报告里没有任何可审计证据」（codex 六轮 P1）。
+    """
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_STATIC, ensure_ascii=False), encoding="utf-8")
+
+    rec = pcap_ingest.DnsRecord(qname="x.example.test", qtype=1, rcode=0)
+    pcap_ingest.merge_into_report_json(str(p), pcap_ingest.PcapSummary(dns_records=[rec]))
+    meta = json.loads(p.read_text(encoding="utf-8")).get("meta", {})
+
+    assert "runtime_merged" not in meta, "只有 record 就声称做过运行时观测"
+    assert "runtime_pcap_inventory" not in meta
 
 
 def test_parse_failure_is_not_erased_by_a_later_success(tmp_path: Path) -> None:
