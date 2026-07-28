@@ -2023,15 +2023,19 @@ def _prev_count(prev: dict, key: str) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
-def _prev_flows(prev: dict) -> int:
-    """读上一份 inventory 里已累计的 flow 条数，兼容改名前的旧报告。
+def _prev_migrated(prev: dict, new_key: str, old_key: str = "") -> int:
+    """读上一份 inventory 里的计数，兼容键改名过的旧报告。
 
-    ★**新键优先、缺失才回退旧键，两者绝不相加**：旧报告只有 ``flows``，新代码只读
-      ``flows_merged`` 的话，历史计数会在下次合并时静默清零；而如果相加，迁移期同时存在新旧键的
-      报告又会双计。取一不相加（codex 六轮 P2）。新 inventory 是整块重建的，所以写回后旧键自然
-      消失，一次性完成迁移。
+    ★**新键优先、缺失才回退旧键，两者绝不相加**：只读新键的话，旧报告的历史计数会在下次
+      合并时静默清零；而相加的话，迁移期同时存在新旧键的报告又会双计。取一不相加。
+
+    ★这个 helper 是**泛化过的**：最初只给 ``flows`` 写了迁移，忘了 ``remote_endpoints`` 与
+      ``dns_queries`` 也在同一次改名里——修了一个实例、没去找同类的兄弟（codex 七轮 P1）。
+      inventory 是整块重建的，旧键写回后自然消失，一次性完成迁移。
     """
-    return _prev_count(prev, "flows_merged") if "flows_merged" in prev else _prev_count(prev, "flows")
+    if new_key in prev:
+        return _prev_count(prev, new_key)
+    return _prev_count(prev, old_key) if old_key else 0
 
 
 def _accumulate_values(meta: dict, key: str, values: "abc.Iterable[str]") -> list[str]:
@@ -2153,17 +2157,29 @@ def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:
                 #   不是报告里的 flow 总数。闸只描述端点贡献，两份 flow 数不同但端点聚合相同的
                 #   采集会被判重复、第二份不计入（漏计，不伪造）。flows 无法从报告反推，
                 #   只能这样累计（codex 六轮 P2）。
-                "flows_merged": _prev_flows(prev) + (0 if already else len(summary.flows)),
+                "flows_merged": _prev_migrated(prev, "flows_merged", "flows") + (
+                    0 if already else len(summary.flows)
+                ),
                 # ★端点数与域名线索数取本路径**自己记的贡献集合**的大小，不从共享 payload 反推
                 #   （见 _accumulate_values 的说明）。集合语义天然幂等：一份纯 DNS 采集并进来也
                 #   不会把之前那份 flow 采集的端点数清零。
-                "remote_endpoints": len(_accumulate_values(
-                    meta, "runtime_pcap_endpoint_values",
-                    (str(ep.get("value", "")) for ep in fresh_eps),
-                )),
-                "domain_leads": len(_accumulate_values(
-                    meta, "runtime_pcap_domain_values", pcap_domains,
-                )),
+                #
+                # ★与旧计数取 **max** 而非相加：旧报告有计数却没有贡献集合（集合是本次才引入的），
+                #   直接用集合长度会让历史计数被重置；而相加又会把重叠的部分算两遍——**无从判断
+                #   重叠**，所以只能取单调下界。迁移期过后集合长度自然超过旧值，max 不再起作用。
+                "remote_endpoints": max(
+                    _prev_migrated(prev, "remote_endpoints"),
+                    len(_accumulate_values(
+                        meta, "runtime_pcap_endpoint_values",
+                        (str(ep.get("value", "")) for ep in fresh_eps),
+                    )),
+                ),
+                "domain_leads": max(
+                    _prev_migrated(prev, "domain_leads", "dns_queries"),
+                    len(_accumulate_values(
+                        meta, "runtime_pcap_domain_values", pcap_domains,
+                    )),
+                ),
                 "parse_status": summary.parse_status,
                 # 只要**任何一次**合并解析异常就置 True，且不被后续成功覆盖——
                 # 「这份报告有过解析失败」不该被下一次成功抹掉。

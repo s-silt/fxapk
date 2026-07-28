@@ -554,6 +554,43 @@ def test_old_flows_key_migrates_without_losing_history(tmp_path: Path) -> None:
     assert "flows" not in inv, "旧键没被清掉，会长期两套并存"
 
 
+def test_old_endpoint_and_domain_counts_do_not_regress(tmp_path: Path) -> None:
+    """★旧报告有计数、却没有贡献集合（集合是后来才引入的）——不得被重置成本次的值数量。
+
+    最初只给 `flows` 写了迁移，忘了 `remote_endpoints` 与 `dns_queries` 是同一次改名的兄弟：
+    旧报告 `{remote_endpoints: 5, dns_queries: 7}` 并入一个端点一个域名后会写成 1、1
+    （codex 七轮 P1）。取 max 作单调下界——不能相加，因为无从判断新旧是否重叠。
+    """
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_report_with(meta={"runtime_pcap_inventory": {
+        "remote_endpoints": 5, "dns_queries": 7,
+    }}), ensure_ascii=False), encoding="utf-8")
+
+    # 这份采集只贡献 1 个端点、0 个域名
+    pcap_ingest.merge_into_report_json(str(p), _bidirectional_summary())
+    inv = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]
+
+    assert inv["remote_endpoints"] == 5, "旧端点计数被重置成本次贡献数"
+    assert inv["domain_leads"] == 7, "旧 dns_queries 没迁移到 domain_leads"
+    assert "dns_queries" not in inv, "旧键没被清掉"
+
+
+def test_migrated_counts_grow_once_the_set_overtakes_them(tmp_path: Path) -> None:
+    """单调下界只在迁移期起作用：贡献集合长过旧值之后，计数要跟着集合走。"""
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_report_with(meta={"runtime_pcap_inventory": {
+        "remote_endpoints": 1,
+    }}), ensure_ascii=False), encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(str(p), _bidirectional_summary())      # 8.138.102.85
+    pcap_ingest.merge_into_report_json(str(p), _two_port_summary())           # 8.163.60.2
+    inv = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]
+
+    assert inv["remote_endpoints"] == 2, "集合已有两个 IP，计数还卡在旧的下界上"
+    assert sorted(json.loads(p.read_text(encoding="utf-8"))["meta"]
+                  ["runtime_pcap_endpoint_values"]) == ["8.138.102.85", "8.163.60.2"]
+
+
 def test_new_and_old_flow_keys_are_not_double_counted(tmp_path: Path) -> None:
     """迁移期两个键同时存在时**取新键**，绝不相加（相加会双计）。"""
     p = tmp_path / "report.json"
