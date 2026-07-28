@@ -359,8 +359,17 @@ def _build_runtime_leads(report: Report, runtime_only: list[Endpoint]) -> int:
     existing_keys: set[tuple[str, str]] = {
         (lead.category.value, lead.value) for lead in report.leads
     }
+    # ★兄弟池按**全样本**算，不是只按本次新增的运行时端点算：低段位裸 IP 的托管佐证豁免
+    #   靠"样本内有没有同形态编号序列"压住版本号，只看增量的话，静态侧已成簇的 1.3.1.1/
+    #   1.3.1.6 拦不住新回灌的 1.4.1.14——它会被判成孤值升进调证出口，理由还写着
+    #   "样本内无同形态编号序列"，与样本事实相反。report.endpoints 此时已是合并后的全量。
+    sibling_pool = {
+        infra._strip_port_suffix(ep.value)
+        for ep in report.endpoints
+        if ep.kind == "ip" and infra.is_low_octet_ipv4(ep.value)
+    }
     candidate_leads = pipeline.build_endpoint_leads(
-        runtime_only, online=report.meta.get("online", True)
+        runtime_only, online=report.meta.get("online", True), sibling_pool=sibling_pool
     )
     new_leads: list = []
     for lead in candidate_leads:
@@ -374,17 +383,39 @@ def _build_runtime_leads(report: Report, runtime_only: list[Endpoint]) -> int:
     pipeline._apply_default_advice(new_leads)
     # 与静态主路径同样做重打包隔离：正版重打包件在运行时连的也是**正版厂商的后端**，
     # 若只在静态侧隔离，`capture --into` 新引入的厂商域名仍会以「建议调证」进调证出口。
-    quarantined = pipeline.apply_repack_quarantine(new_leads, report.meta)
-    if quarantined:
-        blob = report.meta.setdefault(
-            "repack_quarantine",
-            {"reason": pipeline._VERDICT_REPACK_SUSPECTED, "count": 0, "values": []},
-        )
-        merged_values = list(dict.fromkeys([*blob.get("values", []), *quarantined]))
-        blob["values"] = merged_values
-        blob["count"] = len(merged_values)
+    _quarantine_leads(report, new_leads)
     report.leads.extend(new_leads)
     return len(new_leads)
+
+
+def _quarantine_leads(report: Report, leads: list) -> None:
+    """对一批 Lead 跑重打包隔离，并把结果并进 ``meta.repack_quarantine`` 审计块。
+
+    审计块的 ``values`` 是闭环兜底门放行的**唯一凭据**（见 ``closure.targets``），所以每一条
+    被隔离的值都必须记进去，不能只记个数。
+    """
+    quarantined = pipeline.apply_repack_quarantine(leads, report.meta)
+    if not quarantined:
+        return
+    blob = report.meta.setdefault(
+        "repack_quarantine",
+        {"reason": pipeline._VERDICT_REPACK_SUSPECTED, "count": 0, "values": []},
+    )
+    if not isinstance(blob, dict):
+        return
+    merged_values = list(dict.fromkeys([*(blob.get("values") or []), *quarantined]))
+    blob["values"] = merged_values
+    blob["count"] = len(merged_values)
+
+
+def _quarantine_new_leads(report: Report) -> None:
+    """对 report.leads 里**当前全部**网络 Lead 跑一次隔离（幂等）。
+
+    供 dead-drop 那条路径用：它在隔离跑完之后才补建 Lead，只隔离"新增的那批"够不着——
+    补建发生在别的函数里、没有增量列表可传。``apply_repack_quarantine`` 只动 advice 仍为
+    「建议调证」的条目，重复调用不叠加注记（见 ``test_quarantine_is_idempotent``）。
+    """
+    _quarantine_leads(report, list(report.leads))
 
 
 # ---------------------------------------------------------------------------
@@ -1843,6 +1874,10 @@ def resolve_dead_drop_c2(report: Report, runtime_report_path: str) -> dict[str, 
 
         stats["secondary_c2"] = _mark_secondary_c2_leads(report, relations, runtime_seen_before)
         stats["command_domains"] = _note_command_domains(report, relations)
+        # ★这两步会为二级 C2 / 命令域名**补建新 Lead**，走的是 infra.classify_domain，不经
+        #   _build_runtime_leads 那条隔离。重打包件在运行时连的也是被仿冒厂商的后端，漏在
+        #   这里就等于把正版厂商域名以「建议调证」送进闭环与调证函——隔离的整个立意所在。
+        _quarantine_new_leads(report)
         _prioritize_secondary_c2(report, secondary_domains)
 
         report.meta["runtime_dead_drop"] = True

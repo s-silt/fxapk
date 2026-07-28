@@ -319,12 +319,25 @@ def visibility_summary(report: Any) -> dict | None:
         return None
     raw_sources = vis.get("sources")
     sources = raw_sources if isinstance(raw_sources, dict) else {}
+    raw_claims = vis.get("claims")
+    claims = raw_claims if isinstance(raw_claims, dict) else {}
     blocked = vis.get("blocked_claims")
     actions = vis.get("next_actions")
     return {
         "blocked_claims": sorted(str(b) for b in blocked) if isinstance(blocked, list) else [],
         "sources": {
             str(k): _s(v.get("visibility")) for k, v in sources.items() if isinstance(v, dict)
+        },
+        # ★「确证盲区」与「未评估」之分也要收：同一条主张从 missing 退成 unassessed 时，
+        #   blocked_claims、各源档位、degraded、补法条数可以逐字不变，而 closure 的封顶语义
+        #   已经从「记 gap 封顶 partial」松成「只 warn」——办案人那边看到的警示悄悄少了一条。
+        #   这两个列表是 sources（已在指纹里）+ 分档语义的派生值，只在该变的时候变，不会刷屏。
+        "claims": {
+            str(c): {
+                "missing_sources": sorted(str(s) for s in (v.get("missing_sources") or [])),
+                "unassessed_sources": sorted(str(s) for s in (v.get("unassessed_sources") or [])),
+            }
+            for c, v in claims.items() if isinstance(v, dict)
         },
         "degraded": bool(vis.get("degraded")),
         "remediation": _s(vis.get("remediation")) or None,

@@ -23,7 +23,9 @@ from apkscan.network.categories import CAT_CLOUD, CAT_HOSTING_RESELLER, CAT_IDC
 logger = logging.getLogger(__name__)
 
 
-def build_endpoint_leads(endpoints: list[Endpoint], online: bool = True) -> list[Lead]:
+def build_endpoint_leads(
+    endpoints: list[Endpoint], online: bool = True, *, sibling_pool: set[str] | None = None
+) -> list[Lead]:
     """把（已富化的）domain/IP 端点转成 DOMAIN/IP Lead。
 
     - domain 的归属优先级：icp > rdap（RDAP/whois 兜底）> whois；dns 托管 IP/ASN 入 evidence/notes。
@@ -35,7 +37,10 @@ def build_endpoint_leads(endpoints: list[Endpoint], online: bool = True) -> list
     """
     # 样本内的低段位 IPv4 兄弟池：成簇（1.3.1.1 / 1.3.1.6 / 1.4.1.14）是版本号的主要产生形态，
     # 用来压住 classify_ip 的托管佐证豁免。全样本一次算好，逐端点只做减法。
-    low_octet_pool = {
+    #
+    # ★``sibling_pool`` 由调用方传入**全样本**的池。动态回灌只把新增端点交给本函数，若就地
+    #   从 endpoints 自算，静态侧已成簇的兄弟就不在池里，新回灌的同形态值会被当孤值放行。
+    low_octet_pool = sibling_pool if sibling_pool is not None else {
         infra._strip_port_suffix(ep.value)
         for ep in endpoints
         if ep.kind == "ip" and infra.is_low_octet_ipv4(ep.value)
