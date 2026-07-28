@@ -759,11 +759,116 @@ def _strip_port_suffix(value: str) -> str:
 
     ★不剥就会绕过一切精确匹配：实测两案的动态线索值形如 ``223.5.5.5:53/udp``，
     与名单里的 ``223.5.5.5`` 比不上，公共解析器照样进"建议调证"。
+
+    IPv6 分三种形态，判据不同：
+
+    1. ``[2001:db8::1]:443/tcp`` —— RFC 3986 括号形态，**无歧义**，直接取括号内。
+       新产出一律走这个形态（见 ``pcap_ingest.format_peer``）。
+    2. ``2001:db8::1`` —— 裸地址，多冒号且无 ``/proto``。**绝不能剥**：末段 ``1`` 本身
+       就是个合法端口号，剥了会得到 ``2001:db8:``，把地址毁掉。
+    3. ``2001:db8::1:443/tcp`` —— 旧产物里的无括号拼接，字面上**真的有歧义**
+       （它既可以是「::1 上的 443 端口」，也可以是一个末段为 443 的裸地址）。
+       靠 ``/proto`` 尾缀消歧：那个后缀只由「拼过端口」的生产路径产生，所以它在场
+       就说明末段确实是端口。仅在此前提下、且剥完能解析成 IP 时才剥。
     """
-    head = value.split("/", 1)[0].strip()
-    if head.count(":") == 1:                       # IPv6 有多个冒号，不动
-        head = head.rsplit(":", 1)[0]
-    return head
+    head, proto_sep, _proto = value.partition("/")
+    head = head.strip()
+    if not head:
+        return head
+
+    if head.startswith("["):                       # 形态 1：括号形态，最可靠
+        inner, close, _rest = head[1:].partition("]")
+        if close:
+            return inner.strip()
+        return head                                # 只有左括号 —— 坏字面，不猜
+
+    colons = head.count(":")
+    if colons == 0:
+        return head
+    if colons == 1:                                # IPv4:port / host:port，历史行为不变
+        return head.rsplit(":", 1)[0]
+
+    # 多冒号 = IPv6 语境（形态 2 或 3）。默认不动，只有消歧成功才剥。
+    if not proto_sep:
+        return head                                # 形态 2：裸 IPv6，原样返回
+    bare, _, port_s = head.rpartition(":")
+    if not (port_s.isdigit() and 1 <= int(port_s) <= 65535):
+        return head
+    try:
+        ipaddress.ip_address(bare)
+    except ValueError:
+        return head                                # 剥完不是合法地址 → 本来就不是 addr:port
+    return bare
+
+
+#: 合法端口区间（与 config/port_norm.py 同口径）。
+_PORT_MIN_VALID = 1
+_PORT_MAX_VALID = 65535
+
+
+def format_hostport(ip: str, port: int | str) -> str:
+    """把 ``(ip, port)`` 拼成 ``enrichment.runtime.remote_endpoints`` 的规范字面。
+
+    IPv6 加 RFC 3986 方括号，IPv4 原样。**这个字段是跨模块契约**——pcap 与 capture 两条
+    生产路径写它，attribution 与 port-normalize 两处读它。四方必须用这里这一对函数，
+    否则又会出现"一个字段两套格式"（曾经真的出现过：pcap 改了括号、capture 还在裸拼，
+    attribution 于是把 ``[2606:...]`` 当地址解析、IPv6 的运行时归因边静默丢失）。
+    """
+    host = str(ip)
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+
+def split_hostport(value: object) -> tuple[str, int] | None:
+    """:func:`format_hostport` 的逆操作：``"ip:port"`` / ``"[v6]:port"`` → ``(ip, port)``。
+
+    坏形状 / 端口非法 / 剥出来不是合法地址 → ``None``（跳过该条，绝不猜）。
+
+    ★裸 IPv6 带端口（``2001:db8::1:443``，旧产物形态）本身有歧义——末段既可能是端口，也可能
+      是地址的最后一组。这里按"末段当端口"解析并**要求剩余部分是合法地址**：真采集数据一定带
+      端口，所以这个取舍对生产数据是对的；手编的无端口 IPv6 可能被误切，那正是要用括号形态的原因。
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+
+    if text.startswith("["):                      # [v6]:port —— 无歧义，先走这条
+        inner, close, rest = text[1:].partition("]")
+        if not close or not rest.startswith(":"):
+            return None
+        head, port_s = inner.strip(), rest[1:]
+    else:
+        if ":" not in text:
+            return None
+        head, _, port_s = text.rpartition(":")
+
+    if not head or not port_s.isdecimal():
+        return None
+    port = int(port_s)
+    if not (_PORT_MIN_VALID <= port <= _PORT_MAX_VALID):
+        return None
+    try:
+        ipaddress.ip_address(head)
+    except ValueError:
+        return None
+    return head, port
+
+
+def match_key(kind_or_category: str, value: str) -> str:
+    """Lead ↔ Endpoint 配对用的**唯一**规范化值。
+
+    IP 侧剥 ``:port`` / ``:port/proto`` 尾缀（运行时回灌的 Lead 值形如
+    ``8.138.102.85:31861/tcp``，Endpoint 一律裸 IP）；域名侧只做小写。
+
+    ★之所以要一个公共入口而不是各处各写一份：此前只有**选闭环目标**那一处剥了端口，
+      而闭环结论回写 Lead（``closure._update_target_leads``）与调证函关联归属链
+      （``report.letters``）都还在拿 ``value.lower()`` 精确匹配。后果是同一个真后端
+      **被选中当了闭环目标，却拿不到 where_to_request / 五层归属链**——闭环算了、
+      文书不知道，调证函把实测后端漏成一句空壳。三处必须用同一把钥匙。
+    """
+    v = str(value).strip().lower()
+    return _strip_port_suffix(v) if str(kind_or_category).upper() == "IP" else v
 
 
 def is_low_octet_ipv4(value: str) -> bool:

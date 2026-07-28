@@ -138,6 +138,105 @@ def test_standard_port_endpoint_has_no_masquerade_marker() -> None:
     assert "sni_masquerade" not in rt
 
 
+def test_masquerade_survives_report_json_roundtrip_into_the_letter() -> None:
+    """★接线闭环：伪装警示必须自己走到**调证函正文**，不能停在 Lead.notes。
+
+    letters 全文不渲染 notes（与 shape_uncertain 那次一模一样的断裂）。所以要钉的是整条链路：
+    pcap → Lead.sni_masquerade → report.json 往返 → 调证函正文点名"别发给被冒用的那家公司"。
+    只要 Lead 字段、report_io 往返、letters 渲染任意一环退回去，本测试即红。
+    """
+    import json
+
+    from apkscan.core import report_io
+    from apkscan.report import letters
+
+    s = _summary(_flow(_BACKEND, 30135, {_FAKE_SNI}), _flow(_BACKEND, 30135, {_FAKE_SNI}, inbound=True))
+    lead = _lead(pcap_ingest.to_report_leads(s), f"{_BACKEND}:30135/tcp")
+    assert lead.sni_masquerade == [_FAKE_SNI], "pcap 侧没把伪装结构化回带"
+
+    # 经 report.json 的实际序列化形态往返（letters 吃的是磁盘上的 dict，不是内存对象）。
+    payload = {"leads": [json.loads(json.dumps(_lead_as_dict(lead)))]}
+    revived = report_io.report_from_dict(payload)
+    assert revived.leads[0].sni_masquerade == [_FAKE_SNI], "report.json 往返把伪装字段丢了"
+
+    out = letters.build_letters(payload)
+    assert len(out) == 1
+    body = out[0]["body_md"]
+    # _md_safe 会转义 . 与 -（防被渲染成列表/标题），比对时按同规则还原。
+    assert _FAKE_SNI in body.replace("\\", ""), "调证函正文没点名被冒用的域名"
+    assert "切勿向其发函" in body, "没警示别把函发给被冒用的那家公司"
+    assert out[0]["sni_masquerade"] == [_FAKE_SNI]  # 结构化回带供 HTML/PDF 消费
+
+
+def _lead_as_dict(lead) -> dict:
+    """按 report/json.py 的实际做法（dataclasses.asdict + Enum→value）序列化一条 Lead。"""
+    import dataclasses
+
+    d = dataclasses.asdict(lead)
+    d["category"] = lead.category.value
+    d["confidence"] = lead.confidence.value
+    d["source_refs"] = [{**r, "evidence_id": f"E{i}"} for i, r in enumerate(d["source_refs"])]
+    # pcap 侧的 Lead 不带 evidence_to_obtain——它由 closure 的 _update_target_leads 回写
+    # （正是 P1-2 那条链）。letters 要求该字段非空才套打，故这里补上以模拟**结案之后**的状态。
+    d["evidence_to_obtain"] = d.get("evidence_to_obtain") or ["租户实名", "访问日志"]
+    return d
+
+
+def test_no_masquerade_means_no_warning_in_letter() -> None:
+    """无伪装的普通 IP 线索不得平白多出这段警示（警示贬值成噪声就没人看了）。"""
+    from apkscan.report import letters
+
+    s = _summary(_flow("59.111.181.60", 443, set()), _flow("59.111.181.60", 443, set(), inbound=True))
+    lead = _lead(pcap_ingest.to_report_leads(s), "59.111.181.60:443/tcp")
+    assert lead.sni_masquerade == []
+    body = letters.build_letters({"leads": [_lead_as_dict(lead)]})[0]["body_md"]
+    assert "切勿向其发函" not in body
+
+
+def test_masquerade_merges_into_an_existing_lead(tmp_path) -> None:
+    """★入口级：已存在同 (category,value) 的 Lead 时，后续才发现的伪装名必须并进去。
+
+    走真实入口 merge_into_report_json（不是手搓 dict）。此前 merge_runtime_into_lead_dict
+    只搬 Evidence、不碰 sni_masquerade，于是「先并了一份没 SNI 的采集、后来才抓到伪装」
+    这条最常见的路径上，结构化警示永远进不了报告，letters 也就渲染不出「切勿向其发函」——
+    正是本修复要避免的误发函风险。去掉并集逻辑，本测试即红。
+    """
+    import json
+
+    from apkscan.report import letters
+
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({"leads": [], "endpoints": [], "meta": {}}, ensure_ascii=False),
+                      encoding="utf-8")
+
+    # 第一次采集：同一个后端、同一个端口，但没抓到 SNI。
+    first = _summary(_flow(_BACKEND, 30135, set(), payload=1200),
+                     _flow(_BACKEND, 30135, set(), inbound=True, payload=800))
+    pcap_ingest.merge_into_report_json(str(report), first)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    lead = _lead_dict(payload, f"{_BACKEND}:30135/tcp")
+    assert not lead.get("sni_masquerade"), "第一次采集本就没有 SNI"
+
+    # 第二次采集：同一后端同一端口，这次抓到了伪装 SNI → 命中既有 Lead 走合并路径。
+    second = _summary(_flow(_BACKEND, 30135, {_FAKE_SNI}, payload=1500),
+                      _flow(_BACKEND, 30135, {_FAKE_SNI}, inbound=True, payload=900))
+    pcap_ingest.merge_into_report_json(str(report), second)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    lead = _lead_dict(payload, f"{_BACKEND}:30135/tcp")
+
+    assert lead.get("sni_masquerade") == [_FAKE_SNI], "伪装名没并进既有 Lead"
+
+    # 并且真的走到调证函正文里（这才是这个字段存在的意义）
+    lead = dict(lead)
+    lead["evidence_to_obtain"] = ["租户实名", "访问日志"]   # closure 回写才填，此处补上
+    body = letters.build_letters({"leads": [lead]})[0]["body_md"]
+    assert "切勿向其发函" in body
+
+
+def _lead_dict(payload: dict, value: str) -> dict:
+    return next(ld for ld in payload["leads"] if ld.get("value") == value)
+
+
 def test_known_third_party_domain_stays_skip() -> None:
     """已判「无需调证」的（jsDelivr 等在第三方名单里）不受影响——只降"本会出函"的那些。"""
     assert infra.classify_domain("cdn.jsdelivr.net")[0] == infra.ADVICE_SKIP

@@ -755,6 +755,37 @@ def test_annotate_remote_endpoints_parseable_by_assemble(monkeypatch) -> None:  
     assert _ip_from_hostport(keys[0]) == "203.0.113.7"  # assemble 能解出落地 IP → tls_sni 边不丢
 
 
+def test_annotate_remote_endpoints_uses_the_shared_ipv6_format(monkeypatch) -> None:  # noqa: ANN001
+    """★两条生产路径必须用同一个格式化函数：capture 侧与 pcap 侧写的是**同一个字段**。
+
+    上面那条 IPv4 断言逮不住格式分叉——``f"{ip}:{port}"`` 与 ``infra.format_hostport`` 对 IPv4
+    结果完全相同。真正会分叉的是 IPv6：pcap 侧改成括号形态后，capture 侧若还在裸拼，同一个
+    ``remote_endpoints`` 字段就有了两套格式，assemble 把 ``[2606:...]`` 当地址解析不出来 →
+    IPv6 的 tls_sni 真值边静默丢光（codex 二轮 P1，且当时全量测试仍绿）。
+    """
+    from apkscan.attribution.assemble import _ip_from_hostport
+
+    v6 = "2606:4700:4700::1111"
+    monkeypatch.setattr(pcap_ingest, "_ip_public", lambda value: value == v6)
+    summary = pcap_ingest.PcapSummary(
+        flows=[
+            pcap_ingest.Flow(
+                proto="tcp", src_ip="10.0.0.2", src_port=50002, dst_ip=v6, dst_port=8443,
+                packets=2, payload_bytes=80, sni={"api.example.test"},
+            )
+        ]
+    )
+    endpoints = pcap_ingest.to_runtime_endpoints(summary)
+    capture._annotate_runtime_endpoints(
+        endpoints, summary, {f"tcp/{v6}:8443": {"is_target_app": True, "attribution": "confirmed"}}
+    )
+    dom = {e.value: e for e in endpoints}.get("api.example.test")
+    assert dom is not None
+    keys = dom.enrichment["runtime"]["remote_endpoints"]
+    assert keys == [f"[{v6}]:8443"], f"capture 侧没用共享的括号格式：{keys}"
+    assert _ip_from_hostport(keys[0]) == v6, "assemble 解不出 IPv6 落地 IP → tls_sni 边会丢"
+
+
 def test_capture_proxy_up_but_reverse_fail_is_degraded(monkeypatch, tmp_path):
     """★ 复审 P0：代理设了但 adb reverse 失败（设备代理指向死 loopback、MITM 通道不通）
     + 无 floor + 0 端点 → degraded，不假成功。"""

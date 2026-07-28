@@ -35,6 +35,7 @@ from apkscan.attribution.roles import (
     _ROLE_DEFINITIONS,
 )
 from apkscan.attribution.scorer import EvidenceScorer
+from apkscan.core import infra  # 仅取 split_hostport —— 与 remote_endpoints 写方共用同一个解析器
 from apkscan.core.models import OBSERVED_CONTACT_SOURCES
 from apkscan.network import NetworkEntity, NetworkEntityType
 from apkscan.network.categories import CAT_CDN, CAT_CLOUD, CAT_IDC, CAT_TELECOM  # 网络类别规范取值（与五层同一份）
@@ -179,19 +180,14 @@ def _runtime_contact_observed(endpoint: Any) -> bool:
 
 
 def _ip_from_hostport(value: object) -> str | None:
-    """The IP half of an ``ip:port`` runtime ``remote_endpoints`` entry (the capture
-    writer always emits ``f"{ip}:{port}"``). IPv6-safe: split on the LAST colon and
-    require a valid decimal port suffix. Best-effort on malformed input: an entry whose
-    stripped head is not a valid address is skipped, but a hand-edited *port-less* IPv6
-    whose last group is decimal (e.g. ``2001:db8::aaaa:443``) is inherently ambiguous with
-    the ``ip:port`` form and may still be mis-split — real capture data always carries a
-    genuine port, and brackets would be needed to disambiguate hand-edited input."""
-    if not isinstance(value, str) or ":" not in value:
-        return None
-    head, _, port = value.rpartition(":")
-    if not head or not port.isdecimal() or not (1 <= int(port) <= 65535):
-        return None
-    return head
+    """The IP half of a runtime ``remote_endpoints`` entry.
+
+    Delegates to :func:`infra.split_hostport`, the single parser shared with every writer
+    of this field. Do NOT re-implement the split here: producers emit IPv6 in the RFC 3986
+    bracket form, and a local ``rpartition(":")`` returned ``"[2606:...]"`` — not a valid
+    address — so every IPv6 runtime attribution edge was silently dropped."""
+    parsed = infra.split_hostport(value)
+    return parsed[0] if parsed else None
 
 
 def _domain_in_observed_sni(domain: NetworkEntity, runtime: dict[str, Any]) -> bool:

@@ -620,6 +620,65 @@ def test_attribution_absent_no_section() -> None:
     assert "基础设施归属链" not in out[0]["body_md"] and out[0]["attribution"] is None
 
 
+def _ip_lead(value: str) -> dict:
+    """一条 IP 类可办案化 Lead —— value 按运行时回灌的真实形态带 ``:port/proto`` 尾缀。"""
+    return {
+        "category": "IP", "value": value, "subject": "某科技有限公司",
+        "where_to_request": "云服务商", "advice": "建议调证",
+        "evidence_to_obtain": ["租户实名", "开通与登录日志"],
+        "source_refs": [{"evidence_id": "E1"}],
+    }
+
+
+def test_runtime_ip_lead_with_port_suffix_still_gets_attribution_chain() -> None:
+    """★pcap 实测后端的 Lead 值是 ``8.138.102.85:31861/tcp``，Endpoint 是裸 IP。
+
+    此前 letters 按原值精确匹配，于是**最该写清归属的那个实测后端**永远关联不上五层归属链，
+    调证函正文只剩"某科技有限公司 / 云服务商"的空壳。退回精确匹配，本测试即红。
+    """
+    ips = [_five_layer("8.138.102.85", holder="ALIBABA-CN-NET", asn=37963,
+                       asn_org="Alibaba", category="cloud")]
+    report = {
+        "leads": [_ip_lead("8.138.102.85:31861/tcp")],
+        "endpoints": [{
+            "value": "8.138.102.85", "kind": "ip",
+            "enrichment": {"attribution": {"endpoint": "8.138.102.85", "kind": "ip", "ips": ips}},
+        }],
+    }
+    out = letters.build_letters(report)
+    assert len(out) == 1
+    body = out[0]["body_md"]
+    assert "基础设施归属链" in body, "带端口尾缀的实测后端没关联上归属链"
+    assert "AS37963" in body
+    assert out[0]["attribution"] is not None
+    assert out[0]["attribution"]["ips"][0]["ip"] == "8.138.102.85"
+    # 端口本身仍须留在文书标的里——调证函要写"哪个端口"。
+    assert "31861" in body
+
+
+def test_domain_lead_is_not_port_stripped() -> None:
+    """归一化只对 IP 剥端口：域名侧照旧只小写，别把域名里的冒号语义也一并吃掉。"""
+    ips = [_five_layer("45.76.1.1", holder="V", asn=1, asn_org="Y", category="cloud")]
+    rep = {
+        "leads": [_lead_for("Pay.X.com")],   # Lead 大小写与 endpoint 不同
+        "endpoints": [{"value": "pay.x.com", "kind": "domain",
+                       "enrichment": {"attribution": {"ips": ips}}}],
+    }
+    assert "基础设施归属链" in letters.build_letters(rep)[0]["body_md"]
+
+
+def test_attribution_index_does_not_cross_kinds() -> None:
+    """kind 入键：IP 类 Lead 不该关联到同字面的 domain 端点归因（防串号）。"""
+    rep = {
+        "leads": [_ip_lead("1.2.3.4")],
+        "endpoints": [{"value": "1.2.3.4", "kind": "domain",
+                       "enrichment": {"attribution": {"ips": [_five_layer("9.9.9.9")]}}}],
+    }
+    out = letters.build_letters(rep)
+    assert out[0]["attribution"] is None
+    assert "基础设施归属链" not in out[0]["body_md"]
+
+
 def test_attribution_markdown_injection_escaped() -> None:
     """★安全：RDAP/ASN org 是外部数据，恶意 markdown 被 _md_safe 转义，不破坏文书结构。"""
     ips = [_five_layer("1.1.1.1", holder="Evil](http://x)", asn=1, asn_org="**bold** [x](y)",

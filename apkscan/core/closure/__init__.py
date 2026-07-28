@@ -38,6 +38,7 @@ from __future__ import annotations
 import logging
 from typing import Mapping, Sequence
 
+from apkscan.core import infra
 from apkscan.core.models import Report
 
 from apkscan.core.closure._shared import (
@@ -101,7 +102,13 @@ logger = logging.getLogger(__name__)
 
 
 def _update_target_leads(report: Report, targets: Sequence[Mapping[str, object]]) -> None:
-    by_key = {(str(target.get("kind")), str(target.get("value")).lower()): target for target in targets}
+    # ★两侧都走 infra.match_key（IP 剥 :port/proto）。此前这里用裸 .lower()，而选目标那侧
+    #   早就剥了端口——于是一个 pcap 实测后端能被选成闭环目标、却在回写时匹配不上自己的 Lead，
+    #   拿不到 where_to_request / evidence_to_obtain，连 [case-close] 状态都不落。
+    by_key = {
+        (str(target.get("kind")), infra.match_key(str(target.get("kind")), str(target.get("value")))): target
+        for target in targets
+    }
     marker = "[case-close]"
     for lead in report.leads:
         kind = "domain" if lead.category.value == "DOMAIN" else "ip" if lead.category.value == "IP" else ""
@@ -110,7 +117,7 @@ def _update_target_leads(report: Report, targets: Sequence[Mapping[str, object]]
         # 先清本线索所有旧 [case-close] 注记——含上一轮更大 max_targets 时给现已被截断/未选的 lead 写的陈旧状态
         # （codex 审计 P1-1 B 面：否则缩小上限后 dropped lead 会残留与本轮 closure 不一致的旧状态）。
         retained = [line for line in lead.notes.splitlines() if not line.startswith(marker)]
-        target = by_key.get((kind, lead.value.lower()))
+        target = by_key.get((kind, infra.match_key(kind, lead.value)))
         if target is None:
             lead.notes = "\n".join(line for line in retained if line).strip()  # 本轮未评估：只清旧 marker
             continue

@@ -23,6 +23,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
 
+from apkscan.core import infra  # 仅取 split_hostport —— 与 remote_endpoints 写方共用同一个 codec
+
 logger = logging.getLogger(__name__)
 
 #: 端口合法区间（推出的端口越界即判该形式不成立）。
@@ -233,8 +235,14 @@ def predict_port(candidate: TransformCandidate, ip: str, declared: int) -> int |
 def observed_ports_from_report(report: Any) -> dict[str, set[int]]:
     """从主报告里取**实测**的 IP→端口集合。
 
-    数据源是 ``endpoints[].enrichment["runtime"]["remote_endpoints"]``（形如 ``"ip:port"``），
-    由 pcap/socket 归因写入，是真观测。坏结构一律跳过，绝不抛。
+    数据源是 ``endpoints[].enrichment["runtime"]["remote_endpoints"]``（``"ip:port"`` /
+    ``"[v6]:port"``），由 pcap/socket 归因写入，是真观测。坏结构一律跳过，绝不抛。
+
+    ★解析走 :func:`infra.split_hostport`——与写方同一个 codec，不在这里另写一份 ``rpartition``。
+      随后**显式**只留 IPv4：本模块的变换假设空间用到 IP 末段（见 :func:`last_octet`），IPv6 没有
+      对应概念，故 IPv4-only 是**有意的判据**，而不是"解析不了就算了"的副作用。此前靠
+      ``last_octet() is None`` 顺带把 IPv6 滤掉，行为虽对，但意图藏在副作用里、也让"全仓唯一 codec"
+      的说法名不副实（codex 三轮 P2）。
     """
     out: dict[str, set[int]] = {}
     if not isinstance(report, dict):
@@ -251,15 +259,12 @@ def observed_ports_from_report(report: Any) -> dict[str, set[int]]:
         if not isinstance(keys, list):
             continue
         for key in keys:
-            if not isinstance(key, str) or ":" not in key:
+            parsed = infra.split_hostport(key)
+            if parsed is None:
                 continue
-            host, _, port_s = key.rpartition(":")
-            try:
-                port = int(port_s)
-            except ValueError:
-                continue
-            if not (_PORT_MIN <= port <= _PORT_MAX) or last_octet(host) is None:
-                continue
+            host, port = parsed
+            if last_octet(host) is None:
+                continue     # 有意的 IPv4-only 门：变换假设空间基于 IP 末段，IPv6 无此概念
             out.setdefault(host, set()).add(port)
     return out
 
