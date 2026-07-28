@@ -18,7 +18,10 @@ from apkscan.core.models import LeadCategory
 from apkscan.dynamic import pcap_ingest
 
 _BACKEND = "8.138.171.104"
-_FAKE_SNI = "music.163.com"
+#: 刻意用一个**不在** KNOWN_INFRA 名单里的域名。
+#: 实测那批（music.163.com / 有道 / BootCDN）已陆续进了已知第三方名单，但伪装判据的价值恰恰
+#: 在于**不依赖名单**——团伙下次换一个没人收录过的知名域名，名单就已经落后了。
+_FAKE_SNI = "player.mediastatic-cdn.com"
 
 
 def _flow(dst_ip: str, dst_port: int, sni: set[str] | None = None, *,
