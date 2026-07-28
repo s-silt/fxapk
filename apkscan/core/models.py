@@ -114,6 +114,16 @@ class Lead:
     #:   它。写进 notes 时曾以为"办案人发函前看得到"，实际 letters 全文不渲染 notes，承诺在
     #:   出口断裂——发出去的是一封干净的、没有任何存疑提示的调证函。
     shape_uncertain: bool = False
+    #: 这条连接在 TLS 握手里**借用的**域名（非标端口上的 SNI，见 ``pcap_ingest.sni_camouflage_carriers``）。
+    #:
+    #: 语义与 :attr:`shape_uncertain` 相反——它**不是**减分项：非标端口 + 知名域名 SNI = 自建协议
+    #: 混入背景流量，反而使本 IP 更值得查。它要走到出口是为了另一件事：**钉死调证方向**。被冒用的
+    #: 那家公司（网易云音乐、有道、jsDelivr…）与本案无关，向它发函就是把无关企业写成嫌疑方——
+    #: 本项目最重的那类错误。
+    #:
+    #: ★同样必须是结构化字段：这条警示原本只写在 ``notes`` 里，而 letters 全文不渲染 notes
+    #:   （与 :attr:`shape_uncertain` 一模一样的断裂，见该字段注释）。走过一次的坑不走第二次。
+    sni_masquerade: list[str] = field(default_factory=list)
 
     @property
     def is_c2(self) -> bool:

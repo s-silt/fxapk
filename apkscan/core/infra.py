@@ -766,6 +766,22 @@ def _strip_port_suffix(value: str) -> str:
     return head
 
 
+def match_key(kind_or_category: str, value: str) -> str:
+    """Lead ↔ Endpoint 配对用的**唯一**规范化值。
+
+    IP 侧剥 ``:port`` / ``:port/proto`` 尾缀（运行时回灌的 Lead 值形如
+    ``8.138.102.85:31861/tcp``，Endpoint 一律裸 IP）；域名侧只做小写。
+
+    ★之所以要一个公共入口而不是各处各写一份：此前只有**选闭环目标**那一处剥了端口，
+      而闭环结论回写 Lead（``closure._update_target_leads``）与调证函关联归属链
+      （``report.letters``）都还在拿 ``value.lower()`` 精确匹配。后果是同一个真后端
+      **被选中当了闭环目标，却拿不到 where_to_request / 五层归属链**——闭环算了、
+      文书不知道，调证函把实测后端漏成一句空壳。三处必须用同一把钥匙。
+    """
+    v = str(value).strip().lower()
+    return _strip_port_suffix(v) if str(kind_or_category).upper() == "IP" else v
+
+
 def is_low_octet_ipv4(value: str) -> bool:
     """该字面是否为"四段全部 ≤ :data:`_LOW_OCTET_MAX`"的 IPv4（纯形态判断，不看 is_global）。
 

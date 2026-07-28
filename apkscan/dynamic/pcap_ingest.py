@@ -1485,6 +1485,8 @@ def to_report_leads(summary: PcapSummary) -> list[Lead]:
                         observed_at=re.first_ts or None,  # 首包时间 → 观测时刻（0.0 视作未知留 None）
                     )
                 ],
+                # 结构化回带，让 letters 能自己渲染警示——上面那段 notes 文案下游出口读不到。
+                sni_masquerade=masked if advice != infra.ADVICE_SKIP else [],
                 notes=notes,
             )
         )
@@ -1739,48 +1741,98 @@ def _runtime_endpoint_dicts(summary: PcapSummary) -> list[dict]:
       后端"连闭环候选都进不去——排序排的是端点，而那个端点根本没被创建。报告里 Lead 标着
       ``is_runtime_contact=true``，闭环却挑着静态噪音，两边各说各话。
     """
-    out: list[dict] = []
     camouflage = sni_camouflage_carriers(summary)
+    # ★按 IP 聚合，不是按 (ip, port) 各产一条。
+    #   同一 IP 上开多个业务端口是常态（实测：一台机 5479＋8796，呈「主通道＋心跳通道」成对形态）。
+    #   端点的 value 是裸 IP，若每个端口各产一条同 key 的 dict，合并时后者会把前者的 runtime
+    #   整个覆盖掉——端口、字节、SNI 全丢一半。mitm 侧早就用 ``mitm_peers`` 列表累积解决了
+    #   同一问题（见 capture._collect_flow_endpoints 的注释），pcap 侧此前没有。
+    by_ip: dict[str, dict] = {}
     for re_ in remote_endpoints(summary):
         sni = sorted(re_.sni)
         # 这个端点打出来的 SNI 里，哪些是"非标端口上的"——即无法据以判定运营方的（见
         # sni_camouflage_carriers）。记在端点上，读报告的人能一眼看出这条连接在伪装成谁。
         masquerading = sorted(s for s in sni if s.strip().lower().rstrip(".") in camouflage)
-        out.append({
-            "value": re_.ip,
-            "kind": "ip",
-            "is_private": False,  # remote_endpoints 只收公网远端
-            "evidences": [{
-                "source": _SOURCE,
-                "location": "pcap",
-                "snippet": (
-                    f"->{re_.ip}:{re_.port}/{re_.proto} state={re_.state} "
-                    f"out={re_.out_bytes}B in={re_.in_bytes}B conns={re_.connection_count}"
-                    + ("，SNI=" + "/".join(sni) if sni else "")
-                )[:200],
-                "observed_at": re_.first_ts or None,
-            }],
-            "enrichment": {"runtime": {
-                "port": re_.port,
-                "proto": re_.proto,
-                "state": re_.state,
-                "out_bytes": re_.out_bytes,
-                "in_bytes": re_.in_bytes,
-                "has_payload": re_.has_payload,
-                "connection_count": re_.connection_count,
-                "sni": sni,
-                # ★这条连接以谁的名义握手。它**不是**减分项：非标端口 + 借用知名域名做 SNI，
-                #   本身就是自建协议在混入背景流量，反而使这个 IP 更值得查。
-                #   记在端点上，是为了让调证对象指向本 IP:端口，而不是被冒充那家公司。
-                **({"sni_masquerade": masquerading} if masquerading else {}),
-                "first_ts": re_.first_ts or None,
-                "last_ts": re_.last_ts or None,
-                # ★不写 target_attributed：本路径（pcap-leads）没有设备侧 socket 快照，做不了
-                #   UID 归因。缺了就是缺了，不能因为"这是目标的 pcap"就默认填 True——带外抓包
-                #   抓的是整机流量。真归因走 capture 的 socket_attr 路径。
-            }},
+        peer = f"{re_.ip}:{re_.port}"
+        snippet = (
+            f"->{peer}/{re_.proto} state={re_.state} "
+            f"out={re_.out_bytes}B in={re_.in_bytes}B conns={re_.connection_count}"
+            + ("，SNI=" + "/".join(sni) if sni else "")
+        )[:200]
+
+        ep = by_ip.get(re_.ip)
+        if ep is None:
+            by_ip[re_.ip] = {
+                "value": re_.ip,
+                "kind": "ip",
+                "is_private": False,  # remote_endpoints 只收公网远端
+                "evidences": [{
+                    "source": _SOURCE, "location": "pcap",
+                    "snippet": snippet, "observed_at": re_.first_ts or None,
+                }],
+                "enrichment": {"runtime": {
+                    # ★端口级明细：``["ip:port", …]``。这是 port-normalize 的数据源
+                    #   （config/port_norm.py 按 IP 配对 declared↔observed 端口），
+                    #   此前该字段根本没被生成，文档说的"报告实测端口交叉校验"对 pcap 报告不可用。
+                    "remote_endpoints": [peer],
+                    "ports": [re_.port],
+                    # ★``port`` 是**代表端口**（下方合并时取字节数最大的那个），保留它是为了
+                    #   向后兼容既有消费方与展示；同 IP 多端口的**权威明细看 ``ports`` /
+                    #   ``remote_endpoints``**，不要拿它当"该 IP 只有这一个端口"。
+                    "port": re_.port,
+                    "proto": re_.proto,
+                    "state": re_.state,
+                    # 以下为**IP 级聚合**语义（跨该 IP 的全部端口）：闭环排序与门控读的是这几个。
+                    "out_bytes": re_.out_bytes,
+                    "in_bytes": re_.in_bytes,
+                    "has_payload": re_.has_payload,
+                    "connection_count": re_.connection_count,
+                    "sni": sni,
+                    # ★这条连接以谁的名义握手。它**不是**减分项：非标端口 + 借用知名域名做 SNI，
+                    #   本身就是自建协议在混入背景流量，反而使这个 IP 更值得查。
+                    #   记在端点上，是为了让调证对象指向本 IP:端口，而不是被冒充那家公司。
+                    **({"sni_masquerade": masquerading} if masquerading else {}),
+                    "first_ts": re_.first_ts or None,
+                    "last_ts": re_.last_ts or None,
+                    # ★不写 target_attributed：本路径（pcap-leads）没有设备侧 socket 快照，做不了
+                    #   UID 归因。缺了就是缺了，不能因为"这是目标的 pcap"就默认填 True——带外抓包
+                    #   抓的是整机流量。真归因走 capture 的 socket_attr 路径。
+                }},
+            }
+            continue
+
+        # 同 IP 的后续端口：逐字段**合并**，绝不覆盖。
+        rt = ep["enrichment"]["runtime"]
+        if peer not in rt["remote_endpoints"]:
+            rt["remote_endpoints"].append(peer)
+        if re_.port not in rt["ports"]:
+            rt["ports"].append(re_.port)
+        # 代表端口取**流量最大**的那个（主通道），而不是最后并入的那个——
+        # 实测形态是"一主一心跳"，心跳端口若成了代表值，展示与文书会指向次要通道。
+        if re_.out_bytes + re_.in_bytes > rt["out_bytes"] + rt["in_bytes"]:
+            rt["port"] = re_.port
+        rt["out_bytes"] += re_.out_bytes
+        rt["in_bytes"] += re_.in_bytes
+        rt["connection_count"] += re_.connection_count
+        # 任一端口有载荷即该 IP 有载荷；established 优先于 syn_only/reset（闭环据此判优先级）。
+        rt["has_payload"] = bool(rt["has_payload"] or re_.has_payload)
+        if re_.state == "established":
+            rt["state"] = "established"
+        if re_.proto != rt.get("proto"):
+            rt["proto"] = "mixed"
+        rt["sni"] = sorted(set(rt["sni"]) | set(sni))
+        if masquerading:
+            rt["sni_masquerade"] = sorted(set(rt.get("sni_masquerade") or []) | set(masquerading))
+        for key, pick in (("first_ts", min), ("last_ts", max)):
+            cur, new = rt.get(key), (re_.first_ts if key == "first_ts" else re_.last_ts) or None
+            if new is not None:
+                rt[key] = new if cur is None else pick(cur, new)
+        ep["evidences"].append({
+            "source": _SOURCE, "location": "pcap",
+            "snippet": snippet, "observed_at": re_.first_ts or None,
         })
-    return out
+
+    return list(by_ip.values())
 
 
 def _merge_runtime_endpoint_dicts(payload: dict, fresh: list[dict]) -> int:
@@ -1807,11 +1859,51 @@ def _merge_runtime_endpoint_dicts(payload: dict, fresh: list[dict]) -> int:
             continue
         enr = hit.setdefault("enrichment", {})
         if isinstance(enr, dict):
-            enr["runtime"] = {**(enr.get("runtime") or {}), **ep["enrichment"]["runtime"]}
+            enr["runtime"] = _merge_runtime_blocks(enr.get("runtime"), ep["enrichment"]["runtime"])
         evs = hit.setdefault("evidences", [])
         if isinstance(evs, list):
             evs.extend(ep["evidences"])
     return added
+
+
+#: 端口级明细字段：合并时取并集，绝不覆盖（否则同 IP 多端口只剩最后一个）。
+_RUNTIME_UNION_KEYS = ("remote_endpoints", "ports", "sni", "sni_masquerade")
+#: 计数字段：合并时求和（跨端口累计）。
+_RUNTIME_SUM_KEYS = ("out_bytes", "in_bytes", "connection_count")
+
+
+def _merge_runtime_blocks(old: object, new: dict) -> dict:
+    """合并两份 ``enrichment["runtime"]``，逐字段按语义处理而非整体覆盖。
+
+    ★此前是 ``{**old, **new}``——新块里有的键一律压掉旧值。同一 IP 上有两个业务端口时，
+      后并入的那个把端口、字节数、SNI 全盖掉，报告里只剩一半端口。实测样本里
+      「一台机开两个端口、一主一心跳」是常见形态，等于稳定漏掉一半调证标的。
+
+    列表取并集、计数求和、时间取端点、``has_payload`` 取或、``established`` 优先。
+    未列出的键沿用 ``new`` 覆盖 ``old``（如 proto/state 已在上游归并过）。
+    """
+    base = dict(old) if isinstance(old, dict) else {}
+    out = {**base, **new}
+    for key in _RUNTIME_UNION_KEYS:
+        merged = sorted({*(base.get(key) or []), *(new.get(key) or [])},
+                        key=lambda v: (isinstance(v, str), v))
+        if merged:
+            out[key] = merged
+        elif key in out and not out[key]:
+            out.pop(key, None)
+    for key in _RUNTIME_SUM_KEYS:
+        a, b = base.get(key), new.get(key)
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+            out[key] = a + b
+    if base.get("has_payload") or new.get("has_payload"):
+        out["has_payload"] = True
+    if base.get("state") == "established" or new.get("state") == "established":
+        out["state"] = "established"
+    for key, pick in (("first_ts", min), ("last_ts", max)):
+        a, b = base.get(key), new.get(key)
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+            out[key] = pick(a, b)
+    return out
 
 
 def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:

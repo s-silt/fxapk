@@ -24,6 +24,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from apkscan.core import infra
 from apkscan.core.registry import load_rules
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,22 @@ SHAPE_UNCERTAIN_WARNING: str = (
     "推得，非样本内的地址性证据。**发函前请人工确认该值确系网络地址**——若实为版本串，"
     "本函标的不存在，会向无关的云厂商索取一个并不存在的租户。"
 )
+
+# SNI 伪装警示（见 Lead.sni_masquerade）。与形态存疑并列渲染在受文机关之前。
+#
+# ★注意它**不质疑本函该不该发**——恰恰相反，伪装是加重信号。它防的是另一件事：读函的人看到
+#   证据摘要里的 SNI 是个知名域名，顺手把函发给被冒用的那家公司。那是把无关企业写成嫌疑方。
+_SNI_MASQUERADE_WARNING_TMPL: str = (
+    "**⚠ 该连接以 {names} 的名义握手：** 这些域名仅作为 SNI 出现在**非标准 TLS 端口**上，"
+    "系伪装、不代表本地址的运营方——被冒用域名的持有方与本案无关，**切勿向其发函**。"
+    "本函标的即上述 IP 与端口。伪装本身是自建协议混入背景流量的加重信号，非减分项。"
+)
+
+
+def sni_masquerade_warning(names: list[str]) -> str:
+    """按借用的域名渲染伪装警示；名字来自样本流量，须 _md_safe 转义。空列表 → 空串。"""
+    safe = [_md_safe(n) for n in names if str(n).strip()]
+    return _SNI_MASQUERADE_WARNING_TMPL.format(names="、".join(safe)) if safe else ""
 
 # 文件名安全化：去掉文件系统非法字符 + 控制字符。
 _UNSAFE_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
@@ -214,9 +231,19 @@ def _sub_dict(d: dict[str, Any], key: str) -> dict[str, Any]:
     return v if isinstance(v, dict) else {}
 
 
-def _attribution_index(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """从 ``report['endpoints']`` 建 ``{端点 value: attribution}``（仅含真有五层归因的端点）。坏形状容错、绝不抛。"""
-    index: dict[str, dict[str, Any]] = {}
+def _attribution_index(report: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
+    """从 ``report['endpoints']`` 建 ``{(kind, 归一化 value): attribution}``（仅含真有五层归因的端点）。
+
+    ★键必须走 :func:`infra.match_key`（IP 剥 ``:port/proto``）：Lead 值形如
+      ``8.138.102.85:31861/tcp``，Endpoint 是裸 IP。此前按原值精确匹配，于是**恰恰是 pcap 实测
+      到的真后端**——最该在调证函里写清归属的那个——永远关联不上五层归属链，正文只剩空壳。
+      kind 一并入键，防域名与 IP 字面撞车。坏形状容错、绝不抛。
+
+    ``kind`` 缺失/非串的端点（手工编辑过的 report.json、旧产物）**不丢**：改挂在通配 kind ``""``
+    下、值只小写不剥端口（不知 kind 就无从判断该不该剥）。查找先精确后通配——归因是"这个标的
+    归谁"的关键信息，宁可靠通配捞回来，也不能因为少个字段就静默消失。
+    """
+    index: dict[tuple[str, str], dict[str, Any]] = {}
     if not isinstance(report, dict):
         return index
     endpoints = report.get("endpoints")
@@ -226,12 +253,17 @@ def _attribution_index(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
         if not isinstance(ep, dict):
             continue
         value = ep.get("value")
+        kind = ep.get("kind")
         enr = ep.get("enrichment")
         if not (isinstance(value, str) and isinstance(enr, dict)):
             continue
         att = enr.get("attribution")
-        if isinstance(att, dict) and isinstance(att.get("ips"), list) and att["ips"]:
-            index[value] = att
+        if not (isinstance(att, dict) and isinstance(att.get("ips"), list) and att["ips"]):
+            continue
+        if isinstance(kind, str) and kind.strip():
+            index[(kind.strip().lower(), infra.match_key(kind, value))] = att
+        else:
+            index[("", value.strip().lower())] = att
     return index
 
 
@@ -320,6 +352,7 @@ def _build_body_md(
     evidence_refs: list[str],
     attribution_lines: list[str] | None = None,
     shape_uncertain: bool = False,
+    masquerade_warning: str = "",
 ) -> str:
     """套打 markdown 正文：顶部固定免责声明 → 受文机关 → 标的 → 待调取证据 → 出处。"""
     title = template.get("title", "协查函")
@@ -334,6 +367,10 @@ def _build_body_md(
     # 1.5) 标的形态存疑警示——必须在标题与受文机关之前：这封函要不要发，取决于它。
     if shape_uncertain:
         lines.append(f"> {SHAPE_UNCERTAIN_WARNING}")
+        lines.append("")
+    # 1.6) SNI 伪装警示——同样在受文机关之前：它决定这封函**不该发给谁**。
+    if masquerade_warning:
+        lines.append(f"> {masquerade_warning}")
         lines.append("")
     # 2) 标题
     lines.append(f"# {title}（标的：{target}）")
@@ -376,12 +413,13 @@ def _build_body_md(
 def _lead_to_letter(
     lead: dict[str, Any],
     templates: dict[str, dict[str, str]],
-    attr_index: dict[str, dict[str, Any]] | None = None,
+    attr_index: dict[tuple[str, str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """把单条可办案化 Lead 套打成文书 dict（字段见模块 docstring）。
 
-    ``attr_index``：``{端点 value: 五层归因}``（见 _attribution_index）。按 Lead.value 关联，套进正文
-    「基础设施归属链」段并作结构化字段 ``attribution`` 回带。缺/无匹配 → 不渲染该段。
+    ``attr_index``：``{(kind, 归一化 value): 五层归因}``（见 _attribution_index）。按 Lead 的
+    category+value 同法归一化后关联，套进正文「基础设施归属链」段并作结构化字段 ``attribution``
+    回带。缺/无匹配 → 不渲染该段。
     """
     category = _str_or_empty(lead.get("category"))
     recipient = _str_or_empty(lead.get("where_to_request")).strip()
@@ -392,13 +430,19 @@ def _lead_to_letter(
     template = _template_for(category, templates)
 
     # 关联用原始 value 且须为 str（endpoint 侧同样要求 str）——不字符串化，避免 123 与 "123" 串号。
+    # 归一化与 _attribution_index 建键时同一把钥匙（IP 剥 :port/proto），否则实测后端关联不上。
     raw_value = lead.get("value")
-    attribution = (
-        attr_index.get(raw_value) if isinstance(attr_index, dict) and isinstance(raw_value, str) else None
-    )
+    attribution = None
+    if isinstance(attr_index, dict) and isinstance(raw_value, str):
+        attribution = attr_index.get((category.strip().lower(), infra.match_key(category, raw_value)))
+        if attribution is None:  # 端点侧缺 kind 时的通配兜底（见 _attribution_index）
+            attribution = attr_index.get(("", infra.match_key(category, raw_value)))
     attribution_lines = _render_attribution_chain(attribution) if isinstance(attribution, dict) else []
     # 形态存疑：判定靠外部佐证而非样本内的地址性证据，正文顶部要显著警示（见 Lead.shape_uncertain）。
     shape_uncertain = bool(lead.get("shape_uncertain"))
+    # SNI 伪装：正文顶部要警示"别发给被冒用的那家公司"（见 Lead.sni_masquerade）。
+    masquerade = _str_list(lead.get("sni_masquerade"))
+    masquerade_warning = sni_masquerade_warning(masquerade)
 
     body_md = _build_body_md(
         template=template,
@@ -409,6 +453,7 @@ def _lead_to_letter(
         evidence_refs=evidence_refs,
         attribution_lines=attribution_lines,
         shape_uncertain=shape_uncertain,
+        masquerade_warning=masquerade_warning,
     )
     return {
         "category": category,
@@ -420,6 +465,7 @@ def _lead_to_letter(
         "attribution": attribution,  # 五层基础设施归属链（结构化，无匹配为 None）
         # 结构化回带：消费方（HTML/PDF/人工筛选）不必去正文里捞这句警示
         "shape_uncertain": shape_uncertain,
+        "sni_masquerade": masquerade,  # 借用的域名（空列表=无伪装）
         "title": f"{template.get('title', '协查函')}（标的：{target}）",
         "body_md": body_md,
     }

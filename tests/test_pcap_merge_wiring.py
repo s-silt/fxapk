@@ -57,6 +57,26 @@ def _bidirectional_summary(ip: str = "8.138.102.85", port: int = 31861) -> pcap_
     return pcap_ingest.PcapSummary(flows=[out, back])
 
 
+def _two_port_summary(ip: str = "8.163.60.2") -> pcap_ingest.PcapSummary:
+    """同一 IP 上两个业务端口（复刻实测形态：一台机 5479 主通道 ＋ 8796 心跳通道）。
+
+    实测三台后端各开两个端口，每台的两个端口一个流量大（约 1.7KB 上行）、
+    一个流量小（约 250B 上行）——若合并时相互覆盖，稳定漏掉一半调证标的。
+    """
+    flows: list[pcap_ingest.Flow] = []
+    for port, out_b, in_b, lport in ((5479, 1759, 546, 40001), (8796, 258, 447, 40002)):
+        flows.append(pcap_ingest.Flow(
+            proto="tcp", src_ip="192.168.10.233", src_port=lport,
+            dst_ip=ip, dst_port=port, packets=20, payload_bytes=out_b, flags={"syn"},
+        ))
+        flows.append(pcap_ingest.Flow(
+            proto="tcp", src_ip=ip, src_port=port,
+            dst_ip="192.168.10.233", dst_port=lport,
+            packets=17, payload_bytes=in_b, flags={"synack"},
+        ))
+    return pcap_ingest.PcapSummary(flows=flows)
+
+
 def _merge(tmp_path: Path, summary: pcap_ingest.PcapSummary) -> dict:
     p = tmp_path / "report.json"
     p.write_text(json.dumps(_STATIC, ensure_ascii=False), encoding="utf-8")
@@ -193,3 +213,52 @@ def test_private_remote_is_not_merged(tmp_path: Path) -> None:
     payload = _merge(tmp_path, pcap_ingest.PcapSummary(flows=[f]))
 
     assert "192.168.10.1" not in [e["value"] for e in payload["endpoints"]]
+
+
+# ---------------------------------------------------------------------------
+# 面四：同一 IP 多端口不得互相覆盖（codex P1-3）
+# ---------------------------------------------------------------------------
+
+
+def _runtime_of(payload: dict, ip: str) -> dict:
+    ep = next(e for e in payload["endpoints"] if e["value"] == ip)
+    return ep["enrichment"]["runtime"]
+
+
+def test_multi_port_backend_keeps_every_port(tmp_path: Path) -> None:
+    """★同一 IP 上的多个业务端口必须全部保留。
+
+    端点的 value 是裸 IP，此前每个端口各产一条同 key 的 dict、合并时 ``{**old, **new}``
+    把前一个端口的 runtime 整个压掉——报告里只剩最后一个端口。实测形态是
+    「一台机两个端口、一主一心跳」，等于稳定漏掉一半调证标的。
+    """
+    payload = _merge(tmp_path, _two_port_summary())
+    rt = _runtime_of(payload, "8.163.60.2")
+
+    assert sorted(rt["remote_endpoints"]) == ["8.163.60.2:5479", "8.163.60.2:8796"]
+    assert sorted(rt["ports"]) == [5479, 8796]
+
+
+def test_multi_port_counters_are_summed_not_overwritten(tmp_path: Path) -> None:
+    """★字节与连接数按端口累加，不是被后一个端口覆盖。"""
+    payload = _merge(tmp_path, _two_port_summary())
+    rt = _runtime_of(payload, "8.163.60.2")
+
+    assert rt["out_bytes"] == 1759 + 258, "上行字节没有跨端口累加"
+    assert rt["in_bytes"] == 546 + 447
+    assert rt["has_payload"] is True
+
+
+def test_port_normalize_can_read_the_merged_endpoint(tmp_path: Path) -> None:
+    """★接线锁：port-normalize 的数据源必须真的被生成。
+
+    它读 ``endpoints[].enrichment["runtime"]["remote_endpoints"]``（``"ip:port"`` 形态）。
+    该字段此前根本没被 pcap 回灌生成，文档宣称的「报告实测端口交叉校验」对这类报告不可用——
+    只测端点建出来了，挡不住这种「字段名对不上、下游静默拿不到」。
+    """
+    from apkscan.config import port_norm
+
+    payload = _merge(tmp_path, _two_port_summary())
+    observed = port_norm.observed_ports_from_report(payload)
+
+    assert observed.get("8.163.60.2") == {5479, 8796}
