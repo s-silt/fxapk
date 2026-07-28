@@ -1305,6 +1305,36 @@ _FRIDA_HOOK_READY_JS = (
 _BRIDGE_REQUEST = "frida:load-bridge"
 _BRIDGE_RESPONSE = "frida:bridge-loaded"
 
+#: ★注入端的另一半：Python ``create_script()`` 不会像 frida-tools REPL 那样自动安装语言桥的
+#: lazy global，于是脚本里的 ``Java`` 既不存在、也**永远不会发出** ``frida:load-bridge``。
+#: 只做宿主应答器是修了一半——实测表现为 bridge_status 恒 ``requested=[]``、
+#: 会话建立、进程存活、仍报 ``ReferenceError: 'Java' is not defined``，酷似样本反检测。
+#: 这段前导复刻 REPL 的公开协议：首次读取 ``Java`` 时向宿主索取源码，收到后由
+#: ``Script.evaluate`` 装成真正的全局值。**必须排在任何 ``Java.perform`` 之前。**
+_FRIDA_JAVA_BRIDGE_LOADER_JS = r"""
+(() => {
+  Object.defineProperty(globalThis, "Java", {
+    enumerable: true,
+    configurable: true,
+    get() {
+      let bridge;
+      send({ type: "frida:load-bridge", name: "Java" });
+      recv("frida:bridge-loaded", message => {
+        bridge = Script.evaluate(
+          "/frida/bridges/" + message.filename,
+          "(function () { " + [
+            message.source,
+            'Object.defineProperty(globalThis, "Java", { value: bridge });',
+            "return bridge;"
+          ].join("\n") + " })();"
+        );
+      }).wait();
+      return bridge;
+    }
+  });
+})();
+"""
+
 
 def _bridge_source(name: str) -> tuple[str, str] | None:
     """取 frida-tools 随包的 bridge 源码 ``(文件名, 源码)``；找不到 → None。绝不抛。
@@ -1406,7 +1436,10 @@ def _start_frida_session(
         return None, None
 
     source = (
-        FRIDA_UNPINNING_JS
+        # ★必须最先：安装 Java lazy getter，否则下面所有 Java.perform 都在裸 GumJS 上跑。
+        _FRIDA_JAVA_BRIDGE_LOADER_JS
+        + "\n"
+        + FRIDA_UNPINNING_JS
         + "\n"
         + cryptohook.FRIDA_CRYPTO_HOOK_JS
         + "\n"

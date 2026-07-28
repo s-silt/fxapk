@@ -161,6 +161,63 @@ def test_session_registers_the_bridge_loader_before_load(monkeypatch: pytest.Mon
     assert bridge_at < order.index("LOAD"), "应答器晚于 script.load() 注册，赶不上 bridge 请求"
 
 
+def test_session_injects_agent_side_bridge_loader_before_java_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★注入端必须先安装 Java lazy getter —— 只有宿主应答器不会凭空产生 bridge 请求。
+
+    这正是上一版漏掉的另一半：宿主应答写好了，但普通 ``create_script`` 的脚本里
+    ``Java`` 既不存在也不会去要，于是请求从未发生（真机实测 bridge_status 恒
+    ``requested=[]``），照样报 ``ReferenceError: 'Java' is not defined``。
+    只测应答器，挡不住这种「一半的修复」。
+    """
+    captured: dict[str, str] = {}
+
+    class _Sc:
+        def on(self, _name: str, _cb: Any) -> None:
+            pass
+
+        def load(self) -> None:
+            pass
+
+    class _Se:
+        pid = 1
+
+        def create_script(self, source: str) -> "_Sc":
+            captured["source"] = source
+            return _Sc()
+
+    class _Dev:
+        def spawn(self, _args: Any) -> int:
+            return 1
+
+        def attach(self, _pid: int) -> "_Se":
+            return _Se()
+
+        def resume(self, _pid: int) -> None:
+            pass
+
+        def kill(self, _pid: int) -> None:
+            pass
+
+    import sys
+    import types
+
+    fake = types.ModuleType("frida")
+    fake.get_usb_device = lambda **_kwargs: _Dev()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "frida", fake)
+
+    session, _script = capture._start_frida_session("com.x", [])
+
+    assert session is not None
+    source = captured["source"]
+    request_at = source.index('type: "frida:load-bridge"')
+    first_java_hook_at = source.index("Java.perform")
+    assert request_at < first_java_hook_at, "bridge 请求排在 Java.perform 之后，来不及"
+    assert 'recv("frida:bridge-loaded"' in source
+    assert "Script.evaluate" in source
+
+
 def test_bridge_status_separates_two_kinds_of_failure() -> None:
     """★hook 没装上时，要分得清"宿主没给 bridge"与"样本反检测/ART 不可用"。
 
@@ -293,11 +350,23 @@ def test_doctor_fails_when_frida17_cannot_supply_the_bridge(
     assert any("frida-tools" in c for c in out["fix_cmd"])
 
 
-def test_doctor_passes_when_bridge_is_available(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_doctor_passes_when_bridge_source_is_obtainable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★措辞必须收敛为「源码可取得」，不得写成「可供给/已就绪」。
+
+    本项只验证宿主端拿得到 bridges/java.js（必要条件），**不验证运行时 Java.perform
+    真能跑**。曾写成「可供给」而成为假阳性：真机上源码在、注入端却从未发出请求，
+    doctor 报绿而 hook 全空。运行时验收只能靠一次实际注入（capture 的 frida_bridges 三态）。
+    """
     monkeypatch.setattr(capture, "_bridge_source", lambda _n: ("java.js", "x"))
     out = doctor._annotate_java_bridge(
         {"name": "x", "ok": True, "detail": "d", "fix_cmd": []}, "17.2.1")
-    assert out["ok"] is True and "可供给" in out["detail"]
+
+    assert out["ok"] is True
+    assert "源码可取得" in out["detail"]
+    assert "尚未运行时验证" in out["detail"], "没有如实标注本检查的边界"
+    assert "可供给" not in out["detail"], "措辞过强：文件存在 ≠ 运行时可用"
 
 
 @pytest.mark.parametrize("ver", ["16.7.19", "15.2.2", "", "不是版本号"])
