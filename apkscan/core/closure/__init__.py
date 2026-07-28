@@ -134,6 +134,44 @@ def _update_target_leads(report: Report, targets: Sequence[Mapping[str, object]]
         lead.notes = "\n".join(line for line in retained if line).strip()
 
 
+#: 会影响可见性判定的原始信号键。旧报告（分析于 visibility 层落地之前）虽无 ``visibility``
+#: 快照，但这些键早已在 meta 里——据此可补算，不必重跑分析。
+_VISIBILITY_INPUT_KEYS: tuple[str, ...] = (
+    "dex_available", "dex_scanned", "dex_strings_truncated", "dex_string_pool",
+    "is_hardened", "hardening_structural", "extra_dex_visibility",
+    "native_obfuscation", "artifact_lineage",
+    "uni_encrypted", "crypto_recipe", "resource_files_scanned",
+    "runtime_merged", "capture_quality", "capture_signals",
+)
+
+
+def _refresh_visibility(report: Report) -> None:
+    """结案前重算证据可见性 —— 快照是派生视图，不是证据。
+
+    三档，逐档保守：
+
+    - **已有快照** → 无条件重算。分析期算完之后，动态合并还会往 meta 里写
+      ``runtime_merged`` / ``capture_quality``；不重算就会出现「已成功抓包，
+      报告却说未做运行时观测、建议去抓包」。重算幂等。
+    - **无快照但有原始信号** → 补算。否则存量加壳报告会从 gates 的 ``not_applicable``
+      分支旁路而过，拿到 complete —— 加壳样本本该触发的「目标集可能不全」封顶完全落空。
+    - **连信号键都没有** → 不写。「没有信号」不等于「已确认完整」，凭空造一份
+      ``dex=complete`` 的快照正是本层要防的那类误读；留给 gates 的 not_applicable 兜底。
+
+    assess 自带兜底、绝不抛；此处再包一层，重算失败也不影响结案主流程。
+    """
+    from apkscan.core import visibility as _visibility
+
+    meta = report.meta if isinstance(report.meta, dict) else {}
+    has_snapshot = isinstance(meta.get("visibility"), dict)
+    if not has_snapshot and not any(k in meta for k in _VISIBILITY_INPUT_KEYS):
+        return
+    try:
+        report.meta["visibility"] = _visibility.assess({"meta": meta})
+    except Exception:  # noqa: BLE001 - 重算失败不得中断结案
+        logger.exception("[closure] 可见性重求值失败，沿用原快照")
+
+
 def close_report(
     report: Report,
     config: ClosureConfig,
@@ -141,6 +179,7 @@ def close_report(
     enrichers: Sequence[object] | None = None,
 ) -> dict[str, object]:
     """Run bounded re-enrichment, five-layer assembly, and write ``meta.closure``."""
+    # 见 _refresh_visibility 的说明：结案前必须让可见性视图与 meta 现状一致。
     from apkscan.core.enrichment import enrich_selected_targets
     from apkscan.core.registry import discover_enrichers
 
@@ -167,6 +206,7 @@ def close_report(
         # 顶层归因在逐 IP 富化之后再建，才能吸收 resolved_ip_enrichment（P1-3：否则文书/摘要读顶层恒 unknown）。
         _set_attribution(endpoint)
 
+    _refresh_visibility(report)
     targets = [assemble_target_closure(endpoint) for endpoint in selected]
     closure = evaluate_closure(
         report, targets, require_dynamic=config.require_dynamic, target_selection=target_selection
