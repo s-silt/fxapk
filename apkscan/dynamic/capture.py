@@ -1084,6 +1084,9 @@ def _capture(
         "floor_pulled": floor_pcap is not None,
         "hook_ready": hook_status == "confirmed",  # ★#7：仅收到显式 fxapk_hook_ready:true 才算已确认
         "hook_ready_status": hook_status,  # confirmed / java-unavailable / unconfirmed / none
+        # ★Frida 17+ 的 Java bridge 供给情况：hook 没装上时，这一栏区分"宿主没给 bridge"
+        #   与"样本反检测/ART 不可用"——两者的补法完全不同（前者装 frida-tools，后者换探针）。
+        "frida_bridges": _frida_bridge_status(frida_session),
         "mitm_bytes": mitm_bytes,
         "endpoint_total": len(endpoints),
         "warnings": list(warnings),
@@ -1295,6 +1298,70 @@ _FRIDA_HOOK_READY_JS = (
 )
 
 
+#: Frida 17 起 GumJS 不再内置 Java/ObjC bridge：脚本一引用 ``Java``，运行时就 send 一条
+#: ``frida:load-bridge`` 向宿主要源码，宿主回 ``frida:bridge-loaded``。frida-tools 的 REPL/CLI
+#: 自带这个应答器，Python API 没有——于是同一份脚本在 CLI 下能跑、用 ``create_script`` 就
+#: ``Java is not defined``。实测正是这条：CLI/REPL attach 成功而 Python runner 一个事件都收不到。
+_BRIDGE_REQUEST = "frida:load-bridge"
+_BRIDGE_RESPONSE = "frida:bridge-loaded"
+
+
+def _bridge_source(name: str) -> tuple[str, str] | None:
+    """取 frida-tools 随包的 bridge 源码 ``(文件名, 源码)``；找不到 → None。绝不抛。
+
+    直接复用 frida-tools 的 ``bridges/*.js``：与 CLI/REPL 用的是同一份，版本随 frida-tools 走，
+    不在本仓库另存一份 237KB 的副本去承担版本漂移。
+    """
+    try:
+        import importlib.util
+        from pathlib import Path as _Path
+
+        spec = importlib.util.find_spec("frida_tools")
+        if spec is None or not spec.submodule_search_locations:
+            return None
+        root = _Path(next(iter(spec.submodule_search_locations)))
+        for cand in (root / "bridges").glob("*.js"):
+            if cand.stem.lower() == str(name).lower():
+                return cand.name, cand.read_text(encoding="utf-8")
+    except Exception:  # noqa: BLE001 — 取 bridge 失败不得阻断注入
+        logger.debug("[capture] 读取 frida bridge 源码失败", exc_info=True)
+    return None
+
+
+def _make_bridge_loader(script: Any, state: dict[str, Any]) -> Any:
+    """应答 GumJS 的 bridge 请求（Frida 17+）。把结果记进 ``state`` 供收尾如实呈现。
+
+    ★不静默失败：拿不到 bridge 就把原因记下来。否则表现是"会话建好了、hook 一个没装上、
+      事件全空"——正是本模块反复要避免的假成功。
+    """
+    def _handler(message: Any, _data: Any) -> None:
+        try:
+            if not isinstance(message, dict) or message.get("type") != "send":
+                return
+            payload = message.get("payload")
+            if not isinstance(payload, dict) or payload.get("type") != _BRIDGE_REQUEST:
+                return
+            name = str(payload.get("name") or "")
+            state.setdefault("requested", []).append(name)
+            found = _bridge_source(name)
+            if found is None:
+                state.setdefault("missing", []).append(name)
+                logger.warning(
+                    "[capture] 运行时索取 %s bridge 但本机取不到（frida-tools 未安装或版本不带该 bridge）"
+                    "——Java hook 将全部失效，事件会是空的",
+                    name,
+                )
+                return
+            filename, source = found
+            script.post({"type": _BRIDGE_RESPONSE, "filename": filename, "source": source})
+            state.setdefault("loaded", []).append(name)
+            logger.info("[capture] 已向运行时提供 %s bridge（%s，Frida 17+ 不再内置）", name, filename)
+        except Exception:
+            logger.debug("[capture] bridge 应答异常（忽略）", exc_info=True)
+
+    return _handler
+
+
 def _start_frida_session(
     package: str,
     sink: list[dict[str, Any]],
@@ -1376,6 +1443,14 @@ def _start_frida_session(
         except Exception:
             logger.debug("[capture] 无法在会话上寄存 device 句柄（忽略，liveness 退化为仅看 detached）", exc_info=True)
         script = session.create_script(source)
+        # ★Frida 17+：Java bridge 不再内置，运行时会在 load 期间索取。应答器必须**先于
+        #   script.load() 注册**——请求就是 load 过程中发出来的，晚一步就赶不上。
+        bridge_state: dict[str, Any] = {}
+        script.on("message", _make_bridge_loader(script, bridge_state))
+        try:
+            session._fxapk_bridge_state = bridge_state  # type: ignore[attr-defined]
+        except Exception:
+            logger.debug("[capture] 无法在会话寄存 bridge 状态（忽略）", exc_info=True)
         # ★#7：hook readiness 通道——JS 装完 hook 后 send fxapk_hook_ready，异步落进标志容器，
         #   供收尾时读（capture_signals["hook_ready"]），把"会话建立"细化为"hook 真装上"。
         hook_ready: dict[str, Any] = {"ready": None}
@@ -2247,6 +2322,24 @@ def _budget_remaining(started_at: float, total_budget_sec: int) -> float:
 # ---------------------------------------------------------------------------
 # ② frida-core 会话 liveness（治默认路径假成功：resume 后进程秒退却报成功）
 # ---------------------------------------------------------------------------
+
+
+def _frida_bridge_status(session: Any) -> dict[str, Any]:
+    """本次会话的 Java/ObjC bridge 供给情况（Frida 17+）。绝不抛。
+
+    ★为什么要单列：``hook_ready`` 只说"hook 装没装上"，说不出**为什么没装上**。Frida 17 起
+      Java bridge 不再内置，宿主没应答 = 脚本里 ``Java`` 未定义 = 全部 Java hook 静默失效，
+      但会话照样存活、事件只是空的。这一栏把那种情形与"样本反检测"分开。
+    """
+    if session is None:
+        return {"requested": [], "loaded": [], "missing": []}
+    try:
+        st = getattr(session, "_fxapk_bridge_state", None)
+        if isinstance(st, dict):
+            return {k: list(st.get(k) or []) for k in ("requested", "loaded", "missing")}
+    except Exception:
+        logger.debug("[capture] 读取 bridge 状态失败（忽略）", exc_info=True)
+    return {"requested": [], "loaded": [], "missing": []}
 
 
 def _frida_hook_status(session: Any) -> str:
