@@ -554,6 +554,25 @@ def test_old_flows_key_migrates_without_losing_history(tmp_path: Path) -> None:
     assert "flows" not in inv, "旧键没被清掉，会长期两套并存"
 
 
+def test_old_report_parse_failure_survives_the_new_key(tmp_path: Path) -> None:
+    """★旧报告只有 `parse_status`、没有后加的 `parse_degraded`——降级历史不得被抹掉。
+
+    `bool(prev.get("parse_degraded"))` 对旧报告恒为 False，同时 `parse_status` 被本次的
+    "ok" 覆盖，于是「这份报告曾经解析失败」彻底消失（codex 八轮 P1）。缺键时要从旧
+    `parse_status` 反推。这是同一个元错误的第三次：修了兄弟键，又漏了这一个。
+    """
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_report_with(meta={"runtime_pcap_inventory": {
+        "parse_status": "parse_error",          # 旧 schema：没有 parse_degraded
+    }}), ensure_ascii=False), encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(str(p), _bidirectional_summary())   # 本次解析正常
+    inv = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_pcap_inventory"]
+
+    assert inv["parse_status"] == "ok"          # 最近一次确实成功
+    assert inv["parse_degraded"] is True, "旧报告的解析失败历史被抹掉了"
+
+
 def test_old_endpoint_and_domain_counts_do_not_regress(tmp_path: Path) -> None:
     """★旧报告有计数、却没有贡献集合（集合是后来才引入的）——不得被重置成本次的值数量。
 

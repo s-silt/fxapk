@@ -2038,6 +2038,23 @@ def _prev_migrated(prev: dict, new_key: str, old_key: str = "") -> int:
     return _prev_count(prev, old_key) if old_key else 0
 
 
+def _prev_degraded(prev: dict) -> bool:
+    """这份报告此前有没有过解析降级——同样要兼容没有该键的旧报告。
+
+    ★``parse_degraded`` 是后加的键，旧报告只有 ``parse_status``。缺键时若简单地
+      ``bool(prev.get(...))``，一份 ``parse_status="parse_error"`` 的旧报告再并入一次正常采集，
+      就会得到 ``False`` + ``parse_status`` 被覆盖成 ``"ok"``——**曾经解析失败这件事彻底消失**。
+      故缺键时从旧 ``parse_status`` 反推（codex 八轮 P1）。
+
+    这是同一个元错误的第三次：发现一类问题、只修撞见的那个实例，不去找结构上相同的兄弟。
+    inventory 里凡是「后加的键」都要问一句「旧报告里对应的信息在哪、怎么迁过来」。
+    """
+    if "parse_degraded" in prev:
+        return bool(prev.get("parse_degraded"))
+    status = prev.get("parse_status")
+    return isinstance(status, str) and bool(status) and status != "ok"
+
+
 def _accumulate_values(meta: dict, key: str, values: "abc.Iterable[str]") -> list[str]:
     """把本次贡献的值并进 ``meta[key]`` 的集合，返回排序后的全集。
 
@@ -2183,10 +2200,11 @@ def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:
                 "parse_status": summary.parse_status,
                 # 只要**任何一次**合并解析异常就置 True，且不被后续成功覆盖——
                 # 「这份报告有过解析失败」不该被下一次成功抹掉。
-                "parse_degraded": bool(prev.get("parse_degraded"))
-                or summary.parse_status != "ok",
-                # ★本路径无设备侧 socket 快照 → 做不了 UID 归因，如实记下来。消费方（closure /
-                #   digest）看得出"有运行时观测，但不知道这些流量属不属于目标 App"。
+                "parse_degraded": _prev_degraded(prev) or summary.parse_status != "ok",
+                # ★本路径无设备侧 socket 快照 → 做不了 UID 归因，如实记下来。
+                #   ⚠ 现状：``runtime_pcap_inventory`` 整块**目前没有任何生产消费方**（全仓只有本
+                #   writer 与测试读它）。此处曾写着"消费方（closure / digest）看得出…"，那是**假的**
+                #   ——本项目最常见的病，连这条注释自己都犯了一次。接线是待办项，不是既成事实。
                 "uid_attributed": False,
             }
 
