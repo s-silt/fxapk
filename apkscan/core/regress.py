@@ -337,7 +337,34 @@ def _visibility_notes(d: SampleDiff) -> list[str]:
     # 仍瞎着、却不再给补法建议：有过先例的缺陷形态（可见性求值排在补法预案之前 → 建议恒空）。
     if blocked_b and va["next_actions"] > 0 and vb["next_actions"] == 0:
         notes.append("⚠ 仍有受限主张但补法建议清零（历史缺陷形态，须人核阶段顺序）")
+    notes.extend(_downgraded_gap_notes(va, vb))
     return notes
+
+
+def _downgraded_gap_notes(va: dict, vb: dict) -> list[str]:
+    """同一条主张仍被阻断，但阻断理由从「确证盲区」退成了「未评估」。
+
+    两者对 closure 的分量不同：确证盲区是本次分析实测到的缺口，记 gap、把闭环封顶 partial；
+    未评估只 warn、不封顶。于是这种迁移会让 blocked_claims / 各源档位 / degraded / 补法条数
+    全部纹丝不动，而报告上的警示实际弱了一档——正是本模块盯的「警示悄悄消失」那一类。
+    """
+    ca = va.get("claims") or {}
+    cb = vb.get("claims") or {}
+    if not (isinstance(ca, dict) and isinstance(cb, dict)):
+        return []
+    weakened = sorted(
+        claim
+        for claim, before in ca.items()
+        if isinstance(before, dict) and isinstance(after := cb.get(claim), dict)
+        and before.get("missing_sources") and not after.get("missing_sources")
+        and after.get("unassessed_sources")
+    )
+    if not weakened:
+        return []
+    return [
+        f"⚠ 受限理由由「确证盲区」退为「仅未评估」：{'、'.join(weakened)}"
+        "（closure 封顶随之松开，须人核是分档语义变了还是输入丢了）"
+    ]
 
 
 def _summarize(

@@ -136,13 +136,23 @@ def _update_target_leads(report: Report, targets: Sequence[Mapping[str, object]]
 
 #: 会影响可见性判定的原始信号键。旧报告（分析于 visibility 层落地之前）虽无 ``visibility``
 #: 快照，但这些键早已在 meta 里——据此可补算，不必重跑分析。
-_VISIBILITY_INPUT_KEYS: tuple[str, ...] = (
-    "dex_available", "dex_scanned", "dex_strings_truncated", "dex_string_pool",
-    "is_hardened", "hardening_structural", "extra_dex_visibility",
-    "native_obfuscation", "artifact_lineage",
-    "uni_encrypted", "crypto_recipe", "resource_files_scanned",
-    "resource_files_read_failed", "resource_listing_failed",
-    "runtime_merged", "capture_quality", "capture_signals",
+#: 各可见性维度分别读 meta 里的哪些键。按维度分组是为了回答一个更精确的问题——
+#: 「**这一维**还有没有输入」——而不是「meta 里还剩不剩东西」（见 _preserve_confirmed_gaps）。
+_VISIBILITY_INPUT_KEYS_BY_SOURCE: dict[str, tuple[str, ...]] = {
+    "dex": (
+        "dex_available", "dex_scanned", "dex_strings_truncated", "dex_string_pool",
+        "is_hardened", "hardening_structural", "extra_dex_visibility", "artifact_lineage",
+    ),
+    "native": ("native_obfuscation", "native_files_scanned"),
+    "resource": (
+        "uni_encrypted", "crypto_recipe", "resource_files_scanned",
+        "resource_files_read_failed", "resource_listing_failed",
+    ),
+    "runtime": ("runtime_merged", "capture_quality", "capture_signals"),
+}
+
+_VISIBILITY_INPUT_KEYS: tuple[str, ...] = tuple(
+    k for keys in _VISIBILITY_INPUT_KEYS_BY_SOURCE.values() for k in keys
 )
 
 
@@ -159,18 +169,67 @@ def _refresh_visibility(report: Report) -> None:
     - **连信号键都没有** → 不写。「没有信号」不等于「已确认完整」，凭空造一份
       ``dex=complete`` 的快照正是本层要防的那类误读；留给 gates 的 not_applicable 兜底。
 
+    ★重算必须是**信息保持**的：先前记下的「确证盲区」不得因为原始信号不在 meta 里而消失。
+    动态合并只会往 meta 里加信号，所以正常管线的重算总是等价或更强；但一份在工具体外被裁剪过
+    的 report.json（手编、第三方产、人工"精简"）可能只剩快照。对它重算等于从零重推，加壳样本
+    的 ``dex=stub_only`` 会退成"没有记录"，「目标集可能不全」的封顶随之凭空消失——这正是
+    「未发现」被读成「已穷尽」。故重算后逐维做一次保守回填，见 :func:`_preserve_confirmed_gaps`。
+
     assess 自带兜底、绝不抛；此处再包一层，重算失败也不影响结案主流程。
     """
     from apkscan.core import visibility as _visibility
 
     meta = report.meta if isinstance(report.meta, dict) else {}
-    has_snapshot = isinstance(meta.get("visibility"), dict)
+    previous = meta.get("visibility")
+    has_snapshot = isinstance(previous, dict)
     if not has_snapshot and not any(k in meta for k in _VISIBILITY_INPUT_KEYS):
         return
     try:
-        report.meta["visibility"] = _visibility.assess({"meta": meta})
+        fresh = _visibility.assess({"meta": meta})
+        if has_snapshot:
+            fresh = _preserve_confirmed_gaps(previous, fresh, meta)  # type: ignore[arg-type]
+        report.meta["visibility"] = fresh
     except Exception:  # noqa: BLE001 - 重算失败不得中断结案
         logger.exception("[closure] 可见性重求值失败，沿用原快照")
+
+
+def _preserve_confirmed_gaps(previous: dict, fresh: dict, meta: dict) -> dict:
+    """某一维的原始信号已不在 meta 里时，沿用旧快照对该维的判定，并重推主张资格。
+
+    ★判据是「**这一维的输入还在不在**」，不是「新值是什么」。信号从不会自己消失：正常管线只
+      往 meta 里加东西，动态合并更是如此。一维的输入键一个都不剩，只可能是这份 report.json
+      在工具体外被裁剪过（手编 / 第三方产 / 人工"精简"）。此时对它重算不是刷新，是从零重推——
+      加壳样本的 ``dex=stub_only`` 会退成缺省的"完整可见"，「目标集可能不全」的封顶随之无声
+      消失，正是「未发现」被读成「已穷尽」。
+
+    只在旧值属**确证盲区**（``INSUFFICIENT``）时回填：那是本次分析实测到的缺口，丢了就是丢证据。
+    旧值本就是 complete/unknown 的维度照常跟随重算——那里没有要保护的信息。
+    """
+    from apkscan.core import visibility as _visibility
+
+    old_sources = previous.get("sources")
+    new_sources = fresh.get("sources")
+    if not (isinstance(old_sources, dict) and isinstance(new_sources, dict)):
+        return fresh
+
+    restored = False
+    for name, new_info in new_sources.items():
+        old_info = old_sources.get(name)
+        if not (isinstance(old_info, dict) and isinstance(new_info, dict)):
+            continue
+        if old_info.get("visibility") not in _visibility.INSUFFICIENT:
+            continue
+        if any(k in meta for k in _VISIBILITY_INPUT_KEYS_BY_SOURCE.get(name, ())):
+            continue  # 输入还在 → 重算有据，照常跟随（含脱壳回灌这类合法升级）
+        why = [str(w) for w in (old_info.get("why") or [])]
+        why.append("★沿用先前快照：支撑该判定的原始信号已不在 meta 中（报告疑经裁剪）")
+        new_sources[name] = {"visibility": old_info.get("visibility"), "why": why}
+        restored = True
+
+    if restored:
+        # 主张资格是 sources 的派生值，改了源就得重推，否则 blocked_claims 与 sources 自相矛盾。
+        fresh = _visibility.reassess_claims(fresh)
+    return fresh
 
 
 def close_report(

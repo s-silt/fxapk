@@ -79,18 +79,23 @@ def _select_targets_with_stats(report: Report, max_targets: int) -> tuple[list[E
     if max_targets <= 0:
         raise ValueError("max_targets must be greater than zero")
 
-    # 兜底门：判为「正版重打包」且这份报告从未跑过隔离（meta 无审计块）时，其网络端点一律
-    # 不进闭环目标——那些域名属被仿冒的正版厂商。主修复在生成 Lead 时降档，此处只防
-    # **旧版本产出的 / 手工编辑过的** report.json 绕过主修复。
-    # ★审计块存在 = 隔离跑过 = 残余的「建议调证」是人工差分核实后有意恢复的，予以尊重，
-    #   不做无条件硬清空——否则人工核实确认属注入的真 C2 也会被永久挡在闭环之外。
+    # 兜底门：判为「正版重打包」时，其网络端点一律不进闭环目标——那些域名属被仿冒的正版
+    # 厂商。主修复在生成 Lead 时降档，此处只防**旧版本产出的 / 手工编辑过的 / 隔离之后又被
+    # 追加了新 Lead 的** report.json 绕过主修复。
+    #
+    # ★放行条件是**成员资格**，不是审计块存在与否。曾用"有块即视为人工恢复"，于是
+    #   ``{"count": 0}``、只有 reason 的块、以及一个陈旧块（隔离跑完之后 dead-drop 又追加了
+    #   一批从未经隔离的厂商域名）都能整门失效。人工恢复只改 advice、值仍留在 values 里，
+    #   所以「在 values 里」才是"这条曾被隔离、后被人工放回"的凭据。
     meta = report.meta if isinstance(report.meta, dict) else {}
     rid = meta.get("repack_identity")
-    repack_unquarantined = (
-        isinstance(rid, dict)
-        and rid.get("verdict") == "repack_suspected"
-        and not meta.get("repack_quarantine")
-    )
+    is_repack = isinstance(rid, dict) and rid.get("verdict") == "repack_suspected"
+    _blob = meta.get("repack_quarantine")
+    restored_values = {
+        str(v).lower()
+        for v in ((_blob.get("values") or []) if isinstance(_blob, dict) else [])
+        if isinstance(v, str)
+    }
     repack_excluded = 0
 
     lead_rank: dict[tuple[str, str], int] = {}
@@ -102,7 +107,7 @@ def _select_targets_with_stats(report: Report, max_targets: int) -> tuple[list[E
     for lead in report.leads:
         if lead.advice != "建议调证" or lead.category.value not in {"DOMAIN", "IP"}:
             continue
-        if repack_unquarantined:
+        if is_repack and lead.value.lower() not in restored_values:
             repack_excluded += 1
             continue
         key = (lead.category.value.lower(), lead.value.lower())
