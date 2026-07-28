@@ -221,21 +221,50 @@ def _build_capture_quality(
         attr = pcap_app_attr.get(key)
         return isinstance(attr, dict) and attr.get("is_target_app") is True
 
-    #: 归因到目标 App 的对端的 IP / SNI —— mitm 端点靠它反查自己属不属于目标。
-    attributed_ips = {
-        key.split("/", 1)[-1].rsplit(":", 1)[0] for key in business_keys if _is_target_key(key)
+    #: 归因到目标 App 的对端 —— mitm 端点靠它反查自己属不属于目标。
+    #: ★IP 侧带端口：同一个公网 IP 上跑着不同服务是常态（共享 CDN 边缘、大云入口）。只比 IP，
+    #:   「目标 App 直连 1.2.3.4:9000」与「别的 App 经代理访问 1.2.3.4:443」就成了同一个端点。
+    attributed_ip_ports = {
+        key.split("/", 1)[-1] for key in business_keys if _is_target_key(key)
     }
     attributed_hosts = {
         host for key in business_keys if _is_target_key(key) for host in sni_by_key.get(key, ())
     }
 
     def _mitm_is_target(ep: Endpoint) -> bool:
-        """该 mitm 端点能否对上一个**已归因到目标 App** 的 floor 端点。"""
+        """该 mitm 端点能否对上一个**已归因到目标 App** 的 floor 端点。
+
+        ★这是一座桥，不是一份归因证据：mitm 侧结构上拿不到进程身份（代理是整机级的），
+          能比对的只有对端标识。收紧到 ip:port / SNI 之后，剩余的不确定性是「目标 App 与
+          另一个 App 在同一采集窗口内接触了同一个 ip:port」——共享 CDN 上仍然可能发生。
+          故它只作为 floor 侧的补强，且要求 mitm 这边确实完成了一次往返（见 _mitm_has_response）。
+        """
         if ep.kind == "ip":
-            return ep.value in attributed_ips
+            return bool(_mitm_ip_ports(ep) & attributed_ip_ports)
         if ep.kind == "domain":
             return ep.value.lower().rstrip(".") in attributed_hosts
         return False
+
+    def _mitm_ip_ports(ep: Endpoint) -> set[str]:
+        """该 mitm IP 端点实连过的 ``ip:port`` 集合（由 _collect_flow_endpoints 记录）。
+
+        缺失（旧 runtime_report / 别的产出路径）→ 空集，即不参与桥接：宁可少判一次闭环，
+        不可凭一个只对上 IP 的巧合判 complete。
+        """
+        rt = ep.enrichment.get("runtime")
+        peers = rt.get("mitm_peers") if isinstance(rt, dict) else None
+        return {str(p) for p in peers} if isinstance(peers, (list, set, tuple)) else set()
+
+    def _mitm_has_response(ep: Endpoint) -> bool:
+        """该 mitm 端点是否**确实收到过响应**。
+
+        ★mitmproxy 的 HTTPFlow 只要有请求就存在，``flow.response`` 可以是 None（后端沉默、
+          连接被重置、采集在响应到达前结束）；tshark 的明文 HTTP 与 TLS 解密两路更是只抽请求
+          （过滤器就是 ``http.request``）。此前把「有 mitm 端点」直接当成「完成了一次请求-响应」，
+          于是"目标 App 发出去、没人应"照样被计成双向载荷、闭环判 complete。
+        """
+        rt = ep.enrichment.get("runtime")
+        return bool(rt.get("mitm_response_seen")) if isinstance(rt, dict) else False
 
     # 双向证据分两侧记账，**不互相填补**：
     #   floor 侧 —— 归因到目标 App 且双向有载荷的对端；
@@ -247,9 +276,14 @@ def _build_capture_quality(
     #    两个计数各自都不足以支撑闭环，相加/回退不该突然够。
     #    真正要问的是「**同一个端点**上既归因到目标、又有双向载荷」，故单列
     #    ``bidirectional_target_count`` 供门控消费；旧的合计值仅保留作分侧可见性。
+    #    ★mitm 侧还必须**确实有响应**：HTTPFlow 有请求就存在，响应可以是 None；tshark 的
+    #    明文与解密两路更是只抽请求。「有 mitm 端点」≠「完成了一次往返」——不校验就等于把
+    #    "目标 App 发出去、后端沉默"写成双向通信，与上面那个洞同类，只是换了一侧。
     floor_bidirectional = _target_attributed(established_keys)
     mitm_bidirectional = len(mitm_endpoints)
-    mitm_attr_bidirectional = sum(1 for ep in mitm_endpoints if _mitm_is_target(ep))
+    mitm_attr_bidirectional = sum(
+        1 for ep in mitm_endpoints if _mitm_is_target(ep) and _mitm_has_response(ep)
+    )
     bidirectional_count = floor_bidirectional + mitm_bidirectional
     bidirectional_target_count = floor_bidirectional + mitm_attr_bidirectional
     raw = {
@@ -2890,8 +2924,16 @@ def _collect_flow_endpoints(
     ``flow.server_conn.peername`` 是经 mitmproxy 中转后**实际连到的上游服务器 IP**——即 C2
     域名在抓包当时真实解析到的落点 IP（连去哪个机房/IDC），比仅有域名更直接可调取（可凭 IP
     向 IDC/云厂商调取租用主体）。故除 url/域名外，把实连 IP 也作为运行时端点产出。
+
+    另记两项供闭环门控（见 ``_build_capture_quality``）：
+
+    - ``runtime.mitm_response_seen``：这条流**确实收到了响应**。HTTPFlow 只要有请求就存在，
+      ``flow.response`` 可以是 None（后端沉默 / 连接被重置 / 采集在响应到达前结束）。
+    - ``runtime.mitm_peers``：实连过的 ``ip:port``。同一公网 IP 上跑不同服务是常态，只留 IP
+      会让「目标 App 直连某 CDN 边缘的 9000 端口」与「别的 App 访问同一边缘的 443」对上号。
     """
     request = getattr(flow, "request", None)
+    has_response = getattr(flow, "response", None) is not None
     host: str | None = None
     url: object = None
     if request is not None:
@@ -2908,12 +2950,19 @@ def _collect_flow_endpoints(
         # ★裸 IP host（app 直连某 IP 无域名）不建 domain 端点——否则占用 IP 键、peername 分支复用它、
         #   永不建 kind="ip" 端点，路径/信号落到 domain 上被编译器(_ip_signal_features 只读 kind=="ip")丢弃。
         #   交下面 peername 分支按 ip kind 收录。
-        if isinstance(host, str) and host and "." in host and host not in collector and not _is_ip_literal(host):
-            collector[host] = Endpoint(
-                value=host,
-                kind="domain",
-                evidences=[Evidence(source="runtime", location=location, snippet=host)],
-            )
+        if isinstance(host, str) and host and "." in host and not _is_ip_literal(host):
+            if host not in collector:
+                collector[host] = Endpoint(
+                    value=host,
+                    kind="domain",
+                    evidences=[Evidence(source="runtime", location=location, snippet=host)],
+                )
+            # 域名侧同样要记「这条流确实收到了响应」——闭环门控对 domain 端点走的是 SNI 桥接，
+            # 不记的话「请求发出去、没人应」照样能被计成一次完整往返。
+            if has_response:
+                rt_host = collector[host].enrichment.setdefault("runtime", {})
+                if isinstance(rt_host, dict):
+                    rt_host["mitm_response_seen"] = True
 
     # 服务器实连 IP（C2 真实落点）：mitmproxy 上游连接的 peername=(ip, port)。
     server_conn = getattr(flow, "server_conn", None)
@@ -2930,6 +2979,17 @@ def _collect_flow_endpoints(
                     evidences=[Evidence(source="runtime", location=location, snippet=note)],
                 )
                 collector[ip] = ep
+            # 闭环门控要的两项：确有响应（不只是发出过请求）+ 实连到的 ip:port（不只是 IP）。
+            # 跨同 IP 多条流累积：只要**有一条**完成了往返，这个端点就算见过响应。
+            rt_gate = ep.enrichment.setdefault("runtime", {})
+            if isinstance(rt_gate, dict):
+                if has_response:
+                    rt_gate["mitm_response_seen"] = True
+                port = peername[1] if len(peername) >= 2 else None
+                if isinstance(port, int):
+                    peers = rt_gate.setdefault("mitm_peers", [])
+                    if isinstance(peers, list) and f"{ip}:{port}" not in peers:
+                        peers.append(f"{ip}:{port}")
             # 该 IP 观测到的业务/登录路径类别（跨同 IP 多条流累积）——供 origin_candidate 的 BUSINESS_API/LOGIN_ENDPOINT。
             biz, login = _runtime_path_categories(url)
             # 该 IP 的响应边缘行为（跨 host 重定向 / 挑战 cookie 下发）——按请求 host 记，供 edge/cloaking 判同 host 共现。
