@@ -40,21 +40,43 @@ def _request(name: str = "java") -> dict:
     return {"type": "send", "payload": {"type": "frida:load-bridge", "name": name}}
 
 
-def test_java_bridge_request_is_answered() -> None:
+def test_java_bridge_request_is_answered(monkeypatch: pytest.MonkeyPatch) -> None:
     """★核心：运行时索取 java bridge 时，宿主必须回源码。
 
     不回 = 脚本里 Java 未定义 = 全部 Java hook 静默失效，而会话照样"成功"。
+
+    这里替掉 ``_bridge_source``，测的是**应答协议本身**——本机装没装 frida-tools
+    不该左右这条断言。真源码能否读到是另一回事，见
+    ``test_real_frida_tools_bridge_is_readable``（该条按环境跳过）。
     """
+    monkeypatch.setattr(capture, "_bridge_source", lambda _n: ("java.js", "// Java bridge"))
     script, state = _Script(), {}
     capture._make_bridge_loader(script, state)(_request(), None)
 
     assert len(script.posted) == 1, "没有应答 bridge 请求"
     msg = script.posted[0]
     assert msg["type"] == "frida:bridge-loaded"
-    assert msg["filename"].endswith(".js")
-    assert "Java" in msg["source"] and len(msg["source"]) > 10_000, "回的不像真 bridge 源码"
+    assert msg["filename"] == "java.js"
+    assert msg["source"] == "// Java bridge"
     assert state["loaded"] == ["java"]
     assert not state.get("missing")
+
+
+@pytest.mark.skipif(
+    capture._bridge_source("java") is None,
+    reason="本机未安装 frida-tools（或其版本不带 java bridge）——CI 的默认环境即如此",
+)
+def test_real_frida_tools_bridge_is_readable() -> None:
+    """★集成：装了 frida-tools 时，必须真能从中读出 java bridge 源码。
+
+    与上一条分工：上一条锁应答协议（处处可跑），这条锁"路径/文件名约定还对不对"——
+    frida-tools 改了 ``bridges/`` 布局时，这条会红。
+    """
+    found = capture._bridge_source("java")
+    assert found is not None
+    filename, source = found
+    assert filename.endswith(".js")
+    assert "Java" in source and len(source) > 10_000, "读到的不像真 bridge 源码"
 
 
 def test_missing_bridge_is_recorded_not_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -251,6 +273,54 @@ def test_doctor_run_actually_checks_the_uid(monkeypatch: pytest.MonkeyPatch) -> 
     assert seen, "doctor.run 没有核验 frida-server 的运行 UID"
     item = next((i for i in res["items"] if i["name"] == doctor._NAME_FRIDA_SERVER), None)
     assert item is not None and "UID=2000" in item["detail"]
+
+
+def test_doctor_fails_when_frida17_cannot_supply_the_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★体检必须提前拦住"供不上 bridge"。
+
+    否则 doctor 报"就绪"、注入报"成功"、事件全空——真机上白跑一轮才从错误串里认出根因。
+    """
+    monkeypatch.setattr(capture, "_bridge_source", lambda _n: None)
+    item = {"name": doctor._NAME_HOST_FRIDA, "ok": True, "detail": "主机 frida CLI 版本：17.2.1",
+            "fix_cmd": []}
+
+    out = doctor._annotate_java_bridge(item, "17.2.1")
+
+    assert out["ok"] is False, "供不上 Java bridge 却仍判就绪"
+    assert "静默失效" in out["detail"]
+    assert any("frida-tools" in c for c in out["fix_cmd"])
+
+
+def test_doctor_passes_when_bridge_is_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(capture, "_bridge_source", lambda _n: ("java.js", "x"))
+    out = doctor._annotate_java_bridge(
+        {"name": "x", "ok": True, "detail": "d", "fix_cmd": []}, "17.2.1")
+    assert out["ok"] is True and "可供给" in out["detail"]
+
+
+@pytest.mark.parametrize("ver", ["16.7.19", "15.2.2", "", "不是版本号"])
+def test_doctor_does_not_flip_on_pre17_or_unknown_version(
+    monkeypatch: pytest.MonkeyPatch, ver: str,
+) -> None:
+    """★别误伤：17 之前内置 bridge，不装 frida-tools 也能用；版本读不出也不得改判。"""
+    monkeypatch.setattr(capture, "_bridge_source", lambda _n: None)
+    out = doctor._annotate_java_bridge(
+        {"name": "x", "ok": True, "detail": "d", "fix_cmd": []}, ver)
+    assert out["ok"] is True, f"版本 {ver!r} 不该因缺 bridge 被判不就绪"
+    assert out["fix_cmd"] == []
+
+
+def test_host_frida_check_actually_calls_the_bridge_annotation() -> None:
+    """★接线锁：``_check_host_frida`` 必须真的调 bridge 核验。
+
+    只测 ``_annotate_java_bridge`` 本身，挡不住"函数写了但没人调"。
+    """
+    import inspect
+
+    src = inspect.getsource(doctor._check_host_frida)
+    assert "_annotate_java_bridge" in src, "主机 frida 检查没有核验 Java bridge 供给能力"
 
 
 def test_capture_signals_carry_bridge_status() -> None:
