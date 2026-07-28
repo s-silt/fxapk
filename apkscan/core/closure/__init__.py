@@ -141,6 +141,7 @@ _VISIBILITY_INPUT_KEYS: tuple[str, ...] = (
     "is_hardened", "hardening_structural", "extra_dex_visibility",
     "native_obfuscation", "artifact_lineage",
     "uni_encrypted", "crypto_recipe", "resource_files_scanned",
+    "resource_files_read_failed", "resource_listing_failed",
     "runtime_merged", "capture_quality", "capture_signals",
 )
 
