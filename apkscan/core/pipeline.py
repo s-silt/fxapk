@@ -300,7 +300,15 @@ def _stage_degradation_flags(state: _PipelineState) -> None:
     # 下游（visibility / 报告 / 读报告的人）才分得清"并入了 N 个"与"请求了 N 个"。
     extra_report = getattr(ctx, "extra_dex_report", None)
     if isinstance(extra_report, dict) and extra_report:
-        meta["extra_dex_visibility"] = dict(extra_report)
+        block = dict(extra_report)
+        # hidden-api flag 容错生效过就登记：那些 DEX 是**靠放宽第三方库的枚举校验**才载进来的，
+        # 不是本来就没问题。不写下来，"载入 33/33"看着像一次干净的解析。
+        from apkscan.core.apk import hiddenapi_relax_report
+
+        relax = hiddenapi_relax_report()
+        if relax.get("unknown_flags"):
+            block["hiddenapi_flags_relaxed"] = relax
+        meta["extra_dex_visibility"] = block
         failed = int(extra_report.get("failed") or 0)
         if failed:
             logger.warning(
