@@ -1880,10 +1880,25 @@ def _merge_runtime_blocks(old: object, new: dict) -> dict:
       「一台机开两个端口、一主一心跳」是常见形态，等于稳定漏掉一半调证标的。
 
     列表取并集、计数求和、时间取端点、``has_payload`` 取或、``established`` 优先。
-    未列出的键沿用 ``new`` 覆盖 ``old``（如 proto/state 已在上游归并过）。
+    未列出的键沿用 ``new`` 覆盖 ``old``——包括 ``target_attributed``：pcap 路径**从不写**该键
+    （做不了 UID 归因，见 _runtime_endpoint_dicts），故它不在 ``new`` 里，capture 路径写下的真
+    归因不会被这里冲掉。
+
+    ``port``（代表端口）取**两侧总字节数较大的那一侧**的值。跨来源合并时拿不到逐端口明细，
+    只能按来源整体判断——比"后并入的赢"准，但比 :func:`_runtime_endpoint_dicts` 内部的逐端口
+    比较弱。权威明细始终看 ``ports`` / ``remote_endpoints``。
     """
     base = dict(old) if isinstance(old, dict) else {}
     out = {**base, **new}
+
+    def _traffic(block: dict) -> float:
+        return sum(
+            v for k in ("out_bytes", "in_bytes")
+            if isinstance(v := block.get(k), (int, float))
+        )
+
+    if "port" in base and "port" in new and _traffic(base) > _traffic(new):
+        out["port"] = base["port"]
     for key in _RUNTIME_UNION_KEYS:
         merged = sorted({*(base.get(key) or []), *(new.get(key) or [])},
                         key=lambda v: (isinstance(v, str), v))

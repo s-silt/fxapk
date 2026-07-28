@@ -249,6 +249,33 @@ def test_multi_port_counters_are_summed_not_overwritten(tmp_path: Path) -> None:
     assert rt["has_payload"] is True
 
 
+def test_representative_port_is_the_high_traffic_one(tmp_path: Path) -> None:
+    """代表端口取流量最大的那个（主通道），不是最后并入的那个。
+
+    实测形态是"一主一心跳"；心跳端口若当上代表值，展示与调证函会指向次要通道。
+    """
+    rt = _runtime_of(_merge(tmp_path, _two_port_summary()), "8.163.60.2")
+    assert rt["port"] == 5479, "代表端口指到了低流量的次要通道"
+
+
+def test_cross_source_merge_keeps_the_high_traffic_representative_port() -> None:
+    """跨来源合并同样按流量定代表端口——否则 docstring 承诺的规则只在单来源内成立。"""
+    heavy = {"port": 5479, "out_bytes": 1759, "in_bytes": 546, "ports": [5479]}
+    light = {"port": 8796, "out_bytes": 258, "in_bytes": 447, "ports": [8796]}
+
+    assert pcap_ingest._merge_runtime_blocks(heavy, light)["port"] == 5479
+    assert pcap_ingest._merge_runtime_blocks(light, heavy)["port"] == 5479
+
+
+def test_cross_source_merge_does_not_clobber_target_attribution() -> None:
+    """★pcap 路径做不了 UID 归因、从不写 target_attributed；合并不得把 capture 写的真归因冲掉。"""
+    from_capture = {"target_attributed": True, "out_bytes": 10, "in_bytes": 10}
+    from_pcap = {"out_bytes": 5, "in_bytes": 5, "ports": [443]}  # 无 target_attributed 键
+
+    merged = pcap_ingest._merge_runtime_blocks(from_capture, from_pcap)
+    assert merged["target_attributed"] is True, "capture 路径的 UID 归因被 pcap 合并冲掉了"
+
+
 def test_port_normalize_can_read_the_merged_endpoint(tmp_path: Path) -> None:
     """★接线锁：port-normalize 的数据源必须真的被生成。
 
