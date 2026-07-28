@@ -747,6 +747,32 @@ def frida_server_running(serial: str | None = None) -> bool:
     return frida_ps_reachable(serial)
 
 
+def frida_server_uid(serial: str | None = None) -> int | None:
+    """跑着的 frida-server 实际以哪个 UID 运行。判不出来 → None（不猜）。绝不抛。
+
+    ★"能被 frida-ps 枚举到"不等于"以 root 跑着"。实测踩过：Windows 侧把启动命令交给 adb 时
+      引号被拆开，frida-server 实际以 ``UID=2000``（shell）起来了，进程在、能枚举，但 spawn/
+      attach 目标应用一概失败——现象酷似样本反 Frida，实则是权限不足。
+      判据取 ``/proc/<pid>/status`` 的 ``Uid:`` 首列（真实 UID），不看进程列表的显示名。
+    """
+    pid_out = _adb_root_command("pidof frida-server || pidof frida_server", serial)
+    if pid_out is None:
+        return None
+    pids = [t for t in ((pid_out.stdout or "").strip().split()) if t.isdigit()]
+    if not pids:
+        return None
+    status = _adb_root_command(f"cat /proc/{pids[0]}/status", serial)
+    if status is None:
+        return None
+    m = re.search(r"^Uid:\s*(\d+)", status.stdout or "", re.MULTILINE)
+    if m is None:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
+
+
 def force_stop_app(package: str, serial: str | None = None) -> None:
     """best-effort ``adb [-s serial] shell am force-stop <package>``：清掉目标 app（含 frida ``-f``
     spawn 残留的挂起态实例）。绝不抛、失败静默——仅用于清理，不影响主流程。

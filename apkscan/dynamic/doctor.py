@@ -400,6 +400,11 @@ def _check_frida_server(
             ["frida-ps -U"],
         )
 
+    # ★以哪个 UID 跑着，与"跑没跑着"是两件事。实测踩过：Windows 侧启动命令的引号被 adb 拆开，
+    #   frida-server 以 UID=2000（shell）起来了——进程在、frida-ps 能枚举，但 spawn/attach 目标
+    #   一概失败，现象酷似样本反 Frida，实则权限不足。判据取 /proc/<pid>/status 的真实 UID。
+    frida_item = _annotate_frida_uid(frida_item, serial)
+
     after = device.read_network_state(serial)
     outcome, note = _attribute_network(before, after)
     frida_item["detail"] = f"{frida_item['detail']}　[网络归因：{outcome}] {note}"
@@ -407,6 +412,37 @@ def _check_frida_server(
     if outcome == _ATTR_BASELINE_BAD and not frida_item["ok"]:
         frida_item["detail"] += "　★该失败可能由基线网络问题导致，先修网络再判 Frida。"
     return frida_item, _check_device_network(before, after, outcome)
+
+
+def _annotate_frida_uid(item: dict, serial: str | None) -> dict:
+    """核 frida-server 的真实运行 UID；非 0 即判不就绪（就地改写检查项）。绝不抛。
+
+    ★判不出来时**不**改判：``None`` 表示这台设备读不到 ``/proc/<pid>/status``（无 root shell、
+      pidof 不可用等），那是"不知道"，不是"以非 root 跑着"——把读不到当成坏了，正是本仓库
+      反复要避免的那类误读。
+    """
+    try:
+        uid = device.frida_server_uid(serial)
+    except Exception:
+        logger.exception("[doctor] 读取 frida-server UID 异常")
+        return item
+    if uid is None:
+        item["detail"] += "　[运行 UID：判不出来，未据此改判]"
+        return item
+    if uid == 0:
+        item["detail"] += "　[运行 UID：0（root）✓]"
+        return item
+    item["ok"] = False
+    item["detail"] += (
+        f"　★frida-server 实际以 UID={uid} 运行（非 root）——进程在、frida-ps 也枚举得到，"
+        "但 spawn/attach 目标应用会失败，现象酷似样本反 Frida。"
+        "常见成因：启动命令经 adb 传递时引号被拆开，su -c 后半段丢失。"
+    )
+    fixes = item.setdefault("fix_cmd", [])
+    if isinstance(fixes, list):
+        fixes.append("adb shell su -c 'pkill -f frida-server'")
+        fixes.append("fxapk doctor --fix")
+    return item
 
 
 def _fold_frida_fix(fix: dict, host_ver: str) -> dict:
