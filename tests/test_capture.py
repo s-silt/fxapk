@@ -366,6 +366,28 @@ def test_capture_proxy_ok_but_quiet_app_still_done(monkeypatch, tmp_path):
     assert data["capture_signals"]["quality"]["dynamic_status"] == "failed"
 
 
+def _mitm_ip_ep(ip: str, port: int | None = None, *, response: bool = True) -> Endpoint:
+    """mitm 侧的 IP 端点，带闭环门控要的两项证据（由 _collect_flow_endpoints 在真实路径上写入）。
+
+    ``response=False`` 复刻「请求发出去了、后端没应」——HTTPFlow 有请求就存在，响应可以是
+    None；tshark 的明文/解密两路更是只抽请求。``port=None`` 复刻旧 runtime_report（无 ip:port）。
+    """
+    rt: dict[str, object] = {}
+    if response:
+        rt["mitm_response_seen"] = True
+    if port is not None:
+        rt["mitm_peers"] = [f"{ip}:{port}"]
+    ep = Endpoint(value=ip, kind="ip")
+    ep.enrichment["runtime"] = rt
+    return ep
+
+
+def _mitm_domain_ep(host: str, *, response: bool = True) -> Endpoint:
+    ep = Endpoint(value=host, kind="domain")
+    ep.enrichment["runtime"] = {"mitm_response_seen": True} if response else {}
+    return ep
+
+
 def test_build_capture_quality_requires_target_attributed_business_traffic(
     monkeypatch,
 ) -> None:  # noqa: ANN001
@@ -387,7 +409,9 @@ def test_build_capture_quality_requires_target_attributed_business_traffic(
 
     quality = capture._build_capture_quality(
         summary,
-        [Endpoint(value="198.51.100.10", kind="ip")],
+        # mitm 端点须自带「确实收到过响应」与「实连到的 ip:port」——只有请求、或只对上裸 IP，
+        # 都不足以证明这条端点上发生过一次完整往返（见 _mitm_has_response / _mitm_ip_ports）。
+        [_mitm_ip_ep("198.51.100.10", 443)],
         {"tcp/198.51.100.10:443": {"is_target_app": True}},  # A2：键含 proto 族（对齐 pcap_app_attribution）
         channel_ready=True,
     )
@@ -506,13 +530,102 @@ def test_mitm_endpoint_matching_target_sni_counts_as_bidirectional(monkeypatch) 
     )
     quality = capture._build_capture_quality(
         summary,
-        [Endpoint(value="api.target.test", kind="domain")],  # 与 floor 归因端点同一 SNI
+        [_mitm_domain_ep("api.target.test")],  # 与 floor 归因端点同一 SNI，且确实收到过响应
         {"tcp/45.79.10.20:443": {"is_target_app": True}},
         channel_ready=True,
     )
     assert quality["bidirectional_mitm_attributed_count"] == 1
     assert quality["bidirectional_target_count"] == 1
     assert quality["dynamic_status"] == "complete"
+
+
+def test_request_only_mitm_flow_is_not_bidirectional_evidence(monkeypatch) -> None:  # noqa: ANN001
+    """★请求发出去、后端没应 —— 那不是一次往返，不能据以判闭环。
+
+    HTTPFlow 只要有请求就存在，``flow.response`` 可以是 None（后端沉默 / 连接被重置 /
+    采集在响应到达前结束）；tshark 的明文与解密两路的过滤器本身就是 ``http.request``，
+    结构上拿不到响应。此前只要端点对得上就计双向，等于把"没人应"写成"通信正常"。
+    """
+    monkeypatch.setattr(pcap_ingest, "_ip_public", lambda value: True)
+    summary = pcap_ingest.PcapSummary(
+        flows=[
+            pcap_ingest.Flow(
+                proto="tcp", src_ip="10.0.0.2", src_port=50010,
+                dst_ip="45.79.10.20", dst_port=443,
+                packets=6, payload_bytes=900,   # 单向出站：非 established
+                sni={"api.target.test"},
+            )
+        ]
+    )
+    attr = {"tcp/45.79.10.20:443": {"is_target_app": True}}
+
+    silent = capture._build_capture_quality(
+        summary, [_mitm_domain_ep("api.target.test", response=False)], attr, channel_ready=True,
+    )
+    assert silent["bidirectional_mitm_attributed_count"] == 0
+    assert silent["bidirectional_target_count"] == 0
+    assert silent["dynamic_status"] == "partial", "目标从未收到应答，不该判已闭环"
+
+    # 同一场景、这次代理确实拿到了响应 → 仍应支撑 complete（不得反向误杀真闭环）
+    answered = capture._build_capture_quality(
+        summary, [_mitm_domain_ep("api.target.test")], attr, channel_ready=True,
+    )
+    assert answered["dynamic_status"] == "complete"
+
+
+def test_mitm_endpoint_on_same_ip_different_port_is_not_the_same_endpoint(monkeypatch) -> None:  # noqa: ANN001
+    """★同一公网 IP 上跑着不同服务是常态（共享 CDN 边缘、大云入口）。
+
+    只比 IP 时，「目标 App 直连 45.79.10.20:9000」与「别的 App 经整机代理访问
+    45.79.10.20:443」会被当成同一个端点，凑出一个目标其实从未收到应答的 complete。
+    """
+    monkeypatch.setattr(pcap_ingest, "_ip_public", lambda value: True)
+    summary = pcap_ingest.PcapSummary(
+        flows=[
+            pcap_ingest.Flow(
+                proto="tcp", src_ip="10.0.0.2", src_port=50010,
+                dst_ip="45.79.10.20", dst_port=9000,
+                packets=6, payload_bytes=900,   # 单向：目标直连没人应
+            )
+        ]
+    )
+    attr = {"tcp/45.79.10.20:9000": {"is_target_app": True}}
+
+    other_app = capture._build_capture_quality(
+        summary, [_mitm_ip_ep("45.79.10.20", 443)], attr, channel_ready=True,
+    )
+    assert other_app["bidirectional_target_count"] == 0
+    assert other_app["dynamic_status"] == "partial", "443 上那次往返不属于目标的 9000 端点"
+
+    same_service = capture._build_capture_quality(
+        summary, [_mitm_ip_ep("45.79.10.20", 9000)], attr, channel_ready=True,
+    )
+    assert same_service["dynamic_status"] == "complete"
+
+
+def test_legacy_mitm_endpoint_without_peer_ports_does_not_bridge(monkeypatch) -> None:  # noqa: ANN001
+    """旧 runtime_report 的 mitm IP 端点没有 ip:port → 不参与桥接（fail-closed）。
+
+    宁可把已闭环说成未闭环（多跑一次采集），不可凭一个只对上 IP 的巧合判 complete。
+    """
+    monkeypatch.setattr(pcap_ingest, "_ip_public", lambda value: True)
+    summary = pcap_ingest.PcapSummary(
+        flows=[
+            pcap_ingest.Flow(
+                proto="tcp", src_ip="10.0.0.2", src_port=50010,
+                dst_ip="45.79.10.20", dst_port=443,
+                packets=6, payload_bytes=900,
+            )
+        ]
+    )
+    quality = capture._build_capture_quality(
+        summary,
+        [_mitm_ip_ep("45.79.10.20", None)],  # 无 mitm_peers
+        {"tcp/45.79.10.20:443": {"is_target_app": True}},
+        channel_ready=True,
+    )
+    assert quality["bidirectional_target_count"] == 0
+    assert quality["dynamic_status"] == "partial"
 
 
 def test_build_capture_quality_keeps_unknown_dns_server(monkeypatch) -> None:  # noqa: ANN001
@@ -3633,6 +3746,41 @@ def test_collect_flow_endpoints_bare_ip_host_makes_ip_endpoint() -> None:
     ep = collector["45.1.2.3"]
     assert ep.kind == "ip"  # 不是 domain
     assert "/api/user/login" in ep.enrichment["runtime"]["login_paths"]
+
+
+def test_collect_flow_endpoints_records_response_and_peer_port() -> None:
+    """★接线锁：闭环门控要的两项证据必须由这里写入，否则判据永远拿不到、桥接恒不成立。
+
+    退回 _collect_flow_endpoints 的记录，`_mitm_has_response`/`_mitm_ip_ports` 读到的就是空——
+    表现为「所有采集都判 partial」，而不是报错；单测门控层的用例自造 enrichment，挡不住这种死信号。
+    """
+    def _flow(*, response: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            request=SimpleNamespace(pretty_url="https://api.x.com/v1/pay", url="https://api.x.com/v1/pay",
+                                    pretty_host="api.x.com", host="api.x.com", scheme="https"),
+            server_conn=SimpleNamespace(peername=("45.1.2.3", 8443)),
+            response=response,
+        )
+
+    collector: dict = {}
+    capture._collect_flow_endpoints(_flow(response=SimpleNamespace(status_code=200)), "loc", collector)
+    ip_rt = collector["45.1.2.3"].enrichment["runtime"]
+    assert ip_rt["mitm_response_seen"] is True
+    assert ip_rt["mitm_peers"] == ["45.1.2.3:8443"], "端口必须留下：同 IP 不同服务不是同一端点"
+    assert collector["api.x.com"].enrichment["runtime"]["mitm_response_seen"] is True
+
+    # 请求发出去、后端没应 → 不得标成见过响应
+    silent: dict = {}
+    capture._collect_flow_endpoints(_flow(response=None), "loc", silent)
+    assert "mitm_response_seen" not in silent["45.1.2.3"].enrichment["runtime"]
+    assert silent["45.1.2.3"].enrichment["runtime"]["mitm_peers"] == ["45.1.2.3:8443"]
+    assert not silent["api.x.com"].enrichment.get("runtime", {}).get("mitm_response_seen")
+
+    # 同一端点跨多条流：只要有一条完成往返，就算见过响应
+    mixed: dict = {}
+    capture._collect_flow_endpoints(_flow(response=None), "loc", mixed)
+    capture._collect_flow_endpoints(_flow(response=SimpleNamespace(status_code=200)), "loc", mixed)
+    assert mixed["45.1.2.3"].enrichment["runtime"]["mitm_response_seen"] is True
 
 
 def test_collect_flow_endpoints_accumulates_biz_login_paths_per_ip() -> None:
