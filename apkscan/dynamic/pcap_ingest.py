@@ -1381,13 +1381,57 @@ def remote_endpoints(summary: PcapSummary) -> list[RemoteEndpoint]:
     return list(agg.values())
 
 
+#: SNI→运营方这条推断成立的前提：该 TLS 服务跑在**约定端口**上。
+#: 只收公认的 TLS 端口——名单越长判据越弱，这里刻意保持窄。
+_STANDARD_TLS_PORTS: frozenset[int] = frozenset({
+    443,    # HTTPS / QUIC
+    8443,   # 备用 HTTPS
+    853,    # DNS-over-TLS
+    993, 995, 465, 587,  # IMAPS / POP3S / SMTPS / submission
+    636,    # LDAPS
+    989, 990,  # FTPS
+    5223,   # XMPP over TLS
+})
+
+
+def sni_camouflage_carriers(summary: PcapSummary) -> dict[str, list[str]]:
+    """``{SNI 域名: [承载它的非标端点 ip:port/proto, ...]}``——只收**全部**承载端点都在非标端口的。
+
+    ★为什么按端口判、而不是维护一份"知名域名"白名单：实测样本在 30135/tcp 的自建协议连接上
+      打出网易云音乐、jsDelivr 镜像、有道、BootCDN 的 SNI。回灌把这些域名一并当业务线索，
+      于是生成的是一封指名网易/有道的调证函——把无关企业写成了嫌疑方，本项目最重的那类错误。
+      白名单挡不住：团伙下次换个域名就绕过去了。而**推断链**本身是可以判的——「ClientHello
+      里写着 X，所以这台机器归 X 的运营方」这一步，只在 X 确实是跑在约定端口上的 TLS 服务时
+      才成立。端口一非标，这条推断就没有前提，与域名有多知名无关。
+
+    ★只在**全部**承载端点都非标时才算：只要该域名在某个标准端口上也出现过，就说明它确实作为
+      TLS 服务被访问过，不该因为另有一条非标连接而整体降级。
+
+    绝不抛；无 SNI / 无 flows → 空 dict。
+    """
+    carriers: dict[str, list[tuple[str, int, str]]] = {}
+    for re_ in remote_endpoints(summary):
+        for s in re_.sni:
+            name = str(s).strip().lower().rstrip(".")
+            if name:
+                carriers.setdefault(name, []).append((re_.ip, re_.port, re_.proto))
+    out: dict[str, list[str]] = {}
+    for name, eps in carriers.items():
+        if any(port in _STANDARD_TLS_PORTS for _ip, port, _proto in eps):
+            continue
+        out[name] = sorted(f"{ip}:{port}/{proto}" for ip, port, proto in eps)
+    return out
+
+
 def to_report_leads(summary: PcapSummary) -> list[Lead]:
     """把 pcap summary 转成 report 的 Lead（公网接入节点 IP + SNI/DNS 域名，source=runtime-pcap）。"""
     leads: list[Lead] = []
     seen: set[tuple[str, str]] = set()
+    camouflage = sni_camouflage_carriers(summary)
 
     for re in remote_endpoints(summary):
         value = f"{re.ip}:{re.port}/{re.proto}"
+        masked = sorted(s for s in re.sni if str(s).strip().lower().rstrip(".") in camouflage)
         key = (LeadCategory.IP.value, value)
         if key in seen:
             continue
@@ -1413,6 +1457,15 @@ def to_report_leads(summary: PcapSummary) -> list[Lead]:
             notes = (
                 "带外 pcap 仅见连接尝试（SYN-only / 无双向载荷 / RST），待核——"
                 "可能为 ClientCore 轮询/容灾池或背景噪音，勿当实测接入节点直接调证。"
+            )
+        if masked and advice != infra.ADVICE_SKIP:
+            # ★域名是戏服，这个 IP 才是实体。非标端口上借用知名域名做 SNI，是自建协议在混入
+            #   背景流量——它**加重**而非削弱本端点的可疑度，同时把调证方向钉死在本 IP:端口上：
+            #   被冒充的那家公司与本案无关，向它发函是把无关方写成嫌疑方。
+            notes += (
+                f"★该连接以 {'、'.join(masked)} 的名义握手，但端口非标准 TLS 端口——"
+                "SNI 系伪装、不代表运营方；调证对象是本 IP:端口（向其 IDC/云厂商调租户实名与访问日志），"
+                "**不是**被冒充域名的运营方。伪装本身是自建协议混流的加重信号。"
             )
         leads.append(
             Lead(
@@ -1445,6 +1498,8 @@ def to_report_leads(summary: PcapSummary) -> list[Lead]:
                 domain_ts[s] = f.first_ts
     for q in summary.dns_queries:
         domains.setdefault(q, "DNS 查询")
+
+    camouflage = sni_camouflage_carriers(summary)
     for dom, src in domains.items():
         key = (LeadCategory.DOMAIN.value, dom)
         if key in seen:
@@ -1454,12 +1509,25 @@ def to_report_leads(summary: PcapSummary) -> list[Lead]:
             advice, _reason = infra.classify_domain(dom)
         except Exception:  # noqa: BLE001 - 分级失败给默认
             advice = "建议调证"
+        notes = f"带外 pcap 捕获（{src}）。"
+        confidence = Confidence.HIGH
+        carriers = camouflage.get(dom)
+        if carriers and advice == infra.ADVICE_INVESTIGATE:
+            # SNI 只出现在非标准 TLS 端口上 → 它证明不了这台机器归谁运营，降档待核。
+            advice = infra.ADVICE_REVIEW
+            confidence = Confidence.LOW
+            notes += (
+                f"⚠ 该域名仅作为 SNI 出现在非标准 TLS 端口（{'、'.join(carriers)}）上。"
+                "标准端口之外，ClientHello 里的 SNI 不构成「该域名运营方即此端点运营方」的证据——"
+                "自建协议用知名域名做 SNI 混入背景流量是常见手法。"
+                "★调证对象应是承载它的 IP:端口，不是该域名的运营方；如需据此域名调证，先核实证书/Host 一致。"
+            )
         leads.append(
             Lead(
                 category=LeadCategory.DOMAIN,
                 value=dom,
                 where_to_request=_DOMAIN_WHERE,
-                confidence=Confidence.HIGH,
+                confidence=confidence,
                 advice=advice or "建议调证",
                 source_refs=[
                     Evidence(
@@ -1469,7 +1537,7 @@ def to_report_leads(summary: PcapSummary) -> list[Lead]:
                         observed_at=domain_ts.get(dom),  # SNI 域名带首包时间，DNS 域名留 None
                     )
                 ],
-                notes=f"带外 pcap 捕获（{src}）。",
+                notes=notes,
             )
         )
     return leads
@@ -1672,8 +1740,12 @@ def _runtime_endpoint_dicts(summary: PcapSummary) -> list[dict]:
       ``is_runtime_contact=true``，闭环却挑着静态噪音，两边各说各话。
     """
     out: list[dict] = []
+    camouflage = sni_camouflage_carriers(summary)
     for re_ in remote_endpoints(summary):
         sni = sorted(re_.sni)
+        # 这个端点打出来的 SNI 里，哪些是"非标端口上的"——即无法据以判定运营方的（见
+        # sni_camouflage_carriers）。记在端点上，读报告的人能一眼看出这条连接在伪装成谁。
+        masquerading = sorted(s for s in sni if s.strip().lower().rstrip(".") in camouflage)
         out.append({
             "value": re_.ip,
             "kind": "ip",
@@ -1697,6 +1769,10 @@ def _runtime_endpoint_dicts(summary: PcapSummary) -> list[dict]:
                 "has_payload": re_.has_payload,
                 "connection_count": re_.connection_count,
                 "sni": sni,
+                # ★这条连接以谁的名义握手。它**不是**减分项：非标端口 + 借用知名域名做 SNI，
+                #   本身就是自建协议在混入背景流量，反而使这个 IP 更值得查。
+                #   记在端点上，是为了让调证对象指向本 IP:端口，而不是被冒充那家公司。
+                **({"sni_masquerade": masquerading} if masquerading else {}),
                 "first_ts": re_.first_ts or None,
                 "last_ts": re_.last_ts or None,
                 # ★不写 target_attributed：本路径（pcap-leads）没有设备侧 socket 快照，做不了
