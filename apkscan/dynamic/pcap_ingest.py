@@ -1897,31 +1897,44 @@ def summary_merge_fingerprint(summary: PcapSummary) -> str:
       报告不幂等，而字节数正是闭环判"有无双向载荷"的输入。指纹按内容算（不按文件路径），
       所以两份**不同**的采集仍会正常累加，只挡住重复导入同一份。
 
-    ★判据：指纹覆盖的必须**正好**是 :func:`merge_into_report_json` 会写的东西——不多也不少。
-      两个方向都会出错，方向相反：
+    ★判据：指纹只描述**受这道闸保护、且具有累加语义的那一份贡献**——也就是端点侧。
 
-      - **收少了** → 两份不同的采集撞指纹、第二份被整体跳过，那些字段的更新静默丢失。
-        （实测过：端点与字节数相同、只是第二次多解出 SNI，Lead 侧照常拿到 ``sni_masquerade``、
-        端点侧却连 ``runtime.sni`` 都没有，同一份报告两种说法。）
-      - **收多了** → 两份采集因为一个**根本不落盘**的差异被判为不同，于是端点计数又累加一遍，
-        凭空长出观测强度。曾把 ``dns_records`` 收进来，而这条路径只消费 ``dns_queries``
-        （``dns_records`` 明细走 :func:`to_ledger_dict`，不进 report.json）——已移除。
+      :func:`merge_into_report_json` 一个函数里其实有**三种不同的合并代数**，各自的幂等性来源
+      不同，**不能共用一个"所有落盘内容"的集合**（这正是上一版的错误）：
 
-      故本函数收：每个远端端点的统计量与 SNI/JA3/ALPN/QUIC、``dns_queries`` 全部查询名、
-      flows 计数与 ``parse_status``（后两者进 ``meta.runtime_pcap_inventory``）。
-      **改动 merge_into_report_json 写什么，就必须同步改这里。**
+      ===========================  ==================================  ==============
+      合并代数                      字段                                 要不要进指纹
+      ===========================  ==================================  ==============
+      Lead 侧按证据签名去重（闸外）   ``dns_queries`` / ``packets`` /      **不要**
+                                   ``ja3`` / ``alpn`` / ``quic``       （本来就幂等）
+      端点侧**求和 / 并集**          端点统计、``sni``                    **要**
+      ``meta`` 覆盖写                ``flows`` / ``parse_status``        **不要**
+      ===========================  ==================================  ==============
+
+      收多了会怎样：两份**端点贡献完全相同**、只差 ``parse_status``（或 JA3 / ALPN / QUIC /
+      packets / DNS 查询）的采集会算出不同指纹 → 闸放行 → ``out_bytes`` / ``in_bytes`` /
+      ``connection_count`` **再累加一遍**，凭空长出观测强度。而这些差异本来根本不需要这道闸：
+      Lead 侧自带证据签名去重，``meta`` 是覆盖写。
+
+      收少了会怎样：两份端点贡献**不同**的采集撞指纹、第二份被整体跳过，更新静默丢失。
+      （实测过：端点与字节数相同、只是第二次多解出 SNI，Lead 侧照常拿到 ``sni_masquerade``、
+      端点侧却连 ``runtime.sni`` 都没有，同一份报告两种说法。所以 ``sni`` 必须在。）
+
+      故只收 :func:`_runtime_endpoint_dicts` **真正写进端点**、且参与求和/并集/取端点的字段。
+      ★要改这里，先问「这个字段是不是端点侧累加语义的一部分」，而不是「它落不落盘」。
     """
     parts = [
-        f"{re_.ip}|{re_.port}|{re_.proto}|{re_.state}|{re_.out_bytes}|{re_.in_bytes}|"
-        f"{re_.connection_count}|{re_.packets}|{re_.first_ts}|{re_.last_ts}"
+        # 只列 _runtime_endpoint_dicts 真会写进 enrichment["runtime"] 的东西。
+        # packets / ja3 / alpn / quic 只进 Lead 证据，闸外已按签名去重，故不在此。
+        f"{re_.ip}|{re_.port}|{re_.proto}|{re_.state}"
+        f"|out={re_.out_bytes}|in={re_.in_bytes}|conns={re_.connection_count}"
+        f"|payload={int(bool(re_.has_payload))}"
+        f"|ts={re_.first_ts}-{re_.last_ts}"
         f"|sni={','.join(sorted(re_.sni))}"
-        f"|ja3={','.join(sorted(re_.ja3))}"
-        f"|alpn={','.join(sorted(re_.alpn))}"
-        f"|quic={','.join(sorted(re_.quic_versions))}"
         for re_ in remote_endpoints(summary)
     ]
-    parts.append("dnsq=" + ",".join(sorted(str(q) for q in summary.dns_queries)))
-    parts.append(f"flows={len(summary.flows)}|parse={summary.parse_status}")
+    # 无端点的采集（如纯 DNS）指纹恒定——这是对的：端点侧无贡献可累加，
+    # 而它的 DNS 线索由闸外的 Lead 合并处理，不受本闸影响。
     blob = "\n".join(sorted(parts)).encode("utf-8", "replace")
     return hashlib.sha256(blob).hexdigest()
 

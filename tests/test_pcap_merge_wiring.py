@@ -396,16 +396,79 @@ def test_merge_history_is_never_truncated(tmp_path: Path) -> None:
     assert baseline < after_many  # 中间那批确实累加了（否则上面的断言恒真）
 
 
-def test_fingerprint_distinguishes_dns_only_captures() -> None:
-    """DNS-only 采集：查询数量相同、内容不同，也必须分得开（否则整批 DNS 证据被吞）。"""
-    a = pcap_ingest.PcapSummary(dns_queries={"a.example.test"})
-    b = pcap_ingest.PcapSummary(dns_queries={"b.example.test"})
-    assert pcap_ingest.summary_merge_fingerprint(a) != pcap_ingest.summary_merge_fingerprint(b)
+def test_dns_only_captures_still_get_their_leads(tmp_path: Path) -> None:
+    """★DNS-only 采集的线索不受幂等闸影响——因为 Lead 合并在闸**外**。
 
-    # 同一份采集重复算 → 指纹稳定（幂等闸的前提）
-    assert pcap_ingest.summary_merge_fingerprint(a) == pcap_ingest.summary_merge_fingerprint(
-        pcap_ingest.PcapSummary(dns_queries={"a.example.test"})
-    )
+    上一版这条测试断言的是「两份 DNS-only 采集指纹必须不同」，**前提就错了**：
+    幂等闸只保护端点侧的累加，而 DNS 只产生 Lead，Lead 合并在闸外、自带证据签名去重。
+    把 dns_queries 塞进指纹反而会让「端点贡献相同、只差 DNS」的两份采集绕过闸、
+    把端点字节数再累加一遍（codex 四轮 P1）。
+
+    所以该钉的不是指纹差异，而是**结果**：两份 DNS-only 采集的域名线索都要进报告。
+    """
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_STATIC, ensure_ascii=False), encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(
+        str(p), pcap_ingest.PcapSummary(dns_queries={"a.example.test"}))
+    pcap_ingest.merge_into_report_json(
+        str(p), pcap_ingest.PcapSummary(dns_queries={"b.example.test"}))
+
+    values = {ld.get("value") for ld in json.loads(p.read_text(encoding="utf-8"))["leads"]}
+    assert {"a.example.test", "b.example.test"} <= values, "第二份 DNS 采集的线索丢了"
+
+
+# --- 闸的边界：只保护端点侧的累加，不受闸外字段影响 -------------------------
+
+def _pair_with(**kw):
+    """同一组端点贡献，只改 Flow 上某个**不进 runtime 端点**的字段。"""
+    base = dict(proto="tcp", packets=20, payload_bytes=1200)
+    out = {**base, **kw}
+    inb = {**base, "packets": 17, "payload_bytes": 800, **kw}
+    return pcap_ingest.PcapSummary(flows=[
+        pcap_ingest.Flow(src_ip="192.168.10.233", src_port=41000,
+                         dst_ip="8.163.60.2", dst_port=5479, flags={"syn"}, **out),
+        pcap_ingest.Flow(src_ip="8.163.60.2", src_port=5479,
+                         dst_ip="192.168.10.233", dst_port=41000, flags={"synack"}, **inb),
+    ])
+
+
+def test_gate_ignores_fields_that_never_reach_the_endpoint(tmp_path: Path) -> None:
+    """★端点贡献相同时，闸外字段的差异**不得**让端点计数再累加一遍。
+
+    ``parse_status`` 是 meta 覆盖写、``ja3``/``alpn``/``quic`` 只进 Lead 证据——三者都不在
+    ``_runtime_endpoint_dicts`` 写的端点里。把它们收进指纹，就会让「同一批端点、只差这些」
+    的两份采集绕过闸，``out_bytes`` 翻倍。这是「扩大判据范围」引入的伪造（codex 四轮 P1）。
+    """
+    first = _pair_with()
+    for label, second in (
+        ("parse_status", pcap_ingest.PcapSummary(flows=list(first.flows), parse_status="parse_error")),
+        ("ja3", _pair_with(ja3={"deadbeef"})),
+        ("alpn", _pair_with(alpn={"h2"})),
+        ("quic", _pair_with(quic_versions={"1"})),
+    ):
+        assert pcap_ingest.summary_merge_fingerprint(first) == \
+            pcap_ingest.summary_merge_fingerprint(second), f"{label} 不该改变端点侧指纹"
+
+        p = tmp_path / f"report_{label}.json"
+        p.write_text(json.dumps(_STATIC, ensure_ascii=False), encoding="utf-8")
+        pcap_ingest.merge_into_report_json(str(p), first)
+        once = _runtime_of(json.loads(p.read_text(encoding="utf-8")), "8.163.60.2")["out_bytes"]
+        pcap_ingest.merge_into_report_json(str(p), second)
+        twice = _runtime_of(json.loads(p.read_text(encoding="utf-8")), "8.163.60.2")["out_bytes"]
+        assert twice == once, f"只差 {label} 就让端点字节数累加了两次"
+
+
+def test_gate_still_separates_real_endpoint_differences() -> None:
+    """收窄之后不能矫枉过正：端点侧**真**有差异时，指纹仍必须分得开。"""
+    base = _pair_with()
+    assert pcap_ingest.summary_merge_fingerprint(base) != \
+        pcap_ingest.summary_merge_fingerprint(_pair_with(payload_bytes=9999)), "字节数差异被吞了"
+    assert pcap_ingest.summary_merge_fingerprint(base) != \
+        pcap_ingest.summary_merge_fingerprint(_pair_with(sni={"player.example.test"})), "SNI 差异被吞了"
+    # 同一份采集重复计算 → 指纹稳定（幂等闸成立的前提）
+    assert pcap_ingest.summary_merge_fingerprint(base) == \
+        pcap_ingest.summary_merge_fingerprint(_pair_with())
 
 
 def test_merge_never_downgrades_state_or_proto() -> None:
