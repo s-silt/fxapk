@@ -74,6 +74,27 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         "umeng.com",
         "umengcloud",
         "umsns.com",
+        # ---- 字节跳动 SDK（穿山甲广告 / 应用日志 / 监控）----
+        # 实测 2026-07-28 四案：这几个域被整批标成"建议调证"，占满办案人的清单。
+        # 全部是可核实的第三方 SDK 自有域，不是 App 后端。★按域边界后缀匹配，不含通配。
+        "pangolin-sdk-toutiao.com",
+        "snssdk.com",
+        "zijieapi.com",
+        "bdurl.net",
+        "bytedance.com",
+        "bytedns.net",
+        "byteimg.com",
+        # ---- 新浪 / 微博开放平台 ----
+        "weibo.com",
+        "sinaimg.cn",
+        "sina.com.cn",
+        # ---- 网易（静态资源 / 开放服务）----
+        "126.net",
+        "netease.com",
+        "163.com",
+        # ---- 其它统计 / 监控 SDK ----
+        "51.la",          # 51LA 统计
+        "tpstelemetry.tencent.com",  # 腾讯 TPS 遥测（tencent.com 本身不整体列入）
         # ---- 崩溃上报 / 证书 / 多媒体库自带域（实测两案里被误当调证目标）----
         "traces.hk",            # crash 上报 SDK（libucrash.so）
         "public-trust.com",     # DigiCert 证书状态服务（DER 里的 OCSP/CRL URL）
@@ -575,7 +596,40 @@ _COMMON_WORD_SLDS: frozenset[str] = frozenset({
     "her", "its", "may", "now", "any", "how", "who", "why", "did", "yes", "off",
     "own", "too", "via", "www", "this", "that", "with", "from", "have", "were",
     "test", "demo", "true", "false", "null", "none", "type", "name", "text",
+    # SDK 文档/脚手架里的占位 SLD。★只降待核不判 SKIP：这些名字**确实可注册**
+    #   （abc.com、domain.com 都是真实在册域名），判"无需调证"就等于替人下"与本案无关"
+    #   的结论，把一个真 C2 藏起来——降噪那点收益换不来这个代价。
+    "domain", "example", "yourdomain", "mydomain", "sample", "placeholder",
+    "xxx", "xxxx", "abc", "aaa", "todo", "changeme", "host", "server", "api",
+    "your-domain", "my-domain", "your-site", "site", "website",
 })
+
+#: 标准保留、**不可注册**的顶级域（RFC 2606 / 6761 / 6762 / 8375）+ 约定俗成的本机后缀。
+#: 落在这些后缀下的名字不存在注册人，没有可调证的对象。
+#:
+#: ★刻意**不含** ``example.com/.net/.org``：那几个同样是保留域，但在本仓库里它们是测试与
+#:   合成回归语料通用的中性替身（"pay.example.com" 之类），特殊对待会连带改掉检出基线与多处
+#:   富化 fixture。那是一次单独的决定，不该顺手夹带在降噪里做掉。
+_RESERVED_TLDS: tuple[str, ...] = (
+    ".test",         # RFC 2606：测试用
+    ".example",      # RFC 2606：文档用
+    ".invalid",      # RFC 2606：明确无效
+    ".localhost",    # RFC 6761：恒指回环
+    ".local",        # RFC 6762：mDNS 链路本地
+    ".home.arpa",    # RFC 8375：家庭网络
+    ".localdomain",  # 约定俗成的本机后缀（localhost.localdomain），不可路由
+)
+
+
+def _reserved_domain_match(domain: str) -> str | None:
+    """域名是否落在标准保留后缀下；是则返回命中的后缀。"""
+    d = _normalize_domain(domain)
+    if not d:
+        return None
+    for suffix in _RESERVED_TLDS:
+        if d == suffix.lstrip(".") or d.endswith(suffix):
+            return suffix
+    return None
 _GENERIC_TLDS: frozenset[str] = frozenset({"com", "org", "net", "info", "xyz", "top"})
 
 
@@ -610,6 +664,7 @@ def classify_domain(domain: str) -> tuple[str, str]:
     matched = _matched_infra(domain)
     if matched is not None:
         return ADVICE_SKIP, f"已知第三方基础设施/库：{matched}"
+
 
     if _normalize_domain(domain) in _PROTOCOL_ID_HOSTS:
         return ADVICE_SKIP, "规范/协议里的标识符 URL（如 RTP 头扩展 URI），App 从不连它"
@@ -649,6 +704,14 @@ def classify_domain(domain: str) -> tuple[str, str]:
     if _is_common_word_sld(domain):
         return ADVICE_REVIEW, (
             "单个常见英文词 + 通用 TLD 且无子域，疑为二进制里的句子被切出的伪域名，需人工核"
+        )
+
+    reserved = _reserved_domain_match(domain)
+    if reserved is not None:
+        return ADVICE_REVIEW, (
+            f"标准保留的文档/测试域（{reserved}，RFC 2606/6761/6762 明令不可注册）——"
+            "不存在可调证的注册人，多为 SDK 文档/脚手架残留；★留待核而非排除：一个没填完的"
+            "模板域名本身也是团伙工具链的线索，值得人看一眼"
         )
 
     return ADVICE_INVESTIGATE, "疑似 App 自有服务，建议落地核查归属"
