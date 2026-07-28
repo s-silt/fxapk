@@ -36,6 +36,33 @@ def _reset_ipinfo_shared_state(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_ipinfo_mod, "_SLEEP", lambda *_a, **_k: None)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_adb(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
+    """全套测试一律看不见 adb —— 测试结果与耗时不得取决于开发机装没装 adb。
+
+    ★这条是被真事逼出来的：本机跑 3300+ 用例 60 秒全绿，另一台装了 adb 的机器上同一份代码
+      跑到 1204 秒超时（exit 124）。差别只在 PATH 里有没有 adb —— 有 adb 的机器上，那些没把
+      设备层 mock 干净的用例（如 ``doctor.run(serial="dev1")`` 只 mock 了 ensure_frida_server，
+      其余检查项照跑）会真的去 shell out，对一个并不存在的设备逐条命令等到超时。
+      ``read_network_state`` 一次要跑 4 条 shell、每条 su + 回退两次调用，单次就是 8 × 5s。
+
+    ★于是「我这儿是绿的」不是结论，是环境巧合。把 adb 统一挡掉，两台机器才在比同一件事。
+      实测：装了假 adb（每次调用 3s）后摘掉本夹具，三个设备测试文件跑满 10 分钟未结束；
+      带上夹具则秒级完成。
+
+    要测真调用路径的用例自行 monkeypatch ``device._run`` / ``_adb_root_command`` 即可——
+    它们本来就是这么写的，本夹具不影响（见 test_no_real_adb.py 最后一条）。
+
+    ★``adb_path`` 自身的单测（test_tools.py）要的正是这个函数的真实行为，
+      用 ``@pytest.mark.real_adb_path`` 标记即可退出本夹具。
+    """
+    from apkscan.core import tools
+
+    if request.node.get_closest_marker("real_adb_path") is not None:
+        return
+    monkeypatch.setattr(tools, "adb_path", lambda: "")
+
+
 class FakeContext:
     """AnalysisContext 的测试实现，喂合成数据。
 
