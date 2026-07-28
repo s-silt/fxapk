@@ -184,6 +184,26 @@ def _remote_config_objects(report: dict) -> list[dict]:
 _MAX_BUILD_ID = 80
 _BUILD_ID_BAD = frozenset("/\\\n\r\t")
 
+#: 进**串案维度**所需的最少残留路径数。
+#:
+#: 真实的构建环境会在几十个源文件里留下痕迹；只留下一两条路径的，分不清是构建环境
+#: 还是「恰好被引用的某个文件」——而串案对假阳性最敏感：一条噪音就能把两个互不相干的
+#: 案件聚成一簇，读的人会当成并案依据。
+#:
+#: 阈值由 32 份真实检材实测标定，两侧分得很开、中间是空的：
+#:   · 已核实的真构建环境 14 个（``/opt/work/<批次>-<代号>-<业务>/`` 与 ``d:/buildroot``）
+#:     —— 路径数 **26 – 32**；
+#:   · 实测噪音 3 个 —— 路径数 **1 – 2**：
+#:       ``c:/content/test-UHD-HEVC_01_FMV_Med_track1.hvc``（HEVC 测试码流）、
+#:       ``z:/jc/units/javascript.jc``（JavaCC 语法文件）、
+#:       ``e:/tingyunandroid-oom/koom-*``（第三方 APM/OOM 监控库）。
+#: 取 3 而非贴着 26，是给「路径少但真实」的环境留余量：宁可放进来几条弱证据，
+#: 也不要把真环境挡在门外——门槛是为了挡噪音，不是为了挑最强的。
+#:
+#: ★只作用于串案维度：分析器的 ``meta.build_provenance`` 仍**全量如实**记录，
+#:   人核报告看得到全部，这里只决定「哪些够格拿去跨案聚簇」。
+_MIN_BUILD_PATHS = 3
+
 
 def _build_environments(report: dict) -> list[dict]:
     """报告登记的**自建构建环境标识**（meta["build_provenance"]，由 build_provenance 分析器产）。
@@ -205,9 +225,14 @@ def _build_environments(report: dict) -> list[dict]:
         if isinstance(item, dict):
             ident = _s(item.get("identifier") or item.get("root")).strip()
             root = _s(item.get("root")).strip() or None
+            count = item.get("count")
         else:
-            ident, root = _s(item).strip(), None
+            ident, root, count = _s(item).strip(), None, None
         if not ident or len(ident) > _MAX_BUILD_ID or any(c in _BUILD_ID_BAD for c in ident):
+            continue
+        # 残留路径太少 → 不够格进串案维度（见 _MIN_BUILD_PATHS）。
+        # count 缺失（旧报告没这个字段）时**放行**：不因少个字段就丢掉已有数据。
+        if isinstance(count, int) and count < _MIN_BUILD_PATHS:
             continue
         out.setdefault(ident, {"identifier": ident, "root": root})
     return [out[k] for k in sorted(out)]
