@@ -1659,13 +1659,98 @@ def to_ledger_dict(summary: PcapSummary) -> dict[str, object]:
     }
 
 
+def _runtime_endpoint_dicts(summary: PcapSummary) -> list[dict]:
+    """把 pcap 接入节点转成 report.json 的 ``endpoints`` 条目（含 runtime 富化）。
+
+    ★``value`` 用**裸 IP**，不是 Lead 那样的 ``ip:port/proto``。两处各有各的道理：Lead 是调证
+      标的，端口是要写进函里的；Endpoint 是被富化/被闭环排序的对象，得跟静态端点、跟各富化器
+      的 IP 口径对齐。端口/协议/字节/连接态落进 ``enrichment["runtime"]``，闭环排序据此判优先级
+      （见 ``closure.targets._target_rank``）。
+
+    ★这一步此前整个不存在：回灌只往 ``leads`` 里追加，端点侧一片空白。于是"实测双向通信的真
+      后端"连闭环候选都进不去——排序排的是端点，而那个端点根本没被创建。报告里 Lead 标着
+      ``is_runtime_contact=true``，闭环却挑着静态噪音，两边各说各话。
+    """
+    out: list[dict] = []
+    for re_ in remote_endpoints(summary):
+        sni = sorted(re_.sni)
+        out.append({
+            "value": re_.ip,
+            "kind": "ip",
+            "is_private": False,  # remote_endpoints 只收公网远端
+            "evidences": [{
+                "source": _SOURCE,
+                "location": "pcap",
+                "snippet": (
+                    f"->{re_.ip}:{re_.port}/{re_.proto} state={re_.state} "
+                    f"out={re_.out_bytes}B in={re_.in_bytes}B conns={re_.connection_count}"
+                    + ("，SNI=" + "/".join(sni) if sni else "")
+                )[:200],
+                "observed_at": re_.first_ts or None,
+            }],
+            "enrichment": {"runtime": {
+                "port": re_.port,
+                "proto": re_.proto,
+                "state": re_.state,
+                "out_bytes": re_.out_bytes,
+                "in_bytes": re_.in_bytes,
+                "has_payload": re_.has_payload,
+                "connection_count": re_.connection_count,
+                "sni": sni,
+                "first_ts": re_.first_ts or None,
+                "last_ts": re_.last_ts or None,
+                # ★不写 target_attributed：本路径（pcap-leads）没有设备侧 socket 快照，做不了
+                #   UID 归因。缺了就是缺了，不能因为"这是目标的 pcap"就默认填 True——带外抓包
+                #   抓的是整机流量。真归因走 capture 的 socket_attr 路径。
+            }},
+        })
+    return out
+
+
+def _merge_runtime_endpoint_dicts(payload: dict, fresh: list[dict]) -> int:
+    """把运行时端点并进 ``payload["endpoints"]``（按 (kind, value) 去重）。返回新增数。
+
+    命中已有端点 → 把 runtime 富化与证据并进去（静态已知的 IP 这次被实测连上了，是升级不是重复）。
+    """
+    existing = payload.get("endpoints")
+    if not isinstance(existing, list):
+        existing = []
+        payload["endpoints"] = existing
+    by_key: dict[tuple[str, str], dict] = {
+        (str(e.get("kind")), str(e.get("value"))): e
+        for e in existing if isinstance(e, dict)
+    }
+    added = 0
+    for ep in fresh:
+        key = (ep["kind"], ep["value"])
+        hit = by_key.get(key)
+        if hit is None:
+            by_key[key] = ep
+            existing.append(ep)
+            added += 1
+            continue
+        enr = hit.setdefault("enrichment", {})
+        if isinstance(enr, dict):
+            enr["runtime"] = {**(enr.get("runtime") or {}), **ep["enrichment"]["runtime"]}
+        evs = hit.setdefault("evidences", [])
+        if isinstance(evs, list):
+            evs.extend(ep["evidences"])
+    return added
+
+
 def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:
-    """把 pcap 线索合并进 report.json 的 ``leads``。绝不抛，失败返 0。
+    """把 pcap 线索合并进 report.json：``leads`` + ``endpoints`` + ``meta`` 的运行时信号。
+
+    绝不抛，失败返 0。
 
     - 新键（(category, value) 不存在）→ append，计入返回的 added。
     - 命中已存在键（如静态已抓到同 domain/ip）→ 不丢弃，把 runtime 证据并进原 lead、升为
       ``is_runtime_seen``（静态→活体确认），不计入 added。
     - 落盘走 :func:`atomic_write_text`：写中途失败绝不留半截坏 JSON（保底 return 0）。
+
+    ★只写 leads 是不够的，这份报告的三个消费面各读各的：调证函读 leads、闭环排序读 endpoints、
+      可见性读 meta。此前只更新第一面，于是同一份报告里 Lead 标着"实测双向通信"、闭环却挑着
+      静态噪音、digest 还写着"未做运行时观测"——三处自相矛盾，而每一处单看都是自洽的。
     """
     try:
         from apkscan.report import json as report_json
@@ -1698,8 +1783,33 @@ def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:
             existing_by_key[key] = lead_dict
             existing.append(lead_dict)
             added += 1
+
+        # 端点侧：闭环排序、五层归属、外部富化都以 endpoints 为对象，不补这一步等于白抓。
+        fresh_eps = _runtime_endpoint_dicts(summary)
+        ep_added = _merge_runtime_endpoint_dicts(payload, fresh_eps)
+
+        # meta 侧：可见性据此判 runtime 这一维走没走过。不写就一直是"未做运行时观测"。
+        meta = payload.get("meta")
+        if not isinstance(meta, dict):
+            meta = {}
+            payload["meta"] = meta
+        if fresh_eps or summary.flows:
+            meta["runtime_merged"] = True
+            meta["runtime_pcap_inventory"] = {
+                "flows": len(summary.flows),
+                "remote_endpoints": len(fresh_eps),
+                "dns_queries": len(summary.dns_queries),
+                "parse_status": summary.parse_status,
+                # ★本路径无设备侧 socket 快照 → 做不了 UID 归因，如实记下来。消费方（closure /
+                #   digest）看得出"有运行时观测，但不知道这些流量属不属于目标 App"。
+                "uid_attributed": False,
+            }
+
         atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
-        logger.info("[pcap] 追加 %d 条、runtime 确认 %d 条带外线索进 %s", added, confirmed, path)
+        logger.info(
+            "[pcap] 追加 %d 条线索、%d 个运行时端点，runtime 确认 %d 条 → %s",
+            added, ep_added, confirmed, path,
+        )
         return added
     except (OSError, ValueError):
         logger.exception("[pcap] 读取/解析 report.json 失败：%s", report_json_path)
