@@ -52,6 +52,18 @@ DISCLAIMER: str = (
     "受文机关为据线索推导的候选、非武断认定。**"
 )
 
+# 标的形态存疑时的额外警示（紧跟免责声明，在受文机关之前——发函的人必须先看到它）。
+#
+# ★这条警示的存在本身就是一次教训：产生它的那条判据原本只把保留意见写进 Lead.notes，并在
+#   提交说明里声称"办案人发函前看得到"。而本模块全文不读 notes——发出去的是一封干净的、
+#   指名某云厂商的调证函。保留意见必须自己走到出口，不能假定下游会去翻。
+SHAPE_UNCERTAIN_WARNING: str = (
+    "**⚠ 标的形态存疑：** 该值四段数字均偏低、且在样本中未见以地址形式使用（无端口、"
+    "不在 URL 内），形态上与版本号/序号无法区分；判定为地址是靠 ASN 归属落在云/IDC 托管段"
+    "推得，非样本内的地址性证据。**发函前请人工确认该值确系网络地址**——若实为版本串，"
+    "本函标的不存在，会向无关的云厂商索取一个并不存在的租户。"
+)
+
 # 文件名安全化：去掉文件系统非法字符 + 控制字符。
 _UNSAFE_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
 
@@ -307,6 +319,7 @@ def _build_body_md(
     evidence_items: list[str],
     evidence_refs: list[str],
     attribution_lines: list[str] | None = None,
+    shape_uncertain: bool = False,
 ) -> str:
     """套打 markdown 正文：顶部固定免责声明 → 受文机关 → 标的 → 待调取证据 → 出处。"""
     title = template.get("title", "协查函")
@@ -318,6 +331,10 @@ def _build_body_md(
     # 1) 顶部显著免责（固定，最先出现）
     lines.append(f"> {DISCLAIMER}")
     lines.append("")
+    # 1.5) 标的形态存疑警示——必须在标题与受文机关之前：这封函要不要发，取决于它。
+    if shape_uncertain:
+        lines.append(f"> {SHAPE_UNCERTAIN_WARNING}")
+        lines.append("")
     # 2) 标题
     lines.append(f"# {title}（标的：{target}）")
     lines.append("")
@@ -380,6 +397,8 @@ def _lead_to_letter(
         attr_index.get(raw_value) if isinstance(attr_index, dict) and isinstance(raw_value, str) else None
     )
     attribution_lines = _render_attribution_chain(attribution) if isinstance(attribution, dict) else []
+    # 形态存疑：判定靠外部佐证而非样本内的地址性证据，正文顶部要显著警示（见 Lead.shape_uncertain）。
+    shape_uncertain = bool(lead.get("shape_uncertain"))
 
     body_md = _build_body_md(
         template=template,
@@ -389,6 +408,7 @@ def _lead_to_letter(
         evidence_items=evidence_items,
         evidence_refs=evidence_refs,
         attribution_lines=attribution_lines,
+        shape_uncertain=shape_uncertain,
     )
     return {
         "category": category,
@@ -398,6 +418,8 @@ def _lead_to_letter(
         "evidence_items": evidence_items,  # = evidence_to_obtain
         "evidence_refs": evidence_refs,  # evidence_id 优先、降级 source:location
         "attribution": attribution,  # 五层基础设施归属链（结构化，无匹配为 None）
+        # 结构化回带：消费方（HTML/PDF/人工筛选）不必去正文里捞这句警示
+        "shape_uncertain": shape_uncertain,
         "title": f"{template.get('title', '协查函')}（标的：{target}）",
         "body_md": body_md,
     }

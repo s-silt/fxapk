@@ -407,10 +407,15 @@ def _ip_lead(
         )
 
     endpoint_notes = _endpoint_notes(ep, online, enriched)
-    # 靠外部佐证把低段位裸 IP 捞回"建议调证"时，把保留意见落进 notes——办案人发函前该看到
-    # 「这个值的形态本身存疑，是 ASN 佐证把它升回来的」，而不是只看到一条干净的调证条目。
-    if advice == infra.ADVICE_INVESTIGATE and "四段值偏低" in ip_reason:
+    # 靠外部佐证把低段位裸 IP 捞回"建议调证"时，保留意见必须**结构化**地跟着走。
+    # ★曾只把这句话拼进 notes 并声称"办案人发函前看得到"——实际 letters 全文不渲染 notes，
+    #   于是发出去的是一封干净的、HIGH 置信度、指名某云厂商的调证函，没有半点存疑提示。
+    shape_uncertain = advice == infra.ADVICE_INVESTIGATE and "四段值偏低" in ip_reason
+    if shape_uncertain:
         endpoint_notes = f"{endpoint_notes}；{ip_reason}" if endpoint_notes else ip_reason
+        # 形态存疑的值不许以 HIGH 示人：HIGH 是"这确实是个地址"的断言，而此处恰恰不确定。
+        # subject（ASN org）非空只说明"这个数字解释成 IP 后落在谁的网段"，不是地址性的证据。
+        confidence = Confidence.MEDIUM
 
     notes = _apply_forensic(
         advice, ep.value, evidence_to_obtain, endpoint_notes,
@@ -427,6 +432,7 @@ def _ip_lead(
         source_refs=list(ep.evidences),
         notes=notes,
         advice=advice,
+        shape_uncertain=shape_uncertain,
     )
 
 

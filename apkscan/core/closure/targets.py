@@ -50,7 +50,9 @@ def _runtime_info(endpoint: Endpoint) -> dict[str, Any]:
     return runtime
 
 
-def _target_rank(endpoint: Endpoint, confidence_rank: int) -> tuple[int, int, int, int, int, str]:
+def _target_rank(
+    endpoint: Endpoint, confidence_rank: int, shape_uncertain: bool = False
+) -> tuple[int, int, int, int, int, int, str]:
     runtime = _runtime_info(endpoint)
     has_name = bool(runtime.get("sni") or runtime.get("http_host") or runtime.get("host"))
     return (
@@ -59,6 +61,9 @@ def _target_rank(endpoint: Endpoint, confidence_rank: int) -> tuple[int, int, in
         0 if has_name else 1,
         0 if runtime.get("observed") else 1,
         confidence_rank,
+        # 形态存疑的候选排在同档正常候选之后：Top-N 名额有限，不能让一个可能是版本号的
+        # 字面挤掉一个确凿的后端地址（见 Lead.shape_uncertain）。仍参选，只是末位。
+        1 if shape_uncertain else 0,
         endpoint.value.lower() if endpoint.kind == "domain" else endpoint.value,
     )
 
@@ -89,6 +94,11 @@ def _select_targets_with_stats(report: Report, max_targets: int) -> tuple[list[E
     repack_excluded = 0
 
     lead_rank: dict[tuple[str, str], int] = {}
+    # 形态存疑（Lead.shape_uncertain）的值：仍参选，但排在同档正常候选之后。
+    # ★取"任一条 lead 不存疑即不存疑"：同值多条 lead 时，只要有一条是靠地址性证据立住的，
+    #   这个值就不该被形态存疑那条拖到末位。
+    shape_ok: set[tuple[str, str]] = set()
+    shape_suspect: set[tuple[str, str]] = set()
     for lead in report.leads:
         if lead.advice != "建议调证" or lead.category.value not in {"DOMAIN", "IP"}:
             continue
@@ -97,20 +107,21 @@ def _select_targets_with_stats(report: Report, max_targets: int) -> tuple[list[E
             continue
         key = (lead.category.value.lower(), lead.value.lower())
         lead_rank[key] = min(lead_rank.get(key, 9), {"HIGH": 0, "MEDIUM": 1, "LOW": 2}.get(lead.confidence.value, 3))
+        (shape_suspect if getattr(lead, "shape_uncertain", False) else shape_ok).add(key)
 
-    candidates: list[tuple[Endpoint, int]] = []
+    candidates: list[tuple[Endpoint, int, bool]] = []
     for endpoint in report.endpoints:
         if endpoint.kind not in {"domain", "ip"} or endpoint.is_private:
             continue
         key = (endpoint.kind, endpoint.value.lower())
         if key not in lead_rank:
             continue
-        candidates.append((endpoint, lead_rank[key]))
+        candidates.append((endpoint, lead_rank[key], key in shape_suspect and key not in shape_ok))
 
-    candidates.sort(key=lambda item: _target_rank(item[0], item[1]))
+    candidates.sort(key=lambda item: _target_rank(item[0], item[1], item[2]))
     ordered: list[Endpoint] = []
     seen: set[tuple[str, str]] = set()
-    for endpoint, _rank in candidates:
+    for endpoint, _rank, _suspect in candidates:
         value = endpoint.value.lower() if endpoint.kind == "domain" else endpoint.value
         key = (endpoint.kind, value)
         if key in seen:

@@ -87,6 +87,9 @@ def report_from_dict(payload: Mapping[str, object]) -> Report:
                 source_refs=_evidences(item.get("source_refs")),
                 notes=str(item.get("notes", "")),
                 advice=str(item.get("advice", "")),
+                # ★必须往返：closure/letters 都从磁盘上的 report.json 走，丢了这个字段
+                #   等于形态存疑的保留意见在 `case close` / `letters` 那一步凭空消失。
+                shape_uncertain=bool(item.get("shape_uncertain", False)),
             )
         )
 
