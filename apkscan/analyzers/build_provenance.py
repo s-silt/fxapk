@@ -327,10 +327,32 @@ def _split_root(path: str) -> tuple[str, str | None, str | None, bool]:
     return f"/{head}", None, None, False
 
 
+#: 构建标识段若是**媒体/测试码流文件名**，说明这条根本不是构建环境路径，而是某个
+#: 编解码库内嵌的测试资源路径（如 ``c:/content/test-UHD-HEVC_01_FMV_Med_track1.hvc``）。
+#: ★实测代价：该条被判 self_hosted 后，两个**互不相干**的样本因共有这份测试码流而
+#: 在跨案构建环境反查里聚成同一簇——把无关案件串到一起，正是串案分析最忌讳的假阳性。
+_MEDIA_ASSET_SUFFIXES: tuple[str, ...] = (
+    ".hvc", ".h264", ".h265", ".hevc", ".avc", ".yuv", ".ivf", ".obu",
+    ".mp4", ".mkv", ".webm", ".ts", ".m4a", ".aac", ".opus", ".wav", ".pcm",
+    ".bin", ".dat", ".raw",
+)
+
+
+def _looks_like_asset_file(identifier: str) -> bool:
+    """构建标识段看着像个媒体/测试资源**文件**（而非目录）→ 不是构建环境。"""
+    return identifier.lower().endswith(_MEDIA_ASSET_SUFFIXES)
+
+
 def classify_path(path: str) -> ClassifiedPath:
     """按**构建根**分层（绝不看整条路径里的项目名——见模块 docstring 的踩坑记录）。"""
     low = path.lower()
     root, identifier, username, eligible = _split_root(path)
+    # 测试码流/媒体资源路径不是构建环境：拿它串案会把互不相干的样本聚成一簇。
+    if identifier and _looks_like_asset_file(identifier):
+        return ClassifiedPath(
+            path=path, tier=TIER_UNKNOWN, root=root, username=username,
+            origin="媒体/测试码流资源路径（编解码库内嵌的测试样例，非构建环境）",
+        )
     # 撤回名单先于一切判据：这些根查过且结论是"证据不足"，不该再被任何下游规则拾起来
     # 改判（无论改判成第三方还是自建）。
     for prefix, note in _WITHDRAWN_THIRD_PARTY_ROOTS:

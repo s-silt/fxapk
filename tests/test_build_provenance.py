@@ -420,6 +420,50 @@ def test_ci_marker_matched_on_root_only_not_whole_path() -> None:
     assert c.tier == bp.TIER_SELF_HOSTED
 
 
+def test_media_asset_path_is_not_a_build_environment() -> None:
+    """★测试码流/媒体资源路径不得判为自建构建环境。
+
+    实测代价：一份编解码库内嵌的 HEVC 测试码流路径被判 self_hosted 后，
+    两个**互不相干**的样本因共有它而在跨案构建环境反查里聚成同一簇——
+    把无关案件串到一起，是串案分析最忌讳的假阳性。
+    """
+    c = classify_path("c:/content/test-UHD-HEVC_01_FMV_Med_track1.hvc")
+    assert c.tier == TIER_UNKNOWN, "媒体测试资源被当成了构建环境"
+    assert "测试码流" in (c.origin or "")
+
+
+@pytest.mark.parametrize("path", [
+    "c:/content/clip.h265",
+    "d:/assets/sample_stream.ivf",
+    "/opt/media/track1.yuv",
+])
+def test_media_asset_suffixes_are_rejected(path: str) -> None:
+    assert classify_path(path).tier == TIER_UNKNOWN
+
+
+def test_real_project_root_not_hit_by_asset_guard() -> None:
+    """对照：真·私有项目根不得被媒体资源守卫误伤。"""
+    c = classify_path("D:/buildroot/appsdk/sdk/bootstrap.go")
+    assert c.tier == TIER_SELF_HOSTED
+    assert c.identifier == "appsdk"
+
+
+def test_corpus_build_env_lookup_is_reachable_from_cli() -> None:
+    """★接线锁：构建环境反查必须有 CLI 出口。
+
+    ``find_by_build_env`` / ``shared_build_environments`` 实现完备却**零调用方**——
+    提取、解析、入库、反查全做了，就是没人调，于是同一开发环境跨案这件事
+    始终要靠人工比对才能发现。只测库函数挡不住这种「写了但没接上」。
+    """
+    import inspect
+
+    from apkscan.commands import corpus as cmd
+
+    src = inspect.getsource(cmd)
+    assert "find_by_build_env" in src, "corpus seen 没有接构建环境反查"
+    assert "shared_build_environments" in src, "没有跨样本构建环境簇的 CLI 出口"
+
+
 def test_total_budget_stops_scanning_remaining_libs(monkeypatch: pytest.MonkeyPatch) -> None:
     # 第一库耗尽累计预算 → 第二库不读（其中的第三方路径不出现在 meta）。
     lib_a = b"\x00" * 64 + _SYN_SELF_HOSTED.encode() + b"\x00"
