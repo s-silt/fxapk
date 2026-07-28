@@ -484,14 +484,20 @@ def test_static_dns_and_runtime_tls_coexist_as_parallel_edges() -> None:
 
 
 def test_malformed_remote_endpoints_are_skipped_not_crashing() -> None:
-    # non-strings, empties, port-less / bracketed / garbage entries must be skipped (never
-    # raise — a raise would drop the WHOLE endpoint incl. its valid edges).
+    # non-strings, empties, port-less / garbage entries must be skipped (never raise — a
+    # raise would drop the WHOLE endpoint incl. its valid edges).
+    #
+    # NOTE the bracket form is NO LONGER malformed: `[v6]:port` is now the canonical wire
+    # format both pcap and capture emit for remote_endpoints, and infra.split_hostport is
+    # the single parser both sides share. It used to be listed as garbage here precisely
+    # because the old local rpartition(":") could not read it — which is exactly how every
+    # IPv6 runtime attribution edge got silently dropped.
     ep = _ep("api.example.com", "domain", {"runtime": {"sni": ["api.example.com"], "remote_endpoints": [
-        443, None, {"ip": "x"}, "", ":", "garbage:443", "1.2.3.4:99999", "[2001:db8::1]:443",
-        "203.0.113.7:443"]}})
+        443, None, {"ip": "x"}, "", ":", "garbage:443", "1.2.3.4:99999", "[2001:db8::1",
+        "[2001:db8::1]:443", "203.0.113.7:443"]}})
     blob = _build(ep)
     served = {t for rel, _s, t in _edges(blob) if rel == "served_at"}
-    assert served == {"203.0.113.7"}  # only the one well-formed entry survives
+    assert served == {"203.0.113.7", "2001:db8::1"}  # the two well-formed entries survive
     assert blob["skipped"] == []  # skipped-per-endpoint list stays empty (no raise)
 
 

@@ -801,6 +801,60 @@ def _strip_port_suffix(value: str) -> str:
     return bare
 
 
+#: 合法端口区间（与 config/port_norm.py 同口径）。
+_PORT_MIN_VALID = 1
+_PORT_MAX_VALID = 65535
+
+
+def format_hostport(ip: str, port: int | str) -> str:
+    """把 ``(ip, port)`` 拼成 ``enrichment.runtime.remote_endpoints`` 的规范字面。
+
+    IPv6 加 RFC 3986 方括号，IPv4 原样。**这个字段是跨模块契约**——pcap 与 capture 两条
+    生产路径写它，attribution 与 port-normalize 两处读它。四方必须用这里这一对函数，
+    否则又会出现"一个字段两套格式"（曾经真的出现过：pcap 改了括号、capture 还在裸拼，
+    attribution 于是把 ``[2606:...]`` 当地址解析、IPv6 的运行时归因边静默丢失）。
+    """
+    host = str(ip)
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+
+def split_hostport(value: object) -> tuple[str, int] | None:
+    """:func:`format_hostport` 的逆操作：``"ip:port"`` / ``"[v6]:port"`` → ``(ip, port)``。
+
+    坏形状 / 端口非法 / 剥出来不是合法地址 → ``None``（跳过该条，绝不猜）。
+
+    ★裸 IPv6 带端口（``2001:db8::1:443``，旧产物形态）本身有歧义——末段既可能是端口，也可能
+      是地址的最后一组。这里按"末段当端口"解析并**要求剩余部分是合法地址**：真采集数据一定带
+      端口，所以这个取舍对生产数据是对的；手编的无端口 IPv6 可能被误切，那正是要用括号形态的原因。
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+
+    if text.startswith("["):                      # [v6]:port —— 无歧义，先走这条
+        inner, close, rest = text[1:].partition("]")
+        if not close or not rest.startswith(":"):
+            return None
+        head, port_s = inner.strip(), rest[1:]
+    else:
+        if ":" not in text:
+            return None
+        head, _, port_s = text.rpartition(":")
+
+    if not head or not port_s.isdecimal():
+        return None
+    port = int(port_s)
+    if not (_PORT_MIN_VALID <= port <= _PORT_MAX_VALID):
+        return None
+    try:
+        ipaddress.ip_address(head)
+    except ValueError:
+        return None
+    return head, port
+
+
 def match_key(kind_or_category: str, value: str) -> str:
     """Lead ↔ Endpoint 配对用的**唯一**规范化值。
 

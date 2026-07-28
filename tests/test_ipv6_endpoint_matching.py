@@ -100,6 +100,49 @@ def test_malformed_bracket_is_not_guessed() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_remote_endpoints_roundtrip_through_the_shared_parser() -> None:
+    """★格式化与解析必须是一对：写方 format_hostport、读方 split_hostport，全仓只此一份。
+
+    上一轮的回归就出在这里——pcap 侧改成了括号形态，attribution 侧还在本地
+    ``rpartition(":")``，于是拿到 ``"[2606:...]"`` 解析不出地址，IPv6 的运行时归因边**静默**丢光。
+    """
+    for ip, port in ((_V6, 443), (_V6_FULL, 8443), ("8.138.102.85", 31861), ("::1", 80)):
+        wire = infra.format_hostport(ip, port)
+        assert infra.split_hostport(wire) == (ip, port), f"{wire} 无法还原回 ({ip}, {port})"
+
+    # 旧产物的裸拼形态也要能解析（下游读到的历史报告里就是这个）
+    assert infra.split_hostport("8.138.102.85:31861") == ("8.138.102.85", 31861)
+    # 坏形状一律 None，绝不猜
+    for bad in ("", "no-colon", "[2001:db8::1:443", "1.2.3.4:0", "1.2.3.4:99999",
+                "1.2.3.4:abc", "not-an-ip:80", None, 123):
+        assert infra.split_hostport(bad) is None, f"{bad!r} 不该被解析成端点"
+
+
+def test_ipv6_runtime_endpoint_reaches_attribution() -> None:
+    """★入口级链路：pcap 回灌 → runtime.remote_endpoints → attribution 解析出 IPv6 落地 IP。
+
+    这条才是能逮住"格式改了但消费方没跟上"的测试。上一轮我只测到 match_key 与 letters，
+    attribution 那一环没走，于是自己引入的回归自己没发现——由 codex 复审指出。
+    """
+    from apkscan.attribution import assemble
+
+    flows = [
+        pcap_ingest.Flow(proto="tcp", src_ip="192.168.10.233", src_port=45678,
+                         dst_ip=_V6_FULL, dst_port=8443, packets=20,
+                         payload_bytes=1500, flags={"syn"}, sni={"api.example.test"}),
+        pcap_ingest.Flow(proto="tcp", src_ip=_V6_FULL, src_port=8443,
+                         dst_ip="192.168.10.233", dst_port=45678, packets=18,
+                         payload_bytes=900, flags={"synack"}),
+    ]
+    eps = pcap_ingest._runtime_endpoint_dicts(pcap_ingest.PcapSummary(flows=flows))
+    rt = next(e for e in eps if e["value"] == _V6_FULL)["enrichment"]["runtime"]
+
+    assert rt["remote_endpoints"] == [f"[{_V6_FULL}]:8443"], "回灌写出的不是括号形态"
+    # attribution 侧必须能从同一个字面里取回裸 IPv6
+    assert assemble._ip_from_hostport(rt["remote_endpoints"][0]) == _V6_FULL, \
+        "attribution 解析不出 IPv6 落地 IP —— 运行时归因边会被静默丢掉"
+
+
 def test_ipv6_lead_reaches_the_letter_attribution_chain() -> None:
     """★letters 侧：括号形态的 IPv6 Lead 要能关联上裸 IPv6 Endpoint 的五层归属链。"""
     from apkscan.report import letters

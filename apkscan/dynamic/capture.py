@@ -341,11 +341,14 @@ def _annotate_runtime_endpoints(
             continue
 
         # A2：查归因用含 proto 族的键（"proto/ip:port"，对齐 pcap_app_attribution，避免 tcp/udp 同 ip:port
-        #   覆盖）；但写回 remote_endpoints 仍用 "ip:port"——下游 assemble 的 tls_sni/network_flow 边（域名→落地
-        #   IP，最强运行时真值信号）按 "ip:port" 解析该列表，不能改其契约（Fable 复审 HIGH：否则真值边被静默丢）。
+        #   覆盖——纯内部 join 键，两侧同法拼接即可）；写回 remote_endpoints 则必须走
+        #   infra.format_hostport：那是**跨模块契约字段**，下游 assemble 的 tls_sni/network_flow 边
+        #   （域名→落地 IP，最强运行时真值信号）用 infra.split_hostport 解析它。
+        #   ★两条生产路径（本处与 pcap_ingest）必须同一个格式化函数：曾经 pcap 侧改成 IPv6 括号形态、
+        #     这里还在裸拼，同一个字段两套格式，assemble 把 "[2606:...]" 当地址解析 → IPv6 归因边全丢。
         attr_keys = [f"{remote.proto}/{remote.ip}:{remote.port}" for remote in matched]
         attributed = [pcap_app_attr[k] for k in attr_keys if isinstance(pcap_app_attr.get(k), dict)]
-        endpoint_keys = sorted({f"{remote.ip}:{remote.port}" for remote in matched})
+        endpoint_keys = sorted({infra.format_hostport(remote.ip, remote.port) for remote in matched})
         # A2 时序穿透（供 network_attribution 的 SUBSEQUENT_OVERSEAS 时序关联）：该端点最早被接触的时刻。
         #   0.0 视作未知（pcap_ingest first_ts 默认 0.0）→ 过滤；只收有限正值（防 NaN/inf 让下游 max() 顺序敏感
         #   或垃圾值恒产信号）；全未知则 None。不改 remote_endpoints 契约。

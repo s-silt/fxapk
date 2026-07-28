@@ -1402,8 +1402,8 @@ def format_peer(ip: str, port: int, proto: str = "") -> str:
       IPv6 的运行时 Lead 永远匹配不上裸 IPv6 Endpoint —— target 选择、closure 回写、
       letters 归属链三处同时击穿（codex P1）。IPv4 保持原样，不动既有形态。
     """
-    host = f"[{ip}]" if ":" in str(ip) else str(ip)
-    return f"{host}:{port}/{proto}" if proto else f"{host}:{port}"
+    hostport = infra.format_hostport(ip, port)
+    return f"{hostport}/{proto}" if proto else hostport
 
 
 def sni_camouflage_carriers(summary: PcapSummary) -> dict[str, list[str]]:
@@ -1889,6 +1889,10 @@ def _merge_runtime_endpoint_dicts(payload: dict, fresh: list[dict]) -> int:
     return added
 
 
+#: ``meta["runtime_pcap_merges"]`` 保留的指纹条数上限（每条 64 字符）。
+_MAX_MERGE_FINGERPRINTS = 64
+
+
 def summary_merge_fingerprint(summary: PcapSummary) -> str:
     """这份采集结果的内容指纹，用于「同一份 pcap 别并第二次」。
 
@@ -1896,13 +1900,30 @@ def summary_merge_fingerprint(summary: PcapSummary) -> str:
       但同一份 pcap 重复 ``--into`` 同一个 report.json 时，这个求和就变成了凭空翻倍——
       报告不幂等，而字节数正是闭环判"有无双向载荷"的输入。指纹按内容算（不按文件路径），
       所以两份**不同**的采集仍会正常累加，只挡住重复导入同一份。
+
+    ★指纹必须覆盖**这次合并会写进报告的全部内容**，不只是计数。此前只收统计量，于是
+      「端点与字节数完全相同、但第二次多解出了 SNI」被误判成重复：Lead 侧不受闸控制、照常
+      拿到 ``sni_masquerade``，端点侧却被整体跳过、``runtime.sni`` 一片空白——两边说法不一致。
+      DNS-only 的采集更明显：查询数量相同而内容不同，旧指纹分不出来。故 SNI / JA3 / ALPN /
+      QUIC 版本与 DNS 查询名全部入指纹。**漏收一个字段，就等于把那个字段的更新静默丢掉。**
     """
     parts = [
         f"{re_.ip}|{re_.port}|{re_.proto}|{re_.state}|{re_.out_bytes}|{re_.in_bytes}|"
         f"{re_.connection_count}|{re_.packets}|{re_.first_ts}|{re_.last_ts}"
+        f"|sni={','.join(sorted(re_.sni))}"
+        f"|ja3={','.join(sorted(re_.ja3))}"
+        f"|alpn={','.join(sorted(re_.alpn))}"
+        f"|quic={','.join(sorted(re_.quic_versions))}"
         for re_ in remote_endpoints(summary)
     ]
-    parts.append(f"flows={len(summary.flows)}|dns={len(summary.dns_queries)}")
+    parts.append("dnsq=" + ",".join(sorted(str(q) for q in summary.dns_queries)))
+    # DnsRecord 的 answers 会作为 TXT 配置下发通道等证据入报告，内容变了就不是同一份采集。
+    parts.append("dnsr=" + ",".join(sorted(
+        f"{r.qname}/{r.qtype}/{r.rcode}/"
+        + "+".join(f"{a.get('type')}:{a.get('value')}" for a in (r.answers or []))
+        for r in summary.dns_records
+    )))
+    parts.append(f"flows={len(summary.flows)}")
     blob = "\n".join(sorted(parts)).encode("utf-8", "replace")
     return hashlib.sha256(blob).hexdigest()
 
@@ -2041,7 +2062,8 @@ def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:
         fingerprint = summary_merge_fingerprint(summary)
         merged_fps = meta.get("runtime_pcap_merges")
         if not isinstance(merged_fps, list):
-            merged_fps = []
+            merged_fps = []          # 旧报告没有该键 / 键被写坏 → 安全重建
+        merged_fps = [f for f in merged_fps if isinstance(f, str)]
         already = fingerprint in merged_fps
 
         # 端点侧：闭环排序、五层归属、外部富化都以 endpoints 为对象，不补这一步等于白抓。
@@ -2053,6 +2075,11 @@ def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:
         else:
             ep_added = _merge_runtime_endpoint_dicts(payload, fresh_eps)
             merged_fps.append(fingerprint)
+            # 有上限：只留最近 _MAX_MERGE_FINGERPRINTS 条。反复往同一份报告回灌不同采集时，
+            # 这个列表会无界膨胀（每条 64 字符）。超出上限后最老的那几份"失忆"、重并会重复累加，
+            # 这是有意的取舍——真实用法是一份报告并几次，而不是几百次。
+            if len(merged_fps) > _MAX_MERGE_FINGERPRINTS:
+                merged_fps = merged_fps[-_MAX_MERGE_FINGERPRINTS:]
             meta["runtime_pcap_merges"] = merged_fps
 
         # meta 侧：可见性据此判 runtime 这一维走没走过。不写就一直是"未做运行时观测"。

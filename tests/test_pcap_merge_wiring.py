@@ -331,6 +331,53 @@ def test_two_different_captures_still_accumulate(tmp_path: Path) -> None:
     assert after == before + 777, "不同的两份采集没有累加"
 
 
+def _one_flow_pair(sni: set[str] | None = None, out_b: int = 1200, in_b: int = 800):
+    """一对同端点的进出向 flow，统计量固定、只有 SNI 可变——用来单独考指纹的分辨力。"""
+    return pcap_ingest.PcapSummary(flows=[
+        pcap_ingest.Flow(proto="tcp", src_ip="192.168.10.233", src_port=41000,
+                         dst_ip="8.163.60.2", dst_port=5479, packets=20,
+                         payload_bytes=out_b, flags={"syn"}, sni=set(sni or ())),
+        pcap_ingest.Flow(proto="tcp", src_ip="8.163.60.2", src_port=5479,
+                         dst_ip="192.168.10.233", dst_port=41000, packets=17,
+                         payload_bytes=in_b, flags={"synack"}),
+    ])
+
+
+def test_fingerprint_distinguishes_captures_that_differ_only_in_sni(tmp_path: Path) -> None:
+    """★统计量完全相同、只是第二次多解出了 SNI —— 不得被幂等闸当成重复。
+
+    此前指纹只收端点统计与 flows/DNS 计数，这两份采集指纹相同，于是端点侧被整体跳过：
+    Lead 侧照常拿到 sni_masquerade，端点侧却连 runtime.sni 都没有，同一份报告两种说法
+    （codex 二轮 P1）。上一版之所以测试还绿，是因为我恰好改了字节数——那是巧合，不是判据。
+    """
+    plain = _one_flow_pair()
+    with_sni = _one_flow_pair({"player.mediastatic-cdn.com"})
+
+    assert pcap_ingest.summary_merge_fingerprint(plain) != \
+        pcap_ingest.summary_merge_fingerprint(with_sni), "只差 SNI 的两份采集指纹撞了"
+
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps(_STATIC, ensure_ascii=False), encoding="utf-8")
+    pcap_ingest.merge_into_report_json(str(p), plain)
+    pcap_ingest.merge_into_report_json(str(p), with_sni)
+
+    rt = _runtime_of(json.loads(p.read_text(encoding="utf-8")), "8.163.60.2")
+    assert rt["sni"] == ["player.mediastatic-cdn.com"], "第二次采集的 SNI 被幂等闸吞掉了"
+    assert rt["sni_masquerade"] == ["player.mediastatic-cdn.com"], "端点侧没拿到伪装标记"
+
+
+def test_fingerprint_distinguishes_dns_only_captures() -> None:
+    """DNS-only 采集：查询数量相同、内容不同，也必须分得开（否则整批 DNS 证据被吞）。"""
+    a = pcap_ingest.PcapSummary(dns_queries={"a.example.test"})
+    b = pcap_ingest.PcapSummary(dns_queries={"b.example.test"})
+    assert pcap_ingest.summary_merge_fingerprint(a) != pcap_ingest.summary_merge_fingerprint(b)
+
+    # 同一份采集重复算 → 指纹稳定（幂等闸的前提）
+    assert pcap_ingest.summary_merge_fingerprint(a) == pcap_ingest.summary_merge_fingerprint(
+        pcap_ingest.PcapSummary(dns_queries={"a.example.test"})
+    )
+
+
 def test_merge_never_downgrades_state_or_proto() -> None:
     """★合并只应增加信息：已确证的 established / mixed 不得被后并入的弱观测冲掉。"""
     strong = {"state": "established", "proto": "mixed", "out_bytes": 100, "in_bytes": 100}
