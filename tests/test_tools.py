@@ -53,6 +53,7 @@ def test_frozen_false_when_not_set(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.real_adb_path
 def test_adb_path_frozen_uses_app_dir_adb_when_present(monkeypatch, tmp_path):
     """frozen 且 exe 同目录有 adb.exe（无 _MEIPASS）→ 返回该绝对路径（不看 PATH）。"""
     _set_frozen(monkeypatch, True)
@@ -70,6 +71,7 @@ def test_adb_path_frozen_uses_app_dir_adb_when_present(monkeypatch, tmp_path):
     assert result == str(adb_file.resolve())
 
 
+@pytest.mark.real_adb_path
 def test_adb_path_frozen_uses_meipass_internal_when_present(monkeypatch, tmp_path):
     """frozen 且 adb 在 sys._MEIPASS（PyInstaller 6.x onedir 的 _internal/）→ 返回它。
 
@@ -92,6 +94,7 @@ def test_adb_path_frozen_uses_meipass_internal_when_present(monkeypatch, tmp_pat
     assert tools.adb_path() == str(adb_file)
 
 
+@pytest.mark.real_adb_path
 def test_adb_path_frozen_falls_back_to_path_when_no_local_adb(monkeypatch, tmp_path):
     """frozen 但 _MEIPASS / 同目录均无 adb.exe → 回退 PATH。"""
     _set_frozen(monkeypatch, True)
@@ -104,6 +107,7 @@ def test_adb_path_frozen_falls_back_to_path_when_no_local_adb(monkeypatch, tmp_p
     assert tools.adb_path() == "/path/adb"
 
 
+@pytest.mark.real_adb_path
 def test_adb_path_frozen_returns_empty_when_neither(monkeypatch, tmp_path):
     """frozen、_MEIPASS / 同目录均无 adb、PATH 也无 → ""。"""
     _set_frozen(monkeypatch, True)
@@ -116,6 +120,7 @@ def test_adb_path_frozen_returns_empty_when_neither(monkeypatch, tmp_path):
     assert tools.adb_path() == ""
 
 
+@pytest.mark.real_adb_path
 def test_adb_path_source_uses_which(monkeypatch):
     """源码态：直接走 shutil.which。"""
     _set_frozen(monkeypatch, False)
@@ -123,6 +128,7 @@ def test_adb_path_source_uses_which(monkeypatch):
     assert tools.adb_path() == "/usr/bin/adb"
 
 
+@pytest.mark.real_adb_path
 def test_adb_path_source_empty_when_missing(monkeypatch):
     _set_frozen(monkeypatch, False)
     monkeypatch.setattr(tools.shutil, "which", lambda name: None)
@@ -176,6 +182,7 @@ def test_frida_invocation_unknown_tool_warns_but_returns(monkeypatch, caplog):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.real_adb_path
 def test_has_adb_reflects_adb_path(monkeypatch):
     _set_frozen(monkeypatch, False)
     monkeypatch.setattr(tools.shutil, "which", lambda name: "/usr/bin/adb" if name == "adb" else None)
@@ -264,6 +271,7 @@ class _FakeProc:
         self.returncode = returncode
 
 
+@pytest.mark.real_adb_path
 def test_kill_adb_server_runs_kill_when_adb_available(monkeypatch):
     """adb 可用 → 跑 [adb, "kill-server"]，rc=0 → True。"""
     monkeypatch.setattr(tools, "adb_path", lambda: "/x/adb")
@@ -283,6 +291,7 @@ def test_kill_adb_server_runs_kill_when_adb_available(monkeypatch):
     assert recorded["kwargs"]["timeout"] == 5.0
 
 
+@pytest.mark.real_adb_path
 def test_kill_adb_server_frozen_uses_bundled_adb(monkeypatch, tmp_path):
     """frozen 且包内有 adb.exe → kill 用的是包内 adb 路径（与起 server 的同一个 adb）。"""
     _set_frozen(monkeypatch, True)
@@ -307,6 +316,7 @@ def test_kill_adb_server_frozen_uses_bundled_adb(monkeypatch, tmp_path):
     assert recorded["args"] == [str(adb_file.resolve()), "kill-server"]
 
 
+@pytest.mark.real_adb_path
 def test_kill_adb_server_returns_false_when_no_adb(monkeypatch):
     """adb 不可用 → 不调 subprocess.run、返回 False（绝不反而把 server 起起来）。"""
     monkeypatch.setattr(tools, "adb_path", lambda: "")
@@ -318,6 +328,7 @@ def test_kill_adb_server_returns_false_when_no_adb(monkeypatch):
     assert tools.kill_adb_server() is False
 
 
+@pytest.mark.real_adb_path
 def test_kill_adb_server_false_when_nonzero_returncode(monkeypatch):
     """kill-server 退出码非 0 → False（不假成功）+ 不抛。"""
     monkeypatch.setattr(tools, "adb_path", lambda: "/x/adb")
@@ -325,6 +336,7 @@ def test_kill_adb_server_false_when_nonzero_returncode(monkeypatch):
     assert tools.kill_adb_server() is False
 
 
+@pytest.mark.real_adb_path
 def test_kill_adb_server_swallows_oserror(monkeypatch, caplog):
     """subprocess.run 抛 OSError → 返回 False + logging（不抛）。"""
     import logging
@@ -340,6 +352,7 @@ def test_kill_adb_server_swallows_oserror(monkeypatch, caplog):
     assert any("kill-server" in r.message for r in caplog.records)
 
 
+@pytest.mark.real_adb_path
 def test_kill_adb_server_swallows_timeout(monkeypatch, caplog):
     """subprocess.run 超时（TimeoutExpired）→ 返回 False + logging（不抛）。"""
     import logging
