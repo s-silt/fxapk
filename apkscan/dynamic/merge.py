@@ -2266,6 +2266,19 @@ def merge_and_rerender(
             for dest_key, src_key in step.stat_map:
                 stats[dest_key] = sub.get(src_key, 0)
 
+    # 可见性快照是**派生视图**，不是证据：上面这些 merge 步骤刚写入 runtime_merged /
+    # capture_quality / capture_signals，而它们正是 visibility 判定运行时那一维的输入。
+    # 不重算，最终报告里就会 meta.runtime_merged=True 却 visibility.runtime='unavailable'
+    # —— 同一个文件里自相矛盾，且 next_actions 还在建议"去抓包"。
+    # assess 自带兜底、绝不抛，不破坏本函数「异常不外抛」的契约。
+    try:
+        from apkscan.core import visibility as _visibility
+
+        report.meta["visibility"] = _visibility.assess({"meta": report.meta})
+        stats["visibility_refreshed"] = True
+    except Exception:  # noqa: BLE001 - 重算失败不得影响已完成的合并
+        logger.exception("[merge] 可见性重求值失败，保留分析期快照")
+
     fmts = list(formats) if formats else list(_DEFAULT_FORMATS)
     try:
         out_path.mkdir(parents=True, exist_ok=True)
