@@ -152,18 +152,24 @@ def corpus_ls(
 #: seen --by 的列表维度取值（非标量 SEEN_FIELDS，走专用列表反查）。
 _CONFIG_OBJECT_BY = "config-object"
 _SO_SHA256_BY = "so_sha256"
+#: 自建构建环境标识。★比 .so 哈希更耐用：同族样本的 .so 名与 sha256 逐份随机化，
+#: 而构建路径是编译器写进 __FILE__ 的，改名/重打包/重签名都动不了它。
+_BUILD_ENV_BY = "build-env"
 
 
 @corpus_app.command("seen")
 def corpus_seen(
-    value: str = typer.Argument(..., help="要反查的值（样本哈希 / 包名 / 签名证书摘要 / 配置对象 url|sha256 / .so sha256）。"),
+    value: str = typer.Argument(
+        ...,
+        help="要反查的值（样本哈希 / 包名 / 签名证书摘要 / 配置对象 url|sha256 / .so sha256 / 构建环境标识）。",
+    ),
     by: str = typer.Option(
         "sample_sha256", "--by",
-        help="按哪个字段查：sample_sha256 | package_name | sign_sha256 | config-object | so_sha256。",
+        help="按哪个字段查：sample_sha256 | package_name | sign_sha256 | config-object | so_sha256 | build-env。",
     ),
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
-    """见过没？按样本哈希 / 包名 / 共享签名证书 / 共享远程配置对象 / **共享 .so 家族指纹** 一击反查库内记录。"""
+    """见过没？按样本哈希 / 包名 / 共享签名证书 / 共享远程配置对象 / 共享 .so 家族指纹 / **自建构建环境** 一击反查库内记录。"""
     root = _resolve_corpus(corpus)
     if by == _CONFIG_OBJECT_BY:
         # 远程配置对象是列表维度（一样本可引用多个）：按 url 或 sha256 反查引用它的样本。
@@ -175,11 +181,19 @@ def corpus_seen(
         hits = _corpus.find_by_native_lib(_corpus.load_manifest(root), value)
         _print({"seen": bool(hits), "by": by, "value": value, "count": len(hits), "hits": hits})
         return
+    if by == _BUILD_ENV_BY:
+        # 构建环境标识是列表维度（一样本可含多个自建根）：按标识反查同一开发环境打出的样本。
+        # ★同标识即同一下游客户/同一订单主体，是并案依据——比「共用同一台服务器」严谨得多
+        #   （转租机器上同时跑多个互不相干的客户是常态，同机 ≠ 同团伙）。
+        hits = _corpus.find_by_build_env(_corpus.load_manifest(root), value)
+        _print({"seen": bool(hits), "by": by, "value": value, "count": len(hits), "hits": hits})
+        return
     # 拼错 --by 不能静默返回 seen=false（那是权威口吻的假阴性，取证致命）——直接拒跑。
     if by not in _corpus.SEEN_FIELDS:
         typer.echo(
             f"错误：--by 不支持的字段 {by!r}"
-            f"（支持：{' | '.join(_corpus.SEEN_FIELDS)} | {_CONFIG_OBJECT_BY} | {_SO_SHA256_BY}）。",
+            f"（支持：{' | '.join(_corpus.SEEN_FIELDS)} | {_CONFIG_OBJECT_BY} "
+            f"| {_SO_SHA256_BY} | {_BUILD_ENV_BY}）。",
             err=True,
         )
         raise typer.Exit(code=2)
@@ -204,6 +218,24 @@ def corpus_shared_native(
     """跨样本共享同一 .so（sha256 逐字节相同）被 ≥2 样本引用——家族串案强锚（核心业务库同构=同族）。"""
     root = _resolve_corpus(corpus)
     clusters = _corpus.shared_native_libs(_corpus.load_manifest(root))
+    _print({"count": len(clusters), "clusters": clusters})
+
+
+@corpus_app.command("shared-build-env")
+def corpus_shared_build_env(
+    corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
+) -> None:
+    """跨样本共享的**自建构建环境**簇：同一构建标识被 ≥2 样本使用 —— 同一开发环境/同一下游客户。
+
+    ★这是几种串案锚里最耐用的一条。同族样本的 .so 文件名逐份随机、sha256 逐份不同，
+    域名与服务器随时可换；而构建路径是编译器写进 ``__FILE__`` 的，
+    改文件名、重打包、重签名都动不了它。实测一个构建标识横跨 3 个不同案件。
+
+    ★与「共用同一台服务器」的区别：涉案服务器多为转租 IP，转租商同一台机器上跑多个
+    互不相干的客户是常态，**同机 ≠ 同团伙**；而同构建标识 = 同一订单主体，可据以并案。
+    """
+    root = _resolve_corpus(corpus)
+    clusters = _corpus.shared_build_environments(_corpus.load_manifest(root))
     _print({"count": len(clusters), "clusters": clusters})
 
 
