@@ -132,7 +132,7 @@ def _rdap_payload() -> dict[str, object]:
                     "vcard",
                     [
                         ["version", {}, "text", "4.0"],
-                        ["fn", {}, "text", "GoDaddy.com, LLC"],
+                        ["fn", {}, "text", "Example Registrar, LLC"],
                     ],
                 ],
             },
@@ -173,7 +173,7 @@ def test_rdap_success_extracts_fields(
     assert result.ok is True
     assert result.error is None
     assert result.data["source"] == "rdap"
-    assert result.data["registrar"] == "GoDaddy.com, LLC"
+    assert result.data["registrar"] == "Example Registrar, LLC"
     assert result.data["registrant"] == "Fraud Gateway Co"
     assert result.data["created"] == "2021-05-01T12:00:00Z"
     assert result.data["expires"] == "2026-05-01T12:00:00Z"
@@ -350,13 +350,13 @@ def test_rdap_result_written_to_cache(
     fake_requests: _FakeRequests, fake_whois: _FakeWhoisModule, _isolated_cache: Path
 ) -> None:
     fake_requests.response = _FakeResponse(_rdap_payload(), status_code=200)
-    RdapEnricher().enrich(_ep("cache-me.com"))
+    RdapEnricher().enrich(_ep("cache-me.example.com"))
 
     assert _isolated_cache.is_file()
     cache = json.loads(_isolated_cache.read_text(encoding="utf-8"))
-    assert "cache-me.com" in cache
-    assert cache["cache-me.com"]["registrar"] == "GoDaddy.com, LLC"
-    assert cache["cache-me.com"]["source"] == "rdap"
+    assert "cache-me.example.com" in cache
+    assert cache["cache-me.example.com"]["registrar"] == "Example Registrar, LLC"
+    assert cache["cache-me.example.com"]["source"] == "rdap"
 
 
 def test_rdap_cache_hit_skips_network(
@@ -376,7 +376,7 @@ def test_rdap_cache_hit_skips_network(
     )
     second = enr.enrich(_ep("repeat.com"))
     assert second.ok is True
-    assert second.data["registrar"] == "GoDaddy.com, LLC"
+    assert second.data["registrar"] == "Example Registrar, LLC"
     assert len(fake_requests.calls) == 1
 
 
@@ -408,7 +408,7 @@ def test_rdap_legacy_cache_without_timestamp_is_stale(
     fake_requests.response = _FakeResponse(_rdap_payload(), status_code=200)
     r = RdapEnricher().enrich(_ep("old.com"))
     assert len(fake_requests.calls) == 1
-    assert r.data["registrar"] == "GoDaddy.com, LLC"
+    assert r.data["registrar"] == "Example Registrar, LLC"
     assert "_cached_at" not in r.data
 
 

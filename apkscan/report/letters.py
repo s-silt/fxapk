@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -58,28 +59,67 @@ DISCLAIMER: str = (
 # ★这条警示的存在本身就是一次教训：产生它的那条判据原本只把保留意见写进 Lead.notes，并在
 #   提交说明里声称"办案人发函前看得到"。而本模块全文不读 notes——发出去的是一封干净的、
 #   指名某云厂商的调证函。保留意见必须自己走到出口，不能假定下游会去翻。
-SHAPE_UNCERTAIN_WARNING: str = (
-    "**⚠ 标的形态存疑：** 该值四段数字均偏低、且在样本中未见以地址形式使用（无端口、"
-    "不在 URL 内），形态上与版本号/序号无法区分；判定为地址是靠 ASN 归属落在云/IDC 托管段"
-    "推得，非样本内的地址性证据。**发函前请人工确认该值确系网络地址**——若实为版本串，"
-    "本函标的不存在，会向无关的云厂商索取一个并不存在的租户。"
+# ★出口中性的字句表示（唯一事实源）：每段标 ``em``（需强调）或 ``""``（普通）。
+#
+#   为什么不是一个 markdown 字符串：这套警示**有两个出口**——本模块（markdown）与 HTML 报告。
+#   若各出口各存一份字面，改了一处忘另一处就是必然（本项目已在 notes→出口 上栽过两次，见
+#   Lead.shape_uncertain / Lead.sni_masquerade 的注释）。字句只此一份，格式由各出口自己套。
+EmphasisSpans = tuple[tuple[str, str], ...]
+
+SHAPE_UNCERTAIN_WARNING_SPANS: EmphasisSpans = (
+    ("em", "⚠ 标的形态存疑："),
+    (
+        "",
+        " 该值四段数字均偏低、且在样本中未见以地址形式使用（无端口、"
+        "不在 URL 内），形态上与版本号/序号无法区分；判定为地址是靠 ASN 归属落在云/IDC 托管段"
+        "推得，非样本内的地址性证据。",
+    ),
+    ("em", "发函前请人工确认该值确系网络地址"),
+    ("", "——若实为版本串，本函标的不存在，会向无关的云厂商索取一个并不存在的租户。"),
 )
+
+
+def spans_to_markdown(spans: EmphasisSpans) -> str:
+    """强调段套 ``**``（markdown 出口）。"""
+    return "".join(f"**{text}**" if kind == "em" else text for kind, text in spans)
+
+
+def spans_to_plain(spans: EmphasisSpans) -> str:
+    """丢掉强调、只留字句（供不吃 markdown 的出口做纯文本比对/降级展示）。"""
+    return "".join(text for _, text in spans)
+
+
+SHAPE_UNCERTAIN_WARNING: str = spans_to_markdown(SHAPE_UNCERTAIN_WARNING_SPANS)
 
 # SNI 伪装警示（见 Lead.sni_masquerade）。与形态存疑并列渲染在受文机关之前。
 #
 # ★注意它**不质疑本函该不该发**——恰恰相反，伪装是加重信号。它防的是另一件事：读函的人看到
 #   证据摘要里的 SNI 是个知名域名，顺手把函发给被冒用的那家公司。那是把无关企业写成嫌疑方。
-_SNI_MASQUERADE_WARNING_TMPL: str = (
-    "**⚠ 该连接以 {names} 的名义握手：** 这些域名仅作为 SNI 出现在**非标准 TLS 端口**上，"
-    "系伪装、不代表本地址的运营方——被冒用域名的持有方与本案无关，**切勿向其发函**。"
-    "本函标的即上述 IP 与端口。伪装本身是自建协议混入背景流量的加重信号，非减分项。"
-)
+def sni_masquerade_warning_spans(
+    names: list[str], escape: Callable[[str], str] | None = None
+) -> EmphasisSpans:
+    """按借用的域名渲染伪装警示的**出口中性**字句段；空列表 → 空元组。
+
+    ``escape`` 决定域名（来自样本流量的外部数据）如何中性化，由出口注入：markdown 出口传
+    :func:`_md_safe`；HTML 出口传 ``None``——Jinja2 autoescape 会在渲染时转义，这里若再escape
+    一次会双重转义（``&amp;lt;`` 那种）。**两个出口都必须转义，只是转义发生在不同层。**
+    """
+    safe = [(escape or (lambda s: s))(str(n)) for n in names if str(n).strip()]
+    if not safe:
+        return ()
+    return (
+        ("em", f"⚠ 该连接以 {'、'.join(safe)} 的名义握手："),
+        ("", " 这些域名仅作为 SNI 出现在"),
+        ("em", "非标准 TLS 端口"),
+        ("", "上，系伪装、不代表本地址的运营方——被冒用域名的持有方与本案无关，"),
+        ("em", "切勿向其发函"),
+        ("", "。本函标的即上述 IP 与端口。伪装本身是自建协议混入背景流量的加重信号，非减分项。"),
+    )
 
 
 def sni_masquerade_warning(names: list[str]) -> str:
-    """按借用的域名渲染伪装警示；名字来自样本流量，须 _md_safe 转义。空列表 → 空串。"""
-    safe = [_md_safe(n) for n in names if str(n).strip()]
-    return _SNI_MASQUERADE_WARNING_TMPL.format(names="、".join(safe)) if safe else ""
+    """按借用的域名渲染伪装警示（markdown 出口）；名字来自样本流量，须 _md_safe 转义。空列表 → 空串。"""
+    return spans_to_markdown(sni_masquerade_warning_spans(names, escape=_md_safe))
 
 # 文件名安全化：去掉文件系统非法字符 + 控制字符。
 _UNSAFE_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
@@ -235,7 +275,7 @@ def _attribution_index(report: dict[str, Any]) -> dict[tuple[str, str], dict[str
     """从 ``report['endpoints']`` 建 ``{(kind, 归一化 value): attribution}``（仅含真有五层归因的端点）。
 
     ★键必须走 :func:`infra.match_key`（IP 剥 ``:port/proto``）：Lead 值形如
-      ``8.138.102.85:31861/tcp``，Endpoint 是裸 IP。此前按原值精确匹配，于是**恰恰是 pcap 实测
+      ``198.51.100.7:31861/tcp``，Endpoint 是裸 IP。此前按原值精确匹配，于是**恰恰是 pcap 实测
       到的真后端**——最该在调证函里写清归属的那个——永远关联不上五层归属链，正文只剩空壳。
       kind 一并入键，防域名与 IP 字面撞车。坏形状容错、绝不抛。
 
@@ -267,75 +307,117 @@ def _attribution_index(report: dict[str, Any]) -> dict[tuple[str, str], dict[str
     return index
 
 
-def _render_ip_chain(layer: dict[str, Any]) -> list[str]:
-    """把单个落地 IP 的五层渲染成 markdown 行：外部 RDAP/ASN 数据 _md_safe 转义防注入，未知层显式标注，
-    ★service_operator 恒标「不从基础设施推断」——防办案人把某层基础设施持有方误当 App 运营者。"""
+#: 五层归属链里「实际运营者」那一层的固定值。★恒为未知：五层模型里它**绝不**从基础设施
+#: 归属推断，任何出口都必须原样展示这句免责，否则读者会把某层基础设施持有方当成 App 运营者。
+SERVICE_OPERATOR_ROW: tuple[str, str] = (
+    "实际运营者",
+    "未知（★不从基础设施归属推断，须另行落查）",
+)
+
+
+def ip_chain_view(
+    layer: dict[str, Any], escape: Callable[[str], str] | None = None
+) -> tuple[str, tuple[tuple[str, str], ...]] | None:
+    """把单个落地 IP 的五层拆成**出口中性**的 ``(ip, ((标签, 值), ...))``；坏输入 → ``None``。
+
+    这是五层归属链字句的唯一事实源，本模块与 HTML 报告共用（此前只有本模块有，报告出口 0 命中）。
+    未知层一律显式标注（"未知" / "未识别专属特征" / "待结案 RDAP 补全"）——留空会被读成"没这一层"。
+
+    ``escape`` 由出口注入，用来中性化 RDAP/ASN org 名等**外部数据**：markdown 出口传
+    :func:`_md_safe`；HTML 出口传 ``None``（Jinja2 autoescape 在渲染时转义，此处再转会双重转义）。
+    标签与"未知"等字面是本模块自己的常量，不经 escape。
+    """
     if not isinstance(layer, dict):
-        return []
-    lines: list[str] = []
-    ip = _str_or_empty(layer.get("ip")).strip()
-    lines.append(f"- 落地 IP `{_md_safe(ip)}`：" if ip else "- 落地 IP（未知）：")
+        return None
+    esc = escape or (lambda s: s)
+    rows: list[tuple[str, str]] = []
 
     rh = _sub_dict(layer, "resource_holder")
     rh_name = _str_or_empty(rh.get("name")).strip()
     if rh_name:
-        src = _md_safe(_str_or_empty(rh.get("source")) or "RDAP")
-        lines.append(f"  - 资源登记方：{_md_safe(rh_name)}（{src}，置信{_conf_cn(rh)}）")
+        src = esc(_str_or_empty(rh.get("source")) or "RDAP")
+        rows.append(("资源登记方", f"{esc(rh_name)}（{src}，置信{_conf_cn(rh)}）"))
     elif rh.get("deferred") == "case_close":
         # ★analyze 阶段域名解析 IP 未查 IP-RDAP（结案逐个补）。显式标注"待补"而非笼统「未知」，
         #   免得读者把「未查询」与结案后真正的「查无登记方」（走下面 else 的未知）混同。
-        lines.append("  - 资源登记方：待结案 RDAP 补全（analyze 阶段未逐 IP 查询）")
+        rows.append(("资源登记方", "待结案 RDAP 补全（analyze 阶段未逐 IP 查询）"))
     else:
-        lines.append("  - 资源登记方：未知")
+        rows.append(("资源登记方", "未知"))
 
     on = _sub_dict(layer, "origin_network")
     asn = on.get("asn")
     if isinstance(asn, int):
         org = _str_or_empty(on.get("organization")).strip()
         cat = _str_or_empty(on.get("category")).strip()
-        org_part = f" {_md_safe(org)}" if org else ""
-        cat_part = f"，{_md_safe(cat)}" if cat and cat != "unknown" else ""
-        lines.append(f"  - 网络运营方(BGP ASN)：AS{asn}{org_part}{cat_part}（置信{_conf_cn(on)}）")
+        org_part = f" {esc(org)}" if org else ""
+        cat_part = f"，{esc(cat)}" if cat and cat != "unknown" else ""
+        rows.append(("网络运营方(BGP ASN)", f"AS{asn}{org_part}{cat_part}（置信{_conf_cn(on)}）"))
     else:
-        lines.append("  - 网络运营方(BGP ASN)：未知")
+        rows.append(("网络运营方(BGP ASN)", "未知"))
 
     hp = _sub_dict(layer, "hosting_provider")
     hp_name = _str_or_empty(hp.get("name")).strip()
     if hp_name:
-        role = _md_safe(_str_or_empty(hp.get("role")))
-        lines.append(f"  - 托管商/IDC：{_md_safe(hp_name)}（{role}，置信{_conf_cn(hp)}）")
+        role = esc(_str_or_empty(hp.get("role")))
+        rows.append(("托管商/IDC", f"{esc(hp_name)}（{role}，置信{_conf_cn(hp)}）"))
     else:
-        lines.append("  - 托管商/IDC：未知")
+        rows.append(("托管商/IDC", "未知"))
 
     edge = _sub_dict(layer, "edge_provider")
     edge_name = _str_or_empty(edge.get("name")).strip()
     if edge_name:
         tier = _EDGE_TIER_CN.get(str(edge.get("tier") or ""), "")
-        role = _md_safe(_str_or_empty(edge.get("role")))
+        role = esc(_str_or_empty(edge.get("role")))
         tail = f"，{tier}" if tier else ""
-        lines.append(f"  - 边缘/CDN/代理：{_md_safe(edge_name)}（{role}{tail}）")
+        rows.append(("边缘/CDN/代理", f"{esc(edge_name)}（{role}{tail}）"))
     else:
-        lines.append("  - 边缘/CDN/代理：未识别专属特征")
+        rows.append(("边缘/CDN/代理", "未识别专属特征"))
 
-    lines.append("  - 实际运营者：未知（★不从基础设施归属推断，须另行落查）")
-    return lines
+    rows.append(SERVICE_OPERATOR_ROW)
+    return esc(_str_or_empty(layer.get("ip")).strip()), tuple(rows)
 
 
-def _render_attribution_chain(attribution: dict[str, Any]) -> list[str]:
-    """把端点五层归因渲染成调证函「基础设施归属链」段的 markdown 行；空/坏输入 → 空 list，绝不抛。"""
+#: 归属链小标题字句（出口中性）。两个出口都必须带「勿据此认定 App 运营者」这半句。
+ATTRIBUTION_CHAIN_HEADING: str = "基础设施归属链（待核，按落地 IP 分层，勿据此认定 App 运营者）："
+
+
+def attribution_chain_view(
+    attribution: dict[str, Any], escape: Callable[[str], str] | None = None
+) -> tuple[list[tuple[str, tuple[tuple[str, str], ...]]], int]:
+    """把端点五层归因拆成 ``([每个落地 IP 的 ip_chain_view, ...], 未展示的 IP 数)``。
+
+    出口中性、且**限长在此统一施加**（:data:`_MAX_ATTR_IPS`）：CDN 动辄几十个解析 IP，
+    本模块与 HTML 报告都会被撑爆。放在这里而不是各出口自己截，是为了两个出口的"另有 N 个"
+    口径一致——否则一处截 5 一处不截，同一份归因在两个产物里数量不同。
+
+    空/坏输入 → ``([], 0)``，绝不抛（本模块铁律）。
+    """
     if not isinstance(attribution, dict):
-        return []
+        return [], 0
     ips = attribution.get("ips")
     if not isinstance(ips, list) or not ips:
-        return []
+        return [], 0
     # 只计有非空 IP 的落地记录（空 dict 等坏元素不占限长额度、不渲染垃圾）。
     valid = [x for x in ips if isinstance(x, dict) and _str_or_empty(x.get("ip")).strip()]
     if not valid:
-        return []
-    lines = ["**基础设施归属链（待核，按落地 IP 分层，勿据此认定 App 运营者）：**", ""]
+        return [], 0
+    views = []
     for layer in valid[:_MAX_ATTR_IPS]:
-        lines.extend(_render_ip_chain(layer))
-    remaining = len(valid) - min(len(valid), _MAX_ATTR_IPS)
+        view = ip_chain_view(layer, escape=escape)
+        if view is not None:
+            views.append(view)
+    return views, len(valid) - min(len(valid), _MAX_ATTR_IPS)
+
+
+def _render_attribution_chain(attribution: dict[str, Any]) -> list[str]:
+    """把端点五层归因渲染成本模块「基础设施归属链」段的 markdown 行；空/坏输入 → 空 list，绝不抛。"""
+    views, remaining = attribution_chain_view(attribution, escape=_md_safe)
+    if not views:
+        return []
+    lines = [f"**{ATTRIBUTION_CHAIN_HEADING}**", ""]
+    for ip, rows in views:
+        lines.append(f"- 落地 IP `{ip}`：" if ip else "- 落地 IP（未知）：")
+        lines.extend(f"  - {label}：{value}" for label, value in rows)
     if remaining > 0:
         lines.append(f"- （另有 {remaining} 个解析 IP 未列，完整见 report.json 的 enrichment.attribution）")
     lines.append("")

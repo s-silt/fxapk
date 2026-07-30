@@ -60,10 +60,10 @@ def fake_requests(monkeypatch: pytest.MonkeyPatch) -> _FakeRequests:
 def _ip_payload() -> dict[str, object]:
     """典型 rdap.org IP 响应骨架（RIR bootstrap）。"""
     return {
-        "handle": "45.76.0.0 - 45.76.255.255",
+        "handle": "198.51.100.37 - 198.51.100.42",
         "name": "VULTR-AS20473",
-        "startAddress": "45.76.0.0",
-        "endAddress": "45.76.255.255",
+        "startAddress": "198.51.100.37",
+        "endAddress": "198.51.100.42",
         "country": "US",
         "entities": [
             {"roles": ["abuse"], "vcardArray": ["vcard", [["fn", {}, "text", "Abuse Desk"]]]},
@@ -147,14 +147,14 @@ def test_extract_registrant_after_abuse_still_matched() -> None:
 
 def test_success_path_writes_cache(fake_requests: _FakeRequests, _isolated_cache: Path) -> None:
     fake_requests.response = _FakeResponse(_ip_payload())
-    res = IpRdapEnricher().enrich(Endpoint(value="45.76.1.1", kind="ip"))
+    res = IpRdapEnricher().enrich(Endpoint(value="198.51.100.38", kind="ip"))
     assert res.ok and res.data["netname"] == "VULTR-AS20473" and res.data["source"] == "rdap-ip"
     assert _isolated_cache.is_file()  # 成功写缓存
 
 
 def test_cache_hit_no_network(fake_requests: _FakeRequests) -> None:
     fake_requests.response = _FakeResponse(_ip_payload())
-    ep = Endpoint(value="45.76.1.1", kind="ip")
+    ep = Endpoint(value="198.51.100.38", kind="ip")
     IpRdapEnricher().enrich(ep)  # 首查写缓存
     fake_requests.calls.clear()
     res = IpRdapEnricher().enrich(ep)  # 二查命中缓存
@@ -168,14 +168,14 @@ def test_empty_ip_no_network(fake_requests: _FakeRequests) -> None:
 
 def test_network_failure_not_cached(fake_requests: _FakeRequests, _isolated_cache: Path) -> None:
     fake_requests.raises = ConnectionError("boom")
-    res = IpRdapEnricher().enrich(Endpoint(value="45.76.1.1", kind="ip"))
+    res = IpRdapEnricher().enrich(Endpoint(value="198.51.100.38", kind="ip"))
     assert not res.ok and "ConnectionError" in (res.error or "")
     assert not _isolated_cache.is_file()  # 失败不缓存
 
 
 def test_empty_record_not_cached(fake_requests: _FakeRequests, _isolated_cache: Path) -> None:
     """RDAP 返回但无任何登记字段（netname/org/country/handle 全空）→ ok=False，不缓存。"""
-    fake_requests.response = _FakeResponse({"startAddress": "1.2.3.0", "entities": []})
+    fake_requests.response = _FakeResponse({"startAddress": "198.51.100.3", "entities": []})
     res = IpRdapEnricher().enrich(Endpoint(value="1.2.3.4", kind="ip"))
     assert not res.ok and not _isolated_cache.is_file()
 

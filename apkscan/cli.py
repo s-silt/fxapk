@@ -31,6 +31,8 @@ from apkscan.core.report_naming import report_base
 # 样本库 / 案件子命令已物理拆到 apkscan/commands/（纯搬移）；add_typer 留此处以引用主 app。
 from apkscan.commands.corpus import corpus_app
 from apkscan.commands.case import case_app, closure_exit_code
+from apkscan.commands.enrich import enrich_app
+from apkscan.commands.web import analyze_web
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,12 @@ app = typer.Typer(
 )
 app.add_typer(corpus_app, name="corpus")
 app.add_typer(case_app, name="case")
+app.add_typer(enrich_app, name="enrich")
+
+# analyze-web 是**单个命令**（不是子命令组），故用 app.command() 注册而非 add_typer。
+# 函数体在 commands/web.py（逻辑不堆进 cli.py），它反过来惰性 import 本模块的 _write_reports
+# 等共用出口——注册放这里是为了让那份反向依赖始终是函数体内的、不成环。
+app.command(name="analyze-web")(analyze_web)
 
 # 合法输出格式（--fmt）。全非法时回退而非静默产出零报告。
 _VALID_FORMATS = ("html", "json", "pdf")
@@ -1697,6 +1705,107 @@ def _print_summary(report: Report) -> None:
     skipped = sum(1 for s in report.analyzer_status if s.get("status") == "skipped")
     errored = sum(1 for s in report.analyzer_status if s.get("status") == "error")
     typer.echo(f"分析器：ran={ran} skipped={skipped} error={errored}")
+
+
+@app.command(name="leak-scan")
+def leak_scan_cmd(
+    diff_path: str = typer.Option(
+        "", "--diff", help="unified diff 文件；'-' 表示从 stdin 读。缺省则自动取 git diff。"
+    ),
+    base: str = typer.Option(
+        "", "--base", help="与该 git ref 比（CI 里给 PR 的 base，如 origin/master）。"
+    ),
+    staged: bool = typer.Option(
+        False, "--staged", help="扫已 staged 的改动（pre-commit hook 用）。"
+    ),
+    paths: list[str] = typer.Option(
+        [], "--path", help="改为全量扫这些路径（文件或目录，目录递归展开）。"
+    ),
+    tracked: bool = typer.Option(
+        False,
+        "--tracked",
+        help="全树门禁模式：只扫 --path 下 git 已跟踪的文件，枚举不到即 exit 2。",
+    ),
+    strict: bool = typer.Option(
+        False, "--strict", help="把 domain / context 两条噪音较大的判据也升级为阻断。"
+    ),
+) -> None:
+    """扫**新增内容**里不该进公开仓库的字面值（公网 IP / 疑似凭据 / 域名 / 语境词）。
+
+    默认判据只施加在 diff 的新增行上（PR 门禁）。``--path`` 改为全量扫描：目录会**递归
+    展开**，``--tracked`` 进一步收窄为"只扫 git 已跟踪文件"，用作全树门禁。
+
+    ★``--path`` 曾是个**假绿门禁**：目录被当成"读不动的文件"静默跳过，
+    ``leak-scan --path apkscan --path tests`` 输出"未发现泄漏嫌疑" + exit 0，
+    看起来全树干净、实际一个文件都没扫。现在扫不到即 exit 2，"少扫了"绝不与"扫全了"同形。
+
+    默认只有 ``ip`` / ``secret`` / ``exemption`` 三条判据阻断（精确、误报可控）；
+    ``domain`` / ``context`` 天生噪音大，如实报告但不变红，``--strict`` 才升级为阻断。
+
+    放行某行请加行内注释 ``leak-scan: allow <理由>``——理由必须写，无理由的豁免本身即一条阻断项。
+
+    退出码：0 = 无阻断项；1 = 有阻断项；2 = 取不到 diff / 目标路径枚举失败。纯本地，绝不联网。
+    """
+    import subprocess
+    import sys
+
+    from apkscan.core import leakscan
+
+    if tracked and not paths:
+        typer.echo("错误：--tracked 需要至少一个 --path 指定扫描根。", err=True)
+        raise typer.Exit(code=2)
+
+    if paths:
+        scan_errors: list[str] = []
+        if tracked:
+            targets = leakscan.tracked_files(list(paths), errors=scan_errors)
+        else:
+            targets = leakscan.expand_paths(list(paths), scan_errors)
+        if scan_errors:
+            for message in scan_errors:
+                typer.echo(f"错误：{message}", err=True)
+            typer.echo("错误：扫描目标不完整，拒绝给出「未发现」结论。", err=True)
+            raise typer.Exit(code=2)
+        if not targets:
+            typer.echo("错误：没有枚举到任何待扫文件，拒绝假绿。", err=True)
+            raise typer.Exit(code=2)
+        findings = leakscan.scan_paths(targets, scan_errors)
+        if scan_errors:
+            for message in scan_errors:
+                typer.echo(f"错误：{message}", err=True)
+            raise typer.Exit(code=2)
+        typer.echo(f"leak-scan: 已扫描 {len(targets)} 个文件。")
+    else:
+        if diff_path == "-":
+            diff_text = sys.stdin.read()
+        elif diff_path:
+            try:
+                diff_text = Path(diff_path).read_bytes().decode("utf-8", errors="replace")
+            except OSError as exc:
+                typer.echo(f"错误：读不到 diff 文件 {diff_path}：{exc}", err=True)
+                raise typer.Exit(code=2) from None
+        else:
+            # 无 -U 上下文行：只要新增行，少读一大截无关内容。
+            cmd = ["git", "diff", "--unified=0"]
+            if staged:
+                cmd.append("--cached")
+            if base:
+                cmd.append(f"{base}...HEAD")
+            try:
+                proc = subprocess.run(cmd, capture_output=True, timeout=120, check=False)
+            except (OSError, subprocess.SubprocessError) as exc:
+                typer.echo(f"错误：取 git diff 失败（{' '.join(cmd)}）：{exc}", err=True)
+                raise typer.Exit(code=2) from None
+            if proc.returncode != 0:
+                detail = proc.stderr.decode("utf-8", errors="replace").strip()
+                typer.echo(f"错误：git diff 退出码 {proc.returncode}：{detail}", err=True)
+                raise typer.Exit(code=2)
+            diff_text = proc.stdout.decode("utf-8", errors="replace")
+        findings = leakscan.scan_diff(diff_text)
+
+    typer.echo(leakscan.format_findings(findings, strict=strict))
+    if leakscan.blocking(findings, strict=strict):
+        raise typer.Exit(code=1)
 
 
 def main() -> None:

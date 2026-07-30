@@ -67,23 +67,30 @@ def test_build_report_complete_only_when_nothing_failed() -> None:
 
 
 def test_pipeline_writes_extra_dex_visibility_into_meta() -> None:
-    """★接线断言：ctx 上的账目要真的走进 report.meta，否则下游读不到。"""
-    from apkscan.core.pipeline import _stage_degradation_flags
+    """★接线断言：ctx 上的账目要真的走进 report.meta，否则下游读不到。
 
-    class _Ctx:
-        dex_available = True
-        apk_validation_ok = True
-        extra_dex_report = {
-            "requested": 33, "loaded": 10, "failed": 23, "complete": False,
-            "failures_by_error": {"ValueError": 23}, "failure_samples": [],
-        }
+    用真的 ``_PipelineState`` 构造（而非鸭子类型的替身）：该 stage 的降级判读按 ``state.platform``
+    分流，替身少一个字段就测不到生产路径走的那条分支。
+    """
+    from types import SimpleNamespace
 
-    class _State:
-        ctx: Any = _Ctx()
-        meta: dict[str, Any] = {}
+    from apkscan.core.models import AnalysisConfig
+    from apkscan.core.pipeline import _PipelineState, _stage_degradation_flags
 
-    state = _State()
-    _stage_degradation_flags(state)  # type: ignore[arg-type]
+    state = _PipelineState(
+        ctx=SimpleNamespace(  # type: ignore[arg-type]  # 本 stage 只 getattr 这几项
+            dex_available=True,
+            apk_validation_ok=True,
+            extra_dex_report={
+                "requested": 33, "loaded": 10, "failed": 23, "complete": False,
+                "failures_by_error": {"ValueError": 23}, "failure_samples": [],
+            },
+        ),
+        config=AnalysisConfig(online=False),
+        platform="android",
+        capabilities=set(),
+    )
+    _stage_degradation_flags(state)
 
     assert state.meta["extra_dex_visibility"]["failed"] == 23
     assert state.meta["extra_dex_visibility"]["loaded"] == 10

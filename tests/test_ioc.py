@@ -14,9 +14,17 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from apkscan import cli
+from apkscan.core import infra
 from apkscan.report import ioc
+from tests import doc_addresses
 
 runner = CliRunner()
+
+# 这个夹具只需要一个「四段不全 ≤32、形态本身就站得住」的地址，用来和同组那条形态存疑的
+# 1.2.3.4 形成对照。★本模块（report/ioc.py）不做任何 IP 分类——它把 report.json 的 leads
+# 原样扁平成 CSV 行，shape_uncertain 是上游落好的布尔。故这里不需要「被判公网」的语义，
+# 直接用 RFC 5737 文档保留地址的字面量即可。
+_SOLID_IP = doc_addresses.DOC_BACKEND_IP
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +104,7 @@ def test_rows_count_and_basic_fields() -> None:
         "is_c2",
         "sample_sha256",
         "source",
+        "shape_uncertain",
     }
     assert set(rows[0].keys()) == expected_cols
 
@@ -239,6 +248,7 @@ def test_write_csv_roundtrip(tmp_path: Path) -> None:
             "is_c2",
             "sample_sha256",
             "source",
+            "shape_uncertain",
         ]
         read = list(reader)
     assert len(read) == 4
@@ -349,3 +359,83 @@ def test_cli_export_bad_json(tmp_path: Path) -> None:
     assert res.exit_code == 1
     assert res.exception is None or isinstance(res.exception, SystemExit)
     assert "错误" in res.output or "解析" in res.output or "JSON" in res.output
+
+
+# ---------------------------------------------------------------------------
+# D-1：形态存疑标注必须走到 IOC 导出这个出口
+# ---------------------------------------------------------------------------
+
+
+def _shape_uncertain_report() -> dict:
+    """一条形态存疑的 lead ＋ 一条确凿的：导出后两者在该列上必须区分得开。
+
+    形态存疑的来源是「字面形态本身不足以证明它属于本类别」（如四段全 ≤32 的裸 IP，
+    多半是版本号/序号，靠 ASN 归属才捞回 :data:`infra.ADVICE_INVESTIGATE` 档）。值仍要导，但须带着这条保留意见。
+    """
+    return {
+        "package_name": "com.example.synthetic",
+        "meta": {"sample_sha256": "0" * 64},
+        "leads": [
+            {
+                "category": "IP",
+                "value": "1.2.3.4",
+                "subject": "",
+                "where_to_request": "云厂商",
+                "advice": infra.ADVICE_INVESTIGATE,
+                "confidence": "MEDIUM",
+                "is_c2": True,
+                "shape_uncertain": True,
+                "source_refs": [{"source": "dex", "location": "classes.dex"}],
+            },
+            {
+                "category": "IP",
+                "value": _SOLID_IP,
+                "subject": "",
+                "where_to_request": "云厂商",
+                "advice": infra.ADVICE_INVESTIGATE,
+                "confidence": "HIGH",
+                "is_c2": True,
+                "shape_uncertain": False,
+                "source_refs": [{"source": "dex", "location": "classes.dex"}],
+            },
+        ],
+    }
+
+
+def test_shape_uncertain_is_the_last_column_and_carries_a_value(tmp_path: Path) -> None:
+    """★D-1：导出 CSV 表头**末列**是 shape_uncertain，且带标记的行该列有值。
+
+    断言「在末尾」而非「存在」：列顺序是下游平台（MISP/i2/Maltego）字段映射的契约，
+    新列插在中间会让已配好的映射整体错位。
+    """
+    rows = ioc.leads_to_ioc_rows(_shape_uncertain_report())
+    out = tmp_path / "shape.ioc.csv"
+    ioc.write_csv(rows, str(out))
+
+    with out.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        assert reader.fieldnames is not None
+        assert reader.fieldnames[-1] == "shape_uncertain", "新列必须追加在末尾"
+        read = list(reader)
+
+    flagged = next(r for r in read if r["value"] == "1.2.3.4")
+    solid = next(r for r in read if r["value"] == _SOLID_IP)
+    assert flagged["shape_uncertain"] == "True", "带该标记的 lead 该列没有值"
+    assert solid["shape_uncertain"] == "False"
+    # 两行在这一列上必须真的不同——恒 True / 恒 False 都等于没标
+    assert flagged["shape_uncertain"] != solid["shape_uncertain"]
+
+
+def test_shape_uncertain_value_is_still_exported_not_dropped() -> None:
+    """只标注、不静默丢弃：跨案 IOC 库（core/corpus.py）不收这类值是因为碰撞要求地址性已
+    确证；本 CSV 是给人配映射、自行过滤的，丢掉等于替下游做了决定。"""
+    rows = ioc.leads_to_ioc_rows(_shape_uncertain_report())
+    assert len(rows) == 2, "形态存疑的行被丢掉了"
+    assert "1.2.3.4" in [r["value"] for r in rows]
+
+
+def test_missing_shape_uncertain_key_defaults_to_false() -> None:
+    """旧报告没有这个键（字段是后加的）→ 该列为 False，不得抛也不得留 None。"""
+    rows = ioc.leads_to_ioc_rows(_make_report())  # 该夹具的 lead 全无此键
+    assert rows, "夹具应产出行"
+    assert all(r["shape_uncertain"] is False for r in rows)

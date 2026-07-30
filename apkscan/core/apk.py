@@ -215,8 +215,9 @@ def _silence_androguard_logging() -> None:
 
 
 _HIDDENAPI_FLAGS_RELAXED = False
-#: 本次进程里放行过的未知 hidden-api flag 取值（供报告如实说明容错生效过）。
-_HIDDENAPI_UNKNOWN_FLAGS: set[str] = set()
+#: 本次进程里每一次放行事件。必须保留重复项：样本 B 使用了与样本 A 相同的未知 flag，
+#: 仍是 B 自己的解析事实；若只存 set，再做集合差会把 B 的事件误删。
+_HIDDENAPI_UNKNOWN_FLAG_EVENTS: list[str] = []
 
 
 def _relax_hiddenapi_flags() -> None:
@@ -250,7 +251,7 @@ def _relax_hiddenapi_flags() -> None:
                 # （bool 不必单列：True/False 恒等于已有成员 1/0，压根到不了这里。）
                 if not isinstance(value, int) or value < 0:
                     return None
-                _HIDDENAPI_UNKNOWN_FLAGS.add(f"{_label}={value}")
+                _HIDDENAPI_UNKNOWN_FLAG_EVENTS.append(f"{_label}={value}")
                 # 造伪成员保留原值：调用方拿到的仍是个 int，语义"未知档位"如实体现在名字里。
                 pseudo = int.__new__(cls, value)
                 pseudo._name_ = f"UNKNOWN_{value}"
@@ -263,11 +264,27 @@ def _relax_hiddenapi_flags() -> None:
         logger.debug("放宽 androguard hidden-api flag 校验失败（忽略）", exc_info=True)
 
 
-def hiddenapi_relax_report() -> dict[str, object]:
-    """本次进程有没有用到 hidden-api flag 容错、放行了哪些取值。供 meta 如实登记。"""
+def hiddenapi_flags_snapshot() -> int:
+    """返回放行事件游标，用作“本样本从哪里开始”的基线。"""
+    return len(_HIDDENAPI_UNKNOWN_FLAG_EVENTS)
+
+
+def hiddenapi_relax_report(since: int | None = None) -> dict[str, object]:
+    """有没有用到 hidden-api flag 容错、放行了哪些取值。供 meta 如实登记。
+
+    ★``since``（本样本加载前的事件游标）必须传：batch 是单进程顺序跑多个样本，不切片就会把
+      前一个样本的放行写进后一个报告。不能用 set 快照做差——后一个样本若碰到**相同取值**，
+      集合差会误判为零；事件游标既隔离样本，也保留重复取值在后续样本中的真实出现。
+
+    ``applied`` 仍是进程级事实（垫子装没装），不按样本收窄：垫子本身幂等、一次性，不该回退
+    （回退等于让后面的样本重新成批拒载）。判读"这份报告要不要提容错"看的是 ``unknown_flags``
+    非空——那才是本样本自己的账。
+    """
+    start = since if isinstance(since, int) and since >= 0 else 0
+    waved = set(_HIDDENAPI_UNKNOWN_FLAG_EVENTS[start:])
     return {
         "applied": _HIDDENAPI_FLAGS_RELAXED,
-        "unknown_flags": sorted(_HIDDENAPI_UNKNOWN_FLAGS),
+        "unknown_flags": sorted(waved),
     }
 
 
@@ -438,6 +455,7 @@ class ApkContext:
         dex_available: bool = True,
         apk_validation_ok: bool = True,
         extra_dex_report: dict[str, object] | None = None,
+        hiddenapi_flags_baseline: int | None = None,
     ) -> None:
         # apk: androguard.core.apk.APK；dex_objs: list[DEX]
         self._apk = apk
@@ -458,6 +476,10 @@ class ApkContext:
         # 是常态，"请求了几个"与"真解析成功几个"必须分开呈现，否则报告会把"没看见"
         # 说成"看过了没有"。pipeline 写进 meta.extra_dex_visibility。
         self.extra_dex_report: dict[str, object] = dict(extra_dex_report or {})
+        # 本样本加载**前**已放行的 hidden-api flag 取值。放行记录攒在进程级集合里，而 batch
+        # 单进程顺序跑多个样本，不减这条基线就会把上一个样本的账写进这一份报告（见
+        # hiddenapi_relax_report 的 since 参数）。缺省 0：单样本路径本就无前账。
+        self.hiddenapi_flags_baseline: int = hiddenapi_flags_baseline or 0
 
     # ---- 标量属性 -------------------------------------------------------
 
@@ -1020,6 +1042,9 @@ def load_apk(
     # 的 lxml etree.Element 抛 ValueError 致整体 fail-fast。装幂等 shim 净化 nsmap，对齐
     # apktool 的宽容降级，让 manifest 可解（包名/组件/权限/证书等不再因此全丢）。
     _install_axml_nsmap_shim()
+    # 本样本放行了哪些 hidden-api flag，要从**此刻**起算：集合是进程级的，batch 顺序跑多个
+    # 样本时，不取基线就会把前一个样本的放行记录算到这一个头上。在任何 DEX 解析之前抓。
+    hiddenapi_baseline = hiddenapi_flags_snapshot()
     # zip 炸弹前置拦截：在 androguard 全量解析（内部解压 DEX/manifest）前先按声明大小拒炸弹。
     _reject_if_zip_bomb(path)
     from androguard.core.apk import APK
@@ -1085,4 +1110,5 @@ def load_apk(
         extra_dex_report=build_extra_dex_report(
             requested_extra, len(extra_dex_objs), extra_dex_failures
         ),
+        hiddenapi_flags_baseline=hiddenapi_baseline,
     )

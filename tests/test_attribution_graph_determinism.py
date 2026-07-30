@@ -18,7 +18,7 @@ def _diverse_evidence():
         evidence(id="e1b", type="resolved_ip", target=domain("a.example.com"), value="1.2.3.4", source="shodan", confidence=0.9),
         evidence(id="e2", type="tls_sni", target=domain("a.example.com"), value="1.2.3.4"),
         evidence(id="e3", type="asn", target=ip("1.2.3.4"), value=13335, source="shodan"),
-        evidence(id="e4", type="network_flow", target=ip("5.6.7.8"), value="tcp/80"),
+        evidence(id="e4", type="network_flow", target=ip("198.51.100.48"), value="tcp/80"),
         evidence(id="e5", type="cert_san_dns", target=cert(), value="a.example.com", source="censys"),
         evidence(id="e6", type="related_ip", target=domain("a.example.com"), value="9.9.9.9", source="fofa"),
         evidence(id="e7", type="service_org", target=ip("1.2.3.4"), value="Acme", source="shodan"),
@@ -31,7 +31,7 @@ def _canonical(graph) -> str:
 
 def test_permutation_invariance() -> None:
     evs = _diverse_evidence()
-    roles = [domestic_relay_score("1.2.3.4"), domestic_relay_score("5.6.7.8")]
+    roles = [domestic_relay_score("1.2.3.4"), domestic_relay_score("198.51.100.48")]
     baseline = _canonical(
         build_infrastructure_graph(artifact_id="s", extra_evidence=evs, role_scores=roles)
     )

@@ -23,7 +23,7 @@ from apkscan.core.models import (
     LeadCategory,
 )
 
-_CONFIG = {"domains": ["api.evil-c2.com"], "ips": ["45.11.22.33"]}
+_CONFIG = {"domains": ["api.evil-c2.com"], "ips": ["45.11.22.33"]}  # leak-scan: allow 远端配置抓取产物夹具，须被判公网才进 values
 _JSON = json.dumps(_CONFIG).encode()
 _URL = "https://cfg.oss-cn-hangzhou.aliyuncs.com/app/domain.dat"
 
@@ -77,11 +77,11 @@ def test_authorized_active_fetches_decodes_and_feeds_back(monkeypatch, tmp_path)
     pipeline._stage_remote_config_fetch(st)
 
     values = {ep.value for ep in st.endpoints}
-    assert "api.evil-c2.com" in values and "45.11.22.33" in values
+    assert "api.evil-c2.com" in values and "45.11.22.33" in values  # leak-scan: allow 远端配置抓取产物夹具，须被判公网才进 values
     art = st.meta["remote_config_artifacts"]
     assert len(art) == 1 and art[0]["decoded"] is True
     assert art[0]["decode_chain"] == ["gzip", "json"]
-    assert art[0]["domains"] == ["api.evil-c2.com"] and art[0]["ips"] == ["45.11.22.33"]
+    assert art[0]["domains"] == ["api.evil-c2.com"] and art[0]["ips"] == ["45.11.22.33"]  # leak-scan: allow 远端配置抓取产物夹具，须被判公网才进 values
     assert st.meta["remote_config_fetched"] == 1
 
     # ★原始 blob 落盘：stored_path 相对、文件存在、字节原样保真

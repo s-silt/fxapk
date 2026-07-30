@@ -145,7 +145,7 @@ def test_letter_body_contains_case_close_resolved_evidence() -> None:
     from apkscan.core.models import Confidence, Endpoint, Lead, LeadCategory, Report
     from apkscan.report.json import to_dict
 
-    ip = "45.76.100.10"
+    ip = "198.51.100.41"
     endpoint = Endpoint(
         value="evil-example.com",
         kind="domain",
@@ -528,7 +528,7 @@ def _report_with_attr(value: str, ips: list[dict]) -> dict:
 
 def test_attribution_chain_rendered_in_letter() -> None:
     """★五层归属链套进调证函正文，且作结构化字段 attribution 回带。"""
-    ips = [_five_layer("45.76.1.1", holder="VULTR-AS20473", asn=20473, asn_org="Vultr",
+    ips = [_five_layer("45.76.1.1", holder="VULTR-AS20473", asn=20473, asn_org="Vultr",  # leak-scan: allow 调证函归属链夹具，须是公网 IP 才会进「落地 IP」段落
                        category="cloud", edge="Cloudflare")]
     out = letters.build_letters(_report_with_attr("pay.x.com", ips))
     assert len(out) == 1
@@ -538,7 +538,7 @@ def test_attribution_chain_rendered_in_letter() -> None:
     assert "VULTR-AS20473".replace("-", "\\-") in body  # 资源登记方（_md_safe 转义了 -）
     assert "AS20473" in body and "cloud" in body        # 网络运营方
     assert "Cloudflare" in body and "较可能" in body      # 边缘（tier=probable→较可能）
-    assert out[0]["attribution"] is not None and out[0]["attribution"]["ips"][0]["ip"] == "45.76.1.1"
+    assert out[0]["attribution"] is not None and out[0]["attribution"]["ips"][0]["ip"] == "45.76.1.1"  # leak-scan: allow 调证函归属链夹具，须是公网 IP 才会进「落地 IP」段落
 
 
 def test_attribution_unknown_layers_and_edge_labeled() -> None:
@@ -593,7 +593,7 @@ def test_attribution_deferred_resource_holder_rendered_as_pending() -> None:
 
 def test_attribution_deferred_not_shown_when_holder_known() -> None:
     """holder 有值时即使残留 deferred 键也渲染真实登记方，不显示待补（name 优先）。"""
-    layer = _five_layer("45.76.1.1", holder="VULTR-NET", asn=20473, asn_org="Vultr", category="cloud")
+    layer = _five_layer("45.76.1.1", holder="VULTR-NET", asn=20473, asn_org="Vultr", category="cloud")  # leak-scan: allow 调证函归属链夹具，须是公网 IP 才会进「落地 IP」段落
     layer["resource_holder"]["deferred"] = "case_close"   # 不应出现的残留，渲染须免疫
     body = letters.build_letters(_report_with_attr("x.com", [layer]))[0]["body_md"]
     assert "VULTR" in body.replace("\\-", "-")
@@ -602,7 +602,7 @@ def test_attribution_deferred_not_shown_when_holder_known() -> None:
 
 def test_attribution_service_operator_never_inferred() -> None:
     """★核心纪律：每个落地 IP 都标『实际运营者：未知（不从基础设施归属推断）』，防把持有方当运营者。"""
-    ips = [_five_layer("45.76.1.1", holder="X", asn=1, asn_org="Y", category="cloud", edge="Z")]
+    ips = [_five_layer("45.76.1.1", holder="X", asn=1, asn_org="Y", category="cloud", edge="Z")]  # leak-scan: allow 调证函归属链夹具，须是公网 IP 才会进「落地 IP」段落
     body = letters.build_letters(_report_with_attr("x.com", ips))[0]["body_md"]
     assert body.count("实际运营者：未知") == 1
     assert "不从基础设施归属推断" in body
@@ -631,18 +631,18 @@ def _ip_lead(value: str) -> dict:
 
 
 def test_runtime_ip_lead_with_port_suffix_still_gets_attribution_chain() -> None:
-    """★pcap 实测后端的 Lead 值是 ``8.138.102.85:31861/tcp``，Endpoint 是裸 IP。
+    """★pcap 实测后端的 Lead 值是 ``198.51.100.7:31861/tcp``，Endpoint 是裸 IP。
 
     此前 letters 按原值精确匹配，于是**最该写清归属的那个实测后端**永远关联不上五层归属链，
     调证函正文只剩"某科技有限公司 / 云服务商"的空壳。退回精确匹配，本测试即红。
     """
-    ips = [_five_layer("8.138.102.85", holder="ALIBABA-CN-NET", asn=37963,
+    ips = [_five_layer("198.51.100.7", holder="ALIBABA-CN-NET", asn=37963,
                        asn_org="Alibaba", category="cloud")]
     report = {
-        "leads": [_ip_lead("8.138.102.85:31861/tcp")],
+        "leads": [_ip_lead("198.51.100.7:31861/tcp")],
         "endpoints": [{
-            "value": "8.138.102.85", "kind": "ip",
-            "enrichment": {"attribution": {"endpoint": "8.138.102.85", "kind": "ip", "ips": ips}},
+            "value": "198.51.100.7", "kind": "ip",
+            "enrichment": {"attribution": {"endpoint": "198.51.100.7", "kind": "ip", "ips": ips}},
         }],
     }
     out = letters.build_letters(report)
@@ -651,14 +651,14 @@ def test_runtime_ip_lead_with_port_suffix_still_gets_attribution_chain() -> None
     assert "基础设施归属链" in body, "带端口尾缀的实测后端没关联上归属链"
     assert "AS37963" in body
     assert out[0]["attribution"] is not None
-    assert out[0]["attribution"]["ips"][0]["ip"] == "8.138.102.85"
+    assert out[0]["attribution"]["ips"][0]["ip"] == "198.51.100.7"
     # 端口本身仍须留在文书标的里——调证函要写"哪个端口"。
     assert "31861" in body
 
 
 def test_domain_lead_is_not_port_stripped() -> None:
     """归一化只对 IP 剥端口：域名侧照旧只小写，别把域名里的冒号语义也一并吃掉。"""
-    ips = [_five_layer("45.76.1.1", holder="V", asn=1, asn_org="Y", category="cloud")]
+    ips = [_five_layer("45.76.1.1", holder="V", asn=1, asn_org="Y", category="cloud")]  # leak-scan: allow 调证函归属链夹具，须是公网 IP 才会进「落地 IP」段落
     rep = {
         "leads": [_lead_for("Pay.X.com")],   # Lead 大小写与 endpoint 不同
         "endpoints": [{"value": "pay.x.com", "kind": "domain",
