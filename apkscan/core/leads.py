@@ -7,7 +7,9 @@ Lead、按类别补默认研判 advice、并把境外被动富化信号聚合成
 
 from __future__ import annotations
 
+import ipaddress
 import logging
+import re
 
 from apkscan.core import exposure, forensic, infra
 from apkscan.core.attribution import classify_network
@@ -266,14 +268,57 @@ def apply_repack_quarantine(leads: list[Lead], meta: dict) -> list[str]:
     return quarantined
 
 
+#: 配置值里取 host 用的形态：``key=<scheme>://host[:port]/...`` 或 ``key=host:port``。
+#: 只认这两种；取不出 host 就当"这条配置里没有地址"，行为逐字不变。
+_CONFIG_VALUE_HOST_RE = re.compile(
+    r"=\s*(?:[a-z][a-z0-9+.\-]*://)?(?P<host>\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9._\-]+)(?::\d{1,5})?(?:[/?#]|$)"
+)
+
+
+def _config_value_unroutable_host(value: str) -> str:
+    """配置值里的地址是否**不可对外查询**（本机 / 私网 / 保留段）；是则返回那个 host。
+
+    ★为什么要按值分档：``CONFIG_KEY`` 原先不看值一律兜到最高档出口，于是
+    ``baseURL=https://localhost:60267`` 这种也进去了——本机地址没有对外查询对象，
+    名额却被它占着。
+
+    ★判据刻意只认两种形态：字面 ``localhost``，或**能解析成 IP 且非全球可路由**。
+      绝不用"无点即无效"那条口径——``com.openinstall.APP_KEY=y86kxi`` /
+      ``AES_KEY=0123…`` / ``debug=true`` 的值都是无点单串，那样会把整类真线索一起降掉。
+    """
+    m = _CONFIG_VALUE_HOST_RE.search(str(value or ""))
+    if m is None:
+        return ""
+    host = m.group("host").strip("[]").rstrip(".").lower()
+    if not host:
+        return ""
+    if host == "localhost" or host.endswith(".localhost"):
+        return host
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return ""  # 不是 IP 字面 —— 域名与随机串一律不碰
+    return host if not addr.is_global else ""
+
+
 def _apply_default_advice(leads: list[Lead]) -> None:
     """给未自带 advice 的 Lead 按类别填默认研判建议（就地修改，不覆盖已有值）。"""
     for lead in leads:
         if lead.advice:  # 分析器/构造器已研判，尊重之。
             continue
         default = _DEFAULT_ADVICE_BY_CATEGORY.get(lead.category)
-        if default:
-            lead.advice = default
+        if not default:
+            continue
+        if lead.category == LeadCategory.CONFIG_KEY and default == infra.ADVICE_INVESTIGATE:
+            local = _config_value_unroutable_host(lead.value)
+            if local:
+                # ★只降待核、绝不判 SKIP：开发者本机调试端口残留本身是构建环境痕迹，
+                #   有情报价值，必须留在清单上让人看见。
+                lead.advice = infra.ADVICE_REVIEW
+                note = f"配置值指向不可对外查询的地址（{local}：本机/私网/保留段）；作构建环境痕迹留待人工核"
+                lead.notes = f"{lead.notes}；{note}" if lead.notes else note
+                continue
+        lead.advice = default
 
 
 # 离线扫描时附加到归属为空的端点 Lead 的说明。
