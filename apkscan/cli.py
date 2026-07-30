@@ -1831,6 +1831,18 @@ def leak_scan_cmd(
                 raise typer.Exit(code=2)
             diff_text = proc.stdout.decode("utf-8", errors="replace")
         findings = leakscan.scan_diff(diff_text)
+        # ★把"这次按掉了多少护栏"如实打出来。此前完全不可见：加 1 条豁免与加 30 条，
+        #   在输出里同形，review 时也不会被顶到眼前——而批量按掉正是护栏失效的主要形态。
+        exemptions = leakscan.iter_exemptions(diff_text)
+        if exemptions:
+            reasons = sorted({" ".join(r.split()) for _p, _l, r in exemptions})
+            typer.echo(
+                f"leak-scan: 本次改动新增 {len(exemptions)} 条行内豁免"
+                f"（{len(reasons)} 种理由，跨 {len({p for p, _l, _r in exemptions})} 个文件）"
+            )
+            for reason in reasons:
+                count = sum(1 for _p, _l, r in exemptions if " ".join(r.split()) == reason)
+                typer.echo(f"  ×{count}  {reason[:88]}")
 
     typer.echo(leakscan.format_findings(findings, strict=strict))
     if leakscan.blocking(findings, strict=strict):
