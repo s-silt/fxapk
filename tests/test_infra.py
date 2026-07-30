@@ -79,14 +79,14 @@ def test_classify_ip_real_backends_still_investigate():
     取自实测语料里已进调证清单的形态：境外 IDC 段、带高位端口的裸后端。
     """
     for value in (
-        "192.88.99.109:443/tcp",
-        "192.88.99.26:30147/tcp",
-        "192.88.99.17",
-        "192.88.99.163",
-        "192.88.99.121",
-        "192.88.99.128",
-        "192.88.99.27",
-        "192.88.99.45",
+        "192.88.99.109:443/tcp",  # leak-scan: allow classify_ip 分档夹具，非 is_global 会直接落 ADVICE_SKIP、advice 断言失去意义
+        "192.88.99.26:30147/tcp",  # leak-scan: allow classify_ip 分档夹具，非 is_global 会直接落 ADVICE_SKIP、advice 断言失去意义
+        "192.88.99.17",  # leak-scan: allow classify_ip 分档夹具，非 is_global 会直接落 ADVICE_SKIP、advice 断言失去意义
+        "192.88.99.163",  # leak-scan: allow classify_ip 分档夹具，非 is_global 会直接落 ADVICE_SKIP、advice 断言失去意义
+        "192.88.99.121",  # leak-scan: allow classify_ip 分档夹具，非 is_global 会直接落 ADVICE_SKIP、advice 断言失去意义
+        "192.88.99.128",  # leak-scan: allow classify_ip 分档夹具，非 is_global 会直接落 ADVICE_SKIP、advice 断言失去意义
+        "192.88.99.27",  # leak-scan: allow classify_ip 分档夹具，非 is_global 会直接落 ADVICE_SKIP、advice 断言失去意义
+        "192.88.99.45",  # leak-scan: allow classify_ip 分档夹具，非 is_global 会直接落 ADVICE_SKIP、advice 断言失去意义
     ):
         advice, _reason = infra.classify_ip(value)
         assert advice == infra.ADVICE_INVESTIGATE, f"{value} 应建议调证（真后端不得误杀）"
@@ -97,7 +97,7 @@ def test_classify_ip_version_numbers_demoted_not_dropped():
 
     只降"待核"不排除——四段皆小在真 IP 里罕见但不是不可能。
     """
-    for value in ("1.3.1.1", "1.3.1.6", "1.4.1.14", "1.2.0.4"):
+    for value in ("1.3.1.1", "1.3.1.6", "1.4.1.14", "1.2.0.4"):  # leak-scan: allow 低段位形态夹具，判据测的正是「四段≤32 与版本号同形」这一点，值必须保持字面
         advice, reason = infra.classify_ip(value)
         assert advice == infra.ADVICE_REVIEW, value
         assert "版本号" in reason or "序号" in reason
@@ -110,7 +110,7 @@ def test_classify_ip_low_octets_promoted_by_hosting_attribution():
     字面自己提不出端口/URL 上下文来自证。故开一条定向豁免——但佐证必须双重，reason 里保留
     形态存疑的说明，让办案人发函前看得到。
     """
-    for value in ("23.21.5.12", "3.15.20.4", "18.20.31.2"):
+    for value in ("23.21.5.12", "3.15.20.4", "18.20.31.2"):  # leak-scan: allow 低段位形态夹具，判据测的正是「四段≤32 与版本号同形」这一点，值必须保持字面
         advice, reason = infra.classify_ip(value, hosting_attributed=True, low_octet_siblings=0)
         assert advice == infra.ADVICE_INVESTIGATE, value
         assert "托管段" in reason and "形态存疑" in reason
@@ -121,10 +121,10 @@ def test_classify_ip_low_octets_default_stays_demoted():
 
     钉死默认值方向——有人顺手把默认改成 True 就等于无差别取消这条判据。
     """
-    advice, _ = infra.classify_ip("23.21.5.12")
+    advice, _ = infra.classify_ip("23.21.5.12")  # leak-scan: allow 低段位形态夹具，判据测的正是「四段≤32 与版本号同形」这一点，值必须保持字面
     assert advice == infra.ADVICE_REVIEW
     # 只有 ASN 佐证、无兄弟池信息时也照样按默认走（两个参数都得由调用方明确给）
-    advice, _ = infra.classify_ip("23.21.5.12", low_octet_siblings=0)
+    advice, _ = infra.classify_ip("23.21.5.12", low_octet_siblings=0)  # leak-scan: allow 低段位形态夹具，判据测的正是「四段≤32 与版本号同形」这一点，值必须保持字面
     assert advice == infra.ADVICE_REVIEW
 
 
@@ -134,7 +134,7 @@ def test_classify_ip_low_octets_sequence_cluster_blocks_promotion():
     删掉这条守卫就把「误伤修复」扩成了无差别豁免，方向翻到代价高的一侧。
     """
     advice, reason = infra.classify_ip(
-        "1.3.1.1", hosting_attributed=True, low_octet_siblings=3
+        "1.3.1.1", hosting_attributed=True, low_octet_siblings=3  # leak-scan: allow 低段位形态夹具，判据测的正是「四段≤32 与版本号同形」这一点，值必须保持字面
     )
     assert advice == infra.ADVICE_REVIEW
     assert "版本号" in reason or "序号" in reason
@@ -142,9 +142,9 @@ def test_classify_ip_low_octets_sequence_cluster_blocks_promotion():
 
 def test_is_low_octet_ipv4_shape_only():
     """兄弟池判据只看形态：带端口要先剥、非 IPv4 与解析不了的一律 False。"""
-    assert infra.is_low_octet_ipv4("1.3.1.1") is True
-    assert infra.is_low_octet_ipv4("23.21.5.12:8080/tcp") is True
-    assert infra.is_low_octet_ipv4("192.88.99.109") is False
+    assert infra.is_low_octet_ipv4("1.3.1.1") is True  # leak-scan: allow 低段位形态夹具，判据测的正是「四段≤32 与版本号同形」这一点，值必须保持字面
+    assert infra.is_low_octet_ipv4("23.21.5.12:8080/tcp") is True  # leak-scan: allow 低段位形态夹具，判据测的正是「四段≤32 与版本号同形」这一点，值必须保持字面
+    assert infra.is_low_octet_ipv4("192.88.99.109") is False  # leak-scan: allow classify_ip 分档夹具，非 is_global 会直接落 ADVICE_SKIP、advice 断言失去意义
     assert infra.is_low_octet_ipv4("2001:db8::1") is False
     assert infra.is_low_octet_ipv4("1.3.101.112.1") is False
     assert infra.is_low_octet_ipv4("") is False
@@ -177,12 +177,12 @@ def test_classify_ip_strips_port_suffix():
     """★不剥 ':port/proto' 尾缀，一切精确匹配都会被绕过（实测动态线索值就是这个形态）。"""
     assert infra.classify_ip("223.5.5.5:53/udp")[0] == infra.ADVICE_SKIP
     assert infra.classify_ip("114.114.114.114:53/udp")[0] == infra.ADVICE_SKIP
-    assert infra.classify_ip("1.3.1.1:0/tcp")[0] == infra.ADVICE_REVIEW
+    assert infra.classify_ip("1.3.1.1:0/tcp")[0] == infra.ADVICE_REVIEW  # leak-scan: allow 低段位形态夹具，判据测的正是「四段≤32 与版本号同形」这一点，值必须保持字面
 
 
 def test_classify_ip_runtime_observed_exempts_shape_rules():
     """★设备上真连过就是地址，四段再小也不是版本号——形态判据一律让位于观测事实。"""
-    advice, reason = infra.classify_ip("1.3.1.1", runtime_observed=True)
+    advice, reason = infra.classify_ip("1.3.1.1", runtime_observed=True)  # leak-scan: allow 低段位形态夹具，判据测的正是「四段≤32 与版本号同形」这一点，值必须保持字面
     assert advice == infra.ADVICE_INVESTIGATE
     assert "运行时" in reason
     # 但公共解析器与非全球地址仍先行判定（观测到不等于该调证）

@@ -25,12 +25,15 @@ reindex 全量重建后逐字节可复现、幂等易测。若后续需要入库
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
+import posixpath
 import re
 from pathlib import Path
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
 
 from apkscan.core.atomic import atomic_write_text
 
@@ -704,13 +707,96 @@ def find_by_native_lib(entries: list[dict], value: str) -> list[dict]:
     return out
 
 
-def shared_native_libs(entries: list[dict]) -> list[dict]:
-    """跨样本共享同一 .so（sha256 逐字节相同）被 **≥2 个不同样本** 引用——家族串案强锚。
+@functools.lru_cache(maxsize=1)
+def _packer_so_names() -> Mapping[str, str]:
+    """``{小写 .so 库名: 加固产品名}``，取自 ``rules/packers.yaml`` 的 ``so_names``。
 
-    返回按样本数降序的簇 ``[{sha256, name, samples: [sample_sha256...]}]``。绝不抛。
+    复用现成规则而非新建壳指纹库：判据必须**可命名、可解释**，且与 ``analyzers/packing.py``
+    共用同一份真源，避免两处「什么算加固壳」的口径漂移。加载失败 → 空 mapping（静默降级为
+    不降噪，宁可少标注也不误标）。
+
+    ★缓存 + 返回只读视图：``load_rules`` 每次都重读并解析 YAML，而本函数会被每个候选簇调用
+    （原实现是 O(簇数) 次文件读）。``MappingProxyType`` 保证调用方拿不到可变的缓存对象——
+    否则任何一处就地修改都会污染后续全部调用。
+    """
+    out: dict[str, str] = {}
+    try:
+        from apkscan.core.registry import load_rules
+
+        raw = load_rules("packers")
+        packers = raw.get("packers") if isinstance(raw, dict) else None
+        if not isinstance(packers, list):
+            return MappingProxyType({})
+        for entry in packers:
+            if not isinstance(entry, dict):
+                continue
+            product = _s(entry.get("name")).strip()
+            so_names = entry.get("so_names")
+            if not product or not isinstance(so_names, list):
+                continue
+            for so in so_names:
+                key = _s(so).strip().lower()
+                if key:
+                    out.setdefault(key, product)
+    except Exception:
+        logger.exception("加载加固壳 so 名单失败，本次不做共享 .so 降噪标注")
+        return MappingProxyType({})
+    return MappingProxyType(out)
+
+
+def native_anchor_weakness(name: str) -> str | None:
+    """该 ``.so`` 库名是否属**非单一主体独有**（共享它不足以并簇）→ 返回理由；否则 None。
+
+    ★为什么必须降噪：``shared_native_libs`` 原先把「被 ≥2 样本共享的 .so」一律当强锚，
+    而实测有两类共享**与主体归属无关**：
+
+    1. **加固壳运行时库** —— 同一款商用加固的壳 so 逐字节相同，凡用该加固的样本全都共享它。
+       实测一个加固壳 so 让 13 个样本聚成一簇，其中多数互不相干。
+    2. **第三方 SDK / 引擎库** —— RN/Flutter/FFmpeg/播放器等预编译库随 SDK 继承进任何接入方。
+
+    两类的共同点是：**共享它只说明「用了同一个第三方组件」**，不说明同一开发主体。
+    与 :mod:`apkscan.analyzers.build_provenance` 对第三方 SDK 构建路径的处置同一思路。
+
+    ★判据只用**可命名、可解释**的名单（壳产品名 / 已知 SDK 库名），**绝不用统计阈值**：
+    「被很多样本共享」也完全可能是真的强关联（同族核心业务库正是如此），按频次降噪会把
+    最有价值的锚点误杀。
+    """
+    base = posixpath.basename(_s(name).strip().replace("\\", "/")).lower()
+    if not base:
+        return None
+
+    packers = _packer_so_names()
+    product = packers.get(base)
+    if product:
+        return f"packer:{product}"
+    # 规则容忍不带 .so 后缀 / 前缀写法（如 libnllvm* / libsgmainso*），与 packing.py 同款语义。
+    for key, prod in packers.items():
+        if not key.endswith(".so") and base.startswith(key):
+            return f"packer:{prod}"
+
+    try:
+        from apkscan.analyzers._common import NATIVE_LIB_BENIGN_SUBSTR
+
+        for substr in NATIVE_LIB_BENIGN_SUBSTR:
+            if substr in base:
+                return "third-party-sdk"
+    except Exception:
+        logger.exception("加载第三方库名单失败，本次不做第三方 SDK 降噪标注")
+    return None
+
+
+def shared_native_libs(entries: list[dict]) -> list[dict]:
+    """跨样本共享同一 .so（sha256 逐字节相同）被 **≥2 个不同样本** 引用——家族串案锚点候选。
+
+    返回 ``[{sha256, name, samples, weak_anchor, weak_anchor_reason}]``。绝不抛。
+
+    ★ ``weak_anchor=True`` 的簇是**加固壳/第三方 SDK 撞出来的假聚簇**，不足以并案
+    （见 :func:`native_anchor_weakness`）。**标注而非删除**：读结果的人需要看见
+    「这簇是加固壳撞的」，静默丢弃会让人以为压根没有这个共享事实。
+    排序把强锚放前面（弱锚沉底），同强弱内仍按样本数降序。
     """
     groups: dict[str, set[str]] = {}
-    names: dict[str, str] = {}
+    names: dict[str, set[str]] = {}
     for entry in entries:
         sample = _s(entry.get("sample_sha256")).strip().lower()
         if not sample:
@@ -722,11 +808,32 @@ def shared_native_libs(entries: list[dict]) -> list[dict]:
             if not sha:
                 continue
             groups.setdefault(sha, set()).add(sample)
-            names.setdefault(sha, _s(h.get("name")).strip())
-    clusters = [
-        {"sha256": sha, "name": names.get(sha) or None, "samples": sorted(samples)}
-        for sha, samples in groups.items()
-        if len(samples) >= 2
-    ]
-    clusters.sort(key=lambda c: (-len(c["samples"]), c["sha256"]))
+            name = _s(h.get("name")).strip()
+            if name:
+                names.setdefault(sha, set()).add(name)
+    clusters: list[dict] = []
+    for sha, samples in groups.items():
+        if len(samples) < 2:
+            continue
+        observed_names = sorted(names.get(sha) or [])
+        classified = [
+            (0 if reason.startswith("packer:") else 1, name, reason)
+            for name in observed_names
+            if (reason := native_anchor_weakness(name)) is not None
+        ]
+        if classified:
+            _rank, name, reason = min(classified)
+        else:
+            name = observed_names[0] if observed_names else None
+            reason = None
+        clusters.append(
+            {
+                "sha256": sha,
+                "name": name,
+                "samples": sorted(samples),
+                "weak_anchor": reason is not None,
+                "weak_anchor_reason": reason,
+            }
+        )
+    clusters.sort(key=lambda c: (bool(c["weak_anchor"]), -len(c["samples"]), c["sha256"]))
     return clusters

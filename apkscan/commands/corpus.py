@@ -215,7 +215,13 @@ def corpus_shared_config(
 def corpus_shared_native(
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
-    """跨样本共享同一 .so（sha256 逐字节相同）被 ≥2 样本引用——家族串案强锚（核心业务库同构=同族）。"""
+    """跨样本共享同一 .so（sha256 逐字节相同）被 ≥2 样本引用——家族串案锚点候选。
+
+    ★不是每个簇都是强锚：加固壳运行时库与第三方 SDK/引擎库逐字节相同，凡用同款组件的
+    样本全都共享它，**共享它只说明用了同一个第三方组件、不说明同一开发主体**。这类簇带
+    ``weak_anchor=true`` 与 ``weak_anchor_reason``（壳产品名 / third-party-sdk），并排在结果末尾。
+    只标注不删除：共享事实仍要看得见，静默丢弃会让人以为压根没这回事。
+    """
     root = _resolve_corpus(corpus)
     clusters = _corpus.shared_native_libs(_corpus.load_manifest(root))
     _print({"count": len(clusters), "clusters": clusters})

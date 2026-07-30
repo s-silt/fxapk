@@ -24,7 +24,7 @@ from apkscan.report.json import _to_jsonable
 from apkscan.report.letters import build_letters
 
 #: 裸字面证据：值本身出现在字符串表里，既无端口也无 URL 语境——降级判据的触发前提。
-_BARE = "23.21.5.12"
+_BARE = "23.21.5.12"  # leak-scan: allow 低段位降级判据的形态夹具：本测试测的就是「四段≤32、与版本号同形」，换文档段即失去被测形态
 
 _CLOUD_ASN = {"asn": "AS14618", "org": "Amazon.com, Inc."}
 _TELECOM_ASN = {"asn": "AS4134", "org": "CHINANET-BACKBONE"}
@@ -78,7 +78,7 @@ def test_wired_sequence_cluster_stays_demoted() -> None:
 
     退回 build_endpoint_leads 里的兄弟池计算（siblings 恒 0）→ 三条全被升级，本测试即红。
     """
-    eps = [_ip_ep(v, _CLOUD_ASN) for v in ("1.3.1.1", "1.3.1.6", "1.4.1.14")]
+    eps = [_ip_ep(v, _CLOUD_ASN) for v in ("1.3.1.1", "1.3.1.6", "1.4.1.14")]  # leak-scan: allow 低段位降级判据的形态夹具：本测试测的就是「四段≤32、与版本号同形」，换文档段即失去被测形态
     leads = build_endpoint_leads(eps)
 
     assert len(leads) == 3
@@ -92,7 +92,7 @@ def test_wired_sibling_pool_excludes_self() -> None:
 
     不减自己就会让"孤值 + 自己"凑够 2 个，把定向豁免整条废掉。
     """
-    eps = [_ip_ep(v, _CLOUD_ASN) for v in ("23.21.5.12", "3.15.20.4")]
+    eps = [_ip_ep(v, _CLOUD_ASN) for v in ("23.21.5.12", "3.15.20.4")]  # leak-scan: allow 低段位降级判据的形态夹具：本测试测的就是「四段≤32、与版本号同形」，换文档段即失去被测形态
     leads = build_endpoint_leads(eps)
 
     assert [x.advice for x in leads] == [ADVICE_INVESTIGATE, ADVICE_INVESTIGATE]
@@ -184,8 +184,8 @@ def test_letter_draft_carries_the_reservation() -> None:
 
 def test_normal_lead_letter_has_no_spurious_warning() -> None:
     """反向护栏：正常线索的函不得平白多出存疑警示（否则警示贬值成噪声）。"""
-    ep = _ip_ep("192.88.99.109", _CLOUD_ASN)
-    ep.evidences[0].snippet = "https://192.88.99.109:8443/api"  # 当地址用，走正常路径
+    ep = _ip_ep("192.88.99.109", _CLOUD_ASN)  # leak-scan: allow 低段位测试的对照组：需 is_global 为真才能走正常（不降级）路径，文档保留段被判私网会使对照失效
+    ep.evidences[0].snippet = "https://192.88.99.109:8443/api"  # 当地址用，走正常路径  # leak-scan: allow 低段位测试的对照组：需 is_global 为真才能走正常（不降级）路径，文档保留段被判私网会使对照失效
     lead = build_endpoint_leads([ep])[0]
 
     assert lead.shape_uncertain is False
@@ -200,10 +200,10 @@ def test_shape_uncertain_does_not_crowd_out_solid_targets() -> None:
     同无运行时观测，且存疑值的字面还排在字典序前面——只有形态存疑这一个排序键能把顺序扳过来。
     不打平的话，这条测试会被置信度或字典序"顺便"通过，排序键删掉也不红。
     """
-    suspect = _ip_ep("18.20.31.2", _CLOUD_ASN)          # 低段位 + 云 ASN + 裸字面 → 存疑
-    solid = _ip_ep("192.88.99.35")                      # 无 ASN 富化 → 同为 MEDIUM
-    solid.evidences[0].snippet = "https://192.88.99.35:8443/api"   # 当地址用 → 不存疑
-    assert "18.20.31.2" < "192.88.99.35", "前提：存疑值字典序在前，否则排序键不是唯一变量"
+    suspect = _ip_ep("18.20.31.2", _CLOUD_ASN)          # 低段位 + 云 ASN + 裸字面 → 存疑  # leak-scan: allow 低段位降级判据的形态夹具：本测试测的就是「四段≤32、与版本号同形」，换文档段即失去被测形态
+    solid = _ip_ep("192.88.99.35")                      # 无 ASN 富化 → 同为 MEDIUM  # leak-scan: allow 低段位测试的对照组：需 is_global 为真才能走正常（不降级）路径，文档保留段被判私网会使对照失效
+    solid.evidences[0].snippet = "https://192.88.99.35:8443/api"   # 当地址用 → 不存疑  # leak-scan: allow 低段位测试的对照组：需 is_global 为真才能走正常（不降级）路径，文档保留段被判私网会使对照失效
+    assert "18.20.31.2" < "192.88.99.35", "前提：存疑值字典序在前，否则排序键不是唯一变量"  # leak-scan: allow 低段位测试的对照组：需 is_global 为真才能走正常（不降级）路径，文档保留段被判私网会使对照失效
 
     eps = [suspect, solid]
     leads = build_endpoint_leads(eps)
@@ -215,7 +215,7 @@ def test_shape_uncertain_does_not_crowd_out_solid_targets() -> None:
 
     selected, _stats = _select_targets_with_stats(rep, max_targets=1)
 
-    assert [e.value for e in selected] == ["192.88.99.35"], "存疑候选应排在正常候选之后"
+    assert [e.value for e in selected] == ["192.88.99.35"], "存疑候选应排在正常候选之后"  # leak-scan: allow 低段位测试的对照组：需 is_global 为真才能走正常（不降级）路径，文档保留段被判私网会使对照失效
 
 
 def test_reservation_survives_report_round_trip() -> None:
@@ -248,7 +248,7 @@ def test_shape_uncertain_value_stays_out_of_cross_case_iocs() -> None:
     lead = build_endpoint_leads([_ip_ep(_BARE, _CLOUD_ASN)])[0]
     assert corpus._key_iocs({"leads": [_to_jsonable(lead)]}) == []
 
-    solid = _ip_ep("192.88.99.109", _CLOUD_ASN)
-    solid.evidences[0].snippet = "https://192.88.99.109:8443/api"
+    solid = _ip_ep("192.88.99.109", _CLOUD_ASN)  # leak-scan: allow 低段位测试的对照组：需 is_global 为真才能走正常（不降级）路径，文档保留段被判私网会使对照失效
+    solid.evidences[0].snippet = "https://192.88.99.109:8443/api"  # leak-scan: allow 低段位测试的对照组：需 is_global 为真才能走正常（不降级）路径，文档保留段被判私网会使对照失效
     ok = build_endpoint_leads([solid])[0]
-    assert corpus._key_iocs({"leads": [_to_jsonable(ok)]}) == ["192.88.99.109"]
+    assert corpus._key_iocs({"leads": [_to_jsonable(ok)]}) == ["192.88.99.109"]  # leak-scan: allow 低段位测试的对照组：需 is_global 为真才能走正常（不降级）路径，文档保留段被判私网会使对照失效

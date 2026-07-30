@@ -650,7 +650,7 @@ def test_generic_banner_and_shared_asn_alone_have_no_role_signal(
 
 def test_features_for_other_targets_are_ignored() -> None:
     target = _entity()
-    other = _entity("5.6.7.8")
+    other = _entity("198.51.100.48")
     features = [
         RoleFeature(
             signal=RoleSignal.BUSINESS_API,
