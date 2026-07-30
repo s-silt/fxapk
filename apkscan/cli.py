@@ -10,6 +10,7 @@ report.html / report.json 由其它 agent 实现；本文件惰性导入它们�
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 
 import click
@@ -51,6 +52,28 @@ app.command(name="analyze-web")(analyze_web)
 
 # 合法输出格式（--fmt）。全非法时回退而非静默产出零报告。
 _VALID_FORMATS = ("html", "json", "pdf")
+
+
+def _warn_report_revision(payload: object) -> None:
+    """把报告修订差异写到 stderr；不改报告、不改变调用方退出码。"""
+    from apkscan.core.report_compat import report_revision_warnings
+
+    report = payload if isinstance(payload, Mapping) else {}
+    meta = report.get("meta")
+    safe_meta = meta if isinstance(meta, Mapping) else {}
+    for warning in report_revision_warnings(safe_meta):
+        typer.echo(warning, err=True)
+
+
+def _warn_report_path_revision(path: str) -> None:
+    """尽力读取 ``--into`` 报告并告警；读失败留给既有合并边界处理。"""
+    import json as _json
+
+    try:
+        payload = _json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        return
+    _warn_report_revision(payload)
 
 
 def _version_callback(value: bool) -> None:
@@ -893,6 +916,8 @@ def digest(
             typer.echo(f"错误：报告 JSON 解析失败：{report_json}（{exc}）", err=True)
             raise typer.Exit(code=1) from exc
 
+        _warn_report_revision(report)
+
         from apkscan.report.digest import build_digest
 
         typer.echo(_json.dumps(build_digest(report, redact=redact), ensure_ascii=False, indent=2))
@@ -962,6 +987,8 @@ def letters(
         except (ValueError, UnicodeDecodeError) as exc:
             typer.echo(f"错误：报告 JSON 解析失败：{report_json}（{exc}）", err=True)
             raise typer.Exit(code=1) from exc
+
+        _warn_report_revision(report)
 
         from apkscan.report import letters as letters_mod
 
@@ -1038,6 +1065,7 @@ def probe_leads(
                 typer.echo(f"错误：写台账 JSON 失败：{json_out}（{exc}）", err=True)
                 raise typer.Exit(code=1) from exc
         if into:
+            _warn_report_path_revision(into)
             added = probe_ingest.merge_into_report_json(into, leads)
             typer.echo(f"已追加 {added} 条探针线索进 {into}（去重）。")
             # report.json 被改后，若同目录有 report.html 则重渲，让人读报告随台账更新。
@@ -1109,6 +1137,7 @@ def pcap_leads(
                 typer.echo(f"错误：写台账 JSON 失败：{json_out}（{exc}）", err=True)
                 raise typer.Exit(code=1) from exc
         if into:
+            _warn_report_path_revision(into)
             added = pcap_ingest.merge_into_report_json(into, summary)
             typer.echo(f"已追加 {added} 条带外线索进 {into}（去重）。")
             # report.json 被改后，若同目录有 report.html 则重渲，让人读报告随台账更新。

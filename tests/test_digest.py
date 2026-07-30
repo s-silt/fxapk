@@ -276,6 +276,20 @@ def test_cli_digest_emits_json_stdout(tmp_path) -> None:
     assert '"leads"' in res.output
 
 
+def test_cli_digest_warns_on_stderr_without_corrupting_json_stdout(tmp_path) -> None:
+    rep = tmp_path / "old-report.json"
+    rep.write_text(
+        json.dumps({"meta": {"tool_version": "0.0.0-old"}, "leads": []}),
+        encoding="utf-8",
+    )
+
+    res = runner.invoke(cli.app, ["digest", str(rep)])
+
+    assert res.exit_code == 0
+    assert isinstance(json.loads(res.stdout), dict)
+    assert "分析修订与当前 fxapk 不一致" in res.stderr
+
+
 def test_cli_digest_bad_path_exits_1() -> None:
     res = runner.invoke(cli.app, ["digest", "/no/such/report.json"])
     assert res.exit_code == 1
