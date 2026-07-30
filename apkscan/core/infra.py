@@ -68,6 +68,10 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         #   /robot/send）是实测见过的外发通道（见 analyzers/contacts.py 的通道归属表），
         #   主域整体列入等于把那条通道一起判成"无需核查"藏起来——正是本模块要避免的方向。
         "mcs.dingtalk.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        # ---- 华为云 ----
+        # ★补这条是被上面的租户桶判据逼出来的：五家云里只有华为云的裸服务端点从来没进过名单，
+        #   于是"桶 → 建议核查、裸端点 → 无需核查"这条规则在华为云那一行读起来自相矛盾。
+        "myhuaweicloud.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
         # ---- AWS ----
         "amazonaws.com",
         "awsstatic",
@@ -482,6 +486,49 @@ def _normalize_domain(domain: str) -> str:
     return d.strip(".")
 
 
+#: 对象存储的**租户桶**子域形态：``<桶名>.<服务端点>``。
+#:
+#: 为什么非要把它从"云厂商整域豁免"里挖出来：五家云厂商的那几个后缀（见下方各条正则）
+#: 底下混着两类完全不同的东西——
+#:   · 厂商自有门户与静态资源域：与租户无关，判无需核查是对的；
+#:   · ``<桶名>.<区域>.<厂商域>``：**租户专属**子域，桶名（腾讯 COS 还带 appid）就是租户凭据，
+#:     拿它向云厂商能核出实名、付款与访问日志。
+#: 判据不分这两类，一刀切成"云厂商=无需核查"，于是把最能落到人的那类目标静默划掉了。
+#: 实测：线索清单里 8 个案子、21 处把这类桶域名列为查询目标，而同一个桶在另一份报告里
+#: 被判"无需核查"。
+#:
+#: ★每条都要求**桶名标签存在**，绝不匹配各家的裸区域端点（形如 ``<区域>.<厂商域>`` 或
+#:   ``<服务>.<区域>.<厂商域>`` 那种没有桶名的写法）——没有桶名就没有租户，查不出人，
+#:   照旧无需核查。反向用例逐条列在 tests/test_tenant_bucket.py。
+_TENANT_BUCKET_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
+    ("百度智能云 BOS", re.compile(r"^(?P<bucket>[a-z0-9][\w\-]*)\.[a-z0-9\-]+\.bcebos\.com$")),
+    # ★区域段可选：新形态是 ``<桶>-<appid>.cos.<区域>.myqcloud.com``，而老的 file/pic 域
+    #   直接就是 ``<桶>-<appid>.file.myqcloud.com``，没有区域段。写成必填会漏掉老形态。
+    ("腾讯云 COS", re.compile(
+        r"^(?P<bucket>[a-z0-9][\w\-]*)\.(?:cos|file|pic)(?:[.\-][a-z0-9\-]+)?\.myqcloud\.com$"
+    )),
+    ("阿里云 OSS", re.compile(r"^(?P<bucket>[a-z0-9][\w\-]*)\.oss-[a-z0-9\-]+\.aliyuncs\.com$")),
+    ("AWS S3", re.compile(
+        r"^(?P<bucket>[a-z0-9][\w\-]*)\.s3(?:[.\-][a-z0-9\-]+)?\.amazonaws\.com$"
+    )),
+    ("华为云 OBS", re.compile(
+        r"^(?P<bucket>[a-z0-9][\w\-]*)\.obs[.\-][a-z0-9\-]+\.myhuaweicloud\.com$"
+    )),
+)
+
+
+def tenant_bucket(domain: str) -> tuple[str, str] | None:
+    """域名是否为对象存储的租户桶子域；是则返回 ``(云厂商, 桶名)``，否则 None。"""
+    d = _normalize_domain(domain)
+    if not d:
+        return None
+    for provider, pattern in _TENANT_BUCKET_PATTERNS:
+        m = pattern.match(d)
+        if m is not None:
+            return provider, m.group("bucket")
+    return None
+
+
 def _matched_infra(domain: str) -> str | None:
     """返回命中的 KNOWN_INFRA 关键字/后缀；未命中返回 None。
 
@@ -687,6 +734,15 @@ def classify_domain(domain: str) -> tuple[str, str]:
     - 无效 / 私网/回环 IP 字面   → ("待核", "...")
     - 其它（疑似 App 自有服务）  → ("建议调证", "疑似 App 自有服务，建议落地核查归属")
     """
+    # ★必须排在 KNOWN_INFRA 之前：桶域名的后缀正是云厂商域，先走那条就被整域豁免吃掉了。
+    bucket = tenant_bucket(domain)
+    if bucket is not None:
+        provider, name = bucket
+        return ADVICE_INVESTIGATE, (
+            f"对象存储的租户桶（{provider}）：桶名 {name} 是租户专属标识，"
+            "可据此向该云厂商核租户实名 / 付款 / 访问日志"
+        )
+
     matched = _matched_infra(domain)
     if matched is not None:
         return ADVICE_SKIP, f"已知第三方基础设施/库：{matched}"
