@@ -146,7 +146,7 @@ def test_version_ip_filtered_real_ip_kept(monkeypatch, tmp_path) -> None:
     java = (
         "class C {\n"
         '  String ver = "13.3.3.7";\n'
-        '  String backend = "139.59.12.34";\n'
+        '  String backend = "139.59.12.34";\n'  # leak-scan: allow jadx 抽取夹具，验真后端不被 noise 判据误杀
         '  String lan = "192.168.0.1";\n'
         "}\n"
     )
@@ -155,7 +155,7 @@ def test_version_ip_filtered_real_ip_kept(monkeypatch, tmp_path) -> None:
     vals = {e.value for e in result.endpoints}
     assert "13.3.3.7" not in vals
     assert "192.168.0.1" not in vals
-    assert "139.59.12.34" in vals
+    assert "139.59.12.34" in vals  # leak-scan: allow jadx 抽取夹具，验真后端不被 noise 判据误杀
 
 
 def test_run_jadx_uses_resolved_full_path(monkeypatch, tmp_path) -> None:

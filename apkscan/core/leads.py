@@ -35,7 +35,7 @@ def build_endpoint_leads(
     online=False 时在 Lead.notes 标明"离线扫描，归属未查询"，让报告能区分
     "查过查不到" 与 "压根没查"。
     """
-    # 样本内的低段位 IPv4 兄弟池：成簇（1.3.1.1 / 1.3.1.6 / 1.4.1.14）是版本号的主要产生形态，
+    # 样本内的低段位 IPv4 兄弟池：成簇（1.3.1.1 / 1.3.1.6 / 1.4.1.14）是版本号的主要产生形态，  # leak-scan: allow 判据说明所举的版本号/序号形态例子，非网络地址
     # 用来压住 classify_ip 的托管佐证豁免。全样本一次算好，逐端点只做减法。
     #
     # ★``sibling_pool`` 由调用方传入**全样本**的池。动态回灌只把新增端点交给本函数，若就地
@@ -444,7 +444,7 @@ def _ip_lead(
 def _dns_hosting_note(dns: dict) -> str:
     """把 dns 富化的解析 IP / 托管 ASN 压成一句调证落点说明（无数据 → 空串）。
 
-    形如「当前解析 IP 45.76.1.1(AS20473 Vultr), 45.76.1.2(AS20473 Vultr)→向云厂商调租户/访问日志」。
+    形如「当前解析 IP <ip1>(AS20473 Vultr), <ip2>(AS20473 Vultr)→向云厂商调租户/访问日志」。
     """
     ips = dns.get("ips") or []
     hosting = dns.get("hosting") or []

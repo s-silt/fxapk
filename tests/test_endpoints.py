@@ -74,7 +74,7 @@ def test_ordinary_endpoints_emit_no_lead_or_finding():
         dex_strings=[
             "https://pay.fraud-gw.cn/notify",
             "http://10.0.0.8/admin",
-            "139.59.12.34",
+            "139.59.12.34",  # leak-scan: allow 端点抽取夹具，验「真后端不得被 noise_ips/低段位降噪误杀」，值须是公网字面
         ]
     )
     # 端点应有，但绝不产 Lead（DOMAIN/IP Lead 由 pipeline 富化后统一建）；
@@ -157,10 +157,10 @@ def test_dex_bare_domain_extracted():
 
 
 def test_dex_ipv4_extracted():
-    result = _analyze(dex_strings=["connect 139.59.12.34:443"])
+    result = _analyze(dex_strings=["connect 139.59.12.34:443"])  # leak-scan: allow 端点抽取夹具，验「真后端不得被 noise_ips/低段位降噪误杀」，值须是公网字面
     eps = _by_value(result)
-    assert "139.59.12.34" in eps
-    ep = eps["139.59.12.34"]
+    assert "139.59.12.34" in eps  # leak-scan: allow 端点抽取夹具，验「真后端不得被 noise_ips/低段位降噪误杀」，值须是公网字面
+    ep = eps["139.59.12.34"]  # leak-scan: allow 端点抽取夹具，验「真后端不得被 noise_ips/低段位降噪误杀」，值须是公网字面
     assert ep.kind == "ip"
     assert ep.is_private is False
 
@@ -227,11 +227,11 @@ def test_real_public_ips_kept():
     # C4 回归锁：真实公网 IP 不在 denylist、非保留段 → 保留（不得误杀）。
     # 注：原用例拿 8.8.8.8 当"真实公网 IP"的例子，但它是公共 DNS 解析器、已入 noise_ips
     #     （见下条测试的实测理由），故换成不具解析器身份的公网 IP，本意不变。
-    result = _analyze(dex_strings=["c2 139.59.12.34", "backend 45.11.22.33"])
+    result = _analyze(dex_strings=["c2 139.59.12.34", "backend 45.11.22.33"])  # leak-scan: allow 端点抽取夹具，验「真后端不得被 noise_ips/低段位降噪误杀」，值须是公网字面
     eps = _by_value(result)
-    assert "139.59.12.34" in eps
-    assert "45.11.22.33" in eps
-    assert eps["139.59.12.34"].is_private is False
+    assert "139.59.12.34" in eps  # leak-scan: allow 端点抽取夹具，验「真后端不得被 noise_ips/低段位降噪误杀」，值须是公网字面
+    assert "45.11.22.33" in eps  # leak-scan: allow 端点抽取夹具，验「真后端不得被 noise_ips/低段位降噪误杀」，值须是公网字面
+    assert eps["139.59.12.34"].is_private is False  # leak-scan: allow 端点抽取夹具，验「真后端不得被 noise_ips/低段位降噪误杀」，值须是公网字面
 
 
 def test_url_derived_resolver_ip_also_filtered():
@@ -242,12 +242,12 @@ def test_url_derived_resolver_ip_also_filtered():
     """
     result = _analyze(dex_strings=[
         "https://1.12.12.12/dns-query", "https://1.1.1.1/dns-query",
-        "http://139.59.12.34:8080/api",
+        "http://139.59.12.34:8080/api",  # leak-scan: allow 端点抽取夹具，验「真后端不得被 noise_ips/低段位降噪误杀」，值须是公网字面
     ])
     vals = {e.value for e in result.endpoints}
     assert "1.12.12.12" not in vals and "1.1.1.1" not in vals
-    assert "139.59.12.34" in vals, "真后端 IP 不得被误杀"
-    assert "http://139.59.12.34:8080/api" in vals, "URL 本身仍应保留"
+    assert "139.59.12.34" in vals, "真后端 IP 不得被误杀"  # leak-scan: allow 端点抽取夹具，验「真后端不得被 noise_ips/低段位降噪误杀」，值须是公网字面
+    assert "http://139.59.12.34:8080/api" in vals, "URL 本身仍应保留"  # leak-scan: allow 端点抽取夹具，验「真后端不得被 noise_ips/低段位降噪误杀」，值须是公网字面
 
 
 def test_url_host_with_bogus_tld_not_emitted_as_domain():
@@ -280,18 +280,18 @@ def test_public_dns_resolver_ips_filtered():
     """
     result = _analyze(dex_strings=[
         "dns 8.8.8.8", "dns 1.1.1.1", "dns 114.114.114.114", "dns 223.5.5.5",
-        "dns 119.29.29.29", "dns 1.12.12.12", "httpdns 203.107.1.1", "c2 139.59.12.34",
+        "dns 119.29.29.29", "dns 1.12.12.12", "httpdns 203.107.1.1", "c2 139.59.12.34",  # leak-scan: allow 端点抽取夹具，验「真后端不得被 noise_ips/低段位降噪误杀」，值须是公网字面
     ])
     eps = _by_value(result)
     for ip in ("8.8.8.8", "1.1.1.1", "114.114.114.114", "223.5.5.5",
                "119.29.29.29", "1.12.12.12", "203.107.1.1"):
         assert ip not in eps, f"{ip} 是公共 DNS 解析器，应被 noise_ips 过滤"
-    assert "139.59.12.34" in eps, "真 C2 不得被这批 denylist 误杀"
+    assert "139.59.12.34" in eps, "真 C2 不得被这批 denylist 误杀"  # leak-scan: allow 端点抽取夹具，验「真后端不得被 noise_ips/低段位降噪误杀」，值须是公网字面
 
 
 def test_public_ip_not_private():
-    result = _analyze(dex_strings=["139.59.12.34 backend"])
-    assert _by_value(result)["139.59.12.34"].is_private is False
+    result = _analyze(dex_strings=["139.59.12.34 backend"])  # leak-scan: allow 端点抽取夹具，验「真后端不得被 noise_ips/低段位降噪误杀」，值须是公网字面
+    assert _by_value(result)["139.59.12.34"].is_private is False  # leak-scan: allow 端点抽取夹具，验「真后端不得被 noise_ips/低段位降噪误杀」，值须是公网字面
 
 
 def test_cleartext_url_with_private_host_flags_both():
@@ -372,7 +372,7 @@ def test_dedup_merges_evidences_across_sources():
 
 def test_flags_union_on_merge():
     # 用公网 IP（私网裸 IP 已被 C4 过滤；解析器 IP 亦已入 noise_ips，故取普通公网 IP）验证同 value 去重合并。
-    ip = "45.11.22.33"
+    ip = "45.11.22.33"  # leak-scan: allow 端点抽取夹具，验「真后端不得被 noise_ips/低段位降噪误杀」，值须是公网字面
     result = _analyze(dex_strings=[f"a {ip}", f"b {ip}"])
     matches = [e for e in result.endpoints if e.value == ip]
     assert len(matches) == 1
@@ -555,7 +555,7 @@ def test_meta_counts_reported():
             "http://b.heika-gw.cn/y",
             "http://10.0.0.1:9000/p",   # URL host 私网 → 标 private（host 通道）
             "8.8.4.4",
-            "139.59.12.34",
+            "139.59.12.34",  # leak-scan: allow 端点抽取夹具，验「真后端不得被 noise_ips/低段位降噪误杀」，值须是公网字面
             "host=cdn.heika-gw.cn",
         ]
     )
@@ -747,8 +747,8 @@ def test_dense_urls_ip_domain_consistency() -> None:
     行为须与旧线性实现一致（用可观察的端点集合验证）。"""
     text = (
         "https://a.fraud-gw.cn/1 https://b.fraud-gw.cn/2 "
-        "http://139.59.12.34:80/x https://c.fraud-gw.cn/3 "
-        "45.11.22.33 raw.heika-pay.cn https://d.fraud-gw.cn/4"
+        "http://139.59.12.34:80/x https://c.fraud-gw.cn/3 "  # leak-scan: allow 端点抽取夹具，验「真后端不得被 noise_ips/低段位降噪误杀」，值须是公网字面
+        "45.11.22.33 raw.heika-pay.cn https://d.fraud-gw.cn/4"  # leak-scan: allow 端点抽取夹具，验「真后端不得被 noise_ips/低段位降噪误杀」，值须是公网字面
     )
     result = _analyze(dex_strings=[text])
     values = {e.value for e in result.endpoints}
@@ -756,16 +756,16 @@ def test_dense_urls_ip_domain_consistency() -> None:
     for u in (
         "https://a.fraud-gw.cn/1",
         "https://b.fraud-gw.cn/2",
-        "http://139.59.12.34:80/x",
+        "http://139.59.12.34:80/x",  # leak-scan: allow 端点抽取夹具，验「真后端不得被 noise_ips/低段位降噪误杀」，值须是公网字面
         "https://c.fraud-gw.cn/3",
         "https://d.fraud-gw.cn/4",
     ):
         assert u in values
     # URL host 派生的 domain/ip 也在
     assert "a.fraud-gw.cn" in values
-    assert "139.59.12.34" in values
+    assert "139.59.12.34" in values  # leak-scan: allow 端点抽取夹具，验「真后端不得被 noise_ips/低段位降噪误杀」，值须是公网字面
     # URL 之外的裸 IP / 裸域名也应被抽到（用非解析器公网 IP——8.8.8.8 已入 noise_ips）
-    assert "45.11.22.33" in values
+    assert "45.11.22.33" in values  # leak-scan: allow 端点抽取夹具，验「真后端不得被 noise_ips/低段位降噪误杀」，值须是公网字面
     assert "raw.heika-pay.cn" in values
 
 

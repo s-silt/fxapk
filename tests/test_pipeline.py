@@ -208,13 +208,13 @@ def test_enrichment_targets_only_suspicious():
         Endpoint(value="gw.hxhcapi.vip", kind="domain", evidences=[]),  # 疑似 C2 → 查
         Endpoint(value="maps.googleapis.com", kind="domain", evidences=[]),  # 已知 infra → 跳
         Endpoint(value="connectivitycheck.gstatic.com", kind="domain", evidences=[]),  # infra → 跳
-        Endpoint(value="45.76.1.1", kind="ip", evidences=[]),  # 真公网 IP → 查
+        Endpoint(value="45.76.1.1", kind="ip", evidences=[]),  # 真公网 IP → 查  # leak-scan: allow pipeline 闭环目标夹具，非公网不会进 closure 候选
         Endpoint(value="127.0.0.1", kind="ip", evidences=[]),  # 回环 → 待核 → 跳
         Endpoint(value="192.168.1.1", kind="ip", evidences=[]),  # 私网 → 跳
         Endpoint(value="https://gw.hxhcapi.vip/x", kind="url", evidences=[]),  # url 不富化
     ]
     targets = {e.value for e in pipeline._enrichment_targets(eps)}
-    assert targets == {"gw.hxhcapi.vip", "45.76.1.1"}
+    assert targets == {"gw.hxhcapi.vip", "45.76.1.1"}  # leak-scan: allow pipeline 闭环目标夹具，非公网不会进 closure 候选
 
 
 def test_online_skips_infra_domain_enrichment(monkeypatch, fake_ctx):
@@ -442,10 +442,10 @@ def test_domain_lead_dns_hosting_in_evidence_and_notes():
             enrichment={
                 "rdap": {"registrar": "R", "source": "rdap"},
                 "dns": {
-                    "ips": ["45.76.1.1", "45.76.1.2"],
+                    "ips": ["45.76.1.1", "198.51.100.39"],  # leak-scan: allow pipeline 闭环目标夹具，非公网不会进 closure 候选
                     "hosting": [
-                        {"ip": "45.76.1.1", "asn": "AS20473 Vultr", "org": "Vultr", "country": "US"},
-                        {"ip": "45.76.1.2", "asn": "AS20473 Vultr", "org": "Vultr", "country": "US"},
+                        {"ip": "45.76.1.1", "asn": "AS20473 Vultr", "org": "Vultr", "country": "US"},  # leak-scan: allow pipeline 闭环目标夹具，非公网不会进 closure 候选
+                        {"ip": "198.51.100.39", "asn": "AS20473 Vultr", "org": "Vultr", "country": "US"},
                     ],
                 },
             },
@@ -454,7 +454,7 @@ def test_domain_lead_dns_hosting_in_evidence_and_notes():
     leads = pipeline.build_endpoint_leads(eps)
     lead = next(l for l in leads if l.category == LeadCategory.DOMAIN)
     blob = " ".join(lead.evidence_to_obtain) + " " + (lead.notes or "")
-    assert "45.76.1.1" in blob
+    assert "45.76.1.1" in blob  # leak-scan: allow pipeline 闭环目标夹具，非公网不会进 closure 候选
     assert "Vultr" in blob
 
 

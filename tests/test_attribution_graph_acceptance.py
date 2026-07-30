@@ -64,8 +64,8 @@ def test_ordinary_site_gets_no_origin_role_without_a_rolescore() -> None:
     g = build_infrastructure_graph(
         artifact_id="s",
         extra_evidence=[
-            evidence(id="e1", type="resolved_ip", target=domain("www.example.com"), value="104.16.0.1", source="shodan"),
-            evidence(id="e2", type="asn", target=ip("104.16.0.1"), value=13335, source="shodan"),
+            evidence(id="e1", type="resolved_ip", target=domain("www.example.com"), value="198.51.100.8", source="shodan"),
+            evidence(id="e2", type="asn", target=ip("198.51.100.8"), value=13335, source="shodan"),
         ],
     )
     assert all(node.roles == () for node in g.nodes)
