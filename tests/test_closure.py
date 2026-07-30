@@ -1260,7 +1260,7 @@ def test_close_report_refreshes_fronting_cluster(monkeypatch) -> None:
     probe = _endpoint("probe.example.test", kind="domain", enrichment={"dns": {"ips": ["198.51.100.77"]}})
     assert closure_sources._resolved_ips(probe) == ["198.51.100.77"]
     e1 = _endpoint("1.1.1.1", runtime=True, target=True, enrichment={"tls": {"spki_sha256": "sharedspki"}})
-    e2 = _endpoint("2.2.2.2", runtime=True, target=True, enrichment={"tls": {"spki_sha256": "sharedspki"}})
+    e2 = _endpoint("198.51.100.21", runtime=True, target=True, enrichment={"tls": {"spki_sha256": "sharedspki"}})
     report = _report(e1, e2)
     close_report(report, ClosureConfig(online=False, require_dynamic=False), enrichers=[])
     edge1 = e1.enrichment["attribution"]["ips"][0]["edge_provider"]
