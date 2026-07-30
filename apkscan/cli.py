@@ -65,6 +65,17 @@ def _warn_report_revision(payload: object) -> None:
         typer.echo(warning, err=True)
 
 
+def _warn_report_path_revision(path: str) -> None:
+    """尽力读取 ``--into`` 报告并告警；读失败留给既有合并边界处理。"""
+    import json as _json
+
+    try:
+        payload = _json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        return
+    _warn_report_revision(payload)
+
+
 def _version_callback(value: bool) -> None:
     if value:
         from apkscan import __version__
@@ -1054,6 +1065,7 @@ def probe_leads(
                 typer.echo(f"错误：写台账 JSON 失败：{json_out}（{exc}）", err=True)
                 raise typer.Exit(code=1) from exc
         if into:
+            _warn_report_path_revision(into)
             added = probe_ingest.merge_into_report_json(into, leads)
             typer.echo(f"已追加 {added} 条探针线索进 {into}（去重）。")
             # report.json 被改后，若同目录有 report.html 则重渲，让人读报告随台账更新。
@@ -1125,6 +1137,7 @@ def pcap_leads(
                 typer.echo(f"错误：写台账 JSON 失败：{json_out}（{exc}）", err=True)
                 raise typer.Exit(code=1) from exc
         if into:
+            _warn_report_path_revision(into)
             added = pcap_ingest.merge_into_report_json(into, summary)
             typer.echo(f"已追加 {added} 条带外线索进 {into}（去重）。")
             # report.json 被改后，若同目录有 report.html 则重渲，让人读报告随台账更新。
