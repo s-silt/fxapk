@@ -24,6 +24,12 @@ def _short(value: str) -> str:
     return value[:12] if len(value) > 12 else value
 
 
+def _ruleset_text(value: object) -> str:
+    """规则加载失败的公共哨兵不是可比较摘要。"""
+    text = _text(value)
+    return "" if text.casefold() == "unknown" else text
+
+
 def report_revision_warnings(
     meta: Mapping[str, object] | object,
     *,
@@ -46,16 +52,16 @@ def report_revision_warnings(
     if isinstance(current_ruleset_digest, _Auto):
         from apkscan.core.registry import ruleset_digest
 
-        current_ruleset_digest = _text(ruleset_digest()) or None
+        current_ruleset_digest = _ruleset_text(ruleset_digest()) or None
 
     report_version = _text(report_meta.get("tool_version")) or _text(
         manifest.get("tool_version")
     )
     report_commit = _text(manifest.get("build_commit"))
-    report_rules = _text(report_meta.get("ruleset_digest"))
+    report_rules = _ruleset_text(report_meta.get("ruleset_digest"))
     current_version_text = _text(current_version)
     current_commit_text = _text(current_build_commit)
-    current_rules_text = _text(current_ruleset_digest)
+    current_rules_text = _ruleset_text(current_ruleset_digest)
 
     differences: list[str] = []
     if not report_version:

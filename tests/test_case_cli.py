@@ -28,23 +28,9 @@ def _write_report(tmp_path, *, tool_version: str | None = None) -> object:  # no
 
 
 def test_case_close_warns_on_revision_mismatch_without_blocking(
-    monkeypatch, tmp_path
+    tmp_path,
 ) -> None:  # noqa: ANN001
     report_path = _write_report(tmp_path, tool_version="0.0.0-old")
-
-    def fake_close(report, config):  # noqa: ANN001, ANN202
-        del config
-        closure = {
-            "status": "complete",
-            "targets": [],
-            "gaps": [],
-            "next_actions": [],
-            "source_summary": {},
-        }
-        report.meta["closure"] = closure
-        return closure
-
-    monkeypatch.setattr(case_command, "close_report", fake_close)
 
     result = runner.invoke(
         cli.app,
@@ -53,6 +39,9 @@ def test_case_close_warns_on_revision_mismatch_without_blocking(
 
     assert result.exit_code == 0
     assert "分析修订与当前 fxapk 不一致" in result.stderr
+    persisted = report_path.read_text(encoding="utf-8")
+    assert '"closure"' in persisted
+    assert "分析修订与当前 fxapk 不一致" not in persisted
 
 
 @pytest.mark.parametrize(

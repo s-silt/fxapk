@@ -83,6 +83,26 @@ def test_unavailable_build_commits_do_not_create_a_false_mismatch() -> None:
     assert _warnings(meta, commit=None) == []
 
 
+def test_unknown_ruleset_sentinel_is_unavailable_not_a_mismatch() -> None:
+    meta = {
+        "tool_version": "1.3.2",
+        "ruleset_digest": "rules-old",
+        "evidence_manifest": {"build_commit": "new456"},
+    }
+
+    assert _warnings(meta, rules="unknown") == []
+
+
+def test_unknown_report_ruleset_is_unavailable_not_a_mismatch() -> None:
+    meta = {
+        "tool_version": "1.3.2",
+        "ruleset_digest": "unknown",
+        "evidence_manifest": {"build_commit": "new456"},
+    }
+
+    assert _warnings(meta, rules="rules-new") == []
+
+
 def test_malformed_meta_is_treated_as_a_legacy_report() -> None:
     warnings = report_revision_warnings(
         None,  # type: ignore[arg-type]

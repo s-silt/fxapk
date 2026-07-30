@@ -45,6 +45,16 @@ def _build_provenance() -> dict:
     dirty: bool | None = None
     repo = Path(__file__).resolve().parents[2]  # apkscan/core/integrity.py → 仓库根
     try:
+        top = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5, check=False,
+        )
+        if (
+            top.returncode != 0
+            or not top.stdout.strip()
+            or Path(top.stdout.strip()).resolve() != repo
+        ):
+            return {"build_commit": None, "build_dirty": None}
         # ★复审 #2：encoding="utf-8"/errors="replace"——git status 含 UTF-8 文件名时 text=True 默认按 locale
         #   解码，ASCII locale 下会抛 UnicodeDecodeError（不在 OSError/SubprocessError 内）。整段兜底 Exception。
         rev = subprocess.run(
