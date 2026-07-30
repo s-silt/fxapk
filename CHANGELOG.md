@@ -3,7 +3,7 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
-## Unreleased
+## 1.4.0 — 2026-07-30
 
 ### Added
 
@@ -19,6 +19,37 @@ affect automated / CI / agent callers are called out explicitly**.
   `runtime_merged_inventory`，以统一 PCAP 与 probe 观测。`read_inventory()` 兼容读取新旧字段；
   PCAP/probe 写路径会写入新字段并移除旧别名。直接读取历史报告原始 JSON 的调用方必须同时
   接受旧字段，或改用 `read_inventory()`。
+- **可见性快照 schema 升到 1.1**：每个来源维度新增 `inputs_seen`，记录该维度求值时**实际用到
+  的输入键**。重算快照时据此区分「输入被裁剪」与「新增了信号」（见下方 Fixed）。1.0 旧快照
+  迁移后顶层仍标 `1.0`，不冒充完整记录。消费方读 `inputs_seen` 前须容忍其缺失。
+- **运行时端点携带完整端口集合**：每个 IP 的端点新增 `ports` 与 `remote_endpoints`
+  （`"ip:port"` 列表）。顶层 `port` 保留为**代表端口**（流量最大的那个）以兼容既有消费方，
+  但权威明细在 `ports` / `remote_endpoints`——不要再据顶层 `port` 假设「该 IP 只有一个端口」。
+
+### Fixed
+
+- **多端口运行时端点互相覆盖**：同一 IP 上的多个端口按裸 IP 合并时后者覆盖前者，只剩一个
+  端口能进入端点观测。改为按 IP 聚合：端口取并集、字节数与连接数求和、载荷标志取或、
+  时间窗取端点。
+- **端点归一化只用于选取目标**：目标匹配已剥离 `:port` 后缀，但结果回写与文书渲染两处仍用
+  裸 `lower()`，导致带端口的端点匹配不上同一目标。三处改为共用 `infra.match_key()` 这一个
+  编解码器。
+- **IPv6 端点被截断**：`host:port` 反解未区分 IPv6 —— 裸 IPv6 的末段本身是合法端口号，会被
+  当端口剥掉。改用 RFC 3986 括号形态 `[v6]:port`，并把编解码收敛到
+  `infra.format_hostport()` / `split_hostport()`。
+- **重复回灌累加观测强度**：同一份抓包多次并入同一报告时，字节数与连接数被反复累加，虚增
+  观测强度。加入按端点贡献计算的幂等指纹闸；闸只覆盖**具累加语义**的字段，覆盖写字段不受影响。
+- **SNI 伪装信号只写不读**：借用知名域名的握手此前只落在自由文本里。改为 `Lead.sni_masquerade`
+  结构化字段，跨报告往返保留，并在文书模板中于受文对象之前给出警示，避免把被冒用域名的持有方
+  当作查询对象。
+- **回灌不刷新派生视图**：PCAP / probe 并入报告时写了运行时标志与清单，却不重算
+  `meta.visibility`，落盘的是分析期那份「纯静态」旧快照——报告同时写着「有运行时端点」和
+  「未做运行时观测」。抽出 `refresh_visibility_snapshot(meta)`，两条写路径均在落盘前调用；
+  两侧各加一条结构性断言「落盘快照 == 对该报告现场重算」，将来任何写方漏刷都会失败。
+- **输入被部分裁剪时确证盲区遭解禁**：重算快照时若某维度的输入键只剩一部分（例如加固判定
+  依据被移除、只留下一个无关键），该维度会被重算为「完整」，本已阻断的穷尽性结论凭空恢复。
+  改为用 `inputs_seen` 做子集比对：当前键集是旧集合真子集即判为裁剪并回填原结论，否则跟随
+  重算——脱壳后回灌这类**真实的**信号补全仍能正常升级。
 
 ## 1.3.2 — 2026-07-28
 

@@ -31,6 +31,10 @@ Dynamic unpack / capture, the sample corpus and other features need optional dep
 # Static analysis, HTML + JSON into out/
 fxapk analyze app.apk --out out
 
+# Already-captured web evidence is a first-class input:
+#   reads .html / .body / .js / .headers recursively, never re-fetches over the network
+fxapk analyze-web <evidence-dir> --out out
+
 # One-click full pipeline (rooted device / emulator attached):
 #   doctor → static → unpack → capture → merge into one report
 fxapk auto app.apk --out out       # no device? dynamic steps are skipped, static report still produced
@@ -38,9 +42,13 @@ fxapk auto app.apk --out out       # no device? dynamic steps are skipped, stati
 # Did detection get better or worse across versions, on the same real samples?
 # (ingest both versions' reports with `corpus add` first)
 fxapk corpus regress --corpus <library-dir>
+
+# Passively enrich a list of targets (one IP / domain per line).
+# --dry-run is the DEFAULT: it only estimates each source's quota and sends no requests.
+fxapk enrich batch -t targets.txt -o enrich_out
 ```
 
-Main commands: `analyze` (static), `auto` (one-click: static + dynamic when a device is present), `capture` (on-device capture), `doctor` (device env check + auto-fix), `corpus` (sample library: ingest past reports, cross-version regression, look up a value across samples). Full commands and flags: `fxapk --help`.
+Main commands: `analyze` (static), `analyze-web` (already-captured web evidence), `auto` (one-click: static + dynamic when a device is present), `capture` (on-device capture), `doctor` (device env check + auto-fix), `enrich batch` (resumable passive batch enrichment), `corpus` (sample library: ingest past reports, cross-version regression, look up a value across samples). Full commands and flags: `fxapk --help`.
 
 When not installed as a command, use `python -m apkscan.cli <…>`.
 
@@ -73,6 +81,25 @@ the same version, which the sample alone cannot provide.
 - `out/report.html` — self-contained single file (share directly / open on phone)
 - `out/report.json` — full structured data (machine-readable)
 - `--fmt pdf` — optional PDF export (needs local Chrome / Edge)
+
+## Developing from source
+
+Run this once after cloning to enable the pre-commit sensitive-data scan:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+It looks only at **staged added lines**. Three classes block the commit by default: suspected real
+addresses, suspected credentials, and un-justified exemptions; domains and context words are reported
+but do not block (`FXAPK_LEAK_SCAN_STRICT=1` blocks those too). To allow a single line you must state
+why — add `leak-scan: allow <reason>` inline. CI scans the PR diff again, so `--no-verify` does not get
+past the final gate.
+
+Test fixtures must use documentation-reserved ranges (`192.0.2.0/24` / `198.51.100.0/24` /
+`203.0.113.0/24` / `2001:db8::/32` / `example.com`). A real address, once pushed, is **irreversible** —
+rewriting history does not remove the platform's cached copies, so the only reliable fix is never
+writing it in the first place.
 
 ## Compliance
 
