@@ -143,6 +143,154 @@ def test_shared_native_libs_clusters_family() -> None:
     assert not any(c["sha256"] == _sha(_SO_B) for c in clusters)  # _SO_B 仅 1 样本，不成簇
 
 
+def _named_entry(sample_sha: str, *libs: tuple[str, bytes]) -> dict:
+    """同 ``_entry`` 但可指定 .so 库名（降噪判据看的是名字，不是字节）。"""
+    report = {
+        "meta": {
+            "sample_sha256": sample_sha,
+            "native_lib_hashes": [
+                {"name": name, "sha256": _sha(blob), "size": len(blob)} for name, blob in libs
+            ],
+        },
+    }
+    return corpus.manifest_entry(report)
+
+
+# 取自 rules/packers.yaml 的 so_names（真源，不另建名单）；改规则会让这些测试变红=正确的耦合。
+_PACKER_SO = "libDexHelper.so"          # 梆梆加固
+_PACKER_SO_PREFIX = "libnllvm1665488792.so"  # 百度加固：规则写前缀 libnllvm，随机数字后缀
+_SDK_SO = "libhermes.so"                # React Native 引擎，随 SDK 继承
+
+
+def test_native_anchor_weakness_names_packer_and_sdk() -> None:
+    """★判据可命名：加固壳 → ``packer:<产品名>``；第三方 SDK → ``third-party-sdk``；业务库 → None。"""
+    packer = corpus.native_anchor_weakness(_PACKER_SO)
+    assert packer is not None and packer.startswith("packer:")
+    assert packer != "packer:"  # 必须带得出产品名，不能是空壳标签
+    assert corpus.native_anchor_weakness(_SDK_SO) == "third-party-sdk"
+    assert corpus.native_anchor_weakness("libclientcore.so") is None
+    assert corpus.native_anchor_weakness("") is None
+
+
+def test_native_anchor_weakness_normalizes_path_and_case() -> None:
+    """APK 里 .so 带 ABI 目录前缀；库名大小写不一 → 都要归一到 basename 小写再判。"""
+    assert corpus.native_anchor_weakness(f"lib/arm64-v8a/{_PACKER_SO}") is not None
+    assert corpus.native_anchor_weakness(_PACKER_SO.upper()) is not None
+    assert corpus.native_anchor_weakness(f"lib\\armeabi-v7a\\{_PACKER_SO}") is not None
+    # 规则里写成不带 .so 的前缀式（libnllvm*）也要认
+    assert corpus.native_anchor_weakness(_PACKER_SO_PREFIX) is not None
+
+
+def test_shared_native_libs_annotates_packer_but_keeps_business_strong() -> None:
+    """★核心用例：加固壳簇被标 weak_anchor，真业务 .so 簇仍是强簇（且弱锚沉底）。"""
+    packer_blob = b"\x7fELF" + b"packer-runtime" * 30
+    entries = [
+        _named_entry("s1", ("libclientcore.so", _SO_A), (_PACKER_SO, packer_blob)),
+        _named_entry("s2", ("libclientcore.so", _SO_A), (_PACKER_SO, packer_blob)),
+        _named_entry("s3", (_PACKER_SO, packer_blob)),  # 第三个不相干样本也用同款加固
+    ]
+    clusters = corpus.shared_native_libs(entries)
+
+    business = next(c for c in clusters if c["sha256"] == _sha(_SO_A))
+    assert business["weak_anchor"] is False
+    assert business["weak_anchor_reason"] is None
+
+    packer = next(c for c in clusters if c["sha256"] == _sha(packer_blob))
+    assert packer["weak_anchor"] is True
+    assert packer["weak_anchor_reason"].startswith("packer:")
+    # ★标注而非删除：共享事实仍在（3 个样本都列出），只是不当强锚
+    assert packer["samples"] == ["s1", "s2", "s3"]
+
+    # 弱锚沉底：加固壳簇样本更多（3>2），若只按样本数排会排在前面
+    assert clusters[0]["sha256"] == _sha(_SO_A)
+    assert clusters[-1]["sha256"] == _sha(packer_blob)
+
+
+def test_shared_native_libs_annotates_third_party_sdk() -> None:
+    sdk_blob = b"\x7fELF" + b"rn-engine" * 40
+    entries = [_named_entry("s1", (_SDK_SO, sdk_blob)), _named_entry("s2", (_SDK_SO, sdk_blob))]
+    cluster = corpus.shared_native_libs(entries)[0]
+    assert cluster["weak_anchor"] is True and cluster["weak_anchor_reason"] == "third-party-sdk"
+
+
+def test_shared_native_libs_degrades_when_rules_unavailable(monkeypatch) -> None:
+    """规则加载失败 → 不标注（宁可少标注也不误标），且不抛。"""
+    corpus._packer_so_names.cache_clear()
+
+    def _boom(*_a, **_k):
+        raise OSError("boom")
+
+    monkeypatch.setattr("apkscan.core.registry.load_rules", _boom)
+    try:
+        assert corpus.native_anchor_weakness(_PACKER_SO) is None
+        packer_blob = b"\x7fELF" + b"packer-runtime" * 30
+        entries = [_named_entry("s1", (_PACKER_SO, packer_blob)),
+                   _named_entry("s2", (_PACKER_SO, packer_blob))]
+        assert corpus.shared_native_libs(entries)[0]["weak_anchor"] is False
+    finally:
+        corpus._packer_so_names.cache_clear()  # 别把空 mapping 留给后续测试
+
+
+def test_shared_native_libs_classification_is_input_order_independent() -> None:
+    """★同一 sha 被多个样本用**不同库名**登记时，分类结果不得随输入顺序变化。
+
+    真实场景：同一份 .so 在一个样本里叫业务名、在另一个样本里被改名成壳名（重打包/改名
+    对抗），于是一个 sha 对应多个观测名。若分类取"第一个见到的名字"，那么 manifest 的
+    入库顺序（= 谁先 corpus add）就会决定这簇是强锚还是弱锚 —— 同一份证据两次运行给出
+    相反结论，这类不确定性在串案里是直接的误判源。
+
+    判据：把 entries 正序与逆序各跑一遍，``name`` / ``weak_anchor`` / ``weak_anchor_reason``
+    必须逐字段相同（把"取首个名字"改回去 → 本测试必红）。
+    """
+    shared_blob = b"\x7fELF" + b"renamed-shared" * 30
+    forward = [
+        _named_entry("s1", ("libclientcore.so", shared_blob)),
+        _named_entry("s2", (_PACKER_SO, shared_blob)),
+        _named_entry("s3", (_SDK_SO, shared_blob)),
+    ]
+    backward = list(reversed(forward))
+
+    first = corpus.shared_native_libs(forward)
+    second = corpus.shared_native_libs(backward)
+
+    assert len(first) == 1 and len(second) == 1
+    for field in ("sha256", "name", "weak_anchor", "weak_anchor_reason", "samples"):
+        assert first[0][field] == second[0][field], field
+    # 名字冲突时判据必须给出**可解释**的确定结果：加固壳优先（最强的降噪理由）。
+    assert first[0]["weak_anchor"] is True
+    assert first[0]["weak_anchor_reason"].startswith("packer:")
+
+
+def test_shared_native_libs_order_independent_when_only_one_name_is_weak() -> None:
+    """业务名 + 第三方 SDK 名混登同一 sha：无论顺序，都必须给同一个（降噪）结论。
+
+    与上一条的区别是这里没有加固壳名参与排序，验证"弱锚理由的选取"本身也不看输入顺序。
+    """
+    shared_blob = b"\x7fELF" + b"sdk-or-business" * 25
+    forward = [
+        _named_entry("s1", (_SDK_SO, shared_blob)),
+        _named_entry("s2", ("libclientcore.so", shared_blob)),
+    ]
+    first = corpus.shared_native_libs(forward)[0]
+    second = corpus.shared_native_libs(list(reversed(forward)))[0]
+
+    assert first == second
+    assert first["weak_anchor"] is True and first["weak_anchor_reason"] == "third-party-sdk"
+
+
+def test_shared_native_libs_missing_name_is_not_weak() -> None:
+    """库名缺失 → 无从命名判据，不得凭空标弱（未知≠弱锚）。"""
+    entries = [
+        corpus.manifest_entry({"meta": {"sample_sha256": "s1", "native_lib_hashes": [
+            {"name": "", "sha256": _sha(_SO_A), "size": 1}]}}),
+        corpus.manifest_entry({"meta": {"sample_sha256": "s2", "native_lib_hashes": [
+            {"name": "", "sha256": _sha(_SO_A), "size": 1}]}}),
+    ]
+    cluster = corpus.shared_native_libs(entries)[0]
+    assert cluster["name"] is None
+    assert cluster["weak_anchor"] is False and cluster["weak_anchor_reason"] is None
+
+
 def test_cli_seen_by_so_sha256(tmp_path) -> None:
     """★CLI 端到端：corpus seen <so_sha> --by so_sha256 一击拉出同族样本。"""
     import json
@@ -186,3 +334,57 @@ def test_cli_seen_by_so_sha256(tmp_path) -> None:
     bad = runner.invoke(cli.app, ["corpus", "seen", "x", "--by", "so_sh256", "--corpus", str(corpus_dir)])
     assert bad.exit_code == 2
     assert "so_sha256" in bad.stdout + str(bad.stderr or "")
+
+
+def test_cli_shared_native_surfaces_weak_anchor(tmp_path) -> None:
+    """★降噪信号必须走到消费方：weak_anchor / weak_anchor_reason 要出现在 CLI 的 JSON 里。
+
+    只在 core 函数里算出来不算做完——``corpus shared-native`` 是唯一生产消费方，
+    字段没渲染出去，看报告的人照旧会把加固壳簇当强锚。
+    """
+    import json
+
+    from typer.testing import CliRunner
+
+    from apkscan import cli
+
+    packer_blob = b"\x7fELF" + b"packer-runtime" * 30
+
+    def _report(sample: str, libs: list[tuple[str, bytes]]) -> dict:
+        return {
+            "schema_version": "1.0", "analysis_status": "complete", "completeness": 1.0,
+            "package_name": "com.x",
+            "meta": {"sample_sha256": sample, "tool_version": "0.9.0", "ruleset_digest": "dd",
+                     "native_lib_hashes": [
+                         {"name": n, "sha256": _sha(b), "size": len(b)} for n, b in libs]},
+            "leads": [], "endpoints": [], "findings": [],
+        }
+
+    runner = CliRunner()
+    corpus_dir = tmp_path / "corpus"
+    # ★w3 只带加固壳：让加固壳簇(3 样本)比真业务簇(2 样本)**更大**——这正是要降噪的现实形态
+    # （同款加固的无关样本越多，假簇越显眼）。也使「弱锚沉底」只能靠 weak_anchor 排序键成立：
+    # 若只按样本数降序，加固壳簇会排在最前，末位断言必红。
+    fixtures = {
+        "w1": [("libclientcore.so", _SO_A), (_PACKER_SO, packer_blob)],
+        "w2": [("libclientcore.so", _SO_A), (_PACKER_SO, packer_blob)],
+        "w3": [(_PACKER_SO, packer_blob)],
+    }
+    for sha, libs in fixtures.items():
+        rp = tmp_path / f"{sha}.json"
+        rp.write_text(json.dumps(_report(sha, libs)), encoding="utf-8")
+        add = runner.invoke(cli.app, ["corpus", "add", str(rp), "--case", "c1", "--corpus", str(corpus_dir)])
+        assert add.exit_code == 0, add.stdout
+
+    res = runner.invoke(cli.app, ["corpus", "shared-native", "--corpus", str(corpus_dir)])
+    assert res.exit_code == 0, res.stdout
+    clusters = json.loads(res.stdout)["clusters"]
+
+    packer = next(c for c in clusters if c["sha256"] == _sha(packer_blob))
+    assert packer["weak_anchor"] is True
+    assert packer["weak_anchor_reason"].startswith("packer:")
+    business = next(c for c in clusters if c["sha256"] == _sha(_SO_A))
+    assert business["weak_anchor"] is False and business["weak_anchor_reason"] is None
+    # 加固壳簇样本更多却仍排末位 → 沉底靠的是 weak_anchor，不是样本数
+    assert len(packer["samples"]) > len(business["samples"])
+    assert clusters[-1]["sha256"] == _sha(packer_blob)

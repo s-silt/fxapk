@@ -128,3 +128,125 @@ def test_pipeline_records_the_relaxation_in_meta() -> None:
     assert block["hiddenapi_flags_relaxed"]["applied"] is True
     flags = block["hiddenapi_flags_relaxed"]["unknown_flags"]
     assert any("DomapiApiFlag" in str(f) for f in flags), flags
+
+
+# ---------------------------------------------------------------------------
+# D-2：放行账目必须按样本隔离（batch 单进程顺序跑，账会串到下一份报告）
+# ---------------------------------------------------------------------------
+
+
+def _degradation_meta(baseline: int | None) -> dict:
+    """跑一遍 _stage_degradation_flags，返回 meta（baseline 模拟 load_apk 钉下的快照）。"""
+    from types import SimpleNamespace
+
+    from apkscan.core import pipeline
+    from apkscan.core.models import AnalysisConfig
+
+    state = pipeline._PipelineState(
+        ctx=SimpleNamespace(  # type: ignore[arg-type]  # 本 stage 只 getattr 这几项
+            dex_available=True,
+            apk_validation_ok=True,
+            extra_dex_report={"requested": 5, "loaded": 5, "failed": 0},
+            hiddenapi_flags_baseline=baseline,
+        ),
+        config=AnalysisConfig(online=False),
+        platform="android",
+        capabilities=set(),
+    )
+    pipeline._stage_degradation_flags(state)
+    return state.meta
+
+
+def test_second_sample_report_excludes_flags_waved_through_for_the_first() -> None:
+    """★D-2：顺序分析两个样本，样本 B 的报告不得含只属于样本 A 的放行 flag。
+
+    放行记录攒在进程级集合里，而 batch（``dynamic/batch.py``）是**单进程顺序**跑整个文件夹。
+    不按样本减基线，B 的报告就会挂上 A 放行的取值——一份干净样本凭空多出"靠放宽第三方校验
+    才载进来"的账。串案时这是**伪造的共同特征**：两份报告出现同一组 unknown_flags，看着像
+    同一条加固工具链的指纹，实际只是它们在同一次 batch 里被先后分析过。
+    """
+    _restriction, domapi = _flags()
+
+    # —— 样本 A：load_apk 钉基线 → 解析中放行 41 → 出报告
+    baseline_a = apk_mod.hiddenapi_flags_snapshot()
+    domapi(41)
+    meta_a = _degradation_meta(baseline_a)
+    flags_a = meta_a["extra_dex_visibility"]["hiddenapi_flags_relaxed"]["unknown_flags"]
+    assert "DomapiApiFlag=41" in flags_a, "样本 A 自己的放行没记上，隔离过头了"
+
+    # —— 样本 B：紧随其后，本样本一个都没放行
+    baseline_b = apk_mod.hiddenapi_flags_snapshot()
+    meta_b = _degradation_meta(baseline_b)
+    # B 无自己的账 → 整个 hiddenapi_flags_relaxed 块都不该出现（写入前判 unknown_flags 非空）
+    assert "hiddenapi_flags_relaxed" not in meta_b["extra_dex_visibility"], (
+        "样本 B 没放行任何取值，却被挂上了容错账——A 的账串过来了"
+    )
+
+    # —— 样本 C：自己放行 42，只能看到 42，看不到 A 的 41
+    baseline_c = apk_mod.hiddenapi_flags_snapshot()
+    domapi(42)
+    meta_c = _degradation_meta(baseline_c)
+    flags_c = meta_c["extra_dex_visibility"]["hiddenapi_flags_relaxed"]["unknown_flags"]
+    assert "DomapiApiFlag=42" in flags_c
+    assert "DomapiApiFlag=41" not in flags_c, "样本 A 的放行取值漏进了样本 C 的报告"
+
+
+def test_applied_stays_process_wide_and_the_shim_is_never_rolled_back() -> None:
+    """★反向护栏：隔离的只是「本样本放行了哪些」，**不是**垫子本身。
+
+    垫子是进程级、幂等、一次性的 monkeypatch。若按样本重置 ``_HIDDENAPI_FLAGS_RELAXED``
+    并撤回 ``_missing_``，后面的样本会重新成批拒载（实测 23/33），这正是它当初要治的病。
+    所以 ``applied`` 如实保持进程级事实；判读"这份报告要不要提容错"看 ``unknown_flags``。
+    """
+    _restriction, domapi = _flags()
+    baseline = apk_mod.hiddenapi_flags_snapshot()
+    meta = _degradation_meta(baseline)  # 本样本零放行
+
+    assert "hiddenapi_flags_relaxed" not in meta["extra_dex_visibility"]
+    # 垫子仍在：新的未知取值照样被放行，而不是抛 ValueError
+    assert int(domapi(43)) == 43, "垫子被回退了——后续样本会重新成批拒载"
+    assert apk_mod.hiddenapi_relax_report(baseline)["applied"] is True
+
+
+def test_snapshot_is_a_frozen_copy_not_a_live_view() -> None:
+    """事件游标是不可变整数；后续放行不会移动已取得的基线。"""
+    _restriction, domapi = _flags()
+    snap = apk_mod.hiddenapi_flags_snapshot()
+    domapi(44)
+    assert "DomapiApiFlag=44" in apk_mod.hiddenapi_relax_report(snap)["unknown_flags"]  # type: ignore[operator]
+
+
+def test_same_unknown_flag_in_later_sample_is_still_reported() -> None:
+    """样本 B 与 A 使用相同 flag 也必须记在 B 名下；set 差会把它错误消掉。"""
+    _restriction, domapi = _flags()
+    domapi(47)  # 样本 A
+    baseline_b = apk_mod.hiddenapi_flags_snapshot()
+    domapi(47)  # 样本 B 使用相同取值
+
+    flags_b = apk_mod.hiddenapi_relax_report(baseline_b)["unknown_flags"]
+    assert "DomapiApiFlag=47" in flags_b
+
+
+def test_relax_report_without_baseline_keeps_the_old_whole_process_semantics() -> None:
+    """不传 since → 报进程级全量（旧行为）。手搓 ctx / 老调用点不因缺属性而失效或抛。"""
+    _restriction, domapi = _flags()
+    domapi(45)
+    assert "DomapiApiFlag=45" in apk_mod.hiddenapi_relax_report()["unknown_flags"]  # type: ignore[operator]
+
+
+def test_load_apk_pins_a_baseline_onto_the_context() -> None:
+    """★接线锁：基线必须由 ``load_apk`` 自己钉在 ctx 上。
+
+    只在 pipeline 侧减基线是不够的——没人钉，``getattr`` 恒取到 None，退化回串账。
+    这里直接检查构造器契约（真解析 APK 属集成测试范畴，另有样本用例覆盖）。
+    """
+    import inspect
+
+    src = inspect.getsource(apk_mod.load_apk)
+    assert "hiddenapi_flags_snapshot()" in src, "load_apk 没钉基线，隔离形同虚设"
+    # 必须在解析 DEX（放行发生地）**之前**钉，否则本样本自己的放行会被算进基线而消失
+    assert src.index("hiddenapi_flags_snapshot()") < src.index("_load_extra_dex("), (
+        "基线钉晚了：本样本自己放行的取值会被当成前账减掉"
+    )
+    ctx_sig = inspect.signature(apk_mod.ApkContext.__init__)
+    assert "hiddenapi_flags_baseline" in ctx_sig.parameters

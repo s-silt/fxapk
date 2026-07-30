@@ -203,7 +203,7 @@ def test_score_contribution_rejects_non_feature() -> None:
 
 def test_score_contribution_rejects_cross_target_features() -> None:
     first = _feature(RoleSignal.REDIRECT, "ev-a", target=_entity("1.1.1.1"))
-    second = _feature(RoleSignal.REDIRECT, "ev-b", target=_entity("2.2.2.2"))
+    second = _feature(RoleSignal.REDIRECT, "ev-b", target=_entity("198.51.100.21"))
     with pytest.raises(ValueError):
         ScoreContribution(signal=RoleSignal.REDIRECT, points=5, features=(first, second))
 
@@ -455,7 +455,7 @@ def test_role_score_rejects_non_numeric_confidence() -> None:
 
 def test_role_score_rejects_cross_target_contribution() -> None:
     target = _entity("1.1.1.1")
-    other = _entity("2.2.2.2")
+    other = _entity("198.51.100.21")
     contribution = _contribution(RoleSignal.BUSINESS_API, 40, "ev-1", target=other)
     base = _valid_role_score(target, (contribution,))
     with pytest.raises(ValueError):
