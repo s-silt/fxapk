@@ -702,6 +702,41 @@ def test_probe_ipv6_reaches_endpoints_and_inventory(tmp_path) -> None:
     assert inventory["uid_attributed"] is False
 
 
+def test_probe_merge_refreshes_the_visibility_snapshot(tmp_path) -> None:
+    """★探针回灌往 meta 写了 ``runtime_merged`` / 清单，就必须重算派生视图。
+
+    与 pcap 回灌同一条纪律：快照是**算出来的**，写方只写信号不刷快照，落盘就会自相矛盾——
+    报告一边有探针线索、一边说「未做运行时观测（纯静态分析）」。本模块曾只写 leads，
+    后来加了 meta 却没跟上刷新（codex 复审 P1）。
+
+    断言比对「落盘快照 == 对该 payload 现场重算」，所以它不针对某个写方：
+    将来谁往 meta 写信号却忘了刷新，这条就会红。
+    """
+    from apkscan.core import visibility
+
+    log = "[netstat] [LEAD->接入节点] 198.51.100.44:8443  ESTABLISHED"
+    path = tmp_path / "report.json"
+    # 预置一份 analyze 期的陈旧快照：那时确实还没有运行时数据
+    path.write_text(json.dumps({
+        "leads": [], "endpoints": [],
+        "meta": {"visibility": {
+            "sources": {"runtime": {"visibility": visibility.VIS_UNAVAILABLE,
+                                    "why": ["未做运行时观测（纯静态分析）"]}},
+            "blocked_claims": [],
+        }},
+    }, ensure_ascii=False), encoding="utf-8")
+
+    probe_ingest.merge_into_report_json(str(path), probe_ingest.parse_probe_log(log))
+    payload = json.loads(path.read_text(encoding="utf-8"))
+
+    stored = payload["meta"]["visibility"]
+    assert stored == visibility.assess(payload), \
+        "落盘快照与现场重算不一致——探针回灌写了信号却没刷派生视图"
+    rt = stored["sources"]["runtime"]
+    assert rt["visibility"] != visibility.VIS_UNAVAILABLE, "陈旧的『未做运行时观测』没被替换"
+    assert not any("未做运行时观测" in w for w in rt["why"]), rt["why"]
+
+
 def test_probe_ipv6_caliber_agrees_with_pcap(monkeypatch: pytest.MonkeyPatch) -> None:
     """v6 口径必须与 pcap 侧 ``_ip_public`` 一致——两条路径的产出取并集，口径不同 = 算两次。
 

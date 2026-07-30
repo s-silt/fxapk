@@ -2132,6 +2132,20 @@ def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:
             for _stale in _inv.INVENTORY_META_ALIASES:
                 meta.pop(_stale, None)
 
+        # ★刷新派生视图：visibility 快照是**算出来的**，不是证据。上面往 meta 追加了
+        #   ``runtime_merged`` / inventory，不重算就会落盘一份自相矛盾的报告——实测过
+        #   「23 个运行时端点、27 条活体确认线索，快照却写着『未做运行时观测（纯静态分析）』」。
+        #   判据本身没错（它读 runtime_merged），错在**没人把新信号带回快照**。
+        #
+        #   无条件刷、不放进 `if observed`：重算幂等且信息保持（见 refresh_visibility_snapshot
+        #   与 _preserve_confirmed_gaps），所以连「本次无新信号、但快照本来就旧」的报告也会被
+        #   一并修正；而真·空采集不会凭空得到 runtime 维——meta 里没有 runtime_merged，
+        #   重算照样是 unavailable。
+        #   ★延迟导入：closure.sources 反向懒引本模块，模块级互引会成环。
+        from apkscan.core.closure import refresh_visibility_snapshot
+
+        refresh_visibility_snapshot(meta)
+
         atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
         logger.info(
             "[pcap] 追加 %d 条线索、%d 个运行时端点，runtime 确认 %d 条 → %s",
