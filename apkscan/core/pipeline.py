@@ -39,6 +39,7 @@ from apkscan.core.registry import (
     detect_capabilities,
     discover_analyzers,
     discover_enrichers,
+    platform_capabilities,
     ruleset_digest,
 )
 
@@ -190,11 +191,14 @@ def _canonicalize_ctx_config(ctx: "AnalysisContext", config: AnalysisConfig) -> 
 def _init_pipeline_state(ctx: "AnalysisContext", config: AnalysisConfig) -> _PipelineState:
     """探测能力 + 平台并播种 meta，返回初始累积态。
 
-    平台能力：注入 ``apk``（requires=["apk"] 的 analyzer 门控用）。meta 播种 package_name/platform +
-    网络模式留痕（passive / authorized-active，供报告审计声明是否纯被动）。"""
+    平台能力：按 ``ctx.platform`` 注入（``android`` → ``android``/``apk``；``web`` → ``web``），
+    供 ``requires=["apk"]`` / ``requires=["web"]`` 的 analyzer 门控用。**平台专属分析器不许跨平台
+    空跑**：扫 dex/.so/assets 的分析器碰上网页证据只会白跑一趟，还让 completeness 显得很完整。
+    meta 播种 package_name/platform + 网络模式留痕（passive / authorized-active，供报告审计声明
+    是否纯被动）。"""
     capabilities = detect_capabilities(online=config.online)
     platform = getattr(ctx, "platform", "android")
-    capabilities.add("apk")
+    capabilities |= platform_capabilities(platform)
     meta: dict = {"package_name": ctx.package_name, "platform": platform}
     meta["mode"] = getattr(config, "mode", ANALYSIS_MODE_PASSIVE)
     return _PipelineState(
@@ -290,7 +294,7 @@ def _stage_degradation_flags(state: _PipelineState) -> None:
     """把上下文的降级标志显式带入 meta，避免"未采集"被静默当成"采集为空"。"""
     ctx = state.ctx
     meta = state.meta
-    if getattr(ctx, "dex_available", True) is False:
+    if state.platform == "android" and getattr(ctx, "dex_available", True) is False:
         meta["dex_parse_failed"] = True
         logger.warning("DEX 不可用（加固/无 dex），静态端点/SDK/支付线索严重不完整")
     if getattr(ctx, "apk_validation_ok", True) is False:
@@ -305,7 +309,9 @@ def _stage_degradation_flags(state: _PipelineState) -> None:
         # 不是本来就没问题。不写下来，"载入 33/33"看着像一次干净的解析。
         from apkscan.core.apk import hiddenapi_relax_report
 
-        relax = hiddenapi_relax_report()
+        # ★只报**本样本**放行的取值：用事件游标切片，既隔离前一个样本，也不会漏掉后一个
+        #   样本再次出现的相同 flag。基线在 load_apk 时钉下；手搓 ctx 缺属性则退化为全量。
+        relax = hiddenapi_relax_report(getattr(ctx, "hiddenapi_flags_baseline", None))
         if relax.get("unknown_flags"):
             block["hiddenapi_flags_relaxed"] = relax
         meta["extra_dex_visibility"] = block

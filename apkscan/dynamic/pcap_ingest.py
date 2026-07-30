@@ -12,7 +12,6 @@ pcapng 的 Enhanced Packet Block（best-effort）。**绝不抛**：坏包/坏�
 
 from __future__ import annotations
 
-import collections.abc as abc
 import hashlib
 import ipaddress
 import json
@@ -24,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from apkscan.core import infra
+from apkscan.core import runtime_inventory as _inv
 from apkscan.core.atomic import atomic_write_text
 from apkscan.core.models import (
     Confidence,
@@ -2017,63 +2017,11 @@ def _merge_runtime_blocks(old: object, new: dict) -> dict:
     return out
 
 
-def _prev_count(prev: dict, key: str) -> int:
-    """读上一份 inventory 里的计数；缺失 / 坏类型 / 负数 → 0（绝不抛）。"""
-    value = prev.get(key)
-    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
-
-
-def _prev_migrated(prev: dict, new_key: str, old_key: str = "") -> int:
-    """读上一份 inventory 里的计数，兼容键改名过的旧报告。
-
-    ★**新键优先、缺失才回退旧键，两者绝不相加**：只读新键的话，旧报告的历史计数会在下次
-      合并时静默清零；而相加的话，迁移期同时存在新旧键的报告又会双计。取一不相加。
-
-    ★这个 helper 是**泛化过的**：最初只给 ``flows`` 写了迁移，忘了 ``remote_endpoints`` 与
-      ``dns_queries`` 也在同一次改名里——修了一个实例、没去找同类的兄弟（codex 七轮 P1）。
-      inventory 是整块重建的，旧键写回后自然消失，一次性完成迁移。
-    """
-    if new_key in prev:
-        return _prev_count(prev, new_key)
-    return _prev_count(prev, old_key) if old_key else 0
-
-
-def _prev_degraded(prev: dict) -> bool:
-    """这份报告此前有没有过解析降级——同样要兼容没有该键的旧报告。
-
-    ★``parse_degraded`` 是后加的键，旧报告只有 ``parse_status``。缺键时若简单地
-      ``bool(prev.get(...))``，一份 ``parse_status="parse_error"`` 的旧报告再并入一次正常采集，
-      就会得到 ``False`` + ``parse_status`` 被覆盖成 ``"ok"``——**曾经解析失败这件事彻底消失**。
-      故缺键时从旧 ``parse_status`` 反推（codex 八轮 P1）。
-
-    这是同一个元错误的第三次：发现一类问题、只修撞见的那个实例，不去找结构上相同的兄弟。
-    inventory 里凡是「后加的键」都要问一句「旧报告里对应的信息在哪、怎么迁过来」。
-    """
-    if "parse_degraded" in prev:
-        return bool(prev.get("parse_degraded"))
-    status = prev.get("parse_status")
-    return isinstance(status, str) and bool(status) and status != "ok"
-
-
-def _accumulate_values(meta: dict, key: str, values: "abc.Iterable[str]") -> list[str]:
-    """把本次贡献的值并进 ``meta[key]`` 的集合，返回排序后的全集。
-
-    ★为什么要在 meta 里**自己记一份贡献集合**，而不是从 ``payload["endpoints"]`` /
-      ``payload["leads"]`` 反推：反推分不清是谁写的。曾试过按
-      ``source == "runtime-pcap"`` 钉边界，但 capture 路径会直接调用
-      :func:`to_runtime_endpoints`（见 ``dynamic/capture.py``），**产出的也是 runtime-pcap 证据**——
-      那是正常生产路径，不是边角情况。于是名为 *pcap* 的 inventory 会把 capture 的贡献一并算进去
-      （codex 六轮 P1）。共享 schema 判不了归属，只能各自记账。
-
-    集合语义天然幂等：同一份采集并几次，结果不变；静态端点被本路径命中后升级，也照样计入
-    （值一样，进集合即可）。坏结构一律跳过，绝不抛。
-    """
-    prev = meta.get(key)
-    merged = {v for v in prev if isinstance(v, str) and v} if isinstance(prev, list) else set()
-    merged.update(v for v in values if isinstance(v, str) and v)
-    ordered = sorted(merged)
-    meta[key] = ordered
-    return ordered
+# ★清单的 schema、别名表、迁移与消费方派生全部集中在
+#   :mod:`apkscan.core.runtime_inventory`。此前这几件事散在本模块的私有 helper 里，
+#   靠维护者在每个调用点临时决定传不传旧键，同一个「只修撞见的那个键、
+#   漏掉结构相同的兄弟」的错误犯过三次。现在按表驱动，probe 回灌路径复用
+#   同一份声明——两条路径的清单形状不会再各自漂移。
 
 
 def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:
@@ -2167,46 +2115,22 @@ def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:
         observed = bool(fresh_eps or summary.flows or summary.dns_queries)
         if observed:
             meta["runtime_merged"] = True
-            prev = meta.get("runtime_pcap_inventory")
-            prev = prev if isinstance(prev, dict) else {}
-            meta["runtime_pcap_inventory"] = {
-                # ★键名如实：这是「经本路径并入、且**未被端点指纹闸折叠**的 flow 条数」，
-                #   不是报告里的 flow 总数。闸只描述端点贡献，两份 flow 数不同但端点聚合相同的
-                #   采集会被判重复、第二份不计入（漏计，不伪造）。flows 无法从报告反推，
-                #   只能这样累计（codex 六轮 P2）。
-                "flows_merged": _prev_migrated(prev, "flows_merged", "flows") + (
-                    0 if already else len(summary.flows)
-                ),
-                # ★端点数与域名线索数取本路径**自己记的贡献集合**的大小，不从共享 payload 反推
-                #   （见 _accumulate_values 的说明）。集合语义天然幂等：一份纯 DNS 采集并进来也
-                #   不会把之前那份 flow 采集的端点数清零。
-                #
-                # ★与旧计数取 **max** 而非相加：旧报告有计数却没有贡献集合（集合是本次才引入的），
-                #   直接用集合长度会让历史计数被重置；而相加又会把重叠的部分算两遍——**无从判断
-                #   重叠**，所以只能取单调下界。迁移期过后集合长度自然超过旧值，max 不再起作用。
-                "remote_endpoints": max(
-                    _prev_migrated(prev, "remote_endpoints"),
-                    len(_accumulate_values(
-                        meta, "runtime_pcap_endpoint_values",
-                        (str(ep.get("value", "")) for ep in fresh_eps),
-                    )),
-                ),
-                "domain_leads": max(
-                    _prev_migrated(prev, "domain_leads", "dns_queries"),
-                    len(_accumulate_values(
-                        meta, "runtime_pcap_domain_values", pcap_domains,
-                    )),
-                ),
-                "parse_status": summary.parse_status,
-                # 只要**任何一次**合并解析异常就置 True，且不被后续成功覆盖——
-                # 「这份报告有过解析失败」不该被下一次成功抹掉。
-                "parse_degraded": _prev_degraded(prev) or summary.parse_status != "ok",
-                # ★本路径无设备侧 socket 快照 → 做不了 UID 归因，如实记下来。
-                #   ⚠ 现状：``runtime_pcap_inventory`` 整块**目前没有任何生产消费方**（全仓只有本
-                #   writer 与测试读它）。此处曾写着"消费方（closure / digest）看得出…"，那是**假的**
-                #   ——本项目最常见的病，连这条注释自己都犯了一次。接线是待办项，不是既成事实。
-                "uid_attributed": False,
-            }
+            # ★清单的键集合、别名迁移、以及「谁读它」全部由 runtime_inventory 那张表决定；
+            #   本路径只负责如实提供**自己这次贡献了哪些值**。计数由贡献集合派生，
+            #   集合语义天然幂等（同一份采集并几次结果不变），所以不受上面的指纹闸影响。
+            #   ★``uid_attributed=False``：本路径无设备侧 socket 快照、做不了 UID 归因，
+            #   如实记下来——闭环据此把动态结论**封顶 partial**，绝不抬成 complete。
+            meta[_inv.INVENTORY_META_KEY] = _inv.build_inventory(
+                meta,
+                source="pcap",
+                endpoint_values=(str(ep.get("value", "")) for ep in fresh_eps),
+                domain_values=pcap_domains,
+                parse_status=summary.parse_status,
+                uid_attributed=False,
+            )
+            # 清单换过键名：旧键留着会让两套形状长期并存，读方各读一套。整块重建后清掉。
+            for _stale in _inv.INVENTORY_META_ALIASES:
+                meta.pop(_stale, None)
 
         atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
         logger.info(
