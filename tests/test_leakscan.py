@@ -381,9 +381,15 @@ def test_scan_text_respects_first_line_offset() -> None:
 
 
 def test_blocking_rules_are_the_precise_ones() -> None:
-    """精确判据阻断、噪音判据只提示——这个分档是有意的，改动须同时改文档。"""
-    assert leakscan.BLOCKING_RULES == frozenset({"ip", "secret", "exemption"})
-    assert set(leakscan.RULES) == {"ip", "secret", "domain", "context", "exemption"}
+    """精确判据阻断、噪音判据只提示——这个分档是有意的，改动须同时改文档。
+
+    ``exemption`` 与 ``bulk_exemption`` 是护栏**自身**的完整性检查（前者查"豁免没写理由"，
+    后者查"同一条理由被复制到大量新增行"），两条都恒阻断：允许静默削弱护栏的护栏等于没有。
+    """
+    assert leakscan.BLOCKING_RULES == frozenset({"ip", "secret", "exemption", "bulk_exemption"})
+    assert set(leakscan.RULES) == {
+        "ip", "secret", "domain", "context", "exemption", "bulk_exemption",
+    }
 
 
 def test_reserved_doc_networks_are_documented() -> None:
