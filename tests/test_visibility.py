@@ -9,6 +9,24 @@ def _report(**meta) -> dict:
     return {"meta": meta, "leads": [], "endpoints": [], "findings": [], "analysis_status": "complete"}
 
 
+def test_assess_records_only_inputs_seen_for_each_source() -> None:
+    """快照必须自带求值输入出处；否则刷新时无法区分「新增信号」与「旧信号被裁掉」。"""
+    assessment = V.assess(_report(
+        dex_available=True,
+        is_hardened=True,
+        capture_quality={"endpoint_total": 1},
+        unrelated="ignored",
+    ))
+
+    assert assessment["schema_version"] == "1.1"
+    assert assessment["sources"]["dex"]["inputs_seen"] == [
+        "dex_available", "is_hardened",
+    ]
+    assert assessment["sources"]["runtime"]["inputs_seen"] == ["capture_quality"]
+    assert assessment["sources"]["native"]["inputs_seen"] == []
+    assert assessment["sources"]["resource"]["inputs_seen"] == []
+
+
 def test_clean_static_run_blocks_no_static_claim():
     """静态输入完整 → 静态那几条结论全部有资格下。
 
