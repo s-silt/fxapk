@@ -171,7 +171,15 @@ def batch(
     capped = pending[:max_targets]
     over_cap = len(pending) - len(capped)
 
-    budget = _batch.estimate_budget(capped, enrichers, os.environ, completed)
+    # ★预算算在 ``eligible``（本源适用、key 齐全的全部目标）上，而不是 ``capped``（本次待处理的）。
+    #   ``completed`` 一并传进去，``estimate_budget`` 内部会把已完成的从 ``matched`` 里扣掉，
+    #   所以 ``estimated_requests`` 不受影响；差别只在**逐源状态说得对不对**：
+    #   若只喂 ``capped``，全部源都已完成时 ``capped`` 为空，于是每个源都被算成
+    #   ``not_applicable``——一个只吃 ip 的源、目标就是 IP、上轮刚查成功，却报"不吃这种目标"。
+    #   喂 ``eligible`` 才能让它如实报 ``already_done``。
+    #   ★被 ``--max-targets`` 截掉的那部分仍如实计入预算行（它们确实还要查），
+    #     顶层的 ``over_max_targets`` 单独说明本次只处理前 N 个。
+    budget = _batch.estimate_budget(eligible, enrichers, os.environ, completed)
     summary: dict[str, object] = {
         "targets_in_list": len(targets),
         "skipped_unparseable": skipped,
