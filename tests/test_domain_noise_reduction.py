@@ -44,8 +44,8 @@ def test_third_party_sdk_hosts_are_not_subpoena_targets(domain: str) -> None:
 
 
 @pytest.mark.parametrize("domain", [
-    # 2026-07-30 实测：这六个良性域名全部落进「建议核查」出口。前四个归属可核实、其子域
-    # 不可能被外人控制；后两个是编译期烙进 native 字符串表的**文档/官网 URL**，不是端点。
+    # 实测：这六个良性域名全部落进「建议核查」出口。前四个归属可核实、其子域不可能被
+    # 外人控制；后两个是编译期烙进 native 字符串表的**文档/官网 URL**，不是端点。
     "gslb.dingrtc.com",            # leak-scan: allow 判据夹具，验该域已挪出建议核查出口
     "portal-hz.mcs.dingtalk.com",  # leak-scan: allow 判据夹具，验该域已挪出建议核查出口
     "www.alibaba.com",             # leak-scan: allow 判据夹具，验该域已挪出建议核查出口

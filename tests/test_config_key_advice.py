@@ -1,12 +1,12 @@
 """配置键线索按**值**分档，不再不看值一律判「建议核查」。
 
-来源：2026-07-30 对网页证据的重跑。`CONFIG_KEY` 的类别兜底原先无条件给「建议核查」，于是
+来源：一轮网页证据重跑。`CONFIG_KEY` 的类别兜底原先无条件给「建议核查」，于是
 `baseURL=https://localhost:60267`（前端 HTML 内联脚本里一行**被注释掉**的调试配置）也进了
 出口——本机地址不存在可查询的对象，名额却被它占着。
 
 ★两条边界都必须钉住：
 - 只降**待核**，不判无需核查：开发者本机调试端口残留是构建环境痕迹，有情报价值。
-- 值里取不出 host 的配置键行为**逐字不变**——`com.openinstall.APP_KEY=y86kxi` 这类
+- 值里取不出 host 的配置键行为**逐字不变**——`com.example.sdk.APP_KEY=k7f2qx` 这类
   是真线索，判据放宽一点就会把它一起降掉。
 """
 
@@ -53,7 +53,7 @@ def test_local_config_values_are_never_skipped() -> None:
 
 
 @pytest.mark.parametrize("value", [
-    "com.openinstall.APP_KEY=y86kxi",       # 每案不同的真线索
+    "com.example.sdk.APP_KEY=k7f2qx",       # 每案不同的真线索
     "GETUI_APPID=abc123",
     "AES_KEY=0123456789abcdef",
     "debug=true",
