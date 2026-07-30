@@ -193,6 +193,202 @@ def test_runtime_visibility_stops_claiming_nothing_was_observed(tmp_path: Path) 
     assert rt["visibility"] == visibility.VIS_PARTIAL
 
 
+def test_stored_visibility_snapshot_is_refreshed_not_left_stale(tmp_path: Path) -> None:
+    """★落盘的快照必须等于对该 payload **现场重算**的结果——派生视图不许留旧值。
+
+    上面那条测试断言的是 ``visibility.assess(payload)``，即**现场重算**：判据永远正确，
+    而报告里存的 ``meta.visibility`` 可以一直是旧的，测试照样全绿。实测一份真实报告：
+    ``runtime_merged=True``、23 个运行时端点、27 条活体确认线索，而存下的快照仍写着
+    「未做运行时观测（纯静态分析）」——因为 ``pcap-leads --into`` 只写信号、不刷快照。
+
+    ★这条测试的**结构性价值**在于它不针对某个写方：任何往 meta 写信号却忘了刷新派生视图的
+      路径都会让它变红。「每个写方都要记得」靠不住，得让不变量自己可测。
+    """
+    payload = _merge(tmp_path, _bidirectional_summary())
+
+    stored = payload["meta"]["visibility"]
+    recomputed = visibility.assess(payload)
+    assert stored == recomputed, (
+        "落盘快照与现场重算不一致——写方往 meta 追加了信号却没重算派生视图"
+    )
+    # 顺带钉住这次的具体后果：不得再声称"未做运行时观测"
+    assert stored["sources"]["runtime"]["visibility"] == visibility.VIS_PARTIAL
+
+
+def test_empty_capture_leaves_visibility_snapshot_honest(tmp_path: Path) -> None:
+    """反向：真·空采集刷新后仍是 ``unavailable``——刷新不得凭空造出运行时维。
+
+    ★断言不带 `if`：曾写成 `if stored is not None:`，一旦刷新接线缺失、快照压根不存在，
+      整条测试就一句都不跑、静默变成恒真（codex P2）。
+    """
+    payload = _merge(tmp_path, pcap_ingest.PcapSummary(flows=[]))
+
+    stored = payload["meta"].get("visibility")
+    assert stored is not None, "刷新没落盘快照（接线缺失时这条曾被条件断言静默跳过）"
+    assert stored == visibility.assess(payload)
+    assert stored["sources"]["runtime"]["visibility"] == visibility.VIS_UNAVAILABLE
+
+
+def test_stale_snapshot_is_replaced_not_merely_created(tmp_path: Path) -> None:
+    """★钉「替换已有陈旧快照」，而不只是「从无到有生成」。
+
+    `_STATIC` 本身不带 `meta.visibility`，所以上面那条其实只验证了"生成"。真实场景是
+    analyze 先存了一份 `runtime=unavailable`，回灌后必须被改写成 partial（codex P2）。
+    """
+    p = tmp_path / "report.json"
+    stale = json.loads(json.dumps(_STATIC))
+    stale.setdefault("meta", {})["visibility"] = {
+        "sources": {"runtime": {"visibility": visibility.VIS_UNAVAILABLE,
+                                "why": ["未做运行时观测（纯静态分析）"]}},
+        "blocked_claims": [],
+    }
+    p.write_text(json.dumps(stale, ensure_ascii=False), encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(str(p), _bidirectional_summary())
+    payload = json.loads(p.read_text(encoding="utf-8"))
+    rt = payload["meta"]["visibility"]["sources"]["runtime"]
+
+    assert rt["visibility"] == visibility.VIS_PARTIAL, "陈旧快照没被替换"
+    assert not any("未做运行时观测" in w for w in rt["why"]), rt["why"]
+
+
+def test_refresh_preserves_a_gap_when_its_inputs_were_stripped() -> None:
+    """刷新必须是**信息保持**的：该维输入被裁掉时沿用旧盲区，别从零重推成"完整可见"。
+
+    这是回灌无条件刷新的安全前提——若重算会丢盲区，那这条接线就成了新的「未发现被读成已穷尽」。
+
+    当前快照会记录逐维 ``inputs_seen``；后续刷新只要发现旧键消失，就沿用旧盲区。
+    旧 schema 没有该字段时仍按「该维输入全删」兼容，避免冻结合法 runtime 升级。
+    """
+    from apkscan.core.closure import refresh_visibility_snapshot
+
+    hardened = {
+        "dex_available": True, "dex_scanned": 1, "is_hardened": True,
+        "hardening_structural": {"verdict": "hardened"}, "dex_string_pool": 0,
+    }
+    snap = visibility.assess({"meta": hardened})
+    assert snap["sources"]["dex"]["visibility"] in visibility.INSUFFICIENT
+
+    stripped: dict[str, object] = {"visibility": snap}   # 该维输入全被裁掉
+    refresh_visibility_snapshot(stripped)
+
+    after = stripped["visibility"]
+    assert isinstance(after, dict)
+    assert after["sources"]["dex"]["visibility"] in visibility.INSUFFICIENT, \
+        "输入被裁掉后重算把确证盲区刷成了完整可见"
+    for claim in ("no_contact_harvesting", "no_sms_interception"):
+        assert claim in after["blocked_claims"], f"{claim} 被凭空解禁"
+
+
+def test_refresh_preserves_gap_when_only_some_inputs_were_stripped() -> None:
+    """只剩一个无害键也不能把加固盲区刷成 complete；旧 ``any()`` 判据会放过此案。"""
+    from apkscan.core.closure import refresh_visibility_snapshot
+
+    original = {
+        "dex_available": True,
+        "dex_scanned": 1,
+        "dex_string_pool": 0,
+        "is_hardened": True,
+        "hardening_structural": {"verdict": "hardened"},
+    }
+    snapshot = visibility.assess({"meta": original})
+    trimmed: dict[str, object] = {
+        "dex_available": True,
+        "visibility": snapshot,
+    }
+
+    refresh_visibility_snapshot(trimmed)
+
+    after = trimmed["visibility"]
+    assert isinstance(after, dict)
+    assert after["sources"]["dex"]["visibility"] in visibility.INSUFFICIENT
+    assert any(
+        note.startswith("[dex]") and ("加固" in note or "壳" in note)
+        for note in after["notes"]
+    ), "回填源之后 notes 仍是裁剪输入重算出的新说明"
+    assert any("unpack" in action for action in after["next_actions"]), \
+        "回填 DEX 盲区后没有恢复对应补救动作"
+    for claim in ("no_contact_harvesting", "no_sms_interception"):
+        assert claim in after["blocked_claims"], f"{claim} 被凭空解禁"
+
+
+def test_refresh_preserves_gap_when_old_input_disappears_as_new_one_is_added() -> None:
+    """新键不能掩盖旧键丢失；只判断「当前是真子集」会漏掉这种混合变化。"""
+    from apkscan.core.closure import refresh_visibility_snapshot
+
+    original = {
+        "dex_available": True,
+        "is_hardened": True,
+        "hardening_structural": {"verdict": "hardened"},
+    }
+    snapshot = visibility.assess({"meta": original})
+    changed: dict[str, object] = {
+        "dex_available": True,
+        "extra_dex_visibility": {"requested": 1, "loaded": 1, "complete": True},
+        "visibility": snapshot,
+    }
+
+    refresh_visibility_snapshot(changed)
+
+    after = changed["visibility"]
+    assert isinstance(after, dict)
+    assert after["sources"]["dex"]["visibility"] in visibility.INSUFFICIENT
+    assert "no_contact_harvesting" in after["blocked_claims"]
+
+
+def test_legacy_snapshot_with_no_inputs_left_keeps_confirmed_gap() -> None:
+    """1.0 快照无 provenance 时仍保留旧有的「该维输入全删才回填」兼容保护。"""
+    from apkscan.core.closure import refresh_visibility_snapshot
+
+    legacy = {
+        "schema_version": "1.0",
+        "sources": {
+            "dex": {
+                "visibility": visibility.VIS_STUB_ONLY,
+                "why": ["旧报告已确认只看到壳桩"],
+            },
+        },
+        "blocked_claims": ["no_contact_harvesting", "no_sms_interception"],
+    }
+    meta: dict[str, object] = {"visibility": legacy}
+
+    refresh_visibility_snapshot(meta)
+
+    after = meta["visibility"]
+    assert isinstance(after, dict)
+    assert after["schema_version"] == "1.0", "含无 provenance 旧源的快照不能冒充 1.1"
+    assert after["sources"]["dex"]["visibility"] == visibility.VIS_STUB_ONLY
+    assert "inputs_seen" not in after["sources"]["dex"]
+    assert "no_contact_harvesting" in after["blocked_claims"]
+
+
+def test_legacy_snapshot_does_not_freeze_a_valid_runtime_upgrade() -> None:
+    """旧快照不知道原键集合；已有新 runtime 信号时必须允许刷新，不能一律保守回填。"""
+    from apkscan.core.closure import refresh_visibility_snapshot
+
+    legacy = {
+        "schema_version": "1.0",
+        "sources": {
+            "runtime": {
+                "visibility": visibility.VIS_UNAVAILABLE,
+                "why": ["未做运行时观测（纯静态分析）"],
+            },
+        },
+        "blocked_claims": ["runtime_contact_observed"],
+    }
+    meta: dict[str, object] = {
+        "capture_quality": {"dynamic_status": "complete", "reason": "ok"},
+        "visibility": legacy,
+    }
+
+    refresh_visibility_snapshot(meta)
+
+    after = meta["visibility"]
+    assert isinstance(after, dict)
+    assert after["sources"]["runtime"]["visibility"] == visibility.VIS_COMPLETE
+    assert "runtime_contact_observed" not in after["blocked_claims"]
+
+
 def test_merge_records_that_uid_attribution_was_not_possible(tmp_path: Path) -> None:
     """★带外 pcap 抓的是**整机**流量，这条路径没有设备侧 socket 快照，做不了 UID 归因。
 

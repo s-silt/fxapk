@@ -751,6 +751,14 @@ def merge_into_report_json(report_json_path: str, leads: list[ProbeLead]) -> int
             for _stale in _inv.INVENTORY_META_ALIASES:
                 meta.pop(_stale, None)
 
+        # ★与 pcap 回灌同理：往 meta 写了 runtime_merged / inventory，就必须重算派生视图，
+        #   否则落盘的是 analyze 期那份「纯静态」旧快照——报告一边有探针线索、一边说
+        #   「未做运行时观测」。这条路径此前漏了（本模块曾只写 leads，加 meta 之后没跟上刷新）。
+        #   延迟导入：closure.sources 反向懒引 dynamic 侧模块，模块级互引会成环。
+        from apkscan.core.closure import refresh_visibility_snapshot
+
+        refresh_visibility_snapshot(meta)
+
         atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
         logger.info("[probe_ingest] 追加 %d 条、runtime 确认 %d 条探针线索进 %s", added, confirmed, path)
         return added
