@@ -143,7 +143,13 @@ pip install -e .                 # 装运行期依赖 + 注册 fxapk / apkscan �
 cp .env.example .env             # 创建本地密钥文件（已 gitignore，绝不入库）
 #   然后编辑 .env 填入 key（见第 3 节；不填也能跑，仅缺对应富化能力）
 fxapk doctor                     # 环境自检：报告 python/依赖/可选工具(jadx/adb/frida)就绪情况
+git config core.hooksPath .githooks   # ★启用提交前泄漏扫描（改代码就必须开）
 ```
+
+★ 最后那条不是可选项。hook 只看**已 staged 的新增行**，默认阻断疑似真实地址 / 凭据 / 无理由豁免；
+放行单行需写理由（行内 `leak-scan: allow <理由>`）。CI 会对 PR diff 再扫一遍，`--no-verify` 绕不过。
+**测试夹具一律用文档保留段**（`192.0.2.0/24` / `198.51.100.0/24` / `203.0.113.0/24` /
+`2001:db8::/32` / `example.com`）——真实值一旦推上远端不可撤销，改写历史也删不掉平台缓存。
 
 命令两种等价调用方式：`fxapk <cmd> ...`（装好后）或 `python -m apkscan.cli <cmd> ...`（免装）。
 
@@ -183,6 +189,14 @@ fxapk digest out/<样本名>.json
 
 其它常用：
 - `fxapk auto <apk>`：静态 +（有设备则）动态一把梭。`fxapk batch <dir>`：批量。
+- `fxapk analyze-web <证据目录>`：把**已落盘的网页证据**当一级输入（递归读 `.html` / `.body` /
+  `.js` / `.headers`），产出与 `analyze` 同构的报告。**不联网重取**——证据是什么就分析什么。
+  网页专属分析器**按文件分别**记录静态跳转候选，不把不同文件里的跳转拼成一条未经观测的链
+  （拼出来的链是推断，不是观测）。
+- `fxapk enrich batch -t <目标清单> -o <输出目录>`：批量被动富化（每行一个 IP / 域名），产出
+  CSV 回灌 + NDJSON 明细，可 `--resume` 续跑。★ `--dry-run` 是**默认值**：只逐源估算配额、
+  零请求，确认预算后再 `--no-dry-run` 真跑。源不适用于该目标（如域名源拿到 IP）与查了没记录
+  是**分开标注**的——工具失败 ≠ 阴性结果。
 - `fxapk case close <report.json>`：对已有报告执行主目标选择、有限重富化、五层归因与严格验收；默认原地写回 JSON，并刷新已存在的同名 HTML。
 - `fxapk unpack` / `fxapk capture`：真机脱壳 / 抓包（需 adb 设备 + frida；`analyze --dynamic` 会自动接力）。
 - `fxapk repackage <apk>`：脱壳后把**去壳版**重打包（zip 替 DEX + apksigner 重签）装回设备，使 capture 抓去壳版（绕壳反 frida）。需 apksigner/zipalign + 设备；auto 默认含此步（`--no-repackage` 关；重签必卸原包会清 app 数据）。能力边界：治不了 VMP/重 native/反模拟器壳，多数样本预期降级、capture 仍跑原版。
