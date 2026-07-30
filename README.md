@@ -24,91 +24,141 @@ native 库里的。
 装完就能跑静态分析，不需要 JDK、模拟器或真机。要给加固样本脱壳、要抓包，才需要接一台 root 过的
 安卓机。
 
-## 安装
+## 怎么用：对 AI 说三句话
 
-需要 Python 3.11+。
+这个工具是给 AI 助手（Claude Code、Codex 之类）驱动的。**你不用记命令，只要会说几句话**——
+头一次说三句把它装好配好，之后每次干活只说一句。
+
+### 第一次，说这三句
+
+**第一句：「部署 github.com/s-silt/fxapk」**
+
+AI 会去装：
 
 ```bash
 pip install fxapk
+```
 
-# 或从源码
+想连代码一起拿（要改、要看源码）就说「从源码部署」，它会改用：
+
+```bash
 git clone https://github.com/s-silt/fxapk.git && cd fxapk && pip install -e .
 ```
 
-脱壳、抓包、样本库这些是可选依赖，用到哪个装哪个。没装的话对应命令会提示你，不影响核心分析。
+需要 Python 3.11 或更新。万一 `fxapk` 这个命令没装上，换成 `python -m apkscan.cli` 一样使，
+后面参数不变。
+
+**第二句：「自检并配置环境」**
+
+AI 会跑：
+
+```bash
+fxapk selfcheck
+```
+
+它一条条列出来：**什么能用、什么不能用、不能用的要装什么**。AI 看完就知道这台机器能干到哪一步，
+该提醒你补装什么——不用挨个试命令去猜。
+
+分析 APK 本身不需要额外装东西，装完就能跑。脱壳、抓包、联网查服务器归属是可选的，
+少哪个只影响哪一块，自检结果里写得清清楚楚。
+
+**第三句：「把 .env 配好」**
+
+这一步别跳过。查服务器是谁的、在哪，靠的是同时问好几个公开数据库，谁都可能查不到——**问得越多，
+拼出来的画面越完整**。其中 RDAP、WHOIS、DNS、ASN、证书透明度这些不用密钥就能查；商用测绘和情报
+库（FOFA、Shodan、VirusTotal、Hunter、Quake、ZoomEye、Censys、OTX、AbuseIPDB 等）各自要账号密钥，
+写在项目根目录的 `.env` 里。
+
+```bash
+cp .env.example .env    # 然后把你有的密钥填进去
+```
+
+支持哪些源、各自的变量名，`.env.example` 里列全了。**有几个填几个，一个不填也能跑**——只是查归属
+那部分会变弱：没配密钥的源不会瞎猜，报告里如实标成「没查」（`disabled`），而不是「查了没有」
+（`no_record`）。这两件事完全不同，别读混。
+
+密钥只在本机用，不会进报告、不会进日志、不会提交到仓库（`.env` 已经在 `.gitignore` 里）。
+哪个源这次真的查着了、哪个没查成，跑完之后看报告里的 `source_status`——`fxapk selfcheck` 只报
+「联网能力总体通不通」，不逐个源检查。
+
+### 之后每次，只说这一句
+
+**「解析」加一个路径**
+
+```
+解析 D:\样本\app.apk
+解析 D:\证据\某网站目录
+解析 out/app.json
+```
+
+AI 看你给的是什么，自己挑命令：
+
+| 你给的东西 | AI 跑的命令 | 会发生什么 |
+|---|---|---|
+| 一个 `.apk` 文件 | `fxapk analyze <路径> --out out`，然后 `fxapk digest out/<名>.json` | 出一份报告，再压成一页要点 |
+| 一个文件夹，里面是存下来的网页（`.html` / `.js` 等） | `fxapk analyze-web <目录> --out out` | 只读你存下来的文件，不去联网访问那个网站 |
+| 一份已经跑出来的 `report.json` | `fxapk digest <文件>` | 把长报告缩成一页要点 |
+| 一个装了很多 APK 的文件夹 | `fxapk batch <目录>` | 一个个跑，跑过的自动跳过 |
+
+想让它顺便查一下服务器归属，加一句「联网查一下」——AI 会加上 `--online`。
+
+**报告怎么读**：先看开头那段「这次看到了什么」，它会说清楚**哪些话现在还不能说、为什么、
+怎么补**。比如应用被加固过、真代码要跑起来才解密，那报告里写「没发现服务器地址」的意思是
+**没看着**，不是**没有**。看完这段再往下看线索，不容易读岔。
+
+更多命令和参数：`fxapk --help`。给 AI 看的详细操作约定在 [AGENTS.md](AGENTS.md)。
+
+### 这个工具不做什么
+
+免得你白找：
+
+- **只认 Android 的 APK**，不解析苹果的 `.ipa`。（代码里能搜到 `.ipa` 这三个字，那只是一份
+  「这类文件别当文本读」的名单，不是说能分析它。）
+- **不去碰目标服务器**。查境外服务器只翻公开数据库，对目标不发一个包；少数确实要发请求的功能
+  默认是关着的，见下面「合规边界」。
+- **到报告为止**。这个仓库产出的是报告文件（HTML / JSON / PDF）和一份线索的 CSV 导出
+  （`fxapk export`）；再往后怎么汇总、加工成什么表，不在这里。
 
 > 联网查询用的 API Key、动态分析要的外部工具、以及围绕报告的那些配套脚本 / MCP / 探针库，都要自己
 > 准备，本项目不提供。见 [COMPANION-TOOLS.md](COMPANION-TOOLS.md)。
 
-### 想让同一个样本跑出同一份报告
+## 命令表
 
-结论是解析出来的，而解析归上游库管。androguard 换个版本，dex 里读出来的东西就可能不一样；报告也就
-跟着不一样了。所以仓里放了一份 [`requirements.lock`](requirements.lock)，把整棵运行时依赖钉死：
+要自己敲命令的话，常用的就这些。完整参数 `fxapk --help`；`fxapk` 没装成命令就换
+`python -m apkscan.cli`。
 
-```bash
-python -m venv .venv-forensic
-.venv-forensic/bin/pip install -r requirements.lock
-.venv-forensic/bin/pip install --no-deps .
-```
+| 想干什么 | 命令 |
+|---|---|
+| 分析一个 APK | `fxapk analyze app.apk --out out` |
+| 同上，顺带联网查归属 | `fxapk analyze app.apk --online --out out` |
+| 分析存下来的网页文件 | `fxapk analyze-web <目录> --out out` |
+| 批量跑一个文件夹 | `fxapk batch <目录>` |
+| 一把梭：体检→静态→脱壳→抓包→合并（接了 root 机才跑动态；没设备就跳过，静态报告照出） | `fxapk auto app.apk --out out` |
+| 同上，当验收门用（退出码 0/5/6 = complete/partial/failed） | `fxapk auto app.apk --out out --strict-case` |
+| 给已有报告补齐多源查询与五层归属 | `fxapk case close out/app.json` |
+| 把报告压成一页要点 | `fxapk digest out/app.json` |
+| 真机抓包 | `fxapk capture <包名>` |
+| 设备体检，顺带自动修 | `fxapk doctor --fix` |
+| 环境自检（哪些能力通/不通/怎么修） | `fxapk selfcheck` |
+| 批量查目标清单（默认 `--dry-run` 只估配额不发请求；断了能续跑） | `fxapk enrich batch -t targets.txt -o enrich_out` |
+| 报告入库 | `fxapk corpus add out/app.json --corpus <库>` |
+| 换版本后看检出变好还是变坏 | `fxapk corpus regress --corpus <库>` |
+| 这个值以前见过没（跨样本反查） | `fxapk corpus seen <值> --corpus <库>` |
+| 找出自同一套开发环境的样本 | `fxapk corpus shared-build-env --corpus <库>` |
+| 把线索导成 CSV | `fxapk export out/app.json` |
 
-第二条命令的 `--no-deps` 别省 —— 省了 pip 会重新算一遍依赖，把刚锁住的版本又升上去。
+`corpus` 那几条都要指定库目录：`--corpus <库>`，或者先设好 `FXAPK_CORPUS` 环境变量。
+库根会存样本数据，别放在代码仓库里面。
 
-平时随便装就行，用不着这个。只有要复现一份旧报告、或者要让两个人跑出一模一样的结果时才需要。报告
-自己也记着当时实际用的版本（`meta.dependency_versions`），跟这份锁对一下就知道环境一不一样。
-
-## 用法
-
-```bash
-# 静态分析，HTML + JSON 输出到 out/
-fxapk analyze app.apk --out out
-
-# 手上只有存下来的网页文件（.html / .body / .js / .headers）也能分析，不会联网重新抓
-fxapk analyze-web <证据目录> --out out
-
-# 接好 root 机后一把梭：体检 → 静态 → 脱壳 → 抓包 → 合并成一份报告
-fxapk auto app.apk --out out
-
-# 同上，但把结论当验收门用：complete 退 0、partial 退 5、failed 退 6
-# 没设备也能跑，此时不拿动态证据卡门
-fxapk auto app.apk --out out --strict-case
-
-# 已有报告想补齐：多源查询、五层归属、重新验收
-fxapk case close out/app.json
-
-# 换了版本，检出到底变好还是变坏（先把两版报告都 corpus add 入库）
-fxapk corpus regress --corpus <库目录>
-
-# 哪些样本出自同一套开发环境
-# 构建路径是编译时烙进 native 库的，改名、重打包、换服务器都动不了它
-fxapk corpus shared-build-env
-
-# 批量查一份目标清单（每行一个 IP 或域名）
-# 默认 --dry-run，只估算各源要花多少配额，一个请求都不发
-fxapk enrich batch -t targets.txt -o enrich_out
-```
-
-常用命令：`analyze` 静态分析、`analyze-web` 分析存下来的网页、`auto` 一把梭、`case close` 给已有
-报告补齐、`capture` 真机抓包、`doctor` 设备体检顺带自动修、`enrich batch` 批量查询（能续跑）、
-`corpus` 样本库（报告入库、跨版本回归、按值反查、按构建环境找同源样本）。完整参数看 `fxapk --help`。
-
-没装成命令的话，`python -m apkscan.cli <…>` 一样用。
-
-验收结论写在 `report.meta.closure`：`complete` 是指主目标那五层都拿到了证据（运行时、资源登记、
+验收结论写在 `report.meta.closure`：`complete` 是主目标那五层都拿到了证据（运行时、资源登记、
 BGP 宣告、托管分发、最终归属对象）；`partial` 是还有明确缺口；`failed` 是静态就跪了、或者要求动态
 却没抓到业务流量、或者压根没有能收口的主目标。前面套着 CDN、源站还没定位出来的，不会判 complete。
 
-### 报告先告诉你哪些东西没看着
+### 别把「没看着」和「工具没跑成」弄混
 
-报告和 `fxapk digest` 里都有一段 `visibility`，位置在线索前面。它回答的是：这一趟到底看到了什么，
-所以哪些话能说、哪些说不了。
-
-这段挺要紧。加固过的应用，DEX 常常只剩个壳，真代码要跑起来才解密出来。这时候报告里写「没发现网络
-端点」，意思是没看着，不是没有。`blocked_claims` 会点名哪几条「翻遍了都没有」的结论现在不能下，
-`next_actions` 说怎么补：该脱壳的脱壳、该抓包的抓包，或者拿到授权后重跑去取远程配置。
-
-别把它和 `analysis_status` 弄混。后者说的是工具跑得顺不顺，前者说的是样本内容看不看得见。分析器
-全部成功、`analysis_status=complete`，同时 DEX 是个壳、六条结论一条都不能下 —— 这两件事完全可以
-同时成立。
+报告里的 `visibility` 说的是**样本内容看不看得见**，`analysis_status` 说的是**工具跑得顺不顺**。
+分析器全部成功（`analysis_status=complete`），同时 DEX 是个壳、六条结论一条都不能下 ——
+这两件事完全可以同时成立。`blocked_claims` 点名哪几条结论现在不能下，`next_actions` 说怎么补。
 
 ### 先分清：自己写的包，还是正版被人改过
 
@@ -125,6 +175,22 @@ BGP 宣告、托管分发、最终归属对象）；`partial` 是还有明确缺
 - `out/report.json` — 完整数据，给机器读或者接着加工
 - `report.meta.closure` — 验收结论、五层证据、来源覆盖、缺口和下一步该干什么
 - 加 `--fmt pdf` 可以导 PDF（要本机装了 Chrome 或 Edge）
+
+## 想让同一个样本跑出同一份报告
+
+结论是解析出来的，而解析归上游库管。androguard 换个版本，dex 里读出来的东西就可能不一样；报告也就
+跟着不一样了。所以仓里放了一份 [`requirements.lock`](requirements.lock)，把整棵运行时依赖钉死：
+
+```bash
+python -m venv .venv-forensic
+.venv-forensic/bin/pip install -r requirements.lock
+.venv-forensic/bin/pip install --no-deps .
+```
+
+第二条命令的 `--no-deps` 别省 —— 省了 pip 会重新算一遍依赖，把刚锁住的版本又升上去。
+
+平时随便装就行，用不着这个。只有要复现一份旧报告、或者要让两个人跑出一模一样的结果时才需要。报告
+自己也记着当时实际用的版本（`meta.dependency_versions`），跟这份锁对一下就知道环境一不一样。
 
 ## 从源码改代码
 
