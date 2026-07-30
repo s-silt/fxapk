@@ -10,60 +10,153 @@ An APK **static + dynamic analysis CLI**: extracts real app config (AppID / AppK
 
 Runs its core analysis with **zero environment** (`pip install`, no JDK / emulator / device). Unpacking and traffic capture of hardened apps are optional on-device steps.
 
-## Install
+## How to use it: tell your AI three things
 
-Requires **Python 3.11+**.
+This tool is meant to be driven by an AI assistant (Claude Code, Codex, and the like). **You don't
+need to memorise commands — just a few sentences**: say these three once to get set up, then one
+sentence every time you actually want something analysed.
+
+### The first time, say these three
+
+**1. "Deploy github.com/s-silt/fxapk"**
+
+The AI installs it:
 
 ```bash
 pip install fxapk
+```
 
-# Or from source
+Say "deploy from source" instead if you want the code too (to read or change it):
+
+```bash
 git clone https://github.com/s-silt/fxapk.git && cd fxapk && pip install -e .
 ```
 
-Dynamic unpack / capture, the sample corpus and other features need optional deps installed on demand; when missing, the relevant command prints a hint and core analysis is unaffected.
+Requires **Python 3.11+**. If the `fxapk` command doesn't end up on your PATH, use
+`python -m apkscan.cli` instead — same arguments.
+
+**2. "Run a self-check and set up the environment"**
+
+The AI runs:
+
+```bash
+fxapk selfcheck
+```
+
+It lists, item by item: **what works, what doesn't, and what to install for the ones that don't.**
+The AI reads that and knows how far this machine can go and what to ask you to install — no need to
+probe by trial and error.
+
+Core static analysis needs no optional tools — it works right after install. Unpacking, traffic
+capture and online attribution lookups are optional; missing one only affects that part, and the
+self-check spells out which.
+
+**3. "Set up .env"**
+
+Don't skip this one. Finding out who owns a server and where it sits means asking several public
+databases at once — any single one may have nothing. **The more you can ask, the more complete the
+picture.** RDAP, WHOIS, DNS, ASN and certificate transparency need no key; the commercial scanning
+and threat-intel sources (FOFA, Shodan, VirusTotal, Hunter, Quake, ZoomEye, Censys, OTX, AbuseIPDB,
+…) each need their own API key, and keys live in a `.env` file at the project root.
+
+```bash
+cp .env.example .env    # then fill in whichever keys you have
+```
+
+`.env.example` lists every supported source and its variable name. **Fill in as many as you have —
+none at all still works**, attribution lookups are simply weaker: a source without a key is never
+guessed at, the report marks it *not queried* (`disabled`) rather than *queried, nothing found*
+(`no_record`). Those are two very different things; don't read one as the other.
+
+Keys stay on your machine — never in reports, never in logs, never committed (`.env` is already in
+`.gitignore`). To see which sources actually answered on a given run, read `source_status` in the
+report — `fxapk selfcheck` only reports whether online enrichment works **at all**, it does not
+check sources one by one.
+
+### Every time after that, just one sentence
+
+**"Analyse" plus a path**
+
+```
+analyse D:\samples\app.apk
+analyse D:\evidence\some-site-dir
+analyse out/app.json
+```
+
+The AI looks at what you gave it and picks the command:
+
+| What you give it | What the AI runs | What happens |
+|---|---|---|
+| an `.apk` file | `fxapk analyze <path> --out out`, then `fxapk digest out/<name>.json` | produces a report, then squeezes it into a one-page summary |
+| a folder of saved web files (`.html` / `.js` …) | `fxapk analyze-web <dir> --out out` | reads only the files you saved; never goes online to fetch that site |
+| an existing `report.json` | `fxapk digest <file>` | squeezes a long report into a one-page summary |
+| a folder full of APKs | `fxapk batch <dir>` | runs them one by one, skipping ones already done |
+
+Want it to look up server ownership too? Just add "and look it up online" — the AI adds `--online`.
+
+**How to read the report**: start with the "what we could see this time" section. It spells out
+**which statements can't be made yet, why, and how to fix that**. If an app is hardened and its real
+code only decrypts at runtime, then "no server addresses found" means *we couldn't see any*, not
+*there are none*. Read that section first and the leads below won't mislead you.
+
+More commands and flags: `fxapk --help`. The detailed operating contract for AI drivers is in
+[AGENTS.md](AGENTS.md).
+
+### What this tool does not do
+
+So you don't go looking:
+
+- **Android APKs only** — it does not analyse Apple `.ipa` files. (You'll find the string `.ipa` in
+  the code; that's just an entry in a "don't read these as text" list, not an analysis capability.)
+- **It does not touch the target's servers.** Looking up overseas infrastructure only reads public
+  databases — not a single packet goes to the target. The few features that genuinely need to send a
+  request are off by default; see "Compliance" below.
+- **It ends at the report.** This repository produces report files (HTML / JSON / PDF) plus a flat
+  CSV export of the leads (`fxapk export`); whatever you aggregate or build on top of that is out of
+  scope.
 
 > Online-enrichment API keys, dynamic-analysis external tools, and companion scripts / MCP servers / probe libraries around the reports are all **bring-your-own — not shipped by this project**. See [COMPANION-TOOLS.en.md](COMPANION-TOOLS.en.md).
 
-## Usage
+## Command table
 
-```bash
-# Static analysis, HTML + JSON into out/
-fxapk analyze app.apk --out out
+If you'd rather type commands yourself, these are the common ones. Full flags: `fxapk --help`; if
+`fxapk` isn't on your PATH, swap in `python -m apkscan.cli`.
 
-# Already-captured web evidence is a first-class input:
-#   reads .html / .body / .js / .headers recursively, never re-fetches over the network
-fxapk analyze-web <evidence-dir> --out out
+| Goal | Command |
+|---|---|
+| Analyse an APK | `fxapk analyze app.apk --out out` |
+| Same, with online attribution lookups | `fxapk analyze app.apk --online --out out` |
+| Analyse saved web files | `fxapk analyze-web <dir> --out out` |
+| Run a whole folder | `fxapk batch <dir>` |
+| Full pipeline: doctor → static → unpack → capture → merge (dynamic steps only with a rooted device; without one they're skipped and you still get the static report) | `fxapk auto app.apk --out out` |
+| Same, as an acceptance gate (exit 0/5/6 = complete/partial/failed) | `fxapk auto app.apk --out out --strict-case` |
+| Top up an existing report with multi-source lookups and five-layer attribution | `fxapk case close out/app.json` |
+| Squeeze a report into a one-page summary | `fxapk digest out/app.json` |
+| Capture traffic on a device | `fxapk capture <package>` |
+| Device health check, with auto-fix | `fxapk doctor --fix` |
+| Environment self-check (what works / doesn't / how to fix) | `fxapk selfcheck` |
+| Batch-enrich a target list (`--dry-run` by default: estimates quota, sends nothing; resumable) | `fxapk enrich batch -t targets.txt -o enrich_out` |
+| Ingest a report into the corpus | `fxapk corpus add out/app.json --corpus <dir>` |
+| See whether detection improved or regressed across versions | `fxapk corpus regress --corpus <dir>` |
+| Have I seen this value before (look it up across samples) | `fxapk corpus seen <value> --corpus <dir>` |
+| Find samples built in the same environment | `fxapk corpus shared-build-env --corpus <dir>` |
+| Export leads as CSV | `fxapk export out/app.json` |
 
-# One-click full pipeline (rooted device / emulator attached):
-#   doctor → static → unpack → capture → merge into one report
-fxapk auto app.apk --out out       # no device? dynamic steps are skipped, static report still produced
+Every `corpus` command needs a library directory: pass `--corpus <dir>`, or set `FXAPK_CORPUS`
+beforehand. The library root holds sample data — keep it outside the code repository.
 
-# Did detection get better or worse across versions, on the same real samples?
-# (ingest both versions' reports with `corpus add` first)
-fxapk corpus regress --corpus <library-dir>
+The verdict lands in `report.meta.closure`: `complete` means all five layers of the primary target
+carry evidence (runtime, resource registration, BGP announcement, hosting / distribution, final
+attributed party); `partial` means there's a named gap; `failed` means static analysis itself failed,
+or dynamic evidence was required but no business traffic was captured, or there was no target to
+close on at all. A target still behind a CDN with no origin located never counts as complete.
 
-# Passively enrich a list of targets (one IP / domain per line).
-# --dry-run is the DEFAULT: it only estimates each source's quota and sends no requests.
-fxapk enrich batch -t targets.txt -o enrich_out
-```
+### Don't confuse "couldn't see it" with "the tool failed"
 
-Main commands: `analyze` (static), `analyze-web` (already-captured web evidence), `auto` (one-click: static + dynamic when a device is present), `capture` (on-device capture), `doctor` (device env check + auto-fix), `enrich batch` (resumable passive batch enrichment), `corpus` (sample library: ingest past reports, cross-version regression, look up a value across samples). Full commands and flags: `fxapk --help`.
-
-When not installed as a command, use `python -m apkscan.cli <…>`.
-
-### Read "what we could not see" before reading conclusions
-
-Reports and `fxapk digest` carry a `visibility` section, placed **ahead of the leads**. It answers one
-question: given what this run actually saw, which conclusions are eligible. A hardened sample often
-leaves nothing but a stub DEX, and there "no network endpoints found" means *we could not see*, not
-*there are none*. `blocked_claims` names the exhaustiveness claims that cannot be made, and
-`next_actions` says how to close the gap — unpack, capture, or rerun under authorization to fetch
-remote config.
-
-This is orthogonal to `analysis_status`: that one reports whether the **tooling** ran healthy, this one
-whether the **sample's content** was visible. Every analyzer succeeding and the DEX being a stub are
-both true at once.
+`visibility` in the report says whether the **sample's content** was visible; `analysis_status` says
+whether the **tooling** ran healthy. Every analyzer succeeding (`analysis_status=complete`) while the
+DEX is a stub and six conclusions are off the table — both true at once. `blocked_claims` names the
+claims that can't be made yet; `next_actions` says how to close the gap.
 
 ### Self-built shell vs. a repackaged legitimate app
 
