@@ -40,6 +40,22 @@ git clone https://github.com/s-silt/fxapk.git && cd fxapk && pip install -e .
 > 联网查询用的 API Key、动态分析要的外部工具、以及围绕报告的那些配套脚本 / MCP / 探针库，都要自己
 > 准备，本项目不提供。见 [COMPANION-TOOLS.md](COMPANION-TOOLS.md)。
 
+### 想让同一个样本跑出同一份报告
+
+结论是解析出来的，而解析归上游库管。androguard 换个版本，dex 里读出来的东西就可能不一样；报告也就
+跟着不一样了。所以仓里放了一份 [`requirements.lock`](requirements.lock)，把整棵运行时依赖钉死：
+
+```bash
+python -m venv .venv-forensic
+.venv-forensic/bin/pip install -r requirements.lock
+.venv-forensic/bin/pip install --no-deps .
+```
+
+第二条命令的 `--no-deps` 别省 —— 省了 pip 会重新算一遍依赖，把刚锁住的版本又升上去。
+
+平时随便装就行，用不着这个。只有要复现一份旧报告、或者要让两个人跑出一模一样的结果时才需要。报告
+自己也记着当时实际用的版本（`meta.dependency_versions`），跟这份锁对一下就知道环境一不一样。
+
 ## 用法
 
 ```bash

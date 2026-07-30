@@ -1,0 +1,81 @@
+# 取证运行环境锁：把**分析结果可复现**所依赖的整棵运行时闭包钉到确定版本。
+#
+# 为什么单独一份锁、而不是把版本写进 pyproject.toml：
+#   pyproject 的 dependencies 是**安装约束**，钉死会连带卡住所有下游环境；这份锁是
+#   **运行环境快照**，只约束"要复现某份报告时该装什么"。两者目的相反，不能合并。
+#
+# 为什么取证工具非要有它：报告的结论由解析结果决定，而解析结果随上游库变。androguard 的
+# axml/dex 解析在版本间会变（仓内 axml_nsmap_shim 就是踩坑留下的），jinja2 换版会改渲染，
+# typer 换版会改 CLI 行为。报告里的 meta.dependency_versions 记录的是"这次实际跑了什么"，
+# 那是**事后溯源**；这份锁提供的是"下次还能跑成一样"的**事前保证**。两者都要有。
+#
+# 用法（复现某份报告的分析环境）：
+#   python -m venv .venv-forensic
+#   .venv-forensic/bin/pip install -r requirements.lock
+#   .venv-forensic/bin/pip install --no-deps .
+#   ★ --no-deps 不可省：省了 pip 会重新解析依赖，把锁住的版本又升上去。
+#
+# 重新生成（升级依赖时）：
+#   python -m venv /tmp/lockenv && /tmp/lockenv/bin/pip install .
+#   /tmp/lockenv/bin/pip freeze | grep -v '^fxapk' > requirements.lock   # 再补回本文件头
+#   之后跑 tests/test_requirements_lock.py 确认锁与 pyproject 没脱节。
+#
+# 范围：**只锁运行时**。pytest / ruff / pyright 等开发工具不在内——它们不参与分析，
+# 版本漂移不会改变任何一份报告的结论。
+#
+# 平台：除末尾带标记的一条外，其余在三大平台取值相同；同一份锁跨平台装出同一组版本。
+#
+# 生成于 2026-07-30，对应 fxapk 1.4.0 / Python 3.12。
+
+alembic==1.18.5
+androguard==4.1.4
+annotated-doc==0.0.5
+apkInspector==1.3.6
+asn1crypto==1.5.1
+asttokens==3.0.2
+certifi==2026.7.22
+cffi==2.1.0
+charset-normalizer==3.4.9
+click==8.4.2
+colorama==0.4.6
+cryptography==49.0.0
+dataset==2.0.0
+decorator==5.3.1
+executing==2.2.1
+idna==3.18
+ipython==9.15.0
+ipython_pygments_lexers==1.1.1
+jedi==0.20.0
+Jinja2==3.1.6
+loguru==0.7.3
+lxml==6.1.1
+Mako==1.3.12
+markdown-it-py==4.2.0
+MarkupSafe==3.0.3
+matplotlib-inline==0.2.2
+mdurl==0.1.2
+mutf8==1.1.0
+networkx==3.6.1
+parso==0.8.7
+prompt_toolkit==3.0.53
+psutil==7.2.2
+pure_eval==0.2.3
+pycparser==3.0
+pydot==4.0.1
+Pygments==2.20.0
+pyparsing==3.3.2
+python-dateutil==2.9.0.post0
+python-whois==0.9.6
+PyYAML==6.0.3
+requests==2.34.2
+rich==15.0.0
+shellingham==1.5.4
+six==1.17.0
+SQLAlchemy==2.0.51
+stack-data==0.6.3
+traitlets==5.15.1
+typer==0.27.0
+typing_extensions==4.16.0
+urllib3==2.7.0
+wcwidth==0.8.2
+win32-setctime==1.2.0 ; sys_platform == "win32"
