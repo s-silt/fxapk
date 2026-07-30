@@ -55,7 +55,7 @@ def test_observation_is_keyword_only_and_frozen() -> None:
 
 def test_entity_order_is_preserved() -> None:
     first = _entity("1.1.1.1")
-    second = _entity("2.2.2.2")
+    second = _entity("198.51.100.21")
     assert _observation(entities=[second, first]).entities == (second, first)
 
 

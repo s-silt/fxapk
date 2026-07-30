@@ -126,7 +126,7 @@ def test_apply_forensic_domestic_flip_suppresses_overseas_evidence() -> None:
     ev2: list[str] = []
     _apply_forensic(
         infra.ADVICE_INVESTIGATE, "y.com", ev2, "",
-        shodan={"country": "United States", "ip": "5.6.7.8", "ports": [80],
+        shodan={"country": "United States", "ip": "198.51.100.48", "ports": [80],
                 "services": [{"port": 80, "product": "nginx"}]},
     )
     assert any("源站被动归属" in e for e in ev2)

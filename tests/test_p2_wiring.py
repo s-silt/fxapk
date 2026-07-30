@@ -16,6 +16,7 @@ from typing import Any
 
 from apkscan.core import corpus, regress, visibility
 from apkscan.core.closure import _refresh_visibility
+from apkscan.core.infra import ADVICE_INVESTIGATE
 from apkscan.core.models import Confidence, Endpoint, Evidence, Lead, LeadCategory, Report
 from apkscan.dynamic import merge
 
@@ -82,11 +83,11 @@ def test_runtime_merge_uses_whole_sample_sibling_pool() -> None:
     """
     cloud = {"asn": "AS37963", "org": "Alibaba (US) Technology Co., Ltd."}
     rep = _report(online=False)
-    rep.endpoints = [_ip_ep("1.3.1.1", cloud), _ip_ep("1.3.1.6", cloud)]  # 静态侧已成簇
+    rep.endpoints = [_ip_ep("1.3.1.1", cloud), _ip_ep("1.3.1.6", cloud)]  # 静态侧已成簇  # leak-scan: allow 低段位形态夹具，判据测的正是「四段≤32 与版本号同形」这一点，值必须保持字面
 
-    merge.merge_runtime_endpoints(rep, [_ip_ep("1.4.1.14", cloud)])
+    merge.merge_runtime_endpoints(rep, [_ip_ep("1.4.1.14", cloud)])  # leak-scan: allow 低段位形态夹具，判据测的正是「四段≤32 与版本号同形」这一点，值必须保持字面
 
-    lead = next(x for x in rep.leads if x.value == "1.4.1.14")
+    lead = next(x for x in rep.leads if x.value == "1.4.1.14")  # leak-scan: allow 低段位形态夹具，判据测的正是「四段≤32 与版本号同形」这一点，值必须保持字面
     assert lead.advice == "待核", "同形态兄弟成簇 = 编号序列，回灌的新值不该被升为建议调证"
 
 
@@ -241,13 +242,13 @@ def test_native_obfuscation_finding_and_visibility_agree() -> None:
 
 def test_shape_uncertain_excluded_from_manifest_key_iocs() -> None:
     """两个无关样本恰好含同一个版本号字面，不得被呈现成「共享基础设施」。"""
-    lead = {"category": "IP", "value": "23.21.5.12", "advice": "建议调证",
+    lead = {"category": "IP", "value": "198.51.100.24", "advice": ADVICE_INVESTIGATE,
             "is_c2": True, "shape_uncertain": True}
     entry = corpus.manifest_entry({"leads": [lead], "meta": {}})
     assert entry["key_iocs"] == []
 
-    solid = {**lead, "shape_uncertain": False, "value": "192.88.99.109"}
-    assert corpus.manifest_entry({"leads": [solid], "meta": {}})["key_iocs"] == ["192.88.99.109"]
+    solid = {**lead, "shape_uncertain": False, "value": "198.51.100.7"}
+    assert corpus.manifest_entry({"leads": [solid], "meta": {}})["key_iocs"] == ["198.51.100.7"]
 
 
 def test_lead_helpers_unused_imports_are_referenced() -> None:

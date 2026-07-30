@@ -360,8 +360,8 @@ def _build_runtime_leads(report: Report, runtime_only: list[Endpoint]) -> int:
         (lead.category.value, lead.value) for lead in report.leads
     }
     # ★兄弟池按**全样本**算，不是只按本次新增的运行时端点算：低段位裸 IP 的托管佐证豁免
-    #   靠"样本内有没有同形态编号序列"压住版本号，只看增量的话，静态侧已成簇的 1.3.1.1/
-    #   1.3.1.6 拦不住新回灌的 1.4.1.14——它会被判成孤值升进调证出口，理由还写着
+    #   靠"样本内有没有同形态编号序列"压住版本号，只看增量的话，静态侧已成簇的 1.3.1.1/  # leak-scan: allow 判据说明所举的版本号形态例子，非网络地址
+    #   1.3.1.6 拦不住新回灌的 1.4.1.14——它会被判成孤值升进调证出口，理由还写着  # leak-scan: allow 判据说明所举的版本号形态例子，非网络地址
     #   "样本内无同形态编号序列"，与样本事实相反。report.endpoints 此时已是合并后的全量。
     sibling_pool = {
         infra._strip_port_suffix(ep.value)

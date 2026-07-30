@@ -13,6 +13,7 @@ logging）、不静默吞错、全量 type hints。:func:`parse_probe_log` 是�
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import re
@@ -20,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from apkscan.core import runtime_inventory as _inv
 from apkscan.core.atomic import atomic_write_text
 from apkscan.core.models import (
     Confidence,
@@ -27,6 +29,13 @@ from apkscan.core.models import (
     Lead,
     LeadCategory,
     merge_runtime_into_lead_dict,
+)
+from apkscan.core.textutil import (
+    host_from_url,
+    host_is_private,
+    is_noise_bare_ip,
+    parse_ipv4,
+    valid_url_host,
 )
 
 logger = logging.getLogger(__name__)
@@ -120,7 +129,11 @@ _AXIS_SUGGEST: dict[str, str] = {
 }
 
 _TAG_RE = re.compile(r"^\s*\[([a-z0-9][a-z0-9_-]*)\]")
-_BRACKET_RE = re.compile(r"\[[^\]]*\]")
+#: 探针标记 ``[xxx]``。★否定先行断言把 **IPv6 字面量**排除在外：``[2001:db8::1]`` 与探针标记
+#: 同形，无条件抹掉会把 ``http://[2001:db8::1]:8443/x`` 削成 ``http:// :8443/x`` ——
+#: 于是公网 IPv6 端点在 :func:`probe_address_values` 里连正则都匹配不到，v6 通道恒为空。
+#: 判据：方括号内含 ``:`` 且只有十六进制/冒号/点/百分号（v6 与 v6+zone 的字符集），即视为地址。
+_BRACKET_RE = re.compile(r"\[(?![0-9A-Fa-f:.%]*:[0-9A-Fa-f:.%]*\])[^\]]*\]")
 _WS_RE = re.compile(r"\s+")
 # 行首 ISO-8601 时间戳（logcat/frida 常见前缀），如 "2026-07-02 10:30:00" / "…10:30:00.123"。
 # 分组 1 = 时间串，分组 2 = 行首时间戳后的剩余内容（交给 tag/value 解析）。
@@ -343,6 +356,301 @@ def to_ledger_dict(leads: list[ProbeLead]) -> dict[str, object]:
     return {"total": len(deduped), "categories": len(by_cat), "by_category": by_cat}
 
 
+# --- 回灌清单：本路径贡献了哪些「可富化的地址」 -------------------------------
+
+#: 从探针行里保守抽 IP:port / host 的两条正则。★为什么必须抽而不能直接用 ``lead.value``：
+#: ``lead.value`` 是**整条去标记后的日志行**（如 ``connect -> 198.51.100.7:7158``、
+#: ``POST https://api.example.test/v1/login``），不是干净地址。直接拿它计数会有两个后果：
+#: ①与 pcap 路径记的干净地址在并集里**重复计数**（同一个后端两种写法各算一个）；
+#: ②闭环 ``business_candidate_count`` 被日志文本撑大 —— 凭空长出观测强度。
+_ADDR_IPV4_RE = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
+_ADDR_URL_RE = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s\"'<>]+")
+
+#: ``[IPv6]`` / ``[IPv6]:port`` 形态。socket / ssl / netstat 标签里的对端惯例这么写
+#: （``[2001:db8::1]:443 ESTABLISHED``），而它既不是 URL 也没有点分四段，
+#: 上面两条正则一条都不匹配 —— 实测的公网 v6 后端因此**静默丢失**。
+#: 只抓方括号里的内容，端口不入值（端口另有通道，混进地址会污染富化对象）。
+_ADDR_IPV6_BRACKETED_RE = re.compile(r"\[([0-9A-Fa-f:.]{2,45})\]")
+
+#: **裸** IPv6 形态（``2001:db8::1 ESTABLISHED``，无方括号无 scheme）。
+#:
+#: ★为什么写得这么保守：日志里 ``12:34:56``（时间戳）、``a1:b2:c3:d4:e5:f6``（MAC）都长得像
+#: 冒号分隔的十六进制。故本正则只做**候选粗筛**，是否真是地址一律交
+#: :class:`ipaddress.IPv6Address` 严格判定（时间戳/MAC 都会被它拒掉）——判据不写在正则里。
+#: 要求至少 3 个冒号分隔段，从而 ``443:`` / ``12:34`` 这类不进候选；
+#: 段数与总长都有硬上限（``{2,7}`` / ``{0,4}`` / ``{0,3}``），无嵌套量词、无回溯风险。
+#: 前后用 negative lookaround 卡边界，避免从更长的十六进制串中间截一段出来。
+_ADDR_IPV6_BARE_RE = re.compile(
+    r"(?<![0-9A-Za-z:.\[])"
+    r"([0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?:\.\d{1,3}){0,3})"
+    r"(?![0-9A-Za-z:.])"
+)
+_ADDR_HOST_RE = re.compile(r"\b([a-zA-Z0-9](?:[a-zA-Z0-9\-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9\-]*[a-zA-Z0-9])?)+)\b")
+
+
+#: 特殊用途命名空间：**永远**不是可上报的公网对象，故连域名候选都不该进。
+#: ★为什么必须显式列：:func:`host_is_private` 只判 ``localhost`` / ``localhost.localdomain``
+#: 两个**精确**值加 ``.local`` / ``.lan`` / ``.internal`` 三个后缀，于是
+#: ``foo.localhost``（RFC 6761 §6.3 规定整棵子树都解析到回环）与 ``device.home.arpa``
+#: （RFC 8375 家庭网络专用域）双双漏过 → 被当业务候选并进 ``endpoints``、成为外部富化对象、
+#: 撑大闭环 ``business_candidate_count``。反向映射区（``in-addr.arpa`` / ``ip6.arpa``）同理：
+#: 那是 PTR 查询的区名，不是一个可上报的业务域名。
+#:
+#: 有意**不**收 RFC 6761 的 ``.test`` / ``.example`` / ``.invalid``：本仓库夹具正是用
+#: ``*.example.test`` 当"合成公网域名"（写真实域名才是泄漏），把它们拒掉等于把自己的
+#: 测试数据判成不可上报，公网分支再也测不到。
+_SPECIAL_USE_SUFFIXES: tuple[str, ...] = (
+    "localhost",
+    "home.arpa",
+    "in-addr.arpa",
+    "ip6.arpa",
+    "local",
+    "lan",
+    "internal",
+    "localdomain",
+)
+
+
+def _normalize_host(host: str) -> str:
+    """归一化 URL/日志里的 host：去空白、去 IPv6 方括号、去尾点、转小写。取不到返回空。
+
+    ★方括号必须在这里剥掉：``host_from_url`` 对 IPv6 字面量**带括号原样返回**
+    （``[2001:db8::1]``），而 ``valid_url_host`` 判它"不像主机名"直接拒 ——
+    于是公网 IPv6 端点整条通道产出为空，实测的 v6 后端一个都进不了 ``endpoints``。
+    """
+    cleaned = host.strip().rstrip(".").lower()
+    if cleaned.startswith("[") and cleaned.endswith("]"):
+        cleaned = cleaned[1:-1].strip()
+    return cleaned
+
+
+def parse_ip_literal(host: str) -> "ipaddress.IPv4Address | ipaddress.IPv6Address | None":
+    """把 host 当 IP 字面量解析（v4/v6 统一走 :func:`ipaddress.ip_address`）。不是 IP 返回 None。
+
+    ★统一入口的意义：此前只有 :func:`parse_ipv4` 一条路，IPv6 既判不出"是 IP"、也就走不到
+    公网判据，最终被当域名或被整条丢弃。判"是不是 IP"与判"公不公网"必须覆盖同样的地址族，
+    否则 v6 端点在每一道闸上的行为都是偶然的。
+    """
+    cleaned = _normalize_host(host)
+    if not cleaned:
+        return None
+    # ipaddress 接受 "1.2" / "16909060" 这类简写并当 IPv4，日志里那都不是地址；
+    # 四段点分形态仍交给 parse_ipv4 严格判，与裸 IP 通道同口径。
+    if ":" not in cleaned:
+        return parse_ipv4(cleaned)
+    try:
+        return ipaddress.IPv6Address(cleaned.split("%", 1)[0])
+    except ValueError:
+        return None
+
+
+def _ipv6_is_reportable(addr: "ipaddress.IPv6Address") -> bool:
+    """公网 IPv6 才可上报。口径与 pcap 侧 ``_ip_public`` 一致（并集口径不许漂移）。
+
+    ``ipv4_mapped`` / 6to4 / Teredo 内嵌的 v4 地址要按**内嵌那个 v4** 复判：
+    ``::ffff:192.168.1.9`` 是私网地址换了个写法，放行它等于给私网开后门。
+    ``addr.teredo`` 是 ``(服务器, 客户端)`` 元组，取客户端那一侧（真正的对端）。
+    """
+    teredo = addr.teredo
+    embedded = addr.ipv4_mapped or addr.sixtofour or (teredo[1] if teredo else None)
+    if embedded is not None:
+        return not is_noise_bare_ip(str(embedded))
+    return not (
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_multicast
+        or addr.is_unspecified
+        or addr.is_reserved
+        or addr.is_site_local
+    )
+
+
+def url_host_is_reportable(host: str) -> bool:
+    """URL 的 host 是否是**可上报的公网对象**——私网/回环/本机别名/特殊用途域一律拒。
+
+    ★为什么 URL 通道也必须过这道闸：裸 IP 早就走 :func:`is_noise_bare_ip` 过滤了，但
+    ``http://127.0.0.1:8080/`` / ``http://192.168.1.9/cfg`` / ``http://localhost/api``
+    这类探针自查行以前只过 :func:`valid_url_host`（它只判"长得像主机名"，明确放行
+    ``localhost`` 与任意 IPv4 字面量），于是会被当成业务候选：
+      ①并进 ``endpoints`` 后被下游当可富化对象，向外部源查一个本机地址；
+      ②撑大闭环的 ``business_candidate_count``，凭空长出观测强度。
+    探针跑在分析机上，日志里出现本机/私网地址是**常态**，不是线索。
+
+    ★IPv4 字面量刻意复用 :func:`is_noise_bare_ip`（**而不是**另写一套 ``ip_is_private``
+    判断）：URL 通道与裸 IP 通道必须是**同一个**判据函数，否则两条通道会各自漂移——
+    同一个地址在裸 IP 形式下被拒、在 URL 形式下被收，正是"口径不同 = 同一后端算两次"
+    那类缺陷。IPv6 走 :func:`_ipv6_is_reportable`（同口径的 v6 版）。
+
+    ★主机名除 :func:`host_is_private` 外**还要**过 :data:`_SPECIAL_USE_SUFFIXES`：前者
+    只认 ``localhost`` 精确值，``foo.localhost`` / ``device.home.arpa`` 会整棵子树漏过。
+    """
+    cleaned = _normalize_host(host)
+    if not cleaned:
+        return False
+    addr = parse_ip_literal(cleaned)
+    if addr is not None:
+        if isinstance(addr, ipaddress.IPv6Address):
+            return _ipv6_is_reportable(addr)
+        return not is_noise_bare_ip(str(addr))
+    if host_is_private(cleaned):
+        return False
+    # 尾点与大小写已由 _normalize_host 抹平，故 ``FOO.Localhost.`` 与 ``foo.localhost`` 同判。
+    return not any(
+        cleaned == suffix or cleaned.endswith("." + suffix) for suffix in _SPECIAL_USE_SUFFIXES
+    )
+
+
+#: 单条线索文本里每条通道最多接受多少个候选。★为什么每条通道都要有：候选此前用
+#: ``re.findall`` 取，它会把**全部**匹配一次性物化成列表——一条被写坏的超长日志行（或刻意
+#: 构造的证据文件）能产出海量候选，既吃内存又要逐个过一次地址解析。上限只截**候选数**，
+#: 不改判据：正常一条日志行里的对端地址是个位数，64 已经宽得离谱。
+#:
+#: ★四条通道各自独立计数，因为它们抽的是不同形态（URL / 点分四段 / v6 / 主机名），
+#: 一条通道被刷爆不该让其余通道跟着失效。唯一的例外见 :data:`MAX_IPV6_CANDIDATES_PER_LEAD`。
+MAX_URL_CANDIDATES_PER_LEAD = 64
+MAX_IPV4_CANDIDATES_PER_LEAD = 64
+MAX_HOST_CANDIDATES_PER_LEAD = 64
+
+#: IPv6 候选的**共享**预算：``[v6]`` / ``[v6]:port`` / 裸 v6 / URL 里的 v6 **全部**从这一个
+#: 额度里扣。★为什么必须共享而不是每种形态各给 64：URL 分支曾自己解析并直接 ``ips.add()``，
+#: 于是 192 个 ``https://[v6]/`` 能全部进集合、绕过本上限——「每条 lead 的 v6 候选有界」这个
+#: 不变量在最容易被刷的那条通道上恰好不成立。现在 URL 里的 v6 一律不在 URL 分支入集合，
+#: 统一由方括号通道在这个共享预算内处理（URL 语法要求 v6 必须带方括号，故不会漏）。
+MAX_IPV6_CANDIDATES_PER_LEAD = 64
+
+
+def _bounded_findall(pattern: "re.Pattern[str]", text: str, limit: int) -> list[str]:
+    """按 ``limit`` 截断地取匹配组，**绝不** ``findall()``。
+
+    ``findall()`` 会一次性物化全部匹配；本函数用 ``finditer()`` 惰性推进，取满即停，
+    故峰值内存由 ``limit`` 而不是输入长度决定。
+    """
+    out: list[str] = []
+    for match in pattern.finditer(text):
+        out.append(match.group(1) if match.groups() else match.group(0))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _reportable_ipv6_value(candidate: str) -> str | None:
+    """把一个 IPv6 候选串判成"可上报的规范值"，不可上报/不是地址则返回 ``None``。
+
+    ★返回值刻意做**规范化**而不是原样回抛：``2001:DB8::0:1`` 与 ``2001:db8::1`` 是同一个
+    地址的两种写法，原样入集合会让同一后端在闭环里算两次（与 pcap 路径取并集时更明显）。
+
+    ★内嵌 v4 的形态（ipv4-mapped / 6to4 / Teredo）返回**内嵌的那个 v4**：
+    ``::ffff:203.0.113.5`` 与 ``203.0.113.5`` 是同一台主机，而 v4 通道本来就会从同一行文本里
+    抽出后者 —— 不归一到同一个值，同一个后端会以两种形态各计一次。
+    """
+    addr = parse_ip_literal(candidate)
+    if not isinstance(addr, ipaddress.IPv6Address):
+        return None
+    if not _ipv6_is_reportable(addr):
+        return None
+    teredo = addr.teredo
+    embedded = addr.ipv4_mapped or addr.sixtofour or (teredo[1] if teredo else None)
+    if embedded is not None:
+        # ★这里**不**再判一次噪音：上面的 _ipv6_is_reportable 对内嵌 v4 的形态已经按内嵌那个
+        #   v4 走同一个 is_noise_bare_ip 复判过了（``::ffff:192.168.1.9`` 到不了这一行）。
+        #   把同一个条件写两遍的害处不是多跑一次：第二遍永远不成立，于是它既测不出来、也让
+        #   读代码的人以为"删了它就会漏私网"，实际漏私网的判据在上面那一处。
+        return str(embedded)
+    return addr.compressed
+
+
+def _iter_ipv6_candidates(text: str) -> "list[str]":
+    """从一行日志文本里粗筛 IPv6 候选（``[v6]`` / ``[v6]:port`` / 裸 v6），有界。
+
+    只做粗筛：是不是真地址、能不能上报，一律交 :func:`_reportable_ipv6_value` 判。
+
+    ★方括号形态**同时覆盖 URL 里的 v6**：URL 语法（RFC 3986 §3.2.2）要求 v6 字面量必须写在
+    方括号里，故 ``https://[2001:db8::1]:443/x`` 的地址部分本就会被方括号正则抓到。URL 分支
+    因此不再自己解析 v6 —— 所有 v6 都从这一个共享预算里扣，且只经
+    :func:`_reportable_ipv6_value` 一个出口产值（见 :data:`MAX_IPV6_CANDIDATES_PER_LEAD`）。
+    """
+    found: list[str] = []
+    for pattern in (_ADDR_IPV6_BRACKETED_RE, _ADDR_IPV6_BARE_RE):
+        remaining = MAX_IPV6_CANDIDATES_PER_LEAD - len(found)
+        if remaining <= 0:
+            break
+        found.extend(_bounded_findall(pattern, text, remaining))
+    return found
+
+
+def probe_address_values(leads: "list[ProbeLead]") -> tuple[set[str], set[str]]:
+    """从探针线索里保守抽出 ``(IP 集合, 域名集合)`` —— 只认真的地址，抽不出就不计。
+
+    ★口径必须与 pcap 路径一致（裸 IP / 裸域名），因为两条路径的贡献集合会取**并集**：
+      口径不同 = 同一个后端被算两次。抽不出地址的线索（商户号、加密 key、用户个人数据）
+      **一条都不计** —— 那些不是可富化的地址，混进去会污染闭环的业务候选计数与外部富化对象。
+
+    绝不抛：单条抽取异常跳过，返回已抽到的部分。
+    """
+    ips: set[str] = set()
+    domains: set[str] = set()
+    for lead in leads:
+        if lead.category not in (LeadCategory.IP, LeadCategory.DOMAIN):
+            continue
+        text = lead.value or ""
+        try:
+            for url in _bounded_findall(_ADDR_URL_RE, text, MAX_URL_CANDIDATES_PER_LEAD):
+                host = _normalize_host(host_from_url(url))
+                if not host:
+                    continue
+                # ★IP 字面量先判、且判在 valid_url_host 之前：后者只认四段点分与"含点且末段
+                #   为字母"，IPv6 剥括号后既没有点、末段也不是字母 —— 让它先过一遍，公网 v6
+                #   端点整条通道产出恒为空（实测的 v6 后端一个都进不了 endpoints）。
+                addr = parse_ip_literal(host)
+                if addr is not None:
+                    # ★v6 在这里**只跳过、不入集合**：URL 里的 v6 必须写在方括号里，故
+                    #   _iter_ipv6_candidates 的方括号通道已经会抓到同一个地址。让 URL 分支
+                    #   自己 add 有两处害：①它绕过 MAX_IPV6_CANDIDATES_PER_LEAD（192 个 URL v6
+                    #   能全部进来）；②它 add 的是 addr.compressed 而非
+                    #   _reportable_ipv6_value()，于是 ipv4-mapped / 6to4 / Teredo 会以
+                    #   "::ffff:203.0.113.5" 与 "203.0.113.5" 两种写法同时留在集合里 ——
+                    #   同一台主机算两次。两条缺陷的根因都是"v6 有第二个产值出口"。
+                    if isinstance(addr, ipaddress.IPv6Address):
+                        continue
+                    # 私网/回环/链路本地/保留一律不入端点：探针跑在分析机上，日志里的本机
+                    # 地址是常态而非线索。v4 与裸 IP 通道共用 is_noise_bare_ip，口径不漂移。
+                    if url_host_is_reportable(host):
+                        ips.add(addr.compressed)
+                    continue
+                if valid_url_host(host) and url_host_is_reportable(host):
+                    domains.add(host)
+            for raw_ip in _bounded_findall(_ADDR_IPV4_RE, text, MAX_IPV4_CANDIDATES_PER_LEAD):
+                # is_noise_bare_ip：私网/回环/链路本地/网络地址等无上报价值的裸 IP 不计。
+                # 与 pcap 路径「只收公网业务候选」的口径一致，否则闭环的候选数口径会漂移。
+                if parse_ipv4(raw_ip) is not None and not is_noise_bare_ip(raw_ip):
+                    ips.add(raw_ip)
+            # ★裸 IPv6 / ``[v6]:port`` / URL 里的 v6 全走这一条通道（共享 64 个预算、单一
+            #   规范化出口）：URL 通道只处理带 scheme 的，v4 通道只认点分四段，于是
+            #   ``[2001:db8::1]:443 ESTABLISHED`` 这类 socket/ssl/netstat 标签里的对端
+            #   在两条通道上都不匹配 —— 实测的公网 v6 后端**静默丢失**（既不入 endpoints、
+            #   也不计入闭环候选，报告长得跟"没观测到 v6"一模一样）。
+            for candidate in _iter_ipv6_candidates(text):
+                value = _reportable_ipv6_value(candidate)
+                if value is not None:
+                    ips.add(value)
+            for host in _bounded_findall(_ADDR_HOST_RE, text, MAX_HOST_CANDIDATES_PER_LEAD):
+                low = _normalize_host(host)
+                # 纯 IP 字面量已由上面两条通道处理；这里只收看起来像主机名的（末段 2+ 字母）。
+                # 同样过公网闸：``localhost.localdomain`` / ``foo.localhost`` /
+                # ``device.home.arpa`` / ``*.local`` / ``*.lan`` / ``*.internal`` 都含点故能
+                # 匹配本正则，必须与 URL 通道同口径拒掉（见 url_host_is_reportable）。
+                if (
+                    parse_ip_literal(low) is None
+                    and valid_url_host(low)
+                    and url_host_is_reportable(low)
+                ):
+                    domains.add(low)
+        except Exception:  # noqa: BLE001 - 单条抽不出不影响其余
+            logger.debug("[probe_ingest] 地址抽取跳过一条：%r", text, exc_info=True)
+    return ips, domains
+
+
 def merge_into_report_json(report_json_path: str, leads: list[ProbeLead]) -> int:
     """把探针线索合并进已有 report.json 的 ``leads`` 数组。
 
@@ -388,6 +696,61 @@ def merge_into_report_json(report_json_path: str, leads: list[ProbeLead]) -> int
             existing_by_key[key] = lead_dict
             existing.append(lead_dict)
             added += 1
+
+        # ★meta 面：此前本函数**只**动 leads。同一份报告的三个消费面各读各的（letters 出口读 leads、
+        #   闭环排序读 endpoints、可见性与采集质量读 meta），只更新第一面就会出现
+        #   「Lead 标着 runtime 实测、可见性却说未做运行时观测、闭环还判 failed」——
+        #   三处自相矛盾，而每一处单看都自洽。pcap 路径早已补齐（见 pcap_ingest 同名函数的说明），
+        #   probe 路径一直缺这一步。
+        #
+        # Lead.value 是整行日志，不能直接塞 endpoints；但 probe_address_values 已保守抽出了
+        # 干净 IP/域名。三面必须一致：inventory 说有业务候选时，endpoints 也要有可富化对象。
+        probe_ips, probe_domains = probe_address_values(leads)
+        if probe_ips or probe_domains:
+            from apkscan.dynamic.pcap_ingest import _merge_runtime_endpoint_dicts
+
+            fresh_endpoints = [
+                {
+                    "value": value,
+                    "kind": kind,
+                    "is_private": False,
+                    "evidences": [
+                        {
+                            "source": "runtime-probe",
+                            "location": "probe-log",
+                            "snippet": f"进程内探针抽取：{value}",
+                            "observed_at": None,
+                        }
+                    ],
+                    # 只证明进程内观测到了地址，不编造端口、字节数、双向载荷或 UID/socket 归因。
+                    "enrichment": {"runtime": {"observed_by": "probe"}},
+                }
+                for kind, values in (("ip", sorted(probe_ips)), ("domain", sorted(probe_domains)))
+                for value in values
+            ]
+            _merge_runtime_endpoint_dicts(payload, fresh_endpoints)
+
+        observed = bool(added or confirmed or probe_ips or probe_domains)
+        if observed:
+            meta = payload.get("meta")
+            if not isinstance(meta, dict):
+                meta = {}
+                payload["meta"] = meta
+            meta["runtime_merged"] = True
+            # ★``uid_attributed=False``：探针日志是**进程内** hook 产出的，本就归属目标进程；
+            #   但这里没有设备侧 socket 快照做五元组归因，拿不到闭环要的「同一端点上归因 + 双向载荷」
+            #   那份证据。如实记 False → 闭环封顶 partial，绝不抬成 complete。
+            meta[_inv.INVENTORY_META_KEY] = _inv.build_inventory(
+                meta,
+                source="probe",
+                endpoint_values=probe_ips,
+                domain_values=probe_domains,
+                parse_status="ok",
+                uid_attributed=False,
+            )
+            for _stale in _inv.INVENTORY_META_ALIASES:
+                meta.pop(_stale, None)
+
         atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
         logger.info("[probe_ingest] 追加 %d 条、runtime 确认 %d 条探针线索进 %s", added, confirmed, path)
         return added
