@@ -13,6 +13,8 @@ from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from apkscan.core import infra
+from apkscan.report import letters
 from apkscan.core.models import (
     Confidence,
     Endpoint,
@@ -154,6 +156,69 @@ def _endpoint_enrichment(ep: Endpoint) -> dict[str, Any]:
     return ep.enrichment if isinstance(ep.enrichment, dict) else {}
 
 
+def attribution_by_lead(endpoints: list[Endpoint], leads: list[Lead]) -> dict[str, Any]:
+    """建 ``{Lead.value 原样: 该标的的五层归属链视图}``，供模板按 ``lead.value`` 直接查。
+
+    ★键必须走 :func:`infra.match_key`（IP 剥 ``:port/proto``）：运行时回灌的 Lead 值形如
+      ``198.51.100.7:31861/tcp``，而 Endpoint 一律裸 IP。letters 出口侧曾因按原值精确匹配，导致
+      **恰恰是 pcap 实测到的真后端**永远关联不上归属链（见 ``infra.match_key`` 的注释，
+      那里明写"三处必须用同一把钥匙"）。本函数是第四处，用同一把钥匙。
+
+    ★``category`` 取 ``.value``（``"IP"``）而非 ``str(enum)``（``"LeadCategory.IP"``）——
+      后者过不了 match_key 的 ``== "IP"`` 判断，端口尾缀就不会被剥，于是又回到上面那个 bug。
+
+    返回值按 **Lead.value 原样** 作键（模板里 ``lead.value`` 直接查得到，不必在 Jinja2 里
+    重做归一化）。escape 传 ``None``：Jinja2 autoescape 在渲染时转义，此处再转会双重转义。
+    """
+    index: dict[tuple[str, str], Any] = {}
+    for ep in endpoints:
+        att = _endpoint_enrichment(ep).get("attribution")
+        if not isinstance(att, dict):
+            continue
+        kind = ep.kind if isinstance(ep.kind, str) else ""
+        value = ep.value if isinstance(ep.value, str) else ""
+        if not value:
+            continue
+        if kind.strip():
+            index[(kind.strip().lower(), infra.match_key(kind, value))] = att
+        else:
+            index[("", value.strip().lower())] = att
+
+    out: dict[str, Any] = {}
+    for lead in leads:
+        raw = lead.value if isinstance(lead.value, str) else ""
+        category = lead.category.value if isinstance(lead.category, LeadCategory) else ""
+        if not raw or not category:
+            continue
+        key = infra.match_key(category, raw)
+        att = index.get((category.strip().lower(), key)) or index.get(("", key))
+        if not isinstance(att, dict):
+            continue
+        views, remaining = letters.attribution_chain_view(att)
+        if views:
+            out[raw] = {"ips": views, "remaining": remaining}
+    return out
+
+
+def sni_spans_by_lead(leads: list[Lead]) -> dict[str, Any]:
+    """建 ``{Lead.value: SNI 伪装警示的中性字句段}``（无伪装的 lead 不入表）。
+
+    ★``escape`` 传 ``None``：借用的域名来自样本流量（外部数据），但转义由 Jinja2 autoescape
+      在渲染时做；此处若再 ``_md_safe`` 一次，报告里会显示 ``music\\.example\\.com`` 那种反斜杠。
+      **两个出口都转义，只是转义发生在各自该发生的那一层。**
+    """
+    out: dict[str, Any] = {}
+    for lead in leads:
+        raw = lead.value if isinstance(lead.value, str) else ""
+        names = getattr(lead, "sni_masquerade", None)
+        if not raw or not isinstance(names, list):
+            continue
+        spans = letters.sni_masquerade_warning_spans(names)
+        if spans:
+            out[raw] = spans
+    return out
+
+
 def split_endpoints(endpoints: list[Endpoint]) -> dict[str, list[Endpoint]]:
     """把端点拆成 domain / ip / url 三类，便于全表分区展示。"""
     out: dict[str, list[Endpoint]] = {"domain": [], "ip": [], "url": []}
@@ -282,6 +347,12 @@ def _render_template(template: Any, report: Report) -> str:
     network_leads = network_leads_by_advice(report.leads)
     return template.render(
         report=report,
+        # 三个信号此前只在 letters 出口露面，报告出口 0 命中（研判发生在读报告那一步，
+        # 警示到文书阶段才出现等于迟到）。字句一律取 letters 的中性视图，不另写文案。
+        attribution_by_lead=attribution_by_lead(report.endpoints, report.leads),
+        attribution_chain_heading=letters.ATTRIBUTION_CHAIN_HEADING,
+        shape_uncertain_spans=letters.SHAPE_UNCERTAIN_WARNING_SPANS,
+        sni_spans_by_lead=sni_spans_by_lead(report.leads),
         lead_groups=lead_groups,
         lead_total=len(report.leads),
         config_key_leads=config_key_leads,

@@ -17,7 +17,7 @@ from apkscan.core import infra
 from apkscan.core.models import LeadCategory
 from apkscan.dynamic import pcap_ingest
 
-_BACKEND = "8.138.171.104"
+_BACKEND = "8.138.171.104"  # leak-scan: allow SNI 伪装载体的真后端夹具，需被判公网远端才进 carriers
 #: 刻意用一个**不在** KNOWN_INFRA 名单里的域名。
 #: 实测那批（music.163.com / 有道 / BootCDN）已陆续进了已知第三方名单，但伪装判据的价值恰恰
 #: 在于**不依赖名单**——团伙下次换一个没人收录过的知名域名，名单就已经落后了。
@@ -61,7 +61,7 @@ def test_sni_on_nonstandard_port_is_flagged() -> None:
 
 def test_sni_on_standard_port_is_not_flagged() -> None:
     """反向护栏：443 上的 SNI 是正常 TLS 服务，不得被标伪装（否则全库域名线索报废）。"""
-    s = _summary(_flow("59.111.181.60", 443, {_FAKE_SNI}))
+    s = _summary(_flow("59.111.181.60", 443, {_FAKE_SNI}))  # leak-scan: allow SNI 伪装载体的真后端夹具，需被判公网远端才进 carriers
     assert pcap_ingest.sni_camouflage_carriers(s) == {}
 
 
@@ -72,7 +72,7 @@ def test_sni_seen_on_any_standard_port_is_exonerated() -> None:
     """
     s = _summary(
         _flow(_BACKEND, 30135, {_FAKE_SNI}),           # 伪装的那条
-        _flow("59.111.181.60", 443, {_FAKE_SNI}),      # 真访问网易的那条
+        _flow("59.111.181.60", 443, {_FAKE_SNI}),      # 真访问网易的那条  # leak-scan: allow SNI 伪装载体的真后端夹具，需被判公网远端才进 carriers
     )
     assert pcap_ingest.sni_camouflage_carriers(s) == {}
 
@@ -133,7 +133,7 @@ def test_masquerade_is_recorded_on_the_endpoint() -> None:
 
 def test_standard_port_endpoint_has_no_masquerade_marker() -> None:
     """不得平白给正常端点加标记（标记贬值成噪声就没人看了）。"""
-    s = _summary(_flow("59.111.181.60", 443, {_FAKE_SNI}))
+    s = _summary(_flow("59.111.181.60", 443, {_FAKE_SNI}))  # leak-scan: allow SNI 伪装载体的真后端夹具，需被判公网远端才进 carriers
     rt = pcap_ingest._runtime_endpoint_dicts(s)[0]["enrichment"]["runtime"]
     assert "sni_masquerade" not in rt
 
@@ -186,8 +186,8 @@ def test_no_masquerade_means_no_warning_in_letter() -> None:
     """无伪装的普通 IP 线索不得平白多出这段警示（警示贬值成噪声就没人看了）。"""
     from apkscan.report import letters
 
-    s = _summary(_flow("59.111.181.60", 443, set()), _flow("59.111.181.60", 443, set(), inbound=True))
-    lead = _lead(pcap_ingest.to_report_leads(s), "59.111.181.60:443/tcp")
+    s = _summary(_flow("59.111.181.60", 443, set()), _flow("59.111.181.60", 443, set(), inbound=True))  # leak-scan: allow SNI 伪装载体的真后端夹具，需被判公网远端才进 carriers
+    lead = _lead(pcap_ingest.to_report_leads(s), "59.111.181.60:443/tcp")  # leak-scan: allow SNI 伪装载体的真后端夹具，需被判公网远端才进 carriers
     assert lead.sni_masquerade == []
     body = letters.build_letters({"leads": [_lead_as_dict(lead)]})[0]["body_md"]
     assert "切勿向其发函" not in body

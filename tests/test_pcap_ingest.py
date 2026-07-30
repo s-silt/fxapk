@@ -132,7 +132,7 @@ def _pcap(packets: list[bytes], linktype: int = 1) -> bytes:
 def _sample_pcap() -> bytes:
     p_tls = _eth(_ipv4(_tcp(_tls_client_hello("evil-c2.example.com"), 50000, 443), 6, "10.0.0.2", "203.0.113.9"), 0x0800)
     p_dns = _eth(_ipv4(_udp(_dns_query("tracker.example.org"), 40000, 53), 17, "10.0.0.2", "10.0.0.1"), 0x0800)
-    p_native = _eth(_ipv4(_tcp(b"\x00\x01\x02", 50001, 30113), 6, "10.0.0.2", "106.53.21.146"), 0x0800)
+    p_native = _eth(_ipv4(_tcp(b"\x00\x01\x02", 50001, 30113), 6, "10.0.0.2", "106.53.21.146"), 0x0800)  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     return _pcap([p_tls, p_dns, p_native])
 
 
@@ -150,7 +150,7 @@ def test_parse_extracts_tls_sni() -> None:
 def test_parse_extracts_native_endpoint_ip_port() -> None:
     summary = pcap_ingest.parse_pcap_bytes(_sample_pcap())
     peers = {(f.dst_ip, f.dst_port) for f in summary.flows}
-    assert ("106.53.21.146", 30113) in peers  # native 接入节点(无 TLS 也抓到)
+    assert ("106.53.21.146", 30113) in peers  # native 接入节点(无 TLS 也抓到)  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     assert ("203.0.113.9", 443) in peers
 
 
@@ -176,13 +176,13 @@ def test_ipv4_payload_truncated_at_total_length() -> None:
     # 真实业务连接：一个**无应用载荷**的 ACK 包（PCAPdroid 对每个包都追加元数据，
     # 包括纯 ACK——此时追加区就成了 TCP 头之后的第一段字节，正对上 TLS 解析的入口）。
     real = _tcp(b"", 50001, 30124)
-    ip_packet = _ipv4(real, 6, "10.0.0.2", "8.134.204.167")
+    ip_packet = _ipv4(real, 6, "10.0.0.2", "198.51.100.53")
     trailer = _tls_client_hello("static.zhihu.com") + b"\x00com.example.app\x00"
     frame = _eth(ip_packet + trailer, 0x0800)
 
     summary = pcap_ingest.parse_pcap_bytes(_pcap([frame]))
     peers = {(f.dst_ip, f.dst_port) for f in summary.flows}
-    assert ("8.134.204.167", 30124) in peers, "真实连接必须保留"
+    assert ("198.51.100.53", 30124) in peers, "真实连接必须保留"
     snis = {s for f in summary.flows for s in f.sni}
     assert "static.zhihu.com" not in snis, "帧尾元数据不得被读成 SNI"
     assert not snis, f"该连接不该有任何 SNI，实得 {snis}"
@@ -192,7 +192,7 @@ def test_ipv4_payload_byte_count_excludes_trailer() -> None:
     """字节计数也不能把帧尾元数据算进去——它会虚高业务流量、误导闭环判定。"""
     real = _tcp(b"\xaa" * 16, 50001, 30124)
     frame = _eth(
-        _ipv4(real, 6, "10.0.0.2", "8.134.204.167") + b"\xff" * 512, 0x0800
+        _ipv4(real, 6, "10.0.0.2", "198.51.100.53") + b"\xff" * 512, 0x0800
     )
     summary = pcap_ingest.parse_pcap_bytes(_pcap([frame]))
     flow = next(f for f in summary.flows if f.dst_port == 30124)
@@ -218,7 +218,7 @@ def test_ipv4_trailer_does_not_forge_dns_records() -> None:
     """
     real = _udp(b"", 40000, 53)
     trailer = _dns_query("static.zhihu.com")
-    frame = _eth(_ipv4(real, 17, "10.0.0.2", "8.134.204.167") + trailer, 0x0800)
+    frame = _eth(_ipv4(real, 17, "10.0.0.2", "198.51.100.53") + trailer, 0x0800)
     summary = pcap_ingest.parse_pcap_bytes(_pcap([frame]))
     assert "static.zhihu.com" not in summary.dns_queries
 
@@ -227,7 +227,7 @@ def test_normal_tls_sni_still_extracted_after_truncation() -> None:
     """★裁剪不得损召回：没有帧尾元数据的普通 443 TLS，SNI 照常提取。"""
     frame = _eth(
         _ipv4(_tcp(_tls_client_hello("bucket.oss-accelerate.aliyuncs.com"), 50003, 443),
-              6, "10.0.0.2", "47.246.1.1"),
+              6, "10.0.0.2", "198.51.100.45"),
         0x0800,
     )
     summary = pcap_ingest.parse_pcap_bytes(_pcap([frame]))
@@ -238,7 +238,7 @@ def test_normal_tls_sni_still_extracted_after_truncation() -> None:
 def test_bogus_total_length_falls_back_to_actual_bytes() -> None:
     """total_length 坏掉（大于实际字节）时退回按实际切——不能因一个坏字段把整包丢了。"""
     real = _tcp(_tls_client_hello("real-c2.example.com"), 50004, 443)
-    ip_packet = bytearray(_ipv4(real, 6, "10.0.0.2", "45.79.10.20"))
+    ip_packet = bytearray(_ipv4(real, 6, "10.0.0.2", "198.51.100.43"))
     struct.pack_into("!H", ip_packet, 2, 65535)  # total_length 谎报 65535
     summary = pcap_ingest.parse_pcap_bytes(_pcap([_eth(bytes(ip_packet), 0x0800)]))
     snis = {s for f in summary.flows for s in f.sni}
@@ -254,9 +254,9 @@ def test_to_leads_native_ip_is_穿透_lead() -> None:
     summary = pcap_ingest.parse_pcap_bytes(_sample_pcap())
     leads = pcap_ingest.to_report_leads(summary)
     ip_leads = [l for l in leads if l.category == LeadCategory.IP]
-    assert any("106.53.21.146" in l.value and "30113" in l.value for l in ip_leads)
+    assert any("106.53.21.146" in l.value and "30113" in l.value for l in ip_leads)  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     # 公网接入节点默认建议调证、source=runtime-pcap
-    node = next(l for l in ip_leads if "106.53.21.146" in l.value)
+    node = next(l for l in ip_leads if "106.53.21.146" in l.value)  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     assert node.source_refs and node.source_refs[0].source.startswith("runtime")
     assert node.advice == "建议调证"
 
@@ -279,7 +279,7 @@ def test_private_ip_filtered_out() -> None:
 def test_build_ledger_md_has_sections() -> None:
     md = pcap_ingest.build_ledger_md(pcap_ingest.parse_pcap_bytes(_sample_pcap()))
     assert "调证台账" in md or "接入节点" in md
-    assert "106.53.21.146" in md
+    assert "106.53.21.146" in md  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     assert "向" in md  # where_to_request
 
 
@@ -291,7 +291,7 @@ def test_merge_into_report_json_appends(tmp_path) -> None:
     assert added > 0
     out = json.loads(p.read_text(encoding="utf-8"))
     assert len(out["leads"]) == added
-    assert any("106.53.21.146" in str(l.get("value", "")) for l in out["leads"])
+    assert any("106.53.21.146" in str(l.get("value", "")) for l in out["leads"])  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
 
 
 # ======================================================================
@@ -369,7 +369,7 @@ def test_observed_at_populated_for_ip_lead() -> None:
     """IP 接入节点线索的 runtime Evidence 带 observed_at（来自 Flow.first_ts）。"""
     summary = pcap_ingest.parse_pcap_bytes(_sample_pcap())
     leads = pcap_ingest.to_report_leads(summary)
-    node = next(l for l in leads if l.category == LeadCategory.IP and "106.53.21.146" in l.value)
+    node = next(l for l in leads if l.category == LeadCategory.IP and "106.53.21.146" in l.value)  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     ev = node.source_refs[0]
     assert ev.observed_at is not None
     # native 包是第 3 个（index 2），pcap ts = 1700000000 + 2
@@ -383,7 +383,7 @@ def test_observed_at_落库_into_report_json(tmp_path) -> None:
     summary = pcap_ingest.parse_pcap_bytes(_sample_pcap())
     pcap_ingest.merge_into_report_json(str(p), summary)
     out = json.loads(p.read_text(encoding="utf-8"))
-    node = next(l for l in out["leads"] if "106.53.21.146" in str(l.get("value", "")))
+    node = next(l for l in out["leads"] if "106.53.21.146" in str(l.get("value", "")))  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     assert node["source_refs"][0].get("observed_at") is not None
 
 
@@ -510,14 +510,14 @@ def test_strip_link_sll2_linktype_276() -> None:
 def test_pcap_syn_only_is_pending_not_high_confidence() -> None:
     """★ P0-1：仅 SYN、无 SYN-ACK、无载荷的连接尝试 → state=syn_only、advice=待核、非 HIGH——
     不能把 ClientCore 轮询/容灾池的 SYN-only 节点写成"实测接入节点/建议调证"。"""
-    syn = _eth(_ipv4(_tcp_flags(b"", 55555, 9466, 0x02), 6, "10.0.0.2", "45.202.1.235"), 0x0800)
+    syn = _eth(_ipv4(_tcp_flags(b"", 55555, 9466, 0x02), 6, "10.0.0.2", "45.202.1.235"), 0x0800)  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     summary = pcap_ingest.parse_pcap_bytes(_pcap([syn]))
-    node = next(r for r in pcap_ingest.remote_endpoints(summary) if r.ip == "45.202.1.235")
+    node = next(r for r in pcap_ingest.remote_endpoints(summary) if r.ip == "45.202.1.235")  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     assert node.state == "syn_only"
     assert node.out_bytes == 0 and node.in_bytes == 0
     lead = next(
         l for l in pcap_ingest.to_report_leads(summary)
-        if l.category == LeadCategory.IP and "45.202.1.235" in l.value
+        if l.category == LeadCategory.IP and "45.202.1.235" in l.value  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     )
     assert lead.advice == "待核"
     assert lead.confidence != Confidence.HIGH
@@ -526,12 +526,12 @@ def test_pcap_syn_only_is_pending_not_high_confidence() -> None:
 def test_pcap_aggregates_remote_endpoint_across_five_tuples() -> None:
     """★ P0-1：同一远端的 本机→远端(出载荷) + 远端→本机(SYN-ACK+入载荷) 两条 5 元组聚成一个远端，
     双向载荷 → established；out/in 字节与 connection_count 正确累计。"""
-    out1 = _eth(_ipv4(_tcp_flags(b"A" * 100, 50000, 7689, 0x18), 6, "10.0.0.2", "100.64.7.14"), 0x0800)
-    synack = _eth(_ipv4(_tcp_flags(b"", 7689, 50000, 0x12), 6, "100.64.7.14", "10.0.0.2"), 0x0800)
-    in1 = _eth(_ipv4(_tcp_flags(b"B" * 70, 7689, 50000, 0x18), 6, "100.64.7.14", "10.0.0.2"), 0x0800)
+    out1 = _eth(_ipv4(_tcp_flags(b"A" * 100, 50000, 7689, 0x18), 6, "10.0.0.2", "100.64.7.14"), 0x0800)  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
+    synack = _eth(_ipv4(_tcp_flags(b"", 7689, 50000, 0x12), 6, "100.64.7.14", "10.0.0.2"), 0x0800)  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
+    in1 = _eth(_ipv4(_tcp_flags(b"B" * 70, 7689, 50000, 0x18), 6, "100.64.7.14", "10.0.0.2"), 0x0800)  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     summary = pcap_ingest.parse_pcap_bytes(_pcap([out1, synack, in1]))
     node = next(
-        r for r in pcap_ingest.remote_endpoints(summary) if r.ip == "100.64.7.14" and r.port == 7689
+        r for r in pcap_ingest.remote_endpoints(summary) if r.ip == "100.64.7.14" and r.port == 7689  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     )
     assert node.state == "established"
     assert node.out_bytes == 100
@@ -539,7 +539,7 @@ def test_pcap_aggregates_remote_endpoint_across_five_tuples() -> None:
     assert node.connection_count == 1
     lead = next(
         l for l in pcap_ingest.to_report_leads(summary)
-        if l.category == LeadCategory.IP and "100.64.7.14" in l.value
+        if l.category == LeadCategory.IP and "100.64.7.14" in l.value  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     )
     assert lead.advice == "建议调证" and lead.confidence == Confidence.HIGH
 
@@ -564,15 +564,15 @@ def test_pcap_dns_txt_answer_is_preserved() -> None:
 def test_runtime_endpoints_filters_syn_only_no_payload() -> None:
     """★ 复审#1：to_runtime_endpoints（自动并入主报告）过滤无载荷 SYN-only 节点——不让它绕过
     态分级、走下游默认公网 IP"建议调证"；有载荷节点保留；SYN-only 仍在 pcap 台账作待核。"""
-    syn = _eth(_ipv4(_tcp_flags(b"", 55555, 9466, 0x02), 6, "10.0.0.2", "45.202.1.235"), 0x0800)
-    data = _eth(_ipv4(_tcp_flags(b"X" * 50, 50001, 30113, 0x18), 6, "10.0.0.2", "106.53.21.146"), 0x0800)
+    syn = _eth(_ipv4(_tcp_flags(b"", 55555, 9466, 0x02), 6, "10.0.0.2", "45.202.1.235"), 0x0800)  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
+    data = _eth(_ipv4(_tcp_flags(b"X" * 50, 50001, 30113, 0x18), 6, "10.0.0.2", "106.53.21.146"), 0x0800)  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     summary = pcap_ingest.parse_pcap_bytes(_pcap([syn, data]))
     ip_vals = {e.value for e in pcap_ingest.to_runtime_endpoints(summary) if e.kind == "ip"}
-    assert "45.202.1.235" not in ip_vals  # SYN-only 无载荷 → 自动并入过滤
-    assert "106.53.21.146" in ip_vals  # 有载荷 → 保留
+    assert "45.202.1.235" not in ip_vals  # SYN-only 无载荷 → 自动并入过滤  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
+    assert "106.53.21.146" in ip_vals  # 有载荷 → 保留  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     syn_lead = next(
         l for l in pcap_ingest.to_report_leads(summary)
-        if l.category == LeadCategory.IP and "45.202.1.235" in l.value
+        if l.category == LeadCategory.IP and "45.202.1.235" in l.value  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     )
     assert syn_lead.advice == "待核"  # pcap 台账仍留作待核（不静默丢弃）
 
@@ -580,7 +580,7 @@ def test_runtime_endpoints_filters_syn_only_no_payload() -> None:
 def test_fanzha_interception_node_excluded() -> None:
     """★ Codex fengzhixin 案抓包交接 §6：反诈拦截节点（183.192.65.101）即便有双向载荷（拦截页
     返回），也标『无需调证·反诈拦截』、不升入 runtime 端点（会污染归因）；业务接入节点正常保留。"""
-    fanzha, biz = "183.192.65.101", "100.64.113.177"
+    fanzha, biz = "183.192.65.101", "100.64.113.177"  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     # fanzha：双向载荷（拦截页会回数据）——本应被"反诈拦截"排除，而非因"有载荷"被当业务后端保留。
     out1 = _eth(_ipv4(_tcp_flags(b"GET /", 50001, 443, 0x18), 6, "10.0.0.2", fanzha), 0x0800)
     in1 = _eth(_ipv4(_tcp_flags(b"HTTP 302", 443, 50001, 0x18), 6, fanzha, "10.0.0.2"), 0x0800)
@@ -589,7 +589,7 @@ def test_fanzha_interception_node_excluded() -> None:
 
     ip_vals = {e.value for e in pcap_ingest.to_runtime_endpoints(summary) if e.kind == "ip"}
     assert "183.192.65.101" not in ip_vals  # 反诈拦截节点排除，绝不升 runtime 端点污染归因
-    assert "100.64.113.177" in ip_vals  # 业务接入节点正常保留
+    assert "100.64.113.177" in ip_vals  # 业务接入节点正常保留  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
 
     fz_lead = next(
         l for l in pcap_ingest.to_report_leads(summary)
@@ -614,12 +614,12 @@ def test_udp_payload_counts_as_evidence() -> None:
 
 def test_public_to_public_ipv6_not_dropped() -> None:
     """★ 复审#3：两端都公网（移动网 IPv6 GUA 直连）不丢弃——SYN 方向判远端。"""
-    syn = _eth(_ipv6(_tcp_flags(b"", 40000, 443, 0x02), 6, "2409:8a00::1", "2606:4700::1111"), 0x86DD)
-    dat = _eth(_ipv6(_tcp_flags(b"Z" * 30, 40000, 443, 0x18), 6, "2409:8a00::1", "2606:4700::1111"), 0x86DD)
+    syn = _eth(_ipv6(_tcp_flags(b"", 40000, 443, 0x02), 6, "2001:db8:9::1", "2606:4700::1111"), 0x86DD)  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
+    dat = _eth(_ipv6(_tcp_flags(b"Z" * 30, 40000, 443, 0x18), 6, "2001:db8:9::1", "2606:4700::1111"), 0x86DD)  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     summary = pcap_ingest.parse_pcap_bytes(_pcap([syn, dat]))
     ips = {r.ip for r in pcap_ingest.remote_endpoints(summary)}
-    assert "2606:4700::1111" in ips  # 远端保留（未丢连接）
-    assert "2409:8a00::1" not in ips  # 本机端不作远端
+    assert "2606:4700::1111" in ips  # 远端保留（未丢连接）  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
+    assert "2001:db8:9::1" not in ips  # 本机端不作远端
 
 
 def test_to_runtime_endpoints_from_pcap() -> None:
@@ -630,7 +630,7 @@ def test_to_runtime_endpoints_from_pcap() -> None:
     assert eps  # 非空
     assert all(e.evidences and e.evidences[0].source == "runtime-pcap" for e in eps)
     ip_vals = {e.value for e in eps if e.kind == "ip"}
-    assert "106.53.21.146" in ip_vals  # 公网接入节点作 IP 端点
+    assert "106.53.21.146" in ip_vals  # 公网接入节点作 IP 端点  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     # 私网/回环不作接入节点。
     assert not any(
         e.value.startswith(("192.168.", "127.", "10.")) for e in eps if e.kind == "ip"
@@ -741,11 +741,11 @@ def test_ipv6_split_hello() -> None:
     rec = _big_client_hello("v6.evil-c2.com")
     seg1, seg2 = rec[:1400], rec[1400:]
     frames = [
-        _eth(_ipv6(_tcp_seq(seg1, 40000, 443, 5000), 6, "2409:8a00::1", "2606:4700::1111"), 0x86DD),
-        _eth(_ipv6(_tcp_seq(seg2, 40000, 443, 5000 + len(seg1)), 6, "2409:8a00::1", "2606:4700::1111"), 0x86DD),
+        _eth(_ipv6(_tcp_seq(seg1, 40000, 443, 5000), 6, "2001:db8:9::1", "2606:4700::1111"), 0x86DD),  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
+        _eth(_ipv6(_tcp_seq(seg2, 40000, 443, 5000 + len(seg1)), 6, "2001:db8:9::1", "2606:4700::1111"), 0x86DD),  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     ]
     summary = pcap_ingest.parse_pcap_bytes(_pcap(frames))
-    f = next(fl for fl in summary.flows if fl.dst_ip == "2606:4700::1111")
+    f = next(fl for fl in summary.flows if fl.dst_ip == "2606:4700::1111")  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     assert "v6.evil-c2.com" in f.sni
 
 
@@ -824,18 +824,18 @@ def _quic_long_header(version: int = 0x00000001, dcid: bytes = bytes(range(8)),
             + bytes([len(scid)]) + scid + b"\x00" * 24)  # token/length/pn/payload 占位（PR1 不解析）
 
 
-def _quic_pcap(payload: bytes, dst: str = "45.202.1.235", dport: int = 443) -> bytes:
+def _quic_pcap(payload: bytes, dst: str = "45.202.1.235", dport: int = 443) -> bytes:  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     return _pcap([_eth(_ipv4(_udp(payload, 51000, dport), 17, "10.0.0.2", dst), 0x0800)])
 
 
 def test_quic_long_header_metadata_extracted() -> None:
     """QUIC Initial 长包头 → version/DCID/SCID 明文抽取，落 Flow + 远端聚合 + lead snippet（h3 归因）。"""
     summary = pcap_ingest.parse_pcap_bytes(_quic_pcap(_quic_long_header()))
-    f = next(fl for fl in summary.flows if fl.dst_ip == "45.202.1.235")
+    f = next(fl for fl in summary.flows if fl.dst_ip == "45.202.1.235")  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     assert "00000001" in f.quic_versions
     assert bytes(range(8)).hex() in f.quic_dcids and "aabbcc" in f.quic_scids
     lead = next(l for l in pcap_ingest.to_report_leads(summary)
-                if l.category == LeadCategory.IP and "45.202.1.235" in l.value)
+                if l.category == LeadCategory.IP and "45.202.1.235" in l.value)  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     assert "QUIC=00000001" in lead.source_refs[0].snippet
     led = pcap_ingest.to_ledger_dict(summary)
     assert any("00000001" in e["quic_versions"] for e in led["remote_endpoints"])
@@ -845,8 +845,8 @@ def test_quic_dcid_survives_ip_migration_correlation() -> None:
     """同一 QUIC 连接 ID 出现在不同五元组（IP 迁移/NAT 重绑）→ 各 Flow 都记录该 DCID（供跨流关联，
     五元组聚合做不到的能力）。"""
     dcid = b"\xde\xad\xbe\xef\x11\x22"
-    s1 = pcap_ingest.parse_pcap_bytes(_quic_pcap(_quic_long_header(dcid=dcid), dst="45.202.1.235"))
-    s2 = pcap_ingest.parse_pcap_bytes(_quic_pcap(_quic_long_header(dcid=dcid), dst="106.53.21.146"))
+    s1 = pcap_ingest.parse_pcap_bytes(_quic_pcap(_quic_long_header(dcid=dcid), dst="45.202.1.235"))  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
+    s2 = pcap_ingest.parse_pcap_bytes(_quic_pcap(_quic_long_header(dcid=dcid), dst="106.53.21.146"))  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     assert dcid.hex() in s1.flows[0].quic_dcids
     assert dcid.hex() in s2.flows[0].quic_dcids
 
@@ -876,7 +876,7 @@ def test_quic_probe_does_not_break_dns() -> None:
 def test_quic_over_udp53_still_detected() -> None:
     """★复审 #2：QUIC 伪装到 UDP/53（防火墙常放行）仍被抽 QUIC 元数据，不因端口=53 被当 DNS 漏掉。"""
     summary = pcap_ingest.parse_pcap_bytes(_quic_pcap(_quic_long_header(), dport=53))
-    f = next(fl for fl in summary.flows if fl.dst_ip == "45.202.1.235")
+    f = next(fl for fl in summary.flows if fl.dst_ip == "45.202.1.235")  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     assert "00000001" in f.quic_versions
     # 且不把 QUIC 字节误当 DNS 查询污染 dns_queries
     assert summary.dns_queries == set()
@@ -969,11 +969,11 @@ def test_quic_initial_decrypt_yields_sni_and_alpn() -> None:
     frame = b"\x06" + _enc_varint(0) + _enc_varint(len(ch)) + ch  # CRYPTO frame at offset 0
     pkt = _build_quic_initial(dcid, frame)
     summary = pcap_ingest.parse_pcap_bytes(_quic_pcap(pkt))
-    f = next(fl for fl in summary.flows if fl.dst_ip == "45.202.1.235")
+    f = next(fl for fl in summary.flows if fl.dst_ip == "45.202.1.235")  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     assert "quic-c2.evil.com" in f.sni  # QUIC SNI 解出，与 TCP「SNI 不丢」对等
     assert "h3" in f.alpn
     lead = next(l for l in pcap_ingest.to_report_leads(summary)
-                if l.category == LeadCategory.IP and "45.202.1.235" in l.value)
+                if l.category == LeadCategory.IP and "45.202.1.235" in l.value)  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     assert "quic-c2.evil.com" in lead.source_refs[0].snippet and "ALPN=h3" in lead.source_refs[0].snippet
 
 
@@ -988,10 +988,10 @@ def test_quic_initial_multi_packet_crypto_reassembly() -> None:
     p1 = _build_quic_initial(dcid, f1, pn=0)
     p2 = _build_quic_initial(dcid, f2, pn=1)
     summary = pcap_ingest.parse_pcap_bytes(_pcap([
-        _eth(_ipv4(_udp(p1, 51000, 443), 17, "10.0.0.2", "45.202.1.235"), 0x0800),
-        _eth(_ipv4(_udp(p2, 51000, 443), 17, "10.0.0.2", "45.202.1.235"), 0x0800),
+        _eth(_ipv4(_udp(p1, 51000, 443), 17, "10.0.0.2", "45.202.1.235"), 0x0800),  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
+        _eth(_ipv4(_udp(p2, 51000, 443), 17, "10.0.0.2", "45.202.1.235"), 0x0800),  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     ]))
-    f = next(fl for fl in summary.flows if fl.dst_ip == "45.202.1.235")
+    f = next(fl for fl in summary.flows if fl.dst_ip == "45.202.1.235")  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     assert "split-quic.evil.com" in f.sni
 
 
@@ -1004,7 +1004,7 @@ def test_quic_initial_aead_failure_no_sni_no_crash() -> None:
     pkt = bytearray(_build_quic_initial(dcid, frame))
     pkt[-1] ^= 0xFF  # 破坏 AEAD tag
     summary = pcap_ingest.parse_pcap_bytes(_quic_pcap(bytes(pkt)))
-    f = next(fl for fl in summary.flows if fl.dst_ip == "45.202.1.235")
+    f = next(fl for fl in summary.flows if fl.dst_ip == "45.202.1.235")  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     assert not f.sni  # 解密失败 → 无 SNI
     assert "00000001" in f.quic_versions  # 但元数据仍落（QUIC 存在性不丢）
 
@@ -1031,10 +1031,10 @@ def test_quic_dcid_switch_keeps_original_keys() -> None:
     p1 = _build_quic_initial(d0, f1, pn=0)                      # 首包：头 DCID=D0、密钥 D0
     p2 = _build_quic_initial(ssid, f2, pn=1, key_dcid=d0)       # 切换后重传：头 DCID=S、密钥仍 D0
     summary = pcap_ingest.parse_pcap_bytes(_pcap([
-        _eth(_ipv4(_udp(p1, 51000, 443), 17, "10.0.0.2", "45.202.1.235"), 0x0800),
-        _eth(_ipv4(_udp(p2, 51000, 443), 17, "10.0.0.2", "45.202.1.235"), 0x0800),
+        _eth(_ipv4(_udp(p1, 51000, 443), 17, "10.0.0.2", "45.202.1.235"), 0x0800),  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
+        _eth(_ipv4(_udp(p2, 51000, 443), 17, "10.0.0.2", "45.202.1.235"), 0x0800),  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     ]))
-    f = next(fl for fl in summary.flows if fl.dst_ip == "45.202.1.235")
+    f = next(fl for fl in summary.flows if fl.dst_ip == "45.202.1.235")  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
     assert "dcid-switch.evil.com" in f.sni
 
 

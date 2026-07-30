@@ -14,8 +14,8 @@ from apkscan.report.digest import build_digest
 # 取自 示例应用 真样本的 dns 富化（两个 C2 全在 Cloudflare 后）。
 _CF_DNS = {
     "hosting": [
-        {"ip": "104.21.27.56", "asn": "AS13335 Cloudflare, Inc.", "org": "Cloudflare, Inc."},
-        {"ip": "172.67.141.119", "asn": "AS13335 Cloudflare, Inc.", "org": "Cloudflare, Inc."},
+        {"ip": "198.51.100.10", "asn": "AS13335 Cloudflare, Inc.", "org": "Cloudflare, Inc."},
+        {"ip": "198.51.100.18", "asn": "AS13335 Cloudflare, Inc.", "org": "Cloudflare, Inc."},
     ]
 }
 
@@ -30,7 +30,7 @@ def test_overseas_targets_foreign_full() -> None:
         {
             "shodan": {
                 "country": "United States",  # → 国外
-                "ip": "45.33.32.156",
+                "ip": "198.51.100.36",
                 "asn": "AS63949",
                 "org": "Linode",
                 "ports": [80, 443],
@@ -45,7 +45,7 @@ def test_overseas_targets_foreign_full() -> None:
     h = surface[0]
     assert h["host"] == "evil.example" and h["jurisdiction"] == "国外"
     # 源站被动归属（识别真实源站、归属哪，对目标零流量）。
-    assert h["ip"] == "45.33.32.156" and h["asn"] == "AS63949" and h["org"] == "Linode"
+    assert h["ip"] == "198.51.100.36" and h["asn"] == "AS63949" and h["org"] == "Linode"
     assert h["country"] == "United States"
     assert h["ports"] == [80, 443]  # 仅 shodan 被动扫库端口
     assert h["services"][0]["product"] == "nginx"

@@ -6,9 +6,9 @@
 铁律（与 report/json.py 一致）：纯函数层**禁** print/typer，对坏输入容错返回空/留空，
 **绝不抛**。唯一打印的地方是 cli 的 export 命令。
 
-列设计（9 列）::
+列设计（10 列）::
 
-    type,value,subject,where_to_request,advice,confidence,is_c2,sample_sha256,source
+    type,value,subject,where_to_request,advice,confidence,is_c2,sample_sha256,source,shape_uncertain
 
   - type            = Lead.category（DOMAIN/PAYMENT/CONFIG_KEY/CONTACT/CHANNEL…）
   - value/subject/where_to_request/advice = Lead 对应字段（None → 空串）
@@ -16,6 +16,10 @@
   - is_c2           = Lead 的 is_c2 派生标注（report.json 的 Lead dict 已含该字段，直接读）
   - sample_sha256   = report["meta"]["sample_sha256"]（取证完整性功能将来才写，取不到留空）
   - source          = Lead.source_refs 第一个 Evidence 的 "source:location"（无则空）
+  - shape_uncertain = 形态存疑标注（见 Lead.shape_uncertain）：值仍导出，但如实带标记，
+    免得"靠外部佐证才捞回来的低段位裸 IP"在情报平台里与确凿地址混作一谈
+
+★新增列一律**追加在末尾**：列顺序是下游平台字段映射的契约，插在中间会让已配好的映射错位。
 
 保守映射：默认导出**全部** leads，但如实带 advice 列，让下游能按「建议调证」自行过滤；
 ``only_investigate=True`` 时只导 advice=建议调证 的（默认 False 全导）。
@@ -40,6 +44,9 @@ IOC_COLUMNS: list[str] = [
     "is_c2",
     "sample_sha256",
     "source",
+    # ★末列追加，不插在中间：列顺序是下游平台（MISP/i2/Maltego）的映射契约，
+    #   插中间会让已配好的字段映射整体错位。新增一律追加。
+    "shape_uncertain",
 ]
 
 # 研判建议中代表「应进情报平台当 IOC」的取值（only_investigate 过滤依据）。
@@ -98,6 +105,13 @@ def _lead_to_row(lead: dict[str, Any], sample_sha256: str) -> dict[str, Any]:
         "is_c2": bool(lead.get("is_c2", False)),
         "sample_sha256": sample_sha256,
         "source": _first_source(lead),
+        # ★形态存疑（Lead.shape_uncertain）：值的**字面形态本身**不足以证明它属于本类别，
+        #   研判靠外部佐证（ASN 归属）撑起来。这条保留意见的唯一意义就是让下游出口看得见它——
+        #   写进 notes 那次，letters 全文不渲染 notes，承诺在出口断裂（见该字段注释）。
+        #   CSV 是又一个出口：不带这列，进了情报平台的行就与确凿地址长得一模一样。
+        #   ★仍然全导、只标注，不静默丢弃：跨案 IOC 库（core/corpus.py）不收这类值，是因为
+        #   碰撞要求地址性已确证；而本 CSV 是给人配映射、自行过滤的，丢掉等于替下游做了决定。
+        "shape_uncertain": bool(lead.get("shape_uncertain", False)),
     }
 
 

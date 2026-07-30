@@ -100,6 +100,21 @@
   .group-head { display: flex; align-items: center; gap: 10px; margin: 20px 0 6px; }
   .group-head h3 { margin: 0; }
   .group-head .count { background: var(--accent-soft); color: var(--accent); border-radius: 999px; padding: 0 8px; font-size: 12px; font-weight: 700; }
+  /* 线索行内警示（形态存疑 / SNI 伪装）。与 .harden-warn 同色系但更紧凑——它挂在表格单元格里，
+     不能用 harden-warn 那种大块留白。两条警示都必须在**读报告做研判**这一步就看得到：
+     等到 letters 出口阶段才提示，研判已经做完了。 */
+  .lead-warn { background: var(--warn-bg); color: var(--warn-ink); border-left: 3px solid #f87171; border-radius: 4px; padding: 5px 8px; margin-top: 5px; font-size: 12px; line-height: 1.5; }
+  /* 五层归属链折叠块：默认收起（多 IP 会很长），展开后每个落地 IP 一组标签-值。 */
+  .attr-chain { margin-top: 6px; font-size: 12px; }
+  .attr-chain > summary { cursor: pointer; color: var(--muted); font-weight: 600; }
+  .attr-ip { margin: 5px 0 0; padding-left: 8px; border-left: 2px solid var(--line); }
+  .attr-ip .attr-ip-val { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700; }
+  .attr-row { color: var(--muted); }
+  .attr-row .attr-k { color: var(--ink); }
+  /* 归属链最后那一行（恒未知、绝不从基础设施推断）故意标醒目色，防被读者跳过。
+     ★注释里刻意不复写该行的中文字面：测试要靠 count(字面) == 落地 IP 数 来断言"每个 IP 下
+       各出现一次"，样式表里多一份字面会把计数顶高、让断言变得不可用。 */
+  .attr-row-operator { color: var(--warn-ink); font-weight: 600; }
   .lead-table th.c-val { width: 22%; }
   .lead-table th.c-subj { width: 16%; }
   .lead-table th.c-who { width: 16%; }
@@ -361,16 +376,63 @@
     {% endif %}
   {% endmacro %}
 
+  {#- 出口中性字句段 → HTML。强调段套 <strong>，其余纯文本。
+        ★标签本身是**模板字面量**，文字一律走 Jinja2 autoescape（本模板全程不用转义豁免
+          过滤器，见 test_html_template_has_no_unsafe_filter），故外部数据（SNI 域名等）
+          不可能注入标记。letters 侧对应的是 _md_safe。 -#}
+  {% macro spans_html(spans) %}
+    {%- for kind, text in spans %}{% if kind == "em" %}<strong>{{ text }}</strong>{% else %}{{ text }}{% endif %}{% endfor -%}
+  {% endmacro %}
+
+  {#- 线索级警示：形态存疑 + SNI 伪装。字句取 letters 的同一份常量（唯一事实源）。
+        为什么要在报告出口也渲染：人先读报告做研判、再决定发不发函。这两条警示原先只在
+        letters 出口里有，读报告的人看不到「这个值可能是版本号」「这个 IP 在冒充某知名域名」，
+        警示等于迟到一个阶段。 -#}
+  {% macro lead_warnings(lead) %}
+    {% if lead.shape_uncertain %}
+      <div class="lead-warn">{{ spans_html(shape_uncertain_spans) }}</div>
+    {% endif %}
+    {% set sni_spans = sni_spans_by_lead.get(lead.value) %}
+    {% if sni_spans %}
+      <div class="lead-warn">{{ spans_html(sni_spans) }}</div>
+    {% endif %}
+  {% endmacro %}
+
+  {#- 五层基础设施归属链（resource_holder → origin_network → hosting → edge → service_operator）。
+        视图与限长（最多 5 个落地 IP）全在 letters.attribution_chain_view，两个出口口径一致。
+        ★「实际运营者：未知（不从基础设施归属推断）」这句每个 IP 下都必须出现——它防的是
+          把某层基础设施持有方当成 App 运营者，是本项目最重的那类错误。 -#}
+  {% macro attribution_chain(lead) %}
+    {% set chain = attribution_by_lead.get(lead.value) %}
+    {% if chain %}
+      <details class="attr-chain">
+        <summary>{{ attribution_chain_heading }}</summary>
+        {% for ip, rows in chain.ips %}
+        <div class="attr-ip">
+          <div>落地 IP <span class="attr-ip-val">{{ ip or "（未知）" }}</span></div>
+          {% for label, value in rows %}
+          <div class="attr-row{% if label == "实际运营者" %} attr-row-operator{% endif %}"><span class="attr-k">{{ label }}</span>：{{ value }}</div>
+          {% endfor %}
+        </div>
+        {% endfor %}
+        {% if chain.remaining > 0 %}
+        <div class="attr-row" style="margin-top:5px">（另有 {{ chain.remaining }} 个解析 IP 未列，完整见 report.json 的 enrichment.attribution）</div>
+        {% endif %}
+      </details>
+    {% endif %}
+  {% endmacro %}
+
   {#- 域名 / IP 线索行（含 C2 标注、advice 列、富化、取证依据） -#}
   {% macro net_lead_row(lead) %}
     <tr{% if lead.is_c2 %} class="c2-row"{% endif %}>
       <td><span class="mono-strong">{{ lead.value }}</span> {{ c2_badge(lead) }}
         {% if lead.notes %}<div class="muted" style="font-size:12px">{{ lead.notes }}</div>{% endif %}
+        {{ lead_warnings(lead) }}
       </td>
       <td>{{ advice_badge(lead.advice) }}</td>
       <td>{{ lead.subject or "—" }}</td>
       <td>{{ lead.where_to_request or "—" }}</td>
-      <td>{{ enrich_cell(lead.value) }}</td>
+      <td>{{ enrich_cell(lead.value) }}{{ attribution_chain(lead) }}</td>
       <td>{{ source_refs_cell(lead) }}</td>
       <td><span class="badge {{ lead.confidence|confidence_class }}">{{ lead.confidence|confidence_label }}</span></td>
     </tr>
@@ -454,10 +516,14 @@
         <tbody>
           {% for lead in network_leads.skip %}
           <tr>
-            <td class="mono">{{ lead.value }}</td>
+            {#- 警示与归属链在 skip（infra.ADVICE_SKIP）表里同样渲染。按现有判据这两个信号不会落到 skip 桶
+                （shape_uncertain 要求 advice 为 need 档、sni_masquerade 在 skip 时被清空），但
+                report.json 是可被手工编辑 / 跨版本回灌的：若哪天两者同时出现，弱化章节静默
+                吞掉警示，正是 Lead.shape_uncertain 注释里那条「承诺在出口断裂」的坑。宁可多渲染。 -#}
+            <td class="mono">{{ lead.value }}{{ lead_warnings(lead) }}</td>
             <td>{{ advice_badge(lead.advice) }}</td>
             <td class="muted">{{ lead.subject or "—" }}</td>
-            <td class="muted">{{ enrich_cell(lead.value) }}</td>
+            <td class="muted">{{ enrich_cell(lead.value) }}{{ attribution_chain(lead) }}</td>
             <td>{{ source_refs_cell(lead) }}</td>
             <td><span class="badge {{ lead.confidence|confidence_class }}">{{ lead.confidence|confidence_label }}</span></td>
           </tr>

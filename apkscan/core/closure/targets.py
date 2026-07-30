@@ -54,7 +54,7 @@ def _runtime_info(endpoint: Endpoint) -> dict[str, Any]:
 def _match_value(category_or_kind: str, value: str) -> str:
     """Lead 与 Endpoint 配对用的规范化值 —— 薄封装，实现见 :func:`infra.match_key`。
 
-    ★IP 侧要剥 ``:port/proto``：运行时回灌产出的 Lead 值形如 ``8.138.102.85:31861/tcp``（端口是
+    ★IP 侧要剥 ``:port/proto``：运行时回灌产出的 Lead 值形如 ``198.51.100.7:31861/tcp``（端口是
       调证函要写的东西，必须留在 Lead 上），而 Endpoint 一律是裸 IP（富化器、静态端点都按裸 IP
       算）。不剥就永远配不上——实测后果是**实测双向通信的真后端连闭环候选都进不去**，闭环转而
       挑满静态噪音，报告里 Lead 标着 is_runtime_contact=true、闭环却对它一无所知。

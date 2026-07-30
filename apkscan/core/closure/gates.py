@@ -23,6 +23,7 @@ from apkscan.core.closure._shared import (
     SOURCE_STATUSES,
     _mapping,
 )
+from apkscan.core.runtime_inventory import derive_capture_quality, read_inventory
 
 
 def _non_negative_int(value: object) -> int:
@@ -133,11 +134,23 @@ def evaluate_capture_quality(meta: Mapping[str, object]) -> dict[str, object]:
 
 
 def _capture_meta(report: Report) -> dict[str, Any]:
+    """取采集质量输入：优先真采集（floor/mitm），其次从运行时回灌清单派生。
+
+    ★为什么要有回灌这一路：只走 ``pcap-leads`` / ``probe-leads`` 回灌的报告没有
+      ``capture_quality``（那是 floor/mitm 真采集才写的），于是这里返回 ``{}`` →
+      ``business_count=0`` → 动态闭环判 **failed**。而实际上报告里明明有已观测的业务候选
+      端点，正确结论是 **partial**（观测到了去向，只是做不了唯一归因）。
+      回灌清单此前**没有任何生产消费方**，这个函数就是那个消费方。
+
+    ★顺序不能反：真采集的统计口径更完整（含双向载荷、UID 归因），有它就不该被回灌的
+      派生值覆盖。回灌只在真采集缺位时兜底，且 :func:`derive_capture_quality` 保证
+      ``target_attributed_count=0``、不补 ``bidirectional_*`` —— 上限 partial，绝不抬成 complete。
+    """
     for key in ("capture_quality", "runtime_capture_quality", "capture_signals"):
         value = report.meta.get(key)
         if isinstance(value, Mapping):
             return dict(value)
-    return {}
+    return dict(derive_capture_quality(read_inventory(report.meta)))
 
 
 def _source_summary(targets: Sequence[Mapping[str, object]]) -> dict[str, int]:

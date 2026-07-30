@@ -255,12 +255,12 @@ def test_appid_numeric_still_medium() -> None:
 def test_js_version_ip_filtered_real_ip_kept() -> None:
     # C4：js 路径裸 IP——版本号 2.1.5.1 / 占位 1.2.3.4 过滤，真公网 IP（全球可达）保留。
     result = _analyze(
-        {_UNIAPP_PATH: b"var a='2.1.5.1';var b='1.2.3.4';var c='45.76.10.20';"}
+        {_UNIAPP_PATH: b"var a='2.1.5.1';var b='1.2.3.4';var c='45.76.10.20';"}  # leak-scan: allow JS bundle 抽取夹具，验真后端不被 noise 判据误杀
     )
     ips = {ep.value for ep in result.endpoints if ep.kind == "ip"}
     assert "2.1.5.1" not in ips
     assert "1.2.3.4" not in ips
-    assert "45.76.10.20" in ips
+    assert "45.76.10.20" in ips  # leak-scan: allow JS bundle 抽取夹具，验真后端不被 noise 判据误杀
 
 
 # --- 端点：路径 / IP / 明文 ----------------------------------------------

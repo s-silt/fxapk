@@ -9,6 +9,7 @@ from apkscan.core.enrichment import enrich_selected_targets
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
 from apkscan.enrichers.multisource import (
+    AbuseIpDbPassiveEnricher,
     CensysPassiveEnricher,
     FofaPassiveEnricher,
     HunterPassiveEnricher,
@@ -520,7 +521,9 @@ def test_all_multisource_adapters_are_passive_case_close_only() -> None:
     enrichers = configured_case_close_enrichers()
     names = {enricher.name for enricher in enrichers}
 
-    assert {
+    # ★等值断言而非子集：子集写法下「新 provider 忘了加进显式清单」不会变红，
+    #   守卫等于失效。多一个少一个都必须让这条测试红。
+    assert names == {
         "ripestat_bgp",
         "fofa",
         "quake",
@@ -530,7 +533,8 @@ def test_all_multisource_adapters_are_passive_case_close_only() -> None:
         "virustotal",
         "otx",
         "urlscan",
-    } <= names
+        "abuseipdb",
+    }
     assert all(enricher.case_close_only for enricher in enrichers)
     assert all(enricher.active is False for enricher in enrichers)
 
@@ -599,3 +603,287 @@ def test_enrich_records_via_on_success_and_failure(monkeypatch) -> None:  # noqa
             return _Response({"data": {}})
     empty = RipeStatBgpEnricher(session=_EmptyRipe()).enrich(_ip())
     assert empty.ok and empty.data["_via"] == "direct" and empty.data["_source_status"] == "no_record"
+
+
+# ── 任务 1a：AbuseIPDB 举报信誉（仅 IP，被动，case-close） ──────────────────
+def _abuseipdb_payload(**overrides: object) -> dict:
+    """AbuseIPDB /api/v2/check 的响应形状（字段名照官方 camelCase）。"""
+    data: dict[str, object] = {
+        "ipAddress": "198.51.100.10",
+        "isPublic": True,
+        "abuseConfidenceScore": 100,
+        "countryCode": "SC",
+        "usageType": "Data Center/Web Hosting/Transit",
+        "isp": "Example Hosting Ltd",
+        "domain": "example.com",
+        "totalReports": 42,
+        "numDistinctUsers": 7,
+        "lastReportedAt": "2026-07-01T12:00:00+00:00",
+        "isTor": False,
+        "isWhitelisted": False,
+    }
+    data.update(overrides)
+    return {"data": data}
+
+
+def test_abuseipdb_uses_the_reserved_env_var_name() -> None:
+    """★必须复用仓库早已预留的 FXAPK_ABUSEIPDB_KEY（.env.example / COMPANION-TOOLS 已写），
+    另起变量名会让用户配了 key 却不生效。"""
+    assert AbuseIpDbPassiveEnricher.required_env == ("FXAPK_ABUSEIPDB_KEY",)
+
+
+def test_abuseipdb_is_passive_ip_only_case_close() -> None:
+    adapter = AbuseIpDbPassiveEnricher()
+    assert adapter.name == "abuseipdb"
+    assert adapter.applies_to == ["ip"]
+    assert adapter.case_close_only is True
+    assert adapter.active is False
+    # 国际源：随系统代理（境内直连只对 hunter 那类源）。
+    assert adapter._http.trust_env is True
+
+
+def test_abuseipdb_sends_key_header_and_bounded_window(monkeypatch) -> None:  # noqa: ANN001
+    secret = "synthetic-abuseipdb-key"
+    monkeypatch.setenv("FXAPK_ABUSEIPDB_KEY", secret)
+
+    class _CaptureSession:
+        def __init__(self) -> None:
+            self.url = ""
+            self.headers: dict[str, str] = {}
+            self.params: dict[str, object] = {}
+
+        def get(self, url: str, **kwargs):  # noqa: ANN003
+            self.url = url
+            self.headers = dict(kwargs.get("headers") or {})
+            self.params = dict(kwargs.get("params") or {})
+            return _Response(_abuseipdb_payload())
+
+    session = _CaptureSession()
+    result = AbuseIpDbPassiveEnricher(session=session).enrich(_ip())
+
+    assert result.ok is True
+    assert session.url == "https://api.abuseipdb.com/api/v2/check"
+    assert session.headers["Key"] == secret
+    assert session.headers["Accept"] == "application/json"
+    assert session.params["ipAddress"] == "198.51.100.10"
+    # 回溯窗口必须有界，否则会把陈年举报当现状。
+    assert isinstance(session.params["maxAgeInDays"], int)
+    assert 0 < int(session.params["maxAgeInDays"]) <= 365
+
+
+def test_abuseipdb_normalizes_to_snake_case_reputation_fields() -> None:
+    normalized = AbuseIpDbPassiveEnricher()._normalize(_abuseipdb_payload(), _ip())
+
+    assert normalized["abuse_confidence_score"] == 100
+    assert normalized["total_reports"] == 42
+    assert normalized["distinct_reporters"] == 7
+    assert normalized["country_code"] == "SC"
+    assert normalized["isp"] == "Example Hosting Ltd"
+    assert normalized["usage_type"] == "Data Center/Web Hosting/Transit"
+    assert normalized["last_reported_at"] == "2026-07-01T12:00:00+00:00"
+    assert normalized["is_tor"] is False
+    assert normalized["source"] == "abuseipdb"
+
+
+def test_abuseipdb_drops_reporter_free_text() -> None:
+    """★举报正文是第三方未核实的自由文本（可能含 PII），一律不落盘。"""
+    payload = _abuseipdb_payload()
+    payload["data"]["reports"] = [  # type: ignore[index]
+        {"comment": "COOKIE-SENTINEL 举报正文", "reporterId": 999, "reporterCountryName": "X"}
+    ]
+
+    normalized = AbuseIpDbPassiveEnricher()._normalize(payload, _ip())
+
+    assert "COOKIE-SENTINEL" not in json.dumps(normalized, ensure_ascii=False)
+    assert "reports" not in normalized
+
+
+def test_abuseipdb_bounds_oversized_text() -> None:
+    oversized = "x" * 1_000
+    normalized = AbuseIpDbPassiveEnricher()._normalize(
+        _abuseipdb_payload(isp=oversized, usageType=oversized), _ip()
+    )
+
+    assert len(str(normalized["isp"])) == 500
+    assert len(str(normalized["usage_type"])) == 500
+
+
+def test_abuseipdb_empty_payload_is_no_record(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setenv("FXAPK_ABUSEIPDB_KEY", "synthetic-abuseipdb-key")
+
+    class _EmptySession:
+        def get(self, url: str, **kwargs):  # noqa: ANN003
+            return _Response({"data": {}})
+
+    result = AbuseIpDbPassiveEnricher(session=_EmptySession()).enrich(_ip())
+
+    assert result.ok is True
+    assert result.data["_source_status"] == "no_record"
+
+
+def test_abuseipdb_invalid_key_is_failed_not_no_record(monkeypatch) -> None:  # noqa: ANN001
+    """★401（key 配错）必须记 failed。若被兜成 no_record，就等于把「没查成」
+    伪装成「查过、没有记录」——那是造证据。"""
+    secret = "synthetic-abuseipdb-key"
+    monkeypatch.setenv("FXAPK_ABUSEIPDB_KEY", secret)
+
+    class _UnauthorizedSession:
+        def get(self, url: str, **kwargs):  # noqa: ANN003
+            response = requests.Response()
+            response.status_code = 401
+            error = requests.HTTPError("401 Unauthorized")
+            error.response = response  # type: ignore[assignment]
+            raise error
+
+    result = AbuseIpDbPassiveEnricher(session=_UnauthorizedSession()).enrich(_ip())
+    rendered = json.dumps(result.data, ensure_ascii=False) + str(result.error)
+
+    assert result.ok is False
+    assert result.data["_source_status"] == "failed"
+    assert secret not in rendered
+
+
+def test_abuseipdb_http_error_status_is_never_normalized_as_a_hit(monkeypatch) -> None:  # noqa: ANN001
+    """★HTTP 错误状态必须经 ``raise_for_status()`` 变成 failed，**与响应体长什么样无关**。
+
+    这条与上一条互补：上一条的假会话在 ``get()`` 里就抛，验的是传输层异常；本条**正常返回**
+    一个 401 响应、且响应体是「看起来能正常归一化」的形状——若实现漏了 ``raise_for_status()``，
+    这个 401 就会被当成命中落进证据。变异验证第 3 条正是靠本条才 kill。
+    """
+    monkeypatch.setenv("FXAPK_ABUSEIPDB_KEY", "synthetic-abuseipdb-key")
+
+    class _UnauthorizedWithBodySession:
+        """返回 401，但响应体故意是可正常归一化的 payload（不含 errors）。"""
+
+        def get(self, url: str, **kwargs):  # noqa: ANN003
+            response = requests.Response()
+            response.status_code = 401
+            payload = _abuseipdb_payload()
+
+            class _Wrapped:
+                status_code = 401
+
+                @staticmethod
+                def raise_for_status() -> None:
+                    error = requests.HTTPError("401 Unauthorized")
+                    error.response = response  # type: ignore[assignment]
+                    raise error
+
+                @staticmethod
+                def json() -> dict:
+                    return payload
+
+            return _Wrapped()
+
+    result = AbuseIpDbPassiveEnricher(session=_UnauthorizedWithBodySession()).enrich(_ip())
+
+    assert result.ok is False, "401 绝不能被当成命中"
+    assert result.data["_source_status"] == "failed"
+    assert "abuse_confidence_score" not in result.data
+
+
+def test_abuseipdb_provider_declared_error_is_failed(monkeypatch) -> None:  # noqa: ANN001
+    """AbuseIPDB 在 HTTP 200 里用 ``errors`` 报错（如超配额），不能当命中。"""
+    monkeypatch.setenv("FXAPK_ABUSEIPDB_KEY", "synthetic-abuseipdb-key")
+
+    class _QuotaSession:
+        def get(self, url: str, **kwargs):  # noqa: ANN003
+            return _Response({"errors": [{"detail": "Daily rate limit exceeded", "status": 429}]})
+
+    result = AbuseIpDbPassiveEnricher(session=_QuotaSession()).enrich(_ip())
+
+    assert result.ok is False
+    assert result.data["_source_status"] == "failed"
+
+
+def test_abuseipdb_failure_never_leaks_the_key(monkeypatch) -> None:  # noqa: ANN001
+    secret = "synthetic-abuseipdb-key"
+    monkeypatch.setenv("FXAPK_ABUSEIPDB_KEY", secret)
+
+    result = AbuseIpDbPassiveEnricher(session=_FailingSession(secret)).enrich(_ip())
+    rendered = json.dumps(result.data, ensure_ascii=False) + str(result.error)
+
+    assert result.ok is False
+    assert secret not in rendered
+
+
+def test_abuseipdb_without_key_is_disabled_not_failed(monkeypatch) -> None:  # noqa: ANN001
+    """没配 key → disabled（未启用），不是 failed（查失败）。两者结案含义不同。"""
+    monkeypatch.delenv("FXAPK_ABUSEIPDB_KEY", raising=False)
+    endpoint = _ip()
+
+    enrich_selected_targets(
+        [endpoint],
+        [AbuseIpDbPassiveEnricher()],
+        mode="passive",
+        include_case_close=True,
+    )
+
+    assert endpoint.enrichment["source_status"]["abuseipdb"]["status"] == "disabled"
+
+
+def test_abuseipdb_is_skipped_by_ordinary_analysis(monkeypatch) -> None:  # noqa: ANN001
+    """case_close_only：普通 analyze 不得触碰它（配额只花在有界的结案目标集上）。"""
+    monkeypatch.setenv("FXAPK_ABUSEIPDB_KEY", "synthetic-abuseipdb-key")
+
+    class _ExplodingSession:
+        def get(self, url: str, **kwargs):  # noqa: ANN003
+            raise AssertionError("普通 analyze 路径不该请求 abuseipdb")
+
+    endpoint = _ip()
+    enrich_selected_targets(
+        [endpoint],
+        [AbuseIpDbPassiveEnricher(session=_ExplodingSession())],
+        mode="passive",
+        include_case_close=False,
+    )
+
+    assert "abuseipdb" not in endpoint.enrichment
+
+
+def test_abuseipdb_reaches_the_case_close_target_and_status_map(monkeypatch) -> None:  # noqa: ANN001
+    """★信号必须接线：结案路径要真把 abuseipdb 写进 enrichment 与 source_status。"""
+    monkeypatch.setenv("FXAPK_ABUSEIPDB_KEY", "synthetic-abuseipdb-key")
+
+    class _HitSession:
+        def get(self, url: str, **kwargs):  # noqa: ANN003
+            return _Response(_abuseipdb_payload())
+
+    endpoint = _ip()
+    enrich_selected_targets(
+        [endpoint],
+        [AbuseIpDbPassiveEnricher(session=_HitSession())],
+        mode="passive",
+        include_case_close=True,
+    )
+
+    assert endpoint.enrichment["abuseipdb"]["abuse_confidence_score"] == 100
+    assert endpoint.enrichment["source_status"]["abuseipdb"]["status"] == "hit"
+
+
+def test_abuseipdb_does_not_apply_to_domains() -> None:
+    """AbuseIPDB 只查 IP；域名端点不该被它标状态（否则结案面出现查不了的源）。"""
+    domain = Endpoint(value="api.example.com", kind="domain", is_suspicious=True)
+
+    enrich_selected_targets(
+        [domain],
+        [AbuseIpDbPassiveEnricher()],
+        mode="passive",
+        include_case_close=True,
+    )
+
+    assert "abuseipdb" not in (domain.enrichment.get("source_status") or {})
+
+
+def test_abuseipdb_is_not_wired_into_five_layer_attribution() -> None:
+    """★有意不进五层归属：``isp`` 是 ISP 名而非 BGP AS 组织名，硬映射进 origin_network
+    等于造证据。信誉分只作旁证留在 enrichment。"""
+    from apkscan.core.closure.layers import _passive_hosting_evidence
+
+    providers, services, locations = _passive_hosting_evidence(
+        {"abuseipdb": {"isp": "Example Hosting Ltd", "country_code": "SC", "source": "abuseipdb"}}
+    )
+
+    assert providers == []
+    assert services == []
+    assert locations == []

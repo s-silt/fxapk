@@ -171,8 +171,8 @@ def test_stage_attribution_forms_fronting_cluster_across_endpoints() -> None:
     )
     state.endpoints = [
         Endpoint(value="1.1.1.1", kind="ip", enrichment={"tls": {"spki_sha256": "sharedspki"}}),
-        Endpoint(value="2.2.2.2", kind="ip", enrichment={"tls": {"spki_sha256": "sharedspki"}}),
-        Endpoint(value="3.3.3.3", kind="ip", enrichment={"tls": {"spki_sha256": "solo"}}),
+        Endpoint(value="198.51.100.21", kind="ip", enrichment={"tls": {"spki_sha256": "sharedspki"}}),
+        Endpoint(value="198.51.100.27", kind="ip", enrichment={"tls": {"spki_sha256": "solo"}}),
     ]
     pipeline._stage_attribution(state)
 
