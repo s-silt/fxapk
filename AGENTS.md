@@ -90,9 +90,14 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 
 ### 0.6.1 ★ 哪些自动跑、哪些必须你手动补（最常见的"以为跑全了"）
 
-`analyze` / `auto` 会自动跑**全部 30 个分析器**（`native_fingerprint`、`endpoints`、`crypto_recipe`、
-`contacts`、`sms_forwarding` … 全在内，无需开关）。但**下面这些永远不会自动发生**——它们要么需要你
-提供工具拿不到的输入，要么是跨样本操作。跑完 `analyze` 就收工 = 漏掉半个系统：
+`analyze` / `auto` 会自动跑**能力满足的全部分析器**（`native_fingerprint`、`endpoints`、`crypto_recipe`、
+`contacts`、`sms_forwarding` … 全在内，无需开关）。不写死数字：分析器数量随版本变（`discover_analyzers()`
+是唯一真源），而且**并非每个都在每次运行里跑** —— 声明了 `requires` 的会按能力门控自动 skipped，
+例如 `jadx` 要 PATH 上真有 jadx、三个 `web_*` 要有已落盘的网页证据。要看本次实际跑了哪些，
+读报告的 `analyzer_status`（skipped 会如实带原因），别假定"跑完就是全跑了"。
+
+**下面这些永远不会自动发生**——它们要么需要你提供工具拿不到的输入，要么是跨样本操作。
+跑完 `analyze` 就收工 = 漏掉半个系统：
 
 | 必须手动补 | 为什么不能自动 | 什么时候做 |
 |---|---|---|

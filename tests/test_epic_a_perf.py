@@ -48,7 +48,7 @@ class _Ctx:
 
 def _big_ctx() -> _Ctx:
     big_run = "a" * 2_000_000  # 长单字符 run：触发任何无界 / 嵌套量词的灾难性回溯
-    urls = [f"https://h{i}.evilbackend.com/api/admin/login?x={i}" for i in range(1500)]
+    urls = [f"https://h{i}.evilbackend.example.com/api/admin/login?x={i}" for i in range(1500)]
     kw = "跑分 代收代付 聚合支付 短信转发 验证码转发 卡商 卡密 四件套 " * 1500
     dex = (
         urls
@@ -57,7 +57,7 @@ def _big_ctx() -> _Ctx:
         + ["abandon " * 5000]  # 长 BIP-39 词 run：压测 wallet_secret 助记词滑窗（校验和快速过滤）
         + [big_run]
     )
-    h5 = ("var a='https://manage.evilbackend.com/api/admin/list';" + kw + big_run).encode()
+    h5 = ("var a='https://manage.evilbackend.example.com/api/admin/list';" + kw + big_run).encode()
     return _Ctx(
         dex,
         files=["assets/www/app.js", "res/raw/x.png"],
