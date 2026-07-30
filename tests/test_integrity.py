@@ -79,6 +79,22 @@ def test_sample_fingerprint_missing_file_does_not_raise(tmp_path: Path) -> None:
     assert fp["analyzed_at"]
 
 
+def test_current_build_provenance_returns_a_copy(monkeypatch) -> None:  # noqa: ANN001
+    """兼容检查可读构建坐标，但不得拿到并修改 integrity 的进程缓存本体。"""
+    from apkscan.core import integrity
+
+    monkeypatch.setattr(
+        integrity,
+        "_BUILD_PROVENANCE",
+        {"build_commit": "abc123", "build_dirty": False},
+    )
+
+    first = integrity.current_build_provenance()
+    first["build_commit"] = "changed"
+
+    assert integrity.current_build_provenance()["build_commit"] == "abc123"
+
+
 def test_sample_fingerprint_keys_complete(tmp_path: Path) -> None:
     apk = tmp_path / "x.apk"
     apk.write_bytes(b"abc")

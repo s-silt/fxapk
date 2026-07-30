@@ -67,6 +67,11 @@ def _build_provenance() -> dict:
     return result
 
 
+def current_build_provenance() -> dict[str, object]:
+    """返回当前源码构建坐标的副本，避免调用方改写进程缓存。"""
+    return dict(_build_provenance())
+
+
 def sample_fingerprint(apk_path: str, *, tool_version: str) -> dict:
     """返回检材指纹 + 本次分析环境元数据（可采性背书的核心字段）。
 
