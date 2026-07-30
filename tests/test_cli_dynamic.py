@@ -829,13 +829,18 @@ def test_capture_duration_one_accepted(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _write_min_report_json(path: Path, leads: list[dict[str, Any]]) -> None:
+def _write_min_report_json(
+    path: Path,
+    leads: list[dict[str, Any]],
+    *,
+    meta: dict[str, Any] | None = None,
+) -> None:
     """写一份最小 report.json（字段与 report/json.py 序列化同构，供 --into 合并 + 重渲）。"""
     import json as _json
 
     payload = {
         "package_name": "com.x",
-        "meta": {},
+        "meta": dict(meta or {}),
         "leads": leads,
         "endpoints": [],
         "findings": [],
@@ -843,6 +848,47 @@ def _write_min_report_json(path: Path, leads: list[dict[str, Any]]) -> None:
         "enricher_status": [],
     }
     path.write_text(_json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def test_probe_leads_into_warns_before_mutating_old_report(tmp_path: Path) -> None:
+    """探针回灌会按当前判据改报告；旧修订必须先告警，但不得阻断真实合并。"""
+    import json as _json
+
+    rp = tmp_path / "report.json"
+    _write_min_report_json(rp, leads=[], meta={"tool_version": "0.0.0-old"})
+    log = tmp_path / "probe.log"
+    log.write_text(
+        "[http][LEAD] GET https://backend.example.test/api",
+        encoding="utf-8",
+    )
+
+    res = runner.invoke(cli.app, ["probe-leads", str(log), "--into", str(rp)])
+
+    assert res.exit_code == 0
+    assert "分析修订与当前 fxapk 不一致" in res.stderr
+    assert _json.loads(rp.read_text(encoding="utf-8"))["meta"]["runtime_merged"] is True
+
+
+def test_pcap_leads_into_warns_before_mutating_old_report(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """PCAP 解析可替换，报告合并保持真实，验证告警与写入能同时发生。"""
+    import json as _json
+
+    from apkscan.dynamic import pcap_ingest
+
+    rp = tmp_path / "report.json"
+    _write_min_report_json(rp, leads=[], meta={"tool_version": "0.0.0-old"})
+    pcap = tmp_path / "cap.pcap"
+    pcap.write_bytes(b"\x00")
+    summary = pcap_ingest.PcapSummary(dns_queries={"backend.example.test"})
+    monkeypatch.setattr(pcap_ingest, "parse_pcap", lambda _path: summary)
+
+    res = runner.invoke(cli.app, ["pcap-leads", str(pcap), "--into", str(rp)])
+
+    assert res.exit_code == 0
+    assert "分析修订与当前 fxapk 不一致" in res.stderr
+    assert _json.loads(rp.read_text(encoding="utf-8"))["meta"]["runtime_merged"] is True
 
 
 def test_rerender_html_from_report_json_rebuilds_leads(tmp_path: Path) -> None:

@@ -12,6 +12,7 @@ import typer
 
 from apkscan.core.closure import ClosureConfig, close_report
 from apkscan.core.models import ANALYSIS_MODE_PASSIVE, ANALYSIS_MODES
+from apkscan.core.report_compat import report_revision_warnings
 from apkscan.core.report_io import load_report, write_report
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,9 @@ def close_command(
     except (OSError, ValueError, UnicodeError) as exc:
         typer.echo(f"错误：报告读取失败：{report_json}（{type(exc).__name__}）", err=True)
         raise typer.Exit(code=_execution_failure_exit_code(strict=strict)) from exc
+
+    for warning in report_revision_warnings(report.meta):
+        typer.echo(warning, err=True)
 
     try:
         config = ClosureConfig(
