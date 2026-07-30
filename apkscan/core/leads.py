@@ -283,8 +283,8 @@ def _config_value_unroutable_host(value: str) -> str:
     名额却被它占着。
 
     ★判据刻意只认两种形态：字面 ``localhost``，或**能解析成 IP 且非全球可路由**。
-      绝不用"无点即无效"那条口径——``com.openinstall.APP_KEY=REDACTED-KEY`` /
-      ``AES_KEY=0123…`` / ``debug=true`` 的值都是无点单串，那样会把整类真线索一起降掉。
+      绝不用"无点即无效"那条口径——渠道 SDK 的 APP_KEY、``AES_KEY=0123…``、
+      ``debug=true`` 这些值都是无点单串，那样会把整类真线索一起降掉。
     """
     m = _CONFIG_VALUE_HOST_RE.search(str(value or ""))
     if m is None:
