@@ -20,7 +20,7 @@ import re
 from collections import Counter
 from fnmatch import fnmatch
 
-from apkscan.network.fingerprints import is_public_dns_resolver
+from apkscan.network.fingerprints import is_authoritative_dns_host, is_public_dns_resolver
 
 logger = logging.getLogger(__name__)
 
@@ -287,6 +287,14 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         "aomedia.org",              # AV1 编解码联盟
         "dolby.com",
         "dts.com",
+        "smpte-ra.org",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        # ---- 视频站点（播放器/下载库内置的站点适配表，非 App 后端）----
+        # 实测某第三方库把整份站点表编进 DEX：一个样本贡献 6 条这类域名，全被判建议核查。
+        "twitch.tv",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        "ttvnw.net",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        "vimeo.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        "coub.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        "aparat.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
         # ---- 工具库 / 标准组织 ----
         "curl.se",                  # libcurl 官网
         # minizip / unzip 作者站点。zlib 附带的 minizip 源码注释里写着它，被整段编进
@@ -909,6 +917,7 @@ def classify_ip(
     runtime_observed: bool = False,
     hosting_attributed: bool = False,
     low_octet_siblings: int = 0,
+    vendor_sdk_binary: str = "",
 ) -> tuple[str, str]:
     """对 IP 字面做调证研判分级，返回 ``(advice, reason)``——与 :func:`classify_domain` 对称。
 
@@ -923,6 +932,12 @@ def classify_ip(
     （``low_octet_siblings`` 少于 :data:`_LOW_OCTET_SEQUENCE_SIBLINGS`）时升回"建议调证"。
     裸字面自己提不出端口/URL 上下文，只能靠外部佐证捞——但佐证必须是**双重**的：
     单看 ASN 无区分度（几乎每个全球 IP 都有 ASN），单看孤值又漏掉版本号最常见的成簇形态。
+
+    ``vendor_sdk_binary`` 传库文件名时表示：这个地址的**全部**证据都落在该第三方 SDK 的
+    native 库内，且同一文件里还带着该 SDK 自己的域名（判据见 ``leads._vendor_sdk_constant``）。
+    此时判"待核"——厂商 SDK 把接入调度地址硬编码进 .so 是常规做法，与本 App 的后端无关。
+    ★只降待核、绝不判 SKIP：同一形态也可能是**自带 .so 的样本**把后端地址烙在里面，
+      判 SKIP 等于替人下"与本次分析无关"的结论；待核仍留在清单上、理由写明来源可人工捞回。
 
     ★两参数默认关闭，离线 / 无富化路径行为逐字不变（仍是"待核 + 人工可捞回"）。
     ★别把佐证放松成"有 asn 数据"或"Shodan 有开放端口"——前者无区分度，后者会把无关活主机
@@ -947,9 +962,24 @@ def classify_ip(
         # 但它不是调证对象，不该占 closure 预算与外部富化额度。
         return ADVICE_SKIP, "公共递归解析器（归属公开），非调证对象"
 
+    if is_authoritative_dns_host(bare):
+        # 域名托管商的权威 NS 主机：同样是 DNS 基础设施，查它落不到本样本的资产上。
+        return ADVICE_SKIP, "域名托管商的权威 DNS 主机（归属公开），非调证对象"  # leak-scan: allow 出口理由串须与上一条公共解析器同措辞，报告内文用词不能一句一变
+
     if runtime_observed:
         # 设备上真连过 —— 形态判据一概不适用。
         return ADVICE_INVESTIGATE, "运行时观测到的实连地址，建议落地核查归属"
+
+    if vendor_sdk_binary:
+        # 全部证据都在某第三方 SDK 的 .so 内，且该文件同时带着该 SDK 自有域名。
+        # ★放在形态判据之前：来源比形态硬——即便这个地址在 .so 里写成了带端口的 URL，
+        #   它仍然是厂商 SDK 的接入常量，不是本 App 的后端。
+        # ★理由只陈述**来源**，不替这个字面定性：本判据先于形态判据触发，落进来的既有
+        #   接入调度地址、也有版本号一类被 IP 正则吃掉的常量，写死成"接入地址"就说过头了。
+        return ADVICE_REVIEW, (
+            f"该字面的全部证据都落在第三方 SDK 的 native 库 {vendor_sdk_binary} 内"
+            "（同一文件里还有该 SDK 自有域名），疑为该 SDK 内置常量而非本 App 后端，需人工核"
+        )
 
     if bare.startswith(_OID_ARC_PREFIXES):
         return ADVICE_REVIEW, f"ASN.1 OID 而非网络地址（{bare}），需人工核"
