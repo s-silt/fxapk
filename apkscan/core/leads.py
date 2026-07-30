@@ -410,6 +410,13 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
         evidence_to_obtain.append(hosting_note)
         notes = f"{notes}；{hosting_note}" if notes else hosting_note
 
+    # 被动 DNS 历史：与上面的"当前解析"并列。★同时进 evidence_to_obtain 与 notes——
+    #   文书渲染读的是前者，notes 在文书全文里不呈现，只写 notes 等于读的人看不到。
+    pdns_note = _passive_dns_note(ep.enrichment)
+    if pdns_note:
+        evidence_to_obtain.append(pdns_note)
+        notes = f"{notes}；{pdns_note}" if notes else pdns_note
+
     # C1：域名来源可信度档降可信。当端点仅见于第三方库文件/超大字符串表（tier=
     #   library-file / bulk-string）且 classify 仍判"建议调证"（即非已知 infra/
     #   library-embedded、非私网）时，把 advice 降为"待核"并标低可信。★ 绝不降为"无需
@@ -511,6 +518,13 @@ def _ip_lead(
         )
 
     endpoint_notes = _endpoint_notes(ep, online, enriched)
+    # 被动 DNS 历史：对 IP 而言是"这台机器上历史挂过哪些域名"——既是落点佐证，也是跨样本
+    # 并簇的线索。与域名侧同样两处都写（文书读 evidence_to_obtain，不读 notes）。
+    ip_pdns_note = _passive_dns_note(ep.enrichment)
+    if ip_pdns_note:
+        evidence_to_obtain.append(ip_pdns_note)
+        endpoint_notes = f"{endpoint_notes}；{ip_pdns_note}" if endpoint_notes else ip_pdns_note
+
     # 靠外部佐证把低段位裸 IP 捞回"建议调证"时，保留意见必须**结构化**地跟着走。
     # ★曾只把这句话拼进 notes 并声称"办案人发函前看得到"——实际 letters 全文不渲染 notes，
     #   于是发出去的是一封干净的、HIGH 置信度、指名某云厂商的调证函，没有半点存疑提示。
@@ -541,6 +555,66 @@ def _ip_lead(
         notes=notes,
         advice=advice,
         shape_uncertain=shape_uncertain,
+    )
+
+
+#: 被动 DNS 历史的来源富化器（各自把归一后的记录写在 ``enrichment[<name>]["passive_dns"]``）。
+_PASSIVE_DNS_SOURCES = ("virustotal", "otx")
+
+#: 一条 note 里最多列几条历史解析。全量可达数十条，写进文书只会把人淹掉；
+#: 完整明细仍在 ``endpoints[].enrichment[<源>]["passive_dns"]``。
+_PASSIVE_DNS_NOTE_MAX = 8
+
+
+def _passive_dns_records(enrichment: dict) -> list[dict]:
+    """汇总各源的被动 DNS 记录，按对端值去重（多源命中同一值时合并来源）。"""
+    merged: dict[str, dict] = {}
+    for source in _PASSIVE_DNS_SOURCES:
+        block = _as_dict(enrichment.get(source))
+        for record in block.get("passive_dns") or []:
+            if not isinstance(record, dict):
+                continue
+            value = str(record.get("value") or "").strip()
+            if not value:
+                continue
+            existing = merged.get(value)
+            if existing is None:
+                merged[value] = {**record, "sources": [source]}
+            elif source not in existing["sources"]:
+                existing["sources"].append(source)
+                # 时间窗取更全的那份：先到的源可能只给了一半。
+                for key in ("first_seen", "last_seen", "record_type"):
+                    if not existing.get(key) and record.get(key):
+                        existing[key] = record[key]
+    return list(merged.values())
+
+
+def _passive_dns_note(enrichment: dict) -> str:
+    """把被动 DNS 历史压成一句可读的落点说明（无数据 → 空串）。
+
+    ★与 :func:`_dns_hosting_note` 的"当前解析"是**两件事**，必须并列呈现而不是二选一：
+      涉案域名换 IP 很快，取证时点解析到的往往已经不是案发时点那台机器——可能是换过的机器，
+      也可能是被拦截后指向的拦截页。只写当前解析，等于把发函落点押在一个未必相关的地址上。
+    """
+    records = _passive_dns_records(enrichment)
+    if not records:
+        return ""
+
+    def _window(record: dict) -> str:
+        first, last = record.get("first_seen"), record.get("last_seen")
+        if first and last and first != last:
+            return f"{first}→{last}"
+        return f"至 {last}" if last else (f"自 {first}" if first else "时间未知")
+
+    # 有 last_seen 的排前面且倒序：最近的落点通常最相关；无时间的沉底但不丢。
+    ordered = sorted(records, key=lambda r: (str(r.get("last_seen") or ""),), reverse=True)
+    shown = ordered[:_PASSIVE_DNS_NOTE_MAX]
+    parts = [f"{r['value']}({_window(r)})" for r in shown]
+    more = f"，另有 {len(ordered) - len(shown)} 条见报告明细" if len(ordered) > len(shown) else ""
+    sources = sorted({s for r in records for s in r.get("sources", [])})
+    return (
+        f"历史解析（被动 DNS，来源 {'/'.join(sources)}）：{'、'.join(parts)}{more}"
+        "——取证时点的解析未必是案发时点的落点，发函前请按案发日核对时间窗"
     )
 
 

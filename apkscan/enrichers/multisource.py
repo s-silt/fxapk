@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import os
 import urllib.request
 from abc import ABC, abstractmethod
@@ -18,6 +19,8 @@ from apkscan.core.closure import SOURCE_STATUSES
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
 
+logger = logging.getLogger(__name__)
+
 _TIMEOUT = 12
 _MAX_RECORDS = 20
 
@@ -25,7 +28,11 @@ _MAX_RECORDS = 20
 #  改此串**必须**同步 closure._FOFA_FIELDS（有漂移守卫测试兜底），否则 closure 会按错位取值静默污染归属。
 FOFA_QUERY_FIELDS = "host,ip,port,protocol,title,server,country,region,city,as_number,as_organization"
 _MAX_TEXT = 500
-_METADATA_ONLY_KEYS = {"source", "count", "pulse_count", "_via"}
+_METADATA_ONLY_KEYS = {"source", "count", "pulse_count", "passive_dns_status", "_via"}
+
+#: 单个端点最多留多少条被动 DNS 记录。取"够看清落地变迁"的量：此类域名换 IP 频繁，
+#: 全量可达数百条，落进报告只会把人淹掉；按时间倒序留最近这些足以还原案发时点前后的落点。
+_MAX_PASSIVE_DNS = 40
 
 
 class _ProviderResponseError(RuntimeError):
@@ -270,6 +277,19 @@ class _PassiveLookupEnricher(BaseEnricher, ABC):
     def _normalize(self, payload: object, endpoint: Endpoint) -> dict[str, object]:
         ...
 
+    #: 该源是否提供**被动 DNS 历史**（域名历史解析到哪些 IP / IP 上历史挂过哪些域名）。
+    #: 置 True 的源须实现 :meth:`_passive_dns`；结果落在 ``data["passive_dns"]``。
+    supports_passive_dns: bool = False
+
+    def _passive_dns(self, endpoint: Endpoint, credential: str) -> list[dict[str, object]]:
+        """查该端点的被动 DNS 历史。默认无此能力；``supports_passive_dns`` 的源覆写。
+
+        为什么要单开一条而不是并进 :meth:`_lookup`：这是**另一个端点**的另一次请求。
+        合进主查询意味着它一失败整条结果作废——而主查询拿到的归属数据本身是好的。
+        """
+        del endpoint, credential
+        return []
+
     def enrich(self, ep: Endpoint) -> EnrichmentResult:
         via = self._egress_label()  # 本次请求出口（direct=绕代理直连 / system_proxy=随系统代理）——记进每条结果溯源
         credential = _credential(self.required_env)
@@ -299,6 +319,21 @@ class _PassiveLookupEnricher(BaseEnricher, ABC):
                 data={"_source_status": "failed", "_error_type": error_type, "_via": via},
                 error=error_type,
             )
+        if self.supports_passive_dns:
+            # ★独立成败：主查询已经成了，被动 DNS 这一趟失败只让这一段缺，不作废整条结果。
+            #   但**必须留状态**——"查过没有"与"压根没查/查挂了"是两回事：前者能支持
+            #   "该域名无历史落点"，后者不能，而两者在数据上同形（都是没有 passive_dns 字段）。
+            try:
+                records = self._passive_dns(ep, credential)
+            except Exception as exc:  # noqa: BLE001 — 单段失败不得拖垮整条富化结果
+                error_type = _safe_error_type(exc)
+                logger.warning("[%s] 被动 DNS 查询失败（%s）：%s", self.name, error_type, ep.value)
+                data["passive_dns_status"] = f"failed:{error_type}"
+            else:
+                if records:
+                    data["passive_dns"] = records
+                data["passive_dns_status"] = "hit" if records else "no_record"
+
         has_values = any(
             key not in _METADATA_ONLY_KEYS and value not in (None, "", [], {})
             for key, value in data.items()
@@ -567,11 +602,75 @@ class CensysPassiveEnricher(_PassiveLookupEnricher):
         return normalized
 
 
+def _passive_dns_record(
+    *, value: object, kind: str, first_seen: object = None, last_seen: object = None,
+    record_type: object = None,
+) -> dict[str, object]:
+    """归一一条被动 DNS 记录。``value`` 取不到 → 空 dict（调用方丢弃）。
+
+    各源字段名不同（VT 用 ip_address/host_name/date，OTX 用 address/hostname/first/last），
+    在此折成同一形状，下游只认这一种，免得每个消费方各解析一遍。
+    """
+    scalar = _bounded_scalar(value)
+    if scalar in (None, ""):
+        return {}
+    record: dict[str, object] = {"value": scalar, "kind": kind}
+    for key, raw in (("first_seen", first_seen), ("last_seen", last_seen),
+                     ("record_type", record_type)):
+        compact = _bounded_scalar(raw)
+        if compact not in (None, ""):
+            record[key] = compact
+    return record
+
+
+def _epoch_to_date(value: object) -> str | None:
+    """VT 的 ``date`` 是 epoch 秒。转成 UTC 日期串；坏值 → None（不抛）。"""
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        return None
+    from datetime import UTC, datetime
+
+    try:
+        return datetime.fromtimestamp(value, tz=UTC).date().isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 class VirusTotalPassiveEnricher(_PassiveLookupEnricher):
     name = "virustotal"
     applies_to = ["ip", "domain"]
     required_env = ("FXAPK_VT_KEY", "VT_API_KEY")
     _BASE = "https://www.virustotal.com/api/v3"
+    supports_passive_dns = True
+
+    def _passive_dns(self, endpoint: Endpoint, credential: str) -> list[dict[str, object]]:
+        """VT 的 ``/resolutions``：域名历史解析到的 IP、或该 IP 上历史挂过的域名。
+
+        ★与主查询取的 ``last_dns_records`` 不是一回事：那是**当前/最后一次**解析，
+        而要回答的是**案发时点**落在哪台机器上——此类域名换 IP 很快，取证时再解析往往
+        已经是换过的机器或被拦截后的落地页。
+        """
+        collection = "ip_addresses" if endpoint.kind == "ip" else "domains"
+        response = self._http.get(
+            f"{self._BASE}/{collection}/{endpoint.value}/resolutions",
+            headers={"x-apikey": credential},
+            params={"limit": _MAX_PASSIVE_DNS},
+            timeout=_TIMEOUT,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        peer_kind = "domain" if endpoint.kind == "ip" else "ip"
+        peer_field = "host_name" if endpoint.kind == "ip" else "ip_address"
+        records: list[dict[str, object]] = []
+        for item in _list_of_dicts(_dict(payload).get("data"), limit=_MAX_PASSIVE_DNS):
+            attributes = _dict(item.get("attributes"))
+            record = _passive_dns_record(
+                value=attributes.get(peer_field),
+                kind=peer_kind,
+                last_seen=_epoch_to_date(attributes.get("date")),
+            )
+            if record:
+                records.append(record)
+        return records
 
     def _lookup(self, endpoint: Endpoint, credential: str) -> object:
         collection = "ip_addresses" if endpoint.kind == "ip" else "domains"
@@ -624,6 +723,33 @@ class OtxPassiveEnricher(_PassiveLookupEnricher):
     applies_to = ["ip", "domain"]
     required_env = ("FXAPK_OTX_KEY", "OTX_API_KEY")
     _BASE = "https://otx.alienvault.com/api/v1/indicators"
+    supports_passive_dns = True
+
+    def _passive_dns(self, endpoint: Endpoint, credential: str) -> list[dict[str, object]]:
+        """OTX 的 ``/passive_dns``：带 ``first``/``last`` 时间窗，比 VT 只给一个日期更有用——
+        能直接看出"案发那天这个域名指向谁"。"""
+        indicator_type = "IPv4" if endpoint.kind == "ip" else "domain"
+        response = self._http.get(
+            f"{self._BASE}/{indicator_type}/{endpoint.value}/passive_dns",
+            headers={"X-OTX-API-KEY": credential},
+            timeout=_TIMEOUT,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        peer_kind = "domain" if endpoint.kind == "ip" else "ip"
+        peer_field = "hostname" if endpoint.kind == "ip" else "address"
+        records: list[dict[str, object]] = []
+        for item in _list_of_dicts(_dict(payload).get("passive_dns"), limit=_MAX_PASSIVE_DNS):
+            record = _passive_dns_record(
+                value=item.get(peer_field),
+                kind=peer_kind,
+                first_seen=item.get("first"),
+                last_seen=item.get("last"),
+                record_type=item.get("record_type"),
+            )
+            if record:
+                records.append(record)
+        return records
 
     def _lookup(self, endpoint: Endpoint, credential: str) -> object:
         indicator_type = "IPv4" if endpoint.kind == "ip" else "domain"
