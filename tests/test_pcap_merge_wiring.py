@@ -302,6 +302,12 @@ def test_refresh_preserves_gap_when_only_some_inputs_were_stripped() -> None:
     after = trimmed["visibility"]
     assert isinstance(after, dict)
     assert after["sources"]["dex"]["visibility"] in visibility.INSUFFICIENT
+    assert any(
+        note.startswith("[dex]") and ("加固" in note or "壳" in note)
+        for note in after["notes"]
+    ), "回填源之后 notes 仍是裁剪输入重算出的新说明"
+    assert any("unpack" in action for action in after["next_actions"]), \
+        "回填 DEX 盲区后没有恢复对应补救动作"
     for claim in ("no_contact_harvesting", "no_sms_interception"):
         assert claim in after["blocked_claims"], f"{claim} 被凭空解禁"
 
@@ -350,7 +356,9 @@ def test_legacy_snapshot_with_no_inputs_left_keeps_confirmed_gap() -> None:
 
     after = meta["visibility"]
     assert isinstance(after, dict)
+    assert after["schema_version"] == "1.0", "含无 provenance 旧源的快照不能冒充 1.1"
     assert after["sources"]["dex"]["visibility"] == visibility.VIS_STUB_ONLY
+    assert "inputs_seen" not in after["sources"]["dex"]
     assert "no_contact_harvesting" in after["blocked_claims"]
 
 

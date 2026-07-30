@@ -418,6 +418,43 @@ def reassess_claims(assessment: dict) -> dict:
     }
 
 
+def reassess_derived(assessment: dict, meta: dict) -> dict:
+    """按当前 ``sources`` 与原始 ``meta`` 重建全部派生展示字段。
+
+    closure 可能把裁剪报告中丢失的确证盲区从旧快照回填进 ``sources``。此时不仅
+    ``claims``，连逐源说明和补救动作也必须同步，否则机器字段与人读建议会各说各话。
+    """
+    sources = assessment.get("sources")
+    if not isinstance(sources, dict):
+        return assessment
+
+    claims, blocked = _derive_claims(sources)
+    remediation = str(assessment.get("remediation") or REM_NOT_ATTEMPTED)
+    _current_remediation, remediation_why = _remediation(meta)
+    notes: list[str] = []
+    for src, info in sources.items():
+        if not isinstance(info, dict):
+            continue
+        for why in info.get("why") or []:
+            notes.append(f"[{src}] {why}")
+    notes.extend(remediation_why)
+    notes.extend(_attribution_caveat(meta))
+    if blocked:
+        labels = "、".join(_CLAIM_LABELS.get(c, c) for c in blocked)
+        notes.append(
+            f"★以下结论**无资格下**（相关输入不可见）：{labels}。"
+            "此处的「未发现」只说明本次没看到，不能解读为不存在。"
+        )
+    return {
+        **assessment,
+        "claims": claims,
+        "blocked_claims": sorted(blocked),
+        "notes": notes,
+        "next_actions": _next_actions(sources, remediation, meta),
+        "degraded": bool(blocked),
+    }
+
+
 def assess(report: Any) -> dict[str, Any]:
     """求值一份报告的证据可见性与主张资格。绝不抛；坏输入 → 全 unknown 的保守结果。
 

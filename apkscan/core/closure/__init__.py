@@ -221,6 +221,7 @@ def _preserve_confirmed_gaps(previous: dict, fresh: dict, meta: dict) -> dict:
         return fresh
 
     restored = False
+    restored_legacy_source = False
     for name, new_info in new_sources.items():
         old_info = old_sources.get(name)
         if not (isinstance(old_info, dict) and isinstance(new_info, dict)):
@@ -244,10 +245,14 @@ def _preserve_confirmed_gaps(previous: dict, fresh: dict, meta: dict) -> dict:
             why.append(marker)
         new_sources[name] = {**old_info, "why": why}
         restored = True
+        restored_legacy_source = restored_legacy_source or not isinstance(old_seen_raw, list)
 
     if restored:
-        # 主张资格是 sources 的派生值，改了源就得重推，否则 blocked_claims 与 sources 自相矛盾。
-        fresh = _visibility.reassess_claims(fresh)
+        # 源回填后，主张、说明和补救动作都必须重推，否则机器字段与人读建议自相矛盾。
+        fresh = _visibility.reassess_derived(fresh, meta)
+        if restored_legacy_source:
+            # 无 inputs_seen 的旧源无法满足 1.1 的逐维 provenance 契约，不能冒充新 schema。
+            fresh["schema_version"] = "1.0"
     return fresh
 
 
