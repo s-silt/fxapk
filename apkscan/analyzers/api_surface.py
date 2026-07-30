@@ -376,7 +376,7 @@ class ApiSurfaceAnalyzer(BaseAnalyzer):
     """提取后端接口路径、三层过滤误报、按接口名做功能语义标注（只产 Finding + meta，不产 Lead）。"""
 
     name: str = "api_surface"
-    requires: list[str] = ["apk"]  # Android 专属（需扫 dex/.so/assets）
+    requires: list[str] = []  # Android 扫 dex/.so/assets；Web 只扫已落盘文本证据
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
         result = AnalyzerResult(analyzer=self.name)
@@ -534,7 +534,12 @@ class ApiSurfaceAnalyzer(BaseAnalyzer):
                 continue
             if scanned >= _MAX_ASSETS or budget <= 0:
                 break
-            if not is_text_resource(
+            is_web_text = (
+                getattr(ctx, "platform", "android") == "web"
+                and path.replace("\\", "/").lower().startswith("web/")
+                and path.lower().endswith(TEXT_RESOURCE_SUFFIXES)
+            )
+            if not is_web_text and not is_text_resource(
                 path, suffixes=TEXT_RESOURCE_SUFFIXES, prefixes=TEXT_RESOURCE_PREFIXES
             ):
                 continue
