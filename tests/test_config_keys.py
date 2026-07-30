@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 
 from apkscan.analyzers.config_keys import ConfigKeysAnalyzer
+from apkscan.core.infra import ADVICE_SKIP
 from apkscan.core.models import Confidence, LeadCategory, Severity
 from tests.conftest import FakeContext
 
@@ -47,7 +48,7 @@ _REAL_MANIFEST = (
     'android:value="913e6a50-c3b6-4989-8ac6-1ecb53649be3"/>\n'
     '    <meta-data android:name="ZX_CHANNEL_ID" '
     'android:value="C01-GEztJH0JLdBC"/>\n'
-    '    <meta-data android:name="GTSDK_VERSION" android:value="3.3.7.0"/>\n'
+    '    <meta-data android:name="GTSDK_VERSION" android:value="3.2.16.7"/>\n'  # leak-scan: allow SDK 版本号夹具，不是网络地址
     '    <meta-data android:name="DCLOUD_STREAMAPP_CHANNEL" '
     'android:value="com.budget.book.deep|__UNI__F7A0431|128087290804|"/>\n'
     '    <meta-data android:name="THEME_COLOR" android:resource="@color/primary"/>\n'
@@ -321,5 +322,5 @@ def test_config_key_lead_common_fields_and_advice_grading() -> None:
     assert by_val["GETUI_APPID=DVRqpR8NztAJAfq8f4dbv3"].advice == "建议调证"
     assert by_val["PUSH_APPSECRET=zwBt8Xsz3V9RCAZJLbfcL5"].advice == "建议调证"
     assert by_val["ZX_CHANNEL_ID=C01-GEztJH0JLdBC"].advice == "建议调证"
-    # 版本号等框架/系统样板 → 无需调证（降噪，不淹没真凭据线索）
-    assert by_val["GTSDK_VERSION=3.3.7.0"].advice == "无需调证"
+    # 版本号等框架/系统样板 → 降噪档（不淹没真凭据线索）
+    assert by_val["GTSDK_VERSION=3.2.16.7"].advice == ADVICE_SKIP

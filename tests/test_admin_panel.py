@@ -40,25 +40,25 @@ def _leads(ctx: _Ctx):
 
 
 def test_admin_api_path_high() -> None:
-    leads = _leads(_Ctx(dex=["base=https://api.evilbackend.com/api/admin/login"]))
+    leads = _leads(_Ctx(dex=["base=https://api.evilbackend.example.com/api/admin/login"]))
     assert len(leads) == 1
     lead = leads[0]
     assert lead.category is LeadCategory.ADMIN_PANEL
-    assert lead.value == "api.evilbackend.com"
+    assert lead.value == "api.evilbackend.example.com"
     assert lead.confidence is Confidence.HIGH
     assert lead.advice == infra.ADVICE_INVESTIGATE
 
 
 def test_admin_subdomain_host_high() -> None:
-    leads = _leads(_Ctx(dex=["https://admin.evilbackend.com/home"]))
+    leads = _leads(_Ctx(dex=["https://admin.evilbackend.example.com/home"]))
     assert len(leads) == 1
-    assert leads[0].value == "admin.evilbackend.com"
+    assert leads[0].value == "admin.evilbackend.example.com"
     assert leads[0].confidence is Confidence.HIGH
     assert leads[0].advice == infra.ADVICE_INVESTIGATE
 
 
 def test_generic_admin_path_is_review() -> None:
-    leads = _leads(_Ctx(dex=["https://evilbackend.com/admin/"]))
+    leads = _leads(_Ctx(dex=["https://evilbackend.example.com/admin/"]))
     assert len(leads) == 1
     assert leads[0].confidence is Confidence.MEDIUM
     assert leads[0].advice == infra.ADVICE_REVIEW
@@ -76,7 +76,7 @@ def test_skip_private_host() -> None:
 
 
 def test_no_admin_pattern_no_lead() -> None:
-    leads = _leads(_Ctx(dex=["https://evilbackend.com/home/index"]))
+    leads = _leads(_Ctx(dex=["https://evilbackend.example.com/home/index"]))
     assert leads == []
 
 
@@ -85,13 +85,13 @@ def test_dedup_per_host() -> None:
     leads = _leads(
         _Ctx(
             dex=[
-                "https://evilbackend.com/admin/",  # review
-                "https://evilbackend.com/api/admin/users",  # high
+                "https://evilbackend.example.com/admin/",  # review
+                "https://evilbackend.example.com/api/admin/users",  # high
             ]
         )
     )
     assert len(leads) == 1
-    assert leads[0].value == "evilbackend.com"
+    assert leads[0].value == "evilbackend.example.com"
     assert leads[0].confidence is Confidence.HIGH  # 强档把整 host 升 HIGH
 
 
@@ -99,20 +99,20 @@ def test_resource_scan_detects_h5_url() -> None:
     ctx = _Ctx(
         files=["assets/www/app-service.js", "res/raw/foo.png"],
         contents={
-            "assets/www/app-service.js": b'var api="https://manage.evilbackend.com/api/admin/list";',
+            "assets/www/app-service.js": b'var api="https://manage.evilbackend.example.com/api/admin/list";',
             "res/raw/foo.png": b"\x89PNG not-text",
         },
     )
     leads = _leads(ctx)
     assert len(leads) == 1
-    assert leads[0].value == "manage.evilbackend.com"
+    assert leads[0].value == "manage.evilbackend.example.com"
     assert leads[0].source_refs[0].source == "resource"
     assert "app-service.js" in leads[0].source_refs[0].location
 
 
 def test_lead_is_letter_ready() -> None:
     # ADMIN_PANEL 线索须可直接套打调证函：where_to_request 为真实受文机关 + evidence_to_obtain 非空。
-    leads = _leads(_Ctx(dex=["https://api.evilbackend.com/api/admin/login"]))
+    leads = _leads(_Ctx(dex=["https://api.evilbackend.example.com/api/admin/login"]))
     lead = leads[0]
     assert lead.evidence_to_obtain  # 非空
     report = {

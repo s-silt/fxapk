@@ -38,6 +38,59 @@ jobs:
       - name: Pyright (type check)
         run: python -m pyright apkscan
 
+  leak-scan:
+    # ★第二道防线：本地 pre-commit hook 可被 --no-verify 跳过，CI 不能。
+    #   判据只施加在 PR 的**新增行**上——仓库既有正常文字与合成夹具数以千计，
+    #   对全树施压会产生海量误报，误报多到一定程度人就会习惯性加豁免、护栏随之失效。
+    name: leak scan (PR diff)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # 需要 base 与 head 两侧历史才能算 diff；默认浅克隆只有一个 commit。
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e "."
+      - name: Scan added lines for leaked literals (strict)
+        run: |
+          # 不加 --depth：`base...HEAD` 要算 merge-base，浅历史会让它失败（继而误红/误绿）。
+          git fetch --no-tags origin "${{ github.base_ref }}"
+          # --strict：新增行上连 domain / context 两条判据也阻断。这两条对**全树**噪音太大
+          # （见下面 full-tree 关只压默认判据），但对"这个 PR 新写的行"完全可控：写的人当场
+          # 就能改成 example.com / .test，或加带理由的行内豁免。少了 --strict，新域名字面与
+          # 语境框架词只会打印一行"提示"然后 exit 0 —— 那两条判据在 CI 里等于不存在。
+          python -m apkscan.cli leak-scan --base "origin/${{ github.base_ref }}" --strict
+
+  leak-scan-full-tree:
+    # ★第三道防线：diff 判据只看**新增行**，故合并前已存在的阻断项会被永久 grandfather。
+    #   这一关对**全树**施压并要求恒为 0：清理过的树只要有人加回一条无豁免的公网字面
+    #   （哪怕是改动既有行），这里就红。与上面的 diff 关是**互补**关系，不替代它：
+    #   diff 关在 PR 上更严（strict 档连 domain/context 都拦），本关只压默认阻断判据。
+    name: leak scan (full tree, must be 0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e "."
+      - name: Default blocking findings across tracked apkscan/ + tests/ must be 0
+        # --tracked：只扫 git 已跟踪文件。不加它会连 CI 上的未跟踪产物（安装期生成物、
+        # 缓存解包内容）一起扫，门禁就会随运行环境漂移；枚举不到文件时 CLI exit 2，
+        # 「少扫了」不会与「扫全了」同形。
+        run: python -m apkscan.cli leak-scan --tracked --path apkscan --path tests
+
   test:
     name: pytest (${{ matrix.os }} / py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
