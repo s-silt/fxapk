@@ -64,7 +64,7 @@ def test_sources_do_not_change_entity_identity() -> None:
 
 def test_kind_or_value_changes_entity_identity() -> None:
     base = NetworkEntity(NetworkEntityType.IP, "1.2.3.4")
-    assert base != NetworkEntity(NetworkEntityType.IP, "5.6.7.8")
+    assert base != NetworkEntity(NetworkEntityType.IP, "198.51.100.48")
     assert base != NetworkEntity(NetworkEntityType.HOST, "1.2.3.4")
 
 

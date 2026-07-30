@@ -59,7 +59,7 @@ def test_crypto_recipe_recommends_offline_decrypt() -> None:
 
 
 def test_self_hosted_im_recommends_telegram_line() -> None:
-    report = {"leads": [{"category": "SELF_HOSTED_IM", "value": "mtproto 106.53.21.146:30113"}]}
+    report = {"leads": [{"category": "SELF_HOSTED_IM", "value": "mtproto 198.51.100.12:30113"}]}
     text = _joined(capture_plan.plan_capture(report))
     assert "telegram-mtproto" in text or "netstat" in text
 
