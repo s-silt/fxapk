@@ -19,7 +19,7 @@ from apkscan.core import infra
 from apkscan.dynamic import pcap_ingest
 
 _V6 = "2001:db8::1"
-_V6_FULL = "2606:4700:4700::1111"
+_V6_FULL = "2606:4700:4700::1111"  # leak-scan: allow IPv6 Lead 括号形态夹具，须被判公网才产 IPv6 Lead
 
 
 # ---------------------------------------------------------------------------
@@ -28,7 +28,7 @@ _V6_FULL = "2606:4700:4700::1111"
 
 
 def test_format_peer_brackets_ipv6_only() -> None:
-    assert pcap_ingest.format_peer("8.138.102.85", 31861, "tcp") == "8.138.102.85:31861/tcp"
+    assert pcap_ingest.format_peer("198.51.100.7", 31861, "tcp") == "198.51.100.7:31861/tcp"
     assert pcap_ingest.format_peer(_V6, 443, "tcp") == "[2001:db8::1]:443/tcp"
     # 不带 proto 的形态（remote_endpoints 用）同样加括号
     assert pcap_ingest.format_peer(_V6, 443) == "[2001:db8::1]:443"
@@ -82,9 +82,9 @@ def test_legacy_unbracketed_ipv6_is_disambiguated_by_proto_suffix() -> None:
 
 def test_ipv4_behaviour_unchanged() -> None:
     """IPv4 与域名侧的既有行为一字不改。"""
-    assert infra.match_key("IP", "8.138.102.85:31861/tcp") == "8.138.102.85"
+    assert infra.match_key("IP", "198.51.100.7:31861/tcp") == "198.51.100.7"
     assert infra.match_key("IP", "223.5.5.5:53/udp") == "223.5.5.5"
-    assert infra.match_key("IP", "8.138.102.85") == "8.138.102.85"
+    assert infra.match_key("IP", "198.51.100.7") == "198.51.100.7"
     assert infra.match_key("DOMAIN", "Pay.X.com") == "pay.x.com"
     # 非 IP 字面（OID 形态）不受影响
     assert infra.match_key("IP", "1.3.101.112.1") == "1.3.101.112.1"
@@ -106,12 +106,12 @@ def test_remote_endpoints_roundtrip_through_the_shared_parser() -> None:
     上一轮的回归就出在这里——pcap 侧改成了括号形态，attribution 侧还在本地
     ``rpartition(":")``，于是拿到 ``"[2606:...]"`` 解析不出地址，IPv6 的运行时归因边**静默**丢光。
     """
-    for ip, port in ((_V6, 443), (_V6_FULL, 8443), ("8.138.102.85", 31861), ("::1", 80)):
+    for ip, port in ((_V6, 443), (_V6_FULL, 8443), ("198.51.100.7", 31861), ("::1", 80)):
         wire = infra.format_hostport(ip, port)
         assert infra.split_hostport(wire) == (ip, port), f"{wire} 无法还原回 ({ip}, {port})"
 
     # 旧产物的裸拼形态也要能解析（下游读到的历史报告里就是这个）
-    assert infra.split_hostport("8.138.102.85:31861") == ("8.138.102.85", 31861)
+    assert infra.split_hostport("198.51.100.7:31861") == ("198.51.100.7", 31861)
     # 坏形状一律 None，绝不猜
     for bad in ("", "no-colon", "[2001:db8::1:443", "1.2.3.4:0", "1.2.3.4:99999",
                 "1.2.3.4:abc", "not-an-ip:80", None, 123):

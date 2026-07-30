@@ -12,7 +12,7 @@ from apkscan.core.textutil import is_noise_bare_ip
 def test_zero_first_or_last_octet_is_noise():
     assert is_noise_bare_ip("0.0.0.0") is True
     assert is_noise_bare_ip("10.0.0.0") is True
-    assert is_noise_bare_ip("3.2.16.0") is True
+    assert is_noise_bare_ip("8.8.8.0") is True  # leak-scan: allow 末段零分支自测，必须使用非保留公网形态的 .0 才能命中专用判据
     assert is_noise_bare_ip("0.1.2.3") is True
 
 
@@ -24,14 +24,14 @@ def test_private_loopback_linklocal_reserved_are_noise():
         "127.0.0.1",
         "169.254.1.1",
         "240.0.0.1",      # 保留段 (class E)
-        "224.0.0.1",      # 多播
+        "224.0.0.1",      # leak-scan: allow 多播分支自测，必须使用真实多播段字面才能验证 multicast 判据
     ):
         assert is_noise_bare_ip(ip) is True, f"{ip} 应判噪音（bogon/保留段）"
 
 
 def test_real_public_ips_not_noise():
     # 真实公网 IP（全球可达）不是 bogon/保留段 → 非噪音（不得误杀）。
-    for ip in ("8.8.8.8", "139.59.12.34", "1.1.1.1", "104.16.5.7"):
+    for ip in ("8.8.8.8", "139.59.12.34", "1.1.1.1", "104.16.5.7"):  # leak-scan: allow is_noise_bare_ip 阴性夹具，验公网 IP 不被判噪音，值必须是公网字面
         assert is_noise_bare_ip(ip) is False, f"{ip} 不应判噪音"
 
 

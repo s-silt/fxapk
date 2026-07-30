@@ -116,7 +116,7 @@ def test_normalize_credential_tls_decrypted_source_preserved_and_desensitized() 
 
 def test_normalize_credential_url_query_token_desensitized() -> None:
     """★复审 MEDIUM：URL query 里的 token（access_token 等常挂 query）也脱敏、不落全文；host/path/参数名保留供抽端点。"""
-    secret = "eyJhbGciOiJIUzI1NiJ9." + "A" * 120
+    secret = "eyJhbGciOiJIUzI1NiJ9." + "A" * 120  # leak-scan: allow 合成 JWT 夹具，载荷是重复的 A（非真实凭据）；脱敏断言要求它形态上像 token
     ev = cryptohook.normalize_credential_event(
         {
             "type": cryptohook.CREDENTIAL_MSG_TYPE,

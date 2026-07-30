@@ -32,7 +32,9 @@ class BaseAnalyzer(ABC):
 
     name:     稳定标识，用于报告/状态/日志。
     requires: 需要的能力（空 = 永远可用）；registry 探测后决定是否运行。
-              可选值见 detect_capabilities()，如 "jadx" / "adb" / "online"。
+              可选值见 detect_capabilities()（工具类，如 "jadx" / "adb" / "online"）
+              与 _PLATFORM_CAPABILITIES（平台类，如 "android" / "apk" / "web"）。
+              ★平台专属分析器**必须**声明所属平台能力，否则会在别的平台上空跑。
     """
 
     name: str = ""
@@ -125,12 +127,54 @@ def _instantiate_subclasses(modules: list[ModuleType], base: type) -> list:
     return instances
 
 
-# requires 可声明的已知能力名：detect_capabilities() 探测的 + pipeline 注入的 apk。
+# 平台能力：按**被分析物的平台**注入（pipeline 读 ctx.platform），供分析器用 requires
+# 声明"我只适用于某平台"。此前 requires 只表达"环境有没有某工具"，没有平台概念——网页证据
+# 一类的非 APK 输入进来时，扫 dex/.so/assets 的分析器照样会被判 eligible 然后空跑。
+#
+# ★"apk" 归在 android 名下（而非无条件注入）：既有 30 个 requires=["apk"] 的分析器语义本就是
+#   "Android 专属"，挂到平台上后在网页上下文里自动 skip，无需逐个改声明；反之新的
+#   requires=["web"] 分析器在 android 上下文里自动 skip。两个方向都靠现成的 skip 通路。
+_PLATFORM_CAPABILITIES: dict[str, frozenset[str]] = {
+    "android": frozenset({"android", "apk"}),
+    "web": frozenset({"web"}),
+}
+
+# requires 可声明的已知能力名：detect_capabilities() 探测的 + pipeline 按平台注入的。
 # 分析器 requires 里出现此集合外的名字（如把 "jadx" 拼成 "jdax"）会让它永久被 skip，且
 # skipped 理由像"环境缺工具"而非代码 bug——极难发现，故自动发现期校验并点名告警。
+# ★平台能力名从 _PLATFORM_CAPABILITIES 求并集得出，不另抄一份：抄了就会漂移，漂移的后果
+#   正是这个集合要防的那种"拼写错→永久静默 skip"。
 _KNOWN_CAPABILITIES: frozenset[str] = frozenset(
-    {"apk", "jadx", "adb", "online", "frida", "frida-dexdump", "mitmproxy", "device"}
-)
+    {"jadx", "adb", "online", "frida", "frida-dexdump", "mitmproxy", "device"}
+).union(*_PLATFORM_CAPABILITIES.values())
+
+
+#: ``platform`` 缺失/空串时的兜底平台。此前 ``apk`` 是**无条件**注入的，故空平台的上下文
+#: （手工构造、旧产物 round-trip）照样跑全套 android 分析器。改成按平台注入后若把空串判为
+#: "未知"，这些上下文会突然静默少跑 30 个分析器——那是回归，不是加固。故空 = android，
+#: 与消费方既有的 ``getattr(ctx, "platform", "android")`` 读法对齐。
+_DEFAULT_PLATFORM = "android"
+
+
+def platform_capabilities(platform: str) -> set[str]:
+    """把 ``ctx.platform`` 映射成能力集合；空 = android，未知平台返回空集并告警。
+
+    大小写与首尾空白先归一（CLI / 手编产物传进来的平台名不该因大小写就丢掉全部能力）。
+
+    未知平台下所有平台专属分析器都会被 skip。这**不是静默失败**：pipeline 的 skip 通路会把
+    它们逐个记进 ``report.analyzer_status`` / ``report.skipped_analyzers`` 并压低 completeness，
+    读报告即可见"哪些没跑、为什么"。此处再补一条 warning，便于 CLI 侧当场发现平台写错。
+    """
+    key = (platform or "").strip().lower() or _DEFAULT_PLATFORM
+    caps = _PLATFORM_CAPABILITIES.get(key)
+    if caps is None:
+        logger.warning(
+            "未知平台 %r：不注入平台能力，平台专属分析器将全部跳过（已知平台：%s）",
+            platform,
+            sorted(_PLATFORM_CAPABILITIES),
+        )
+        return set()
+    return set(caps)
 
 
 def _dedup_and_validate(instances: list, *, kind: str) -> list:

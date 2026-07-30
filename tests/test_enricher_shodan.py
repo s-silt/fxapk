@@ -18,7 +18,7 @@ from apkscan.enrichers.shodan import ShodanEnricher
 
 # 取自真实 scanme.nmap.org 响应的精简样例（字段形态一致）。
 _HOST_PAYLOAD = {
-    "ip_str": "45.33.32.156",
+    "ip_str": "198.51.100.36",
     "ports": [80, 22, 31337],
     "hostnames": ["scanme.nmap.org"],
     "org": "Linode",
@@ -94,16 +94,16 @@ def _ep(value: str, kind: str) -> Endpoint:
 def test_disabled_without_key(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeRequests({})
     monkeypatch.setattr(sh_mod._http, "capped_get", fake.get)
-    res = ShodanEnricher().enrich(_ep("45.33.32.156", "ip"))
+    res = ShodanEnricher().enrich(_ep("198.51.100.36", "ip"))
     assert res.ok is False
     assert not fake.calls  # opt-in 未开，绝不触网
 
 
 def test_ip_host_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FXAPK_SHODAN_KEY", "testkey")
-    fake = _FakeRequests({"/shodan/host/45.33.32.156": (200, _HOST_PAYLOAD)})
+    fake = _FakeRequests({"/shodan/host/198.51.100.36": (200, _HOST_PAYLOAD)})
     monkeypatch.setattr(sh_mod._http, "capped_get", fake.get)
-    res = ShodanEnricher().enrich(_ep("45.33.32.156", "ip"))
+    res = ShodanEnricher().enrich(_ep("198.51.100.36", "ip"))
     assert res.ok is True
     d = res.data
     assert d["ports"] == [22, 80, 31337]  # 归一去重数值排序
@@ -119,15 +119,15 @@ def test_ip_host_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_domain_resolves_then_host(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SHODAN_API_KEY", "testkey")  # 兼容官方变量名
     fake = _FakeRequests({
-        "/dns/resolve": (200, {"evil.example": "45.33.32.156"}),
-        "/shodan/host/45.33.32.156": (200, _HOST_PAYLOAD),
+        "/dns/resolve": (200, {"evil.example": "198.51.100.36"}),
+        "/shodan/host/198.51.100.36": (200, _HOST_PAYLOAD),
     })
     monkeypatch.setattr(sh_mod._http, "capped_get", fake.get)
     res = ShodanEnricher().enrich(_ep("evil.example", "domain"))
     assert res.ok is True
     assert res.data["country"] == "United States"
     assert any("/dns/resolve" in c for c in fake.calls)  # 走了解析
-    assert any("/shodan/host/45.33.32.156" in c for c in fake.calls)
+    assert any("/shodan/host/198.51.100.36" in c for c in fake.calls)
 
 
 def test_host_404_miss_cached(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -145,13 +145,13 @@ def test_host_404_miss_cached(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_network_error_ok_false_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FXAPK_SHODAN_KEY", "testkey")
-    fake = _FakeRequests({"/shodan/host/45.33.32.156": (500, {})})  # 500 → raise_for_status 抛
+    fake = _FakeRequests({"/shodan/host/198.51.100.36": (500, {})})  # 500 → raise_for_status 抛
     monkeypatch.setattr(sh_mod._http, "capped_get", fake.get)
     e = ShodanEnricher()
-    res = e.enrich(_ep("45.33.32.156", "ip"))
+    res = e.enrich(_ep("198.51.100.36", "ip"))
     assert res.ok is False
     n = len(fake.calls)
-    e.enrich(_ep("45.33.32.156", "ip"))  # 失败不缓存 → 再次触网
+    e.enrich(_ep("198.51.100.36", "ip"))  # 失败不缓存 → 再次触网
     assert len(fake.calls) > n
 
 
@@ -177,12 +177,12 @@ def test_network_error_never_exposes_api_key(
 
 def test_cache_hit_skips_network(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FXAPK_SHODAN_KEY", "testkey")
-    fake = _FakeRequests({"/shodan/host/45.33.32.156": (200, _HOST_PAYLOAD)})
+    fake = _FakeRequests({"/shodan/host/198.51.100.36": (200, _HOST_PAYLOAD)})
     monkeypatch.setattr(sh_mod._http, "capped_get", fake.get)
     e = ShodanEnricher()
-    e.enrich(_ep("45.33.32.156", "ip"))
+    e.enrich(_ep("198.51.100.36", "ip"))
     n = len(fake.calls)
-    e.enrich(_ep("45.33.32.156", "ip"))
+    e.enrich(_ep("198.51.100.36", "ip"))
     assert len(fake.calls) == n
 
 
@@ -190,27 +190,27 @@ def test_expired_cache_triggers_requery(monkeypatch: pytest.MonkeyPatch) -> None
     """★codex B2：超 TTL 的缓存 → 重查，不返回旧主机画像（主机换服务/下线场景）。"""
     import json as _json
     monkeypatch.setenv("FXAPK_SHODAN_KEY", "testkey")
-    fake = _FakeRequests({"/shodan/host/45.33.32.156": (200, _HOST_PAYLOAD)})
+    fake = _FakeRequests({"/shodan/host/198.51.100.36": (200, _HOST_PAYLOAD)})
     monkeypatch.setattr(sh_mod._http, "capped_get", fake.get)
     e = ShodanEnricher()
-    e.enrich(_ep("45.33.32.156", "ip"))
+    e.enrich(_ep("198.51.100.36", "ip"))
     n = len(fake.calls)
     cache = _json.loads(sh_mod.CACHE_FILE.read_text(encoding="utf-8"))
-    assert cache["45.33.32.156"]["_cached_at"]
-    cache["45.33.32.156"]["_cached_at"] = 0.0
+    assert cache["198.51.100.36"]["_cached_at"]
+    cache["198.51.100.36"]["_cached_at"] = 0.0
     sh_mod.CACHE_FILE.write_text(_json.dumps(cache), encoding="utf-8")
-    e.enrich(_ep("45.33.32.156", "ip"))
+    e.enrich(_ep("198.51.100.36", "ip"))
     assert len(fake.calls) == n + 1, "过期 Shodan 缓存未触发重查"
 
 
 def test_cached_at_not_leaked_into_data(monkeypatch: pytest.MonkeyPatch) -> None:
     """★_cached_at 只是内部 TTL 戳，不得泄进 result.data。"""
     monkeypatch.setenv("FXAPK_SHODAN_KEY", "testkey")
-    fake = _FakeRequests({"/shodan/host/45.33.32.156": (200, _HOST_PAYLOAD)})
+    fake = _FakeRequests({"/shodan/host/198.51.100.36": (200, _HOST_PAYLOAD)})
     monkeypatch.setattr(sh_mod._http, "capped_get", fake.get)
     e = ShodanEnricher()
-    e.enrich(_ep("45.33.32.156", "ip"))
-    r = e.enrich(_ep("45.33.32.156", "ip"))  # 命中未过期
+    e.enrich(_ep("198.51.100.36", "ip"))
+    r = e.enrich(_ep("198.51.100.36", "ip"))  # 命中未过期
     assert "_cached_at" not in r.data
 
 
@@ -228,7 +228,7 @@ def test_forensic_uses_shodan_country() -> None:
 def test_render_overseas_targets() -> None:
     # 境外源站被动定位：源站归属(IP/ASN/org/geo) + 开放端口/服务指纹 + 关联主机名(串案)；零漏洞/利用。
     lines = forensic.render_overseas_targets({
-        "ip": "45.33.32.156",
+        "ip": "198.51.100.36",
         "asn": "AS63949",
         "org": "Linode",
         "country": "United States",
@@ -240,7 +240,7 @@ def test_render_overseas_targets() -> None:
         "hostnames": ["a.example", "b.example"],
     })
     blob = "\n".join(lines)
-    assert "源站被动归属" in blob and "45.33.32.156" in blob and "Linode" in blob
+    assert "源站被动归属" in blob and "198.51.100.36" in blob and "Linode" in blob
     assert "80(Apache httpd 2.4.7)" in blob
     assert "22(OpenSSH 6.6.1p1)" in blob
     # 纯被动定位：绝不含漏洞方向 / CVE / 利用。

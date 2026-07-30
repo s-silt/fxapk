@@ -125,7 +125,7 @@ def test_known_infra_host_excluded() -> None:
 
 
 def test_no_keyword_no_lead() -> None:
-    leads = _leads(_Ctx(dex=["https://evilbackend.com/home/index", "正常文案"]))
+    leads = _leads(_Ctx(dex=["https://evilbackend.example.com/home/index", "正常文案"]))
     assert leads == []
 
 

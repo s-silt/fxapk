@@ -395,10 +395,10 @@ def test_build_endpoint_attribution_domain_per_ip_never_collapses() -> None:
     """★域名解析到多 IP（异构 ASN）→ 逐 IP 五层、绝不合并；域名级 CNAME 喂每个 IP 的 edge。"""
     att = A.build_endpoint_attribution("domain", "pay.example.com", {
         "dns": {
-            "ips": ["1.1.1.1", "2.2.2.2"],
+            "ips": ["1.1.1.1", "198.51.100.21"],
             "hosting": [
                 {"ip": "1.1.1.1", "asn": "AS13335", "org": "Cloudflare", "country": "US"},
-                {"ip": "2.2.2.2", "asn": "AS45090", "org": "Tencent", "country": "CN"},
+                {"ip": "198.51.100.21", "asn": "AS45090", "org": "Tencent", "country": "CN"},
             ],
             "cname": ["pay.example.com.cdn.cloudflare.net"],
         },
@@ -407,10 +407,10 @@ def test_build_endpoint_attribution_domain_per_ip_never_collapses() -> None:
     by_ip = {layer["ip"]: layer for layer in att["ips"]}
     # ★两个 IP 的 origin 各不相同（不塌缩）：一个 cdn、一个 cloud。
     assert by_ip["1.1.1.1"]["origin_network"]["category"] == A.CAT_CDN
-    assert by_ip["2.2.2.2"]["origin_network"]["category"] == A.CAT_CLOUD
+    assert by_ip["198.51.100.21"]["origin_network"]["category"] == A.CAT_CLOUD
     # 域名级 CNAME 共享给每个 IP 的 edge（单强信号 → probable）。
     assert by_ip["1.1.1.1"]["edge_provider"]["name"] == "Cloudflare"
-    assert by_ip["2.2.2.2"]["edge_provider"]["name"] == "Cloudflare"
+    assert by_ip["198.51.100.21"]["edge_provider"]["name"] == "Cloudflare"
 
 
 def test_domain_analyze_ip_resource_holder_marked_deferred() -> None:
@@ -418,10 +418,10 @@ def test_domain_analyze_ip_resource_holder_marked_deferred() -> None:
     须显式标 deferred='case_close'，区分「未查询」与结案后 name=None 的「查无登记方」。"""
     att = A.build_endpoint_attribution("domain", "pay.example.com", {
         "dns": {
-            "ips": ["1.1.1.1", "2.2.2.2"],
+            "ips": ["1.1.1.1", "198.51.100.21"],
             "hosting": [
                 {"ip": "1.1.1.1", "asn": "AS13335", "org": "Cloudflare", "country": "US"},
-                {"ip": "2.2.2.2", "asn": "AS45090", "org": "Tencent", "country": "CN"},
+                {"ip": "198.51.100.21", "asn": "AS45090", "org": "Tencent", "country": "CN"},
             ],
         },
     })
@@ -448,28 +448,28 @@ def test_domain_resolved_ip_queried_but_empty_not_deferred() -> None:
     assert "deferred" not in rh, "结案已查（条目空）落回 fallback 被误标成未查询"
     # 条目仅错误/状态字段 → 同样无有效信号落回 fallback，key 存在 → 不标
     att2 = A.build_endpoint_attribution("domain", "pay.example.com", {
-        "dns": {"ips": ["2.2.2.2"]},
-        "resolved_ip_enrichment": {"2.2.2.2": {"ip_rdap": {"error": "timeout"}}},
+        "dns": {"ips": ["198.51.100.21"]},
+        "resolved_ip_enrichment": {"198.51.100.21": {"ip_rdap": {"error": "timeout"}}},
     })
     rh2 = att2["ips"][0]["resource_holder"]
     assert rh2["name"] is None
     assert "deferred" not in rh2, "结案已查（仅 error 字段）落回 fallback 被误标成未查询"
     # 对照混合：同域名下未查的 IP（不在 resolved）标 deferred、已查空的 IP（在 resolved）不标
     att3 = A.build_endpoint_attribution("domain", "pay.example.com", {
-        "dns": {"ips": ["1.1.1.1", "3.3.3.3"]},
+        "dns": {"ips": ["1.1.1.1", "198.51.100.27"]},
         "resolved_ip_enrichment": {"1.1.1.1": {}},
     })
     by_ip = {layer["ip"]: layer["resource_holder"] for layer in att3["ips"]}
     assert "deferred" not in by_ip["1.1.1.1"], "已查空的 IP 不该标未查询"
-    assert by_ip["3.3.3.3"].get("deferred") == "case_close", "未查的 IP 应标待补"
+    assert by_ip["198.51.100.27"].get("deferred") == "case_close", "未查的 IP 应标待补"
 
 
 def test_domain_resolved_ip_with_rdap_not_deferred() -> None:
     """★对照：结案已补 ip_rdap 有登记方 → resource_holder 有 name、绝不带 deferred 标记。"""
     att = A.build_endpoint_attribution("domain", "pay.example.com", {
-        "dns": {"ips": ["45.76.100.10"], "hosting": [{"ip": "45.76.100.10", "asn": "AS20473"}]},
+        "dns": {"ips": ["198.51.100.41"], "hosting": [{"ip": "198.51.100.41", "asn": "AS20473"}]},
         "resolved_ip_enrichment": {
-            "45.76.100.10": {"ip_rdap": {"netname": "VULTR-NET", "org": "The Constant Company"}},
+            "198.51.100.41": {"ip_rdap": {"netname": "VULTR-NET", "org": "The Constant Company"}},
         },
     })
     rh = att["ips"][0]["resource_holder"]
@@ -489,12 +489,12 @@ def test_build_endpoint_attribution_domain_absorbs_resolved_ip_enrichment() -> N
     顶层五层的 resource_holder 有值而非恒 unknown；域名级 cname 与 hosting asn 兜底不退化。"""
     att = A.build_endpoint_attribution("domain", "pay.example.com", {
         "dns": {
-            "ips": ["45.76.100.10"],
-            "hosting": [{"ip": "45.76.100.10", "asn": "AS20473", "org": "AS-CHOOPA", "country": "US"}],
+            "ips": ["198.51.100.41"],
+            "hosting": [{"ip": "198.51.100.41", "asn": "AS20473", "org": "AS-CHOOPA", "country": "US"}],
             "cname": ["pay.example.com.cdn.cloudflare.net"],
         },
         "resolved_ip_enrichment": {
-            "45.76.100.10": {"ip_rdap": {"netname": "VULTR-NET", "org": "The Constant Company", "country": "US"}},
+            "198.51.100.41": {"ip_rdap": {"netname": "VULTR-NET", "org": "The Constant Company", "country": "US"}},
         },
     })
     assert att is not None and len(att["ips"]) == 1
@@ -509,11 +509,11 @@ def test_build_endpoint_attribution_domain_resolved_asn_error_falls_back_to_host
     按"有效字段"而非"键存在"回落 dns.hosting 的 ASN → origin/hosting 层不退化；resource_holder 仍取 ip_rdap。"""
     att = A.build_endpoint_attribution("domain", "pay.example.com", {
         "dns": {
-            "ips": ["45.76.100.10"],
-            "hosting": [{"ip": "45.76.100.10", "asn": "AS20473", "org": "AS-CHOOPA", "country": "US"}],
+            "ips": ["198.51.100.41"],
+            "hosting": [{"ip": "198.51.100.41", "asn": "AS20473", "org": "AS-CHOOPA", "country": "US"}],
         },
         "resolved_ip_enrichment": {
-            "45.76.100.10": {
+            "198.51.100.41": {
                 "ip_rdap": {"netname": "VULTR-NET", "org": "The Constant Company", "country": "US"},
                 "asn": {"error": "Timeout contacting ip-api"},  # 富化失败的控制字段，非有效 ASN
             },
@@ -527,8 +527,9 @@ def test_build_endpoint_attribution_domain_resolved_asn_error_falls_back_to_host
 
 def test_build_endpoint_attribution_domain_hosting_missing_degrades() -> None:
     """域名 hosting 缺（限速）但有 ips+cname → 退化：origin unknown，但 CNAME 仍识别 edge。"""
-    att = A.build_endpoint_attribution("domain", "x.com", {
-        "dns": {"ips": ["3.3.3.3"], "cname": ["x.com.cdn.cloudflare.net"]}})
+    att = A.build_endpoint_attribution("domain", "x.example.com", {
+        # CNAME 夹具须带真实 CDN 后缀：那是 providers.yaml 的 edge 指纹本身，改写后缀本断言即空转。
+        "dns": {"ips": ["198.51.100.27"], "cname": ["x.example.com.cdn.cloudflare.net"]}})  # leak-scan: allow edge 指纹后缀是被测判据本身，非泄漏；域名主体已用 example.com
     assert att is not None and len(att["ips"]) == 1
     assert att["ips"][0]["origin_network"]["category"] == A.CAT_UNKNOWN
     assert att["ips"][0]["edge_provider"]["name"] == "Cloudflare"
@@ -539,16 +540,16 @@ def test_build_endpoint_attribution_partial_hosting_keeps_all_ips() -> None:
     只在 ips 里、hosting 缺的 IP 用 unknown ASN，绝不因只遍历 hosting 而丢失。"""
     att = A.build_endpoint_attribution("domain", "pay.x.com", {
         "dns": {
-            "ips": ["1.1.1.1", "2.2.2.2", "3.3.3.3"],  # 解析到 3 个
+            "ips": ["1.1.1.1", "198.51.100.21", "198.51.100.27"],  # 解析到 3 个
             "hosting": [{"ip": "1.1.1.1", "asn": "AS13335", "org": "Cloudflare"}],  # 仅 1 个查到托管
         },
     })
     assert att is not None
     by_ip = {layer["ip"]: layer for layer in att["ips"]}
-    assert set(by_ip) == {"1.1.1.1", "2.2.2.2", "3.3.3.3"}, "只在 ips 里的 IP 被丢失 = per-IP 塌缩"
+    assert set(by_ip) == {"1.1.1.1", "198.51.100.21", "198.51.100.27"}, "只在 ips 里的 IP 被丢失 = per-IP 塌缩"
     assert by_ip["1.1.1.1"]["origin_network"]["asn"] == 13335  # hosting 命中 → 有 ASN
-    assert by_ip["2.2.2.2"]["origin_network"]["asn"] is None   # hosting 缺 → unknown ASN，但 IP 保留
-    assert by_ip["3.3.3.3"]["origin_network"]["asn"] is None
+    assert by_ip["198.51.100.21"]["origin_network"]["asn"] is None   # hosting 缺 → unknown ASN，但 IP 保留
+    assert by_ip["198.51.100.27"]["origin_network"]["asn"] is None
 
 
 def test_build_endpoint_attribution_hosting_ip_not_in_ips_kept() -> None:
@@ -571,7 +572,7 @@ def test_build_endpoint_attribution_no_empty_shell() -> None:
 def test_build_endpoint_attribution_none_and_robust() -> None:
     """无归属信号 → None；坏输入/未知 kind → None，绝不抛。"""
     assert A.build_endpoint_attribution("domain", "y.com", {}) is None
-    assert A.build_endpoint_attribution("ip", "5.5.5.5", {"tier": "app"}) is None
+    assert A.build_endpoint_attribution("ip", "198.51.100.47", {"tier": "app"}) is None
     assert A.build_endpoint_attribution("ip", "x", None) is None  # type: ignore[arg-type]
     assert A.build_endpoint_attribution("weird", "x", {"asn": {"asn": "AS1"}}) is None  # 未知 kind → 无 per-IP
     # 域名 hosting 列表里混入坏元素不抛。
@@ -588,7 +589,7 @@ def test_build_endpoint_attribution_none_and_robust() -> None:
 def test_ip_rdap_fills_resource_holder() -> None:
     """★slice-1c：IP-RDAP 子键（资源登记方）→ resource_holder 层不再恒 unknown。"""
     ip_rdap = {"netname": "VULTR-AS20473", "org": "Vultr Holdings", "country": "US", "source": "rdap-ip"}
-    att = A.build_endpoint_attribution("ip", "45.76.1.1", {"asn": {"asn": "AS20473", "org": "Vultr"}, "ip_rdap": ip_rdap})
+    att = A.build_endpoint_attribution("ip", "198.51.100.38", {"asn": {"asn": "AS20473", "org": "Vultr"}, "ip_rdap": ip_rdap})
     rh = att["ips"][0]["resource_holder"]
     assert rh["name"] == "VULTR-AS20473" and rh["confidence"] == A.CONF_HIGH and rh["source"] == "rdap-ip"
 
@@ -743,8 +744,8 @@ def _fronting_view(ip: str, sig: dict) -> dict:
 def test_cluster_fronting_groups_shared_fingerprint_and_spares_singletons() -> None:
     """跨端点共享同一 SPKI 的 clustered 候选 → fronting-cluster-0001；孤点保留证据但不编号。"""
     a = _fronting_view("1.1.1.1", {"tls_spki": "shared"})
-    b = _fronting_view("2.2.2.2", {"tls_spki": "shared"})
-    lone = _fronting_view("3.3.3.3", {"favicon_mmh3": "solo"})
+    b = _fronting_view("198.51.100.21", {"tls_spki": "shared"})
+    lone = _fronting_view("198.51.100.27", {"favicon_mmh3": "solo"})
     assert A.cluster_fronting([a, b, lone]) == 1
     assert a["edge_provider"]["cluster_id"] == b["edge_provider"]["cluster_id"] == "fronting-cluster-0001"
     assert a["edge_provider"]["name"] == "fronting-cluster-0001"
@@ -756,21 +757,21 @@ def test_cluster_fronting_groups_shared_fingerprint_and_spares_singletons() -> N
 def test_cluster_fronting_deterministic_numbering_and_robust() -> None:
     """两独立簇 → 0001/0002 按 ip 序确定性；坏输入/命名 edge 不参与、绝不抛。"""
     views = [_fronting_view("9.9.9.9", {"tls_spki": "g2"}), _fronting_view("8.8.8.8", {"tls_spki": "g2"}),
-             _fronting_view("1.1.1.1", {"favicon_mmh3": "g1"}), _fronting_view("2.2.2.2", {"favicon_mmh3": "g1"})]
+             _fronting_view("1.1.1.1", {"favicon_mmh3": "g1"}), _fronting_view("198.51.100.21", {"favicon_mmh3": "g1"})]
     assert A.cluster_fronting(views) == 2
     by_ip = {v["ip"]: v["edge_provider"]["cluster_id"] for v in views}
-    assert by_ip["1.1.1.1"] == by_ip["2.2.2.2"] == "fronting-cluster-0001"  # ip 更小的组先编号
+    assert by_ip["1.1.1.1"] == by_ip["198.51.100.21"] == "fronting-cluster-0001"  # ip 更小的组先编号
     assert by_ip["8.8.8.8"] == by_ip["9.9.9.9"] == "fronting-cluster-0002"
     assert A.cluster_fronting([]) == 0
     assert A.cluster_fronting("garbage") == 0  # type: ignore[arg-type]
     assert A.cluster_fronting([{"edge_provider": None}, {}, None]) == 0  # type: ignore[list-item]
-    named = {"ip": "5.5.5.5", "edge_provider": {"tier": "probable", "matched_signals": ["spki:X"]}}
+    named = {"ip": "198.51.100.47", "edge_provider": {"tier": "probable", "matched_signals": ["spki:X"]}}
     assert A.cluster_fronting([named, dict(named)]) == 0  # 命名 edge（非 clustered）不聚类
 
 
 def test_attribution_from_enrichment_wires_tls_fronting_signal() -> None:
     """★enrichment 接线（B2-b）：tls 子键 SPKI 进 edge 信号 → 认不出名时产 clustered 候选；lone TLS 也算有效。"""
-    att = A.attribution_from_enrichment({"tls": {"spki_sha256": "zz"}}, ip="4.4.4.4")
+    att = A.attribution_from_enrichment({"tls": {"spki_sha256": "zz"}}, ip="198.51.100.29")
     assert att is not None
     ep = att["edge_provider"]
     assert ep["tier"] == "clustered" and "spki:zz" in ep["matched_signals"] and ep["cluster_id"] is None
