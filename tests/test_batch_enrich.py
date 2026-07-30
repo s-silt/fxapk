@@ -434,6 +434,17 @@ def test_cli_resume_skips_completed_targets(tmp_path: Path, monkeypatch) -> None
     assert payload["will_process"] == 0
     # ★续跑闸门本体：第二轮一个请求都没发
     assert exploding.calls == []
+    # ★逐源状态不得把「查过了」报成「不吃这种目标」：二者都是本次 0 请求，含义却相反。
+    #   曾经共用 `matched == 0` 一个分支，于是一个只吃 ip 的源、目标就是 IP、上轮刚查成功，
+    #   却被标成 not_applicable「只吃 ip」——理由自己自相矛盾，读的人无从判断预算对不对。
+    done = [b for b in payload["budget"] if b["status"] == "already_done"]
+    assert done, "已完成的源没有 already_done 状态"
+    for line in done:
+        assert "已在续跑账本里完成" in line["reason"]
+    assert not [
+        b for b in payload["budget"]
+        if b["status"] == "not_applicable" and "只吃 ip" in (b.get("reason") or "")
+    ], "适用的 ip 源被错标成 not_applicable"
 
 
 def test_cli_tolerates_corrupt_ledger_when_refreshing_csv(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001

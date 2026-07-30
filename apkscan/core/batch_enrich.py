@@ -69,8 +69,33 @@ _DOMAIN_RE = re.compile(
 )
 
 #: 预算行状态。``would_query`` = 会真发请求并计配额；``disabled`` = 缺 key 不会跑；
-#: ``not_applicable`` = 该源不吃这种目标（如 abuseipdb 只吃 ip）。
-BUDGET_STATUSES = ("would_query", "disabled", "not_applicable")
+#: ``not_applicable`` = 该源不吃这种目标（如 abuseipdb 只吃 ip）；
+#: ``already_done`` = 该源对全部适用目标都已在续跑账本里完成，本次不再发请求。
+#:
+#: ★``already_done`` 与 ``not_applicable`` 必须分开：二者都表现为「本次 0 请求」，
+#:   但含义相反——前者是"查过了"，后者是"压根不该查"。合成一个状态会输出自相矛盾的
+#:   预算行（一个只吃 ip 的源、目标就是 IP、上次刚查成功，却被标成"不吃这种目标"），
+#:   读的人无从判断预算对不对。
+BUDGET_STATUSES = ("would_query", "disabled", "not_applicable", "already_done")
+
+
+def _not_applicable_reason(applies_to: list[str]) -> str:
+    """说清「为什么这个源不适用」——区分「不吃这种 kind」与「有意不声明」。
+
+    ★空 ``applies_to`` **不是遗漏**：仓内至少 ``whois`` 是有意留空的（见
+      ``enrichers/whois.py`` 的注释——域名注册归属已收敛到 ``rdap``，``rdap`` 内部再拿
+      ``whois.query_whois`` 兜底；两边都声明就会对同一域名双查）。
+
+      此前这里统一输出「只吃 （未声明）」，把一个深思熟虑的决定说成疏漏。后果是**读的人很可能
+      "顺手补上" applies_to，把双查重新引进来**——而双查不报错、只静默多烧一倍配额，极难发现。
+      所以这句话必须自带"别补回来"的提示：**输出里的措辞会引导下一个人的修改方向。**
+    """
+    if applies_to:
+        return "只吃 " + ", ".join(str(k) for k in applies_to)
+    return (
+        "applies_to 为空——有意不参与批量路由，非遗漏"
+        "（如 whois：域名注册归属已收敛到 rdap，补回会造成双查）"
+    )
 
 
 @dataclass(frozen=True)
@@ -173,18 +198,33 @@ def estimate_budget(
     for enricher in sorted(enrichers, key=_provider_name):
         provider = _provider_name(enricher)
         applies_to = getattr(enricher, "applies_to", []) or []
+        # ★「本源适用的目标数」与「本次还要查的目标数」分开算。二者都可能为 0，但原因不同：
+        #   applicable == 0 → 这个源不吃这种 kind（或有意不声明 applies_to）
+        #   applicable > 0 而 matched == 0 → 都在续跑账本里查过了
+        #   混成一个 `matched == 0` 分支，就会把"查过了"报成"不吃这种目标"。
+        applicable = sum(1 for target in targets if target.kind in applies_to)
         matched = sum(
             1
             for target in targets
             if target.kind in applies_to and provider not in progress.get(target.value, set())
         )
-        if not matched:
+        if not applicable:
             lines.append(
                 BudgetLine(
                     provider=provider,
                     status="not_applicable",
                     targets=0,
-                    reason=f"只吃 {', '.join(str(k) for k in applies_to) or '（未声明）'}",
+                    reason=_not_applicable_reason(applies_to),
+                )
+            )
+            continue
+        if not matched:
+            lines.append(
+                BudgetLine(
+                    provider=provider,
+                    status="already_done",
+                    targets=0,
+                    reason=f"{applicable} 个适用目标均已在续跑账本里完成（--no-resume 可强制重查）",
                 )
             )
             continue
