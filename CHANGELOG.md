@@ -5,6 +5,21 @@ affect automated / CI / agent callers are called out explicitly**.
 
 ## Unreleased
 
+### Added
+
+- **网页证据成为一级输入**：新增 `analyze-web`，只读取已落盘的 `.body` / `.headers` /
+  `.html` / `.js` 证据；网页专属分析器按文件分别记录静态跳转候选，不把不同文件拼成一条
+  未经观测的跳转链。
+- **批量多源富化**：新增可续跑的 NDJSON 台账与 `enrich` 命令，并接入 AbuseIPDB 被动查询。
+- **提交前敏感信息扫描**：本地 hook 与 CI 共用同一套 leak-scan 判据。
+
+### Changed
+
+- **运行时清单字段迁移**：报告元数据从 `runtime_pcap_inventory` 迁移到
+  `runtime_merged_inventory`，以统一 PCAP 与 probe 观测。`read_inventory()` 兼容读取新旧字段；
+  PCAP/probe 写路径会写入新字段并移除旧别名。直接读取历史报告原始 JSON 的调用方必须同时
+  接受旧字段，或改用 `read_inventory()`。
+
 ## 1.3.2 — 2026-07-28
 
 **两件事：Frida 17 的 Java hook 终于真的能用；构建环境串案第一次接上出口。**

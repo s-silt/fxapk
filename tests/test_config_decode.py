@@ -14,10 +14,10 @@ import pytest
 
 from apkscan.config.decode import decode_config_blob
 
-_CONFIG = {"domains": ["api.evil-c2.com", "backup.evil-c2.com"], "ips": ["45.11.22.33"]}
+_CONFIG = {"domains": ["api.evil-c2.com", "backup.evil-c2.com"], "ips": ["45.11.22.33"]}  # leak-scan: allow 配置解密产物夹具，_classify_host 要判它公网才计入 domains/ips
 _JSON_BYTES = json.dumps(_CONFIG).encode("utf-8")
 _EXPECT_DOMAINS = ("api.evil-c2.com", "backup.evil-c2.com")
-_EXPECT_IPS = ("45.11.22.33",)
+_EXPECT_IPS = ("45.11.22.33",)  # leak-scan: allow 配置解密产物夹具，_classify_host 要判它公网才计入 domains/ips
 
 
 def test_plaintext_json() -> None:
@@ -77,8 +77,8 @@ def test_plain_text_domain_list() -> None:
 
 
 def test_private_and_loopback_ips_are_dropped() -> None:
-    r = decode_config_blob(json.dumps({"ips": ["10.0.0.1", "127.0.0.1", "169.254.1.1", "45.11.22.33"]}).encode())
-    assert r.ips == ("45.11.22.33",)  # 私网 10.x / 回环 127.x / 链路本地 169.254 清洗掉，公网留
+    r = decode_config_blob(json.dumps({"ips": ["10.0.0.1", "127.0.0.1", "169.254.1.1", "45.11.22.33"]}).encode())  # leak-scan: allow 配置解密产物夹具，_classify_host 要判它公网才计入 domains/ips
+    assert r.ips == ("45.11.22.33",)  # 私网 10.x / 回环 127.x / 链路本地 169.254 清洗掉，公网留  # leak-scan: allow 配置解密产物夹具，_classify_host 要判它公网才计入 domains/ips
 
 
 def test_undecodable_blob_degrades_gracefully() -> None:

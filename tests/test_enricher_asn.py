@@ -225,7 +225,7 @@ def test_cache_hit_skips_network(fake_requests: _FakeRequests) -> None:
     fake_requests.response = _FakeResponse(_success_payload())
     enr = AsnEnricher()
 
-    first = enr.enrich(_ep("5.5.5.5"))
+    first = enr.enrich(_ep("198.51.100.47"))
     assert first.ok is True
     assert len(fake_requests.calls) == 1
 
@@ -233,7 +233,7 @@ def test_cache_hit_skips_network(fake_requests: _FakeRequests) -> None:
     fake_requests.response = _FakeResponse(
         {"status": "success", "isp": "SHOULD NOT BE USED"}
     )
-    second = enr.enrich(_ep("5.5.5.5"))
+    second = enr.enrich(_ep("198.51.100.47"))
     assert second.ok is True
     assert second.data["isp"] == "Alibaba.com LLC"
     assert len(fake_requests.calls) == 1  # 没有新增网络调用
@@ -241,11 +241,11 @@ def test_cache_hit_skips_network(fake_requests: _FakeRequests) -> None:
 
 def test_cache_hit_across_instances(fake_requests: _FakeRequests) -> None:
     fake_requests.response = _FakeResponse(_success_payload())
-    AsnEnricher().enrich(_ep("6.6.6.6"))
+    AsnEnricher().enrich(_ep("198.51.100.50"))
     assert len(fake_requests.calls) == 1
 
     # 新实例也能读到磁盘缓存。
-    result = AsnEnricher().enrich(_ep("6.6.6.6"))
+    result = AsnEnricher().enrich(_ep("198.51.100.50"))
     assert result.ok is True
     assert result.data["isp"] == "Alibaba.com LLC"
     assert len(fake_requests.calls) == 1
@@ -256,7 +256,7 @@ def test_cache_dir_created_when_missing(
 ) -> None:
     assert not _isolated_cache.parent.exists()
     fake_requests.response = _FakeResponse(_success_payload())
-    AsnEnricher().enrich(_ep("7.7.7.7"))
+    AsnEnricher().enrich(_ep("198.51.100.52"))
     assert _isolated_cache.parent.is_dir()
     assert _isolated_cache.is_file()
 
@@ -300,6 +300,6 @@ def test_cached_at_not_leaked_into_result_data(fake_requests: _FakeRequests) -> 
     """★_cached_at 只是内部 TTL 戳，不得泄进 result.data（否则进报告/归因）。"""
     fake_requests.response = _FakeResponse(_success_payload())
     enr = AsnEnricher()
-    enr.enrich(_ep("3.3.3.3"))
-    r = enr.enrich(_ep("3.3.3.3"))  # 命中未过期
+    enr.enrich(_ep("198.51.100.27"))
+    r = enr.enrich(_ep("198.51.100.27"))  # 命中未过期
     assert "_cached_at" not in r.data
