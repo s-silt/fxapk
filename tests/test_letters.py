@@ -461,6 +461,20 @@ def test_cli_letters_happy_path(tmp_path: Path) -> None:
     assert "1" in res.output
 
 
+def test_cli_letters_warns_without_blocking_output(tmp_path: Path) -> None:
+    report_json = tmp_path / "old-case.json"
+    payload = _make_report()
+    payload["meta"] = {"tool_version": "0.0.0-old"}
+    report_json.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    out_dir = tmp_path / "letters_out"
+
+    res = runner.invoke(cli.app, ["letters", str(report_json), "--out", str(out_dir)])
+
+    assert res.exit_code == 0
+    assert "分析修订与当前 fxapk 不一致" in res.stderr
+    assert (out_dir / "letters" / "index.md").is_file()
+
+
 def test_cli_letters_default_out_is_report_dir(tmp_path: Path) -> None:
     report_json = tmp_path / "mycase.json"
     _write_report_json(report_json)

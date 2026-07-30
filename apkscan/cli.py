@@ -10,6 +10,7 @@ report.html / report.json 由其它 agent 实现；本文件惰性导入它们�
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 
 import click
@@ -51,6 +52,17 @@ app.command(name="analyze-web")(analyze_web)
 
 # 合法输出格式（--fmt）。全非法时回退而非静默产出零报告。
 _VALID_FORMATS = ("html", "json", "pdf")
+
+
+def _warn_report_revision(payload: object) -> None:
+    """把报告修订差异写到 stderr；不改报告、不改变调用方退出码。"""
+    from apkscan.core.report_compat import report_revision_warnings
+
+    report = payload if isinstance(payload, Mapping) else {}
+    meta = report.get("meta")
+    safe_meta = meta if isinstance(meta, Mapping) else {}
+    for warning in report_revision_warnings(safe_meta):
+        typer.echo(warning, err=True)
 
 
 def _version_callback(value: bool) -> None:
@@ -893,6 +905,8 @@ def digest(
             typer.echo(f"错误：报告 JSON 解析失败：{report_json}（{exc}）", err=True)
             raise typer.Exit(code=1) from exc
 
+        _warn_report_revision(report)
+
         from apkscan.report.digest import build_digest
 
         typer.echo(_json.dumps(build_digest(report, redact=redact), ensure_ascii=False, indent=2))
@@ -962,6 +976,8 @@ def letters(
         except (ValueError, UnicodeDecodeError) as exc:
             typer.echo(f"错误：报告 JSON 解析失败：{report_json}（{exc}）", err=True)
             raise typer.Exit(code=1) from exc
+
+        _warn_report_revision(report)
 
         from apkscan.report import letters as letters_mod
 
