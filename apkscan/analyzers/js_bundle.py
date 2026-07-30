@@ -406,7 +406,10 @@ class JsBundleAnalyzer(BaseAnalyzer):
             all_files = []
 
         framework = self._detect_framework(ctx, all_files)
-        targets = self._collect_targets(all_files)
+        targets = self._collect_targets(
+            all_files,
+            platform=str(getattr(ctx, "platform", "android") or "android"),
+        )
 
         # 逐文件累积密钥命中（去重后再产 Finding）。
         secret_hits: dict[tuple[str, str], _SecretHit] = {}
@@ -511,24 +514,26 @@ class JsBundleAnalyzer(BaseAnalyzer):
     # 目标文件收集
     # ------------------------------------------------------------------
 
-    def _collect_targets(self, files: list[str]) -> list[str]:
+    def _collect_targets(self, files: list[str], platform: str = "android") -> list[str]:
         """收集 assets/www 下 .js/.html/.json + index.android.bundle（保序去重）。"""
         seen: set[str] = set()
         out: list[str] = []
         for path in files:
             if path in seen:
                 continue
-            if self._is_target(path):
+            if self._is_target(path, platform=platform):
                 seen.add(path)
                 out.append(path)
         return out
 
     @staticmethod
-    def _is_target(path: str) -> bool:
+    def _is_target(path: str, platform: str = "android") -> bool:
         low = path.replace("\\", "/").lower()
         base = posixpath.basename(low)
         if base == _RN_BUNDLE_NAME:
             return True
+        if platform == "web" and low.startswith("web/"):
+            return low.endswith((".js", ".html", ".htm", ".json"))
         # assets/ 或 www/ 路径下的 JS/HTML/JSON。
         in_scope = low.startswith("assets/") or "/www/" in low
         if not in_scope:
