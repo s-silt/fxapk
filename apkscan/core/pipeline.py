@@ -125,6 +125,53 @@ def _dependency_versions() -> dict[str, str]:
     return out
 
 
+#: 运行环境快照里**允许**出现的字段。用白名单而非黑名单：报告会随案流转、会进 PDF 发出去，
+#: 而 ``platform`` 里顺手能拿到的 ``node()``（主机名）与登录用户名都是 PII——写进去就收不回来了。
+#: 白名单意味着新增字段必须有人显式加，而不是某天换个 API 就把机器身份带了进来。
+_RUN_ENV_FIELDS = ("os", "os_release", "machine", "python", "python_implementation")
+
+
+def _run_environment() -> dict[str, str]:
+    """跑这次分析的运行环境 → report.meta 复现锚点。
+
+    与 :func:`_dependency_versions` 互补：那个记"装了哪些库"，这个记"在什么系统/解释器上跑的"。
+    同样本同版本仍可能因 OS/解释器差异产出不同结果（路径与编码处理、并行 worker 数、
+    native 解析走的分支），只记依赖版本看不出这一层。
+
+    ★只收 :data:`_RUN_ENV_FIELDS` 白名单里的字段，**绝不含主机名与用户名**。取不到 → 跳过，绝不抛。
+    """
+    import platform as _platform
+
+    getters = {
+        "os": _platform.system,
+        "os_release": _platform.release,
+        "machine": _platform.machine,
+        "python": _platform.python_version,
+        "python_implementation": _platform.python_implementation,
+    }
+    out: dict[str, str] = {}
+    for name in _RUN_ENV_FIELDS:
+        try:
+            value = str(getters[name]() or "").strip()
+        except Exception:  # noqa: BLE001 — 环境探测绝不影响主流程
+            logger.debug("读取运行环境失败：%s", name, exc_info=True)
+            continue
+        if value:
+            out[name] = value
+    return out
+
+
+def _now_local_iso() -> str:
+    """当前时刻，本地时区 + 明确偏移的 ISO-8601（秒精度）。
+
+    ★带偏移而非裸本地时间：报告跨机跨时区流转，``2026-07-30T16:12:03`` 这种写法在别处读到时
+    无法判断是哪个时刻；``+08:00`` 让它自证。
+    """
+    from datetime import datetime
+
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
 def _analysis_health(analyzer_status: list[dict]) -> tuple[str, float, list[str], list[str]]:
     """据 analyzer_status 聚合分析完整度，返回 (status, completeness, critical_failures, skipped)。
 
@@ -550,6 +597,7 @@ def _stage_credibility(state: _PipelineState) -> None:
     state.meta["tool_version"] = _tool_version()
     state.meta["ruleset_digest"] = ruleset_digest()
     state.meta["dependency_versions"] = _dependency_versions()  # 依赖版本复现锚点（androguard 等）
+    state.meta["analysis_environment"] = _run_environment()  # 系统/解释器锚点（白名单，无机器身份）
 
 
 def _stage_visibility(state: _PipelineState) -> None:
@@ -698,8 +746,12 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     经 ``_run_stage`` 执行——**阶段级故障被捕获记入 stage_status、不中断后续**，并反馈 analysis_status。
     各阶段业务逻辑与历史内联实现逐字一致（结构重构），仅新增阶段边界的状态捕获与韧性。
     """
+    # ★在**任何**阶段跑之前取时刻：这是"这份报告什么时候做的"，不是"记录这行代码时是几点"。
+    #   放到末尾的 credibility 阶段去取，记下的就成了分析结束时间，差着整段分析时长。
+    started_at = _now_local_iso()
     _canonicalize_ctx_config(ctx, config)
     state = _init_pipeline_state(ctx, config)
+    state.meta["analysis_started_at"] = started_at
     _run_stage(state, "analyze", _stage_run_analyzers)              # 分析器执行 + 聚合 + 端点去重
     _run_stage(state, "degradation_flags", _stage_degradation_flags)  # 降级标志入 meta
     _run_stage(state, "remote_config_fetch", _stage_remote_config_fetch)  # 授权档：下载+解码远程配置，回灌端点
