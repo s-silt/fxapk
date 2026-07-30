@@ -298,7 +298,50 @@ def close_report(
     report.meta["closure"] = closure
     _refresh_derived_views(report, online=config.online)
     _update_target_leads(report, targets)
+    _sync_passive_dns_evidence(report, selected)
     return closure
+
+
+def _sync_passive_dns_evidence(report: Report, endpoints: Sequence[object]) -> None:
+    """把结案期富化拿到的被动 DNS 历史补进对应线索的取证要项。
+
+    ★为什么单开这一步：线索是在 ``analyze`` 阶段建的，那时富化已经跑过，历史落点顺着
+    ``build_endpoint_leads`` 自然进了线索。但结案会**再富化一轮**（选中的目标、常常是首次联网），
+    这一轮的产物只落在 ``endpoint.enrichment`` 里——:func:`_update_target_leads` 只回写
+    ``where_to_request`` 与五层证据字段，不重算这条。不补这一步，联网结案拿到的历史落点
+    就停在报告的 endpoints 段里，进不了文书。
+
+    只补 ``evidence_to_obtain``（文书渲染读它）；幂等，重复结案不会堆重复行。绝不抛。
+    """
+    from apkscan.core.leads import _passive_dns_note
+
+    by_key = {}
+    for endpoint in endpoints:
+        kind = str(getattr(endpoint, "kind", ""))
+        if kind not in ("domain", "ip"):
+            continue
+        try:
+            note = _passive_dns_note(getattr(endpoint, "enrichment", {}) or {})
+        except Exception:  # noqa: BLE001 — 补注记失败不得让结案失败
+            logger.debug("被动 DNS 注记生成失败：%s", getattr(endpoint, "value", "?"), exc_info=True)
+            continue
+        if note:
+            by_key[(kind, infra.match_key(kind, str(getattr(endpoint, "value", ""))))] = note
+
+    if not by_key:
+        return
+    for lead in report.leads:
+        kind = "domain" if lead.category.value == "DOMAIN" else "ip" if lead.category.value == "IP" else ""
+        if not kind:
+            continue
+        note = by_key.get((kind, infra.match_key(kind, lead.value)))
+        # 旧注记按前缀清掉再写：历史落点会随富化更新，留着两版会让人不知道该信哪个。
+        if note is None:
+            continue
+        lead.evidence_to_obtain[:] = [
+            line for line in lead.evidence_to_obtain if not str(line).startswith("历史解析（被动 DNS")
+        ]
+        lead.evidence_to_obtain.append(note)
 
 
 def _populate_network_attribution(report: Report) -> None:
