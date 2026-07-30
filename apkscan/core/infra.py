@@ -60,6 +60,14 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         "alicdn.com",
         "aliyun",
         "alipayobjects.com",
+        # 阿里云 DingRTC 音视频通信（接入调度走 gslb 子域）。整棵域由阿里持有，"aliyun"
+        # 关键字覆盖不到它，故单列一行。
+        "dingrtc.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        # 钉钉移动推送长连接（mcs 子域，形如 portal-hz.mcs.<钉钉主域>）。
+        # ★刻意**只列 mcs 子域**、不整体列入钉钉主域：群机器人 webhook（oapi 子域下的
+        #   /robot/send）是实测见过的外发通道（见 analyzers/contacts.py 的通道归属表），
+        #   主域整体列入等于把那条通道一起判成"无需核查"藏起来——正是本模块要避免的方向。
+        "mcs.dingtalk.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
         # ---- AWS ----
         "amazonaws.com",
         "awsstatic",
@@ -247,6 +255,10 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         "wostore.cn",
         "189store.com",
         # ---- 电商 / 通用 CDN ----
+        # 阿里系电商门户。带 www 前缀出现，多来自打包库的站点表 / WebView 默认地址 / 深链
+        # 演示串；同一后缀也覆盖阿里 SDK 的接口子域（acs.m / h5api.m 等长连接与 mtop 网关）。
+        "alibaba.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        "taobao.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
         "yzcdn.cn",                 # 有赞 CDN
         "youzan.com",
         "meituan.net",
@@ -277,6 +289,9 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         "dts.com",
         # ---- 工具库 / 标准组织 ----
         "curl.se",                  # libcurl 官网
+        # minizip / unzip 作者站点。zlib 附带的 minizip 源码注释里写着它，被整段编进
+        # native 库的字符串表，于是以 www 子域形态被抽成"端点"。
+        "winimage.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
         "iptc.org",                 # 图片元数据标准
         "useplus.org",              # PLUS 图片版权标准
         "open.gl",                  # OpenGL 教程站
@@ -325,6 +340,9 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         "godaddy.com",
         "letsencrypt.org",
         "sectigo.com",
+        # TC TrustCenter（德国 CA，后并入 DigiCert）。根证书仍留在系统/内置 CA 包里，
+        # 其官网 URL 随证书策略字段一起被抽出来。
+        "trustcenter.de",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
         "curl.haxx.se",             # libcurl 证书包来源说明 URL
     }
 )
