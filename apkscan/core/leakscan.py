@@ -42,7 +42,11 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from apkscan.network.fingerprints import KNOWN_INTERCEPT_IPS, PUBLIC_DNS_RESOLVERS
+from apkscan.network.fingerprints import (
+    AUTHORITATIVE_DNS_HOSTS,
+    KNOWN_INTERCEPT_IPS,
+    PUBLIC_DNS_RESOLVERS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -159,10 +163,13 @@ def _rule_noise_ips() -> frozenset[str]:
         return frozenset()
 
 
-#: 公知基础设施 / 占位地址：公共递归解析器 + 已知拦截节点 + 规则表里的占位与版本号串。
-#: 三份来源全部**复用**既有名单（``network.fingerprints`` 与 ``rules/endpoints.yaml``），
-#: 不另立一份——两份名单一定会漂移。这些地址写进代码是**功能需要**，不是泄漏。
-_INFRA_IPS: frozenset[str] = PUBLIC_DNS_RESOLVERS | KNOWN_INTERCEPT_IPS | _rule_noise_ips()
+#: 公知基础设施 / 占位地址：公共递归解析器 + 托管商权威 NS + 已知拦截节点 + 规则表里的
+#: 占位与版本号串。四份来源全部**复用**既有名单（``network.fingerprints`` 与
+#: ``rules/endpoints.yaml``），不另立一份——两份名单一定会漂移。这些地址写进代码是
+#: **功能需要**，不是泄漏。
+_INFRA_IPS: frozenset[str] = (
+    PUBLIC_DNS_RESOLVERS | AUTHORITATIVE_DNS_HOSTS | KNOWN_INTERCEPT_IPS | _rule_noise_ips()
+)
 
 #: 前后不许接 ``\w`` 或 ``.``：既排掉版本号/OID 这类更长的点分序列（``1.3.101.112.1``
 #: 整体不产生匹配），也排掉 ``sha1.2.3.4`` 这类嵌在标识符里的巧合。
