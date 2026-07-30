@@ -16,9 +16,11 @@
    默认只报告不阻断，用 ``strict=True`` 升级为阻断。
    两档都**如实产出 finding**，差别只在是否让门禁变红——先观察一轮再收紧。
 
-3. **豁免必须写理由**。行内注释 ``leak-scan: allow <理由>`` 放行整行。
-   只写 ``leak-scan: allow`` 而不给理由本身就是一条 finding：
-   没有理由的豁免等于没有护栏。
+3. **豁免必须写理由，且不许批量按**。行内注释 ``leak-scan: allow <理由>`` 放行整行。
+   只写 ``leak-scan: allow`` 而不给理由本身就是一条 finding：没有理由的豁免等于没有护栏。
+   理由**成不成立**机器判不了，能判的是动作形态：同一条理由被复制到大量新增行
+   （见 :data:`_BULK_EXEMPTION_THRESHOLD`）即判 ``bulk_exemption``——那是"报了几十条阻断，
+   于是用脚本把同一句话贴满每一行"的形态，与逐条豁免必须区别对待。
 
 4. **判据可命名、可解释**。每条 finding 都带 ``rule`` 与 ``detail``，说明为什么判它，
    而不是给一个不可复核的分数。
@@ -63,6 +65,7 @@ __all__ = [
     "expand_paths",
     "format_findings",
     "iter_added_lines",
+    "iter_exemptions",
     "scan_diff",
     "scan_paths",
     "scan_text",
@@ -75,12 +78,27 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 #: 全部判据名（稳定标识，进 finding.rule / CLI 输出 / 测试断言）。
-RULES: tuple[str, ...] = ("ip", "secret", "domain", "context", "exemption")
+RULES: tuple[str, ...] = ("ip", "secret", "domain", "context", "exemption", "bulk_exemption")
 
 #: 默认阻断的判据。``ip`` / ``secret`` 判据精确，误报可控，直接当门禁；
 #: ``domain`` / ``context`` 噪音大，默认只报告（``strict=True`` 时全部阻断）。
-#: ``exemption``（豁免没写理由）恒阻断：它是护栏自身的完整性检查，不允许静默削弱。
-BLOCKING_RULES: frozenset[str] = frozenset({"ip", "secret", "exemption"})
+#: ``exemption``（豁免没写理由）与 ``bulk_exemption``（同一条理由被复制到大量新增行）恒阻断：
+#: 二者都是护栏**自身**的完整性检查，不允许静默削弱。
+BLOCKING_RULES: frozenset[str] = frozenset({"ip", "secret", "exemption", "bulk_exemption"})
+
+#: 一次改动里，同一条豁免理由最多可出现在多少个新增行上。
+#:
+#: 为什么要有这条：豁免只校验"有没有写理由"，不校验理由**成不成立**——写一句听着合理的话
+#: 就能把该行的全部判据关掉。真实发生过的形态是：门禁报了几十条阻断，于是用脚本把**同一句**
+#: 理由批量贴到每一行，再跑就绿了。那句理由是假的，而门禁看不出批量按掉与逐条豁免的区别。
+#:
+#: 阈值取 20 的由来：本仓历史上一次改动里合法新增的同理由豁免最多 17 条（一批公共解析器
+#: 名单夹具，判据要求全球可路由字面、换合成值即失去被测形态）；而那次批量按掉护栏是 30 条以上。
+#: 取 20 让前者照常通过、后者必红。数值可调，但**调高前请先确认那批豁免逐条都成立**。
+#:
+#: ★只在**增量**（diff）模式下判：全树模式看到的是历史累积（单文件已有 45 条同理由的合法
+#:   夹具），对它施压只会逼人把理由改花，护栏反而更弱。
+_BULK_EXEMPTION_THRESHOLD = 20
 
 
 @dataclass(frozen=True)
@@ -546,11 +564,56 @@ def iter_added_lines(diff_text: str) -> "list[tuple[str, int, str]]":
     return added
 
 
+def iter_exemptions(diff_text: str) -> "list[tuple[str, int, str]]":
+    """取出 diff 新增行里的全部行内豁免，返回 ``[(路径, 行号, 理由)]``。
+
+    供调用方**如实呈现**"这次改动按掉了多少护栏"。此前这件事完全不可见：一次加 1 条豁免
+    与一次加 30 条，在门禁输出里同形，review 时也不会被顶到眼前。
+    """
+    out: list[tuple[str, int, str]] = []
+    for path, line_no, line in iter_added_lines(diff_text):
+        marked, reason = _exemption(line)
+        if marked and reason:
+            out.append((path, line_no, reason))
+    return out
+
+
+def _bulk_exemption_findings(entries: "list[tuple[str, int, str]]") -> list[Finding]:
+    """同一条理由被复制到 ≥ 阈值 个新增行 → 一条 ``bulk_exemption``。
+
+    判的是**批量按掉护栏**这个动作本身，不是豁免的对错（理由成不成立机器判不了）。
+    要么逐条给出各自成立的理由，要么改用合成值让判据根本不触发。
+    """
+    by_reason: dict[str, list[tuple[str, int]]] = {}
+    for path, line_no, reason in entries:
+        by_reason.setdefault(" ".join(reason.split()), []).append((path, line_no))
+
+    findings: list[Finding] = []
+    for reason, spots in sorted(by_reason.items()):
+        if len(spots) < _BULK_EXEMPTION_THRESHOLD:
+            continue
+        path, line_no = sorted(spots)[0]
+        files = len({p for p, _ in spots})
+        findings.append(Finding(
+            rule="bulk_exemption",
+            path=path,
+            line_no=line_no,
+            value=reason[:80],
+            detail=(
+                f"同一条豁免理由出现在本次改动的 {len(spots)} 个新增行上（跨 {files} 个文件），"
+                f"超过阈值 {_BULK_EXEMPTION_THRESHOLD}——这是批量按掉护栏的形态。"
+                "请逐条给出各自成立的理由，或改用合成值使判据不再触发"
+            ),
+        ))
+    return findings
+
+
 def scan_diff(diff_text: str) -> list[Finding]:
     """扫描一份 unified diff 的全部新增行。"""
     findings: list[Finding] = []
     for path, line_no, line in iter_added_lines(diff_text):
         findings.extend(_scan_line(line, path, line_no))
+    findings.extend(_bulk_exemption_findings(iter_exemptions(diff_text)))
     return findings
 
 
