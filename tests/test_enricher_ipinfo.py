@@ -204,8 +204,8 @@ def test_lookup_ip_respects_shared_rate_limit(
     assert slept == []  # 首查距 reset 时钟已远超间隔，无需等待
 
     clock[0] = 100.5  # 距上次仅过 0.5s
-    http.response = _FakeResponse({"status": "success", "query": "2.2.2.2"})
-    lookup_ip("2.2.2.2", http=http)
+    http.response = _FakeResponse({"status": "success", "query": "198.51.100.21"})
+    lookup_ip("198.51.100.21", http=http)
 
     assert len(slept) == 1
     assert slept[0] == pytest.approx(ipinfo_mod.IPINFO_MIN_INTERVAL - 0.5)
@@ -225,8 +225,8 @@ def test_lookup_ip_no_wait_when_interval_elapsed(
     lookup_ip("1.1.1.1", http=http)
 
     clock[0] = 100.0 + ipinfo_mod.IPINFO_MIN_INTERVAL + 1.0
-    http.response = _FakeResponse({"status": "success", "query": "2.2.2.2"})
-    lookup_ip("2.2.2.2", http=http)
+    http.response = _FakeResponse({"status": "success", "query": "198.51.100.21"})
+    lookup_ip("198.51.100.21", http=http)
     assert slept == []
 
 
@@ -252,8 +252,8 @@ def test_lookup_ips_batch_uses_batch_interval_not_single(
     assert slept == []  # 首批距 reset 时钟已远超间隔，无需等待
 
     clock[0] = 100.5  # 距上次仅过 0.5s
-    http.post_response = _FakeResponse([_batch_item("2.2.2.2", "CN")])
-    lookup_ips_batch(["2.2.2.2"], http=http)
+    http.post_response = _FakeResponse([_batch_item("198.51.100.21", "CN")])
+    lookup_ips_batch(["198.51.100.21"], http=http)
 
     assert len(slept) == 1
     # 关键：用的是 batch 4.0s 闸（4.0-0.5=3.5），不是单查 1.4s 闸（否则会是 0.9）。
@@ -286,8 +286,8 @@ def test_batch_and_single_limiters_are_independent(
     assert slept == []  # 单查不被批量闸挤占
 
     # 再来一批：批量闸看的是 last_batch=100，clock=100.5 → 等 4.0-0.5=3.5（不受中间单查影响）。
-    http.post_response = _FakeResponse([_batch_item("2.2.2.2", "CN")])
-    lookup_ips_batch(["2.2.2.2"], http=http)
+    http.post_response = _FakeResponse([_batch_item("198.51.100.21", "CN")])
+    lookup_ips_batch(["198.51.100.21"], http=http)
     assert len(slept) == 1
     assert slept[0] == pytest.approx(ipinfo_mod.IPINFO_BATCH_MIN_INTERVAL - 0.5)
 
@@ -307,8 +307,8 @@ def test_reset_state_clears_batch_clock(
 
     ipinfo_mod.reset_state()  # 批量时钟归 0
     clock[0] = 100.5  # 仍距 "100" 仅 0.5s，但时钟已被清 → 不应等待
-    http.post_response = _FakeResponse([_batch_item("2.2.2.2", "CN")])
-    lookup_ips_batch(["2.2.2.2"], http=http)
+    http.post_response = _FakeResponse([_batch_item("198.51.100.21", "CN")])
+    lookup_ips_batch(["198.51.100.21"], http=http)
     assert slept == []
 
 
@@ -333,15 +333,15 @@ def test_lookup_ips_batch_posts_to_batch_endpoint(
     monkeypatch.setattr(ipinfo_mod, "_SLEEP", lambda *_a, **_k: None)
     http = _FakeRequests()
     http.post_response = _FakeResponse(
-        [_batch_item("1.1.1.1", "US"), _batch_item("2.2.2.2", "CN")]
+        [_batch_item("1.1.1.1", "US"), _batch_item("198.51.100.21", "CN")]
     )
 
-    result = lookup_ips_batch(["1.1.1.1", "2.2.2.2"], http=http)
+    result = lookup_ips_batch(["1.1.1.1", "198.51.100.21"], http=http)
 
-    assert set(result) == {"1.1.1.1", "2.2.2.2"}
+    assert set(result) == {"1.1.1.1", "198.51.100.21"}
     assert result["1.1.1.1"]["country"] == "US"
     assert result["1.1.1.1"]["org"] == "Org-1.1.1.1"
-    assert result["2.2.2.2"]["asn"] == "AS-2.2.2.2"
+    assert result["198.51.100.21"]["asn"] == "AS-198.51.100.21"
 
     # 恰好一次 POST，命中 /batch 端点，未走单查 GET。
     assert http.calls == []
@@ -350,7 +350,7 @@ def test_lookup_ips_batch_posts_to_batch_endpoint(
     assert url == ipinfo_mod.IPINFO_BATCH_URL
     assert kwargs.get("timeout") == ipinfo_mod.IPINFO_TIMEOUT
     body = kwargs["json"]
-    assert [item["query"] for item in body] == ["1.1.1.1", "2.2.2.2"]
+    assert [item["query"] for item in body] == ["1.1.1.1", "198.51.100.21"]
     assert all(item["fields"] == ipinfo_mod.IPINFO_FIELDS for item in body)
 
 

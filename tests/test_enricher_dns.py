@@ -133,11 +133,11 @@ def test_name_and_applies_to() -> None:
 def test_doh_success_aggregates_hosting(
     fake_requests: _FakeRequests, fake_lookup: _FakeBatchLookup
 ) -> None:
-    fake_requests.response = _FakeResponse(_doh_payload(["1.1.1.1", "2.2.2.2"]))
+    fake_requests.response = _FakeResponse(_doh_payload(["1.1.1.1", "198.51.100.21"]))
     fake_lookup.table["1.1.1.1"] = {
         "isp": "ISP A", "org": "Org A", "asn": "AS111", "country": "US"
     }
-    fake_lookup.table["2.2.2.2"] = {
+    fake_lookup.table["198.51.100.21"] = {
         "isp": "ISP B", "org": "Org B", "asn": "AS222", "country": "CN"
     }
 
@@ -147,13 +147,13 @@ def test_doh_success_aggregates_hosting(
     assert result.provider == "dns"
     assert result.ok is True
     assert result.error is None
-    assert result.data["ips"] == ["1.1.1.1", "2.2.2.2"]
+    assert result.data["ips"] == ["1.1.1.1", "198.51.100.21"]
 
     hosting = {h["ip"]: h for h in result.data["hosting"]}
     assert hosting["1.1.1.1"]["org"] == "Org A"
     assert hosting["1.1.1.1"]["asn"] == "AS111"
     assert hosting["1.1.1.1"]["country"] == "US"
-    assert hosting["2.2.2.2"]["org"] == "Org B"
+    assert hosting["198.51.100.21"]["org"] == "Org B"
 
     # DoH 走 HTTPS dns.google。
     assert len(fake_requests.calls) == 1
@@ -239,23 +239,23 @@ def test_empty_domain_short_circuits(
 def test_dns_result_written_to_cache(
     fake_requests: _FakeRequests, fake_lookup: _FakeBatchLookup, _isolated_cache: Path
 ) -> None:
-    fake_requests.response = _FakeResponse(_doh_payload(["3.3.3.3"]))
-    fake_lookup.table["3.3.3.3"] = {
+    fake_requests.response = _FakeResponse(_doh_payload(["198.51.100.27"]))
+    fake_lookup.table["198.51.100.27"] = {
         "isp": "I", "org": "O", "asn": "AS333", "country": "JP"
     }
-    DnsEnricher().enrich(_ep("cache-me.com"))
+    DnsEnricher().enrich(_ep("cache-me.example.com"))
 
     assert _isolated_cache.is_file()
     cache = json.loads(_isolated_cache.read_text(encoding="utf-8"))
-    assert "cache-me.com" in cache
-    assert cache["cache-me.com"]["ips"] == ["3.3.3.3"]
+    assert "cache-me.example.com" in cache
+    assert cache["cache-me.example.com"]["ips"] == ["198.51.100.27"]
 
 
 def test_dns_cache_hit_skips_network(
     fake_requests: _FakeRequests, fake_lookup: _FakeBatchLookup
 ) -> None:
-    fake_requests.response = _FakeResponse(_doh_payload(["4.4.4.4"]))
-    fake_lookup.table["4.4.4.4"] = {
+    fake_requests.response = _FakeResponse(_doh_payload(["198.51.100.29"]))
+    fake_lookup.table["198.51.100.29"] = {
         "isp": "I", "org": "O", "asn": "AS444", "country": "DE"
     }
     enr = DnsEnricher()
@@ -264,10 +264,10 @@ def test_dns_cache_hit_skips_network(
     assert first.ok is True
     assert len(fake_requests.calls) == 1
 
-    fake_requests.response = _FakeResponse(_doh_payload(["5.5.5.5"]))
+    fake_requests.response = _FakeResponse(_doh_payload(["198.51.100.47"]))
     second = enr.enrich(_ep("repeat.com"))
     assert second.ok is True
-    assert second.data["ips"] == ["4.4.4.4"]  # 仍是首查结果
+    assert second.data["ips"] == ["198.51.100.29"]  # 仍是首查结果
     assert len(fake_requests.calls) == 1
 
 
@@ -294,8 +294,8 @@ def test_cache_entry_carries_cached_at(
     fake_requests: _FakeRequests, fake_lookup: _FakeBatchLookup, _isolated_cache: Path
 ) -> None:
     """成功缓存条目带 _cached_at 时间戳，供 TTL 过期判断。"""
-    fake_requests.response = _FakeResponse(_doh_payload(["6.6.6.6"]))
-    fake_lookup.table["6.6.6.6"] = {"isp": "I", "org": "O", "asn": "AS6", "country": "US"}
+    fake_requests.response = _FakeResponse(_doh_payload(["198.51.100.50"]))
+    fake_lookup.table["198.51.100.50"] = {"isp": "I", "org": "O", "asn": "AS6", "country": "US"}
     DnsEnricher().enrich(_ep("stamp.com"))
 
     cache = json.loads(_isolated_cache.read_text(encoding="utf-8"))
@@ -308,8 +308,8 @@ def test_expired_cache_triggers_requery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """缓存 _cached_at 超过 TTL → 重新查询（拿到新结果），而非返回陈旧缓存。"""
-    fake_requests.response = _FakeResponse(_doh_payload(["7.7.7.7"]))
-    fake_lookup.table["7.7.7.7"] = {"isp": "I", "org": "O", "asn": "AS7", "country": "US"}
+    fake_requests.response = _FakeResponse(_doh_payload(["198.51.100.52"]))
+    fake_lookup.table["198.51.100.52"] = {"isp": "I", "org": "O", "asn": "AS7", "country": "US"}
     fake_lookup.table["8.8.8.8"] = {"isp": "I2", "org": "O2", "asn": "AS8", "country": "DE"}
     enr = DnsEnricher()
 
@@ -319,7 +319,7 @@ def test_expired_cache_triggers_requery(
 
     first = enr.enrich(_ep("ttl.com"))
     assert first.ok is True
-    assert first.data["ips"] == ["7.7.7.7"]
+    assert first.data["ips"] == ["198.51.100.52"]
 
     # 时钟推进超过 TTL → 应重查（返回新 IP）。
     now["t"] = 1_000.0 + dns_mod.CACHE_TTL_SECONDS + 1
@@ -398,9 +398,9 @@ def test_hosting_uses_single_batch_call(
 ) -> None:
     """多 IP 时托管查询只调一次 lookup_ips_batch（限速/去重集中到 _ipinfo 批量端点）。"""
     fake_requests.response = _FakeResponse(
-        _doh_payload(["1.1.1.1", "2.2.2.2", "3.3.3.3"])
+        _doh_payload(["1.1.1.1", "198.51.100.21", "198.51.100.27"])
     )
-    for ip in ("1.1.1.1", "2.2.2.2", "3.3.3.3"):
+    for ip in ("1.1.1.1", "198.51.100.21", "198.51.100.27"):
         fake_lookup.table[ip] = {
             "isp": f"I-{ip}", "org": f"O-{ip}", "asn": f"AS-{ip}", "country": "CN"
         }
@@ -410,10 +410,10 @@ def test_hosting_uses_single_batch_call(
     assert result.ok is True
     # 关键：只一次批量调用，且传入全部解析出的 IP（而非逐 IP）。
     assert len(fake_lookup.calls) == 1
-    assert fake_lookup.calls[0] == ["1.1.1.1", "2.2.2.2", "3.3.3.3"]
+    assert fake_lookup.calls[0] == ["1.1.1.1", "198.51.100.21", "198.51.100.27"]
     # data 结构不变：hosting 仍逐 IP 一项。
     assert [h["ip"] for h in result.data["hosting"]] == [
-        "1.1.1.1", "2.2.2.2", "3.3.3.3"
+        "1.1.1.1", "198.51.100.21", "198.51.100.27"
     ]
 
 
@@ -421,16 +421,16 @@ def test_hosting_batch_partial_miss_keeps_ips(
     fake_requests: _FakeRequests, fake_lookup: _FakeBatchLookup
 ) -> None:
     """批量结果缺某 IP（查不到/被跳过）时，IP 列表保留，hosting 仅含查到的项。"""
-    fake_requests.response = _FakeResponse(_doh_payload(["1.1.1.1", "2.2.2.2"]))
+    fake_requests.response = _FakeResponse(_doh_payload(["1.1.1.1", "198.51.100.21"]))
     fake_lookup.table["1.1.1.1"] = {
         "isp": "I", "org": "O", "asn": "AS1", "country": "US"
     }
-    # 2.2.2.2 不在 table → 批量返回里缺它。
+    # 198.51.100.21 不在 table → 批量返回里缺它。
 
     result = DnsEnricher().enrich(_ep("partial.com"))
 
     assert result.ok is True
-    assert result.data["ips"] == ["1.1.1.1", "2.2.2.2"]  # IP 列表完整
+    assert result.data["ips"] == ["1.1.1.1", "198.51.100.21"]  # IP 列表完整
     hosting_ips = [h["ip"] for h in result.data["hosting"]]
     assert hosting_ips == ["1.1.1.1"]  # 仅查到的入 hosting
 
