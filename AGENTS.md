@@ -142,7 +142,12 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 pip install -e .                 # 装运行期依赖 + 注册 fxapk / apkscan 命令
 cp .env.example .env             # 创建本地密钥文件（已 gitignore，绝不入库）
 #   然后编辑 .env 填入 key（见第 3 节；不填也能跑，仅缺对应富化能力）
-fxapk doctor                     # 环境自检：报告 python/依赖/可选工具(jadx/adb/frida)就绪情况
+fxapk selfcheck                  # 能力自检（稳定 JSON）：核心/版本/cryptography/jadx/adb/frida/
+                                 #   mitmproxy/device/联网能力**总体**逐项 ok|missing|disabled|
+                                 #   unreachable + 一句修复指引。★驱动前先跑它，别试错
+                                 #   ★它**不逐个源检查 API Key**（只报 online-enrichment 总体）；
+                                 #     哪个源真查着了看报告的 source_status
+                                 #   设备侧（root/ABI/frida/mitmproxy/CA）另见 §1.5 的 `fxapk doctor`
 git config core.hooksPath .githooks   # ★启用提交前泄漏扫描（改代码就必须开）
 ```
 
