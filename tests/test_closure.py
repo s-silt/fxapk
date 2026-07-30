@@ -685,11 +685,12 @@ def test_close_does_not_fabricate_visibility_without_signals() -> None:
 
     「没有信号」≠「已确认完整」——凭空写一份 dex=complete 正是本层要防的误读。
     """
+    from apkscan.core import visibility
+
     report = _report(_complete_endpoint())
     report.meta.pop("visibility", None)
-    for key in list(report.meta):
-        if key in closure_module._VISIBILITY_INPUT_KEYS:
-            report.meta.pop(key)
+    for key in visibility.input_keys_seen(report.meta):
+        report.meta.pop(key)
 
     closure_module._refresh_visibility(report)
 

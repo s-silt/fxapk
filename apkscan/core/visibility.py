@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,33 @@ _CLAIM_LABELS: dict[str, str] = {
 _INSUFFICIENT = frozenset({VIS_PARTIAL, VIS_STUB_ONLY, VIS_OPAQUE, VIS_UNAVAILABLE})
 #: 公开别名：closure 判断「这一维是不是**确证盲区**」时用同一份定义，别各写各的。
 INSUFFICIENT = _INSUFFICIENT
+
+#: 每个可见性维度实际消费的 ``report.meta`` 原始信号键。快照会记录本轮见到的键集合，
+#: 让后续刷新能区分「合法新增信号」与「旧报告被裁掉了部分输入」。
+_INPUT_KEYS_BY_SOURCE: dict[str, tuple[str, ...]] = {
+    "dex": (
+        "dex_available", "dex_scanned", "dex_strings_truncated", "dex_string_pool",
+        "is_hardened", "hardening_structural", "extra_dex_visibility", "artifact_lineage",
+    ),
+    "native": ("native_obfuscation", "native_files_scanned"),
+    "resource": (
+        "uni_encrypted", "crypto_recipe", "resource_files_scanned",
+        "resource_files_read_failed", "resource_listing_failed",
+    ),
+    "runtime": ("runtime_merged", "capture_quality", "capture_signals"),
+}
+
+
+def input_keys_seen(
+    meta: Mapping[str, object], source: str | None = None
+) -> tuple[str, ...]:
+    """返回本轮求值实际可见的输入键（稳定排序）；``source=None`` 时覆盖全部维度。"""
+    names = (
+        _INPUT_KEYS_BY_SOURCE.get(source, ())
+        if source is not None
+        else tuple(key for keys in _INPUT_KEYS_BY_SOURCE.values() for key in keys)
+    )
+    return tuple(sorted(key for key in names if key in meta))
 
 
 def _meta(report: Any) -> dict:
@@ -390,6 +418,43 @@ def reassess_claims(assessment: dict) -> dict:
     }
 
 
+def reassess_derived(assessment: dict, meta: dict) -> dict:
+    """按当前 ``sources`` 与原始 ``meta`` 重建全部派生展示字段。
+
+    closure 可能把裁剪报告中丢失的确证盲区从旧快照回填进 ``sources``。此时不仅
+    ``claims``，连逐源说明和补救动作也必须同步，否则机器字段与人读建议会各说各话。
+    """
+    sources = assessment.get("sources")
+    if not isinstance(sources, dict):
+        return assessment
+
+    claims, blocked = _derive_claims(sources)
+    remediation = str(assessment.get("remediation") or REM_NOT_ATTEMPTED)
+    _current_remediation, remediation_why = _remediation(meta)
+    notes: list[str] = []
+    for src, info in sources.items():
+        if not isinstance(info, dict):
+            continue
+        for why in info.get("why") or []:
+            notes.append(f"[{src}] {why}")
+    notes.extend(remediation_why)
+    notes.extend(_attribution_caveat(meta))
+    if blocked:
+        labels = "、".join(_CLAIM_LABELS.get(c, c) for c in blocked)
+        notes.append(
+            f"★以下结论**无资格下**（相关输入不可见）：{labels}。"
+            "此处的「未发现」只说明本次没看到，不能解读为不存在。"
+        )
+    return {
+        **assessment,
+        "claims": claims,
+        "blocked_claims": sorted(blocked),
+        "notes": notes,
+        "next_actions": _next_actions(sources, remediation, meta),
+        "degraded": bool(blocked),
+    }
+
+
 def assess(report: Any) -> dict[str, Any]:
     """求值一份报告的证据可见性与主张资格。绝不抛；坏输入 → 全 unknown 的保守结果。
 
@@ -411,10 +476,26 @@ def assess(report: Any) -> dict[str, Any]:
         rt_vis, rt_why = _runtime_visibility(meta)
         res_vis, res_why = _resource_visibility(meta)
         sources = {
-            "dex": {"visibility": dex_vis, "why": dex_why},
-            "native": {"visibility": nat_vis, "why": nat_why},
-            "resource": {"visibility": res_vis, "why": res_why},
-            "runtime": {"visibility": rt_vis, "why": rt_why},
+            "dex": {
+                "visibility": dex_vis,
+                "why": dex_why,
+                "inputs_seen": list(input_keys_seen(meta, "dex")),
+            },
+            "native": {
+                "visibility": nat_vis,
+                "why": nat_why,
+                "inputs_seen": list(input_keys_seen(meta, "native")),
+            },
+            "resource": {
+                "visibility": res_vis,
+                "why": res_why,
+                "inputs_seen": list(input_keys_seen(meta, "resource")),
+            },
+            "runtime": {
+                "visibility": rt_vis,
+                "why": rt_why,
+                "inputs_seen": list(input_keys_seen(meta, "runtime")),
+            },
         }
 
         claims, blocked = _derive_claims(sources)
@@ -434,7 +515,7 @@ def assess(report: Any) -> dict[str, Any]:
             )
 
         return {
-            "schema_version": "1.0",
+            "schema_version": "1.1",
             "sources": sources,
             "claims": claims,
             "blocked_claims": sorted(blocked),
@@ -446,9 +527,11 @@ def assess(report: Any) -> dict[str, Any]:
     except Exception:  # noqa: BLE001 — 求值失败不得影响主流程；返回保守的"全未知"
         logger.exception("[visibility] 可见性求值异常，返回保守结果")
         return {
-            "schema_version": "1.0",
-            "sources": {k: {"visibility": VIS_UNKNOWN, "why": []}
-                        for k in ("dex", "native", "resource")},
+            "schema_version": "1.1",
+            "sources": {
+                k: {"visibility": VIS_UNKNOWN, "why": [], "inputs_seen": []}
+                for k in ("dex", "native", "resource", "runtime")
+            },
             "claims": {}, "blocked_claims": sorted(_CLAIM_REQUIREMENTS),
             "remediation": REM_NOT_ATTEMPTED,
             "notes": ["可见性求值异常，全部穷尽性结论按无资格处理"],
@@ -481,4 +564,5 @@ __all__ = [
     "VIS_UNKNOWN",
     "assess",
     "blocks_claim",
+    "input_keys_seen",
 ]
