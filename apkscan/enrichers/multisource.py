@@ -697,6 +697,66 @@ class UrlscanPassiveEnricher(_PassiveLookupEnricher):
         return {"records": compact, "count": len(compact), "source": "urlscan"} if compact else {}
 
 
+#: AbuseIPDB 响应字段 → 本仓归一化字段名（本仓一律 snake_case，与其它 provider 对齐）。
+#: ★有意**不收** ``reports[]``：举报正文是第三方自由文本，既可能含 PII，也是未经核实的指控。
+_ABUSEIPDB_FIELDS = (
+    ("abuse_confidence_score", "abuseConfidenceScore"),
+    ("total_reports", "totalReports"),
+    ("distinct_reporters", "numDistinctUsers"),
+    ("country_code", "countryCode"),
+    ("isp", "isp"),
+    ("usage_type", "usageType"),
+    ("domain", "domain"),
+    ("last_reported_at", "lastReportedAt"),
+    ("is_tor", "isTor"),
+    ("is_whitelisted", "isWhitelisted"),
+    ("is_public", "isPublic"),
+)
+
+
+class AbuseIpDbPassiveEnricher(_PassiveLookupEnricher):
+    """AbuseIPDB 举报信誉（仅 IP）。环境变量名沿用仓库早已预留的 ``FXAPK_ABUSEIPDB_KEY``。
+
+    ★证据定位：信誉分是**他人举报的聚合**，不是本工具的独立观测，只能当旁证。故它
+      只进 ``endpoints[].enrichment`` 与 ``source_status``，**不参与五层归属**——
+      ``isp`` 是 ISP 名而非 BGP AS 组织名，把它硬映射进 origin_network 等于造证据。
+    ★只留计数与信誉分，举报正文一律不落盘（见 ``_ABUSEIPDB_FIELDS`` 注释）。
+    """
+
+    name = "abuseipdb"
+    applies_to = ["ip"]
+    required_env = ("FXAPK_ABUSEIPDB_KEY",)
+    _URL = "https://api.abuseipdb.com/api/v2/check"
+    #: 举报回溯窗口（天）。90=官方默认，够覆盖一个分析周期，又不至于把陈年举报当现状。
+    _MAX_AGE_DAYS = 90
+
+    def _lookup(self, endpoint: Endpoint, credential: str) -> object:
+        response = self._http.get(
+            self._URL,
+            headers={"Key": credential, "Accept": "application/json"},
+            params={"ipAddress": endpoint.value, "maxAgeInDays": self._MAX_AGE_DAYS},
+            timeout=_TIMEOUT,
+        )
+        # 401（key 配错）在此抛 HTTPError → 基类记 failed。绝不在子类里 catch 成空 dict，
+        # 那会把「没查」伪装成「查过没有」。
+        response.raise_for_status()
+        return response.json()
+
+    def _normalize(self, payload: object, endpoint: Endpoint) -> dict[str, object]:
+        del endpoint
+        data = _dict(_dict(payload).get("data"))
+        if not data:
+            return {}
+        normalized: dict[str, object] = {}
+        for target_key, source_key in _ABUSEIPDB_FIELDS:
+            scalar = _bounded_scalar(data.get(source_key))
+            if scalar is not None:
+                normalized[target_key] = scalar
+        if normalized:
+            normalized["source"] = "abuseipdb"
+        return normalized
+
+
 def configured_case_close_enrichers() -> list[BaseEnricher]:
     """Return all built-in bounded passive adapters in deterministic order."""
     return [
@@ -709,10 +769,12 @@ def configured_case_close_enrichers() -> list[BaseEnricher]:
         VirusTotalPassiveEnricher(),
         OtxPassiveEnricher(),
         UrlscanPassiveEnricher(),
+        AbuseIpDbPassiveEnricher(),
     ]
 
 
 __all__ = [
+    "AbuseIpDbPassiveEnricher",
     "CensysPassiveEnricher",
     "FofaPassiveEnricher",
     "HunterPassiveEnricher",
