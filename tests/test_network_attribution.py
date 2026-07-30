@@ -69,14 +69,14 @@ def test_parse_asn_strict() -> None:
 # --------------------------------------------------------------------------- #
 def test_dns_facts_become_resolves_to_and_alias_edges() -> None:
     ep = _ep("a.example.com", "domain", {
-        "dns": {"ips": ["1.2.3.4"], "hosting": [{"ip": "5.6.7.8", "asn": "AS4134"}], "cname": ["cdn.b.net"]},
+        "dns": {"ips": ["1.2.3.4"], "hosting": [{"ip": "198.51.100.48", "asn": "AS4134"}], "cname": ["cdn.b.example.net"]},
     })
     blob = _build(ep)
     edges = _edges(blob)
     assert ("resolves_to", "a.example.com", "1.2.3.4") in edges
-    assert ("resolves_to", "a.example.com", "5.6.7.8") in edges  # hosting ip union
-    assert ("alias_of", "a.example.com", "cdn.b.net") in edges
-    assert ("in_asn", "5.6.7.8", "AS4134") in edges
+    assert ("resolves_to", "a.example.com", "198.51.100.48") in edges  # hosting ip union
+    assert ("alias_of", "a.example.com", "cdn.b.example.net") in edges
+    assert ("in_asn", "198.51.100.48", "AS4134") in edges
 
 
 def test_certs_and_shodan_hostnames_become_related_hostname_never_certificate() -> None:
@@ -121,14 +121,14 @@ def test_domestic_and_direct_connection_from_facts() -> None:
 
 def test_public_cdn_reuses_the_wired_edge_tier() -> None:
     ep = _ep("cdn.example.com", "domain", {
-        "dns": {"ips": ["104.16.0.1"]},
-        "attribution": {"ips": [{"ip": "104.16.0.1", "country": "US",
+        "dns": {"ips": ["198.51.100.8"]},
+        "attribution": {"ips": [{"ip": "198.51.100.8", "country": "US",
                                  "origin_network": {"asn": 13335, "category": "cdn"},
                                  "hosting_provider": {"category": "cdn"},
                                  "edge_provider": {"name": "Cloudflare", "tier": "confirmed"}}]},
     })
     blob = _build(ep)
-    roles = _roles(blob, "104.16.0.1")
+    roles = _roles(blob, "198.51.100.8")
     # public_cdn present as a role signal (context/blocker), and it BLOCKS relay/origin
     assert roles["domestic_relay_candidate"]["eligible"] is False
     assert "public_cdn" in roles["domestic_relay_candidate"]["negative_signals"]
@@ -139,14 +139,14 @@ def test_domain_icp_does_not_make_resolved_ips_domestic() -> None:
     # domain resolves to must NOT inherit domestic_network.
     ep = _ep("pay.example.com", "domain", {
         "icp": {"unit": "示例公司"},
-        "dns": {"ips": ["104.16.0.1"]},
-        "attribution": {"ips": [{"ip": "104.16.0.1", "country": "US",
+        "dns": {"ips": ["198.51.100.8"]},
+        "attribution": {"ips": [{"ip": "198.51.100.8", "country": "US",
                                  "origin_network": {"asn": 13335, "category": "cdn"},
                                  "hosting_provider": {"category": "cdn"},
                                  "edge_provider": {"tier": "confirmed"}}]},
     })
     blob = _build(ep)
-    for role in _roles(blob, "104.16.0.1").values():
+    for role in _roles(blob, "198.51.100.8").values():
         assert "domestic_network" not in role["matched_signals"]
 
 
@@ -166,8 +166,8 @@ def test_no_static_report_yields_an_eligible_role() -> None:
     # the load-bearing invariant: behavioral signals are never static-derivable, so
     # cloaking/edge/relay/origin can never be eligible from a static-only report.
     blob = _build(_cn_ip_endpoint(), _ep("x.example.com", "domain", {
-        "dns": {"ips": ["104.16.0.1"]},
-        "attribution": {"ips": [{"ip": "104.16.0.1", "country": "US",
+        "dns": {"ips": ["198.51.100.8"]},
+        "attribution": {"ips": [{"ip": "198.51.100.8", "country": "US",
                                  "origin_network": {"asn": 13335, "category": "cdn"},
                                  "hosting_provider": {"category": "cdn"}, "edge_provider": {"tier": "confirmed"}}]}}))
     for ep in blob["endpoints"]:
@@ -178,13 +178,13 @@ def test_no_static_report_yields_an_eligible_role() -> None:
 
 def test_same_asn_alone_makes_no_cross_edge() -> None:
     e1 = _ep("1.1.1.1", "ip", {"asn": {"asn": 4837}, "attribution": {"ips": [{"ip": "1.1.1.1", "origin_network": {"asn": 4837}}]}})
-    e2 = _ep("2.2.2.2", "ip", {"asn": {"asn": 4837}, "attribution": {"ips": [{"ip": "2.2.2.2", "origin_network": {"asn": 4837}}]}})
+    e2 = _ep("198.51.100.21", "ip", {"asn": {"asn": 4837}, "attribution": {"ips": [{"ip": "198.51.100.21", "origin_network": {"asn": 4837}}]}})
     blob = _build(e1, e2)
     edges = _edges(blob)
     assert ("in_asn", "1.1.1.1", "AS4837") in edges
-    assert ("in_asn", "2.2.2.2", "AS4837") in edges
+    assert ("in_asn", "198.51.100.21", "AS4837") in edges
     assert all(t == "AS4837" for rel, s, t in edges if rel == "in_asn")  # only the shared AS, no stray in_asn
-    assert not any(s in ("1.1.1.1", "2.2.2.2") and t in ("1.1.1.1", "2.2.2.2") for _, s, t in edges)
+    assert not any(s in ("1.1.1.1", "198.51.100.21") and t in ("1.1.1.1", "198.51.100.21") for _, s, t in edges)
 
 
 def test_no_operator_or_actor_key_anywhere() -> None:
@@ -209,8 +209,8 @@ def test_determinism_under_endpoint_shuffle() -> None:
     # case) collide on a fact-only evidence id, so this exercises the dedup path — the
     # only order-sensitive one. Permuting endpoint order must still yield a byte-identical
     # blob: the deduped evidence keeps a canonical (lexicographically-smallest) raw_reference.
-    a = _ep("a.example.com", "domain", {"dns": {"hosting": [{"ip": "5.6.7.8", "asn": "AS4134"}]}})
-    b = _ep("b.example.com", "domain", {"dns": {"hosting": [{"ip": "5.6.7.8", "asn": "AS4134"}]}})
+    a = _ep("a.example.com", "domain", {"dns": {"hosting": [{"ip": "198.51.100.48", "asn": "AS4134"}]}})
+    b = _ep("b.example.com", "domain", {"dns": {"hosting": [{"ip": "198.51.100.48", "asn": "AS4134"}]}})
     first = json.dumps(build_network_attribution([a, b], artifact_id="s", phase="analyze"), sort_keys=True)
     second = json.dumps(build_network_attribution([b, a], artifact_id="s", phase="analyze"), sort_keys=True)
     assert first == second
@@ -297,8 +297,8 @@ def test_digest_role_candidates_have_exact_keys_including_kind() -> None:
         {"endpoint": "c2.fraud-gw.cn", "kind": "domain", "ips": [
             {"ip": "1.2.3.4", "roles": [
                 {"role": "origin_candidate", "eligible": True, "score": 0.9, "confidence": "high"}]}]},
-        {"endpoint": "5.6.7.8", "kind": "ip", "ips": [
-            {"ip": "5.6.7.8", "roles": [
+        {"endpoint": "198.51.100.48", "kind": "ip", "ips": [
+            {"ip": "198.51.100.48", "roles": [
                 {"role": "edge_candidate", "eligible": True, "score": 0.5, "confidence": "medium"}]}]},
     ]}
     cands = build_digest({"meta": {"network_attribution": blob}, "leads": []})["network_attribution"]["role_candidates"]
@@ -307,7 +307,7 @@ def test_digest_role_candidates_have_exact_keys_including_kind() -> None:
         assert set(c) == {"endpoint", "kind", "ip", "role", "score", "confidence"}  # exact key set
     by_ep = {c["endpoint"]: c for c in cands}
     assert by_ep["c2.fraud-gw.cn"]["kind"] == "domain"  # domain 端点 kind 透传
-    assert by_ep["5.6.7.8"]["kind"] == "ip"             # ip 端点 kind 透传
+    assert by_ep["198.51.100.48"]["kind"] == "ip"             # ip 端点 kind 透传
     ranks = [_ROLE_RANK.get(str(c["role"]), 99) for c in cands]
     assert ranks == sorted(ranks)  # 排序仍按 role_rank 优先
 
@@ -389,7 +389,7 @@ def test_ip_endpoint_sni_list_makes_no_domain_ip_edge() -> None:
     # runtime["sni"] on an IP endpoint may list co-hosted third-party names; the bridge
     # must NOT pair them to the IP (tls_sni is emitted only from the domain-endpoint side).
     ep = _ep("203.0.113.7", "ip",
-             {"runtime": {"sni": ["a.com", "b.com"], "remote_endpoints": ["203.0.113.7:443"]}},
+             {"runtime": {"sni": ["a.example.com", "b.example.com"], "remote_endpoints": ["203.0.113.7:443"]}},
              evidences=[Evidence(source="runtime-pcap", location="pcap")])
     blob = _build(ep)
     assert not any(e["type"] == "tls_sni" for e in blob["evidence"])
@@ -726,7 +726,7 @@ def test_origin_candidate_single_login_path_not_eligible() -> None:
 def _edge_ip(value, *, host_signals=None, source="runtime", tier=None, country="US"):
     # host_signals: {host: (redirect, cookie)}; 默认一个 host 同时重定向+挑战（cloaking 行为）。
     if host_signals is None:
-        host_signals = {"pay.x.com": (True, True)}
+        host_signals = {"pay.x.example.com": (True, True)}
     edge_hosts = {h: {"r": bool(r), "c": bool(c)} for h, (r, c) in host_signals.items()}
     return _ep(value, "ip", {
         "attribution": {"ips": [{"ip": value, "country": country,
@@ -737,20 +737,20 @@ def _edge_ip(value, *, host_signals=None, source="runtime", tier=None, country="
 
 
 def test_edge_candidate_eligible_from_runtime_redirect_and_cookie() -> None:
-    r = _roles(_build(_edge_ip("5.5.5.5")), "5.5.5.5")["edge_candidate"]
+    r = _roles(_build(_edge_ip("198.51.100.47")), "198.51.100.47")["edge_candidate"]
     assert r["eligible"] is True
     assert {"redirect", "cookie_challenge"} <= set(r["matched_signals"])
     assert r["evidence"]
 
 
 def test_cloaking_edge_node_eligible_from_redirect_and_cookie() -> None:
-    r = _roles(_build(_edge_ip("5.5.5.5")), "5.5.5.5")["cloaking_edge_node"]
+    r = _roles(_build(_edge_ip("198.51.100.47")), "198.51.100.47")["cloaking_edge_node"]
     assert r["eligible"] is True  # 同 host 的 COOKIE_CHALLENGE + REDIRECT = ≥2 强行为信号
 
 
 def test_edge_and_cloaking_not_eligible_single_signal() -> None:
     # 某 host 仅重定向（无挑战）→ 无 host 双命中 → 不产信号 → 不 eligible。
-    roles = _roles(_build(_edge_ip("5.5.5.5", host_signals={"pay.x.com": (True, False)})), "5.5.5.5")
+    roles = _roles(_build(_edge_ip("198.51.100.47", host_signals={"pay.x.example.com": (True, False)})), "198.51.100.47")
     for role in ("edge_candidate", "cloaking_edge_node"):
         r = roles.get(role)
         assert r is None or r["eligible"] is False, role
@@ -758,7 +758,7 @@ def test_edge_and_cloaking_not_eligible_single_signal() -> None:
 
 def test_edge_cross_tenant_shared_edge_not_eligible() -> None:
     # ★复审 P1：共享边缘上不同 host（不同租户）各出一个信号，不得凑成 cloaking——须同一 host 双命中。
-    roles = _roles(_build(_edge_ip("5.5.5.5", host_signals={"a.com": (True, False), "b.com": (False, True)})), "5.5.5.5")
+    roles = _roles(_build(_edge_ip("198.51.100.47", host_signals={"a.example.com": (True, False), "b.example.com": (False, True)})), "198.51.100.47")
     all_sig = {s for role in roles.values() for s in role["matched_signals"]}
     assert not ({"redirect", "cookie_challenge"} & all_sig)
     for role in ("edge_candidate", "cloaking_edge_node"):
@@ -791,14 +791,14 @@ def _cloaking_ip_payload(evidences) -> dict:
     # 一个 IP 端点：带 cloaking 触发所需的 enrichment（同 host redirect+cookie=两只布尔就过 cloaking 档）
     # 与 attribution 事实，evidences 由参数决定（无 / 非 runtime* / 真 runtime）。
     ep: dict = {
-        "value": "5.5.5.5",
+        "value": "198.51.100.47",
         "kind": "ip",
         "enrichment": {
-            "attribution": {"ips": [{"ip": "5.5.5.5", "country": "US",
+            "attribution": {"ips": [{"ip": "198.51.100.47", "country": "US",
                                      "origin_network": {"asn": 64500, "category": "cloud"},
                                      "hosting_provider": {"category": None},
                                      "edge_provider": {"tier": None}}]},
-            "runtime": {"edge_hosts": {"pay.x.com": {"r": True, "c": True}}},
+            "runtime": {"edge_hosts": {"pay.x.example.com": {"r": True, "c": True}}},
         },
     }
     if evidences is not None:
@@ -813,7 +813,7 @@ def test_handinjected_runtime_report_without_contact_evidence_licenses_no_role(t
     #   旧逻辑合成 source="runtime" 会命中 observed-contact allowlist、两只布尔直接过 cloaking 档。
     eps = load_runtime_endpoints(_write_runtime_report(tmp_path, _cloaking_ip_payload(evidences=None)))
     assert eps and all(ev.source == "runtime-derived" for ev in eps[0].evidences)
-    roles = _roles(_build(*eps), "5.5.5.5")
+    roles = _roles(_build(*eps), "198.51.100.47")
     all_sig = {s for role in roles.values() for s in role["matched_signals"]}
     assert not ({"redirect", "cookie_challenge"} & all_sig)
     for role in ("edge_candidate", "cloaking_edge_node"):
@@ -826,7 +826,7 @@ def test_handinjected_runtime_report_with_static_evidence_licenses_no_role(tmp_p
     static_ev = [{"source": "static", "location": "x", "snippet": "s"}]
     eps = load_runtime_endpoints(_write_runtime_report(tmp_path, _cloaking_ip_payload(evidences=static_ev)))
     assert eps and all(ev.source == "runtime-derived" for ev in eps[0].evidences)
-    roles = _roles(_build(*eps), "5.5.5.5")
+    roles = _roles(_build(*eps), "198.51.100.47")
     all_sig = {s for role in roles.values() for s in role["matched_signals"]}
     assert not ({"redirect", "cookie_challenge"} & all_sig)
     for role in ("edge_candidate", "cloaking_edge_node"):
@@ -837,16 +837,16 @@ def test_handinjected_runtime_report_with_static_evidence_licenses_no_role(tmp_p
 def test_genuine_capture_runtime_evidence_still_licenses_cloaking(tmp_path) -> None:
     # 控制组 / 无回归：真 capture 产物本就带 source="runtime"（observed-contact），reload 后保持 "runtime"，
     #   cloaking 仍如常 eligible——证明上面两条不是因整条路径失灵才通过。
-    real_ev = [{"source": "runtime", "location": "flows.mitm", "snippet": "5.5.5.5:443"}]
+    real_ev = [{"source": "runtime", "location": "flows.mitm", "snippet": "198.51.100.47:443"}]
     eps = load_runtime_endpoints(_write_runtime_report(tmp_path, _cloaking_ip_payload(evidences=real_ev)))
     assert eps and eps[0].evidences[0].source == "runtime"
-    r = _roles(_build(*eps), "5.5.5.5")["cloaking_edge_node"]
+    r = _roles(_build(*eps), "198.51.100.47")["cloaking_edge_node"]
     assert r["eligible"] is True
 
 
 def test_edge_signals_need_runtime_evidence_not_just_flags() -> None:
     # ★守不变量：手注 edge_hosts 但无 runtime 证据 → 不产信号。
-    roles = _roles(_build(_edge_ip("5.5.5.5", source="static")), "5.5.5.5")
+    roles = _roles(_build(_edge_ip("198.51.100.47", source="static")), "198.51.100.47")
     all_sig = {s for role in roles.values() for s in role["matched_signals"]}
     assert not ({"redirect", "cookie_challenge"} & all_sig)
 
@@ -973,16 +973,16 @@ def test_giant_first_contact_ts_on_domain_endpoint_keeps_resource_signals() -> N
     视图塌成 None。修前 from_endpoint 无条件 eager 调 _runtime_first_contact_ts → OverflowError → per-endpoint
     except 吞掉 → public_cdn 等纯资源信号连累丢失。"""
     ep = _ep("cdn.example.com", "domain", {
-        "dns": {"ips": ["104.16.0.1"]},
+        "dns": {"ips": ["198.51.100.8"]},
         "runtime": {"first_contact_ts": 10**400},  # 越界垃圾时间戳
-        "attribution": {"ips": [{"ip": "104.16.0.1", "country": "US",
+        "attribution": {"ips": [{"ip": "198.51.100.8", "country": "US",
                                  "origin_network": {"asn": 13335, "category": "cdn"},
                                  "hosting_provider": {"category": "cdn"},
                                  "edge_provider": {"name": "Cloudflare", "tier": "confirmed"}}]},
     })
     blob = _build(ep)
     assert blob is not None  # 视图未塌
-    roles = _roles(blob, "104.16.0.1")
+    roles = _roles(blob, "198.51.100.8")
     assert "public_cdn" in roles["domestic_relay_candidate"]["negative_signals"]  # 资源信号仍在
 
 
