@@ -11,7 +11,9 @@ import urllib.parse
 __all__ = [
     "DNS_SERVICE_PORTS",
     "KNOWN_INTERCEPT_IPS",
+    "AUTHORITATIVE_DNS_HOSTS",
     "PUBLIC_DNS_RESOLVERS",
+    "is_authoritative_dns_host",
     "is_infrastructure_endpoint",
     "is_known_intercept_ip",
     "is_public_dns_resolver",
@@ -85,7 +87,47 @@ PUBLIC_DNS_RESOLVERS: frozenset[str] = frozenset({
     "94.140.14.14", "94.140.15.15",                 # AdGuard
     "76.76.2.0", "76.76.10.0",                      # Control D
     "185.228.168.9", "185.228.169.9",               # CleanBrowsing
+    # ★以下为同一批服务商的**过滤档 / 家庭档**地址与几家区域解析器。名单原先只收了各家的
+    #   默认档，于是同一个服务商的另一档地址照旧被判「建议核查」。实测某第三方库把整份
+    #   公共解析器清单编进 DEX，一个样本就贡献 20 余条这类地址。
+    "185.228.168.168", "185.228.169.168",           # CleanBrowsing 家庭过滤档
+    "208.67.222.123", "208.67.220.123",             # OpenDNS FamilyShield
+    "77.88.8.88", "77.88.8.2",                      # Yandex 安全档 / 家庭档
+    "199.85.126.10", "199.85.127.10",               # Norton ConnectSafe（服务已下线，地址仍在各清单里）
+    "209.244.0.3", "209.244.0.4",                   # Level3 / CenturyLink
+    "216.146.35.35", "216.146.36.36",               # Dyn
+    "195.46.39.39",                                 # SafeDNS
+    "168.95.1.1", "168.95.192.1",                   # 中華電信 HiNet
+    "80.80.80.80", "80.80.81.81",                   # Freenom World
 })
+
+#: 域名托管商的**权威** DNS 主机（不是递归解析器）。样本里出现同样是 DNS 库的引导/测试
+#: 数据，向托管商查这些地址与本案无关。
+#:
+#: ★只列**实测见过**的地址，不按网段整段放行：Route53 的 NS 确实占着一个公开的 /21，
+#:   但本仓没有可离线核对的官方前缀表，按整段放行等于凭记忆替人下结论。
+#:   再遇到新地址就加一行——这条路慢，但每一行都可核。
+AUTHORITATIVE_DNS_HOSTS: frozenset[str] = frozenset({
+    # AWS Route53 的 ns-*.awsdns-*.* 主机
+    "205.251.193.186", "205.251.194.188", "205.251.197.22", "205.251.199.99",
+})
+
+
+def is_authoritative_dns_host(value: str) -> bool:
+    """``value`` 是否为已知的域名托管商权威 DNS 主机（非业务节点）。
+
+    与 :func:`is_public_dns_resolver` 同口径：先折回 IPv4-mapped IPv6 再比。坏输入 → False。
+    """
+    if not isinstance(value, str):
+        return False
+    if value in AUTHORITATIVE_DNS_HOSTS:
+        return True
+    try:
+        addr = ipaddress.ip_address(value.strip())
+    except ValueError:
+        return False
+    mapped = getattr(addr, "ipv4_mapped", None)
+    return mapped is not None and str(mapped) in AUTHORITATIVE_DNS_HOSTS
 
 
 def is_public_dns_resolver(value: str) -> bool:
