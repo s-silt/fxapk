@@ -45,13 +45,61 @@ def build_endpoint_leads(
         for ep in endpoints
         if ep.kind == "ip" and infra.is_low_octet_ipv4(ep.value)
     }
+    # 哪些 native 库能被认出是「第三方 SDK 的二进制」——供 IP 侧判断裸地址是不是 SDK 内置常量。
+    # ★同样要全样本一次算好：判据要看的是"这个库里还有没有该 SDK 自己的域名"，
+    #   而域名端点与 IP 端点是两条独立记录，逐端点看不出来。
+    vendor_libs = _vendor_sdk_libraries(endpoints)
     leads: list[Lead] = []
     for ep in endpoints:
         if ep.kind == "domain":
             leads.append(_domain_lead(ep, online))
         elif ep.kind == "ip":
-            leads.append(_ip_lead(ep, online, low_octet_pool=low_octet_pool))
+            leads.append(_ip_lead(ep, online, low_octet_pool=low_octet_pool, vendor_libs=vendor_libs))
     return leads
+
+
+#: 一个 native 库里要出现几个**已知第三方基础设施域名**，才算认出它是厂商 SDK 的二进制。
+#: 取 2 而不是 1：单个已知域名太容易被自带 .so 的样本顺手写进去（随手塞一个众所周知的
+#: 大厂域名就能让同文件里的真后端地址降档），两个以上才构成"这确实是那家 SDK 的库"的形态。
+_VENDOR_SDK_MIN_KNOWN_DOMAINS = 2
+
+
+def _native_lib_of(location: object) -> str:
+    """证据位置指向 native 库时返回其文件名（小写），否则空串。
+
+    ``lib/arm64-v8a/libDingRtc.so`` 与 ``lib/armeabi-v7a/libDingRtc.so`` 折到同一个名字：
+    多 ABI 是同一个库的多份拷贝，不该被当成两个来源。
+    """
+    loc = str(location or "").replace("\\", "/").lower()
+    if not loc.endswith(".so"):
+        return ""
+    return loc.rsplit("/", 1)[-1]
+
+
+def _vendor_sdk_libraries(endpoints: list[Endpoint]) -> set[str]:
+    """找出「带着 ≥2 个已知第三方基础设施域名」的 native 库文件名集合。"""
+    per_lib: dict[str, set[str]] = {}
+    for ep in endpoints:
+        if ep.kind != "domain" or not infra.is_known_infra(ep.value):
+            continue
+        for ev in ep.evidences:
+            lib = _native_lib_of(ev.location)
+            if lib:
+                per_lib.setdefault(lib, set()).add(ep.value.lower())
+    return {lib for lib, doms in per_lib.items() if len(doms) >= _VENDOR_SDK_MIN_KNOWN_DOMAINS}
+
+
+def _vendor_sdk_constant(ep: Endpoint, vendor_libs: set[str]) -> str:
+    """该端点是否**只**出现在某一个已认出的厂商 SDK 库内；是则返回库名，否则空串。
+
+    要求"全部证据同属一个库"：只要还有别的来源（dex 串、资源、运行时），这个地址就不只是
+    SDK 常量，判据不适用——宁可留在原来的出口里。
+    """
+    libs = {_native_lib_of(ev.location) for ev in ep.evidences}
+    if len(libs) != 1:
+        return ""
+    lib = libs.pop()
+    return lib if lib and lib in vendor_libs else ""
 
 
 # 结构化境外目标聚合的展示上限（防个别巨型主机塞爆 meta；完整原始数据仍在 endpoints[].enrichment）。
@@ -367,7 +415,11 @@ def _is_tenant_hosting_asn(asn: dict) -> bool:
 
 
 def _ip_lead(
-    ep: Endpoint, online: bool = True, *, low_octet_pool: set[str] | None = None
+    ep: Endpoint,
+    online: bool = True,
+    *,
+    low_octet_pool: set[str] | None = None,
+    vendor_libs: set[str] | None = None,
 ) -> Lead:
     asn = ep.enrichment.get("asn") or {}
 
@@ -409,6 +461,8 @@ def _ip_lead(
             # 低段位裸 IP 的定向豁免佐证：ASN 落托管段 + 样本内无同形态编号序列。
             hosting_attributed=_is_tenant_hosting_asn(asn),
             low_octet_siblings=len((low_octet_pool or set()) - {bare}),
+            # 全部证据都在某厂商 SDK 的 .so 内（该文件同时带着该 SDK 自有域名）→ 降待核。
+            vendor_sdk_binary=_vendor_sdk_constant(ep, vendor_libs or set()),
         )
 
     endpoint_notes = _endpoint_notes(ep, online, enriched)
@@ -421,6 +475,10 @@ def _ip_lead(
         # 形态存疑的值不许以 HIGH 示人：HIGH 是"这确实是个地址"的断言，而此处恰恰不确定。
         # subject（ASN org）非空只说明"这个数字解释成 IP 后落在谁的网段"，不是地址性的证据。
         confidence = Confidence.MEDIUM
+    elif advice == infra.ADVICE_REVIEW and ip_reason:
+        # 降待核的理由必须跟到线索上。★不写就只剩一个没有出处的"待核"：人既不知道为什么
+        #   被降、也不知道该核什么，等于把判据的结论藏起来——降噪的账要算得回来。
+        endpoint_notes = f"{endpoint_notes}；{ip_reason}" if endpoint_notes else ip_reason
 
     notes = _apply_forensic(
         advice, ep.value, evidence_to_obtain, endpoint_notes,
