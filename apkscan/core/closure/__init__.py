@@ -226,6 +226,22 @@ def _preserve_confirmed_gaps(previous: dict, fresh: dict, meta: dict) -> dict:
 
     只在旧值属**确证盲区**（``INSUFFICIENT``）时回填：那是本次分析实测到的缺口，丢了就是丢证据。
     旧值本就是 complete/unknown 的维度照常跟随重算——那里没有要保护的信息。
+
+    ★**已知未修的缺口（部分裁剪）**：判据是「该维还剩**任意**一个输入键」，所以只挡得住
+      「该维输入被全删」的报告。实测反例：加固样本 ``dex=stub_only``，裁剪后只留
+      ``dex_available=True``、删掉 ``is_hardened`` / ``hardening_structural``，重算得到
+      ``dex=complete``，``blocked_claims`` 里 ``no_contact_harvesting`` /
+      ``no_sms_interception`` 随之解禁——加固样本本该封顶的主张凭空放开。
+
+      **为什么没在这里顺手改严**：改成「要求该维输入全在场」会拦死合法升级——``runtime`` 维只有
+      三个键，而正常路径的升级常只新增 ``capture_quality`` 一个（见
+      ``test_close_refreshes_stale_visibility_snapshot``），一改即红。``any()`` 太松、``all()``
+      太紧，**中间没有可靠判据**：要区分「被裁剪」与「新增了信号」，必须知道这份快照当初是基于
+      哪些键算出来的，而那个信息**现在没有被记录**。
+
+      正解是让 :func:`visibility.assess` 把「本次可见的输入键集合」一并写进快照，
+      重算时比对集合：现有键是旧集合的**真子集** → 判为裁剪、回填；否则跟随。那是一次
+      schema 变更，独立一刀做，不混在本次接线里。
     """
     from apkscan.core import visibility as _visibility
 

@@ -216,13 +216,71 @@ def test_stored_visibility_snapshot_is_refreshed_not_left_stale(tmp_path: Path) 
 
 
 def test_empty_capture_leaves_visibility_snapshot_honest(tmp_path: Path) -> None:
-    """反向：真·空采集刷新后仍是 ``unavailable``——刷新不得凭空造出运行时维。"""
+    """反向：真·空采集刷新后仍是 ``unavailable``——刷新不得凭空造出运行时维。
+
+    ★断言不带 `if`：曾写成 `if stored is not None:`，一旦刷新接线缺失、快照压根不存在，
+      整条测试就一句都不跑、静默变成恒真（codex P2）。
+    """
     payload = _merge(tmp_path, pcap_ingest.PcapSummary(flows=[]))
 
     stored = payload["meta"].get("visibility")
-    if stored is not None:                     # 原报告本就有快照时才有可比对象
-        assert stored == visibility.assess(payload)
-        assert stored["sources"]["runtime"]["visibility"] == visibility.VIS_UNAVAILABLE
+    assert stored is not None, "刷新没落盘快照（接线缺失时这条曾被条件断言静默跳过）"
+    assert stored == visibility.assess(payload)
+    assert stored["sources"]["runtime"]["visibility"] == visibility.VIS_UNAVAILABLE
+
+
+def test_stale_snapshot_is_replaced_not_merely_created(tmp_path: Path) -> None:
+    """★钉「替换已有陈旧快照」，而不只是「从无到有生成」。
+
+    `_STATIC` 本身不带 `meta.visibility`，所以上面那条其实只验证了"生成"。真实场景是
+    analyze 先存了一份 `runtime=unavailable`，回灌后必须被改写成 partial（codex P2）。
+    """
+    p = tmp_path / "report.json"
+    stale = json.loads(json.dumps(_STATIC))
+    stale.setdefault("meta", {})["visibility"] = {
+        "sources": {"runtime": {"visibility": visibility.VIS_UNAVAILABLE,
+                                "why": ["未做运行时观测（纯静态分析）"]}},
+        "blocked_claims": [],
+    }
+    p.write_text(json.dumps(stale, ensure_ascii=False), encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(str(p), _bidirectional_summary())
+    payload = json.loads(p.read_text(encoding="utf-8"))
+    rt = payload["meta"]["visibility"]["sources"]["runtime"]
+
+    assert rt["visibility"] == visibility.VIS_PARTIAL, "陈旧快照没被替换"
+    assert not any("未做运行时观测" in w for w in rt["why"]), rt["why"]
+
+
+def test_refresh_preserves_a_gap_when_its_inputs_were_stripped() -> None:
+    """刷新必须是**信息保持**的：该维输入被裁掉时沿用旧盲区，别从零重推成"完整可见"。
+
+    这是回灌无条件刷新的安全前提——若重算会丢盲区，那这条接线就成了新的「未发现被读成已穷尽」。
+
+    ★已知边界（未在本刀修）：判据是「该维还剩**任意**一个输入键」，故只挡得住"全删"。
+      **部分裁剪仍会丢盲区**——保留 `dex_available`、删掉 `is_hardened`，`stub_only` 会被刷成
+      `complete`（实测复现）。改严会拦死合法升级（`runtime` 维只三个键，正常升级常只新增
+      `capture_quality` 一个），正解要让 `assess` 把「本次可见的输入键集合」写进快照、
+      重算时比子集关系——那是 schema 变更，独立一刀。
+    """
+    from apkscan.core.closure import refresh_visibility_snapshot
+
+    hardened = {
+        "dex_available": True, "dex_scanned": 1, "is_hardened": True,
+        "hardening_structural": {"verdict": "hardened"}, "dex_string_pool": 0,
+    }
+    snap = visibility.assess({"meta": hardened})
+    assert snap["sources"]["dex"]["visibility"] in visibility.INSUFFICIENT
+
+    stripped: dict[str, object] = {"visibility": snap}   # 该维输入全被裁掉
+    refresh_visibility_snapshot(stripped)
+
+    after = stripped["visibility"]
+    assert isinstance(after, dict)
+    assert after["sources"]["dex"]["visibility"] in visibility.INSUFFICIENT, \
+        "输入被裁掉后重算把确证盲区刷成了完整可见"
+    for claim in ("no_contact_harvesting", "no_sms_interception"):
+        assert claim in after["blocked_claims"], f"{claim} 被凭空解禁"
 
 
 def test_merge_records_that_uid_attribution_was_not_possible(tmp_path: Path) -> None:
