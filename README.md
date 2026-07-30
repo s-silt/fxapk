@@ -31,6 +31,9 @@ git clone https://github.com/s-silt/fxapk.git && cd fxapk && pip install -e .
 # 静态分析，产出 HTML + JSON 到 out/
 fxapk analyze app.apk --out out
 
+# 已落盘的网页证据也是一级输入：递归读 .html / .body / .js / .headers，不联网重取
+fxapk analyze-web <证据目录> --out out
+
 # 一键全自动（接好 root 真机 / 模拟器）：体检 → 静态 → 脱壳 → 抓包 → 合并 → 案件闭环
 fxapk auto app.apk --out out
 
@@ -45,9 +48,12 @@ fxapk corpus regress --corpus <库目录>
 
 # 哪些样本出自同一套开发环境（构建路径是编译期烙进 native 库的，改名/重打包/换服务器都动不了）
 fxapk corpus shared-build-env
+
+# 批量被动富化一份目标清单（每行一个 IP / 域名）——默认 --dry-run 只估算各源配额、不发请求
+fxapk enrich batch -t targets.txt -o enrich_out
 ```
 
-主要命令：`analyze`（静态）、`auto`（一键分析并闭环）、`case close`（已有报告严格闭环）、`capture`（真机抓包）、`doctor`（设备环境体检 + 自动修）、`corpus`（样本库：历次报告入库、跨版本回归、按值反查串案、按构建环境找同源样本）。完整命令与参数见 `fxapk --help`。
+主要命令：`analyze`（静态）、`analyze-web`（已落盘网页证据）、`auto`（一键分析并闭环）、`case close`（已有报告严格闭环）、`capture`（真机抓包）、`doctor`（设备环境体检 + 自动修）、`enrich batch`（批量被动富化，可续跑）、`corpus`（样本库：历次报告入库、跨版本回归、按值反查串案、按构建环境找同源样本）。完整命令与参数见 `fxapk --help`。
 
 闭环状态写入 `report.meta.closure`：`complete` 表示主目标的运行时证据、资源登记、BGP 宣告、托管/分发和最终调证对象五层均有证据；`partial` 表示仍有显式缺口；`failed` 表示静态关键失败、要求动态但没有业务流量，或没有可闭环主目标。CDN / 防红前端未定位 Origin 时不会判为 `complete`。
 
@@ -78,6 +84,22 @@ fxapk corpus shared-build-env
 - `out/report.json` —— 完整结构化数据（机器读 / 二次处理）
 - `report.meta.closure` —— 闭环状态、五层证据、来源覆盖、缺口与下一步动作
 - `--fmt pdf` 可选导出 PDF（需本机 Chrome / Edge）
+
+## 从源码开发
+
+clone 后跑一次，启用提交前的敏感信息扫描：
+
+```bash
+git config core.hooksPath .githooks
+```
+
+它只看**已 staged 的新增行**：疑似真实地址、疑似凭据、无理由豁免三类默认阻断；域名与语境词
+如实报告但不阻断（`FXAPK_LEAK_SCAN_STRICT=1` 可一并阻断）。放行单行需写明理由——行内加
+`leak-scan: allow <理由>`。CI 会对 PR diff 再扫一遍，所以 `--no-verify` 绕不过最终门禁。
+
+测试夹具一律使用文档保留段（`192.0.2.0/24` / `198.51.100.0/24` / `203.0.113.0/24` /
+`2001:db8::/32` / `example.com`）。真实地址一旦推上远端就**不可撤销**——改写历史也删不掉平台
+侧的缓存副本，唯一可靠的办法是源头不写进去。
 
 ## 合规边界
 
