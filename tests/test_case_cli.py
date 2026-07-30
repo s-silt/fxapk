@@ -11,12 +11,12 @@ from apkscan.report import json as report_json
 runner = CliRunner()
 
 
-def _write_report(tmp_path) -> object:  # noqa: ANN001
+def _write_report(tmp_path, *, tool_version: str | None = None) -> object:  # noqa: ANN001
     path = tmp_path / "report.json"
     report_json.dump(
         Report(
             package_name="com.example.synthetic",
-            meta={},
+            meta={"tool_version": tool_version} if tool_version is not None else {},
             leads=[],
             endpoints=[],
             findings=[],
@@ -25,6 +25,23 @@ def _write_report(tmp_path) -> object:  # noqa: ANN001
         str(path),
     )
     return path
+
+
+def test_case_close_warns_on_revision_mismatch_without_blocking(
+    tmp_path,
+) -> None:  # noqa: ANN001
+    report_path = _write_report(tmp_path, tool_version="0.0.0-old")
+
+    result = runner.invoke(
+        cli.app,
+        ["case", "close", str(report_path), "--offline", "--no-strict"],
+    )
+
+    assert result.exit_code == 0
+    assert "分析修订与当前 fxapk 不一致" in result.stderr
+    persisted = report_path.read_text(encoding="utf-8")
+    assert '"closure"' in persisted
+    assert "分析修订与当前 fxapk 不一致" not in persisted
 
 
 @pytest.mark.parametrize(

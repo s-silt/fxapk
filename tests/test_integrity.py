@@ -79,6 +79,22 @@ def test_sample_fingerprint_missing_file_does_not_raise(tmp_path: Path) -> None:
     assert fp["analyzed_at"]
 
 
+def test_current_build_provenance_returns_a_copy(monkeypatch) -> None:  # noqa: ANN001
+    """兼容检查可读构建坐标，但不得拿到并修改 integrity 的进程缓存本体。"""
+    from apkscan.core import integrity
+
+    monkeypatch.setattr(
+        integrity,
+        "_BUILD_PROVENANCE",
+        {"build_commit": "abc123", "build_dirty": False},
+    )
+
+    first = integrity.current_build_provenance()
+    first["build_commit"] = "changed"
+
+    assert integrity.current_build_provenance()["build_commit"] == "abc123"
+
+
 def test_sample_fingerprint_keys_complete(tmp_path: Path) -> None:
     apk = tmp_path / "x.apk"
     apk.write_bytes(b"abc")
@@ -157,6 +173,12 @@ def test_build_provenance_returns_commit_and_dirty(monkeypatch, tmp_path: Path) 
     monkeypatch.setattr(integrity, "_BUILD_PROVENANCE", None)
 
     def _fake_run(args, **k):  # noqa: ANN001, ANN003, ANN202
+        if "--show-toplevel" in args:
+            return types.SimpleNamespace(
+                returncode=0,
+                stdout=str(Path(integrity.__file__).resolve().parents[2]) + "\n",
+                stderr="",
+            )
         if "rev-parse" in args:
             return types.SimpleNamespace(returncode=0, stdout="abc123def456\n", stderr="")
         return types.SimpleNamespace(returncode=0, stdout=" M apkscan/x.py\n", stderr="")  # status → dirty
@@ -167,6 +189,39 @@ def test_build_provenance_returns_commit_and_dirty(monkeypatch, tmp_path: Path) 
     fp = sample_fingerprint(str(apk), tool_version="1.0.0")
     assert fp["build_commit"] == "abc123def456" and fp["build_dirty"] is True
     monkeypatch.setattr(integrity, "_BUILD_PROVENANCE", None)  # 复原缓存，免污染后续
+
+
+def test_build_provenance_rejects_enclosing_repository_for_wheel(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """仓库内 .venv 的 wheel 不能把外层 checkout HEAD 冒充自身构建修订。"""
+    import types
+
+    from apkscan.core import integrity
+
+    outer_repo = tmp_path / "checkout"
+    installed = outer_repo / ".venv/Lib/site-packages/apkscan/core/integrity.py"
+    monkeypatch.setattr(integrity, "__file__", str(installed))
+    monkeypatch.setattr(integrity, "_BUILD_PROVENANCE", None)
+    calls: list[list[str]] = []
+
+    def _fake_run(args, **k):  # noqa: ANN001, ANN003, ANN202
+        calls.append(args)
+        if "--show-toplevel" in args:
+            return types.SimpleNamespace(
+                returncode=0, stdout=str(outer_repo) + "\n", stderr=""
+            )
+        if "rev-parse" in args:
+            return types.SimpleNamespace(returncode=0, stdout="unrelated-head\n", stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(integrity.subprocess, "run", _fake_run)
+
+    assert integrity.current_build_provenance() == {
+        "build_commit": None,
+        "build_dirty": None,
+    }
+    assert not any("HEAD" in args for args in calls)
 
 
 def test_build_provenance_failure_not_cached_reprobes(monkeypatch, tmp_path: Path) -> None:
@@ -187,6 +242,12 @@ def test_build_provenance_failure_not_cached_reprobes(monkeypatch, tmp_path: Pat
     assert integrity._BUILD_PROVENANCE is None  # ★失败态未缓存
 
     def _ok(args, **k):  # noqa: ANN001, ANN003, ANN202
+        if "--show-toplevel" in args:
+            return types.SimpleNamespace(
+                returncode=0,
+                stdout=str(Path(integrity.__file__).resolve().parents[2]) + "\n",
+                stderr="",
+            )
         if "rev-parse" in args:
             return types.SimpleNamespace(returncode=0, stdout="deadbeef\n", stderr="")
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
