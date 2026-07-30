@@ -141,28 +141,6 @@ def _update_target_leads(report: Report, targets: Sequence[Mapping[str, object]]
         lead.notes = "\n".join(line for line in retained if line).strip()
 
 
-#: 会影响可见性判定的原始信号键。旧报告（分析于 visibility 层落地之前）虽无 ``visibility``
-#: 快照，但这些键早已在 meta 里——据此可补算，不必重跑分析。
-#: 各可见性维度分别读 meta 里的哪些键。按维度分组是为了回答一个更精确的问题——
-#: 「**这一维**还有没有输入」——而不是「meta 里还剩不剩东西」（见 _preserve_confirmed_gaps）。
-_VISIBILITY_INPUT_KEYS_BY_SOURCE: dict[str, tuple[str, ...]] = {
-    "dex": (
-        "dex_available", "dex_scanned", "dex_strings_truncated", "dex_string_pool",
-        "is_hardened", "hardening_structural", "extra_dex_visibility", "artifact_lineage",
-    ),
-    "native": ("native_obfuscation", "native_files_scanned"),
-    "resource": (
-        "uni_encrypted", "crypto_recipe", "resource_files_scanned",
-        "resource_files_read_failed", "resource_listing_failed",
-    ),
-    "runtime": ("runtime_merged", "capture_quality", "capture_signals"),
-}
-
-_VISIBILITY_INPUT_KEYS: tuple[str, ...] = tuple(
-    k for keys in _VISIBILITY_INPUT_KEYS_BY_SOURCE.values() for k in keys
-)
-
-
 def _refresh_visibility(report: Report) -> None:
     """结案前重算证据可见性 —— 快照是派生视图，不是证据。
 
@@ -204,7 +182,7 @@ def refresh_visibility_snapshot(meta: dict) -> None:
 
     previous = meta.get("visibility")
     has_snapshot = isinstance(previous, dict)
-    if not has_snapshot and not any(k in meta for k in _VISIBILITY_INPUT_KEYS):
+    if not has_snapshot and not _visibility.input_keys_seen(meta):
         return
     try:
         fresh = _visibility.assess({"meta": meta})
@@ -218,30 +196,22 @@ def refresh_visibility_snapshot(meta: dict) -> None:
 def _preserve_confirmed_gaps(previous: dict, fresh: dict, meta: dict) -> dict:
     """某一维的原始信号已不在 meta 里时，沿用旧快照对该维的判定，并重推主张资格。
 
-    ★判据是「**这一维的输入还在不在**」，不是「新值是什么」。信号从不会自己消失：正常管线只
-      往 meta 里加东西，动态合并更是如此。一维的输入键一个都不剩，只可能是这份 report.json
-      在工具体外被裁剪过（手编 / 第三方产 / 人工"精简"）。此时对它重算不是刷新，是从零重推——
-      加壳样本的 ``dex=stub_only`` 会退成缺省的"完整可见"，「目标集可能不全」的封顶随之无声
-      消失，正是「未发现」被读成「已穷尽」。
+    ★判据是「**旧快照见过的输入是否仍全部在场**」，不是「新值是什么」。信号从不会自己消失：
+      正常管线只往 meta 里加东西，动态合并更是如此。只要旧 ``inputs_seen`` 里的任一键不见了，
+      就说明这份 report.json 在工具体外被裁剪过（手编 / 第三方产 / 人工"精简"）。此时对它
+      重算不是刷新，是拿残缺输入重新推理——加壳样本的 ``dex=stub_only`` 会退成"完整可见"，
+      「目标集可能不全」的封顶随之无声消失，正是「未发现」被读成「已穷尽」。
 
     只在旧值属**确证盲区**（``INSUFFICIENT``）时回填：那是本次分析实测到的缺口，丢了就是丢证据。
     旧值本就是 complete/unknown 的维度照常跟随重算——那里没有要保护的信息。
 
-    ★**已知未修的缺口（部分裁剪）**：判据是「该维还剩**任意**一个输入键」，所以只挡得住
-      「该维输入被全删」的报告。实测反例：加固样本 ``dex=stub_only``，裁剪后只留
-      ``dex_available=True``、删掉 ``is_hardened`` / ``hardening_structural``，重算得到
-      ``dex=complete``，``blocked_claims`` 里 ``no_contact_harvesting`` /
-      ``no_sms_interception`` 随之解禁——加固样本本该封顶的主张凭空放开。
+    新快照由 :func:`visibility.assess` 逐维记录 ``inputs_seen``。这里检查
+    ``old_inputs - current_inputs``，而不只检查「当前是真子集」：删除旧键的同时新增另一个键，
+    仍然发生了信息丢失，不能借新增键把旧盲区冲掉。合法升级只新增信号，旧集合必为当前集合子集。
 
-      **为什么没在这里顺手改严**：改成「要求该维输入全在场」会拦死合法升级——``runtime`` 维只有
-      三个键，而正常路径的升级常只新增 ``capture_quality`` 一个（见
-      ``test_close_refreshes_stale_visibility_snapshot``），一改即红。``any()`` 太松、``all()``
-      太紧，**中间没有可靠判据**：要区分「被裁剪」与「新增了信号」，必须知道这份快照当初是基于
-      哪些键算出来的，而那个信息**现在没有被记录**。
-
-      正解是让 :func:`visibility.assess` 把「本次可见的输入键集合」一并写进快照，
-      重算时比对集合：现有键是旧集合的**真子集** → 判为裁剪、回填；否则跟随。那是一次
-      schema 变更，独立一刀做，不混在本次接线里。
+    旧报告没有 ``inputs_seen`` 时无法可靠区分部分裁剪与合法新增，继续沿用旧兼容口径：
+    该维输入全不在才回填。这样不会把历史 ``runtime=unavailable`` 快照冻结住，妨碍新增
+    ``capture_quality`` 后的正常升级；完整保护需用当前版本重新分析生成带溯源的新快照。
     """
     from apkscan.core import visibility as _visibility
 
@@ -257,11 +227,22 @@ def _preserve_confirmed_gaps(previous: dict, fresh: dict, meta: dict) -> dict:
             continue
         if old_info.get("visibility") not in _visibility.INSUFFICIENT:
             continue
-        if any(k in meta for k in _VISIBILITY_INPUT_KEYS_BY_SOURCE.get(name, ())):
-            continue  # 输入还在 → 重算有据，照常跟随（含脱壳回灌这类合法升级）
+        old_seen_raw = old_info.get("inputs_seen")
+        new_seen_raw = new_info.get("inputs_seen")
+        if isinstance(old_seen_raw, list) and isinstance(new_seen_raw, list):
+            old_seen = {str(key) for key in old_seen_raw}
+            current_seen = {str(key) for key in new_seen_raw}
+            should_restore = bool(old_seen - current_seen)
+        else:
+            # 旧 schema 无法识别「部分裁剪」；保留此前兼容行为，避免拦死合法 runtime 升级。
+            should_restore = not _visibility.input_keys_seen(meta, name)
+        if not should_restore:
+            continue
         why = [str(w) for w in (old_info.get("why") or [])]
-        why.append("★沿用先前快照：支撑该判定的原始信号已不在 meta 中（报告疑经裁剪）")
-        new_sources[name] = {"visibility": old_info.get("visibility"), "why": why}
+        marker = "★沿用先前快照：支撑该判定的原始信号已不在 meta 中（报告疑经裁剪）"
+        if marker not in why:
+            why.append(marker)
+        new_sources[name] = {**old_info, "why": why}
         restored = True
 
     if restored:
