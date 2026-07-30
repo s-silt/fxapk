@@ -184,9 +184,24 @@ def _refresh_visibility(report: Report) -> None:
 
     assess 自带兜底、绝不抛；此处再包一层，重算失败也不影响结案主流程。
     """
+    if isinstance(report.meta, dict):
+        refresh_visibility_snapshot(report.meta)
+
+
+def refresh_visibility_snapshot(meta: dict) -> None:
+    """在 ``meta`` 上**就地**重算 visibility 快照。逻辑与语义见 :func:`_refresh_visibility`。
+
+    ★**任何往 report.json 写 meta 的路径都该调它**，不只结案。快照是派生视图：写方往 meta 里
+      追加了新信号却不重算，报告就会自相矛盾——实测过一份「``runtime_merged=True``、23 个运行时
+      端点、27 条活体确认线索，而快照仍写着『未做运行时观测（纯静态分析）』」的报告，因为
+      ``pcap-leads --into`` 只写信号、没刷快照。**判据是对的，落盘的东西是旧的。**
+
+    ★这类缺口测试很容易漏掉：既有测试断言的是 ``visibility.assess(payload)``（**现场重算**），
+      判据永远正确，而产物永远陈旧，测试全绿。所以另有一条结构性测试直接比对
+      「存下的快照 == 对该 payload 现场重算的结果」，将来新增的写方忘了刷新会被它照出来。
+    """
     from apkscan.core import visibility as _visibility
 
-    meta = report.meta if isinstance(report.meta, dict) else {}
     previous = meta.get("visibility")
     has_snapshot = isinstance(previous, dict)
     if not has_snapshot and not any(k in meta for k in _VISIBILITY_INPUT_KEYS):
@@ -195,8 +210,8 @@ def _refresh_visibility(report: Report) -> None:
         fresh = _visibility.assess({"meta": meta})
         if has_snapshot:
             fresh = _preserve_confirmed_gaps(previous, fresh, meta)  # type: ignore[arg-type]
-        report.meta["visibility"] = fresh
-    except Exception:  # noqa: BLE001 - 重算失败不得中断结案
+        meta["visibility"] = fresh
+    except Exception:  # noqa: BLE001 - 重算失败不得中断调用方主流程
         logger.exception("[closure] 可见性重求值失败，沿用原快照")
 
 

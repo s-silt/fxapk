@@ -193,6 +193,38 @@ def test_runtime_visibility_stops_claiming_nothing_was_observed(tmp_path: Path) 
     assert rt["visibility"] == visibility.VIS_PARTIAL
 
 
+def test_stored_visibility_snapshot_is_refreshed_not_left_stale(tmp_path: Path) -> None:
+    """★落盘的快照必须等于对该 payload **现场重算**的结果——派生视图不许留旧值。
+
+    上面那条测试断言的是 ``visibility.assess(payload)``，即**现场重算**：判据永远正确，
+    而报告里存的 ``meta.visibility`` 可以一直是旧的，测试照样全绿。实测一份真实报告：
+    ``runtime_merged=True``、23 个运行时端点、27 条活体确认线索，而存下的快照仍写着
+    「未做运行时观测（纯静态分析）」——因为 ``pcap-leads --into`` 只写信号、不刷快照。
+
+    ★这条测试的**结构性价值**在于它不针对某个写方：任何往 meta 写信号却忘了刷新派生视图的
+      路径都会让它变红。「每个写方都要记得」靠不住，得让不变量自己可测。
+    """
+    payload = _merge(tmp_path, _bidirectional_summary())
+
+    stored = payload["meta"]["visibility"]
+    recomputed = visibility.assess(payload)
+    assert stored == recomputed, (
+        "落盘快照与现场重算不一致——写方往 meta 追加了信号却没重算派生视图"
+    )
+    # 顺带钉住这次的具体后果：不得再声称"未做运行时观测"
+    assert stored["sources"]["runtime"]["visibility"] == visibility.VIS_PARTIAL
+
+
+def test_empty_capture_leaves_visibility_snapshot_honest(tmp_path: Path) -> None:
+    """反向：真·空采集刷新后仍是 ``unavailable``——刷新不得凭空造出运行时维。"""
+    payload = _merge(tmp_path, pcap_ingest.PcapSummary(flows=[]))
+
+    stored = payload["meta"].get("visibility")
+    if stored is not None:                     # 原报告本就有快照时才有可比对象
+        assert stored == visibility.assess(payload)
+        assert stored["sources"]["runtime"]["visibility"] == visibility.VIS_UNAVAILABLE
+
+
 def test_merge_records_that_uid_attribution_was_not_possible(tmp_path: Path) -> None:
     """★带外 pcap 抓的是**整机**流量，这条路径没有设备侧 socket 快照，做不了 UID 归因。
 
