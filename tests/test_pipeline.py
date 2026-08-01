@@ -128,7 +128,10 @@ def test_pipeline_runs_and_records_errors(monkeypatch, fake_ctx):
     assert report.completeness == 0.5
     assert report.critical_failures == []  # good/crashing 非关键分析器（manifest/endpoints）
     assert "needs_adb" in report.skipped_analyzers
-    assert report.schema_version == "1.0"
+    # ★这里就是要**写死字面**：schema_version 是对外契约，消费方（AI / CI / 第三方工具）据它
+    #   判断字段布局。改成 `== REPORT_SCHEMA_VERSION` 看着更"整洁"，实则是拿常量和它自己比，
+    #   测试从此失去独立预期——版本被意外 bump 也不会红。契约变更应当在这里显式改一行。
+    assert report.schema_version == "1.1"
     assert report.meta["tool_version"]  # 工具版本落 meta（非空）
     assert len(report.meta["ruleset_digest"]) == 16  # 规则内容摘要（可复现锚点）
 
