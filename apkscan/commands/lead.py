@@ -118,6 +118,40 @@ def _match(lead: Lead, value: str, category: str | None) -> bool:
     return lead.value.strip().lower() == value.strip().lower()
 
 
+def _replay_payload(
+    sha: str,
+    *,
+    entries: list[dict[str, Any]],
+    results: list[dict[str, Any]],
+    lifted: int,
+    written: list[str],
+    dry_run: bool,
+    note: str = "",
+) -> str:
+    """把 ``replay`` 的输出**在一处**构造出来，让每个出口的键集合与类型天然一致。
+
+    ★为什么不让早退分支自己拼一个短的：它曾经就是自己拼的，于是「样本库里没有该样本凭据」
+      这条出口少了 ``results`` / ``written`` / ``dry_run`` 三个键，``lifted`` 还是 ``[]``
+      而正常出口是整数——同一个键在两个分支类型都不同。消费方按工作流是 AI 或脚本，
+      ``payload["written"]`` 会 KeyError、``payload["lifted"] + 1`` 会 TypeError，而这条分支
+      恰恰是最常走到的（新样本第一次重放时库里当然没凭据）。分支形状漂移是机器契约最容易
+      伤下游的一种，靠人盯着两处写一样是盯不住的，得让它们没法不一样。
+
+    ``note`` 只在有话要说时出现——它是给人看的补充说明，不是消费方该分支判断的依据。
+    """
+    payload: dict[str, Any] = {
+        "sample_sha256": sha,
+        "candidates": len(entries),
+        "lifted": lifted,
+        "results": results,
+        "written": written,
+        "dry_run": dry_run,
+    }
+    if note:
+        payload["note"] = note
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
 @lead_app.command("show")
 def lead_show(
     report: str = typer.Argument(..., help="report.json 路径。"),
@@ -250,9 +284,8 @@ def lead_replay(
     entries = [e for e in load_restores(corpus_root)
                if str(e.get("sample_sha256", "")).strip().lower() == sha.lower()]
     if not entries:
-        typer.echo(json.dumps(
-            {"sample_sha256": sha, "candidates": 0, "lifted": [], "note": "样本库里没有该样本的凭据"},
-            ensure_ascii=False, indent=2))
+        typer.echo(_replay_payload(sha, entries=[], results=[], lifted=0, written=[],
+                                   dry_run=dry_run, note="样本库里没有该样本的凭据"))
         return
 
     rep = report_io.load_report(path)
@@ -310,10 +343,8 @@ def lead_replay(
     written: list[str] = []
     if changed and not dry_run:
         written = report_io.write_report(rep, path, render_existing_html=True)
-    typer.echo(json.dumps({
-        "sample_sha256": sha, "candidates": len(entries), "lifted": changed,
-        "results": results, "written": written, "dry_run": dry_run,
-    }, ensure_ascii=False, indent=2))
+    typer.echo(_replay_payload(sha, entries=entries, results=results, lifted=changed,
+                               written=written, dry_run=dry_run))
 
 
 __all__ = ["RESTORES_NAME", "lead_app", "load_restores", "restores_path", "save_restores", "upsert_restore"]

@@ -480,6 +480,47 @@ def test_cli_replay_is_scoped_to_the_sample(tmp_path: Path) -> None:
     assert load_report(report).leads[0].advice == infra.ADVICE_REVIEW, "别的样本的凭据不得生效"
 
 
+def test_cli_replay_output_shape_is_identical_across_branches(tmp_path: Path) -> None:
+    """``replay`` 的每个出口给出**同一套键、同样的类型**——分支形状漂移是机器契约最伤下游的一种。
+
+    ★这条走 CLI 真入口而不是只调 ``_replay_payload``：形状要一致靠的是「每个出口都真的走了
+      那个构造器」，只测构造器本身测不到有人在某个分支里另拼一个字典（那正是修掉的原样）。
+      「库里没有该样本的凭据」还是最常走到的分支——新样本第一次重放时库里当然是空的。
+    """
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    report = tmp_path / "report.json"
+    _write_pressed_report(report)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    payload["meta"]["sample_sha256"] = "e" * 64
+    report.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    # 分支一：库里没有这个样本的任何凭据（早退出口）。
+    empty = json.loads(
+        runner.invoke(cli.app, ["lead", "replay", str(report), "--corpus", str(corpus_dir)]).stdout
+    )
+
+    # 分支二：有凭据、正常走完（主出口）。
+    lead_cmd.save_restores(corpus_dir, [{
+        "sample_sha256": "e" * 64, "category": "DOMAIN", "value": _VALUE,
+        "source": DOWNGRADE_REPACK_IDENTITY, "note": "x", "at": "2026-08-01T10:00:00+08:00",
+    }])
+    full = json.loads(
+        runner.invoke(cli.app, ["lead", "replay", str(report), "--corpus", str(corpus_dir)]).stdout
+    )
+
+    contract = {"sample_sha256", "candidates", "lifted", "results", "written", "dry_run"}
+    assert contract <= set(empty), f"早退出口缺键：{sorted(contract - set(empty))}"
+    assert contract <= set(full), f"主出口缺键：{sorted(contract - set(full))}"
+    for key in contract:
+        assert type(empty[key]) is type(full[key]), (
+            f"键 {key!r} 在两个出口类型不同："
+            f"{type(empty[key]).__name__} vs {type(full[key]).__name__}"
+        )
+    # note 只在有话要说时出现，是给人看的补充，不进消费方该依赖的那套键。
+    assert set(empty) - contract == {"note"} and set(full) == contract
+
+
 def test_cli_replay_dry_run_does_not_write(tmp_path: Path) -> None:
     corpus_dir = tmp_path / "corpus"
     corpus_dir.mkdir()

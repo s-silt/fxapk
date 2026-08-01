@@ -5,7 +5,119 @@ affect automated / CI / agent callers are called out explicitly**.
 
 ## Unreleased
 
+## 1.5.0 — 2026-08-02
+
+### Added
+
+- **线索档位的抑制来源可以被撤销**。此前判据链一旦把某条线索压下去，压的原因只留在
+  `notes` 的自由文本里，压完就是终点——人再判断「这条其实要查」时无处可写，改 `advice`
+  又会在下一次重跑或运行时回灌时被同一条判据重新压回去。现在 `Lead` 带三个新字段：
+
+  - `base_advice`：判据链自己得出的结论，在管线接缝处一次性封存（`seal_base_advice`），
+    此后任何抑制都只往 `downgrades` 里加，不再改写它；
+  - `downgrades`：`{来源 id: 说明}`，每一次降档都留下**是谁压的、为什么压**；
+  - `legacy_effective_advice`：旧报告迁移时的 write-once 快照，保证老产物读进来档位不变。
+
+  实际档位由 `models.effective_advice(base, downgrades, legacy)` 求值，`advice` 退化为
+  物化缓存。撤销一条抑制来源，档位自动回到判据链原本的结论，无需人手改档。
+
+  **这套求值只对带 `base_advice` 的新报告完整成立**。旧报告分两种：只有迁移快照
+  `legacy_effective_advice` 的，撤销后恢复到的是那份快照、不是判据链的原始结论；两个锚点
+  都没有的，`effective_advice()` 返回空串，调用方保留既有 `advice`——这类报告拒绝撤销。
+  要拿到完整能力，对旧报告重跑一次分析即可。
+
+- **新增 `fxapk lead` 命令**，三个子命令：`show`（看一条线索的判据链结论、各抑制来源、
+  当前实际档位）、`restore`（人工放行一条被压住的线索）、`replay`（把已记录的放行凭据
+  重新施加到一份报告上——换版本、补证据后重跑，人的判断不用重做一遍）。
+
+  放行留**墓碑**而非直接改档：`report.meta["manual_restores"]` 里按
+  `(category, value, source)` 三元组记录，重跑与运行时回灌都认它，不会再把这条压回去。
+  放行凭据以 `restores.jsonl` 落在 corpus 里，`replay` 从那里读。
+
+### Changed
+
+- **四个出口都会标出人工放行**。`digest` / `letters` / `html` / `ioc` 在**各自实际呈现的线索
+  中**，凡有人工放行记录的一律显式标出「这条是人放回来的、自动判据本来压住了它」。条件是
+  「有墓碑」而不是「回到了最高档」——`digest` / `html` / 全量 `ioc` 里，一条被放行后仍被另一条
+  抑制来源压在「待核」的线索照样会标出来。`letters` 是例外，但不是因为标记逻辑不同：它本就
+  只对满足套打条件的最高档（`ADVICE_INVESTIGATE`）线索产生结果，其余档位在标记之前就已经不在
+  它的输入里了。全出口可见是有意的：墓碑不做
+  真伪校验，因此不能让「塞墓碑」比「改 advice」更安静——后者会被守卫挡下，前者若无声
+  就成了更隐蔽的绕过路径。`letters` 另有独立提示句，避免据此套打时不知情。
+
+- **档位常量的真源从 `core.infra` 迁到 `core.models`**（`ADVICE_INVESTIGATE` /
+  `ADVICE_SKIP` / `ADVICE_REVIEW`，另加 `VALID_ADVICE`）。`core.infra` 仍可导入，取值不变。
+
+- **降档原因从自由文本迁进结构化字段**。此前压档的理由拼在 `notes` 里、部分生产路径还顺手
+  把 `confidence` 压到 `LOW`；现在理由一律进 `downgrades`，隔离类路径也不再压 `confidence`
+  ——那是证据强度，撤销隔离并不会让证据变强或变弱，两件事本就不该绑在一起。按 `notes` 文本
+  匹配降档原因的下游脚本需改读 `downgrades`。
+
+- **报告 schema 由 `1.0` 升到 `1.1`**（`report.json` 的 `schema_version`）。这是向后兼容的
+  字段扩展——旧报告缺新字段照常读、`advice` 行为逐字不变。**1.1 此前从未随任何发布 tag 出门**
+  （截至 v1.4.0 写出的都是 `1.0`），自 1.5.0 起它成为在野契约。机器可见的新增字段：
+
+  - `Lead`：`base_advice` / `downgrades` / `legacy_effective_advice`；
+  - `report.meta.manual_restores[]`：每条墓碑含 `category` / `value` / `source` / `note` /
+    `at` / `prior_advice` / `new_advice`。匹配只按前三项归一化后比对；`prior_advice` 与
+    `new_advice` **仅作审计留痕**，重放时一律重算档位，不拿它们直接写回——否则一份换了版本、
+    判据链结论已经变了的新报告会被旧档位覆盖；
+  - `digest` 的每条 lead：`downgrades` / `manually_restored`；
+  - `letters` 的每条结构化结果：`manually_restored`；
+  - **IOC CSV 表头末列追加 `manually_restored`**——列顺序是下游情报平台的字段映射契约，
+    新增一律追加、不插中间，但已配好映射的消费方仍需确认末列不越界；
+  - `closure` 统计：`manually_restored` / `inconsistent_excluded`（后者记「档位与抑制账本
+    互相矛盾、因而被挡在闭环之外」的线索数，多半意味着有人绕过 `fxapk lead restore` 手改了
+    `advice`——它不静默，就是要被看见）。
+
+- **新增持久化契约 `<corpus>/restores.jsonl`**。每行一条放行凭据，按
+  `(sample_sha256, category, value, source)` 去重、同键覆盖，字段另含 `note` / `at` /
+  `sample_sha256_synthetic`。**键里带 `sample_sha256` 是刻意的**：凭据是对某一个样本的判断，
+  不跨样本生效——不同样本上的同名值完全可以是两回事。写入走原子全量重写。
+
+- **`fxapk lead` 的机器输出与退出码**（自动化可依赖）：`show` 出 `leads` / `manual_restores`；
+  `restore` 出 `lifted` / `refused_no_anchor` / `written` / `stored_in_corpus`；`replay` 出
+  `sample_sha256` / `candidates` / `lifted` / `results[].status` / `written` / `dry_run`
+  ——**这六个键在 `replay` 的每个出口都在、类型都一致**，包括「样本库里没有该样本凭据」那条
+  早退分支（另附一个仅供人读的 `note`）。报告不存在、解析失败、线索或抑制来源匹配不上
+  → **exit 1**；corpus 配置与安全边界类错误 → **exit 2**。
+
+- **`commands.corpus._resolve_corpus` 更名为 `resolve_corpus`**——它现在是 `lead` 命令也走的
+  公开入口，不再是 corpus 命令的私有 helper。**旧名未保留别名**（原名以下划线开头，按惯例不属
+  对外承诺的接口）。
+
+- **`models.merge_runtime_into_lead_dict` 返回值由 `bool` 改为 `tuple[bool, bool]`**
+  （`(evidence_merged, ledger_changed)`），并新增关键字参数 `restored`。直接调用该函数的
+  外部调用方须同步解包——回灌合并现在既可能只并证据，也可能只动抑制账本。
+
+- **README 改成「对 AI 说三句话」的上手路径**，命令表纠错去重。
+
 ### Fixed
+
+- **厂商推送接入段与公网 IP 回显服务挪出最高档出口**。25 条厂商推送、采集与应用市场主机进
+  `KNOWN_INFRA_EXACT`（**精确主机名匹配，不是后缀**）；3 个公网 IP 回显服务降到
+  `ADVICE_REVIEW`。精确匹配是刻意的取舍：能证明的只是「这些主机曾被厂商 SDK 使用」，
+  证不出「该标签下永远不会出现第三方可控的名字」，而按整棵子树放行会在一份公开名单上
+  留出藏身处。代价是厂商换区域主机名后噪音回流——那是安全方向的失效。
+
+  回显服务只降 `ADVICE_REVIEW` 不判 `ADVICE_SKIP`：这类多由小主体运营、整域可被收购易主，
+  且「样本去查自己出口 IP」这个行为本身有价值，判 `ADVICE_SKIP` 会把真实出网记录从四个
+  出口一并抹掉。
+
+- **厂商推送凭据补齐归属**。`config_keys` 此前只认下划线分词的键名，连写前缀
+  （`MIPUSH_` / `OPPOPUSH_` / `VIVOPUSH_`）全部漏归属——分析器本来就提取到了这些
+  `meta-data`，缺的是「归到哪家厂商」而不是提取通道。魅族 / 荣耀因证据只覆盖到具体键名，
+  按 `exact` 收录，不放宽成前缀（`HONOR_` 这类宽前缀会把 `HONOR_THEME` 误归成推送凭据
+  并升到最高档）。
+
+- **对象存储的租户桶不再被云厂商整域豁免吃掉**。`<桶名>.<厂商端点>` 形态的域名是**租户
+  自己**能控制的资源，与厂商基础设施不是一回事，此前被整域豁免连带放行。
+
+- **厂商应用市场与钱包域名挪出建议核查出口**。
+
+- **名单匹配定序**。匹配此前遍历集合，同一份报告在不同哈希种子下可能给出不同结果。
+
+- **名单里的无点关键字全部收口为带点后缀**，消除跨域误命中。
 
 - **被冒用的域名不再进 `letters` 出口（P0）**。非标准 TLS 端口上借用知名域名做 SNI 的连接，
   其被借用的域名此前会被判 `ADVICE_INVESTIGATE`，`letters` 据此套打出指向该域名持有方的文书
@@ -33,6 +145,10 @@ affect automated / CI / agent callers are called out explicitly**.
 
   **对已产出的报告不追溯**：历史报告的 `sni_masquerade` 字段为空，直接用新版套打仍会出文书。
   补救办法是对该报告重跑一次 `pcap-leads --into`，合并会补上该字段，出口闸随即生效。
+
+### Internal
+
+- SNI 伪装测试夹具改用合成段；注释与测试说明改用不指名的表述。
 
 ## 1.4.0 — 2026-07-30
 
