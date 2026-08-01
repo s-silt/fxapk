@@ -50,12 +50,17 @@ def _compact_lead(lead: dict[str, Any], redact: bool, pii_flag: list[bool]) -> d
     where = lead.get("where_to_request")
     notes = lead.get("notes") or ""
     evidence = lead.get("evidence_to_obtain") or []
+    raw_downgrades = lead.get("downgrades")
+    downgrades = {
+        str(k): str(v) for k, v in raw_downgrades.items()
+    } if isinstance(raw_downgrades, dict) else {}
     if redact:
         value = redact_value(category, value)
         subject = _scrub_field(subject, pii_flag)
         where = _scrub_field(where, pii_flag)
         notes = _scrub_field(notes, pii_flag)
         evidence = [_scrub_field(item, pii_flag) for item in evidence]
+        downgrades = {k: _scrub_field(v, pii_flag) or "" for k, v in downgrades.items()}
     return {
         "category": category,
         "value": value,
@@ -70,6 +75,10 @@ def _compact_lead(lead: dict[str, Any], redact: bool, pii_flag: list[bool]) -> d
         "where_to_request": where,
         "evidence_to_obtain": evidence,
         "notes": notes,
+        # ★档位的抑制来源（{来源 id: 原因}）。降档原因不再拼进 notes——digest 的主要读者按
+        #   工作流是 AI，它要判断「这条为什么被压着、能不能放回」，靠的就是这个字段；漏了它，
+        #   压档在 AI 眼里就成了无来由的档位。
+        "downgrades": downgrades,
     }
 
 

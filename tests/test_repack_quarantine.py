@@ -13,10 +13,11 @@ from __future__ import annotations
 import pytest
 
 from apkscan.analyzers.repack_identity import VERDICT_REPACK_SUSPECTED
-from apkscan.core import pipeline
+from apkscan.core import infra, pipeline
 from apkscan.core.closure.targets import _select_targets_with_stats
 from apkscan.core.leads import _VERDICT_REPACK_SUSPECTED, apply_repack_quarantine
 from apkscan.core.models import (
+    DOWNGRADE_REPACK_IDENTITY,
     AnalysisConfig,
     Confidence,
     Endpoint,
@@ -73,8 +74,15 @@ def test_quarantine_closes_every_downstream_gate() -> None:
     ) is False
     # 降档而非删除：仍在清单里、带理由，人工差分核实后可恢复
     assert lead.advice == "待核"
-    assert lead.confidence is Confidence.LOW
-    assert "正版" in lead.notes and "差分" in lead.notes
+    # ★confidence **不再**随降档压 LOW：它度量的是证据强度（这条端点的证据有多硬），与「该不该
+    #   作为标的」是两个维度。隔离撤销后证据并不会因此变强，而把各自的 HIGH/MEDIUM 一把塌缩成
+    #   LOW 是不可逆的信息销毁——原值再也拿不回来。
+    assert lead.confidence is Confidence.HIGH, "证据强度不受档位抑制影响"
+    # ★理由存进结构化的抑制来源，不再拼进 notes：混在 notes 里就没法在撤销时精确删掉自己那句，
+    #   那正是上一次把别的机制的说明一起冲掉的根因。
+    assert DOWNGRADE_REPACK_IDENTITY in lead.downgrades, "抑制来源要记在账上，撤销时才撤得准"
+    reason = lead.downgrades[DOWNGRADE_REPACK_IDENTITY]
+    assert "正版" in reason and "差分" in reason
 
 
 def test_quarantine_never_downgrades_to_skip() -> None:
@@ -153,6 +161,57 @@ def test_static_pipeline_stage_is_wired() -> None:
     assert all(x.is_c2 is False for x in net)
     audit = state.meta.get("repack_quarantine")
     assert isinstance(audit, dict) and audit.get("count", 0) >= 1, "隔离须留审计块，否则兜底门会误判为旧报告"
+
+
+def test_static_pipeline_seals_base_before_suppressing() -> None:
+    """★次序锁：判据链结论必须在任何抑制**之前**被封存为 base_advice。
+
+    这条锁的是 :func:`models.seal_base_advice` 的**调用位置**，不是它的实现：
+
+    - 封存没接线 → 新产的 lead 没有 base_advice，抑制时会被当成「旧报告」拍下迁移快照，
+      于是 ``legacy_effective_advice`` 非空——本测试红。那个字段是给来源不可考的旧数据用的，
+      本次运行刚算出来的判据结论盖上它，等于把新数据伪装成迁移遗留。
+    - 封存排到抑制**之后** → 被压成待核的档位会被烙进 base，撤销时再也回不去（棘轮），
+      下面那条 ``base_advice`` 为最高档的断言会红。
+    """
+    state = pipeline._PipelineState(
+        ctx=None,  # type: ignore[arg-type]  # 本 stage 不碰 ctx
+        config=AnalysisConfig(online=False),
+        platform="android",
+        capabilities=set(),
+    )
+    state.meta.update(_repack_meta())
+    state.endpoints.append(Endpoint(kind="domain", value="api.example.com"))
+    # ★夹具必须含一条**不走 _domain_lead 的** Lead：网络 Lead 由 _domain_lead 构造时自己就
+    #   填了 base_advice，光靠它们测不出封存有没有接线（删掉调用照样绿——实测如此）。分析器
+    #   产出的这类 Lead 才是只能靠 seal 封的那一批。
+    analyzer_lead = Lead(
+        category=LeadCategory.CONFIG_KEY,
+        value="SOME_APPKEY=deadbeef",
+        advice=infra.ADVICE_INVESTIGATE,
+    )
+    assert analyzer_lead.base_advice is None, "前提：分析器产出的 Lead 不自带判据链封存"
+    state.leads.append(analyzer_lead)
+
+    pipeline._stage_build_leads(state)
+
+    assert analyzer_lead.base_advice == infra.ADVICE_INVESTIGATE, (
+        "封存未接线：分析器产出的 Lead 没被封上判据链结论，它一旦被抑制就会走进旧报告路径"
+    )
+
+    net = [x for x in state.leads if x.category in (LeadCategory.DOMAIN, LeadCategory.IP)]
+    assert net, "前提：该端点本应产出一条网络 Lead"
+    for lead in net:
+        assert lead.base_advice == infra.ADVICE_INVESTIGATE, "封存的必须是判据链结论，不是被压之后的档"
+        assert lead.advice == infra.ADVICE_REVIEW, "抑制照旧生效"
+        assert DOWNGRADE_REPACK_IDENTITY in lead.downgrades, "抑制来源要记在账上"
+        assert lead.legacy_effective_advice is None, (
+            "本次运行刚产出的 lead 不该带迁移快照——带了说明封存没赶在抑制之前"
+        )
+    # 全体 lead（含非网络类）都该被封上判据链结论：漏封的将来一被抑制就走进旧报告路径。
+    assert all(x.base_advice is not None for x in state.leads if x.advice), (
+        "有档位的 lead 必须都封了 base_advice"
+    )
 
 
 def test_runtime_merge_path_is_wired() -> None:
