@@ -39,12 +39,28 @@ def _enrichment_targets(endpoints: list[Endpoint]) -> list[Endpoint]:
     只对疑似 App 自有服务/C2 的域名/IP 查 WHOIS/ICP/ASN；已知第三方基础设施/SDK/CDN
     （无需调证）、私网/回环 IP / 行情代码伪域名（待核）都不查。这正是"最后只对高度可疑的查、
     而不是有一个查一个"：省时（网络受限不被 infra 域名拖死、不误查 127.0.0.1）+ 聚焦调证。
+
+    ★域名走 :func:`infra.effective_advice` 而不是裸 ``classify_domain``：后者不叠加来源可信度
+      档（``tier``），于是「仅见于第三方库文件 / 超大字符串表、终判已被压到待核」的端点在这里
+      仍被算成最高档、照样发起联网查询。``effective_advice`` 的 docstring 自己写着「目标筛选
+      须与最终 Lead 研判用同一套判据，避免判据漂移」——这一行此前正是它要防的那种漂移。
+      tier 由 analyze 阶段的抽取器写进 ``enrichment``、``_dedup_endpoints`` 合并，本函数跑在
+      enrich 阶段，读得到。
+
+    ★**IP 必须走 IP 判据**，不能跟着域名一起走 ``effective_advice``——那是域名接口（内部调
+      ``classify_domain`` 并叠 tier 降档），拿它判 IP 会造出新的漂移：一个带 library-file tier
+      的公网 IP 会在这里被压成待核、不再富化，而它最终的 Lead 走 ``classify_ip``、很可能仍是
+      最高档，于是「该核查的 IP 却没有 ASN/RDAP 富化结果」。tier 的生产侧也没有从模型上限制
+      只写给域名，指望它对 IP 恒为 None 是靠不住的。
     """
     targets: list[Endpoint] = []
     for ep in endpoints:
-        if ep.kind not in ("domain", "ip"):
+        if ep.kind == "domain":
+            advice = infra.effective_advice(ep.value, ep.enrichment.get("tier"))
+        elif ep.kind == "ip":
+            advice, _reason = infra.classify_ip(ep.value)
+        else:
             continue  # 非 domain/ip 本就不被 WHOIS/ICP/ASN 路由
-        advice, _reason = infra.classify_domain(ep.value)
         if advice == infra.ADVICE_INVESTIGATE:
             targets.append(ep)
     return targets

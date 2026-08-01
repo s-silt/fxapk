@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from apkscan.core import infra
 from apkscan.core import runtime_inventory as _inv
 from apkscan.core.atomic import atomic_write_text
 from apkscan.core.models import (
@@ -246,15 +247,174 @@ def dedup(leads: list[ProbeLead]) -> list[ProbeLead]:
     return out
 
 
+def _network_target(value: str) -> tuple[str, str] | None:
+    """从线索值里提取网络标的，返回 ``("domain"|"ip", 标的)``；值里没有网络标的则 ``None``。
+
+    ★**按形态提取，不按 category 猜**。这是本函数存在的全部理由：探针的 category 是**业务
+      语义**（谁该被追问：支付、短信转发、自建 IM…），而「这个值是不是网络标的」是**形态
+      问题**。两者不重合——`push-c2` 这个 tag 映射到的是 :attr:`LeadCategory.SELF_HOSTED_IM`
+      而不是 DOMAIN，可它的值恰恰就是域名或 wss:// URL。按 category 分流会漏掉它，而它正是
+      厂商推送域被判最高档那条事故路径本身。
+
+    识别的形态：带 scheme 的 URL（取 host）、``host:<数字端口>``（剥端口）、裸 IP、裸域名。
+    商户号、密钥、手机号、描述串这些提取不到标的，返回 ``None`` 由调用方按类别语义处置。
+
+    ★主机名走**严格** DNS 校验（每标签 1–63 字符、仅字母数字与连字符、不以连字符开头结尾），
+      不能用 ``valid_url_host``——那个只查「含点 + 末段是 2–24 位字母」，于是
+      ``key=<长串>.ab`` 这类点分密钥、签名串会被当成域名交给判据链。探针的值里本来就混着
+      密钥、token、描述串，这道校验是它们与真标的之间唯一的分界。
+
+    ★端口必须是**数字**才剥。``_strip_port_suffix`` 对 ``host:任意后缀`` 一律剥，于是
+      ``<厂商域>:not-a-port`` 这种描述串会被剥出一个厂商域来、进而被压档。
+    """
+    raw = str(value).strip()
+    if not raw:
+        return None
+    explicit_shape = "://" in raw  # 有 scheme：形态明确是网络标的，host 允许单标签
+    if explicit_shape:
+        host = str(host_from_url(raw) or "").strip()
+    else:
+        host, sep, tail = raw.rpartition(":")
+        if sep and host and not host.endswith(":") and tail.isdigit() and 1 <= int(tail) <= 65535:
+            # host:<合法端口>：形态明确。★端口要在合法范围内——``token:0`` / ``key:000000``
+            #   这种「冒号后跟一串数字」的非网络值不该凭此拿到单标签放行。
+            explicit_shape = True
+        else:
+            host = raw
+    host = host.strip().rstrip(".")
+    if not host:
+        return None
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        pass
+    else:
+        return ("ip", host)
+    if not _is_strict_hostname(host, allow_single_label=explicit_shape):
+        return None
+    return ("domain", host)
+
+
+#: 合法 DNS 标签：1–63 字符，字母数字与连字符，不以连字符开头或结尾。
+_DNS_LABEL_RE = re.compile(r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)\Z")
+
+
+def _is_strict_hostname(host: str, *, allow_single_label: bool) -> bool:
+    """严格主机名校验。``allow_single_label`` 只在形态已明确（有 scheme 或数字端口）时为真。
+
+    裸值必须多标签：单标签的裸字符串（``key``、``token``、随便一个词）与主机名无法区分，
+    按主机名处理就是在替一堆非网络值找判据。
+    """
+    if not host or len(host) > 253 or " " in host:
+        return False
+    labels = host.split(".")
+    if not allow_single_label and len(labels) < 2:
+        return False
+    return all(_DNS_LABEL_RE.match(label) for label in labels)
+
+
+def _network_advice(kind: str, target: str) -> tuple[str, str]:
+    """网络标的的档位：**走判据链**，但保底待核、绝不落 SKIP。返回 (档位, 说明)。
+
+    ★为什么不能沿用「探针捕到的一律最高档」：那是只看 category、不看值本身的赋值，等于主张
+      「凡是探针见过的名字，其持有方都值得被追问」。可是探针照样会捕到已知第三方基础设施
+      （推送接入段、IP 回显服务这些）——它们的持有方与本次分析无关，把它们放进最高档就是
+      本项目定义中最重的那类误判。旧行为没在 letters 上酿成事故，只是因为探针 Lead 恰好没填
+      ``evidence_to_obtain``、被 :func:`report.letters._is_actionable` 的条件 2 挡下——那是
+      运气不是设计：谁哪天给探针 Lead 补上取证路径，闸门就无声打开了。
+
+    ★为什么保底待核、不落 SKIP：探针是**进程内**的，捕到的是这个 App 自己的行为，不像整机
+      pcap 那样存在「别的 App 的流量」的归因问题。「该 App 的代码真的碰了这个值」这一事实
+      比静态字符串强得多。而 SKIP 是判据链结论、不走抑制账本，``fxapk lead restore`` 够不着
+      ——一旦落进去就再也捞不回来。真 C2 借宿在厂商域下（非租户桶形态）时，保底待核是唯一
+      还留得住这条观测的档位：关掉自动出口，但留在清单里供人核。
+
+    ★IP 走 :func:`infra.classify_ip` 而不是域名判据链——公共递归 DNS / 权威 DNS / 非全球地址
+      / 低段位形态这些判据全在 IP 侧，拿域名判据去判 IP 会整套绕过去（公共 DNS 的 IP 尤其会
+      一路落到最高档）。
+
+    ★``classify_ip`` 的 ``runtime_observed`` **有意传默认的 False**：它是用来豁免「低段位裸 IP
+      疑似版本号」那类形态怀疑的，传 True 会让一部分 IP 从待核**升**到最高档。本刀是收紧刀，
+      不夹带任何新的升档路径；何况该参数与 vendor_sdk_binary 的排序本身尚未定论，另案再议。
+
+    ★★**只认判据链里的「身份判定」，不认「形态怀疑」**——这是本函数最要紧的一条。
+
+      判据链里两类结论混在一起：一类回答「这个标的的持有方是谁」（命中已知第三方基础设施、
+      库内置站点、协议标识符、公网 IP 回显服务、公共递归 DNS…），另一类回答「这个字面像不像
+      真域名」（长高熵串疑似编码、单个常见词、保留测试域、行情代码…）。
+
+      对探针捕获的值，**只有前一类成立**。后一类的前提是「这串东西可能压根不是域名，只是被
+      当成域名切出来的字符串」——而探针看到的是 App 运行时真的在用的值，它像不像域名不影响
+      「它的持有方是不是无关第三方」这个问题。更要紧的是，探针的值里本来就混着密钥、token、
+      签名串：让形态怀疑参与压档，等于让 ``CRYPTO_RECIPE`` / ``RUNTIME_CREDENTIAL`` 这些本该
+      最高档的线索，因为值的偶然形态（点分 base64 恰好像域名）被压下去。
+
+      所以这里只把 :data:`infra.ADVICE_SKIP` 这一档（身份判定的出口）连同两条**出口是待核、
+      但实质属身份判定**的分支当成压档依据；判据链给出的其它「待核」一律不采纳，档位交回
+      类别语义。那两条是：
+
+      - **公网 IP 回显服务**：这类域的持有方与本次分析无关；
+      - **RFC/IANA 特殊用途域**（``.test`` / ``.example`` / ``.localhost`` / ``.local`` …）：
+        标准机制各不相同（测试保留域 / 回环语义 / mDNS 链路本地），但在本函数关心的那个维度上
+        结论一致——**不是公共 DNS 里可注册的域，不存在可向注册商查询的注册人**。这不是「看起来
+        不像域名」：它像不像无关紧要，重点是标准保证了没有持有方可查。把它当形态怀疑放行，
+        就会让一个明知查无此人的域进最高档、进而进文书出口。
+    """
+    try:
+        if kind == "ip":
+            advice, reason = infra.classify_ip(target)
+            identity_review = ""
+        else:
+            advice, reason = infra.classify_domain(target)
+            echo = infra._public_ip_echo_service(target)
+            reserved = infra._reserved_domain_match(target)
+            if echo is not None:
+                identity_review = f"公网 IP 回显 / 地理查询服务（{echo}），非自有后端"
+            elif reserved is not None:
+                identity_review = (
+                    f"标准保留的文档/测试域（{reserved}，RFC 2606/6761/6762 明令不可注册）"
+                    "——不存在可查的注册人"
+                )
+            else:
+                identity_review = ""
+    except Exception:  # noqa: BLE001 - 判据失败不阻断回灌，退回保底档
+        logger.warning("探针线索 %r 的档位判据失败，退回保底待核", target[:80])
+        return infra.ADVICE_REVIEW, "档位判据失败，保底待核"
+    if advice == infra.ADVICE_SKIP:
+        return infra.ADVICE_REVIEW, f"判据链判「无需再核」（{reason}），但进程内探针实测捕获，保底待核"
+    if identity_review:
+        return infra.ADVICE_REVIEW, identity_review
+    # 形态怀疑类的「待核」不采纳——见上面那条。返回空档位，由调用方回落到类别语义。
+    return "", ""
+
+
 def to_report_leads(leads: list[ProbeLead]) -> list[Lead]:
     """把 ProbeLead 转成 report 的 :class:`Lead`（source=runtime-probe，含合规提示）。
 
-    advice：除 CARD_MERCHANT（情报研判、默认待核）外，运行时实测线索给「建议调证」。
+    advice 的定法，按**值的形态**而不是 category：值里提取得到网络标的（域名 / IP，含 URL 与
+    ``host:port`` 形态）的，走 :func:`_network_advice` 的判据链 + 保底待核；提取不到的按类别
+    语义——CARD_MERCHANT（情报研判）待核，其余最高档，它们的标的是商户号 / 密钥 / 被劫持的
+    机构这类东西，域名判据链管不着，本来就该由人去核。
+
+    ★为什么不按 category 分流：``push-c2`` 这个 tag 映射到的是 ``SELF_HOSTED_IM`` 而不是
+      ``DOMAIN``，它的值却恰恰是域名或 ``wss://`` URL——按 category 分流会整条漏掉，而它正是
+      厂商推送域被判最高档那条路径本身。category 是「谁该被追问」的业务语义，
+      「这个值是不是网络标的」是形态问题，两者不重合。
     """
     out: list[Lead] = []
     for pl in dedup(leads):
-        advice = "待核" if pl.category == LeadCategory.CARD_MERCHANT else "建议调证"
+        advice, advice_reason = "", ""
+        target = _network_target(pl.value)
+        if target is not None:
+            advice, advice_reason = _network_advice(*target)
+        if not advice:  # 没有网络标的，或判据链只给出「形态怀疑」——回落到类别语义
+            advice = (
+                infra.ADVICE_REVIEW if pl.category == LeadCategory.CARD_MERCHANT
+                else infra.ADVICE_INVESTIGATE
+            )
         notes = _COMPLIANCE_NOTE if pl.category in _SENSITIVE_CATS else "运行时探针实测捕获。"
+        if advice_reason:
+            notes = f"{notes}（{advice_reason}）"
         out.append(
             Lead(
                 category=pl.category,
@@ -262,6 +422,9 @@ def to_report_leads(leads: list[ProbeLead]) -> list[Lead]:
                 where_to_request=pl.where_to_request or None,
                 confidence=Confidence.HIGH,
                 advice=advice,
+                # ★同时封存 base_advice：这是判据链（含保底规则）的结论，探针路径此前完全没接
+                #   可撤销抑制机制——base 为 None 意味着将来任何一次降档都撤不回来。
+                base_advice=advice,
                 source_refs=[
                     Evidence(
                         source=_RUNTIME_SOURCE,
