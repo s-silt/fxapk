@@ -7,6 +7,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 class Severity(Enum):
@@ -135,6 +139,31 @@ class Lead:
     #: ★同样必须是结构化字段：这条警示原本只写在 ``notes`` 里，而 letters 全文不渲染 notes
     #:   （与 :attr:`shape_uncertain` 一模一样的断裂，见该字段注释）。走过一次的坑不走第二次。
     sni_masquerade: list[str] = field(default_factory=list)
+    #: 判据链算出的**初始档**，不含任何后续抑制。``None`` 表示来源未知（旧报告，见下）。
+    #:
+    #: ★与 :attr:`advice` 的关系：``advice`` 是 ``base_advice`` 与 :attr:`downgrades` 共同
+    #:   算出的**物化缓存**，不是第三个独立真源。要改档位就增删 downgrade，别直接写 advice。
+    #:
+    #: ★为什么允许 ``None`` 而不是回落成 ``advice``：旧报告里的「待核」可能出自分析器初判、
+    #:   来源档降级、重打包隔离、伪装 SNI……这些来源已不可逆地丢失。把它写成
+    #:   ``base_advice=<当前档>, downgrades={}`` 虽然当前档位没变，字段名却在暗示「这就是
+    #:   原始判据结论」——将来有人据此自动解除抑制，就会把本该压着的线索放出去。
+    #:   ``None`` 如实表达「这条的来源不可考」，:func:`effective_advice` 对它原样返回 advice。
+    base_advice: str | None = None
+    #: 可独立撤销的**抑制来源**：``{来源 id: 该来源的说明}``。
+    #:
+    #: ★存在的理由：档位此前是被多个机制**依次改写**出来的结果，谁也不知道「是谁降的」。
+    #:   于是任一机制想撤销自己那次降档时，既不知道该恢复到哪一档，也会把别人的降档一起
+    #:   冲掉——实测发生过：伪装 SNI 解除时把重打包隔离冲没了，被仿冒厂商的域名重新进了
+    #:   文书出口。记下来源之后，撤销只删自己那条，其余照旧压着。
+    #:
+    #: ★说明文字存在这里、**不**并进 :attr:`notes`：notes 里还有离线状态、解析历史、辖区
+    #:   等等非抑制信息，把两者混在一起就没法在撤销时精确删掉自己那句（那正是上一次把别的
+    #:   机制的说明一起冲掉的原因）。展示层自行把 notes 与本字段的说明合起来渲染。
+    #:
+    #: 什么才算 downgrade：与基础判据**正交**、可能被后续证据独立撤销、且撤销时必须保留其它
+    #: 机制效果的，才是。仅仅因为「代码里执行得晚」不算——那种应当直接算进 base。
+    downgrades: dict[str, str] = field(default_factory=dict)
 
     @property
     def is_c2(self) -> bool:
@@ -177,6 +206,103 @@ class Lead:
         return any(
             str(getattr(ev, "source", "")) in OBSERVED_CONTACT_SOURCES for ev in self.source_refs
         )
+
+
+#: 抑制来源 id。**写进 report.json，是对外契约的一部分——发布后不要改名**。
+#:
+#: ★命名描述**证据/原因**，不描述当前政策：政策（降到哪一档、界面怎么呈现）将来可能变，
+#:   而「这条线索是因为样本被判为重打包件才被压着的」这个事实不会变。故用 ``repack_identity``
+#:   而不是 ``repack_quarantine``。
+#:
+#: ★粒度：一种可独立撤销的判据一个 id。具体的 tier 名、承载端点、verdict 等动态细节放进
+#:   说明文本，**不要**编进 id——那会产生一堆清不掉的动态键。
+DOWNGRADE_REPACK_IDENTITY: str = "repack_identity"
+DOWNGRADE_SNI_MASQUERADE: str = "sni_masquerade"
+DOWNGRADE_SOURCE_TIER: str = "source_tier"
+
+#: 与 :mod:`apkscan.core.infra` 的 ``ADVICE_*`` 同值。此处重复一份是为了不让模型层反向依赖
+#: 判据层（``is_c2`` 早已用同样的字面写法）。两处若不一致，下面那条一致性断言会先红。
+_ADVICE_INVESTIGATE: str = "建议调证"  # leak-scan: allow 档位取值的字面定义本身，与 infra.ADVICE_INVESTIGATE 同值
+_ADVICE_REVIEW: str = "待核"
+
+
+def effective_advice(base_advice: str | None, downgrades: "Mapping[str, str] | None") -> str:
+    """由初始档与抑制来源算出**实际档位**。纯函数、绝不抛。
+
+    规则只有一条：有任何抑制来源时，最高档压到 :data:`_ADVICE_REVIEW`（待核）。
+
+    - 最低档（已知第三方基础设施那一类）不受抑制影响——那是判据本身的结论，不是「暂时
+      压着」，压了也没有再压的意义；
+    - 已经在待核档的保持不变；
+    - ``base_advice`` 为 ``None``（旧报告，来源不可考）时**原样返回空串**，由调用方回落到
+      报告里既有的 advice——绝不凭空替它推断一个初始档。
+    """
+    if not base_advice:
+        return ""
+    if base_advice == _ADVICE_INVESTIGATE and downgrades:
+        return _ADVICE_REVIEW
+    return base_advice
+
+
+def recompute_advice(lead: "Lead") -> None:
+    """按 ``base_advice`` 与 ``downgrades`` 重算并就地写回 :attr:`Lead.advice`。
+
+    ``base_advice`` 为 ``None`` 时**不动** advice：那是来源不可考的旧数据，凭它推不出档位。
+    """
+    fresh = effective_advice(lead.base_advice, lead.downgrades)
+    if fresh:
+        lead.advice = fresh
+
+
+def apply_downgrade(lead: "Lead", reason_id: str, note: str) -> bool:
+    """记一条抑制来源并压档；返回是否新增（已有同 id 则只更新说明、返回 False）。
+
+    ★命中就记，**哪怕当前档位已经是「待核」**：档位相同不代表来源相同。若因为「反正已经
+      是待核了」而不记，将来另一条来源被撤销时，本条不在字典里，档位就会错误地弹回最高档
+      ——这正是本机制要防的那件事。
+
+    ★``base_advice`` 不可考（旧报告）时**照样压档**：「存在抑制来源」这个事实本身是明确的，
+      压档是保守方向。绝不能只把来源记进字典却不动档位——那样字典看着像「抑制已生效」，
+      线索却照旧走到文书出口，是最危险的那种静默失败。
+      代价是这条此后**不可撤销**（见 :func:`lift_downgrade`）：撤销需要知道恢复到哪一档，
+      而那个信息在旧数据里已经丢了。
+    """
+    added = reason_id not in lead.downgrades
+    lead.downgrades[reason_id] = note
+    if lead.base_advice is None:
+        if lead.advice == _ADVICE_INVESTIGATE:
+            lead.advice = _ADVICE_REVIEW
+    else:
+        recompute_advice(lead)
+    return added
+
+
+def lift_downgrade(lead: "Lead", reason_id: str) -> bool:
+    """撤掉一条抑制来源并重算档位；返回是否真的撤掉了。
+
+    只删自己那条。其余来源仍在时，档位照旧压着——这是与「整体重算 Lead」最关键的区别。
+
+    ★``base_advice`` 不可考时**拒绝撤销**（返回 ``False``、字典不动）：算不出该恢复到哪一档，
+      硬撤只能靠猜，而猜错的方向是把本该压着的线索放进文书出口。宁可留着不撤。
+    """
+    if reason_id not in lead.downgrades:
+        return False
+    if lead.base_advice is None:
+        return False
+    del lead.downgrades[reason_id]
+    recompute_advice(lead)
+    return True
+
+
+def advice_is_consistent(lead: "Lead") -> bool:
+    """``advice`` 是否与 ``base_advice`` + ``downgrades`` 自洽。
+
+    供持久化边界与测试做不变量校验：``advice`` 是物化缓存，任何绕过
+    :func:`apply_downgrade` / :func:`lift_downgrade` 直接写它的地方都会让三者失配。
+    ``base_advice`` 为 ``None``（旧数据）时无从校验，视为一致。
+    """
+    expected = effective_advice(lead.base_advice, lead.downgrades)
+    return not expected or expected == lead.advice
 
 
 def merge_runtime_into_lead_dict(existing: dict, runtime_lead: dict) -> bool:
@@ -370,7 +496,11 @@ class AnalysisConfig:
 
 
 #: report.json 结构版本。消费方（AI / CI / 第三方工具）据此判断字段布局；发生破坏性字段变更时 bump。
-REPORT_SCHEMA_VERSION = "1.0"
+#:
+#: 1.1 —— Lead 增加 ``base_advice`` 与 ``downgrades``（档位的可撤销来源）。**向后兼容的扩展**：
+#:        旧报告缺这两个字段照常读，``advice`` 原样沿用、行为逐字不变；新增字段只是让「档位是
+#:        被谁压着的」这件事变得可查、可单独撤销。故 bump 次版本号而非主版本号。
+REPORT_SCHEMA_VERSION = "1.1"
 
 #: 分析完整度状态（Report.analysis_status）。
 #: complete=无分析器报错；partial=有分析器报错但仍有成功产出；failed=无任何分析器成功跑完。

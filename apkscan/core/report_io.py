@@ -8,6 +8,7 @@ from dataclasses import fields
 from pathlib import Path
 from typing import Mapping
 
+from apkscan.core import infra
 from apkscan.core.models import (
     ANALYSIS_STATUS_COMPLETE,
     REPORT_SCHEMA_VERSION,
@@ -25,6 +26,12 @@ from apkscan.report import json as report_json
 logger = logging.getLogger(__name__)
 
 _EXTENSIONS_META_KEY = "_report_top_level_extensions"
+
+#: ``Lead.base_advice`` 的合法取值。磁盘上的报告可能被手改或被别的工具写坏，读进来的初始档
+#: 必须落在这个集合里——否则一个没人认识的字符串会被当成档位一路写进 ``advice``。
+_VALID_ADVICE: frozenset[str] = frozenset({
+    infra.ADVICE_INVESTIGATE, infra.ADVICE_REVIEW, infra.ADVICE_SKIP,
+})
 _REPORT_FIELDS = frozenset(field.name for field in fields(Report))
 
 
@@ -42,6 +49,45 @@ def _evidence_from_dict(value: object) -> Evidence:
 
 def _string_list(value: object) -> list[str]:
     return [str(item) for item in value] if isinstance(value, list) else []
+
+
+def _base_advice(value: object) -> str | None:
+    """读 ``Lead.base_advice``：只认**合法档位取值**，其余（含缺失 / null / 乱码）一律 ``None``。
+
+    ★保留「没有」这个状态：``None`` 表示这条线索的初始档不可考（旧报告），与「初始档恰好
+      是空串」不是一回事，也不该被悄悄抹平成后者。
+
+    ★只收白名单里的取值、**不做 ``str()`` 硬转**：这份数据来自磁盘，可能被手改或被别的工具
+      写坏。放一个 ``"{'bad': 1}"`` 进来，它会被 :func:`models.recompute_advice` 当成初始档
+      写进 ``advice``，而一致性校验还判它自洽——凭空造出一个没人认识的档位。
+      非法值当作「来源不可考」处理：档位原样沿用报告里的 advice，行为等同旧报告，安全。
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if text not in _VALID_ADVICE:
+        if text:
+            logger.warning("report.json 里的 base_advice 取值非法，按来源不可考处理：%r", text)
+        return None
+    return text
+
+
+def _str_mapping(value: object) -> dict[str, str]:
+    """读一个 ``{str: str}`` 映射；非映射 / 非字符串键值一律丢弃，绝不抛。
+
+    ★值也必须是真字符串、不做 ``str()`` 硬转：嵌套对象被转成 ``"{'a': 1}"`` 这种字面后，
+      看着像一条正常的抑制说明，实则是坏数据混进了判定输入。
+    """
+    if not isinstance(value, Mapping):
+        return {}
+    out: dict[str, str] = {}
+    for key, item in value.items():
+        if not (isinstance(key, str) and key.strip()):
+            continue
+        if not isinstance(item, str):
+            continue
+        out[key.strip()] = item
+    return out
 
 
 def _evidences(value: object) -> list[Evidence]:
@@ -92,6 +138,12 @@ def report_from_dict(payload: Mapping[str, object]) -> Report:
                 shape_uncertain=bool(item.get("shape_uncertain", False)),
                 # 同上：letters 靠它渲染「别发给被冒用的那家公司」的警示，丢了警示就消失。
                 sni_masquerade=_string_list(item.get("sni_masquerade")),
+                # ★档位的可撤销来源。旧报告没有这两个字段：``base_advice`` 保持 None（如实
+                #   表达「这条的初始档不可考」），``downgrades`` 为空。此时 advice 原样沿用，
+                #   行为与改动前逐字一致；但也**不会**有人据此自动解除抑制——因为没有 base
+                #   就算不出该恢复到哪一档，:func:`models.effective_advice` 会返回空串。
+                base_advice=_base_advice(item.get("base_advice")),
+                downgrades=_str_mapping(item.get("downgrades")),
             )
         )
 
