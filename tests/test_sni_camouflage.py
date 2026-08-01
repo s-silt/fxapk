@@ -76,9 +76,23 @@ def test_sni_on_nonstandard_port_is_flagged() -> None:
     assert carriers == {_FAKE_SNI: [f"{_BACKEND}:{_ODD_PORT}/tcp"]}
 
 
+def _aggregated_ips(s: pcap_ingest.PcapSummary) -> set[str]:
+    """该 summary 里真正被聚合成公网远端的地址集合。
+
+    ★这两条反向测试断言的是「结果为空」，而端点压根没进来时结果也是空——**两种原因产出
+      同一个绿**。夹具用的共享地址空间正踩在这条缝上：它现在能过 ``_ip_public``（该函数按
+      is_private 判），但若哪天改按 ``is_global`` 判，这些地址会在聚合阶段就被滤掉，两条
+      测试会在护栏其实已经失效的情况下继续全绿。故先钉住前置事实，再断言豁免。
+    """
+    return {ep.ip for ep in pcap_ingest.remote_endpoints(s)}
+
+
 def test_sni_on_standard_port_is_not_flagged() -> None:
     """反向护栏：443 上的 SNI 是正常 TLS 服务，不得被标伪装（否则全库域名线索报废）。"""
     s = _summary(_flow(_STD_PORT_HOST, 443, {_FAKE_SNI}))  # 合成段，护栏放行、无需豁免
+
+    assert _STD_PORT_HOST in _aggregated_ips(s), "前置：该地址须真被聚合，否则下面的空结果是假绿"
+
     assert pcap_ingest.sni_camouflage_carriers(s) == {}
 
 
@@ -91,6 +105,11 @@ def test_sni_seen_on_any_standard_port_is_exonerated() -> None:
         _flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}),           # 伪装的那条
         _flow(_STD_PORT_HOST, 443, {_FAKE_SNI}),      # 真访问该服务的那条（合成段）
     )
+
+    # 前置：两条 flow 都要真进聚合——豁免必须是「标准端口那条也在」换来的，
+    # 而不是「标准端口那条根本没进来、非标那条也没进来」凑出的空。
+    assert {_BACKEND, _STD_PORT_HOST} <= _aggregated_ips(s)
+
     assert pcap_ingest.sni_camouflage_carriers(s) == {}
 
 
