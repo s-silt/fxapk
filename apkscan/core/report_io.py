@@ -11,6 +11,7 @@ from typing import Mapping
 from apkscan.core.models import (
     ANALYSIS_STATUS_COMPLETE,
     REPORT_SCHEMA_VERSION,
+    VALID_ADVICE,
     Confidence,
     Endpoint,
     Evidence,
@@ -25,6 +26,7 @@ from apkscan.report import json as report_json
 logger = logging.getLogger(__name__)
 
 _EXTENSIONS_META_KEY = "_report_top_level_extensions"
+
 _REPORT_FIELDS = frozenset(field.name for field in fields(Report))
 
 
@@ -42,6 +44,47 @@ def _evidence_from_dict(value: object) -> Evidence:
 
 def _string_list(value: object) -> list[str]:
     return [str(item) for item in value] if isinstance(value, list) else []
+
+
+def _advice_or_none(value: object, field_name: str) -> str | None:
+    """读一个**档位锚点字段**：只认合法取值，其余（含缺失 / null / 乱码）一律 ``None``。
+
+    ``base_advice`` 与 ``legacy_effective_advice`` 共用——两者取值域相同，坏数据的后果也相同。
+
+    ★保留「没有」这个状态：``None`` 表示这个锚点不可考（旧报告），与「锚点恰好是空串」不是
+      一回事，也不该被悄悄抹平成后者。
+
+    ★只收白名单里的取值、**不做 ``str()`` 硬转**：这份数据来自磁盘，可能被手改或被别的工具
+      写坏。放一个 ``"{'bad': 1}"`` 进来，它会被 :func:`models.recompute_advice` 当成锚点
+      写进 ``advice``，而一致性校验还判它自洽——凭空造出一个没人认识的档位。
+      非法值当作「不可考」处理：档位原样沿用报告里的 advice，行为等同旧报告，安全。
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if text not in VALID_ADVICE:
+        if text:
+            logger.warning("report.json 里的 %s 取值非法，按不可考处理：%r", field_name, text)
+        return None
+    return text
+
+
+def _str_mapping(value: object) -> dict[str, str]:
+    """读一个 ``{str: str}`` 映射；非映射 / 非字符串键值一律丢弃，绝不抛。
+
+    ★值也必须是真字符串、不做 ``str()`` 硬转：嵌套对象被转成 ``"{'a': 1}"`` 这种字面后，
+      看着像一条正常的抑制说明，实则是坏数据混进了判定输入。
+    """
+    if not isinstance(value, Mapping):
+        return {}
+    out: dict[str, str] = {}
+    for key, item in value.items():
+        if not (isinstance(key, str) and key.strip()):
+            continue
+        if not isinstance(item, str):
+            continue
+        out[key.strip()] = item
+    return out
 
 
 def _evidences(value: object) -> list[Evidence]:
@@ -76,6 +119,20 @@ def report_from_dict(payload: Mapping[str, object]) -> Report:
             continue
         subject = item.get("subject")
         where = item.get("where_to_request")
+        base_advice = _advice_or_none(item.get("base_advice"), "base_advice")
+        legacy_advice = _advice_or_none(item.get("legacy_effective_advice"), "legacy_effective_advice")
+        if base_advice is not None and legacy_advice is not None:
+            # 眼下两者互斥：有判据结论就不会去拍迁移快照，所以同时出现说明这条被手改过、或
+            # 经过了某个我们还不知道的写路径。**不丢弃任何一个**：计算上由
+            # models.effective_advice 让 base 优先，快照原样往返留档，供人事后核对。
+            #
+            # ★下一刀要重审这段文案：一旦开始给旧 lead **补算** base_advice，「两个锚点并存」
+            #   就成了迁移期的正常过渡态，那时再说「被手改」就不对了，得按当时的迁移策略改写。
+            logger.warning(
+                "report.json 的 lead %r 同时带 base_advice 与 legacy_effective_advice；"
+                "按 base_advice 计算档位，快照原样保留：%r / %r",
+                item.get("value"), base_advice, legacy_advice,
+            )
         leads.append(
             Lead(
                 category=category,
@@ -92,6 +149,14 @@ def report_from_dict(payload: Mapping[str, object]) -> Report:
                 shape_uncertain=bool(item.get("shape_uncertain", False)),
                 # 同上：letters 靠它渲染「别发给被冒用的那家公司」的警示，丢了警示就消失。
                 sni_masquerade=_string_list(item.get("sni_masquerade")),
+                # ★档位的可撤销来源。旧报告没有这三个字段：两个锚点保持 None（如实表达「不可
+                #   考」），``downgrades`` 为空。此时 advice 原样沿用，行为与改动前逐字一致；
+                #   也不会有人据此自动解除抑制——两个锚点都没有时 models.effective_advice 返回
+                #   空串，算不出该恢复到哪一档。要等它被 apply_downgrade 碰过、拍下迁移快照，
+                #   才具备撤销能力。
+                base_advice=base_advice,
+                downgrades=_str_mapping(item.get("downgrades")),
+                legacy_effective_advice=legacy_advice,
             )
         )
 
