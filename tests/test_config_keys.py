@@ -16,7 +16,10 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from apkscan.analyzers.config_keys import ConfigKeysAnalyzer
+from apkscan.core import infra
 from apkscan.core.infra import ADVICE_SKIP
 from apkscan.core.models import Confidence, LeadCategory, Severity
 from tests.conftest import FakeContext
@@ -324,3 +327,102 @@ def test_config_key_lead_common_fields_and_advice_grading() -> None:
     assert by_val["ZX_CHANNEL_ID=C01-GEztJH0JLdBC"].advice == "建议调证"
     # 版本号等框架/系统样板 → 降噪档（不淹没真凭据线索）
     assert by_val["GTSDK_VERSION=3.2.16.7"].advice == ADVICE_SKIP
+
+# ---------------------------------------------------------------------------
+# 厂商推送凭据的**归属**：拿到值还不够，得知道该向谁调取
+# ---------------------------------------------------------------------------
+#
+# ★这一组锁的是 subject，不是「能不能提取」：未命中任何规则的 <meta-data> 照样会成为
+#   CONFIG_KEY 线索（分析器对全部 meta-data 一视同仁），只是 subject 落到「待核（应用配置）」。
+#   差别在于那条线索能不能落地——「MIPUSH_APPID=<值>，向谁调取？待核」是废线索。
+
+
+def _ctx(manifest_body: str) -> FakeContext:
+    return FakeContext(
+        package_name="com.example.app",
+        manifest_xml=(
+            '<?xml version="1.0" encoding="utf-8"?>\n'
+            '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+            'package="com.example.app">\n'
+            f'  <application>\n{manifest_body}  </application>\n'
+            '</manifest>\n'
+        ),
+        files={},
+    )
+
+
+def _meta(name: str, value: str) -> str:
+    return f'    <meta-data android:name="{name}" android:value="{value}"/>\n'
+
+
+@pytest.mark.parametrize(("key_name", "expect_in_subject"), [
+    # 各家 SDK 的标准连写形态——原先只有下划线前缀（MI_/OPPO_/VIVO_），接不住这些。
+    ("MIPUSH_APPID", "小米"),
+    ("MIPUSH_APPKEY", "小米"),
+    ("OPPOPUSH_APPKEY", "OPPO"),
+    ("VIVOPUSH_APPID", "vivo"),
+    # 魅族/荣耀此前整家无归属规则，只收已见过形态的具体键名。
+    ("MEIZU_APPID", "魅族"),
+    ("FLYME_APPID", "魅族"),
+    ("HONOR_APPID", "荣耀"),
+])
+def test_vendor_push_credential_is_attributed_to_the_vendor(
+    key_name: str, expect_in_subject: str
+) -> None:
+    """★走真入口：厂商推送凭据要带**具体归属**，否则拿到值也不知道向谁调取。
+
+    规则退回原状（去掉连写前缀 / 删掉魅族荣耀两家），本测试即红——那时这些键仍会产出线索，
+    但 subject 是「待核（应用配置）」。
+    """
+    result = _analyzer().analyze(_ctx(_meta(key_name, "Abc123Xyz789Def456")))
+    assert result.error is None
+
+    lead = _leads_by_value(result).get(f"{key_name}=Abc123Xyz789Def456")
+    assert lead is not None, f"{key_name} 没产出线索"
+    assert lead.subject and expect_in_subject in lead.subject, (
+        f"{key_name} 的归属是 {lead.subject!r}——拿到值却不知道向谁调取，线索落不了地"
+    )
+    assert lead.where_to_request == lead.subject
+    assert lead.advice == infra.ADVICE_INVESTIGATE
+
+
+@pytest.mark.parametrize("key_name", [
+    # ★负例：厂商命名空间下的**非凭据**配置。它们与推送无关，绝不能被归成「推送」——
+    #   _advice_for 对命中规则的键一律给最高档，误归属会直接产出错误的调取落点。
+    "HONOR_THEME",
+    "MEIZU_CHANNEL_CONFIG",
+    "FLYME_FEATURE_FLAG",
+])
+def test_vendor_namespace_non_credential_keys_are_not_attributed_to_push(key_name: str) -> None:
+    """厂商命名空间 ≠ 推送凭据形态。收 `MEIZU_` / `HONOR_` 这类宽前缀就会踩这里。"""
+    result = _analyzer().analyze(_ctx(_meta(key_name, "some_value_here")))
+    assert result.error is None
+
+    lead = _leads_by_value(result).get(f"{key_name}=some_value_here")
+    assert lead is not None
+    # ★断言的是 subject（归属主体），不是 notes 里的 SDK 名：subject 才是文书的受文对象。
+    #   未命中任何规则时它是兜底的「待核（应用配置）」——那正是我们要的结果：拿到了值，
+    #   但不冒充知道该找谁。误归属后 subject 会变成厂商公司全称，据此就会发出错误的函。
+    assert lead.subject == "待核（应用配置）", (
+        f"{key_name} 被误归给了 {lead.subject!r}——厂商命名空间不等于推送凭据形态，"
+        f"据此产出的是指向该厂商的错误落点"
+    )
+
+
+def test_vendor_push_credential_end_to_end_has_concrete_value_and_recipient() -> None:
+    """端到端：两家的凭据同时在场时，各自带对的具体值与受文对象。"""
+    result = _analyzer().analyze(
+        _ctx(_meta("MIPUSH_APPID", "2882303761520123456")
+             + _meta("MEIZU_APPKEY", "xML3o7rBgL6naCbxeYS9m8"))
+    )
+    assert result.error is None
+
+    by_val = _leads_by_value(result)
+    mi = by_val.get("MIPUSH_APPID=2882303761520123456")
+    mz = by_val.get("MEIZU_APPKEY=xML3o7rBgL6naCbxeYS9m8")
+    assert mi is not None and mz is not None
+
+    assert mi.category == LeadCategory.CONFIG_KEY
+    assert mi.subject and "小米" in mi.subject
+    assert mz.subject and "魅族" in mz.subject, "魅族归属没锁住——删光魅族规则这条才会红"
+    assert mi.advice == infra.ADVICE_INVESTIGATE
