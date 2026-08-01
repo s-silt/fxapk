@@ -273,11 +273,17 @@ def _lead_dict(payload: dict, value: str) -> dict:
     return next(ld for ld in payload["leads"] if ld.get("value") == value)
 
 
+#: 本条断言要求一个**确实收录在 KNOWN_INFRA 名单里**的真实域名——它扮演的角色是「本就已判
+#: ADVICE_SKIP 的第三方基础设施」，而保留域不在那份名单里、承担不了这个角色。故此处的真实
+#: 域名字面是判据本身的要求，并非从样本材料里抄来的值。
+_KNOWN_INFRA_DOMAIN = "cdn.jsdelivr.net"  # leak-scan: allow 判据要求该域确在 KNOWN_INFRA 名单内，保留域不在名单中
+
+
 def test_known_third_party_domain_stays_skip() -> None:
-    """已判「无需调证」的（jsDelivr 等在第三方名单里）不受影响——只降"本会出函"的那些。"""
-    assert infra.classify_domain("cdn.jsdelivr.net")[0] == infra.ADVICE_SKIP
-    s = _summary(_flow(_BACKEND, _ODD_PORT, {"cdn.jsdelivr.net"}))
-    lead = _lead(pcap_ingest.to_report_leads(s), "cdn.jsdelivr.net")
+    """已在第三方名单里、本就判 ADVICE_SKIP 的域名不受影响——只降"本会套打"的那些。"""
+    assert infra.classify_domain(_KNOWN_INFRA_DOMAIN)[0] == infra.ADVICE_SKIP
+    s = _summary(_flow(_BACKEND, _ODD_PORT, {_KNOWN_INFRA_DOMAIN}))
+    lead = _lead(pcap_ingest.to_report_leads(s), _KNOWN_INFRA_DOMAIN)
     assert lead.advice == infra.ADVICE_SKIP
 
 
