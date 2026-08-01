@@ -698,11 +698,12 @@ def test_merge_runtime_into_lead_dict_upgrades_contact_on_observed_source() -> N
 
     # observed-contact（runtime-pcap = pcap 真 dst_ip）并入 → 同步升 is_runtime_contact
     observed = _static_lead_dict()
-    merged = merge_runtime_into_lead_dict(
+    ev_merged, ledger_changed = merge_runtime_into_lead_dict(
         observed,
         {"source_refs": [{"source": "runtime-pcap", "location": "pcap", "snippet": "y"}]},
     )
-    assert merged is True
+    assert ev_merged is True
+    assert ledger_changed is False, "只并证据没动账本——两个返回位语义不能互相污染"
     assert observed["is_runtime_seen"] is True
     assert observed["is_runtime_contact"] is True  # ← 无修复即失败
 

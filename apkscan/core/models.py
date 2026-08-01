@@ -358,6 +358,37 @@ def lift_downgrade(lead: "Lead", reason_id: str) -> bool:
     return True
 
 
+def seal_base_advice(leads: "list[Lead]") -> int:
+    """把本次运行**判据链刚算出**的 advice 封存为 :attr:`Lead.base_advice`；返回封了几条。
+
+    调用点在管线的**接缝**上：所有判据链生产者都跑完、任何抑制机制动手之前。那一刻 ``advice``
+    恰好就是「判据链的结论」，封下来即可，不必逐个改二三十处 ``Lead(advice=...)`` 构造。
+
+    ★三条守卫缺一不可，任一不满足就跳过——它们共同保证「只封判据链结论，绝不把别的东西
+      冒充成判据结论」：
+
+      - ``base_advice`` 已有：别人已经显式填过（那些在接缝之前就要抑制的生产者），不覆盖；
+      - ``downgrades`` 非空：这条已被抑制过，此刻的 advice 是**压过之后**的档，封了就把抑制
+        效果烙进 base，撤销时再也回不去（棘轮）；
+      - ``legacy_effective_advice`` 非空：这是旧报告，它的 advice 来源不可考，更不是判据结论。
+
+      外加 ``advice`` 必须是合法档位——空串（未研判）或乱码封进 base 只会造出假档位。
+
+    ★为什么不用 ``__post_init__`` 自动封：:func:`report_io.report_from_dict` 读旧报告时走的是
+      同一个构造器，自动封会把旧报告的 advice 冒充成判据链结论——那正是 ``base_advice`` 允许
+      为 ``None`` 要表达的东西（见该字段注释），一封就全毁了。
+    """
+    sealed = 0
+    for lead in leads:
+        if lead.base_advice is not None or lead.downgrades or lead.legacy_effective_advice is not None:
+            continue
+        if lead.advice not in VALID_ADVICE:
+            continue
+        lead.base_advice = lead.advice
+        sealed += 1
+    return sealed
+
+
 def advice_is_consistent(lead: "Lead") -> bool:
     """``advice`` 是否与两个锚点 + ``downgrades`` 自洽。
 
@@ -376,7 +407,7 @@ def advice_is_consistent(lead: "Lead") -> bool:
     return not expected or expected == lead.advice
 
 
-def merge_runtime_into_lead_dict(existing: dict, runtime_lead: dict) -> bool:
+def merge_runtime_into_lead_dict(existing: dict, runtime_lead: dict) -> tuple[bool, bool]:
     """把一条 **runtime** 观测（已序列化的 lead dict）并进已存在的 lead dict，升为活体确认。
 
     回灌层（pcap_ingest / probe_ingest）在 ``report.json`` 上做原地字典合并：命中已存在
@@ -390,22 +421,32 @@ def merge_runtime_into_lead_dict(existing: dict, runtime_lead: dict) -> bool:
 
     只搬 runtime Evidence（``existing`` 可能是静态 lead，静态证据原样保留）。
 
-    ★**尚未**搬 ``base_advice`` / ``downgrades`` / ``legacy_effective_advice``：眼下还没有任何
-      生产路径调用 :func:`apply_downgrade`，这三个字段在真实报告里恒为空，不搬没有实际后果。
-      第二刀把降档生产者迁过来之后必须补上，且三个要**一起**搬——只搬前两个而漏掉快照，回灌
-      合并出来的 lead 就退回了「永远解不开」那个状态。合并语义（两侧同 id 时以谁的说明为准、
-      快照冲突时取哪张）要等生产者接线后才定得准，故留到那一刀，此处先记账。
+    ★抑制账本（``downgrades``）的合并**完全复用** :func:`apply_downgrade` 的语义：把 existing
+      的档位状态装进一个临时 Lead、逐条灌 runtime 侧的账本、把结果写回 dict——旧报告的
+      write-once 快照、压档方向、同 id 幂等全部由同一个 helper 保证，不在 dict 层另立规则。
+      没有这段，运行时侧压出的账本在命中同键静态 lead 时会被整体丢弃、advice 也不重算：
+      被冒用域名在合并后的报告里保持最高档，而 closure 目标选择与 HTML 的 C2 区块都按
+      advice 走——letters 之外的出口全部失守。
+
+    ★``base_advice`` 不从 runtime 侧采纳：runtime 侧的 base 是它那条判据链对同一个值的结论，
+      existing 侧要么已有自己的结论、要么来源不可考（旧报告）——不可考时由 apply_downgrade
+      拍迁移快照兜底，可撤销性不丢。跨侧的「等值才采纳」优化留给恢复凭据那一刀。
 
     Args:
         existing: report.json 里已存在的 lead dict（**原地**被改）。
         runtime_lead: 新 runtime lead 的序列化 dict。
 
     Returns:
-        本次是否真的并入了新的 runtime 证据（True=发生合并/确认；False=无新 runtime 证据可并）。
+        ``(evidence_merged, ledger_changed)`` 二元组，**两个语义不能合并成一个 bool**：
+        前者=真并入了新的 runtime 证据（调用方据此计「活体确认」并升 runtime 位），
+        后者=抑制账本/档位发生了变化（值得落盘，但**不是**确认——账本不是证据）。
+        合成一个的话，仅账本变化的合并会被计进「runtime 确认 N 条」的日志与统计，语义失真。
     """
     incoming = runtime_lead.get("source_refs")
     if not isinstance(incoming, list):
-        return False
+        # 证据缺失/坏形状：没证据可搬，但**不能**在此直接返回——下面的伪装名并集与抑制账本
+        # 合并对这样的输入同样必须生效（早退会把账本一起跳过，那正是本函数要防的丢失）。
+        incoming = []
     refs = existing.get("source_refs")
     if not isinstance(refs, list):
         refs = []
@@ -443,6 +484,52 @@ def merge_runtime_into_lead_dict(existing: dict, runtime_lead: dict) -> bool:
         if union != current:
             existing["sni_masquerade"] = union
 
+    # ★抑制账本合并（见 docstring）。``ledger_changed`` 独立于 ``merged``：账本不是 runtime
+    #   证据，不能触发下面的 is_runtime_seen 升位——那两个布尔的语义是「动态侧真的出现过」。
+    ledger_changed = False
+    raw_incoming_dg = runtime_lead.get("downgrades")
+    incoming_dg = {
+        str(k).strip(): str(v)
+        for k, v in raw_incoming_dg.items()
+        if isinstance(k, str) and k.strip() and isinstance(v, str)
+    } if isinstance(raw_incoming_dg, dict) else {}
+    if incoming_dg:
+        def _anchor(value: object) -> str | None:
+            # 与 report_io 读盘同判据：只认合法档位，其余当「不可考」。
+            return value.strip() if isinstance(value, str) and value.strip() in VALID_ADVICE else None
+
+        raw_current_dg = existing.get("downgrades")
+        current_dg = {
+            str(k).strip(): str(v)
+            for k, v in raw_current_dg.items()
+            if isinstance(k, str) and k.strip() and isinstance(v, str)
+        } if isinstance(raw_current_dg, dict) else {}
+        current_advice = existing.get("advice")
+        current_legacy = _anchor(existing.get("legacy_effective_advice"))
+        shim = Lead(
+            # category/value 仅为构造合法对象；apply_downgrade 不读它们。
+            category=LeadCategory.DOMAIN,
+            value=str(existing.get("value", "")),
+            advice=current_advice if isinstance(current_advice, str) else "",
+            base_advice=_anchor(existing.get("base_advice")),
+            downgrades=dict(current_dg),
+            legacy_effective_advice=current_legacy,
+        )
+        for reason_id, note in incoming_dg.items():
+            apply_downgrade(shim, reason_id, note)
+        if (
+            shim.advice != (current_advice if isinstance(current_advice, str) else "")
+            or shim.downgrades != current_dg
+            or shim.legacy_effective_advice != current_legacy
+        ):
+            existing["advice"] = shim.advice
+            existing["downgrades"] = shim.downgrades
+            if shim.legacy_effective_advice is not None:
+                # 旧报告被首次抑制时 helper 拍下的迁移快照——必须落回 dict，否则往返即丢、
+                # 这条抑制退回「永远解不开」。base_advice 不写：shim 里的就是 existing 自己的。
+                existing["legacy_effective_advice"] = shim.legacy_effective_advice
+            ledger_changed = True
+
     if merged:
         # 有 runtime 证据 → 升为「运行时出现」（宽口径，与 Lead.is_runtime_seen 一致）。
         existing["is_runtime_seen"] = True
@@ -452,7 +539,7 @@ def merge_runtime_into_lead_dict(existing: dict, runtime_lead: dict) -> bool:
             isinstance(r, dict) and str(r.get("source")) in OBSERVED_CONTACT_SOURCES for r in refs
         ):
             existing["is_runtime_contact"] = True
-    return merged
+    return merged, ledger_changed
 
 
 #: Finding 的**主张类型**（复核 / Agent 据此区分「看到的」与「推断的」，别把弱推断当铁证）：

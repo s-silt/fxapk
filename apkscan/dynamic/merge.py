@@ -42,6 +42,7 @@ from apkscan.core.models import (
     LeadCategory,
     Report,
     Severity,
+    seal_base_advice,
 )
 
 logger = logging.getLogger(__name__)
@@ -381,6 +382,9 @@ def _build_runtime_leads(report: Report, runtime_only: list[Endpoint]) -> int:
 
     # 兜底新 leads 的空 advice（DOMAIN/IP 的 advice 已由 build_endpoint_leads 按 infra 分级）。
     pipeline._apply_default_advice(new_leads)
+    # ★与静态主路径同一个接缝：判据链跑完、抑制动手之前，把 advice 封存为 base_advice。
+    #   已在 build_endpoint_leads / pcap 直建里显式填过 base 的不受影响（seal 见到非空就跳过）。
+    seal_base_advice(new_leads)
     # 与静态主路径同样做重打包隔离：正版重打包件在运行时连的也是**正版厂商的后端**，
     # 若只在静态侧隔离，`capture --into` 新引入的厂商域名仍会以「建议调证」进调证出口。
     _quarantine_leads(report, new_leads)

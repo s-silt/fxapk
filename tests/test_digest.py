@@ -293,3 +293,43 @@ def test_cli_digest_warns_on_stderr_without_corrupting_json_stdout(tmp_path) -> 
 def test_cli_digest_bad_path_exits_1() -> None:
     res = runner.invoke(cli.app, ["digest", "/no/such/report.json"])
     assert res.exit_code == 1
+
+
+def test_build_digest_carries_downgrade_ledger() -> None:
+    """★抑制账本必须进 digest：降档原因不再拼 notes，digest 的主要读者是 AI，
+    它要判断「这条为什么被压着、能不能放回」全靠这个字段——漏了它，压档就成了无来由的档位。"""
+    from apkscan.core import infra
+
+    report = {
+        "leads": [
+            {"category": "DOMAIN", "value": "pressed.example.com",
+             "advice": infra.ADVICE_REVIEW, "confidence": "HIGH",
+             "downgrades": {"sni_masquerade": "只在非标准 TLS 端口作 SNI 出现"}},
+            {"category": "DOMAIN", "value": "clean.example.com",
+             "advice": infra.ADVICE_INVESTIGATE, "confidence": "HIGH"},
+        ],
+    }
+    d = build_digest(report)
+    by_val = {lead["value"]: lead for lead in d["leads"]}
+    assert by_val["pressed.example.com"]["downgrades"] == {
+        "sni_masquerade": "只在非标准 TLS 端口作 SNI 出现"
+    }
+    assert by_val["clean.example.com"]["downgrades"] == {}, "无抑制的也要有该键（空 dict），消费方不必判缺"
+
+
+def test_build_digest_redact_keeps_ledger_usable() -> None:
+    """redact 路径：账本的值过脱敏兜底后仍是字符串、键不丢——账本值是判据产生的固定文案，
+    脱敏是防御性的（防上游把 PII 写进说明），不该把整个字段抹没。"""
+    from apkscan.core import infra
+
+    report = {
+        "leads": [
+            {"category": "DOMAIN", "value": "pressed.example.com",
+             "advice": infra.ADVICE_REVIEW, "confidence": "HIGH",
+             "downgrades": {"repack_identity": "按疑似正版资产隔离"}},
+        ],
+    }
+    d = build_digest(report, redact=True)
+    dg = d["leads"][0]["downgrades"]
+    assert set(dg.keys()) == {"repack_identity"}
+    assert isinstance(dg["repack_identity"], str) and dg["repack_identity"], "脱敏后值仍须可读"
