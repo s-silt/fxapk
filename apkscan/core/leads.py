@@ -15,6 +15,7 @@ from apkscan.core import exposure, forensic, infra
 from apkscan.core.attribution import classify_network
 from apkscan.core.models import (
     OBSERVED_CONTACT_SOURCES,
+    SNI_MASQUERADE_KEY,
     Confidence,
     Endpoint,
     Lead,
@@ -429,6 +430,29 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
         tier_note = "仅见于第三方库文件/超大字符串表，疑似库内置，低可信"
         notes = f"{notes}；{tier_note}" if notes else tier_note
 
+    # 伪装 SNI：该域名只在**非标准 TLS 端口**上作为 SNI 出现过（判据见
+    # ``dynamic.pcap_ingest.sni_camouflage_carriers``，事实随 Endpoint 一起传过来）。
+    #
+    # ★这是本项目最重的那类误判的入口：非标端口上的 ClientHello 写着谁，证明不了这台机器归谁
+    #   运营——自建协议借知名域名的名义混入背景流量是常见手法。此处若照常判
+    #   ``ADVICE_INVESTIGATE``，出口就会为被冒用域名套打出一份指向其持有方的文书，把无关第三方
+    #   列成了标的。实测（1.4.0）已真的对两个知名服务各生成了一份。
+    #
+    # ★只降到 ``ADVICE_REVIEW``、不判 ``ADVICE_SKIP``：样本作者完全可以注册一个知名域名的近似域
+    #   自用，一律排除会把真 C2 藏起来。降档关掉自动套打，同时留在清单里供人核。
+    masq_carriers = _sni_masquerade_carriers(ep)
+    if masq_carriers:
+        if advice == infra.ADVICE_INVESTIGATE:
+            advice = infra.ADVICE_REVIEW
+            confidence = Confidence.LOW
+        masq_note = (
+            f"⚠ 该域名仅作为 SNI 出现在非标准 TLS 端口（{'、'.join(masq_carriers)}）上——"
+            "标准端口之外，ClientHello 里的 SNI 不构成「该域名运营方即此端点运营方」的证据，"
+            "系伪装的可能性高。★标的应是承载它的 IP:端口，**不是**该域名的持有方；"
+            "如确需以此域名为标的，须先人工核实证书 / Host 与之一致。"
+        )
+        notes = f"{notes}；{masq_note}" if notes else masq_note
+
     notes = _apply_forensic(
         advice, ep.value, evidence_to_obtain, notes,
         icp=icp, rdap=rdap, whois=whois, dns=dns,
@@ -445,7 +469,22 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
         source_refs=list(ep.evidences),
         notes=notes,
         advice=advice,
+        # 被冒用的域名，其 Lead 的标的**就是**被借用的那个名字——故填自身。方向与 IP 侧
+        # （「本连接借用了谁」）相反，字段语义一致：这条线索上出现的这些名字，其持有方与
+        # 本案无关，不得作为受文机关。★必须结构化：上面那段 notes 在合并与出口两处都会丢。
+        sni_masquerade=[ep.value] if masq_carriers else [],
     )
+
+
+def _sni_masquerade_carriers(ep: Endpoint) -> list[str]:
+    """取端点上「只在非标端口作 SNI 出现」的承载端点列表；没有 / 结构不符 → 空列表。绝不抛。"""
+    raw = ep.enrichment.get(SNI_MASQUERADE_KEY)
+    if not isinstance(raw, dict):
+        return []
+    carriers = raw.get("carriers")
+    if not isinstance(carriers, list):
+        return []
+    return [str(c).strip() for c in carriers if str(c).strip()]
 
 
 #: ASN 归属被判为这几类时，算「这个地址落在租户可查的托管段上」——用作低段位裸 IP 的升级佐证。

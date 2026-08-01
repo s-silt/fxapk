@@ -78,6 +78,17 @@ class Endpoint:
     enrichment: dict = field(default_factory=dict)  # whois/icp/asn 结果
 
 
+#: ``Endpoint.enrichment`` 里存放「本域名只作为非标端口的 SNI 出现过」这一事实的键，
+#: 值形如 ``{"carriers": ["ip:port/proto", ...]}``——承载它的那些端点。
+#:
+#: ★为什么这条事实必须挂在 **Endpoint** 上，而不只是留在产它的那条 pcap Lead 里：域名端点
+#:   并入主报告后会被 :func:`apkscan.core.leads._domain_lead` 重新产一条 Lead，那个生产者只
+#:   看得到 Endpoint 自身。事实不在 Endpoint 上，它就只能按「这是个陌生域名」判
+#:   ``ADVICE_INVESTIGATE``，而 letters 的文书正是据此套打的。判据的产地（dynamic）与消费地
+#:   （core）分处两层，故常量定义在两边都依赖的 models，不让 core 反向依赖 dynamic。
+SNI_MASQUERADE_KEY: str = "sni_masquerade"
+
+
 #: 运行时证据里 **真观测到「连去该端点自身 peer IP」** 的 observed-contact 子来源：``runtime``
 #: （mitm 实测上游服务器 IP）/ ``runtime-pcap``（pcap 解出的真实 dst_ip）。其余 ``runtime*`` 子来源
 #: ——手编 / 合成兜底的 ``runtime-derived``（见 ``dynamic.merge._RUNTIME_DERIVED_SOURCE``）、
