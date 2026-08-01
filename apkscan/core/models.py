@@ -83,9 +83,9 @@ class Endpoint:
 #:
 #: ★为什么这条事实必须挂在 **Endpoint** 上，而不只是留在产它的那条 pcap Lead 里：域名端点
 #:   并入主报告后会被 :func:`apkscan.core.leads._domain_lead` 重新产一条 Lead，那个生产者只
-#:   看得到 Endpoint 自身。事实不在 Endpoint 上，它就只能按「这是个陌生域名」判「建议调证」，
-#:   而调证函正是据此生成的。判据的产地（dynamic）与消费地（core）分处两层，故常量定义在
-#:   两边都依赖的 models，不让 core 反向依赖 dynamic。
+#:   看得到 Endpoint 自身。事实不在 Endpoint 上，它就只能按「这是个陌生域名」判
+#:   ``ADVICE_INVESTIGATE``，而 letters 的文书正是据此套打的。判据的产地（dynamic）与消费地
+#:   （core）分处两层，故常量定义在两边都依赖的 models，不让 core 反向依赖 dynamic。
 SNI_MASQUERADE_KEY: str = "sni_masquerade"
 
 

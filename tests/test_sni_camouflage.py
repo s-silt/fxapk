@@ -249,21 +249,21 @@ def test_known_third_party_domain_stays_skip() -> None:
 # ---------------------------------------------------------------------------
 # 第二条生产路径：域名端点并入主报告后，由 core.leads._domain_lead 重新产 Lead
 #
-# ★上面那批测试锁的全是 pcap 自己那条路（to_report_leads）。真正把函件发出去的却是另一条：
+# ★上面那批测试锁的全是 pcap 自己那条路（to_report_leads）。真正走到套打出口的却是另一条：
 #   域名端点并入 report.endpoints 后，_domain_lead 会**重新**产一条同名 Lead，而那个生产者
 #   只看得到 Endpoint 自身，压根不知道这个名字是从哪个端口的握手里抠出来的。
 #
-#   实测（马耀案，fxapk 1.4.0）：同一份报告里四个伪装域名分裂成 2:2——进了 endpoints 的两个
-#   被判「建议调证」并真的生成了指向 jsDelivr 镜像与网易有道的调证函；没进 endpoints 的两个
-#   因走不到这条路而幸免。决定安全与否的竟是「有没有进 endpoints」这条与伪装判断毫不相干的
-#   分叉，上面那批测试全绿也没抓住。故本节按**真入口**逐环钉死。
+#   实测（fxapk 1.4.0）：同一份报告里四个伪装域名分裂成 2:2——进了 endpoints 的两个被判
+#   ADVICE_INVESTIGATE 并真的套打出了指向被冒用服务的文书；没进 endpoints 的两个因走不到
+#   这条路而幸免。决定安全与否的竟是「有没有进 endpoints」这条与伪装判断毫不相干的分叉，
+#   上面那批测试全绿也没抓住。故本节按**真入口**逐环钉死。
 # ---------------------------------------------------------------------------
 
-#: 对照用的真业务域名：同样不在已知名单里，但只在标准端口出现 → 必须**保持**建议调证。
-#: 护栏收得过宽会把三桶那类真调证落点一起吃掉，那比漏更糟。
-#: ★不能用 example.com / .test / .invalid：那些是标准保留域，classify_domain 一律判「待核」，
-#:   而本对照项要求的恰恰是「本会被判建议调证」的角色，保留域承担不了。同 _FAKE_SNI 的处境。
-_REAL_BACKEND_DOMAIN = "gateway.appnode-svc.com"  # leak-scan: allow 合成对照域名，需被判建议调证故不能用保留域
+#: 对照用的真业务域名：同样不在已知名单里，但只在标准端口出现 → 必须**保持** ADVICE_INVESTIGATE。
+#: 护栏收得过宽会把真标的一起吃掉，那比漏更糟。
+#: ★不能用 example.com / .test / .invalid：那些是标准保留域，classify_domain 一律判 ADVICE_REVIEW，
+#:   而本对照项要求的恰恰是「本会被判 ADVICE_INVESTIGATE」的角色，保留域承担不了。同 _FAKE_SNI。
+_REAL_BACKEND_DOMAIN = "gateway.appnode-svc.com"  # leak-scan: allow 合成对照域名，须被判 ADVICE_INVESTIGATE 故不能用保留域
 
 
 def test_masquerade_travels_with_the_domain_endpoint() -> None:
@@ -290,12 +290,12 @@ def test_standard_port_domain_endpoint_carries_no_marker() -> None:
 
 
 def test_domain_lead_producer_downgrades_the_masqueraded_name() -> None:
-    """★接线②：走 build_endpoint_leads 这个**真入口**——被冒用的域名不得判「建议调证」。
+    """★接线②：走 build_endpoint_leads 这个**真入口**——被冒用的域名不得判 ADVICE_INVESTIGATE。
 
-    这是马耀案实际走的那条路。删掉 _domain_lead 里读伪装事实的那段，本测试必红。
+    这是真实报告里实际走的那条路。删掉 _domain_lead 里读伪装事实的那段，本测试必红。
     """
     assert infra.classify_domain(_FAKE_SNI)[0] == infra.ADVICE_INVESTIGATE, (
-        "前提：该域名本会被判建议调证（不在已知第三方名单里）"
+        "前提：该域名本会被判 ADVICE_INVESTIGATE（不在已知第三方名单里）"
     )
     s = _summary(
         _flow(_BACKEND, 30135, {_FAKE_SNI}),
@@ -305,17 +305,17 @@ def test_domain_lead_producer_downgrades_the_masqueraded_name() -> None:
 
     lead = _lead(build_endpoint_leads(dom_eps, online=False), _FAKE_SNI)
 
-    assert lead.advice == infra.ADVICE_REVIEW, "本条路径此前判「建议调证」并真的出了函"
+    assert lead.advice == infra.ADVICE_REVIEW, "本条路径此前判 ADVICE_INVESTIGATE 并真的套打了"
     assert lead.is_c2 is False
     assert lead.sni_masquerade == [_FAKE_SNI], "结构化标记要在，notes 在合并与出口两处都会丢"
     assert "非标准 TLS 端口" in lead.notes
 
 
 def test_domain_lead_producer_keeps_the_real_backend() -> None:
-    """★反向护栏：护栏不得误伤真调证落点。
+    """★反向护栏：不得误伤真标的。
 
-    实测马耀案同一份 pcap 里，三个桶域名（阿里 OSS / 百度 BOS / 天翼 ZOS）与伪装域名同在，
-    降档若收得过宽就把该发的函一起关掉了——那比漏发更糟。
+    实测同一份 pcap 里，对象存储的租户桶域名与伪装域名同在，降档若收得过宽就把该套打的
+    一起关掉了——那比漏更糟。
     """
     assert infra.classify_domain(_REAL_BACKEND_DOMAIN)[0] == infra.ADVICE_INVESTIGATE
     s = _summary(
@@ -334,9 +334,9 @@ def test_domain_lead_producer_keeps_the_real_backend() -> None:
 def test_letters_never_drafts_for_a_masqueraded_domain() -> None:
     """★接线③：出口硬闸，与上游判据相互独立。
 
-    上游任何一环退回去，办出去的都是一封发给被冒用企业的协查函。故出口自己再挡一次：
+    上游任何一环退回去，套打出来的都是一份指向被冒用服务持有方的文书。故出口自己再挡一次：
     标的自身出现在自己的 sni_masquerade 里 → 绝不套打。删掉 _is_actionable 里那道闸，
-    即便 advice 被上游误升为「建议调证」本测试也必须红。
+    即便 advice 被上游误升为 ADVICE_INVESTIGATE 本测试也必须红。
     """
     from apkscan.report import json as report_json
     from apkscan.report import letters
@@ -351,6 +351,6 @@ def test_letters_never_drafts_for_a_masqueraded_domain() -> None:
     payload = report_json._to_jsonable(lead)
     assert letters._is_actionable(payload) is False
 
-    # 出口闸独立成立：即便上游把 advice 误升回「建议调证」，也照样不出函。
+    # 出口闸独立成立：即便上游把 advice 误升回 ADVICE_INVESTIGATE，也照样不套打。
     payload["advice"] = infra.ADVICE_INVESTIGATE
     assert letters._is_actionable(payload) is False, "出口闸不得依赖 advice 判对"

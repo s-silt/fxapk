@@ -188,9 +188,9 @@ def _is_non_recipient(where_to_request: str) -> bool:
 def _is_masqueraded_domain(lead: dict[str, Any]) -> bool:
     """本条 Lead 的标的自身是否为**被冒用**的域名（自己出现在自己的 sni_masquerade 里）。
 
-    ★出口硬闸，与上游各级判据相互独立。上游任何一环判错，办出去的就是一封发给被冒用企业的
-      协查函——这是本项目最重的那类错误，它必须在出口再挡一次，而不是信任链路上游。
-      实测（马耀案 1.4.0）上游三处同时失守，函件已真的生成，故补此闸。
+    ★出口硬闸，与上游各级判据相互独立。上游任何一环判错，套打出来的就是一份指向被冒用服务
+      持有方的文书——这是本项目最重的那类误判，必须在出口再挡一次，而不是信任链路上游。
+      实测（1.4.0）上游三处同时失守，文书已真的生成，故补此闸。
     """
     if str(lead.get("category") or "").upper() != "DOMAIN":
         return False
@@ -204,7 +204,7 @@ def _is_masqueraded_domain(lead: dict[str, Any]) -> bool:
 
 
 def _is_actionable(lead: dict[str, Any]) -> bool:
-    """该 Lead 是否可办案化（满足全部 4 个套打条件）。"""
+    """该 Lead 是否可套打（满足全部 4 个条件）。"""
     if lead.get("advice") != _ADVICE_INVESTIGATE:
         return False  # 条件 1：只对建议调证的
     if not _str_list(lead.get("evidence_to_obtain")):

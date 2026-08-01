@@ -433,13 +433,13 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
     # 伪装 SNI：该域名只在**非标准 TLS 端口**上作为 SNI 出现过（判据见
     # ``dynamic.pcap_ingest.sni_camouflage_carriers``，事实随 Endpoint 一起传过来）。
     #
-    # ★这是本项目最重的那类错误的入口：非标端口上的 ClientHello 写着谁，证明不了这台机器归谁
-    #   运营——自建协议借知名域名的名义混入背景流量是常见手法。此处若照常判「建议调证」，出口
-    #   就会生成一封指向被冒用公司的协查函，把与本案无关的企业写成嫌疑方。实测（马耀案 1.4.0）
-    #   已真的对 jsDelivr 镜像与网易有道各生成了一封。
+    # ★这是本项目最重的那类误判的入口：非标端口上的 ClientHello 写着谁，证明不了这台机器归谁
+    #   运营——自建协议借知名域名的名义混入背景流量是常见手法。此处若照常判
+    #   ``ADVICE_INVESTIGATE``，出口就会为被冒用域名套打出一份指向其持有方的文书，把无关第三方
+    #   列成了标的。实测（1.4.0）已真的对两个知名服务各生成了一份。
     #
-    # ★只降到「待核」、不判「无需调证」：团伙完全可以注册一个知名域名的近似域自用，一律排除会
-    #   把真 C2 藏起来。降档挡住自动出函，同时留人一眼。
+    # ★只降到 ``ADVICE_REVIEW``、不判 ``ADVICE_SKIP``：样本作者完全可以注册一个知名域名的近似域
+    #   自用，一律排除会把真 C2 藏起来。降档关掉自动套打，同时留在清单里供人核。
     masq_carriers = _sni_masquerade_carriers(ep)
     if masq_carriers:
         if advice == infra.ADVICE_INVESTIGATE:
@@ -448,8 +448,8 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
         masq_note = (
             f"⚠ 该域名仅作为 SNI 出现在非标准 TLS 端口（{'、'.join(masq_carriers)}）上——"
             "标准端口之外，ClientHello 里的 SNI 不构成「该域名运营方即此端点运营方」的证据，"
-            "系伪装的可能性高。★调证对象应是承载它的 IP:端口，**不是**该域名的持有方；"
-            "如确需据此域名调证，须先人工核实证书 / Host 与之一致。"
+            "系伪装的可能性高。★标的应是承载它的 IP:端口，**不是**该域名的持有方；"
+            "如确需以此域名为标的，须先人工核实证书 / Host 与之一致。"
         )
         notes = f"{notes}；{masq_note}" if notes else masq_note
 
