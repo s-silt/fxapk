@@ -39,7 +39,10 @@ class _GoodAnalyzer(BaseAnalyzer):
                     kind="domain",
                     evidences=[Evidence(source="dex", location="X;->y", snippet="pay.example.com")],
                 ),
-                Endpoint(value="1.2.3.4", kind="ip"),
+                # ★不能用 1.2.3.4：四段全 ≤32 是低段位形态（版本号/序号的主要产生形态），
+                #   classify_ip 判它待核 → 不进富化目标，用它当「IP 被富化」的夹具会假红。
+                #   富化目标筛选走的是 IP 判据，夹具就得选 IP 判据下确实判最高档的值。
+                Endpoint(value="45.76.1.1", kind="ip"),  # leak-scan: allow pipeline 富化目标夹具，须是 IP 判据下判最高档的公网地址
                 Endpoint(value="https://pay.example.com/notify", kind="url"),
             ],
             findings=[
@@ -219,6 +222,52 @@ def test_enrichment_targets_only_suspicious():
     ]
     targets = {e.value for e in pipeline._enrichment_targets(eps)}
     assert targets == {"gw.synthetic-c2a.vip", "45.76.1.1"}  # leak-scan: allow pipeline 闭环目标夹具，非公网不会进 closure 候选
+
+
+def test_enrichment_targets_respect_source_tier():
+    """富化目标筛选与最终 Lead 研判**同口径**：终判已被 tier 压到待核的端点不再发起联网查询。
+
+    此前这里裸调 ``classify_domain``、不叠加 tier，于是「仅见于第三方库文件 / 超大字符串表」
+    的端点在 Lead 上判待核、在这里却仍算最高档，照样被拿去查 WHOIS/ICP/ASN。
+    ``infra.effective_advice`` 的 docstring 自己写着「目标筛选须与最终 Lead 研判用同一套判据，
+    避免判据漂移」——那一行正是它要防的那种漂移。
+
+    ★把实现退回 ``classify_domain(ep.value)`` 则本条变红：两个端点的值完全相同，唯一的区别
+      就是 tier，不叠加 tier 就分不开它们。
+    """
+    same_value = "api.the.com"  # leak-scan: allow 判据链上零命中的夹具，两个端点须只在 tier 上有别
+    app_tier = Endpoint(value=same_value, kind="domain", evidences=[],
+                        enrichment={"tier": infra.TIER_APP})
+    library_tier = Endpoint(value=same_value, kind="domain", evidences=[],
+                            enrichment={"tier": infra.TIER_LIBRARY_FILE})
+    bulk_tier = Endpoint(value=same_value, kind="domain", evidences=[],
+                         enrichment={"tier": infra.TIER_BULK_STRING})
+
+    assert pipeline._enrichment_targets([app_tier]) == [app_tier], "app tier 照常查"
+    assert pipeline._enrichment_targets([library_tier]) == [], "库文件档终判待核，不该再查"
+    assert pipeline._enrichment_targets([bulk_tier]) == [], "超大字符串表档终判待核，不该再查"
+
+
+def test_enrichment_targets_judge_ips_by_ip_criteria_not_domain_ones():
+    """IP 走 ``classify_ip``，不跟着域名的 tier 规则走——否则会造出反方向的新漂移。
+
+    tier 降档是**域名**判据（``effective_advice`` 是域名接口）。若拿它判 IP：一个带
+    library-file tier 的公网 IP 会在这里被压成待核、不再富化，而它最终的 Lead 走
+    ``classify_ip`` 很可能仍判最高档——「该核查的 IP 却没有 ASN/RDAP 结果」。tier 的生产侧
+    也没有从模型上限制只写给域名，指望它对 IP 恒为 None 靠不住。
+
+    ★把实现里 IP 那条分支改回 ``effective_advice`` 则本条变红。
+    """
+    public_ip = "45.76.1.1"  # leak-scan: allow pipeline 闭环目标夹具，非公网不会进 closure 候选
+    # 前置断言：IP 判据对它判最高档——本测试要锁的正是这个结论不被域名侧的 tier 规则改写。
+    assert infra.classify_ip(public_ip)[0] == infra.ADVICE_INVESTIGATE
+
+    tiered_ip = Endpoint(value=public_ip, kind="ip", evidences=[],
+                         enrichment={"tier": infra.TIER_LIBRARY_FILE})
+
+    assert pipeline._enrichment_targets([tiered_ip]) == [tiered_ip], (
+        "IP 的最终 Lead 判最高档，富化就不该因为域名侧的 tier 规则被跳过"
+    )
 
 
 def test_online_skips_infra_domain_enrichment(monkeypatch, fake_ctx):

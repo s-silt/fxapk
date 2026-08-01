@@ -11,6 +11,7 @@ import json
 
 import pytest
 
+from apkscan.core import infra
 from apkscan.core import runtime_inventory as _inv
 from apkscan.core.closure import CLOSURE_PARTIAL, evaluate_capture_quality
 from apkscan.core.models import LeadCategory
@@ -153,6 +154,255 @@ def test_to_report_leads_sets_runtime_source_and_advice() -> None:
         assert lead.advice in ("建议调证", "待核")
     # is_runtime_seen 应为 True（source=runtime）
     assert all(lead.is_runtime_seen for lead in rls)
+
+
+def test_probe_infra_domain_from_the_real_tag_path_does_not_reach_the_top_tier() -> None:
+    """★走**真入口**：``[push-c2] <厂商域>`` 日志行 → parse_probe_log → to_report_leads。
+
+    这条必须从日志行起跑，不能手搓 ``ProbeLead(category=DOMAIN, ...)``：``push-c2`` 这个 tag
+    经 ``_TAG_MAP`` 映射到的是 :attr:`LeadCategory.SELF_HOSTED_IM`，**不是** DOMAIN。手搓
+    DOMAIN 的测试会全绿，而真实链路上厂商推送域照旧判最高档——那正是本刀第一版漏掉的东西，
+    也正是「接线锁必须走真入口」这条纪律说的：只调被测函数测不到接线。
+    """
+    infra_host = sorted(infra.KNOWN_INFRA_EXACT)[0]
+
+    leads = probe_ingest.to_report_leads(
+        probe_ingest.parse_probe_log(f"[push-c2] {infra_host} [LEAD-穿透]")
+    )
+
+    assert len(leads) == 1
+    assert leads[0].category == LeadCategory.SELF_HOSTED_IM, (
+        "前置断言：真实链路上它就是 SELF_HOSTED_IM 而非 DOMAIN——这正是按 category 分流会漏掉它的原因"
+    )
+    assert leads[0].advice != infra.ADVICE_INVESTIGATE, (
+        f"{infra_host} 命中已知第三方基础设施名单，探针见过它不构成「其持有方值得被追问」"
+    )
+
+
+def test_probe_infra_domain_bottoms_out_at_review_not_skip() -> None:
+    """保底「待核」、不落 SKIP：SKIP 是判据链结论、不走抑制账本，``lead restore`` 够不着。
+
+    探针是进程内的，捕到的是这个 App 自己的行为（不像整机 pcap 有归因问题）。真 C2 借宿在
+    厂商域下时，待核是唯一还留得住这条观测的档位：关掉自动出口，但留在清单里供人核。
+    """
+    infra_host = sorted(infra.KNOWN_INFRA_EXACT)[0]
+    # 前置断言：判据链本身对该值判的确实是 SKIP，否则本测试测不到保底那条分支。
+    assert infra.classify_domain(infra_host)[0] == infra.ADVICE_SKIP
+
+    leads = probe_ingest.to_report_leads(
+        probe_ingest.parse_probe_log(f"[push-c2] {infra_host} [LEAD-穿透]")
+    )
+
+    assert leads[0].advice == infra.ADVICE_REVIEW, "判据链判 SKIP 时应保底抬到待核"
+    assert leads[0].base_advice == infra.ADVICE_REVIEW, (
+        "base_advice 必须一并封存——否则这条线索上任何降档都撤不回来"
+    )
+
+
+def test_probe_extracts_the_network_target_out_of_url_and_hostport_shapes() -> None:
+    """标的按**形态**提取：URL 取 host、``host:port`` 剥端口——厂商域藏在这两种形态里同样要被抓到。"""
+    infra_host = sorted(infra.KNOWN_INFRA_EXACT)[0]
+
+    for line in (
+        f"[push-c2] wss://{infra_host}:8443/ws [LEAD-穿透]",
+        f"[push-c2] {infra_host}:443 [LEAD-穿透]",
+        f"[push-c2] https://{infra_host}/api/v1/push [LEAD-穿透]",
+    ):
+        leads = probe_ingest.to_report_leads(probe_ingest.parse_probe_log(line))
+        assert leads, line
+        assert leads[0].advice == infra.ADVICE_REVIEW, (
+            f"{line!r}：标的是厂商域，无论包在哪种形态里都不该判最高档"
+        )
+
+
+def test_probe_public_dns_ip_goes_through_the_ip_criteria_not_the_domain_ones() -> None:
+    """IP 走 :func:`infra.classify_ip`——公共递归 DNS 这类判据只在 IP 侧，拿域名判据判会整套绕过。"""
+    dns_ip = "8.8.8.8"  # leak-scan: allow 公共递归 DNS 的判据夹具，须是真实可路由地址才命中该判据
+    # 前置断言：IP 判据链确实把它判成最低档，否则本测试测不到「走对了判据链」这件事。
+    assert infra.classify_ip(dns_ip)[0] == infra.ADVICE_SKIP
+    assert infra.classify_domain(dns_ip)[0] != infra.ADVICE_SKIP, (
+        "前置断言：域名判据链对它给不出同样结论——这正是必须分流的原因"
+    )
+
+    leads = probe_ingest.to_report_leads(probe_ingest.parse_probe_log(f"[netstat] {dns_ip}:53 [LEAD-穿透]"))
+
+    assert leads[0].advice == infra.ADVICE_REVIEW, "IP 判据判 SKIP → 保底待核，而不是最高档"
+
+
+@pytest.mark.parametrize("not_a_target", [
+    "key=abcdefghijklmnopqrstuvwxyz0123456789.ab",   # 点分密钥：标签含 '='，不是合法 DNS 标签
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.ab_cd",    # JWT：base64url 的 '_' 不是合法 DNS 字符
+    "2088000000000001",                              # 商户号：无点、无 scheme、无端口
+    "aes-256-cbc key/iv derived from build id",      # 描述串：含空格与斜杠
+    "13800138000",                                   # 手机号
+    "-lead-.example.com",                            # 标签以连字符开头
+])
+def test_network_target_rejects_values_that_are_not_network_targets(not_a_target: str) -> None:
+    """★负向：非网络标的**不得**被提取——否则它们会被交给判据链，按值的偶然形态压档。
+
+    探针的值里本来就混着密钥、token、签名串、号码。严格 DNS 标签校验是它们与真标的之间
+    唯一的分界；用宽松的 ``valid_url_host``（只查「含点 + 末段 2–24 位字母」）挡不住这些。
+    """
+    assert probe_ingest._network_target(not_a_target) is None
+
+
+def test_network_target_requires_a_numeric_port_before_stripping() -> None:
+    """端口必须是数字才剥——否则 ``<厂商域>:not-a-port`` 这种描述串会被剥出一个厂商域来。"""
+    infra_host = sorted(infra.KNOWN_INFRA_EXACT)[0]
+
+    assert probe_ingest._network_target(f"{infra_host}:443") == ("domain", infra_host)
+    assert probe_ingest._network_target(f"{infra_host}:not-a-port") is None
+
+
+def test_probe_shape_suspicion_does_not_press_a_crypto_lead_down() -> None:
+    """★形态怀疑**不**参与压档：密钥线索不因值恰好长得像编码伪域名而被压出最高档。
+
+    判据链里两类结论混在一起——「这个标的的持有方是谁」（身份判定）与「这个字面像不像真域名」
+    （形态怀疑）。对探针捕获的值只有前者成立：探针看到的是 App 真的在用的字符串，它像不像
+    域名不影响其持有方是不是无关第三方。让后者参与压档，CRYPTO_RECIPE 这类本该最高档的线索
+    会因值的偶然形态被压下去。
+
+    夹具是一个足够长、足够高熵的标签——它确实会被 ``looks_like_encoding`` 判成编码伪域名
+    （下面第一条断言钉住这个前提），但档位不受影响。
+
+    ★TLD **不能**用 ``.example`` / ``.test``：那些是 RFC 保留域，属身份判定（标准保证不存在
+      注册人）、本来就该压档，夹具命中它就测不到「纯形态怀疑」那条路了。三条前置断言分别
+      排除三类身份判定命中。
+    """
+    encoded_like = "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0.com"  # leak-scan: allow 合成高熵标签，TLD 必须非保留域否则命中保留域判据、测不到形态怀疑那条路
+    # 前置断言：判据链对这个值给的确实是「形态怀疑」类的待核，否则本测试测不到那条分支。
+    assert infra.classify_domain(encoded_like)[0] == infra.ADVICE_REVIEW
+    assert infra._matched_infra(encoded_like) is None, "前置断言：它不是身份判定命中"
+    assert infra._reserved_domain_match(encoded_like) is None, "前置断言：它不是 RFC 保留域"
+    assert infra._public_ip_echo_service(encoded_like) is None, "前置断言：它不是回显服务"
+
+    leads = probe_ingest.to_report_leads(
+        [probe_ingest.ProbeLead(category=LeadCategory.CRYPTO_RECIPE, value=encoded_like,
+                                probe="ks", raw="x")]
+    )
+
+    assert leads[0].advice == infra.ADVICE_INVESTIGATE, (
+        "形态怀疑不该把密钥线索压出最高档——判据链只在身份判定命中时才有话语权"
+    )
+
+
+def test_probe_echo_service_is_still_pressed_down() -> None:
+    """回显服务判 REVIEW 而不是 SKIP，但它属**身份判定**，仍须压档——不能跟形态怀疑一起被忽略。"""
+    echo_host = sorted(infra._IP_ECHO_SERVICES)[0]
+    assert infra.classify_domain(echo_host)[0] == infra.ADVICE_REVIEW, "前置断言：它不是 SKIP 档"
+
+    leads = probe_ingest.to_report_leads(
+        probe_ingest.parse_probe_log(f"[push-c2] {echo_host} [LEAD-穿透]")
+    )
+
+    assert leads[0].advice == infra.ADVICE_REVIEW, "回显服务的持有方与本次分析无关，须压档"
+
+
+@pytest.mark.parametrize("reserved_line, reserved_host", [
+    ("[push-c2] https://config.test/api [LEAD-穿透]", "config.test"),
+    ("[push-c2] c2.localhost [LEAD-穿透]", "c2.localhost"),
+    ("[push-c2] gateway.local:8443 [LEAD-穿透]", "gateway.local"),
+])
+def test_probe_rfc_reserved_domain_is_pressed_down(reserved_line: str, reserved_host: str) -> None:
+    """★RFC 保留的文档 / 测试域须压档——标准保证了它**不存在可查的注册人**。
+
+    这条容易被归错类：保留域走的是判据链里那些「出口为待核」的分支，看着像形态怀疑
+    （「这串东西可能不是真域名」），实则是**可查性判定**——``.test`` / ``.localhost`` /
+    ``.local`` 由 RFC 明令不可注册，不是「像不像域名」的问题，是「查无此人」的问题。
+    当形态怀疑放行，就会让一个明知没有持有方的域进最高档、进而进文书出口。
+    """
+    # 前置断言：判据链对它给的是待核而**不是** SKIP，否则本条测的就不是「特判分支」那条路。
+    assert infra.classify_domain(reserved_host)[0] == infra.ADVICE_REVIEW
+    assert infra._matched_infra(reserved_host) is None, "前置断言：它不是走 SKIP 那条身份判定"
+
+    leads = probe_ingest.to_report_leads(probe_ingest.parse_probe_log(reserved_line))
+
+    assert leads[0].advice == infra.ADVICE_REVIEW, (
+        f"{reserved_host} 是 RFC 保留域，不存在可查的注册人，不得回升到最高档"
+    )
+
+
+@pytest.mark.parametrize("bogus_port_value", ["token:0", "key:999999999", "seed:000000"])
+def test_network_target_rejects_out_of_range_ports(bogus_port_value: str) -> None:
+    """端口须在合法范围内——``token:0`` 这种「冒号后跟一串数字」不该凭此拿到单标签放行。"""
+    assert probe_ingest._network_target(bogus_port_value) is None
+
+
+def test_probe_domain_with_no_infra_match_still_reaches_the_top_tier() -> None:
+    """反向：陌生域名照旧判最高档——本刀收紧的只是「命中已知基础设施」那部分，不是全面降档。
+
+    ★夹具不能用 ``*.example`` / ``*.test``：那些是 RFC 2606 保留域，会命中
+      ``_reserved_domain_match`` 判待核，于是这条反向锁测的就不是「无命中→最高档」那条路径。
+      形态要求：有子域（避开单常见词 SLD 判据）、标签短（避开编码判据）、不命中任何名单。
+    """
+    unknown = "api.the.com"  # leak-scan: allow 判据链上零命中的夹具，用保留域会命中保留域判据、测不到「无命中→最高档」
+    leads = probe_ingest.to_report_leads(
+        [probe_ingest.ProbeLead(category=LeadCategory.DOMAIN, value=unknown,
+                                probe="push-c2", raw="x")]
+    )
+
+    assert leads[0].advice == infra.ADVICE_INVESTIGATE
+    assert leads[0].base_advice == infra.ADVICE_INVESTIGATE
+
+
+def test_probe_non_network_categories_keep_the_top_tier() -> None:
+    """非网络类别不受影响：商户号 / 密钥这些的标的不是域名持有方，域名判据链管不着它们。"""
+    leads = probe_ingest.to_report_leads([
+        probe_ingest.ProbeLead(category=LeadCategory.PAYMENT, value="2088000000000001",
+                               probe="pay", raw="x"),
+        probe_ingest.ProbeLead(category=LeadCategory.CRYPTO_RECIPE, value="key=0011deadbeef",
+                               probe="ks", raw="x"),
+        probe_ingest.ProbeLead(category=LeadCategory.CARD_MERCHANT, value="A0000000031010",
+                               probe="nfc", raw="x"),
+    ])
+
+    by_cat = {ld.category: ld.advice for ld in leads}
+    assert by_cat[LeadCategory.PAYMENT] == infra.ADVICE_INVESTIGATE
+    assert by_cat[LeadCategory.CRYPTO_RECIPE] == infra.ADVICE_INVESTIGATE
+    assert by_cat[LeadCategory.CARD_MERCHANT] == infra.ADVICE_REVIEW  # 情报研判，默认待核
+
+
+def test_probe_infra_domain_produces_no_letter_even_with_evidence_filled(tmp_path) -> None:
+    """★端到端负向锁：探针捕到的已知基础设施域，**即便填了取证路径**也不得套打出文书。
+
+    这条锁的是「设计」而不是「运气」。修复前，探针 Lead 全都判最高档，之所以没在 letters 上
+    酿成事故，仅仅因为 probe 路径没填 ``evidence_to_obtain``——而 ``_is_actionable`` 的条件 2
+    正好要求它非空。也就是说，谁哪天顺手给探针 Lead 补上取证路径（这是完全合理的改进），
+    闸门就会无声打开，指向厂商持有方的文书当场开始产出。
+
+    所以这里刻意**把取证路径填满**，只让档位这一道闸拦着：档位判对了才有 0 份文书。
+    把 :func:`probe_ingest._network_advice` 退回硬编码最高档，这条立刻变红。
+
+    链路是完整的：**日志行** → ``parse_probe_log``（含 ``_TAG_MAP`` 分类）→
+    ``merge_into_report_json``（真回灌 + 真 JSON 序列化）→ 从盘上读回 → ``build_letters``。
+    一段都不许绕：``push-c2`` 经 ``_TAG_MAP`` 映射成 SELF_HOSTED_IM，手搓
+    ``ProbeLead(category=DOMAIN, ...)`` 的测试会全绿而真实链路照旧出文书。
+    """
+    from apkscan.report import letters
+
+    infra_host = sorted(infra.KNOWN_INFRA_EXACT)[0]
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps({"leads": []}, ensure_ascii=False), encoding="utf-8")
+
+    added = probe_ingest.merge_into_report_json(
+        str(report_path),
+        probe_ingest.parse_probe_log(f"[push-c2] {infra_host} [LEAD-穿透]"),
+    )
+    assert added == 1
+
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert payload["leads"][0]["where_to_request"], (
+        "前置断言：_TAG_MAP 给了受文方，出口闸不是靠它空着挡的"
+    )
+    # ★故意填满：不让本测试依赖「probe 恰好没填 evidence_to_obtain」这个巧合。
+    payload["leads"][0]["evidence_to_obtain"] = ["RDAP/WHOIS 注册人/注册邮箱/注册时间"]
+
+    out = letters.build_letters(payload)
+
+    assert out == [], (
+        f"已知第三方基础设施域 {infra_host} 不得产出文书——其持有方与本次分析无关，"
+        "向它发函正是本项目定义中最重的那类误判"
+    )
 
 
 def test_coverage_axes_flags_missing_and_suggests() -> None:
