@@ -3,6 +3,37 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
+## Unreleased
+
+### Fixed
+
+- **被冒用的域名不再生成调证函（P0）**。非标准 TLS 端口上借用知名域名做 SNI 的连接，其
+  被借用的域名此前会被判「建议调证」，`letters` 据此套打出指向该域名持有方的协查函——把与
+  本案无关的企业写成了嫌疑方，是本项目定义中最重的一类错误。实测在一份真实报告里已对两家
+  公司各生成了一封。
+
+  根因是同一个域名有两条 Lead 生产路径，而保护只做在其中一条上：
+
+  1. `dynamic.pcap_ingest.to_report_leads` 产的域名 Lead 只把警示写进 `notes`，未填结构化的
+     `sni_masquerade` 字段（IP 侧一直填着，域名侧一直空着）；
+  2. `dynamic.pcap_ingest.to_runtime_endpoints` 产的域名端点不带伪装事实，于是这些端点并入
+     主报告后，`core.leads._domain_lead` 重新产 Lead 时只能按「陌生域名」判「建议调证」；
+  3. `models.merge_runtime_into_lead_dict` 本已实现该字段的并集搬运，但因来源字段为空而完全落空。
+
+  同一份报告里因此出现四个伪装域名分裂成两种结局：进了 `endpoints` 的被判「建议调证」并出函，
+  没进的保住了警示——决定安全与否的是「有没有进 endpoints」这条与伪装判断毫不相干的路径分叉。
+
+  四处一并修正：pcap 域名 Lead 补填 `sni_masquerade`；伪装事实随域名端点经
+  `Endpoint.enrichment[SNI_MASQUERADE_KEY]` 传递；`_domain_lead` 读到即降为「待核」并附理由；
+  `report.letters._is_actionable` 增加第四道条件——标的自身出现在自己的 `sni_masquerade` 里
+  即不套打，该闸与上游判据相互独立，上游任何一环退回也拦得住。
+
+  只降到「待核」而不判「无需调证」：团伙完全可以注册知名域名的近似域自用，一律排除会把真
+  C2 藏起来。真实调证落点（如对象存储的租户桶域名）不受影响，仍判「建议调证」。
+
+  **对已产出的报告不追溯**：历史报告的 `sni_masquerade` 字段为空，直接用新版套打仍会出函。
+  补救办法是对该报告重跑一次 `pcap-leads --into`，合并会补上该字段，出口闸随即生效。
+
 ## 1.4.0 — 2026-07-30
 
 ### Added

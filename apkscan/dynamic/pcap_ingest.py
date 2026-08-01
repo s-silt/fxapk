@@ -26,6 +26,7 @@ from apkscan.core import infra
 from apkscan.core import runtime_inventory as _inv
 from apkscan.core.atomic import atomic_write_text
 from apkscan.core.models import (
+    SNI_MASQUERADE_KEY,
     Confidence,
     Endpoint,
     Evidence,
@@ -1552,6 +1553,17 @@ def to_report_leads(summary: PcapSummary) -> list[Lead]:
                         observed_at=domain_ts.get(dom),  # SNI 域名带首包时间，DNS 域名留 None
                     )
                 ],
+                # ★被冒用的域名，其 Lead 的标的**就是**被借用的那个名字——故填自身。
+                #   与 IP 侧填「本连接借用了谁」方向相反，但字段语义一致：这条线索上出现的
+                #   这些名字，其持有方与本案无关，不得作为受文机关。
+                #
+                #   为什么必须是结构化字段、而不是上面那段 notes：notes 在合并与出口两处都
+                #   丢失。实测（马耀案 1.4.0）——该域名同时被 core.leads._domain_lead 产出
+                #   一条「建议调证」的同键 Lead，合并时 notes 不搬运，于是报告里活下来的是
+                #   没有任何警示的那条，letters 照单生成了指向被冒用公司的调证函。
+                #   merge_runtime_into_lead_dict 早已实现该字段的并集搬运，此前**只有 IP 侧
+                #   填了它**，域名侧一直空着，那套搬运逻辑对本案完全落空。
+                sni_masquerade=[dom] if carriers else [],
                 notes=notes,
             )
         )
@@ -1622,24 +1634,32 @@ def to_runtime_endpoints(summary: PcapSummary) -> list[Endpoint]:
                 domain_ts[s] = f.first_ts
     for q in summary.dns_queries:
         domains.setdefault(q, "DNS 查询")
+    # ★伪装判定必须随端点一起走：域名端点并入主报告后，由 core.leads._domain_lead 重新产 Lead，
+    #   而那个生产者只看得到 Endpoint 自身——它不知道这个名字是从哪个端口的握手里抠出来的，
+    #   于是把被冒用的域名判成「建议调证」。实测（马耀案 1.4.0）由此对 jsDelivr 镜像与网易有道
+    #   各生成了一封调证函；同批未并入 endpoints 的两个伪装域名反而因走不到这条路径而幸免——
+    #   决定安全与否的竟是「有没有进 endpoints」这条与伪装判断毫不相干的分叉。
+    camouflage = sni_camouflage_carriers(summary)
     for dom, src in domains.items():
         if dom in seen:
             continue
         seen.add(dom)
-        endpoints.append(
-            Endpoint(
-                value=dom,
-                kind="domain",
-                evidences=[
-                    Evidence(
-                        source=_SOURCE,
-                        location="pcap",
-                        snippet=f"{src}: {dom}",
-                        observed_at=domain_ts.get(dom),
-                    )
-                ],
-            )
+        ep = Endpoint(
+            value=dom,
+            kind="domain",
+            evidences=[
+                Evidence(
+                    source=_SOURCE,
+                    location="pcap",
+                    snippet=f"{src}: {dom}",
+                    observed_at=domain_ts.get(dom),
+                )
+            ],
         )
+        carriers = camouflage.get(str(dom).strip().lower().rstrip("."))
+        if carriers:
+            ep.enrichment[SNI_MASQUERADE_KEY] = {"carriers": list(carriers)}
+        endpoints.append(ep)
     return endpoints
 
 
