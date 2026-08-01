@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from apkscan.core import infra, pipeline
 from apkscan.core.models import (
+    DOWNGRADE_SOURCE_TIER,
     AnalysisConfig,
     AnalyzerResult,
     Confidence,
@@ -252,7 +253,8 @@ def test_domain_tier_downgrades_advice_to_review():
     domain_lead = next(l for l in leads if l.category == LeadCategory.DOMAIN)
     assert domain_lead.advice == "待核"
     assert domain_lead.confidence == Confidence.LOW
-    assert "库内置" in domain_lead.notes
+    # 理由现在存进结构化的抑制来源账本，不再拼进 notes——撤销这条抑制时才删得准。
+    assert "库内置" in domain_lead.downgrades[DOWNGRADE_SOURCE_TIER]
 
 
 def test_app_tier_real_c2_not_downgraded():

@@ -396,6 +396,12 @@
     {% if sni_spans %}
       <div class="lead-warn">{{ spans_html(sni_spans) }}</div>
     {% endif %}
+    {#- 档位的抑制来源（Lead.downgrades：{来源 id: 原因}）。原因文本不再拼进 notes（撤销时
+          才删得掉自己那句），所以必须在这里渲染——否则「为什么被压成待核」在人读的报告里
+          凭空消失，研判者看到一个无来由的档位。 -#}
+    {% for reason in (lead.downgrades or {}).values() %}
+      <div class="lead-warn">{{ reason }}</div>
+    {% endfor %}
   {% endmacro %}
 
   {#- 五层基础设施归属链（resource_holder → origin_network → hosting → edge → service_operator）。

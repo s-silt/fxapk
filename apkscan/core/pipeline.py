@@ -34,6 +34,7 @@ from apkscan.core.models import (
     Evidence,
     LeadCategory,
     Report,
+    seal_base_advice,
 )
 from apkscan.core.registry import (
     detect_capabilities,
@@ -568,6 +569,10 @@ def _stage_build_leads(state: _PipelineState) -> None:
     避免报告出现空白"是否调证"列；已自带 advice 的不覆盖）。"""
     state.leads.extend(build_endpoint_leads(state.endpoints, online=state.config.online))
     _apply_default_advice(state.leads)
+    # ★接缝：所有判据链生产者都跑完、任何抑制机制动手之前。此刻 advice 恰好就是「判据链的
+    #   结论」，封存为 base_advice。位置错一步就毁：放到隔离之后，被压成待核的档位会被烙进
+    #   base，撤销时再也回不去（棘轮）。
+    seal_base_advice(state.leads)
     # 正版重打包件的端点属被仿冒厂商，不能进调证出口。必须在 advice 定型之后立刻做——
     # 下游的 closure 目标选择 / letters / ioc / HTML 红标区块全以 advice 为闸门。
     quarantined = apply_repack_quarantine(state.leads, state.meta)

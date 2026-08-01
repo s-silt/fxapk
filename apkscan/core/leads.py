@@ -14,12 +14,16 @@ import re
 from apkscan.core import exposure, forensic, infra
 from apkscan.core.attribution import classify_network
 from apkscan.core.models import (
+    DOWNGRADE_REPACK_IDENTITY,
+    DOWNGRADE_SNI_MASQUERADE,
+    DOWNGRADE_SOURCE_TIER,
     OBSERVED_CONTACT_SOURCES,
     SNI_MASQUERADE_KEY,
     Confidence,
     Endpoint,
     Lead,
     LeadCategory,
+    apply_downgrade,
 )
 from apkscan.network.categories import CAT_CLOUD, CAT_HOSTING_RESELLER, CAT_IDC
 
@@ -248,7 +252,20 @@ def apply_repack_quarantine(leads: list[Lead], meta: dict) -> list[str]:
     留在「建议调证」会误伤正版厂商。故降为「待核」并写明理由，把判断交还给人，
     人工差分核实后可改回。同理**绝不降到「无需调证」**——那等于替人下了"与本案无关"的结论。
 
-    幂等：已被降档的（advice 不再是「建议调证」）不会二次处理，故运行时回灌路径重复调用安全。
+    幂等：:func:`models.apply_downgrade` 对同一来源 id 只更新说明并返回 ``False``，故运行时
+    回灌路径重复调用安全，返回值里也不会出现重复。
+
+    ★判的是 :attr:`Lead.base_advice`（判据链结论）而**不是**当前 ``advice``：一条 base 为最高档
+      （``ADVICE_INVESTIGATE``）、但已被来源档或伪装 SNI 压成待核的线索，照样要记上本条抑制。
+      旧写法看当前档位、发现已是待核就跳过，于是这条线索的账上没有重打包这一笔——将来撤销那条
+      来源时，档位就会错误地弹回最高档，被仿冒厂商的域名重新走进出口。那正是本机制要防的。
+      代价是审计块 ``repack_quarantine.values`` 会比旧版大，但它记的本就是「被本机制压过的值」，
+      语义一致。
+
+    ★不再压 ``confidence``、也不再把理由拼进 ``notes``：前者是证据强度（隔离撤销后证据并不会
+      因此变强或变弱，把各自的 HIGH/MEDIUM 一把塌缩成 LOW 是不可逆的信息销毁），后者混进
+      notes 就没法在撤销时精确删掉自己那句（见 :attr:`models.Lead.downgrades` 注释）。理由现在
+      存进 downgrades 的值里。
     """
     rid = meta.get("repack_identity") if isinstance(meta, dict) else None
     if not (isinstance(rid, dict) and rid.get("verdict") == _VERDICT_REPACK_SUSPECTED):
@@ -257,15 +274,11 @@ def apply_repack_quarantine(leads: list[Lead], meta: dict) -> list[str]:
     for lead in leads:
         if lead.category not in (LeadCategory.DOMAIN, LeadCategory.IP):
             continue
-        if lead.advice != infra.ADVICE_INVESTIGATE:
+        base = lead.base_advice if lead.base_advice is not None else lead.advice
+        if base != infra.ADVICE_INVESTIGATE:
             continue
-        lead.advice = infra.ADVICE_REVIEW
-        lead.confidence = Confidence.LOW
-        lead.notes = (
-            f"{lead.notes}；{_REPACK_QUARANTINE_NOTE}" if lead.notes
-            else _REPACK_QUARANTINE_NOTE
-        )
-        quarantined.append(lead.value)
+        if apply_downgrade(lead, DOWNGRADE_REPACK_IDENTITY, _REPACK_QUARANTINE_NOTE):
+            quarantined.append(lead.value)
     return quarantined
 
 
@@ -424,11 +437,17 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
     #   调证"（避免误杀真 C2）；已是 infra/私网档的不动（app tier 的真 C2 不受影响）。
     #   用 infra.effective_advice 统一判据（与目标筛选同口径，防判据漂移）。
     tier = ep.enrichment.get("tier")
-    if advice == infra.ADVICE_INVESTIGATE and infra.effective_advice(ep.value, tier) != infra.ADVICE_INVESTIGATE:
-        advice = infra.ADVICE_REVIEW
+    tier_suppressed = (
+        advice == infra.ADVICE_INVESTIGATE
+        and infra.effective_advice(ep.value, tier) != infra.ADVICE_INVESTIGATE
+    )
+    tier_note = "仅见于第三方库文件/超大字符串表，疑似库内置，低可信"
+    if tier_suppressed:
+        # ★这里的 LOW **留在判据链里**（不随降档走）：它编码的是「这条端点的静态出处只有
+        #   库文件/超大字符串表」这一**证据强度**事实，撤销降档之后该事实依然成立。其余三个
+        #   位点的 LOW 则跟着降档一起去掉——那些是当年没有结构化降档记录时，借 confidence
+        #   当可见标记的历史代偿，现在 downgrades 就是那个标记。
         confidence = Confidence.LOW
-        tier_note = "仅见于第三方库文件/超大字符串表，疑似库内置，低可信"
-        notes = f"{notes}；{tier_note}" if notes else tier_note
 
     # 伪装 SNI：该域名只在**非标准 TLS 端口**上作为 SNI 出现过（判据见
     # ``dynamic.pcap_ingest.sni_camouflage_carriers``，事实随 Endpoint 一起传过来）。
@@ -441,25 +460,16 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
     # ★只降到 ``ADVICE_REVIEW``、不判 ``ADVICE_SKIP``：样本作者完全可以注册一个知名域名的近似域
     #   自用，一律排除会把真 C2 藏起来。降档关掉自动套打，同时留在清单里供人核。
     masq_carriers = _sni_masquerade_carriers(ep)
-    if masq_carriers:
-        if advice == infra.ADVICE_INVESTIGATE:
-            advice = infra.ADVICE_REVIEW
-            confidence = Confidence.LOW
-        masq_note = (
-            f"⚠ 该域名仅作为 SNI 出现在非标准 TLS 端口（{'、'.join(masq_carriers)}）上——"
-            "标准端口之外，ClientHello 里的 SNI 不构成「该域名运营方即此端点运营方」的证据，"
-            "系伪装的可能性高。★标的应是承载它的 IP:端口，**不是**该域名的持有方；"
-            "如确需以此域名为标的，须先人工核实证书 / Host 与之一致。"
-        )
-        notes = f"{notes}；{masq_note}" if notes else masq_note
+    masq_note = (
+        f"⚠ 该域名仅作为 SNI 出现在非标准 TLS 端口（{'、'.join(masq_carriers)}）上——"
+        "标准端口之外，ClientHello 里的 SNI 不构成「该域名运营方即此端点运营方」的证据，"
+        "系伪装的可能性高。★标的应是承载它的 IP:端口，**不是**该域名的持有方；"
+        "如确需以此域名为标的，须先人工核实证书 / Host 与之一致。"
+    ) if masq_carriers else ""
 
-    notes = _apply_forensic(
-        advice, ep.value, evidence_to_obtain, notes,
-        icp=icp, rdap=rdap, whois=whois, dns=dns,
-        shodan=ep.enrichment.get("shodan"),
-        certs=ep.enrichment.get("certs"),
-    )
-    return Lead(
+    # ★构造提前到抑制之前：``apply_downgrade`` 要有 Lead 对象才能记账。``advice`` 此刻还是
+    #   判据链的结论，正好同时作为 ``base_advice`` 封存；随后的档位一律由 helper 算出。
+    lead = Lead(
         category=LeadCategory.DOMAIN,
         value=ep.value,
         subject=subject,
@@ -469,11 +479,28 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
         source_refs=list(ep.evidences),
         notes=notes,
         advice=advice,
+        base_advice=advice,
         # 被冒用的域名，其 Lead 的标的**就是**被借用的那个名字——故填自身。方向与 IP 侧
         # （「本连接借用了谁」）相反，字段语义一致：这条线索上出现的这些名字，其持有方与
-        # 本案无关，不得作为受文机关。★必须结构化：上面那段 notes 在合并与出口两处都会丢。
+        # 本案无关，不得作为受文机关。★必须结构化：那段说明在合并与出口两处都会丢。
         sni_masquerade=[ep.value] if masq_carriers else [],
     )
+    if tier_suppressed:
+        apply_downgrade(lead, DOWNGRADE_SOURCE_TIER, tier_note)
+    if masq_carriers:
+        apply_downgrade(lead, DOWNGRADE_SNI_MASQUERADE, masq_note)
+
+    # ★必须读**压完之后**的 lead.advice：_apply_forensic 只对最高档就地追加取证路径，
+    #   传压之前的档位会让被抑制的线索多出一段取证路径——与旧行为相反。旧代码此处传的是被
+    #   降档语句改写过的局部变量，等价于压完之后的值，这里保持一致。
+    #   （evidence_to_obtain 是同一个 list 对象，就地追加对上面构造的 lead 同样可见。）
+    lead.notes = _apply_forensic(
+        lead.advice, ep.value, evidence_to_obtain, lead.notes,
+        icp=icp, rdap=rdap, whois=whois, dns=dns,
+        shodan=ep.enrichment.get("shodan"),
+        certs=ep.enrichment.get("certs"),
+    )
+    return lead
 
 
 def _sni_masquerade_carriers(ep: Endpoint) -> list[str]:

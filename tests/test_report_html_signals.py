@@ -319,3 +319,36 @@ def test_endpoint_missing_kind_still_matches_via_wildcard() -> None:
         )
     )
     assert "SYNTH-HOLDER-A" in out
+
+
+def test_html_renders_downgrade_reasons() -> None:
+    """★出口级：抑制账本的原因文案必须出现在渲染出的 HTML 里。
+
+    降档原因不再拼 notes（撤销时才删得掉自己那句），于是人读报告时「为什么被压成待核」
+    只能靠模板渲染 downgrades——漏渲染，研判者看到的就是一个无来由的档位。
+    """
+    lead = Lead(
+        category=LeadCategory.DOMAIN,
+        value="pressed.example.com",
+        advice=infra.ADVICE_REVIEW,
+        base_advice=infra.ADVICE_INVESTIGATE,
+        confidence=Confidence.HIGH,
+        downgrades={"source_tier": "仅见于第三方库文件/超大字符串表，疑似库内置"},
+    )
+    html = report_html.render_to_string(_report([lead]))
+    assert "仅见于第三方库文件/超大字符串表" in html, "降档原因没渲染，档位在人眼里无来由"
+
+
+def test_html_escapes_downgrade_reason_payload() -> None:
+    """账本值经 Jinja autoescape 渲染——磁盘上的 dict 可能被手改，注入载荷不得原样落进 HTML。"""
+    lead = Lead(
+        category=LeadCategory.DOMAIN,
+        value="pressed.example.com",
+        advice=infra.ADVICE_REVIEW,
+        base_advice=infra.ADVICE_INVESTIGATE,
+        confidence=Confidence.HIGH,
+        downgrades={"source_tier": "<img src=x onerror=alert(1)>"},
+    )
+    html = report_html.render_to_string(_report([lead]))
+    assert "<img src=x onerror=alert(1)>" not in html
+    assert "&lt;img" in html

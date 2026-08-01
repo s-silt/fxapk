@@ -26,12 +26,14 @@ from apkscan.core import infra
 from apkscan.core import runtime_inventory as _inv
 from apkscan.core.atomic import atomic_write_text
 from apkscan.core.models import (
+    DOWNGRADE_SNI_MASQUERADE,
     SNI_MASQUERADE_KEY,
     Confidence,
     Endpoint,
     Evidence,
     Lead,
     LeadCategory,
+    apply_downgrade,
     merge_runtime_into_lead_dict,
 )
 from apkscan.network.fingerprints import KNOWN_INTERCEPT_IPS as _KNOWN_FANZHA
@@ -1528,31 +1530,31 @@ def to_report_leads(summary: PcapSummary) -> list[Lead]:
         notes = f"带外 pcap 捕获（{src}）。"
         confidence = Confidence.HIGH
         carriers = camouflage.get(dom)
-        if carriers and advice == infra.ADVICE_INVESTIGATE:
-            # SNI 只出现在非标准 TLS 端口上 → 它证明不了这台机器归谁运营，降档待核。
-            advice = infra.ADVICE_REVIEW
-            confidence = Confidence.LOW
-            notes += (
-                f"⚠ 该域名仅作为 SNI 出现在非标准 TLS 端口（{'、'.join(carriers)}）上。"
-                "标准端口之外，ClientHello 里的 SNI 不构成「该域名运营方即此端点运营方」的证据——"
-                "自建协议用知名域名做 SNI 混入背景流量是常见手法。"
-                "★调证对象应是承载它的 IP:端口，不是该域名的运营方；如需据此域名调证，先核实证书/Host 一致。"
-            )
-        leads.append(
-            Lead(
-                category=LeadCategory.DOMAIN,
-                value=dom,
-                where_to_request=_DOMAIN_WHERE,
-                confidence=confidence,
-                advice=advice or "建议调证",
-                source_refs=[
-                    Evidence(
-                        source=_SOURCE,
-                        location="pcap",
-                        snippet=f"{src}: {dom}",
-                        observed_at=domain_ts.get(dom),  # SNI 域名带首包时间，DNS 域名留 None
-                    )
-                ],
+        base = advice or infra.ADVICE_INVESTIGATE
+        # SNI 只出现在非标准 TLS 端口上 → 它证明不了这台机器归谁运营，降档待核。
+        # ★只在判据链本判最高档时才记这笔抑制：base 本来就是最低档的（已知第三方基础设施）
+        #   压了也没有意义，撤销时也不会因此升档，记上去只是给账本添噪。
+        masq_note = (
+            f"⚠ 该域名仅作为 SNI 出现在非标准 TLS 端口（{'、'.join(carriers)}）上。"
+            "标准端口之外，ClientHello 里的 SNI 不构成「该域名运营方即此端点运营方」的证据——"
+            "自建协议用知名域名做 SNI 混入背景流量是常见手法。"
+            "★标的应是承载它的 IP:端口，不是该域名的运营方；如需以此域名为标的，先核实证书/Host 一致。"
+        ) if carriers and base == infra.ADVICE_INVESTIGATE else ""
+        lead = Lead(
+            category=LeadCategory.DOMAIN,
+            value=dom,
+            where_to_request=_DOMAIN_WHERE,
+            confidence=confidence,
+            advice=base,
+            base_advice=base,
+            source_refs=[
+                Evidence(
+                    source=_SOURCE,
+                    location="pcap",
+                    snippet=f"{src}: {dom}",
+                    observed_at=domain_ts.get(dom),  # SNI 域名带首包时间，DNS 域名留 None
+                )
+            ],
                 # ★被冒用的域名，其 Lead 的标的**就是**被借用的那个名字——故填自身。
                 #   与 IP 侧填「本连接借用了谁」方向相反，但字段语义一致：这条线索上出现的
                 #   这些名字，其持有方与本次分析无关，不得作为文书的受文方。
@@ -1563,10 +1565,12 @@ def to_report_leads(summary: PcapSummary) -> list[Lead]:
                 #   的是没有任何警示的那条，letters 照单套打出指向被冒用服务的文书。
                 #   merge_runtime_into_lead_dict 早已实现该字段的并集搬运，此前**只有 IP 侧
                 #   填了它**，域名侧一直空着，那套搬运逻辑完全落空。
-                sni_masquerade=[dom] if carriers else [],
-                notes=notes,
-            )
+            sni_masquerade=[dom] if carriers else [],
+            notes=notes,
         )
+        if masq_note:
+            apply_downgrade(lead, DOWNGRADE_SNI_MASQUERADE, masq_note)
+        leads.append(lead)
     return leads
 
 
@@ -2086,7 +2090,10 @@ def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:
             hit = existing_by_key.get(key)
             if hit is not None:
                 # 命中已存在键：不丢弃——把 runtime 证据并进原 lead、升为活体确认。
-                if merge_runtime_into_lead_dict(hit, lead_dict):
+                # ★confirmed 只计**证据**并入；仅抑制账本变化（ledger）不是「确认」，
+                #   混计会让日志把降档合并报成「runtime 确认 N 条」。
+                ev_merged, _ledger = merge_runtime_into_lead_dict(hit, lead_dict)
+                if ev_merged:
                     confirmed += 1
                 continue
             existing_by_key[key] = lead_dict

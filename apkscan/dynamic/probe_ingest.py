@@ -690,7 +690,9 @@ def merge_into_report_json(report_json_path: str, leads: list[ProbeLead]) -> int
             hit = existing_by_key.get(key)
             if hit is not None:
                 # 命中已存在键：不丢弃——把 runtime 探针证据并进原 lead、升为活体确认。
-                if merge_runtime_into_lead_dict(hit, lead_dict):
+                # ★confirmed 只计**证据**并入；仅抑制账本变化不是「确认」（与 pcap 侧同口径）。
+                ev_merged, _ledger = merge_runtime_into_lead_dict(hit, lead_dict)
+                if ev_merged:
                     confirmed += 1
                 continue
             existing_by_key[key] = lead_dict

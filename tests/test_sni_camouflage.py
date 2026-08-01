@@ -15,7 +15,13 @@ from __future__ import annotations
 
 from apkscan.core import infra
 from apkscan.core.leads import build_endpoint_leads
-from apkscan.core.models import SNI_MASQUERADE_KEY, Endpoint, Evidence, LeadCategory
+from apkscan.core.models import (
+    DOWNGRADE_SNI_MASQUERADE,
+    SNI_MASQUERADE_KEY,
+    Endpoint,
+    Evidence,
+    LeadCategory,
+)
 from apkscan.dynamic import pcap_ingest
 from apkscan.report import json as report_json
 from apkscan.report import letters as letters_mod
@@ -140,7 +146,9 @@ def test_masquerade_domain_leaves_the_subpoena_outlets() -> None:
     assert lead.category is LeadCategory.DOMAIN
     assert lead.advice == infra.ADVICE_REVIEW, "仍留在清单里供人核，但关掉四个调证出口"
     assert lead.is_c2 is False
-    assert "SNI 不构成" in lead.notes and "非标准 TLS 端口" in lead.notes
+    # 说明存进结构化账本，不再拼 notes（撤销时才删得掉自己那句，不会连带冲掉别人的）。
+    masq_reason = lead.downgrades[DOWNGRADE_SNI_MASQUERADE]
+    assert "SNI 不构成" in masq_reason and "非标准 TLS 端口" in masq_reason
 
 
 def test_masquerade_makes_the_ip_more_suspicious_not_less() -> None:
@@ -274,6 +282,60 @@ def test_masquerade_merges_into_an_existing_lead(tmp_path) -> None:
     assert "切勿向其发函" in body
 
 
+def test_masquerade_ledger_merges_into_an_existing_static_lead(tmp_path) -> None:
+    """★入口级：pcap 侧压出的**抑制账本**命中既有静态同键 lead 时必须并入并重算档位。
+
+    这是全链里最危险的丢失点：静态报告先给同一个域名产了一条最高档 lead（静态判据看不出
+    伪装），pcap 回灌才发现它只在非标端口作 SNI 出现。合并若只搬 sni_masquerade 字段而丢
+    账本、不重算 advice，这条 lead 在合并后的报告里**仍是最高档**——closure 目标选择与
+    HTML 的 C2 区块都按 advice 走，letters 之外的出口全部失守，被冒用域名照样成为标的。
+
+    去掉 merge_runtime_into_lead_dict 里的账本合并段，本测试即红。
+    """
+    import json
+
+    report = tmp_path / "report.json"
+    # 静态侧已有同键 DOMAIN lead：最高档、无锚点（模拟第一刀之前的旧静态报告）。
+    static_lead = {
+        "category": "DOMAIN", "value": _FAKE_SNI,
+        "advice": infra.ADVICE_INVESTIGATE, "confidence": "MEDIUM",
+        "notes": "静态提取", "source_refs": [],
+    }
+    report.write_text(
+        json.dumps({"leads": [static_lead], "endpoints": [], "meta": {}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    # pcap 采集：该域名只在非标端口作 SNI 出现 → 位点 4 压档并记账。
+    s = _summary(
+        _flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}, payload=1500),
+        _flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}, inbound=True, payload=900),
+    )
+    pcap_ingest.merge_into_report_json(str(report), s)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    lead = _lead_dict(payload, _FAKE_SNI)
+
+    assert lead.get("advice") == infra.ADVICE_REVIEW, (
+        "账本没并进来/档位没重算：被冒用域名在合并后的报告里仍是最高档，"
+        "closure 与 HTML 的 C2 区块都会把它当标的"
+    )
+    assert DOWNGRADE_SNI_MASQUERADE in (lead.get("downgrades") or {}), "抑制账本必须落在合并后的 dict 上"
+    assert lead.get("legacy_effective_advice") == infra.ADVICE_INVESTIGATE, (
+        "旧静态 lead 无锚点，首次被抑制必须拍迁移快照——否则这条抑制永远解不开"
+    )
+    assert lead.get("sni_masquerade") == [_FAKE_SNI], "结构化伪装名照旧并集"
+    # 静态证据与 notes 原样保留（合并只加不减）。
+    assert lead.get("notes") == "静态提取"
+
+    # 幂等：同一份采集再回灌一遍，账本与档位不再变化。
+    pcap_ingest.merge_into_report_json(str(report), s)
+    payload2 = json.loads(report.read_text(encoding="utf-8"))
+    lead2 = _lead_dict(payload2, _FAKE_SNI)
+    assert lead2.get("advice") == infra.ADVICE_REVIEW
+    assert lead2.get("downgrades") == lead.get("downgrades")
+    assert lead2.get("legacy_effective_advice") == infra.ADVICE_INVESTIGATE, "快照 write-once，不被重拍"
+
+
 def _lead_dict(payload: dict, value: str) -> dict:
     return next(ld for ld in payload["leads"] if ld.get("value") == value)
 
@@ -354,7 +416,9 @@ def test_domain_lead_producer_downgrades_the_masqueraded_name() -> None:
     assert lead.advice == infra.ADVICE_REVIEW, "本条路径此前判 ADVICE_INVESTIGATE 并真的套打了"
     assert lead.is_c2 is False
     assert lead.sni_masquerade == [_FAKE_SNI], "结构化标记要在，notes 在合并与出口两处都会丢"
-    assert "非标准 TLS 端口" in lead.notes
+    # ★说明现在存进抑制来源账本，不再拼进 notes：撤销这条抑制时才能精确删掉它自己那句，
+    #   而不会连带把别的机制写在 notes 里的说明一起冲掉。
+    assert "非标准 TLS 端口" in lead.downgrades[DOWNGRADE_SNI_MASQUERADE]
 
 
 def test_domain_lead_producer_keeps_the_real_backend() -> None:
