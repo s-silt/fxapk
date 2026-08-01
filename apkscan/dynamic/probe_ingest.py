@@ -30,6 +30,7 @@ from apkscan.core.models import (
     LeadCategory,
     merge_runtime_into_lead_dict,
 )
+from apkscan.core.restore import restore_index, strip_restored_downgrades
 from apkscan.core.textutil import (
     host_from_url,
     host_is_private,
@@ -684,6 +685,8 @@ def merge_into_report_json(report_json_path: str, leads: list[ProbeLead]) -> int
         }
         added = 0
         confirmed = 0
+        # 人工恢复凭据：命中的来源不复压（与 pcap 回灌同口径）。
+        restored_index = restore_index(payload.get("meta"))
         for lead in to_report_leads(leads):
             key = (lead.category.value, lead.value)
             lead_dict = report_json._to_jsonable(lead)
@@ -691,10 +694,14 @@ def merge_into_report_json(report_json_path: str, leads: list[ProbeLead]) -> int
             if hit is not None:
                 # 命中已存在键：不丢弃——把 runtime 探针证据并进原 lead、升为活体确认。
                 # ★confirmed 只计**证据**并入；仅抑制账本变化不是「确认」（与 pcap 侧同口径）。
-                ev_merged, _ledger = merge_runtime_into_lead_dict(hit, lead_dict)
+                ev_merged, _ledger = merge_runtime_into_lead_dict(
+                    hit, lead_dict, restored=restored_index
+                )
                 if ev_merged:
                     confirmed += 1
                 continue
+            # ★首次引入也要认墓碑（与 pcap 回灌同口径，理由见那里）。
+            strip_restored_downgrades(lead_dict, restored_index)
             existing_by_key[key] = lead_dict
             existing.append(lead_dict)
             added += 1

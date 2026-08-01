@@ -36,6 +36,7 @@ from apkscan.core.models import (
     apply_downgrade,
     merge_runtime_into_lead_dict,
 )
+from apkscan.core.restore import restore_index, strip_restored_downgrades
 from apkscan.network.fingerprints import KNOWN_INTERCEPT_IPS as _KNOWN_FANZHA
 from apkscan.network.fingerprints import (  # noqa: F401 — public re-export (capture/closure/tests use pcap_ingest.is_known_intercept_ip)
     is_infrastructure_endpoint,
@@ -2081,6 +2082,9 @@ def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:
         }
         added = 0
         confirmed = 0
+        # 人工恢复凭据（从这份报告自己的 meta 读）：命中的来源不复压。必须在循环外读一次——
+        # meta 在下面才被规范化成 dict，此处用宽松取法，坏形状由 restore_index 兜底成空集。
+        restored_index = restore_index(payload.get("meta"))
         pcap_domains: set[str] = set()   # 本次采集贡献的域名（用于 inventory，见下）
         for lead in to_report_leads(summary):
             key = (lead.category.value, lead.value)
@@ -2092,10 +2096,16 @@ def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:
                 # 命中已存在键：不丢弃——把 runtime 证据并进原 lead、升为活体确认。
                 # ★confirmed 只计**证据**并入；仅抑制账本变化（ledger）不是「确认」，
                 #   混计会让日志把降档合并报成「runtime 确认 N 条」。
-                ev_merged, _ledger = merge_runtime_into_lead_dict(hit, lead_dict)
+                ev_merged, _ledger = merge_runtime_into_lead_dict(
+                    hit, lead_dict, restored=restored_index
+                )
                 if ev_merged:
                     confirmed += 1
                 continue
+            # ★首次引入这个值也要认墓碑：这条分支 append 的是一个**已经带着抑制账本**的新
+            #   lead，不过滤就等于绕开人工放行（真实序列：replay 放行 → 本轮静态侧没产出该值
+            #   → pcap 首次发现 → 带抑制入库 → 核实被抹掉）。
+            strip_restored_downgrades(lead_dict, restored_index)
             existing_by_key[key] = lead_dict
             existing.append(lead_dict)
             added += 1

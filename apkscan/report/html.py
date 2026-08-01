@@ -219,6 +219,27 @@ def sni_spans_by_lead(leads: list[Lead]) -> dict[str, Any]:
     return out
 
 
+def restored_by_lead(leads: list[Lead], meta: dict) -> dict[tuple[str, str], list[str]]:
+    """建 ``{(类别, 值): [人工放行的抑制来源...]}``（没被放行过的 lead 不入表）。
+
+    键用 Lead 的**原始** category/value（模板按这个查），匹配则走 restore 的归一化 helper——
+    两件事分开，才不会因为模板拿不到归一化后的键而查不到。
+    """
+    from apkscan.core.restore import restore_index, restored_sources_for
+
+    index = restore_index(meta)
+    if not index:
+        return {}
+    out: dict[tuple[str, str], list[str]] = {}
+    for lead in leads:
+        sources = restored_sources_for(
+            {"category": lead.category.value, "value": lead.value}, index
+        )
+        if sources:
+            out[(lead.category.value, lead.value)] = sorted(sources)
+    return out
+
+
 def split_endpoints(endpoints: list[Endpoint]) -> dict[str, list[Endpoint]]:
     """把端点拆成 domain / ip / url 三类，便于全表分区展示。"""
     out: dict[str, list[Endpoint]] = {"domain": [], "ip": [], "url": []}
@@ -353,6 +374,10 @@ def _render_template(template: Any, report: Report) -> str:
         attribution_chain_heading=letters.ATTRIBUTION_CHAIN_HEADING,
         shape_uncertain_spans=letters.SHAPE_UNCERTAIN_WARNING_SPANS,
         sni_spans_by_lead=sni_spans_by_lead(report.leads),
+        # 人工放行：{(类别, 值): [放行来源...]}。与 letters 共用同一份匹配 helper 与字句，
+        # 避免两个出口的口径分叉（分叉即意味着可见性在某个出口上悄悄消失）。
+        restored_by_lead=restored_by_lead(report.leads, report.meta or {}),
+        manual_restore_warning_text=letters.spans_to_plain(letters.MANUAL_RESTORE_WARNING_SPANS),
         lead_groups=lead_groups,
         lead_total=len(report.leads),
         config_key_leads=config_key_leads,

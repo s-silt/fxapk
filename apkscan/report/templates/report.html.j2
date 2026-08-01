@@ -402,6 +402,13 @@
     {% for reason in (lead.downgrades or {}).values() %}
       <div class="lead-warn">{{ reason }}</div>
     {% endfor %}
+    {#- 人工放行：这条本已被自动判据压住、不该出现在最高档区，是人放回来的。不渲染
+          就等于让它以普通线索的外观混在里面——而手改 advice 会被 closure 守卫挡下、手塞
+          墓碑不会，可见性是这套机制唯一站得住的保证。 -#}
+    {% set restored = restored_by_lead.get((lead.category.value, lead.value)) %}
+    {% if restored %}
+      <div class="lead-warn">{{ manual_restore_warning_text }}（放行来源：{{ restored|join("、") }}）</div>
+    {% endif %}
   {% endmacro %}
 
   {#- 五层基础设施归属链（resource_holder → origin_network → hosting → edge → service_operator）。

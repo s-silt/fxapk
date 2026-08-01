@@ -27,6 +27,7 @@ from typing import Any
 
 from apkscan.core import infra
 from apkscan.core.registry import load_rules
+from apkscan.core.restore import restore_index, restored_sources_for
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,30 @@ def spans_to_plain(spans: EmphasisSpans) -> str:
 
 
 SHAPE_UNCERTAIN_WARNING: str = spans_to_markdown(SHAPE_UNCERTAIN_WARNING_SPANS)
+
+# 人工放行警示（见 apkscan.core.restore）。与形态存疑并列渲染在受文机关之前。
+#
+# ★这是墓碑机制里最危险的那个消费面：这条线索本已被自动判据压住、不该套打，是**人**把它放
+#   回来的。文书出口若不写这一句，产出的就是一份外观完全正常的函——读的人无从知道「机器本来
+#   拦下了它、是有人放行的」，也就不会去追放行依据。墓碑不做真伪校验，可见性是唯一的保证，
+#   而这里正是可见性最该落地的地方。
+MANUAL_RESTORE_WARNING_SPANS: EmphasisSpans = (
+    ("em", "⚠ 本条系人工放行："),
+    (
+        "",
+        " 自动判据原本已将其降档、排除在本出口之外，是经人工核实后放回的（放行依据见报告的"
+        " manual_restores 记录）。",
+    ),
+    ("em", "发函前请复核放行依据是否成立"),
+    ("", "——放行记录不构成对该依据的核验，工具只如实记下有人放行过这件事。"),
+)
+
+MANUAL_RESTORE_WARNING: str = spans_to_markdown(MANUAL_RESTORE_WARNING_SPANS)
+
+
+def manual_restore_warning(sources: list[str]) -> str:
+    """有放行来源则给出警示字句，否则空串。"""
+    return MANUAL_RESTORE_WARNING if sources else ""
 
 # SNI 伪装警示（见 Lead.sni_masquerade）。与形态存疑并列渲染在受文机关之前。
 #
@@ -455,6 +480,7 @@ def _build_body_md(
     attribution_lines: list[str] | None = None,
     shape_uncertain: bool = False,
     masquerade_warning: str = "",
+    manual_restore_warning: str = "",
 ) -> str:
     """套打 markdown 正文：顶部固定免责声明 → 受文机关 → 标的 → 待调取证据 → 出处。"""
     title = template.get("title", "协查函")
@@ -466,6 +492,12 @@ def _build_body_md(
     # 1) 顶部显著免责（固定，最先出现）
     lines.append(f"> {DISCLAIMER}")
     lines.append("")
+    # 1.4) 人工放行警示——与形态存疑同级、同样排在标题之前。★这是最危险的那个消费面：
+    #      这条线索本已被自动判据压住、不该套打，是**人**把它放回来的。不写在正文里，
+    #      一份外观完全正常的文书就掩盖了「放行依据是谁给的、核没核实过」这件事。
+    if manual_restore_warning:
+        lines.append(f"> {manual_restore_warning}")
+        lines.append("")
     # 1.5) 标的形态存疑警示——必须在标题与受文机关之前：这封函要不要发，取决于它。
     if shape_uncertain:
         lines.append(f"> {SHAPE_UNCERTAIN_WARNING}")
@@ -516,6 +548,7 @@ def _lead_to_letter(
     lead: dict[str, Any],
     templates: dict[str, dict[str, str]],
     attr_index: dict[tuple[str, str], dict[str, Any]] | None = None,
+    restored_index: set[tuple[str, str, str]] | None = None,
 ) -> dict[str, Any]:
     """把单条可办案化 Lead 套打成文书 dict（字段见模块 docstring）。
 
@@ -545,6 +578,9 @@ def _lead_to_letter(
     # SNI 伪装：正文顶部要警示"别发给被冒用的那家公司"（见 Lead.sni_masquerade）。
     masquerade = _str_list(lead.get("sni_masquerade"))
     masquerade_warning = sni_masquerade_warning(masquerade)
+    # 人工放行：这条本已被自动判据压住、不该走到本出口，是人放回来的。必须写进正文。
+    restored_sources = sorted(restored_sources_for(lead, restored_index or set()))
+    restore_warning = manual_restore_warning(restored_sources)
 
     body_md = _build_body_md(
         template=template,
@@ -556,8 +592,11 @@ def _lead_to_letter(
         attribution_lines=attribution_lines,
         shape_uncertain=shape_uncertain,
         masquerade_warning=masquerade_warning,
+        manual_restore_warning=restore_warning,
     )
     return {
+        # 结构化回带：消费方不必去正文里捞这句（与 sni_masquerade 同理）。
+        "manually_restored": restored_sources,
         "category": category,
         "subject": subject,  # 标的归属（公司/人）
         "recipient": recipient,  # 受文机关（取自 where_to_request）
@@ -591,6 +630,8 @@ def build_letters(report: dict[str, Any]) -> list[dict[str, Any]]:
 
     templates = _load_templates()
     attr_index = _attribution_index(report)  # {端点 value: 五层归因}，按 Lead.value 关联进正文
+    # 人工放行索引：文书正文要写「本条系人工放行」——最危险的消费面，必须显式。
+    restored_index = restore_index(report.get("meta"))
     out: list[dict[str, Any]] = []
     for lead in leads:
         if not isinstance(lead, dict):
@@ -598,7 +639,7 @@ def build_letters(report: dict[str, Any]) -> list[dict[str, Any]]:
         if not _is_actionable(lead):
             continue  # 严格过滤：不可办案化的不套打
         try:
-            out.append(_lead_to_letter(lead, templates, attr_index))
+            out.append(_lead_to_letter(lead, templates, attr_index, restored_index))
         except Exception:  # 单条套打异常不应炸掉整体；记录后跳过。
             logger.exception("套打单条文书失败：value=%r", lead.get("value"))
     return out
