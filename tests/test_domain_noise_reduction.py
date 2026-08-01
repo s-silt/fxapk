@@ -145,10 +145,70 @@ def test_matched_infra_is_deterministic_across_hash_seeds() -> None:
     assert all(r is not None for r in results[0]), "探测域名应当全部命中名单"
 
 
-def test_specific_suffix_wins_over_broader_brand_keyword() -> None:
-    """★带点的服务域条目优先于更宽泛的无点品牌词，且更长（更具体）的先匹配。
+def test_no_dotless_keyword_entries_remain() -> None:
+    """★名单里不得再有无点条目：它们走**子串**匹配，会吞掉可被任何人注册的近似域。
 
-    此前是 frozenset 任意顺序，宽泛的品牌词可能先命中、把精确写好的服务域条目遮蔽掉。
+    这条锁的是「不许回退」。新增条目一律写带点的域名后缀（按域边界匹配）；若确有非写不可的
+    品牌变体主机名，逐条列出完整主机名，而不是放一个裸词进来对所有域名生效。
+
+    ★先锁**匹配器实际吃进去的那份输入**（`_INFRA_KEYWORDS`），再锁源名单：光断言
+      `KNOWN_INFRA` 里没有裸词，挡不住「另建一个集合、在匹配器里再加一条子串分支」这种
+      绕法。只要子串匹配这条路上没有任何条目，这个危险面就是关着的。
+    """
+    assert infra._INFRA_KEYWORDS == (), (
+        f"子串匹配路径上出现了条目，会吞掉可被任意注册的近似域：{infra._INFRA_KEYWORDS}"
+    )
+    dotless = sorted(m for m in infra.KNOWN_INFRA if "." not in m)
+    assert dotless == [], f"名单里出现了无点条目：{dotless}"
+
+
+@pytest.mark.parametrize("domain", [
+    "aliyun-pay.top",          # leak-scan: allow 边界攻击夹具，验品牌词近似域不被子串匹配吞掉
+    "evil-aliyun.vip",         # leak-scan: allow 边界攻击夹具，验品牌词近似域不被子串匹配吞掉
+    "myaliyunservice.com",     # leak-scan: allow 边界攻击夹具，验品牌词近似域不被子串匹配吞掉
+    "qcloud-pay.top",          # leak-scan: allow 边界攻击夹具，验品牌词近似域不被子串匹配吞掉
+    "autonavi-pay.top",        # leak-scan: allow 边界攻击夹具，验品牌词近似域不被子串匹配吞掉
+    "bcebos-pay.top",          # leak-scan: allow 边界攻击夹具，验品牌词近似域不被子串匹配吞掉
+    "bdstatic-pay.top",        # leak-scan: allow 边界攻击夹具，验品牌词近似域不被子串匹配吞掉
+    "bootcdn-pay.top",         # leak-scan: allow 边界攻击夹具，验品牌词近似域不被子串匹配吞掉
+    "cdnjs-pay.top",           # leak-scan: allow 边界攻击夹具，验品牌词近似域不被子串匹配吞掉
+    "igexin-pay.top",          # leak-scan: allow 边界攻击夹具，验品牌词近似域不被子串匹配吞掉
+    "umengcloud-pay.top",      # leak-scan: allow 边界攻击夹具，验品牌词近似域不被子串匹配吞掉
+])
+def test_brand_lookalike_domains_are_still_investigated(domain: str) -> None:
+    """★这些形态可被任何人注册。收口前它们全部被判无需核查——等于替人下了「与本案无关」。"""
+    assert infra._matched_infra(domain) is None, f"{domain} 被无点关键字子串命中"
+    assert infra.classify_domain(domain)[0] == _INV, f"{domain} 被误判为无需核查"
+
+
+@pytest.mark.parametrize("domain", [
+    "aliyuncs.com",                  # leak-scan: allow 判据夹具，验收口后正规服务域判档不变
+    "oss-cn-hangzhou.aliyuncs.com",  # leak-scan: allow 判据夹具，验收口后正规服务域判档不变
+    "gz.bcebos.com",                 # leak-scan: allow 判据夹具，验收口后正规服务域判档不变
+    "ss0.bdstatic.com",              # leak-scan: allow 判据夹具，验收口后正规服务域判档不变
+    "restapi.amap.com",              # leak-scan: allow 判据夹具，验收口后正规服务域判档不变
+    "cdn.bootcdn.net",               # leak-scan: allow 判据夹具，验收口后正规服务域判档不变
+    "cdnjs.cloudflare.com",          # leak-scan: allow 判据夹具，验收口后正规服务域判档不变
+    "sdk.open.api.igexin.com",       # leak-scan: allow 判据夹具，验收口后正规服务域判档不变
+    "plus.umengcloud.com",           # leak-scan: allow 判据夹具，验收口后正规服务域判档不变
+    "d1.awsstatic.com",              # leak-scan: allow 判据夹具，验收口后正规服务域判档不变
+    "cos.ap-nanjing.myqcloud.com",   # leak-scan: allow 判据夹具，验收口后正规服务域判档不变
+    # ★这条是收口时漏掉的：裸词时代它被子串顺带覆盖着，换成带点后缀后才发现名单里没有它。
+    "dh-cn-hangzhou.aliyun-inc.com",  # leak-scan: allow 判据夹具，验收口漏掉的服务侧端点域已补回
+])
+def test_legitimate_vendor_hosts_still_skip_after_closure(domain: str) -> None:
+    """★反向：收口不得把原先靠裸词判掉的正规服务域漏出来（实测代价为 0 条）。
+
+    漏了的后果只是该域回到「建议核查」——保守方向、不藏线索，但会占着清单，所以发现一条补
+    一条。
+    """
+    assert infra.classify_domain(domain)[0] == _SKIP, f"{domain} 收口后漏回了核查清单"
+
+
+def test_specific_suffix_wins_over_broader_brand_keyword() -> None:
+    """★更长（更具体）的带点后缀先匹配。
+
+    此前是 frozenset 任意顺序，宽泛的条目可能先命中、把精确写好的服务域条目遮蔽掉。
     """
     assert infra._matched_infra("aliyuncs.com") == "aliyuncs.com"  # leak-scan: allow 判据夹具，验带点条目优先于无点品牌词
 

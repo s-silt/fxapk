@@ -37,11 +37,16 @@ TIER_BULK_STRING = "bulk-string"       # 来源是超大字符串表 —— 疑�
 # tier 可信度排序（app 最优，bulk-string 最差）；dedup 合并时取最优。
 _TIER_RANK: dict[str, int] = {TIER_APP: 0, TIER_LIBRARY_FILE: 1, TIER_BULK_STRING: 2}
 
-# 已知正规基础设施：域名后缀 / 关键字集合（全小写）。命中任一 = 正规基础设施，
-# 对其本身无需调证。新增第三方/云厂商/开源 CDN 只需往这里加一行。
+# 已知正规基础设施：域名后缀集合（全小写）。命中任一 = 正规基础设施，对其本身无需核查。
 #
-# 判定用"子串包含"匹配域名（已小写、去端口），因此既可写完整后缀
-# （如 "dcloud.net.cn"）也可写关键字（如 "getui"）。
+# ★新增条目**一律写带点的域名后缀**，按域边界匹配（``d == marker`` 或 ``.<marker>`` 结尾）。
+#   不含点的条目走**子串**匹配，会把「品牌词 + 任意后缀」这类**可被任何人注册**的近似域一并
+#   判成无需核查——那是在替人下「与本案无关」的结论，一个真 C2 就此被藏起来。
+#   本表的无点条目已在 2026-08-01 全部收口成带点后缀；那次逐条核过：某案样本 86 个域名端点
+#   里靠无点关键字判掉的实为 0 条（唯一命中的那条被租户桶判据先接住了），收口的实际代价接近零，
+#   而危险面是每条都能被 ``<品牌词>-任意.top`` 命中。
+#   收口方向本身也是安全的：万一某个形态因此漏掉，它只是回到「建议核查」——多一条噪音，
+#   不会藏线索。
 KNOWN_INFRA: frozenset[str] = frozenset(
     {
         # ---- DCloud / uni-app（本样本 __UNI__ 打包框架）----
@@ -51,14 +56,17 @@ KNOWN_INFRA: frozenset[str] = frozenset(
 
         # ---- 腾讯云 / 腾讯 ----
         "myqcloud.com",
-        "qcloud",
-        "tencent-cloud",
+        "qcloud.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        "tencent-cloud.net",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        "tencent-cloud.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
         "tencentcs.com",
         "qq.com",
         # ---- 阿里云 / 阿里 ----
         "aliyuncs.com",
         "alicdn.com",
-        "aliyun",
+        "aliyun.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        # 该厂商另有一个内网/服务侧端点域，收口时漏了——裸词时代它被子串顺带覆盖着。
+        "aliyun-inc.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
         "alipayobjects.com",
         # 阿里云 DingRTC 音视频通信（接入调度走 gslb 子域）。整棵域由阿里持有，"aliyun"
         # 关键字覆盖不到它，故单列一行。
@@ -74,7 +82,7 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         "myhuaweicloud.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
         # ---- AWS ----
         "amazonaws.com",
-        "awsstatic",
+        "awsstatic.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
         "cloudfront.net",
         # ---- 手机厂商的应用市场 / 钱包 / 黄页，以及一家支付服务 ----
         # 这几条解决的是：它们的注册人就是那家厂商本身，向注册商问「这个域名归谁」得到的答案
@@ -111,11 +119,13 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         "getui.com",
         "gepush.com",
         "getui.net",
-        "igexin",
-        "gtuid",
+        "igexin.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        # ★这里原先还有一条 "gtuid"：那是该 SDK 里的**字段名**，不是域名的一部分，没有任何
+        #   主机名会包含它——作为域名匹配条目是死条目，却因为无点而对所有含该串的域名生效。
+        #   收口时一并删除，不要凭印象加回来。
         # ---- 友盟 ----
         "umeng.com",
-        "umengcloud",
+        "umengcloud.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
         "umsns.com",
         # ---- 字节跳动 SDK（穿山甲广告 / 应用日志 / 监控）----
         # 实测 2026-07-28 四案：这几个域被整批标成"建议调证"，占满办案人的清单。
@@ -144,11 +154,12 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         "videolan.org",         # VLC/libvlc 测试流地址
         # ---- 高德 ----
         "amap.com",
-        "autonavi",
+        "autonavi.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
         # ---- 百度 ----
         "baidu.com",
-        "bdstatic",
-        "bcebos",
+        "bdstatic.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        # ★该条只覆盖裸端点；其下的租户桶由 _TENANT_BUCKET_PATTERNS 先接住（顺序见 classify_domain）。
+        "bcebos.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
         # ---- Google ----
         "google.com",
         "gstatic.com",
@@ -164,8 +175,10 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         "unpkg.com",
         "npmjs.com",
         "npmjs.org",
-        "cdnjs",
-        "bootcdn",
+        "cdnjs.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        "cdnjs.cloudflare.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        "bootcdn.net",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        "bootcdn.cn",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
         # ---- 前端框架官网 ----
         "vuejs.org",
         "nodejs.org",
@@ -700,34 +713,41 @@ KNOWN_INFRA_EXACT: frozenset[str] = frozenset(
 )
 
 
-#: 带点后缀条目，**按长度降序**排定；无点品牌关键字条目按字典序排定。
+#: 带点后缀条目，**按长度降序**排定（更具体的先匹配）。
 #:
 #: ★为什么要预先定序：``KNOWN_INFRA`` 是 frozenset，迭代顺序随哈希种子变化。名单里存在
-#:   互相重叠的条目（例如某厂商同时有带点的服务域与无点的品牌词），于是同一个输入在不同
-#:   进程里可能返回不同的 marker——advice 一样，但写进报告的 reason 文本会变。本仓库的
-#:   跨版本回归比对依赖报告可比，随机文本会让它无法工作。实测：某个厂商域在 PYTHONHASHSEED=7
-#:   时返回品牌词、其余种子返回服务域。
-#:
-#: ★顺序也顺带修了语义：带点条目优先于无点品牌词、且更长（更具体）的先匹配。此前更宽泛的
-#:   品牌词可能先命中，把精确写好的服务域条目遮蔽掉。
+#:   互相重叠的条目，于是同一个输入在不同进程里可能返回不同的 marker——advice 一样，但
+#:   写进报告的 reason 文本会变。本仓库的跨版本回归比对依赖报告可比，随机文本会让它无法
+#:   工作。实测：某个厂商域在 PYTHONHASHSEED=7 时返回品牌词、其余种子返回服务域。
 _INFRA_SUFFIXES: tuple[str, ...] = tuple(
     sorted((m for m in KNOWN_INFRA if "." in m), key=lambda m: (-len(m), m))
 )
+
+#: ★**恒为空**，且必须保持为空——留着它不是为了将来往里加，而是为了让「名单里混进了无点
+#:   条目」这件事有个显式的、可被测试锁住的落点。
+#:
+#: 无点条目走的是**子串**匹配：一个裸品牌词会把 ``<品牌词>-任意.top`` 这类**任何人都能注册**
+#: 的近似域一并判成无需核查，等于替人下了「与本案无关」的结论，一个真 C2 就此被藏起来。
+#: 名单里曾有 12 条这样的条目，2026-08-01 全部收口成带点后缀（实测收口代价 0 条）。
+#:
+#: 新增条目一律写带点的域名后缀；确有品牌变体主机名要覆盖时，逐条列出完整主机名，
+#: **不要**放裸词进来对所有域名生效。
 _INFRA_KEYWORDS: tuple[str, ...] = tuple(sorted(m for m in KNOWN_INFRA if "." not in m))
 
 
 def _matched_infra(domain: str) -> str | None:
-    """返回命中的 KNOWN_INFRA 关键字/后缀；未命中返回 None。
+    """返回命中的 KNOWN_INFRA 后缀；未命中返回 None。
 
-    三类 marker 按**确定的优先级**依次匹配，避免短域名后缀被当子串误命中：
+    两档 marker 按**确定的优先级**依次匹配，避免短域名后缀被当子串误命中：
     1. **精确主机名型**（:data:`KNOWN_INFRA_EXACT`）：只认 ``d == marker``，子域一概不认。
     2. **域名后缀型**（含点）：要求 ``d == marker`` 或以 ``.<marker>`` 结尾（域边界）。
        否则一个短后缀会子串命中攻击者构造的近似域，把真 C2 误判成"无需核查"——与本模块
        "宁可建议核查"的取向正好相反。**长的先匹配**。
-    3. **品牌关键字型**（无点）：保留子串匹配（它们本就是为匹配「品牌词 + 连字符 + 任意
-       后缀」这类变体主机名而设）。
 
-    ★三档的先后是**确定的**（见 :data:`_INFRA_SUFFIXES` 的说明）：同一输入在任何进程里
+    末尾那段子串匹配只对 :data:`_INFRA_KEYWORDS` 生效，而它**恒为空**（见该常量的说明）：
+    保留这条分支是为了让「有人往名单里塞了裸词」立刻可见，而不是给裸词留后门。
+
+    ★两档的先后是**确定的**（见 :data:`_INFRA_SUFFIXES` 的说明）：同一输入在任何进程里
       都返回同一个 marker，报告文本因此可比对。
     """
     d = _normalize_domain(domain)
