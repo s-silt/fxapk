@@ -12,11 +12,27 @@ import logging
 from typing import Any
 
 from apkscan.core import infra
-from apkscan.core.models import Endpoint, Report
+from apkscan.core.models import (
+    DOWNGRADE_REPACK_IDENTITY,
+    DOWNGRADE_SNI_MASQUERADE,
+    DOWNGRADE_SOURCE_TIER,
+    Endpoint,
+    Report,
+    advice_is_consistent,
+)
+from apkscan.core.restore import is_restored, restore_index
 
 from apkscan.core.closure._shared import _mapping
 
 logger = logging.getLogger(__name__)
+
+#: 已知的抑制来源 id。用于统计「这条线索是不是被人工放行过」——只认已知来源，磁盘上塞进来的
+#: 陌生 id 不参与计数（免得凭空造出一个谁也不认识的放行理由）。
+_KNOWN_DOWNGRADE_SOURCES = (
+    DOWNGRADE_REPACK_IDENTITY,
+    DOWNGRADE_SNI_MASQUERADE,
+    DOWNGRADE_SOURCE_TIER,
+)
 
 
 #: FOFA 数组行的字段顺序（与富化器 ``multisource.FOFA_QUERY_FIELDS`` 查询串**逐字段同序**——
@@ -119,9 +135,27 @@ def _select_targets_with_stats(report: Report, max_targets: int) -> tuple[list[E
     #   这个值就不该被形态存疑那条拖到末位。
     shape_ok: set[tuple[str, str]] = set()
     shape_suspect: set[tuple[str, str]] = set()
+    # 因人工放行而未被抑制、从而进了候选的线索数。★必须显式呈现：手改 advice 会被下面的一致性
+    # 守卫挡住，而手塞一条墓碑不会（跳过抑制后档位与空账本自洽）。不计数就等于给绕过守卫留了
+    # 一条更安静的路——墓碑不做真伪校验，可见性是这里唯一站得住的保证。
+    restored_lead_index = restore_index(meta)
+    manually_restored = 0
+    inconsistent_excluded = 0
     for lead in report.leads:
         if lead.advice != "建议调证" or lead.category.value not in {"DOMAIN", "IP"}:
             continue
+        # ★一致性守卫：``advice`` 是由判据链结论与抑制来源算出的物化缓存。绕过 lift_downgrade
+        #   直接手改 advice，会得到「档位说可查、账本却还压着」的矛盾态——而下一次任何重算都
+        #   会把它压回去。此处 fail-closed（不进闭环目标）并计数，让矛盾可见而非静默放行。
+        #   两个锚点都没有的旧数据无从校验，视为一致（见 models.advice_is_consistent）。
+        if lead.base_advice is not None and not advice_is_consistent(lead):
+            inconsistent_excluded += 1
+            continue
+        if restored_lead_index and any(
+            is_restored(restored_lead_index, lead.category.value, lead.value, rid)
+            for rid in _KNOWN_DOWNGRADE_SOURCES
+        ):
+            manually_restored += 1
         if is_repack and lead.value.lower() not in restored_values:
             repack_excluded += 1
             continue
@@ -161,6 +195,13 @@ def _select_targets_with_stats(report: Report, max_targets: int) -> tuple[list[E
     if repack_excluded:
         # 排除不静默：让读报告的人看得出"闭环目标为空"是因为隔离，而非样本真没有端点。
         stats["repack_excluded"] = repack_excluded
+    if inconsistent_excluded:
+        # 同理不静默：档位与抑制账本矛盾的线索被挡在闭环之外，得让人看见并去查为什么矛盾
+        # （多半是有人绕过 `fxapk lead restore` 手改了 advice）。
+        stats["inconsistent_excluded"] = inconsistent_excluded
+    if manually_restored:
+        # 「这条是被人放行的、不是判据说它干净」——必须能在闭环结果上直接看出来。
+        stats["manually_restored"] = manually_restored
     return selected, stats
 
 

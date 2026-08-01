@@ -13,6 +13,7 @@ import re
 
 from apkscan.core import exposure, forensic, infra
 from apkscan.core.attribution import classify_network
+from apkscan.core.restore import is_restored, restore_index
 from apkscan.core.models import (
     DOWNGRADE_REPACK_IDENTITY,
     DOWNGRADE_SNI_MASQUERADE,
@@ -270,12 +271,18 @@ def apply_repack_quarantine(leads: list[Lead], meta: dict) -> list[str]:
     rid = meta.get("repack_identity") if isinstance(meta, dict) else None
     if not (isinstance(rid, dict) and rid.get("verdict") == _VERDICT_REPACK_SUSPECTED):
         return []
+    # 人工已核实放行的不再复压。没有这道门，「换版本重跑一次」就把上一次的人工核实抹掉——
+    # 而重跑是常态，等于人工恢复永远白做。墓碑按 (类别, 值, 来源) 精确匹配：同一条线索被别的
+    # 来源压着的部分不受影响。
+    restored = restore_index(meta if isinstance(meta, dict) else None)
     quarantined: list[str] = []
     for lead in leads:
         if lead.category not in (LeadCategory.DOMAIN, LeadCategory.IP):
             continue
         base = lead.base_advice if lead.base_advice is not None else lead.advice
         if base != infra.ADVICE_INVESTIGATE:
+            continue
+        if is_restored(restored, lead.category.value, lead.value, DOWNGRADE_REPACK_IDENTITY):
             continue
         if apply_downgrade(lead, DOWNGRADE_REPACK_IDENTITY, _REPACK_QUARANTINE_NOTE):
             quarantined.append(lead.value)

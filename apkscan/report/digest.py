@@ -12,6 +12,7 @@ from collections import Counter
 from typing import Any
 
 from apkscan.core.redact import redact_value, scrub_pii
+from apkscan.core.restore import restore_index, restored_sources_for
 
 # 排序优先级：建议调证 > 待核 > 无需调证；同档高可信在前；C2 在前。
 _ADVICE_RANK = {"建议调证": 0, "待核": 1, "无需调证": 2}
@@ -37,13 +38,19 @@ def _scrub_field(text: object, flag: list[bool]) -> object:
     return scrubbed
 
 
-def _compact_lead(lead: dict[str, Any], redact: bool, pii_flag: list[bool]) -> dict[str, Any]:
+def _compact_lead(
+    lead: dict[str, Any],
+    redact: bool,
+    pii_flag: list[bool],
+    restored_sources: set[str] | None = None,
+) -> dict[str, Any]:
     """单条线索压成扁平稳定字段（去掉 source_refs 等冗长内部结构）。
 
     redact=True（可选）：高敏类别（钱包私钥/凭据/受害人 PII/加密配方）的 value 按类别脱敏；
     并对 subject/notes/where_to_request/evidence_to_obtain 等**自由文本**兜底抹结构化 PII
     （不依赖类别标注是否正确，防受害人手机号/证件号绕过脱敏进云端 agent，codex C1）。默认 False。
     """
+    restored_sources = restored_sources or set()
     category = lead.get("category")
     value = lead.get("value")
     subject = lead.get("subject")
@@ -79,6 +86,10 @@ def _compact_lead(lead: dict[str, Any], redact: bool, pii_flag: list[bool]) -> d
         #   工作流是 AI，它要判断「这条为什么被压着、能不能放回」，靠的就是这个字段；漏了它，
         #   压档在 AI 眼里就成了无来由的档位。
         "downgrades": downgrades,
+        # ★这条档位是不是**被人放行**过（而不是判据说它干净）。必须显式呈现：手改 advice 会被
+        #   closure 的一致性守卫挡下，手塞一条墓碑则不会——不呈现就等于给绕过守卫留了一条更
+        #   安静的路。墓碑不做真伪校验，可见性是这里唯一站得住的保证。
+        "manually_restored": sorted(restored_sources),
     }
 
 
@@ -349,6 +360,8 @@ def build_digest(report: object, *, redact: bool = False) -> dict[str, Any]:
     leads = [lead for lead in (report.get("leads") or []) if isinstance(lead, dict)]
     leads_sorted = sorted(leads, key=_lead_sort_key)
     pii_flag = [False]  # 单元素可变标记：任一 lead 自由文本抹掉 PII 即置 True（见 _compact_lead）
+    # 人工放行凭据：让「这条是被人放行的」在 digest（AI 的主消费面）上直接可见。
+    restored_index = restore_index(meta)
 
     by_advice = Counter(str(lead.get("advice") or "未研判") for lead in leads)
     by_category = Counter(str(lead.get("category") or "?") for lead in leads)
@@ -403,7 +416,10 @@ def build_digest(report: object, *, redact: bool = False) -> dict[str, Any]:
         #   findings 承载 leads 不表达的判断（重打包警示、通讯录窃取接口、未知壳…），
         #   此前完全不透出，对 AI 等于不存在。
         "findings": _compact_findings(report),
-        "leads": [_compact_lead(lead, redact, pii_flag) for lead in leads_sorted],
+        "leads": [
+            _compact_lead(lead, redact, pii_flag, restored_sources_for(lead, restored_index))
+            for lead in leads_sorted
+        ],
         "overseas_targets": overseas_targets,
         "closure": compact_closure,
     }

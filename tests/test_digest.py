@@ -333,3 +333,30 @@ def test_build_digest_redact_keeps_ledger_usable() -> None:
     dg = d["leads"][0]["downgrades"]
     assert set(dg.keys()) == {"repack_identity"}
     assert isinstance(dg["repack_identity"], str) and dg["repack_identity"], "脱敏后值仍须可读"
+
+
+def test_build_digest_flags_manually_restored_leads() -> None:
+    """★人工放行必须在 digest 上可见：AI 要能分清「判据说它干净」与「人把它放回来了」。
+
+    手改 advice 会被 closure 的一致性守卫挡下，手塞一条墓碑不会——不呈现就等于给绕过守卫留了
+    一条更安静的路。墓碑不做真伪校验，可见性是唯一站得住的保证。
+    """
+    from apkscan.core import infra
+    from apkscan.core.restore import MANUAL_RESTORES_KEY
+
+    report = {
+        "meta": {MANUAL_RESTORES_KEY: [
+            {"category": "DOMAIN", "value": "restored.example.com",
+             "source": "repack_identity", "note": "已差分核实"},
+        ]},
+        "leads": [
+            {"category": "DOMAIN", "value": "restored.example.com",
+             "advice": infra.ADVICE_INVESTIGATE, "confidence": "HIGH"},
+            {"category": "DOMAIN", "value": "clean.example.com",
+             "advice": infra.ADVICE_INVESTIGATE, "confidence": "HIGH"},
+        ],
+    }
+    d = build_digest(report)
+    by_val = {lead["value"]: lead for lead in d["leads"]}
+    assert by_val["restored.example.com"]["manually_restored"] == ["repack_identity"]
+    assert by_val["clean.example.com"]["manually_restored"] == [], "判据说它干净的不该被标成人工放行"
