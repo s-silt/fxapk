@@ -500,32 +500,143 @@ def _normalize_domain(domain: str) -> str:
 #: ★每条都要求**桶名标签存在**，绝不匹配各家的裸区域端点（形如 ``<区域>.<厂商域>`` 或
 #:   ``<服务>.<区域>.<厂商域>`` 那种没有桶名的写法）——没有桶名就没有租户，查不出人，
 #:   照旧无需核查。反向用例逐条列在 tests/test_tenant_bucket.py。
+#: 租户标识（桶名 / 存储账户名）的**语法**片段。
+#:
+#: ★刻意不用 ``\w``：Python 正则的 ``\w`` 默认匹配 Unicode，中文与下划线都能通过，于是
+#:   ``中文桶.<厂商端点>`` 这种不可能存在的名字也会被认成租户桶，凭空产出一个查不到的目标。
+#:   端点后缀写对只解决了「是不是这家厂商」，租户标识本身的合法字符与长度是**另一件事**，
+#:   两者都收紧才谈得上宁漏勿宽。
+#:
+#: 通用形态：DNS 标签字符集，总长 3–63（各厂商公开的桶名下限普遍是 3）。
+_BUCKET = r"[a-z0-9][a-z0-9\-]{1,61}[a-z0-9]"
+#: 允许含点的变体（虚拟主机式写法把带点的桶名整段放进 host）。
+#: 点号带来的额外非法组合（连续点、点与连字符相邻、整体成 IPv4 字面）不在正则里穷举，
+#: 统一交给 :func:`_is_valid_bucket_name` 后置校验——写在一处才好测，也才不会某几家漏掉。
+_BUCKET_DOTTED = r"[a-z0-9][a-z0-9\-.]{1,61}[a-z0-9]"
+
+#: 点与连字符的非法相邻组合：连续点、点后接连字符、连字符后接点。各厂商的桶名规则一致禁止。
+_BAD_BUCKET_ADJACENCY = re.compile(r"\.\.|\.-|-\.")
+#: 形如 IPv4 字面的标识。对象存储厂商普遍禁止桶名长成 IP 的样子（会与路径式寻址歧义）。
+_BUCKET_LOOKS_LIKE_IPV4 = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+
+
+def _is_valid_bucket_name(name: str) -> bool:
+    """租户标识本身的语法是否成立（正则只判形态，这里判各家共有的那几条硬约束）。
+
+    ★为什么不塞进正则：点号一旦允许，非法组合就有好几类，逐家写进各自的正则既啰嗦又必定漏
+      （已经漏过一轮）。集中在这里，新增厂商时自动受同一套约束保护。
+    """
+    if not name:
+        return False
+    if _BAD_BUCKET_ADJACENCY.search(name):
+        return False
+    return not _BUCKET_LOOKS_LIKE_IPV4.match(name)
+
 _TENANT_BUCKET_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
-    ("百度智能云 BOS", re.compile(r"^(?P<bucket>[a-z0-9][\w\-]*)\.[a-z0-9\-]+\.bcebos\.com$")),
+    # ★区域段刻意保持必填：放开成可选，``<区域>.<厂商域>`` 这种裸端点就会被当成「桶名=区域码」
+    #   的租户桶——那正是本表开头声明要避免的误判。无区域的两段写法是否真实存在未经证实，
+    #   在拿到实证之前不为一个假设的形态牺牲已成立的反向护栏。
+    ("百度智能云 BOS", re.compile(rf"^(?P<bucket>{_BUCKET})\.[a-z0-9\-]+\.bcebos\.com$")),
     # ★区域段可选：新形态是 ``<桶>-<appid>.cos.<区域>.myqcloud.com``，而老的 file/pic 域
     #   直接就是 ``<桶>-<appid>.file.myqcloud.com``，没有区域段。写成必填会漏掉老形态。
     ("腾讯云 COS", re.compile(
-        r"^(?P<bucket>[a-z0-9][\w\-]*)\.(?:cos|file|pic)(?:[.\-][a-z0-9\-]+)?\.myqcloud\.com$"
+        rf"^(?P<bucket>{_BUCKET})\.(?:cos|file|pic)(?:[.\-][a-z0-9\-]+)?\.myqcloud\.com$"
     )),
-    ("阿里云 OSS", re.compile(r"^(?P<bucket>[a-z0-9][\w\-]*)\.oss-[a-z0-9\-]+\.aliyuncs\.com$")),
+    ("阿里云 OSS", re.compile(rf"^(?P<bucket>{_BUCKET})\.oss-[a-z0-9\-]+\.aliyuncs\.com$")),
+    # 这两家的公开规则同样允许桶名含点，故用带点变体——否则合法的带点桶名会被整域豁免吃掉。
     ("AWS S3", re.compile(
-        r"^(?P<bucket>[a-z0-9][\w\-]*)\.s3(?:[.\-][a-z0-9\-]+)?\.amazonaws\.com$"
+        rf"^(?P<bucket>{_BUCKET_DOTTED})\.s3(?:[.\-][a-z0-9\-]+)?\.amazonaws\.com$"
     )),
     ("华为云 OBS", re.compile(
-        r"^(?P<bucket>[a-z0-9][\w\-]*)\.obs[.\-][a-z0-9\-]+\.myhuaweicloud\.com$"
+        rf"^(?P<bucket>{_BUCKET_DOTTED})\.obs[.\-][a-z0-9\-]+\.myhuaweicloud\.com$"
+    )),
+    # ★这一条是补一个**正在生效**的漏洞，不是预防：该厂商的整域条目已在已知基础设施名单里，
+    #   而本表此前没有它的对象存储形态，于是 ``<桶名>.<存储端点>`` 被整域豁免命中、判无需
+    #   核查——既不富化、不进闭环，也不出文书。
+    #   该厂商的虚拟主机式写法允许桶名含点，故用带点变体；但仍要求桶名合法（首尾字母数字、
+    #   无连续点、长度 3–63），裸存储端点与同域下的其它服务子域都不匹配。
+    ("Google Cloud Storage", re.compile(
+        rf"^(?P<bucket>{_BUCKET_DOTTED})\.storage\.googleapis\.com$"
+    )),
+    # ★以下几家此前不在名单里。它们当时之所以没出事，只是因为这些厂商域**恰好**也不在
+    #   KNOWN_INFRA 里，于是落到 classify_domain 末尾的兜底档——是运气，不是保护：任何人
+    #   往已知基础设施名单里添一条对应的厂商域，这些桶就会被整域豁免静默吃掉，而它们恰恰是
+    #   最能落到租户实名的那类目标。
+    #
+    # ★证据等级（写清楚，免得后人把两者当同一回事）：
+    #   · 天翼云 ZOS —— 有在手样本实证，形态取自实际观测到的写法；
+    #   · 其余各家 —— 按各厂商**公开的端点域形态**写，未经在手样本验证。
+    #     选择容忍这一点，是因为两类错误不对称：形态写窄了只是漏（维持改动前的现状，不更差），
+    #     写宽了才会凭空造出查不到的目标。
+    #
+    # ★「宁漏勿宽」要在**两处**都成立，缺一处就是空话：端点后缀写对只解决「是不是这家厂商」，
+    #   租户标识本身的合法字符与长度是另一件事。本表初版只做了前者、租户标识一律用宽松字符类，
+    #   于是能匹配出一批语法上不可能存在的账户名——那等于凭空造目标。现按各厂商公开的标识
+    #   语法分别收紧（见 _BUCKET / _BUCKET_DOTTED 与 Azure、R2 两条的单独说明）。
+    #   反向用例（裸端点、域边界攻击、非法标识）逐条列在 tests/test_tenant_bucket.py。
+    ("天翼云 ZOS", re.compile(
+        rf"^(?P<bucket>{_BUCKET})\.[a-z0-9\-]+\.zos\.ctyun\.cn$"
+    )),
+    # 该厂商有两个端点域并存（正则里的可选 ``cs`` 段），桶名段之后固定是 ks3-<区域>。
+    ("金山云 KS3", re.compile(
+        rf"^(?P<bucket>{_BUCKET})\.ks3-[a-z0-9\-]+\.ksyun(?:cs)?\.com$"
+    )),
+    ("UCloud US3", re.compile(
+        rf"^(?P<bucket>{_BUCKET})\.[a-z0-9\-]+\.ufileos\.com$"
+    )),
+    ("青云 QingStor", re.compile(
+        rf"^(?P<bucket>{_BUCKET})\.[a-z0-9\-]+\.qingstor\.com$"
+    )),
+    ("京东云 OSS", re.compile(
+        rf"^(?P<bucket>{_BUCKET})\.(?:s3|obs)[.\-][a-z0-9\-]+\.jdcloud-oss\.com$"
+    )),
+    ("小米 FDS", re.compile(rf"^(?P<bucket>{_BUCKET})\.fds\.api\.xiaomi\.com$")),
+    # 华为云的旧端点域，与前面那个端点域并存。
+    ("华为云 OBS", re.compile(
+        rf"^(?P<bucket>{_BUCKET})\.obs(?:[.\-][a-z0-9\-]+)?\.myhwclouds\.com$"
+    )),
+    # ★这一段是**存储账户名**而非桶名，但同样是租户专属标识、同样能据以核出订阅主体。
+    #   该厂商对账户名的公开约束比桶名严得多——只允许 3–24 位小写字母数字，连字符与下划线
+    #   都不合法。按通用桶名形态写会接受一批不可能存在的账户名，故此处单独收紧。
+    ("Azure Blob", re.compile(
+        r"^(?P<bucket>[a-z0-9]{3,24})\.(?:blob|file|queue|table)\.core\.windows\.net$"
+    )),
+    # ★中间那一段不是区域码，而是该厂商的**账号标识**（32 位十六进制）。写成任意标签会把
+    #   ``<桶>.<任意串>.r2...`` 一律认成租户桶，而那种形态不可能对应真实账号。
+    #   ★可选的第三段是辖区端点，且**只有公开的那两个取值**——写成任意字母串同样会造出
+    #   不存在的端点形态。枚举写死，新增辖区时再加。
+    ("Cloudflare R2", re.compile(
+        rf"^(?P<bucket>{_BUCKET})\.[0-9a-f]{{32}}(?:\.(?:eu|fedramp))?"
+        r"\.r2\.cloudflarestorage\.com$"
+    )),
+    ("DigitalOcean Spaces", re.compile(
+        rf"^(?P<bucket>{_BUCKET})\.[a-z0-9\-]+\.digitaloceanspaces\.com$"
+    )),
+    # 该厂商同样允许桶名含点。
+    ("Yandex Object Storage", re.compile(
+        rf"^(?P<bucket>{_BUCKET_DOTTED})\.storage\.yandexcloud\.net$"
     )),
 )
 
 
 def tenant_bucket(domain: str) -> tuple[str, str] | None:
-    """域名是否为对象存储的租户桶子域；是则返回 ``(云厂商, 桶名)``，否则 None。"""
+    """域名是否为对象存储的租户桶子域；是则返回 ``(云厂商, 桶名)``，否则 None。
+
+    形态由 :data:`_TENANT_BUCKET_PATTERNS` 判，标识本身的语法由 :func:`_is_valid_bucket_name`
+    兜底——两道都过才算。语法不成立的标识对应不到任何真实租户，认下来只会产出一条查不到人的
+    线索，比漏更糟。
+    """
     d = _normalize_domain(domain)
     if not d:
         return None
     for provider, pattern in _TENANT_BUCKET_PATTERNS:
         m = pattern.match(d)
-        if m is not None:
-            return provider, m.group("bucket")
+        if m is None:
+            continue
+        bucket = m.group("bucket")
+        if not _is_valid_bucket_name(bucket):
+            continue  # 形态像，但标识本身语法不成立——不是真租户
+        return provider, bucket
     return None
 
 
