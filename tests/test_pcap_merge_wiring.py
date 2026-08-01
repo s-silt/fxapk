@@ -69,7 +69,7 @@ _STATIC = {
 
 
 def _bidirectional_summary(ip: str = _BACKEND_IP, port: int = 31861) -> pcap_ingest.PcapSummary:
-    """目标与 ip:port 有过双向载荷的 pcap（复刻周祥/戎子佳/范旻三案的强证据形态）。
+    """目标与 ip:port 有过双向载荷的 pcap（复刻三份在手样本共有的强证据形态）。
 
     双向要两条流：本机→远端贡献 out_bytes，远端→本机贡献 in_bytes；两者都 >0 才判 established。
     """
