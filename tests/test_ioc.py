@@ -105,6 +105,7 @@ def test_rows_count_and_basic_fields() -> None:
         "sample_sha256",
         "source",
         "shape_uncertain",
+        "manually_restored",
     }
     assert set(rows[0].keys()) == expected_cols
 
@@ -249,6 +250,7 @@ def test_write_csv_roundtrip(tmp_path: Path) -> None:
             "sample_sha256",
             "source",
             "shape_uncertain",
+            "manually_restored",
         ]
         read = list(reader)
     assert len(read) == 4
@@ -415,7 +417,8 @@ def test_shape_uncertain_is_the_last_column_and_carries_a_value(tmp_path: Path) 
     with out.open("r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         assert reader.fieldnames is not None
-        assert reader.fieldnames[-1] == "shape_uncertain", "新列必须追加在末尾"
+        assert reader.fieldnames[-2] == "shape_uncertain"
+        assert reader.fieldnames[-1] == "manually_restored", "新列一律追加在末尾（列序是下游映射契约）"
         read = list(reader)
 
     flagged = next(r for r in read if r["value"] == "1.2.3.4")

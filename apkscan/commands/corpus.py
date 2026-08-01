@@ -49,11 +49,15 @@ def _inside_git_worktree(path: Path) -> bool:
     return False
 
 
-def _resolve_corpus(corpus: str) -> Path:
+def resolve_corpus(corpus: str) -> Path:
     """定位语料库根目录：--corpus 优先，其次环境变量 FXAPK_CORPUS；皆缺 → 拒跑（exit 2）。
 
     ★PII 硬防线：解析出的目录若落在 git 工作树内一律拒跑——语料含真实案件数据，必须放库外
     （OneDrive），绝不让它随 ``git add`` 混进公开仓库（本仓库有过 PII 泄入 git 历史的前科）。
+
+    ★**公开**（非下划线）是有意的：凡是往语料库读写的命令都必须走这道门。``fxapk lead`` 的
+      恢复凭据同样含真实线索值与核实说明，一开始各写各的解析就等于把这道防线绕过去了——
+      共用同一个入口，防线才不会随着新命令增加而漏。
     """
     root = (corpus or os.environ.get(ENV_CORPUS, "")).strip()
     if not root:
@@ -80,7 +84,7 @@ def corpus_add(
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
     """把一份/多份 report.json 入库（原样存证 + 登记索引，按样本×版本×规则幂等去重）。"""
-    root = _resolve_corpus(corpus)
+    root = resolve_corpus(corpus)
     if not case:
         typer.echo(
             "警告：未指定 --case，本次入库无案件归属（串案维度将退化为纯样本维度）。", err=True
@@ -141,7 +145,7 @@ def corpus_ls(
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
     """按条件列举库内样本（稳定 JSON）。"""
-    root = _resolve_corpus(corpus)
+    root = resolve_corpus(corpus)
     entries = _corpus.load_manifest(root)
     rows = _corpus.query(
         entries, package_name=package, case_id=case, packer=packer, app_type=app_type
@@ -170,7 +174,7 @@ def corpus_seen(
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
     """见过没？按样本哈希 / 包名 / 共享签名证书 / 共享远程配置对象 / 共享 .so 家族指纹 / **自建构建环境** 一击反查库内记录。"""
-    root = _resolve_corpus(corpus)
+    root = resolve_corpus(corpus)
     if by == _CONFIG_OBJECT_BY:
         # 远程配置对象是列表维度（一样本可引用多个）：按 url 或 sha256 反查引用它的样本。
         hits = _corpus.find_by_config_object(_corpus.load_manifest(root), value)
@@ -206,7 +210,7 @@ def corpus_shared_config(
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
     """跨样本共享的远程配置对象簇：同一 OSS 对象(url) 或同一配置内容(sha256) 被 ≥2 样本引用——串案强锚。"""
-    root = _resolve_corpus(corpus)
+    root = resolve_corpus(corpus)
     clusters = _corpus.shared_config_objects(_corpus.load_manifest(root))
     _print({"count": len(clusters), "clusters": clusters})
 
@@ -222,7 +226,7 @@ def corpus_shared_native(
     ``weak_anchor=true`` 与 ``weak_anchor_reason``（壳产品名 / third-party-sdk），并排在结果末尾。
     只标注不删除：共享事实仍要看得见，静默丢弃会让人以为压根没这回事。
     """
-    root = _resolve_corpus(corpus)
+    root = resolve_corpus(corpus)
     clusters = _corpus.shared_native_libs(_corpus.load_manifest(root))
     _print({"count": len(clusters), "clusters": clusters})
 
@@ -240,7 +244,7 @@ def corpus_shared_build_env(
     ★与「共用同一台服务器」的区别：涉案服务器多为转租 IP，转租商同一台机器上跑多个
     互不相干的客户是常态，**同机 ≠ 同团伙**；而同构建标识 = 同一订单主体，可据以并案。
     """
-    root = _resolve_corpus(corpus)
+    root = resolve_corpus(corpus)
     clusters = _corpus.shared_build_environments(_corpus.load_manifest(root))
     _print({"count": len(clusters), "clusters": clusters})
 
@@ -250,7 +254,7 @@ def corpus_reindex(
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
     """扫 reports/ 全量重建 manifest（自愈索引；只从旧 manifest 继承人工 case_id）。"""
-    root = _resolve_corpus(corpus)
+    root = resolve_corpus(corpus)
     entries = _corpus.reindex(root)
     _print({"reindexed": len(entries), "corpus": str(root)})
 
@@ -263,7 +267,7 @@ def corpus_events(
     """把库内该样本的报告吐成 JSONL 事件流（复用 report_to_events，喂 agent）。多版本取最近入库的一份。"""
     from apkscan.core.jsonl import report_to_events
 
-    root = _resolve_corpus(corpus)
+    root = resolve_corpus(corpus)
     hits = _corpus.find_by(_corpus.load_manifest(root), sha256, by="sample_sha256")
     if not hits:
         typer.echo(f"库内无此样本：{sha256}", err=True)
@@ -341,7 +345,7 @@ def corpus_regress_cmd(
     """
     from apkscan.core import regress as _regress
 
-    root = _resolve_corpus(corpus)
+    root = resolve_corpus(corpus)
     entries = _corpus.load_manifest(root)
     versions = _regress.available_versions(entries)
     if len(versions) < 2:

@@ -33,6 +33,7 @@ from apkscan.core.report_naming import report_base
 from apkscan.commands.corpus import corpus_app
 from apkscan.commands.case import case_app, closure_exit_code
 from apkscan.commands.enrich import enrich_app
+from apkscan.commands.lead import lead_app
 from apkscan.commands.web import analyze_web
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ app = typer.Typer(
 app.add_typer(corpus_app, name="corpus")
 app.add_typer(case_app, name="case")
 app.add_typer(enrich_app, name="enrich")
+app.add_typer(lead_app, name="lead")
 
 # analyze-web 是**单个命令**（不是子命令组），故用 app.command() 注册而非 add_typer。
 # 函数体在 commands/web.py（逻辑不堆进 cli.py），它反过来惰性 import 本模块的 _write_reports

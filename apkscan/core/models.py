@@ -407,7 +407,27 @@ def advice_is_consistent(lead: "Lead") -> bool:
     return not expected or expected == lead.advice
 
 
-def merge_runtime_into_lead_dict(existing: dict, runtime_lead: dict) -> tuple[bool, bool]:
+def _is_restored_triplet(
+    index: "set[tuple[str, str, str]]", category: object, value: object, source: object
+) -> bool:
+    """``(类别, 值, 抑制来源)`` 是否在人工恢复凭据索引里。
+
+    ★归一化**共用** :func:`apkscan.core.restore.norm_component`，不再各写一份：那是安全键的
+      匹配规则，两处分叉会让「已放行」在一处成立、另一处不成立，人工核实被静默抹掉。
+      ``restore`` 同样只依赖 stdlib 且不 import 本模块，这条依赖不成环、也不破坏叶子性质。
+    """
+    from apkscan.core.restore import norm_component
+
+    key = tuple(norm_component(x) for x in (category, value, source))
+    return key in index  # type: ignore[comparison-overlap]
+
+
+def merge_runtime_into_lead_dict(
+    existing: dict,
+    runtime_lead: dict,
+    *,
+    restored: "set[tuple[str, str, str]] | None" = None,
+) -> tuple[bool, bool]:
     """把一条 **runtime** 观测（已序列化的 lead dict）并进已存在的 lead dict，升为活体确认。
 
     回灌层（pcap_ingest / probe_ingest）在 ``report.json`` 上做原地字典合并：命中已存在
@@ -435,6 +455,9 @@ def merge_runtime_into_lead_dict(existing: dict, runtime_lead: dict) -> tuple[bo
     Args:
         existing: report.json 里已存在的 lead dict（**原地**被改）。
         runtime_lead: 新 runtime lead 的序列化 dict。
+        restored: 人工恢复凭据索引（见 :func:`apkscan.core.restore.restore_index`）。命中的
+            ``(类别, 值, 来源)`` 不再复压——回灌是重跑之外的第二条复压路径，两处都堵上人工
+            核实才不会被自动机制反复抹掉。调用方从 ``report.meta`` 取，本函数不碰存储。
 
     Returns:
         ``(evidence_merged, ledger_changed)`` 二元组，**两个语义不能合并成一个 bool**：
@@ -487,23 +510,27 @@ def merge_runtime_into_lead_dict(existing: dict, runtime_lead: dict) -> tuple[bo
     # ★抑制账本合并（见 docstring）。``ledger_changed`` 独立于 ``merged``：账本不是 runtime
     #   证据，不能触发下面的 is_runtime_seen 升位——那两个布尔的语义是「动态侧真的出现过」。
     ledger_changed = False
-    raw_incoming_dg = runtime_lead.get("downgrades")
-    incoming_dg = {
-        str(k).strip(): str(v)
-        for k, v in raw_incoming_dg.items()
-        if isinstance(k, str) and k.strip() and isinstance(v, str)
-    } if isinstance(raw_incoming_dg, dict) else {}
+    # 规范化共用 restore.normalize_downgrades：两条路径（本函数与 strip_restored_downgrades）
+    # 对同一份畸形账本必须得到同一结果，否则"哪条路径先碰到它"就决定了结果。
+    from apkscan.core.restore import normalize_downgrades as _norm_dg
+
+    incoming_dg = _norm_dg(runtime_lead.get("downgrades"))
+    if incoming_dg and restored:
+        # 人工已放行的来源不再复压（回灌是重跑之外的第二条复压路径）。按 (类别,值,来源) 精确
+        # 匹配：同一条线索上别的来源该压照压。
+        category = str(existing.get("category", ""))
+        value = str(existing.get("value", ""))
+        incoming_dg = {
+            rid: note
+            for rid, note in incoming_dg.items()
+            if not _is_restored_triplet(restored, category, value, rid)
+        }
     if incoming_dg:
         def _anchor(value: object) -> str | None:
             # 与 report_io 读盘同判据：只认合法档位，其余当「不可考」。
             return value.strip() if isinstance(value, str) and value.strip() in VALID_ADVICE else None
 
-        raw_current_dg = existing.get("downgrades")
-        current_dg = {
-            str(k).strip(): str(v)
-            for k, v in raw_current_dg.items()
-            if isinstance(k, str) and k.strip() and isinstance(v, str)
-        } if isinstance(raw_current_dg, dict) else {}
+        current_dg = _norm_dg(existing.get("downgrades"))
         current_advice = existing.get("advice")
         current_legacy = _anchor(existing.get("legacy_effective_advice"))
         shim = Lead(

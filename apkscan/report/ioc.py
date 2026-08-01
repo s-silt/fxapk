@@ -31,6 +31,8 @@ import csv
 import logging
 from typing import Any
 
+from apkscan.core.restore import restore_index, restored_sources_for
+
 logger = logging.getLogger(__name__)
 
 # CSV 列顺序（DictWriter 表头）。改这里即改导出 schema，下游平台映射依赖此顺序。
@@ -47,6 +49,10 @@ IOC_COLUMNS: list[str] = [
     # ★末列追加，不插在中间：列顺序是下游平台（MISP/i2/Maltego）的映射契约，
     #   插中间会让已配好的字段映射整体错位。新增一律追加。
     "shape_uncertain",
+    # ★人工放行的抑制来源（``|`` 分隔，无则空）。这行本已被自动判据压住、不该进 IOC，是
+    #   人放回来的——不带这列，进了情报平台的行就与判据确认的线索长得一模一样，机器消费方
+    #   完全看不到人工判断介入过。它是该行 provenance 的必要组成，不是可选装饰。
+    "manually_restored",
 ]
 
 # 研判建议中代表「应进情报平台当 IOC」的取值（only_investigate 过滤依据）。
@@ -92,7 +98,11 @@ def _first_source(lead: dict[str, Any]) -> str:
     return f"{_str_or_empty(source)}:{_str_or_empty(location)}"
 
 
-def _lead_to_row(lead: dict[str, Any], sample_sha256: str) -> dict[str, Any]:
+def _lead_to_row(
+    lead: dict[str, Any],
+    sample_sha256: str,
+    restored_index: set[tuple[str, str, str]] | None = None,
+) -> dict[str, Any]:
     """把单条 Lead dict 映射成一行 IOC dict（列见 IOC_COLUMNS）。"""
     return {
         "type": _str_or_empty(lead.get("category")),
@@ -112,6 +122,8 @@ def _lead_to_row(lead: dict[str, Any], sample_sha256: str) -> dict[str, Any]:
         #   ★仍然全导、只标注，不静默丢弃：跨案 IOC 库（core/corpus.py）不收这类值，是因为
         #   碰撞要求地址性已确证；而本 CSV 是给人配映射、自行过滤的，丢掉等于替下游做了决定。
         "shape_uncertain": bool(lead.get("shape_uncertain", False)),
+        # 人工放行的抑制来源（见 IOC_COLUMNS 处的说明）。多条以 ``|`` 连接，稳定排序。
+        "manually_restored": "|".join(sorted(restored_sources_for(lead, restored_index or set()))),
     }
 
 
@@ -140,13 +152,16 @@ def leads_to_ioc_rows(report: dict[str, Any], only_investigate: bool = False) ->
     if isinstance(meta, dict):
         sample_sha256 = _str_or_empty(meta.get("sample_sha256"))
 
+    # 人工放行索引（据报告自身的墓碑）：让「这行是人放回来的」随行导出，机器消费方看得见。
+    restored_index = restore_index(meta if isinstance(meta, dict) else None)
+
     rows: list[dict[str, Any]] = []
     for lead in leads:
         if not isinstance(lead, dict):
             continue  # 非 dict 的 lead（脏数据）跳过，不抛
         if only_investigate and lead.get("advice") != _ADVICE_INVESTIGATE:
             continue
-        rows.append(_lead_to_row(lead, sample_sha256))
+        rows.append(_lead_to_row(lead, sample_sha256, restored_index))
     return rows
 
 
