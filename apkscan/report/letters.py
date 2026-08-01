@@ -185,8 +185,26 @@ def _is_non_recipient(where_to_request: str) -> bool:
     return any(marker in where_to_request for marker in _NON_RECIPIENT_MARKERS)
 
 
+def _is_masqueraded_domain(lead: dict[str, Any]) -> bool:
+    """本条 Lead 的标的自身是否为**被冒用**的域名（自己出现在自己的 sni_masquerade 里）。
+
+    ★出口硬闸，与上游各级判据相互独立。上游任何一环判错，套打出来的就是一份指向被冒用服务
+      持有方的文书——这是本项目最重的那类误判，必须在出口再挡一次，而不是信任链路上游。
+      实测（1.4.0）上游三处同时失守，文书已真的生成，故补此闸。
+    """
+    if str(lead.get("category") or "").upper() != "DOMAIN":
+        return False
+    names = lead.get("sni_masquerade")
+    if not isinstance(names, list):
+        return False
+    value = str(lead.get("value") or "").strip().lower().rstrip(".")
+    if not value:
+        return False
+    return any(str(n).strip().lower().rstrip(".") == value for n in names)
+
+
 def _is_actionable(lead: dict[str, Any]) -> bool:
-    """该 Lead 是否可办案化（满足全部 3 个套打条件）。"""
+    """该 Lead 是否可套打（满足全部 4 个条件）。"""
     if lead.get("advice") != _ADVICE_INVESTIGATE:
         return False  # 条件 1：只对建议调证的
     if not _str_list(lead.get("evidence_to_obtain")):
@@ -196,6 +214,8 @@ def _is_actionable(lead: dict[str, Any]) -> bool:
         return False  # 无受文机关
     if _is_non_recipient(recipient):
         return False  # 条件 3：跳过非真实受文机关占位文案
+    if _is_masqueraded_domain(lead):
+        return False  # 条件 4：标的自身是被冒用的域名——绝不向其持有方发函
     return True
 
 
