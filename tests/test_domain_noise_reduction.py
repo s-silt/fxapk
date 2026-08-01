@@ -389,3 +389,153 @@ def test_placeholder_rule_needs_the_bare_two_part_shape(domain: str) -> None:
     带子域的形态是正常业务命名，一并降级会把真后端埋进人工堆——漏报方向。
     """
     assert infra.classify_domain(domain)[0] == _INV, f"{domain} 被占位判据误伤"
+
+# ---------------------------------------------------------------------------
+# 手机厂商推送 / 采集接入段（逐个完整主机名，不放宽成后缀）
+# ---------------------------------------------------------------------------
+
+#: ★参数**直接由名单驱动**，不手写一份平行列表：手写列表与名单会各自漂移——删掉或拼错一个
+#:  条目时，手写列表照旧只测它自己那几个，测试全绿。由名单驱动则「名单里有的，每一条都被断言」。
+_EXACT_HOSTS = sorted(infra.KNOWN_INFRA_EXACT)
+
+
+@pytest.mark.parametrize("host", _EXACT_HOSTS)
+def test_every_exact_host_is_skipped_and_none_of_its_subdomains_are(host: str) -> None:
+    """精确表里的每一条：主机名自身判无需核查，其**任意子域**照旧逐个判。
+
+    这正是它与 KNOWN_INFRA 的分界——后者按域边界后缀匹配整棵子树，等于宣称「该标签下永远不会
+    出现第三方可控的名字」。在手证据只到「这些具体主机曾被厂商 SDK 使用」，证不到那一步。
+    """
+    assert infra.classify_domain(host)[0] == _SKIP, f"{host} 没被精确表放行"
+
+    # 子域必须**不**被这条精确条目带出去。用一个不可能被别的条目命中的标签。
+    sub = f"tenant-a1b2c3.{host}"
+    matched = infra._matched_infra(sub)
+    assert matched != host, (
+        f"{sub} 被 {host} 这条精确条目命中了——精确表一旦退化成后缀匹配，"
+        f"整棵子树就被判成无需核查"
+    )
+
+
+@pytest.mark.parametrize("domain", [
+    # ★收录的**边界**：厂商主域下混着账号、开发者托管、对象存储等第三方能实际拿到自己控制
+    #   资源的面。整域放行会把它们一并藏起来——本仓已实证过华为静态网站桶被吃掉。
+    "miui.com",                    # leak-scan: allow 判据夹具，验厂商主域未被整体放行
+    "meizu.com",                   # leak-scan: allow 判据夹具，验厂商主域未被整体放行
+    "oppo.com",                    # leak-scan: allow 判据夹具，验厂商主域未被整体放行
+    "dbankcloud.com",              # leak-scan: allow 判据夹具，验厂商主域未被整体放行
+    "dbankcloud.cn",               # leak-scan: allow 判据夹具，验厂商主域未被整体放行
+    "xiaomi.net",                  # leak-scan: allow 判据夹具，验厂商主域未被整体放行
+    "account.xiaomi.com",          # leak-scan: allow 判据夹具，验账号面未被放行
+    "sdkconfig.xiaomi.com",        # leak-scan: allow 判据夹具，验配置下发面未被放行
+    "obs-website.dbankcloud.com",  # leak-scan: allow 判据夹具，验对象存储面未被放行
+])
+def test_vendor_root_and_tenant_faces_stay_subpoena_targets(domain: str) -> None:
+    """★厂商主域与其账号 / 托管 / 存储面一概不放行。
+
+    ★两层都断言（与本文件既有的同类守卫同口径）：先锁「不在名单匹配范围内」，再锁最终档位。
+      只锁后者是间接的——日后若新增一条更早的特判把它们判成建议核查，即便有人误把主域塞进
+      名单，测试仍会绿。
+    """
+    assert infra._matched_infra(domain) is None, f"{domain} 落进了已知基础设施名单的匹配范围"
+    assert infra.classify_domain(domain)[0] == _INV, f"{domain} 被放行成了无需核查"
+
+
+# ---------------------------------------------------------------------------
+# 公网 IP 回显 / 地理查询服务
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("domain", sorted(infra._IP_ECHO_SERVICES))
+def test_ip_echo_services_are_downgraded_but_not_skipped(domain: str) -> None:
+    """★回显服务只降「待核」，绝不判「无需核查」——差别在运营主体能不能事先核实。
+
+    这类多由个人或小主体运营、整域可被收购易主，「归属答案事先已知」不恒成立，而那正是
+    最低档的前提。判无需核查等于在一份公开名单上留个现成藏身处：把域买下来挂上配置分发，
+    工具就替他判了「与本案无关」。降到待核既压掉噪音，又保住那条出网记录留在清单里。
+
+    语料里其中一条还有真机 TLS SNI 实连记录——判最低档会把它从四个出口一并抹掉。
+    """
+    advice, reason = infra.classify_domain(domain)
+    assert advice == _REVIEW, f"{domain} 判成了 {advice}"
+    assert "回显" in reason or "出口地址" in reason
+
+
+@pytest.mark.parametrize("domain", sorted(infra._IP_ECHO_SERVICES))
+def test_ip_echo_subdomains_are_covered(domain: str) -> None:
+    """回显服务按域边界后缀匹配（与 KNOWN_INFRA 同口径），故其子域同样降待核。
+
+    这里放宽到子树是安全的：档位只到「待核」，线索仍留在清单里，没有把任何东西藏掉。
+    """
+    assert infra.classify_domain(f"api.{domain}")[0] == _REVIEW
+
+
+def test_ip_echo_list_does_not_swallow_lookalike_domains() -> None:
+    """名单按域边界匹配、不做子串——三种近似形态都不得被吞。"""
+    # 三种近似：把名单条目当左标签的子域、把它粘进更长 SLD、在它前面加前缀。
+    for domain in (
+        "ip.sb.example.com",     # leak-scan: allow 判据夹具，验名单条目当左标签时不被吞
+        "myip.sbexample.com",    # leak-scan: allow 判据夹具，验粘进更长 SLD 时不被吞
+        "notip-api.com",         # leak-scan: allow 判据夹具，验加前缀的近似域不被吞
+    ):
+        advice, _reason = infra.classify_domain(domain)
+        assert advice == _INV, f"{domain} 被回显名单误吞成 {advice}"
+
+
+#: ★**独立的期望集合**：上面那组测试由名单自身驱动，能锁「表里每条都遵守精确匹配语义」，
+#:  却锁不住「本该在表里的条目还在不在」——删掉或拼错一条，参数会同步消失，用例根本不生成。
+#:  两者职责不同，都要有。本集合是这一刀收录内容的**独立记账**，改名单必须同步改它。
+_EXPECTED_VENDOR_HOSTS = frozenset({
+    # 小米推送（注册接入 / 长连接 / 解析调度 / 统计）
+    "api.xmpush.xiaomi.com",                  # leak-scan: allow 记账：小米推送注册接入
+    "register.xmpush.xiaomi.com",             # leak-scan: allow 记账：小米推送注册接入
+    "cn.register.xmpush.xiaomi.com",          # leak-scan: allow 记账：小米推送注册（境内）
+    "sandbox.xmpush.xiaomi.com",              # leak-scan: allow 记账：小米推送沙箱接入
+    "register.xmpush.global.xiaomi.com",      # leak-scan: allow 记账：小米推送国际段注册
+    "fr.register.xmpush.global.xiaomi.com",   # leak-scan: allow 记账：小米推送国际段区域主机
+    "ru.register.xmpush.global.xiaomi.com",   # leak-scan: allow 记账：小米推送国际段区域主机
+    "idmb.register.xmpush.global.xiaomi.com", # leak-scan: allow 记账：小米推送国际段区域主机
+    "app.chat.xiaomi.net",                    # leak-scan: allow 记账：小米推送长连接通道
+    "resolver.msg.xiaomi.net",                # leak-scan: allow 记账：小米推送解析调度
+    "resolver.msg.global.xiaomi.net",         # leak-scan: allow 记账：小米推送解析国际段
+    "tracking.miui.com",                      # leak-scan: allow 记账：小米统计采集 ingest
+    # 华为推送数据上报 / 路由引导
+    "data-dra.push.dbankcloud.com",           # leak-scan: allow 记账：华为推送上报区域主机
+    "data-drcn.push.dbankcloud.com",          # leak-scan: allow 记账：华为推送上报区域主机
+    "data-dre.push.dbankcloud.com",           # leak-scan: allow 记账：华为推送上报区域主机
+    "data-drru.push.dbankcloud.com",          # leak-scan: allow 记账：华为推送上报区域主机
+    "grs.dbankcloud.com",                     # leak-scan: allow 记账：华为路由引导服务
+    "grs.dbankcloud.cn",                      # leak-scan: allow 记账：华为路由引导境内段
+    # 魅族推送 / 采集
+    "api-push.meizu.com",                     # leak-scan: allow 记账：魅族推送 API
+    "api-push.in.meizu.com",                  # leak-scan: allow 记账：魅族推送 API 的 in. 变体
+    "push-statics.meizu.com",                 # leak-scan: allow 记账：魅族推送统计端点
+    "push-statics.in.meizu.com",              # leak-scan: allow 记账：魅族推送统计 in. 变体
+    "norma-external-collect.meizu.com",       # leak-scan: allow 记账：魅族数据采集 ingest
+    # 应用市场
+    "app.market.oppo.com",                    # leak-scan: allow 记账：OPPO 应用市场 API
+    "appgallery1.huawei.com",                 # leak-scan: allow 记账：华为应用市场编号兄弟
+})
+
+#: 回显服务的独立记账，理由同上。
+_EXPECTED_ECHO_SERVICES = frozenset({
+    "ip.sb",        # leak-scan: allow 记账：回显服务，语料 3 样本
+    "ip-api.com",   # leak-scan: allow 记账：IP 地理 API，语料 1 样本
+    "ip9.com.cn",   # leak-scan: allow 记账：境内 IP 查询站，语料 1 样本
+})
+
+
+def test_vendor_host_membership_is_pinned() -> None:
+    """★成员资格锁：本刀收录的每条主机名都必须还在精确表里，且拼写一致。
+
+    名单驱动的语义测试挡不住「删掉一条」——参数会跟着消失。这条独立记账才挡得住。
+    反过来若有意增删条目，改这里是**显式动作**，会在 diff 里被看见。
+    """
+    missing = _EXPECTED_VENDOR_HOSTS - infra.KNOWN_INFRA_EXACT
+    assert not missing, f"精确表里少了这些收录条目（被删或拼错）：{sorted(missing)}"
+
+
+def test_echo_service_membership_is_pinned() -> None:
+    """回显服务的成员资格锁，理由同上。"""
+    missing = _EXPECTED_ECHO_SERVICES - infra._IP_ECHO_SERVICES
+    assert not missing, f"回显名单里少了这些条目（被删或拼错）：{sorted(missing)}"
