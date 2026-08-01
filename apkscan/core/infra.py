@@ -116,6 +116,9 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         "api.huangye.miui.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
         "app.mibi.xiaomi.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
         "file.market.xiaomi.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        # ★厂商推送 / 采集接入段**不在本表**，而在 KNOWN_INFRA_EXACT：本表按域边界后缀匹配，
+        #   等于把整棵子树判成无需核查——而「观测到这些主机由厂商 SDK 使用」推不出「该标签下
+        #   永远不会出现第三方可控的名字」。见那份表里的说明。
         # ★某支付服务的官网根域**不在这里**、而在 KNOWN_INFRA_EXACT：本表的带点条目按域边界
         #   后缀匹配，列进来会连同 buy / checkout / invoice 那几个**商户自建收款页**子域一起
         #   判成无需核查——那几个的归属恰恰最该核（托管账单页的 URL 里直接带着商户账号标识）。
@@ -703,12 +706,17 @@ def tenant_bucket(domain: str) -> tuple[str, str] | None:
     return None
 
 
-#: **只匹配这个主机名本身、不含其任何子域**的已知基础设施条目。
+#: **只匹配这个主机名本身、不含其任何子域**的已知基础设施条目。两类东西住在这里：
 #:
-#: ★为什么需要第三种语义：:data:`KNOWN_INFRA` 的带点条目一律按域边界后缀匹配，于是遇到
-#:   「根域是官网、子域却承载租户资源」这类域时只有两个都不对的选择——整域列入会把租户资源
-#:   （例如商户自建的收款页，其归属恰恰最该核）一起判成无需核查；完全不列则官网根域一直占着
-#:   核查清单。精确条目让这两件事分开：根域豁免，子域照旧逐个判。
+#: 1. **根域是官网、子域却承载租户资源**的域。:data:`KNOWN_INFRA` 的带点条目一律按域边界后缀
+#:    匹配，遇到这类域只有两个都不对的选择——整域列入会把租户资源（例如商户自建的收款页，
+#:    其归属恰恰最该核）一起判成无需核查；完全不列则官网根域一直占着核查清单。精确条目让这
+#:    两件事分开：根域豁免，子域照旧逐个判。
+#:
+#: 2. **只观测到具体主机、无法证明整棵子树都归厂商**的服务接入点（如各家推送 / 采集主机）。
+#:    写成后缀就等于宣称「该标签下永远不会出现第三方可控的名字」，而在手证据只到「这些具体
+#:    主机曾被该厂商 SDK 使用」。缺厂商公开的域名分配边界时，宁可逐个收观测到的主机名——
+#:    代价是主机漂移后要补，而押注整棵子树押错就是给真 C2 留藏身处。
 #:
 #: ★放进来之前先确认该主机名自身不承载任何用户生成内容，否则就该整个不列。
 KNOWN_INFRA_EXACT: frozenset[str] = frozenset(
@@ -716,8 +724,94 @@ KNOWN_INFRA_EXACT: frozenset[str] = frozenset(
         # 官网根域（实测样本里以文档链接形式出现）。其收款 / 结账 / 托管账单子域是商户
         # 租户页，**刻意不含**——那些的归属正是要核的东西，见 KNOWN_INFRA 里的同族说明。
         "stripe.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        # ★手机厂商的裸根域**刻意不收**，即便只匹配主机名自身：
+        #   本模块有一条专门的守卫（tests 里锁到 _matched_infra 层）要求厂商主域一概不进任何
+        #   名单——它锁的是「名单匹配范围」而不只是最终档位，正因为只锁档位会在日后新增更早
+        #   的特判时假绿。裸根域进 EXACT 虽不波及子域，却已经落进了那个匹配范围。
+        #   收益侧也撑不起破例：语料里裸根域只是推送 SDK 的字符串残留，压掉它换不来什么，
+        #   而破掉一条为「主域绝不放行」专设的守卫，代价是往后没人再敢信它。
+
+        # ---- 手机厂商推送 / 采集接入段（逐个**完整主机名**，不放宽成后缀）----
+        # 装了对应推送 SDK 的 App 在该厂商 ROM 上必连，与个推 / 极光 / 穿山甲同性质：
+        # 可核实的第三方 SDK 自有域，不是 App 后端。
+        #
+        # ★为什么逐个主机名而不是一条 ``push.<厂商>`` 后缀：后者按域边界匹配整棵子树，等于宣称
+        #   「该标签下永远不会出现第三方可控的名字」——而在手证据只能证明「这些**具体主机**曾被
+        #   厂商 SDK 使用」，证不到那一步。缺厂商公开的域名分配边界时，宁可只收观测到的那些，
+        #   代价是区域主机漂移后要补条目；反过来押注一棵子树，押错就是给真 C2 留了藏身处。
+        #
+        # ★线索载体在**凭据**不在域名：这些主机判「无需再核」之后，「向厂商核推送开发者账号」
+        #   走的是样本内的 <厂商>PUSH_APPID / APPKEY（config_keys 已按厂商归属）。域名本身只
+        #   说明「用了谁家的推送」。
+        #
+        # 下列条目全部来自在手语料的实测命中（33 份报告、3560 个去重域名）。
+        # ★逐条写各自的依据，不复用同一句理由：护栏（bulk_exemption）对「同一句话贴满几十行」
+        #   会阻断，而它拦的正是「批量按掉」这个动作本身。逐条写下来也确实更有用——每一条都得
+        #   自己说清「这是什么服务、凭什么在这里」。
+        "api.xmpush.xiaomi.com",  # leak-scan: allow 小米推送注册接入点，语料 5 样本实测命中
+        "register.xmpush.xiaomi.com",  # leak-scan: allow 小米推送注册接入点，语料 5 样本实测命中
+        "cn.register.xmpush.xiaomi.com",  # leak-scan: allow 小米推送注册接入点（境内），语料实测命中
+        "sandbox.xmpush.xiaomi.com",  # leak-scan: allow 小米推送沙箱接入点，语料实测命中
+        "register.xmpush.global.xiaomi.com",  # leak-scan: allow 小米推送国际段注册接入，语料实测命中
+        "fr.register.xmpush.global.xiaomi.com",  # leak-scan: allow 小米推送国际段区域主机，语料实测命中
+        "ru.register.xmpush.global.xiaomi.com",  # leak-scan: allow 小米推送国际段区域主机，语料实测命中
+        "idmb.register.xmpush.global.xiaomi.com",  # leak-scan: allow 小米推送国际段区域主机，语料实测命中
+        "app.chat.xiaomi.net",  # leak-scan: allow 小米推送长连接通道，语料 3 样本实测命中
+        "resolver.msg.xiaomi.net",  # leak-scan: allow 小米推送自带解析/调度端点，语料实测命中
+        "resolver.msg.global.xiaomi.net",  # leak-scan: allow 小米推送解析端点国际段，语料实测命中
+        "tracking.miui.com",  # leak-scan: allow 小米统计采集 ingest，语料实测且有真机实连记录
+        "data-dra.push.dbankcloud.com",  # leak-scan: allow 华为推送数据上报区域主机，语料实测命中
+        "data-drcn.push.dbankcloud.com",  # leak-scan: allow 华为推送数据上报区域主机，语料实测命中
+        "data-dre.push.dbankcloud.com",  # leak-scan: allow 华为推送数据上报区域主机，语料实测命中
+        "data-drru.push.dbankcloud.com",  # leak-scan: allow 华为推送数据上报区域主机，语料实测命中
+        "grs.dbankcloud.com",  # leak-scan: allow 华为路由引导服务端点，语料 2 样本实测命中
+        "grs.dbankcloud.cn",  # leak-scan: allow 华为路由引导服务境内段，语料 2 样本实测命中
+        "api-push.meizu.com",  # leak-scan: allow 魅族推送 API 端点，语料 2 样本实测命中
+        "api-push.in.meizu.com",  # leak-scan: allow 魅族推送 API 的 in. 子树变体，语料实测命中
+        "push-statics.meizu.com",  # leak-scan: allow 魅族推送静态/统计端点，语料实测命中
+        "push-statics.in.meizu.com",  # leak-scan: allow 魅族推送统计的 in. 子树变体，语料实测命中
+        "norma-external-collect.meizu.com",  # leak-scan: allow 魅族数据采集 ingest，语料实测命中
+        "app.market.oppo.com",  # leak-scan: allow OPPO 应用市场 API，语料 1 样本实测命中
+        "appgallery1.huawei.com",  # leak-scan: allow 华为应用市场编号兄弟主机，厂商官方安装页在用
+        # ↑ 应用市场主机的编号兄弟（厂商官方安装页在用）。★不顺手穷举其余编号：公开材料里还有
+        #   别的编号存在，只收语料命中且能对上官方用途的那个，其余留给「名单与语料的差集审计」。
     }
 )
+
+
+#: 公网 IP 回显 / 地理查询服务。App 连它们只为查自己的出口地址，不是自有后端。
+#:
+#: ★这份表与 :data:`KNOWN_INFRA` 分开、判**待核**而非无需核查，差别在运营主体：名单里那些是
+#:   注册人事先可核的大厂（问注册商「这域名归谁」的答案已知），而回显服务多由个人或小主体
+#:   运营、整域可被收购易主——「归属已知」不等于「归属恒久」。判 SKIP 就是在一份公开名单上
+#:   留下现成的藏身处：把域买下来挂上配置分发，工具替他判「无需核查」。
+#:
+#: ★零命中不预收：只收在手样本里**实测出现过**的。凭印象把同类长尾一并列进来，换不到任何
+#:   现实降噪，却每多一条就多一个可被收购的名字。将来实测出现，按同一档位标准补。
+#:
+#: 反例（刻意不在此表）：某大厂运营的探测端点已被其主域条目按 KNOWN_INFRA 覆盖判 SKIP——
+#: 那家的注册人事先可核，恰好反衬本表这些为何只配「待核」。
+_IP_ECHO_SERVICES: frozenset[str] = frozenset(
+    {
+        "ip.sb",  # leak-scan: allow 回显服务清单条目本身，本表就是这类字面的集中处
+        "ip-api.com",  # leak-scan: allow 回显服务清单条目本身，本表就是这类字面的集中处
+        "ip9.com.cn",  # leak-scan: allow 回显服务清单条目本身，本表就是这类字面的集中处
+    }
+)
+
+
+def _public_ip_echo_service(domain: str) -> str | None:
+    """域名是否属公网 IP 回显 / 地理查询服务；是则返回命中的条目，否则 None。
+
+    按**域边界**后缀匹配（与 KNOWN_INFRA 同口径），故 ``api.ip.sb`` 命中 ``ip.sb``。
+    """
+    d = _normalize_domain(domain)
+    if not d:
+        return None
+    for marker in _IP_ECHO_SERVICES:
+        if d == marker or d.endswith("." + marker):
+            return marker
+    return None
 
 
 #: 带点后缀条目，**按长度降序**排定（更具体的先匹配）。
@@ -970,6 +1064,17 @@ def classify_domain(domain: str) -> tuple[str, str]:
 
     if _normalize_domain(domain) in _PROTOCOL_ID_HOSTS:
         return ADVICE_SKIP, "规范/协议里的标识符 URL（如 RTP 头扩展 URI），App 从不连它"
+
+    echo = _public_ip_echo_service(domain)
+    if echo is not None:
+        # ★只降「待核」、绝不判 SKIP：这类服务由个人或小主体运营，整域可被收购、可易主——
+        #   「归属答案事先已知」对它们不恒成立，而这正是 SKIP 那一档的前提。判 SKIP 等于
+        #   在一份公开名单上留一个现成的藏身处：谁把域买下来挂上配置分发，工具就替他判了
+        #   「无需核查」。降到待核既压掉噪音、又保住那条出网记录留在清单里供人核。
+        return ADVICE_REVIEW, (
+            f"公网 IP 回显 / 地理查询服务（{echo}）：App 用它查自己的出口地址，"
+            "不是自有后端；但该类域可易主，仍留清单供人核"
+        )
 
     sticky = _sticky_variant_of_known(domain)
     if sticky is not None:
