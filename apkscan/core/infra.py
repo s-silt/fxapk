@@ -76,6 +76,37 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         "amazonaws.com",
         "awsstatic",
         "cloudfront.net",
+        # ---- 手机厂商的应用市场 / 钱包 / 黄页，以及一家支付服务 ----
+        # 这几条解决的是：它们的注册人就是那家厂商本身，向注册商问「这个域名归谁」得到的答案
+        # 事先已知，没有核查价值，却一直占着「建议核查」把清单撑满。
+        #
+        # ★注意判的是「归属无需再核」，不是「这条信息没用」：样本里出现钱包 / 应用市场链接
+        #   本身仍是有意义的观察（比如指向某条付款路径），它照常留在报告里，只是不再作为
+        #   「向谁核这个域名归谁」的目标。
+        #
+        # ★刻意**只列具体子域、绝不列这两家的主域**——理由与上面钉钉那条同源，但这里还多
+        #   一层：两家主域下都有对象存储端点，主域整体列入后，凡是租户桶判据没覆盖到的写法
+        #   都会掉进整域豁免被静默吃掉。
+        #   证据分两级，别混为一谈：
+        #     · **已证实**——华为云的静态网站桶端点（``obs-website`` 那种多一段区域标签的写法）
+        #       此前确实不匹配租户桶判据，正被整域条目吃着；该形态有厂商公开文档为据。
+        #     · **防御性构造**——小米那侧我只做了机制层面的反事实验证（构造一个未覆盖写法，
+        #       证明加主域后它会被吃掉），并没有证据表明现实中存在这样的租户端点。
+        #   两者都支持「不列主域」这个决定，但前者是现实风险、后者只是机制风险。
+        #
+        # ★同样刻意**不写无点的品牌关键字**：_matched_infra 对无点条目走子串匹配，会把
+        #   「品牌名 + 连字符 + 任意后缀」这类可被任何人注册的近似域一并判成无需核查。
+        "appgallery.huawei.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        # 该条按域边界后缀匹配，其下的 global.* 等子域自动覆盖，无需逐个列。
+        "api.huangye.miui.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        "app.mibi.xiaomi.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        "file.market.xiaomi.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        # ★某支付服务的官网根域**不在这里**、而在 KNOWN_INFRA_EXACT：本表的带点条目按域边界
+        #   后缀匹配，列进来会连同 buy / checkout / invoice 那几个**商户自建收款页**子域一起
+        #   判成无需核查——那几个的归属恰恰最该核（托管账单页的 URL 里直接带着商户账号标识）。
+        #   那家的租户控制发生在 URL 路径与固定子域上、不在 DNS 注册上，所以「子域不对第三方
+        #   开放注册」推不出「整域可跳过」。见 KNOWN_INFRA_EXACT 的说明。
+        "www.stripe.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
         # ---- 个推 GeTui（本样本 GETUI_APPID / GTSDK）----
         "getui.com",
         "gepush.com",
@@ -547,8 +578,15 @@ _TENANT_BUCKET_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
     ("AWS S3", re.compile(
         rf"^(?P<bucket>{_BUCKET_DOTTED})\.s3(?:[.\-][a-z0-9\-]+)?\.amazonaws\.com$"
     )),
+    # ★该厂商公开的结构恰好两种：常规端点，以及多一段区域标签的**静态网站**端点。后者原先
+    #   跨不过去，于是那种写法的桶落到该厂商的整域条目上被判无需核查——一个真实存在、正在
+    #   生效的漏法（由复审据厂商公开文档指出，非构造）。
+    #   ★两种结构**分别**写死，不给它们统一追加可选标签：那样会顺带接受
+    #   ``<桶>.obs.<区域>.<额外段>.<域>`` 这类没有公开依据的形态，等于又把宽度放回去。
     ("华为云 OBS", re.compile(
-        rf"^(?P<bucket>{_BUCKET_DOTTED})\.obs[.\-][a-z0-9\-]+\.myhuaweicloud\.com$"
+        rf"^(?P<bucket>{_BUCKET_DOTTED})"
+        r"\.(?:obs[.\-][a-z0-9\-]+|obs-website\.[a-z0-9\-]+)"
+        r"\.myhuaweicloud\.com$"
     )),
     # ★这一条是补一个**正在生效**的漏洞，不是预防：该厂商的整域条目已在已知基础设施名单里，
     #   而本表此前没有它的对象存储形态，于是 ``<桶名>.<存储端点>`` 被整域豁免命中、判无需
@@ -590,7 +628,12 @@ _TENANT_BUCKET_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
     ("京东云 OSS", re.compile(
         rf"^(?P<bucket>{_BUCKET})\.(?:s3|obs)[.\-][a-z0-9\-]+\.jdcloud-oss\.com$"
     )),
-    ("小米 FDS", re.compile(rf"^(?P<bucket>{_BUCKET})\.fds\.api\.xiaomi\.com$")),
+    # ★这一条已**撤回**，不要凭印象加回来：该厂商公开的接口文档给的是 path-style
+    #   （``<区域>.fds.api.xiaomi.com/<桶>/<对象>``，桶在路径里而非主机名里），此处原先按
+    #   host-style 写的 ``<桶>.fds.api.xiaomi.com`` 找不到公开依据，也没有在手样本佐证——
+    #   本表声称覆盖一个可能不存在的形态，比不覆盖更糟：它会让人以为这家已经护住了。
+    #   桶在路径里意味着**主机名判据天然够不着它**，要护得改成看 URL 路径，那是另一件事。
+    #   撤回后该主机名走末尾兜底档（建议核查），不会被静默吃掉。
     # 华为云的旧端点域，与前面那个端点域并存。
     ("华为云 OBS", re.compile(
         rf"^(?P<bucket>{_BUCKET})\.obs(?:[.\-][a-z0-9\-]+)?\.myhwclouds\.com$"
@@ -640,10 +683,28 @@ def tenant_bucket(domain: str) -> tuple[str, str] | None:
     return None
 
 
+#: **只匹配这个主机名本身、不含其任何子域**的已知基础设施条目。
+#:
+#: ★为什么需要第三种语义：:data:`KNOWN_INFRA` 的带点条目一律按域边界后缀匹配，于是遇到
+#:   「根域是官网、子域却承载租户资源」这类域时只有两个都不对的选择——整域列入会把租户资源
+#:   （例如商户自建的收款页，其归属恰恰最该核）一起判成无需核查；完全不列则官网根域一直占着
+#:   核查清单。精确条目让这两件事分开：根域豁免，子域照旧逐个判。
+#:
+#: ★放进来之前先确认该主机名自身不承载任何用户生成内容，否则就该整个不列。
+KNOWN_INFRA_EXACT: frozenset[str] = frozenset(
+    {
+        # 官网根域（实测样本里以文档链接形式出现）。其收款 / 结账 / 托管账单子域是商户
+        # 租户页，**刻意不含**——那些的归属正是要核的东西，见 KNOWN_INFRA 里的同族说明。
+        "stripe.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+    }
+)
+
+
 def _matched_infra(domain: str) -> str | None:
     """返回命中的 KNOWN_INFRA 关键字/后缀；未命中返回 None。
 
-    两类 marker 区别匹配，避免短域名后缀被当子串误命中：
+    三类 marker 区别匹配，避免短域名后缀被当子串误命中：
+    - **精确主机名型**（:data:`KNOWN_INFRA_EXACT`）：只认 ``d == marker``，子域一概不认。
     - **域名后缀型**（含点，如 ``qq.com`` / ``mob.com``）：要求 ``d == marker`` 或以
       ``.<marker>`` 结尾（域边界）。否则 ``mob.com`` 会子串命中攻击者构造的 ``evilmob.com.cn``，
       把真 C2 误判成"无需调证"——与本模块"宁可建议调证"的取向正好相反。
@@ -653,6 +714,8 @@ def _matched_infra(domain: str) -> str | None:
     d = _normalize_domain(domain)
     if not d:
         return None
+    if d in KNOWN_INFRA_EXACT:
+        return d
     for marker in KNOWN_INFRA:
         if "." in marker:
             if d == marker or d.endswith("." + marker):

@@ -40,8 +40,11 @@ _TENANT_BUCKETS: tuple[tuple[str, str], ...] = (
     (f"{_B}.pek3b.qingstor.com", "青云 QingStor"),
     (f"{_B}.s3.cn-north-1.jdcloud-oss.com", "京东云 OSS"),
     (f"{_B}.storage.googleapis.com", "Google Cloud Storage"),
-    (f"{_B}.fds.api.xiaomi.com", "小米 FDS"),
+    # ★这里曾有一条按 host-style 写的某家 FDS 用例，已随实现一并撤回：该厂商公开的接口是
+    #   path-style（桶在 URL 路径里而非主机名里），按主机名构造的形态找不到公开依据。
+    #   声称覆盖一个可能不存在的形态比不覆盖更糟——会让人以为那家已经护住了。
     (f"{_B}.obs.myhwclouds.com", "华为云 OBS"),
+    (f"{_B}.obs-website.cn-north-4.myhuaweicloud.com", "华为云 OBS"),
     (f"{_B}.blob.core.windows.net", "Azure Blob"),
     # 中间段是 32 位十六进制的账号标识，不是区域码——用 _B 拼两遍凑足 32 位。
     (f"{_B}.{_B * 2}.r2.cloudflarestorage.com", "Cloudflare R2"),
@@ -81,7 +84,6 @@ _BARE_ENDPOINTS: tuple[str, ...] = (
     "fonts.googleapis.com",  # leak-scan: allow 同厂商域下的非存储服务，验正则不越界到该域其它子域
     "blob.core.windows.net",  # leak-scan: allow 裸端点反向用例，须用真实端点域才验得到「无桶名不认」
     "storage.yandexcloud.net",  # leak-scan: allow 裸端点反向用例，须用真实端点域才验得到「无桶名不认」
-    "fds.api.xiaomi.com",  # leak-scan: allow 裸端点反向用例，须用真实端点域才验得到「无桶名不认」
 )
 
 
@@ -120,9 +122,7 @@ _BOUNDARY_ATTACKS: tuple[str, ...] = (
     f"{_B}.blob.core.windows.net.phish.io",  # leak-scan: allow 域边界用例：真端点域后接他域，验尾锚定
     f"{_B}.r2.cloudflarestorage.com.evil.tld",  # leak-scan: allow 域边界用例：真端点域后接他域，验尾锚定
     f"{_B}.storage.yandexcloud.net.evil.tld",  # leak-scan: allow 域边界用例：真端点域后接他域，验尾锚定
-    f"{_B}.fds.api.xiaomi.com.evil.tld",  # leak-scan: allow 域边界用例：真端点域后接他域，验尾锚定
-    "xiaomi.com",  # leak-scan: allow 域边界用例：厂商主域本身不是端点，不得被当成桶
-    "api.xiaomi.com",  # leak-scan: allow 域边界用例：端点域的上级域不得被当成桶
+    f"{_B}.obs-website.cn-north-4.myhuaweicloud.com.evil.tld",  # leak-scan: allow 域边界用例：真端点域后接他域，验尾锚定
 )
 
 #: 与对象存储无关的域名：不得被任何一条正则捎带命中。
