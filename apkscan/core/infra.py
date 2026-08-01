@@ -20,14 +20,21 @@ import re
 from collections import Counter
 from fnmatch import fnmatch
 
+from apkscan.core.models import ADVICE_INVESTIGATE, ADVICE_REVIEW, ADVICE_SKIP
 from apkscan.network.fingerprints import is_authoritative_dns_host, is_public_dns_resolver
 
 logger = logging.getLogger(__name__)
 
-# 研判建议三态（与 Lead.advice 取值约定一致）。
-ADVICE_INVESTIGATE = "建议调证"
-ADVICE_SKIP = "无需调证"
-ADVICE_REVIEW = "待核"
+# 研判建议三态。真源在 apkscan.core.models（那三个字面是 Lead.advice 的取值域，属模型自己的
+# 词汇）；此处再导出，让沿用多年的 `infra.ADVICE_*` 写法继续可用，全仓调用方一处都不用改。
+#
+# ★只按名引这三个常量，**不要**顺手 `from apkscan.core import models` 再取属性：models 里有个
+#   同名不同义的 effective_advice(base, downgrades, snapshot)，与本模块 1270 行开外那个
+#   effective_advice(domain, tier) 撞名。引整模块迟早有人写出 models.effective_advice 却以为
+#   在调本模块的，签名还恰好都能过——那是能静默改掉判据结论的一类错。
+#
+# 不写 __all__：本模块自己就用着这三个常量（各 8-14 处），再导出是顺带的，不是「只为转发」，
+# 也就没有 unused-import 要压；凭空加个三项的 __all__ 反而把 import * 的可见面收窄了。
 
 # 域名来源可信度档（写入 Endpoint.enrichment["tier"]，pipeline 据此降可信）。
 TIER_APP = "app"                       # App 自有文件/普通字符串 —— 最可信。
