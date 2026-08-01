@@ -120,9 +120,21 @@ patterns:
   # ======================================================================
   # 厂商推送（小米 / OPPO / vivo / 华为）
   # ======================================================================
+  # ★ 各家 SDK 的标准键名是 `<厂商>PUSH_APPID` 这种连写形态（MIPUSH_APPID / OPPOPUSH_APPKEY /
+  #   VIVOPUSH_APPID），而下划线前缀（MI_ / OPPO_ / VIVO_）接不住它们。
+  #
+  #   ★补的是**厂商归属**，不是提取：未命中任何规则的 <meta-data> 照样会成为 CONFIG_KEY 线索，
+  #     只是 subject 落到「待核（应用配置）」——即「拿到了值，却不知道该找谁」。这一条差别决定
+  #     那条线索能不能落地，但值本身从未丢失。
+  #
+  #   ★前缀宽度必须与证据宽度一致：`<厂商>PUSH_` 同时含厂商与 push 语义，误归属风险低；而
+  #     `MEIZU_` / `HONOR_` 这类**纯厂商命名空间**前缀会把 HONOR_THEME、MEIZU_CHANNEL_CONFIG
+  #     一并归成「推送」，再经 _advice_for 的「命中规则即最高档」升进出口——产出的是指向该厂商
+  #     的错误落点。故厂商命名空间一律只用 exact 收已见过的具体键名。
   - sdk: "小米推送 (MiPush)"
     subject: "小米（北京小米移动软件有限公司）"
     prefixes:
+      - "MIPUSH_"
       - "MI_"
       - "XIAOMI_PUSH"
       - "XIAOMI_"
@@ -130,12 +142,14 @@ patterns:
   - sdk: "OPPO 推送 (HeyTap)"
     subject: "OPPO（广东欢太科技有限公司 / HeyTap）"
     prefixes:
+      - "OPPOPUSH_"
       - "OPPO_"
       - "HEYTAP"
 
   - sdk: "vivo 推送"
     subject: "vivo（维沃移动通信有限公司）"
     prefixes:
+      - "VIVOPUSH_"
       - "VIVO_"
 
   - sdk: "华为推送 (HMS Push)"
@@ -144,3 +158,26 @@ patterns:
       - "HUAWEI_"
       - "HMS"
       - "com.huawei.hms"
+
+  # 魅族 Flyme 推送：此前整家无归属规则（语料里 5 个推送/采集主机实测出现过）。
+  # ★只收**已见过形态**的具体键名（exact）+ 含 push 语义的连写前缀：`MEIZU_` 整个命名空间下
+  #   还有主题/渠道/统计等无关配置，宽收会把它们一并判成推送凭据并升进出口。
+  - sdk: "魅族推送 (Flyme Push)"
+    subject: "魅族（珠海市魅族通讯设备有限公司 / Flyme）"
+    exact:
+      - "MEIZU_APPID"
+      - "MEIZU_APPKEY"
+      - "FLYME_APPID"
+      - "FLYME_APPKEY"
+    prefixes:
+      - "MEIZUPUSH_"
+
+  # 荣耀推送：证据仅有 secrets 白名单里记着的两个键名（说明真实样本见过这类键），
+  # 故只收这两个 exact —— 见过两个键就只支持两个键，不放宽到 `HONOR_` 命名空间。
+  - sdk: "荣耀推送 (Honor Push)"
+    subject: "荣耀（荣耀终端有限公司）"
+    exact:
+      - "HONOR_APPID"
+      - "HONOR_APPKEY"
+    prefixes:
+      - "HONORPUSH_"
