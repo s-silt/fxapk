@@ -12,9 +12,14 @@
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 from apkscan.core import infra
+
+#: 仓库根（起子进程验确定性时要把它放进 sys.path）。
+_REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 _INV = infra.ADVICE_INVESTIGATE
 _SKIP = infra.ADVICE_SKIP
@@ -101,6 +106,51 @@ def test_phone_vendor_root_domains_stay_subpoena_targets(domain: str) -> None:
     """
     assert infra._matched_infra(domain) is None, f"{domain} 落进了已知基础设施名单的匹配范围"
     assert infra.classify_domain(domain)[0] == _INV, f"{domain} 被整域豁免吞掉了"
+
+
+def test_matched_infra_is_deterministic_across_hash_seeds() -> None:
+    """★同一输入在任何进程里都要返回同一个 marker。
+
+    名单是 frozenset，迭代顺序随哈希种子变化；名单里存在互相重叠的条目（某厂商同时有带点的
+    服务域与无点的品牌词），于是同一个域名曾在不同种子下返回不同 marker——advice 一样，但
+    写进报告的 reason 文本会变，而本仓库的跨版本回归比对依赖报告可比。
+
+    实测过 PYTHONHASHSEED=7 会翻车，故本测试真起子进程跑多个种子，不靠单进程内的巧合。
+    """
+    import json
+    import os
+    import subprocess
+    import sys
+
+    probes = ["aliyuncs.com", "tencentcs.com", "getui.com", "qcloud.com"]  # leak-scan: allow 判据夹具，验重叠条目下的匹配确定性
+    code = (
+        "import json,sys;"
+        "sys.path.insert(0, %r);"
+        "from apkscan.core import infra;"
+        "print(json.dumps([infra._matched_infra(d) for d in %r]))"
+        % (str(_REPO_ROOT), probes)
+    )
+
+    results = []
+    for seed in ("0", "7", "42"):
+        env = {**os.environ, "PYTHONHASHSEED": seed, "PYTHONIOENCODING": "utf-8"}
+        out = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, env=env, check=True,
+        )
+        results.append(json.loads(out.stdout.strip().splitlines()[-1]))
+
+    assert results[0] == results[1] == results[2], (
+        f"匹配结果随哈希种子变化：{results}"
+    )
+    assert all(r is not None for r in results[0]), "探测域名应当全部命中名单"
+
+
+def test_specific_suffix_wins_over_broader_brand_keyword() -> None:
+    """★带点的服务域条目优先于更宽泛的无点品牌词，且更长（更具体）的先匹配。
+
+    此前是 frozenset 任意顺序，宽泛的品牌词可能先命中、把精确写好的服务域条目遮蔽掉。
+    """
+    assert infra._matched_infra("aliyuncs.com") == "aliyuncs.com"  # leak-scan: allow 判据夹具，验带点条目优先于无点品牌词
 
 
 def test_exact_host_entry_covers_the_root_but_not_its_subdomains() -> None:

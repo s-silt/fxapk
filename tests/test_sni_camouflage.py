@@ -15,8 +15,13 @@ from __future__ import annotations
 
 from apkscan.core import infra
 from apkscan.core.leads import build_endpoint_leads
-from apkscan.core.models import SNI_MASQUERADE_KEY, LeadCategory
+from apkscan.core.models import SNI_MASQUERADE_KEY, Endpoint, Evidence, LeadCategory
 from apkscan.dynamic import pcap_ingest
+from apkscan.report import json as report_json
+from apkscan.report import letters as letters_mod
+
+#: 合成桶名（形态同真实，不含取自样本材料的值）——用于「租户桶 × 伪装 SNI」的组合用例。
+_B_BUCKET = "0123456789abcdef"
 
 #: 合成的「公网远端」夹具地址，取自 RFC 6598 共享地址空间（100.64.0.0/10）。
 #:
@@ -370,6 +375,42 @@ def test_domain_lead_producer_keeps_the_real_backend() -> None:
 
     assert lead.advice == infra.ADVICE_INVESTIGATE
     assert lead.sni_masquerade == []
+
+
+def test_tenant_bucket_that_only_appears_as_odd_port_sni_is_downgraded() -> None:
+    """★跨两套规则的优先级：伪装降档**盖过**租户桶升档。
+
+    对象存储的租户桶域名本会被 `classify_domain` 判 ADVICE_INVESTIGATE（桶名是租户凭据、
+    能据以核出实名）。但若这个名字在样本里**只**作为非标端口的 SNI 出现过，那条推断的前提
+    就不成立——ClientHello 里写着桶名，证明不了承载它的那台机器归该租户所有。故降为待核。
+
+    ★这不是把线索丢掉：它仍在清单里，人核实证书 / Host 一致后可以手工恢复。
+      而反过来（让租户桶身份盖过伪装判定）就会把一封指向被冒用租户的文书放出去。
+
+    ★这条单独写，是因为两套规则分别在两个测试文件里各自锁着，谁都没锁住它们**相遇时**
+      谁说了算。以后若有人把伪装降档挪到 classify_domain 前后、或只保护普通域名不保护桶，
+      这个取舍会无声改变。
+    """
+    bucket_host = f"{_B_BUCKET}.storage.googleapis.com"  # leak-scan: allow 组合用例，须用真实存储端点域才构造得出租户桶身份
+
+    assert infra.classify_domain(bucket_host)[0] == infra.ADVICE_INVESTIGATE, (
+        "前提：该域名本会因租户桶身份被判建议核查"
+    )
+
+    ep = Endpoint(
+        value=bucket_host,
+        kind="domain",
+        evidences=[Evidence(source="runtime-pcap", location="pcap", snippet="TLS SNI")],
+    )
+    ep.enrichment[SNI_MASQUERADE_KEY] = {"carriers": [f"{_BACKEND}:{_ODD_PORT}/tcp"]}
+
+    lead = _lead(build_endpoint_leads([ep], online=False), bucket_host)
+
+    assert lead.advice == infra.ADVICE_REVIEW, "伪装降档没能盖过租户桶升档"
+    assert lead.sni_masquerade == [bucket_host]
+
+    payload = report_json._to_jsonable(lead)
+    assert letters_mod._is_actionable(payload) is False, "被冒用的桶域名仍会套打"
 
 
 def test_letters_never_drafts_for_a_masqueraded_domain() -> None:
