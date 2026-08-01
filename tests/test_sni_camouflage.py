@@ -1,14 +1,14 @@
 """非标端口上的 SNI 伪装：域名是戏服，IP 才是实体。
 
-实测（范旻案）：`30135/tcp` 上的自建协议连接打出网易云音乐、jsDelivr 镜像、有道、BootCDN
-的 SNI。回灌把这些域名一并当业务线索——生成的是一封**指名网易/有道**的调证函，把无关企业
-写成了嫌疑方。这是本项目最重的一类错误。
+实测形态：某非标端口上的自建协议连接，在 ClientHello 里打出多个知名内容分发 / 笔记 / 音乐
+服务的 SNI。若把这些域名一并当业务线索，套打出来的就是一份指向那些服务持有方的文书，把无关
+第三方列成了标的——本项目最重的一类误判。
 
 判据按**端口**而非域名白名单：白名单挡不住下一次换域名，而推断链本身可判——「ClientHello
 里写着 X，所以这台机器归 X 的运营方」这一步，只在 X 确实是跑在约定端口上的 TLS 服务时才成立。
 
 方向同样要紧：伪装**加重**该 IP 的可疑度（自建协议在混流），不是把它一起降级。所以
-域名降档、IP 那条反而点名"它在冒充谁、调证对象是本 IP:端口"。
+域名降档、IP 那条反而点名"它在冒充谁、标的是本 IP:端口"。
 """
 
 from __future__ import annotations
@@ -18,10 +18,26 @@ from apkscan.core.leads import build_endpoint_leads
 from apkscan.core.models import SNI_MASQUERADE_KEY, LeadCategory
 from apkscan.dynamic import pcap_ingest
 
-_BACKEND = "8.138.171.104"  # leak-scan: allow SNI 伪装载体的真后端夹具，需被判公网远端才进 carriers
+#: 合成的「公网远端」夹具地址，取自 RFC 6598 共享地址空间（100.64.0.0/10）。
+#:
+#: ★为什么不用 RFC 5737 的文档段：``ipaddress`` 把 192.0.2.0/24 那三段判为 ``is_private``，而
+#:   ``pcap_ingest._ip_public`` 要求非私网才认作公网远端——文档段根本进不了 carriers，判据跑
+#:   不起来。而 leak-scan 拦的恰恰是 ``is_global`` 为真的字面。两条判据结构上互斥，于是此前
+#:   只能逐行写行内豁免顶着真实地址用，真实后端地址因此反复出现在公开仓库里。
+#:
+#:   共享地址空间同时满足两边：``is_global`` 为假故护栏放行、无需任何豁免；``is_private`` 亦为
+#:   假故仍被判作公网远端。该段保留给运营商级 NAT、不分配给终端，天然不会是任何真实后端。
+#:   ★注意它过不了 ``infra.classify_ip``（那条按 ``is_global`` 判），故只适用于本文件这类
+#:   走 pcap 层判据的夹具；断言 IP 分档的测试仍需另想办法。
+_BACKEND = "100.64.0.10"
+#: 标准 TLS 端口上的对照地址（同段另一个值）。
+_STD_PORT_HOST = "100.64.0.20"
+#: 承载伪装 SNI 的非标端口。判据只关心「是否落在标准 TLS 端口名单内」，具体数值无关——
+#: 故取一个不含任何编号语义的值，不必也不该照抄实测样本里的那个。
+_ODD_PORT = 40001
 #: 刻意用一个**不在** KNOWN_INFRA 名单里的域名。
-#: 实测那批（music.163.com / 有道 / BootCDN）已陆续进了已知第三方名单，但伪装判据的价值恰恰
-#: 在于**不依赖名单**——团伙下次换一个没人收录过的知名域名，名单就已经落后了。
+#: 实测被借用的那批知名域名已陆续进了已知第三方名单，但伪装判据的价值恰恰在于**不依赖名单**
+#: ——样本作者下次换一个没人收录过的知名域名，名单就已经落后了。
 _FAKE_SNI = "player.mediastatic-cdn.com"
 
 
@@ -55,14 +71,14 @@ def _lead(leads: list, value: str):
 
 def test_sni_on_nonstandard_port_is_flagged() -> None:
     """★核心：只在非标端口上出现过的 SNI，证明不了这台机器归谁运营。"""
-    s = _summary(_flow(_BACKEND, 30135, {_FAKE_SNI}), _flow(_BACKEND, 30135, {_FAKE_SNI}, inbound=True))
+    s = _summary(_flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}), _flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}, inbound=True))
     carriers = pcap_ingest.sni_camouflage_carriers(s)
-    assert carriers == {_FAKE_SNI: [f"{_BACKEND}:30135/tcp"]}
+    assert carriers == {_FAKE_SNI: [f"{_BACKEND}:{_ODD_PORT}/tcp"]}
 
 
 def test_sni_on_standard_port_is_not_flagged() -> None:
     """反向护栏：443 上的 SNI 是正常 TLS 服务，不得被标伪装（否则全库域名线索报废）。"""
-    s = _summary(_flow("59.111.181.60", 443, {_FAKE_SNI}))  # leak-scan: allow SNI 伪装载体的真后端夹具，需被判公网远端才进 carriers
+    s = _summary(_flow(_STD_PORT_HOST, 443, {_FAKE_SNI}))  # 合成段，护栏放行、无需豁免
     assert pcap_ingest.sni_camouflage_carriers(s) == {}
 
 
@@ -72,15 +88,15 @@ def test_sni_seen_on_any_standard_port_is_exonerated() -> None:
     只按"存在一条非标连接"降级，会把真实访问过该域名的样本一并误伤。
     """
     s = _summary(
-        _flow(_BACKEND, 30135, {_FAKE_SNI}),           # 伪装的那条
-        _flow("59.111.181.60", 443, {_FAKE_SNI}),      # 真访问网易的那条  # leak-scan: allow SNI 伪装载体的真后端夹具，需被判公网远端才进 carriers
+        _flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}),           # 伪装的那条
+        _flow(_STD_PORT_HOST, 443, {_FAKE_SNI}),      # 真访问该服务的那条（合成段）
     )
     assert pcap_ingest.sni_camouflage_carriers(s) == {}
 
 
 def test_no_sni_or_no_flows_is_empty() -> None:
     assert pcap_ingest.sni_camouflage_carriers(_summary()) == {}
-    assert pcap_ingest.sni_camouflage_carriers(_summary(_flow(_BACKEND, 30135))) == {}
+    assert pcap_ingest.sni_camouflage_carriers(_summary(_flow(_BACKEND, _ODD_PORT))) == {}
 
 
 # ---------------------------------------------------------------------------
@@ -89,11 +105,11 @@ def test_no_sni_or_no_flows_is_empty() -> None:
 
 
 def test_masquerade_domain_leaves_the_subpoena_outlets() -> None:
-    """★被冒充的域名不得以「建议调证」出函——那封函的受文机关是网易，与本案无关。"""
+    """★被冒充的域名不得判 ADVICE_INVESTIGATE——那份文书的受文方会是被冒充的那家服务商。"""
     assert infra.classify_domain(_FAKE_SNI)[0] == infra.ADVICE_INVESTIGATE, (
         "前提：该域名本会被判建议调证（不在已知第三方名单里）"
     )
-    s = _summary(_flow(_BACKEND, 30135, {_FAKE_SNI}), _flow(_BACKEND, 30135, {_FAKE_SNI}, inbound=True))
+    s = _summary(_flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}), _flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}, inbound=True))
 
     lead = _lead(pcap_ingest.to_report_leads(s), _FAKE_SNI)
 
@@ -109,9 +125,9 @@ def test_masquerade_makes_the_ip_more_suspicious_not_less() -> None:
     伪装是自建协议在混入背景流量——它加重本端点的可疑度。若把 IP 也一起降档，就等于
     因为对方伪装得好而放过它，方向正好反了。
     """
-    s = _summary(_flow(_BACKEND, 30135, {_FAKE_SNI}), _flow(_BACKEND, 30135, {_FAKE_SNI}, inbound=True))
+    s = _summary(_flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}), _flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}, inbound=True))
 
-    ip_lead = _lead(pcap_ingest.to_report_leads(s), f"{_BACKEND}:30135/tcp")
+    ip_lead = _lead(pcap_ingest.to_report_leads(s), f"{_BACKEND}:{_ODD_PORT}/tcp")
 
     assert ip_lead.advice == infra.ADVICE_INVESTIGATE, "实测双向载荷的后端仍是调证对象"
     assert ip_lead.is_c2 is True
@@ -122,19 +138,19 @@ def test_masquerade_makes_the_ip_more_suspicious_not_less() -> None:
 
 def test_masquerade_is_recorded_on_the_endpoint() -> None:
     """结构化落在端点上：读报告的人不必去 notes 里捞，程序化消费方也能筛。"""
-    s = _summary(_flow(_BACKEND, 30135, {_FAKE_SNI}), _flow(_BACKEND, 30135, {_FAKE_SNI}, inbound=True))
+    s = _summary(_flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}), _flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}, inbound=True))
 
     eps = pcap_ingest._runtime_endpoint_dicts(s)
     rt = next(e for e in eps if e["value"] == _BACKEND)["enrichment"]["runtime"]
 
     assert rt["sni_masquerade"] == [_FAKE_SNI]
-    assert rt["port"] == 30135
+    assert rt["port"] == _ODD_PORT
     assert rt["has_payload"] is True
 
 
 def test_standard_port_endpoint_has_no_masquerade_marker() -> None:
     """不得平白给正常端点加标记（标记贬值成噪声就没人看了）。"""
-    s = _summary(_flow("59.111.181.60", 443, {_FAKE_SNI}))  # leak-scan: allow SNI 伪装载体的真后端夹具，需被判公网远端才进 carriers
+    s = _summary(_flow(_STD_PORT_HOST, 443, {_FAKE_SNI}))  # 合成段，护栏放行、无需豁免
     rt = pcap_ingest._runtime_endpoint_dicts(s)[0]["enrichment"]["runtime"]
     assert "sni_masquerade" not in rt
 
@@ -151,8 +167,8 @@ def test_masquerade_survives_report_json_roundtrip_into_the_letter() -> None:
     from apkscan.core import report_io
     from apkscan.report import letters
 
-    s = _summary(_flow(_BACKEND, 30135, {_FAKE_SNI}), _flow(_BACKEND, 30135, {_FAKE_SNI}, inbound=True))
-    lead = _lead(pcap_ingest.to_report_leads(s), f"{_BACKEND}:30135/tcp")
+    s = _summary(_flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}), _flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}, inbound=True))
+    lead = _lead(pcap_ingest.to_report_leads(s), f"{_BACKEND}:{_ODD_PORT}/tcp")
     assert lead.sni_masquerade == [_FAKE_SNI], "pcap 侧没把伪装结构化回带"
 
     # 经 report.json 的实际序列化形态往返（letters 吃的是磁盘上的 dict，不是内存对象）。
@@ -187,8 +203,8 @@ def test_no_masquerade_means_no_warning_in_letter() -> None:
     """无伪装的普通 IP 线索不得平白多出这段警示（警示贬值成噪声就没人看了）。"""
     from apkscan.report import letters
 
-    s = _summary(_flow("59.111.181.60", 443, set()), _flow("59.111.181.60", 443, set(), inbound=True))  # leak-scan: allow SNI 伪装载体的真后端夹具，需被判公网远端才进 carriers
-    lead = _lead(pcap_ingest.to_report_leads(s), "59.111.181.60:443/tcp")  # leak-scan: allow SNI 伪装载体的真后端夹具，需被判公网远端才进 carriers
+    s = _summary(_flow(_STD_PORT_HOST, 443, set()), _flow(_STD_PORT_HOST, 443, set(), inbound=True))  # 合成段，护栏放行、无需豁免
+    lead = _lead(pcap_ingest.to_report_leads(s), f"{_STD_PORT_HOST}:443/tcp")  # 合成段，护栏放行、无需豁免
     assert lead.sni_masquerade == []
     body = letters.build_letters({"leads": [_lead_as_dict(lead)]})[0]["body_md"]
     assert "切勿向其发函" not in body
@@ -211,19 +227,19 @@ def test_masquerade_merges_into_an_existing_lead(tmp_path) -> None:
                       encoding="utf-8")
 
     # 第一次采集：同一个后端、同一个端口，但没抓到 SNI。
-    first = _summary(_flow(_BACKEND, 30135, set(), payload=1200),
-                     _flow(_BACKEND, 30135, set(), inbound=True, payload=800))
+    first = _summary(_flow(_BACKEND, _ODD_PORT, set(), payload=1200),
+                     _flow(_BACKEND, _ODD_PORT, set(), inbound=True, payload=800))
     pcap_ingest.merge_into_report_json(str(report), first)
     payload = json.loads(report.read_text(encoding="utf-8"))
-    lead = _lead_dict(payload, f"{_BACKEND}:30135/tcp")
+    lead = _lead_dict(payload, f"{_BACKEND}:{_ODD_PORT}/tcp")
     assert not lead.get("sni_masquerade"), "第一次采集本就没有 SNI"
 
     # 第二次采集：同一后端同一端口，这次抓到了伪装 SNI → 命中既有 Lead 走合并路径。
-    second = _summary(_flow(_BACKEND, 30135, {_FAKE_SNI}, payload=1500),
-                      _flow(_BACKEND, 30135, {_FAKE_SNI}, inbound=True, payload=900))
+    second = _summary(_flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}, payload=1500),
+                      _flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}, inbound=True, payload=900))
     pcap_ingest.merge_into_report_json(str(report), second)
     payload = json.loads(report.read_text(encoding="utf-8"))
-    lead = _lead_dict(payload, f"{_BACKEND}:30135/tcp")
+    lead = _lead_dict(payload, f"{_BACKEND}:{_ODD_PORT}/tcp")
 
     assert lead.get("sni_masquerade") == [_FAKE_SNI], "伪装名没并进既有 Lead"
 
@@ -241,7 +257,7 @@ def _lead_dict(payload: dict, value: str) -> dict:
 def test_known_third_party_domain_stays_skip() -> None:
     """已判「无需调证」的（jsDelivr 等在第三方名单里）不受影响——只降"本会出函"的那些。"""
     assert infra.classify_domain("cdn.jsdelivr.net")[0] == infra.ADVICE_SKIP
-    s = _summary(_flow(_BACKEND, 30135, {"cdn.jsdelivr.net"}))
+    s = _summary(_flow(_BACKEND, _ODD_PORT, {"cdn.jsdelivr.net"}))
     lead = _lead(pcap_ingest.to_report_leads(s), "cdn.jsdelivr.net")
     assert lead.advice == infra.ADVICE_SKIP
 
@@ -269,19 +285,19 @@ _REAL_BACKEND_DOMAIN = "gateway.appnode-svc.com"  # leak-scan: allow 合成对�
 def test_masquerade_travels_with_the_domain_endpoint() -> None:
     """接线①：伪装事实必须随**域名端点**一起走，否则下游生产者无从得知。"""
     s = _summary(
-        _flow(_BACKEND, 30135, {_FAKE_SNI}),
-        _flow(_BACKEND, 30135, {_FAKE_SNI}, inbound=True),
+        _flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}),
+        _flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}, inbound=True),
     )
 
     eps = pcap_ingest.to_runtime_endpoints(s)
     dom_ep = next(e for e in eps if e.kind == "domain" and e.value == _FAKE_SNI)
 
-    assert dom_ep.enrichment[SNI_MASQUERADE_KEY] == {"carriers": [f"{_BACKEND}:30135/tcp"]}
+    assert dom_ep.enrichment[SNI_MASQUERADE_KEY] == {"carriers": [f"{_BACKEND}:{_ODD_PORT}/tcp"]}
 
 
 def test_standard_port_domain_endpoint_carries_no_marker() -> None:
     """反向：正常 TLS 服务的域名端点不得被平白打标（标记贬值成噪声就没人看了）。"""
-    s = _summary(_flow("59.111.181.60", 443, {_REAL_BACKEND_DOMAIN}))  # leak-scan: allow SNI 伪装载体的真后端夹具，需被判公网远端才进 carriers
+    s = _summary(_flow(_STD_PORT_HOST, 443, {_REAL_BACKEND_DOMAIN}))  # 合成段，护栏放行、无需豁免
 
     eps = pcap_ingest.to_runtime_endpoints(s)
     dom_ep = next(e for e in eps if e.kind == "domain" and e.value == _REAL_BACKEND_DOMAIN)
@@ -298,8 +314,8 @@ def test_domain_lead_producer_downgrades_the_masqueraded_name() -> None:
         "前提：该域名本会被判 ADVICE_INVESTIGATE（不在已知第三方名单里）"
     )
     s = _summary(
-        _flow(_BACKEND, 30135, {_FAKE_SNI}),
-        _flow(_BACKEND, 30135, {_FAKE_SNI}, inbound=True),
+        _flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}),
+        _flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}, inbound=True),
     )
     dom_eps = [e for e in pcap_ingest.to_runtime_endpoints(s) if e.kind == "domain"]
 
@@ -319,9 +335,9 @@ def test_domain_lead_producer_keeps_the_real_backend() -> None:
     """
     assert infra.classify_domain(_REAL_BACKEND_DOMAIN)[0] == infra.ADVICE_INVESTIGATE
     s = _summary(
-        _flow(_BACKEND, 30135, {_FAKE_SNI}),                       # 伪装的那条
-        _flow(_BACKEND, 30135, {_FAKE_SNI}, inbound=True),
-        _flow("59.111.181.60", 443, {_REAL_BACKEND_DOMAIN}),       # 真业务的那条  # leak-scan: allow SNI 伪装载体的真后端夹具，需被判公网远端才进 carriers
+        _flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}),                       # 伪装的那条
+        _flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}, inbound=True),
+        _flow(_STD_PORT_HOST, 443, {_REAL_BACKEND_DOMAIN}),       # 真业务的那条  # 合成段，护栏放行、无需豁免
     )
     dom_eps = [e for e in pcap_ingest.to_runtime_endpoints(s) if e.kind == "domain"]
 
@@ -342,8 +358,8 @@ def test_letters_never_drafts_for_a_masqueraded_domain() -> None:
     from apkscan.report import letters
 
     s = _summary(
-        _flow(_BACKEND, 30135, {_FAKE_SNI}),
-        _flow(_BACKEND, 30135, {_FAKE_SNI}, inbound=True),
+        _flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}),
+        _flow(_BACKEND, _ODD_PORT, {_FAKE_SNI}, inbound=True),
     )
     dom_eps = [e for e in pcap_ingest.to_runtime_endpoints(s) if e.kind == "domain"]
     lead = _lead(build_endpoint_leads(dom_eps, online=False), _FAKE_SNI)
