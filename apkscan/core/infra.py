@@ -700,27 +700,46 @@ KNOWN_INFRA_EXACT: frozenset[str] = frozenset(
 )
 
 
+#: 带点后缀条目，**按长度降序**排定；无点品牌关键字条目按字典序排定。
+#:
+#: ★为什么要预先定序：``KNOWN_INFRA`` 是 frozenset，迭代顺序随哈希种子变化。名单里存在
+#:   互相重叠的条目（例如某厂商同时有带点的服务域与无点的品牌词），于是同一个输入在不同
+#:   进程里可能返回不同的 marker——advice 一样，但写进报告的 reason 文本会变。本仓库的
+#:   跨版本回归比对依赖报告可比，随机文本会让它无法工作。实测：某个厂商域在 PYTHONHASHSEED=7
+#:   时返回品牌词、其余种子返回服务域。
+#:
+#: ★顺序也顺带修了语义：带点条目优先于无点品牌词、且更长（更具体）的先匹配。此前更宽泛的
+#:   品牌词可能先命中，把精确写好的服务域条目遮蔽掉。
+_INFRA_SUFFIXES: tuple[str, ...] = tuple(
+    sorted((m for m in KNOWN_INFRA if "." in m), key=lambda m: (-len(m), m))
+)
+_INFRA_KEYWORDS: tuple[str, ...] = tuple(sorted(m for m in KNOWN_INFRA if "." not in m))
+
+
 def _matched_infra(domain: str) -> str | None:
     """返回命中的 KNOWN_INFRA 关键字/后缀；未命中返回 None。
 
-    三类 marker 区别匹配，避免短域名后缀被当子串误命中：
-    - **精确主机名型**（:data:`KNOWN_INFRA_EXACT`）：只认 ``d == marker``，子域一概不认。
-    - **域名后缀型**（含点，如 ``qq.com`` / ``mob.com``）：要求 ``d == marker`` 或以
-      ``.<marker>`` 结尾（域边界）。否则 ``mob.com`` 会子串命中攻击者构造的 ``evilmob.com.cn``，
-      把真 C2 误判成"无需调证"——与本模块"宁可建议调证"的取向正好相反。
-    - **品牌关键字型**（无点，如 ``aliyun`` / ``qcloud`` / ``igexin``）：保留子串匹配
-      （它们本就是为匹配 ``aliyun-xxx.com`` 这类品牌变体而设）。
+    三类 marker 按**确定的优先级**依次匹配，避免短域名后缀被当子串误命中：
+    1. **精确主机名型**（:data:`KNOWN_INFRA_EXACT`）：只认 ``d == marker``，子域一概不认。
+    2. **域名后缀型**（含点）：要求 ``d == marker`` 或以 ``.<marker>`` 结尾（域边界）。
+       否则一个短后缀会子串命中攻击者构造的近似域，把真 C2 误判成"无需核查"——与本模块
+       "宁可建议核查"的取向正好相反。**长的先匹配**。
+    3. **品牌关键字型**（无点）：保留子串匹配（它们本就是为匹配「品牌词 + 连字符 + 任意
+       后缀」这类变体主机名而设）。
+
+    ★三档的先后是**确定的**（见 :data:`_INFRA_SUFFIXES` 的说明）：同一输入在任何进程里
+      都返回同一个 marker，报告文本因此可比对。
     """
     d = _normalize_domain(domain)
     if not d:
         return None
     if d in KNOWN_INFRA_EXACT:
         return d
-    for marker in KNOWN_INFRA:
-        if "." in marker:
-            if d == marker or d.endswith("." + marker):
-                return marker
-        elif marker in d:
+    for marker in _INFRA_SUFFIXES:
+        if d == marker or d.endswith("." + marker):
+            return marker
+    for marker in _INFRA_KEYWORDS:
+        if marker in d:
             return marker
     return None
 
