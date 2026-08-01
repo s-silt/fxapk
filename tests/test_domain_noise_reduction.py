@@ -65,6 +65,124 @@ def test_vendor_and_toolchain_hosts_are_not_subpoena_targets(domain: str) -> Non
     assert "第三方" in reason
 
 
+@pytest.mark.parametrize("domain", [
+    "appgallery.huawei.com",         # leak-scan: allow 判据夹具，验该域已挪出建议核查出口
+    "api.huangye.miui.com",          # leak-scan: allow 判据夹具，验该域已挪出建议核查出口
+    "global.api.huangye.miui.com",   # leak-scan: allow 判据夹具，验父域条目按域边界覆盖其子域
+    "app.mibi.xiaomi.com",           # leak-scan: allow 判据夹具，验该域已挪出建议核查出口
+    "file.market.xiaomi.com",        # leak-scan: allow 判据夹具，验该域已挪出建议核查出口
+    "www.stripe.com",                # leak-scan: allow 判据夹具，验官网主机名已挪出建议核查出口
+])
+def test_vendor_store_and_wallet_hosts_are_not_subpoena_targets(domain: str) -> None:
+    """手机厂商的应用市场 / 钱包 / 黄页与一家支付服务：归属事先已知，没有核查价值。
+
+    ★判的是「归属无需再核」，不是「这条信息没用」——样本里出现钱包或应用市场链接本身仍是
+      有意义的观察，它照常留在报告里，只是不再作为「向谁核这个域名归谁」的目标。
+    """
+    advice, reason = infra.classify_domain(domain)
+    assert advice == _SKIP, f"{domain} 仍判 {advice}"
+    assert "第三方" in reason
+
+
+@pytest.mark.parametrize("domain", [
+    "xiaomi.com",                       # leak-scan: allow 判据夹具，验厂商主域未被整体放行
+    "huawei.com",                       # leak-scan: allow 判据夹具，验厂商主域未被整体放行
+    "unknown-service.xiaomi.com",       # leak-scan: allow 判据夹具，验只放行具体子域而非整域
+    "some-other.huawei.com",            # leak-scan: allow 判据夹具，验只放行具体子域而非整域
+])
+def test_phone_vendor_root_domains_stay_subpoena_targets(domain: str) -> None:
+    """★只放行具体子域，**绝不放行**这两家的主域。
+
+    理由与钉钉那条同源，但这里多一层：两家主域下都有对象存储端点。主域整体列入后，凡是
+    租户桶判据没覆盖到的写法都会掉进整域豁免被静默吃掉——那正是本模块刚修过的那类缺陷。
+
+    ★两层都断言：先直接锁「主域不在名单匹配范围内」，再锁最终档位。只锁后者是间接的——
+      日后若新增一条更早的特判把这些域名判成建议核查，即便有人误把主域加进名单，测试仍会绿。
+    """
+    assert infra._matched_infra(domain) is None, f"{domain} 落进了已知基础设施名单的匹配范围"
+    assert infra.classify_domain(domain)[0] == _INV, f"{domain} 被整域豁免吞掉了"
+
+
+def test_exact_host_entry_covers_the_root_but_not_its_subdomains() -> None:
+    """★精确匹配语义：根域豁免、子域一概不豁免。
+
+    这条语义是为「根域是官网、子域却承载租户资源」那类域专设的。只用后缀匹配时两个选择
+    都不对：整域列入吃掉租户资源，完全不列则官网根域一直占着核查清单。
+
+    ★同时锁住它**不会**泄漏成后缀匹配——任意子域、右侧追加、标签粘连都不得命中。
+    """
+    assert infra._matched_infra("stripe.com") == "stripe.com"  # leak-scan: allow 判据夹具，验精确条目命中根域自身
+
+    for other in (
+        "evil.stripe.com",           # leak-scan: allow 判据夹具，验精确条目不泄漏到任意子域
+        "stripe.com.attacker.top",   # leak-scan: allow 判据夹具，验精确条目不被右侧追加绕过
+        "notstripe.com",             # leak-scan: allow 判据夹具，验精确条目不被标签粘连绕过
+    ):
+        assert infra._matched_infra(other) is None, f"精确条目泄漏到了 {other}"
+
+
+@pytest.mark.parametrize("host", [
+    "buy.stripe.com",       # leak-scan: allow 判据夹具，验租户级收款页未被整域豁免吞掉
+    "checkout.stripe.com",  # leak-scan: allow 判据夹具，验租户级收款页未被整域豁免吞掉
+    "invoice.stripe.com",   # leak-scan: allow 判据夹具，验租户级收款页未被整域豁免吞掉
+])
+def test_payment_tenant_pages_stay_subpoena_targets(host: str) -> None:
+    """★这家只放行官网主机名，**绝不放行整域**——租户控制在 URL 路径上，不在 DNS 上。
+
+    商户自建的收款页（含托管账单，其 URL 直接带商户账号标识）都挂在这几个固定子域下。
+    整域列入会把「涉案收款通道」这类最该核的线索一起判成无需核查，而分类器只看主机名，
+    事后没有任何护栏能把它们捞回来——这与对象存储那种「租户在主机名里」的形态不是一回事，
+    tenant_bucket 那道前置护栏在这里帮不上忙。
+    """
+    assert infra._matched_infra(host) is None, f"{host} 落进了名单匹配范围（整域被误列？）"
+    assert infra.classify_domain(host)[0] == _INV, f"租户级收款页被判成无需核查：{host}"
+
+
+@pytest.mark.parametrize("endpoint", [
+    "obs.cn-north-4.myhuaweicloud.com",          # leak-scan: allow 判据夹具，验租户桶端点未被整域条目吞掉
+    "obs-cn-north-4.myhuaweicloud.com",          # leak-scan: allow 判据夹具，验另一种连字符写法同样受护
+    "obs-website.cn-north-4.myhuaweicloud.com",  # leak-scan: allow 判据夹具，验静态网站端点写法同样受护
+])
+def test_vendor_tenant_buckets_survive_the_new_entries(endpoint: str) -> None:
+    """★厂商域已在名单里的那家，其对象存储桶必须仍留在核查出口。
+
+    第三种写法（静态网站端点，比常规写法多一段区域标签）此前不匹配租户桶判据，正被整域
+    条目吃着——那是现实风险而非构造，也正是「不列主域」这条约束的实证。
+
+    ★这里不再拿另一家的 host-style 写法当用例：那家公开的接口是 path-style（桶在 URL 路径
+      里而非主机名里），按主机名构造的形态找不到公开依据，当实证用是虚的。
+    """
+    domain = f"0123456789abcdef.{endpoint}"
+    assert infra.tenant_bucket(domain) is not None, f"桶形态没被认出：{domain}"
+    assert infra.classify_domain(domain)[0] == _INV, f"租户桶被整域豁免吃掉：{domain}"
+
+
+@pytest.mark.parametrize("endpoint", [
+    "obs.cn-north-4.internal.myhuaweicloud.com",           # leak-scan: allow 判据夹具，验端点尾部不接受额外标签
+    "obs-website-cn-north-4.internal.myhuaweicloud.com",   # leak-scan: allow 判据夹具，验静态网站端点无连字符写法
+])
+def test_undocumented_endpoint_shapes_are_not_treated_as_buckets(endpoint: str) -> None:
+    """★补上一种写法时不得顺手放宽尾部：两种官方结构分别写死，别给它们统一加可选标签。
+
+    统一追加可选标签会顺带接受这类没有公开依据的形态，等于把刚收紧的宽度又放回去——
+    认下来就是凭空造出一个查不到租户的目标。
+    """
+    domain = f"0123456789abcdef.{endpoint}"
+    assert infra.tenant_bucket(domain) is None, f"未公开的端点形态被当成了租户桶：{domain}"
+
+
+@pytest.mark.parametrize("domain", [
+    "xiaomi-pay.top",                    # leak-scan: allow 边界攻击夹具，验名单不含无点关键字
+    "huawei-app.vip",                    # leak-scan: allow 边界攻击夹具，验名单不含无点关键字
+    "stripe-pay.top",                    # leak-scan: allow 边界攻击夹具，验名单不含无点关键字
+    "appgallery.huawei.com.evil.tld",    # leak-scan: allow 边界攻击夹具，验名单按域边界而非子串匹配
+    "notstripe.com",                     # leak-scan: allow 边界攻击夹具，验名单按域边界而非子串匹配
+])
+def test_vendor_lookalike_domains_still_investigated(domain: str) -> None:
+    """★名单里刻意不写无点关键字：那会走子串匹配，把可被任意注册的近似域一并判成无需核查。"""
+    assert infra.classify_domain(domain)[0] == _INV, f"{domain} 被名单误吞"
+
+
 def test_dingtalk_robot_channel_host_stays_a_subpoena_target() -> None:
     """★只放行钉钉推送长连接子域，**不放行**主域——群机器人 webhook 必须留在出口里。
 
