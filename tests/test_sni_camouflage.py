@@ -261,7 +261,9 @@ def test_known_third_party_domain_stays_skip() -> None:
 
 #: 对照用的真业务域名：同样不在已知名单里，但只在标准端口出现 → 必须**保持**建议调证。
 #: 护栏收得过宽会把三桶那类真调证落点一起吃掉，那比漏更糟。
-_REAL_BACKEND_DOMAIN = "gateway.appnode-svc.com"
+#: ★不能用 example.com / .test / .invalid：那些是标准保留域，classify_domain 一律判「待核」，
+#:   而本对照项要求的恰恰是「本会被判建议调证」的角色，保留域承担不了。同 _FAKE_SNI 的处境。
+_REAL_BACKEND_DOMAIN = "gateway.appnode-svc.com"  # leak-scan: allow 合成对照域名，需被判建议调证故不能用保留域
 
 
 def test_masquerade_travels_with_the_domain_endpoint() -> None:
