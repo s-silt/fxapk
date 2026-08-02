@@ -586,6 +586,65 @@ def _is_valid_bucket_name(name: str) -> bool:
         return False
     return not _BUCKET_LOOKS_LIKE_IPV4.match(name)
 
+
+#: 桶名位置是**运行时填充记号**（而非一个真实桶名）时会出现的元字符。
+#:
+#: ★这是一条形态陈述，不是写法名单：这些字符在 DNS 标签里绝无合法位置，而各家格式化 / 模板
+#:   语言恰好都拿它们当填充记号。printf 族（``%s`` / ``%v`` / ``%1$s``）、花括号族
+#:   （``{}`` / ``{0}`` / ``{bucket}``）、``${var}``、``<bucket>`` 因此被同一条判据覆盖，
+#:   将来冒出别的模板语法也多半落在同一个集合里——比穷举写法耐用。
+#:
+#: ★刻意**不含** ``*``：通配符的语义是「任意 / 此处被隐去」（证书 SAN、允许清单的写法），
+#:   不是「运行时在这里拼一个值进去」。``*.<厂商端点>`` 说明不了样本与某个租户桶有关系，
+#:   照旧走整域豁免。
+#:
+#: ★``@`` / ``#`` / ``?`` 同样不含，但理由不同：域名规整与 URL 取 host 都会在这些字符处把
+#:   主机名截断，含它们的字面根本到不了这条判据（如 ObjC 的 ``%@`` 会先被切成裸端点）。
+#:   那是提取层的语义，不在这里假装覆盖。
+_TEMPLATE_METACHARS: frozenset[str] = frozenset("%{}$<>")
+
+#: 把占位符换成它，再走一遍真桶判据——用来问「除去桶名那一段，剩下的尾缀是不是某家的对象
+#: 存储端点」。取值要对**全部**厂商的标识语法都合法（含 Azure 那条最严的「3–24 位小写字母
+#: 数字」），故用纯小写字母。
+_BUCKET_PROBE = "probe"
+
+
+def _label_is_template(label: str) -> bool:
+    """标签是不是运行时填充记号（含 :data:`_TEMPLATE_METACHARS` 里的字符）。
+
+    ``isascii`` 门：非 ASCII 夹杂元字符的多半是字符串表里的粘连噪音，不是模板语言的写法。
+    漏掉真的非 ASCII 模板是漏报方向，可接受。
+    """
+    return bool(label) and label.isascii() and any(ch in _TEMPLATE_METACHARS for ch in label)
+
+
+def tenant_bucket_template(domain: str) -> tuple[str, str] | None:
+    """域名是否为对象存储的租户桶**模板**（桶名位置是占位符）；是则返回 ``(云厂商, 占位字面)``。
+
+    ★第二元**不是桶名**，是占位符原样——它没有对应任何真实租户，只作展示。要跟
+    :func:`tenant_bucket` 的返回值区分开（那个第二元是真桶名，可据以向云厂商检索）。
+
+    ★为什么这件事非判不可：``%s.<厂商端点>`` 的尾缀恰恰命中云厂商整域豁免，于是一条
+      「样本会去某家对象存储取东西、桶名还是运行时算的」的事实被判成「与本案无关」。而
+      :data:`ADVICE_SKIP` 是判据链结论、不走抑制账本，``fxapk lead restore`` 够不着——
+      落进去就再也捞不回来。
+
+    ★实现刻意**复用** :func:`tenant_bucket` 而不另建一张模板正则表：把占位符换成一个各家
+      语法都合法的探针标识再问一次，等于直接拿现有的 16 条厂商正则去判尾缀。两条判据因此
+      天然同源——厂商表改一处，严格与模板两侧同时跟着变，不会漂移。
+    """
+    d = _normalize_domain(domain)
+    if not d or "." not in d:
+        return None
+    label, _, tail = d.partition(".")
+    if not _label_is_template(label):
+        return None
+    hit = tenant_bucket(f"{_BUCKET_PROBE}.{tail}")
+    if hit is None:
+        return None
+    return hit[0], label
+
+
 _TENANT_BUCKET_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
     # ★区域段刻意保持必填：放开成可选，``<区域>.<厂商域>`` 这种裸端点就会被当成「桶名=区域码」
     #   的租户桶——那正是本表开头声明要避免的误判。无区域的两段写法是否真实存在未经证实，
@@ -1055,6 +1114,25 @@ def classify_domain(domain: str) -> tuple[str, str]:
         return ADVICE_INVESTIGATE, (
             f"对象存储的租户桶（{provider}）：桶名 {name} 是租户专属标识，"
             "可据此向该云厂商核租户实名 / 付款 / 访问日志"
+        )
+
+    # ★与真桶同一条顺序不变量：也必须排在 KNOWN_INFRA 之前。模板的尾缀就是云厂商域，
+    #   放到整域豁免之后就被吃掉了——那正是这条判据要堵的洞。
+    template = tenant_bucket_template(domain)
+    if template is not None:
+        provider, placeholder = template
+        # ★判「待核」而不是最高档，理由是一个很实在的问题：**没有桶名，云厂商查什么**。
+        #   最高档的语义是「向该标的的持有方发函」，而发函要有能让受文方定位到租户的检索键；
+        #   占位符没有键，「核租户实名 / 付款 / 访问日志」这句话对它不成立。
+        #   但 SKIP 更不成立——模板恰恰证明样本与某个租户桶有取件关系，判 SKIP 是替人下
+        #   「无关」的结论，且不走抑制账本、撤不回来。待核是唯一诚实的档位。
+        return ADVICE_REVIEW, (
+            f"对象存储桶域名模板（{provider}）：桶名位置是占位符 {placeholder}，真实桶名由样本"
+            "运行时拼出。这说明除固定端点外还有一个运行时才确定的租户标识，值得人看；但没有"
+            "桶名就没有可供该云厂商检索的租户，暂无法据此发函。★下一步是取运行时实际拼出的"
+            "桶名（动态取证 / 配置解密），拿到真桶名后它是一个**新的端点值**，会自行走真桶"
+            "判据升到最高档——不要去 `fxapk lead restore` 撤销本条，这一档是判据链的结论、"
+            "不在抑制账本里。"
         )
 
     matched = _matched_infra(domain)

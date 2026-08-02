@@ -422,8 +422,15 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
     confidence = Confidence.HIGH if subject else Confidence.MEDIUM
 
     # infra 分级：命中已知基础设施→无需调证；私网/无效→待核；否则→建议调证。
-    advice, _reason = infra.classify_domain(ep.value)
+    advice, cls_reason = infra.classify_domain(ep.value)
     notes = _endpoint_notes(ep, online, enriched)
+
+    # 对象存储桶模板：判据链把它降到待核，而**降档的理由必须跟到线索上**——否则出口只看得到
+    # 一条没有来由的「待核」，读的人无从知道「这是个桶名占位符、下一步该去取运行时真桶名」。
+    # ★窄门：只搬运这一类的理由，不把全部 REVIEW 域名的 reason 一律拼进 notes——那是另一件
+    #   事（爆炸半径大得多），本刀不夹带。IP 侧早有同款先例（降待核的理由跟到线索上）。
+    if advice == infra.ADVICE_REVIEW and infra.tenant_bucket_template(ep.value) is not None:
+        notes = f"{notes}；{cls_reason}" if notes else cls_reason
 
     # dns 富化：把当前解析 IP / 托管 ASN 体现为调证落点（向云厂商调租户/访问日志）。
     hosting_note = _dns_hosting_note(dns)
