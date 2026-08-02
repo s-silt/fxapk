@@ -1,7 +1,7 @@
 # AGENTS.md — fxapk 操作指南（给 AI agent）
 
 本仓库是 **fxapk（apkscan）**：APK **调证取证分析 CLI**。你（agent）通过命令行驱动它对样本做
-全套静态/动态分析 + 境外源站 IP 被动归属，产出**可办案化的调证线索（leads）**。本文件让你在新机
+全套静态/动态分析 + 境外源站 IP 被动归属，产出**可直接使用的线索（leads）**。本文件让你在新机
 clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件只讲**怎么跑**。
 
 > **本文件假定：一个 agent 独立跑完全程。** 没有第二个 agent 接力、没有外部私有目录兜底——
@@ -13,6 +13,43 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 
 ---
 
+## 0.0 ★首次在一台新机器上驱动本工具：先把这三条告诉用户
+
+**这三件事不加任何参数就会发生。**前两条会在外部留下删不掉的记录、或不可逆地改动那台设备；
+第三条是安全方向的默认值，列在这里是免得你以为还要额外加参数。你在这台机器上第一次要跑
+`analyze` / `doctor` / `auto` 之前，**先把对应那条如实讲给用户**，别默默跑掉：
+
+| 默认行为 | 会发生什么 | 用户想避开时 |
+|---|---|---|
+| `analyze` **默认联网** | 不碰目标服务器，但会把样本里的域名 / IP 拿去查公开数据库（WHOIS / RDAP / 备案 / 测绘平台）。查询记录留在那些平台上——**案子未公开时这本身可能暴露调查方向** | `--offline` |
+| `doctor` / `auto` **默认改设备** | 部署 frida-server、装抓包 CA；`auto` 还可能脱壳、重打包重签名、**卸载原应用并清空其数据**、安装并运行待分析样本 | `doctor --no-fix`；`auto` 只在专用测试机上跑 |
+| `digest` **默认脱敏** | 钱包私钥 / 助记词、个人隐私数据、后端凭据在摘要里打码。**这是给你看的那份**——你读到的 digest 默认就是脱敏的 | 确需明文加 `--no-redact`（完整明文一直在本地 `report.json` 里） |
+
+★第二条尤其要先问再做：`auto --fix` 会不可逆地改动那台设备。用户没有明确说「这是专用测试机 /
+可以随便改」之前，别替他决定——先跑 `fxapk doctor --no-fix` 把现状报给他，让他定。
+
+★第三条的方向别搞反：`digest` 现在**默认就开着脱敏**，你不需要额外加参数来保护高敏值；
+反过来，当用户确实要看原值时才加 `--no-redact`，并且提醒他那份输出别再贴给第三方服务。
+
+★但**别把它说成「已净化、可以安全外发」**——它是「默认开着有限范围的脱敏」，不是净化。
+确切范围见下条。
+
+★★**但脱敏只管 `digest` 这一条路，别把它当成整个工具的保护。**下面这些出口一律原样吐高敏值：
+`fxapk jsonl` / `fxapk diff` / `fxapk lead show|restore|replay` /
+`fxapk corpus events|ls|seen|shared-config` / `fxapk probe-leads` / `fxapk pcap-leads`
+（★这些都会把线索原值打到 stdout，运行时各自往 stderr 打一行提醒，看到了别忽略；corpus 那几条
+经台账的 key_iocs 带出，而台账不按类别过滤高敏。★这份名单是人工维护的、必然滞后——判断方法是
+问「它的 stdout 里会不会出现线索值」）、`fxapk export` 的 CSV、HTML / PDF
+报告、生成的文书、`corpus` 存证、以及 `report.json` 本身。你要把内容转给任何第三方服务时，
+**只有 `digest` 的输出是被处理过的**；其余都得你自己判断能不能发出去。
+
+★脱敏本身也是尽力而为，确切的保证只有两条：高敏类别的**值**被打码；**线索自己的**自由文本里，
+邮箱 / 手机号 / 身份证号 / 长数字串这类有固定形态的被抹掉。这之外一律原样——包括 findings 的
+标题、visibility 与 closure 的说明文字、overseas_targets 整段。姓名、地址、境外号码没有稳定
+形态，哪儿都抹不掉。**别对用户说「已经全部脱敏了」**，那是过度承诺。
+
+---
+
 ## 0. 行为铁律：直接用 fxapk 跑，别空想 / 别手搓
 
 你是来**驱动 fxapk 出结果**的，不是来手动逆向、读源码猜结论、或大段推演的。收到「分析这个 APK / 查这些线索 / 准备设备 / 为什么动态跑不起来」一类请求时——**先跑对应 fxapk 命令，再据产物决策**。命令产物（`report.json` / `digest` / `corpus` 台账）才是事实来源，不是你的推测。
@@ -21,11 +58,11 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 
 | 用户想要 | 直接执行 |
 |---|---|
-| 分析一个 APK（静态 + 联网富化） | `fxapk analyze <apk> --online --out out` 然后 `fxapk digest out/<名>.json` |
+| 分析一个 APK（静态 + 联网富化） | `fxapk analyze <apk> --out out`（**默认联网**；不想外发域名 / IP 加 `--offline`）然后 `fxapk digest out/<名>.json` |
 | 一把梭（有真机：体检→静态→脱壳→去壳重打包→抓包→合并→闭环） | `fxapk auto <apk> --fix --strict-case` |
 | 已有报告补跑多源富化 + 五层闭环 | `fxapk case close <report.json>`（默认严格：partial=5、failed=6） |
 | 批量整个文件夹 | `fxapk batch <dir>` |
-| 准备真机环境 / 排查动态为什么跑不起来 | `fxapk doctor --fix` |
+| 准备真机环境 / 排查动态为什么跑不起来 | `fxapk doctor`（**默认就会动手修**；只想看现状用 `--no-fix`） |
 | 真机脱壳 / 去壳重打包 / 抓包（单步） | `fxapk unpack <apk>` / `fxapk repackage <apk>` / `fxapk capture <pkg>` |
 | 串案 / 资产沉淀 /「这值见过没」反查 | `fxapk corpus add <report.json...>`（历次报告入库、跨版本回归）；`fxapk corpus seen <值> [--by sign_sha256\|so_sha256]`（按共享签名证书或 native 库哈希一击串案）；`fxapk corpus shared-native`（跨样本共享 .so = 家族簇）；`fxapk corpus ls` 过滤列举 |
 | 反推配置端口的运行时归一化规则 | `fxapk port-normalize --declared <声明端口.json> --report <report.json>`（详见 §0.6.2） |
@@ -165,10 +202,10 @@ git config core.hooksPath .githooks   # ★启用提交前泄漏扫描（改代�
 脱壳 / 抓包 / 去壳重打包都需要**已 root 的 Android 真机或模拟器**（frida-server 必须 root 跑）。**纯静态 `analyze` 不需要设备**。一次性配置：
 
 1. **root**（以红米 K40＝代号 `alioth` 为例）：解锁 BL（登小米账号 + 插**任意 SIM**翻开关，翻完可拔；小米有强制等待期）→ 取**与当前 MIUI/HyperOS 版本完全一致的 boot.img** → Magisk「安装 → 修补文件」生成 `magisk_patched.img` → `fastboot flash boot magisk_patched.img`。给 **shell（adb）授予 su 权限**（doctor 的 root 判定就认 `adb shell su -c id` 出 uid=0）。
-2. **一键体检 + 自愈**：`fxapk doctor --fix` —— 自动按设备 ABI（K40＝arm64-v8a）+ 主机 frida 版本**下载并部署 frida-server、起进程、把 mitmproxy CA 装进系统信任库**，逐项报 OK / 怎么修。这一步能修的都自动修，别手动逐个搞。
+2. **一键体检 + 自愈**：`fxapk doctor`（默认即 `--fix`）—— 自动按设备 ABI（K40＝arm64-v8a）+ 主机 frida 版本**下载并部署 frida-server、起进程、把 mitmproxy CA 装进系统信任库**，逐项报 OK / 怎么修。这一步能修的都自动修，别手动逐个搞。
 3. **装 APK 绕过 MIUI「USB 安装要插 SIM」闸**：root 后不用开"USB 安装"那个 SIM 限制开关，直接
    `adb push x.apk /data/local/tmp/ && adb shell su -c 'pm install -r -t /data/local/tmp/x.apk'`。
-4. **验证**：`frida-ps -U` 能列出设备进程 = frida 通；`fxapk doctor`（不带 --fix，纯体检）全绿即可开跑 `fxapk auto`。
+4. **验证**：`frida-ps -U` 能列出设备进程 = frida 通；`fxapk doctor --no-fix`（纯体检、什么都不改）全绿即可开跑 `fxapk auto`。
 
 常见坑：
 - **frida-server 从 GitHub releases 下载**——PC 在国内无代理会失败/慢。解决：挂代理；或手动下 `frida-server-<主机frida版本>-android-<abi>.xz`（版本须与 PC `frida --version` 一致，doctor 已自动对齐版本号）push 到 `/data/local/tmp/frida-server` 自起。
@@ -188,8 +225,10 @@ fxapk analyze <sample.apk> --online --out out --fmt html,json
 # ② 把完整报告压成【紧凑调证摘要】供你（agent）低 token 消费、直接决策
 fxapk digest out/<样本名>.json
 #   摘要：leads 按优先级排序（建议调证 > 待核 > 无需调证；高可信/C2 在前）+ 计数摘要。
-#   高敏值（钱包私钥/助记词、后端凭据、受害人 PII、加密配方）默认**明文**（取证查看需要）。
-#   ★ 若要把摘要再喂给云端模型，加 --redact 脱敏：fxapk digest out/<样本名>.json --redact
+#   高敏值（钱包私钥/助记词、后端凭据、个人隐私数据、加密配方）默认**已脱敏**——这条命令的输出
+#   通常直接进你的上下文，安全的那一档就是默认档。
+#   ★ 确需明文原值（核对取证细节）时才显式关掉：fxapk digest out/<样本名>.json --no-redact
+#     关掉之后那份输出别再贴给第三方服务；完整明文一直在本地 report.json 里，不受此开关影响。
 ```
 
 其它常用：

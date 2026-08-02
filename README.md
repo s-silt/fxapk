@@ -24,6 +24,34 @@ native 库里的。
 装完就能跑静态分析，不需要 JDK、模拟器或真机。要给加固样本脱壳、要抓包，才需要接一台 root 过的
 安卓机。
 
+## ⚠ 先看：三条不加参数就会发生的事
+
+前两条会在外部留下记录、或改动那台设备，撤不回来；第三条是安全方向的默认值，写在这里是免得
+你以为要额外加参数才安全：
+
+1. **`analyze` 默认联网。** 它不碰目标服务器，但会把样本里的域名 / IP 拿去查公开数据库
+   （WHOIS / RDAP / 备案 / 测绘平台）。查询记录留在那些平台上——**案子还没公开时，这本身
+   就可能暴露你在查什么**，而且删不掉。不想联网加 `--offline`。
+2. **`doctor` 与 `auto` 默认会改设备**（检测到可用设备时；没接设备则跳过动态步骤）。
+   部署 frida-server、装抓包用的 CA 证书；`auto` 还可能对应用脱壳、重打包重签名、
+   **卸载原应用并清掉它的数据**，再装上待分析的样本——被清掉的数据回不来。
+   别在日常手机、带账号的模拟器或办公网络里跑。只想看看环境状况用 `fxapk doctor --no-fix`。
+3. **`digest` 默认脱敏。** 钱包私钥 / 助记词、个人手机号 / 身份证 / 银行卡、后端凭据这些会被打码
+   ——因为这条命令的输出通常直接喂给 AI。确需明文原值时显式加 `--no-redact`；
+   完整明文一直都在本地的 `report.json` 里，不受这个开关影响。
+
+> **脱敏只管 `digest` 这一条路。** 其余出口若含高敏值，不会替你脱敏：xapk jsonl、xapk diff、xapk lead show/restore/replay、xapk corpus events/ls/seen/shared-config、xapk probe-leads、xapk pcap-leads（这些会把线索值打到 stdout 且不脱敏，运行时各自打一行提醒；corpus 那几条经台账的 key_iocs 带出，而台账不按类别过滤高敏）、
+> `fxapk export` 的 CSV、HTML / PDF 报告、生成的文书、`corpus` 存证，以及 `report.json` 本身。
+> 它们多半就该是本地证据载体，但**把它们贴给第三方服务时没有任何东西替你挡着**。
+>
+> 另外，脱敏是尽力而为、不是完整的数据防泄漏。确切的保证只有两条：高敏类别的**值**被打码；
+> **线索自己的**自由文本里，邮箱 / 手机号 / 身份证号 / 长数字串这类有固定形态的被抹掉。
+> 这之外一律原样——包括技术发现的标题、可见性与闭环结论的说明文字、境外目标那一段。
+> 姓名、地址、境外号码没有稳定形态，哪儿都抹不掉。
+
+动态那部分建议只在专用测试机上跑：没有个人账号与真实短信、没有银行卡钱包通讯录、与办公和家庭
+网络隔离、最好是能还原快照的模拟器。
+
 ## 怎么用：对 AI 说三句话
 
 这个工具是给 AI 助手（Claude Code、Codex 之类）驱动的。**你不用记命令，只要会说几句话**——
@@ -95,12 +123,13 @@ AI 看你给的是什么，自己挑命令：
 
 | 你给的东西 | AI 跑的命令 | 会发生什么 |
 |---|---|---|
-| 一个 `.apk` 文件 | `fxapk analyze <路径> --out out`，然后 `fxapk digest out/<名>.json` | 出一份报告，再压成一页要点 |
+| 一个 `.apk` 文件 | `fxapk analyze <路径> --out out`，然后 `fxapk digest out/<名>.json` | 出一份报告，再压成一页要点（默认联网查归属、摘要默认脱敏） |
 | 一个文件夹，里面是存下来的网页（`.html` / `.js` 等） | `fxapk analyze-web <目录> --out out` | 只读你存下来的文件，不去联网访问那个网站 |
-| 一份已经跑出来的 `report.json` | `fxapk digest <文件>` | 把长报告缩成一页要点 |
+| 一份已经跑出来的 `report.json` | `fxapk digest <文件>` | 把长报告缩成一页要点，高敏值默认打码 |
 | 一个装了很多 APK 的文件夹 | `fxapk batch <目录>` | 一个个跑，跑过的自动跳过 |
 
-想让它顺便查一下服务器归属，加一句「联网查一下」——AI 会加上 `--online`。
+想让它顺便查一下服务器归属，直接说就行——**`analyze` 默认就联网**；反过来，不想让它联网
+要专门说一句「别联网」（AI 会加 `--offline`）。
 
 **报告怎么读**：先看开头那段「这次看到了什么」，它会说清楚**哪些话现在还不能说、为什么、
 怎么补**。比如应用被加固过、真代码要跑起来才解密，那报告里写「没发现服务器地址」的意思是
@@ -129,16 +158,18 @@ AI 看你给的是什么，自己挑命令：
 
 | 想干什么 | 命令 |
 |---|---|
-| 分析一个 APK | `fxapk analyze app.apk --out out` |
-| 同上，顺带联网查归属 | `fxapk analyze app.apk --online --out out` |
+| 分析一个 APK（**默认联网**查归属） | `fxapk analyze app.apk --out out` |
+| 同上，但**不联网**（样本里的域名 / IP 不外发） | `fxapk analyze app.apk --offline --out out` |
 | 分析存下来的网页文件 | `fxapk analyze-web <目录> --out out` |
 | 批量跑一个文件夹 | `fxapk batch <目录>` |
-| 一把梭：体检→静态→脱壳→抓包→合并（接了 root 机才跑动态；没设备就跳过，静态报告照出） | `fxapk auto app.apk --out out` |
+| 一把梭：体检→静态→脱壳→抓包→合并（接了 root 机才跑动态；没设备就跳过，静态报告照出）。**会改设备**，只在专用测试机上跑 | `fxapk auto app.apk --out out` |
 | 同上，当验收门用（退出码 0/5/6 = complete/partial/failed） | `fxapk auto app.apk --out out --strict-case` |
 | 给已有报告补齐多源查询与五层归属 | `fxapk case close out/app.json` |
-| 把报告压成一页要点 | `fxapk digest out/app.json` |
+| 把报告压成一页要点（**默认脱敏**） | `fxapk digest out/app.json` |
+| 同上，但要看高敏值的明文原值 | `fxapk digest out/app.json --no-redact` |
 | 真机抓包 | `fxapk capture <包名>` |
-| 设备体检，顺带自动修 | `fxapk doctor --fix` |
+| 设备体检（**默认就会动手修**：装 frida-server / CA 证书） | `fxapk doctor` |
+| 只体检、什么都不改 | `fxapk doctor --no-fix` |
 | 环境自检（哪些能力通/不通/怎么修） | `fxapk selfcheck` |
 | 批量查目标清单（默认 `--dry-run` 只估配额不发请求；断了能续跑） | `fxapk enrich batch -t targets.txt -o enrich_out` |
 | 报告入库 | `fxapk corpus add out/app.json --corpus <库>` |

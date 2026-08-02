@@ -264,14 +264,14 @@ def test_cli_add_seen_reindex_closed_loop(tmp_path: Path) -> None:
     assert res.exit_code == 0 and json.loads(res.output)["added"] == 1
 
     res = runner.invoke(cli.app, ["corpus", "seen", "abc123", "--corpus", str(corpus_dir)])
-    assert res.exit_code == 0 and json.loads(res.output)["seen"] is True
+    assert res.exit_code == 0 and json.loads(res.stdout)["seen"] is True
 
     res = runner.invoke(cli.app, ["corpus", "reindex", "--corpus", str(corpus_dir)])
     assert res.exit_code == 0 and json.loads(res.output)["reindexed"] == 1
 
     # 再入库幂等跳过
     res = runner.invoke(cli.app, ["corpus", "add", str(report_file), "--case", "c1", "--corpus", str(corpus_dir)])
-    assert json.loads(res.output)["skipped"] == 1
+    assert json.loads(res.stdout)["skipped"] == 1
 
 
 def test_cli_events_streams_jsonl(tmp_path: Path) -> None:
@@ -283,7 +283,7 @@ def test_cli_events_streams_jsonl(tmp_path: Path) -> None:
 
     res = runner.invoke(cli.app, ["corpus", "events", "abc123", "--corpus", str(corpus_dir)])
     assert res.exit_code == 0
-    lines = [ln for ln in res.output.splitlines() if ln.strip()]
+    lines = [ln for ln in res.stdout.splitlines() if ln.strip()]  # stdout：本命令往 stderr 打不脱敏提醒
     parsed = [json.loads(ln) for ln in lines]  # 每行合法 JSON
     assert parsed[0]["type"] == "meta"
     assert {e["type"] for e in parsed} == {"meta", "lead", "finding"}
@@ -308,10 +308,10 @@ def test_cli_nan_report_yields_strict_valid_jsonl(tmp_path: Path) -> None:
 
     ev = runner.invoke(cli.app, ["corpus", "events", "nan-sample", "--corpus", str(corpus_dir)])
     assert ev.exit_code == 0
-    assert "NaN" not in ev.output and "Infinity" not in ev.output
+    assert "NaN" not in ev.stdout and "Infinity" not in ev.stdout
     # 用严格解析器（禁 NaN/Infinity）逐行验证，模拟 jq / JS JSON.parse
     strict = json.JSONDecoder(parse_constant=lambda c: (_ for _ in ()).throw(ValueError(c)))
-    for line in ev.output.splitlines():
+    for line in ev.stdout.splitlines():
         if line.strip():
             strict.decode(line)  # 非法常量会抛 → 测试失败
 

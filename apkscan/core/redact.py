@@ -1,14 +1,72 @@
 """高敏值脱敏（隐私安全）。
 
-fxapk 会提取受害人 PII / 钱包私钥助记词 / 后端凭据 / 运行时登录态等**高敏物证**。digest **默认明文**
-（取证查看需要看到实际值）；仅当 `fxapk digest --redact`（如要把摘要喂可能经云端模型处理的 agent）时
-才对高敏类 value 脱敏，明文始终在本地完整 report.json 里。脱敏后 agent 仍能看到「存在哪类高敏线索
-+ 调证去向」，需要明文时读本地完整报告。
+fxapk 会提取个人隐私数据 / 钱包私钥助记词 / 后端凭据 / 运行时登录态等**高敏值**。
+
+``digest`` **默认脱敏**（`fxapk digest <报告>` 不带参数即已脱敏）；要明文原值须显式
+`--no-redact`。明文始终在本地完整 report.json 里，不受这个开关影响。脱敏后消费方仍看得到
+「存在哪类高敏线索 + 后续去向」，只是拿不到原值。
+
+★**保护范围仅限 digest**——别以为「装了脱敏」就等于整个工具的输出都安全了：
+
+- 受本开关保护：``fxapk digest``；
+- **不受保护、原样输出**：``fxapk jsonl`` / ``fxapk corpus events`` / ``fxapk diff`` /
+  ``fxapk corpus ls`` / ``fxapk corpus seen``（这五条都明确面向 agent 消费，各自在运行时打一行
+  提醒；后两条经 corpus 台账的 ``key_iocs`` 带出线索原值，而那份台账不按类别过滤高敏）、
+  ``fxapk export`` 的 CSV、HTML / PDF 报告、``letters`` 文书、``corpus add`` 的存证、
+  ``case close`` 的回写、以及 ``report.json`` 本身。这些多半就该是本地证据载体，但把它们贴给
+  第三方服务时**没有任何东西替你挡着**。
+
+★脱敏是**尽力而为**，不是完整的 DLP。确切的保证只有两条：
+
+  1. 高敏类别（见 :data:`SENSITIVE_CATEGORIES`）的 ``value`` 按类别 mask；
+  2. **lead 自身**的若干自由文本字段（见 ``report.digest._compact_lead``）里，邮箱 / 国内手机号
+     / 身份证号 / 长数字串这几类**有固定形态**的东西被 :func:`scrub_pii` 抹掉。
+
+  这两条之外一律原样，包括：``findings[].title``、``visibility`` 的 notes 与 next_actions、
+  ``closure`` 的 gaps / next_actions / source_summary、以及整个 ``overseas_targets``。
+  姓名、地址、护照号、境外号码这类没有稳定形态的东西任何位置都抹不掉。
+  把覆盖面铺到 digest 的全部字符串叶节点是待办，**在那之前别把它当成「输出已净化」**。
 """
 
 from __future__ import annotations
 
 import re
+import sys
+
+#: 会把线索原值打到 stdout、且**不做任何脱敏**的命令。它们不受 ``digest`` 那个开关保护——
+#: 只写 docstring 挡不住任何人，故各自在运行时真打一行。
+#:
+#: ★**这份名单是人工维护的，必然滞后**。复审里连着三轮各补出一批（先是 jsonl，再是 diff 与
+#:   corpus events，再是 corpus ls/seen 与三条 lead 子命令）——每次都是「以为列全了」。
+#:   新增命令时**别指望有人记得回来加**：判断方法是问一句「它的 stdout 里会不会出现
+#:   ``Lead.value`` 或台账的 ``key_iocs``」，会就加进来。
+#:   真正的出路是反过来做——让输出线索的命令默认走脱敏、显式声明才给明文，那是另一刀。
+UNREDACTED_AGENT_COMMANDS: frozenset[str] = frozenset(
+    {
+        # 直接输出报告里的 Lead.value
+        "jsonl", "diff", "lead show", "lead restore", "lead replay",
+        # 输出 corpus 里的 lead
+        "corpus events",
+        # 经台账的 key_iocs 带出线索原值（那份台账不按类别过滤高敏）
+        "corpus ls", "corpus seen", "corpus shared-config",
+        # 无 -o 时把新生成的线索台账直接打到 stdout
+        "probe-leads", "pcap-leads",
+    }
+)
+
+
+def warn_unredacted_agent_output(command: str) -> None:
+    """往 **stderr** 打一行「本命令不脱敏」的警告。
+
+    ★必须走 stderr：这些命令的 stdout 是给机器解析的数据流（JSONL / JSON），掺一行非数据进去
+      会把下游的 ``| jq`` 打坏。走 stderr 则管道里干干净净，而人在终端上照样看得见。
+    """
+    print(
+        f"⚠ {command} 不做脱敏：输出里**若含**高敏值（钱包私钥/助记词、后端凭据、个人隐私数据），"
+        "会原样带出。要把内容交给第三方服务请改用 `fxapk digest`（默认脱敏）。",
+        file=sys.stderr,
+    )
+
 
 #: 高敏类别：其 value 在 agent 摘要里默认脱敏（明文只留本地完整报告）。
 #: ★ 须与 models.LeadCategory 的高敏类目**同步维护**：新增「可直接控资金 / 登录 / 含受害人 PII /

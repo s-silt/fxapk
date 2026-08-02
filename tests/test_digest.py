@@ -77,10 +77,13 @@ def test_redact_scrubs_pii_from_freetext_fields() -> None:
 
 
 def test_no_redact_keeps_freetext_plaintext() -> None:
-    """默认（redact=False）自由文本原样，取证查看需要看到实际值；无告警。"""
+    """显式关掉脱敏（``redact=False``）时自由文本原样，无告警。
+
+    ★这里必须**显式**传 ``redact=False``：默认值已翻转成脱敏，不传参数拿到的是脱敏结果。
+    """
     report = {"leads": [{"category": "VICTIM_DATA", "value": "x",
                          "notes": "手机 13800138000", "advice": "待核", "confidence": "LOW"}]}
-    d = build_digest(report)
+    d = build_digest(report, redact=False)
     assert d["leads"][0]["notes"] == "手机 13800138000"
     assert "redaction_warning" not in d
 

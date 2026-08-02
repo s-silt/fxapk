@@ -46,9 +46,14 @@ def _compact_lead(
 ) -> dict[str, Any]:
     """单条线索压成扁平稳定字段（去掉 source_refs 等冗长内部结构）。
 
-    redact=True（可选）：高敏类别（钱包私钥/凭据/受害人 PII/加密配方）的 value 按类别脱敏；
-    并对 subject/notes/where_to_request/evidence_to_obtain 等**自由文本**兜底抹结构化 PII
-    （不依赖类别标注是否正确，防受害人手机号/证件号绕过脱敏进云端 agent，codex C1）。默认 False。
+    ``redact=True``（``build_digest`` 的默认值，由调用方传入——本函数自己没有默认参数）：
+    高敏类别（钱包私钥/凭据/个人隐私数据/加密配方）的 value 按类别脱敏；并对 subject / notes /
+    where_to_request / evidence_to_obtain 等**本条 lead 自己的自由文本**兜底抹结构化 PII
+    （不依赖类别标注是否正确，防个人手机号/证件号绕过脱敏进云端 agent）。
+
+    ★覆盖面**仅限本函数处理的 lead 字段**：digest 里 findings 的 title、visibility 与 closure
+      的说明文本、overseas_targets 都不经过这里，一律原样。别把「digest 默认脱敏」读成
+      「digest 的输出已净化」——确切的保证范围写在 :mod:`apkscan.core.redact` 的模块说明里。
     """
     restored_sources = restored_sources or set()
     category = lead.get("category")
@@ -347,11 +352,18 @@ def _compact_visibility(raw: object) -> dict[str, Any]:
     }
 
 
-def build_digest(report: object, *, redact: bool = False) -> dict[str, Any]:
+def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
     """report.json 解析出的对象 → 紧凑摘要 dict（线索按优先级排序）。绝不抛。
 
-    redact=False（默认）：原样输出——取证查看需要看到钱包私钥/凭据等实际值。
-    redact=True（`fxapk digest --redact`，喂云端 agent 时）：高敏类别 value 脱敏，明文只留本地完整报告。
+    ``redact=True``（**默认**）：钱包私钥 / 助记词、后端凭据、个人隐私数据、加密配方等高敏类别的
+    value 按类别脱敏，自由文本里的结构化 PII 一并抹掉。明文原值只留在本地完整报告里。
+
+    ``redact=False``（`fxapk digest --no-redact`）：原样输出。
+
+    ★默认值曾是 ``False``（明文），已翻转。理由是这个出口的实际用法：本工具的主推路径就是把
+      digest 喂给 AI，默认明文等于「按最省事的方式用」就把高敏原值交了出去，而想要安全反倒得
+      额外记得加参数。两类失误的后果也不对称——忘了关脱敏只是少看见几个值、回头补跑即可；
+      忘了开脱敏则是原值已经出去了、收不回来。
     """
     if not isinstance(report, dict):
         return {"error": "report 非 dict", "leads": []}
