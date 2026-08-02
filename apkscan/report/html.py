@@ -73,6 +73,46 @@ CATEGORY_ORDER: list[LeadCategory] = [
     LeadCategory.CHANNEL,
 ]
 
+#: 在模板里**有专属区块**的类别。其余一律走「其他线索」统一区块——见
+#: :func:`other_lead_groups` 与模板末尾那一节。
+#:
+#: ★为什么这份名单必须在 Python 侧、且配一条覆盖测试：模板此前是逐个
+#:   ``{% if group.category.value == "PAYMENT" %}`` 硬编码挑类别的，于是
+#:   :data:`CATEGORY_LABELS` 里定义了标签、:data:`CATEGORY_ORDER` 里排了序的 12 个类别
+#:   **在 HTML 报告里一条都不渲染**——实测一份交付报告里 7 条运行时凭据 + 1 条短信转发
+#:   线索完全看不见，而后台入口、自建 IM / C2、后端凭据这些同样在漏掉的名单上。
+#:   把「谁有专属区块」写成数据，就能用一条测试断言**每个类别都渲染得出来**，
+#:   将来新增类别漏接线会直接变红，而不是安静地消失在报告里。
+DEDICATED_SECTION_CATEGORIES: frozenset[LeadCategory] = frozenset(
+    {
+        LeadCategory.CRYPTO_RECIPE,      # ★ 应用层加密配方（专章）
+        LeadCategory.CONFIG_KEY,         # ② 调用插件 / 配置键值
+        LeadCategory.DOMAIN,             # ③ C2 / 主控域名 + ④ 通联域名
+        LeadCategory.IP,                 # 同上
+        LeadCategory.SDK_SERVICE,        # ⑤ 第三方 SDK → 厂商清单
+        LeadCategory.PAYMENT,            # ⑥ 支付 / 资金
+        LeadCategory.CONTACT,            # ⑥ 联系方式
+        # ★SIGNING **不在**这里：⑦ 签名证书那一节渲染的是 ``meta.certificates``，
+        #   与 SIGNING 类别的 Lead 是两码事。曾误以为它有专属区块——按值搜索时看着「可见」，
+        #   实则只是 lead 的值（证书指纹 / 主体）恰好也出现在证书表里。用独立探针值一测就露馅。
+        #   它照常走「其余线索」区块。
+    }
+)
+
+
+def other_lead_groups(leads: list[Lead]) -> list[dict[str, Any]]:
+    """没有专属区块的类别分组（按 :data:`CATEGORY_ORDER` 排序，空组不返回）。
+
+    这些是**没人替它们单独排版**的线索——后台入口、自建 IM / C2、后端凭据、四方支付、
+    短信转发、运行时凭据、钱包私钥…… 它们此前直接不进 HTML 报告。
+    """
+    return [
+        group
+        for group in group_leads_by_category(leads)
+        if group["category"] not in DEDICATED_SECTION_CATEGORIES
+    ]
+
+
 # advice（调证研判建议）归一化：用于判断是否「建议调证」。
 ADVICE_NEED = "建议调证"
 ADVICE_SKIP = "无需调证"
@@ -368,6 +408,9 @@ def _render_template(template: Any, report: Report) -> str:
     network_leads = network_leads_by_advice(report.leads)
     return template.render(
         report=report,
+        # 没有专属区块的类别（后台入口 / 自建 IM·C2 / 后端凭据 / 四方支付 / 短信转发 …）。
+        # 此前它们完全不进 HTML 报告，见 DEDICATED_SECTION_CATEGORIES 的说明。
+        other_lead_groups=other_lead_groups(report.leads),
         # 三个信号此前只在 letters 出口露面，报告出口 0 命中（研判发生在读报告那一步，
         # 警示到文书阶段才出现等于迟到）。字句一律取 letters 的中性视图，不另写文案。
         attribution_by_lead=attribution_by_lead(report.endpoints, report.leads),
