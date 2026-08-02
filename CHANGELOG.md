@@ -3,7 +3,11 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
-## Unreleased
+## 1.5.1 — 2026-08-02
+
+> ⚠ **本版含一处破坏性变更**：`digest` 的默认值由明文翻转为脱敏。版本号取 patch 是有意的
+> （功能面无新增、无删除），但**依赖 `digest` 输出明文的脚本必须加 `--no-redact`**，
+> 否则拿到的是打码后的值。详见下方第一条。
 
 ### Changed
 
