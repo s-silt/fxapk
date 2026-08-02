@@ -623,6 +623,39 @@
     {% else %}<div class="empty">未提取到联系方式线索。</div>{% endif %}
   </section>
 
+  {#- ============ ⑥bis 其余类别线索 ============
+       后台入口 / 自建 IM·C2 / 后端凭据 / 四方支付 / 短信转发 / 运行时凭据 / 钱包私钥 …
+       —— 这些类别此前**在本报告里一条都不渲染**：模板原先是逐个
+       `{% if group.category.value == "PAYMENT" %}` 硬编码挑类别的，没被挑中的就消失了，
+       而 CATEGORY_LABELS 给它们都起了中文标签、CATEGORY_ORDER 还把高敏那几类排在最前面。
+       实测一份交付报告里 7 条运行时凭据 + 1 条短信转发线索完全看不见。
+       现在改由 Python 侧算出「没有专属区块的分组」统一渲染（见 html.DEDICATED_SECTION_CATEGORIES），
+       并有测试断言每个 LeadCategory 都渲染得出来。 -#}
+  {% if other_lead_groups %}
+  <section id="other-leads">
+    <h2><span class="num">⑥+</span> 其余线索 <span class="muted" style="font-size:13px;font-weight:400">（后台入口 / 自建 IM·C2 / 凭据 / 四方支付 / 短信转发 等，按研判优先级排序）</span></h2>
+    {% for group in other_lead_groups %}
+    <h3>{{ group.label }} <span class="muted" style="font-size:13px;font-weight:400">（{{ group.leads|length }} 条）</span></h3>
+    <table>
+      <thead><tr><th>线索值</th><th>归属主体</th><th>调证建议</th><th>向谁调取</th><th>可调取证据</th><th>置信度</th></tr></thead>{# leak-scan: allow 表头逐字沿用 ⑥ 区块，改一处两节表格就不一致了 #}
+      <tbody>
+        {% for lead in group.leads %}
+        <tr>
+          <td><span class="mono-strong">{{ lead.value }}</span></td>
+          <td>{{ lead.subject or "—" }}</td>
+          <td>{{ advice_badge(lead.advice) }}</td>
+          <td>{{ lead.where_to_request or "—" }}</td>
+          <td>{% if lead.evidence_to_obtain %}<ul class="tight">{% for ev in lead.evidence_to_obtain %}<li>{{ ev }}</li>{% endfor %}</ul>{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td><span class="badge {{ lead.confidence|confidence_class }}">{{ lead.confidence|confidence_label }}</span></td>
+        </tr>
+        {% if lead.notes %}<tr><td colspan="6" class="muted" style="font-size:12px">{{ lead.notes }}</td></tr>{% endif %}
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endfor %}
+  </section>
+  {% endif %}
+
   {#- ============ ⑦ 签名证书 ============ -#}
   <section id="signing">
     <h2><span class="num">⑦</span> 签名证书 <span class="muted" style="font-size:13px;font-weight:400">（serial / 有效期 / thumbprint sha256）</span></h2>

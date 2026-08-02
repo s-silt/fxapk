@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from apkscan.core.models import (
+    ADVICE_INVESTIGATE,
     Confidence,
     Endpoint,
     Evidence,
@@ -43,7 +44,7 @@ def sample_report() -> Report:
             where_to_request="个推（GeTui）厂商",
             evidence_to_obtain=["AppID 对应注册主体", "推送 / 设备日志"],
             confidence=Confidence.HIGH,
-            advice="建议调证",
+            advice=ADVICE_INVESTIGATE,
             source_refs=[Evidence(source="manifest", location="AndroidManifest.xml#meta-data", snippet="GETUI_APPID")],
             notes="个推推送 AppID（manifest meta-data）",
         ),
@@ -54,7 +55,7 @@ def sample_report() -> Report:
             where_to_request="聚合支付平台 / 收单机构",
             evidence_to_obtain=["商户号绑定主体", "结算银行账户"],
             confidence=Confidence.HIGH,
-            advice="建议调证",
+            advice=ADVICE_INVESTIGATE,
             source_refs=[Evidence(source="dex", location="com/app/Pay.java", snippet="pay.fraud-example.com/notify")],
             notes="支付回调域名",
         ),
@@ -65,7 +66,7 @@ def sample_report() -> Report:
             where_to_request="极光（JPush）厂商",
             evidence_to_obtain=["AppKey 对应注册主体", "推送日志"],
             confidence=Confidence.MEDIUM,
-            advice="建议调证",
+            advice=ADVICE_INVESTIGATE,
             source_refs=[Evidence(source="dex", location="cn.jpush.android.api.JPushInterface")],
         ),
         Lead(
@@ -74,7 +75,7 @@ def sample_report() -> Report:
             subject="某科技有限公司",
             where_to_request="域名注册商 / ICP 备案主体",
             confidence=Confidence.HIGH,
-            advice="建议调证",
+            advice=ADVICE_INVESTIGATE,
             notes="疑似主控域名",
         ),
         Lead(
@@ -98,7 +99,7 @@ def sample_report() -> Report:
             value="kefu_fraud_2024",
             subject="客服微信",
             confidence=Confidence.MEDIUM,
-            advice="建议调证",
+            advice=ADVICE_INVESTIGATE,
             source_refs=[Evidence(source="resource", location="res/values/strings.xml")],
             notes="微信号",
         ),
@@ -394,7 +395,7 @@ def test_html_crypto_recipe_section_renders(tmp_path: Path) -> None:
                 category=LeadCategory.CRYPTO_RECIPE,
                 value="AES-CFB/Pkcs7 key(utf8,32B)=55f0…3467 iv=md5(key+ts)[:16]",
                 confidence=Confidence.HIGH,
-                advice="建议调证",
+                advice=ADVICE_INVESTIGATE,
                 notes="自 JS 逆出的应用层加密配方",
                 source_refs=[Evidence(source="js", location="app-service.js", snippet="AES.encrypt")],
             )
@@ -427,7 +428,7 @@ def test_html_escapes_attacker_controlled_strings(tmp_path: Path) -> None:
                 category=LeadCategory.CONFIG_KEY,
                 value="<img src=x onerror=alert(2)>",
                 confidence=Confidence.HIGH,
-                advice="建议调证",
+                advice=ADVICE_INVESTIGATE,
                 notes='a&b"c',
                 source_refs=[Evidence(source="dex", location="X.java", snippet="<b>x</b>")],
             )
@@ -517,7 +518,7 @@ def test_html_renders_rdap_and_dns_enrichment(tmp_path: Path) -> None:
                 subject="某科技有限公司",
                 where_to_request="域名注册商",
                 confidence=Confidence.HIGH,
-                advice="建议调证",
+                advice=ADVICE_INVESTIGATE,
             )
         ],
         endpoints=[
@@ -772,7 +773,7 @@ def test_html_c2_badge_tiers_by_contact(tmp_path: Path) -> None:
         rpt = Report(
             package_name="com.x", meta={},
             leads=[Lead(category=LeadCategory.DOMAIN, value="c2.fraud.cn",
-                        advice="建议调证", source_refs=refs)],
+                        advice=ADVICE_INVESTIGATE, source_refs=refs)],
             endpoints=[], findings=[], analyzer_status=[],
         )
         out = tmp_path / f"{source or 'static'}.html"
@@ -959,3 +960,75 @@ def test_html_no_integrity_section_when_manifest_absent(sample_report: Report, t
     report_html.render(sample_report, str(path))
     html = path.read_text(encoding="utf-8")
     assert "证据完整性" not in html
+
+
+def test_every_lead_category_is_rendered_in_html(tmp_path: Path) -> None:
+    """★每个 LeadCategory 的线索都必须在 HTML 报告里看得见——一个都不许丢。
+
+    起因是实测发现的真缺陷：模板原先逐个 `{% if group.category.value == "PAYMENT" %}`
+    硬编码挑类别，没被挑中的**整类消失**。一份交付出去的真实报告里，7 条运行时凭据 +
+    1 条短信转发线索在 HTML 中完全不可见，而 CATEGORY_LABELS 给它们都起了中文标签、
+    CATEGORY_ORDER 还把高敏那几类排在最前面——设计上要显示，实现漏了。
+
+    ★这条测试遍历 **LeadCategory 全枚举**，不是写死名单：将来新增类别若忘了接线，
+      这里直接红。锁的是「报告不会安静地吞掉一整类线索」这个契约。
+    """
+    leads = [
+        Lead(
+            category=cat,
+            value=f"probe-value-for-{cat.value.lower()}",
+            advice=ADVICE_INVESTIGATE,
+            confidence=Confidence.HIGH,
+        )
+        for cat in LeadCategory
+    ]
+    report = Report(
+        package_name="com.example.app",
+        meta={},
+        leads=leads,
+        endpoints=[],
+        findings=[],
+        analyzer_status=[],
+    )
+
+    path = tmp_path / "all.html"
+    report_html.render(report, str(path))
+    html = path.read_text(encoding="utf-8")
+
+    # ★断言**恰好一次**，不是「至少一次」：前者同时锁住两个方向——整类消失（0 次）与
+    #   被两个区块各渲染一遍（≥2 次）。只判 `in` 的话，重复渲染是看不出来的。
+    counts = {lead.value: html.count(lead.value) for lead in leads}
+    missing = sorted(v for v, n in counts.items() if n == 0)
+    duplicated = sorted(f"{v}×{n}" for v, n in counts.items() if n > 1)
+
+    assert not missing, (
+        f"这些类别的线索在 HTML 报告里看不见：{missing}。"
+        "要么给它加专属区块并登记进 html.DEDICATED_SECTION_CATEGORIES，"
+        "要么让它落进「其余线索」区块——绝不能整类消失。"
+    )
+    assert not duplicated, (
+        f"这些线索被渲染了不止一遍：{duplicated}。"
+        "多半是某个类别既有专属区块、又没登记进 DEDICATED_SECTION_CATEGORIES。"
+    )
+
+
+def test_dedicated_section_categories_really_have_their_own_block(tmp_path: Path) -> None:
+    """★反向：登记为「有专属区块」的类别，不得同时出现在「其余线索」区块里（重复渲染）。
+
+    这份名单一旦与模板漂移，要么某类被渲染两遍，要么它以为有人管、实际没人管。
+    """
+    from apkscan.report.html import DEDICATED_SECTION_CATEGORIES, other_lead_groups
+
+    leads = [
+        Lead(category=cat, value=f"v-{cat.value}", advice=ADVICE_INVESTIGATE, confidence=Confidence.HIGH)
+        for cat in LeadCategory
+    ]
+
+    others = {group["category"] for group in other_lead_groups(leads)}
+
+    assert not (others & DEDICATED_SECTION_CATEGORIES), (
+        f"这些类别既登记了专属区块、又落进了「其余线索」：{others & DEDICATED_SECTION_CATEGORIES}"
+    )
+    assert others | DEDICATED_SECTION_CATEGORIES == set(LeadCategory), (
+        "两者并集必须覆盖全部类别，否则有类别两边都不管"
+    )
