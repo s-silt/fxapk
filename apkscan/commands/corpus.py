@@ -19,6 +19,7 @@ from pathlib import Path
 import typer
 
 from apkscan.core import corpus as _corpus
+from apkscan.core.redact import warn_unredacted_agent_output
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +146,7 @@ def corpus_ls(
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
     """按条件列举库内样本（稳定 JSON）。"""
+    warn_unredacted_agent_output("corpus ls")
     root = resolve_corpus(corpus)
     entries = _corpus.load_manifest(root)
     rows = _corpus.query(
@@ -174,6 +176,7 @@ def corpus_seen(
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
     """见过没？按样本哈希 / 包名 / 共享签名证书 / 共享远程配置对象 / 共享 .so 家族指纹 / **自建构建环境** 一击反查库内记录。"""
+    warn_unredacted_agent_output("corpus seen")
     root = resolve_corpus(corpus)
     if by == _CONFIG_OBJECT_BY:
         # 远程配置对象是列表维度（一样本可引用多个）：按 url 或 sha256 反查引用它的样本。
@@ -210,6 +213,7 @@ def corpus_shared_config(
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
     """跨样本共享的远程配置对象簇：同一 OSS 对象(url) 或同一配置内容(sha256) 被 ≥2 样本引用——串案强锚。"""
+    warn_unredacted_agent_output("corpus shared-config")
     root = resolve_corpus(corpus)
     clusters = _corpus.shared_config_objects(_corpus.load_manifest(root))
     _print({"count": len(clusters), "clusters": clusters})
@@ -264,8 +268,14 @@ def corpus_events(
     sha256: str = typer.Argument(..., help="样本哈希（sample_sha256，支持库内 nosha- 占位）。"),
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
-    """把库内该样本的报告吐成 JSONL 事件流（复用 report_to_events，喂 agent）。多版本取最近入库的一份。"""
+    """把库内该样本的报告吐成 JSONL 事件流（复用 report_to_events，喂 agent）。多版本取最近入库的一份。
+
+    ★★**本命令不脱敏，原样输出**——与 ``fxapk jsonl`` 共用同一条转换路径，同样不受 ``digest``
+      默认脱敏的保护。
+    """
     from apkscan.core.jsonl import report_to_events
+
+    warn_unredacted_agent_output("corpus events")
 
     root = resolve_corpus(corpus)
     hits = _corpus.find_by(_corpus.load_manifest(root), sha256, by="sample_sha256")

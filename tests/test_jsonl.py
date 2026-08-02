@@ -74,7 +74,10 @@ def test_cli_jsonl_one_json_per_line(tmp_path: Path) -> None:
     p.write_text(json.dumps(_REPORT), encoding="utf-8")
     res = CliRunner().invoke(cli.app, ["jsonl", str(p)])
     assert res.exit_code == 0
-    lines = [ln for ln in res.output.splitlines() if ln.strip()]
+    # ★读 stdout 而不是 output：后者在当前 click 版本里混着 stderr，而本命令往 stderr 打一行
+    #   「不脱敏」警告。真实用法是 `fxapk jsonl x.json | jq`——管道里只有 stdout，所以要锁的
+    #   契约是「**stdout** 每行都是合法 JSON」。用 output 测等于把警告也当数据，测的不是那件事。
+    lines = [ln for ln in res.stdout.splitlines() if ln.strip()]
     parsed = [json.loads(ln) for ln in lines]  # 每行必须是合法 JSON
     assert [e["type"] for e in parsed] == ["meta", "lead", "finding"]
 

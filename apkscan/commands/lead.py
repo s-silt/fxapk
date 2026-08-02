@@ -23,6 +23,7 @@ import typer
 
 from apkscan.commands.corpus import ENV_CORPUS, resolve_corpus
 from apkscan.core import corpus as _corpus
+from apkscan.core.redact import warn_unredacted_agent_output
 from apkscan.core import report_io
 from apkscan.core.models import Lead, lift_downgrade
 from apkscan.core.restore import MANUAL_RESTORES_KEY, record_restore
@@ -160,6 +161,7 @@ def lead_show(
     ),
 ) -> None:
     """列出线索的档位与**抑制来源**：谁压着它、为什么、还能不能撤。"""
+    warn_unredacted_agent_output("lead show")
     rep = report_io.load_report(Path(report))
     restored_raw = rep.meta.get(MANUAL_RESTORES_KEY)
     restored_n = len(restored_raw) if isinstance(restored_raw, list) else 0
@@ -192,6 +194,7 @@ def lead_restore(
     corpus: str = typer.Option("", "--corpus", help=f"同时把凭据存进样本库（重跑后可 replay）；默认取环境变量 {ENV_CORPUS}。"),
 ) -> None:
     """撤销一条抑制来源并留下凭据：本报告立即生效，可选同时存进样本库供重跑重放。"""
+    warn_unredacted_agent_output("lead restore")
     # ★corpus 的解析必须赶在**任何**报告改动之前：解析会因「落在 git 工作树内」而 exit 2，
     #   若排在写盘之后，拒跑时报告已经被改写（甚至连带刷新了 HTML）——那不是原子失败，
     #   而是"一半生效"。另：与 replay 同口径地认 FXAPK_CORPUS，否则两个命令行为不一致。
@@ -277,6 +280,7 @@ def lead_replay(
     ★重放的是**放行这个动作**，不是当时的档位：逐条走 lift_downgrade 重新算，所以判据链结论
       变了的新报告不会被旧档位覆盖。
     """
+    warn_unredacted_agent_output("lead replay")
     corpus_root = resolve_corpus(corpus)   # 同上：统一走 corpus 的 PII 硬防线
     path = Path(report)
     raw = _load_report_payload(path)

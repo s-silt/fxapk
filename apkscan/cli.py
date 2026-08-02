@@ -465,8 +465,15 @@ def diff(
     """对比两份分析结果，输出**调证增量**的稳定 JSON：新增 / 删除的线索、端点、发现，加身份 /
     加固 / 分类变化。每个参数可是 report.json（直接读）或 APK（现分析）——适合追踪同一 App 跨版本
     新增了哪些支付通道 / 钱包 / 后台入口、加固是否升级、SDK 是否变了。
+
+    ★★**本命令不脱敏，原样输出**：新增 / 删除的线索条目整条带出来，配对键本身就含 ``value``。
+      与 ``jsonl`` 同理，它不受 ``digest`` 默认脱敏的保护。
     """
     import json as _json
+
+    from apkscan.core.redact import warn_unredacted_agent_output
+
+    warn_unredacted_agent_output("diff")
 
     from apkscan.core.diff import diff_reports
 
@@ -482,7 +489,15 @@ def jsonl(
     """把 report.json 摊成 **JSONL 事件流**（每行一个 JSON：1 条 meta 头 + 每条线索 / 发现一个事件），
     供 AI agent / 脚本逐条流式消费——据 finding 的 confidence/kind/analyzer 加权、逐条串案、生成文书，
     无需先解析整份嵌套报告。坏 JSON → 退出码 3。
+
+    ★★**本命令不脱敏，原样输出**——包括钱包私钥 / 助记词、后端凭据、个人隐私数据。
+      它与 ``digest`` 同样面向 agent 消费，但**不受 ``digest`` 的默认脱敏保护**：那个开关只作用
+      在 ``digest`` 一条路径上，本命令走的是 :mod:`apkscan.core.jsonl` 的另一条。要把内容交给
+      第三方服务，请改用 ``fxapk digest``（默认已脱敏）。给本命令补脱敏选项是待办。
     """
+    from apkscan.core.redact import warn_unredacted_agent_output
+
+    warn_unredacted_agent_output("jsonl")
     import json as _json
 
     from apkscan.core.jsonl import report_to_events
@@ -889,16 +904,27 @@ def digest(
         help="已产出的 report.json 路径（analyze/auto/batch 写出的 JSON 报告）。",
     ),
     redact: bool = typer.Option(
-        False,
-        "--redact",
-        help="脱敏高敏值（钱包私钥/助记词、后端凭据、受害人 PII、加密配方）——喂云端 agent 时用；默认明文，便于取证查看。",
+        True,
+        "--redact/--no-redact",
+        help=(
+            "脱敏高敏值（钱包私钥/助记词、后端凭据、个人隐私数据、加密配方）。"
+            "**默认脱敏**；确需明文原值时显式加 --no-redact。"
+        ),
     ),
 ) -> None:
-    """把 report.json 压成**紧凑调证摘要 JSON** 打印到 stdout（供任意 AI agent（Codex/Claude 等）/ 脚本低 token 消费）。
+    """把 report.json 压成**紧凑摘要 JSON** 打印到 stdout（供任意 AI agent / 脚本低 token 消费）。
 
-    线索按优先级排序（建议调证 > 待核 > 无需调证；同档高可信、C2 在前），只保留可办案化的扁平
+    线索按优先级排序（最高档 > 待核 > 无需再核；同档高可信、C2 在前），只保留可直接使用的扁平
     字段 + 计数摘要，去掉端点全表 / 技术附录 / 富化原始数据等冗长内容。绝不抛——读不到 / 坏 JSON
     打印友好错误并退出码 1。
+
+    ★**默认脱敏**（本命令的默认值曾是明文，已翻转）。理由是这个出口的实际用法：本工具的主推
+      路径就是把 digest 的输出喂给 AI，而报告里可能含钱包私钥 / 助记词、个人手机号 / 身份证 /
+      银行卡、后端凭据与加密配方。默认明文意味着「按最省事的方式用」就等于把这些原值交出去，
+      而想要安全得额外记得加一个参数——安全选项不该是要额外记得的那个。
+
+      翻转之后两类失误的后果也不对称：忘了加 --no-redact 只是少看见几个值（回头补跑即可），
+      忘了加 --redact 则是高敏原值已经出去了、收不回来。
     """
     import json as _json
 
@@ -1033,6 +1059,10 @@ def probe_leads(
     """
     import json as _json
 
+    from apkscan.core.redact import warn_unredacted_agent_output
+
+    warn_unredacted_agent_output("probe-leads")
+
     try:
         try:
             text = log.read_text(encoding="utf-8", errors="replace")
@@ -1098,6 +1128,10 @@ def pcap_leads(
     带外抓的 pcap 里仍有真实接入节点 IP/SNI——这就是穿透真源站的调证锚点。纯标准库解析，绝不抛。
     """
     import json as _json
+
+    from apkscan.core.redact import warn_unredacted_agent_output
+
+    warn_unredacted_agent_output("pcap-leads")
 
     try:
         from apkscan.core.models import LeadCategory

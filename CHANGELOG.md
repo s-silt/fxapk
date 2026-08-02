@@ -5,6 +5,50 @@ affect automated / CI / agent callers are called out explicitly**.
 
 ## Unreleased
 
+### Changed
+
+- **★破坏性：`digest` 改为默认脱敏。** `fxapk digest <报告>` 不带任何参数时，钱包私钥 / 助记词、
+  后端凭据、个人隐私数据、加密配方一律按类别打码；要明文原值须显式 `--no-redact`。
+  函数层 `report.digest.build_digest` 的 `redact` 默认值同步由 `False` 翻成 `True`。
+
+  **调用方须知**：依赖 `digest` 拿明文的脚本要加 `--no-redact`；直接调 `build_digest` 且不传
+  `redact` 的代码现在拿到的是脱敏结果。完整明文一直在本地 `report.json` 里，不受此开关影响。
+
+  翻转的理由是这个出口的实际用法：本工具的主推路径就是把 digest 喂给 AI，默认明文意味着
+  「按最省事的方式用」等于把高敏原值交出去，而想要安全反倒得额外记得加参数——安全选项不该是
+  要额外记得的那个。两类失误的后果也不对称：忘了加 `--no-redact` 只是少看见几个值、回头补跑
+  即可；忘了加 `--redact` 则是原值已经出去了、收不回来。
+
+- **11 条会把线索值打到 stdout 且不脱敏的命令现在各自如实声明**（往 stderr 打一行；
+  stdout 仍纯净，管道与 `| jq` 不受影响）：`jsonl` / `diff` / `lead show|restore|replay` /
+  `corpus events|ls|seen|shared-config` / `probe-leads` / `pcap-leads`。它们与 `digest` 同样
+  面向 agent 消费，却走各自的路径、**不受 `digest` 的默认脱敏保护**——翻转 `digest` 之后若不
+  说明，反而会造成「喂 AI 已经安全了」的错觉。
+
+  名单在 `core.redact.UNREDACTED_AGENT_COMMANDS`，并由测试逐条**真跑 CLI** 验证接线（只调
+  helper 锁不住「名单列着但忘了接」）。★名单是人工维护的、必然滞后——复审里连着三轮各补出
+  一批。判断方法写在常量注释里：问「它的 stdout 会不会出现线索值」。真正的出路是反过来做
+  ——让输出线索的命令默认脱敏、显式声明才给明文，那是另一刀。
+
+### Docs
+
+- **明确脱敏的边界**：只有 `digest` 受保护；`jsonl` / `corpus events` / `export` CSV /
+  HTML / PDF / 文书 / `corpus` 存证 / `report.json` 若含高敏值不会替你脱敏。并写明脱敏是尽力而为
+  ——保证高敏类别的值被 mask、自由文本里**模式化** PII（邮箱 / 手机号 / 身份证号 / 长数字串）
+  被抹，而姓名、地址、境外号码这类无稳定形态的抹不掉。此前 `core/redact.py` 的模块注释还写着
+  「digest 默认明文，仅 `--redact` 才脱敏」，与新默认值完全相反，一并改正。
+
+- **三条默认行为写进 README / README.en / AGENTS 的开头**：`analyze` 默认联网（样本里的域名 /
+  IP 会被拿去查公开数据库，案子未公开时这本身可能暴露调查方向）、`doctor` 与 `auto` 默认改设备
+  （部署 frida-server、装抓包 CA，`auto` 还可能卸载原应用并清空其数据）、`digest` 默认脱敏。
+
+  这三处此前文档与实现**相反**：README 写的是「想联网就加 `--online`」「体检顺带修用
+  `--fix`」，读起来像「不加参数就不会做那件事」，而实际默认就做。AGENTS.md 里还有一处
+  「`fxapk doctor`（不带 --fix，纯体检）」是明确的错误说明，已改为 `--no-fix`。
+
+  AGENTS.md 另加 §0.0：agent 在一台新机器上首次驱动 `analyze` / `doctor` / `auto` 之前，
+  须先把对应那条如实告诉用户；`auto --fix` 这类不可逆改动要先问再做。
+
 ## 1.5.0 — 2026-08-02
 
 ### Added

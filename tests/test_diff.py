@@ -146,7 +146,7 @@ def test_cli_diff_two_json_reports(tmp_path: Path) -> None:
 
     res = CliRunner().invoke(cli.app, ["diff", str(old_p), str(new_p)])
     assert res.exit_code == 0
-    out = json.loads(res.output)
+    out = json.loads(res.stdout)  # stdout：本命令往 stderr 打不脱敏提醒
     assert {(x["category"], x["value"]) for x in out["leads"]["added"]} == {("WALLET_SECRET", "0xnew")}
     assert {(x["category"], x["value"]) for x in out["leads"]["removed"]} == {("PAYMENT", "pay.old.com")}
     assert out["meta_changes"]["is_hardened"] == {"old": None, "new": True}
