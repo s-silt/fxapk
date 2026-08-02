@@ -56,8 +56,7 @@ _TENANT_BUCKETS: tuple[tuple[str, str], ...] = (
 #: 不在本表，于是整域豁免先命中，桶被判无需核查——既不富化、不进闭环、也不出文书。
 #: 单独列出来并单独断言，是为了让后人删改对应正则时看到的红是「活洞复发」而不是「少了一条」。
 _LIVE_HOLES: tuple[tuple[str, str], ...] = (
-    # leak-scan: allow 活洞回归用例，须用真实存储端点域才复现得了「被整域豁免吃掉」
-    (f"{_B}.storage.googleapis.com", "该厂商整域豁免曾吃掉其对象存储租户桶"),
+    (f"{_B}.storage.googleapis.com", "该厂商整域豁免曾吃掉其对象存储租户桶"),  # leak-scan: allow 活洞回归用例，须用真实存储端点域才复现得了「被整域豁免吃掉」
 )
 
 #: 裸区域端点：**没有桶名标签**，就没有租户，查不出人 —— 不得被当成租户桶。
@@ -316,3 +315,160 @@ def test_bucket_beats_infra_even_for_listed_provider_domain() -> None:
     # ★没有这一句，上面的 continue 全部跳过时本测试会静静地通过、变成恒真。
     #   `assert listed` 只保证「有名单内厂商域」，保证不了「其中至少一个能构造出桶」。
     assert checked, "一个对照都没跑到，本测试已退化为恒真——需重挑用例"
+
+
+# ---------------------------------------------------------------------------
+# 桶名是**占位符**的模板形态
+#
+# 实测样本（Go 控制面）里，配置地址是 `https://%s.<厂商端点>/%s.dat` 这样的模板——桶名每天
+# 由算法现算，静态里只有占位符。这类域名的尾缀恰恰是云厂商域，于是整域豁免先命中、判「无需
+# 再核」：一条「样本会去某家对象存储取东西、桶名还是运行时算出来的」的事实，被判成与本案无关。
+# 而 ADVICE_SKIP 是判据链结论、不走抑制账本，`fxapk lead restore` 够不着——落进去捞不回来。
+# ---------------------------------------------------------------------------
+
+#: `(域名, 期望厂商, 期望占位字面)`。占位符本身是合成的模板语法，非取自任何样本材料。
+_TEMPLATE_BUCKETS: tuple[tuple[str, str, str], ...] = (
+    ("%s.gz.bcebos.com", "百度智能云 BOS", "%s"),  # leak-scan: allow 桶模板正向用例，须用真实端点域才验得到「模板不被整域豁免吃掉」
+    ("%s.oss-accelerate.aliyuncs.com", "阿里云 OSS", "%s"),  # leak-scan: allow 桶模板正向用例，覆盖另一家的加速端点形态
+    ("%s.jiangsu-10.zos.ctyun.cn", "天翼云 ZOS", "%s"),  # leak-scan: allow 桶模板正向用例，覆盖区域段可变的端点形态
+    ("%1$s.storage.googleapis.com", "Google Cloud Storage", "%1$s"),  # leak-scan: allow 桶模板正向用例，覆盖 printf 位置参数写法
+    ("{bucket}.s3.amazonaws.com", "AWS S3", "{bucket}"),  # leak-scan: allow 桶模板正向用例，覆盖花括号模板写法
+    ("{}.pek3b.qingstor.com", "青云 QingStor", "{}"),  # leak-scan: allow 桶模板正向用例，覆盖空花括号写法
+    ("${bucket}.cn-bj.ufileos.com", "UCloud US3", "${bucket}"),  # leak-scan: allow 桶模板正向用例，覆盖 shell 风格变量写法
+    ("<bucket>.blob.core.windows.net", "Azure Blob", "<bucket>"),  # leak-scan: allow 桶模板正向用例，覆盖尖括号写法与最严的账户名语法
+)
+
+#: 长得像但**不是**运行时填充记号的，逐条说明为什么。
+_NOT_TEMPLATES: tuple[tuple[str, str], ...] = (
+    ("*.oss-cn-hangzhou.aliyuncs.com", "通配符语义是「任意/此处被隐去」，不是「运行时拼值进去」"),  # leak-scan: allow 通配符反向用例，须用真实端点域才验得到「通配符不算模板」
+    ("s.gz.bcebos.com", "裸域名通道剥掉 % 之后的残片——已经没有占位符信息了"),  # leak-scan: allow 残片反向用例，须用真实端点域才验得到「剥掉 % 的残片不算模板」
+    ("%s.fonts.googleapis.com", "同厂商但不是对象存储端点，尾缀判据不该命中"),  # leak-scan: allow 同厂商非存储子域反向用例，须用真实域才验得到「尾缀不是存储端点就不认」
+    ("%s.example.com", "尾缀不属任何已知厂商"),
+    ("%s.gz.bcebos.com.evil.example", "域边界：厂商端点后面还挂着别的注册域"),  # leak-scan: allow 域边界反向用例，须用真实端点域才验得到「后面还挂着别的注册域就不认」
+    ("b%sé.gz.bcebos.com", "非 ASCII 夹杂元字符，多半是字符串表粘连噪音而非模板语言"),  # leak-scan: allow 非 ASCII 反向用例，须用真实端点域才验得到 isascii 门
+)
+
+
+@pytest.mark.parametrize("domain, provider, placeholder", _TEMPLATE_BUCKETS)
+def test_template_bucket_recognised(domain: str, provider: str, placeholder: str) -> None:
+    """占位字面**原样**取出，不伪装成桶名——它对应不到任何真实租户。"""
+    assert infra.tenant_bucket_template(domain) == (provider, placeholder)
+
+
+@pytest.mark.parametrize("domain, _provider, _placeholder", _TEMPLATE_BUCKETS)
+def test_template_bucket_is_not_a_real_bucket(domain: str, _provider: str, _placeholder: str) -> None:
+    """★误升档主锁：模板绝不能被真桶判据吃进去——那会让它判最高档、进文书出口。"""
+    assert infra.tenant_bucket(domain) is None
+
+
+@pytest.mark.parametrize("domain, provider, placeholder", _TEMPLATE_BUCKETS)
+def test_template_reaches_review_at_the_real_entry(
+    domain: str, provider: str, placeholder: str
+) -> None:
+    """走 ``classify_domain`` 真入口，**精确**断言待核：既不是无需再核，也不是最高档。
+
+    两个方向都要锁：判 SKIP 是替人下「与本案无关」的结论且撤不回来；判最高档则是主张
+    「该向这个标的的持有方发函」——可占位符没有能让云厂商检索到租户的键，那句话不成立。
+    """
+    advice, reason = infra.classify_domain(domain)
+
+    assert advice == infra.ADVICE_REVIEW
+    assert provider in reason and placeholder in reason, "厂商与占位字面都要写进理由供人看"
+
+
+def test_template_beats_infra_for_listed_provider_domain() -> None:
+    """★三钉法，锁的是**判据顺序**：模板分支必须排在整域豁免之前。
+
+    先钉前提（厂商域确在已知基础设施名单里，否则这个洞压根复现不出来），再钉结论。
+    """
+    checked = 0
+    for domain, provider, _placeholder in _TEMPLATE_BUCKETS:
+        _label, _, tail = domain.partition(".")
+        if infra._matched_infra(tail) is None:
+            continue  # 该厂商域不在名单里，构不成「被整域豁免吃掉」的场景
+        checked += 1
+        assert infra.classify_domain(domain)[0] == infra.ADVICE_REVIEW, (
+            f"{provider} 的域在已知基础设施名单里，模板分支排到它后面就会被整域豁免吃掉"
+        )
+    assert checked, "一条名单内厂商域都没跑到，本测试已退化为恒真——需重挑用例"
+
+
+@pytest.mark.parametrize("domain, why", _NOT_TEMPLATES)
+def test_non_template_is_not_recognised(domain: str, why: str) -> None:
+    assert infra.tenant_bucket_template(domain) is None, why
+
+
+def test_multi_label_template_is_a_known_gap_not_a_covered_case() -> None:
+    """★如实钉住一个**已知缺口**：只有第一个标签会被当占位符处理。
+
+    ``tenant_bucket_template`` 把第一个标签换成探针标识后交给真桶正则，所以
+    ``%s.%s.<端点>`` 这种「用多个格式参数拼出带点桶名」的写法替换后仍含占位符、匹配不上，
+    最终落回整域豁免。对允许点号桶名的厂商，这是实际存在的模型缺口。
+
+    ★这条测试的意义是**不让后人误以为多段模板已经覆盖了**。修它的正确做法不是把所有标签
+      一律替换——区域段、账号段同样可能含模板，盲目替换会放宽既有的严格判据（那些段的
+      形态约束正是「不凭空造出不存在的端点」的保证）。要修得单独设计。
+    """
+    multi = "%s.%s.storage.googleapis.com"  # leak-scan: allow 已知缺口用例，须用真实端点域才复现得了「多段模板落回整域豁免」
+
+    assert infra.tenant_bucket_template(multi) is None, "当前实现只处理第一个标签"
+    assert infra.classify_domain(multi)[0] == infra.ADVICE_SKIP, (
+        "如实记录现状：多段模板仍被整域豁免吃掉。这条变红说明缺口被修了——"
+        "届时请把本测试改成正向用例，而不是删掉它"
+    )
+
+
+def test_wildcard_and_residue_stay_exempt() -> None:
+    """模板判据不外溢：该被整域豁免吃掉的照旧吃掉，不因新增分支而松动。"""
+    # leak-scan: allow 通配符的档位反向用例，须用真实端点域才验得到
+    assert infra.classify_domain("*.oss-cn-hangzhou.aliyuncs.com")[0] == infra.ADVICE_SKIP
+    assert infra.classify_domain("s.gz.bcebos.com")[0] == infra.ADVICE_SKIP  # leak-scan: allow 残片的档位反向用例，须用真实端点域才验得到
+
+
+def test_template_reason_reaches_the_lead_through_the_real_entry() -> None:
+    """★接线锁：降档的理由必须跟到线索上，走 ``build_endpoint_leads`` 真入口。
+
+    只判对档位不够——出口读不到理由的话，人看到的是一条没有来由的「待核」，不知道
+    「这是个桶名占位符、下一步该去取运行时真桶名」。本仓栽过两次同款
+    （``shape_uncertain`` / ``sni_masquerade`` 都曾只写进 notes 而出口不渲染）。
+    """
+    from apkscan.core.leads import build_endpoint_leads
+    from apkscan.core.models import Endpoint, Evidence
+
+    value = "%s.gz.bcebos.com"  # leak-scan: allow 接线锁夹具，须用真实端点域才走得到模板判据
+    ep = Endpoint(
+        value=value,
+        kind="domain",
+        evidences=[Evidence(source="native", location="lib/arm64-v8a/libapp.so",
+                            snippet=f"https://{value}/%s.dat")],
+    )
+
+    leads = build_endpoint_leads([ep], online=False)
+
+    assert len(leads) == 1
+    assert leads[0].advice == infra.ADVICE_REVIEW
+    assert "桶名位置是占位符" in leads[0].notes, "降档理由没跟到线索上，出口就看不见它"
+
+
+def test_template_survives_the_extraction_layer() -> None:
+    """★提取层锁：占位符得先**活着**走完端点提取，判据才有机会看到它。
+
+    这条锁的是一个隐式前提：``textutil.valid_url_host`` 的 docstring 明写它的用途正是
+    「剔除 ``http://%s`` 这类来自格式串的伪 URL」。它目前只拦无点 host，所以带点的
+    ``%s.<厂商端点>`` 能过——但后人顺手把「host 含 %」加进剔除条件是完全可能的动作，
+    那一刻模板判据静默失能，而上面那些手造 ``Endpoint`` 的测试**照常全绿**。
+    所以必须有一条从原始字节起跑的锁。
+    """
+    from apkscan.analyzers.endpoints import EndpointsAnalyzer
+    from tests.conftest import FakeContext
+
+    template_url = "https://%s.gz.bcebos.com/%s.dat"  # leak-scan: allow 提取层锁夹具，须用真实端点域才走得到模板判据
+    result = EndpointsAnalyzer().analyze(
+        FakeContext(files={"assets/cfg.json": template_url.encode()})
+    )
+
+    domains = {ep.value for ep in result.endpoints if ep.kind == "domain"}
+    assert "%s.gz.bcebos.com" in domains, (  # leak-scan: allow 提取层锁断言，须用真实端点域才验得到
+        "占位符在提取层就被吃掉了——模板判据永远收不到这个值，"
+        f"而所有手造 Endpoint 的测试仍会全绿。实际提取到：{sorted(domains)}"
+    )
