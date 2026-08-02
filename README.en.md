@@ -10,6 +10,47 @@ An APK **static + dynamic analysis CLI**: extracts real app config (AppID / AppK
 
 Runs its core analysis with **zero environment** (`pip install`, no JDK / emulator / device). Unpacking and traffic capture of hardened apps are optional on-device steps.
 
+## ⚠ Read first: three things that happen with no flags at all
+
+The first two leave records outside your machine, or change the device — neither can be taken back.
+The third is a safe default, listed here so you don't assume you need an extra flag to be safe:
+
+1. **`analyze` goes online by default.** It never touches the target's servers, but it does take the
+   domains and IPs found in the sample and look them up in public databases (WHOIS / RDAP /
+   filing records / internet-scan platforms). Those lookups are logged on the platforms' side —
+   **while a case is still non-public, that alone can reveal what you are investigating**, and you
+   cannot delete those records. Pass `--offline` to keep everything local.
+2. **`doctor` and `auto` modify the device by default** (when a usable device is detected; without
+   one the dynamic steps are skipped). They deploy frida-server and install an interception CA;
+   `auto` may additionally unpack the app, repackage and re-sign it, **uninstall the original app
+   and wipe its data** — that data does not come back — then install and run the sample under
+   analysis. Do not run these against a daily-driver phone, an emulator holding real accounts, or
+   an office network. Use `fxapk doctor --no-fix` if you only want to see the current state.
+3. **`digest` redacts by default.** Wallet private keys and mnemonics, personal phone numbers / ID
+   numbers / bank cards, backend credentials — masked, because this command's output is typically
+   fed straight to an AI. Pass `--no-redact` when you genuinely need the raw values; the full
+   plaintext always stays in the local `report.json` regardless of this flag.
+
+> **Redaction covers `digest` and nothing else.** Where other outputs contain sensitive values,
+> nothing redacts them for you: `fxapk jsonl`, `fxapk diff`, `fxapk lead show/restore/replay`,
+> `fxapk corpus events/ls/seen/shared-config`, `fxapk probe-leads` and `fxapk pcap-leads` print lead
+> values to stdout without redacting them (each now emits a one-line reminder; the corpus ones surface them via
+> the ledger's `key_iocs`, which does not filter by sensitivity category), the `export` CSV, HTML / PDF reports,
+> generated letters, `corpus` records, and `report.json` itself. Most of those are meant to be
+> local evidence carriers — but **nothing stands between them and a third-party service if you
+> paste them there**.
+>
+> Redaction is also best-effort, not a full DLP layer. It guarantees exactly two things: values of
+> sensitive categories are masked, and **pattern-shaped** PII (emails, Chinese mobile numbers,
+> national ID numbers, long digit strings) is stripped from **a lead's own** free-text fields.
+> Everything else passes through untouched — finding titles, the visibility and closure narratives,
+> the overseas-targets section. Names, addresses and non-Chinese phone numbers have no stable
+> shape and are never removed.
+
+For the dynamic parts, use a dedicated test device: no personal accounts or real SMS, no bank
+cards / wallets / contacts, isolated from office and home networks, ideally a snapshot-restorable
+emulator.
+
 ## How to use it: tell your AI three things
 
 This tool is meant to be driven by an AI assistant (Claude Code, Codex, and the like). **You don't
@@ -87,12 +128,12 @@ The AI looks at what you gave it and picks the command:
 
 | What you give it | What the AI runs | What happens |
 |---|---|---|
-| an `.apk` file | `fxapk analyze <path> --out out`, then `fxapk digest out/<name>.json` | produces a report, then squeezes it into a one-page summary |
+| an `.apk` file | `fxapk analyze <path> --out out`, then `fxapk digest out/<name>.json` | produces a report, then squeezes it into a one-page summary (online lookups by default; summary redacted by default) |
 | a folder of saved web files (`.html` / `.js` …) | `fxapk analyze-web <dir> --out out` | reads only the files you saved; never goes online to fetch that site |
-| an existing `report.json` | `fxapk digest <file>` | squeezes a long report into a one-page summary |
+| an existing `report.json` | `fxapk digest <file>` | squeezes a long report into a one-page summary, sensitive values masked |
 | a folder full of APKs | `fxapk batch <dir>` | runs them one by one, skipping ones already done |
 
-Want it to look up server ownership too? Just add "and look it up online" — the AI adds `--online`.
+Want it to look up server ownership? That is already the default — **`analyze` goes online unless told otherwise**. To keep it local, say so explicitly ("do not go online") and the AI adds `--offline`.
 
 **How to read the report**: start with the "what we could see this time" section. It spells out
 **which statements can't be made yet, why, and how to fix that**. If an app is hardened and its real
@@ -124,16 +165,18 @@ If you'd rather type commands yourself, these are the common ones. Full flags: `
 
 | Goal | Command |
 |---|---|
-| Analyse an APK | `fxapk analyze app.apk --out out` |
-| Same, with online attribution lookups | `fxapk analyze app.apk --online --out out` |
+| Analyse an APK (**online by default**) | `fxapk analyze app.apk --out out` |
+| Same, but **offline** (no domain / IP leaves the machine) | `fxapk analyze app.apk --offline --out out` |
 | Analyse saved web files | `fxapk analyze-web <dir> --out out` |
 | Run a whole folder | `fxapk batch <dir>` |
 | Full pipeline: doctor → static → unpack → capture → merge (dynamic steps only with a rooted device; without one they're skipped and you still get the static report) | `fxapk auto app.apk --out out` |
 | Same, as an acceptance gate (exit 0/5/6 = complete/partial/failed) | `fxapk auto app.apk --out out --strict-case` |
 | Top up an existing report with multi-source lookups and five-layer attribution | `fxapk case close out/app.json` |
-| Squeeze a report into a one-page summary | `fxapk digest out/app.json` |
+| Squeeze a report into a one-page summary (**redacted by default**) | `fxapk digest out/app.json` |
+| Same, but with raw values for the sensitive fields | `fxapk digest out/app.json --no-redact` |
 | Capture traffic on a device | `fxapk capture <package>` |
-| Device health check, with auto-fix | `fxapk doctor --fix` |
+| Device health check (**fixes by default**: deploys frida-server / installs CA) | `fxapk doctor` |
+| Check only, change nothing | `fxapk doctor --no-fix` |
 | Environment self-check (what works / doesn't / how to fix) | `fxapk selfcheck` |
 | Batch-enrich a target list (`--dry-run` by default: estimates quota, sends nothing; resumable) | `fxapk enrich batch -t targets.txt -o enrich_out` |
 | Ingest a report into the corpus | `fxapk corpus add out/app.json --corpus <dir>` |
