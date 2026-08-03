@@ -738,3 +738,13 @@ def test_ci_full_tree_gate_stays_tracked_and_default_tier() -> None:
     assert "--tracked" in invocation, invocation
     assert "--strict" not in invocation, f"全树关不应升 strict：{invocation}"
     assert "--path apkscan" in invocation and "--path tests" in invocation, invocation
+
+def test_global_fixture_segment_contract() -> None:
+    """散在各测试里的 ``is_global`` 夹具依赖标准库分类，这条钉住那个前提。
+
+    ★放在这里而不是各处重复断言：翻转时**只有这一条**红，且失败信息直接说明
+      哪些文件要迁、按什么规则迁。否则十余条业务测试会以看不懂的方式同时失败。
+    """
+    from tests.doc_addresses import assert_global_fixture_contract
+
+    assert_global_fixture_contract()

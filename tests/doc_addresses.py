@@ -44,6 +44,9 @@ __all__ = [
     "DOC_SECOND_IP",
     "DOC_STATIC_NOISE_IP",
     "DOC_THIRD_IP",
+    "GLOBAL_FIXTURE_IP",
+    "GLOBAL_FIXTURE_NET",
+    "assert_global_fixture_contract",
     "is_documentation_address",
     "public_and_non_public_probe_cases",
     "restore_real_address_calipers",
@@ -67,6 +70,41 @@ DOC_IPV6 = "2001:db8::1"
 
 #: RFC 6761 保留给文档/测试的域名后缀。本仓库夹具用 ``*.example.test`` 当合成公网域名。
 DOC_DOMAIN = "api.example.test"
+
+#: ★需要 ``is_global`` 为真的夹具用这一段（6to4 中继前缀，RFC 7526 已废弃该 anycast）。
+#:
+#: 为什么不能用上面的文档段：``ipaddress`` 把 RFC 5737 三段全判 ``is_private``，
+#: 于是"要一个会被判成公网的地址"这件事在文档段里根本表达不出来。而在 IPv4 里
+#: **不存在**既由规范保证无归属、又保证 ``is_global`` 为真的段——这两个要求互斥。
+#:
+#: ★这一段能用，靠的是 :mod:`ipaddress` **当前**的分类结果，不是该前缀的规范属性：
+#:   RFC 7526 只规定整个 /24 不得重新分配，IANA 对其布尔属性留空。标准库或 IANA
+#:   特殊用途地址表一变，它可能翻成 ``is_global=False``。
+#:   :func:`assert_global_fixture_contract` 就是为这一天准备的——翻转时**只有那一条**
+#:   会红，而不是十余条业务测试一起红、且看不出跟被测逻辑有什么关系。
+#:
+#: 用它的前提：该测试**测的就是分类行为本身**（如 ``classify_ip`` 的分档、leak-scan
+#: 对 ``is_global`` 字面的拦截）。若只是需要"下游拿到一个公网端点"，应改用文档段 +
+#: :func:`treat_doc_addresses_as_public`，不要再往这一段上加新依赖。
+GLOBAL_FIXTURE_NET = "192.88.99.0/24"  # leak-scan: allow 夹具段的集中定义，6to4 弃用前缀非真实主机
+GLOBAL_FIXTURE_IP = "192.88.99.1"  # leak-scan: allow 同上，契约测试用的代表地址
+
+
+def assert_global_fixture_contract() -> None:
+    """钉住 :data:`GLOBAL_FIXTURE_NET` 依赖的标准库分类事实。
+
+    这条契约一旦不成立，散在各测试里的 ``192.88.99.x`` 夹具会同时失去意义。
+    与其让它们各自以看不懂的方式红掉，不如在这里显式失败并说清怎么办。
+    """
+    addr = ipaddress.ip_address(GLOBAL_FIXTURE_IP)
+    assert addr.is_global is True, (
+        f"{GLOBAL_FIXTURE_NET} 不再被判 is_global——标准库或 IANA 特殊用途表已变。"
+        " 依赖它的夹具（tests/test_infra.py、tests/test_leads_low_octet.py、"
+        "tests/test_leakscan.py、tests/test_vendor_sdk_noise.py、"
+        "tests/test_config_key_advice.py）需要一起迁移：测分类行为本身的换新的可路由段，"
+        "只需要'下游拿到公网端点'的改用文档段 + treat_doc_addresses_as_public。"
+    )
+    assert addr.is_private is False, f"{GLOBAL_FIXTURE_NET} 被判私网，夹具语义已反转"
 
 #: 文档保留网段（RFC 5737 + RFC 3849）。放行判据只认落在这些段里的地址。
 _DOC_NETWORKS = tuple(
