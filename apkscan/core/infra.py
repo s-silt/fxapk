@@ -49,7 +49,7 @@ _TIER_RANK: dict[str, int] = {TIER_APP: 0, TIER_LIBRARY_FILE: 1, TIER_BULK_STRIN
 # ★新增条目**一律写带点的域名后缀**，按域边界匹配（``d == marker`` 或 ``.<marker>`` 结尾）。
 #   不含点的条目走**子串**匹配，会把「品牌词 + 任意后缀」这类**可被任何人注册**的近似域一并
 #   判成无需核查——那是在替人下「与本案无关」的结论，一个真 C2 就此被藏起来。
-#   本表的无点条目已在 2026-08-01 全部收口成带点后缀；那次逐条核过：一份在手样本的 86 个域名
+#   本表的无点条目已在 2026-08-01 全部收口成带点后缀；那次逐条核过：一份在手样本的域名
 #   端点里，靠无点关键字判掉的实为 0 条（唯一命中的那条被租户桶判据先接住了），收口的实际代价
 #   接近零，而危险面是每条都能被 ``<品牌词>-任意.top`` 命中。
 #   收口方向本身也是安全的：万一某个形态因此漏掉，它只是回到「建议核查」——多一条噪音，
@@ -488,7 +488,8 @@ def _is_library_embedded(domain: str) -> str | None:
     """域名是否命中 library-embedded（打包库内置全球站点库）；命中返回匹配后缀。
 
     与 KNOWN_INFRA 同口径用子串匹配（已小写、去端口）。★ 仅精确后缀，绝不碰任意
-    .vip / .com SLD —— 确保真 C2（synthetic-c2a.vip / synthetic-c2b.com）不受影响。
+    .vip / .com SLD —— 放开整个 SLD 会把该后缀下的待查域名一并判成无需核查，
+    等于替人下「与本案无关」的结论。回归锁见 tests/test_infra.py。
     """
     d = _normalize_domain(domain)
     if not d:
@@ -803,19 +804,19 @@ KNOWN_INFRA_EXACT: frozenset[str] = frozenset(
         #   走的是样本内的 <厂商>PUSH_APPID / APPKEY（config_keys 已按厂商归属）。域名本身只
         #   说明「用了谁家的推送」。
         #
-        # 下列条目全部来自在手语料的实测命中（33 份报告、3560 个去重域名）。
+        # 下列条目全部来自在手语料的实测命中。
         # ★逐条写各自的依据，不复用同一句理由：护栏（bulk_exemption）对「同一句话贴满几十行」
         #   会阻断，而它拦的正是「批量按掉」这个动作本身。逐条写下来也确实更有用——每一条都得
         #   自己说清「这是什么服务、凭什么在这里」。
-        "api.xmpush.xiaomi.com",  # leak-scan: allow 小米推送注册接入点，语料 5 样本实测命中
-        "register.xmpush.xiaomi.com",  # leak-scan: allow 小米推送注册接入点，语料 5 样本实测命中
+        "api.xmpush.xiaomi.com",  # leak-scan: allow 小米推送注册接入点，实测语料中的样本实测命中
+        "register.xmpush.xiaomi.com",  # leak-scan: allow 小米推送注册接入点，实测语料中的样本实测命中
         "cn.register.xmpush.xiaomi.com",  # leak-scan: allow 小米推送注册接入点（境内），语料实测命中
         "sandbox.xmpush.xiaomi.com",  # leak-scan: allow 小米推送沙箱接入点，语料实测命中
         "register.xmpush.global.xiaomi.com",  # leak-scan: allow 小米推送国际段注册接入，语料实测命中
         "fr.register.xmpush.global.xiaomi.com",  # leak-scan: allow 小米推送国际段区域主机，语料实测命中
         "ru.register.xmpush.global.xiaomi.com",  # leak-scan: allow 小米推送国际段区域主机，语料实测命中
         "idmb.register.xmpush.global.xiaomi.com",  # leak-scan: allow 小米推送国际段区域主机，语料实测命中
-        "app.chat.xiaomi.net",  # leak-scan: allow 小米推送长连接通道，语料 3 样本实测命中
+        "app.chat.xiaomi.net",  # leak-scan: allow 小米推送长连接通道，实测语料中的样本实测命中
         "resolver.msg.xiaomi.net",  # leak-scan: allow 小米推送自带解析/调度端点，语料实测命中
         "resolver.msg.global.xiaomi.net",  # leak-scan: allow 小米推送解析端点国际段，语料实测命中
         "tracking.miui.com",  # leak-scan: allow 小米统计采集 ingest，语料实测且有真机实连记录
@@ -823,14 +824,14 @@ KNOWN_INFRA_EXACT: frozenset[str] = frozenset(
         "data-drcn.push.dbankcloud.com",  # leak-scan: allow 华为推送数据上报区域主机，语料实测命中
         "data-dre.push.dbankcloud.com",  # leak-scan: allow 华为推送数据上报区域主机，语料实测命中
         "data-drru.push.dbankcloud.com",  # leak-scan: allow 华为推送数据上报区域主机，语料实测命中
-        "grs.dbankcloud.com",  # leak-scan: allow 华为路由引导服务端点，语料 2 样本实测命中
-        "grs.dbankcloud.cn",  # leak-scan: allow 华为路由引导服务境内段，语料 2 样本实测命中
-        "api-push.meizu.com",  # leak-scan: allow 魅族推送 API 端点，语料 2 样本实测命中
+        "grs.dbankcloud.com",  # leak-scan: allow 华为路由引导服务端点，实测语料中的样本实测命中
+        "grs.dbankcloud.cn",  # leak-scan: allow 华为路由引导服务境内段，实测语料中的样本实测命中
+        "api-push.meizu.com",  # leak-scan: allow 魅族推送 API 端点，实测语料中的样本实测命中
         "api-push.in.meizu.com",  # leak-scan: allow 魅族推送 API 的 in. 子树变体，语料实测命中
         "push-statics.meizu.com",  # leak-scan: allow 魅族推送静态/统计端点，语料实测命中
         "push-statics.in.meizu.com",  # leak-scan: allow 魅族推送统计的 in. 子树变体，语料实测命中
         "norma-external-collect.meizu.com",  # leak-scan: allow 魅族数据采集 ingest，语料实测命中
-        "app.market.oppo.com",  # leak-scan: allow OPPO 应用市场 API，语料 1 样本实测命中
+        "app.market.oppo.com",  # leak-scan: allow OPPO 应用市场 API，实测语料中的样本实测命中
         "appgallery1.huawei.com",  # leak-scan: allow 华为应用市场编号兄弟主机，厂商官方安装页在用
         # ↑ 应用市场主机的编号兄弟（厂商官方安装页在用）。★不顺手穷举其余编号：公开材料里还有
         #   别的编号存在，只收语料命中且能对上官方用途的那个，其余留给「名单与语料的差集审计」。
@@ -1202,7 +1203,7 @@ def classify_domain(domain: str) -> tuple[str, str]:
     return ADVICE_INVESTIGATE, "疑似 App 自有服务，建议落地核查归属"
 
 
-#: 点分四段字面被当成 IP 的两大来源，实测语料 40 份报告统计：
+#: 点分四段字面被当成 IP 的两大来源，实测统计：
 #:   - 版本号 / 序号（``1.3.1.1``、``1.4.1.14``——同一混淆资源里成**连续递增序列**出现）  # leak-scan: allow 这两个点分四段是被误判成 IP 的**版本号**字面，本注释正是在解释该误判形态，非网络地址
 #:   - ASN.1 OID（X.509 证书与加密库常量：``1.3.101.112`` Ed25519、``2.5.4.3`` CN、
 #:     ``2.5.29.17`` SAN、``1.3.6.1`` iso.org.dod.internet、``1.3.36.3`` Teletrust）

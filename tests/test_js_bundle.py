@@ -145,7 +145,7 @@ def test_framework_unknown_when_no_js() -> None:
 
 def test_secret_key_is_high() -> None:
     result = _analyze(
-        {_UNIAPP_PATH: b"var c={app_secret:'zwBt8Xsz3V9RCAZJLbfcL5x'};"}
+        {_UNIAPP_PATH: b"var c={app_secret:'zwBt8Xsz3V9RCAZJLbfcL5x'};"}  # leak-scan: allow JS 包夹具，模拟被检出的硬编码凭据，值为合成串
     )
     assert FINDING_SECRET in _finding_ids(result)
     f = next(x for x in result.findings if x.id == FINDING_SECRET)

@@ -156,6 +156,65 @@ def test_environment_variable_read_is_not_a_secret() -> None:
     assert not [f for f in findings if f.rule == "secret"]
 
 
+def test_key_in_docstring_with_wrapper_call_is_rejected() -> None:
+    """裸 ``key`` + 值被一层函数包住的形态必须被拦。
+
+    凭据不一定写成 ``api_key = "…"``：名字可能是裸 ``key``，赋值右侧也可能
+    先过一层编码函数。两者叠加时判据仍须命中。
+    """
+    findings = leakscan.scan_diff(
+        _diff("apkscan/core/x.py", f'key=UTF-8("{_SECRET_VALUE}")（32B）')
+    )
+    secrets = [f for f in findings if f.rule == "secret"]
+    assert secrets, "docstring 里被函数包住的 key 也必须判为泄漏"
+    assert _SECRET_VALUE not in secrets[0].value, "finding 不得回显凭据明文"
+    assert leakscan.blocking(findings)
+
+
+def test_env_reader_wrapper_exempts_but_lookalike_value_does_not() -> None:
+    """豁免只认**语法位置**（值裹在环境读取调用里），不认值的长相。
+
+    ★这条锁的是一个真被绕过的形态：曾按"全大写下划线就当变量名"放行，于是
+    任何长得像变量名的硬编码值都被整类放过——扫描器无法从字符串长相分辨
+    它是环境变量索引还是真凭据。判断必须落在语法位置上。
+    """
+    # 值在 os.environ.get(...) 里 → 是变量名，放行
+    exempt = leakscan.scan_diff(
+        _diff("apkscan/x.py", 'key = os.environ.get("FXAPK_FOFA_KEY", "")')
+    )
+    assert not [f for f in exempt if f.rule == "secret"], "从环境取值是推荐写法，不能被拦"
+
+    # 同样长相、但是直接赋值 → 必须拦
+    lookalike = leakscan.scan_diff(
+        _diff("apkscan/x.py", 'key = "REAL_SECRET_VALUE_7Q9K"')  # leak-scan: allow secret 判据阳性夹具，合成串非真实凭据
+    )
+    assert [f for f in lookalike if f.rule == "secret"], "长得像变量名的硬编码值仍须被拦"
+
+
+def test_compound_credential_names_are_covered() -> None:
+    """``client_secret`` / ``private_key`` 这类**复合名**必须命中。
+
+    下划线是正则的单词字符，靠 ``\\b`` 锚定的裸 ``secret``/``key`` 分支
+    匹配不到它们——这类名字恰恰是最常见的凭据写法。
+    """
+    for name in ("client_secret", "auth_token", "private_key", "encryption_key"):
+        line = f'{name} = "{_SECRET_VALUE}"'
+        findings = leakscan.scan_diff(_diff("apkscan/x.py", line))
+        assert [f for f in findings if f.rule == "secret"], f"{name} 未被覆盖"
+
+
+def test_env_mention_does_not_exempt_whole_line() -> None:
+    """行里提到 ``os.environ`` **不能**让整行免检——同行的硬编码凭据仍须被拦。
+
+    放行的理由必须落在「值长什么样」上，不能落在「这行提到了 os.environ」上：
+    否则一句注释就能让任何凭据免检。
+    """
+    findings = leakscan.scan_diff(
+        _diff("apkscan/x.py", f'api_key = "{_SECRET_VALUE}"  # 迁移自 os.environ.get("X")')
+    )
+    assert [f for f in findings if f.rule == "secret"], "带 env 字样的行里，硬编码凭据仍须被拦"
+
+
 def test_placeholder_secrets_pass() -> None:
     findings = leakscan.scan_diff(
         _diff(

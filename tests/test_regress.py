@@ -181,7 +181,7 @@ def test_malformed_manifest_does_not_raise(tmp_path):
 def test_same_tool_version_different_ruleset_is_comparable(tmp_path):
     """★真实迭代形态：版本号不动、规则集在动。
 
-    实测语料库 14 个样本里被重跑过的三个**全部**是同 tool_version 不同 ruleset_digest；
+    实测语料库 多个样本里被重跑过的三个**全部**是同 tool_version 不同 ruleset_digest；
     若版本坐标只取 tool_version，一整轮规则改动的效果会被量成 0（两版零重叠）。
     """
     root = _seed(tmp_path, [

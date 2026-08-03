@@ -198,7 +198,7 @@ def test_shared_native_libs_annotates_packer_but_keeps_business_strong() -> None
     packer = next(c for c in clusters if c["sha256"] == _sha(packer_blob))
     assert packer["weak_anchor"] is True
     assert packer["weak_anchor_reason"].startswith("packer:")
-    # ★标注而非删除：共享事实仍在（3 个样本都列出），只是不当强锚
+    # ★标注而非删除：共享事实仍在（多个样本都列出），只是不当强锚
     assert packer["samples"] == ["s1", "s2", "s3"]
 
     # 弱锚沉底：加固壳簇样本更多（3>2），若只按样本数排会排在前面

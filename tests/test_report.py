@@ -393,7 +393,7 @@ def test_html_crypto_recipe_section_renders(tmp_path: Path) -> None:
         leads=[
             Lead(
                 category=LeadCategory.CRYPTO_RECIPE,
-                value="AES-CFB/Pkcs7 key(utf8,32B)=55f0…3467 iv=md5(key+ts)[:16]",
+                value="AES-CFB/Pkcs7 key(utf8,32B)=<已脱敏> iv=md5(key+ts)[:16]",
                 confidence=Confidence.HIGH,
                 advice=ADVICE_INVESTIGATE,
                 notes="自 JS 逆出的应用层加密配方",

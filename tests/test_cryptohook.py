@@ -12,7 +12,7 @@ from typing import Any
 
 from apkscan.dynamic import cryptohook
 
-# 真样本 key（32 个 ASCII 字符，按 UTF-8 当 key —— CryptoJS enc.Utf8.parse 口径）。
+# 合成 key（32 个 ASCII 字符，按 UTF-8 当 key —— CryptoJS enc.Utf8.parse 口径）。
 _KEY = "0123456789abcdef0123456789abcdef"
 _KEY_HEX = _KEY.encode("utf-8").hex()  # JS 侧 getEncoded() 回传的 key bytes 的 hex
 

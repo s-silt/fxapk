@@ -189,9 +189,9 @@ def corpus_seen(
         _print({"seen": bool(hits), "by": by, "value": value, "count": len(hits), "hits": hits})
         return
     if by == _BUILD_ENV_BY:
-        # 构建环境标识是列表维度（一样本可含多个自建根）：按标识反查同一开发环境打出的样本。
-        # ★同标识即同一下游客户/同一订单主体，是并案依据——比「共用同一台服务器」严谨得多
-        #   （转租机器上同时跑多个互不相干的客户是常态，同机 ≠ 同团伙）。
+        # 构建环境标识是列表维度（一样本可含多个自建根）：按标识反查同一构建环境打出的样本。
+        # ★它比「共用同一台服务器」耐用（同机不代表同源），但只说明构建环境相同，
+        #   定性仍须结合其它独立证据。
         hits = _corpus.find_by_build_env(_corpus.load_manifest(root), value)
         _print({"seen": bool(hits), "by": by, "value": value, "count": len(hits), "hits": hits})
         return
@@ -239,14 +239,15 @@ def corpus_shared_native(
 def corpus_shared_build_env(
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
-    """跨样本共享的**自建构建环境**簇：同一构建标识被 ≥2 样本使用 —— 同一开发环境/同一下游客户。
+    """跨样本共享的**自建构建环境**簇：同一构建标识被 ≥2 个样本使用。
 
-    ★这是几种串案锚里最耐用的一条。同族样本的 .so 文件名逐份随机、sha256 逐份不同，
-    域名与服务器随时可换；而构建路径是编译器写进 ``__FILE__`` 的，
-    改文件名、重打包、重签名都动不了它。实测一个构建标识横跨 3 个不同案件。
+    ★这是几种关联锚里最耐用的一条：文件名与哈希可以逐份不同、域名与服务器随时可换，
+    而构建路径是编译器写进 ``__FILE__`` 的，对**已编译产物**做改名、重打包、重签名
+    都动不了它。
 
-    ★与「共用同一台服务器」的区别：涉案服务器多为转租 IP，转租商同一台机器上跑多个
-    互不相干的客户是常态，**同机 ≠ 同团伙**；而同构建标识 = 同一订单主体，可据以并案。
+    ★但它只说明"构建环境相同"，**不足以直接得出同一主体**：重新编译（换机器、
+    换 CI 工作区、换项目根目录）就会改写它。相同标识须结合其它独立证据才能定性；
+    反向的"标识不同"同理——足以排除同一次构建环境，不足以单独排除同一主体。
     """
     root = resolve_corpus(corpus)
     clusters = _corpus.shared_build_environments(_corpus.load_manifest(root))

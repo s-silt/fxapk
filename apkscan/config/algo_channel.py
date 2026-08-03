@@ -1,11 +1,11 @@
 """算法生成的下发通道枚举（A4）：``MD5(前缀 + 日期) + "." + 基域 [+ 路径]`` 这类**运行时算法生成**的
 配置/后端下发子域。
 
-背景：部分涉诈家族不硬编码下发 URL，而是每天用 ``子域 = MD5(常量前缀 + yyyyMMdd)`` 拼出新子域去拉配置
-（如 ``MD5("PREFIX-000-" + 20260723) + ".example-cfg.invalid" + "/x.txt"``）。这类 URL 静态不存在（跑起来才拼），
-``discover.classify_config_url`` 认不出——但**前缀常量、基域、MD5+SimpleDateFormat 算法**都是可提取的静态事实。
-本模块是**纯生成器框架**：给定组件（办案 agent 从样本里抠出、或从案件资料提供），按日期窗口枚举候选子域/URL，
-供被动查询历史解析 / passive DNS / 证书透明度反查。**不含任何具体前缀/域名**（那是案件数据）。
+背景：部分样本不硬编码下发 URL，而是每天用 ``子域 = MD5(常量前缀 + yyyyMMdd)`` 拼出新子域去拉配置。
+这类 URL 静态不存在（跑起来才拼），``discover.classify_config_url`` 认不出——
+但**前缀常量、基域、MD5+SimpleDateFormat 算法**都是可提取的静态事实。
+本模块是**纯生成器框架**：给定组件（由调用方从样本里抠出或另行提供），按日期窗口枚举候选子域/URL，
+供被动查询历史解析 / passive DNS / 证书透明度反查。**不含任何具体前缀/域名**（那属检材数据）。
 
 ★week-year 坑（务必）：Java ``SimpleDateFormat("YYYYMMdd")`` 的大写 ``YYYY`` 是**周年（week-year）**，
 在跨年周（12 月底 / 1 月初）与日历年不同，且其值取决于 formatter 所用 Calendar 的 **locale**——ISO

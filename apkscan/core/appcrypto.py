@@ -13,9 +13,10 @@
   由调用方保留原密文条目，绝不静默吞错、绝不抛给调用方。
 - 全程 type hints。
 
-配方对照真值（仅用于测试，不进产品逻辑）：真样本 AES-256-CFB128 + Pkcs7，
-key=UTF-8("0123456789abcdef0123456789abcdef")（32B），iv=MD5(key+str(ts)).hexdigest()[:16]
-的 UTF-8 字节（16B），载荷裸 base64（无 OpenSSL Salted__ 前缀）。
+配方形态（供实现对照，**不含具体值**）：AES-256-CFB128 + Pkcs7，key 为 32 字节 UTF-8
+字符串，iv = MD5(key + str(ts)).hexdigest()[:16] 的 UTF-8 字节（16B），载荷为裸 base64
+（无 OpenSSL Salted__ 前缀）。具体 key 属检材数据，测试用合成值；需要跑真样本对照的，
+设环境变量 ``FXAPK_GROUNDTRUTH_KEY`` 由本地注入。
 """
 
 from __future__ import annotations

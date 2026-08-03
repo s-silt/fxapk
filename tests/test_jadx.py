@@ -68,7 +68,7 @@ def test_extracts_endpoint_and_secret(monkeypatch, tmp_path) -> None:
     java = (
         'public class C {\n'
         '  String url = "https://c2.jadx-found.cn/api/report";\n'
-        '  String app_secret = "Abc123Xyz789Def456";\n'
+        '  String app_secret = "Abc123Xyz789Def456";\n'  # leak-scan: allow 反编译输出夹具，模拟被检出的硬编码凭据，值为合成串
         '  int n = obj.length;  // 不应被当域名\n'
         '}\n'
     )
@@ -133,7 +133,7 @@ def test_sdk_constant_secrets_not_flagged(monkeypatch, tmp_path) -> None:
 
 def test_real_secret_still_flagged(monkeypatch, tmp_path) -> None:
     # ★ 回归锁：真凭据 app_secret=Abc123Xyz789Def456 仍产 HIGH secret Finding。
-    java = 'class C { String app_secret = "Abc123Xyz789Def456"; }'
+    java = 'class C { String app_secret = "Abc123Xyz789Def456"; }'  # leak-scan: allow 反编译输出夹具，模拟被检出的硬编码凭据，值为合成串
     monkeypatch.setattr(jadx.subprocess, "run", _fake_run_writing(java))
     result = JadxAnalyzer().analyze(_ctx(tmp_path))
     assert any(f.category == "secret" for f in result.findings)

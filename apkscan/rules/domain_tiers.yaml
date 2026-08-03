@@ -7,8 +7,8 @@
 #       知名站点（与 KNOWN_INFRA 同口径，子串/后缀匹配，已小写）。命中 →
 #       classify_domain 返回 (无需调证, "第三方库内置站点（library-embedded）")。
 #       这类是 C1 dump dex 噪音主体（amazon / 各国银行 / 新闻 / 成人站等）。
-#       ★ 只精确后缀/关键字匹配，绝不碰任意 .vip / .com SLD —— 确保真 C2
-#       （*.synthetic-c2a.vip / *.synthetic-c2b.com）不受影响。此表只增不减。
+#       ★ 只精确后缀/关键字匹配，绝不碰任意 .vip / .com SLD —— 放开整个 SLD 会把
+#       该后缀下的待查域名一并判成无需核查。此表只增不减。
 #
 #   library_file_globs : list[str]，"已知第三方库文件路径"glob（fnmatch，已小写）。
 #       端点来源 location 命中 → tier="library-file"（pipeline 据此降可信到"待核"）。

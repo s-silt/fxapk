@@ -307,7 +307,7 @@ def test_domain_tier_downgrades_advice_to_review():
 
 
 def test_app_tier_real_c2_not_downgraded():
-    # ★ C1 回归锁：app tier（或无 tier）的真 C2（synthetic-c2a.vip）→ 建议调证，不被降档。
+    # ★ C1 回归锁：app tier（或无 tier）的待查域名 → 建议核查，不被降档。
     eps = [
         Endpoint(value="api.synthetic-c2a.vip", kind="domain", enrichment={"tier": "app"}),
         Endpoint(value="pay.synthetic-c2b.com", kind="domain"),  # 无 tier

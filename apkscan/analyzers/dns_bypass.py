@@ -8,7 +8,7 @@
   - 于是「DNS 日志里没有 X 域名」不能推出「该 App 没访问过 X」——又一个「抓不到≠没有」。
 
 本模块只回答「这个 App 的域名解析我们还看不看得见」，**不指名工具、不产端点、不作可疑判定**。
-实测语料 24 个样本中 9 个含 DoH 线格式标记（``application/dns-message``），属常见能力而非异常，
+实测语料 部分样本含 DoH 线格式标记（``application/dns-message``），属常见能力而非异常，
 故命中只作**取证方法提示**，严重度不拔高。
 
 分档（按证据硬度，不是按可疑度）：
@@ -155,7 +155,7 @@ class DnsBypassAnalyzer(BaseAnalyzer):
         return Finding(
             id="APP-MANAGED-DNS-RESOLUTION",
             title=f"App 自带域名解析（{kind}）——DNS 层抓包看不到其解析",
-            severity=Severity.LOW,      # 能力/可见性信号，非可疑度；语料 24 样本中 9 个具备
+            severity=Severity.LOW,      # 能力/可见性信号，非可疑度；语料 部分样本具备
             confidence=Confidence.MEDIUM,
             category="anti_analysis",
             description=(

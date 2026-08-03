@@ -255,7 +255,7 @@ affect automated / CI / agent callers are called out explicitly**.
 一轮真实取参因此白跑，事后才从事件日志里残留的错误串认出根因。
 
 另一件更值得记：`corpus` 的构建环境反查（`find_by_build_env` /
-`shared_build_environments`）实现完备、注释里写着"实测一个构建标识横跨 3 个案件"，
+`shared_build_environments`）实现完备、注释里写着"实测一个构建标识横跨多个案件"，
 却**没有任何调用方**。提取、解析、入库、反查四步全做了，就是没人调，
 于是"这两个样本出自同一开发环境"始终得靠人工比对 JSON 才能发现。
 接上出口当天就发现了三个长期存在的假阳性——它们一直在报告里，只因没人消费而看不见。
@@ -384,7 +384,7 @@ affect automated / CI / agent callers are called out explicitly**.
     跑完的加固样本表现成「分析失败」，并冲击既有基线与 `--strict` 退出码。
   - **落到「主张」而非「分析器」**：`endpoints` 同时扫 DEX/manifest/资源/native，DEX 不可见时
     manifest 里声明的域名、pcap 实测的连接照样成立——被阻断的只是需要完整可见性的那几条。
-  - **实测**：语料库 40 份报告中 14 份 DEX 为壳桩，各阻断 6 条结论。最能说明问题的是同包对照：
+  - **实测**：语料库 多份报告中 14 份 DEX 为壳桩，各阻断 6 条结论。最能说明问题的是同包对照：
     同一样本、同样 87 条线索 99 个端点，旧版报告说 `complete`、新版说 `stub_only`。
 
 - **★ 真样本跨修订版回归对比**：新增 `fxapk corpus regress`，比对同一批**真实样本**换版后的检出变化。
@@ -509,7 +509,7 @@ affect automated / CI / agent callers are called out explicitly**.
   - **解决的问题**：厂商识别靠 so 名/特征文件/包名等已知特征，遇未知壳或自研壳全部落空、报「未加固」
     ——而真相是 Java 侧几乎什么都没抽到，报告却让人以为静态结果完整。实测三个真样本正是如此：
     `classes.dex` 仅 1~3KB、DEX 字符串 15~57 条，却被判「未加固」。
-  - **阈值有实测依据**：24 样本标定，加固样本 DEX 字符串 15~440 条、正常 App 12867~299356 条，
+  - **阈值有实测依据**：真实样本标定，加固样本 DEX 字符串 15~440 条、正常 App 12867~299356 条，
     相差 29 倍，故取 1000 有充足余量；端到端 **命中 8/8、正常 App 误报 0/9**，厂商已识别的 7 个不重复报。
   - **只报手法不认厂商**：不写 `packed`（那是厂商归属，写了会误导「向该厂商调证」），
     只置 `is_hardened` 与 `meta["hardening_structural"]`。
@@ -539,7 +539,7 @@ affect automated / CI / agent callers are called out explicitly**.
   - **不是新引入的缺陷**：相关代码来自首个提交，旧样本同样含此类残片，只是淹没在上百条端点里未被注意。
 - **★ 一个垃圾条目不再判死整个样本**（「拒绝分析」式诱饵炸弹）：zip 炸弹前置拦截原本对**任意**
   声明超限的条目就拒绝整个 APK。但 androguard 急切解压的只有 `AndroidManifest.xml` /
-  `resources.arsc` / `classes*.dex`——真实语料里 3 个样本各塞了一对 `res/1.xml` + `assets/1.xml`，
+  `resources.arsc` / `classes*.dex`——真实语料里 多个样本各塞了一对 `res/1.xml` + `assets/1.xml`，
   声明 1000MB、压缩仅 5.5MB（三样本参数完全一致，同一工具注入），它们不在急切解压之列，却让整个
   样本被判死、什么都分析不到，**攻击者用我们自己的防护达成了完全的分析拒绝**。
   改为只对核心条目 fail-fast，非核心超限条目 `warning` + 跳过（仍由 `read_file` 逐条闸拒读，
@@ -676,7 +676,7 @@ Theme: **1.0.0 后的安全与精度加固**——一轮全项目审计 + 对抗
 
 ### Removed — 静态密文的 Tier A 确定性自动解密（`_stage_decrypt_candidates`）
 
-跨 14 个真实样本实测：该阶段一次都没有真正执行过（`decrypt_candidates_auto` 恒为
+跨多个样本实测：该阶段一次都没有真正执行过（`decrypt_candidates_auto` 恒为
 `{"attempted":0,"reason":"no crypto_recipe"}`）。原因是结构性的而非偶然——密文候选来自
 jadx 反编译的 **Java** 代码，而配方只从 **JS bundle** 逆出（`crypto_recipe` 仅扫
 `assets/` `**/www/` 与 RN bundle），两者无文件、调用点或数据流关联；把 JS 侧的 AES 流量

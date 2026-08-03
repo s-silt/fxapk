@@ -1247,9 +1247,9 @@ def capture_plan_cmd(
 
 @app.command(name="config-channel")
 def config_channel_cmd(
-    prefix: str = typer.Option(..., "--prefix", help="算法前缀常量（样本里抠出的 ENABLE_SETTING 类常量，如 PREFIX-000-）。"),
-    domain: str = typer.Option(..., "--domain", help="基域（OSS_URL 类常量，如 example-cfg.invalid）。"),
-    path: str = typer.Option("", "--path", help="配置对象路径（如 /config.txt）；空则只到域名。"),
+    prefix: str = typer.Option(..., "--prefix", help="算法前缀常量（从样本里抠出的常量字符串）。"),
+    domain: str = typer.Option(..., "--domain", help="基域（从样本里抠出的域名常量）。"),
+    path: str = typer.Option("", "--path", help="配置对象路径；空则只到域名。"),
     day: str = typer.Option("", "--date", help="中心日期 YYYY-MM-DD；默认今天。"),
     back: int = typer.Option(3, "--back", help="往前枚举天数。"),
     fwd: int = typer.Option(1, "--fwd", help="往后枚举天数。"),

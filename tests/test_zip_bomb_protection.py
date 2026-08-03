@@ -199,7 +199,7 @@ def test_reject_if_zip_bomb_raises_on_oversized_entry(tmp_path: Path, monkeypatc
 def test_reject_if_zip_bomb_allows_oversized_noncore_entry(tmp_path: Path, monkeypatch, caplog) -> None:
     """★无修复即失败：**非核心**条目声明超上限时，不得判死整个 APK。
 
-    实测语料 3 个样本各塞了一对 res/1.xml + assets/1.xml，声明 1000MB、压缩仅 5.5MB——它们不是
+    实测语料中的样本各塞了一对 res/1.xml + assets/1.xml，声明 1000MB、压缩仅 5.5MB——它们不是
     androguard 急切解压的对象，却让原实现拒绝整个样本、什么都分析不到，即用我们自己的防护达成
     「拒绝分析」。修前此处会抛 ApkParseError。这些条目仍由 read_file 的逐条闸拒读，不会被真解压。
     """

@@ -526,12 +526,12 @@ def test_pcap_syn_only_is_pending_not_high_confidence() -> None:
 def test_pcap_aggregates_remote_endpoint_across_five_tuples() -> None:
     """★ P0-1：同一远端的 本机→远端(出载荷) + 远端→本机(SYN-ACK+入载荷) 两条 5 元组聚成一个远端，
     双向载荷 → established；out/in 字节与 connection_count 正确累计。"""
-    out1 = _eth(_ipv4(_tcp_flags(b"A" * 100, 50000, 7689, 0x18), 6, "10.0.0.2", "100.64.7.14"), 0x0800)  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
-    synack = _eth(_ipv4(_tcp_flags(b"", 7689, 50000, 0x12), 6, "100.64.7.14", "10.0.0.2"), 0x0800)  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
-    in1 = _eth(_ipv4(_tcp_flags(b"B" * 70, 7689, 50000, 0x18), 6, "100.64.7.14", "10.0.0.2"), 0x0800)  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
+    out1 = _eth(_ipv4(_tcp_flags(b"A" * 100, 50000, 7689, 0x18), 6, "10.0.0.2", "100.64.7.14"), 0x0800)
+    synack = _eth(_ipv4(_tcp_flags(b"", 7689, 50000, 0x12), 6, "100.64.7.14", "10.0.0.2"), 0x0800)
+    in1 = _eth(_ipv4(_tcp_flags(b"B" * 70, 7689, 50000, 0x18), 6, "100.64.7.14", "10.0.0.2"), 0x0800)
     summary = pcap_ingest.parse_pcap_bytes(_pcap([out1, synack, in1]))
     node = next(
-        r for r in pcap_ingest.remote_endpoints(summary) if r.ip == "100.64.7.14" and r.port == 7689  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
+        r for r in pcap_ingest.remote_endpoints(summary) if r.ip == "100.64.7.14" and r.port == 7689
     )
     assert node.state == "established"
     assert node.out_bytes == 100
@@ -539,7 +539,7 @@ def test_pcap_aggregates_remote_endpoint_across_five_tuples() -> None:
     assert node.connection_count == 1
     lead = next(
         l for l in pcap_ingest.to_report_leads(summary)
-        if l.category == LeadCategory.IP and "100.64.7.14" in l.value  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
+        if l.category == LeadCategory.IP and "100.64.7.14" in l.value
     )
     assert lead.advice == "建议调证" and lead.confidence == Confidence.HIGH
 
@@ -580,7 +580,7 @@ def test_runtime_endpoints_filters_syn_only_no_payload() -> None:
 def test_fanzha_interception_node_excluded() -> None:
     """★ Codex fengzhixin 案抓包交接 §6：反诈拦截节点（183.192.65.101）即便有双向载荷（拦截页
     返回），也标『无需调证·反诈拦截』、不升入 runtime 端点（会污染归因）；业务接入节点正常保留。"""
-    fanzha, biz = "183.192.65.101", "100.64.113.177"  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
+    fanzha, biz = "183.192.65.101", "100.64.113.177"
     # fanzha：双向载荷（拦截页会回数据）——本应被"反诈拦截"排除，而非因"有载荷"被当业务后端保留。
     out1 = _eth(_ipv4(_tcp_flags(b"GET /", 50001, 443, 0x18), 6, "10.0.0.2", fanzha), 0x0800)
     in1 = _eth(_ipv4(_tcp_flags(b"HTTP 302", 443, 50001, 0x18), 6, fanzha, "10.0.0.2"), 0x0800)
@@ -589,7 +589,7 @@ def test_fanzha_interception_node_excluded() -> None:
 
     ip_vals = {e.value for e in pcap_ingest.to_runtime_endpoints(summary) if e.kind == "ip"}
     assert "183.192.65.101" not in ip_vals  # 反诈拦截节点排除，绝不升 runtime 端点污染归因
-    assert "100.64.113.177" in ip_vals  # 业务接入节点正常保留  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
+    assert "100.64.113.177" in ip_vals  # 业务接入节点正常保留
 
     fz_lead = next(
         l for l in pcap_ingest.to_report_leads(summary)

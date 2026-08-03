@@ -68,7 +68,7 @@ logger = logging.getLogger(__name__)
 
 _RULES_NAME = "packers"
 
-#: APK 核心文件名——每个解析器必找的三个。诱饵条目精确冒充它们（24 样本实测：411 条诱饵首段无一例外）。
+#: APK 核心文件名——每个解析器必找的三个。诱饵条目精确冒充它们（实测：411 条诱饵首段无一例外）。
 _CORE_APK_NAMES = frozenset({"AndroidManifest.xml", "classes.dex", "resources.arsc"})
 #: 多 dex 的 classes2.dex / classes3.dex …（与 _CORE_APK_NAMES 同等对待）。
 _EXTRA_DEX_RE = re.compile(r"classes\d+\.dex")
@@ -76,7 +76,7 @@ _EXTRA_DEX_RE = re.compile(r"classes\d+\.dex")
 #: 「拒绝分析」诱饵炸弹的声明大小门槛（实测语料里的构造声明 1000MB；正常 APK 单条目远低于此）。
 _DENIAL_BOMB_DECLARED_BYTES = 256 * 1024 * 1024
 
-#: stub dex 判据：DEX 字符串数下限。24 样本实测双峰分离极干净——加固样本 15~440 条，
+#: stub dex 判据：DEX 字符串数下限。实测双峰分离极干净——加固样本 15~440 条，
 #: 正常 App 12867~299356 条，**29 倍鸿沟**，故取 1000 有充足余量。
 #: ★这是结构判据、不依赖厂商特征，故对未知壳 / 自研壳同样有效（与抗 fork 的思路一致）。
 _STUB_MAX_DEX_STRINGS = 1000
@@ -227,12 +227,12 @@ class PackingAnalyzer(BaseAnalyzer):
     def _flag_core_name_decoys(self, result: AnalyzerResult, file_paths: list[str]) -> None:
         """检出「以 ``/`` 开头、首段恰为 APK 核心文件名」的诱饵条目，写 meta 并产 Finding。
 
-        ★依据（24 个真实样本实测）：7 个样本共 411 条此类条目，**首段无一例外**只有三种——
+        ★依据（真实样本实测）：部分样本含数百条此类条目，**首段无一例外**只有三种——
         ``AndroidManifest.xml``×153、``classes.dex``×153、``resources.arsc``×105，即精确瞄准每个
         APK 解析器必找的那三个文件。形如 ``/AndroidManifest.xml///.png``、``/classes.dex/<乱码>.json``。
 
         ★为什么近乎零假阳：ZIP 规范明确要求条目名**不得以斜杠开头**（不得为绝对路径），Android
-        构建工具也从不产生这种条目。出现即人为构造。语料中 17 个样本一条都没有。
+        构建工具也从不产生这种条目。出现即人为构造。语料中 多个样本一条都没有。
 
         ★不做的事：不据此判定"是哪个加固工具"——实测各样本的扩展名分布逐构建随机化，细粒度签名
         每样本都不同，当不了家族键（与 dpt-shell「so 名随机、assets 常量固定」同理）。只报手法。
@@ -289,7 +289,7 @@ class PackingAnalyzer(BaseAnalyzer):
         就全部落空、报「未加固」——而真相是 Java 侧几乎什么都没抽到，报告却让人以为静态端点完整。
         实测三个真样本正是如此：classes.dex 仅 1~3KB、DEX 字符串 15~57 条，却被判「未加固」。
 
-        ★阈值有实测依据（24 样本标定）：加固样本 DEX 字符串 15~440 条，正常 App 12867~299356 条，
+        ★阈值有实测依据（真实样本标定）：加固样本 DEX 字符串 15~440 条，正常 App 12867~299356 条，
         **相差 29 倍**，故取 1000 有充足余量。第二判据取「dex 极小」或「有 App 自有 .so」二选一——
         真 App 即便字符串少也不会只有几 KB dex；纯资源类小 App 无 .so 时不误伤。
 
@@ -346,7 +346,7 @@ class PackingAnalyzer(BaseAnalyzer):
         """检出「声明解压极大、实际压缩很小」的**非核心**条目——「拒绝分析」式诱饵炸弹。
 
         ★手法：塞一两个声明 1GB、实际只有几 MB 的垃圾条目（如 ``res/1.xml``），任何带 zip 炸弹
-        防护的工具见了就拒绝**整个**样本 → 攻击者用我们的防护达成完全的分析拒绝。实测语料 3 个样本
+        防护的工具见了就拒绝**整个**样本 → 攻击者用我们的防护达成完全的分析拒绝。实测语料中的样本
         各有一对 ``res/1.xml`` + ``assets/1.xml``，声明 1000MB / 压缩 5.5MB（180 倍），三样本参数一致。
 
         ★fxapk 已不再因此判死整包（见 core.apk._reject_if_zip_bomb）：非核心超限条目只跳过该条目、

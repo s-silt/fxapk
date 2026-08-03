@@ -2,7 +2,7 @@
 
 覆盖：
 - library-embedded 知名站点 / 银行 / 成人站 → 无需调证。
-- ★ 真 C2 域名（synthetic-c2a.vip / synthetic-c2b.com）→ 建议调证（回归锁，不得误杀）。
+- ★ 不在名单里的待查域名 → 建议核查（回归锁，不得被降噪误杀）。
 - KNOWN_INFRA 新增 m3w.cn → 无需调证。
 - domain_source_tier：library-file / bulk-string / app 三档判定。
 - best_tier：多来源取最可信档。
@@ -24,10 +24,11 @@ def test_library_embedded_well_known_sites_skip():
 
 
 def test_real_c2_domains_still_investigate():
-    # ★ 真 C2（示例应用样本）不得被 library-embedded 误降——精确后缀绝不碰任意 .vip/.com SLD。
+    # ★ 待查域名不得被 library-embedded 误降——精确后缀绝不碰任意 .vip/.com SLD。
+    #   域名全为合成值；判据只看后缀是否精确命中名单，不看具体注册域。
     for dom in ("synthetic-c2a.vip", "synthetic-c2b.com", "api.synthetic-c2a.vip", "pay.synthetic-c2b.com"):
         advice, _reason = infra.classify_domain(dom)
-        assert advice == infra.ADVICE_INVESTIGATE, f"{dom} 应建议调证（真 C2 不得误杀）"
+        assert advice == infra.ADVICE_INVESTIGATE, f"{dom} 应建议核查（待查域名不得误杀）"
 
 
 def test_protocol_identifier_urls_are_not_endpoints():
@@ -74,19 +75,20 @@ def test_common_word_slds_are_demoted_not_dropped():
 
 
 def test_classify_ip_real_backends_still_investigate():
-    """★最重要的一条：真实团伙后端不得被任何降级判据碰到。
+    """★最重要的一条：待查后端不得被任何降级判据碰到。
 
-    取自实测语料里已进调证清单的形态：境外 IDC 段、带高位端口的裸后端。
+    覆盖的是**形态**：非低段位、带高位端口的裸地址、纯地址三种写法。
+    值本身全部合成——判据只看 is_global 与降级条件，不看具体归属。
     """
     for value in (
-        "192.88.99.109:443/tcp",  # leak-scan: allow classify_ip 分档夹具，非 is_global 会直接落 ADVICE_SKIP、advice 断言失去意义
-        "192.88.99.26:30147/tcp",  # leak-scan: allow classify_ip 分档夹具，非 is_global 会直接落 ADVICE_SKIP、advice 断言失去意义
-        "192.88.99.17",  # leak-scan: allow classify_ip 分档夹具，非 is_global 会直接落 ADVICE_SKIP、advice 断言失去意义
-        "192.88.99.163",  # leak-scan: allow classify_ip 分档夹具，非 is_global 会直接落 ADVICE_SKIP、advice 断言失去意义
-        "192.88.99.121",  # leak-scan: allow classify_ip 分档夹具，非 is_global 会直接落 ADVICE_SKIP、advice 断言失去意义
-        "192.88.99.128",  # leak-scan: allow classify_ip 分档夹具，非 is_global 会直接落 ADVICE_SKIP、advice 断言失去意义
-        "192.88.99.27",  # leak-scan: allow classify_ip 分档夹具，非 is_global 会直接落 ADVICE_SKIP、advice 断言失去意义
-        "192.88.99.45",  # leak-scan: allow classify_ip 分档夹具，非 is_global 会直接落 ADVICE_SKIP、advice 断言失去意义
+        "192.88.99.109:443/tcp",  # leak-scan: allow 分档夹具用 6to4 已弃用段（is_global 为真才走得到该分支），非案件语料
+        "192.88.99.26:30147/tcp",  # leak-scan: allow 分档夹具用 6to4 已弃用段（is_global 为真才走得到该分支），非案件语料
+        "192.88.99.17",  # leak-scan: allow 分档夹具用 6to4 已弃用段（is_global 为真才走得到该分支），非案件语料
+        "192.88.99.163",  # leak-scan: allow 分档夹具用 6to4 已弃用段（is_global 为真才走得到该分支），非案件语料
+        "192.88.99.121",  # leak-scan: allow 分档夹具用 6to4 已弃用段（is_global 为真才走得到该分支），非案件语料
+        "192.88.99.128",  # leak-scan: allow 分档夹具用 6to4 已弃用段（is_global 为真才走得到该分支），非案件语料
+        "192.88.99.27",  # leak-scan: allow 分档夹具用 6to4 已弃用段（is_global 为真才走得到该分支），非案件语料
+        "192.88.99.45",  # leak-scan: allow 分档夹具用 6to4 已弃用段（is_global 为真才走得到该分支），非案件语料
     ):
         advice, _reason = infra.classify_ip(value)
         assert advice == infra.ADVICE_INVESTIGATE, f"{value} 应建议调证（真后端不得误杀）"
@@ -144,7 +146,7 @@ def test_is_low_octet_ipv4_shape_only():
     """兄弟池判据只看形态：带端口要先剥、非 IPv4 与解析不了的一律 False。"""
     assert infra.is_low_octet_ipv4("1.3.1.1") is True  # leak-scan: allow 低段位形态夹具，判据测的正是「四段≤32 与版本号同形」这一点，值必须保持字面
     assert infra.is_low_octet_ipv4("23.21.5.12:8080/tcp") is True  # leak-scan: allow 低段位形态夹具，判据测的正是「四段≤32 与版本号同形」这一点，值必须保持字面
-    assert infra.is_low_octet_ipv4("192.88.99.109") is False  # leak-scan: allow classify_ip 分档夹具，非 is_global 会直接落 ADVICE_SKIP、advice 断言失去意义
+    assert infra.is_low_octet_ipv4("192.88.99.109") is False  # leak-scan: allow 分档夹具用 6to4 已弃用段（is_global 为真才走得到该分支），非案件语料
     assert infra.is_low_octet_ipv4("2001:db8::1") is False
     assert infra.is_low_octet_ipv4("1.3.101.112.1") is False
     assert infra.is_low_octet_ipv4("") is False

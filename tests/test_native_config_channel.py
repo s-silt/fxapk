@@ -1,10 +1,9 @@
 """native 控制面通道：地址是算出来的，不是静态串。
 
 ★为什么这个分析器必须存在：config-chain 一直假设控制面地址以 http(s) URL 形态摆在
-DEX 里，remote_config / config_probe 都只扫具体 URL。实测样本的地址由
-``MD5(日期+AppName+SDKVersion+云厂商盐)`` 每天现算，静态里只有 ``%s`` 模板——被动发现
-路径抓不到它，报告里 remote_config 与 config_probe_plan 全空，读的人会以为这个样本
-没有远程配置通道。
+DEX 里，remote_config / config_probe 都只扫具体 URL。实测样本的地址由一个**每天现算的
+哈希子域**承载，静态里只有 ``%s`` 模板——被动发现路径抓不到它，报告里 remote_config 与
+config_probe_plan 全空，读的人会以为这个样本没有远程配置通道。
 """
 
 from __future__ import annotations

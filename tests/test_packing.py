@@ -453,7 +453,7 @@ def _finding_ids(result: AnalyzerResult) -> list[str]:
 def test_core_name_decoy_entries_flagged():
     """★真实样本形态：以 / 开头、首段恰为核心文件名的条目 → 产 Finding 并记 meta。
 
-    实测 24 个样本中 7 个有此构造、共 411 条，首段无一例外只有 AndroidManifest.xml /
+    实测 部分样本有此构造、共 411 条，首段无一例外只有 AndroidManifest.xml /
     classes.dex / resources.arsc 三种——精确瞄准每个 APK 解析器必找的文件。
     """
     files = {
@@ -473,7 +473,7 @@ def test_core_name_decoy_entries_flagged():
 
 
 def test_normal_apk_has_no_decoy_finding():
-    """★正常 APK（无绝对路径条目）不得命中——语料中 17/24 样本一条都没有。"""
+    """★正常 APK（无绝对路径条目）不得命中——语料中多数样本一条都没有。"""
     files = {
         "AndroidManifest.xml": b"<manifest/>", "classes.dex": b"dex\n035",
         "resources.arsc": b"x", "res/layout/main.xml": b"x", "assets/config.json": b"{}",
@@ -548,7 +548,7 @@ def test_normal_app_with_many_strings_not_flagged():
 def test_denial_of_analysis_bomb_flagged():
     """★真实样本形态：声明解压极大的非核心垃圾条目 → 产 Finding 并记 meta。
 
-    实测语料 3 个样本各含一对 res/1.xml + assets/1.xml，声明 1000MB、压缩 5.5MB（180 倍），
+    实测语料中的样本各含一对 res/1.xml + assets/1.xml，声明 1000MB、压缩 5.5MB（180 倍），
     三样本参数完全一致。作用是让带 zip 炸弹防护的工具拒绝整个样本 = 用防护达成分析拒绝。
     """
     ctx = FakeContext(

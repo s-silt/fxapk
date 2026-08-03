@@ -519,9 +519,9 @@ _EXPECTED_VENDOR_HOSTS = frozenset({
 
 #: 回显服务的独立记账，理由同上。
 _EXPECTED_ECHO_SERVICES = frozenset({
-    "ip.sb",        # leak-scan: allow 记账：回显服务，语料 3 样本
-    "ip-api.com",   # leak-scan: allow 记账：IP 地理 API，语料 1 样本
-    "ip9.com.cn",   # leak-scan: allow 记账：境内 IP 查询站，语料 1 样本
+    "ip.sb",        # leak-scan: allow 记账：回显服务，实测语料中的样本
+    "ip-api.com",   # leak-scan: allow 记账：IP 地理 API，实测语料中的样本
+    "ip9.com.cn",   # leak-scan: allow 记账：境内 IP 查询站，实测语料中的样本
 })
 
 

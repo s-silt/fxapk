@@ -118,7 +118,11 @@ def test_decrypt_envelope_timestamp_as_str() -> None:
 
 
 def test_derive_iv_known_value() -> None:
-    """iv 派生正确性：ts=1700000000000 → e83b22226e37f79f。"""
+    """iv 派生正确性：给定 key 与 ts，落在下面这个已知值上。
+
+    期望值按 ``md5(key + str(ts)).hexdigest()[:16]`` **独立复算**得出，
+    不是取被测函数的输出——否则这条断言恒真，改坏派生逻辑也测不出来。
+    """
     recipe = CryptoRecipe(key=_KEY)
     iv = appcrypto._derive_iv(recipe, _TS)
     assert iv == b"e83b22226e37f79f"

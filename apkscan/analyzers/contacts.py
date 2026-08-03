@@ -593,7 +593,7 @@ def _valid_for_kind(kind: str, value: str) -> bool:
 # 手机号提取已于 2026-07-24 整类移除（详见 rules/contacts.yaml 的说明注释）。
 # 原 _classify_phone / _longest_repeat_run / 占位号 denylist / vanity-run 启发式
 # 一并删除：规则里没有 kind=phone 后它们永不被调用，留着是死代码。
-# 实证依据：语料库 15 样本提取的 12 个「手机号」经逐条回原文核验 12/12 全为误报
+# 实证依据：语料库样本提取的「手机号」经逐条回原文核验，全部为误报
 #（矢量图坐标 / Lottie 数值 / π / SHA 常量 / 合约字节码 / 货币配置）。
 # ★短信转发分析器（sms_forwarding.py）的手机号提取是**上下文门控**的
 #  （须与转发关键词共现才记证据），属真线索，不受本次移除影响。

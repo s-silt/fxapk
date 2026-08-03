@@ -245,14 +245,30 @@ def _ipv6_findings(line: str) -> list[tuple[str, str]]:
 #: 故 ``os.environ.get("FXAPK_FOFA_KEY")`` 这类**读环境变量**的写法不会命中。
 _SECRET_RE = re.compile(
     r"""(?ix)
-    \b(?P<name>api[_-]?key|apikey|access[_-]?key|secret[_-]?key|secret|token
-       |password|passwd|pwd|credential|bearer)
+    (?<![a-z0-9_])
+    (?P<name>(?:[a-z0-9]+[_-])*
+       (?:api[_-]?key|apikey|access[_-]?key|secret|token
+          |password|passwd|pwd|credential|bearer|key))
     \s*[:=]\s*
+    (?:(?P<wrapper>[A-Za-z0-9_.\-]{1,24})\()?
     (?P<quote>["'])
     (?P<value>[A-Za-z0-9_\-./+]{12,})
     (?P=quote)
     """
 )
+
+#: 从环境读取的包裹函数——**这是唯一的豁免依据**。
+#:
+#: ★不要改回"按值的长相豁免"（如"全大写下划线就当变量名"）：扫描器无法从
+#:   字符串长相分辨它是环境变量索引还是硬编码值，形如 ``REAL_SECRET_VALUE_7Q9K``
+#:   的真凭据会被整类放过。判断必须落在**语法位置**上。
+_ENV_READER_RE = re.compile(r"(?i)(?:^|\.)(?:environ\.get|getenv)\Z")
+# ★两处覆盖面说明：
+#   - name 含裸 ``key``：凭据未必以 api_key/secret_key 这类复合名出现。
+#     ``(?<![a-z0-9_])`` 是词首边界，挡住 monkey / hotkey / _key_of 这类。
+#   - 允许值被一层函数包住（``key=SomeCodec("…")``）：赋值右侧不一定紧跟引号。
+#   ★不收 ``iv`` / ``mask``：加密测试向量的固定 IV、协议位掩码都是合规写法，
+#     收进来误伤远大于收益。
 
 #: 明显占位值：命中即不算泄漏。真实凭据不会自称 synthetic/placeholder。
 _PLACEHOLDER_MARKERS: tuple[str, ...] = (
@@ -274,6 +290,21 @@ _PLACEHOLDER_MARKERS: tuple[str, ...] = (
     "invalid",
     "unset",
     "<",
+)
+
+#: **标识符形态**的值：枚举成员、Finding ID、字段名、meta 键名长这样，不是凭据。
+#:   ``DEX_TRUNCATED_META_KEY = "dex_truncated_meta"``
+#:   ``RUNTIME_CREDENTIAL = "RUNTIME_CREDENTIAL"``
+#:   ``FINDING_SECRET = "JS-HARDCODED-SECRET"``
+#:
+#: 两种收：全小写分段（可含数字），或全大写分段且**每段纯字母**。
+#:
+#: ★判据落在**值**上而不是常量名上：``API_KEY = "<真凭据>"`` 仍须被拦，
+#:   所以不能按"名字全大写就当常量定义"放行。
+#: ★大写侧要求每段纯字母，正是为了把 ``REAL_SECRET_VALUE_7Q9K`` 这类留在拦截面内：
+#:   它有 ``7Q9K`` 这样的字母数字混合段，是随机凭据的特征，而枚举名不会长这样。
+_IDENT_VALUE_RE = re.compile(
+    r"(?:[a-z][a-z0-9]*(?:[_-][a-z0-9]+)+|[A-Z]+(?:[_-][A-Z]+)+)\Z"
 )
 
 #: 连续序列片段：出现即说明这串是人手敲的占位（``0123456789abcdef…``），不是随机凭据。
@@ -302,6 +333,8 @@ def _looks_placeholder(value: str) -> bool:
         return True
     if _has_repeated_block(value):
         return True
+    if _IDENT_VALUE_RE.match(value):
+        return True
     stripped = low.strip("-_./+")
     return len(set(stripped)) <= 2  # "aaaaaaaaaaaa" / "000000000000" 之类
 
@@ -309,6 +342,10 @@ def _looks_placeholder(value: str) -> bool:
 def _secret_findings(line: str) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     for match in _SECRET_RE.finditer(line):
+        # 值裹在环境读取调用里（``os.environ.get("X")``）＝这是变量名不是值，放行。
+        # 只认这一种语法位置，不看值长什么样。
+        if _ENV_READER_RE.search(match.group("wrapper") or ""):
+            continue
         value = match.group("value")
         if _looks_placeholder(value):
             continue

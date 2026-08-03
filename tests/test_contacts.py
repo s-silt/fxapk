@@ -267,7 +267,7 @@ def test_channel_leads_do_not_disturb_contacts():
 def test_phone_type_removed_no_bare_number_extraction():
     """裸手机号不再被提取为联系方式线索。
 
-    移除依据（实证）：语料库 15 个样本提取出的 12 个「手机号」逐条回原始 snippet 核验，
+    移除依据（实证）：语料库 多个样本提取出的 12 个「手机号」逐条回原始 snippet 核验，
     **12/12 全为误报**，来源包括矢量图 path 坐标、Lottie 动画数值与颜色分量、数学常量 π、
     SHA 初始常量、以太坊合约字节码、货币配置上限。11 位数字窗口在浮点/十六进制串里无处不在，
     靠正则边界修不干净；而该类型产出 advice=建议调证 + subject=电信运营商，

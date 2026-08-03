@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -20,7 +21,8 @@ from apkscan.analyzers.crypto_recipe import CryptoRecipeAnalyzer
 from apkscan.core.models import LeadCategory
 from tests.conftest import FakeContext
 
-_EXPECTED_KEY = "0123456789abcdef0123456789abcdef"
+# 真样本 ground-truth 的期望 key 不写进仓库：由本地环境变量注入，未设则跳过该用例。
+_EXPECTED_KEY = os.environ.get("FXAPK_GROUNDTRUTH_KEY", "")
 _GROUNDTRUTH_APKS = sorted((Path(__file__).resolve().parent.parent / "ybku").glob("*.apk"))
 
 # 合成 JS：CryptoJS AES-CFB/Pkcs7 + 硬编码 key（utf8）+ iv=MD5(key+ts).substring(0,16)
@@ -254,7 +256,10 @@ def test_iv_derive_unknown_when_no_md5_no_iv() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not _GROUNDTRUTH_APKS, reason="本地无样本，跳过真值验证")
+@pytest.mark.skipif(
+    not _GROUNDTRUTH_APKS or not _EXPECTED_KEY,
+    reason="本地无样本、或未设 FXAPK_GROUNDTRUTH_KEY，跳过真值验证",
+)
 def test_groundtruth_key_extracted() -> None:
     from apkscan.core.apk import ApkParseError, load_apk
     from apkscan.core.models import AnalysisConfig

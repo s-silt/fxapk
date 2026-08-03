@@ -122,7 +122,7 @@ def _closure_status(report: dict | None) -> str | None:
 def revision_of(entry: dict) -> str:
     """一条 manifest 记录的「修订版」标识：``tool_version@完整 ruleset_digest``。
 
-    ★为什么不只用 tool_version：实测语料库 14 个样本里，**被重跑过的三个全部是同 tool_version、
+    ★为什么不只用 tool_version：实测语料里，**被重跑过的样本全部是同 tool_version、
     不同 ruleset_digest**——真实迭代节奏是「版本号不动、规则集天天在动」。只按版本号切版，
     一整轮规则改动的效果一份都量不出来。规则集变了检出就可能变，它必须进版本坐标。
 
