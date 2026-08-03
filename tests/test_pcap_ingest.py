@@ -1060,3 +1060,28 @@ def test_remote_endpoints_exposes_per_connection_local_port_and_window(monkeypat
     c = re.connections[0]
     assert c.local_port == 50002                   # 本机临时端口（出站 src_port = 入站 dst_port）
     assert c.first_ts == 1.0 and c.last_ts == 2.5  # 两方向时间区间并集
+
+def test_ingest_and_advice_calibers_differ_on_purpose() -> None:
+    """摄取层与出口层对"公网"的判据**有意不同**，这条锁住的是分工本身。
+
+    ``_ip_public`` 问的是"这是不是一个可上报的远端"（并集口径，与 probe 侧对齐）；
+    ``infra.classify_ip`` 问的是"值不值得调证"。CGNAT 正踩在两者的缝上：
+    它确实是远端（该被摄取），但运营商级 NAT 没有可调证的租户（不该进调证出口）。
+
+    ★谁要是把 ``_ip_public`` "顺手"改成 ``is_global``，这条会红——那不是笔误，
+      是会破坏 pcap/probe 并集口径的改动，须连同 probe 侧一起重新设计。
+    """
+    from apkscan.core import infra
+
+    cgnat = "100.64.7.14"
+    assert pcap_ingest._ip_public(cgnat) is True, "摄取层：CGNAT 是远端，应被收下"
+    assert infra.classify_ip(cgnat)[0] == infra.ADVICE_SKIP, "出口层：CGNAT 无调证对象"
+
+    # 对照：私网在两层都不该被当远端 / 调证对象——分歧只在 CGNAT 这一档上
+    assert pcap_ingest._ip_public("10.0.0.5") is False
+    assert infra.classify_ip("10.0.0.5")[0] == infra.ADVICE_SKIP
+
+    # ★这里**不放**"真公网"对照组：要一个 is_global=True 的字面就得引入
+    #   192.88.99.x 那类依赖标准库特殊段分类的地址，而那正是另一项待清理的债
+    #   （见任务「测试夹具不再依赖 ipaddress 的特殊段分类偶然性」）。
+    #   本条锁的是"两层判据在 CGNAT 上有意分歧"，不需要第三组数据。
