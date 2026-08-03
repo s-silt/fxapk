@@ -3,6 +3,28 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
+## 1.5.2 — 2026-08-03
+
+仓库卫生版本，**无功能变更、无行为变更**。已发布的 1.5.1 及更早版本建议不再使用。
+
+### Changed
+
+- **示例值与测试夹具统一为合成值。** 注释、docstring、CLI `--help` 文本与测试夹具中的
+  举例值一律改为明显合成的占位值；需要对照真实检材运行的用例改为由环境变量
+  `FXAPK_GROUNDTRUTH_KEY` 注入，未设置则跳过。
+- **阈值说明改为只保留可复现的测量值。** 判据注释保留数值区间（任何人重跑同类工具都能得到），
+  不再记录标定语料的规模与分布。
+
+### Fixed
+
+- **`leak-scan` 的凭据判据补齐三类此前完全命中不到的形态**：
+  - 复合命名 —— `client_secret` / `private_key` / `auth_token` / `encryption_key` 等
+    （下划线是正则单词字符，原先靠 `\b` 锚定的裸词分支匹配不到它们）；
+  - 裸 `key` 命名，以及赋值右侧先过一层编码函数的写法（`key=SomeCodec("…")`）；
+  - 占位判定新增标识符形态（枚举成员 / Finding ID），避免上述扩容带来的误报。
+- **`leak-scan` 的环境变量豁免改为按语法位置判定。** 仅当值出现在 `os.environ.get(...)` /
+  `getenv(...)` 调用内才放行；此前按「值的字符形态」放行，会把长得像变量名的硬编码值整类漏掉。
+
 ## 1.5.1 — 2026-08-02
 
 > ⚠ **本版含一处破坏性变更**：`digest` 的默认值由明文翻转为脱敏。版本号取 patch 是有意的
