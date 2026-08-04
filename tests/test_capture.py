@@ -3661,6 +3661,13 @@ def test_floor_pcap_auto_ingested_into_endpoints(monkeypatch, tmp_path):
         f"被排除的拦截节点没有出现在 playbook 里：{playbook_text}"
     )
     assert "拦截" in playbook_text and "复核" in playbook_text
+    # ★更要紧的是落进**持久产物**：playbook 只在 run() 的返回值里，转交 / 离线复审
+    #   runtime_report.json 的人看不到。名单误收导致的端点消失必须能从产物里审计。
+    #   第一版只断言了 playbook，恰好漏掉这一层（复审实跑指出）。
+    exclusions = (payload.get("capture_signals") or {}).get("endpoint_exclusions") or {}
+    assert exclusions.get("known_intercept_ips") == ["203.0.113.77"], (
+        f"拦截节点排除没有落进 runtime_report.json 的 capture_signals：{exclusions}"
+    )
 
 
 # ---------------------------------------------------------------------------

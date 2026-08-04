@@ -169,15 +169,15 @@ def _add_endpoint(collector: EndpointCollector, raw: str, path: str, snippet: st
         #   整类漏掉：URL 端点不直接产 Lead（见 leads 模块首段），也不进富化目标，于是形如
         #   ``window.config={api:"https://x.com/api"}`` 的真后端既不发函也不进闭环。
         #   与 endpoints.py 的 URL-host 通道同口径。
-        _add_host_endpoint(collector, host, evidence, tier)
+        _add_host_endpoint(collector, host, evidence, tier, bare=False)
         return
     # 裸域名 / 裸 IP：必须过既有形态校验（避免把 a.length / rect.top 之类代码当域名）。  # leak-scan: allow 注释里的 rect.top 是属性访问示例，非域名
     if valid_url_host(value) and "." in value:
-        _add_host_endpoint(collector, value, evidence, tier)
+        _add_host_endpoint(collector, value, evidence, tier, bare=True)
 
 
 def _add_host_endpoint(
-    collector: EndpointCollector, host: str, evidence: Evidence, tier: str
+    collector: EndpointCollector, host: str, evidence: Evidence, tier: str, *, bare: bool
 ) -> None:
     """把一个 host 收成 domain 或 ip 端点（按形态分流），并标来源档。
 
@@ -185,11 +185,19 @@ def _add_host_endpoint(
       ``classify_ip`` + ASN/IDC 调证路径，域名走 ``classify_domain`` + ICP/WHOIS 注册人路径。
       把裸 IP 收成 domain，会拿域名模板去套一个 IP，且完全绕开 IP 侧的形态判据
       （公共解析器、低段位版本号、bogon 这些一个都不生效）。
+
+    ``bare`` 区分来源语义，**IP 侧的过滤强度按它分档**（与 ``endpoints.py`` 同口径）：
+
+    - ``bare=True``（裸四段字面）：过 ``is_noise_bare_ip``——末段为 0、bogon、占位/版本号形态
+      在裸字面里绝大多数不是地址。
+    - ``bare=False``（来自完整 URL 的 host）：**不过**那条形态判据。写在 URL 里的 host 是
+      **强地址性证据**——``http://<末段为0的IP>/x`` 里那个值就是当地址用的，按"疑似网络地址"
+      删掉是纯漏报。私网 URL 也留证（标 ``is_private``），它至少是运营入口。
+      ``is_noise_bare_ip`` 的 docstring 本就写明「仅作用于裸 IP」。
     """
     ip_obj = parse_ipv4(host)
     if ip_obj is not None:
-        # 与 endpoints/js_bundle 同口径的裸 IP 去噪：bogon/保留段、占位与版本号形态。
-        if is_noise_bare_ip(host):
+        if bare and is_noise_bare_ip(host):
             return
         collector.add(host, "ip", evidence, is_private=ip_is_private(ip_obj))
     else:

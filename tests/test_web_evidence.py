@@ -512,13 +512,34 @@ def test_bare_ip_in_web_config_is_ip_kind_not_domain() -> None:
     )
 
 
-def test_web_bare_ip_noise_filtered_same_as_apk() -> None:
-    """网页侧的裸 IP 去噪与 APK 侧同口径：bogon / 保留段不产端点。"""
+def test_bare_ip_literal_noise_filtered_but_url_host_kept() -> None:
+    """裸 IP 字面过形态去噪，**完整 URL 里的 host 不过**——两者的证据强度不同。
+
+    ★这条最初写反了：夹具名字写「bare」、输入却全是完整 URL，把「URL host 也按裸 IP 去噪」
+      这个错口径固化成了测试。复审实跑指出后果：``http://<末段为0的IP>/x`` 与私网 URL
+      都只留下 url 端点、不派生 ip 端点，而 URL 端点不产 Lead——纯漏报。
+
+      判据依据：``is_noise_bare_ip`` 的 docstring 本就写明「仅作用于裸 IP」；``endpoints.py``
+      的 URL-host 通道同样不过它。写在 URL 里的 host 是**强地址性证据**，末段为 0 也好、
+      私网也好，那个值就是当地址用的。
+    """
+    # 裸字面：形态去噪照常生效
     for noise in ("127.0.0.1", "0.0.0.0", "10.0.0.0"):
-        html = f'<html><script>window.api = "http://{noise}/x";</script></html>'.encode()
+        html = f'<html><script>window.api = "{noise}";</script></html>'.encode()
         result = WebInlineConfigAnalyzer().analyze(_ctx({"web/i.html": html}))
         vals = {ep.value for ep in result.endpoints if ep.kind == "ip"}
-        assert noise not in vals, f"{noise} 应被裸 IP 去噪拦下"
+        assert noise not in vals, f"裸字面 {noise} 应被形态去噪拦下"
+
+    # 完整 URL 里的 host：不过形态去噪，一律留证
+    # ★公网侧的夹具取 6to4 弃用段、且末段为 0：裸字面会被形态去噪拦下，而 is_private 为假，
+    #   正好验到「URL 里的它照收、且不被误标私网」两件事。RFC 5737 文档段在这里不适用——
+    #   ipaddress 把它判 private，验不到公网那一半。
+    for addr, private in (("192.88.99.0", False), ("10.0.0.7", True)):  # leak-scan: allow 见 tests/doc_addresses.GLOBAL_FIXTURE_NET
+        html = f'<html><script>window.api = "http://{addr}/x";</script></html>'.encode()
+        result = WebInlineConfigAnalyzer().analyze(_ctx({"web/i.html": html}))
+        by = {ep.value: ep for ep in result.endpoints if ep.kind == "ip"}
+        assert addr in by, f"URL 里的 host {addr} 被形态去噪误删——那是强地址性证据"
+        assert by[addr].is_private is private, f"{addr} 的私网标记不对"
 
 
 def test_inline_config_marks_cleartext_http() -> None:

@@ -908,6 +908,11 @@ def _capture(
     #    基础设施并在报告折叠）；域名侧（SNI/DNS）按 OS/GMS/连通性 host 名单折叠明显噪音。绝不因
     #    floor 解析失败影响主报告（pcap 仍作产物留档）。
     floor_summary = None  # 解析一次，供并入端点与 UID 归因复用（复审 #5：避免重复全量解析大 pcap）
+    # 被判为「已知反诈拦截节点」而未升为 runtime 端点的对端。★必须活到 capture_signals：
+    #   playbook 只在 run() 的返回值里，转交/离线复审 runtime_report.json 的人看不到，而这条
+    #   排除直接判「无需调证」、且靠人工维护的名单命中——名单误收导致的端点消失必须能从
+    #   持久产物里审计出来。
+    intercept_excluded: list[str] = []
     if floor_pcap is not None and floor_pcap.is_file():
         try:
             noise_patterns = _load_noise_patterns()
@@ -926,6 +931,7 @@ def _capture(
             #   发现不了「有个真后端被吞了」。
             excluded = ingest_stats.get("intercept_excluded") or []
             if isinstance(excluded, list) and excluded:
+                intercept_excluded = [str(v) for v in excluded]
                 playbook.append(
                     f"① floor：带外 pcap 排除已知反诈拦截节点 {len(excluded)} 个"
                     f"（{'、'.join(str(v) for v in excluded)}）——非业务接入/落地机，不升为 runtime 端点；"
@@ -1108,6 +1114,10 @@ def _capture(
     }
     if pcap_app_attr:  # floor pcap 接入节点→app UID/进程 归因（真后端 vs 背景噪音）
         capture_signals["pcap_app_attribution"] = pcap_app_attr
+    if intercept_excluded:
+        # ★端点排除必须进**持久产物**，不能只在 run() 返回的 playbook 里：转交 / 离线复审
+        #   runtime_report.json 的人否则完全看不出「有个对端被名单吞了」。
+        capture_signals["endpoint_exclusions"] = {"known_intercept_ips": intercept_excluded}
     # 降级判定：仅当**没有任何证据路径成立**——代理未起 且 无 floor pcap 且 MITM 0 字节 且 端点 0
     # ——才降为 degraded（总失败组合）。只要代理起了 / floor 拉回了 / 抓到端点，即便 app 安静
     # （0 flows）仍算 done（不阻断，降级细节走 reason/warnings，保持既有契约）。
