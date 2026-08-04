@@ -513,6 +513,36 @@ def test_runtime_derived_source_does_not_exempt_ip_tier_downgrade() -> None:
     assert "source_tier" in (lead.downgrades or {})
 
 
+def test_runtime_observed_domain_not_downgraded_by_vendor_tier() -> None:
+    """域名侧的实连豁免必须与 IP 侧对称——真连过的域名不因出现在库文件里降档。
+
+    ★此前只有 IP 侧有这条豁免。域名带 runtime 实连证据 + library-file tier 时会被压
+      「待核」，于是 `is_runtime_contact` 徽标标着实连、advice 却是待核，出口自相矛盾，
+      且 runtime-first 的闭环候选被 `targets.py` 的 advice 门直接挡掉。
+    """
+    from apkscan.core import infra
+    from apkscan.core.leads import build_endpoint_leads
+    from apkscan.core.models import OBSERVED_CONTACT_SOURCES, Endpoint, Evidence
+
+    def _lead(source: str):
+        ep = Endpoint(
+            value="api.fraud-x.cn", kind="domain", is_private=False,
+            evidences=[Evidence(source=source, location=_VENDOR_PATH,
+                                snippet="https://api.fraud-x.cn/a")],
+            enrichment={"tier": infra.TIER_LIBRARY_FILE},
+        )
+        return build_endpoint_leads([ep])[0]
+
+    live = _lead(sorted(OBSERVED_CONTACT_SOURCES)[0])
+    assert live.advice == infra.ADVICE_INVESTIGATE, "实连过的域名被 tier 降档了"
+    assert not (live.downgrades or {}), f"实连过的域名不该有降档墓碑：{live.downgrades}"
+
+    # 对照：纯静态来源仍降档——豁免只对实连证据开口，不是把域名侧降档整体关掉
+    static = _lead("static")
+    assert static.advice == infra.ADVICE_REVIEW
+    assert "source_tier" in (static.downgrades or {})
+
+
 def test_bulk_string_ip_is_tier_demoted_at_lead_level() -> None:
     """bulk-string 档的 IP 同样降待核并留墓碑（超大字符串表里的 IP 常量）。"""
     from apkscan.core import infra

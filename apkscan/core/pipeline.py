@@ -823,7 +823,7 @@ def _dedup_endpoints(endpoints: list[Endpoint]) -> list[Endpoint]:
         existing.is_suspicious = existing.is_suspicious or ep.is_suspicious
         for key, val in ep.enrichment.items():
             if key == "tier":
-                # C1：域名来源可信度档特殊处理——多来源取最可信档（app > library-file
+                # C1：来源可信度档特殊处理（域名与 IP 通用）——多来源取最可信档（app > library-file
                 #   > bulk-string），避免"既来自 app 文件又来自 library 文件"被错降。
                 existing.enrichment["tier"] = infra.best_tier(
                     existing.enrichment.get("tier"), val

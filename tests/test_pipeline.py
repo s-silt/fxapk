@@ -249,12 +249,14 @@ def test_enrichment_targets_respect_source_tier():
 
 
 def test_enrichment_targets_judge_ips_by_ip_criteria_not_domain_ones():
-    """IP 走 ``classify_ip``，不跟着域名的 tier 规则走——否则会造出反方向的新漂移。
+    """富化目标筛选对 IP 只走 ``classify_ip``，不读 tier——降档的 IP 也照旧富化。
 
-    tier 降档是**域名**判据（``effective_advice`` 是域名接口）。若拿它判 IP：一个带
-    library-file tier 的公网 IP 会在这里被压成待核、不再富化，而它最终的 Lead 走
-    ``classify_ip`` 很可能仍判最高档——「该核查的 IP 却没有 ASN/RDAP 结果」。tier 的生产侧
-    也没有从模型上限制只写给域名，指望它对 IP 恒为 None 靠不住。
+    ★本条锁的语义在 IP 接上 tier 降档消费后**换了理由但行为不变**：现在
+    ``leads._ip_lead`` 会把 library-file/bulk-string 档的 IP 降为「待核」，但那是
+    **留给人核**、不是排除——人核时手里得有 ASN/RDAP 结果，所以富化侧必须继续把
+    这些 IP 当目标（见 ``leads.py`` IP 侧降档注释的第 2 条有意差别）。若把这里改成
+    ``effective_advice``（域名接口）判 IP，降档 IP 就会被静默跳过富化，
+    「该核查的 IP 却没有 ASN/RDAP 结果」。
 
     ★把实现里 IP 那条分支改回 ``effective_advice`` 则本条变红。
     """

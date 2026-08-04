@@ -451,8 +451,17 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
     #   调证"（避免误杀真 C2）；已是 infra/私网档的不动（app tier 的真 C2 不受影响）。
     #   用 infra.effective_advice 统一判据（与目标筛选同口径，防判据漂移）。
     tier = ep.enrichment.get("tier")
+    # ★与 IP 侧（:func:`_ip_lead`）同口径的实连豁免：真连过的域名不因"它也出现在某个
+    #   库文件/超大字符串表里"降档。此前只有 IP 侧有这条，域名侧带 runtime-pcap 实连
+    #   证据照样被压待核——`is_runtime_contact` 徽标标着实连、advice 却是待核，出口自相
+    #   矛盾，且 runtime-first 的闭环候选被 advice 门挡掉。口径同样必须是严格的
+    #   OBSERVED_CONTACT_SOURCES（runtime-derived 只证明"出现在 runtime 报告里"，不豁免）。
+    domain_runtime_observed = any(
+        str(ev.source) in OBSERVED_CONTACT_SOURCES for ev in ep.evidences
+    )
     tier_suppressed = (
         advice == infra.ADVICE_INVESTIGATE
+        and not domain_runtime_observed
         and infra.effective_advice(ep.value, tier) != infra.ADVICE_INVESTIGATE
     )
     tier_note = "仅见于第三方库文件/超大字符串表，疑似库内置，低可信"

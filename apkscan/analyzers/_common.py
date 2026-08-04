@@ -185,10 +185,10 @@ class EndpointCollector:
             ep.evidences.append(evidence)
 
     def mark_tier(self, value: str, tier: str) -> None:
-        """给已收集的端点写域名来源可信度档（C1）。多来源取最可信档（app 优先）。
+        """给已收集的端点写来源可信度档（C1，域名与 IP 通用）。多来源取最可信档（app 优先）。
 
         延迟导入 infra 的合并器，避免 _common 顶层依赖 infra。tier 写入
-        Endpoint.enrichment["tier"]，pipeline 据此对非 infra 域名降可信到"待核"。
+        Endpoint.enrichment["tier"]，leads 据此把非 infra 的域名/IP 降可信到"待核"。
         """
         ep = self.by_value.get(value)
         if ep is None:

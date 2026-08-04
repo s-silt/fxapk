@@ -399,11 +399,16 @@ class EndpointsAnalyzer(BaseAnalyzer):
 
     name: str = "endpoints"
     requires: list[str] = []  # 纯静态，永远可用
+    #: 来源档判据语境（analyze 按 ctx.platform 覆写；类级默认兜底直调扫描函数的路径）。
+    _tier_context: str = "apk"
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
         result = AnalyzerResult(analyzer=self.name)
         rules = self._load_rules()
         collector = EndpointCollector()
+        # 来源档判据的语境：web 证据不适用 APK 的 glob 先验（站点自有代码必然压缩过，
+        # `*.min.js`/`*/dist/*` 在 web 上不是 vendor 信号）。判据分歧见 infra.domain_source_tier。
+        self._tier_context = "web" if getattr(ctx, "platform", "android") == "web" else "apk"
 
         # 四路数据源各自 try/except，单源失败不影响其余。
         dex_ok, dex_truncated = self._scan_dex(ctx, collector, rules)
@@ -564,7 +569,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
                 if not isinstance(s, str) or not s:
                     continue
                 try:
-                    self._scan_text(s, "dex", "dex_strings", collector, rules)
+                    self._scan_text(s, "dex", "dex_strings", collector, rules, bulk_len=len(s))
                 except Exception:
                     logger.exception("[%s] 解析 DEX 字符串失败，跳过该条", self.name)
         except Exception:
@@ -583,7 +588,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
         if not isinstance(manifest, str) or not manifest:
             return
         try:
-            self._scan_text(manifest, "manifest", "AndroidManifest.xml", collector, rules)
+            self._scan_text(manifest, "manifest", "AndroidManifest.xml", collector, rules, bulk_len=0)
         except Exception:
             logger.exception("[%s] 解析 manifest 文本失败", self.name)
 
@@ -667,7 +672,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
             text = decode(data)
             if text:
                 try:
-                    self._scan_text(text, source, location, collector, rules)
+                    self._scan_text(text, source, location, collector, rules, bulk_len=0)
                 except Exception:
                     logger.exception("[%s] 解析文件失败，跳过：%s", self.name, location)
             return
@@ -687,7 +692,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
             text = decode(chunk)
             if text:
                 try:
-                    self._scan_text(text, source, location, collector, rules)
+                    self._scan_text(text, source, location, collector, rules, bulk_len=0)
                 except Exception:
                     logger.exception("[%s] 分块扫描失败，跳过该块：%s", self.name, location)
             start += step
@@ -738,7 +743,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
                 ascii_run = m.group().decode("ascii", errors="ignore")
                 if not ascii_run:
                     continue
-                self._scan_text(ascii_run, "native", location, collector, rules)
+                self._scan_text(ascii_run, "native", location, collector, rules, bulk_len=len(ascii_run))
         except Exception:
             logger.exception("[%s] 解析 native 文件失败，跳过：%s", self.name, location)
 
@@ -753,8 +758,19 @@ class EndpointsAnalyzer(BaseAnalyzer):
         location: str,
         collector: EndpointCollector,
         rules: _Rules,
+        *,
+        bulk_len: int,
     ) -> None:
-        """在一段文本里抽 URL / 域名 / IP，命中加入 collector。"""
+        """在一段文本里抽 URL / 域名 / IP，命中加入 collector。
+
+        ``bulk_len``：供 bulk-string 档判据用的「单条字面量长度」。★必传、不许拿
+        ``len(text)`` 兜底——yaml 语义是「**单条** dex 字符串/字面量超阈值（2000）」，
+        而本函数的 ``text`` 在 manifest/resource 通道是整份 XML / 整文件 / 4MB 分块，
+        长度必超阈值，等于把这些来源里的端点**整批**误判 bulk-string 降档（实测
+        3.8KB 的 assets 配置里的真后端就中招，且域名侧连富化都不发起）。约定：
+        dex / native 逐条通道传 ``len(text)``（此时 text 就是单条），manifest /
+        resource 整块通道传 0（只让路径 glob 判据生效，与 web_evidence 同取舍）。
+        """
         # 1) URL（最具体，先抽）。记录已被 URL 覆盖的区间，避免域名/IP 重复抽。
         consumed: list[tuple[int, int]] = []
         for m in _URL_RE.finditer(text):
@@ -800,14 +816,14 @@ class EndpointsAnalyzer(BaseAnalyzer):
                     #   入口：pipeline 按 best_tier 合并多处出现，DEX/app 文件里的这次
                     #   出现标上 app 档，才能把同值在某 vendor bundle 里的降档救回来。
                     #   此前只有域名分支标，IP 整类两个方向都缺。
-                    collector.mark_tier(host, infra.domain_source_tier(location, len(text)))
+                    collector.mark_tier(host, infra.domain_source_tier(location, bulk_len, context=self._tier_context))
             elif _looks_like_domain(host) and _url_host_tld_ok(host):
                 collector.add(
                     host,
                     "domain",
                     Evidence(source=source, location=location, snippet=host_snippet),
                 )
-                collector.mark_tier(host, infra.domain_source_tier(location, len(text)))
+                collector.mark_tier(host, infra.domain_source_tier(location, bulk_len, context=self._tier_context))
 
         # consumed 已按 URL 匹配顺序（start 升序、互不重叠）追加 → 用 bisect O(log n) 判定，
         # 不再对每个 IP/域名候选线性扫全部区间（密集样本上省下 O(URL×候选)）。
@@ -831,7 +847,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
                 is_private=_ip_is_private(ip_obj),
             )
             # 同上：裸 IP 也标来源档（降档与 best_tier 救回共用同一入口）。
-            collector.mark_tier(ip_str, infra.domain_source_tier(location, len(text)))
+            collector.mark_tier(ip_str, infra.domain_source_tier(location, bulk_len, context=self._tier_context))
 
         # 3) 裸域名。
         for m in _DOMAIN_RE.finditer(text):
@@ -851,7 +867,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
                 "domain",
                 Evidence(source=source, location=location, snippet=_truncate(m.group(), rules.snippet_max)),
             )
-            collector.mark_tier(domain, infra.domain_source_tier(location, len(text)))
+            collector.mark_tier(domain, infra.domain_source_tier(location, bulk_len, context=self._tier_context))
 
     # ------------------------------------------------------------------
     # 噪音过滤

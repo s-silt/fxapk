@@ -393,6 +393,8 @@ class JsBundleAnalyzer(BaseAnalyzer):
 
     name: str = "js_bundle"
     requires: list[str] = []  # 纯静态，永远可用
+    #: 来源档判据语境（analyze 按 ctx.platform 覆写；类级默认兜底直调扫描函数的路径）。
+    _tier_context: str = "apk"
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
         result = AnalyzerResult(analyzer=self.name)
@@ -406,10 +408,10 @@ class JsBundleAnalyzer(BaseAnalyzer):
             all_files = []
 
         framework = self._detect_framework(ctx, all_files)
-        targets = self._collect_targets(
-            all_files,
-            platform=str(getattr(ctx, "platform", "android") or "android"),
-        )
+        platform = str(getattr(ctx, "platform", "android") or "android")
+        # 来源档判据语境（理由见 infra.domain_source_tier / endpoints.analyze 同款注释）。
+        self._tier_context = "web" if platform == "web" else "apk"
+        targets = self._collect_targets(all_files, platform=platform)
 
         # 逐文件累积密钥命中（去重后再产 Finding）。
         secret_hits: dict[tuple[str, str], _SecretHit] = {}
@@ -700,14 +702,14 @@ class JsBundleAnalyzer(BaseAnalyzer):
                 # ★IP 与域名同样要打来源档：此前只有域名分支标 tier，IP 整类不降档，
                 #   于是第三方 bundle（ethers 等库）里硬编码的公共节点会以 is_c2=true
                 #   进调证出口——实测一份 vendor bundle 就送进 28 个这样的"目标"。
-                collector.mark_tier(host, infra.domain_source_tier(path, len(literal)))
+                collector.mark_tier(host, infra.domain_source_tier(path, len(literal), context=self._tier_context))
             elif _looks_like_domain(host):
                 collector.add(
                     host,
                     "domain",
                     Evidence(source="js", location=path, snippet=host_snippet),
                 )
-                collector.mark_tier(host, infra.domain_source_tier(path, len(literal)))
+                collector.mark_tier(host, infra.domain_source_tier(path, len(literal), context=self._tier_context))
 
         def _in_consumed(pos: int) -> bool:
             return any(start <= pos < end for start, end in consumed)
@@ -730,7 +732,7 @@ class JsBundleAnalyzer(BaseAnalyzer):
                 is_private=_ip_is_private(ip_obj),
             )
             # 同上：裸 IP 也走来源档，否则第三方库常量里的裸 IP 直接进最高档。
-            collector.mark_tier(ip_str, infra.domain_source_tier(path, len(literal)))
+            collector.mark_tier(ip_str, infra.domain_source_tier(path, len(literal), context=self._tier_context))
 
         # 3) 裸域名 / host（字面量内放宽 TLD，但排除文件名 / 命名空间 / 代码词）。
         for m in _DOMAIN_RE.finditer(literal):
@@ -749,7 +751,7 @@ class JsBundleAnalyzer(BaseAnalyzer):
                 "domain",
                 Evidence(source="js", location=path, snippet=_short(m.group(), rules.snippet_max)),
             )
-            collector.mark_tier(domain, infra.domain_source_tier(path, len(literal)))
+            collector.mark_tier(domain, infra.domain_source_tier(path, len(literal), context=self._tier_context))
 
         # 4) 相对 API 路径（/api/... /v1/... 等）。
         for m in _API_PATH_RE.finditer(literal):

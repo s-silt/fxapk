@@ -400,7 +400,7 @@ def _add(
     ep.is_cleartext = ep.is_cleartext or is_cleartext
     ep.is_private = ep.is_private or is_private
     if tier is not None:
-        # 域名来源可信度档（C1）：多来源取最可信档（app 优先）。
+        # 来源可信度档（C1，域名与 IP 通用）：多来源取最可信档（app 优先）。
         current = ep.enrichment.get("tier")
         ep.enrichment["tier"] = infra.best_tier(current, tier) if current else tier
     if all(ev.location != location for ev in ep.evidences):

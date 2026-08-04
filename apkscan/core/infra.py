@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 # 不写 __all__：本模块自己就用着这三个常量（各 8-14 处），再导出是顺带的，不是「只为转发」，
 # 也就没有 unused-import 要压；凭空加个三项的 __all__ 反而把 import * 的可见面收窄了。
 
-# 域名来源可信度档（写入 Endpoint.enrichment["tier"]，pipeline 据此降可信）。
+# 端点来源可信度档（域名与 IP 通用；写入 Endpoint.enrichment["tier"]，pipeline 据此降可信）。
 TIER_APP = "app"                       # App 自有文件/普通字符串 —— 最可信。
 TIER_LIBRARY_FILE = "library-file"     # 来源命中已知第三方库文件路径 —— 疑似库内置。
 TIER_BULK_STRING = "bulk-string"       # 来源是超大字符串表 —— 疑似内置域名库噪音。

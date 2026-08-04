@@ -28,12 +28,14 @@ def _analyze(
     files: dict[str, bytes] | None = None,
     dex_strings: list[str] | None = None,
     native_libs: list[str] | None = None,
+    platform: str = "android",
 ) -> AnalyzerResult:
     ctx = FakeContext(
         manifest_xml=manifest_xml,
         files=files,
         dex_strings=dex_strings,
         native_libs=native_libs,
+        platform=platform,
     )
     return EndpointsAnalyzer().analyze(ctx)
 
@@ -557,6 +559,67 @@ def test_ip_from_library_file_marked_tier():
     # 裸 IP 通道
     result = _analyze(files={lib: f"var ip='{GLOBAL_FIXTURE_IP}';".encode()})
     assert _by_value(result)[GLOBAL_FIXTURE_IP].enrichment.get("tier") == "library-file"
+
+
+def test_large_resource_and_manifest_do_not_mass_demote_to_bulk_string():
+    """>2KB 的资源文件 / manifest 里的端点不因**整块**长度被整批判 bulk-string。
+
+    ★bulk-string 判据的语义是「**单条**字符串/字面量超阈值（2000，典型内置域名库大表）」。
+      但 _scan_text 的 text 在 manifest 通道是整份 XML、在 resource 通道是整文件或 4MB 分块，
+      长度必超阈值——照 len(text) 传就等于把这两路来源里的端点全部降档。实测 3.8KB 的
+      assets 配置里的真后端就中招（域名侧还连富化都不发起）。故这两路传 raw_len=0，
+      只让路径 glob 判据生效；dex/native 是逐条通道，照旧按真实单条长度判。
+    """
+    from tests.doc_addresses import GLOBAL_FIXTURE_IP
+
+    filler = "x" * 3000  # 把整块推过 2000 阈值，但单条字面量本身很短
+    body = f'{{"api":"https://api.fraud-x.cn/a","node":"{GLOBAL_FIXTURE_IP}","pad":"{filler}"}}'
+    eps = _by_value(_analyze(files={"assets/myapp/config.json": body.encode()}))
+    for value in ("api.fraud-x.cn", GLOBAL_FIXTURE_IP):
+        assert eps[value].enrichment.get("tier") == "app", (
+            f"{value} 因整块文本长度被误判 bulk-string"
+        )
+
+    manifest = (
+        '<?xml version="1.0"?><manifest><!-- ' + filler + ' -->'
+        f'<data android:host="api.fraud-x.cn"/><data android:host="{GLOBAL_FIXTURE_IP}"/></manifest>'
+    )
+    eps = _by_value(_analyze(manifest_xml=manifest))
+    for value in ("api.fraud-x.cn", GLOBAL_FIXTURE_IP):
+        assert eps[value].enrichment.get("tier") == "app", f"manifest 里的 {value} 被误降"
+
+
+def test_dex_bulk_string_still_demotes():
+    """对照：dex 是逐条通道，**单条**超阈值仍判 bulk-string——降噪本身没被关掉。"""
+    from tests.doc_addresses import GLOBAL_FIXTURE_IP
+
+    huge = "https://api.fraud-x.cn/a " + GLOBAL_FIXTURE_IP + " " + "y" * 2500
+    eps = _by_value(_analyze(dex_strings=[huge]))
+    for value in ("api.fraud-x.cn", GLOBAL_FIXTURE_IP):
+        assert eps[value].enrichment.get("tier") == "bulk-string", f"{value} 未判 bulk-string"
+
+
+def test_web_platform_does_not_demote_site_own_minified_code():
+    """analyze-web（ctx.platform="web"）下不套用 APK 的 glob 先验。
+
+    ★endpoints 的 requires=[]，analyze-web 里照跑，且 .js/.html/.json 命中资源目标。
+      此前它恒用 context="apk"，于是站点自有的 main.min.js 里的后端被判 library-file
+      → 降待核 → 不发函/不闭环/不富化，是漏报方向的误伤。web_evidence 的豁免救不回
+      非配置形态的值。
+    """
+    from tests.doc_addresses import GLOBAL_FIXTURE_IP
+
+    body = f'var api="https://api.fraud-x.cn/a";var node="{GLOBAL_FIXTURE_IP}";'.encode()
+    eps = _by_value(_analyze(files={"web/static/js/main.min.js": body}, platform="web"))
+    for value in ("api.fraud-x.cn", GLOBAL_FIXTURE_IP):
+        assert eps[value].enrichment.get("tier") == "app", f"web 语境误降站点自有代码里的 {value}"
+
+    # 对照一：同路径在 APK 语境仍降档（既有语义不变）
+    eps = _by_value(_analyze(files={"web/static/js/main.min.js": body}))
+    assert eps["api.fraud-x.cn"].enrichment.get("tier") == "library-file"
+    # 对照二：web 语境下明确的 vendor 命名仍降档（降噪没被整体关掉）
+    eps = _by_value(_analyze(files={"web/chunk-vendors.bc47.js": body}, platform="web"))
+    assert eps["api.fraud-x.cn"].enrichment.get("tier") == "library-file"
 
 
 def test_ip_from_app_file_marked_app_tier():
