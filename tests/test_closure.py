@@ -224,16 +224,48 @@ def test_forged_vendor_name_cannot_evict_real_backend() -> None:
 
 
 def test_runtime_observed_endpoints_bypass_source_quota() -> None:
-    """实连过的对端不受来源配额限制——那已不是"某个文件里的字面量"，是设备真连过。"""
+    """实连过的对端不受来源配额限制——那已不是"某个文件里的字面量"，是设备真连过。
+
+    ★名额必须**真的紧张**这条才验得到：另配 8 个各自独立来源的静态候选，若实连端点也吃配额，
+      同文件的第 2..4 个会被顺延到那 8 个之后、挤出 Top-6。只放一两个候选时顺延与否都在
+      Top-6 内，突变照样绿（第一版就是这么写的，杀不掉）。
+    """
     live = [
         _endpoint(f"198.51.100.{n}", runtime=True, target=True, location=_VENDOR_BUNDLE)
         for n in range(10, 14)
     ]
-    report = _report(*live, _endpoint("203.0.113.9", location=_APP_BUNDLE))
+    others = [_endpoint(f"203.0.113.{n}", location=f"assets/mod-{n}.js") for n in range(20, 28)]
+    report = _report(*live, *others)
 
     selected = [ep.value for ep in select_targets(report, max_targets=6)]
     live_selected = [v for v in selected if v.startswith("198.51.100.")]
     assert len(live_selected) == 4, f"实连过的对端被配额压掉了：{selected}"
+
+
+def test_value_seen_in_multiple_files_is_exempt_from_source_quota() -> None:
+    """同一个值在多处独立出现 → 不参与来源配额。
+
+    ★「这个值在好几个文件里都有」本身就是它**不是**某一个文件的内嵌常量的证据。把它绑到
+      任意一个来源组上再按组顺延，等于拿一条与判据相反的事实去压它。
+    """
+    vendor = [_endpoint(f"198.51.100.{n}", location=_VENDOR_BUNDLE) for n in range(10, 38)]
+    app_side = [_endpoint(f"203.0.113.{n}", location=_APP_BUNDLE) for n in range(10, 21)]
+    # 真后端：同时出现在两个文件里（值刻意排在最后，两个组届时都已被占用）
+    multi = Endpoint(
+        value="203.0.113.99",
+        kind="ip",
+        evidences=[
+            Evidence(source="dex", location=_VENDOR_BUNDLE, snippet="203.0.113.99"),
+            Evidence(source="dex", location=_APP_BUNDLE, snippet="203.0.113.99"),
+        ],
+        is_suspicious=True,
+    )
+    report = _report(*vendor, *app_side, multi)
+
+    selected = [ep.value for ep in select_targets(report, max_targets=6)]
+    assert "203.0.113.99" in selected, (
+        f"多处出现的值被当成某个文件的内嵌常量顺延了：{selected}"
+    )
 
 
 def test_select_targets_prioritizes_target_attributed_runtime_endpoint() -> None:
