@@ -39,7 +39,7 @@ WRITE_CASES = [
     #   analyzers/permissions.py、analyzers/remote_config.py、core/pipeline.py 都这么写。
     #   这条教训值得记：单一扫描器无法验证自己的盲区，必须有另一路独立证据。
     pytest.param('result.meta = {"k1": 1, "k2": 2}', {"k1", "k2"}, id="★整体字典赋值"),
-    pytest.param('meta: dict = {"k3": 1}', {"k3"}, id="★带类型标注的整体赋值"),
+    pytest.param('report.meta: dict = {"k3": 1}', {"k3"}, id="★带类型标注的整体赋值"),
     pytest.param('r = AnalyzerResult(analyzer="x", meta={"k4": 1})', {"k4"}, id="★构造时传入 meta="),
 ]
 
@@ -142,7 +142,7 @@ def test_poisoned_constant_never_resolves_to_a_stale_value(src: str) -> None:
 OPEN_WRITE_CASES = [
     pytest.param('def f(result):\n    result.meta = build_meta()', id="整体赋非字典字面量"),
     pytest.param('def f(result, other):\n    result.meta = other', id="整体赋另一个变量"),
-    pytest.param('def f():\n    meta: dict = build_meta()', id="带标注整体赋函数返回值"),
+    pytest.param('def f(report):\n    report.meta: dict = build_meta()', id="带标注整体赋函数返回值"),
     pytest.param('def f(other):\n    r = AnalyzerResult(meta=other)', id="构造时传非字典"),
 ]
 
@@ -156,6 +156,32 @@ def test_whole_meta_assignment_from_unknown_source_is_surfaced(src: str) -> None
     还会让「已无开放写入」这个结论假成立（复审实测指出）。
     """
     assert _dynamic(src), f"开放的整体写入被静默跳过：{src!r}"
+
+
+NOT_REPORT_META_CASES = [
+    pytest.param('def f():\n    meta: dict = field(default_factory=dict)', id="dataclass 字段声明"),
+    pytest.param('def f(x):\n    merged_meta = {"alg": x}\n    return merged_meta',
+                 id="碰巧叫 merged_meta 的局部字典"),
+    pytest.param('def f(pkt):\n    meta = parse_quic_header(pkt)', id="碰巧叫 meta 的解析结果"),
+    pytest.param('def f(tpl, report):\n    return tpl.render(meta=report.meta)',
+                 id="模板渲染传参（纯消费）"),
+    pytest.param('def f(x):\n    return helper(meta=x)', id="任意函数的 meta= 关键字"),
+]
+
+
+@pytest.mark.parametrize("src", NOT_REPORT_META_CASES)
+def test_things_that_merely_look_like_report_meta_are_not_counted(src: str) -> None:
+    """★叫 ``meta`` 不等于就是 ``Report.meta``——这类不得计入写入或动态点。
+
+    复审逐项核过：早先版本把 19 处这样的东西报成了「开放整体写入」，其中包括
+    dataclass 字段声明、`merge.py` 里碰巧叫 ``merged_meta`` 的 crypto 子字典、
+    `pcap_ingest.py` 里的 QUIC 包头解析结果、以及 ``template.render(meta=...)``。
+
+    误报的代价不比漏报小：它会把「哪里还有开放写入」这个判断整个污染掉，
+    让人以为有 19 个口子要堵，而真正的口子淹没在噪音里。
+    """
+    accesses = meta_scan.scan_source(src)
+    assert not accesses, f"非 report.meta 的东西被计入了：{accesses}"
 
 
 def test_same_stem_modules_do_not_share_a_constant_table(tmp_path: Path) -> None:

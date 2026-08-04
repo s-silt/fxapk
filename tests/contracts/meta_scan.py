@@ -36,6 +36,10 @@ _META_ATTRS = frozenset({"meta"})
 #: 直接以这些名字出现的局部变量也视为 meta 容器（本仓 pipeline 里的既有写法）。
 _META_NAMES = frozenset({"meta", "_meta", "raw_meta", "merged_meta"})
 
+#: 真正持有报告 meta 的构造器。``f(meta=...)`` 只在这些之上才算写入——
+#: 否则 ``template.render(meta=...)`` 这类纯传参会被误算成创造键（复审实证）。
+_META_BEARING_CTORS = frozenset({"AnalyzerResult", "Report"})
+
 #: 生成「有限键族」的工厂函数：``函数名 -> 族名``。
 #: ★这类键在运行时拼出，但**定义域静态封闭**（有限后缀表 × 权威注册表里的分析器名），
 #:   属于 Codex 分类里的 C 类「有限模板族」，不是开放动态键——
@@ -90,64 +94,73 @@ def collect_module_constants(src: str) -> dict[str, str]:
       ``NAME = "字符串字面量"``。条件赋值、函数调用、f-string、重赋值一律不认，
       认不出就落回 unresolved——宁可少认，不可猜错。
     """
-    consts: dict[str, str] = {}
-    invalid: set[str] = set()  # ★单调失效：一旦进来就永不回到 consts
+    #: 名字 → 绑定次数。★只有**恰好绑定一次**、且那一次是顶层简单字面量赋值的，才算常量。
+    #:   不比较值是否相同：早先写成「值不同才 pop」，于是 ``a → b → c`` 三次赋值后
+    #:   ``c`` 会被重新接受（复审实测）。解析错比不解析更糟——把真实键登记成错名字，
+    #:   基线从此建在错的集合上，而且是无声的。
+    binds: dict[str, int] = {}
+    literals: dict[str, str] = {}
 
-    def _bind(name: str, value: str | None) -> None:
-        """记一次绑定。★二次绑定一律永久失效，**不比较值是否相同**。
-
-        早先写成「值不同才 pop」，于是 ``a → b → c`` 三次赋值后 ``c`` 会被重新接受
-        （复审实测复现）。解析错比不解析更糟：把真实键登记成错名字，
-        基线从此建在错的集合上，而且是无声的。
-        """
-        if name in invalid:
-            return
-        if name in consts or value is None:
-            consts.pop(name, None)
-            invalid.add(name)
-            return
-        consts[name] = value
+    def _bind(name: str, value: str | None = None) -> None:
+        binds[name] = binds.get(name, 0) + 1
+        if value is not None and name not in literals:
+            literals[name] = value
 
     try:
         tree = ast.parse(src)
     except SyntaxError:
-        return consts
+        return {}
 
-    for node in tree.body:  # 只看模块顶层，不进函数/类
-        # ★条件/循环/异常块里的绑定一律使候选失效——静态看不出哪一支会执行。
-        if isinstance(node, (ast.If, ast.For, ast.While, ast.Try, ast.With)):
-            for sub in ast.walk(node):
-                if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store):
-                    _bind(sub.id, None)
-            continue
-        # import 绑定同样使同名候选失效（from x import K 会覆盖模块常量）
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            for a in node.names:
-                _bind(a.asname or a.name.split(".")[0], None)
-            continue
-        if isinstance(node, ast.Delete):
-            for t in node.targets:
-                if isinstance(t, ast.Name):
-                    _bind(t.id, None)
-            continue
-        if isinstance(node, ast.AugAssign):  # K += "x"
-            if isinstance(node.target, ast.Name):
-                _bind(node.target.id, None)
-            continue
+    # ★不枚举语句类型，而是**统一收集模块作用域内的一切绑定**（复审建议）：
+    #   walrus、match capture、except-as、类/函数定义、解构、AsyncFor/With……
+    #   逐个枚举必然漏，而漏一个就意味着可能解析出过期值。
+    #   comprehension 是独立作用域，其绑定不泄漏，故显式跳过。
+    _NESTED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda,
+                      ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 
+    def _all_bindings(n: ast.AST, skip: set[int] | None = None) -> None:
+        """收集本作用域的每一次名字绑定。``skip`` 里的节点已被顶层字面量赋值计过，不重复计。"""
+        skip = skip or set()
+        for child in ast.iter_child_nodes(n):
+            if id(child) in skip:
+                continue
+            if isinstance(child, _NESTED_SCOPES):
+                # 函数/lambda/推导式：自身的名字**是**一次模块级绑定（def K(): ...）
+                name = getattr(child, "name", None)
+                if name:
+                    _bind(name, None)
+                continue
+            if isinstance(child, ast.ClassDef):
+                _bind(child.name, None)  # 类名绑定；类体是独立作用域，不下探
+                continue
+            if isinstance(child, ast.Name) and isinstance(child.ctx, (ast.Store, ast.Del)):
+                _bind(child.id, None)
+            elif isinstance(child, (ast.Import, ast.ImportFrom)):
+                for a in child.names:
+                    _bind(a.asname or a.name.split(".")[0], None)
+            elif isinstance(child, ast.ExceptHandler) and child.name:
+                _bind(child.name, None)
+            _all_bindings(child, skip)
+
+    # 顶层「简单字面量赋值」带值记一次绑定；其余一切绑定形态由 _all_bindings 记（不带值）。
+    simple: set[int] = set()
+    for node in tree.body:
         targets: list[ast.expr] = []
         value: ast.expr | None = None
         if isinstance(node, ast.Assign):
             targets, value = list(node.targets), node.value
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
             targets, value = [node.target], node.value
-        else:
+        if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
             continue
-        lit = value.value if isinstance(value, ast.Constant) and isinstance(value.value, str) else None
         for t in targets:
             if isinstance(t, ast.Name):
-                _bind(t.id, lit)
-    return consts
+                _bind(t.id, value.value)
+                simple.add(id(t))  # 标记：这次绑定已计过，_all_bindings 里跳过
+
+    _all_bindings(tree, skip=simple)
+    # ★只保留恰好绑定一次的：多于一次 = 被重赋值/遮蔽/导入覆盖过，一律不解析
+    return {k: v for k, v in literals.items() if binds.get(k) == 1}
 
 
 class _Visitor(ast.NodeVisitor):
@@ -168,15 +181,33 @@ class _Visitor(ast.NodeVisitor):
         ★复审实测：函数内 ``K = "b"`` 会让模块级 ``K = "a"`` 被误用成 "a"。
           静态看不出哪个绑定生效，宁可落 unresolved。
         """
+        # ★只收**本作用域**的绑定，不穿透嵌套函数/类/comprehension：
+        #   Python 3 里那些是独立作用域，它们的绑定不泄漏到外层。
+        #   穿透会把本可安全解析的常量误失效，虚增 unresolved（复审实证）。
         local: set[str] = set()
-        for sub in ast.walk(node):
-            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store):
-                local.add(sub.id)
-            elif isinstance(sub, ast.arg):
-                local.add(sub.arg)
-            elif isinstance(sub, (ast.Import, ast.ImportFrom)):
-                for a in sub.names:
-                    local.add(a.asname or a.name.split(".")[0])
+        _NESTED = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda,
+                   ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+        def _walk_own(n: ast.AST) -> None:
+            for child in ast.iter_child_nodes(n):
+                if isinstance(child, _NESTED):
+                    continue  # 独立作用域，其绑定不影响本层
+                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
+                    local.add(child.id)
+                elif isinstance(child, ast.arg):
+                    local.add(child.arg)
+                elif isinstance(child, (ast.Import, ast.ImportFrom)):
+                    for a in child.names:
+                        local.add(a.asname or a.name.split(".")[0])
+                elif isinstance(child, ast.ExceptHandler) and child.name:
+                    local.add(child.name)
+                _walk_own(child)
+
+        fn_args = getattr(node, "args", None)
+        if fn_args is not None:
+            for a in list(fn_args.args) + list(fn_args.posonlyargs) + list(fn_args.kwonlyargs):
+                local.add(a.arg)
+        _walk_own(node)
         shadowed = {k: v for k, v in self.consts.items() if k not in local}
         saved = self.consts
         self.consts = shadowed
@@ -231,12 +262,17 @@ class _Visitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def _is_meta_target(self, node: ast.expr) -> bool:
-        """赋值左侧是不是一个 meta 容器本身（而非它的某个键）。"""
-        if isinstance(node, ast.Attribute) and node.attr in _META_ATTRS:
-            return True
-        return isinstance(node, ast.Name) and (
-            node.id in _META_NAMES or node.id in self.aliases
-        )
+        """赋值左侧是不是**报告的 meta 容器本身**（而非它的某个键）。
+
+        ★只认属性形态 ``X.meta``，**不认裸变量名**。复审实测：认裸名会把一堆无关东西
+          当成开放写入——`merge.py` 里叫 `merged_meta` 的 crypto 子字典、
+          `pcap_ingest.py` 里叫 `meta` 的 QUIC 包头解析结果、以及任何函数内的
+          `meta = {...}` 局部变量。19 处「开放整体写入」全是这么误报出来的。
+
+        ★下标访问（``meta["k"] = v``）仍认裸名：那种写法在本仓确实指 report meta，
+          且键是具体的、可登记的——两者的误判代价不同。
+        """
+        return isinstance(node, ast.Attribute) and node.attr in _META_ATTRS
 
     def _is_meta_expr(self, node: ast.expr) -> bool:
         if isinstance(node, ast.Attribute) and node.attr in _META_ATTRS:
@@ -261,15 +297,19 @@ class _Visitor(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
         # ★构造时传入：``AnalyzerResult(meta={"a": 1})`` / ``f(..., meta={...})``。
         #   与整体赋值同源的盲区，一并认。
-        for kw in node.keywords:
-            if kw.arg in _META_ATTRS:
-                if isinstance(kw.value, ast.Dict):
-                    for k in kw.value.keys:
-                        self._record(k, "write", node.lineno)
-                elif not self._is_meta_expr(kw.value):
-                    # 同上：构造时传一个键不可知的 meta，必须可见
-                    self.out.append(Access("<dynamic:whole-meta>", "write",
-                                           self.path, node.lineno))
+        # ★只认**已知的 meta 载体构造器**：`template.render(meta=...)`、
+        #   `foo(meta=bar)` 这类传参不创造报告 meta 键，全算写入会造出大量误报（实证）。
+        ctor = node.func.id if isinstance(node.func, ast.Name) else (
+            node.func.attr if isinstance(node.func, ast.Attribute) else "")
+        if ctor in _META_BEARING_CTORS:
+            for kw in node.keywords:
+                if kw.arg in _META_ATTRS:
+                    if isinstance(kw.value, ast.Dict):
+                        for k in kw.value.keys:
+                            self._record(k, "write", node.lineno)
+                    elif not self._is_meta_expr(kw.value):
+                        self.out.append(Access("<dynamic:whole-meta>", "write",
+                                               self.path, node.lineno))
         f = node.func
         if isinstance(f, ast.Attribute) and self._is_meta_expr(f.value):
             if f.attr in ("get", "pop"):
