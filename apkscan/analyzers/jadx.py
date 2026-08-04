@@ -283,7 +283,11 @@ class JadxAnalyzer(BaseAnalyzer):
                  is_cleartext=url.lower().startswith("http://"))
             ip = _parse_ipv4(host)
             if ip is not None:
-                _add(collector, host, "ip", location, is_private=_ip_private(ip))
+                # ★IP 同样标来源档：jadx 反编译源里的这次出现若在 app 包路径下标 app 档，
+                #   pipeline 的 best_tier 合并才能把同值在 vendor bundle 里的降档救回来；
+                #   反之在已知库包路径（*/com/squareup/* 等）下则降档。此前只有域名分支标。
+                _add(collector, host, "ip", location, is_private=_ip_private(ip),
+                     tier=infra.domain_source_tier(location, len(lit)))
             elif _safe_domain(host):
                 _add(collector, host, "domain", location,
                      tier=infra.domain_source_tier(location, len(lit)))
@@ -296,7 +300,9 @@ class JadxAnalyzer(BaseAnalyzer):
             #   占位/版本号 denylist），消除三处不一致。URL 内 IP 走上面 host 通道不受限。
             if ip_str in self._noise_ips or _is_noise_bare_ip(ip_str):
                 continue
-            _add(collector, ip_str, "ip", location, is_private=_ip_private(ip))
+            # 同上：裸 IP 也标来源档。
+            _add(collector, ip_str, "ip", location, is_private=_ip_private(ip),
+                 tier=infra.domain_source_tier(location, len(lit)))
         for m in _DOMAIN_RE.finditer(lit):
             dom = m.group(1).rstrip(".").lower()
             if _safe_domain(dom):

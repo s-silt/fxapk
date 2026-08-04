@@ -301,6 +301,34 @@ def test_best_tier_none_is_worst():
     assert infra.best_tier(infra.TIER_APP, None) == infra.TIER_APP
 
 
+def test_domain_tiers_new_yaml_keys_are_live(monkeypatch):
+    """`library_file_basename_globs` / `web_unsafe_globs` 两个新 yaml 键的解析分支必须是活的。
+
+    ★为什么要打桩：内置兜底常量与 yaml 内容逐字相同，删掉解析分支后一切照旧——
+      解析分支不可杀。给 load_rules 注入与兜底**不同**的值，才能证明读的是 yaml。
+      顺带把「basename 组的 web 跳过」守卫置于可达状态（真实配置下该组暂无 web_unsafe
+      条目，守卫不可达；靠本条注入式测试锁它，防未来配置时守卫已被删）。
+    """
+    from apkscan.core import registry
+
+    stub = {
+        "library_file_globs": ["*/zzz-dir/*"],
+        "library_file_basename_globs": ["zzz-probe.*.js"],
+        "web_unsafe_globs": ["zzz-probe.*.js", "*/zzz-dir/*"],
+    }
+    monkeypatch.setattr(registry, "load_rules", lambda name: stub)
+    monkeypatch.setattr(infra, "_DOMAIN_TIERS_CACHE", None)
+
+    # 三个键都活着：注入值生效而非兜底
+    assert infra.domain_source_tier("a/b/zzz-probe.x.js", 0) == infra.TIER_LIBRARY_FILE
+    assert infra.domain_source_tier("q/zzz-dir/f.js", 0) == infra.TIER_LIBRARY_FILE
+    # 兜底里的 chunk-vendors 不在注入表中 → 不再命中（证明没有静默混用兜底）
+    assert infra.domain_source_tier("chunk-vendors.abc.js", 0) == infra.TIER_APP
+    # web 语境：全路径组与 basename 组的 web_unsafe 跳过都生效
+    assert infra.domain_source_tier("a/b/zzz-probe.x.js", 0, context="web") == infra.TIER_APP
+    assert infra.domain_source_tier("q/zzz-dir/f.js", 0, context="web") == infra.TIER_APP
+
+
 # --- A：XML 命名空间 / 框架常量噪音域名 → 无需调证（jadx 干扰收紧）------------
 
 

@@ -796,6 +796,11 @@ class EndpointsAnalyzer(BaseAnalyzer):
                         Evidence(source=source, location=location, snippet=host_snippet),
                         is_private=_ip_is_private(host_ip),
                     )
+                    # ★IP 与域名同样要标来源档，且这不只是「降档」的入口，也是「救回」的
+                    #   入口：pipeline 按 best_tier 合并多处出现，DEX/app 文件里的这次
+                    #   出现标上 app 档，才能把同值在某 vendor bundle 里的降档救回来。
+                    #   此前只有域名分支标，IP 整类两个方向都缺。
+                    collector.mark_tier(host, infra.domain_source_tier(location, len(text)))
             elif _looks_like_domain(host) and _url_host_tld_ok(host):
                 collector.add(
                     host,
@@ -825,6 +830,8 @@ class EndpointsAnalyzer(BaseAnalyzer):
                 Evidence(source=source, location=location, snippet=_truncate(m.group(), rules.snippet_max)),
                 is_private=_ip_is_private(ip_obj),
             )
+            # 同上：裸 IP 也标来源档（降档与 best_tier 救回共用同一入口）。
+            collector.mark_tier(ip_str, infra.domain_source_tier(location, len(text)))
 
         # 3) 裸域名。
         for m in _DOMAIN_RE.finditer(text):

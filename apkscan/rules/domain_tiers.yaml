@@ -13,6 +13,12 @@
 #   library_file_globs : list[str]，"已知第三方库文件路径"glob（fnmatch，已小写）。
 #       端点来源 location 命中 → tier="library-file"（pipeline 据此降可信到"待核"）。
 #
+#   library_file_basename_globs : list[str]，同上但只拿 location 的**文件名**（basename）
+#       去比——全路径组里的 `*` 会跨 `/`，文件名类判据放这组防目录穿透。
+#
+#   web_unsafe_globs : list[str]，网页证据语境（context="web"）下跳过的 library-file
+#       模式（APK 先验不适用于站点自有压缩代码，详见下方同名段）。
+#
 #   bulk_string_min_len : int，单条 dex 字符串/字面量长度超过此阈值 → tier="bulk-string"
 #       （典型内置域名库大字符串表）。
 #

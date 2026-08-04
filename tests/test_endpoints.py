@@ -544,6 +544,31 @@ def test_domain_from_app_file_marked_app_tier():
     assert eps["api.fraud-x.cn"].enrichment.get("tier") == "app"
 
 
+def test_ip_from_library_file_marked_tier():
+    # ★IP 与域名同口径标来源档。此前只有域名分支标，IP 整类缺两个方向：
+    #   vendor 文件里的 IP 不降档（漏降），DEX/app 文件里的同值 IP 也标不上 app 档、
+    #   best_tier 救不回 vendor 侧的降档（误杀无救济）。URL-host 与裸 IP 两条通道都锁。
+    from tests.doc_addresses import GLOBAL_FIXTURE_IP
+
+    lib = "assets/apps/X/www/uni_modules/lime-echart/static/echarts.min.js"
+    # URL-host 通道
+    result = _analyze(files={lib: f"var u='https://{GLOBAL_FIXTURE_IP}:8545/a';".encode()})
+    assert _by_value(result)[GLOBAL_FIXTURE_IP].enrichment.get("tier") == "library-file"
+    # 裸 IP 通道
+    result = _analyze(files={lib: f"var ip='{GLOBAL_FIXTURE_IP}';".encode()})
+    assert _by_value(result)[GLOBAL_FIXTURE_IP].enrichment.get("tier") == "library-file"
+
+
+def test_ip_from_app_file_marked_app_tier():
+    # 对照：app 文件里的 IP 标 app 档——这是 best_tier 救回通道的生产侧。
+    from tests.doc_addresses import GLOBAL_FIXTURE_IP
+
+    result = _analyze(
+        files={"assets/apps/X/www/app-service.js": f"var u='https://{GLOBAL_FIXTURE_IP}/a';".encode()}
+    )
+    assert _by_value(result)[GLOBAL_FIXTURE_IP].enrichment.get("tier") == "app"
+
+
 # --- meta 统计 -----------------------------------------------------------
 
 

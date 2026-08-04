@@ -458,6 +458,9 @@ def test_vendor_bundle_ip_constants_are_tier_demoted() -> None:
         )
         assert ld.advice == infra.ADVICE_REVIEW, f"{ip} 未降为待核（advice={ld.advice!r}）"
         assert "source_tier" in (ld.downgrades or {}), f"{ip} 降了档却没留墓碑，出口无法解释"
+        # LOW 编码「静态出处只有库文件」这一证据强度事实，撤销降档后仍成立（判据链、不随降档走）
+        from apkscan.core.models import Confidence
+        assert ld.confidence == Confidence.LOW, f"{ip} 降档后 confidence={ld.confidence}"
 
     # 对照：app 档的同一个 IP 仍判最高档——降档不是把 IP 整类压低
     app_lead = build_endpoint_leads([app_by[_VENDOR_IP_A]])[0]
@@ -483,6 +486,101 @@ def test_runtime_observed_ip_not_downgraded_by_vendor_tier() -> None:
     lead = build_endpoint_leads([ep])[0]
     assert lead.advice == infra.ADVICE_INVESTIGATE, "实连过的对端被 tier 降档了"
     assert not (lead.downgrades or {}), f"实连过的对端不该有降档墓碑：{lead.downgrades}"
+
+
+def test_runtime_derived_source_does_not_exempt_ip_tier_downgrade() -> None:
+    """``runtime-derived``（手编/回灌）**不豁免** tier 降档——豁免口径必须是严格的实连证据。
+
+    ★钉的是 `leads.py` 里 `OBSERVED_CONTACT_SOURCES` 与 ``startswith("runtime")`` 的差：
+      后者会把「只证明出现在 runtime 报告里」的 runtime-derived 也当实连证据放行。
+      复审实测把口径突变回 startswith 后全仓仍绿——本条就是补上的那把锁。
+    """
+    from apkscan.core import infra
+    from apkscan.core.leads import build_endpoint_leads
+    from apkscan.core.models import OBSERVED_CONTACT_SOURCES, Endpoint, Evidence
+
+    # 前置断言：夹具用的来源必须真的不在严格口径里，否则本条锁的差集不存在
+    assert "runtime-derived" not in OBSERVED_CONTACT_SOURCES
+
+    ep = Endpoint(
+        value=_VENDOR_IP_A, kind="ip", is_private=False,
+        evidences=[Evidence(source="runtime-derived", location=_VENDOR_PATH,
+                            snippet=f"https://{_VENDOR_IP_A}:8545/rpc")],
+        enrichment={"tier": infra.TIER_LIBRARY_FILE},
+    )
+    lead = build_endpoint_leads([ep])[0]
+    assert lead.advice == infra.ADVICE_REVIEW, "runtime-derived 被当成实连证据豁免了降档"
+    assert "source_tier" in (lead.downgrades or {})
+
+
+def test_bulk_string_ip_is_tier_demoted_at_lead_level() -> None:
+    """bulk-string 档的 IP 同样降待核并留墓碑（超大字符串表里的 IP 常量）。"""
+    from apkscan.core import infra
+    from apkscan.core.leads import build_endpoint_leads
+    from apkscan.core.models import Endpoint, Evidence
+
+    ep = Endpoint(
+        value=_VENDOR_IP_A, kind="ip", is_private=False,
+        evidences=[Evidence(source="static", location="dex_strings",
+                            snippet=f"https://{_VENDOR_IP_A}/x")],
+        enrichment={"tier": infra.TIER_BULK_STRING},
+    )
+    lead = build_endpoint_leads([ep])[0]
+    assert lead.advice == infra.ADVICE_REVIEW
+    assert "source_tier" in (lead.downgrades or {})
+
+
+def test_non_investigate_ip_with_vendor_tier_gets_no_tombstone() -> None:
+    """非最高档的 IP（私网→无需调证）不因 tier 长出墓碑——降档只作用于「建议调证」。
+
+    删掉 `_ip_lead` 里 `advice == ADVICE_INVESTIGATE` 前置后本条变红：
+    无需调证的 lead 会带上 source_tier 墓碑 + LOW，是出口可见的噪音。
+    """
+    from apkscan.core import infra
+    from apkscan.core.leads import build_endpoint_leads
+    from apkscan.core.models import Endpoint, Evidence
+
+    ep = Endpoint(
+        value="192.168.10.9", kind="ip", is_private=True,
+        evidences=[Evidence(source="static", location=_VENDOR_PATH, snippet="x")],
+        enrichment={"tier": infra.TIER_LIBRARY_FILE},
+    )
+    lead = build_endpoint_leads([ep])[0]
+    assert lead.advice == infra.ADVICE_SKIP
+    assert not (lead.downgrades or {}), f"无需调证的 lead 长出了墓碑：{lead.downgrades}"
+
+
+def test_tier_demoted_lead_gets_no_forensic_paths() -> None:
+    """降档后的 Lead 不追加「建议调证」专属的取证路径——`_apply_forensic` 必须读压完的档。
+
+    ★复审实测：把 `_apply_forensic(lead.advice, …)` 突变回传**压档前**的 advice 后全仓仍绿。
+      本条用对照差集锁住：同一端点 app 档（最高档）比 vendor 档多出的 evidence_to_obtain
+      即取证路径追加——差集为空说明降档 lead 也被追加了（突变生效的形态）。
+      域名侧同一突变面，一并锁。
+    """
+    from apkscan.core import infra
+    from apkscan.core.leads import build_endpoint_leads
+    from apkscan.core.models import Endpoint, Evidence
+
+    def _lead(kind: str, value: str, tier: str):
+        ep = Endpoint(
+            value=value, kind=kind, is_private=False,
+            evidences=[Evidence(source="static", location=_VENDOR_PATH,
+                                snippet=f"https://{value}/x")],
+            enrichment={"tier": tier},
+        )
+        return build_endpoint_leads([ep])[0]
+
+    for kind, value in (("ip", _VENDOR_IP_A), ("domain", "api.fraud-x.cn")):
+        control = _lead(kind, value, infra.TIER_APP)
+        demoted = _lead(kind, value, infra.TIER_LIBRARY_FILE)
+        assert control.advice == infra.ADVICE_INVESTIGATE, f"{kind} 对照组未判最高档，锁失效"
+        assert demoted.advice == infra.ADVICE_REVIEW, f"{kind} 降档未生效，锁失效"
+        gained = set(control.evidence_to_obtain) - set(demoted.evidence_to_obtain)
+        assert gained, (
+            f"{kind} 对照组没有多出任何取证路径——要么 forensic 不再追加（本条失去意义），"
+            "要么降档 lead 也被追加了（_apply_forensic 读了压档前的 advice）"
+        )
 
 
 def test_flat_vendor_bundle_names_hit_library_file_glob() -> None:

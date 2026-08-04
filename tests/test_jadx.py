@@ -211,6 +211,54 @@ def test_run_jadx_failed_when_no_jadx(monkeypatch, tmp_path) -> None:
     assert JadxAnalyzer()._run_jadx("app.apk", str(tmp_path)) == "failed"
 
 
+def test_scan_java_marks_ip_tier_by_package_path(tmp_path) -> None:
+    """jadx 的 IP 端点同样按包路径标来源档：库包降档、app 包标 app 档（best_tier 救回入口）。
+
+    此前只有域名分支传 tier，IP 两条通道（URL-host / 裸 IP）都不传——vendor bundle 侧
+    的降档在 DEX 反编译源里出现同值时救不回来。
+    """
+    from tests.doc_addresses import GLOBAL_FIXTURE_IP
+
+    # ★裸 IP 字面（非 URL）：只有裸 IP 分支收取——URL 形式会被两个分支都收（jadx 无
+    #   consumed 追踪），互相掩护后单删裸分支的 tier 杀不死。URL-host 分支由下一条单锁。
+    java = f'class C {{ String h = "{GLOBAL_FIXTURE_IP}"; }}'
+
+    def _tree(pkg: str) -> Path:
+        root = tmp_path / pkg.replace("/", "_") / "out"
+        d = root / "sources" / Path(pkg)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "C.java").write_text(java, encoding="utf-8")
+        return root
+
+    lib_eps, _, _, _, _ = JadxAnalyzer()._scan_java(_tree("com/squareup/okhttp"))
+    app_eps, _, _, _, _ = JadxAnalyzer()._scan_java(_tree("com/zmeiop/app"))
+    lib_by = {e.value: e for e in lib_eps}
+    app_by = {e.value: e for e in app_eps}
+    assert lib_by[GLOBAL_FIXTURE_IP].enrichment.get("tier") == "library-file"
+    assert app_by[GLOBAL_FIXTURE_IP].enrichment.get("tier") == "app"
+
+
+def test_scan_java_url_host_ip_tier_not_masked_by_bare_branch(tmp_path) -> None:
+    """URL-host IP 分支的 tier 单独锁死。
+
+    ★jadx 没有 endpoints.py 那样的 consumed 区间追踪，URL 里的 IP 会被裸 IP 分支再收一遍，
+      两个分支互相掩护——只删 URL 分支的 tier、突变照样绿。故用**末段为 0** 的地址：
+      裸 IP 降噪（``_is_noise_bare_ip`` 判网络地址）会跳过它，只有 URL-host 分支收，
+      该分支的 tier 一删本条即红。
+    """
+    url_only_ip = "192.88.99.0"  # leak-scan: allow 夹具段网络地址，仅经 URL-host 通道收取
+    java = f'class D {{ String u = "https://{url_only_ip}:8443/api"; }}'
+    root = tmp_path / "out"
+    d = root / "sources" / "com" / "squareup" / "okhttp"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "D.java").write_text(java, encoding="utf-8")
+
+    eps, _, _, _, _ = JadxAnalyzer()._scan_java(root)
+    by = {e.value: e for e in eps}
+    assert url_only_ip in by, "URL-host 通道未收取该 IP——前提变了，本条锁失效"
+    assert by[url_only_ip].enrichment.get("tier") == "library-file"
+
+
 def _tree_with_pkg_case(tmp_path: Path, pkg_case: str, java: str) -> Path:
     """在 tmp 下造一棵 jadx 产物树，把同一类文件落进包目录 sources/<pkg_case>/（大小写可控）。"""
     root = tmp_path / pkg_case / "out"
