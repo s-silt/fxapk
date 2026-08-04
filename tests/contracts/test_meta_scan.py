@@ -97,11 +97,86 @@ def test_module_constant_key_is_resolved() -> None:
 
 def test_cross_module_constant_key_is_resolved() -> None:
     """跨模块一跳：``meta[_inv.INVENTORY_META_KEY]``（本仓 pcap_ingest/probe_ingest 的写法）。"""
-    symbols = {"runtime_inventory": {"INVENTORY_META_KEY": "runtime_merged_inventory"}}
+    # ★键是完整模块路径（见 test_same_stem_modules_do_not_share_a_constant_table）
+    symbols = {"apkscan.core.runtime_inventory": {"INVENTORY_META_KEY": "runtime_merged_inventory"}}
     src = ("from apkscan.core import runtime_inventory as _inv\n"
            "def f(meta):\n    meta[_inv.INVENTORY_META_KEY] = 1\n")
     got = {a.key for a in meta_scan.scan_source(src, symbols=symbols) if a.kind == "write"}
     assert got == {"runtime_merged_inventory"}
+
+
+CONSTANT_POISON_CASES = [
+    pytest.param('K = "a"\nif flag:\n    K = "b"\ndef f(meta):\n    meta[K] = 1',
+                 id="条件赋值"),
+    pytest.param('K = "a"\ndef f(meta):\n    K = "b"\n    meta[K] = 1',
+                 id="函数内局部遮蔽"),
+    pytest.param('K = "a"\nK = "b"\nK = "c"\ndef f(meta):\n    meta[K] = 1',
+                 id="三次重赋值"),
+    pytest.param('K = "a"\nfrom x import K\ndef f(meta):\n    meta[K] = 1',
+                 id="import 覆盖"),
+    pytest.param('K = "a"\nfor K in items:\n    pass\ndef f(meta):\n    meta[K] = 1',
+                 id="循环变量绑定"),
+    pytest.param('K = "a"\ndel K\ndef f(meta):\n    meta[K] = 1',
+                 id="del 之后"),
+]
+
+
+@pytest.mark.parametrize("src", CONSTANT_POISON_CASES)
+def test_poisoned_constant_never_resolves_to_a_stale_value(src: str) -> None:
+    """★名字被二次绑定过，一律不再解析——**绝不用旧值**。
+
+    复审用这几个构造实证过：早先的实现会把它们错误地登记成 'a' 或 'c'。
+    根因是「值不同才 pop」不是永久失效（第三次赋值会重新被接受），
+    且模块常量表被无差别用于所有作用域。
+
+    ★解析错比不解析更糟：不解析只是落进 unresolved（可见、可人工处理），
+      解析错则把一个真实键登记成**错的名字**，基线从此建在错的集合上，而且无声。
+    """
+    got = _keys(src, "write")
+    assert got == set() or "<dynamic>" in {a.key for a in meta_scan.scan_source(src)}, (
+        f"被污染的常量被解析成了 {got}——应落 unresolved"
+    )
+    assert "a" not in got and "c" not in got, f"用了过期的常量值：{got}"
+
+
+OPEN_WRITE_CASES = [
+    pytest.param('def f(result):\n    result.meta = build_meta()', id="整体赋非字典字面量"),
+    pytest.param('def f(result, other):\n    result.meta = other', id="整体赋另一个变量"),
+    pytest.param('def f():\n    meta: dict = build_meta()', id="带标注整体赋函数返回值"),
+    pytest.param('def f(other):\n    r = AnalyzerResult(meta=other)', id="构造时传非字典"),
+]
+
+
+@pytest.mark.parametrize("src", OPEN_WRITE_CASES)
+def test_whole_meta_assignment_from_unknown_source_is_surfaced(src: str) -> None:
+    """★整体赋一个键不可知的值，必须进 unresolved，不能静默跳过。
+
+    此前只在右值是字典字面量时登记，右值是函数调用/变量时**什么都不记**——
+    于是这类写法既不进 produced、也不进 unresolved，凭空绕过整套契约，
+    还会让「已无开放写入」这个结论假成立（复审实测指出）。
+    """
+    assert _dynamic(src), f"开放的整体写入被静默跳过：{src!r}"
+
+
+def test_same_stem_modules_do_not_share_a_constant_table(tmp_path: Path) -> None:
+    """★符号表按完整模块路径建，不用文件名短名。
+
+    本仓真实存在 ``apkscan/commands/corpus.py`` 与 ``apkscan/core/corpus.py``
+    （另有三个 ``models.py``）。短名做键会把两张常量表合并，
+    后扫描的模块无声覆盖先扫描的，于是跨模块常量键可能解析到**错的值**。
+    """
+    (tmp_path / "apkscan" / "a").mkdir(parents=True)
+    (tmp_path / "apkscan" / "b").mkdir(parents=True)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "apkscan" / "a" / "dup.py").write_text('K = "from_a"\n', encoding="utf-8")
+    (tmp_path / "apkscan" / "b" / "dup.py").write_text('K = "from_b"\n', encoding="utf-8")
+    (tmp_path / "apkscan" / "user.py").write_text(
+        "from apkscan.b.dup import K\ndef f(meta):\n    meta[K] = 1\n", encoding="utf-8"
+    )
+
+    res = meta_scan.scan_repository(tmp_path)
+    assert "from_b" in res.produced, f"跨模块常量解析到了错的表：{sorted(res.produced)}"
+    assert "from_a" not in res.produced
 
 
 def test_constant_resolution_refuses_to_guess() -> None:

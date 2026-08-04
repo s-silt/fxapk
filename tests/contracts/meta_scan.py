@@ -91,25 +91,62 @@ def collect_module_constants(src: str) -> dict[str, str]:
       认不出就落回 unresolved——宁可少认，不可猜错。
     """
     consts: dict[str, str] = {}
+    invalid: set[str] = set()  # ★单调失效：一旦进来就永不回到 consts
+
+    def _bind(name: str, value: str | None) -> None:
+        """记一次绑定。★二次绑定一律永久失效，**不比较值是否相同**。
+
+        早先写成「值不同才 pop」，于是 ``a → b → c`` 三次赋值后 ``c`` 会被重新接受
+        （复审实测复现）。解析错比不解析更糟：把真实键登记成错名字，
+        基线从此建在错的集合上，而且是无声的。
+        """
+        if name in invalid:
+            return
+        if name in consts or value is None:
+            consts.pop(name, None)
+            invalid.add(name)
+            return
+        consts[name] = value
+
     try:
         tree = ast.parse(src)
     except SyntaxError:
         return consts
+
     for node in tree.body:  # 只看模块顶层，不进函数/类
+        # ★条件/循环/异常块里的绑定一律使候选失效——静态看不出哪一支会执行。
+        if isinstance(node, (ast.If, ast.For, ast.While, ast.Try, ast.With)):
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store):
+                    _bind(sub.id, None)
+            continue
+        # import 绑定同样使同名候选失效（from x import K 会覆盖模块常量）
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for a in node.names:
+                _bind(a.asname or a.name.split(".")[0], None)
+            continue
+        if isinstance(node, ast.Delete):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    _bind(t.id, None)
+            continue
+        if isinstance(node, ast.AugAssign):  # K += "x"
+            if isinstance(node.target, ast.Name):
+                _bind(node.target.id, None)
+            continue
+
         targets: list[ast.expr] = []
         value: ast.expr | None = None
         if isinstance(node, ast.Assign):
             targets, value = list(node.targets), node.value
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
             targets, value = [node.target], node.value
-        if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+        else:
             continue
+        lit = value.value if isinstance(value, ast.Constant) and isinstance(value.value, str) else None
         for t in targets:
             if isinstance(t, ast.Name):
-                if t.id in consts and consts[t.id] != value.value:
-                    consts.pop(t.id)  # 重赋值 → 放弃，不猜
-                else:
-                    consts[t.id] = value.value
+                _bind(t.id, lit)
     return consts
 
 
@@ -125,6 +162,36 @@ class _Visitor(ast.NodeVisitor):
         #: ``模块别名 -> {常量名: 值}``，供 ``_inv.INVENTORY_META_KEY`` 这类跨模块引用解析
         self.imported: dict[str, dict[str, str]] = dict(imported or {})
 
+    def _scoped(self, node: ast.AST) -> None:
+        """进入函数体：**局部绑定同名的模块常量在本作用域内不解析**。
+
+        ★复审实测：函数内 ``K = "b"`` 会让模块级 ``K = "a"`` 被误用成 "a"。
+          静态看不出哪个绑定生效，宁可落 unresolved。
+        """
+        local: set[str] = set()
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store):
+                local.add(sub.id)
+            elif isinstance(sub, ast.arg):
+                local.add(sub.arg)
+            elif isinstance(sub, (ast.Import, ast.ImportFrom)):
+                for a in sub.names:
+                    local.add(a.asname or a.name.split(".")[0])
+        shadowed = {k: v for k, v in self.consts.items() if k not in local}
+        saved = self.consts
+        self.consts = shadowed
+        try:
+            for child in ast.iter_child_nodes(node):
+                self.visit(child)
+        finally:
+            self.consts = saved
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        self._scoped(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # noqa: N802
+        self._scoped(node)
+
     # -- 别名：m = state.meta / m = meta ---------------------------------
     def visit_Assign(self, node: ast.Assign) -> None:  # noqa: N802
         if self._is_meta_expr(node.value):
@@ -136,17 +203,28 @@ class _Visitor(ast.NodeVisitor):
         #   而且**路径 A 最初就漏了它**——是运行期观测（路径 C）把这 7 个键抓出来的。
         #   这正是「不能让单一扫描器既生成真相又验证自己的真相」的实证。
         for t in node.targets:
-            if self._is_meta_target(t) and isinstance(node.value, ast.Dict):
-                for k in node.value.keys:
-                    self._record(k, "write", node.lineno)
+            if self._is_meta_target(t):
+                if isinstance(node.value, ast.Dict):
+                    for k in node.value.keys:
+                        self._record(k, "write", node.lineno)
+                elif not self._is_meta_expr(node.value):
+                    # ★整体赋一个**非字典字面量**（``result.meta = build_meta()``）：
+                    #   键完全不可知，必须记进 unresolved。此前这里没有兜底，
+                    #   这类写法被静默跳过——与「动态键绝不静默跳过」的核心保证冲突，
+                    #   且会让「已无开放写入」这个结论假成立（复审实测指出）。
+                    self.out.append(Access("<dynamic:whole-meta>", "write",
+                                           self.path, node.lineno))
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:  # noqa: N802
         """带类型标注的整体赋值：``meta: dict = {...}``（core/pipeline.py 的写法）。"""
-        if (self._is_meta_target(node.target) and node.value is not None
-                and isinstance(node.value, ast.Dict)):
-            for k in node.value.keys:
-                self._record(k, "write", node.lineno)
+        if self._is_meta_target(node.target) and node.value is not None:
+            if isinstance(node.value, ast.Dict):
+                for k in node.value.keys:
+                    self._record(k, "write", node.lineno)
+            elif not self._is_meta_expr(node.value):
+                self.out.append(Access("<dynamic:whole-meta>", "write",
+                                       self.path, node.lineno))
         if node.value is not None and self._is_meta_expr(node.value):
             if isinstance(node.target, ast.Name):
                 self.aliases.add(node.target.id)
@@ -184,9 +262,14 @@ class _Visitor(ast.NodeVisitor):
         # ★构造时传入：``AnalyzerResult(meta={"a": 1})`` / ``f(..., meta={...})``。
         #   与整体赋值同源的盲区，一并认。
         for kw in node.keywords:
-            if kw.arg in _META_ATTRS and isinstance(kw.value, ast.Dict):
-                for k in kw.value.keys:
-                    self._record(k, "write", node.lineno)
+            if kw.arg in _META_ATTRS:
+                if isinstance(kw.value, ast.Dict):
+                    for k in kw.value.keys:
+                        self._record(k, "write", node.lineno)
+                elif not self._is_meta_expr(kw.value):
+                    # 同上：构造时传一个键不可知的 meta，必须可见
+                    self.out.append(Access("<dynamic:whole-meta>", "write",
+                                           self.path, node.lineno))
         f = node.func
         if isinstance(f, ast.Attribute) and self._is_meta_expr(f.value):
             if f.attr in ("get", "pop"):
@@ -252,21 +335,24 @@ def _import_map(src: str, symbols: dict[str, dict[str, str]]) -> tuple[dict[str,
     except SyntaxError:
         return from_consts, alias_map
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            table = symbols.get(node.module.split(".")[-1], {})
+        if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            # ★按**完整模块路径**查表，不用短名：本仓已有 apkscan.commands.corpus 与
+            #   apkscan.core.corpus 同名，短名做键会把两张常量表合并、无声取到错的那张。
+            #   相对导入（level>0）不解析——解析它要还原当前 package，超出「不猜」的边界。
+            table = symbols.get(node.module, {})
             for a in node.names:
                 if a.name == "*":
                     continue  # 星号导入不解析
                 if a.name in table:
                     from_consts[a.asname or a.name] = table[a.name]
-                # from x import y as _inv —— 模块别名形态
-                elif a.name in symbols:
-                    alias_map[a.asname or a.name] = symbols[a.name]
+                else:  # from apkscan.core import runtime_inventory as _inv
+                    full = f"{node.module}.{a.name}"
+                    if full in symbols:
+                        alias_map[a.asname or a.name] = symbols[full]
         elif isinstance(node, ast.Import):
             for a in node.names:
-                short = a.name.split(".")[-1]
-                if short in symbols:
-                    alias_map[a.asname or short] = symbols[short]
+                if a.name in symbols:
+                    alias_map[a.asname or a.name.split(".")[-1]] = symbols[a.name]
     return from_consts, alias_map
 
 
@@ -302,14 +388,21 @@ def scan_repository(root: Path, *, prod_dir: str = "apkscan",
     res = ScanResult()
     # ★先建全仓符号表：常量键（meta[DEX_TRUNCATED_META_KEY]）要靠它解析成真实键名。
     #   这是「解析而非豁免」的实现基础——豁免会不断增长成动态访问的逃生口。
+    #   ★键是**完整模块路径**（apkscan.core.runtime_inventory），不是文件名短名：
+    #     本仓已有 apkscan.commands.corpus 与 apkscan.core.corpus 同名，
+    #     用短名会把两张常量表合并、后扫描者无声覆盖前者。
     symbols: dict[str, dict[str, str]] = {}
     for sub in (prod_dir, test_dir):
         base = root / sub
         if base.is_dir():
             for py in base.rglob("*.py"):
                 consts = collect_module_constants(py.read_text(encoding="utf-8", errors="ignore"))
-                if consts:
-                    symbols[py.stem] = {**symbols.get(py.stem, {}), **consts}
+                if not consts:
+                    continue
+                parts = list(py.relative_to(root).with_suffix("").parts)
+                if parts and parts[-1] == "__init__":
+                    parts.pop()
+                symbols[".".join(parts)] = consts
 
     for sub, is_test in ((prod_dir, False), (test_dir, True)):
         base = root / sub
