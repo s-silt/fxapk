@@ -34,8 +34,8 @@ from tests.conftest import FakeContext
 _UNIAPP_PATH = "assets/apps/__UNI__X/www/app-service.js"
 
 
-def _analyze(files: dict[str, bytes] | None = None) -> AnalyzerResult:
-    return JsBundleAnalyzer().analyze(FakeContext(files=files))
+def _analyze(files: dict[str, bytes] | None = None, platform: str = "android") -> AnalyzerResult:
+    return JsBundleAnalyzer().analyze(FakeContext(files=files, platform=platform))
 
 
 def _values(result: AnalyzerResult) -> set[str]:
@@ -622,6 +622,27 @@ def test_flat_vendor_bundle_names_hit_library_file_glob() -> None:
         assert infra.domain_source_tier(loc, 0) == infra.TIER_LIBRARY_FILE, loc
     for loc in ("app.204b4fda.js", "evidence/index.html"):
         assert infra.domain_source_tier(loc, 0) == infra.TIER_APP, loc
+
+
+def test_js_bundle_web_platform_keeps_site_own_minified_code_at_app_tier() -> None:
+    """js_bundle 在 analyze-web（platform="web"）下同样不套用 APK 的 glob 先验。
+
+    ★与 endpoints 同一个坑：js_bundle 的 `_collect_targets` 在 web 平台扫 `web/*`，
+      但判据此前恒用 context="apk"，站点自有的 main.min.js 里的后端会被判 library-file。
+      这条锁的是判据语境按 ctx.platform 穿透到 `_scan_literal`。
+    """
+    from apkscan.core import infra
+
+    body = f'var api="https://api.fraud-x.cn/a";var n="{_VENDOR_IP_A}";'.encode()
+    web_by = {ep.value: ep for ep in _analyze({"web/static/js/main.min.js": body}, platform="web").endpoints}
+    for value in ("api.fraud-x.cn", _VENDOR_IP_A):
+        assert web_by[value].enrichment.get("tier") == infra.TIER_APP, (
+            f"web 平台下站点自有代码里的 {value} 被误降"
+        )
+
+    # 对照：web 平台下明确的 vendor 命名仍降档
+    van_by = {ep.value: ep for ep in _analyze({"web/chunk-vendors.bc47.js": body}, platform="web").endpoints}
+    assert van_by["api.fraud-x.cn"].enrichment.get("tier") == infra.TIER_LIBRARY_FILE
 
 
 def test_web_context_keeps_site_own_minified_code_at_app_tier() -> None:
