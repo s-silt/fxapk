@@ -918,7 +918,19 @@ def _capture(
                     f"① floor：带外 pcap 解析未成功（{floor_summary.parse_status}）——"
                     f"空结果不代表零流量，{floor_pcap.name} 留档待核"
                 )
-            floor_eps = pcap_ingest.to_runtime_endpoints(floor_summary)
+            ingest_stats: dict[str, object] = {}
+            floor_eps = pcap_ingest.to_runtime_endpoints(floor_summary, stats=ingest_stats)
+            # ★被当作反诈拦截节点排除的对端必须写进 playbook：那条排除直接判「无需调证」，
+            #   是全仓降噪里唯一的例外通道，且命中与否取决于一份人工维护的常量名单。此前它
+            #   静默丢弃、计数还与「无载荷」混在同一行日志里——名单若收错，读报告的人永远
+            #   发现不了「有个真后端被吞了」。
+            excluded = ingest_stats.get("intercept_excluded") or []
+            if isinstance(excluded, list) and excluded:
+                playbook.append(
+                    f"① floor：带外 pcap 排除已知反诈拦截节点 {len(excluded)} 个"
+                    f"（{'、'.join(str(v) for v in excluded)}）——非业务接入/落地机，不升为 runtime 端点；"
+                    f"若其中有本案真实后端，说明拦截节点名单收录有误，需人工复核"
+                )
             seen_vals = {ep.value for ep in endpoints}
             added = [
                 ep

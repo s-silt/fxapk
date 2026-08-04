@@ -561,6 +561,45 @@ def test_pcap_dns_txt_answer_is_preserved() -> None:
     assert "7nf15vxk.yqdgtbq2xm.uk" in summary.dns_queries  # 向后兼容仍保留 qname
 
 
+def test_intercept_exclusion_is_reported_separately_from_no_payload() -> None:
+    """反诈拦截节点的排除必须**单列**统计，不能混进「无载荷」里。
+
+    ★这条排除是全仓降噪纪律里唯一直接判「无需调证」的通道，且命中与否取决于一份人工维护的
+      常量名单。此前它与无载荷共用一个计数、日志只提无载荷，于是「有个端点被当拦截节点吞了」
+      在报告里完全看不出来——名单若哪天收错（某 IP 改作普通业务地址并被后端租用），
+      静默丢弃会让人永远发现不了。
+    """
+    from apkscan.network.fingerprints import KNOWN_INTERCEPT_IPS
+
+    intercept = sorted(KNOWN_INTERCEPT_IPS)[0]
+    # 拦截节点带**双向载荷**：证明它不是靠「无载荷」那条判据被滤掉的
+    hit = _eth(_ipv4(_tcp_flags(b"Y" * 60, 50002, 443, 0x18), 6, "10.0.0.2", intercept), 0x0800)
+    syn = _eth(_ipv4(_tcp_flags(b"", 55555, 9466, 0x02), 6, "10.0.0.2", "45.202.1.235"), 0x0800)  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
+    data = _eth(_ipv4(_tcp_flags(b"X" * 50, 50001, 30113, 0x18), 6, "10.0.0.2", "106.53.21.146"), 0x0800)  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
+    summary = pcap_ingest.parse_pcap_bytes(_pcap([hit, syn, data]))
+
+    stats: dict[str, object] = {}
+    eps = pcap_ingest.to_runtime_endpoints(summary, stats=stats)
+    ip_vals = {e.value for e in eps if e.kind == "ip"}
+
+    assert intercept not in ip_vals, "拦截节点仍被升为 runtime 端点"
+    assert stats["intercept_excluded"] == [intercept], (
+        f"拦截节点的排除没有单列出来：{stats}"
+    )
+    assert stats["no_payload_dropped"] == 1, (
+        f"拦截节点被混进了「无载荷」计数：{stats}——两类判据性质不同，合在一起数等于把后者藏起来"
+    )
+    assert "106.53.21.146" in ip_vals  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
+
+
+def test_intercept_exclusion_stats_absent_when_not_requested() -> None:
+    """不传 stats 时行为逐字不变——既有 20+ 处调用点零改动。"""
+    summary = pcap_ingest.parse_pcap_bytes(_sample_pcap())
+    assert pcap_ingest.to_runtime_endpoints(summary) == pcap_ingest.to_runtime_endpoints(
+        summary, stats={}
+    )
+
+
 def test_runtime_endpoints_filters_syn_only_no_payload() -> None:
     """★ 复审#1：to_runtime_endpoints（自动并入主报告）过滤无载荷 SYN-only 节点——不让它绕过
     态分级、走下游默认公网 IP"建议调证"；有载荷节点保留；SYN-only 仍在 pcap 台账作待核。"""

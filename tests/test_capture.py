@@ -3635,15 +3635,32 @@ def test_floor_pcap_auto_ingested_into_endpoints(monkeypatch, tmp_path):
         Endpoint(value="connectivitycheck.gstatic.com", kind="domain", evidences=_ev()),  # 噪音
     ]
     monkeypatch.setattr(capture.pcap_ingest, "parse_pcap", lambda p: object())
-    monkeypatch.setattr(capture.pcap_ingest, "to_runtime_endpoints", lambda s: floor_eps)
+    def _fake_ingest(s, *, stats=None):
+        # ★如实模拟生产签名：capture 会传 stats 收集「被排除的拦截节点」，
+        #   替身若不接这个 kwarg，本测试就只是在验一个不存在的调用形态。
+        if stats is not None:
+            stats["intercept_excluded"] = ["203.0.113.77"]
+            stats["no_payload_dropped"] = 0
+        return floor_eps
 
-    capture.run("com.x", out_dir=str(tmp_path), duration=1)
+    monkeypatch.setattr(capture.pcap_ingest, "to_runtime_endpoints", _fake_ingest)
+
+    result = capture.run("com.x", out_dir=str(tmp_path), duration=1)
 
     payload = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
     vals = {e["value"] for e in payload["endpoints"]}
     assert "8.8.4.4" in vals  # IP 接入节点并入（噪音判定交下游 asn）
     assert "evil-c2.example.com" in vals  # 真 SNI 域名并入
     assert "connectivitycheck.gstatic.com" not in vals  # GMS/连通性噪音域名被折叠
+
+    # ★接线锁：被当作反诈拦截节点排除的对端必须写进 playbook。那条排除直接判「无需调证」，
+    #   是全仓降噪里唯一的例外通道，且命中与否取决于一份人工维护的常量名单——静默丢弃会让
+    #   「名单收错、真后端被吞」永远发现不了。删掉 capture 里那段 playbook.append 即变红。
+    playbook_text = "\n".join(str(x) for x in (result.get("playbook") or []))
+    assert "203.0.113.77" in playbook_text, (
+        f"被排除的拦截节点没有出现在 playbook 里：{playbook_text}"
+    )
+    assert "拦截" in playbook_text and "复核" in playbook_text
 
 
 # ---------------------------------------------------------------------------

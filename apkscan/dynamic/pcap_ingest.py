@@ -1595,7 +1595,9 @@ def to_report_leads(summary: PcapSummary) -> list[Lead]:
     return leads
 
 
-def to_runtime_endpoints(summary: PcapSummary) -> list[Endpoint]:
+def to_runtime_endpoints(
+    summary: PcapSummary, *, stats: dict[str, object] | None = None
+) -> list[Endpoint]:
     """把 pcap summary 转成 runtime_report 的 ``Endpoint``（公网接入节点 IP + SNI/DNS 域名，
     ``source=runtime-pcap``）——供 capture 把带外 pcap 的接入节点【自动并入】``runtime_report.endpoints``，
     随后经 merge → asn 富化 → infra 归属分级（Google/云 IP 自动判为第三方基础设施并在报告里折叠）。
@@ -1607,11 +1609,18 @@ def to_runtime_endpoints(summary: PcapSummary) -> list[Endpoint]:
     endpoints: list[Endpoint] = []
     seen: set[str] = set()
     dropped = 0
+    intercept_dropped: list[str] = []
     for re in remote_endpoints(summary):
         # ★反诈拦截节点排除（Codex fengzhixin 案抓包交接 §6）：涉诈域名被拦后解析至此的拦截页，即便
         #   有双向载荷也非业务接入/落地机，绝不升为 runtime 端点（会污染归因）；仍在 pcap 台账留证。
+        #
+        # ★这条排除必须**可见**：它是全仓降噪纪律里唯一直接判「无需调证」的通道，而名单命中与否
+        #   取决于一份人工维护的常量表。此前它与下面的「无载荷」共用一个计数、日志只提无载荷，
+        #   于是「有个端点被当拦截节点吞了」在报告里完全看不出来。名单若哪天收错（某 IP 改作
+        #   普通业务地址并被后端租用），静默丢弃会让人永远发现不了。
         if re.ip in _KNOWN_FANZHA:
-            dropped += 1
+            if re.ip not in intercept_dropped:
+                intercept_dropped.append(re.ip)
             continue
         # ★自动并入护栏：无载荷（SYN-only/reset/仅握手）节点不升为主报告"公网 IP 建议调证"——
         # 下游 _ip_lead 对 pcap Endpoint 只按公私网给 advice、会绕过这里的态分级，故直接过滤；
@@ -1649,6 +1658,16 @@ def to_runtime_endpoints(summary: PcapSummary) -> list[Endpoint]:
             "[pcap] 自动并入过滤无载荷接入节点 %d 个（SYN-only/连接尝试，留 pcap 台账作待核，不升'建议调证'）",
             dropped,
         )
+    if intercept_dropped:
+        logger.info(
+            "[pcap] 自动并入排除已知反诈拦截节点 %d 个：%s（非业务接入/落地机，留 pcap 台账留证）",
+            len(intercept_dropped), "、".join(intercept_dropped),
+        )
+    if stats is not None:
+        # ★两类丢弃分开记：性质完全不同——「无载荷」是形态判据，「拦截节点」是名单判据。
+        #   合在一起数就等于把后者藏进前者里。
+        stats["no_payload_dropped"] = dropped
+        stats["intercept_excluded"] = list(intercept_dropped)
     # SNI / DNS 域名端点（DNS 域名无 per-query ts，留 None）。
     domain_ts: dict[str, float] = {}
     domains: dict[str, str] = {}
