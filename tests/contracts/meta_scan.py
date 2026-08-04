@@ -48,6 +48,13 @@ _KEY_FAMILY_FUNCS: dict[str, str] = {
     "coverage_meta_key": "web_coverage",
 }
 
+
+def _is_meta_ctor(node: ast.Call) -> bool:
+    """调用的是不是已知的 meta 载体构造器（``AnalyzerResult(...)`` / ``Report(...)``）。"""
+    name = node.func.id if isinstance(node.func, ast.Name) else (
+        node.func.attr if isinstance(node.func, ast.Attribute) else "")
+    return name in _META_BEARING_CTORS
+
 #: 独立作用域节点：其**函数体/类体/推导式体**内的绑定不泄漏到外层。
 #: ★但它们的一部分子表达式仍在外层求值，见 :func:`_outer_parts`。
 _NESTED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef,
@@ -232,8 +239,8 @@ class _Visitor(ast.NodeVisitor):
         self.consts: dict[str, str] = dict(consts or {})
         #: ``模块别名 -> {常量名: 值}``，供 ``_inv.INVENTORY_META_KEY`` 这类跨模块引用解析
         self.imported: dict[str, dict[str, str]] = dict(imported or {})
-        #: 本作用域内键已被逐一看见的字典名（见 :meth:`_names_with_visible_keys`）
-        self.keys_seen: set[str] = set()
+        #: 本作用域内来源可证的字典名 → 字面量初值（见 :meth:`_locally_built_dicts`）
+        self.local_dicts: dict[str, ast.Dict] = {}
 
     def _scoped(self, node: ast.AST) -> None:
         """进入函数体：**局部绑定同名的模块常量在本作用域内不解析**。
@@ -264,40 +271,73 @@ class _Visitor(ast.NodeVisitor):
         _walk_own(node)
         shadowed = {k: v for k, v in self.consts.items() if k not in local}
         saved = self.consts
-        saved_seen = self.keys_seen
+        saved_dicts = self.local_dicts
         self.consts = shadowed
-        self.keys_seen = self._names_with_visible_keys(node)
+        self.local_dicts = self._locally_built_dicts(node)
         try:
             for child in ast.iter_child_nodes(node):
                 self.visit(child)
         finally:
             self.consts = saved
-            self.keys_seen = saved_seen
+            self.local_dicts = saved_dicts
 
     @staticmethod
-    def _names_with_visible_keys(node: ast.AST) -> set[str]:
-        """本作用域内**键被逐一看见**的字典名：就地建的字典字面量，或被下标写入过的名字。
+    def _locally_built_dicts(node: ast.AST) -> dict[str, ast.Dict]:
+        """本作用域内**来源可证**的字典名 → 它的字面量初值。
 
-        ★这是 ``result.meta = X`` 该不该记 unresolved 的判据。此前判据是「X 看起来像 meta」，
-          于是 ``result.meta = meta``（``meta`` 是函数参数、来自别处）被静默放过——
-          名字叫 meta 不等于它的键在本文件出现过，这是复审指出的真 escape hatch。
+        ★判据是「这个名字从哪来」，不是「有没有见过往它里写」。
+          见过写入只说明看见了**新增**的键，说明不了它原本带着哪些键——
+          复审用五个构造实证过这条错判：外部参数只要在本作用域写过一个已知键，
+          它其余的未知键就被整个隐藏，而扫描器表面上一切正常。
+
+        必须同时成立才算可证：
+
+        - 本作用域内**恰好绑定一次**，且那次的右值是**字典字面量**
+          （``ast.DictComp`` 不算——推导式的键通常是动态的）；
+        - 不是函数参数、不来自导入或函数返回值（这些都会让绑定次数或形态对不上）；
+        - 没有被 ``global`` / ``nonlocal`` 声明过（否则别处可改它）；
+        - 没有被搬去另一个名字（``n = m`` 之后 ``n["x"]`` 记不到，会静默漏键）；
+        - 没有被当参数传出去（被调方可能加键，静态证不了）。
         """
-        seen: set[str] = set()
-        for sub in ast.walk(node):
-            value = getattr(sub, "value", None)
-            if isinstance(sub, (ast.Assign, ast.AnnAssign)) and isinstance(
-                value, (ast.Dict, ast.DictComp)
-            ):
-                targets = sub.targets if isinstance(sub, ast.Assign) else [sub.target]
-                seen.update(t.id for t in targets if isinstance(t, ast.Name))
-            elif (isinstance(sub, ast.Subscript) and isinstance(sub.ctx, ast.Store)
-                    and isinstance(sub.value, ast.Name)):
-                seen.add(sub.value.id)
-            elif (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
-                    and isinstance(sub.func.value, ast.Name)
-                    and sub.func.attr in ("setdefault", "update")):
-                seen.add(sub.func.value.id)
-        return seen
+        binds: dict[str, int] = {}
+        literals: dict[str, ast.Dict] = {}
+        disqualified: set[str] = set()
+
+        def _walk_own(n: ast.AST) -> None:
+            for child in ast.iter_child_nodes(n):
+                if isinstance(child, _NESTED_SCOPES):
+                    # 嵌套作用域体内的绑定不泄漏，但 global/nonlocal 能改到本层
+                    for sub in ast.walk(child):
+                        if isinstance(sub, (ast.Global, ast.Nonlocal)):
+                            disqualified.update(sub.names)
+                    for part in _outer_parts(child):
+                        _walk_own(part)
+                    continue
+                if isinstance(child, (ast.Global, ast.Nonlocal)):
+                    disqualified.update(child.names)
+                elif isinstance(child, (ast.Assign, ast.AnnAssign)):
+                    targets = (child.targets if isinstance(child, ast.Assign)
+                               else [child.target])
+                    names = [t.id for t in targets if isinstance(t, ast.Name)]
+                    if isinstance(child.value, ast.Dict):
+                        literals.update(dict.fromkeys(names, child.value))
+                    elif isinstance(child.value, ast.Name) and names:
+                        # ``n = m``：搬去另一个**名字**后，``n["x"]`` 记不到，会静默漏键。
+                        # ★必须限定左侧是 Name——``result.meta = m`` 左侧是属性，
+                        #   那正是要放行的形态，早先没看左侧把它自己也判死了。
+                        disqualified.add(child.value.id)
+                elif isinstance(child, ast.Call):
+                    meta_kw = child.keywords if _is_meta_ctor(child) else []
+                    passed = [*child.args, *(k.value for k in child.keywords
+                                             if k not in meta_kw or k.arg not in _META_ATTRS)]
+                    disqualified.update(a.id for a in passed if isinstance(a, ast.Name))
+                for nm in _bound_names(child):
+                    binds[nm] = binds.get(nm, 0) + 1
+                _walk_own(child)
+
+        _walk_own(node)
+        return {n: d for n, d in literals.items()
+                if binds.get(n) == 1 and n not in disqualified}
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
         self._scoped(node)
@@ -319,11 +359,11 @@ class _Visitor(ast.NodeVisitor):
         #     必须记进 unresolved——静默跳过会让「已无开放写入」这个结论假成立。
         for t in node.targets:
             if self._is_meta_target(t):
-                # ★反向别名：``result.meta = m``（m 是本作用域就地建的字典）——
+                # ★反向别名：``result.meta = m``（m 是来源可证的本地字典）——
                 #   m 上的下标写入本来不算 meta 写入，于是那批键对基线完全隐形：
                 #   既没记具体键、也没记 unresolved，是最坏的一种「静默」。
-                #   只对 keys_seen 里的名字生效；参数/外来的 meta 仍走 unresolved。
-                if isinstance(node.value, ast.Name) and node.value.id in self.keys_seen:
+                #   只对 local_dicts 里的名字生效；参数/外来的 meta 仍走 unresolved。
+                if isinstance(node.value, ast.Name) and node.value.id in self.local_dicts:
                     self.aliases.add(node.value.id)
                 self._whole_meta_write(node.value, node.lineno)
         self.generic_visit(node)
@@ -350,27 +390,26 @@ class _Visitor(ast.NodeVisitor):
         """
         return isinstance(node, ast.Attribute) and node.attr in _META_ATTRS
 
-    def _keys_visible(self, node: ast.expr) -> bool:
-        """整体赋给 ``X.meta`` 的右值，其键是否**已被本扫描器逐一看见**。
-
-        ★只有两种情况算看见：搬运另一个 ``Y.meta`` 容器（不创造新键），
-          或右值是本作用域里就地建起、并被逐条下标写入过的字典。
-          ``result.meta = meta`` 里的 ``meta`` 若是函数参数或来自别处，键完全不可知，
-          必须落 unresolved——不能因为名字叫 meta 就假定看见过（复审指出的真 escape hatch）。
-        """
-        if isinstance(node, ast.Attribute) and node.attr in _META_ATTRS:
-            return True
-        if isinstance(node, ast.Name):
-            return node.id in self.keys_seen
-        return False
-
     def _whole_meta_write(self, value: ast.expr, line: int) -> None:
-        """``X.meta = <expr>``：字典字面量记具体键，否则记 unresolved（绝不静默跳过）。"""
+        """``X.meta = <expr>``：键可证的记具体键，否则记 unresolved（绝不静默跳过）。
+
+        ★「键可证」只有三种：字典字面量、搬运另一个 ``Y.meta`` 容器（不创造新键）、
+          或来源可证的本地字典名（见 :meth:`_locally_built_dicts`）。
+          其余一律 unresolved——包括名字恰好叫 ``meta`` 的函数参数。
+        """
         if isinstance(value, ast.Dict):
             for k in value.keys:
                 self._record(k, "write", line)
-        elif not self._keys_visible(value):
-            self.out.append(Access("<dynamic:whole-meta>", "write", self.path, line))
+            return
+        if isinstance(value, ast.Attribute) and value.attr in _META_ATTRS:
+            return
+        if isinstance(value, ast.Name) and value.id in self.local_dicts:
+            # 字面量初值的键要登记：``m = {"a": 1}; result.meta = m`` 此前返回空——
+            # 既不记键也不记 unresolved，是最坏的一种静默（复审实证）。
+            for k in self.local_dicts[value.id].keys:
+                self._record(k, "write", line)
+            return
+        self.out.append(Access("<dynamic:whole-meta>", "write", self.path, line))
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:  # noqa: N802
         """``report.meta |= other`` / ``meta.meta += ...``：此前零记录，是无声的整体写入。"""

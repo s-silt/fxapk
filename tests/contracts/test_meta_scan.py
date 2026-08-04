@@ -180,6 +180,25 @@ OPEN_WRITE_CASES = [
     pytest.param('def f(result, meta):\n    result.meta = meta', id="整体赋外部的 meta 参数"),
     pytest.param('def f(meta):\n    r = AnalyzerResult(meta=meta)', id="构造时传外部的 meta 参数"),
     pytest.param('def f(report, other):\n    report.meta |= other', id="增量合并（此前零记录）"),
+    # ★以下八个构造由复审给出：判据一旦从「来源可证」滑成「见过写入」，它们全部静默通过。
+    #   见过写入只说明看见了**新增**的键，说明不了这个名字**原本**带着哪些键。
+    pytest.param('def f(result, m):\n    m["seen"] = 1\n    result.meta = m',
+                 id="外部参数写过一个已知键"),
+    pytest.param('def f(result, m):\n    def g():\n        m["nested"] = 1\n    result.meta = m',
+                 id="写入发生在嵌套作用域"),
+    pytest.param('def f(result, external):\n    m = {}\n    m = external\n    result.meta = m',
+                 id="本地初始化后重绑外部值"),
+    pytest.param('def f(result, items):\n    m = {k: v for k, v in items}\n    result.meta = m',
+                 id="字典推导（键通常是动态的）"),
+    pytest.param('def f(result, external, c):\n    if c:\n        m = {}\n    else:\n'
+                 '        m = external\n    result.meta = m',
+                 id="分支里混入外部来源"),
+    pytest.param('def f(result, m, ext):\n    m.update(ext)\n    result.meta = m',
+                 id="外部参数被 update"),
+    pytest.param('def f(result):\n    m = {}\n    helper(m)\n    result.meta = m',
+                 id="本地字典被传出去（被调方可能加键）"),
+    pytest.param('def f(result):\n    m = {"a": 1}\n    n = m\n    n["x"] = 1\n    result.meta = m',
+                 id="搬去另一个名字后再写"),
 ]
 
 
@@ -194,17 +213,35 @@ def test_whole_meta_assignment_from_unknown_source_is_surfaced(src: str) -> None
     assert _dynamic(src), f"开放的整体写入被静默跳过：{src!r}"
 
 
-def test_locally_built_dict_assigned_to_meta_yields_its_keys() -> None:
-    """★就地建的字典整体赋给 ``X.meta``：键**必须逐条登记**，不能既不记键也不记 unresolved。
+PROVABLE_DICT_CASES = [
+    pytest.param('def f(result):\n    m = {}\n    m["a"] = 1\n    m["b"] = 2\n    result.meta = m',
+                 {"a", "b"}, id="就地建空字典后逐条写"),
+    pytest.param('def f(result):\n    m = {"a": 1}\n    result.meta = m',
+                 {"a"}, id="字面量初值经名字搬运"),
+    pytest.param('def f(result):\n    m = {"a": 1}\n    m["b"] = 2\n    result.meta = m',
+                 {"a", "b"}, id="字面量初值加补写"),
+]
 
-    这是收紧「右值键是否可见」判据时自己引入的洞：``m`` 上的下标写入本来不算 meta 写入，
-    于是 ``m["a"]`` 这批键对基线完全隐形——最坏的一种结果，因为它连 unresolved
-    都不产，扫描器看上去一切正常。
+
+@pytest.mark.parametrize(("src", "expect"), PROVABLE_DICT_CASES)
+def test_provably_local_dict_assigned_to_meta_yields_its_keys(src: str, expect: set[str]) -> None:
+    """★来源可证的本地字典整体赋给 ``X.meta``：键必须逐条登记。
+
+    这是收紧判据时自己开的洞：``m`` 上的下标写入本来不算 meta 写入，于是那批键
+    对基线完全隐形——比误报危险得多，因为它连 unresolved 都不产，扫描器看上去一切正常。
+
+    ★另一面是**字面量初值**：``m = {"a": 1}`` 之后直接整体赋值，键从没经过下标写入，
+      只靠反向别名救不回来，必须单独把初值的键取出来登记。
     """
-    src = 'def f(result):\n    m = {}\n    m["a"] = 1\n    m["b"] = 2\n    result.meta = m'
+    assert _keys(src, "write") == expect, "来源可证的本地字典，键被静默丢弃"
+    assert not _dynamic(src), "来源与增键操作都可证，不该再记 unresolved"
 
-    assert _keys(src, "write") == {"a", "b"}, "本地字典的键被静默丢弃"
-    assert not _dynamic(src), "键其实可见，不该记 unresolved"
+
+def test_dynamic_key_written_into_a_local_dict_is_still_surfaced() -> None:
+    """★来源可证**不等于**每个键都认得：动态键仍须落 unresolved。"""
+    src = 'def f(result, k):\n    m = {}\n    m[k] = 1\n    result.meta = m'
+
+    assert _keys(src, "write") == {"<dynamic>"}, "本地字典里的动态键被吞了"
 
 
 NESTED_SCOPE_CASES = [
