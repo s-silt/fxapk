@@ -512,6 +512,63 @@ def test_bare_ip_in_web_config_is_ip_kind_not_domain() -> None:
     )
 
 
+def test_multi_page_web_evidence_top_n_selection_end_to_end() -> None:
+    """端到端：多份网页证据 → 端点 → Lead → 闭环 Top-N，每个来源文件都占得到名额。
+
+    ★为什么需要这条：给 URL 派生 host 之后，网页证据的候选池会显著变大（统计、CDN、第三方
+      服务的域名都会成为域名 Lead）。此前只验过「单个 URL host 能产 Lead」，没验过**一堆**
+      host 对闭环目标选择的影响——而「一簇候选把 Top-N 占满」正是这条链最初要修的事故。
+
+    实测形态（5 份 HTML × 每份 1 个 known-infra + 3 个第三方，真后端只在其中一份里）：
+      - known-infra 被 ``classify_domain`` 判「无需调证」，压根不进候选池；
+      - 同源去拥塞让 5 个来源文件**各占一个名额**，没有哪一份能吃掉 Top-6；
+      - 其余 11 条顺延，可从 ``source_deferred`` 看出。
+
+    ★这条判据的**边界**必须说清、不能靠一次凑巧的通过来掩盖：组代表由 rank/字典序决定，
+      而「同组里哪个才是真后端」工具无从判断。本例中真后端能进 Top-6，是因为它所在的
+      page3 组由它代表（字典序 ``real-`` 在 ``tracker`` 前）——**换个名字它就会被顺延**。
+      真正能把真后端顶上来的是运行时证据（实连的对端绕过来源配额且排序优先），
+      静态侧不做、也做不到这个保证。
+    """
+    from apkscan.core.closure.targets import _select_targets_with_stats
+    from apkscan.core.leads import build_endpoint_leads
+    from apkscan.core.models import Report
+
+    files: dict[str, bytes] = {}
+    for n in range(1, 6):
+        parts = [
+            'window.cdn = "https://fonts.googleapis.com/css";',  # known-infra，应被降噪
+            f'window.t1 = "https://tracker{n}a.unknown-vendor.com/t";',
+            f'window.t2 = "https://tracker{n}b.unknown-vendor.com/t";',
+            f'window.t3 = "https://tracker{n}c.unknown-vendor.com/t";',
+        ]
+        if n == 3:
+            parts.append('window.apiBase = "https://real-backend.fraud-x.cn/api/v1";')
+        files[f"web/page{n}.html"] = ("<html><script>" + "".join(parts) + "</script></html>").encode()
+
+    result = WebInlineConfigAnalyzer().analyze(_ctx(files))
+    eps = [e for e in result.endpoints if e.kind in ("domain", "ip")]
+    leads = build_endpoint_leads(eps, online=False)
+
+    # ① known-infra 不进候选：降噪在 Lead 层就生效，不靠闭环去挤
+    infra_lead = next(ld for ld in leads if ld.value == "fonts.googleapis.com")
+    assert infra_lead.advice == "无需调证", f"known-infra 未被降噪：{infra_lead.advice}"
+
+    report = Report(
+        package_name="", meta={}, leads=leads, endpoints=eps, findings=[],
+        analyzer_status=[{"name": "web_inline_config", "status": "ran"}],
+    )
+    selected, stats = _select_targets_with_stats(report, 6)
+
+    # ② 每个来源文件都占得到名额——没有哪一份 HTML 能吃掉整个 Top-6
+    groups = {tuple(sorted(ev.location for ev in ep.evidences)) for ep in selected}
+    assert len(groups) == 5, f"Top-6 只覆盖了 {len(groups)} 个来源文件：{[e.value for e in selected]}"
+
+    # ③ 顺延可见（顺延≠排除，它们仍在候选序列与 dropped 里）
+    assert stats["source_deferred"] == 11, f"顺延数不对：{stats}"
+    assert stats["candidate_total"] == 16, "known-infra 应已在候选池之外"
+
+
 def test_bare_ip_literal_noise_filtered_but_url_host_kept() -> None:
     """裸 IP 字面过形态去噪，**完整 URL 里的 host 不过**——两者的证据强度不同。
 
