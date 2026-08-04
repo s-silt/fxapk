@@ -49,6 +49,15 @@ _KEY_FAMILY_FUNCS: dict[str, str] = {
 }
 
 
+#: 扫描器**已建模**的字典方法：它们对键的影响会被 :class:`_Visitor` 如实记下
+#: （``update`` 传未知字典记 ``<dynamic:update>``，``setdefault`` 记键，``pop``/``get`` 记读）。
+#: ★白名单之外的一切 receiver 方法都当作可能原地加键——``m.absorb(x)`` 也好、
+#:   ``m.__setitem__(k, v)`` 也好，扫描器看不见它们写了什么（复审实证）。
+_MODELED_DICT_METHODS = frozenset({
+    "get", "pop", "setdefault", "update", "keys", "values", "items", "copy", "clear",
+})
+
+
 def _is_meta_ctor(node: ast.Call) -> bool:
     """调用的是不是已知的 meta 载体构造器（``AnalyzerResult(...)`` / ``Report(...)``）。"""
     name = node.func.id if isinstance(node.func, ast.Name) else (
@@ -293,23 +302,30 @@ class _Visitor(ast.NodeVisitor):
         必须同时成立才算可证：
 
         - 本作用域内**恰好绑定一次**，且那次的右值是**字典字面量**
-          （``ast.DictComp`` 不算——推导式的键通常是动态的）；
+          （``ast.DictComp`` 不算——推导式的键通常是动态的），且那次赋值**只绑定一个名字**
+          （``m = n = {}`` 两名共享同一个对象，从 ``n`` 加的键在 ``m`` 上看不到）；
         - 不是函数参数、不来自导入或函数返回值（这些都会让绑定次数或形态对不上）；
         - 没有被 ``global`` / ``nonlocal`` 声明过（否则别处可改它）；
-        - 没有被搬去另一个名字（``n = m`` 之后 ``n["x"]`` 记不到，会静默漏键）；
-        - 没有被当参数传出去（被调方可能加键，静态证不了）。
+        - 没有逃逸：搬去另一个名字、存进属性/下标/容器、被 return/yield 出去、
+          当参数传给任何调用——逃逸之后加的键，静态一律追不回来；
+        - receiver 上只出现**扫描器已建模的字典方法**；``m.absorb(x)`` / ``m.__setitem__(k, v)``
+          这类未知方法可能原地加键，一律失效。
+
+        ★绑定分析守作用域（嵌套函数的同名绑定不泄漏），**逃逸分析不守**——
+          值一旦跑出去，在哪个作用域被改都算数。早先两件事混在一个遍历里，
+          于是闭包里 ``m.absorb(...)`` 完全看不见（复审实证）。
         """
         binds: dict[str, int] = {}
         literals: dict[str, ast.Dict] = {}
         disqualified: set[str] = set()
 
+        # 第一遍：绑定与声明，**守作用域**
         def _walk_own(n: ast.AST) -> None:
             for child in ast.iter_child_nodes(n):
                 if isinstance(child, _NESTED_SCOPES):
-                    # 嵌套作用域体内的绑定不泄漏，但 global/nonlocal 能改到本层
                     for sub in ast.walk(child):
                         if isinstance(sub, (ast.Global, ast.Nonlocal)):
-                            disqualified.update(sub.names)
+                            disqualified.update(sub.names)  # 能改到本层
                     for part in _outer_parts(child):
                         _walk_own(part)
                     continue
@@ -320,22 +336,40 @@ class _Visitor(ast.NodeVisitor):
                                else [child.target])
                     names = [t.id for t in targets if isinstance(t, ast.Name)]
                     if isinstance(child.value, ast.Dict):
-                        literals.update(dict.fromkeys(names, child.value))
-                    elif isinstance(child.value, ast.Name) and names:
-                        # ``n = m``：搬去另一个**名字**后，``n["x"]`` 记不到，会静默漏键。
-                        # ★必须限定左侧是 Name——``result.meta = m`` 左侧是属性，
-                        #   那正是要放行的形态，早先没看左侧把它自己也判死了。
-                        disqualified.add(child.value.id)
-                elif isinstance(child, ast.Call):
-                    meta_kw = child.keywords if _is_meta_ctor(child) else []
-                    passed = [*child.args, *(k.value for k in child.keywords
-                                             if k not in meta_kw or k.arg not in _META_ATTRS)]
-                    disqualified.update(a.id for a in passed if isinstance(a, ast.Name))
+                        if len(names) > 1:
+                            disqualified.update(names)  # m = n = {}：共享同一个对象
+                        else:
+                            literals.update(dict.fromkeys(names, child.value))
                 for nm in _bound_names(child):
                     binds[nm] = binds.get(nm, 0) + 1
                 _walk_own(child)
 
         _walk_own(node)
+
+        # 第二遍：逃逸与未知方法，**不守作用域**（含嵌套函数体）
+        for sub in ast.walk(node):
+            if isinstance(sub, (ast.Assign, ast.AnnAssign)):
+                targets = sub.targets if isinstance(sub, ast.Assign) else [sub.target]
+                if isinstance(sub.value, ast.Name):
+                    for t in targets:
+                        # ★放行的只有 ``X.meta = m`` 本身；存进别的属性、下标、
+                        #   另一个名字、解构目标，都是逃逸。
+                        if not (isinstance(t, ast.Attribute) and t.attr in _META_ATTRS):
+                            disqualified.add(sub.value.id)
+            elif isinstance(sub, (ast.Return, ast.Yield, ast.YieldFrom)):
+                if isinstance(sub.value, ast.Name):
+                    disqualified.add(sub.value.id)
+            elif isinstance(sub, ast.Call):
+                keep = {id(k.value) for k in sub.keywords
+                        if k.arg in _META_ATTRS and _is_meta_ctor(sub)}
+                for arg in (*sub.args, *(k.value for k in sub.keywords)):
+                    if isinstance(arg, ast.Name) and id(arg) not in keep:
+                        disqualified.add(arg.id)
+                if (isinstance(sub.func, ast.Attribute)
+                        and isinstance(sub.func.value, ast.Name)
+                        and sub.func.attr not in _MODELED_DICT_METHODS):
+                    disqualified.add(sub.func.value.id)
+
         return {n: d for n, d in literals.items()
                 if binds.get(n) == 1 and n not in disqualified}
 

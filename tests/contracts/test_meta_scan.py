@@ -206,6 +206,27 @@ OPEN_WRITE_CASES = [
                  id="嵌套函数用 nonlocal 重绑"),
     pytest.param('def f(result):\n    global m\n    m = {}\n    result.meta = m',
                  id="global 声明的名字（别处可改）"),
+    # ★以下由复审第二轮给出：判据只看「绑定与参数传递」时，这五类全部静默通过。
+    #   根因是把**绑定分析**和**逃逸分析**混在一个守作用域的遍历里——
+    #   值一旦跑出去，在哪个作用域被改都算数，逃逸分析不能守作用域。
+    pytest.param('def f(result):\n    m = n = {}\n    n["x"] = 1\n    result.meta = m',
+                 id="多目标赋值共享同一个字典"),
+    pytest.param('def f(result, box):\n    m = {}\n    box.value = m\n'
+                 '    box.value["x"] = 1\n    result.meta = m',
+                 id="逃逸到属性后再加键"),
+    pytest.param('def f(result, box):\n    m = {}\n    box[0] = m\n'
+                 '    box[0]["x"] = 1\n    result.meta = m',
+                 id="逃逸到容器后再加键"),
+    pytest.param('def f(result, external):\n    m = {}\n    m.absorb(external)\n    result.meta = m',
+                 id="receiver 上的未知方法"),
+    pytest.param('def f(result, key, value):\n    m = {}\n    m.__setitem__(key, value)\n'
+                 '    result.meta = m',
+                 id="未建模的原地方法 __setitem__"),
+    pytest.param('def f(result, ext):\n    m = {}\n    def g():\n        m.absorb(ext)\n'
+                 '    result.meta = m',
+                 id="闭包里调未知方法"),
+    pytest.param('def f(result):\n    m = {}\n    result.meta = m\n    return m',
+                 id="return 出去（被调方可能加键）"),
 ]
 
 
@@ -227,6 +248,10 @@ PROVABLE_DICT_CASES = [
                  {"a"}, id="字面量初值经名字搬运"),
     pytest.param('def f(result):\n    m = {"a": 1}\n    m["b"] = 2\n    result.meta = m',
                  {"a", "b"}, id="字面量初值加补写"),
+    # ★已建模的字典方法不算逃逸：它们对键的影响会被如实记下，否则「未知方法一律失效」
+    #   会把正常写法也判死，把 unresolved 虚高成噪音。
+    pytest.param('def f(result):\n    m = {}\n    m.setdefault("a", 1)\n    result.meta = m',
+                 {"a"}, id="setdefault 是已建模的方法"),
 ]
 
 
