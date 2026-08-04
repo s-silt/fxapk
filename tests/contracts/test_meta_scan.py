@@ -199,6 +199,13 @@ OPEN_WRITE_CASES = [
                  id="本地字典被传出去（被调方可能加键）"),
     pytest.param('def f(result):\n    m = {"a": 1}\n    n = m\n    n["x"] = 1\n    result.meta = m',
                  id="搬去另一个名字后再写"),
+    # ★嵌套作用域的绑定通常不泄漏，唯独 nonlocal / global 能改到本层——
+    #   「本作用域只绑定一次」这个判据对它们不成立。
+    pytest.param('def f(result, external):\n    m = {}\n    def g():\n        nonlocal m\n'
+                 '        m = external\n    result.meta = m',
+                 id="嵌套函数用 nonlocal 重绑"),
+    pytest.param('def f(result):\n    global m\n    m = {}\n    result.meta = m',
+                 id="global 声明的名字（别处可改）"),
 ]
 
 
