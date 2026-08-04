@@ -132,11 +132,20 @@ def test_poisoned_constant_never_resolves_to_a_stale_value(src: str) -> None:
     ★解析错比不解析更糟：不解析只是落进 unresolved（可见、可人工处理），
       解析错则把一个真实键登记成**错的名字**，基线从此建在错的集合上，而且无声。
     """
-    got = _keys(src, "write")
-    assert got == set() or "<dynamic>" in {a.key for a in meta_scan.scan_source(src)}, (
-        f"被污染的常量被解析成了 {got}——应落 unresolved"
-    )
-    assert "a" not in got and "c" not in got, f"用了过期的常量值：{got}"
+    accesses = meta_scan.scan_source(src)
+
+    # ★必须**恰有一个**访问点，且它是 unresolved。
+    #   早先写成 `got == set() or "<dynamic>" in ...`，于是扫描器把这处访问**整个漏掉**
+    #   （一个 Access 都不产）时测试照绿——那等于在测「没解析错」，
+    #   而没测「有没有看见」。漏扫与解析错的后果一样：那个键不会进基线。
+    writes = [a for a in accesses if a.kind == "write"]
+    assert len(writes) == 1, f"访问点数不对（漏扫或重复计）：{writes}"
+
+    a = writes[0]
+    assert a.key == "<dynamic>", f"被污染的常量被解析成了 {a.key!r}，应落 unresolved"
+    assert a.line == src.count("\n", 0, src.index("meta[K]")) + 1, "行号不对"
+    assert "a" not in {x.key for x in accesses}, "用了过期的常量值"
+    assert "c" not in {x.key for x in accesses}, "用了过期的常量值"
 
 
 OPEN_WRITE_CASES = [
