@@ -39,8 +39,11 @@
 from __future__ import annotations
 
 import ipaddress
+import io
 import logging
 import re
+import token
+import tokenize
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -526,15 +529,68 @@ _DETECTORS: tuple[tuple[str, "object"], ...] = (
 )
 
 
+def _python_domain_text_by_line(text: str) -> "dict[int, str] | None":
+    """提取 Python 文字 token 的逐行文本；解析失败返回 ``None`` 触发保守回退。"""
+    lines = text.splitlines()
+    masks = [[" " for _char in line] for line in lines]
+    text_token_types = {token.STRING, token.COMMENT}
+    fstring_middle_type = getattr(token, "FSTRING_MIDDLE", None)
+    # Python 3.12+ 会把 f-string 拆成专用 token；旧版本没有这些常量。
+    for name in ("FSTRING_START", "FSTRING_MIDDLE", "FSTRING_END"):
+        value = getattr(token, name, None)
+        if isinstance(value, int):
+            text_token_types.add(value)
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(text).readline)
+        for item in tokens:
+            if item.type not in text_token_types:
+                continue
+            start_line, start_col = item.start
+            end_line, end_col = item.end
+            for line_no in range(start_line, end_line + 1):
+                if not 1 <= line_no <= len(lines):
+                    continue
+                left = start_col if line_no == start_line else 0
+                right = end_col if line_no == end_line else len(lines[line_no - 1])
+                source = lines[line_no - 1]
+                masks[line_no - 1][left:right] = source[left:right]
+                # Python 3.12+ 会把插值后面的域名字面部分切成
+                # 以 ``.`` 开头的 FSTRING_MIDDLE。这个点是 tokenizer 制造的片段边界，
+                # 不是更长域名的左侧字符；改成分隔符后让片段内完整 apex 正常命中。
+                if (
+                    item.type == fstring_middle_type
+                    and line_no == start_line
+                    and left < right
+                    and source[left] == "."
+                ):
+                    masks[line_no - 1][left] = "/"
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return None
+    except Exception:  # pragma: no cover - tokenizer 失效时宁可多报，不可漏报
+        logger.exception("[leakscan] Python tokenize 异常，回退逐行 domain 正则")
+        return None
+    out: dict[int, str] = {}
+    for i, chars in enumerate(masks):
+        masked = "".join(chars)
+        # Python 3.11 把整个 f-string 作为 STRING；插值后的点会挡住域名正则的左边界。
+        # 只在文字 token 掩码内把 ``{expr}.host`` 的插值段改成分隔符。
+        out[i + 1] = masked.replace("}.", "/")
+    return out
+
+
 def scan_text(text: str, path: str = "<text>", *, first_line: int = 1) -> list[Finding]:
-    """逐行扫描一段文本。行内带合法豁免注释的整行跳过。"""
+    """逐行扫描一段文本；Python 域名只看字符串与注释 token。"""
     findings: list[Finding] = []
+    domain_lines = _python_domain_text_by_line(text) if path.lower().endswith(".py") else None
     for offset, line in enumerate(text.splitlines()):
-        findings.extend(_scan_line(line, path, first_line + offset))
+        domain_text = None if domain_lines is None else domain_lines.get(offset + 1, "")
+        findings.extend(_scan_line(line, path, first_line + offset, domain_text=domain_text))
     return findings
 
 
-def _scan_line(line: str, path: str, line_no: int) -> list[Finding]:
+def _scan_line(
+    line: str, path: str, line_no: int, *, domain_text: "str | None" = None
+) -> list[Finding]:
     marked, reason = _exemption(line)
     if marked and reason is None:
         return [Finding(
@@ -548,7 +604,8 @@ def _scan_line(line: str, path: str, line_no: int) -> list[Finding]:
         return []
     findings: list[Finding] = []
     for rule, detector in _DETECTORS:
-        for value, detail in detector(line):  # type: ignore[operator]
+        detector_text = domain_text if rule == "domain" and domain_text is not None else line
+        for value, detail in detector(detector_text):  # type: ignore[operator]
             findings.append(
                 Finding(rule=rule, path=path, line_no=line_no, value=value, detail=detail)
             )
@@ -645,11 +702,38 @@ def _bulk_exemption_findings(entries: "list[tuple[str, int, str]]") -> list[Find
     return findings
 
 
-def scan_diff(diff_text: str) -> list[Finding]:
-    """扫描一份 unified diff 的全部新增行。"""
+def scan_diff(diff_text: str, *, source_root: "Path | None" = None) -> list[Finding]:
+    """扫描 unified diff 新增行；给出 ``source_root`` 时用完整 Python 文件映射 token。"""
     findings: list[Finding] = []
+    source_cache: dict[str, "tuple[list[str], dict[int, str]] | None"] = {}
     for path, line_no, line in iter_added_lines(diff_text):
-        findings.extend(_scan_line(line, path, line_no))
+        domain_text: str | None = None
+        if path.lower().endswith(".py"):
+            if source_root is not None:
+                if path not in source_cache:
+                    root = source_root.resolve()
+                    candidate = (root / path).resolve()
+                    try:
+                        candidate.relative_to(root)
+                        source = candidate.read_bytes().decode("utf-8", errors="replace")
+                    except (OSError, ValueError):
+                        source_cache[path] = None
+                    else:
+                        tokenized = _python_domain_text_by_line(source)
+                        source_cache[path] = (
+                            source.splitlines(), tokenized
+                        ) if tokenized is not None else None
+                cached = source_cache[path]
+                # 行号和内容必须同时吻合；工作树与 diff 错位时回退原正则，绝不套错掩码。
+                if cached is not None and 1 <= line_no <= len(cached[0]):
+                    if cached[0][line_no - 1] == line:
+                        domain_text = cached[1].get(line_no, "")
+            else:
+                # 库函数兼容无工作树调用；残片失败时同样回退原始行正则。
+                fragment = line.lstrip()
+                tokenized = _python_domain_text_by_line(fragment)
+                domain_text = None if tokenized is None else tokenized.get(1, "")
+        findings.extend(_scan_line(line, path, line_no, domain_text=domain_text))
     findings.extend(_bulk_exemption_findings(iter_exemptions(diff_text)))
     return findings
 

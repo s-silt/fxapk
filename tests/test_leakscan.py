@@ -301,6 +301,106 @@ def test_filenames_and_attribute_access_are_not_domains() -> None:
     assert not [f for f in findings if f.rule == "domain"], f"文件名/属性访问被误判：{findings}"
 
 
+def test_python_domain_scans_data_tokens_not_executable_tokens(monkeypatch) -> None:
+    """Python 的分界是文字 token / 代码 token，不按碰撞 TLD 猜属性含义。"""
+    findings = leakscan.scan_diff(
+        _diff(
+            "apkscan/x.py",
+            f'url = "https://{_OUTSIDE_DOMAIN}/x"',
+            f'other = f"https://{{host}}.{_OUTSIDE_DOMAIN}"',
+            f'before = f"https://{_OUTSIDE_DOMAIN}/{{p}}"',
+            f'after = f"https://{_OUTSIDE_DOMAIN}{{path}}"',
+            f"# 落地在 {_OUTSIDE_DOMAIN}",
+            "a = node.func.id",  # leak-scan: allow domain 判据阴性夹具，验证代码属性链不误报
+            "b = ast.store",  # leak-scan: allow domain 判据阴性夹具，验证代码属性链不误报
+            "c = service.space",  # leak-scan: allow domain 判据阴性夹具，验证任意 TLD 属性链不误报
+            "d = product.tech",  # leak-scan: allow domain 判据阴性夹具，验证任意 TLD 属性链不误报
+        )
+    )
+    domains = [finding.value for finding in findings if finding.rule == "domain"]
+    assert domains == [_OUTSIDE_DOMAIN] * 5
+
+    # 当前测试环境即使是 3.11，也显式模拟 3.12 的 token 流来锁住片段边界分支；
+    # 否则 3.11 的整串 STRING + ``}.`` 兼容路径会让删掉该分支的突变假绿。
+    source = f'other = f"https://{{host}}.{_OUTSIDE_DOMAIN}"'
+    middle_type = 10_001
+    left = source.index(f".{_OUTSIDE_DOMAIN}")
+    right = left + len(_OUTSIDE_DOMAIN) + 1
+    middle = leakscan.tokenize.TokenInfo(
+        middle_type, source[left:right], (1, left), (1, right), source
+    )
+    monkeypatch.setattr(leakscan.token, "FSTRING_MIDDLE", middle_type, raising=False)
+    monkeypatch.setattr(leakscan.tokenize, "generate_tokens", lambda _readline: iter([middle]))
+
+    domains = [
+        finding.value
+        for finding in leakscan.scan_text(source, "x.py")
+        if finding.rule == "domain"
+    ]
+    assert domains == [_OUTSIDE_DOMAIN]
+
+
+def test_non_python_files_keep_line_regex_domain_detection() -> None:
+    for suffix in ("md", "json", "yaml", "j2"):
+        findings = leakscan.scan_diff(_diff(f"fixture.{suffix}", f'value: "{_OUTSIDE_DOMAIN}"'))
+        assert [finding for finding in findings if finding.rule == "domain"], suffix
+
+
+def test_python_allowlists_reserved_tlds_and_reverse_dns_still_apply() -> None:
+    findings = leakscan.scan_diff(
+        _diff(
+            "apkscan/x.py",
+            'allowed = "api.example.com"',
+            'reserved = "backend.invalid"',
+            'package = "com.test.app"',
+        )
+    )
+    assert not [finding for finding in findings if finding.rule == "domain"]
+
+
+def test_python_tokenize_failure_falls_back_to_conservative_line_scan(monkeypatch) -> None:
+    """残缺 diff 无法 tokenize 时必须多报，不能把安全控制变成静默放行。"""
+    def fail(_readline):
+        raise IndentationError("合成 tokenizer 失败")
+
+    monkeypatch.setattr(leakscan.tokenize, "generate_tokens", fail)
+    findings = leakscan.scan_diff(_diff("apkscan/x.py", f'value = "{_OUTSIDE_DOMAIN}"'))
+    assert [finding for finding in findings if finding.rule == "domain"]
+
+
+def test_full_python_file_uses_precise_token_spans_on_mixed_lines() -> None:
+    text = f'value = "{_OUTSIDE_DOMAIN}"; ignored = node.func.id\n# {_OUTSIDE_DOMAIN}\n'  # leak-scan: allow domain 判据阴性夹具，同行属性链只用于验证 token 精确跨度
+    domains = [finding.value for finding in leakscan.scan_text(text, "x.py") if finding.rule == "domain"]
+    assert domains == [_OUTSIDE_DOMAIN, _OUTSIDE_DOMAIN]
+
+
+def test_diff_worktree_mapping_handles_multiline_string_and_code(tmp_path: Path) -> None:
+    """完整文件映射不能把多行字符串正文误当代码；普通属性链仍不判。"""
+    package = tmp_path / "apkscan"
+    package.mkdir()
+    source = f'"""\n{_OUTSIDE_DOMAIN}\n"""\nvalue = node.func.id\n'  # leak-scan: allow domain 判据阴性夹具，验证完整文件 token 映射
+    (package / "x.py").write_text(source, encoding="utf-8", newline="\n")
+    diff = (
+        "--- /dev/null\n+++ b/apkscan/x.py\n@@ -0,0 +1,4 @@\n"
+        + "".join(f"+{line}\n" for line in source.splitlines())
+    )
+    domains = [
+        finding.value
+        for finding in leakscan.scan_diff(diff, source_root=tmp_path)
+        if finding.rule == "domain"
+    ]
+    assert domains == [_OUTSIDE_DOMAIN]
+
+
+def test_diff_worktree_mismatch_falls_back_conservatively(tmp_path: Path) -> None:
+    """工作树不是 diff 对应版本时不得套用错位掩码并静默放行。"""
+    (tmp_path / "x.py").write_text("value = node.func.id\n", encoding="utf-8")  # leak-scan: allow domain 判据阴性夹具，构造与 diff 错位的工作树
+    findings = leakscan.scan_diff(
+        _diff("x.py", f'value = "{_OUTSIDE_DOMAIN}"'), source_root=tmp_path
+    )
+    assert [finding for finding in findings if finding.rule == "domain"]
+
+
 # ---------------------------------------------------------------------------
 # 判据 4：语境框架词
 # ---------------------------------------------------------------------------

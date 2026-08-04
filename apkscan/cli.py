@@ -1866,7 +1866,9 @@ def leak_scan_cmd(
                 typer.echo(f"错误：git diff 退出码 {proc.returncode}：{detail}", err=True)
                 raise typer.Exit(code=2)
             diff_text = proc.stdout.decode("utf-8", errors="replace")
-        findings = leakscan.scan_diff(diff_text)
+        # diff 自身只有新增行；用当前 HEAD 工作树的完整文件做 Python token 映射。
+        # 行号/内容不吻合或 tokenize 失败时 scan_diff 会回退原始正则（保守多报）。
+        findings = leakscan.scan_diff(diff_text, source_root=Path.cwd())
         # ★把"这次按掉了多少护栏"如实打出来。此前完全不可见：加 1 条豁免与加 30 条，
         #   在输出里同形，review 时也不会被顶到眼前——而批量按掉正是护栏失效的主要形态。
         exemptions = leakscan.iter_exemptions(diff_text)
