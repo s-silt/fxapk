@@ -1001,3 +1001,22 @@ def test_giant_first_contact_ts_on_own_ip_endpoint_no_raise() -> None:
     relay = _roles(blob, "203.0.113.9").get("domestic_relay_candidate")
     assert relay is not None and "domestic_network" in relay["matched_signals"]
     assert "subsequent_overseas_connection" not in relay["matched_signals"]  # 越界 ts→None→不误发
+
+def test_known_intercept_ips_cover_both_carriers() -> None:
+    """拦截节点名单要覆盖已确认的多家运营商，且 IPv4-mapped 写法不能绕过。
+
+    ★为什么锁"不止一条"：这份名单的价值在于**成规模地**把反诈拦截页排除出归属，
+      只有一条时很容易被当成个例删掉。已确认的两个分属移动与电信，形态一致
+      （自签/ISP 证书 + 拦截提示页 + 业务 API 403）。
+
+    ★收录门槛也一并写在这里：必须有主动观测到的上述形态，
+      **不能**因为"某个涉案域名解析到过它"就收——那只说明该域名被拦了。
+    """
+    from apkscan.network.fingerprints import KNOWN_INTERCEPT_IPS, is_known_intercept_ip
+
+    assert len(KNOWN_INTERCEPT_IPS) >= 2, "名单退化到单条，排除能力形同虚设"
+    for ip in KNOWN_INTERCEPT_IPS:
+        assert is_known_intercept_ip(ip), ip
+        # IPv4-mapped IPv6 写法必须折回同一判定，否则换个写法就绕过去了
+        assert is_known_intercept_ip(f"::ffff:{ip}"), f"::ffff:{ip}"
+    assert not is_known_intercept_ip("")

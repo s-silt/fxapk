@@ -34,7 +34,20 @@ _DEFAULT_PORTS = {"http": 80, "https": 443}
 #: to an anti-fraud interception page IP — never a real serving/landing host — so it must
 #: be excluded from attribution (never surfaced as "the domain's serving IP"). Shared by
 #: the pcap ingest (drop as a runtime endpoint) and the attribution bridge (mint no edge).
-KNOWN_INTERCEPT_IPS: frozenset[str] = frozenset({"183.192.65.101"})
+#: 收录门槛：必须有**主动观测**证据（自签/ISP 证书 + 拦截提示页 + 业务 API 403 这一组
+#: 形态同时成立），而不是"某个涉案域名解析到过它"。后者只能说明该域名被拦了，
+#: 拿它当收录依据会把运营商的正常业务地址一起吃进来。
+#:
+#: ★为什么只能是名单、不能做成通用形态判据：判"是不是拦截页"要看响应内容，
+#: 而本模块跑在静态/被动侧，拿不到页面。形态判据的位置在主动探测那一侧。
+KNOWN_INTERCEPT_IPS: frozenset[str] = frozenset({
+    # 中国移动上海。
+    "183.192.65.101",
+    # 中国电信山东（RDAP netname=CHINANET-SD，本方复核）。
+    # 拦截形态由 codex-1 于 2026-08-04 主动探测确认：自签 IDCISP 证书、首页反诈提示、
+    # 业务 API 403。★本方只复核了 RDAP 归属，页面形态未独立复现。
+    "182.43.124.7",
+})
 
 
 def is_known_intercept_ip(value: str) -> bool:
