@@ -167,6 +167,7 @@ class PaymentAnalyzer(BaseAnalyzer):
     """识别第三方/聚合支付 SDK 与收款/资金特征，产出 PAYMENT 调证线索。"""
 
     name: str = "payment"
+    meta_keys = frozenset({"crypto_addresses", "dex_scanned", "dex_strings_truncated", "payment_keywords", "payment_sdks"})
     requires: list[str] = []  # 纯静态，永远可用
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

@@ -45,6 +45,9 @@ from apkscan.core import device
 from apkscan.core.models import ANALYSIS_MODE_PASSIVE, AnalysisConfig, Report
 from apkscan.core.report_naming import report_base
 
+META_WRITE_OWNER = "dynamic.auto"
+META_WRITE_KEYS = frozenset({"artifact_lineage", "online", "target_serial"})
+
 logger = logging.getLogger(__name__)
 
 # 步骤名常量（避免裸字符串漂移；CLI / 测试以此识别步骤）。

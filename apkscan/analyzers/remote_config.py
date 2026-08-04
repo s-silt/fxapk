@@ -45,6 +45,7 @@ class RemoteConfigAnalyzer(BaseAnalyzer):
     """发现远程配置对象候选（被动）。"""
 
     name = "remote_config"
+    meta_keys = frozenset({"dex_strings_truncated", "remote_config_candidate_count", "remote_config_source_scope"})
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
         rules = DiscoveryRules.load()

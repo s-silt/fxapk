@@ -190,6 +190,7 @@ class CryptoRecipeAnalyzer(BaseAnalyzer):
     """从打包 JS 反查应用层加密配方（算法/key/iv 推导/信封字段）。"""
 
     name: str = "crypto_recipe"
+    meta_keys = frozenset({"crypto_recipe", "crypto_recipe_count", "crypto_recipe_files_scanned"})
     requires: list[str] = []  # 纯静态，永远可用
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

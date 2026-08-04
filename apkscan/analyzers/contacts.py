@@ -122,6 +122,7 @@ class ContactsAnalyzer(BaseAnalyzer):
     """提取 QQ/微信/Telegram/邮箱，产出 CONTACT 调证线索。"""
 
     name: str = "contacts"
+    meta_keys = frozenset({"contacts", "dex_strings_truncated", "telegram_bot_tokens"})
     requires: list[str] = []  # 纯静态，永远可用
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

@@ -35,6 +35,7 @@ def _stub_discovery(monkeypatch, *, analyzers=None, enrichers=None) -> None:  # 
     monkeypatch.setattr(pipeline, "discover_analyzers", lambda: analyzers or [])
     monkeypatch.setattr(pipeline, "discover_enrichers", lambda: enrichers or [])
     monkeypatch.setattr(pipeline, "detect_capabilities", lambda online=True: set())
+    # 空/fake 发现名单只用于隔离阶段行为，不参与生产注册表快照对账。
 
 
 def test_stage_status_recorded_in_order_happy_path(fake_ctx, monkeypatch) -> None:  # type: ignore[no-untyped-def]

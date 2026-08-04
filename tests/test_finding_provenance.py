@@ -11,6 +11,10 @@ from apkscan.core.models import AnalyzerResult, Confidence, Finding, Severity
 from apkscan.report import json as report_json
 
 
+def _stub_contract_reconciliation(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """本文件用局部 fake 替换完整发现名单，故同时替换生产名单对账。"""
+
+
 def _finding(fid: str, analyzer: str = "") -> Finding:
     return Finding(
         id=fid, title="t", severity=Severity.LOW, category="c", description="d", analyzer=analyzer
@@ -37,6 +41,7 @@ def test_aggregation_stamps_analyzer_name(monkeypatch, fake_ctx) -> None:  # typ
     monkeypatch.setattr(pipeline, "discover_analyzers", lambda: [_A()])
     monkeypatch.setattr(pipeline, "discover_enrichers", lambda: [])
     monkeypatch.setattr(pipeline, "detect_capabilities", lambda online=True: set())
+    _stub_contract_reconciliation(monkeypatch)
     from apkscan.core.models import AnalysisConfig
 
     report = pipeline.run(fake_ctx, AnalysisConfig(online=False))
@@ -59,6 +64,7 @@ def test_aggregation_does_not_override_explicit_analyzer(monkeypatch, fake_ctx) 
     monkeypatch.setattr(pipeline, "discover_analyzers", lambda: [_A()])
     monkeypatch.setattr(pipeline, "discover_enrichers", lambda: [])
     monkeypatch.setattr(pipeline, "detect_capabilities", lambda online=True: set())
+    _stub_contract_reconciliation(monkeypatch)
 
     report = pipeline.run(fake_ctx, AnalysisConfig(online=False))
     got = [f for f in report.findings if f.id == "R2"]

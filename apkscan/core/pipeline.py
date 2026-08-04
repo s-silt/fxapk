@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-
 from apkscan.analyzers.classify import classify_app
 from apkscan.config.asset_score import rank_assets
 from apkscan.config.chain import build_control_chains
@@ -35,6 +34,13 @@ from apkscan.core.models import (
     LeadCategory,
     Report,
     seal_base_advice,
+)
+from apkscan.core.meta_contract import (
+    MERGE_BOOLEAN_OR,
+    MISSING_ANALYZERS_KEY,
+    META_KEY_REGISTRY,
+    allowed_meta_keys,
+    validate_registry_owners,
 )
 from apkscan.core.registry import (
     detect_capabilities,
@@ -68,6 +74,19 @@ from apkscan.core.enrichment import (
 # 分析器进程池并行 + 内存封顶决策已物理拆到 apkscan/core/parallel.py（纯搬移）；_stage_run_analyzers
 # 经 _analyze_eligible 调用本簇。并行/内存机器的 monkeypatch 测试现打补丁到 parallel.* 命名空间。
 from apkscan.core.parallel import _analyze_eligible
+
+META_WRITE_OWNER = "core.pipeline"
+META_WRITE_KEYS = frozenset({
+    "active_enrichers_enabled", "active_enrichers_skipped_passive_mode", "analysis_environment",
+    "analysis_started_at", "apk_validation_warning", "asset_scores", "config_probe_plan",
+    "control_chains", "dependency_versions", "dex_parse_failed", "dex_strings_truncated",
+    "dex_strings_truncated_by", "enriched_target_count", "enrichment_skipped_offline",
+    "extra_dex_visibility", "missing_analyzers", "mode", "network_attribution",
+    "overseas_targets", "remote_config_archived", "remote_config_artifacts",
+    "remote_config_fetch_skipped", "remote_config_fetch_skipped_passive_mode",
+    "remote_config_fetched", "repack_quarantine", "ruleset_digest", "stage_status",
+    "tool_version", "visibility",
+})
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -264,6 +283,14 @@ def _stage_run_analyzers(state: _PipelineState) -> None:
     capabilities = state.capabilities
     meta = state.meta
     discovered = discover_analyzers()
+    missing_analyzers = validate_registry_owners({
+        getattr(analyzer, "name", "") or analyzer.__class__.__name__
+        for analyzer in discovered
+    })
+    if missing_analyzers:
+        missing = sorted(missing_analyzers)
+        logger.warning("注册表中的分析器本轮未发现：%s", ", ".join(missing))
+        meta[MISSING_ANALYZERS_KEY] = missing
     eligible: list[tuple[str, object]] = []  # (name, analyzer)，requires 已满足，发现顺序
     for analyzer in discovered:
         name = getattr(analyzer, "name", "") or analyzer.__class__.__name__
@@ -308,9 +335,22 @@ def _stage_run_analyzers(state: _PipelineState) -> None:
                 finding.analyzer = name
         state.findings.extend(result.findings)
         if result.meta:
+            # 必须校验分析器返回的原始 keys；任一越权即原子拒绝整块 meta，不能让合法子集先落地。
+            # endpoints/leads/findings 是独立产物，保留；状态改为 error，使整份分析继续但显著降级。
+            raw_keys = frozenset(result.meta.keys())
+            illegal = sorted(raw_keys - allowed_meta_keys(name))
+            if illegal:
+                reason = f"meta 契约违规：未登记键 {illegal!r}"
+                logger.error("分析器 %s %s；已拒绝该分析器全部 meta", name, reason)
+                state.analyzer_status.append({"name": name, "status": "error", "reason": reason})
+                continue
+
             # ★截断标记是**或运算**，不是覆盖：实测一个样本上 11 个分析器同时截断，若按普通
             #   meta 合并，最后一个写 False 的会把前面的 True 抹掉——"没扫全"这件事就此消失。
             #   顺带记下是谁截断的，让人能定位到具体哪块没扫完。
+            truncated_contract = META_KEY_REGISTRY[_DEX_TRUNCATED_KEY]
+            if truncated_contract.merge != MERGE_BOOLEAN_OR:
+                raise RuntimeError("dex_strings_truncated 必须声明 boolean_or 合并策略")
             if result.meta.get(_DEX_TRUNCATED_KEY):
                 meta[_DEX_TRUNCATED_KEY] = True
                 truncated = meta.setdefault(_DEX_TRUNCATED_BY_KEY, [])

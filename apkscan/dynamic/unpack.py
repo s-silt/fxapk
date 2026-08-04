@@ -39,6 +39,9 @@ from apkscan.dynamic import (
 
 logger = logging.getLogger(__name__)
 
+META_WRITE_OWNER = "dynamic.unpack"
+META_WRITE_KEYS = frozenset({"unpacked", "unpacked_dex_count"})
+
 # frida-dexdump 在加固应用上要等壳解密、脱完所有 DEX，给足超时（秒）。
 _DEXDUMP_TIMEOUT = 300.0
 

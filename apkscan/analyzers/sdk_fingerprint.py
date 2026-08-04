@@ -119,6 +119,7 @@ class SdkFingerprintAnalyzer(BaseAnalyzer):
     """识别第三方 SDK / 服务，产出 SDK_SERVICE 调证线索（每 SDK 绑定一家可调证厂商）。"""
 
     name: str = "sdk_fingerprint"
+    meta_keys = frozenset({"dex_scanned", "dex_strings_truncated", "sdk_categories", "sdks"})
     requires: list[str] = ["apk"]  # Android 专属
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

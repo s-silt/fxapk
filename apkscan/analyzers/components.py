@@ -100,6 +100,7 @@ class ComponentsAnalyzer(BaseAnalyzer):
     """枚举导出组件，产出攻击面 Finding（provider 可读写 → HIGH）。"""
 
     name: str = "components"
+    meta_keys = frozenset({"all_activities", "component_totals", "components", "exported_counts", "exported_total"})
     requires: list[str] = ["apk"]  # Android 专属
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

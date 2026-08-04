@@ -36,6 +36,9 @@ from apkscan.commands.enrich import enrich_app
 from apkscan.commands.lead import lead_app
 from apkscan.commands.web import analyze_web
 
+META_WRITE_OWNER = "cli"
+META_WRITE_KEYS = frozenset({"device_detected", "evidence_manifest", "online", "sample_sha256"})
+
 logger = logging.getLogger(__name__)
 
 app = typer.Typer(

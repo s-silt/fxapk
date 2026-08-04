@@ -159,6 +159,7 @@ class FirebaseAnalyzer(BaseAnalyzer):
     """从 strings.xml / google-services.json 抠 Firebase 配置，归属 Google/GCP 项目所有者。"""
 
     name: str = "firebase"
+    meta_keys = frozenset({"firebase", "firebase_project_id"})
     requires: list[str] = []  # 纯静态解析，永远可用
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

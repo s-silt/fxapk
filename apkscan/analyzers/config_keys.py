@@ -192,6 +192,7 @@ class ConfigKeysAnalyzer(BaseAnalyzer):
     """抠出 App 真实配置 key=value，归属到调证主体，产出 CONFIG_KEY 线索。"""
 
     name: str = "config_keys"
+    meta_keys = frozenset({"config_key_count", "config_keys_input_errors", "uni_app_name", "uni_appid", "uni_encrypted"})
     requires: list[str] = []  # 纯静态解析，永远可用
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

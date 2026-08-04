@@ -84,6 +84,7 @@ class DeeplinkSurfaceAnalyzer(BaseAnalyzer):
     """枚举导出组件的 deeplink 外部入口，产 category=\"exported_surface\" 的 Finding。"""
 
     name: str = "deeplink_surface"
+    meta_keys = frozenset({"browsable_deeplink_count", "deeplink_count", "deeplinks"})
     requires: list[str] = ["apk"]  # Android 专属
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

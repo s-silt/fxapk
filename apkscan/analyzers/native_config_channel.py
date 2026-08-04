@@ -81,6 +81,7 @@ class NativeConfigChannelAnalyzer(BaseAnalyzer):
     """还原 native 侧的「算出来的」控制面地址通道：模板 / 算法 / 缺失输入。"""
 
     name: str = "native_config_channel"
+    meta_keys = frozenset({"native_config_channel"})
     requires: list[str] = ["apk"]
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

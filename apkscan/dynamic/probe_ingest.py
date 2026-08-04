@@ -42,6 +42,9 @@ from apkscan.core.textutil import (
 
 logger = logging.getLogger(__name__)
 
+META_WRITE_OWNER = "dynamic.probe_ingest"
+META_WRITE_KEYS = frozenset({"runtime_merged", "runtime_merged_inventory"})
+
 # 探针线索来源标记（与 merge.py 一致：source 以 runtime 开头 → Lead.is_runtime_seen=True）。
 _RUNTIME_SOURCE = "runtime-probe"
 

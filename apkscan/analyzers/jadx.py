@@ -109,6 +109,7 @@ class JadxAnalyzer(BaseAnalyzer):
     """jadx 反编译后从 Java 字符串字面量补端点 / 密钥（requires=["jadx"]）。"""
 
     name: str = "jadx"
+    meta_keys = frozenset({"decrypt_candidates", "decrypt_candidates_suppressed", "jadx_endpoint_count", "jadx_java_files", "jadx_status"})
     requires: list[str] = ["jadx", "apk"]  # jadx 反编 DEX
 
     def __init__(self) -> None:

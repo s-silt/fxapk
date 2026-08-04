@@ -104,6 +104,7 @@ class ManifestAnalyzer(BaseAnalyzer):
     """解析 AndroidManifest，产出基础指纹 meta 与安全 Finding。"""
 
     name = "manifest"
+    meta_keys = frozenset({"allow_backup", "debuggable", "manifest_anomaly", "min_sdk", "network_security_config", "package_name", "suspicious_version_hits", "suspicious_version_name", "target_sdk", "uses_cleartext_traffic", "version_code", "version_name", "xposed_markers", "xposed_module"})
     requires: list[str] = ["apk"]  # Android 专属
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

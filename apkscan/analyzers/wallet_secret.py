@@ -58,6 +58,7 @@ class WalletSecretAnalyzer(BaseAnalyzer):
     """检测钱包私钥 / 助记词，产出 category=WALLET_SECRET 的高敏调证线索。"""
 
     name: str = "wallet_secret"
+    meta_keys = frozenset({"dex_strings_truncated", "wallet_secret_count"})
     requires: list[str] = []
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

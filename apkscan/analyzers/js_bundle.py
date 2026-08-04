@@ -392,6 +392,7 @@ class JsBundleAnalyzer(BaseAnalyzer):
     """从打包 JS 的字符串字面量内部精确提取真实端点与硬编码密钥。"""
 
     name: str = "js_bundle"
+    meta_keys = frozenset({"js_domain_count", "js_endpoint_count", "js_files_scanned", "js_framework", "js_ip_count", "js_path_count", "js_secret_count", "js_url_count"})
     requires: list[str] = []  # 纯静态，永远可用
     #: 来源档判据语境（analyze 按 ctx.platform 覆写；类级默认兜底直调扫描函数的路径）。
     _tier_context: str = "apk"
