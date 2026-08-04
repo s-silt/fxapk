@@ -19,6 +19,7 @@ import pytest
 
 from apkscan.core import visibility
 from apkscan.core.closure.targets import _select_targets_with_stats
+from apkscan.core.models import Report
 from apkscan.core.report_io import report_from_dict
 from apkscan.core import runtime_inventory
 from apkscan.dynamic import pcap_ingest
@@ -1010,4 +1011,42 @@ def test_counts_follow_the_set_once_it_overtakes_the_migrated_floor(tmp_path: Pa
     assert inventory["remote_endpoints"] == 2, "集合已有两个 IP，计数还卡在旧的下界上"
     assert sorted(payload["meta"]["runtime_pcap_endpoint_values"]) == sorted(
         [_BACKEND_IP, _TWO_PORT_IP]
+    )
+
+
+def test_endpoint_exclusions_survive_merge_into_main_report(tmp_path) -> None:
+    """拦截节点排除必须活到**用户真正读的那份产物**：``report.meta.capture_signals``。
+
+    ★链条是 ``runtime_report.capture_signals.endpoint_exclusions``
+      → ``merge_capture_quality`` → ``report.meta.capture_signals.endpoint_exclusions``。
+      capture 侧的测试只锁到 runtime_report.json 那一站，而 auto 流程里办案人拿到的是主报告。
+
+    ★现在能保留是因为 ``merge_capture_quality`` 对 capture_signals 整体复制
+      （``dict(raw_signals)``）；若哪天改成字段白名单而漏了这一项，排除记录就会在合并时
+      静默蒸发——那正是这条链最初要修的「静默」本身。本条把最终落点钉住。
+    """
+    from apkscan.dynamic.merge import merge_capture_quality
+
+    runtime = tmp_path / "runtime_report.json"
+    runtime.write_text(
+        json.dumps(
+            {
+                "capture_signals": {
+                    "endpoint_total": 3,
+                    "endpoint_exclusions": {"known_intercept_ips": ["203.0.113.77"]},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = Report(
+        package_name="com.example.synthetic", meta={}, leads=[], endpoints=[], findings=[],
+        analyzer_status=[{"name": "manifest", "status": "ran"}],
+    )
+
+    merge_capture_quality(report, str(runtime))
+
+    merged = (report.meta.get("capture_signals") or {}).get("endpoint_exclusions") or {}
+    assert merged.get("known_intercept_ips") == ["203.0.113.77"], (
+        f"排除记录在合并进主报告时丢了：{report.meta.get('capture_signals')}"
     )
