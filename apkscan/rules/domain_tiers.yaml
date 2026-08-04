@@ -69,16 +69,6 @@ library_file_globs:
   - "*/static/lime-echart/*"
   - "*echarts.min.js"
   - "*lame.min.js"
-  # ★不带路径前缀的 vendor bundle 命名：网页证据常是**扁平目录**（证据抓下来就是
-  #   chunk-vendors.<hash>.js，没有 /static/js/ 这一层），只写带路径的模式会整类漏掉。
-  #   实测漏过一次：一份 vendor bundle 里 ethers 等库硬编码的公共节点，全部以最高档
-  #   进了调证出口，把真实站点挤出主目标。
-  - "chunk-vendors*"
-  - "*/chunk-vendors*"
-  - "vendors~*"
-  - "*/vendors~*"
-  - "vendor.*.js"
-  - "*/vendor.*.js"
   - "*/static/js/chunk-vendors*"
   - "*polyfill*"
   - "*/dist/*"
@@ -93,6 +83,33 @@ library_file_globs:
   - "*/com/squareup/*"
   - "*/androidx/*"
   - "*/android/support/*"
+
+# ---- library-file（按**文件名**匹配，不看目录）----
+# 上面那组按全路径匹配，其中的 `*` 会跨 `/`——写成 `vendor.*.js` 会把「目录叫 vendor.min」
+# 之下的所有 .js 整树吃掉。打包器产出的 vendor bundle 判据本就只关乎文件名，故单列一组，
+# 只拿 basename 去比，天然覆盖任意目录深度且不穿透。
+#
+# ★为什么需要这组：网页证据常是**扁平目录**（抓下来就是 chunk-vendors.<hash>.js，没有
+#   /static/js/ 这一层），只写带路径的模式会整类漏掉。实测漏过一次：一份 vendor bundle 里
+#   第三方 web3 库硬编码的公共 RPC 节点，全部以最高档进了调证出口，把真实站点挤出主目标。
+library_file_basename_globs:
+  - "chunk-vendors*.js"
+  - "vendors~*.js"
+  - "vendor.*.js"
+
+# ---- web 证据语境下**不可用**的 library-file 模式 ----
+# 上面两组的先验是「APK 内部路径」。在抓取的网页证据里，同样的模式含义完全变了：
+# 站点自己的业务代码几乎必然是压缩过的（main.min.js / app.<hash>.min.js），用 Vite、
+# webpack 时资源路径又常含 /dist/。拿 APK 的先验去判网页，会把**涉诈站自有的后端域名**
+# 降成待核——不发调证函、不进闭环、不做 ICP/WHOIS 富化，是漏报方向的误伤。
+#
+# 故 web 语境只保留「明确的 vendor 命名」这类判据，下列模式一律跳过。
+web_unsafe_globs:
+  - "*.min.js"
+  - "*.min.css"
+  - "*/dist/*"
+  - "*polyfill*"
+  - "*/vendor/*"
 
 # ---- bulk-string：单条字符串/字面量超过此长度 → tier=bulk-string（疑似内置域名库大表）----
 bulk_string_min_len: 2000

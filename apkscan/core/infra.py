@@ -19,6 +19,7 @@ import math
 import re
 from collections import Counter
 from fnmatch import fnmatch
+from typing import NamedTuple
 
 from apkscan.core.models import ADVICE_INVESTIGATE, ADVICE_REVIEW, ADVICE_SKIP
 from apkscan.network.fingerprints import is_authoritative_dns_host, is_public_dns_resolver
@@ -437,24 +438,47 @@ _FALLBACK_LIBRARY_FILE_GLOBS: tuple[str, ...] = (
     "*/androidx/*", "*/android/support/*",
 )
 _FALLBACK_BULK_STRING_MIN_LEN = 2000
+#: 只比 basename 的 vendor bundle 命名兜底（全路径组里的 `*` 会跨 `/`，故单列）。
+_FALLBACK_LIBRARY_FILE_BASENAME_GLOBS: tuple[str, ...] = (
+    "chunk-vendors*.js", "vendors~*.js", "vendor.*.js",
+)
+#: web 证据语境下不可用的模式兜底（理由见 domain_tiers.yaml 的同名段）。
+_FALLBACK_WEB_UNSAFE_GLOBS: tuple[str, ...] = (
+    "*.min.js", "*.min.css", "*/dist/*", "*polyfill*", "*/vendor/*",
+)
+
+#: 端点来源判档所需的全部规则。★用 NamedTuple 而非裸元组：这张表已经加到第五项，
+#: 位置解包再加字段就会在调用点静默错位。
+class _TierRules(NamedTuple):
+    suffixes: tuple[str, ...]
+    globs: tuple[str, ...]
+    bulk_min: int
+    basename_globs: tuple[str, ...]
+    web_unsafe: frozenset[str]
 
 
-def _load_domain_tiers() -> tuple[tuple[str, ...], tuple[str, ...], int]:
-    """加载 rules/domain_tiers.yaml，返回 (library_embedded_suffixes, library_file_globs,
-    bulk_string_min_len)。任何缺失/异常走内置兜底（纯增量，不破坏离线）。
+def _load_domain_tiers() -> _TierRules:
+    """加载 rules/domain_tiers.yaml，返回 :class:`_TierRules`。
 
+    任何缺失/异常走内置兜底（纯增量，不破坏离线）。
     用延迟导入 registry 避免 infra（被广泛依赖的纯函数模块）与 registry 形成导入环。
     """
     suffixes: tuple[str, ...] = _FALLBACK_LIBRARY_EMBEDDED
     globs: tuple[str, ...] = _FALLBACK_LIBRARY_FILE_GLOBS
     bulk_min = _FALLBACK_BULK_STRING_MIN_LEN
+    base_globs: tuple[str, ...] = _FALLBACK_LIBRARY_FILE_BASENAME_GLOBS
+    web_unsafe: tuple[str, ...] = _FALLBACK_WEB_UNSAFE_GLOBS
+
+    def _built() -> _TierRules:
+        return _TierRules(suffixes, globs, bulk_min, base_globs, frozenset(web_unsafe))
+
     try:
         from apkscan.core.registry import load_rules
 
         data = load_rules("domain_tiers")
     except Exception:
         logger.exception("加载 domain_tiers 规则失败，使用内置兜底")
-        return suffixes, globs, bulk_min
+        return _built()
 
     if isinstance(data, dict):
         emb = data.get("library_embedded_suffixes")
@@ -470,14 +494,24 @@ def _load_domain_tiers() -> tuple[tuple[str, ...], tuple[str, ...], int]:
         bm = data.get("bulk_string_min_len")
         if isinstance(bm, int) and bm > 0:
             bulk_min = bm
-    return suffixes, globs, bulk_min
+        bg = data.get("library_file_basename_globs")
+        if isinstance(bg, list):
+            vals = tuple(s.strip().lower() for s in bg if isinstance(s, str) and s.strip())
+            if vals:
+                base_globs = vals
+        wu = data.get("web_unsafe_globs")
+        if isinstance(wu, list):
+            vals = tuple(s.strip().lower() for s in wu if isinstance(s, str) and s.strip())
+            if vals:
+                web_unsafe = vals
+    return _built()
 
 
 # 进程级缓存（规则文件在运行期不变；首次访问后复用，避免每次 classify 都读盘）。
-_DOMAIN_TIERS_CACHE: tuple[tuple[str, ...], tuple[str, ...], int] | None = None
+_DOMAIN_TIERS_CACHE: _TierRules | None = None
 
 
-def _domain_tiers() -> tuple[tuple[str, ...], tuple[str, ...], int]:
+def _domain_tiers() -> _TierRules:
     global _DOMAIN_TIERS_CACHE
     if _DOMAIN_TIERS_CACHE is None:
         _DOMAIN_TIERS_CACHE = _load_domain_tiers()
@@ -494,26 +528,43 @@ def _is_library_embedded(domain: str) -> str | None:
     d = _normalize_domain(domain)
     if not d:
         return None
-    suffixes, _globs, _bulk = _domain_tiers()
-    for suffix in suffixes:
+    for suffix in _domain_tiers().suffixes:
         if d == suffix or d.endswith("." + suffix):
             return suffix
     return None
 
 
-def domain_source_tier(location: str, raw_len: int) -> str:
-    """按端点来源判定域名可信度档（纯函数，数据来自 domain_tiers.yaml）。
+def domain_source_tier(location: str, raw_len: int, *, context: str = "apk") -> str:
+    """按端点来源判定域名/IP 可信度档（纯函数，数据来自 domain_tiers.yaml）。
 
-    - location 命中已知第三方库文件路径 glob → TIER_LIBRARY_FILE。
+    - location 命中已知第三方库文件 glob（全路径组或 basename 组）→ TIER_LIBRARY_FILE。
     - 单条字符串/字面量长度超阈值（典型内置域名库大表）→ TIER_BULK_STRING。
     - 否则 → TIER_APP（最可信）。
+
+    ``context`` 取 ``"apk"``（默认）或 ``"web"``。★两者的先验不同，不能共用整张表：
+    APK 内部「``.min.js`` ≈ 第三方库」是个还行的先验；在抓取的网页证据里，站点**自己的**
+    业务代码几乎必然是压缩过的，照搬会把涉诈站自有后端降成待核（不发函、不闭环、不富化），
+    是漏报方向的误伤。故 web 语境跳过 ``web_unsafe_globs`` 里那些模式。
+
+    函数名带 domain 是历史沿革，实际也用于 IP——判的是**来源文件的性质**，与端点类型无关。
     """
     loc = (location or "").replace("\\", "/").lower()
-    _suffixes, globs, bulk_min = _domain_tiers()
-    for pat in globs:
+    base = loc.rsplit("/", 1)[-1]
+    rules = _domain_tiers()
+    web = context == "web"
+    for pat in rules.globs:
+        if web and pat in rules.web_unsafe:
+            continue
         if fnmatch(loc, pat):
             return TIER_LIBRARY_FILE
-    if raw_len >= bulk_min:
+    # ★basename 组只比文件名：全路径组里的 `*` 会跨 `/`，`vendor.*.js` 那类模式若按全路径
+    #   匹配，会把「目录恰好叫 vendor.min」之下的所有 .js 整树降档。
+    for pat in rules.basename_globs:
+        if web and pat in rules.web_unsafe:
+            continue
+        if fnmatch(base, pat):
+            return TIER_LIBRARY_FILE
+    if raw_len >= rules.bulk_min:
         return TIER_BULK_STRING
     return TIER_APP
 

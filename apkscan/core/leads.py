@@ -546,6 +546,11 @@ def _is_tenant_hosting_asn(asn: dict) -> bool:
     return classify_network(str(org), asn_no) in _TENANT_HOSTING_CATEGORIES
 
 
+#: IP 侧 tier 降档的记账说明。与域名侧措辞对齐，但点明「公共节点」这一 IP 特有的实际形态
+#: （第三方库硬编码的 RPC/DNS/时间服务节点），让读线索的人知道该核什么。
+_IP_TIER_NOTE = "仅见于第三方库文件/超大字符串表，疑似库内置的公共节点，低可信"
+
+
 def _ip_lead(
     ep: Endpoint,
     online: bool = True,
@@ -574,6 +579,13 @@ def _ip_lead(
     # 混进"建议调证"，把闭环预算与外部富化额度吃光。判据用得着证据片段来判断
     # 这个字面在样本里是否当地址使用（带端口 / 在 URL 里），故把 snippet 拼给它。
     ip_reason = ""
+    # ★用 OBSERVED_CONTACT_SOURCES 而非 startswith("runtime")：后者会把
+    #   runtime-derived（手编/回灌，只证明"出现在 runtime 报告里"）与解密派生值
+    #   也当成实连证据。豁免形态判据这种事，必须用严格口径，与 attribution 侧同源。
+    #   ★提取成变量：classify_ip 与下面的 tier 降档共用同一口径——真连过的 IP 两处都豁免。
+    runtime_observed = any(
+        str(ev.source) in OBSERVED_CONTACT_SOURCES for ev in ep.evidences
+    )
     if ep.is_private:
         advice = infra.ADVICE_SKIP
     else:
@@ -584,12 +596,7 @@ def _ip_lead(
         advice, ip_reason = infra.classify_ip(
             ep.value,
             context=context,
-            # ★用 OBSERVED_CONTACT_SOURCES 而非 startswith("runtime")：后者会把
-            #   runtime-derived（手编/回灌，只证明"出现在 runtime 报告里"）与解密派生值
-            #   也当成实连证据。豁免形态判据这种事，必须用严格口径，与 attribution 侧同源。
-            runtime_observed=any(
-                str(ev.source) in OBSERVED_CONTACT_SOURCES for ev in ep.evidences
-            ),
+            runtime_observed=runtime_observed,
             # 低段位裸 IP 的定向豁免佐证：ASN 落托管段 + 样本内无同形态编号序列。
             hosting_attributed=_is_tenant_hosting_asn(asn),
             low_octet_siblings=len((low_octet_pool or set()) - {bare}),
@@ -619,12 +626,33 @@ def _ip_lead(
         #   被降、也不知道该核什么，等于把判据的结论藏起来——降噪的账要算得回来。
         endpoint_notes = f"{endpoint_notes}；{ip_reason}" if endpoint_notes else ip_reason
 
-    notes = _apply_forensic(
-        advice, ep.value, evidence_to_obtain, endpoint_notes,
-        asn=asn, shodan=ep.enrichment.get("shodan"),
-        certs=ep.enrichment.get("certs"),
+    # C1（IP 侧）：来源可信度档降可信，与 :func:`_domain_lead` 同口径。第三方库文件里
+    #   硬编码的公共节点 IP（如 web3 库自带的以太坊 RPC 节点）此前整类以最高档进调证出口，
+    #   把闭环主目标占满、真实站点被挤到候选尾部——实测一次占掉前 6 个目标里的全部 6 个。
+    #
+    # ★与域名侧的两处**有意差别**：
+    #   1. 不走 ``infra.effective_advice``——那是域名接口。IP 的档由 ``classify_ip`` 判，
+    #      故这里只读 tier 本身，判据不跨类借用（见 test_pipeline 里那条设计锁）。
+    #   2. 只降 Lead 的 advice，**不动 enrichment 侧**（``_enrichment_targets`` 照旧富化
+    #      降档后的 IP）。降到待核不是排除，是留给人核；人核时手里得有 ASN/RDAP 结果。
+    #      这正是那条设计锁担心的「该核查的 IP 却没有富化结果」，两边由此不再打架。
+    #
+    # ★``runtime_observed`` 同样豁免：真连过的对端不因"它也出现在某个库文件里"降档。
+    #   与 ``classify_ip`` 的形态豁免共用一个口径，故上面提取成了变量。
+    tier = ep.enrichment.get("tier")
+    ip_tier_suppressed = (
+        advice == infra.ADVICE_INVESTIGATE
+        and not runtime_observed
+        and tier in (infra.TIER_LIBRARY_FILE, infra.TIER_BULK_STRING)
     )
-    return Lead(
+    if ip_tier_suppressed:
+        # 与域名侧一致：LOW 编码的是"静态出处只有库文件/超大字符串表"这一证据强度事实，
+        # 撤销降档后该事实依然成立，故留在判据链里、不随降档走。
+        confidence = Confidence.LOW
+
+    # ★Lead 构造提前到降档之前（与 _domain_lead 同）：apply_downgrade 要有 Lead 才能记账，
+    #   此刻的 advice 正好同时作为 base_advice 封存，随后的档位一律由 helper 算出。
+    lead = Lead(
         category=LeadCategory.IP,
         value=ep.value,
         subject=subject,
@@ -632,10 +660,22 @@ def _ip_lead(
         evidence_to_obtain=evidence_to_obtain,
         confidence=confidence,
         source_refs=list(ep.evidences),
-        notes=notes,
+        notes=endpoint_notes,
         advice=advice,
+        base_advice=advice,
         shape_uncertain=shape_uncertain,
     )
+    if ip_tier_suppressed:
+        apply_downgrade(lead, DOWNGRADE_SOURCE_TIER, _IP_TIER_NOTE)
+
+    # ★必须读**压完之后**的 lead.advice：_apply_forensic 只对最高档就地追加取证路径。
+    #   （evidence_to_obtain 是同一个 list 对象，就地追加对上面构造的 lead 同样可见。）
+    lead.notes = _apply_forensic(
+        lead.advice, ep.value, evidence_to_obtain, lead.notes,
+        asn=asn, shodan=ep.enrichment.get("shodan"),
+        certs=ep.enrichment.get("certs"),
+    )
+    return lead
 
 
 #: 被动 DNS 历史的来源富化器（各自把归一后的记录写在 ``enrichment[<name>]["passive_dns"]``）。

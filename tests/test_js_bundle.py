@@ -443,6 +443,47 @@ def test_vendor_bundle_ip_constants_are_tier_demoted() -> None:
     app_by = {ep.value: ep for ep in _analyze({app_path: js}).endpoints}
     assert app_by[_VENDOR_IP_A].enrichment.get("tier") == infra.TIER_APP
 
+    # ★★锁必须走到 Lead 层：只断言 tier 锁不住这次事故。第一版就止步于此，而复审实跑发现
+    #   ``_ip_lead`` 通篇不读 ``enrichment["tier"]``——档标上了、没有任何消费者，那 28 个 IP
+    #   照旧 advice=建议调证 / is_c2=true 进闭环主目标。「提取出信号 ≠ 接上了线」。
+    from apkscan.core.leads import build_endpoint_leads
+
+    leads = {ld.value: ld for ld in build_endpoint_leads([by[_VENDOR_IP_A], by[_VENDOR_IP_B]])}
+    for ip in (_VENDOR_IP_A, _VENDOR_IP_B):
+        ld = leads[ip]
+        # 前置断言：降档**之前**确实判最高档。没有它，判据哪天把这些 IP 判成别的档，
+        # 下面两条会以"本来就不是建议调证"的方式假绿。
+        assert ld.base_advice == infra.ADVICE_INVESTIGATE, (
+            f"{ip} 的 base_advice={ld.base_advice!r}，夹具已不再触发本条要锁的场景"
+        )
+        assert ld.advice == infra.ADVICE_REVIEW, f"{ip} 未降为待核（advice={ld.advice!r}）"
+        assert "source_tier" in (ld.downgrades or {}), f"{ip} 降了档却没留墓碑，出口无法解释"
+
+    # 对照：app 档的同一个 IP 仍判最高档——降档不是把 IP 整类压低
+    app_lead = build_endpoint_leads([app_by[_VENDOR_IP_A]])[0]
+    assert app_lead.advice == infra.ADVICE_INVESTIGATE, "业务 bundle 里的 IP 被误伤降档"
+
+
+def test_runtime_observed_ip_not_downgraded_by_vendor_tier() -> None:
+    """真连过的对端不因"它也出现在某个库文件里"降档——与 classify_ip 的形态豁免同口径。
+
+    ★这条防的是最贵的那类错：涉诈后端 IP 恰好也被某个第三方库当公共节点写死，或攻击者
+      刻意把业务 bundle 命名成 chunk-vendors。只要 pcap 里真有连接，就不该被静态出处压低。
+    """
+    from apkscan.core import infra
+    from apkscan.core.leads import build_endpoint_leads
+    from apkscan.core.models import OBSERVED_CONTACT_SOURCES, Endpoint, Evidence
+
+    ep = Endpoint(
+        value=_VENDOR_IP_A, kind="ip", is_private=False,
+        evidences=[Evidence(source=sorted(OBSERVED_CONTACT_SOURCES)[0],
+                            location=_VENDOR_PATH, snippet=f"https://{_VENDOR_IP_A}:8545/rpc")],
+        enrichment={"tier": infra.TIER_LIBRARY_FILE},
+    )
+    lead = build_endpoint_leads([ep])[0]
+    assert lead.advice == infra.ADVICE_INVESTIGATE, "实连过的对端被 tier 降档了"
+    assert not (lead.downgrades or {}), f"实连过的对端不该有降档墓碑：{lead.downgrades}"
+
 
 def test_flat_vendor_bundle_names_hit_library_file_glob() -> None:
     """扁平命名的 vendor bundle 要能命中 glob（网页证据没有 /static/js/ 那一层）。"""
@@ -453,3 +494,35 @@ def test_flat_vendor_bundle_names_hit_library_file_glob() -> None:
         assert infra.domain_source_tier(loc, 0) == infra.TIER_LIBRARY_FILE, loc
     for loc in ("app.204b4fda.js", "evidence/index.html"):
         assert infra.domain_source_tier(loc, 0) == infra.TIER_APP, loc
+
+
+def test_web_context_keeps_site_own_minified_code_at_app_tier() -> None:
+    """web 证据语境不照搬 APK 的 glob 表——站点自己的压缩代码不是第三方库。
+
+    ★这条锁的是**降噪机制自身的误伤面**，方向与上面几条相反：在 APK 内部
+      「``.min.js`` ≈ 第三方库」是个还行的先验；网页证据里站点自有业务代码几乎必然压缩过、
+      资源路径又常含 ``/dist/``。若照搬，涉诈站自有后端会被整批降成待核——不发调证函、
+      不进闭环、不做 ICP/WHOIS 富化，是**漏报**方向的误伤，比误报贵得多。
+    """
+    from apkscan.core import infra
+
+    # web 语境：站点自有代码保持最高档
+    for loc in ("static/js/app.a1b2.min.js", "js/main.min.js",
+                "dist/assets/index.js", "assets/vendor/config.js"):
+        assert infra.domain_source_tier(loc, 0, context="web") == infra.TIER_APP, loc
+    # web 语境：明确的 vendor 命名仍然降档（降噪没被整体关掉）
+    for loc in ("chunk-vendors.bc47c059.js", "static/js/chunk-vendors.abc.js"):
+        assert infra.domain_source_tier(loc, 0, context="web") == infra.TIER_LIBRARY_FILE, loc
+    # APK 语境（默认）不受影响：同样这些路径照旧判 library-file
+    for loc in ("static/js/app.a1b2.min.js", "js/main.min.js", "assets/vendor/config.js"):
+        assert infra.domain_source_tier(loc, 0) == infra.TIER_LIBRARY_FILE, loc
+
+
+def test_basename_globs_do_not_traverse_directories() -> None:
+    """vendor 文件名判据只比 basename——``fnmatch`` 的 ``*`` 跨 ``/``，写成全路径模式会整树降档。"""
+    from apkscan.core import infra
+
+    for loc in ("assets/vendor.min/app.business.js",  # 目录恰好叫 vendor.min
+                "vendor.abc/deep/path/app.js",
+                "chunk-vendors-copycat/settings.json"):
+        assert infra.domain_source_tier(loc, 0) == infra.TIER_APP, f"{loc} 被目录穿透降档"

@@ -134,13 +134,18 @@ def _add_endpoint(collector: EndpointCollector, raw: str, path: str, snippet: st
       整条链路都没有降噪机制——``leads`` 的 tier 降档判据形同虚设。
       ``raw_len`` 传 0 是有意的：网页证据的 snippet 已被截断，长度代表不了原字面量，
       拿它去判 bulk-string 会误判；这里只让**路径 glob** 那一条生效。
+
+      ★``context="web"`` 同样是有意的、且是必须的：整张 glob 表的先验是「APK 内部路径」。
+      网页语境下站点**自己的**业务代码几乎必然压缩过（``main.min.js``），资源路径又常含
+      ``/dist/``——照搬 APK 的表会把涉诈站自有的后端域名整批降成待核，不发函、不进闭环、
+      不做 ICP/WHOIS 富化，是漏报方向的误伤。判据分歧见 ``infra.domain_source_tier``。
     """
     value = raw.strip().strip("'\"")
     if not value or len(value) > 2048:
         return
     low = value.lower()
     evidence = Evidence(source=EVIDENCE_SOURCE, location=path, snippet=truncate(snippet, SNIPPET_MAX))
-    tier = infra.domain_source_tier(path, 0)
+    tier = infra.domain_source_tier(path, 0, context="web")
     if low.startswith(("http://", "https://", "ws://", "wss://")):
         host = host_from_url(value)
         if not host or not valid_url_host(host):
