@@ -242,6 +242,54 @@ def test_runtime_observed_endpoints_bypass_source_quota() -> None:
     assert len(live_selected) == 4, f"实连过的对端被配额压掉了：{selected}"
 
 
+def test_shared_multi_file_cluster_still_deduplicated() -> None:
+    """一整簇诱饵**共享同一组文件**时仍要去拥塞——多 location 不是绕过配额的通道。
+
+    ★锁的是复审实测出的绕过：若来源组按「单文件才算一组、多文件就豁免」判，把 28 个诱饵
+      各写进同样的两个文件，每条的来源都成了"多处出现"，整簇一起逃过配额——而这个成本
+      **不随诱饵数量增长**。改按 location **集合**分组后，共享同一组合的一簇仍只占一个名额。
+    """
+    shared = []
+    for n in range(10, 38):
+        shared.append(
+            Endpoint(
+                value=f"198.51.100.{n}",
+                kind="ip",
+                evidences=[
+                    Evidence(source="dex", location=_VENDOR_BUNDLE, snippet=f"198.51.100.{n}"),
+                    Evidence(source="dex", location="assets/decoy.js", snippet=f"198.51.100.{n}"),
+                ],
+                is_suspicious=True,
+            )
+        )
+    real_backend = _endpoint("203.0.113.9", location=_APP_BUNDLE)
+    report = _report(*shared, real_backend)
+
+    selected = [ep.value for ep in select_targets(report, max_targets=6)]
+    assert "203.0.113.9" in selected, f"共享多文件的诱饵簇绕过了配额：{selected}"
+    before_real = selected[: selected.index("203.0.113.9")]
+    crowding = [v for v in before_real if v.startswith("198.51.100.")]
+    assert len(crowding) <= 1, f"共享同组文件的一簇占了 {len(crowding)} 个位置：{selected}"
+
+
+def test_vendor_named_source_ranks_after_same_tier_peers() -> None:
+    """文件名像 vendor 的候选在**同档之内**靠后——弱信号仍要有效，只是不改 advice。
+
+    ★与 tests/test_js_bundle.py::test_forged_vendor_filename_cannot_suppress_real_backend
+      配对：那条锁「不改 advice」，这条锁「仍影响排序」。两条都在，降噪才既没被丢掉、
+      也没被做成可伪造的硬判据。
+    """
+    vendor_named = _endpoint("198.51.100.10", location="assets/www/chunk-vendors.bc47.js")
+    plain = _endpoint("203.0.113.10", location="assets/www/app-service.js")
+    # 两者同档同置信；只有文件名不同 → vendor 命名的那个该排在后面
+    report = _report(vendor_named, plain)
+
+    selected = [ep.value for ep in select_targets(report, max_targets=6)]
+    assert selected.index("203.0.113.10") < selected.index("198.51.100.10"), (
+        f"vendor 命名的候选没有排在同档之后：{selected}"
+    )
+
+
 def test_value_seen_in_multiple_files_is_exempt_from_source_quota() -> None:
     """同一个值在多处独立出现 → 不参与来源配额。
 
