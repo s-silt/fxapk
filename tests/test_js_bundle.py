@@ -412,60 +412,46 @@ _VENDOR_IP_A = "192.88.99.9"   # leak-scan: allow 见 tests/doc_addresses.GLOBAL
 _VENDOR_IP_B = "192.88.99.44"  # leak-scan: allow 同上
 
 
-def test_vendor_bundle_ip_constants_are_tier_demoted() -> None:
-    """第三方 vendor bundle 里的 IP 常量必须打上 library-file 档，不能进最高档。
+def test_forged_vendor_filename_cannot_suppress_real_backend() -> None:
+    """伪造的 vendor 文件名**不得**改变 advice——只影响闭环排序。
 
-    ★锁的是一次实测事故：一份 ``chunk-vendors.<hash>.js`` 里第三方库硬编码的公共节点，
-      28 个 IP 全部以 ``is_c2=true`` / 建议调证进了闭环主目标，把真实站点挤到第 25 位
-      之后——办案方拿到的前 6 个"目标"没有一个是本案后端。
+    ★这条替换了原来那条「vendor bundle 里的 IP 必须降档」。判据变了，理由是复审实测出的
+      对抗面：文件名由打包者自己起、可任意伪造，一旦它能决定 advice，对手把业务主 bundle
+      命名成 ``chunk-vendors.<hash>.js`` 就能让其中的真后端**确定性退出闭环候选**
+      （leads 降待核 → closure 只收「建议调证」）——误判方向对对手有利，
+      与本仓「判据只能用形态与结构，不能用名字」的纪律相悖。
 
-    两个缺陷叠加才造成它，**两个都被这条锁住**：
-      ① ``mark_tier`` 此前只在**域名**分支调用，IP 整类不降档；
-      ② vendor glob 只有带路径的 ``*/static/js/chunk-vendors*``，扁平文件名匹配不上。
+    ★原事故（一簇同文件常量占满 Top-N）改由 closure 的同源去拥塞治，那条判据不看名字：
+      见 tests/test_closure.py::test_same_source_cluster_does_not_fill_all_target_slots。
 
-    ★必须走 ``_analyze`` 真入口。先前写过一版在测试里自己调 ``mark_tier``，
-      把分析器里那行删掉照样绿——假绿，锁不住缺陷①。
+    ★必须走 ``_analyze`` → ``build_endpoint_leads`` 真链路：原先那版直接手工构造
+      ``advice="建议调证"``，绕开了 tier → advice 这一段，等于没验到本条声称的场景。
     """
     from apkscan.core import infra
-
-    js = f'var rpc="https://{_VENDOR_IP_A}:8545/rpc";var bare="{_VENDOR_IP_B}";'.encode()
-    by = {ep.value: ep for ep in _analyze({_VENDOR_PATH: js}).endpoints}
-
-    for ip in (_VENDOR_IP_A, _VENDOR_IP_B):
-        assert ip in by, f"{ip} 未被提取——夹具或提取逻辑变了，本条断言已失去意义"
-        tier = by[ip].enrichment.get("tier")
-        assert tier == infra.TIER_LIBRARY_FILE, (
-            f"vendor bundle 里的 IP {ip} 未降档（tier={tier!r}）——它会以最高档进调证出口"
-        )
-
-    # ★对照：站点自身的业务 bundle 不降档，真后端不受误伤
-    app_path = "assets/apps/__UNI__X/www/app-service.js"
-    app_by = {ep.value: ep for ep in _analyze({app_path: js}).endpoints}
-    assert app_by[_VENDOR_IP_A].enrichment.get("tier") == infra.TIER_APP
-
-    # ★★锁必须走到 Lead 层：只断言 tier 锁不住这次事故。第一版就止步于此，而复审实跑发现
-    #   ``_ip_lead`` 通篇不读 ``enrichment["tier"]``——档标上了、没有任何消费者，那 28 个 IP
-    #   照旧 advice=建议调证 / is_c2=true 进闭环主目标。「提取出信号 ≠ 接上了线」。
     from apkscan.core.leads import build_endpoint_leads
 
-    leads = {ld.value: ld for ld in build_endpoint_leads([by[_VENDOR_IP_A], by[_VENDOR_IP_B]])}
+    js = f'var rpc="https://{_VENDOR_IP_A}:8545/rpc";var bare="{_VENDOR_IP_B}";'.encode()
+    forged = {ep.value: ep for ep in _analyze({_VENDOR_PATH: js}).endpoints}
+    app_by = {ep.value: ep for ep in _analyze(
+        {"assets/apps/__UNI__X/www/app-service.js": js}).endpoints}
+
     for ip in (_VENDOR_IP_A, _VENDOR_IP_B):
-        ld = leads[ip]
-        # 前置断言：降档**之前**确实判最高档。没有它，判据哪天把这些 IP 判成别的档，
-        # 下面两条会以"本来就不是建议调证"的方式假绿。
-        assert ld.base_advice == infra.ADVICE_INVESTIGATE, (
-            f"{ip} 的 base_advice={ld.base_advice!r}，夹具已不再触发本条要锁的场景"
+        assert ip in forged, f"{ip} 未被提取——夹具或提取逻辑变了，本条断言已失去意义"
+        # 文件名不再决定 tier：伪装成 vendor 的文件与普通业务文件同档
+        assert forged[ip].enrichment.get("tier") == infra.TIER_APP, (
+            f"{ip} 仍被**文件名**降档——对手改个文件名就能把真后端踢出闭环"
         )
-        assert ld.advice == infra.ADVICE_REVIEW, f"{ip} 未降为待核（advice={ld.advice!r}）"
-        assert "source_tier" in (ld.downgrades or {}), f"{ip} 降了档却没留墓碑，出口无法解释"
-        # LOW 编码「静态出处只有库文件」这一证据强度事实，撤销降档后仍成立（判据链、不随降档走）
-        from apkscan.core.models import Confidence
-        assert ld.confidence == Confidence.LOW, f"{ip} 降档后 confidence={ld.confidence}"
+        lead = build_endpoint_leads([forged[ip]])[0]
+        assert lead.advice == infra.ADVICE_INVESTIGATE, (
+            f"{ip} 的 advice 被伪造的文件名压成了 {lead.advice!r}"
+        )
+        assert not (lead.downgrades or {}), f"{ip} 因文件名长出了降档墓碑"
 
-    # 对照：app 档的同一个 IP 仍判最高档——降档不是把 IP 整类压低
-    app_lead = build_endpoint_leads([app_by[_VENDOR_IP_A]])[0]
-    assert app_lead.advice == infra.ADVICE_INVESTIGATE, "业务 bundle 里的 IP 被误伤降档"
-
+    # 文件名仍是**弱排序信号**：同档之内靠后（降噪没被整体丢掉，只是不再改 advice）
+    assert infra.name_vendor_hint(_VENDOR_PATH) is True
+    assert infra.name_vendor_hint("assets/apps/__UNI__X/www/app-service.js") is False
+    # 对照：普通业务文件里的同一个值照常判最高档
+    assert build_endpoint_leads([app_by[_VENDOR_IP_A]])[0].advice == infra.ADVICE_INVESTIGATE
 
 def test_runtime_observed_ip_not_downgraded_by_vendor_tier() -> None:
     """真连过的对端不因"它也出现在某个库文件里"降档——与 classify_ip 的形态豁免同口径。
@@ -613,14 +599,22 @@ def test_tier_demoted_lead_gets_no_forensic_paths() -> None:
         )
 
 
-def test_flat_vendor_bundle_names_hit_library_file_glob() -> None:
-    """扁平命名的 vendor bundle 要能命中 glob（网页证据没有 /static/js/ 那一层）。"""
+def test_flat_vendor_bundle_names_are_hint_only_not_tier() -> None:
+    """扁平 vendor 命名只产**弱排序信号**，不再决定 tier / advice。
+
+    ★这条曾锁的是相反行为（basename 命中即 TIER_LIBRARY_FILE）。撤掉的理由：文件名由打包者
+      自己起、可任意伪造，一旦能决定 advice，把业务主 bundle 命名成 chunk-vendors.<hash>.js
+      就能让真后端确定性退出闭环——误判方向对对手有利。现由 closure 的同源去拥塞治拥塞
+      （不看名字），basename 只在同档内影响排序。见 infra.name_vendor_hint。
+    """
     from apkscan.core import infra
 
     for loc in ("chunk-vendors.bc47c059.js", "evidence/chunk-vendors.abc.js",
                 "vendors~main.1a2b.js", "vendor.9f8e.js"):
-        assert infra.domain_source_tier(loc, 0) == infra.TIER_LIBRARY_FILE, loc
+        assert infra.name_vendor_hint(loc) is True, loc
+        assert infra.domain_source_tier(loc, 0) == infra.TIER_APP, f"{loc} 仍被文件名降档"
     for loc in ("app.204b4fda.js", "evidence/index.html"):
+        assert infra.name_vendor_hint(loc) is False, loc
         assert infra.domain_source_tier(loc, 0) == infra.TIER_APP, loc
 
 
@@ -640,9 +634,9 @@ def test_js_bundle_web_platform_keeps_site_own_minified_code_at_app_tier() -> No
             f"web 平台下站点自有代码里的 {value} 被误降"
         )
 
-    # 对照：web 平台下明确的 vendor 命名仍降档
+    # 对照：vendor 命名也是 app 档（文件名不再决定 tier），降拥塞交给 closure 的同源配额
     van_by = {ep.value: ep for ep in _analyze({"web/chunk-vendors.bc47.js": body}, platform="web").endpoints}
-    assert van_by["api.fraud-x.cn"].enrichment.get("tier") == infra.TIER_LIBRARY_FILE
+    assert van_by["api.fraud-x.cn"].enrichment.get("tier") == infra.TIER_APP
 
 
 def test_web_context_keeps_site_own_minified_code_at_app_tier() -> None:
@@ -659,9 +653,10 @@ def test_web_context_keeps_site_own_minified_code_at_app_tier() -> None:
     for loc in ("static/js/app.a1b2.min.js", "js/main.min.js",
                 "dist/assets/index.js", "assets/vendor/config.js"):
         assert infra.domain_source_tier(loc, 0, context="web") == infra.TIER_APP, loc
-    # web 语境：明确的 vendor 命名仍然降档（降噪没被整体关掉）
+    # web 语境：vendor 命名也不再降档（basename 已整体撤出 tier 判据），但仍产弱排序信号
     for loc in ("chunk-vendors.bc47c059.js", "static/js/chunk-vendors.abc.js"):
-        assert infra.domain_source_tier(loc, 0, context="web") == infra.TIER_LIBRARY_FILE, loc
+        assert infra.domain_source_tier(loc, 0, context="web") == infra.TIER_APP, loc
+    assert infra.name_vendor_hint("chunk-vendors.bc47c059.js", context="web") is True
     # APK 语境（默认）不受影响：同样这些路径照旧判 library-file
     for loc in ("static/js/app.a1b2.min.js", "js/main.min.js", "assets/vendor/config.js"):
         assert infra.domain_source_tier(loc, 0) == infra.TIER_LIBRARY_FILE, loc

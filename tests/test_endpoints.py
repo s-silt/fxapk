@@ -617,9 +617,10 @@ def test_web_platform_does_not_demote_site_own_minified_code():
     # 对照一：同路径在 APK 语境仍降档（既有语义不变）
     eps = _by_value(_analyze(files={"web/static/js/main.min.js": body}))
     assert eps["api.fraud-x.cn"].enrichment.get("tier") == "library-file"
-    # 对照二：web 语境下明确的 vendor 命名仍降档（降噪没被整体关掉）
+    # 对照二：vendor 命名同样是 app 档——文件名不再决定 tier（见 infra.name_vendor_hint），
+    # 「一簇同文件常量占满 Top-N」改由 closure 的同源去拥塞治，那条判据不看名字。
     eps = _by_value(_analyze(files={"web/chunk-vendors.bc47.js": body}, platform="web"))
-    assert eps["api.fraud-x.cn"].enrichment.get("tier") == "library-file"
+    assert eps["api.fraud-x.cn"].enrichment.get("tier") == "app"
 
 
 def test_ip_from_app_file_marked_app_tier():

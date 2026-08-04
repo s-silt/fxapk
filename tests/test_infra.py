@@ -320,12 +320,13 @@ def test_domain_tiers_new_yaml_keys_are_live(monkeypatch):
     monkeypatch.setattr(infra, "_DOMAIN_TIERS_CACHE", None)
 
     # 三个键都活着：注入值生效而非兜底
-    assert infra.domain_source_tier("a/b/zzz-probe.x.js", 0) == infra.TIER_LIBRARY_FILE
+    # basename 组现在只喂 name_vendor_hint（弱排序信号），不再决定 tier
+    assert infra.name_vendor_hint("a/b/zzz-probe.x.js") is True
     assert infra.domain_source_tier("q/zzz-dir/f.js", 0) == infra.TIER_LIBRARY_FILE
     # 兜底里的 chunk-vendors 不在注入表中 → 不再命中（证明没有静默混用兜底）
-    assert infra.domain_source_tier("chunk-vendors.abc.js", 0) == infra.TIER_APP
+    assert infra.name_vendor_hint("chunk-vendors.abc.js") is False
     # web 语境：全路径组与 basename 组的 web_unsafe 跳过都生效
-    assert infra.domain_source_tier("a/b/zzz-probe.x.js", 0, context="web") == infra.TIER_APP
+    assert infra.name_vendor_hint("a/b/zzz-probe.x.js", context="web") is False
     assert infra.domain_source_tier("q/zzz-dir/f.js", 0, context="web") == infra.TIER_APP
 
 

@@ -549,7 +549,6 @@ def domain_source_tier(location: str, raw_len: int, *, context: str = "apk") -> 
     函数名带 domain 是历史沿革，实际也用于 IP——判的是**来源文件的性质**，与端点类型无关。
     """
     loc = (location or "").replace("\\", "/").lower()
-    base = loc.rsplit("/", 1)[-1]
     rules = _domain_tiers()
     web = context == "web"
     for pat in rules.globs:
@@ -557,16 +556,39 @@ def domain_source_tier(location: str, raw_len: int, *, context: str = "apk") -> 
             continue
         if fnmatch(loc, pat):
             return TIER_LIBRARY_FILE
-    # ★basename 组只比文件名：全路径组里的 `*` 会跨 `/`，`vendor.*.js` 那类模式若按全路径
-    #   匹配，会把「目录恰好叫 vendor.min」之下的所有 .js 整树降档。
+    # ★basename 组**不再决定 tier**——见 :func:`name_vendor_hint`。它判的是打包者自己起的
+    #   文件名，可任意伪造；一旦能决定 advice，对手把业务主 bundle 命名成 chunk-vendors.js
+    #   就能让真后端确定性退出闭环（误判方向对对手有利）。现降为闭环排序用的弱信号。
+    if raw_len >= rules.bulk_min:
+        return TIER_BULK_STRING
+    return TIER_APP
+
+
+def name_vendor_hint(location: str, *, context: str = "apk") -> bool:
+    """该位置的**文件名**长得像第三方 vendor bundle（chunk-vendors*.js 等）。
+
+    ★这是**弱信号，不是判据**：它看的是打包者自己起的文件名，webpack 的 ``output.filename``
+      完全可控。曾经它能决定 ``tier``（进而降 ``advice``），于是对手把业务主 bundle 命名成
+      ``chunk-vendors.<hash>.js`` 就能让其中所有端点确定性退出闭环候选——误判方向对对手有利，
+      与本仓「判据只能用形态与结构，不能用名字」的纪律相悖。
+
+      现在它只作用于**闭环目标的排序**（同档之内靠后），不改变 advice、不影响是否发函、
+      不影响富化。真正治「一簇同文件常量占满 Top-N」的是 closure 的同源去拥塞
+      （``closure.targets._diversify_by_source``），那条判据不看名字、伪造不到好处。
+
+    全路径组（``*/node_modules/*`` 等，目录结构由包管理器强制、伪造成本高）仍照常决定 tier，
+    不走这里。
+    """
+    loc = (location or "").replace("\\", "/").lower()
+    rules = _domain_tiers()
+    web = context == "web"
+    base = loc.rsplit("/", 1)[-1]
     for pat in rules.basename_globs:
         if web and pat in rules.web_unsafe:
             continue
         if fnmatch(base, pat):
-            return TIER_LIBRARY_FILE
-    if raw_len >= rules.bulk_min:
-        return TIER_BULK_STRING
-    return TIER_APP
+            return True
+    return False
 
 
 def best_tier(a: str | None, b: str | None) -> str:

@@ -81,9 +81,20 @@ def _match_value(category_or_kind: str, value: str) -> str:
     return infra.match_key(category_or_kind, value)
 
 
+def _name_vendor_hinted(endpoint: Endpoint) -> bool:
+    """该端点的静态证据**全部**来自文件名像 vendor bundle 的文件。
+
+    ★弱信号，只作用于排序（见 ``infra.name_vendor_hint``）：文件名可伪造，故它既不改 advice
+      也不排除候选，只在同档之内靠后。要求"全部证据都如此"——只要还有一条来自别处，
+      这个值就不只是某个 vendor bundle 里的字面量。实连过的对端不适用（另有更强的优先项）。
+    """
+    locations = [str(ev.location or "") for ev in endpoint.evidences if str(ev.location or "")]
+    return bool(locations) and all(infra.name_vendor_hint(loc) for loc in locations)
+
+
 def _target_rank(
     endpoint: Endpoint, confidence_rank: int, shape_uncertain: bool = False
-) -> tuple[int, int, int, int, int, int, str]:
+) -> tuple[int, int, int, int, int, int, int, str]:
     runtime = _runtime_info(endpoint)
     has_name = bool(runtime.get("sni") or runtime.get("http_host") or runtime.get("host"))
     return (
@@ -92,6 +103,8 @@ def _target_rank(
         0 if has_name else 1,
         0 if runtime.get("observed") else 1,
         confidence_rank,
+        # 文件名像第三方 vendor bundle 的排在同档之后（弱信号、不排除，见 _name_vendor_hinted）。
+        1 if _name_vendor_hinted(endpoint) else 0,
         # 形态存疑的候选排在同档正常候选之后：Top-N 名额有限，不能让一个可能是版本号的
         # 字面挤掉一个确凿的后端地址（见 Lead.shape_uncertain）。仍参选，只是末位。
         1 if shape_uncertain else 0,
@@ -99,15 +112,26 @@ def _target_rank(
     )
 
 
-def _static_source_group(endpoint: Endpoint) -> str:
-    """该端点的静态来源组：全部证据同属一个文件时返回该文件路径，否则空串。
+#: 无位置信息的候选归入的专用组名。★不能让它们「无 location 即豁免配额」——那等于给
+#: 「把证据位置抹掉」开一条绕过通道。用一个不可能与真实路径相撞的名字（真实 location
+#: 经归一后不含 NUL）。
+_UNKNOWN_SOURCE_GROUP = "\x00unknown-source"
 
-    空串表示「不参与来源配额」——要么没有位置信息，要么这个值在多处独立出现过
-    （那本身就是它不是某一个文件的内嵌常量的证据，不该被配额压后）。
+
+def _static_source_group(endpoint: Endpoint) -> str:
+    """该端点的静态来源组 = 它**全部证据位置的集合**（归一、排序后拼成稳定键）。
+
+    ★按集合而不是「单文件才算一组、多文件就豁免」：后者能被零成本绕过——把同一簇诱饵各写进
+      同样的两个文件，每条的来源就都是"多处出现"，整簇一起逃过配额，且这个成本**不随诱饵数量
+      增长**。按集合分组后，共享同一组合的一簇仍然只占一个名额。
+
+    ★真正该被豁免配额的是「来源集合与别人都不同」的值——那自然落进它自己的组，无需特例。
     """
     locations = {str(ev.location or "").replace("\\", "/").lower() for ev in endpoint.evidences}
     locations.discard("")
-    return locations.pop() if len(locations) == 1 else ""
+    if not locations:
+        return _UNKNOWN_SOURCE_GROUP
+    return "\x00".join(sorted(locations))
 
 
 def _diversify_by_source(ordered: list[Endpoint]) -> tuple[list[Endpoint], int]:
