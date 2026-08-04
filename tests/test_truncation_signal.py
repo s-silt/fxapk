@@ -42,23 +42,68 @@ def test_result_optional_keeps_old_callers_working():
     assert ok and len(strings) == 10
 
 
-def test_pipeline_merges_truncation_as_or_not_overwrite():
-    """★多分析器合并时截断是**或运算**，不是覆盖。
+def test_pipeline_merges_truncation_as_or_not_overwrite(monkeypatch):
+    """★多分析器合并时截断是**或运算**，不是覆盖，且要记下是谁截断的。
 
     实测一个样本上 11 个分析器同时截断；若按普通 meta 合并，最后一个写 False 的会把前面的
-    True 抹掉——"没扫全"这件事就此消失。顺带要记下是谁截断的，让人能定位哪块没扫完。
+    True 抹掉——"没扫全"这件事就此消失。
+
+    ★这条测试**曾经是假的**：原版用 ``inspect.getsource(pipeline)`` 断言源码里出现过
+      ``continue`` 字符串。复审实测：把那个守卫改成 ``if False:``，``continue`` 仍在源码里，
+      4362 条测试全绿——它查的是源码文本，不是行为。而同一文件下一条测试的 docstring 就写着
+      「静态审计骗过我三次……唯一可信的是真跑一遍」，教训写下了，没有回头改这一条。
+
+    现改为走 ``pipeline.run`` 真入口的行为断言，锁三件事（缺一件都等于「没扫全」丢了）：
+      ① 先 True 后 False → 合并结果必须仍是 True；
+      ② ``dex_strings_truncated_by`` 记下**是谁**截断的（人要能定位哪块没扫完）；
+      ③ 这个事实一路传到 ``visibility``，把 dex 面判成 partial 且理由里带上分析器名。
     """
-    import inspect
+    from apkscan.core import pipeline, visibility
+    from apkscan.core.models import AnalysisConfig, AnalyzerResult
+    from apkscan.core.registry import BaseAnalyzer
 
-    from apkscan.core import pipeline
+    class _Truncating(BaseAnalyzer):
+        name = "probe_truncated"
+        requires: list = []
 
-    src = inspect.getsource(pipeline)
-    assert "_DEX_TRUNCATED_KEY" in src
-    assert "_DEX_TRUNCATED_BY_KEY" in src
-    # 合并处必须跳过截断键的覆盖式赋值
-    assert "continue" in src.split("_DEX_TRUNCATED_KEY:")[-1][:200], (
-        "截断键没有被排除出覆盖式合并，后跑的分析器会把 True 抹成 False"
+        def analyze(self, ctx):  # noqa: ANN001
+            r = AnalyzerResult(analyzer=self.name)
+            r.meta[pipeline._DEX_TRUNCATED_KEY] = True
+            return r
+
+    class _NotTruncating(BaseAnalyzer):
+        """后跑且明确写 False——正是会把前者抹掉的那种。"""
+
+        name = "probe_complete"
+        requires: list = []
+
+        def analyze(self, ctx):  # noqa: ANN001
+            r = AnalyzerResult(analyzer=self.name)
+            r.meta[pipeline._DEX_TRUNCATED_KEY] = False
+            return r
+
+    # 顺序要紧：截断的先跑，不截断的后跑，才验得到「后者不得覆盖前者」
+    from tests.conftest import FakeContext
+
+    monkeypatch.setattr(
+        pipeline, "discover_analyzers", lambda: [_Truncating(), _NotTruncating()]
     )
+    report = pipeline.run(FakeContext(), AnalysisConfig(online=False))
+
+    # ① 或运算：后写的 False 不得抹掉前面的 True
+    assert report.meta.get(pipeline._DEX_TRUNCATED_KEY) is True, (
+        "后跑的分析器把截断标记抹成了 False——「没扫全」这件事就此消失"
+    )
+    # ② 记名：人要能定位是哪块没扫完
+    by = report.meta.get(pipeline._DEX_TRUNCATED_BY_KEY)
+    assert by == ["probe_truncated"], f"截断来源记错或没记：{by!r}"
+
+    # ③ 接线：截断事实必须一路传到可见性判定，否则「未发现」会被当成「确实没有」
+    dex_vis, why = visibility._dex_visibility(report.meta)
+    assert dex_vis == visibility.VIS_PARTIAL, (
+        f"截断了却把 DEX 面判成 {dex_vis}——「未发现某接口」会被误当作确实不存在"
+    )
+    assert any("probe_truncated" in w for w in why), f"可见性理由里没带上是谁截断的：{why}"
 
 
 def test_every_dex_reading_analyzer_reports_truncation():
