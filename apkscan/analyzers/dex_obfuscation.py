@@ -205,6 +205,7 @@ class DexObfuscationAnalyzer(BaseAnalyzer):
     """度量 DEX 字符串池不透明度 → 报告里明示「静态抽取可能失明」（可信度信号，非工具指纹）。"""
 
     name: str = "dex_obfuscation"
+    meta_keys = frozenset({"dex_string_pool", "dex_strings_truncated"})
     requires: list[str] = ["apk"]  # 纯静态但只对 DEX 有意义；Web 上不存在 DEX 面
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

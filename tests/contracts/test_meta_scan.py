@@ -277,6 +277,17 @@ def test_dynamic_key_written_into_a_local_dict_is_still_surfaced() -> None:
     assert _keys(src, "write") == {"<dynamic>"}, "本地字典里的动态键被吞了"
 
 
+def test_local_dict_stored_under_meta_key_remains_nested() -> None:
+    """局部字典挂进一个顶层键后，其子键不能被提升成顶层权限。"""
+    src = '''
+def f(result):
+    meta = {"verdict": "unknown"}
+    result.meta["repack_identity"] = meta
+    meta.update({"signals": []})
+'''
+    assert _keys(src, "write") == {"repack_identity"}
+
+
 NESTED_SCOPE_CASES = [
     pytest.param(
         'K = "real_key"\ndef outer(meta):\n    def inner():\n        K = "shadow"\n    meta[K] = 1',
@@ -468,6 +479,18 @@ def test_repository_scan_finds_real_known_keys() -> None:
     assert "app_classification" in res.produced
 
 
+def test_analyzer_unresolved_writes_match_reviewed_baseline() -> None:
+    """分析器目录的开放写入逐点冻结；新增动态键必须先被人工建模。"""
+    root = Path(__file__).resolve().parents[2]
+    res = meta_scan.scan_repository(root)
+    got = {
+        (access.file, access.key)
+        for access in res.unresolved
+        if access.kind == "write" and access.file.startswith("apkscan/analyzers/")
+    }
+    assert got == {("apkscan/analyzers/manifest.py", "<dynamic:whole-meta>")}
+
+
 def _dex_helper_result_owners(root: Path) -> set[str]:
     """找出把 ``result`` 传给共享 DEX helper 的分析器。
 
@@ -498,6 +521,23 @@ def _dex_helper_result_owners(root: Path) -> set[str]:
     return owners
 
 
+def test_common_meta_writes_have_explicit_compensation() -> None:
+    """共享 helper 的写入面必须显式冻结，不能靠跳过 ``_common`` 放行新键。"""
+    root = Path(__file__).resolve().parents[2]
+    res = meta_scan.scan_repository(root)
+    common_writes = {
+        key
+        for key, accesses in res.produced.items()
+        if any(a.kind == "write" and a.file == "apkscan/analyzers/_common.py" for a in accesses)
+    }
+    common_unresolved = {
+        a.key for a in res.unresolved
+        if a.kind == "write" and a.file == "apkscan/analyzers/_common.py"
+    }
+    assert common_writes == {"dex_strings_truncated"}
+    assert common_unresolved == set()
+
+
 def _owners_for_access(file: str, key: str) -> set[str]:
     module = Path(file).stem
     if module == "web_evidence":
@@ -508,14 +548,17 @@ def _owners_for_access(file: str, key: str) -> set[str]:
     return {module}
 
 
-def test_analyzer_meta_registry_matches_all_static_writes_both_ways() -> None:
-    """具体键、有限键族、共享 helper 写入都必须与注册表双向一致。"""
+def test_analyzer_meta_declarations_match_all_static_writes_both_ways() -> None:
+    """具体键、有限键族、共享 helper 写入都必须与分析器声明双向一致。"""
     from apkscan.core.meta_contract import META_KEY_REGISTRY, PIPELINE_OWNER
     from apkscan.analyzers.web_evidence import iter_coverage_meta_keys
+    from apkscan.core.registry import discover_analyzers
 
     root = Path(__file__).resolve().parents[2]
     res = meta_scan.scan_repository(root)
     observed: set[tuple[str, str]] = set()
+    analyzers = discover_analyzers()
+    declared = {(key, analyzer.name) for analyzer in analyzers for key in analyzer.meta_keys}
 
     # 普通字面量写入。classify 写 report.meta，属于 pipeline 后阶段，不是分析器返回块。
     for key, accesses in res.produced.items():
@@ -526,10 +569,9 @@ def test_analyzer_meta_registry_matches_all_static_writes_both_ways() -> None:
             if module in {"_common", "classify"}:
                 continue
             owners = _owners_for_access(access.file, key)
-            contract = META_KEY_REGISTRY.get(key)
-            assert contract is not None, f"{access.file}:{access.line} 写入未注册键 {key!r}"
-            assert owners & contract.owners, (
-                f"{access.file}:{access.line} 写入 {key!r}，但 owner 未登记：{contract.owners}"
+            declared_owners = {owner for declared_key, owner in declared if declared_key == key}
+            assert owners & declared_owners, (
+                f"{access.file}:{access.line} 写入 {key!r}，但分析器未声明：{owners}"
             )
             observed.update((key, owner) for owner in owners)
 
@@ -537,34 +579,29 @@ def test_analyzer_meta_registry_matches_all_static_writes_both_ways() -> None:
     assert any(a.key.startswith("<family:web_coverage:") for a in res.families)
     for key in iter_coverage_meta_keys():
         owners = _owners_for_access("apkscan/analyzers/web_evidence.py", key)
-        contract = META_KEY_REGISTRY.get(key)
-        assert contract is not None, f"有限键族写入未注册：{key!r}"
-        assert owners & contract.owners, f"有限键族 owner 未登记：{key!r} -> {owners}"
+        declared_owners = {owner for declared_key, owner in declared if declared_key == key}
+        assert owners & declared_owners, f"有限键族 owner 未声明：{key!r} -> {owners}"
         observed.update((key, owner) for owner in owners)
 
     # _common 是真实写入点，owner 是把自己 result 传给 helper 的调用方。
     helper_owners = _dex_helper_result_owners(root)
-    truncation = META_KEY_REGISTRY["dex_strings_truncated"]
-    assert helper_owners <= truncation.owners, (
-        f"共享 DEX helper 的 owner 未登记：{sorted(helper_owners - truncation.owners)}"
+    truncation_owners = {owner for key, owner in declared if key == "dex_strings_truncated"}
+    assert helper_owners <= truncation_owners, (
+        f"共享 DEX helper 的 owner 未声明：{sorted(helper_owners - truncation_owners)}"
     )
     observed.update(("dex_strings_truncated", owner) for owner in helper_owners)
 
-    # 反向核对：分析器所有的每个登记项都必须有可见的生产写入路径。
-    registered = {
-        (key, owner)
-        for key, contract in META_KEY_REGISTRY.items()
-        for owner in contract.owners
-        if owner != PIPELINE_OWNER
-    }
-    assert registered == observed, (
-        f"注册表/静态生产路径漂移："
-        f"只在注册表={sorted(registered - observed)}；"
-        f"只在生产路径={sorted(observed - registered)}"
+    # 反向核对：每个声明项都必须有可见的生产写入路径。
+    assert declared == observed, (
+        f"分析器声明/静态生产路径漂移："
+        f"只在声明={sorted(declared - observed)}；"
+        f"只在生产路径={sorted(observed - declared)}"
     )
 
     derived = META_KEY_REGISTRY["dex_strings_truncated_by"]
     assert derived.owners == frozenset({PIPELINE_OWNER}), "派生键必须登记为 pipeline 所有"
+    missing = META_KEY_REGISTRY["missing_analyzers"]
+    assert missing.owners == frozenset({PIPELINE_OWNER}), "缺席留痕键必须登记为 pipeline 所有"
 
 
 def test_template_scan_catches_jinja_reads() -> None:

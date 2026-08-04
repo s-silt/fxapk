@@ -51,6 +51,7 @@ class CertificateAnalyzer(BaseAnalyzer):
     """从签名证书提取 SIGNING 线索，并对调试/可疑证书产出 Finding。"""
 
     name: str = "certificate"
+    meta_keys = frozenset({"cert_count", "certificates", "schemes", "sign_sha256", "sign_subject"})
     requires: list[str] = ["apk"]  # Android 专属
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

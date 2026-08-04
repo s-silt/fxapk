@@ -107,6 +107,12 @@ def coverage_meta_key(analyzer: str, suffix: str) -> str:
     return f"{analyzer}_{suffix}"
 
 
+def coverage_meta_keys_for(analyzer: str) -> frozenset[str]:
+    """返回一个网页分析器声明的完整覆盖度键族。"""
+
+    return frozenset(coverage_meta_key(analyzer, suffix) for suffix in COVERAGE_SUFFIXES)
+
+
 def iter_coverage_meta_keys() -> list[str]:
     """枚举全部覆盖度键（分析器名 × 后缀）。
 
@@ -119,7 +125,7 @@ def iter_coverage_meta_keys() -> list[str]:
     names = sorted(
         a.name for a in discover_analyzers() if "web" in (getattr(a, "requires", None) or [])
     )
-    return [f"{n}_{s}" for n in names for s in COVERAGE_SUFFIXES]
+    return sorted(key for name in names for key in coverage_meta_keys_for(name))
 
 
 # ---------------------------------------------------------------------------
@@ -303,6 +309,7 @@ class WebInlineConfigAnalyzer(BaseAnalyzer):
 
     name: str = "web_inline_config"
     requires: list[str] = ["web"]
+    meta_keys = frozenset({"web_inline_config_count"}) | coverage_meta_keys_for(name)
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
         result = AnalyzerResult(analyzer=self.name)
@@ -429,6 +436,7 @@ class WebRedirectChainAnalyzer(BaseAnalyzer):
 
     name: str = "web_redirect_chain"
     requires: list[str] = ["web"]
+    meta_keys = frozenset({"web_redirect_chain"}) | coverage_meta_keys_for(name)
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
         result = AnalyzerResult(analyzer=self.name)
@@ -591,6 +599,7 @@ class WebRequestRecipeAnalyzer(BaseAnalyzer):
 
     name: str = "web_request_recipe"
     requires: list[str] = ["web"]
+    meta_keys = frozenset({"web_request_recipe"}) | coverage_meta_keys_for(name)
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
         result = AnalyzerResult(analyzer=self.name)

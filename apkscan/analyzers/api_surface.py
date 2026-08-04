@@ -376,6 +376,7 @@ class ApiSurfaceAnalyzer(BaseAnalyzer):
     """提取后端接口路径、三层过滤误报、按接口名做功能语义标注（只产 Finding + meta，不产 Lead）。"""
 
     name: str = "api_surface"
+    meta_keys = frozenset({"api_surface", "dex_strings_truncated"})
     requires: list[str] = []  # Android 扫 dex/.so/assets；Web 只扫已落盘文本证据
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

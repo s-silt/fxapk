@@ -39,6 +39,8 @@ class BaseAnalyzer(ABC):
 
     name: str = ""
     requires: list[str] = []
+    # 分析器可写入 Report.meta 的完整集合；声明与生产代码同文件，契约层只负责汇总。
+    meta_keys: frozenset[str] = frozenset()
 
     @abstractmethod
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

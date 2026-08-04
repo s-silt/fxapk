@@ -156,6 +156,7 @@ class ReToolkitAnalyzer(BaseAnalyzer):
     """识别样本内置的 hook 框架 / 反检测工具，产 anti_analysis Finding + 抓包预判 meta。"""
 
     name: str = "re_toolkit"
+    meta_keys = frozenset({"anti_frida", "dex_strings_truncated", "hook_frameworks", "re_toolkit"})
     requires: list[str] = ["apk"]  # Android 专属
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

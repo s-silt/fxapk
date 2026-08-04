@@ -38,8 +38,10 @@ from apkscan.core.models import (
 )
 from apkscan.core.meta_contract import (
     MERGE_BOOLEAN_OR,
+    MISSING_ANALYZERS_KEY,
     META_KEY_REGISTRY,
     allowed_meta_keys,
+    validate_registry_owners,
 )
 from apkscan.core.registry import (
     detect_capabilities,
@@ -269,6 +271,14 @@ def _stage_run_analyzers(state: _PipelineState) -> None:
     capabilities = state.capabilities
     meta = state.meta
     discovered = discover_analyzers()
+    missing_analyzers = validate_registry_owners({
+        getattr(analyzer, "name", "") or analyzer.__class__.__name__
+        for analyzer in discovered
+    })
+    if missing_analyzers:
+        missing = sorted(missing_analyzers)
+        logger.warning("注册表中的分析器本轮未发现：%s", ", ".join(missing))
+        meta[MISSING_ANALYZERS_KEY] = missing
     eligible: list[tuple[str, object]] = []  # (name, analyzer)，requires 已满足，发现顺序
     for analyzer in discovered:
         name = getattr(analyzer, "name", "") or analyzer.__class__.__name__

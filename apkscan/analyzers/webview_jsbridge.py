@@ -99,6 +99,7 @@ class WebViewJsBridgeAnalyzer(BaseAnalyzer):
     """审查 WebView/JS-bridge 桥接面，产 category=\"webview\" Finding + 桥接 CONFIG_KEY Lead。"""
 
     name: str = "webview_jsbridge"
+    meta_keys = frozenset({"dex_scanned", "dex_strings_truncated", "webview_signal_count", "webview_signals"})
     requires: list[str] = []  # 纯静态，永远可用
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

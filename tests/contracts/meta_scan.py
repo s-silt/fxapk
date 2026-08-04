@@ -250,6 +250,9 @@ class _Visitor(ast.NodeVisitor):
         self.imported: dict[str, dict[str, str]] = dict(imported or {})
         #: 本作用域内来源可证的字典名 → 字面量初值（见 :meth:`_locally_built_dicts`）
         self.local_dicts: dict[str, ast.Dict] = {}
+        #: 已作为 ``X.meta[k]`` 的值挂入报告的局部字典；其后写入属于嵌套结构，
+        #: 不再是顶层 meta 权限。整体赋给 ``X.meta`` 的字典不会进入此集合。
+        self.nested_meta_dicts: set[str] = set()
 
     def _scoped(self, node: ast.AST) -> None:
         """进入函数体：**局部绑定同名的模块常量在本作用域内不解析**。
@@ -281,14 +284,17 @@ class _Visitor(ast.NodeVisitor):
         shadowed = {k: v for k, v in self.consts.items() if k not in local}
         saved = self.consts
         saved_dicts = self.local_dicts
+        saved_nested = self.nested_meta_dicts
         self.consts = shadowed
         self.local_dicts = self._locally_built_dicts(node)
+        self.nested_meta_dicts = set()
         try:
             for child in ast.iter_child_nodes(node):
                 self.visit(child)
         finally:
             self.consts = saved
             self.local_dicts = saved_dicts
+            self.nested_meta_dicts = saved_nested
 
     @staticmethod
     def _locally_built_dicts(node: ast.AST) -> dict[str, ast.Dict]:
@@ -354,7 +360,14 @@ class _Visitor(ast.NodeVisitor):
                     for t in targets:
                         # ★放行的只有 ``X.meta = m`` 本身；存进别的属性、下标、
                         #   另一个名字、解构目标，都是逃逸。
-                        if not (isinstance(t, ast.Attribute) and t.attr in _META_ATTRS):
+                        stored_in_meta = (
+                            isinstance(t, ast.Attribute) and t.attr in _META_ATTRS
+                        ) or (
+                            isinstance(t, ast.Subscript)
+                            and isinstance(t.value, ast.Attribute)
+                            and t.value.attr in _META_ATTRS
+                        )
+                        if not stored_in_meta:
                             disqualified.add(sub.value.id)
             elif isinstance(sub, (ast.Return, ast.Yield, ast.YieldFrom)):
                 if isinstance(sub.value, ast.Name):
@@ -381,6 +394,12 @@ class _Visitor(ast.NodeVisitor):
 
     # -- 别名：m = state.meta / m = meta ---------------------------------
     def visit_Assign(self, node: ast.Assign) -> None:  # noqa: N802
+        # ``result.meta["section"] = local`` 后，local 里的键只是 section 的子键。
+        # 必须先于 generic_visit 标记，避免后续 ``local.update(...)`` 被误报成顶层写入。
+        if isinstance(node.value, ast.Name) and node.value.id in self.local_dicts:  # leak-scan: allow AST 字段访问，不是域名
+            for target in node.targets:
+                if isinstance(target, ast.Subscript) and self._is_meta_expr(target.value):
+                    self.nested_meta_dicts.add(node.value.id)  # leak-scan: allow AST 字段访问，不是域名
         if self._is_meta_expr(node.value):
             for t in node.targets:
                 if isinstance(t, ast.Name):
@@ -454,7 +473,9 @@ class _Visitor(ast.NodeVisitor):
     def _is_meta_expr(self, node: ast.expr) -> bool:
         if isinstance(node, ast.Attribute) and node.attr in _META_ATTRS:
             return True
-        if isinstance(node, ast.Name) and (node.id in _META_NAMES or node.id in self.aliases):
+        if (isinstance(node, ast.Name)
+                and node.id not in self.nested_meta_dicts  # leak-scan: allow AST 字段访问，不是域名
+                and (node.id in _META_NAMES or node.id in self.aliases)):  # leak-scan: allow AST 字段访问，不是域名
             return True
         # raw = report.get("meta") 之类
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)

@@ -108,6 +108,7 @@ class CardMerchantAnalyzer(BaseAnalyzer):
     """识别卡商 / 料商 / 开户供应链关键词，产出 category=CARD_MERCHANT 的研判线索。"""
 
     name: str = "card_merchant"
+    meta_keys = frozenset({"card_merchant_count", "dex_strings_truncated"})
     requires: list[str] = []  # 关键词文本通用（dex/H5），缺数据自然空跑
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

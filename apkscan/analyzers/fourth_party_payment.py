@@ -113,6 +113,7 @@ class FourthPartyPaymentAnalyzer(BaseAnalyzer):
     """识别四方支付 / 跑分平台，产出 category=FOURTH_PARTY_PAYMENT 的调证线索。"""
 
     name: str = "fourth_party_payment"
+    meta_keys = frozenset({"dex_strings_truncated", "fourth_party_payment_count"})
     requires: list[str] = []  # URL / 文本通用（dex/H5），缺数据自然空跑
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

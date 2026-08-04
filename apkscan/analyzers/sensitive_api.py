@@ -112,6 +112,7 @@ class SensitiveApiAnalyzer(BaseAnalyzer):
     """扫 DEX 里实际调用的敏感 API，产出 category=\"sensitive_api\" 的 Finding。"""
 
     name: str = "sensitive_api"
+    meta_keys = frozenset({"dex_scanned", "dex_strings_truncated", "sensitive_api_count", "sensitive_apis"})
     requires: list[str] = ["apk"]  # Android 专属
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
