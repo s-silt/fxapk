@@ -158,6 +158,33 @@ def test_whole_meta_assignment_from_unknown_source_is_surfaced(src: str) -> None
     assert _dynamic(src), f"开放的整体写入被静默跳过：{src!r}"
 
 
+NESTED_SCOPE_CASES = [
+    pytest.param(
+        'K = "real_key"\ndef outer(meta):\n    def inner():\n        K = "shadow"\n    meta[K] = 1',
+        id="嵌套函数里的同名绑定不影响外层",
+    ),
+    pytest.param(
+        'K = "real_key"\ndef f(meta):\n    xs = [x for K in seq]\n    meta[K] = 1',
+        id="comprehension 的循环变量不泄漏",
+    ),
+    pytest.param(
+        'K = "real_key"\ndef f(meta):\n    g = lambda K: K\n    meta[K] = 1',
+        id="lambda 参数不泄漏",
+    ),
+]
+
+
+@pytest.mark.parametrize("src", NESTED_SCOPE_CASES)
+def test_nested_scopes_do_not_poison_the_outer_constant(src: str) -> None:
+    """★嵌套函数 / comprehension / lambda 是独立作用域，其绑定不该让外层常量失效。
+
+    早先用 ``ast.walk`` 收集整个函数体的绑定，于是内层的 ``K = "shadow"`` 会把外层
+    本可安全解析的 ``K`` 也一并失效。这不产生错值（方向安全），但会**虚增 unresolved**——
+    而 unresolved 的数量正是「基线能不能冻结」的判据，虚高会让判断失真。
+    """
+    assert _keys(src, "write") == {"real_key"}, "嵌套作用域的绑定污染了外层常量"
+
+
 NOT_REPORT_META_CASES = [
     pytest.param('def f():\n    meta: dict = field(default_factory=dict)', id="dataclass 字段声明"),
     pytest.param('def f(x):\n    merged_meta = {"alg": x}\n    return merged_meta',
