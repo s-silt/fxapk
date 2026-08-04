@@ -156,6 +156,23 @@ def test_coverage_key_domain_comes_from_registry_not_runtime() -> None:
             assert f"{name}_{suf}" in keys
 
 
+def test_coverage_key_rejects_suffix_outside_the_family() -> None:
+    """表外后缀必须当场拒绝，不能悄悄造出一个契约管不着的键。
+
+    ★这是键族「定义域封闭」的兜底：若手滑写成 ``coverage_meta_key(a, "read_faild")``
+      而工厂照单全收，就会凭空产生一个既不在契约、也没人消费的键——
+      而它本该承载「我没看全」这类最不该丢的事实。静态扫描只认得族标记，
+      拦不住这种拼写错误，只有运行期校验能。
+    """
+    from apkscan.analyzers.web_evidence import coverage_meta_key
+
+    assert coverage_meta_key("web_inline_config", "read_failed") == "web_inline_config_read_failed"
+    with pytest.raises(ValueError):
+        coverage_meta_key("web_inline_config", "read_faild")  # 拼写错误
+    with pytest.raises(ValueError):
+        coverage_meta_key("web_inline_config", "whatever")
+
+
 @pytest.mark.parametrize("src", DYNAMIC_CASES)
 def test_dynamic_keys_are_surfaced_not_dropped(src: str) -> None:
     """★动态键必须记进 unresolved。
