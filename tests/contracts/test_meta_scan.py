@@ -34,6 +34,13 @@ WRITE_CASES = [
     pytest.param('report.meta.update(h=1)', {"h"}, id="update 关键字参数"),
     pytest.param('m = state.meta\nm["i"] = 1', {"i"}, id="别名传播"),
     pytest.param('raw_meta = report.get("meta")\nraw_meta["j"] = 1', {"j"}, id="report.get(meta) 别名"),
+    # ★以下三种是**路径 A 最初漏掉的形态**：不是逐键下标赋值，而是整体给一个字典。
+    #   它们不是假想——是运行期观测（路径 C）在真仓库上抓出 7 个键后回头定位到的真实写法：
+    #   analyzers/permissions.py、analyzers/remote_config.py、core/pipeline.py 都这么写。
+    #   这条教训值得记：单一扫描器无法验证自己的盲区，必须有另一路独立证据。
+    pytest.param('result.meta = {"k1": 1, "k2": 2}', {"k1", "k2"}, id="★整体字典赋值"),
+    pytest.param('meta: dict = {"k3": 1}', {"k3"}, id="★带类型标注的整体赋值"),
+    pytest.param('r = AnalyzerResult(analyzer="x", meta={"k4": 1})', {"k4"}, id="★构造时传入 meta="),
 ]
 
 

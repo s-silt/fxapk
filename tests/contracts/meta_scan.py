@@ -79,7 +79,34 @@ class _Visitor(ast.NodeVisitor):
             for t in node.targets:
                 if isinstance(t, ast.Name):
                     self.aliases.add(t.id)
+        # ★整体字典赋值：``result.meta = {"a": 1, "b": 2}``。
+        #   本仓真实写法（analyzers/permissions.py、remote_config.py 等），
+        #   而且**路径 A 最初就漏了它**——是运行期观测（路径 C）把这 7 个键抓出来的。
+        #   这正是「不能让单一扫描器既生成真相又验证自己的真相」的实证。
+        for t in node.targets:
+            if self._is_meta_target(t) and isinstance(node.value, ast.Dict):
+                for k in node.value.keys:
+                    self._record(k, "write", node.lineno)
         self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:  # noqa: N802
+        """带类型标注的整体赋值：``meta: dict = {...}``（core/pipeline.py 的写法）。"""
+        if (self._is_meta_target(node.target) and node.value is not None
+                and isinstance(node.value, ast.Dict)):
+            for k in node.value.keys:
+                self._record(k, "write", node.lineno)
+        if node.value is not None and self._is_meta_expr(node.value):
+            if isinstance(node.target, ast.Name):
+                self.aliases.add(node.target.id)
+        self.generic_visit(node)
+
+    def _is_meta_target(self, node: ast.expr) -> bool:
+        """赋值左侧是不是一个 meta 容器本身（而非它的某个键）。"""
+        if isinstance(node, ast.Attribute) and node.attr in _META_ATTRS:
+            return True
+        return isinstance(node, ast.Name) and (
+            node.id in _META_NAMES or node.id in self.aliases
+        )
 
     def _is_meta_expr(self, node: ast.expr) -> bool:
         if isinstance(node, ast.Attribute) and node.attr in _META_ATTRS:
@@ -102,6 +129,12 @@ class _Visitor(ast.NodeVisitor):
 
     # -- 方法：meta.get("k") / setdefault / update / pop ------------------
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+        # ★构造时传入：``AnalyzerResult(meta={"a": 1})`` / ``f(..., meta={...})``。
+        #   与整体赋值同源的盲区，一并认。
+        for kw in node.keywords:
+            if kw.arg in _META_ATTRS and isinstance(kw.value, ast.Dict):
+                for k in kw.value.keys:
+                    self._record(k, "write", node.lineno)
         f = node.func
         if isinstance(f, ast.Attribute) and self._is_meta_expr(f.value):
             if f.attr in ("get", "pop"):
