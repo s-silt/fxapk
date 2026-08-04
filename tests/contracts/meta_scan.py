@@ -36,6 +36,14 @@ _META_ATTRS = frozenset({"meta"})
 #: 直接以这些名字出现的局部变量也视为 meta 容器（本仓 pipeline 里的既有写法）。
 _META_NAMES = frozenset({"meta", "_meta", "raw_meta", "merged_meta"})
 
+#: 生成「有限键族」的工厂函数：``函数名 -> 族名``。
+#: ★这类键在运行时拼出，但**定义域静态封闭**（有限后缀表 × 权威注册表里的分析器名），
+#:   属于 Codex 分类里的 C 类「有限模板族」，不是开放动态键——
+#:   它们记录的是「我没看全」，绝不能因为写法动态就被排除在契约之外。
+_KEY_FAMILY_FUNCS: dict[str, str] = {
+    "coverage_meta_key": "web_coverage",
+}
+
 
 @dataclass(frozen=True)
 class Access:
@@ -57,6 +65,10 @@ class ScanResult:
     test_consumed: dict[str, list[Access]] = field(default_factory=dict)
     #: 无法解析为字面量的访问点（动态键）。绝不丢弃：它们是扫描器的已知盲区，必须可见。
     unresolved: list[Access] = field(default_factory=list)
+    #: 有限键族的访问点（``<family:族名:后缀>``）。定义域静态封闭，不算盲区。
+    #: ★展开成具体键**由契约层负责**——展开需要权威分析器注册表，
+    #:   而扫描器刻意不 import 生产模块（import 会执行代码，地基不该有副作用）。
+    families: list[Access] = field(default_factory=list)
 
     @property
     def written_keys(self) -> set[str]:
@@ -209,6 +221,14 @@ class _Visitor(ast.NodeVisitor):
         # 跨模块一跳：meta[_inv.INVENTORY_META_KEY]
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
             return self.imported.get(node.value.id, {}).get(node.attr)
+        # ★有限键族：``meta[coverage_meta_key(analyzer, "read_failed")]``。
+        #   键名运行时拼出，但**定义域静态封闭**（有限后缀表 × 权威注册表里的分析器名），
+        #   属 C 类「有限模板族」，不是开放动态键——它们记的是「我没看全」，
+        #   绝不能因为写法动态就被排除在契约之外。返回族标记，具体键由契约层展开。
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id in _KEY_FAMILY_FUNCS
+                and len(node.args) >= 2 and isinstance(node.args[1], ast.Constant)):
+            return f"<family:{_KEY_FAMILY_FUNCS[node.func.id]}:{node.args[1].value}>"
         return None
 
     def _record(self, key_node: ast.expr | None, kind: str, line: int) -> None:
@@ -302,7 +322,9 @@ def scan_repository(root: Path, *, prod_dir: str = "apkscan",
             except SyntaxError:  # 语法错的文件必须暴露，不吞
                 raise
             for a in accesses:
-                if a.key.startswith("<dynamic"):
+                if a.key.startswith("<family:"):
+                    res.families.append(a)
+                elif a.key.startswith("<dynamic"):
                     res.unresolved.append(a)
                 elif a.kind == "write":
                     if not is_test:

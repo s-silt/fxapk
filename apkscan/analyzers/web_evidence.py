@@ -79,6 +79,50 @@ _HEADER_SUFFIXES: tuple[str, ...] = (".headers", ".headers.txt")
 
 
 # ---------------------------------------------------------------------------
+# 覆盖度 meta 键族（"我没看全"这件事的载体）
+# ---------------------------------------------------------------------------
+
+#: 覆盖度事实的后缀。★这四件事记的都是「本次**没有**看全」——列举失败、文件数被截、
+#: 读取失败若干份、单份内容被截。它们是取证报告里最不能丢的一类信息：
+#: 缺了它们，「未发现某后端」与「确实没有该后端」在报告里长得一模一样。
+COVERAGE_SUFFIXES: tuple[str, ...] = (
+    "list_failed",
+    "files_truncated",
+    "read_failed",
+    "content_truncated",
+)
+
+
+def coverage_meta_key(analyzer: str, suffix: str) -> str:
+    """拼出覆盖度 meta 键：``<分析器名>_<后缀>``。
+
+    ★为什么要有这个函数、而不是就地写 f-string：这四个键此前是
+    ``result.meta[f"{analyzer}_list_failed"]`` 这样的动态键，**静态扫描认不出**，
+    于是它们在 meta 契约里既登记不了、也无法被「有没有人消费」这类检查覆盖——
+    而它们恰恰是最不该悄悄消失的那类事实。收敛成一个函数 + 一张有限后缀表之后，
+    键族就可由 :func:`iter_coverage_meta_keys` 静态枚举。
+    """
+    if suffix not in COVERAGE_SUFFIXES:  # 防手滑造出表外的键
+        raise ValueError(f"未知的覆盖度后缀：{suffix!r}")
+    return f"{analyzer}_{suffix}"
+
+
+def iter_coverage_meta_keys() -> list[str]:
+    """枚举全部覆盖度键（分析器名 × 后缀）。
+
+    ★取值域取自**权威的分析器注册/发现结果**，不是「运行时曾经碰巧执行过的名字」：
+      后者会让一个因能力门控而未运行的分析器**从契约里整个消失**，
+      于是它那份「我没看全」的事实也就无从登记——这正是本函数要防的。
+    """
+    from apkscan.core.registry import discover_analyzers
+
+    names = sorted(
+        a.name for a in discover_analyzers() if "web" in (getattr(a, "requires", None) or [])
+    )
+    return [f"{n}_{s}" for n in names for s in COVERAGE_SUFFIXES]
+
+
+# ---------------------------------------------------------------------------
 # 共享读取
 # ---------------------------------------------------------------------------
 
@@ -98,14 +142,14 @@ def _iter_text(
         paths = [p for p in ctx.list_files() if isinstance(p, str)]
     except Exception:
         logger.exception("[%s] 列举证据文件失败", analyzer)
-        result.meta[f"{analyzer}_list_failed"] = True
+        result.meta[coverage_meta_key(analyzer, "list_failed")] = True
         return out
 
     failed = 0
     truncated = False
     for path in sorted(paths):
         if len(out) >= MAX_FILES:
-            result.meta[f"{analyzer}_files_truncated"] = True
+            result.meta[coverage_meta_key(analyzer, "files_truncated")] = True
             break
         if not path.lower().endswith(suffixes):
             continue
@@ -127,9 +171,9 @@ def _iter_text(
 
     # 读失败必须成为**数据**而非只是一行日志：否则"扫了 1 份"与"扫全了"在报告里完全一样。
     if failed:
-        result.meta[f"{analyzer}_read_failed"] = failed
+        result.meta[coverage_meta_key(analyzer, "read_failed")] = failed
     if truncated:
-        result.meta[f"{analyzer}_content_truncated"] = True
+        result.meta[coverage_meta_key(analyzer, "content_truncated")] = True
     return out
 
 

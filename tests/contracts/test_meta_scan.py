@@ -118,6 +118,44 @@ def test_constant_resolution_refuses_to_guess() -> None:
     assert _dynamic(src2)
 
 
+def test_bounded_key_family_is_not_an_open_dynamic_key() -> None:
+    """有限键族（``coverage_meta_key(analyzer, "read_failed")``）不算开放动态键。
+
+    ★这四个键记录的是「列举失败 / 文件数被截 / 读取失败 N 份 / 单份内容被截」——
+      也就是**「我没看全」**。它们此前是 f-string 动态键，静态扫描认不出，于是既进不了
+      契约、也无法被「有没有人消费」的检查覆盖；而缺了它们，「未发现某后端」与
+      「确实没有该后端」在报告里长得一模一样。
+
+    收敛成工厂函数后，定义域静态封闭（有限后缀表 × 权威注册表里的分析器名），
+    应记为族访问而非 unresolved。
+    """
+    src = 'def f(result, analyzer):\n    result.meta[coverage_meta_key(analyzer, "read_failed")] = 3\n'
+    acc = meta_scan.scan_source(src)
+    fams = [a for a in acc if a.key.startswith("<family:")]
+    assert fams, "有限键族被当成了开放动态键"
+    assert fams[0].key == "<family:web_coverage:read_failed>"
+    assert not [a for a in acc if a.key.startswith("<dynamic")], "同一处被重复记成了动态键"
+
+
+def test_coverage_key_domain_comes_from_registry_not_runtime() -> None:
+    """★键族的取值域必须来自**权威分析器注册表**，不是「运行时碰巧跑过的名字」。
+
+    否则一个因能力门控而未运行的分析器会从契约里整个消失，
+    它那份「我没看全」的事实也就无从登记——而那恰恰是最该留痕的情形。
+    """
+    from apkscan.analyzers.web_evidence import COVERAGE_SUFFIXES, iter_coverage_meta_keys
+    from apkscan.core.registry import discover_analyzers
+
+    web = sorted(a.name for a in discover_analyzers()
+                 if "web" in (getattr(a, "requires", None) or []))
+    keys = iter_coverage_meta_keys()
+    assert web, "没发现 web 分析器，取值域为空则本条失去意义"
+    assert len(keys) == len(web) * len(COVERAGE_SUFFIXES)
+    for name in web:  # 每个注册的分析器都必须在键族里，一个都不能少
+        for suf in COVERAGE_SUFFIXES:
+            assert f"{name}_{suf}" in keys
+
+
 @pytest.mark.parametrize("src", DYNAMIC_CASES)
 def test_dynamic_keys_are_surfaced_not_dropped(src: str) -> None:
     """★动态键必须记进 unresolved。
