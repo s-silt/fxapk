@@ -431,6 +431,47 @@ def test_coverage_key_rejects_suffix_outside_the_family() -> None:
         coverage_meta_key("web_inline_config", "whatever")
 
 
+# --- 未建模的字典方法：绕过通道，必须可见 ------------------------------------
+
+
+def test_dunder_setitem_is_modeled_like_subscript_assignment() -> None:
+    """``meta.__setitem__("k", v)`` 键位置明确，必须与下标赋值同等登记。
+
+    ★复审实证（P0）：此前它连一个 Access 都不产——既不进 produced 也不进
+      unresolved，这样写的真实写入永远进不了孤儿基线，测试保持全绿。
+      这直接违反扫描器「绝不静默跳过」的核心承诺。
+    """
+    assert _keys('report.meta.__setitem__("ghost", 1)', "write") == {"ghost"}
+
+
+UNMODELED_METHOD_CASES = [
+    pytest.param('report.meta.popitem()', id="popitem"),
+    pytest.param('report.meta.absorb(x)', id="任意未知方法"),
+    pytest.param('report.meta.__delitem__("k")', id="__delitem__（未建模）"),
+    pytest.param('getattr(report.meta, "update")({"ghost2": 1})', id="getattr 拿方法"),
+    pytest.param('meta.__setitem__(key_var, 1)', id="__setitem__ 动态键"),
+]
+
+
+@pytest.mark.parametrize("src", UNMODELED_METHOD_CASES)
+def test_unmodeled_method_on_meta_receiver_is_surfaced(src: str) -> None:
+    """★meta receiver 上任何未建模的方法调用至少要落 unresolved。
+
+    静默返回空 = 给绕过留一条无声的路：``popitem`` / ``getattr(meta, ...)``
+    这类写法的真实写入不会被任何契约看见（复审 P0 实证三种构造）。
+    """
+    assert _dynamic(src), f"未建模方法被静默跳过：{src!r}"
+
+
+def test_key_neutral_dict_methods_stay_silent() -> None:
+    """已建模且不动具体键的方法（items/keys/copy/clear…）不得制造噪音——
+    unresolved 虚高会让「基线能不能冻结」的判断失真。"""
+    src = ("x = list(report.meta.items())\n"
+           "y = report.meta.keys()\n"
+           "z = report.meta.copy()\n")
+    assert not meta_scan.scan_source(src), "键中立方法被误报"
+
+
 @pytest.mark.parametrize("src", DYNAMIC_CASES)
 def test_dynamic_keys_are_surfaced_not_dropped(src: str) -> None:
     """★动态键必须记进 unresolved。
@@ -695,3 +736,34 @@ def test_template_scan_catches_jinja_reads() -> None:
     root = Path(__file__).resolve().parents[2]
     tpl_keys = meta_scan.scan_templates(root / "apkscan")
     assert tpl_keys, "模板里一个 meta 读取都没扫到，正则或路径有问题"
+
+
+TEMPLATE_INERT_CASES = [
+    pytest.param('{# meta.get("ghost") 已下线 #}', id="Jinja 注释"),
+    pytest.param('{#\n  meta.get("ghost")\n#}', id="多行注释"),
+    pytest.param('{% raw %}meta.get("ghost"){% endraw %}', id="raw 块"),
+    pytest.param('{%- raw -%}\nmeta.get("ghost")\n{%- endraw -%}', id="带 trim 的多行 raw 块"),
+    pytest.param('{# 注释里的开启符 {% raw %} #}\n{# meta.get("ghost") #}', id="注释里的 raw 开启符"),
+    pytest.param('{# 没闭合的注释\nmeta.get("ghost")', id="未闭合区域置空到文件尾"),
+]
+
+
+@pytest.mark.parametrize("text", TEMPLATE_INERT_CASES)
+def test_template_inert_regions_are_not_consumption(text: str, tmp_path: Path) -> None:
+    """★注释与 raw 块里的文本不是消费（复审 P1-2 实证）。
+
+    否则把一处模板输出「注释掉下线」时，真实消费已消失而基线不红——真孤儿隐形。
+    这两类区域词法上确定不渲染，可以静态剔除；``{% if false %}`` 这类恒假分支
+    是控制流性质，刻意不做（见 ``_strip_inert_template_regions`` 的文档）。
+    """
+    (tmp_path / "t.j2").write_text(text, encoding="utf-8")
+    assert "ghost" not in meta_scan.scan_templates(tmp_path), f"惰性区域被算成了消费：{text!r}"
+
+
+def test_template_live_read_survives_stripping_with_correct_line(tmp_path: Path) -> None:
+    """剔除惰性区域不能伤及活读取，且行号不许漂移（基线红时要靠它定位）。"""
+    text = '{#\n 两行注释 \n#}\n{{ meta.get("alive") }}\n'
+    (tmp_path / "t.j2").write_text(text, encoding="utf-8")
+    got = meta_scan.scan_templates(tmp_path)
+    assert "alive" in got, "活读取被误剔除"
+    assert got["alive"][0].line == 4, "剔除后行号漂移"

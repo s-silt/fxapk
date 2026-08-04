@@ -504,10 +504,24 @@ class _Visitor(ast.NodeVisitor):
                 if kw.arg in _META_ATTRS:
                     self._whole_meta_write(kw.value, node.lineno)
         f = node.func
+        # ★``getattr(meta, "update")(...)`` 这类把 meta 交给 getattr 的写法：
+        #   方法名对扫描器不可见，等价于未建模方法，必须记 unresolved。
+        #   （复审实证：此前它连一个 Access 都不产，真实写入凭空隐形。）
+        if (isinstance(f, ast.Name) and f.id == "getattr"
+                and node.args and self._is_meta_expr(node.args[0])):
+            self.out.append(Access("<dynamic:method:getattr>", "write",
+                                   self.path, node.lineno))
         if isinstance(f, ast.Attribute) and self._is_meta_expr(f.value):
             if f.attr in ("get", "pop"):
                 if node.args:
                     self._record(node.args[0], "read", node.lineno)
+            elif f.attr == "__setitem__":
+                # 键位置明确，与下标赋值同等建模；解析不出仍会落 unresolved
+                if node.args:
+                    self._record(node.args[0], "write", node.lineno)
+                else:
+                    self.out.append(Access("<dynamic:method:__setitem__>", "write",
+                                           self.path, node.lineno))
             elif f.attr == "setdefault":
                 if node.args:
                     self._record(node.args[0], "write", node.lineno)
@@ -525,6 +539,14 @@ class _Visitor(ast.NodeVisitor):
                     else:  # **kwargs
                         self.out.append(Access("<dynamic:update>", "write",
                                                self.path, node.lineno))
+            elif f.attr in _MODELED_DICT_METHODS:
+                pass  # 键中立方法（keys/values/items/copy/clear）：不动具体键，不制造噪音
+            else:
+                # ★未建模方法（popitem / __delitem__ / absorb / …）：扫描器看不见
+                #   它对键做了什么，必须落 unresolved——此前这里静默返回空，
+                #   真实写入凭空绕过整套契约（复审 P0 实证）。
+                self.out.append(Access(f"<dynamic:method:{f.attr}>", "write",
+                                       self.path, node.lineno))
         self.generic_visit(node)
 
     def _resolve_key(self, node: ast.expr | None) -> str | None:
@@ -661,12 +683,50 @@ def scan_repository(root: Path, *, prod_dir: str = "apkscan",
     return res
 
 
+def _strip_inert_template_regions(text: str) -> str:
+    """把 Jinja 注释（``{# ... #}``）与 raw 块（``{% raw %}...{% endraw %}``）置空。
+
+    ★这两类区域**词法上确定不会被渲染成 meta 读取**：注释被 lexer 丢弃，
+      raw 块按字面输出、不求值。不剔除它们，把一处模板输出「注释掉下线」时
+      真实消费已消失而基线不红——真孤儿隐形（复审实证三种构造）。
+
+    - 按「先到的开启符生效」顺序扫描（与 Jinja lexer 的行为一致），
+      注释里的 ``{% raw %}`` / raw 块里的 ``{# ... #}`` 都不会被错配。
+    - 置空时保留换行，后续行号不漂移。
+    - 未闭合的区域一路置空到文件尾——宁可把后面的读取误判成孤儿（红了有人看），
+      也不能把死区域里的文本当成真实消费（假绿无人知）。
+    - ★不做 ``{% if false %}`` 这类恒假分支：控制流可达性不是词法性质，
+      静态判定要么做不全要么误伤，死分支里的「消费」维持保守方向（不红）。
+    """
+    import re
+
+    opener = re.compile(r"\{#|\{%-?\s*raw\s*-?%\}")
+    comment_close = re.compile(r"#\}")
+    raw_close = re.compile(r"\{%-?\s*endraw\s*-?%\}")
+    out: list[str] = []
+    pos = 0
+    while True:
+        m = opener.search(text, pos)
+        if m is None:
+            out.append(text[pos:])
+            break
+        out.append(text[pos:m.start()])
+        closer = comment_close if m.group(0) == "{#" else raw_close
+        end = closer.search(text, m.end())
+        stop = end.end() if end is not None else len(text)
+        out.append("\n" * text.count("\n", m.start(), stop))  # 保留行号
+        pos = stop
+    return "".join(out)
+
+
 def scan_templates(root: Path) -> dict[str, list[Access]]:
     """扫 Jinja 模板里的 meta 读取。
 
     ★必须单独扫、且不复用 AST 逻辑：模板是另一套语法，而本仓模板里确有
       ``meta.get("uni_app")`` / ``meta.get("uniapp")`` 这类**兼容旧键**的读法——
       漏扫它们会把仍在被渲染的键误判成孤儿。
+    ★反向也要守住：注释与 raw 块里的文本不是消费（见
+      :func:`_strip_inert_template_regions`），不剔除会让真孤儿隐形。
     """
     import re
 
@@ -674,7 +734,8 @@ def scan_templates(root: Path) -> dict[str, list[Access]]:
     out: dict[str, list[Access]] = {}
     for tpl in sorted(root.rglob("*.j2")):
         rel = str(tpl.relative_to(root)).replace("\\", "/")
-        for i, line in enumerate(tpl.read_text(encoding="utf-8").splitlines(), 1):
+        text = _strip_inert_template_regions(tpl.read_text(encoding="utf-8"))
+        for i, line in enumerate(text.splitlines(), 1):
             for m in pat.finditer(line):
                 out.setdefault(m.group(1), []).append(Access(m.group(1), "read", rel, i))
     return out

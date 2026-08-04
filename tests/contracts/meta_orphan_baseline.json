@@ -1,0 +1,379 @@
+{
+  "readme": [
+    "meta 孤儿键冻结基线：生产代码写了、但生产代码与模板都没人读的键。",
+    "本文件由 python -m tests.contracts.meta_orphans --write 生成，",
+    "由 test_meta_orphan_baseline.py 与现实做双向严格比对：",
+    "新增孤儿会红（回归）；孤儿获得消费方也会红（请把该条移除，让改善留痕）。",
+    "值是写入该键的生产文件列表（owner），供下一轮分类处置；",
+    "有限键族已按权威注册表展开成 分析器×后缀 的具体键（键名即含分析器身份）；",
+    "仅当后缀不在权威定义域内时才保留 <family:...> 原始标记（可见，不静默丢弃）。",
+    "★不要为了让测试变绿而无脑重生成——每条差异都必须有人看过并说得出为什么。"
+  ],
+  "orphans": {
+    "active_enrichers_enabled": [
+      "apkscan/core/pipeline.py"
+    ],
+    "active_enrichers_skipped_passive_mode": [
+      "apkscan/core/pipeline.py"
+    ],
+    "admin_panel_count": [
+      "apkscan/analyzers/admin_panel.py"
+    ],
+    "all_activities": [
+      "apkscan/analyzers/components.py"
+    ],
+    "analysis_environment": [
+      "apkscan/core/pipeline.py"
+    ],
+    "analysis_started_at": [
+      "apkscan/core/pipeline.py"
+    ],
+    "backend_credential_count": [
+      "apkscan/analyzers/backend_credential.py"
+    ],
+    "browsable_deeplink_count": [
+      "apkscan/analyzers/deeplink_surface.py"
+    ],
+    "build_provenance": [
+      "apkscan/analyzers/build_provenance.py"
+    ],
+    "capture_capabilities": [
+      "apkscan/dynamic/merge.py"
+    ],
+    "card_merchant_count": [
+      "apkscan/analyzers/card_merchant.py"
+    ],
+    "cert_count": [
+      "apkscan/analyzers/certificate.py"
+    ],
+    "cleartext_count": [
+      "apkscan/analyzers/endpoints.py"
+    ],
+    "component_totals": [
+      "apkscan/analyzers/components.py"
+    ],
+    "config_key_count": [
+      "apkscan/analyzers/config_keys.py"
+    ],
+    "config_keys_input_errors": [
+      "apkscan/analyzers/config_keys.py"
+    ],
+    "container_decoy_entries": [
+      "apkscan/analyzers/packing.py"
+    ],
+    "control_chains": [
+      "apkscan/core/closure/__init__.py",
+      "apkscan/core/pipeline.py"
+    ],
+    "crypto_recipe_count": [
+      "apkscan/analyzers/crypto_recipe.py"
+    ],
+    "crypto_recipe_files_scanned": [
+      "apkscan/analyzers/crypto_recipe.py"
+    ],
+    "dangerous_count": [
+      "apkscan/analyzers/permissions.py"
+    ],
+    "decrypt_candidates": [
+      "apkscan/analyzers/jadx.py"
+    ],
+    "decrypt_candidates_suppressed": [
+      "apkscan/analyzers/jadx.py"
+    ],
+    "deeplink_count": [
+      "apkscan/analyzers/deeplink_surface.py"
+    ],
+    "denial_bomb_entries": [
+      "apkscan/analyzers/packing.py"
+    ],
+    "device_detected": [
+      "apkscan/cli.py"
+    ],
+    "dns_bypass": [
+      "apkscan/analyzers/dns_bypass.py"
+    ],
+    "domain_count": [
+      "apkscan/analyzers/endpoints.py"
+    ],
+    "endpoint_total": [
+      "apkscan/analyzers/endpoints.py"
+    ],
+    "enriched_target_count": [
+      "apkscan/core/pipeline.py"
+    ],
+    "exported_counts": [
+      "apkscan/analyzers/components.py"
+    ],
+    "exported_total": [
+      "apkscan/analyzers/components.py"
+    ],
+    "favicon_mmh3": [
+      "apkscan/analyzers/favicon.py"
+    ],
+    "finding_ids": [
+      "apkscan/analyzers/crypto.py"
+    ],
+    "findings": [
+      "apkscan/analyzers/crypto.py"
+    ],
+    "firebase": [
+      "apkscan/analyzers/firebase.py"
+    ],
+    "fourth_party_payment_count": [
+      "apkscan/analyzers/fourth_party_payment.py"
+    ],
+    "hook_frameworks": [
+      "apkscan/analyzers/re_toolkit.py"
+    ],
+    "ip_count": [
+      "apkscan/analyzers/endpoints.py"
+    ],
+    "jadx_endpoint_count": [
+      "apkscan/analyzers/jadx.py"
+    ],
+    "jadx_java_files": [
+      "apkscan/analyzers/jadx.py"
+    ],
+    "jadx_status": [
+      "apkscan/analyzers/jadx.py"
+    ],
+    "js_domain_count": [
+      "apkscan/analyzers/js_bundle.py"
+    ],
+    "js_endpoint_count": [
+      "apkscan/analyzers/js_bundle.py"
+    ],
+    "js_files_scanned": [
+      "apkscan/analyzers/js_bundle.py"
+    ],
+    "js_framework": [
+      "apkscan/analyzers/js_bundle.py"
+    ],
+    "js_ip_count": [
+      "apkscan/analyzers/js_bundle.py"
+    ],
+    "js_path_count": [
+      "apkscan/analyzers/js_bundle.py"
+    ],
+    "js_secret_count": [
+      "apkscan/analyzers/js_bundle.py"
+    ],
+    "js_url_count": [
+      "apkscan/analyzers/js_bundle.py"
+    ],
+    "manifest_anomaly": [
+      "apkscan/analyzers/manifest.py"
+    ],
+    "min_sdk": [
+      "apkscan/analyzers/manifest.py"
+    ],
+    "missing_analyzers": [
+      "apkscan/core/pipeline.py"
+    ],
+    "native_files_scanned": [
+      "apkscan/analyzers/endpoints.py"
+    ],
+    "native_lib_hashes": [
+      "apkscan/analyzers/native_fingerprint.py"
+    ],
+    "packers": [
+      "apkscan/analyzers/packing.py"
+    ],
+    "payment_sdks": [
+      "apkscan/analyzers/payment.py"
+    ],
+    "permission_count": [
+      "apkscan/analyzers/permissions.py"
+    ],
+    "private_count": [
+      "apkscan/analyzers/endpoints.py"
+    ],
+    "re_toolkit": [
+      "apkscan/analyzers/re_toolkit.py"
+    ],
+    "remote_config_archived": [
+      "apkscan/core/pipeline.py"
+    ],
+    "remote_config_candidate_count": [
+      "apkscan/analyzers/remote_config.py"
+    ],
+    "remote_config_fetch_skipped": [
+      "apkscan/core/pipeline.py"
+    ],
+    "remote_config_fetch_skipped_passive_mode": [
+      "apkscan/core/pipeline.py"
+    ],
+    "remote_config_fetched": [
+      "apkscan/core/pipeline.py"
+    ],
+    "remote_config_source_scope": [
+      "apkscan/analyzers/remote_config.py"
+    ],
+    "resources_scanned": [
+      "apkscan/analyzers/crypto.py"
+    ],
+    "runtime_antidetect": [
+      "apkscan/dynamic/merge.py"
+    ],
+    "runtime_brand_hints": [
+      "apkscan/dynamic/merge.py"
+    ],
+    "runtime_clipboard": [
+      "apkscan/dynamic/merge.py"
+    ],
+    "runtime_clipboard_address_count": [
+      "apkscan/dynamic/merge.py"
+    ],
+    "runtime_credential_count": [
+      "apkscan/dynamic/merge.py"
+    ],
+    "runtime_credentials": [
+      "apkscan/dynamic/merge.py"
+    ],
+    "runtime_crypto_event_count": [
+      "apkscan/dynamic/merge.py"
+    ],
+    "runtime_database_count": [
+      "apkscan/dynamic/merge.py"
+    ],
+    "runtime_databases": [
+      "apkscan/dynamic/merge.py"
+    ],
+    "runtime_db_digests": [
+      "apkscan/dynamic/merge.py"
+    ],
+    "runtime_dead_drop": [
+      "apkscan/dynamic/merge.py"
+    ],
+    "runtime_dead_drop_relations": [
+      "apkscan/dynamic/merge.py"
+    ],
+    "runtime_decrypt_stats": [
+      "apkscan/dynamic/merge.py"
+    ],
+    "runtime_decrypted": [
+      "apkscan/dynamic/merge.py"
+    ],
+    "runtime_endpoint_count": [
+      "apkscan/dynamic/merge.py"
+    ],
+    "runtime_jsbridge": [
+      "apkscan/dynamic/merge.py"
+    ],
+    "runtime_merged_inventory": [
+      "apkscan/dynamic/pcap_ingest.py",
+      "apkscan/dynamic/probe_ingest.py"
+    ],
+    "runtime_remote_control": [
+      "apkscan/dynamic/merge.py"
+    ],
+    "runtime_remote_control_targets": [
+      "apkscan/dynamic/merge.py"
+    ],
+    "runtime_remote_control_unknown_packages": [
+      "apkscan/dynamic/merge.py"
+    ],
+    "runtime_sensitive_apis": [
+      "apkscan/dynamic/merge.py"
+    ],
+    "runtime_traced": [
+      "apkscan/dynamic/merge.py"
+    ],
+    "schemes": [
+      "apkscan/analyzers/certificate.py"
+    ],
+    "sdk_categories": [
+      "apkscan/analyzers/sdk_fingerprint.py"
+    ],
+    "self_hosted_im_channel_count": [
+      "apkscan/analyzers/self_hosted_im.py"
+    ],
+    "self_hosted_im_fingerprints": [
+      "apkscan/analyzers/self_hosted_im.py"
+    ],
+    "sensitive_api_count": [
+      "apkscan/analyzers/sensitive_api.py"
+    ],
+    "sensitive_apis": [
+      "apkscan/analyzers/sensitive_api.py"
+    ],
+    "sms_forwarding_count": [
+      "apkscan/analyzers/sms_forwarding.py"
+    ],
+    "stage_status": [
+      "apkscan/core/pipeline.py"
+    ],
+    "strings_scanned": [
+      "apkscan/analyzers/crypto.py"
+    ],
+    "suspicious_version_hits": [
+      "apkscan/analyzers/manifest.py"
+    ],
+    "suspicious_version_name": [
+      "apkscan/analyzers/manifest.py"
+    ],
+    "target_serial": [
+      "apkscan/dynamic/auto.py"
+    ],
+    "url_count": [
+      "apkscan/analyzers/endpoints.py"
+    ],
+    "wallet_secret_count": [
+      "apkscan/analyzers/wallet_secret.py"
+    ],
+    "web_evidence": [
+      "apkscan/commands/web.py"
+    ],
+    "web_inline_config_content_truncated": [
+      "apkscan/analyzers/web_evidence.py"
+    ],
+    "web_inline_config_count": [
+      "apkscan/analyzers/web_evidence.py"
+    ],
+    "web_inline_config_files_truncated": [
+      "apkscan/analyzers/web_evidence.py"
+    ],
+    "web_inline_config_list_failed": [
+      "apkscan/analyzers/web_evidence.py"
+    ],
+    "web_inline_config_read_failed": [
+      "apkscan/analyzers/web_evidence.py"
+    ],
+    "web_redirect_chain": [
+      "apkscan/analyzers/web_evidence.py"
+    ],
+    "web_redirect_chain_content_truncated": [
+      "apkscan/analyzers/web_evidence.py"
+    ],
+    "web_redirect_chain_files_truncated": [
+      "apkscan/analyzers/web_evidence.py"
+    ],
+    "web_redirect_chain_list_failed": [
+      "apkscan/analyzers/web_evidence.py"
+    ],
+    "web_redirect_chain_read_failed": [
+      "apkscan/analyzers/web_evidence.py"
+    ],
+    "web_request_recipe": [
+      "apkscan/analyzers/web_evidence.py"
+    ],
+    "web_request_recipe_content_truncated": [
+      "apkscan/analyzers/web_evidence.py"
+    ],
+    "web_request_recipe_files_truncated": [
+      "apkscan/analyzers/web_evidence.py"
+    ],
+    "web_request_recipe_list_failed": [
+      "apkscan/analyzers/web_evidence.py"
+    ],
+    "web_request_recipe_read_failed": [
+      "apkscan/analyzers/web_evidence.py"
+    ],
+    "webview_signal_count": [
+      "apkscan/analyzers/webview_jsbridge.py"
+    ],
+    "webview_signals": [
+      "apkscan/analyzers/webview_jsbridge.py"
+    ]
+  }
+}
