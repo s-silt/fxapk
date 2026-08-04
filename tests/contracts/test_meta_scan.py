@@ -79,6 +79,45 @@ DYNAMIC_CASES = [
 ]
 
 
+# --- 常量键：解析，而不是豁免 -----------------------------------------------
+
+
+def test_module_constant_key_is_resolved() -> None:
+    """``meta[SOME_KEY]`` 里 SOME_KEY 是模块常量时，必须解析成真实键名。
+
+    ★为什么解析而不是列进豁免名单：豁免名单会不断增长，最终变成动态访问的逃生口；
+      常量被重命名时基线看不到键变化；而且豁免抹掉了「固定常量」与「真正开放的
+      ``meta[key]``」之间的区别——后者才是必须堵的绕过通道。
+      本仓有约 20 处这种写法（DEX_TRUNCATED_META_KEY / MANUAL_RESTORES_KEY 等）。
+    """
+    src = 'K = "dex_strings_truncated"\ndef f(result):\n    result.meta[K] = True\n'
+    assert _keys(src, "write") == {"dex_strings_truncated"}
+    assert not _dynamic(src), "常量键仍被当成动态键"
+
+
+def test_cross_module_constant_key_is_resolved() -> None:
+    """跨模块一跳：``meta[_inv.INVENTORY_META_KEY]``（本仓 pcap_ingest/probe_ingest 的写法）。"""
+    symbols = {"runtime_inventory": {"INVENTORY_META_KEY": "runtime_merged_inventory"}}
+    src = ("from apkscan.core import runtime_inventory as _inv\n"
+           "def f(meta):\n    meta[_inv.INVENTORY_META_KEY] = 1\n")
+    got = {a.key for a in meta_scan.scan_source(src, symbols=symbols) if a.kind == "write"}
+    assert got == {"runtime_merged_inventory"}
+
+
+def test_constant_resolution_refuses_to_guess() -> None:
+    """解析边界必须收窄：认不出就落 unresolved，**绝不猜**。
+
+    重赋值、条件赋值、函数调用产生的键一律不解析——宁可少认，不可猜错：
+    猜错会把一个真实键登记成错的名字，比不认更糟（基线从此建在错的集合上）。
+    """
+    # 重赋值 → 放弃
+    src = 'K = "a"\nK = "b"\ndef f(meta):\n    meta[K] = 1\n'
+    assert _dynamic(src), "重赋值的常量被猜了一个值"
+    # 函数调用产生的键 → 不解析
+    src2 = 'def f(meta):\n    meta[make_key()] = 1\n'
+    assert _dynamic(src2)
+
+
 @pytest.mark.parametrize("src", DYNAMIC_CASES)
 def test_dynamic_keys_are_surfaced_not_dropped(src: str) -> None:
     """★动态键必须记进 unresolved。

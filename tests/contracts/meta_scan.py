@@ -67,11 +67,51 @@ class ScanResult:
         return {k for k in self.produced if k not in self.production_consumed}
 
 
+def collect_module_constants(src: str) -> dict[str, str]:
+    """收集模块级的字符串常量 ``NAME = "literal"``，供常量键解析。
+
+    ★为什么解析常量而不是把它们列进豁免名单：豁免名单会不断增长，最终变成动态访问的
+      逃生口；常量被重命名时基线看不到键变化；而且豁免抹掉了「固定常量」与「真正开放的
+      ``meta[key]``」之间的区别——后者才是必须堵的绕过通道。
+
+    ★边界刻意收窄，**不执行 Python、不 import 生产模块**：只认模块级的
+      ``NAME = "字符串字面量"``。条件赋值、函数调用、f-string、重赋值一律不认，
+      认不出就落回 unresolved——宁可少认，不可猜错。
+    """
+    consts: dict[str, str] = {}
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return consts
+    for node in tree.body:  # 只看模块顶层，不进函数/类
+        targets: list[ast.expr] = []
+        value: ast.expr | None = None
+        if isinstance(node, ast.Assign):
+            targets, value = list(node.targets), node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+            continue
+        for t in targets:
+            if isinstance(t, ast.Name):
+                if t.id in consts and consts[t.id] != value.value:
+                    consts.pop(t.id)  # 重赋值 → 放弃，不猜
+                else:
+                    consts[t.id] = value.value
+    return consts
+
+
 class _Visitor(ast.NodeVisitor):
-    def __init__(self, path: str, out: list[Access]) -> None:
+    def __init__(self, path: str, out: list[Access],
+                 consts: dict[str, str] | None = None,
+                 imported: dict[str, dict[str, str]] | None = None) -> None:
         self.path = path
         self.out = out
         self.aliases: set[str] = set()
+        #: 本模块的字符串常量（含 from-import 带进来的）
+        self.consts: dict[str, str] = dict(consts or {})
+        #: ``模块别名 -> {常量名: 值}``，供 ``_inv.INVENTORY_META_KEY`` 这类跨模块引用解析
+        self.imported: dict[str, dict[str, str]] = dict(imported or {})
 
     # -- 别名：m = state.meta / m = meta ---------------------------------
     def visit_Assign(self, node: ast.Assign) -> None:  # noqa: N802
@@ -159,34 +199,98 @@ class _Visitor(ast.NodeVisitor):
                                                self.path, node.lineno))
         self.generic_visit(node)
 
+    def _resolve_key(self, node: ast.expr | None) -> str | None:
+        """把键节点解析成字面量字符串；解析不出返回 None（→ unresolved，绝不猜）。"""
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        # 本模块常量：meta[DEX_TRUNCATED_META_KEY]
+        if isinstance(node, ast.Name):
+            return self.consts.get(node.id)
+        # 跨模块一跳：meta[_inv.INVENTORY_META_KEY]
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            return self.imported.get(node.value.id, {}).get(node.attr)
+        return None
+
     def _record(self, key_node: ast.expr | None, kind: str, line: int) -> None:
-        if isinstance(key_node, ast.Constant) and isinstance(key_node.value, str):
-            self.out.append(Access(key_node.value, kind, self.path, line))
+        key = self._resolve_key(key_node)
+        if key is not None:
+            self.out.append(Access(key, kind, self.path, line))
         else:
             # ★动态键：记为 unresolved，绝不静默跳过
             self.out.append(Access("<dynamic>", kind, self.path, line))
 
 
-def scan_source(src: str, path: str = "<mem>") -> list[Access]:
-    """扫一段 Python 源码，返回全部 meta 访问点。语法错误直接抛（地基不容忍静默失败）。"""
+def _import_map(src: str, symbols: dict[str, dict[str, str]]) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+    """解析本模块的 import，返回 (从别处 from-import 进来的常量, 模块别名 → 常量表)。
+
+    ★只走一跳、不解析星号导入、不解析重导出。解析不出就落回 unresolved。
+    """
+    from_consts: dict[str, str] = {}
+    alias_map: dict[str, dict[str, str]] = {}
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return from_consts, alias_map
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            table = symbols.get(node.module.split(".")[-1], {})
+            for a in node.names:
+                if a.name == "*":
+                    continue  # 星号导入不解析
+                if a.name in table:
+                    from_consts[a.asname or a.name] = table[a.name]
+                # from x import y as _inv —— 模块别名形态
+                elif a.name in symbols:
+                    alias_map[a.asname or a.name] = symbols[a.name]
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                short = a.name.split(".")[-1]
+                if short in symbols:
+                    alias_map[a.asname or short] = symbols[short]
+    return from_consts, alias_map
+
+
+def scan_source(src: str, path: str = "<mem>",
+                symbols: dict[str, dict[str, str]] | None = None) -> list[Access]:
+    """扫一段 Python 源码，返回全部 meta 访问点。语法错误直接抛（地基不容忍静默失败）。
+
+    ``symbols`` 是 ``模块短名 → {常量名: 值}`` 的全仓符号表，供跨模块常量键解析。
+    """
     tree = ast.parse(src)
-    out: list[Access] = []
-    v = _Visitor(path, out)
-    v.visit(tree)
-    # 别名可能在使用之后才赋值（少见），再扫一遍让别名生效
-    if v.aliases:
-        out2: list[Access] = []
-        v2 = _Visitor(path, out2)
-        v2.aliases = set(v.aliases)
-        v2.visit(tree)
-        return out2
-    return out
+    consts = collect_module_constants(src)
+    from_consts, alias_map = _import_map(src, symbols or {})
+    consts.update(from_consts)
+
+    def _run() -> list[Access]:
+        out: list[Access] = []
+        v = _Visitor(path, out, consts=consts, imported=alias_map)
+        v.visit(tree)
+        if v.aliases:  # 别名可能在使用之后才赋值，再扫一遍让它生效
+            out2: list[Access] = []
+            v2 = _Visitor(path, out2, consts=consts, imported=alias_map)
+            v2.aliases = set(v.aliases)
+            v2.visit(tree)
+            return out2
+        return out
+
+    return _run()
 
 
 def scan_repository(root: Path, *, prod_dir: str = "apkscan",
                     test_dir: str = "tests") -> ScanResult:
     """扫全仓，按生产/测试分开归集。"""
     res = ScanResult()
+    # ★先建全仓符号表：常量键（meta[DEX_TRUNCATED_META_KEY]）要靠它解析成真实键名。
+    #   这是「解析而非豁免」的实现基础——豁免会不断增长成动态访问的逃生口。
+    symbols: dict[str, dict[str, str]] = {}
+    for sub in (prod_dir, test_dir):
+        base = root / sub
+        if base.is_dir():
+            for py in base.rglob("*.py"):
+                consts = collect_module_constants(py.read_text(encoding="utf-8", errors="ignore"))
+                if consts:
+                    symbols[py.stem] = {**symbols.get(py.stem, {}), **consts}
+
     for sub, is_test in ((prod_dir, False), (test_dir, True)):
         base = root / sub
         if not base.is_dir():
@@ -194,7 +298,7 @@ def scan_repository(root: Path, *, prod_dir: str = "apkscan",
         for py in sorted(base.rglob("*.py")):
             rel = str(py.relative_to(root)).replace("\\", "/")
             try:
-                accesses = scan_source(py.read_text(encoding="utf-8"), rel)
+                accesses = scan_source(py.read_text(encoding="utf-8"), rel, symbols=symbols)
             except SyntaxError:  # 语法错的文件必须暴露，不吞
                 raise
             for a in accesses:
