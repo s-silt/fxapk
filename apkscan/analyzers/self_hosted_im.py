@@ -92,7 +92,12 @@ class SelfHostedImAnalyzer(BaseAnalyzer):
     """识别自建 IM / C2 控制信道，产出 category=SELF_HOSTED_IM 的调证线索。"""
 
     name: str = "self_hosted_im"
-    meta_keys = frozenset({"dex_strings_truncated", "self_hosted_im_channel_count", "self_hosted_im_fingerprints"})
+    meta_key_categories = {
+        'dex_strings_truncated': 'coverage',
+        'self_hosted_im_channel_count': 'record',
+        'self_hosted_im_fingerprints': 'record',
+    }
+    meta_keys = frozenset(meta_key_categories)
     # 信道 URL 走文本（dex/H5/资源），库指纹走 dex 字符串；缺数据自然空跑。
     requires: list[str] = []
 

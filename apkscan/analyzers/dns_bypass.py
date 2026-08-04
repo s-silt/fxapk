@@ -76,7 +76,11 @@ class DnsBypassAnalyzer(BaseAnalyzer):
     """检出 App 自带 DoH / HTTPDNS 解析 → 提示 DNS 层抓包看不到其域名解析。"""
 
     name: str = "dns_bypass"
-    meta_keys = frozenset({"dex_strings_truncated", "dns_bypass"})
+    meta_key_categories = {
+        'dex_strings_truncated': 'coverage',
+        'dns_bypass': 'signal',
+    }
+    meta_keys = frozenset(meta_key_categories)
     requires: list[str] = ["apk"]  # Android 专属（需扫 .so）
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

@@ -84,7 +84,11 @@ class AdminPanelAnalyzer(BaseAnalyzer):
     """识别后台管理系统入口，产出 category=ADMIN_PANEL 的调证线索。"""
 
     name: str = "admin_panel"
-    meta_keys = frozenset({"admin_panel_count", "dex_strings_truncated"})
+    meta_key_categories = {
+        'admin_panel_count': 'record',
+        'dex_strings_truncated': 'coverage',
+    }
+    meta_keys = frozenset(meta_key_categories)
     requires: list[str] = []  # URL 文本通用（dex/H5），缺数据自然空跑
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

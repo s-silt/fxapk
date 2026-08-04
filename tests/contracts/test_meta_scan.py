@@ -59,6 +59,19 @@ READ_CASES = [
     pytest.param('x = report.meta.get("c", None)', {"c"}, id="get 带默认值"),
     pytest.param('x = report.meta.pop("d", None)', {"d"}, id="pop"),
     pytest.param('m = report.meta\nx = m.get("e")', {"e"}, id="别名后读取"),
+    pytest.param(
+        'def helper(report):\n'
+        '    m = report.get("meta")\n'
+        '    return m if isinstance(m, dict) else {}\n'
+        'x = helper(report).get("wrapped")',
+        {"wrapped"}, id="结构识别返回-meta-的-helper",
+    ),
+    pytest.param(
+        'def helper(report):\n'
+        '    return report.get("meta")\n'
+        'x = helper(report)["direct"]',
+        {"direct"}, id="helper-直接返回-meta-表达式",
+    ),
 ]
 
 
@@ -66,6 +79,38 @@ READ_CASES = [
 def test_read_forms_are_detected(src: str, expect: set[str]) -> None:
     """漏认读取方 = 把一个有人消费的键误判成孤儿，进而被错误地清理掉。"""
     assert _keys(src, "read") >= expect
+
+
+def test_function_name_alone_does_not_make_a_call_meta() -> None:
+    """判据只看返回结构；名字像 helper/meta 不能把普通字典读取误报为 report.meta。"""
+    src = ('def get_meta(report):\n'
+           '    return {"ordinary": 1}\n'
+           'x = get_meta(report).get("ordinary")\n')
+    assert "ordinary" not in _keys(src, "read")
+
+
+@pytest.mark.parametrize("returned", [
+    'm if ok else {"not_meta": 1}',
+    'other',
+])
+def test_mixed_return_helper_is_not_treated_as_meta(returned: str) -> None:
+    """只要一条返回路径可能是普通 dict，就不能把调用结果冒充 report.meta。"""
+    src = ('def helper(report, other, ok):\n'
+           '    m = report.get("meta")\n'
+           f'    return {returned}\n'
+           'x = helper(report, {}, True).get("ordinary")\n')
+    assert "ordinary" not in _keys(src, "read")
+
+
+def test_corpus_meta_helpers_are_scanned_as_production_reads() -> None:
+    """真实调用缝：串案锚点不能因 helper 包装而被误判成孤儿。"""
+    root = Path(__file__).resolve().parents[2]
+    result = meta_scan.scan_repository(root)
+    helper_reads = {
+        "sample_sha256", "remote_config_artifacts", "build_provenance",
+        "native_lib_hashes", "visibility",
+    }
+    assert helper_reads <= set(result.production_consumed)
 
 
 # --- 动态键：必须暴露，绝不静默跳过 ------------------------------------------
@@ -589,7 +634,9 @@ def _owners_for_access(file: str, key: str) -> set[str]:
     return {module}
 
 
-def _static_meta_declaration(path: Path) -> tuple[str, set[str]] | None:
+def _static_meta_declaration(
+    path: Path,
+) -> tuple[str, set[str], dict[str, str], set[str]] | None:
     """读取模块内的非分析器声明，不 import 生产模块、不给测试引入副作用。"""
     values: dict[str, object] = {}
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -603,24 +650,38 @@ def _static_meta_declaration(path: Path) -> tuple[str, set[str]] | None:
         value = node.value
         if name == "META_WRITE_OWNER" and value is not None:
             values[name] = ast.literal_eval(value)
+        elif name == "META_WRITE_CATEGORIES" and value is not None:
+            values[name] = ast.literal_eval(value)
+        elif name == "META_CATEGORY_PENDING" and value is not None:
+            assert isinstance(value, ast.Call) and len(value.args) == 1
+            values[name] = set(ast.literal_eval(value.args[0]))
         elif (
             name == "META_WRITE_KEYS"
             and isinstance(value, ast.Call)
             and isinstance(value.func, ast.Name)
             and value.func.id == "frozenset"
             and len(value.args) == 1
+            and isinstance(value.args[0], ast.Name)
+            and value.args[0].id == "META_WRITE_CATEGORIES"
         ):
-            values[name] = set(ast.literal_eval(value.args[0]))
+            values[name] = set(values.get("META_WRITE_CATEGORIES", {}))
     if not values:
         return None
-    assert set(values) == {"META_WRITE_OWNER", "META_WRITE_KEYS"}, (
-        f"{path}: meta 写入声明必须同时包含 owner 与 keys"
+    required = {"META_WRITE_OWNER", "META_WRITE_CATEGORIES", "META_WRITE_KEYS"}
+    assert required <= set(values) <= required | {"META_CATEGORY_PENDING"}, (
+        f"{path}: meta 写入声明必须同时包含 owner、categories 与 keys"
     )
     owner = values["META_WRITE_OWNER"]
     keys = values["META_WRITE_KEYS"]
+    categories = values["META_WRITE_CATEGORIES"]
+    pending = values.get("META_CATEGORY_PENDING", set())
     assert isinstance(owner, str) and owner
     assert isinstance(keys, set) and all(isinstance(key, str) and key for key in keys)
-    return owner, keys
+    assert isinstance(categories, dict) and set(categories) == keys
+    assert set(categories.values()) <= {"signal", "record", "coverage"}
+    assert isinstance(pending, set) and pending <= keys
+    assert all(categories[key] == "signal" for key in pending)
+    return owner, keys, categories, pending
 
 
 def _owner_from_module_path(file: str) -> str:
@@ -644,6 +705,11 @@ def test_analyzer_meta_declarations_match_all_static_writes_both_ways() -> None:
     res = meta_scan.scan_repository(root)
     observed: set[tuple[str, str]] = set()
     analyzers = discover_analyzers()
+    for analyzer in analyzers:
+        assert set(analyzer.meta_key_categories) == set(analyzer.meta_keys), (
+            f"{analyzer.name}: 类别声明与 meta_keys 不一致"
+        )
+        assert set(analyzer.meta_key_categories.values()) <= {"signal", "record", "coverage"}
     declared = {(key, analyzer.name) for analyzer in analyzers for key in analyzer.meta_keys}
 
     # 普通字面量写入。classify 写 report.meta，属于 pipeline 后阶段，不是分析器返回块。
@@ -683,6 +749,9 @@ def test_analyzer_meta_declarations_match_all_static_writes_both_ways() -> None:
         f"只在声明={sorted(declared - observed)}；"
         f"只在生产路径={sorted(observed - declared)}"
     )
+    for analyzer in analyzers:
+        for key, category in analyzer.meta_key_categories.items():
+            assert META_KEY_REGISTRY[key].category == category
 
     derived = META_KEY_REGISTRY["dex_strings_truncated_by"]
     assert derived.owners == frozenset({PIPELINE_OWNER}), "派生键必须登记为 pipeline 所有"
@@ -711,7 +780,7 @@ def test_non_analyzer_meta_declarations_match_all_static_writes_both_ways() -> N
         if declaration is None:
             continue
         file = path.relative_to(root).as_posix()
-        owner, keys = declaration
+        owner, keys, _categories, _pending = declaration
         assert file in observed_files, f"{file} 有 meta 声明但没有生产写入"
         expected_owner = _owner_from_module_path(file)
         assert owner == expected_owner, f"{file} owner 应为 {expected_owner!r}，实际 {owner!r}"

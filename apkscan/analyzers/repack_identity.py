@@ -227,7 +227,11 @@ class RepackIdentityAnalyzer(BaseAnalyzer):
     """判别自研马甲包 vs 正版应用被重打包，给出三态 verdict 与命中明细。"""
 
     name: str = "repack_identity"
-    meta_keys = frozenset({"dex_strings_truncated", "repack_identity"})
+    meta_key_categories = {
+        'dex_strings_truncated': 'coverage',
+        'repack_identity': 'signal',
+    }
+    meta_keys = frozenset(meta_key_categories)
     requires: list[str] = ["apk"]  # Android 专属（签名形态 + .so 栈画像）
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

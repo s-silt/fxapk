@@ -28,7 +28,10 @@ logger = logging.getLogger(__name__)
 #: ``report.meta`` 里存放人工恢复凭据的键。写进报告、随报告流转，是对外契约的一部分。
 MANUAL_RESTORES_KEY = "manual_restores"
 META_WRITE_OWNER = "core.restore"
-META_WRITE_KEYS = frozenset({"manual_restores"})
+META_WRITE_CATEGORIES = {
+    'manual_restores': 'signal',
+}
+META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
 
 #: 单条凭据的必需字段。``value`` 大小写不敏感（与 closure 的比对口径一致）。
 _REQUIRED = ("category", "value", "source")

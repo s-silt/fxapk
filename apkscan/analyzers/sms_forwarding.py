@@ -131,7 +131,11 @@ class SmsForwardingAnalyzer(BaseAnalyzer):
     """识别短信 / 验证码转发服务，产出 category=SMS_FORWARDING 的调证线索。"""
 
     name: str = "sms_forwarding"
-    meta_keys = frozenset({"dex_strings_truncated", "sms_forwarding_count"})
+    meta_key_categories = {
+        'dex_strings_truncated': 'coverage',
+        'sms_forwarding_count': 'record',
+    }
+    meta_keys = frozenset(meta_key_categories)
     # 既扫 dex 方法引用（组合证据，Android 专属）也扫文本资源，故声明 apk。
     requires: list[str] = ["apk"]
 

@@ -71,7 +71,10 @@ class FaviconAnalyzer(BaseAnalyzer):
     """从应用图标 / favicon 抽 mmh3 指纹，产测绘 pivot 锚点线索。"""
 
     name: str = "favicon"
-    meta_keys = frozenset({"favicon_mmh3"})
+    meta_key_categories = {
+        'favicon_mmh3': 'record',
+    }
+    meta_keys = frozenset(meta_key_categories)
     requires: list[str] = []  # 纯文件读取，永远可用
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

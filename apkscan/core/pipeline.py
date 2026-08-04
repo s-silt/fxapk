@@ -76,17 +76,38 @@ from apkscan.core.enrichment import (
 from apkscan.core.parallel import _analyze_eligible
 
 META_WRITE_OWNER = "core.pipeline"
-META_WRITE_KEYS = frozenset({
-    "active_enrichers_enabled", "active_enrichers_skipped_passive_mode", "analysis_environment",
-    "analysis_started_at", "apk_validation_warning", "asset_scores", "config_probe_plan",
-    "control_chains", "dependency_versions", "dex_parse_failed", "dex_strings_truncated",
-    "dex_strings_truncated_by", "enriched_target_count", "enrichment_skipped_offline",
-    "extra_dex_visibility", "missing_analyzers", "mode", "network_attribution",
-    "overseas_targets", "remote_config_archived", "remote_config_artifacts",
-    "remote_config_fetch_skipped", "remote_config_fetch_skipped_passive_mode",
-    "remote_config_fetched", "repack_quarantine", "ruleset_digest", "stage_status",
-    "tool_version", "visibility",
-})
+META_WRITE_CATEGORIES = {
+    'active_enrichers_enabled': 'record',
+    'active_enrichers_skipped_passive_mode': 'coverage',
+    'analysis_environment': 'coverage',
+    'analysis_started_at': 'record',
+    'apk_validation_warning': 'signal',
+    'asset_scores': 'signal',
+    'config_probe_plan': 'signal',
+    'control_chains': 'signal',
+    'dependency_versions': 'record',
+    'dex_parse_failed': 'coverage',
+    'dex_strings_truncated': 'coverage',
+    'dex_strings_truncated_by': 'coverage',
+    'enriched_target_count': 'record',
+    'enrichment_skipped_offline': 'coverage',
+    'extra_dex_visibility': 'coverage',
+    'missing_analyzers': 'coverage',
+    'mode': 'signal',
+    'network_attribution': 'signal',
+    'overseas_targets': 'signal',
+    'remote_config_archived': 'record',
+    'remote_config_artifacts': 'signal',
+    'remote_config_fetch_skipped': 'coverage',
+    'remote_config_fetch_skipped_passive_mode': 'coverage',
+    'remote_config_fetched': 'record',
+    'repack_quarantine': 'signal',
+    'ruleset_digest': 'record',
+    'stage_status': 'coverage',
+    'tool_version': 'record',
+    'visibility': 'signal',
+}
+META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
