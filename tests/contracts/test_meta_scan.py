@@ -118,6 +118,28 @@ CONSTANT_POISON_CASES = [
                  id="循环变量绑定"),
     pytest.param('K = "a"\ndel K\ndef f(meta):\n    meta[K] = 1',
                  id="del 之后"),
+    # ★match 的捕获名藏在 MatchAs.name / MatchStar.name / MatchMapping.rest 这些
+    #   **字符串字段**里，不是 ast.Name 节点。只认 ast.Name 会把它们整个漏掉，
+    #   于是「统一收集一切绑定」这句话在 match 上并不成立（复审用这三个构造实证）。
+    pytest.param('K = "a"\nmatch x:\n    case K:\n        pass\ndef f(meta):\n    meta[K] = 1',
+                 id="match 捕获名"),
+    pytest.param('K = "a"\nmatch x:\n    case [*K]:\n        pass\ndef f(meta):\n    meta[K] = 1',
+                 id="match 星号捕获"),
+    pytest.param('K = "a"\nmatch x:\n    case {**K}:\n        pass\ndef f(meta):\n    meta[K] = 1',
+                 id="match 映射余项"),
+    # ★嵌套作用域的**头部**在外层求值：默认值、装饰器、基类、推导式首个 iter。
+    #   整体跳过嵌套节点会漏掉这些绑定，于是外层常量不失效、被解析成过期值。
+    pytest.param('K = "a"\ndef g(x=(K := "b")): pass\ndef f(meta):\n    meta[K] = 1',
+                 id="函数默认值里的海象"),
+    pytest.param('K = "a"\n@deco(K := "b")\ndef g(): pass\ndef f(meta):\n    meta[K] = 1',
+                 id="装饰器里的海象"),
+    pytest.param('K = "a"\nclass C(base(K := "b")): pass\ndef f(meta):\n    meta[K] = 1',
+                 id="类基类里的海象"),
+    # PEP 572：推导式内的 := 绑定到**包含它的作用域**，不是推导式自身
+    pytest.param('K = "a"\nxs = [(K := x) for x in seq]\ndef f(meta):\n    meta[K] = 1',
+                 id="推导式里的海象"),
+    pytest.param('K = "a"\ndef f(meta):\n    def inner(y=(K := "b")): pass\n    meta[K] = 1',
+                 id="函数内嵌套 def 的默认值"),
 ]
 
 
@@ -153,6 +175,11 @@ OPEN_WRITE_CASES = [
     pytest.param('def f(result, other):\n    result.meta = other', id="整体赋另一个变量"),
     pytest.param('def f(report):\n    report.meta: dict = build_meta()', id="带标注整体赋函数返回值"),
     pytest.param('def f(other):\n    r = AnalyzerResult(meta=other)', id="构造时传非字典"),
+    # ★右值**恰好叫 meta**（函数参数、来自别处）是最隐蔽的一条：早先只要右值"看起来像
+    #   meta 容器"就跳过，可它的键从未在本文件出现过。名字叫 meta ≠ 键已被看见。
+    pytest.param('def f(result, meta):\n    result.meta = meta', id="整体赋外部的 meta 参数"),
+    pytest.param('def f(meta):\n    r = AnalyzerResult(meta=meta)', id="构造时传外部的 meta 参数"),
+    pytest.param('def f(report, other):\n    report.meta |= other', id="增量合并（此前零记录）"),
 ]
 
 
@@ -165,6 +192,19 @@ def test_whole_meta_assignment_from_unknown_source_is_surfaced(src: str) -> None
     还会让「已无开放写入」这个结论假成立（复审实测指出）。
     """
     assert _dynamic(src), f"开放的整体写入被静默跳过：{src!r}"
+
+
+def test_locally_built_dict_assigned_to_meta_yields_its_keys() -> None:
+    """★就地建的字典整体赋给 ``X.meta``：键**必须逐条登记**，不能既不记键也不记 unresolved。
+
+    这是收紧「右值键是否可见」判据时自己引入的洞：``m`` 上的下标写入本来不算 meta 写入，
+    于是 ``m["a"]`` 这批键对基线完全隐形——最坏的一种结果，因为它连 unresolved
+    都不产，扫描器看上去一切正常。
+    """
+    src = 'def f(result):\n    m = {}\n    m["a"] = 1\n    m["b"] = 2\n    result.meta = m'
+
+    assert _keys(src, "write") == {"a", "b"}, "本地字典的键被静默丢弃"
+    assert not _dynamic(src), "键其实可见，不该记 unresolved"
 
 
 NESTED_SCOPE_CASES = [
