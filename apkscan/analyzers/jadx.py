@@ -109,7 +109,16 @@ class JadxAnalyzer(BaseAnalyzer):
     """jadx 反编译后从 Java 字符串字面量补端点 / 密钥（requires=["jadx"]）。"""
 
     name: str = "jadx"
-    meta_keys = frozenset({"decrypt_candidates", "decrypt_candidates_suppressed", "jadx_endpoint_count", "jadx_java_files", "jadx_status"})
+    meta_key_categories = {
+        'decrypt_candidates': 'signal',
+        'decrypt_candidates_suppressed': 'coverage',
+        'jadx_endpoint_count': 'record',
+        'jadx_java_files': 'coverage',
+        'jadx_status': 'coverage',
+    }
+    meta_keys = frozenset(meta_key_categories)
+    # 待定：它可能只是逆向候选清单，也可能应驱动后续解密动作；先按信号报警。
+    meta_category_pending = frozenset({'decrypt_candidates'})
     requires: list[str] = ["jadx", "apk"]  # jadx 反编 DEX
 
     def __init__(self) -> None:

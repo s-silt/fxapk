@@ -161,7 +161,14 @@ class CryptoAnalyzer(BaseAnalyzer):
     """检测弱加密 / 硬编码密钥，产出 category=\"crypto\" 的 Finding。"""
 
     name: str = "crypto"
-    meta_keys = frozenset({"dex_strings_truncated", "finding_ids", "findings", "resources_scanned", "strings_scanned"})
+    meta_key_categories = {
+        'dex_strings_truncated': 'coverage',
+        'finding_ids': 'record',
+        'findings': 'record',
+        'resources_scanned': 'coverage',
+        'strings_scanned': 'coverage',
+    }
+    meta_keys = frozenset(meta_key_categories)
     requires: list[str] = []  # 纯静态扫描，永远可用
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

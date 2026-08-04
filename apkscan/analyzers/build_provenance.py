@@ -442,7 +442,11 @@ class BuildProvenanceAnalyzer(BaseAnalyzer):
     """提取构建来源路径并分层：第三方继承 / 私有平台疑似 / 未知。"""
 
     name: str = "build_provenance"
-    meta_keys = frozenset({"build_provenance", "dex_strings_truncated"})
+    meta_key_categories = {
+        'build_provenance': 'record',
+        'dex_strings_truncated': 'coverage',
+    }
+    meta_keys = frozenset(meta_key_categories)
     requires: list[str] = ["apk"]
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

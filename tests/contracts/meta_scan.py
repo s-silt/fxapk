@@ -240,7 +240,8 @@ def collect_module_constants(src: str) -> dict[str, str]:
 class _Visitor(ast.NodeVisitor):
     def __init__(self, path: str, out: list[Access],
                  consts: dict[str, str] | None = None,
-                 imported: dict[str, dict[str, str]] | None = None) -> None:
+                 imported: dict[str, dict[str, str]] | None = None,
+                 meta_returning_functions: set[str] | None = None) -> None:
         self.path = path
         self.out = out
         self.aliases: set[str] = set()
@@ -248,6 +249,9 @@ class _Visitor(ast.NodeVisitor):
         self.consts: dict[str, str] = dict(consts or {})
         #: ``模块别名 -> {常量名: 值}``，供 ``_inv.INVENTORY_META_KEY`` 这类跨模块引用解析
         self.imported: dict[str, dict[str, str]] = dict(imported or {})
+        #: 模块级函数中，按返回值结构可证会返回 report.meta 容器的函数。
+        #: 名字不参与判定；集合由 :func:`_meta_returning_functions` 从 AST 推导。
+        self.meta_returning_functions = set(meta_returning_functions or ())
         #: 本作用域内来源可证的字典名 → 字面量初值（见 :meth:`_locally_built_dicts`）
         self.local_dicts: dict[str, ast.Dict] = {}
         #: 已作为 ``X.meta[k]`` 的值挂入报告的局部字典；其后写入属于嵌套结构，
@@ -482,6 +486,11 @@ class _Visitor(ast.NodeVisitor):
                 and node.func.attr == "get" and node.args
                 and isinstance(node.args[0], ast.Constant) and node.args[0].value == "meta"):
             return True
+        # ``helper(report).get("k")``：helper 是否返回 meta 只由模块级函数的
+        # 返回结构证明，绝不按 ``_meta`` / ``get_meta`` 等函数名猜。
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id in self.meta_returning_functions):
+            return True
         return False
 
     # -- 下标：meta["k"] = v（写） / x = meta["k"]（读）--------------------
@@ -611,6 +620,68 @@ def _import_map(src: str, symbols: dict[str, dict[str, str]]) -> tuple[dict[str,
     return from_consts, alias_map
 
 
+def _meta_returning_functions(tree: ast.Module) -> set[str]:
+    """找出返回 report.meta 容器的模块级函数，判据只看形态与数据流。
+
+    当前刻意只做函数内的一跳别名：``m = report.get("meta")`` 后返回 ``m``；
+    返回表达式可用条件表达式包一层，空字典允许作为坏输入兜底。所有显式返回
+    都必须符合，且别名只能被绑定一次。这样普通 dict helper、混合返回和重绑
+    都不会被误认，函数名完全不参与语义。
+    """
+    found: set[str] = set()
+
+    def direct_meta(expr: ast.expr, aliases: set[str]) -> bool:
+        if isinstance(expr, ast.Attribute) and expr.attr in _META_ATTRS:
+            return True
+        if isinstance(expr, ast.Name):
+            return expr.id in aliases
+        if (isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute)
+                and expr.func.attr == "get" and expr.args
+                and isinstance(expr.args[0], ast.Constant)
+                and expr.args[0].value == "meta"):
+            return True
+        return False
+
+    def safe_return(expr: ast.expr | None, aliases: set[str]) -> bool:
+        if expr is None:
+            return False
+        if direct_meta(expr, aliases):
+            return True
+        if isinstance(expr, ast.Dict) and not expr.keys:
+            return True
+        if isinstance(expr, ast.IfExp):
+            return safe_return(expr.body, aliases) and safe_return(expr.orelse, aliases)
+        return False
+
+    for fn in tree.body:
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        aliases: set[str] = set()
+        binds: dict[str, int] = {}
+        returns: list[ast.Return] = []
+        # Module-level helper summaries do not inherit evidence from nested scopes.
+        stack: list[ast.AST] = list(fn.body)
+        while stack:
+            node = stack.pop()
+            if isinstance(node, _NESTED_SCOPES):
+                continue
+            if isinstance(node, ast.Return):
+                returns.append(node)
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                value = node.value
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        binds[target.id] = binds.get(target.id, 0) + 1
+                        if value is not None and direct_meta(value, aliases):
+                            aliases.add(target.id)
+            stack.extend(ast.iter_child_nodes(node))
+        aliases = {name for name in aliases if binds.get(name) == 1}
+        if returns and all(safe_return(ret.value, aliases) for ret in returns):
+            found.add(fn.name)
+    return found
+
+
 def scan_source(src: str, path: str = "<mem>",
                 symbols: dict[str, dict[str, str]] | None = None) -> list[Access]:
     """扫一段 Python 源码，返回全部 meta 访问点。语法错误直接抛（地基不容忍静默失败）。
@@ -618,17 +689,20 @@ def scan_source(src: str, path: str = "<mem>",
     ``symbols`` 是 ``模块短名 → {常量名: 值}`` 的全仓符号表，供跨模块常量键解析。
     """
     tree = ast.parse(src)
+    meta_functions = _meta_returning_functions(tree)
     consts = collect_module_constants(src)
     from_consts, alias_map = _import_map(src, symbols or {})
     consts.update(from_consts)
 
     def _run() -> list[Access]:
         out: list[Access] = []
-        v = _Visitor(path, out, consts=consts, imported=alias_map)
+        v = _Visitor(path, out, consts=consts, imported=alias_map,
+                     meta_returning_functions=meta_functions)
         v.visit(tree)
         if v.aliases:  # 别名可能在使用之后才赋值，再扫一遍让它生效
             out2: list[Access] = []
-            v2 = _Visitor(path, out2, consts=consts, imported=alias_map)
+            v2 = _Visitor(path, out2, consts=consts, imported=alias_map,
+                          meta_returning_functions=meta_functions)
             v2.aliases = set(v.aliases)
             v2.visit(tree)
             return out2

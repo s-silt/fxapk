@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import sys
+import ast
 from pathlib import Path
 
 from tests.contracts import meta_scan
@@ -38,15 +39,18 @@ from tests.contracts import meta_scan
 BASELINE_PATH = Path(__file__).with_name("meta_orphan_baseline.json")
 
 _README = [
-    "meta 孤儿键冻结基线：生产代码写了、但生产代码与模板都没人读的键。",
+    "meta 孤儿键分类基线：生产代码写了、但生产代码与模板都没人读的键。",
     "本文件由 python -m tests.contracts.meta_orphans --write 生成，",
     "由 test_meta_orphan_baseline.py 与现实做双向严格比对：",
-    "新增孤儿会红（回归）；孤儿获得消费方也会红（请把该条移除，让改善留痕）。",
+    "仅 signal 类新增孤儿会红；三类存量的解决、删除与写入点漂移仍会红。",
+    "record / coverage 类新增项由声明↔写入契约约束，不视为缺陷。",
     "值是写入该键的生产文件列表（owner），供下一轮分类处置；",
     "有限键族已按权威注册表展开成 分析器×后缀 的具体键（键名即含分析器身份）；",
     "仅当后缀不在权威定义域内时才保留 <family:...> 原始标记（可见，不静默丢弃）。",
     "★不要为了让测试变绿而无脑重生成——每条差异都必须有人看过并说得出为什么。",
 ]
+
+_CATEGORIES = ("signal", "record", "coverage")
 
 
 def compute_orphans(root: Path) -> tuple[dict[str, list[str]], set[str]]:
@@ -117,6 +121,47 @@ def compute_orphans(root: Path) -> tuple[dict[str, list[str]], set[str]]:
     return orphans, set(res.produced) | fam_written
 
 
+def declared_categories(root: Path) -> dict[str, str]:
+    """汇总写入方旁的显式类别声明；冲突、漏项都直接失败。"""
+    from apkscan.core.meta_contract import META_KEY_REGISTRY
+
+    categories = {key: contract.category for key, contract in META_KEY_REGISTRY.items()}
+    for path in (root / "apkscan").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in tree.body:
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if len(targets) != 1 or not isinstance(targets[0], ast.Name):
+                continue
+            if targets[0].id != "META_WRITE_CATEGORIES":
+                continue
+            declared = ast.literal_eval(node.value)
+            for key, category in declared.items():
+                previous = categories.setdefault(key, category)
+                if previous != category:
+                    raise AssertionError(
+                        f"meta 键 {key!r} 类别冲突：{previous!r} != {category!r}（{path}）"
+                    )
+    return categories
+
+
+def compute_orphans_by_category(
+    root: Path,
+) -> tuple[dict[str, dict[str, list[str]]], set[str]]:
+    """按显式声明拆分孤儿；键名不参与类别判断。"""
+    orphans, written = compute_orphans(root)
+    categories = declared_categories(root)
+    missing = sorted(set(orphans) - set(categories))
+    assert not missing, f"孤儿键缺类别声明：{missing!r}"
+    grouped = {category: {} for category in _CATEGORIES}
+    for key, writers in orphans.items():
+        category = categories[key]
+        assert category in grouped, f"meta 键 {key!r} 类别非法：{category!r}"
+        grouped[category][key] = writers
+    return grouped, written
+
+
 def _parse_family_marker(marker: str) -> tuple[str, str]:
     """``<family:族名:后缀>`` → ``(族名, 后缀)``。格式坏了直接抛，不猜。"""
     inner = marker.removeprefix("<family:").removesuffix(">")
@@ -184,26 +229,54 @@ def diff_against_baseline(
     return problems
 
 
-def load_baseline() -> dict[str, list[str]]:
+def diff_categories_against_baseline(
+    current: dict[str, dict[str, list[str]]],
+    baseline: dict[str, dict[str, list[str]]],
+    written_keys: set[str],
+) -> list[str]:
+    """信号类严格双向；留档/覆盖类允许新增，但存量漂移必须显式处置。"""
+    problems = diff_against_baseline(
+        current["signal"], baseline["signal"], written_keys,
+    )
+    for category in ("record", "coverage"):
+        group_problems = diff_against_baseline(
+            current[category], baseline[category], written_keys,
+        )
+        problems.extend(
+            f"[{category}] {problem}"
+            for problem in group_problems
+            if not problem.startswith("新增孤儿：")
+        )
+    return problems
+
+
+def load_baseline() -> dict[str, dict[str, list[str]]]:
     """读基线文件。格式坏了直接抛——基线是契约的一半，不容忍静默降级。"""
     data = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
-    orphans = data["orphans"]
-    if not isinstance(orphans, dict):
-        raise TypeError(f"基线 orphans 字段必须是对象，实际 {type(orphans).__name__}")
-    out: dict[str, list[str]] = {}
-    for key, files in orphans.items():
-        if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
-            raise TypeError(f"基线键 {key!r} 的写入文件列表格式非法：{files!r}")
-        out[str(key)] = list(files)
+    groups = data["orphans"]
+    if not isinstance(groups, dict) or set(groups) != set(_CATEGORIES):
+        raise TypeError("基线 orphans 必须恰含 signal / record / coverage 三组")
+    out: dict[str, dict[str, list[str]]] = {}
+    for category, orphans in groups.items():
+        if not isinstance(orphans, dict):
+            raise TypeError(f"基线 {category} 字段必须是对象")
+        out[category] = {}
+        for key, files in orphans.items():
+            if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
+                raise TypeError(f"基线键 {key!r} 的写入文件列表格式非法：{files!r}")
+            out[category][str(key)] = list(files)
     return out
 
 
-def write_baseline(root: Path) -> dict[str, list[str]]:
+def write_baseline(root: Path) -> dict[str, dict[str, list[str]]]:
     """按当前现实重写基线（键排序，LF 换行），返回写入的内容。"""
-    current, _ = compute_orphans(root)
+    current, _ = compute_orphans_by_category(root)
     payload = {
         "readme": _README,
-        "orphans": {key: current[key] for key in sorted(current)},
+        "orphans": {
+            category: {key: current[category][key] for key in sorted(current[category])}
+            for category in _CATEGORIES
+        },
     }
     text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     BASELINE_PATH.write_text(text, encoding="utf-8", newline="\n")
@@ -215,15 +288,10 @@ def main(argv: list[str]) -> int:
         print(__doc__)
         return 2
     root = Path(__file__).resolve().parents[2]
-    old = load_baseline() if BASELINE_PATH.exists() else {}
     new = write_baseline(root)
-    added = sorted(set(new) - set(old))
-    removed = sorted(set(old) - set(new))
-    print(f"基线已写入 {BASELINE_PATH}：共 {len(new)} 条；新增 {len(added)}，移除 {len(removed)}")
-    for key in added:
-        print(f"  + {key}")
-    for key in removed:
-        print(f"  - {key}")
+    total = sum(len(group) for group in new.values())
+    counts = " + ".join(f"{category}={len(new[category])}" for category in _CATEGORIES)
+    print(f"基线已写入 {BASELINE_PATH}：共 {total} 条（{counts}）")
     return 0
 
 

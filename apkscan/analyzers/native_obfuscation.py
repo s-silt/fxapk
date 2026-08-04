@@ -84,7 +84,10 @@ class NativeObfuscationAnalyzer(BaseAnalyzer):
     """启发式标出疑加密 / 虚拟化的 App 自有 native .so（信号，非精确判定）。"""
 
     name: str = "native_obfuscation"
-    meta_keys = frozenset({"native_obfuscation"})
+    meta_key_categories = {
+        'native_obfuscation': 'signal',
+    }
+    meta_keys = frozenset(meta_key_categories)
     requires: list[str] = ["apk"]  # Android 专属
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

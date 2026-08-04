@@ -72,7 +72,13 @@ class PermissionsAnalyzer(BaseAnalyzer):
     """检测危险权限与高危权限组合，产出 category=\"permission\" 的 Finding。"""
 
     name = "permissions"
-    meta_keys = frozenset({"dangerous_count", "dangerous_matched", "permission_count", "permissions"})
+    meta_key_categories = {
+        'dangerous_count': 'record',
+        'dangerous_matched': 'signal',
+        'permission_count': 'record',
+        'permissions': 'signal',
+    }
+    meta_keys = frozenset(meta_key_categories)
     requires: list[str] = ["apk"]  # Android 专属（权限声明）
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

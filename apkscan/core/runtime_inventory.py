@@ -31,7 +31,10 @@ logger = logging.getLogger(__name__)
 #: 清单落在 ``report.meta`` 下的键名。
 INVENTORY_META_KEY = "runtime_merged_inventory"
 META_WRITE_OWNER = "core.runtime_inventory"
-META_WRITE_KEYS = frozenset({"runtime_uid_attributed_sources"})
+META_WRITE_CATEGORIES = {
+    'runtime_uid_attributed_sources': 'coverage',
+}
+META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
 
 #: 历史键名（本键自己也改过名）：pcap 路径最初叫 ``runtime_pcap_inventory``。
 INVENTORY_META_ALIASES: tuple[str, ...] = ("runtime_pcap_inventory",)

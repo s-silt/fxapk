@@ -37,7 +37,13 @@ from apkscan.commands.lead import lead_app
 from apkscan.commands.web import analyze_web
 
 META_WRITE_OWNER = "cli"
-META_WRITE_KEYS = frozenset({"device_detected", "evidence_manifest", "online", "sample_sha256"})
+META_WRITE_CATEGORIES = {
+    'device_detected': 'coverage',
+    'evidence_manifest': 'record',
+    'online': 'signal',
+    'sample_sha256': 'record',
+}
+META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
 
 logger = logging.getLogger(__name__)
 

@@ -99,9 +99,15 @@ from apkscan.core.closure.targets import (
 # 原单文件模块的 module-level logger：保持 ``closure.logger`` 属性面与 logger 名不变
 # （真正使用它的 _parse_fofa_row 已随迁 targets.py，用各自模块的 child logger）。
 META_WRITE_OWNER = "core.closure"
-META_WRITE_KEYS = frozenset({
-    "asset_scores", "closure", "control_chains", "network_attribution", "overseas_targets", "visibility",
-})
+META_WRITE_CATEGORIES = {
+    'asset_scores': 'signal',
+    'closure': 'signal',
+    'control_chains': 'signal',
+    'network_attribution': 'signal',
+    'overseas_targets': 'signal',
+    'visibility': 'signal',
+}
+META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
 
 logger = logging.getLogger(__name__)
 

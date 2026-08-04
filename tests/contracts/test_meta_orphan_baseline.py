@@ -29,10 +29,10 @@ def test_orphan_baseline_matches_reality_both_ways() -> None:
     ★不要为了变绿无脑重生成基线——每条差异都必须有人看过并说得出为什么。
     """
     root = Path(__file__).resolve().parents[2]
-    current, written = meta_orphans.compute_orphans(root)
+    current, written = meta_orphans.compute_orphans_by_category(root)
     baseline = meta_orphans.load_baseline()
 
-    problems = meta_orphans.diff_against_baseline(current, baseline, written)
+    problems = meta_orphans.diff_categories_against_baseline(current, baseline, written)
     assert not problems, (
         "孤儿基线与现实不一致（逐条处置后可用 "
         "python -m tests.contracts.meta_orphans --write 重写基线）：\n  "
@@ -48,12 +48,14 @@ def test_baseline_file_is_wellformed_and_nonvacuous() -> None:
       （治病治到清零的那天，这条测试应当与基线一起被有意识地更新，而不是被绕过）。
     """
     baseline = meta_orphans.load_baseline()
-    assert len(baseline) >= 100, f"基线只剩 {len(baseline)} 条——不该是无声发生的"
-    for key, files in baseline.items():
-        assert key, "基线里有空键"
-        assert files, f"{key!r} 没有记录写入文件（owner 缺失）"
-        for f in files:
-            assert f.startswith("apkscan/"), f"{key!r} 的写入点 {f!r} 不在生产代码里"
+    total = sum(len(group) for group in baseline.values())
+    assert total == 119, f"三类存量应守恒为 119，实际 {total}"
+    for category, group in baseline.items():
+        for key, files in group.items():
+            assert key, f"{category} 基线里有空键"
+            assert files, f"{key!r} 没有记录写入文件（owner 缺失）"
+            for f in files:
+                assert f.startswith("apkscan/"), f"{key!r} 的写入点 {f!r} 不在生产代码里"
 
 
 # --- 计算原语的边界（每条对应 compute_orphans 文档里的一条判断） -------------
@@ -249,3 +251,32 @@ def test_writer_drift_is_reported() -> None:
 def test_identical_state_yields_no_problems() -> None:
     same = {"k": ["apkscan/x.py"]}
     assert meta_orphans.diff_against_baseline(same, dict(same), {"k"}) == []
+
+
+def test_new_signal_orphan_is_a_regression_but_new_record_is_not() -> None:
+    baseline = {"signal": {}, "record": {}, "coverage": {}}
+    current = {
+        "signal": {"decision": ["apkscan/x.py"]},
+        "record": {"stat": ["apkscan/x.py"]},
+        "coverage": {},
+    }
+    problems = meta_orphans.diff_categories_against_baseline(
+        current, baseline, {"decision", "stat"},
+    )
+    assert len(problems) == 1
+    assert "decision" in problems[0]
+    assert "stat" not in problems[0]
+
+
+def test_signal_comparison_remains_strictly_bidirectional() -> None:
+    baseline = {
+        "signal": {"healed": ["apkscan/x.py"]},
+        "record": {},
+        "coverage": {},
+    }
+    current = {"signal": {}, "record": {}, "coverage": {}}
+    problems = meta_orphans.diff_categories_against_baseline(
+        current, baseline, {"healed"},
+    )
+    assert len(problems) == 1
+    assert "已解决" in problems[0]

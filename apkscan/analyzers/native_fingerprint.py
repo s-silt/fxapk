@@ -33,7 +33,10 @@ class NativeFingerprintAnalyzer(BaseAnalyzer):
     """对 App .so 逐个算 sha256 → meta["native_lib_hashes"]（家族级硬指纹，供 corpus --by so_sha256 反查）。"""
 
     name: str = "native_fingerprint"
-    meta_keys = frozenset({"native_lib_hashes"})
+    meta_key_categories = {
+        'native_lib_hashes': 'record',
+    }
+    meta_keys = frozenset(meta_key_categories)
     requires: list[str] = ["apk"]  # Android 专属
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

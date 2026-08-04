@@ -142,7 +142,18 @@ class PackingAnalyzer(BaseAnalyzer):
     """识别加固厂商，产出 PACKER 线索 + 静态端点不完整 Finding。"""
 
     name: str = "packing"
-    meta_keys = frozenset({"container_decoy_entries", "denial_bomb_entries", "dex_scanned", "dex_strings_truncated", "hardening_structural", "is_hardened", "packed", "packer", "packers"})
+    meta_key_categories = {
+        'container_decoy_entries': 'signal',
+        'denial_bomb_entries': 'signal',
+        'dex_scanned': 'coverage',
+        'dex_strings_truncated': 'coverage',
+        'hardening_structural': 'signal',
+        'is_hardened': 'signal',
+        'packed': 'signal',
+        'packer': 'signal',
+        'packers': 'record',
+    }
+    meta_keys = frozenset(meta_key_categories)
     requires: list[str] = ["apk"]  # Android 专属
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

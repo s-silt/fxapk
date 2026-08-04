@@ -46,7 +46,12 @@ from apkscan.core.models import ANALYSIS_MODE_PASSIVE, AnalysisConfig, Report
 from apkscan.core.report_naming import report_base
 
 META_WRITE_OWNER = "dynamic.auto"
-META_WRITE_KEYS = frozenset({"artifact_lineage", "online", "target_serial"})
+META_WRITE_CATEGORIES = {
+    'artifact_lineage': 'signal',
+    'online': 'signal',
+    'target_serial': 'record',
+}
+META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
 
 logger = logging.getLogger(__name__)
 

@@ -398,12 +398,21 @@ class EndpointsAnalyzer(BaseAnalyzer):
     （硬编码非标准回环 IP + native 库 → 疑似 native 运行时取址占位架构，见 _native_runtime_addressing_finding）。"""
 
     name: str = "endpoints"
-    meta_keys = frozenset({
-        "cleartext_count", "dex_scanned", "dex_strings_truncated", "domain_count",
-        "endpoint_total", "ip_count", "native_files_scanned", "private_count",
-        "resource_files_read_failed", "resource_files_scanned", "resource_listing_failed",
-        "url_count",
-    })
+    meta_key_categories = {
+        'cleartext_count': 'record',
+        'dex_scanned': 'coverage',
+        'dex_strings_truncated': 'coverage',
+        'domain_count': 'record',
+        'endpoint_total': 'record',
+        'ip_count': 'record',
+        'native_files_scanned': 'coverage',
+        'private_count': 'record',
+        'resource_files_read_failed': 'coverage',
+        'resource_files_scanned': 'coverage',
+        'resource_listing_failed': 'coverage',
+        'url_count': 'record',
+    }
+    meta_keys = frozenset(meta_key_categories)
     requires: list[str] = []  # 纯静态，永远可用
     #: 来源档判据语境（analyze 按 ctx.platform 覆写；类级默认兜底直调扫描函数的路径）。
     _tier_context: str = "apk"

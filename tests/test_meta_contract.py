@@ -15,6 +15,7 @@ def test_pipeline_reserved_key_conflict_fails_registry_build(monkeypatch) -> Non
     analyzer = SimpleNamespace(
         name="conflicting_analyzer",
         meta_keys=frozenset({"dex_strings_truncated_by"}),
+        meta_key_categories={"dex_strings_truncated_by": "coverage"},
     )
     monkeypatch.setattr(registry, "discover_analyzers", lambda: [analyzer])
 
@@ -33,7 +34,11 @@ def test_malformed_declaration_fails_registry_build(monkeypatch, bad_key) -> Non
       空串键会让 ``allowed_meta_keys`` 平白多出一个 ``""``，非字符串键则会在
       后续与 ``result.meta.keys()`` 求差集时静默参与比较——两者都不会有人发现。
     """
-    analyzer = SimpleNamespace(name="malformed_analyzer", meta_keys=frozenset({bad_key}))
+    analyzer = SimpleNamespace(
+        name="malformed_analyzer",
+        meta_keys=frozenset({bad_key}),
+        meta_key_categories={bad_key: "signal"},
+    )
     monkeypatch.setattr(registry, "discover_analyzers", lambda: [analyzer])
 
     with pytest.raises(RuntimeError, match="含非法键"):

@@ -46,16 +46,40 @@ from apkscan.core.models import (
 )
 
 META_WRITE_OWNER = "dynamic.merge"
-META_WRITE_KEYS = frozenset({
-    "capture_capabilities", "capture_quality", "capture_signals", "comm_sessions",
-    "repack_quarantine", "runtime_antidetect", "runtime_brand_hints", "runtime_clipboard",
-    "runtime_clipboard_address_count", "runtime_credential_count", "runtime_credentials",
-    "runtime_crypto_event_count", "runtime_crypto_recipe", "runtime_database_count",
-    "runtime_databases", "runtime_db_digests", "runtime_dead_drop", "runtime_dead_drop_relations",
-    "runtime_decrypt_stats", "runtime_decrypted", "runtime_endpoint_count", "runtime_jsbridge",
-    "runtime_merged", "runtime_remote_control", "runtime_remote_control_targets",
-    "runtime_remote_control_unknown_packages", "runtime_sensitive_apis", "runtime_traced", "visibility",
-})
+META_WRITE_CATEGORIES = {
+    'capture_capabilities': 'coverage',
+    'capture_quality': 'coverage',
+    'capture_signals': 'signal',
+    'comm_sessions': 'signal',
+    'repack_quarantine': 'signal',
+    'runtime_antidetect': 'signal',
+    'runtime_brand_hints': 'signal',
+    'runtime_clipboard': 'signal',
+    'runtime_clipboard_address_count': 'record',
+    'runtime_credential_count': 'record',
+    'runtime_credentials': 'signal',
+    'runtime_crypto_event_count': 'record',
+    'runtime_crypto_recipe': 'signal',
+    'runtime_database_count': 'record',
+    'runtime_databases': 'signal',
+    'runtime_db_digests': 'record',
+    'runtime_dead_drop': 'signal',
+    'runtime_dead_drop_relations': 'signal',
+    'runtime_decrypt_stats': 'record',
+    'runtime_decrypted': 'signal',
+    'runtime_endpoint_count': 'record',
+    'runtime_jsbridge': 'signal',
+    'runtime_merged': 'signal',
+    'runtime_remote_control': 'signal',
+    'runtime_remote_control_targets': 'signal',
+    'runtime_remote_control_unknown_packages': 'signal',
+    'runtime_sensitive_apis': 'signal',
+    'runtime_traced': 'coverage',
+    'visibility': 'signal',
+}
+META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
+# 待定：数据库清单可能只是动态留档，也可能应驱动受害数据取证；先按信号报警。
+META_CATEGORY_PENDING = frozenset({'runtime_databases'})
 
 logger = logging.getLogger(__name__)
 

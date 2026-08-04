@@ -167,7 +167,14 @@ class PaymentAnalyzer(BaseAnalyzer):
     """识别第三方/聚合支付 SDK 与收款/资金特征，产出 PAYMENT 调证线索。"""
 
     name: str = "payment"
-    meta_keys = frozenset({"crypto_addresses", "dex_scanned", "dex_strings_truncated", "payment_keywords", "payment_sdks"})
+    meta_key_categories = {
+        'crypto_addresses': 'signal',
+        'dex_scanned': 'coverage',
+        'dex_strings_truncated': 'coverage',
+        'payment_keywords': 'signal',
+        'payment_sdks': 'record',
+    }
+    meta_keys = frozenset(meta_key_categories)
     requires: list[str] = []  # 纯静态，永远可用
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

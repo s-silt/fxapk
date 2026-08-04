@@ -46,7 +46,12 @@ from apkscan.network.fingerprints import (  # noqa: F401 — public re-export (c
 logger = logging.getLogger(__name__)
 
 META_WRITE_OWNER = "dynamic.pcap_ingest"
-META_WRITE_KEYS = frozenset({"runtime_merged", "runtime_merged_inventory", "runtime_pcap_merges"})
+META_WRITE_CATEGORIES = {
+    'runtime_merged': 'signal',
+    'runtime_merged_inventory': 'record',
+    'runtime_pcap_merges': 'record',
+}
+META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
 
 _SOURCE = "runtime-pcap"
 

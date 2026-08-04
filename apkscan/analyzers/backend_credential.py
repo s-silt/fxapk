@@ -60,7 +60,11 @@ class BackendCredentialAnalyzer(BaseAnalyzer):
     """抠 APK 内硬编码后端 / 管理凭据，产出 category=BACKEND_CREDENTIAL 的高敏取证线索。"""
 
     name: str = "backend_credential"
-    meta_keys = frozenset({"backend_credential_count", "dex_strings_truncated"})
+    meta_key_categories = {
+        'backend_credential_count': 'record',
+        'dex_strings_truncated': 'coverage',
+    }
+    meta_keys = frozenset(meta_key_categories)
     requires: list[str] = []
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:

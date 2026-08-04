@@ -40,7 +40,10 @@ class BaseAnalyzer(ABC):
     name: str = ""
     requires: list[str] = []
     # 分析器可写入 Report.meta 的完整集合；声明与生产代码同文件，契约层只负责汇总。
-    meta_keys: frozenset[str] = frozenset()
+    meta_key_categories: dict[str, str] = {}
+    # 拿不准是否应驱动下游的键保守留在 signal，并在写入方旁显式标待复核。
+    meta_category_pending: frozenset[str] = frozenset()
+    meta_keys = frozenset(meta_key_categories)
 
     @abstractmethod
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
