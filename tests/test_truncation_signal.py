@@ -59,6 +59,7 @@ def test_pipeline_merges_truncation_as_or_not_overwrite(monkeypatch):
       ③ 这个事实一路传到 ``visibility``，把 dex 面判成 partial 且理由里带上分析器名。
     """
     from apkscan.core import pipeline, visibility
+    from apkscan.core.meta_contract import META_KEY_REGISTRY, MetaKeyContract
     from apkscan.core.models import AnalysisConfig, AnalyzerResult
     from apkscan.core.registry import BaseAnalyzer
 
@@ -87,6 +88,15 @@ def test_pipeline_merges_truncation_as_or_not_overwrite(monkeypatch):
 
     monkeypatch.setattr(
         pipeline, "discover_analyzers", lambda: [_Truncating(), _NotTruncating()]
+    )
+    contract = META_KEY_REGISTRY[pipeline._DEX_TRUNCATED_KEY]
+    monkeypatch.setitem(
+        META_KEY_REGISTRY,
+        pipeline._DEX_TRUNCATED_KEY,
+        MetaKeyContract(
+            owners=contract.owners | {"probe_truncated", "probe_complete"},
+            merge=contract.merge,
+        ),
     )
     report = pipeline.run(FakeContext(), AnalysisConfig(online=False))
 

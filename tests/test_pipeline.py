@@ -5,8 +5,12 @@
 
 from __future__ import annotations
 
+import logging
+
+import pytest
 
 from apkscan.core import infra, pipeline
+from apkscan.core.meta_contract import META_KEY_REGISTRY, MetaKeyContract
 from apkscan.core.models import (
     DOWNGRADE_SOURCE_TIER,
     AnalysisConfig,
@@ -95,6 +99,20 @@ class _CrashingEnricher(BaseEnricher):
         raise RuntimeError("network down")
 
 
+@pytest.fixture(autouse=True)
+def _register_local_analyzer_contract(monkeypatch):  # type: ignore[no-untyped-def]
+    """本文件的 fake 分析器也必须显式获得测试所需权限，不能依赖生产白名单后门。"""
+    current = META_KEY_REGISTRY["packer"]
+    monkeypatch.setitem(
+        META_KEY_REGISTRY,
+        "packer",
+        MetaKeyContract(
+            owners=current.owners | {"good"},
+            merge=current.merge,
+        ),
+    )
+
+
 # --- 测试 ------------------------------------------------------------------
 
 
@@ -144,6 +162,59 @@ def test_pipeline_runs_and_records_errors(monkeypatch, fake_ctx):
     assert f1.id == "F1"
     assert f1.analyzer == "good"  # 集中盖章（_GoodAnalyzer 未自标 → 盖成分析器名）
     assert f1.confidence == Confidence.MEDIUM
+
+
+def test_pipeline_atomically_rejects_unregistered_analyzer_meta(
+    monkeypatch, fake_ctx, caplog
+):  # type: ignore[no-untyped-def]
+    """走 run 真入口：一个越权键使整块 meta 拒绝，并留下 ERROR 与分析器错误状态。"""
+
+    class _ViolatingAnalyzer(BaseAnalyzer):
+        name = "contract_probe"
+        requires: list[str] = []
+
+        def analyze(self, ctx) -> AnalyzerResult:  # noqa: ARG002
+            return AnalyzerResult(
+                analyzer=self.name,
+                meta={"packer": "legal-looking", "unregistered_probe_key": 1},
+            )
+
+    packer_contract = META_KEY_REGISTRY["packer"]
+    monkeypatch.setitem(
+        META_KEY_REGISTRY,
+        "packer",
+        MetaKeyContract(
+            owners=packer_contract.owners | {"contract_probe"},
+            merge=packer_contract.merge,
+        ),
+    )
+    monkeypatch.setattr(pipeline, "discover_analyzers", lambda: [_ViolatingAnalyzer()])
+    monkeypatch.setattr(pipeline, "discover_enrichers", lambda: [])
+    monkeypatch.setattr(pipeline, "detect_capabilities", lambda online=True: set())
+
+    with caplog.at_level(logging.ERROR, logger="apkscan.core.pipeline"):
+        report = pipeline.run(fake_ctx, AnalysisConfig(online=False))
+
+    assert "packer" not in report.meta, "违规分析器的合法子集被部分合并，原子拒绝失效"
+    assert "unregistered_probe_key" not in report.meta
+    status = next(s for s in report.analyzer_status if s["name"] == "contract_probe")
+    assert status["status"] == "error"
+    assert "meta 契约违规" in status["reason"]
+    assert any(
+        record.levelno == logging.ERROR and "unregistered_probe_key" in record.message
+        for record in caplog.records
+    )
+
+
+def test_pipeline_merges_registered_analyzer_meta(monkeypatch, fake_ctx):
+    """走 run 真入口：获准键仍按普通策略进入最终 Report.meta。"""
+    monkeypatch.setattr(pipeline, "discover_analyzers", lambda: [_GoodAnalyzer()])
+    monkeypatch.setattr(pipeline, "discover_enrichers", lambda: [])
+    monkeypatch.setattr(pipeline, "detect_capabilities", lambda online=True: set())
+
+    report = pipeline.run(fake_ctx, AnalysisConfig(online=False))
+
+    assert report.meta["packer"] == "none"
 
 
 def test_endpoint_leads_built_from_domains_and_ips(monkeypatch, fake_ctx):

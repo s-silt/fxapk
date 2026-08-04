@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import pytest
@@ -465,6 +466,105 @@ def test_repository_scan_finds_real_known_keys() -> None:
     assert "dex_strings_truncated" in res.produced
     assert "dex_strings_truncated" in res.production_consumed  # core/visibility.py 读它
     assert "app_classification" in res.produced
+
+
+def _dex_helper_result_owners(root: Path) -> set[str]:
+    """找出把 ``result`` 传给共享 DEX helper 的分析器。
+
+    这是 ``_common`` 跨文件写入的真实 owner 传播边：调用方虽没在本文件
+    直接写键，helper 会写进它传入的 AnalyzerResult。
+    """
+    owners: set[str] = set()
+    for path in (root / "apkscan" / "analyzers").glob("*.py"):
+        if path.name == "_common.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        helper_names = {"collect_dex_strings", "_collect_dex_strings_shared", "_collect_dex_strings"}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            # ★属性形态也要认：``_common.collect_dex_strings(...)`` / ``self._collect_dex_strings(...)``。
+            #   只认 ``ast.Name`` 会漏掉这种写法，于是新分析器不会被登记、也不会被本测试挑出，
+            #   到运行时截断样本上整块 meta 被拒——正是本轮 packing/re_toolkit 那个缺陷的下一次复发。
+            fn = node.func
+            name = fn.id if isinstance(fn, ast.Name) else (fn.attr if isinstance(fn, ast.Attribute) else "")
+            if name not in helper_names:
+                continue
+            if any(kw.arg == "result" and not (
+                isinstance(kw.value, ast.Constant) and kw.value.value is None
+            ) for kw in node.keywords):
+                owners.add(path.stem)
+                break
+    return owners
+
+
+def _owners_for_access(file: str, key: str) -> set[str]:
+    module = Path(file).stem
+    if module == "web_evidence":
+        return {
+            name for name in ("web_inline_config", "web_redirect_chain", "web_request_recipe")
+            if key.startswith(f"{name}_") or key == name
+        }
+    return {module}
+
+
+def test_analyzer_meta_registry_matches_all_static_writes_both_ways() -> None:
+    """具体键、有限键族、共享 helper 写入都必须与注册表双向一致。"""
+    from apkscan.core.meta_contract import META_KEY_REGISTRY, PIPELINE_OWNER
+    from apkscan.analyzers.web_evidence import iter_coverage_meta_keys
+
+    root = Path(__file__).resolve().parents[2]
+    res = meta_scan.scan_repository(root)
+    observed: set[tuple[str, str]] = set()
+
+    # 普通字面量写入。classify 写 report.meta，属于 pipeline 后阶段，不是分析器返回块。
+    for key, accesses in res.produced.items():
+        for access in accesses:
+            if not access.file.startswith("apkscan/analyzers/"):
+                continue
+            module = Path(access.file).stem
+            if module in {"_common", "classify"}:
+                continue
+            owners = _owners_for_access(access.file, key)
+            contract = META_KEY_REGISTRY.get(key)
+            assert contract is not None, f"{access.file}:{access.line} 写入未注册键 {key!r}"
+            assert owners & contract.owners, (
+                f"{access.file}:{access.line} 写入 {key!r}，但 owner 未登记：{contract.owners}"
+            )
+            observed.update((key, owner) for owner in owners)
+
+    # 有限键族不在 produced：扫描器把它单独放在 families，必须显式展开。
+    assert any(a.key.startswith("<family:web_coverage:") for a in res.families)
+    for key in iter_coverage_meta_keys():
+        owners = _owners_for_access("apkscan/analyzers/web_evidence.py", key)
+        contract = META_KEY_REGISTRY.get(key)
+        assert contract is not None, f"有限键族写入未注册：{key!r}"
+        assert owners & contract.owners, f"有限键族 owner 未登记：{key!r} -> {owners}"
+        observed.update((key, owner) for owner in owners)
+
+    # _common 是真实写入点，owner 是把自己 result 传给 helper 的调用方。
+    helper_owners = _dex_helper_result_owners(root)
+    truncation = META_KEY_REGISTRY["dex_strings_truncated"]
+    assert helper_owners <= truncation.owners, (
+        f"共享 DEX helper 的 owner 未登记：{sorted(helper_owners - truncation.owners)}"
+    )
+    observed.update(("dex_strings_truncated", owner) for owner in helper_owners)
+
+    # 反向核对：分析器所有的每个登记项都必须有可见的生产写入路径。
+    registered = {
+        (key, owner)
+        for key, contract in META_KEY_REGISTRY.items()
+        for owner in contract.owners
+        if owner != PIPELINE_OWNER
+    }
+    assert registered == observed, (
+        f"注册表/静态生产路径漂移："
+        f"只在注册表={sorted(registered - observed)}；"
+        f"只在生产路径={sorted(observed - registered)}"
+    )
+
+    derived = META_KEY_REGISTRY["dex_strings_truncated_by"]
+    assert derived.owners == frozenset({PIPELINE_OWNER}), "派生键必须登记为 pipeline 所有"
 
 
 def test_template_scan_catches_jinja_reads() -> None:

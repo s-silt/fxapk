@@ -36,6 +36,11 @@ from apkscan.core.models import (
     Report,
     seal_base_advice,
 )
+from apkscan.core.meta_contract import (
+    MERGE_BOOLEAN_OR,
+    META_KEY_REGISTRY,
+    allowed_meta_keys,
+)
 from apkscan.core.registry import (
     detect_capabilities,
     discover_analyzers,
@@ -308,9 +313,22 @@ def _stage_run_analyzers(state: _PipelineState) -> None:
                 finding.analyzer = name
         state.findings.extend(result.findings)
         if result.meta:
+            # 必须校验分析器返回的原始 keys；任一越权即原子拒绝整块 meta，不能让合法子集先落地。
+            # endpoints/leads/findings 是独立产物，保留；状态改为 error，使整份分析继续但显著降级。
+            raw_keys = frozenset(result.meta.keys())
+            illegal = sorted(raw_keys - allowed_meta_keys(name))
+            if illegal:
+                reason = f"meta 契约违规：未登记键 {illegal!r}"
+                logger.error("分析器 %s %s；已拒绝该分析器全部 meta", name, reason)
+                state.analyzer_status.append({"name": name, "status": "error", "reason": reason})
+                continue
+
             # ★截断标记是**或运算**，不是覆盖：实测一个样本上 11 个分析器同时截断，若按普通
             #   meta 合并，最后一个写 False 的会把前面的 True 抹掉——"没扫全"这件事就此消失。
             #   顺带记下是谁截断的，让人能定位到具体哪块没扫完。
+            truncated_contract = META_KEY_REGISTRY[_DEX_TRUNCATED_KEY]
+            if truncated_contract.merge != MERGE_BOOLEAN_OR:
+                raise RuntimeError("dex_strings_truncated 必须声明 boolean_or 合并策略")
             if result.meta.get(_DEX_TRUNCATED_KEY):
                 meta[_DEX_TRUNCATED_KEY] = True
                 truncated = meta.setdefault(_DEX_TRUNCATED_BY_KEY, [])
