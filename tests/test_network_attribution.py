@@ -1005,16 +1005,27 @@ def test_giant_first_contact_ts_on_own_ip_endpoint_no_raise() -> None:
 def test_known_intercept_ips_cover_both_carriers() -> None:
     """拦截节点名单要覆盖已确认的多家运营商，且 IPv4-mapped 写法不能绕过。
 
-    ★为什么锁"不止一条"：这份名单的价值在于**成规模地**把反诈拦截页排除出归属，
-      只有一条时很容易被当成个例删掉。已确认的两个分属移动与电信，形态一致
-      （自签/ISP 证书 + 拦截提示页 + 业务 API 403）。
+    ★为什么逐条钉住而不是只断言条数：``len >= 2`` 只锁**基数**、不锁**内容**——
+      把两条都换成垃圾值、或两条都改成同一家运营商，它照样绿，
+      而测试名声称的"双运营商覆盖"一行都没验到。
 
-    ★收录门槛也一并写在这里：必须有主动观测到的上述形态，
+    ★为什么电信那条尤其要在这里钉：移动那条已被本文件与 test_pcap_ingest 的多处
+      行为测试间接钉死；电信那条在全仓**别处零引用**，被静默删掉或写错一位时
+      全仓仍绿，而后果是该拦截页重新以"落地 IP"进归因——那正是这份名单要防的。
+
+    ★收录门槛：必须有主动观测到的形态（自签/ISP 证书 + 拦截提示页 + 业务 API 403），
       **不能**因为"某个涉案域名解析到过它"就收——那只说明该域名被拦了。
     """
     from apkscan.network.fingerprints import KNOWN_INTERCEPT_IPS, is_known_intercept_ip
 
-    assert len(KNOWN_INTERCEPT_IPS) >= 2, "名单退化到单条，排除能力形同虚设"
+    # 这两个值本就在源码里（公开仓库可见），逐条钉住不产生新的暴露面。
+    confirmed = {
+        "183.192.65.101",  # leak-scan: allow 已确认的运营商反诈拦截节点，判据数据本身
+        "182.43.124.7",  # leak-scan: allow 同上
+    }
+    missing = confirmed - set(KNOWN_INTERCEPT_IPS)
+    assert not missing, f"已确认的拦截节点被移出名单：{sorted(missing)}"
+
     for ip in KNOWN_INTERCEPT_IPS:
         assert is_known_intercept_ip(ip), ip
         # IPv4-mapped IPv6 写法必须折回同一判定，否则换个写法就绕过去了
