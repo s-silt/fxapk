@@ -548,6 +548,51 @@ def _owners_for_access(file: str, key: str) -> set[str]:
     return {module}
 
 
+def _static_meta_declaration(path: Path) -> tuple[str, set[str]] | None:
+    """读取模块内的非分析器声明，不 import 生产模块、不给测试引入副作用。"""
+    values: dict[str, object] = {}
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if len(targets) != 1 or not isinstance(targets[0], ast.Name):
+            continue
+        name = targets[0].id
+        value = node.value
+        if name == "META_WRITE_OWNER" and value is not None:
+            values[name] = ast.literal_eval(value)
+        elif (
+            name == "META_WRITE_KEYS"
+            and isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "frozenset"
+            and len(value.args) == 1
+        ):
+            values[name] = set(ast.literal_eval(value.args[0]))
+    if not values:
+        return None
+    assert set(values) == {"META_WRITE_OWNER", "META_WRITE_KEYS"}, (
+        f"{path}: meta 写入声明必须同时包含 owner 与 keys"
+    )
+    owner = values["META_WRITE_OWNER"]
+    keys = values["META_WRITE_KEYS"]
+    assert isinstance(owner, str) and owner
+    assert isinstance(keys, set) and all(isinstance(key, str) and key for key in keys)
+    return owner, keys
+
+
+def _owner_from_module_path(file: str) -> str:
+    """owner 就是产生层的模块路径；由路径推导，避免另建中心 owner 清单。"""
+    path = Path(file)
+    parts = list(path.with_suffix("").parts)
+    assert parts[0] == "apkscan"
+    parts = parts[1:]
+    if parts[-1] == "__init__":
+        parts.pop()
+    return ".".join(parts)
+
+
 def test_analyzer_meta_declarations_match_all_static_writes_both_ways() -> None:
     """具体键、有限键族、共享 helper 写入都必须与分析器声明双向一致。"""
     from apkscan.core.meta_contract import META_KEY_REGISTRY, PIPELINE_OWNER
@@ -602,6 +647,46 @@ def test_analyzer_meta_declarations_match_all_static_writes_both_ways() -> None:
     assert derived.owners == frozenset({PIPELINE_OWNER}), "派生键必须登记为 pipeline 所有"
     missing = META_KEY_REGISTRY["missing_analyzers"]
     assert missing.owners == frozenset({PIPELINE_OWNER}), "缺席留痕键必须登记为 pipeline 所有"
+
+
+def test_non_analyzer_meta_declarations_match_all_static_writes_both_ways() -> None:
+    """第一方 stage 的模块内声明与实际写入必须键、owner 双向一致。"""
+    root = Path(__file__).resolve().parents[2]
+    res = meta_scan.scan_repository(root)
+    excluded = {"apkscan/core/report_io.py"}  # 反序列化边界按设计开放
+    observed_files = {
+        access.file
+        for accesses in res.produced.values()
+        for access in accesses
+        if access.kind == "write"
+        and access.file.startswith("apkscan/")
+        and not access.file.startswith("apkscan/analyzers/")
+        and access.file not in excluded
+    }
+
+    declared: set[tuple[str, str]] = set()
+    for path in (root / "apkscan").rglob("*.py"):
+        declaration = _static_meta_declaration(path)
+        if declaration is None:
+            continue
+        file = path.relative_to(root).as_posix()
+        owner, keys = declaration
+        assert file in observed_files, f"{file} 有 meta 声明但没有生产写入"
+        expected_owner = _owner_from_module_path(file)
+        assert owner == expected_owner, f"{file} owner 应为 {expected_owner!r}，实际 {owner!r}"
+        declared.update((key, owner) for key in keys)
+
+    observed = {
+        (key, _owner_from_module_path(access.file))
+        for key, accesses in res.produced.items()
+        for access in accesses
+        if access.kind == "write" and access.file in observed_files
+    }
+    assert declared == observed, (
+        "非分析器声明/静态生产路径漂移："
+        f"只在声明={sorted(declared - observed)}；"
+        f"只在生产路径={sorted(observed - declared)}"
+    )
 
 
 def test_template_scan_catches_jinja_reads() -> None:

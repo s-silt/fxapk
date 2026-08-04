@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-
 from apkscan.analyzers.classify import classify_app
 from apkscan.config.asset_score import rank_assets
 from apkscan.config.chain import build_control_chains
@@ -75,6 +74,19 @@ from apkscan.core.enrichment import (
 # 分析器进程池并行 + 内存封顶决策已物理拆到 apkscan/core/parallel.py（纯搬移）；_stage_run_analyzers
 # 经 _analyze_eligible 调用本簇。并行/内存机器的 monkeypatch 测试现打补丁到 parallel.* 命名空间。
 from apkscan.core.parallel import _analyze_eligible
+
+META_WRITE_OWNER = "core.pipeline"
+META_WRITE_KEYS = frozenset({
+    "active_enrichers_enabled", "active_enrichers_skipped_passive_mode", "analysis_environment",
+    "analysis_started_at", "apk_validation_warning", "asset_scores", "config_probe_plan",
+    "control_chains", "dependency_versions", "dex_parse_failed", "dex_strings_truncated",
+    "dex_strings_truncated_by", "enriched_target_count", "enrichment_skipped_offline",
+    "extra_dex_visibility", "missing_analyzers", "mode", "network_attribution",
+    "overseas_targets", "remote_config_archived", "remote_config_artifacts",
+    "remote_config_fetch_skipped", "remote_config_fetch_skipped_passive_mode",
+    "remote_config_fetched", "repack_quarantine", "ruleset_digest", "stage_status",
+    "tool_version", "visibility",
+})
 
 if TYPE_CHECKING:
     from collections.abc import Callable

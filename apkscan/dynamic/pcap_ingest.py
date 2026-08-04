@@ -45,6 +45,9 @@ from apkscan.network.fingerprints import (  # noqa: F401 — public re-export (c
 
 logger = logging.getLogger(__name__)
 
+META_WRITE_OWNER = "dynamic.pcap_ingest"
+META_WRITE_KEYS = frozenset({"runtime_merged", "runtime_merged_inventory", "runtime_pcap_merges"})
+
 _SOURCE = "runtime-pcap"
 
 # TLS GREASE 值（JA3 计算须剔除）：0x0a0a, 0x1a1a, …, 0xfafa。

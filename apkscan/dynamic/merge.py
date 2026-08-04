@@ -45,6 +45,18 @@ from apkscan.core.models import (
     seal_base_advice,
 )
 
+META_WRITE_OWNER = "dynamic.merge"
+META_WRITE_KEYS = frozenset({
+    "capture_capabilities", "capture_quality", "capture_signals", "comm_sessions",
+    "repack_quarantine", "runtime_antidetect", "runtime_brand_hints", "runtime_clipboard",
+    "runtime_clipboard_address_count", "runtime_credential_count", "runtime_credentials",
+    "runtime_crypto_event_count", "runtime_crypto_recipe", "runtime_database_count",
+    "runtime_databases", "runtime_db_digests", "runtime_dead_drop", "runtime_dead_drop_relations",
+    "runtime_decrypt_stats", "runtime_decrypted", "runtime_endpoint_count", "runtime_jsbridge",
+    "runtime_merged", "runtime_remote_control", "runtime_remote_control_targets",
+    "runtime_remote_control_unknown_packages", "runtime_sensitive_apis", "runtime_traced", "visibility",
+})
+
 logger = logging.getLogger(__name__)
 
 # 运行时端点 / 证据的来源标记（与 capture._collect_flow_endpoints / models.Evidence 约定一致）。

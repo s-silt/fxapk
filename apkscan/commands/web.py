@@ -26,6 +26,9 @@ from apkscan.core.webctx import load_web_evidence
 
 logger = logging.getLogger(__name__)
 
+META_WRITE_OWNER = "commands.web"
+META_WRITE_KEYS = frozenset({"online", "web_evidence"})
+
 #: 报告文件名兜底 base（证据目录名不可用时）。
 _FALLBACK_BASE = "web_evidence"
 
