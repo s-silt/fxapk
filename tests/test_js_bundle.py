@@ -405,7 +405,7 @@ def test_small_bundle_behavior_unchanged() -> None:
     assert result.meta["js_files_scanned"] == 1
 
 #: vendor bundle 夹具路径：文件名用扁平 vendor 命名，目录取分析器会扫的位置。
-_VENDOR_PATH = "assets/apps/__UNI__X/www/chunk-vendors.bc47c059.js"
+_VENDOR_PATH = "assets/apps/__UNI__X/www/chunk-vendors.deadbeef.js"
 #: 夹具 IP 取 6to4 已弃用段——文档段（RFC 5737）会被 is_noise_bare_ip 当噪音滤掉，
 #: 端点根本进不来，断言会以"两种原因产出同一个绿"的方式失效。
 _VENDOR_IP_A = "192.88.99.9"   # leak-scan: allow 见 tests/doc_addresses.GLOBAL_FIXTURE_NET
@@ -609,11 +609,11 @@ def test_flat_vendor_bundle_names_are_hint_only_not_tier() -> None:
     """
     from apkscan.core import infra
 
-    for loc in ("chunk-vendors.bc47c059.js", "evidence/chunk-vendors.abc.js",
+    for loc in ("chunk-vendors.deadbeef.js", "evidence/chunk-vendors.abc.js",
                 "vendors~main.1a2b.js", "vendor.9f8e.js"):
         assert infra.name_vendor_hint(loc) is True, loc
         assert infra.domain_source_tier(loc, 0) == infra.TIER_APP, f"{loc} 仍被文件名降档"
-    for loc in ("app.204b4fda.js", "evidence/index.html"):
+    for loc in ("app.cafebabe.js", "evidence/index.html"):
         assert infra.name_vendor_hint(loc) is False, loc
         assert infra.domain_source_tier(loc, 0) == infra.TIER_APP, loc
 
@@ -654,9 +654,9 @@ def test_web_context_keeps_site_own_minified_code_at_app_tier() -> None:
                 "dist/assets/index.js", "assets/vendor/config.js"):
         assert infra.domain_source_tier(loc, 0, context="web") == infra.TIER_APP, loc
     # web 语境：vendor 命名也不再降档（basename 已整体撤出 tier 判据），但仍产弱排序信号
-    for loc in ("chunk-vendors.bc47c059.js", "static/js/chunk-vendors.abc.js"):
+    for loc in ("chunk-vendors.deadbeef.js", "static/js/chunk-vendors.abc.js"):
         assert infra.domain_source_tier(loc, 0, context="web") == infra.TIER_APP, loc
-    assert infra.name_vendor_hint("chunk-vendors.bc47c059.js", context="web") is True
+    assert infra.name_vendor_hint("chunk-vendors.deadbeef.js", context="web") is True
     # APK 语境（默认）不受影响：同样这些路径照旧判 library-file
     for loc in ("static/js/app.a1b2.min.js", "js/main.min.js", "assets/vendor/config.js"):
         assert infra.domain_source_tier(loc, 0) == infra.TIER_LIBRARY_FILE, loc

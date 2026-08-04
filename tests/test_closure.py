@@ -166,7 +166,7 @@ def test_close_report_untruncated_targets_stay_complete() -> None:
     assert closure["target_selection"]["candidate_total"] == closure["target_selection"]["selected"] == 2
 
 
-_VENDOR_BUNDLE = "assets/apps/__UNI__X/www/chunk-vendors.bc47c059.js"
+_VENDOR_BUNDLE = "assets/apps/__UNI__X/www/chunk-vendors.deadbeef.js"
 _APP_BUNDLE = "assets/apps/__UNI__X/www/app-service.js"
 
 
