@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from apkscan.analyzers._common import EndpointCollector, snippet_around, truncate
+from apkscan.core import infra
 from apkscan.core.models import (
     AnalyzerResult,
     Confidence,
@@ -126,12 +127,20 @@ def _iter_text(
 
 
 def _add_endpoint(collector: EndpointCollector, raw: str, path: str, snippet: str) -> None:
-    """把一个 URL / 域名收进端点表（形态校验后），标明文/私网。非法形态静默丢。"""
+    """把一个 URL / 域名收进端点表（形态校验后），标明文/私网 + 来源可信度档。非法形态静默丢。
+
+    ★来源档（tier）必须在这里打：网页证据里混着第三方 vendor bundle，它们的常量
+      不该与站点自身的配置同档。此前本函数只 ``add`` 不 ``mark_tier``，于是 web 侧
+      整条链路都没有降噪机制——``leads`` 的 tier 降档判据形同虚设。
+      ``raw_len`` 传 0 是有意的：网页证据的 snippet 已被截断，长度代表不了原字面量，
+      拿它去判 bulk-string 会误判；这里只让**路径 glob** 那一条生效。
+    """
     value = raw.strip().strip("'\"")
     if not value or len(value) > 2048:
         return
     low = value.lower()
     evidence = Evidence(source=EVIDENCE_SOURCE, location=path, snippet=truncate(snippet, SNIPPET_MAX))
+    tier = infra.domain_source_tier(path, 0)
     if low.startswith(("http://", "https://", "ws://", "wss://")):
         host = host_from_url(value)
         if not host or not valid_url_host(host):
@@ -143,10 +152,12 @@ def _add_endpoint(collector: EndpointCollector, raw: str, path: str, snippet: st
             is_cleartext=low.startswith(("http://", "ws://")),
             is_private=host_is_private(host),
         )
+        collector.mark_tier(value, tier)
         return
     # 裸域名：必须过既有形态校验（避免把 a.length / rect.top 之类代码当域名）。  # leak-scan: allow 注释里的 rect.top 是属性访问示例，非域名
     if valid_url_host(value) and "." in value:
         collector.add(value, "domain", evidence, is_private=host_is_private(value))
+        collector.mark_tier(value, tier)
 
 
 # ---------------------------------------------------------------------------

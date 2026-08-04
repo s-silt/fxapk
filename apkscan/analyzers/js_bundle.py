@@ -697,6 +697,10 @@ class JsBundleAnalyzer(BaseAnalyzer):
                     Evidence(source="js", location=path, snippet=host_snippet),
                     is_private=_ip_is_private(host_ip),
                 )
+                # ★IP 与域名同样要打来源档：此前只有域名分支标 tier，IP 整类不降档，
+                #   于是第三方 bundle（ethers 等库）里硬编码的公共节点会以 is_c2=true
+                #   进调证出口——实测一份 vendor bundle 就送进 28 个这样的"目标"。
+                collector.mark_tier(host, infra.domain_source_tier(path, len(literal)))
             elif _looks_like_domain(host):
                 collector.add(
                     host,
@@ -725,6 +729,8 @@ class JsBundleAnalyzer(BaseAnalyzer):
                 Evidence(source="js", location=path, snippet=_short(m.group(), rules.snippet_max)),
                 is_private=_ip_is_private(ip_obj),
             )
+            # 同上：裸 IP 也走来源档，否则第三方库常量里的裸 IP 直接进最高档。
+            collector.mark_tier(ip_str, infra.domain_source_tier(path, len(literal)))
 
         # 3) 裸域名 / host（字面量内放宽 TLD，但排除文件名 / 命名空间 / 代码词）。
         for m in _DOMAIN_RE.finditer(literal):

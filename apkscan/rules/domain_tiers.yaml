@@ -69,6 +69,16 @@ library_file_globs:
   - "*/static/lime-echart/*"
   - "*echarts.min.js"
   - "*lame.min.js"
+  # ★不带路径前缀的 vendor bundle 命名：网页证据常是**扁平目录**（证据抓下来就是
+  #   chunk-vendors.<hash>.js，没有 /static/js/ 这一层），只写带路径的模式会整类漏掉。
+  #   实测漏过一次：一份 vendor bundle 里 ethers 等库硬编码的公共节点，全部以最高档
+  #   进了调证出口，把真实站点挤出主目标。
+  - "chunk-vendors*"
+  - "*/chunk-vendors*"
+  - "vendors~*"
+  - "*/vendors~*"
+  - "vendor.*.js"
+  - "*/vendor.*.js"
   - "*/static/js/chunk-vendors*"
   - "*polyfill*"
   - "*/dist/*"

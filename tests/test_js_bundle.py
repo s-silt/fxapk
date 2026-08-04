@@ -403,3 +403,53 @@ def test_small_bundle_behavior_unchanged() -> None:
     result = _analyze({_UNIAPP_PATH: b"var u='https://api.real-fraud.top/login';"})
     assert "https://api.real-fraud.top/login" in _values(result)
     assert result.meta["js_files_scanned"] == 1
+
+#: vendor bundle 夹具路径：文件名用扁平 vendor 命名，目录取分析器会扫的位置。
+_VENDOR_PATH = "assets/apps/__UNI__X/www/chunk-vendors.bc47c059.js"
+#: 夹具 IP 取 6to4 已弃用段——文档段（RFC 5737）会被 is_noise_bare_ip 当噪音滤掉，
+#: 端点根本进不来，断言会以"两种原因产出同一个绿"的方式失效。
+_VENDOR_IP_A = "192.88.99.9"   # leak-scan: allow 见 tests/doc_addresses.GLOBAL_FIXTURE_NET
+_VENDOR_IP_B = "192.88.99.44"  # leak-scan: allow 同上
+
+
+def test_vendor_bundle_ip_constants_are_tier_demoted() -> None:
+    """第三方 vendor bundle 里的 IP 常量必须打上 library-file 档，不能进最高档。
+
+    ★锁的是一次实测事故：一份 ``chunk-vendors.<hash>.js`` 里第三方库硬编码的公共节点，
+      28 个 IP 全部以 ``is_c2=true`` / 建议调证进了闭环主目标，把真实站点挤到第 25 位
+      之后——办案方拿到的前 6 个"目标"没有一个是本案后端。
+
+    两个缺陷叠加才造成它，**两个都被这条锁住**：
+      ① ``mark_tier`` 此前只在**域名**分支调用，IP 整类不降档；
+      ② vendor glob 只有带路径的 ``*/static/js/chunk-vendors*``，扁平文件名匹配不上。
+
+    ★必须走 ``_analyze`` 真入口。先前写过一版在测试里自己调 ``mark_tier``，
+      把分析器里那行删掉照样绿——假绿，锁不住缺陷①。
+    """
+    from apkscan.core import infra
+
+    js = f'var rpc="https://{_VENDOR_IP_A}:8545/rpc";var bare="{_VENDOR_IP_B}";'.encode()
+    by = {ep.value: ep for ep in _analyze({_VENDOR_PATH: js}).endpoints}
+
+    for ip in (_VENDOR_IP_A, _VENDOR_IP_B):
+        assert ip in by, f"{ip} 未被提取——夹具或提取逻辑变了，本条断言已失去意义"
+        tier = by[ip].enrichment.get("tier")
+        assert tier == infra.TIER_LIBRARY_FILE, (
+            f"vendor bundle 里的 IP {ip} 未降档（tier={tier!r}）——它会以最高档进调证出口"
+        )
+
+    # ★对照：站点自身的业务 bundle 不降档，真后端不受误伤
+    app_path = "assets/apps/__UNI__X/www/app-service.js"
+    app_by = {ep.value: ep for ep in _analyze({app_path: js}).endpoints}
+    assert app_by[_VENDOR_IP_A].enrichment.get("tier") == infra.TIER_APP
+
+
+def test_flat_vendor_bundle_names_hit_library_file_glob() -> None:
+    """扁平命名的 vendor bundle 要能命中 glob（网页证据没有 /static/js/ 那一层）。"""
+    from apkscan.core import infra
+
+    for loc in ("chunk-vendors.bc47c059.js", "evidence/chunk-vendors.abc.js",
+                "vendors~main.1a2b.js", "vendor.9f8e.js"):
+        assert infra.domain_source_tier(loc, 0) == infra.TIER_LIBRARY_FILE, loc
+    for loc in ("app.204b4fda.js", "evidence/index.html"):
+        assert infra.domain_source_tier(loc, 0) == infra.TIER_APP, loc
