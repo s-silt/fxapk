@@ -99,6 +99,50 @@ def _target_rank(
     )
 
 
+def _static_source_group(endpoint: Endpoint) -> str:
+    """该端点的静态来源组：全部证据同属一个文件时返回该文件路径，否则空串。
+
+    空串表示「不参与来源配额」——要么没有位置信息，要么这个值在多处独立出现过
+    （那本身就是它不是某一个文件的内嵌常量的证据，不该被配额压后）。
+    """
+    locations = {str(ev.location or "").replace("\\", "/").lower() for ev in endpoint.evidences}
+    locations.discard("")
+    return locations.pop() if len(locations) == 1 else ""
+
+
+def _diversify_by_source(ordered: list[Endpoint]) -> tuple[list[Endpoint], int]:
+    """首轮每个静态来源组只占一个名额，同组其余候选顺延到后面。返回 (重排结果, 顺延数)。
+
+    ★这条治的是本工具出过的一次实测事故：一份 ``chunk-vendors.<hash>.js`` 里第三方库硬编码
+      的 28 个公共节点 IP 全部判「建议调证」，把 Top-6 目标占满，真实站点被挤到第 25 位之后
+      ——办案方拿到的前 6 个调证目标没有一个是本案后端。
+
+    ★为什么按「来源拥塞」治而不是按「识别第三方库」治：判断"这文件是不是第三方库"只能靠
+      文件名 glob 或已知域名名单，两者都是**建它的人自己起的字符串**，可任意伪造；一旦把它
+      做成硬判据，对手只要把业务主 bundle 命名成 ``chunk-vendors.<hash>.js``，真后端就会
+      确定性地退出闭环候选——误判方向对对手有利。而「同一个文件贡献了一整簇候选」是结构性
+      事实，不需要知道那文件是什么，伪造它也无从获益：把真后端和一堆诱饵塞进同一个文件，
+      只会让它们彼此竞争同一个名额，而真后端在别处（另一文件 / 运行时）的出现照常入选。
+
+    ★实连过的对端**不受配额限制**：那已经不是"某个文件里的字面量"，而是这台设备真的连过。
+    """
+    first: list[Endpoint] = []
+    deferred: list[Endpoint] = []
+    used_groups: set[str] = set()
+    for endpoint in ordered:
+        if _runtime_info(endpoint).get("observed"):
+            first.append(endpoint)
+            continue
+        group = _static_source_group(endpoint)
+        if group and group in used_groups:
+            deferred.append(endpoint)
+            continue
+        if group:
+            used_groups.add(group)
+        first.append(endpoint)
+    return first + deferred, len(deferred)
+
+
 def _select_targets_with_stats(report: Report, max_targets: int) -> tuple[list[Endpoint], dict[str, object]]:
     """Order suspicious domain/IP leads (runtime-first) and split at ``max_targets``.
 
@@ -183,6 +227,10 @@ def _select_targets_with_stats(report: Report, max_targets: int) -> tuple[list[E
         seen.add(key)
         ordered.append(endpoint)
 
+    # 同源去拥塞：首轮每个静态来源文件只占一个名额，避免一整簇同文件常量吃光 Top-N。
+    # ★放在排序**之后**：rank 决定组内谁代表该来源，配额只决定组间的名额分配，两者不互相污染。
+    ordered, source_deferred = _diversify_by_source(ordered)
+
     selected = ordered[:max_targets]
     dropped = ordered[max_targets:]
     stats: dict[str, object] = {
@@ -202,6 +250,11 @@ def _select_targets_with_stats(report: Report, max_targets: int) -> tuple[list[E
     if manually_restored:
         # 「这条是被人放行的、不是判据说它干净」——必须能在闭环结果上直接看出来。
         stats["manually_restored"] = manually_restored
+    if source_deferred:
+        # 同样不静默：让读报告的人看得出「有一簇候选来自同一个文件、被顺延了」——这既是
+        # 目标为何是这几个的解释，也是「那个文件值得单独看一眼」的提示。顺延不是排除，
+        # 它们仍在候选序列里，只是排在各来源的头名之后。
+        stats["source_deferred"] = source_deferred
     return selected, stats
 
 

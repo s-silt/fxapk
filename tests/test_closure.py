@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from apkscan.core import closure as closure_module
 from apkscan.core.closure import sources as closure_sources
+from apkscan.core.closure.targets import _select_targets_with_stats
 from apkscan.core.closure import (
     CLOSURE_COMPLETE,
     CLOSURE_FAILED,
@@ -35,6 +36,7 @@ def _endpoint(
     payload: bool = False,
     sni: bool = False,
     enrichment: dict | None = None,
+    location: str = "synthetic",
 ) -> Endpoint:
     source = "runtime" if runtime else "dex"
     merged_enrichment = dict(enrichment or {})
@@ -47,7 +49,7 @@ def _endpoint(
     return Endpoint(
         value=value,
         kind=kind,
-        evidences=[Evidence(source=source, location="synthetic", snippet=value)],
+        evidences=[Evidence(source=source, location=location, snippet=value)],
         is_suspicious=True,
         enrichment=merged_enrichment,
     )
@@ -162,6 +164,76 @@ def test_close_report_untruncated_targets_stay_complete() -> None:
     assert closure["gaps"] == []
     assert closure["target_selection"]["truncated"] == 0
     assert closure["target_selection"]["candidate_total"] == closure["target_selection"]["selected"] == 2
+
+
+_VENDOR_BUNDLE = "assets/apps/__UNI__X/www/chunk-vendors.bc47c059.js"
+_APP_BUNDLE = "assets/apps/__UNI__X/www/app-service.js"
+
+
+def test_same_source_cluster_does_not_fill_all_target_slots() -> None:
+    """一整簇同文件常量不得占满 Top-N，别处来源的候选必须挤得进来。
+
+    ★锁的是实测事故：一份 ``chunk-vendors.<hash>.js`` 里第三方库硬编码的 28 个公共节点 IP
+      全判「建议调证」，把 Top-6 占满，真实站点被挤到第 25 位之后——办案方拿到的前 6 个
+      调证目标没有一个是本案后端。
+
+    ★治法刻意**不去判断"那文件是不是第三方库"**：那只能靠文件名或域名名单，两者都是建它的人
+      自己起的字符串、可任意伪造。「同一个文件贡献了一整簇候选」才是结构性事实。
+    """
+    vendor = [_endpoint(f"198.51.100.{n}", location=_VENDOR_BUNDLE) for n in range(10, 38)]
+    real_backend = _endpoint("203.0.113.9", location=_APP_BUNDLE)
+    report = _report(*vendor, real_backend)
+
+    selected = [ep.value for ep in select_targets(report, max_targets=6)]
+
+    assert "203.0.113.9" in selected, (
+        f"真后端被同源簇挤出 Top-6：{selected}——这正是本条要防的事故形态"
+    )
+    # ★首轮每组一个：真后端之前最多只能站一个同源簇的代表。事故里它前面站了 24 个。
+    #   （首轮之后剩余名额仍由顺延项填满——名额不浪费，顺延≠排除。）
+    before_real = selected[: selected.index("203.0.113.9")]
+    crowding = [v for v in before_real if v.startswith("198.51.100.")]
+    assert len(crowding) <= 1, f"同源簇在真后端之前占了 {len(crowding)} 个位置：{selected}"
+
+
+def test_source_deferral_is_reported_not_silent() -> None:
+    """被顺延的同源候选要在选择统计里可见——顺延不是排除，但必须能解释目标为何是这几个。"""
+    vendor = [_endpoint(f"198.51.100.{n}", location=_VENDOR_BUNDLE) for n in range(10, 38)]
+    report = _report(*vendor, _endpoint("203.0.113.9", location=_APP_BUNDLE))
+
+    _selected, stats = _select_targets_with_stats(report, 6)
+
+    assert stats["source_deferred"] == 27, f"顺延数不对：{stats}"
+    assert stats["candidate_total"] == 29, "顺延不该改变候选总数（顺延≠排除）"
+
+
+def test_forged_vendor_name_cannot_evict_real_backend() -> None:
+    """把真后端和一堆诱饵塞进同一个文件，伪造不到好处——诱饵只会彼此竞争同一个名额。
+
+    ★这是「按来源拥塞治」相对「按文件名识别第三方库治」的关键优势：后者一旦成硬判据，
+      对手把业务主 bundle 命名成 chunk-vendors.<hash>.js 就能让真后端确定性退出闭环。
+      本判据下，同文件的诱饵越多，被顺延的也只是它们自己。
+    """
+    forged = [_endpoint(f"198.51.100.{n}", location=_VENDOR_BUNDLE) for n in range(10, 38)]
+    # 真后端也被塞进那个伪装成 vendor 的文件里，但它在别处（app bundle）同样出现
+    elsewhere = _endpoint("203.0.113.9", location=_APP_BUNDLE)
+    report = _report(*forged, elsewhere)
+
+    selected = [ep.value for ep in select_targets(report, max_targets=6)]
+    assert "203.0.113.9" in selected
+
+
+def test_runtime_observed_endpoints_bypass_source_quota() -> None:
+    """实连过的对端不受来源配额限制——那已不是"某个文件里的字面量"，是设备真连过。"""
+    live = [
+        _endpoint(f"198.51.100.{n}", runtime=True, target=True, location=_VENDOR_BUNDLE)
+        for n in range(10, 14)
+    ]
+    report = _report(*live, _endpoint("203.0.113.9", location=_APP_BUNDLE))
+
+    selected = [ep.value for ep in select_targets(report, max_targets=6)]
+    live_selected = [v for v in selected if v.startswith("198.51.100.")]
+    assert len(live_selected) == 4, f"实连过的对端被配额压掉了：{selected}"
 
 
 def test_select_targets_prioritizes_target_attributed_runtime_endpoint() -> None:
