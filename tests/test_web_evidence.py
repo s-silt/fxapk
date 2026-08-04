@@ -470,10 +470,65 @@ def test_inline_config_does_not_read_external_script_tags() -> None:
     assert result.endpoints == []
 
 
+def test_url_only_backend_still_produces_lead() -> None:
+    """只以**完整 URL** 形态出现的后端也要产 Lead——否则整类漏掉。
+
+    ★锁的是一个既有漏报：``web_evidence`` 此前对 URL 只 ``add(kind="url")``、不派生 host，
+      而 URL 端点不直接产 Lead（见 leads 模块首段）、也不进富化目标。于是配置里写成完整
+      URL 的真后端既不发调证函、也不进闭环——而完整 URL 恰恰是网页配置里最常见的写法。
+
+    ★必须走 ``build_endpoint_leads`` 真链路：只断言"抽到了 domain 端点"锁不住这条，
+      本缺陷的要害正是端点与 Lead 之间那一段。
+    """
+    from apkscan.core.leads import build_endpoint_leads
+
+    html = f'<html><script>window.apiBase = "https://{DOC_HOST}/api/v1";</script></html>'.encode()
+    result = WebInlineConfigAnalyzer().analyze(_ctx({"web/i.html": html}))
+
+    hosts = {ep.value: ep for ep in result.endpoints if ep.kind in ("domain", "ip")}
+    assert DOC_HOST in hosts, (
+        f"URL 的 host 未派生成端点，只以完整 URL 出现的后端会整类漏掉：{[e.value for e in result.endpoints]}"
+    )
+    leads = {ld.value for ld in build_endpoint_leads([hosts[DOC_HOST]])}
+    assert DOC_HOST in leads, "host 端点没能产出 Lead"
+
+
+def test_bare_ip_in_web_config_is_ip_kind_not_domain() -> None:
+    """网页配置里的裸 IP 收成 ``kind="ip"``，不能当域名。
+
+    ★kind 决定走哪套判据与文书模板：IP 走 ``classify_ip`` + ASN/IDC 调证路径，域名走
+      ``classify_domain`` + ICP/WHOIS 注册人路径。把裸 IP 收成 domain 会拿域名模板去套一个
+      IP，且完全绕开 IP 侧的形态判据（公共解析器、低段位版本号、bogon 一个都不生效）。
+    """
+    from tests.doc_addresses import GLOBAL_FIXTURE_IP
+
+    html = f'<html><script>window.api = "https://{GLOBAL_FIXTURE_IP}:8443/x";</script></html>'.encode()
+    result = WebInlineConfigAnalyzer().analyze(_ctx({"web/i.html": html}))
+
+    by = {ep.value: ep for ep in result.endpoints}
+    assert GLOBAL_FIXTURE_IP in by, "URL 里的裸 IP 未派生成端点"
+    assert by[GLOBAL_FIXTURE_IP].kind == "ip", (
+        f"裸 IP 被收成了 {by[GLOBAL_FIXTURE_IP].kind}——会走错判据与文书模板"
+    )
+
+
+def test_web_bare_ip_noise_filtered_same_as_apk() -> None:
+    """网页侧的裸 IP 去噪与 APK 侧同口径：bogon / 保留段不产端点。"""
+    for noise in ("127.0.0.1", "0.0.0.0", "10.0.0.0"):
+        html = f'<html><script>window.api = "http://{noise}/x";</script></html>'.encode()
+        result = WebInlineConfigAnalyzer().analyze(_ctx({"web/i.html": html}))
+        vals = {ep.value for ep in result.endpoints if ep.kind == "ip"}
+        assert noise not in vals, f"{noise} 应被裸 IP 去噪拦下"
+
+
 def test_inline_config_marks_cleartext_http() -> None:
     html = f'<html><script>window.api = "http://{DOC_HOST}/x";</script></html>'.encode()
     result = WebInlineConfigAnalyzer().analyze(_ctx({"web/i.html": html}))
-    assert [ep.is_cleartext for ep in result.endpoints] == [True]
+    # ★明文性是 **URL** 的属性，不是 host 的：同一个 host 可以既有 http 又有 https 端点。
+    #   URL 现在会额外派生一条 domain/ip 端点（否则只以完整 URL 出现的后端不产 Lead），
+    #   故按 kind 取而不是断言端点总数。
+    assert [ep.is_cleartext for ep in result.endpoints if ep.kind == "url"] == [True]
+    assert [ep.value for ep in result.endpoints if ep.kind == "domain"] == [DOC_HOST]
 
 
 def test_inline_config_evidence_source_is_web_not_runtime() -> None:

@@ -41,7 +41,14 @@ from apkscan.core.models import (
     Severity,
 )
 from apkscan.core.registry import BaseAnalyzer
-from apkscan.core.textutil import host_from_url, host_is_private, valid_url_host
+from apkscan.core.textutil import (
+    host_from_url,
+    host_is_private,
+    ip_is_private,
+    is_noise_bare_ip,
+    parse_ipv4,
+    valid_url_host,
+)
 
 if TYPE_CHECKING:
     from apkscan.core.context import AnalysisContext
@@ -158,11 +165,36 @@ def _add_endpoint(collector: EndpointCollector, raw: str, path: str, snippet: st
             is_private=host_is_private(host),
         )
         collector.mark_tier(value, tier)
+        # ★URL 的 host 必须另收一条 domain/ip 端点，否则**只以完整 URL 形态出现**的后端
+        #   整类漏掉：URL 端点不直接产 Lead（见 leads 模块首段），也不进富化目标，于是形如
+        #   ``window.config={api:"https://x.com/api"}`` 的真后端既不发函也不进闭环。
+        #   与 endpoints.py 的 URL-host 通道同口径。
+        _add_host_endpoint(collector, host, evidence, tier)
         return
-    # 裸域名：必须过既有形态校验（避免把 a.length / rect.top 之类代码当域名）。  # leak-scan: allow 注释里的 rect.top 是属性访问示例，非域名
+    # 裸域名 / 裸 IP：必须过既有形态校验（避免把 a.length / rect.top 之类代码当域名）。  # leak-scan: allow 注释里的 rect.top 是属性访问示例，非域名
     if valid_url_host(value) and "." in value:
-        collector.add(value, "domain", evidence, is_private=host_is_private(value))
-        collector.mark_tier(value, tier)
+        _add_host_endpoint(collector, value, evidence, tier)
+
+
+def _add_host_endpoint(
+    collector: EndpointCollector, host: str, evidence: Evidence, tier: str
+) -> None:
+    """把一个 host 收成 domain 或 ip 端点（按形态分流），并标来源档。
+
+    ★按形态分 kind、不一律当 domain：``kind`` 决定走哪套判据与文书模板——IP 走
+      ``classify_ip`` + ASN/IDC 调证路径，域名走 ``classify_domain`` + ICP/WHOIS 注册人路径。
+      把裸 IP 收成 domain，会拿域名模板去套一个 IP，且完全绕开 IP 侧的形态判据
+      （公共解析器、低段位版本号、bogon 这些一个都不生效）。
+    """
+    ip_obj = parse_ipv4(host)
+    if ip_obj is not None:
+        # 与 endpoints/js_bundle 同口径的裸 IP 去噪：bogon/保留段、占位与版本号形态。
+        if is_noise_bare_ip(host):
+            return
+        collector.add(host, "ip", evidence, is_private=ip_is_private(ip_obj))
+    else:
+        collector.add(host, "domain", evidence, is_private=host_is_private(host))
+    collector.mark_tier(host, tier)
 
 
 # ---------------------------------------------------------------------------
