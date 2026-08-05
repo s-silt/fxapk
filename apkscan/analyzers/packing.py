@@ -99,6 +99,13 @@ _MAX_DEX_STRINGS = 200_000
 # dex_strings 命中后用于证据片段的截断长度。
 _SNIPPET_MAX = 200
 
+# 绝对路径诱饵条目落进 Finding.evidences 的条数上限。
+# ★不设成 5：分析员据此决定「解压前要剥掉哪些条目」，只给 5 条等于没给。
+# ★也不设成 200：本文件记着的实测样本就是 153+153+105=411 条，200 会丢掉过半——
+#   拿一个比已知实测量级还小的数当上限，等于默认要丢数据。取 2000（实测量级的近 5 倍），
+#   只当恶意构造 ZIP 的兜底，不当正常展示边界。超出部分在描述里**如实标明未落进报告**。
+_DECOY_EVIDENCE_CAP = 2000
+
 
 @dataclass
 class _PackerRule:
@@ -237,6 +244,27 @@ class PackingAnalyzer(BaseAnalyzer):
     # 容器结构异常：冒充核心文件名的绝对路径诱饵条目
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _decoy_scope_note(decoys: list[str]) -> str:
+        """说清「报告里到底收了多少条」——这是取证依据列本身讲不了的事。
+
+        ★具体路径不在这里重复：它们由 ``Finding.evidences`` 承载，并在 HTML 的技术发现表
+          「取证依据」列渲染。同一事实写两处，改一处忘一处就是口径分叉。
+
+        ★但**边界必须写**：实测单样本此类条目可达数百条，evidences 有上限，超出部分哪个
+          字段都没有。只给条目不说截断，会被读成「就这么几条」——与本项目反复要防的
+          「缺失被当不存在」同一个错。
+        """
+        total = len(decoys)
+        if total <= _DECOY_EVIDENCE_CAP:
+            return f"全部 {total} 条已列入本条的取证依据（report.json 的 findings[].evidences）。"
+        # 不能写「完整清单见 report.json」——承诺一份并不存在的清单比不给更坏：
+        # 分析员会以为自己已经查全了。
+        return (
+            f"共 {total} 条，本条取证依据只收录前 {_DECOY_EVIDENCE_CAP} 条，"
+            f"余下 {total - _DECOY_EVIDENCE_CAP} 条未落进报告，需自行读 APK 中央目录复核。"
+        )
+
     def _flag_core_name_decoys(self, result: AnalyzerResult, file_paths: list[str]) -> None:
         """检出「以 ``/`` 开头、首段恰为 APK 核心文件名」的诱饵条目，写 meta 并产 Finding。
 
@@ -254,10 +282,15 @@ class PackingAnalyzer(BaseAnalyzer):
         if not decoys:
             return
         impersonated: dict[str, int] = {}
+        core_decoys: list[str] = []
+        other_decoys: list[str] = []
         for path in decoys:
             head = path[1:].split("/", 1)[0]
             if head in _CORE_APK_NAMES or _EXTRA_DEX_RE.fullmatch(head):
                 impersonated[head] = impersonated.get(head, 0) + 1
+                core_decoys.append(path)
+            else:
+                other_decoys.append(path)
         result.meta["container_decoy_entries"] = {
             "absolute_path_entries": len(decoys),
             "impersonating_core_names": impersonated,
@@ -279,7 +312,9 @@ class PackingAnalyzer(BaseAnalyzer):
                 description=(
                     f"压缩包内有 {len(decoys)} 条**以 / 开头的绝对路径条目**，但首段均未冒充 "
                     "APK 核心文件名。ZIP 规范要求条目名不得为绝对路径，Android 构建工具也不产生"
-                    "此类条目——出现即人为构造；**但本例未见瞄准解析器的迹象，意图不明**。"
+                    "此类条目——出现即人为构造；**但本例未见瞄准解析器的迹象，意图不明**。\n"
+                    # 具体路径见本条的取证依据（HTML 技术发现表已渲染该列）；这里只交代边界。
+                    f"{self._decoy_scope_note(decoys)}"
                 ),
                 recommendation=(
                     "操作提示：别用会**落盘解压**的工具直接展开该样本（apktool / unzip / "
@@ -289,12 +324,15 @@ class PackingAnalyzer(BaseAnalyzer):
                 ),
                 evidences=[
                     Evidence(source="resource", location="zip-entry", snippet=_truncate(p))
-                    for p in decoys[:5]
+                    for p in decoys[:_DECOY_EVIDENCE_CAP]
                 ],
             ))
             return
 
         shown = "、".join(f"{name}×{n}" for name, n in sorted(impersonated.items()))
+        # 冒充核心名的排在前面：recommendation 让人「先剥掉以 / 开头的条目」，
+        # 而最该先看的正是瞄准解析器的那些。
+        ordered = core_decoys + other_decoys
         result.findings.append(Finding(
             id="APK-CORE-NAME-DECOY-ENTRIES",
             title="APK 内含冒充核心文件名的诱饵条目（容器级反分析构造）",
@@ -305,7 +343,9 @@ class PackingAnalyzer(BaseAnalyzer):
                 f"压缩包内有 {len(decoys)} 条**以 / 开头的绝对路径条目**，其中 {sum(impersonated.values())} 条的"
                 f"首段恰为 APK 核心文件名（{shown}）。ZIP 规范要求条目名不得为绝对路径，Android 构建工具"
                 "也从不产生此类条目——出现即人为构造，意在让解析器在定位这三个核心文件时撞上假条目。\n"
-                "★ 已实测：fxapk 自身不受影响（真样本上包名/清单/DEX 均正常解出，诱饵未遮蔽真文件）。"
+                "★ 已实测：fxapk 自身不受影响（真样本上包名/清单/DEX 均正常解出，诱饵未遮蔽真文件）。\n"
+                # 具体路径见本条的取证依据（冒充核心名的已排在前面）；这里只交代边界。
+                f"{self._decoy_scope_note(decoys)}"
             ),
             recommendation=(
                 "别用会**落盘解压**的工具直接展开该样本（apktool / unzip / 部分反编译器）："
@@ -315,7 +355,7 @@ class PackingAnalyzer(BaseAnalyzer):
             ),
             evidences=[
                 Evidence(source="resource", location="zip-entry", snippet=_truncate(p))
-                for p in decoys[:5]
+                for p in ordered[:_DECOY_EVIDENCE_CAP]
             ],
         ))
         logger.info(

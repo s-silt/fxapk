@@ -18,12 +18,23 @@ from apkscan.report import letters
 from apkscan.core.models import (
     Confidence,
     Endpoint,
+    Finding,
     Lead,
     LeadCategory,
     Report,
 )
 
 _TEMPLATE_NAME = "report.html.j2"
+
+# 单条 Finding 直接铺开的取证依据条数。取全仓生产端已声明的最大证据预算
+# （web_evidence 的 20；另有 api_surface 12、repack_identity 6、dns_bypass 5），
+# 免得展示层反过来把生产端有意保留的条数截掉——那等于替分析器改主意。
+_FINDING_EVIDENCE_PREVIEW = 20
+
+# 连折叠区在内、单条 Finding 在 HTML 里最多渲染多少条。少数 Finding 把跨规则命中全部
+# 展平（packing 的规则合并、re_toolkit 的跨 hit 展开），条数理论上不封顶，
+# 恶意构造的 ZIP 能把它推到上万条。超出的部分如实标明「只在 report.json 里」。
+_FINDING_EVIDENCE_HTML_MAX = 500
 
 # LeadCategory → 中文标签（用于线索清单分组标题）。
 CATEGORY_LABELS: dict[LeadCategory, str] = {
@@ -369,6 +380,47 @@ def _build_environment(template_dir: str) -> Environment:
     return env
 
 
+def finding_evidence_views(findings: list[Finding]) -> list[dict[str, Any]]:
+    """把每条 Finding 的取证依据压成「有界展开条目 + 省略计数」，供模板逐行对齐渲染。
+
+    ★为什么要有这个视图：在此之前 ``Finding.evidences`` 在**任何人看得见的出口**都不渲染
+      （HTML 的 findings 表只有 id/title/severity/category/description/recommendation，
+      digest 只投影 id/severity/title，letters 只读 Lead 不读 Finding），而全仓有 40+ 处
+      把关键取证值——绝对路径条目、被劫持的域名、类名、命中片段——**只**写进 evidences。
+      值到了对象、到不了人，与本项目反复要防的「信号只写不读」是同一个错。
+
+    ★为什么不是逐个把值搬进 description：那是打地鼠，且每加一个新 Finding 就要重犯一次。
+
+    分三段，因为「没展示」有两种，读报告的人必须能分清：
+    ``rows`` 直接铺开、``more_rows`` 收在折叠区里（数据都在页面上），
+    而 ``omitted`` 是**连 HTML 都没有、只在 report.json 里**的那部分。
+
+    返回顺序与入参一一对应（模板按 ``loop.index0`` 取），不拿 Finding 的 id 当键——
+    同一个 id 可能出现多条。
+    """
+
+    def row(evidence: Any) -> dict[str, str]:
+        return {
+            "source": evidence.source,
+            "location": evidence.location,
+            "snippet": evidence.snippet,
+        }
+
+    views: list[dict[str, Any]] = []
+    for finding in findings:
+        evidences = list(finding.evidences or [])
+        rendered = evidences[:_FINDING_EVIDENCE_HTML_MAX]
+        views.append(
+            {
+                # 键名不能叫 items：Jinja 的点号取属性优先，会取到 dict 自带的 .items 方法。
+                "rows": [row(e) for e in rendered[:_FINDING_EVIDENCE_PREVIEW]],
+                "more_rows": [row(e) for e in rendered[_FINDING_EVIDENCE_PREVIEW:]],
+                "omitted": len(evidences) - len(rendered),
+            }
+        )
+    return views
+
+
 def render_to_string(report: Report) -> str:
     """渲染 Report 为 HTML 字符串。
 
@@ -433,6 +485,7 @@ def _render_template(template: Any, report: Report) -> str:
         analyzer_status=report.analyzer_status or [],
         enricher_status=report.enricher_status or [],
         findings=report.findings or [],
+        finding_evidences=finding_evidence_views(report.findings or []),
     )
 
 

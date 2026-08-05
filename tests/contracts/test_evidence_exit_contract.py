@@ -18,7 +18,7 @@ from apkscan.core.evidence_exit_contract import (
     SCENARIO_TESTS, SIGNAL_KEYS_OUTSIDE_EVIDENCE_CONTRACT,
     validate_evidence_exit_contract,
 )
-from apkscan.core.models import Finding, Report, Severity
+from apkscan.core.models import Evidence, Finding, Report, Severity
 from apkscan.dynamic import merge
 from tests.conftest import FakeContext
 
@@ -200,13 +200,144 @@ def test_both_container_branches_reach_a_finding() -> None:
     weak = next(f for f in gap.findings if f.id == "APK-ABSOLUTE-PATH-ENTRIES")
     assert weak.severity is Severity.LOW, "意图不明的一支不得与冒充核心名同级"
     assert "落盘解压" in weak.recommendation, "操作风险提示必须到达分析员"
-    assert "/tmp/note.txt" in " ".join(ev.snippet for ev in weak.evidences)
+    # 具体路径由 evidences 承载并在 HTML 渲染（见下一条测试）；这里只锁「边界写没写」——
+    # 报告收了多少条、还有多少没进来，是取证依据列本身讲不了的事。
+    assert "/tmp/note.txt" in {e.snippet for e in weak.evidences}
+    assert "全部 1 条已列入" in weak.description, "收录边界必须写明，否则会被读成「就这么几条」"
 
+
+def test_absolute_path_entries_actually_reach_rendered_html() -> None:
+    """★到达「人看得见的产物」，不是到达 Finding 对象。
+
+    此前所有行为锁都止于 ``AnalyzerResult`` / ``Report.findings``，
+    证明的是「值到达了对象」。实测发现 Finding 的 evidences 在 HTML 与 digest
+    都不渲染——只放那里的值，任何出口都看不到。本条渲染真 HTML 后查值。
+    """
+    from apkscan.report.html import render_to_string
+
+    result = PackingAnalyzer().analyze(FakeContext(files={"/tmp/note.txt": b"x"}))
+    report = Report(
+        package_name="com.test.app", meta=dict(result.meta), leads=[], endpoints=[],
+        findings=list(result.findings), analyzer_status=[],
+    )
+    html = render_to_string(report)
+
+    assert "/tmp/note.txt" in html, "路径没出现在渲染后的 HTML 里"
+    assert "落盘解压" in html, "操作风险提示没出现在渲染后的 HTML 里"
+
+    # ★MEDIUM 支同样要给出**完整路径**而非仅计数：它的 recommendation 明确要求
+    #   「先剥掉以 / 开头的条目」，只报「classes2.dex×1」剥不动任何东西。
     positive = PackingAnalyzer().analyze(
         FakeContext(files={"/classes2.dex/picture.png": b"x"})
     )
-    finding = next(f for f in positive.findings if f.id == "APK-CORE-NAME-DECOY-ENTRIES")
-    assert "classes2.dex" in finding.description
+    positive_html = render_to_string(Report(
+        package_name="com.test.app", meta=dict(positive.meta), leads=[], endpoints=[],
+        findings=list(positive.findings), analyzer_status=[],
+    ))
+    assert "/classes2.dex/picture.png" in positive_html, "冒充核心名那一支的完整路径没到 HTML"
+
+
+def test_finding_evidences_are_rendered_in_html() -> None:
+    """★治本锁：``Finding.evidences`` 必须在 HTML 里渲染出来。
+
+    全仓 40+ 处把关键取证值只写进 evidences，而此前 HTML 的 findings 表只有
+    id/title/severity/category/description/recommendation，digest 只投影
+    id/severity/title，letters 只读 Lead——值到了对象、到不了人。
+    逐个把值搬进 description 是打地鼠，正解是让这个字段有出口。
+    """
+    from apkscan.report.html import (
+        _FINDING_EVIDENCE_HTML_MAX, _FINDING_EVIDENCE_PREVIEW, render_to_string,
+    )
+
+    def render(count: int) -> str:
+        finding = Finding(
+            id="X-EVIDENCE-RENDER", title="t", severity=Severity.LOW, category="c",
+            description="d", recommendation="r",
+            evidences=[
+                Evidence(source="native", location=f"lib/arm64-v8a/lib{i}.so", snippet=f"值-{i}")
+                for i in range(count)
+            ],
+        )
+        return render_to_string(Report(
+            package_name="com.test.app", meta={}, leads=[], endpoints=[],
+            findings=[finding], analyzer_status=[],
+        ))
+
+    small = render(3)
+    assert "lib/arm64-v8a/lib0.so" in small and "值-0" in small, "证据的位置与片段都要渲染"
+    assert "展开其余" not in small and "另有" not in small, "没有省略时不该出现任何省略提示"
+
+    # ★预览条数不得低于生产端自己声明的证据预算（web_evidence 就切了 20 条）——
+    #   展示层把生产端有意保留的条数截掉，等于替分析器改主意。
+    assert _FINDING_EVIDENCE_PREVIEW >= 20
+
+    over = _FINDING_EVIDENCE_HTML_MAX + 30
+    big = render(over)
+    # 三段各自的边界都要如实：铺开的、折叠的、连 HTML 都没有的。
+    assert f"展开其余 {_FINDING_EVIDENCE_HTML_MAX - _FINDING_EVIDENCE_PREVIEW} 条" in big
+    assert f"lib{_FINDING_EVIDENCE_HTML_MAX - 1}.so" in big, "折叠区里的证据仍须在页面上"
+    assert "另有 30 条未在 HTML 中展示" in big, "连折叠区都放不下的部分必须单独说明"
+    # ★两种「没显示」不能混：折叠区翻一下就有，这 30 条是真的不在页面上。
+    assert "完整清单" not in big, "不得承诺一份 HTML 里并不存在的完整清单"
+
+
+def test_decoy_finding_does_not_promise_a_list_it_does_not_have() -> None:
+    """★超过 evidences 上限时，不得再写「完整清单见 report.json」。
+
+    承诺一份并不存在的清单比不给更坏：分析员会以为自己已经查全了。
+    """
+    from apkscan.analyzers.packing import _DECOY_EVIDENCE_CAP
+
+    # ★上限本身要钉住量级，否则下面全按常量取值、把它调回 5 也照样绿。
+    #   本文件的 docstring 记着实测样本 153+153+105=411 条——比已知实测量级还小的上限，
+    #   等于开工就默认要丢一半数据。
+    assert _DECOY_EVIDENCE_CAP >= 411, "上限低于本仓已记录的实测条目数"
+
+    over = _DECOY_EVIDENCE_CAP + 7
+    result = PackingAnalyzer().analyze(FakeContext(
+        files={f"/tmp/decoy-{i}.bin": b"x" for i in range(over)}
+    ))
+    finding = next(f for f in result.findings if f.id == "APK-ABSOLUTE-PATH-ENTRIES")
+
+    assert "完整清单见 report.json" not in finding.description
+    assert "余下 7 条未落进报告" in finding.description, "超出报告承载的条数必须如实说明"
+    assert len(finding.evidences) == _DECOY_EVIDENCE_CAP
+
+    # 未超上限时才能说「全部已列入」——此时 evidences 里确实是全集。
+    few = PackingAnalyzer().analyze(FakeContext(
+        files={f"/tmp/decoy-{i}.bin": b"x" for i in range(12)}
+    ))
+    few_finding = next(f for f in few.findings if f.id == "APK-ABSOLUTE-PATH-ENTRIES")
+    assert "全部 12 条已列入" in few_finding.description
+    assert len(few_finding.evidences) == 12
+
+
+def test_evidence_values_survive_real_pipeline_and_json_roundtrip() -> None:
+    """★端到端：真 ``pipeline.run`` → JSON 序列化往返 → digest + HTML。
+
+    其余行为锁都用 producer 结果手拼 Report，绕过了 pipeline 聚合、report.json
+    序列化与读回。接线回归若发生在 producer 之后、渲染之前，那些锁一条都不会红。
+    """
+    import json as _json
+
+    from apkscan.core import pipeline
+    from apkscan.core.models import AnalysisConfig
+    from apkscan.report import json as report_json
+    from apkscan.core.report_io import report_from_dict
+    from apkscan.report.digest import build_digest
+    from apkscan.report.html import render_to_string
+
+    report = pipeline.run(
+        FakeContext(files={"/classes2.dex/picture.png": b"x"}), AnalysisConfig(online=False)
+    )
+    payload = _json.loads(_json.dumps(report_json.to_dict(report), ensure_ascii=False))
+    restored = report_from_dict(payload)
+
+    html = render_to_string(restored)
+    digest = _json.dumps(build_digest(payload), ensure_ascii=False)
+
+    assert "/classes2.dex/picture.png" in html, "值没能穿过真 pipeline + JSON 往返到达 HTML"
+    assert "APK-CORE-NAME-DECOY-ENTRIES" in digest, "该 Finding 在 digest 里连 ID 都不见"
 
 
 def test_brand_hints_value_reaches_finding(tmp_path) -> None:  # type: ignore[no-untyped-def]
