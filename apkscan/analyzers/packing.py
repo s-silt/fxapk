@@ -237,6 +237,17 @@ class PackingAnalyzer(BaseAnalyzer):
     # 容器结构异常：冒充核心文件名的绝对路径诱饵条目
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _decoy_sample(decoys: list[str], limit: int = 8) -> str:
+        """绝对路径条目的有界样例串（供写进 Finding 描述）。
+
+        ★有上限但**必须说清有没有截断**：实测样本里此类条目可达数百条，全列会把描述撑爆；
+          只列前几条又会被读成「就这么几条」——与本项目反复要防的「缺失被当不存在」同一个错。
+        """
+        shown = [_truncate(p, 120) for p in decoys[:limit]]
+        more = len(decoys) - len(shown)
+        return "、".join(shown) + (f"（另有 {more} 条，完整清单见 report.json）" if more > 0 else "")
+
     def _flag_core_name_decoys(self, result: AnalyzerResult, file_paths: list[str]) -> None:
         """检出「以 ``/`` 开头、首段恰为 APK 核心文件名」的诱饵条目，写 meta 并产 Finding。
 
@@ -279,7 +290,12 @@ class PackingAnalyzer(BaseAnalyzer):
                 description=(
                     f"压缩包内有 {len(decoys)} 条**以 / 开头的绝对路径条目**，但首段均未冒充 "
                     "APK 核心文件名。ZIP 规范要求条目名不得为绝对路径，Android 构建工具也不产生"
-                    "此类条目——出现即人为构造；**但本例未见瞄准解析器的迹象，意图不明**。"
+                    "此类条目——出现即人为构造；**但本例未见瞄准解析器的迹象，意图不明**。\n"
+                    # ★路径必须写进 description，不能只放 evidences：实测 Finding 的 evidences
+                    #   在**任何**人看得见的出口都不渲染（HTML 的 findings 表只有
+                    #   id/title/severity/category/description/recommendation；digest 只有
+                    #   id/severity/title）。而要判断该不该解压、要剥掉哪些条目，靠的正是路径本身。
+                    f"条目示例：{self._decoy_sample(decoys)}"
                 ),
                 recommendation=(
                     "操作提示：别用会**落盘解压**的工具直接展开该样本（apktool / unzip / "

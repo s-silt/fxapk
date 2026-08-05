@@ -200,7 +200,30 @@ def test_both_container_branches_reach_a_finding() -> None:
     weak = next(f for f in gap.findings if f.id == "APK-ABSOLUTE-PATH-ENTRIES")
     assert weak.severity is Severity.LOW, "意图不明的一支不得与冒充核心名同级"
     assert "落盘解压" in weak.recommendation, "操作风险提示必须到达分析员"
-    assert "/tmp/note.txt" in " ".join(ev.snippet for ev in weak.evidences)
+    # ★路径必须在 description 里，不能只在 evidences：实测 Finding 的 evidences
+    #   在 HTML 与 digest **都不渲染**，只放那里等于没给人。而要判断该不该解压、
+    #   要剥掉哪些条目，靠的正是路径本身。
+    assert "/tmp/note.txt" in weak.description, "具体路径必须进 description（evidences 不渲染）"
+
+
+def test_absolute_path_entries_actually_reach_rendered_html() -> None:
+    """★到达「人看得见的产物」，不是到达 Finding 对象。
+
+    此前所有行为锁都止于 ``AnalyzerResult`` / ``Report.findings``，
+    证明的是「值到达了对象」。实测发现 Finding 的 evidences 在 HTML 与 digest
+    都不渲染——只放那里的值，任何出口都看不到。本条渲染真 HTML 后查值。
+    """
+    from apkscan.report.html import render_to_string
+
+    result = PackingAnalyzer().analyze(FakeContext(files={"/tmp/note.txt": b"x"}))
+    report = Report(
+        package_name="com.test.app", meta=dict(result.meta), leads=[], endpoints=[],
+        findings=list(result.findings), analyzer_status=[],
+    )
+    html = render_to_string(report)
+
+    assert "/tmp/note.txt" in html, "路径没出现在渲染后的 HTML 里"
+    assert "落盘解压" in html, "操作风险提示没出现在渲染后的 HTML 里"
 
     positive = PackingAnalyzer().analyze(
         FakeContext(files={"/classes2.dex/picture.png": b"x"})
