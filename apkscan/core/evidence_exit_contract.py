@@ -159,6 +159,59 @@ EXPECTED_GAPS = {
 }
 
 
+#: ★契约之外的 signal 类 meta 键——**冻住，新增即红**。
+#:
+#: 为什么需要它：`EVIDENCE_UNIT_INVENTORY` 是人工清单，`EXPECTED_GAPS` 全零只约束
+#: 「已经被人列进契约的条目」。复审给的绕过构造是：分析器新增 `meta["new_signal"]`，
+#: 同时在生产代码里加一个无用户价值的读取（例如只用于 debug 日志）——
+#: 孤儿扫描因「有生产读取」判它非孤儿，证据契约因「不在人工清单里」看不见它，
+#: 三类 gap 仍全零。**两道门都过，而那个信号其实没到任何人眼前。**
+#:
+#: 本表把当下 47 个 signal 键里未被证据单元覆盖的 35 个钉住。新增 signal 键必须二选一：
+#: 要么建一个证据单元（说明它到达哪个出口），要么显式加进本表并说明为什么暂不建。
+#: ★这不是「覆盖全部 signal 键」——证据契约的范围本就是已审过的那批；
+#:   本表只保证**范围不会被无声扩大**。
+SIGNAL_KEYS_OUTSIDE_EVIDENCE_CONTRACT = frozenset({
+    "allow_backup", "anti_frida", "api_surface", "contacts", "crypto_addresses",
+    "crypto_recipe", "dangerous_matched", "debuggable", "deeplinks", "dex_string_pool",
+    "firebase_project_id", "hardening_structural", "is_hardened", "native_config_channel",
+    "native_obfuscation", "network_security_config", "package_name", "packed", "packer",
+    "payment_keywords", "permissions", "repack_identity", "sdks", "sign_sha256",
+    "sign_subject", "target_sdk", "telegram_bot_tokens", "uni_app_name", "uni_appid",
+    "uni_encrypted", "uses_cleartext_traffic", "version_code", "version_name",
+    "xposed_markers", "xposed_module",
+})
+
+
+#: ``scenario`` → 实现它的测试函数名。★没有这张表时 ``scenario`` 只是个自由字符串：
+#: 验证器只查它非空，写错一个字母照样过，测试名里的 "executable scenario" 比实际保证强。
+SCENARIO_TESTS: dict[str, str] = {
+    "runtime_antidetect_finding": "test_runtime_antidetect_jsbridge_and_sensitive_values_reach_sinks",
+    "runtime_jsbridge_lead": "test_runtime_antidetect_jsbridge_and_sensitive_values_reach_sinks",
+    "runtime_sensitive_api_confirmation": (
+        "test_runtime_antidetect_jsbridge_and_sensitive_values_reach_sinks"
+    ),
+    "runtime_brand_hint_finding": "test_brand_hints_value_reaches_finding",
+    "runtime_dead_drop_relation": "test_runtime_antidetect_jsbridge_and_sensitive_values_reach_sinks",
+    "runtime_known_remote_target": "test_unknown_remote_target_reaches_finding_without_gesture",
+    "runtime_unknown_remote_target_finding": (
+        "test_unknown_remote_target_reaches_finding_without_gesture"
+    ),
+    "decrypt_candidate_finding": "test_denial_bomb_value_reaches_finding",
+    "denial_bomb_finding": "test_denial_bomb_value_reaches_finding",
+    "container_decoy_absolute_only_finding": "test_both_container_branches_reach_a_finding",
+    "firebase_field_exits": "test_firebase_every_field_reaches_an_exit",
+    "control_chain_digest_section": "test_control_chain_relation_reaches_digest",
+    "dns_bypass_finding": "test_dns_protocol_value_reaches_finding_and_visibility_wording",
+    "manifest_anomaly_finding": "test_manifest_anomaly_value_reaches_finding",
+    "suspicious_version_finding": "test_suspicious_version_value_reaches_finding",
+    "re_toolkit_finding": "test_re_toolkit_name_and_capability_reach_finding",
+    "web_redirect_chain_finding": "test_web_redirect_fields_reach_finding_and_endpoint",
+    "web_request_recipe_finding": "test_web_request_decoded_value_and_context_reach_finding",
+    "webview_signal_finding": "test_webview_signal_id_reaches_matching_finding",
+}
+
+
 def validate_evidence_exit_contract() -> list[str]:
     problems: list[str] = []
     units = [item.unit for item in EVIDENCE_EXITS]
@@ -183,4 +236,33 @@ def validate_evidence_exit_contract() -> list[str]:
         actual[kind] = (len(rows), sum(len(item.producer) for item in rows))
     if actual != EXPECTED_GAPS:
         problems.append(f"缺口数字漂移：expected={EXPECTED_GAPS!r}, actual={actual!r}")
+
+    # ★scenario 必须指向一张明确的实现表——否则它只是个自由字符串，写错也照过。
+    for item in EVIDENCE_EXITS:
+        if item.gap is None and item.scenario not in SCENARIO_TESTS:
+            problems.append(
+                f"{item.unit}: scenario {item.scenario!r} 未登记实现它的测试（见 SCENARIO_TESTS）"
+            )
+
+    # ★signal 类 meta 键的范围不得被无声扩大：新增的要么建证据单元、要么显式进那张表。
+    from apkscan.core.meta_contract import META_CATEGORY_SIGNAL, META_KEY_REGISTRY
+
+    signal_keys = {
+        key for key, contract in META_KEY_REGISTRY.items()
+        if contract.category == META_CATEGORY_SIGNAL
+    }
+    covered = {producer for item in EVIDENCE_EXITS for producer in item.producer}
+    unaccounted = signal_keys - covered - SIGNAL_KEYS_OUTSIDE_EVIDENCE_CONTRACT
+    stale = SIGNAL_KEYS_OUTSIDE_EVIDENCE_CONTRACT - signal_keys
+    if unaccounted:
+        problems.append(
+            f"新增 signal 键未交代出口：{sorted(unaccounted)!r}——"
+            "要么建证据单元说明它到达哪个出口，要么显式加进 "
+            "SIGNAL_KEYS_OUTSIDE_EVIDENCE_CONTRACT 并说明为什么暂不建"
+        )
+    if stale:
+        problems.append(
+            f"SIGNAL_KEYS_OUTSIDE_EVIDENCE_CONTRACT 有过期条目：{sorted(stale)!r}——"
+            "它们已不是 signal 键（改类别或已删），请同步移除，别让表和现实脱节"
+        )
     return problems

@@ -15,6 +15,7 @@ from apkscan.analyzers.webview_jsbridge import WebViewJsBridgeAnalyzer
 from apkscan.config.chain import build_control_chains
 from apkscan.core.evidence_exit_contract import (
     EVIDENCE_EXITS, EVIDENCE_UNIT_INVENTORY, EXPECTED_GAPS, GapKind,
+    SCENARIO_TESTS, SIGNAL_KEYS_OUTSIDE_EVIDENCE_CONTRACT,
     validate_evidence_exit_contract,
 )
 from apkscan.core.models import Finding, Report, Severity
@@ -48,6 +49,46 @@ def test_every_positive_lock_names_a_real_sink_and_executable_scenario() -> None
     gap_units = {item.unit for item in EVIDENCE_EXITS if item.gap is not None}
     assert {item.unit for item in positives} == EVIDENCE_UNIT_INVENTORY - gap_units
     assert all(item.sinks and item.scenario and item.projection.required for item in positives)
+
+
+def test_every_scenario_names_a_test_that_actually_exists() -> None:
+    """★``SCENARIO_TESTS`` 指向的函数必须真的在本模块里存在。
+
+    没有这一条，那张表本身就是新的自由字符串：写个不存在的函数名照样过，
+    「scenario 已被某条行为锁覆盖」这句话就又变成没人验的声明。
+    验证器负责「每个 scenario 都登记了」，本条负责「登记的那个真的存在」——
+    两头都钉住才闭环。
+    """
+    import inspect
+
+    module_tests = {
+        name for name, obj in globals().items()
+        if name.startswith("test_") and inspect.isfunction(obj)
+    }
+    declared = set(SCENARIO_TESTS.values())
+    missing = declared - module_tests
+    assert not missing, f"SCENARIO_TESTS 指向不存在的测试：{sorted(missing)}"
+
+
+def test_signal_key_scope_cannot_widen_silently() -> None:
+    """★新增 signal 键必须交代出口，不能靠「加个 debug 读取」同时躲过两道门。
+
+    复审给的绕过：分析器新增 ``meta["new_signal"]``，再在生产代码里加一个只用于
+    debug 日志的 ``meta.get("new_signal")``——孤儿扫描因「有生产读取」判它非孤儿，
+    证据契约因「不在人工清单里」看不见它，三类 gap 仍全零。两道门都过，
+    而那个信号其实没到任何人眼前。
+    """
+    from apkscan.core.meta_contract import META_CATEGORY_SIGNAL, META_KEY_REGISTRY
+
+    signal_keys = {
+        key for key, contract in META_KEY_REGISTRY.items()
+        if contract.category == META_CATEGORY_SIGNAL
+    }
+    covered = {producer for item in EVIDENCE_EXITS for producer in item.producer}
+    assert signal_keys - covered == SIGNAL_KEYS_OUTSIDE_EVIDENCE_CONTRACT, (
+        "signal 键的契约外范围变了：新增的要建证据单元或显式入表，"
+        "消失的要同步移除——别让表和现实脱节"
+    )
 
 
 def test_firebase_every_field_reaches_an_exit() -> None:
