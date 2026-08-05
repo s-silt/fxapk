@@ -318,6 +318,52 @@ def _severity_name(value: object) -> str:
     return got if isinstance(got, str) else "UNKNOWN"
 
 
+def _compact_control_chains(raw: object) -> list[dict[str, Any]]:
+    """控制链 → digest 紧凑段：远程配置对象 → 解密配方 → 后端 → 落地归因。
+
+    ★为什么必须有这个出口：``build_control_chains`` 的存在理由就是「报告输出的不再是孤立
+      IOC，而是一条可读的控制链」（见 config/chain.py 模块头），可它只写进
+      ``meta["control_chains"]``，没有任何出口呈现——**组成节点各自可见，不等于这条关系可见**。
+      拿到报告的人看得到域名、看得到配方、看得到 IDC，却看不出它们是一条链上的。
+
+    ★摘要必须保住**关系**：把 source_url / recipe / backends 拆成三个平铺列表就退回孤立 IOC
+      了，等于没接。所以逐链成条，链内保留次序与归属。
+    """
+    if not isinstance(raw, list) or not raw:
+        return []
+    out: list[dict[str, Any]] = []
+    for chain in raw:
+        if not isinstance(chain, dict):
+            continue
+        backends = [
+            {
+                "kind": b.get("kind"),
+                "value": b.get("value"),
+                # 落地归因只取可读标签，链条视图不重复整份五层结构（那在 enrichment 里）。
+                "landing": [
+                    {
+                        "ip": rec.get("ip"),
+                        "country": rec.get("country"),
+                        "hosting": rec.get("hosting_provider"),
+                    }
+                    for rec in (b.get("attribution") or [])
+                    if isinstance(rec, dict)
+                ],
+            }
+            for b in (chain.get("backends") or [])
+            if isinstance(b, dict)
+        ]
+        out.append({
+            "source_url": chain.get("source_url"),
+            "decoded": bool(chain.get("decoded")),
+            "decode_chain": [str(s) for s in (chain.get("decode_chain") or [])],
+            # 配方只带形态摘要（算法/模式/编码），chain.py 已保证不含 key 明文。
+            "crypto_recipe": chain.get("crypto_recipe"),
+            "backends": backends,
+        })
+    return out
+
+
 def _compact_visibility(raw: object) -> dict[str, Any]:
     """可见性求值 → digest 紧凑段。缺失（旧报告）→ unknown 而非"完整"。
 
@@ -424,6 +470,9 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
         # ★证据可见性放在 leads **之前**：消费方（尤其是 AI）必须先知道「哪些输入没看见」，
         #   否则会把一份壳桩样本的空线索列表读成「该样本干净」。见 core/visibility.py。
         "visibility": _compact_visibility(meta.get("visibility")),
+        # ★控制链紧接 visibility：先知道哪里没看见，再看「看见的这些是怎么串起来的」。
+        #   原先只写 meta、无出口——组成节点各自可见 ≠ 这条关系可见。
+        "control_chains": _compact_control_chains(meta.get("control_chains")),
         # ★三段的顺序即研判次序：哪里没看见 → 看见了什么事实 → 该向谁调证。
         #   findings 承载 leads 不表达的判断（重打包警示、通讯录窃取接口、未知壳…），
         #   此前完全不透出，对 AI 等于不存在。

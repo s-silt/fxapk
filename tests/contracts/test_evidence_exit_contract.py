@@ -223,6 +223,52 @@ def test_unknown_remote_target_reaches_finding_without_gesture(tmp_path) -> None
     assert "不代表不具备该能力" in finding.description
 
 
+def test_control_chain_relation_reaches_digest() -> None:
+    """★关系必须整条到达，不能拆成平铺 IOC。
+
+    `build_control_chains` 的存在理由就是「不再是孤立 IOC，而是可读的控制链」，
+    原先它只写 meta、无出口——组成节点各自可见 ≠ 这条关系可见。
+    两端都走真入口：先用真 `build_control_chains` 造链，再过真 `build_digest`。
+    """
+    from types import SimpleNamespace
+
+    from apkscan.report.digest import build_digest
+
+    endpoint = SimpleNamespace(
+        value="backend.example.com",
+        enrichment={"attribution": {"ips": [{
+            "ip": "203.0.113.7",
+            "country": "SG",
+            "hosting_provider": {"name": "Example IDC"},
+        }]}},
+    )
+    chains = build_control_chains(
+        artifacts=[{
+            "source_url": "https://cfg.example.com/a.json",
+            "decoded": True,
+            "decode_chain": ["base64", "aes-cbc"],
+            "domains": ["backend.example.com"],
+        }],
+        recipe={"algo": "AES", "mode": "CBC", "key_encoding": "hex"},
+        endpoints=[endpoint],
+    )
+    assert chains, "夹具没造出控制链"
+
+    digest = build_digest({"meta": {"control_chains": chains}, "leads": []})
+    section = digest["control_chains"]
+    assert len(section) == 1, "控制链未进 digest"
+
+    chain = section[0]
+    # ★整条关系都要在同一个对象里：配置对象 → 配方 → 后端 → 落地。
+    assert chain["source_url"] == "https://cfg.example.com/a.json"
+    assert chain["crypto_recipe"]["algo"] == "AES"
+    assert chain["decode_chain"] == ["base64", "aes-cbc"]
+    backend = chain["backends"][0]
+    assert backend["value"] == "backend.example.com"
+    assert backend["landing"][0]["ip"] == "203.0.113.7"
+    assert backend["landing"][0]["hosting"] == "Example IDC"
+
+
 def test_denial_bomb_value_reaches_finding() -> None:
     path = "assets/oversized.bin"
     result = PackingAnalyzer().analyze(FakeContext(files={path: b"x"}, declared_sizes={path: 600_000_000}))

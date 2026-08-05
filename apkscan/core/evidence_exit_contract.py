@@ -65,8 +65,6 @@ def _gap(unit: str, producer: tuple[str, ...], required: tuple[str, ...], scenar
 
 
 EVIDENCE_EXITS: tuple[EvidenceExit, ...] = (
-    _gap("control_chains", ("control_chains",), ("config", "recipe", "backend", "attribution"),
-         "control_chain_meta_only", GapKind.COMPLETE),
 
     _ok("runtime_antidetect", "runtime_antidetect", ("kind", "probe"),
         (Sink.FINDING,), "runtime_antidetect_finding"),
@@ -102,6 +100,11 @@ EVIDENCE_EXITS: tuple[EvidenceExit, ...] = (
     _ok("firebase_unprojected_fields", "firebase",
         ("storage_bucket", "api_key", "sender_id", "project_number"),
         (Sink.LEAD, Sink.ENDPOINT), "firebase_field_exits"),
+    # 原为 COMPLETE 缺口：build_control_chains 的存在理由就是「不再是孤立 IOC，而是可读的
+    # 控制链」，可它只写 meta、无出口——组成节点各自可见 ≠ 这条关系可见。
+    # 已补 digest 的 control_chains 段（逐链成条，链内保留归属，不拆成平铺列表）。
+    _ok("control_chains", "control_chains", ("config", "recipe", "backend", "attribution"),
+        (Sink.DIGEST,), "control_chain_digest_section"),
     _ok("dns_bypass", "dns_bypass", ("protocol",),
         (Sink.FINDING, Sink.VISIBILITY), "dns_bypass_finding"),
     _ok("manifest_anomaly", "manifest_anomaly", ("anomaly",),
@@ -137,14 +140,20 @@ EVIDENCE_UNIT_INVENTORY = frozenset({
 })
 
 
-#: 已知缺口的 (证据单元数, producer 键数)。★数字下调只能因为**真的接上了出口**：
-#: 起点是 complete 3/4 + conditional 2/2 + field 1/1（6 单元 / 7 键），现已修四个——
-#: brand_hints、suspicious_version（complete），unknown_remote_target、
-#: container_decoy_absolute_only（conditional）。
-#: ★零的那一类显式写成 (0, 0) 而不是删掉键：删掉读起来像「没查这一类」，
-#:   写 0 才是「查过了，这一类没有」。
+#: 已知缺口的 (证据单元数, producer 键数)。★数字下调只能因为**真的接上了出口**。
+#:
+#: 起点是 complete 3/4 + conditional 2/2 + field 1/1（**6 单元 / 7 键**），已全部接上：
+#:   - runtime_brand_hints → RUNTIME-BRAND-HINTS Finding
+#:   - suspicious_version_keyword → MANIFEST-SUSPICIOUS-VERSION-NAME Finding
+#:   - control_chains → digest 的 control_chains 段
+#:   - runtime_remote_control_unknown_packages → 无手势分支的 observation Finding
+#:   - container_decoy_absolute_only → APK-ABSOLUTE-PATH-ENTRIES Finding
+#:   - firebase_unprojected_fields → 三标识符并进 Lead 证据 + storage_bucket 产 Endpoint
+#:
+#: ★全零后**这张表更要留着**：它是「新增缺口即红」的判据。三类都写 (0, 0) 而不是删掉键——
+#:   删掉读起来像「没查这一类」，写 0 才是「查过了，这一类没有」。
 EXPECTED_GAPS = {
-    GapKind.COMPLETE: (1, 1),
+    GapKind.COMPLETE: (0, 0),
     GapKind.CONDITIONAL: (0, 0),
     GapKind.FIELD: (0, 0),
 }
