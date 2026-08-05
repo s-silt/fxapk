@@ -65,8 +65,6 @@ def _gap(unit: str, producer: tuple[str, ...], required: tuple[str, ...], scenar
 
 
 EVIDENCE_EXITS: tuple[EvidenceExit, ...] = (
-    _gap("runtime_brand_hints", ("runtime_brand_hints",), ("brand",),
-         "runtime_brand_meta_only", GapKind.COMPLETE),
     _gap("runtime_remote_control_unknown_packages",
          ("runtime_remote_control_unknown_packages",), ("package",),
          "runtime_unknown_package_meta_only", GapKind.CONDITIONAL,
@@ -84,6 +82,10 @@ EVIDENCE_EXITS: tuple[EvidenceExit, ...] = (
 
     _ok("runtime_antidetect", "runtime_antidetect", ("kind", "probe"),
         (Sink.FINDING,), "runtime_antidetect_finding"),
+    # 原为 COMPLETE 缺口：写入点注释写着「供报告呈现」，实际没有任何出口呈现它。
+    # 已补 RUNTIME-BRAND-HINTS observation Finding，缺口数字同步下调。
+    _ok("runtime_brand_hints", "runtime_brand_hints", ("brand",),
+        (Sink.FINDING,), "runtime_brand_hint_finding"),
     _ok("runtime_jsbridge", "runtime_jsbridge", ("interface",),
         (Sink.LEAD,), "runtime_jsbridge_lead"),
     _ok("runtime_sensitive_apis", "runtime_sensitive_apis", ("api",),
@@ -123,7 +125,9 @@ EVIDENCE_UNIT_INVENTORY = frozenset({
 })
 
 
-EXPECTED_GAPS = {GapKind.COMPLETE: (3, 4), GapKind.CONDITIONAL: (2, 2), GapKind.FIELD: (1, 1)}
+#: 已知缺口的 (证据单元数, producer 键数)。★数字下调只能因为**真的接上了出口**——
+#: `runtime_brand_hints` 由 3/4 降为 2/3 是补了 RUNTIME-BRAND-HINTS Finding 的结果。
+EXPECTED_GAPS = {GapKind.COMPLETE: (2, 3), GapKind.CONDITIONAL: (2, 2), GapKind.FIELD: (1, 1)}
 
 
 def validate_evidence_exit_contract() -> list[str]:

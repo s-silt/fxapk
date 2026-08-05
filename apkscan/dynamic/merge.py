@@ -506,6 +506,9 @@ def decrypt_runtime_messages(report: Report, runtime_report_path: str) -> dict[s
         if brand_hints:
             report.meta["runtime_brand_hints"] = brand_hints
             logger.info("[merge] 运行时明文捕获冒充对象线索：%s", "、".join(brand_hints[:5]))
+            # 同一份 brand_hints 既留档进 meta、也走 Finding 出口——只写 meta 时
+            # 读报告的人看不到它（见 _add_brand_hint_finding 的说明）。
+            _add_brand_hint_finding(report, brand_hints)
 
         # 候选配方（按优先级）：实测合并配方优先、纯静态配方兜底。逐信封依次尝试、首个解出即用。
         # 关键：「实测优先但绝不回归静态」——实测拿到二进制 key 覆盖、却与静态 iv 推导口径不兼容
@@ -933,6 +936,50 @@ def _add_anti_analysis_finding(
                 "越可能隐藏涉诈核心逻辑（在检测通过后才解密/拉取真实后台）。"
             ),
             evidences=evidences,
+            references=[],
+        )
+    )
+
+
+def _add_brand_hint_finding(report: Report, brand_hints: list[str]) -> None:
+    """运行时明文里出现的品牌/行业词 → 产 observation Finding（冒充对象研判材料）。
+
+    ★为什么必须有这个出口：这批词是从**活体解密明文**里抽出来的（webName / 品牌名 /
+      行业词），是判断「这个壳假装成什么」最直接的材料。原实现只写进
+      ``meta["runtime_brand_hints"]`` 并打一行日志——写入点的注释写着「供报告呈现」，
+      而实际上没有任何出口呈现它，读报告的人看不到（本仓「信号必须接线」纪律）。
+
+    ★措辞守住证据边界：抽到的是**明文里出现的词**，不等于「冒充了某机构」。
+      同名可能来自第三方 SDK 文案、行业通用词、甚至被仿冒方自己的接口字段名。
+      所以只陈述观察到什么、由人去判断，不替人下「冒充 X」的结论
+      （与重打包件不写「植入/注入」同一条纪律）。
+    """
+    shown = brand_hints[:12]
+    more = len(brand_hints) - len(shown)
+    label = "、".join(shown) + (f"（另有 {more} 条）" if more > 0 else "")
+    report.findings.append(
+        Finding(
+            id="RUNTIME-BRAND-HINTS",
+            title="运行时明文出现品牌/行业词",
+            severity=Severity.MEDIUM,
+            # 运行时观测合入，无静态分析器归属 → 显式标 runtime-merge（区别于"未归因"的空串）。
+            analyzer="runtime-merge",
+            kind=FINDING_KIND_OBSERVATION,  # 活体明文里的**观察**，非规则推导
+            category="brand_impersonation",
+            description=(
+                f"运行时解密明文中出现下列品牌/行业词：{label}。"
+                "这类词常见于壳应用向服务端上报的 webName / 站点标题字段，"
+                "是判断该样本对外假冒何种业务的直接材料。"
+            ),
+            recommendation=(
+                "研判：把这些词与应用图标、界面文案、域名注册信息比对，确认对外呈现的业务身份；"
+                "★注意同名不等于冒充——行业通用词、第三方 SDK 文案、被仿冒方自身接口字段"
+                "都可能产生同样的词，需另有证据才能认定冒充关系。"
+            ),
+            evidences=[
+                Evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=hint[:160])
+                for hint in shown
+            ],
             references=[],
         )
     )

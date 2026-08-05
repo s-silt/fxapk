@@ -14,7 +14,8 @@ from apkscan.analyzers.web_evidence import WebRedirectChainAnalyzer, WebRequestR
 from apkscan.analyzers.webview_jsbridge import WebViewJsBridgeAnalyzer
 from apkscan.config.chain import build_control_chains
 from apkscan.core.evidence_exit_contract import (
-    EVIDENCE_EXITS, EXPECTED_GAPS, GapKind, validate_evidence_exit_contract,
+    EVIDENCE_EXITS, EVIDENCE_UNIT_INVENTORY, EXPECTED_GAPS, GapKind,
+    validate_evidence_exit_contract,
 )
 from apkscan.core.models import Finding, Report, Severity
 from apkscan.dynamic import merge
@@ -22,18 +23,26 @@ from tests.conftest import FakeContext
 
 
 def test_contract_is_complete_and_gap_numbers_are_honest() -> None:
+    """缺口的实际条目必须与 ``EXPECTED_GAPS`` 声明的 (单元数, 键数) 逐类对上。
+
+    ★不再另写一份「总数 == 6」的魔数：那样同一个事实存在两处，
+      接好一个出口就要记得改两个地方，忘一个就是契约自己漂移——
+      正是这套机制要治的毛病，不该在它自己的测试里复现。
+    """
     assert validate_evidence_exit_contract() == []
     gaps = [item for item in EVIDENCE_EXITS if item.gap is not None]
-    assert len(gaps) == 6
-    assert sum(len(item.producer) for item in gaps) == 7
-    assert EXPECTED_GAPS == {
-        GapKind.COMPLETE: (3, 4), GapKind.CONDITIONAL: (2, 2), GapKind.FIELD: (1, 1),
-    }
+    actual: dict[GapKind, tuple[int, int]] = {}
+    for item in gaps:
+        units, keys = actual.get(item.gap, (0, 0))
+        actual[item.gap] = (units + 1, keys + len(item.producer))
+    assert actual == EXPECTED_GAPS, "缺口条目与 EXPECTED_GAPS 声明不符"
 
 
 def test_every_positive_lock_names_a_real_sink_and_executable_scenario() -> None:
+    """正向单元 = 清单里除去已知缺口的那些；每个都必须有 sink、场景与必达字段。"""
     positives = [item for item in EVIDENCE_EXITS if item.gap is None]
-    assert len(positives) == 13
+    gap_units = {item.unit for item in EVIDENCE_EXITS if item.gap is not None}
+    assert {item.unit for item in positives} == EVIDENCE_UNIT_INVENTORY - gap_units
     assert all(item.sinks and item.scenario and item.projection.required for item in positives)
 
 
@@ -66,6 +75,42 @@ def test_conditional_container_gap_and_positive_decoy_branch() -> None:
     )
     finding = next(f for f in positive.findings if f.id == "APK-CORE-NAME-DECOY-ENTRIES")
     assert "classes2.dex" in finding.description
+
+
+def test_brand_hints_value_reaches_finding(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """★行为锁：品牌词必须**带着值**进 Finding，而不只是写进 meta。
+
+    这个出口原本不存在——写入点注释写着「供报告呈现」，但没有任何东西呈现它，
+    读报告的人看不到。
+
+    ★必须走真入口 ``decrypt_runtime_messages``，不能直接调 ``_add_brand_hint_finding``：
+      本仓实证过「只调被测函数的单测永远测不到接线」——删掉调用点，那种测试照样全绿。
+      我写这条时先犯了一次，突变（把调用行换成 pass）没变红才发现。
+    """
+    import base64
+    import json
+
+    plaintext = json.dumps({"webName": "某某证券", "note": "某某银行股份"}, ensure_ascii=False)
+    runtime_report = tmp_path / "runtime_report.json"
+    runtime_report.write_text(
+        json.dumps({"crypto_events": [
+            {"plaintext_b64": base64.b64encode(plaintext.encode()).decode()},
+        ]}),
+        encoding="utf-8",
+    )
+    report = Report(
+        package_name="com.test.app", meta={}, leads=[], endpoints=[],
+        findings=[], analyzer_status=[],
+    )
+    merge.decrypt_runtime_messages(report, str(runtime_report))
+
+    assert "某某证券" in report.meta["runtime_brand_hints"], "夹具没触发 brand hints 抽取"
+    finding = next(f for f in report.findings if f.id == "RUNTIME-BRAND-HINTS")
+    assert "某某证券" in finding.description
+    assert "某某证券" in " ".join(ev.snippet for ev in finding.evidences)
+    # 措辞不得替人下「冒充了 X」的结论——同名可能来自第三方 SDK 文案或行业通用词。
+    assert "冒充" not in finding.title
+    assert "同名不等于冒充" in finding.recommendation
 
 
 def test_denial_bomb_value_reaches_finding() -> None:
