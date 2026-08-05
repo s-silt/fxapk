@@ -259,6 +259,11 @@ def _claim_field(claims: dict, claim: str, key: str, fallback: Any) -> Any:
 #: LOW/INFO 不进——digest 的立身之本是低 token，几十条信息级条目会把它撑成第二份报告。
 _DIGEST_FINDING_SEVERITIES = frozenset({"critical", "high", "medium"})
 
+#: 省略条目最多列多少个 ID。有上限是因为 digest 的立身之本是低 token；
+#: 但**必须有下限意义上的可见性**——超过上限时 counts.omitted 仍如实计数，
+#: 两者一起读才知道「列出来的是不是全部」。
+_OMITTED_ID_CAP = 40
+
 
 def _compact_findings(report: dict) -> dict[str, Any]:
     """Finding → digest 紧凑段：只带 id / 严重度 / 标题，不带证据明细。
@@ -285,6 +290,15 @@ def _compact_findings(report: dict) -> dict[str, Any]:
                 "title": str(f.get("title") or "")[:160],
             })
     kept.sort(key=lambda x: (x["severity"], x["id"]))
+    kept_ids = {item["id"] for item in kept}
+    # ★「省略必须说出来」不能只说**数量**：只给一个 omitted=3，读的人知道有东西被丢了，
+    #   却不知道被丢的是什么、也无从去 report.json 里定位——等于知道自己瞎但不知道瞎在哪。
+    #   带上 ID（不带标题/证据，token 仍然便宜）才能按图索骥。
+    #   实证：本轮补的三条 LOW 出口（版本标记词、绝对路径条目的落盘解压风险、
+    #   未知远控目标）在默认 digest 里只体现为 omitted 计数，操作提示对决策面完全消失。
+    omitted_ids = sorted(
+        {str(f.get("id") or "") for f in items} - kept_ids - {""}
+    )[:_OMITTED_ID_CAP]
     return {
         "items": kept,
         "counts": {
@@ -293,7 +307,11 @@ def _compact_findings(report: dict) -> dict[str, Any]:
             "omitted": len(items) - len(kept),
             "by_severity": dict(by_sev),
         },
-        "note": "只列 CRITICAL/HIGH/MEDIUM；完整条目与证据见 report.json 的 findings",
+        "omitted_ids": omitted_ids,
+        "note": (
+            "只列 CRITICAL/HIGH/MEDIUM 的条目；低于该档的仅列 ID（见 omitted_ids）。"
+            "完整条目与证据见 report.json 的 findings"
+        ),
     }
 
 

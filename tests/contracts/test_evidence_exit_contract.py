@@ -101,6 +101,51 @@ def test_firebase_every_field_reaches_an_exit() -> None:
     )
 
 
+def test_firebase_identifiers_reach_lead_without_project_id() -> None:
+    """★缺 project_id 时其余标识符仍须有出口。
+
+    原实现 ``if not project_id: return``——只有 api_key / sender_id / project_number
+    的样本一条线索都不产，那几个值只躺在 meta 里。复审用这个构造推翻了「字段级缺口已清零」
+    的结论：我上一版的夹具**总是带着 project_id**，注释却写着「缺 project_id 时它是唯一抓手」，
+    自相矛盾。
+    """
+    xml = ("<resources><string name='google_api_key'>FAKE-API-KEY</string>"
+           "<string name='gcm_defaultSenderId'>123456789012</string></resources>")
+    result = FirebaseAnalyzer().analyze(FakeContext(files={"res/values/strings.xml": xml.encode()}))
+
+    assert not result.meta["firebase"].get("project_id"), "夹具不该带 project_id"
+    lead = next(lead for lead in result.leads if lead.category.value == "CONFIG_KEY")
+    assert lead.value.startswith("firebase_sender_id="), "缺 project_id 时应回落到 sender_id 锚点"
+    evidence = " ".join(ev.snippet for ev in lead.source_refs)
+    assert "FAKE-API-KEY" in evidence and "123456789012" in evidence
+
+
+def test_digest_names_the_findings_it_omits() -> None:
+    """★「省略必须说出来」不能只说数量：LOW 条目的 ID 必须列出来，否则无从定位。
+
+    本轮补的三条 LOW 出口在默认 digest 里只体现为 omitted 计数——
+    按本仓「决策只读 digest」的契约，那等于没到决策面。
+    """
+    from apkscan.report.digest import build_digest
+
+    report = {
+        "meta": {},
+        "leads": [],
+        "findings": [
+            {"id": "HIGH-ONE", "severity": "HIGH", "title": "高危"},
+            {"id": "APK-ABSOLUTE-PATH-ENTRIES", "severity": "LOW", "title": "绝对路径条目"},
+            {"id": "MANIFEST-SUSPICIOUS-VERSION-NAME", "severity": "LOW", "title": "版本标记词"},
+        ],
+    }
+    section = build_digest(report)["findings"]
+
+    assert [i["id"] for i in section["items"]] == ["HIGH-ONE"]
+    assert section["counts"]["omitted"] == 2
+    assert section["omitted_ids"] == [
+        "APK-ABSOLUTE-PATH-ENTRIES", "MANIFEST-SUSPICIOUS-VERSION-NAME",
+    ], "被省略的条目必须报出 ID，只给计数等于知道自己瞎但不知道瞎在哪"
+
+
 def test_both_container_branches_reach_a_finding() -> None:
     """★两支都要有出口：冒充核心名 → MEDIUM；仅绝对路径 → LOW（操作提示）。
 
