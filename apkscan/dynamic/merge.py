@@ -941,6 +941,18 @@ def _add_anti_analysis_finding(
     )
 
 
+#: ★品牌词与凭据同源——都来自**活体解密明文**，只是抽取判据不同。
+#: `brand_hints_from_events` 的取值有两条路：`_BRAND_KEYS` 结构化字段（webName 等），
+#: 以及「任何含行业词的字符串值 / 非 JSON 明文前 80 字符」。后一条会把
+#: `{"remark": "受害人…的银行卡尾号…"}` 这类整条收走，**可能混入受害人个人信息**。
+#: 所以本条与凭据 Lead 一样必须带合规提示：内容挂在「品牌/行业词」这个看着无害的
+#: 标签下，拿到报告的人不会预期里面有个人信息——**敏感性标注错位比放原文更危险**。
+_BRAND_HINT_COMPLIANCE_NOTE = (
+    "★合规提示：以上词条截自运行时解密明文，抽取判据为「命中行业词」，"
+    "可能连带非品牌内容（含受害人个人信息片段）。按办案合规要求留存处置，不得外泄全文。"
+)
+
+
 def _add_brand_hint_finding(report: Report, brand_hints: list[str]) -> None:
     """运行时明文里出现的品牌/行业词 → 产 observation Finding（冒充对象研判材料）。
 
@@ -970,6 +982,7 @@ def _add_brand_hint_finding(report: Report, brand_hints: list[str]) -> None:
                 f"运行时解密明文中出现下列品牌/行业词：{label}。"
                 "这类词常见于壳应用向服务端上报的 webName / 站点标题字段，"
                 "是判断该样本对外假冒何种业务的直接材料。"
+                f"\n\n{_BRAND_HINT_COMPLIANCE_NOTE}"
             ),
             recommendation=(
                 "研判：把这些词与应用图标、界面文案、域名注册信息比对，确认对外呈现的业务身份；"

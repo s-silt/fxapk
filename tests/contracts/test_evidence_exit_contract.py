@@ -111,6 +111,11 @@ def test_brand_hints_value_reaches_finding(tmp_path) -> None:  # type: ignore[no
     # 措辞不得替人下「冒充了 X」的结论——同名可能来自第三方 SDK 文案或行业通用词。
     assert "冒充" not in finding.title
     assert "同名不等于冒充" in finding.recommendation
+    # ★合规提示必须在：词条截自解密明文、判据是「命中行业词」，可能连带受害人信息片段。
+    #   挂在「品牌/行业词」这个看着无害的标签下而不标敏感，比放原文更危险
+    #   （凭据 Lead 走的是 RUNTIME_CREDENTIAL + 合规提示，本条须对齐）。
+    assert "合规提示" in finding.description
+    assert "受害人个人信息" in finding.description
 
 
 def test_denial_bomb_value_reaches_finding() -> None:
