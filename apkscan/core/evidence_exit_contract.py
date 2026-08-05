@@ -67,9 +67,6 @@ def _gap(unit: str, producer: tuple[str, ...], required: tuple[str, ...], scenar
 EVIDENCE_EXITS: tuple[EvidenceExit, ...] = (
     _gap("control_chains", ("control_chains",), ("config", "recipe", "backend", "attribution"),
          "control_chain_meta_only", GapKind.COMPLETE),
-    _gap("firebase_unprojected_fields", ("firebase",),
-         ("storage_bucket", "api_key", "sender_id", "project_number"),
-         "firebase_field_gap", GapKind.FIELD),
 
     _ok("runtime_antidetect", "runtime_antidetect", ("kind", "probe"),
         (Sink.FINDING,), "runtime_antidetect_finding"),
@@ -98,6 +95,13 @@ EVIDENCE_EXITS: tuple[EvidenceExit, ...] = (
     # 这条操作提示。已补 APK-ABSOLUTE-PATH-ENTRIES（LOW observation），两支都有出口。
     _ok("container_decoy_absolute_only", "container_decoy_entries", ("absolute_path_entries",),
         (Sink.FINDING,), "container_decoy_absolute_only_finding"),
+    # 原为 FIELD 缺口：project_id 进 Lead、database_url 进 Endpoint，
+    # 而 storage_bucket/api_key/sender_id/project_number 四字段只在 meta。
+    # 已补：前三者作同一 GCP 项目的其它标识符并进那条 Lead 的证据；
+    # storage_bucket 与 database_url 同口径产 domain Endpoint。
+    _ok("firebase_unprojected_fields", "firebase",
+        ("storage_bucket", "api_key", "sender_id", "project_number"),
+        (Sink.LEAD, Sink.ENDPOINT), "firebase_field_exits"),
     _ok("dns_bypass", "dns_bypass", ("protocol",),
         (Sink.FINDING, Sink.VISIBILITY), "dns_bypass_finding"),
     _ok("manifest_anomaly", "manifest_anomaly", ("anomaly",),
@@ -142,7 +146,7 @@ EVIDENCE_UNIT_INVENTORY = frozenset({
 EXPECTED_GAPS = {
     GapKind.COMPLETE: (1, 1),
     GapKind.CONDITIONAL: (0, 0),
-    GapKind.FIELD: (1, 1),
+    GapKind.FIELD: (0, 0),
 }
 
 

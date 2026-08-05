@@ -200,6 +200,11 @@ class FirebaseAnalyzer(BaseAnalyzer):
         except Exception:
             logger.exception("[%s] 构造 project_id Lead 失败", self.name)
 
+        try:
+            self._emit_storage_bucket_endpoint(config, result)
+        except Exception:
+            logger.exception("[%s] 构造 storage_bucket Endpoint 失败", self.name)
+
         self._write_meta(config, result)
 
         logger.info(
@@ -407,9 +412,53 @@ class FirebaseAnalyzer(BaseAnalyzer):
                         snippet=_truncate(
                             f"firebase project_id={project_id}", _SNIPPET_MAX
                         ),
-                    )
+                    ),
+                    # ★project_number / sender_id / api_key 是**同一个 GCP 项目**的其它标识符，
+                    #   原先只写进 meta["firebase"]、无任何出口。它们不该各产一条 Lead
+                    #   （同一调证对象滥产线索），而应补强这条：project_number 与 project_id
+                    #   等价可向 Google 调项目实名/账单，缺 project_id 时它就是唯一抓手。
+                    *(
+                        Evidence(
+                            source=config.source,
+                            location=config.location,
+                            snippet=_truncate(f"firebase {name}={value}", _SNIPPET_MAX),
+                        )
+                        for name, value in (
+                            ("project_number", config.project_number),
+                            ("sender_id", config.sender_id),
+                            ("api_key", config.api_key),
+                        )
+                        if value
+                    ),
                 ],
                 notes=template.notes,
+            )
+        )
+
+    def _emit_storage_bucket_endpoint(
+        self, config: _FirebaseConfig, result: AnalyzerResult
+    ) -> None:
+        """storage_bucket → domain Endpoint（与 databaseURL 同口径，pipeline 统一富化）。
+
+        ★为什么补：``<project>.appspot.com`` 是该项目的对象存储主机，可能存放样本配置
+          与受害数据；原先只写进 ``meta["firebase"]``，读报告的人看不到。
+          走 Endpoint 而非自造 Lead——与 ``_emit_database_endpoint`` 同一条路，
+          由 pipeline 统一做 infra 分级（Google 基础设施不会被误升为 C2 源站）。
+        """
+        bucket = (config.storage_bucket or "").strip()
+        if not bucket or "." not in bucket:
+            return
+        result.endpoints.append(
+            Endpoint(
+                value=bucket,
+                kind="domain",
+                evidences=[
+                    Evidence(
+                        source=config.source,
+                        location=config.location,
+                        snippet=_truncate(f"firebase storage_bucket={bucket}", _SNIPPET_MAX),
+                    )
+                ],
             )
         )
 

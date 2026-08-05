@@ -50,7 +50,15 @@ def test_every_positive_lock_names_a_real_sink_and_executable_scenario() -> None
     assert all(item.sinks and item.scenario and item.projection.required for item in positives)
 
 
-def test_firebase_field_gap_runs_analyzer_and_checks_each_missing_field() -> None:
+def test_firebase_every_field_reaches_an_exit() -> None:
+    """★字段级：四个原本只在 meta 的字段各自必须到达出口。
+
+    分工按「它是什么」定，不是一律塞进同一个出口：
+    - ``project_number`` / ``sender_id`` / ``api_key`` 是**同一个 GCP 项目**的其它标识符
+      → 并进那条 CONFIG_KEY Lead 的证据（同一调证对象不滥产线索）
+    - ``storage_bucket`` 是独立主机（可能存放配置与受害数据）
+      → 与 ``database_url`` 同口径产 domain Endpoint，由 pipeline 统一做 infra 分级
+    """
     xml = ("<resources><string name='project_id'>demo-project</string>"
            "<string name='google_storage_bucket'>demo-project.appspot.com</string>"
            "<string name='google_api_key'>FAKE-API-KEY</string>"
@@ -60,13 +68,37 @@ def test_firebase_field_gap_runs_analyzer_and_checks_each_missing_field() -> Non
         "project_id": "demo-project", "api_key": "FAKE-API-KEY",
         "sender_id": "123456789012", "storage_bucket": "demo-project.appspot.com",
     }
-    rendered = "\n".join(
-        [lead.value for lead in result.leads]
-        + [ep.value for ep in result.endpoints]
-        + [f.description for f in result.findings]
+
+    lead = next(lead for lead in result.leads if lead.value.startswith("firebase_project_id="))
+    lead_evidence = " ".join(ev.snippet for ev in lead.source_refs)
+    assert "FAKE-API-KEY" in lead_evidence, "api_key 未到达 Lead 证据"
+    assert "123456789012" in lead_evidence, "sender_id 未到达 Lead 证据"
+
+    assert any(ep.value == "demo-project.appspot.com" for ep in result.endpoints), (
+        "storage_bucket 未产 Endpoint"
     )
-    for value in ("demo-project.appspot.com", "FAKE-API-KEY", "123456789012"):
-        assert value not in rendered
+
+    # ★project_number 只能来自 google-services.json（strings.xml 没有对应键，
+    #   见 _FALLBACK_STRINGS_KEYS），必须单独构夹具，否则这个字段其实没被覆盖。
+    import json
+
+    gs = json.dumps({
+        "project_info": {
+            "project_id": "demo-project",
+            "project_number": "987654321098",
+        },
+        "client": [],
+    })
+    with_number = FirebaseAnalyzer().analyze(
+        FakeContext(files={"assets/google-services.json": gs.encode()})
+    )
+    assert with_number.meta["firebase"]["project_number"] == "987654321098"
+    number_lead = next(
+        lead for lead in with_number.leads if lead.value.startswith("firebase_project_id=")
+    )
+    assert "987654321098" in " ".join(ev.snippet for ev in number_lead.source_refs), (
+        "project_number 未到达 Lead 证据——缺 project_id 时它是唯一抓手"
+    )
 
 
 def test_both_container_branches_reach_a_finding() -> None:
