@@ -51,6 +51,7 @@ from apkscan.analyzers._common import (
     truncate as _truncate_shared,
 )
 from apkscan.core.models import (
+    FINDING_KIND_OBSERVATION,
     AnalyzerResult,
     Confidence,
     Evidence,
@@ -262,7 +263,36 @@ class PackingAnalyzer(BaseAnalyzer):
             "impersonating_core_names": impersonated,
         }
         if not impersonated:
-            return  # 有绝对路径但不冒充核心名：异常但意图不明，只记 meta 不产 Finding
+            # 有绝对路径但不冒充核心名：**意图**不明，但「出现即人为构造」这个结构性事实成立
+            # （ZIP 规范禁止绝对路径条目，Android 构建工具从不产生）。
+            # ★仍必须产 Finding：下面那条「别用会落盘解压的工具展开」的操作风险，
+            #   对**所有**绝对路径条目都成立，不只冒充核心名的那些。原实现在这一支
+            #   直接 return，分析员拿到含数百条此类条目的样本却得不到任何提示——
+            #   意图不明是不下定性结论的理由，不是不告诉人的理由。
+            result.findings.append(Finding(
+                id="APK-ABSOLUTE-PATH-ENTRIES",
+                title="APK 内含绝对路径条目（容器结构异常，意图不明）",
+                severity=Severity.LOW,
+                confidence=Confidence.HIGH,  # 结构性事实：违反 ZIP 规范，非统计启发式
+                kind=FINDING_KIND_OBSERVATION,
+                category="anti_analysis",
+                description=(
+                    f"压缩包内有 {len(decoys)} 条**以 / 开头的绝对路径条目**，但首段均未冒充 "
+                    "APK 核心文件名。ZIP 规范要求条目名不得为绝对路径，Android 构建工具也不产生"
+                    "此类条目——出现即人为构造；**但本例未见瞄准解析器的迹象，意图不明**。"
+                ),
+                recommendation=(
+                    "操作提示：别用会**落盘解压**的工具直接展开该样本（apktool / unzip / "
+                    "部分反编译器）——绝对路径条目在不同工具下行为不一，可能写到预期外位置"
+                    "或直接报错中断。宜继续用内存读取方式分析。"
+                    "★研判上不宜据此单独定性：未冒充核心名时构造意图不明。"
+                ),
+                evidences=[
+                    Evidence(source="resource", location="zip-entry", snippet=_truncate(p))
+                    for p in decoys[:5]
+                ],
+            ))
+            return
 
         shown = "、".join(f"{name}×{n}" for name, n in sorted(impersonated.items()))
         result.findings.append(Finding(

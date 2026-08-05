@@ -506,6 +506,9 @@ def decrypt_runtime_messages(report: Report, runtime_report_path: str) -> dict[s
         if brand_hints:
             report.meta["runtime_brand_hints"] = brand_hints
             logger.info("[merge] 运行时明文捕获冒充对象线索：%s", "、".join(brand_hints[:5]))
+            # 同一份 brand_hints 既留档进 meta、也走 Finding 出口——只写 meta 时
+            # 读报告的人看不到它（见 _add_brand_hint_finding 的说明）。
+            _add_brand_hint_finding(report, brand_hints)
 
         # 候选配方（按优先级）：实测合并配方优先、纯静态配方兜底。逐信封依次尝试、首个解出即用。
         # 关键：「实测优先但绝不回归静态」——实测拿到二进制 key 覆盖、却与静态 iv 推导口径不兼容
@@ -933,6 +936,70 @@ def _add_anti_analysis_finding(
                 "越可能隐藏涉诈核心逻辑（在检测通过后才解密/拉取真实后台）。"
             ),
             evidences=evidences,
+            references=[],
+        )
+    )
+
+
+#: ★品牌词与凭据同源——都来自**活体解密明文**，只是抽取判据不同。
+#: `brand_hints_from_events` 的取值有两条路：`_BRAND_KEYS` 结构化字段（webName 等），
+#: 以及「任何含行业词的字符串值 / 非 JSON 明文前 80 字符」。后一条会把
+#: `{"remark": "…卡号尾号…"}` 这类整条收走，**可能混入无关的个人数据**。
+#: 所以本条与凭据 Lead 一样必须带合规提示：内容挂在「品牌/行业词」这个看着无害的
+#: 标签下，读报告的人不会预期里面有个人数据——**敏感性标注错位比放原文更危险**。
+_BRAND_HINT_COMPLIANCE_NOTE = (
+    "★合规提示：以上词条截自运行时解密明文，抽取判据为「命中行业词」，"
+    "可能连带非品牌内容（含个人数据片段）。按适用的合规要求留存处置，不得外泄全文。"
+)
+
+
+def _add_brand_hint_finding(report: Report, brand_hints: list[str]) -> None:
+    """运行时明文里出现的品牌/行业词 → 产 observation Finding（冒充对象研判材料）。
+
+    ★为什么必须有这个出口：这批词是从**活体解密明文**里抽出来的（webName / 品牌名 /
+      行业词），是判断「这个壳假装成什么」最直接的材料。原实现只写进
+      ``meta["runtime_brand_hints"]`` 并打一行日志——写入点的注释写着「供报告呈现」，
+      而实际上没有任何出口呈现它，读报告的人看不到（本仓「信号必须接线」纪律）。
+
+    ★措辞守住证据边界：抽到的是**明文里出现的词**，不等于「冒充了某机构」。
+      同名可能来自第三方 SDK 文案、行业通用词、甚至被仿冒方自己的接口字段名。
+      所以只陈述观察到什么、由人去判断，不替人下「冒充 X」的结论
+      （与重打包件不写「植入/注入」同一条纪律）。
+    """
+    # ★幂等：同一 Report 上重复合并（重跑动态、重渲染）不得堆出同 ID 的多条 Finding，
+    #   否则 digest 计数与 HTML/PDF 会重复，且「重跑改变既有结果」本身就不可信。
+    if any(f.id == "RUNTIME-BRAND-HINTS" for f in report.findings):
+        return
+    shown = brand_hints[:12]
+    more = len(brand_hints) - len(shown)
+    label = "、".join(shown) + (f"（另有 {more} 条）" if more > 0 else "")
+    report.findings.append(
+        Finding(
+            id="RUNTIME-BRAND-HINTS",
+            title="运行时明文出现品牌/行业词",
+            severity=Severity.MEDIUM,
+            # 运行时观测合入，无静态分析器归属 → 显式标 runtime-merge（区别于"未归因"的空串）。
+            analyzer="runtime-merge",
+            kind=FINDING_KIND_OBSERVATION,  # 活体明文里的**观察**，非规则推导
+            # ★category 用中性名：叫 brand_impersonation 等于在分类字段上断言了「冒充」，
+            #   而 title 却写得克制——两处自相矛盾，且分类会进统计与筛选，
+            #   比正文更容易被当成结论。目前能确定的只有「明文出现这些词」。
+            category="runtime_plaintext_identity_hint",
+            description=(
+                f"运行时解密明文中出现下列品牌/行业词：{label}。"
+                "这类词常见于壳应用向服务端上报的 webName / 站点标题字段，"
+                "可作为该样本对外身份呈现的候选材料。"
+                f"\n\n{_BRAND_HINT_COMPLIANCE_NOTE}"
+            ),
+            recommendation=(
+                "研判：把这些词与应用图标、界面文案、域名注册信息比对，确认对外呈现的业务身份；"
+                "★注意同名不等于冒充——行业通用词、第三方 SDK 文案、被仿冒方自身接口字段"
+                "都可能产生同样的词，需另有证据才能认定冒充关系。"
+            ),
+            evidences=[
+                Evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=hint[:160])
+                for hint in shown
+            ],
             references=[],
         )
     )
@@ -1687,6 +1754,14 @@ def merge_runtime_remote_control(report: Report, runtime_report_path: str) -> di
             _add_remote_control_finding(
                 report, known_targets, unknown_targets, gesture_actions, screencapture
             )
+        elif unknown_targets:
+            # ★没抓到手势/录屏，但确实观察到针对未知包的无障碍事件——仍必须有出口。
+            #   上面 ① 处注释写着「未知进 Finding/notes」，可那条 Finding 被
+            #   `gesture or screencapture` 挡在门外，于是这一支只剩 meta。
+            #   ★而下面那行日志自己写着「launch-only 抓不到，多数需引导式人工动态」：
+            #     抓包本就常常很浅，**没抓到手势不等于没有能力**——
+            #     拿手势当报告前提，正好卡在最容易漏的地方。
+            _add_unknown_remote_target_finding(report, unknown_targets)
 
         report.meta["runtime_remote_control"] = True
         report.meta["runtime_remote_control_targets"] = [s for _, s in known_targets]
@@ -1704,6 +1779,54 @@ def merge_runtime_remote_control(report: Report, runtime_report_path: str) -> di
     except Exception:  # noqa: BLE001 - 远控并回失败不得抛给调用方（不破坏已产出报告）
         logger.exception("[merge] 无障碍远控并回异常")
     return stats
+
+
+def _add_unknown_remote_target_finding(report: Report, unknown_targets: list[str]) -> None:
+    """只观察到「针对未知包的无障碍事件」、无手势/录屏时的出口（LOW observation）。
+
+    ★与 :func:`_add_remote_control_finding` 的分工：那条要求实测到手势或录屏，
+      是「已在实施远控」的强证据；本条只说明**监视/控制目标存在**，
+      份量低一档，且不替人断言远控已发生。
+
+    ★为什么不能省：无障碍事件的目标包名本身就是取证材料——它指出这个样本在盯哪些
+      应用。而 launch-only 抓包常常抓不到手势（见并回日志里那句说明），
+      用手势作为报告前提会让浅抓包的样本整批静默。
+    """
+    if any(f.id == "RUNTIME-REMOTE-CONTROL-UNKNOWN-TARGET" for f in report.findings):
+        return  # 幂等：重复合并不得堆同 ID
+    shown = unknown_targets[:12]
+    more = len(unknown_targets) - len(shown)
+    label = "、".join(shown) + (f"（另有 {more} 个）" if more > 0 else "")
+    report.findings.append(
+        Finding(
+            id="RUNTIME-REMOTE-CONTROL-UNKNOWN-TARGET",
+            title="无障碍事件指向未知包（未实测到手势/录屏）",
+            severity=Severity.LOW,
+            analyzer="runtime-merge",
+            kind=FINDING_KIND_OBSERVATION,
+            category="remote_control",
+            description=(
+                f"运行时观察到样本对下列包名发出无障碍事件：{label}。"
+                "这些包名不在已知银行/支付机构名单内，故未产机构主体线索。"
+                "本次未实测到远控手势或屏幕录制——**这不代表不具备该能力**："
+                "launch-only 抓包通常触发不到远控行为，多数需引导式人工动态。"
+            ),
+            recommendation=(
+                "研判：先确认这些包名对应什么应用（可能是小众银行、券商、钱包或本地工具）；"
+                "若涉及资金类应用，建议补一次引导式动态抓包以确认是否实施手势操控。"
+                "★不宜据本条单独认定已发生远控——目前只观察到事件指向。"
+            ),
+            evidences=[
+                Evidence(
+                    source=_RUNTIME_SOURCE,
+                    location="runtime-remote-control",
+                    snippet=f"无障碍事件目标包：{pkg}",
+                )
+                for pkg in shown
+            ],
+            references=[],
+        )
+    )
 
 
 def _add_remote_control_leads(

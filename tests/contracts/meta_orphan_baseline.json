@@ -15,10 +15,6 @@
       "container_decoy_entries": [
         "apkscan/analyzers/packing.py"
       ],
-      "control_chains": [
-        "apkscan/core/closure/__init__.py",
-        "apkscan/core/pipeline.py"
-      ],
       "decrypt_candidates": [
         "apkscan/analyzers/jadx.py"
       ],

@@ -49,7 +49,10 @@ def test_baseline_file_is_wellformed_and_nonvacuous() -> None:
     """
     baseline = meta_orphans.load_baseline()
     total = sum(len(group) for group in baseline.values())
-    assert total == 119, f"三类存量应守恒为 119，实际 {total}"
+    # 变更史（每次下调都必须写清是**哪个键真的接上了消费方**，不许只改数字）：
+    #   119 → 118：control_chains 接进 digest 的 control_chains 段
+    #              （见 evidence_exit_contract 的同名证据单元）。
+    assert total == 118, f"三类存量应守恒为 118，实际 {total}"
     for category, group in baseline.items():
         for key, files in group.items():
             assert key, f"{category} 基线里有空键"

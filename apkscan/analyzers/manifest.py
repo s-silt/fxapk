@@ -22,6 +22,7 @@ import xml.parsers.expat as expat
 from typing import TYPE_CHECKING, Any
 
 from apkscan.core.models import (
+    FINDING_KIND_OBSERVATION,
     AnalyzerResult,
     Evidence,
     Finding,
@@ -185,8 +186,8 @@ class ManifestAnalyzer(BaseAnalyzer):
                 )
             )
 
-        # 研判提示（不阻断），写入 meta 供报告参考。
-        self._annotate_suspicious(meta, rules)
+        # 研判提示（不阻断），写入 meta 并产 LOW observation Finding。
+        self._annotate_suspicious(meta, rules, result)
 
         result.meta = meta
         return result
@@ -424,8 +425,21 @@ class ManifestAnalyzer(BaseAnalyzer):
     # 研判提示
     # ------------------------------------------------------------------
 
-    def _annotate_suspicious(self, meta: dict[str, Any], rules: dict[str, Any]) -> None:
-        """对可疑 versionName 等做研判标注，写入 meta["suspicious"]（不报 Finding）。"""
+    def _annotate_suspicious(
+        self, meta: dict[str, Any], rules: dict[str, Any], result: AnalyzerResult
+    ) -> None:
+        """对可疑 versionName 做研判标注：写 meta **并**产一条 LOW observation Finding。
+
+        ★为什么补 Finding：这两个 meta 键原本零消费方——docstring 自称「研判标注」，
+          可它谁也没告诉，读报告的人看不到（本仓「信号必须接线」纪律）。
+          既然定位是给人做判断的材料，就必须到达人。
+
+        ★为什么是 LOW 且措辞克制：关键词强弱悬殊。``马甲``/``渠道`` 是做壳的人自己的
+          用词、分量重；``debug``/``test``/``demo`` 正经应用的构建版本里也常有。
+          单条不足以定性，只作合并研判时的加权项——**宁可让它以低份量出现在报告里
+          被人一眼排除，也不该因为「怕噪音」而整条不可见**（误报可见可排除，
+          真信号静默消失不可见）。
+        """
         try:
             cfg = rules.get("suspicious_versions", {})
             keywords = cfg.get("version_name_keywords", []) if isinstance(cfg, dict) else []
@@ -439,5 +453,31 @@ class ManifestAnalyzer(BaseAnalyzer):
             if hits:
                 meta["suspicious_version_name"] = True
                 meta["suspicious_version_hits"] = hits
+                result.findings.append(
+                    Finding(
+                        id="MANIFEST-SUSPICIOUS-VERSION-NAME",
+                        title="versionName 含构建/马甲标记词",
+                        severity=Severity.LOW,
+                        kind=FINDING_KIND_OBSERVATION,  # 字面命中，非行为推导
+                        category="manifest",
+                        description=(
+                            f"versionName「{vname}」命中标记词：{'、'.join(hits)}。"
+                            "正式发行版通常不带这类词；它们常见于测试构建、渠道分发包，"
+                            "以及批量产出的马甲包。"
+                        ),
+                        recommendation=(
+                            "研判：单条不足以定性，作合并研判的加权项——"
+                            "与签名证书生成时间、构建路径、包名形态一起看；"
+                            "★正经应用的内测/渠道包也会命中 debug/test/渠道，需另有证据。"
+                        ),
+                        evidences=[
+                            Evidence(
+                                source="static",
+                                location="AndroidManifest.xml",
+                                snippet=f"versionName={vname}",
+                            )
+                        ],
+                    )
+                )
         except Exception:  # noqa: BLE001 — 研判提示失败不影响主流程
             logger.exception("manifest 可疑版本研判失败")

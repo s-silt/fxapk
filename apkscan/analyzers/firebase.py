@@ -200,6 +200,11 @@ class FirebaseAnalyzer(BaseAnalyzer):
         except Exception:
             logger.exception("[%s] 构造 project_id Lead 失败", self.name)
 
+        try:
+            self._emit_storage_bucket_endpoint(config, result)
+        except Exception:
+            logger.exception("[%s] 构造 storage_bucket Endpoint 失败", self.name)
+
         self._write_meta(config, result)
 
         logger.info(
@@ -387,29 +392,84 @@ class FirebaseAnalyzer(BaseAnalyzer):
         template: _ProjectLeadTemplate,
         result: AnalyzerResult,
     ) -> None:
-        """project_id → CONFIG_KEY Lead（归属 Google/GCP 项目所有者）。"""
-        project_id = config.project_id
-        if not project_id:
+        """项目标识 → CONFIG_KEY Lead（归属 Google/GCP 项目所有者）。
+
+        ★锚点按可用性回落，不是「没有 project_id 就整条不产」：
+          原实现 ``if not project_id: return``，于是只有 api_key / sender_id /
+          project_number 的样本**一条线索都不产**，那几个值只躺在 meta 里没有出口。
+          gcm_defaultSenderId 在 FCM 里就是项目编号，project_number 同理——
+          缺 project_id 时它们各自都能定位到同一个 GCP 项目。
+        ★仍以 ``firebase_project_id=`` 为首选前缀：meta["firebase_project_id"] 是既有的
+          跨样本聚类键，不能因为回落逻辑改掉它的形态。
+        """
+        anchor_name, anchor_value = next(
+            (
+                (name, value)
+                for name, value in (
+                    (_PROJECT_ID_VALUE_PREFIX, config.project_id),
+                    ("firebase_project_number", config.project_number),
+                    ("firebase_sender_id", config.sender_id),
+                    ("firebase_api_key", config.api_key),
+                )
+                if value
+            ),
+            ("", ""),
+        )
+        if not anchor_value:
             return
         result.leads.append(
             Lead(
                 category=LeadCategory.CONFIG_KEY,
-                value=f"{_PROJECT_ID_VALUE_PREFIX}={project_id}",
+                value=f"{anchor_name}={anchor_value}",
                 subject=template.subject,
                 where_to_request=template.where_to_request,
                 evidence_to_obtain=list(template.evidence_to_obtain),
                 confidence=Confidence.HIGH,
                 advice=_ADVICE_NEED,
+                # ★四个标识符全部作为证据，不只带锚点那一个：它们指向**同一个 GCP 项目**，
+                #   不该各产一条 Lead（同一目标不重复产线索），但也不能只留在 meta 里没出口。
                 source_refs=[
                     Evidence(
                         source=config.source,
                         location=config.location,
-                        snippet=_truncate(
-                            f"firebase project_id={project_id}", _SNIPPET_MAX
-                        ),
+                        snippet=_truncate(f"firebase {name}={value}", _SNIPPET_MAX),
                     )
+                    for name, value in (
+                        ("project_id", config.project_id),
+                        ("project_number", config.project_number),
+                        ("sender_id", config.sender_id),
+                        ("api_key", config.api_key),
+                    )
+                    if value
                 ],
                 notes=template.notes,
+            )
+        )
+
+    def _emit_storage_bucket_endpoint(
+        self, config: _FirebaseConfig, result: AnalyzerResult
+    ) -> None:
+        """storage_bucket → domain Endpoint（与 databaseURL 同口径，pipeline 统一富化）。
+
+        ★为什么补：``<project>.appspot.com`` 是该项目的对象存储主机，可能存放样本配置
+          与受害数据；原先只写进 ``meta["firebase"]``，读报告的人看不到。
+          走 Endpoint 而非自造 Lead——与 ``_emit_database_endpoint`` 同一条路，
+          由 pipeline 统一做 infra 分级（Google 基础设施不会被误升为 C2 源站）。
+        """
+        bucket = (config.storage_bucket or "").strip()
+        if not bucket or "." not in bucket:
+            return
+        result.endpoints.append(
+            Endpoint(
+                value=bucket,
+                kind="domain",
+                evidences=[
+                    Evidence(
+                        source=config.source,
+                        location=config.location,
+                        snippet=_truncate(f"firebase storage_bucket={bucket}", _SNIPPET_MAX),
+                    )
+                ],
             )
         )
 
