@@ -74,8 +74,6 @@ EVIDENCE_EXITS: tuple[EvidenceExit, ...] = (
     _gap("firebase_unprojected_fields", ("firebase",),
          ("storage_bucket", "api_key", "sender_id", "project_number"),
          "firebase_field_gap", GapKind.FIELD),
-    _gap("suspicious_version_keyword", ("suspicious_version_name", "suspicious_version_hits"),
-         ("version_name", "matched_keyword"), "suspicious_version_meta_only", GapKind.COMPLETE),
     _gap("container_decoy_absolute_only", ("container_decoy_entries",),
          ("absolute_path_entries",), "container_decoy_conditional_gap", GapKind.CONDITIONAL,
          condition="存在绝对路径条目，但未冒充 APK 核心文件名"),
@@ -102,6 +100,14 @@ EVIDENCE_EXITS: tuple[EvidenceExit, ...] = (
         (Sink.FINDING, Sink.VISIBILITY), "dns_bypass_finding"),
     _ok("manifest_anomaly", "manifest_anomaly", ("anomaly",),
         (Sink.FINDING, Sink.VISIBILITY), "manifest_anomaly_finding"),
+    # 原为 COMPLETE 缺口：docstring 自称「研判标注」却零消费方，读报告的人看不到。
+    # 已补 MANIFEST-SUSPICIOUS-VERSION-NAME（LOW observation）。
+    EvidenceExit(
+        "suspicious_version_keyword",
+        ("suspicious_version_name", "suspicious_version_hits"),
+        Projection(("suspicious_version_name",), ("version_name", "matched_keyword")),
+        (Sink.FINDING,), Coverage.ALL, "suspicious_version_finding",
+    ),
     _ok("re_toolkit", "re_toolkit", ("name", "capability"),
         (Sink.FINDING,), "re_toolkit_finding", coverage=Coverage.SUMMARY),
     _ok("web_redirect_chain", "web_redirect_chain", ("step", "target", "mechanism"),
@@ -127,7 +133,7 @@ EVIDENCE_UNIT_INVENTORY = frozenset({
 
 #: 已知缺口的 (证据单元数, producer 键数)。★数字下调只能因为**真的接上了出口**——
 #: `runtime_brand_hints` 由 3/4 降为 2/3 是补了 RUNTIME-BRAND-HINTS Finding 的结果。
-EXPECTED_GAPS = {GapKind.COMPLETE: (2, 3), GapKind.CONDITIONAL: (2, 2), GapKind.FIELD: (1, 1)}
+EXPECTED_GAPS = {GapKind.COMPLETE: (1, 1), GapKind.CONDITIONAL: (2, 2), GapKind.FIELD: (1, 1)}
 
 
 def validate_evidence_exit_contract() -> list[str]:

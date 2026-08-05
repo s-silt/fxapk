@@ -124,6 +124,28 @@ def test_brand_hints_value_reaches_finding(tmp_path) -> None:  # type: ignore[no
     assert len([f for f in report.findings if f.id == "RUNTIME-BRAND-HINTS"]) == 1
 
 
+def test_suspicious_version_value_reaches_finding() -> None:
+    """★行为锁：命中的关键词与 versionName 必须带值进 Finding。
+
+    原实现只写 meta 并在 docstring 里自称「研判标注」——可它谁也没告诉。
+    走真入口 ``ManifestAnalyzer().analyze``，不直接调 ``_annotate_suspicious``。
+    """
+    xml = (
+        '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+        'package="com.demo.app" android:versionName="1.0-马甲-debug">'
+        "<application/></manifest>"
+    )
+    result = ManifestAnalyzer().analyze(FakeContext(manifest_xml=xml))
+
+    assert result.meta["suspicious_version_hits"], "夹具没命中关键词"
+    finding = next(f for f in result.findings if f.id == "MANIFEST-SUSPICIOUS-VERSION-NAME")
+    assert "1.0-马甲-debug" in finding.description
+    assert "马甲" in finding.description
+    # 弱信号：份量必须压住，且不得替人定性。
+    assert finding.severity is Severity.LOW
+    assert "需另有证据" in finding.recommendation
+
+
 def test_denial_bomb_value_reaches_finding() -> None:
     path = "assets/oversized.bin"
     result = PackingAnalyzer().analyze(FakeContext(files={path: b"x"}, declared_sizes={path: 600_000_000}))
@@ -179,15 +201,6 @@ def test_runtime_antidetect_jsbridge_and_sensitive_values_reach_sinks(monkeypatc
     assert "root" in anti.description and "synthetic-root-probe" in " ".join(e.snippet for e in anti.evidences)
     assert any(lead.value == "JSBridge:SyntheticBridge" for lead in report.leads)
     assert any(e.source == "runtime" and "getDeviceId" in e.snippet for e in static.evidences)
-
-
-def test_suspicious_version_two_key_unit_is_meta_only() -> None:
-    manifest = ("<manifest xmlns:android='http://schemas.android.com/apk/res/android' "
-                "android:versionName='1.0-test'><application/></manifest>")
-    result = ManifestAnalyzer().analyze(FakeContext(manifest_xml=manifest))
-    assert result.meta["suspicious_version_name"] is True
-    assert "test" in result.meta["suspicious_version_hits"]
-    assert not any("versionName" in f.description and "test" in f.description for f in result.findings)
 
 
 def test_re_toolkit_name_and_capability_reach_finding() -> None:
