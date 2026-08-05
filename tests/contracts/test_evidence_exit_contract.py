@@ -65,10 +65,20 @@ def test_firebase_field_gap_runs_analyzer_and_checks_each_missing_field() -> Non
         assert value not in rendered
 
 
-def test_conditional_container_gap_and_positive_decoy_branch() -> None:
+def test_both_container_branches_reach_a_finding() -> None:
+    """★两支都要有出口：冒充核心名 → MEDIUM；仅绝对路径 → LOW（操作提示）。
+
+    原实现在「有绝对路径但不冒充核心名」这一支直接 return，只写 meta——
+    可 recommendation 里那条「别用会落盘解压的工具展开」的操作风险，
+    对**所有**绝对路径条目都成立。意图不明是不下定性结论的理由，不是不告诉人的理由。
+    """
     gap = PackingAnalyzer().analyze(FakeContext(files={"/tmp/note.txt": b"x"}))
     assert gap.meta["container_decoy_entries"]["absolute_path_entries"] == 1
     assert not any(f.id == "APK-CORE-NAME-DECOY-ENTRIES" for f in gap.findings)
+    weak = next(f for f in gap.findings if f.id == "APK-ABSOLUTE-PATH-ENTRIES")
+    assert weak.severity is Severity.LOW, "意图不明的一支不得与冒充核心名同级"
+    assert "落盘解压" in weak.recommendation, "操作风险提示必须到达分析员"
+    assert "/tmp/note.txt" in " ".join(ev.snippet for ev in weak.evidences)
 
     positive = PackingAnalyzer().analyze(
         FakeContext(files={"/classes2.dex/picture.png": b"x"})

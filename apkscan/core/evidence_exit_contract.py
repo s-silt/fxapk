@@ -74,9 +74,6 @@ EVIDENCE_EXITS: tuple[EvidenceExit, ...] = (
     _gap("firebase_unprojected_fields", ("firebase",),
          ("storage_bucket", "api_key", "sender_id", "project_number"),
          "firebase_field_gap", GapKind.FIELD),
-    _gap("container_decoy_absolute_only", ("container_decoy_entries",),
-         ("absolute_path_entries",), "container_decoy_conditional_gap", GapKind.CONDITIONAL,
-         condition="存在绝对路径条目，但未冒充 APK 核心文件名"),
 
     _ok("runtime_antidetect", "runtime_antidetect", ("kind", "probe"),
         (Sink.FINDING,), "runtime_antidetect_finding"),
@@ -96,6 +93,10 @@ EVIDENCE_EXITS: tuple[EvidenceExit, ...] = (
         (Sink.FINDING,), "decrypt_candidate_finding"),
     _ok("denial_bomb_entries", "denial_bomb_entries", ("path", "declared_size"),
         (Sink.FINDING,), "denial_bomb_finding"),
+    # 原为 CONDITIONAL 缺口：不冒充核心名那一支直接 return，分析员拿不到「别落盘解压」
+    # 这条操作提示。已补 APK-ABSOLUTE-PATH-ENTRIES（LOW observation），两支都有出口。
+    _ok("container_decoy_absolute_only", "container_decoy_entries", ("absolute_path_entries",),
+        (Sink.FINDING,), "container_decoy_absolute_only_finding"),
     _ok("dns_bypass", "dns_bypass", ("protocol",),
         (Sink.FINDING, Sink.VISIBILITY), "dns_bypass_finding"),
     _ok("manifest_anomaly", "manifest_anomaly", ("anomaly",),
@@ -133,7 +134,7 @@ EVIDENCE_UNIT_INVENTORY = frozenset({
 
 #: 已知缺口的 (证据单元数, producer 键数)。★数字下调只能因为**真的接上了出口**——
 #: `runtime_brand_hints` 由 3/4 降为 2/3 是补了 RUNTIME-BRAND-HINTS Finding 的结果。
-EXPECTED_GAPS = {GapKind.COMPLETE: (1, 1), GapKind.CONDITIONAL: (2, 2), GapKind.FIELD: (1, 1)}
+EXPECTED_GAPS = {GapKind.COMPLETE: (1, 1), GapKind.CONDITIONAL: (1, 1), GapKind.FIELD: (1, 1)}
 
 
 def validate_evidence_exit_contract() -> list[str]:
