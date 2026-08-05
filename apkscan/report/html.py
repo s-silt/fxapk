@@ -18,12 +18,16 @@ from apkscan.report import letters
 from apkscan.core.models import (
     Confidence,
     Endpoint,
+    Finding,
     Lead,
     LeadCategory,
     Report,
 )
 
 _TEMPLATE_NAME = "report.html.j2"
+
+# 单条 Finding 在 HTML 里展开的取证依据条数上限（余下计数如实标出，不静默截断）。
+_FINDING_EVIDENCE_SHOWN = 6
 
 # LeadCategory → 中文标签（用于线索清单分组标题）。
 CATEGORY_LABELS: dict[LeadCategory, str] = {
@@ -369,6 +373,41 @@ def _build_environment(template_dir: str) -> Environment:
     return env
 
 
+def finding_evidence_views(findings: list[Finding]) -> list[dict[str, Any]]:
+    """把每条 Finding 的取证依据压成「有界展开条目 + 省略计数」，供模板逐行对齐渲染。
+
+    ★为什么要有这个视图：在此之前 ``Finding.evidences`` 在**任何人看得见的出口**都不渲染
+      （HTML 的 findings 表只有 id/title/severity/category/description/recommendation，
+      digest 只投影 id/severity/title，letters 只读 Lead 不读 Finding），而全仓有 40+ 处
+      把关键取证值——绝对路径条目、被劫持的域名、类名、命中片段——**只**写进 evidences。
+      值到了对象、到不了人，与本项目反复要防的「信号只写不读」是同一个错。
+
+    ★为什么不是逐个把值搬进 description：那是打地鼠，且每加一个新 Finding 就要重犯一次。
+
+    返回顺序与入参一一对应（模板按 ``loop.index0`` 取），不用 finding.id 作键——同一 id
+    可能出现多条。
+    """
+    views: list[dict[str, Any]] = []
+    for finding in findings:
+        evidences = list(finding.evidences or [])
+        shown = evidences[:_FINDING_EVIDENCE_SHOWN]
+        views.append(
+            {
+                # 键名不能叫 items：Jinja 的点号取属性优先，会取到 dict 自带的 .items 方法。
+                "rows": [
+                    {
+                        "source": evidence.source,
+                        "location": evidence.location,
+                        "snippet": evidence.snippet,
+                    }
+                    for evidence in shown
+                ],
+                "omitted": len(evidences) - len(shown),
+            }
+        )
+    return views
+
+
 def render_to_string(report: Report) -> str:
     """渲染 Report 为 HTML 字符串。
 
@@ -433,6 +472,7 @@ def _render_template(template: Any, report: Report) -> str:
         analyzer_status=report.analyzer_status or [],
         enricher_status=report.enricher_status or [],
         findings=report.findings or [],
+        finding_evidences=finding_evidence_views(report.findings or []),
     )
 
 
