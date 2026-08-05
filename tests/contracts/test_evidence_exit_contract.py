@@ -55,18 +55,18 @@ def test_firebase_every_field_reaches_an_exit() -> None:
 
     分工按「它是什么」定，不是一律塞进同一个出口：
     - ``project_number`` / ``sender_id`` / ``api_key`` 是**同一个 GCP 项目**的其它标识符
-      → 并进那条 CONFIG_KEY Lead 的证据（同一调证对象不滥产线索）
-    - ``storage_bucket`` 是独立主机（可能存放配置与受害数据）
+      → 并进那条 CONFIG_KEY Lead 的证据（同一目标不重复产线索）
+    - ``storage_bucket`` 是独立主机（可能存放配置与业务数据）
       → 与 ``database_url`` 同口径产 domain Endpoint，由 pipeline 统一做 infra 分级
     """
     xml = ("<resources><string name='project_id'>demo-project</string>"
-           "<string name='google_storage_bucket'>demo-project.appspot.com</string>"
+           "<string name='google_storage_bucket'>demo-project.storage.example.com</string>"
            "<string name='google_api_key'>FAKE-API-KEY</string>"
            "<string name='gcm_defaultSenderId'>123456789012</string></resources>")
     result = FirebaseAnalyzer().analyze(FakeContext(files={"res/values/strings.xml": xml.encode()}))
     assert result.meta["firebase"] == {
         "project_id": "demo-project", "api_key": "FAKE-API-KEY",
-        "sender_id": "123456789012", "storage_bucket": "demo-project.appspot.com",
+        "sender_id": "123456789012", "storage_bucket": "demo-project.storage.example.com",
     }
 
     lead = next(lead for lead in result.leads if lead.value.startswith("firebase_project_id="))
@@ -74,7 +74,7 @@ def test_firebase_every_field_reaches_an_exit() -> None:
     assert "FAKE-API-KEY" in lead_evidence, "api_key 未到达 Lead 证据"
     assert "123456789012" in lead_evidence, "sender_id 未到达 Lead 证据"
 
-    assert any(ep.value == "demo-project.appspot.com" for ep in result.endpoints), (
+    assert any(ep.value == "demo-project.storage.example.com" for ep in result.endpoints), (
         "storage_bucket 未产 Endpoint"
     )
 
@@ -157,11 +157,11 @@ def test_brand_hints_value_reaches_finding(tmp_path) -> None:  # type: ignore[no
     # 措辞不得替人下「冒充了 X」的结论——同名可能来自第三方 SDK 文案或行业通用词。
     assert "冒充" not in finding.title
     assert "同名不等于冒充" in finding.recommendation
-    # ★合规提示必须在：词条截自解密明文、判据是「命中行业词」，可能连带受害人信息片段。
+    # ★合规提示必须在：词条截自解密明文、判据是「命中行业词」，可能连带无关的个人数据片段。
     #   挂在「品牌/行业词」这个看着无害的标签下而不标敏感，比放原文更危险
     #   （凭据 Lead 走的是 RUNTIME_CREDENTIAL + 合规提示，本条须对齐）。
     assert "合规提示" in finding.description
-    assert "受害人个人信息" in finding.description
+    assert "个人数据" in finding.description
     # ★分类字段不得替人断言「冒充」：它进统计与筛选，比正文更容易被当成结论。
     assert "impersonation" not in finding.category
 

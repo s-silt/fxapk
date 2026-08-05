@@ -415,8 +415,8 @@ class FirebaseAnalyzer(BaseAnalyzer):
                     ),
                     # ★project_number / sender_id / api_key 是**同一个 GCP 项目**的其它标识符，
                     #   原先只写进 meta["firebase"]、无任何出口。它们不该各产一条 Lead
-                    #   （同一调证对象滥产线索），而应补强这条：project_number 与 project_id
-                    #   等价可向 Google 调项目实名/账单，缺 project_id 时它就是唯一抓手。
+                    #   （同一目标不重复产线索），而应补强这条：project_number 与 project_id
+                    #   等价指向同一 GCP 项目，缺 project_id 时它是唯一标识。
                     *(
                         Evidence(
                             source=config.source,
