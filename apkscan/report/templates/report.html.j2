@@ -252,6 +252,17 @@
   {#- 复用：advice 醒目徽标（建议调证=红 / 无需调证=灰 / 待核=黄）。 -#}
   {% macro advice_badge(advice) %}<span class="badge {{ advice|advice_class }}">{{ advice|advice_label }}</span>{% endmacro %}
 
+  {#- 复用：Finding 取证依据条目列表（预览区与折叠区共用，免得两处渲染口径分叉）。 -#}
+  {% macro evidence_rows(rows) %}
+    <ul class="tight">
+      {% for e in rows %}
+      <li><span class="muted">[{{ e.source }}]</span> <span class="mono">{{ e.location }}</span>
+        {% if e.snippet %}<br><code class="snip">{{ e.snippet }}</code>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+  {% endmacro %}
+
   {#- 复用：取证依据（source_refs）列表。 -#}
   {% macro source_refs_cell(lead) %}
     {% if lead.source_refs %}
@@ -725,14 +736,14 @@
               而全仓 40+ 处把关键值（路径 / 域名 / 类名 / 片段）只写进 evidences。 -#}
           <td>
             {% if ev.rows %}
-            <ul class="tight">
-              {% for e in ev.rows %}
-              <li><span class="muted">[{{ e.source }}]</span> <span class="mono">{{ e.location }}</span>
-                {% if e.snippet %}<br><code class="snip">{{ e.snippet }}</code>{% endif %}
-              </li>
-              {% endfor %}
-            </ul>
-            {% if ev.omitted %}<div class="muted">另有 {{ ev.omitted }} 条未在此展开，完整清单见 report.json 的 <span class="mono">findings[].evidences</span>。</div>{% endif %}
+            {{ evidence_rows(ev.rows) }}
+            {% if ev.more_rows %}
+            <details><summary class="muted">展开其余 {{ ev.more_rows|length }} 条</summary>{{ evidence_rows(ev.more_rows) }}</details>
+            {% endif %}
+            {#- ★与上面那句「其余 N 条」不是一回事：折叠区的数据在本页面上，
+                这里的 N 条**连 HTML 都没有**。两种「没显示」混为一谈，
+                就会把「翻一下能看到」读成「查过了没有」。 -#}
+            {% if ev.omitted %}<div class="muted">另有 {{ ev.omitted }} 条未在 HTML 中展示，见 report.json 的 <span class="mono">findings[].evidences</span>。</div>{% endif %}
             {% else %}<span class="muted">—</span>{% endif %}
           </td>
         </tr>

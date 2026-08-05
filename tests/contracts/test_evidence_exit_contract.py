@@ -245,24 +245,40 @@ def test_finding_evidences_are_rendered_in_html() -> None:
     id/severity/title，letters 只读 Lead——值到了对象、到不了人。
     逐个把值搬进 description 是打地鼠，正解是让这个字段有出口。
     """
-    from apkscan.report.html import render_to_string
-
-    finding = Finding(
-        id="X-EVIDENCE-RENDER", title="t", severity=Severity.LOW, category="c",
-        description="d", recommendation="r",
-        evidences=[
-            Evidence(source="native", location=f"lib/arm64-v8a/lib{i}.so", snippet=f"值-{i}")
-            for i in range(8)
-        ],
+    from apkscan.report.html import (
+        _FINDING_EVIDENCE_HTML_MAX, _FINDING_EVIDENCE_PREVIEW, render_to_string,
     )
-    html = render_to_string(Report(
-        package_name="com.test.app", meta={}, leads=[], endpoints=[],
-        findings=[finding], analyzer_status=[],
-    ))
 
-    assert "lib/arm64-v8a/lib0.so" in html and "值-0" in html, "证据的位置与片段都要渲染"
-    # 有上限，但**截断必须自报**：只列前几条又不说，会被读成「就这么几条」。
-    assert "另有 2 条" in html, "超出展开上限的部分必须报出条数，不得静默截断"
+    def render(count: int) -> str:
+        finding = Finding(
+            id="X-EVIDENCE-RENDER", title="t", severity=Severity.LOW, category="c",
+            description="d", recommendation="r",
+            evidences=[
+                Evidence(source="native", location=f"lib/arm64-v8a/lib{i}.so", snippet=f"值-{i}")
+                for i in range(count)
+            ],
+        )
+        return render_to_string(Report(
+            package_name="com.test.app", meta={}, leads=[], endpoints=[],
+            findings=[finding], analyzer_status=[],
+        ))
+
+    small = render(3)
+    assert "lib/arm64-v8a/lib0.so" in small and "值-0" in small, "证据的位置与片段都要渲染"
+    assert "展开其余" not in small and "另有" not in small, "没有省略时不该出现任何省略提示"
+
+    # ★预览条数不得低于生产端自己声明的证据预算（web_evidence 就切了 20 条）——
+    #   展示层把生产端有意保留的条数截掉，等于替分析器改主意。
+    assert _FINDING_EVIDENCE_PREVIEW >= 20
+
+    over = _FINDING_EVIDENCE_HTML_MAX + 30
+    big = render(over)
+    # 三段各自的边界都要如实：铺开的、折叠的、连 HTML 都没有的。
+    assert f"展开其余 {_FINDING_EVIDENCE_HTML_MAX - _FINDING_EVIDENCE_PREVIEW} 条" in big
+    assert f"lib{_FINDING_EVIDENCE_HTML_MAX - 1}.so" in big, "折叠区里的证据仍须在页面上"
+    assert "另有 30 条未在 HTML 中展示" in big, "连折叠区都放不下的部分必须单独说明"
+    # ★两种「没显示」不能混：折叠区翻一下就有，这 30 条是真的不在页面上。
+    assert "完整清单" not in big, "不得承诺一份 HTML 里并不存在的完整清单"
 
 
 def test_decoy_finding_does_not_promise_a_list_it_does_not_have() -> None:
@@ -271,6 +287,11 @@ def test_decoy_finding_does_not_promise_a_list_it_does_not_have() -> None:
     承诺一份并不存在的清单比不给更坏：分析员会以为自己已经查全了。
     """
     from apkscan.analyzers.packing import _DECOY_EVIDENCE_CAP
+
+    # ★上限本身要钉住量级，否则下面全按常量取值、把它调回 5 也照样绿。
+    #   本文件的 docstring 记着实测样本 153+153+105=411 条——比已知实测量级还小的上限，
+    #   等于开工就默认要丢一半数据。
+    assert _DECOY_EVIDENCE_CAP >= 411, "上限低于本仓已记录的实测条目数"
 
     over = _DECOY_EVIDENCE_CAP + 7
     result = PackingAnalyzer().analyze(FakeContext(
