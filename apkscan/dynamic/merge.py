@@ -1754,6 +1754,14 @@ def merge_runtime_remote_control(report: Report, runtime_report_path: str) -> di
             _add_remote_control_finding(
                 report, known_targets, unknown_targets, gesture_actions, screencapture
             )
+        elif unknown_targets:
+            # ★没抓到手势/录屏，但确实观察到针对未知包的无障碍事件——仍必须有出口。
+            #   上面 ① 处注释写着「未知进 Finding/notes」，可那条 Finding 被
+            #   `gesture or screencapture` 挡在门外，于是这一支只剩 meta。
+            #   ★而下面那行日志自己写着「launch-only 抓不到，多数需引导式人工动态」：
+            #     抓包本就常常很浅，**没抓到手势不等于没有能力**——
+            #     拿手势当报告前提，正好卡在最容易漏的地方。
+            _add_unknown_remote_target_finding(report, unknown_targets)
 
         report.meta["runtime_remote_control"] = True
         report.meta["runtime_remote_control_targets"] = [s for _, s in known_targets]
@@ -1771,6 +1779,54 @@ def merge_runtime_remote_control(report: Report, runtime_report_path: str) -> di
     except Exception:  # noqa: BLE001 - 远控并回失败不得抛给调用方（不破坏已产出报告）
         logger.exception("[merge] 无障碍远控并回异常")
     return stats
+
+
+def _add_unknown_remote_target_finding(report: Report, unknown_targets: list[str]) -> None:
+    """只观察到「针对未知包的无障碍事件」、无手势/录屏时的出口（LOW observation）。
+
+    ★与 :func:`_add_remote_control_finding` 的分工：那条要求实测到手势或录屏，
+      是「已在实施远控」的强证据；本条只说明**监视/控制目标存在**，
+      份量低一档，且不替人断言远控已发生。
+
+    ★为什么不能省：无障碍事件的目标包名本身就是取证材料——它指出这个样本在盯哪些
+      应用。而 launch-only 抓包常常抓不到手势（见并回日志里那句说明），
+      用手势作为报告前提会让浅抓包的样本整批静默。
+    """
+    if any(f.id == "RUNTIME-REMOTE-CONTROL-UNKNOWN-TARGET" for f in report.findings):
+        return  # 幂等：重复合并不得堆同 ID
+    shown = unknown_targets[:12]
+    more = len(unknown_targets) - len(shown)
+    label = "、".join(shown) + (f"（另有 {more} 个）" if more > 0 else "")
+    report.findings.append(
+        Finding(
+            id="RUNTIME-REMOTE-CONTROL-UNKNOWN-TARGET",
+            title="无障碍事件指向未知包（未实测到手势/录屏）",
+            severity=Severity.LOW,
+            analyzer="runtime-merge",
+            kind=FINDING_KIND_OBSERVATION,
+            category="remote_control",
+            description=(
+                f"运行时观察到样本对下列包名发出无障碍事件：{label}。"
+                "这些包名不在已知银行/支付机构名单内，故未产机构主体线索。"
+                "本次未实测到远控手势或屏幕录制——**这不代表不具备该能力**："
+                "launch-only 抓包通常触发不到远控行为，多数需引导式人工动态。"
+            ),
+            recommendation=(
+                "研判：先确认这些包名对应什么应用（可能是小众银行、券商、钱包或本地工具）；"
+                "若涉及资金类应用，建议补一次引导式动态抓包以确认是否实施手势操控。"
+                "★不宜据本条单独认定已发生远控——目前只观察到事件指向。"
+            ),
+            evidences=[
+                Evidence(
+                    source=_RUNTIME_SOURCE,
+                    location="runtime-remote-control",
+                    snippet=f"无障碍事件目标包：{pkg}",
+                )
+                for pkg in shown
+            ],
+            references=[],
+        )
+    )
 
 
 def _add_remote_control_leads(

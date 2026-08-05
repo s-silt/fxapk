@@ -65,10 +65,6 @@ def _gap(unit: str, producer: tuple[str, ...], required: tuple[str, ...], scenar
 
 
 EVIDENCE_EXITS: tuple[EvidenceExit, ...] = (
-    _gap("runtime_remote_control_unknown_packages",
-         ("runtime_remote_control_unknown_packages",), ("package",),
-         "runtime_unknown_package_meta_only", GapKind.CONDITIONAL,
-         condition="未知包 accessibility 事件存在，且无 gesture/screencapture"),
     _gap("control_chains", ("control_chains",), ("config", "recipe", "backend", "attribution"),
          "control_chain_meta_only", GapKind.COMPLETE),
     _gap("firebase_unprojected_fields", ("firebase",),
@@ -89,6 +85,11 @@ EVIDENCE_EXITS: tuple[EvidenceExit, ...] = (
         (Sink.LEAD, Sink.ENDPOINT), "runtime_dead_drop_relation"),
     _ok("runtime_remote_control_targets", "runtime_remote_control_targets", ("package", "subject"),
         (Sink.LEAD,), "runtime_known_remote_target"),
+    # 原为 CONDITIONAL 缺口：未知包只在有 gesture/screencapture 时才进 Finding，
+    # 而 launch-only 抓包常抓不到手势 → 浅抓包样本整批静默。
+    # 已补 RUNTIME-REMOTE-CONTROL-UNKNOWN-TARGET（LOW observation）覆盖无手势那一支。
+    _ok("runtime_remote_control_unknown_packages", "runtime_remote_control_unknown_packages",
+        ("package",), (Sink.FINDING,), "runtime_unknown_remote_target_finding"),
     _ok("decrypt_candidates", "decrypt_candidates", ("ciphertext", "consumer"),
         (Sink.FINDING,), "decrypt_candidate_finding"),
     _ok("denial_bomb_entries", "denial_bomb_entries", ("path", "declared_size"),
@@ -132,9 +133,17 @@ EVIDENCE_UNIT_INVENTORY = frozenset({
 })
 
 
-#: 已知缺口的 (证据单元数, producer 键数)。★数字下调只能因为**真的接上了出口**——
-#: `runtime_brand_hints` 由 3/4 降为 2/3 是补了 RUNTIME-BRAND-HINTS Finding 的结果。
-EXPECTED_GAPS = {GapKind.COMPLETE: (1, 1), GapKind.CONDITIONAL: (1, 1), GapKind.FIELD: (1, 1)}
+#: 已知缺口的 (证据单元数, producer 键数)。★数字下调只能因为**真的接上了出口**：
+#: 起点是 complete 3/4 + conditional 2/2 + field 1/1（6 单元 / 7 键），现已修四个——
+#: brand_hints、suspicious_version（complete），unknown_remote_target、
+#: container_decoy_absolute_only（conditional）。
+#: ★零的那一类显式写成 (0, 0) 而不是删掉键：删掉读起来像「没查这一类」，
+#:   写 0 才是「查过了，这一类没有」。
+EXPECTED_GAPS = {
+    GapKind.COMPLETE: (1, 1),
+    GapKind.CONDITIONAL: (0, 0),
+    GapKind.FIELD: (1, 1),
+}
 
 
 def validate_evidence_exit_contract() -> list[str]:

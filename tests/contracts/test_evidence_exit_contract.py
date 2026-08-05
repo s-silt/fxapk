@@ -30,11 +30,15 @@ def test_contract_is_complete_and_gap_numbers_are_honest() -> None:
       正是这套机制要治的毛病，不该在它自己的测试里复现。
     """
     assert validate_evidence_exit_contract() == []
-    gaps = [item for item in EVIDENCE_EXITS if item.gap is not None]
-    actual: dict[GapKind, tuple[int, int]] = {}
-    for item in gaps:
-        units, keys = actual.get(item.gap, (0, 0))
-        actual[item.gap] = (units + 1, keys + len(item.producer))
+    # ★所有 GapKind 都要出现，清零的那类写 (0, 0)——与 validate 同口径。
+    #   删掉键读起来像「没查这一类」，写 0 才是「查过了、这一类没有」。
+    actual = {
+        kind: (
+            sum(1 for item in EVIDENCE_EXITS if item.gap is kind),
+            sum(len(item.producer) for item in EVIDENCE_EXITS if item.gap is kind),
+        )
+        for kind in GapKind
+    }
     assert actual == EXPECTED_GAPS, "缺口条目与 EXPECTED_GAPS 声明不符"
 
 
@@ -154,6 +158,37 @@ def test_suspicious_version_value_reaches_finding() -> None:
     # 弱信号：份量必须压住，且不得替人定性。
     assert finding.severity is Severity.LOW
     assert "需另有证据" in finding.recommendation
+
+
+def test_unknown_remote_target_reaches_finding_without_gesture(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """★无手势/录屏时，未知包也必须有出口。
+
+    原实现把 Finding 挡在 ``gesture or screencapture`` 之后——而并回日志自己写着
+    「launch-only 抓不到，多数需引导式人工动态」：抓包本就常常很浅，
+    拿手势当报告前提，正好卡在最容易漏的地方。走真入口驱动。
+    """
+    import json
+
+    runtime_report = tmp_path / "runtime_report.json"
+    runtime_report.write_text(
+        json.dumps({"remote_control_events": [
+            {"event": "window", "package": "com.unknown.wallet.demo"},
+        ]}),
+        encoding="utf-8",
+    )
+    report = Report(
+        package_name="com.test.app", meta={}, leads=[], endpoints=[],
+        findings=[], analyzer_status=[],
+    )
+    merge.merge_runtime_remote_control(report, str(runtime_report))
+
+    assert report.meta.get("runtime_remote_control_unknown_packages"), "夹具没触发未知包"
+    finding = next(
+        f for f in report.findings if f.id == "RUNTIME-REMOTE-CONTROL-UNKNOWN-TARGET"
+    )
+    assert "com.unknown.wallet.demo" in finding.description
+    assert finding.severity is Severity.LOW, "无手势证据时不得与实测远控同级"
+    assert "不代表不具备该能力" in finding.description
 
 
 def test_denial_bomb_value_reaches_finding() -> None:
