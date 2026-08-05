@@ -966,6 +966,10 @@ def _add_brand_hint_finding(report: Report, brand_hints: list[str]) -> None:
       所以只陈述观察到什么、由人去判断，不替人下「冒充 X」的结论
       （与重打包件不写「植入/注入」同一条纪律）。
     """
+    # ★幂等：同一 Report 上重复合并（重跑动态、重渲染）不得堆出同 ID 的多条 Finding，
+    #   否则 digest 计数与 HTML/PDF 会重复，且「重跑改变既有结果」本身就不可信。
+    if any(f.id == "RUNTIME-BRAND-HINTS" for f in report.findings):
+        return
     shown = brand_hints[:12]
     more = len(brand_hints) - len(shown)
     label = "、".join(shown) + (f"（另有 {more} 条）" if more > 0 else "")
@@ -977,11 +981,14 @@ def _add_brand_hint_finding(report: Report, brand_hints: list[str]) -> None:
             # 运行时观测合入，无静态分析器归属 → 显式标 runtime-merge（区别于"未归因"的空串）。
             analyzer="runtime-merge",
             kind=FINDING_KIND_OBSERVATION,  # 活体明文里的**观察**，非规则推导
-            category="brand_impersonation",
+            # ★category 用中性名：叫 brand_impersonation 等于在分类字段上断言了「冒充」，
+            #   而 title 却写得克制——两处自相矛盾，且分类会进统计与筛选，
+            #   比正文更容易被当成结论。目前能确定的只有「明文出现这些词」。
+            category="runtime_plaintext_identity_hint",
             description=(
                 f"运行时解密明文中出现下列品牌/行业词：{label}。"
                 "这类词常见于壳应用向服务端上报的 webName / 站点标题字段，"
-                "是判断该样本对外假冒何种业务的直接材料。"
+                "可作为该样本对外身份呈现的候选材料。"
                 f"\n\n{_BRAND_HINT_COMPLIANCE_NOTE}"
             ),
             recommendation=(

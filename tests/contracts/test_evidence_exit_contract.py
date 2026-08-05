@@ -116,6 +116,12 @@ def test_brand_hints_value_reaches_finding(tmp_path) -> None:  # type: ignore[no
     #   （凭据 Lead 走的是 RUNTIME_CREDENTIAL + 合规提示，本条须对齐）。
     assert "合规提示" in finding.description
     assert "受害人个人信息" in finding.description
+    # ★分类字段不得替人断言「冒充」：它进统计与筛选，比正文更容易被当成结论。
+    assert "impersonation" not in finding.category
+
+    # ★幂等：重复合并（重跑动态 / 重渲染）不得堆出同 ID 的多条 Finding。
+    merge.decrypt_runtime_messages(report, str(runtime_report))
+    assert len([f for f in report.findings if f.id == "RUNTIME-BRAND-HINTS"]) == 1
 
 
 def test_denial_bomb_value_reaches_finding() -> None:
