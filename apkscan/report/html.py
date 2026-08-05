@@ -384,8 +384,8 @@ def finding_evidence_views(findings: list[Finding]) -> list[dict[str, Any]]:
 
     ★为什么不是逐个把值搬进 description：那是打地鼠，且每加一个新 Finding 就要重犯一次。
 
-    返回顺序与入参一一对应（模板按 ``loop.index0`` 取），不用 finding.id 作键——同一 id
-    可能出现多条。
+    返回顺序与入参一一对应（模板按 ``loop.index0`` 取），不拿 Finding 的 id 当键——
+    同一个 id 可能出现多条。
     """
     views: list[dict[str, Any]] = []
     for finding in findings:
