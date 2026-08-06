@@ -8,13 +8,19 @@ of truth，这是与中央台账的本质区别。
 库布局（根目录经 CLI 的 --corpus 或环境变量 FXAPK_CORPUS 注入，指向 OneDrive，含案件数据不入 git）::
 
     <corpus>/
-      reports/<sample_sha256>/<tool_version>_<ruleset_digest>.report.json   ← 报告原样字节入库
+      reports/<sample_sha256>/<tool_version>_<ruleset_digest>[_<证据面>].report.json  ← 报告原样字节入库
       manifest.jsonl                                                        ← 派生索引，一报告一行
 
 记录单元 = 一份 report.json 原样（schema_version 已版本化、meta 已带 sample_sha256/tool_version/
 ruleset_digest 三可复现锚点、finding 已带 analyzer/confidence/kind 溯源）。入库 = 复制 + 登记，无
-转换层。库内主键 = ``(sample_sha256, tool_version, ruleset_digest)``：同一样本用同一版 fxapk + 同一
-套规则重复入库幂等跳过；换版本 / 换规则则并存一份新报告，天然支撑跨版本回归对比。
+转换层。库内主键 = ``(sample_sha256, tool_version, ruleset_digest, evidence_surface)``：同一样本用
+同一版 fxapk + 同一套规则、且看的是同一个证据面时，重复入库幂等跳过；换版本 / 换规则 / 换证据面
+则并存一份新报告，天然支撑跨版本回归对比。
+
+★证据面（evidence_surface）为什么必须入主键：同一样本、同一版本、同一套规则，**脱壳前后看到的
+不是同一批内容**——脱壳后能读到壳内 dex，端点与线索通常显著更多。此前它不在主键里，两份报告
+主键完全相同，后入库的被幂等跳过，于是**更完整的那份被静默丢弃**。
+static 不加路径后缀，故该维度引入后存量记录的路径与主键一字不变。
 
 ★铁律（与 report/json.py、core/diff.py 一致）：纯函数层**禁** print/typer，对坏输入容错返回空/
 留空、**绝不抛**；打印与退出码只在 commands/corpus.py。
@@ -44,8 +50,32 @@ REPORTS_DIR = "reports"
 #: 派生索引文件名（JSONL，一报告一行）。
 MANIFEST_NAME = "manifest.jsonl"
 
-#: 库内主键字段：唯一标识"某样本 × 某版 fxapk × 某套规则"的一次分析。
-KEY_FIELDS: tuple[str, ...] = ("sample_sha256", "tool_version", "ruleset_digest")
+#: 证据面：同一样本 × 同一版本 × 同一套规则，**脱壳前后看到的不是同一批内容**——
+#: 脱壳后能读到壳内的 dex，端点与线索通常显著更多（实测某样本：静态 100 端点、脱壳后 239）。
+#: 若不入主键，两份报告主键完全相同，后入库的那份被幂等跳过，
+#: 结果是**更完整的那份被静默丢弃**——正是取证上最不该发生的一类损失。
+_SURFACE_STATIC = "static"
+_SURFACE_UNPACKED = "unpacked"
+
+
+def evidence_surface(report: dict) -> str:
+    """本次分析看到的证据面：脱壳产物 or 原始包。
+
+    判据是脱壳路径写下的 ``meta.unpacked`` 标记，不靠端点数量之类的启发式——
+    数量会随规则变化，标记不会。
+    """
+    return _SURFACE_UNPACKED if _meta(report).get("unpacked") else _SURFACE_STATIC
+
+
+#: 库内主键字段：唯一标识"某样本 × 某版 fxapk × 某套规则 × 某个证据面"的一次分析。
+KEY_FIELDS: tuple[str, ...] = (
+    "sample_sha256", "tool_version", "ruleset_digest", "evidence_surface",
+)
+
+#: 主键字段的缺省值。``evidence_surface`` 是后加的一维，**存量 manifest 行没有这个字段**；
+#: 不给缺省值的话，同一份存量报告在 reindex 前算出 ""、reindex 后算出 "static"，
+#: 主键对不上、会被当成两条记录。缺省对齐到 static 后，存量记录的主键与路径都一字不变。
+_KEY_DEFAULTS: dict[str, str] = {"evidence_surface": _SURFACE_STATIC}
 
 #: manifest 里能被 ``corpus seen --by`` 反查的字段（值 → 命中记录）。
 SEEN_FIELDS: tuple[str, ...] = ("sample_sha256", "package_name", "sign_sha256")
@@ -118,18 +148,30 @@ def sample_identity(report: dict) -> tuple[str, bool]:
 
 
 def _key_of(entry: dict) -> tuple[str, ...]:
-    """从一条 manifest 记录取库内主键元组。"""
-    return tuple(_s(entry.get(f)) for f in KEY_FIELDS)
+    """从一条 manifest 记录取库内主键元组。
+
+    缺字段取 ``_KEY_DEFAULTS`` 的缺省值——后加的主键维度在存量行里不存在，
+    不归一就会让同一份报告在 reindex 前后算出两个不同主键。
+    """
+    return tuple(_s(entry.get(f)) or _KEY_DEFAULTS.get(f, "") for f in KEY_FIELDS)
 
 
 def report_relpath(report: dict) -> str:
-    """报告在库内的相对路径：``reports/<sha>/<tool_version>_<ruleset_digest>.report.json``。"""
+    """报告在库内的相对路径。
+
+    ``reports/<sha>/<tool_version>_<ruleset_digest>[_<证据面>].report.json``
+
+    ★证据面后缀**只在非 static 时才加**：静态分析的路径与后缀引入前完全一致，
+    存量记录不需要搬家，reindex 也不会把它们算成新记录。
+    """
     meta = _meta(report)
     sha, _synthetic = sample_identity(report)
     sha_dir = _safe_component(sha, "unknown")
     tv = _safe_component(_s(meta.get("tool_version")) or "unknown", "unknown")
     digest = _safe_component(_s(meta.get("ruleset_digest")) or "unknown", "unknown")
-    return f"{REPORTS_DIR}/{sha_dir}/{tv}_{digest}.report.json"
+    surface = evidence_surface(report)
+    suffix = "" if surface == _SURFACE_STATIC else f"_{_safe_component(surface, 'unknown')}"
+    return f"{REPORTS_DIR}/{sha_dir}/{tv}_{digest}{suffix}.report.json"
 
 
 def _key_iocs(report: dict) -> list[str]:
@@ -393,6 +435,8 @@ def manifest_entry(report: dict, case_id: str | None = None) -> dict:
         "sample_sha256_synthetic": synthetic,
         "tool_version": _s(meta.get("tool_version")) or None,
         "ruleset_digest": _s(meta.get("ruleset_digest")) or None,
+        # 证据面（static / unpacked）：脱壳前后看到的不是同一批内容，不入主键会丢掉更完整的那份。
+        "evidence_surface": evidence_surface(report),
         # ---- 身份 / 版本 ----
         "package_name": _s(report.get("package_name") or meta.get("package_name")) or None,
         "version_name": meta.get("version_name"),

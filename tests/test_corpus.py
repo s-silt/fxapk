@@ -413,3 +413,71 @@ def test_cli_refuses_corpus_inside_git_worktree(tmp_path: Path, monkeypatch) -> 
         cli.app, ["corpus", "add", str(report_file), "--corpus", str(repo / "corpus")]
     )
     assert res.exit_code == 2
+
+
+# --- 证据面（脱壳前 / 脱壳后）入主键 -----------------------------------------
+
+
+def _unpacked_report(**kw) -> dict:  # type: ignore[no-untyped-def]
+    """同一样本、同一版本、同一套规则，但看的是**脱壳后**的证据面。"""
+    rep = _report(**kw)
+    rep["meta"]["unpacked"] = True
+    rep["meta"]["unpacked_dex_count"] = 7
+    return rep
+
+
+def test_unpacked_and_static_reports_coexist(tmp_path: Path) -> None:
+    """★脱壳前后不是同一批内容，两份报告必须并存。
+
+    此前证据面不在主键里，两份的 (样本, 版本, 规则) 完全相同 → 后入库的被幂等跳过。
+    而脱壳那份通常检出**更多**（真样本实测：静态 100 端点、脱壳后 239），
+    被丢掉的恰恰是更完整的证据面。
+
+    ★变异验证：把 "evidence_surface" 从 corpus.KEY_FIELDS 去掉，本测试必红。
+    """
+    static, unpacked = _report(), _unpacked_report()
+
+    entries, added_1 = corpus.upsert([], corpus.manifest_entry(static))
+    assert added_1 is True
+    entries, added_2 = corpus.upsert(entries, corpus.manifest_entry(unpacked))
+    assert added_2 is True, "脱壳报告被当成静态那份的重复，幂等跳过了"
+    assert len(entries) == 2
+
+    surfaces = sorted(e["evidence_surface"] for e in entries)
+    assert surfaces == ["static", "unpacked"]
+
+    # 两份落在不同文件，不会互相覆盖
+    assert corpus.report_relpath(static) != corpus.report_relpath(unpacked)
+
+
+def test_static_report_path_is_unchanged_by_the_new_dimension() -> None:
+    """★向后兼容：static 不加后缀，存量记录不必搬家。
+
+    这一维是后加的；若给 static 也加后缀，库里 40 余条存量记录的路径会全部失配。
+    """
+    assert corpus.report_relpath(_report()).endswith("/0.9.0_deadbeef.report.json")
+    assert corpus.report_relpath(_unpacked_report()).endswith(
+        "/0.9.0_deadbeef_unpacked.report.json"
+    )
+
+
+def test_legacy_manifest_row_without_the_field_keys_the_same_as_static() -> None:
+    """★存量 manifest 行没有 evidence_surface 字段，主键必须与重算后的 static 对齐。
+
+    不归一的话，同一份存量报告在 reindex 前算出 ""、reindex 后算出 "static"，
+    会被当成两条记录——一次索引重建就把库里的记录数凭空翻倍。
+    """
+    fresh = corpus.manifest_entry(_report())
+    legacy = {k: v for k, v in fresh.items() if k != "evidence_surface"}
+    assert "evidence_surface" not in legacy
+
+    _entries, added = corpus.upsert([legacy], fresh)
+    assert added is False, "存量行与重算行主键不一致，reindex 会重复计数"
+
+
+def test_unpacked_flag_absent_means_static() -> None:
+    """没有 unpacked 标记就是 static——判据只认标记，不靠端点多寡之类的启发式。"""
+    assert corpus.evidence_surface(_report()) == "static"
+    assert corpus.evidence_surface({}) == "static"
+    assert corpus.evidence_surface({"meta": {"unpacked": False}}) == "static"
+    assert corpus.evidence_surface({"meta": {"unpacked": True}}) == "unpacked"

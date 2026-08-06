@@ -71,6 +71,20 @@ def build_endpoint_leads(
 #: 大厂域名就能让同文件里的真后端地址降档），两个以上才构成"这确实是那家 SDK 的库"的形态。
 _VENDOR_SDK_MIN_KNOWN_DOMAINS = 2
 
+#: 应用**自身**业务代码的编译产物——这类文件不是第三方 SDK 的库，必须排除在厂商库判定之外。
+#:
+#: 判据是编译框架的**固定产物命名**，不是靠名字猜厂商：
+#:   · libapp.so    —— Flutter 把整个 Dart 业务代码 AOT 编译进这一个文件
+#:   · libil2cpp.so —— Unity 把 C# 业务代码经 IL2CPP 转译后编译进这一个文件
+#: 两者都与各自的引擎库（libflutter.so / libunity.so）分开存放，引擎才是第三方部分。
+#:
+#: ★为什么必须排除：整个 App 的业务代码都在里面，引用一堆第三方域名是常态
+#:   （地图、头像、CDN、文档链接都写在业务代码里），"带 ≥2 个已知基础设施域名"这条
+#:   形态判据必然命中，于是**同一文件里的本 App 真后端会被一并降成待核**。
+#:   实测踩过：一份 Flutter 样本的自建服务器与其已确认的 C2 同处 libapp.so，
+#:   却被判成"疑为该 SDK 内置常量"，险些整条线索被放过。
+_APP_OWN_CODE_LIBS = frozenset({"libapp.so", "libil2cpp.so"})
+
 
 def _native_lib_of(location: object) -> str:
     """证据位置指向 native 库时返回其文件名（小写），否则空串。
@@ -85,14 +99,18 @@ def _native_lib_of(location: object) -> str:
 
 
 def _vendor_sdk_libraries(endpoints: list[Endpoint]) -> set[str]:
-    """找出「带着 ≥2 个已知第三方基础设施域名」的 native 库文件名集合。"""
+    """找出「带着 ≥2 个已知第三方基础设施域名」的 native 库文件名集合。
+
+    ★应用自身业务代码的编译产物（见 ``_APP_OWN_CODE_LIBS``）先行排除：它们必然携带多个
+    第三方域名，不排除就会把本 App 的真后端一并降档。
+    """
     per_lib: dict[str, set[str]] = {}
     for ep in endpoints:
         if ep.kind != "domain" or not infra.is_known_infra(ep.value):
             continue
         for ev in ep.evidences:
             lib = _native_lib_of(ev.location)
-            if lib:
+            if lib and lib not in _APP_OWN_CODE_LIBS:
                 per_lib.setdefault(lib, set()).add(ep.value.lower())
     return {lib for lib, doms in per_lib.items() if len(doms) >= _VENDOR_SDK_MIN_KNOWN_DOMAINS}
 

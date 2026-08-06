@@ -185,6 +185,79 @@ def test_dump_success_done_with_artifacts(
     assert "--extra-dex" in playbook_text
 
 
+# ══════════════════════════════════════════════════════════════════
+# 脱壳报告必须带检材指纹（2026-08-06 实证）
+#
+# 现象：语料库里 5 份真实 APK 的记录 sample_sha256 是 nosha-<16hex> 占位，
+#       按样本哈希串案整类查不到它们。
+# 根因：``_reanalyze`` 走完 pipeline 直接落盘，从不写 evidence_manifest /
+#       sample_sha256——那段只在 ``cli.analyze`` 里有，脱壳这条路径漏了。
+#       ``corpus add`` 从 meta.sample_sha256 取身份，取不到就按内容派生占位。
+# ★上面那批 mock 掉 _reanalyze 的测试全都覆盖不到这里，所以它一直没被发现。
+# ══════════════════════════════════════════════════════════════════
+
+def _stub_reanalyze_deps(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """把 _reanalyze 的重量级依赖换掉，只留指纹那段真跑。"""
+    from apkscan.core import apk as apk_mod
+    from apkscan.core import pipeline as pipeline_mod
+    from apkscan.report import html as html_mod
+    from apkscan.report import json as json_mod
+
+    class _R:
+        def __init__(self) -> None:
+            self.meta: dict[str, Any] = {}
+
+    report = _R()
+    monkeypatch.setattr(apk_mod, "load_apk", lambda *a, **k: object())
+    monkeypatch.setattr(pipeline_mod, "run", lambda *a, **k: report)
+    monkeypatch.setattr(json_mod, "dump", lambda *a, **k: None)
+    monkeypatch.setattr(html_mod, "render", lambda *a, **k: None)
+    return {"report": report}
+
+
+def test_reanalyze_writes_sample_fingerprint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★脱壳报告必须带 sample_sha256，否则该样本在语料库里没有真实哈希身份。"""
+    import hashlib
+
+    held = _stub_reanalyze_deps(monkeypatch)
+    apk = tmp_path / "sample.apk"
+    apk.write_bytes(b"PK\x03\x04fake-apk-content")
+    want = hashlib.sha256(apk.read_bytes()).hexdigest()
+
+    unpack._reanalyze(str(apk), ["a.dex"], str(tmp_path / "out"))
+
+    meta = held["report"].meta
+    assert meta.get("sample_sha256") == want, "脱壳报告缺样本哈希 → 入库只能拿占位身份"
+    assert isinstance(meta.get("evidence_manifest"), dict)
+    # ★哈希算的是**原始 APK**（检材），不是脱壳产物：产物每次运行都可能不同，
+    #   拿它当身份会让同一份检材每跑一次多一个身份。
+    assert meta["evidence_manifest"].get("sha256") == want
+    assert meta.get("unpacked") is True and meta.get("unpacked_dex_count") == 1
+
+
+def test_reanalyze_survives_fingerprint_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """指纹算不出来时只记日志，不能让脱壳整个失败——主产物是 DEX。"""
+    held = _stub_reanalyze_deps(monkeypatch)
+    from apkscan.core import integrity
+
+    def _boom(*_a: Any, **_k: Any) -> dict:
+        raise OSError("simulated")
+
+    monkeypatch.setattr(integrity, "sample_fingerprint", _boom)
+    apk = tmp_path / "s.apk"
+    apk.write_bytes(b"x")
+
+    paths, report = unpack._reanalyze(str(apk), [], str(tmp_path / "out"))
+
+    assert report is held["report"]
+    assert len(paths) == 2                       # 报告照样写出
+    assert "sample_sha256" not in held["report"].meta   # 缺就是缺，不伪造
+
+
 def test_dump_success_no_reanalyze(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
