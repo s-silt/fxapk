@@ -43,6 +43,10 @@ META_WRITE_OWNER = "dynamic.unpack"
 META_WRITE_CATEGORIES = {
     'unpacked': 'coverage',
     'unpacked_dex_count': 'record',
+    # 检材指纹：与 cli.analyze 落同一组键、同一类别（record）。
+    # 脱壳这条路径此前完全不写，导致产出的报告没有样本身份、入库只能拿占位。
+    'evidence_manifest': 'record',
+    'sample_sha256': 'record',
 }
 META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
 
@@ -377,6 +381,26 @@ def _reanalyze(apk_path: str, extra_dex: list[str], out_dir: str) -> tuple[list[
     # 标注本报告来自脱壳回灌，便于报告消费方区分。
     report.meta["unpacked"] = True
     report.meta["unpacked_dex_count"] = len(extra_dex)
+
+    # ★检材指纹：与 ``cli.analyze`` 同一个函数、同一组键，不在此另写一套。
+    #
+    #   此前这条路径**完全没写**，于是脱壳产出的报告没有 ``meta.sample_sha256``；
+    #   ``corpus add`` 从该字段取样本身份，取不到就按内容派生 ``nosha-<16hex>`` 占位。
+    #   后果是这些样本在库里**没有真实哈希身份**，按样本哈希串案时整类查不到——
+    #   实测语料库 59 条记录里有 5 条真实 APK 落成了占位身份（另 2 条是网页分析，本就无样本）。
+    #
+    #   ★哈希算的是**原始 APK**（检材），不是脱壳产物：脱壳出的 DEX 是分析中间物，
+    #     每次运行都可能不同，拿它当样本身份会让同一份检材每跑一次多一个身份。
+    #   ★失败只记日志不抛：脱壳的主产物是 DEX，不该因为算不出哈希就整个失败。
+    try:
+        from apkscan import __version__
+        from apkscan.core.integrity import sample_fingerprint
+
+        manifest = sample_fingerprint(apk_path, tool_version=__version__)
+        report.meta["evidence_manifest"] = manifest
+        report.meta["sample_sha256"] = manifest.get("sha256", "")
+    except Exception:  # noqa: BLE001 - 指纹失败不影响脱壳产物本身
+        logger.exception("[unpack] 写入检材指纹失败（已忽略，脱壳产物不受影响）")
 
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
