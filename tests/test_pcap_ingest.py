@@ -661,6 +661,161 @@ def test_public_to_public_ipv6_not_dropped() -> None:
     assert "2001:db8:9::1" not in ips  # 本机端不作远端
 
 
+# ======================================================================
+# UID 归因回灌（Codex 8.6 交接问题 1）
+#
+# 现象：capture 的 runtime_report.json 已把某端点标 target_attributed=true/confirmed，
+# 而同一份采集经 `pcap-leads --into` 回灌后写出「runtime 确认 0 条」——
+# 同一事实两个结论，且回灌那条是把「已确认」降成「没确认」的方向。
+# ======================================================================
+
+
+def _attr_key(summary) -> str:  # type: ignore[no-untyped-def]
+    """夹具里第一个远端的归因表键（``proto/ip:port``）。
+
+    ★从 summary 派生、不写死端口：夹具端口一改，写死的键会静默不命中，
+      测试照样"通过"（因为断言的是"没有归因字段"）——那是最坏的假绿。
+    """
+    r = pcap_ingest.remote_endpoints(summary)[0]
+    return f"{r.proto}/{r.ip}:{r.port}"
+
+
+def _attr_of(report_path, ip: str) -> dict:
+    """从 report.json 取某 IP 端点的 runtime 块。"""
+    data = json.loads(report_path.read_text(encoding="utf-8"))
+    for ep in data.get("endpoints", []):
+        if ep.get("value") == ip:
+            return (ep.get("enrichment") or {}).get("runtime") or {}
+    return {}
+
+
+def test_no_socket_snapshot_writes_no_attribution_field(tmp_path) -> None:
+    """★没给快照时**一个归因字段都不写**——绝不填 target_attributed=False。
+
+    「没做归因」和「做了、结论是不属目标」是两件事：前者是不知道，后者是证据。
+    往缺失里填 False 就是把不知道写成了否定，而否定会让真后端被当噪音滤掉。
+    """
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps({"leads": [], "endpoints": [], "meta": {}}), encoding="utf-8")
+    summary = pcap_ingest.parse_pcap_bytes(_sample_pcap())
+    pcap_ingest.merge_into_report_json(str(p), summary)  # 不传 app_attr
+    rt = _attr_of(p, "106.53.21.146")  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
+    assert rt, "端点本身应当写进去了"
+    for key in ("target_attributed", "attribution", "target_among_candidates"):
+        assert key not in rt, f"未归因时不该出现 {key}"
+    inv = (json.loads(p.read_text(encoding="utf-8")).get("meta") or {}).get(
+        "runtime_merged_inventory") or {}
+    assert inv.get("uid_attributed") is False
+
+
+def test_socket_attribution_reaches_report(tmp_path) -> None:
+    """给了归因表 → 端点带 target_attributed，且 meta 两处都跟着走。"""
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps({"leads": [], "endpoints": [], "meta": {}}), encoding="utf-8")
+    summary = pcap_ingest.parse_pcap_bytes(_sample_pcap())
+    # 键格式与 capture 的 capture_signals["pcap_app_attribution"] 一致
+    app_attr = {
+        _attr_key(summary): {
+            "attribution": "confirmed", "is_target_app": True,
+            "score": 0.95, "target_uid_among_candidates": True, "uid": 10255,
+        }
+    }
+    pcap_ingest.merge_into_report_json(str(p), summary, app_attr)
+    rt = _attr_of(p, "106.53.21.146")  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
+    assert rt["target_attributed"] is True
+    assert rt["attribution"] == ["confirmed"]
+    assert rt["attribution_score"] == 0.95
+    assert rt["target_among_candidates"] is True
+    meta = json.loads(p.read_text(encoding="utf-8"))["meta"]
+    # ★闭环门控读 uid_attributed，报告读 capture_signals——两处都要有，否则归因做了也不算数
+    assert meta["runtime_merged_inventory"]["uid_attributed"] is True
+    assert meta["capture_signals"]["pcap_app_attribution"] == app_attr
+
+
+def test_attribution_not_target_is_recorded_as_false_not_missing(tmp_path) -> None:
+    """做了归因、结论是「不属目标」→ 明确写 False（这是证据，与"没做"不同）。"""
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps({"leads": [], "endpoints": [], "meta": {}}), encoding="utf-8")
+    summary = pcap_ingest.parse_pcap_bytes(_sample_pcap())
+    app_attr = {
+        _attr_key(summary): {
+            "attribution": "confirmed", "is_target_app": False, "uid": 1000,
+        }
+    }
+    pcap_ingest.merge_into_report_json(str(p), summary, app_attr)
+    rt = _attr_of(p, "106.53.21.146")  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
+    assert rt["target_attributed"] is False
+    assert rt["attribution"] == ["confirmed"]
+
+
+def test_target_attributed_count_is_real_not_endpoint_total(tmp_path) -> None:
+    """★★本刀自查抓到的核心问题：``target_attributed_count`` 必须是**真实归目标条数**。
+
+    ``derive_capture_quality`` 曾写成 ``endpoints if uid_attributed else 0``——
+    把「做过归因」读成「全部端点都归到目标了」。pcap 回灌恒 uid_attributed=False 时
+    不暴露，一旦回灌能真做归因就是重大误报：某真实样本实测 33 个接入节点仅 1 个属目标，
+    其余是设备自带推送等背景噪音，那个写法会把它们全报成"目标 app 已确认通信"。
+
+    这里构造「有归因表、但该端点不属目标」，断言计数是 0 而不是端点数。
+    """
+    from apkscan.core import runtime_inventory as inv
+
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps({"leads": [], "endpoints": [], "meta": {}}), encoding="utf-8")
+    summary = pcap_ingest.parse_pcap_bytes(_sample_pcap())
+    pcap_ingest.merge_into_report_json(str(p), summary, {
+        _attr_key(summary): {"attribution": "confirmed", "is_target_app": False, "uid": 1000},
+    })
+    inventory = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_merged_inventory"]
+    assert inventory["uid_attributed"] is True, "做过归因"
+    assert inventory["remote_endpoints"] >= 1, "端点是有的"
+    assert inventory["target_attributed"] == 0, "但没有一个属目标"
+    q = inv.derive_capture_quality(inventory)
+    assert q["target_attributed_count"] == 0, (
+        "★归因结论是「不属目标」，却被计成已归因——这会把背景噪音写成目标资产")
+    assert q["business_candidate_count"] >= 1
+
+
+def test_target_attributed_count_counts_only_the_real_ones(tmp_path) -> None:
+    """归目标的算 1 个，不属目标的不算——两者同时存在时也要分得清。"""
+    from apkscan.core import runtime_inventory as inv
+
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps({"leads": [], "endpoints": [], "meta": {}}), encoding="utf-8")
+    summary = pcap_ingest.parse_pcap_bytes(_sample_pcap())
+    pcap_ingest.merge_into_report_json(str(p), summary, {
+        _attr_key(summary): {"attribution": "confirmed", "is_target_app": True, "uid": 10255},
+    })
+    inventory = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_merged_inventory"]
+    assert inventory["target_attributed"] == 1
+    assert inv.derive_capture_quality(inventory)["target_attributed_count"] == 1
+
+
+def test_no_attribution_keeps_count_zero(tmp_path) -> None:
+    """没做归因 → 恒 0（既有语义，闭环上限 partial）。"""
+    from apkscan.core import runtime_inventory as inv
+
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps({"leads": [], "endpoints": [], "meta": {}}), encoding="utf-8")
+    summary = pcap_ingest.parse_pcap_bytes(_sample_pcap())
+    pcap_ingest.merge_into_report_json(str(p), summary)
+    inventory = json.loads(p.read_text(encoding="utf-8"))["meta"]["runtime_merged_inventory"]
+    assert inventory["uid_attributed"] is False
+    assert inv.derive_capture_quality(inventory)["target_attributed_count"] == 0
+
+
+def test_unattributed_endpoint_gets_no_false_positive(tmp_path) -> None:
+    """归因表里没有这个远端 → 不写字段（不能因为"表在"就给所有端点填 False）。"""
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps({"leads": [], "endpoints": [], "meta": {}}), encoding="utf-8")
+    summary = pcap_ingest.parse_pcap_bytes(_sample_pcap())
+    pcap_ingest.merge_into_report_json(
+        str(p), summary, {"tcp/198.51.100.7:443": {"attribution": "confirmed",
+                                                   "is_target_app": True}})
+    rt = _attr_of(p, "106.53.21.146")  # leak-scan: allow pcap 远端/接入节点夹具，_ip_public 要判它是公网远端才会产出 runtime 端点
+    assert "target_attributed" not in rt
+
+
 def test_to_runtime_endpoints_from_pcap() -> None:
     """★ floor 自动并入的基础：pcap summary → runtime Endpoint（公网 IP + SNI/DNS 域名，
     source=runtime-pcap），供 capture 并进 runtime_report.endpoints 走下游 asn/infra 分级。"""

@@ -1124,17 +1124,51 @@ def probe_leads(
         raise typer.Exit(code=1) from exc
 
 
+#: capture 落在 pcap 旁边的 socket 快照文件名（含时间线采样）。
+_SOCKET_SNAPSHOT_GLOBS = ("uid_sockets.txt", "socket_timeline.*")
+
+
+def _discover_socket_snapshots(where: Path) -> list[Path]:
+    """在 pcap 同目录找 socket 快照。找不到返回空列表——**绝不向上级目录递归**。
+
+    ★不递归是有意的：往上翻可能捞到**另一次采集**的快照，把 A 次的 UID 表配到 B 次的 pcap 上，
+      归因结果看着齐全、实则张冠李戴。这类错误比"没归因"严重得多——没归因只是缺信息，
+      配错则是**造出一条不存在的归属**。宁可让人显式传 --uid-sockets。
+    """
+    try:
+        found: list[Path] = []
+        for pattern in _SOCKET_SNAPSHOT_GLOBS:
+            found.extend(sorted(p for p in where.glob(pattern) if p.is_file()))
+        return found
+    except OSError:
+        return []
+
+
 @app.command(name="pcap-leads")
 def pcap_leads(
     pcap: Path = typer.Argument(..., help="带外抓的 pcap/pcapng（网关 tcpdump / PCAPdroid 免 root 导出 / Wireshark）。"),
     md: str = typer.Option("", "--md", help="台账 markdown 输出路径（默认打到终端）。"),
     json_out: str = typer.Option("", "--json", help="台账 JSON 输出路径（程序化消费）。"),
     into: str = typer.Option("", "--into", help="把线索追加进已有 report.json 的 leads（去重）。"),
+    uid_sockets: list[str] = typer.Option(
+        [], "--uid-sockets",
+        help="设备侧 socket 快照/时间线（uid_sockets.txt / socket_timeline.*，可重复）。"
+             "给了才能把接入节点归因到目标 app UID；不给则同目录自动探测，"
+             "用 --no-uid-sockets 关掉探测。",
+    ),
+    auto_uid_sockets: bool = typer.Option(
+        True, "--auto-uid-sockets/--no-uid-sockets",
+        help="未显式给 --uid-sockets 时，自动在 pcap 同目录找 uid_sockets.txt / socket_timeline.*。",
+    ),
 ) -> None:
     """从**带外 pcap** 抽接入节点 IP:port + TLS SNI + DNS + JA3 → 调证台账，可回灌 report.json。
 
     针对反分析涉诈 App：即便 TLS 解不开、走 MTProto/native 自建协议（普通抓包 endpoint=0），
     带外抓的 pcap 里仍有真实接入节点 IP/SNI——这就是穿透真源站的调证锚点。纯标准库解析，绝不抛。
+
+    ★带上 socket 快照才能回答"这条流是不是目标 app 的"。带外 tcpdump 抓的是**整机**流量，
+      光看 pcap 分不出真后端与背景噪音。快照通常就在 pcap 旁边（capture 一起落的），
+      所以默认会自动探测——**探到什么会明确打印出来**，不做无声的事。
     """
     import json as _json
 
@@ -1147,6 +1181,42 @@ def pcap_leads(
         from apkscan.dynamic import pcap_ingest
 
         summary = pcap_ingest.parse_pcap(str(pcap))
+
+        # ── UID 归因：把整机 pcap 里的接入节点绑到目标 app ─────────────────
+        app_attr: dict[str, dict] = {}
+        snap_paths = [Path(p) for p in (uid_sockets or [])]
+        if not snap_paths and auto_uid_sockets:
+            # capture 把 pcap 与快照落在同一个目录，这是最常见的形态。
+            snap_paths = _discover_socket_snapshots(pcap.parent)
+            if snap_paths:
+                typer.echo(f"自动探测到 socket 快照：{', '.join(p.name for p in snap_paths)}"
+                           f"（--no-uid-sockets 可关闭探测）")
+        if snap_paths:
+            from apkscan.dynamic import socket_attr
+
+            table, used = socket_attr.load_socket_tables(snap_paths)
+            if table is None:
+                typer.echo("警告：给定的 socket 快照解析不出任何记录，本次不做 UID 归因。", err=True)
+            else:
+                app_attr = socket_attr.attribute_remote_endpoints(
+                    pcap_ingest.remote_endpoints(summary), table
+                )
+                c = socket_attr.attribution_counts(app_attr)
+                typer.echo(
+                    f"UID 归因（来源 {'+'.join(used)}，目标 uid={table.target_uid}）："
+                    f"{c['total']} 个接入节点 → confirmed {c['confirmed']} / probable {c['probable']} / "
+                    f"ambiguous {c['ambiguous']} / unattributed {c['unattributed']}；"
+                    f"其中 {c['target_app']} 个属目标 app"
+                    + (f"，另有 {c['target_among_candidates']} 个目标也连过（歧义未定夺）"
+                       if c["target_among_candidates"] else "")
+                )
+        else:
+            typer.echo(
+                "提示：未给 socket 快照 → **不做 UID 归因**。带外 pcap 抓的是整机流量，"
+                "无快照时无法区分目标 app 的真后端与背景噪音；报告里这些端点将不带 "
+                "target_attributed —— 那是「未归因」，不是「不属目标」。"
+            )
+
         leads = pcap_ingest.to_report_leads(summary)
         n_ip = sum(1 for lead in leads if lead.category == LeadCategory.IP)
         n_dom = sum(1 for lead in leads if lead.category == LeadCategory.DOMAIN)
@@ -1183,7 +1253,7 @@ def pcap_leads(
                 raise typer.Exit(code=1) from exc
         if into:
             _warn_report_path_revision(into)
-            added = pcap_ingest.merge_into_report_json(into, summary)
+            added = pcap_ingest.merge_into_report_json(into, summary, app_attr or None)
             typer.echo(f"已追加 {added} 条带外线索进 {into}（去重）。")
             # report.json 被改后，若同目录有 report.html 则重渲，让人读报告随台账更新。
             rerendered = _rerender_html_if_present(into)

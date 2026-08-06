@@ -169,18 +169,36 @@ def test_derive_is_empty_only_when_the_inventory_is_absent() -> None:
 def test_derive_caps_at_partial_even_when_uid_attribution_is_claimed() -> None:
     """★★上限 partial：回灌路径拿不到双向载荷证据，所以永远够不到 complete。
 
-    ``uid_attributed=True`` 时派生**确实**会给出 ``target_attributed_count>0``（UID 归因是
-    pcap 侧真读到的事实，不该抹掉）。真正的天花板在别处：派生一律**不补** ``bidirectional_*``，
-    而门控只在同一端点上既归因又双向时才判 complete，缺失按 0 处理（fail-closed）。
-    所以这里断言的是「不补双向字段」+「结论止于 partial」，而不是「归因数必须为 0」——
-    后者会把一个真实信号钉死，且 complete 的闸门本来就不是它。
+    天花板在于：派生一律**不补** ``bidirectional_*``，而门控只在同一端点上既归因又双向时
+    才判 complete，缺失按 0 处理（fail-closed）。所以这里断言的是「不补双向字段」+
+    「结论止于 partial」。
+
+    ★``uid_attributed=True`` 只说明**做过归因**，说明不了**几个属目标**——归因数取
+      清单里真实的 ``target_attributed``。这条曾写成 ``endpoints if uid_attributed else 0``，
+      即拿端点总数顶替，实测会把 33 个接入节点（其中 32 个是背景噪音）全报成已归因。
+      没有那本账的输入按 fail-closed 记 0：宁可停在 partial，不虚报"已确认属目标"。
     """
     derived = inv.derive_capture_quality({"remote_endpoints": 3, "uid_attributed": True})
-    assert derived["target_attributed_count"] > 0, "UID 归因是真读到的事实，不该被抹平"
+    assert derived["target_attributed_count"] == 0, (
+        "做过归因但没有归目标的账 → 不知道几个属目标，不得拿端点总数顶替")
+    assert derived["business_candidate_count"] == 3, "端点总数仍要如实报"
     # 双向载荷字段一律不补：缺失按 0 处理是既定的 fail-closed 语义，也正是 partial 的来源
     assert "bidirectional_target_count" not in derived
     assert "bidirectional_business_count" not in derived
     assert "bidirectional_floor_count" not in derived
+    assert evaluate_capture_quality(derived)["dynamic_status"] == CLOSURE_PARTIAL
+
+
+def test_attributed_count_never_borrows_the_endpoint_total() -> None:
+    """★把「几个属目标」与「一共几个端点」钉死为两件事。
+
+    3 个端点、只有 1 个归到目标 → 计数必须是 1。写成端点总数就是把无关第三方的
+    接入节点计成"目标 app 已确认通信"，那是这套工具最不能犯的错。
+    """
+    derived = inv.derive_capture_quality(
+        {"remote_endpoints": 3, "uid_attributed": True, "target_attributed": 1})
+    assert derived["target_attributed_count"] == 1
+    assert derived["business_candidate_count"] == 3
     assert evaluate_capture_quality(derived)["dynamic_status"] == CLOSURE_PARTIAL
 
 
@@ -308,11 +326,17 @@ def test_static_only_report_does_not_suddenly_require_dynamic_evidence() -> None
 # ---------------------------------------------------------------------------
 
 
-def _merge(meta: dict, source: str, *, uid: bool, endpoints: list[str]) -> dict:
-    """按真实调用约定合并一次：清单是返回值，必须由调用方落回 meta。"""
+def _merge(meta: dict, source: str, *, uid: bool, endpoints: list[str],
+           attributed: list[str] | None = None) -> dict:
+    """按真实调用约定合并一次：清单是返回值，必须由调用方落回 meta。
+
+    ``attributed``：本次真正归到目标 app 的端点值（``uid_attributed`` 只说明"做过归因"，
+    说明不了"几个属目标"，两者必须分开传）。
+    """
     built = inv.build_inventory(
         meta, source=source, endpoint_values=endpoints, domain_values=[],
-        parse_status="ok", uid_attributed=uid)
+        parse_status="ok", uid_attributed=uid,
+        target_attributed_values=attributed or [])
     meta[inv.INVENTORY_META_KEY] = built
     return built
 
@@ -367,10 +391,25 @@ def test_uid_source_ledger_survives_garbage() -> None:
     assert isinstance(meta[inv.UID_ATTRIBUTED_SOURCES_KEY], list)
 
 
-def test_derived_attributed_count_follows_the_monotonic_flag() -> None:
-    """接线复核：派生的 ``target_attributed_count`` 跟着单调后的布尔走。"""
+def test_derived_attributed_count_survives_a_later_unattributed_merge() -> None:
+    """接线复核：先并入的归因结论，不得被后并入的无归因路径擦掉。
+
+    ★与 ``uid_attributed`` 那本来源账同理：归目标的端点值也按路径分记、取并集，
+      所以 pcap（有归因）→ probe（无归因）与反序结果一致，不取决于合并顺序。
+    """
     meta: dict = {}
-    _merge(meta, "pcap", uid=True, endpoints=["198.51.100.7"])
+    _merge(meta, "pcap", uid=True, endpoints=["198.51.100.7"],
+           attributed=["198.51.100.7"])
     built = _merge(meta, "probe", uid=False, endpoints=["198.51.100.7"])
     derived = inv.derive_capture_quality(built)
-    assert derived["target_attributed_count"] == built["remote_endpoints"] > 0
+    assert built["target_attributed"] == 1, "归因结论被后一次无归因合并擦掉了"
+    assert derived["target_attributed_count"] == 1
+
+
+def test_attributed_values_are_a_union_not_a_sum() -> None:
+    """同一个端点被两条路径都归因 → 算 1 个，不是 2 个。"""
+    meta: dict = {}
+    _merge(meta, "pcap", uid=True, endpoints=["198.51.100.7"], attributed=["198.51.100.7"])
+    built = _merge(meta, "probe", uid=True, endpoints=["198.51.100.7"],
+                   attributed=["198.51.100.7"])
+    assert built["target_attributed"] == 1

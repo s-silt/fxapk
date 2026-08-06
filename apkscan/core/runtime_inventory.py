@@ -74,8 +74,15 @@ INVENTORY_FIELDS: tuple[_Field, ...] = (
     ),
     _Field(
         "uid_attributed", "flag", (),
-        reader="derive_capture_quality → target_attributed_count（False 则恒 0、闭环上限 partial）；"
-               "★由 UID_ATTRIBUTED_SOURCES_KEY 那本来源账派生，不得被后一次无归因合并擦除",
+        reader="derive_capture_quality → 是否具备归因能力（False 则 target_attributed_count 恒 0、"
+               "闭环上限 partial）；★由 UID_ATTRIBUTED_SOURCES_KEY 那本来源账派生，"
+               "不得被后一次无归因合并擦除",
+    ),
+    _Field(
+        "target_attributed", "count", (),
+        reader="derive_capture_quality → target_attributed_count（闭环采集质量门）。"
+               "★这是**真实归到目标 app 的端点数**，不是端点总数——"
+               "uid_attributed 只说明「做过归因」，说明不了「几个属目标」",
     ),
     _Field(
         "sources", "list", ("source",),
@@ -91,6 +98,19 @@ VALUE_SET_KEYS: Mapping[str, tuple[str, str]] = MappingProxyType({
     # source: (端点贡献集合键, 域名贡献集合键)
     "pcap": ("runtime_pcap_endpoint_values", "runtime_pcap_domain_values"),
     "probe": ("runtime_probe_endpoint_values", "runtime_probe_domain_values"),
+})
+
+#: 各路径**归因到目标 app** 的端点值集合键。与上面同理按路径分记、计数取并集。
+#:
+#: ★为什么必须单独记这个集合，而不是拿 ``uid_attributed`` 去推：
+#:   ``derive_capture_quality`` 曾写成 ``endpoints if uid_attributed else 0``——
+#:   把「做过归因」读成「**全部**端点都归到目标了」。pcap 回灌恒 False 时这没暴露，
+#:   一旦回灌能真做归因就立刻变成重大误报：某真实样本实测 33 个接入节点里只有 1 个属目标
+#:   （其余是设备自带推送等背景噪音），那个写法会报成 33。
+#:   把无关第三方的接入节点计成"目标 app 已确认通信"，是这套工具最不能犯的错。
+TARGET_ATTRIBUTED_SET_KEYS: Mapping[str, str] = MappingProxyType({
+    "pcap": "runtime_pcap_target_attributed_values",
+    "probe": "runtime_probe_target_attributed_values",
 })
 
 #: UID 归因的**来源记账**键（落在 ``meta``，与贡献集合同一套记账法）。
@@ -227,6 +247,7 @@ def build_inventory(
     domain_values: Iterable[str],
     parse_status: str,
     uid_attributed: bool = False,
+    target_attributed_values: Iterable[str] | None = None,
 ) -> dict[str, object]:
     """按表组装一份新清单：记账本路径的贡献、迁移旧清单的历史信息，并写回 ``meta``。
 
@@ -244,12 +265,25 @@ def build_inventory(
     ep_key, dom_key = VALUE_SET_KEYS.get(source, VALUE_SET_KEYS["pcap"])
     accumulate_values(meta, ep_key, endpoint_values)
     accumulate_values(meta, dom_key, domain_values)
+    accumulate_values(
+        meta,
+        TARGET_ATTRIBUTED_SET_KEYS.get(source, TARGET_ATTRIBUTED_SET_KEYS["pcap"]),
+        target_attributed_values or (),
+    )
     uid_sources = accumulate_uid_attributed_sources(meta, source, uid_attributed, prev)
 
     def _union(index: int) -> int:
         seen: set[str] = set()
         for keys in VALUE_SET_KEYS.values():
             stored = meta.get(keys[index])
+            if isinstance(stored, list):
+                seen.update(v for v in stored if isinstance(v, str) and v)
+        return len(seen)
+
+    def _target_union() -> int:
+        seen: set[str] = set()
+        for key in TARGET_ATTRIBUTED_SET_KEYS.values():
+            stored = meta.get(key)
             if isinstance(stored, list):
                 seen.update(v for v in stored if isinstance(v, str) and v)
         return len(seen)
@@ -264,6 +298,9 @@ def build_inventory(
         # ★按来源记账后派生：只要任一已并入来源带来了可靠 UID 归因就为 True，
         # 后并入的无归因路径**不得**把它擦回 False（否则结论取决于合并顺序）。
         "uid_attributed": bool(uid_sources),
+        # ★真实归到目标 app 的端点数。与旧值取 max 同 remote_endpoints 的理由：
+        #   旧报告只有布尔没有这本账，直接用集合长度会把历史结论重置。
+        "target_attributed": max(migrate_count(prev, "target_attributed"), _target_union()),
         "sources": sorted({*migrate_sources(prev), source}),
     }
 
@@ -275,9 +312,15 @@ def derive_capture_quality(inventory: Mapping[str, object]) -> dict[str, object]
       拿到空 capture_quality → ``business_count=0`` → 判 **failed**，而正确结论是 **partial**
       （观测到了业务候选端点，只是做不了唯一归因）。
 
-    ★绝不抬成 complete：``uid_attributed=False`` → ``target_attributed_count`` 恒 0；
+    ★绝不抬成 complete：没做过归因（``uid_attributed=False``）→ ``target_attributed_count`` 恒 0；
       ``bidirectional_*`` 一律不补（缺失按 0 = fail-closed 是既定语义），本路径拿不到
       双向载荷统计，补默认值等于伪造观测强度。
+
+    ★``target_attributed_count`` **取清单里真实的归目标端点数**，绝不拿端点总数顶替。
+      这里曾写成 ``endpoints if uid_attributed else 0``——把「做过归因」读成「全部端点
+      都归到目标了」。pcap 回灌恒 False 时没暴露，一旦回灌能真做归因就是重大误报：
+      某真实样本实测 33 个接入节点仅 1 个属目标（其余是设备自带推送等背景噪音），
+      那个写法会报成 33，等于把无关第三方的接入节点写成"目标 app 已确认通信"。
     """
     if not inventory:
         return {}
@@ -291,9 +334,15 @@ def derive_capture_quality(inventory: Mapping[str, object]) -> dict[str, object]
     sources = migrate_sources(inventory)
     return {
         "business_candidate_count": endpoints,
-        # uid_attributed 为 False 时**显式**写 0：不写会让 evaluate_capture_quality 回退去
-        # 读 pcap_app_attribution，而本路径压根没有那份数据。
-        "target_attributed_count": endpoints if inventory.get("uid_attributed") is True else 0,
+        # ★没做过归因 → **显式**写 0：不写会让 evaluate_capture_quality 回退去读
+        #   pcap_app_attribution，而没归因的路径压根没有那份数据。
+        # ★做过归因 → 写清单里**真实的**归目标条数，不拿端点总数顶替（见 docstring）。
+        #   旧报告没有这本账（字段是后加的）→ _count 回 0，即"做过归因但不知道几个属目标"，
+        #   按 fail-closed 记 0：宁可闭环停在 partial，也不虚报"已确认属目标"。
+        "target_attributed_count": (
+            _count(inventory.get("target_attributed"))
+            if inventory.get("uid_attributed") is True else 0
+        ),
         "floor_parse_status": parse_status,
         # 供读报告的人核：观测到域名却没有可达端点，与「压根没有流量」长得完全不同。
         "runtime_domain_lead_count": domains,
