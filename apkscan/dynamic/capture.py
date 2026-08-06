@@ -1029,55 +1029,26 @@ def _capture(
         try:
             from apkscan.dynamic import socket_attr
 
-            parsed: list = []
-            names: list[str] = []
-            if socket_timeline is not None and socket_timeline.is_file():
-                tl = socket_attr.parse_socket_timeline(
-                    socket_timeline.read_text(encoding="utf-8", errors="replace")
-                )
-                if tl.entries:
-                    parsed.append(tl)
-                    names.append(socket_timeline.name)
-            if uid_snapshot is not None and uid_snapshot.is_file():
-                snap = socket_attr.parse_uid_sockets(
-                    uid_snapshot.read_text(encoding="utf-8", errors="replace")
-                )
-                if snap.entries:
-                    parsed.append(snap)
-                    names.append(uid_snapshot.name)
-            if not parsed:
+            # ★合并【时间线】（_SocketSampler 只采目标 UID、补短连）+【窗口末快照】（含全 UID，
+            #   是歧义判定必需的竞争视图）——不能只用 target-only 时间线，否则同远端多 UID 时会
+            #   误判 confident（codex 复审 P0）。这段与读文件、合并的逻辑已抽进 socket_attr，
+            #   **与 pcap-leads 路径共用同一个入口**：两条路径各写一套是"同一份 pcap 两个结论"的根因。
+            table, names = socket_attr.load_socket_tables(
+                [p for p in (socket_timeline, uid_snapshot) if p is not None]
+            )
+            if table is None:
                 raise ValueError("socket 时间线与窗口末快照均无可解析记录")
-            # ★codex 复审 P0：合并【时间线】（_SocketSampler 只采目标 UID、补短连）+【窗口末快照】（含全 UID，
-            #   是歧义判定必需的竞争视图）——不能只用 target-only 时间线，否则同远端多 UID 时会误判 confident。
-            table = parsed[0] if len(parsed) == 1 else socket_attr.merge_uid_sockets(*parsed)
             attribution_source = "+".join(names)
             res = pcap_ingest.remote_endpoints(floor_summary)  # 复用已解析的 summary，不重复解析
             # A2：把每个远端接入节点连同其本机连接明细（本地端口 + pcap 流时间窗）喂给五元组归因引擎——
             #   同远端多 UID（CDN/网关）时用本地端口/时间窗消歧到 confirmed/probable，四级评分。键含 proto 族。
-            eps = [
-                socket_attr.PcapEndpoint(
-                    remote_ip=r.ip,
-                    remote_port=r.port,
-                    proto=r.proto,
-                    conns=[socket_attr.PcapConn(c.local_port, c.first_ts, c.last_ts) for c in r.connections],
-                )
-                for r in res
-            ]
-            attr = socket_attr.attribute_connections(eps, table)
-            pcap_app_attr = {f"{proto}/{ip}:{port}": v for (proto, ip, port), v in attr.items()}
+            pcap_app_attr = socket_attr.attribute_remote_endpoints(res, table)
             if pcap_app_attr:
-                # ★A2 四级计数：confirmed/probable/ambiguous/unattributed；is_target_app=None（歧义/未归因）
-                #   不能被当 falsy 归入"背景噪音"（承 codex 复审 P1 三类不塌缩纪律）。
-                vals = list(pcap_app_attr.values())
-                n_target = sum(1 for v in vals if v.get("is_target_app") is True)
-
-                def _n(kind: str) -> int:
-                    return sum(1 for v in vals if v.get("attribution") == kind)
-
+                c = socket_attr.attribution_counts(pcap_app_attr)
                 playbook.append(
-                    f"UID 归因（五元组+时间窗）：floor pcap 接入节点绑到 app——{len(vals)} 个已归因："
-                    f"confirmed {_n('confirmed')} / probable {_n('probable')} / ambiguous {_n('ambiguous')} / "
-                    f"unattributed {_n('unattributed')}；其中 {n_target} 属目标 app（uid={table.target_uid}）"
+                    f"UID 归因（五元组+时间窗）：floor pcap 接入节点绑到 app——{c['total']} 个已归因："
+                    f"confirmed {c['confirmed']} / probable {c['probable']} / ambiguous {c['ambiguous']} / "
+                    f"unattributed {c['unattributed']}；其中 {c['target_app']} 属目标 app（uid={table.target_uid}）"
                     f"（来源 {attribution_source}）"
                 )
         except Exception:

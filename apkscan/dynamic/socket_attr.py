@@ -16,15 +16,47 @@ import logging
 import math
 import re
 import socket
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
-#: /proc/net/tcp 状态码（十六进制）→ 可读名（只列关联用得上的）。
+#: /proc/net/tcp 状态码（十六进制）→ 可读名。**列全**：缺映射的状态会以原始 hex
+#: 落进 ``SocketEntry.state``，让下游按名字判状态的逻辑（如残留识别）整类失效。
+#: 实测遗漏过 ``04``/``05``（两种 FIN_WAIT），它们恰恰是判断连接是否已终止的关键。
 _TCP_STATES = {
-    "01": "established", "02": "syn_sent", "03": "syn_recv", "06": "time_wait",
-    "08": "close_wait", "0A": "listen",
+    "01": "established", "02": "syn_sent", "03": "syn_recv", "04": "fin_wait1",
+    "05": "fin_wait2", "06": "time_wait", "07": "close", "08": "close_wait",
+    "09": "last_ack", "0A": "listen", "0B": "closing",
 }
+
+#: 连接已终止或正在终止的状态。这些状态下 socket 可能已与创建它的进程解绑。
+_CLOSING_STATES = frozenset({"time_wait", "fin_wait1", "fin_wait2",
+                             "close", "last_ack", "closing"})
+
+
+def is_orphan_record(entry: "SocketEntry") -> bool:
+    """该 socket 记录是否为**无进程持有的残留**（不代表任何主体）。
+
+    ★判据是 ``uid == 0`` **且** 处于终止态，两个条件缺一不可：
+
+    - TCP 进入 TIME_WAIT 后连接已完全关闭，socket 由内核保留 2MSL 等待迟到报文，
+      不再属于任何进程，``/proc/net/tcp`` 的 uid 列固定显示 0。FIN_WAIT/LAST_ACK
+      等终止中的状态在进程已退出时同样会变成无主（orphan socket）。
+    - 但**只看 uid==0 会误伤真正的 root 进程连接**（系统守护进程的 established 连接
+      uid 就是 0），只看终止态又会误伤目标 app 自己正在关闭的连接。
+
+    ★为什么要有这个判据：不排除这类记录，**任何反复重连的应用都会被自己的 TIME_WAIT
+      残留判成归属歧义**——同一个远端上，活着的连接归目标 app、刚关闭的那批记为 uid=0，
+      归因引擎看到两个 UID 就判 ambiguous。2026-08-06 实测：某样本 33 个接入节点里
+      13 个因此被判歧义，其中包括通信量最大的两个业务节点，导致它们没有进入结论。
+
+    ★注意 ``close_wait`` **不在**终止态集合里：那是对端已关闭、本端尚未关闭，
+      socket 仍由进程持有（实测目标 app 自己就有 close_wait 记录），排除它会丢真证据。
+    """
+    return entry.uid == 0 and entry.state in _CLOSING_STATES
 
 
 @dataclass
@@ -387,7 +419,12 @@ def attribute_endpoints(
     out: dict[tuple[str, int], dict] = {}
     tgt = sockets.target_uid
     for ip, port in endpoints:
-        hits = sockets.by_remote.get((ip, port))
+        raw = sockets.by_remote.get((ip, port))
+        if not raw:
+            continue
+        # 与 attribute_connections 同一条判据：无主残留不参与 UID 竞争，
+        # 否则应用自己刚关闭的连接会以 uid=0 冒充第二个主体。见 is_orphan_record。
+        hits = [e for e in raw if not is_orphan_record(e)]
         if not hits:
             continue
         by_uid: dict[int, SocketEntry] = {}
@@ -513,9 +550,17 @@ def attribute_connections(
         key = (fam, ep.remote_ip, ep.remote_port)
         # 远端命中后按 proto 族过滤：tcp 接入节点只认 tcp/tcp6 socket、udp 只认 udp/udp6——tcp/udp 本地端口
         # 空间独立可同号，不分族会把别的 app 的 UDP 流撞进目标 TCP socket 误确证（Fable 复审 P1-1）。
-        hits = [e for e in (sockets.by_remote.get((ep.remote_ip, ep.remote_port)) or []) if _proto_family(e.proto) == fam]
+        raw_hits = [e for e in (sockets.by_remote.get((ep.remote_ip, ep.remote_port)) or []) if _proto_family(e.proto) == fam]
+        # ★先剔除无主残留（uid=0 且处于终止态），再谈"有几个 UID 在竞争"。
+        #   不剔的话，目标 app 自己刚关闭的那批连接会以 uid=0 的身份成为"第二个候选"，
+        #   把它自己的节点判成归属歧义——实测该误判吃掉了通信量最大的两个业务节点。
+        #   残留数量单独记下来：它是"这个远端被反复连过"的旁证，不该静默丢弃。
+        hits = [e for e in raw_hits if not is_orphan_record(e)]
+        n_orphan = len(raw_hits) - len(hits)
         if not hits:
-            out[key] = {"attribution": "unattributed", "is_target_app": None, "score": 0.0, "matched_by": []}
+            out[key] = {"attribution": "unattributed", "is_target_app": None, "score": 0.0,
+                        "matched_by": [],
+                        **({"orphan_records": n_orphan} if n_orphan else {})}
             continue
         by_uid: dict[int, SocketEntry] = {}
         for e in hits:
@@ -526,6 +571,8 @@ def attribute_connections(
         precise: dict[int, dict] = {}
         for conn in ep.conns:
             for e in sockets.by_conn.get((fam, conn.local_port, ep.remote_ip, ep.remote_port), []):
+                if is_orphan_record(e):
+                    continue      # 同上：残留记录不参与本地端口确证
                 rec = precise.setdefault(e.uid, {"entry": e, "time_hits": 0, "nonconflict_hits": 0})
                 if _ts_overlap(e, conn, time_tolerance):
                     rec["time_hits"] += 1
@@ -553,6 +600,7 @@ def attribute_connections(
                 #   分拣会把"目标也连的真后端"整段当背景噪音丢掉（Fable 复审 P2-1 取证假阴性）。
                 "target_uid_among_candidates": target_among,
                 "matched_by": matched_by,
+                **({"orphan_records": n_orphan} if n_orphan else {}),
             }
             continue
         # ② 无有效本地端口确证（无命中，或命中均为已知时间冲突）+ 远端仅一个 UID → probable。
@@ -566,6 +614,7 @@ def attribute_connections(
                 "attribution": "probable",
                 "score": 0.5,
                 "matched_by": ["remote_ip_port"],
+                **({"orphan_records": n_orphan} if n_orphan else {}),
             }
             continue
         # ③ 多 UID（含"多本地端口分属不同 UID"）→ ambiguous + 带 score 的 candidates，不强选目标。
@@ -598,5 +647,97 @@ def attribute_connections(
             "candidates": candidates,
             "score": None,
             "matched_by": matched_by,
+            **({"orphan_records": n_orphan} if n_orphan else {}),
         }
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 从 socket 快照文件直接归因一份 pcap —— capture 与 pcap-leads 的**共用入口**
+# ---------------------------------------------------------------------------
+def load_socket_tables(paths: "Sequence[Path | str]") -> tuple["UidSockets | None", list[str]]:
+    """读若干 socket 快照/时间线文件 → 合并后的 :class:`UidSockets` + 实际用到的文件名。
+
+    ★同时认两种格式：``socket_timeline``（``_SocketSampler`` 采样，只含目标 UID、补短连）
+      与 ``uid_sockets.txt``（窗口末快照，含全 UID）。**两者要合并**——只用 target-only
+      的时间线，同远端多 UID 时会误判成 confident（codex 复审 P0 的原结论）。
+
+    解析不出记录的文件不计入。全都读不到 → ``(None, [])``。绝不抛。
+    """
+    parsed: list[UidSockets] = []
+    names: list[str] = []
+    for raw in paths or ():
+        try:
+            p = Path(raw)
+            if not p.is_file():
+                continue
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            logger.warning("[socket_attr] socket 快照读取失败，跳过：%s", raw)
+            continue
+        # 时间线与快照的头部不同，两个解析器都试一遍，取解出记录多的那个——
+        # 文件名不可靠（改名/复制很常见），按内容判才稳。
+        best: UidSockets | None = None
+        for fn in (parse_socket_timeline, parse_uid_sockets):
+            try:
+                got = fn(text)
+            except Exception:  # noqa: BLE001 - 单个文件解析失败不阻断其余
+                continue
+            if got.entries and (best is None or len(got.entries) > len(best.entries)):
+                best = got
+        if best is not None:
+            parsed.append(best)
+            names.append(Path(raw).name)
+    if not parsed:
+        return None, []
+    table = parsed[0] if len(parsed) == 1 else merge_uid_sockets(*parsed)
+    return table, names
+
+
+def attribute_remote_endpoints(remotes: "Sequence[Any]", table: "UidSockets") -> dict[str, dict]:
+    """把 :class:`pcap_ingest.RemoteEndpoint` 列表归因到 UID → ``{"proto/ip:port": 归因}``。
+
+    ★这是 capture 与 pcap-leads **唯一**的归因入口。抽出来是因为两条路径此前各写各的：
+      capture 有这套、pcap-leads 压根没有，于是同一份 pcap 经 capture 得到
+      ``target_attributed=true``、经 ``pcap-leads --into`` 却写出"runtime 确认 0 条"——
+      **同一事实两个结论**，而回灌那条恰恰是把"已确认"降成"没确认"的方向。
+
+    键格式 ``"proto/ip:port"`` 与 ``capture_signals["pcap_app_attribution"]`` 一致，
+    下游（closure 门控、报告）不必区分数据是哪条路径来的。
+    """
+    eps = [
+        PcapEndpoint(
+            remote_ip=r.ip,
+            remote_port=r.port,
+            proto=r.proto,
+            conns=[
+                PcapConn(c.local_port, c.first_ts, c.last_ts)
+                for c in getattr(r, "connections", []) or []
+            ],
+        )
+        for r in remotes or ()
+    ]
+    if not eps:
+        return {}
+    attr = attribute_connections(eps, table)
+    return {f"{proto}/{ip}:{port}": v for (proto, ip, port), v in attr.items()}
+
+
+def attribution_counts(attr: "Mapping[str, Any]") -> dict[str, int]:
+    """四级归因计数 + 归目标 app 的条数。供两条路径打同一句日志/回执。
+
+    ★``is_target_app=None``（歧义/未归因）不得被当 falsy 归进"背景噪音"——
+      三类不塌缩是本模块的既有纪律。
+    """
+    vals = [v for v in (attr or {}).values() if isinstance(v, Mapping)]
+    out = {
+        kind: sum(1 for v in vals if v.get("attribution") == kind)
+        for kind in ("confirmed", "probable", "ambiguous", "unattributed")
+    }
+    out["total"] = len(vals)
+    out["target_app"] = sum(1 for v in vals if v.get("is_target_app") is True)
+    # 目标虽不是本条流的所有者、但也连过该远端——按 is_target_app 分拣会整段丢掉，单列出来。
+    out["target_among_candidates"] = sum(
+        1 for v in vals if v.get("target_uid_among_candidates") is True
+    )
     return out

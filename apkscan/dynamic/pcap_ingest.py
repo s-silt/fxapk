@@ -50,6 +50,10 @@ META_WRITE_CATEGORIES = {
     'runtime_merged': 'signal',
     'runtime_merged_inventory': 'record',
     'runtime_pcap_merges': 'record',
+    # 带 --uid-sockets 回灌时写：与 capture 落**同一个键**，下游（closure 门控、报告）
+    # 不必区分归因数据是哪条路径产的。见 merge_into_report_json。
+    # 类别随 capture 侧的既有声明（signal）——同一个键两处类别不一致会被契约测试拦下。
+    'capture_signals': 'signal',
 }
 META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
 
@@ -1814,8 +1818,41 @@ def to_ledger_dict(summary: PcapSummary) -> dict[str, object]:
     }
 
 
-def _runtime_endpoint_dicts(summary: PcapSummary) -> list[dict]:
+def _attr_block(app_attr: dict[str, dict] | None, re_: "RemoteEndpoint") -> dict:
+    """该远端的 UID 归因摘要，供写进端点的 ``enrichment["runtime"]``。
+
+    ★没有 socket 快照（``app_attr`` 为空）时**返回空 dict**——一个字段都不写。
+      「没做归因」与「做了归因、结论是不属于目标」必须分得开：前者是不知道，
+      后者是证据。往缺失里填 ``target_attributed=False`` 就是把不知道写成了否定。
+
+    键格式与 capture 的 ``capture_signals["pcap_app_attribution"]`` 一致（``proto/ip:port``），
+    两条路径经 :func:`socket_attr.attribute_remote_endpoints` 同源产出。
+    """
+    if not app_attr:
+        return {}
+    hit = app_attr.get(f"{re_.proto}/{re_.ip}:{re_.port}")
+    if not isinstance(hit, dict):
+        return {}
+    out: dict = {
+        "target_attributed": hit.get("is_target_app") is True,
+        "attribution": [str(hit.get("attribution", "unknown"))],
+    }
+    # 目标虽非本条流的所有者、但也连过该远端——不透出的话，下游按 target_attributed
+    # 分拣会把"目标也连的真后端"整段当背景噪音丢掉。
+    if hit.get("target_uid_among_candidates") is True:
+        out["target_among_candidates"] = True
+    if isinstance(hit.get("score"), (int, float)):
+        out["attribution_score"] = hit["score"]
+    return out
+
+
+def _runtime_endpoint_dicts(
+    summary: PcapSummary, app_attr: dict[str, dict] | None = None
+) -> list[dict]:
     """把 pcap 接入节点转成 report.json 的 ``endpoints`` 条目（含 runtime 富化）。
+
+    ``app_attr``：可选的 UID 归因表（``socket_attr.attribute_remote_endpoints`` 的产出）。
+    给了才写 ``target_attributed`` 等字段——见 :func:`_attr_block`。
 
     ★``value`` 用**裸 IP**，不是 Lead 那样的 ``ip:port/proto``。两处各有各的道理：Lead 是调证
       标的，端口是要写进函里的；Endpoint 是被富化/被闭环排序的对象，得跟静态端点、跟各富化器
@@ -1879,9 +1916,9 @@ def _runtime_endpoint_dicts(summary: PcapSummary) -> list[dict]:
                     **({"sni_masquerade": masquerading} if masquerading else {}),
                     "first_ts": re_.first_ts or None,
                     "last_ts": re_.last_ts or None,
-                    # ★不写 target_attributed：本路径（pcap-leads）没有设备侧 socket 快照，做不了
-                    #   UID 归因。缺了就是缺了，不能因为"这是目标的 pcap"就默认填 True——带外抓包
-                    #   抓的是整机流量。真归因走 capture 的 socket_attr 路径。
+                    # ★target_attributed 只在**给了 socket 快照**时才写（见 _attr_block）。
+                    #   没给就是缺，绝不因为"这是目标的 pcap"默认填 True——带外抓的是整机流量。
+                    **_attr_block(app_attr, re_),
                 }},
             }
             continue
@@ -2096,8 +2133,16 @@ def _merge_runtime_blocks(old: object, new: dict) -> dict:
 #   同一份声明——两条路径的清单形状不会再各自漂移。
 
 
-def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:
+def merge_into_report_json(
+    report_json_path: str,
+    summary: PcapSummary,
+    app_attr: dict[str, dict] | None = None,
+) -> int:
     """把 pcap 线索合并进 report.json：``leads`` + ``endpoints`` + ``meta`` 的运行时信号。
+
+    ``app_attr``：可选的 UID 归因表。给了则端点带 ``target_attributed``，且 inventory 的
+    ``uid_attributed`` 置 True（闭环因此不再把动态结论封顶在 partial）。**不给就一律不写**，
+    见 :func:`_attr_block`。
 
     绝不抛，失败返 0。
 
@@ -2173,7 +2218,7 @@ def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:
         already = fingerprint in merged_fps
 
         # 端点侧：闭环排序、五层归属、外部富化都以 endpoints 为对象，不补这一步等于白抓。
-        fresh_eps = _runtime_endpoint_dicts(summary)
+        fresh_eps = _runtime_endpoint_dicts(summary, app_attr)
         if already:
             ep_added = 0
             logger.info("[pcap] 这份采集已并入过（fingerprint=%s…），跳过端点合并以保幂等",
@@ -2202,16 +2247,40 @@ def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:
             # ★清单的键集合、别名迁移、以及「谁读它」全部由 runtime_inventory 那张表决定；
             #   本路径只负责如实提供**自己这次贡献了哪些值**。计数由贡献集合派生，
             #   集合语义天然幂等（同一份采集并几次结果不变），所以不受上面的指纹闸影响。
-            #   ★``uid_attributed=False``：本路径无设备侧 socket 快照、做不了 UID 归因，
-            #   如实记下来——闭环据此把动态结论**封顶 partial**，绝不抬成 complete。
+            #   ★``uid_attributed`` **随本次是否真做了归因而定**：给了 socket 快照
+            #   （``--uid-sockets`` 或同目录自动探测）才是 True。没给仍是 False，
+            #   闭环据此把动态结论**封顶 partial**，绝不抬成 complete。
+            #   —— 此前这里恒 False：即便 capture 早已把某端点判为 confirmed，
+            #      经 ``pcap-leads --into`` 回灌后也一律降成"未归因"，
+            #      同一份采集因走的路径不同得出相反结论。
             meta[_inv.INVENTORY_META_KEY] = _inv.build_inventory(
                 meta,
                 source="pcap",
                 endpoint_values=(str(ep.get("value", "")) for ep in fresh_eps),
                 domain_values=pcap_domains,
                 parse_status=summary.parse_status,
-                uid_attributed=False,
+                uid_attributed=bool(app_attr),
+                # ★只收**真的归到目标 app** 的那些端点值。传端点总数（或让下游拿总数顶替）
+                #   会把背景噪音写成"目标已确认通信"——实测 33 个接入节点里只有 1 个属目标。
+                target_attributed_values=[
+                    str(ep.get("value", ""))
+                    for ep in fresh_eps
+                    if ((ep.get("enrichment") or {}).get("runtime") or {}).get(
+                        "target_attributed") is True
+                ],
             )
+            if app_attr:
+                # 与 capture 落同一个键：下游（closure 门控 evaluate_capture_quality、报告）
+                # 读的是 capture_signals.pcap_app_attribution，不区分数据来自哪条路径。
+                signals = meta.get("capture_signals")
+                if not isinstance(signals, dict):
+                    signals = {}
+                    meta["capture_signals"] = signals
+                merged_attr = signals.get("pcap_app_attribution")
+                if not isinstance(merged_attr, dict):
+                    merged_attr = {}
+                merged_attr.update(app_attr)
+                signals["pcap_app_attribution"] = merged_attr
             # 清单换过键名：旧键留着会让两套形状长期并存，读方各读一套。整块重建后清掉。
             for _stale in _inv.INVENTORY_META_ALIASES:
                 meta.pop(_stale, None)
@@ -2231,9 +2300,21 @@ def merge_into_report_json(report_json_path: str, summary: PcapSummary) -> int:
         refresh_visibility_snapshot(meta)
 
         atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
+        # ★把「没做 UID 归因」和「做了、0 条归目标」分开说：此前两者都只体现为
+        #   "runtime 确认 0 条"，读的人无从判断该去补快照还是该接受这个结论。
+        if app_attr:
+            from apkscan.dynamic import socket_attr as _sa
+
+            c = _sa.attribution_counts(app_attr)
+            attr_note = (f"UID 归因 {c['total']} 个端点："
+                         f"confirmed {c['confirmed']}/probable {c['probable']}/"
+                         f"ambiguous {c['ambiguous']}/unattributed {c['unattributed']}，"
+                         f"其中 {c['target_app']} 属目标 app")
+        else:
+            attr_note = "未做 UID 归因（本次没给 socket 快照）——不等于这些端点不属目标 app"
         logger.info(
-            "[pcap] 追加 %d 条线索、%d 个运行时端点，runtime 确认 %d 条 → %s",
-            added, ep_added, confirmed, path,
+            "[pcap] 追加 %d 条线索、%d 个运行时端点，runtime 证据合并 %d 条；%s → %s",
+            added, ep_added, confirmed, attr_note, path,
         )
         return added
     except (OSError, ValueError):

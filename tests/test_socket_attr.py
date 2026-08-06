@@ -470,3 +470,99 @@ def test_attribute_connections_tcp_pcap_matches_tcp6_vmapped_socket() -> None:
         [socket_attr.PcapEndpoint("1.2.3.4", 443, proto="tcp", conns=[socket_attr.PcapConn(43090)])], s
     )[("tcp", "1.2.3.4", 443)]
     assert a["attribution"] == "confirmed" and a["uid"] == 10234  # tcp pcap 命中 tcp6 socket（同 tcp 族）
+
+
+# ══════════════════════════════════════════════════════════════════
+# TIME_WAIT 残留不得冒充第二个主体（2026-08-06 实证）
+#
+# 现象：某样本 33 个接入节点里 13 个被判归属歧义，候选恒为 {目标uid, 0}。
+# 根因：应用反复重连，刚关闭的那批连接进入 TIME_WAIT，内核解除 socket 与进程的绑定、
+#       uid 列固定显示 0；归因引擎看到两个 UID 就判 ambiguous——而那个 0 正是应用自己。
+# 后果：通信量最大的两个业务节点因此没进结论（占该案总流量 76%）。
+# ══════════════════════════════════════════════════════════════════
+
+def _proc_line(local_port: int, remote_hex: str, rport_hex: str, st: str, uid: int) -> str:
+    return (f"   0: 0F02000A:{local_port:04X} {remote_hex}:{rport_hex} {st}"
+            f" 00000000:00000000 00:00000000 00000000 {uid} 0 1\n")
+
+
+def test_state_map_covers_all_closing_states() -> None:
+    """★状态码必须列全：缺映射的状态会以原始 hex 落进 state，
+    让所有按名字判状态的逻辑（残留识别就是其一）整类失效。实测漏过 04/05。"""
+    for code, name in (("04", "fin_wait1"), ("05", "fin_wait2"), ("07", "close"),
+                       ("09", "last_ack"), ("0B", "closing")):
+        assert socket_attr._TCP_STATES[code] == name
+
+
+def test_orphan_needs_both_uid_zero_and_closing_state() -> None:
+    """★两个条件缺一不可，否则两头误伤。"""
+    E = socket_attr.SocketEntry
+    # uid=0 + 终止态 → 残留
+    assert socket_attr.is_orphan_record(E("tcp", "10.0.0.1", 1, "1.2.3.4", 443, "time_wait", 0))
+    assert socket_attr.is_orphan_record(E("tcp", "10.0.0.1", 1, "1.2.3.4", 443, "fin_wait2", 0))
+    # uid=0 但连接活着 → 是真的 root 进程，不能排除
+    assert not socket_attr.is_orphan_record(
+        E("tcp", "10.0.0.1", 1, "1.2.3.4", 443, "established", 0))
+    # 终止态但属某个应用 → socket 仍归该进程，不能排除
+    assert not socket_attr.is_orphan_record(
+        E("tcp", "10.0.0.1", 1, "1.2.3.4", 443, "time_wait", 10234))
+    # ★close_wait 不算终止态：对端已关、本端未关，socket 仍由进程持有
+    #   （实测目标 app 自己就有 close_wait 记录，排除它会丢真证据）
+    assert not socket_attr.is_orphan_record(
+        E("tcp", "10.0.0.1", 1, "1.2.3.4", 443, "close_wait", 0))
+
+
+def test_time_wait_residue_does_not_create_a_phantom_second_uid() -> None:
+    """★核心回归：同一远端上「目标 app 的活连接 + 自己刚关闭的 TIME_WAIT」不得判成歧义。"""
+    txt = ("# package=com.x uid=10234\n## /proc/net/tcp\n"
+           # 活着的连接，属目标
+           + _proc_line(43090, "04030201", "01BB", "01", 10234)
+           # 同一远端、另外三个本地端口，已进 TIME_WAIT → 内核显示 uid=0
+           + _proc_line(43091, "04030201", "01BB", "06", 0)
+           + _proc_line(43092, "04030201", "01BB", "06", 0)
+           + _proc_line(43093, "04030201", "01BB", "06", 0))
+    s = socket_attr.parse_uid_sockets(txt)
+    assert len({e.uid for e in s.entries}) == 2, "夹具应当含两个 uid（10234 与 0）"
+    a = socket_attr.attribute_connections(
+        [socket_attr.PcapEndpoint("1.2.3.4", 443, proto="tcp",
+                                  conns=[socket_attr.PcapConn(43090)])], s
+    )[("tcp", "1.2.3.4", 443)]
+    assert a["attribution"] == "confirmed", "被自己的 TIME_WAIT 残留判成歧义了"
+    assert a["is_target_app"] is True
+    assert a.get("orphan_records") == 3, "残留数要记下来（它是该远端被反复连过的旁证）"
+
+
+def test_real_root_process_still_competes() -> None:
+    """反向：真的 root 进程活连接**仍要**参与竞争，不能被一起排除。"""
+    txt = ("# package=com.x uid=10234\n## /proc/net/tcp\n"
+           + _proc_line(43090, "04030201", "01BB", "01", 10234)
+           + _proc_line(43091, "04030201", "01BB", "01", 0))     # uid=0 但 established
+    s = socket_attr.parse_uid_sockets(txt)
+    a = socket_attr.attribute_connections(
+        [socket_attr.PcapEndpoint("1.2.3.4", 443, proto="tcp", conns=[])], s
+    )[("tcp", "1.2.3.4", 443)]
+    assert a["attribution"] == "ambiguous", "两个活着的 UID 应当仍判歧义"
+    assert a["target_uid_among_candidates"] is True
+
+
+def test_all_records_orphan_means_unattributed_not_confirmed() -> None:
+    """全是残留 → 归为「socket 表无有效记录」，不是「确认属某人」。"""
+    txt = ("# package=com.x uid=10234\n## /proc/net/tcp\n"
+           + _proc_line(43091, "04030201", "01BB", "06", 0))
+    s = socket_attr.parse_uid_sockets(txt)
+    a = socket_attr.attribute_connections(
+        [socket_attr.PcapEndpoint("1.2.3.4", 443, proto="tcp", conns=[])], s
+    )[("tcp", "1.2.3.4", 443)]
+    assert a["attribution"] == "unattributed"
+    assert a["is_target_app"] is None
+    assert a.get("orphan_records") == 1
+
+
+def test_attribute_endpoints_also_skips_orphans() -> None:
+    """另一条归因路径（仅远端二元组）用同一条判据，不能只修一处。"""
+    txt = ("# package=com.x uid=10234\n## /proc/net/tcp\n"
+           + _proc_line(43090, "04030201", "01BB", "01", 10234)
+           + _proc_line(43091, "04030201", "01BB", "06", 0))
+    s = socket_attr.parse_uid_sockets(txt)
+    a = socket_attr.attribute_endpoints([("1.2.3.4", 443)], s)[("1.2.3.4", 443)]
+    assert a["attribution"] == "confident" and a["is_target_app"] is True

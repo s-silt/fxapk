@@ -992,7 +992,9 @@ def test_pcap_leads_into_rerenders_html(monkeypatch, tmp_path: Path):
         flows = ["f"]
         dns_queries = []
 
-    def _fake_merge(report_json_path: str, summary: object) -> int:
+    # 第三个位置参数是 UID 归因表（可选）——替身要跟着签名走，否则 CLI 一传就 TypeError，
+    # 而这条测试断的是 exit_code，报出来像是 CLI 坏了。
+    def _fake_merge(report_json_path: str, summary: object, app_attr: object = None) -> int:
         _write_min_report_json(
             Path(report_json_path),
             leads=[
