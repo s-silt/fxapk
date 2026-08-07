@@ -1935,6 +1935,16 @@ def leak_scan_cmd(
                 cmd.append("--cached")
             if base:
                 cmd.append(f"{base}...HEAD")
+                # ★`base...HEAD` 是三点：只比**已提交**的 commit，工作树里未提交的改动一律不进
+                #   diff。不提示的话，改完直接跑本地校验会看到与改动前一模一样的结果——
+                #   人会以为「豁免没生效 / 判据有 bug」，实际是根本没扫到。踩过一次，故显式说明。
+                dirty = leakscan.uncommitted_paths()
+                if dirty:
+                    typer.echo(
+                        f"提示：检测到 {len(dirty)} 个未提交改动，本次按 {base}...HEAD 扫描、"
+                        f"**不含它们**；要校验未提交内容请先 commit（或改用 --path / --diff）。",
+                        err=True,
+                    )
             try:
                 proc = subprocess.run(cmd, capture_output=True, timeout=120, check=False)
             except (OSError, subprocess.SubprocessError) as exc:

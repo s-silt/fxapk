@@ -811,6 +811,40 @@ def test_ci_defines_both_leak_scan_gates() -> None:
     assert set(scripts) == {"leak-scan", "leak-scan-full-tree"}, scripts.keys()
 
 
+# ---------------------------------------------------------------------------
+# 未提交改动提示：--base 走三点 diff，不含工作树
+# ---------------------------------------------------------------------------
+
+
+def test_uncommitted_paths_lists_dirty_files(tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    """★脏工作树必须能被列出——这条提示的全部价值在于「说出没扫到什么」。"""
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.test",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e.test"}
+    import os
+    env = {**os.environ, **env}
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True, env=env)
+    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, env=env)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, check=True, env=env)
+
+    assert leakscan.uncommitted_paths(repo_root=repo) == [], "干净工作树不该报改动"
+
+    (repo / "a.py").write_text("x = 2\n", encoding="utf-8")   # 已跟踪文件被改
+    (repo / "b.py").write_text("y = 3\n", encoding="utf-8")   # 新增未跟踪
+    dirty = leakscan.uncommitted_paths(repo_root=repo)
+    assert "a.py" in dirty, dirty
+    assert "b.py" in dirty, dirty
+
+
+def test_uncommitted_paths_is_quiet_outside_a_repo(tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    """★取不到就返回空、不抛：这只是一句提示，不该让整个扫描失败。"""
+    assert leakscan.uncommitted_paths(repo_root=tmp_path) == []
+
+
 def test_ci_pr_diff_gate_runs_strict() -> None:
     """★PR diff 关必须带 ``--strict``（把 domain / context 也升为阻断）。
 
