@@ -38,6 +38,7 @@ from apkscan.commands.web import analyze_web
 
 META_WRITE_OWNER = "cli"
 META_WRITE_CATEGORIES = {
+    'config_probe_run': 'coverage',
     'device_detected': 'coverage',
     'evidence_manifest': 'record',
     'online': 'signal',
@@ -1354,6 +1355,124 @@ def config_channel_cmd(
     typer.echo(_json.dumps(
         {"center": center.isoformat(), "count": len(candidates), "candidates": candidates},
         ensure_ascii=False, indent=2))
+
+
+@app.command(name="config-probe")
+def config_probe_cmd(
+    report_path: Path = typer.Argument(..., help="analyze 产出的 report.json（读其中的 config_probe_plan）。"),
+    authorized_active: bool = typer.Option(
+        False, "--authorized-active",
+        help="真的发起请求。**默认关**：不带此开关只列出将要请求的 URL，零流量。",
+    ),
+    into: str = typer.Option("", "--into", help="把结果回灌进这份 report.json（默认不写，只打印）。"),
+    limit: int = typer.Option(0, "--limit", help="本次最多请求几个候选；0 = 用内建上限。"),
+    archive: str = typer.Option("", "--archive", help="原始字节落盘目录；不给则不落盘（线索仍照出）。"),
+) -> None:
+    """按 report.json 里的配置探测预案实际取回配置对象（授权档）。
+
+    analyze 只出预案不取回：预案要靠资产排序才拼得出，而排序在下载阶段之后，同一轮里赶不上。
+    这个时序是有意保留的——主动请求属不可逆的对外动作，让它跨一轮、由人看过预案再决定发不发。
+
+    ★默认不发任何请求。要真发必须显式 ``--authorized-active``，且请自行确认已获授权。
+
+    结果分三种，绝不混：**取到并解出**（hit）/ **取到但没解出东西**（no_content，这是真的
+    "查了没有"）/ **没取成**（failed，404、超时、被 SSRF 防护拦下——这不是"没有"）。
+    """
+    import json as _json
+
+    from apkscan.core.appcrypto import CryptoRecipe
+    from apkscan.core.config_probe_run import run_plan
+
+    try:
+        payload = _json.loads(report_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001 — CLI 边界：坏输入给明确退出码
+        typer.echo(f"错误：读不了 {report_path}：{exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    if not isinstance(payload, dict):
+        typer.echo("错误：report.json 顶层不是对象。", err=True)
+        raise typer.Exit(code=2)
+
+    raw_meta = payload.get("meta")
+    meta: dict = raw_meta if isinstance(raw_meta, dict) else {}
+    plan = meta.get("config_probe_plan")
+    if not plan:
+        typer.echo(
+            "该报告里没有配置探测预案（meta.config_probe_plan）。预案需要样本里同时提取到"
+            "配置接口路径与后端域名才拼得出——缺哪一头都不会有。",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    result = run_plan(
+        plan,
+        authorized=authorized_active,
+        archive_dir=Path(archive) if archive else None,
+        recipe=CryptoRecipe.from_meta(meta.get("crypto_recipe")),
+        limit=limit or None,
+    )
+
+    if not authorized_active:
+        typer.echo(f"预演：{len(result.outcomes)} 个候选，**未发出任何请求**。")
+        for o in result.outcomes:
+            typer.echo(f"  {o.url}")
+        if result.truncated:
+            typer.echo(f"  （另有 {result.truncated} 个候选超出上限未列入）")
+        typer.echo("\n确认已获授权后，加 --authorized-active 真正取回。")
+        return
+
+    counts = result.counts()
+    typer.echo(
+        f"取回完成：hit {counts.get('hit', 0)} / 取到但无内容 {counts.get('no_content', 0)} / "
+        f"未取成 {counts.get('failed', 0)}"
+        + (f"；另有 {result.truncated} 个候选超出上限未请求" if result.truncated else "")
+    )
+    for o in result.outcomes:
+        if o.status == "hit":
+            typer.echo(f"  [hit] {o.url} → 域名 {len(o.domains)} / IP {len(o.ips)}")
+    if not into:
+        typer.echo(_json.dumps(result.to_meta(), ensure_ascii=False, indent=2))
+        return
+
+    added = _merge_config_probe_into_report(into, result)
+    typer.echo(f"已回灌 {into}：新增端点 {added} 个（source=remote-config，非运行时实测）。")
+
+
+def _merge_config_probe_into_report(report_json_path: str, result: object) -> int:
+    """把取回结果并进 report.json：endpoints 追加 + meta 记一次运行。原子写，绝不留半截。
+
+    ★回灌的端点 source 恒为 ``remote-config``：它是"配置里出现的域名"，**不是**运行时实测
+    接触，不得升成确认徽标。这与 pipeline 内的授权档下载走同一份构造函数，口径不会分叉。
+    """
+    import json as _json
+
+    from apkscan.core.atomic import atomic_write_text
+    from apkscan.report import json as report_json
+
+    path = Path(report_json_path)
+    payload = _json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise typer.BadParameter(f"{report_json_path} 顶层不是对象")
+    endpoints = payload.get("endpoints")
+    if not isinstance(endpoints, list):
+        endpoints = []
+        payload["endpoints"] = endpoints
+    seen = {
+        (str(e.get("kind")), str(e.get("value")))
+        for e in endpoints if isinstance(e, dict)
+    }
+    added = 0
+    for ep in getattr(result, "endpoints", []):
+        key = (ep.kind, ep.value)
+        if key in seen:
+            continue
+        seen.add(key)
+        endpoints.append(report_json._to_jsonable(ep))
+        added += 1
+    meta = payload.setdefault("meta", {})
+    if isinstance(meta, dict):
+        meta["config_probe_run"] = result.to_meta()  # type: ignore[attr-defined]
+    atomic_write_text(path, _json.dumps(payload, ensure_ascii=False, indent=2))
+    return added
 
 
 @app.command(name="port-normalize")
