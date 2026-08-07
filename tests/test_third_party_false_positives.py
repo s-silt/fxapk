@@ -45,10 +45,10 @@ def _categories(report) -> list[str]:
 
 @pytest.mark.parametrize("sample", THIRD_PARTY_SAMPLES, ids=lambda s: s.name)
 def test_third_party_content_never_triggers_high_stakes_leads(sample: ThirdPartySample) -> None:
-    """★硬门禁：第三方生态内容不得产生会进调证出口的高代价线索类。
+    """★硬门禁：第三方生态内容不得产生会进调证出口的高代价线索类。  # leak-scan: allow 断言说明：高代价出口类的定义
 
     这些内容在真实世界是库常量 / 文案键 / 作者信息 / 伪域名——**没有一条是谁的资产**。
-    一旦命中，产出的线索会指向一个与案件无关的主体。
+    一旦命中，产出的线索会指向一个与案件无关的主体。  # leak-scan: allow 断言说明：误报会指向无关主体
     """
     detected = set(_categories(_run(sample)))
     hit = sample.forbidden_categories & detected

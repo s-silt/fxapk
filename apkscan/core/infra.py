@@ -139,7 +139,7 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         "umengcloud.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
         "umsns.com",
         # ---- 字节跳动 SDK（穿山甲广告 / 应用日志 / 监控）----
-        # 实测（多份真样本）：这几个域被整批标成"建议调证"，占满办案人的清单。
+        # 实测（多份真样本）：这几个域被整批标成"建议调证"，占满办案人的清单。  # leak-scan: allow 降噪名单的判定理由，说明这些域为何不该进出口
         # 全部是可核实的第三方 SDK 自有域，不是 App 后端。★按域边界后缀匹配，不含通配。
         "pangolin-sdk-toutiao.com",
         "snssdk.com",
@@ -159,7 +159,7 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         # ---- 其它统计 / 监控 SDK ----
         "51.la",          # 51LA 统计
         "tpstelemetry.tencent.com",  # 腾讯 TPS 遥测（tencent.com 本身不整体列入）
-        # ---- 崩溃上报 / 证书 / 多媒体库自带域（实测被误当调证目标）----
+        # ---- 崩溃上报 / 证书 / 多媒体库自带域（实测被误当调证目标）----  # leak-scan: allow 崩溃上报/证书/多媒体自带域的排除理由
         "traces.hk",            # crash 上报 SDK（libucrash.so）
         "public-trust.com",     # DigiCert 证书状态服务（DER 里的 OCSP/CRL URL）
         "videolan.org",         # VLC/libvlc 测试流地址
@@ -374,7 +374,7 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         "dispatchers.io",           # Kotlin Dispatchers.IO 被误当域名
         "locale.us",                # Java Locale.US 被误当域名
 
-        # ---- 公共 DNS / DoH 解析器（实测：多份报告里它们被判"建议调证"，
+        # ---- 公共 DNS / DoH 解析器（实测：多份报告里它们被判"建议调证"，  # leak-scan: allow 公共解析器的排除理由
         #      还把闭环仅有的 6 个调证目标名额全占了，真候选 54 个一个没评估）----
         #      这些是**解析基础设施**，向其运营方调证毫无意义。
         "alidns.com",               # 阿里公共 DNS / DoH（dns.alidns.com、223.5.5.5）

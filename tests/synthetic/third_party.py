@@ -15,7 +15,7 @@
 夹具来源与合规
 --------------
 全部取自**公开的开源库常量与生态固有形态**（ethers.js 的 keccak 空哈希、secp256k1 曲线参数、
-Flutter/Unity 的产物命名、Go 库的截断域名…），**不含任何案件值、真实样本或 PII**。
+Flutter/Unity 的产物命名、Go 库的截断域名…），**不含任何案件值、真实样本或 PII**。  # leak-scan: allow 本网用途说明，描述判据要防的误报类型
 这些值本身就印在千万个公开仓库里，不是任何人的资产。
 """
 from __future__ import annotations
@@ -29,7 +29,7 @@ class ThirdPartySample:
 
     ``forbidden_categories`` 是「绝不能出现」（不相交判据）——断言实际检出与它无交集。
     不做全等断言：这些内容仍可能产生低档位的域名端点（那是正常的、留给人复核的），
-    本网只守「**不得升到会进调证出口的类**」这条线。
+    本网只守「**不得升到会进调证出口的类**」这条线。  # leak-scan: allow 夹具字段注释，说明禁止类的含义
     """
 
     name: str
@@ -63,20 +63,20 @@ _I18N_KEYS = [
 ]
 
 # --- 开源库作者 / 文档链接 ---------------------------------------------------
-# 真实误报：库作者邮箱被判成「可定位注册主体的联系人」；文档域名进「建议调证」。
+# 真实误报：库作者邮箱被判成「可定位注册主体的联系人」；文档域名进「建议调证」。  # leak-scan: allow 样本说明：ethers.js 库常量曾被判进资金类出口
 # js-sha3 / js-md5 的作者信息随库打包，出现在千万个 bundle 里。
 _OSS_METADATA = [
-    "@author Chen, Yi-Cyuan emn178@gmail.com",
-    "see https://docs.soliditylang.org/en/latest/ and https://eips.ethereum.org/EIPS/eip-165",
+    "@author Chen, Yi-Cyuan emn178@gmail.com",  # leak-scan: allow 阴性夹具：js-sha3 开源库作者邮箱，随库打包非联系人
+    "see https://docs.soliditylang.org/en/latest/ and https://eips.ethereum.org/EIPS/eip-165",  # leak-scan: allow 阴性夹具：Solidity/EIP 官方文档域，非资产
     "https://exoplayer.dev/issues/cleartext-not-permitted",
 ]
 
 # --- Go 库里的截断域名 -------------------------------------------------------
 # 真实误报：Go 二进制的字符串表把 "github.com" 前一个字符连读，正则切出
-# 2github.com / agithub.com 这类根本不存在的域名，一份样本报出 8 个。
+# 2github.com / agithub.com 这类根本不存在的域名，一份样本报出 8 个。  # leak-scan: allow 阴性夹具：Go 字符串表连读切出的伪域名，实测零解析
 _GO_TRUNCATED = [
-    "modernc.org/sqlite2github.com/mattn/go-sqlite3github.com/pkg/errors",
-    "go.uber.org/zapagithub.com/spf13/cobraprotobuf.dev/reference",
+    "modernc.org/sqlite2github.com/mattn/go-sqlite3github.com/pkg/errors",  # leak-scan: allow 阴性夹具：同上，sqlite/errors 包名被连读
+    "go.uber.org/zapagithub.com/spf13/cobraprotobuf.dev/reference",  # leak-scan: allow 阴性夹具：同上，zap/cobra 包名被连读
 ]
 
 # --- Flutter 业务代码容器 ----------------------------------------------------
@@ -86,10 +86,10 @@ _GO_TRUNCATED = [
 _FLUTTER_LIBAPP = "lib/arm64-v8a/libapp.so"
 
 # --- WebGL / Three.js shader 变量 -------------------------------------------
-# 真实误报：shader 里的 x09/x20 前缀变量名被域名正则切成 x09shadowcoord.xyz，
+# 真实误报：shader 里的 x09/x20 前缀变量名被域名正则切成 x09shadowcoord.xyz，  # leak-scan: allow 阴性夹具/说明文字里的第三方域 x09shadowcoord.xyz，非本方资产
 # 实测这些「域名」RDAP 查无、零解析——根本不存在。
 _SHADER_VARS = [
-    "varying vec3 x09shadowcoord.xyz; uniform vec4 x20envcolor.xyz;",
+    "varying vec3 x09shadowcoord.xyz; uniform vec4 x20envcolor.xyz;",  # leak-scan: allow 阴性夹具/说明文字里的第三方域 x09shadowcoord.xyz，非本方资产；阴性夹具/说明文字里的第三方域 x20envcolor.xyz，非本方资产
 ]
 
 # --- 前端路由框架属性链 ------------------------------------------------------
@@ -97,7 +97,7 @@ _SHADER_VARS = [
 _ROUTER_CHAIN = ["i.router.app.$nextTick(function(){ e.beforeEach() })"]
 
 
-#: 会进调证出口、误报代价最高的线索类——本网守的就是这几类不被第三方内容触发。
+#: 会进调证出口、误报代价最高的线索类——本网守的就是这几类不被第三方内容触发。  # leak-scan: allow 判据说明中的技术表述（调证），非案件语境
 _HIGH_STAKES = frozenset({
     "PAYMENT", "FOURTH_PARTY_PAYMENT", "BACKEND_CREDENTIAL",
     "WALLET_SECRET", "CARD_MERCHANT", "ADMIN_PANEL",
@@ -125,7 +125,7 @@ THIRD_PARTY_SAMPLES: tuple[ThirdPartySample, ...] = (
     ),
     ThirdPartySample(
         name="go-truncated-domains",
-        why="Go 字符串表连读切出的伪域名（2github.com 一类），实测零解析、不存在",
+        why="Go 字符串表连读切出的伪域名（2github.com 一类），实测零解析、不存在",  # leak-scan: allow 阴性夹具/说明文字里的第三方域 2github.com，非本方资产
         dex_strings=_GO_TRUNCATED,
         forbidden_categories=_HIGH_STAKES,
     ),
