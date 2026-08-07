@@ -11,7 +11,7 @@ import ipaddress
 import logging
 import re
 
-from apkscan.core import exposure, forensic, infra
+from apkscan.core import appframework, exposure, forensic, infra
 from apkscan.core.attribution import classify_network
 from apkscan.core.restore import is_restored, restore_index
 from apkscan.core.models import (
@@ -32,7 +32,11 @@ logger = logging.getLogger(__name__)
 
 
 def build_endpoint_leads(
-    endpoints: list[Endpoint], online: bool = True, *, sibling_pool: set[str] | None = None
+    endpoints: list[Endpoint],
+    online: bool = True,
+    *,
+    sibling_pool: set[str] | None = None,
+    framework: appframework.AppFramework | None = None,
 ) -> list[Lead]:
     """把（已富化的）domain/IP 端点转成 DOMAIN/IP Lead。
 
@@ -42,6 +46,10 @@ def build_endpoint_leads(
 
     online=False 时在 Lead.notes 标明"离线扫描，归属未查询"，让报告能区分
     "查过查不到" 与 "压根没查"。
+
+    ``framework`` 由调用方从 ``report.meta['app_framework']`` 复原后传入（见
+    :func:`apkscan.core.appframework.framework_from_meta`）。给了就按该样本的实际框架
+    判断哪个 .so 装着本应用代码；不给则退回全局并集这一宽口径。
     """
     # 样本内的低段位 IPv4 兄弟池：成簇（1.3.1.1 / 1.3.1.6 / 1.4.1.14）是版本号的主要产生形态，  # leak-scan: allow 判据说明所举的版本号/序号形态例子，非网络地址
     # 用来压住 classify_ip 的托管佐证豁免。全样本一次算好，逐端点只做减法。
@@ -56,7 +64,7 @@ def build_endpoint_leads(
     # 哪些 native 库能被认出是「第三方 SDK 的二进制」——供 IP 侧判断裸地址是不是 SDK 内置常量。
     # ★同样要全样本一次算好：判据要看的是"这个库里还有没有该 SDK 自己的域名"，
     #   而域名端点与 IP 端点是两条独立记录，逐端点看不出来。
-    vendor_libs = _vendor_sdk_libraries(endpoints)
+    vendor_libs = _vendor_sdk_libraries(endpoints, framework=framework)
     leads: list[Lead] = []
     for ep in endpoints:
         if ep.kind == "domain":
@@ -71,19 +79,13 @@ def build_endpoint_leads(
 #: 大厂域名就能让同文件里的真后端地址降档），两个以上才构成"这确实是那家 SDK 的库"的形态。
 _VENDOR_SDK_MIN_KNOWN_DOMAINS = 2
 
-#: 应用**自身**业务代码的编译产物——这类文件不是第三方 SDK 的库，必须排除在厂商库判定之外。
-#:
-#: 判据是编译框架的**固定产物命名**，不是靠名字猜厂商：
-#:   · libapp.so    —— Flutter 把整个 Dart 业务代码 AOT 编译进这一个文件
-#:   · libil2cpp.so —— Unity 把 C# 业务代码经 IL2CPP 转译后编译进这一个文件
-#: 两者都与各自的引擎库（libflutter.so / libunity.so）分开存放，引擎才是第三方部分。
-#:
-#: ★为什么必须排除：整个 App 的业务代码都在里面，引用一堆第三方域名是常态
-#:   （地图、头像、CDN、文档链接都写在业务代码里），"带 ≥2 个已知基础设施域名"这条
-#:   形态判据必然命中，于是**同一文件里的本 App 真后端会被一并降成待核**。
-#:   实测踩过：一份 Flutter 样本的自建服务器与其已确认的 C2 同处 libapp.so，
-#:   却被判成"疑为该 SDK 内置常量"，险些整条线索被放过。
-_APP_OWN_CODE_LIBS = frozenset({"libapp.so", "libil2cpp.so"})
+# 应用**自身**业务代码的编译产物（Flutter 的 libapp.so、Unity 的 libil2cpp.so 等）必须排除在
+# 厂商库判定之外：整个应用的业务代码都在这类文件里，引用一堆第三方域名是常态（地图、头像、
+# CDN、文档链接都写在业务代码里），"带 ≥2 个已知基础设施域名"这条形态判据必然命中，于是
+# **同一文件里本应用的真后端会被一并降成待核**。实测踩过：一份 Flutter 样本的自建服务器与其
+# 已确认的 C2 同处业务代码容器，却被判成"疑为该 SDK 内置常量"。
+#
+# 判据与各框架的产物命名是 :mod:`apkscan.core.appframework` 的单一真源，此处只调用它。
 
 
 def _native_lib_of(location: object) -> str:
@@ -98,11 +100,15 @@ def _native_lib_of(location: object) -> str:
     return loc.rsplit("/", 1)[-1]
 
 
-def _vendor_sdk_libraries(endpoints: list[Endpoint]) -> set[str]:
+def _vendor_sdk_libraries(
+    endpoints: list[Endpoint], *, framework: appframework.AppFramework | None = None
+) -> set[str]:
     """找出「带着 ≥2 个已知第三方基础设施域名」的 native 库文件名集合。
 
-    ★应用自身业务代码的编译产物（见 ``_APP_OWN_CODE_LIBS``）先行排除：它们必然携带多个
-    第三方域名，不排除就会把本 App 的真后端一并降档。
+    ★应用自身业务代码的编译产物先行排除：它们必然携带多个第三方域名，不排除就会把
+    本 App 的真后端一并降档。给了 ``framework``（该样本实际识别出的框架）就按它精确判，
+    否则退回全局并集这一宽口径——两者的差别在于：Unity 样本里一个真叫 ``libapp.so``
+    的第三方库，精确口径下不会被当成本应用代码而免检。
     """
     per_lib: dict[str, set[str]] = {}
     for ep in endpoints:
@@ -110,7 +116,7 @@ def _vendor_sdk_libraries(endpoints: list[Endpoint]) -> set[str]:
             continue
         for ev in ep.evidences:
             lib = _native_lib_of(ev.location)
-            if lib and lib not in _APP_OWN_CODE_LIBS:
+            if lib and not appframework.is_app_own_code(lib, framework):
                 per_lib.setdefault(lib, set()).add(ep.value.lower())
     return {lib for lib, doms in per_lib.items() if len(doms) >= _VENDOR_SDK_MIN_KNOWN_DOMAINS}
 

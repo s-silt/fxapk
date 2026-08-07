@@ -18,7 +18,7 @@ from apkscan.config.asset_score import rank_assets
 from apkscan.config.chain import build_control_chains
 from apkscan.config.decode import decode_config_blob
 from apkscan.config.fetch import fetch_config_object
-from apkscan.core import infra
+from apkscan.core import appframework, infra
 from apkscan.core.appcrypto import CryptoRecipe
 from apkscan.core.atomic import atomic_write_bytes
 from apkscan.core.attribution import build_endpoint_attribution, cluster_fronting
@@ -627,8 +627,19 @@ def _stage_attribution(state: _PipelineState) -> None:
 def _stage_build_leads(state: _PipelineState) -> None:
     """端点 → DOMAIN/IP Lead（分析器本身不产 DOMAIN/IP Lead，统一在此生成；advice 已在
     build_endpoint_leads 内按 infra 分级赋值）+ advice 兜底（分析器未自带研判建议时按线索类别给默认值，
-    避免报告出现空白"是否调证"列；已自带 advice 的不覆盖）。"""
-    state.leads.extend(build_endpoint_leads(state.endpoints, online=state.config.online))
+    避免报告出现空白"是否调证"列；已自带 advice 的不覆盖）。
+
+    ★框架识别结果从 ``meta`` 取出后传给判据：``app_framework`` 分析器在 analyzers 阶段就已
+    写入，本阶段在其后，所以取得到。它决定哪些 .so 装着本应用自己的代码——判错就会把真后端
+    当第三方常量降档。取不到（没跑该分析器、或形状不对）时 framework 为未识别，判据退回
+    宽口径，行为与接线前一致。
+    """
+    framework = appframework.framework_from_meta(state.meta.get(appframework.META_KEY))
+    state.leads.extend(
+        build_endpoint_leads(
+            state.endpoints, online=state.config.online, framework=framework
+        )
+    )
     _apply_default_advice(state.leads)
     # ★接缝：所有判据链生产者都跑完、任何抑制机制动手之前。此刻 advice 恰好就是「判据链的
     #   结论」，封存为 base_advice。位置错一步就毁：放到隔离之后，被压成待核的档位会被烙进
