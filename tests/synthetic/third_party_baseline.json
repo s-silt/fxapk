@@ -1,0 +1,15 @@
+{
+  "ethers-js-library-constants": [],
+  "i18n-copy-keys": [],
+  "oss-author-and-docs": [
+    "CONTACT",
+    "DOMAIN"
+  ],
+  "go-truncated-domains": [
+    "DOMAIN"
+  ],
+  "webgl-shader-variables": [
+    "DOMAIN"
+  ],
+  "frontend-router-property-chain": []
+}

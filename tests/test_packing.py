@@ -500,9 +500,9 @@ def test_multidex_names_also_covered():
 
 
 def test_unidentified_stub_dex_flagged():
-    """★无修复即失败（2026-07-26 三案实测）：DEX 只剩壳桩 + 有 .so → 判疑加固，即便厂商未识别。
+    """★无修复即失败（多份真样本实测）：DEX 只剩壳桩 + 有 .so → 判疑加固，即便厂商未识别。
 
-    修前这三案 classes.dex 仅 1~3KB、DEX 字符串 15~57 条，却因未命中任何厂商特征而被报
+    修前这些样本 classes.dex 仅 1~3KB、DEX 字符串 15~57 条，却因未命中任何厂商特征而被报
     「未加固」，办案人会以为静态端点完整——而真相是 Java 侧几乎什么都没抽到。
     """
     result = _analyze(

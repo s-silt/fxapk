@@ -62,7 +62,7 @@ def evaluate_capture_quality(meta: Mapping[str, object]) -> dict[str, object]:
 
     # 双向业务证据：出站与入站均有应用层载荷的、且归因到目标 App 的对端数量。
     # ★为什么必须单列：单向流量（DNS query、SYN-only、发出去没人应）证明不了"与后端通信过"，
-    #   而闭环 complete 的含义正是"拿到了真实通信去向"。实测两案上，目标 UID 只向公共解析器
+    #   而闭环 complete 的含义正是"拿到了真实通信去向"。实测多份真样本上，目标 UID 只向公共解析器
     #   发过 DNS query（入站 0B），却被判 complete —— 人工结论是动态未闭环。
     # ★字段缺失（老 runtime_report / 未提供该统计）时按 0 处理，即 fail-closed 降级为 partial：
     #   宁可把已闭环说成未闭环（多跑一次采集），不可把未闭环说成已闭环（据以结案）。

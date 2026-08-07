@@ -213,7 +213,7 @@ class PackingAnalyzer(BaseAnalyzer):
             return result
 
         # ★结构判据兜底（厂商没认出来 ≠ 没加固）：必须在「无任何命中」分支**之前**调用——
-        #   实测三案正是零厂商命中、直接走 not hits 分支返回，若放在后面永远到不了。
+        #   实测多份真样本正是零厂商命中、直接走 not hits 分支返回，若放在后面永远到不了。
         try:
             self._flag_stub_dex(result, file_paths, dex_strings)
         except Exception:

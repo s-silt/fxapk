@@ -239,7 +239,7 @@ def test_framework_infra_subdomains_skip():
 def test_resolver_stun_ca_infra_skip():
     """★无修复即失败（2026-07-26 真案实测）：公共 DNS / DoH / STUN / 证书链域名不得判"建议调证"。
 
-    修前两案报告把 dns.alidns.com、doh.pub、stun.*、crl.comodoca.com、entrust.net 等一并标成
+    修前报告把 dns.alidns.com、doh.pub、stun.*、crl.comodoca.com、entrust.net 等一并标成  # leak-scan: allow 回归说明：修前这些基础设施域被判进出口
     建议调证，还把闭环仅有的 6 个调证目标名额全占了，真候选 54 个一个没评估——办案人拿到的
     是一份指向证书吊销列表和公共 DNS 的"调证清单"。
     """

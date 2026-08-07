@@ -202,6 +202,34 @@ def _eip55_ok(body: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+#: 一个 40 hex 串里至少要有多少个不同的十六进制字符，才可能是真地址。
+#:
+#: ★为什么需要这条：EVM 地址**全小写时无法做 EIP-55 校验**（上面那个分支一律放行），
+#:   于是任何 40 位小写 hex 都能冒充地址。真实世界里从这个缺口涌进来的是 **web3 库常量**：
+#:   零地址、最大地址、ERC-165 选择子、以及 keccak/曲线参数被截断出的前 20 字节。
+#:   实测一份 Web3 应用因此报出 21 条「虚拟货币收款地址 / 建议调证」，无一为真。  # leak-scan: allow 判据说明引用出口档位名，非案件语境
+#:
+#: ★判据用**密码学随机性**这一形态事实，不内置任何常量名单（名单永远追不上库的更新）：
+#:   真地址是 keccak(公钥) 的后 20 字节，16 种 hex 字符近乎均匀出现，40 位里出现
+#:   ≤4 种不同字符的概率低到可忽略；而库常量恰恰是 0x0000…/0xffff…/0x01ffc9a7… 这类
+#:   高度规整的值。取 5 是保守下界——宁可放过极罕见的畸形真地址，也不放进一批库常量。
+_EVM_MIN_DISTINCT_NIBBLES = 5
+
+
+def _looks_like_library_constant(body: str) -> bool:
+    """40 hex 是否呈「库常量」而非密码学随机地址的形态。
+
+    两条结构判据（都不看具体值，只看分布）：
+      · 不同 hex 字符数过少 —— 零地址(1 种)、最大地址(1 种)、0x01ffc9a7 后接大段 0；
+      · 尾部有长游程 —— 选择子/掩码类常量常以成片的 0 或 f 收尾，真地址不会。
+    """
+    if len(set(body.lower())) < _EVM_MIN_DISTINCT_NIBBLES:
+        return True
+    # 尾部同字符游程 ≥ 24（40 位里超过一半是同一个字符收尾）——掩码/选择子形态。
+    tail = body.lower()[-24:]
+    return len(set(tail)) == 1
+
+
 def validate_address(s: str) -> ChainAddress | None:
     """对单个候选串判链 + 校验和。通过返回 ChainAddress，否则 None。绝不抛。"""
     if not s:
@@ -210,7 +238,10 @@ def validate_address(s: str) -> ChainAddress | None:
         if _EVM_RE.fullmatch(s):
             body = s[2:]
             if body == body.lower() or body == body.upper():
-                return ChainAddress(s, "EVM", False)  # 全小写/全大写无法校验 → 低可信
+                # ★全小写/全大写无 EIP-55 可校验，只能靠形态兜——否则 web3 库常量长驱直入。
+                if _looks_like_library_constant(body):
+                    return None
+                return ChainAddress(s, "EVM", False)  # 低可信但形态像地址
             return ChainAddress(s, "EVM", True) if _eip55_ok(body) else None
         if s[0] == "T" and len(s) == 34:
             data = _b58check_payload(s)
@@ -232,7 +263,11 @@ def validate_address(s: str) -> ChainAddress | None:
 
 
 _CANDIDATE_RES = (
-    re.compile(r"0x[0-9a-fA-F]{40}"),
+    # ★右边界 (?![0-9a-fA-F]) 不可省：没有它，正则会从**更长的 hex 串**里切出前 40 位，
+    #   把 keccak256 摘要(64 hex)、secp256k1 曲线参数(64 hex)、创世块 extraData 切成
+    #   「地址」。实测一份 Web3 应用因此把 ethers.js 的 keccak(空串) 与曲线阶 N 报成收款地址。
+    #   左边界同理，防从 0x 前缀更长的串中途起切。
+    re.compile(r"(?<![0-9a-fA-Fx])0x[0-9a-fA-F]{40}(?![0-9a-fA-F])"),
     re.compile(r"T[1-9A-HJ-NP-Za-km-z]{33}"),
     re.compile(r"bc1[ac-hj-np-z02-9]{25,87}"),
     re.compile(r"(?<![1-9A-HJ-NP-Za-km-z])[13][1-9A-HJ-NP-Za-km-z]{25,34}"),

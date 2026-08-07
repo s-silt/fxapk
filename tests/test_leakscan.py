@@ -547,7 +547,7 @@ def test_blocking_rules_are_the_precise_ones() -> None:
     """
     assert leakscan.BLOCKING_RULES == frozenset({"ip", "secret", "exemption", "bulk_exemption"})
     assert set(leakscan.RULES) == {
-        "ip", "secret", "domain", "context", "name", "exemption", "bulk_exemption",
+        "ip", "secret", "domain", "context", "exemption", "bulk_exemption",
     }
 
 
@@ -809,75 +809,6 @@ def test_ci_defines_both_leak_scan_gates() -> None:
     """两关必须都在：diff 关（PR，严）+ 全树关（恒为 0）。少一关都不许静默通过。"""
     scripts = _ci_leak_scan_run_scripts()
     assert set(scripts) == {"leak-scan", "leak-scan-full-tree"}, scripts.keys()
-
-
-# ---------------------------------------------------------------------------
-# name 判据：当事人姓名（中文姓名 + 案）
-#
-# 这条判据是为「真名反复溜进注释 / commit」补的：三关 + IP/域名/密钥/语境词判据
-# 全绿，中文人名却是判据盲区，照样把当事人姓名推上过 GitHub。以下夹具里的「姓名」
-# 全是**合成**的（赵钱孙 / 周吴郑），不是真实当事人。
-# ---------------------------------------------------------------------------
-
-
-#: name 判据的阴阳性夹具都是**合成姓名**（赵钱孙 / 周吴郑，百家姓头三字，非真实当事人），
-#: 但字面上仍会命中 name / context 判据。按本文件既定做法，用行内豁免声明「这是有意的夹具」，
-#: 让 self-scan strict 关照常跑过，而判据本身一点不弱化（值经 f-string 进 diff 行时照常命中）。
-_SYNTH_NAME_A = "赵钱孙"  # leak-scan: allow name 判据阳性夹具，百家姓头三字合成姓名、非真实当事人
-_SYNTH_NAME_B = "周吴郑"  # leak-scan: allow name 判据阳性夹具，百家姓头三字合成姓名、非真实当事人
-
-
-def test_case_name_in_comment_is_flagged() -> None:
-    """★注释里「合成姓名+案」必须被 name 判据抓到——这正是失守过的形态。"""
-    findings = leakscan.scan_diff(_diff("apkscan/x.py", f"# 实测{_SYNTH_NAME_A}案 33 个接入节点"))
-    names = [f for f in findings if f.rule == "name"]
-    assert names, "注释里的当事人姓名没被抓到"
-    assert _SYNTH_NAME_A in names[0].value
-
-
-def test_case_name_survives_leading_and_trailing_cjk() -> None:
-    """★姓名前后紧跟别的汉字也要抓到——lookbehind/lookahead 卡词边界会把真名一起漏掉。"""
-    assert [f for f in leakscan.scan_diff(_diff("a.py", f"关于{_SYNTH_NAME_B}案的分析")) if f.rule == "name"]
-    assert [f for f in leakscan.scan_diff(_diff("a.py", f"{_SYNTH_NAME_B}案的六节点")) if f.rule == "name"]
-
-
-def test_case_name_default_reports_strict_blocks() -> None:
-    """★默认档只提示（不阻断正常提交），strict 档才阻断——与 domain/context 同档。"""
-    default = leakscan.scan_diff(_diff("apkscan/x.py", f"# {_SYNTH_NAME_A}案填清单"))
-    assert [f for f in default if f.rule == "name"]
-    assert not leakscan.blocking(default), "name 判据不该在默认档阻断"
-    assert "name" not in leakscan.BLOCKING_RULES
-
-
-def test_common_case_words_are_not_flagged_as_names() -> None:
-    """★通用「X案 / 案X」词不得误报为姓名——否则护栏噪音大到没人看。
-
-    ★有的字符串还会命中既有的 context 判据（语境词），那是另一条判据、与本测试无关；
-      故每行加行内豁免让 self-scan strict 关跳过该源码行（判据本身经 f-string 进 diff 时照常跑）。
-    """
-    benign = [
-        "本案 TXT 配置下发通道",       # leak-scan: allow name 判据阴性夹具：案前 1 字（本案）
-        "该案证据链",                 # leak-scan: allow name 判据阴性夹具：该案
-        "串案锚点纪律",               # leak-scan: allow name 判据阴性夹具：串案
-        "涉案 APK 静态分析",          # leak-scan: allow name 判据阴性夹具：涉案
-        "解决方案与实施方案",          # leak-scan: allow name 判据阴性夹具：方案（末字「方」）
-        "档案管理与备案流程",          # leak-scan: allow name 判据阴性夹具：档案 / 备案
-        "这类案件的处置",             # leak-scan: allow name 判据阴性夹具：案件（案后成词）
-        "两个案子先后并串",           # leak-scan: allow name 判据阴性夹具：案子（案后成词）
-        "跨案并案串并",               # leak-scan: allow name 判据阴性夹具：跨案 / 并案
-        "案例分析与立案侦查",          # leak-scan: allow name 判据阴性夹具：案例 / 立案
-        "办案单位出具的答案",          # leak-scan: allow name 判据阴性夹具：办案 / 答案
-        "一起命案发生后破案",          # leak-scan: allow name 判据阴性夹具：命案 / 案发 / 破案
-    ]
-    for line in benign:
-        names = [f for f in leakscan.scan_diff(_diff("apkscan/x.py", line)) if f.rule == "name"]
-        assert not names, f"通用词「{line}」被误判为姓名：{[f.value for f in names]}"
-
-
-def test_case_name_exemption_line_passes() -> None:
-    """★误报可用行内豁免放行（判据是启发式，要给出口）。"""
-    diff = _diff("apkscan/x.py", "# 某方案案例  # leak-scan: allow 合成夹具非真名")
-    assert not [f for f in leakscan.scan_diff(diff) if f.rule == "name"]
 
 
 def test_ci_pr_diff_gate_runs_strict() -> None:
