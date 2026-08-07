@@ -329,10 +329,24 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         "flutter.dev",
         "flutter.io",
         "dart.io",
+        "dart.dev",                 # Dart 官网（诊断信息里的 go/ 短链就指这儿）
         "pub.dev",                  # Dart/Flutter 包仓库
         "dartbug.com",              # Dart issue 追踪
         "baseflow.com",             # Flutter 插件作者（permission_handler 等）
         "dexterous.com",            # Flutter 插件作者（fluttertoast 等）
+        # ---- 其余跨平台框架（与 Flutter 同一形态：框架把自家服务编进每个构建产物）----
+        # 这类框架把整份业务代码编译进单个产物，框架自己的官网与云服务地址也一并烙在
+        # 同一个文件里。不列进来，每个用该框架的样本都会稳定贡献几条无关线索——而且它们
+        # 与本 App 的真后端同处一个文件，噪音正好压在最该看清楚的地方。
+        "unity3d.com",              # Unity 官网及其 Analytics/Ads/云构建子域  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        "unity.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        "reactnative.dev",          # React Native 官网
+        "expo.dev",                 # Expo（RN 工具链）
+        "cordova.apache.org",       # Cordova 官方文档
+        "ionicframework.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        "capacitorjs.com",          # Capacitor（Ionic 的原生桥）  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        "dcloud.net.cn",            # uni-app 官方（HBuilder 系）  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        "dcloud.io",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
         # ---- Go 语言官方 ----
         "golang.org",
         "go.dev",

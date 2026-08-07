@@ -26,6 +26,7 @@ import pytest
 
 from apkscan.core import pipeline
 from apkscan.core.models import AnalysisConfig
+from apkscan.core.regress import ADVICE_INVESTIGATE
 from tests.conftest import FakeContext
 from tests.synthetic.third_party import THIRD_PARTY_SAMPLES, ThirdPartySample
 
@@ -75,6 +76,41 @@ def test_third_party_detection_matches_baseline(sample: ThirdPartySample) -> Non
         f"第三方样本 {sample.name!r} 检出漂移：基线 {baseline} → 实际 {detected}。\n"
         f"  该内容实为：{sample.why}\n"
         f"  线索变多 = 判据变松（误报风险上升）；变少 = 降噪生效，两者都请有意更新基线。"
+    )
+
+
+@pytest.mark.parametrize(
+    "sample", [s for s in THIRD_PARTY_SAMPLES if s.must_not_be_actionable],
+    ids=lambda s: s.name,
+)
+def test_framework_own_values_never_reach_the_actionable_tier(sample: ThirdPartySample) -> None:
+    """★档位锁：框架自带的域名/地址不得落在"建议"档。
+
+    基线只记「检出了哪些线索类」，对档位是盲的——一个域名从"无需"升成"建议"，
+    类还是 DOMAIN，基线照样全绿，而那正是误报真正生效的形态。这条补上那个缺口。
+
+    实测抓到过：同一个 Flutter 框架的域名里，只有 dart.dev 漏在名单外被升了档；
+    Unity 的三个云服务端点与 RN 的文档站整族缺席。
+
+    ★变异验证：把 infra 已知基础设施清单里对应的条目删掉，本测试必红。
+    """
+    report = _run(sample)
+    by_value = {str(lead.value): lead for lead in report.leads}
+    offenders = {
+        v: by_value[v].advice
+        for v in sample.must_not_be_actionable
+        if v in by_value and by_value[v].advice == ADVICE_INVESTIGATE
+    }
+    assert not offenders, (
+        f"{sample.name}: 框架自带的值被升到「{ADVICE_INVESTIGATE}」档 {offenders}\n"
+        f"  该内容实为：{sample.why}\n"
+        f"  这些值没有可查的主体，升档只会把无关的一方拉进来。"
+    )
+    # ★防空转：这些值必须真的出现在报告里，否则本条断言什么都没检查。
+    missing = sample.must_not_be_actionable - set(by_value)
+    assert not missing, (
+        f"{sample.name}: 夹具里的 {sorted(missing)} 压根没被提取成线索，"
+        f"本条档位断言等于空转——请先确认夹具形态仍能被提取"
     )
 
 
