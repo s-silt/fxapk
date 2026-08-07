@@ -73,6 +73,7 @@ __all__ = [
     "scan_paths",
     "scan_text",
     "tracked_files",
+    "uncommitted_paths",
 ]
 
 
@@ -889,6 +890,40 @@ def tracked_files(
             _fail(f"{root_str} 下的已跟踪文件全部被跳过（二进制/派生物），未扫描任何内容")
 
     return sorted(collected)
+
+
+def uncommitted_paths(*, repo_root: "Path | None" = None) -> list[str]:
+    """工作树里未提交的改动路径（含已暂存与未暂存、含未跟踪）。取不到时返回空列表。
+
+    用途只有一个：``leak-scan --base X`` 走的是 ``git diff X...HEAD``（**三点**），
+    只比已提交的 commit。改完不提交就跑本地校验，看到的是与改动前**一模一样**的结果——
+    很容易读成「豁免没生效」或「判据有 bug」，实际是那些行根本没进 diff。
+    调用方据此打一行提示，把「没扫到」和「扫了没问题」区分开。
+
+    ★取不到清单时返回空列表（不打提示）而**不是**抛错：这只是一句提示，
+    不该因为 git 不可用就让整个扫描失败——扫描本身的完整性由 diff 那条路径自己保证。
+    """
+    import subprocess
+
+    base = Path(repo_root) if repo_root is not None else Path.cwd()
+    cmd = ["git", "-C", str(base), "status", "--porcelain", "-z"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("[leakscan] git status 执行失败（%s），跳过未提交改动提示",
+                       type(exc).__name__)
+        return []
+    if proc.returncode != 0:
+        logger.warning("[leakscan] git status 退出码 %s，跳过未提交改动提示", proc.returncode)
+        return []
+
+    out: list[str] = []
+    for entry in proc.stdout.decode("utf-8", errors="replace").split("\0"):
+        if not entry or len(entry) < 4:
+            continue
+        # porcelain 格式：XY<space>path（重命名为 "R  new\0old"，old 单独成段、长度不足会被上面滤掉）
+        out.append(entry[3:])
+    return out
 
 
 def blocking(findings: "list[Finding]", *, strict: bool = False) -> list[Finding]:
