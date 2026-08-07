@@ -24,8 +24,9 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core import pipeline
+from apkscan.core import infra, pipeline
 from apkscan.core.models import AnalysisConfig
+from apkscan.core.regress import ADVICE_INVESTIGATE
 from tests.conftest import FakeContext
 from tests.synthetic.third_party import THIRD_PARTY_SAMPLES, ThirdPartySample
 
@@ -78,6 +79,41 @@ def test_third_party_detection_matches_baseline(sample: ThirdPartySample) -> Non
     )
 
 
+@pytest.mark.parametrize(
+    "sample", [s for s in THIRD_PARTY_SAMPLES if s.must_not_be_actionable],
+    ids=lambda s: s.name,
+)
+def test_framework_own_values_never_reach_the_actionable_tier(sample: ThirdPartySample) -> None:
+    """★档位锁：框架自带的域名/地址不得落在"建议"档。
+
+    基线只记「检出了哪些线索类」，对档位是盲的——一个域名从"无需"升成"建议"，
+    类还是 DOMAIN，基线照样全绿，而那正是误报真正生效的形态。这条补上那个缺口。
+
+    实测抓到过：同一个 Flutter 框架的域名里，只有 dart.dev 漏在名单外被升了档；
+    Unity 的三个云服务端点与 RN 的文档站整族缺席。
+
+    ★变异验证：把 infra 已知基础设施清单里对应的条目删掉，本测试必红。
+    """
+    report = _run(sample)
+    by_value = {str(lead.value): lead for lead in report.leads}
+    offenders = {
+        v: by_value[v].advice
+        for v in sample.must_not_be_actionable
+        if v in by_value and by_value[v].advice == ADVICE_INVESTIGATE
+    }
+    assert not offenders, (
+        f"{sample.name}: 框架自带的值被升到「{ADVICE_INVESTIGATE}」档 {offenders}\n"
+        f"  该内容实为：{sample.why}\n"
+        f"  这些值没有可查的主体，升档只会把无关的一方拉进来。"
+    )
+    # ★防空转：这些值必须真的出现在报告里，否则本条断言什么都没检查。
+    missing = sample.must_not_be_actionable - set(by_value)
+    assert not missing, (
+        f"{sample.name}: 夹具里的 {sorted(missing)} 压根没被提取成线索，"
+        f"本条档位断言等于空转——请先确认夹具形态仍能被提取"
+    )
+
+
 @pytest.mark.parametrize("sample", THIRD_PARTY_SAMPLES, ids=lambda s: s.name)
 def test_samples_actually_reach_the_analyzers(sample: ThirdPartySample) -> None:
     """★防永假绿：夹具必须真的被分析器读到。
@@ -90,6 +126,41 @@ def test_samples_actually_reach_the_analyzers(sample: ThirdPartySample) -> None:
     ran = (report.meta or {}).get("analyzers_ran")
     if ran is not None:  # 该字段存在时顺带断言确有分析器执行
         assert ran, f"{sample.name}: 没有任何分析器执行，样本未进 pipeline"
+
+
+#: ★往「已知基础设施」清单里加一条 = 给它下的一整棵子树发免检牌（本表按域边界后缀匹配）。
+#: 平台厂商的域名下常常同时挂着两种东西：厂商自己的固定服务端点，以及**租户可控**的资源。
+#: 后者的归属恰恰是最该核的——它是 App 作者能往里塞代码/配置的地方。
+_TENANT_CONTROLLED = [
+    ("u.expo.dev", "EAS Update 的 OTA 清单地址，JS bundle 与下发配置由 App 作者控制"),
+    ("services.api.unity.com", "Unity Gaming Services，Cloud Code 是开发者自写的服务端脚本"),  # leak-scan: allow 阴性夹具：测的正是这个租户可控子域不该被整域免检，占位域名验不出边界
+    ("cloud.unity3d.com", "Unity Cloud Build 承载用户构建产物"),  # leak-scan: allow 阴性夹具：测的正是这个租户可控子域不该被整域免检，占位域名验不出边界
+]
+#: 与之相对：厂商自己的固定端点/文档站，免检才对。
+_VENDOR_FIXED = [
+    "auction.unityads.unity3d.com", "config.uca.cloud.unity3d.com",  # leak-scan: allow 阴性夹具：Unity 引擎自带端点，测的正是它们该免检
+    "cdp.cloud.unity3d.com", "docs.expo.dev", "reactnative.dev",  # leak-scan: allow 阴性夹具：Unity/Expo/RN 厂商固定端点与文档站
+    "flutter.dev", "dart.dev", "pub.dev",
+]
+
+
+@pytest.mark.parametrize(("host", "why"), _TENANT_CONTROLLED, ids=lambda x: str(x)[:40])
+def test_tenant_controlled_subdomains_are_not_waved_through(host: str, why: str) -> None:
+    """★整域收编会把租户可控的子域一起免检——那是把最该查的东西判成不用查。
+
+    本表的 SKIP 是判据链结论、不进抑制账本，``fxapk lead restore`` 也够不着；
+    落进去就捞不回来，所以宁可窄。同表里对同类情形本就是这个做法（钉钉只列 mcs 子域）。
+
+    ★变异验证：把 infra 清单里的文档站条目放宽成对应的裸域（去掉 docs. 前缀，或补回
+    厂商的顶级域整条），本测试必红。
+    """
+    assert not infra.is_known_infra(host), f"{host} 被整域免检了——{why}"
+
+
+@pytest.mark.parametrize("host", _VENDOR_FIXED)
+def test_vendor_fixed_endpoints_stay_waved_through(host: str) -> None:
+    """收窄不能收过头：厂商自己的固定端点与文档站仍要免检，否则每个包都稳定贡献噪音。"""
+    assert infra.is_known_infra(host), f"{host} 该免检却没有——收窄收过头了"
 
 
 def test_baseline_covers_all_third_party_samples() -> None:

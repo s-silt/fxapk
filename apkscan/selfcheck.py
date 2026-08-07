@@ -40,6 +40,51 @@ def _component(name: str, category: str, status: str, detail: str, fix: str = ""
     return {"name": name, "category": category, "status": status, "detail": detail, "fix": fix}
 
 
+def build_credential_components() -> list[dict[str, str]]:
+    """逐个需要凭据的富化源报「已配 / 未配」。**只看变量在不在，绝不读它的值**。
+
+    为什么这一项必须有
+    ------------------
+    没配 key 的源会安静地不查。落到报告里，那条线索就成了"未发现"——而真相是
+    **压根没查**。这两者的差别很实：前者可以写进结论，后者只是一条没做完的活。
+    把凭据就绪度摆到台面上，"没查成"才有地方体现。
+
+    绝不回显值：这里只判断 ``os.environ`` 里键在不在，连长度、前缀都不输出。
+    """
+    import os
+
+    from apkscan.core.registry import discover_enrichers
+
+    out: list[dict[str, str]] = []
+    try:
+        enrichers = discover_enrichers()
+    except Exception:  # noqa: BLE001 — 自检自身绝不抛
+        logger.exception("[selfcheck] 富化源发现异常，凭据项跳过")
+        return out
+
+    for enricher in sorted(enrichers, key=lambda e: e.name):
+        # required_env / name 都是 BaseEnricher 上的声明字段，直接取。
+        required = tuple(enricher.required_env or ())
+        if not required:
+            continue  # 无需凭据的源（whois/rdap/dns…）由 online-enrichment 一项统一覆盖
+        name = enricher.name
+        # ★.strip() 不可少：真正决定该源发不发查询的两处（enrichment._provider_configured 与
+        #   multisource._credential）都是 strip 后判空。这里若不 strip，一个纯空白的
+        #   FXAPK_XX_KEY="  " 会被自检说成「已配置」、还不给修复指引，而实际上那个源根本不查
+        #   ——恰好是最坏的方向：人以为查过了。
+        configured = any((os.environ.get(var) or "").strip() for var in required)
+        out.append(_component(
+            f"credential:{name}",
+            "credential",
+            _STATUS_OK if configured else _STATUS_DISABLED,
+            f"{name} 富化源的访问凭据"
+            + ("（已配置）" if configured else "（未配置 → 该源不会被查询，其结果缺失属"
+                                              "「没查成」而非「查了没有」）"),
+            "" if configured else f"在 .env 或环境里设 {' 或 '.join(required)}",
+        ))
+    return out
+
+
 def _git_head(package_dir: str) -> str:
     """若包目录位于 git 工作树内，返回 HEAD 短哈希；否则空串。绝不抛。"""
     from pathlib import Path
@@ -166,6 +211,9 @@ def run_selfcheck(*, online: bool = True, probe_network: bool = True) -> dict[st
             "" if net_ok else "确保本机可出网且用 --online（注意 whois 走 DNS，部分环境不可用）",
         )
     )
+
+    # 凭据就绪度：紧跟联网项——两者一起才回答得了"某个源为什么没有结果"。
+    components += build_credential_components()
 
     summary = Counter(c["status"] for c in components)
     # 整体 ok：核心就绪 + 无「配了却连不上」的硬故障（missing/disabled 是可选能力未启用，可接受）。

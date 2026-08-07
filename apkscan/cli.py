@@ -38,6 +38,8 @@ from apkscan.commands.web import analyze_web
 
 META_WRITE_OWNER = "cli"
 META_WRITE_CATEGORIES = {
+    'config_probe_run': 'coverage',
+    'config_probe_runs': 'coverage',
     'device_detected': 'coverage',
     'evidence_manifest': 'record',
     'online': 'signal',
@@ -1354,6 +1356,193 @@ def config_channel_cmd(
     typer.echo(_json.dumps(
         {"center": center.isoformat(), "count": len(candidates), "candidates": candidates},
         ensure_ascii=False, indent=2))
+
+
+@app.command(name="config-probe")
+def config_probe_cmd(
+    report_path: Path = typer.Argument(..., help="analyze 产出的 report.json（读其中的 config_probe_plan）。"),
+    authorized_active: bool = typer.Option(
+        False, "--authorized-active",
+        help="真的发起请求。**默认关**：不带此开关只列出将要请求的 URL，零流量。",
+    ),
+    into: str = typer.Option("", "--into", help="把结果回灌进这份 report.json（默认不写，只打印）。"),
+    limit: int = typer.Option(0, "--limit", help="本次最多请求几个候选；0 = 用内建上限。"),
+    archive: str = typer.Option("", "--archive", help="原始字节落盘目录；不给则不落盘（线索仍照出）。"),
+) -> None:
+    """按 report.json 里的配置探测预案实际取回配置对象（授权档）。
+
+    analyze 只出预案不取回：预案要靠资产排序才拼得出，而排序在下载阶段之后，同一轮里赶不上。
+    这个时序是有意保留的——主动请求属不可逆的对外动作，让它跨一轮、由人看过预案再决定发不发。
+
+    ★默认不发任何请求。要真发必须显式 ``--authorized-active``，且请自行确认已获授权。
+
+    结果分四种，两两都不能混：**取到并解出**（hit）/ **解开了里面确实没有**（no_content，
+    这才是"查了没有"）/ **取到但解码链没走通**（undecoded，内容未知，多为密文而没配方）/
+    **没取成**（failed，404、超时、被 SSRF 防护拦下）。
+    """
+    import json as _json
+
+    from apkscan.core.appcrypto import CryptoRecipe
+    from apkscan.core.config_probe_run import run_plan
+
+    try:
+        payload = _json.loads(report_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001 — CLI 边界：坏输入给明确退出码
+        typer.echo(f"错误：读不了 {report_path}：{exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    if not isinstance(payload, dict):
+        typer.echo("错误：report.json 顶层不是对象。", err=True)
+        raise typer.Exit(code=2)
+
+    raw_meta = payload.get("meta")
+    meta: dict = raw_meta if isinstance(raw_meta, dict) else {}
+    plan = meta.get("config_probe_plan")
+    if not plan:
+        typer.echo(
+            "该报告里没有配置探测预案（meta.config_probe_plan）。预案需要样本里同时提取到"
+            "配置接口路径与后端域名才拼得出——缺哪一头都不会有。",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    result = run_plan(
+        plan,
+        authorized=authorized_active,
+        archive_dir=Path(archive) if archive else None,
+        recipe=CryptoRecipe.from_meta(meta.get("crypto_recipe")),
+        limit=limit or None,
+    )
+
+    if not authorized_active:
+        typer.echo(f"预演：{len(result.outcomes)} 个候选，**未发出任何请求**。")
+        for o in result.outcomes:
+            typer.echo(f"  {o.url}")
+        if result.truncated:
+            typer.echo(f"  （另有 {result.truncated} 个候选超出上限未列入）")
+        typer.echo("\n确认已获授权后，加 --authorized-active 真正取回。")
+        return
+
+    counts = result.counts()
+    undecoded = counts.get("undecoded", 0)
+    typer.echo(
+        f"取回完成：解出内容 {counts.get('hit', 0)} / 解开了但里面没有 "
+        f"{counts.get('no_content', 0)} / 取到但解不开 {undecoded} / "
+        f"未取成 {counts.get('failed', 0)}"
+        + (f"；另有 {result.truncated} 个候选超出上限未请求" if result.truncated else "")
+    )
+    if undecoded:
+        # ★不能让这几条被读成"没有"：字节在手上，内容还不知道。
+        typer.echo(
+            f"  提示：{undecoded} 个候选取到了字节但解码链没走通，**内容未知**——"
+            f"不可据此写「未发现下发域名」。多为密文而报告里没有可用配方；"
+            f"拿到配方后重跑，或用 --archive 保下原始字节另行分析。"
+        )
+    for o in result.outcomes:
+        if o.status == "hit":
+            typer.echo(f"  [hit] {o.url} → 域名 {len(o.domains)} / IP {len(o.ips)}")
+        elif o.status == "undecoded":
+            typer.echo(f"  [解不开] {o.url} → {o.size} 字节，内容未知")
+    if not into:
+        typer.echo(_json.dumps(result.to_meta(), ensure_ascii=False, indent=2))
+        return
+
+    try:
+        added_eps, added_leads = _merge_config_probe_into_report(into, result)
+    except Exception as exc:  # noqa: BLE001 — 已经发出去的请求不能白发
+        # ★回灌失败时必须把成果吐到 stdout：这些字节是**实发请求**换来的，
+        #   报个错就退出等于把它们扔了，而对方那边的请求已经发生、不可撤销。
+        typer.echo(f"错误：回灌 {into} 失败：{exc}", err=True)
+        typer.echo("以下是本次取回的完整结果（请自行保存，勿重复发起请求）：", err=True)
+        typer.echo(_json.dumps(result.to_meta(), ensure_ascii=False, indent=2))
+        raise typer.Exit(code=1) from exc
+    typer.echo(
+        f"已回灌 {into}：新增端点 {added_eps} 个、线索 {added_leads} 条"
+        f"（source=remote-config，非运行时实测；未做归属查询，需要就跑 `fxapk enrich`）。"
+    )
+
+
+def _merge_config_probe_into_report(report_json_path: str, result: object) -> tuple[int, int]:
+    """把取回结果并进 report.json：endpoints + **leads** + meta 记一次运行。原子写。
+
+    ★必须同时产 Lead，否则这批域名到不了任何出口：文书套打、IOC 导出、闭环目标、digest、
+    corpus 入库**全部只读 leads**。只往 endpoints 里塞，等于取回来的下发池躺在 JSON 里没人看
+    ——而它恰恰是这条命令最有价值的产出。Lead 走 ``build_endpoint_leads`` 这条与静态侧
+    同一的链（含 advice 分级 + 默认兜底 + base_advice 封存），口径不会分叉。
+
+    ★回灌的端点 source 恒为 ``remote-config``：它是"配置里出现的域名"，**不是**运行时实测
+    接触，不得升成确认徽标。
+
+    Returns:
+        ``(新增端点数, 新增线索数)``
+    """
+    import json as _json
+
+    from apkscan.core.atomic import atomic_write_text
+    from apkscan.core.leads import _apply_default_advice, build_endpoint_leads
+    from apkscan.core.models import seal_base_advice
+    from apkscan.report import json as report_json
+
+    path = Path(report_json_path)
+    payload = _json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise typer.BadParameter(f"{report_json_path} 顶层不是对象")
+    endpoints = payload.get("endpoints")
+    if not isinstance(endpoints, list):
+        endpoints = []
+        payload["endpoints"] = endpoints
+    seen = {
+        (str(e.get("kind")), str(e.get("value")))
+        for e in endpoints if isinstance(e, dict)
+    }
+    fresh = []
+    for ep in getattr(result, "endpoints", []):
+        key = (ep.kind, ep.value)
+        if key in seen:
+            continue
+        seen.add(key)
+        endpoints.append(report_json._to_jsonable(ep))
+        fresh.append(ep)
+
+    # --- 新端点 → Lead ---------------------------------------------------
+    # online=False：本命令只取配置对象，没做 WHOIS/ICP/ASN 归属查询。如实标注比假装查过好，
+    # 想补归属另跑 `fxapk enrich`。
+    leads = payload.get("leads")
+    if not isinstance(leads, list):
+        leads = []
+        payload["leads"] = leads
+    lead_keys = {
+        (str(x.get("category")), str(x.get("value")))
+        for x in leads if isinstance(x, dict)
+    }
+    added_leads = 0
+    if fresh:
+        new_leads = build_endpoint_leads(fresh, online=False)
+        _apply_default_advice(new_leads)
+        seal_base_advice(new_leads)
+        for lead in new_leads:
+            key = (lead.category.value, lead.value)
+            if key in lead_keys:
+                continue
+            lead_keys.add(key)
+            leads.append(report_json._to_jsonable(lead))
+            added_leads += 1
+
+    meta = payload.get("meta")
+    if not isinstance(meta, dict):
+        # meta 存在但不是 dict 时，原样保留在 meta_original 里再重建——直接覆盖会毁掉
+        # 别人的数据，静默丢弃则会让"已回灌"这句话变成假话（三分记录压根没写进去）。
+        if meta is not None:
+            payload["meta_original"] = meta
+        meta = {}
+        payload["meta"] = meta
+    runs = meta.get("config_probe_runs")
+    if not isinstance(runs, list):
+        runs = []
+    runs.append(result.to_meta())  # type: ignore[attr-defined]
+    meta["config_probe_runs"] = runs
+    meta["config_probe_run"] = runs[-1]  # 最近一次，供只看单次的消费方
+    atomic_write_text(path, _json.dumps(payload, ensure_ascii=False, indent=2))
+    return len(fresh), added_leads
 
 
 @app.command(name="port-normalize")

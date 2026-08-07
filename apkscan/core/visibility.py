@@ -335,9 +335,14 @@ def _next_actions(sources: dict, remediation: str, meta: dict) -> list[str]:
         )
     plan = meta.get("config_probe_plan")
     if isinstance(plan, dict) and plan.get("candidates"):
+        # ★这里必须指 `fxapk config-probe`，不能说"重跑 analyze"：analyze 的下载阶段只收
+        #   REMOTE_CONFIG 类 Lead，预案里的合成 URL 不是 Lead，且那个阶段排在 asset_score
+        #   之前——预案本身还没生成。指错路径的补法建议比没有更糟：人照做了、什么也没取到，
+        #   反而更相信"确实没有"。
         actions.append(
             f"已生成 {len(plan['candidates'])} 条配置接口候选 URL（meta.config_probe_plan）："
-            "确认授权后以 `--mode authorized-active` 重跑可下载解码，取回下发的域名/IP 池"
+            "确认授权后跑 `fxapk config-probe <report.json> --authorized-active --into <report.json>` "
+            "可下载解码并回灌，取回下发的域名/IP 池（不加 --authorized-active 只列候选、不发请求）"
         )
 
     # native 控制面：地址是按算法逐日算出来的，静态端点集里本来就不会有它。
