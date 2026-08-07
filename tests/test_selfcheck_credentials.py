@@ -71,6 +71,28 @@ def test_configured_credential_flips_to_ok(monkeypatch: pytest.MonkeyPatch) -> N
     assert row["status"] == "ok"
 
 
+def test_blank_credential_counts_as_unconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★空白值等于没配——必须与真正决定查不查的判据同口径。
+
+    `enrichment._provider_configured` 与 `multisource._credential` 都是 strip 后判空，
+    所以 `FXAPK_XX_KEY="   "` 那个源根本不会被查。自检若说「已配置」，方向恰好是最坏的：
+    人以为查过了，而报告里那条线索的缺席其实是「没查成」。
+
+    ★变异验证：去掉 build_credential_components 里的 .strip()，本测试必红。
+    """
+    target = next(
+        e for e in discover_enrichers() if tuple(getattr(e, "required_env", ()) or ())
+    )
+    for var in tuple(target.required_env):
+        monkeypatch.setenv(var, "   ")
+
+    row = next(
+        c for c in build_credential_components() if c["name"] == f"credential:{target.name}"
+    )
+    assert row["status"] == "disabled", "纯空白被当成了已配置"
+    assert row["fix"], "既然实际没配，就要给出怎么配"
+
+
 def test_credential_values_never_appear_in_output(monkeypatch: pytest.MonkeyPatch) -> None:
     """★绝不回显：整份自检输出里不得出现凭据的任何片段。
 

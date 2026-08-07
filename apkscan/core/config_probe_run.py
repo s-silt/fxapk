@@ -6,13 +6,16 @@
 **之后**——同一轮里没法既排完序又回头去取。这个时序不是缺陷：主动请求是不可逆的对外动作，
 让它跨一轮、由人看过预案再决定要不要发，正是想要的。所以取回做成独立命令。
 
-## 三种结果，绝不混为一谈
+## 四种结果，绝不混为一谈
 
-- ``hit``：取到了，且从中解出了域名/IP；
-- ``no_content``：取到了，但没解出东西——这是**真的"查了没有"**；
-- ``failed``：压根没取成（404 / 超时 / 被 SSRF 防护拦下）——这是"没查成"，不是"查了没有"。
+- ``hit``：取到了、解开了，且从中解出了域名/IP；
+- ``no_content``：取到了、**解开了**，里面确实没有——这才是"查了没有"；
+- ``undecoded``：取到了但解码链没走通，**内容未知**（多为密文而手头没配方）；
+- ``failed``：压根没取成（404 / 超时 / 被 SSRF 防护拦下）——"没查成"。
 
-把后两者混起来，报告里"未发现下发域名"就成了一句不知深浅的话。
+后三者两两都不能混。曾把 ``undecoded`` 和 ``no_content`` 合成一档，于是「取回 3 个候选、
+全是解不开的密文」打印成「取到但无内容 3」，报告里顺手写成"未发现下发域名"——
+拿一坨看不懂的字节当了否定结论。
 
 ## 默认不发流量
 
@@ -52,7 +55,7 @@ _MAX_REQUESTS = 40
 
 @dataclass(frozen=True)
 class ProbeOutcome:
-    """单个候选的结果。``status`` ∈ {planned, hit, no_content, failed}。"""
+    """单个候选的结果。``status`` ∈ {planned, hit, undecoded, no_content, failed}。"""
 
     url: str
     status: str
@@ -61,6 +64,8 @@ class ProbeOutcome:
     error: str | None = None
     sha256: str | None = None
     size: int | None = None
+    #: 解码链是否真的走通。``False`` 时内容未知——**不等于**里面没有域名。
+    decoded: bool = False
     decode_chain: tuple[str, ...] = ()
     domains: tuple[str, ...] = ()
     ips: tuple[str, ...] = ()
@@ -76,6 +81,10 @@ class ProbeOutcome:
             val = getattr(self, key)
             if val is not None:
                 d[key] = val
+        # ★decoded 恒输出（哪怕是 False）：它是「内容未知」与「确实没有」的唯一区分位，
+        #   按"假值省略"的惯例漏掉它，读 JSON 的人就分不出这两种情形。
+        if self.status in ("hit", "undecoded", "no_content"):
+            d["decoded"] = self.decoded
         for key in ("decode_chain", "domains", "ips"):
             val = getattr(self, key)
             if val:
@@ -183,7 +192,8 @@ def _fetch_one(
         result = decode_config_blob(blob, recipe=recipe)
     except Exception as exc:  # noqa: BLE001 — 解码失败仍是「取到了」，别退化成「没取成」
         logger.warning("[config_probe] 解码异常 %s", url, exc_info=True)
-        return ProbeOutcome(url=url, status="no_content", host=host, path=path,
+        # 抛异常与「解码链走不通」是同一种处境：字节在手上，内容不知道。
+        return ProbeOutcome(url=url, status="undecoded", host=host, path=path,
                             error=f"解码异常：{exc}", sha256=sha, size=len(blob),
                             stored_path=stored)
 
@@ -193,10 +203,23 @@ def _fetch_one(
         sink.append(config_endpoint(d, "domain", url))
     for ip in ips:
         sink.append(config_endpoint(ip, "ip", url))
-    # ★取到了但没解出东西 = 「查了没有」，与「没取成」分开记。
+    # ★三分的分界就在这里，两个判断缺一不可：
+    #   · 解码链没走通（decoded=False）→ undecoded：**内容未知**。多半是密文而手头没配方，
+    #     绝不能说成"里面没有域名"——那是拿一坨看不懂的字节当否定结论。
+    #   · 解开了、里面确实没有域名/IP → no_content：这才是真的"查了没有"。
+    #   曾把两者合成一档，于是「取回 3 个候选、全是解不开的密文」会打印成
+    #   「取到但无内容 3」，报告里顺手就写成"未发现下发域名"。
+    if not result.decoded:
+        status = "undecoded"
+    elif domains or ips:
+        status = "hit"
+    else:
+        status = "no_content"
     return ProbeOutcome(
-        url=url, status="hit" if (domains or ips) else "no_content", host=host, path=path,
-        sha256=sha, size=len(blob), decode_chain=tuple(result.decode_chain),
+        url=url, status=status, host=host, path=path,
+        error=None if result.decoded else "解码链未走通，内容未知（多为密文而未提供配方）",
+        sha256=sha, size=len(blob), decoded=result.decoded,
+        decode_chain=tuple(result.decode_chain),
         domains=domains, ips=ips, stored_path=stored,
     )
 

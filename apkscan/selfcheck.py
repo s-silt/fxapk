@@ -68,7 +68,11 @@ def build_credential_components() -> list[dict[str, str]]:
         if not required:
             continue  # 无需凭据的源（whois/rdap/dns…）由 online-enrichment 一项统一覆盖
         name = enricher.name
-        configured = any(os.environ.get(var) for var in required)
+        # ★.strip() 不可少：真正决定该源发不发查询的两处（enrichment._provider_configured 与
+        #   multisource._credential）都是 strip 后判空。这里若不 strip，一个纯空白的
+        #   FXAPK_XX_KEY="  " 会被自检说成「已配置」、还不给修复指引，而实际上那个源根本不查
+        #   ——恰好是最坏的方向：人以为查过了。
+        configured = any((os.environ.get(var) or "").strip() for var in required)
         out.append(_component(
             f"credential:{name}",
             "credential",

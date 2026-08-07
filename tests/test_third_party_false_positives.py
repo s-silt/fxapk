@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from apkscan.core import pipeline
+from apkscan.core import infra, pipeline
 from apkscan.core.models import AnalysisConfig
 from apkscan.core.regress import ADVICE_INVESTIGATE
 from tests.conftest import FakeContext
@@ -126,6 +126,41 @@ def test_samples_actually_reach_the_analyzers(sample: ThirdPartySample) -> None:
     ran = (report.meta or {}).get("analyzers_ran")
     if ran is not None:  # 该字段存在时顺带断言确有分析器执行
         assert ran, f"{sample.name}: 没有任何分析器执行，样本未进 pipeline"
+
+
+#: ★往「已知基础设施」清单里加一条 = 给它下的一整棵子树发免检牌（本表按域边界后缀匹配）。
+#: 平台厂商的域名下常常同时挂着两种东西：厂商自己的固定服务端点，以及**租户可控**的资源。
+#: 后者的归属恰恰是最该核的——它是 App 作者能往里塞代码/配置的地方。
+_TENANT_CONTROLLED = [
+    ("u.expo.dev", "EAS Update 的 OTA 清单地址，JS bundle 与下发配置由 App 作者控制"),
+    ("services.api.unity.com", "Unity Gaming Services，Cloud Code 是开发者自写的服务端脚本"),  # leak-scan: allow 阴性夹具：测的正是这个租户可控子域不该被整域免检，占位域名验不出边界
+    ("cloud.unity3d.com", "Unity Cloud Build 承载用户构建产物"),  # leak-scan: allow 阴性夹具：测的正是这个租户可控子域不该被整域免检，占位域名验不出边界
+]
+#: 与之相对：厂商自己的固定端点/文档站，免检才对。
+_VENDOR_FIXED = [
+    "auction.unityads.unity3d.com", "config.uca.cloud.unity3d.com",  # leak-scan: allow 阴性夹具：Unity 引擎自带端点，测的正是它们该免检
+    "cdp.cloud.unity3d.com", "docs.expo.dev", "reactnative.dev",  # leak-scan: allow 阴性夹具：Unity/Expo/RN 厂商固定端点与文档站
+    "flutter.dev", "dart.dev", "pub.dev",
+]
+
+
+@pytest.mark.parametrize(("host", "why"), _TENANT_CONTROLLED, ids=lambda x: str(x)[:40])
+def test_tenant_controlled_subdomains_are_not_waved_through(host: str, why: str) -> None:
+    """★整域收编会把租户可控的子域一起免检——那是把最该查的东西判成不用查。
+
+    本表的 SKIP 是判据链结论、不进抑制账本，``fxapk lead restore`` 也够不着；
+    落进去就捞不回来，所以宁可窄。同表里对同类情形本就是这个做法（钉钉只列 mcs 子域）。
+
+    ★变异验证：把 infra 清单里的文档站条目放宽成对应的裸域（去掉 docs. 前缀，或补回
+    厂商的顶级域整条），本测试必红。
+    """
+    assert not infra.is_known_infra(host), f"{host} 被整域免检了——{why}"
+
+
+@pytest.mark.parametrize("host", _VENDOR_FIXED)
+def test_vendor_fixed_endpoints_stay_waved_through(host: str) -> None:
+    """收窄不能收过头：厂商自己的固定端点与文档站仍要免检，否则每个包都稳定贡献噪音。"""
+    assert infra.is_known_infra(host), f"{host} 该免检却没有——收窄收过头了"
 
 
 def test_baseline_covers_all_third_party_samples() -> None:

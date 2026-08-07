@@ -65,6 +65,39 @@ def test_no_engine_means_unidentified_not_native(libs: list[str]) -> None:
     assert fw.name == "" and fw.own_code_libs == ()
 
 
+def test_coexisting_frameworks_keep_every_business_code_container() -> None:
+    """★★接线不得比不接线更窄——那是把降噪做成了降档。
+
+    不给 framework 时判据用全局并集，libapp.so 与 libil2cpp.so **无条件**都算本应用代码。
+    识别结果若只带主框架那一个容器，Unity+Flutter 并存的包里落选那个反而失去保护，
+    它里面的真后端会被当第三方常量降档——比不做识别还糟。
+
+    ★变异验证：把 detect_framework 里合并 own_code_libs 的分支删掉（退回 matched[0]），
+    本测试必红。
+    """
+    fw = detect_framework(_UNITY + _FLUTTER)
+    assert fw.identified
+    assert set(fw.own_code_libs) == {"libapp.so", "libil2cpp.so"}, (
+        f"并存时丢了容器：{fw.own_code_libs}"
+    )
+    for lib in ("libapp.so", "libil2cpp.so"):
+        assert is_app_own_code(lib, fw) is True, f"{lib} 在并存包里失去了保护"
+        # 与宽口径对齐：接线后不得比不接线更严。
+        assert is_app_own_code(lib) is True
+    assert any("并存" in e for e in fw.evidence), "并存这个事实要留在证据里，供人复核"
+
+
+def test_single_framework_still_excludes_a_lookalike_third_party_lib() -> None:
+    """★放宽并存后，精确口径的价值不能跟着丢。
+
+    Unity 样本里一个真叫 libapp.so 的第三方库——没有 libflutter.so 撑着，就不该被
+    当成本应用代码。这正是精确口径存在的理由。
+    """
+    fw = detect_framework(_UNITY + ["lib/arm64-v8a/libapp.so"])
+    assert fw.own_code_libs == ("libil2cpp.so",), f"误收了假容器：{fw.own_code_libs}"
+    assert is_app_own_code("libapp.so", fw) is False
+
+
 def test_is_app_own_code_narrows_when_the_framework_is_known() -> None:
     """★精确口径与宽口径的差别就在这里，也是整条接线存在的理由。
 

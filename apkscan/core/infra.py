@@ -338,15 +338,19 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         # 这类框架把整份业务代码编译进单个产物，框架自己的官网与云服务地址也一并烙在
         # 同一个文件里。不列进来，每个用该框架的样本都会稳定贡献几条无关线索——而且它们
         # 与本 App 的真后端同处一个文件，噪音正好压在最该看清楚的地方。
-        "unity3d.com",              # Unity 官网及其 Analytics/Ads/云构建子域  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
-        "unity.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
-        "reactnative.dev",          # React Native 官网
-        "expo.dev",                 # Expo（RN 工具链）
+        # ★只列**厂商自己的**站点与固定服务端点，绝不整域收编。本表按域边界后缀匹配，
+        #   一条顶级域会把它下面的**租户可控**子域一并豁免——OTA 更新清单、云构建产物、
+        #   托管函数这类地方，内容由 App 作者控制，形态等同对象存储的租户桶，
+        #   恰恰是最该核归属的东西。本表对同类情形本来就是这个做法（同族厂商只列具体
+        #   服务子域、不列其主域）。收窄的边界由误报回归网锁着。
+        "unityads.unity3d.com",     # 广告投放固定端点  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        "uca.cloud.unity3d.com",    # Analytics 配置固定端点  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        "cdp.cloud.unity3d.com",    # Analytics 事件上报固定端点  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
+        "reactnative.dev",          # React Native 官网（纯文档站）
+        "docs.expo.dev",            # 仅文档站；其主域下有租户可控的更新下发通道，故不整域收
         "cordova.apache.org",       # Cordova 官方文档
         "ionicframework.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
         "capacitorjs.com",          # Capacitor（Ionic 的原生桥）  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
-        "dcloud.net.cn",            # uni-app 官方（HBuilder 系）  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
-        "dcloud.io",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
         # ---- Go 语言官方 ----
         "golang.org",
         "go.dev",

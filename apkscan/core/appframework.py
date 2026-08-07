@@ -88,8 +88,15 @@ def _basename(path: str) -> str:
 def detect_framework(native_libs: "list[str] | tuple[str, ...]") -> AppFramework:
     """按 native 库清单识别框架。识别不出返回空 ``AppFramework``（不猜、不默认原生）。
 
-    多框架并存时（少见但存在：Unity 游戏内嵌 RN 页面）取**业务代码容器非空**的那个，
-    因为下游关心的正是「业务代码在哪」；都为空则取第一个匹配的，只作标注。
+    多框架并存时（少见但存在：Unity 游戏内嵌 RN 页面）``name`` 取**业务代码容器非空**的那个，
+    但 ``own_code_libs`` 收**所有在场框架**的容器——判据关心的是「哪些文件装着本应用的代码」，
+    那是个集合，不该因为要给样本贴一个名字就丢掉另一个框架的容器。
+
+    ★这里曾经只返回一个框架的容器，于是 Unity+Flutter 并存时落选那个的业务代码
+      反而失去保护，比不做框架识别时（全局并集无条件生效）更窄——把降噪做成了降档。
+
+    仍然要求**引擎在场**才算数：单 Unity 样本里一个真叫 ``libapp.so`` 的第三方库，因为没有
+    ``libflutter.so``，不会被收进 own_code_libs——精确口径的价值正在于此，没有被这次放宽。
     """
     bases = {_basename(p) for p in (native_libs or []) if p}
     if not bases:
@@ -111,7 +118,19 @@ def detect_framework(native_libs: "list[str] | tuple[str, ...]") -> AppFramework
     if not matched:
         return AppFramework()
     matched.sort(key=lambda f: (not f.own_code_libs, f.name))
-    return matched[0]
+    primary = matched[0]
+    if len(matched) == 1:
+        return primary
+    # 并存：主框架定名，容器取并集，证据留全（让人看得出这个包里不止一个框架）。
+    all_own = tuple(sorted({lib for f in matched for lib in f.own_code_libs}))
+    others = ", ".join(f.name for f in matched[1:])
+    return AppFramework(
+        name=primary.name,
+        own_code_libs=all_own,
+        runtime_libs=primary.runtime_libs,
+        evidence=tuple(e for f in matched for e in f.evidence)
+        + (f"同包内并存框架：{others}（其业务代码容器一并计入）",),
+    )
 
 
 def framework_from_meta(meta: object) -> AppFramework:

@@ -110,6 +110,74 @@ def test_fetched_but_empty_is_not_the_same_as_never_fetched(no_network, monkeypa
     assert rec.calls == [ok_url, bad_url]
 
 
+def test_undecoded_is_not_the_same_as_decoded_and_empty(no_network, monkeypatch) -> None:
+    """★★「解不开」≠「解开了里面没有」——这两者曾被合成一档。
+
+    一坨解不开的密文，内容是**未知**的；一份解开了的 JSON 里确实没有域名，才是"查了没有"。
+    合成一档之后，「取回 3 个候选全是密文」会打印成「取到但无内容 3」，报告里顺手就写成
+    "未发现下发域名"——拿看不懂的字节当了否定结论。
+
+    ★变异验证：把 _fetch_one 的 status 判断改回只看 domains/ips（不看 decoded），本测试必红。
+    """
+    opaque_url, plain_url = (c["url"] for c in _PLAN["candidates"])
+    no_network({
+        opaque_url: FetchResult(opaque_url, True, b"\x9c\x1f" * 64, 200, None),
+        plain_url: FetchResult(plain_url, True, b'{"ver":1}', 200, None),
+    })
+
+    class _Opaque:      # 解码链没走通：内容未知
+        decoded = False
+        text = None
+        decode_chain: tuple[str, ...] = ()
+        domains: tuple[str, ...] = ()
+        ips: tuple[str, ...] = ()
+
+    class _PlainEmpty:  # 解开了，里面确实没有
+        decoded = True
+        text = '{"ver":1}'
+        decode_chain = ("json",)
+        domains: tuple[str, ...] = ()
+        ips: tuple[str, ...] = ()
+
+    monkeypatch.setattr(
+        "apkscan.config.decode.decode_config_blob",
+        lambda raw, **_k: _Opaque() if raw.startswith(b"\x9c") else _PlainEmpty(),
+    )
+    by_url = {o.url: o for o in run_plan(_PLAN, authorized=True).outcomes}
+
+    assert by_url[opaque_url].status == "undecoded", "解不开不能记成「查了没有」"
+    assert by_url[opaque_url].decoded is False
+    assert by_url[opaque_url].error, "解不开要说明原因，否则读者以为是空的"
+    assert by_url[plain_url].status == "no_content"
+    assert by_url[plain_url].decoded is True
+    # ★两者在汇总层也必须分得开——counts 是 CLI 直接打印的那一行。
+    counts = run_plan(_PLAN, authorized=True).counts()
+    assert counts.get("undecoded") == 1 and counts.get("no_content") == 1
+
+
+def test_decoded_flag_is_always_emitted_for_fetched_outcomes(no_network, monkeypatch) -> None:
+    """★decoded 必须出现在序列化输出里，哪怕值是 False。
+
+    to_dict 对假值一律省略，decoded=False 若跟着这个惯例被省掉，读 JSON 的人就再也
+    分不出「内容未知」和「确实没有」——修好的三分会在出口处重新塌回去。
+    """
+    url = _PLAN["candidates"][0]["url"]
+    no_network({url: FetchResult(url, True, b"xx", 200, None)})
+
+    class _Opaque:
+        decoded = False
+        text = None
+        decode_chain: tuple[str, ...] = ()
+        domains: tuple[str, ...] = ()
+        ips: tuple[str, ...] = ()
+
+    monkeypatch.setattr("apkscan.config.decode.decode_config_blob",
+                        lambda *_a, **_k: _Opaque())
+    d = next(o for o in run_plan(_PLAN, authorized=True).outcomes
+             if o.url == url).to_dict()
+    assert "decoded" in d and d["decoded"] is False
+
+
 def test_hit_yields_endpoints_marked_as_config_not_runtime(no_network, monkeypatch) -> None:
     """★解出的域名是"配置里出现的"，不是运行时实测接触——source 标错会误升确认徽标。"""
     ok_url = _PLAN["candidates"][0]["url"]
@@ -135,7 +203,11 @@ def test_hit_yields_endpoints_marked_as_config_not_runtime(no_network, monkeypat
 
 
 def test_decode_failure_still_counts_as_fetched(no_network, monkeypatch) -> None:
-    """解码炸了仍然是「取到了」——退化成 failed 会把"取到一坨解不开的东西"说成"没取到"。"""
+    """解码炸了仍然是「取到了」——退化成 failed 会把"取到一坨解不开的东西"说成"没取到"。
+
+    归 ``undecoded`` 而非 ``no_content``：抛异常与解码链走不通是同一种处境——
+    字节在手上，内容不知道。
+    """
     ok_url = _PLAN["candidates"][0]["url"]
     no_network({ok_url: FetchResult(ok_url, True, b"blob", 200, None)})
 
@@ -144,7 +216,8 @@ def test_decode_failure_still_counts_as_fetched(no_network, monkeypatch) -> None
 
     monkeypatch.setattr("apkscan.config.decode.decode_config_blob", _boom)
     outcome = next(o for o in run_plan(_PLAN, authorized=True).outcomes if o.url == ok_url)
-    assert outcome.status == "no_content"
+    assert outcome.status == "undecoded"
+    assert outcome.decoded is False
     assert outcome.sha256 and outcome.size == 4, "原始字节的事实要留住"
 
 
@@ -316,6 +389,56 @@ def test_cli_merges_endpoints_without_claiming_runtime(
     fresh = next(e for e in payload["endpoints"] if e["value"] == "c2.example.org")
     assert fresh["evidences"][0]["source"] == "remote-config"
     assert payload["meta"]["config_probe_run"]["counts"]["hit"] == 1
+
+
+def test_cli_merge_produces_leads_reachable_by_the_real_exports(
+    tmp_path: Path, no_network, monkeypatch
+) -> None:
+    """★★接线锁：取回的域名必须能走到真出口，光进 endpoints 等于没做。
+
+    文书套打、IOC 导出、闭环目标、digest、corpus 入库**全部只读 leads**。曾经只往
+    endpoints 里塞，于是实发请求换来的下发池躺在 JSON 里，五个出口一条都看不到。
+
+    这里不只断言 leads 数组有值——那还是在原地打转；而是把回灌后的报告真喂给
+    IOC 导出，看那个域名有没有出现在最终产物里。
+
+    ★变异验证：把 _merge_config_probe_into_report 里产 Lead 的那段删掉，本测试必红。
+    """
+    import json as _json
+
+    from typer.testing import CliRunner
+
+    from apkscan.cli import app
+    from apkscan.report import ioc
+
+    ok_url = _PLAN["candidates"][0]["url"]
+    no_network({ok_url: FetchResult(ok_url, True, b"blob", 200, None)})
+
+    class _Found:
+        decoded = True
+        text = ""
+        decode_chain = ("json",)
+        domains = ("c2-from-config.example.org",)
+        ips: tuple[str, ...] = ()
+
+    monkeypatch.setattr("apkscan.config.decode.decode_config_blob",
+                        lambda *_a, **_k: _Found())
+    report = _report_with_plan(tmp_path)
+    res = CliRunner().invoke(app, ["config-probe", str(report),
+                                   "--authorized-active", "--into", str(report)])
+    assert res.exit_code == 0, res.output
+
+    payload = _json.loads(report.read_text(encoding="utf-8"))
+    lead = next((x for x in payload["leads"]
+                 if x.get("value") == "c2-from-config.example.org"), None)
+    assert lead is not None, "取回的域名没进 leads——所有出口都读不到它"
+    assert lead.get("advice"), "Lead 必须带研判档位，否则出口的闸门筛不到它"
+
+    # ★真出口：喂给 IOC 导出，看它到不到得了最终产物。
+    rows = ioc.leads_to_ioc_rows(payload)
+    assert any("c2-from-config.example.org" in str(r) for r in rows), (
+        "回灌的域名到不了 IOC 导出——leads 这一层接上了，出口那层还是断的"
+    )
 
 
 def test_cli_reports_a_missing_plan_instead_of_pretending(tmp_path: Path) -> None:
