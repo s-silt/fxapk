@@ -81,12 +81,10 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 #: 全部判据名（稳定标识，进 finding.rule / CLI 输出 / 测试断言）。
-RULES: tuple[str, ...] = (
-    "ip", "secret", "domain", "context", "name", "exemption", "bulk_exemption",
-)
+RULES: tuple[str, ...] = ("ip", "secret", "domain", "context", "exemption", "bulk_exemption")
 
 #: 默认阻断的判据。``ip`` / ``secret`` 判据精确，误报可控，直接当门禁；
-#: ``domain`` / ``context`` / ``name`` 噪音大，默认只报告（``strict=True`` 时全部阻断）。
+#: ``domain`` / ``context`` 噪音大，默认只报告（``strict=True`` 时全部阻断）。
 #: ``exemption``（豁免没写理由）与 ``bulk_exemption``（同一条理由被复制到大量新增行）恒阻断：
 #: 二者都是护栏**自身**的完整性检查，不允许静默削弱。
 BLOCKING_RULES: frozenset[str] = frozenset({"ip", "secret", "exemption", "bulk_exemption"})
@@ -500,10 +498,12 @@ def _domain_findings(line: str) -> list[tuple[str, str]]:
 # 判据 4：语境框架词
 # ---------------------------------------------------------------------------
 
-#: 不进公开仓库可见文本的语境框架词。判据只施加在**新增行**上；
-#: 仓库既有文本不在扫描范围内（另有清理计划，不由本护栏代劳）。
-#: ★本判据的**词表自身**必须豁免：不豁免则本模块与其测试永远自我命中，
-#: 而"护栏自己过不了自己"会逼人整体关掉这条判据。
+#: Framing terms that must not appear in publicly visible text.
+#: Applies to added lines only; pre-existing text is out of scope for this gate.
+#:
+#: NOTE: this rule's own term list must carry inline exemptions. Without them the
+#: module and its tests would self-match forever, and a gate that cannot pass itself
+#: is a gate people switch off entirely.
 CONTEXT_TERMS: tuple[str, ...] = (
     "涉诈", "诈骗", "执法", "公安", "警方",  # leak-scan: allow 本判据的词表定义自身
     "受害人", "受害者", "团伙", "办案", "调证", "案件",  # leak-scan: allow 本判据的词表定义自身
@@ -518,70 +518,6 @@ def _context_findings(line: str) -> list[tuple[str, str]]:
     ]
 
 
-#: 「中文姓名 + 案」形态——取证语境里个案按当事人姓名命名（「张三案」），  # leak-scan: allow name 判据自身的说明示例
-#: 真实姓名绝不能进公开仓库。这条判据**多次实战失守**：注释与 commit 里写「实测某某案  # leak-scan: allow name 判据自身的说明示例
-#: 33 个节点」当具体锚点，三关 + 其它 leak-scan 判据全绿却照样把当事人姓名带进 GitHub。
-#: leak-scan 原本只扫 IP / 域名 / 密钥 / 语境词，**中文人名是判据盲区**，本条补上。
-#:
-#: ★形态而非名单：只认「案」字前 2–3 个汉字的结构，不内置任何真实姓名（人名名单本身是敏感值，
-#:   不能进 git）。中文没有词边界，姓名前后都可能紧跟别的汉字（「实测某某案」「某某案的」），  # leak-scan: allow name 判据自身的说明示例
-#:   所以**不能**用 lookbehind/lookahead 卡边界——那会把真名一起挡掉（实测这条踩过）。
-#:   改成扫「案」字、回看前缀，再用三道排除收敛误报：
-#:     · 案前不足 2 字（本案 / 该案 / 串案 / 涉案 / 方案）→ 跳过；
-#:     · 案后紧跟成词字（案+件 / 案+例 / 案+由 / 案+发 / 案+子）→ 跳过；
-#:     · 前缀末字构成「X案」词（方案 / 档案 / 答案 / 命案……）或前缀是高频非姓名词 → 跳过。
-#:   默认只提示、strict 阻断——中文歧义大，宁可偶尔误提示让人扫一眼，也好过又把真名推上去。
-_CASE_NAME_MAX_PREFIX = 3
-
-#: 「案X」里 X 让「案」成词的字（案后紧跟这些 → 不是「姓名+案」）。
-_CASE_TAIL_WORD_CHARS: frozenset[str] = frozenset("件例由发情卷宗底号犯值务头子")
-
-#: 前缀末字构成「X案」词的字（方案 / 档案 / 答案 / 文案 / 命案……→ 匹配跨了词边界，跳过）。
-_CASE_WORD_HEAD_CHARS: frozenset[str] = frozenset("方档答备预草议提个悬血惨命要专积结立办破审翻铁冤错旧新文")
-
-#: 案前 2–3 字里不是人名的高频词（这类 / 两个 / 关于……）。
-_CASE_NAME_STOPWORDS: frozenset[str] = frozenset({
-    "两个", "这个", "那个", "几个", "多个", "整个", "一个", "各个", "每个", "同个",
-    "关于", "对于", "上述", "前述", "该批", "本批", "同批", "这批", "那批",
-    "此类", "这类", "那类", "同类", "各类", "本类", "这起", "那起", "本起", "同起",
-    "这宗", "那宗", "本宗", "同宗", "串并", "并串", "历史", "跨案", "并案", "串案",
-})
-
-
-def _is_cjk(ch: str) -> bool:
-    return "一" <= ch <= "龥"
-
-
-def _name_findings(line: str) -> list[tuple[str, str]]:
-    """疑似当事人姓名（中文姓名 + 案）。命中即报，理由要人把真名换成中性表述。"""
-    out: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    for i, ch in enumerate(line):
-        if ch != "案":
-            continue
-        if i + 1 < len(line) and line[i + 1] in _CASE_TAIL_WORD_CHARS:
-            continue  # 案+件 / 案+例 / 案+子…… 成词，不是姓名
-        j = i
-        # 姓名里不含「案」字，回看遇到「案」就停——否则「跨案并案」会把中间的案吞进前缀。  # leak-scan: allow name 判据自身的说明示例
-        while j > 0 and i - j < _CASE_NAME_MAX_PREFIX and _is_cjk(line[j - 1]) and line[j - 1] != "案":
-            j -= 1
-        name = line[j:i]
-        if len(name) < 2 or name in _CASE_NAME_STOPWORDS:
-            continue  # 本案 / 方案（前缀 1 字）、这类 / 两个（停用词）
-        if name[-1] in _CASE_WORD_HEAD_CHARS:
-            continue  # 前缀末字构成「X案」词（解决方案 → 决方案 → 末字「方」）
-        token = f"{name}案"
-        if token in seen:
-            continue
-        seen.add(token)
-        out.append((
-            token,
-            "疑似当事人姓名（中文姓名+案）；公开仓库禁出现真名，"
-            "请改中性表述（如「某真实样本」「某案」），误报可加行内豁免",
-        ))
-    return out
-
-
 # ---------------------------------------------------------------------------
 # 扫描入口
 # ---------------------------------------------------------------------------
@@ -592,7 +528,6 @@ _DETECTORS: tuple[tuple[str, "object"], ...] = (
     ("secret", _secret_findings),
     ("domain", _domain_findings),
     ("context", _context_findings),
-    ("name", _name_findings),
 )
 
 
