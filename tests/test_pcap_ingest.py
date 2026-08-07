@@ -170,7 +170,7 @@ def test_ipv4_payload_truncated_at_total_length() -> None:
     """★真样本回归：PCAPdroid 的 dump_extensions 在 IP 数据之后追加 UID/包名元数据。
 
     帧尾那段字节若继续喂给 TCP/TLS 解析，碰上 0x16 开头就被读成 ClientHello，
-    解出的 SNI 会被绑到真实的业务连接上——实测两案的团伙后端 30124/30139
+    解出的 SNI 会被绑到真实的业务连接上——实测样本的目标后端 30124/30139
     因此挂上了 zhihu.com / bilibili.com。
     """
     # 真实业务连接：一个**无应用载荷**的 ACK 包（PCAPdroid 对每个包都追加元数据，

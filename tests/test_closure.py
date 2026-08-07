@@ -460,7 +460,7 @@ def test_capture_legacy_floor_count_still_completes() -> None:
 
 def test_capture_one_way_traffic_is_not_complete() -> None:
     """★真样本回归：目标 UID 只向公共解析器发过 DNS query（出站 ~6KB、入站 0B），
-    两案都被判 complete —— 人工结论是动态未闭环。归因到目标 ≠ 与后端通信过。
+    均被判 complete —— 人工结论是动态未闭环。归因到目标 ≠ 与后端通信过。
     """
     quality = evaluate_capture_quality(
         {

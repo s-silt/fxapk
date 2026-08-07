@@ -191,7 +191,7 @@ def _build_capture_quality(
                 intercept_observed = True
                 continue
             if pcap_ingest.is_infrastructure_endpoint(remote.ip, remote.port):
-                # 公共解析器上的 DNS query：App 在解析域名而已，不是业务通信。实测两案各 3 条
+                # 公共解析器上的 DNS query：App 在解析域名而已，不是业务通信。实测每份样本各数条
                 # （223.5.5.5 / 114.114.114.114 / 119.29.29.29，均仅出站 ~6KB、入站 0B）被
                 # 计为业务候选，把"动态未闭环"写成了 complete。
                 infra_excluded += 1

@@ -239,7 +239,7 @@ def test_real_public_ips_kept():
 def test_url_derived_resolver_ip_also_filtered():
     """★无修复即失败：URL 里的解析器 IP 同样要过 noise_ips。
 
-    实测两案：`https://1.12.12.12/dns-query`（公共 DoH）从 URL 通道绕过了裸 IP 的 denylist，
+    实测：`https://1.12.12.12/dns-query`（公共 DoH）从 URL 通道绕过了裸 IP 的 denylist，
     仍被判"建议调证"并占用闭环调证名额。同一个值不能因来源不同而结论不一致。
     """
     result = _analyze(dex_strings=[
@@ -276,7 +276,7 @@ def test_url_host_with_bogus_tld_not_emitted_as_domain():
 def test_public_dns_resolver_ips_filtered():
     """★无修复即失败（2026-07-26 真案实测）：公共 DNS 解析器 IP 裸出现 → 不产端点。
 
-    修前两案报告把 1.1.1.1 / 1.12.12.12 / 203.107.1.1 等判成"建议调证"，且因闭环目标排序在
+    修前报告把 1.1.1.1 / 1.12.12.12 / 203.107.1.1 等判成"建议调证"，且因闭环目标排序在
     纯静态报告上塌缩为按字符串排，这些以 "1." 开头的解析器 IP 恰好排最前，把仅有的 6 个调证
     目标名额全占了，真候选 54 个一个没评估。向解析器运营方调证毫无意义。
     """

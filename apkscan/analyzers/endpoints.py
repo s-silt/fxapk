@@ -1041,7 +1041,7 @@ def _is_strict_bare_domain(domain: str) -> bool:
 def _url_host_tld_ok(host: str) -> bool:
     """URL 派生 host 是否有**可信的 TLD**——专治 .so 里被截断的 URL 残片。
 
-    ★实测理由（2026-07-26 两案）：native ASCII 串被按块切分时，``http://www.<词>...`` 会在中途断掉，
+    ★实测理由（多份真样本）：native ASCII 串被按块切分时，``http://www.<词>...`` 会在中途断掉，
     留下 ``http://www.hortcut`` / ``http://www.years`` / ``http://www.wencodeuricomponent`` 这种残片。
     裸域名通道有 :func:`_is_strict_bare_domain` 的 TLD 白名单挡着，**URL 通道却没有**，于是
     ``http://www.任意小写词`` 都能派生出一个"域名端点"，还带着 tier=app 被判"建议调证"，直接污染调证清单。

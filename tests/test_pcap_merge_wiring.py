@@ -139,7 +139,7 @@ def test_runtime_backend_becomes_a_closure_candidate(tmp_path: Path) -> None:
 def test_runtime_backend_outranks_static_noise(tmp_path: Path) -> None:
     """★核心回归：真后端排在静态噪音之前，而不是被挤出 Top-N。
 
-    实测三案里，动态证据已满足闭环门槛，closure 却仍判 partial、五层归属预算被噪音耗尽。
+    实测多份真样本里，动态证据已满足闭环门槛，closure 却仍判 partial、五层归属预算被噪音耗尽。
     """
     payload = _merge(tmp_path, _bidirectional_summary())
     rep = report_from_dict(payload)

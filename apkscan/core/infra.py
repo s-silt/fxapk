@@ -139,7 +139,7 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         "umengcloud.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
         "umsns.com",
         # ---- 字节跳动 SDK（穿山甲广告 / 应用日志 / 监控）----
-        # 实测 2026-07-28 四案：这几个域被整批标成"建议调证"，占满办案人的清单。
+        # 实测（多份真样本）：这几个域被整批标成"建议调证"，占满办案人的清单。
         # 全部是可核实的第三方 SDK 自有域，不是 App 后端。★按域边界后缀匹配，不含通配。
         "pangolin-sdk-toutiao.com",
         "snssdk.com",
@@ -159,7 +159,7 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         # ---- 其它统计 / 监控 SDK ----
         "51.la",          # 51LA 统计
         "tpstelemetry.tencent.com",  # 腾讯 TPS 遥测（tencent.com 本身不整体列入）
-        # ---- 崩溃上报 / 证书 / 多媒体库自带域（实测两案里被误当调证目标）----
+        # ---- 崩溃上报 / 证书 / 多媒体库自带域（实测被误当调证目标）----
         "traces.hk",            # crash 上报 SDK（libucrash.so）
         "public-trust.com",     # DigiCert 证书状态服务（DER 里的 OCSP/CRL URL）
         "videolan.org",         # VLC/libvlc 测试流地址
@@ -374,7 +374,7 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         "dispatchers.io",           # Kotlin Dispatchers.IO 被误当域名
         "locale.us",                # Java Locale.US 被误当域名
 
-        # ---- 公共 DNS / DoH 解析器（2026-07-26 实测：两案报告里它们被判"建议调证"，
+        # ---- 公共 DNS / DoH 解析器（实测：多份报告里它们被判"建议调证"，
         #      还把闭环仅有的 6 个调证目标名额全占了，真候选 54 个一个没评估）----
         #      这些是**解析基础设施**，向其运营方调证毫无意义。
         "alidns.com",               # 阿里公共 DNS / DoH（dns.alidns.com、223.5.5.5）
@@ -622,7 +622,7 @@ def _normalize_domain(domain: str) -> str:
 #:   · ``<桶名>.<区域>.<厂商域>``：**租户专属**子域，桶名（腾讯 COS 还带 appid）就是租户凭据，
 #:     拿它向云厂商能核出实名、付款与访问日志。
 #: 判据不分这两类，一刀切成"云厂商=无需核查"，于是把最能落到人的那类目标静默划掉了。
-#: 实测：线索清单里 8 个案子、21 处把这类桶域名列为查询目标，而同一个桶在另一份报告里
+#: 实测：线索清单里多处把这类桶域名列为查询目标，而同一个桶在另一份报告里
 #: 被判"无需核查"。
 #:
 #: ★每条都要求**桶名标签存在**，绝不匹配各家的裸区域端点（形如 ``<区域>.<厂商域>`` 或
@@ -1316,7 +1316,7 @@ _ADDRESSY_RE = re.compile(r":\d{1,5}\b|//|https?", re.IGNORECASE)
 def _strip_port_suffix(value: str) -> str:
     """剥掉 lead 值上的 ``:port`` / ``:port/proto`` 尾缀，取回裸 IP 字面。
 
-    ★不剥就会绕过一切精确匹配：实测两案的动态线索值形如 ``223.5.5.5:53/udp``，
+    ★不剥就会绕过一切精确匹配：实测动态线索值形如 ``223.5.5.5:53/udp``，
     与名单里的 ``223.5.5.5`` 比不上，公共解析器照样进"建议调证"。
 
     IPv6 分三种形态，判据不同：

@@ -204,7 +204,7 @@ def test_semantics_avoid_overtagging():
 def test_compiled_source_paths_are_not_backend_apis():
     """★真样本回归：WebRTC 的 __FILE__ 调试串被编进 .so，形如 /api/…/xxx.cc。
 
-    两案（2026-07-23 / 07-24）的报告里这类路径被整片当成后端接口面。段字符集含 `.`，
+    多份真样本的报告里这类路径被整片当成后端接口面。段字符集含 `.`，
     正则天然吃得下扩展名，故必须显式排除编译型源码/头文件叶子。
     """
     for path in (
@@ -225,7 +225,7 @@ def test_compiled_source_paths_are_not_backend_apis():
 
 def test_go_symbol_table_is_not_backend_api():
     """★真样本回归：gomobile 绑定层符号（golang.org/x/mobile/bind）命中 `mobile` 前缀，
-    整片被收成 /mobile/bind/seq.Delete 这类"接口"。两案剔掉 .cc 后剩下的 10 条全是这个。
+    整片被收成 /mobile/bind/seq.Delete 这类"接口"。剔掉 .cc 后剩下的 10 条全是这个。
     """
     for path in (
         "/mobile/bind/seq.Delete",

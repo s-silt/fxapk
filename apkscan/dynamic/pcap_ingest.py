@@ -378,7 +378,7 @@ def _parse_ipv4(b: bytes) -> tuple[int, str, str, bytes] | None:
     ★载荷必须按头里的 ``total_length`` 截断，不能一路切到帧尾：抓包工具会在 IP 数据之后
     追加自己的元数据（PCAPdroid 的 ``dump_extensions`` 就在帧尾附 UID/包名），那段字节
     若继续喂给 TCP/TLS 解析，碰上 ``0x16`` 开头就会被读成 ClientHello，解出**伪 SNI**。
-    实测两案里团伙的 30124/30139 后端因此被绑上了 zhihu.com / bilibili.com。
+    实测样本里目标的 30124/30139 后端因此被绑上了 zhihu.com / bilibili.com。
 
     ``total_length`` 不可信（小于头长，或大于实际字节）时退回按实际字节切——宁可少截
     也不能因为一个坏字段把整包丢掉。

@@ -94,7 +94,7 @@ _SOURCE_FILE_EXTS: frozenset[str] = frozenset(
     }
 )
 
-# 第 5 层：段内含 `.` 的**代码符号**（Go/Java 符号表被当接口路径）。实测两案 .so 里
+# 第 5 层：段内含 `.` 的**代码符号**（Go/Java 符号表被当接口路径）。实测多份真样本 .so 里
 # gomobile 的绑定层符号 `golang.org/x/mobile/bind` 整片被收录成 `/mobile/bind/seq.Delete`、
 # `/mobile/bind/java.setContext` —— 命中 `mobile` 前缀但根本不是后端接口。
 # ★不能按 `/mobile/bind/` 前缀一刀切：`/mobile/bind/card`（绑卡）是完全可能的真实接口。

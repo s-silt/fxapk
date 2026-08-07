@@ -438,7 +438,7 @@ def test_build_capture_quality_requires_target_attributed_business_traffic(
 
 
 def test_build_capture_quality_excludes_public_dns_resolvers(monkeypatch) -> None:  # noqa: ANN001
-    """★真样本回归（2026-07-23 / 07-24 两案）：floor-only 抓 90 秒，目标 UID 只向三个公共
+    """★真样本回归（多份真样本）：floor-only 抓 90 秒，目标 UID 只向三个公共
     解析器发过 DNS query —— 仅出站约 6KB、入站 0B，却被计成 3 条业务候选并判 complete。
 
     公共解析器上的 DNS 是基础设施流量，不构成"与后端通信"的证据。
