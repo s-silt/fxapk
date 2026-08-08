@@ -1,4 +1,4 @@
-"""样本库 CLI 子命令（``corpus_app``）：累积 report.json → 查询 / 见过没 / 重建 / 喂 agent。
+"""样本库 CLI 子命令（``corpus_app``）：累积 report.json → 查询 / 见过没 / 重建 / 快照回滚 / 喂 agent。
 
 ``corpus_app`` 由 cli.py ``app.add_typer(corpus_app, name="corpus")`` 挂到主 app（add_typer 留 cli.py
 以引用主 app、避免本模块反向 import cli 造成循环）。纯逻辑在 core/corpus.py，
@@ -112,8 +112,11 @@ def corpus_add(
             continue
         try:
             result = _corpus.add_report(root, report, raw, case_id=case or None)
-        except OSError as exc:
+        except (OSError, _corpus.ManifestShrinkError) as exc:
             # 写盘失败（如畸形/超长文件名触发 OSError）不得中止整批入库。
+            # ManifestShrinkError 在 add 路径唯一的触发方式是并发竞态：本进程 load 之后、save 之前
+            # 另一进程入库了 ≥2 条——过去这是静默的 lost-update（后写者抹掉先写者），护栏把它变成
+            # 可见的失败；重跑本次 add 会重新 load 到对方的条目，自然自愈。
             logger.warning("写入失败，跳过 %s：%s", rp, exc)
             typer.echo(f"跳过（写入失败）：{rp}：{exc}", err=True)
             failed += 1
@@ -256,12 +259,109 @@ def corpus_shared_build_env(
 
 @corpus_app.command("reindex")
 def corpus_reindex(
+    allow_shrink: bool = typer.Option(
+        False, "--allow-shrink",
+        help="允许重建条数少于现有 manifest（仅当报告文件确已删除时用；默认拒绝，防 OneDrive "
+             "占位符/读失败把样本静默丢出索引）。",
+    ),
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
-    """扫 reports/ 全量重建 manifest（自愈索引；只从旧 manifest 继承人工 case_id）。"""
+    """扫 reports/ 全量重建 manifest（自愈索引；只从旧 manifest 继承人工 case_id）。
+
+    ★重建条数**变少**默认拒绝：报告读不出来（OneDrive 未按需下载/同步中断）时 reindex 会把
+    这些样本静默丢出索引、连带丢掉只活在 manifest 里的人工 case_id。确认报告文件是**有意删除**
+    后才加 ``--allow-shrink``。
+    """
     root = resolve_corpus(corpus)
-    entries = _corpus.reindex(root)
+    try:
+        entries = _corpus.reindex(root, allow_shrink=allow_shrink)
+    except _corpus.ManifestShrinkError as exc:
+        typer.echo(f"错误：{exc}", err=True)
+        raise typer.Exit(code=1) from exc
     _print({"reindexed": len(entries), "corpus": str(root)})
+
+
+@corpus_app.command("snapshot")
+def corpus_snapshot(
+    corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
+) -> None:
+    """手动给 manifest.jsonl 打一份快照（落 <corpus>/.snapshots/，可 corpus restore 回滚）。
+
+    save_manifest 每次真写前也会自动打（写前快照）；本命令给"接下来要做危险操作"的人一个
+    显式的落点——比如跑一次性脚本前先拍一份。内容与最新快照相同时复用既有快照、不新建。
+    """
+    root = resolve_corpus(corpus)
+    if not _corpus.manifest_path(root).exists():
+        typer.echo(f"错误：{root} 下没有 manifest.jsonl，无可快照。", err=True)
+        raise typer.Exit(code=1)
+    snap = _corpus.snapshot_manifest(root)
+    if snap is None:
+        typer.echo("错误：快照失败（原因见日志 warning）。", err=True)
+        raise typer.Exit(code=1)
+    _print({
+        "snapshot": str(snap),
+        "entries": len(_corpus.load_manifest(root)),
+        "snapshots_kept": len(_corpus.list_snapshots(root)),
+    })
+
+
+@corpus_app.command("restore")
+def corpus_restore(
+    snapshot: str = typer.Argument("", help="要恢复的快照文件名（留空则列出可用快照）。"),
+    apply: bool = typer.Option(
+        False, "--apply", help="真写入。默认 dry-run：只打印将恢复几条/现有几条，不动磁盘。"
+    ),
+    corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
+) -> None:
+    """列出可用快照 / 把 manifest.jsonl 恢复到某份快照。
+
+    ★破坏性操作：恢复是对 manifest 的全量覆盖，故默认 dry-run、``--apply`` 才真写；
+    真写前会先给**当前**状态打一份快照（否则恢复本身又成了一次不可逆覆盖，恢复错了没法反悔）。
+    只回滚 manifest 索引，不动 reports/ 下的报告文件。
+    """
+    root = resolve_corpus(corpus)
+    current = len(_corpus.load_manifest(root))
+
+    if not snapshot:
+        if apply:
+            typer.echo("错误：--apply 需要指定要恢复的快照文件名（先不带参数列出可用快照）。", err=True)
+            raise typer.Exit(code=2)
+        _print({
+            "current_entries": current,
+            "snapshots": [
+                {"name": p.name, "entries": len(_corpus.load_manifest_file(p))}
+                for p in _corpus.list_snapshots(root)
+            ],
+        })
+        return
+
+    target = _corpus.resolve_snapshot(root, snapshot)
+    if target is None:
+        # 不存在与路径穿越同一出口：绝不据用户输入读快照目录之外的文件。
+        typer.echo(f"错误：快照不存在或名字越出快照目录：{snapshot!r}", err=True)
+        raise typer.Exit(code=1)
+
+    if not apply:
+        _print({
+            "dry_run": True,
+            "snapshot": target.name,
+            "would_restore_entries": len(_corpus.load_manifest_file(target)),
+            "current_entries": current,
+            "hint": "加 --apply 才真写；真写前会先给当前状态打快照。",
+        })
+        return
+
+    result = _corpus.restore_manifest(root, snapshot)
+    if result.get("error"):
+        typer.echo(f"错误：{result['error']}", err=True)
+        raise typer.Exit(code=1)
+    _print({
+        "applied": True,
+        "snapshot": target.name,
+        "restored_entries": result["restored_entries"],
+        "previous_entries": current,
+        "pre_restore_snapshot": result["pre_restore_snapshot"],
+    })
 
 
 @corpus_app.command("events")

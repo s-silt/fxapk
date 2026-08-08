@@ -10,6 +10,7 @@ of truth，这是与中央台账的本质区别。
     <corpus>/
       reports/<sample_sha256>/<tool_version>_<ruleset_digest>[_<证据面>].report.json  ← 报告原样字节入库
       manifest.jsonl                                                        ← 派生索引，一报告一行
+      .snapshots/manifest-<UTC时间戳>-<pid>-<seq>.jsonl                     ← manifest 写前快照（可 restore 回滚）
 
 记录单元 = 一份 report.json 原样（schema_version 已版本化、meta 已带 sample_sha256/tool_version/
 ruleset_digest 三可复现锚点、finding 已带 analyzer/confidence/kind 溯源）。入库 = 复制 + 登记，无
@@ -33,15 +34,18 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import itertools
 import json
 import logging
+import os
 import posixpath
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from apkscan.core.atomic import atomic_write_text
+from apkscan.core.atomic import atomic_write_bytes, atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -491,7 +495,17 @@ def manifest_path(corpus_dir: str | Path) -> Path:
 
 def load_manifest(corpus_dir: str | Path) -> list[dict]:
     """读 manifest.jsonl → 记录列表。文件不存在 → 空列表；坏行记 warning 跳过、绝不抛。"""
-    path = manifest_path(corpus_dir)
+    return load_manifest_file(manifest_path(corpus_dir))
+
+
+def load_manifest_file(path: str | Path) -> list[dict]:
+    """按文件路径读一份 JSONL manifest（当前 manifest 或某份快照）→ 记录列表。
+
+    容错语义同 :func:`load_manifest`：不存在 → 空列表；坏行记 warning 跳过、绝不抛。
+    独立成函数是为了让快照（.snapshots/ 下的历史 manifest）能用同一套解析口径计数/预览——
+    缩减护栏与 restore 的条数比对必须与 load_manifest 同基准，否则「磁盘上有坏行」会被误判成缩减。
+    """
+    path = Path(path)
     if not path.exists():
         return []
     entries: list[dict] = []
@@ -515,12 +529,212 @@ def load_manifest(corpus_dir: str | Path) -> list[dict]:
     return entries
 
 
-def save_manifest(corpus_dir: str | Path, entries: list[dict]) -> None:
+# ---------------------------------------------------------------------------
+# 写前快照 + 缩减护栏
+#
+# ★事故形态（2026-07-28，这两道门的存在理由）：一个一次性脚本的替换判据写成「某字段有差异就
+#   替换」，而旧版本记录压根没有那个字段——条件恒真；glob 又扫了全部版本而非当前那份。结果
+#   28 份跨 4 个工具版本的历史存证被本机一份产物覆盖。语料库在库外（OneDrive）、没有版本控制，
+#   事后只能靠「文件名里编的版本号 vs 内容里的 meta.tool_version」比对才定位出污染面。
+#   save_manifest 的原子写保证的是「要么旧内容完整、要么新内容完整」，保证不了「新内容是对的」：
+#   调用方把 entries 算错，一次调用就抹掉整库。下面把这类不可逆损失变成可逆：
+#   ① 缩减护栏——正常操作只增不减，条数变少默认拒写（见 save_manifest / ManifestShrinkError）；
+#   ② 写前快照——真写之前把现状逐字节复制进 .snapshots/，可 `fxapk corpus restore` 回滚。
+# ---------------------------------------------------------------------------
+
+#: 写前快照目录名（位于语料库根下）。reindex 只扫 reports/、load_manifest 只读 manifest.jsonl，
+#: 都不受本目录影响。
+SNAPSHOT_DIR = ".snapshots"
+
+#: 快照保留份数。取 50 的理由：
+#: · 一次批量 ``corpus add`` 会连环触发写入（每份报告一次 save = 一次快照），历史最大一批是
+#:   几十份报告——窗口必须大于常见批量规模，批量结束后「批前状态」才仍在窗口内、没被中间态挤掉；
+#: · manifest 目前百级样本、单文件几百 KB，50 份合计不过几十 MB，对 OneDrive 无压力；
+#: · 同内容不重复建快照（见 :func:`snapshot_manifest` 去重），窗口不会被无变化的重写刷穿。
+SNAPSHOT_KEEP = 50
+
+#: 进程内快照序号：快照文件名的时间戳部分在 Windows 上挂钟粒度约 15.6ms，批量入库连环快照
+#: 大概率同刻——若光用时间戳，后一份会**覆盖**前一份、写前状态白拍。名字里再编入 pid + 进程内
+#: 递增序号：绝不覆盖已有快照，且同进程内文件名字典序 == 时间序（列表/去重/淘汰都按名字排）。
+_SNAPSHOT_SEQ = itertools.count()
+
+
+class ManifestShrinkError(RuntimeError):
+    """save_manifest 缩减护栏：新列表比磁盘现有条数少、且调用方未显式声明 ``allow_shrink``。
+
+    抛出时磁盘分毫未动。错误信息自带现有几条/本次几条/怎么显式缩减。
+    """
+
+
+def snapshot_dir(corpus_dir: str | Path) -> Path:
+    """语料库快照目录的完整路径。"""
+    return Path(corpus_dir) / SNAPSHOT_DIR
+
+
+def list_snapshots(corpus_dir: str | Path) -> list[Path]:
+    """现有快照文件，新 → 旧。目录不存在/读失败 → 空列表，绝不抛。
+
+    排序按文件名：时间戳定宽 + pid + 进程内序号定宽，字典序即时间序（见 ``_SNAPSHOT_SEQ`` 注释）。
+    """
+    d = snapshot_dir(corpus_dir)
+    try:
+        if not d.is_dir():
+            return []
+        return sorted(
+            (p for p in d.glob("manifest-*.jsonl") if p.is_file()),
+            key=lambda p: p.name,
+            reverse=True,
+        )
+    except OSError:
+        logger.warning("列举快照失败：%s", d, exc_info=True)
+        return []
+
+
+def snapshot_manifest(corpus_dir: str | Path) -> Path | None:
+    """把当前 manifest.jsonl 逐字节复制进 ``.snapshots/``，返回代表当前内容的快照路径。
+
+    · manifest 尚不存在（首写）→ None（无可快照，不是失败）。
+    · 内容与最新快照逐字节相同 → 不新建，直接返回既有最新快照——防同内容重写把保留窗口
+      刷穿、挤掉真正不同的旧状态。
+    · 新建后按文件名时间序淘汰到 :data:`SNAPSHOT_KEEP` 份。
+    · ★任何失败 → warning + 返回 None，**绝不抛**：快照是保险，保险坏了不该让正事（主写入）
+      停下；但必须出声——沉默降级会让人以为有保险，等真出事才发现快照区早就是空的。
+      调用方若把快照当前置条件（如 restore 恢复前拍现状），须自查返回值。
+    """
+    root = Path(corpus_dir)
+    src = manifest_path(root)
+    try:
+        if not src.exists():
+            return None
+        data = src.read_bytes()
+        snaps = list_snapshots(root)
+        if snaps:
+            try:
+                if snaps[0].read_bytes() == data:
+                    return snaps[0]  # 内容未变：复用最新快照，不占保留窗口
+            except OSError:
+                pass  # 最新快照读不出来 → 照常新建，不因保险的保险坏了就不投保
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%f")
+        dest = snapshot_dir(root) / (
+            f"manifest-{ts}Z-{os.getpid():08d}-{next(_SNAPSHOT_SEQ):06d}.jsonl"
+        )
+        atomic_write_bytes(dest, data)
+        for stale in list_snapshots(root)[SNAPSHOT_KEEP:]:
+            try:
+                stale.unlink()
+            except OSError:
+                logger.warning("淘汰过期快照失败（不阻断）：%s", stale, exc_info=True)
+        return dest
+    except Exception:
+        logger.warning(
+            "manifest 写前快照失败（主写入继续，但此刻没有保险，请尽快排查）：%s", src, exc_info=True
+        )
+        return None
+
+
+def resolve_snapshot(corpus_dir: str | Path, name: str) -> Path | None:
+    """按文件名定位一份快照；不存在或名字越出快照目录（路径穿越）→ None。
+
+    ``name`` 来自 CLI 用户输入——与 commands/corpus.py events 对 report_path 的防线同一思路：
+    绝不据外部输入读快照目录之外的文件。
+    """
+    raw = _s(name).strip()
+    if not raw:
+        return None
+    d = snapshot_dir(corpus_dir)
+    candidate = d / raw
+    try:
+        if not candidate.resolve().is_relative_to(d.resolve()):
+            return None
+    except OSError:
+        return None
+    return candidate if candidate.is_file() else None
+
+
+def restore_manifest(corpus_dir: str | Path, snapshot_name: str) -> dict:
+    """把指定快照恢复为当前 manifest.jsonl（逐字节）。执行层：被调用即真写。
+
+    dry-run 与 ``--apply`` 确认在 commands 层做；本函数的不变式是**真写之前必给当前状态打快照**——
+    否则「恢复」本身就是又一次不可逆的全量覆盖，正是本模块要消灭的那类操作。与
+    :func:`snapshot_manifest` 在 save_manifest 里的角色（保险，失败不阻断）不同，这里快照失败
+    必须**中止恢复**：恢复是显式的破坏性写入，保险装不上就不该动手。
+
+    Returns:
+        ``{"applied": bool, "error": str | None, "restored_entries": int | None,
+        "current_entries": int, "pre_restore_snapshot": str | None}``。失败不抛（错误进 error）。
+    """
+    root = Path(corpus_dir)
+    base: dict = {
+        "applied": False,
+        "error": None,
+        "restored_entries": None,
+        "current_entries": len(load_manifest(root)),
+        "pre_restore_snapshot": None,
+    }
+    target = resolve_snapshot(root, snapshot_name)
+    if target is None:
+        return {**base, "error": f"快照不存在或名字越出快照目录：{snapshot_name!r}"}
+    try:
+        data = target.read_bytes()
+    except OSError as exc:
+        return {**base, "error": f"读取快照失败：{target}：{exc}"}
+    pre: Path | None = None
+    if manifest_path(root).exists():
+        pre = snapshot_manifest(root)
+        if pre is None:
+            return {**base, "error": "恢复前给当前状态打快照失败，中止恢复（保险装不上就不动手）"}
+    try:
+        atomic_write_bytes(manifest_path(root), data)
+    except OSError as exc:
+        return {
+            **base,
+            "error": f"写入 manifest 失败：{exc}",
+            "pre_restore_snapshot": str(pre) if pre else None,
+        }
+    return {
+        **base,
+        "applied": True,
+        "restored_entries": len(load_manifest_file(target)),
+        "pre_restore_snapshot": str(pre) if pre else None,
+    }
+
+
+def save_manifest(
+    corpus_dir: str | Path, entries: list[dict], *, allow_shrink: bool = False
+) -> None:
     """把记录列表原子全量重写进 manifest.jsonl（keyed 语义由调用方保证，本函数只落盘）。
 
     ``atomic_write_text`` 无 append，故写入恒为"内存 merge 后整文件原子替换"——百级样本无碍，且
     保证 manifest 要么旧内容完整、要么新内容完整，绝不留半截坏索引。
+
+    ★但原子性保证不了「新内容是对的」（事故形态见上方分节注释）——这里再加两道门：
+
+    ① 缩减护栏：正常操作只增不减（:func:`upsert` 是幂等跳过语义），新列表比磁盘现有**少**时
+       默认拒写、抛 :class:`ManifestShrinkError`，磁盘分毫未动。条数比对基准取
+       :func:`load_manifest` 的可解析条数——调用方的列表本来就从它来，用原始行数会把
+       「磁盘上有坏行」误判成缩减。确需缩减的路径必须显式传 ``allow_shrink=True`` 自证故意；
+       **当前唯一合法缩减路径是 :func:`reindex`**（报告文件确实删掉之后重建索引），
+       add_report/upsert 恒只增——对它们这道门是纯防御。
+       ★护栏只看条数：等条数的**内容**覆盖（错误 merge 原地替换记录）它挡不住，那部分靠②兜底。
+
+    ② 写前快照：真写之前把现状复制进 .snapshots/（:func:`snapshot_manifest`）。快照失败
+       **不阻断**主写入、但 warning——快照是保险，保险坏了不该让正事停下；但沉默会让人
+       以为有保险，故必须出声。
+
+    Raises:
+        ManifestShrinkError: 新列表条数少于磁盘现有、且未显式 ``allow_shrink=True``。
+        OSError: 落盘失败（同 ``atomic_write_text``）。
     """
+    existing = len(load_manifest(corpus_dir))
+    if len(entries) < existing and not allow_shrink:
+        raise ManifestShrinkError(
+            f"manifest 缩减被拒：本次写入 {len(entries)} 条 < 磁盘现有 {existing} 条"
+            f"（将丢 {existing - len(entries)} 条）。正常入库只增不减，条数变少通常是调用方把"
+            f" entries 算丢了（曾有一次性脚本以恒真判据覆盖 28 份历史存证）。确认要缩减"
+            f"（如删除报告文件后重建索引）：save_manifest(..., allow_shrink=True)，"
+            f"CLI 用 fxapk corpus reindex --allow-shrink。"
+        )
+    snapshot_manifest(corpus_dir)
     payload = "\n".join(
         json.dumps(e, ensure_ascii=False, sort_keys=True) for e in entries
     )
@@ -612,11 +826,21 @@ def add_report(
     return {**base, "added": added, "collision": False}
 
 
-def reindex(corpus_dir: str | Path) -> list[dict]:
+def reindex(corpus_dir: str | Path, *, allow_shrink: bool = False) -> list[dict]:
     """扫 reports/ 下全部 *.report.json 全量重建 manifest，并写回。
 
     manifest 是缓存不是事实源：本函数从报告重算每条记录，只从**旧 manifest 继承人工 case_id**
     （按主键匹配）——其余字段全由报告内容决定。坏报告（无法解析）记 warning 跳过。返回新记录列表。
+
+    ★缩减语义：重建条数少于现有 manifest 时，默认被 save_manifest 的缩减护栏拒绝
+    （抛 :class:`ManifestShrinkError`，manifest 分毫未动）。条数变少只有两种可能：报告文件真被
+    删了（合法，显式传 ``allow_shrink=True`` / CLI ``--allow-shrink`` 自证故意），或**报告读不
+    出来**——语料库在 OneDrive 上，文件未按需下载（占位符）/同步中断时读取会失败，上面那句
+    「坏报告记 warning 跳过」就会把这些样本静默丢出索引，连带丢掉只活在 manifest 里的人工
+    case_id。默认拒绝防的正是这后一种：warning 会刷屏而过，条数护栏会硬停。
+
+    Raises:
+        ManifestShrinkError: 重建条数少于现有 manifest 且未显式 ``allow_shrink=True``。
     """
     root = Path(corpus_dir)
     reports_root = root / REPORTS_DIR
@@ -646,7 +870,7 @@ def reindex(corpus_dir: str | Path) -> list[dict]:
                 entry["case_id"] = carried
             entries.append(entry)
 
-    save_manifest(root, entries)
+    save_manifest(root, entries, allow_shrink=allow_shrink)
     logger.info("reindex 完成：%d 条记录", len(entries))
     return entries
 
