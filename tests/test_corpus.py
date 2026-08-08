@@ -669,3 +669,284 @@ def test_cli_snapshot_without_manifest_exits_1(tmp_path: Path) -> None:
     corpus_dir.mkdir()
     res = CliRunner().invoke(cli.app, ["corpus", "snapshot", "--corpus", str(corpus_dir)])
     assert res.exit_code == 1
+
+
+# --- 存证自证未被篡改：入库哈希 / verify 三档严格分开 / 补录证据边界 ----------
+
+
+def _sha256(data: bytes) -> str:
+    import hashlib
+
+    return hashlib.sha256(data).hexdigest()
+
+
+def _strip_hash(corpus_dir: Path, sample_sha: str) -> None:
+    """把某条 manifest 记录的完整性哈希字段剥掉，模拟完整性功能之前入库的存量记录。"""
+    entries = corpus.load_manifest(corpus_dir)
+    for e in entries:
+        if e["sample_sha256"] == sample_sha:
+            e.pop("report_bytes_sha256", None)
+            e.pop("report_bytes_sha256_origin", None)
+    corpus.save_manifest(corpus_dir, entries)
+
+
+def test_add_report_records_ingest_hash_of_stored_bytes(tmp_path: Path) -> None:
+    """入库时记下**存盘原样字节**的哈希（origin=ingest），且它 == 磁盘上那份文件的 sha256。
+
+    ★变异验证：把 add_report 里写 report_bytes_sha256 的两行删掉，本测试必红。
+    """
+    r = _report()
+    raw = json.dumps(r, indent=2)  # 多行，连带验证换行不被翻译（哈希对得上就说明字节保真）
+    res = corpus.add_report(tmp_path, r, raw)
+    [e] = corpus.load_manifest(tmp_path)
+    stored = (tmp_path / res["report_path"]).read_bytes()
+    assert e["report_bytes_sha256"] == _sha256(stored)
+    assert e["report_bytes_sha256_origin"] == corpus.HASH_ORIGIN_INGEST
+    # 与样本哈希是两个字段、两个值，绝不混同
+    assert e["report_bytes_sha256"] != e["sample_sha256"]
+
+
+def test_hash_fields_do_not_change_primary_key() -> None:
+    """完整性字段不入主键：带哈希的新条目与不带哈希的存量行必须算同一条记录，
+    否则一次 reindex/入库就把库内记录凭空翻倍。"""
+    legacy = corpus.manifest_entry(_report())
+    hashed = {
+        **legacy,
+        "report_bytes_sha256": "a" * 64,
+        "report_bytes_sha256_origin": corpus.HASH_ORIGIN_INGEST,
+    }
+    _entries, added = corpus.upsert([legacy], hashed)
+    assert added is False
+
+
+def test_verify_ok_mismatch_unverifiable_strictly_separated(tmp_path: Path) -> None:
+    """★核心价值观：三种"文件读得到"的情形严格分开——
+    ok（有哈希且相符）/ mismatch（有哈希对不上=被改过）/ unverifiable（没哈希=没法验）。
+
+    ★变异验证：把 verify_reports 里 recorded is None 分支改成归 ok，本测试必红（unverifiable
+    计数）；把哈希比对改成恒真，本测试必红（mismatch 计数）。
+    """
+    r_ok = _report(sha="s-ok")
+    corpus.add_report(tmp_path, r_ok, json.dumps(r_ok))
+
+    r_bad = _report(sha="s-bad")
+    res_bad = corpus.add_report(tmp_path, r_bad, json.dumps(r_bad))
+    # 入库后绕过 API 改文件（追加一个空格：内容仍是合法 JSON，但字节已非原样）
+    bad_file = tmp_path / res_bad["report_path"]
+    bad_file.write_text(json.dumps(r_bad) + " ", encoding="utf-8")
+
+    r_old = _report(sha="s-old")
+    corpus.add_report(tmp_path, r_old, json.dumps(r_old))
+    _strip_hash(tmp_path, "s-old")  # 模拟存量记录：没有入库哈希
+
+    res = corpus.verify_reports(tmp_path)
+    assert res["counts"] == {"ok": 1, "mismatch": 1, "unverifiable": 1, "missing": 0, "orphan": 0}
+    by_sha = {row["sample_sha256"]: row for row in res["entries"]}
+    assert by_sha["s-ok"]["status"] == "ok"
+    assert by_sha["s-bad"]["status"] == "mismatch"
+    # mismatch 行给出两侧哈希，够人去 .snapshots/ 与备份定位
+    assert by_sha["s-bad"]["recorded_sha256"] == _sha256(json.dumps(r_bad).encode("utf-8"))
+    assert by_sha["s-bad"]["actual_sha256"] == _sha256(bad_file.read_bytes())
+    # ★没法验 ≠ 验过没问题：存量记录必须是 unverifiable，绝不能折进 ok
+    assert by_sha["s-old"]["status"] == "unverifiable"
+    assert by_sha["s-old"]["origin"] is None
+
+
+def test_verify_missing_and_orphan(tmp_path: Path) -> None:
+    """missing（有记录无文件）与 orphan（有文件无记录）都要报出来。"""
+    r1 = corpus.add_report(tmp_path, _report(sha="s-gone"), "{}")
+    (tmp_path / r1["report_path"]).unlink()
+    stray = tmp_path / corpus.REPORTS_DIR / "stray" / "x.report.json"
+    stray.parent.mkdir(parents=True)
+    stray.write_text("{}", encoding="utf-8")
+
+    res = corpus.verify_reports(tmp_path)
+    assert res["counts"] == {"ok": 0, "mismatch": 0, "unverifiable": 0, "missing": 1, "orphan": 1}
+    assert res["orphans"] == ["reports/stray/x.report.json"]
+
+
+def test_verify_path_traversal_counted_missing_not_read(tmp_path: Path) -> None:
+    """manifest 的 report_path 越出库根 → 归 missing、绝不出库读文件、不抛。"""
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    cd = tmp_path / "corpus"
+    cd.mkdir()
+    corpus.save_manifest(cd, [{
+        "sample_sha256": "evil", "tool_version": "t", "ruleset_digest": "d",
+        "report_path": "../outside.txt",
+        "report_bytes_sha256": _sha256(b"secret"),  # 哪怕哈希"能对上"也不许出库比对
+        "report_bytes_sha256_origin": "ingest",
+    }])
+    res = corpus.verify_reports(cd)
+    assert res["counts"]["missing"] == 1 and res["counts"]["ok"] == 0
+
+
+def test_backfill_marks_backfill_origin_and_never_overwrites(tmp_path: Path) -> None:
+    """补录打 origin=backfill、与入库哈希在输出里长得不一样；已有哈希绝不重算覆盖；幂等。
+
+    ★变异验证：把 backfill_report_hashes 里的 HASH_ORIGIN_BACKFILL 换成 HASH_ORIGIN_INGEST，
+    本测试必红——那正是"给来历不明的哈希发合格证"的形态。
+    """
+    r_new = _report(sha="s-ingest")
+    corpus.add_report(tmp_path, r_new, json.dumps(r_new))
+    r_old = _report(sha="s-legacy")
+    corpus.add_report(tmp_path, r_old, json.dumps(r_old))
+    _strip_hash(tmp_path, "s-legacy")
+
+    result = corpus.backfill_report_hashes(tmp_path)
+    assert result["backfilled"] == 1 and result["already_hashed"] == 1
+    assert result["written"] is True and result["error"] is None
+
+    by_sha = {e["sample_sha256"]: e for e in corpus.load_manifest(tmp_path)}
+    assert by_sha["s-legacy"]["report_bytes_sha256"] == _sha256(json.dumps(r_old).encode("utf-8"))
+    assert by_sha["s-legacy"]["report_bytes_sha256_origin"] == corpus.HASH_ORIGIN_BACKFILL
+    # 入库哈希原样未动（补录绝不碰已有基准）
+    assert by_sha["s-ingest"]["report_bytes_sha256_origin"] == corpus.HASH_ORIGIN_INGEST
+
+    # verify 的 ok 按来源分开呈现：一条 ingest、一条 backfill，不混同
+    v = corpus.verify_reports(tmp_path)
+    assert v["counts"]["ok"] == 2 and v["counts"]["unverifiable"] == 0
+    assert v["ok_by_origin"] == {"ingest": 1, "backfill": 1}
+
+    # 幂等：再补一次无事发生
+    again = corpus.backfill_report_hashes(tmp_path)
+    assert again["backfilled"] == 0 and again["already_hashed"] == 2 and again["written"] is False
+
+
+def test_backfill_cannot_retroactively_certify_pre_backfill_tampering(tmp_path: Path) -> None:
+    """★证据边界的如实呈现：补录**前**已被篡改的文件，补录后 verify 恒 ok——机制本身证明不了
+    补录之前的历史，唯一诚实的做法是 origin=backfill 标记让读的人知道这份 ok 只覆盖补录之后。
+    本测试同时锁住"边界存在"这个事实与"标记在场"这个补救。"""
+    r = _report(sha="s-pre-tamper")
+    res = corpus.add_report(tmp_path, r, json.dumps(r))
+    _strip_hash(tmp_path, "s-pre-tamper")  # 存量：无哈希
+    tampered = json.dumps(r) + "  "
+    (tmp_path / res["report_path"]).write_text(tampered, encoding="utf-8")  # 补录前被篡改
+
+    corpus.backfill_report_hashes(tmp_path)
+    v = corpus.verify_reports(tmp_path)
+    # 篡改被钉成基准：ok 而非 mismatch——这正是补录证明不了的部分
+    assert v["counts"]["ok"] == 1 and v["counts"]["mismatch"] == 0
+    [row] = v["entries"]
+    assert row["origin"] == corpus.HASH_ORIGIN_BACKFILL, "没有 backfill 标记，这份 ok 就成了伪证"
+
+
+def test_backfill_skips_unreadable_and_snapshots_before_write(tmp_path: Path) -> None:
+    """文件取不到的记录补不了、逐条报出；补录写 manifest 条数不变（缩减护栏放行）且写前拍快照。"""
+    r1 = _report(sha="s-a")
+    corpus.add_report(tmp_path, r1, json.dumps(r1))
+    r2 = _report(sha="s-b")
+    res2 = corpus.add_report(tmp_path, r2, json.dumps(r2))
+    _strip_hash(tmp_path, "s-a")
+    _strip_hash(tmp_path, "s-b")
+    (tmp_path / res2["report_path"]).unlink()  # s-b 的文件没了 → 补不了
+
+    before_bytes = corpus.manifest_path(tmp_path).read_bytes()
+    snaps_before = len(corpus.list_snapshots(tmp_path))
+    result = corpus.backfill_report_hashes(tmp_path)
+    assert result["backfilled"] == 1
+    assert result["unreadable"] == [{"sample_sha256": "s-b", "report_path": res2["report_path"]}]
+    assert len(corpus.load_manifest(tmp_path)) == 2  # 条数不变
+    snaps = corpus.list_snapshots(tmp_path)
+    assert len(snaps) == snaps_before + 1  # 写前快照触发
+    assert snaps[0].read_bytes() == before_bytes  # 快照 = 补录前的状态，可回滚
+
+
+def test_reindex_carries_hash_and_does_not_launder_tampering(tmp_path: Path) -> None:
+    """reindex 照抄旧 manifest 的哈希（连同 origin），绝不按当前文件字节重算。
+
+    ★变异验证：把 reindex 的哈希继承改成"按文件内容重算"，本测试必红——重算会把篡改洗白，
+    verify 从此恒 ok。
+    """
+    r = _report(sha="s-1")
+    raw = json.dumps(r)
+    res = corpus.add_report(tmp_path, r, raw, case_id="c1")
+    # 篡改文件：内容仍解析出同一主键（只加尾随空白），reindex 才能按主键对上旧记录
+    (tmp_path / res["report_path"]).write_text(raw + "   ", encoding="utf-8")
+
+    rebuilt = corpus.reindex(tmp_path)
+    [e] = rebuilt
+    assert e["report_bytes_sha256"] == _sha256(raw.encode("utf-8")), "reindex 重算了哈希 = 洗白篡改"
+    assert e["report_bytes_sha256_origin"] == corpus.HASH_ORIGIN_INGEST
+    assert e["case_id"] == "c1"  # 既有 case_id 继承不回退
+
+    v = corpus.verify_reports(tmp_path)
+    assert v["counts"]["mismatch"] == 1, "篡改必须在 reindex 之后仍可检出"
+
+
+def test_reindex_does_not_invent_hashes_for_legacy_rows(tmp_path: Path) -> None:
+    """旧记录没哈希 → reindex 后也没有（补录是 backfill-hash 的显式职责，reindex 不发明基准）。"""
+    r = _report(sha="s-legacy")
+    corpus.add_report(tmp_path, r, json.dumps(r))
+    _strip_hash(tmp_path, "s-legacy")
+    [e] = corpus.reindex(tmp_path)
+    assert "report_bytes_sha256" not in e
+    assert corpus.verify_reports(tmp_path)["counts"]["unverifiable"] == 1
+
+
+def test_cli_verify_exit_codes_and_prominent_hints(tmp_path: Path) -> None:
+    """CLI 三种局面：全 ok → 0；仅 unverifiable → 0 但 stderr 醒目提示；mismatch → 1。
+
+    ★变异验证：把 corpus_verify 末尾的 raise typer.Exit(1) 删掉，本测试必红（mismatch 段）。
+    """
+    corpus_dir = tmp_path / "corpus"
+    runner = CliRunner()
+    r = _report(sha="s-1")
+    res_add = corpus.add_report(corpus_dir, r, json.dumps(r))
+
+    ok = runner.invoke(cli.app, ["corpus", "verify", "--corpus", str(corpus_dir)])
+    assert ok.exit_code == 0
+    payload = json.loads(ok.stdout)
+    assert payload["counts"]["ok"] == 1 and payload["ok_by_origin"] == {"ingest": 1}
+
+    # 仅 unverifiable：退出码 0，但 stderr 必须把"还有多少条没法验"说出来
+    _strip_hash(corpus_dir, "s-1")
+    unver = runner.invoke(cli.app, ["corpus", "verify", "--corpus", str(corpus_dir)])
+    assert unver.exit_code == 0
+    assert json.loads(unver.stdout)["counts"]["unverifiable"] == 1
+    assert "没法验" in unver.stderr and "backfill-hash" in unver.stderr
+
+    # mismatch：补录回哈希后篡改文件 → 非零退出
+    runner.invoke(cli.app, ["corpus", "backfill-hash", "--apply", "--corpus", str(corpus_dir)])
+    (corpus_dir / res_add["report_path"]).write_text(json.dumps(r) + " ", encoding="utf-8")
+    bad = runner.invoke(cli.app, ["corpus", "verify", "--corpus", str(corpus_dir)])
+    assert bad.exit_code == 1
+    assert json.loads(bad.stdout)["counts"]["mismatch"] == 1
+    assert "改过" in bad.stderr
+
+
+def test_cli_verify_missing_exits_1(tmp_path: Path) -> None:
+    corpus_dir = tmp_path / "corpus"
+    r = corpus.add_report(corpus_dir, _report(sha="s-1"), "{}")
+    (corpus_dir / r["report_path"]).unlink()
+    res = CliRunner().invoke(cli.app, ["corpus", "verify", "--corpus", str(corpus_dir)])
+    assert res.exit_code == 1
+    assert json.loads(res.stdout)["counts"]["missing"] == 1
+
+
+def test_cli_backfill_dry_run_default_then_apply(tmp_path: Path) -> None:
+    """backfill-hash 默认 dry-run（不动磁盘）、--apply 才写；两种输出都写明证据边界。
+
+    ★变异验证：把 corpus_backfill_hash 的 dry-run 分支删掉（不带 --apply 也真写），本测试必红。
+    """
+    corpus_dir = tmp_path / "corpus"
+    runner = CliRunner()
+    r = _report(sha="s-1")
+    corpus.add_report(corpus_dir, r, json.dumps(r))
+    _strip_hash(corpus_dir, "s-1")
+
+    dry = runner.invoke(cli.app, ["corpus", "backfill-hash", "--corpus", str(corpus_dir)])
+    assert dry.exit_code == 0
+    dry_payload = json.loads(dry.stdout)
+    assert dry_payload["dry_run"] is True and dry_payload["would_backfill"] == 1
+    assert "不能追溯" in dry_payload["evidence_boundary"]
+    [e] = corpus.load_manifest(corpus_dir)
+    assert "report_bytes_sha256" not in e  # dry-run 没动磁盘
+
+    ap = runner.invoke(cli.app, ["corpus", "backfill-hash", "--apply", "--corpus", str(corpus_dir)])
+    assert ap.exit_code == 0
+    ap_payload = json.loads(ap.stdout)
+    assert ap_payload["backfilled"] == 1
+    assert "不能追溯" in ap_payload["evidence_boundary"]
+    [e] = corpus.load_manifest(corpus_dir)
+    assert e["report_bytes_sha256_origin"] == corpus.HASH_ORIGIN_BACKFILL

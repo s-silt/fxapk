@@ -23,6 +23,14 @@ ruleset_digest 三可复现锚点、finding 已带 analyzer/confidence/kind 溯�
 主键完全相同，后入库的被幂等跳过，于是**更完整的那份被静默丢弃**。
 static 不加路径后缀，故该维度引入后存量记录的路径与主键一字不变。
 
+★存证自证未被篡改（完整性三件套）：入库时对**存盘原样字节**计 sha256 记进 manifest
+（``report_bytes_sha256`` + origin="ingest"，与样本 APK 的 ``sample_sha256`` 是两回事）；
+``fxapk corpus verify`` 逐条校验并把 ok / mismatch / unverifiable 严格分开——「没法验」绝不能
+呈现成「验过没问题」；``fxapk corpus backfill-hash`` 给存量记录补录哈希（origin="backfill"），
+补录哈希只证明「从补录起」未改、**不追溯**证明此前历史。绕过 API 直接改 reports/ 文件的脚本
+永远防不住，但从此**可检测**——2026-07-28 那次 28 份存证被一次性脚本覆盖，事后定位靠的是
+「文件名里编的版本号 vs 内容里的 meta.tool_version 对不上」这种巧合，这里把巧合变成机制。
+
 ★铁律（与 report/json.py、core/diff.py 一致）：纯函数层**禁** print/typer，对坏输入容错返回空/
 留空、**绝不抛**；打印与退出码只在 commands/corpus.py。
 
@@ -103,6 +111,30 @@ _WIN_RESERVED = frozenset(
 )
 #: 派生占位身份的保留前缀（见 sample_identity）；真 sha256 是纯 hex，不可能以此开头。
 _NOSHA_PREFIX = "nosha-"
+
+#: 报告内容哈希（manifest 字段 ``report_bytes_sha256``）的来源标记。
+#:
+#: ★与 ``sample_sha256`` 是两回事，混同会出大事：sample_sha256 是**样本 APK 检材**的身份哈希
+#:   （定"分析的是哪个检材"）；report_bytes_sha256 是**入库报告文件存盘原样字节**的哈希
+#:   （定"这份存证自哈希钉下起有没有被改过一字节"）。字段名带 ``bytes`` 就是为了把两者拉开。
+#:
+#: 两个来源值的证据强度不同，绝不能在任何输出里长得一样：
+#:   · ``ingest``   —— :func:`add_report` 在落盘同一时刻对即将写盘的字节计算，
+#:     覆盖该存证的整个库内生命期；
+#:   · ``backfill`` —— 事后按文件**当时**的内容补算，只证明「从补录那一刻起」未被改动，
+#:     **不能**追溯证明补录之前没被改过。若补录前文件已被篡改，补录会把篡改后的内容钉成
+#:     基准、verify 从此恒 ok——这正是补录必须打独立标记的原因：不打标记，就是在给一批
+#:     来历不明的哈希发"入库即验"的合格证。
+HASH_ORIGIN_INGEST = "ingest"
+HASH_ORIGIN_BACKFILL = "backfill"
+
+#: :func:`verify_reports` 的分档。★前三档都是"manifest 有记录"的情形，必须严格分开——
+#: 把 unverifiable 折进 ok，等于替一批无从验证的文件背书（本项目最忌讳的一类塌缩）。
+VERIFY_OK = "ok"  # 有记录哈希，且文件当前字节与之相符（origin 决定这句话覆盖多长的历史）
+VERIFY_MISMATCH = "mismatch"  # 有记录哈希但对不上——文件在库内被改过，要报警
+VERIFY_UNVERIFIABLE = "unverifiable"  # 没有记录哈希（存量记录）——是「没法验」，不是「验过没问题」
+VERIFY_MISSING = "missing"  # manifest 有记录但文件取不到（不存在/路径越界/读失败）
+VERIFY_ORPHAN = "orphan"  # reports/ 下有报告文件但 manifest 无对应记录
 
 
 def _s(value: Any) -> str:
@@ -425,7 +457,11 @@ def manifest_entry(report: dict, case_id: str | None = None) -> dict:
     """把一份 report dict 提炼成一条 manifest 记录（纯函数，坏输入容错，绝不抛）。
 
     只提取索引/研判/可复现所需字段；报告全文另存于 :func:`report_relpath`。``case_id`` 是唯一
-    非派生的人工字段（入库时标注案件归属），其余全部由报告内容决定 → reindex 可全量重建。
+    非派生的**人工**字段（入库时人工标注归属）。另有一对非派生的**机器**字段不在本函数里产：
+    ``report_bytes_sha256`` / ``report_bytes_sha256_origin`` 由 :func:`add_report`（入库时）或
+    :func:`backfill_report_hashes`（事后补录）追加在条目上、:func:`reindex` 按主键照抄继承——
+    它们记录的是「哈希是什么时候钉下的」这一历史事实，从报告内容重算不出来（重算得到的是
+    "此刻的哈希"，不是"当时的哈希"）。其余字段全部由报告内容决定 → reindex 可全量重建。
     """
     if not isinstance(report, dict):
         report = {}
@@ -791,6 +827,14 @@ def add_report(
     """
     root = Path(corpus_dir)
     entry = manifest_entry(report, case_id=case_id)
+    # ★入库哈希：对**即将存盘的原样字节**计算并记进 manifest（origin="ingest"）。
+    #   atomic_write_text 恒按 UTF-8、newline="" 落盘，encode 出的字节 == 磁盘字节
+    #   （test_add_report_byte_fidelity_multiline 锁着这条等式），故这份哈希与取证链
+    #   「不改一字节」的要求对齐。此后任何绕过 API 直接改 reports/ 文件的脚本，
+    #   fxapk corpus verify 都能按此哈希检出（mismatch）。幂等跳过路径会丢弃本 entry、
+    #   保留库内原记录的哈希不动——重复入库不得刷新完整性基准。
+    entry["report_bytes_sha256"] = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
+    entry["report_bytes_sha256_origin"] = HASH_ORIGIN_INGEST
     entries = load_manifest(root)
     new_entries, added = upsert(entries, entry)
     report_path = entry["report_path"]
@@ -829,8 +873,15 @@ def add_report(
 def reindex(corpus_dir: str | Path, *, allow_shrink: bool = False) -> list[dict]:
     """扫 reports/ 下全部 *.report.json 全量重建 manifest，并写回。
 
-    manifest 是缓存不是事实源：本函数从报告重算每条记录，只从**旧 manifest 继承人工 case_id**
-    （按主键匹配）——其余字段全由报告内容决定。坏报告（无法解析）记 warning 跳过。返回新记录列表。
+    manifest 是缓存不是事实源：本函数从报告重算每条记录，只从旧 manifest 按主键继承**非派生
+    字段**——人工 case_id 与完整性哈希（report_bytes_sha256/…origin）——其余字段全由报告内容
+    决定。坏报告（无法解析）记 warning 跳过。返回新记录列表。
+
+    ★完整性哈希必须**照抄**、绝不按当前文件字节重算：重算 = 把此刻的内容重新钉成基准——若
+    文件在重建前已被篡改，重算会把篡改「洗白」，verify 从此恒 ok。库内报告本就没有合法改写
+    路径（add_report 幂等 + 碰撞守卫），照抄的哈希不存在"过期"一说。注意继承按主键匹配，而
+    主键是从**当前文件内容**重算的：篡改若改动了主键字段（如 meta.tool_version），旧记录连同
+    哈希会整条对不上号——所以纪律是**先 verify 后 reindex**，别把 reindex 当例行清洁工跑。
 
     ★缩减语义：重建条数少于现有 manifest 时，默认被 save_manifest 的缩减护栏拒绝
     （抛 :class:`ManifestShrinkError`，manifest 分毫未动）。条数变少只有两种可能：报告文件真被
@@ -845,12 +896,17 @@ def reindex(corpus_dir: str | Path, *, allow_shrink: bool = False) -> list[dict]
     root = Path(corpus_dir)
     reports_root = root / REPORTS_DIR
 
-    # 旧 manifest 的 case_id 表：主键 → case_id（人工标注不能因重建而丢）。
+    # 旧 manifest 的非派生字段表：主键 → case_id / 完整性哈希（都只活在 manifest，不能因重建而丢）。
     old_case: dict[tuple[str, ...], str] = {}
+    old_hash: dict[tuple[str, ...], tuple[str, str | None]] = {}
     for e in load_manifest(root):
+        key = _key_of(e)
         cid = e.get("case_id")
         if cid:
-            old_case[_key_of(e)] = cid
+            old_case[key] = cid
+        recorded = _s(e.get("report_bytes_sha256")).strip()
+        if recorded:
+            old_hash[key] = (recorded, _s(e.get("report_bytes_sha256_origin")).strip() or None)
 
     entries: list[dict] = []
     if reports_root.exists():
@@ -868,11 +924,214 @@ def reindex(corpus_dir: str | Path, *, allow_shrink: bool = False) -> list[dict]
             carried = old_case.get(_key_of(entry))
             if carried:
                 entry["case_id"] = carried
+            # ★哈希照抄不重算（洗白风险见函数 docstring）；旧记录没有哈希则新记录也没有——
+            #   reindex 不发明完整性基准，补录是 backfill_report_hashes 的显式职责。
+            carried_hash = old_hash.get(_key_of(entry))
+            if carried_hash:
+                entry["report_bytes_sha256"] = carried_hash[0]
+                entry["report_bytes_sha256_origin"] = carried_hash[1]
             entries.append(entry)
 
     save_manifest(root, entries, allow_shrink=allow_shrink)
     logger.info("reindex 完成：%d 条记录", len(entries))
     return entries
+
+
+# ---------------------------------------------------------------------------
+# 完整性自证：verify（只读校验）+ backfill（存量补录）
+#
+# 防的不是"绕过 API 直接写文件"本身——语料库就是一个普通目录，那永远防不住——而是让这种
+# 篡改**可检测**：manifest（及其 .snapshots/ 历史）记着每份存证入库那一刻的字节哈希，改过
+# 就对不上。走 API 的路径本已安全（add_report 幂等 + 碰撞守卫，库内报告没有合法改写路径），
+# 这两个函数补的是 API 之外那条路的检测面。
+# ---------------------------------------------------------------------------
+
+
+def _resolve_report_file(root: Path, rel: str) -> Path | None:
+    """按 manifest 的 report_path 定位库内报告文件；缺失/越出语料库根 → None。
+
+    manifest 是可重建的派生缓存、非路径权威（与 commands 层 events 命令的防线同一思路）：
+    绝不据一条可能被编辑过的记录读语料库之外的文件。
+    """
+    rel = _s(rel).strip()
+    if not rel:
+        return None
+    candidate = root / rel
+    try:
+        if not candidate.resolve().is_relative_to(root.resolve()):
+            return None
+    except OSError:
+        return None
+    return candidate
+
+
+def verify_reports(corpus_dir: str | Path) -> dict:
+    """逐条校验存证完整性（只读，不写任何文件；坏输入容错、绝不抛）。
+
+    每条 manifest 记录归入且仅归入一档。★"文件读得到"的三种情形必须严格分开——把
+    unverifiable 折进 ok，等于替一批无从验证的文件背书；把读失败折进 ok 同理：
+
+      · ``ok``           —— 有记录哈希，且文件当前字节与之相符。origin 决定这句话覆盖多长的
+                            历史：ingest 覆盖整个库内生命期，backfill 只覆盖补录之后。
+      · ``mismatch``     —— 有记录哈希但对不上：文件在库内被改过，要报警。
+      · ``unverifiable`` —— 没有记录哈希（完整性功能之前的存量记录）：无从验起，
+                            **不等于验过没问题**。
+      · ``missing``      —— 文件取不到：不存在 / report_path 越出库根 / 读失败。OneDrive 未按
+                            需下载也落这档——宁可误报，也不把「读不到」静默当「没问题」。
+
+    另扫 reports/ 下全部 ``*.report.json`` 找 ``orphan``（有文件、manifest 无记录）：那是绕过
+    add_report 直接落盘的产物或索引丢条，两种都该有人看。范围与 :func:`reindex` 的扫描口径
+    一致，故 reports/ 下的其它制品（如 remote_config/ 落盘的配置对象）不会被误报成 orphan。
+
+    Returns:
+        ``{"counts": {ok, mismatch, unverifiable, missing, orphan}, "ok_by_origin": {...},
+        "entries": [每条 manifest 记录一行], "orphans": [库内相对路径]}``。
+    """
+    root = Path(corpus_dir)
+    counts = {VERIFY_OK: 0, VERIFY_MISMATCH: 0, VERIFY_UNVERIFIABLE: 0, VERIFY_MISSING: 0}
+    ok_by_origin: dict[str, int] = {}
+    rows: list[dict] = []
+    referenced: set[Path] = set()
+    for e in load_manifest(root):
+        rel = _s(e.get("report_path")).strip()
+        recorded = _s(e.get("report_bytes_sha256")).strip().lower() or None
+        # origin 只在有哈希时才有意义；有哈希却没标来源（手编 manifest）→ "unknown"，不猜。
+        origin = (_s(e.get("report_bytes_sha256_origin")).strip() or "unknown") if recorded else None
+        row: dict[str, Any] = {
+            "sample_sha256": _s(e.get("sample_sha256")) or None,
+            "report_path": rel or None,
+            "origin": origin,
+            "recorded_sha256": recorded,
+        }
+        target = _resolve_report_file(root, rel)
+        if target is not None:
+            try:
+                referenced.add(target.resolve())
+            except OSError:
+                pass
+        data: bytes | None = None
+        if target is None:
+            row |= {
+                "status": VERIFY_MISSING,
+                "reason": "report_path 缺失或越出语料库根（索引坏条可 corpus reindex 自愈）",
+            }
+        elif not target.is_file():
+            row |= {"status": VERIFY_MISSING, "reason": "manifest 有记录但文件不在"}
+        else:
+            try:
+                data = target.read_bytes()
+            except OSError as exc:
+                row |= {"status": VERIFY_MISSING, "reason": f"文件读取失败（OneDrive 未下载/权限？）：{exc}"}
+        if data is not None:
+            if recorded is None:
+                row |= {
+                    "status": VERIFY_UNVERIFIABLE,
+                    "reason": "manifest 未记录内容哈希（存量记录）——没法验，不等于验过没问题；"
+                              "corpus backfill-hash 可补录（只证明补录起点之后）",
+                }
+            else:
+                actual = hashlib.sha256(data).hexdigest()
+                if actual == recorded:
+                    row["status"] = VERIFY_OK
+                    ok_by_origin[origin or "unknown"] = ok_by_origin.get(origin or "unknown", 0) + 1
+                else:
+                    row |= {"status": VERIFY_MISMATCH, "actual_sha256": actual}
+        counts[row["status"]] += 1
+        rows.append(row)
+
+    orphans: list[str] = []
+    reports_root = root / REPORTS_DIR
+    try:
+        if reports_root.is_dir():
+            for f in sorted(reports_root.rglob("*.report.json")):
+                try:
+                    if f.is_file() and f.resolve() not in referenced:
+                        orphans.append(f.relative_to(root).as_posix())
+                except OSError:
+                    logger.warning("orphan 扫描无法处理文件，跳过：%s", f, exc_info=True)
+    except OSError:
+        logger.warning("orphan 扫描失败：%s", reports_root, exc_info=True)
+
+    return {
+        "counts": {**counts, VERIFY_ORPHAN: len(orphans)},
+        "ok_by_origin": ok_by_origin,
+        "entries": rows,
+        "orphans": orphans,
+    }
+
+
+def backfill_report_hashes(corpus_dir: str | Path) -> dict:
+    """给没有内容哈希的存量记录按**当前**文件字节补算哈希并回填 manifest。执行层：被调用即真写
+    （dry-run 与 ``--apply`` 确认在 commands 层做，同 :func:`restore_manifest` 的分工）。
+
+    ★★证据边界（本函数最重要的一条）：补录哈希以补录那一刻的文件内容为基准，只能证明
+    「从补录起」未被改动，**不能**追溯证明补录之前没被改过——若文件在补录前已被篡改，
+    补录会把篡改后的内容钉成基准、verify 从此恒 ok。因此：
+
+      ① 回填一律打 ``origin="backfill"``，与入库哈希（ingest）在 manifest 与 verify 输出里
+         都不同貌——不打标记，就是在给一批来历不明的哈希发"入库即验"的合格证；
+      ② 已有哈希的记录（无论 ingest 还是 backfill）**绝不重算覆盖**：覆盖 = 销毁旧基准，
+         恰好抹掉 mismatch 本可揭发的篡改。
+
+    文件取不到的记录原样保留（仍 unverifiable），逐条列入返回值——补不上要说出来，
+    静默跳过会让人以为补齐了。
+
+    写 manifest 条数不变：缩减护栏放行、写前快照照常触发（补录前的 manifest 状态可回滚，
+    快照文件名的时间戳顺带钉住了"补录发生在何时"）。
+
+    Returns:
+        ``{"total": int, "already_hashed": int, "backfilled": int, "unreadable": [...],
+        "written": bool, "error": str | None}``。绝不抛（写失败进 error）。
+    """
+    root = Path(corpus_dir)
+    entries = load_manifest(root)
+    new_entries: list[dict] = []
+    backfilled = 0
+    already = 0
+    unreadable: list[dict] = []
+    for e in entries:
+        if _s(e.get("report_bytes_sha256")).strip():
+            already += 1
+            new_entries.append(e)
+            continue
+        target = _resolve_report_file(root, _s(e.get("report_path")))
+        data: bytes | None = None
+        if target is not None and target.is_file():
+            try:
+                data = target.read_bytes()
+            except OSError:
+                data = None
+        if data is None:
+            unreadable.append({
+                "sample_sha256": _s(e.get("sample_sha256")) or None,
+                "report_path": _s(e.get("report_path")) or None,
+            })
+            new_entries.append(e)
+            continue
+        new_entries.append({
+            **e,
+            "report_bytes_sha256": hashlib.sha256(data).hexdigest(),
+            "report_bytes_sha256_origin": HASH_ORIGIN_BACKFILL,
+        })
+        backfilled += 1
+
+    base = {
+        "total": len(entries),
+        "already_hashed": already,
+        "unreadable": unreadable,
+        "written": False,
+        "error": None,
+    }
+    if not backfilled:
+        return {**base, "backfilled": 0}
+    try:
+        # 条数不变 → 缩减护栏放行；真写前自动拍快照（补录前状态可回滚）。
+        save_manifest(root, new_entries)
+    except (OSError, ManifestShrinkError) as exc:
+        # ShrinkError 在此唯一的触发方式是并发竞态（本进程 load 之后另一进程入了库）；
+        # 报出去让调用方重跑即可自愈，不静默吞。
+        return {**base, "backfilled": 0, "error": f"写入 manifest 失败：{exc}"}
+    return {**base, "backfilled": backfilled, "written": True}
 
 
 def query(entries: list[dict], **filters: str) -> list[dict]:

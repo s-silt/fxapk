@@ -281,6 +281,120 @@ def corpus_reindex(
     _print({"reindexed": len(entries), "corpus": str(root)})
 
 
+#: 补录哈希的证据边界声明。写进每一处补录相关输出（dry-run 与真写），不许只在文档里活着：
+#: 读输出的人（含后续接手的 AI）必须在拿到哈希的同一屏看到它证明不了什么。
+_BACKFILL_BOUNDARY = (
+    "补录哈希只证明「从补录这一刻起」文件未被改动，不能追溯证明补录之前没被改过"
+    "（manifest 里恒带 origin=backfill，与入库哈希 origin=ingest 严格分开）"
+)
+
+
+@corpus_app.command("verify")
+def corpus_verify(
+    corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
+) -> None:
+    """逐条校验存证未被篡改：文件在吗？当前字节哈希与 manifest 入库记录一致吗？（只读命令）
+
+    分档严格分开（★「没法验」不等于「验过没问题」）：
+
+      ok（有哈希且相符）/ mismatch（有哈希但对不上 = 文件被改过，报警）/
+      unverifiable（存量记录无哈希，没法验）/ missing（有记录、文件取不到）/
+      orphan（reports/ 有文件、manifest 无记录）。
+
+    退出码：mismatch 或 missing > 0 → 1（存证出了要人处理的事）；仅 unverifiable / orphan
+    → 0，但往 stderr 醒目提示还有多少条没法验。
+    """
+    root = resolve_corpus(corpus)
+    res = _corpus.verify_reports(root)
+    counts = res["counts"]
+    # ok 行不逐条列（没有待办动作，逐条列只会淹没要人看的行）；其余四类给足坐标。
+    _print({
+        "counts": counts,
+        "ok_by_origin": res["ok_by_origin"],
+        "mismatch": [r for r in res["entries"] if r["status"] == _corpus.VERIFY_MISMATCH],
+        "missing": [r for r in res["entries"] if r["status"] == _corpus.VERIFY_MISSING],
+        "unverifiable": [
+            {"sample_sha256": r["sample_sha256"], "report_path": r["report_path"]}
+            for r in res["entries"] if r["status"] == _corpus.VERIFY_UNVERIFIABLE
+        ],
+        "orphans": res["orphans"],
+    })
+    if counts[_corpus.VERIFY_MISMATCH]:
+        typer.echo(
+            f"警告：{counts[_corpus.VERIFY_MISMATCH]} 条存证与记录的内容哈希不符——文件在库内被"
+            "改过。先别写库（reindex 会按被改后的内容重算索引），去 .snapshots/ 与备份比对定位改动。",
+            err=True,
+        )
+    if counts[_corpus.VERIFY_MISSING]:
+        typer.echo(
+            f"警告：{counts[_corpus.VERIFY_MISSING]} 条记录的报告文件取不到"
+            "（被删/路径越界/OneDrive 未按需下载）。",
+            err=True,
+        )
+    if counts[_corpus.VERIFY_UNVERIFIABLE]:
+        typer.echo(
+            f"注意：{counts[_corpus.VERIFY_UNVERIFIABLE]} 条存量记录没有内容哈希，本次没法验"
+            f"（≠ 验过没问题）。可 fxapk corpus backfill-hash 补录；{_BACKFILL_BOUNDARY}。",
+            err=True,
+        )
+    if counts[_corpus.VERIFY_ORPHAN]:
+        typer.echo(
+            f"注意：reports/ 下有 {counts[_corpus.VERIFY_ORPHAN]} 个 manifest 之外的报告文件"
+            "（orphan）——绕库写入的产物或索引丢条，请核查来历（确认合法后 corpus reindex 可纳入索引）。",
+            err=True,
+        )
+    if counts[_corpus.VERIFY_MISMATCH] or counts[_corpus.VERIFY_MISSING]:
+        raise typer.Exit(code=1)
+
+
+@corpus_app.command("backfill-hash")
+def corpus_backfill_hash(
+    apply: bool = typer.Option(
+        False, "--apply", help="真写入。默认 dry-run：只列出将补录哪些记录，不动磁盘。"
+    ),
+    corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
+) -> None:
+    """给没有内容哈希的存量记录补录报告文件哈希（默认 dry-run，--apply 才写）。
+
+    ★证据边界：补录按文件**当前**内容计算，只证明「从补录这一刻起」未被改动，**不能**追溯
+    证明补录之前没被改过——若文件此前已被篡改，补录会把篡改后的内容钉成基准。因此补录哈希
+    恒带 ``origin=backfill``，在 manifest 与 verify 输出里与入库哈希（ingest）严格分开；
+    已有哈希的记录绝不重算覆盖。真写前自动给 manifest 拍快照。
+    """
+    root = resolve_corpus(corpus)
+    if not apply:
+        res = _corpus.verify_reports(root)
+        todo = [
+            {"sample_sha256": r["sample_sha256"], "report_path": r["report_path"]}
+            for r in res["entries"] if r["status"] == _corpus.VERIFY_UNVERIFIABLE
+        ]
+        _print({
+            "dry_run": True,
+            "would_backfill": len(todo),
+            "targets": todo,
+            "evidence_boundary": _BACKFILL_BOUNDARY,
+            "hint": "加 --apply 才真写；真写前会自动给 manifest 拍快照。",
+        })
+        return
+    result = _corpus.backfill_report_hashes(root)
+    if result.get("error"):
+        typer.echo(f"错误：{result['error']}", err=True)
+        raise typer.Exit(code=1)
+    _print({
+        "backfilled": result["backfilled"],
+        "already_hashed": result["already_hashed"],
+        "unreadable": result["unreadable"],
+        "total": result["total"],
+        "evidence_boundary": _BACKFILL_BOUNDARY,
+    })
+    if result["unreadable"]:
+        typer.echo(
+            f"注意：{len(result['unreadable'])} 条记录的文件取不到，未补录（verify 中仍为"
+            " missing/unverifiable）。",
+            err=True,
+        )
+
+
 @corpus_app.command("snapshot")
 def corpus_snapshot(
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
