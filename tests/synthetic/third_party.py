@@ -156,9 +156,12 @@ _RN_STRINGS = [  # leak-scan: allow 阴性夹具：RN 开发期打包服务器�
 _CORDOVA_STRINGS = [  # leak-scan: allow 阴性夹具：Cordova 白名单通配与本地资源路径，非远端端点
     '<access origin="*" subdomains="true" />',
     "file:///android_asset/www/index.html",
-    "https://cordova.apache.org/docs/en/latest/guide/appdev/whitelist/",
+    # cordova.apache.org 有意不放：apache.org 在提取层就被整域排除，放进来这条夹具
+    # 什么也验不到（空转）。要验的是**真会被提取**的那些框架域名，见下面两条。
     "cordova-plugin-inappbrowser: gap://ready",
     "ionic.config.json",
+    "https://ionicframework.com/docs/native/in-app-browser",  # leak-scan: allow 阴性夹具：Ionic 官网，测的正是它该判无需
+    "@capacitor/core: https://capacitorjs.com/docs/apis/app",  # leak-scan: allow 阴性夹具：Capacitor 官网，测的正是它该判无需
 ]
 
 
@@ -240,8 +243,11 @@ THIRD_PARTY_SAMPLES: tuple[ThirdPartySample, ...] = (
     ThirdPartySample(
         name="cordova-whitelist-strings",
         why="Cordova 白名单里的通配 origin 与 file:// 本地资源路径，是权限声明与本地路径，"
-            "不是远端端点",
+            "不是远端端点；另含 Ionic/Capacitor 官网（框架文档站）",
         dex_strings=_CORDOVA_STRINGS,
         forbidden_categories=_HIGH_STAKES,
+        # 这两条把 infra 名单里对应的条目锁住——它们原先是「凭印象预收」，
+        # 名单里加了但没有任何夹具验证过它们真的生效。
+        must_not_be_actionable=frozenset({"ionicframework.com", "capacitorjs.com"}),  # leak-scan: allow 阴性夹具：Ionic/Capacitor 官网，测的正是它们不该升档
     ),
 )
