@@ -820,6 +820,16 @@ def native_anchor_weakness(name: str) -> str | None:
         if not key.endswith(".so") and base.startswith(key):
             return f"packer:{prod}"
 
+    # ★先问「这是不是本应用自己的业务代码容器」。Flutter 的 libapp.so、Unity 的
+    #   libil2cpp.so 装的是这个 App 自己的全部业务逻辑——两份样本共享同一份**逐字节相同**的
+    #   业务代码容器，是最强的同族证据，恰恰不能当第三方降噪掉。
+    #   而第三方名单是按子串匹配的，"libil2cpp" 就在里面（它服务于另一个用途：给扫描器
+    #   划定输入范围）。同一张表被两处消费、目的相反，这里按用途取自己的口径。
+    from apkscan.core.appframework import is_app_own_code
+
+    if is_app_own_code(base):
+        return None
+
     try:
         from apkscan.analyzers._common import NATIVE_LIB_BENIGN_SUBSTR
 

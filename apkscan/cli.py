@@ -43,6 +43,8 @@ META_WRITE_CATEGORIES = {
     'device_detected': 'coverage',
     'evidence_manifest': 'record',
     'online': 'signal',
+    # 与 pipeline 里同名键同类别——同一个键两处归类不一致会被契约测试挡下（本就该挡）。
+    'repack_quarantine': 'signal',
     'sample_sha256': 'record',
 }
 META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
@@ -1467,7 +1469,10 @@ def _merge_config_probe_into_report(report_json_path: str, result: object) -> tu
     ★必须同时产 Lead，否则这批域名到不了任何出口：文书套打、IOC 导出、闭环目标、digest、
     corpus 入库**全部只读 leads**。只往 endpoints 里塞，等于取回来的下发池躺在 JSON 里没人看
     ——而它恰恰是这条命令最有价值的产出。Lead 走 ``build_endpoint_leads`` 这条与静态侧
-    同一的链（含 advice 分级 + 默认兜底 + base_advice 封存），口径不会分叉。
+    同一的链，**四步一步都不能少**：advice 分级 → 默认兜底 → base_advice 封存 →
+    重打包隔离。曾经只做前三步，于是重打包件（正版 App 被重签名）里取回的域名——它们属于
+    **被仿冒的正版厂商**——会以最高档直通出口，而同一份报告走静态链会被降到「待核」。
+    接出口就得连隔离一起接：把 Lead 送进闸门的那只手，也要负责把该拦的拦住。
 
     ★回灌的端点 source 恒为 ``remote-config``：它是"配置里出现的域名"，**不是**运行时实测
     接触，不得升成确认徽标。
@@ -1478,7 +1483,12 @@ def _merge_config_probe_into_report(report_json_path: str, result: object) -> tu
     import json as _json
 
     from apkscan.core.atomic import atomic_write_text
-    from apkscan.core.leads import _apply_default_advice, build_endpoint_leads
+    from apkscan.core.leads import (
+        _VERDICT_REPACK_SUSPECTED,
+        _apply_default_advice,
+        apply_repack_quarantine,
+        build_endpoint_leads,
+    )
     from apkscan.core.models import seal_base_advice
     from apkscan.report import json as report_json
 
@@ -1503,6 +1513,17 @@ def _merge_config_probe_into_report(report_json_path: str, result: object) -> tu
         endpoints.append(report_json._to_jsonable(ep))
         fresh.append(ep)
 
+    # ★meta 要在产 Lead **之前**取好：第四步的重打包隔离读的就是 meta 里的
+    #   repack_identity 判定与人工放行墓碑。末尾的三分运行记录也写在这里。
+    meta = payload.get("meta")
+    if not isinstance(meta, dict):
+        # meta 存在但不是 dict 时，原样保留在 meta_original 里再重建——直接覆盖会毁掉
+        # 别人的数据，静默丢弃则会让"已回灌"这句话变成假话（三分记录压根没写进去）。
+        if meta is not None:
+            payload["meta_original"] = meta
+        meta = {}
+        payload["meta"] = meta
+
     # --- 新端点 → Lead ---------------------------------------------------
     # online=False：本命令只取配置对象，没做 WHOIS/ICP/ASN 归属查询。如实标注比假装查过好，
     # 想补归属另跑 `fxapk enrich`。
@@ -1516,25 +1537,37 @@ def _merge_config_probe_into_report(report_json_path: str, result: object) -> tu
     }
     added_leads = 0
     if fresh:
-        new_leads = build_endpoint_leads(fresh, online=False)
-        _apply_default_advice(new_leads)
-        seal_base_advice(new_leads)
-        for lead in new_leads:
+        candidates = build_endpoint_leads(fresh, online=False)
+        _apply_default_advice(candidates)
+        seal_base_advice(candidates)
+        # 先去重、再隔离：审计块记的是**真正写进这份报告**的值，被去重丢掉的不算，
+        # 否则账目与报告内容对不上。
+        new_leads = []
+        for lead in candidates:
             key = (lead.category.value, lead.value)
             if key in lead_keys:
                 continue
             lead_keys.add(key)
+            new_leads.append(lead)
+        # ★第四步，与静态链（pipeline._stage_build_leads）和动态回灌（dynamic.merge）同一道闸。
+        #   样本判为正版重打包时，配置服务器下发的域名/IP 属**被仿冒的正版厂商**，必须机制化
+        #   降到「待核」——advice 的最高档是文书套打 / ioc --only-investigate / HTML 红标 /
+        #   closure 的共同闸门，而本函数正是把 Lead 新接进这些出口的地方。
+        quarantined = apply_repack_quarantine(new_leads, meta)
+        if quarantined:
+            # 并入而非覆盖：目标报告多半已带静态侧的隔离记录，整块覆盖会把那批 values 抹掉
+            # ——而它们是闭环兜底门放行时查的凭据。
+            blob = meta.get("repack_quarantine")
+            if not isinstance(blob, dict):
+                blob = {"reason": _VERDICT_REPACK_SUSPECTED, "count": 0, "values": []}
+                meta["repack_quarantine"] = blob
+            merged = list(dict.fromkeys([*(blob.get("values") or []), *quarantined]))
+            blob["values"] = merged
+            blob["count"] = len(merged)
+        for lead in new_leads:
             leads.append(report_json._to_jsonable(lead))
-            added_leads += 1
+        added_leads = len(new_leads)
 
-    meta = payload.get("meta")
-    if not isinstance(meta, dict):
-        # meta 存在但不是 dict 时，原样保留在 meta_original 里再重建——直接覆盖会毁掉
-        # 别人的数据，静默丢弃则会让"已回灌"这句话变成假话（三分记录压根没写进去）。
-        if meta is not None:
-            payload["meta_original"] = meta
-        meta = {}
-        payload["meta"] = meta
     runs = meta.get("config_probe_runs")
     if not isinstance(runs, list):
         runs = []

@@ -441,6 +441,70 @@ def test_cli_merge_produces_leads_reachable_by_the_real_exports(
     )
 
 
+def test_cli_merge_quarantines_repack_sample_domains(
+    tmp_path: Path, no_network, monkeypatch
+) -> None:
+    """★★重打包件取回的域名属被仿冒的正版厂商，不得以最高档进出口。
+
+    产 Lead 的链有四步——advice 分级 / 默认兜底 / base_advice 封存 / **重打包隔离**。
+    前三步曾经做了、第四步漏了，于是同一份报告：静态链把厂商域名降到「待核」，
+    这条路却把它放行到出口，会导致向无关的正版厂商发函。
+
+    ★变异验证：删掉 _merge_config_probe_into_report 里的 apply_repack_quarantine 调用，
+    本测试必红。
+    """
+    import json as _json
+
+    from typer.testing import CliRunner
+
+    from apkscan.cli import app
+    from apkscan.core.leads import _VERDICT_REPACK_SUSPECTED
+    from apkscan.report import ioc
+
+    ok_url = _PLAN["candidates"][0]["url"]
+    no_network({ok_url: FetchResult(ok_url, True, b"blob", 200, None)})
+
+    class _Found:
+        decoded = True
+        text = ""
+        decode_chain = ("json",)
+        domains = ("api.vendor-from-config.example.org",)
+        ips: tuple[str, ...] = ()
+
+    monkeypatch.setattr("apkscan.config.decode.decode_config_blob",
+                        lambda *_a, **_k: _Found())
+
+    report = tmp_path / "repack_report.json"
+    report.write_text(_json.dumps({
+        "meta": {
+            "config_probe_plan": _PLAN,
+            # 样本被判为正版重打包——这是隔离生效的前提。
+            "repack_identity": {"verdict": _VERDICT_REPACK_SUSPECTED},
+        },
+        "endpoints": [],
+        "leads": [],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    res = CliRunner().invoke(app, ["config-probe", str(report),
+                                   "--authorized-active", "--into", str(report)])
+    assert res.exit_code == 0, res.output
+
+    payload = _json.loads(report.read_text(encoding="utf-8"))
+    lead = next(x for x in payload["leads"]
+                if x.get("value") == "api.vendor-from-config.example.org")
+    assert lead["advice"] != "建议调证", (  # leak-scan: allow 判据档位常量本身，测的正是这一档不该出现
+        f"重打包件的厂商域名档位是 {lead['advice']!r}——隔离没生效"
+    )
+    # 审计要留痕，否则被降档的人无从知道为什么。
+    assert payload["meta"]["repack_quarantine"]["count"] >= 1
+
+    # ★真出口：ioc --only-investigate 的闸门是 advice，这批不该出现在里面。
+    rows = ioc.leads_to_ioc_rows(payload, only_investigate=True)
+    assert not any("api.vendor-from-config.example.org" in str(r) for r in rows), (
+        "被仿冒厂商的域名走到了出口"
+    )
+
+
 def test_cli_reports_a_missing_plan_instead_of_pretending(tmp_path: Path) -> None:
     """没有预案就说没有——不能静默成功让人以为探过了。"""
     from typer.testing import CliRunner

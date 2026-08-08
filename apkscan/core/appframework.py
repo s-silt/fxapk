@@ -72,7 +72,13 @@ _FRAMEWORKS: Mapping[str, tuple[tuple[str, ...], tuple[str, ...]]] = MappingProx
     "unity": (("libunity",), ("libil2cpp.so",)),
     # React Native：JS 业务代码不在 .so 里（在 assets 的 bundle），故 own_code_libs 为空——
     # 这不是遗漏：RN 的业务代码本就不是 native 库，下游按 assets 找。
-    "react_native": (("libhermes", "libjsi", "libfbjni", "libreactnativejni"), ()),
+    #
+    # ★引擎标记只用 RN **独占**的两个。曾经把 libfbjni / libjsi 也算进来，但它们是
+    #   Facebook 系 SDK（Fresco 图片库、Flipper 调试器等）的支撑库，在大量非 RN 应用里
+    #   都有——凭它们认定 RN，就把本模块承诺的「引擎在场才认定」悄悄放掉了。
+    #   代价还不止于误标：RN 的 own_code_libs 是空的，一旦误判成 RN，下面
+    #   is_app_own_code 的精确口径就只认这个空集合，libapp.so / libil2cpp.so 反而失去保护。
+    "react_native": (("libhermes", "libreactnativejni"), ()),
 })
 
 #: 所有框架的业务代码容器（并集，小写 basename）。判据可直接用它做「这不是第三方库」的判断。
@@ -169,8 +175,13 @@ def is_app_own_code(lib_basename: str, framework: "AppFramework | None" = None) 
     给了 ``framework`` 就按识别结果判（准确）；没给则退回全局并集（宽口径，
     用于拿不到框架上下文的调用点）。宽口径的代价是可能把一个真叫 libapp.so 的
     第三方库误当自有——但那个方向的错误是「少降一档」，比反过来把真后端降掉安全。
+
+    ★不变量：**给了框架不得比不给更严**。识别结果的 ``own_code_libs`` 为空时（RN 天然如此，
+    它的业务代码在 assets 的 JS bundle 里、根本不在 .so 中；框架误判也会落到这个形态）
+    退回宽口径——否则一次误判就能把 ``libapp.so`` / ``libil2cpp.so`` 的保护整个剥掉，
+    把降噪做成降档。框架识别是用来**放宽**判断的，不该成为新的降档来源。
     """
     base = _basename(lib_basename)
-    if framework is not None and framework.identified:
+    if framework is not None and framework.identified and framework.own_code_libs:
         return base in framework.own_code_libs
     return base in APP_OWN_CODE_LIBS

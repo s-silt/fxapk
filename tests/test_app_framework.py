@@ -98,6 +98,41 @@ def test_single_framework_still_excludes_a_lookalike_third_party_lib() -> None:
     assert is_app_own_code("libapp.so", fw) is False
 
 
+def test_facebook_support_libs_alone_do_not_make_it_react_native() -> None:
+    """★libfbjni / libjsi 是 Facebook 系 SDK（Fresco、Flipper…）的支撑库，遍地都是。
+
+    拿它们认定 RN，等于把「引擎在场才认定」这条承诺悄悄放掉；而 RN 的 own_code_libs
+    是空的，误判之后精确口径只认空集合，libapp.so 反倒失去保护——降噪变降档。
+
+    ★变异验证：把 libfbjni / libjsi 加回 _FRAMEWORKS 的 RN 引擎前缀，本测试必红。
+    """
+    fw = detect_framework(["lib/arm64-v8a/libfbjni.so", "lib/arm64-v8a/libapp.so"])
+    assert not fw.identified, f"仅凭支撑库就认定了 {fw.name!r}"
+    fw2 = detect_framework(["lib/arm64-v8a/libjsi.so"])
+    assert not fw2.identified
+    # 真正的 RN 引擎仍要认得出。
+    assert detect_framework(["lib/arm64-v8a/libhermes.so"]).name == "react_native"
+    assert detect_framework(["lib/arm64-v8a/libreactnativejni.so"]).name == "react_native"
+
+
+def test_a_framework_without_own_code_libs_never_strips_protection() -> None:
+    """★不变量：给了 framework 不得比不给更严。
+
+    识别结果的 own_code_libs 为空时（RN 天然如此，误判也会落到这个形态），必须退回
+    全局并集。否则任何一次框架误判都能把 libapp.so / libil2cpp.so 的保护整个剥掉——
+    框架识别是用来放宽判断的，不该成为新的降档来源。
+
+    ★变异验证：去掉 is_app_own_code 里 `and framework.own_code_libs` 这个条件，本测试必红。
+    """
+    rn = detect_framework(["lib/arm64-v8a/libhermes.so"])
+    assert rn.identified and rn.own_code_libs == (), "前提：RN 的业务代码不在 .so 里"
+    for lib in ("libapp.so", "libil2cpp.so"):
+        assert is_app_own_code(lib, rn) is True, (
+            f"{lib} 因为样本被识别成 RN 而失去保护——精确口径比宽口径还严"
+        )
+        assert is_app_own_code(lib) is True  # 宽口径基准
+
+
 def test_is_app_own_code_narrows_when_the_framework_is_known() -> None:
     """★精确口径与宽口径的差别就在这里，也是整条接线存在的理由。
 
