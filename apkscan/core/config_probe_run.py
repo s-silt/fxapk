@@ -45,7 +45,9 @@ __all__ = [
     "run_plan",
 ]
 
-#: 原始配置对象落盘子目录名（相对输出目录）。报告里 stored_path 用相对路径，保报告可迁移。
+#: analyze 流水线的落盘子目录名（out_dir/remote_config/，见 pipeline._stage_remote_config_fetch）。
+#: 只用来**构造目录**，不拼进 archive_blob 的返回值——stored_path 一律按实际写入位置登记，
+#: 「相对 out_dir 保报告可迁移」的形式由知道报告落在哪的 pipeline 侧自己换算。
 REMOTE_CONFIG_SUBDIR = "remote_config"
 
 #: 单次运行的请求数硬帽。预案本身已封顶，这里是第二道——防的是有人手改 report.json 里的
@@ -69,6 +71,8 @@ class ProbeOutcome:
     decode_chain: tuple[str, ...] = ()
     domains: tuple[str, ...] = ()
     ips: tuple[str, ...] = ()
+    #: 落盘位置，按调用方给的 archive_dir 原样表达（CLI：``--archive`` 怎么写就怎么记，
+    #: 从运行目录可解析）。未落盘 / 落盘失败 → None。
     stored_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -120,21 +124,30 @@ class ProbeRunResult:
 
 
 def archive_blob(archive_dir: "Path | None", sha: str, blob: bytes) -> str | None:
-    """把原始配置对象字节原子落盘 ``<dir>/<sha>.bin``；返回**相对** stored_path。
+    """把原始配置对象字节原子落盘 ``<dir>/<sha>.bin``；返回**实际写入位置**作 stored_path。
+
+    ★返回值按调用方给的 ``archive_dir`` 原样拼出（给相对路径就记相对、给绝对就记绝对），
+    **不猜任何前缀**：曾恒定返回 ``remote_config/<sha>.bin``——那只是 analyze 流水线自己的
+    布局；``fxapk config-probe --archive <任意目录>`` 时登记出的路径指向不存在的位置，
+    落盘的一手件只能靠 sha 全盘搜。「相对 out_dir 保报告可迁移」的换算由知道报告落在哪的
+    调用方自己做（见 pipeline._fetch_decode_one）。
 
     落盘失败（磁盘满/只读）不得连累已解出的域名/IP 线索——记 warning、返回 None
     （stored_path 缺失但线索仍在）。sha 命名幂等：同内容重复下载覆写同一文件、字节相同。
     """
     if archive_dir is None:
         return None
+    target = archive_dir / f"{sha}.bin"
     try:
-        atomic_write_bytes(archive_dir / f"{sha}.bin", blob)
+        atomic_write_bytes(target, blob)
     except OSError:
         logger.warning(
             "[remote_config] 原始配置对象落盘失败（已解出的线索不受影响）：%s", sha, exc_info=True
         )
         return None
-    return f"{REMOTE_CONFIG_SUBDIR}/{sha}.bin"
+    # as_posix()：stored_path 跨平台统一用 / 分隔（与既有报告里的形状一致），Windows 上
+    # Path() 也照样解析得回来。
+    return target.as_posix()
 
 
 def config_endpoint(value: str, kind: str, ref: str) -> Endpoint:
@@ -237,7 +250,9 @@ def run_plan(
     Args:
         plan: ``report.meta['config_probe_plan']`` 的原样内容。形状不对 → 空结果。
         authorized: **只有显式 True 才会发出请求**。默认预演，零流量。
-        archive_dir: 原始字节落盘目录；None 则不落盘（线索仍照出）。
+        archive_dir: 原始字节落盘目录；None 则不落盘（线索仍照出）。outcome.stored_path
+            按此目录**原样**登记（给相对路径就记相对，从运行目录可解析），不再恒带
+            ``remote_config/`` 前缀。
         recipe: 解码配方（``CryptoRecipe`` 或 None）。
         limit: 本次最多请求几个候选；与内建硬帽取小。
 

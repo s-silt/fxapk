@@ -840,6 +840,38 @@ def test_uncommitted_paths_lists_dirty_files(tmp_path: Path) -> None:  # type: i
     assert "b.py" in dirty, dirty
 
 
+def test_uncommitted_paths_counts_a_rename_as_one_change(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """★porcelain -z 的重命名/复制占**两段**（``R  new\\0old``），旧路径段没有 XY 前缀。
+
+    曾把旧路径段也按 ``XY<空格>path`` 切头：``longoldname.py`` 被削首 3 字符成
+    ``goldname.py`` 混进结果，一次重命名被报成 2 条未提交改动。旧路径不该出现在
+    结果里——改动内容如今活在新路径上。
+    """
+    import os
+    import subprocess
+
+    # 钉死 rename 检测：用户全局 gitconfig 可设 status.renames=false，那会把重命名拆成
+    # 普通的 A+D 两条单段记录，本测试要走的「两段记录」解析路径就测不到了。
+    # uncommitted_paths 内部起的 git 子进程继承 os.environ，故这里 setenv 对它同样生效。
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "status.renames")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "true")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = {**os.environ,
+           "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.test",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e.test"}
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True, env=env)
+    (repo / "longoldname.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, env=env)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, check=True, env=env)
+    subprocess.run(["git", "mv", "longoldname.py", "newname.py"], cwd=repo, check=True, env=env)
+
+    # 不喂伪造字节：让函数自己跑真 `git status --porcelain -z`，锁的是对真 git 输出的解析。
+    assert leakscan.uncommitted_paths(repo_root=repo) == ["newname.py"]
+
+
 def test_uncommitted_paths_is_quiet_outside_a_repo(tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
     """★取不到就返回空、不抛：这只是一句提示，不该让整个扫描失败。"""
     assert leakscan.uncommitted_paths(repo_root=tmp_path) == []

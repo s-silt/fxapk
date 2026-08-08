@@ -42,6 +42,16 @@ class ThirdPartySample:
     #: ★为什么不能只靠基线：基线记的是「检出了哪些线索类」，对档位是盲的。一个域名
     #:   从"无需"升成"建议"，类还是 DOMAIN，基线全绿——而那正是误报真正生效的形态。
     must_not_be_actionable: frozenset[str] = frozenset()
+    #: 点名死值：这些**具体串**绝不该作为线索出现，一个都不行。
+    #:
+    #: ★与 ``must_not_be_actionable`` 的分工：那个管「出现了但不该升档」，这个管
+    #:   「压根就不该出现」——伪域名、被切碎的包名之类，它们不是任何人的资产，
+    #:   出现在报告里就是纯噪音。
+    #:
+    #: ★这一维补的是基线的另一个盲区：夹具**空转**。判据某天不再提取某种形态后，
+    #:   夹具还在、基线也还绿，但它已经什么都不防了——直到判据回退，误报重新出现。
+    #:   点名死值让"这个夹具到底在防什么"变成可执行的断言，而不是注释里的一句话。
+    must_not_appear: frozenset[str] = frozenset()
 
 
 # --- ethers.js / web3 库常量 ------------------------------------------------
@@ -183,12 +193,18 @@ THIRD_PARTY_SAMPLES: tuple[ThirdPartySample, ...] = (
         why="Go 字符串表连读切出的伪域名（2github.com 一类），实测零解析、不存在",  # leak-scan: allow 阴性夹具/说明文字里的第三方域 2github.com，非本方资产
         dex_strings=_GO_TRUNCATED,
         forbidden_categories=_HIGH_STAKES,
+        # ★当前判据已经不再切出这些伪域名了（这份夹具眼下只产出那两个真的包托管域，
+        #   值级基线里看得到）。点名死值就是为了把这个状态钉住：它靠的是域名正则的
+        #   边界，而边界一旦被放宽，这几个串会立刻回来。
+        must_not_appear=frozenset({"2github.com", "3github.com", "agithub.com", "zapagithub.com", "sqlite2github.com", "errorsgithub.com", "cobraprotobuf.dev"}),  # noqa: E501  # leak-scan: allow 阴性夹具：被连读切碎的伪域名，测的正是它们不该出现
     ),
     ThirdPartySample(
         name="webgl-shader-variables",
         why="shader 变量名被域名正则切出的伪域名，RDAP 查无、零解析",
         dex_strings=_SHADER_VARS,
         forbidden_categories=_HIGH_STAKES,
+        # ★与 go-truncated 那份不同：这两个伪域名**现在仍然被提取出来**（值级基线里看得到），
+        #   说明这条误报还活着。留在基线里如实记着，等哪天真去治它，diff 会显示它们消失。
     ),
     ThirdPartySample(
         name="frontend-router-property-chain",

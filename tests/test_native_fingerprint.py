@@ -172,6 +172,28 @@ def test_native_anchor_weakness_names_packer_and_sdk() -> None:
     assert corpus.native_anchor_weakness("") is None
 
 
+def test_business_code_container_is_not_downgraded_as_third_party() -> None:
+    """★★本应用自己的业务代码容器是**最强**的同族证据，不能被第三方名单降噪掉。
+
+    Flutter 的 libapp.so、Unity 的 libil2cpp.so 装着这个 App 的全部业务逻辑。
+    两份样本共享同一份逐字节相同的业务代码容器，说明的正是「同一开发主体」——
+    与"共享了同一个第三方组件"恰好相反。
+
+    这里踩过的坑：第三方名单按**子串**匹配，而 "libil2cpp" 就在名单里（它在那儿服务的是
+    另一个用途——给扫描器划定输入范围）。同一张表被两处消费、目的相反，串案这一侧必须
+    按自己的口径先行豁免。
+
+    ★变异验证：删掉 native_anchor_weakness 里的 is_app_own_code 豁免，本测试必红。
+    """
+    for own in ("libil2cpp.so", "libapp.so", "lib/arm64-v8a/libil2cpp.so"):
+        assert corpus.native_anchor_weakness(own) is None, (
+            f"{own} 被当第三方降噪了——Unity/Flutter 家族最强的锚点会被丢弃"
+        )
+    # 与之相对：框架**引擎**库仍是第三方，照旧降噪。
+    assert corpus.native_anchor_weakness("libunity.so") == "third-party-sdk"
+    assert corpus.native_anchor_weakness("libflutter.so") == "third-party-sdk"
+
+
 def test_native_anchor_weakness_normalizes_path_and_case() -> None:
     """APK 里 .so 带 ABI 目录前缀；库名大小写不一 → 都要归一到 basename 小写再判。"""
     assert corpus.native_anchor_weakness(f"lib/arm64-v8a/{_PACKER_SO}") is not None

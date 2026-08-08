@@ -20,6 +20,7 @@ from apkscan.core import device
 from apkscan.core.apk import ApkParseError
 from apkscan.core.apk import load_apk
 from apkscan.core.models import (
+    ANALYSIS_MODE_AUTHORIZED_ACTIVE,
     ANALYSIS_MODE_PASSIVE,
     ANALYSIS_MODES,
     ANALYSIS_STATUS_COMPLETE,
@@ -42,7 +43,12 @@ META_WRITE_CATEGORIES = {
     'config_probe_runs': 'coverage',
     'device_detected': 'coverage',
     'evidence_manifest': 'record',
+    # 以下三个都与 pipeline 里的同名键同类别——同一个键两处归类不一致会被契约测试挡下
+    # （本就该挡：消费方按类别决定怎么读它）。
+    'mode': 'signal',
     'online': 'signal',
+    'remote_config_artifacts': 'signal',
+    'repack_quarantine': 'signal',
     'sample_sha256': 'record',
 }
 META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
@@ -1405,6 +1411,24 @@ def config_probe_cmd(
         )
         raise typer.Exit(code=1)
 
+    # ★身份校验放在**发请求之前**：预案、解码配方都取自 report_path，结果却写进 --into
+    #   指向的报告。两者若不是同一个样本，取回的下发池会被安到别的案子头上——而请求一旦
+    #   发出就撤不回来，事后才发现写错地方已经晚了。
+    if into and Path(into).resolve() != report_path.resolve():
+        their = _sample_id_of(into)
+        mine = meta.get("sample_sha256")
+        if not (mine and their and str(mine) == str(their)):
+            typer.echo(
+                f"错误：--into 指向的是另一份报告，且两边的 sample_sha256 对不上"
+                f"（预案来自 {report_path.name}={mine or '缺失'}，"
+                f"目标 {Path(into).name}={their or '缺失'}）。\n"
+                f"取回结果只能写回**同一个样本**的报告。要么把 --into 指向 {report_path.name} "
+                f"本身，要么先确认两份报告确实是同一样本（缺 sample_sha256 的旧报告请重跑 "
+                f"analyze 生成）。",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+
     result = run_plan(
         plan,
         authorized=authorized_active,
@@ -1461,13 +1485,35 @@ def config_probe_cmd(
     )
 
 
+def _sample_id_of(report_json_path: str) -> str:
+    """读一份 report.json 的 ``meta.sample_sha256``；读不到（文件坏/缺字段）返回空串。
+
+    只用于「两份报告是不是同一个样本」这一道校验，所以读不到就返回空——由调用方按
+    fail-closed 处理（宁可拦下让人确认，也不能把一个案子的取回结果写进另一个案子）。
+    """
+    import json as _json
+
+    try:
+        payload = _json.loads(Path(report_json_path).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — 读不出就是「对不上」，交调用方拦下
+        logger.debug("[config-probe] 读不了 %s，无法校验样本身份", report_json_path,
+                     exc_info=True)
+        return ""
+    meta = payload.get("meta") if isinstance(payload, dict) else None
+    value = meta.get("sample_sha256") if isinstance(meta, dict) else None
+    return str(value) if value else ""
+
+
 def _merge_config_probe_into_report(report_json_path: str, result: object) -> tuple[int, int]:
     """把取回结果并进 report.json：endpoints + **leads** + meta 记一次运行。原子写。
 
     ★必须同时产 Lead，否则这批域名到不了任何出口：文书套打、IOC 导出、闭环目标、digest、
     corpus 入库**全部只读 leads**。只往 endpoints 里塞，等于取回来的下发池躺在 JSON 里没人看
     ——而它恰恰是这条命令最有价值的产出。Lead 走 ``build_endpoint_leads`` 这条与静态侧
-    同一的链（含 advice 分级 + 默认兜底 + base_advice 封存），口径不会分叉。
+    同一的链，**四步一步都不能少**：advice 分级 → 默认兜底 → base_advice 封存 →
+    重打包隔离。曾经只做前三步，于是重打包件（正版 App 被重签名）里取回的域名——它们属于
+    **被仿冒的正版厂商**——会以最高档直通出口，而同一份报告走静态链会被降到「待核」。
+    接出口就得连隔离一起接：把 Lead 送进闸门的那只手，也要负责把该拦的拦住。
 
     ★回灌的端点 source 恒为 ``remote-config``：它是"配置里出现的域名"，**不是**运行时实测
     接触，不得升成确认徽标。
@@ -1478,7 +1524,12 @@ def _merge_config_probe_into_report(report_json_path: str, result: object) -> tu
     import json as _json
 
     from apkscan.core.atomic import atomic_write_text
-    from apkscan.core.leads import _apply_default_advice, build_endpoint_leads
+    from apkscan.core.leads import (
+        _VERDICT_REPACK_SUSPECTED,
+        _apply_default_advice,
+        apply_repack_quarantine,
+        build_endpoint_leads,
+    )
     from apkscan.core.models import seal_base_advice
     from apkscan.report import json as report_json
 
@@ -1503,6 +1554,17 @@ def _merge_config_probe_into_report(report_json_path: str, result: object) -> tu
         endpoints.append(report_json._to_jsonable(ep))
         fresh.append(ep)
 
+    # ★meta 要在产 Lead **之前**取好：第四步的重打包隔离读的就是 meta 里的
+    #   repack_identity 判定与人工放行墓碑。末尾的三分运行记录也写在这里。
+    meta = payload.get("meta")
+    if not isinstance(meta, dict):
+        # meta 存在但不是 dict 时，原样保留在 meta_original 里再重建——直接覆盖会毁掉
+        # 别人的数据，静默丢弃则会让"已回灌"这句话变成假话（三分记录压根没写进去）。
+        if meta is not None:
+            payload["meta_original"] = meta
+        meta = {}
+        payload["meta"] = meta
+
     # --- 新端点 → Lead ---------------------------------------------------
     # online=False：本命令只取配置对象，没做 WHOIS/ICP/ASN 归属查询。如实标注比假装查过好，
     # 想补归属另跑 `fxapk enrich`。
@@ -1516,31 +1578,82 @@ def _merge_config_probe_into_report(report_json_path: str, result: object) -> tu
     }
     added_leads = 0
     if fresh:
-        new_leads = build_endpoint_leads(fresh, online=False)
-        _apply_default_advice(new_leads)
-        seal_base_advice(new_leads)
-        for lead in new_leads:
+        candidates = build_endpoint_leads(fresh, online=False)
+        _apply_default_advice(candidates)
+        seal_base_advice(candidates)
+        # 先去重、再隔离：审计块记的是**真正写进这份报告**的值，被去重丢掉的不算，
+        # 否则账目与报告内容对不上。
+        new_leads = []
+        for lead in candidates:
             key = (lead.category.value, lead.value)
             if key in lead_keys:
                 continue
             lead_keys.add(key)
+            new_leads.append(lead)
+        # ★第四步，与静态链（pipeline._stage_build_leads）和动态回灌（dynamic.merge）同一道闸。
+        #   样本判为正版重打包时，配置服务器下发的域名/IP 属**被仿冒的正版厂商**，必须机制化
+        #   降到「待核」——advice 的最高档是文书套打 / ioc --only-investigate / HTML 红标 /
+        #   closure 的共同闸门，而本函数正是把 Lead 新接进这些出口的地方。
+        quarantined = apply_repack_quarantine(new_leads, meta)
+        if quarantined:
+            # 并入而非覆盖：目标报告多半已带静态侧的隔离记录，整块覆盖会把那批 values 抹掉
+            # ——而它们是闭环兜底门放行时查的凭据。
+            blob = meta.get("repack_quarantine")
+            if not isinstance(blob, dict):
+                blob = {"reason": _VERDICT_REPACK_SUSPECTED, "count": 0, "values": []}
+                meta["repack_quarantine"] = blob
+            merged = list(dict.fromkeys([*(blob.get("values") or []), *quarantined]))
+            blob["values"] = merged
+            blob["count"] = len(merged)
+        for lead in new_leads:
             leads.append(report_json._to_jsonable(lead))
-            added_leads += 1
+        added_leads = len(new_leads)
 
-    meta = payload.get("meta")
-    if not isinstance(meta, dict):
-        # meta 存在但不是 dict 时，原样保留在 meta_original 里再重建——直接覆盖会毁掉
-        # 别人的数据，静默丢弃则会让"已回灌"这句话变成假话（三分记录压根没写进去）。
-        if meta is not None:
-            payload["meta_original"] = meta
-        meta = {}
-        payload["meta"] = meta
     runs = meta.get("config_probe_runs")
     if not isinstance(runs, list):
         runs = []
     runs.append(result.to_meta())  # type: ignore[attr-defined]
     meta["config_probe_runs"] = runs
     meta["config_probe_run"] = runs[-1]  # 最近一次，供只看单次的消费方
+
+    # ★真取到字节的 outcome 还要汇进 remote_config_artifacts —— 那是 config-chain 组装、
+    #   corpus 跨样本「同一份配置对象」串联、closure 解密三处**唯一**读的键
+    #   （pipeline 内的授权档下载写的也是它）。只写 config_probe_runs 的话，同一份配置
+    #   能不能串案就取决于走哪条路取回，控制链还会永远缺最后一段。
+    artifacts = meta.get("remote_config_artifacts")
+    if not isinstance(artifacts, list):
+        artifacts = []
+    known = {
+        (str(a.get("source_url")), str(a.get("sha256")))
+        for a in artifacts if isinstance(a, dict)
+    }
+    for outcome in getattr(result, "outcomes", []):
+        if not outcome.sha256:  # 没取到字节的（planned/failed）不是 artifact
+            continue
+        if (outcome.url, outcome.sha256) in known:
+            continue
+        known.add((outcome.url, outcome.sha256))
+        # 形状与 pipeline._fetch_decode_one 的返回逐字段对齐——消费方按名取值，
+        # 差一个字段就会在另一条路上静默取到 None。
+        artifacts.append({
+            "source_url": outcome.url,
+            "sha256": outcome.sha256,
+            "size": outcome.size,
+            "decoded": outcome.decoded,
+            "decode_chain": list(outcome.decode_chain),
+            "domains": list(outcome.domains),
+            "ips": list(outcome.ips),
+            "stored_path": outcome.stored_path,
+        })
+    if artifacts:
+        meta["remote_config_artifacts"] = artifacts
+
+    # ★网络模式痕迹要如实：这条命令真的向目标发过请求，报告不能再声称自己全程被动。
+    #   只升不降——静态那轮是 passive 是事实，但"此后又做过授权档主动取回"同样是事实，
+    #   而 corpus 与 jsonl 把 mode 当可信度/可复现性的依据在读。
+    if getattr(result, "authorized", False):
+        meta["mode"] = ANALYSIS_MODE_AUTHORIZED_ACTIVE
+
     atomic_write_text(path, _json.dumps(payload, ensure_ascii=False, indent=2))
     return len(fresh), added_leads
 
