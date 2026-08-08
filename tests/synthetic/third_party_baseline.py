@@ -8,7 +8,6 @@
 ★不要手改：跑 tests/synthetic 下的生成流程重出（改判据后基线漂移是**有意**的动作，
   要在 diff 里看得见）。
 """
-
 BASELINE: dict[str, list[list[str]]] = {
     'ethers-js-library-constants': [
     ],
@@ -47,5 +46,7 @@ BASELINE: dict[str, list[list[str]]] = {
         ['IP', '10.0.2.2', 'skip'],
     ],
     'cordova-whitelist-strings': [
+        ['DOMAIN', 'capacitorjs.com', 'skip'],  # leak-scan: allow 值级基线条目：判据实际吐出的值，占位域名验不出边界
+        ['DOMAIN', 'ionicframework.com', 'skip'],  # leak-scan: allow 值级基线条目：判据实际吐出的值，占位域名验不出边界
     ],
 }

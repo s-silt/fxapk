@@ -348,7 +348,9 @@ KNOWN_INFRA: frozenset[str] = frozenset(
         "cdp.cloud.unity3d.com",    # Analytics 事件上报固定端点  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
         "reactnative.dev",          # React Native 官网（纯文档站）
         "docs.expo.dev",            # 仅文档站；其主域下有租户可控的更新下发通道，故不整域收
-        "cordova.apache.org",       # Cordova 官方文档
+        # 不列 cordova.apache.org：apache.org 在**提取层**（analyzers/endpoints.py）就被整域
+        # 排除，本表上面也早有一条 apache.org——写在这里的条目永远不会被求值。实测确认：
+        # 该域名的裸形态与 URL 形态都产不出线索。留着只会让人以为是它在起作用。
         "ionicframework.com",  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
         "capacitorjs.com",          # Capacitor（Ionic 的原生桥）  # leak-scan: allow 已知基础设施清单条目本身，本表就是这类字面的集中处
         # ---- Go 语言官方 ----

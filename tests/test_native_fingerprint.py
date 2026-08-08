@@ -194,6 +194,35 @@ def test_business_code_container_is_not_downgraded_as_third_party() -> None:
     assert corpus.native_anchor_weakness("libflutter.so") == "third-party-sdk"
 
 
+def test_app_so_paths_keeps_business_code_containers() -> None:
+    """★★分析器要读得到 Unity/Flutter 的业务代码容器。
+
+    ``app_so_paths`` 的白名单按**子串**匹配，而 "libil2cpp" 在表里（它在那儿是为了排除
+    引擎运行时）。照子串滤掉，api_surface / build_provenance / native_config_channel
+    这几个分析器就**从来没读过** Unity 样本的业务代码——端点、构建路径、控制面全在
+    那个文件里。
+
+    ★变异验证：删掉 app_so_paths 里的 is_app_own_code 豁免，本测试必红。
+    """
+    from apkscan.analyzers._common import app_so_paths
+
+    class _Ctx:
+        def native_libs(self):
+            return ["lib/arm64-v8a/libil2cpp.so", "lib/arm64-v8a/libunity.so",
+                    "lib/arm64-v8a/libapp.so", "lib/arm64-v8a/libflutter.so",
+                    "lib/arm64-v8a/libbiz.so"]
+
+        def list_files(self):
+            return []
+
+    got = {p.rsplit("/", 1)[-1] for p in app_so_paths(_Ctx(), "test")}
+    assert "libil2cpp.so" in got, "Unity 的业务代码容器被当第三方滤掉了"
+    assert "libapp.so" in got, "Flutter 的业务代码容器被滤掉了"
+    assert "libbiz.so" in got
+    # 引擎运行时仍该排除——豁免只针对业务代码容器，不是把白名单整个放开。
+    assert "libunity.so" not in got and "libflutter.so" not in got
+
+
 def test_native_anchor_weakness_normalizes_path_and_case() -> None:
     """APK 里 .so 带 ABI 目录前缀；库名大小写不一 → 都要归一到 basename 小写再判。"""
     assert corpus.native_anchor_weakness(f"lib/arm64-v8a/{_PACKER_SO}") is not None

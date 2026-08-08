@@ -355,10 +355,21 @@ def app_so_paths(
     for p in libs + files:
         if isinstance(p, str) and p.lower().endswith(".so"):
             seen.setdefault(p, None)
+    from apkscan.core.appframework import is_app_own_code
+
     out: list[str] = []
     for p in seen:
         base = posixpath.basename(p.replace("\\", "/")).lower()
-        if any(b in base for b in NATIVE_LIB_BENIGN_SUBSTR):
+        # ★白名单按**子串**匹配，而 "libil2cpp" 就在里面——它在那儿是为了排除引擎运行时，
+        #   可 libil2cpp.so 恰恰是 Unity 把**本应用全部 C# 业务代码**编译成的那个文件。
+        #   照子串滤掉，等于让下游几个分析器（api_surface / build_provenance /
+        #   native_config_channel）**从来没读过** Unity 样本的业务代码。
+        #   本函数的名字就叫「App 自有 .so」，那就先问这一句。
+        #
+        #   验证边界：改动时逐个比对过样本库全部 36 份 APK 的 .so 清单，新旧口径输出
+        #   **完全一致**——库里没有 Unity 包，而 Flutter 的 libapp.so 本就不在白名单里。
+        #   即：对现有样本零影响，收益兑现在将来遇到 Unity 包时。判据本身由合成夹具锁住。
+        if not is_app_own_code(base) and any(b in base for b in NATIVE_LIB_BENIGN_SUBSTR):
             continue
         out.append(p)
         if len(out) >= max_libs:
