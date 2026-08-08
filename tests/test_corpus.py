@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from apkscan import cli
@@ -481,3 +482,190 @@ def test_unpacked_flag_absent_means_static() -> None:
     assert corpus.evidence_surface({}) == "static"
     assert corpus.evidence_surface({"meta": {"unpacked": False}}) == "static"
     assert corpus.evidence_surface({"meta": {"unpacked": True}}) == "unpacked"
+
+
+# --- 缩减护栏 + 写前快照（防"调用方算错 entries 一次调用抹掉整库"的不可逆损失）---
+
+
+def test_save_manifest_refuses_shrink_by_default(tmp_path: Path) -> None:
+    """★正常操作只增不减：新列表比磁盘现有少 → 默认拒写、磁盘分毫未动，显式 allow_shrink 才放行。
+
+    ★变异验证：把 save_manifest 里的条数比对（raise ManifestShrinkError）删掉，本测试必红。
+    """
+    entries = [corpus.manifest_entry(_report(sha=f"s{i}")) for i in range(3)]
+    corpus.save_manifest(tmp_path, entries)
+
+    with pytest.raises(corpus.ManifestShrinkError) as exc_info:
+        corpus.save_manifest(tmp_path, entries[:1])
+    # 错误信息说得清楚：现有几条、本次几条、要真删怎么显式表达
+    msg = str(exc_info.value)
+    assert "3" in msg and "1" in msg and "allow_shrink" in msg
+    assert len(corpus.load_manifest(tmp_path)) == 3  # 拒写 = 磁盘分毫未动
+
+    # 等条数 / 增条数照常放行（upsert 幂等重写、正常入库）
+    corpus.save_manifest(tmp_path, entries)
+    corpus.save_manifest(tmp_path, [*entries, corpus.manifest_entry(_report(sha="s9"))])
+
+    # 显式声明才可缩减
+    corpus.save_manifest(tmp_path, entries[:1], allow_shrink=True)
+    assert len(corpus.load_manifest(tmp_path)) == 1
+
+
+def test_save_manifest_snapshots_previous_state_before_write(tmp_path: Path) -> None:
+    """写前快照 = 写入前旧状态的逐字节副本，落 .snapshots/。
+
+    ★变异验证：把 save_manifest 里的 snapshot_manifest 调用删掉，本测试必红。
+    """
+    corpus.add_report(tmp_path, _report(sha="s1"), "{}")
+    before = corpus.manifest_path(tmp_path).read_bytes()
+    corpus.add_report(tmp_path, _report(sha="s2"), "{}")
+
+    snaps = corpus.list_snapshots(tmp_path)
+    assert len(snaps) == 1, "首写无旧状态可拍，第二次写必须拍下第一次的状态"
+    assert snaps[0].read_bytes() == before  # 逐字节保真
+
+
+def test_snapshot_failure_warns_but_does_not_block_write(tmp_path: Path, caplog) -> None:  # type: ignore[no-untyped-def]
+    """快照是保险：保险坏了不该让正事（入库）停下，但必须 warning——沉默会让人以为有保险。
+
+    ★变异验证：把 snapshot_manifest 里的 try/except（吞异常转 warning）去掉，本测试必红。
+    """
+    import logging
+
+    corpus.add_report(tmp_path, _report(sha="s1"), "{}")
+    # 用同名普通文件占住 .snapshots → 快照目录无法创建，快照必然失败
+    (tmp_path / corpus.SNAPSHOT_DIR).write_text("occupied", encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        res = corpus.add_report(tmp_path, _report(sha="s2"), "{}")
+    assert res["added"] is True and len(corpus.load_manifest(tmp_path)) == 2  # 主写入未被阻断
+    assert any("快照失败" in r.message for r in caplog.records), "快照失败必须出声"
+
+
+def test_snapshot_retention_and_dedup(tmp_path: Path) -> None:
+    """保留窗口按时间淘汰到 SNAPSHOT_KEEP 份；同内容不重复建快照（窗口不被无变化重写刷穿）。
+
+    ★变异验证：删掉 snapshot_manifest 的淘汰循环 → 第一段断言红；删掉去重分支 → 第二段断言红。
+    """
+    entries: list[dict] = []
+    for i in range(corpus.SNAPSHOT_KEEP + 5):
+        entries.append(corpus.manifest_entry(_report(sha=f"s{i:03d}")))
+        corpus.save_manifest(tmp_path, entries)
+    snaps = corpus.list_snapshots(tmp_path)
+    # KEEP+5 次写：首写无快照 → 产出 KEEP+4 份，各份内容都不同，淘汰后剩 KEEP
+    assert len(snaps) == corpus.SNAPSHOT_KEEP
+    # 最新快照 = 最后一次写之前的状态（KEEP+4 条）
+    assert len(corpus.load_manifest_file(snaps[0])) == corpus.SNAPSHOT_KEEP + 4
+
+    # 同内容重写：第一次把当前态拍进窗口，此后内容不变 → 复用最新快照、不再新建
+    corpus.save_manifest(tmp_path, entries)
+    names_after_first = [p.name for p in corpus.list_snapshots(tmp_path)]
+    corpus.save_manifest(tmp_path, entries)
+    assert [p.name for p in corpus.list_snapshots(tmp_path)] == names_after_first
+
+
+def test_cli_reindex_refuses_shrink_without_flag(tmp_path: Path) -> None:
+    """接线锁走真入口：删一份报告文件后 reindex 将少 1 条 → 默认拒绝（exit 1、manifest 未动），
+    ``--allow-shrink`` 显式声明后才重建成功。
+
+    ★变异验证：把 reindex（或 CLI 透传）的 allow_shrink 改成恒 True，本测试必红。
+    """
+    corpus_dir = tmp_path / "corpus"
+    r1 = corpus.add_report(corpus_dir, _report(sha="s1"), "{}")
+    corpus.add_report(corpus_dir, _report(sha="s2"), "{}")
+    (corpus_dir / r1["report_path"]).unlink()  # 报告文件被删（或 OneDrive 占位符读不出的同形态）
+
+    res = CliRunner().invoke(cli.app, ["corpus", "reindex", "--corpus", str(corpus_dir)])
+    assert res.exit_code == 1
+    assert len(corpus.load_manifest(corpus_dir)) == 2  # 拒写：manifest 分毫未动
+
+    res = CliRunner().invoke(
+        cli.app, ["corpus", "reindex", "--allow-shrink", "--corpus", str(corpus_dir)]
+    )
+    assert res.exit_code == 0
+    assert json.loads(res.stdout)["reindexed"] == 1
+    assert len(corpus.load_manifest(corpus_dir)) == 1
+
+
+def test_cli_snapshot_and_restore_roundtrip(tmp_path: Path) -> None:
+    """snapshot 手动拍 → 再入库 → restore 无参列表 / 默认 dry-run 不动磁盘 / --apply 恢复且
+    恢复前先给当前状态拍快照（恢复错了还能再反悔）。
+
+    ★变异验证：删掉 restore_manifest 里「恢复前先快照」那步，本测试必红
+    （pre_restore_snapshot 为 None）。
+    """
+    corpus_dir = tmp_path / "corpus"
+    runner = CliRunner()
+    corpus.add_report(corpus_dir, _report(sha="s1"), "{}", case_id="c1")
+    corpus.add_report(corpus_dir, _report(sha="s2"), "{}", case_id="c1")
+
+    snap_res = runner.invoke(cli.app, ["corpus", "snapshot", "--corpus", str(corpus_dir)])
+    assert snap_res.exit_code == 0
+    snap_payload = json.loads(snap_res.stdout)
+    assert snap_payload["entries"] == 2
+    snap_name = Path(snap_payload["snapshot"]).name
+
+    corpus.add_report(corpus_dir, _report(sha="s3"), "{}", case_id="c1")
+    assert len(corpus.load_manifest(corpus_dir)) == 3
+
+    # 无参 = 列出可用快照 + 当前条数
+    ls = runner.invoke(cli.app, ["corpus", "restore", "--corpus", str(corpus_dir)])
+    assert ls.exit_code == 0
+    listing = json.loads(ls.stdout)
+    assert listing["current_entries"] == 3
+    assert any(s["name"] == snap_name and s["entries"] == 2 for s in listing["snapshots"])
+
+    # 默认 dry-run：打印将恢复几条/现有几条，不写入
+    dry = runner.invoke(cli.app, ["corpus", "restore", snap_name, "--corpus", str(corpus_dir)])
+    assert dry.exit_code == 0
+    dry_payload = json.loads(dry.stdout)
+    assert dry_payload["dry_run"] is True
+    assert dry_payload["would_restore_entries"] == 2 and dry_payload["current_entries"] == 3
+    assert len(corpus.load_manifest(corpus_dir)) == 3  # 磁盘没动
+
+    # --apply 真恢复：回到 2 条；恢复前的 3 条状态被拍成新快照
+    ap = runner.invoke(
+        cli.app, ["corpus", "restore", snap_name, "--apply", "--corpus", str(corpus_dir)]
+    )
+    assert ap.exit_code == 0
+    ap_payload = json.loads(ap.stdout)
+    assert ap_payload["applied"] is True and ap_payload["restored_entries"] == 2
+    assert ap_payload["previous_entries"] == 3
+    assert len(corpus.load_manifest(corpus_dir)) == 2
+    pre = Path(ap_payload["pre_restore_snapshot"])
+    assert pre.is_file() and len(corpus.load_manifest_file(pre)) == 3
+
+
+def test_cli_restore_rejects_missing_and_traversal_names(tmp_path: Path) -> None:
+    """不存在的快照与路径穿越名同一出口拒绝——绝不据用户输入读快照目录外的文件。"""
+    corpus_dir = tmp_path / "corpus"
+    corpus.add_report(corpus_dir, _report(sha="s1"), "{}")
+    runner = CliRunner()
+
+    res = runner.invoke(
+        cli.app, ["corpus", "restore", "ghost.jsonl", "--apply", "--corpus", str(corpus_dir)]
+    )
+    assert res.exit_code == 1
+    # ../manifest.jsonl 真实存在，但越出 .snapshots → 必须拒绝
+    res = runner.invoke(
+        cli.app,
+        ["corpus", "restore", "../manifest.jsonl", "--apply", "--corpus", str(corpus_dir)],
+    )
+    assert res.exit_code == 1
+    assert len(corpus.load_manifest(corpus_dir)) == 1  # 磁盘没动
+
+
+def test_cli_restore_apply_without_name_exits_2(tmp_path: Path) -> None:
+    """--apply 不指明恢复哪份 → 拒跑（不许"恢复个最新的"这种隐式破坏性默认）。"""
+    corpus_dir = tmp_path / "corpus"
+    corpus.add_report(corpus_dir, _report(sha="s1"), "{}")
+    res = CliRunner().invoke(
+        cli.app, ["corpus", "restore", "--apply", "--corpus", str(corpus_dir)]
+    )
+    assert res.exit_code == 2
+
+
+def test_cli_snapshot_without_manifest_exits_1(tmp_path: Path) -> None:
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    res = CliRunner().invoke(cli.app, ["corpus", "snapshot", "--corpus", str(corpus_dir)])
+    assert res.exit_code == 1
