@@ -918,11 +918,21 @@ def uncommitted_paths(*, repo_root: "Path | None" = None) -> list[str]:
         return []
 
     out: list[str] = []
-    for entry in proc.stdout.decode("utf-8", errors="replace").split("\0"):
+    # porcelain -z 每段形如 ``XY<空格>path``，合法段最短 4 字符（末尾 split 还会多出一个空段）。
+    # ★重命名/复制（X 或 Y 位为 R/C，见 git-status(1)）占**两段**：``R  new\0old``——
+    #   旧路径紧跟其后单独成段、**没有 XY 前缀**，长度照样能 ≥4，上面的长度门滤不掉
+    #   （实测字节：b'R  newname.py\0longoldname.py\0'）。曾把旧路径段也按普通段削首
+    #   3 个字符混进结果，一次重命名还被计成 2 条，故必须按状态位有状态地消费。
+    segments = iter(proc.stdout.decode("utf-8", errors="replace").split("\0"))
+    for entry in segments:
         if not entry or len(entry) < 4:
             continue
-        # porcelain 格式：XY<space>path（重命名为 "R  new\0old"，old 单独成段、长度不足会被上面滤掉）
         out.append(entry[3:])
+        if entry[0] in "RC" or entry[1] in "RC":
+            # 旧路径段消费掉、不入结果：改动内容如今活在新路径上，扫旧路径没有意义。
+            # next 的 None 默认值兜住输出异常截断（R/C 段后旧路径缺失）——本函数只是
+            # 一句提示，宁可少算一段也不抛 StopIteration。
+            next(segments, None)
     return out
 
 

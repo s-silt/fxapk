@@ -438,7 +438,8 @@ def _stage_remote_config_fetch(state: _PipelineState) -> None:
     contacts getMe 口径）；passive（默认）/ offline 只记 meta、保留候选静态线索、绝不联网。放行/跳过写
     meta 审计。★回灌端点标 source='remote-config'（**非 runtime***）：不进 OBSERVED_CONTACT_SOURCES、
     也不 startswith('runtime')，故既非"确认 C2"（is_runtime_contact）也不算"运行时出现"（is_runtime_seen）
-    ——它是"配置里出现的动态域名/IP"线索，非运行时实测接触。原始 blob 落盘作后续（stored_path=None）。
+    ——它是"配置里出现的动态域名/IP"线索，非运行时实测接触。原始 blob 落在
+    ``<out_dir>/remote_config/<sha>.bin``，artifact 里记相对路径（整目录搬走仍可解析）。
     本阶段在 endpoints 去重之后、enrich 之前跑，故回灌端点会吃到完整富化 + 五层归因 + 建线索。
     """
     config = state.config
@@ -496,7 +497,24 @@ def _fetch_decode_one(
         return {"source_url": url, "decoded": False, "error": fetched.error}
     blob = fetched.raw
     sha = hashlib.sha256(blob).hexdigest()
-    stored_path = _archive_blob(archive_dir, sha, blob)  # 抓到即落盘（先于解码，防下游失败丢原始证据）
+    stored = _archive_blob(archive_dir, sha, blob)  # 抓到即落盘（先于解码，防下游失败丢原始证据）
+    # archive_blob 只登记它**实际写入的位置**；「相对 out_dir、正斜杠」是只有本 pipeline
+    # 才知道的布局（archive_dir 恒为 out_dir/remote_config，见 _stage_remote_config_fetch）：
+    # report.json 与 remote_config/ 同处一目录，整目录搬走后 stored_path 仍可解析，换算
+    # 就该发生在这里。从返回值 relative_to 换算而非重拼文件名——落盘命名若再变，这里
+    # 不会悄悄指错。★产出必须逐字节保持 ``remote_config/<sha>.bin``：config/chain.py
+    # 与 corpus 都按这个形状读它。
+    stored_path = None
+    if stored is not None and archive_dir is not None:
+        try:
+            stored_path = Path(stored).relative_to(archive_dir.parent).as_posix()
+        except ValueError:
+            # 换算不出相对形式（archive_dir 被改成别的布局、符号链接跨盘…）时退回绝对路径：
+            # 报告少了「可整目录搬走」这个便利，但**一手件仍指得到**。这里绝不能抛——
+            # 落盘只是取证的附带产物，让它炸掉整条下载解码链就本末倒置了。
+            logger.warning("[remote_config] stored_path 无法换算成相对形式，改记绝对路径：%s",
+                           stored)
+            stored_path = stored
     result = decode_config_blob(blob, recipe=recipe)
     for domain in result.domains:
         sink.append(_config_endpoint(domain, "domain", url))

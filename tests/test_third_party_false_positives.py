@@ -19,7 +19,6 @@
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -29,9 +28,10 @@ from apkscan.core.models import AnalysisConfig
 from apkscan.core.regress import ADVICE_INVESTIGATE
 from tests.conftest import FakeContext
 from tests.synthetic.third_party import THIRD_PARTY_SAMPLES, ThirdPartySample
+from tests.synthetic.third_party_baseline import BASELINE
 
-_BASELINE_PATH = Path(__file__).parent / "synthetic" / "third_party_baseline.json"
-_BASELINE = json.loads(_BASELINE_PATH.read_text(encoding="utf-8"))
+_BASELINE_PATH = Path(__file__).parent / "synthetic" / "third_party_baseline.py"
+_BASELINE = BASELINE
 
 
 def _run(sample: ThirdPartySample):
@@ -42,6 +42,29 @@ def _run(sample: ThirdPartySample):
 
 def _categories(report) -> list[str]:
     return sorted({str(getattr(lead.category, "value", lead.category)) for lead in report.leads})
+
+
+#: 档位 → 基线里用的稳定代号。基线存代号而非中文文案，是为了与措辞解耦：改一句文案
+#: 不该让十份基线一起漂移。
+_ADVICE_CODE = {ADVICE_INVESTIGATE: "investigate", "待核": "review", "无需调证": "skip"}  # leak-scan: allow 判据档位常量本身，映射表要照抄它们
+
+
+def _signature(report) -> list[list[str]]:
+    """值级签名：``[类别, 值, 档位代号]`` 的有序列表，**不去重**（条数也是签名的一部分）。
+
+    ★基线从「类别集合」升到这里，补的是两个盲区：
+      · **值集**——夹具本要防的那个具体串还在不在？判据某天不再提取它，夹具就空转了，
+        而类集合看不出来（实证：go-truncated 那份夹具的伪域名早就不出现了，基线仍全绿）；
+      · **条数**——同一类多冒出一条，是判据变松最早的征兆。
+    """
+    return sorted(
+        [
+            str(getattr(x.category, "value", x.category)),
+            str(x.value),
+            _ADVICE_CODE.get(str(x.advice or ""), str(x.advice or "")),
+        ]
+        for x in report.leads
+    )
 
 
 @pytest.mark.parametrize("sample", THIRD_PARTY_SAMPLES, ids=lambda s: s.name)
@@ -62,20 +85,47 @@ def test_third_party_content_never_triggers_high_stakes_leads(sample: ThirdParty
 
 @pytest.mark.parametrize("sample", THIRD_PARTY_SAMPLES, ids=lambda s: s.name)
 def test_third_party_detection_matches_baseline(sample: ThirdPartySample) -> None:
-    """★漂移可见：附带线索须与基线全等——判据变松/变严都要在 diff 里显式。
+    """★漂移可见：附带线索须与基线**逐值**全等——判据变松/变严都要在 diff 里显式。
 
     只守「禁止类为空」是不够的：判据整体放宽时，低档位噪音会先涨起来，
     那正是下一次高代价误报的前兆。基线全等把这个前兆也钉住。
+
+    基线记的是 ``[类别, 值, 档位]``，不是类别集合——后者对「值换了」「多了一条」
+    「档位升了」三种漂移全盲，而那三种恰恰是判据变松的样子。
     """
-    detected = _categories(_run(sample))
+    detected = _signature(_run(sample))
     baseline = _BASELINE.get(sample.name)
     assert baseline is not None, (
         f"样本 {sample.name!r} 无基线；新增第三方样本后请更新 {_BASELINE_PATH.name}"
     )
-    assert detected == baseline, (
-        f"第三方样本 {sample.name!r} 检出漂移：基线 {baseline} → 实际 {detected}。\n"
+    expected = [list(row) for row in baseline]
+    assert detected == expected, (
+        f"第三方样本 {sample.name!r} 检出漂移：\n"
+        f"  基线 {expected}\n  实际 {detected}\n"
         f"  该内容实为：{sample.why}\n"
         f"  线索变多 = 判据变松（误报风险上升）；变少 = 降噪生效，两者都请有意更新基线。"
+    )
+
+
+@pytest.mark.parametrize(
+    "sample", [s for s in THIRD_PARTY_SAMPLES if s.must_not_appear],
+    ids=lambda s: s.name,
+)
+def test_named_dead_values_never_show_up(sample: ThirdPartySample) -> None:
+    """★点名死值：这些具体串一个都不该作为线索出现。
+
+    补的是基线的另一个盲区——**夹具空转**。判据某天不再提取某种形态后，夹具还在、
+    基线也还绿，但它已经什么都不防了，直到判据回退、误报重新出现才被发现。
+    把「这份夹具到底在防什么」写成可执行断言，空转与生效就分得开了。
+
+    ★变异验证：把域名正则的边界放宽（去掉左边界的非字母数字要求），本测试必红。
+    """
+    values = {str(x.value) for x in _run(sample).leads}
+    hit = sample.must_not_appear & values
+    assert not hit, (
+        f"{sample.name}: 点名的死值又出现了 {sorted(hit)}\n"
+        f"  该内容实为：{sample.why}\n"
+        f"  这些串不是任何人的资产，出现在报告里就是纯噪音。"
     )
 
 
@@ -174,8 +224,21 @@ def test_forbidden_categories_are_not_in_baseline() -> None:
     否则等于把一条已知误报「固化成基线」当作正常——护栏会永远绿着，而误报还在。
     """
     for s in THIRD_PARTY_SAMPLES:
-        overlap = s.forbidden_categories & set(_BASELINE[s.name])
+        baseline_cats = {str(row[0]) for row in _BASELINE[s.name]}
+        overlap = s.forbidden_categories & baseline_cats
         assert not overlap, (
             f"{s.name}: 基线里含禁止类 {sorted(overlap)}——"
             f"这是把已知误报固化成基线，必须先修判据"
+        )
+
+
+def test_named_dead_values_are_not_in_baseline() -> None:
+    """★同理：点名的死值也不能出现在基线里——那同样是把已知误报固化。"""
+    for s in THIRD_PARTY_SAMPLES:
+        if not s.must_not_appear:
+            continue
+        baseline_values = {str(row[1]) for row in _BASELINE[s.name]}
+        overlap = s.must_not_appear & baseline_values
+        assert not overlap, (
+            f"{s.name}: 基线里含点名死值 {sorted(overlap)}——先修判据，别把它写进基线"
         )

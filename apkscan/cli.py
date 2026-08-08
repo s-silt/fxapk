@@ -20,6 +20,7 @@ from apkscan.core import device
 from apkscan.core.apk import ApkParseError
 from apkscan.core.apk import load_apk
 from apkscan.core.models import (
+    ANALYSIS_MODE_AUTHORIZED_ACTIVE,
     ANALYSIS_MODE_PASSIVE,
     ANALYSIS_MODES,
     ANALYSIS_STATUS_COMPLETE,
@@ -42,8 +43,11 @@ META_WRITE_CATEGORIES = {
     'config_probe_runs': 'coverage',
     'device_detected': 'coverage',
     'evidence_manifest': 'record',
+    # 以下三个都与 pipeline 里的同名键同类别——同一个键两处归类不一致会被契约测试挡下
+    # （本就该挡：消费方按类别决定怎么读它）。
+    'mode': 'signal',
     'online': 'signal',
-    # 与 pipeline 里同名键同类别——同一个键两处归类不一致会被契约测试挡下（本就该挡）。
+    'remote_config_artifacts': 'signal',
     'repack_quarantine': 'signal',
     'sample_sha256': 'record',
 }
@@ -1407,6 +1411,24 @@ def config_probe_cmd(
         )
         raise typer.Exit(code=1)
 
+    # ★身份校验放在**发请求之前**：预案、解码配方都取自 report_path，结果却写进 --into
+    #   指向的报告。两者若不是同一个样本，取回的下发池会被安到别的案子头上——而请求一旦
+    #   发出就撤不回来，事后才发现写错地方已经晚了。
+    if into and Path(into).resolve() != report_path.resolve():
+        their = _sample_id_of(into)
+        mine = meta.get("sample_sha256")
+        if not (mine and their and str(mine) == str(their)):
+            typer.echo(
+                f"错误：--into 指向的是另一份报告，且两边的 sample_sha256 对不上"
+                f"（预案来自 {report_path.name}={mine or '缺失'}，"
+                f"目标 {Path(into).name}={their or '缺失'}）。\n"
+                f"取回结果只能写回**同一个样本**的报告。要么把 --into 指向 {report_path.name} "
+                f"本身，要么先确认两份报告确实是同一样本（缺 sample_sha256 的旧报告请重跑 "
+                f"analyze 生成）。",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+
     result = run_plan(
         plan,
         authorized=authorized_active,
@@ -1461,6 +1483,25 @@ def config_probe_cmd(
         f"已回灌 {into}：新增端点 {added_eps} 个、线索 {added_leads} 条"
         f"（source=remote-config，非运行时实测；未做归属查询，需要就跑 `fxapk enrich`）。"
     )
+
+
+def _sample_id_of(report_json_path: str) -> str:
+    """读一份 report.json 的 ``meta.sample_sha256``；读不到（文件坏/缺字段）返回空串。
+
+    只用于「两份报告是不是同一个样本」这一道校验，所以读不到就返回空——由调用方按
+    fail-closed 处理（宁可拦下让人确认，也不能把一个案子的取回结果写进另一个案子）。
+    """
+    import json as _json
+
+    try:
+        payload = _json.loads(Path(report_json_path).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — 读不出就是「对不上」，交调用方拦下
+        logger.debug("[config-probe] 读不了 %s，无法校验样本身份", report_json_path,
+                     exc_info=True)
+        return ""
+    meta = payload.get("meta") if isinstance(payload, dict) else None
+    value = meta.get("sample_sha256") if isinstance(meta, dict) else None
+    return str(value) if value else ""
 
 
 def _merge_config_probe_into_report(report_json_path: str, result: object) -> tuple[int, int]:
@@ -1574,6 +1615,45 @@ def _merge_config_probe_into_report(report_json_path: str, result: object) -> tu
     runs.append(result.to_meta())  # type: ignore[attr-defined]
     meta["config_probe_runs"] = runs
     meta["config_probe_run"] = runs[-1]  # 最近一次，供只看单次的消费方
+
+    # ★真取到字节的 outcome 还要汇进 remote_config_artifacts —— 那是 config-chain 组装、
+    #   corpus 跨样本「同一份配置对象」串联、closure 解密三处**唯一**读的键
+    #   （pipeline 内的授权档下载写的也是它）。只写 config_probe_runs 的话，同一份配置
+    #   能不能串案就取决于走哪条路取回，控制链还会永远缺最后一段。
+    artifacts = meta.get("remote_config_artifacts")
+    if not isinstance(artifacts, list):
+        artifacts = []
+    known = {
+        (str(a.get("source_url")), str(a.get("sha256")))
+        for a in artifacts if isinstance(a, dict)
+    }
+    for outcome in getattr(result, "outcomes", []):
+        if not outcome.sha256:  # 没取到字节的（planned/failed）不是 artifact
+            continue
+        if (outcome.url, outcome.sha256) in known:
+            continue
+        known.add((outcome.url, outcome.sha256))
+        # 形状与 pipeline._fetch_decode_one 的返回逐字段对齐——消费方按名取值，
+        # 差一个字段就会在另一条路上静默取到 None。
+        artifacts.append({
+            "source_url": outcome.url,
+            "sha256": outcome.sha256,
+            "size": outcome.size,
+            "decoded": outcome.decoded,
+            "decode_chain": list(outcome.decode_chain),
+            "domains": list(outcome.domains),
+            "ips": list(outcome.ips),
+            "stored_path": outcome.stored_path,
+        })
+    if artifacts:
+        meta["remote_config_artifacts"] = artifacts
+
+    # ★网络模式痕迹要如实：这条命令真的向目标发过请求，报告不能再声称自己全程被动。
+    #   只升不降——静态那轮是 passive 是事实，但"此后又做过授权档主动取回"同样是事实，
+    #   而 corpus 与 jsonl 把 mode 当可信度/可复现性的依据在读。
+    if getattr(result, "authorized", False):
+        meta["mode"] = ANALYSIS_MODE_AUTHORIZED_ACTIVE
+
     atomic_write_text(path, _json.dumps(payload, ensure_ascii=False, indent=2))
     return len(fresh), added_leads
 

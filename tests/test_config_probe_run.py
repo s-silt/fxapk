@@ -328,6 +328,35 @@ def test_archive_writes_the_raw_bytes(tmp_path: Path, no_network, monkeypatch) -
     assert written.read_bytes() == b"raw-blob"
 
 
+def test_stored_path_locates_the_archived_bytes(tmp_path: Path, no_network, monkeypatch) -> None:
+    """★stored_path 必须定位到实际落盘的文件——按调用方给的 archive_dir 原样登记。
+
+    曾恒定拼 ``remote_config/`` 前缀：那只是 analyze 流水线自己的布局
+    （archive_dir=out_dir/remote_config）；``fxapk config-probe --archive <任意目录>``
+    时登记出的路径指向不存在的位置，实发请求换来的一手件只能靠 sha 全盘搜。
+    """
+    ok_url = _PLAN["candidates"][0]["url"]
+    no_network({ok_url: FetchResult(ok_url, True, b"raw-blob", 200, None)})
+
+    class _Found:
+        decoded = True
+        text = ""
+        decode_chain = ()
+        domains = ("c2.example.org",)
+        ips: tuple[str, ...] = ()
+
+    monkeypatch.setattr("apkscan.config.decode.decode_config_blob",
+                        lambda *_a, **_k: _Found())
+    monkeypatch.chdir(tmp_path)  # 复刻在工作目录里跑 `--archive blobs` 的形态
+    outcome = next(o for o in
+                   run_plan(_PLAN, authorized=True, archive_dir=Path("blobs")).outcomes
+                   if o.url == ok_url)
+    assert outcome.stored_path is not None
+    located = Path(outcome.stored_path)
+    assert located.is_file(), f"stored_path={outcome.stored_path!r} 定位不到落盘文件"
+    assert located.read_bytes() == b"raw-blob", "定位到了文件但字节不保真"
+
+
 # ---------------------------------------------------------------------------
 # 5. CLI 回灌
 # ---------------------------------------------------------------------------
@@ -503,6 +532,128 @@ def test_cli_merge_quarantines_repack_sample_domains(
     assert not any("api.vendor-from-config.example.org" in str(r) for r in rows), (
         "被仿冒厂商的域名走到了出口"
     )
+
+
+def test_cli_merge_feeds_the_control_chain_artifacts_key(
+    tmp_path: Path, no_network, monkeypatch
+) -> None:
+    """★取回的配置对象要进 remote_config_artifacts——config-chain / corpus 串联 / closure
+    解密三处只读这一个键。
+
+    只写 config_probe_runs 的话，同一份配置能不能串案就取决于走哪条路取回，
+    而控制链会永远缺最后一段。
+
+    ★变异验证：删掉回灌里写 remote_config_artifacts 的那段，本测试必红。
+    """
+    import json as _json
+
+    from typer.testing import CliRunner
+
+    from apkscan.cli import app
+    from apkscan.config.chain import build_control_chains
+
+    ok_url = _PLAN["candidates"][0]["url"]
+    no_network({ok_url: FetchResult(ok_url, True, b"blob", 200, None)})
+
+    class _Found:
+        decoded = True
+        text = ""
+        decode_chain = ("base64", "json")
+        domains = ("chain.example.org",)
+        ips: tuple[str, ...] = ()
+
+    monkeypatch.setattr("apkscan.config.decode.decode_config_blob",
+                        lambda *_a, **_k: _Found())
+    report = _report_with_plan(tmp_path)
+    res = CliRunner().invoke(app, ["config-probe", str(report),
+                                   "--authorized-active", "--into", str(report)])
+    assert res.exit_code == 0, res.output
+
+    payload = _json.loads(report.read_text(encoding="utf-8"))
+    arts = payload["meta"]["remote_config_artifacts"]
+    assert len(arts) == 1
+    art = arts[0]
+    # 形状要与 pipeline 那条路逐字段对齐，否则消费方按名取值会取到 None。
+    for field in ("source_url", "sha256", "size", "decoded", "decode_chain",
+                  "domains", "ips", "stored_path"):
+        assert field in art, f"artifact 缺字段 {field}——与 pipeline 那条路不同构"
+    assert art["decoded"] is True and art["domains"] == ["chain.example.org"]
+
+    # ★真消费方：控制链组装读的就是这个键。
+    chains = build_control_chains(arts, None, [])
+    assert chains, "取回的配置对象没能进控制链"
+
+    # 重复回灌不该把同一个对象记两遍。
+    CliRunner().invoke(app, ["config-probe", str(report),
+                             "--authorized-active", "--into", str(report)])
+    again = _json.loads(report.read_text(encoding="utf-8"))
+    assert len(again["meta"]["remote_config_artifacts"]) == 1, "同一对象被重复登记"
+
+
+def test_cli_merge_marks_the_run_as_active(tmp_path: Path, no_network, monkeypatch) -> None:
+    """★发过请求就不能再声称全程被动——mode 只升不降。
+
+    corpus manifest 与 jsonl 头把 mode 当可信度/可复现性的依据在读；静态那轮是 passive
+    是事实，"此后又做过授权档主动取回"同样是事实，报告要如实。
+    """
+    import json as _json
+
+    from typer.testing import CliRunner
+
+    from apkscan.cli import app
+
+    ok_url = _PLAN["candidates"][0]["url"]
+    no_network({ok_url: FetchResult(ok_url, True, b"x", 200, None)})
+
+    class _Found:
+        decoded = True
+        text = ""
+        decode_chain = ()
+        domains = ("m.example.org",)
+        ips: tuple[str, ...] = ()
+
+    monkeypatch.setattr("apkscan.config.decode.decode_config_blob",
+                        lambda *_a, **_k: _Found())
+    report = _report_with_plan(tmp_path)
+    payload = _json.loads(report.read_text(encoding="utf-8"))
+    payload["meta"]["mode"] = "passive"
+    report.write_text(_json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    CliRunner().invoke(app, ["config-probe", str(report),
+                             "--authorized-active", "--into", str(report)])
+    assert _json.loads(report.read_text(encoding="utf-8"))["meta"]["mode"] == \
+        "authorized-active"
+
+
+def test_cli_refuses_to_write_into_a_different_sample(
+    tmp_path: Path, no_network, capsys
+) -> None:
+    """★--into 指向别的样本时必须在**发请求之前**拦下。
+
+    预案与解码配方取自 report_path，结果却写进 --into；两者不是同一样本的话，
+    取回的下发池会被安到别的案子头上。而请求一旦发出就撤不回来。
+    """
+    import json as _json
+
+    from typer.testing import CliRunner
+
+    from apkscan.cli import app
+
+    rec = no_network({})
+    src = _report_with_plan(tmp_path)
+    payload = _json.loads(src.read_text(encoding="utf-8"))
+    payload["meta"]["sample_sha256"] = "a" * 64
+    src.write_text(_json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    other = tmp_path / "other_sample.json"
+    other.write_text(_json.dumps(
+        {"meta": {"sample_sha256": "b" * 64}, "endpoints": [], "leads": []},
+        ensure_ascii=False), encoding="utf-8")
+
+    res = CliRunner().invoke(app, ["config-probe", str(src),
+                                   "--authorized-active", "--into", str(other)])
+    assert res.exit_code == 2, res.output
+    assert rec.calls == [], "拦下之前已经把请求发出去了"
 
 
 def test_cli_reports_a_missing_plan_instead_of_pretending(tmp_path: Path) -> None:
