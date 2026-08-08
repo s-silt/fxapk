@@ -139,6 +139,18 @@ class NativeObfuscationAnalyzer(BaseAnalyzer):
     # ------------------------------------------------------------------
 
     def _app_so_paths(self, ctx: "AnalysisContext") -> list[str]:
+        """★这里**有意**不做 ``_common.app_so_paths`` 那道业务代码容器豁免——不是漏改。
+
+        两处同名、共用同一张白名单，回答的却是两个问题：那边要在业务代码里找端点与
+        构建路径，把业务代码容器滤掉直接导致「没读过」；本处判的是「有没有刻意混淆」，
+        而混淆判据看的是熵与串密度，与「这文件属不属于本应用」无关——一个 AOT/转译
+        产物即便是自家代码，也可能因体量与符号形态触发启发式。
+
+        ★**这条保留是保守选择，未经真样本验证**：截至改动时样本库 36 份 APK 里没有一份
+        Unity 包（无 libil2cpp.so），无法实测该文件在本判据下会不会被误报成混淆。
+        维持现状是因为改它属于放宽降噪、没有证据支撑；等真拿到 Unity 样本，应实测
+        「豁免后会不会多出一条混淆误报」，再决定是否与那边统一。
+        """
         seen: dict[str, None] = {}
         for source in (ctx.native_libs() or []), (ctx.list_files() or []):
             for p in source:
