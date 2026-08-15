@@ -1,0 +1,838 @@
+"""扫描器自身的测试 —— 整套 meta 契约的地基，它错了全盘皆错。
+
+★为什么这份测试要先于扫描器的任何使用方存在：基线集合由扫描器生成，
+  若它漏扫一种写法，那个键就不会进基线，后面所有检查都建在错的集合上，
+  而且**错得无声无息**（正是本机制要治的那种缺陷形态）。
+"""
+
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+import pytest
+
+from tests.contracts import meta_scan
+
+
+def _keys(src: str, kind: str) -> set[str]:
+    return {a.key for a in meta_scan.scan_source(src) if a.kind == kind}
+
+
+def _dynamic(src: str) -> list[meta_scan.Access]:
+    return [a for a in meta_scan.scan_source(src) if a.key.startswith("<dynamic")]
+
+
+# --- 写入的各种写法 ---------------------------------------------------------
+
+WRITE_CASES = [
+    pytest.param('report.meta["a"] = 1', {"a"}, id="下标赋值"),
+    pytest.param('state.meta["b"] = 1', {"b"}, id="state.meta"),
+    pytest.param('result.meta["c"] = 1', {"c"}, id="result.meta"),
+    pytest.param('meta["d"] = 1', {"d"}, id="裸 meta 变量"),
+    pytest.param('report.meta.setdefault("e", [])', {"e"}, id="setdefault"),
+    pytest.param('report.meta.update({"f": 1, "g": 2})', {"f", "g"}, id="update 字典字面量"),
+    pytest.param('report.meta.update(h=1)', {"h"}, id="update 关键字参数"),
+    pytest.param('m = state.meta\nm["i"] = 1', {"i"}, id="别名传播"),
+    pytest.param('raw_meta = report.get("meta")\nraw_meta["j"] = 1', {"j"}, id="report.get(meta) 别名"),
+    # ★以下三种是**路径 A 最初漏掉的形态**：不是逐键下标赋值，而是整体给一个字典。
+    #   它们不是假想——是运行期观测（路径 C）在真仓库上抓出 7 个键后回头定位到的真实写法：
+    #   analyzers/permissions.py、analyzers/remote_config.py、core/pipeline.py 都这么写。
+    #   这条教训值得记：单一扫描器无法验证自己的盲区，必须有另一路独立证据。
+    pytest.param('result.meta = {"k1": 1, "k2": 2}', {"k1", "k2"}, id="★整体字典赋值"),
+    pytest.param('report.meta: dict = {"k3": 1}', {"k3"}, id="★带类型标注的整体赋值"),
+    pytest.param('r = AnalyzerResult(analyzer="x", meta={"k4": 1})', {"k4"}, id="★构造时传入 meta="),
+]
+
+
+@pytest.mark.parametrize(("src", "expect"), WRITE_CASES)
+def test_write_forms_are_detected(src: str, expect: set[str]) -> None:
+    """每种写法都必须被认出——漏一种，那种写法写的键就永远进不了基线。"""
+    assert _keys(src, "write") >= expect
+
+
+# --- 读取的各种写法 ---------------------------------------------------------
+
+READ_CASES = [
+    pytest.param('x = report.meta["a"]', {"a"}, id="下标读取"),
+    pytest.param('x = report.meta.get("b")', {"b"}, id="get"),
+    pytest.param('x = report.meta.get("c", None)', {"c"}, id="get 带默认值"),
+    pytest.param('x = report.meta.pop("d", None)', {"d"}, id="pop"),
+    pytest.param('m = report.meta\nx = m.get("e")', {"e"}, id="别名后读取"),
+    pytest.param(
+        'def helper(report):\n'
+        '    m = report.get("meta")\n'
+        '    return m if isinstance(m, dict) else {}\n'
+        'x = helper(report).get("wrapped")',
+        {"wrapped"}, id="结构识别返回-meta-的-helper",
+    ),
+    pytest.param(
+        'def helper(report):\n'
+        '    return report.get("meta")\n'
+        'x = helper(report)["direct"]',
+        {"direct"}, id="helper-直接返回-meta-表达式",
+    ),
+]
+
+
+@pytest.mark.parametrize(("src", "expect"), READ_CASES)
+def test_read_forms_are_detected(src: str, expect: set[str]) -> None:
+    """漏认读取方 = 把一个有人消费的键误判成孤儿，进而被错误地清理掉。"""
+    assert _keys(src, "read") >= expect
+
+
+def test_function_name_alone_does_not_make_a_call_meta() -> None:
+    """判据只看返回结构；名字像 helper/meta 不能把普通字典读取误报为 report.meta。"""
+    src = ('def get_meta(report):\n'
+           '    return {"ordinary": 1}\n'
+           'x = get_meta(report).get("ordinary")\n')
+    assert "ordinary" not in _keys(src, "read")
+
+
+@pytest.mark.parametrize("returned", [
+    'm if ok else {"not_meta": 1}',
+    'other',
+])
+def test_mixed_return_helper_is_not_treated_as_meta(returned: str) -> None:
+    """只要一条返回路径可能是普通 dict，就不能把调用结果冒充 report.meta。"""
+    src = ('def helper(report, other, ok):\n'
+           '    m = report.get("meta")\n'
+           f'    return {returned}\n'
+           'x = helper(report, {}, True).get("ordinary")\n')
+    assert "ordinary" not in _keys(src, "read")
+
+
+def test_corpus_meta_helpers_are_scanned_as_production_reads() -> None:
+    """真实调用缝：串案锚点不能因 helper 包装而被误判成孤儿。"""
+    root = Path(__file__).resolve().parents[2]
+    result = meta_scan.scan_repository(root)
+    helper_reads = {
+        "sample_sha256", "remote_config_artifacts", "build_provenance",
+        "native_lib_hashes", "visibility",
+    }
+    assert helper_reads <= set(result.production_consumed)
+
+
+# --- 动态键：必须暴露，绝不静默跳过 ------------------------------------------
+
+
+DYNAMIC_CASES = [
+    pytest.param('report.meta[key] = 1', id="变量作键"),
+    pytest.param('report.meta[f"{name}_count"] = 1', id="f-string 作键"),
+    pytest.param('report.meta.update(other)', id="update 非字面量字典"),
+    pytest.param('report.meta.update(**kw)', id="update 双星展开"),
+    pytest.param('x = report.meta.get(key)', id="变量作键读取"),
+]
+
+
+# --- 常量键：解析，而不是豁免 -----------------------------------------------
+
+
+def test_module_constant_key_is_resolved() -> None:
+    """``meta[SOME_KEY]`` 里 SOME_KEY 是模块常量时，必须解析成真实键名。
+
+    ★为什么解析而不是列进豁免名单：豁免名单会不断增长，最终变成动态访问的逃生口；
+      常量被重命名时基线看不到键变化；而且豁免抹掉了「固定常量」与「真正开放的
+      ``meta[key]``」之间的区别——后者才是必须堵的绕过通道。
+      本仓有约 20 处这种写法（DEX_TRUNCATED_META_KEY / MANUAL_RESTORES_KEY 等）。
+    """
+    src = 'K = "dex_strings_truncated"\ndef f(result):\n    result.meta[K] = True\n'
+    assert _keys(src, "write") == {"dex_strings_truncated"}
+    assert not _dynamic(src), "常量键仍被当成动态键"
+
+
+def test_cross_module_constant_key_is_resolved() -> None:
+    """跨模块一跳：``meta[_inv.INVENTORY_META_KEY]``（本仓 pcap_ingest/probe_ingest 的写法）。"""
+    # ★键是完整模块路径（见 test_same_stem_modules_do_not_share_a_constant_table）
+    symbols = {"apkscan.core.runtime_inventory": {"INVENTORY_META_KEY": "runtime_merged_inventory"}}
+    src = ("from apkscan.core import runtime_inventory as _inv\n"
+           "def f(meta):\n    meta[_inv.INVENTORY_META_KEY] = 1\n")
+    got = {a.key for a in meta_scan.scan_source(src, symbols=symbols) if a.kind == "write"}
+    assert got == {"runtime_merged_inventory"}
+
+
+CONSTANT_POISON_CASES = [
+    pytest.param('K = "a"\nif flag:\n    K = "b"\ndef f(meta):\n    meta[K] = 1',
+                 id="条件赋值"),
+    pytest.param('K = "a"\ndef f(meta):\n    K = "b"\n    meta[K] = 1',
+                 id="函数内局部遮蔽"),
+    pytest.param('K = "a"\nK = "b"\nK = "c"\ndef f(meta):\n    meta[K] = 1',
+                 id="三次重赋值"),
+    pytest.param('K = "a"\nfrom x import K\ndef f(meta):\n    meta[K] = 1',
+                 id="import 覆盖"),
+    pytest.param('K = "a"\nfor K in items:\n    pass\ndef f(meta):\n    meta[K] = 1',
+                 id="循环变量绑定"),
+    pytest.param('K = "a"\ndel K\ndef f(meta):\n    meta[K] = 1',
+                 id="del 之后"),
+    # ★match 的捕获名藏在 MatchAs.name / MatchStar.name / MatchMapping.rest 这些
+    #   **字符串字段**里，不是 ast.Name 节点。只认 ast.Name 会把它们整个漏掉，
+    #   于是「统一收集一切绑定」这句话在 match 上并不成立（复审用这三个构造实证）。
+    pytest.param('K = "a"\nmatch x:\n    case K:\n        pass\ndef f(meta):\n    meta[K] = 1',
+                 id="match 捕获名"),
+    pytest.param('K = "a"\nmatch x:\n    case [*K]:\n        pass\ndef f(meta):\n    meta[K] = 1',
+                 id="match 星号捕获"),
+    pytest.param('K = "a"\nmatch x:\n    case {**K}:\n        pass\ndef f(meta):\n    meta[K] = 1',
+                 id="match 映射余项"),
+    # ★嵌套作用域的**头部**在外层求值：默认值、装饰器、基类、推导式首个 iter。
+    #   整体跳过嵌套节点会漏掉这些绑定，于是外层常量不失效、被解析成过期值。
+    pytest.param('K = "a"\ndef g(x=(K := "b")): pass\ndef f(meta):\n    meta[K] = 1',
+                 id="函数默认值里的海象"),
+    pytest.param('K = "a"\n@deco(K := "b")\ndef g(): pass\ndef f(meta):\n    meta[K] = 1',
+                 id="装饰器里的海象"),
+    pytest.param('K = "a"\nclass C(base(K := "b")): pass\ndef f(meta):\n    meta[K] = 1',
+                 id="类基类里的海象"),
+    # PEP 572：推导式内的 := 绑定到**包含它的作用域**，不是推导式自身
+    pytest.param('K = "a"\nxs = [(K := x) for x in seq]\ndef f(meta):\n    meta[K] = 1',
+                 id="推导式里的海象"),
+    pytest.param('K = "a"\ndef f(meta):\n    def inner(y=(K := "b")): pass\n    meta[K] = 1',
+                 id="函数内嵌套 def 的默认值"),
+]
+
+
+@pytest.mark.parametrize("src", CONSTANT_POISON_CASES)
+def test_poisoned_constant_never_resolves_to_a_stale_value(src: str) -> None:
+    """★名字被二次绑定过，一律不再解析——**绝不用旧值**。
+
+    复审用这几个构造实证过：早先的实现会把它们错误地登记成 'a' 或 'c'。
+    根因是「值不同才 pop」不是永久失效（第三次赋值会重新被接受），
+    且模块常量表被无差别用于所有作用域。
+
+    ★解析错比不解析更糟：不解析只是落进 unresolved（可见、可人工处理），
+      解析错则把一个真实键登记成**错的名字**，基线从此建在错的集合上，而且无声。
+    """
+    accesses = meta_scan.scan_source(src)
+
+    # ★必须**恰有一个**访问点，且它是 unresolved。
+    #   早先写成 `got == set() or "<dynamic>" in ...`，于是扫描器把这处访问**整个漏掉**
+    #   （一个 Access 都不产）时测试照绿——那等于在测「没解析错」，
+    #   而没测「有没有看见」。漏扫与解析错的后果一样：那个键不会进基线。
+    writes = [a for a in accesses if a.kind == "write"]
+    assert len(writes) == 1, f"访问点数不对（漏扫或重复计）：{writes}"
+
+    a = writes[0]
+    assert a.key == "<dynamic>", f"被污染的常量被解析成了 {a.key!r}，应落 unresolved"
+    assert a.line == src.count("\n", 0, src.index("meta[K]")) + 1, "行号不对"
+    assert "a" not in {x.key for x in accesses}, "用了过期的常量值"
+    assert "c" not in {x.key for x in accesses}, "用了过期的常量值"
+
+
+OPEN_WRITE_CASES = [
+    pytest.param('def f(result):\n    result.meta = build_meta()', id="整体赋非字典字面量"),
+    pytest.param('def f(result, other):\n    result.meta = other', id="整体赋另一个变量"),
+    pytest.param('def f(report):\n    report.meta: dict = build_meta()', id="带标注整体赋函数返回值"),
+    pytest.param('def f(other):\n    r = AnalyzerResult(meta=other)', id="构造时传非字典"),
+    # ★右值**恰好叫 meta**（函数参数、来自别处）是最隐蔽的一条：早先只要右值"看起来像
+    #   meta 容器"就跳过，可它的键从未在本文件出现过。名字叫 meta ≠ 键已被看见。
+    pytest.param('def f(result, meta):\n    result.meta = meta', id="整体赋外部的 meta 参数"),
+    pytest.param('def f(meta):\n    r = AnalyzerResult(meta=meta)', id="构造时传外部的 meta 参数"),
+    pytest.param('def f(report, other):\n    report.meta |= other', id="增量合并（此前零记录）"),
+    # ★以下八个构造由复审给出：判据一旦从「来源可证」滑成「见过写入」，它们全部静默通过。
+    #   见过写入只说明看见了**新增**的键，说明不了这个名字**原本**带着哪些键。
+    pytest.param('def f(result, m):\n    m["seen"] = 1\n    result.meta = m',
+                 id="外部参数写过一个已知键"),
+    pytest.param('def f(result, m):\n    def g():\n        m["nested"] = 1\n    result.meta = m',
+                 id="写入发生在嵌套作用域"),
+    pytest.param('def f(result, external):\n    m = {}\n    m = external\n    result.meta = m',
+                 id="本地初始化后重绑外部值"),
+    pytest.param('def f(result, items):\n    m = {k: v for k, v in items}\n    result.meta = m',
+                 id="字典推导（键通常是动态的）"),
+    pytest.param('def f(result, external, c):\n    if c:\n        m = {}\n    else:\n'
+                 '        m = external\n    result.meta = m',
+                 id="分支里混入外部来源"),
+    pytest.param('def f(result, m, ext):\n    m.update(ext)\n    result.meta = m',
+                 id="外部参数被 update"),
+    pytest.param('def f(result):\n    m = {}\n    helper(m)\n    result.meta = m',
+                 id="本地字典被传出去（被调方可能加键）"),
+    pytest.param('def f(result):\n    m = {"a": 1}\n    n = m\n    n["x"] = 1\n    result.meta = m',
+                 id="搬去另一个名字后再写"),
+    # ★嵌套作用域的绑定通常不泄漏，唯独 nonlocal / global 能改到本层——
+    #   「本作用域只绑定一次」这个判据对它们不成立。
+    pytest.param('def f(result, external):\n    m = {}\n    def g():\n        nonlocal m\n'
+                 '        m = external\n    result.meta = m',
+                 id="嵌套函数用 nonlocal 重绑"),
+    pytest.param('def f(result):\n    global m\n    m = {}\n    result.meta = m',
+                 id="global 声明的名字（别处可改）"),
+    # ★以下由复审第二轮给出：判据只看「绑定与参数传递」时，这五类全部静默通过。
+    #   根因是把**绑定分析**和**逃逸分析**混在一个守作用域的遍历里——
+    #   值一旦跑出去，在哪个作用域被改都算数，逃逸分析不能守作用域。
+    pytest.param('def f(result):\n    m = n = {}\n    n["x"] = 1\n    result.meta = m',
+                 id="多目标赋值共享同一个字典"),
+    pytest.param('def f(result, box):\n    m = {}\n    box.value = m\n'
+                 '    box.value["x"] = 1\n    result.meta = m',
+                 id="逃逸到属性后再加键"),
+    pytest.param('def f(result, box):\n    m = {}\n    box[0] = m\n'
+                 '    box[0]["x"] = 1\n    result.meta = m',
+                 id="逃逸到容器后再加键"),
+    pytest.param('def f(result, external):\n    m = {}\n    m.absorb(external)\n    result.meta = m',
+                 id="receiver 上的未知方法"),
+    pytest.param('def f(result, key, value):\n    m = {}\n    m.__setitem__(key, value)\n'
+                 '    result.meta = m',
+                 id="未建模的原地方法 __setitem__"),
+    pytest.param('def f(result, ext):\n    m = {}\n    def g():\n        m.absorb(ext)\n'
+                 '    result.meta = m',
+                 id="闭包里调未知方法"),
+    pytest.param('def f(result):\n    m = {}\n    result.meta = m\n    return m',
+                 id="return 出去（被调方可能加键）"),
+]
+
+
+@pytest.mark.parametrize("src", OPEN_WRITE_CASES)
+def test_whole_meta_assignment_from_unknown_source_is_surfaced(src: str) -> None:
+    """★整体赋一个键不可知的值，必须进 unresolved，不能静默跳过。
+
+    此前只在右值是字典字面量时登记，右值是函数调用/变量时**什么都不记**——
+    于是这类写法既不进 produced、也不进 unresolved，凭空绕过整套契约，
+    还会让「已无开放写入」这个结论假成立（复审实测指出）。
+    """
+    assert _dynamic(src), f"开放的整体写入被静默跳过：{src!r}"
+
+
+PROVABLE_DICT_CASES = [
+    pytest.param('def f(result):\n    m = {}\n    m["a"] = 1\n    m["b"] = 2\n    result.meta = m',
+                 {"a", "b"}, id="就地建空字典后逐条写"),
+    pytest.param('def f(result):\n    m = {"a": 1}\n    result.meta = m',
+                 {"a"}, id="字面量初值经名字搬运"),
+    pytest.param('def f(result):\n    m = {"a": 1}\n    m["b"] = 2\n    result.meta = m',
+                 {"a", "b"}, id="字面量初值加补写"),
+    # ★已建模的字典方法不算逃逸：它们对键的影响会被如实记下，否则「未知方法一律失效」
+    #   会把正常写法也判死，把 unresolved 虚高成噪音。
+    pytest.param('def f(result):\n    m = {}\n    m.setdefault("a", 1)\n    result.meta = m',
+                 {"a"}, id="setdefault 是已建模的方法"),
+]
+
+
+@pytest.mark.parametrize(("src", "expect"), PROVABLE_DICT_CASES)
+def test_provably_local_dict_assigned_to_meta_yields_its_keys(src: str, expect: set[str]) -> None:
+    """★来源可证的本地字典整体赋给 ``X.meta``：键必须逐条登记。
+
+    这是收紧判据时自己开的洞：``m`` 上的下标写入本来不算 meta 写入，于是那批键
+    对基线完全隐形——比误报危险得多，因为它连 unresolved 都不产，扫描器看上去一切正常。
+
+    ★另一面是**字面量初值**：``m = {"a": 1}`` 之后直接整体赋值，键从没经过下标写入，
+      只靠反向别名救不回来，必须单独把初值的键取出来登记。
+    """
+    assert _keys(src, "write") == expect, "来源可证的本地字典，键被静默丢弃"
+    assert not _dynamic(src), "来源与增键操作都可证，不该再记 unresolved"
+
+
+def test_dynamic_key_written_into_a_local_dict_is_still_surfaced() -> None:
+    """★来源可证**不等于**每个键都认得：动态键仍须落 unresolved。"""
+    src = 'def f(result, k):\n    m = {}\n    m[k] = 1\n    result.meta = m'
+
+    assert _keys(src, "write") == {"<dynamic>"}, "本地字典里的动态键被吞了"
+
+
+def test_local_dict_stored_under_meta_key_remains_nested() -> None:
+    """局部字典挂进一个顶层键后，其子键不能被提升成顶层权限。"""
+    src = '''
+def f(result):
+    meta = {"verdict": "unknown"}
+    result.meta["repack_identity"] = meta
+    meta.update({"signals": []})
+'''
+    assert _keys(src, "write") == {"repack_identity"}
+
+
+NESTED_SCOPE_CASES = [
+    pytest.param(
+        'K = "real_key"\ndef outer(meta):\n    def inner():\n        K = "shadow"\n    meta[K] = 1',
+        id="嵌套函数里的同名绑定不影响外层",
+    ),
+    pytest.param(
+        'K = "real_key"\ndef f(meta):\n    xs = [x for K in seq]\n    meta[K] = 1',
+        id="comprehension 的循环变量不泄漏",
+    ),
+    pytest.param(
+        'K = "real_key"\ndef f(meta):\n    g = lambda K: K\n    meta[K] = 1',
+        id="lambda 参数不泄漏",
+    ),
+]
+
+
+@pytest.mark.parametrize("src", NESTED_SCOPE_CASES)
+def test_nested_scopes_do_not_poison_the_outer_constant(src: str) -> None:
+    """★嵌套函数 / comprehension / lambda 是独立作用域，其绑定不该让外层常量失效。
+
+    早先用 ``ast.walk`` 收集整个函数体的绑定，于是内层的 ``K = "shadow"`` 会把外层
+    本可安全解析的 ``K`` 也一并失效。这不产生错值（方向安全），但会**虚增 unresolved**——
+    而 unresolved 的数量正是「基线能不能冻结」的判据，虚高会让判断失真。
+    """
+    assert _keys(src, "write") == {"real_key"}, "嵌套作用域的绑定污染了外层常量"
+
+
+NOT_REPORT_META_CASES = [
+    pytest.param('def f():\n    meta: dict = field(default_factory=dict)', id="dataclass 字段声明"),
+    pytest.param('def f(x):\n    merged_meta = {"alg": x}\n    return merged_meta',
+                 id="碰巧叫 merged_meta 的局部字典"),
+    pytest.param('def f(pkt):\n    meta = parse_quic_header(pkt)', id="碰巧叫 meta 的解析结果"),
+    pytest.param('def f(tpl, report):\n    return tpl.render(meta=report.meta)',
+                 id="模板渲染传参（纯消费）"),
+    pytest.param('def f(x):\n    return helper(meta=x)', id="任意函数的 meta= 关键字"),
+]
+
+
+@pytest.mark.parametrize("src", NOT_REPORT_META_CASES)
+def test_things_that_merely_look_like_report_meta_are_not_counted(src: str) -> None:
+    """★叫 ``meta`` 不等于就是 ``Report.meta``——这类不得计入写入或动态点。
+
+    复审逐项核过：早先版本把 19 处这样的东西报成了「开放整体写入」，其中包括
+    dataclass 字段声明、`merge.py` 里碰巧叫 ``merged_meta`` 的 crypto 子字典、
+    `pcap_ingest.py` 里的 QUIC 包头解析结果、以及 ``template.render(meta=...)``。
+
+    误报的代价不比漏报小：它会把「哪里还有开放写入」这个判断整个污染掉，
+    让人以为有 19 个口子要堵，而真正的口子淹没在噪音里。
+    """
+    accesses = meta_scan.scan_source(src)
+    assert not accesses, f"非 report.meta 的东西被计入了：{accesses}"
+
+
+def test_same_stem_modules_do_not_share_a_constant_table(tmp_path: Path) -> None:
+    """★符号表按完整模块路径建，不用文件名短名。
+
+    本仓真实存在 ``apkscan/commands/corpus.py`` 与 ``apkscan/core/corpus.py``
+    （另有三个 ``models.py``）。短名做键会把两张常量表合并，
+    后扫描的模块无声覆盖先扫描的，于是跨模块常量键可能解析到**错的值**。
+    """
+    (tmp_path / "apkscan" / "a").mkdir(parents=True)
+    (tmp_path / "apkscan" / "b").mkdir(parents=True)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "apkscan" / "a" / "dup.py").write_text('K = "from_a"\n', encoding="utf-8")
+    (tmp_path / "apkscan" / "b" / "dup.py").write_text('K = "from_b"\n', encoding="utf-8")
+    (tmp_path / "apkscan" / "user.py").write_text(
+        "from apkscan.b.dup import K\ndef f(meta):\n    meta[K] = 1\n", encoding="utf-8"
+    )
+
+    res = meta_scan.scan_repository(tmp_path)
+    assert "from_b" in res.produced, f"跨模块常量解析到了错的表：{sorted(res.produced)}"
+    assert "from_a" not in res.produced
+
+
+def test_constant_resolution_refuses_to_guess() -> None:
+    """解析边界必须收窄：认不出就落 unresolved，**绝不猜**。
+
+    重赋值、条件赋值、函数调用产生的键一律不解析——宁可少认，不可猜错：
+    猜错会把一个真实键登记成错的名字，比不认更糟（基线从此建在错的集合上）。
+    """
+    # 重赋值 → 放弃
+    src = 'K = "a"\nK = "b"\ndef f(meta):\n    meta[K] = 1\n'
+    assert _dynamic(src), "重赋值的常量被猜了一个值"
+    # 函数调用产生的键 → 不解析
+    src2 = 'def f(meta):\n    meta[make_key()] = 1\n'
+    assert _dynamic(src2)
+
+
+def test_bounded_key_family_is_not_an_open_dynamic_key() -> None:
+    """有限键族（``coverage_meta_key(analyzer, "read_failed")``）不算开放动态键。
+
+    ★这四个键记录的是「列举失败 / 文件数被截 / 读取失败 N 份 / 单份内容被截」——
+      也就是**「我没看全」**。它们此前是 f-string 动态键，静态扫描认不出，于是既进不了
+      契约、也无法被「有没有人消费」的检查覆盖；而缺了它们，「未发现某后端」与
+      「确实没有该后端」在报告里长得一模一样。
+
+    收敛成工厂函数后，定义域静态封闭（有限后缀表 × 权威注册表里的分析器名），
+    应记为族访问而非 unresolved。
+    """
+    src = 'def f(result, analyzer):\n    result.meta[coverage_meta_key(analyzer, "read_failed")] = 3\n'
+    acc = meta_scan.scan_source(src)
+    fams = [a for a in acc if a.key.startswith("<family:")]
+    assert fams, "有限键族被当成了开放动态键"
+    assert fams[0].key == "<family:web_coverage:read_failed>"
+    assert not [a for a in acc if a.key.startswith("<dynamic")], "同一处被重复记成了动态键"
+
+
+def test_coverage_key_domain_comes_from_registry_not_runtime() -> None:
+    """★键族的取值域必须来自**权威分析器注册表**，不是「运行时碰巧跑过的名字」。
+
+    否则一个因能力门控而未运行的分析器会从契约里整个消失，
+    它那份「我没看全」的事实也就无从登记——而那恰恰是最该留痕的情形。
+    """
+    from apkscan.analyzers.web_evidence import COVERAGE_SUFFIXES, iter_coverage_meta_keys
+    from apkscan.core.registry import discover_analyzers
+
+    web = sorted(a.name for a in discover_analyzers()
+                 if "web" in (getattr(a, "requires", None) or []))
+    keys = iter_coverage_meta_keys()
+    assert web, "没发现 web 分析器，取值域为空则本条失去意义"
+    assert len(keys) == len(web) * len(COVERAGE_SUFFIXES)
+    for name in web:  # 每个注册的分析器都必须在键族里，一个都不能少
+        for suf in COVERAGE_SUFFIXES:
+            assert f"{name}_{suf}" in keys
+
+
+def test_coverage_key_rejects_suffix_outside_the_family() -> None:
+    """表外后缀必须当场拒绝，不能悄悄造出一个契约管不着的键。
+
+    ★这是键族「定义域封闭」的兜底：若手滑写成 ``coverage_meta_key(a, "read_faild")``
+      而工厂照单全收，就会凭空产生一个既不在契约、也没人消费的键——
+      而它本该承载「我没看全」这类最不该丢的事实。静态扫描只认得族标记，
+      拦不住这种拼写错误，只有运行期校验能。
+    """
+    from apkscan.analyzers.web_evidence import coverage_meta_key
+
+    assert coverage_meta_key("web_inline_config", "read_failed") == "web_inline_config_read_failed"
+    with pytest.raises(ValueError):
+        coverage_meta_key("web_inline_config", "read_faild")  # 拼写错误
+    with pytest.raises(ValueError):
+        coverage_meta_key("web_inline_config", "whatever")
+
+
+# --- 未建模的字典方法：绕过通道，必须可见 ------------------------------------
+
+
+def test_dunder_setitem_is_modeled_like_subscript_assignment() -> None:
+    """``meta.__setitem__("k", v)`` 键位置明确，必须与下标赋值同等登记。
+
+    ★复审实证（P0）：此前它连一个 Access 都不产——既不进 produced 也不进
+      unresolved，这样写的真实写入永远进不了孤儿基线，测试保持全绿。
+      这直接违反扫描器「绝不静默跳过」的核心承诺。
+    """
+    assert _keys('report.meta.__setitem__("ghost", 1)', "write") == {"ghost"}
+
+
+UNMODELED_METHOD_CASES = [
+    pytest.param('report.meta.popitem()', id="popitem"),
+    pytest.param('report.meta.absorb(x)', id="任意未知方法"),
+    pytest.param('report.meta.__delitem__("k")', id="__delitem__（未建模）"),
+    pytest.param('getattr(report.meta, "update")({"ghost2": 1})', id="getattr 拿方法"),
+    pytest.param('meta.__setitem__(key_var, 1)', id="__setitem__ 动态键"),
+]
+
+
+@pytest.mark.parametrize("src", UNMODELED_METHOD_CASES)
+def test_unmodeled_method_on_meta_receiver_is_surfaced(src: str) -> None:
+    """★meta receiver 上任何未建模的方法调用至少要落 unresolved。
+
+    静默返回空 = 给绕过留一条无声的路：``popitem`` / ``getattr(meta, ...)``
+    这类写法的真实写入不会被任何契约看见（复审 P0 实证三种构造）。
+    """
+    assert _dynamic(src), f"未建模方法被静默跳过：{src!r}"
+
+
+def test_key_neutral_dict_methods_stay_silent() -> None:
+    """已建模且不动具体键的方法（items/keys/copy/clear…）不得制造噪音——
+    unresolved 虚高会让「基线能不能冻结」的判断失真。"""
+    src = ("x = list(report.meta.items())\n"
+           "y = report.meta.keys()\n"
+           "z = report.meta.copy()\n")
+    assert not meta_scan.scan_source(src), "键中立方法被误报"
+
+
+@pytest.mark.parametrize("src", DYNAMIC_CASES)
+def test_dynamic_keys_are_surfaced_not_dropped(src: str) -> None:
+    """★动态键必须记进 unresolved。
+
+    静默跳过等于给「绕过契约」留一条无声的路：写 ``meta[k] = v`` 就能凭空造一个
+    不在任何基线里的键，而没有任何检查会红。这与本机制要治的缺陷是同一形态。
+    """
+    assert _dynamic(src), f"动态键被静默跳过了：{src!r}"
+
+
+# --- 生产 / 测试消费必须分开 -------------------------------------------------
+
+
+def test_production_and_test_consumers_are_separated(tmp_path: Path) -> None:
+    """★这条锁的是那 66 个「只有测试读」的键。
+
+    若扫描把 tests/ 的读取算作消费方，这批键会假装合格通过检查——
+    而它们恰恰是问题最集中的一批（有人写、有测试读、但**产物链路上无人消费**）。
+    """
+    (tmp_path / "apkscan").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "apkscan" / "w.py").write_text(
+        'def f(report):\n    report.meta["only_test_reads"] = 1\n', encoding="utf-8"
+    )
+    (tmp_path / "tests" / "t.py").write_text(
+        'def test_x(report):\n    assert report.meta.get("only_test_reads")\n', encoding="utf-8"
+    )
+
+    res = meta_scan.scan_repository(tmp_path)
+
+    assert "only_test_reads" in res.produced
+    assert "only_test_reads" in res.test_consumed
+    assert "only_test_reads" not in res.production_consumed
+    assert "only_test_reads" in res.orphans(), "测试读取被误算成生产消费方"
+
+
+def test_repository_scan_finds_real_known_keys() -> None:
+    """在真仓库上跑一遍，锚定几个已知键，防止扫描器整体失效后所有断言空对空。"""
+    root = Path(__file__).resolve().parents[2]
+    res = meta_scan.scan_repository(root)
+
+    assert len(res.produced) > 50, f"只扫到 {len(res.produced)} 个 meta 键，扫描器可能整体失效"
+    # 这三个键的存在与消费关系是本次调查中人工确认过的事实
+    assert "dex_strings_truncated" in res.produced
+    assert "dex_strings_truncated" in res.production_consumed  # core/visibility.py 读它
+    assert "app_classification" in res.produced
+
+
+def test_analyzer_unresolved_writes_match_reviewed_baseline() -> None:
+    """分析器目录的开放写入逐点冻结；新增动态键必须先被人工建模。"""
+    root = Path(__file__).resolve().parents[2]
+    res = meta_scan.scan_repository(root)
+    got = {
+        (access.file, access.key)
+        for access in res.unresolved
+        if access.kind == "write" and access.file.startswith("apkscan/analyzers/")
+    }
+    assert got == {("apkscan/analyzers/manifest.py", "<dynamic:whole-meta>")}
+
+
+def _dex_helper_result_owners(root: Path) -> set[str]:
+    """找出把 ``result`` 传给共享 DEX helper 的分析器。
+
+    这是 ``_common`` 跨文件写入的真实 owner 传播边：调用方虽没在本文件
+    直接写键，helper 会写进它传入的 AnalyzerResult。
+    """
+    owners: set[str] = set()
+    for path in (root / "apkscan" / "analyzers").glob("*.py"):
+        if path.name == "_common.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        helper_names = {"collect_dex_strings", "_collect_dex_strings_shared", "_collect_dex_strings"}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            # ★属性形态也要认：``_common.collect_dex_strings(...)`` / ``self._collect_dex_strings(...)``。
+            #   只认 ``ast.Name`` 会漏掉这种写法，于是新分析器不会被登记、也不会被本测试挑出，
+            #   到运行时截断样本上整块 meta 被拒——正是本轮 packing/re_toolkit 那个缺陷的下一次复发。
+            fn = node.func
+            name = fn.id if isinstance(fn, ast.Name) else (fn.attr if isinstance(fn, ast.Attribute) else "")
+            if name not in helper_names:
+                continue
+            if any(kw.arg == "result" and not (
+                isinstance(kw.value, ast.Constant) and kw.value.value is None
+            ) for kw in node.keywords):
+                owners.add(path.stem)
+                break
+    return owners
+
+
+def test_common_meta_writes_have_explicit_compensation() -> None:
+    """共享 helper 的写入面必须显式冻结，不能靠跳过 ``_common`` 放行新键。"""
+    root = Path(__file__).resolve().parents[2]
+    res = meta_scan.scan_repository(root)
+    common_writes = {
+        key
+        for key, accesses in res.produced.items()
+        if any(a.kind == "write" and a.file == "apkscan/analyzers/_common.py" for a in accesses)
+    }
+    common_unresolved = {
+        a.key for a in res.unresolved
+        if a.kind == "write" and a.file == "apkscan/analyzers/_common.py"
+    }
+    assert common_writes == {"dex_strings_truncated"}
+    assert common_unresolved == set()
+
+
+def _owners_for_access(file: str, key: str) -> set[str]:
+    module = Path(file).stem
+    if module == "web_evidence":
+        return {
+            name for name in ("web_inline_config", "web_redirect_chain", "web_request_recipe")
+            if key.startswith(f"{name}_") or key == name
+        }
+    return {module}
+
+
+def _static_meta_declaration(
+    path: Path,
+) -> tuple[str, set[str], dict[str, str], set[str]] | None:
+    """读取模块内的非分析器声明，不 import 生产模块、不给测试引入副作用。"""
+    values: dict[str, object] = {}
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in tree.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if len(targets) != 1 or not isinstance(targets[0], ast.Name):
+            continue
+        name = targets[0].id
+        value = node.value
+        if name == "META_WRITE_OWNER" and value is not None:
+            values[name] = ast.literal_eval(value)
+        elif name == "META_WRITE_CATEGORIES" and value is not None:
+            values[name] = ast.literal_eval(value)
+        elif name == "META_CATEGORY_PENDING" and value is not None:
+            assert isinstance(value, ast.Call) and len(value.args) == 1
+            values[name] = set(ast.literal_eval(value.args[0]))
+        elif (
+            name == "META_WRITE_KEYS"
+            and isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "frozenset"
+            and len(value.args) == 1
+            and isinstance(value.args[0], ast.Name)
+            and value.args[0].id == "META_WRITE_CATEGORIES"
+        ):
+            values[name] = set(values.get("META_WRITE_CATEGORIES", {}))
+    if not values:
+        return None
+    required = {"META_WRITE_OWNER", "META_WRITE_CATEGORIES", "META_WRITE_KEYS"}
+    assert required <= set(values) <= required | {"META_CATEGORY_PENDING"}, (
+        f"{path}: meta 写入声明必须同时包含 owner、categories 与 keys"
+    )
+    owner = values["META_WRITE_OWNER"]
+    keys = values["META_WRITE_KEYS"]
+    categories = values["META_WRITE_CATEGORIES"]
+    pending = values.get("META_CATEGORY_PENDING", set())
+    assert isinstance(owner, str) and owner
+    assert isinstance(keys, set) and all(isinstance(key, str) and key for key in keys)
+    assert isinstance(categories, dict) and set(categories) == keys
+    assert set(categories.values()) <= {"signal", "record", "coverage"}
+    assert isinstance(pending, set) and pending <= keys
+    assert all(categories[key] == "signal" for key in pending)
+    return owner, keys, categories, pending
+
+
+def _owner_from_module_path(file: str) -> str:
+    """owner 就是产生层的模块路径；由路径推导，避免另建中心 owner 清单。"""
+    path = Path(file)
+    parts = list(path.with_suffix("").parts)
+    assert parts[0] == "apkscan"
+    parts = parts[1:]
+    if parts[-1] == "__init__":
+        parts.pop()
+    return ".".join(parts)
+
+
+def test_analyzer_meta_declarations_match_all_static_writes_both_ways() -> None:
+    """具体键、有限键族、共享 helper 写入都必须与分析器声明双向一致。"""
+    from apkscan.core.meta_contract import META_KEY_REGISTRY, PIPELINE_OWNER
+    from apkscan.analyzers.web_evidence import iter_coverage_meta_keys
+    from apkscan.core.registry import discover_analyzers
+
+    root = Path(__file__).resolve().parents[2]
+    res = meta_scan.scan_repository(root)
+    observed: set[tuple[str, str]] = set()
+    analyzers = discover_analyzers()
+    for analyzer in analyzers:
+        assert set(analyzer.meta_key_categories) == set(analyzer.meta_keys), (
+            f"{analyzer.name}: 类别声明与 meta_keys 不一致"
+        )
+        assert set(analyzer.meta_key_categories.values()) <= {"signal", "record", "coverage"}
+    declared = {(key, analyzer.name) for analyzer in analyzers for key in analyzer.meta_keys}
+
+    # 普通字面量写入。classify 写 report.meta，属于 pipeline 后阶段，不是分析器返回块。
+    for key, accesses in res.produced.items():
+        for access in accesses:
+            if not access.file.startswith("apkscan/analyzers/"):
+                continue
+            module = Path(access.file).stem
+            if module in {"_common", "classify"}:
+                continue
+            owners = _owners_for_access(access.file, key)
+            declared_owners = {owner for declared_key, owner in declared if declared_key == key}
+            assert owners & declared_owners, (
+                f"{access.file}:{access.line} 写入 {key!r}，但分析器未声明：{owners}"
+            )
+            observed.update((key, owner) for owner in owners)
+
+    # 有限键族不在 produced：扫描器把它单独放在 families，必须显式展开。
+    assert any(a.key.startswith("<family:web_coverage:") for a in res.families)
+    for key in iter_coverage_meta_keys():
+        owners = _owners_for_access("apkscan/analyzers/web_evidence.py", key)
+        declared_owners = {owner for declared_key, owner in declared if declared_key == key}
+        assert owners & declared_owners, f"有限键族 owner 未声明：{key!r} -> {owners}"
+        observed.update((key, owner) for owner in owners)
+
+    # _common 是真实写入点，owner 是把自己 result 传给 helper 的调用方。
+    helper_owners = _dex_helper_result_owners(root)
+    truncation_owners = {owner for key, owner in declared if key == "dex_strings_truncated"}
+    assert helper_owners <= truncation_owners, (
+        f"共享 DEX helper 的 owner 未声明：{sorted(helper_owners - truncation_owners)}"
+    )
+    observed.update(("dex_strings_truncated", owner) for owner in helper_owners)
+
+    # 反向核对：每个声明项都必须有可见的生产写入路径。
+    assert declared == observed, (
+        f"分析器声明/静态生产路径漂移："
+        f"只在声明={sorted(declared - observed)}；"
+        f"只在生产路径={sorted(observed - declared)}"
+    )
+    for analyzer in analyzers:
+        for key, category in analyzer.meta_key_categories.items():
+            assert META_KEY_REGISTRY[key].category == category
+
+    derived = META_KEY_REGISTRY["dex_strings_truncated_by"]
+    assert derived.owners == frozenset({PIPELINE_OWNER}), "派生键必须登记为 pipeline 所有"
+    missing = META_KEY_REGISTRY["missing_analyzers"]
+    assert missing.owners == frozenset({PIPELINE_OWNER}), "缺席留痕键必须登记为 pipeline 所有"
+
+
+def test_non_analyzer_meta_declarations_match_all_static_writes_both_ways() -> None:
+    """第一方 stage 的模块内声明与实际写入必须键、owner 双向一致。"""
+    root = Path(__file__).resolve().parents[2]
+    res = meta_scan.scan_repository(root)
+    excluded = {"apkscan/core/report_io.py"}  # 反序列化边界按设计开放
+    observed_files = {
+        access.file
+        for accesses in res.produced.values()
+        for access in accesses
+        if access.kind == "write"
+        and access.file.startswith("apkscan/")
+        and not access.file.startswith("apkscan/analyzers/")
+        and access.file not in excluded
+    }
+
+    declared: set[tuple[str, str]] = set()
+    for path in (root / "apkscan").rglob("*.py"):
+        declaration = _static_meta_declaration(path)
+        if declaration is None:
+            continue
+        file = path.relative_to(root).as_posix()
+        owner, keys, _categories, _pending = declaration
+        assert file in observed_files, f"{file} 有 meta 声明但没有生产写入"
+        expected_owner = _owner_from_module_path(file)
+        assert owner == expected_owner, f"{file} owner 应为 {expected_owner!r}，实际 {owner!r}"
+        declared.update((key, owner) for key in keys)
+
+    observed = {
+        (key, _owner_from_module_path(access.file))
+        for key, accesses in res.produced.items()
+        for access in accesses
+        if access.kind == "write" and access.file in observed_files
+    }
+    assert declared == observed, (
+        "非分析器声明/静态生产路径漂移："
+        f"只在声明={sorted(declared - observed)}；"
+        f"只在生产路径={sorted(observed - declared)}"
+    )
+
+
+def test_template_scan_catches_jinja_reads() -> None:
+    """模板是独立一路证据：本仓模板里有 ``meta.get("uniapp")`` 这类兼容旧键的读法，
+    漏扫会把仍在被渲染的键误判成孤儿。"""
+    root = Path(__file__).resolve().parents[2]
+    tpl_keys = meta_scan.scan_templates(root / "apkscan")
+    assert tpl_keys, "模板里一个 meta 读取都没扫到，正则或路径有问题"
+
+
+TEMPLATE_INERT_CASES = [
+    pytest.param('{# meta.get("ghost") 已下线 #}', id="Jinja 注释"),
+    pytest.param('{#\n  meta.get("ghost")\n#}', id="多行注释"),
+    pytest.param('{% raw %}meta.get("ghost"){% endraw %}', id="raw 块"),
+    pytest.param('{%- raw -%}\nmeta.get("ghost")\n{%- endraw -%}', id="带 trim 的多行 raw 块"),
+    pytest.param('{# 注释里的开启符 {% raw %} #}\n{# meta.get("ghost") #}', id="注释里的 raw 开启符"),
+    pytest.param('{# 没闭合的注释\nmeta.get("ghost")', id="未闭合区域置空到文件尾"),
+]
+
+
+@pytest.mark.parametrize("text", TEMPLATE_INERT_CASES)
+def test_template_inert_regions_are_not_consumption(text: str, tmp_path: Path) -> None:
+    """★注释与 raw 块里的文本不是消费（复审 P1-2 实证）。
+
+    否则把一处模板输出「注释掉下线」时，真实消费已消失而基线不红——真孤儿隐形。
+    这两类区域词法上确定不渲染，可以静态剔除；``{% if false %}`` 这类恒假分支
+    是控制流性质，刻意不做（见 ``_strip_inert_template_regions`` 的文档）。
+    """
+    (tmp_path / "t.j2").write_text(text, encoding="utf-8")
+    assert "ghost" not in meta_scan.scan_templates(tmp_path), f"惰性区域被算成了消费：{text!r}"
+
+
+def test_template_live_read_survives_stripping_with_correct_line(tmp_path: Path) -> None:
+    """剔除惰性区域不能伤及活读取，且行号不许漂移（基线红时要靠它定位）。"""
+    text = '{#\n 两行注释 \n#}\n{{ meta.get("alive") }}\n'
+    (tmp_path / "t.j2").write_text(text, encoding="utf-8")
+    got = meta_scan.scan_templates(tmp_path)
+    assert "alive" in got, "活读取被误剔除"
+    assert got["alive"][0].line == 4, "剔除后行号漂移"

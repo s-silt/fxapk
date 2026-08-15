@@ -1,0 +1,260 @@
+name: CI
+
+# PR 是主门（master 受分支保护：required checks + strict up-to-date）；push 兜底
+# admin 直推并让 README 的 CI 徽章反映 master 实际状态；workflow_dispatch 留手动入口。
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: lint + typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # ★PII 硬防线：语料库/案件数据只能经 FXAPK_CORPUS 存在 OneDrive，绝不入 git。真正的 PII 载荷是
+      #   报告全文 reports/<sha>/<tv>_<digest>.report.json（含真实 IOC/案件线索），不止派生索引
+      #   manifest.jsonl / ioc_index.jsonl——三者任一被跟踪即视为误提交、CI 红。
+      - name: Guard — no corpus/case data committed
+        run: |
+          if git ls-files | grep -E '(^|/)(manifest\.jsonl|ioc_index\.jsonl)$|\.report\.json$'; then
+            echo "::error::corpus/case data (*.report.json / manifest.jsonl / ioc_index.jsonl) must never be committed — it belongs in OneDrive via FXAPK_CORPUS"
+            exit 1
+          fi
+          echo "no corpus data files tracked — OK"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install deps + linters
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e "."
+          # Pinned: the lint gate must be deterministic — unpinned ruff lets a
+          # release with changed defaults/rules silently alter what CI enforces.
+          python -m pip install "ruff==0.15.15" pyright
+      - name: Ruff (lint)
+        run: python -m ruff check apkscan tests
+      - name: Pyright (type check)
+        run: python -m pyright apkscan
+
+  leak-scan:
+    # ★第二道防线：本地 pre-commit hook 可被 --no-verify 跳过，CI 不能。
+    #   判据只施加在 PR 的**新增行**上——仓库既有正常文字与合成夹具数以千计，
+    #   对全树施压会产生海量误报，误报多到一定程度人就会习惯性加豁免、护栏随之失效。
+    name: leak scan (PR diff)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # 需要 base 与 head 两侧历史才能算 diff；默认浅克隆只有一个 commit。
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e "."
+      - name: Scan added lines for leaked literals (strict)
+        run: |
+          # 不加 --depth：`base...HEAD` 要算 merge-base，浅历史会让它失败（继而误红/误绿）。
+          git fetch --no-tags origin "${{ github.base_ref }}"
+          # --strict：新增行上连 domain / context 两条判据也阻断。这两条对**全树**噪音太大
+          # （见下面 full-tree 关只压默认判据），但对"这个 PR 新写的行"完全可控：写的人当场
+          # 就能改成 example.com / .test，或加带理由的行内豁免。少了 --strict，新域名字面与
+          # 语境框架词只会打印一行"提示"然后 exit 0 —— 那两条判据在 CI 里等于不存在。
+          python -m apkscan.cli leak-scan --base "origin/${{ github.base_ref }}" --strict
+
+  leak-scan-full-tree:
+    # ★第三道防线：diff 判据只看**新增行**，故合并前已存在的阻断项会被永久 grandfather。
+    #   这一关对**全树**施压并要求恒为 0：清理过的树只要有人加回一条无豁免的公网字面
+    #   （哪怕是改动既有行），这里就红。与上面的 diff 关是**互补**关系，不替代它：
+    #   diff 关在 PR 上更严（strict 档连 domain/context 都拦），本关只压默认阻断判据。
+    name: leak scan (full tree, must be 0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e "."
+      - name: Default blocking findings across tracked apkscan/ + tests/ must be 0
+        # --tracked：只扫 git 已跟踪文件。不加它会连 CI 上的未跟踪产物（安装期生成物、
+        # 缓存解包内容）一起扫，门禁就会随运行环境漂移；枚举不到文件时 CLI exit 2，
+        # 「少扫了」不会与「扫全了」同形。
+        run: python -m apkscan.cli leak-scan --tracked --path apkscan --path tests
+
+  test:
+    name: pytest (${{ matrix.os }} / py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux 跑全 Python 版本；macOS / Windows 各跑一版验跨平台（路径/编码/换行等平台差异）。
+        os: [ubuntu-latest]
+        python-version: ["3.11", "3.12"]
+        include:
+          - os: macos-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.12"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install package + test deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e "."
+          # build/setuptools/wheel：test_version_artifacts.py 的产物级测试要跑
+          # `python -m build --no-isolation`，三者缺一测试就地 skip。矩阵关必须
+          # 显式装上让它们真跑——守门测试静默 skip 等于没有门（#363 红叉根因）。
+          # pytest-xdist：全量并行（-n auto），计费按 job 时长、并行直接省分钟。
+          python -m pip install pytest pytest-cov pytest-xdist build "setuptools>=68" wheel
+      # 覆盖率门禁只在 Linux 跑（基线 83%，阈值 80 留 3% 余量）。macOS/Windows 覆盖到的行不同
+      # （平台分支），共用一个阈值会假红；那两个 job 只验跨平台正确性，不做覆盖率门禁。
+      - name: Run tests + coverage gate (Linux)
+        if: runner.os == 'Linux'
+        # FXAPK_REQUIRE_BUILD_TOOLCHAIN=1：产物级版本测试在矩阵关缺构建链时必须 fail
+        # 而非 skip——否则上面的安装行被改掉后守门测试会静默消失、CI 照绿。
+        env:
+          FXAPK_REQUIRE_BUILD_TOOLCHAIN: "1"
+        run: >-
+          python -m pytest -q -n auto
+          --cov=apkscan --cov-report=term-missing:skip-covered --cov-fail-under=80
+      - name: Run tests (macOS / Windows)
+        if: runner.os != 'Linux'
+        env:
+          FXAPK_REQUIRE_BUILD_TOOLCHAIN: "1"
+        run: python -m pytest -q -n auto
+      # ★合成基线不可变守卫：CI 运行期间 tests/synthetic（快照基线 + 检出基线 + 夹具）被任何
+      #   步骤改写即红。测试进程内的 env 自检（test_baseline_update_env_var_not_set）只看得见
+      #   pytest 自己的环境——"某步骤先设 APKSCAN_ALLOW_BASELINE_UPDATE=1 跑更新器、unset 后
+      #   再跑 pytest"它是盲的，基线已被重写而漂移测试照绿。这一步看的是文件本身：基线更新
+      #   只能发生在 PR diff 里、被人 review，不得发生在 CI 运行时。
+      - name: Guard — synthetic baselines untouched during CI
+        run: git diff --exit-code -- tests/synthetic
+
+  locked-env:
+    # ★取证复现关：上面的矩阵装的是**当下最新**的依赖，验的是"跟着上游走还没坏"；
+    #   这一关装 requirements.lock 钉死的那组，验的是"照锁装出来的环境仍能跑出结果"。
+    #   两关是互补的：只有前者，锁会悄悄烂掉（没人装过，装不起来也没人知道）；
+    #   只有后者，上游破坏性变更要等到下次升级才暴露。
+    name: pytest (locked forensic env)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install from lock
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.lock
+          # --no-deps：不加会让 pip 重新解析依赖，把刚锁住的版本又升上去，这一关就白跑了。
+          python -m pip install --no-deps .
+          # 有意不装 build/setuptools/wheel：锁环境对齐真实取证部署、不混构建工具链，
+          # test_version_artifacts 的产物级测试在本关按 skip 通过（矩阵关 + package-smoke 已覆盖）。
+          # pytest/pytest-xdist 是锁外的测试工具，不属于取证运行时依赖。
+          python -m pip install pytest pytest-xdist
+      - name: Assert the installed versions match the lock
+        # 装完再核一遍：锁写了什么与实际装成什么之间，只有这一步能证明没有偏差。
+        run: |
+          python - <<'PY'
+          import re, subprocess, sys
+          pin = re.compile(r"^([A-Za-z0-9._-]+)==([^\s;]+)")
+          norm = lambda s: re.sub(r"[-_.]+", "-", s).lower()
+          want = {}
+          for line in open("requirements.lock", encoding="utf-8"):
+              line = line.strip()
+              if not line or line.startswith("#"):
+                  continue
+              if 'sys_platform == "win32"' in line:
+                  continue  # 本关跑在 Linux 上，Windows-only 项按标记跳过
+              m = pin.match(line)
+              want[norm(m.group(1))] = m.group(2)
+          got = {}
+          for line in subprocess.run([sys.executable, "-m", "pip", "freeze"],
+                                     capture_output=True, text=True, check=True).stdout.splitlines():
+              m = pin.match(line.strip())
+              if m:
+                  got[norm(m.group(1))] = m.group(2)
+          bad = {k: (v, got.get(k)) for k, v in want.items() if got.get(k) != v}
+          if bad:
+              print("锁与实际安装版本不一致（包: 锁 / 实际）:")
+              for k, (w, g) in sorted(bad.items()):
+                  print(f"  {k}: {w} / {g}")
+              sys.exit(1)
+          print(f"锁住的 {len(want)} 个包全部按版本装到位。")
+          PY
+      - name: Run tests in the locked environment
+        run: python -m pytest -q -n auto
+      # 同 test job 的基线不可变守卫（这个 job 也跑全量 pytest，同样的绕闸面）。
+      - name: Guard — synthetic baselines untouched during CI
+        run: git diff --exit-code -- tests/synthetic
+
+  package-smoke:
+    name: package smoke (wheel install)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+      - name: Install built wheel in a clean venv and smoke-test
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/python -m pip install --upgrade pip
+          /tmp/smoke/bin/python -m pip install dist/*.whl
+          # 入口 console_script 装包后可用。
+          /tmp/smoke/bin/fxapk --version
+          # ★关键：rules/*.yaml 等 package-data 真打进 wheel 且可被 importlib.resources 读到。
+          #   纯源码测试跑不出这类“忘打数据文件 → pip 装完加载不了规则”的发布事故。
+          /tmp/smoke/bin/python -c "from apkscan.core.registry import load_rules; assert all(load_rules(n) for n in ('packers','re_toolkit','app_types')), 'packaged rules missing from wheel'; print('packaged rules load OK')"
+
+  audit:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      # 审计**仅 fxapk 的依赖树**：把 fxapk 装进隔离 venv，不含 pip-audit 自身及其
+      # 依赖 / CI 工具——否则那些无关上游漏洞会让审计误红（pip-audit 的传递依赖爆 CVE 与本项目无关）。
+      - name: Install fxapk deps into an isolated venv
+        run: |
+          python -m venv /tmp/auditenv
+          /tmp/auditenv/bin/python -m pip install --upgrade pip
+          /tmp/auditenv/bin/python -m pip install "."
+      # pip-audit 装在 runner python（与被审 venv 隔离），--path 只审那个 venv 的 site-packages。
+      # 当前干净 → 阻断式门禁，只在**新**漏洞出现时变红；某上游漏洞暂无修复版时用 `--ignore-vuln <ID>`
+      # 显式豁免。不加 --strict：非 PyPI 的本地 fxapk 包会被跳过、--strict 会因此误红。
+      - name: Audit only the fxapk dependency tree
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          # sysconfig purelib = 真正的 site-packages（跨平台可靠；site.getsitepackages()[0] 在不同
+          # 平台可能是 venv 根，会让 --path 审到空目录、"无漏洞"假绿）。
+          SITE=$(/tmp/auditenv/bin/python -c "import sysconfig; print(sysconfig.get_path('purelib'))")
+          echo "auditing: $SITE"
+          test -d "$SITE" || { echo "site-packages 路径无效：$SITE"; exit 1; }
+          python -m pip_audit --path "$SITE"

@@ -1,0 +1,32 @@
+{
+  "admin-panel-login-url": [
+    "ADMIN_PANEL",
+    "DOMAIN"
+  ],
+  "backend-credential-db-dsn": [
+    "BACKEND_CREDENTIAL"
+  ],
+  "self-hosted-im-websocket": [
+    "DOMAIN",
+    "SELF_HOSTED_IM"
+  ],
+  "wallet-secret-mnemonic": [
+    "WALLET_SECRET"
+  ],
+  "fourth-party-payment-gateway": [
+    "DOMAIN",
+    "FOURTH_PARTY_PAYMENT",
+    "PAYMENT"
+  ],
+  "crypto-recipe-cryptojs-envelope": [
+    "CRYPTO_RECIPE"
+  ],
+  "card-merchant-keyword": [
+    "CARD_MERCHANT"
+  ],
+  "payment-sdk-alipay": [
+    "PAYMENT",
+    "SDK_SERVICE"
+  ],
+  "hardened-unidentified-stub": []
+}

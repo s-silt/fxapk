@@ -1,0 +1,106 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# 发行名 fxapk（PyPI）；CLI 命令 fxapk（保留 apkscan 别名）；内部 import 包仍为 apkscan。
+name = "fxapk"
+version = "1.6.1"
+description = "涉诈 APK 调证分析 CLI — 静态分析 + 配置键值/服务归属提取，产出调证线索清单"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "s-silt" }]
+keywords = [
+    "android", "apk", "forensics", "fraud", "reverse-engineering",
+    "security", "androguard", "调证", "反诈",
+]
+classifiers = [
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+    "Topic :: Security",
+    "Intended Audience :: Information Technology",
+]
+dependencies = [
+    # ★上界钉住 androguard 大版本：axml/dex 解析在大版本间会变（仓内 axml_nsmap_shim 即踩过坑），
+    #   取证的"同样本同版本→同结果"承诺不能被上游大版本漂移打破；升 5.x 须先验证解析一致再放开。
+    "androguard>=4.1,<5",
+    "jinja2",
+    "typer",
+    "python-whois",
+    "requests",
+    "pyyaml",
+    "psutil",  # 并行分析器 worker 数按可用内存封顶（pipeline._decide_workers）；缺失则退固定兜底
+]
+
+[project.urls]
+Homepage = "https://github.com/s-silt/fxapk"
+Repository = "https://github.com/s-silt/fxapk"
+Issues = "https://github.com/s-silt/fxapk/issues"
+
+[project.optional-dependencies]
+# packaging 显式声明：测试里用它做 PEP440 规范校验（发版护栏，缺失应让流水线失败而非跳过）。
+# 它虽是 pytest 的传递依赖，但依赖别人的传递关系来保证自己的护栏能跑，是隐含且易碎的约定。
+# build/setuptools：产物级版本一致性测试要真构建 wheel/sdist，且用 --no-isolation
+# 跑（否则 build 会自建隔离环境联网装 build-system.requires，CI 里既慢又不稳）。
+dev = ["pytest", "ruff", "pyright", "packaging>=22", "build>=1.2", "setuptools>=68", "wheel"]
+# PCAP-first 动态解析的深度能力：QUIC Initial 解密 / TLS 密钥派生需 cryptography（androguard 已传递引入，
+# 但正常安装不保证；显式声明使 `pip install fxapk[pcap]` 明确锁定该能力）。惰性引入，缺失则优雅降级为仅元数据。
+pcap = ["cryptography>=42.0"]
+dynamic = ["cryptography>=42.0"]
+# 串案学习排序仅在独立标签门槛通过后才惰性导入；普通分析/评测不安装重量级 ML 栈。
+# 锁住次版本，避免求解器或默认值漂移在同一训练数据上静默改变模型产物。
+ml = ["scikit-learn>=1.8,<1.9"]
+
+[project.scripts]
+fxapk = "apkscan.cli:main"
+apkscan = "apkscan.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["apkscan*"]
+
+[tool.setuptools.package-data]
+apkscan = ["rules/*.yaml", "rules/*.txt", "rules/**/*.yaml", "report/templates/*.j2"]
+# 内置 Frida JS hook 脚本（cryptohook 经 importlib.resources 读取，注入真机）——装后仍可读。
+"apkscan.dynamic" = ["frida_js/*.js"]
+
+[tool.pytest.ini_options]
+markers = [
+    # 重型真 spawn 端到端校验（加载真实 APK + 起进程池，~40s）。仅当显式设置
+    # FXAPK_TEST_APK=<样本路径> 时运行；普通工作树即使存有本地 APK 也保持 skip。
+    "slow: 重型/慢测试（真实 APK + 进程池真 spawn）",
+    "real_adb_path: 需要 tools.adb_path 的真实行为（退出 conftest 的 _no_real_adb 夹具）",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# Explicit select pinning ruff's historical default set (E4/E7/E9 + pyflakes).
+# The CI gate must not depend on ruff's *implicit* default ruleset: a ruff upgrade
+# that widens defaults (e.g. import sorting, RUF100 unused-noqa) would silently
+# change or break the gate. Wider rules (BLE/ANN/ARG) are used advisorily during
+# development but are not part of the enforced baseline.
+select = ["E4", "E7", "E9", "F"]
+# E741：歧义变量名 l —— 测试与推导式里 `for l in leads` 大量使用且可读，忽略此风格项。
+ignore = ["E741"]
+
+[tool.pyright]
+include = ["apkscan"]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+# 第三方依赖（androguard 等）无类型存根，缺存根不算错。
+reportMissingModuleSource = false
+# ★本地与 CI 看同一个依赖环境：不写这两行时 pyright 回落到 PATH 上的解释器（本机是装了
+#   可选 extra 的系统 Python），import 解析会比 CI（仅 `pip install -e "."`）宽——本地绿、
+#   CI 红（如 scikit-learn reportMissingImports）。钉住 .venv 后本地默认复现 CI 的缺包判定。
+#   CI runner 上没有 .venv：pyright 对缺失 venv 只打一行提示并回落到 PATH 解释器
+#   （即 CI 自己装依赖的那个 python），退出码不受影响——两侧行为均已实测
+#   （findPythonSearchPaths：venv 存在则无条件用其 site-packages，缺失则回落 pythonPath→PATH）。
+venvPath = "."
+venv = ".venv"

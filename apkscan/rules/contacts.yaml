@@ -1,0 +1,203 @@
+# 联系方式线索规则库 —— 直接落地线索（QQ / 微信 / Telegram / 邮箱 / 手机号）。
+#
+# 由 apkscan.analyzers.contacts 通过 registry.load_rules("contacts") 读取。
+# 顶层 dict：
+#   meta  : 全局兜底（默认可调取证据）
+#   types : list[联系方式类型规则]
+#
+# ---- types 规则字段 ----
+#   name              : 类型展示名（如 "QQ"）
+#   kind              : 机器标识（email/qq/wechat/telegram；phone 已于 2026-07-24 整类移除，见下文说明）
+#   subject           : 归属主体 / 平台（写入 Lead.subject）
+#   where_to_request  : 向谁调证（写入 Lead.where_to_request）
+#   confidence        : high/medium/low（默认 medium）
+#   patterns          : 正则列表（IGNORECASE）；若有捕获组取首个非空组为线索值，否则取整段
+#   blacklist         : 命中值若包含其中任一子串（大小写不敏感）则丢弃（去误报）
+#   evidence_to_obtain: 可调取证据（缺省用 meta 兜底）
+#   note              : 备注（写入 Lead.notes）
+#
+# 误报控制：手机号用前后非数字边界；QQ/微信要求上下文关键字；邮箱黑名单排除 @drawable 等资源引用。
+
+meta:
+  evidence_to_obtain:
+    - "账号实名注册信息"
+    - "绑定手机号 / 邮箱"
+    - "登录 IP 与设备信息"
+    - "依法可调取的通信 / 交易记录"
+
+types:
+  # ---------------- 邮箱 ----------------
+  - name: "邮箱"
+    kind: "email"
+    subject: "邮箱服务商（按域名定）"
+    where_to_request: "对应邮箱服务商（腾讯 / 网易 / Google 等）/ 域名注册商"
+    confidence: "medium"
+    # ★ 界定量词（local≤64 / 每段域名 label≤63 / 最多 9 段 / TLD 2–24）：全部有上界 →
+    #   线性匹配、无回溯。旧式 '[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}' 的
+    #   `[A-Za-z0-9.\-]+` 与 `\.` 字符类重叠（都含 `.`），且 local `+` 无上界，对长字母/点串
+    #   会 O(n²)~指数回溯（512KB 字体解码内容曾卡死 4.6 分钟）。域名按 label 拆分（label 字符类
+    #   不含 `.`）消除重叠歧义。真实邮箱全部落在该界内，命中集与旧式一致。
+    patterns:
+      - '[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9\-]{1,63}(?:\.[A-Za-z0-9\-]{1,63}){0,8}\.[A-Za-z]{2,24}'
+    blacklist:
+      - "@drawable"
+      - "@string"
+      - "@android"
+      - "@id/"
+      - "@style"
+      - "@color"
+      - "@mipmap"
+      - "@xml"
+      - "@layout"
+      - "@dimen"
+      - "@anim"
+      - "@array"
+      - "@integer"
+      - "@2x"
+      - "@3x"
+      - "schemas.android.com"
+      - "w3.org"
+      - "example.com"
+      - "@attr"
+      # ---- OSS 库作者邮箱 / 被 vendored 的 JS 里的作者邮箱（非 App 联系方式，C3 降噪）----
+      - "jack@greensock.com"     # GSAP 作者
+      - "greensock.com"          # GSAP 域
+      - "jhruby.web@gmail.com"   # JS 库作者
+      - "@sentry.io"
+      - "@babeljs.io"
+      - "@webpack.js.org"
+      - "@rollupjs.org"
+      - "@vuejs.org"
+      - "@reactjs.org"
+      - "support@apple.com"
+      - "support@google.com"
+      - "noreply@"               # 通用 no-reply
+      - "no-reply@"
+      - "donotreply@"
+    evidence_to_obtain:
+      - "邮箱注册实名信息 / 注册手机号"
+      - "登录 IP 与登录时间日志"
+      - "收发件记录（依法调取）"
+    note: "邮箱可定位注册主体；企业邮箱后缀可关联公司域名。"
+
+  # ---------------- 手机号（已于 2026-07-24 移除）----------------
+  # ★不再提取裸手机号。实证依据：语料库样本提取的唯一"手机号"，
+  #   逐条回原始 snippet 核验，**12/12 全部为误报**，且来源五花八门：
+  #     矢量图 path 坐标  'l 0.0,2.15845447942'      → 15845447942
+  #     Lottie 动画数值   '"op":180.18018018018'      → 18018018018
+  #     Lottie 颜色分量   '[…,0.18717955047,…]'       → 18717955047
+  #     数学常量 π        'const float PI = 3.14159265358' → 14159265358
+  #     SHA 初始常量      '…3adec17512775099da2f590…' → 17512775099
+  #     以太坊合约字节码  '…8063dd62ed3e14610211575b…' → 14610211575
+  #     货币配置          '"max_amount":"16175950000"' → 16175950000
+  #   正则边界修不干净：11 位数字窗口在浮点/十六进制/二进制串里无处不在，
+  #   加 (?<![\d.]) 只能挡住浮点那一类，挡不住十六进制串中间的数字段。
+  #   而该类型产出 advice=建议调证 + subject=电信运营商，等于建议使用者
+  #   拿假号去查证机主实名 —— 白费查证工作量、可能波及无关机主。
+  #   业务判断：嫌疑人不会把自己手机号编进 APK；真实联系方式走
+  #   QQ/微信/Telegram（本文件另有这些类型，且确有真命中）。
+  # ★注意：短信转发分析器（analyzers/sms_forwarding.py）另有手机号提取，
+  #   但它**要求与转发关键词共现**才记证据（转发目标号是真线索），与此处无关，保留。
+
+  # ---------------- QQ ----------------
+  - name: "QQ"
+    kind: "qq"
+    subject: "腾讯（QQ）"
+    where_to_request: "深圳市腾讯计算机系统有限公司"
+    confidence: "medium"
+    patterns:
+      - '(?:QQ|扣扣|企鹅)[号码群:：＠@\s]{0,3}(\d{5,11})'
+      - '(\d{5,11})@qq\.com'
+      - 'mqqwpa://im/chat\?[^"\s]*?uin=(\d{5,11})'
+      - 'qq://[^"\s]*?uin=(\d{5,11})'
+    blacklist: []
+    evidence_to_obtain:
+      - "QQ 号实名信息 / 绑定手机号"
+      - "登录 IP 与设备信息"
+      - "聊天 / 群成员记录（依法调取）"
+    note: "QQ 号 / QQ 群可经腾讯调取实名与通信记录；客服 QQ 常为引流落地点。"
+
+  # ---------------- 微信 ----------------
+  - name: "微信"
+    kind: "wechat"
+    subject: "腾讯 / 财付通（微信）"
+    where_to_request: "财付通支付科技有限公司 / 腾讯（微信）"
+    confidence: "medium"
+    # 必须有明确分隔符（：: ＠@）才认微信号，避免 JS 里 weixin/wechat 后跟 base64
+    # 标识符（如 weixinJSBridge / FShareApi）被误判。裸 weixin/wechat 触发词已移除
+    # （微信 SDK 代码里满地都是）。wxid_ 前缀是可靠的微信内部 id 形态。
+    patterns:
+      - '(?:微信号|加我?微信|微信|加微|薇信|威信|vx|v信)[：:＠@]\s*([a-zA-Z][-_a-zA-Z0-9]{5,19})'
+      - '(wxid_[a-zA-Z0-9]{6,20})'
+    blacklist:
+      - "weixin://"
+      - "wechat_sdk"
+      - "weixinhao"
+      - "jsbridge"
+    evidence_to_obtain:
+      - "微信号实名信息 / 绑定手机号、银行卡"
+      - "登录 IP 与设备信息"
+      - "支付 / 转账记录（依法调取）"
+    note: "微信号可经腾讯调取实名、绑定与资金记录；常为引流与收款落地点。"
+
+  # ---------------- Telegram ----------------
+  - name: "Telegram"
+    kind: "telegram"
+    subject: "Telegram（境外平台）"
+    where_to_request: "Telegram（境外，需国际执法协作 / 链路侧落地）"
+    confidence: "low"
+    patterns:
+      - 't\.me/([A-Za-z0-9_]{4,32})'
+      - 'tg://resolve\?domain=([A-Za-z0-9_]{4,32})'
+      - '(?:telegram|电报|飞机|纸飞机|tg)[:：@\s]{0,5}@([A-Za-z0-9_]{5,32})'
+    blacklist:
+      - "telegram.org"
+      - "t.me/share"
+    evidence_to_obtain:
+      - "账号注册手机号 / 登录 IP（经国际协作）"
+      - "关联频道 / 群组及管理员"
+      - "应用侧落地：引流落地页 / 推广链路归属"
+    note: "境外即时通讯，常用于涉诈引流与黑产协作；境内难直接调证，重在链路侧固定。"
+
+  # ================= IM 回传通道（CHANNEL）=================
+  # 涉诈短信转发马 / RAT 常硬编码以下回传凭据把窃取数据（短信验证码 / 通讯录）外传给接料人。
+  # 抠出 = 直接锁定「接收数据的接料人 / 操盘通道」，是高保真团伙归属物证。
+  # 这些类型 category=channel → Lead.category=CHANNEL，value=裸 token/webhook（不带类型前缀）。
+
+  # ---------------- Telegram bot token ----------------
+  # 严格形态：冒号前 8-10 位纯数字（bot 数字 id），冒号后正好 35 位 base64url（[A-Za-z0-9_-]）。
+  # patterns 已写紧（边界 + 长度精确），代码侧另做"形态闸"二次校验（digit-prefix / 35 位）降误报。
+  - name: "Telegram bot token"
+    kind: "telegram_bot"
+    category: "channel"
+    subject: "Telegram（境外平台，bot 接料通道）"
+    where_to_request: "Telegram（境外，需国际执法协作）/ bot 控制人侧落地"
+    confidence: "high"
+    patterns:
+      - '(?<![A-Za-z0-9_:-])(\d{8,10}:[A-Za-z0-9_-]{35})(?![A-Za-z0-9_-])'
+    blacklist: []
+    evidence_to_obtain:
+      - "bot 控制人注册手机号 / 登录 IP（经国际协作）"
+      - "接收 bot 消息的群成员 / 频道管理员"
+      - "历史外传数据（短信验证码 / 通讯录等）"
+    note: "硬编码 Telegram bot token，外传窃取数据的接料通道；形态强特征且可在线验证（getMe），高保真团伙归属物证。"
+
+  # ---------------- IM webhook（钉钉 / 企微 / 飞书）----------------
+  # 按域名 + 路径匹配；vendor 归属在代码里按域名判定（钉钉→阿里 / 企微→腾讯 / 飞书→字节）。
+  # 一条规则三种 pattern，代码据命中 URL 的域名归属对应厂商主体。
+  - name: "IM webhook"
+    kind: "im_webhook"
+    category: "channel"
+    subject: "IM 群机器人 webhook（接料通道，按域名归属厂商）"
+    where_to_request: "对应平台厂商（钉钉→阿里 / 企微→腾讯 / 飞书→字节）调注册主体 / 控制人"
+    confidence: "high"
+    patterns:
+      - 'https?://oapi\.dingtalk\.com/robot/send[^\s"''<>]*'
+      - 'https?://qyapi\.weixin\.qq\.com/cgi-bin/webhook/[^\s"''<>]*'
+      - 'https?://open\.feishu\.cn/open-apis/bot/[^\s"''<>]*'
+    blacklist: []
+    evidence_to_obtain:
+      - "webhook 注册主体 / 控制人（按厂商调）"
+      - "接收消息的群成员 / 群管理员"
+      - "历史外传数据（短信验证码 / 通讯录等）"
+    note: "硬编码 IM 群机器人 webhook，外传窃取数据的接料通道；高保真团伙归属物证。"

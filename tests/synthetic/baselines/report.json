@@ -1,0 +1,228 @@
+{
+  "admin-panel-login-url": {
+    "leads": [
+      {
+        "advice": "待核",
+        "base_advice": "待核",
+        "category": "ADMIN_PANEL",
+        "confidence": "MEDIUM",
+        "downgrades": {},
+        "is_c2": false,
+        "is_runtime_contact": false,
+        "is_runtime_seen": false,
+        "shape_uncertain": false,
+        "sni_masquerade": [],
+        "subject": null,
+        "value": "api.evilbackend-synthetic.test"
+      },
+      {
+        "advice": "待核",
+        "base_advice": "待核",
+        "category": "DOMAIN",
+        "confidence": "MEDIUM",
+        "downgrades": {},
+        "is_c2": false,
+        "is_runtime_contact": false,
+        "is_runtime_seen": false,
+        "shape_uncertain": false,
+        "sni_masquerade": [],
+        "subject": null,
+        "value": "api.evilbackend-synthetic.test"
+      }
+    ],
+    "schema_version": "1.2"
+  },
+  "backend-credential-db-dsn": {
+    "leads": [
+      {
+        "advice": "建议调证",
+        "base_advice": "建议调证",
+        "category": "BACKEND_CREDENTIAL",
+        "confidence": "HIGH",
+        "downgrades": {},
+        "is_c2": false,
+        "is_runtime_contact": false,
+        "is_runtime_seen": false,
+        "shape_uncertain": false,
+        "sni_masquerade": [],
+        "subject": null,
+        "value": "mysql://root:pass123@db.evil-synthetic.test:3306"
+      }
+    ],
+    "schema_version": "1.2"
+  },
+  "card-merchant-keyword": {
+    "leads": [
+      {
+        "advice": "待核",
+        "base_advice": "待核",
+        "category": "CARD_MERCHANT",
+        "confidence": "MEDIUM",
+        "downgrades": {},
+        "is_c2": false,
+        "is_runtime_contact": false,
+        "is_runtime_seen": false,
+        "shape_uncertain": false,
+        "sni_masquerade": [],
+        "subject": null,
+        "value": "卡商"
+      }
+    ],
+    "schema_version": "1.2"
+  },
+  "crypto-recipe-cryptojs-envelope": {
+    "leads": [
+      {
+        "advice": "建议调证",
+        "base_advice": "建议调证",
+        "category": "CRYPTO_RECIPE",
+        "confidence": "HIGH",
+        "downgrades": {},
+        "is_c2": false,
+        "is_runtime_contact": false,
+        "is_runtime_seen": false,
+        "shape_uncertain": false,
+        "sni_masquerade": [],
+        "subject": null,
+        "value": "AES-CFB/Pkcs7 key(utf8,32B)=0123…cdef iv=md5(key+ts)[:16]"
+      }
+    ],
+    "schema_version": "1.2"
+  },
+  "fourth-party-payment-gateway": {
+    "leads": [
+      {
+        "advice": "待核",
+        "base_advice": "待核",
+        "category": "DOMAIN",
+        "confidence": "MEDIUM",
+        "downgrades": {},
+        "is_c2": false,
+        "is_runtime_contact": false,
+        "is_runtime_seen": false,
+        "shape_uncertain": false,
+        "sni_masquerade": [],
+        "subject": null,
+        "value": "pay.evilgw-synthetic.test"
+      },
+      {
+        "advice": "待核",
+        "base_advice": "待核",
+        "category": "FOURTH_PARTY_PAYMENT",
+        "confidence": "MEDIUM",
+        "downgrades": {},
+        "is_c2": false,
+        "is_runtime_contact": false,
+        "is_runtime_seen": false,
+        "shape_uncertain": false,
+        "sni_masquerade": [],
+        "subject": null,
+        "value": "pay.evilgw-synthetic.test"
+      },
+      {
+        "advice": "建议调证",
+        "base_advice": "建议调证",
+        "category": "PAYMENT",
+        "confidence": "HIGH",
+        "downgrades": {},
+        "is_c2": false,
+        "is_runtime_contact": false,
+        "is_runtime_seen": false,
+        "shape_uncertain": false,
+        "sni_masquerade": [],
+        "subject": "待核（商户号对应实名收款主体）",
+        "value": "商户号 (mch_id / merchant id)"
+      }
+    ],
+    "schema_version": "1.2"
+  },
+  "hardened-unidentified-stub": {
+    "leads": [],
+    "schema_version": "1.2"
+  },
+  "payment-sdk-alipay": {
+    "leads": [
+      {
+        "advice": "建议调证",
+        "base_advice": "建议调证",
+        "category": "PAYMENT",
+        "confidence": "MEDIUM",
+        "downgrades": {},
+        "is_c2": false,
+        "is_runtime_contact": false,
+        "is_runtime_seen": false,
+        "shape_uncertain": false,
+        "sni_masquerade": [],
+        "subject": "支付宝（中国）网络技术有限公司 / 蚂蚁科技集团股份有限公司",
+        "value": "支付宝 (Alipay SDK)"
+      },
+      {
+        "advice": "建议调证",
+        "base_advice": "建议调证",
+        "category": "SDK_SERVICE",
+        "confidence": "MEDIUM",
+        "downgrades": {},
+        "is_c2": false,
+        "is_runtime_contact": false,
+        "is_runtime_seen": false,
+        "shape_uncertain": false,
+        "sni_masquerade": [],
+        "subject": "支付宝（中国）网络技术有限公司 / 蚂蚁科技集团股份有限公司",
+        "value": "支付宝 (Alipay SDK)"
+      }
+    ],
+    "schema_version": "1.2"
+  },
+  "self-hosted-im-websocket": {
+    "leads": [
+      {
+        "advice": "待核",
+        "base_advice": "待核",
+        "category": "DOMAIN",
+        "confidence": "MEDIUM",
+        "downgrades": {},
+        "is_c2": false,
+        "is_runtime_contact": false,
+        "is_runtime_seen": false,
+        "shape_uncertain": false,
+        "sni_masquerade": [],
+        "subject": null,
+        "value": "im.evilbroker-synthetic.test"
+      },
+      {
+        "advice": "待核",
+        "base_advice": "待核",
+        "category": "SELF_HOSTED_IM",
+        "confidence": "MEDIUM",
+        "downgrades": {},
+        "is_c2": false,
+        "is_runtime_contact": false,
+        "is_runtime_seen": false,
+        "shape_uncertain": false,
+        "sni_masquerade": [],
+        "subject": null,
+        "value": "im.evilbroker-synthetic.test"
+      }
+    ],
+    "schema_version": "1.2"
+  },
+  "wallet-secret-mnemonic": {
+    "leads": [
+      {
+        "advice": "建议调证",
+        "base_advice": "建议调证",
+        "category": "WALLET_SECRET",
+        "confidence": "HIGH",
+        "downgrades": {},
+        "is_c2": false,
+        "is_runtime_contact": false,
+        "is_runtime_seen": false,
+        "shape_uncertain": false,
+        "sni_masquerade": [],
+        "subject": null,
+        "value": "legal winner thank year wave sausage worth useful legal winner thank yellow"
+      }
+    ],
+    "schema_version": "1.2"
+  }
+}

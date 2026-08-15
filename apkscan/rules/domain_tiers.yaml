@@ -1,0 +1,121 @@
+# 域名可信度档规则（C1：脱壳后域名误报降噪）。
+#
+# 由 apkscan.core.infra 通过 registry.load_rules("domain_tiers") 读取（可选；
+# 缺失时走内置兜底，离线/规则缺失不崩）。顶层为 dict，键含义：
+#
+#   library_embedded_suffixes : list[str]，打包库内置的"全球网站域名库"/演示数据/
+#       知名站点（与 KNOWN_INFRA 同口径，子串/后缀匹配，已小写）。命中 →
+#       classify_domain 返回 (无需调证, "第三方库内置站点（library-embedded）")。
+#       这类是 C1 dump dex 噪音主体（amazon / 各国银行 / 新闻 / 成人站等）。
+#       ★ 只精确后缀/关键字匹配，绝不碰任意 .vip / .com SLD —— 放开整个 SLD 会把
+#       该后缀下的待查域名一并判成无需核查。此表只增不减。
+#
+#   library_file_globs : list[str]，"已知第三方库文件路径"glob（fnmatch，已小写）。
+#       端点来源 location 命中 → tier="library-file"（pipeline 据此降可信到"待核"）。
+#
+#   library_file_basename_globs : list[str]，同上但只拿 location 的**文件名**（basename）
+#       去比——全路径组里的 `*` 会跨 `/`，文件名类判据放这组防目录穿透。
+#
+#   web_unsafe_globs : list[str]，网页证据语境（context="web"）下跳过的 library-file
+#       模式（APK 先验不适用于站点自有压缩代码，详见下方同名段）。
+#
+#   bulk_string_min_len : int，单条 dex 字符串/字面量长度超过此阈值 → tier="bulk-string"
+#       （典型内置域名库大字符串表）。
+#
+# 说明：本表是有限枚举，不可能穷尽 dump dex 的 1481 个噪音域名；真正的降噪靠
+# "来源标记"机制（library-file / bulk-string 来源 → 整批降档为"待核"），枚举表只兜知名站点。
+
+# ---- library-embedded：打包库内置的全球网站库 / 演示数据 / 知名站点 ----
+library_embedded_suffixes:
+  # 知名站点（被某打包库的"全球网站域名库"内置，非 App 后端）
+  - "amazon.com"
+  - "ebay.com"
+  - "bbc.co.uk"
+  - "cnn.com"
+  - "nytimes.com"
+  - "reddit.com"
+  - "instagram.com"
+  - "linkedin.com"
+  - "pinterest.com"
+  - "tumblr.com"
+  - "yahoo.com"
+  - "bing.com"
+  - "yandex.ru"
+  - "facebook.com"
+  - "twitter.com"
+  - "youtube.com"
+  - "netflix.com"
+  - "spotify.com"
+  - "wordpress.com"
+  - "blogspot.com"
+  # 各国银行 / 支付门户（出现即库内置，调证无意义）—按需增补
+  - "chase.com"
+  - "paypal.com"
+  - "wellsfargo.com"
+  - "bankofamerica.com"
+  - "citibank.com"
+  - "hsbc.com"
+  - "barclays.co.uk"
+  - "santander.com"
+  # 成人站（库内置黑/白名单，非业务）
+  - "pornhub.com"
+  - "xvideos.com"
+  - "xnxx.com"
+  - "redtube.com"
+  - "xhamster.com"
+
+# ---- library-file：已知第三方库文件路径 glob（命中 → tier=library-file，降可信）----
+library_file_globs:
+  - "*/uni_modules/*"
+  - "*/node_modules/*"
+  - "*/vendor/*"
+  - "*.min.js"
+  - "*.min.css"
+  - "*/static/echarts*"
+  - "*/static/lime-echart/*"
+  - "*echarts.min.js"
+  - "*lame.min.js"
+  - "*/static/js/chunk-vendors*"
+  - "*polyfill*"
+  - "*/dist/*"
+  # jadx 反编译出的第三方库包路径（库内置的 URL/XML 命名空间/常量，非 App 后端 → 降待核）
+  - "*/org/xmlpull/*"
+  - "*/com/adobe/*"
+  - "*/org/apache/*"
+  - "*/org/jetbrains/*"
+  - "*/kotlin/*"
+  - "*/kotlinx/*"
+  - "*/io/reactivex/*"
+  - "*/com/squareup/*"
+  - "*/androidx/*"
+  - "*/android/support/*"
+
+# ---- library-file（按**文件名**匹配，不看目录）----
+# 上面那组按全路径匹配，其中的 `*` 会跨 `/`——写成 `vendor.*.js` 会把「目录叫 vendor.min」
+# 之下的所有 .js 整树吃掉。打包器产出的 vendor bundle 判据本就只关乎文件名，故单列一组，
+# 只拿 basename 去比，天然覆盖任意目录深度且不穿透。
+#
+# ★为什么需要这组：网页证据常是**扁平目录**（抓下来就是 chunk-vendors.<hash>.js，没有
+#   /static/js/ 这一层），只写带路径的模式会整类漏掉。实测漏过一次：一份 vendor bundle 里
+#   第三方 web3 库硬编码的公共 RPC 节点，全部以最高档进了调证出口，把真实站点挤出主目标。
+library_file_basename_globs:
+  - "chunk-vendors*.js"
+  - "vendors~*.js"
+  - "vendor.*.js"
+
+# ---- web 证据语境下**不可用**的 library-file 模式 ----
+# 上面两组的先验是「APK 内部路径」。在抓取的网页证据里，同样的模式含义完全变了：
+# 站点自己的业务代码几乎必然是压缩过的（main.min.js / app.<hash>.min.js），用 Vite、
+# webpack 时资源路径又常含 /dist/。拿 APK 的先验去判网页，会把**涉诈站自有的后端域名**
+# 降成待核——不发调证函、不进闭环、不做 ICP/WHOIS 富化，是漏报方向的误伤。
+#
+# 故 web 语境只保留「明确的 vendor 命名」这类判据，下列模式一律跳过。
+web_unsafe_globs:
+  - "*.min.js"
+  - "*.min.css"
+  - "*/dist/*"
+  - "*polyfill*"
+  - "*/vendor/*"
+
+# ---- bulk-string：单条字符串/字面量超过此长度 → tier=bulk-string（疑似内置域名库大表）----
+bulk_string_min_len: 2000

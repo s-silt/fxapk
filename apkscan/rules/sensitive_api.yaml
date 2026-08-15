@@ -1,0 +1,237 @@
+# apkscan — sensitive_api 分析器规则
+#
+# 由 apkscan.core.registry.load_rules("sensitive_api") 读取。
+# 扫 DEX 字符串里**实际调用**的敏感 API 方法引用（与 permissions 的"声明"互补）。
+#
+# 顶层 dict，键 apis: 规则列表。每条：
+#   id:              稳定 Finding id。
+#   title:           标题。
+#   severity:        INFO/LOW/MEDIUM/HIGH/CRITICAL。
+#   dex_tokens:      方法名片段列表（任一在 DEX 字符串里出现即触发）。
+#   require_class:   类名片段列表（可选）。命中则确认调用点、用规则 severity；
+#                    未命中则降一级 + description 标注"未确认调用点"，收敛误报。
+#   description / recommendation / evidence_to_obtain / references。
+#
+# 反诈视角：这些是设备指纹、短信验证码窃取/拦截、通讯录上传、剪贴板(钱包地址/口令)窃取
+# 的代码落点，是"非法获取公民个人信息 / 帮信"的技术佐证。
+apis:
+  # ---- 设备标识：IMEI/IMSI/SIM/手机号（设备指纹 + 唯一定位被害人设备）----
+  - id: SAPI-IMEI
+    title: "读取 IMEI / 设备序列号 (getDeviceId/getImei)"
+    severity: HIGH
+    dex_tokens: ["getDeviceId", "getImei"]
+    require_class: ["TelephonyManager", "Landroid/telephony"]
+    description: >-
+      代码调用 TelephonyManager.getDeviceId/getImei 读取设备唯一标识（IMEI）。
+      涉诈样本借此做设备指纹、唯一标记被害人设备、规避多开/风控。
+    recommendation: >-
+      研判：结合网络端点定位 IMEI 回传去向，调取服务端是否留存被害人设备标识。
+    evidence_to_obtain:
+      - "IMEI 回传的服务器域名/IP 及接口"
+      - "服务端存储的设备指纹库（关联被害人设备）"
+    references: ["https://developer.android.com/reference/android/telephony/TelephonyManager"]
+
+  - id: SAPI-IMSI
+    title: "读取 IMSI / SIM 信息 (getSubscriberId/getSimSerialNumber)"
+    severity: HIGH
+    dex_tokens: ["getSubscriberId", "getSimSerialNumber"]
+    require_class: ["TelephonyManager", "Landroid/telephony"]
+    description: >-
+      读取 IMSI / SIM 序列号——可唯一关联手机卡（运营商实名主体），是定位被害人身份的强标识。
+    recommendation: "研判：调取 IMSI 回传去向，关联运营商实名信息。"
+    evidence_to_obtain:
+      - "IMSI/SIM 序列号回传去向"
+      - "运营商侧该 SIM 的实名登记主体"
+    references: []
+
+  - id: SAPI-PHONE-NUMBER
+    title: "读取本机手机号 (getLine1Number)"
+    severity: HIGH
+    dex_tokens: ["getLine1Number"]
+    require_class: ["TelephonyManager", "Landroid/telephony"]
+    description: "读取本机手机号码（常用于自动注册/绑定被害人手机号）。"
+    recommendation: "研判：核查手机号是否被自动上传用于注册涉诈账号。"
+    evidence_to_obtain: ["手机号回传去向与用途"]
+    references: []
+
+  # ---- 短信：验证码窃取 / 拦截转发（资金盗取链关键一环）----
+  - id: SAPI-SEND-SMS
+    title: "代码发送短信 (SmsManager.sendTextMessage)"
+    severity: HIGH
+    dex_tokens: ["sendTextMessage", "sendMultipartTextMessage"]
+    require_class: ["SmsManager", "Landroid/telephony/SmsManager"]
+    description: >-
+      代码调用 SmsManager 静默发送短信。涉诈样本借此群发诈骗短信、或把拦截到的验证码
+      自动转发到诈骗号码，绕过被害人感知。
+    recommendation: "研判：调取发送目标号码与内容，作为帮信/诈骗的直接证据。"
+    evidence_to_obtain:
+      - "短信发送目标号码、内容、时间（运营商网关日志）"
+      - "触发发送的后台指令来源"
+    references: []
+
+  # ---- 通讯录：批量窃取上传（杀猪盘/催收/裂变）----
+  - id: SAPI-CONTACTS
+    title: "读取通讯录 (ContactsContract)"
+    severity: HIGH
+    dex_tokens: ["ContactsContract", "content://com.android.contacts", "com.android.contacts"]
+    require_class: []
+    description: >-
+      代码访问通讯录 Provider。涉诈样本借此批量窃取被害人通讯录上传后台，用于裂变拉新、
+      催收施压、或冒充熟人二次诈骗。
+    recommendation: "研判：调取通讯录上传去向与服务端存储，定罪非法获取公民个人信息。"
+    evidence_to_obtain:
+      - "通讯录上传的服务器域名/IP 及接口"
+      - "服务端存储的被害人通讯录数据"
+    references: []
+
+  # ---- 定位：精准跟踪被害人 ----
+  - id: SAPI-LOCATION
+    title: "读取地理位置 (LocationManager)"
+    severity: MEDIUM
+    dex_tokens: ["getLastKnownLocation", "requestLocationUpdates"]
+    require_class: ["LocationManager", "Landroid/location"]
+    description: "读取设备地理位置（精准跟踪被害人活动范围 / 风控规避）。"
+    recommendation: "研判：核查位置数据回传去向。"
+    evidence_to_obtain: ["位置数据回传去向"]
+    references: []
+
+  # ---- 剪贴板：窃取钱包地址 / 口令 / 验证码 ----
+  - id: SAPI-CLIPBOARD
+    title: "读取剪贴板 (ClipboardManager.getPrimaryClip)"
+    severity: MEDIUM
+    dex_tokens: ["getPrimaryClip"]
+    require_class: ["ClipboardManager", "Landroid/content/ClipboardManager"]
+    description: >-
+      读取系统剪贴板。涉诈/盗币样本借此窃取剪贴板里的钱包地址、口令、验证码，
+      或在转账时替换收款地址（剪贴板劫持）。
+    recommendation: "研判：核查剪贴板内容是否外发、是否存在收款地址替换逻辑。"
+    evidence_to_obtain: ["剪贴板内容回传去向", "是否存在地址替换（劫持）逻辑"]
+    references: []
+
+  # ---- 设备指纹 / 反沙箱：已装应用枚举、安装来源 ----
+  - id: SAPI-INSTALLED-APPS
+    title: "枚举已安装应用 (getInstalledPackages/getInstalledApplications)"
+    severity: MEDIUM
+    dex_tokens: ["getInstalledPackages", "getInstalledApplications"]
+    require_class: ["PackageManager", "Landroid/content/pm"]
+    description: "枚举已安装应用列表（设备指纹 / 检测安全软件与分析环境 / 反沙箱）。"
+    recommendation: "研判：核查已装应用列表是否上传用于画像或反检测。"
+    evidence_to_obtain: ["已装应用列表回传去向"]
+    references: []
+
+  - id: SAPI-INSTALLER
+    title: "读取安装来源 (getInstallerPackageName)"
+    severity: LOW
+    dex_tokens: ["getInstallerPackageName"]
+    require_class: ["PackageManager", "Landroid/content/pm"]
+    description: "读取自身安装来源（常用于判断是否经官方商店分发、规避检测）。"
+    recommendation: "研判：辅助判断分发渠道。"
+    evidence_to_obtain: ["分发渠道线索"]
+    references: []
+
+  # ---- SIM/运营商指纹：无需 READ_PHONE_STATE 即可拿运营商，permissions 层看不到 ----
+  - id: SAPI-SIM-OPERATOR
+    title: "读取 SIM/运营商信息 (getSimOperator/getNetworkOperator)"
+    severity: HIGH
+    dex_tokens:
+      - "getSimOperator"
+      - "getSimOperatorName"
+      - "getNetworkOperator"
+      - "getNetworkOperatorName"
+      - "getSimCountryIso"
+    require_class: ["TelephonyManager", "Landroid/telephony"]
+    description: >-
+      读取 SIM 卡运营商 / 国家码。涉诈样本借此判断卡归属地区、区分境内外、规避风控
+      （无需 READ_PHONE_STATE 即可拿运营商，比 IMSI 更隐蔽高频）。
+    recommendation: "研判：核查地区判断逻辑是否用于差异化诈骗话术/规避境外风控。"
+    evidence_to_obtain: ["运营商信息回传去向与地区判断逻辑"]
+    references: []
+
+  - id: SAPI-SERIAL
+    title: "读取设备序列号 (Build.getSerial)"
+    severity: MEDIUM
+    dex_tokens: ["getSerial"]
+    require_class: ["Landroid/os/Build", "android/os/Build"]
+    description: "读取设备序列号（Android 10+ 取不到 IMEI 后，样本常转用序列号做设备指纹）。"
+    recommendation: "研判：辅助设备指纹研判。"
+    evidence_to_obtain: ["序列号回传去向"]
+    references: []
+
+  # ---- 通话记录 / 读短信：催收施压、验证码拦截读取侧 ----
+  - id: SAPI-CALLLOG
+    title: "读取通话记录 (CallLog)"
+    severity: HIGH
+    dex_tokens: ["content://call_log", "CallLog$Calls", "CallLog"]
+    require_class: []
+    description: >-
+      访问通话记录。催收/杀猪盘样本借此掌握被害人社交关系与通话对象，用于施压、冒充。
+    recommendation: "研判：调取通话记录上传去向与服务端存储。"
+    evidence_to_obtain: ["通话记录上传去向", "服务端存储的被害人通话记录"]
+    references: []
+
+  - id: SAPI-READ-SMS
+    title: "读取短信收件箱 (content://sms)"
+    severity: HIGH
+    dex_tokens: ["content://sms/inbox", "content://sms"]
+    require_class: []
+    description: >-
+      读取短信收件箱（与发送侧 SAPI-SEND-SMS 互补，构成验证码拦截读取链）。涉诈样本借此
+      读取银行/支付验证码并上传/转发。
+    recommendation: "研判：调取短信读取去向，结合发送侧还原验证码拦截转发链。"
+    evidence_to_obtain: ["短信内容回传去向"]
+    references: []
+
+  # ---- 录音：远控窃听 ----
+  - id: SAPI-AUDIO-RECORD
+    title: "录音 (MediaRecorder/AudioRecord)"
+    severity: MEDIUM
+    dex_tokens: ["Landroid/media/MediaRecorder", "Landroid/media/AudioRecord"]
+    require_class: []
+    description: "调用录音 API（远控样本借此窃听被害人环境音 / 通话）。"
+    recommendation: "研判：核查录音文件是否外发。"
+    evidence_to_obtain: ["录音文件回传去向"]
+    references: []
+
+  # ---- 短信拦截广播：abortBroadcast 拦截短信到达（强信号）----
+  - id: SAPI-SMS-INTERCEPT
+    title: "拦截短信广播 (SMS_RECEIVED + abortBroadcast)"
+    severity: HIGH
+    require_all: ["android.provider.Telephony.SMS_RECEIVED", "abortBroadcast"]
+    require_class: []
+    description: >-
+      注册短信到达广播并调 abortBroadcast 拦截——经典短信劫持手法：拦截银行/验证码短信
+      不让被害人感知，配合读取/转发实现盗刷。abortBroadcast 共现是强信号。
+    recommendation: "研判：定位拦截后处理逻辑（读取/转发/上传），作为短信劫持的直接证据。"
+    evidence_to_obtain: ["拦截短信的处理去向（转发号码/上传服务器）"]
+    references: []
+
+  # ---- 设备指纹：Android ID / MAC ----
+  - id: SAPI-ANDROID-ID
+    title: "读取 Android ID (Settings.Secure ANDROID_ID)"
+    severity: LOW
+    # android_id 是统计 SDK 高频良性字段名；用 require_all 要求与读取入口 getString 共现，
+    # 并以 Settings$Secure 类佐证，仍按 LOW 起评 + 提示需 jadx 复核，避免污染研判面。
+    require_all: ["android_id", "getString"]
+    require_class: ["Settings$Secure", "android/provider/Settings"]
+    description: >-
+      疑似读取 Android ID（设备唯一标识，用于设备指纹）。注意：android_id 也是统计 SDK
+      的高频字段名，命中需 jadx 复核确认确为 Settings.Secure 读取。
+    recommendation: "研判：jadx 确认确为 ANDROID_ID 读取后，辅助设备指纹研判。"
+    evidence_to_obtain: ["Android ID 回传去向"]
+    references: []
+
+  - id: SAPI-MAC
+    title: "读取 MAC 地址 (getMacAddress / NetworkInterface)"
+    severity: MEDIUM
+    # Android 6+ WifiInfo.getMacAddress 返回固定值，样本转用 NetworkInterface 读 wlan0。
+    dex_tokens: ["getMacAddress", "getHardwareAddress", "/sys/class/net", "wlan0"]
+    require_class: ["WifiInfo", "Ljava/net/NetworkInterface", "Landroid/net/wifi"]
+    description: "读取 WiFi MAC 地址（设备唯一标识 / 指纹；Android 6+ 多经 NetworkInterface 读 wlan0）。"
+    recommendation: "研判：辅助设备指纹研判。"
+    evidence_to_obtain: ["MAC 地址回传去向"]
+    references: []
+
+meta:
+  note: >-
+    本规则覆盖涉诈样本最常用的敏感 API 实调面。dex_tokens 为方法名片段，require_class 双重
+    约束收敛误报；命中即产 Finding(category=sensitive_api)，与 permissions 的声明层交叉研判。

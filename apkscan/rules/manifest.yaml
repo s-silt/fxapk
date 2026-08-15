@@ -1,0 +1,104 @@
+# apkscan — manifest 分析器规则
+#
+# 由 apkscan.core.registry.load_rules("manifest") 读取。
+# 覆盖中文涉诈 App 在 AndroidManifest 层面的真实风险特征与调证语义。
+#
+# 顶层为 dict，键含义：
+#   findings:        各风险开关对应的 Finding 模板（标题/严重度/描述/建议/参考）
+#   sdk_floor:       低于此 minSdk / targetSdk 视为"刻意降级以规避新版系统管控"
+#   suspicious_versions: 涉诈马甲包常见的可疑 versionName / versionCode 特征
+#   fraud_notes:     涉诈场景的研判说明（写入 Finding.description 增强可读性）
+
+# ---------------------------------------------------------------------------
+# 风险 Finding 模板
+# ---------------------------------------------------------------------------
+findings:
+  debuggable:
+    id: MANIFEST-DEBUGGABLE
+    title: "应用以可调试模式发布 (android:debuggable=true)"
+    severity: MEDIUM
+    description: >-
+      AndroidManifest 中 application 的 android:debuggable 被置为 true。
+      正式发布的应用不应开启调试。涉诈马甲包/灰产快速打包常遗留此标志，
+      表明构建流程随意、未走正规发布通道。调试模式允许 jdwp 附加、
+      运行时读取内存与私有数据，便于现场取证时动态调试与脱壳。
+    recommendation: >-
+      研判：可借助调试模式在受控真机上动态调试、dump 内存/DEX，
+      补全静态分析看不到的运行时端点与解密后的配置。
+    references:
+      - "https://developer.android.com/privacy-and-security/risks/android-debuggable"
+
+  allow_backup:
+    id: MANIFEST-ALLOWBACKUP
+    title: "允许应用数据备份 (android:allowBackup=true)"
+    severity: LOW
+    description: >-
+      application 的 android:allowBackup 为 true（或默认未显式关闭）。
+      可通过 adb backup / 厂商备份导出应用私有数据（含本地数据库、
+      SharedPreferences、缓存的服务器地址与账号 token）。
+    recommendation: >-
+      研判：在合法授权设备上可用 adb backup 导出 app 私有目录，
+      获取本地落地的服务器域名、商户号、聊天/账本数据库等调证物。
+    references:
+      - "https://developer.android.com/privacy-and-security/risks/android-allowbackup"
+
+  cleartext_traffic:
+    id: MANIFEST-CLEARTEXT
+    title: "允许明文 HTTP 流量 (usesCleartextTraffic / 网络安全配置)"
+    severity: MEDIUM
+    description: >-
+      android:usesCleartextTraffic=true 或 networkSecurityConfig 放开了明文流量。
+      涉诈 App 后台多为快速搭建的明文 HTTP 接口（赌博/刷单/虚假投资平台后台），
+      明文通信便于在网络侧抓包还原完整的下单、充值、回调链路。
+    recommendation: >-
+      研判：对该应用做网络侧/中间人抓包可直接还原明文 API、商户号与资金回调，
+      为后续端点归属（WHOIS/ICP/ASN）与资金流调证提供一手证据。
+    references:
+      - "https://developer.android.com/privacy-and-security/risks/cleartext-communications"
+
+  low_target_sdk:
+    id: MANIFEST-LOW-TARGETSDK
+    title: "targetSdkVersion 偏低，刻意规避新版系统管控"
+    severity: LOW
+    description: >-
+      targetSdkVersion 显著低于当前合规要求。涉诈/灰产包常压低 targetSdk，
+      以规避作用域存储、后台限制、明文流量默认禁用、权限运行时弹窗等新版约束，
+      从而更自由地读写存储、常驻后台、走明文接口。
+    recommendation: >-
+      研判：低 targetSdk 是马甲包的常见特征，结合签名证书可做跨 App 同源关联。
+    references:
+      - "https://developer.android.com/google/play/requirements/target-sdk"
+
+# ---------------------------------------------------------------------------
+# SDK 版本下限：低于该值视为刻意降级
+# ---------------------------------------------------------------------------
+sdk_floor:
+  # 低于此 targetSdk 触发 low_target_sdk Finding。
+  # Google Play 自 2023+ 要求 target >= 33；涉诈包常停留在 22~28。
+  target_sdk_min: 30
+  # minSdk 过低（如 <=19）也常见于追求最大兼容的灰产包，仅写入 meta 供研判。
+  min_sdk_floor: 21
+
+# ---------------------------------------------------------------------------
+# 可疑版本特征（仅作研判提示，写入 meta，不单独报 Finding）
+# ---------------------------------------------------------------------------
+suspicious_versions:
+  # versionName 命中以下（不区分大小写子串）视为测试/马甲特征
+  version_name_keywords:
+    - "test"
+    - "debug"
+    - "demo"
+    - "马甲"
+    - "测试"
+    - "渠道"
+
+# ---------------------------------------------------------------------------
+# 涉诈研判通用说明（供报告人快速理解 manifest 指纹的调证价值）
+# ---------------------------------------------------------------------------
+fraud_notes:
+  package_name: >-
+    包名是跨 App 关联与上架渠道追溯的核心指纹；涉诈马甲包常用随机/仿冒包名，
+    结合签名证书 SHA256 可串并同一团伙的多个马甲。
+  version: >-
+    versionName/versionCode 体现迭代节奏；短周期高频改版、版本号异常
+    （如长期停留 1.0 或跳变）常见于打一枪换一个地方的涉诈包。

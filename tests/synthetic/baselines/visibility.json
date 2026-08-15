@@ -1,0 +1,265 @@
+{
+  "admin-panel-login-url": {
+    "blocked_claims": [
+      "config_chain_complete",
+      "no_hardcoded_credential",
+      "no_remote_config",
+      "runtime_contact_observed",
+      "static_endpoint_exhaustive"
+    ],
+    "claims_eligible": {
+      "config_chain_complete": false,
+      "no_contact_harvesting": true,
+      "no_hardcoded_credential": false,
+      "no_remote_config": false,
+      "no_sms_interception": true,
+      "runtime_contact_observed": false,
+      "static_endpoint_exhaustive": false
+    },
+    "critical_failures": [],
+    "degraded": true,
+    "is_hardened": false,
+    "remediation": "not_attempted",
+    "sources": {
+      "dex": "complete",
+      "java": "unknown",
+      "native": "complete",
+      "resource": "unknown",
+      "runtime": "unavailable"
+    }
+  },
+  "backend-credential-db-dsn": {
+    "blocked_claims": [
+      "config_chain_complete",
+      "no_hardcoded_credential",
+      "no_remote_config",
+      "runtime_contact_observed",
+      "static_endpoint_exhaustive"
+    ],
+    "claims_eligible": {
+      "config_chain_complete": false,
+      "no_contact_harvesting": true,
+      "no_hardcoded_credential": false,
+      "no_remote_config": false,
+      "no_sms_interception": true,
+      "runtime_contact_observed": false,
+      "static_endpoint_exhaustive": false
+    },
+    "critical_failures": [],
+    "degraded": true,
+    "is_hardened": false,
+    "remediation": "not_attempted",
+    "sources": {
+      "dex": "complete",
+      "java": "unknown",
+      "native": "complete",
+      "resource": "unknown",
+      "runtime": "unavailable"
+    }
+  },
+  "card-merchant-keyword": {
+    "blocked_claims": [
+      "config_chain_complete",
+      "no_hardcoded_credential",
+      "no_remote_config",
+      "runtime_contact_observed",
+      "static_endpoint_exhaustive"
+    ],
+    "claims_eligible": {
+      "config_chain_complete": false,
+      "no_contact_harvesting": true,
+      "no_hardcoded_credential": false,
+      "no_remote_config": false,
+      "no_sms_interception": true,
+      "runtime_contact_observed": false,
+      "static_endpoint_exhaustive": false
+    },
+    "critical_failures": [],
+    "degraded": true,
+    "is_hardened": false,
+    "remediation": "not_attempted",
+    "sources": {
+      "dex": "complete",
+      "java": "unknown",
+      "native": "complete",
+      "resource": "unknown",
+      "runtime": "unavailable"
+    }
+  },
+  "crypto-recipe-cryptojs-envelope": {
+    "blocked_claims": [
+      "config_chain_complete",
+      "no_hardcoded_credential",
+      "no_remote_config",
+      "runtime_contact_observed",
+      "static_endpoint_exhaustive"
+    ],
+    "claims_eligible": {
+      "config_chain_complete": false,
+      "no_contact_harvesting": true,
+      "no_hardcoded_credential": false,
+      "no_remote_config": false,
+      "no_sms_interception": true,
+      "runtime_contact_observed": false,
+      "static_endpoint_exhaustive": false
+    },
+    "critical_failures": [],
+    "degraded": true,
+    "is_hardened": false,
+    "remediation": "not_attempted",
+    "sources": {
+      "dex": "complete",
+      "java": "unknown",
+      "native": "complete",
+      "resource": "partial",
+      "runtime": "unavailable"
+    }
+  },
+  "fourth-party-payment-gateway": {
+    "blocked_claims": [
+      "config_chain_complete",
+      "no_hardcoded_credential",
+      "no_remote_config",
+      "runtime_contact_observed",
+      "static_endpoint_exhaustive"
+    ],
+    "claims_eligible": {
+      "config_chain_complete": false,
+      "no_contact_harvesting": true,
+      "no_hardcoded_credential": false,
+      "no_remote_config": false,
+      "no_sms_interception": true,
+      "runtime_contact_observed": false,
+      "static_endpoint_exhaustive": false
+    },
+    "critical_failures": [],
+    "degraded": true,
+    "is_hardened": false,
+    "remediation": "not_attempted",
+    "sources": {
+      "dex": "complete",
+      "java": "unknown",
+      "native": "complete",
+      "resource": "unknown",
+      "runtime": "unavailable"
+    }
+  },
+  "hardened-unidentified-stub": {
+    "blocked_claims": [
+      "config_chain_complete",
+      "no_contact_harvesting",
+      "no_hardcoded_credential",
+      "no_remote_config",
+      "no_sms_interception",
+      "runtime_contact_observed",
+      "static_endpoint_exhaustive"
+    ],
+    "claims_eligible": {
+      "config_chain_complete": false,
+      "no_contact_harvesting": false,
+      "no_hardcoded_credential": false,
+      "no_remote_config": false,
+      "no_sms_interception": false,
+      "runtime_contact_observed": false,
+      "static_endpoint_exhaustive": false
+    },
+    "critical_failures": [],
+    "degraded": true,
+    "is_hardened": true,
+    "remediation": "not_attempted",
+    "sources": {
+      "dex": "stub_only",
+      "java": "unknown",
+      "native": "complete",
+      "resource": "unknown",
+      "runtime": "unavailable"
+    }
+  },
+  "payment-sdk-alipay": {
+    "blocked_claims": [
+      "config_chain_complete",
+      "no_hardcoded_credential",
+      "no_remote_config",
+      "runtime_contact_observed",
+      "static_endpoint_exhaustive"
+    ],
+    "claims_eligible": {
+      "config_chain_complete": false,
+      "no_contact_harvesting": true,
+      "no_hardcoded_credential": false,
+      "no_remote_config": false,
+      "no_sms_interception": true,
+      "runtime_contact_observed": false,
+      "static_endpoint_exhaustive": false
+    },
+    "critical_failures": [],
+    "degraded": true,
+    "is_hardened": false,
+    "remediation": "not_attempted",
+    "sources": {
+      "dex": "complete",
+      "java": "unknown",
+      "native": "complete",
+      "resource": "unknown",
+      "runtime": "unavailable"
+    }
+  },
+  "self-hosted-im-websocket": {
+    "blocked_claims": [
+      "config_chain_complete",
+      "no_hardcoded_credential",
+      "no_remote_config",
+      "runtime_contact_observed",
+      "static_endpoint_exhaustive"
+    ],
+    "claims_eligible": {
+      "config_chain_complete": false,
+      "no_contact_harvesting": true,
+      "no_hardcoded_credential": false,
+      "no_remote_config": false,
+      "no_sms_interception": true,
+      "runtime_contact_observed": false,
+      "static_endpoint_exhaustive": false
+    },
+    "critical_failures": [],
+    "degraded": true,
+    "is_hardened": false,
+    "remediation": "not_attempted",
+    "sources": {
+      "dex": "complete",
+      "java": "unknown",
+      "native": "complete",
+      "resource": "unknown",
+      "runtime": "unavailable"
+    }
+  },
+  "wallet-secret-mnemonic": {
+    "blocked_claims": [
+      "config_chain_complete",
+      "no_hardcoded_credential",
+      "no_remote_config",
+      "runtime_contact_observed",
+      "static_endpoint_exhaustive"
+    ],
+    "claims_eligible": {
+      "config_chain_complete": false,
+      "no_contact_harvesting": true,
+      "no_hardcoded_credential": false,
+      "no_remote_config": false,
+      "no_sms_interception": true,
+      "runtime_contact_observed": false,
+      "static_endpoint_exhaustive": false
+    },
+    "critical_failures": [],
+    "degraded": true,
+    "is_hardened": false,
+    "remediation": "not_attempted",
+    "sources": {
+      "dex": "complete",
+      "java": "unknown",
+      "native": "complete",
+      "resource": "unknown",
+      "runtime": "unavailable"
+    }
+  }
+}

@@ -1,0 +1,76 @@
+"""apkscan.report.json — 把 Report 序列化为 JSON。
+
+dataclass → dict（dataclasses.asdict），Enum → .value，写 UTF-8 JSON
+（ensure_ascii=False, indent=2）。
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+import logging
+from enum import Enum
+from typing import Any
+
+from apkscan.core.atomic import atomic_write_text
+from apkscan.core.integrity import evidence_id
+from apkscan.core.models import Evidence, Lead, Report
+from apkscan.core.source_status import canonicalize_source_status_tree
+
+logger = logging.getLogger(__name__)
+
+
+def _to_jsonable(obj: Any) -> Any:
+    """递归把任意对象转成可 JSON 序列化的结构。
+
+    - Enum → .value
+    - dataclass → dict（逐字段递归）
+    - dict / list / tuple / set → 逐元素递归
+    - 其它原样返回（基础类型）；不可序列化的兜底为 str()。
+    """
+    if isinstance(obj, Enum):
+        return obj.value
+    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        d = {f.name: _to_jsonable(getattr(obj, f.name)) for f in dataclasses.fields(obj)}
+        # Lead 的派生标注（C2 / 运行时出现 / 实连）也落 JSON，便于下游程序化筛选「诈骗后端服务器」。
+        # is_runtime_seen（宽口径·动态侧出现）与 is_runtime_contact（严·observed-contact 真接触）分档，
+        # 下游据此分层，勿把「出现在 runtime 报告里」当「实连/确认 C2」。
+        if isinstance(obj, Lead):
+            d["is_c2"] = obj.is_c2
+            d["is_runtime_seen"] = obj.is_runtime_seen
+            d["is_runtime_contact"] = obj.is_runtime_contact
+        # Evidence 注入确定性 evidence_id（仅 source|location，不含 snippet），让每条证据带
+        # 可回溯锚点 —— 同条证据跨报告 / 跨文件 id 稳定（取证完整性背书层）。
+        if isinstance(obj, Evidence):
+            d["evidence_id"] = evidence_id(obj.source, obj.location)
+        return d
+    if isinstance(obj, dict):
+        return {str(_to_jsonable(k)): _to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_to_jsonable(v) for v in obj]
+    if isinstance(obj, (str, int, float, bool)) or obj is None:
+        return obj
+    if isinstance(obj, (bytes, bytearray)):
+        return obj.decode("utf-8", errors="replace")
+    # 兜底：出现预期外类型被强制 str 化（可能是数据本应结构化却类型异常）。
+    # 记一条 warning 让"无声降级"可追，而非静默掩盖。
+    logger.warning("JSON 序列化遇到预期外类型，降级为 str：%s", type(obj).__name__)
+    return str(obj)
+
+
+def to_dict(report: Report) -> dict[str, Any]:
+    """把 Report 转成纯 dict（Enum 已转为 value），便于序列化或测试断言。"""
+    payload = _to_jsonable(report)
+    # ``to_dict`` is itself a public serialization boundary (diff/corpus and
+    # callers need not go through report_io.write_report).  Normalize the copy
+    # so every new external representation uses the object-valued contract
+    # without mutating the caller's typed report.
+    canonicalize_source_status_tree(payload)
+    return payload
+
+
+def dump(report: Report, path: str) -> None:
+    """把 Report 写成 UTF-8 JSON 文件（ensure_ascii=False, indent=2）。"""
+    payload = to_dict(report)
+    raw = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False)
+    atomic_write_text(path, raw)

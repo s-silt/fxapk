@@ -1,0 +1,894 @@
+"""五层 IP 归属模型（core/attribution）：分类器 + 五层组装 + edge 多信号打分，纯逻辑离线测。
+
+★核心纪律测试点：五层不塌缩（service_operator 恒 None、hosting≠website_owner）；confirmed 须 ≥2 独立强信号；
+单一 ASN/header 不足以 confirmed；负证据抑制"租了公有云"误判；坏输入 → unknown、绝不抛。
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Any, cast
+
+from apkscan.core import attribution as A
+
+# 自造规则（不依赖 rules/providers.yaml，测引擎逻辑本身）。
+_RULES = {
+    "network_categories": {
+        A.CAT_CLOUD: {"org_keywords": ["tencent", "aliyun", "阿里"]},
+        A.CAT_CDN: {"org_keywords": ["cloudflare"]},
+        A.CAT_TELECOM: {"org_keywords": ["chinanet", "中国电信"]},
+        A.CAT_SECURITY_PROXY: {"org_keywords": ["jiasule", "加速乐"]},
+    },
+    "edge_providers": [
+        {
+            "id": "cdn.cf", "name": "Cloudflare", "category": "cdn", "role": "reverse_proxy",
+            "signals": {
+                "http": {"headers": [{"name": "cf-ray", "weight": 6}]},
+                "dns": {"cname_suffix": [{"value": ".cloudflare.net", "weight": 8}]},
+                "tls": {"spki_sha256": [{"value": "deadbeef", "weight": 4}]},  # 中信号（非强），供负证据测试
+                "network": {"asns": [{"value": 13335, "weight": 2}]},
+            },
+        },
+        {
+            "id": "waf.jsl", "name": "加速乐", "category": "security_proxy", "role": "waf",
+            "signals": {"http": {
+                "headers": [{"name": "server", "regex": "jsl", "weight": 6}],
+                "cookies": [{"value": "__jsluid", "weight": 5}],
+            }},
+            "negative_signals": [{"type": "public_cloud_only", "weight": -2}],
+        },
+    ],
+    "scoring": {"confirmed": 10, "probable": 6, "possible": 3},
+}
+
+
+def _edge_score(
+    observed: dict[str, Any], *, rules: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    score = A.score_edge_provider(observed, rules=rules)
+    assert score is not None
+    return score
+
+
+def _endpoint_attribution(
+    kind: str, value: str, enrichment: dict[str, Any]
+) -> dict[str, Any]:
+    attribution = A.build_endpoint_attribution(kind, value, enrichment)
+    assert attribution is not None
+    return attribution
+
+
+def test_classify_network() -> None:
+    assert A.classify_network("Tencent cloud computing", "AS45090") == A.CAT_CLOUD
+    assert A.classify_network("Cloudflare Inc", "AS13335") == A.CAT_CDN
+    assert A.classify_network("CHINANET-BACKBONE", "AS4134") == A.CAT_TELECOM
+    assert A.classify_network("Yunaq Jiasule", None) == A.CAT_SECURITY_PROXY  # rules/providers.yaml 有 jiasule
+    assert A.classify_network(None, None) == A.CAT_UNKNOWN
+    assert A.classify_network("Some Random Ltd", "AS99999") == A.CAT_UNKNOWN
+
+
+def test_classify_network_prefers_more_specific_category() -> None:
+    """★同时命中多类时按**类别专指度**裁决，而不是 YAML 书写顺序、也不是关键字长度。
+
+    三段历史都在这条测试里钉住：
+    - 曾按书写顺序首个命中即返回 → "Amazon CloudFront" 撞上 cloud 的 amazon 就再也轮不到 cdn 的
+      cloudfront，CDN 边缘不触发 PUBLIC_CDN 阻断、反落进「云/IDC 自建托管」被当源站调证。
+    - 改成「最长关键字优先」后中文直接反转 → telecom 的 "中国移动"(4 字) 压过 cloud 的 "移动云"(3 字)，
+      运营商系云被判成运营商，hosting 层整层落 None，调证方向从云商（有租户实名）错指运营商。
+    - 同样是长度惹的祸：idc 的泛词 "hosting"/"data center" 长于几乎所有品牌词。
+    """
+    # 云 vs CDN：CDN 更专指
+    assert A.classify_network("Amazon CloudFront") == A.CAT_CDN
+    assert A.classify_network("Tencent EdgeOne") == A.CAT_CDN
+    assert A.classify_network("Amazon Technologies Inc.") == A.CAT_CLOUD  # 不含 cdn 关键字仍是云
+
+    # ★运营商系云：中文形态不得反转成 telecom（英文形态本来就靠加长词侥幸保住，一并钉住）
+    for org in (
+        "中国移动云能力中心",
+        "中国联通云数据有限公司",
+        "中国电信天翼云科技有限公司",
+        "China Mobile Cloud Computing Center",
+    ):
+        assert A.classify_network(org) == A.CAT_CLOUD, f"运营商系云被判成运营商：{org}"
+    # 不带云品牌的纯运营商仍是 telecom
+    assert A.classify_network("China Mobile Communications Group") == A.CAT_TELECOM
+
+    # ★idc 泛词不得压过品牌词：厂商名在场时泛词只是描述，不是归属
+    assert A.classify_network("Fastly hosting") == A.CAT_CDN
+    assert A.classify_network("Cloudflare data center") == A.CAT_CDN
+    assert A.classify_network("aliyun hosting") == A.CAT_CLOUD
+    assert A.classify_network("Some Hosting Ltd") == A.CAT_IDC  # 只有泛词时才落 idc
+
+
+def test_classify_network_knows_cdn_orgs_by_real_whois_form() -> None:
+    """★CDN 厂商要按**实际 org 形态**认得出来，而不是只认连写商标名。
+
+    45.202.x 那批 IP 的 Shodan org 是 "Bunny Technology LLC"——表里只有连写的 "bunnycdn" 时
+    匹配不上，归属落 unknown，边缘 IP 被当成托管商查了半天。
+    """
+    for org in ("Bunny Technology LLC", "bunny.net", "CDN77 Ltd", "G-Core Labs S.A.",
+                "Gcore S.A.", "Edgio Inc.", "Limelight Networks, Inc."):
+        assert A.classify_network(org) == A.CAT_CDN, f"CDN 组织名认不出：{org}"
+
+
+def test_classify_network_does_not_match_substrings_of_other_names() -> None:
+    """★关键字不得粘进无关公司名：误判成 CDN 会触发 PUBLIC_CDN 阻断，把可能的真源站压掉。
+
+    实测的三类假阳：``Kingcore Electronics`` 含 gcore（词边界可挡）；``Limelight Health``、
+    ``Bunny Studio`` 是真·同名公司（边界挡不住，只能把规则写成专指形态）。
+    """
+    for org in (
+        "Kingcore Electronics Corp.",
+        "Limelight Health, Inc.",
+        "The Limelight Hotel Aspen",
+        "Bunny Studio Inc.",
+        "Bunnyshell SRL",
+    ):
+        assert A.classify_network(org) != A.CAT_CDN, f"无关公司被判成 CDN：{org}"
+
+    # 词边界的代价：纯连写无分隔的形态会漏判（落 unknown）。这是有意的取舍——漏判不指错人，
+    # 而误判会触发 PUBLIC_CDN 阻断把真源站压掉。ASN 名里的连字符本就是边界，故不受影响。
+    assert A.classify_network("TencentEdgeOne") == A.CAT_UNKNOWN
+    assert A.classify_network("AS45090 TENCENT-NET-AP-Shenzhen") == A.CAT_CLOUD
+
+
+def test_five_layers_never_collapse() -> None:
+    """★五层各自独立、不塌缩：service_operator 恒未知、hosting 不等于 website_owner。"""
+    att = A.build_ip_attribution("1.2.3.4", {
+        "country": "cn", "rdap": {"netname": "ALISOFT"},
+        "asn": {"asn": "AS37963", "org": "Hangzhou Aliyun"},
+    })
+    assert set(att) == {"ip", "country", "resource_holder", "origin_network",
+                        "hosting_provider", "edge_provider", "service_operator"}
+    assert att["country"] == "CN"
+    assert att["resource_holder"]["name"] == "ALISOFT" and att["resource_holder"]["confidence"] == A.CONF_HIGH
+    assert att["origin_network"]["asn"] == 37963 and att["origin_network"]["category"] == A.CAT_CLOUD  # Aliyun→cloud
+    assert att["hosting_provider"]["role"] == "cloud_host"  # hosting 反映网络类型，★不写成 website_owner
+    # ★实际站点运营者绝不从 ASN/RDAP 推断
+    assert att["service_operator"]["name"] is None and att["service_operator"]["confidence"] == A.CONF_UNKNOWN
+
+
+def test_edge_confirmed_requires_two_strong_signals() -> None:
+    """★单一强信号最多 probable；≥2 个不同强信号才 confirmed（防单头被配置/伪造即坐实）。"""
+    one = _edge_score({"response_headers": {"CF-RAY": "abc"}}, rules=_RULES)
+    assert one["tier"] == "probable" and one["confidence"] == A.CONF_MEDIUM
+    two = _edge_score(
+        {"response_headers": {"CF-RAY": "abc"}, "cname_chain": ["x.cloudflare.net"]}, rules=_RULES)
+    assert two["tier"] == "confirmed" and two["confidence"] == A.CONF_HIGH
+    assert len([m for m in two["matched_signals"] if m.startswith(("cname", "response_header"))]) == 2
+
+
+def test_edge_cookie_name_matched_by_name() -> None:
+    """观测 cookie 带 =value → 按名匹配规则的 cookie 名（server 头 + __jsluid cookie = 2 强信号 → confirmed）。"""
+    edge = _edge_score(
+        {"response_headers": {"Server": "jsl/1.1"}, "cookies": ["__jsluid=deadbeef; path=/"]}, rules=_RULES)
+    assert edge["id"] == "waf.jsl" and edge["tier"] == "confirmed"
+
+
+def test_edge_weak_only_below_threshold_returns_none() -> None:
+    """只命中 ASN（弱信号 weight 2 < possible 阈值 3）→ 不达阈值 → None（未识别，非"无代理"）。"""
+    assert A.score_edge_provider({"asn": 13335}, rules=_RULES) is None
+
+
+def test_edge_negative_public_cloud_only_dampens() -> None:
+    """★负证据**精确扣 2**（非随意扣分）：验证扣分前后分数差正好 2、且带 neg 标签、跨阈值时降档。"""
+    # 仅命中 TLS 中信号（weight 4，非强）→ 4 ≥ possible(3) → possible。
+    hit = A.score_edge_provider({"tls_spki": "deadbeef"}, rules=_RULES)
+    assert hit is not None and hit["tier"] == "possible" and hit["score"] == 4.0
+    # 叠加 origin 在公共云类别且无强信号 → public_cloud_only 扣 2 → 2 < possible(3) → 被抑制为 None。
+    damp = A.score_edge_provider({"tls_spki": "deadbeef", "origin_category": A.CAT_CLOUD}, rules=_RULES)
+    assert damp is None
+    # ★精确性：TLS(4)+ASN(2)=6 probable，叠负证据 → 正好 4.0（差恰为 2，不是 3、不是 100）→ possible，且带 neg 标签。
+    exact = A.score_edge_provider({"tls_spki": "deadbeef", "asn": 13335, "origin_category": A.CAT_CLOUD}, rules=_RULES)
+    assert exact is not None and exact["score"] == 4.0 and exact["tier"] == "possible"
+    assert "neg:public_cloud_only" in exact["weak_signals"]
+    # 反向对照：非公共云类别 → 负证据不触发 → 6.0 probable（证明确是该负证据在起作用）。
+    keep = A.score_edge_provider({"tls_spki": "deadbeef", "asn": 13335, "origin_category": A.CAT_TELECOM}, rules=_RULES)
+    assert keep is not None and keep["score"] == 6.0 and keep["tier"] == "probable"
+
+
+def test_edge_reranks_by_tier_not_raw_score() -> None:
+    """★负证据后重排：原始分更高但只到 probable 的弱候选，不得压过分数略低却 confirmed（≥2 强信号）的候选。"""
+    rules = {"edge_providers": [
+        {"id": "A", "name": "ProvA", "category": "cdn",
+         "signals": {"tls": {"spki_sha256": [{"value": "aa", "weight": 15}]}}},   # 原始分 15、0 强信号 → 顶 probable
+        {"id": "B", "name": "ProvB", "category": "cdn", "signals": {              # 6+8=14、2 强信号 → confirmed
+            "http": {"headers": [{"name": "x-b", "weight": 6}]},
+            "dns": {"cname_suffix": [{"value": ".provb.net", "weight": 8}]}}},
+    ], "scoring": {"confirmed": 10, "probable": 6, "possible": 3}}
+    obs = {"tls_spki": "aa", "response_headers": {"x-b": "1"}, "cname_chain": ["e.provb.net"],
+           "origin_category": A.CAT_CLOUD}
+    best = _edge_score(obs, rules=rules)
+    assert best["name"] == "ProvB" and best["tier"] == "confirmed"
+
+
+def test_edge_negative_x_cache_and_nginx_only_dampen() -> None:
+    """x_cache_only / nginx_only 两类通用中间件负证据也真扣分。"""
+    base = {"tls_spki": "deadbeef"}
+    assert A.score_edge_provider({**base, "x_cache_only": True}, rules=_RULES) is None   # 4-2=2 → None
+    assert A.score_edge_provider({**base, "server_nginx_only": True}, rules=_RULES) is None  # 4-3=1 → None
+
+
+def test_edge_forged_suffix_not_confirmed() -> None:
+    """★P0：伪造域名把品牌根塞进**中间**（x.cloudflare.net.attacker.example）不得命中——标签级匹配。"""
+    forged = _edge_score(
+        {"response_headers": {"CF-RAY": "forged"}, "cname_chain": ["x.cloudflare.net.attacker.example"]}, rules=_RULES)
+    # CNAME 不命中 → 只剩单 header 强信号 → 最多 probable，绝不 confirmed。
+    assert forged["tier"] == "probable"
+    assert not any(m.startswith("cname") for m in forged["matched_signals"])
+    # 真·子域仍 confirmed（header + cname = 2 强信号）。
+    genuine = _edge_score(
+        {"response_headers": {"CF-RAY": "ok"}, "cname_chain": ["edge.cloudflare.net"]}, rules=_RULES)
+    assert genuine["tier"] == "confirmed"
+
+
+def test_host_suffix_match_boundaries() -> None:
+    """★标签级后缀匹配的边界：精确/子域/大小写/末点 命中；中间根/空标签/父域 不命中。"""
+    S = A._host_hits_suffix
+    assert S(["cloudflare.net"], ".cloudflare.net")            # 精确
+    assert S(["edge.cloudflare.net"], "cloudflare.net")        # 子域（后缀前导点可省）
+    assert S(["EDGE.CloudFlare.NET"], ".cloudflare.net")       # 大小写不敏感
+    assert S(["edge.cloudflare.net."], ".cloudflare.net")      # 末点归一
+    assert not S(["x.cloudflare.net.evil.com"], ".cloudflare.net")   # 根在中间
+    assert not S(["x..cloudflare.net"], ".cloudflare.net")     # 空标签畸形
+    assert not S(["notcloudflare.net"], ".cloudflare.net")     # 非标签边界（子串但非后缀标签）
+    assert not S(["net"], ".cloudflare.net")                   # 父域（比根短）
+    assert not S([], ".cloudflare.net") and not S(["a.b"], "")  # 空输入/空规则
+
+
+def test_origin_network_rejects_malformed_asn() -> None:
+    """★P0：畸形 ASN（负号/小数/前缀垃圾/越界/保留值/bool）不得抠出数字冒充高置信 BGP 归属 → 一律 unknown。"""
+    bad_values: list[object] = [
+        "-123 Tencent", "1.5 Tencent", "garbage123 Tencent", "AS4294967296 Tencent",
+        "AS0", "AS4294967295",  # 0（RFC7607）与 0xFFFFFFFF（RFC7300）保留值
+        "", True, False,        # bool 是 int 子类，须显式排除，不得被当作 AS1/AS0
+    ]
+    for bad in bad_values:
+        o = A._origin_network({"asn": bad})
+        assert o["asn"] is None and o["confidence"] == A.CONF_UNKNOWN, f"bad asn {bad!r} 未被拒"
+        assert o["source"] is None
+    # 合法边界仍解析：可路由上界 4294967294、裸数字、AS 前缀带 org 尾。
+    for ok_val, want in [("AS45090", 45090), ("AS4294967294", 4294967294), (45090, 45090), ("AS12345 Org", 12345)]:
+        o = A._origin_network({"asn": ok_val})
+        assert o["asn"] == want and o["confidence"] == A.CONF_HIGH and o["source"] == "BGP/ASN", f"{ok_val!r} 应解析"
+
+
+def test_never_raises_on_bad_input() -> None:
+    """★核心 invariant「绝不抛」：各类坏输入（None/错类型/畸形规则）都返回结构或 None，绝不异常。"""
+    assert A.score_edge_provider(cast(dict[str, Any], None)) is None                       # observed=None
+    assert A.score_edge_provider({}, rules=cast(dict[str, Any], [])) is None               # rules 非 dict
+    assert A.score_edge_provider({}, rules={"edge_providers": "x"}) is None  # edges 非 list
+    # 列表字段被喂标量 → 不迭代崩溃。
+    for bad_field in ({"cname_chain": 123}, {"nameservers": 5}, {"cookies": "a=b"}, {"response_headers": [1, 2]}):
+        A.build_ip_attribution("1.2.3.4", bad_field)  # 不抛即通过
+    # 畸形 scoring/weights 不参与比较时崩溃（None/字符串阈值与权重都被 _num 清洗回默认）。
+    r = A.score_edge_provider(
+        {"response_headers": {"cf-ray": "x"}, "cname_chain": ["a.cdn.cloudflare.net"]},
+        rules={"edge_providers": [{"id": "c", "name": "CF", "signals": {
+            "http": {"headers": [{"name": "cf-ray", "weight": 6}]},
+            "dns": {"cname_suffix": [{"value": ".cdn.cloudflare.net", "weight": 8}]}}}],
+            "scoring": {"probable": None, "confirmed": "x"},
+            "weights": {"response_header": "bad", "cname_suffix": None}})   # 脏正权重不得 0.0+str 抛
+    assert r is not None  # 阈值/权重被 _num 清洗回默认，仍能定档
+    # 观测 ASN 为无穷/极端浮点 → int() 转换 OverflowError 须被吞（绝不抛）。
+    assert A.score_edge_provider(
+        {"asn": float("inf")},
+        rules={"edge_providers": [{"id": "c", "name": "C", "signals": {
+            "network": {"asns": [{"value": 13335, "weight": 2}]}}}]}) is None
+    # 超大整数权重（float() OverflowError）与 inf 权重（非有限）→ _num 兜默认、不抛、不泄漏 inf 分。
+    huge = A.score_edge_provider(
+        {"response_headers": {"cf-ray": "x"}},
+        rules={"edge_providers": [{"id": "c", "name": "C", "signals": {"http": {"headers": [{"name": "cf-ray"}]}}}],
+               "weights": {"response_header": 10 ** 10000}})
+    assert huge is not None and huge["score"] == 6.0  # 脏权重回落默认 6
+    inf_w = A.score_edge_provider(
+        {"response_headers": {"cf-ray": "x"}, "cname_chain": ["a.cf.net"]},
+        rules={"edge_providers": [{"id": "c", "name": "C", "signals": {
+            "http": {"headers": [{"name": "cf-ray", "weight": float("inf")}]},
+            "dns": {"cname_suffix": [{"value": ".cf.net", "weight": 8}]}}}]})
+    assert inf_w is not None and math.isfinite(inf_w["score"]) and inf_w["score"] == 14.0
+
+
+def test_edge_asn_signal_rejects_reserved_and_out_of_range() -> None:
+    """★ASN 弱信号匹配前须过 range 校验：保留值/越界观测 ASN 不得被规则采纳为证据（与 _parse_asn 同纪律）。"""
+    def _rule(asn_val: int) -> dict:
+        return {"edge_providers": [{"id": "c", "name": "C", "signals": {
+            "network": {"asns": [{"value": asn_val, "weight": 3}]}}}],
+            "scoring": {"confirmed": 10, "probable": 6, "possible": 3}}
+    # 保留值 4294967295 / 0：即便规则恰好列了它，观测到也不采纳 → None。
+    assert A.score_edge_provider({"asn": 4294967295}, rules=_rule(4294967295)) is None
+    assert A.score_edge_provider({"asn": 0}, rules=_rule(0)) is None
+    # 合法可路由 ASN 仍正常匹配 → possible。
+    ok = A.score_edge_provider({"asn": 13335}, rules=_rule(13335))
+    assert ok is not None and ok["tier"] == "possible" and ok["score"] == 3.0
+    # 非整数 float ASN（13335.9）不得被截断采纳；规则侧超长数字串不得抛。
+    assert A.score_edge_provider({"asn": 13335.9}, rules=_rule(13335)) is None
+    assert A.score_edge_provider({"asn": 13335}, rules=_rule("9" * 10000)) is None  # type: ignore[arg-type]
+
+
+def test_parse_asn_oversized_digit_string_no_raise() -> None:
+    """★超长数字串（>10 位）在 int() 触达 CPython 4300 位限制前即判非法 → (None, None)，绝不抛。"""
+    assert A._parse_asn("9" * 10000) == (None, None)
+    assert A._parse_asn("AS" + "1" * 5000) == (None, None)
+    assert A._parse_asn("13335.9") == (None, None)  # 非整数字符串
+    assert A._parse_asn(13335.9) == (None, None)    # 非整数 float
+
+
+def test_edge_score_always_finite() -> None:
+    """★分数有限总闸：即便规则权重是有限大数（1e308）累加溢出成 inf，也不得泄漏非有限分 → 候选作废。"""
+    r = A.score_edge_provider(
+        {"response_headers": {"cf-ray": "x"}, "cname_chain": ["a.cf.net"]},
+        rules={"edge_providers": [{"id": "c", "name": "C", "signals": {
+            "http": {"headers": [{"name": "cf-ray", "weight": 1e308}]},
+            "dns": {"cname_suffix": [{"value": ".cf.net", "weight": 1e308}]}}}]})
+    assert r is None  # inf 分被 isfinite 闸拦下
+    # 合法权重仍产出有限分。
+    ok = A.score_edge_provider({"response_headers": {"cf-ray": "x"}}, rules=_RULES)
+    assert ok is not None and math.isfinite(ok["score"])
+
+
+def test_every_layer_has_source_field() -> None:
+    """★invariant：五层都带 source 键（未知即 None，已识别写明来源）。"""
+    att = A.build_ip_attribution("1.2.3.4", {"rdap": {"netname": "X"}, "asn": {"asn": "AS45090", "org": "Tencent"}})
+    for layer in ("resource_holder", "origin_network", "hosting_provider", "edge_provider", "service_operator"):
+        assert "source" in att[layer], f"{layer} 缺 source 键"
+    assert att["origin_network"]["source"] == "BGP/ASN"
+    assert att["hosting_provider"]["source"] == "origin_asn_category"
+
+
+def test_real_providers_yaml_confirmed_needs_two_signals() -> None:
+    """契约测试：用**真实 rules/providers.yaml**，Cloudflare 单头 probable、header+cname 才 confirmed。"""
+    one = A.score_edge_provider({"response_headers": {"CF-RAY": "abc"}})  # rules=None → 加载真实库
+    assert one is not None and one["tier"] == "probable"
+    two = A.score_edge_provider(
+        {"response_headers": {"CF-RAY": "abc"}, "cname_chain": ["e.cdn.cloudflare.net"]})
+    assert two is not None and two["tier"] == "confirmed" and two["name"] == "Cloudflare"
+
+
+def test_origin_network_parses_asn_string_forms() -> None:
+    assert A._origin_network({"asn": "AS12345 Some Org"})["asn"] == 12345
+    assert A._origin_network({"asn": "12345", "org": "X"})["asn"] == 12345
+    assert A._origin_network({})["asn"] is None and A._origin_network({})["confidence"] == A.CONF_UNKNOWN
+    assert A._origin_network(None)["asn"] is None  # type: ignore[arg-type]
+
+
+def test_build_robust_bad_input() -> None:
+    att = A.build_ip_attribution("x", None)  # type: ignore[arg-type]
+    assert att["resource_holder"]["name"] is None
+    assert att["origin_network"]["category"] == A.CAT_UNKNOWN
+    assert att["edge_provider"]["name"] is None  # 无信号 → edge 未识别
+    assert att["service_operator"]["name"] is None
+
+
+def test_attribution_from_enrichment_maps_asn_layers() -> None:
+    """扁平 enrichment 的 asn 子键 → origin/hosting 分层；resource_holder 暂 unknown（未接 IP RDAP，不冒充登记方）。"""
+    att = A.attribution_from_enrichment({"asn": {"asn": "AS45090", "org": "Tencent cloud", "country": "CN"}})
+    assert att is not None
+    assert att["origin_network"]["asn"] == 45090 and att["origin_network"]["category"] == A.CAT_CLOUD
+    assert att["hosting_provider"]["role"] == "cloud_host"
+    assert att["resource_holder"]["name"] is None  # ★不拿 ISP 冒充 RDAP 登记方
+    assert att["service_operator"]["name"] is None
+
+
+def test_attribution_from_enrichment_none_without_signals() -> None:
+    assert A.attribution_from_enrichment({}) is None
+    assert A.attribution_from_enrichment({"tier": "app"}) is None  # 无 asn/dns 等归属信号 → None
+    assert A.attribution_from_enrichment(None) is None  # type: ignore[arg-type]
+
+
+def test_attribution_from_enrichment_reads_dns_cname() -> None:
+    """★P1-2：映射器须读 DnsEnricher 真实输出位置 enrichment['dns']['cname']。
+
+    dns.cname（专属后缀）是强信号，但单信号最多 probable（confirmed 须 ≥2 强信号）。
+    """
+    att = A.attribution_from_enrichment({
+        "asn": {"asn": "AS13335", "org": "Cloudflare"},
+        "dns": {"cname": ["a.cdn.cloudflare.net"]},
+    })
+    assert att is not None
+    assert att["origin_network"]["category"] == A.CAT_CDN
+    assert att["edge_provider"].get("name") == "Cloudflare"
+    assert att["edge_provider"].get("tier") == "probable"  # 若漏读 dns.cname 则识别不出 edge
+
+
+def test_attribution_from_enrichment_none_on_dns_only_no_signal() -> None:
+    """只有 dns.ips 但无 cname/asn 可用信号 → 无归因价值 → None（不产全 unknown 空壳）。"""
+    assert A.attribution_from_enrichment({"dns": {"ips": ["1.2.3.4"]}}) is None
+    # 但有 CNAME（可识别 edge）就该产出。
+    att = A.attribution_from_enrichment({"dns": {"cname": ["a.cdn.cloudflare.net"]}})
+    assert att is not None and att["edge_provider"]["name"] == "Cloudflare"
+
+
+def test_build_endpoint_attribution_ip() -> None:
+    """IP 端点：用 enrichment['asn'] → 单条五层归因。"""
+    att = A.build_endpoint_attribution("ip", "1.2.3.4", {"asn": {"asn": "AS45090", "org": "Tencent cloud"}})
+    assert att is not None and att["kind"] == "ip" and att["endpoint"] == "1.2.3.4"
+    assert len(att["ips"]) == 1
+    assert att["ips"][0]["origin_network"]["category"] == A.CAT_CLOUD
+    assert att["ips"][0]["resource_holder"]["name"] is None  # 未接 IP-RDAP，不冒充登记方
+
+
+def test_build_endpoint_attribution_rejects_stale_non_hit_provider_payloads() -> None:
+    for status in ("failed", "no_record", "skipped", "disabled"):
+        source_status = {
+            provider: {"status": status}
+            for provider in ("asn", "ip_rdap", "dns", "shodan")
+        }
+        stale_ip = {
+            "source_status": source_status,
+            "asn": {"asn": "AS64500", "org": "Example Cloud"},
+            "ip_rdap": {"netname": "STALE-NET"},
+            "shodan": {"asn_org": "Example Cloud"},
+        }
+        stale_domain = {
+            "source_status": source_status,
+            "dns": {
+                "ips": ["198.51.100.10"],
+                "hosting": [{"ip": "198.51.100.10", "asn": "AS64500"}],
+            },
+        }
+
+        assert A.build_endpoint_attribution("ip", "198.51.100.10", stale_ip) is None
+        assert A.build_endpoint_attribution("domain", "api.example.com", stale_domain) is None
+
+
+def test_build_endpoint_attribution_fails_closed_when_provider_status_is_missing() -> None:
+    enrichment = {
+        "source_status": {"certs": {"status": "hit"}},
+        "asn": {"asn": "AS64500", "org": "Example Cloud"},
+    }
+
+    assert A.build_endpoint_attribution("ip", "198.51.100.10", enrichment) is None
+
+
+def test_build_endpoint_attribution_accepts_canonical_hits_and_true_legacy() -> None:
+    ip_payload = {"asn": {"asn": "AS64500", "org": "Example Cloud"}}
+    domain_payload = {"dns": {"ips": ["198.51.100.10"]}}
+
+    assert A.build_endpoint_attribution(
+        "ip",
+        "198.51.100.10",
+        {"source_status": {"asn": {"status": "hit"}}, **ip_payload},
+    ) is not None
+    assert A.build_endpoint_attribution("ip", "198.51.100.10", ip_payload) is not None
+    assert A.build_endpoint_attribution(
+        "domain",
+        "api.example.com",
+        {"source_status": {"dns": {"status": "hit"}}, **domain_payload},
+    ) is not None
+    assert A.build_endpoint_attribution("domain", "api.example.com", domain_payload) is not None
+
+
+def test_domain_attribution_rejects_stale_resolved_payload_but_keeps_hit_dns_fallback() -> None:
+    enrichment = {
+        "source_status": {"dns": {"status": "hit"}},
+        "dns": {
+            "ips": ["198.51.100.10"],
+            "hosting": [
+                {
+                    "ip": "198.51.100.10",
+                    "asn": "AS64500",
+                    "org": "Current DNS Hosting",
+                }
+            ],
+        },
+        "resolved_ip_enrichment": {
+            "198.51.100.10": {
+                "source_status": {
+                    "asn": {"status": "failed"},
+                    "ip_rdap": {"status": "no_record"},
+                },
+                "asn": {"asn": "AS64501", "org": "Stale ASN"},
+                "ip_rdap": {"netname": "STALE-NET"},
+            }
+        },
+    }
+
+    attribution = A.build_endpoint_attribution("domain", "api.example.com", enrichment)
+
+    assert attribution is not None
+    layer = attribution["ips"][0]
+    assert layer["resource_holder"]["name"] is None
+    assert layer["origin_network"]["asn"] == 64500
+    assert layer["origin_network"]["organization"] == "Current DNS Hosting"
+
+
+def test_build_endpoint_attribution_domain_per_ip_never_collapses() -> None:
+    """★域名解析到多 IP（异构 ASN）→ 逐 IP 五层、绝不合并；域名级 CNAME 喂每个 IP 的 edge。"""
+    att = A.build_endpoint_attribution("domain", "pay.example.com", {
+        "dns": {
+            "ips": ["1.1.1.1", "198.51.100.21"],
+            "hosting": [
+                {"ip": "1.1.1.1", "asn": "AS13335", "org": "Cloudflare", "country": "US"},
+                {"ip": "198.51.100.21", "asn": "AS45090", "org": "Tencent", "country": "CN"},
+            ],
+            "cname": ["pay.example.com.cdn.cloudflare.net"],
+        },
+    })
+    assert att is not None and att["kind"] == "domain" and len(att["ips"]) == 2
+    by_ip = {layer["ip"]: layer for layer in att["ips"]}
+    # ★两个 IP 的 origin 各不相同（不塌缩）：一个 cdn、一个 cloud。
+    assert by_ip["1.1.1.1"]["origin_network"]["category"] == A.CAT_CDN
+    assert by_ip["198.51.100.21"]["origin_network"]["category"] == A.CAT_CLOUD
+    # 域名级 CNAME 共享给每个 IP 的 edge（单强信号 → probable）。
+    assert by_ip["1.1.1.1"]["edge_provider"]["name"] == "Cloudflare"
+    assert by_ip["198.51.100.21"]["edge_provider"]["name"] == "Cloudflare"
+
+
+def test_domain_analyze_ip_resource_holder_marked_deferred() -> None:
+    """★analyze 路径：域名解析 IP 无 resolved_ip_enrichment（IP-RDAP 未逐 IP 查）→ resource_holder
+    须显式标 deferred='case_close'，区分「未查询」与结案后 name=None 的「查无登记方」。"""
+    att = A.build_endpoint_attribution("domain", "pay.example.com", {
+        "dns": {
+            "ips": ["1.1.1.1", "198.51.100.21"],
+            "hosting": [
+                {"ip": "1.1.1.1", "asn": "AS13335", "org": "Cloudflare", "country": "US"},
+                {"ip": "198.51.100.21", "asn": "AS45090", "org": "Tencent", "country": "CN"},
+            ],
+        },
+    })
+    assert att is not None and len(att["ips"]) == 2
+    for ip_layer in att["ips"]:
+        rh = ip_layer["resource_holder"]
+        assert rh["name"] is None
+        assert rh["deferred"] == "case_close", "analyze 域名 IP 的第1层须标待补，不能静默当作查无"
+
+
+def test_domain_resolved_ip_queried_but_empty_not_deferred() -> None:
+    """★codex P0 回归：resolved_ip_enrichment 里**有**该 IP（结案已查）但条目无有效信号、
+    归因生成失败**落回 fallback** 时，绝不能标 deferred——那是「已查、查无有效信号」，不是「未查询」。
+
+    ★场景须真正 fall through：该 IP 无 hosting 有效字段（否则 merged 被兜底注入 asn → 走 continue、
+    测不到 fallback 分支）。resolved 条目空 → attribution_from_enrichment 返回 None → 进 fallback。"""
+    # 条目为空 dict、无 hosting → merged 全空 → attribution_from_enrichment None → fallback；但 key 存在 → 不标
+    att = _endpoint_attribution("domain", "pay.example.com", {
+        "dns": {"ips": ["1.1.1.1"]},
+        "resolved_ip_enrichment": {"1.1.1.1": {}},
+    })
+    rh = att["ips"][0]["resource_holder"]
+    assert rh["name"] is None
+    assert "deferred" not in rh, "结案已查（条目空）落回 fallback 被误标成未查询"
+    # 条目仅错误/状态字段 → 同样无有效信号落回 fallback，key 存在 → 不标
+    att2 = _endpoint_attribution("domain", "pay.example.com", {
+        "dns": {"ips": ["198.51.100.21"]},
+        "resolved_ip_enrichment": {"198.51.100.21": {"ip_rdap": {"error": "timeout"}}},
+    })
+    rh2 = att2["ips"][0]["resource_holder"]
+    assert rh2["name"] is None
+    assert "deferred" not in rh2, "结案已查（仅 error 字段）落回 fallback 被误标成未查询"
+    # 对照混合：同域名下未查的 IP（不在 resolved）标 deferred、已查空的 IP（在 resolved）不标
+    att3 = _endpoint_attribution("domain", "pay.example.com", {
+        "dns": {"ips": ["1.1.1.1", "198.51.100.27"]},
+        "resolved_ip_enrichment": {"1.1.1.1": {}},
+    })
+    by_ip = {layer["ip"]: layer["resource_holder"] for layer in att3["ips"]}
+    assert "deferred" not in by_ip["1.1.1.1"], "已查空的 IP 不该标未查询"
+    assert by_ip["198.51.100.27"].get("deferred") == "case_close", "未查的 IP 应标待补"
+
+
+def test_domain_resolved_ip_with_rdap_not_deferred() -> None:
+    """★对照：结案已补 ip_rdap 有登记方 → resource_holder 有 name、绝不带 deferred 标记。"""
+    att = _endpoint_attribution("domain", "pay.example.com", {
+        "dns": {"ips": ["198.51.100.41"], "hosting": [{"ip": "198.51.100.41", "asn": "AS20473"}]},
+        "resolved_ip_enrichment": {
+            "198.51.100.41": {"ip_rdap": {"netname": "VULTR-NET", "org": "The Constant Company"}},
+        },
+    })
+    rh = att["ips"][0]["resource_holder"]
+    assert rh["name"] == "VULTR-NET"
+    assert "deferred" not in rh
+
+
+def test_ip_endpoint_resource_holder_never_deferred() -> None:
+    """★IP 端点 analyze 就跑 IP-RDAP（applies_to=['ip']），其 resource_holder 无论有无值都不该标 deferred
+    （deferred 仅限域名解析 IP 这条真未查询的分支）。"""
+    att = _endpoint_attribution("ip", "1.2.3.4", {"asn": {"asn": "AS45090", "org": "Tencent cloud"}})
+    assert "deferred" not in att["ips"][0]["resource_holder"]
+
+
+def test_build_endpoint_attribution_domain_absorbs_resolved_ip_enrichment() -> None:
+    """★P1-3：域名端点吸收 case-close 逐 IP 富化（resolved_ip_enrichment[ip] 的 ip_rdap 资源登记方）→
+    顶层五层的 resource_holder 有值而非恒 unknown；域名级 cname 与 hosting asn 兜底不退化。"""
+    att = _endpoint_attribution("domain", "pay.example.com", {
+        "dns": {
+            "ips": ["198.51.100.41"],
+            "hosting": [{"ip": "198.51.100.41", "asn": "AS20473", "org": "AS-CHOOPA", "country": "US"}],
+            "cname": ["pay.example.com.cdn.cloudflare.net"],
+        },
+        "resolved_ip_enrichment": {
+            "198.51.100.41": {"ip_rdap": {"netname": "VULTR-NET", "org": "The Constant Company", "country": "US"}},
+        },
+    })
+    assert len(att["ips"]) == 1
+    ip_layer = att["ips"][0]
+    assert ip_layer["resource_holder"]["name"] == "VULTR-NET"     # 来自 resolved 的 ip_rdap（域名分支原本不读）
+    assert ip_layer["origin_network"]["asn"] == 20473            # hosting 兜底：origin 层未退化
+    assert ip_layer["edge_provider"]["name"] == "Cloudflare"     # 域名级 cname 注入 edge 未丢
+
+
+def test_build_endpoint_attribution_domain_resolved_asn_error_falls_back_to_hosting() -> None:
+    """★P1-3 兜底（Codex 复审）：resolved 的 asn 是失败 payload({"error":...}，富化失败也写 asn 键)时，
+    按"有效字段"而非"键存在"回落 dns.hosting 的 ASN → origin/hosting 层不退化；resource_holder 仍取 ip_rdap。"""
+    att = _endpoint_attribution("domain", "pay.example.com", {
+        "dns": {
+            "ips": ["198.51.100.41"],
+            "hosting": [{"ip": "198.51.100.41", "asn": "AS20473", "org": "AS-CHOOPA", "country": "US"}],
+        },
+        "resolved_ip_enrichment": {
+            "198.51.100.41": {
+                "ip_rdap": {"netname": "VULTR-NET", "org": "The Constant Company", "country": "US"},
+                "asn": {"error": "Timeout contacting ip-api"},  # 富化失败的控制字段，非有效 ASN
+            },
+        },
+    })
+    ip_layer = att["ips"][0]
+    assert ip_layer["resource_holder"]["name"] == "VULTR-NET"  # ip_rdap 仍生效
+    assert ip_layer["origin_network"]["asn"] == 20473          # asn={"error"} 不阻断 hosting 兜底
+
+
+def test_build_endpoint_attribution_domain_hosting_missing_degrades() -> None:
+    """域名 hosting 缺（限速）但有 ips+cname → 退化：origin unknown，但 CNAME 仍识别 edge。"""
+    att = _endpoint_attribution("domain", "x.example.com", {
+        # CNAME 夹具须带真实 CDN 后缀：那是 providers.yaml 的 edge 指纹本身，改写后缀本断言即空转。
+        "dns": {"ips": ["198.51.100.27"], "cname": ["x.example.com.cdn.cloudflare.net"]}})  # leak-scan: allow edge 指纹后缀是被测判据本身，非泄漏；域名主体已用 example.com
+    assert len(att["ips"]) == 1
+    assert att["ips"][0]["origin_network"]["category"] == A.CAT_UNKNOWN
+    assert att["ips"][0]["edge_provider"]["name"] == "Cloudflare"
+
+
+def test_build_endpoint_attribution_partial_hosting_keeps_all_ips() -> None:
+    """★P0 回归（不塌缩）：hosting 常少于 ips（部分 IP 托管查询限速被跳过）——每个解析 IP 都须产一条，
+    只在 ips 里、hosting 缺的 IP 用 unknown ASN，绝不因只遍历 hosting 而丢失。"""
+    att = _endpoint_attribution("domain", "pay.x.com", {
+        "dns": {
+            "ips": ["1.1.1.1", "198.51.100.21", "198.51.100.27"],  # 解析到 3 个
+            "hosting": [{"ip": "1.1.1.1", "asn": "AS13335", "org": "Cloudflare"}],  # 仅 1 个查到托管
+        },
+    })
+    by_ip = {layer["ip"]: layer for layer in att["ips"]}
+    assert set(by_ip) == {"1.1.1.1", "198.51.100.21", "198.51.100.27"}, "只在 ips 里的 IP 被丢失 = per-IP 塌缩"
+    assert by_ip["1.1.1.1"]["origin_network"]["asn"] == 13335  # hosting 命中 → 有 ASN
+    assert by_ip["198.51.100.21"]["origin_network"]["asn"] is None   # hosting 缺 → unknown ASN，但 IP 保留
+    assert by_ip["198.51.100.27"]["origin_network"]["asn"] is None
+
+
+def test_build_endpoint_attribution_hosting_ip_not_in_ips_kept() -> None:
+    """hosting 里出现 ips 未列的 IP（数据不一致）→ 也纳入，一个不丢（ips ∪ hosting.ip）。"""
+    att = A.build_endpoint_attribution("domain", "y.com", {
+        "dns": {"ips": ["1.1.1.1"], "hosting": [{"ip": "9.9.9.9", "asn": "AS45090", "org": "Tencent"}]}})
+    assert att is not None
+    assert {layer["ip"] for layer in att["ips"]} == {"1.1.1.1", "9.9.9.9"}
+
+
+def test_build_endpoint_attribution_no_empty_shell() -> None:
+    """★P2：非空但字段全 None 的子键不得产全 unknown 空壳 → None（IP 端点空 asn / 域名空 hosting 元素）。"""
+    assert A.build_endpoint_attribution("ip", "1.2.3.4", {"asn": {"asn": None, "org": None, "isp": None}}) is None
+    assert A.build_endpoint_attribution("ip", "1.2.3.4", {"asn": {"unexpected": "v"}}) is None
+    assert A.build_endpoint_attribution("ip", "1.2.3.4", {"unrelated": {"x": True}}) is None
+    assert A.build_endpoint_attribution("domain", "z.com", {"dns": {"hosting": [{}]}}) is None  # 无有效 IP
+    assert A.build_endpoint_attribution("domain", "z.com", {"dns": {"ips": [""]}}) is None       # 空 IP 串
+
+
+def test_build_endpoint_attribution_none_and_robust() -> None:
+    """无归属信号 → None；坏输入/未知 kind → None，绝不抛。"""
+    assert A.build_endpoint_attribution("domain", "y.com", {}) is None
+    assert A.build_endpoint_attribution("ip", "198.51.100.47", {"tier": "app"}) is None
+    assert A.build_endpoint_attribution("ip", "x", None) is None  # type: ignore[arg-type]
+    assert A.build_endpoint_attribution("weird", "x", {"asn": {"asn": "AS1"}}) is None  # 未知 kind → 无 per-IP
+    # 域名 hosting 列表里混入坏元素不抛。
+    att = A.build_endpoint_attribution("domain", "z.com", {"dns": {"hosting": [None, {"ip": "9.9.9.9", "asn": "AS45090"}]}})
+    assert att is not None and len(att["ips"]) == 1 and att["ips"][0]["ip"] == "9.9.9.9"
+    # ★退化分支 ips 非 list：int 不得抛（不可迭代）、str 不得被逐字符迭代成垃圾 per-IP → 一律 None。
+    for bad_ips in (123, "1.2.3.4", None, {"a": 1}):
+        assert A.build_endpoint_attribution("domain", "x", {"dns": {"ips": bad_ips}}) is None, f"ips={bad_ips!r} 未安全归空"
+    # dns 子键本身非 dict 也不抛。
+    assert A.build_endpoint_attribution("domain", "x", {"dns": []}) is None
+    assert A.build_endpoint_attribution("domain", "x", {"dns": "garbage"}) is None
+
+
+def test_ip_rdap_fills_resource_holder() -> None:
+    """★slice-1c：IP-RDAP 子键（资源登记方）→ resource_holder 层不再恒 unknown。"""
+    ip_rdap = {"netname": "VULTR-AS20473", "org": "Vultr Holdings", "country": "US", "source": "rdap-ip"}
+    att = _endpoint_attribution("ip", "198.51.100.38", {"asn": {"asn": "AS20473", "org": "Vultr"}, "ip_rdap": ip_rdap})
+    rh = att["ips"][0]["resource_holder"]
+    assert rh["name"] == "VULTR-AS20473" and rh["confidence"] == A.CONF_HIGH and rh["source"] == "rdap-ip"
+
+
+def test_ip_rdap_only_is_valid_signal() -> None:
+    """仅有 ip_rdap（无 asn/dns）也算有效信号 → 产出（resource_holder 有值，其余层 unknown）。"""
+    att = A.build_endpoint_attribution("ip", "1.2.3.4", {"ip_rdap": {"netname": "SOME-NET", "source": "rdap-ip"}})
+    assert att is not None
+    assert att["ips"][0]["resource_holder"]["name"] == "SOME-NET"
+    assert att["ips"][0]["origin_network"]["category"] == A.CAT_UNKNOWN  # 无 ASN → origin 仍 unknown（不塌缩）
+
+
+def test_ip_rdap_empty_not_signal() -> None:
+    """ip_rdap 存在但无 netname/org（全空登记）→ 不算有效信号、不冒充 resource_holder。"""
+    assert A.build_endpoint_attribution("ip", "x", {"ip_rdap": {"source": "rdap-ip"}}) is None
+    # country 补全：ip_rdap 有 country 但无 netname/org 时不设 rdap，但 country 仍不足以单独成信号。
+    assert A.build_endpoint_attribution("ip", "x", {"ip_rdap": {"country": "US"}}) is None
+
+
+def test_online_as_org_fills_origin_network_from_case_close_sources() -> None:
+    """★case-close 增强：ip-api 无 org 时，FOFA/Hunter 等在线源的 as_org 补 origin_network 网络运营方。"""
+    a = A.attribution_from_enrichment({"fofa": {"records": [{"as_organization": "Chinanet Jilin"}]}}, ip="1.2.3.4")
+    assert a is not None
+    assert a["origin_network"]["organization"] == "Chinanet Jilin"
+    assert a["origin_network"]["category"] == "telecom"  # org 归类到 origin_network
+
+
+def test_online_as_org_ignores_hunter_company() -> None:
+    """★纪律：只取 as_org（网络运营方），绝不取 Hunter 的 company（ICP 备案主体=服务运营方，恒 unknown）。"""
+    a = A.attribution_from_enrichment(
+        {"hunter": {"records": [{"company": "某ICP备案主体", "as_org": "Aliyun"}]}}, ip="1.2.3.4"
+    )
+    assert a is not None and a["origin_network"]["organization"] == "Aliyun"  # 取 as_org，非 company
+    assert a["service_operator"]["name"] is None  # company 不进任何归因层
+
+
+def test_online_as_org_only_when_ipapi_missing_and_no_empty_shell() -> None:
+    """ip-api org 优先于在线补充；两者都无 org（只非 org 字段）→ 不塞空壳、返回 None。"""
+    a = A.attribution_from_enrichment(
+        {"asn": {"org": "ip-api-org"}, "fofa": {"records": [{"as_organization": "FOFA-org"}]}}, ip="1.2.3.4"
+    )
+    assert a is not None
+    assert a["origin_network"]["organization"] == "ip-api-org"  # ip-api 优先
+    assert A.attribution_from_enrichment({"fofa": {"records": [{"title": "x"}]}}, ip="1.2.3.4") is None
+
+
+def test_online_as_org_helper_priority_shape_and_fields() -> None:
+    """_online_as_org：多源按优先级、records 列表与顶层两种形态、只认 as_org 类字段（不取 company/isp/org）。"""
+    assert A._online_as_org({"fofa": {"records": [{"as_org": "F"}]}, "hunter": {"records": [{"as_org": "H"}]}}) == "F"
+    assert A._online_as_org({"shodan": {"as_organization": "S"}}) == "S"  # 顶层形态
+    assert A._online_as_org({"fofa": {"records": [{"company": "C", "isp": "I", "org": "O"}]}}) is None  # 非 as_org 类不取
+    assert A._online_as_org({}) is None
+
+
+def test_cidr_ip_pool_weak_signal_matches_and_stays_weak() -> None:
+    """★network.cidrs / ip_pool 匹配器（schema 此前有 ip_pool=3 权重但 _score_one_edge 无匹配代码）：观测 IP
+    落规则 CIDR → ip_pool 弱信号命中；弱信号（非强信号）单独至多 possible，不据 IP 池就 confirmed。"""
+    rules = {
+        "edge_providers": [{"id": "x.edge", "name": "X",
+                            "signals": {"network": {"cidrs": [{"value": "203.0.113.0/24"}]}}}],
+        "scoring": {"confirmed": 10, "probable": 6, "possible": 3},
+    }
+    ep = A.score_edge_provider({"ip": "203.0.113.9"}, rules=rules)
+    assert ep is not None and ep["id"] == "x.edge" and ep["tier"] == "possible"
+    assert "ip_pool:203.0.113.0/24" in ep["matched_signals"]
+    assert A.score_edge_provider({"ip": "8.8.8.8"}, rules=rules) is None  # 不在 CIDR → 无信号
+
+
+def test_ip_in_cidr_helper_robust() -> None:
+    assert A._ip_in_cidr("203.0.113.9", "203.0.113.0/24") is True
+    assert A._ip_in_cidr("8.8.8.8", "203.0.113.0/24") is False
+    assert A._ip_in_cidr("2001:db8::1", "2001:db8::/32") is True   # IPv6 也支持
+    assert A._ip_in_cidr("bad-ip", "203.0.113.0/24") is False      # 坏 IP 不抛
+    assert A._ip_in_cidr("1.2.3.4", "not-a-cidr") is False         # 坏 CIDR 不抛
+
+
+#: PR #165 P1 回归：生产入口用真 _providers_rules()、不注入 rules——若 build_ip_attribution 不把 ip 入参喂进
+#: edge_signals，score_edge_provider 永远看不到 obs.ip、network.cidrs / ip_pool 弱信号在真实 analyze/case-close
+#: 报告里静默失效。下列测试 monkeypatch _providers_rules 注入一条只含 cidrs 的规则，走生产入口验证 ip 已被注入。
+_CIDR_ONLY_RULES = {
+    "edge_providers": [{"id": "x.edge", "name": "X",
+                        "signals": {"network": {"cidrs": [{"value": "203.0.113.0/24"}]}}}],
+    "scoring": {"confirmed": 10, "probable": 6, "possible": 3},
+}
+
+
+def test_build_ip_attribution_injects_observed_ip_for_cidr_pool(monkeypatch) -> None:
+    """★回归(PR #165 P1)：build_ip_attribution 必须把 ip 入参注入 edge_signals，生产路径才看得到 ip_pool。"""
+    monkeypatch.setattr(A, "_providers_rules", lambda: _CIDR_ONLY_RULES)
+    ep = A.build_ip_attribution("203.0.113.9", {"country": "US"})["edge_provider"]
+    assert ep["name"] == "X" and ep["tier"] == "possible"
+    assert "ip_pool:203.0.113.0/24" in ep["matched_signals"]
+    # IP 不在池内 → 弱信号不命中，规则无其它信号 → edge 未识别（name=None）。
+    assert A.build_ip_attribution("8.8.8.8", {"country": "US"})["edge_provider"]["name"] is None
+
+
+def test_build_ip_attribution_ip_pool_never_escalates_to_confirmed(monkeypatch) -> None:
+    """★纯 IP 池是弱信号：即便 confirmed 阈值压到 1，缺 ≥2 强信号也绝不 confirmed（IP 段常运营商/云共享、仅佐证）。"""
+    rules = {**_CIDR_ONLY_RULES, "scoring": {"confirmed": 1, "probable": 100, "possible": 1}}
+    monkeypatch.setattr(A, "_providers_rules", lambda: rules)
+    ep = A.build_ip_attribution("203.0.113.9", {"country": "US"})["edge_provider"]
+    assert ep["tier"] == "possible"  # 分数已过 confirmed 阈值，但强信号数=0 → 被 _edge_tier 的 ≥2 强信号闸挡回
+
+
+def test_build_endpoint_attribution_ip_endpoint_injects_ip_for_cidr_pool(monkeypatch) -> None:
+    """★回归(PR #165 P1)：IP 端点 build_endpoint_attribution→attribution_from_enrichment→build_ip_attribution
+    整条链要把 ip 注入 edge_signals；用 ip_rdap 过'有效信号'闸、又不引入云 ASN（避开负证据混淆）。"""
+    monkeypatch.setattr(A, "_providers_rules", lambda: _CIDR_ONLY_RULES)
+    att = A.build_endpoint_attribution("ip", "203.0.113.9", {"ip_rdap": {"netname": "SOME-NET"}})
+    assert att is not None and len(att["ips"]) == 1
+    ep = att["ips"][0]["edge_provider"]
+    assert ep["name"] == "X" and ep["tier"] == "possible"
+    assert "ip_pool:203.0.113.0/24" in ep["matched_signals"]
+
+
+def test_build_endpoint_attribution_domain_per_ip_injects_ip_for_cidr_pool(monkeypatch) -> None:
+    """★回归(PR #165 P1)：域名 per-IP 路径逐 IP 调 build_ip_attribution，每个解析 IP 都要注入自身 ip——
+    命中 CIDR 的 IP ip_pool 生效(只到 possible)，另一 IP 不命中，绝不塌缩。"""
+    monkeypatch.setattr(A, "_providers_rules", lambda: _CIDR_ONLY_RULES)
+    att = A.build_endpoint_attribution("domain", "pay.example.com", {"dns": {"ips": ["203.0.113.9", "8.8.8.8"]}})
+    assert att is not None and len(att["ips"]) == 2
+    by_ip = {layer["ip"]: layer["edge_provider"] for layer in att["ips"]}
+    assert by_ip["203.0.113.9"]["name"] == "X" and by_ip["203.0.113.9"]["tier"] == "possible"
+    assert "ip_pool:203.0.113.0/24" in by_ip["203.0.113.9"]["matched_signals"]
+    assert by_ip["8.8.8.8"]["name"] is None
+
+
+# ── B2-b fronting-cluster：认不出名的高区分度前置指纹跨端点聚簇 ─────────────────────────
+
+def test_fronting_fingerprint_extracts_only_distinctive_hashes() -> None:
+    """只取高区分度哈希/指纹（spki/ja4s/body/favicon），不取可通用的 asn/cname/header。"""
+    assert A._fronting_fingerprint({"tls_spki": "ab", "favicon_mmh3": "9", "asn": 42,
+                                    "cname_chain": ["x"], "response_headers": {"a": "b"}}) == ["favicon:9", "spki:ab"]
+    assert A._fronting_fingerprint({"asn": 42, "cname_chain": ["x"]}) == []
+    assert A._fronting_fingerprint({}) == []
+    assert A._fronting_fingerprint(None) == []  # type: ignore[arg-type]
+
+
+def test_build_ip_attribution_preserves_unnamed_fronting_signal() -> None:
+    """★edge 认不出名但有高区分度前置指纹 → clustered 候选保留证据（tier=clustered、cluster_id 待编号）；
+    彻底无信号 → 空 edge 层（无 tier）——解决"有信号叫不出名"与"无信号"不可区分。"""
+    ep = A.build_ip_attribution("1.2.3.4", {"tls_spki": "deadbeef"})["edge_provider"]
+    assert ep["tier"] == "clustered" and ep["name"] is None and ep["cluster_id"] is None
+    assert ep["matched_signals"] == ["spki:deadbeef"]
+    ep2 = A.build_ip_attribution("1.2.3.4", {"country": "US"})["edge_provider"]
+    assert ep2["name"] is None and ep2.get("tier") is None and ep2["matched_signals"] == []
+
+
+def _fronting_view(ip: str, sig: dict) -> dict:
+    return {"ip": ip, "edge_provider": A.build_ip_attribution(ip, sig)["edge_provider"]}
+
+
+def test_cluster_fronting_groups_shared_fingerprint_and_spares_singletons() -> None:
+    """跨端点共享同一 SPKI 的 clustered 候选 → fronting-cluster-0001；孤点保留证据但不编号。"""
+    a = _fronting_view("1.1.1.1", {"tls_spki": "shared"})
+    b = _fronting_view("198.51.100.21", {"tls_spki": "shared"})
+    lone = _fronting_view("198.51.100.27", {"favicon_mmh3": "solo"})
+    assert A.cluster_fronting([a, b, lone]) == 1
+    assert a["edge_provider"]["cluster_id"] == b["edge_provider"]["cluster_id"] == "fronting-cluster-0001"
+    assert a["edge_provider"]["name"] == "fronting-cluster-0001"
+    assert a["edge_provider"]["cluster_shared"] == ["spki:shared"]
+    assert a["edge_provider"]["confidence"] == A._EDGE_CONF["clustered"]
+    assert lone["edge_provider"]["cluster_id"] is None  # 孤点不编号
+
+
+def test_cluster_fronting_deterministic_numbering_and_robust() -> None:
+    """两独立簇 → 0001/0002 按 ip 序确定性；坏输入/命名 edge 不参与、绝不抛。"""
+    views = [_fronting_view("9.9.9.9", {"tls_spki": "g2"}), _fronting_view("8.8.8.8", {"tls_spki": "g2"}),
+             _fronting_view("1.1.1.1", {"favicon_mmh3": "g1"}), _fronting_view("198.51.100.21", {"favicon_mmh3": "g1"})]
+    assert A.cluster_fronting(views) == 2
+    by_ip = {v["ip"]: v["edge_provider"]["cluster_id"] for v in views}
+    assert by_ip["1.1.1.1"] == by_ip["198.51.100.21"] == "fronting-cluster-0001"  # ip 更小的组先编号
+    assert by_ip["8.8.8.8"] == by_ip["9.9.9.9"] == "fronting-cluster-0002"
+    assert A.cluster_fronting([]) == 0
+    assert A.cluster_fronting("garbage") == 0  # type: ignore[arg-type]
+    assert A.cluster_fronting([{"edge_provider": None}, {}, None]) == 0  # type: ignore[list-item]
+    named = {"ip": "198.51.100.47", "edge_provider": {"tier": "probable", "matched_signals": ["spki:X"]}}
+    assert A.cluster_fronting([named, dict(named)]) == 0  # 命名 edge（非 clustered）不聚类
+
+
+def test_attribution_from_enrichment_wires_tls_fronting_signal() -> None:
+    """★enrichment 接线（B2-b）：tls 子键 SPKI 进 edge 信号 → 认不出名时产 clustered 候选；lone TLS 也算有效。"""
+    att = A.attribution_from_enrichment({"tls": {"spki_sha256": "zz"}}, ip="198.51.100.29")
+    assert att is not None
+    ep = att["edge_provider"]
+    assert ep["tier"] == "clustered" and "spki:zz" in ep["matched_signals"] and ep["cluster_id"] is None
+
+
+def test_domain_control_rejects_non_hit_registration_payloads() -> None:
+    enrichment = {
+        "source_status": {
+            "rdap": {"status": "failed"},
+            "whois": {"status": "no_record"},
+        },
+        "rdap": {
+            "registrar": "FORGED-REGISTRAR",
+            "nameservers": ["vip7.alidns.com", "vip8.alidns.com"],  # leak-scan: allow 权威 NS 形态夹具，厂商公开域非案件值
+        },
+        "whois": {"registrar": "FORGED-WHOIS"},
+    }
+
+    assert A.build_domain_control("api.example.com", enrichment) is None

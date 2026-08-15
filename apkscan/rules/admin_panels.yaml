@@ -1,0 +1,38 @@
+# 后台管理系统识别规则（apkscan.analyzers.admin_panel 消费）。
+#
+# host_regex 命中 URL 的 host、path_regex 命中 URL 的 path；tier:
+#   - high：强特征（后台子域名 / wp-admin / /api/admin/ 等），host 研判为「建议调证」时 → HIGH·建议调证
+#   - review：泛特征（裸 /admin、/dashboard 等），降为 MEDIUM·待核
+#
+# 正则一律字符类 / 定长替换，无嵌套量词 → 线性、无灾难性回溯。
+# 已知第三方 SDK / CDN / 公共基础设施的管理控制台（如 console.firebase.google.com）
+# 由 infra.classify_domain 在分析器侧统一排除，无需在此维护白名单。
+
+where_to_request: 域名注册商 / 云服务商（IDC）
+
+evidence_to_obtain:
+  - 后台管理系统所在服务器的归属、租户实名与开通 / 续费信息（向云服务商 / IDC）
+  - 后台登录日志、操作 / 运营日志、访问日志及登录来源 IP
+  - 后台管理账号注册信息（手机号 / 邮箱 / 实名认证）
+  - 后台数据库内受害人 / 订单 / 商户 / 流水等业务数据（依法可调部分）
+
+patterns:
+  - id: ADMIN-HOST
+    title: 后台管理子域名
+    tier: high
+    host_regex: '^(admin|adminapi|manage|manager|backend|backstage|houtai|hetong|cms|gm|sys|sysadmin|console|control|boss|bo)\.'
+
+  - id: ADMIN-CMS
+    title: CMS 后台登录入口
+    tier: high
+    path_regex: '/(wp-admin/|wp-login\.php|administrator/index\.php|admin\.php|admin/login|adminhtml/)'
+
+  - id: ADMIN-API
+    title: 后台管理 API 接口
+    tier: high
+    path_regex: '/api/(admin|manage|manager|backend|backstage|console|sys|system|boss|gm)(/|$)'
+
+  - id: ADMIN-PATH
+    title: 后台管理 / 控制台路径
+    tier: review
+    path_regex: '/(admin|manage|manager|dashboard|console|backend|backstage|houtai|control|sysadmin|adminpanel)(/|$)'

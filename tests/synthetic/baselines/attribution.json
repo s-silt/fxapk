@@ -1,0 +1,38 @@
+{
+  "admin-panel-login-url": {
+    "attributed_role_candidates": 0,
+    "network_attribution_present": false
+  },
+  "backend-credential-db-dsn": {
+    "attributed_role_candidates": 0,
+    "network_attribution_present": false
+  },
+  "card-merchant-keyword": {
+    "attributed_role_candidates": 0,
+    "network_attribution_present": false
+  },
+  "crypto-recipe-cryptojs-envelope": {
+    "attributed_role_candidates": 0,
+    "network_attribution_present": false
+  },
+  "fourth-party-payment-gateway": {
+    "attributed_role_candidates": 0,
+    "network_attribution_present": false
+  },
+  "hardened-unidentified-stub": {
+    "attributed_role_candidates": 0,
+    "network_attribution_present": false
+  },
+  "payment-sdk-alipay": {
+    "attributed_role_candidates": 0,
+    "network_attribution_present": false
+  },
+  "self-hosted-im-websocket": {
+    "attributed_role_candidates": 0,
+    "network_attribution_present": false
+  },
+  "wallet-secret-mnemonic": {
+    "attributed_role_candidates": 0,
+    "network_attribution_present": false
+  }
+}

@@ -1,0 +1,2564 @@
+"""apkscan.dynamic.merge — 把 capture 抓到的运行时端点并回主 Report。
+
+目标：让 ``capture.run`` 抓到的运行时端点（真·C2 / 资金回调 / 配置拉取地址）从游离
+的 ``runtime_report.json`` 进入主 ``Report.endpoints`` 与线索清单，并重渲
+``report.html`` / ``report.json``，使其与静态端点享受同一套去重 / infra 分级 / 报告渲染，
+而不是孤立躺在动态产物里被下游忽略。
+
+放置说明：本模块归 ``dynamic`` 而非 ``report``——它依赖 pipeline 的端点去重与 infra
+分级，属"动态补全编排"而非纯渲染；``report/`` 保持纯渲染职责。cli ``analyze --dynamic``
+在 capture status==done 后调 :func:`merge_and_rerender`。
+
+设计铁律（与 dynamic.__init__ / capture / pipeline 一致）：
+- 纯逻辑、结构化返回（dict），**绝不把异常抛给调用方**（内部 try/except + logging）。
+- 不静默吞错：每个 except 必 logging（warning / exception）。
+- GUI-ready：耗时 / 分阶段函数接受可选 ``on_progress`` 回调上报进度（None 时 no-op）；
+  本模块内**禁** print / typer.* / sys.exit / input。
+- exe-ready：重渲时惰性 import ``apkscan.report.{json,html}``，容缺（缺失/异常不致命）。
+- 全量 type hints；复用 pipeline 的 ``_dedup_endpoints`` / ``build_endpoint_leads`` /
+  ``_apply_default_advice`` 保证与静态侧零行为偏移（由本模块测试锁定）。
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import threading
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, NamedTuple
+
+from apkscan.core import infra, pipeline
+from apkscan.core.textutil import host_from_url
+from apkscan.core.models import (
+    FINDING_KIND_OBSERVATION,
+    Confidence,
+    Endpoint,
+    Evidence,
+    EvidenceScope,
+    Finding,
+    Lead,
+    LeadCategory,
+    Report,
+    Severity,
+    seal_base_advice,
+)
+
+META_WRITE_OWNER = "dynamic.merge"
+META_WRITE_CATEGORIES = {
+    'capture_capabilities': 'coverage',
+    'capture_quality': 'coverage',
+    'capture_signals': 'signal',
+    'comm_sessions': 'signal',
+    'repack_quarantine': 'signal',
+    'runtime_antidetect': 'signal',
+    'runtime_brand_hints': 'signal',
+    'runtime_clipboard': 'signal',
+    'runtime_clipboard_address_count': 'record',
+    'runtime_credential_count': 'record',
+    'runtime_credentials': 'signal',
+    'runtime_crypto_event_count': 'record',
+    'runtime_crypto_recipe': 'signal',
+    'runtime_database_count': 'record',
+    'runtime_databases': 'signal',
+    'runtime_db_digests': 'record',
+    'runtime_dead_drop': 'signal',
+    'runtime_dead_drop_relations': 'signal',
+    'runtime_decrypt_stats': 'record',
+    'runtime_decrypted': 'signal',
+    'runtime_endpoint_count': 'record',
+    'runtime_jsbridge': 'signal',
+    'runtime_merged': 'signal',
+    'runtime_remote_control': 'signal',
+    'runtime_remote_control_targets': 'signal',
+    'runtime_remote_control_unknown_packages': 'signal',
+    'runtime_sensitive_apis': 'signal',
+    'runtime_traced': 'coverage',
+    'visibility': 'signal',
+}
+META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
+# 待定：数据库清单可能只是动态留档，也可能应驱动受害数据取证；先按信号报警。
+META_CATEGORY_PENDING = frozenset({'runtime_databases'})
+
+logger = logging.getLogger(__name__)
+
+# 运行时端点 / 证据的来源标记（与 capture._collect_flow_endpoints / models.Evidence 约定一致）。
+_RUNTIME_SOURCE = "runtime"
+# C5b：运行时解密出的明文端点来源标记（与抓包原始端点 "runtime" 区分，便于报告标注来源）。
+_RUNTIME_DECRYPTED_SOURCE = "runtime-decrypted"
+# 合成 / 非 runtime* 来源的兜底标记。仍是 runtime*（``startswith("runtime")`` → is_runtime_seen /
+# 报告"标运行时"语义不变），但**刻意不叫 "runtime"**：它不在 attribution 的 observed-contact allowlist
+# （``assemble._OBSERVED_CONTACT_SOURCES == {"runtime", "runtime-pcap"}``）里。语义边界——它只证明"该值出现在
+# runtime 报告里"，不证明"运行时真观测到连去该 peer IP"。故手编 / 回灌的 runtime_report.json（只有
+# ``enrichment.runtime`` 标志、无真实 observed-contact 证据）不能凭空过 network_attribution 的运行时行为角色
+# （domestic_relay / origin / edge / cloaking——本只需两只布尔就过 cloaking 档）。真 capture 产物本就带
+# 正确的 ``source="runtime"``（capture.py 的 _collect_flow_endpoints），不经此兜底、不受影响、无回归。
+_RUNTIME_DERIVED_SOURCE = "runtime-derived"
+
+# 重渲支持的报告格式（默认全产出，覆盖 analyze 首次写出的静态报告）。
+_DEFAULT_FORMATS = ["html", "json"]
+
+
+def _emit(on_progress: Callable[[str], None] | None, msg: str) -> None:
+    """向可选进度回调上报一条消息（None 时 no-op）。
+
+    回调异常一律吞掉 + logging，防止 GUI 端的回调实现炸穿动态内核。
+    """
+    if on_progress is None:
+        return
+    try:
+        on_progress(msg)
+    except Exception:  # noqa: BLE001 - GUI 回调异常不得影响合并逻辑
+        logger.exception("on_progress 回调异常（已忽略）：%s", msg)
+
+
+# ---------------------------------------------------------------------------
+# runtime_report.json 进程内单次解析缓存（去 IO：一次 merge 内同一路径只读+解析一次）
+# ---------------------------------------------------------------------------
+#
+# 历史坑：一次 merge_and_rerender 里 decrypt/traces/credentials/... 各消费者各自
+# read_text + json.loads 同一 runtime_report.json，同文件在一次 merge 内被读/解析约
+# 11 次。此处以「per-call 缓存」去重：merge_and_rerender 进入时用 _runtime_payload_cache()
+# 开一个作用域缓存，各 _load_* 走 _read_runtime_payload 共享同一次解析结果；作用域退出即清空，
+# 缓存绝不跨调用泄漏（文件在两次 merge 间可能变），单独调用 loader 时无缓存、行为与旧版一致。
+
+# 「文件缺失 / 读或解析失败」的缓存占位——把负结果也缓存，免得每个消费者都重试一遍读盘。
+_RUNTIME_PAYLOAD_MISSING: Any = object()
+
+# 线程本地：每个线程独立的作用域缓存栈顶（None 表示当前无活动作用域，不缓存）。
+_runtime_cache_state = threading.local()
+
+
+@contextmanager
+def _runtime_payload_cache() -> Iterator[None]:
+    """开一个 per-call 的 runtime_report.json 解析缓存作用域（退出即清空、可安全嵌套）。"""
+    prev = getattr(_runtime_cache_state, "cache", None)
+    _runtime_cache_state.cache = {}
+    try:
+        yield
+    finally:
+        _runtime_cache_state.cache = prev
+
+
+def _read_runtime_payload(runtime_report_path: str) -> Any:
+    """读并解析 runtime_report.json 一次，返回 payload dict / list / 标量。
+
+    - 文件缺失 或 read/解析失败 → 返回 ``_RUNTIME_PAYLOAD_MISSING`` 占位（调用方据此走各自的
+      缺文件 / 坏 JSON 分支，保持与旧 loader 完全一致的 logging 与返回）。
+    - 有活动缓存作用域（:func:`_runtime_payload_cache`）时，同一路径只真正读+解析一次，
+      后续消费者复用结果（含负结果）。无作用域时每次都真读（行为与旧版一致）。
+    """
+    cache = getattr(_runtime_cache_state, "cache", None)
+    key = str(Path(runtime_report_path))
+    if cache is not None and key in cache:
+        return cache[key]
+
+    path = Path(runtime_report_path)
+    if not path.exists():
+        result: Any = _RUNTIME_PAYLOAD_MISSING
+    else:
+        try:
+            result = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # 单次解析、单次记：不静默吞（logger.exception 带 traceback），且不再由各 loader 重复记。
+            logger.exception("[merge] 读取/解析 runtime 报告失败（相关运行时并回跳过）：%s", path)
+            result = _RUNTIME_PAYLOAD_MISSING
+
+    if cache is not None:
+        cache[key] = result
+    return result
+
+
+def merge_capture_quality(report: Report, runtime_report_path: str) -> dict[str, object]:
+    """Copy normalized capture-quality evidence into the main report metadata."""
+    payload = _read_runtime_payload(runtime_report_path)
+    if not isinstance(payload, Mapping):
+        return {}
+    raw_signals = payload.get("capture_signals")
+    if not isinstance(raw_signals, Mapping):
+        return {}
+
+    from apkscan.core.closure import evaluate_capture_quality
+
+    signals = dict(raw_signals)
+    quality = evaluate_capture_quality(signals)
+    signals["quality"] = quality
+    report.meta["capture_signals"] = signals
+    report.meta["capture_quality"] = quality
+    return quality
+
+
+def merge_capture_capabilities(report: Report, runtime_report_path: str) -> dict[str, object]:
+    """把 ``runtime_report.json`` 的 ``capture_capabilities``（A1-3 抓包能力计划快照）拷进
+    ``report.meta['capture_capabilities']``。
+
+    让"floor 底座就绪没有 / 明文最强可达层 / 为何没明文（缺哪些增强）"成为机器可读的报告字段
+    （与只反映抓包**结果**的 ``capture_signals`` 互补：能力计划是抓包**起手**的能力快照）。
+    缺失 / 结构异常 / 空 → 不写、返回 ``{}``（不抛）。
+    """
+    payload = _read_runtime_payload(runtime_report_path)
+    if not isinstance(payload, Mapping):
+        return {}
+    caps = payload.get("capture_capabilities")
+    if not isinstance(caps, Mapping) or not caps:
+        return {}
+    caps_dict = dict(caps)
+    report.meta["capture_capabilities"] = caps_dict
+    return caps_dict
+
+
+def load_runtime_endpoints(runtime_report_path: str) -> list[Endpoint]:
+    """从 capture 写出的 ``runtime_report.json`` 重建运行时端点列表。
+
+    capture 仍只返回 DynamicResult 五字段契约（不带 Endpoint 对象），cli 在 capture
+    status==done 后调本函数把 ``runtime_report.json`` 的 ``endpoints`` 数组还原为
+    ``list[Endpoint]``，再交 :func:`merge_runtime_endpoints` 并入——这样无需改动
+    capture 的 DynamicResult 契约即可拿到运行时端点。
+
+    Args:
+        runtime_report_path: capture 产出的 runtime_report.json 路径。
+
+    Returns:
+        重建出的运行时 Endpoint 列表；文件缺失 / JSON 解析失败 / 结构异常 → ``[]``
+        （记 logging，绝不抛）。每个 Endpoint 的 evidences 钉成 runtime* 来源：原 runtime* 子来源
+        （runtime / runtime-pcap / runtime-tls-decrypted 等）原样保留，非 runtime* 与合成的钉
+        ``runtime-derived``（非 observed-contact，见 :func:`_evidences_from_jsonable`）。
+    """
+    import json
+    from pathlib import Path
+
+    path = Path(runtime_report_path)
+    if not path.exists():
+        logger.info("[merge] runtime 报告不存在，无运行时端点可并入：%s", path)
+        return []
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        logger.exception("[merge] 读取/解析 runtime 报告失败：%s", path)
+        return []
+
+    raw_endpoints = payload.get("endpoints") if isinstance(payload, dict) else None
+    if not isinstance(raw_endpoints, list):
+        logger.warning("[merge] runtime 报告无 endpoints 数组或类型异常：%s", path)
+        return []
+
+    endpoints: list[Endpoint] = []
+    for item in raw_endpoints:
+        ep = _endpoint_from_jsonable(item)
+        if ep is not None:
+            endpoints.append(ep)
+    logger.info("[merge] 从 runtime 报告重建运行时端点 %d 个：%s", len(endpoints), path)
+    return endpoints
+
+
+def _endpoint_from_jsonable(item: Any) -> Endpoint | None:
+    """把单条序列化端点（dict）还原成 Endpoint；结构异常 → None（不抛）。"""
+    if not isinstance(item, dict):
+        logger.warning("[merge] 跳过非 dict 的端点条目：%r", type(item).__name__)
+        return None
+    try:
+        value = item.get("value")
+        kind = item.get("kind")
+        if not isinstance(value, str) or not value:
+            logger.warning("[merge] 端点缺少有效 value，跳过：%r", item)
+            return None
+        if not isinstance(kind, str) or not kind:
+            kind = "url"
+
+        evidences = _evidences_from_jsonable(item.get("evidences"), value)
+        enrichment = item.get("enrichment")
+        return Endpoint(
+            value=value,
+            kind=kind,
+            evidences=evidences,
+            is_cleartext=bool(item.get("is_cleartext", False)),
+            is_private=bool(item.get("is_private", False)),
+            is_suspicious=bool(item.get("is_suspicious", False)),
+            enrichment=dict(enrichment) if isinstance(enrichment, dict) else {},
+        )
+    except Exception:  # noqa: BLE001 - 单条端点还原失败不应中断整体
+        logger.exception("[merge] 还原端点失败，跳过：%r", item)
+        return None
+
+
+def _evidences_from_jsonable(raw: Any, value: str) -> list[Evidence]:
+    """还原 evidences 列表，钉成 runtime* 来源；缺失则合成一条最小 ``runtime-derived`` 证据。
+
+    保留原 JSON 里真实的 runtime* 子来源（runtime / runtime-pcap / runtime-tshark /
+    runtime-tls-decrypted / runtime-decrypted）——capture 各语义来源不能被抹平。非 runtime* 的
+    （手编 / 写串）与"无 evidences 时合成的"一律钉成 ``runtime-derived`` 而非最强的 ``runtime``：
+    仍是 runtime*（下游 is_runtime_seen / 报告"标运行时"不变），但**不是** observed-contact
+    （不在 ``assemble._OBSERVED_CONTACT_SOURCES``），故不凭空授予"运行时真接触该 peer IP"的信任，
+    守住 network_attribution 运行时行为角色的信任边界（见 ``_RUNTIME_DERIVED_SOURCE``）。
+    """
+    evidences: list[Evidence] = []
+    if isinstance(raw, list):
+        for ev in raw:
+            if not isinstance(ev, dict):
+                continue
+            raw_source = str(ev.get("source", ""))
+            try:
+                scope = EvidenceScope(
+                    str(ev.get("scope", EvidenceScope.LEGACY_UNSPECIFIED.value))
+                )
+            except ValueError:
+                scope = EvidenceScope.LEGACY_UNSPECIFIED
+            evidences.append(
+                Evidence(
+                    source=raw_source if raw_source.startswith("runtime") else _RUNTIME_DERIVED_SOURCE,
+                    location=str(ev.get("location", "")),
+                    snippet=str(ev.get("snippet", "")),
+                    scope=scope,
+                )
+            )
+    if not evidences:
+        evidences.append(
+            Evidence(
+                source=_RUNTIME_DERIVED_SOURCE,
+                location="runtime_report.json",
+                snippet=value,
+                scope=EvidenceScope.LEGACY_UNSPECIFIED,
+            )
+        )
+    return evidences
+
+
+def _force_runtime_source(endpoints: list[Endpoint]) -> None:
+    """就地确保运行时端点的每条 evidence source 为 runtime*（合并语义靠 source 区分来源）。
+
+    任何 ``runtime*`` 子来源（runtime / runtime-pcap / runtime-decrypted / runtime-tshark /
+    runtime-tls-decrypted）放行——都属运行时来源，保留更精确的标记便于报告区分"密文抓到 / 明文 HTTP /
+    TLS 解密还原"；仅非 runtime* 的（哪怕原 JSON 写串了）才钉成 ``runtime-derived`` 而非最强的 ``runtime``：
+    仍 runtime*（is_runtime_seen 不变），但不是 observed-contact（见 ``_RUNTIME_DERIVED_SOURCE``），
+    绝不因"写串成 dex → 钉回 runtime"而凭空授予运行时接触信任。
+    """
+    for ep in endpoints:
+        for ev in ep.evidences:
+            if not ev.source.startswith("runtime"):
+                ev.source = _RUNTIME_DERIVED_SOURCE
+
+
+def merge_runtime_endpoints(report: Report, endpoints: list[Endpoint]) -> dict[str, int]:
+    """把运行时端点去重并入 ``report.endpoints``，对新引入的 domain/ip 生成线索。
+
+    就地修改 ``report``（不重渲——重渲交 :func:`merge_and_rerender`）。合并语义完全复用
+    pipeline 的 ``_dedup_endpoints``，与静态侧一致：
+
+    1. 运行时 evidence 钉成 runtime* 来源（``_force_runtime_source``）：真 runtime* 子来源
+       原样保留，非 runtime* 的钉成 ``runtime-derived``（非 observed-contact，见
+       :func:`_evidences_from_jsonable`）——不再一律钉最强的 ``"runtime"``。
+    2. ``_dedup_endpoints(report.endpoints + endpoints)`` 去重合并：evidences 按
+       (source, location, snippet) 去重并集、is_cleartext/is_private/is_suspicious 取 OR、
+       enrichment 浅合并、kind 首现为准、保持首现顺序；写回 report.endpoints。运行时端点
+       value 已被静态端点覆盖时，runtime evidence 并进同一 Endpoint（一端点同时带 dex+runtime）。
+    3. 对"仅由运行时引入、静态未覆盖"的 domain/ip 端点调 ``build_endpoint_leads``，advice 由
+       ``infra.classify_domain`` 分级（未命中 KNOWN_INFRA 的疑似 App 自有服务 → 建议调证）；
+       按已有 leads 的 {(category.value, value)} 去重后 append。
+    4. ``_apply_default_advice`` 兜底新 leads 的空 advice。
+    5. meta 打标 runtime_merged / runtime_endpoint_count。
+
+    Args:
+        report: 主报告（静态产出），就地被修改。
+        endpoints: 运行时端点（通常来自 :func:`load_runtime_endpoints`）。
+
+    Returns:
+        统计 dict ``{"merged", "new_leads", "total_endpoints"}``。内部 try/except，
+        异常时返回零统计 + logging，绝不抛。
+    """
+    stats = {"merged": 0, "new_leads": 0, "total_endpoints": len(report.endpoints)}
+    try:
+        runtime_count = len(endpoints)
+        _force_runtime_source(endpoints)
+
+        # 合并前快照：用于判定哪些 value 是"仅运行时引入"（静态未覆盖）。
+        static_values = {ep.value for ep in report.endpoints}
+
+        before = len(report.endpoints)
+        merged_endpoints = pipeline._dedup_endpoints(report.endpoints + endpoints)
+        report.endpoints = merged_endpoints
+        stats["total_endpoints"] = len(merged_endpoints)
+        # "并入"计数：合并后净增的端点数（运行时端点中静态未覆盖、且彼此去重后的新 value）。
+        stats["merged"] = max(0, len(merged_endpoints) - before)
+
+        # 仅对"运行时引入且静态未覆盖"的 domain/ip 生成线索，避免与静态线索重复。
+        runtime_only = [
+            ep for ep in merged_endpoints if ep.value not in static_values
+        ]
+        new_leads = _build_runtime_leads(report, runtime_only)
+        stats["new_leads"] = new_leads
+
+        report.meta["runtime_merged"] = True
+        report.meta["runtime_endpoint_count"] = runtime_count
+        logger.info(
+            "[merge] 运行时端点并入完成：merged=%d new_leads=%d total=%d",
+            stats["merged"],
+            stats["new_leads"],
+            stats["total_endpoints"],
+        )
+    except Exception:  # noqa: BLE001 - 合并失败不得抛给调用方（不破坏已产出静态报告）
+        logger.exception("[merge] 运行时端点并入异常")
+    return stats
+
+
+def _build_runtime_leads(report: Report, runtime_only: list[Endpoint]) -> int:
+    """对仅运行时引入的端点生成 DOMAIN/IP 线索并去重 append 进 report.leads，返回新增数。"""
+    # 已有 leads 的去重键集合：(category.value, value)。
+    existing_keys: set[tuple[str, str]] = {
+        (lead.category.value, lead.value) for lead in report.leads
+    }
+    # ★兄弟池按**全样本**算，不是只按本次新增的运行时端点算：低段位裸 IP 的托管佐证豁免
+    #   靠"样本内有没有同形态编号序列"压住版本号，只看增量的话，静态侧已成簇的 1.3.1.1/  # leak-scan: allow 判据说明所举的版本号形态例子，非网络地址
+    #   1.3.1.6 拦不住新回灌的 1.4.1.14——它会被判成孤值升进调证出口，理由还写着  # leak-scan: allow 判据说明所举的版本号形态例子，非网络地址
+    #   "样本内无同形态编号序列"，与样本事实相反。report.endpoints 此时已是合并后的全量。
+    sibling_pool = {
+        infra._strip_port_suffix(ep.value)
+        for ep in report.endpoints
+        if ep.kind == "ip" and infra.is_low_octet_ipv4(ep.value)
+    }
+    candidate_leads = pipeline.build_endpoint_leads(
+        runtime_only, online=report.meta.get("online", True), sibling_pool=sibling_pool
+    )
+    new_leads: list = []
+    for lead in candidate_leads:
+        key = (lead.category.value, lead.value)
+        if key in existing_keys:
+            continue
+        existing_keys.add(key)
+        new_leads.append(lead)
+
+    # 兜底新 leads 的空 advice（DOMAIN/IP 的 advice 已由 build_endpoint_leads 按 infra 分级）。
+    pipeline._apply_default_advice(new_leads)
+    # ★与静态主路径同一个接缝：判据链跑完、抑制动手之前，把 advice 封存为 base_advice。
+    #   已在 build_endpoint_leads / pcap 直建里显式填过 base 的不受影响（seal 见到非空就跳过）。
+    seal_base_advice(new_leads)
+    # 与静态主路径同样做重打包隔离：正版重打包件在运行时连的也是**正版厂商的后端**，
+    # 若只在静态侧隔离，`capture --into` 新引入的厂商域名仍会以「建议调证」进调证出口。
+    _quarantine_leads(report, new_leads)
+    report.leads.extend(new_leads)
+    return len(new_leads)
+
+
+def _quarantine_leads(report: Report, leads: list) -> None:
+    """对一批 Lead 跑重打包隔离，并把结果并进 ``meta.repack_quarantine`` 审计块。
+
+    审计块的 ``values`` 是闭环兜底门放行的**唯一凭据**（见 ``closure.targets``），所以每一条
+    被隔离的值都必须记进去，不能只记个数。
+    """
+    quarantined = pipeline.apply_repack_quarantine(leads, report.meta)
+    if not quarantined:
+        return
+    blob = report.meta.setdefault(
+        "repack_quarantine",
+        {"reason": pipeline._VERDICT_REPACK_SUSPECTED, "count": 0, "values": []},
+    )
+    if not isinstance(blob, dict):
+        return
+    merged_values = list(dict.fromkeys([*(blob.get("values") or []), *quarantined]))
+    blob["values"] = merged_values
+    blob["count"] = len(merged_values)
+
+
+def _quarantine_new_leads(report: Report) -> None:
+    """对 report.leads 里**当前全部**网络 Lead 跑一次隔离（幂等）。
+
+    供 dead-drop 那条路径用：它在隔离跑完之后才补建 Lead，只隔离"新增的那批"够不着——
+    补建发生在别的函数里、没有增量列表可传。``apply_repack_quarantine`` 只动 advice 仍为
+    「建议调证」的条目，重复调用不叠加注记（见 ``test_quarantine_is_idempotent``）。
+    """
+    _quarantine_leads(report, list(report.leads))
+
+
+# ---------------------------------------------------------------------------
+# C5b：用静态配方解密运行时信封报文 → 明文端点并入主报告
+# ---------------------------------------------------------------------------
+
+# 明文 JSON 里抽端点的正则：http(s) URL 与 /api 风格相对路径。
+_PLAINTEXT_URL_RE = re.compile(r"""https?://[^\s"'`<>()\[\]{}\\^|,;]+""", re.IGNORECASE)
+_PLAINTEXT_PATH_RE = re.compile(
+    r"""(?<![\w.])(/(?:api|app|v\d+|gateway|service|interface|open|mobile|client|user|auth|register|login|pay|order|account|member|sys|admin|h5|wap|webconfig|config)
+        (?:/[A-Za-z0-9_\-.~%]+)*)""",
+    re.VERBOSE | re.IGNORECASE,
+)
+
+
+def decrypt_runtime_messages(report: Report, runtime_report_path: str) -> dict[str, int]:
+    """用 ``report.meta["crypto_recipe"]`` 对 runtime_report.json 的信封报文解密，
+    把明文里的端点（register/login/webConfig/产品/入金/客服等）并入 ``report``。
+
+    流程（见 §3.4 spec）：
+      1. 从 report.meta 取配方；无配方 → 跳过（零统计），保留密文，不崩。
+      2. 读 runtime_report.json 的 messages。
+      3. 每条 message 的请求/响应体若命中信封（含 data 与 timestamp）→ decrypt_envelope。
+      4. 明文是合法 JSON → 抽 URL/路径/webName 关联域名 → Endpoint(source=runtime-decrypted)
+         → 走 merge_runtime_endpoints 并入（去重/分级/产线索）。
+      5. 解密失败/配方不全/padding 错 → warning + 保留原密文，不并入、不崩。
+      6. 统计写 report.meta["runtime_decrypted"]。
+
+    Returns:
+        ``{"decrypted", "failed", "plaintext_endpoints"}``。内部 try/except，绝不抛。
+    """
+    stats = {"decrypted": 0, "failed": 0, "plaintext_endpoints": 0, "live_recipe": 0}
+    try:
+        from apkscan.core import appcrypto
+        from apkscan.dynamic import cryptohook
+
+        # P0：运行时密钥 hook 抓到的活体事件 → 反推「实测配方」，与静态配方浅合并（实测优先）。
+        # 实测拿到权威 key（静态可能逆错/逆不到），iv 仅在实测恒定时覆盖、否则交静态推导。
+        events = _load_crypto_events(runtime_report_path)
+        live_meta = cryptohook.recipe_from_events(events) if events else None
+        if live_meta:
+            report.meta["runtime_crypto_recipe"] = dict(live_meta)
+            report.meta["runtime_crypto_event_count"] = len(events)
+            stats["live_recipe"] = 1
+            logger.info("[merge] 采用运行时实测配方（活体 key）解密：%s", _recipe_brief(live_meta))
+        # 冒充对象（webName/品牌/行业词）从活体明文抽出，写进 meta 供报告呈现。
+        brand_hints = cryptohook.brand_hints_from_events(events) if events else []
+        if brand_hints:
+            report.meta["runtime_brand_hints"] = brand_hints
+            logger.info("[merge] 运行时明文捕获冒充对象线索：%s", "、".join(brand_hints[:5]))
+            # 同一份 brand_hints 既留档进 meta、也走 Finding 出口——只写 meta 时
+            # 读报告的人看不到它（见 _add_brand_hint_finding 的说明）。
+            _add_brand_hint_finding(report, brand_hints)
+
+        # 候选配方（按优先级）：实测合并配方优先、纯静态配方兜底。逐信封依次尝试、首个解出即用。
+        # 关键：「实测优先但绝不回归静态」——实测拿到二进制 key 覆盖、却与静态 iv 推导口径不兼容
+        # （如静态 md5(key+ts) 对 hex key 失效）时，仍能用纯静态配方解出原本能解的信封。
+        # 也顺带消解 iv 伪恒定风险：实测 fixed iv 解错其它信封时自动回退静态 md5 推导。
+        static_meta = report.meta.get("crypto_recipe")
+        merged_meta = _merge_recipe_meta(static_meta, live_meta)
+        merged_recipe = appcrypto.CryptoRecipe.from_meta(merged_meta)
+        if merged_recipe is None:
+            logger.info("[merge] 无静态/运行时 crypto 配方，跳过运行时信封解密")
+            return stats
+        candidates = [merged_recipe]
+        if live_meta:
+            static_recipe = appcrypto.CryptoRecipe.from_meta(static_meta)
+            if static_recipe is not None:
+                candidates.append(static_recipe)  # 实测优先、静态兜底
+
+        messages = _load_runtime_messages(runtime_report_path)
+        if not messages:
+            logger.info("[merge] runtime 报告无 messages，无信封可解密")
+            return stats
+
+        plaintext_endpoints: list[Endpoint] = []
+        for msg in messages:
+            url = str(msg.get("url", "")) if isinstance(msg, dict) else ""
+            for body_key in ("response_body", "request_body"):
+                body = msg.get(body_key) if isinstance(msg, dict) else None
+                env = _parse_envelope(body)
+                if env is None:
+                    continue
+                plain = _decrypt_with_candidates(
+                    appcrypto, env["data"], candidates, env["timestamp"]
+                )
+                if plain is None:
+                    stats["failed"] += 1
+                    logger.warning(
+                        "[merge] 信封解密失败（配方不全/padding 错/缺 crypto），保留密文：%s", url or body_key
+                    )
+                    continue
+                stats["decrypted"] += 1
+                eps = _endpoints_from_plaintext(plain, url)
+                plaintext_endpoints.extend(eps)
+
+        stats["plaintext_endpoints"] = len(plaintext_endpoints)
+        if plaintext_endpoints:
+            merge_runtime_endpoints(report, plaintext_endpoints)
+
+        report.meta["runtime_decrypted"] = True
+        report.meta["runtime_decrypt_stats"] = dict(stats)
+        logger.info(
+            "[merge] 运行时信封解密完成：decrypted=%d failed=%d plaintext_endpoints=%d",
+            stats["decrypted"],
+            stats["failed"],
+            stats["plaintext_endpoints"],
+        )
+    except Exception:  # noqa: BLE001 - 解密失败不得抛给调用方（不破坏已产出报告）
+        logger.exception("[merge] 运行时信封解密异常")
+    return stats
+
+
+def _load_runtime_messages(runtime_report_path: str) -> list[dict[str, Any]]:
+    """读 runtime_report.json 的 messages 数组；缺文件/坏 JSON/无字段 → []（不抛）。
+
+    经 :func:`_read_runtime_payload` 拿解析结果——在 merge_and_rerender 的缓存作用域内，
+    同一路径只读+解析一次（解析失败已由 reader 记 exception，此处不重复记）。
+    """
+    payload = _read_runtime_payload(runtime_report_path)
+    if payload is _RUNTIME_PAYLOAD_MISSING:
+        return []
+    raw = payload.get("messages") if isinstance(payload, dict) else None
+    if not isinstance(raw, list):
+        return []
+    return [m for m in raw if isinstance(m, dict)]
+
+
+def _decrypt_with_candidates(
+    appcrypto: Any, data: str, candidates: list[Any], timestamp: Any
+) -> str | None:
+    """逐个候选配方尝试解密信封，返回首个解出的明文；全失败 → None（不抛）。
+
+    候选按优先级排列（实测合并配方在前、纯静态兜底在后）：实测优先但绝不回归静态——
+    实测配方解不出时自动落到静态配方，避免「实测覆盖把本可成功的静态解密拉成全失败」。
+    """
+    for recipe in candidates:
+        plain = appcrypto.decrypt_envelope(data, recipe, timestamp)
+        if plain is not None:
+            return plain
+    return None
+
+
+def _load_events_field(runtime_report_path: str, field: str) -> list[dict[str, Any]]:
+    """读 runtime_report.json 里某个事件数组字段（crypto_events/jsbridge_events/…）。
+
+    缺文件/坏 JSON/无字段/旧版报告无该字段 → []（向后兼容，不抛）。经
+    :func:`_read_runtime_payload` 共享单次解析——merge 作用域内同路径只读一次（解析失败
+    已由 reader 记 exception，此处不重复记）。
+    """
+    payload = _read_runtime_payload(runtime_report_path)
+    if payload is _RUNTIME_PAYLOAD_MISSING:
+        return []
+    raw = payload.get(field) if isinstance(payload, dict) else None
+    if not isinstance(raw, list):
+        return []
+    return [e for e in raw if isinstance(e, dict)]
+
+
+def _load_crypto_events(runtime_report_path: str) -> list[dict[str, Any]]:
+    """读 runtime_report.json 的 crypto_events 数组（P0 运行时密钥 hook 产出）。"""
+    return _load_events_field(runtime_report_path, "crypto_events")
+
+
+def merge_runtime_sessions(report: Report, runtime_report_path: str) -> dict[str, int]:
+    """把运行时报文按 flow 时间戳重建为**通信会话时序**，写 ``report.meta['comm_sessions']``。
+
+    每条会话条目 = ``{ts, flow_id, url, host, kind, has_request_body, has_response_body}``，按 ts
+    升序（无 ts 排末尾、稳定）。还原 App↔服务器交互时间线，作通信会话物证供办案串起请求/响应
+    序列。纯派生（不新增 Lead），绝不抛。
+    """
+    try:
+        messages = _load_runtime_messages(runtime_report_path)
+        if not messages:
+            return {"sessions": 0}
+        sessions: list[dict[str, Any]] = []
+        for m in messages:
+            if not isinstance(m, dict):
+                continue
+            url = str(m.get("url") or "")
+            ts = m.get("ts")
+            sessions.append(
+                {
+                    "ts": ts if isinstance(ts, (int, float)) else None,
+                    "flow_id": str(m.get("flow_id") or ""),
+                    "url": url,
+                    "host": host_from_url(url),
+                    "kind": str(m.get("kind") or "envelope"),
+                    "has_request_body": bool(m.get("request_body")),
+                    "has_response_body": bool(m.get("response_body")),
+                }
+            )
+        sessions.sort(key=lambda s: (s["ts"] is None, s["ts"] or 0.0))
+        report.meta["comm_sessions"] = sessions
+        logger.info("[merge] 重建通信会话时序 %d 条", len(sessions))
+        return {"sessions": len(sessions)}
+    except Exception:
+        logger.exception("[merge] 重建通信会话时序异常（已忽略）")
+        return {"sessions": 0}
+
+
+def merge_runtime_traces(report: Report, runtime_report_path: str) -> dict[str, int]:
+    """把 P1 运行时追踪（JS-bridge 暴露面/调用、敏感 API 实调）并回主报告。
+
+    - JS-bridge：运行时实际暴露/调用的桥接接口 → Lead(CONFIG_KEY, "JSBridge:<iface>",
+      source=runtime → is_runtime_seen=True)，去重并入；写 report.meta["runtime_jsbridge"]。
+    - 敏感 API：运行时实测调用的 ``<类>.<方法>`` → 给匹配的静态 sensitive_api Finding 追加
+      runtime Evidence（把"静态存在"升级为"活体确认"）；写 report.meta["runtime_sensitive_apis"]。
+
+    Returns:
+        ``{"jsbridge_leads", "api_confirmed"}``。内部 try/except，绝不抛。
+    """
+    stats = {"jsbridge_leads": 0, "api_confirmed": 0, "antidetect_probes": 0}
+    try:
+        from apkscan.dynamic import cryptohook
+
+        jb_events = _load_events_field(runtime_report_path, "jsbridge_events")
+        api_events = _load_events_field(runtime_report_path, "sensitive_api_events")
+
+        jb_hints = cryptohook.jsbridge_hints_from_events(jb_events)
+        if jb_hints:
+            report.meta["runtime_jsbridge"] = jb_hints
+            stats["jsbridge_leads"] = _add_runtime_jsbridge_leads(report, jb_hints)
+
+        api_hints = cryptohook.sensitive_api_hints_from_events(api_events)
+        if api_hints:
+            report.meta["runtime_sensitive_apis"] = api_hints
+            stats["api_confirmed"] = _confirm_sensitive_api_findings(report, api_hints)
+
+        # P3：样本自我检测（root/模拟器/frida）→ 反取证/反分析行为 Finding + meta。
+        ad_events = _load_events_field(runtime_report_path, "antidetect_events")
+        ad_kinds = cryptohook.antidetect_kinds_from_events(ad_events)
+        if ad_kinds:
+            report.meta["runtime_antidetect"] = ad_kinds
+            _add_anti_analysis_finding(report, ad_kinds, ad_events)
+            stats["antidetect_probes"] = sum(ad_kinds.values())
+
+        if jb_hints or api_hints or ad_kinds:
+            report.meta["runtime_traced"] = True
+            logger.info(
+                "[merge] 运行时追踪并回：jsbridge_leads=%d api_confirmed=%d antidetect=%s",
+                stats["jsbridge_leads"],
+                stats["api_confirmed"],
+                ad_kinds,
+            )
+    except Exception:  # noqa: BLE001 - 追踪并回失败不得抛给调用方
+        logger.exception("[merge] 运行时追踪并回异常")
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# 第二波：运行时登录态/明文凭据 → RUNTIME_CREDENTIAL Lead + 明文 host 走 infra
+# ---------------------------------------------------------------------------
+
+# Lead.notes / 日志的合规提示（横切硬要求：含高敏个人信息，按办案合规留存处置）。
+_CREDENTIAL_COMPLIANCE_NOTE = (
+    "运行时实测捕获，含受害人/高敏个人信息（登录态/凭据/账号），已脱敏截断；"
+    "按办案合规要求留存处置，不得外泄全文。"
+)
+
+
+def merge_runtime_credentials(report: Report, runtime_report_path: str) -> dict[str, int]:
+    """把 P2 运行时凭据（OkHttp 加密前明文 token/手机号、SharedPrefs 落地凭据）并回主报告。
+
+    流程：
+      1. 读 runtime_report.json 的 ``credential_events``（缺/旧版报告无该字段 → 跳过，零统计）。
+      2. 每条事件经 ``cryptohook.normalize_credential_event`` 再脱敏兜底，产 RUNTIME_CREDENTIAL
+         Lead（去重；where_to_request 指向凭 token/手机号向平台/运营商调证；notes 带合规提示）。
+      3. OkHttp 事件的明文真实 host：复用 ``_endpoints_from_plaintext`` 从 url 抽 domain/url 端点，
+         走 ``merge_runtime_endpoints``（去重 + infra 分级）——务必走 infra，别把 CDN 当 C2。
+      4. meta 打标 runtime_credentials。
+
+    Returns:
+        ``{"credential_leads", "credential_endpoints"}``。内部 try/except，绝不抛。
+    """
+    stats = {"credential_leads": 0, "credential_endpoints": 0}
+    try:
+        from apkscan.dynamic import cryptohook
+
+        raw_events = _load_events_field(runtime_report_path, "credential_events")
+        if not raw_events:
+            return stats
+
+        # 规范化兜底（capture 侧已规范化，这里再过一遍确保脱敏/形态闸口径统一、向后兼容旧报告）。
+        events: list[dict[str, Any]] = []
+        for raw in raw_events:
+            ev = cryptohook.normalize_credential_event(raw)
+            if ev is not None:
+                events.append(ev)
+        if not events:
+            return stats
+
+        stats["credential_leads"] = _add_runtime_credential_leads(report, events)
+
+        # OkHttp 明文真实 host → 端点并入（走 infra 分级，CDN 自动判无需调证）。
+        host_endpoints = _credential_host_endpoints(events)
+        if host_endpoints:
+            merge_runtime_endpoints(report, host_endpoints)
+            stats["credential_endpoints"] = len(host_endpoints)
+
+        report.meta["runtime_credentials"] = True
+        report.meta["runtime_credential_count"] = len(events)
+        logger.info(
+            "[merge] 运行时凭据并回：credential_leads=%d credential_endpoints=%d（%s）",
+            stats["credential_leads"],
+            stats["credential_endpoints"],
+            "含高敏个人信息，按办案合规留存处置",
+        )
+    except Exception:  # noqa: BLE001 - 凭据并回失败不得抛给调用方（不破坏已产出报告）
+        logger.exception("[merge] 运行时凭据并回异常")
+    return stats
+
+
+def _add_runtime_credential_leads(report: Report, events: list[dict[str, Any]]) -> int:
+    """把规范化凭据事件产成 RUNTIME_CREDENTIAL Lead，去重 append 进 report.leads，返回新增数。"""
+    existing = {(lead.category.value, lead.value) for lead in report.leads}
+    added = 0
+    for ev in events:
+        value, snippet, where = _credential_lead_fields(ev)
+        if not value:
+            continue
+        key = (LeadCategory.RUNTIME_CREDENTIAL.value, value)
+        if key in existing:
+            continue
+        existing.add(key)
+        report.leads.append(
+            Lead(
+                category=LeadCategory.RUNTIME_CREDENTIAL,
+                value=value,
+                where_to_request=where,
+                confidence=Confidence.HIGH,
+                advice="建议调证",
+                source_refs=[
+                    Evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=snippet[:200])
+                ],
+                notes=_CREDENTIAL_COMPLIANCE_NOTE,
+            )
+        )
+        added += 1
+    return added
+
+
+def _credential_lead_fields(ev: dict[str, Any]) -> tuple[str, str, str]:
+    """从规范化凭据事件产 (lead_value, evidence_snippet, where_to_request)。
+
+    HTTP 请求（okhttp 明文 / tls-decrypted 解密还原）：value=登录/请求的真实 host + 路径；
+      snippet=脱敏 token/body 摘要；where=凭 token 以受害人身份向平台调登录 IP/设备。
+    sharedprefs：value=``凭据键名=脱敏值``；where=凭手机号向运营商调号主实名 / 凭 token 向平台调登录态。
+    """
+    source = str(ev.get("source", ""))
+    # HTTP 请求凭据源（url/headers schema）：okhttp 明文 + tls-decrypted 解密还原
+    # （权威定义见 cryptohook._HTTP_CREDENTIAL_SOURCES；此处内联避免函数内跨模块导入）。
+    if source in ("okhttp", "tls-decrypted"):
+        url = str(ev.get("url", ""))
+        host = _host_of_url(url) or url
+        headers = ev.get("headers") if isinstance(ev.get("headers"), dict) else {}
+        auth = ""
+        for k, v in headers.items():  # type: ignore[union-attr]
+            if str(k).strip().lower() in ("authorization", "token", "cookie"):
+                auth = f"{k}={v}"
+                break
+        label = "TLS解密登录态" if source == "tls-decrypted" else "OkHttp登录态"
+        value = f"{label}:{host}"
+        body = str(ev.get("body", ""))
+        snippet = f"{ev.get('method', '')} {url} | {auth} | body={body[:80]}".strip(" |")
+        where = (
+            "凭抓到的 token/登录凭据以受害人身份向该平台后台调取登录 IP/设备指纹/操作日志；"
+            "凭明文手机号向运营商调取号主实名。"
+        )
+        return value, snippet, where
+
+    # sharedprefs
+    name = str(ev.get("name", ""))
+    val = str(ev.get("value", ""))
+    file_ = str(ev.get("file", ""))
+    value = f"SharedPrefs:{name}={val}"
+    snippet = f"{file_} {name}={val}"
+    low = name.lower()
+    if any(tok in low for tok in ("mobile", "phone")):
+        where = "凭手机号向运营商调取号主实名/开户信息与通话记录。"
+    elif any(tok in low for tok in ("merchant", "mch")):
+        where = "凭商户号向第三方支付/收单机构调取商户实名与结算账户。"
+    else:
+        where = "凭 token/会话以受害人身份向平台后台调取登录态、绑定信息与操作日志。"
+    return value, snippet, where
+
+
+def _credential_host_endpoints(events: list[dict[str, Any]]) -> list[Endpoint]:
+    """从 OkHttp 凭据事件的明文 url 抽 domain/url 端点（复用 _endpoints_from_plaintext）。
+
+    务必复用同一抽取 + 后续走 merge_runtime_endpoints 的 infra 分级，确保真实业务后端 host
+    与解密明文 host 同等待遇（CDN/SDK 自动判无需调证，疑似 App 自有 → 建议调证）。
+    """
+    found: dict[str, Endpoint] = {}
+    for ev in events:
+        if str(ev.get("source", "")) not in ("okhttp", "tls-decrypted"):  # HTTP 请求凭据源（含解密还原）
+            continue
+        url = str(ev.get("url", ""))
+        if not url:
+            continue
+        for ep in _endpoints_from_plaintext(url, url):
+            if ep.value not in found:
+                found[ep.value] = ep
+    return list(found.values())
+
+
+def _add_runtime_jsbridge_leads(report: Report, jb_hints: list[str]) -> int:
+    """把运行时观测到的桥接接口加成 CONFIG_KEY Lead（source=runtime），去重 append。"""
+    existing = {(lead.category.value, lead.value) for lead in report.leads}
+    added = 0
+    for hint in jb_hints:
+        value = f"JSBridge:{hint}"
+        key = (LeadCategory.CONFIG_KEY.value, value)
+        if key in existing:
+            # 已有同名（静态桥接框架）→ 追加 runtime 证据，升为活体确认。
+            for lead in report.leads:
+                if lead.category == LeadCategory.CONFIG_KEY and lead.value == value:
+                    lead.source_refs.append(
+                        Evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=f"运行时暴露/调用：{hint}")
+                    )
+                    break
+            continue
+        existing.add(key)
+        report.leads.append(
+            Lead(
+                category=LeadCategory.CONFIG_KEY,
+                value=value,
+                confidence=Confidence.HIGH,
+                advice="建议调证",
+                source_refs=[
+                    Evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=f"运行时暴露/调用：{hint}")
+                ],
+                notes="运行时实测：H5 可调用/已调用的原生 JS-bridge 接口（活体确认）。",
+            )
+        )
+        added += 1
+    return added
+
+
+def _add_anti_analysis_finding(
+    report: Report, ad_kinds: dict[str, int], ad_events: list[dict[str, Any]]
+) -> None:
+    """运行时探测到 root/模拟器/frida 检测 → 产「反分析行为」Finding（涉诈/木马研判信号）。
+
+    正经 app 极少探测 su/qemu/frida；运行时实测到这类探测是反取证/反沙箱行为的活体证据。
+    """
+    kinds_label = "、".join(f"{k}×{v}" for k, v in sorted(ad_kinds.items()))
+    # 取每类首个 probe 作为证据样本。
+    samples: dict[str, str] = {}
+    for ev in ad_events:
+        if not isinstance(ev, dict):
+            continue
+        kind = str(ev.get("kind", "")).strip()
+        probe = str(ev.get("probe", "")).strip()
+        if kind and probe and kind not in samples:
+            samples[kind] = probe
+    evidences = [
+        Evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=f"[{k}] {p[:160]}")
+        for k, p in samples.items()
+    ]
+    severity = Severity.HIGH if ("root" in ad_kinds or "frida" in ad_kinds) else Severity.MEDIUM
+    report.findings.append(
+        Finding(
+            id="RUNTIME-ANTI-ANALYSIS",
+            title="运行时反分析行为：探测 root/模拟器/frida",
+            severity=severity,
+            # 运行时观测合入，无静态分析器归属 → 显式标 runtime-merge（区别于"未归因"的空串）。
+            analyzer="runtime-merge",
+            kind=FINDING_KIND_OBSERVATION,  # 运行时**实测**行为，非规则推导 → observation
+            category="anti_analysis",
+            description=(
+                f"运行时实测：样本自我检测了 {kinds_label}（已由取证运行时兼容层中和）。"
+                "正经应用极少探测 su/qemu/frida——这类反取证/反沙箱行为是涉诈样本/木马规避"
+                "动态分析与风控的典型特征，应作为研判加权信号。"
+            ),
+            recommendation=(
+                "研判：结合静态加固/反调试线索综合判断样本的反分析强度；样本越在意被分析，"
+                "越可能隐藏涉诈核心逻辑（在检测通过后才解密/拉取真实后台）。"
+            ),
+            evidences=evidences,
+            references=[],
+        )
+    )
+
+
+#: ★品牌词与凭据同源——都来自**活体解密明文**，只是抽取判据不同。
+#: `brand_hints_from_events` 的取值有两条路：`_BRAND_KEYS` 结构化字段（webName 等），
+#: 以及「任何含行业词的字符串值 / 非 JSON 明文前 80 字符」。后一条会把
+#: `{"remark": "…卡号尾号…"}` 这类整条收走，**可能混入无关的个人数据**。
+#: 所以本条与凭据 Lead 一样必须带合规提示：内容挂在「品牌/行业词」这个看着无害的
+#: 标签下，读报告的人不会预期里面有个人数据——**敏感性标注错位比放原文更危险**。
+_BRAND_HINT_COMPLIANCE_NOTE = (
+    "★合规提示：以上词条截自运行时解密明文，抽取判据为「命中行业词」，"
+    "可能连带非品牌内容（含个人数据片段）。按适用的合规要求留存处置，不得外泄全文。"
+)
+
+
+def _add_brand_hint_finding(report: Report, brand_hints: list[str]) -> None:
+    """运行时明文里出现的品牌/行业词 → 产 observation Finding（冒充对象研判材料）。
+
+    ★为什么必须有这个出口：这批词是从**活体解密明文**里抽出来的（webName / 品牌名 /
+      行业词），是判断「这个壳假装成什么」最直接的材料。原实现只写进
+      ``meta["runtime_brand_hints"]`` 并打一行日志——写入点的注释写着「供报告呈现」，
+      而实际上没有任何出口呈现它，读报告的人看不到（本仓「信号必须接线」纪律）。
+
+    ★措辞守住证据边界：抽到的是**明文里出现的词**，不等于「冒充了某机构」。
+      同名可能来自第三方 SDK 文案、行业通用词、甚至被仿冒方自己的接口字段名。
+      所以只陈述观察到什么、由人去判断，不替人下「冒充 X」的结论
+      （与重打包件不写「植入/注入」同一条纪律）。
+    """
+    # ★幂等：同一 Report 上重复合并（重跑动态、重渲染）不得堆出同 ID 的多条 Finding，
+    #   否则 digest 计数与 HTML/PDF 会重复，且「重跑改变既有结果」本身就不可信。
+    if any(f.id == "RUNTIME-BRAND-HINTS" for f in report.findings):
+        return
+    shown = brand_hints[:12]
+    more = len(brand_hints) - len(shown)
+    label = "、".join(shown) + (f"（另有 {more} 条）" if more > 0 else "")
+    report.findings.append(
+        Finding(
+            id="RUNTIME-BRAND-HINTS",
+            title="运行时明文出现品牌/行业词",
+            severity=Severity.MEDIUM,
+            # 运行时观测合入，无静态分析器归属 → 显式标 runtime-merge（区别于"未归因"的空串）。
+            analyzer="runtime-merge",
+            kind=FINDING_KIND_OBSERVATION,  # 活体明文里的**观察**，非规则推导
+            # ★category 用中性名：叫 brand_impersonation 等于在分类字段上断言了「冒充」，
+            #   而 title 却写得克制——两处自相矛盾，且分类会进统计与筛选，
+            #   比正文更容易被当成结论。目前能确定的只有「明文出现这些词」。
+            category="runtime_plaintext_identity_hint",
+            description=(
+                f"运行时解密明文中出现下列品牌/行业词：{label}。"
+                "这类词常见于壳应用向服务端上报的 webName / 站点标题字段，"
+                "可作为该样本对外身份呈现的候选材料。"
+                f"\n\n{_BRAND_HINT_COMPLIANCE_NOTE}"
+            ),
+            recommendation=(
+                "研判：把这些词与应用图标、界面文案、域名注册信息比对，确认对外呈现的业务身份；"
+                "★注意同名不等于冒充——行业通用词、第三方 SDK 文案、被仿冒方自身接口字段"
+                "都可能产生同样的词，需另有证据才能认定冒充关系。"
+            ),
+            evidences=[
+                Evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=hint[:160])
+                for hint in shown
+            ],
+            references=[],
+        )
+    )
+
+
+def _confirm_sensitive_api_findings(report: Report, api_hints: list[str]) -> int:
+    """给匹配的静态 sensitive_api Finding 追加 runtime Evidence（活体确认）。
+
+    匹配口径：运行时 api 串（如 "TelephonyManager.getDeviceId"）的方法名出现在 Finding 的
+    title/description/id 里即视为同一能力，追加一条 runtime 证据。返回确认条数。
+    """
+    confirmed = 0
+    method_names = {h.rsplit(".", 1)[-1] for h in api_hints if h}
+    for finding in report.findings:
+        if getattr(finding, "category", "") != "sensitive_api":
+            continue
+        hay = f"{finding.id} {finding.title} {finding.description}"
+        matched = next((m for m in method_names if m and m in hay), None)
+        if matched is None:
+            continue
+        finding.evidences.append(
+            Evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=f"运行时实测调用：{matched}")
+        )
+        confirmed += 1
+    return confirmed
+
+
+# ---------------------------------------------------------------------------
+# 第二波：运行时 SQLCipher/SQLite 落地库导出 → VICTIM_DATA 受害人物证 Lead
+# ---------------------------------------------------------------------------
+#
+# 物证价值（全工程最高之一）：诈骗 app 本地落地库（SQLCipher 加密）藏 IM 聊天/话术剧本、
+# 通讯录、account/会员表、订单/入金缓存——导成明文 = 受害人名单 + 话术 + 上下线对接人。
+#
+# 流程：capture 把 SQLCipher hook 导出的 .plain.db adb pull 回 out/dump_db/，并在
+# runtime_report.json['sqlcipher_events'] 记 {event,db_path,plain_path,key}。本模块用标准库
+# sqlite3 **只读**打开 .plain.db，按 rules/db_carve.yaml 的表/列名启发式 + 通用正则抠值，
+# 产 VICTIM_DATA Lead（含合规脱敏与 SHA256 留存）。导出失败降级事件（key_only）→ 产带人工
+# 解密 playbook 的 Lead，不崩、不假成功。
+
+# Lead.notes / 日志的合规提示（横切硬要求：含受害人高敏个人信息，按办案合规留存处置）。
+_VICTIM_DATA_COMPLIANCE_NOTE = (
+    "运行时从落地库导出，含受害人/高敏个人信息（IM 账号/手机号/订单/商户号/话术），已脱敏截断；"
+    "原 .plain.db 已算 SHA256 留存（取证完整性）；按办案合规要求留存处置，不得外泄全文。"
+)
+
+# 时序依赖诚实标注（核验坑）：sqlcipher_export 需库已被 app 打开，launch-only 抓不全。
+_VICTIM_DATA_TIMING_NOTE = (
+    "时序提示：落地库导出依赖 app 运行时已打开该库，launch-only 抓不全未触发的库——"
+    "建议配合人工操作（登录/收消息/下单）触发后重抓。"
+)
+
+# 导出失败降级（key_only）时的人工解密 playbook（写进 Lead.notes，不崩、不假成功）。
+_VICTIM_DATA_MANUAL_PLAYBOOK = (
+    "自动导出失败（SQLCipher v3/v4 KDF 不匹配或库未就绪），已降级为仅回传库路径 + 密钥。"
+    "人工解密：sqlcipher <db> 后 PRAGMA key=\"x'<keyhex>'\"（raw key）或 PRAGMA key='<key>'；"
+    "v3 库先 PRAGMA cipher_compatibility = 3; 再 .dump / sqlcipher_export 导明文。"
+)
+
+#: db_carve 启发式规则惰性缓存。
+_DB_CARVE_RULES_CACHE: dict[str, Any] | None = None
+
+#: 兜底表名关键词（rules/db_carve.yaml 不可用时用，保守圈高物证价值表）。
+_FALLBACK_CARVE_TABLES: tuple[str, ...] = (
+    "account", "user", "member", "contact", "friend", "message", "msg", "chat",
+    "conversation", "order", "recharge", "deposit", "withdraw", "pay", "wallet",
+    "bank", "customer",
+)
+#: 兜底列名关键词。
+_FALLBACK_CARVE_COLUMNS: tuple[str, ...] = (
+    "phone", "mobile", "tel", "account", "username", "nickname", "im", "uid",
+    "openid", "wechat", "qq", "telegram", "whatsapp", "email", "idcard", "card",
+    "bank", "mchid", "merchant", "token", "amount", "money", "balance", "content",
+    "remark", "url", "domain", "host",
+)
+
+# 系统/sqlite 自身表（绝不抠，避免噪音）。
+_DB_SYSTEM_TABLES: frozenset[str] = frozenset(
+    {"android_metadata", "sqlite_sequence", "sqlite_master", "room_master_table"}
+)
+
+# 单值/单库抠值上限（保守，宁缺毋滥，避免把每行都当线索刷爆报告）。
+_DB_MAX_TABLES = 40
+_DB_MAX_ROWS = 50
+_DB_MAX_VALUES_PER_COL = 20
+# 抠出的单值脱敏后截断上限（不留全文聊天/话术）。
+_DB_VALUE_MAX = 80
+
+# 手机号打码（与 cryptohook 同口径：前 3 后 4 保留，中间 ****）。
+_DB_PHONE_RE = re.compile(r"(?<!\d)(1\d{2})(\d{4})(\d{4})(?!\d)")
+
+
+def _load_db_carve_rules() -> dict[str, Any]:
+    """惰性加载 db_carve 启发式规则（rules/db_carve.yaml）；缺失/异常 → 兜底。"""
+    global _DB_CARVE_RULES_CACHE
+    if _DB_CARVE_RULES_CACHE is not None:
+        return _DB_CARVE_RULES_CACHE
+    tables: list[str] = list(_FALLBACK_CARVE_TABLES)
+    columns: list[str] = list(_FALLBACK_CARVE_COLUMNS)
+    try:
+        from apkscan.core.registry import load_rules
+
+        data = load_rules("db_carve")
+        if isinstance(data, dict):
+            tk = data.get("table_keywords")
+            if isinstance(tk, list):
+                cleaned = [str(t).strip().lower() for t in tk if str(t).strip()]
+                if cleaned:
+                    tables = cleaned
+            ck = data.get("column_keywords")
+            if isinstance(ck, list):
+                cleaned_c = [str(c).strip().lower() for c in ck if str(c).strip()]
+                if cleaned_c:
+                    columns = cleaned_c
+    except Exception:  # noqa: BLE001 — 规则不可用不阻断，用兜底
+        logger.exception("[merge] 加载 db_carve 规则失败，用内置兜底")
+    _DB_CARVE_RULES_CACHE = {"tables": tuple(tables), "columns": tuple(columns)}
+    return _DB_CARVE_RULES_CACHE
+
+
+def _is_carve_table(table: str) -> bool:
+    """表名是否命中物证价值关键词（子串、小写）；系统表一律排除。"""
+    if not isinstance(table, str) or not table:
+        return False
+    low = table.strip().lower()
+    if low in _DB_SYSTEM_TABLES or low.startswith("sqlite_"):
+        return False
+    keywords = _load_db_carve_rules()["tables"]
+    return any(tok in low for tok in keywords)
+
+
+def _is_carve_column(column: str) -> bool:
+    """列名是否命中可调证关键词（子串、小写）。"""
+    if not isinstance(column, str) or not column:
+        return False
+    low = column.strip().lower()
+    if low == "id":  # 主键自增 id 无物证价值，显式排除
+        return False
+    keywords = _load_db_carve_rules()["columns"]
+    return any(tok in low for tok in keywords)
+
+
+def _mask_db_value(value: str) -> str:
+    """落地库抠出的值脱敏：手机号中间打码 + 截断（不留全文聊天/话术）。绝不抛。"""
+    try:
+        masked = _DB_PHONE_RE.sub(lambda m: f"{m.group(1)}****{m.group(3)}", value)
+    except Exception:  # noqa: BLE001
+        logger.exception("[merge] db 值脱敏异常")
+        masked = value
+    masked = masked.strip()
+    return masked[:_DB_VALUE_MAX]
+
+
+def _sha256_of_file(path: Any) -> str:
+    """算文件 SHA256（取证完整性留存）；失败 → 空串（不抛）。"""
+    import hashlib
+    from pathlib import Path
+
+    try:
+        h = hashlib.sha256()
+        with Path(path).open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        logger.exception("[merge] 计算 .plain.db SHA256 失败：%s", path)
+        return ""
+
+
+def merge_runtime_databases(report: Report, runtime_report_path: str) -> dict[str, int]:
+    """把运行时导出的落地库（SQLCipher .plain.db / 普通 SQLite）抠成 VICTIM_DATA Lead 并回报告。
+
+    流程：
+      1. 读 runtime_report.json 的 ``sqlcipher_events``（缺/旧版无该字段 → 跳过，零统计）。
+      2. ``exported`` 事件：用标准库 sqlite3 **只读**打开 .plain.db，按 db_carve 启发式抠表/列值
+         （手机号脱敏、截断），产 VICTIM_DATA Lead；落盘 .plain.db 算 SHA256 留存（meta 台账）。
+      3. ``key_only`` 降级事件：产带人工解密 playbook 的 Lead（不崩、不假成功）。
+      4. where_to_request：向 IM 平台调账号实名+注册手机/IP、向支付机构凭商户号调结算主体。
+      5. meta 打标 runtime_databases / runtime_db_digests。
+
+    单库读取失败（坏文件/锁/缺文件）只记日志、不影响其它库，绝不抛。
+
+    Returns:
+        ``{"victim_leads", "victim_databases"}``。内部 try/except，绝不抛。
+    """
+    stats = {"victim_leads": 0, "victim_databases": 0}
+    try:
+        from apkscan.dynamic import cryptohook
+
+        raw_events = _load_events_field(runtime_report_path, "sqlcipher_events")
+        if not raw_events:
+            return stats
+
+        events: list[dict[str, Any]] = []
+        for raw in raw_events:
+            ev = cryptohook.normalize_sqlcipher_event(raw)
+            if ev is not None:
+                events.append(ev)
+        if not events:
+            return stats
+
+        existing = {(lead.category.value, lead.value) for lead in report.leads}
+        digests: dict[str, str] = {}
+        seen_db: set[str] = set()
+        added = 0
+        dbs = 0
+
+        for ev in events:
+            db_path = str(ev.get("db_path", ""))
+            if db_path in seen_db:
+                continue
+            seen_db.add(db_path)
+            dbs += 1
+            plain_path = str(ev.get("plain_path", ""))
+            if ev.get("event") == "exported" and plain_path:
+                digest = _sha256_of_file(plain_path)
+                if digest:
+                    digests[plain_path] = digest
+                carved = _carve_plain_db(plain_path)
+                if carved:
+                    added += _add_victim_data_leads(report, db_path, carved, existing)
+                    continue
+                # 导出库存在但抠不出物证（空库/坏库/无敏感表）：不产 Lead（宁缺毋滥）。
+                logger.info("[merge] 落地库无可抠物证（空库/无敏感表）：%s", db_path)
+                continue
+            # key_only 降级 / exported 但 plain_path 缺：产人工解密 playbook Lead。
+            added += _add_db_degraded_lead(report, db_path, str(ev.get("key", "")), existing)
+
+        stats["victim_leads"] = added
+        stats["victim_databases"] = dbs
+        if digests:
+            report.meta["runtime_db_digests"] = digests
+        report.meta["runtime_databases"] = True
+        report.meta["runtime_database_count"] = dbs
+        logger.info(
+            "[merge] 运行时落地库并回：victim_leads=%d victim_databases=%d（%s）",
+            stats["victim_leads"],
+            stats["victim_databases"],
+            "含受害人高敏个人信息，按办案合规留存处置",
+        )
+    except Exception:  # noqa: BLE001 - 落地库并回失败不得抛给调用方（不破坏已产出报告）
+        logger.exception("[merge] 运行时落地库并回异常")
+    return stats
+
+
+def _carve_plain_db(plain_path: str) -> list[tuple[str, str, str]]:
+    """用标准库 sqlite3 **只读**打开 .plain.db，按 db_carve 启发式抠 (table, column, value)。
+
+    返回脱敏/截断后的 (table, column, masked_value) 列表（去重、限量）。坏库/缺文件/锁/任何
+    异常 → []（单库失败不影响其它，绝不抛）。
+    """
+    import sqlite3
+    from pathlib import Path
+
+    out: list[tuple[str, str, str]] = []
+    p = Path(plain_path)
+    if not p.exists() or not p.is_file():
+        logger.info("[merge] .plain.db 不存在，跳过：%s", plain_path)
+        return out
+    conn: Any = None
+    try:
+        # 只读打开（uri mode=ro），避免误改物证库。
+        conn = sqlite3.connect(f"file:{p.as_posix()}?mode=ro", uri=True, timeout=2.0)
+        conn.text_factory = lambda b: b.decode("utf-8", errors="replace")
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = [str(r[0]) for r in cur.fetchall() if r and r[0]]
+        seen: set[tuple[str, str, str]] = set()
+        tcount = 0
+        for table in tables:
+            if tcount >= _DB_MAX_TABLES:
+                break
+            if not _is_carve_table(table):
+                continue
+            tcount += 1
+            _carve_table(cur, table, out, seen)
+    except sqlite3.DatabaseError:
+        # 非 sqlite / 损坏 / 加密未解 → 单库失败，不影响其它。
+        logger.exception("[merge] sqlite 读取落地库失败（坏库/非 sqlite），跳过：%s", plain_path)
+        return out
+    except Exception:  # noqa: BLE001 — 单库任何异常都不应中断整体
+        logger.exception("[merge] 读取落地库异常，跳过：%s", plain_path)
+        return out
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                logger.debug("[merge] 关闭 sqlite 连接失败（忽略）", exc_info=True)
+    return out
+
+
+def _carve_table(
+    cur: Any, table: str, out: list[tuple[str, str, str]], seen: set[tuple[str, str, str]]
+) -> None:
+    """抠单表命中关键词的列值（限行/限值、脱敏截断）。单表失败只记日志、不抛。"""
+    import sqlite3
+
+    try:
+        # 表名取自 sqlite_master（库自身），但仍用引号包裹防御特殊字符。
+        cur.execute(f'PRAGMA table_info("{table}")')
+        cols_info = cur.fetchall()
+        carve_cols = [str(c[1]) for c in cols_info if c and len(c) > 1 and _is_carve_column(str(c[1]))]
+        if not carve_cols:
+            return
+        col_list = ", ".join(f'"{c}"' for c in carve_cols)
+        cur.execute(f'SELECT {col_list} FROM "{table}" LIMIT {_DB_MAX_ROWS}')
+        rows = cur.fetchall()
+        per_col_count: dict[str, int] = {}
+        for row in rows:
+            for col, raw in zip(carve_cols, row):
+                if raw is None:
+                    continue
+                value = str(raw).strip()
+                if not value:
+                    continue
+                if per_col_count.get(col, 0) >= _DB_MAX_VALUES_PER_COL:
+                    continue
+                masked = _mask_db_value(value)
+                key = (table, col, masked)
+                if key in seen:
+                    continue
+                seen.add(key)
+                per_col_count[col] = per_col_count.get(col, 0) + 1
+                out.append((table, col, masked))
+    except sqlite3.DatabaseError:
+        logger.warning("[merge] 抠表失败（坏表/列），跳过：%s", table, exc_info=True)
+    except Exception:  # noqa: BLE001 — 单表失败不影响其它表
+        logger.exception("[merge] 抠表异常，跳过：%s", table)
+
+
+def _add_victim_data_leads(
+    report: Report,
+    db_path: str,
+    carved: list[tuple[str, str, str]],
+    existing: set[tuple[str, str]],
+) -> int:
+    """把抠出的 (table, column, masked_value) 产成 VICTIM_DATA Lead，去重 append，返回新增数。"""
+    db_name = db_path.rsplit("/", 1)[-1] if db_path else "db"
+    added = 0
+    for table, column, value in carved:
+        lead_value = f"DB:{db_name}/{table}.{column}={value}"
+        key = (LeadCategory.VICTIM_DATA.value, lead_value)
+        if key in existing:
+            continue
+        existing.add(key)
+        report.leads.append(
+            Lead(
+                category=LeadCategory.VICTIM_DATA,
+                value=lead_value,
+                where_to_request=_db_where_to_request(column),
+                confidence=Confidence.HIGH,
+                advice="建议调证",
+                source_refs=[
+                    Evidence(
+                        source=_RUNTIME_SOURCE,
+                        location=db_path,
+                        snippet=f"{table}.{column}={value}"[:200],
+                    )
+                ],
+                notes=f"{_VICTIM_DATA_COMPLIANCE_NOTE} {_VICTIM_DATA_TIMING_NOTE}",
+            )
+        )
+        added += 1
+    return added
+
+
+def _db_where_to_request(column: str) -> str:
+    """按列语义给 where_to_request：手机号→运营商；商户号→支付机构；IM 账号→平台。"""
+    low = column.lower()
+    if any(tok in low for tok in ("phone", "mobile", "tel")):
+        return "凭手机号向运营商调取号主实名/开户信息与通话记录（受害人/上下线身份核实）。"
+    if any(tok in low for tok in ("mchid", "merchant", "mch")):
+        return "凭商户号向第三方支付/收单机构调取商户实名与结算主体（资金归集落点）。"
+    if any(tok in low for tok in ("im", "wechat", "qq", "telegram", "whatsapp", "openid", "uid")):
+        return "凭 IM 账号向对应平台调取账号实名、注册手机/IP 与登录记录（定位对接人/上线）。"
+    if any(tok in low for tok in ("card", "bank")):
+        return "凭卡号向开户银行调取户名/开户行/流水（资金流向）。"
+    return "向落地库归属平台调取该字段对应主体实名与关联信息（受害人/对接人物证）。"
+
+
+def _add_db_degraded_lead(
+    report: Report, db_path: str, key: str, existing: set[tuple[str, str]]
+) -> int:
+    """SQLCipher 导出失败降级（key_only）：产带人工解密 playbook 的 VICTIM_DATA Lead，去重 append。"""
+    db_name = db_path.rsplit("/", 1)[-1] if db_path else "db"
+    lead_value = f"DB(加密未导出):{db_name}"
+    dedup = (LeadCategory.VICTIM_DATA.value, lead_value)
+    if dedup in existing:
+        return 0
+    existing.add(dedup)
+    key_hint = f"（密钥已截断留存：{key}）" if key else ""
+    report.leads.append(
+        Lead(
+            category=LeadCategory.VICTIM_DATA,
+            value=lead_value,
+            where_to_request="解密后凭库内 IM 账号/手机号/商户号向对应平台/运营商/支付机构调证。",
+            confidence=Confidence.MEDIUM,
+            advice="待核",
+            source_refs=[
+                Evidence(
+                    source=_RUNTIME_SOURCE,
+                    location=db_path,
+                    snippet=f"SQLCipher 加密库，自动导出失败{key_hint}"[:200],
+                )
+            ],
+            notes=(
+                f"{_VICTIM_DATA_MANUAL_PLAYBOOK} {_VICTIM_DATA_COMPLIANCE_NOTE} "
+                f"{_VICTIM_DATA_TIMING_NOTE}"
+            ),
+        )
+    )
+    return 1
+
+
+# ---------------------------------------------------------------------------
+# 第二波：运行时剪贴板链上地址 → PAYMENT 类 Lead（资金流起点·运行时确认）
+# ---------------------------------------------------------------------------
+#
+# 资金流价值：杀猪盘/跑分引导受害人「复制这个地址转账」——剪贴板里就是真实收款钱包地址。
+# 运行时抓到 = is_runtime_seen 的铁证（比静态硬编码可信度更高，能拿到服务端运行时下发、静态
+# 抠不到的地址）。本功能产的剪贴板地址走 PAYMENT 类（与静态链上地址归一、不新增 LeadCategory），
+# 但 source 标 runtime（使 Lead.is_runtime_seen=True）。
+#
+# ★ 隐私护栏在 cryptohook.normalize_clipboard_event 已完成（抽地址、丢全文）；本模块只消费
+# 抽出的地址，runtime_report.json['clipboard_events'] 本就不含剪贴板全文。
+
+# 剪贴板地址 Lead 的归属/调证语义（复用 payment 链上地址口径：交易所/链上分析/Tether 冻结）。
+_CLIPBOARD_LEAD_SUBJECT = "待核（疑似收款主体）"
+_CLIPBOARD_LEAD_WHERE = (
+    "凭地址上链做钱包聚类→归集点→落地交易所，对接 TronScan/Etherscan 等链上分析；"
+    "向交易所/Tether 申请冻结与调取 KYC（充提记录、绑定身份）。"
+)
+_CLIPBOARD_LEAD_EVIDENCE: tuple[str, ...] = (
+    "链上交易流水（充值/提现/归集路径）",
+    "落地交易所 KYC（实名、绑定手机/邮箱、登录 IP）",
+    "Tether/交易所冻结与协查",
+)
+
+
+def merge_runtime_clipboard(report: Report, runtime_report_path: str) -> dict[str, int]:
+    """把运行时剪贴板抓到的链上地址产成 PAYMENT 类 Lead 并回主报告（资金流起点·运行时确认）。
+
+    流程：
+      1. 读 runtime_report.json 的 ``clipboard_events``（缺/旧版无该字段 → 跳过，零统计）。
+      2. ``cryptohook.clipboard_addresses_from_events`` 抽出 (value, chain, checksum) 链上地址
+         （已过校验和、去重保序；隐私护栏在 normalize 阶段已抽地址丢全文，此处只见地址）。
+      3. 每地址产 PAYMENT 类 Lead（value=地址、where_to_request 复用 payment 链上地址语义、
+         source 标 runtime → ``Lead.is_runtime_seen=True``、notes 标链 + 「运行时剪贴板抓取，
+         受害人复制转账入口」）。
+      4. 去重：静态已抠到同地址 PAYMENT Lead → 不产重复，给静态那条**追加** runtime 证据
+         （把「静态硬编码」升级为「运行时剪贴板确认」，is_runtime_seen 随之为 True）。
+      5. meta 打标 runtime_clipboard / runtime_clipboard_address_count。
+
+    Returns:
+        ``{"clipboard_leads"}``（新增 Lead 数；仅追加确认到已有静态 Lead 的不计入新增）。
+        内部 try/except，绝不抛。
+    """
+    stats = {"clipboard_leads": 0}
+    try:
+        from apkscan.dynamic import cryptohook
+
+        events = _load_events_field(runtime_report_path, "clipboard_events")
+        if not events:
+            return stats
+
+        addresses = cryptohook.clipboard_addresses_from_events(events)
+        if not addresses:
+            return stats
+
+        stats["clipboard_leads"] = _add_runtime_clipboard_leads(report, addresses)
+
+        report.meta["runtime_clipboard"] = True
+        report.meta["runtime_clipboard_address_count"] = len(addresses)
+        logger.info(
+            "[merge] 运行时剪贴板链上地址并回：clipboard_leads=%d addresses=%d",
+            stats["clipboard_leads"],
+            len(addresses),
+        )
+    except Exception:  # noqa: BLE001 - 剪贴板并回失败不得抛给调用方（不破坏已产出报告）
+        logger.exception("[merge] 运行时剪贴板链上地址并回异常")
+    return stats
+
+
+def _add_runtime_clipboard_leads(
+    report: Report, addresses: list[tuple[str, str, bool]]
+) -> int:
+    """把剪贴板抽出的链上地址产成 PAYMENT 类 Lead，去重 append；返回**新增** Lead 数。
+
+    去重：同地址静态已有 PAYMENT Lead → 不重复产，给其追加一条 runtime 证据（升为运行时确认）。
+    """
+    added = 0
+    # 同地址、同类目的已有 Lead 索引（便于追加 runtime 证据）。
+    existing: dict[str, Lead] = {
+        lead.value: lead
+        for lead in report.leads
+        if lead.category == LeadCategory.PAYMENT
+    }
+    for value, chain, checksum_verified in addresses:
+        runtime_ev = Evidence(
+            source=_RUNTIME_SOURCE,
+            location="runtime-clipboard",
+            snippet=f"运行时剪贴板抓取链上地址（{chain}）：{value}"[:200],
+        )
+        prior = existing.get(value)
+        if prior is not None:
+            # 静态已抠到同地址 → 不产重复，追加 runtime 证据使 is_runtime_seen=True。
+            if not any(
+                ev.scope is EvidenceScope.CASE_EVIDENCE
+                and str(ev.source).startswith("runtime")
+                for ev in prior.source_refs
+            ):
+                prior.source_refs.append(runtime_ev)
+            continue
+        verified_note = (
+            "校验和已通过。" if checksum_verified else "全小写/全大写未通过大小写校验，低可信、需人工复核。"
+        )
+        lead = Lead(
+            category=LeadCategory.PAYMENT,
+            value=value,
+            subject=_CLIPBOARD_LEAD_SUBJECT,
+            where_to_request=_CLIPBOARD_LEAD_WHERE,
+            evidence_to_obtain=list(_CLIPBOARD_LEAD_EVIDENCE),
+            confidence=Confidence.HIGH if checksum_verified else Confidence.MEDIUM,
+            advice="建议调证",
+            source_refs=[runtime_ev],
+            notes=(
+                f"链上收款地址（{chain}），{verified_note}"
+                "运行时剪贴板抓取，受害人复制转账入口（资金流起点）——"
+                "运行时确认，比静态硬编码可信度更高。"
+            ),
+        )
+        report.leads.append(lead)
+        existing[value] = lead
+        added += 1
+    return added
+
+
+# ---------------------------------------------------------------------------
+# 第二波（最后）：无障碍远控目标银行清单 → REMOTE_CONTROL Lead + 回传 host 走 infra + 手势 Finding
+# ---------------------------------------------------------------------------
+#
+# 反诈价值：无障碍远控木马劫持银行/支付 app 自动转账。运行时 hook 抓到：被劫持的目标 app 包名
+# 清单（针对性盗刷的硬物证、指明向哪些银行调被害人流水）、下发的远控手势/全局动作（远控指令）、
+# 屏幕回传 host（操盘端 C2）。
+#
+# ★ 优先级与边界（务必照做）：无障碍远控逻辑绝大多数要诱导真人操作才走，launch-only 抓不到——
+#   降 P2，Lead/Finding.notes 明标「需引导式人工动态，launch-only 抓不到」。三条产出：
+#   ① 目标银行/支付包名清单 → 按 rules/bank_packages.yaml 映射机构主体，产 REMOTE_CONTROL Lead
+#      （命中已知银行包名才产；未知包名进 Finding/notes，不滥产 Lead）。
+#   ② 屏幕/控件树回传 host → 并入端点走 merge_runtime_endpoints（infra 分级，别把 CDN 当 C2）。
+#   ③ 远控手势/指令序列 + MediaProjection 开启 → 产 Finding（severity 高，行为定性证据），不 Lead 化。
+
+# launch-only 诚实标注（横切硬要求，写进 REMOTE_CONTROL Lead.notes 与 Finding）。
+_REMOTE_CONTROL_TIMING_NOTE = (
+    "时序提示：无障碍远控逻辑绝大多数要诱导真人操作才触发，launch-only 抓不到——"
+    "需配合引导式人工动态（在被劫持 app 内模拟登录/转账操作）触发后重抓。"
+)
+# REMOTE_CONTROL Lead 的合规提示（含受害人高敏调证去向）。
+_REMOTE_CONTROL_COMPLIANCE_NOTE = (
+    "运行时实测：无障碍服务劫持了该目标银行/支付 app（针对性盗刷物证）；"
+    "凭目标机构主体向其调取被害人交易流水/异常转账记录，按办案合规留存处置。"
+)
+# REMOTE_CONTROL Lead 可调取的证据（指明向目标银行/支付机构调被害人流水）。
+_REMOTE_CONTROL_EVIDENCE: tuple[str, ...] = (
+    "被害账户交易流水",
+    "异常转账记录",
+    "设备登录指纹",
+)
+# 屏幕/控件树回传 host 的端点来源标记位置（runtime，走 infra 分级）。
+
+#: bank_packages 规则惰性缓存（包名精确键 dict + 前缀键 list）。
+_BANK_PACKAGES_CACHE: dict[str, Any] | None = None
+
+#: bank_packages.yaml 不可用时的内置兜底映射（覆盖主要几家，数据化便于扩）。
+_FALLBACK_BANK_PACKAGES: dict[str, str] = {
+    "com.icbc": "中国工商银行",
+    "com.icbc.": "中国工商银行",
+    "com.chinamworld.main": "中国建设银行",
+    "com.android.bankabc": "中国农业银行",
+    "com.chinamworld.bocmbci": "中国银行",
+    "com.bankcomm.Bankcomm": "交通银行",
+    "cmb.pb": "招商银行",
+    "com.cmbchina.": "招商银行",
+    "com.eg.android.AlipayGphone": "支付宝（蚂蚁集团）",
+    "com.alipay.": "支付宝（蚂蚁集团）",
+    "com.tencent.mm": "微信（财付通）",
+}
+
+
+def _load_bank_packages() -> dict[str, Any]:
+    """惰性加载 bank_packages 映射（rules/bank_packages.yaml）；缺失/异常 → 内置兜底。
+
+    返回 ``{"exact": {pkg: subject}, "prefixes": [(prefix, subject), ...]}``：以 ``.`` 结尾的
+    键作前缀匹配（覆盖同机构多子包/马甲），其余作精确匹配。前缀按长度降序（更具体优先）。
+    """
+    global _BANK_PACKAGES_CACHE
+    if _BANK_PACKAGES_CACHE is not None:
+        return _BANK_PACKAGES_CACHE
+    raw: dict[str, str] = dict(_FALLBACK_BANK_PACKAGES)
+    try:
+        from apkscan.core.registry import load_rules
+
+        data = load_rules("bank_packages")
+        if isinstance(data, dict):
+            packages = data.get("packages")
+            if isinstance(packages, dict):
+                cleaned = {
+                    str(k).strip().lower(): str(v).strip()
+                    for k, v in packages.items()
+                    if str(k).strip() and str(v).strip()
+                }
+                if cleaned:
+                    raw = cleaned
+    except Exception:  # noqa: BLE001 — 规则不可用不阻断，用兜底
+        logger.exception("[merge] 加载 bank_packages 规则失败，用内置兜底")
+    exact: dict[str, str] = {}
+    prefixes: list[tuple[str, str]] = []
+    for key, subject in raw.items():
+        if key.endswith("."):
+            prefixes.append((key, subject))
+        else:
+            exact[key] = subject
+    # 前缀按长度降序：更具体的前缀优先命中（如 com.cmbchina. 优先于 com.）。
+    prefixes.sort(key=lambda kv: -len(kv[0]))
+    _BANK_PACKAGES_CACHE = {"exact": exact, "prefixes": prefixes}
+    return _BANK_PACKAGES_CACHE
+
+
+def _bank_subject_of_package(package: str) -> str | None:
+    """把目标 app 包名映射回机构主体（精确优先、再前缀）；未命中 → None（不滥产 Lead）。"""
+    if not isinstance(package, str) or not package.strip():
+        return None
+    pkg = package.strip().lower()
+    rules = _load_bank_packages()
+    exact = rules["exact"]
+    if pkg in exact:
+        return exact[pkg]
+    for prefix, subject in rules["prefixes"]:
+        if pkg.startswith(prefix):
+            return subject
+    return None
+
+
+def merge_runtime_remote_control(report: Report, runtime_report_path: str) -> dict[str, int]:
+    """把无障碍远控事件并回主报告：目标银行包名→机构 Lead / 回传 host 走 infra / 手势序列 Finding。
+
+    流程（见模块顶部 §边界）：
+      1. 读 runtime_report.json 的 ``remote_control_events``（缺/旧版无该字段 → 跳过，零统计）。
+      2. 每条事件经 ``cryptohook.normalize_remote_control_event`` 再规范化兜底。
+      3. 目标包名清单（去重）→ ``_bank_subject_of_package`` 映射机构主体：
+         - **命中已知银行/支付包名** → 产 REMOTE_CONTROL Lead（subject=机构主体、where_to_request=
+           向目标机构调被害人流水、evidence_to_obtain=[被害账户交易流水/异常转账记录/设备登录指纹]、
+           notes 带 launch-only 诚实标注）。去重。
+         - **未知包名** → 不产 Lead，收集进 Finding 描述/notes（不滥产 Lead）。
+      4. 屏幕/控件树回传 host → 并入端点走 ``merge_runtime_endpoints``（infra 分级，CDN 不升 C2）；
+         该 host 是 hook **上报**串（非 pcap dst_ip / mitm upstream）→ 钉 ``runtime-derived``
+         （非 observed-contact，见 ``_RUNTIME_DERIVED_SOURCE``），不凭空授予运行时接触信任。
+      5. 远控手势/指令序列 + MediaProjection 开启 → 产 Finding（severity 高，描述实测无障碍远控
+         行为：下发 N 个自动手势 / 劫持包名 X / 屏幕录制开启），**不 Lead 化**。
+      6. meta 打标 runtime_remote_control。
+
+    Returns:
+        ``{"rc_leads", "gesture_count", "screencapture", "unknown_packages", "rc_endpoints"}``。
+        内部 try/except，绝不抛。
+    """
+    stats = {
+        "rc_leads": 0,
+        "gesture_count": 0,
+        "screencapture": 0,
+        "unknown_packages": 0,
+        "rc_endpoints": 0,
+    }
+    try:
+        from apkscan.dynamic import cryptohook
+
+        raw_events = _load_events_field(runtime_report_path, "remote_control_events")
+        if not raw_events:
+            return stats
+
+        events: list[dict[str, Any]] = []
+        for raw in raw_events:
+            ev = cryptohook.normalize_remote_control_event(raw)
+            if ev is not None:
+                events.append(ev)
+        if not events:
+            return stats
+
+        # 分流：目标包名清单（去重保序）/ 手势计数 / 屏幕录制 / 回传 host。
+        target_packages: list[str] = []
+        seen_pkg: set[str] = set()
+        gesture_actions: list[str] = []
+        screencapture = 0
+        hosts: list[str] = []
+        seen_host: set[str] = set()
+        for ev in events:
+            pkg = str(ev.get("target_package", "")).strip()
+            if pkg and pkg not in seen_pkg:
+                seen_pkg.add(pkg)
+                target_packages.append(pkg)
+            if ev.get("event") == "gesture":
+                action = str(ev.get("action", "")).strip()
+                if action:
+                    gesture_actions.append(action)
+            if ev.get("event") == "screencapture":
+                screencapture += 1
+            host = str(ev.get("host", "")).strip()
+            if host and host not in seen_host:
+                seen_host.add(host)
+                hosts.append(host)
+
+        # ① 目标银行/支付包名 → 机构主体 Lead（命中才产；未知进 Finding/notes）。
+        known_targets: list[tuple[str, str]] = []  # (package, subject)
+        unknown_targets: list[str] = []
+        for pkg in target_packages:
+            subject = _bank_subject_of_package(pkg)
+            if subject is not None:
+                known_targets.append((pkg, subject))
+            else:
+                unknown_targets.append(pkg)
+        stats["rc_leads"] = _add_remote_control_leads(report, known_targets)
+        stats["unknown_packages"] = len(unknown_targets)
+
+        # ② 屏幕/控件树回传 host → 并入端点走 infra 分级（别把 CDN 当 C2）。
+        if hosts:
+            host_endpoints = [
+                Endpoint(
+                    value=h,
+                    kind="domain",
+                    evidences=[
+                        Evidence(
+                            # 回传 host 是 Frida 无障碍 hook **上报**的字符串（经规整），非 pcap dst_ip /
+                            # mitm upstream——不是"运行时真观测到连去该 peer IP"的 observed-contact。故钉
+                            # runtime-derived（仍 runtime*、is_runtime_seen 不变，但不在 assemble 的
+                            # observed-contact allowlist，见 _RUNTIME_DERIVED_SOURCE），与 dead-drop 从
+                            # 回包内容推导的二级 C2（commit ad0b762）同法：堵手编 runtime_report 的
+                            # remote_control_events[].host 借此路径伪造 source="runtime" 端点，并消除
+                            # "仅因 kind==domain 才没漏成 attribution 运行时行为角色"的巧合边界。
+                            source=_RUNTIME_DERIVED_SOURCE,
+                            location="runtime-remote-control",
+                            snippet=f"无障碍远控屏幕/控件树回传 host：{h}",
+                        )
+                    ],
+                )
+                for h in hosts
+            ]
+            merge_runtime_endpoints(report, host_endpoints)
+            stats["rc_endpoints"] = len(host_endpoints)
+
+        # ③ 远控手势序列 + MediaProjection → Finding（不 Lead 化）。
+        stats["gesture_count"] = len(gesture_actions)
+        stats["screencapture"] = screencapture
+        if gesture_actions or screencapture:
+            _add_remote_control_finding(
+                report, known_targets, unknown_targets, gesture_actions, screencapture
+            )
+        elif unknown_targets:
+            # ★没抓到手势/录屏，但确实观察到针对未知包的无障碍事件——仍必须有出口。
+            #   上面 ① 处注释写着「未知进 Finding/notes」，可那条 Finding 被
+            #   `gesture or screencapture` 挡在门外，于是这一支只剩 meta。
+            #   ★而下面那行日志自己写着「launch-only 抓不到，多数需引导式人工动态」：
+            #     抓包本就常常很浅，**没抓到手势不等于没有能力**——
+            #     拿手势当报告前提，正好卡在最容易漏的地方。
+            _add_unknown_remote_target_finding(report, unknown_targets)
+
+        report.meta["runtime_remote_control"] = True
+        report.meta["runtime_remote_control_targets"] = [s for _, s in known_targets]
+        if unknown_targets:
+            report.meta["runtime_remote_control_unknown_packages"] = unknown_targets
+        logger.info(
+            "[merge] 无障碍远控并回：rc_leads=%d gesture=%d screencapture=%d unknown_pkg=%d host=%d"
+            "（launch-only 抓不到，多数需引导式人工动态）",
+            stats["rc_leads"],
+            stats["gesture_count"],
+            stats["screencapture"],
+            stats["unknown_packages"],
+            stats["rc_endpoints"],
+        )
+    except Exception:  # noqa: BLE001 - 远控并回失败不得抛给调用方（不破坏已产出报告）
+        logger.exception("[merge] 无障碍远控并回异常")
+    return stats
+
+
+def _add_unknown_remote_target_finding(report: Report, unknown_targets: list[str]) -> None:
+    """只观察到「针对未知包的无障碍事件」、无手势/录屏时的出口（LOW observation）。
+
+    ★与 :func:`_add_remote_control_finding` 的分工：那条要求实测到手势或录屏，
+      是「已在实施远控」的强证据；本条只说明**监视/控制目标存在**，
+      份量低一档，且不替人断言远控已发生。
+
+    ★为什么不能省：无障碍事件的目标包名本身就是取证材料——它指出这个样本在盯哪些
+      应用。而 launch-only 抓包常常抓不到手势（见并回日志里那句说明），
+      用手势作为报告前提会让浅抓包的样本整批静默。
+    """
+    if any(f.id == "RUNTIME-REMOTE-CONTROL-UNKNOWN-TARGET" for f in report.findings):
+        return  # 幂等：重复合并不得堆同 ID
+    shown = unknown_targets[:12]
+    more = len(unknown_targets) - len(shown)
+    label = "、".join(shown) + (f"（另有 {more} 个）" if more > 0 else "")
+    report.findings.append(
+        Finding(
+            id="RUNTIME-REMOTE-CONTROL-UNKNOWN-TARGET",
+            title="无障碍事件指向未知包（未实测到手势/录屏）",
+            severity=Severity.LOW,
+            analyzer="runtime-merge",
+            kind=FINDING_KIND_OBSERVATION,
+            category="remote_control",
+            description=(
+                f"运行时观察到样本对下列包名发出无障碍事件：{label}。"
+                "这些包名不在已知银行/支付机构名单内，故未产机构主体线索。"
+                "本次未实测到远控手势或屏幕录制——**这不代表不具备该能力**："
+                "launch-only 抓包通常触发不到远控行为，多数需引导式人工动态。"
+            ),
+            recommendation=(
+                "研判：先确认这些包名对应什么应用（可能是小众银行、券商、钱包或本地工具）；"
+                "若涉及资金类应用，建议补一次引导式动态抓包以确认是否实施手势操控。"
+                "★不宜据本条单独认定已发生远控——目前只观察到事件指向。"
+            ),
+            evidences=[
+                Evidence(
+                    source=_RUNTIME_SOURCE,
+                    location="runtime-remote-control",
+                    snippet=f"无障碍事件目标包：{pkg}",
+                )
+                for pkg in shown
+            ],
+            references=[],
+        )
+    )
+
+
+def _add_remote_control_leads(
+    report: Report, known_targets: list[tuple[str, str]]
+) -> int:
+    """把命中已知银行/支付包名的目标产成 REMOTE_CONTROL Lead，去重 append，返回新增数。"""
+    existing = {(lead.category.value, lead.value) for lead in report.leads}
+    added = 0
+    for package, subject in known_targets:
+        lead_value = f"无障碍远控目标:{subject}({package})"
+        key = (LeadCategory.REMOTE_CONTROL.value, lead_value)
+        if key in existing:
+            continue
+        existing.add(key)
+        report.leads.append(
+            Lead(
+                category=LeadCategory.REMOTE_CONTROL,
+                value=lead_value,
+                subject=subject,
+                where_to_request=(
+                    f"向 {subject} 调取被害人账户交易流水、异常转账记录与设备登录指纹"
+                    "（针对性盗刷物证，凭机构主体落地被害人资金流）。"
+                ),
+                evidence_to_obtain=list(_REMOTE_CONTROL_EVIDENCE),
+                confidence=Confidence.HIGH,
+                advice="建议调证",
+                source_refs=[
+                    Evidence(
+                        source=_RUNTIME_SOURCE,
+                        location="runtime-remote-control",
+                        snippet=f"无障碍服务劫持目标 app：{package}（{subject}）"[:200],
+                    )
+                ],
+                notes=f"{_REMOTE_CONTROL_COMPLIANCE_NOTE} {_REMOTE_CONTROL_TIMING_NOTE}",
+            )
+        )
+        added += 1
+    return added
+
+
+def _add_remote_control_finding(
+    report: Report,
+    known_targets: list[tuple[str, str]],
+    unknown_targets: list[str],
+    gesture_actions: list[str],
+    screencapture: int,
+) -> None:
+    """运行时实测无障碍远控行为（手势序列 / 屏幕录制）→ 产高 severity Finding（不 Lead 化）。
+
+    行为定性证据走 Finding（category=runtime）：描述下发 N 个自动手势 / 劫持包名 X / 屏幕录制
+    开启。未知包名也在此呈现（不滥产 Lead，但作为劫持面证据保留）。
+    """
+    target_labels = [f"{subject}({pkg})" for pkg, subject in known_targets]
+    target_labels.extend(unknown_targets)
+    targets_text = "、".join(target_labels) if target_labels else "（未捕获到具体目标包名）"
+    screen_text = "已开启屏幕录制（MediaProjection）" if screencapture else "未观测到屏幕录制"
+    evidences: list[Evidence] = []
+    # 取每类首个手势动作作为证据样本（限量，避免刷爆）。
+    sample_actions: list[str] = []
+    for action in gesture_actions:
+        if action not in sample_actions:
+            sample_actions.append(action)
+        if len(sample_actions) >= 5:
+            break
+    for action in sample_actions:
+        evidences.append(
+            Evidence(
+                source=_RUNTIME_SOURCE,
+                location="runtime-remote-control",
+                snippet=f"下发远控指令：{action}",
+            )
+        )
+    if screencapture:
+        evidences.append(
+            Evidence(
+                source=_RUNTIME_SOURCE,
+                location="runtime-remote-control",
+                snippet="MediaProjection.createVirtualDisplay：屏幕录制开启",
+            )
+        )
+    report.findings.append(
+        Finding(
+            id="RUNTIME-REMOTE-CONTROL",
+            title="运行时无障碍远控行为：自动手势 / 屏幕录制劫持银行支付",
+            severity=Severity.HIGH,
+            # 运行时观测合入，无静态分析器归属 → 显式标 runtime-merge（区别于"未归因"的空串）。
+            analyzer="runtime-merge",
+            kind=FINDING_KIND_OBSERVATION,  # 运行时**实测**行为，非规则推导 → observation
+            category="runtime",
+            description=(
+                f"运行时实测无障碍远控行为：下发 {len(gesture_actions)} 个自动手势/全局动作；"
+                f"劫持目标 app：{targets_text}；{screen_text}。"
+                "无障碍服务被用于劫持银行/支付 app 自动转账（远控盗刷），是涉诈木马的典型远控盗刷手法。"
+            ),
+            recommendation=(
+                f"研判：结合目标机构清单向对应银行/支付机构调取被害人流水；{_REMOTE_CONTROL_TIMING_NOTE}"
+            ),
+            evidences=evidences,
+            references=[],
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# Dead-Drop：二级真实 C2 从回包浮出（命令域名 → 回包 JSON 二段式）
+# ---------------------------------------------------------------------------
+#
+# 很多涉诈盘子是二段式：app 先打一个伪装的「命令域名」（甚至像合规备案域名），回包 JSON 里才带
+# 真实交易/后台域名（dead-drop resolver 模式，如 Sophos 记录的 rest.apizza.net→acedealex.xyz）。
+# 静态 endpoints 只看到伪装命令域名，真后端只在运行时回包出现。本函数对 capture 保留的 messages
+# （信封 + 新增的 config 明文响应）做**回包关系分析**：把响应体里出现的、与请求 host 不同的新域名/IP
+# 抽出，走现有 infra 分级兜底——infra 判「建议调证」才作为二级 C2 浮出（标 secondary、调高排序），
+# infra 判 CDN/SDK/公共服务 → 不升不标（避免误升 CDN/SDK 回调）。
+#
+# ★ 设计取向：**只调整优先级排序与 notes，不改 advice 终判**——advice 仍由现有 infra 分级决定，
+# 避免误杀/误升。命令域名保留并在 notes 标与二级 C2 的关系。二级 C2 若同时 is_runtime_seen
+# （运行时实连）即高可信。
+#
+# ★ 诚实标注（核验坑）：本功能依赖抓包窗口真触发了命令域名的回包（需人工操作 app 登录/拉配置）；
+# launch-only 抓不到登录后接口 → 二级 C2 需配合人工操作触发命令域名回包（写进 Lead.notes）。
+
+# Lead.notes 模板：二级下发关系（标明经回包关系分析浮出、非直连命令域名）。
+_DEAD_DROP_SECONDARY_NOTE = (
+    "二级下发，经回包关系分析浮出，非直连命令域名——由命令域名 {cmd} 的回包 JSON 携带，"
+    "疑似 dead-drop 二级真实 C2（伪装命令域名先合规探测、真后端只在运行时回包出现）。"
+)
+# Lead.notes 模板：命令域名标与二级 C2 的关系。
+_DEAD_DROP_COMMAND_NOTE = (
+    "命令域名（dead-drop 一级）：其回包 JSON 携带了疑似二级真实 C2（{secondaries}）；"
+    "本域名可能仅作伪装/合规探测，真交易后端走二级下发地址。"
+)
+# 诚实标注：launch-only 抓不全（横切硬要求，写进二级 C2 Lead.notes）。
+_DEAD_DROP_TIMING_NOTE = (
+    "时序提示：依赖抓包窗口真触发了命令域名回包，launch-only 抓不全——"
+    "二级 C2 需配合人工操作（登录/拉配置）触发命令域名回包后重抓。"
+)
+
+
+def resolve_dead_drop_c2(report: Report, runtime_report_path: str) -> dict[str, int]:
+    """对保留的 messages 做回包关系分析，把二级真实 C2 从回包浮出、标高优先级。
+
+    流程：
+      1. 读 runtime_report.json 的 messages（信封 + dead-drop config 明文响应）。
+      2. 每条 message：抽请求 host（命令域名）+ 响应体里出现的、与请求 host 不同的新域名。
+      3. 新域名走 ``infra.classify_domain`` 兜底——判「建议调证」才作为二级 C2 浮出
+         （并入端点 + 产/取 DOMAIN Lead，notes 标二级下发、调高排序）；判 CDN/SDK/公共服务
+         （无需调证）或私网/无效（待核）→ 不升、不标 C2（避免误升 CDN/SDK 回调）。
+      4. 命令域名保留并在 notes 标与二级 C2 的关系。
+      5. **只调优先级排序与 notes，不改 advice 终判**（advice 仍由 infra 分级决定）。
+      6. 二级 C2 若在 dead-drop 端点**并入之前**就已是运行时端点（真实连过）→ 高可信；仅由本次
+         回包内容推导浮出的派生端点（source=runtime-derived），绝不因自身把每个二级 C2 恒升 HIGH。
+
+    Returns:
+        ``{"secondary_c2", "command_domains"}``。内部 try/except，绝不抛。
+    """
+    stats = {"secondary_c2": 0, "command_domains": 0}
+    try:
+        messages = _load_runtime_messages(runtime_report_path)
+        if not messages:
+            return stats
+
+        # 回包关系：命令域名 → 其回包里浮出的二级真实 C2 域名集合（去重保序）。
+        relations: dict[str, list[str]] = {}
+        for msg in messages:
+            cmd_host = _host_of_url(str(msg.get("url", "")))
+            resp_body = str(msg.get("response_body", ""))
+            if not resp_body:
+                continue
+            for domain in _new_domains_in_response(resp_body, cmd_host):
+                # infra 兜底：只有「建议调证」才作二级 C2 浮出（CDN/SDK/公共服务/私网不升）。
+                advice, _reason = infra.classify_domain(domain)
+                if advice != infra.ADVICE_INVESTIGATE:
+                    continue
+                bucket = relations.setdefault(cmd_host, [])
+                if domain not in bucket:
+                    bucket.append(domain)
+
+        if not relations:
+            return stats
+
+        # 先把二级 C2 域名作为运行时端点并入（去重 + infra 分级产 DOMAIN Lead），再标 secondary。
+        secondary_domains = _unique_secondaries(relations)
+        # ★升 HIGH 的判据 = 二级 C2 域名在 dead-drop 端点并入**之前**就已是运行时端点（真实连过）。
+        #   必须在 merge_runtime_endpoints 之前取快照：dead-drop 自身端点 source 也 startswith("runtime")，
+        #   若并入后再算「已见运行时」会把每个二级 C2 都误判成 is_runtime_seen → 恒升 HIGH（时序 bug）。
+        runtime_seen_before = {
+            ep.value
+            for ep in report.endpoints
+            if any(
+                ev.scope is EvidenceScope.CASE_EVIDENCE
+                and str(getattr(ev, "source", "")).startswith("runtime")
+                for ev in ep.evidences
+            )
+        }
+        endpoints = [
+            Endpoint(
+                value=d,
+                kind="domain",
+                evidences=[
+                    Evidence(
+                        # 二级 C2 是从明文回包 body **推导**出的值（非真实连接的 peer）→ 钉 runtime-derived
+                        # （仍 runtime*、不在 observed-contact allowlist），堵手编 messages 伪造运行时真接触。
+                        source=_RUNTIME_DERIVED_SOURCE,
+                        location="runtime-deaddrop",
+                        snippet=f"回包关系分析浮出二级 C2：{d}",
+                    )
+                ],
+            )
+            for d in secondary_domains
+        ]
+        merge_runtime_endpoints(report, endpoints)
+
+        stats["secondary_c2"] = _mark_secondary_c2_leads(report, relations, runtime_seen_before)
+        stats["command_domains"] = _note_command_domains(report, relations)
+        # ★这两步会为二级 C2 / 命令域名**补建新 Lead**，走的是 infra.classify_domain，不经
+        #   _build_runtime_leads 那条隔离。重打包件在运行时连的也是被仿冒厂商的后端，漏在
+        #   这里就等于把正版厂商域名以「建议调证」送进闭环与调证函——隔离的整个立意所在。
+        _quarantine_new_leads(report)
+        _prioritize_secondary_c2(report, secondary_domains)
+
+        report.meta["runtime_dead_drop"] = True
+        report.meta["runtime_dead_drop_relations"] = {
+            cmd: list(secs) for cmd, secs in relations.items()
+        }
+        logger.info(
+            "[merge] Dead-Drop 二级 C2 浮出：secondary_c2=%d command_domains=%d",
+            stats["secondary_c2"],
+            stats["command_domains"],
+        )
+    except Exception:  # noqa: BLE001 - dead-drop 浮出失败不得抛给调用方（不破坏已产出报告）
+        logger.exception("[merge] Dead-Drop 二级 C2 浮出异常")
+    return stats
+
+
+def _new_domains_in_response(resp_body: str, cmd_host: str) -> list[str]:
+    """从明文响应体抽出与命令域名（请求 host）不同的新域名（http(s) URL host）。去重保序。"""
+    req = (cmd_host or "").strip().lower().rstrip(".")
+    found: list[str] = []
+    seen: set[str] = set()
+    for m in _PLAINTEXT_URL_RE.finditer(resp_body):
+        raw = m.group(0).rstrip(".,;)\"'")
+        host = _host_of_url(raw)
+        if not host:
+            continue
+        host = host.strip().lower().rstrip(".")
+        if not host or host == req or host in seen:
+            continue
+        seen.add(host)
+        found.append(host)
+    return found
+
+
+def _unique_secondaries(relations: dict[str, list[str]]) -> list[str]:
+    """汇总所有命令域名回包里浮出的二级 C2 域名（跨命令域名去重保序）。"""
+    out: list[str] = []
+    seen: set[str] = set()
+    for secs in relations.values():
+        for d in secs:
+            if d not in seen:
+                seen.add(d)
+                out.append(d)
+    return out
+
+
+def _mark_secondary_c2_leads(
+    report: Report, relations: dict[str, list[str]], runtime_seen: set[str]
+) -> int:
+    """给浮出的二级 C2 域名 Lead 标 secondary（notes + 高可信），**不改 advice**。返回标记数。
+
+    每个二级 C2 找到对应 DOMAIN Lead（merge_runtime_endpoints 已产/已有）：追加二级下发 notes
+    + launch-only 诚实标注；若该域名在 dead-drop 端点**并入前**就已是运行时端点（``runtime_seen``
+    快照，真实连过）→ 升 Confidence.HIGH。advice 一律不动（终判归 infra 分级，避免误杀/误升）。
+
+    Args:
+        runtime_seen: **并入前**的运行时端点 value 快照（由调用方在 merge_runtime_endpoints 之前
+            取好传入）。绝不在此就地重算——dead-drop 自身派生端点 source 也 startswith("runtime")，
+            并入后再算会把每个二级 C2 恒判 is_runtime_seen → 恒升 HIGH（时序 bug）。
+    """
+    # 二级 C2 → 携带它的命令域名集合（用于 notes 标关系）。
+    carriers: dict[str, list[str]] = {}
+    for cmd, secs in relations.items():
+        for d in secs:
+            carriers.setdefault(d, [])
+            if cmd and cmd not in carriers[d]:
+                carriers[d].append(cmd)
+
+    existing_keys = {(l.category.value, l.value) for l in report.leads}
+    marked = 0
+    for domain, cmds in carriers.items():
+        lead = next(
+            (l for l in report.leads
+             if l.category == LeadCategory.DOMAIN and l.value == domain),
+            None,
+        )
+        if lead is None:
+            # 二级 C2 已并端点但无 Lead（如它本就已是 runtime 端点，merge_runtime_endpoints
+            # 视其为"已覆盖"而不产 Lead）→ 补一条最小 DOMAIN Lead，advice 走 infra（不强升）。
+            advice, _reason = infra.classify_domain(domain)
+            lead = Lead(
+                category=LeadCategory.DOMAIN,
+                value=domain,
+                confidence=Confidence.MEDIUM,
+                advice=advice,
+                source_refs=[
+                    Evidence(
+                        # 内容推导值 → runtime-derived（不授 observed-contact，见 _RUNTIME_DERIVED_SOURCE）。
+                        source=_RUNTIME_DERIVED_SOURCE,
+                        location="runtime-deaddrop",
+                        snippet=f"回包关系分析浮出二级 C2：{domain}",
+                    )
+                ],
+            )
+            key = (LeadCategory.DOMAIN.value, domain)
+            if key not in existing_keys:
+                existing_keys.add(key)
+                report.leads.append(lead)
+        cmd_label = "、".join(cmds) if cmds else "（未知命令域名）"
+        note = _DEAD_DROP_SECONDARY_NOTE.format(cmd=cmd_label)
+        # 追加二级下发关系 + 诚实标注（保留原 notes，幂等：已标过不重复）。
+        if "二级下发" not in lead.notes:
+            lead.notes = f"{lead.notes}；{note} {_DEAD_DROP_TIMING_NOTE}".lstrip("；")
+        # 二级 C2 在 dead-drop 端点并入前就已被运行时实连（runtime_seen 快照）→ 高可信（不改 advice）。
+        if domain in runtime_seen:
+            lead.confidence = Confidence.HIGH
+        marked += 1
+    return marked
+
+
+def _note_command_domains(report: Report, relations: dict[str, list[str]]) -> int:
+    """命令域名（发起请求那个）保留并在 notes 标与二级 C2 的关系。返回标注的命令域名数。
+
+    命令域名 Lead 若不存在（其端点可能未被并入）→ 产一条最小 DOMAIN Lead（advice 由 infra 判）。
+    **不改 advice 终判**：命令域名 advice 仍由 infra 分级决定。
+    """
+    existing_keys = {(l.category.value, l.value) for l in report.leads}
+    noted = 0
+    for cmd, secs in relations.items():
+        if not cmd or not secs:
+            continue
+        lead = next(
+            (l for l in report.leads
+             if l.category == LeadCategory.DOMAIN and l.value == cmd),
+            None,
+        )
+        if lead is None:
+            # 命令域名没有现成 Lead：补一条最小 DOMAIN Lead（advice 走 infra，不强升）。
+            advice, _reason = infra.classify_domain(cmd)
+            lead = Lead(
+                category=LeadCategory.DOMAIN,
+                value=cmd,
+                confidence=Confidence.MEDIUM,
+                advice=advice,
+                source_refs=[
+                    Evidence(
+                        source=_RUNTIME_SOURCE,
+                        location="runtime-deaddrop",
+                        snippet=f"命令域名（dead-drop 一级）：{cmd}",
+                    )
+                ],
+            )
+            key = (LeadCategory.DOMAIN.value, cmd)
+            if key not in existing_keys:
+                existing_keys.add(key)
+                report.leads.append(lead)
+        note = _DEAD_DROP_COMMAND_NOTE.format(secondaries="、".join(secs))
+        if "命令域名（dead-drop 一级）" not in lead.notes:
+            lead.notes = f"{lead.notes}；{note}".lstrip("；")
+        noted += 1
+    return noted
+
+
+def _prioritize_secondary_c2(report: Report, secondary_domains: list[str]) -> None:
+    """调高二级 C2 排序：把浮出的 secondary C2 Lead 稳定前移到线索清单最前（优先级）。
+
+    稳定排序：secondary C2 之间保持原相对顺序，其余 Lead 亦保持原相对顺序——只把 secondary
+    整体提到前面，不打乱其它线索。dead-drop 只调排序、不改 advice/类别。
+    """
+    sec_set = set(secondary_domains)
+    front = [
+        l for l in report.leads
+        if l.category == LeadCategory.DOMAIN and l.value in sec_set
+    ]
+    rest = [l for l in report.leads if l not in front]
+    report.leads[:] = front + rest
+
+
+def _merge_recipe_meta(
+    static_meta: Any, live_meta: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """把运行时实测配方浅合并到静态配方上（实测非空字段覆盖静态）；都没有 → None。
+
+    语义：实测拿到的字段（权威 key、恒定 iv）覆盖静态推断；实测没把握的字段（如变化的
+    iv 未设 iv_derive）保留静态值——避免无依据地改写静态推断、或把单次 iv 误当 fixed。
+    """
+    base: dict[str, Any] = dict(static_meta) if isinstance(static_meta, dict) else {}
+    if isinstance(live_meta, dict):
+        for key, val in live_meta.items():
+            if val not in (None, ""):
+                base[key] = val
+    return base or None
+
+
+def _recipe_brief(meta: dict[str, Any]) -> str:
+    """配方一行摘要（日志用，不泄全 key）。"""
+    key = str(meta.get("key", ""))
+    key_tail = key[:4] + "…" + key[-4:] if len(key) >= 8 else key
+    return (
+        f"{meta.get('algo', '?')}-{meta.get('mode', '?')}/{meta.get('padding', '?')} "
+        f"key({meta.get('key_encoding', '?')})={key_tail} iv={meta.get('iv_derive', '继承静态')}"
+    )
+
+
+def _parse_envelope(body: Any) -> dict[str, Any] | None:
+    """把报文体（str 或 dict）解析为信封 dict，须含 data 与 timestamp 两键；否则 None。"""
+    import json
+
+    obj: Any = body
+    if isinstance(body, str):
+        if not body.strip():
+            return None
+        try:
+            obj = json.loads(body)
+        except ValueError:
+            return None
+    if not isinstance(obj, dict):
+        return None
+    if "data" not in obj or "timestamp" not in obj:
+        return None
+    data = obj.get("data")
+    if not isinstance(data, str) or not data:
+        return None
+    return {"data": data, "timestamp": obj.get("timestamp")}
+
+
+def _endpoints_from_plaintext(plaintext: str, source_url: str) -> list[Endpoint]:
+    """从解密后的明文（合法 JSON 优先）抽端点：http(s) URL / /api 风格路径 / webName 关联域名。
+
+    产 Endpoint(source="runtime-decrypted")。明文非 JSON 时退化为在文本上跑正则。
+    """
+    import json
+
+    location = source_url or "runtime-decrypted"
+    found: dict[str, Endpoint] = {}
+
+    def _add(value: str, kind: str, snippet: str) -> None:
+        value = value.strip()
+        if not value or value in found:
+            return
+        found[value] = Endpoint(
+            value=value,
+            kind=kind,
+            evidences=[
+                Evidence(source=_RUNTIME_DECRYPTED_SOURCE, location=location, snippet=snippet[:200])
+            ],
+            is_cleartext=value.lower().startswith("http://"),
+        )
+
+    # 优先把明文当 JSON 递归收集字符串值（精确，能抓到 webName 等）。
+    text_values: list[str] = []
+    web_name = ""
+    try:
+        obj = json.loads(plaintext)
+        for key, val in _walk_json_strings(obj):
+            text_values.append(val)
+            if key.lower() == "webname" and val:
+                web_name = val
+    except ValueError:
+        text_values = [plaintext]
+
+    haystack = "\n".join(text_values) if text_values else plaintext
+
+    for m in _PLAINTEXT_URL_RE.finditer(haystack):
+        raw = m.group(0).rstrip(".,;)\"'")
+        _add(raw, "url", raw)
+        host = _host_of_url(raw)
+        if host:
+            _add(host, "domain", raw)
+    for m in _PLAINTEXT_PATH_RE.finditer(haystack):
+        _add(m.group(1), "path", m.group(1))
+
+    if web_name:
+        # webName（冒充对象）本身不是端点，但作为线索片段附在第一个端点证据里更有价值；
+        # 这里仅记日志，端点抽取已覆盖明文里的真实地址。
+        logger.info("[merge] 解密明文含 webName（冒充对象）：%s", web_name)
+
+    return list(found.values())
+
+
+def _walk_json_strings(obj: Any, key: str = "") -> list[tuple[str, str]]:
+    """递归收集 JSON 里的 (key, str_value) 对（用于从明文契约抽地址/字段）。"""
+    out: list[tuple[str, str]] = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            out.extend(_walk_json_strings(v, str(k)))
+    elif isinstance(obj, list):
+        for item in obj:
+            out.extend(_walk_json_strings(item, key))
+    elif isinstance(obj, str):
+        out.append((key, obj))
+    return out
+
+
+def _host_of_url(url: str) -> str:
+    """从 URL 取 host（不含端口/路径）。解析失败 → 空串。"""
+    from urllib.parse import urlsplit
+
+    try:
+        netloc = urlsplit(url).netloc
+    except ValueError:
+        return ""
+    host = netloc.split("@")[-1].split(":")[0]
+    return host if "." in host else ""
+
+
+class _RuntimeMergeStep(NamedTuple):
+    """一条运行时并回步骤：进度文案 + 消费者函数 + 子统计→顶层 stats 的键映射。"""
+
+    progress: str
+    func: Callable[[Report, str], dict[str, int]]
+    # (顶层 stats 键, 子统计键)——子统计缺键按 0 补（与原手写 sub.get(k, 0) 一致）。
+    stat_map: tuple[tuple[str, str], ...]
+
+
+# merge_and_rerender 的运行时并回步骤表（表驱动，替代十几行手写 stats[x]=sub.get(x,0)）。
+# 顺序即执行顺序，务必保持不变：端点/解密在前，Dead-Drop 二级 C2 复用已并入端点须在其后跑。
+_RUNTIME_MERGE_STEPS: tuple[_RuntimeMergeStep, ...] = (
+    # C5b：用静态/实测配方解密运行时信封报文，把明文端点并入（在端点并入之后、重渲之前）。
+    _RuntimeMergeStep(
+        "解密运行时信封报文 ...",
+        decrypt_runtime_messages,
+        (
+            ("decrypted", "decrypted"),
+            ("decrypt_failed", "failed"),
+            ("plaintext_endpoints", "plaintext_endpoints"),
+            ("live_recipe", "live_recipe"),
+        ),
+    ),
+    # P1：运行时追踪（JS-bridge 暴露面/调用、敏感 API 实调）并回 + 确认静态发现。
+    _RuntimeMergeStep(
+        "并回运行时 JS-bridge / 敏感 API 追踪 ...",
+        merge_runtime_traces,
+        (("jsbridge_leads", "jsbridge_leads"), ("api_confirmed", "api_confirmed")),
+    ),
+    # P2：运行时登录态/明文凭据（OkHttp token/手机号、SharedPrefs 落地凭据）并回（含合规脱敏）。
+    _RuntimeMergeStep(
+        "并回运行时登录态/明文凭据 ...",
+        merge_runtime_credentials,
+        (
+            ("credential_leads", "credential_leads"),
+            ("credential_endpoints", "credential_endpoints"),
+        ),
+    ),
+    # P2：运行时落地库（SQLCipher/SQLite）导出 → VICTIM_DATA 受害人物证（含合规脱敏 + SHA256 留存）。
+    _RuntimeMergeStep(
+        "并回运行时落地库受害人物证 ...",
+        merge_runtime_databases,
+        (("victim_leads", "victim_leads"), ("victim_databases", "victim_databases")),
+    ),
+    # 第二波：运行时剪贴板链上地址 → PAYMENT 类 Lead（资金流起点·运行时确认，is_runtime_seen）。
+    _RuntimeMergeStep(
+        "并回运行时剪贴板链上地址 ...",
+        merge_runtime_clipboard,
+        (("clipboard_leads", "clipboard_leads"),),
+    ),
+    # 第二波（最后）：无障碍远控目标银行清单 → REMOTE_CONTROL Lead / 回传 host 走 infra /
+    # 手势序列产 Finding（不 Lead 化）。★ launch-only 抓不到，多数需引导式人工动态。
+    _RuntimeMergeStep(
+        "并回无障碍远控目标银行清单 ...",
+        merge_runtime_remote_control,
+        (("rc_leads", "rc_leads"), ("rc_gesture_count", "gesture_count")),
+    ),
+    # 第二波：Dead-Drop 二级真实 C2 从回包浮出（命令域名 → 回包 JSON）。在端点并回之后跑——
+    # 复用已并入的端点/Lead，对 config/信封回包做关系分析，把二级 C2 标 secondary、调高优先级。
+    _RuntimeMergeStep(
+        "浮出 Dead-Drop 二级真实 C2 ...",
+        resolve_dead_drop_c2,
+        (("secondary_c2", "secondary_c2"),),
+    ),
+    # 通信会话时序重建：把运行时报文按 flow 时间戳串成会话物证（App↔服务器交互时间线）。
+    _RuntimeMergeStep(
+        "重建运行时通信会话时序 ...",
+        merge_runtime_sessions,
+        (("comm_sessions", "sessions"),),
+    ),
+)
+
+
+def merge_and_rerender(
+    report: Report,
+    endpoints: list[Endpoint],
+    out_dir: str,
+    base: str = "report",
+    *,
+    formats: list[str] | None = None,
+    on_progress: Callable[[str], None] | None = None,
+    runtime_report_path: str | None = None,
+) -> dict[str, Any]:
+    """并入运行时端点后按 ``formats`` 重渲报告，覆盖 ``out_dir`` 下的首次产出。
+
+    供 cli ``analyze --dynamic`` 在 capture 后调用：先 :func:`merge_runtime_endpoints`
+    就地补全 report，再（C5b）用静态配方对 runtime_report.json 的信封报文
+    :func:`decrypt_runtime_messages` 解密、把明文端点并入，最后惰性 import
+    ``apkscan.report.{json,html}`` 覆盖写 ``out_dir/<base>.{json,html}``，使真·C2 与
+    解密还原的接口契约都进入主线索清单与报告。
+
+    Args:
+        report: 主报告，就地被修改。
+        endpoints: 运行时端点。
+        out_dir: 报告输出目录（与 analyze 首次写出一致）。
+        base: 报告文件名 base（APK 名去后缀）。**必须与静态首次写出同一 base**，否则静态
+            写 ``<apk>.*`` 而重渲写 ``report.*`` 产两套报告。默认 ``"report"`` 仅兜底，
+            调用方应显式传同一 base。
+        formats: 要重渲的格式，默认 ``["html", "json"]``。
+        on_progress: 可选进度回调。
+        runtime_report_path: runtime_report.json 路径（含 messages 信封）；默认
+            ``out_dir/runtime_report.json``。用于 C5b 解密。
+
+    Returns:
+        在 :func:`merge_runtime_endpoints` 统计基础上加 ``"report_paths"``（成功重渲的
+        报告路径列表；单格式失败不计入、不致命）与 ``"decrypt_*"`` 解密统计。绝不抛。
+    """
+    out_path = Path(out_dir)
+
+    _emit(on_progress, "并入运行时端点 ...")
+    stats: dict[str, Any] = dict(merge_runtime_endpoints(report, endpoints))
+
+    rr_path = runtime_report_path or str(out_path / "runtime_report.json")
+    # per-call 缓存作用域：下面各消费者对同一 runtime_report.json 只读+解析一次（去 11× IO）。
+    with _runtime_payload_cache():
+        quality = merge_capture_quality(report, rr_path)
+        if quality:
+            stats["capture_quality_status"] = quality.get("dynamic_status", "failed")
+        caps = merge_capture_capabilities(report, rr_path)  # A1-3：能力计划快照 → report.meta
+        if caps:
+            stats["capture_capabilities_mode"] = caps.get("mode")
+        for step in _RUNTIME_MERGE_STEPS:
+            _emit(on_progress, step.progress)
+            sub = step.func(report, rr_path)
+            for dest_key, src_key in step.stat_map:
+                stats[dest_key] = sub.get(src_key, 0)
+
+    # 可见性快照是**派生视图**，不是证据：上面这些 merge 步骤刚写入 runtime_merged /
+    # capture_quality / capture_signals，而它们正是 visibility 判定运行时那一维的输入。
+    # 不重算，最终报告里就会 meta.runtime_merged=True 却 visibility.runtime='unavailable'
+    # —— 同一个文件里自相矛盾，且 next_actions 还在建议"去抓包"。
+    # assess 自带兜底、绝不抛，不破坏本函数「异常不外抛」的契约。
+    try:
+        from apkscan.core import visibility as _visibility
+
+        report.meta["visibility"] = _visibility.assess({"meta": report.meta})
+        stats["visibility_refreshed"] = True
+    except Exception:  # noqa: BLE001 - 重算失败不得影响已完成的合并
+        logger.exception("[merge] 可见性重求值失败，保留分析期快照")
+
+    fmts = list(formats) if formats else list(_DEFAULT_FORMATS)
+    try:
+        out_path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logger.exception("[merge] 创建输出目录失败：%s", out_dir)
+
+    report_paths: list[str] = []
+    if "json" in fmts:
+        json_path = _rerender_json(report, out_path, base, on_progress)
+        if json_path:
+            report_paths.append(json_path)
+    if "html" in fmts:
+        html_path = _rerender_html(report, out_path, base, on_progress)
+        if html_path:
+            report_paths.append(html_path)
+
+    stats["report_paths"] = report_paths
+    return stats
+
+
+def _rerender_json(
+    report: Report, out_path: Any, base: str, on_progress: Callable[[str], None] | None
+) -> str:
+    """惰性 import report.json 并覆盖写 ``<base>.json``；失败记 logging 返回空串（不致命）。"""
+    target = out_path / f"{base}.json"
+    _emit(on_progress, f"重渲 {base}.json ...")
+    try:
+        from apkscan.report import json as report_json
+
+        report_json.dump(report, str(target))
+    except Exception:  # noqa: BLE001 - 单格式重渲失败不致命，不计入 report_paths
+        logger.exception("[merge] 重渲 %s 失败：%s", target.name, target)
+        return ""
+    return str(target)
+
+
+def _rerender_html(
+    report: Report, out_path: Any, base: str, on_progress: Callable[[str], None] | None
+) -> str:
+    """惰性 import report.html 并覆盖写 ``<base>.html``；失败记 logging 返回空串（不致命）。"""
+    target = out_path / f"{base}.html"
+    _emit(on_progress, f"重渲 {base}.html ...")
+    try:
+        from apkscan.report import html as report_html
+
+        report_html.render(report, str(target))
+    except Exception:  # noqa: BLE001 - 单格式重渲失败不致命，不计入 report_paths
+        logger.exception("[merge] 重渲 %s 失败：%s", target.name, target)
+        return ""
+    return str(target)
+
+
+__all__ = [
+    "load_runtime_endpoints",
+    "merge_capture_capabilities",
+    "merge_capture_quality",
+    "merge_runtime_endpoints",
+    "decrypt_runtime_messages",
+    "merge_runtime_traces",
+    "merge_runtime_credentials",
+    "merge_runtime_databases",
+    "merge_runtime_clipboard",
+    "merge_runtime_remote_control",
+    "resolve_dead_drop_c2",
+    "merge_and_rerender",
+]

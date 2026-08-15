@@ -1,0 +1,58 @@
+# 远程配置对象发现规则（被动、纯启发式）——供 apkscan/config/discover.py 加载。
+#
+# 判定：URL 的 host 命中 store_families 任一家族 → 入选（reason: object-storage-host）；
+#       非对象存储 host → 须同时命中 config_object_exts 后缀 + config_path_hints 路径（双证降噪）才入选。
+# host 用 fnmatch 通配匹配（小写）；后缀/路径子串大小写不敏感。
+
+# 对象存储 / CDN host 家族（涉诈 App 最常把加密配置托管于此，运行时拉取后解密出动态域名池）
+store_families:
+  aliyun-oss:
+    - "*.oss-*.aliyuncs.com"
+    - "oss-*.aliyuncs.com"
+    - "*.oss-accelerate.aliyuncs.com"
+    - "*.oss-accelerate-overseas.aliyuncs.com"
+  tencent-cos:
+    - "*.cos.*.myqcloud.com"
+    - "cos.*.myqcloud.com"
+    - "*.file.myqcloud.com"
+    - "*.cos.accelerate.myqcloud.com"
+  huawei-obs:
+    - "*.obs.*.myhuaweicloud.com"
+    - "obs.*.myhuaweicloud.com"
+  aws-s3:
+    - "*.s3.amazonaws.com"
+    - "*.s3.*.amazonaws.com"
+    - "s3.amazonaws.com"
+    - "s3.*.amazonaws.com"
+    - "*.s3.*.amazonaws.com.cn"
+    - "s3.*.amazonaws.com.cn"
+  qiniu:
+    - "*.clouddn.com"
+    - "*.qiniucdn.com"
+    - "*.qbox.me"
+    - "*.qnssl.com"
+
+# 配置类对象后缀（object_path 结尾命中）
+config_object_exts:
+  - ".dat"
+  - ".json"
+  - ".bin"
+  - ".conf"
+  - ".cfg"
+  - ".config"
+  - ".data"
+  - ".db"
+  - ".enc"
+  - ".txt"
+  - ".key"
+  - ".properties"
+
+# 配置类路径线索（object_path 含子串）
+config_path_hints:
+  - "/config"
+  - "/conf/"
+  - "/appconfig"
+  - "/app_config"
+  - "/settings"
+  - "/init"
+  - "/domain"

@@ -1,0 +1,234 @@
+# 加固/加壳识别规则 — 国内主流加固厂商特征库（覆盖中文涉诈场景）。
+#
+# 由 apkscan.analyzers.packing 通过 registry.load_rules("packers") 读取。
+# 顶层为 dict，含两个键：
+#   packers : list[规则]，每条加固厂商一条
+#   meta    : 全局调证文案的兜底默认（命中后写入 Lead 的 evidence_to_obtain 等）
+#
+# 每条 packer 规则字段：
+#   name          : 加固产品名（展示用）
+#   vendor        : 加固厂商主体（=调证对象，写入 Lead.subject / where_to_request）
+#   so_names      : .so 库名特征（匹配 ctx.native_libs() 与 list_files() 的 basename，大小写不敏感）
+#   files         : 特征文件（assets/资源等路径子串，匹配 ctx.list_files()，大小写不敏感）
+#   dex_prefixes  : DEX 类名/字符串前缀或子串特征（匹配 ctx.dex_strings()，大小写敏感保留原样比较时用子串）
+#   note          : 该厂商补充说明（写入 Lead.notes）
+#
+# 说明：加固（加壳）会把真实 DEX 加密/隐藏，静态分析拿不到完整端点/SDK/支付线索，
+# 因此命中即产 HIGH Finding 提示"静态端点不完整，建议脱壳或真机动态补全"，
+# 同时加固厂商本身是高价值调证目标（持有未加固原始包、实名注册、操作日志）。
+#
+# ★ 证据分级（分析器实现，见 packing.py）：so_names / files 匹配 = 强证据（加固运行时实证）；
+#   dex_prefixes 匹配 = 弱证据（可能只是某检测/风控库内嵌的"加固名词表"字符串）。
+#   判已加固（产 HIGH PACK-DETECTED + PACKER Lead + is_hardened=True）**必须该厂商至少 1 条强证据**；
+#   仅 dex 名词命中 → 不判加固，降级为 LOW PACK-NAME-STRINGS-ONLY Finding（透明说明，不产脱壳建议）。
+
+# 命中后 Lead 默认可调取证据（packer 条目可用 evidence_to_obtain 覆盖）。
+meta:
+  evidence_to_obtain:
+    - "未加固原始安装包"
+    - "开发者实名注册信息"
+    - "加固/打包账号与操作日志"
+  where_to_request_suffix: "（加固厂商）"
+
+packers:
+  # ---- 梆梆安全（Bangcle）-------------------------------------------------
+  - name: "梆梆加固 (Bangcle)"
+    vendor: "梆梆安全（北京梆梆安全科技有限公司）"
+    so_names:
+      - "libDexHelper.so"
+      - "libDexHelper-x86.so"
+      - "libsecexe.so"
+      - "libsecmain.so"
+      - "libSecShell.so"
+      - "libSecShell-x86.so"
+    files:
+      - "assets/secData0.jar"
+      - "assets/secData"
+      - "secData0.jar"
+      - "assets/bangcle_classes.jar"
+      - "assets/bangcleplugin"
+    dex_prefixes:
+      - "com.secneo."
+      - "com.bangcle."
+      - "cn.com.chinatelecom.account"
+    note: "梆梆为国内最早商用加固厂商之一，libDexHelper/libsecexe + secData 为其典型特征。"
+
+  # ---- 爱加密（Ijiami）---------------------------------------------------
+  - name: "爱加密 (Ijiami)"
+    vendor: "爱加密（北京智游网安科技有限公司）"
+    so_names:
+      - "libexec.so"
+      - "libexecmain.so"
+      - "libijm.so"
+      - "libijiami.so"
+    files:
+      - "assets/ijiami.dat"
+      - "assets/ijiami.ajm"
+      - "assets/af.bin"
+      - "assets/signs.bin"
+      - "ijiami.dat"
+    dex_prefixes:
+      - "com.shell."
+      - "com.ijiami."
+      - "S.MID"
+    note: "爱加密典型特征为 libexec/libexecmain.so 配合 assets/ijiami.dat。"
+
+  # ---- 360 加固保（Qihoo 360 Jiagu）-------------------------------------
+  - name: "360加固保 (360 Jiagu)"
+    vendor: "奇虎360（北京奇虎科技有限公司 / 360加固保）"
+    so_names:
+      - "libjiagu.so"
+      - "libjiagu_art.so"
+      - "libjiagu_x86.so"
+      - "libjiagu_a64.so"
+      - "libprotectClass.so"
+    files:
+      - "assets/libjiagu.so"
+      - "assets/libjiagu_art.so"
+      - "assets/libjiagu_x86.so"
+      - "assets/qihoo"
+    dex_prefixes:
+      - "com.qihoo.util."
+      - "com.stub.StubApp"
+      - "com.qihoo360."
+    note: "360加固以 libjiagu*.so + com.stub.StubApp 入口替换为典型特征，国内使用极广。"
+
+  # ---- 腾讯乐固 / 御安全（Tencent Legu）---------------------------------
+  - name: "腾讯乐固 (Tencent Legu)"
+    vendor: "腾讯（深圳市腾讯计算机系统有限公司 / 腾讯云乐固·御安全）"
+    so_names:
+      - "libshell.so"
+      - "libshella.so"
+      - "libshellx.so"
+      - "libtxshell.so"
+      - "libtup.so"
+      - "libnsdkmctf.so"
+      - "libBugly.so"
+    files:
+      - "assets/libshell-super.2019.so"
+      - "assets/libshella"
+      - "assets/0OO00l111l1l"
+      - "assets/o0oooOO0ooOo.dat"
+      - "tencent_stub"
+    dex_prefixes:
+      - "com.tencent.StubShell"
+      - "com.tencent.bugly"
+      - "com.tencent.tup."
+    note: "腾讯乐固以 libshell/libtxshell/libtup.so 与 com.tencent.StubShell 为典型特征。"
+
+  # ---- 娜迦 / 梆梆免费版底层（Nagain / ChaosVMP）------------------------
+  - name: "娜迦加固 (Nagain / ChaosVMP)"
+    vendor: "娜迦信息（北京娜迦信息科技发展有限公司）"
+    so_names:
+      - "libchaosvmp.so"
+      - "libddog.so"
+      - "libfdog.so"
+      - "libgdog.so"
+      - "libnqshield.so"
+    files:
+      - "assets/chaosvmp"
+      - "assets/libddog"
+    dex_prefixes:
+      - "com.nagapt."
+      - "com.chaosvmp."
+    note: "娜迦（爱加密底层 VMP 提供方之一）以 libchaosvmp/libddog/libfdog/libgdog.so 为典型特征。"
+
+  # ---- 百度加固（Baidu Protect）----------------------------------------
+  - name: "百度加固 (Baidu Protect)"
+    vendor: "百度（北京百度网讯科技有限公司 / 百度加固）"
+    so_names:
+      - "libbaiduprotect.so"
+      - "libbaiduprotect_x86.so"
+      - "libnllvm"
+    files:
+      - "assets/baiduprotect.jar"
+      - "assets/baiduprotect1.jar"
+      - "baiduprotect"
+    dex_prefixes:
+      - "com.baidu.protect."
+    note: "百度加固以 libbaiduprotect.so + assets/baiduprotect*.jar 为典型特征。"
+
+  # ---- 网易易盾（NetEase Yidun）----------------------------------------
+  - name: "网易易盾 (NetEase Yidun)"
+    vendor: "网易（杭州网易智企科技有限公司 / 网易易盾）"
+    so_names:
+      - "libnesec.so"
+      - "libnesecsdk.so"
+      - "libAppGuard.so"
+      - "libnedmp.so"
+    files:
+      - "assets/nesec"
+      - "assets/yidun"
+    dex_prefixes:
+      - "com.netease.nis."
+      - "com.netease.htprotect"
+    note: "网易易盾以 libnesec.so 与 com.netease.nis/htprotect 类为典型特征。"
+
+  # ---- 阿里聚安全 / 阿里云移动安全（Alibaba Jaq / Mobile Security）------
+  - name: "阿里聚安全 (Alibaba JAQ / 阿里云移动安全)"
+    vendor: "阿里巴巴（阿里云计算有限公司 / 阿里聚安全·移动安全）"
+    so_names:
+      - "libsgmain.so"
+      - "libsgsecuritybody.so"
+      - "libmobisec.so"
+      - "libpreverify1.so"
+      - "libfakejni.so"
+      - "libsgmainso"
+    files:
+      - "assets/libsgmain"
+      - "assets/yw_1222"
+      - "assets/0OO00l111l1l"
+    dex_prefixes:
+      - "com.alibaba.wireless.security"
+      - "com.taobao.wireless.security"
+    note: "阿里聚安全（JAQ）以 libsgmain.so/libmobisec.so 与 alibaba/taobao.wireless.security 类为典型特征。"
+
+  # ---- 几维安全（Kiwi Security）----------------------------------------
+  - name: "几维安全 (Kiwi Security)"
+    vendor: "几维安全（成都盈海益讯科技有限公司 / 几维安全 KiwiSec）"
+    so_names:
+      - "libkwscmm.so"
+      - "libkwscr.so"
+      - "libkwslinker.so"
+      - "libkdp.so"
+    files:
+      - "assets/kdpdata.dat"
+      - "assets/kdpcfg"
+    dex_prefixes:
+      - "com.kiwisec."
+      - "com.payegis."
+    note: "几维安全以 libkwscmm/libkwscr/libkwslinker.so 为典型特征。"
+
+  # ---- dpt-shell / dex-shell（开源 DEX 抽取壳，非商业厂商）---------------
+  - name: "dpt-shell / dex-shell 抽取壳 (开源)"
+    vendor: "开源自研壳（luoyesiqiu/dpt-shell 及其 fork，无第三方加固厂商——脱壳后静态补全 / 向开发者本人调证）"
+    so_names:
+      - "libdpt.so"
+    files:
+      - "assets/i11111i111.zip"
+      - "assets/OoooooOooo"
+      - "assets/d_shell_data_001"
+      - "assets/vwwwwwvwww"
+    dex_prefixes:
+      - "com.luoyesiqiu"
+      - "com.luoyesiqiu.shell"
+    note: >-
+      开源 DEX 抽取壳（抽取方法体 NOP 填充、运行时还原）；★ 内置主动反 frida（内存扫 frida-agent
+      命中即崩溃）+ ptrace 反调试 + SO 段 RC4 加密。命中 = 需脱壳（真实 DEX 不完整）且 frida
+      抓包会被主动击败——配 sample_runtime_compat 反检测或退旁路 pcap。★ so 名(libdpt.so)与包名
+      (com.luoyesiqiu)均随构建随机化、新版/fork 会击穿；上面四个 assets 是 Const.java 硬编码常量、
+      不随构建变，为抗随机化的强锚点。注：dobby/bytehook 静态链入壳 so、APK 内无独立 libdobby/libbytehook.so。
+
+  # ---- nmmp / dex2c（开源 DEX 方法级虚拟机保护，非商业厂商）---------------
+  - name: "nmmp / dex2c DEX-VMP (开源)"
+    vendor: "开源自研壳（maoabc/nmmp，DEX 方法转 native 自定义 VM——脱壳/dump 得空壳、向开发者本人调证）"
+    so_names:
+      - "libnmmp.so"
+      - "libnmmvm.so"
+    dex_prefixes:
+      - "com/nmmedit/protect"
+    note: >-
+      开源 DEX 方法级虚拟化保护（dex2c：选中方法体转成 native 自定义字节码由 VM 解释执行）；★ 受保护方法
+      静态反编译 / 脱壳 / dump 均得空壳，须对具体业务逻辑做运行时 hook（vmInterpret 或目标 native 方法）或人工还原。
+      正常 App 罕见方法级虚拟化，命中 = 主动把核心逻辑(收款路由/C2/转账/远控编排)虚拟化隐藏、对抗静态取证的强反分析信号。
+      注：com/nmmedit/protect 为 dex 字符串池中类型描述符形式；loadLibrary("nmmp") 必伴随上面 so 强证据共现。

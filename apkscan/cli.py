@@ -1,0 +1,2310 @@
+"""apkscan CLI（typer）。
+
+analyze: load_apk → pipeline.run → report.html.render + report.json.dump，写到 out 目录，
+并打印线索数量摘要。
+
+report.html / report.json 由其它 agent 实现；本文件惰性导入它们，
+缺失时记 warning 并跳过对应格式，不影响其余流程。
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Mapping
+from pathlib import Path
+
+import click
+import typer
+
+from apkscan.core import device
+from apkscan.core.apk import ApkParseError
+from apkscan.core.apk import load_apk
+from apkscan.core.models import (
+    ANALYSIS_MODE_AUTHORIZED_ACTIVE,
+    ANALYSIS_MODE_PASSIVE,
+    ANALYSIS_MODES,
+    ANALYSIS_STATUS_COMPLETE,
+    AnalysisConfig,
+    LeadCategory,
+    Report,
+)
+from apkscan.core.report_naming import report_base
+
+# 样本库 / 案件子命令已物理拆到 apkscan/commands/（纯搬移）；add_typer 留此处以引用主 app。
+from apkscan.commands.corpus import corpus_app
+from apkscan.commands.case import case_app, closure_exit_code
+from apkscan.commands.enrich import enrich_app
+from apkscan.commands.lead import lead_app
+from apkscan.commands.web import analyze_web
+
+META_WRITE_OWNER = "cli"
+META_WRITE_CATEGORIES = {
+    'config_probe_run': 'coverage',
+    'config_probe_runs': 'coverage',
+    'device_detected': 'coverage',
+    'evidence_manifest': 'record',
+    # 以下三个都与 pipeline 里的同名键同类别——同一个键两处归类不一致会被契约测试挡下
+    # （本就该挡：消费方按类别决定怎么读它）。
+    'mode': 'signal',
+    'online': 'signal',
+    'remote_config_artifacts': 'signal',
+    'repack_quarantine': 'signal',
+    'sample_sha256': 'record',
+}
+META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
+
+logger = logging.getLogger(__name__)
+
+app = typer.Typer(
+    add_completion=False,
+    help="涉诈 APK 调证分析 CLI：静态分析 + 端点/服务归属提取，产出调证线索清单。",
+)
+app.add_typer(corpus_app, name="corpus")
+app.add_typer(case_app, name="case")
+app.add_typer(enrich_app, name="enrich")
+app.add_typer(lead_app, name="lead")
+
+# analyze-web 是**单个命令**（不是子命令组），故用 app.command() 注册而非 add_typer。
+# 函数体在 commands/web.py（逻辑不堆进 cli.py），它反过来惰性 import 本模块的 _write_reports
+# 等共用出口——注册放这里是为了让那份反向依赖始终是函数体内的、不成环。
+app.command(name="analyze-web")(analyze_web)
+
+# 合法输出格式（--fmt）。全非法时回退而非静默产出零报告。
+_VALID_FORMATS = ("html", "json", "pdf")
+
+
+def _warn_report_revision(payload: object) -> None:
+    """把报告修订差异写到 stderr；不改报告、不改变调用方退出码。"""
+    from apkscan.core.report_compat import report_revision_warnings
+
+    report = payload if isinstance(payload, Mapping) else {}
+    meta = report.get("meta")
+    safe_meta = meta if isinstance(meta, Mapping) else {}
+    for warning in report_revision_warnings(safe_meta):
+        typer.echo(warning, err=True)
+
+
+def _warn_report_path_revision(path: str) -> None:
+    """尽力读取 ``--into`` 报告并告警；读失败留给既有合并边界处理。"""
+    import json as _json
+
+    try:
+        payload = _json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        return
+    _warn_report_revision(payload)
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        from apkscan import __version__
+
+        typer.echo(f"fxapk {__version__}")
+        raise typer.Exit()
+
+
+def _version_verbose_callback(value: bool) -> None:
+    """``--version-verbose``：报告实际导入的是哪份代码，被遮蔽时非零退出。
+
+    ★为什么单列一个开关而不是只在 selfcheck 里报：在旧源码目录下跑 ``python -m apkscan.cli``
+    时，当前目录的 apkscan 包会遮蔽已安装版本，报告里的 tool_version 写的是旧版号，
+    而 ``--version`` 与 ``pip show`` 都显示新版——读报告的人无从察觉自己看的是旧版结果。
+    这一项要能被脚本单独调用、且不一致时退出码非零，才挡得住批量流程里误用旧代码。
+    """
+    if not value:
+        return
+    from apkscan.selfcheck import build_version_component
+
+    item = build_version_component()
+    typer.echo(item["detail"].replace(" ", "\n"))
+    if item["status"] != "ok":
+        typer.echo("", err=True)
+        typer.echo(f"★ {item['detail'].split('★')[-1]}", err=True)
+        typer.echo(f"  {item['fix']}", err=True)
+        raise typer.Exit(code=1)
+    raise typer.Exit()
+
+
+@app.callback()
+def _main(
+    version: bool = typer.Option(  # noqa: ARG001 - eager callback 内即退出，形参仅供 typer 注册
+        False,
+        "--version",
+        help="显示版本号并退出。",
+        callback=_version_callback,
+        is_eager=True,
+    ),
+    version_verbose: bool = typer.Option(  # noqa: ARG001 - 同上
+        False,
+        "--version-verbose",
+        help="显示版本 + 实际导入路径 + 分发位置 + git HEAD；版本被遮蔽时退出码 1。",
+        callback=_version_verbose_callback,
+        is_eager=True,
+    ),
+) -> None:
+    """涉诈 APK 调证分析 CLI。"""
+
+
+def _parse_formats(fmt: str) -> list[str]:
+    """解析 ``--fmt`` 逗号串为合法格式列表。
+
+    无法识别的格式会告警并忽略；**全部非法 → 回退 ['html','json'] 并告警**，绝不让"格式参数
+    全填错"静默产出零报告却 exit 0（调证场景最怕"以为出了报告其实没有"）。
+    """
+    requested = [f.strip().lower() for f in fmt.split(",") if f.strip()]
+    formats = [f for f in requested if f in _VALID_FORMATS]
+    invalid = [f for f in requested if f not in _VALID_FORMATS]
+    if invalid:
+        typer.echo(
+            f"忽略无法识别的输出格式：{'、'.join(invalid)}（合法：{', '.join(_VALID_FORMATS)}）",
+            err=True,
+        )
+    if not formats:
+        typer.echo("未指定任何合法输出格式，回退为 html,json。", err=True)
+        formats = ["html", "json"]
+    return formats
+
+
+def _adb_owned_at_start() -> bool:
+    """命令**起手**判本次 adb server 是否归本进程收：起手时无 server 在跑 → 本次动态动作会起
+    一个、归我们收（True）；起手时已有 server（外部 / 先前已在跑，可能仍要用于 pull）→ 不归我们、
+    收尾不杀（False）。惰性 import、绝不抛（探测失败保守视作外部、不杀）。
+    """
+    try:
+        from apkscan.core import tools
+
+        return not tools.adb_server_running()
+    except Exception:
+        logger.exception("[cli] 判定 adb server 归属失败（保守：收尾不杀）")
+        return False
+
+
+def _cleanup_adb_quiet(owned: bool = True) -> None:
+    """命令收尾：**仅当本次进程自起**的 adb server（owned=True）才收掉（惰性 import tools，绝不抛）。
+
+    adb server 是 adb 全局单例：analyze 的设备探测、doctor/auto/capture 的动态动作都会经 adb 起
+    一个常驻 server。GUI 分析走子进程，退出时若不收、adb.exe 残留下次重打 exe 被锁——故收尾要收。
+    但 ★P0-5：``owned=False``（命令起手时已有外部 / 先前 server 在跑，可能仍要用于 pull）时**绝不杀**，
+    避免误杀外部或仍在 pull 落盘 floor.pcap 的 adb。kill-server 幂等、仅在 adb 可用时执行。
+    """
+    if not owned:
+        logger.info("[cli] adb server 起手时已存在（外部/先前），收尾不杀（避免误杀外部或正在 pull 的 adb）")
+        return
+    try:
+        from apkscan.core import tools
+
+        tools.kill_adb_server()
+    except Exception:
+        logger.exception("[cli] 收尾清理 adb server 失败（已忽略）")
+
+
+def _resolve_out(out: str | None, apk: Path) -> str:
+    """输出目录解析：显式 --out 原样用（相对则相对 cwd）；未给 --out 时默认落到 **APK 同目录**
+    下的 ``out/``。
+
+    动机：旧默认是相对当前工作目录的 ``"out"``——从哪个目录跑就把 out/ 建在哪、GUI/auto 下 cwd
+    还不可预测，产物散落（"建在错的位置"）。默认跟着样本走最可预测。
+    """
+    if out is not None:
+        return out
+    return str(apk.resolve().parent / "out")
+
+
+def _resolve_out_cwd(out: str | None) -> str:
+    """无样本文件命令（capture）的输出目录解析：统一绝对化到 **当前工作目录** 基准。
+
+    动机：capture 只有包名、没有样本文件路径，无法像 analyze/unpack 那样落到「样本同目录」。
+    旧默认是相对 cwd 的裸字符串 ``"out"``——从哪跑就散在哪、GUI/auto 下 cwd 不可预测。这里把
+    未给 / 相对的 out 都解析成绝对路径（口径确定、可预测），与 analyze/unpack「产物落点确定」
+    的精神一致，只是基准是 cwd（capture 无样本可依）。
+    """
+    return str((Path(out) if out else Path("out")).resolve())
+
+
+def _raise_exit_for_status(status: object) -> None:
+    """按 DynamicResult 的 status 决定命令退出码：
+
+    - ``STATUS_ERROR`` → ``typer.Exit(1)``（执行出错）；
+    - ``STATUS_SKIPPED`` → ``typer.Exit(2)``（缺 frida/mitmproxy/root 等前置 → 零产出高发场景，
+      与 error 分开，便于调用方/脚本区分「跑错了」与「没跑起来」）；
+    - ``STATUS_DEGRADED`` → ``typer.Exit(3)``（抓包跑完但无任何证据路径：代理未起/MITM 0 字节/
+      floor 未拉回/端点 0 → 脚本调用方不能当成功，独立码便于区分「降级无产出」）；
+    - 其它（done/未知）→ 不抛，正常返回 0。
+    """
+    from apkscan.dynamic import STATUS_DEGRADED, STATUS_ERROR, STATUS_SKIPPED
+
+    if status == STATUS_ERROR:
+        raise typer.Exit(code=1)
+    if status == STATUS_SKIPPED:
+        raise typer.Exit(code=2)
+    if status == STATUS_DEGRADED:
+        raise typer.Exit(code=3)
+
+
+def _strict_exit_code(report: Report) -> int | None:
+    """analyze --strict 的退出码判定（与 capture 的 _raise_exit_for_status 是不同命令、各自命名空间）：
+
+    - 关键分析器失败（report.critical_failures 非空）→ 4（报告核心不可信）；
+    - 其它不完整（analysis_status != complete，即 partial/failed）→ 3；
+    - 完整 → None（调用方退 0）。
+
+    纯函数，便于单测；analyze 仅在 --strict 时消费其结果。
+    """
+    if report.critical_failures:
+        return 4
+    if report.analysis_status != ANALYSIS_STATUS_COMPLETE:
+        return 3
+    return None
+
+
+def _validate_mode(mode: str) -> None:
+    """校验 --mode 值合法（analyze / auto / batch 共用）；非法值 → typer.Exit(2)。"""
+    if mode not in ANALYSIS_MODES:
+        typer.echo(
+            f"错误：--mode 只能是 {' | '.join(ANALYSIS_MODES)}（收到 {mode!r}）", err=True
+        )
+        raise typer.Exit(code=2)
+
+
+@app.command()
+def analyze(
+    apk: Path = typer.Argument(
+        ...,
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="待分析的 APK 文件路径。",
+    ),
+    online: bool = typer.Option(
+        True,
+        "--online/--offline",
+        help="是否联网富化归属信息（WHOIS/ICP/ASN）。",
+    ),
+    out: str | None = typer.Option(None, "--out", help="报告输出目录（默认：APK 同目录下的 out/）。"),
+    fmt: str = typer.Option(
+        "html,json",
+        "--fmt",
+        help="输出格式，逗号分隔：html,json,pdf。pdf 需本机有 Chrome/Edge/Chromium（无头打印）。",
+    ),
+    extra_dex: str = typer.Option(
+        "",
+        "--extra-dex",
+        help="额外 DEX（脱壳 dump 的 .dex 文件或含 .dex 的目录），逗号分隔；并入静态分析。",
+    ),
+    dynamic: bool = typer.Option(
+        False,
+        "--dynamic",
+        help="静态分析后，若探测到在线设备则自动执行真机 unpack + capture（需设备/工具）。",
+    ),
+    mode: str = typer.Option(
+        ANALYSIS_MODE_PASSIVE,
+        "--mode",
+        help=(
+            "网络模式：passive（默认，只跑被动 OSINT 富化、对目标零流量）| "
+            "authorized-active（显式授权下才放行会向目标 / 其基础设施发起请求的动作："
+            "下载样本引用的远程配置对象、Telegram getMe 在线核验等）。"
+        ),
+    ),
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help=(
+            "严格模式：分析不完整时非零退出（关键分析器失败=退出码 4，其它分析器报错=3）。"
+            "默认关（尽力而为、退出码 0），适合 CI / 批量 / Agent 判定。"
+        ),
+    ),
+) -> None:
+    """分析一个 APK 并产出报告。"""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    # 无条件 finally 收 adb server：analyze 的 device.has_device() 设备探测每次都会经
+    # adb 起一个常驻 adb server（即便纯静态/离线），不收则 adb.exe 残留（GUI 子进程尤甚）。
+    _adb_owned = _adb_owned_at_start()  # ★P0-5：起手判 adb server 归属（外部/先前存在则收尾不杀）
+    try:
+        formats = _parse_formats(fmt)
+        _validate_mode(mode)
+        out = _resolve_out(out, apk)  # 未给 --out → 默认落到 APK 同目录下的 out/
+        config = AnalysisConfig(online=online, out_dir=out, formats=formats, mode=mode)
+
+        extra_dex_files = _resolve_extra_dex(extra_dex)
+        if extra_dex_files:
+            typer.echo(f"额外 DEX：发现 {len(extra_dex_files)} 个，加载中 ...")
+
+        typer.echo(f"加载：{apk}")
+        try:
+            ctx = load_apk(str(apk), config, extra_dex=extra_dex_files or None)
+        except ApkParseError as exc:
+            typer.echo(f"错误：{exc}", err=True)
+            raise typer.Exit(code=2) from exc
+
+        # ★加载**之后**才报数：脱壳 dump 的 DEX 成批不被 androguard 接受是常态，
+        #   在加载前写"N 个并入"等于替结果打包票。实测 33 个只成功 10 个。
+        _echo_extra_dex_result(getattr(ctx, "extra_dex_report", None))
+
+        typer.echo(f"包名：{ctx.package_name or '(未知)'}  联网富化：{'是' if online else '否'}")
+        typer.echo("运行分析流水线 ...")
+        # 启动提速：pipeline（→registry）延迟到真正分析时才 import；--version/doctor/gui
+        # 等不分析的命令不再付这份导入开销。
+        from apkscan.core import pipeline
+
+        # ApkContext 用 @cached_property 暴露 package_name/manifest_xml，运行期满足
+        # AnalysisContext 协议（324 测试+真机已证）；pyright 对 cached_property→property
+        # 的协议匹配有已知局限，故此处显式忽略。
+        report = pipeline.run(ctx, config)  # type: ignore[arg-type]
+
+        # 把真实联网状态落到 meta：merge 生成运行时线索时据此决定 online 分级标注，
+        # 离线扫描（--no-online）下运行时端点才不会被默认 online=True 当成已联网核实
+        # （否则拿不到静态侧"离线扫描，归属未查询"标注，偏乐观、轻微假成功）。
+        report.meta["online"] = config.online
+
+        # 取证完整性背书：检材指纹（多算法 + 分析环境）落 meta["evidence_manifest"]，
+        # 并把 sha256 提到顶层快捷键 meta["sample_sha256"]（CSV 导出 / 团伙聚类已预留引用）。
+        # 纯函数容错、绝不抛；外层仍包 try 兜底任何意外，失败只 logging 不炸 analyze。
+        try:
+            from apkscan import __version__
+            from apkscan.core.integrity import sample_fingerprint
+
+            manifest = sample_fingerprint(str(apk), tool_version=__version__)
+            report.meta["evidence_manifest"] = manifest
+            report.meta["sample_sha256"] = manifest.get("sha256", "")
+        except Exception:
+            logger.exception("[cli] 写入取证完整性元数据失败（已忽略，不影响报告产出）")
+
+        # 设备探测：有在线设备则提示并写入 meta，便于报告/后续动态补全感知。
+        device_detected = device.has_device()
+        if device_detected:
+            report.meta["device_detected"] = True
+            typer.echo("检测到在线 adb 设备：可用 --dynamic 做真机脱壳/抓包补全静态盲区。")
+
+        # 报告文件名 base：用 APK 文件名去后缀（清理非法字符），空/异常回退包名再回退 report。
+        base = report_base(str(apk), ctx.package_name or "")
+
+        out_dir = Path(out)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        _write_reports(report, out_dir, formats, base)
+
+        _print_summary(report)
+
+        # --dynamic：静态完成后，若有设备则自动 unpack + capture（实现由 dynamic 模块 agent 完成）。
+        if dynamic:
+            if not device_detected:
+                typer.echo("未检测到在线设备，跳过 --dynamic（动态脱壳/抓包需真机）。")
+            else:
+                # base 透传：merge 重渲必须用与静态写出同一 base，否则静态写 <apk>.* 而
+                # 重渲写 report.* 产两套报告。
+                _run_dynamic_after_static(
+                    str(apk), ctx.package_name or "", out, report, formats, base
+                )
+
+        # --strict：所有工作（写报告 / 入账 / 动态）完成后，据完整度决定退出码，供 CI / Agent 判定。
+        # 非严格默认退 0（尽力而为，向后兼容）。退出穿过 finally 正常收尾（与 capture 同范式）。
+        if strict:
+            code = _strict_exit_code(report)
+            if code is not None:
+                typer.echo(
+                    f"[strict] 分析不完整：status={report.analysis_status}"
+                    f"，completeness={report.completeness}"
+                    f"，critical_failures={report.critical_failures}",
+                    err=True,
+                )
+                raise typer.Exit(code=code)
+    finally:
+        _cleanup_adb_quiet(_adb_owned)
+
+
+def _report_dict_for(path: Path, *, online: bool) -> dict:
+    """把 diff 的一个参数解析成 report dict：``.json`` → 直接读；否则当 APK → 现分析成报告 dict。
+
+    JSON 读取 / APK 解析失败 → 友好报错 + 非零退出（3=坏输入 JSON，2=APK 解析失败），不打 traceback。
+    """
+    import json as _json
+
+    if path.suffix.lower() == ".json":
+        try:
+            # parse_constant：把 NaN/Infinity（json.loads 默认接受、但非 RFC-8259 合法）归一化为
+            # None，保证 diff/jsonl 后续 dumps 出的每行都是严格合法 JSON（jq / JSON.parse 不炸）。
+            data = _json.loads(path.read_text(encoding="utf-8"), parse_constant=lambda _c: None)
+        except Exception as exc:  # noqa: BLE001 — 坏 JSON → 友好报错而非 traceback
+            typer.echo(f"错误：无法读取报告 JSON：{path}（{exc}）", err=True)
+            raise typer.Exit(code=3) from exc
+        return data if isinstance(data, dict) else {}
+
+    # 非 .json → 当 APK 现分析（离线默认：diff 通常不需联网富化，也让结果确定/快）。
+    from apkscan.core import pipeline
+    from apkscan.report import json as report_json
+
+    config = AnalysisConfig(online=online, out_dir=str(path.parent), formats=[])
+    try:
+        ctx = load_apk(str(path), config)
+    except ApkParseError as exc:
+        typer.echo(f"错误：{exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    report = pipeline.run(ctx, config)  # type: ignore[arg-type]
+    data = report_json.to_dict(report)
+    # ★现算 sample_sha256 填回 meta：pipeline.run 不算它（只 analyze 的证据 manifest 步骤算），
+    #   否则 `diff old.json new.apk` 会报虚假的 sample_sha256 变化（旧有哈希、新为 None）。
+    meta = data.get("meta")
+    if isinstance(meta, dict) and not meta.get("sample_sha256"):
+        digest = _file_sha256(path)
+        if digest:
+            meta["sample_sha256"] = digest
+    return data
+
+
+def _file_sha256(path: Path) -> str:
+    """流式算文件 sha256（大文件不占内存）。读失败 → 空串（不抛，diff 不因哈希失败中断）。"""
+    import hashlib
+
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        logger.warning("[cli] 算 sample_sha256 失败（已忽略）：%s", path, exc_info=True)
+        return ""
+
+
+@app.command()
+def diff(
+    old: Path = typer.Argument(..., exists=True, help="旧版：report.json 或 APK。"),
+    new: Path = typer.Argument(..., exists=True, help="新版：report.json 或 APK。"),
+    online: bool = typer.Option(
+        False,
+        "--online/--offline",
+        help="参数是 APK 时是否联网富化（默认离线：diff 通常只看结构变化、更快更确定）。",
+    ),
+) -> None:
+    """对比两份分析结果，输出**调证增量**的稳定 JSON：新增 / 删除的线索、端点、发现，加身份 /
+    加固 / 分类变化。每个参数可是 report.json（直接读）或 APK（现分析）——适合追踪同一 App 跨版本
+    新增了哪些支付通道 / 钱包 / 后台入口、加固是否升级、SDK 是否变了。
+
+    ★★**本命令不脱敏，原样输出**：新增 / 删除的线索条目整条带出来，配对键本身就含 ``value``。
+      与 ``jsonl`` 同理，它不受 ``digest`` 默认脱敏的保护。
+    """
+    import json as _json
+
+    from apkscan.core.redact import warn_unredacted_agent_output
+
+    warn_unredacted_agent_output("diff")
+
+    from apkscan.core.diff import diff_reports
+
+    old_dict = _report_dict_for(old, online=online)
+    new_dict = _report_dict_for(new, online=online)
+    typer.echo(_json.dumps(diff_reports(old_dict, new_dict), ensure_ascii=False, indent=2))
+
+
+@app.command()
+def jsonl(
+    report: Path = typer.Argument(..., exists=True, dir_okay=False, help="report.json 路径。"),
+) -> None:
+    """把 report.json 摊成 **JSONL 事件流**（每行一个 JSON：1 条 meta 头 + 每条线索 / 发现一个事件），
+    供 AI agent / 脚本逐条流式消费——据 finding 的 confidence/kind/analyzer 加权、逐条串案、生成文书，
+    无需先解析整份嵌套报告。坏 JSON → 退出码 3。
+
+    ★★**本命令不脱敏，原样输出**——包括钱包私钥 / 助记词、后端凭据、个人隐私数据。
+      它与 ``digest`` 同样面向 agent 消费，但**不受 ``digest`` 的默认脱敏保护**：那个开关只作用
+      在 ``digest`` 一条路径上，本命令走的是 :mod:`apkscan.core.jsonl` 的另一条。要把内容交给
+      第三方服务，请改用 ``fxapk digest``（默认已脱敏）。给本命令补脱敏选项是待办。
+    """
+    from apkscan.core.redact import warn_unredacted_agent_output
+
+    warn_unredacted_agent_output("jsonl")
+    import json as _json
+
+    from apkscan.core.jsonl import report_to_events
+
+    try:
+        # parse_constant：NaN/Infinity → None，保证每行输出严格合法 JSON（见 _report_dict_for）。
+        data = _json.loads(report.read_text(encoding="utf-8"), parse_constant=lambda _c: None)
+    except Exception as exc:  # noqa: BLE001 — 坏 JSON → 友好报错而非 traceback
+        typer.echo(f"错误：无法读取报告 JSON：{report}（{exc}）", err=True)
+        raise typer.Exit(code=3) from exc
+    for event in report_to_events(data):
+        typer.echo(_json.dumps(event, ensure_ascii=False))
+
+
+@app.command()
+def unpack(
+    apk: Path = typer.Argument(
+        ...,
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="待脱壳的 APK 文件路径。",
+    ),
+    out: str | None = typer.Option(None, "--out", help="产物 / 报告输出目录（默认：APK 同目录下的 out/）。"),
+    reanalyze: bool = typer.Option(
+        True,
+        "--reanalyze/--no-reanalyze",
+        help="脱壳得到额外 DEX 后是否自动重新静态分析。",
+    ),
+) -> None:
+    """真机脱壳：dump 隐藏 DEX 并（可选）重新静态分析。
+
+    实现由 apkscan.dynamic.unpack 提供；未安装时打印提示并退出，不崩。
+    """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    try:
+        from apkscan.dynamic import unpack as _unpack
+    except ImportError:
+        typer.echo("该功能未安装：apkscan.dynamic.unpack 不可用（动态脱壳模块尚未就绪）。")
+        raise typer.Exit(code=1) from None
+
+    out = _resolve_out(out, apk)  # 未给 --out → 默认落到 APK 同目录下的 out/
+    result = _unpack.run(str(apk), out=out, reanalyze=reanalyze)
+    _print_dynamic_result("脱壳", result)
+    # 业务失败返回非零退出码：error→1 / skipped（缺 root/frida 等前置）→2，正常→0。
+    _raise_exit_for_status(result.get("status") if isinstance(result, dict) else None)
+
+
+@app.command()
+def repackage(
+    apk: Path = typer.Argument(
+        ...,
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="原 APK 路径（以它为基底替换脱壳 DEX 重打包）。",
+    ),
+    out: str | None = typer.Option(None, "--out", help="产物目录（脱壳 DEX 取自 <out>/dump；默认 APK 同目录 out/）。"),
+) -> None:
+    """脱壳后重打包出去壳 APK 并装回设备，使其能被重新动态抓包（绕加固壳反 frida）。
+
+    前置：先 unpack 出脱壳 DEX（落 <out>/dump）+ apksigner/zipalign + 在线设备。需 unpack
+    先成功；缺工具/设备则 skipped 给手册。实现由 apkscan.dynamic.repackage 提供，未安装优雅退出。
+    """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    try:
+        from apkscan.dynamic import repackage as _repackage
+    except ImportError:
+        typer.echo("该功能未安装：apkscan.dynamic.repackage 不可用。")
+        raise typer.Exit(code=1) from None
+
+    out = _resolve_out(out, apk)  # 未给 --out → 默认落到 APK 同目录下的 out/
+    result = _repackage.run(str(apk), out=out)
+    _print_dynamic_result("去壳重打包", result)
+    # 业务失败返回非零退出码：error→1 / skipped（缺 unpack 产物/apksigner/设备）→2，正常→0。
+    _raise_exit_for_status(result.get("status") if isinstance(result, dict) else None)
+
+
+@app.command()
+def capture(
+    package: str = typer.Argument(..., help="目标应用包名（在设备上运行/抓包）。"),
+    out: str | None = typer.Option(
+        None, "--out", help="产物 / 报告输出目录（默认：当前目录下的 out/，绝对化）。"
+    ),
+    duration: int = typer.Option(60, "--duration", min=1, help="抓包时长（秒，下限 1）。"),
+    serial: str | None = typer.Option(
+        None, "--serial", help="目标设备 serial（多设备/一机多 transport 时钉定那台；不给则 -U/自动）。"
+    ),
+    mode: str = typer.Option(
+        "both",
+        "--mode",
+        help="抓包模式：both（默认，mitm 明文 + 带外 pcap）/ floor-only（不设代理、只带外抓，加固 IM/反 frida 更稳）/ mitm-only（不起 floor）。",
+    ),
+) -> None:
+    """真机抓包：对运行中的目标应用做流量抓取，提取动态端点。
+
+    实现由 apkscan.dynamic.capture 提供；未安装时打印提示并退出，不崩。业务失败按 status
+    返回非零退出码（error→1 / skipped→2），便于脚本区分「跑错了」与「缺前置没跑起来」。
+    """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # 抓包必经 adb（frida -U / mitmproxy 走设备），finally 收掉自起的 adb server。
+    _adb_owned = _adb_owned_at_start()  # ★P0-5：起手判 adb server 归属（外部/仍在 pull 则收尾不杀）
+    try:
+        try:
+            from apkscan.dynamic import capture as _capture
+        except ImportError:
+            typer.echo("该功能未安装：apkscan.dynamic.capture 不可用（动态抓包模块尚未就绪）。")
+            raise typer.Exit(code=1) from None
+
+        if mode not in ("both", "floor-only", "mitm-only", "no-proxy"):
+            typer.echo(f"--mode 取值非法：{mode!r}（可选 both / floor-only / mitm-only）")
+            raise typer.Exit(code=2)
+        out = _resolve_out_cwd(out)  # 未给 / 相对 → 绝对化到 cwd 下的 out/（口径确定）
+        result = _capture.run(package, out=out, duration=duration, serial=serial, mode=mode)
+        _print_dynamic_result("抓包", result)
+        # 业务失败返回非零退出码（在 adb 清理 finally 之前抛，仍会穿过 finally 收 server）。
+        _raise_exit_for_status(result.get("status") if isinstance(result, dict) else None)
+    finally:
+        _cleanup_adb_quiet(_adb_owned)
+
+
+@app.command()
+def doctor(
+    serial: str = typer.Option(
+        "", "--serial", help="目标设备序列号（默认 adb 当前设备）。"
+    ),
+    auto_fix: bool = typer.Option(
+        True,
+        "--fix/--no-fix",
+        help="对 frida-server / CA 等可自动修的项调 provision 自动修复（--no-fix 仅体检不动设备）。",
+    ),
+    profile: str = typer.Option(
+        "full",
+        "--profile",
+        help="体检 profile：full（默认，完整抓包栈）| floor-only（只体检 floor pcap 底座 设备+root+tcpdump，"
+        "缺 frida/mitmproxy/CA 仍体检但不判环境失败——PCAP-first 只想 tcpdump 抓包时用）。",
+    ),
+) -> None:
+    """动态抓包/脱壳前置环境体检：设备/root/ABI/frida/mitmproxy/CA，逐项给出状态与可复制命令。
+
+    实现由 apkscan.dynamic.doctor 提供（纯结构化返回）；本命令是唯一打印体检结果的薄包装。
+    """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # doctor 体检会经 adb 探测设备/起 server，finally 收掉自起的 adb server。
+    # 注意：doctor 给用户的 "adb kill-server && adb start-server" 是可复制的修复命令字符串
+    # （结构化结果里的 fix_cmd），不是程序执行路径——本收尾不触碰它，语义不破坏。
+    _adb_owned = _adb_owned_at_start()  # ★P0-5：起手判 adb server 归属（外部/先前存在则收尾不杀）
+    try:
+        try:
+            from apkscan.dynamic import doctor as _doctor
+        except ImportError:
+            typer.echo("该功能未安装：apkscan.dynamic.doctor 不可用（环境体检模块尚未就绪）。")
+            raise typer.Exit(code=1) from None
+
+        typer.echo("===== 动态环境体检 =====")
+        result = _doctor.run(
+            serial=serial or None,
+            auto_fix=auto_fix,
+            profile=profile,
+            on_progress=lambda m: typer.echo(f"... {m}"),
+        )
+        _print_doctor_result(result)
+        if not result.get("ok", False):
+            raise typer.Exit(code=1)
+    finally:
+        _cleanup_adb_quiet(_adb_owned)
+
+
+@app.command()
+def auto(
+    apk: Path = typer.Argument(
+        ...,
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="待分析的 APK 文件路径。",
+    ),
+    out: str | None = typer.Option(None, "--out", help="报告 / 产物输出目录（默认：APK 同目录下的 out/）。"),
+    online: bool = typer.Option(
+        True,
+        "--online/--offline",
+        help="静态分析是否联网富化归属（WHOIS/ICP/ASN）。默认联网（与 analyze 一致）；"
+        "网络受限/不想等富化可加 --offline。",
+    ),
+    auto_fix: bool = typer.Option(
+        True,
+        "--fix/--no-fix",
+        help="体检时对 frida-server / CA 等可自动修的项调 provision 自动修复（--no-fix 仅体检不动设备）。",
+    ),
+    duration: int = typer.Option(60, "--duration", min=1, help="抓包时长（秒，下限 1）。"),
+    fmt: str = typer.Option(
+        "html,json",
+        "--fmt",
+        help="输出格式，逗号分隔：html,json,pdf。",
+    ),
+    repackage: bool = typer.Option(
+        True,
+        "--repackage/--no-repackage",
+        help="脱壳后把去壳版重打包装回设备供 capture 抓（绕壳反 frida）。默认开；"
+        "--no-repackage 关（重签必卸原包会清 app 数据/登录态）。",
+    ),
+    strict_case: bool = typer.Option(
+        False,
+        "--strict-case/--no-strict-case",
+        help="按案件闭环状态返回退出码：complete=0、partial=5、failed=6。默认只报告状态。",
+    ),
+    mode: str = typer.Option(
+        ANALYSIS_MODE_PASSIVE,
+        "--mode",
+        help="网络模式：passive（默认，静态富化只跑被动 OSINT）| authorized-active（显式授权下才放行会向目标发起请求的动作，如远程配置对象下载、Telegram getMe 核验）。",
+    ),
+) -> None:
+    """一键全自动：体检 → 静态分析 → 脱壳 → 抓包 → 合并 → 案件闭环。
+
+    无设备时优雅跳过脱壳/抓包，仍产出静态报告。实现由 apkscan.dynamic.auto 提供
+    （纯结构化返回 + 回调）；本命令是唯一打印 / 交互（提示操作 app）的薄包装。
+    """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # auto 流水线含体检/脱壳/抓包，全经 adb；finally 收掉自起的 adb server。
+    _adb_owned = _adb_owned_at_start()  # ★P0-5：起手判 adb server 归属（外部/先前存在则收尾不杀）
+    try:
+        try:
+            from apkscan.dynamic import auto as _auto
+        except ImportError:
+            typer.echo("该功能未安装：apkscan.dynamic.auto 不可用（一键全自动模块尚未就绪）。")
+            raise typer.Exit(code=1) from None
+
+        formats = _parse_formats(fmt)
+        _validate_mode(mode)
+
+        def _confirm(msg: str) -> None:
+            """抓包前提示用户操作 app 触发网络，并等回车（CLI 落点；GUI 用弹窗）。
+
+            确认提示只是「准备好就继续」的暂停闸（返回值本就不使用）。无 stdin / EOF /
+            Ctrl-C 时 click.confirm 抛 Abort —— 这不是错误，直接继续抓包，不刷 ERROR+traceback。
+            """
+            typer.echo("")
+            typer.echo(f">>> {msg}")
+            try:
+                typer.confirm("已准备好，开始抓包？", default=True)
+            except (click.Abort, EOFError):
+                typer.echo("（未读到输入，直接继续抓包）")
+
+        out = _resolve_out(out, apk)  # 未给 --out → 默认落到 APK 同目录下的 out/
+        typer.echo(f"===== 一键全自动：{apk} =====")
+        result = _auto.run(
+            str(apk),
+            out_dir=out,
+            online=online,
+            auto_fix=auto_fix,
+            capture_duration=duration,
+            formats=formats,
+            mode=mode,
+            repackage=repackage,
+            strict_case=strict_case,
+            on_progress=lambda m: typer.echo(f"... {m}"),
+            confirm=_confirm,
+        )
+        _print_auto_result(result)
+        if strict_case:
+            status = result.get("status") if isinstance(result, dict) else "failed"
+            code = closure_exit_code(status)
+            if code:
+                raise typer.Exit(code=code)
+    finally:
+        _cleanup_adb_quiet(_adb_owned)
+
+
+@app.command()
+def batch(
+    folder: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+        help="待扫描的文件夹：逐个分析其中**没分析过**的 APK（顶层 *.apk，不递归）。",
+    ),
+    out: str = typer.Option(
+        "out_batch", "--out", help="批量输出根目录；每个 APK 落到 <out>/<名>__<sha8>/。"
+    ),
+    online: bool = typer.Option(
+        True,
+        "--online/--offline",
+        help="静态分析是否联网富化归属（WHOIS/ICP/ASN）。默认联网（与 auto 一致）。",
+    ),
+    duration: int = typer.Option(30, "--duration", min=1, help="launch-only 抓包时长（秒，下限 1）。"),
+    fmt: str = typer.Option(
+        "html,json", "--fmt", help="输出格式，逗号分隔：html,json,pdf。"
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="无视去重台账、文件夹内全部重跑。"
+    ),
+    mode: str = typer.Option(
+        ANALYSIS_MODE_PASSIVE,
+        "--mode",
+        help="网络模式：passive（默认，静态富化只跑被动 OSINT）| authorized-active（显式授权下才放行会向目标发起请求的动作，如远程配置对象下载、Telegram getMe 核验）。",
+    ),
+) -> None:
+    """批量分析文件夹：扫描没分析过的 APK，逐个「静态 + launch-only 动态」产出报告。
+
+    launch-only = 只启动 app 抓冷启动流量、不等人操作（需登录才出流量的 app 请在场时手动
+    单跑 ``auto``）。有设备时每个 app 跑完自动 ``adb uninstall`` 收尾，保持设备干净。去重按
+    APK 内容 sha256：同一样本改名也跳过；``--force`` 强制重跑。实现由 apkscan.dynamic.batch
+    提供（纯结构化返回 + 回调），本命令是打印薄包装。
+    """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # 批量逐个走 auto（含体检/脱壳/抓包），全经 adb；finally 收掉自起的 adb server。
+    _adb_owned = _adb_owned_at_start()  # ★P0-5：起手判 adb server 归属（外部/先前存在则收尾不杀）
+    try:
+        try:
+            from apkscan.dynamic import batch as _batch
+        except ImportError:
+            typer.echo("该功能未安装：apkscan.dynamic.batch 不可用（批量分析模块尚未就绪）。")
+            raise typer.Exit(code=1) from None
+
+        formats = _parse_formats(fmt)
+        _validate_mode(mode)
+        typer.echo(f"===== 批量分析文件夹：{folder} =====")
+        result = _batch.run_folder(
+            str(folder),
+            out_dir=out,
+            online=online,
+            capture_duration=duration,
+            formats=formats,
+            force=force,
+            mode=mode,
+            on_progress=lambda m: typer.echo(f"... {m}"),
+        )
+        _print_batch_result(result)
+    finally:
+        _cleanup_adb_quiet(_adb_owned)
+
+
+@app.command()
+def export(
+    report_json: Path = typer.Argument(
+        ...,
+        help="已产出的 report.json 路径（analyze/auto/batch 写出的 JSON 报告）。",
+    ),
+    out: str = typer.Option(
+        "",
+        "--out",
+        help="导出的 CSV 路径。默认 = 与 report.json 同目录的 <base>.ioc.csv。",
+    ),
+    only_investigate: bool = typer.Option(
+        False,
+        "--only-investigate",
+        help="只导 advice=建议调证 的线索（默认全导，但带 advice 列让下游自行过滤）。",
+    ),
+) -> None:
+    """把 report.json 的线索导成扁平 IOC CSV，便于进 MISP/i2/Maltego 做跨案碰撞。
+
+    薄包装：读 report.json → leads_to_ioc_rows → write_csv。绝不抛——读不到文件 / 坏 JSON
+    都打印友好提示并退出码 1。CSV 为 UTF-8 with BOM（Excel 打开中文不乱码）。
+    """
+    import json as _json
+
+    try:
+        try:
+            raw = report_json.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            typer.echo(f"错误：找不到报告文件：{report_json}", err=True)
+            raise typer.Exit(code=1) from None
+        except OSError as exc:
+            typer.echo(f"错误：读取报告文件失败：{report_json}（{exc}）", err=True)
+            raise typer.Exit(code=1) from exc
+
+        try:
+            report = _json.loads(raw)
+        except (ValueError, UnicodeDecodeError) as exc:
+            typer.echo(f"错误：报告 JSON 解析失败：{report_json}（{exc}）", err=True)
+            raise typer.Exit(code=1) from exc
+
+        from apkscan.report import ioc
+
+        rows = ioc.leads_to_ioc_rows(report, only_investigate=only_investigate)
+
+        # 默认 out = 与 report.json 同目录的 <base>.ioc.csv（base = 去掉 .json 后缀的名）。
+        out_path = Path(out) if out else report_json.with_suffix("").with_suffix(".ioc.csv")
+        if out_path.parent and not out_path.parent.exists():
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            ioc.write_csv(rows, str(out_path))
+        except OSError as exc:
+            typer.echo(f"错误：写出 CSV 失败：{out_path}（{exc}）", err=True)
+            raise typer.Exit(code=1) from exc
+
+        scope = "（仅 建议调证）" if only_investigate else ""
+        typer.echo(f"已导出 IOC CSV：{out_path}（{len(rows)} 行{scope}）")
+    except typer.Exit:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 兜底任何意外，转友好提示而非 traceback
+        logger.exception("[cli] export 导出 IOC CSV 异常")
+        typer.echo(f"错误：导出失败：{exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+@app.command()
+def digest(
+    report_json: Path = typer.Argument(
+        ...,
+        help="已产出的 report.json 路径（analyze/auto/batch 写出的 JSON 报告）。",
+    ),
+    redact: bool = typer.Option(
+        True,
+        "--redact/--no-redact",
+        help=(
+            "脱敏高敏值（钱包私钥/助记词、后端凭据、个人隐私数据、加密配方）。"
+            "**默认脱敏**；确需明文原值时显式加 --no-redact。"
+        ),
+    ),
+) -> None:
+    """把 report.json 压成**紧凑摘要 JSON** 打印到 stdout（供任意 AI agent / 脚本低 token 消费）。
+
+    线索按优先级排序（最高档 > 待核 > 无需再核；同档高可信、C2 在前），只保留可直接使用的扁平
+    字段 + 计数摘要，去掉端点全表 / 技术附录 / 富化原始数据等冗长内容。绝不抛——读不到 / 坏 JSON
+    打印友好错误并退出码 1。
+
+    ★**默认脱敏**（本命令的默认值曾是明文，已翻转）。理由是这个出口的实际用法：本工具的主推
+      路径就是把 digest 的输出喂给 AI，而报告里可能含钱包私钥 / 助记词、个人手机号 / 身份证 /
+      银行卡、后端凭据与加密配方。默认明文意味着「按最省事的方式用」就等于把这些原值交出去，
+      而想要安全得额外记得加一个参数——安全选项不该是要额外记得的那个。
+
+      翻转之后两类失误的后果也不对称：忘了加 --no-redact 只是少看见几个值（回头补跑即可），
+      忘了加 --redact 则是高敏原值已经出去了、收不回来。
+    """
+    import json as _json
+
+    try:
+        try:
+            raw = report_json.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            typer.echo(f"错误：找不到报告文件：{report_json}", err=True)
+            raise typer.Exit(code=1) from None
+        except OSError as exc:
+            typer.echo(f"错误：读取报告文件失败：{report_json}（{exc}）", err=True)
+            raise typer.Exit(code=1) from exc
+
+        try:
+            report = _json.loads(raw)
+        except (ValueError, UnicodeDecodeError) as exc:
+            typer.echo(f"错误：报告 JSON 解析失败：{report_json}（{exc}）", err=True)
+            raise typer.Exit(code=1) from exc
+
+        _warn_report_revision(report)
+
+        from apkscan.report.digest import build_digest
+
+        typer.echo(_json.dumps(build_digest(report, redact=redact), ensure_ascii=False, indent=2))
+    except typer.Exit:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 兜底任何意外，转友好提示而非 traceback
+        logger.exception("[cli] digest 生成摘要异常")
+        typer.echo(f"错误：生成摘要失败：{exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+@app.command()
+def selfcheck(
+    online: bool = typer.Option(
+        True, "--online/--offline", help="是否探测联网富化就绪度。"
+    ),
+    probe: bool = typer.Option(
+        True, "--probe/--no-probe", help="是否实际发起网络探测；--no-probe 只看配置。"
+    ),
+) -> None:
+    """自检诊断：逐项报告**哪个能力通 / 不通 / 怎么修**，输出稳定 JSON（供任意 AI agent 驱动前自检）。
+
+    覆盖：核心、可选依赖（解密 cryptography）、外部工具（jadx/adb）、动态（frida/mitmproxy/设备）、
+    联网富化。每项给 status（ok/missing/disabled/unreachable）+ 一句话修复指引。绝不抛。
+    """
+    import json as _json
+
+    from apkscan.selfcheck import run_selfcheck
+
+    typer.echo(
+        _json.dumps(run_selfcheck(online=online, probe_network=probe), ensure_ascii=False, indent=2)
+    )
+
+
+@app.command()
+def letters(
+    report_json: Path = typer.Argument(
+        ...,
+        help="已产出的 report.json 路径（analyze/auto/batch 写出的 JSON 报告）。",
+    ),
+    out: str = typer.Option(
+        "",
+        "--out",
+        help="文书输出目录（其下生成 letters/ 子目录）。默认 = report.json 同目录。",
+    ),
+) -> None:
+    """把 report.json 的可办案化线索套打成「调证函 / 协查文书」草稿（markdown）。
+
+    薄包装：读 report.json → build_letters → write_letters。只对建议调证、有可调取证据、
+    且 where_to_request 为真实受文机关的线索成文（证书指纹/解密配方等占位 Lead 自动跳过）。
+    绝不抛——读不到文件 / 坏 JSON 都打印友好提示并退出码 1。每份文书顶部带免责声明草稿标注。
+    """
+    import json as _json
+
+    try:
+        try:
+            raw = report_json.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            typer.echo(f"错误：找不到报告文件：{report_json}", err=True)
+            raise typer.Exit(code=1) from None
+        except OSError as exc:
+            typer.echo(f"错误：读取报告文件失败：{report_json}（{exc}）", err=True)
+            raise typer.Exit(code=1) from exc
+
+        try:
+            report = _json.loads(raw)
+        except (ValueError, UnicodeDecodeError) as exc:
+            typer.echo(f"错误：报告 JSON 解析失败：{report_json}（{exc}）", err=True)
+            raise typer.Exit(code=1) from exc
+
+        _warn_report_revision(report)
+
+        from apkscan.report import letters as letters_mod
+
+        drafts = letters_mod.build_letters(report)
+
+        # 默认 out = report.json 同目录（其下再建 letters/ 子目录）。
+        out_dir = out or str(report_json.parent)
+        try:
+            paths = letters_mod.write_letters(drafts, out_dir)
+        except OSError as exc:
+            typer.echo(f"错误：写出文书失败：{out_dir}（{exc}）", err=True)
+            raise typer.Exit(code=1) from exc
+
+        letters_dir = Path(out_dir) / "letters"
+        typer.echo(f"已生成 {len(drafts)} 份调证 / 协查文书草稿：{letters_dir}（含 index.md）")
+        if not drafts:
+            typer.echo("提示：本样本无可套打的调证线索（仅生成空索引 index.md）。")
+        else:
+            logger.info("[cli] letters 写出 %d 个文件", len(paths))
+    except typer.Exit:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 兜底任何意外，转友好提示而非 traceback
+        logger.exception("[cli] letters 套打调证文书异常")
+        typer.echo(f"错误：套打失败：{exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+@app.command(name="probe-leads")
+def probe_leads(
+    log: Path = typer.Argument(..., help="frida 探针日志（`frida -o probe.log` 的 console 输出）。"),
+    md: str = typer.Option("", "--md", help="台账 markdown 输出路径（默认打到终端）。"),
+    json_out: str = typer.Option("", "--json", help="台账 JSON 输出路径（程序化消费/入图）。"),
+    into: str = typer.Option("", "--into", help="把线索追加进已有 report.json 的 leads（去重）。"),
+) -> None:
+    """把独立探针(自备，`-l` 注入)散落的 `[LEAD]` 输出聚成**调证台账**，并可回灌进 report.json。
+
+    薄包装：读探针日志 → parse_probe_log（按 LeadCategory 分类+where_to_request）→ 去重 →
+    build_ledger_md / to_ledger_dict / merge_into_report_json。绝不抛——读不到 / 坏文件打印
+    友好提示并退出码 1。线索带合规提示（含高敏个人信息按办案合规留存处置）。
+    """
+    import json as _json
+
+    from apkscan.core.redact import warn_unredacted_agent_output
+
+    warn_unredacted_agent_output("probe-leads")
+
+    try:
+        try:
+            text = log.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            typer.echo(f"错误：找不到探针日志：{log}", err=True)
+            raise typer.Exit(code=1) from None
+        except OSError as exc:
+            typer.echo(f"错误：读取探针日志失败：{log}（{exc}）", err=True)
+            raise typer.Exit(code=1) from exc
+
+        from apkscan.dynamic import probe_ingest
+
+        leads = probe_ingest.dedup(probe_ingest.parse_probe_log(text))
+        typer.echo(f"解析出 {len(leads)} 条去重调证线索。")
+
+        ledger_md = probe_ingest.build_ledger_md(leads)
+        if md:
+            try:
+                Path(md).write_text(ledger_md, encoding="utf-8")
+                typer.echo(f"台账(markdown) → {md}")
+            except OSError as exc:
+                typer.echo(f"错误：写台账失败：{md}（{exc}）", err=True)
+                raise typer.Exit(code=1) from exc
+        if json_out:
+            try:
+                Path(json_out).write_text(
+                    _json.dumps(probe_ingest.to_ledger_dict(leads), ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                typer.echo(f"台账(JSON) → {json_out}")
+            except OSError as exc:
+                typer.echo(f"错误：写台账 JSON 失败：{json_out}（{exc}）", err=True)
+                raise typer.Exit(code=1) from exc
+        if into:
+            _warn_report_path_revision(into)
+            added = probe_ingest.merge_into_report_json(into, leads)
+            typer.echo(f"已追加 {added} 条探针线索进 {into}（去重）。")
+            # report.json 被改后，若同目录有 report.html 则重渲，让人读报告随台账更新。
+            rerendered = _rerender_html_if_present(into)
+            if rerendered:
+                typer.echo(f"已重渲 HTML 报告：{rerendered}")
+        if not (md or json_out or into):
+            typer.echo("")
+            typer.echo(ledger_md)
+    except typer.Exit:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 兜底任何意外，转友好提示而非 traceback
+        logger.exception("[cli] probe-leads 聚合台账异常")
+        typer.echo(f"错误：聚合台账失败：{exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+#: capture 落在 pcap 旁边的 socket 快照文件名（含时间线采样）。
+_SOCKET_SNAPSHOT_GLOBS = ("uid_sockets.txt", "socket_timeline.*")
+
+
+def _discover_socket_snapshots(where: Path) -> list[Path]:
+    """在 pcap 同目录找 socket 快照。找不到返回空列表——**绝不向上级目录递归**。
+
+    ★不递归是有意的：往上翻可能捞到**另一次采集**的快照，把 A 次的 UID 表配到 B 次的 pcap 上，
+      归因结果看着齐全、实则张冠李戴。这类错误比"没归因"严重得多——没归因只是缺信息，
+      配错则是**造出一条不存在的归属**。宁可让人显式传 --uid-sockets。
+    """
+    try:
+        found: list[Path] = []
+        for pattern in _SOCKET_SNAPSHOT_GLOBS:
+            found.extend(sorted(p for p in where.glob(pattern) if p.is_file()))
+        return found
+    except OSError:
+        return []
+
+
+@app.command(name="pcap-leads")
+def pcap_leads(
+    pcap: Path = typer.Argument(..., help="带外抓的 pcap/pcapng（网关 tcpdump / PCAPdroid 免 root 导出 / Wireshark）。"),
+    md: str = typer.Option("", "--md", help="台账 markdown 输出路径（默认打到终端）。"),
+    json_out: str = typer.Option("", "--json", help="台账 JSON 输出路径（程序化消费）。"),
+    into: str = typer.Option("", "--into", help="把线索追加进已有 report.json 的 leads（去重）。"),
+    uid_sockets: list[str] = typer.Option(
+        [], "--uid-sockets",
+        help="设备侧 socket 快照/时间线（uid_sockets.txt / socket_timeline.*，可重复）。"
+             "给了才能把接入节点归因到目标 app UID；不给则同目录自动探测，"
+             "用 --no-uid-sockets 关掉探测。",
+    ),
+    auto_uid_sockets: bool = typer.Option(
+        True, "--auto-uid-sockets/--no-uid-sockets",
+        help="未显式给 --uid-sockets 时，自动在 pcap 同目录找 uid_sockets.txt / socket_timeline.*。",
+    ),
+) -> None:
+    """从**带外 pcap** 抽接入节点 IP:port + TLS SNI + DNS + JA3 → 调证台账，可回灌 report.json。
+
+    针对反分析涉诈 App：即便 TLS 解不开、走 MTProto/native 自建协议（普通抓包 endpoint=0），
+    带外抓的 pcap 里仍有真实接入节点 IP/SNI——这就是穿透真源站的调证锚点。纯标准库解析，绝不抛。
+
+    ★带上 socket 快照才能回答"这条流是不是目标 app 的"。带外 tcpdump 抓的是**整机**流量，
+      光看 pcap 分不出真后端与背景噪音。快照通常就在 pcap 旁边（capture 一起落的），
+      所以默认会自动探测——**探到什么会明确打印出来**，不做无声的事。
+    """
+    import json as _json
+
+    from apkscan.core.redact import warn_unredacted_agent_output
+
+    warn_unredacted_agent_output("pcap-leads")
+
+    try:
+        from apkscan.core.models import LeadCategory
+        from apkscan.dynamic import pcap_ingest
+
+        summary = pcap_ingest.parse_pcap(str(pcap))
+
+        # ── UID 归因：把整机 pcap 里的接入节点绑到目标 app ─────────────────
+        # ★``None`` = 本次**没做** UID 归因；``{}`` = 做了、但这份 pcap 里没有可归因的远端
+        #   （例如纯 DNS 采集）。两者含义相反，不能都塌成假值——下游的 "uid_attributed" 与
+        #   台账抬头那句警示全靠这个区别，塌了就会出现"终端说归因了 0 个接入节点、
+        #   台账却写本次未做归因"的自相矛盾。
+        app_attr: dict[str, dict] | None = None
+        snap_paths = [Path(p) for p in (uid_sockets or [])]
+        if not snap_paths and auto_uid_sockets:
+            # capture 把 pcap 与快照落在同一个目录，这是最常见的形态。
+            snap_paths = _discover_socket_snapshots(pcap.parent)
+            if snap_paths:
+                typer.echo(f"自动探测到 socket 快照：{', '.join(p.name for p in snap_paths)}"
+                           f"（--no-uid-sockets 可关闭探测）")
+        if snap_paths:
+            from apkscan.dynamic import socket_attr
+
+            table, used = socket_attr.load_socket_tables(snap_paths)
+            if table is None:
+                typer.echo("警告：给定的 socket 快照解析不出任何记录，本次不做 UID 归因。", err=True)
+            else:
+                app_attr = socket_attr.attribute_remote_endpoints(
+                    pcap_ingest.remote_endpoints(summary), table
+                )
+                c = socket_attr.attribution_counts(app_attr)
+                typer.echo(
+                    f"UID 归因（来源 {'+'.join(used)}，目标 uid={table.target_uid}）："
+                    f"{c['total']} 个接入节点 → confirmed {c['confirmed']} / probable {c['probable']} / "
+                    f"ambiguous {c['ambiguous']} / unattributed {c['unattributed']}；"
+                    f"其中 {c['target_app']} 个属目标 app"
+                    + (f"，另有 {c['target_among_candidates']} 个目标也连过（歧义未定夺）"
+                       if c["target_among_candidates"] else "")
+                )
+        else:
+            typer.echo(
+                "提示：未给 socket 快照 → **不做 UID 归因**。带外 pcap 抓的是整机流量，"
+                "无快照时无法区分目标 app 的真后端与背景噪音；报告里这些端点将不带 "
+                "target_attributed —— 那是「未归因」，不是「不属目标」。"
+            )
+
+        # ★三处产物（计数 / md 台账 / json 台账）必须与 --into 用**同一份**归因结论。
+        #   此前只有 --into 传了 app_attr，于是一条命令同时带 --md --into 时，
+        #   报告里已判非目标的节点，台账里仍列在调证锚点下——两份产物结论相反。
+        leads = pcap_ingest.to_report_leads(summary, app_attr)
+        n_ip = sum(1 for lead in leads if lead.category == LeadCategory.IP)
+        n_dom = sum(1 for lead in leads if lead.category == LeadCategory.DOMAIN)
+        n_unattributed = sum(1 for lead in leads if pcap_ingest.is_attribution_denied(lead))
+        typer.echo(
+            f"解析出 {len(summary.flows)} 条流、{n_ip} 个公网接入节点、{n_dom} 个域名、"
+            f"{len(summary.dns_queries)} 条 DNS 查询。"
+            + (f"其中 {n_unattributed} 条经归因判定不属于目标应用（台账已标注）。"
+               if app_attr is not None and n_unattributed else "")
+        )
+        if getattr(summary, "parse_status", "ok") != "ok":
+            typer.echo(
+                f"警告：pcap 解析未成功（{summary.parse_status}：{summary.error}）——"
+                "空结果**不代表零流量**，请核对文件完整性/格式后重抓。",
+                err=True,
+            )
+        elif not summary.flows and not summary.dns_queries:
+            typer.echo("提示：没解析出流量——确认是 pcap/pcapng、且为 Ethernet/RAW/Linux-SLL 链路（pcapng 也支持）。")
+
+        ledger = pcap_ingest.build_ledger_md(summary, app_attr)
+        if md:
+            try:
+                Path(md).write_text(ledger, encoding="utf-8")
+                typer.echo(f"台账(markdown) → {md}")
+            except OSError as exc:
+                typer.echo(f"错误：写台账失败：{md}（{exc}）", err=True)
+                raise typer.Exit(code=1) from exc
+        if json_out:
+            try:
+                Path(json_out).write_text(
+                    _json.dumps(pcap_ingest.to_ledger_dict(summary, app_attr), ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                typer.echo(f"台账(JSON) → {json_out}")
+            except OSError as exc:
+                typer.echo(f"错误：写台账 JSON 失败：{json_out}（{exc}）", err=True)
+                raise typer.Exit(code=1) from exc
+        if into:
+            _warn_report_path_revision(into)
+            added = pcap_ingest.merge_into_report_json(into, summary, app_attr)
+            typer.echo(f"已追加 {added} 条带外线索进 {into}（去重）。")
+            # report.json 被改后，若同目录有 report.html 则重渲，让人读报告随台账更新。
+            rerendered = _rerender_html_if_present(into)
+            if rerendered:
+                typer.echo(f"已重渲 HTML 报告：{rerendered}")
+        if not (md or json_out or into):
+            typer.echo("")
+            typer.echo(ledger)
+    except typer.Exit:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 兜底任何意外，转友好提示而非 traceback
+        logger.exception("[cli] pcap-leads 聚合台账异常")
+        typer.echo(f"错误：聚合台账失败：{exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+@app.command(name="capture-plan")
+def capture_plan_cmd(
+    report_json: Path = typer.Argument(..., help="已产出的 report.json（analyze/auto 写出）。"),
+    as_json: bool = typer.Option(
+        False,
+        "--json",
+        help="输出机器可读的结构化决策（CaptureDecision：floor 优先 / 秒退阈值 / 总预算 / 信号），供引擎或 Codex 消费，而非人读文本步骤。",
+    ),
+) -> None:
+    """据静态报告的规避信号（加固/endpoint数/加密配方/自建IM），输出**针对该样本的抓包打法**。
+
+    薄包装：读 report.json → capture_plan.plan_capture → 打印有序步骤（起手式带外 pcap 保底 → 按
+    规避类型选 frida unpinning / 静态去 pin / pcap-leads / 专项探针）。绝不抛——读不到/坏 JSON
+    打印友好提示并退出码 1。供办案人/Codex 决定"这个样本该怎么抓"。``--json`` 则改出与文本同源的
+    结构化决策（decide_capture），供自动编排读。
+    """
+    import json as _json
+
+    try:
+        try:
+            raw = report_json.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            typer.echo(f"错误：找不到报告文件：{report_json}", err=True)
+            raise typer.Exit(code=1) from None
+        except OSError as exc:
+            typer.echo(f"错误：读取报告失败：{report_json}（{exc}）", err=True)
+            raise typer.Exit(code=1) from exc
+        try:
+            report = _json.loads(raw)
+        except (ValueError, UnicodeDecodeError) as exc:
+            typer.echo(f"错误：报告 JSON 解析失败：{report_json}（{exc}）", err=True)
+            raise typer.Exit(code=1) from exc
+
+        from apkscan.dynamic import capture_plan
+
+        if as_json:
+            import dataclasses
+
+            decision = capture_plan.decide_capture(report)
+            typer.echo(_json.dumps(dataclasses.asdict(decision), ensure_ascii=False, indent=2))
+            return
+
+        steps = capture_plan.plan_capture(report)
+        typer.echo("# 抓包打法（据静态报告规避信号 + 方法目录决策树）\n")
+        for i, step in enumerate(steps, 1):
+            typer.echo(f"{i}. {step}\n")
+    except typer.Exit:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 兜底任何意外，转友好提示而非 traceback
+        logger.exception("[cli] capture-plan 生成打法异常")
+        typer.echo(f"错误：生成打法失败：{exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+@app.command(name="config-channel")
+def config_channel_cmd(
+    prefix: str = typer.Option(..., "--prefix", help="算法前缀常量（从样本里抠出的常量字符串）。"),
+    domain: str = typer.Option(..., "--domain", help="基域（从样本里抠出的域名常量）。"),
+    path: str = typer.Option("", "--path", help="配置对象路径；空则只到域名。"),
+    day: str = typer.Option("", "--date", help="中心日期 YYYY-MM-DD；默认今天。"),
+    back: int = typer.Option(3, "--back", help="往前枚举天数。"),
+    fwd: int = typer.Option(1, "--fwd", help="往后枚举天数。"),
+) -> None:
+    """枚举「MD5(前缀+日期)+.基域」算法生成的下发通道候选子域（A4）。
+
+    这类下发 URL 运行时才拼、静态不存在，analyze 发现不了。给定从样本抠出的前缀 + 基域，本命令按日期窗口
+    枚举候选子域/URL（**同时**产日历年与 ISO 周年两种，堵 Java SimpleDateFormat 大写 YYYY 的 week-year 坑），
+    供被动查历史解析 / passive DNS / 证书透明度反查真实下发。纯离线生成，绝不联网。
+    """
+    import json as _json
+    from datetime import date as _date
+
+    from apkscan.config.algo_channel import date_window, md5_date_subdomains
+
+    try:
+        center = _date.fromisoformat(day.strip()) if day.strip() else _date.today()
+    except ValueError:
+        typer.echo(f"错误：--date 格式应为 YYYY-MM-DD：{day!r}", err=True)
+        raise typer.Exit(code=2) from None
+    days = date_window(center, back=back, fwd=fwd)
+    candidates = md5_date_subdomains(prefix, domain, days, path=path)
+    typer.echo(_json.dumps(
+        {"center": center.isoformat(), "count": len(candidates), "candidates": candidates},
+        ensure_ascii=False, indent=2))
+
+
+@app.command(name="config-probe")
+def config_probe_cmd(
+    report_path: Path = typer.Argument(..., help="analyze 产出的 report.json（读其中的 config_probe_plan）。"),
+    authorized_active: bool = typer.Option(
+        False, "--authorized-active",
+        help="真的发起请求。**默认关**：不带此开关只列出将要请求的 URL，零流量。",
+    ),
+    into: str = typer.Option("", "--into", help="把结果回灌进这份 report.json（默认不写，只打印）。"),
+    limit: int = typer.Option(0, "--limit", help="本次最多请求几个候选；0 = 用内建上限。"),
+    archive: str = typer.Option("", "--archive", help="原始字节落盘目录；不给则不落盘（线索仍照出）。"),
+) -> None:
+    """按 report.json 里的配置探测预案实际取回配置对象（授权档）。
+
+    analyze 只出预案不取回：预案要靠资产排序才拼得出，而排序在下载阶段之后，同一轮里赶不上。
+    这个时序是有意保留的——主动请求属不可逆的对外动作，让它跨一轮、由人看过预案再决定发不发。
+
+    ★默认不发任何请求。要真发必须显式 ``--authorized-active``，且请自行确认已获授权。
+
+    结果分四种，两两都不能混：**取到并解出**（hit）/ **解开了里面确实没有**（no_content，
+    这才是"查了没有"）/ **取到但解码链没走通**（undecoded，内容未知，多为密文而没配方）/
+    **没取成**（failed，404、超时、被 SSRF 防护拦下）。
+    """
+    import json as _json
+
+    from apkscan.core.appcrypto import CryptoRecipe
+    from apkscan.core.config_probe_run import run_plan
+
+    try:
+        payload = _json.loads(report_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001 — CLI 边界：坏输入给明确退出码
+        typer.echo(f"错误：读不了 {report_path}：{exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    if not isinstance(payload, dict):
+        typer.echo("错误：report.json 顶层不是对象。", err=True)
+        raise typer.Exit(code=2)
+
+    raw_meta = payload.get("meta")
+    meta: dict = raw_meta if isinstance(raw_meta, dict) else {}
+    plan = meta.get("config_probe_plan")
+    if not plan:
+        typer.echo(
+            "该报告里没有配置探测预案（meta.config_probe_plan）。预案需要样本里同时提取到"
+            "配置接口路径与后端域名才拼得出——缺哪一头都不会有。",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    # ★身份校验放在**发请求之前**：预案、解码配方都取自 report_path，结果却写进 --into
+    #   指向的报告。两者若不是同一个样本，取回的下发池会被安到别的案子头上——而请求一旦
+    #   发出就撤不回来，事后才发现写错地方已经晚了。
+    if into and Path(into).resolve() != report_path.resolve():
+        their = _sample_id_of(into)
+        mine = meta.get("sample_sha256")
+        if not (mine and their and str(mine) == str(their)):
+            typer.echo(
+                f"错误：--into 指向的是另一份报告，且两边的 sample_sha256 对不上"
+                f"（预案来自 {report_path.name}={mine or '缺失'}，"
+                f"目标 {Path(into).name}={their or '缺失'}）。\n"
+                f"取回结果只能写回**同一个样本**的报告。要么把 --into 指向 {report_path.name} "
+                f"本身，要么先确认两份报告确实是同一样本（缺 sample_sha256 的旧报告请重跑 "
+                f"analyze 生成）。",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+
+    result = run_plan(
+        plan,
+        authorized=authorized_active,
+        archive_dir=Path(archive) if archive else None,
+        recipe=CryptoRecipe.from_meta(meta.get("crypto_recipe")),
+        limit=limit or None,
+    )
+
+    if not authorized_active:
+        typer.echo(f"预演：{len(result.outcomes)} 个候选，**未发出任何请求**。")
+        for o in result.outcomes:
+            typer.echo(f"  {o.url}")
+        if result.truncated:
+            typer.echo(f"  （另有 {result.truncated} 个候选超出上限未列入）")
+        typer.echo("\n确认已获授权后，加 --authorized-active 真正取回。")
+        return
+
+    counts = result.counts()
+    undecoded = counts.get("undecoded", 0)
+    typer.echo(
+        f"取回完成：解出内容 {counts.get('hit', 0)} / 解开了但里面没有 "
+        f"{counts.get('no_content', 0)} / 取到但解不开 {undecoded} / "
+        f"未取成 {counts.get('failed', 0)}"
+        + (f"；另有 {result.truncated} 个候选超出上限未请求" if result.truncated else "")
+    )
+    if undecoded:
+        # ★不能让这几条被读成"没有"：字节在手上，内容还不知道。
+        typer.echo(
+            f"  提示：{undecoded} 个候选取到了字节但解码链没走通，**内容未知**——"
+            f"不可据此写「未发现下发域名」。多为密文而报告里没有可用配方；"
+            f"拿到配方后重跑，或用 --archive 保下原始字节另行分析。"
+        )
+    for o in result.outcomes:
+        if o.status == "hit":
+            typer.echo(f"  [hit] {o.url} → 域名 {len(o.domains)} / IP {len(o.ips)}")
+        elif o.status == "undecoded":
+            typer.echo(f"  [解不开] {o.url} → {o.size} 字节，内容未知")
+    if not into:
+        typer.echo(_json.dumps(result.to_meta(), ensure_ascii=False, indent=2))
+        return
+
+    try:
+        added_eps, added_leads = _merge_config_probe_into_report(into, result)
+    except Exception as exc:  # noqa: BLE001 — 已经发出去的请求不能白发
+        # ★回灌失败时必须把成果吐到 stdout：这些字节是**实发请求**换来的，
+        #   报个错就退出等于把它们扔了，而对方那边的请求已经发生、不可撤销。
+        typer.echo(f"错误：回灌 {into} 失败：{exc}", err=True)
+        typer.echo("以下是本次取回的完整结果（请自行保存，勿重复发起请求）：", err=True)
+        typer.echo(_json.dumps(result.to_meta(), ensure_ascii=False, indent=2))
+        raise typer.Exit(code=1) from exc
+    typer.echo(
+        f"已回灌 {into}：新增端点 {added_eps} 个、线索 {added_leads} 条"
+        f"（source=remote-config，非运行时实测；未做归属查询，需要就跑 `fxapk enrich`）。"
+    )
+
+
+def _sample_id_of(report_json_path: str) -> str:
+    """读一份 report.json 的 ``meta.sample_sha256``；读不到（文件坏/缺字段）返回空串。
+
+    只用于「两份报告是不是同一个样本」这一道校验，所以读不到就返回空——由调用方按
+    fail-closed 处理（宁可拦下让人确认，也不能把一个案子的取回结果写进另一个案子）。
+    """
+    import json as _json
+
+    try:
+        payload = _json.loads(Path(report_json_path).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — 读不出就是「对不上」，交调用方拦下
+        logger.debug("[config-probe] 读不了 %s，无法校验样本身份", report_json_path,
+                     exc_info=True)
+        return ""
+    meta = payload.get("meta") if isinstance(payload, dict) else None
+    value = meta.get("sample_sha256") if isinstance(meta, dict) else None
+    return str(value) if value else ""
+
+
+def _merge_config_probe_into_report(report_json_path: str, result: object) -> tuple[int, int]:
+    """把取回结果并进 report.json：endpoints + **leads** + meta 记一次运行。原子写。
+
+    ★必须同时产 Lead，否则这批域名到不了任何出口：文书套打、IOC 导出、闭环目标、digest、
+    corpus 入库**全部只读 leads**。只往 endpoints 里塞，等于取回来的下发池躺在 JSON 里没人看
+    ——而它恰恰是这条命令最有价值的产出。Lead 走 ``build_endpoint_leads`` 这条与静态侧
+    同一的链，**四步一步都不能少**：advice 分级 → 默认兜底 → base_advice 封存 →
+    重打包隔离。曾经只做前三步，于是重打包件（正版 App 被重签名）里取回的域名——它们属于
+    **被仿冒的正版厂商**——会以最高档直通出口，而同一份报告走静态链会被降到「待核」。
+    接出口就得连隔离一起接：把 Lead 送进闸门的那只手，也要负责把该拦的拦住。
+
+    ★回灌的端点 source 恒为 ``remote-config``：它是"配置里出现的域名"，**不是**运行时实测
+    接触，不得升成确认徽标。
+
+    Returns:
+        ``(新增端点数, 新增线索数)``
+    """
+    import json as _json
+
+    from apkscan.core.atomic import atomic_write_text
+    from apkscan.core.leads import (
+        _VERDICT_REPACK_SUSPECTED,
+        _apply_default_advice,
+        apply_repack_quarantine,
+        build_endpoint_leads,
+    )
+    from apkscan.core.models import seal_base_advice
+    from apkscan.core.report_schema import ensure_writable_report_version
+    from apkscan.report import json as report_json
+
+    path = Path(report_json_path)
+    payload = _json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise typer.BadParameter(f"{report_json_path} 顶层不是对象")
+    ensure_writable_report_version(payload.get("schema_version"))
+    endpoints = payload.get("endpoints")
+    if not isinstance(endpoints, list):
+        endpoints = []
+        payload["endpoints"] = endpoints
+    seen = {
+        (str(e.get("kind")), str(e.get("value")))
+        for e in endpoints if isinstance(e, dict)
+    }
+    fresh = []
+    for ep in getattr(result, "endpoints", []):
+        key = (ep.kind, ep.value)
+        if key in seen:
+            continue
+        seen.add(key)
+        endpoints.append(report_json._to_jsonable(ep))
+        fresh.append(ep)
+
+    # ★meta 要在产 Lead **之前**取好：第四步的重打包隔离读的就是 meta 里的
+    #   repack_identity 判定与人工放行墓碑。末尾的三分运行记录也写在这里。
+    meta = payload.get("meta")
+    if not isinstance(meta, dict):
+        # meta 存在但不是 dict 时，原样保留在 meta_original 里再重建——直接覆盖会毁掉
+        # 别人的数据，静默丢弃则会让"已回灌"这句话变成假话（三分记录压根没写进去）。
+        if meta is not None:
+            payload["meta_original"] = meta
+        meta = {}
+        payload["meta"] = meta
+
+    # --- 新端点 → Lead ---------------------------------------------------
+    # online=False：本命令只取配置对象，没做 WHOIS/ICP/ASN 归属查询。如实标注比假装查过好，
+    # 想补归属另跑 `fxapk enrich`。
+    leads = payload.get("leads")
+    if not isinstance(leads, list):
+        leads = []
+        payload["leads"] = leads
+    lead_keys = {
+        (str(x.get("category")), str(x.get("value")))
+        for x in leads if isinstance(x, dict)
+    }
+    added_leads = 0
+    if fresh:
+        candidates = build_endpoint_leads(fresh, online=False)
+        _apply_default_advice(candidates)
+        seal_base_advice(candidates)
+        # 先去重、再隔离：审计块记的是**真正写进这份报告**的值，被去重丢掉的不算，
+        # 否则账目与报告内容对不上。
+        new_leads = []
+        for lead in candidates:
+            key = (lead.category.value, lead.value)
+            if key in lead_keys:
+                continue
+            lead_keys.add(key)
+            new_leads.append(lead)
+        # ★第四步，与静态链（pipeline._stage_build_leads）和动态回灌（dynamic.merge）同一道闸。
+        #   样本判为正版重打包时，配置服务器下发的域名/IP 属**被仿冒的正版厂商**，必须机制化
+        #   降到「待核」——advice 的最高档是文书套打 / ioc --only-investigate / HTML 红标 /
+        #   closure 的共同闸门，而本函数正是把 Lead 新接进这些出口的地方。
+        quarantined = apply_repack_quarantine(new_leads, meta)
+        if quarantined:
+            # 并入而非覆盖：目标报告多半已带静态侧的隔离记录，整块覆盖会把那批 values 抹掉
+            # ——而它们是闭环兜底门放行时查的凭据。
+            blob = meta.get("repack_quarantine")
+            if not isinstance(blob, dict):
+                blob = {"reason": _VERDICT_REPACK_SUSPECTED, "count": 0, "values": []}
+                meta["repack_quarantine"] = blob
+            merged = list(dict.fromkeys([*(blob.get("values") or []), *quarantined]))
+            blob["values"] = merged
+            blob["count"] = len(merged)
+        for lead in new_leads:
+            leads.append(report_json._to_jsonable(lead))
+        added_leads = len(new_leads)
+
+    runs = meta.get("config_probe_runs")
+    if not isinstance(runs, list):
+        runs = []
+    runs.append(result.to_meta())  # type: ignore[attr-defined]
+    meta["config_probe_runs"] = runs
+    meta["config_probe_run"] = runs[-1]  # 最近一次，供只看单次的消费方
+
+    # ★真取到字节的 outcome 还要汇进 remote_config_artifacts —— 那是 config-chain 组装、
+    #   corpus 跨样本「同一份配置对象」串联、closure 解密三处**唯一**读的键
+    #   （pipeline 内的授权档下载写的也是它）。只写 config_probe_runs 的话，同一份配置
+    #   能不能串案就取决于走哪条路取回，控制链还会永远缺最后一段。
+    artifacts = meta.get("remote_config_artifacts")
+    if not isinstance(artifacts, list):
+        artifacts = []
+    known = {
+        (str(a.get("source_url")), str(a.get("sha256")))
+        for a in artifacts if isinstance(a, dict)
+    }
+    for outcome in getattr(result, "outcomes", []):
+        if not outcome.sha256:  # 没取到字节的（planned/failed）不是 artifact
+            continue
+        if (outcome.url, outcome.sha256) in known:
+            continue
+        known.add((outcome.url, outcome.sha256))
+        # 形状与 pipeline._fetch_decode_one 的返回逐字段对齐——消费方按名取值，
+        # 差一个字段就会在另一条路上静默取到 None。
+        artifacts.append({
+            "source_url": outcome.url,
+            "sha256": outcome.sha256,
+            "size": outcome.size,
+            "decoded": outcome.decoded,
+            "decode_chain": list(outcome.decode_chain),
+            "domains": list(outcome.domains),
+            "ips": list(outcome.ips),
+            "stored_path": outcome.stored_path,
+        })
+    if artifacts:
+        meta["remote_config_artifacts"] = artifacts
+
+    # ★网络模式痕迹要如实：这条命令真的向目标发过请求，报告不能再声称自己全程被动。
+    #   只升不降——静态那轮是 passive 是事实，但"此后又做过授权档主动取回"同样是事实，
+    #   而 corpus 与 jsonl 把 mode 当可信度/可复现性的依据在读。
+    if getattr(result, "authorized", False):
+        meta["mode"] = ANALYSIS_MODE_AUTHORIZED_ACTIVE
+
+    atomic_write_text(path, _json.dumps(payload, ensure_ascii=False, indent=2))
+    return len(fresh), added_leads
+
+
+@app.command(name="port-normalize")
+def port_normalize_cmd(
+    declared_path: str = typer.Option(..., "--declared", help='声明端口 JSON：{"IP": 端口} 或 [{"ip":…,"port":…}]（解密所得，本命令只读不存）。'),
+    report_path: str = typer.Option("", "--report", help="report.json：从中取实测端口（enrichment.runtime.remote_endpoints）。"),
+    observed_path: str = typer.Option("", "--observed", help='实测端口 JSON（替代 --report）：{"IP": [端口,…]}。'),
+    min_support: int = typer.Option(3, "--min-support", help="最少配对数，低于此不给确认结论。"),
+) -> None:
+    """用实测端口反推「配置声明端口 → 真实连接端口」的归一化变换（A2 静态×动态交叉校验）。
+
+    部分家族配置里存的是 raw 端口，运行时再按固定规则算真实端口。本命令把**解密所得的声明端口**与
+    **fxapk 实测到的连接端口**按 IP 配对，在有界假设空间里找能解释全部配对的最简变换，并给出支持/反例明细。
+
+    ★ 不产生任何端点：observed 侧全是实测值，输出是**可证伪的变换假设**。配对太少或过于齐整时判
+    degenerate、拒绝给结论——宁可说数据不足，也不给凑出来的公式。纯离线，绝不联网。
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    from apkscan.config.port_norm import (
+        build_pairs,
+        infer_port_transform,
+        observed_ports_from_report,
+    )
+
+    def _load(path: str, what: str) -> object:
+        try:
+            return _json.loads(_Path(path).read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001 — CLI 边界：坏输入give 明确退出码
+            typer.echo(f"错误：读取{what}失败（{path}）：{exc}", err=True)
+            raise typer.Exit(code=2) from None
+
+    raw_declared = _load(declared_path, "--declared")
+    declared: dict[str, int] = {}
+    if isinstance(raw_declared, dict):
+        declared = {str(k): v for k, v in raw_declared.items() if isinstance(v, int)}
+    elif isinstance(raw_declared, list):
+        for item in raw_declared:
+            if isinstance(item, dict) and isinstance(item.get("port"), int):
+                declared[str(item.get("ip") or "")] = item["port"]
+    if not declared:
+        typer.echo('错误：--declared 应为 {"IP": 端口} 或 [{"ip":…,"port":…}]，且端口为整数。', err=True)
+        raise typer.Exit(code=2)
+
+    if observed_path:
+        raw_obs = _load(observed_path, "--observed")
+        observed = {
+            str(k): {p for p in v if isinstance(p, int)}
+            for k, v in (raw_obs or {}).items()
+            if isinstance(v, list)
+        } if isinstance(raw_obs, dict) else {}
+    elif report_path:
+        observed = observed_ports_from_report(_load(report_path, "--report"))
+    else:
+        typer.echo("错误：须给 --report 或 --observed 之一（实测端口来源）。", err=True)
+        raise typer.Exit(code=2)
+
+    pairs, ambiguous, unmatched = build_pairs(declared, observed)
+    res = infer_port_transform(pairs, min_support=min_support)
+    best = res.best
+    typer.echo(_json.dumps({
+        "pair_count": len(res.pairs),
+        "degenerate": res.degenerate,
+        "degenerate_reason": res.degenerate_reason,
+        "ambiguous_ips": ambiguous,
+        "unmatched_ips": unmatched,
+        "notes": res.notes,
+        "confirmed": None if best is None else {
+            "form": best.form, "constant": best.constant,
+            "formula": best.formula, "support": best.support_count,
+        },
+        "candidates": [
+            {
+                "form": c.form, "constant": c.constant, "formula": c.formula,
+                "support": c.support_count, "contradicted": len(c.contradicted),
+                "confirmed": c.confirmed,
+            }
+            for c in res.candidates
+        ],
+    }, ensure_ascii=False, indent=2))
+
+
+def _print_auto_result(result: object) -> None:
+    """打印 auto.run 的结构化结果：逐步状态 + 报告路径。"""
+    if not isinstance(result, dict):
+        typer.echo("一键全自动：返回值非预期格式，已忽略。")
+        return
+    typer.echo("")
+    typer.echo("===== 步骤摘要 =====")
+    steps = result.get("steps") or []
+    _tags = {"done": "[OK]  ", "skipped": "[SKIP]", "error": "[ERR] "}
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        status = str(step.get("status", "?"))
+        name = str(step.get("name", "?"))
+        detail = str(step.get("detail", ""))
+        tag = _tags.get(status, "[?]   ")
+        typer.echo(f"{tag} {name}{('：' + detail) if detail else ''}")
+
+    pkg = str(result.get("package_name") or "(未知)")
+    out_dir = str(result.get("out_dir") or "")
+    typer.echo("")
+    typer.echo(f"包名：{pkg}  输出目录：{out_dir}")
+
+    report_paths = result.get("report_paths") or []
+    if report_paths:
+        typer.echo(f"报告（{len(report_paths)}）：")
+        for p in report_paths:
+            typer.echo(f"  - {p}")
+    else:
+        typer.echo("未产出报告（详见步骤摘要）。")
+
+    closure = result.get("closure")
+    if isinstance(closure, dict):
+        typer.echo("")
+        typer.echo(f"案件闭环：{closure.get('status', 'failed')}")
+        gaps = closure.get("gaps")
+        if isinstance(gaps, list) and gaps:
+            typer.echo(f"未闭环项（{len(gaps)}）：")
+            for gap in gaps[:6]:
+                typer.echo(f"  - {gap}")
+
+
+def _print_batch_result(result: object) -> None:
+    """打印 batch.run_folder 的结构化汇总：计数行 + 逐个 [OK]/[ERR]/[SKIP]。"""
+    if not isinstance(result, dict):
+        typer.echo("批量分析：返回值非预期格式，已忽略。")
+        return
+    summary = result.get("summary") or {}
+    typer.echo("")
+    typer.echo("===== 批量汇总 =====")
+    had = "有" if summary.get("had_device") else "无（仅静态）"
+    typer.echo(
+        f"共 {summary.get('total', 0)} 个 · 分析 {summary.get('analyzed', 0)}"
+        f" · 跳过 {summary.get('skipped', 0)} · 失败 {summary.get('failed', 0)} · 设备：{had}"
+    )
+    clusters = result.get("clusters") or []
+    if clusters:
+        typer.echo(f"团伙簇：{len(clusters)} 个（共享强指纹串并，详见 case_correlation.json）")
+        for c in clusters:
+            if not isinstance(c, dict):
+                continue
+            members = c.get("members") or []
+            shared = c.get("shared") or []
+            keys = "、".join(
+                f"{s.get('kind')}={s.get('value')}" for s in shared[:3] if isinstance(s, dict)
+            )
+            typer.echo(f"  簇#{c.get('cluster_id')}：{len(members)} 个样本，并案依据：{keys}")
+    for item in result.get("analyzed") or []:
+        if isinstance(item, dict):
+            typer.echo(f"[OK]   {item.get('apk')} → {item.get('out_dir')}")
+    for item in result.get("failed") or []:
+        if isinstance(item, dict):
+            typer.echo(f"[ERR]  {item.get('apk')}：{item.get('detail')}")
+    for item in result.get("skipped") or []:
+        if isinstance(item, dict):
+            typer.echo(f"[SKIP] {item.get('apk')}（已分析过）")
+
+
+def _print_doctor_result(result: object) -> None:
+    """打印 doctor.run 的结构化结果：逐项 [OK]/[FAIL] + 缩进列出 fix_cmd。"""
+    if not isinstance(result, dict):
+        typer.echo("体检：返回值非预期格式，已忽略。")
+        return
+    items = result.get("items") or []
+    typer.echo("")
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        ok = bool(item.get("ok"))
+        name = str(item.get("name", "?"))
+        detail = str(item.get("detail", ""))
+        tag = "[OK]  " if ok else "[FAIL]"
+        typer.echo(f"{tag} {name}{('：' + detail) if detail else ''}")
+        if not ok:
+            fix_cmd = item.get("fix_cmd") or []
+            if isinstance(fix_cmd, list) and fix_cmd:
+                typer.echo("       建议命令：")
+                for cmd in fix_cmd:
+                    typer.echo(f"         {cmd}")
+    typer.echo("")
+    overall = "全部关键项通过" if result.get("ok", False) else "存在未通过的关键项（详见上方 [FAIL]）"
+    typer.echo(f"体检结论：{overall}")
+
+
+def _echo_extra_dex_result(report: object) -> None:
+    """加载完额外 DEX 后如实报数：发现几个、成功并入几个、失败几个。
+
+    ★不能在加载前只报"发现 N 个并入分析"——脱壳 dump 的 DEX 成批不被 androguard 接受
+    是常态（Android 10+ hidden-api flag），实测 33 个只成功 10 个，而读到的却是
+    "33 个并入" + 分析器 error=0，等于把"没看见"说成"看过了"。
+    """
+    if not isinstance(report, dict) or not report:
+        return
+    requested = report.get("requested")
+    loaded = report.get("loaded")
+    failed = int(report.get("failed") or 0)
+    if not failed:
+        typer.echo(f"额外 DEX：{loaded} 个已并入静态分析")
+        return
+    by_error = report.get("failures_by_error")
+    kinds = (
+        "；".join(f"{k} ×{v}" for k, v in list(by_error.items())[:3])
+        if isinstance(by_error, dict) and by_error
+        else ""
+    )
+    typer.echo(
+        f"额外 DEX：发现 {requested} 个，成功并入 {loaded} 个，失败 {failed} 个"
+        + (f"（{kinds}）" if kinds else "")
+    )
+    typer.echo("       ★静态 DEX 面不完整，报告 visibility.dex 已标 partial")
+
+
+def _resolve_extra_dex(spec: str) -> list[str]:
+    """解析 --extra-dex（逗号分隔的 .dex 路径或目录）为 .dex 文件路径列表。
+
+    - 目录：递归收集其下所有 .dex 文件（frida-dexdump 常把 dump 放子目录，
+      与 unpack._collect_dex 的 rglob 行为对齐，避免子目录 dex 静默漏掉）。
+    - 文件：原样保留。
+    - 不存在的条目记 warning 跳过（不静默吞错），交由 load_apk 对单个失败再降级。
+    """
+    files: list[str] = []
+    for raw in spec.split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        p = Path(item)
+        if p.is_dir():
+            dexes = sorted(p.rglob("*.dex"))
+            if not dexes:
+                logger.warning("--extra-dex 目录内无 .dex 文件：%s", p)
+            files.extend(str(d) for d in dexes)
+        elif p.is_file():
+            files.append(str(p))
+        else:
+            logger.warning("--extra-dex 路径不存在，跳过：%s", item)
+    return files
+
+
+def _run_dynamic_after_static(
+    apk_path: str, package: str, out: str, report: Report, formats: list[str], base: str,
+) -> None:
+    """--dynamic：静态完成且有设备时，顺序执行 unpack + capture，并把运行时端点并回主报告。
+
+    两个动态模块均惰性导入，缺失时打印"该功能未安装"并跳过，绝不崩主流程。
+    capture status==done 后，惰性 import merge，从 out/runtime_report.json 读回运行时端点，
+    去重并入静态 report.endpoints、按 infra 分级生成线索、重渲 report.html/json，
+    让真·C2 进入主线索清单而非游离在 runtime_report.json。合并失败不影响已产出静态报告。
+    """
+    typer.echo("")
+    typer.echo("===== 动态补全（真机） =====")
+
+    try:
+        from apkscan.dynamic import unpack as _unpack
+    except ImportError:
+        typer.echo("该功能未安装：apkscan.dynamic.unpack 不可用，跳过脱壳。")
+    else:
+        try:
+            _print_dynamic_result("脱壳", _unpack.run(apk_path, out=out, reanalyze=True))
+        except Exception:
+            logger.exception("动态脱壳执行异常（不影响已产出的静态报告）")
+            typer.echo("脱壳执行异常（详见日志），已跳过。")
+
+    if not package:
+        typer.echo("未知包名，跳过抓包（capture 需目标包名）。")
+        return
+
+    try:
+        from apkscan.dynamic import capture as _capture
+    except ImportError:
+        typer.echo("该功能未安装：apkscan.dynamic.capture 不可用，跳过抓包。")
+        return
+
+    try:
+        capture_result = _capture.run(package, out=out)
+    except Exception:
+        logger.exception("动态抓包执行异常（不影响已产出的静态报告）")
+        typer.echo("抓包执行异常（详见日志），已跳过。")
+        return
+
+    _print_dynamic_result("抓包", capture_result)
+
+    # 抓包成功（done）才把运行时端点并回主报告并重渲；skipped/error 不调 merge。
+    status = capture_result.get("status") if isinstance(capture_result, dict) else None
+    from apkscan.dynamic import STATUS_DONE
+
+    if status != STATUS_DONE:
+        return
+
+    _merge_runtime_into_report(capture_result, out, report, formats, base)
+
+
+def _merge_runtime_into_report(
+    capture_result: object, out: str, report: Report, formats: list[str], base: str,
+) -> None:
+    """把 capture 抓到的运行时端点并回主报告并重渲；任何失败不破坏已产出的静态报告。"""
+    try:
+        from apkscan.dynamic import merge as _merge
+    except ImportError:
+        typer.echo("该功能未安装：apkscan.dynamic.merge 不可用，跳过运行时端点并入。")
+        return
+
+    try:
+        # 运行时端点来源（不动 capture 契约）：优先 report_paths 里的 runtime_report.json，
+        # 否则回退到约定路径 out/runtime_report.json。
+        runtime_path = _resolve_runtime_report_path(capture_result, out)
+        endpoints = _merge.load_runtime_endpoints(runtime_path)
+        stats = _merge.merge_and_rerender(
+            report,
+            endpoints,
+            out,
+            base,
+            formats=formats,
+            on_progress=lambda m: typer.echo(f"... {m}"),
+            runtime_report_path=runtime_path,
+        )
+        merged = stats.get("merged", 0)
+        new_leads = stats.get("new_leads", 0)
+        report_paths = stats.get("report_paths") or []
+        typer.echo(
+            f"运行时端点并入：新增端点 {merged}，新增线索 {new_leads}；"
+            f"重渲报告 {len(report_paths)} 份"
+        )
+        for p in report_paths:
+            typer.echo(f"  - {p}")
+    except Exception:
+        logger.exception("运行时端点并入/重渲异常（不影响已产出的静态报告）")
+        typer.echo("运行时端点并入异常（详见日志），静态报告不受影响。")
+
+
+def _resolve_runtime_report_path(capture_result: object, out: str) -> str:
+    """从 capture 返回的 report_paths 里找 runtime_report.json，否则回退 out/runtime_report.json。"""
+    if isinstance(capture_result, dict):
+        for p in capture_result.get("report_paths") or []:
+            if isinstance(p, str) and Path(p).name == "runtime_report.json":
+                return p
+    return str(Path(out) / "runtime_report.json")
+
+
+def _report_from_json_dict(payload: dict) -> Report:
+    """Backward-compatible wrapper around the shared report loader."""
+    from apkscan.core.report_io import report_from_dict
+
+    return report_from_dict(payload)
+
+
+def _rerender_html_if_present(report_json_path: str) -> str:
+    """``--into`` 回灌改了 report.json 后：若**同目录同名** ``<base>.html`` 存在，则据改后的
+    report.json 复用 report.html 渲染入口重渲该 html，让台账新增线索同步进人读报告。
+
+    返回重渲的 html 路径；同目录无对应 html 则不重渲、不新建（返回空串）。绝不抛——读/解析/
+    渲染失败只 logging 并返回空串，不影响已回灌的 report.json（--into 主产物）。
+    """
+    import json as _json
+
+    rp = Path(report_json_path)
+    html_path = rp.with_suffix(".html")
+    if not html_path.is_file():
+        return ""  # 无对应 report.html：不主动生成（尊重用户只要 JSON 的场景）
+    try:
+        payload = _json.loads(rp.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            logger.warning("[cli] --into 重渲跳过：report.json 顶层非对象：%s", rp)
+            return ""
+        report = _report_from_json_dict(payload)
+        from apkscan.report import html as report_html
+
+        report_html.render(report, str(html_path))
+        return str(html_path)
+    except Exception:
+        logger.exception("[cli] --into 后重渲 report.html 失败（已忽略，不影响 report.json）：%s", html_path)
+        return ""
+
+
+def _print_dynamic_result(label: str, result: object) -> None:
+    """打印 DynamicResult（dict 契约）摘要；容错非 dict 返回。"""
+    if not isinstance(result, dict):
+        typer.echo(f"{label}：返回值非预期格式，已忽略。")
+        return
+    status = result.get("status", "?")
+    reason = result.get("reason", "")
+    typer.echo(f"{label}：status={status}{('  ' + reason) if reason else ''}")
+    for key, title in (("artifacts", "产物"), ("report_paths", "报告"), ("playbook", "操作步骤")):
+        items = result.get(key) or []
+        if items:
+            typer.echo(f"  {title}（{len(items)}）：")
+            for it in items:
+                typer.echo(f"    - {it}")
+
+
+def _write_reports(report: Report, out_dir: Path, formats: list[str], base: str) -> None:
+    """按 formats 写出报告，文件名用 ``base``（APK 名去后缀）：``<base>.{json,html,pdf}``。
+
+    report.html / report.json 由其它 agent 实现。``runtime_report.json`` 不在此处写
+    （那是 capture 的独立契约名）。
+
+    写完后对每个产物算 sha256，落 ``<base>.sha256`` 旁文件（对标 sha256sum 格式），作为
+    报告自证完整性的可复现校验锚点（工具产物自证，不替代司法鉴定机构的证据保全）。
+    """
+    written: list[Path] = []  # 实际落盘成功的产物，供生成 .sha256 旁文件
+
+    if "json" in formats:
+        try:
+            from apkscan.report import json as report_json
+
+            path = out_dir / f"{base}.json"
+            report_json.dump(report, str(path))
+            written.append(path)
+            typer.echo(f"已写出 JSON 报告：{path}")
+        except Exception:
+            logger.exception("写出 JSON 报告失败（report.json 模块可能尚未就绪）")
+
+    html_path = out_dir / f"{base}.html"
+    if "html" in formats:
+        try:
+            from apkscan.report import html as report_html
+
+            report_html.render(report, str(html_path))
+            written.append(html_path)
+            typer.echo(f"已写出 HTML 报告：{html_path}")
+        except Exception:
+            logger.exception("写出 HTML 报告失败（report.html 模块可能尚未就绪）")
+
+    if "pdf" in formats:
+        # PDF 派生自 HTML：html 已写则复用，否则 pdf.render 内部渲临时 HTML 再转。
+        try:
+            from apkscan.report import pdf as report_pdf
+
+            path = out_dir / f"{base}.pdf"
+            html_source = str(html_path) if ("html" in formats and html_path.is_file()) else None
+            if report_pdf.render(report, str(path), html_source=html_source):
+                written.append(path)
+                typer.echo(f"已写出 PDF 报告：{path}")
+            else:
+                typer.echo(
+                    "PDF 导出跳过：未找到 Chrome/Edge/Chromium 或转换失败（详见日志）；"
+                    "HTML/JSON 不受影响。"
+                )
+        except Exception:
+            logger.exception("写出 PDF 报告失败")
+
+    _write_sha256_sidecar(out_dir, base, written)
+
+
+def _write_sha256_sidecar(out_dir: Path, base: str, products: list[Path]) -> None:
+    """对每个报告产物算 sha256，落 ``<base>.sha256`` 旁文件（sha256sum 风格：``<hash>  <文件名>``）。
+
+    工具产物自证：供调证人员 / 复核方用 sha256sum 校验报告未被篡改，**不替代司法鉴定机构的
+    证据保全**。算 hash / 写旁文件全包 try/except——失败只 logging，绝不影响已产出的报告。
+    """
+    if not products:
+        return
+    try:
+        import hashlib
+
+        lines: list[str] = []
+        for path in products:
+            if not path.is_file():
+                continue
+            h = hashlib.sha256()
+            with open(path, "rb") as f:
+                for chunk in iter(lambda f=f: f.read(1 << 20), b""):
+                    h.update(chunk)
+            # sha256sum 风格：哈希 + 两个空格 + 文件名（旁文件与产物同目录，用 name 即可）。
+            lines.append(f"{h.hexdigest()}  {path.name}")
+        if not lines:
+            return
+        sidecar = out_dir / f"{base}.sha256"
+        sidecar.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        typer.echo(f"已写出完整性校验旁文件：{sidecar}")
+    except Exception:
+        logger.exception("[cli] 写出 .sha256 旁文件失败（已忽略，不影响报告产出）")
+
+
+def _print_summary(report: Report) -> None:
+    """打印线索数量摘要。"""
+    typer.echo("")
+    typer.echo("===== 线索摘要 =====")
+    typer.echo(f"端点总数：{len(report.endpoints)}")
+    typer.echo(f"技术发现：{len(report.findings)}")
+    typer.echo(f"线索总数：{len(report.leads)}")
+
+    by_cat: dict[str, int] = {}
+    for lead in report.leads:
+        cat = lead.category.value if isinstance(lead.category, LeadCategory) else str(lead.category)
+        by_cat[cat] = by_cat.get(cat, 0) + 1
+    for cat in sorted(by_cat):
+        typer.echo(f"  {cat}: {by_cat[cat]}")
+
+    ran = sum(1 for s in report.analyzer_status if s.get("status") == "ran")
+    skipped = sum(1 for s in report.analyzer_status if s.get("status") == "skipped")
+    errored = sum(1 for s in report.analyzer_status if s.get("status") == "error")
+    typer.echo(f"分析器：ran={ran} skipped={skipped} error={errored}")
+
+
+@app.command(name="leak-scan")
+def leak_scan_cmd(
+    diff_path: str = typer.Option(
+        "", "--diff", help="unified diff 文件；'-' 表示从 stdin 读。缺省则自动取 git diff。"
+    ),
+    base: str = typer.Option(
+        "", "--base", help="与该 git ref 比（CI 里给 PR 的 base，如 origin/master）。"
+    ),
+    staged: bool = typer.Option(
+        False, "--staged", help="扫已 staged 的改动（pre-commit hook 用）。"
+    ),
+    paths: list[str] = typer.Option(
+        [], "--path", help="改为全量扫这些路径（文件或目录，目录递归展开）。"
+    ),
+    tracked: bool = typer.Option(
+        False,
+        "--tracked",
+        help="全树门禁模式：只扫 --path 下 git 已跟踪的文件，枚举不到即 exit 2。",
+    ),
+    strict: bool = typer.Option(
+        False, "--strict", help="把 domain / context 两条噪音较大的判据也升级为阻断。"
+    ),
+) -> None:
+    """扫**新增内容**里不该进公开仓库的字面值（公网 IP / 疑似凭据 / 域名 / 语境词）。
+
+    默认判据只施加在 diff 的新增行上（PR 门禁）。``--path`` 改为全量扫描：目录会**递归
+    展开**，``--tracked`` 进一步收窄为"只扫 git 已跟踪文件"，用作全树门禁。
+
+    ★``--path`` 曾是个**假绿门禁**：目录被当成"读不动的文件"静默跳过，
+    ``leak-scan --path apkscan --path tests`` 输出"未发现泄漏嫌疑" + exit 0，
+    看起来全树干净、实际一个文件都没扫。现在扫不到即 exit 2，"少扫了"绝不与"扫全了"同形。
+
+    默认只有 ``ip`` / ``secret`` / ``exemption`` 三条判据阻断（精确、误报可控）；
+    ``domain`` / ``context`` 天生噪音大，如实报告但不变红，``--strict`` 才升级为阻断。
+
+    放行某行请加行内注释 ``leak-scan: allow <理由>``——理由必须写，无理由的豁免本身即一条阻断项。
+
+    退出码：0 = 无阻断项；1 = 有阻断项；2 = 取不到 diff / 目标路径枚举失败。纯本地，绝不联网。
+    """
+    import subprocess
+    import sys
+
+    from apkscan.core import leakscan
+
+    if tracked and not paths:
+        typer.echo("错误：--tracked 需要至少一个 --path 指定扫描根。", err=True)
+        raise typer.Exit(code=2)
+
+    if paths:
+        scan_errors: list[str] = []
+        if tracked:
+            targets = leakscan.tracked_files(list(paths), errors=scan_errors)
+        else:
+            targets = leakscan.expand_paths(list(paths), scan_errors)
+        if scan_errors:
+            for message in scan_errors:
+                typer.echo(f"错误：{message}", err=True)
+            typer.echo("错误：扫描目标不完整，拒绝给出「未发现」结论。", err=True)
+            raise typer.Exit(code=2)
+        if not targets:
+            typer.echo("错误：没有枚举到任何待扫文件，拒绝假绿。", err=True)
+            raise typer.Exit(code=2)
+        findings = leakscan.scan_paths(targets, scan_errors)
+        if scan_errors:
+            for message in scan_errors:
+                typer.echo(f"错误：{message}", err=True)
+            raise typer.Exit(code=2)
+        typer.echo(f"leak-scan: 已扫描 {len(targets)} 个文件。")
+    else:
+        if diff_path == "-":
+            diff_text = sys.stdin.read()
+        elif diff_path:
+            try:
+                diff_text = Path(diff_path).read_bytes().decode("utf-8", errors="replace")
+            except OSError as exc:
+                typer.echo(f"错误：读不到 diff 文件 {diff_path}：{exc}", err=True)
+                raise typer.Exit(code=2) from None
+        else:
+            # 无 -U 上下文行：只要新增行，少读一大截无关内容。
+            cmd = ["git", "diff", "--unified=0"]
+            if staged:
+                cmd.append("--cached")
+            if base:
+                cmd.append(f"{base}...HEAD")
+                # ★`base...HEAD` 是三点：只比**已提交**的 commit，工作树里未提交的改动一律不进
+                #   diff。不提示的话，改完直接跑本地校验会看到与改动前一模一样的结果——
+                #   人会以为「豁免没生效 / 判据有 bug」，实际是根本没扫到。踩过一次，故显式说明。
+                dirty = leakscan.uncommitted_paths()
+                if dirty:
+                    typer.echo(
+                        f"提示：检测到 {len(dirty)} 个未提交改动，本次按 {base}...HEAD 扫描、"
+                        f"**不含它们**；要校验未提交内容请先 commit（或改用 --path / --diff）。",
+                        err=True,
+                    )
+            try:
+                proc = subprocess.run(cmd, capture_output=True, timeout=120, check=False)
+            except (OSError, subprocess.SubprocessError) as exc:
+                typer.echo(f"错误：取 git diff 失败（{' '.join(cmd)}）：{exc}", err=True)
+                raise typer.Exit(code=2) from None
+            if proc.returncode != 0:
+                detail = proc.stderr.decode("utf-8", errors="replace").strip()
+                typer.echo(f"错误：git diff 退出码 {proc.returncode}：{detail}", err=True)
+                raise typer.Exit(code=2)
+            diff_text = proc.stdout.decode("utf-8", errors="replace")
+        # diff 自身只有新增行；用当前 HEAD 工作树的完整文件做 Python token 映射。
+        # 行号/内容不吻合或 tokenize 失败时 scan_diff 会回退原始正则（保守多报）。
+        findings = leakscan.scan_diff(diff_text, source_root=Path.cwd())
+        # ★把"这次按掉了多少护栏"如实打出来。此前完全不可见：加 1 条豁免与加 30 条，
+        #   在输出里同形，review 时也不会被顶到眼前——而批量按掉正是护栏失效的主要形态。
+        exemptions = leakscan.iter_exemptions(diff_text)
+        if exemptions:
+            reasons = sorted({" ".join(r.split()) for _p, _l, r in exemptions})
+            typer.echo(
+                f"leak-scan: 本次改动新增 {len(exemptions)} 条行内豁免"
+                f"（{len(reasons)} 种理由，跨 {len({p for p, _l, _r in exemptions})} 个文件）"
+            )
+            for reason in reasons:
+                count = sum(1 for _p, _l, r in exemptions if " ".join(r.split()) == reason)
+                typer.echo(f"  ×{count}  {reason[:88]}")
+
+    typer.echo(leakscan.format_findings(findings, strict=strict))
+    if leakscan.blocking(findings, strict=strict):
+        raise typer.Exit(code=1)
+
+
+def main() -> None:
+    """[project.scripts] 入口。"""
+    # 入口先开 UTF-8 环境：修控制台中文乱码 + 让后续 adb/frida 子进程自动带 UTF-8
+    # （Windows 默认 GBK，否则读子进程输出遇非 GBK 字节会崩）。
+    from apkscan.core.dotenv import load_dotenv
+    from apkscan.core.logsetup import setup_logging
+    from apkscan.core.utf8 import enable_utf8_runtime
+
+    enable_utf8_runtime()
+    # 装「错误定位标识」日志格式器（WARNING+ 末尾带 [@模块.函数:行号]，便于按日志反馈定位）。
+    setup_logging()
+    # 从项目根 .env 兜底加载密钥（FXAPK_SHODAN_KEY 等）；真实环境变量优先，绝不抛。
+    load_dotenv()
+    app()
+
+
+if __name__ == "__main__":
+    main()

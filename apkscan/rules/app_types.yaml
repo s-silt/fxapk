@@ -1,0 +1,192 @@
+# 涉诈 App 类型研判规则库 —— 把"一摞域名/SDK/权限"翻译成"这是哪类盘 → 该向谁调什么证据"。
+#
+# 由 apkscan.analyzers.classify.classify_app 通过 registry.load_rules("app_types") 读取。
+# classify_app 是聚合函数（非普通 BaseAnalyzer）：在所有分析器跑完、build_endpoint_leads
+# 之后由 pipeline 调用一次，聚合 report 现成的 meta/leads/endpoints/findings 信号，加权定类，
+# 并据类型产出**针对性调证 Lead**（带 where_to_request + evidence_to_obtain）。
+#
+# ★ 铁律：分类必须伴随调证 Lead。只输出 app_type 标签 = 检测，不合格。
+#
+# ---- 顶层 dict ----
+#   threshold : 全局过线分（默认 3.0）；某类型最高分 < threshold → 判"未定"。
+#   types     : list[类型规则]
+#
+# ---- 每条 type 规则字段 ----
+#   name        : 类型展示名（杀猪盘 / 赌博 / 贷款 / 裸聊 / 刷单 / 短信马）
+#   investigation: 该类型的调证指向（命中后写入新建 Lead）
+#       where_to_request   : 向谁调
+#       evidence_to_obtain : 可调取的证据清单
+#       notes              : 调证指向说明
+#   signals     : list[带权重的信号]；每条匹配 report 现成信号源，命中累加 weight。
+#       weight   : 权重（float）
+#       desc     : 信号可读描述（写入 app_classification.signals 便于追溯）
+#       任选一种匹配源（互斥，一条信号只用一种）：
+#         permission_all : list[权限短名]；report.meta.dangerous_matched/permissions 全含才命中
+#         permission_any : list[权限短名]；命中任一即命中
+#         path_any       : list[路径子串]；endpoint.value（URL/域名）含任一即命中（大小写不敏感）
+#         text_any       : list[文案/品牌词]；扫 finding 标题+描述 / lead.value / version_name
+#                          / contacts 文本 / endpoint.value 等文本语料，含任一即命中
+#         sdk_any        : list[SDK 名子串]；report.meta.sdks 含任一即命中（大小写不敏感）
+#         crypto_present : true；report.meta.crypto_addresses 非空即命中（USDT/链上收款）
+#         payment_kw_any : list[支付关键字子串]；report.meta.payment_keywords 含任一即命中
+#         c2_present     : true；report.leads 有 is_c2（建议调证的 DOMAIN/IP）即命中
+#         contact_any    : list[contact kind]；report.meta.contacts 有该 kind 计数即命中
+
+threshold: 3.0
+
+types:
+  # =====================================================================
+  # 贷款盘
+  # =====================================================================
+  - name: "贷款盘"
+    investigation:
+      where_to_request: "运营商 / 放贷平台后台 / 短信通道服务商（调被害人范围与个人信息流向）"
+      evidence_to_obtain:
+        - "通讯录上传接口与接收端（服务器归属、接收数据库）"
+        - "被害人手机号清单 / 通讯录上传记录"
+        - "短信读取 / 转发记录与接收方"
+        - "放款 / 还款资金流水与结算账户"
+      notes: "涉非法获取公民个人信息：通讯录 + 短信权限组合 + 上传接口为佐证，向运营商/平台调被害人范围。"
+    signals:
+      - weight: 2.0
+        desc: "通讯录 + 短信权限组合（非法获取公民个人信息核心佐证）"
+        permission_all: ["READ_CONTACTS", "READ_SMS"]
+      - weight: 1.5
+        desc: "申请放贷接口路径特征（/loan、/apply）"
+        path_any: ["/loan", "/apply", "/repay", "/credit", "/borrow"]
+      - weight: 1.5
+        desc: "放款 / 额度 / 借款文案"
+        text_any: ["放款", "额度", "借款", "下款", "贷款", "分期", "授信", "提额", "秒到账"]
+      - weight: 1.0
+        desc: "读取 / 接收短信权限（短信验证码窃取佐证）"
+        permission_any: ["RECEIVE_SMS", "READ_SMS"]
+
+  # =====================================================================
+  # 杀猪盘（投资理财 / 虚假交易）
+  # =====================================================================
+  - name: "杀猪盘"
+    investigation:
+      where_to_request: "聚合 / 第三方支付（入金接口商户号）+ 即时通讯平台（客服 IM）+ 链上（收款地址）"
+      evidence_to_obtain:
+        - "入金 / 充值接口对应商户号与结算主体（营业执照/法人/结算账户）"
+        - "客服 IM 账号实名与聊天记录（引流话术、杀猪剧本）"
+        - "USDT / 链上收款地址流水与归集账户"
+        - "提现 / 出金通道与资金清算路径"
+      notes: "盯 is_c2 入金接口商户号 + 客服 IM 账号 + 收款地址，还原资金流与冒充关系。"
+    signals:
+      - weight: 2.0
+        desc: "链上收款地址（USDT/钱包）存在"
+        crypto_present: true
+      - weight: 1.5
+        desc: "充值 / 提现 / 入金接口路径特征"
+        path_any: ["/recharge", "/withdraw", "/deposit", "/charge", "/invest", "/trade"]
+      - weight: 1.5
+        desc: "投资 / 理财 / 证券 / 基金 / 钱包冒充文案"
+        text_any: ["投资", "理财", "证券", "基金", "钱包", "数字货币", "合约", "收益", "提现", "充值"]
+      - weight: 1.0
+        desc: "is_c2 入金后端服务器（建议调证的 DOMAIN/IP）"
+        c2_present: true
+      - weight: 1.0
+        desc: "客服即时通讯账号（引流落地：QQ/微信/Telegram）"
+        contact_any: ["qq", "wechat", "telegram"]
+
+  # =====================================================================
+  # 赌博
+  # =====================================================================
+  - name: "赌博"
+    investigation:
+      where_to_request: "聚合支付（商户号）+ 链上（USDT 收款）+ 资金清算银行 / 第四方"
+      evidence_to_obtain:
+        - "聚合 / 第四方支付商户号与结算主体"
+        - "USDT 收款地址流水与资金清算路径"
+        - "投注 / 开奖后端服务器归属与运营主体"
+        - "代理 / 返水分润资金链路"
+      notes: "盯聚合支付商户号 + USDT 收款 + 资金清算，还原投注资金流与平台运营主体。"
+    signals:
+      - weight: 2.0
+        desc: "下注 / 开奖 / 彩票接口路径特征"
+        path_any: ["/bet", "/lottery", "/game/", "/odds", "/wager", "/draw"]
+      - weight: 1.5
+        desc: "下注 / 开奖 / 彩票 / 棋牌文案"
+        text_any: ["下注", "投注", "开奖", "彩票", "棋牌", "赔率", "六合", "时时彩", "返水", "庄家"]
+      - weight: 1.5
+        desc: "链上收款地址（USDT）存在"
+        crypto_present: true
+      - weight: 1.0
+        desc: "聚合支付关键字"
+        payment_kw_any: ["聚合支付", "USDT", "代收", "代付", "四方"]
+
+  # =====================================================================
+  # 裸聊
+  # =====================================================================
+  - name: "裸聊"
+    investigation:
+      where_to_request: "RTC / 推流服务商 + 录像存储 OSS 服务商 + 通讯录窃取接口接收端"
+      evidence_to_obtain:
+        - "RTC 推流服务器归属与房间 / 通话记录（声网/腾讯云等）"
+        - "录像 / 截图存储 OSS 桶归属与内容"
+        - "通讯录窃取上传接口与接收数据库（敲诈目标清单）"
+        - "敲诈话术 / 收款账户与资金流水"
+      notes: "指向 RTC 推流服务器 + 录像存储 OSS + 通讯录窃取接口，固定敲诈链路。"
+    signals:
+      - weight: 2.0
+        desc: "RTC / 实时音视频 SDK（声网 Agora / 腾讯云 TRTC 等）"
+        sdk_any: ["agora", "声网", "trtc", "zego", "即构", "rtc", "腾讯云音视频"]
+      - weight: 1.5
+        desc: "相机 + 录音 + 通讯录权限组合（裸聊 + 敲诈佐证）"
+        permission_all: ["CAMERA", "READ_CONTACTS"]
+      - weight: 1.5
+        desc: "视频认证 / 裸聊 / 视频通话接口路径"
+        path_any: ["/vchat", "/video", "/rtc", "/live", "/call"]
+      - weight: 1.5
+        desc: "视频认证 / 裸聊 / 一对一文案"
+        text_any: ["视频认证", "裸聊", "一对一", "视频通话", "约会", "同城交友", "真人认证"]
+
+  # =====================================================================
+  # 刷单
+  # =====================================================================
+  - name: "刷单"
+    investigation:
+      where_to_request: "返佣资金通道（支付/聚合商户号）+ 任务下发后端服务器"
+      evidence_to_obtain:
+        - "返佣 / 垫付资金通道商户号与结算主体"
+        - "任务下发后端服务器归属与运营主体"
+        - "刷单任务 / 订单流水与被害人垫付记录"
+        - "拉手 / 群引流账号与分润链路"
+      notes: "指向返佣资金通道 + 任务下发后端，还原垫付资金流与组织结构。"
+    signals:
+      - weight: 2.0
+        desc: "抢任务 / 接单 / 返佣接口路径特征"
+        path_any: ["/task/grab", "/task", "/order/grab", "/commission", "/rebate"]
+      - weight: 1.5
+        desc: "刷单 / 返佣 / 垫付 / 抢单文案"
+        text_any: ["刷单", "返佣", "垫付", "抢单", "做任务", "佣金", "返利", "兼职赚钱", "拉手"]
+      - weight: 1.0
+        desc: "返佣资金关键字"
+        payment_kw_any: ["返佣", "佣金", "垫付", "代付"]
+
+  # =====================================================================
+  # 短信马（短信转发木马）
+  # =====================================================================
+  - name: "短信马"
+    investigation:
+      where_to_request: "短信转发接收方（Telegram / webhook 服务器）+ 运营商（被害人短信范围）"
+      evidence_to_obtain:
+        - "短信转发接收方（Telegram bot / webhook URL / 接收服务器）"
+        - "被劫持短信内容与验证码流向（接管的支付/银行验证码）"
+        - "被害人手机号清单与运营商侧短信记录"
+        - "上线 / 控制后端服务器归属"
+      notes: "指向短信转发接收方（Telegram/webhook）+ RECEIVE_SMS 佐证，固定验证码劫持链路。"
+    signals:
+      - weight: 2.0
+        desc: "接收 / 转发短信权限（短信马核心能力）"
+        permission_all: ["RECEIVE_SMS", "READ_SMS"]
+      - weight: 1.5
+        desc: "Telegram / webhook 转发落地（境外接收方）"
+        contact_any: ["telegram"]
+      - weight: 1.5
+        desc: "短信转发 / 拦截 / 上线文案"
+        text_any: ["短信转发", "拦截短信", "上线", "马甲", "webhook", "bot token", "转发到"]
+      - weight: 1.0
+        desc: "接收短信权限（单项佐证）"
+        permission_any: ["RECEIVE_SMS"]

@@ -1,0 +1,87 @@
+"""把分析报告摊成 JSONL 事件流（供 AI agent / 脚本逐条流式消费）。
+
+一行一个 JSON 对象：先 1 条 ``meta`` 头（身份 / 完整度 / 可复现锚点），再每条**线索**（lead，核心
+调证产出）与**发现**（finding，带 confidence/kind/analyzer 溯源）各一个事件。让 Claude/GPT 等按
+confidence/kind 加权、逐条串案、生成文书，而不必先解析整份嵌套报告。纯 dict 入、纯 list 出，可离线测。
+"""
+
+from __future__ import annotations
+
+from apkscan.core.evidence_scope import (
+    project_serialized_leads,
+    serialized_case_evidence_refs,
+)
+
+
+def _meta_event(report: dict) -> dict:
+    m = report.get("meta")
+    meta = m if isinstance(m, dict) else {}
+    return {
+        "type": "meta",
+        "package": meta.get("package_name") or report.get("package_name"),
+        "sample_sha256": meta.get("sample_sha256"),
+        "version_name": meta.get("version_name"),
+        "version_code": meta.get("version_code"),
+        "mode": meta.get("mode"),
+        "analysis_status": report.get("analysis_status"),
+        "completeness": report.get("completeness"),
+        "schema_version": report.get("schema_version"),
+        "tool_version": meta.get("tool_version"),
+        "ruleset_digest": meta.get("ruleset_digest"),
+    }
+
+
+def _lead_event(lead: dict) -> dict:
+    direct_refs = serialized_case_evidence_refs(lead, "source_refs")
+    return {
+        "type": "lead",
+        "category": lead.get("category"),
+        "value": lead.get("value"),
+        "subject": lead.get("subject"),
+        "confidence": lead.get("confidence"),
+        "advice": lead.get("advice"),
+        "where_to_request": lead.get("where_to_request"),
+        "evidence_to_obtain": lead.get("evidence_to_obtain") if isinstance(
+            lead.get("evidence_to_obtain"), list) else [],
+        # ``source_refs`` itself is intentionally omitted from compact JSONL,
+        # so preserve the decision-relevant part of its provenance explicitly.
+        # Matching Endpoint evidence has already been carried into the shared
+        # projection before this event is built.
+        "evidence_scope_summary": {
+            "qualified": bool(direct_refs),
+            "case_evidence_refs": len(direct_refs),
+        },
+    }
+
+
+def _finding_event(f: dict) -> dict:
+    return {
+        "type": "finding",
+        "id": f.get("id"),
+        "title": f.get("title"),
+        "severity": f.get("severity"),
+        "confidence": f.get("confidence"),
+        "kind": f.get("kind"),
+        "analyzer": f.get("analyzer"),
+        "category": f.get("category"),
+        "evidence": f.get("evidences") if isinstance(f.get("evidences"), list) else [],
+    }
+
+
+def report_to_events(report: object) -> list[dict]:
+    """report dict → JSONL 事件列表：``meta`` 头 + 每条 lead + 每条 finding。绝不抛（非 dict → 仅 meta）。
+
+    保留溯源字段（lead.confidence/advice；finding.id/analyzer/confidence/kind）让每个事件自解释，
+    可被 agent 直接加权 / 分流 / 归因，无需回读整份报告。
+    """
+    r = report if isinstance(report, dict) else {}
+    events: list[dict] = [_meta_event(r)]
+    # JSONL deliberately drops ``source_refs`` to stay compact.  Scope must
+    # therefore be applied *before* that provenance is discarded; otherwise a
+    # stale/forged cached ``advice=建议调证`` backed only by batch or legacy
+    # material becomes an unqualified, impossible-to-audit lead event.
+    events.extend(_lead_event(x) for x in project_serialized_leads(r))
+    findings = r.get("findings")
+    if isinstance(findings, list):
+        events.extend(_finding_event(x) for x in findings if isinstance(x, dict))
+    return events

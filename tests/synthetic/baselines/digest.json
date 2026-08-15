@@ -1,0 +1,433 @@
+{
+  "admin-panel-login-url": {
+    "app_classification": {
+      "reason": "最高分 0.0 未过阈值 3.0",
+      "runner_up": null,
+      "score": 0.0,
+      "signals": [],
+      "top_candidate": "贷款盘",
+      "type": "未定"
+    },
+    "closure": {
+      "gaps": [
+        "no investigation target selected"
+      ],
+      "next_actions": [
+        "Resolve closure gap: no investigation target selected"
+      ],
+      "source_summary": {
+        "disabled": 0,
+        "failed": 0,
+        "hit": 0,
+        "no_record": 0,
+        "skipped": 0
+      },
+      "status": "failed",
+      "target_count": 0
+    },
+    "findings_counts": {
+      "by_severity": {
+        "MEDIUM": 1
+      },
+      "omitted": 0,
+      "shown": 1,
+      "total": 1
+    },
+    "summary": {
+      "attributed_role_candidates": 0,
+      "by_advice": {
+        "待核": 2
+      },
+      "by_category": {
+        "ADMIN_PANEL": 1,
+        "DOMAIN": 1
+      },
+      "comm_sessions": 0,
+      "overseas_target_hosts": 0,
+      "total_leads": 2
+    }
+  },
+  "backend-credential-db-dsn": {
+    "app_classification": {
+      "reason": "最高分 0.0 未过阈值 3.0",
+      "runner_up": null,
+      "score": 0.0,
+      "signals": [],
+      "top_candidate": "贷款盘",
+      "type": "未定"
+    },
+    "closure": {
+      "gaps": [
+        "no investigation target selected"
+      ],
+      "next_actions": [
+        "Resolve closure gap: no investigation target selected"
+      ],
+      "source_summary": {
+        "disabled": 0,
+        "failed": 0,
+        "hit": 0,
+        "no_record": 0,
+        "skipped": 0
+      },
+      "status": "failed",
+      "target_count": 0
+    },
+    "findings_counts": {
+      "by_severity": {},
+      "omitted": 0,
+      "shown": 0,
+      "total": 0
+    },
+    "summary": {
+      "attributed_role_candidates": 0,
+      "by_advice": {
+        "建议调证": 1
+      },
+      "by_category": {
+        "BACKEND_CREDENTIAL": 1
+      },
+      "comm_sessions": 0,
+      "overseas_target_hosts": 0,
+      "total_leads": 1
+    }
+  },
+  "card-merchant-keyword": {
+    "app_classification": {
+      "reason": "最高分 0.0 未过阈值 3.0",
+      "runner_up": null,
+      "score": 0.0,
+      "signals": [],
+      "top_candidate": "贷款盘",
+      "type": "未定"
+    },
+    "closure": {
+      "gaps": [
+        "no investigation target selected"
+      ],
+      "next_actions": [
+        "Resolve closure gap: no investigation target selected"
+      ],
+      "source_summary": {
+        "disabled": 0,
+        "failed": 0,
+        "hit": 0,
+        "no_record": 0,
+        "skipped": 0
+      },
+      "status": "failed",
+      "target_count": 0
+    },
+    "findings_counts": {
+      "by_severity": {},
+      "omitted": 0,
+      "shown": 0,
+      "total": 0
+    },
+    "summary": {
+      "attributed_role_candidates": 0,
+      "by_advice": {
+        "待核": 1
+      },
+      "by_category": {
+        "CARD_MERCHANT": 1
+      },
+      "comm_sessions": 0,
+      "overseas_target_hosts": 0,
+      "total_leads": 1
+    }
+  },
+  "crypto-recipe-cryptojs-envelope": {
+    "app_classification": {
+      "reason": "最高分 0.0 未过阈值 3.0",
+      "runner_up": null,
+      "score": 0.0,
+      "signals": [],
+      "top_candidate": "贷款盘",
+      "type": "未定"
+    },
+    "closure": {
+      "gaps": [
+        "no investigation target selected",
+        "target set may be incomplete: static inputs not fully visible (resource)"
+      ],
+      "next_actions": [
+        "Resolve closure gap: no investigation target selected",
+        "Resolve closure gap: target set may be incomplete: static inputs not fully visible (resource)"
+      ],
+      "source_summary": {
+        "disabled": 0,
+        "failed": 0,
+        "hit": 0,
+        "no_record": 0,
+        "skipped": 0
+      },
+      "status": "failed",
+      "target_count": 0
+    },
+    "findings_counts": {
+      "by_severity": {
+        "HIGH": 1
+      },
+      "omitted": 0,
+      "shown": 1,
+      "total": 1
+    },
+    "summary": {
+      "attributed_role_candidates": 0,
+      "by_advice": {
+        "建议调证": 1
+      },
+      "by_category": {
+        "CRYPTO_RECIPE": 1
+      },
+      "comm_sessions": 0,
+      "overseas_target_hosts": 0,
+      "total_leads": 1
+    }
+  },
+  "fourth-party-payment-gateway": {
+    "app_classification": {
+      "reason": "最高分 1.5 未过阈值 3.0",
+      "runner_up": null,
+      "score": 1.5,
+      "signals": [
+        {
+          "desc": "刷单 / 返佣 / 垫付 / 抢单文案",
+          "source": "findings/leads",
+          "weight": 1.5
+        }
+      ],
+      "top_candidate": "刷单",
+      "type": "未定"
+    },
+    "closure": {
+      "gaps": [
+        "no investigation target selected"
+      ],
+      "next_actions": [
+        "Resolve closure gap: no investigation target selected"
+      ],
+      "source_summary": {
+        "disabled": 0,
+        "failed": 0,
+        "hit": 0,
+        "no_record": 0,
+        "skipped": 0
+      },
+      "status": "failed",
+      "target_count": 0
+    },
+    "findings_counts": {
+      "by_severity": {
+        "MEDIUM": 1
+      },
+      "omitted": 0,
+      "shown": 1,
+      "total": 1
+    },
+    "summary": {
+      "attributed_role_candidates": 0,
+      "by_advice": {
+        "建议调证": 1,
+        "待核": 2
+      },
+      "by_category": {
+        "DOMAIN": 1,
+        "FOURTH_PARTY_PAYMENT": 1,
+        "PAYMENT": 1
+      },
+      "comm_sessions": 0,
+      "overseas_target_hosts": 0,
+      "total_leads": 3
+    }
+  },
+  "hardened-unidentified-stub": {
+    "app_classification": {
+      "reason": "最高分 0.0 未过阈值 3.0",
+      "runner_up": null,
+      "score": 0.0,
+      "signals": [],
+      "top_candidate": "贷款盘",
+      "type": "未定"
+    },
+    "closure": {
+      "gaps": [
+        "no investigation target selected",
+        "target set may be incomplete: static inputs not fully visible (dex)"
+      ],
+      "next_actions": [
+        "Resolve closure gap: no investigation target selected",
+        "Resolve closure gap: target set may be incomplete: static inputs not fully visible (dex)"
+      ],
+      "source_summary": {
+        "disabled": 0,
+        "failed": 0,
+        "hit": 0,
+        "no_record": 0,
+        "skipped": 0
+      },
+      "status": "failed",
+      "target_count": 0
+    },
+    "findings_counts": {
+      "by_severity": {
+        "HIGH": 1
+      },
+      "omitted": 0,
+      "shown": 1,
+      "total": 1
+    },
+    "summary": {
+      "attributed_role_candidates": 0,
+      "by_advice": {},
+      "by_category": {},
+      "comm_sessions": 0,
+      "overseas_target_hosts": 0,
+      "total_leads": 0
+    }
+  },
+  "payment-sdk-alipay": {
+    "app_classification": {
+      "reason": "最高分 0.0 未过阈值 3.0",
+      "runner_up": null,
+      "score": 0.0,
+      "signals": [],
+      "top_candidate": "贷款盘",
+      "type": "未定"
+    },
+    "closure": {
+      "gaps": [
+        "no investigation target selected"
+      ],
+      "next_actions": [
+        "Resolve closure gap: no investigation target selected"
+      ],
+      "source_summary": {
+        "disabled": 0,
+        "failed": 0,
+        "hit": 0,
+        "no_record": 0,
+        "skipped": 0
+      },
+      "status": "failed",
+      "target_count": 0
+    },
+    "findings_counts": {
+      "by_severity": {},
+      "omitted": 0,
+      "shown": 0,
+      "total": 0
+    },
+    "summary": {
+      "attributed_role_candidates": 0,
+      "by_advice": {
+        "建议调证": 2
+      },
+      "by_category": {
+        "PAYMENT": 1,
+        "SDK_SERVICE": 1
+      },
+      "comm_sessions": 0,
+      "overseas_target_hosts": 0,
+      "total_leads": 2
+    }
+  },
+  "self-hosted-im-websocket": {
+    "app_classification": {
+      "reason": "最高分 0.0 未过阈值 3.0",
+      "runner_up": null,
+      "score": 0.0,
+      "signals": [],
+      "top_candidate": "贷款盘",
+      "type": "未定"
+    },
+    "closure": {
+      "gaps": [
+        "no investigation target selected"
+      ],
+      "next_actions": [
+        "Resolve closure gap: no investigation target selected"
+      ],
+      "source_summary": {
+        "disabled": 0,
+        "failed": 0,
+        "hit": 0,
+        "no_record": 0,
+        "skipped": 0
+      },
+      "status": "failed",
+      "target_count": 0
+    },
+    "findings_counts": {
+      "by_severity": {},
+      "omitted": 0,
+      "shown": 0,
+      "total": 0
+    },
+    "summary": {
+      "attributed_role_candidates": 0,
+      "by_advice": {
+        "待核": 2
+      },
+      "by_category": {
+        "DOMAIN": 1,
+        "SELF_HOSTED_IM": 1
+      },
+      "comm_sessions": 0,
+      "overseas_target_hosts": 0,
+      "total_leads": 2
+    }
+  },
+  "wallet-secret-mnemonic": {
+    "app_classification": {
+      "reason": "最高分 1.5 未过阈值 3.0",
+      "runner_up": null,
+      "score": 1.5,
+      "signals": [
+        {
+          "desc": "投资 / 理财 / 证券 / 基金 / 钱包冒充文案",
+          "source": "findings/leads",
+          "weight": 1.5
+        }
+      ],
+      "top_candidate": "杀猪盘",
+      "type": "未定"
+    },
+    "closure": {
+      "gaps": [
+        "no investigation target selected"
+      ],
+      "next_actions": [
+        "Resolve closure gap: no investigation target selected"
+      ],
+      "source_summary": {
+        "disabled": 0,
+        "failed": 0,
+        "hit": 0,
+        "no_record": 0,
+        "skipped": 0
+      },
+      "status": "failed",
+      "target_count": 0
+    },
+    "findings_counts": {
+      "by_severity": {},
+      "omitted": 0,
+      "shown": 0,
+      "total": 0
+    },
+    "summary": {
+      "attributed_role_candidates": 0,
+      "by_advice": {
+        "建议调证": 1
+      },
+      "by_category": {
+        "WALLET_SECRET": 1
+      },
+      "comm_sessions": 0,
+      "overseas_target_hosts": 0,
+      "total_leads": 1
+    }
+  }
+}

@@ -1,0 +1,73 @@
+name: Release to PyPI
+
+# 推送 vX.Y.Z 标签时构建并发布到 PyPI。
+# 采用 PyPI Trusted Publishing（OIDC），仓库内无需任何 token / Secret。
+# 一次性准备（PyPI 项目 fxapk 已存在）：
+#   https://pypi.org/manage/project/fxapk/settings/publishing/ → Add a new publisher (GitHub)
+#   Owner=s-silt  Repository=fxapk  Workflow=release.yml  Environment=pypi
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  # ★发布前的版本契约闸：tag 可能打在**未过 CI** 的 commit 上，而
+  #   test_fallback_version_contract_holds（锁 _FALLBACK_VERSION == pyproject version）
+  #   与 PEP440 规范断言都只在 PR / push master 的 CI 跑。失同步的包一旦出厂，
+  #   **所有用户装完即 selfcheck 报错**，且 PyPI 版本不可撤回——故在 build 前独立跑一次。
+  #   只跑这两条契约测试（秒级），不重复整套 CI：它们守的正是"发出去才发现"的那类故障。
+  version-contract:
+    name: version contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5      # 默认 checkout 的就是该 tag 指向的 SHA
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install (dev extra 带 pytest 与 packaging)
+        run: python -m pip install -e ".[dev]"
+      - name: 版本契约（同步 + PEP440 规范）
+        run: |
+          python -m pytest -q \
+            tests/test_version_shadowing.py::test_fallback_version_contract_holds \
+            tests/test_version_shadowing.py::test_pyproject_version_is_pep440_canonical
+
+  publish:
+    name: build & publish
+    needs: version-contract   # ★契约不过就不 build、不 publish
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # Trusted Publishing 必需
+      contents: write   # 建 GitHub Release 必需
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Idempotent: if the version already exists (e.g. a tag re-push /
+          # history rewrite re-triggers this run), skip instead of failing.
+          skip-existing: true
+      # 打 tag 时顺带建 GitHub Release（正文自动从上个 Release 以来的 PR 生成）。
+      # ★ 幂等：Release 已存在（tag 重推）则跳过，不失败——与上面 skip-existing 同philosophy。
+      # 历史上 v1.0.0 只发了 PyPI、漏建 Release 就是因为这步以前靠手动。
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists, skipping."
+            exit 0
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag

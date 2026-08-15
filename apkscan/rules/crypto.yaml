@@ -1,0 +1,245 @@
+# apkscan — crypto（弱加密 / 硬编码）分析器规则
+#
+# 由 apkscan.core.registry.load_rules("crypto") 读取。
+# 覆盖中文涉诈 App（杀猪盘 / 贷超 / 跑分 / 刷单）里常见的弱加密误用与硬编码风险特征。
+#
+# 顶层为 dict，键含义：
+#   patterns:  弱算法 / 不安全模式 → Finding 模板列表。逐条用 needles（子串，
+#              大小写不敏感）在 dex 字符串与文本资源里匹配；命中即产 Finding。
+#   keys:      硬编码密钥 / IV 的可疑常量启发式（IV/key/secret 等命名 + 算法名同现）。
+#   base64:    大块 Base64 常量检测阈值（疑似内嵌密钥 / 加密载荷 / 隐藏配置）。
+#
+# severity 取值：INFO/LOW/MEDIUM/HIGH/CRITICAL。
+# 为保持低误报，patterns 只匹配“算法名明确出现”的字面量（getInstance 参数串 / 算法常量），
+# references 统一带 CWE-327（Use of a Broken or Risky Cryptographic Algorithm）。
+
+# ---------------------------------------------------------------------------
+# 弱算法 / 不安全模式
+# ---------------------------------------------------------------------------
+patterns:
+  # ---- ECB 模式：明文分组可见，是最典型的“看起来加密了其实没保护”的误用 ----
+  - id: CRYPTO-ECB
+    title: "使用 ECB 加密模式"
+    severity: MEDIUM
+    # needles 大小写不敏感子串；这些都是 Cipher.getInstance 的真实 transformation 字面量。
+    needles:
+      - "AES/ECB/"
+      - "DES/ECB/"
+      - "DESede/ECB/"
+      - "/ECB/PKCS5Padding"
+      - "/ECB/NoPadding"
+      - "SM4/ECB/"
+    description: >-
+      检测到使用 ECB 分组模式。ECB 对相同明文块产出相同密文块，无法隐藏数据模式，
+      在涉诈 App 中常见于本地加密用户隐私（身份证 / 银行卡 / 通讯录）或加密回传报文，
+      因可被识别结构而削弱保护。该字面量明确出现于 Cipher transformation 参数。
+    recommendation: >-
+      研判：定位该 Cipher 使用处与对应的本地密文 / 回传字段，结合硬编码密钥可在
+      取证侧离线解密被加密的隐私数据 / C2 通信报文，作为还原资金流与受害人信息的支撑。
+    references:
+      - "CWE-327"
+      - "https://cwe.mitre.org/data/definitions/327.html"
+
+  # ---- DES / 3DES：密钥过短，已不再安全 ----
+  - id: CRYPTO-DES
+    title: "使用已淘汰的 DES / 3DES 算法"
+    severity: MEDIUM
+    needles:
+      - "DES/CBC/"
+      - "DESede/CBC/"
+      - "DESede/ECB/"
+      - "DES/ECB/"
+      - "\"DESede\""
+      - "TripleDES"
+    description: >-
+      检测到使用 DES / 3DES（DESede）。DES 有效密钥仅 56 位，3DES 强度亦偏弱且已被
+      NIST 弃用。涉诈样本常沿用老旧加密库或与服务端约定弱算法，密文可被离线暴力 / 已知密钥还原。
+    recommendation: >-
+      研判：标记该处算法与密钥来源；若密钥为硬编码或可从服务端约定推得，取证侧可离线解密。
+    references:
+      - "CWE-327"
+      - "https://cwe.mitre.org/data/definitions/327.html"
+
+  # ---- 纯 DES Cipher 实例（无模式后缀的裸 "DES"）----
+  - id: CRYPTO-DES-CIPHER
+    title: "实例化 DES 密码器"
+    severity: MEDIUM
+    needles:
+      - "getInstance(\"DES\")"
+      - "getInstance(\"DESede\")"
+      - "getInstance(\"DES/"
+      - "KeyGenerator.getInstance(\"DES\")"
+      - "SecretKeyFactory.getInstance(\"DES\")"
+    description: >-
+      检测到直接以 "DES" / "DESede" 实例化 Cipher / KeyGenerator。未指定安全模式时
+      JCA 默认走 ECB，叠加 DES 弱密钥，等同于最弱配置。
+    recommendation: >-
+      研判：确认是否用于加密本地隐私或网络报文；弱算法 + 默认 ECB 的密文在取证侧极易还原。
+    references:
+      - "CWE-327"
+      - "https://cwe.mitre.org/data/definitions/327.html"
+
+  # ---- MD5：抗碰撞已破，作完整性 / 签名 / 口令哈希均不安全 ----
+  - id: CRYPTO-MD5
+    title: "使用 MD5 散列算法"
+    severity: MEDIUM
+    needles:
+      - "MessageDigest.getInstance(\"MD5\")"
+      - "getInstance(\"MD5\")"
+      - "\"MD5\""
+      - "HmacMD5"
+      - "MD5withRSA"
+    description: >-
+      检测到使用 MD5。MD5 抗碰撞性已被攻破，用作完整性校验、签名摘要或口令哈希均不安全。
+      涉诈 App 常用 MD5 对接口参数签名 / 对口令哈希 / 给本地缓存命名，可被构造碰撞或彩虹表反推。
+    recommendation: >-
+      研判：若用于接口签名，可据此复现请求签名以验证抓包 / 还原协议；若用于口令哈希，
+      可结合彩虹表 / 字典还原弱口令，辅助登入控制端取证。
+    references:
+      - "CWE-327"
+      - "CWE-328"
+      - "https://cwe.mitre.org/data/definitions/327.html"
+
+  # ---- SHA-1：抗碰撞已破（SHAttered）----
+  - id: CRYPTO-SHA1
+    title: "使用 SHA-1 散列算法"
+    severity: MEDIUM
+    needles:
+      - "MessageDigest.getInstance(\"SHA-1\")"
+      - "getInstance(\"SHA-1\")"
+      - "getInstance(\"SHA1\")"
+      - "\"SHA-1\""
+      - "\"SHA1\""
+      - "HmacSHA1"
+      - "SHA1withRSA"
+    description: >-
+      检测到使用 SHA-1。SHA-1 抗碰撞性已被实际攻破（SHAttered），作签名摘要 / 完整性校验不再安全。
+      涉诈样本常用于接口签名或文件校验。
+    recommendation: >-
+      研判：若用于接口签名，可复现签名验证抓包还原协议；建议核实是否影响证据完整性链条。
+    references:
+      - "CWE-327"
+      - "https://cwe.mitre.org/data/definitions/327.html"
+
+  # ---- ECB 默认值（无模式的 AES / SM4 Cipher 实例 → 默认 ECB）----
+  - id: CRYPTO-AES-DEFAULT-ECB
+    title: "AES 未指定模式（默认 ECB）"
+    severity: MEDIUM
+    needles:
+      - "getInstance(\"AES\")"
+      - "Cipher.getInstance(\"AES\")"
+      - "getInstance(\"SM4\")"
+    description: >-
+      检测到以裸算法名 "AES" / "SM4" 实例化 Cipher。未显式指定 transformation 时，
+      JCA 默认采用 ECB 模式，等同于使用弱模式，不能隐藏明文结构。
+    recommendation: >-
+      研判：核查是否用于加密隐私 / 报文；默认 ECB 密文结构可识别，结合硬编码密钥可离线解密。
+    references:
+      - "CWE-327"
+      - "https://cwe.mitre.org/data/definitions/327.html"
+
+  # ---- ECB 字符串“AES/ECB/”宽松命中（即便后缀写法各异）----
+  - id: CRYPTO-RC4
+    title: "使用 RC4 流密码"
+    severity: MEDIUM
+    needles:
+      - "getInstance(\"RC4\")"
+      - "\"RC4\""
+      - "ARCFOUR"
+    description: >-
+      检测到使用 RC4 / ARCFOUR 流密码。RC4 存在已知偏置弱点，被 RFC 7465 等禁用。
+      涉诈样本常用 RC4 对配置 / C2 通信做轻量混淆，密钥固定时可直接还原明文。
+    recommendation: >-
+      研判：定位 RC4 密钥来源，若固定 / 硬编码可离线解密被混淆的配置或通信内容。
+    references:
+      - "CWE-327"
+      - "https://cwe.mitre.org/data/definitions/327.html"
+
+  # ---- ECB 兜底：单独的 "AES/ECB/" 子串（与 CRYPTO-ECB 互补，仅在未带具体 padding 时）----
+  - id: CRYPTO-INSECURE-RANDOM
+    title: "使用可预测的随机源生成密钥 / IV"
+    severity: LOW
+    needles:
+      - "new SecureRandom(\""
+      - "SecureRandom.getInstance(\"SHA1PRNG\")"
+      - "setSeed("
+    description: >-
+      检测到可能以固定种子初始化 SecureRandom（setSeed / 带种子构造）或使用 SHA1PRNG。
+      固定种子会使生成的密钥 / IV 可预测，等同于硬编码。注意：本项为启发式，需结合上下文复核。
+    recommendation: >-
+      研判：人工确认 setSeed 是否传入固定值；若是，则生成的密钥 / IV 可在取证侧复算还原。
+    references:
+      - "CWE-330"
+      - "CWE-338"
+      - "https://cwe.mitre.org/data/definitions/330.html"
+
+# ---------------------------------------------------------------------------
+# 硬编码密钥 / IV 启发式
+# ---------------------------------------------------------------------------
+# 静态难以把 getInstance("AES") 与具体硬编码 key 精确关联，这里采用启发式：
+#   当字符串同时含有“密钥相关命名前缀（key/secret/iv/...）” + “= 一段定长十六进制/Base64 常量”，
+#   或字符串本身是赋给 key/iv 命名变量的定长常量时 → 产可疑 Finding（MEDIUM），提示人工复核。
+keys:
+  id: CRYPTO-HARDCODED-KEY
+  title: "疑似硬编码密钥 / IV"
+  severity: MEDIUM
+  # 命名提示（大小写不敏感）：出现这些词 + 紧随定长常量，视为可疑。
+  name_hints:
+    - "secretkey"
+    - "secret_key"
+    - "aeskey"
+    - "aes_key"
+    - "deskey"
+    - "des_key"
+    - "encryptkey"
+    - "encrypt_key"
+    - "privatekey"
+    - "apikey"
+    - "app_secret"
+    - "appsecret"
+    - "iv="
+    - "ivspec"
+    - "ivparameter"
+    - "secretkeyspec"
+    - "ivparameterspec"
+  # 候选常量的长度约束：AES-128/192/256 key 常见 16/24/32 字节，IV 16 字节；
+  # 这里以“去掉引号后的可见常量长度”近似判断（16/24/32/44/64 等）。
+  candidate_lengths:
+    - 16
+    - 24
+    - 32
+    - 44
+    - 64
+  description: >-
+    检测到疑似硬编码的对称密钥 / IV（密钥相关命名 + 定长十六进制 / Base64 常量同现）。
+    硬编码密钥使加密形同虚设——所有安装包共享同一密钥，取证侧可离线解密该 App 加密的
+    本地隐私数据与网络回传报文，是还原资金流 / 受害人信息的高价值切入点。
+  recommendation: >-
+    研判：人工确认该常量确为加密密钥 / IV（结合相邻算法名），随后可对 App 加密的本地文件、
+    数据库字段、上传报文做离线解密，作为非法获取公民个人信息 / 资金盗取的直接证据。
+  references:
+    - "CWE-321"
+    - "CWE-798"
+    - "https://cwe.mitre.org/data/definitions/321.html"
+
+# ---------------------------------------------------------------------------
+# 大块 Base64 常量
+# ---------------------------------------------------------------------------
+# 字符串池里出现超长 Base64 常量，常见于内嵌密钥 / 证书 / 加密载荷 / 隐藏配置 / 二级 dex。
+base64:
+  id: CRYPTO-BASE64-BLOB
+  title: "内嵌大块 Base64 常量"
+  severity: LOW
+  # 触发阈值：纯 Base64 字符（A-Za-z0-9+/=，可含少量换行）且长度 >= min_length。
+  min_length: 256
+  # 单次最多报告的 blob 数，避免对资源密集型样本刷屏。
+  max_reports: 20
+  description: >-
+    检测到内嵌的大块 Base64 常量。涉诈样本常以 Base64 内嵌加密密钥 / 数字证书 /
+    加密后的二级 DEX / C2 配置 / 隐藏服务器列表，以规避静态扫描。
+  recommendation: >-
+    研判：解码该 Base64 并辨识内容（密钥 / 证书 / 加密载荷 / 配置）；若为加密配置，
+    结合本报告的硬编码密钥 / 弱算法线索尝试离线解密，常可还原隐藏的回传端点与控制参数。
+  references:
+    - "CWE-312"
+    - "https://cwe.mitre.org/data/definitions/312.html"

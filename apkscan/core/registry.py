@@ -1,0 +1,431 @@
+"""分析器/富化器基类、自动发现、能力探测、规则加载。
+
+自动发现：用 pkgutil.iter_modules 扫描 apkscan.analyzers / apkscan.enrichers，
+import 后实例化所有 Base* 的具体子类（跳过抽象基类）→ 新增模块无需改任何中心文件。
+"""
+
+from __future__ import annotations
+
+import importlib
+import importlib.resources
+import inspect
+import logging
+import pkgutil
+import socket
+from abc import ABC, abstractmethod
+from types import ModuleType
+from typing import TYPE_CHECKING, Any
+
+import yaml
+
+from apkscan.core import device, tools
+from apkscan.core.models import AnalyzerResult, EnrichmentResult, Endpoint
+
+if TYPE_CHECKING:
+    from apkscan.core.context import AnalysisContext
+
+logger = logging.getLogger(__name__)
+
+
+class BaseAnalyzer(ABC):
+    """静态分析器基类。
+
+    name:     稳定标识，用于报告/状态/日志。
+    requires: 需要的能力（空 = 永远可用）；registry 探测后决定是否运行。
+              可选值见 detect_capabilities()（工具类，如 "jadx" / "adb" / "online"）
+              与 _PLATFORM_CAPABILITIES（平台类，如 "android" / "apk" / "web"）。
+              ★平台专属分析器**必须**声明所属平台能力，否则会在别的平台上空跑。
+    """
+
+    name: str = ""
+    requires: list[str] = []
+    # 分析器可写入 Report.meta 的完整集合；声明与生产代码同文件，契约层只负责汇总。
+    meta_key_categories: dict[str, str] = {}
+    # 拿不准是否应驱动下游的键保守留在 signal，并在写入方旁显式标待复核。
+    meta_category_pending: frozenset[str] = frozenset()
+    meta_keys = frozenset(meta_key_categories)
+
+    @abstractmethod
+    def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
+        """对上下文做分析，返回 AnalyzerResult。异常由 pipeline 捕获并记录。"""
+        ...
+
+
+class BaseEnricher(ABC):
+    """联网富化器基类。
+
+    name:        稳定标识。
+    applies_to:  适用的端点类型，元素为 "domain" / "ip"。
+    phase:       富化阶段（两遍富化调度用）：
+                 - ``"attribution"``（默认）：第①遍，查归属（rdap/whois/dns/asn/icp），
+                   定服务器辖区（国内/国外/未知）。
+                 - ``"overseas"``：第②遍，境外被动取证（shodan/certs），**仅对国外(+未知)端点跑**。
+    active:      **是否会向目标发起连接的标记**。本仓当前富化器全部为被动（``active=False``），
+                 只读第三方公开库 / OSINT，对目标零流量；保留该标记以便审计声明「不接触目标」。
+    """
+
+    name: str = ""
+    applies_to: list[str] = []
+    phase: str = "attribution"
+    active: bool = False
+    #: Expensive/key-gated providers that are reserved for the bounded case-close target set.
+    case_close_only: bool = False
+    #: Any one non-empty variable enables the provider. Empty means no credential is required.
+    required_env: tuple[str, ...] = ()
+
+    @abstractmethod
+    def enrich(self, ep: Endpoint) -> EnrichmentResult:
+        """对单个端点做富化，返回 EnrichmentResult。异常由 pipeline 捕获并记录。"""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# 自动发现
+# ---------------------------------------------------------------------------
+
+
+def _iter_package_modules(package_name: str) -> list[ModuleType]:
+    """import 并返回某包下所有子模块。单模块导入失败记录后跳过。"""
+    modules: list[ModuleType] = []
+    try:
+        package = importlib.import_module(package_name)
+    except Exception:
+        logger.exception("无法导入包：%s", package_name)
+        return modules
+
+    pkg_path = getattr(package, "__path__", None)
+    if pkg_path is None:
+        logger.warning("%s 不是包（无 __path__），跳过自动发现", package_name)
+        return modules
+
+    for mod_info in pkgutil.iter_modules(pkg_path):
+        if mod_info.name.startswith("_"):
+            continue
+        full_name = f"{package_name}.{mod_info.name}"
+        try:
+            modules.append(importlib.import_module(full_name))
+        except Exception:
+            logger.exception("导入模块失败，跳过：%s", full_name)
+    return modules
+
+
+def _instantiate_subclasses(modules: list[ModuleType], base: type) -> list:
+    """实例化 modules 中所有 base 的具体子类（跳过 base 自身与抽象类）。"""
+    seen: set[type] = set()
+    instances: list = []
+    for module in modules:
+        for _, obj in inspect.getmembers(module, inspect.isclass):
+            if not issubclass(obj, base) or obj is base:
+                continue
+            if inspect.isabstract(obj):
+                continue
+            # 仅实例化定义于被扫描模块内的类，避免重复（import 进来的同名类）
+            if obj.__module__ != module.__name__:
+                continue
+            if obj in seen:
+                continue
+            seen.add(obj)
+            try:
+                instances.append(obj())
+            except Exception:
+                logger.exception("实例化失败，跳过：%s", obj)
+    return instances
+
+
+# 平台能力：按**被分析物的平台**注入（pipeline 读 ctx.platform），供分析器用 requires
+# 声明"我只适用于某平台"。此前 requires 只表达"环境有没有某工具"，没有平台概念——网页证据
+# 一类的非 APK 输入进来时，扫 dex/.so/assets 的分析器照样会被判 eligible 然后空跑。
+#
+# ★"apk" 归在 android 名下（而非无条件注入）：既有 30 个 requires=["apk"] 的分析器语义本就是
+#   "Android 专属"，挂到平台上后在网页上下文里自动 skip，无需逐个改声明；反之新的
+#   requires=["web"] 分析器在 android 上下文里自动 skip。两个方向都靠现成的 skip 通路。
+_PLATFORM_CAPABILITIES: dict[str, frozenset[str]] = {
+    "android": frozenset({"android", "apk"}),
+    "web": frozenset({"web"}),
+}
+
+# requires 可声明的已知能力名：detect_capabilities() 探测的 + pipeline 按平台注入的。
+# 分析器 requires 里出现此集合外的名字（如把 "jadx" 拼成 "jdax"）会让它永久被 skip，且
+# skipped 理由像"环境缺工具"而非代码 bug——极难发现，故自动发现期校验并点名告警。
+# ★平台能力名从 _PLATFORM_CAPABILITIES 求并集得出，不另抄一份：抄了就会漂移，漂移的后果
+#   正是这个集合要防的那种"拼写错→永久静默 skip"。
+_KNOWN_CAPABILITIES: frozenset[str] = frozenset(
+    {"jadx", "adb", "online", "frida", "frida-dexdump", "mitmproxy", "device"}
+).union(*_PLATFORM_CAPABILITIES.values())
+
+
+#: ``platform`` 缺失/空串时的兜底平台。此前 ``apk`` 是**无条件**注入的，故空平台的上下文
+#: （手工构造、旧产物 round-trip）照样跑全套 android 分析器。改成按平台注入后若把空串判为
+#: "未知"，这些上下文会突然静默少跑 30 个分析器——那是回归，不是加固。故空 = android，
+#: 与消费方既有的 ``getattr(ctx, "platform", "android")`` 读法对齐。
+_DEFAULT_PLATFORM = "android"
+
+
+def platform_capabilities(platform: str) -> set[str]:
+    """把 ``ctx.platform`` 映射成能力集合；空 = android，未知平台返回空集并告警。
+
+    大小写与首尾空白先归一（CLI / 手编产物传进来的平台名不该因大小写就丢掉全部能力）。
+
+    未知平台下所有平台专属分析器都会被 skip。这**不是静默失败**：pipeline 的 skip 通路会把
+    它们逐个记进 ``report.analyzer_status`` / ``report.skipped_analyzers`` 并压低 completeness，
+    读报告即可见"哪些没跑、为什么"。此处再补一条 warning，便于 CLI 侧当场发现平台写错。
+    """
+    key = (platform or "").strip().lower() or _DEFAULT_PLATFORM
+    caps = _PLATFORM_CAPABILITIES.get(key)
+    if caps is None:
+        logger.warning(
+            "未知平台 %r：不注入平台能力，平台专属分析器将全部跳过（已知平台：%s）",
+            platform,
+            sorted(_PLATFORM_CAPABILITIES),
+        )
+        return set()
+    return set(caps)
+
+
+def _dedup_and_validate(instances: list, *, kind: str) -> list:
+    """对自动发现的实例做 name 唯一性 + requires 能力名校验（不静默，快速失败式告警）。
+
+    - **重名 name**：复制新模块时最常见的错。两个同名分析器都会跑、meta 互相覆盖、报告出现
+      两条同名 status 却无法区分——这里保留首个、对后续重名 ``logger.error`` 点名两个类。
+    - **requires 拼写错**：未知能力名会让分析器永久 skip 且伪装成"缺工具"，``logger.error`` 点名。
+    name 为空的实例直接跳过并告警（无名分析器无法被状态/报告引用）。
+    """
+    seen: dict[str, object] = {}
+    kept: list = []
+    for inst in instances:
+        name = getattr(inst, "name", "") or ""
+        if not name:
+            logger.error("%s %s 的 name 为空，已跳过", kind, type(inst).__name__)
+            continue
+        if name in seen:
+            logger.error(
+                "%s name 冲突：'%s' 已被 %s 占用，跳过 %s（重名会互相覆盖，请改名）",
+                kind, name, type(seen[name]).__name__, type(inst).__name__,
+            )
+            continue
+        requires = getattr(inst, "requires", None)
+        if isinstance(requires, list):
+            unknown = [c for c in requires if c not in _KNOWN_CAPABILITIES]
+            if unknown:
+                logger.error(
+                    "%s '%s' 的 requires 含未知能力名 %s（疑似拼写错误→永久 skip）；已知能力：%s",
+                    kind, name, unknown, sorted(_KNOWN_CAPABILITIES),
+                )
+        seen[name] = inst
+        kept.append(inst)
+    return kept
+
+
+def discover_analyzers() -> list[BaseAnalyzer]:
+    """发现并实例化 apkscan.analyzers 下所有 BaseAnalyzer 具体子类（含重名/requires 校验）。"""
+    modules = _iter_package_modules("apkscan.analyzers")
+    return _dedup_and_validate(_instantiate_subclasses(modules, BaseAnalyzer), kind="分析器")
+
+
+def discover_enrichers() -> list[BaseEnricher]:
+    """发现并实例化 apkscan.enrichers 下所有 BaseEnricher 具体子类（含重名校验）。"""
+    modules = _iter_package_modules("apkscan.enrichers")
+    return _dedup_and_validate(_instantiate_subclasses(modules, BaseEnricher), kind="富化器")
+
+
+# ---------------------------------------------------------------------------
+# 能力探测
+# ---------------------------------------------------------------------------
+
+
+def detect_capabilities(online: bool = True) -> set[str]:
+    """探测可用能力集合。
+
+    静态/工具类：
+    - "jadx" / "adb"：对应外部工具在 PATH 中。
+    - "online"：当 online=True 且本机有出网连通性时加入。
+
+    动态(脱壳/抓包)类（探测助手见 apkscan.core.device，全部不抛）：
+    - "frida" / "frida-dexdump" / "mitmproxy"：对应外部工具在 PATH 中。
+    - "device"：有至少一台在线 adb 设备。
+
+    返回的集合用于决定 requires 不满足的分析器/能力是否跳过。
+    """
+    caps: set[str] = set()
+
+    # jadx 不内置：PATH 上有则用，否则看独立 jadx 插件包（jadx-addon/，自带 JRE）是否就位；
+    # adb 走 tools.has_adb（frozen 看 exe 同目录随包 adb.exe）。
+    if tools.has_jadx():
+        caps.add("jadx")
+    if tools.has_adb():
+        caps.add("adb")
+
+    if online and _has_network():
+        caps.add("online")
+
+    # 动态能力（无设备/工具时静默不加入；探测助手内部已 try/except+logging）。
+    if device.has_frida():
+        caps.add("frida")
+    if device.has_frida_dexdump():
+        caps.add("frida-dexdump")
+    if device.has_mitmproxy():
+        caps.add("mitmproxy")
+    if device.has_device():
+        caps.add("device")
+
+    return caps
+
+
+# 连通性探测锚点（IP, port）：混合**境内**（阿里/腾讯公共 DNS 的 DoH 端点）+ **境外**（Cloudflare）。
+# ★全部用**数字 IP**（非主机名）：避免探测本身依赖 DNS 解析——主机名锚点的 getaddrinfo 不受
+#   create_connection 的 timeout 约束、且可能多地址重试，会让最坏耗时超出预期；数字 IP 单地址、
+#   零解析，每次尝试严格 ≤ timeout。只做 TCP:443 连接、不发任何请求（不泄露探测意图、不留 provider
+#   日志）；任一可达即判在线。
+# ★不单锚境外 DNS（旧版 1.1.1.1:53 / 8.8.8.8:53）：境外锚点在部分网络（如 GFW）被阻断/污染 →
+#   探测假阴性"无网" → 把本可用的**境内** provider 富化整体误关。境内锚点在前：常见部署下最可能
+#   命中、命中即短路，联网场景近乎零延迟。
+#   - 223.5.5.5 = 阿里公共 DNS（AliDNS，dns.alidns.com 的 DoH 落地 IP，:443 承载 DoH）
+#   - 120.53.53.53 = 腾讯 DNSPod（doh.pub 的 DoH 落地 IP，:443 承载 DoH）
+#   - 1.1.1.1 = Cloudflare，境外兜底（:443 而非易被污染的 :53）
+_NETWORK_PROBE_HOSTS: tuple[tuple[str, int], ...] = (
+    ("223.5.5.5", 443),      # 阿里 AliDNS，境内高可用（数字 IP，无需解析）
+    ("120.53.53.53", 443),   # 腾讯 DNSPod，境内高可用（数字 IP，无需解析）
+    ("1.1.1.1", 443),        # Cloudflare，境外兜底
+)
+
+
+def _has_network(timeout: float = 1.5) -> bool:
+    """探测出网连通性：对代表性 provider 锚点做 TCP:443 连接（不发请求），任一可达即在线。
+
+    锚点混合境内 + 境外且**全为数字 IP**，避免单靠境外 DNS 在受限网络下假阴性、误关整个富化层，
+    并避免探测自身受 DNS 解析拖累（见 ``_NETWORK_PROBE_HOSTS`` 说明）。命中即短路返回；全不可达
+    （真离线）最坏付 ``len(hosts) × timeout``（默认 3 × 1.5s，数字 IP 无额外解析开销）。绝不抛。
+    """
+    for host, port in _NETWORK_PROBE_HOSTS:
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                logger.debug("网络探测命中：%s:%s", host, port)
+                return True
+        except OSError:
+            logger.debug("网络探测失败：%s:%s", host, port, exc_info=True)
+    return False
+
+
+# ---------------------------------------------------------------------------
+# 规则加载
+# ---------------------------------------------------------------------------
+
+
+def ruleset_digest() -> str:
+    """对全部内置规则文件内容算稳定摘要（sha256 前 16 hex）：同一套规则 → 同一 digest。
+
+    供报告标注「本次结果由哪套规则产出」，是可复现性 / 回归对比的锚点（规则一改 digest 就变）。
+    只哈希 rules/ 下的 .yaml/.txt（文件名 + 内容，按名排序保证稳定）。任何读取失败 → "unknown"
+    （绝不抛，不得影响主流程）。
+
+    ★换行归一化（CRLF/CR → LF）后再哈希：规则文件在 Windows（autocrlf）与 Linux 上 checkout 出的
+    字节 EOL 不同，若直接哈希会让**同一套规则**在不同平台/安装形态算出不同 digest，违背"同规则→
+    同 digest"。归一化使 digest 只随规则**内容**变，与 checkout 的换行风格无关。
+    """
+    import hashlib
+
+    try:
+        rules_dir = importlib.resources.files("apkscan") / "rules"
+        # ★递归：providers/ 等分目录下的规则文件也须入 digest，否则分目录扩库后规则变了 digest 却不变、
+        #   破坏"同规则→同 digest"。用**相对路径**作 key（顶层文件 rel==name，向后兼容既有 digest；子目录
+        #   文件 rel=subdir/name，避免跨目录同名冲突），按 rel 排序保证跨平台稳定。
+        entries = sorted(_walk_rule_files(rules_dir, ""), key=lambda kv: kv[0])
+        if not entries:
+            return "unknown"
+        h = hashlib.sha256()
+        for rel, entry in entries:
+            content = entry.read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+            h.update(rel.encode("utf-8"))
+            h.update(b"\0")
+            h.update(content)
+            h.update(b"\0")
+        return h.hexdigest()[:16]
+    except Exception:
+        logger.debug("ruleset_digest 计算失败，返回 unknown", exc_info=True)
+        return "unknown"
+
+
+def _walk_rule_files(node: Any, prefix: str) -> "list[tuple[str, Any]]":
+    """递归收集 node 下所有 .yaml/.txt（Traversable），返回 (相对路径, entry) 列表，按 name 排序。
+
+    ★不吞遍历异常：让调用方 :func:`ruleset_digest` 的外层 try 捕获后返回 ``"unknown"``——若某子目录中途
+    权限错只返回部分列表，会产出"看似有效但内容不全"的 digest，破坏"同规则→同 digest"锚点（宁 unknown 不半份）。
+    """
+    out: list[tuple[str, Any]] = []
+    for e in sorted(node.iterdir(), key=lambda x: x.name):
+        rel = f"{prefix}{e.name}"
+        if e.is_dir():
+            out.extend(_walk_rule_files(e, rel + "/"))
+        elif e.name.endswith((".yaml", ".txt")):
+            out.append((rel, e))
+    return out
+
+
+def load_rules_dir(subdir: str) -> list[dict]:
+    """加载 rules/<subdir>/ 下所有 *.yaml（非递归），返回各文件解析出的 dict 列表（按文件名排序）。
+
+    供 attribution 的分目录 provider 专库（rules/providers/{cloud,idc,cdn,waf,carrier}.yaml）与 fxapk 自有
+    防红指纹（rules/providers/investigative/）合并加载。subdir 支持多级（如 "providers/investigative"）。
+    目录不存在 / 空 / 单文件解析失败 → 跳过该文件；整体绝不抛（坏文件不拖垮其余）。
+    """
+    out: list[dict] = []
+    try:
+        base = importlib.resources.files("apkscan") / "rules"
+        for part in subdir.split("/"):  # 逐级定位，支持多级 subdir（Traversable / 逐级安全）
+            base = base / part
+        if not base.is_dir():
+            return []
+        for entry in sorted(base.iterdir(), key=lambda e: e.name):
+            if not entry.name.endswith(".yaml"):
+                continue
+            try:
+                data = yaml.safe_load(entry.read_text(encoding="utf-8"))
+            except Exception:
+                logger.exception("解析规则失败：rules/%s/%s", subdir, entry.name)
+                continue
+            if isinstance(data, dict):
+                out.append(data)
+            elif data is not None:
+                logger.warning("规则文件顶层应为 dict，跳过：rules/%s/%s", subdir, entry.name)
+    except Exception:
+        logger.exception("加载规则目录失败：rules/%s", subdir)
+    return out
+
+
+def load_rules(name: str) -> dict | list:
+    """读取 apkscan/rules/<name>.yaml。
+
+    用 importlib.resources 锚顶层包 ``apkscan`` 定位资源（rules/ 是数据目录、非子包，
+    故锚 'apkscan' 而非 'apkscan.rules'），不依赖 ``Path(__file__)`` 相对路径——
+    这样在 PyInstaller onefile 等打包形态下仍成立（exe-ready）。
+
+    找不到 / 解析失败 → 记 warning（用 logging，不静默 pass）并返回空 dict。
+    name 可带或不带 .yaml 后缀。
+    """
+    stem = name[:-5] if name.endswith(".yaml") else name
+
+    try:
+        resource = importlib.resources.files("apkscan") / "rules" / f"{stem}.yaml"
+        text = resource.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        logger.warning("规则文件不存在：rules/%s.yaml", stem)
+        return {}
+    except (OSError, ModuleNotFoundError):
+        logger.exception("定位/读取规则资源失败：rules/%s.yaml", stem)
+        return {}
+
+    try:
+        data = yaml.safe_load(text)
+    except Exception:
+        logger.exception("解析规则失败：rules/%s.yaml", stem)
+        return {}
+
+    if data is None:
+        logger.warning("规则文件为空：rules/%s.yaml", stem)
+        return {}
+    if not isinstance(data, (dict, list)):
+        logger.warning(
+            "规则文件顶层类型应为 dict/list，实际 %s：rules/%s.yaml", type(data).__name__, stem
+        )
+        return {}
+    return data

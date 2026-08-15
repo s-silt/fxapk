@@ -1,0 +1,47 @@
+# apkscan — bank_packages 银行/支付 app 包名 → 机构主体映射
+#
+# 由 apkscan.dynamic.merge.merge_runtime_remote_control 经 registry.load_rules("bank_packages")
+# 读取。无障碍远控木马（REMOTE_CONTROL）劫持银行/支付 app 自动转账——运行时 hook
+# AccessibilityService.onAccessibilityEvent 抓到的「被操作 app 包名」即被劫持的目标。把这些
+# 包名映射回**机构主体**，就能指明该向哪些银行/支付机构调被害人流水（针对性盗刷的硬物证）。
+#
+# 反诈视角：命中已知银行/支付包名才产 REMOTE_CONTROL Lead（映射机构主体、给调证去向）；未知
+# 包名进 Finding/notes（不滥产 Lead）。覆盖主要几家即可，数据化便于按需扩。
+#
+# 顶层 dict：
+#   packages: 包名（小写精确）/ 包名前缀（以 . 结尾视为前缀匹配，覆盖多模块/马甲包）→ 机构主体。
+#
+# 注：包名取自公开应用市场的真实包名；前缀（trailing .）用于覆盖同一机构的多个子包/变体。
+
+packages:
+  # ---- 国有大型银行 ----
+  "com.icbc": "中国工商银行"                       # 工行（部分版本 com.icbc，前缀覆盖见下）
+  "com.icbc.": "中国工商银行"                      # 工行（com.icbc.* 各模块）
+  "com.chinamworld.main": "中国建设银行"           # 建行 手机银行
+  "com.chinamworld.bocmbci": "中国银行"            # 中行 手机银行（BOCMBCI）
+  "com.android.bankabc": "中国农业银行"            # 农行 掌上银行
+  "com.bankcomm.Bankcomm": "交通银行"             # 交行 手机银行
+  "com.bankcomm.": "交通银行"                      # 交行 各子包
+  "cn.com.psbc.psbcmobilebanking": "中国邮政储蓄银行"  # 邮储 手机银行
+
+  # ---- 全国性股份制银行 ----
+  "cmb.pb": "招商银行"                             # 招行 手机银行（专业版）
+  "com.cmbchina.": "招商银行"                      # 招行 各子包（含掌上生活等）
+  "com.pingan.paces.ccms": "平安银行"             # 平安口袋银行
+  "com.pingan.": "平安银行"                        # 平安 各子包
+  "com.chinamworld.bocsh": "中国银行"             # 中行（部分地区子包）
+  "com.cgbchina.xpage": "广发银行"               # 广发 手机银行
+  "com.citiccard.mobilebank": "中信银行"          # 中信 动卡空间/手机银行
+  "com.ecitic.bank.mobile": "中信银行"            # 中信 手机银行
+  "com.cib.cibmb": "兴业银行"                     # 兴业 手机银行
+  "com.spdbccc.app": "上海浦东发展银行"            # 浦发 手机银行
+  "cn.com.spdb.mobilebank.per": "上海浦东发展银行" # 浦发 手机银行（个人）
+  "com.cmbc.": "中国民生银行"                      # 民生 各子包
+  "cn.com.hxb.mobilebank": "华夏银行"            # 华夏 手机银行
+
+  # ---- 第三方支付（资金归集/盗刷高发面）----
+  "com.eg.android.AlipayGphone": "支付宝（蚂蚁集团）"   # 支付宝
+  "com.alipay.": "支付宝（蚂蚁集团）"                  # 支付宝 各子包
+  "com.tencent.mm": "微信（财付通）"                  # 微信（含微信支付）
+  "com.unionpay": "云闪付（中国银联）"                 # 云闪付
+  "com.unionpay.": "云闪付（中国银联）"                # 云闪付 各子包

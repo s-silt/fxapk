@@ -1,0 +1,409 @@
+# apkscan — permissions 分析器规则
+#
+# 由 apkscan.core.registry.load_rules("permissions") 读取。
+# 覆盖中文涉诈 App 在权限层面的真实风险特征与调证语义。
+#
+# 顶层为 dict，键含义：
+#   dangerous:   危险权限 → Finding 模板（severity / title / description / recommendation /
+#                evidence_to_obtain（涉诈取证意义）/ references）。
+#                键为权限短名（去掉 android.permission. 前缀），与全限定名都可匹配。
+#   combos:      高危权限组合（同时出现 → 额外 Finding，提示典型涉诈/窃密能力画像）。
+#   fraud_notes: 涉诈场景通用研判说明。
+#
+# severity 取值：INFO/LOW/MEDIUM/HIGH/CRITICAL。
+# 涉诈核心的短信 / 通讯录 / 通话记录 / 录音 / 安装包 / 悬浮窗等给 HIGH，
+# 并在 description 点明取证意义（这些是“GP 木马 / 杀猪盘 / 刷单贷超”的关键能力）。
+
+# ---------------------------------------------------------------------------
+# 危险权限 → Finding 模板
+# ---------------------------------------------------------------------------
+dangerous:
+  # ---- 短信：涉诈木马窃取验证码 / 拦截银行短信的核心能力 ----
+  READ_SMS:
+    id: PERM-READ-SMS
+    title: "读取短信 (READ_SMS)"
+    severity: HIGH
+    description: >-
+      申请读取短信权限。涉诈木马（GP 木马 / 贷超 / 杀猪盘配套样本）借此读取
+      银行、第三方支付与各平台下发的短信验证码，配合后台上传可实现盗刷、
+      接管账号、绕过短信二次验证。是“资金盗取链”的关键一环。
+    recommendation: >-
+      研判：重点核查短信上传去向（结合 endpoints/sdk 线索定位回传服务器），
+      调取该 App 是否将本机短信明文/密文外发，可作为非法获取公民个人信息、
+      帮助信息网络犯罪活动的直接证据。
+    evidence_to_obtain:
+      - "短信内容回传的服务器域名/IP 及接口（结合网络端点线索）"
+      - "服务器侧存储的被害人短信验证码、银行通知数据"
+    references:
+      - "https://developer.android.com/reference/android/Manifest.permission#READ_SMS"
+
+  RECEIVE_SMS:
+    id: PERM-RECEIVE-SMS
+    title: "接收短信广播 (RECEIVE_SMS)"
+    severity: HIGH
+    description: >-
+      申请接收短信广播权限。常与 READ_SMS 搭配，注册短信到达广播即时拦截、
+      转发验证码，是短信劫持类木马的标准能力，可在被害人无感知下实时窃取验证码。
+    recommendation: >-
+      研判：核查注册的短信 Receiver 与转发逻辑，调取短信实时转发的目标号码/服务器，
+      可关联接码平台或团伙控制端。
+    evidence_to_obtain:
+      - "短信广播 Receiver 类名与转发目标（号码/服务器）"
+      - "实时转发链路与控制端归属"
+    references:
+      - "https://developer.android.com/reference/android/Manifest.permission#RECEIVE_SMS"
+
+  SEND_SMS:
+    id: PERM-SEND-SMS
+    title: "发送短信 (SEND_SMS)"
+    severity: HIGH
+    description: >-
+      申请发送短信权限。涉诈样本可静默群发诈骗/钓鱼短信、订阅扣费、
+      或代被害人发送验证码完成盗刷，亦可产生资费消耗。
+    recommendation: >-
+      研判：调取静默发送的短信目标号码与内容模板，可关联诈骗话术/钓鱼链路与受害面。
+    evidence_to_obtain:
+      - "静默发送的短信目标号码、内容模板"
+      - "短信网关/通道商对应的发送记录"
+    references:
+      - "https://developer.android.com/reference/android/Manifest.permission#SEND_SMS"
+
+  # ---- 通讯录：杀猪盘 / 贷超暴力催收 / 通讯录轰炸的核心能力 ----
+  READ_CONTACTS:
+    id: PERM-READ-CONTACTS
+    title: "读取通讯录 (READ_CONTACTS)"
+    severity: HIGH
+    description: >-
+      申请读取通讯录权限。涉诈/套路贷类 App 借此窃取被害人全量通讯录，
+      用于暴力催收（呼死你 / 群发恐吓侮辱短信）、社工施压、扩展受害名单，
+      是“非法获取公民个人信息 + 软暴力催收”的直接能力。
+    recommendation: >-
+      研判：调取通讯录上传服务器与时间戳，结合被害人陈述固定“上传即催收”链路；
+      通讯录外发本身即涉嫌侵犯公民个人信息。
+    evidence_to_obtain:
+      - "通讯录上传的服务器域名/IP 及接口、上传时间戳"
+      - "服务器侧存储的被害人通讯录数据"
+      - "据此实施的催收短信/呼叫记录"
+    references:
+      - "https://developer.android.com/reference/android/Manifest.permission#READ_CONTACTS"
+
+  WRITE_CONTACTS:
+    id: PERM-WRITE-CONTACTS
+    title: "修改通讯录 (WRITE_CONTACTS)"
+    severity: MEDIUM
+    description: >-
+      申请修改通讯录权限。可被用于篡改/注入联系人（如伪造“客服”“官方”条目）
+      或清除痕迹，配合读取通讯录扩大社工与施压面。
+    recommendation: >-
+      研判：核查是否注入伪装联系人或清理记录，可佐证主观恶意与反取证行为。
+    evidence_to_obtain:
+      - "被注入/篡改的联系人条目"
+    references:
+      - "https://developer.android.com/reference/android/Manifest.permission#WRITE_CONTACTS"
+
+  # ---- 通话记录 / 电话：贷超催收、隐私窃取 ----
+  READ_CALL_LOG:
+    id: PERM-READ-CALL-LOG
+    title: "读取通话记录 (READ_CALL_LOG)"
+    severity: HIGH
+    description: >-
+      申请读取通话记录权限。涉诈/套路贷借此窃取被害人通话对象与频次，
+      用于精准社工、催收施压与关系网分析，属侵犯公民个人信息的敏感数据。
+    recommendation: >-
+      研判：调取通话记录上传去向，结合通讯录数据还原“画像—施压”链路。
+    evidence_to_obtain:
+      - "通话记录上传的服务器与接口"
+      - "服务器侧存储的被害人通话记录"
+    references:
+      - "https://developer.android.com/reference/android/Manifest.permission#READ_CALL_LOG"
+
+  WRITE_CALL_LOG:
+    id: PERM-WRITE-CALL-LOG
+    title: "修改通话记录 (WRITE_CALL_LOG)"
+    severity: MEDIUM
+    description: >-
+      申请修改通话记录权限，可用于删除呼叫痕迹以反取证，或伪造通话记录。
+    recommendation: >-
+      研判：核查是否存在删除/伪造通话痕迹的行为，佐证反取证意图。
+    evidence_to_obtain:
+      - "被删除/伪造的通话记录痕迹"
+    references:
+      - "https://developer.android.com/reference/android/Manifest.permission#WRITE_CALL_LOG"
+
+  PROCESS_OUTGOING_CALLS:
+    id: PERM-PROCESS-OUTGOING-CALLS
+    title: "监控拨出电话 (PROCESS_OUTGOING_CALLS)"
+    severity: HIGH
+    description: >-
+      申请监控/重定向拨出电话权限。可拦截被害人外拨号码、改写为诈骗中继号，
+      或在拨打官方客服/报警时进行干扰，是电话劫持类样本的高危能力。
+    recommendation: >-
+      研判：核查拨出电话的拦截/改写逻辑与目标号码，可关联中继/话务团伙。
+    evidence_to_obtain:
+      - "拨出电话的拦截/改写规则与目标号码"
+    references:
+      - "https://developer.android.com/reference/android/Manifest.permission#PROCESS_OUTGOING_CALLS"
+
+  CALL_PHONE:
+    id: PERM-CALL-PHONE
+    title: "直接拨打电话 (CALL_PHONE)"
+    severity: MEDIUM
+    description: >-
+      申请无需用户确认直接拨号权限。可被用于自动外呼、吸费号码拨打或骚扰。
+    recommendation: >-
+      研判：核查自动拨号目标号码，关联吸费/话务链路。
+    evidence_to_obtain:
+      - "自动拨打的目标号码列表"
+    references:
+      - "https://developer.android.com/reference/android/Manifest.permission#CALL_PHONE"
+
+  # ---- 音视频采集：偷录偷拍 ----
+  RECORD_AUDIO:
+    id: PERM-RECORD-AUDIO
+    title: "录音 (RECORD_AUDIO)"
+    severity: HIGH
+    description: >-
+      申请麦克风录音权限。涉诈/间谍类样本可在后台偷录环境与通话语音，
+      窃取被害人隐私、获取验证信息或用于敲诈，属高度敏感的隐私采集能力。
+    recommendation: >-
+      研判：核查录音文件落地路径与上传去向，调取偷录音频作为非法监控证据。
+    evidence_to_obtain:
+      - "录音文件本地落地路径与上传服务器"
+      - "服务器侧存储的偷录音频"
+    references:
+      - "https://developer.android.com/reference/android/Manifest.permission#RECORD_AUDIO"
+
+  CAMERA:
+    id: PERM-CAMERA
+    title: "摄像头 (CAMERA)"
+    severity: HIGH
+    description: >-
+      申请摄像头权限。涉诈样本可后台偷拍、采集人脸或证件影像（用于绕过实名/活体、
+      或敲诈勒索），结合相册/存储读取可批量窃取影像资料。
+    recommendation: >-
+      研判：核查拍摄影像的落地与上传去向，调取偷拍/人脸采集数据。
+    evidence_to_obtain:
+      - "拍摄影像/人脸数据的落地路径与上传服务器"
+    references:
+      - "https://developer.android.com/reference/android/Manifest.permission#CAMERA"
+
+  # ---- 位置 ----
+  ACCESS_FINE_LOCATION:
+    id: PERM-ACCESS-FINE-LOCATION
+    title: "精确定位 (ACCESS_FINE_LOCATION)"
+    severity: MEDIUM
+    description: >-
+      申请精确定位权限。可持续采集被害人地理位置用于画像、施压或盯梢。
+    recommendation: >-
+      研判：核查定位数据上传频率与去向。
+    evidence_to_obtain:
+      - "定位轨迹上传的服务器与频率"
+    references:
+      - "https://developer.android.com/reference/android/Manifest.permission#ACCESS_FINE_LOCATION"
+
+  ACCESS_COARSE_LOCATION:
+    id: PERM-ACCESS-COARSE-LOCATION
+    title: "粗略定位 (ACCESS_COARSE_LOCATION)"
+    severity: LOW
+    description: >-
+      申请粗略定位权限。可用于区域级画像与风控规避，敏感度低于精确定位。
+    recommendation: >-
+      研判：结合精确定位与上传链路综合研判。
+    evidence_to_obtain:
+      - "粗略定位数据上传的服务器"
+    references:
+      - "https://developer.android.com/reference/android/Manifest.permission#ACCESS_COARSE_LOCATION"
+
+  # ---- 设备标识：撞库 / 设备指纹 / 风控规避 ----
+  READ_PHONE_STATE:
+    id: PERM-READ-PHONE-STATE
+    title: "读取手机状态与身份 (READ_PHONE_STATE)"
+    severity: MEDIUM
+    description: >-
+      申请读取手机状态权限，可获取 IMEI/IMSI/手机号/SIM 等设备与身份标识。
+      涉诈样本用其做设备指纹、撞库关联、多开/风控规避，亦属敏感个人信息采集。
+    recommendation: >-
+      研判：核查设备标识的采集与上传，可用于跨样本/跨账号关联同一团伙基础设施。
+    evidence_to_obtain:
+      - "采集的设备标识（IMEI/IMSI/手机号）及上传去向"
+    references:
+      - "https://developer.android.com/reference/android/Manifest.permission#READ_PHONE_STATE"
+
+  READ_PHONE_NUMBERS:
+    id: PERM-READ-PHONE-NUMBERS
+    title: "读取本机手机号 (READ_PHONE_NUMBERS)"
+    severity: MEDIUM
+    description: >-
+      申请读取本机手机号权限，可直接获取被害人手机号用于精准诈骗与账号关联。
+    recommendation: >-
+      研判：核查手机号采集上传链路。
+    evidence_to_obtain:
+      - "采集的本机手机号及上传去向"
+    references:
+      - "https://developer.android.com/reference/android/Manifest.permission#READ_PHONE_NUMBERS"
+
+  # ---- 悬浮窗：钓鱼覆盖 / 诱导授权的高危能力 ----
+  SYSTEM_ALERT_WINDOW:
+    id: PERM-SYSTEM-ALERT-WINDOW
+    title: "悬浮窗/置顶覆盖 (SYSTEM_ALERT_WINDOW)"
+    severity: HIGH
+    description: >-
+      申请在其他应用之上绘制悬浮窗权限。涉诈木马借此在银行/支付/系统界面之上
+      覆盖钓鱼输入框窃取账号密码（overlay 攻击），或诱导/劫持用户点击授予无障碍、
+      设备管理员等更高权限，是 Android 银行木马的标志性能力。
+    recommendation: >-
+      研判：核查 overlay 钓鱼界面与被覆盖目标 App，调取钓鱼采集数据回传去向。
+    evidence_to_obtain:
+      - "overlay 钓鱼布局资源与被覆盖目标应用"
+      - "钓鱼采集的账号密码回传服务器"
+    references:
+      - "https://developer.android.com/reference/android/Manifest.permission#SYSTEM_ALERT_WINDOW"
+
+  # ---- 静默安装 / 应用枚举：投放木马、识别银行/卸载杀软 ----
+  REQUEST_INSTALL_PACKAGES:
+    id: PERM-REQUEST-INSTALL-PACKAGES
+    title: "请求安装应用包 (REQUEST_INSTALL_PACKAGES)"
+    severity: HIGH
+    description: >-
+      申请安装其他应用包权限。涉诈样本借此诱导/静默安装二级木马、更新恶意载荷，
+      绕过应用市场审核分发，是“母包拉子包”分发链路的关键能力。
+    recommendation: >-
+      研判：调取下发的子包来源 URL 与子包样本，关联分发服务器与上线团伙。
+    evidence_to_obtain:
+      - "下发安装的子包来源 URL 与子包样本哈希"
+    references:
+      - "https://developer.android.com/reference/android/Manifest.permission#REQUEST_INSTALL_PACKAGES"
+
+  QUERY_ALL_PACKAGES:
+    id: PERM-QUERY-ALL-PACKAGES
+    title: "枚举已安装应用 (QUERY_ALL_PACKAGES)"
+    severity: MEDIUM
+    description: >-
+      申请枚举全部已安装应用权限。涉诈样本借此识别被害人安装的银行/支付/杀毒 App，
+      据以投放对应钓鱼界面或规避检测，是 overlay 木马的侦察能力。
+    recommendation: >-
+      研判：核查应用清单的采集与上传，关联针对性钓鱼模板下发逻辑。
+    evidence_to_obtain:
+      - "已安装应用清单的采集与上传去向"
+    references:
+      - "https://developer.android.com/reference/android/Manifest.permission#QUERY_ALL_PACKAGES"
+
+  # ---- 存储：批量窃取相册/文件 ----
+  READ_EXTERNAL_STORAGE:
+    id: PERM-READ-EXTERNAL-STORAGE
+    title: "读取外部存储 (READ_EXTERNAL_STORAGE)"
+    severity: MEDIUM
+    description: >-
+      申请读取外部存储权限。可批量窃取相册照片、下载文件、聊天截图与证件影像。
+    recommendation: >-
+      研判：核查文件批量上传去向，调取窃取的影像/文件数据。
+    evidence_to_obtain:
+      - "批量上传的文件/相册数据及服务器"
+    references:
+      - "https://developer.android.com/reference/android/Manifest.permission#READ_EXTERNAL_STORAGE"
+
+  READ_MEDIA_IMAGES:
+    id: PERM-READ-MEDIA-IMAGES
+    title: "读取相册图片 (READ_MEDIA_IMAGES)"
+    severity: MEDIUM
+    description: >-
+      Android 13+ 细分的相册图片读取权限，可批量窃取被害人相册（含证件/隐私照）。
+    recommendation: >-
+      研判：核查相册图片批量上传去向。
+    evidence_to_obtain:
+      - "批量上传的相册图片及服务器"
+    references:
+      - "https://developer.android.com/reference/android/Manifest.permission#READ_MEDIA_IMAGES"
+
+  # ---- 设备管理员 / 后台常驻 ----
+  BIND_DEVICE_ADMIN:
+    id: PERM-BIND-DEVICE-ADMIN
+    title: "设备管理员 (BIND_DEVICE_ADMIN)"
+    severity: HIGH
+    description: >-
+      声明设备管理员能力。勒索/锁机类样本借此锁屏、强制改密、阻止卸载，
+      实施敲诈勒索并增强持久化，是锁机勒索木马的典型能力。
+    recommendation: >-
+      研判：核查锁屏/改密/防卸载逻辑与勒索话术，固定敲诈勒索事实。
+    evidence_to_obtain:
+      - "锁屏/改密策略与勒索提示内容"
+    references:
+      - "https://developer.android.com/reference/android/Manifest.permission#BIND_DEVICE_ADMIN"
+
+  BIND_ACCESSIBILITY_SERVICE:
+    id: PERM-BIND-ACCESSIBILITY-SERVICE
+    title: "无障碍服务 (BIND_ACCESSIBILITY_SERVICE)"
+    severity: HIGH
+    description: >-
+      声明无障碍服务能力。涉诈木马滥用无障碍读取屏幕内容、模拟点击、
+      自动授予权限/自动转账、拦截卸载，是当前 Android 银行木马最危险的能力之一。
+    recommendation: >-
+      研判：核查无障碍自动化脚本（自动点击/转账/授权）目标与服务端指令来源。
+    evidence_to_obtain:
+      - "无障碍自动化脚本/配置与远端指令服务器"
+    references:
+      - "https://developer.android.com/reference/android/Manifest.permission#BIND_ACCESSIBILITY_SERVICE"
+
+  RECEIVE_BOOT_COMPLETED:
+    id: PERM-RECEIVE-BOOT-COMPLETED
+    title: "开机自启 (RECEIVE_BOOT_COMPLETED)"
+    severity: LOW
+    description: >-
+      申请开机自启权限。常用于木马持久化，开机即拉起后台服务保持上线。
+    recommendation: >-
+      研判：结合常驻服务与上线心跳综合研判持久化能力。
+    evidence_to_obtain:
+      - "开机自启拉起的服务与上线心跳服务器"
+    references:
+      - "https://developer.android.com/reference/android/Manifest.permission#RECEIVE_BOOT_COMPLETED"
+
+# ---------------------------------------------------------------------------
+# 高危权限组合（同时出现 → 额外 Finding，画像典型涉诈能力）
+# ---------------------------------------------------------------------------
+combos:
+  - id: PERM-COMBO-SMS-INTERCEPT
+    title: "短信劫持能力组合 (READ_SMS + RECEIVE_SMS)"
+    severity: HIGH
+    require:
+      - READ_SMS
+      - RECEIVE_SMS
+    description: >-
+      同时申请读取与接收短信，构成实时短信劫持能力（读取+广播拦截+可转发），
+      是验证码窃取类木马的典型权限画像。
+    recommendation: >-
+      研判：优先核查短信回传/转发链路，作为盗刷与帮信的核心证据。
+
+  - id: PERM-COMBO-PERSONAL-INFO-HARVEST
+    title: "公民个人信息批量窃取组合 (通讯录 + 通话记录 + 短信)"
+    severity: HIGH
+    require:
+      - READ_CONTACTS
+      - READ_CALL_LOG
+      - READ_SMS
+    description: >-
+      同时申请通讯录、通话记录与短信读取，构成对被害人社交关系与隐私的
+      全面采集能力，是套路贷/暴力催收类 App 的典型权限画像。
+    recommendation: >-
+      研判：上述数据外发本身即涉嫌侵犯公民个人信息，重点调取统一回传服务器。
+
+  - id: PERM-COMBO-BANK-OVERLAY
+    title: "银行木马 overlay 组合 (悬浮窗 + 短信 + 应用枚举)"
+    severity: HIGH
+    require:
+      - SYSTEM_ALERT_WINDOW
+      - READ_SMS
+      - QUERY_ALL_PACKAGES
+    description: >-
+      同时具备悬浮窗覆盖、短信读取与应用枚举，构成识别目标银行 App 并 overlay
+      钓鱼、同时劫持短信验证码的银行木马典型能力画像。
+    recommendation: >-
+      研判：核查钓鱼布局、目标银行清单与验证码/凭证回传服务器。
+
+# ---------------------------------------------------------------------------
+# 涉诈研判通用说明
+# ---------------------------------------------------------------------------
+fraud_notes:
+  privacy_theft: >-
+    短信/通讯录/通话记录/录音/摄像头/位置等敏感权限的申请与外发，
+    是非法获取公民个人信息罪与帮助信息网络犯罪活动罪的常见技术支撑；
+    权限本身只是能力证据，须结合网络端点线索定位数据回传服务器以闭环取证。

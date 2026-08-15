@@ -1,0 +1,22 @@
+# rules/providers/cloud.yaml —— 国内云厂商 org 关键字补全（主 providers.yaml 已有阿里/腾讯/华为/火山/百度/金山/UCloud）。
+# 补运营商系云 + 二线云；均为 org 名子串（供 classify_network 定 cloud 类）。ASN 数值保守不填。
+network_categories:
+  cloud:
+    org_keywords:
+      # 运营商系云
+      - ctyun            # 天翼云（中国电信）
+      - 天翼云
+      - china telecom cloud
+      - ecloud           # 移动云（中国移动）
+      - 移动云
+      - china mobile cloud
+      - unicom cloud     # 联通云
+      - wo cloud
+      - 联通云
+      # 二线公有云
+      - qingcloud        # 青云
+      - 青云科技          # 专属词形——裸"青云"会撞南昌青云谱区等地名 org 串
+      - jdcloud          # 京东云
+      - jd cloud
+      - 京东云
+      - ksyun            # 金山云（专属短码；不用裸 kingsoft——会撞金山非云业务 WPS/西山居网段）

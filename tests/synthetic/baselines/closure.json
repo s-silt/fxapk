@@ -1,0 +1,283 @@
+{
+  "admin-panel-login-url": {
+    "checks": [
+      {
+        "evidence_refs": [],
+        "id": "static_health",
+        "status": "pass"
+      },
+      {
+        "evidence_refs": [],
+        "id": "dynamic_evidence",
+        "status": "not_applicable"
+      },
+      {
+        "evidence_refs": [],
+        "id": "evidence_visibility",
+        "status": "warn"
+      }
+    ],
+    "gaps": [
+      "no investigation target selected"
+    ],
+    "status": "failed",
+    "target_selection": {
+      "candidate_total": 0,
+      "dropped": [],
+      "limit": 6,
+      "selected": 0,
+      "truncated": 0
+    },
+    "targets": []
+  },
+  "backend-credential-db-dsn": {
+    "checks": [
+      {
+        "evidence_refs": [],
+        "id": "static_health",
+        "status": "pass"
+      },
+      {
+        "evidence_refs": [],
+        "id": "dynamic_evidence",
+        "status": "not_applicable"
+      },
+      {
+        "evidence_refs": [],
+        "id": "evidence_visibility",
+        "status": "warn"
+      }
+    ],
+    "gaps": [
+      "no investigation target selected"
+    ],
+    "status": "failed",
+    "target_selection": {
+      "candidate_total": 0,
+      "dropped": [],
+      "limit": 6,
+      "selected": 0,
+      "truncated": 0
+    },
+    "targets": []
+  },
+  "card-merchant-keyword": {
+    "checks": [
+      {
+        "evidence_refs": [],
+        "id": "static_health",
+        "status": "pass"
+      },
+      {
+        "evidence_refs": [],
+        "id": "dynamic_evidence",
+        "status": "not_applicable"
+      },
+      {
+        "evidence_refs": [],
+        "id": "evidence_visibility",
+        "status": "warn"
+      }
+    ],
+    "gaps": [
+      "no investigation target selected"
+    ],
+    "status": "failed",
+    "target_selection": {
+      "candidate_total": 0,
+      "dropped": [],
+      "limit": 6,
+      "selected": 0,
+      "truncated": 0
+    },
+    "targets": []
+  },
+  "crypto-recipe-cryptojs-envelope": {
+    "checks": [
+      {
+        "evidence_refs": [],
+        "id": "static_health",
+        "status": "pass"
+      },
+      {
+        "evidence_refs": [],
+        "id": "dynamic_evidence",
+        "status": "not_applicable"
+      },
+      {
+        "evidence_refs": [],
+        "id": "evidence_visibility",
+        "status": "warn"
+      }
+    ],
+    "gaps": [
+      "no investigation target selected",
+      "target set may be incomplete: static inputs not fully visible (resource)"
+    ],
+    "status": "failed",
+    "target_selection": {
+      "candidate_total": 0,
+      "dropped": [],
+      "limit": 6,
+      "selected": 0,
+      "truncated": 0
+    },
+    "targets": []
+  },
+  "fourth-party-payment-gateway": {
+    "checks": [
+      {
+        "evidence_refs": [],
+        "id": "static_health",
+        "status": "pass"
+      },
+      {
+        "evidence_refs": [],
+        "id": "dynamic_evidence",
+        "status": "not_applicable"
+      },
+      {
+        "evidence_refs": [],
+        "id": "evidence_visibility",
+        "status": "warn"
+      }
+    ],
+    "gaps": [
+      "no investigation target selected"
+    ],
+    "status": "failed",
+    "target_selection": {
+      "candidate_total": 0,
+      "dropped": [],
+      "limit": 6,
+      "selected": 0,
+      "truncated": 0
+    },
+    "targets": []
+  },
+  "hardened-unidentified-stub": {
+    "checks": [
+      {
+        "evidence_refs": [],
+        "id": "static_health",
+        "status": "pass"
+      },
+      {
+        "evidence_refs": [],
+        "id": "dynamic_evidence",
+        "status": "not_applicable"
+      },
+      {
+        "evidence_refs": [],
+        "id": "evidence_visibility",
+        "status": "warn"
+      }
+    ],
+    "gaps": [
+      "no investigation target selected",
+      "target set may be incomplete: static inputs not fully visible (dex)"
+    ],
+    "status": "failed",
+    "target_selection": {
+      "candidate_total": 0,
+      "dropped": [],
+      "limit": 6,
+      "selected": 0,
+      "truncated": 0
+    },
+    "targets": []
+  },
+  "payment-sdk-alipay": {
+    "checks": [
+      {
+        "evidence_refs": [],
+        "id": "static_health",
+        "status": "pass"
+      },
+      {
+        "evidence_refs": [],
+        "id": "dynamic_evidence",
+        "status": "not_applicable"
+      },
+      {
+        "evidence_refs": [],
+        "id": "evidence_visibility",
+        "status": "warn"
+      }
+    ],
+    "gaps": [
+      "no investigation target selected"
+    ],
+    "status": "failed",
+    "target_selection": {
+      "candidate_total": 0,
+      "dropped": [],
+      "limit": 6,
+      "selected": 0,
+      "truncated": 0
+    },
+    "targets": []
+  },
+  "self-hosted-im-websocket": {
+    "checks": [
+      {
+        "evidence_refs": [],
+        "id": "static_health",
+        "status": "pass"
+      },
+      {
+        "evidence_refs": [],
+        "id": "dynamic_evidence",
+        "status": "not_applicable"
+      },
+      {
+        "evidence_refs": [],
+        "id": "evidence_visibility",
+        "status": "warn"
+      }
+    ],
+    "gaps": [
+      "no investigation target selected"
+    ],
+    "status": "failed",
+    "target_selection": {
+      "candidate_total": 0,
+      "dropped": [],
+      "limit": 6,
+      "selected": 0,
+      "truncated": 0
+    },
+    "targets": []
+  },
+  "wallet-secret-mnemonic": {
+    "checks": [
+      {
+        "evidence_refs": [],
+        "id": "static_health",
+        "status": "pass"
+      },
+      {
+        "evidence_refs": [],
+        "id": "dynamic_evidence",
+        "status": "not_applicable"
+      },
+      {
+        "evidence_refs": [],
+        "id": "evidence_visibility",
+        "status": "warn"
+      }
+    ],
+    "gaps": [
+      "no investigation target selected"
+    ],
+    "status": "failed",
+    "target_selection": {
+      "candidate_total": 0,
+      "dropped": [],
+      "limit": 6,
+      "selected": 0,
+      "truncated": 0
+    },
+    "targets": []
+  }
+}

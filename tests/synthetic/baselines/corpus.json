@@ -1,0 +1,822 @@
+{
+  "admin-panel-login-url": {
+    "app_score": 0.0,
+    "app_type": "未定",
+    "build_environments": [],
+    "cname_edges": [],
+    "counts": {
+      "endpoints": 2,
+      "findings": 1,
+      "leads": 2
+    },
+    "domains": [
+      "api.evilbackend-synthetic.test"
+    ],
+    "evidence_surface": "static",
+    "finding_ids": [
+      "API-SURFACE-OVERVIEW"
+    ],
+    "is_hardened": false,
+    "key_iocs": [],
+    "mode": "passive",
+    "native_lib_hashes": [],
+    "package_name": "com.test.app",
+    "packer": null,
+    "remote_config_objects": [],
+    "schema_version": "1.2",
+    "sign_sha256": null,
+    "version_code": null,
+    "version_name": null,
+    "visibility": {
+      "blocked_claims": [
+        "config_chain_complete",
+        "no_hardcoded_credential",
+        "no_remote_config",
+        "runtime_contact_observed",
+        "static_endpoint_exhaustive"
+      ],
+      "claims": {
+        "config_chain_complete": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "resource"
+          ]
+        },
+        "no_contact_harvesting": {
+          "missing_sources": [],
+          "unassessed_sources": []
+        },
+        "no_hardcoded_credential": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "java",
+            "resource"
+          ]
+        },
+        "no_remote_config": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "resource"
+          ]
+        },
+        "no_sms_interception": {
+          "missing_sources": [],
+          "unassessed_sources": []
+        },
+        "runtime_contact_observed": {
+          "missing_sources": [
+            "runtime"
+          ],
+          "unassessed_sources": []
+        },
+        "static_endpoint_exhaustive": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "java",
+            "resource"
+          ]
+        }
+      },
+      "degraded": true,
+      "next_actions": 0,
+      "remediation": "not_attempted",
+      "sources": {
+        "dex": "complete",
+        "java": "unknown",
+        "native": "complete",
+        "resource": "unknown",
+        "runtime": "unavailable"
+      }
+    }
+  },
+  "backend-credential-db-dsn": {
+    "app_score": 0.0,
+    "app_type": "未定",
+    "build_environments": [],
+    "cname_edges": [],
+    "counts": {
+      "endpoints": 0,
+      "findings": 0,
+      "leads": 1
+    },
+    "domains": [],
+    "evidence_surface": "static",
+    "finding_ids": [],
+    "is_hardened": false,
+    "key_iocs": [
+      "mysql://root:pass123@db.evil-synthetic.test:3306"
+    ],
+    "mode": "passive",
+    "native_lib_hashes": [],
+    "package_name": "com.test.app",
+    "packer": null,
+    "remote_config_objects": [],
+    "schema_version": "1.2",
+    "sign_sha256": null,
+    "version_code": null,
+    "version_name": null,
+    "visibility": {
+      "blocked_claims": [
+        "config_chain_complete",
+        "no_hardcoded_credential",
+        "no_remote_config",
+        "runtime_contact_observed",
+        "static_endpoint_exhaustive"
+      ],
+      "claims": {
+        "config_chain_complete": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "resource"
+          ]
+        },
+        "no_contact_harvesting": {
+          "missing_sources": [],
+          "unassessed_sources": []
+        },
+        "no_hardcoded_credential": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "java",
+            "resource"
+          ]
+        },
+        "no_remote_config": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "resource"
+          ]
+        },
+        "no_sms_interception": {
+          "missing_sources": [],
+          "unassessed_sources": []
+        },
+        "runtime_contact_observed": {
+          "missing_sources": [
+            "runtime"
+          ],
+          "unassessed_sources": []
+        },
+        "static_endpoint_exhaustive": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "java",
+            "resource"
+          ]
+        }
+      },
+      "degraded": true,
+      "next_actions": 0,
+      "remediation": "not_attempted",
+      "sources": {
+        "dex": "complete",
+        "java": "unknown",
+        "native": "complete",
+        "resource": "unknown",
+        "runtime": "unavailable"
+      }
+    }
+  },
+  "card-merchant-keyword": {
+    "app_score": 0.0,
+    "app_type": "未定",
+    "build_environments": [],
+    "cname_edges": [],
+    "counts": {
+      "endpoints": 0,
+      "findings": 0,
+      "leads": 1
+    },
+    "domains": [],
+    "evidence_surface": "static",
+    "finding_ids": [],
+    "is_hardened": false,
+    "key_iocs": [],
+    "mode": "passive",
+    "native_lib_hashes": [],
+    "package_name": "com.test.app",
+    "packer": null,
+    "remote_config_objects": [],
+    "schema_version": "1.2",
+    "sign_sha256": null,
+    "version_code": null,
+    "version_name": null,
+    "visibility": {
+      "blocked_claims": [
+        "config_chain_complete",
+        "no_hardcoded_credential",
+        "no_remote_config",
+        "runtime_contact_observed",
+        "static_endpoint_exhaustive"
+      ],
+      "claims": {
+        "config_chain_complete": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "resource"
+          ]
+        },
+        "no_contact_harvesting": {
+          "missing_sources": [],
+          "unassessed_sources": []
+        },
+        "no_hardcoded_credential": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "java",
+            "resource"
+          ]
+        },
+        "no_remote_config": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "resource"
+          ]
+        },
+        "no_sms_interception": {
+          "missing_sources": [],
+          "unassessed_sources": []
+        },
+        "runtime_contact_observed": {
+          "missing_sources": [
+            "runtime"
+          ],
+          "unassessed_sources": []
+        },
+        "static_endpoint_exhaustive": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "java",
+            "resource"
+          ]
+        }
+      },
+      "degraded": true,
+      "next_actions": 0,
+      "remediation": "not_attempted",
+      "sources": {
+        "dex": "complete",
+        "java": "unknown",
+        "native": "complete",
+        "resource": "unknown",
+        "runtime": "unavailable"
+      }
+    }
+  },
+  "crypto-recipe-cryptojs-envelope": {
+    "app_score": 0.0,
+    "app_type": "未定",
+    "build_environments": [],
+    "cname_edges": [],
+    "counts": {
+      "endpoints": 0,
+      "findings": 1,
+      "leads": 1
+    },
+    "domains": [],
+    "evidence_surface": "static",
+    "finding_ids": [
+      "CRYPTO-RECIPE-AES"
+    ],
+    "is_hardened": false,
+    "key_iocs": [
+      "AES-CFB/Pkcs7 key(utf8,32B)=0123…cdef iv=md5(key+ts)[:16]"
+    ],
+    "mode": "passive",
+    "native_lib_hashes": [],
+    "package_name": "com.test.app",
+    "packer": null,
+    "remote_config_objects": [],
+    "schema_version": "1.2",
+    "sign_sha256": null,
+    "version_code": null,
+    "version_name": null,
+    "visibility": {
+      "blocked_claims": [
+        "config_chain_complete",
+        "no_hardcoded_credential",
+        "no_remote_config",
+        "runtime_contact_observed",
+        "static_endpoint_exhaustive"
+      ],
+      "claims": {
+        "config_chain_complete": {
+          "missing_sources": [
+            "resource"
+          ],
+          "unassessed_sources": []
+        },
+        "no_contact_harvesting": {
+          "missing_sources": [],
+          "unassessed_sources": []
+        },
+        "no_hardcoded_credential": {
+          "missing_sources": [
+            "resource"
+          ],
+          "unassessed_sources": [
+            "java"
+          ]
+        },
+        "no_remote_config": {
+          "missing_sources": [
+            "resource"
+          ],
+          "unassessed_sources": []
+        },
+        "no_sms_interception": {
+          "missing_sources": [],
+          "unassessed_sources": []
+        },
+        "runtime_contact_observed": {
+          "missing_sources": [
+            "runtime"
+          ],
+          "unassessed_sources": []
+        },
+        "static_endpoint_exhaustive": {
+          "missing_sources": [
+            "resource"
+          ],
+          "unassessed_sources": [
+            "java"
+          ]
+        }
+      },
+      "degraded": true,
+      "next_actions": 0,
+      "remediation": "not_attempted",
+      "sources": {
+        "dex": "complete",
+        "java": "unknown",
+        "native": "complete",
+        "resource": "partial",
+        "runtime": "unavailable"
+      }
+    }
+  },
+  "fourth-party-payment-gateway": {
+    "app_score": 1.5,
+    "app_type": "未定",
+    "build_environments": [],
+    "cname_edges": [],
+    "counts": {
+      "endpoints": 2,
+      "findings": 1,
+      "leads": 3
+    },
+    "domains": [
+      "pay.evilgw-synthetic.test"
+    ],
+    "evidence_surface": "static",
+    "finding_ids": [
+      "API-SURFACE-OVERVIEW"
+    ],
+    "is_hardened": false,
+    "key_iocs": [
+      "商户号 (mch_id / merchant id)"
+    ],
+    "mode": "passive",
+    "native_lib_hashes": [],
+    "package_name": "com.test.app",
+    "packer": null,
+    "remote_config_objects": [],
+    "schema_version": "1.2",
+    "sign_sha256": null,
+    "version_code": null,
+    "version_name": null,
+    "visibility": {
+      "blocked_claims": [
+        "config_chain_complete",
+        "no_hardcoded_credential",
+        "no_remote_config",
+        "runtime_contact_observed",
+        "static_endpoint_exhaustive"
+      ],
+      "claims": {
+        "config_chain_complete": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "resource"
+          ]
+        },
+        "no_contact_harvesting": {
+          "missing_sources": [],
+          "unassessed_sources": []
+        },
+        "no_hardcoded_credential": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "java",
+            "resource"
+          ]
+        },
+        "no_remote_config": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "resource"
+          ]
+        },
+        "no_sms_interception": {
+          "missing_sources": [],
+          "unassessed_sources": []
+        },
+        "runtime_contact_observed": {
+          "missing_sources": [
+            "runtime"
+          ],
+          "unassessed_sources": []
+        },
+        "static_endpoint_exhaustive": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "java",
+            "resource"
+          ]
+        }
+      },
+      "degraded": true,
+      "next_actions": 0,
+      "remediation": "not_attempted",
+      "sources": {
+        "dex": "complete",
+        "java": "unknown",
+        "native": "complete",
+        "resource": "unknown",
+        "runtime": "unavailable"
+      }
+    }
+  },
+  "hardened-unidentified-stub": {
+    "app_score": 0.0,
+    "app_type": "未定",
+    "build_environments": [],
+    "cname_edges": [],
+    "counts": {
+      "endpoints": 0,
+      "findings": 1,
+      "leads": 0
+    },
+    "domains": [],
+    "evidence_surface": "static",
+    "finding_ids": [
+      "PACK-UNIDENTIFIED-STUB-DEX"
+    ],
+    "is_hardened": true,
+    "key_iocs": [],
+    "mode": "passive",
+    "native_lib_hashes": [
+      {
+        "name": "libshellstub-synthetic.so",
+        "sha256": "436baa5ca2a991d18ffa08bca94c101c91f70e3260cf4f87c28b61cb92f72181",
+        "size": 68
+      }
+    ],
+    "package_name": "com.test.app",
+    "packer": null,
+    "remote_config_objects": [],
+    "schema_version": "1.2",
+    "sign_sha256": null,
+    "version_code": null,
+    "version_name": null,
+    "visibility": {
+      "blocked_claims": [
+        "config_chain_complete",
+        "no_contact_harvesting",
+        "no_hardcoded_credential",
+        "no_remote_config",
+        "no_sms_interception",
+        "runtime_contact_observed",
+        "static_endpoint_exhaustive"
+      ],
+      "claims": {
+        "config_chain_complete": {
+          "missing_sources": [
+            "dex"
+          ],
+          "unassessed_sources": [
+            "resource"
+          ]
+        },
+        "no_contact_harvesting": {
+          "missing_sources": [
+            "dex"
+          ],
+          "unassessed_sources": []
+        },
+        "no_hardcoded_credential": {
+          "missing_sources": [
+            "dex"
+          ],
+          "unassessed_sources": [
+            "java",
+            "resource"
+          ]
+        },
+        "no_remote_config": {
+          "missing_sources": [
+            "dex"
+          ],
+          "unassessed_sources": [
+            "resource"
+          ]
+        },
+        "no_sms_interception": {
+          "missing_sources": [
+            "dex"
+          ],
+          "unassessed_sources": []
+        },
+        "runtime_contact_observed": {
+          "missing_sources": [
+            "runtime"
+          ],
+          "unassessed_sources": []
+        },
+        "static_endpoint_exhaustive": {
+          "missing_sources": [
+            "dex"
+          ],
+          "unassessed_sources": [
+            "java",
+            "resource"
+          ]
+        }
+      },
+      "degraded": true,
+      "next_actions": 2,
+      "remediation": "not_attempted",
+      "sources": {
+        "dex": "stub_only",
+        "java": "unknown",
+        "native": "complete",
+        "resource": "unknown",
+        "runtime": "unavailable"
+      }
+    }
+  },
+  "payment-sdk-alipay": {
+    "app_score": 0.0,
+    "app_type": "未定",
+    "build_environments": [],
+    "cname_edges": [],
+    "counts": {
+      "endpoints": 0,
+      "findings": 0,
+      "leads": 2
+    },
+    "domains": [],
+    "evidence_surface": "static",
+    "finding_ids": [],
+    "is_hardened": false,
+    "key_iocs": [
+      "支付宝 (Alipay SDK)"
+    ],
+    "mode": "passive",
+    "native_lib_hashes": [],
+    "package_name": "com.test.app",
+    "packer": null,
+    "remote_config_objects": [],
+    "schema_version": "1.2",
+    "sign_sha256": null,
+    "version_code": null,
+    "version_name": null,
+    "visibility": {
+      "blocked_claims": [
+        "config_chain_complete",
+        "no_hardcoded_credential",
+        "no_remote_config",
+        "runtime_contact_observed",
+        "static_endpoint_exhaustive"
+      ],
+      "claims": {
+        "config_chain_complete": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "resource"
+          ]
+        },
+        "no_contact_harvesting": {
+          "missing_sources": [],
+          "unassessed_sources": []
+        },
+        "no_hardcoded_credential": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "java",
+            "resource"
+          ]
+        },
+        "no_remote_config": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "resource"
+          ]
+        },
+        "no_sms_interception": {
+          "missing_sources": [],
+          "unassessed_sources": []
+        },
+        "runtime_contact_observed": {
+          "missing_sources": [
+            "runtime"
+          ],
+          "unassessed_sources": []
+        },
+        "static_endpoint_exhaustive": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "java",
+            "resource"
+          ]
+        }
+      },
+      "degraded": true,
+      "next_actions": 0,
+      "remediation": "not_attempted",
+      "sources": {
+        "dex": "complete",
+        "java": "unknown",
+        "native": "complete",
+        "resource": "unknown",
+        "runtime": "unavailable"
+      }
+    }
+  },
+  "self-hosted-im-websocket": {
+    "app_score": 0.0,
+    "app_type": "未定",
+    "build_environments": [],
+    "cname_edges": [],
+    "counts": {
+      "endpoints": 2,
+      "findings": 0,
+      "leads": 2
+    },
+    "domains": [
+      "im.evilbroker-synthetic.test"
+    ],
+    "evidence_surface": "static",
+    "finding_ids": [],
+    "is_hardened": false,
+    "key_iocs": [],
+    "mode": "passive",
+    "native_lib_hashes": [],
+    "package_name": "com.test.app",
+    "packer": null,
+    "remote_config_objects": [],
+    "schema_version": "1.2",
+    "sign_sha256": null,
+    "version_code": null,
+    "version_name": null,
+    "visibility": {
+      "blocked_claims": [
+        "config_chain_complete",
+        "no_hardcoded_credential",
+        "no_remote_config",
+        "runtime_contact_observed",
+        "static_endpoint_exhaustive"
+      ],
+      "claims": {
+        "config_chain_complete": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "resource"
+          ]
+        },
+        "no_contact_harvesting": {
+          "missing_sources": [],
+          "unassessed_sources": []
+        },
+        "no_hardcoded_credential": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "java",
+            "resource"
+          ]
+        },
+        "no_remote_config": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "resource"
+          ]
+        },
+        "no_sms_interception": {
+          "missing_sources": [],
+          "unassessed_sources": []
+        },
+        "runtime_contact_observed": {
+          "missing_sources": [
+            "runtime"
+          ],
+          "unassessed_sources": []
+        },
+        "static_endpoint_exhaustive": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "java",
+            "resource"
+          ]
+        }
+      },
+      "degraded": true,
+      "next_actions": 0,
+      "remediation": "not_attempted",
+      "sources": {
+        "dex": "complete",
+        "java": "unknown",
+        "native": "complete",
+        "resource": "unknown",
+        "runtime": "unavailable"
+      }
+    }
+  },
+  "wallet-secret-mnemonic": {
+    "app_score": 1.5,
+    "app_type": "未定",
+    "build_environments": [],
+    "cname_edges": [],
+    "counts": {
+      "endpoints": 0,
+      "findings": 0,
+      "leads": 1
+    },
+    "domains": [],
+    "evidence_surface": "static",
+    "finding_ids": [],
+    "is_hardened": false,
+    "key_iocs": [
+      "legal winner thank year wave sausage worth useful legal winner thank yellow"
+    ],
+    "mode": "passive",
+    "native_lib_hashes": [],
+    "package_name": "com.test.app",
+    "packer": null,
+    "remote_config_objects": [],
+    "schema_version": "1.2",
+    "sign_sha256": null,
+    "version_code": null,
+    "version_name": null,
+    "visibility": {
+      "blocked_claims": [
+        "config_chain_complete",
+        "no_hardcoded_credential",
+        "no_remote_config",
+        "runtime_contact_observed",
+        "static_endpoint_exhaustive"
+      ],
+      "claims": {
+        "config_chain_complete": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "resource"
+          ]
+        },
+        "no_contact_harvesting": {
+          "missing_sources": [],
+          "unassessed_sources": []
+        },
+        "no_hardcoded_credential": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "java",
+            "resource"
+          ]
+        },
+        "no_remote_config": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "resource"
+          ]
+        },
+        "no_sms_interception": {
+          "missing_sources": [],
+          "unassessed_sources": []
+        },
+        "runtime_contact_observed": {
+          "missing_sources": [
+            "runtime"
+          ],
+          "unassessed_sources": []
+        },
+        "static_endpoint_exhaustive": {
+          "missing_sources": [],
+          "unassessed_sources": [
+            "java",
+            "resource"
+          ]
+        }
+      },
+      "degraded": true,
+      "next_actions": 0,
+      "remediation": "not_attempted",
+      "sources": {
+        "dex": "complete",
+        "java": "unknown",
+        "native": "complete",
+        "resource": "unknown",
+        "runtime": "unavailable"
+      }
+    }
+  }
+}

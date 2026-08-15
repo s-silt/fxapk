@@ -1,0 +1,498 @@
+"""apkscan.core.device 单测：adb_devices 枚举可靠性（先 start-server 再 devices）+ 解析。
+
+真机实测 bug 回归：本工具结束 kill-server 不留残留 → 每次 adb 冷启；若 adb devices 赶上
+server 冷启/版本重启会空表，误判「无设备」（而后续 adb shell 因 server 已热而 OK）。
+adb_devices 先 ensure_adb_server（同步 start-server）拉热，枚举才可靠。
+"""
+
+from __future__ import annotations
+
+import sys
+import types
+from typing import Any
+
+from apkscan.core import device
+
+
+class _Proc:
+    def __init__(self, returncode: int, stdout: str) -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+
+
+def test_adb_devices_starts_server_before_enumerate(monkeypatch: Any) -> None:
+    """回归：adb_devices 必须先 `adb start-server` 再 `adb devices`（拉热避免冷启空表）。"""
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], timeout: float = 5.0) -> _Proc | None:
+        calls.append(list(args))
+        if args[:2] == ["adb", "start-server"]:
+            return _Proc(0, "")
+        if args[:2] == ["adb", "devices"]:
+            return _Proc(0, "List of devices attached\nemulator-5554\tdevice\n")
+        return None
+
+    monkeypatch.setattr(device, "_run", fake_run)
+    serials = device.adb_devices()
+
+    assert serials == ["emulator-5554"]
+    twoheads = [c[:2] for c in calls]
+    assert ["adb", "start-server"] in twoheads
+    assert ["adb", "devices"] in twoheads
+    assert twoheads.index(["adb", "start-server"]) < twoheads.index(["adb", "devices"])
+
+
+def test_adb_devices_parses_only_online_and_strips_cr(monkeypatch: Any) -> None:
+    """Windows \\r\\n + 多状态：只收 state==device 的，且 `device\\r` 被 strip 后仍命中。"""
+    out = (
+        "List of devices attached\r\n"
+        "emulator-5554\tdevice\r\n"
+        "10.0.0.2:5555\tdevice\r\n"
+        "offline-dev\toffline\r\n"
+        "bad-dev\tunauthorized\r\n"
+    )
+
+    def fake_run(args: list[str], timeout: float = 5.0) -> _Proc:
+        return _Proc(0, out) if args[:2] == ["adb", "devices"] else _Proc(0, "")
+
+    monkeypatch.setattr(device, "_run", fake_run)
+    assert device.adb_devices() == ["emulator-5554", "10.0.0.2:5555"]
+
+
+def test_adb_devices_empty_when_run_none(monkeypatch: Any) -> None:
+    monkeypatch.setattr(device, "_run", lambda args, timeout=5.0: None)
+    assert device.adb_devices() == []
+
+
+def test_adb_devices_empty_on_nonzero(monkeypatch: Any) -> None:
+    def fake_run(args: list[str], timeout: float = 5.0) -> _Proc:
+        return _Proc(1, "")
+
+    monkeypatch.setattr(device, "_run", fake_run)
+    assert device.adb_devices() == []
+
+
+def test_ensure_adb_server_no_raise(monkeypatch: Any) -> None:
+    # _run 返回 None（adb 不可用）也不抛。
+    monkeypatch.setattr(device, "_run", lambda args, timeout=5.0: None)
+    device.ensure_adb_server()
+
+
+def test_has_device_true_when_serials(monkeypatch: Any) -> None:
+    monkeypatch.setattr(device, "adb_devices", lambda: ["emulator-5554"])
+    assert device.has_device() is True
+    monkeypatch.setattr(device, "adb_devices", lambda: [])
+    assert device.has_device() is False
+
+
+# ---------------------------------------------------------------------------
+# frida_server_running：ps 进程名启发式 + frida-ps -U 权威兜底（与 doctor 一致，
+# 避免 unpack/capture 因进程名截断/改名漏判「缺 frida-server」）
+# ---------------------------------------------------------------------------
+
+
+def test_frida_server_running_true_when_ps_finds(monkeypatch: Any) -> None:
+    """ps 直接命中 frida-server → True，无需 frida-ps 兜底。"""
+    monkeypatch.setattr(
+        device, "_run", lambda args, timeout=5.0: _Proc(0, "u0_a1 1234 frida-server\n")
+    )
+
+    def _boom(serial: Any = None) -> bool:
+        raise AssertionError("ps 已命中，不应再调 frida_ps_reachable")
+
+    monkeypatch.setattr(device, "frida_ps_reachable", _boom)
+    assert device.frida_server_running() is True
+
+
+def test_frida_server_running_falls_back_to_frida_ps(monkeypatch: Any) -> None:
+    """ps 没命中（进程名被截断/改名）→ frida-ps 权威兜底确认在跑 → True。"""
+    monkeypatch.setattr(
+        device, "_run", lambda args, timeout=5.0: _Proc(0, "u0_a1 1234 other_proc\n")
+    )
+    monkeypatch.setattr(device, "frida_ps_reachable", lambda serial=None: True)
+    assert device.frida_server_running() is True
+
+
+def test_frida_server_running_false_when_both_miss(monkeypatch: Any) -> None:
+    monkeypatch.setattr(device, "_run", lambda args, timeout=5.0: _Proc(0, "nope\n"))
+    monkeypatch.setattr(device, "frida_ps_reachable", lambda serial=None: False)
+    assert device.frida_server_running() is False
+
+
+def test_frida_server_running_ps_probe_fails_uses_frida_ps(monkeypatch: Any) -> None:
+    """adb ps 探测失败（None）也走 frida-ps 兜底，而非直接判未运行。"""
+    monkeypatch.setattr(device, "_run", lambda args, timeout=5.0: None)
+    monkeypatch.setattr(device, "frida_ps_reachable", lambda serial=None: True)
+    assert device.frida_server_running() is True
+
+
+def test_frida_ps_reachable_false_when_no_invocation(monkeypatch: Any) -> None:
+    monkeypatch.setattr(device.tools, "frida_invocation", lambda tool: [])
+    assert device.frida_ps_reachable() is False
+
+
+def test_frida_spawn_hint_jailed_gives_root_hint() -> None:
+    """「需 Gadget / jailed」→ frida-server 非 root 提示（含 pkill 命令）。"""
+    msg = device.frida_spawn_hint(
+        "Failed to spawn: need Gadget to attach on jailed Android; ... gadget-android-arm64.so"
+    )
+    assert "root" in msg
+    assert "pkill frida-server" in msg
+
+
+def test_frida_spawn_hint_not_installed_gives_install_hint() -> None:
+    """「unable to find application」→ app 未安装提示（不再误报 root）。"""
+    msg = device.frida_spawn_hint(
+        "Failed to spawn: unable to find application with identifier 'com.x.y'"
+    )
+    assert "未安装" in msg
+    assert "install" in msg
+    assert "root" not in msg  # 不再误把"未安装"当"非 root"
+
+
+def test_frida_spawn_hint_empty_when_unrelated() -> None:
+    # 仅 "Failed to spawn" 不带具体特征 → 不给误导性提示（收窄后不再瞎匹配）。
+    assert device.frida_spawn_hint("Failed to spawn: some other reason") == ""
+    assert device.frida_spawn_hint("connection refused") == ""
+    assert device.frida_spawn_hint("") == ""
+
+
+# ---------------------------------------------------------------------------
+# frida_server_is_root：ps USER 列判属主（保守：探测不到/找不到一律 True 不误杀）
+# ---------------------------------------------------------------------------
+
+
+def test_frida_server_is_root_true_when_root_owner(monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        device, "_run", lambda args, timeout=5.0: _Proc(0, "USER PID\nroot 1234 frida-server\n")
+    )
+    assert device.frida_server_is_root() is True
+
+
+def test_frida_server_is_root_false_when_shell_owner(monkeypatch: Any) -> None:
+    """非 root 属主（shell）→ False（触发以 root 重启）。"""
+    monkeypatch.setattr(
+        device, "_run", lambda args, timeout=5.0: _Proc(0, "USER PID\nshell 1234 frida-server\n")
+    )
+    assert device.frida_server_is_root() is False
+
+
+def test_frida_server_is_root_false_when_ps_fails(monkeypatch: Any) -> None:
+    """严格：ps 探测不到 → 未确认 root → False（触发以 root 重启）。"""
+    monkeypatch.setattr(device, "_run", lambda args, timeout=5.0: None)
+    assert device.frida_server_is_root() is False
+
+
+def test_frida_server_is_root_false_when_not_found(monkeypatch: Any) -> None:
+    """严格：ps 里没 frida-server 行（进程名被截断/MuMu ps 不认）→ 未确认 root → False。"""
+    monkeypatch.setattr(device, "_run", lambda args, timeout=5.0: _Proc(0, "USER PID\nroot 1 init\n"))
+    assert device.frida_server_is_root() is False
+
+
+# ---------------------------------------------------------------------------
+# frida_server_probe：必须同时确认部署路径进程、root、版本与真实 attach
+# ---------------------------------------------------------------------------
+
+
+def test_frida_server_probe_rejects_enumeration_without_deployed_process(monkeypatch: Any) -> None:
+    """frida-ps/Gadget 即使能枚举，找不到部署路径对应进程也不能判动态注入就绪。"""
+    monkeypatch.setattr(device, "_deployed_frida_server_process", lambda serial=None: None)
+    monkeypatch.setattr(device, "frida_ps_reachable", lambda serial=None: True)
+
+    probe = device.frida_server_probe(expected_version="17.15.3")
+
+    assert probe.ok is False
+    assert "进程" in probe.detail
+
+
+def test_deployed_frida_process_accepts_partial_proc_listing(monkeypatch: Any) -> None:
+    """Android ls 遇到个别瞬时消失的 /proc PID 会 rc=1，但有效输出仍必须解析。"""
+    replies = iter(
+        [
+            _Proc(
+                1,
+                "lrwxrwxrwx 1 root root 0 now /proc/4321/exe"
+                " -> /data/local/tmp/frida-server\n",
+            ),
+            _Proc(0, "Name:\tfrida-server\nUid:\t0\t0\t0\t0\n"),
+            _Proc(0, "17.15.3\n"),
+        ]
+    )
+    monkeypatch.setattr(device, "_adb_root_command", lambda command, serial=None: next(replies))
+
+    process = device._deployed_frida_server_process()
+
+    assert process == device.FridaServerProcess(pid=4321, uid=0, version="17.15.3")
+
+
+def test_frida_server_probe_rejects_non_root_process(monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        device,
+        "_deployed_frida_server_process",
+        lambda serial=None: device.FridaServerProcess(pid=1234, uid=2000, version="17.15.3"),
+    )
+
+    probe = device.frida_server_probe(expected_version="17.15.3")
+
+    assert probe.ok is False
+    assert "root" in probe.detail
+
+
+def test_frida_server_probe_rejects_version_mismatch(monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        device,
+        "_deployed_frida_server_process",
+        lambda serial=None: device.FridaServerProcess(pid=1234, uid=0, version="16.5.9"),
+    )
+
+    probe = device.frida_server_probe(expected_version="17.15.3")
+
+    assert probe.ok is False
+    assert "16.5.9" in probe.detail
+    assert "17.15.3" in probe.detail
+
+
+def test_frida_server_probe_requires_attach_smoke(monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        device,
+        "_deployed_frida_server_process",
+        lambda serial=None: device.FridaServerProcess(pid=1234, uid=0, version="17.15.3"),
+    )
+    monkeypatch.setattr(device, "_frida_attach_smoke", lambda serial=None: (False, "jailed"))
+
+    probe = device.frida_server_probe(expected_version="17.15.3")
+
+    assert probe.ok is False
+    assert "jailed" in probe.detail
+
+
+def test_frida_server_probe_accepts_root_matching_attachable_server(monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        device,
+        "_deployed_frida_server_process",
+        lambda serial=None: device.FridaServerProcess(pid=1234, uid=0, version="17.15.3"),
+    )
+    monkeypatch.setattr(device, "_frida_attach_smoke", lambda serial=None: (True, ""))
+
+    probe = device.frida_server_probe(expected_version="17.15.3")
+
+    assert probe.ok is True
+    assert probe.pid == 1234
+
+
+def test_frida_attach_smoke_detaches_and_kills_helper(monkeypatch: Any) -> None:
+    calls: list[tuple[str, int]] = []
+
+    class _Session:
+        def detach(self) -> None:
+            calls.append(("detach", 4321))
+
+    class _FridaDevice:
+        def attach(self, pid: int) -> _Session:
+            calls.append(("attach", pid))
+            return _Session()
+
+    fake_frida = types.SimpleNamespace(
+        get_usb_device=lambda timeout=None: _FridaDevice(),
+        get_device=lambda serial, timeout=None: _FridaDevice(),
+    )
+    monkeypatch.setitem(sys.modules, "frida", fake_frida)
+    monkeypatch.setattr(device, "_start_root_attach_helper", lambda serial=None: (object(), 4321))
+    monkeypatch.setattr(
+        device,
+        "_stop_root_attach_helper",
+        lambda host, pid, serial=None: calls.append(("stop", pid)),
+    )
+
+    ok, detail = device._frida_attach_smoke("dev1")
+
+    assert ok is True
+    assert detail == ""
+    assert calls == [("attach", 4321), ("detach", 4321), ("stop", 4321)]
+
+
+def test_root_attach_helper_passes_remote_command_as_one_quoted_argument(
+    monkeypatch: Any,
+) -> None:
+    """★真机实测：拆开传 ``["su", "-c", "sleep 30"]`` 到设备后 su 只收到 ``-c sleep``。
+
+    adb 把 shell 之后的参数拼成一条命令串发给设备，设备 shell 再分词一次——``sleep`` 与
+    ``30`` 就此分家，su 执行了无参数的 sleep，设备日志是 ``sleep: Needs 1 argument``，
+    helper 立刻退出而 PID 永远等不到，probe 白等约 80 秒。远端命令必须整条引用。
+    """
+    seen: list[list[str]] = []
+
+    class _Popen:
+        def poll(self) -> int | None:
+            return None
+
+        def terminate(self) -> None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    def _fake_popen(args: list[str], **_kwargs: Any) -> _Popen:
+        seen.append(list(args))
+        return _Popen()
+
+    monkeypatch.setattr(device.tools, "adb_path", lambda: "adb")
+    monkeypatch.setattr(device.subprocess, "Popen", _fake_popen)
+    # 第一次枚举无 sleep，第二次出现 helper PID。
+    pids = iter([set(), {7788}])
+    monkeypatch.setattr(device, "_root_sleep_pids", lambda serial=None: next(pids, {7788}))
+
+    host, pid = device._start_root_attach_helper("dev1")
+
+    assert pid == 7788 and host is not None
+    args = seen[0]
+    assert args[:4] == ["adb", "-s", "dev1", "shell"]
+    # ★关键断言：shell 之后只有一个参数，且 sleep 的参数在同一层引用里。
+    remote = args[4:]
+    assert len(remote) == 1, f"远端命令必须是单个参数，实得 {remote}"
+    assert remote[0] == f"su -c 'sleep {device._FRIDA_HELPER_SECONDS}'"
+
+
+def test_ensure_adb_server_connects_common_emulator_ports(monkeypatch: Any) -> None:
+    """真机实测(MuMu 12)：ensure_adb_server 应 best-effort connect 常见模拟器端口
+    （16384 等），否则 server 重启后 MuMu 掉线、命令 exit 1。"""
+    calls: list[list[str]] = []
+
+    def _rec(args: list[str], timeout: float = 5.0) -> None:
+        calls.append(list(args))
+        return None
+
+    monkeypatch.setattr(device, "_run", _rec)
+    device.ensure_adb_server()
+
+    twoheads = [c[:2] for c in calls]
+    assert ["adb", "start-server"] in twoheads
+    connect_targets = [c[2] for c in calls if c[:2] == ["adb", "connect"] and len(c) > 2]
+    assert "127.0.0.1:16384" in connect_targets  # MuMu 12
+
+
+def test_ensure_adb_server_skips_connect_when_device_present(monkeypatch: Any) -> None:
+    """已有在线设备 → 不再 connect（避免给 MuMu 等加重复 transport 致 "more than one device"）。"""
+    calls: list[list[str]] = []
+
+    def _rec(args: list[str], timeout: float = 5.0) -> "_Proc | None":
+        calls.append(list(args))
+        if args[:2] == ["adb", "devices"]:
+            return _Proc(0, "List of devices attached\nemulator-5554\tdevice\n")
+        return None
+
+    monkeypatch.setattr(device, "_run", _rec)
+    device.ensure_adb_server()
+
+    assert ["adb", "start-server"] in [c[:2] for c in calls]
+    assert not any(c[:2] == ["adb", "connect"] for c in calls)  # 设备已可见 → 不 connect
+
+
+# ---------------------------------------------------------------------------
+# select_target_serial：多设备/一机多 transport 下钉定单个 serial（P0 真机 bug 修复）
+# ---------------------------------------------------------------------------
+
+
+def test_select_target_serial_none_when_no_device(monkeypatch: Any) -> None:
+    """0 个在线设备 → None（下游照旧不带 -s、frida 用 -U，向后兼容）。"""
+    monkeypatch.setattr(device, "adb_devices", lambda: [])
+    assert device.select_target_serial() is None
+
+
+def test_select_target_serial_returns_the_only_one(monkeypatch: Any) -> None:
+    """恰好 1 个设备 → 返回它（无 warning，单设备本就是常态）。"""
+    monkeypatch.setattr(device, "adb_devices", lambda: ["emulator-5554"])
+    assert device.select_target_serial() == "emulator-5554"
+
+
+def test_select_target_serial_prefers_emulator_transport(monkeypatch: Any, caplog: Any) -> None:
+    """一机多 transport（emulator-5554 + 127.0.0.1:7555 同一台 MuMu）→ 钉定 emulator-*（原生
+    transport 比 tcp connect 稳）并 log warning。"""
+    import logging
+
+    monkeypatch.setattr(device, "adb_devices", lambda: ["127.0.0.1:7555", "emulator-5554"])
+    with caplog.at_level(logging.WARNING):
+        chosen = device.select_target_serial()
+    assert chosen == "emulator-5554"
+    # warning 文案明确：检测到多个、已钉定、其余忽略、单设备假设。
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "emulator-5554" in text
+    assert "钉定" in text or "钉死" in text
+
+
+def test_select_target_serial_prefers_usb_real_device_over_localhost(monkeypatch: Any) -> None:
+    """多个真机/transport，无 emulator-* 时优先非 127.0.0.1/localhost 的 USB 真机。"""
+    monkeypatch.setattr(device, "adb_devices", lambda: ["127.0.0.1:7555", "ABCDEF0123"])
+    assert device.select_target_serial() == "ABCDEF0123"
+
+
+def test_select_target_serial_falls_back_to_first_sorted(monkeypatch: Any) -> None:
+    """全是 localhost transport（无 emulator-*、无 USB 真机）→ 取排序第一个，仍只选一个。"""
+    monkeypatch.setattr(device, "adb_devices", lambda: ["127.0.0.1:7555", "127.0.0.1:16384"])
+    assert device.select_target_serial() == "127.0.0.1:16384"  # 排序后第一
+
+
+def test_select_target_serial_multiple_real_devices_warns(monkeypatch: Any, caplog: Any) -> None:
+    """多台真机 → 选定一个 + warning（fxapk 单设备假设）。"""
+    import logging
+
+    monkeypatch.setattr(device, "adb_devices", lambda: ["DEV2SERIAL", "DEV1SERIAL"])
+    with caplog.at_level(logging.WARNING):
+        chosen = device.select_target_serial()
+    assert chosen in ("DEV1SERIAL", "DEV2SERIAL")
+    assert any("钉定" in r.getMessage() or "钉死" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# ★复审 codex BUG1 补丁 #3/#4：_adb_root_command 的 adb-root 回退 + su -c 单引号包裹
+# ---------------------------------------------------------------------------
+def _ns(returncode: int, stdout: str = "", stderr: str = "") -> Any:
+    return types.SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+def test_adb_root_command_su_quoted_and_no_fallback_on_success(monkeypatch: Any) -> None:
+    """★#4：su -c 用单引号包裹整条命令（防 -l/glob/2>/dev/null 外泄给 su）；su 成功不回退。"""
+    seen: list[list[str]] = []
+
+    def fake_run(args: list[str], timeout: float = 5.0) -> Any:
+        seen.append(args)
+        return _ns(0, "ok")
+
+    monkeypatch.setattr(device, "_run", fake_run)
+    proc = device._adb_root_command("ls -l /proc/[0-9]*/exe 2>/dev/null")
+    assert proc is not None and proc.stdout == "ok"
+    assert len(seen) == 1  # su 成功 → 不回退
+    su_args = seen[0]
+    assert su_args[-3:-1] == ["su", "-c"]
+    assert su_args[-1].startswith("'") and su_args[-1].endswith("'")  # 整条单引号包裹
+    assert "ls -l /proc" in su_args[-1] and "2>/dev/null" in su_args[-1]
+
+
+def test_adb_root_command_falls_back_to_adb_root_when_su_absent(monkeypatch: Any) -> None:
+    """★#3：su 二进制缺失（adb-root 设备：AOSP rootful/AVD，adbd uid0 无 su）→ 回退直接 adb shell（root）。"""
+    seen: list[list[str]] = []
+
+    def fake_run(args: list[str], timeout: float = 5.0) -> Any:
+        seen.append(args)
+        if "su" in args:
+            return _ns(127, "", "/system/bin/sh: su: not found")
+        return _ns(0, "root-out")
+
+    monkeypatch.setattr(device, "_run", fake_run)
+    proc = device._adb_root_command("cat /proc/1/status")
+    assert proc is not None and proc.stdout == "root-out"  # 直执兜底结果
+    assert len(seen) == 2 and "su" not in seen[1]  # su 试过 + 直执兜底（第二次无 su）
+
+
+def test_adb_root_command_keeps_su_result_on_nonzero_with_output(monkeypatch: Any) -> None:
+    """su 存在但命令本身 rc!=0 且有有效输出（toybox ls 枚举 /proc 期间 PID 退出返回 1）→ 用 su 结果、不误回退。"""
+    seen: list[list[str]] = []
+
+    def fake_run(args: list[str], timeout: float = 5.0) -> Any:
+        seen.append(args)
+        return _ns(1, "/proc/123/exe -> /data/local/tmp/frida-server\n")
+
+    monkeypatch.setattr(device, "_run", fake_run)
+    proc = device._adb_root_command("ls -l /proc/[0-9]*/exe")
+    assert proc is not None and proc.returncode == 1 and "frida-server" in proc.stdout
+    assert len(seen) == 1  # su 存在（非 su-not-found）→ 不回退

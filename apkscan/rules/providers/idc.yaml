@@ -1,0 +1,14 @@
+# rules/providers/idc.yaml —— 国内主机托管/IDC 公司 org 关键字（主 providers.yaml 的 idc 仅通用词 idc/机房/hosting）。
+# 补具体 IDC 公司名（供 classify_network 定 idc 类，进而 hosting_provider 判托管商）。ASN 数值保守不填。
+network_categories:
+  idc:
+    org_keywords:
+      - 21vianet          # 世纪互联
+      - 世纪互联
+      - sinnet            # 光环新网
+      - 光环新网
+      - dr.peng           # 鹏博士
+      - dr peng
+      - 鹏博士
+      - capitalonline     # 首都在线
+      - 首都在线

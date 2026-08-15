@@ -1,0 +1,416 @@
+"""真机脱壳（unpack）：root 设备 + frida + frida-dexdump 自动 dump 解密 DEX 并回灌重分析。
+
+取证用途：对取证样本自身在分析机上做运行时观测，产出端点/密钥/独特串等线索，不面向任何第三方基础设施。
+
+工作流::
+
+    1. 探测能力：device.has_device / has_frida / has_frida_dexdump / frida_server_running，
+       任一缺失 → status="skipped" + 精确手册（playbook 给可复制的命令），reason 写缺啥。
+    2. 满足条件：load_apk 取包名 → subprocess 跑 ``frida-dexdump -FU -f <package>``
+       到 ``out_dir/dump`` → 收集 *.dex 到 artifacts。
+    3. reanalyze → load_apk(extra_dex=dumped) + pipeline.run + 写
+       ``out_dir/unpacked_report.{json,html}`` → report_paths。
+    4. status="done"。
+
+错误处理铁律：任何失败 → status="error" + reason（不抛、不静默吞错；全程 logging）。
+设备/工具探测一律走 apkscan.core.device（纯 subprocess、不抛）。
+
+返回值见 apkscan.dynamic.DynamicResult 契约。
+"""
+
+from __future__ import annotations
+
+import logging
+import subprocess
+import tempfile
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+from apkscan.core import device, tools
+from apkscan.core.models import AnalysisConfig
+from apkscan.dynamic import (
+    STATUS_DONE,
+    STATUS_ERROR,
+    STATUS_SKIPPED,
+    DynamicResult,
+    empty_result,
+)
+
+logger = logging.getLogger(__name__)
+
+META_WRITE_OWNER = "dynamic.unpack"
+META_WRITE_CATEGORIES = {
+    'unpacked': 'coverage',
+    'unpacked_dex_count': 'record',
+    # 检材指纹：与 cli.analyze 落同一组键、同一类别（record）。
+    # 脱壳这条路径此前完全不写，导致产出的报告没有样本身份、入库只能拿占位。
+    'evidence_manifest': 'record',
+    'sample_sha256': 'record',
+}
+META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
+
+# frida-dexdump 在加固应用上要等壳解密、脱完所有 DEX，给足超时（秒）。
+_DEXDUMP_TIMEOUT = 300.0
+
+# subprocess 输出尾部保留多少字符记到 reason / 日志（防止刷屏）。
+_STDOUT_TAIL = 2000
+
+
+def run(
+    apk_path: str,
+    out_dir: str = "out",
+    reanalyze: bool = True,
+    *,
+    out: str | None = None,
+    serial: str | None = None,
+    on_reanalyzed: Callable[[Any], None] | None = None,
+) -> DynamicResult:
+    """真机脱壳主入口（见模块 docstring）。
+
+    Args:
+        apk_path: 待脱壳的 APK 文件路径。
+        out_dir: 产物 / 报告输出目录（dump 落到 ``out_dir/dump``）。
+        reanalyze: 脱壳得到额外 DEX 后是否自动 load_apk(extra_dex=...) 重新静态分析。
+        out: ``out_dir`` 的关键字别名（CLI 以 ``out=`` 调用，二者取其一，out 优先）。
+        on_reanalyzed: 回灌成功时以**回灌后的 Report 对象**回调一次。流水线（auto）据此把后续
+                       merge/closure/最终报告切到脱壳版；不传则行为不变（仅落盘）。
+        serial: 目标设备 serial（多设备/一机多 transport 下钉定那台，由 auto 选定后传入）。
+                frida-dexdump 用 ``-F -D <serial>``、frida-server 探测带 serial；None 时退回
+                ``-FU``（向后兼容无设备选择的旧路径/测试）。
+
+    Returns:
+        DynamicResult（status=done|skipped|error，字段齐全，绝不抛异常）。
+    """
+    if out is not None:
+        out_dir = out
+
+    # 1) 能力探测：任一缺失 → skipped + 精确手册。
+    skipped = _check_capabilities(serial)
+    if skipped is not None:
+        return skipped
+
+    # 2) 取包名（脱壳/重分析都要）。load_apk 失败 → error，不抛。
+    try:
+        package_name = _resolve_package_name(apk_path)
+    except Exception as exc:  # noqa: BLE001 - 转成 DynamicResult，不抛给 CLI
+        logger.exception("load_apk 取包名失败：%s", apk_path)
+        result = empty_result(STATUS_ERROR, f"加载 APK 取包名失败：{exc}")
+        return result
+
+    if not package_name:
+        logger.error("APK 包名为空，无法用 frida-dexdump 定位目标：%s", apk_path)
+        return empty_result(
+            STATUS_ERROR,
+            "无法从 APK 解析包名（frida-dexdump 需 -f <package> 定位目标进程）。",
+        )
+
+    # 防御：包名源自样本 manifest（不可信），畸形包名直接拒绝，不下发到 frida-dexdump。
+    if not device.is_valid_package(package_name):
+        logger.error("[unpack] 包名形态非法，拒绝脱壳：%r", package_name)
+        return empty_result(STATUS_ERROR, f"包名形态非法，拒绝脱壳：{package_name!r}")
+
+    # 3) 跑 frida-dexdump dump 到 out_dir/dump。
+    dump_dir = Path(out_dir) / "dump"
+    playbook: list[str] = []
+    try:
+        dumped = _dexdump(package_name, dump_dir, playbook, serial)
+    except Exception as exc:  # noqa: BLE001 - dump 任何异常都转 error
+        logger.exception("frida-dexdump 脱壳异常：package=%s", package_name)
+        result = empty_result(STATUS_ERROR, f"frida-dexdump 执行异常：{exc}")
+        result["playbook"] = playbook
+        return result
+
+    if isinstance(dumped, str):
+        # _dexdump 以字符串返回失败原因（非零退出 / 超时 / 无产物）。
+        logger.error("frida-dexdump 脱壳失败：%s", dumped)
+        result = empty_result(STATUS_ERROR, dumped)
+        result["playbook"] = playbook
+        return result
+
+    artifacts = [str(p) for p in dumped]
+    logger.info("frida-dexdump 脱壳成功：dump 出 %d 个 DEX", len(artifacts))
+
+    report_paths: list[str] = []
+    if reanalyze:
+        # 4) 回灌：load_apk(extra_dex=dumped) + pipeline.run + 写报告。失败不致命，
+        #    脱壳产物已在 artifacts，仅在 reason 标注重分析失败。
+        try:
+            report_paths, reanalyzed = _reanalyze(apk_path, artifacts, out_dir)
+            if on_reanalyzed is not None:
+                on_reanalyzed(reanalyzed)
+            playbook.append(
+                f"apkscan analyze {apk_path} --extra-dex {dump_dir} "
+                "（脱壳产物已自动回灌重分析）"
+            )
+        except Exception as exc:  # noqa: BLE001 - 重分析失败不丢脱壳产物
+            logger.exception("脱壳后重分析失败：%s", apk_path)
+            result = empty_result(
+                STATUS_DONE,
+                f"脱壳成功（{len(artifacts)} 个 DEX），但重分析失败：{exc}",
+            )
+            result["artifacts"] = artifacts
+            result["playbook"] = playbook
+            return result
+    else:
+        playbook.append(
+            f"apkscan analyze {apk_path} --extra-dex {dump_dir} "
+            "（手动回灌：把脱壳 DEX 并入静态分析）"
+        )
+
+    result = empty_result(STATUS_DONE, f"脱壳成功，dump 出 {len(artifacts)} 个 DEX。")
+    result["artifacts"] = artifacts
+    result["playbook"] = playbook
+    result["report_paths"] = report_paths
+    return result
+
+
+def _check_capabilities(serial: str | None = None) -> DynamicResult | None:
+    """探测脱壳所需能力。全部满足返回 None；任一缺失返回 status=skipped 的 DynamicResult。
+
+    缺什么写进 reason，并在 playbook 给出可直接复制的精确补全命令。
+    serial 非空时 frida-server 运行探测钉定那台（多设备消歧）；None 退回旧行为。
+    """
+    missing: list[str] = []
+    if not device.has_device():
+        missing.append("在线 root 设备（adb devices 无在线设备）")
+    if not device.has_frida():
+        missing.append("frida CLI（PATH 无 frida）")
+    if not device.has_frida_dexdump():
+        missing.append("frida-dexdump（PATH 无 frida-dexdump）")
+    # frida-server 仅在有设备时判定才有意义；无设备时上面已记，避免误导。
+    if device.has_device() and not device.frida_server_running(serial):
+        missing.append("设备上运行中的 frida-server")
+
+    if not missing:
+        return None
+
+    reason = "缺少：" + "；".join(missing)
+    logger.info("脱壳前置条件不满足，跳过：%s", reason)
+    result = empty_result(STATUS_SKIPPED, reason)
+    result["playbook"] = _manual_playbook()
+    return result
+
+
+def _manual_playbook() -> list[str]:
+    """无设备 / 缺工具时的精确手册（每条都是可直接复制的命令或动作）。"""
+    return [
+        "# 1) 准备 root 设备（真机或模拟器），确认 adb 连接：",
+        "adb devices  # 状态应为 device（非 offline/unauthorized）",
+        "",
+        "# 2) 查设备 ABI，按 ABI 下载匹配的 frida-server：",
+        "adb shell getprop ro.product.cpu.abi  # 如 arm64-v8a / armeabi-v7a / x86_64",
+        "#    去 https://github.com/frida/frida/releases 下载对应 frida-server"
+        "（如 frida-server-<版本>-android-arm64.xz），解压：",
+        "xz -d frida-server-<版本>-android-arm64.xz",
+        "",
+        "# 3) push 到设备并赋可执行、后台运行：",
+        "adb push frida-server-<版本>-android-arm64 /data/local/tmp/frida-server",
+        "adb shell su -c 'chmod 755 /data/local/tmp/frida-server'",
+        "adb shell su -c '/data/local/tmp/frida-server &'  # 后台启动 frida-server",
+        "",
+        "# 4) 安装 PC 端 frida 工具链（版本需与 frida-server 一致）：",
+        "pip install frida-tools frida-dexdump",
+        "frida-ps -U  # 验证 PC 能连到设备上的 frida-server",
+        "",
+        "# 5) 启动目标 app 并自动 dump 解密后的 DEX（-FU=USB前台应用, -f=按包名spawn）：",
+        "frida-dexdump -FU -f <package>  # <package> 换成目标应用包名",
+        "",
+        "# 6) 把 dump 出的 DEX 目录回灌静态分析：",
+        "apkscan analyze <apk> --extra-dex <dump_dir>",
+    ]
+
+
+def _resolve_package_name(apk_path: str) -> str:
+    """load_apk 后取 ctx.package_name。androguard 解析失败由 load_apk 抛，调用方转 error。"""
+    from apkscan.core.apk import load_apk
+
+    ctx = load_apk(apk_path, AnalysisConfig(online=False))
+    return ctx.package_name or ""
+
+
+def _dexdump(
+    package_name: str, dump_dir: Path, playbook: list[str], serial: str | None = None
+) -> list[Path] | str:
+    """跑 ``frida-dexdump`` 脱壳（设备选择按 serial：``-F -D <serial>`` 或 ``-FU``）。
+
+    返回 dump 出的 .dex 文件路径列表；失败（非零退出 / 超时 / 无产物）返回字符串原因。
+    超时 / 异常由调用方 try/except 兜底（本函数超时返回字符串、不抛）。
+
+    设备选择：serial 非空时用 ``-F -D <serial>`` 钉定那台（多设备/一机多 transport 下
+    ``-U`` 会因多个可达设备 ambiguous）；serial=None 退回 ``-FU``（向后兼容）。
+    """
+    dump_dir.mkdir(parents=True, exist_ok=True)
+    # frozen 时经 tools.frida_invocation 自调用内置 frida-dexdump；源码时用 PATH。
+    inv = tools.frida_invocation("frida-dexdump")
+    if not inv:
+        logger.error("frida-dexdump 不可用（frozen 内置缺失 / PATH 无 frida-dexdump）")
+        return "frida-dexdump 不可用"
+    # -F=attach 前台应用, -U=USB 设备, -D <serial>=钉定设备, -f=按包名 spawn, -o=输出目录。
+    device_flags = ["-F", "-D", serial] if serial else ["-FU"]
+    cmd = [*inv, *device_flags, "-f", package_name, "-o", str(dump_dir)]
+    # playbook 记**人类可读命令**（不暴露 sys.executable frida-dexdump），与实际 argv 解耦。
+    human_flags = f"-F -D {serial}" if serial else "-FU"
+    playbook.append(f"frida-dexdump {human_flags} -f {package_name} -o {dump_dir}")
+    logger.info("执行 frida-dexdump：%s", " ".join(cmd))
+
+    # 防级联：frida-dexdump 用 -f 以**挂起态** spawn 目标；spawn 要求目标未在运行。先 force-stop
+    # 清掉上一轮超时被杀后残留的挂起实例，否则本次 spawn 冲突会卡死、dump 全空（模拟器也点不开 app）。
+    device.force_stop_app(package_name, serial)
+
+    # ★ stdout/stderr 重定向到临时文件，绝不用 capture_output(=PIPE)：frida-dexdump 会派生 frida
+    #   孙进程并继承管道写端；用 PIPE 时 300s 超时后 communicate() 排空管道会因孙进程未退而**永久
+    #   阻塞**——超时形同虚设。重定向到文件 → 无管道可阻塞，超时如期触发。
+    #   stdin=DEVNULL：避免子进程继承非 TTY stdin 时阻塞（终端手动跑正常、被 subprocess 包起来却卡）。
+    fd, log_path = tempfile.mkstemp(prefix="apkscan_dexdump_", suffix=".log")
+    timed_out = False
+    proc: subprocess.CompletedProcess | None = None
+    try:
+        try:
+            with open(fd, "w", encoding="utf-8", errors="replace") as log_fh:
+                proc = subprocess.run(
+                    cmd,
+                    stdout=log_fh,
+                    stderr=subprocess.STDOUT,  # 并入 stdout 同一文件，诊断尾部一并保留
+                    stdin=subprocess.DEVNULL,
+                    timeout=_DEXDUMP_TIMEOUT,
+                    check=False,
+                )
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            logger.warning("frida-dexdump 超时（%ss）：package=%s", _DEXDUMP_TIMEOUT, package_name)
+        # 无论超时与否都读日志尾部：旧实现超时路径直接 return，把 frida-dexdump 的真实输出
+        # （连不上 frida-server / 反调试 / spawn 失败 / 卡等 app）连同临时文件一起丢了，排障无据。
+        tail = _read_log_tail(log_path)
+    finally:
+        try:
+            Path(log_path).unlink()
+        except OSError:
+            logger.debug("清理 frida-dexdump 日志临时文件失败：%s", log_path, exc_info=True)
+        # 清设备侧 spawn 残留（挂起态 app）：治"很多失败"级联 + "模拟器打不开 app"。脱壳后该 app
+        # 不再需要常驻；auto 后续 capture 会重新拉起。
+        device.force_stop_app(package_name, serial)
+
+    # 超时：先抢救已 dump 的部分 DEX（壳已脱大半时不白丢），无产物再按超时失败（带真实输出尾部）。
+    if timed_out:
+        partial = _collect_dex(dump_dir)
+        if partial:
+            logger.warning(
+                "frida-dexdump 超时但已 dump %d 个 DEX，按部分成功返回（壳可能未脱完）", len(partial)
+            )
+            return partial
+        logger.error(
+            "frida-dexdump 超时且无产物：package=%s\n输出尾部：%s", package_name, tail
+        )
+        return (
+            f"frida-dexdump 超时（{_DEXDUMP_TIMEOUT}s 未完成）且未 dump 出任何 .dex。"
+            f"输出尾部：{tail.strip()}{device.frida_spawn_hint(tail)}"
+        )
+
+    assert proc is not None  # 非超时路径 subprocess.run 已正常返回
+    if proc.returncode != 0:
+        logger.error(
+            "frida-dexdump 非零退出（%s）：package=%s\n输出尾部：%s",
+            proc.returncode,
+            package_name,
+            tail,
+        )
+        return (
+            f"frida-dexdump 非零退出（returncode={proc.returncode}）。"
+            f"输出尾部：{tail.strip()}"
+            f"{device.frida_spawn_hint(tail)}"
+        )
+
+    dumped = _collect_dex(dump_dir)
+    if not dumped:
+        logger.error(
+            "frida-dexdump 退出 0 但未产出 .dex：package=%s\n输出尾部：%s",
+            package_name,
+            tail,
+        )
+        return (
+            f"frida-dexdump 未 dump 出任何 .dex（目录 {dump_dir} 为空）。"
+            f"输出尾部：{tail.strip()}"
+        )
+
+    logger.debug("frida-dexdump 输出尾部：%s", tail)
+    return dumped
+
+
+def _read_log_tail(log_path: str, limit: int = _STDOUT_TAIL) -> str:
+    """读 frida-dexdump 日志文件尾部（合并的 stdout+stderr）。读失败返回空串（不抛、记 debug）。"""
+    try:
+        text = Path(log_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        logger.debug("读取 frida-dexdump 日志失败：%s", log_path, exc_info=True)
+        return ""
+    return text[-limit:]
+
+
+def _collect_dex(dump_dir: Path) -> list[Path]:
+    """收集 dump_dir 下所有 *.dex（递归，frida-dexdump 可能分子目录）。排序保证稳定。
+
+    注意：不在此吞 IO 异常——若 rglob 因权限/路径异常失败，让异常上抛由 run() 的
+    try 转成带真实原因的 STATUS_ERROR；空目录自然返回 []，从而把"收集失败"与
+    "确实没脱出 dex"区分开（否则真实 IO 错误会被误报成"壳没脱出来"）。
+    """
+    return sorted(dump_dir.rglob("*.dex"))
+
+
+def _reanalyze(apk_path: str, extra_dex: list[str], out_dir: str) -> tuple[list[str], object]:
+    """load_apk(extra_dex=dumped) + pipeline.run + 写 unpacked_report.{json,html}。
+
+    返回 ``(报告路径列表, 回灌后的 Report 对象)``。任何异常向上抛，由调用方转 DynamicResult
+    （不在此吞错）。
+
+    ★为什么要把 Report **对象**带回来而不只是路径：脱壳的全部价值在于让隐藏 DEX 里的端点/配置
+    进入后续 merge/closure/最终报告。Report → JSON 是单向的（没有反序列化器），只回传路径的话
+    调用方拿不回内存对象，脱壳结果就只能躺在 unpacked_report.json 里，主线仍在壳桩上跑完全程。
+    """
+    # 惰性导入：重分析才需要 androguard / pipeline / report，避免无谓加载。
+    from apkscan.core import pipeline
+    from apkscan.core.apk import load_apk
+    from apkscan.report import html as html_report
+    from apkscan.report import json as json_report
+
+    config = AnalysisConfig(online=False, out_dir=out_dir)
+    ctx = load_apk(apk_path, config, extra_dex=extra_dex)
+    # ApkContext 运行期满足 AnalysisContext 协议；pyright 对 cached_property→property
+    # 协议匹配有已知局限，显式忽略（见 cli.analyze 同处说明）。
+    report = pipeline.run(ctx, config)  # type: ignore[arg-type]
+    # 标注本报告来自脱壳回灌，便于报告消费方区分。
+    report.meta["unpacked"] = True
+    report.meta["unpacked_dex_count"] = len(extra_dex)
+
+    # ★检材指纹：与 ``cli.analyze`` 同一个函数、同一组键，不在此另写一套。
+    #
+    #   此前这条路径**完全没写**，于是脱壳产出的报告没有 ``meta.sample_sha256``；
+    #   ``corpus add`` 从该字段取样本身份，取不到就按内容派生 ``nosha-<16hex>`` 占位。
+    #   后果是这些样本在库里**没有真实哈希身份**，按样本哈希串案时整类查不到——
+    #   实测语料库 59 条记录里有 5 条真实 APK 落成了占位身份（另 2 条是网页分析，本就无样本）。
+    #
+    #   ★哈希算的是**原始 APK**（检材），不是脱壳产物：脱壳出的 DEX 是分析中间物，
+    #     每次运行都可能不同，拿它当样本身份会让同一份检材每跑一次多一个身份。
+    #   ★失败只记日志不抛：脱壳的主产物是 DEX，不该因为算不出哈希就整个失败。
+    try:
+        from apkscan import __version__
+        from apkscan.core.integrity import sample_fingerprint
+
+        manifest = sample_fingerprint(apk_path, tool_version=__version__)
+        report.meta["evidence_manifest"] = manifest
+        report.meta["sample_sha256"] = manifest.get("sha256", "")
+    except Exception:  # noqa: BLE001 - 指纹失败不影响脱壳产物本身
+        logger.exception("[unpack] 写入检材指纹失败（已忽略，脱壳产物不受影响）")
+
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    json_path = out_path / "unpacked_report.json"
+    html_path = out_path / "unpacked_report.html"
+
+    json_report.dump(report, str(json_path))
+    html_report.render(report, str(html_path))
+    logger.info("脱壳后重分析报告已写出：%s / %s", json_path, html_path)
+    return [str(json_path), str(html_path)], report
+
+
+__all__ = ["run"]

@@ -1,0 +1,1205 @@
+"""report.json.dump / report.html.render 单测。
+
+手工构造含若干 Lead / Endpoint / Finding 的 Report（不依赖 androguard / 网络），
+断言：
+- json.dump 产出合法 JSON、Enum 已转为字符串值、含关键线索值。
+- html.render 产出含关键中文小节标题与线索值的 HTML 文件。
+"""
+
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
+import copy
+import json
+from pathlib import Path
+import threading
+
+import pytest
+
+from apkscan.core.models import (
+    ADVICE_INVESTIGATE,
+    Confidence,
+    Endpoint,
+    Evidence,
+    Finding,
+    Lead,
+    LeadCategory,
+    Report,
+    Severity,
+)
+from apkscan.report import html as report_html
+from apkscan.report import json as report_json
+from apkscan.report.html import (
+    group_leads_by_category,
+    network_leads_by_advice,
+    sort_leads_by_confidence,
+)
+
+
+@pytest.fixture
+def sample_report() -> Report:
+    """含配置键值/支付/SDK/域名/IP/联系方式线索 + 端点 + 发现的样例 Report。"""
+    leads = [
+        Lead(
+            category=LeadCategory.CONFIG_KEY,
+            value="GETUI_APPID=DVRqpR8NztAJAfq8f4dbv3",
+            subject="每日互动股份有限公司（个推）",
+            where_to_request="个推（GeTui）厂商",
+            evidence_to_obtain=["AppID 对应注册主体", "推送 / 设备日志"],
+            confidence=Confidence.HIGH,
+            advice=ADVICE_INVESTIGATE,
+            source_refs=[Evidence(source="manifest", location="AndroidManifest.xml#meta-data", snippet="GETUI_APPID")],
+            notes="个推推送 AppID（manifest meta-data）",
+        ),
+        Lead(
+            category=LeadCategory.PAYMENT,
+            value="pay.fraud-example.com",
+            subject="某聚合支付公司",
+            where_to_request="聚合支付平台 / 收单机构",
+            evidence_to_obtain=["商户号绑定主体", "结算银行账户"],
+            confidence=Confidence.HIGH,
+            advice=ADVICE_INVESTIGATE,
+            source_refs=[Evidence(source="dex", location="com/app/Pay.java", snippet="pay.fraud-example.com/notify")],
+            notes="支付回调域名",
+        ),
+        Lead(
+            category=LeadCategory.SDK_SERVICE,
+            value="极光推送 JPush",
+            subject="深圳市和讯华谷信息技术有限公司",
+            where_to_request="极光（JPush）厂商",
+            evidence_to_obtain=["AppKey 对应注册主体", "推送日志"],
+            confidence=Confidence.MEDIUM,
+            advice=ADVICE_INVESTIGATE,
+            source_refs=[Evidence(source="dex", location="cn.jpush.android.api.JPushInterface")],
+        ),
+        Lead(
+            category=LeadCategory.DOMAIN,
+            value="ctrl.fraud-example.com",
+            subject="某科技有限公司",
+            where_to_request="域名注册商 / ICP 备案主体",
+            confidence=Confidence.HIGH,
+            advice=ADVICE_INVESTIGATE,
+            notes="疑似主控域名",
+        ),
+        Lead(
+            category=LeadCategory.DOMAIN,
+            value="cdn.aliyuncs.com",
+            subject="阿里云",
+            where_to_request="域名注册商 / ICP 备案主体",
+            confidence=Confidence.LOW,
+            advice="无需调证",
+            notes="公共 CDN",
+        ),
+        Lead(
+            category=LeadCategory.IP,
+            value="1.2.3.4",
+            where_to_request="IP 归属 ASN / IDC",
+            confidence=Confidence.MEDIUM,
+            advice="无需调证",
+        ),
+        Lead(
+            category=LeadCategory.CONTACT,
+            value="kefu_fraud_2024",
+            subject="客服微信",
+            confidence=Confidence.MEDIUM,
+            advice=ADVICE_INVESTIGATE,
+            source_refs=[Evidence(source="resource", location="res/values/strings.xml")],
+            notes="微信号",
+        ),
+    ]
+    endpoints = [
+        Endpoint(
+            value="ctrl.fraud-example.com",
+            kind="domain",
+            evidences=[Evidence(source="dex", location="com/app/Net.java")],
+            is_cleartext=False,
+            enrichment={
+                "whois": {"registrar": "Alibaba Cloud", "registrant": "隐藏"},
+                "icp": {"subject": "某科技有限公司", "license_no": "粤ICP备12345678号"},
+            },
+        ),
+        Endpoint(
+            value="1.2.3.4",
+            kind="ip",
+            evidences=[Evidence(source="dex", location="com/app/Net.java")],
+            is_cleartext=True,
+            is_private=False,
+            enrichment={"asn": {"asn": "AS37963", "org": "Alibaba", "country": "CN"}},
+        ),
+        Endpoint(
+            value="http://10.0.0.1/internal",
+            kind="url",
+            is_cleartext=True,
+            is_private=True,
+        ),
+    ]
+    findings = [
+        Finding(
+            id="CRYPTO-001",
+            title="使用 MD5 弱哈希",
+            severity=Severity.MEDIUM,
+            category="crypto",
+            description="检测到 MessageDigest.getInstance(\"MD5\")。",
+            recommendation="改用 SHA-256。",
+            evidences=[Evidence(source="dex", location="com/app/Crypto.java")],
+        ),
+    ]
+    meta = {
+        "version_name": "3.2.1",
+        "version_code": 321,
+        "min_sdk": 21,
+        "target_sdk": 33,
+        "sign_subject": "CN=Fraud Dev",
+        "sign_sha256": "ab" * 32,
+        "packer": "梆梆加固",
+        "is_hardened": True,
+        "uni_app": "__UNI__F7A0431",
+        "uni_encrypted": True,
+        "permissions": ["android.permission.INTERNET", "android.permission.READ_SMS"],
+        "components": [
+            {"name": "com.app.MainActivity", "kind": "activity", "exported": True},
+        ],
+        "certificates": [
+            {
+                "subject": "CN=Fraud Dev",
+                "issuer": "CN=Fraud Dev",
+                "serial": "0x1a2b3c",
+                "sha256": "ab" * 32,
+                "not_before": "2023-01-01",
+                "not_after": "2048-01-01",
+                "is_debug": False,
+                "schemes": ["v1", "v2"],
+            }
+        ],
+    }
+    analyzer_status = [
+        {"name": "manifest", "status": "ran", "reason": ""},
+        {"name": "packing", "status": "ran", "reason": ""},
+        {"name": "runtime_capture", "status": "skipped", "reason": "缺少 adb 能力"},
+        {"name": "broken_one", "status": "error", "reason": "ValueError: boom"},
+    ]
+    return Report(
+        package_name="com.fraud.example",
+        meta=meta,
+        leads=leads,
+        endpoints=endpoints,
+        findings=findings,
+        analyzer_status=analyzer_status,
+    )
+
+
+# --------------------------- JSON ---------------------------
+
+
+def test_json_dump_writes_valid_json(sample_report: Report, tmp_path: Path) -> None:
+    path = tmp_path / "report.json"
+    report_json.dump(sample_report, str(path))
+
+    assert path.exists()
+    data = json.loads(path.read_text(encoding="utf-8"))  # 合法 JSON
+
+    assert data["package_name"] == "com.fraud.example"
+    assert len(data["leads"]) == 7
+    assert len(data["endpoints"]) == 3
+    assert len(data["findings"]) == 1
+    assert len(data["analyzer_status"]) == 4
+
+
+def test_json_enums_serialized_as_values(sample_report: Report, tmp_path: Path) -> None:
+    path = tmp_path / "report.json"
+    report_json.dump(sample_report, str(path))
+    data = json.loads(path.read_text(encoding="utf-8"))
+
+    # LeadCategory / Confidence / Severity 都应是字符串值，而非枚举 repr。
+    cats = {lead["category"] for lead in data["leads"]}
+    assert cats == {"CONFIG_KEY", "PAYMENT", "SDK_SERVICE", "DOMAIN", "IP", "CONTACT"}
+    confs = {lead["confidence"] for lead in data["leads"]}
+    assert confs <= {"LOW", "MEDIUM", "HIGH"}
+    assert data["findings"][0]["severity"] == "MEDIUM"
+
+
+def test_json_contains_lead_values_and_enrichment(sample_report: Report, tmp_path: Path) -> None:
+    path = tmp_path / "report.json"
+    report_json.dump(sample_report, str(path))
+    raw = path.read_text(encoding="utf-8")
+
+    assert "pay.fraud-example.com" in raw
+    assert "极光推送 JPush" in raw  # ensure_ascii=False 保留中文
+    assert "粤ICP备12345678号" in raw  # 富化结果保留
+    assert "GETUI_APPID=DVRqpR8NztAJAfq8f4dbv3" in raw  # 具体配置键值
+    # nested Evidence 被序列化为 dict
+    data = json.loads(raw)
+    pay = next(lead for lead in data["leads"] if lead["category"] == "PAYMENT")
+    assert pay["source_refs"][0]["location"] == "com/app/Pay.java"
+
+
+def test_json_contains_advice_field(sample_report: Report, tmp_path: Path) -> None:
+    """advice 随 dataclass 自动序列化，且按线索保留正确取值。"""
+    path = tmp_path / "report.json"
+    report_json.dump(sample_report, str(path))
+    data = json.loads(path.read_text(encoding="utf-8"))
+
+    # 每条 lead 都带 advice 字段
+    assert all("advice" in lead for lead in data["leads"])
+    config = next(lead for lead in data["leads"] if lead["category"] == "CONFIG_KEY")
+    assert config["advice"] == "建议调证"
+    cdn = next(lead for lead in data["leads"] if lead["value"] == "cdn.aliyuncs.com")
+    assert cdn["advice"] == "无需调证"
+
+
+def test_json_is_utf8_no_ascii_escape(sample_report: Report, tmp_path: Path) -> None:
+    path = tmp_path / "report.json"
+    report_json.dump(sample_report, str(path))
+    raw = path.read_text(encoding="utf-8")
+    assert "\\u" not in raw  # ensure_ascii=False
+
+
+def test_json_creates_parent_dirs(sample_report: Report, tmp_path: Path) -> None:
+    path = tmp_path / "nested" / "deep" / "report.json"
+    report_json.dump(sample_report, str(path))
+    assert path.exists()
+
+
+def test_json_dump_interrupted_write_preserves_existing_report_and_cleans_temp(
+    sample_report: Report,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "report.json"
+    path.write_text("stable-old-report", encoding="utf-8")
+    original_write_text = Path.write_text
+
+    def partial_write_then_fail(self, data, *args, **kwargs):  # noqa: ANN001, ANN202
+        original_write_text(self, data[:31], *args, **kwargs)
+        raise OSError("synthetic interrupted write")
+
+    monkeypatch.setattr(Path, "write_text", partial_write_then_fail)
+
+    with pytest.raises(OSError, match="synthetic interrupted write"):
+        report_json.dump(sample_report, str(path))
+
+    assert path.read_text(encoding="utf-8") == "stable-old-report"
+    assert list(tmp_path.glob("report.json.*.tmp")) == []
+
+
+def test_json_dump_strict_json_failure_does_not_touch_existing_report(
+    sample_report: Report,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "report.json"
+    path.write_text("stable-old-report", encoding="utf-8")
+    sample_report.meta["invalid_number"] = float("nan")
+
+    with pytest.raises(ValueError, match="Out of range float values"):
+        report_json.dump(sample_report, str(path))
+
+    assert path.read_text(encoding="utf-8") == "stable-old-report"
+    assert list(tmp_path.glob("report.json.*.tmp")) == []
+
+
+def test_concurrent_json_dump_uses_unique_temps_and_keeps_complete_json(
+    sample_report: Report,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "report.json"
+    barrier = threading.Barrier(2)
+    temp_names: list[str] = []
+    original_write_text = Path.write_text
+
+    def synchronized_temp_write(self, data, *args, **kwargs):  # noqa: ANN001, ANN202
+        written = original_write_text(self, data, *args, **kwargs)
+        if self.name.endswith(".tmp"):
+            temp_names.append(self.name)
+            barrier.wait(timeout=5)
+        return written
+
+    monkeypatch.setattr(Path, "write_text", synchronized_temp_write)
+    first = copy.deepcopy(sample_report)
+    first.package_name = "com.example.first"
+    second = copy.deepcopy(sample_report)
+    second.package_name = "com.example.second"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(report_json.dump, first, str(path)),
+            pool.submit(report_json.dump, second, str(path)),
+        ]
+        for future in futures:
+            future.result(timeout=10)
+
+    assert len(set(temp_names)) == 2
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["package_name"] in {"com.example.first", "com.example.second"}
+    assert list(tmp_path.glob("report.json.*.tmp")) == []
+
+
+# --------------------------- helpers ---------------------------
+
+
+def test_sort_leads_by_confidence_high_first() -> None:
+    leads = [
+        Lead(category=LeadCategory.DOMAIN, value="a", confidence=Confidence.LOW),
+        Lead(category=LeadCategory.DOMAIN, value="b", confidence=Confidence.HIGH),
+        Lead(category=LeadCategory.DOMAIN, value="c", confidence=Confidence.MEDIUM),
+    ]
+    ordered = sort_leads_by_confidence(leads)
+    assert [lead.value for lead in ordered] == ["b", "c", "a"]
+
+
+def test_group_leads_by_category(sample_report: Report) -> None:
+    groups = group_leads_by_category(sample_report.leads)
+    cats = [g["category"] for g in groups]
+    # CONFIG_KEY 置于最前（最高优先）
+    assert cats[0] == LeadCategory.CONFIG_KEY
+    # 仅含非空分组；PAYMENT/SDK_SERVICE/CONTACT 应排在 DOMAIN/IP 之前
+    assert LeadCategory.PAYMENT in cats
+    assert cats.index(LeadCategory.PAYMENT) < cats.index(LeadCategory.DOMAIN)
+    assert cats.index(LeadCategory.SDK_SERVICE) < cats.index(LeadCategory.IP)
+    # 每组都带中文 label 且非空
+    assert all(g["label"] and g["leads"] for g in groups)
+
+
+def test_network_leads_by_advice_splits(sample_report: Report) -> None:
+    buckets = network_leads_by_advice(sample_report.leads)
+    need_values = {lead.value for lead in buckets["need"]}
+    skip_values = {lead.value for lead in buckets["skip"]}
+    # 建议调证的主控域名进 need；无需调证的 CDN/IP 进 skip
+    assert "ctrl.fraud-example.com" in need_values
+    assert "cdn.aliyuncs.com" in skip_values
+    assert "1.2.3.4" in skip_values
+    # 仅含 DOMAIN/IP，不含 PAYMENT/CONFIG_KEY
+    assert "pay.fraud-example.com" not in (need_values | skip_values)
+    assert "GETUI_APPID=DVRqpR8NztAJAfq8f4dbv3" not in (need_values | skip_values)
+
+
+# --------------------------- HTML ---------------------------
+
+
+def test_html_render_writes_file(sample_report: Report, tmp_path: Path) -> None:
+    path = tmp_path / "report.html"
+    report_html.render(sample_report, str(path))
+    assert path.exists()
+    html = path.read_text(encoding="utf-8")
+    assert html.lstrip().lower().startswith("<!doctype html")
+
+
+def test_html_contains_section_titles(sample_report: Report, tmp_path: Path) -> None:
+    path = tmp_path / "report.html"
+    report_html.render(sample_report, str(path))
+    html = path.read_text(encoding="utf-8")
+
+    for title in [
+        "概览",
+        "调用插件 / 配置键值",  # ② ★ CONFIG_KEY
+        "主控域名",  # ③ 建议调证
+        "通联域名 / IP",  # ④ 无需调证
+        "SDK",  # ⑤ 第三方 SDK → 厂商
+        "支付",
+        "联系方式",
+        "签名证书",  # ⑦
+        "技术附录",  # ⑧
+        "分析器",  # ⑨ 分析器 + 富化器运行状态
+    ]:
+        assert title in html, f"缺少小节标题: {title}"
+
+
+def test_html_renders_case_closure_status_layers_and_gaps(
+    sample_report: Report,
+    tmp_path: Path,
+) -> None:
+    sample_report.meta["closure"] = {
+        "status": "partial",
+        "targets": [
+            {
+                "value": "198.51.100.10",
+                "kind": "ip",
+                "status": "partial",
+                "layers": {
+                    "runtime_evidence": {"status": "complete"},
+                    "resource_registration": {"status": "complete"},
+                    "bgp_announcement": {"status": "complete"},
+                    "hosting_delivery": {"status": "partial"},
+                    "request_target": {
+                        "status": "partial",
+                        "evidence": {"provider": "Example Hosting Ltd"},
+                    },
+                },
+                "origin": {"required": True, "status": "missing"},
+            }
+        ],
+        "gaps": ["Origin is missing"],
+        "next_actions": ["request edge origin logs"],
+        "source_summary": {"hit": 3, "failed": 1},
+    }
+    path = tmp_path / "report.html"
+
+    report_html.render(sample_report, str(path))
+    rendered = path.read_text(encoding="utf-8")
+
+    assert "案件闭环" in rendered
+    assert "partial" in rendered
+    assert "198.51.100.10" in rendered
+    assert "Example Hosting Ltd" in rendered
+    assert "Origin is missing" in rendered
+
+
+def test_html_config_key_section_shows_key_and_advice(sample_report: Report, tmp_path: Path) -> None:
+    """★ 调用插件/配置键值小节：含具体 key 值（mono 显著）与 advice 标记。"""
+    path = tmp_path / "report.html"
+    report_html.render(sample_report, str(path))
+    html = path.read_text(encoding="utf-8")
+
+    assert "调用插件 / 配置键值" in html  # 小节标题
+    assert "GETUI_APPID=DVRqpR8NztAJAfq8f4dbv3" in html  # 具体 key 值
+    assert "mono-strong" in html  # 具体值用显著 mono 样式
+    assert "每日互动股份有限公司（个推）" in html  # 所属公司
+    # advice 标记同时出现「建议调证」与「无需调证」两种
+    assert "建议调证" in html
+    assert "无需调证" in html
+    # advice 上色类
+    assert "advice-need" in html
+    assert "advice-skip" in html
+
+
+def test_html_crypto_recipe_section_renders(tmp_path: Path) -> None:
+    """C5a：CRYPTO_RECIPE 线索渲染为专属小节（配方摘要 + advice），不缺标题。"""
+    report = Report(
+        package_name="com.test",
+        meta={},
+        leads=[
+            Lead(
+                category=LeadCategory.CRYPTO_RECIPE,
+                value="AES-CFB/Pkcs7 key(utf8,32B)=<已脱敏> iv=md5(key+ts)[:16]",
+                confidence=Confidence.HIGH,
+                advice=ADVICE_INVESTIGATE,
+                notes="自 JS 逆出的应用层加密配方",
+                source_refs=[Evidence(source="js", location="app-service.js", snippet="AES.encrypt")],
+            )
+        ],
+        endpoints=[],
+        findings=[],
+        analyzer_status=[],
+    )
+    path = tmp_path / "report.html"
+    report_html.render(report, str(path))
+    html = path.read_text(encoding="utf-8")
+
+    assert 'id="crypto-recipe"' in html
+    assert "应用层加密配方" in html
+    assert "AES-CFB/Pkcs7 key(utf8,32B)" in html
+    assert "建议调证" in html
+
+
+def test_html_escapes_attacker_controlled_strings(tmp_path: Path) -> None:
+    """报告嵌入的包名/线索值是涉诈样本里攻击者可控的串：必须被 HTML 转义，绝不原样注入。
+
+    报告常在浏览器打开给执法/调证人员看，若模板某处不慎用 |safe 或关 autoescape，样本里的
+    <script> 就会 XSS。此用例钉住转义状态（之前 19 个 HTML 用例全是正向存在性，无转义断言）。
+    """
+    report = Report(
+        package_name="<script>alert(1)</script>",
+        meta={},
+        leads=[
+            Lead(
+                category=LeadCategory.CONFIG_KEY,
+                value="<img src=x onerror=alert(2)>",
+                confidence=Confidence.HIGH,
+                advice=ADVICE_INVESTIGATE,
+                notes='a&b"c',
+                source_refs=[Evidence(source="dex", location="X.java", snippet="<b>x</b>")],
+            )
+        ],
+        endpoints=[],
+        findings=[],
+        analyzer_status=[],
+    )
+    path = tmp_path / "report.html"
+    report_html.render(report, str(path))
+    html = path.read_text(encoding="utf-8")
+
+    assert "<script>alert(1)</script>" not in html  # 原始恶意标签绝不出现
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html  # 转义形态出现
+    assert "<img src=x onerror=alert(2)>" not in html
+    assert "&lt;img src=x onerror=alert(2)&gt;" in html
+
+
+def test_html_template_has_no_unsafe_filter() -> None:
+    """模板不得使用 |safe（会绕过 autoescape 引入 XSS）——防有人将来误加。"""
+    import importlib.resources
+
+    tmpl = (
+        importlib.resources.files("apkscan") / "report" / "templates" / "report.html.j2"
+    ).read_text(encoding="utf-8")
+    assert "|safe" not in tmpl
+    assert "| safe" not in tmpl
+
+
+def test_html_no_crypto_recipe_section_when_absent(sample_report: Report, tmp_path: Path) -> None:
+    """无 CRYPTO_RECIPE 线索时不渲染该小节（避免空小节噪音）。"""
+    path = tmp_path / "report.html"
+    report_html.render(sample_report, str(path))
+    html = path.read_text(encoding="utf-8")
+    assert 'id="crypto-recipe"' not in html
+
+
+def test_html_network_split_by_advice(sample_report: Report, tmp_path: Path) -> None:
+    """主控域名（建议调证）与通联域名/IP（无需调证）分区展示。"""
+    path = tmp_path / "report.html"
+    report_html.render(sample_report, str(path))
+    html = path.read_text(encoding="utf-8")
+
+    assert "ctrl.fraud-example.com" in html  # 主控域名（建议调证）
+    assert "cdn.aliyuncs.com" in html  # 通联域名（无需调证）
+    # uni-app 代码加密提示
+    assert "__UNI__F7A0431" in html
+    assert "plus.confusion" in html
+
+
+def test_html_contains_lead_values(sample_report: Report, tmp_path: Path) -> None:
+    path = tmp_path / "report.html"
+    report_html.render(sample_report, str(path))
+    html = path.read_text(encoding="utf-8")
+
+    assert "pay.fraud-example.com" in html
+    assert "极光推送 JPush" in html
+    assert "某聚合支付公司" in html
+    assert "kefu_fraud_2024" in html
+
+
+def test_html_shows_hardening_and_enrichment(sample_report: Report, tmp_path: Path) -> None:
+    path = tmp_path / "report.html"
+    report_html.render(sample_report, str(path))
+    html = path.read_text(encoding="utf-8")
+
+    assert "梆梆加固" in html  # 加固状态
+    assert "粤ICP备12345678号" in html  # icp 富化（主控域名行）
+    assert "AS37963" in html  # asn 富化（通联 IP 行）
+
+
+def test_html_renders_rdap_and_dns_enrichment(tmp_path: Path) -> None:
+    """归属富化迁移回归：enrichment 改用 rdap（注册归属）+ dns（托管）后，富化单元格须渲染二者。
+
+    旧模板只读 whois/icp/asn 三个 provider；WhoisEnricher.applies_to 置空后 pipeline 不再产
+    whois 键，注册归属迁到 enrichment["rdap"]，并新增 enrichment["dns"] 托管。本用例钉住：
+    - 仅有 rdap（无 icp/asn）的域名不再误判「未富化」；
+    - rdap 注册商/注册人与 dns 托管 IP/ASN/org 都渲染得出来。
+    """
+    report = Report(
+        package_name="com.x",
+        meta={},
+        leads=[
+            Lead(
+                category=LeadCategory.DOMAIN,
+                value="c2.fraud-gw.cn",
+                subject="某科技有限公司",
+                where_to_request="域名注册商",
+                confidence=Confidence.HIGH,
+                advice=ADVICE_INVESTIGATE,
+            )
+        ],
+        endpoints=[
+            Endpoint(
+                value="c2.fraud-gw.cn",
+                kind="domain",
+                enrichment={
+                    "rdap": {
+                        "registrar": "GoDaddy.com, LLC",
+                        "registrant": "Zhang Fraud",
+                        "created": "2024-01-02T00:00:00Z",
+                        "status": ["client transfer prohibited"],
+                        "nameservers": ["ns1.dnspod.net"],
+                        "source": "rdap",
+                    },
+                    "dns": {
+                        "ips": ["203.0.113.9"],
+                        "hosting": [
+                            {
+                                "ip": "203.0.113.9",
+                                "asn": "AS37963",
+                                "org": "Hangzhou Alibaba",
+                                "country": "CN",
+                                "isp": "Aliyun",
+                            }
+                        ],
+                    },
+                },
+            )
+        ],
+        findings=[],
+        analyzer_status=[],
+    )
+    path = tmp_path / "report.html"
+    report_html.render(report, str(path))
+    html = path.read_text(encoding="utf-8")
+
+    # rdap-only 端点不得命中「未富化」分支。
+    assert "未富化" not in html
+    # RDAP 注册归属渲染得出来。
+    assert "GoDaddy.com, LLC" in html  # 注册商
+    assert "Zhang Fraud" in html  # 注册人
+    # DNS 托管渲染得出来（IP / ASN / org）。
+    assert "203.0.113.9" in html
+    assert "AS37963" in html
+    assert "Hangzhou Alibaba" in html
+
+
+def test_html_shows_analyzer_status(sample_report: Report, tmp_path: Path) -> None:
+    path = tmp_path / "report.html"
+    report_html.render(sample_report, str(path))
+    html = path.read_text(encoding="utf-8")
+
+    assert "缺少 adb 能力" in html  # skipped 原因
+    assert "ValueError: boom" in html  # error 原因
+    assert "已跳过" in html
+    assert "异常" in html
+
+
+def test_html_render_empty_report(tmp_path: Path) -> None:
+    """空 Report 不应崩溃，并给出空提示。"""
+    empty = Report(
+        package_name="com.empty.app",
+        meta={},
+        leads=[],
+        endpoints=[],
+        findings=[],
+        analyzer_status=[],
+    )
+    path = tmp_path / "report.html"
+    report_html.render(empty, str(path))
+    html = path.read_text(encoding="utf-8")
+    assert "com.empty.app" in html
+    # 各空线索区给出空提示，不崩溃
+    assert "未抠取到配置键值" in html
+    assert "未识别到「建议调证」的主控域名" in html
+
+
+# --------------------------- 资源审计（exe-ready）---------------------------
+
+
+def test_template_loaded_via_importlib_resources(sample_report: Report, tmp_path: Path) -> None:
+    """html 模板经 importlib.resources 定位而非 Path(__file__) 相对路径，仍能正常渲染。
+
+    锚顶层包 'apkscan'，并断言模板加载链不再引用模块级 __file__ 相对目录常量
+    （exe-ready：PyInstaller onefile 下资源不是真实目录，靠 importlib.resources + as_file）。
+    """
+    # 模块不再保留 __file__ 相对的模板目录常量。
+    assert not hasattr(report_html, "_TEMPLATE_DIR")
+    # render_to_string 走 importlib.resources，渲染产物与现状一致。
+    out = report_html.render_to_string(sample_report)
+    assert out.lstrip().lower().startswith("<!doctype html")
+    assert "ctrl.fraud-example.com" in out
+
+
+# ---------------------------------------------------------------------------
+# C2 标注：Lead.is_c2 / is_runtime_seen + 报告渲染
+# ---------------------------------------------------------------------------
+
+
+def test_lead_is_c2_only_network_and_investigate() -> None:
+    from apkscan.core.models import Lead, LeadCategory
+
+    assert Lead(category=LeadCategory.DOMAIN, value="c2.fraud.cn", advice="建议调证").is_c2 is True
+    assert Lead(category=LeadCategory.IP, value="203.0.113.9", advice="建议调证").is_c2 is True
+    # 无需调证（CDN/公共服务）→ 非 C2
+    assert Lead(category=LeadCategory.DOMAIN, value="maps.googleapis.com", advice="无需调证").is_c2 is False
+    # 非网络端点（配置键）即使建议调证也非 C2 服务器
+    assert Lead(category=LeadCategory.CONFIG_KEY, value="K=V", advice="建议调证").is_c2 is False
+
+
+def test_lead_is_runtime_seen() -> None:
+    from apkscan.core.models import Evidence, Lead, LeadCategory
+
+    runtime = Lead(
+        category=LeadCategory.DOMAIN, value="c2.fraud.cn", advice="建议调证",
+        source_refs=[Evidence(source="runtime-decrypted", location="flows", snippet="y")],
+    )
+    static = Lead(
+        category=LeadCategory.DOMAIN, value="c2.fraud.cn", advice="建议调证",
+        source_refs=[Evidence(source="dex", location="classes.dex", snippet="y")],
+    )
+    assert runtime.is_runtime_seen is True
+    assert static.is_runtime_seen is False
+
+
+def test_lead_is_runtime_contact_tiers_observed_vs_derived() -> None:
+    """observed-contact（runtime / runtime-pcap）才 is_runtime_contact；runtime-derived 等其余
+    runtime* 只算 is_runtime_seen（动态侧出现）、不算接触——办案人徽标据此分档，勿把「出现在
+    runtime 报告里」误当「实连/确认 C2」。"""
+    from apkscan.core.models import (
+        OBSERVED_CONTACT_SOURCES,
+        Evidence,
+        Lead,
+        LeadCategory,
+    )
+
+    def _lead(source: str) -> Lead:
+        return Lead(
+            category=LeadCategory.IP, value="203.0.113.9", advice="建议调证",
+            source_refs=[Evidence(source=source, location="flows", snippet="x")],
+        )
+
+    # observed-contact：真观测到连去该 peer IP → seen + contact 皆真
+    for good in OBSERVED_CONTACT_SOURCES:  # {"runtime", "runtime-pcap"}
+        lead = _lead(good)
+        assert lead.is_runtime_seen is True, good
+        assert lead.is_runtime_contact is True, good
+
+    # runtime* 但非 observed-contact（含手编 / 合成兜底 runtime-derived）→ 只 seen、不 contact
+    for derived in ("runtime-derived", "runtime-decrypted", "runtime-tshark", "runtime-probe"):
+        lead = _lead(derived)
+        assert lead.is_runtime_seen is True, derived
+        assert lead.is_runtime_contact is False, derived
+
+    # 纯静态 → 两者皆假
+    static = _lead("dex")
+    assert static.is_runtime_seen is False
+    assert static.is_runtime_contact is False
+
+
+def test_merge_runtime_into_lead_dict_upgrades_contact_on_observed_source() -> None:
+    """report.json 原地回灌合并升活体确认时，dict 派生标志须与 Lead 属性同口径：observed-contact
+    源（runtime-pcap）并入 → is_runtime_contact 升 True；仅派生源（runtime-derived）并入 → 只
+    is_runtime_seen、不 is_runtime_contact。
+
+    无修复即失败：旧实现只翻 is_runtime_seen，pcap 实抓确认的 C2 在 dict 上被降级为「未确认接触」，
+    与属性重算值矛盾、下游按新字段筛「确认接触」会漏掉真确认端点。"""
+    from apkscan.core.models import merge_runtime_into_lead_dict
+
+    def _static_lead_dict() -> dict:
+        # 序列化态静态 lead：is_runtime_seen / is_runtime_contact 均为 False。
+        return {
+            "category": "IP", "value": "203.0.113.9", "advice": "建议调证",
+            "is_runtime_seen": False, "is_runtime_contact": False,
+            "source_refs": [{"source": "dex", "location": "classes.dex", "snippet": "x"}],
+        }
+
+    # observed-contact（runtime-pcap = pcap 真 dst_ip）并入 → 同步升 is_runtime_contact
+    observed = _static_lead_dict()
+    ev_merged, ledger_changed = merge_runtime_into_lead_dict(
+        observed,
+        {
+            "source_refs": [
+                {
+                    "source": "runtime-pcap",
+                    "location": "pcap",
+                    "snippet": "y",
+                    "scope": "case_evidence",
+                }
+            ]
+        },
+    )
+    assert ev_merged is True
+    assert ledger_changed is False, "只并证据没动账本——两个返回位语义不能互相污染"
+    assert observed["is_runtime_seen"] is True
+    assert observed["is_runtime_contact"] is True  # ← 无修复即失败
+
+    # 仅派生源（runtime-derived，非 observed-contact）并入 → 只「运行时出现」，不升接触
+    derived = _static_lead_dict()
+    merge_runtime_into_lead_dict(
+        derived,
+        {
+            "source_refs": [
+                {
+                    "source": "runtime-derived",
+                    "location": "runtime_report.json",
+                    "snippet": "y",
+                    "scope": "case_evidence",
+                }
+            ]
+        },
+    )
+    assert derived["is_runtime_seen"] is True
+    assert derived["is_runtime_contact"] is False
+
+
+def test_merge_runtime_into_lead_dict_cannot_upgrade_from_non_case_scope() -> None:
+    from apkscan.core.models import merge_runtime_into_lead_dict
+
+    def _static_lead_dict() -> dict:
+        return {
+            "category": "IP",
+            "value": "203.0.113.9",
+            "advice": "建议调证",
+            "is_runtime_seen": False,
+            "is_runtime_contact": False,
+            "source_refs": [{"source": "dex", "location": "classes.dex", "snippet": "x"}],
+        }
+
+    for scope in ("batch_reference", "legacy_unspecified", None):
+        existing = _static_lead_dict()
+        incoming = {"source": "runtime-pcap", "location": "pcap", "snippet": "y"}
+        if scope is not None:
+            incoming["scope"] = scope
+
+        ev_merged, ledger_changed = merge_runtime_into_lead_dict(
+            existing, {"source_refs": [incoming]}
+        )
+
+        assert ev_merged is False, scope
+        assert ledger_changed is False
+        assert existing["is_runtime_seen"] is False
+        assert existing["is_runtime_contact"] is False
+
+
+def test_case_scope_can_upgrade_after_same_batch_evidence_signature() -> None:
+    from apkscan.core.models import merge_runtime_into_lead_dict
+
+    existing = {
+        "category": "IP",
+        "value": "203.0.113.9",
+        "advice": "建议调证",
+        "is_runtime_seen": False,
+        "is_runtime_contact": False,
+        "source_refs": [
+            {
+                "source": "runtime-pcap",
+                "location": "pcap",
+                "snippet": "same",
+                "scope": "batch_reference",
+            }
+        ],
+    }
+
+    ev_merged, _ledger_changed = merge_runtime_into_lead_dict(
+        existing,
+        {
+            "source_refs": [
+                {
+                    "source": "runtime-pcap",
+                    "location": "pcap",
+                    "snippet": "same",
+                    "scope": "case_evidence",
+                }
+            ]
+        },
+    )
+
+    assert ev_merged is True
+    assert existing["is_runtime_seen"] is True
+    assert existing["is_runtime_contact"] is True
+    assert {ref.get("scope") for ref in existing["source_refs"]} >= {
+        "batch_reference",
+        "case_evidence",
+    }
+
+
+def test_json_includes_c2_flags(sample_report: Report, tmp_path: Path) -> None:
+    import json as _json
+
+    from apkscan.report import json as report_json
+
+    p = tmp_path / "r.json"
+    report_json.dump(sample_report, str(p))
+    data = _json.loads(p.read_text(encoding="utf-8"))
+    for lead in data["leads"]:
+        assert "is_c2" in lead
+        assert "is_runtime_seen" in lead
+        assert "is_runtime_contact" in lead
+
+
+def test_html_marks_c2_servers(tmp_path: Path) -> None:
+    from apkscan.core.models import Evidence, Lead, LeadCategory, Report
+    from apkscan.report import html as report_html
+
+    rpt = Report(
+        package_name="com.x",
+        meta={},
+        leads=[
+            Lead(
+                category=LeadCategory.DOMAIN, value="c2.fraud-gw.cn", advice="建议调证",
+                source_refs=[Evidence(source="runtime", location="flows", snippet="x")],
+            ),
+            Lead(category=LeadCategory.DOMAIN, value="maps.googleapis.com", advice="无需调证"),
+        ],
+        endpoints=[],
+        findings=[],
+        analyzer_status=[],
+    )
+    out = tmp_path / "r.html"
+    report_html.render(rpt, str(out))
+    text = out.read_text(encoding="utf-8")
+    assert "C2" in text  # C2 标注出现
+    assert "c2.fraud-gw.cn" in text
+
+
+def test_html_c2_badge_tiers_by_contact(tmp_path: Path) -> None:
+    """C2 徽标三档按观测强弱分层：observed-contact → 深红「实连」(badge-c2-live)；仅动态出现的
+    runtime-derived → 橙「运行时」(badge-c2-runtime)、**绝不实连**；纯静态 → 红「C2」(badge-c2)。
+
+    无修复即失败：旧模板把 runtime-derived 也当 is_runtime_seen 渲成 badge-c2-live——本测试对
+    ``runtime-derived`` 断言 `badge-c2-live` 不出现，即钉住「手编 / 合成来源不得升『实连』」。
+    断言用 ``class="badge badge-c2-*"`` span 标记（CSS 规则 `.badge-c2-*{}` / 注释里也含中文标签，
+    故不能只按可见文字判定）。"""
+    from apkscan.core.models import Evidence, Lead, LeadCategory, Report
+    from apkscan.report import html as report_html
+
+    def _render(source: str | None) -> str:
+        refs = [Evidence(source=source, location="flows", snippet="x")] if source else []
+        rpt = Report(
+            package_name="com.x", meta={},
+            leads=[Lead(category=LeadCategory.DOMAIN, value="c2.fraud.cn",
+                        advice=ADVICE_INVESTIGATE, source_refs=refs)],
+            endpoints=[], findings=[], analyzer_status=[],
+        )
+        out = tmp_path / f"{source or 'static'}.html"
+        report_html.render(rpt, str(out))
+        return out.read_text(encoding="utf-8")
+
+    # observed-contact（runtime-pcap）→ 实连
+    live = _render("runtime-pcap")
+    assert 'class="badge badge-c2-live"' in live
+
+    # 手编 / 合成 runtime-derived：只动态出现、未确认接触 → 运行时（中档），绝不实连
+    derived = _render("runtime-derived")
+    assert 'class="badge badge-c2-runtime"' in derived
+    assert 'class="badge badge-c2-live"' not in derived  # ← 无修复即失败
+
+    # 纯静态 → 普通 C2，既非实连也非运行时
+    static = _render(None)
+    assert 'class="badge badge-c2"' in static
+    assert 'class="badge badge-c2-live"' not in static
+    assert 'class="badge badge-c2-runtime"' not in static
+
+
+def test_runtime_report_derived_endpoint_not_confirmed_c2(tmp_path: Path) -> None:
+    """信任边界·端到端：手编 / 回灌 runtime_report.json（无 observed-contact 证据的 IP 端点）经
+    load_runtime_endpoints → merge_runtime_endpoints，其 Lead 只 is_runtime_seen、不 is_runtime_contact，
+    渲染为「C2·运行时」而非「C2·实连」。
+
+    无修复即失败：合成 / 非 runtime* 来源被钉成 ``runtime-derived``（仍 startswith runtime），旧徽标
+    据宽口径 is_runtime_seen 会把它误呈成「实连/确认 C2」——办案人面的活体确认信任边界漏点。"""
+    import json as _json
+
+    from apkscan.core.models import Report
+    from apkscan.dynamic.merge import load_runtime_endpoints, merge_runtime_endpoints
+    from apkscan.report import html as report_html
+
+    # 手编 runtime 报告：公网 IP 端点，evidence 用非 runtime* 来源（模拟无真实 observed-contact 证据）；
+    # merge 会把它钉成 runtime-derived（非 observed-contact），而非最强的 runtime。
+    runtime_report = {
+        "endpoints": [
+            {
+                "value": "45.79.10.77",  # leak-scan: allow 报告重建夹具，须是公网 IP 才为运行时端点生成 Lead
+                    "kind": "ip",
+                    "evidences": [
+                        {
+                            "source": "static",
+                            "location": "hand-edited",
+                            "snippet": "45.79.10.77",  # leak-scan: allow 报告重建夹具，须是公网 IP 才为运行时端点生成 Lead
+                            "scope": "case_evidence",
+                        }
+                    ],
+            }
+        ]
+    }
+    path = tmp_path / "runtime_report.json"
+    path.write_text(_json.dumps(runtime_report), encoding="utf-8")
+
+    endpoints = load_runtime_endpoints(str(path))
+    assert endpoints, "应重建出运行时端点"
+    assert all(
+        ev.source == "runtime-derived" for ep in endpoints for ev in ep.evidences
+    ), "非 runtime* 来源应被钉成 runtime-derived（非 observed-contact）"
+
+    report = Report(
+        package_name="com.x", meta={}, leads=[], endpoints=[],
+        findings=[], analyzer_status=[],
+    )
+    merge_runtime_endpoints(report, endpoints)
+
+    ip_leads = [ld for ld in report.leads if ld.value == "45.79.10.77"]  # leak-scan: allow 报告重建夹具，须是公网 IP 才为运行时端点生成 Lead
+    assert ip_leads, "应为运行时引入的公网 IP 生成 Lead"
+    lead = ip_leads[0]
+    assert lead.is_c2 is True  # 公网 IP + 建议调证
+    assert lead.is_runtime_seen is True  # 宽口径：动态侧出现
+    assert lead.is_runtime_contact is False  # 严口径：非 observed-contact
+
+    out = tmp_path / "r.html"
+    report_html.render(report, str(out))
+    text = out.read_text(encoding="utf-8")
+    assert 'class="badge badge-c2-runtime"' in text
+    assert 'class="badge badge-c2-live"' not in text  # ← 无修复即失败
+
+
+# ---------------------------------------------------------------------------
+# 取证完整性：Evidence 注入 evidence_id（可回溯锚点）
+# ---------------------------------------------------------------------------
+
+
+def test_json_injects_evidence_id_on_every_evidence(sample_report: Report, tmp_path: Path) -> None:
+    """每条 Evidence（line 在 lead.source_refs / endpoint.evidences / finding.evidences）
+    序列化后都带 evidence_id，且与 integrity.evidence_id(source, location) 一致。"""
+    import json as _json
+
+    from apkscan.core.integrity import evidence_id
+    from apkscan.report import json as report_json
+
+    p = tmp_path / "r.json"
+    report_json.dump(sample_report, str(p))
+    data = _json.loads(p.read_text(encoding="utf-8"))
+
+    seen = 0
+    for lead in data["leads"]:
+        for ev in lead.get("source_refs", []):
+            assert "evidence_id" in ev
+            assert ev["evidence_id"] == evidence_id(ev["source"], ev["location"])
+            seen += 1
+    for ep in data["endpoints"]:
+        for ev in ep.get("evidences", []):
+            assert "evidence_id" in ev
+            assert ev["evidence_id"] == evidence_id(ev["source"], ev["location"])
+            seen += 1
+    for f in data["findings"]:
+        for ev in f.get("evidences", []):
+            assert "evidence_id" in ev
+            assert ev["evidence_id"] == evidence_id(ev["source"], ev["location"])
+            seen += 1
+    assert seen > 0  # sample_report 里确有若干 Evidence，确保真的断言到了
+
+
+def test_json_evidence_id_ignores_snippet(tmp_path: Path) -> None:
+    """同 source|location、snippet 不同的两条证据，evidence_id 相同（id 不随 snippet 漂移）。"""
+    import json as _json
+
+    from apkscan.report import json as report_json
+
+    rpt = Report(
+        package_name="com.x",
+        meta={},
+        leads=[
+            Lead(
+                category=LeadCategory.DOMAIN,
+                value="c2.example.cn",
+                source_refs=[
+                    Evidence(source="runtime", location="flows#0", snippet="ts=111"),
+                    Evidence(source="runtime", location="flows#0", snippet="ts=999"),
+                ],
+            ),
+        ],
+        endpoints=[],
+        findings=[],
+        analyzer_status=[],
+    )
+    p = tmp_path / "r.json"
+    report_json.dump(rpt, str(p))
+    data = _json.loads(p.read_text(encoding="utf-8"))
+    refs = data["leads"][0]["source_refs"]
+    assert refs[0]["evidence_id"] == refs[1]["evidence_id"]
+
+
+def test_html_renders_evidence_integrity_section(tmp_path: Path) -> None:
+    """meta 带 evidence_manifest 时，HTML 渲染「证据完整性」小节，列检材 sha256/大小/时间/版本，
+    且含克制的法律措辞（分析时间≠采集时间、md5/sha1 仅兼容冗余、不替代司法鉴定）。"""
+    rpt = Report(
+        package_name="com.x",
+        meta={
+            "evidence_manifest": {
+                "sha256": "ab" * 32,
+                "sha1": "cd" * 20,
+                "md5": "ef" * 16,
+                "size": 123456,
+                "analyzed_at": "2026-06-12T00:00:00+00:00",
+                "tool_version": "0.5.4",
+                "platform": "Windows-11",
+            },
+            "sample_sha256": "ab" * 32,
+        },
+        leads=[],
+        endpoints=[],
+        findings=[],
+        analyzer_status=[],
+    )
+    out = tmp_path / "r.html"
+    report_html.render(rpt, str(out))
+    html = out.read_text(encoding="utf-8")
+
+    assert "证据完整性" in html  # 小节标题
+    assert "ab" * 32 in html  # 检材 sha256
+    assert "0.5.4" in html  # 工具版本
+    # 法律措辞：克制、不夸大
+    assert "分析时间" in html and "采集时间" in html  # 显式区分
+    assert "SHA-256 为准" in html  # md5/sha1 仅兼容冗余，完整性以 sha256 为准
+    assert "司法鉴定" in html  # 不替代证据保全
+    # 不出现打包票措辞
+    assert "法律可采性" not in html
+
+
+def test_html_no_integrity_section_when_manifest_absent(sample_report: Report, tmp_path: Path) -> None:
+    """meta 无 evidence_manifest 时不渲染该小节（避免空小节噪音；现有报告不受影响）。"""
+    path = tmp_path / "r.html"
+    report_html.render(sample_report, str(path))
+    html = path.read_text(encoding="utf-8")
+    assert "证据完整性" not in html
+
+
+def test_every_lead_category_is_rendered_in_html(tmp_path: Path) -> None:
+    """★每个 LeadCategory 的线索都必须在 HTML 报告里看得见——一个都不许丢。
+
+    起因是实测发现的真缺陷：模板原先逐个 `{% if group.category.value == "PAYMENT" %}`
+    硬编码挑类别，没被挑中的**整类消失**。一份交付出去的真实报告里，7 条运行时凭据 +
+    1 条短信转发线索在 HTML 中完全不可见，而 CATEGORY_LABELS 给它们都起了中文标签、
+    CATEGORY_ORDER 还把高敏那几类排在最前面——设计上要显示，实现漏了。
+
+    ★这条测试遍历 **LeadCategory 全枚举**，不是写死名单：将来新增类别若忘了接线，
+      这里直接红。锁的是「报告不会安静地吞掉一整类线索」这个契约。
+    """
+    leads = [
+        Lead(
+            category=cat,
+            value=f"probe-value-for-{cat.value.lower()}",
+            advice=ADVICE_INVESTIGATE,
+            confidence=Confidence.HIGH,
+        )
+        for cat in LeadCategory
+    ]
+    report = Report(
+        package_name="com.example.app",
+        meta={},
+        leads=leads,
+        endpoints=[],
+        findings=[],
+        analyzer_status=[],
+    )
+
+    path = tmp_path / "all.html"
+    report_html.render(report, str(path))
+    html = path.read_text(encoding="utf-8")
+
+    # ★断言**恰好一次**，不是「至少一次」：前者同时锁住两个方向——整类消失（0 次）与
+    #   被两个区块各渲染一遍（≥2 次）。只判 `in` 的话，重复渲染是看不出来的。
+    counts = {lead.value: html.count(lead.value) for lead in leads}
+    missing = sorted(v for v, n in counts.items() if n == 0)
+    duplicated = sorted(f"{v}×{n}" for v, n in counts.items() if n > 1)
+
+    assert not missing, (
+        f"这些类别的线索在 HTML 报告里看不见：{missing}。"
+        "要么给它加专属区块并登记进 html.DEDICATED_SECTION_CATEGORIES，"
+        "要么让它落进「其余线索」区块——绝不能整类消失。"
+    )
+    assert not duplicated, (
+        f"这些线索被渲染了不止一遍：{duplicated}。"
+        "多半是某个类别既有专属区块、又没登记进 DEDICATED_SECTION_CATEGORIES。"
+    )
+
+
+def test_dedicated_section_categories_really_have_their_own_block(tmp_path: Path) -> None:
+    """★反向：登记为「有专属区块」的类别，不得同时出现在「其余线索」区块里（重复渲染）。
+
+    这份名单一旦与模板漂移，要么某类被渲染两遍，要么它以为有人管、实际没人管。
+    """
+    from apkscan.report.html import DEDICATED_SECTION_CATEGORIES, other_lead_groups
+
+    leads = [
+        Lead(category=cat, value=f"v-{cat.value}", advice=ADVICE_INVESTIGATE, confidence=Confidence.HIGH)
+        for cat in LeadCategory
+    ]
+
+    others = {group["category"] for group in other_lead_groups(leads)}
+
+    assert not (others & DEDICATED_SECTION_CATEGORIES), (
+        f"这些类别既登记了专属区块、又落进了「其余线索」：{others & DEDICATED_SECTION_CATEGORIES}"
+    )
+    assert others | DEDICATED_SECTION_CATEGORIES == set(LeadCategory), (
+        "两者并集必须覆盖全部类别，否则有类别两边都不管"
+    )

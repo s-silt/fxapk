@@ -1,0 +1,455 @@
+"""apkscan.dynamic.cryptohook 的单测（P0 运行时密钥 hook 纯逻辑层）。
+
+策略：全程无设备/无 Frida，只测 on_message handler 规范化、活体配方反推、冒充品牌抽取、
+transformation 拆分、Frida JS 常量完整性。Frida JS 本身的真机行为由用户在 MuMu 复验。
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+from typing import Any
+
+from apkscan.dynamic import cryptohook
+
+# 合成 key（32 个 ASCII 字符，按 UTF-8 当 key —— CryptoJS enc.Utf8.parse 口径）。
+_KEY = "0123456789abcdef0123456789abcdef"
+_KEY_HEX = _KEY.encode("utf-8").hex()  # JS 侧 getEncoded() 回传的 key bytes 的 hex
+
+
+def _send(payload: dict[str, Any]) -> dict[str, Any]:
+    """包成 Frida send 消息。"""
+    return {"type": "send", "payload": {"type": cryptohook.CRYPTO_MSG_TYPE, **payload}}
+
+
+def _cipher_init(**kw: Any) -> dict[str, Any]:
+    base = {"src": "cipher", "event": "init", "transformation": "AES/CFB/PKCS5Padding"}
+    base.update(kw)
+    return base
+
+
+# ---------------------------------------------------------------------------
+# make_message_handler
+# ---------------------------------------------------------------------------
+
+
+def test_make_message_handler_collects_send_payload() -> None:
+    sink: list[dict[str, Any]] = []
+    handler = cryptohook.make_message_handler(sink)
+    handler(_send(_cipher_init(key_hex=_KEY_HEX, iv_hex="61626364616263646162636461626364")), None)
+    assert len(sink) == 1
+    ev = sink[0]
+    assert ev["src"] == "cipher"
+    assert ev["event"] == "init"
+    assert ev["key_hex"] == _KEY_HEX
+    assert ev["transformation"] == "AES/CFB/PKCS5Padding"
+
+
+def test_handler_ignores_non_apkscan_and_error_messages() -> None:
+    sink: list[dict[str, Any]] = []
+    handler = cryptohook.make_message_handler(sink)
+    # 非本通道 send
+    handler({"type": "send", "payload": {"type": "other", "src": "x"}}, None)
+    # error 消息（JS 异常）：记 warning、不入 sink、不抛
+    handler({"type": "error", "description": "boom", "stack": "..."}, None)
+    # payload 非 dict
+    handler({"type": "send", "payload": "notadict"}, None)
+    # message 非 dict
+    handler("garbage", None)  # type: ignore[arg-type]
+    handler(None, None)
+    assert sink == []
+
+
+def test_handler_never_raises_on_garbage_payload() -> None:
+    sink: list[dict[str, Any]] = []
+    handler = cryptohook.make_message_handler(sink)
+    # payload 缺 src/event → normalize 返回 None，不入 sink、不抛
+    handler(_send({"foo": "bar"}), None)
+    assert sink == []
+
+
+def test_handler_logs_warning_on_error_message(caplog) -> None:
+    """error 消息（JS 异常）必须记 warning（JS 异常诊断的唯一出口），不入 sink、不抛。"""
+    import logging
+
+    sink: list[dict[str, Any]] = []
+    handler = cryptohook.make_message_handler(sink)
+    with caplog.at_level(logging.WARNING):
+        handler({"type": "error", "description": "TypeError: x", "stack": "..."}, None)
+    assert sink == []
+    assert any("Frida JS 异常" in r.message for r in caplog.records)
+
+
+def test_handler_swallows_exception_in_body(monkeypatch, caplog) -> None:
+    """不变量 #8 最后防线：handler 内部抛异常被吞住（绝不炸 Frida 会话），记 exception。"""
+    import logging
+
+    def _boom(payload: Any) -> dict[str, Any]:
+        raise RuntimeError("normalize boom")
+
+    monkeypatch.setattr(cryptohook, "normalize_crypto_event", _boom)
+    sink: list[dict[str, Any]] = []
+    handler = cryptohook.make_message_handler(sink)
+    with caplog.at_level(logging.ERROR):
+        handler(_send(_cipher_init(key_hex=_KEY_HEX)), None)  # 不抛即通过
+    assert sink == []
+    assert any("处理 Frida 消息异常" in r.message for r in caplog.records)
+
+
+def test_handler_respects_sink_cap(monkeypatch) -> None:
+    monkeypatch.setattr(cryptohook, "_SINK_CAP", 2)
+    sink: list[dict[str, Any]] = []
+    handler = cryptohook.make_message_handler(sink)
+    for i in range(4):
+        handler(_send(_cipher_init(src=f"cipher{i}", key_hex=_KEY_HEX)), None)
+    # 2 条真事件 + 1 条 _capped 占位（触发一次性 warning 后停）
+    real = [e for e in sink if not e.get("_capped")]
+    capped = [e for e in sink if e.get("_capped")]
+    assert len(real) == 2
+    assert len(capped) == 1
+
+
+# ---------------------------------------------------------------------------
+# normalize_crypto_event
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_drops_non_dict_and_missing_fields() -> None:
+    assert cryptohook.normalize_crypto_event("x") is None
+    assert cryptohook.normalize_crypto_event({"src": "cipher"}) is None  # 缺 event
+    assert cryptohook.normalize_crypto_event({"event": "init"}) is None  # 缺 src
+
+
+def test_normalize_rejects_bad_hex_key() -> None:
+    ev = cryptohook.normalize_crypto_event(
+        {"src": "cipher", "event": "init", "key_hex": "ZZZZ", "iv_hex": "not-hex"}
+    )
+    assert ev is not None
+    assert ev["key_hex"] is None  # 非合法 hex → None
+    assert ev["iv_hex"] is None
+
+
+# ---------------------------------------------------------------------------
+# recipe_from_events
+# ---------------------------------------------------------------------------
+
+
+def test_recipe_from_events_prefers_utf8_key_when_ascii() -> None:
+    events = [_cipher_init(key_hex=_KEY_HEX)]
+    recipe = cryptohook.recipe_from_events(events)
+    assert recipe is not None
+    assert recipe["key"] == _KEY  # 可见 ASCII → 还原成 utf8 串
+    assert recipe["key_encoding"] == "utf8"
+    assert recipe["algo"] == "AES"
+    assert recipe["mode"] == "CFB"
+    assert recipe["padding"] == "Pkcs7"
+
+
+def test_recipe_from_events_hex_key_when_binary() -> None:
+    bin_key_hex = "00112233445566778899aabbccddeeff"  # 含不可见字节
+    events = [_cipher_init(key_hex=bin_key_hex)]
+    recipe = cryptohook.recipe_from_events(events)
+    assert recipe is not None
+    assert recipe["key"] == bin_key_hex
+    assert recipe["key_encoding"] == "hex"
+
+
+def test_recipe_from_events_constant_iv_sets_fixed() -> None:
+    iv_ascii = "abcdefghijklmnop"  # 16 可见 ASCII
+    iv_hex = iv_ascii.encode("utf-8").hex()
+    events = [
+        _cipher_init(key_hex=_KEY_HEX, iv_hex=iv_hex),
+        _cipher_init(key_hex=_KEY_HEX, iv_hex=iv_hex),  # 恒定
+    ]
+    recipe = cryptohook.recipe_from_events(events)
+    assert recipe is not None
+    assert recipe["iv_derive"] == "fixed"
+    # key_encoding=utf8 且 iv 可见 ASCII → iv_value 用 ascii 串
+    assert recipe["iv_value"] == iv_ascii
+
+
+def test_recipe_from_events_varying_iv_not_fixed() -> None:
+    """风险缓解：iv 每请求变（md5(key+ts)）时绝不设 fixed，仅反哺 key、iv 交静态推导。"""
+    events = [
+        _cipher_init(key_hex=_KEY_HEX, iv_hex="61626364616263646162636461626364"),
+        _cipher_init(key_hex=_KEY_HEX, iv_hex="71727374717273747172737471727374"),  # 变化
+    ]
+    recipe = cryptohook.recipe_from_events(events)
+    assert recipe is not None
+    assert "iv_derive" not in recipe  # 不设 fixed
+    assert "iv_value" not in recipe
+    assert recipe["key"] == _KEY  # key 仍反哺
+
+
+def test_recipe_from_events_none_when_no_key() -> None:
+    events = [{"src": "cipher", "event": "doFinal", "plaintext_b64": "eyJhIjoxfQ=="}]
+    assert cryptohook.recipe_from_events(events) is None
+    assert cryptohook.recipe_from_events([]) is None
+
+
+def test_recipe_from_events_dominant_key_wins() -> None:
+    other = "aa" * 16
+    events = [
+        _cipher_init(key_hex=_KEY_HEX),
+        _cipher_init(key_hex=_KEY_HEX),
+        _cipher_init(key_hex=other),
+    ]
+    recipe = cryptohook.recipe_from_events(events)
+    assert recipe is not None
+    assert recipe["key"] == _KEY  # 出现 2 次 > 1 次
+
+
+def test_recipe_from_events_mac_key_only_as_fallback() -> None:
+    """Mac(HMAC) key 仅在无 cipher/secretkeyspec key 时兜底。"""
+    mac_hex = "aabbccddeeff00112233445566778899"
+    events = [{"src": "mac", "event": "init", "key_hex": mac_hex}]
+    recipe = cryptohook.recipe_from_events(events)
+    assert recipe is not None
+    assert recipe["key_encoding"] == "hex"
+    assert recipe["key"] == mac_hex
+
+
+# ---------------------------------------------------------------------------
+# transformation_parts
+# ---------------------------------------------------------------------------
+
+
+def test_transformation_parts_full() -> None:
+    assert cryptohook.transformation_parts("AES/CFB/PKCS5Padding") == ("AES", "CFB", "Pkcs7")
+    assert cryptohook.transformation_parts("AES/CBC/NoPadding") == ("AES", "CBC", "NoPadding")
+    assert cryptohook.transformation_parts("DESede/ECB/PKCS7Padding") == ("3DES", "ECB", "Pkcs7")
+
+
+def test_transformation_parts_algo_only() -> None:
+    assert cryptohook.transformation_parts("AES") == ("AES", "", "")
+    assert cryptohook.transformation_parts("") == ("", "", "")
+
+
+def test_transformation_parts_preserves_cfb_segment() -> None:
+    """★CFB8 段位不得被折叠成 CFB——两者密文不同，折叠后 appcrypto 按 128 解会得乱码。"""
+    assert cryptohook.transformation_parts("AES/CFB8/NoPadding") == ("AES", "CFB8", "NoPadding")
+    assert cryptohook.transformation_parts("AES/CFB128/PKCS5Padding") == ("AES", "CFB128", "Pkcs7")
+    # 无段位后缀的 CFB 保持不变（默认整块反馈）。
+    assert cryptohook.transformation_parts("AES/CFB/PKCS5Padding") == ("AES", "CFB", "Pkcs7")
+    # 其余模式不受影响（段位语义只属 CFB）。
+    assert cryptohook._norm_mode("CBC") == "CBC"
+
+
+# ---------------------------------------------------------------------------
+# brand_hints_from_events
+# ---------------------------------------------------------------------------
+
+
+def _doFinal_plain(obj: dict[str, Any]) -> dict[str, Any]:
+    raw = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+    return {
+        "src": "cipher",
+        "event": "doFinal",
+        "opmode": 2,
+        "plaintext_b64": base64.b64encode(raw).decode("ascii"),
+    }
+
+
+def test_brand_hints_from_events_extracts_webname() -> None:
+    events = [_doFinal_plain({"webName": "示例证券", "register": "/api/register"})]
+    hints = cryptohook.brand_hints_from_events(events)
+    assert "示例证券" in hints
+
+
+def test_brand_hints_from_events_catches_industry_token() -> None:
+    events = [_doFinal_plain({"foo": "华西银行股份有限公司", "x": 1})]
+    hints = cryptohook.brand_hints_from_events(events)
+    assert any("银行" in h for h in hints)
+
+
+def test_brand_hints_from_events_empty_when_no_plaintext() -> None:
+    assert cryptohook.brand_hints_from_events([_cipher_init(key_hex=_KEY_HEX)]) == []
+    assert cryptohook.brand_hints_from_events([]) == []
+
+
+# ---------------------------------------------------------------------------
+# Frida JS 常量完整性
+# ---------------------------------------------------------------------------
+
+
+def test_frida_crypto_hook_js_integrity() -> None:
+    js = cryptohook.FRIDA_CRYPTO_HOOK_JS
+    assert "Java.perform" in js
+    assert "javax.crypto.Cipher" in js
+    assert "doFinal" in js
+    assert "SecretKeySpec" in js
+    assert "IvParameterSpec" in js
+    assert "CryptoJS" in js  # WebView 补充路径
+    assert "send(" in js  # 回传通道
+    assert "apkscan-crypto" in js  # 通道判别值与 Python 端一致
+
+
+# ---------------------------------------------------------------------------
+# 内嵌 Frida JS 外置为 frida_js/*.js（importlib.resources 读取）：逐字一致 + 装后可读
+# ---------------------------------------------------------------------------
+
+# 8 个对外常量 ↔ frida_js/ 下 .js 资源文件（capture.py 拼接注入真机的全部脚本）。
+_FRIDA_JS_FILES: dict[str, str] = {
+    "FRIDA_CRYPTO_HOOK_JS": "crypto_hook.js",
+    "FRIDA_JSBRIDGE_HOOK_JS": "jsbridge_hook.js",
+    "FRIDA_SENSITIVE_API_HOOK_JS": "sensitive_api_hook.js",
+    "FRIDA_ANTIDETECT_JS": "sample_runtime_compat.js",
+    "FRIDA_OKHTTP_HOOK_JS": "okhttp_hook.js",
+    "FRIDA_SQLCIPHER_HOOK_JS": "sqlcipher_hook.js",
+    "FRIDA_CLIPBOARD_HOOK_JS": "clipboard_hook.js",
+    "FRIDA_ACCESSIBILITY_HOOK_JS": "accessibility_hook.js",
+}
+
+
+def test_all_frida_constants_are_nonempty_str() -> None:
+    """8 个 Frida JS 常量都必须是非空 str（对外契约：capture.py 直接字符串拼接注入）。"""
+    for attr in _FRIDA_JS_FILES:
+        value = getattr(cryptohook, attr)
+        assert isinstance(value, str), f"{attr} 应为 str"
+        assert value, f"{attr} 不应为空"
+        assert "Java.perform" in value, f"{attr} 应是 Frida perform 脚本"
+
+
+def test_frida_constants_match_js_resource_files_verbatim() -> None:
+    """外置迁移铁律：每个常量必须与 frida_js/ 下同名 .js 资源**逐字一致**（纯搬运，不改语义）。
+
+    经 importlib.resources 按 bytes 读回资源、UTF-8 解码（无换行翻译），与常量比对全等。
+    """
+    import importlib.resources
+
+    for attr, fname in _FRIDA_JS_FILES.items():
+        res = importlib.resources.files("apkscan.dynamic") / "frida_js" / fname
+        disk = res.read_bytes().decode("utf-8")
+        assert getattr(cryptohook, attr) == disk, f"{attr} 与 {fname} 内容不一致（迁移应逐字搬运）"
+
+
+def test_frida_js_resources_are_readable_and_lf_only() -> None:
+    """资源必须可经 importlib.resources 读取（装后同样可读），且为 LF-only（无 CR 泄漏）。"""
+    import importlib.resources
+
+    for fname in _FRIDA_JS_FILES.values():
+        res = importlib.resources.files("apkscan.dynamic") / "frida_js" / fname
+        raw = res.read_bytes()
+        assert raw, f"{fname} 不应为空"
+        assert b"\r" not in raw, f"{fname} 不应含 CR（保持源文件 LF 一致）"
+
+
+# ---------------------------------------------------------------------------
+# P1：make_typed_handler + JS-bridge / 敏感 API 通道
+# ---------------------------------------------------------------------------
+
+
+def test_make_typed_handler_routes_by_type() -> None:
+    sink: list[dict[str, Any]] = []
+    handler = cryptohook.make_typed_handler(
+        sink, cryptohook.JSBRIDGE_MSG_TYPE, cryptohook.normalize_jsbridge_event
+    )
+    # 本通道消息 → 收
+    handler({"type": "send", "payload": {"type": cryptohook.JSBRIDGE_MSG_TYPE, "event": "register", "iface": "android"}}, None)
+    # 别的通道（crypto）→ 忽略
+    handler({"type": "send", "payload": {"type": cryptohook.CRYPTO_MSG_TYPE, "src": "cipher", "event": "init"}}, None)
+    # error → 忽略不抛（typed handler 不记 error）
+    handler({"type": "error", "description": "x"}, None)
+    assert len(sink) == 1
+    assert sink[0]["iface"] == "android"
+
+
+def test_make_typed_handler_never_raises() -> None:
+    sink: list[dict[str, Any]] = []
+    handler = cryptohook.make_typed_handler(sink, "apkscan-api", cryptohook.normalize_sensitive_api_event)
+    handler("garbage", None)  # type: ignore[arg-type]
+    handler(None, None)
+    handler({"type": "send", "payload": "notadict"}, None)
+    assert sink == []
+
+
+def test_normalize_jsbridge_event() -> None:
+    ev = cryptohook.normalize_jsbridge_event(
+        {"type": "x", "event": "register", "iface": "AndroidNative", "object_class": "com.x.Bridge", "methods": "pay,getInfo"}
+    )
+    assert ev is not None
+    assert ev["event"] == "register"
+    assert ev["iface"] == "AndroidNative"
+    assert ev["methods"] == "pay,getInfo"
+    # 缺 iface → None
+    assert cryptohook.normalize_jsbridge_event({"event": "register"}) is None
+
+
+def test_normalize_sensitive_api_event() -> None:
+    ev = cryptohook.normalize_sensitive_api_event(
+        {"event": "call", "api": "TelephonyManager.getDeviceId", "result_summary": "8601..."}
+    )
+    assert ev is not None
+    assert ev["api"] == "TelephonyManager.getDeviceId"
+    assert cryptohook.normalize_sensitive_api_event({"event": "call"}) is None  # 缺 api
+
+
+def test_jsbridge_hints_from_events() -> None:
+    events = [
+        {"event": "register", "iface": "android"},
+        {"event": "call", "iface": "android", "method": "pay"},
+        {"event": "register", "iface": "android"},  # 去重
+    ]
+    hints = cryptohook.jsbridge_hints_from_events(events)
+    assert "android" in hints
+    assert "android.pay" in hints
+    assert len([h for h in hints if h == "android"]) == 1
+
+
+def test_sensitive_api_hints_from_events() -> None:
+    events = [
+        {"api": "TelephonyManager.getDeviceId"},
+        {"api": "SmsManager.sendTextMessage"},
+        {"api": "TelephonyManager.getDeviceId"},  # 去重
+    ]
+    hints = cryptohook.sensitive_api_hints_from_events(events)
+    assert hints == ["TelephonyManager.getDeviceId", "SmsManager.sendTextMessage"]
+
+
+def test_frida_p1_hook_js_integrity() -> None:
+    jb = cryptohook.FRIDA_JSBRIDGE_HOOK_JS
+    assert "Java.perform" in jb
+    assert "addJavascriptInterface" in jb
+    assert "apkscan-jsbridge" in jb
+    api = cryptohook.FRIDA_SENSITIVE_API_HOOK_JS
+    assert "getDeviceId" in api
+    assert "sendTextMessage" in api
+    assert "apkscan-api" in api
+
+
+# ---------------------------------------------------------------------------
+# P3：反检测绕过
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_antidetect_event() -> None:
+    ev = cryptohook.normalize_antidetect_event(
+        {"type": "x", "kind": "root", "probe": "File.exists: /system/bin/su", "bypassed": True}
+    )
+    assert ev is not None
+    assert ev["kind"] == "root"
+    assert ev["bypassed"] is True
+    assert cryptohook.normalize_antidetect_event({"kind": "root"}) is None  # 缺 probe
+    assert cryptohook.normalize_antidetect_event({"probe": "x"}) is None  # 缺 kind
+
+
+def test_antidetect_kinds_from_events() -> None:
+    events = [
+        {"kind": "root", "probe": "su"},
+        {"kind": "root", "probe": "magisk"},
+        {"kind": "emulator", "probe": "qemu"},
+        {"kind": "frida", "probe": "27042"},
+    ]
+    counts = cryptohook.antidetect_kinds_from_events(events)
+    assert counts == {"root": 2, "emulator": 1, "frida": 1}
+
+
+def test_frida_antidetect_js_integrity() -> None:
+    js = cryptohook.FRIDA_ANTIDETECT_JS
+    assert "Java.perform" in js
+    assert "File" in js and "exists" in js  # File.exists 绕过
+    assert "Runtime" in js  # Runtime.exec 拦截
+    assert "android.os.Build" in js  # Build 字段伪装
+    assert "SystemProperties" in js  # qemu 属性屏蔽
+    assert "apkscan-antidetect" in js  # 通道判别值
+    assert "su" in js and "qemu" in js and "frida" in js  # 三类检测特征

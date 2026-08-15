@@ -1,0 +1,486 @@
+"""ReToolkitAnalyzer 单测：用 conftest 的 FakeContext 喂合成 hook/反检测工具特征。
+
+覆盖：
+- 基本属性 name/requires。
+- 未命中 → 空 meta（re_toolkit=[]、hook_frameworks=[]、anti_frida=False），无 Finding。
+- .so 命中 hook 框架（ShadowHook）→ RE-TOOLKIT-DETECTED Finding(anti_analysis/HIGH)、hook_frameworks 记名。
+- dex 包名命中反 frida 工具（LibcoreSyscall）→ anti_frida=True、Finding HIGH。
+- dex 包名命中 hook 框架（pine，仅 dex 弱证据）→ 命中、severity MEDIUM。
+- frida-gadget 经特征文件命中。
+- 大小写不敏感（.so 名）。
+- 多工具同时命中 → 一条 Finding 汇总、meta 列全部。
+- fixture 样例 ctx 不误报。
+- 鲁棒性：单数据源抛异常不炸整个 analyze。
+"""
+
+from __future__ import annotations
+
+from apkscan.analyzers.re_toolkit import ReToolkitAnalyzer
+from apkscan.core.models import AnalyzerResult, Severity
+
+from tests.conftest import FakeContext
+
+
+def _analyze(
+    *,
+    native_libs: list[str] | None = None,
+    files: dict[str, bytes] | None = None,
+    dex_strings: list[str] | None = None,
+) -> AnalyzerResult:
+    ctx = FakeContext(native_libs=native_libs, files=files, dex_strings=dex_strings)
+    return ReToolkitAnalyzer().analyze(ctx)
+
+
+# --- 基本属性 -------------------------------------------------------------
+
+
+def test_analyzer_name_and_requires():
+    analyzer = ReToolkitAnalyzer()
+    assert analyzer.name == "re_toolkit"
+    assert analyzer.requires == ["apk"]
+
+
+# --- 不命中 ---------------------------------------------------------------
+
+
+def test_no_toolkit_yields_empty():
+    result = _analyze(
+        native_libs=["lib/arm64-v8a/libnative.so", "lib/armeabi-v7a/libc++_shared.so"],
+        files={"assets/config.json": b"{}"},
+        dex_strings=["com.example.app.MainActivity", "https://example.com"],
+    )
+    assert result.error is None
+    assert result.findings == []
+    assert result.meta["re_toolkit"] == []
+    assert result.meta["hook_frameworks"] == []
+    assert result.meta["anti_frida"] is False
+
+
+# --- .so 命中 hook 框架（ShadowHook）--------------------------------------
+
+
+def test_shadowhook_so_hit_yields_medium_finding():
+    result = _analyze(native_libs=["lib/arm64-v8a/libshadowhook.so"])
+    assert result.error is None
+
+    assert len(result.findings) == 1
+    finding = result.findings[0]
+    assert finding.id == "RE-TOOLKIT-DETECTED"
+    assert finding.category == "anti_analysis"
+    # 仅 hook 框架（dual-use，亦见于合法 APM）→ MEDIUM，不单凭此报 HIGH
+    assert finding.severity == Severity.MEDIUM
+    assert any(ev.source == "native" for ev in finding.evidences)
+
+    assert any("ShadowHook" in name for name in result.meta["hook_frameworks"])
+    tools = result.meta["re_toolkit"]
+    assert len(tools) == 1
+    assert tools[0]["category"] == "hook_framework"
+    assert tools[0]["strong"] is True
+    assert result.meta["anti_frida"] is False
+
+
+# --- .so 命中内存插桩工具（Android-Mem-Kit）---------------------------------
+
+
+def test_android_mem_kit_so_hit_yields_medium_finding():
+    result = _analyze(native_libs=["lib/arm64-v8a/libmemkit.so"])
+    assert result.error is None
+    assert any("Android-Mem-Kit" in name for name in result.meta["hook_frameworks"])
+    assert result.findings[0].severity == Severity.MEDIUM
+
+
+def test_android_mem_kit_and_shadowhook_shim_both_detected():
+    # Android-Mem-Kit 依赖 shadowhook 兼容层，两条目应同时命中且不互相抵消。
+    result = _analyze(
+        native_libs=["lib/arm64-v8a/libmemkit.so", "lib/arm64-v8a/libshadowhook_nothing.so"]
+    )
+    names = [t["name"] for t in result.meta["re_toolkit"]]
+    assert any("Android-Mem-Kit" in n for n in names)
+    assert any("ShadowHook" in n for n in names)
+
+
+# --- dex 命中反 frida 工具（LibcoreSyscall）→ anti_frida=True ---------------
+
+
+def test_libcoresyscall_sets_anti_frida():
+    result = _analyze(dex_strings=["dev.tmpfs.libcoresyscall.core.Syscall"])
+    assert result.error is None
+    assert result.meta["anti_frida"] is True
+    # 反 frida 命中 → HIGH（即便只有 dex 证据）
+    finding = result.findings[0]
+    assert finding.severity == Severity.HIGH
+    assert "frida" in finding.description.lower() or "frida" in finding.recommendation.lower()
+    # 反 frida 工具不属 hook_framework 分类
+    assert result.meta["hook_frameworks"] == []
+
+
+# --- 抗改名锚点：包名被改后仍能靠字符串字面量命中 --------------------------
+
+#: LibcoreSyscall arm64 shellcode 的 base64 首段（2026-07-25 逐字节核于上游 main）。
+#: 它是 syscall 指令流本身，删了库不能工作；R8 只改符号不改串内容，故改名后仍在。
+_LCS_ARM64_B64 = "AAA+1MADX9boAwaq5gNA+eEDA6rgAwIq4gMEquMDBarkAwiq5QMHqgEAABQJfECT4AMBquEDAqri"
+
+
+def test_libcoresyscall_detected_after_package_rename():
+    """★无修复即失败：包名被 R8 改光（源码内联/重打包场景）→ 仅靠 base64 shellcode 锚点仍须命中。
+
+    修前只有 dex_prefixes，此处零包名痕迹 → 完全漏检。断言命中且为**强证据**。
+    """
+    result = _analyze(dex_strings=[
+        "a.b.c.d",                       # 包名已被改成无意义短名
+        f"{_LCS_ARM64_B64}\nAwOq4wMEquQ",  # 折叠后的大串里含该段（javac 常量折叠形态）
+    ])
+    names = [t["name"] for t in result.meta["re_toolkit"]]
+    assert any("LibcoreSyscall" in n for n in names)
+    hit = next(t for t in result.meta["re_toolkit"] if "LibcoreSyscall" in t["name"])
+    assert hit["strong"] is True  # 字符串内容命中 = 强证据（非仅包名的中证据）
+    assert result.meta["anti_frida"] is True
+
+
+def test_libcoresyscall_detected_by_unique_error_string() -> None:
+    """★错误串锚点（含上游拼写错误 heade）：包名全无时亦能命中。"""
+    result = _analyze(dex_strings=["x.y.z", "Invalid ELF heade: bad magic"])
+    names = [t["name"] for t in result.meta["re_toolkit"]]
+    assert any("LibcoreSyscall" in n for n in names)
+
+
+def test_dex_string_match_is_case_sensitive() -> None:
+    """★base64 区分大小写：全小写化的同长串**不得**命中（否则等于放宽成模糊匹配）。"""
+    result = _analyze(dex_strings=["a.b.c", _LCS_ARM64_B64.lower()])
+    names = [t["name"] for t in result.meta["re_toolkit"]]
+    assert not any("LibcoreSyscall" in n for n in names)
+
+
+def test_ordinary_app_strings_do_not_hit_libcoresyscall() -> None:
+    """普通 App 的常见字符串（含被明确否决的技术级串）不得命中——防技术级误报。"""
+    result = _analyze(dex_strings=[
+        "sun.misc.Unsafe", "theUnsafe", "java.lang.reflect.ArtMethod",
+        "libcore.io.Memory", "android.util.Base64",
+        "Invalid ELF header: bad magic",  # 拼写正确的版本 = 通用串，不是指纹
+    ])
+    names = [t["name"] for t in result.meta["re_toolkit"]]
+    assert not any("LibcoreSyscall" in n for n in names)
+
+
+# --- 结构性检测（抗 fork）：内嵌 syscall 机器码 -----------------------------
+
+
+def _b64_of(code: bytes) -> str:
+    import base64
+    return base64.b64encode(code).decode()
+
+
+def _arm64_stub(nop_words: int = 200) -> bytes:
+    """合成一段 arm64「机器码」：大量 NOP + 一处 svc #0（真实载荷正是全部 syscall 走同一 stub）。"""
+    nop = b"\x1f\x20\x03\xd5"          # nop
+    svc = b"\x01\x00\x00\xd4"          # svc #0
+    return nop * (nop_words // 2) + svc + nop * (nop_words // 2)
+
+
+def test_embedded_syscall_stub_detected_without_any_library_identity():
+    """★抗 fork 的核心断言：包名、错误串、原库特有 base64 值**一个都没有**，仅凭
+    「base64 文本解码后是含 syscall 指令的裸机器码」这一手法本身即命中。
+
+    fork 改包名 / 删错误串 / 重新编译 shellcode 后，前面所有字面量锚点都失效——本条是最后防线。
+    """
+    result = _analyze(dex_strings=["a.b.C", "onCreate", _b64_of(_arm64_stub())])
+    names = [t["name"] for t in result.meta["re_toolkit"]]
+    assert any("syscall" in n for n in names), names
+    hit = next(t for t in result.meta["re_toolkit"] if "syscall" in t["name"])
+    assert hit["strong"] is True
+    assert result.meta["anti_frida"] is True   # 手法直接后果：Java 层 hook 可能被绕过
+
+
+def test_stub_detected_when_folded_with_newlines():
+    """javac 常量折叠形态（段间含真实换行）同样识别——去空白后再判 base64。"""
+    b64 = _b64_of(_arm64_stub())
+    folded = "\n".join(b64[i:i + 76] for i in range(0, len(b64), 76))
+    result = _analyze(dex_strings=[folded])
+    assert any("syscall" in t["name"] for t in result.meta["re_toolkit"])
+
+
+def test_container_payloads_not_flagged():
+    """★内嵌合法资源（ELF/ZIP/PNG/证书）不得命中——那是正常 App 的常见做法。"""
+    import base64
+    stub = _arm64_stub()
+    for magic in (b"\x7fELF", b"PK\x03\x04", b"\x89PNG", b"\x30\x82"):
+        payload = magic + stub          # 带容器魔数 → 应被排除
+        result = _analyze(dex_strings=[base64.b64encode(payload).decode()])
+        names = [t["name"] for t in result.meta["re_toolkit"]]
+        assert not any("syscall" in n for n in names), f"{magic!r} 误命中"
+
+
+def test_random_base64_not_flagged():
+    """★随机/加密载荷不得命中（4 字节指令 × 4 字节对齐，随机命中概率约 1/2^32）。"""
+    import hashlib
+    blob = b"".join(hashlib.sha256(bytes([i])).digest() for i in range(120))  # 确定性伪随机 3840B
+    result = _analyze(dex_strings=[_b64_of(blob)])
+    names = [t["name"] for t in result.meta["re_toolkit"]]
+    assert not any("syscall" in n for n in names)
+
+
+def test_short_base64_not_flagged():
+    """短 base64（token / 短密钥 / ID）不进入解码——避免在海量短串上空转与误报。"""
+    short = _b64_of(_arm64_stub(nop_words=8))   # 解码后仅几十字节
+    result = _analyze(dex_strings=[short])
+    names = [t["name"] for t in result.meta["re_toolkit"]]
+    assert not any("syscall" in n for n in names)
+
+
+def test_real_payload_found_after_many_unrelated_candidates():
+    """★复审 P1 无修复即失败：大量无关长 base64 排在**前面**时，真载荷不得被静默挤掉。
+
+    修前 checked 在解码前自增、200 个候选即 break → 真载荷排在后面就永远查不到（"抓不到≠没有"）。
+    """
+    import base64
+    import hashlib
+    noise = [base64.b64encode(hashlib.sha512(str(i).encode()).digest() * 12).decode()
+             for i in range(300)]           # 300 个无关长 base64（各 768B）
+    result = _analyze(dex_strings=[*noise, _b64_of(_arm64_stub())])
+    assert any("内嵌 syscall" in t["name"] for t in result.meta["re_toolkit"])
+
+
+def test_oversize_candidate_does_not_consume_budget():
+    """★复审 P1 无修复即失败：单个超大 base64 不得先被整体解码、也不得吃掉后续预算。
+
+    修前先 b64decode 再扣预算 → 一个几 MB 的串会先完成分配；且扣完预算后真载荷被跳过。
+    """
+    import base64
+    huge = base64.b64encode(b"\x00" * (2 * 1024 * 1024)).decode()  # 2MB > 单载荷上限
+    result = _analyze(dex_strings=[huge, _b64_of(_arm64_stub())])
+    assert any("内嵌 syscall" in t["name"] for t in result.meta["re_toolkit"])
+
+
+def test_large_payload_requires_more_syscall_hits():
+    """★复审 P1：载荷越大扫描位置越多、随机碰撞机会线性增长 → 大载荷要求 ≥2 处命中。"""
+    nop, svc = b"\x1f\x20\x03\xd5", b"\x01\x00\x00\xd4"
+    one = _b64_of(nop * 3000 + svc + nop * 3000)          # 24KB，仅 1 处
+    two = _b64_of(nop * 1500 + svc + nop * 1500 + svc + nop * 1500)  # 同量级，2 处
+    assert not any("内嵌 syscall" in t["name"] for t in _analyze(dex_strings=[one]).meta["re_toolkit"])
+    assert any("内嵌 syscall" in t["name"] for t in _analyze(dex_strings=[two]).meta["re_toolkit"])
+
+
+def test_malformed_base64_does_not_crash_or_hit():
+    """畸形 base64（中间含 =、超量 padding）不得崩、不得误命中。"""
+    stub = _b64_of(_arm64_stub())
+    for bad in (stub[:200] + "=" + stub[200:], stub + "====", "=" * 600):
+        result = _analyze(dex_strings=[bad])
+        assert isinstance(result.meta["re_toolkit"], list)  # 不崩
+
+
+def test_ordinary_app_with_long_base64_config_not_flagged():
+    """普通 App 常见的长 base64 配置串（可打印文本编码而来）不得命中。"""
+    text = ("{'endpoint':'https://api.example-synthetic.test','timeout':30}" * 40).encode()
+    result = _analyze(dex_strings=[_b64_of(text)])
+    names = [t["name"] for t in result.meta["re_toolkit"]]
+    assert not any("syscall" in n for n in names)
+
+
+# --- dex 命中 hook 框架（pine，仅弱证据）→ MEDIUM --------------------------
+
+
+def test_pine_dex_only_medium():
+    result = _analyze(dex_strings=["top.canyie.pine.Pine", "com.example.A"])
+    assert result.error is None
+    finding = result.findings[0]
+    # 仅 dex 证据、无反 frida → MEDIUM
+    assert finding.severity == Severity.MEDIUM
+    assert any("pine" in name for name in result.meta["hook_frameworks"])
+    assert result.meta["re_toolkit"][0]["strong"] is False
+
+
+# --- frida-gadget 经特征文件命中 ------------------------------------------
+
+
+def test_frida_gadget_via_file():
+    result = _analyze(files={"lib/arm64-v8a/libfrida-gadget.so": b"\x7fELF"})
+    assert result.meta["re_toolkit"]
+    assert any("Gadget" in t["name"] for t in result.meta["re_toolkit"])
+    # 内嵌 frida gadget（instrumentation，罕见于正常 app）→ HIGH
+    assert result.findings[0].severity == Severity.HIGH
+
+
+# --- 大小写不敏感 ---------------------------------------------------------
+
+
+def test_so_match_case_insensitive():
+    result = _analyze(native_libs=["lib/arm64-v8a/LIBSHADOWHOOK.SO"])
+    assert result.meta["re_toolkit"]
+    assert any("ShadowHook" in name for name in result.meta["hook_frameworks"])
+
+
+# --- 多工具同时命中 -------------------------------------------------------
+
+
+def test_multiple_tools_aggregated_in_one_finding():
+    result = _analyze(
+        native_libs=["lib/arm64-v8a/libshadowhook.so", "lib/arm64-v8a/libdobby.so"],
+        dex_strings=["dev.tmpfs.libcoresyscall.core.MemoryAccess"],
+    )
+    # 一条 Finding 汇总
+    assert len(result.findings) == 1
+    tools = result.meta["re_toolkit"]
+    names = [t["name"] for t in tools]
+    assert any("ShadowHook" in n for n in names)
+    assert any("Dobby" in n for n in names)
+    assert any("LibcoreSyscall" in n for n in names)
+    # 含反 frida → anti_frida=True、HIGH
+    assert result.meta["anti_frida"] is True
+    assert result.findings[0].severity == Severity.HIGH
+
+
+# --- fixture 样例 ctx 不误报 ----------------------------------------------
+
+
+def test_fixture_ctx_not_flagged(fake_ctx):
+    result = ReToolkitAnalyzer().analyze(fake_ctx)
+    assert result.error is None
+    assert result.findings == []
+    assert result.meta["re_toolkit"] == []
+    assert result.meta["anti_frida"] is False
+
+
+# --- 鲁棒性：单数据源抛异常不炸整个 analyze -------------------------------
+
+
+def test_native_libs_failure_still_detects_via_dex():
+    class _Ctx(FakeContext):
+        def native_libs(self):  # type: ignore[override]
+            raise RuntimeError("boom native_libs")
+
+    ctx = _Ctx(dex_strings=["dev.tmpfs.libcoresyscall.core.Syscall"])
+    result = ReToolkitAnalyzer().analyze(ctx)
+    assert result.error is None
+    assert result.meta["anti_frida"] is True
+
+
+def test_dex_failure_still_detects_via_so():
+    class _Ctx(FakeContext):
+        def dex_strings(self):  # type: ignore[override]
+            raise RuntimeError("boom dex")
+
+    ctx = _Ctx(native_libs=["lib/arm64-v8a/libshadowhook.so"])
+    result = ReToolkitAnalyzer().analyze(ctx)
+    assert result.error is None
+    assert any("ShadowHook" in name for name in result.meta["hook_frameworks"])
+
+
+# --- 新增：反重打包 / 反注入 / 身份伪装 工具链(开源加固·反侦察) ---
+
+
+def test_signcheck_so_sets_anti_frida():
+    result = _analyze(native_libs=["lib/arm64-v8a/libSignVerify.so"])
+    assert result.error is None
+    assert result.meta["anti_frida"] is True
+    assert any("SignCheck" in t["name"] for t in result.meta["re_toolkit"])
+    assert result.findings[0].severity == Severity.HIGH
+
+
+def test_injectdetect_so_sets_anti_frida():
+    result = _analyze(native_libs=["lib/arm64-v8a/libcheck_env.so"])
+    assert result.meta["anti_frida"] is True
+    assert any("InjectDetect" in t["name"] for t in result.meta["re_toolkit"])
+
+
+def test_xposed_module_identity_via_file():
+    result = _analyze(files={"assets/xposed_init": b"com.evil.Hook"})
+    assert any("Xposed" in t["name"] for t in result.meta["re_toolkit"])
+
+
+def test_virtual_camera_via_dex():
+    result = _analyze(dex_strings=["com.zensu.camswap.MainHook", "com.example.A"])
+    assert any(("虚拟摄像头" in t["name"]) or ("CamSwap" in t["name"]) for t in result.meta["re_toolkit"])
+
+
+def test_benign_antixposed_string_not_flagged_as_module():
+    # ★FP 防回归：正规银行/支付 app 内嵌 de.robv.android.xposed 做反 Xposed 检测,
+    # 不得被误判为"Xposed 模块身份"(所以该条目只锚 assets/xposed_init、不加 de.robv 作 dex 前缀)。
+    result = _analyze(dex_strings=["de.robv.android.xposed.XposedHelpers", "com.bank.App"])
+    assert not any(t["name"] == "Xposed/LSPosed 模块身份" for t in result.meta["re_toolkit"])
+
+
+# --- 新增：native .so 符号/字符串扫描(抗 so 名/包名改名) ---------------------
+
+
+def test_arthook_via_native_symbol_string():
+    # ArtHook 静态库编入宿主 .so、无独立 so/dex，靠 .so 内 mangled 符号 _ZN7arthook 识别。
+    result = _analyze(files={"lib/arm64-v8a/libnative.so": b"xxx _ZN7arthook9InitializeEv yyy"})
+    assert result.error is None
+    assert any("ArtHook" in t["name"] for t in result.meta["re_toolkit"])
+    assert any("ArtHook" in n for n in result.meta["hook_frameworks"])
+    # so_strings 命中 = 强证据
+    assert any(t["strong"] for t in result.meta["re_toolkit"] if "ArtHook" in t["name"])
+
+
+def test_signcheck_renamed_so_via_double_string():
+    # so 改名为 libfoo.so、无原包名，但 .so 内同含两 native 字面量 → all_of 命中(抗改名)。
+    blob = b"aa android.content.pm.IPackageManager bb android.os.IServiceManager cc"
+    result = _analyze(files={"lib/arm64-v8a/libfoo.so": blob})
+    assert any("SignCheck" in t["name"] for t in result.meta["re_toolkit"])
+    assert result.meta["anti_frida"] is True
+
+
+def test_signcheck_all_of_needs_both_strings():
+    # ★FP 防回归：只含 IServiceManager(单独常见)不该触发 SignCheck 的 all_of。
+    result = _analyze(files={"lib/arm64-v8a/libfoo.so": b"only android.os.IServiceManager here"})
+    assert not any("SignCheck" in t["name"] for t in result.meta["re_toolkit"])
+
+
+def test_injectdetect_renamed_via_misspelled_string():
+    # 改名后靠 .so 内特征串(原作拼写错 bean≠been)识别。
+    result = _analyze(files={"lib/arm64-v8a/librenamed.so": b".... detect lib has bean hooked ...."})
+    assert any("InjectDetect" in t["name"] for t in result.meta["re_toolkit"])
+    assert result.meta["anti_frida"] is True
+
+
+def test_so_with_no_target_strings_not_flagged():
+    # 普通 .so 无任何 so_strings 命中 → 不误报 ArtHook/SignCheck/InjectDetect。
+    result = _analyze(files={"lib/arm64-v8a/libapp.so": b"hello world some ordinary strings here"})
+    flagged = {t["name"] for t in result.meta["re_toolkit"]}
+    assert not any(("ArtHook" in n) or ("SignCheck" in n) or ("InjectDetect" in n) for n in flagged)
+
+
+def test_benign_so_skipped_by_whitelist():
+    # 白名单库(libflutter.so)即便含特征串也不扫(排除以省 IO/降 FP)。
+    result = _analyze(files={"lib/arm64-v8a/libflutter.so": b"_ZN7arthook9InitializeEv"})
+    assert not any("ArtHook" in t["name"] for t in result.meta["re_toolkit"])
+
+
+# --- 新增:加固圈次世代 hook / 反检测器(taisuii 圈子) -------------------------
+
+
+def test_albatross_hook_via_so_string_rename_resistant():
+    # so 改名，靠导出 C/JNI 符号串识别。
+    result = _analyze(files={"lib/arm64-v8a/librenamed.so": b"xx AlbatrossHookInstrument yy"})
+    assert any("Albatross" in t["name"] for t in result.meta["re_toolkit"])
+    assert any("Albatross" in n for n in result.meta["hook_frameworks"])
+
+
+def test_albatross_hook_via_so_name():
+    result = _analyze(native_libs=["lib/arm64-v8a/libalbatross_base.so"])
+    assert any("Albatross" in t["name"] for t in result.meta["re_toolkit"])
+
+
+def test_sentry_rusda_via_package_sets_anti_frida():
+    result = _analyze(dex_strings=["anti.rusda.SentryApp", "com.example.A"])
+    assert result.meta["anti_frida"] is True
+    assert any("sentry" in t["name"] for t in result.meta["re_toolkit"])
+
+
+def test_applist_detector_via_package_sets_anti_frida():
+    result = _analyze(dex_strings=["icu.nullptr.applistdetector.AbnormalEnvironment"])
+    assert result.meta["anti_frida"] is True
+    assert any("ApplistDetector" in t["name"] for t in result.meta["re_toolkit"])
+
+
+def test_generic_antidebug_so_not_flagged_as_sentry():
+    # ★FP 防回归:libantidebug.so 是通用反调试 so 名(商业加固/游戏 DRM 亦用),
+    # 已从 sentry 规则剔除,不得误命中(否则误报 HIGH anti_frida)。
+    result = _analyze(native_libs=["lib/arm64-v8a/libantidebug.so"])
+    assert not any("sentry" in t["name"] for t in result.meta["re_toolkit"])
+
+
+def test_generic_stub_apk_not_flagged_as_applistdetector():
+    # ★FP 防回归:assets/stub.apk 是通用文件名,已从 ApplistDetector 规则剔除。
+    result = _analyze(files={"assets/stub.apk": b"PK\x03\x04"})
+    assert not any("ApplistDetector" in t["name"] for t in result.meta["re_toolkit"])

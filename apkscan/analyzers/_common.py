@@ -1,0 +1,491 @@
+"""分析器共享工具 —— 标量规整、文本资源判定、snippet 截取、端点收集器、数据采集。
+
+把多个分析器逐字重复的私有实现收敛到这里，作为单一权威版本。全部保持与原各分析器
+私有实现逐字一致的行为（测试是契约），只是消除重复。
+
+约束：
+- 只依赖 AnalysisContext 公开接口与 core.models / core.textutil，禁止 import androguard。
+- 全程 type hints。
+"""
+
+from __future__ import annotations
+
+import logging
+import posixpath
+import re
+import zipfile
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, TypeGuard
+
+from apkscan.core.models import Confidence, Endpoint, Evidence
+
+# 标量工具：转发 textutil 的权威实现，供分析器以共享版引用。
+from apkscan.core.textutil import as_str_list as as_str_list
+from apkscan.core.textutil import truncate as truncate
+
+if TYPE_CHECKING:
+    from apkscan.core.context import AnalysisContext
+
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    "as_str_list",
+    "truncate",
+    "str_or_empty",
+    "nonempty_str",
+    "parse_confidence",
+    "TEXT_RESOURCE_SUFFIXES",
+    "TEXT_RESOURCE_PREFIXES",
+    "BINARY_RESOURCE_SUFFIXES",
+    "is_text_resource",
+    "snippet_around",
+    "EndpointCollector",
+    "collect_so_basenames",
+    "collect_file_paths",
+    "collect_dex_strings",
+    "present_tokens",
+    "NATIVE_LIB_BENIGN_SUBSTR",
+    "app_so_paths",
+    "collect_app_so_string_blobs",
+]
+
+# DEX 字符串扫描上限：样本字符串池可能很大，避免极端情况下扫描过久。
+_MAX_DEX_STRINGS = 200_000
+
+# 视为文本、值得做关键字扫描的资源后缀 / 路径前缀（payment / contacts 共用）。
+TEXT_RESOURCE_SUFFIXES: tuple[str, ...] = (
+    ".json", ".xml", ".txt", ".properties", ".js", ".html", ".htm",
+    ".cfg", ".conf", ".ini", ".csv", ".kv", ".plist",
+)
+TEXT_RESOURCE_PREFIXES: tuple[str, ...] = ("assets/", "res/raw/", "res/xml/")
+
+# 已知二进制资源后缀：即使落在文本前缀目录（assets/ 等）下也**绝不**按文本扫描。
+# 把字体/图片/音视频/原生库/压缩包解码成 utf-8 去跑正则既错（在字体里"找邮箱"）又危险——
+# 曾因 "assets/" 前缀把 512KB 的 MaterialIcons-Regular.otf 当文本喂给 contacts，触发
+# email 正则灾难性回溯卡死 4.6 分钟。优先级高于前缀/后缀命中。
+BINARY_RESOURCE_SUFFIXES: tuple[str, ...] = (
+    # 字体
+    ".otf", ".ttf", ".ttc", ".woff", ".woff2", ".eot",
+    # 图片
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".svgz", ".tif", ".tiff",
+    # 音视频
+    ".mp3", ".mp4", ".wav", ".ogg", ".webm", ".aac", ".m4a", ".flac", ".mov", ".avi", ".mkv",
+    # 原生库 / 可执行 / 字节码
+    ".so", ".dex", ".jar", ".class", ".arsc",
+    # 压缩 / 二进制数据
+    ".zip", ".gz", ".tar", ".7z", ".bin", ".dat", ".pak", ".lottie", ".pdf",
+)
+
+
+# ---------------------------------------------------------------------------
+# 标量规整
+# ---------------------------------------------------------------------------
+
+
+def str_or_empty(value: object) -> str:
+    """规则字段取 str（去空白），非 str / None → 空串。"""
+    return value.strip() if isinstance(value, str) else ""
+
+
+def nonempty_str(value: object) -> TypeGuard[str]:
+    """value 是非空（strip 后非空）字符串。"""
+    return isinstance(value, str) and bool(value.strip())
+
+
+def parse_confidence(value: object) -> Confidence | None:
+    """把规则的 confidence 字段解析为 Confidence；无法判定返回 None。"""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return Confidence[value.strip().upper()]
+    except KeyError:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# 文本资源判定 / snippet
+# ---------------------------------------------------------------------------
+
+
+def is_text_resource(
+    path: str,
+    *,
+    suffixes: tuple[str, ...],
+    prefixes: tuple[str, ...],
+) -> bool:
+    """路径是否为值得做文本扫描的资源（后缀或路径前缀命中）。
+
+    二进制资源（字体/图片/音视频/.so/压缩包等）优先排除：即使落在 assets/ 等文本前缀下
+    也不按文本扫描——把二进制解码成 utf-8 跑正则既错又可能触发灾难性回溯。
+    """
+    low = path.lower()
+    if low.endswith(BINARY_RESOURCE_SUFFIXES):
+        return False
+    if low.endswith(suffixes):
+        return True
+    return low.startswith(prefixes)
+
+
+def snippet_around(text: str, m: object, radius: int = 60) -> str:
+    """截取命中位置周边片段，便于人工复核。
+
+    m 需提供 start()/end()（re.Match 或等价替身）。取片段失败时回退为整段截断。
+    """
+    try:
+        start = max(0, m.start() - radius)  # type: ignore[attr-defined]
+        end = min(len(text), m.end() + radius)  # type: ignore[attr-defined]
+    except Exception:
+        return truncate(text, 160)
+    seg = text[start:end].replace("\n", " ").strip()
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(text) else ""
+    return f"{prefix}{seg}{suffix}"
+
+
+# ---------------------------------------------------------------------------
+# 端点收集器（endpoints / js_bundle 共用）
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class EndpointCollector:
+    """累积去重的端点表：value -> Endpoint，evidences 合并。"""
+
+    by_value: dict[str, Endpoint] = field(default_factory=dict)
+    _ev_keys: dict[str, set[tuple[str, str]]] = field(default_factory=dict)
+
+    def add(
+        self,
+        value: str,
+        kind: str,
+        evidence: Evidence,
+        *,
+        is_cleartext: bool = False,
+        is_private: bool = False,
+    ) -> None:
+        ep = self.by_value.get(value)
+        if ep is None:
+            ep = Endpoint(
+                value=value,
+                kind=kind,
+                evidences=[],
+                is_cleartext=is_cleartext,
+                is_private=is_private,
+            )
+            self.by_value[value] = ep
+            self._ev_keys[value] = set()
+        else:
+            # 标志位取并集（任一来源标明文/私网即视为明文/私网）。
+            ep.is_cleartext = ep.is_cleartext or is_cleartext
+            ep.is_private = ep.is_private or is_private
+
+        ev_key = (evidence.source, evidence.location)
+        if ev_key not in self._ev_keys[value]:
+            self._ev_keys[value].add(ev_key)
+            ep.evidences.append(evidence)
+
+    def mark_tier(self, value: str, tier: str) -> None:
+        """给已收集的端点写来源可信度档（C1，域名与 IP 通用）。多来源取最可信档（app 优先）。
+
+        延迟导入 infra 的合并器，避免 _common 顶层依赖 infra。tier 写入
+        Endpoint.enrichment["tier"]，leads 据此把非 infra 的域名/IP 降可信到"待核"。
+        """
+        ep = self.by_value.get(value)
+        if ep is None:
+            return
+        from apkscan.core.infra import best_tier
+
+        current = ep.enrichment.get("tier")
+        ep.enrichment["tier"] = best_tier(current, tier) if current else tier
+
+    def endpoints(self, order: dict[str, int]) -> list[Endpoint]:
+        """稳定排序：按 order 给出的 kind 权重，再按 value。"""
+        return sorted(
+            self.by_value.values(),
+            key=lambda e: (order.get(e.kind, 9), e.value),
+        )
+
+
+# ---------------------------------------------------------------------------
+# 数据源采集（sdk_fingerprint / packing / payment 共用）
+# ---------------------------------------------------------------------------
+
+
+def collect_so_basenames(
+    ctx: "AnalysisContext", analyzer_name: str
+) -> dict[str, str]:
+    """返回 {小写 basename: 原始路径}。包含 native_libs 与 list_files 中的 .so。"""
+    result: dict[str, str] = {}
+    try:
+        libs = list(ctx.native_libs())
+    except Exception:
+        logger.exception("[%s] 读取 native_libs 失败", analyzer_name)
+        libs = []
+    try:
+        files = list(ctx.list_files())
+    except Exception:
+        logger.exception("[%s] 读取 list_files 失败（用于 .so 采集）", analyzer_name)
+        files = []
+
+    for path in libs + files:
+        if not isinstance(path, str):
+            continue
+        base = posixpath.basename(path.replace("\\", "/"))
+        if base.lower().endswith(".so"):
+            result.setdefault(base.lower(), path)
+    return result
+
+
+def collect_so_paths(ctx: "AnalysisContext", analyzer_name: str) -> list[str]:
+    """所有 .so **完整路径**（native_libs + list_files 合并，去重、稳定排序）。
+
+    与 :func:`collect_so_basenames` 的关键区别：**不按 basename 塌缩**。同名多 ABI 变体
+    （``lib/arm64-v8a/libfoo.so`` 与 ``lib/armeabi-v7a/libfoo.so``）字节不同、sha256 不同，
+    须各自保留；basename 塌缩会把它们并成一个、令家族反查漏掉部分构建（native_fingerprint 用本函数）。
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for getter_name in ("native_libs", "list_files"):
+        try:
+            items = list(getattr(ctx, getter_name)())
+        except Exception:
+            logger.exception("[%s] 读取 %s 失败（.so 路径采集）", analyzer_name, getter_name)
+            items = []
+        for path in items:
+            if not isinstance(path, str):
+                continue
+            if path.replace("\\", "/").lower().endswith(".so") and path not in seen:
+                seen.add(path)
+                out.append(path)
+    return sorted(out)
+
+
+def collect_file_paths(ctx: "AnalysisContext", analyzer_name: str) -> list[str]:
+    """APK 内全部文件路径（仅保留 str 条目）。"""
+    try:
+        return [p for p in ctx.list_files() if isinstance(p, str)]
+    except Exception:
+        logger.exception("[%s] 读取 list_files 失败", analyzer_name)
+        return []
+
+
+#: 分析器 meta 里标记"本分析器的 DEX 字符串扫描被截断"的键。
+#:
+#: ★为什么必须进 meta 而不是只打日志：截断是最隐蔽的可见性缺口——分析器"跑成功了"、状态全绿，
+#: 只是没扫完，于是"未发现某接口"完全可能只是它排在截断线之后。实测一个 100MB 样本上
+#: **11 个分析器同时截断**，而此前只有 endpoints 把这个事实写进 meta；可见性层碰巧靠它感知到，
+#: 一旦 endpoints 没截断而别的截断了就彻底沉默。日志不是数据面——digest / closure / AI 读不到日志。
+#:
+#: ★为什么不用模块级集合收集：分析器可能跑在**子进程**里（见 core/parallel.py），worker 只回传
+#: (name, result, error)，模块级状态留在子进程随之丢弃。截断事实必须搭 AnalyzerResult 回来。
+DEX_TRUNCATED_META_KEY = "dex_strings_truncated"
+
+
+def collect_dex_strings(
+    ctx: "AnalysisContext",
+    analyzer_name: str,
+    *,
+    max_strings: int = _MAX_DEX_STRINGS,
+    result: Any = None,
+) -> tuple[bool, list[str]]:
+    """收集 DEX 字符串（带上限）。返回 ``(是否成功遍历, 字符串列表)``。
+
+    传入 ``result``（AnalyzerResult）时，截断会写 ``result.meta[DEX_TRUNCATED_META_KEY]=True``，
+    让"没扫全"成为**数据**而非只是一行日志——见该常量处关于为何不能只打日志、也不能用模块级
+    集合收集的说明。不传则行为不变（只告警），便于逐个分析器渐进接入。
+    """
+    strings: list[str] = []
+    try:
+        for idx, s in enumerate(ctx.dex_strings()):
+            if idx >= max_strings:
+                logger.warning(
+                    "[%s] DEX 字符串超过上限 %d，截断扫描", analyzer_name, max_strings
+                )
+                meta = getattr(result, "meta", None)
+                if isinstance(meta, dict):
+                    meta[DEX_TRUNCATED_META_KEY] = True
+                break
+            if isinstance(s, str) and s:
+                strings.append(s)
+    except Exception:
+        logger.exception("[%s] 遍历 dex_strings 失败", analyzer_name)
+        return False, strings
+    return True, strings
+
+
+# ---------------------------------------------------------------------------
+# App 自有 .so 内容采样 / 字符串提取（re_toolkit 的 native 符号·串扫描等复用）
+# ---------------------------------------------------------------------------
+
+# 系统 / 引擎 / 常见三方库白名单（子串小写匹配）——扫描 .so 内容前排除，降 IO 与 FP。
+# 注：native_obfuscation 有一份等价私有副本 `_BENIGN_SUBSTR`（历史原因），后续可统一到本处。
+NATIVE_LIB_BENIGN_SUBSTR: frozenset[str] = frozenset(
+    {
+        "libc++_shared", "libc++.", "libc.so", "libm.so", "libz.so", "libdl.",
+        "liblog.so", "libjsc", "libhermes", "libv8", "libflutter", "libmonosgen",
+        "libmono", "libunity", "libil2cpp", "libreactnativejni", "libfbjni",
+        "libfolly", "libskia", "libavcodec", "libavformat", "libavutil",
+        "libcrypto", "libssl", "libopus", "libwebp", "libjpeg", "libpng",
+        "libtensorflow", "libpytorch", "libtorch", "libglog", "libmarsxlog",
+        "libwcdb", "libsqlite", "libcronet", "libmmkv",
+    }
+)
+
+# .so 内容采样：≥4 连续可打印 ASCII 视为一条串；head/mid/tail 各一窗（超大 .so 不全量扫）。
+_SO_STRING_RE = re.compile(rb"[\x20-\x7e]{4,}")
+_SO_SCAN_WINDOW = 256 * 1024
+_SO_SCAN_MAX_LIBS = 60
+
+
+def app_so_paths(
+    ctx: "AnalysisContext", analyzer_name: str, *, max_libs: int = _SO_SCAN_MAX_LIBS
+) -> list[str]:
+    """枚举 App 自有（非白名单）``.so`` 路径，保序去重，上限 ``max_libs``。绝不抛。"""
+    seen: dict[str, None] = {}
+    try:
+        libs = list(ctx.native_libs() or [])
+    except Exception:
+        logger.exception("[%s] 读取 native_libs 失败（app .so 枚举）", analyzer_name)
+        libs = []
+    try:
+        files = list(ctx.list_files() or [])
+    except Exception:
+        logger.exception("[%s] 读取 list_files 失败（app .so 枚举）", analyzer_name)
+        files = []
+    for p in libs + files:
+        if isinstance(p, str) and p.lower().endswith(".so"):
+            seen.setdefault(p, None)
+    from apkscan.core.appframework import is_app_own_code
+
+    out: list[str] = []
+    for p in seen:
+        base = posixpath.basename(p.replace("\\", "/")).lower()
+        # ★白名单按**子串**匹配，而 "libil2cpp" 就在里面——它在那儿是为了排除引擎运行时，
+        #   可 libil2cpp.so 恰恰是 Unity 把**本应用全部 C# 业务代码**编译成的那个文件。
+        #   照子串滤掉，等于让下游几个分析器（api_surface / build_provenance /
+        #   native_config_channel）**从来没读过** Unity 样本的业务代码。
+        #   本函数的名字就叫「App 自有 .so」，那就先问这一句。
+        #
+        #   验证边界：改动时逐个比对过样本库全部 36 份 APK 的 .so 清单，新旧口径输出
+        #   **完全一致**——库里没有 Unity 包，而 Flutter 的 libapp.so 本就不在白名单里。
+        #   即：对现有样本零影响，收益兑现在将来遇到 Unity 包时。判据本身由合成夹具锁住。
+        if not is_app_own_code(base) and any(b in base for b in NATIVE_LIB_BENIGN_SUBSTR):
+            continue
+        out.append(p)
+        if len(out) >= max_libs:
+            break
+    return out
+
+
+def _sample_so(data: bytes, window: int) -> bytes:
+    """取 head/mid/tail 三窗（超大 .so 不全量扫；覆盖 .dynstr/.rodata/.comment/.symtab 常见落点）。"""
+    n = len(data)
+    if n <= 3 * window:
+        return data
+    mid = n // 2
+    return data[:window] + data[mid : mid + window] + data[-window:]
+
+
+def _discard(fp: "object", n: int) -> None:
+    """从 forward-only 流丢弃 n 字节（分块读，内存 O(chunk)——压缩条目不可 seek，只能读穿）。"""
+    remaining = max(0, n)
+    while remaining > 0:
+        chunk = fp.read(min(remaining, 1 << 16))  # type: ignore[attr-defined]
+        if not chunk:
+            break
+        remaining -= len(chunk)
+
+
+def _read_so_windows(zip_path: str, entry: str, window: int) -> bytes | None:
+    """流式读 zip 内 entry 的 head/mid/tail 三窗，内存 O(window)——不把 ≤500MB 大 .so 整解压进内存
+    （只为取 3 个小窗做字符串扫描）。窗口口径与 :func:`_sample_so` 一致。坏/缺/超上限 → None（调用方回退整读）。"""
+    from apkscan.core.apk import _MAX_DECOMPRESSED_FILE_BYTES  # 复用同口径 zip 炸弹上限
+
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            size = zf.getinfo(entry).file_size
+            if size > _MAX_DECOMPRESSED_FILE_BYTES:  # 同 read_file 的前置拦截：超上限不解压
+                return None
+            with zf.open(entry) as fp:
+                if size <= 3 * window:  # 小 .so 直接全读（本就 ≤3 窗，与 _sample_so 返回 data 等价）
+                    return fp.read(size)
+                head = fp.read(window)
+                mid_start = size // 2
+                _discard(fp, mid_start - len(head))  # 读穿到 mid
+                mid = fp.read(window)
+                _discard(fp, (size - window) - (mid_start + len(mid)))  # 读穿到 tail
+                tail = fp.read(window)
+                return head + mid + tail
+    except Exception:
+        logger.debug("[so] 流式三窗读失败，回退整读：%s!%s", zip_path, entry, exc_info=True)
+        return None
+
+
+def collect_app_so_string_blobs(
+    ctx: "AnalysisContext",
+    analyzer_name: str,
+    *,
+    max_libs: int = _SO_SCAN_MAX_LIBS,
+    window: int = _SO_SCAN_WINDOW,
+) -> list[tuple[str, str]]:
+    """读 App 自有 ``.so``（采样），提取可打印 ASCII 串拼成一坨（小写），返回 ``[(so路径, 串坨)]``。
+
+    供需要匹配 ``.so`` 内符号 / 字符串的分析器复用（如识别以静态库编入宿主 .so、无独立
+    so 名 / dex 包名的 hook 框架，或抗改名的反检测特征串）。单库读取 / 提取异常 try/except
+    跳过、绝不炸整个 analyze。
+    """
+    blobs: list[tuple[str, str]] = []
+    zip_path = getattr(ctx, "apk_path", "") or ""
+    for path in app_so_paths(ctx, analyzer_name, max_libs=max_libs):
+        # 优先流式三窗读（内存 O(window)，不把大 .so 整解压）；无 apk_path / 流式读失败 → 回退整读+采样。
+        sample = _read_so_windows(zip_path, path, window) if zip_path else None
+        if sample is None:
+            try:
+                data = ctx.read_file(path)
+            except Exception:
+                logger.exception("[%s] 读取 .so 失败：%s", analyzer_name, path)
+                continue
+            if not data:
+                continue
+            try:
+                sample = _sample_so(data, window)
+            except Exception:
+                logger.exception("[%s] 采样 .so 失败：%s", analyzer_name, path)
+                continue
+        try:
+            blob = b"\n".join(_SO_STRING_RE.findall(sample)).decode("ascii", "replace").lower()
+        except Exception:
+            logger.exception("[%s] 提取 .so 字符串失败：%s", analyzer_name, path)
+            continue
+        if blob:
+            blobs.append((path, blob))
+    return blobs
+
+
+def present_tokens(tokens: set[str], strings: list[str]) -> set[str]:
+    """一次扫描收集 ``strings`` 中按**标识符边界**出现的 token 集合。
+
+    性能：替代「每 token 各自全量扫」（O(串×token)）为「合并正则单遍扫」（O(串)）。用标识符边界
+    lookaround ``(?<![A-Za-z0-9_])…(?![A-Za-z0-9_])`` 精确复刻逐 token 的词边界匹配语义（含 token
+    自带非标识符字符的情形——其边界判定天然成立）；命中即从待找集合移除、全部找到即早停。
+    sms_forwarding / self_hosted_im 等的 dex token 存在性判定共用本实现。
+    """
+    toks = [t for t in tokens if t]
+    if not toks:
+        return set()
+    pat = re.compile(
+        r"(?<![A-Za-z0-9_])(?:"
+        + "|".join(re.escape(t) for t in sorted(toks, key=len, reverse=True))
+        + r")(?![A-Za-z0-9_])"
+    )
+    present: set[str] = set()
+    remaining = set(toks)
+    for s in strings:
+        if not remaining:
+            break
+        for m in pat.finditer(s):
+            tok = m.group(0)
+            if tok in remaining:
+                present.add(tok)
+                remaining.discard(tok)
+    return present

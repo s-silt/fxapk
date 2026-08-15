@@ -1,0 +1,92 @@
+# apkscan — js_bundle 分析器规则
+#
+# 由 apkscan.core.registry.load_rules("js_bundle") 读取（可选；缺失时分析器用内置兜底）。
+# 针对 uni-app / H5 / Cordova / RN 打包 JS：只在**字符串字面量内部**抽真实端点与密钥，
+# 避免把压缩 JS 的 a.length / rect.top / f32.store 这类点分代码误判为域名。
+#
+# 顶层为 dict，键含义（均可缺省，缺省走分析器内置兜底）：
+#   noise_hosts       : list[str]，命中（等于或以其结尾）即丢弃的命名空间 / 框架 / CDN 官网。
+#   noise_substrings  : list[str]，URL/域名含这些子串即视为噪音（schema URI 等）。
+#   secret_key_hints  : list[str]，键名（小写）含这些子串 + 值像真实凭证 → 产密钥 Finding。
+#   max_string_len    : int，证据 snippet 最大保留长度。
+#
+# 端点：只产 Endpoint（kind=url|domain|ip|path），source="js"；DOMAIN/IP Lead 由 pipeline 统一建。
+# 密钥：secret/access_key/token/private_key/AES key/JWT/PEM → HIGH；appid/appkey → MEDIUM。
+
+# ---- 命名空间 / 框架 / CDN 官网噪音（字面量里仍可能出现，非业务端点）----
+noise_hosts:
+  - "schemas.android.com"
+  - "www.w3.org"
+  - "w3.org"
+  - "ns.adobe.com"
+  - "java.sun.com"
+  - "xmlpull.org"
+  - "apache.org"
+  - "www.apache.org"
+  - "github.com"
+  - "github.io"
+  - "raw.githubusercontent.com"
+  - "developer.android.com"
+  - "developer.mozilla.org"
+  - "developer.apple.com"
+  - "registry.npmjs.org"
+  - "npmjs.com"
+  - "unpkg.com"
+  - "jsdelivr.net"
+  - "cdn.jsdelivr.net"
+  - "vuejs.org"
+  - "reactjs.org"
+  - "facebook.github.io"
+  - "uniapp.dcloud.io"
+  - "uniapp.dcloud.net.cn"
+  - "ask.dcloud.net.cn"
+  - "localhost"
+  - "example.com"
+  - "www.example.com"
+  - "tools.ietf.org"
+  - "rfc-editor.org"
+
+# ---- 噪音子串（命名空间 URI；整段 URL 含之即丢弃）----
+noise_substrings:
+  - "schemas.android.com/apk"
+  - "/2000/svg"
+  - "/2001/XMLSchema"
+  - "/1999/xhtml"
+  - "/1999/xlink"
+  - "www.w3.org/"
+  - "ns.adobe.com/"
+
+# ---- 密钥键名提示（小写子串匹配；含之 + 值像真实凭证 → Finding）----
+secret_key_hints:
+  - "appid"
+  - "app_id"
+  - "appkey"
+  - "app_key"
+  - "appsecret"
+  - "app_secret"
+  - "secret"
+  - "secretkey"
+  - "secret_key"
+  - "access_key"
+  - "accesskey"
+  - "accesskeyid"
+  - "accesskeysecret"
+  - "secret_access_key"
+  - "apikey"
+  - "api_key"
+  - "aeskey"
+  - "aes_key"
+  - "privatekey"
+  - "private_key"
+  - "token"
+  - "client_secret"
+  - "clientsecret"
+  - "mch_key"
+  - "mchkey"
+  - "paykey"
+  - "pay_key"
+  - "signkey"
+  - "sign_key"
+
+# 证据 snippet 最大长度。
+max_string_len: 200
