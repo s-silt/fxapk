@@ -23,6 +23,9 @@ out/
 # CodeGraph 本地索引(生成物，类似 .git，绝不入库)
 /.codegraph/
 
+# 本地隔离开发 worktree（由 agent 执行实现计划时创建，绝不入库）
+/.worktrees/
+
 # Understand-Anything 知识图谱(本地生成物，重跑 /understand 即可重建，绝不入库)
 /.ua/
 
