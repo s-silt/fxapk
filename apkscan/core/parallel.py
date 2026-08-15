@@ -358,7 +358,10 @@ def _run_pool(snapshot: object, names: list[str], workers: int) -> list[tuple]:
             if task is None:
                 rows.append((name, None, f"{_SCHEDULER_ERROR_PREFIX} 派发失败（{dispatch_error}）"))
                 continue
-            remaining = max(0.0, deadline - time.monotonic())
+            remaining = min(
+                _BATCH_TIMEOUT_SECONDS,
+                max(0.0, deadline - time.monotonic()),
+            )
             try:
                 rows.append(task.get(timeout=remaining))  # type: ignore[attr-defined]
             except multiprocessing.TimeoutError:
