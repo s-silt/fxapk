@@ -766,6 +766,20 @@ def test_run_pool_normal_path_returns_rows_in_order(monkeypatch: pytest.MonkeyPa
     assert result == [("x", "res-x", None), ("y", "res-y", None)]
 
 
+def test_run_pool_clamps_float_rounding_to_batch_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deadline arithmetic must never pass a timeout above the declared batch budget."""
+    pool = _RecordingPool()
+    monotonic_value = 1_048_503.0367474168
+    monkeypatch.setattr(parallel.multiprocessing, "Pool", lambda **kw: pool)
+    monkeypatch.setattr(parallel.time, "monotonic", lambda: monotonic_value)
+
+    result = parallel._run_pool(object(), ["x"], 1)
+
+    assert result == [("x", "res-x", None)]
+
+
 def test_run_pool_dispatch_failure_marks_rest_scheduler_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
