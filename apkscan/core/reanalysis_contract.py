@@ -141,6 +141,9 @@ def _strings(value: object, path: str) -> tuple[str, ...]:
 def validate_planning_context(context: PlanningContext) -> None:
     if not context.gaps:
         _fail("gaps_empty", "$.gaps")
+    if len({gap.gap_id for gap in context.gaps}) != len(context.gaps):
+        # 重复 gap 会让 receipt 授予计数与实际 gap_ids 去重结果失配（codex 复审 P2）。
+        _fail("gap_duplicate", "$.gaps")
     if not isinstance(context.question.question_id, str):
         _fail("question_id_invalid", "$.question.question_id")
     for index, gap in enumerate(context.gaps):
