@@ -333,3 +333,219 @@ def test_key_fixed_vector() -> None:
     # 材料本身可 JSON 往返（canonical_json_v1 拒 NaN/Inf/重复键的前提下）。
     json.loads(canonical_json_v1(material))
     assert key == "ebe1f5fded4666108898e45ac7500aa951aabd5f2a0cb1589e7dbacc456c3f7d"
+
+
+# ---------------------------------------------------------------------------
+# Task 3：存储层——cache root 安全
+# ---------------------------------------------------------------------------
+
+from apkscan.core.jadx_index import (  # noqa: E402
+    IndexBuildResult,
+    IndexBuildState,
+    JadxIndexStore,
+    LoadedIndex,
+)
+
+
+def _make_manifest(tmp_path: Path, n_dex: int = 1) -> JadxIndexManifest:
+    inputs = [
+        _write_dex(tmp_path / "src", f"classes{i or ''}.dex", b"dex-%d" % i) for i in range(n_dex)
+    ]
+    fixed = [
+        DexInput(
+            role=inp.role,
+            ordinal=i,
+            source_label=inp.source_label,
+            relative_path=inp.relative_path,
+            declared_digest=inp.declared_digest,
+        )
+        for i, inp in enumerate(inputs)
+    ]
+    lineage = verify_dex_inputs(tmp_path / "src", fixed)
+    key = derive_index_key(lineage, "1.5.2", _OPTS)
+    material = build_key_material(lineage, "1.5.2", _OPTS)
+    return JadxIndexManifest(
+        index_key=key,
+        key_material=material,
+        dex_lineage=lineage,
+        jadx_version="1.5.2",
+        options_digest=_OPTS,
+    )
+
+
+@pytest.mark.parametrize(
+    "bad_root",
+    ["", "relative/cache", "file:///c:/cache", "//server/share/cache", "C:relative"],
+)
+def test_store_rejects_unsafe_cache_root(bad_root: str) -> None:
+    with pytest.raises(JadxIndexError) as exc:
+        JadxIndexStore(bad_root)
+    assert _code_of(exc) == "invalid_cache_root"
+
+
+def test_store_rejects_protected_root_overlap(tmp_path: Path) -> None:
+    """cache root 等于/位于/包含保护根（含大小写别名）→ 一律拒绝。"""
+    protected = tmp_path / "Evidence"
+    protected.mkdir()
+    cache_inside = protected / "cache"
+    with pytest.raises(JadxIndexError) as exc:
+        JadxIndexStore(cache_inside, protected_roots=[protected])
+    assert _code_of(exc) == "protected_root_overlap"
+    with pytest.raises(JadxIndexError) as exc:
+        JadxIndexStore(tmp_path, protected_roots=[protected])
+    assert _code_of(exc) == "protected_root_overlap"
+    # 大小写折叠别名同样拦截（Windows 大小写不敏感文件系统的现实）。
+    with pytest.raises(JadxIndexError) as exc:
+        JadxIndexStore(str(protected).upper(), protected_roots=[str(protected).lower()])
+    assert _code_of(exc) == "protected_root_overlap"
+
+
+def test_store_accepts_disjoint_roots(tmp_path: Path) -> None:
+    cache = tmp_path / "cache"
+    other = tmp_path / "evidence"
+    other.mkdir()
+    store = JadxIndexStore(cache, protected_roots=[other])
+    assert store.cache_root == cache.resolve()
+
+
+# ---------------------------------------------------------------------------
+# Task 3：build → load 往返、幂等与崩溃恢复
+# ---------------------------------------------------------------------------
+
+
+def test_build_then_load_roundtrip(tmp_path: Path) -> None:
+    manifest = _make_manifest(tmp_path, n_dex=2)
+    store = JadxIndexStore(tmp_path / "cache")
+    result = store.build_index(tmp_path / "src", manifest)
+    assert isinstance(result, IndexBuildResult) and result.state == IndexBuildState.BUILT
+    assert result.manifest is not None and len(result.manifest.shard_refs) == 2
+
+    loaded = store.load_index(manifest.index_key)
+    assert isinstance(loaded, LoadedIndex)
+    assert loaded.manifest.index_key == manifest.index_key
+    assert loaded.manifest.dex_lineage == manifest.dex_lineage
+    assert len(loaded.shards) == 2
+    assert loaded.coverage == "complete"
+
+
+def test_rebuild_is_reused_and_immutable(tmp_path: Path) -> None:
+    manifest = _make_manifest(tmp_path)
+    store = JadxIndexStore(tmp_path / "cache")
+    first = store.build_index(tmp_path / "src", manifest)
+    assert isinstance(first, IndexBuildResult)
+    manifest_path = tmp_path / "cache" / manifest.index_key / "manifest.json"
+    before = manifest_path.read_bytes()
+    second = store.build_index(tmp_path / "src", manifest)
+    assert isinstance(second, IndexBuildResult) and second.state == IndexBuildState.REUSED
+    assert manifest_path.read_bytes() == before  # 绝不改写既有产物
+
+
+def test_crash_before_manifest_recovers(tmp_path: Path) -> None:
+    """shard 已发布、manifest 未发布（模拟崩溃）：load=absent、重跑 build 补齐。"""
+    manifest = _make_manifest(tmp_path)
+    store = JadxIndexStore(tmp_path / "cache")
+    built = store.build_index(tmp_path / "src", manifest)
+    assert isinstance(built, IndexBuildResult)
+    manifest_path = tmp_path / "cache" / manifest.index_key / "manifest.json"
+    manifest_path.unlink()  # 抹掉 manifest = 崩溃前状态
+    assert isinstance(store.load_index(manifest.index_key), CacheMiss)
+    recovered = store.build_index(tmp_path / "src", manifest)
+    assert isinstance(recovered, IndexBuildResult) and recovered.state == IndexBuildState.BUILT
+    assert isinstance(store.load_index(manifest.index_key), LoadedIndex)
+
+
+# ---------------------------------------------------------------------------
+# Task 3：fail-closed 加载校验链
+# ---------------------------------------------------------------------------
+
+
+def _built_store(tmp_path: Path) -> tuple[JadxIndexStore, JadxIndexManifest]:
+    manifest = _make_manifest(tmp_path)
+    store = JadxIndexStore(tmp_path / "cache")
+    result = store.build_index(tmp_path / "src", manifest)
+    assert isinstance(result, IndexBuildResult) and result.state == IndexBuildState.BUILT
+    return store, manifest
+
+
+def test_load_malformed_key_and_absent(tmp_path: Path) -> None:
+    store = JadxIndexStore(tmp_path / "cache")
+    miss = store.load_index("not-a-key")
+    assert isinstance(miss, CacheMiss) and miss.reason == "malformed"
+    miss = store.load_index("0" * 64)
+    assert isinstance(miss, CacheMiss) and miss.reason == "absent"
+
+
+def test_load_rejects_tampered_manifest_bytes(tmp_path: Path) -> None:
+    store, manifest = _built_store(tmp_path)
+    path = tmp_path / "cache" / manifest.index_key / "manifest.json"
+    raw = path.read_bytes()
+    path.write_bytes(raw.replace(b'"complete"', b'"COMPLETE"', 1))
+    miss = store.load_index(manifest.index_key)
+    assert isinstance(miss, CacheMiss)  # canonical 自证或字段校验，两者都 fail-closed
+
+
+def test_load_rejects_tampered_aggregate_digest(tmp_path: Path) -> None:
+    """★aggregate 复验：manifest 内 shard digest 集合的锚被改写必须揭穿。"""
+    store, manifest = _built_store(tmp_path)
+    path = tmp_path / "cache" / manifest.index_key / "manifest.json"
+    raw = path.read_bytes()
+    loaded = store.load_index(manifest.index_key)
+    assert isinstance(loaded, LoadedIndex)
+    old_aggregate = loaded.manifest.aggregate_digest.encode("ascii")
+    new_aggregate = ("e" * 64).encode("ascii")
+    tampered = raw.replace(old_aggregate, new_aggregate, 1)
+    assert tampered != raw
+    path.unlink()
+    path.write_bytes(tampered)
+    miss = store.load_index(manifest.index_key)
+    assert isinstance(miss, CacheMiss) and miss.reason == "malformed"
+
+
+def test_load_rejects_tampered_shard_bytes(tmp_path: Path) -> None:
+    store, manifest = _built_store(tmp_path)
+    shard_dir = tmp_path / "cache" / manifest.index_key / "shards"
+    shard_path = next(shard_dir.glob("*.json"))
+    shard_path.write_bytes(shard_path.read_bytes() + b" ")
+    miss = store.load_index(manifest.index_key)
+    assert isinstance(miss, CacheMiss) and miss.reason == "shard_digest_mismatch"
+
+
+def test_load_rejects_key_mismatch_via_copied_dir(tmp_path: Path) -> None:
+    """把 A 的整个索引目录复制成另一个 key 的目录名——re-derive 必须揭穿。"""
+    import shutil
+
+    store, manifest = _built_store(tmp_path)
+    src_dir = tmp_path / "cache" / manifest.index_key
+    fake_key = "f" * 64
+    shutil.copytree(src_dir, tmp_path / "cache" / fake_key)
+    miss = store.load_index(fake_key)
+    assert isinstance(miss, CacheMiss) and miss.reason == "key_mismatch"
+
+
+def test_shard_conflict_fails_build(tmp_path: Path) -> None:
+    """同 shard 路径已有不同内容：cache_conflict → build FAILED 带诊断，不覆盖。"""
+    manifest = _make_manifest(tmp_path)
+    store = JadxIndexStore(tmp_path / "cache")
+    shard_key = derive_shard_key(manifest.dex_lineage[0], "1.5.2", _OPTS)
+    shard_path = tmp_path / "cache" / manifest.index_key / "shards" / f"{shard_key}.json"
+    shard_path.parent.mkdir(parents=True)
+    shard_path.write_bytes(b'{"poisoned": true}')
+    result = store.build_index(tmp_path / "src", manifest)
+    assert isinstance(result, IndexBuildResult) and result.state == IndexBuildState.FAILED
+    assert any("cache_conflict" in d for d in result.diagnostics)
+    assert shard_path.read_bytes() == b'{"poisoned": true}'  # 原物未被覆盖
+
+
+def test_symlinked_index_dir_rejected(tmp_path: Path) -> None:
+    """索引目录若是符号链接（指向 cache 外）→ path escape。无权限建链则 skip。"""
+    store = JadxIndexStore(tmp_path / "cache")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "cache").mkdir(exist_ok=True)
+    link = tmp_path / "cache" / ("a" * 64)
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("no symlink privilege on this host")
+    result = store.load_index("a" * 64)
+    assert isinstance(result, CacheMiss) and result.reason == "path_escape"
