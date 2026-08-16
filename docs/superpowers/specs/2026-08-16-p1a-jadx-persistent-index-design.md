@@ -29,6 +29,16 @@ KnowledgePack are out of scope.
 The new module is `apkscan/core/jadx_index.py`.
 
 ```python
+def build_manifest(
+    inputs: Sequence[DexInput],
+    *,
+    jadx_version: str,
+    options_digest: str,
+) -> JadxIndexManifest: ...
+    # DexInput carries (role, ordinal, source_label, dex_path-or-bytes).
+    # The library reads the DEX bytes itself and computes every lineage
+    # SHA-256 internally. Callers can never supply a digest assertion.
+
 class JadxIndexStore:
     def __init__(
         self,
@@ -41,9 +51,11 @@ class JadxIndexStore:
         self,
         source_root: str | os.PathLike[str],
         manifest: JadxIndexManifest,
-    ) -> IndexBuildResult: ...
+    ) -> IndexBuildResult | CacheUnavailable: ...
 
-    def load_index(self, index_key: str) -> LoadedIndex | CacheMiss: ...
+    def load_index(
+        self, index_key: str
+    ) -> LoadedIndex | CacheMiss | CacheUnavailable: ...
 
     def find_value_usage(
         self,
@@ -51,6 +63,18 @@ class JadxIndexStore:
         value: str,
     ) -> tuple[UsageHit, ...]: ...
 ```
+
+`CacheMiss` and `CacheUnavailable` are disjoint structured results and are never
+interchangeable:
+
+- `CacheMiss` is a **content-layer** verdict: absent artifacts, malformed JSON,
+  schema/tool/options drift, key mismatch, shard digest mismatch, duplicate or
+  normalization-conflicting postings, or any containment violation. The cached
+  content is untrusted; the caller may rebuild from the current source tree.
+- `CacheUnavailable` is an **environment-layer** verdict: permission failure,
+  lock contention, `AtomicCreateUnsupportedError`, or I/O failure. Nothing can
+  be said about the cached content; the caller must NOT treat it as a miss and
+  must not rebuild over (or delete) existing artifacts.
 
 `cache_root` is required and must be non-empty. The library does not read cwd,
 the APK parent, the repository, or an environment-variable default. A future
@@ -62,7 +86,10 @@ Each input DEX has a canonical lineage record containing:
 
 - a role (`apk_dex` or `extra_dex`);
 - a caller-provided ordinal within that role;
-- the DEX content digest (`sha256:<64 lowercase hex>`);
+- the DEX content digest (`sha256:<64 lowercase hex>`), **computed by the
+  library itself from the actual DEX bytes inside `build_manifest`** — the
+  API accepts bytes or a readable path, never a caller-asserted digest, so a
+  stale or forged digest cannot enter the key material;
 - the canonical source label, which is an opaque caller label and never an
   absolute filesystem path.
 
@@ -88,7 +115,14 @@ of these values before exposing a query surface.
 ## Manifest and Shards
 
 The manifest and shard files are canonical JSON encoded with the existing
-`recognition_codec.canonical_json_v1`. They are immutable create-only artifacts:
+`recognition_codec.canonical_json_v1`. Publication uses the existing
+`apkscan.core.atomic.atomic_create_bytes` (note: it lives in `core.atomic`,
+not in the codec module): it returns `True` when this call published the file
+and `False` when the target already existed or another creator won the race —
+a loser then byte-compares the existing artifact (equal content is success,
+differing content is a cache conflict); `AtomicCreateUnsupportedError` and
+other I/O failures surface as `CacheUnavailable`. The artifacts are immutable
+create-only:
 
 1. Build and fsync every new shard in a same-directory temporary file.
 2. Publish each shard with `atomic_create_bytes`; an existing differing shard is
@@ -128,8 +162,13 @@ cross-root traversal.
 ## Indexed Usage Data
 
 The source tree is enumerated deterministically using NFC-normalized, lowercase,
-POSIX relative paths sorted by `(casefold, original)`. Each selected Java file
-contributes bounded usage records:
+POSIX relative paths sorted by `(casefold, original)`. **Normalization collisions
+are rejected, never silently deduplicated**: if two distinct original paths map
+to the same NFC/case-folded key, `build_index` fails with a structured
+normalization-conflict result (no partial artifacts are published); at load
+time, a shard whose postings contain normalization-conflicting or duplicate
+relative paths is a `CacheMiss`. Each selected Java file contributes bounded
+usage records:
 
 - relative path;
 - 1-based line and column;
@@ -146,8 +185,9 @@ JADX failure are recorded in coverage and never produce a negative Observation.
 
 ## Ledger Projection Boundary
 
-The index query itself is not a judgment. A future or explicit adapter must
-project a successful hit through the existing ledger state machine:
+The index query itself is not a judgment. **P1-A ships a minimal explicit
+adapter** (`project_usage_query`) that projects a query through the existing
+ledger state machine:
 
 ```text
 ActionProposed
@@ -157,11 +197,24 @@ ActionProposed
 ```
 
 The adapter records the index manifest/shard as evidence anchors and the query
-receipt as an action outcome. Cache hit, rebuild, cache miss, corruption,
-schema/tool drift, timeout, and failure have explicit status/coverage values.
-Only successful or explicitly partial positive observations may be emitted;
-partial/timeout/failed states cannot be interpreted as absence. The adapter
-must use `append_event`/`replay` and cannot construct a detached Outcome or
+receipt as an action outcome. The status/coverage mapping is fixed (coverage
+`source` is the existing `CoverageSource.JADX_INDEX`):
+
+| index result                         | ActionStatus | CoverageStatus |
+|--------------------------------------|--------------|----------------|
+| build complete, full enumeration     | `complete`   | `complete`     |
+| build with truncation/read failures  | `partial`    | `partial`      |
+| cache hit (all verifications pass)   | `complete`   | as recorded in the manifest (`complete` or `partial`) |
+| JADX/build timeout, partial output   | `partial`    | `timeout`      |
+| JADX/build timeout, no output        | `failed`     | `timeout`      |
+| `CacheMiss` (absent/corrupt/drift)   | `failed`     | `unknown`      |
+| `CacheUnavailable` (environment)     | `failed`     | `unavailable`  |
+
+Only successful or explicitly partial positive observations may be emitted; an
+`ObservationAdded` is appended **only** for actual hits. Empty results,
+partial/timeout/failed states, misses, and unavailability never produce an
+Observation and cannot be interpreted as absence. The adapter must use
+`append_event`/`replay` and cannot construct a detached Outcome or
 Observation, a ClaimCandidate, or a ReviewDecision.
 
 ## Failure and Concurrency Contract
@@ -181,6 +234,12 @@ non-persistent JADX analysis.
 P1-A tests must cover:
 
 - deterministic key and posting order;
+- library-computed DEX digests: tampering with DEX bytes changes the key, and
+  no API path accepts a caller-asserted digest;
+- NFC/case-fold normalization collisions rejected at build (structured error,
+  no partial artifacts) and detected at load as `CacheMiss`;
+- `CacheMiss` and `CacheUnavailable` returned distinctly for their respective
+  content-layer and environment-layer causes;
 - equal DEX bytes with distinct lineage not colliding;
 - duplicate identical lineage rejection;
 - extra-Dex shard reuse and incremental manifest construction;
