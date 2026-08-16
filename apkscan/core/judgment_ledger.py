@@ -29,6 +29,7 @@ class EventType(StrEnum):
     ACTION_OUTCOME_RECORDED = "action_outcome_recorded"
     CLAIM_REVISED = "claim_revised"
     REVIEW_DECIDED = "review_decided"
+    FEEDBACK_QUEUED = "feedback_queued"
 
 
 class QuestionStatus(StrEnum):
@@ -93,6 +94,7 @@ class JudgmentProjection:
     outcomes: tuple[rc.ActionOutcome, ...]
     decisions: tuple[rc.ReviewDecision, ...]
     anchors: tuple[rc.EvidenceAnchor, ...]
+    feedbacks: tuple[rc.CandidateLabelFeedback, ...]
     current_coverage: tuple[rc.CoverageAssertion, ...]
     coverage_context_digest: str
     question_statuses: tuple[tuple[str, QuestionStatus], ...]
@@ -115,6 +117,7 @@ _EVENT_PAYLOAD_TYPES: dict[EventType, type[LedgerPayload]] = {
     EventType.ACTION_OUTCOME_RECORDED: rc.ActionOutcome,
     EventType.CLAIM_REVISED: rc.ClaimCandidate,
     EventType.REVIEW_DECIDED: rc.ReviewDecision,
+    EventType.FEEDBACK_QUEUED: rc.CandidateLabelFeedback,
 }
 
 _RECORD_ID_FIELDS: dict[type[rc.DomainRecord], str] = {
@@ -126,6 +129,7 @@ _RECORD_ID_FIELDS: dict[type[rc.DomainRecord], str] = {
     rc.NextAction: "action_id",
     rc.ActionOutcome: "outcome_id",
     rc.ReviewDecision: "decision_id",
+    rc.CandidateLabelFeedback: "feedback_id",
 }
 
 _TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z")
@@ -207,6 +211,13 @@ def _validate_payload(event: LedgerEvent) -> None:
         EventType.ACTION_OUTCOME_RECORDED,
     } and event.actor.kind is rc.ActorKind.MODEL:
         _fail("model_evidence_actor_forbidden", event, path="$.actor.kind")
+
+    # 模型无权自行入队候选标签（母设计 §7）；HUMAN（XLSX 纠正）与 SYSTEM（规则队列）可以。
+    if (
+        event.event_type is EventType.FEEDBACK_QUEUED
+        and event.actor.kind is rc.ActorKind.MODEL
+    ):
+        _fail("feedback_actor_forbidden", event, path="$.actor.kind")
 
 
 def _validate_event_local(event: LedgerEvent, *, verify_digest: bool) -> None:
@@ -412,6 +423,7 @@ class _ReplayState:
     observations: dict[str, rc.Observation] = field(default_factory=dict)
     claims: dict[str, rc.ClaimCandidate] = field(default_factory=dict)
     gaps: dict[str, rc.EvidenceGap] = field(default_factory=dict)
+    feedbacks: dict[str, rc.CandidateLabelFeedback] = field(default_factory=dict)
     actions: dict[str, rc.NextAction] = field(default_factory=dict)
     authorizations: dict[str, rc.ActionAuthorization] = field(default_factory=dict)
     outcomes: dict[str, rc.ActionOutcome] = field(default_factory=dict)
@@ -463,6 +475,7 @@ class _ReplayState:
             outcomes=_canonical_records(self.outcomes),
             decisions=_canonical_records(self.decisions),
             anchors=_canonical_records(self.anchors),
+            feedbacks=_canonical_records(self.feedbacks),
             current_coverage=current_coverage,
             coverage_context_digest=codec.compute_coverage_context_digest(current_coverage),
             question_statuses=tuple(sorted(self.question_statuses.items())),
@@ -928,6 +941,12 @@ def _apply_review(
     )
 
 
+def _apply_feedback(state: _ReplayState, feedback: rc.CandidateLabelFeedback) -> None:
+    if feedback.feedback_id in state.feedbacks:
+        _transition_error("feedback_duplicate", state)
+    state.feedbacks[feedback.feedback_id] = feedback
+
+
 def _apply_event(state: _ReplayState, event: LedgerEvent) -> None:
     state.event_sequence = event.sequence
     if event.event_type is EventType.QUESTION_OPENED:
@@ -946,6 +965,8 @@ def _apply_event(state: _ReplayState, event: LedgerEvent) -> None:
         _apply_authorization(state, cast(rc.ActionAuthorization, event.payload))
     elif event.event_type is EventType.ACTION_OUTCOME_RECORDED:
         _apply_outcome(state, cast(rc.ActionOutcome, event.payload))
+    elif event.event_type is EventType.FEEDBACK_QUEUED:
+        _apply_feedback(state, cast(rc.CandidateLabelFeedback, event.payload))
     elif event.event_type is EventType.REVIEW_DECIDED:
         _apply_review(state, event, cast(rc.ReviewDecision, event.payload))
     else:
