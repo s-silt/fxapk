@@ -521,3 +521,74 @@ def test_multiline_signature_skipped_not_fatal(tmp_path: Path) -> None:
     result = scan_java_sources(src, [], lineage=_lin(), limits=Limits())
     cls = _classes_of(result.structure, "com.l.M")
     assert [m["name"] for m in cls["methods"]] == ["ok"]
+
+
+def test_escaped_quotes_with_braces_do_not_break_spans(tmp_path: Path) -> None:
+    """转义引号里的括号（"\\"}{" 与 '\''）绝不参与配平。"""
+    esc = (
+        "package com.o;\n"
+        "\n"
+        "public class Esc {\n"
+        "    void f() {\n"
+        '        String s = "\\"}{";\n'
+        "        char q = '\\'';\n"
+        "        step();\n"
+        "    }\n"
+        "\n"
+        "    void step() {\n"
+        "    }\n"
+        "}\n"
+    )
+    src = tmp_path / "java"
+    _java_tree(src, {"com/o/Esc.java": esc})
+    result = scan_java_sources(src, [], lineage=_lin(), limits=Limits())
+    cls = _classes_of(result.structure, "com.o.Esc")
+    assert [(m["name"], m["start_line"], m["end_line"]) for m in cls["methods"]] == [
+        ("f", 4, 8),
+        ("step", 10, 11),
+    ]
+    assert [dict(c) for c in dict(cls["methods"][0])["calls"]] == [{"callee": "step", "line": 7}]
+
+
+def test_sanitizer_preserves_line_count() -> None:
+    """★清理前后行数恒等是行号定位的地基契约——含跨行块注释与未闭合字符串。"""
+    from apkscan.core.jadx_index import _sanitize_java_source
+
+    samples = [
+        "a\n/* x\n y */\nint c = 1; // t\n",
+        '"unterminated\nnext line\n',
+        "/* never closed\nstill comment\n",
+        "",
+        "no newline at all",
+    ]
+    for text in samples:
+        assert len(_sanitize_java_source(text)) == len(text.splitlines())
+
+
+def test_body_digest_uses_original_lines_not_sanitized(tmp_path: Path) -> None:
+    """★digest 基于原始行：体内注释参与摘要——若误用清理行，注释会被抹平导致同 digest。"""
+    with_comment = (
+        "package com.q1;\n"
+        "\n"
+        "public class W {\n"
+        "    void f() {\n"
+        "        // marker {\n"
+        "        x = 1;\n"
+        "    }\n"
+        "}\n"
+    )
+    without_comment = (
+        "package com.q2;\n"
+        "\n"
+        "public class V {\n"
+        "    void f() {\n"
+        "        x = 1;\n"
+        "    }\n"
+        "}\n"
+    )
+    src = tmp_path / "java"
+    _java_tree(src, {"com/q1/W.java": with_comment, "com/q2/V.java": without_comment})
+    result = scan_java_sources(src, [], lineage=_lin(), limits=Limits())
+    digest_w = dict(_classes_of(result.structure, "com.q1.W")["methods"][0])["body_digest"]
+    digest_v = dict(_classes_of(result.structure, "com.q2.V")["methods"][0])["body_digest"]
+    assert digest_w != digest_v
