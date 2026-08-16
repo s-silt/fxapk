@@ -570,6 +570,20 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
                     "与调用方断言的 baseline 结构匹配不构成鉴真结论。"
                 ),
             }
+        # 查询账本 sidecar 引用锚（P2-D2）：只投影绑定所需四字段；sidecar 内容由
+        # locator 指向，reason 保留在原始 meta 审计面。
+        raw_ledger = meta.get("jadx_judgment_ledger")
+        if isinstance(raw_ledger, dict):
+            # 白名单透传、源字段存在才输出：失败锚的 attempted_*/reason/published 一并
+            # 可见——digest 消费者必须能分清"已验证磁盘摘要"与"本次拟发布字节摘要"。
+            jadx_index["ledger"] = {
+                key: raw_ledger[key]
+                for key in (
+                    "locator", "digest", "attempted_digest", "event_count",
+                    "attempted_event_count", "replay_ok", "reason", "published",
+                )
+                if key in raw_ledger
+            }
         digest["jadx_index"] = jadx_index
 
     if network_attribution is not None:

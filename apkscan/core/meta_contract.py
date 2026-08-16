@@ -84,7 +84,12 @@ def _build_registry() -> dict[str, MetaKeyContract]:
         )
     # pipeline 派生键也走普通注册。保留键若被分析器声明，必须在启动期直接报错；
     # 不能覆盖掉分析器 owner 后再让运行期把它的整块 meta 静默拒绝。
-    for key in ("dex_strings_truncated_by", MISSING_ANALYZERS_KEY, "analyzer_receipts"):
+    for key in (
+        "dex_strings_truncated_by",
+        MISSING_ANALYZERS_KEY,
+        "analyzer_receipts",
+        "jadx_judgment_ledger",
+    ):
         if key in registry:
             owners = sorted(registry[key].owners)
             raise RuntimeError(f"pipeline 保留 meta 键 {key!r} 被分析器声明：{owners!r}")
