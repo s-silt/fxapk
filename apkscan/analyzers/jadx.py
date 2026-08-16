@@ -605,10 +605,18 @@ def _baseline_manifest_digest(cache_root: str, baseline_key: str) -> str | None:
 
 
 def _unavailable_ownership_summary(reason: object) -> dict[str, object]:
-    """构造不暴露路径/异常文本的 unavailable 摘要。"""
+    """构造不暴露路径/异常文本的 unavailable 摘要。
+
+    失败摘要同样可能被下游直接展示——四个防误读字段与成功摘要保持一致，
+    无论比较是否成功都不代表真实性鉴定、不影响任何 verdict。
+    """
     return {
         "status": "unavailable",
         "reason": _stable_index_reason(reason, _INDEX_REASON_BASELINE_UNAVAILABLE),
+        "baseline_designation": "caller_asserted_official",
+        "comparison_semantics": "structural_match_only",
+        "authenticity_asserted": False,
+        "verdict_effect": "none",
     }
 
 
@@ -1007,29 +1015,31 @@ class JadxAnalyzer(BaseAnalyzer):
                     result.meta.pop("jadx_index_key", None)
                 result.meta["jadx_index_status"] = index_receipt["status"]
 
-                # ----------------------------------------------------------
-                # P2-C：baseline ownership 比较是索引之上的旁路——subject 索引
-                # built/reused 才投影；否则摘要明确 unavailable。baseline 失败
-                # 绝不牵连 subject 的 jadx_index_status / result.error / 任何
-                # 既有产出（verdict 红线：摘要只新增键，不改任何值）。
-                # ----------------------------------------------------------
-                if cache_root and baseline_requested:
-                    if index_receipt["status"] in {"built", "reused"}:
-                        baseline_summary, baseline_receipt = _project_jadx_baseline(
-                            cache_root=cache_root,
-                            subject_key=result.meta.get("jadx_index_key"),
-                            baseline_key=baseline_index,
-                        )
-                    else:
-                        baseline_summary = _unavailable_ownership_summary(
-                            _INDEX_REASON_SUBJECT_UNAVAILABLE
-                        )
-                        baseline_receipt = {
-                            "status": "unavailable",
-                            "reason": baseline_summary["reason"],
-                        }
-                    result.meta["jadx_ownership_summary"] = baseline_summary
-                    index_receipt["baseline"] = baseline_receipt
+            # --------------------------------------------------------------
+            # P2-C：baseline ownership 是 subject 索引之上的独立旁路。双 opt-in
+            # 后必须始终产生摘要——即使版本探测/物化/索引准备失败，也明确输出
+            # subject_index_unavailable，不许静默缺席（所以收口在索引块**外**，
+            # 读 meta 里的终态而非索引块局部状态）。baseline 结果只新增
+            # meta/receipt 字段，不改 subject 索引终态、result.error 或任何
+            # 既有产出（verdict 红线）。
+            # --------------------------------------------------------------
+            if cache_root and baseline_requested:
+                if result.meta.get("jadx_index_status") in {"built", "reused"}:
+                    baseline_summary, baseline_receipt = _project_jadx_baseline(
+                        cache_root=cache_root,
+                        subject_key=result.meta.get("jadx_index_key"),
+                        baseline_key=baseline_index,
+                    )
+                else:
+                    baseline_summary = _unavailable_ownership_summary(
+                        _INDEX_REASON_SUBJECT_UNAVAILABLE
+                    )
+                    baseline_receipt = {
+                        "status": "unavailable",
+                        "reason": baseline_summary["reason"],
+                    }
+                result.meta["jadx_ownership_summary"] = baseline_summary
+                index_receipt["baseline"] = baseline_receipt
         except Exception as exc:  # noqa: BLE001 - 任何异常转 error，不抛给 pipeline
             logger.exception("[jadx] 反编译/扫描异常")
             result.error = f"jadx 增强异常：{exc}"

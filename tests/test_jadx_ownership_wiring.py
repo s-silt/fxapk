@@ -113,6 +113,11 @@ def test_baseline_key_syntax_checked(
     summary = result.meta["jadx_ownership_summary"]
     assert summary["status"] == "unavailable"
     assert all(c.islower() or c.isdigit() or c == "_" for c in summary["reason"])
+    # ★失败摘要同样可能被下游直接展示——四个防误读字段一个不能少。
+    assert summary["baseline_designation"] == "caller_asserted_official"
+    assert summary["comparison_semantics"] == "structural_match_only"
+    assert summary["authenticity_asserted"] is False
+    assert summary["verdict_effect"] == "none"
     assert result.meta["jadx_status"] == "ok"
 
 
@@ -148,13 +153,20 @@ def test_verdict_surface_byte_identical_with_and_without_baseline(
                 index_block = {k: v for k, v in index_block.items() if k != "baseline"}
                 receipt = {**receipt, "index": index_block}
                 meta = {**meta, "jadx_receipt": receipt}
+        from dataclasses import asdict
+
         payload = {
             "meta": meta,
-            "endpoints": [e.value for e in result.endpoints],
-            "findings": [f.id for f in result.findings],
+            "endpoints": [asdict(e) for e in result.endpoints],
+            "findings": [asdict(f) for f in result.findings],
             "error": result.error,
         }
-        return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+        # default 带类型名 + repr：枚举等非 JSON 类型可比较，但类型漂移仍会暴露
+        # （不像裸 default=str 那样把 Enum→str 的变化也掩盖掉）。
+        return json.dumps(
+            payload, ensure_ascii=False, sort_keys=True,
+            default=lambda o: f"{o.__class__.__qualname__}={o!r}",
+        )
 
     assert _canon(plain, drop={"jadx_ownership_summary"}) == _canon(
         with_baseline, drop={"jadx_ownership_summary"}
@@ -175,6 +187,7 @@ def test_digest_comparison_subsection(tmp_path: Path) -> None:
             "jadx_index_status": "built",
             "jadx_index_key": key,
             "jadx_ownership_summary": {
+                "status": "compared",
                 "baseline_designation": "caller_asserted_official",
                 "comparison_semantics": "structural_match_only",
                 "authenticity_asserted": False,
@@ -198,3 +211,82 @@ def test_digest_comparison_subsection(tmp_path: Path) -> None:
     # 无摘要时 digest 无 comparison 小节。
     d2 = build_digest({"meta": {"jadx_index_status": "built", "jadx_index_key": key}, "leads": []})
     assert "comparison" not in d2["jadx_index"]
+
+
+# ---------------------------------------------------------------------------
+# 复审补锁（codex P2-C 复审）
+# ---------------------------------------------------------------------------
+
+
+def test_index_preparation_failure_still_yields_unavailable_summary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★双 opt-in 的收口锁：版本探测失败（索引 disabled）时摘要必须明确 unavailable，
+    不许静默消失。"""
+    _patch(monkeypatch, version=None)  # 探测失败 → 索引 disabled
+    ctx = _ctx(tmp_path)
+    ctx.jadx_baseline_index = "a" * 64
+    result = JadxAnalyzer().analyze(ctx)
+    assert result.meta["jadx_index_status"] == "disabled"
+    summary = result.meta["jadx_ownership_summary"]
+    assert summary["status"] == "unavailable"
+    assert summary["reason"] == "subject_index_unavailable"
+    assert result.meta["jadx_receipt"]["index"]["baseline"]["status"] == "unavailable"
+
+
+def test_projection_exception_fails_open(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★投影层抛异常 → 摘要 unavailable，主分析与索引状态零影响。"""
+    ctx, key = _built_key(tmp_path, monkeypatch)
+    ctx.jadx_baseline_index = key
+
+    def _boom(subject, baseline):  # noqa: ANN001, ANN202
+        raise RuntimeError("projection exploded")
+
+    monkeypatch.setattr(jadx, "project_ownership", _boom)
+    result = JadxAnalyzer().analyze(ctx)
+    assert result.error is None
+    assert result.meta["jadx_index_status"] == "reused"
+    assert result.meta["jadx_ownership_summary"]["status"] == "unavailable"
+
+
+def test_digest_comparison_unattributed_and_strict_gate(tmp_path: Path) -> None:
+    """★digest 四桶完整（含 unattributed/total_regions）；状态门只认 compared；
+    bool 计数拒收。"""
+    from apkscan.report.digest import build_digest
+
+    key = "a1" * 32
+    base_meta = {
+        "jadx_index_status": "built",
+        "jadx_index_key": key,
+    }
+    summary = {
+        "status": "compared",
+        "baseline_designation": "caller_asserted_official",
+        "comparison_semantics": "structural_match_only",
+        "authenticity_asserted": False,
+        "verdict_effect": "none",
+        "matches": 2, "modified": 1, "absent": 0, "unattributed": 3,
+    }
+    d = build_digest({"meta": {**base_meta, "jadx_ownership_summary": summary}, "leads": []})
+    comparison = d["jadx_index"]["comparison"]
+    assert comparison["unattributed"] == 3
+    assert comparison["total_regions"] == 6  # 四桶之和
+    # 未知/缺失状态：不建 comparison（不许归零冒充合法结果）。
+    for bad_status in ("weird", None):
+        forged = dict(summary)
+        if bad_status is None:
+            forged.pop("status")
+        else:
+            forged["status"] = bad_status
+        d2 = build_digest(
+            {"meta": {**base_meta, "jadx_ownership_summary": forged}, "leads": []}
+        )
+        assert "comparison" not in d2["jadx_index"], bad_status
+    # bool 计数拒收（True 不是 1）。
+    forged_bool = {**summary, "matches": True}
+    d3 = build_digest(
+        {"meta": {**base_meta, "jadx_ownership_summary": forged_bool}, "leads": []}
+    )
+    assert d3["jadx_index"]["comparison"]["matches"] == 0

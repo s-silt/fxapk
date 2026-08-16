@@ -889,3 +889,16 @@ def test_snapshot_carries_jadx_cache_root_through_pickle() -> None:
     )
     restored = pickle.loads(pickle.dumps(snap))
     assert restored.jadx_cache_root == "D:/idx-cache"
+
+
+def test_snapshot_carries_jadx_baseline_index_through_pickle() -> None:
+    # baseline key 同 cache root 纪律：必填过并行边界，pickle 往返不丢。
+    snap = SnapshotContext(
+        package_name="", manifest_xml="", platform="android", config=None,
+        apk_path="", extra_dex_paths=[], jadx_cache_root=None,
+        jadx_baseline_index="b" * 64,
+        permissions=[], components=None,
+        dex_strings=(), file_list=[], native_libs=[], certificates=[], files={},
+    )
+    restored = pickle.loads(pickle.dumps(snap))
+    assert restored.jadx_baseline_index == "b" * 64

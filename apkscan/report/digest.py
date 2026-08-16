@@ -538,23 +538,32 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
         index_key = meta.get("jadx_index_key")
         if isinstance(index_key, str) and re.fullmatch(r"[0-9a-f]{64}", index_key):
             jadx_index["key"] = index_key
-        # ownership 比较小节（P2-C）：只透出 compared 摘要；unavailable/非法摘要不建
-        # comparison。不输出 ownership 枚举值，带"非鉴真"caveat——INHERITED_OFFICIAL
-        # 绝不能被排版成鉴真结论。
+        # ownership 比较小节（P2-C）：只有明确的 compared 摘要才投影——unavailable、
+        # 缺失/未知状态一律不建 comparison（不许归零冒充合法结果）。不输出 ownership
+        # 枚举值，带"非鉴真"caveat——INHERITED_OFFICIAL 绝不能被排版成鉴真结论。
         raw_summary = meta.get("jadx_ownership_summary")
-        if isinstance(raw_summary, dict) and raw_summary.get("status") != "unavailable":
+        if isinstance(raw_summary, dict) and raw_summary.get("status") == "compared":
 
             def _nonnegative_int(value: object) -> int:
+                # bool 是 int 的子类，但摘要计数不接受布尔值。
                 if isinstance(value, bool):
-                    return int(value)
+                    return 0
                 if isinstance(value, int) and value >= 0:
                     return value
                 return 0
 
+            matches = _nonnegative_int(raw_summary.get("matches"))
+            modified = _nonnegative_int(raw_summary.get("modified"))
+            absent = _nonnegative_int(raw_summary.get("absent"))
+            unattributed = _nonnegative_int(raw_summary.get("unattributed"))
             jadx_index["comparison"] = {
-                "matches": _nonnegative_int(raw_summary.get("matches")),
-                "modified": _nonnegative_int(raw_summary.get("modified")),
-                "absent": _nonnegative_int(raw_summary.get("absent")),
+                "matches": matches,
+                "modified": modified,
+                "absent": absent,
+                # partial baseline 时 region 全落 unattributed——不透出它，三桶全 0
+                # 会被读成"没有 region"。total 从校验后的四桶复算，不信任上游。
+                "unattributed": unattributed,
+                "total_regions": matches + modified + absent + unattributed,
                 "authenticity_asserted": raw_summary.get("authenticity_asserted") is True,
                 "caveat": (
                     "此处仅表示 JADX 结构匹配/差异，不是来源真实性或官方身份鉴真；"
