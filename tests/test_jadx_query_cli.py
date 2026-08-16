@@ -107,7 +107,6 @@ def test_usage_hits_shape(tmp_path: Path) -> None:
     assert hit["ownership"] == "unknown"
     # lineage 是逻辑身份，不含路径。
     assert hit["lineage"]["role"] == "apk_dex"
-    assert "\\" not in json.dumps(hit) or True  # 序列化里不允许带盘符路径
 
 
 def test_usage_empty_hits_explicit_with_caveat(tmp_path: Path) -> None:
@@ -143,22 +142,63 @@ def test_usage_load_miss_and_bad_syntax(tmp_path: Path) -> None:
     assert result.exit_code == 2
 
 
-def test_usage_never_runs_jadx(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """★只读承诺：查询全程 run_owned 零调用（绝不启动 jadx/任何子进程）。"""
+def _install_process_bombs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """锁死全部子进程启动入口——只读查询一个都不许碰。"""
+    import os as _os
+    import subprocess as _subprocess
+
     from apkscan.core import proctree
 
     def _boom(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
         raise AssertionError("只读查询绝不允许启动子进程")
 
     monkeypatch.setattr(proctree, "run_owned", _boom)
+    monkeypatch.setattr(_subprocess, "Popen", _boom)
+    monkeypatch.setattr(_os, "system", _boom)
+
+
+def test_usage_never_runs_jadx(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★只读承诺：查询全程零子进程。炸弹在夹具建完索引**之后**装——
+    证明的是查询路径干净，不被夹具路径混淆。"""
     cache_root, key = _build_index(tmp_path)
+    _install_process_bombs(monkeypatch)
     code, data = _run(
         ["jadx", "usage", _NEEDLE,
          "--jadx-cache-root", str(cache_root), "--jadx-index", key]
     )
     assert code == 0 and data is not None and data["status"] == "ok"
+
+
+def test_callpath_never_runs_jadx(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """callpath 同款只读承诺锁。"""
+    cache_root, key = _build_index(tmp_path)
+    _install_process_bombs(monkeypatch)
+    code, data = _run(
+        ["jadx", "callpath", "Alpha#start/0", "Alpha#target/0",
+         "--jadx-cache-root", str(cache_root), "--jadx-index", key]
+    )
+    assert code == 0 and data is not None and data["status"] == "ok"
+
+
+def test_output_hygiene_no_source_no_host_paths(tmp_path: Path) -> None:
+    """★输出卫生：查询原值、Java 源码行、宿主路径（cache root/盘符）都不得出现在
+    完整 stdout 里——hits 只带 digest 与索引内相对路径。"""
+    cache_root, key = _build_index(tmp_path)
+    result = runner.invoke(
+        cli.app,
+        ["jadx", "usage", _NEEDLE,
+         "--jadx-cache-root", str(cache_root), "--jadx-index", key],
+    )
+    assert result.exit_code == 0
+    out = result.stdout
+    assert _NEEDLE not in out  # 原值绝不回显（只有 digest）
+    assert "String u =" not in out  # 源码行绝不回显
+    for host_marker in (str(tmp_path), str(tmp_path).replace("\\", "\\\\")):
+        assert host_marker not in out  # 宿主路径（含 JSON 转义形态）绝不出现
 
 
 # ---------------------------------------------------------------------------
