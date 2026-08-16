@@ -629,3 +629,488 @@ def evaluate_pairs(
         positive_pair_count=positive_pair_count,
         negative_pair_count=negative_pair_count,
     )
+
+
+# 与 recognition_labels 同源的本模块词表副本。
+_RELATION_SUBTYPES: Final[frozenset[str]] = frozenset(
+    {
+        "exact_artifact_identity",
+        "binary_lineage",
+        "packaging_pipeline",
+        "product_line_reuse",
+        "control_plane",
+        "infrastructure_reuse",
+        "technical_link_relevant",
+        "same_operator",
+    }
+)
+_VERDICTS: Final[frozenset[str]] = frozenset({"valid", "invalid", "unknown"})
+_OWNERSHIPS: Final[frozenset[str]] = frozenset(
+    {
+        "suspect_first_party",
+        "inherited_official",
+        "inherited_third_party",
+        "shared_infrastructure",
+        "unknown",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class GroupEvaluation:
+    provenance: EvaluationProvenance
+    bcubed_precision: float | None
+    bcubed_recall: float | None
+    cannot_link_violation_count: int
+    official_repack_mismerge_count: int
+    evaluated_item_count: int
+    gold_unclustered_count: int
+    unpredicted_item_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class ClueCandidate:
+    clue_ref: str
+    subject_sha256: str
+    predicted_verdict: str
+    predicted_ownership: str
+    evidence_ref: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ClueEvaluation:
+    provenance: EvaluationProvenance
+    validity_precision: float | None
+    ownership_precision: float | None
+    valid_and_ownership_precision: float | None
+    evidence_ref_completeness: float | None
+    candidate_count: int
+    top_count: int
+    labeled_top_count: int
+    unlabeled_top_count: int
+    ownership_unknown_gold_count: int
+
+
+def _validate_relation_subtypes(
+    subtypes: tuple[str, ...],
+    *,
+    name: str,
+    allow_empty: bool,
+) -> frozenset[str]:
+    if not isinstance(subtypes, tuple):
+        _fail("predictions_invalid", f"{name} 必须为 tuple")
+    if not allow_empty and not subtypes:
+        _fail("predictions_invalid", f"{name} 不得为空")
+    if any(
+        not isinstance(subtype, str) or subtype not in _RELATION_SUBTYPES for subtype in subtypes
+    ):
+        _fail("predictions_invalid", f"{name} 含未知 relation_subtype")
+    return frozenset(subtypes)
+
+
+def _canonical_relation_pair(
+    left_sha256: str,
+    right_sha256: str,
+) -> tuple[str, str]:
+    if left_sha256 <= right_sha256:
+        return left_sha256, right_sha256
+    return right_sha256, left_sha256
+
+
+def evaluate_groups(
+    label_set: RecognitionLabelSet,
+    manifest: SplitManifest,
+    split_name: str,
+    predicted_groups: tuple[tuple[str, ...], ...],
+    *,
+    layers: tuple[str, ...],
+    positive_subtypes: tuple[str, ...],
+    cannot_link_subtypes: tuple[str, ...],
+    repack_subtypes: tuple[str, ...],
+) -> GroupEvaluation:
+    """评估指定切分上的分组结果与显式关系约束。"""
+    _validate_split_name(split_name)
+    selected_layers = _validate_layers(layers)
+    selected_positive_subtypes = _validate_relation_subtypes(
+        positive_subtypes,
+        name="positive_subtypes",
+        allow_empty=False,
+    )
+    selected_cannot_link_subtypes = _validate_relation_subtypes(
+        cannot_link_subtypes,
+        name="cannot_link_subtypes",
+        allow_empty=True,
+    )
+    selected_repack_subtypes = _validate_relation_subtypes(
+        repack_subtypes,
+        name="repack_subtypes",
+        allow_empty=True,
+    )
+    split_members = _split_members(manifest, split_name)
+
+    if not isinstance(predicted_groups, tuple):
+        _fail("predictions_invalid", "predicted_groups 必须为 tuple")
+
+    predicted_group_by_sha: dict[str, frozenset[str]] = {}
+    seen_predicted_members: set[str] = set()
+
+    for group in predicted_groups:
+        if not isinstance(group, tuple) or not group:
+            _fail("predictions_invalid", "预测组必须为非空 tuple")
+
+        group_members: set[str] = set()
+        for sample_sha256 in group:
+            if not _is_valid_sha256(sample_sha256):
+                _fail(
+                    "predictions_invalid",
+                    f"预测组含非法 SHA-256: {sample_sha256!r}",
+                )
+            if sample_sha256 not in split_members:
+                _fail(
+                    "predictions_invalid",
+                    f"预测组含切分外样本: {sample_sha256}",
+                )
+            if sample_sha256 in seen_predicted_members:
+                _fail(
+                    "predictions_invalid",
+                    f"预测组成员重复: {sample_sha256}",
+                )
+            seen_predicted_members.add(sample_sha256)
+            group_members.add(sample_sha256)
+
+        frozen_group = frozenset(group_members)
+        for sample_sha256 in frozen_group:
+            predicted_group_by_sha[sample_sha256] = frozen_group
+
+    parent: dict[str, str] = {}
+
+    def find(sample_sha256: str) -> str:
+        root = sample_sha256
+        while parent[root] != root:
+            root = parent[root]
+        while parent[sample_sha256] != sample_sha256:
+            next_sha256 = parent[sample_sha256]
+            parent[sample_sha256] = root
+            sample_sha256 = next_sha256
+        return root
+
+    def add_vertex(sample_sha256: str) -> None:
+        if sample_sha256 not in parent:
+            parent[sample_sha256] = sample_sha256
+
+    def union(left_sha256: str, right_sha256: str) -> None:
+        add_vertex(left_sha256)
+        add_vertex(right_sha256)
+        left_root = find(left_sha256)
+        right_root = find(right_sha256)
+        if left_root == right_root:
+            return
+        if left_root < right_root:
+            parent[right_root] = left_root
+        else:
+            parent[left_root] = right_root
+
+    consumed_records: list[RecognitionLabelRecord] = []
+    cannot_link_pairs: set[tuple[str, str]] = set()
+    repack_pairs: set[tuple[str, str]] = set()
+    supported_positive_pairs: set[tuple[str, str]] = set()
+    negative_endpoints: set[str] = set()
+
+    for record in label_set.effective:
+        if (
+            record.kind != "relation_judgment"
+            or record.layer not in selected_layers
+            or record.left_sha256 is None
+            or record.right_sha256 is None
+            or record.left_sha256 not in split_members
+            or record.right_sha256 not in split_members
+        ):
+            continue
+
+        pair = _canonical_relation_pair(
+            record.left_sha256,
+            record.right_sha256,
+        )
+        consumed = False
+
+        if record.relation == "positive" and record.relation_subtype in selected_positive_subtypes:
+            union(record.left_sha256, record.right_sha256)
+            supported_positive_pairs.add(pair)
+            consumed = True
+
+        if (
+            record.relation == "negative"
+            and record.relation_subtype in selected_cannot_link_subtypes
+        ):
+            cannot_link_pairs.add(pair)
+            negative_endpoints.add(record.left_sha256)
+            negative_endpoints.add(record.right_sha256)
+            consumed = True
+
+        if record.relation == "positive" and record.relation_subtype in selected_repack_subtypes:
+            repack_pairs.add(pair)
+            consumed = True
+
+        if consumed:
+            consumed_records.append(record)
+
+    gold_members_by_root: dict[str, set[str]] = {}
+    for sample_sha256 in sorted(parent):
+        root = find(sample_sha256)
+        gold_members_by_root.setdefault(root, set()).add(sample_sha256)
+
+    gold_group_by_sha: dict[str, frozenset[str]] = {}
+    for members in gold_members_by_root.values():
+        frozen_members = frozenset(members)
+        for sample_sha256 in frozen_members:
+            gold_group_by_sha[sample_sha256] = frozen_members
+
+    gold_items = tuple(sorted(gold_group_by_sha))
+    gold_unclustered_count = len(negative_endpoints.difference(gold_group_by_sha))
+    unpredicted_item_count = sum(
+        1 for sample_sha256 in gold_items if sample_sha256 not in predicted_group_by_sha
+    )
+
+    precision_values: list[float] = []
+    recall_values: list[float] = []
+
+    for sample_sha256 in gold_items:
+        gold_group = gold_group_by_sha[sample_sha256]
+        predicted_group = predicted_group_by_sha.get(
+            sample_sha256,
+            frozenset({sample_sha256}),
+        )
+        intersection_count = len(gold_group.intersection(predicted_group))
+        precision_values.append(intersection_count / len(predicted_group))
+        recall_values.append(intersection_count / len(gold_group))
+
+    evaluated_item_count = len(gold_items)
+    if evaluated_item_count:
+        bcubed_precision: float | None = sum(precision_values) / evaluated_item_count
+        bcubed_recall: float | None = sum(recall_values) / evaluated_item_count
+    else:
+        bcubed_precision = None
+        bcubed_recall = None
+
+    def pair_is_in_same_predicted_group(pair: tuple[str, str]) -> bool:
+        left_sha256, right_sha256 = pair
+        left_group = predicted_group_by_sha.get(left_sha256)
+        return left_group is not None and right_sha256 in left_group
+
+    cannot_link_violation_count = sum(
+        1 for pair in cannot_link_pairs if pair_is_in_same_predicted_group(pair)
+    )
+    official_repack_mismerge_count = sum(
+        1
+        for pair in repack_pairs
+        if pair not in supported_positive_pairs and pair_is_in_same_predicted_group(pair)
+    )
+
+    layers_used = tuple(sorted({record.layer for record in consumed_records}))
+    lineages_used = tuple(sorted({record.label_lineage for record in consumed_records}))
+    label_count = len(consumed_records)
+    promotion_eligible = derive_promotion_eligible(
+        split_name=split_name,
+        label_count=label_count,
+        layers_used=layers_used,
+        lineages_used=lineages_used,
+        pair_task=False,
+    )
+
+    provenance = EvaluationProvenance(
+        split_name=split_name,
+        level=None,
+        layers_used=layers_used,
+        lineages_used=lineages_used,
+        label_count=label_count,
+        evaluated_count=evaluated_item_count,
+        promotion_eligible=promotion_eligible,
+    )
+    return GroupEvaluation(
+        provenance=provenance,
+        bcubed_precision=bcubed_precision,
+        bcubed_recall=bcubed_recall,
+        cannot_link_violation_count=cannot_link_violation_count,
+        official_repack_mismerge_count=official_repack_mismerge_count,
+        evaluated_item_count=evaluated_item_count,
+        gold_unclustered_count=gold_unclustered_count,
+        unpredicted_item_count=unpredicted_item_count,
+    )
+
+
+def _clue_record_sort_key(
+    record: RecognitionLabelRecord,
+) -> tuple[str, str, str]:
+    return (
+        record.layer,
+        record.label_lineage,
+        record.record_id,
+    )
+
+
+def evaluate_clues(
+    label_set: RecognitionLabelSet,
+    manifest: SplitManifest,
+    split_name: str,
+    candidates: tuple[ClueCandidate, ...],
+    *,
+    top_n: int,
+    layers: tuple[str, ...],
+) -> ClueEvaluation:
+    """评估指定切分上的线索候选优先级与标注一致性。"""
+    _validate_split_name(split_name)
+    selected_layers = _validate_layers(layers)
+
+    if not isinstance(top_n, int) or isinstance(top_n, bool) or top_n < 1:
+        _fail("predictions_invalid", "top_n 必须为不小于 1 的整数")
+    if not isinstance(candidates, tuple):
+        _fail("predictions_invalid", "candidates 必须为 tuple")
+
+    split_members = _split_members(manifest, split_name)
+    seen_clue_refs: set[str] = set()
+
+    for candidate in candidates:
+        if not isinstance(candidate, ClueCandidate):
+            _fail("predictions_invalid", "candidates 含非 ClueCandidate 项")
+        if not isinstance(candidate.clue_ref, str) or not candidate.clue_ref:
+            _fail("predictions_invalid", "clue_ref 必须为非空字符串")
+        if candidate.clue_ref in seen_clue_refs:
+            _fail(
+                "predictions_invalid",
+                f"clue_ref 重复: {candidate.clue_ref!r}",
+            )
+        seen_clue_refs.add(candidate.clue_ref)
+
+        if not _is_valid_sha256(candidate.subject_sha256):
+            _fail(
+                "predictions_invalid",
+                f"线索载体 SHA-256 非法: {candidate.subject_sha256!r}",
+            )
+        if candidate.subject_sha256 not in split_members:
+            _fail(
+                "predictions_invalid",
+                f"线索载体不属于目标切分: {candidate.subject_sha256}",
+            )
+        if candidate.predicted_verdict not in _VERDICTS:
+            _fail(
+                "predictions_invalid",
+                f"非法 predicted_verdict: {candidate.predicted_verdict!r}",
+            )
+        if candidate.predicted_ownership not in _OWNERSHIPS:
+            _fail(
+                "predictions_invalid",
+                f"非法 predicted_ownership: {candidate.predicted_ownership!r}",
+            )
+        if candidate.evidence_ref is not None and not isinstance(candidate.evidence_ref, str):
+            _fail(
+                "predictions_invalid",
+                "evidence_ref 必须为字符串或 None",
+            )
+
+    top_candidates = candidates[:top_n]
+    top_clue_refs = frozenset(candidate.clue_ref for candidate in top_candidates)
+
+    records_by_clue_ref: dict[str, list[RecognitionLabelRecord]] = {}
+    for record in label_set.effective:
+        if (
+            record.kind == "clue_judgment"
+            and record.layer in selected_layers
+            and record.clue_ref is not None
+            and record.clue_ref in top_clue_refs
+        ):
+            records_by_clue_ref.setdefault(record.clue_ref, []).append(record)
+
+    gold_by_clue_ref: dict[str, RecognitionLabelRecord] = {}
+    for clue_ref in sorted(records_by_clue_ref):
+        gold_by_clue_ref[clue_ref] = min(
+            records_by_clue_ref[clue_ref],
+            key=_clue_record_sort_key,
+        )
+
+    consumed_records = tuple(gold_by_clue_ref[clue_ref] for clue_ref in sorted(gold_by_clue_ref))
+
+    labeled_candidates = tuple(
+        candidate for candidate in top_candidates if candidate.clue_ref in gold_by_clue_ref
+    )
+    labeled_top_count = len(labeled_candidates)
+    top_count = len(top_candidates)
+    unlabeled_top_count = top_count - labeled_top_count
+
+    valid_gold_count = 0
+    ownership_correct_count = 0
+    valid_and_ownership_correct_count = 0
+    ownership_evaluable_count = 0
+    ownership_unknown_gold_count = 0
+
+    for candidate in labeled_candidates:
+        gold = gold_by_clue_ref[candidate.clue_ref]
+        ownership_correct = candidate.predicted_ownership == gold.ownership
+
+        if gold.verdict == "valid":
+            valid_gold_count += 1
+            if ownership_correct:
+                valid_and_ownership_correct_count += 1
+
+        if gold.ownership == "unknown":
+            ownership_unknown_gold_count += 1
+        else:
+            ownership_evaluable_count += 1
+            if ownership_correct:
+                ownership_correct_count += 1
+
+    if labeled_top_count:
+        validity_precision: float | None = valid_gold_count / labeled_top_count
+        valid_and_ownership_precision: float | None = (
+            valid_and_ownership_correct_count / labeled_top_count
+        )
+    else:
+        validity_precision = None
+        valid_and_ownership_precision = None
+
+    if ownership_evaluable_count:
+        ownership_precision: float | None = ownership_correct_count / ownership_evaluable_count
+    else:
+        ownership_precision = None
+
+    if top_count:
+        evidence_present_count = sum(
+            1
+            for candidate in top_candidates
+            if (isinstance(candidate.evidence_ref, str) and bool(candidate.evidence_ref.strip()))
+        )
+        evidence_ref_completeness: float | None = evidence_present_count / top_count
+    else:
+        evidence_ref_completeness = None
+
+    layers_used = tuple(sorted({record.layer for record in consumed_records}))
+    lineages_used = tuple(sorted({record.label_lineage for record in consumed_records}))
+    label_count = len(consumed_records)
+    promotion_eligible = derive_promotion_eligible(
+        split_name=split_name,
+        label_count=label_count,
+        layers_used=layers_used,
+        lineages_used=lineages_used,
+        pair_task=False,
+    )
+
+    provenance = EvaluationProvenance(
+        split_name=split_name,
+        level=None,
+        layers_used=layers_used,
+        lineages_used=lineages_used,
+        label_count=label_count,
+        evaluated_count=labeled_top_count,
+        promotion_eligible=promotion_eligible,
+    )
+    return ClueEvaluation(
+        provenance=provenance,
+        validity_precision=validity_precision,
+        ownership_precision=ownership_precision,
+        valid_and_ownership_precision=valid_and_ownership_precision,
+        evidence_ref_completeness=evidence_ref_completeness,
+        candidate_count=len(candidates),
+        top_count=top_count,
+        labeled_top_count=labeled_top_count,
+        unlabeled_top_count=unlabeled_top_count,
+        ownership_unknown_gold_count=ownership_unknown_gold_count,
+    )
