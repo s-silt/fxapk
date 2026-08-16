@@ -751,3 +751,25 @@ def test_scan_java_location_case_deterministic(tmp_path) -> None:
         lower.receipt["selected_paths_digest"]
         == upper.receipt["selected_paths_digest"]
     ), "同一 JADX 相对路径仅大小写漂移时，coverage receipt 也必须逐字节稳定"
+
+
+def test_analyzer_creates_no_persistent_index_by_default(tmp_path, monkeypatch) -> None:
+    """★P1-A opt-in 回归锁：常规 JadxAnalyzer 运行绝不创建/查询持久索引。
+
+    持久索引必须由调用方显式提供 cache root（JadxIndexStore）才存在；
+    默认分析路径与 P1-A 之前同行为——不读 cwd、不摸样本旁目录、
+    不产生任何 manifest/shard 产物。
+    """
+    workdir = tmp_path / "wd"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    sample = tmp_path / "sample.apk"
+    sample.write_bytes(b"PK\x03\x04fake")
+    JadxAnalyzer().analyze(FakeContext(apk_path=str(sample)))  # 无 jadx 工具时走既有降级
+    index_artifacts = [
+        p
+        for p in tmp_path.rglob("*")
+        if p.name == "manifest.json" or (p.parent.name == "shards" and p.suffix == ".json")
+    ]
+    assert index_artifacts == [], "默认分析不得留下任何持久索引产物"
+    assert list(workdir.iterdir()) == [], "默认分析不得向 cwd 写任何东西"
