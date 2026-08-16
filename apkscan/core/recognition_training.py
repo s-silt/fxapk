@@ -216,6 +216,11 @@ def _validate_manifest_invariants(manifest: SplitManifest) -> None:
 
     for split_name in _SPLIT_NAMES:
         units: tuple[SplitUnit, ...] = getattr(manifest, split_name)
+        # 切分内单位必须按 members 升序——digest 只锁内容不锁顺序，重排重签
+        # 在此被拒（codex 复审 P2）。
+        for left_unit, right_unit in zip(units, units[1:]):
+            if left_unit.members >= right_unit.members:
+                _fail("manifest_invalid", f"{split_name} 单位未按 canonical 顺序")
         for unit in units:
             if unit.unit_id != _unit_id(unit.members):
                 _fail("manifest_invalid", "unit_id 与 members 不匹配")
@@ -256,11 +261,13 @@ def _validate_manifest_invariants(manifest: SplitManifest) -> None:
     ):
         _fail("manifest_invalid", "sha 归属不唯一")
 
-    # 指名 adversarial 样本可以不在场（语料外），但在场就必须落 test_adversarial
-    # ——加载器不信任构建器，独立复验该不变量。
+    # 指名 adversarial/calibration 样本可以不在场（语料外），但在场就必须落
+    # 各自切分——加载器不信任构建器，独立复验该不变量（codex 复审 P1）。
     for member, split_name in membership.items():
         if member in adversarial and split_name != "test_adversarial":
             _fail("manifest_invalid", f"adversarial 样本落在 {split_name}")
+        if member in calibration and split_name != "calibration":
+            _fail("calibration_conflict", f"calibration 样本落在 {split_name}")
 
 
 def build_split_manifest(
@@ -536,4 +543,8 @@ def load_split_manifest(text: str) -> SplitManifest:
         **{name: parse_units(name) for name in _SPLIT_NAMES},
     )
     _validate_manifest_invariants(manifest)
+    # 冻结文件必须逐字节 canonical：重排单位/键序后重签 digest 仍会在此被拒
+    # （codex 复审 P2——digest 只锁内容，不锁编码形态）。
+    if encode_split_manifest(manifest) != text:
+        _fail("manifest_invalid", "manifest 编码非 canonical 形态")
     return manifest

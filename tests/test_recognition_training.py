@@ -338,3 +338,59 @@ def test_unknown_policy_version_is_rejected() -> None:
     with pytest.raises(SplitManifestError) as exc:
         _build([_row(SHA_A, "case-early")], policy_version="split-v0")
     assert exc.value.reason_code == "policy_unknown"
+
+
+# --------------------------------------------------- codex 复审补锁（P1/P2）
+
+
+def _resign(payload: dict) -> str:
+    """独立于被测模块重算 digest（域前缀写字面量，防同源常量假绿）。"""
+    body = dict(payload)
+    body.pop("manifest_digest")
+    canonical = json.dumps(
+        body, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    )
+    body["manifest_digest"] = hashlib.sha256(
+        ("fxapk-split-manifest-v1\n" + canonical).encode("utf-8")
+    ).hexdigest()
+    return (
+        json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        + "\n"
+    )
+
+
+def test_loader_rejects_resigned_calibration_unit_moved_to_train() -> None:
+    text = encode_split_manifest(
+        _build(
+            [_row(SHA_A, "case-early"), _row(SHA_B, "case-mid")],
+            calibration_samples=(SHA_A,),
+        )
+    )
+    payload = json.loads(text)
+    # 插到 canonical 位置（SHA_A < SHA_B），让 calibration 落点不变量精确被测，
+    # 不被单位顺序检查抢报。
+    payload["train"].insert(0, payload["calibration"].pop())
+    with pytest.raises(SplitManifestError) as exc:
+        load_split_manifest(_resign(payload))
+    assert exc.value.reason_code == "calibration_conflict"
+
+
+def test_loader_rejects_reordered_units_even_with_valid_digest() -> None:
+    text = encode_split_manifest(_build([_row(SHA_A, "case-early"), _row(SHA_B, "case-mid")]))
+    payload = json.loads(text)
+    assert len(payload["train"]) == 2
+    payload["train"].reverse()
+    with pytest.raises(SplitManifestError) as exc:
+        load_split_manifest(_resign(payload))
+    assert exc.value.reason_code == "manifest_invalid"
+
+
+def test_calibration_sample_captured_by_unseen_family_rejects() -> None:
+    with pytest.raises(SplitManifestError) as exc:
+        _build(
+            [_row(SHA_A, "case-early")],
+            _label_set(_family(SHA_A, "fam-u")),
+            unseen_families=("fam-u",),
+            calibration_samples=(SHA_A,),
+        )
+    assert exc.value.reason_code == "calibration_conflict"
