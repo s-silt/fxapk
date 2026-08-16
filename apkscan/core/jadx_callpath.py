@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from apkscan.core.jadx_index import (
+    REASON_DUPLICATE_STRUCTURE,
     REASON_MALFORMED,
     JadxIndexError,
     LoadedIndex,
@@ -86,9 +87,13 @@ def _index_methods(
     """跨全部 shard 建方法表：id -> (caller 文件, calls)；简单名 -> 候选 id 列表。
 
     ★形状异常 fail-closed（对齐 find_value_usage）：坏结构当场揭穿，不许静默跳过。
+    ★同一方法 id 的重复：同 shard 内是擦除后同 arity 的合法重载——塌缩节点合并
+    出边（保持过近似语义）；跨 shard 重复意味着索引级类重复，fail-closed 拒绝，
+    绝不静默后者覆盖（后者覆盖会让结果依赖 shard 顺序、unique 被误标 ambiguous）。
     """
     methods: dict[str, tuple[str, list[object]]] = {}
     by_name: dict[str, list[str]] = {}
+    origin_shard: dict[str, int] = {}
     for si, shard in enumerate(index.shards):
         if not isinstance(shard, Mapping):
             raise JadxIndexError(REASON_MALFORMED, f"$.shards[{si}]")
@@ -131,7 +136,17 @@ def _index_methods(
                 ):
                     raise JadxIndexError(REASON_MALFORMED, f"$.shards[{si}].structure")
                 ident = f"{name}#{mn}/{arity}"
+                existing = methods.get(ident)
+                if existing is not None:
+                    if origin_shard[ident] != si:
+                        raise JadxIndexError(
+                            REASON_DUPLICATE_STRUCTURE, f"$.shards[{si}].structure"
+                        )
+                    merged = list(existing[1]) + list(calls)
+                    methods[ident] = (existing[0], merged)
+                    continue
                 methods[ident] = (rel, calls)
+                origin_shard[ident] = si
                 by_name.setdefault(mn, []).append(ident)
     for candidates in by_name.values():
         candidates.sort()

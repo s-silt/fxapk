@@ -1140,9 +1140,73 @@ _CALL_KEYWORDS = frozenset(
 )
 
 
-def _strip_string_literals(line: str) -> str:
-    """掏空行内字符串字面量——字面量里的 `name(` 不是调用点。"""
-    return re.sub(r'"(?:[^"\\]|\\.)*"', '""', line)
+def _sanitize_java_source(text: str) -> list[str]:
+    """把字符串/字符字面量内容与两种注释全部置空（保留行结构与逐行对齐）。
+
+    ★注释与字面量里的括号绝不参与配平（JADX 输出满是 ``/* renamed from: */``）；
+    块注释跨行由状态机跨行携带。返回行数恒等于 ``text.splitlines()``。
+    """
+    lines = text.splitlines()
+    sanitized: list[str] = []
+    state = "NORMAL"
+
+    for source_line in lines:
+        chars = list(source_line)
+        index = 0
+        while index < len(chars):
+            current = chars[index]
+            following = chars[index + 1] if index + 1 < len(chars) else ""
+
+            if state == "NORMAL":
+                if current == "/" and following == "/":
+                    # 行注释：本行剩余全部置空，状态不跨行。
+                    for j in range(index, len(chars)):
+                        chars[j] = " "
+                    break
+                if current == "/" and following == "*":
+                    chars[index] = " "
+                    chars[index + 1] = " "
+                    state = "BLOCK_COMMENT"
+                    index += 2
+                    continue
+                if current == '"':
+                    chars[index] = " "
+                    state = "STRING"
+                elif current == "'":
+                    chars[index] = " "
+                    state = "CHAR"
+                index += 1
+                continue
+
+            if state == "BLOCK_COMMENT":
+                if current == "*" and following == "/":
+                    chars[index] = " "
+                    chars[index + 1] = " "
+                    state = "NORMAL"
+                    index += 2
+                else:
+                    chars[index] = " "
+                    index += 1
+                continue
+
+            # STRING / CHAR：全部置空；反斜杠转义连吞一个字符；闭引号回 NORMAL。
+            closing = '"' if state == "STRING" else "'"
+            chars[index] = " "
+            if current == "\\":
+                if index + 1 < len(chars):
+                    chars[index + 1] = " "
+                    index += 2
+                else:
+                    index += 1
+            elif current == closing:
+                state = "NORMAL"
+                index += 1
+            else:
+                index += 1
+
+        sanitized.append("".join(chars))
+
+    return sanitized
 
 
 def _declared_arity(params: str) -> int:
@@ -1162,11 +1226,11 @@ def _method_body_digest(lines: list[str], start_line: int, end_line: int) -> str
     return "sha256:" + hashlib.sha256("\n".join(region).encode("utf-8")).hexdigest()
 
 
-def _method_end_line(lines: list[str], start_line: int) -> int:
-    """从签名行起做括号配平找方法闭括号行；找不到（截断文件）退回签名行。"""
+def _method_end_line(clean_lines: list[str], start_line: int) -> int:
+    """在已清理行上从签名行起做括号配平；找不到闭括号（截断文件）退回签名行。"""
     brace = 0
-    for number in range(start_line, len(lines) + 1):
-        clean = _strip_string_literals(lines[number - 1])
+    for number in range(start_line, len(clean_lines) + 1):
+        clean = clean_lines[number - 1]
         brace += clean.count("{") - clean.count("}")
         if brace <= 0:
             return number
@@ -1174,13 +1238,13 @@ def _method_end_line(lines: list[str], start_line: int) -> int:
 
 
 def _method_calls(
-    lines: list[str], start_line: int, end_line: int, limits: Limits
+    clean_lines: list[str], start_line: int, end_line: int, limits: Limits
 ) -> tuple[list[dict[str, object]], bool]:
-    """方法体内（不含签名行）的调用点；返回 (calls, 是否触界)。"""
+    """已清理方法体内（不含签名行）的调用点；返回 (calls, 是否触界)。"""
     calls: list[dict[str, object]] = []
     limited = False
     for line_no in range(start_line + 1, end_line + 1):
-        clean = _strip_string_literals(lines[line_no - 1])
+        clean = clean_lines[line_no - 1]
         for match in _CALL_SITE_RE.finditer(clean):
             callee = match.group(1)
             if callee in _CALL_KEYWORDS or len(callee) > limits.max_identifier_len:
@@ -1206,8 +1270,10 @@ def _extract_file_structure(
     方法体语句（更深一层）与匿名类不会被误判为成员。
     """
     lines = text.splitlines()
+    # ★匹配与配平全部走清理后的行；body_digest 仍然基于原始行（区域按打印形态摘要）。
+    clean_lines = _sanitize_java_source(text)
     package = ""
-    for line in lines:
+    for line in clean_lines:
         match = re.match(r"\s*package\s+([\w.]+)\s*;", line)
         if match:
             package = match.group(1)
@@ -1219,8 +1285,7 @@ def _extract_file_structure(
     stack: list[tuple[str, int, int]] = []
     limited = False
 
-    for number, raw in enumerate(lines, 1):
-        clean = _strip_string_literals(raw)
+    for number, clean in enumerate(clean_lines, 1):
         class_match = _CLASS_DECL_RE.search(clean)
         if class_match:
             simple = class_match.group(1)
@@ -1254,8 +1319,8 @@ def _extract_file_structure(
                     if len(methods) >= limits.max_methods_per_class:
                         limited = True
                     else:
-                        end = _method_end_line(lines, number)
-                        calls, calls_limited = _method_calls(lines, number, end, limits)
+                        end = _method_end_line(clean_lines, number)
+                        calls, calls_limited = _method_calls(clean_lines, number, end, limits)
                         limited = limited or calls_limited
                         methods.append(
                             {

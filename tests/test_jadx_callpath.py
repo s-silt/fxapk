@@ -593,3 +593,167 @@ def test_callpath_result_validates_paths_tuple() -> None:
             paths=("not-a-path",),  # type: ignore[arg-type]
         )
     assert exc.value.code == "invalid_query_paths"
+
+
+# ---------------------------------------------------------------------------
+# codex 复审补锁：跨 shard 重复 id、shard 序无关、零上限、同行重复调用、重复 digest 锚
+# ---------------------------------------------------------------------------
+
+
+def _build_two_dex_index_with(
+    tmp_path: Path, files_main: dict[str, str], files_extra: dict[str, str]
+) -> LoadedIndex:
+    src = tmp_path / "src"
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "classes.dex").write_bytes(b"dex-main")
+    (src / "extra.dex").write_bytes(b"dex-extra")
+    inputs = [
+        DexInput(
+            role=DexRole.APK_DEX,
+            ordinal=0,
+            source_label="classes.dex",
+            relative_path="classes.dex",
+            declared_digest=_digest(b"dex-main"),
+        ),
+        DexInput(
+            role=DexRole.EXTRA_DEX,
+            ordinal=0,
+            source_label="extra.dex",
+            relative_path="extra.dex",
+            declared_digest=_digest(b"dex-extra"),
+        ),
+    ]
+    lineage = verify_dex_inputs(src, inputs)
+    manifest = JadxIndexManifest(
+        index_key=derive_index_key(lineage, "1.5.2", _OPTS),
+        key_material=build_key_material(lineage, "1.5.2", _OPTS),
+        dex_lineage=lineage,
+        jadx_version="1.5.2",
+        options_digest=_OPTS,
+    )
+    main_root = tmp_path / "out-main"
+    extra_root = tmp_path / "out-extra"
+    _java_tree(main_root, files_main)
+    _java_tree(extra_root, files_extra)
+    by_role = {lin.role: lin for lin in lineage}
+    scans = {
+        by_role[DexRole.APK_DEX]: scan_java_sources(
+            main_root, [], lineage=by_role[DexRole.APK_DEX], limits=Limits()
+        ),
+        by_role[DexRole.EXTRA_DEX]: scan_java_sources(
+            extra_root, [], lineage=by_role[DexRole.EXTRA_DEX], limits=Limits()
+        ),
+    }
+    store = JadxIndexStore(tmp_path / "cache")
+    result = store.build_index(src, manifest, scan=scans)
+    assert isinstance(result, IndexBuildResult) and result.state == IndexBuildState.BUILT
+    loaded = store.load_index(manifest.index_key)
+    assert isinstance(loaded, LoadedIndex)
+    return loaded
+
+
+def test_duplicate_method_id_across_shards_rejected(tmp_path: Path) -> None:
+    """★两个 shard 携带同一 class#method/arity → fail-closed 拒绝，绝不静默后者覆盖。"""
+    loaded = _build_two_dex_index_with(
+        tmp_path,
+        {"com/a/App.java": APP_JAVA, "com/b/Helper.java": HELPER_JAVA},
+        {"com/a/App.java": APP_JAVA},  # extra dex 重复同一类
+    )
+    with pytest.raises(JadxIndexError) as exc:
+        trace_callpath(loaded, "com.a.App#onCreate/0", "com.b.Helper#fetch/1")
+    assert exc.value.code == "duplicate_structure"
+
+
+def test_trace_results_independent_of_shard_order(tmp_path: Path) -> None:
+    loaded = _build_two_dex_index(tmp_path)
+    reversed_index = LoadedIndex(
+        manifest=loaded.manifest,
+        shard_locators=tuple(reversed(loaded.shard_locators)),
+        coverage=loaded.coverage,
+        shards=tuple(reversed(loaded.shards)),
+    )
+    forward = trace_callpath(loaded, "com.a.App#onCreate/0", "com.c.Net#raw/1")
+    backward = trace_callpath(reversed_index, "com.a.App#onCreate/0", "com.c.Net#raw/1")
+    assert forward == backward and len(forward) == 1
+
+
+def test_zero_limits_yield_empty(tmp_path: Path) -> None:
+    loaded = _build_two_dex_index(tmp_path)
+    source, target = "com.a.App#onCreate/0", "com.c.Net#raw/1"
+    assert trace_callpath(loaded, source, target, limits=CallPathLimits(max_depth=0)) == ()
+    assert trace_callpath(loaded, source, target, limits=CallPathLimits(max_paths=0)) == ()
+    assert trace_callpath(loaded, source, target, limits=CallPathLimits(max_visited=0)) == ()
+
+
+def test_same_line_double_call_yields_single_deduped_path(tmp_path: Path) -> None:
+    dup_call = (
+        "package com.m;\n"
+        "\n"
+        "public class D {\n"
+        "    void go() {\n"
+        "        add(one(), one());\n"
+        "    }\n"
+        "\n"
+        "    int one() {\n"
+        "        return 1;\n"
+        "    }\n"
+        "\n"
+        "    int add(int a, int b) {\n"
+        "        return a + b;\n"
+        "    }\n"
+        "}\n"
+    )
+    loaded = _build_single_tree_index(tmp_path, {"com/m/D.java": dup_call})
+    paths = trace_callpath(loaded, "com.m.D#go/0", "com.m.D#one/0")
+    assert len(paths) == 1  # 同行两次同名调用 → 节点序列去重后只有一条路径
+    assert paths[0].edges[0].resolution == "unique"
+
+
+def test_duplicate_shard_digests_produce_distinct_anchors() -> None:
+    """相同 digest 的多个 shard 锚以 logical_id 区分——不触发 canonical tuple 重复拒绝。"""
+    events, action_id = _authorized_ledger("jadx-callpath-query")
+    out = append_jadx_callpath_projection(
+        events,
+        action_id=action_id,
+        result=CallPathQueryResult(
+            state=IndexQueryState.HIT,
+            coverage="complete",
+            paths=(_path(),),
+            manifest_digest="sha256:" + "a" * 64,
+            shard_digests=("sha256:" + "b" * 64, "sha256:" + "b" * 64),
+            reason_codes=("test",),
+        ),
+        actor=make_actor(),
+        occurred_at=FIXED_TIME,
+    )
+    outcome = jl.replay(out).outcomes[-1]
+    assert len(outcome.output_anchors) == 3
+    assert len({a.anchor_id for a in outcome.output_anchors}) == 3
+
+
+def test_same_arity_overloads_collapse_not_reject(tmp_path: Path) -> None:
+    """★同类内擦除后同 arity 的重载是合法 Java：塌缩节点合并两个重载的出边，
+    绝不因 id 撞车拒绝（跨 shard 重复才拒绝）。"""
+    overloads = (
+        "package com.n;\n"
+        "\n"
+        "public class O {\n"
+        "    void go(int x) {\n"
+        "        alpha();\n"
+        "    }\n"
+        "\n"
+        "    void go(String s) {\n"
+        "        beta();\n"
+        "    }\n"
+        "\n"
+        "    void alpha() {\n"
+        "    }\n"
+        "\n"
+        "    void beta() {\n"
+        "    }\n"
+        "}\n"
+    )
+    loaded = _build_single_tree_index(tmp_path, {"com/n/O.java": overloads})
+    to_alpha = trace_callpath(loaded, "com.n.O#go/1", "com.n.O#alpha/0")
+    to_beta = trace_callpath(loaded, "com.n.O#go/1", "com.n.O#beta/0")
+    assert len(to_alpha) == 1 and len(to_beta) == 1

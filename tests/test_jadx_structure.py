@@ -427,3 +427,97 @@ def test_load_rejects_legacy_1_0_manifest_as_schema_drift(tmp_path: Path) -> Non
     manifest_path.write_bytes(canonical_json_v1(value))
     miss = store.load_index(manifest.index_key)
     assert isinstance(miss, CacheMiss) and miss.reason == "schema_drift"
+
+
+# ---------------------------------------------------------------------------
+# codex 复审补锁：注释/字符字面量的括号、截断方法、签名形态
+# ---------------------------------------------------------------------------
+
+
+def test_braces_in_comments_and_char_literals_do_not_break_spans(tmp_path: Path) -> None:
+    """★JADX 输出满是 /* renamed from: */ 注释——注释与字符字面量里的括号绝不参与配平。"""
+    noisy = (
+        "package com.i;\n"
+        "\n"
+        "/* renamed from: a {\n"
+        " * } */\n"
+        "public class Noisy {\n"
+        "    void f() {\n"
+        "        char c = '}';\n"
+        "        // { open in line comment\n"
+        "        step();\n"
+        "    }\n"
+        "\n"
+        "    void step() {\n"
+        "    }\n"
+        "}\n"
+    )
+    src = tmp_path / "java"
+    _java_tree(src, {"com/i/Noisy.java": noisy})
+    result = scan_java_sources(src, [], lineage=_lin(), limits=Limits())
+    cls = _classes_of(result.structure, "com.i.Noisy")
+    assert [(m["name"], m["start_line"], m["end_line"]) for m in cls["methods"]] == [
+        ("f", 6, 10),
+        ("step", 12, 13),
+    ]
+    f_method = dict(cls["methods"][0])
+    assert [dict(c) for c in f_method["calls"]] == [{"callee": "step", "line": 9}]
+
+
+def test_truncated_method_without_closing_brace_locked(tmp_path: Path) -> None:
+    """闭括号缺失（截断/畸形文件）→ end_line 退回签名行、calls 为空——锁死降级形态。"""
+    cut = "package com.j;\n\npublic class Cut {\n    void f() {\n        step(\n"
+    src = tmp_path / "java"
+    _java_tree(src, {"com/j/Cut.java": cut})
+    result = scan_java_sources(src, [], lineage=_lin(), limits=Limits())
+    cls = _classes_of(result.structure, "com.j.Cut")
+    (method,) = [dict(m) for m in cls["methods"]]
+    assert method["name"] == "f"
+    assert method["end_line"] == method["start_line"] == 4
+    assert list(method["calls"]) == []
+
+
+def test_generic_array_returns_and_annotations(tmp_path: Path) -> None:
+    generic = (
+        "package com.k;\n"
+        "\n"
+        "public class G {\n"
+        "    @Override\n"
+        "    public Map<String, String> pairs(int n) {\n"
+        "        return null;\n"
+        "    }\n"
+        "\n"
+        "    int[] arr() {\n"
+        "        return null;\n"
+        "    }\n"
+        "}\n"
+    )
+    src = tmp_path / "java"
+    _java_tree(src, {"com/k/G.java": generic})
+    result = scan_java_sources(src, [], lineage=_lin(), limits=Limits())
+    cls = _classes_of(result.structure, "com.k.G")
+    assert [(m["name"], m["arity"], m["start_line"], m["end_line"]) for m in cls["methods"]] == [
+        ("pairs", 1, 5, 7),
+        ("arr", 0, 9, 11),
+    ]
+
+
+def test_multiline_signature_skipped_not_fatal(tmp_path: Path) -> None:
+    """跨行签名是文档化的启发式盲区：跳过该方法、不崩溃、不影响其它方法。"""
+    broken = (
+        "package com.l;\n"
+        "\n"
+        "public class M {\n"
+        "    void ok() {\n"
+        "    }\n"
+        "\n"
+        "    void broken(\n"
+        "        int a) {\n"
+        "    }\n"
+        "}\n"
+    )
+    src = tmp_path / "java"
+    _java_tree(src, {"com/l/M.java": broken})
+    result = scan_java_sources(src, [], lineage=_lin(), limits=Limits())
+    cls = _classes_of(result.structure, "com.l.M")
+    assert [m["name"] for m in cls["methods"]] == ["ok"]
