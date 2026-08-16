@@ -19,6 +19,13 @@ from apkscan.analyzers.jadx import JadxAnalyzer
 from tests.conftest import FakeContext
 from tests.test_jadx_index_wiring import _ctx, _owned, _patch  # 复用 P2-A 夹具
 
+
+@pytest.fixture(autouse=True)
+def _stub_resolve_jadx(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CI 机器没有真 jadx——resolve 必须 stub，否则本文件在装了 jadx 的机器上绿、
+    CI 上 disabled（「我这儿是绿的」是环境巧合，不是结论；同 conftest 的 adb 教训）。"""
+    monkeypatch.setattr(jadx.tools, "resolve_jadx", lambda: (["jadx"], {}))
+
 # 结构投影要有方法 region 才有 match 可数——P2-A 公共夹具的单行类没有方法，
 # 这里换成带方法体的类（JADX 形态：类声明与 { 同行、方法可被结构提取器识别）。
 _JAVA_WITH_METHODS = (
