@@ -29,15 +29,11 @@ KnowledgePack are out of scope.
 The new module is `apkscan/core/jadx_index.py`.
 
 ```python
-def build_manifest(
-    inputs: Sequence[DexInput],
-    *,
-    jadx_version: str,
-    options_digest: str,
-) -> JadxIndexManifest: ...
-    # DexInput carries (role, ordinal, source_label, dex_path-or-bytes).
-    # The library reads the DEX bytes itself and computes every lineage
-    # SHA-256 internally. Callers can never supply a digest assertion.
+# DexInput carries (role, ordinal, source_label, safe relative_path,
+# declared_digest). The library resolves the path under source_root, reads
+# the actual DEX bytes, recomputes SHA-256, and rejects any mismatch before
+# JADX runs — a declared digest is an obligation to verify, never a trusted
+# assertion, so a stale or forged digest cannot enter the key material.
 
 class JadxIndexStore:
     def __init__(
@@ -86,10 +82,10 @@ Each input DEX has a canonical lineage record containing:
 
 - a role (`apk_dex` or `extra_dex`);
 - a caller-provided ordinal within that role;
-- the DEX content digest (`sha256:<64 lowercase hex>`), **computed by the
-  library itself from the actual DEX bytes inside `build_manifest`** — the
-  API accepts bytes or a readable path, never a caller-asserted digest, so a
-  stale or forged digest cannot enter the key material;
+- the DEX content digest (`sha256:<64 lowercase hex>`), **always recomputed by
+  the library from the actual DEX bytes and verified against the declared
+  digest before use** — a mismatch is a structured rejection, so a stale or
+  forged digest cannot enter the key material;
 - the canonical source label, which is an opaque caller label and never an
   absolute filesystem path.
 
