@@ -16,6 +16,7 @@ from apkscan.core import reanalysis as rp
 from apkscan.core import reanalysis_contract as rxc
 from apkscan.core import reanalysis_ledger as rl
 from apkscan.commands.labels_cli import labels_app
+from apkscan.commands.split_cli import split_app
 from apkscan.core import recognition_contract as rc
 from apkscan.core.atomic import atomic_create_bytes
 
@@ -29,6 +30,9 @@ recognize_app = typer.Typer(
 
 # labels 子组（P4-C）：只读标签校验器，挂在同一 recognize 命名空间下。
 recognize_app.add_typer(labels_app, name="labels")
+
+# split 子组（P5-D）：防泄漏 split-manifest 的构建与只读复验。
+recognize_app.add_typer(split_app, name="split")
 
 DEFAULT_POLICY = rp.DEFAULT_ADMISSION_POLICY
 
