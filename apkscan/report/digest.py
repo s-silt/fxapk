@@ -570,6 +570,16 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
                     "与调用方断言的 baseline 结构匹配不构成鉴真结论。"
                 ),
             }
+        # 查询账本 sidecar 引用锚（P2-D2）：只投影绑定所需四字段；sidecar 内容由
+        # locator 指向，reason 保留在原始 meta 审计面。
+        raw_ledger = meta.get("jadx_judgment_ledger")
+        if isinstance(raw_ledger, dict):
+            jadx_index["ledger"] = {
+                "locator": raw_ledger.get("locator"),
+                "digest": raw_ledger.get("digest"),
+                "event_count": raw_ledger.get("event_count"),
+                "replay_ok": raw_ledger.get("replay_ok"),
+            }
         digest["jadx_index"] = jadx_index
 
     if network_attribution is not None:

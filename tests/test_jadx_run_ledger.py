@@ -9,7 +9,6 @@ subject = 样本 sha256（哈希失败不开账本流，绝不发空 subject）�
 from __future__ import annotations
 
 import hashlib
-import json
 from pathlib import Path
 
 import pytest
@@ -94,9 +93,12 @@ def test_ledger_written_and_replayable(
     run_event = events[0]
     subject = run_event.payload.subjects[0]  # type: ignore[union-attr]
     assert expected_sha in subject.value
-    # 具名自动策略 actor：非 human。
+    # 具名自动策略 actor：绝不伪装人签。
+    from apkscan.core import recognition_contract as rc
+
     for event in events:
-        assert event.actor.kind is not jl.rc.ActorKind.HUMAN if hasattr(jl, "rc") else True
+        assert event.actor.kind is not rc.ActorKind.HUMAN
+        assert event.actor.actor_id == "fxapk.pipeline.auto_policy"
 
     # meta 锚：相对 locator + 字节 digest + 事件数 + replay 结果。
     anchor = report.meta["jadx_judgment_ledger"]
@@ -164,3 +166,36 @@ def test_digest_surfaces_ledger_anchor() -> None:
         {"meta": {"jadx_index_status": "built", "jadx_index_key": "a1" * 32}, "leads": []}
     )
     assert "ledger" not in d2["jadx_index"]
+
+
+def test_ownership_action_lands_when_compared(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★baseline compared → 账本落第二个动作（jadx-ownership-projection），
+    自比全 match 产 INHERITED_OFFICIAL 观察。"""
+    from tests.test_jadx_ownership_wiring import _patch_with_methods
+
+    _patch_with_methods(monkeypatch)
+    ctx = _ctx_with_cache(tmp_path)
+    # 第一跑建索引拿 key。
+    report1, _ = _run(tmp_path, ctx)
+    key = report1.meta["jadx_index_key"]
+    # 第二跑自比 baseline，账本落到新 out 目录。
+    ctx.jadx_baseline_index = key
+    out2 = tmp_path / "out2"
+    out2.mkdir()
+    config = AnalysisConfig(online=False, out_dir=str(out2))
+    report2 = pipeline.run(ctx, config)
+    assert report2.meta["jadx_ownership_summary"]["status"] == "compared"
+    events = _read_chain(out2 / _LEDGER_NAME)
+    actions = [e.payload for e in events if e.event_type is jl.EventType.ACTION_PROPOSED]
+    assert [a.action_type for a in actions] == [
+        "jadx-usage-query", "jadx-ownership-projection",
+    ]
+    observations = [
+        e for e in events if e.event_type is jl.EventType.OBSERVATION_ADDED
+    ]
+    assert observations, "自比全 match 必须产 ownership 匹配观察"
+    assert all(
+        e.payload.observation_type == "jadx_ownership_match" for e in observations
+    )

@@ -92,6 +92,7 @@ META_WRITE_CATEGORIES = {
     'enriched_target_count': 'record',
     'enrichment_skipped_offline': 'coverage',
     'extra_dex_visibility': 'coverage',
+    'jadx_judgment_ledger': 'coverage',
     'missing_analyzers': 'coverage',
     'mode': 'signal',
     'network_attribution': 'signal',
@@ -692,6 +693,29 @@ def _stage_visibility(state: _PipelineState) -> None:
     state.meta["visibility"] = visibility.assess({"meta": state.meta})
 
 
+def _stage_judgment_ledger(state: _PipelineState) -> None:
+    """启用持久 JADX 索引时发布查询账本 sidecar，把引用锚写入 report meta（P2-D2）。
+
+    ledger 是附加消费面：模块内部把构造/发布/replay 故障收敛为 ``replay_ok=False``
+    的稳定失败锚，不向本 stage 抛出。未启用索引、无输出目录或样本哈希不可得时
+    返回 None、不写 meta 键（绝不发空 subject）。
+    """
+    cache_root = getattr(state.ctx, "jadx_cache_root", None)
+    if not isinstance(cache_root, str) or not cache_root:
+        return
+    out_dir = state.config.out_dir
+    if not isinstance(out_dir, str) or not out_dir:
+        return
+
+    from apkscan.core.jadx_run_ledger import build_and_publish
+
+    anchor = build_and_publish(
+        ctx=state.ctx, meta=state.meta, cache_root=cache_root, out_dir=out_dir
+    )
+    if anchor is not None:
+        state.meta["jadx_judgment_ledger"] = anchor
+
+
 def _stage_network_attribution(state: _PipelineState) -> None:
     """附加视图：把**已收集的端点事实**组装成基础设施归因图谱 + 角色候选（PR3-PR8）。纯被动、
     不新增网络/富化/文件 I/O、不反哺闭环/线索/退出码；仅写 meta["network_attribution"]。云/ASN/CDN
@@ -845,6 +869,7 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     #   补法建议要据此告诉人"授权后重跑可取回配置"）。曾排在 config_probe_plan 之前，于是
     #   求值时那份预案还不存在——预案生成了 16 条候选、补法建议却是空的。
     _run_stage(state, "visibility", _stage_visibility)             # 证据可见性 → 哪些「未发现」不可下
+    _run_stage(state, "judgment_ledger", _stage_judgment_ledger)   # JADX 查询账本 sidecar；内部 fail-open
     _apply_stage_failures(state)          # 阶段级故障反馈 analysis_status
     state.meta["stage_status"] = state.stage_status
     report = _assemble_report(state)

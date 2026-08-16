@@ -24,10 +24,12 @@ _EXPECTED_STAGES = [
     "asset_score",
     # 配置探测预案要用 asset_score 的"最像自有后端"排序挑 host，故必须排在它之后。
     "config_probe_plan",
-    # ★可见性求值必须是**最后一个**：它读遍前面各阶段写下的事实（is_hardened /
+    # ★可见性求值必须在全部事实收集之后：它读遍前面各阶段写下的事实（is_hardened /
     # dex_string_pool / artifact_lineage / repack_identity / config_probe_plan）。
     # 曾排在 config_probe_plan 之前，结果预案生成了 16 条候选而补法建议是空的。
     "visibility",
+    # 查询账本 sidecar 在可见性之后收尾（P2-D2）：读 jadx meta 终态，内部 fail-open。
+    "judgment_ledger",
 ]
 
 
