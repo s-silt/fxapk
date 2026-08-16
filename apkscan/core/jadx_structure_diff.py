@@ -13,6 +13,7 @@ from apkscan.core.jadx_index import (
     LoadedIndex,
     _normalize_safe_relative_path,
     _validate_digest,
+    _validate_shard_structure,
 )
 
 
@@ -103,6 +104,15 @@ def _read_structure(
         shard_path = f"$.shards[{shard_index}]"
         if not isinstance(shard, Mapping):
             _malformed(shard_path)
+
+        # ★与 load 侧共用同一套完整校验（排序/重复三元组/标识符/path∈files）——
+        # 单一来源杜绝两套规则漂移；伪造 LoadedIndex 在此 fail-closed。
+        files_raw = shard.get("files")
+        if not isinstance(files_raw, list) or any(
+            not isinstance(item, str) for item in files_raw
+        ):
+            _malformed(f"{shard_path}.files")
+        _validate_shard_structure(shard, set(files_raw))
 
         structure = shard.get("structure")
         if not isinstance(structure, Mapping) or set(structure) != {"classes"}:

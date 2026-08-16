@@ -303,3 +303,137 @@ def test_method_region_validation(overrides: dict) -> None:
     }
     with pytest.raises(JadxIndexError):
         MethodRegion(**{**base, **overrides})  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# codex 复审补锁：与 load 侧同强度的 fail-closed、多重集边界
+# ---------------------------------------------------------------------------
+
+
+def _forge(loaded: LoadedIndex, mutate) -> LoadedIndex:  # type: ignore[no-untyped-def]
+    import copy
+
+    shard = copy.deepcopy(dict(loaded.shards[0]))
+    mutate(shard)
+    return LoadedIndex(
+        manifest=loaded.manifest,
+        shard_locators=loaded.shard_locators,
+        coverage=loaded.coverage,
+        shards=(shard,),
+    )
+
+
+def test_same_shard_duplicate_class_rejected(tmp_path: Path) -> None:
+    loaded = _build_index(tmp_path, "l", {"com/b/B.java": B_JAVA})
+
+    def _dup(shard: dict) -> None:
+        classes = shard["structure"]["classes"]
+        classes.append(copy_class := dict(classes[0]))
+        assert copy_class["name"] == classes[0]["name"]
+
+    forged = _forge(loaded, _dup)
+    with pytest.raises(JadxIndexError) as exc:
+        diff_index_structure(forged, loaded)
+    assert exc.value.code == "duplicate_structure"
+
+
+def test_duplicate_method_triple_rejected(tmp_path: Path) -> None:
+    loaded = _build_index(tmp_path, "l", {"com/b/B.java": B_JAVA})
+
+    def _dup(shard: dict) -> None:
+        methods = shard["structure"]["classes"][0]["methods"]
+        methods.append(dict(methods[0]))
+
+    forged = _forge(loaded, _dup)
+    with pytest.raises(JadxIndexError) as exc:
+        diff_index_structure(forged, loaded)
+    assert exc.value.code == "duplicate_structure"
+
+
+def test_bad_class_name_and_disorder_rejected(tmp_path: Path) -> None:
+    loaded = _build_index(tmp_path, "l", {"com/b/B.java": B_JAVA})
+
+    def _bad_name(shard: dict) -> None:
+        shard["structure"]["classes"][0]["name"] = "com..Bad"
+
+    with pytest.raises(JadxIndexError) as exc:
+        diff_index_structure(_forge(loaded, _bad_name), loaded)
+    assert exc.value.code == "malformed"
+
+    def _disorder(shard: dict) -> None:
+        first = shard["structure"]["classes"][0]
+        earlier = dict(first)
+        earlier["name"] = "aaa.First"
+        shard["structure"]["classes"] = [first, earlier]  # 降序 → 乱序
+
+    with pytest.raises(JadxIndexError) as exc:
+        diff_index_structure(_forge(loaded, _disorder), loaded)
+    assert exc.value.code == "malformed"
+
+
+def test_class_path_outside_files_rejected(tmp_path: Path) -> None:
+    loaded = _build_index(tmp_path, "l", {"com/b/B.java": B_JAVA})
+
+    def _reroute(shard: dict) -> None:
+        shard["structure"]["classes"][0]["path"] = "com/zzz/N.java"
+
+    with pytest.raises(JadxIndexError) as exc:
+        diff_index_structure(_forge(loaded, _reroute), loaded)
+    assert exc.value.code == "malformed"
+
+
+def test_multiset_equal_digests_different_lines_unchanged(tmp_path: Path) -> None:
+    """digest 多重集相同（声明顺序/行号不同）→ unchanged；[A,A] vs [A,B] → changed。"""
+    two_same_sig = (
+        "package com.r;\n"
+        "\n"
+        "public class T {\n"
+        "    void go(int x) {\n"
+        "        k = 1;\n"
+        "    }\n"
+        "\n"
+        "    void go(String s) {\n"
+        "        k = 1;\n"
+        "    }\n"
+        "}\n"
+    )
+    # 右侧对调两个声明的顺序（行号变、digest 多重集不变）。
+    swapped = (
+        "package com.r;\n"
+        "\n"
+        "public class T {\n"
+        "    void go(String s) {\n"
+        "        k = 1;\n"
+        "    }\n"
+        "\n"
+        "    void go(int x) {\n"
+        "        k = 1;\n"
+        "    }\n"
+        "}\n"
+    )
+    left = _build_index(tmp_path, "l", {"com/r/T.java": two_same_sig})
+    right = _build_index(tmp_path, "r", {"com/r/T.java": swapped})
+    diff = diff_index_structure(left, right)
+    assert diff.changed_methods == () and diff.unchanged_methods == 1
+
+    # [A,A] vs [A,B]：完全同签名的两个声明，一侧改其中一个 body → changed。
+    dup_decl = (
+        "package com.s;\n"
+        "\n"
+        "public class U {\n"
+        "    void go(int x) {\n"
+        "        k = 1;\n"
+        "    }\n"
+        "\n"
+        "    void go(int x) {\n"
+        "        k = 1;\n"
+        "    }\n"
+        "}\n"
+    )
+    dup_changed = dup_decl.replace("k = 1;\n    }\n}", "k = 2;\n    }\n}")
+    aa = _build_index(tmp_path, "aa", {"com/s/U.java": dup_decl})
+    ab = _build_index(tmp_path, "ab", {"com/s/U.java": dup_changed})
+    diff2 = diff_index_structure(aa, ab)
+    (changed,) = diff2.changed_methods
+    assert (changed.class_name, changed.method) == ("com.s.U", "go/1")
+    assert len(changed.left_regions) == 2 and len(changed.right_regions) == 2
