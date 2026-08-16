@@ -17,7 +17,33 @@ import pytest
 from apkscan.analyzers import jadx
 from apkscan.analyzers.jadx import JadxAnalyzer
 from tests.conftest import FakeContext
-from tests.test_jadx_index_wiring import _ctx, _patch  # 复用 P2-A 夹具
+from tests.test_jadx_index_wiring import _ctx, _owned, _patch  # 复用 P2-A 夹具
+
+# 结构投影要有方法 region 才有 match 可数——P2-A 公共夹具的单行类没有方法，
+# 这里换成带方法体的类（JADX 形态：类声明与 { 同行、方法可被结构提取器识别）。
+_JAVA_WITH_METHODS = (
+    "class Alpha {\n"
+    "    void work() {\n"
+    '        String u = "https://cfg-host.example/api";\n'
+    "    }\n"
+    "}\n"
+)
+
+
+def _patch_with_methods(monkeypatch: pytest.MonkeyPatch) -> None:
+    """run_owned 替身：--version 分流 + 写带方法的合成 java 树。"""
+
+    def _run(cmd, *, timeout, env=None):  # noqa: ANN001
+        if "--version" in cmd:
+            return _owned(0, stdout="1.5.2\n")
+        out_dir = Path(cmd[cmd.index("-d") + 1])
+        pkg = out_dir / "sources" / "com" / "x"
+        pkg.mkdir(parents=True, exist_ok=True)
+        (pkg / "Alpha.java").write_text(_JAVA_WITH_METHODS, encoding="utf-8")
+        return _owned(0)
+
+    monkeypatch.setattr(jadx.proctree, "run_owned", _run)
+
 
 # ---------------------------------------------------------------------------
 # 夹具：先跑一次 analyze 建 baseline 索引，再对 subject 启用 baseline key
@@ -26,7 +52,7 @@ from tests.test_jadx_index_wiring import _ctx, _patch  # 复用 P2-A 夹具
 
 def _built_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[FakeContext, str]:
     """建一份索引并返回 (ctx, key)：同一 ctx 再次 analyze 会 reused 同 key。"""
-    _patch(monkeypatch)
+    _patch_with_methods(monkeypatch)
     ctx = _ctx(tmp_path)
     result = JadxAnalyzer().analyze(ctx)
     assert result.meta["jadx_index_status"] == "built"
@@ -113,6 +139,15 @@ def test_verdict_surface_byte_identical_with_and_without_baseline(
 
     def _canon(result, *, drop: set[str]) -> str:  # noqa: ANN001
         meta = {k: v for k, v in result.meta.items() if k not in drop}
+        # receipt.index.baseline 是设计要求的比较留痕（记录面），不属于 verdict 面；
+        # 红线比较剔除它——其余 receipt 内容必须逐字节一致。
+        receipt = meta.get("jadx_receipt")
+        if isinstance(receipt, dict):
+            index_block = receipt.get("index")
+            if isinstance(index_block, dict):
+                index_block = {k: v for k, v in index_block.items() if k != "baseline"}
+                receipt = {**receipt, "index": index_block}
+                meta = {**meta, "jadx_receipt": receipt}
         payload = {
             "meta": meta,
             "endpoints": [e.value for e in result.endpoints],

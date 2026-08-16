@@ -538,6 +538,29 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
         index_key = meta.get("jadx_index_key")
         if isinstance(index_key, str) and re.fullmatch(r"[0-9a-f]{64}", index_key):
             jadx_index["key"] = index_key
+        # ownership 比较小节（P2-C）：只透出 compared 摘要；unavailable/非法摘要不建
+        # comparison。不输出 ownership 枚举值，带"非鉴真"caveat——INHERITED_OFFICIAL
+        # 绝不能被排版成鉴真结论。
+        raw_summary = meta.get("jadx_ownership_summary")
+        if isinstance(raw_summary, dict) and raw_summary.get("status") != "unavailable":
+
+            def _nonnegative_int(value: object) -> int:
+                if isinstance(value, bool):
+                    return int(value)
+                if isinstance(value, int) and value >= 0:
+                    return value
+                return 0
+
+            jadx_index["comparison"] = {
+                "matches": _nonnegative_int(raw_summary.get("matches")),
+                "modified": _nonnegative_int(raw_summary.get("modified")),
+                "absent": _nonnegative_int(raw_summary.get("absent")),
+                "authenticity_asserted": raw_summary.get("authenticity_asserted") is True,
+                "caveat": (
+                    "此处仅表示 JADX 结构匹配/差异，不是来源真实性或官方身份鉴真；"
+                    "与调用方断言的 baseline 结构匹配不构成鉴真结论。"
+                ),
+            }
         digest["jadx_index"] = jadx_index
 
     if network_attribution is not None:
