@@ -39,7 +39,11 @@ _POSITIVE_STATES = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class IndexQueryResult:
-    """一次索引查询的完整结局（适配器的唯一输入载体）。"""
+    """一次索引查询的完整结局（适配器的唯一输入载体）。
+
+    外部调用者的输入面：构造期即校验，坏输入在这里被结构化拒绝，
+    不留到投影中途炸成非契约异常。
+    """
 
     state: IndexQueryState
     coverage: str | None
@@ -48,6 +52,18 @@ class IndexQueryResult:
     shard_digests: tuple[str, ...] = ()
     reason_codes: tuple[str, ...] = ()
     query_receipt_locator: rc.EvidenceLocator | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.state, IndexQueryState):
+            raise JadxIndexError("invalid_query_state", "$.state")
+        if self.coverage is not None and self.coverage not in ("complete", "partial"):
+            raise JadxIndexError("invalid_query_coverage", "$.coverage")
+        if not isinstance(self.hits, tuple) or any(
+            not isinstance(hit, UsageHit) for hit in self.hits
+        ):
+            raise JadxIndexError("invalid_query_hits", "$.hits")
+        if not isinstance(self.shard_digests, tuple) or not isinstance(self.reason_codes, tuple):
+            raise JadxIndexError("invalid_query_tuples", "$")
 
 
 def _coverage_status(state: IndexQueryState, coverage: str | None) -> rc.CoverageStatus:

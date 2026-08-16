@@ -123,15 +123,33 @@ def test_manifest_requires_valid_options_digest() -> None:
     不存在"看起来合法"的默认值可以静默通过。"""
     lin = DexLineage(DexRole.APK_DEX, 0, "classes.dex", _digest(b"x"))
     key = derive_index_key([lin], "1.5.2", _OPTS)
+    material = build_key_material([lin], "1.5.2", _OPTS)
     with pytest.raises(JadxIndexError) as exc:
         JadxIndexManifest(
             index_key=key,
-            key_material={},
+            key_material=material,
             dex_lineage=(lin,),
             jadx_version="1.5.2",
             options_digest=INDEX_SCHEMA_VERSION,  # 恰是曾经的坏默认值
         )
     assert _code_of(exc) == "invalid_digest"
+
+
+def test_manifest_rejects_unknown_key_material_keys() -> None:
+    """★codex 复审必须项：key_material 未知键是不影响身份的自由载荷通道，两侧拒绝。"""
+    lin = DexLineage(DexRole.APK_DEX, 0, "classes.dex", _digest(b"x"))
+    key = derive_index_key([lin], "1.5.2", _OPTS)
+    material = dict(build_key_material([lin], "1.5.2", _OPTS))
+    material["smuggled"] = "payload"
+    with pytest.raises(JadxIndexError) as exc:
+        JadxIndexManifest(
+            index_key=key,
+            key_material=material,
+            dex_lineage=(lin,),
+            jadx_version="1.5.2",
+            options_digest=_OPTS,
+        )
+    assert _code_of(exc) == "invalid_key_material"
 
 
 def test_manifest_rejects_schema_drift() -> None:
@@ -140,7 +158,7 @@ def test_manifest_rejects_schema_drift() -> None:
     with pytest.raises(JadxIndexError) as exc:
         JadxIndexManifest(
             index_key=key,
-            key_material={},
+            key_material=build_key_material([lin], "1.5.2", _OPTS),
             dex_lineage=(lin,),
             jadx_version="1.5.2",
             options_digest=_OPTS,

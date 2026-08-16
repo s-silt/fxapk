@@ -148,6 +148,15 @@ The store resolves `cache_root` and every protected root before use. It rejects:
   files, manifest, or shard paths;
 - `..`, absolute, drive-qualified, or separator-ambiguous shard/locator names.
 
+**Trust boundary (explicit):** the cache root and its parent path must be
+exclusively managed by a trusted principal. Containment checks defend against
+mistaken or malicious *inputs* (locators, roots, prepared artifacts), not
+against an attacker who can concurrently mutate the cache directory itself —
+check-then-use windows (TOCTOU, concurrent reparse-point swaps) are outside
+the threat model, because local write access to the cache root already implies
+the ability to forge every artifact in it. Deployments that cannot guarantee
+this exclusivity must not enable the persistent index.
+
 The implementation uses resolved component containment, not string prefixes.
 Temporary files are created only inside the resolved cache directory. Index
 locators are slash-normalized relative paths and are checked to remain inside

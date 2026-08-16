@@ -204,7 +204,14 @@ class JadxIndexManifest:
     def __post_init__(self) -> None:
         if not isinstance(self.index_key, str) or not re.fullmatch(r"[0-9a-f]{64}", self.index_key):
             _fail(REASON_INVALID_DIGEST, "$.index_key")
-        if not isinstance(self.key_material, Mapping):
+        # key_material 只允许四个受控键：未知键不参与 derive_index_key，却会随
+        # canonical manifest 落盘——允许它们存在等于留一个不影响身份的自由载荷通道。
+        if not isinstance(self.key_material, Mapping) or set(self.key_material) != {
+            "dex_lineage",
+            "jadx_version",
+            "options_digest",
+            "index_schema_version",
+        }:
             _fail("invalid_key_material", "$.key_material")
         if not isinstance(self.dex_lineage, tuple):
             _fail("lineage_must_be_tuple", "$.dex_lineage")
@@ -551,7 +558,13 @@ def _resolve_root(value: str | os.PathLike[str], reason: str) -> Path:
 
 
 def _contained_locator(cache_root: Path, locator: Path) -> Path:
-    """校验 locator 解析后留在 cache_root 内，已存在组件无 symlink/junction/reparse 逃逸。"""
+    """校验 locator 解析后留在 cache_root 内，已存在组件无 symlink/junction/reparse 逃逸。
+
+    ★信任边界（spec 同步声明）：cache root 及其父路径必须由受信任主体独占管理。
+    本检查防的是**错误/恶意输入**（locator、root、预置产物），不防「检查后、使用前」
+    并发改写 cache 目录的攻击者（TOCTOU/并发 reparse 替换）——能写 cache root 的
+    攻击者本就能伪造其中一切产物，该场景在威胁模型之外。
+    """
     try:
         relative = locator.relative_to(cache_root)
     except ValueError:
@@ -711,8 +724,13 @@ class JadxIndexStore:
             return CacheMiss(REASON_KEY_MISMATCH, "manifest index_key")
 
         key_material = value.get("key_material")
-        if not isinstance(key_material, dict):
-            return CacheMiss(REASON_MALFORMED, "key_material")
+        if not isinstance(key_material, dict) or set(key_material) != {
+            "dex_lineage",
+            "jadx_version",
+            "options_digest",
+            "index_schema_version",
+        }:
+            return CacheMiss(REASON_MALFORMED, "key_material keys")
         try:
             lineage = _lineage_from_records(key_material.get("dex_lineage"))
             jadx_version = key_material.get("jadx_version")
