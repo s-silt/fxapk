@@ -369,3 +369,24 @@ def test_determinism_under_input_reordering() -> None:
     p_other = _eval_pairs(_PAIR_GOLD, tuple(reversed(rankings)))
     assert p_one.recall_at_k == p_other.recall_at_k
     assert p_one.mean_average_precision == p_other.mean_average_precision
+
+
+# --------------------------------------------------- codex 复审补锁（P1）
+
+
+def test_promotion_derivation_rejects_empty_consumption_directly() -> None:
+    from apkscan.core.recognition_evaluation import derive_promotion_eligible
+
+    base: dict = {
+        "split_name": "test_temporal_seen",
+        "label_count": 1,
+        "layers_used": ("gold_external",),
+        "lineages_used": ("queue-external",),
+    }
+    assert derive_promotion_eligible(**base, pair_task=True) is True
+    # 空 layers_used：空集是任意集合子集，必须显式拒
+    assert derive_promotion_eligible(**{**base, "layers_used": ()}, pair_task=False) is False
+    # pair 任务空 lineages_used 同理
+    assert derive_promotion_eligible(**{**base, "lineages_used": ()}, pair_task=True) is False
+    # 非 pair 任务不受 lineage 门约束
+    assert derive_promotion_eligible(**{**base, "lineages_used": ()}, pair_task=False) is True

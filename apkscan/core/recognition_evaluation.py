@@ -143,9 +143,14 @@ def derive_promotion_eligible(
     """按实际消费标签推导晋升资格。"""
     if split_name not in _PROMOTION_SPLITS or label_count <= 0:
         return False
+    # 空消费集合不得晋级——空集是任意集合的子集，必须先拒（codex 复审 P1）。
+    if not layers_used:
+        return False
     if not set(layers_used).issubset(_PROMOTION_LAYERS):
         return False
-    if pair_task and not set(lineages_used).issubset(_PROMOTION_PAIR_LINEAGES):
+    if pair_task and (
+        not lineages_used or not set(lineages_used).issubset(_PROMOTION_PAIR_LINEAGES)
+    ):
         return False
     return True
 
