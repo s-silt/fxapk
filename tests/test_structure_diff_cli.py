@@ -277,3 +277,137 @@ def test_detail_caps_truncate_with_full_counts(
     assert section["added_classes_emitted"] == 1
     assert len(section["added_classes"]) == 1
     assert section["truncated"] is True
+
+
+# ---------------------------------------------------------------------------
+# 复审补锁（codex P2-B 复审）
+# ---------------------------------------------------------------------------
+
+
+def test_uppercase_json_operand_stays_on_json_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """.JSON 操作数（Windows 常见）：与 _report_dict_for 同口径大小写不敏感——
+    放行后必走 JSON 读取分支，绝不进分析路径（load_apk 零调用锁死等价性）。"""
+
+    def _boom(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise AssertionError("大小写变体也绝不允许进入分析路径")
+
+    monkeypatch.setattr(cli, "load_apk", _boom)
+    cache_root, key = _build_real_index(tmp_path, "uc", _OLD_JAVA)
+    upper = tmp_path / "OLD.JSON"
+    upper.write_text(
+        json.dumps({"meta": {}, "leads": [], "endpoints": [], "findings": []}),
+        encoding="utf-8",
+    )
+    new = _report_file(tmp_path, "new.json")
+    result = runner.invoke(
+        cli.app,
+        ["diff", str(upper), str(new),
+         "--jadx-cache-root", str(cache_root),
+         "--jadx-index-old", key, "--jadx-index-new", key],
+    )
+    assert result.exit_code == 0  # 合法 JSON 报告，不因后缀大小写被拒
+
+
+def test_no_index_args_output_keyset_unchanged(tmp_path: Path) -> None:
+    """无 index 参数时输出键集恰为既有五键——锁"没有静默新增键"。"""
+    code, data, _ = _diff_with_index(tmp_path)
+    assert code == 0 and data is not None
+    assert set(data) == {"leads", "endpoints", "findings", "meta_changes", "summary"}
+
+
+def test_bad_key_never_touches_store(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★证伪加强：key 语法非法时 JadxIndexStore 构造一次都不许发生。"""
+    import apkscan.core.jadx_index as ji
+
+    def _boom(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise AssertionError("语法关之前绝不允许触碰 store")
+
+    monkeypatch.setattr(ji.JadxIndexStore, "__init__", _boom)
+    code, _, _ = _diff_with_index(
+        tmp_path,
+        "--jadx-cache-root", str(tmp_path / "cache"),
+        "--jadx-index-old", "Z" * 64,
+        "--jadx-index-new", "a" * 64,
+    )
+    assert code == 2
+
+
+def test_diff_engine_exception_folds_to_stable_reason(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★fail-open 加强：diff_index_structure 抛带路径的 JadxIndexError →
+    reason 折叠为稳定码，JSON 不含路径/异常文本。"""
+    import apkscan.core.jadx_structure_diff as jsd
+    from apkscan.core.jadx_index import JadxIndexError
+
+    cache_root, key = _build_real_index(tmp_path, "boom", _OLD_JAVA)
+
+    def _boom(left, right):  # noqa: ANN001, ANN202
+        raise JadxIndexError(r"C:\evil path\leak", "$.x")
+
+    monkeypatch.setattr(jsd, "diff_index_structure", _boom)
+    code, data, _ = _diff_with_index(
+        tmp_path,
+        "--jadx-cache-root", str(cache_root),
+        "--jadx-index-old", key, "--jadx-index-new", key,
+    )
+    assert code == 0 and data is not None
+    section = data["structure_diff"]
+    assert section["status"] == "unavailable"
+    assert section["reason"] == "index_unavailable"  # 非法 code 已折叠
+    assert "evil" not in json.dumps(data)
+
+
+def test_partial_coverage_emits_caveat(tmp_path: Path) -> None:
+    """partial 侧参与对比 → coverage_partial caveat 出现；ok 段每组明细齐备 total/emitted。"""
+    # max_files=1 截断出 partial coverage 的索引。
+    src = tmp_path / "src-part"
+    src.mkdir()
+    dex = src / "classes.dex"
+    dex.write_bytes(b"dex-part")
+    digest = "sha256:" + hashlib.sha256(dex.read_bytes()).hexdigest()
+    lineage = verify_dex_inputs(
+        src,
+        [DexInput(role=DexRole.APK_DEX, ordinal=0, source_label="apk",
+                  relative_path="classes.dex", declared_digest=digest)],
+    )
+    key = derive_index_key(lineage, "1.5.2", _OPTS)
+    manifest = JadxIndexManifest(
+        index_key=key, key_material=build_key_material(lineage, "1.5.2", _OPTS),
+        dex_lineage=lineage, jadx_version="1.5.2", options_digest=_OPTS,
+    )
+    java_root = tmp_path / "java-part"
+    for rel, content in _OLD_JAVA.items():
+        target = java_root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    scan = scan_java_sources(java_root, [], lineage=lineage[0], limits=Limits(max_files=1))
+    assert scan.coverage == "partial"
+    store = JadxIndexStore(tmp_path / "cache")
+    built = store.build_index(src, manifest, scan=scan)
+    assert isinstance(built, IndexBuildResult)
+
+    cache_root, full_key = _build_real_index(tmp_path, "full", _NEW_JAVA)
+    code, data, _ = _diff_with_index(
+        tmp_path,
+        "--jadx-cache-root", str(cache_root),
+        "--jadx-index-old", key, "--jadx-index-new", full_key,
+    )
+    assert code == 0 and data is not None
+    section = data["structure_diff"]
+    assert section["status"] == "ok"
+    assert any(c["code"] == "coverage_partial" for c in section["caveats"])
+    assert section["absence_claimable"] is False
+    # 每组明细齐备 total/emitted。
+    for name in ("added_classes", "removed_classes", "added_methods",
+                 "removed_methods", "changed"):
+        assert f"{name}_total" in section and f"{name}_emitted" in section
+    # manifest_digest 与 cache 内文件字节精确一致。
+    expected = "sha256:" + hashlib.sha256(
+        (cache_root / key / "manifest.json").read_bytes()
+    ).hexdigest()
+    assert section["old"]["manifest_digest"] == expected
