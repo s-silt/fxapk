@@ -823,8 +823,23 @@ class JadxIndexStore:
         self,
         source_root: str | os.PathLike[str],
         manifest: JadxIndexManifest,
+        *,
+        scan: "ShardScanResult | Mapping[DexLineage, ShardScanResult] | None" = None,
     ) -> IndexBuildResult | CacheUnavailable:
         index_key = manifest.index_key
+
+        # S3 扫描结果（可选）：无扫描输入时保持 S2 行为——空 files/postings、
+        # coverage 取 manifest 值；有扫描输入时逐 lineage 落 postings，
+        # manifest coverage 取最差值（partial 传染）。
+        scans: dict[DexLineage, "ShardScanResult"]
+        if scan is None:
+            scans = {}
+        elif isinstance(scan, ShardScanResult):
+            scans = {scan.lineage: scan}
+        elif isinstance(scan, Mapping):
+            scans = dict(scan)
+        else:
+            _fail(REASON_MALFORMED, "$.scan")
 
         existing = self.load_index(index_key)
         if isinstance(existing, LoadedIndex):
@@ -841,16 +856,26 @@ class JadxIndexStore:
         try:
             shard_refs: list[ShardRef] = []
             shard_locators: list[str] = []
+            coverages: list[str] = []
             for lineage in manifest.dex_lineage:
                 shard_key = derive_shard_key(
                     lineage, manifest.jadx_version, manifest.options_digest
                 )
+                current = scans.get(lineage)
+                if current is None:
+                    files: list[str] = []
+                    postings: list[Mapping[str, object]] = []
+                    coverages.append(manifest.coverage)
+                else:
+                    files = list(current.files)
+                    postings = [dict(p) for p in current.postings]
+                    coverages.append(current.coverage)
                 shard_record = {
                     "index_schema_version": manifest.index_schema_version,
                     "shard_key": shard_key,
                     "lineage": lineage.to_record(),
-                    "files": [],
-                    "postings": [],
+                    "files": files,
+                    "postings": postings,
                 }
                 shard_bytes = canonical_json_v1(shard_record)
                 path = self._shard_path(index_key, shard_key)
@@ -861,8 +886,14 @@ class JadxIndexStore:
             aggregate = hashlib.sha256(
                 "".join(sorted(ref.digest for ref in shard_refs)).encode("ascii")
             ).hexdigest()
+            final_coverage = (
+                "partial" if any(c == "partial" for c in coverages) else manifest.coverage
+            )
             final_manifest = replace(
-                manifest, shard_refs=tuple(shard_refs), aggregate_digest=aggregate
+                manifest,
+                shard_refs=tuple(shard_refs),
+                aggregate_digest=aggregate,
+                coverage=final_coverage,
             )
             manifest_bytes = canonical_json_v1(_manifest_record(final_manifest))
             self._publish_bytes(self._manifest_path(index_key), manifest_bytes)
@@ -881,3 +912,245 @@ class JadxIndexStore:
                 coverage="failed",
                 diagnostics=(f"{exc.code} at {exc.field_path}",),
             )
+
+
+# ---------------------------------------------------------------------------
+# S3：查询层——确定性枚举、bounded postings、find_value_usage
+# ---------------------------------------------------------------------------
+
+#: 查询值长度上限：Limits 默认与 find_value_usage 的独立防线共用同一常量。
+_DEFAULT_MAX_VALUE_LEN = 4096
+
+
+@dataclass(frozen=True, slots=True)
+class Limits:
+    max_files: int = 5000
+    max_file_bytes: int = 4 * 1024 * 1024
+    max_value_len: int = _DEFAULT_MAX_VALUE_LEN
+
+    def __post_init__(self) -> None:
+        for name in ("max_files", "max_file_bytes", "max_value_len"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                _fail(REASON_MALFORMED, f"$.limits.{name}")
+
+
+@dataclass(frozen=True, slots=True)
+class ShardScanResult:
+    lineage: DexLineage
+    files: tuple[str, ...]
+    postings: tuple[Mapping[str, object], ...]
+    coverage: str
+    files_total: int
+    scanned: int
+    read_failed: int
+    truncated: int
+    bytes_scanned: int
+    scan_limit_hit: bool
+
+
+def _scan_relative_path(root: Path, path: Path) -> str:
+    relative = path.relative_to(root).as_posix()
+    return unicodedata.normalize("NFC", relative)
+
+
+def scan_java_sources(
+    jadx_output_root: str | os.PathLike[str],
+    values: Iterable[str],
+    *,
+    lineage: DexLineage,
+    limits: Limits,
+) -> ShardScanResult:
+    if not isinstance(lineage, DexLineage):
+        _fail(REASON_MALFORMED, "$.lineage")
+    if not isinstance(limits, Limits):
+        _fail(REASON_MALFORMED, "$.limits")
+
+    try:
+        root = Path(jadx_output_root)
+    except (TypeError, ValueError) as exc:
+        raise JadxIndexError(REASON_INVALID_SOURCE_ROOT) from exc
+
+    if not root.is_absolute():
+        _fail(REASON_INVALID_SOURCE_ROOT, "$.jadx_output_root")
+    try:
+        root = root.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise JadxIndexError(REASON_INVALID_SOURCE_ROOT, "$.jadx_output_root") from exc
+    if not root.is_dir():
+        _fail(REASON_INVALID_SOURCE_ROOT, "$.jadx_output_root")
+
+    query_values: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        if not value or len(value) > limits.max_value_len:
+            continue
+        query_values.append(value)
+    # 同一查询值只保留一次，避免重复 posting；排序保证结果确定。
+    query_values = sorted(set(query_values))
+
+    paths: list[tuple[str, Path]] = []
+    try:
+        candidates = tuple(item for item in root.rglob("*.java") if item.is_file())
+    except (OSError, RuntimeError):
+        candidates = ()
+
+    seen_normalized: dict[str, str] = {}
+    for path in candidates:
+        try:
+            relative = _scan_relative_path(root, path)
+        except (ValueError, OSError):
+            continue
+        key = relative.casefold()
+        previous = seen_normalized.get(key)
+        if previous is not None and previous != relative:
+            raise JadxIndexError(REASON_NORMALIZATION_CONFLICT, "$.jadx_output_root")
+        seen_normalized[key] = relative
+        paths.append((relative, path))
+
+    # ★先全量排序、后截断：截断保留的文件集合才与枚举序无关（确定性契约）。
+    paths.sort(key=lambda item: (item[0].casefold(), item[0]))
+    files_total = len(paths)
+    scan_limit_hit = files_total > limits.max_files
+    selected = paths[: limits.max_files]
+
+    postings: list[Mapping[str, object]] = []
+    files: list[str] = []
+    read_failed = 0
+    truncated = 0
+    scanned = 0
+    bytes_scanned = 0
+
+    for relative, path in selected:
+        try:
+            with path.open("rb") as stream:
+                data = stream.read(limits.max_file_bytes + 1)
+        except OSError:
+            read_failed += 1
+            continue
+
+        if len(data) > limits.max_file_bytes:
+            data = data[: limits.max_file_bytes]
+            truncated += 1
+        bytes_scanned += len(data)
+        scanned += 1
+        files.append(relative)
+
+        text = data.decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        for value in query_values:
+            digest = "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+            for line_number, line_text in enumerate(lines, start=1):
+                start = 0
+                while True:
+                    column_zero = line_text.find(value, start)
+                    if column_zero < 0:
+                        break
+                    postings.append(
+                        {
+                            "path": relative,
+                            "line": line_number,
+                            "column": column_zero + 1,
+                            "value_digest": digest,
+                        }
+                    )
+                    # 允许重叠子串命中。
+                    start = column_zero + 1
+
+    coverage = "complete" if not read_failed and not truncated and not scan_limit_hit else "partial"
+    return ShardScanResult(
+        lineage=lineage,
+        files=tuple(files),
+        postings=tuple(postings),
+        coverage=coverage,
+        files_total=files_total,
+        scanned=scanned,
+        read_failed=read_failed,
+        truncated=truncated,
+        bytes_scanned=bytes_scanned,
+        scan_limit_hit=scan_limit_hit,
+    )
+
+
+def _lineage_from_shard_record(record: Mapping[str, object], path: str) -> DexLineage:
+    raw = record.get("lineage")
+    if not isinstance(raw, Mapping):
+        _fail(REASON_MALFORMED, f"{path}.lineage")
+    if set(raw) != {"role", "ordinal", "source_label", "digest"}:
+        _fail(REASON_MALFORMED, f"{path}.lineage")
+    role = raw.get("role")
+    ordinal = raw.get("ordinal")
+    source_label = raw.get("source_label")
+    digest = raw.get("digest")
+    if role not in (DexRole.APK_DEX.value, DexRole.EXTRA_DEX.value):
+        _fail(REASON_MALFORMED, f"{path}.lineage.role")
+    if isinstance(ordinal, bool) or not isinstance(ordinal, int):
+        _fail(REASON_MALFORMED, f"{path}.lineage.ordinal")
+    if not isinstance(source_label, str) or not isinstance(digest, str):
+        _fail(REASON_MALFORMED, f"{path}.lineage")
+    try:
+        return DexLineage(
+            role=DexRole(role), ordinal=ordinal, source_label=source_label, digest=digest
+        )
+    except JadxIndexError as exc:
+        raise JadxIndexError(REASON_MALFORMED, f"{path}.lineage") from exc
+
+
+def find_value_usage(index: LoadedIndex, value: str) -> tuple[UsageHit, ...]:
+    if (
+        not isinstance(index, LoadedIndex)
+        or not isinstance(value, str)
+        or not value
+        or len(value) > _DEFAULT_MAX_VALUE_LEN
+    ):
+        return ()
+
+    value_digest = "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+    hits: list[UsageHit] = []
+
+    for shard_index, shard in enumerate(index.shards):
+        if not isinstance(shard, Mapping):
+            _fail(REASON_MALFORMED, f"$.shards[{shard_index}]")
+        lineage = _lineage_from_shard_record(shard, f"$.shards[{shard_index}]")
+        postings = shard.get("postings")
+        if not isinstance(postings, list):
+            _fail(REASON_MALFORMED, f"$.shards[{shard_index}].postings")
+
+        for posting_index, posting in enumerate(postings):
+            path = f"$.shards[{shard_index}].postings[{posting_index}]"
+            if not isinstance(posting, Mapping):
+                _fail(REASON_MALFORMED, path)
+            if set(posting) != {"path", "line", "column", "value_digest"}:
+                _fail(REASON_MALFORMED, path)
+            relative_path = posting.get("path")
+            line = posting.get("line")
+            column = posting.get("column")
+            digest = posting.get("value_digest")
+            if (
+                not isinstance(relative_path, str)
+                or isinstance(line, bool)
+                or not isinstance(line, int)
+                or isinstance(column, bool)
+                or not isinstance(column, int)
+                or not isinstance(digest, str)
+            ):
+                _fail(REASON_MALFORMED, path)
+            # ★形状异常 fail-closed：即使不是本次查询的值，坏 posting 也必须当场揭穿，
+            #   不许静默跳过（UsageHit 构造本身就是校验）。
+            try:
+                hit = UsageHit(
+                    relative_path=relative_path,
+                    line=line,
+                    column=column,
+                    value_digest=_validate_digest(digest, f"{path}.value_digest"),
+                    lineage=lineage,
+                )
+            except JadxIndexError as exc:
+                raise JadxIndexError(REASON_MALFORMED, path) from exc
+
+            if digest == value_digest:
+                hits.append(hit)
+
+    hits.sort(key=lambda hit: (hit.lineage.sort_key(), hit.relative_path, hit.line, hit.column))
+    return tuple(hits)

@@ -549,3 +549,130 @@ def test_symlinked_index_dir_rejected(tmp_path: Path) -> None:
         pytest.skip("no symlink privilege on this host")
     result = store.load_index("a" * 64)
     assert isinstance(result, CacheMiss) and result.reason == "path_escape"
+
+
+# ---------------------------------------------------------------------------
+# Task 4：查询层——确定性枚举、bounded postings、find_value_usage
+# ---------------------------------------------------------------------------
+
+from apkscan.core.jadx_index import (  # noqa: E402
+    Limits,
+    find_value_usage,
+    scan_java_sources,
+)
+
+
+def _java_tree(root: Path, files: dict[str, str]) -> None:
+    for rel, content in files.items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+
+def _lin() -> DexLineage:
+    return DexLineage(DexRole.APK_DEX, 0, "classes.dex", _digest(b"dex"))
+
+
+def test_scan_produces_bounded_postings_no_raw_value(tmp_path: Path) -> None:
+    src = tmp_path / "java"
+    _java_tree(src, {"com/a/App.java": 'x = "needle-value";\ny = "needle-value";\n'})
+    result = scan_java_sources(src, ["needle-value"], lineage=_lin(), limits=Limits())
+    assert result.coverage == "complete"
+    assert result.files == ("com/a/App.java",)
+    assert len(result.postings) == 2
+    first = result.postings[0]
+    assert first["line"] == 1 and first["column"] == 6  # 1-based
+    # ★postings 只带 digest，绝无原值。
+    assert all("needle-value" not in str(p.values()) for p in result.postings)
+    expected = "sha256:" + hashlib.sha256(b"needle-value").hexdigest()
+    assert first["value_digest"] == expected
+
+
+def test_scan_is_deterministic_across_creation_order(tmp_path: Path) -> None:
+    """同一文件集不同创建顺序 → 逐字节相同的 files/postings 序列。"""
+    files = {f"p{i}/F{i}.java": f'v = "acme-{i % 3}";\n' for i in range(12)}
+    a_root = tmp_path / "a"
+    b_root = tmp_path / "b"
+    _java_tree(a_root, files)
+    _java_tree(b_root, dict(reversed(list(files.items()))))
+    values = ["acme-0", "acme-1", "acme-2"]
+    ra = scan_java_sources(a_root, values, lineage=_lin(), limits=Limits())
+    rb = scan_java_sources(b_root, values, lineage=_lin(), limits=Limits())
+    assert ra.files == rb.files
+    assert ra.postings == rb.postings
+
+
+def test_scan_limit_and_truncation_yield_partial(tmp_path: Path) -> None:
+    src = tmp_path / "java"
+    _java_tree(src, {f"f{i}.java": "x = 1;\n" for i in range(4)})
+    limited = scan_java_sources(src, ["x"], lineage=_lin(), limits=Limits(max_files=2))
+    assert limited.scan_limit_hit and limited.coverage == "partial"
+    assert limited.files_total == 4 and limited.scanned == 2
+
+    big = tmp_path / "big"
+    _java_tree(big, {"Big.java": "A" * 100 + "\n"})
+    truncated = scan_java_sources(big, ["A"], lineage=_lin(), limits=Limits(max_file_bytes=10))
+    assert truncated.truncated == 1 and truncated.coverage == "partial"
+
+
+def test_build_with_scan_roundtrip_query(tmp_path: Path) -> None:
+    """★端到端：扫描 → build(scan=) → load → find_value_usage 命中。"""
+    manifest = _make_manifest(tmp_path)
+    src = tmp_path / "java"
+    _java_tree(src, {"com/x/C.java": 'u = "https://cfg-host.example/api";\n'})
+    scan = scan_java_sources(
+        src,
+        ["https://cfg-host.example/api"],
+        lineage=manifest.dex_lineage[0],
+        limits=Limits(),
+    )
+    store = JadxIndexStore(tmp_path / "cache")
+    result = store.build_index(tmp_path / "src", manifest, scan=scan)
+    assert isinstance(result, IndexBuildResult) and result.state == IndexBuildState.BUILT
+
+    loaded = store.load_index(manifest.index_key)
+    assert isinstance(loaded, LoadedIndex)
+    hits = find_value_usage(loaded, "https://cfg-host.example/api")
+    assert len(hits) == 1
+    assert hits[0].relative_path == "com/x/C.java" and hits[0].line == 1
+    assert hits[0].ownership == "unknown"
+    # 未命中值与超长值 → 空结果，不抛。
+    assert find_value_usage(loaded, "absent-value") == ()
+    assert find_value_usage(loaded, "A" * 5000) == ()
+
+
+def test_partial_scan_infects_manifest_coverage(tmp_path: Path) -> None:
+    manifest = _make_manifest(tmp_path)
+    src = tmp_path / "java"
+    _java_tree(src, {f"f{i}.java": "x = 1;\n" for i in range(3)})
+    scan = scan_java_sources(
+        src, ["x"], lineage=manifest.dex_lineage[0], limits=Limits(max_files=1)
+    )
+    assert scan.coverage == "partial"
+    store = JadxIndexStore(tmp_path / "cache")
+    result = store.build_index(tmp_path / "src", manifest, scan=scan)
+    assert isinstance(result, IndexBuildResult)
+    assert result.coverage == "partial"
+    loaded = store.load_index(manifest.index_key)
+    assert isinstance(loaded, LoadedIndex) and loaded.coverage == "partial"
+
+
+def test_find_value_usage_fail_closed_on_malformed_posting(tmp_path: Path) -> None:
+    """★shard 内坏 posting（缺字段）必须当场揭穿，不许静默跳过。"""
+    manifest = _make_manifest(tmp_path)
+    store = JadxIndexStore(tmp_path / "cache")
+    built = store.build_index(tmp_path / "src", manifest)
+    assert isinstance(built, IndexBuildResult)
+    loaded = store.load_index(manifest.index_key)
+    assert isinstance(loaded, LoadedIndex)
+    bad_shard = dict(loaded.shards[0]) if loaded.shards else {}
+    bad_shard["postings"] = [{"path": "a.java", "line": 1}]  # 缺 column/value_digest
+    forged = LoadedIndex(
+        manifest=loaded.manifest,
+        shard_locators=loaded.shard_locators,
+        coverage=loaded.coverage,
+        shards=(bad_shard,),
+    )
+    with pytest.raises(JadxIndexError) as exc:
+        find_value_usage(forged, "anything")
+    assert _code_of(exc) == "malformed"
