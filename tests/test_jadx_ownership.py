@@ -387,3 +387,115 @@ def test_ownership_query_result_validates_projection() -> None:
             projection="not-a-projection",  # type: ignore[arg-type]
         )
     assert exc.value.code == "invalid_query_projection"
+
+
+# ---------------------------------------------------------------------------
+# codex 复审补锁：重复声明数量差异、TIMEOUT_PARTIAL 语义、malformed baseline
+# ---------------------------------------------------------------------------
+
+DUP_DECL = (
+    "package com.u;\n"
+    "\n"
+    "public class U {\n"
+    "    void go(int x) {\n"
+    "        k = 1;\n"
+    "    }\n"
+    "\n"
+    "    void go(int x) {\n"
+    "        k = 1;\n"
+    "    }\n"
+    "}\n"
+)
+
+SINGLE_DECL = (
+    "package com.u;\n"
+    "\n"
+    "public class U {\n"
+    "    void go(int x) {\n"
+    "        k = 1;\n"
+    "    }\n"
+    "}\n"
+)
+
+
+def test_declaration_count_mismatch_is_modified_not_match(tmp_path: Path) -> None:
+    """★[A,A] vs [A] 与 [A] vs [A,A]：digest 相同但声明数不同 → 多重集不等 → UNKNOWN。"""
+    subject_aa = _build_index(tmp_path, "saa", {"com/u/U.java": DUP_DECL})
+    baseline_a = _build_index(tmp_path, "ba", {"com/u/U.java": SINGLE_DECL})
+    projection = project_ownership(subject_aa, baseline_a)
+    assert len(projection.regions) == 2
+    for item in projection.regions:
+        assert item.ownership is rc.OwnershipValue.UNKNOWN
+        assert item.reason == "modified_relative_to_baseline"
+
+    subject_a = _build_index(tmp_path, "sa", {"com/u/U.java": SINGLE_DECL})
+    baseline_aa = _build_index(tmp_path, "baa", {"com/u/U.java": DUP_DECL})
+    projection2 = project_ownership(subject_a, baseline_aa)
+    (only,) = projection2.regions
+    assert only.ownership is rc.OwnershipValue.UNKNOWN
+    assert only.reason == "modified_relative_to_baseline"
+
+
+def test_matched_identity_emits_one_observation_per_region(tmp_path: Path) -> None:
+    """匹配身份有 N 个声明 → N 条观察（每个区域可独立定位）。"""
+    subject = _build_index(tmp_path, "s", {"com/u/U.java": DUP_DECL})
+    baseline = _build_index(tmp_path, "b", {"com/u/U.java": DUP_DECL})
+    projection = project_ownership(subject, baseline)
+    matches = [
+        i for i in projection.regions if i.ownership is rc.OwnershipValue.INHERITED_OFFICIAL
+    ]
+    assert len(matches) == 2
+
+    events, action_id = _authorized_ledger("jadx-ownership-projection")
+    before = _observation_count(events)
+    out = append_jadx_ownership_projection(
+        events,
+        action_id=action_id,
+        result=_result(projection),
+        actor=make_actor(),
+        occurred_at=FIXED_TIME,
+    )
+    assert _observation_count(out) == before + 2
+    spans = {
+        (o.source_refs[0].start, o.source_refs[0].end)
+        for o in jl.replay(out).observations
+        if o.observation_type == "jadx_ownership_match"
+    }
+    assert len(spans) == 2  # 两个区域各自定位
+
+
+def test_timeout_partial_still_projects_qualified_matches(tmp_path: Path) -> None:
+    """★语义锁定：TIMEOUT_PARTIAL 属阳性态——匹配观察照产，但 coverage 断言
+    同时落 TIMEOUT 限定（观察被限定，而非被夸大）。与 usage/callpath 一致。"""
+    subject = _build_index(tmp_path, "s", {"com/u/U.java": SINGLE_DECL})
+    baseline = _build_index(tmp_path, "b", {"com/u/U.java": SINGLE_DECL})
+    projection = project_ownership(subject, baseline)
+    events, action_id = _authorized_ledger("jadx-ownership-projection")
+    before = _observation_count(events)
+    out = append_jadx_ownership_projection(
+        events,
+        action_id=action_id,
+        result=_result(projection, state=IndexQueryState.TIMEOUT_PARTIAL, coverage="partial"),
+        actor=make_actor(),
+        occurred_at=FIXED_TIME,
+    )
+    assert _observation_count(out) == before + 1
+    outcome = jl.replay(out).outcomes[-1]
+    assert outcome.status is rc.OutcomeStatus.PARTIAL
+    assert outcome.coverage_assertions[0].status is rc.CoverageStatus.TIMEOUT
+
+
+def test_malformed_baseline_fail_closed(tmp_path: Path) -> None:
+    subject = _build_index(tmp_path, "s", {"com/u/U.java": SINGLE_DECL})
+    baseline = _build_index(tmp_path, "b", {"com/u/U.java": SINGLE_DECL})
+    bad_shard = dict(baseline.shards[0])
+    bad_shard["structure"] = {"classes": [{"name": "com.x.Bad"}]}
+    forged = LoadedIndex(
+        manifest=baseline.manifest,
+        shard_locators=baseline.shard_locators,
+        coverage=baseline.coverage,
+        shards=(bad_shard,),
+    )
+    with pytest.raises(JadxIndexError) as exc:
+        project_ownership(subject, forged)
+    assert exc.value.code == "malformed"
