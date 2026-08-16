@@ -234,6 +234,7 @@ _ID_DOMAINS = {
     "next_action": ("action-", "fxapk:next-action:v1"),
     "action_outcome": ("outcome-", "fxapk:action-outcome:v1"),
     "review_decision": ("decision-", "fxapk:review-decision:v1"),
+    "candidate_label_feedback": ("feedback-", "fxapk:candidate-label-feedback:v1"),
     "evidence_anchor": ("anchor-", "fxapk:evidence-anchor:v1"),
 }
 
@@ -604,6 +605,43 @@ def build_next_action(
     return record
 
 
+def build_candidate_label_feedback(
+    *,
+    label_kind: rc.LabelKind,
+    proposed_label_digest: str,
+    subject_refs: tuple[rc.SubjectRef, ...],
+    evidence_ref: str | None,
+    reason_codes: tuple[str, ...],
+    policy: rc.PolicyRef,
+    producer: rc.ProducerRef,
+) -> rc.CandidateLabelFeedback:
+    body = {
+        "kind": "candidate_label_feedback",
+        "schema_version": "1.0",
+        "label_kind": label_kind.value,
+        "proposed_label_digest": proposed_label_digest,
+        "subject_refs": _to_json_value(subject_refs),
+        "evidence_ref": evidence_ref,
+        "reason_codes": _to_json_value(reason_codes),
+        "policy": _to_json_value(policy),
+        "producer": _to_json_value(producer),
+    }
+    record = rc.CandidateLabelFeedback(
+        kind="candidate_label_feedback",
+        schema_version="1.0",
+        feedback_id=_seal_entity("candidate_label_feedback", "feedback_id", body),
+        label_kind=label_kind,
+        proposed_label_digest=proposed_label_digest,
+        subject_refs=subject_refs,
+        evidence_ref=evidence_ref,
+        reason_codes=reason_codes,
+        policy=policy,
+        producer=producer,
+    )
+    rc.validate_contract_value(record)
+    return record
+
+
 def build_action_outcome(
     *,
     action_id: str,
@@ -693,6 +731,7 @@ _RECORD_CLASSES: dict[str, type[DomainRecord]] = {
     "next_action": rc.NextAction,
     "action_outcome": rc.ActionOutcome,
     "review_decision": rc.ReviewDecision,
+    "candidate_label_feedback": rc.CandidateLabelFeedback,
 }
 
 _IDENTITY_FIELDS = {
@@ -703,6 +742,7 @@ _IDENTITY_FIELDS = {
     "next_action": ("action_id", "next_action"),
     "action_outcome": ("outcome_id", "action_outcome"),
     "review_decision": ("decision_id", "review_decision"),
+    "candidate_label_feedback": ("feedback_id", "candidate_label_feedback"),
 }
 
 
@@ -781,6 +821,7 @@ def decode_record(text: str) -> DomainRecord:
 
 __all__ = [
     "build_action_outcome",
+    "build_candidate_label_feedback",
     "build_claim_candidate",
     "build_evidence_anchor",
     "build_evidence_gap",

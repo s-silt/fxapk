@@ -719,9 +719,10 @@ def test_full_ten_event_golden_replay_is_stable() -> None:
 
     assert tuple(event.event_type for event in events) == tuple(EventType)
     assert second == first
-    assert second.event_count == 10
+    assert second.event_count == 11  # P4-B 起金样含 FEEDBACK_QUEUED
     assert second.head_digest == (
-        "sha256:98ced47c733b74f68cdb56597a0f58e00feb10dc6bc3d589655e88ac3ca0fbef"
+        # P4-B 金样刷新：链尾追加 FEEDBACK_QUEUED 后的确定性 head digest。
+        "sha256:46f48b3e6e7e834cce24192a1cb28ca51a0b7f87228d8a6463904a8a4c5a6a2f"
     )
 
 
@@ -806,7 +807,9 @@ def test_accepted_review_rejects_coverage_drift() -> None:
 
 
 def test_resolved_gap_cannot_support_unknown_review() -> None:
-    events = make_full_ten_event_ledger()[:-1]
+    # 尾部现在是 [..., CLAIM_REVISED, REVIEW_DECIDED, FEEDBACK_QUEUED]（P4-B 加第 11 类），
+    # 切到 CLAIM_REVISED 收尾需去掉两个。
+    events = make_full_ten_event_ledger()[:-2]
     revised = events[-1].payload
     assert isinstance(revised, ClaimCandidate)
     decision = build_review_decision(
