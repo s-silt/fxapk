@@ -15,6 +15,7 @@ from apkscan.core import judgment_ledger as jl
 from apkscan.core import reanalysis as rp
 from apkscan.core import reanalysis_contract as rxc
 from apkscan.core import reanalysis_ledger as rl
+from apkscan.commands.labels_cli import labels_app
 from apkscan.core import recognition_contract as rc
 from apkscan.core.atomic import atomic_create_bytes
 
@@ -25,6 +26,9 @@ recognize_app = typer.Typer(
         "空输出≠无缺口。"
     ),
 )
+
+# labels 子组（P4-C）：只读标签校验器，挂在同一 recognize 命名空间下。
+recognize_app.add_typer(labels_app, name="labels")
 
 DEFAULT_POLICY = rp.DEFAULT_ADMISSION_POLICY
 
