@@ -179,19 +179,22 @@ def test_apk_and_extra_dex_lineage_deterministic(
 def test_unrecognized_zip_members_do_not_enter_lineage(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """语法白名单：assets/evil.dex、classes01.dex（非法编号形态）不进 lineage。"""
+    """语法白名单：assets/evil.dex、classes01.dex、classes1.dex（非法编号形态）不进 lineage。"""
     _patch(monkeypatch)
     apk = tmp_path / "app.apk"
     with zipfile.ZipFile(apk, "w") as zf:
         zf.writestr("classes.dex", b"dex-main")
         zf.writestr("assets/evil.dex", b"not-apk-dex")
         zf.writestr("classes01.dex", b"bad-number-form")
+        zf.writestr("classes1.dex", b"bad-number-form-too")
     ctx = FakeContext(apk_path=str(apk))
     ctx.jadx_cache_root = str(tmp_path / "jadx-cache")
     result = JadxAnalyzer().analyze(ctx)
     assert result.meta["jadx_index_status"] == "built"
     loaded = _load(ctx, result.meta["jadx_index_key"])
     assert len(loaded.manifest.dex_lineage) == 1  # 只有 classes.dex
+    # 不匹配的 .dex 形态不静默：计数进 receipt。
+    assert result.meta["jadx_receipt"]["index"]["unrecognized_dex_members"] == 3
 
 
 def test_oversized_dex_disables_indexing(
@@ -272,3 +275,165 @@ def test_jadx_zero_output_produces_no_index(
     assert result.meta["jadx_index_status"] == "failed"
     cache = tmp_path / "jadx-cache"
     assert not (cache.exists() and list(cache.rglob("manifest.json")))
+
+
+# ---------------------------------------------------------------------------
+# 复审补锁（codex P2-A 复审：fail-open 闭合、流闸、最终 run 语义、卫生边界）
+# ---------------------------------------------------------------------------
+
+
+def test_index_subflow_exception_stays_fail_open(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★fail-open 承诺锁：索引扫描层抛异常 → 主分析产出完好、索引只降级为 failed。"""
+    _patch(monkeypatch)
+
+    def _boom(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise RuntimeError("index scan exploded")
+
+    monkeypatch.setattr(jadx, "scan_java_sources", _boom)
+    ctx = _ctx(tmp_path)
+    result = JadxAnalyzer().analyze(ctx)
+    assert result.error is None  # 绝不污染主分析
+    assert result.meta["jadx_status"] == "ok"
+    assert result.meta["jadx_endpoint_count"] >= 1
+    assert result.meta["jadx_index_status"] == "failed"
+    assert "index_exception" in result.meta["jadx_receipt"]["index"]["reason_codes"]
+
+
+def test_copy_stream_limit_enforced_beyond_declared_size(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """流式写入闸独立于 zip 声明大小闸：实际字节超限即拒，不信任元数据。"""
+    import io
+
+    monkeypatch.setattr(jadx, "_MAX_MATERIALIZE_DEX_BYTES", 16)
+    with pytest.raises(jadx._DexMaterializeError) as exc:
+        jadx._copy_stream_limited(
+            io.BytesIO(b"x" * 20), tmp_path / "out.dex", total_remaining=1 << 30
+        )
+    assert exc.value.code == "dex_too_large"
+    # 总预算独立于单文件上限：单文件没超、总预算超 → materialize_budget_exceeded。
+    with pytest.raises(jadx._DexMaterializeError) as exc2:
+        jadx._copy_stream_limited(
+            io.BytesIO(b"x" * 10), tmp_path / "out2.dex", total_remaining=8
+        )
+    assert exc2.value.code == "materialize_budget_exceeded"
+
+
+def test_degraded_rerun_uses_final_run_and_prunes_lineage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★最终 run 语义：坏 extra DEX 触发降级重跑 → 索引基于重跑（lineage 剔除 extra、
+    ordinal 不重排、coverage=partial、excluded_dex 留痕）。"""
+    calls: list[dict] = []
+
+    def _run(cmd, *, timeout, env=None):  # noqa: ANN001
+        calls.append({"cmd": list(cmd)})
+        if "--version" in cmd:
+            return _owned(0, stdout="1.5.2\n")
+        out_dir = Path(cmd[cmd.index("-d") + 1])
+        if any(str(a).endswith("dump0.dex") for a in cmd):
+            return _owned(1)  # 首跑带坏 dump：0 产出（模拟 jadx 被拖垮）
+        pkg = out_dir / "sources" / "com" / "x"
+        pkg.mkdir(parents=True, exist_ok=True)
+        (pkg / "C.java").write_text(_JAVA_BODY, encoding="utf-8")
+        return _owned(0)
+
+    monkeypatch.setattr(jadx.proctree, "run_owned", _run)
+    # b"junk..." 不是合法 DEX 头 → _dex_checksum_ok=False → 降级剔除。
+    ctx = _ctx(tmp_path, extra=(b"junk-not-a-dex-at-all",))
+    result = JadxAnalyzer().analyze(ctx)
+    assert result.meta["jadx_status"] == "partial"
+    assert result.meta["jadx_bad_dex_excluded"] == ["dump0.dex"]
+    # 剔除后 coverage=partial → 索引状态 partial（built 的 partial 形态）。
+    assert result.meta["jadx_index_status"] == "partial"
+    index_block = result.meta["jadx_receipt"]["index"]
+    assert "excluded_dex" in index_block["reason_codes"]
+    loaded = _load(ctx, result.meta["jadx_index_key"])
+    lineage = loaded.manifest.dex_lineage
+    assert [x.role for x in lineage] == [DexRole.APK_DEX]  # extra 已剔除
+    assert loaded.coverage == "partial"
+
+
+def test_duplicate_zip_member_rejects_indexing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """同名 classes.dex 出现两次（zip 允许重名条目）→ ordinal 冲突即拒，分析照常。"""
+    _patch(monkeypatch)
+    apk = tmp_path / "app.apk"
+    with zipfile.ZipFile(apk, "w") as zf:
+        zf.writestr("classes.dex", b"dex-payload-a")
+        zf.writestr("classes.dex", b"dex-payload-b")
+    ctx = FakeContext(apk_path=str(apk))
+    ctx.jadx_cache_root = str(tmp_path / "jadx-cache")
+    result = JadxAnalyzer().analyze(ctx)
+    assert result.meta["jadx_index_status"] == "disabled"
+    assert (
+        "duplicate_apk_dex_member"
+        in result.meta["jadx_receipt"]["index"]["reason_codes"]
+    )
+    assert result.meta["jadx_status"] == "ok"
+
+
+def test_forged_unavailable_reason_not_leaked_into_receipt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★reason 卫生闸：伪造 CacheUnavailable 带 Windows 路径 → 绝不进 receipt，
+    折叠为稳定码。"""
+    from apkscan.core.jadx_index import CacheUnavailable
+
+    _patch(monkeypatch)
+    forged = CacheUnavailable(r"C:\evil\path with spaces\x.json")
+    monkeypatch.setattr(JadxIndexStore, "load_index", lambda self, key: forged)
+    ctx = _ctx(tmp_path)
+    result = JadxAnalyzer().analyze(ctx)
+    assert result.meta["jadx_index_status"] == "unavailable"
+    reasons = result.meta["jadx_receipt"]["index"]["reason_codes"]
+    assert all("evil" not in r and "\\" not in r for r in reasons)
+    assert "invalid_cache_state" in reasons
+
+
+def test_cache_unavailable_never_reaches_build(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """CacheUnavailable 终态锁的直接形态：build_index 一次都不许被调（spy 即炸）。"""
+    from apkscan.core.jadx_index import CacheUnavailable
+
+    _patch(monkeypatch)
+    monkeypatch.setattr(
+        JadxIndexStore, "load_index", lambda self, key: CacheUnavailable("io_error")
+    )
+
+    def _no_build(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        raise AssertionError("build_index must not be called on CacheUnavailable")
+
+    monkeypatch.setattr(JadxIndexStore, "build_index", _no_build)
+    result = JadxAnalyzer().analyze(_ctx(tmp_path))
+    assert result.meta["jadx_index_status"] == "unavailable"
+
+
+def test_resolve_none_not_reresolved(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★同一解析结果契约：启用索引时首次 resolve 得 None → 反编译绝不二次解析
+    （即使 PATH 中途"变出"了另一个 jadx，也不许用它）。"""
+    resolve_calls = {"n": 0}
+
+    def _resolve():  # noqa: ANN202
+        resolve_calls["n"] += 1
+        return None if resolve_calls["n"] == 1 else (["jadx"], {})
+
+    monkeypatch.setattr(jadx.tools, "resolve_jadx", _resolve)
+    ran: list[list[str]] = []
+
+    def _run(cmd, *, timeout, env=None):  # noqa: ANN001
+        ran.append(list(cmd))
+        return _owned(0, stdout="1.5.2\n")
+
+    monkeypatch.setattr(jadx.proctree, "run_owned", _run)
+    result = JadxAnalyzer().analyze(_ctx(tmp_path))
+    assert resolve_calls["n"] == 1  # 绝无二次解析
+    assert ran == []  # 没有任何 jadx 进程（含 --version）被启动
+    assert result.meta["jadx_status"] == "failed"
+    assert result.meta["jadx_index_status"] == "disabled"

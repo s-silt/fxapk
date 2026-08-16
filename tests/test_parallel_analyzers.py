@@ -877,3 +877,15 @@ def test_long_and_short_lane_each_execute_exactly_once(
     assert all(err is None for _n, _r, err in rows)
     assert receipts["jadx"]["lane"] == "long"
     assert receipts["s1"]["lane"] == receipts["s2"]["lane"] == "short"
+
+
+def test_snapshot_carries_jadx_cache_root_through_pickle() -> None:
+    # 协议数据字段过并行边界的运行期锁：cache root 不许在 worker 侧静默丢失。
+    snap = SnapshotContext(
+        package_name="", manifest_xml="", platform="android", config=None,
+        apk_path="", extra_dex_paths=[], jadx_cache_root="D:/idx-cache",
+        permissions=[], components=None,
+        dex_strings=(), file_list=[], native_libs=[], certificates=[], files={},
+    )
+    restored = pickle.loads(pickle.dumps(snap))
+    assert restored.jadx_cache_root == "D:/idx-cache"

@@ -36,7 +36,7 @@ from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, TYPE_CHECKING
+from typing import IO, TYPE_CHECKING, cast
 
 from apkscan.config.string_graph import StringChain, scan_java_source
 from apkscan.core.models import (
@@ -195,6 +195,21 @@ _VERSION_PROBE_TIMEOUT = 30.0
 #: 必须在运行时经模块属性读取，部署策略与测试才能安全收紧。
 _MAX_MATERIALIZE_DEX_BYTES = 256 * 1024 * 1024
 
+#: 一次索引准备允许物化的全部 DEX 实际字节总量（防大量合法 classesN.dex 撑爆磁盘，
+#: 磁盘耗尽会反噬「索引 fail-open 不影响主分析」的承诺）。运行时经模块属性读取。
+_MAX_MATERIALIZE_TOTAL_BYTES = 1024 * 1024 * 1024
+
+#: 一次索引准备允许接受的 APK + extra DEX 输入总数。运行时经模块属性读取。
+_MAX_MATERIALIZE_DEX_COUNT = 200
+
+#: receipt 只接受这个语法的稳定 reason code——其余一律折叠，防路径/异常文本外泄。
+_REASON_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+#: _run_jadx 的 resolved 参数 sentinel：区分「调用方未提供」（自行解析，既有行为）
+#: 与「调用方明确提供 None」（已解析过、确实没有 jadx——绝不二次解析）。
+_ResolvedJadx = tuple[list[str], dict[str, str]] | None
+_RESOLVED_UNSET: object = object()
+
 #: APK 顶层合法 DEX 名：classes.dex→ordinal 0、classes2.dex→1、classesN.dex→N-1。
 #: classes1.dex / classes01.dex / 子目录中的 *.dex 都不属于 APK DEX lineage。
 _APK_DEX_MEMBER_RE = re.compile(r"^classes(?:([2-9]|[1-9][0-9]+))?\.dex$")
@@ -208,6 +223,7 @@ _INDEX_REASON_CACHE_NOT_CONFIGURED = "cache_root_not_configured"
 _INDEX_REASON_NO_APK_PATH = "no_apk_path"
 _INDEX_REASON_JADX_VERSION_UNAVAILABLE = "jadx_version_unavailable"
 _INDEX_REASON_DEX_TOO_LARGE = "dex_too_large"
+_INDEX_REASON_MATERIALIZE_BUDGET = "materialize_budget_exceeded"
 _INDEX_REASON_DEX_MATERIALIZE_FAILED = "dex_materialize_failed"
 _INDEX_REASON_NO_DEX_INPUTS = "no_dex_inputs"
 _INDEX_REASON_DUPLICATE_APK_DEX = "duplicate_apk_dex_member"
@@ -255,14 +271,33 @@ def _index_receipt(
 
 
 def _append_index_reason(index_receipt: dict, code: str) -> None:
-    """向 index.reason_codes 加稳定码并保持确定排序。"""
-    reasons = {
-        str(item)
-        for item in (index_receipt.get("reason_codes") or [])
-        if isinstance(item, str) and item
-    }
-    if code:
+    """向 index.reason_codes 加稳定码并保持确定排序。
+
+    receipt 只接受受限 ASCII reason code：P1 的三态对象（CacheUnavailable 等）自身
+    不校验 reason，异常旁路可能把路径/异常文本带进来——不合语法的值折叠为
+    ``invalid_cache_state``，原值仅进 warning 日志。
+    """
+    reasons: set[str] = set()
+    raw_reasons = index_receipt.get("reason_codes") or []
+    if isinstance(raw_reasons, str):
+        existing_items: Iterable[object] = (raw_reasons,)
+    elif isinstance(raw_reasons, (list, tuple, set, frozenset)):
+        existing_items = raw_reasons
+    else:
+        logger.warning("[jadx-index] reason_codes 容器非法，已折叠：%r", raw_reasons)
+        existing_items = ()
+        reasons.add(_INDEX_REASON_INVALID_CACHE_STATE)
+    for item in existing_items:
+        if isinstance(item, str) and _REASON_CODE_RE.fullmatch(item) is not None:
+            reasons.add(item)
+        elif item:
+            logger.warning("[jadx-index] 非法 reason code 已折叠：%r", item)
+            reasons.add(_INDEX_REASON_INVALID_CACHE_STATE)
+    if _REASON_CODE_RE.fullmatch(code) is not None:
         reasons.add(code)
+    else:
+        logger.warning("[jadx-index] 非法 reason code 已折叠：%r", code)
+        reasons.add(_INDEX_REASON_INVALID_CACHE_STATE)
     index_receipt["reason_codes"] = sorted(reasons)
 
 
@@ -306,26 +341,45 @@ def _probe_jadx_version(
     return version or None
 
 
-def _copy_stream_limited(source: IO[bytes], destination: Path) -> str:
-    """把二进制流写入受控路径，按实际字节数设闸并返回复算 digest。
+def _copy_stream_limited(
+    source: IO[bytes],
+    destination: Path,
+    *,
+    total_remaining: int,
+) -> tuple[str, int]:
+    """把二进制流写入受控路径，返回 ``(复算 digest, 实际写入字节数)``。
 
-    zip 声明大小可伪造（小压缩巨解压），实际写入必须独立计数；超限即拒绝。
+    zip 声明大小可伪造（小压缩巨解压），实际写入必须独立计数：同时执行单 DEX 上限
+    与本次物化剩余总预算；到达任一边界后额外读取至多一个字节探测越界，越界字节
+    不落盘。
     """
-    limit = _MAX_MATERIALIZE_DEX_BYTES
-    total = 0
+    per_dex_limit = _MAX_MATERIALIZE_DEX_BYTES
+    if per_dex_limit < 0:
+        raise _DexMaterializeError(_INDEX_REASON_DEX_TOO_LARGE)
+    if total_remaining < 0:
+        raise _DexMaterializeError(_INDEX_REASON_MATERIALIZE_BUDGET)
+    written = 0
     digest = hashlib.sha256()
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("wb") as output:
         while True:
-            chunk = source.read(min(1024 * 1024, limit + 1))
+            readable_without_overflow = min(
+                per_dex_limit - written,
+                total_remaining - written,
+                1024 * 1024,
+            )
+            chunk = source.read(readable_without_overflow + 1)
             if not chunk:
                 break
-            total += len(chunk)
-            if total > limit:
+            next_written = written + len(chunk)
+            if next_written > per_dex_limit:
                 raise _DexMaterializeError(_INDEX_REASON_DEX_TOO_LARGE)
+            if next_written > total_remaining:
+                raise _DexMaterializeError(_INDEX_REASON_MATERIALIZE_BUDGET)
             output.write(chunk)
             digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
+            written = next_written
+    return "sha256:" + digest.hexdigest(), written
 
 
 def _apk_dex_ordinal(member_name: str, suffix: str | None) -> int:
@@ -359,6 +413,11 @@ def _materialize_dex_inputs(
     try:
         inputs: list[DexInput] = []
         unrecognized = 0
+        total_written = 0
+        total_budget = _MAX_MATERIALIZE_TOTAL_BYTES
+        dex_count_limit = _MAX_MATERIALIZE_DEX_COUNT
+        if total_budget < 0 or dex_count_limit < 0:
+            raise _DexMaterializeError(_INDEX_REASON_MATERIALIZE_BUDGET)
         try:
             with zipfile.ZipFile(apk_path, "r") as archive:
                 valid_members: list[tuple[int, zipfile.ZipInfo]] = []
@@ -378,16 +437,24 @@ def _materialize_dex_inputs(
                             f"APK 中出现重复 DEX ordinal：{ordinal}",
                         )
                     seen_ordinals.add(ordinal)
-                    # 声明大小先挡一层；实际流读取还会再次计数，不信任 zip 元数据。
+                    # 声明大小先挡单文件上限；总预算只按后续实际流读取字节累计。
                     if info.file_size > _MAX_MATERIALIZE_DEX_BYTES:
                         raise _DexMaterializeError(_INDEX_REASON_DEX_TOO_LARGE)
                     valid_members.append((ordinal, info))
+                # 开始物化前先拒超量输入（extra 计入同一数量预算）：大量合法
+                # classesN.dex 的磁盘占用会反噬 fail-open 承诺。
+                if len(valid_members) + len(extra_dex_paths) > dex_count_limit:
+                    raise _DexMaterializeError(_INDEX_REASON_MATERIALIZE_BUDGET)
                 valid_members.sort(key=lambda item: item[0])
                 for ordinal, info in valid_members:
                     relative = f"apk/{info.filename}"
                     destination = Path(root) / relative
                     with archive.open(info, "r") as source:
-                        digest = _copy_stream_limited(source, destination)
+                        digest, written = _copy_stream_limited(
+                            source, destination,
+                            total_remaining=total_budget - total_written,
+                        )
+                    total_written += written
                     inputs.append(
                         DexInput(
                             role=DexRole.APK_DEX,
@@ -413,7 +480,11 @@ def _materialize_dex_inputs(
                 if source_path.stat().st_size > _MAX_MATERIALIZE_DEX_BYTES:
                     raise _DexMaterializeError(_INDEX_REASON_DEX_TOO_LARGE)
                 with source_path.open("rb") as source:
-                    digest = _copy_stream_limited(source, destination)
+                    digest, written = _copy_stream_limited(
+                        source, destination,
+                        total_remaining=total_budget - total_written,
+                    )
+                total_written += written
             except _DexMaterializeError:
                 raise
             except OSError as exc:
@@ -578,15 +649,17 @@ class JadxAnalyzer(BaseAnalyzer):
         scan_receipt: dict | None = None
 
         # 索引启用时只解析一次 jadx：版本探测与后续反编译共用同一份解析结果，
-        # 版本身份与实际反编译命令绝不来自两次解析。索引准备的任何失败只降级索引
-        # （fail-open），jadx 分析本体照常。
-        resolved_jadx: tuple[list[str], dict[str, str]] | None = None
+        # 版本身份与实际反编译命令绝不来自两次解析（解析出 None 也一样——绝不给
+        # 二次解析留「换了台 jadx」的窗口）。未启用索引保持 sentinel，_run_jadx
+        # 维持自行解析的既有行为。索引准备的任何失败只降级索引（fail-open）。
+        resolved_jadx: _ResolvedJadx | object = _RESOLVED_UNSET
         materialized: _MaterializedDexInputs | None = None
         jadx_version: str | None = None
         if cache_root:
             try:
-                resolved_jadx = tools.resolve_jadx()
-                jadx_version = _probe_jadx_version(resolved_jadx)
+                resolved_for_index: _ResolvedJadx = tools.resolve_jadx()
+                resolved_jadx = resolved_for_index
+                jadx_version = _probe_jadx_version(resolved_for_index)
                 if jadx_version is None:
                     _append_index_reason(
                         index_receipt, _INDEX_REASON_JADX_VERSION_UNAVAILABLE
@@ -845,7 +918,7 @@ class JadxAnalyzer(BaseAnalyzer):
         out_dir: str,
         extra_dex_paths: list[str] | None = None,
         *,
-        resolved: tuple[list[str], dict[str, str]] | None = None,
+        resolved: _ResolvedJadx | object = _RESOLVED_UNSET,
     ) -> _JadxRun:
         """跑 jadx --no-res -d <out> <apk> [dump.dex...]。返回 :class:`_JadxRun`（不抛）。
 
@@ -853,8 +926,9 @@ class JadxAnalyzer(BaseAnalyzer):
         jadx 接受多输入（.apk/.dex/...）；加固样本的真实代码全在 dump DEX 里，不喂进来只反编译
         出壳桩。超时按额外 DEX 数量线性伸缩（见 ``_jadx_timeout``）。
 
-        ``resolved`` 非 None 时直接使用该解析结果：持久索引启用时 analyze 先用它探测
-        ``--version``，再把同一结果传进来——版本身份与实际反编译命令绝不来自两次解析。
+        ``resolved`` 非 sentinel 时直接消费该解析结果（含有意义的 None——调用方已经解析过、
+        确实没有 jadx，绝不二次解析）：持久索引启用时 analyze 先用它探测 ``--version``，
+        再把同一结果传进来——版本身份与实际反编译命令绝不来自两次解析。
         未启用索引时保持既有行为，本方法自行解析。
 
         进程经 ``proctree.run_owned`` 执行：本 analyzer 自己持有 300-1200s deadline（long lane
@@ -867,7 +941,10 @@ class JadxAnalyzer(BaseAnalyzer):
         dex_inputs = list(extra_dex_paths or [])
         timeout = self._jadx_timeout(len(dex_inputs))
         digest = _options_digest(apk_path, dex_inputs, timeout)
-        effective_resolved = resolved if resolved is not None else tools.resolve_jadx()
+        if resolved is _RESOLVED_UNSET:
+            effective_resolved = tools.resolve_jadx()
+        else:
+            effective_resolved = cast(_ResolvedJadx, resolved)
         if effective_resolved is None:
             logger.warning("[jadx] 无可用 jadx（PATH 与插件包 jadx-addon 均无），跳过反编译")
             return _JadxRun(status="failed", options_digest=digest, process=None)
