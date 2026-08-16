@@ -212,6 +212,9 @@ def test_structure_diff_ok_section(tmp_path: Path) -> None:
     assert counts["added_classes"] == 1  # C
     assert counts["removed_classes"] == 1  # B
     assert counts["changed_methods"] == 1  # A.m 体变了
+    # 类级明细按 schema 1.2 身份口径输出 (class_name, path) 对象——混淆同名类可区分。
+    assert section["added_classes"] == [{"class_name": "C", "path": "com/x/C.java"}]
+    assert section["removed_classes"] == [{"class_name": "B", "path": "com/x/B.java"}]
     # changed 明细 + 四元组（机器可读，非散文）。
     assert isinstance(section["changed"], list) and section["changed"]
     assert section["changed_total"] == 1

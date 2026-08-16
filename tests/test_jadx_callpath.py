@@ -652,16 +652,126 @@ def _build_two_dex_index_with(
     return loaded
 
 
-def test_duplicate_method_id_across_shards_rejected(tmp_path: Path) -> None:
-    """★两个 shard 携带同一 class#method/arity → fail-closed 拒绝，绝不静默后者覆盖。"""
+def test_duplicate_method_id_across_shards_merges(tmp_path: Path) -> None:
+    """★schema 1.2：跨 shard 重复类（多 dex 脱壳 dump 常态）不再 fail-closed——
+    同 ident 确定性合并出边（与同 shard 擦除重载同语义），路径照常可寻。"""
     loaded = _build_two_dex_index_with(
         tmp_path,
         {"com/a/App.java": APP_JAVA, "com/b/Helper.java": HELPER_JAVA},
         {"com/a/App.java": APP_JAVA},  # extra dex 重复同一类
     )
-    with pytest.raises(JadxIndexError) as exc:
-        trace_callpath(loaded, "com.a.App#onCreate/0", "com.b.Helper#fetch/1")
-    assert exc.value.code == "duplicate_structure"
+    paths = trace_callpath(loaded, "com.a.App#onCreate/0", "com.b.Helper#fetch/1")
+    assert len(paths) == 1
+    assert paths[0].nodes == ("com.a.App#onCreate/0", "com.b.Helper#fetch/1")
+
+
+def test_cross_shard_merge_unions_out_edges(tmp_path: Path) -> None:
+    """合并语义锁：两个 shard 的同 ident 各带不同出边——合并后两边都可达。
+
+    突变敏感：实现若「后者覆盖」则 alpha 不可达，若「前者独占」则 beta 不可达。"""
+    loaded = _build_two_dex_index_with(
+        tmp_path,
+        {
+            "com/m/M.java": (
+                "package com.m;\n"
+                "\n"
+                "public class M {\n"
+                "    void run() {\n"
+                "        alpha();\n"
+                "    }\n"
+                "}\n"
+            ),
+            "com/m/A.java": (
+                "package com.m;\n"
+                "\n"
+                "public class A {\n"
+                "    void alpha() {\n"
+                "    }\n"
+                "}\n"
+            ),
+        },
+        {
+            "com/m/M.java": (
+                "package com.m;\n"
+                "\n"
+                "public class M {\n"
+                "    void run() {\n"
+                "        beta();\n"
+                "    }\n"
+                "}\n"
+            ),
+            "com/m/B.java": (
+                "package com.m;\n"
+                "\n"
+                "public class B {\n"
+                "    void beta() {\n"
+                "    }\n"
+                "}\n"
+            ),
+        },
+    )
+    to_alpha = trace_callpath(loaded, "com.m.M#run/0", "com.m.A#alpha/0")
+    to_beta = trace_callpath(loaded, "com.m.M#run/0", "com.m.B#beta/0")
+    assert len(to_alpha) == 1 and len(to_beta) == 1
+
+
+def test_duplicate_ident_merge_independent_of_shard_order(tmp_path: Path) -> None:
+    """★codex 复审 P1 回归锁：重复 ident 落在不同路径时，合并输出（含
+    caller_path）必须与 shard 枚举序无关——caller 文件取字典序最小的声明路径。"""
+    loaded = _build_two_dex_index_with(
+        tmp_path,
+        {
+            "com/m/M.java": (
+                "package com.m;\n"
+                "\n"
+                "public class M {\n"
+                "    void run() {\n"
+                "        alpha();\n"
+                "    }\n"
+                "}\n"
+            ),
+            "com/m/A.java": (
+                "package com.m;\n"
+                "\n"
+                "public class A {\n"
+                "    void alpha() {\n"
+                "    }\n"
+                "}\n"
+            ),
+        },
+        {
+            # 同限定名重复类落在不同相对路径（脱壳 dump 去重后缀形态）。
+            "dup/com/m/M.java": (
+                "package com.m;\n"
+                "\n"
+                "public class M {\n"
+                "    void run() {\n"
+                "        beta();\n"
+                "    }\n"
+                "}\n"
+            ),
+            "com/m/B.java": (
+                "package com.m;\n"
+                "\n"
+                "public class B {\n"
+                "    void beta() {\n"
+                "    }\n"
+                "}\n"
+            ),
+        },
+    )
+    reversed_index = LoadedIndex(
+        manifest=loaded.manifest,
+        shard_locators=tuple(reversed(loaded.shard_locators)),
+        coverage=loaded.coverage,
+        shards=tuple(reversed(loaded.shards)),
+    )
+    for target in ("com.m.A#alpha/0", "com.m.B#beta/0"):
+        forward = trace_callpath(loaded, "com.m.M#run/0", target)
+        backward = trace_callpath(reversed_index, "com.m.M#run/0", target)
+        assert forward == backward and len(forward) == 1
+        (edge,) = forward[0].edges
+        assert edge.caller_path == "com/m/M.java"  # 字典序最小的声明路径
 
 
 def test_trace_results_independent_of_shard_order(tmp_path: Path) -> None:

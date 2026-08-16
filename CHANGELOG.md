@@ -5,6 +5,17 @@ affect automated / CI / agent callers are called out explicitly**.
 
 ## Unreleased
 
+### Fixed
+
+- 修复真实混淆样本（含脱壳 dump）令 JADX 持久索引整体不可建的问题：结构段类身份从
+  仅 `name` 改为 `(name, path)`（`INDEX_SCHEMA_VERSION` 1.1 → 1.2，旧工件按既有漂移
+  机制拒收重建）。不同路径的同名类（无 package 声明塌缩的混淆简单名、多 dex dump 的
+  同限定名重复类）现在可发布可加载；完全相同 `(name, path)` 的重复仍 fail-closed。
+  结构 diff / ownership 按 `(class_name, path)` 对齐（同名类绝不互相污染；
+  `structure_diff` 段的 `added_classes`/`removed_classes` 明细从裸类名字符串改为
+  `{"class_name", "path"}` 对象，`changed` 明细新增 `path` 字段——影响机器消费方）；
+  callpath 对跨 shard 重复 ident 从 fail-closed 拒绝改为确定性合并出边。
+
 ### Changed
 
 - 仓库公开化准备：过程性设计文档移出仓库（`docs/`）；面向公开语境统一文档与注释措辞

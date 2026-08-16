@@ -1,6 +1,6 @@
 """JADX 结构索引上的有界静态调用路径查询（P1-B）。
 
-在 schema 1.1 的 structure 段上做确定性 BFS：按简单名解析调用边（index 全局
+在 schema 1.2 的 structure 段上做确定性 BFS：按简单名解析调用边（index 全局
 唯一候选 → "unique"，多候选 → "ambiguous"，刻意过近似）。反射 / JNI / 动态
 分发 / `new` 构造边均不可见——**查不到路径绝不等于不可达**，阴性一律不产出。
 路径上每条边都带 caller 文件与调用行，可定位可复核。
@@ -14,7 +14,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from apkscan.core.jadx_index import (
-    REASON_DUPLICATE_STRUCTURE,
     REASON_MALFORMED,
     JadxIndexError,
     LoadedIndex,
@@ -87,13 +86,13 @@ def _index_methods(
     """跨全部 shard 建方法表：id -> (caller 文件, calls)；简单名 -> 候选 id 列表。
 
     ★形状异常 fail-closed（对齐 find_value_usage）：坏结构当场揭穿，不许静默跳过。
-    ★同一方法 id 的重复：同 shard 内是擦除后同 arity 的合法重载——塌缩节点合并
-    出边（保持过近似语义）；跨 shard 重复意味着索引级类重复，fail-closed 拒绝，
-    绝不静默后者覆盖（后者覆盖会让结果依赖 shard 顺序、unique 被误标 ambiguous）。
+    ★同一方法 id 的重复：同 shard 内的擦除重载与跨 shard 的重复类（多 dex 脱壳
+    dump 常态，schema 1.2 起合法）同语义——确定性合并出边，绝不静默后者覆盖。
+    合并必须与 shard 枚举序无关：caller 文件取全部声明中字典序最小的路径；
+    calls 多重集本身无序（BFS 扩展前按 (callee, line) 排序）。
     """
     methods: dict[str, tuple[str, list[object]]] = {}
     by_name: dict[str, list[str]] = {}
-    origin_shard: dict[str, int] = {}
     for si, shard in enumerate(index.shards):
         if not isinstance(shard, Mapping):
             raise JadxIndexError(REASON_MALFORMED, f"$.shards[{si}]")
@@ -138,15 +137,10 @@ def _index_methods(
                 ident = f"{name}#{mn}/{arity}"
                 existing = methods.get(ident)
                 if existing is not None:
-                    if origin_shard[ident] != si:
-                        raise JadxIndexError(
-                            REASON_DUPLICATE_STRUCTURE, f"$.shards[{si}].structure"
-                        )
                     merged = list(existing[1]) + list(calls)
-                    methods[ident] = (existing[0], merged)
+                    methods[ident] = (min(existing[0], rel), merged)
                     continue
                 methods[ident] = (rel, calls)
-                origin_shard[ident] = si
                 by_name.setdefault(mn, []).append(ident)
     for candidates in by_name.values():
         candidates.sort()

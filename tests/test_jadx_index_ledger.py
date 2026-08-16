@@ -102,7 +102,12 @@ def test_hit_complete_projection_with_observations() -> None:
     assert cov.source is rc.CoverageSource.JADX_INDEX
     assert cov.status is rc.CoverageStatus.COMPLETE
     assert _observation_count(out) == before_obs + 1
-    obs = jl.replay(out).observations[-1]
+    # ★不用 observations[-1]：投影按 observation_id 排序，位置随 digest 漂移——
+    #   按 observation_type 选取本次追加的那条。
+    (obs,) = [
+        o for o in jl.replay(out).observations
+        if o.observation_type == "jadx_value_usage"
+    ]
     assert obs.ownership is rc.OwnershipValue.UNKNOWN
     assert obs.origin_outcome_id == outcome.outcome_id
     # 观察值是 digest（token 化形态），不是原值。

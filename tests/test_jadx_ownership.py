@@ -147,6 +147,23 @@ def test_no_baseline_all_unknown(tmp_path: Path) -> None:
         assert item.reason == "no_official_baseline"
 
 
+def test_duplicate_names_align_by_path_against_baseline(tmp_path: Path) -> None:
+    """★混淆锁（schema 1.2）：同名类按 (name, path) 对齐 baseline——同路径同 digest
+    的那份 INHERITED_OFFICIAL，baseline 没有的那份 absent_from_baseline，
+    绝不因同名互相污染（旧身份下 subject 侧直接 fail-closed，索引不可用）。"""
+    shared = "class a {\n    void run() {\n        x = 1;\n    }\n}\n"
+    extra = "class a {\n    void run() {\n        y = 1;\n    }\n}\n"
+    subject = _build_index(tmp_path, "s", {"p000/a.java": shared, "p001/a.java": extra})
+    baseline = _build_index(tmp_path, "b", {"p000/a.java": shared})
+    projection = project_ownership(subject, baseline)
+    assert len(projection.regions) == 2
+    by_path = {item.region.path: item for item in projection.regions}
+    assert by_path["p000/a.java"].ownership is rc.OwnershipValue.INHERITED_OFFICIAL
+    assert by_path["p000/a.java"].reason == "matches_official_baseline"
+    assert by_path["p001/a.java"].ownership is rc.OwnershipValue.UNKNOWN
+    assert by_path["p001/a.java"].reason == "absent_from_baseline"
+
+
 def test_full_match_inherited_official(tmp_path: Path) -> None:
     subject = _build_index(tmp_path, "s", {"com/a/App.java": APP_JAVA, "com/b/Lib.java": LIB_JAVA})
     baseline = _build_index(tmp_path, "b", {"com/a/App.java": APP_JAVA, "com/b/Lib.java": LIB_JAVA})

@@ -49,13 +49,16 @@ def _region_sort_key(item: RegionOwnership) -> tuple[object, ...]:
 
 
 def _regions_by_identity(
-    structures: dict[str, tuple[str, list[MethodRegion]]],
-) -> dict[tuple[str, str], list[MethodRegion]]:
-    """按方法身份 (class_name, "name/arity") 分组该身份的全部声明。"""
-    grouped: dict[tuple[str, str], list[MethodRegion]] = {}
-    for class_name, (_, regions) in structures.items():
+    structures: dict[tuple[str, str], list[MethodRegion]],
+) -> dict[tuple[str, str, str], list[MethodRegion]]:
+    """按方法身份 (class_name, path, "name/arity") 分组该身份的全部声明。
+
+    path 进身份（schema 1.2）：混淆样本的同名类各自独立对齐 baseline，
+    绝不因同名互相污染。"""
+    grouped: dict[tuple[str, str, str], list[MethodRegion]] = {}
+    for (class_name, path), regions in structures.items():
         for region in regions:
-            grouped.setdefault((class_name, region.method), []).append(region)
+            grouped.setdefault((class_name, path, region.method), []).append(region)
     return grouped
 
 
