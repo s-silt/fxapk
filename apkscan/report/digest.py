@@ -8,6 +8,7 @@ token 又难抓重点。本模块抽出**可办案化的核心**：按优先级�
 from __future__ import annotations
 
 import math
+import re
 from collections import Counter
 from typing import Any
 
@@ -530,6 +531,15 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
         "overseas_targets": overseas_targets,
         "closure": compact_closure,
     }
+    # jadx 持久索引状态透出（消费面之一：不透出等于没接）。兼容旧报告：只有 meta
+    # 明确带 jadx_index_status 时才输出整段；key 按 hex64 语法校验后才带（绝非路径）。
+    if "jadx_index_status" in meta:
+        jadx_index: dict[str, Any] = {"status": meta.get("jadx_index_status")}
+        index_key = meta.get("jadx_index_key")
+        if isinstance(index_key, str) and re.fullmatch(r"[0-9a-f]{64}", index_key):
+            jadx_index["key"] = index_key
+        digest["jadx_index"] = jadx_index
+
     if network_attribution is not None:
         digest["network_attribution"] = network_attribution
     # ★告警（codex C1）：redact 模式下自由文本命中并抹掉了结构化 PII → 显式标记，不静默

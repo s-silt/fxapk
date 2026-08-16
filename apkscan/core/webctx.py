@@ -295,6 +295,8 @@ class WebContext:
         self.apk_path = ""  # 无 APK：jadx/unpack 等增强器据此自然不启用
         # 同理：Web 证据面没有 DEX，脱壳回灌路径在此恒为空（协议要求该字段存在）。
         self.extra_dex_paths: list[str] = []
+        # 同理：无 jadx 面，持久索引在 Web 证据上恒不启用（协议要求该字段存在）。
+        self.jadx_cache_root: str | None = None
         self._files: dict[str, bytes] = dict(files or {})
         self.origin = origin
         self.source_dir = source_dir

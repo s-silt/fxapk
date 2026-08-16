@@ -62,7 +62,8 @@ def _apk(tmp_path: Path, *, dex_names: tuple[str, ...] = ("classes.dex",)) -> Pa
     apk = tmp_path / "app.apk"
     with zipfile.ZipFile(apk, "w") as zf:
         for i, name in enumerate(dex_names):
-            zf.writestr(name, b"dex-bytes-%d" % i)
+            # 20 字节：oversized 测试把上限 monkeypatch 成 16，payload 必须真的超限。
+            zf.writestr(name, b"dex-payload-%08d" % i)
         zf.writestr("resources.arsc", b"rsrc")
     return apk
 
@@ -83,6 +84,7 @@ def _ctx(tmp_path: Path, *, cache: bool = True, dex_names: tuple[str, ...] = ("c
 
 
 def _load(ctx: FakeContext, key: str) -> LoadedIndex:
+    assert ctx.jadx_cache_root is not None
     store = JadxIndexStore(ctx.jadx_cache_root)
     loaded = store.load_index(key)
     assert isinstance(loaded, LoadedIndex), loaded
@@ -198,7 +200,7 @@ def test_oversized_dex_disables_indexing(
     """解压前大小闸：超限 → disabled + 稳定 reason；普通分析照常。"""
     _patch(monkeypatch)
     monkeypatch.setattr(jadx, "_MAX_MATERIALIZE_DEX_BYTES", 16)
-    ctx = _ctx(tmp_path)  # dex 内容 > 16 字节
+    ctx = _ctx(tmp_path)  # dex 内容 20 字节 > 16
     result = JadxAnalyzer().analyze(ctx)
     assert result.meta["jadx_index_status"] == "disabled"
     assert "dex_too_large" in result.meta["jadx_receipt"]["index"]["reason_codes"]

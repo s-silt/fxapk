@@ -179,7 +179,7 @@ def test_snapshot_pickle_roundtrip_excludes_worker_apk() -> None:
     # 生产中 ProcessPoolExecutor 同样只 pickle 本进程自建的快照（来自被分析 APK），不接收外部 pickle。
     snap = SnapshotContext(
         package_name="com.x", manifest_xml="<m/>", platform="android",
-        config=None, apk_path="", extra_dex_paths=[], permissions=["p"], components=None,
+        config=None, apk_path="", extra_dex_paths=[], jadx_cache_root=None, permissions=["p"], components=None,
         dex_strings=("a", "b"), file_list=["f.json"], native_libs=[],
         certificates=[], files={"f.json": b"x"},
     )
@@ -196,7 +196,7 @@ def test_snapshot_read_file_missing_no_apk_returns_none() -> None:
     # 非预读文件 + 无 apk_path → 惰性兜底拿不到 APK → None（不抛）。
     snap = SnapshotContext(
         package_name="", manifest_xml="", platform="android", config=None,
-        apk_path="", extra_dex_paths=[], permissions=[], components=None,
+        apk_path="", extra_dex_paths=[], jadx_cache_root=None, permissions=[], components=None,
         dex_strings=(), file_list=[], native_libs=[], certificates=[], files={},
     )
     assert snap.read_file("nope/missing.bin") is None
@@ -205,7 +205,7 @@ def test_snapshot_read_file_missing_no_apk_returns_none() -> None:
 def _snap_with_declared(declared: dict[str, int]) -> SnapshotContext:
     snap = SnapshotContext(
         package_name="", manifest_xml="", platform="android", config=None,
-        apk_path="/x.apk", extra_dex_paths=[], permissions=[], components=None,
+        apk_path="/x.apk", extra_dex_paths=[], jadx_cache_root=None, permissions=[], components=None,
         dex_strings=(), file_list=[], native_libs=[], certificates=[], files={},
     )
     snap._worker_declared_sizes = declared
@@ -249,7 +249,7 @@ def test_ensure_declared_sizes_reads_real_zip(tmp_path: object) -> None:
         zf.writestr("lib/x.so", b"y" * 4096)
     snap = SnapshotContext(
         package_name="", manifest_xml="", platform="android", config=None,
-        apk_path=str(apk), extra_dex_paths=[], permissions=[], components=None,
+        apk_path=str(apk), extra_dex_paths=[], jadx_cache_root=None, permissions=[], components=None,
         dex_strings=(), file_list=[], native_libs=[], certificates=[], files={},
     )
     sizes = snap._ensure_declared_sizes()

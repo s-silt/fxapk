@@ -30,11 +30,13 @@ import struct
 import tempfile
 import time
 import unicodedata
+import zipfile
 import zlib
 from collections import Counter
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import IO, TYPE_CHECKING
 
 from apkscan.config.string_graph import StringChain, scan_java_source
 from apkscan.core.models import (
@@ -47,6 +49,23 @@ from apkscan.core.models import (
     Severity,
 )
 from apkscan.core import infra, proctree, tools
+from apkscan.core.jadx_index import (
+    CacheMiss,
+    CacheUnavailable,
+    DexInput,
+    DexLineage,
+    DexRole,
+    IndexBuildState,
+    JadxIndexError,
+    JadxIndexManifest,
+    JadxIndexStore,
+    Limits,
+    LoadedIndex,
+    build_key_material,
+    derive_index_key,
+    scan_java_sources,
+    verify_dex_inputs,
+)
 from apkscan.core.registry import BaseAnalyzer
 from apkscan.core.secrets import (
     SecretRules,
@@ -165,6 +184,324 @@ class _ScanOutcome:
     receipt: dict = field(default_factory=dict)
 
 
+# ---------------------------------------------------------------------------
+# 持久索引接线（opt-in：ctx.jadx_cache_root；一切失败 fail-open 到无索引路径）
+# ---------------------------------------------------------------------------
+
+#: jadx 版本参与持久索引身份。探测只占很短时间，不继承反编译的 300-1200s deadline。
+_VERSION_PROBE_TIMEOUT = 30.0
+
+#: 单个物化 DEX 的硬上限（解压前按 zip 声明大小挡一层，流式写入时再按实际字节复核）。
+#: 必须在运行时经模块属性读取，部署策略与测试才能安全收紧。
+_MAX_MATERIALIZE_DEX_BYTES = 256 * 1024 * 1024
+
+#: APK 顶层合法 DEX 名：classes.dex→ordinal 0、classes2.dex→1、classesN.dex→N-1。
+#: classes1.dex / classes01.dex / 子目录中的 *.dex 都不属于 APK DEX lineage。
+_APK_DEX_MEMBER_RE = re.compile(r"^classes(?:([2-9]|[1-9][0-9]+))?\.dex$")
+
+#: jadx 输出是全部输入联合反编译的一棵树，.java 无法按 DEX 归属；扫描产物统一
+#: 绑定排序后首个 lineage，其余 lineage 为空 shard。下游消费（结构 diff/ownership）
+#: 是跨 shard 聚合，语义无损；此标记让读 receipt 的人知道 shard≠单 DEX 内容。
+_INDEX_SCAN_ATTACHMENT = "joint_scan_first_lineage"
+
+_INDEX_REASON_CACHE_NOT_CONFIGURED = "cache_root_not_configured"
+_INDEX_REASON_NO_APK_PATH = "no_apk_path"
+_INDEX_REASON_JADX_VERSION_UNAVAILABLE = "jadx_version_unavailable"
+_INDEX_REASON_DEX_TOO_LARGE = "dex_too_large"
+_INDEX_REASON_DEX_MATERIALIZE_FAILED = "dex_materialize_failed"
+_INDEX_REASON_NO_DEX_INPUTS = "no_dex_inputs"
+_INDEX_REASON_DUPLICATE_APK_DEX = "duplicate_apk_dex_member"
+_INDEX_REASON_INVALID_CACHE_STATE = "invalid_cache_state"
+_INDEX_REASON_EMPTY_JADX_OUTPUT = "empty_jadx_output"
+_INDEX_REASON_BUILD_FAILED = "index_build_failed"
+_INDEX_REASON_INDEX_EXCEPTION = "index_exception"
+_INDEX_REASON_EXCLUDED_DEX = "excluded_dex"
+
+
+@dataclass(frozen=True)
+class _MaterializedDexInputs:
+    """物化后的已验证 DEX 身份。``lineage`` 不含路径，可安全参与 index key 与 manifest。"""
+
+    root: str
+    lineage: tuple[DexLineage, ...]
+    unrecognized_dex_members: int
+
+
+class _DexMaterializeError(ValueError):
+    """索引物化阶段的稳定拒绝；message 只进日志，code 才能进 receipt。"""
+
+    def __init__(self, code: str, message: str = "") -> None:
+        self.code = code
+        super().__init__(message or code)
+
+
+def _index_receipt(
+    *,
+    status: str = "disabled",
+    reason_codes: Iterable[str] = (),
+    unrecognized_dex_members: int = 0,
+    key: str | None = None,
+) -> dict:
+    """创建不含文件系统路径的索引 receipt 子块。"""
+    receipt: dict = {
+        "status": status,
+        "reason_codes": sorted({str(code) for code in reason_codes if code}),
+        "unrecognized_dex_members": int(unrecognized_dex_members),
+        "scan_attachment": _INDEX_SCAN_ATTACHMENT,
+    }
+    if key is not None:
+        receipt["key"] = key
+    return receipt
+
+
+def _append_index_reason(index_receipt: dict, code: str) -> None:
+    """向 index.reason_codes 加稳定码并保持确定排序。"""
+    reasons = {
+        str(item)
+        for item in (index_receipt.get("reason_codes") or [])
+        if isinstance(item, str) and item
+    }
+    if code:
+        reasons.add(code)
+    index_receipt["reason_codes"] = sorted(reasons)
+
+
+def _resolved_jadx_env(extra_env: dict[str, str]) -> dict[str, str] | None:
+    """按反编译入口相同规则生成子进程环境（插件包 JRE 时注入 JAVA_HOME）。"""
+    return {**os.environ, **extra_env} if extra_env else None
+
+
+def _probe_jadx_version(
+    resolved: tuple[list[str], dict[str, str]] | None,
+) -> str | None:
+    """探测本次解析出的 jadx 命令版本。
+
+    不缓存成功或失败结果：每次启用持久索引的 analyze 都探测一次（相对反编译本体
+    成本可忽略，且免去跨运行的缓存失效问题）。只有进程树受控、正常退出且 stdout
+    首行经 NFC 规范化后非空，才允许版本进入 key material——版本参与索引身份，
+    假版本会让不兼容索引共享身份。
+    """
+    if resolved is None:
+        return None
+    jadx_cmd, extra_env = resolved
+    if not jadx_cmd:
+        return None
+    owned = proctree.run_owned(
+        [*jadx_cmd, "--version"],
+        timeout=_VERSION_PROBE_TIMEOUT,
+        env=_resolved_jadx_env(extra_env),
+    )
+    if (
+        owned.returncode != 0
+        or owned.timed_out
+        or not owned.ownership_complete
+        or not owned.termination_complete
+        or owned.forced_tree_kill
+    ):
+        return None
+    lines = (owned.stdout or "").splitlines()
+    if not lines:
+        return None
+    version = unicodedata.normalize("NFC", lines[0].strip())
+    return version or None
+
+
+def _copy_stream_limited(source: IO[bytes], destination: Path) -> str:
+    """把二进制流写入受控路径，按实际字节数设闸并返回复算 digest。
+
+    zip 声明大小可伪造（小压缩巨解压），实际写入必须独立计数；超限即拒绝。
+    """
+    limit = _MAX_MATERIALIZE_DEX_BYTES
+    total = 0
+    digest = hashlib.sha256()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("wb") as output:
+        while True:
+            chunk = source.read(min(1024 * 1024, limit + 1))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > limit:
+                raise _DexMaterializeError(_INDEX_REASON_DEX_TOO_LARGE)
+            output.write(chunk)
+            digest.update(chunk)
+    return "sha256:" + digest.hexdigest()
+
+
+def _apk_dex_ordinal(member_name: str, suffix: str | None) -> int:
+    """把已匹配的 APK DEX 名转换成 role 内 ordinal（classes.dex=0、classesN=N-1）。"""
+    if member_name == "classes.dex":
+        return 0
+    if suffix is None:
+        raise _DexMaterializeError(
+            _INDEX_REASON_DEX_MATERIALIZE_FAILED,
+            f"合法 DEX 名缺少数字后缀：{member_name}",
+        )
+    return int(suffix) - 1
+
+
+def _materialize_dex_inputs(
+    apk_path: str,
+    extra_dex_paths: Sequence[str],
+) -> _MaterializedDexInputs:
+    """把 APK 顶层 classes*.dex 与额外 DEX 物化到独立临时根并验证 lineage。
+
+    verify_dex_inputs 只吃目录下的真实文件，而 APK 是 zip——必须先解出。物化路径
+    用固定安全相对路径（apk/classes.dex、extra/000000.dex…），绝不把原绝对路径当
+    relative_path。digest 为解出字节的复算值（declared=复算值；verify_dex_inputs
+    再复算一遍是防物化后被改）。
+
+    调用成功后 root 归调用方所有，必须立即并入 ``tmp_dirs`` 统一受检清理；失败时
+    本函数尽力删除尚未交接的 root，清理失败只写日志。
+    """
+    root = tempfile.mkdtemp(prefix="apkscan_jadx_mat_")
+    handed_off = False
+    try:
+        inputs: list[DexInput] = []
+        unrecognized = 0
+        try:
+            with zipfile.ZipFile(apk_path, "r") as archive:
+                valid_members: list[tuple[int, zipfile.ZipInfo]] = []
+                seen_ordinals: set[int] = set()
+                for info in archive.infolist():
+                    name = info.filename
+                    match = _APK_DEX_MEMBER_RE.fullmatch(name)
+                    if match is None:
+                        # 非白名单形态的 .dex（子目录、非法编号）不静默：计数留痕。
+                        if name.lower().endswith(".dex"):
+                            unrecognized += 1
+                        continue
+                    ordinal = _apk_dex_ordinal(name, match.group(1))
+                    if ordinal in seen_ordinals:
+                        raise _DexMaterializeError(
+                            _INDEX_REASON_DUPLICATE_APK_DEX,
+                            f"APK 中出现重复 DEX ordinal：{ordinal}",
+                        )
+                    seen_ordinals.add(ordinal)
+                    # 声明大小先挡一层；实际流读取还会再次计数，不信任 zip 元数据。
+                    if info.file_size > _MAX_MATERIALIZE_DEX_BYTES:
+                        raise _DexMaterializeError(_INDEX_REASON_DEX_TOO_LARGE)
+                    valid_members.append((ordinal, info))
+                valid_members.sort(key=lambda item: item[0])
+                for ordinal, info in valid_members:
+                    relative = f"apk/{info.filename}"
+                    destination = Path(root) / relative
+                    with archive.open(info, "r") as source:
+                        digest = _copy_stream_limited(source, destination)
+                    inputs.append(
+                        DexInput(
+                            role=DexRole.APK_DEX,
+                            ordinal=ordinal,
+                            source_label="apk",
+                            relative_path=relative,
+                            declared_digest=digest,
+                        )
+                    )
+        except _DexMaterializeError:
+            raise
+        except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
+            raise _DexMaterializeError(
+                _INDEX_REASON_DEX_MATERIALIZE_FAILED,
+                f"读取 APK ZIP 失败：{exc}",
+            ) from exc
+
+        for ordinal, raw_path in enumerate(extra_dex_paths):
+            source_path = Path(raw_path)
+            relative = f"extra/{ordinal:06d}.dex"
+            destination = Path(root) / relative
+            try:
+                if source_path.stat().st_size > _MAX_MATERIALIZE_DEX_BYTES:
+                    raise _DexMaterializeError(_INDEX_REASON_DEX_TOO_LARGE)
+                with source_path.open("rb") as source:
+                    digest = _copy_stream_limited(source, destination)
+            except _DexMaterializeError:
+                raise
+            except OSError as exc:
+                raise _DexMaterializeError(
+                    _INDEX_REASON_DEX_MATERIALIZE_FAILED,
+                    f"读取额外 DEX 失败：{source_path}",
+                ) from exc
+            inputs.append(
+                DexInput(
+                    role=DexRole.EXTRA_DEX,
+                    ordinal=ordinal,
+                    source_label="extra",
+                    relative_path=relative,
+                    declared_digest=digest,
+                )
+            )
+
+        if not inputs:
+            raise _DexMaterializeError(_INDEX_REASON_NO_DEX_INPUTS)
+
+        lineage = verify_dex_inputs(root, inputs)
+        handed_off = True
+        return _MaterializedDexInputs(
+            root=root,
+            lineage=lineage,
+            unrecognized_dex_members=unrecognized,
+        )
+    finally:
+        if not handed_off:
+            cleanup = _remove_tree_checked(root)
+            if not cleanup["complete"]:
+                logger.warning("[jadx-index] 失败物化 root 未能清理：%s", root)
+
+
+def _lineage_after_exclusions(
+    lineage: tuple[DexLineage, ...],
+    original_extra_paths: Sequence[str],
+    excluded_paths: Sequence[str],
+) -> tuple[DexLineage, ...]:
+    """按原始 extra 输入序剔除降级重跑排除项；保留者 ordinal 不重排（身份稳定）。"""
+    excluded = set(excluded_paths)
+    excluded_ordinals = {
+        ordinal
+        for ordinal, path in enumerate(original_extra_paths)
+        if path in excluded
+    }
+    return tuple(
+        item
+        for item in lineage
+        if not (item.role is DexRole.EXTRA_DEX and item.ordinal in excluded_ordinals)
+    )
+
+
+def _index_values(outcome: "_ScanOutcome") -> list[str]:
+    """构造 usage 索引关注值：端点值 + decrypt candidate 密文，稳定去重。
+
+    这是「一次索引、多次廉价 usage 查询」的观察面；scan_java_sources 自会再做
+    排序去重与长度上限。
+    """
+    values: set[str] = set()
+    for endpoint in outcome.endpoints:
+        value = getattr(endpoint, "value", None)
+        if isinstance(value, str) and value:
+            values.add(value)
+    for candidate in outcome.decrypt_candidates:
+        if not isinstance(candidate, dict):
+            continue
+        ciphertext = candidate.get("ciphertext")
+        if isinstance(ciphertext, str) and ciphertext:
+            values.add(ciphertext)
+    return sorted(values)
+
+
+def _index_status_from_build(state: IndexBuildState, coverage: str) -> str:
+    """把 P1 build state 映射成 analyzer 对外状态（未知形态保守按 failed）。"""
+    if state is IndexBuildState.REUSED:
+        return "reused"
+    if state is IndexBuildState.UNAVAILABLE:
+        return "unavailable"
+    if state is IndexBuildState.FAILED:
+        return "failed"
+    if state is IndexBuildState.PARTIAL or coverage == "partial":
+        return "partial"
+    if state is IndexBuildState.BUILT:
+        return "built"
+    return "failed"
+
+
 _FINDING_SECRET = "JADX-HARDCODED-SECRET"
 #: config-chain 层②：方法内 密文→解密(→sink) 共现链（启发式、非数据流证明）。
 _FINDING_STRING_CHAIN = "STRING-CHAIN-DECRYPT"
@@ -179,6 +516,8 @@ class JadxAnalyzer(BaseAnalyzer):
         'decrypt_candidates_suppressed': 'coverage',
         'jadx_bad_dex_excluded': 'coverage',
         'jadx_endpoint_count': 'record',
+        'jadx_index_key': 'record',
+        'jadx_index_status': 'coverage',
         'jadx_java_files': 'coverage',
         'jadx_receipt': 'coverage',
         'jadx_scan_truncated': 'coverage',
@@ -197,15 +536,27 @@ class JadxAnalyzer(BaseAnalyzer):
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
         result = AnalyzerResult(analyzer=self.name)
         apk_path = (getattr(ctx, "apk_path", "") or "").strip()
+        # 持久索引 opt-in：不给 cache root = 现行为 + disabled，文件系统零持久化。
+        cache_root = (getattr(ctx, "jadx_cache_root", "") or "").strip()
+        index_receipt = _index_receipt(
+            status="disabled",
+            reason_codes=(
+                [_INDEX_REASON_CACHE_NOT_CONFIGURED] if not cache_root else []
+            ),
+        )
+        result.meta["jadx_index_status"] = "disabled"
+
         if not apk_path:
             logger.info("[jadx] 无 apk_path，跳过 jadx 反编译")
             result.error = "无 apk_path，跳过 jadx 反编译"
             result.meta["jadx_status"] = "no_apk_path"
+            _append_index_reason(index_receipt, _INDEX_REASON_NO_APK_PATH)
             # 早退也产 receipt（complete=False）：让「每次 analyze 都有 jadx_receipt」的
             # 契约无例外，visibility 的 receipt 通道能识别 no_apk_path → unavailable。
             result.meta["jadx_receipt"] = _build_jadx_receipt(
                 status="no_apk_path", runs=[], scan=None,
                 cleanup={"complete": True, "reason_codes": []}, analyzer_error=False,
+                index=index_receipt,
             )
             return result
 
@@ -225,8 +576,56 @@ class JadxAnalyzer(BaseAnalyzer):
         tmp_dirs = [tmp]  # 本次 analyze 创建过的全部输出目录（finally 逐个受检清理）
         runs: list[dict] = []
         scan_receipt: dict | None = None
+
+        # 索引启用时只解析一次 jadx：版本探测与后续反编译共用同一份解析结果，
+        # 版本身份与实际反编译命令绝不来自两次解析。索引准备的任何失败只降级索引
+        # （fail-open），jadx 分析本体照常。
+        resolved_jadx: tuple[list[str], dict[str, str]] | None = None
+        materialized: _MaterializedDexInputs | None = None
+        jadx_version: str | None = None
+        if cache_root:
+            try:
+                resolved_jadx = tools.resolve_jadx()
+                jadx_version = _probe_jadx_version(resolved_jadx)
+                if jadx_version is None:
+                    _append_index_reason(
+                        index_receipt, _INDEX_REASON_JADX_VERSION_UNAVAILABLE
+                    )
+                else:
+                    materialized = _materialize_dex_inputs(apk_path, extra_dex_paths)
+                    # 物化 root 创建成功后立刻交给统一 finally 管理（受检清理）。
+                    tmp_dirs.append(materialized.root)
+                    index_receipt["unrecognized_dex_members"] = (
+                        materialized.unrecognized_dex_members
+                    )
+            except _DexMaterializeError as exc:
+                logger.warning(
+                    "[jadx-index] DEX 物化被拒绝：code=%s detail=%s", exc.code, exc
+                )
+                _append_index_reason(index_receipt, exc.code)
+                materialized = None
+            except JadxIndexError as exc:
+                # 稳定协议值进 receipt；字段坐标只进日志。
+                logger.warning(
+                    "[jadx-index] lineage 输入被拒绝：code=%s field_path=%s",
+                    exc.code, exc.field_path,
+                )
+                _append_index_reason(index_receipt, exc.code)
+                materialized = None
+            except OSError:
+                logger.exception("[jadx-index] 版本探测或物化发生 OS 异常")
+                _append_index_reason(
+                    index_receipt, _INDEX_REASON_DEX_MATERIALIZE_FAILED
+                )
+                materialized = None
+            except Exception:  # noqa: BLE001 - 索引旁路绝不影响主分析
+                logger.exception("[jadx-index] 索引准备异常")
+                _append_index_reason(index_receipt, _INDEX_REASON_INDEX_EXCEPTION)
+                materialized = None
+
         try:
-            run1 = self._run_jadx(apk_path, tmp, extra_dex_paths)
+            run1 = self._run_jadx(apk_path, tmp, extra_dex_paths, resolved=resolved_jadx)
+            final_run = run1
             runs.append(_run_receipt(run1))
             status = run1.status
             # 先落一次 status：_scan_java 若异常，报告里仍看得到 jadx 进程本身的结局
@@ -234,6 +633,7 @@ class JadxAnalyzer(BaseAnalyzer):
             result.meta["jadx_status"] = status
             # timeout/failed 仍尽量扫已生成产物（jadx 常非零退出但已产出部分源码）。
             outcome = self._scan_java(Path(tmp))
+            excluded_paths: list[str] = []
             # ★全军覆没降级：损坏的 dump DEX（头体不一致，checksum 必不符）会让 jadx 在
             #   载入期 OOM 崩掉整个进程——不是拒载单个文件，而是 0 产出（实测比不喂 dump
             #   还差）。此时剔除 checksum 不符的 DEX 重跑一次，把好 DEX 的产出救回来。
@@ -254,7 +654,10 @@ class JadxAnalyzer(BaseAnalyzer):
                     #   旧目录不在此刻删，统一由 finally 的受检清理收口并进 receipt。
                     tmp = tempfile.mkdtemp(prefix="apkscan_jadx_")
                     tmp_dirs.append(tmp)
-                    retry = self._run_jadx(apk_path, tmp, good)
+                    retry = self._run_jadx(apk_path, tmp, good, resolved=resolved_jadx)
+                    # 索引一律基于最终那次 run：最终输出树、最终 options_digest、
+                    # 剔除坏 DEX 后的保留 lineage。
+                    final_run = retry
                     # 重跑的输入集已剔除坏 DEX → options_digest 必与首跑不同：两次执行的
                     # 参数差异在 receipt 里可辨，不会被误当同一输入的重复执行。
                     runs.append({**_run_receipt(retry), "degraded_rerun": True})
@@ -263,6 +666,7 @@ class JadxAnalyzer(BaseAnalyzer):
                     # 干净退出也不报 ok，避免把「部分丢失」读成「全部成功」。丢了哪些
                     # 落进 meta.jadx_bad_dex_excluded（basename，不带案件路径），报告可见。
                     status = retry.status if retry.status != "ok" else "partial"
+                    excluded_paths = bad
                     result.meta["jadx_bad_dex_excluded"] = [
                         os.path.basename(p) for p in bad
                     ]
@@ -285,9 +689,132 @@ class JadxAnalyzer(BaseAnalyzer):
                 "[jadx] status=%s java=%d 端点=%d 密钥Finding=%d",
                 status, outcome.n_files, len(outcome.endpoints), len(outcome.findings),
             )
+
+            # --------------------------------------------------------------
+            # 持久索引旁路：build 时机在最终 _scan_java 之后、finally 清理之前
+            # （jadx 输出目录与物化 root 都还活着）。任何异常只改索引 status/receipt，
+            # 绝不污染 result.error 与既有产出。
+            # --------------------------------------------------------------
+            if cache_root and materialized is not None and jadx_version is not None:
+                lineage = _lineage_after_exclusions(
+                    materialized.lineage, extra_dex_paths, excluded_paths
+                )
+                if excluded_paths:
+                    _append_index_reason(index_receipt, _INDEX_REASON_EXCLUDED_DEX)
+                try:
+                    if not lineage:
+                        index_receipt["status"] = "disabled"
+                        _append_index_reason(index_receipt, _INDEX_REASON_NO_DEX_INPUTS)
+                    else:
+                        options_digest = final_run.options_digest
+                        key = derive_index_key(lineage, jadx_version, options_digest)
+                        index_receipt["key"] = key
+                        result.meta["jadx_index_key"] = key
+                        # 保护根传 APK **文件**而非其目录：cache root 不许圈住样本文件，
+                        # 但用户把 cache 放样本旁边是合法布局。tmp_dirs 已含全部输出目录
+                        # 与物化 root。
+                        try:
+                            store = JadxIndexStore(
+                                cache_root,
+                                protected_roots=[apk_path, *tmp_dirs],
+                            )
+                        except JadxIndexError as exc:
+                            logger.warning(
+                                "[jadx-index] cache root 被拒绝：code=%s field_path=%s",
+                                exc.code, exc.field_path,
+                            )
+                            index_receipt["status"] = "disabled"
+                            _append_index_reason(index_receipt, exc.code)
+                        else:
+                            loaded = store.load_index(key)
+                            if isinstance(loaded, LoadedIndex):
+                                index_receipt["status"] = "reused"
+                            elif isinstance(loaded, CacheUnavailable):
+                                # CacheUnavailable 绝不当 miss：不重建、不覆盖、不绕道。
+                                index_receipt["status"] = "unavailable"
+                                if loaded.reason:
+                                    _append_index_reason(index_receipt, loaded.reason)
+                            elif isinstance(loaded, CacheMiss):
+                                if outcome.n_files == 0:
+                                    # jadx 0 产出（失败态）：绝不发布空索引冒充观察面。
+                                    index_receipt["status"] = "failed"
+                                    _append_index_reason(
+                                        index_receipt, _INDEX_REASON_EMPTY_JADX_OUTPUT
+                                    )
+                                else:
+                                    coverage = (
+                                        "partial"
+                                        if status in {"partial", "timeout"}
+                                        or bool(excluded_paths)
+                                        else "complete"
+                                    )
+                                    material = build_key_material(
+                                        lineage, jadx_version, options_digest
+                                    )
+                                    manifest = JadxIndexManifest(
+                                        index_key=key,
+                                        key_material=material,
+                                        dex_lineage=lineage,
+                                        jadx_version=jadx_version,
+                                        options_digest=options_digest,
+                                        coverage=coverage,
+                                    )
+                                    scan = scan_java_sources(
+                                        tmp,
+                                        _index_values(outcome),
+                                        lineage=lineage[0],
+                                        limits=Limits(),
+                                    )
+                                    built = store.build_index(
+                                        materialized.root, manifest, scan=scan
+                                    )
+                                    if isinstance(built, CacheUnavailable):
+                                        index_receipt["status"] = "unavailable"
+                                        if built.reason:
+                                            _append_index_reason(
+                                                index_receipt, built.reason
+                                            )
+                                    else:
+                                        index_status = _index_status_from_build(
+                                            built.state, built.coverage
+                                        )
+                                        index_receipt["status"] = index_status
+                                        if index_status == "failed":
+                                            _append_index_reason(
+                                                index_receipt,
+                                                _INDEX_REASON_BUILD_FAILED,
+                                            )
+                            else:
+                                # 未知返回形态不能当 miss，更不能覆盖已有 cache。
+                                index_receipt["status"] = "unavailable"
+                                _append_index_reason(
+                                    index_receipt, _INDEX_REASON_INVALID_CACHE_STATE
+                                )
+                except JadxIndexError as exc:
+                    logger.warning(
+                        "[jadx-index] 索引构建被拒绝：code=%s field_path=%s",
+                        exc.code, exc.field_path,
+                    )
+                    index_receipt["status"] = "failed"
+                    _append_index_reason(index_receipt, exc.code)
+                except Exception:  # noqa: BLE001 - 索引旁路 fail-open
+                    logger.exception("[jadx-index] 索引构建异常")
+                    index_receipt["status"] = "failed"
+                    _append_index_reason(index_receipt, _INDEX_REASON_INDEX_EXCEPTION)
+
+                # disabled 是「未建未载」的承诺，不许留下 key 暗示索引存在。
+                if index_receipt["status"] == "disabled":
+                    index_receipt.pop("key", None)
+                    result.meta.pop("jadx_index_key", None)
+                result.meta["jadx_index_status"] = index_receipt["status"]
         except Exception as exc:  # noqa: BLE001 - 任何异常转 error，不抛给 pipeline
             logger.exception("[jadx] 反编译/扫描异常")
             result.error = f"jadx 增强异常：{exc}"
+            # 索引尚未获得终态时明确记 failed；不把主分析异常伪装成 cache unavailable。
+            if cache_root and materialized is not None:
+                index_receipt["status"] = "failed"
+                _append_index_reason(index_receipt, _INDEX_REASON_INDEX_EXCEPTION)
+                result.meta["jadx_index_status"] = "failed"
         finally:
             # 受检清理：进程树已在 _run_jadx 内验证终止后才走到这里；失败不再无痕，
             # 进 receipt 的 cleanup 块并使 complete=False（Java 面不得算完整覆盖）。
@@ -297,25 +824,38 @@ class JadxAnalyzer(BaseAnalyzer):
                 "complete": all(c["complete"] for c in cleanups),
                 "reason_codes": sorted({rc for c in cleanups for rc in c["reason_codes"]}),
             }
+            # 物化 root 清理失败只进顶层 cleanup（挡 Java 面 complete），不回写已发布
+            # manifest 的 coverage、也不改 jadx_index_status——索引内容的完整性由构建时
+            # 的观察决定，与事后环境卫生无关。
             result.meta["jadx_receipt"] = _build_jadx_receipt(
                 status=str(result.meta.get("jadx_status") or "failed"),
                 runs=runs,
                 scan=scan_receipt,
                 cleanup=cleanup,
                 analyzer_error=bool(result.error),
+                index=index_receipt,
             )
         return result
 
     # ------------------------------------------------------------------
 
     def _run_jadx(
-        self, apk_path: str, out_dir: str, extra_dex_paths: list[str] | None = None
+        self,
+        apk_path: str,
+        out_dir: str,
+        extra_dex_paths: list[str] | None = None,
+        *,
+        resolved: tuple[list[str], dict[str, str]] | None = None,
     ) -> _JadxRun:
         """跑 jadx --no-res -d <out> <apk> [dump.dex...]。返回 :class:`_JadxRun`（不抛）。
 
         ``extra_dex_paths``：脱壳 dump 的额外 .dex 文件，作为**额外输入**与原 APK 一并反编译。
         jadx 接受多输入（.apk/.dex/...）；加固样本的真实代码全在 dump DEX 里，不喂进来只反编译
         出壳桩。超时按额外 DEX 数量线性伸缩（见 ``_jadx_timeout``）。
+
+        ``resolved`` 非 None 时直接使用该解析结果：持久索引启用时 analyze 先用它探测
+        ``--version``，再把同一结果传进来——版本身份与实际反编译命令绝不来自两次解析。
+        未启用索引时保持既有行为，本方法自行解析。
 
         进程经 ``proctree.run_owned`` 执行：本 analyzer 自己持有 300-1200s deadline（long lane
         调度器不加 worker 级超时），超时/正常退出后都验证 ``.bat -> java -> 后代`` 整树终止，
@@ -327,11 +867,11 @@ class JadxAnalyzer(BaseAnalyzer):
         dex_inputs = list(extra_dex_paths or [])
         timeout = self._jadx_timeout(len(dex_inputs))
         digest = _options_digest(apk_path, dex_inputs, timeout)
-        resolved = tools.resolve_jadx()
-        if resolved is None:
+        effective_resolved = resolved if resolved is not None else tools.resolve_jadx()
+        if effective_resolved is None:
             logger.warning("[jadx] 无可用 jadx（PATH 与插件包 jadx-addon 均无），跳过反编译")
             return _JadxRun(status="failed", options_digest=digest, process=None)
-        jadx_cmd, extra_env = resolved
+        jadx_cmd, extra_env = effective_resolved
         cmd = [*jadx_cmd, "--no-res"]
         if dex_inputs:
             # dump DEX 常从进程内存抓取，checksum/signature 与磁盘态不一致，jadx 默认
@@ -339,7 +879,7 @@ class JadxAnalyzer(BaseAnalyzer):
             cmd.append("-Pdex-input.verify-checksum=no")
         cmd += ["-d", out_dir, apk_path, *dex_inputs]
         # 插件包自带 JRE 时把 JAVA_HOME 注入子进程环境（在系统环境基础上覆盖）。
-        env = {**os.environ, **extra_env} if extra_env else None
+        env = _resolved_jadx_env(extra_env)
         logger.info("[jadx] 执行（超时 %ss，额外 DEX %d 个）：%s", timeout, len(dex_inputs), " ".join(cmd))
         owned = proctree.run_owned(cmd, timeout=timeout, env=env)
         if not owned.ownership_complete:
@@ -668,7 +1208,8 @@ def _run_receipt(run: _JadxRun) -> dict:
 
 
 def _build_jadx_receipt(
-    *, status: str, runs: list[dict], scan: dict | None, cleanup: dict, analyzer_error: bool
+    *, status: str, runs: list[dict], scan: dict | None, cleanup: dict,
+    analyzer_error: bool, index: dict | None = None,
 ) -> dict:
     """组装 ``meta['jadx_receipt']``。``complete=True`` 是 Java 面「完整覆盖」的唯一凭据，
     要求全部成立：进程 ok 且**恰有一次**非降级执行、执行的进程树状态全程受验（含中间态）、
@@ -676,6 +1217,10 @@ def _build_jadx_receipt(
     未抛异常。任一不成立即 ``complete=False`` 并在 ``reason_codes`` 留下稳定原因
     （阳性发现不受影响，只挡穷尽性）。builder 自身独立强制这些条件，不依赖调用方只在
     正确形态下调用（fail closed）。
+
+    ``index`` 子块承载持久索引旁路的结局：只含稳定 status/reason code/计数/attachment/key，
+    不含 field_path、异常字符串或文件系统路径。索引是旁路——其 disabled/failed/unavailable
+    不进顶层 reason_codes、不挡 Java 面 ``complete``。
     """
     reasons: set[str] = set()
     if analyzer_error:
@@ -728,7 +1273,24 @@ def _build_jadx_receipt(
         "cleanup": cleanup,
         "complete": complete,
         "reason_codes": sorted(reasons),
+        "index": (
+            dict(index)
+            if index is not None
+            else _index_receipt(
+                status="disabled",
+                reason_codes=[_INDEX_REASON_CACHE_NOT_CONFIGURED],
+            )
+        ),
     }
+    # 即使调用方传入未收敛列表，builder 仍自行收敛成确定形态（fail closed 同款纪律）。
+    index_reasons = receipt["index"].get("reason_codes")
+    receipt["index"]["reason_codes"] = sorted(
+        {
+            item
+            for item in (index_reasons if isinstance(index_reasons, list) else [])
+            if isinstance(item, str) and item
+        }
+    )
     if scan is not None:
         receipt["scan"] = scan
     return receipt

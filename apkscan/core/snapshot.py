@@ -64,6 +64,7 @@ class SnapshotContext:
         config: Any,
         apk_path: str,
         extra_dex_paths: list[str],
+        jadx_cache_root: str | None,
         permissions: list[str],
         components: Any,
         dex_strings: tuple[str, ...],
@@ -86,6 +87,9 @@ class SnapshotContext:
         # 并行失效（加固样本在实际使用路径只反编译出壳桩）。故设为**必填参数**——build_snapshot
         # 漏传直接 TypeError，而非无声丢字段。协议新增数据字段照此办理（见文件底部静态校验）。
         self.extra_dex_paths = extra_dex_paths
+        # jadx 持久索引 cache root（opt-in）。同 extra_dex_paths 的教训：协议数据字段
+        # 必填过并行边界，漏传直接 TypeError，不许 getattr 静默退化成"未启用"。
+        self.jadx_cache_root = jadx_cache_root
         self.dex_available = dex_available
         self.apk_validation_ok = apk_validation_ok
         # 清单包名交叉校验异常（None=正常）；随快照过并行边界，供 manifest 分析器发 Finding。
@@ -268,6 +272,7 @@ def build_snapshot(ctx: Any) -> SnapshotContext:
         config=ctx.config,
         apk_path=getattr(ctx, "apk_path", "") or "",
         extra_dex_paths=list(getattr(ctx, "extra_dex_paths", None) or []),
+        jadx_cache_root=getattr(ctx, "jadx_cache_root", None),
         permissions=list(ctx.permissions()),
         components=ctx.components(),
         dex_strings=tuple(ctx.dex_strings()),
