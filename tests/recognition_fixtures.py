@@ -228,12 +228,14 @@ def make_gap() -> EvidenceGap:
     )
 
 
-def make_action(*, attempt_nonce: str = "2" * 32) -> NextAction:
+def make_action(
+    *, attempt_nonce: str = "2" * 32, action_type: str = "jadx-usage-query"
+) -> NextAction:
     return build_next_action(
         question_id=make_question().question_id,
         gap_ids=(make_gap().gap_id,),
         attempt_nonce=attempt_nonce,
-        action_type="jadx-usage-query",
+        action_type=action_type,
         subjects=(SUBJECT,),
         input_anchor_ids=(make_anchor().anchor_id,),
         parameters_digest=DIGEST_B,
@@ -414,11 +416,13 @@ def make_gap_ledger() -> tuple[LedgerEvent, ...]:
     return append_record(make_claim_ledger(), EventType.GAP_IDENTIFIED, make_gap())
 
 
-def make_action_ledger(*, attempt_nonce: str = "2" * 32) -> tuple[LedgerEvent, ...]:
+def make_action_ledger(
+    *, attempt_nonce: str = "2" * 32, action_type: str = "jadx-usage-query"
+) -> tuple[LedgerEvent, ...]:
     return append_record(
         make_gap_ledger(),
         EventType.ACTION_PROPOSED,
-        make_action(attempt_nonce=attempt_nonce),
+        make_action(attempt_nonce=attempt_nonce, action_type=action_type),
     )
 
 

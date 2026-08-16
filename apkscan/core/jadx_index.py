@@ -1,8 +1,13 @@
-"""JADX 持久化索引：契约与身份层（S1）+ 存储层（S2）。
+"""JADX 持久化索引：契约与身份层（S1）+ 存储层（S2）+ 查询层（S3）。
 
 S1：数据契约、DEX 输入复算校验、域分离 key 派生。
 S2：受控 cache root、create-only 原子发布、fail-closed 加载校验链。
-本模块不负责 JADX 调用、源码枚举与查询（S3）。
+S3：确定性枚举、bounded postings、结构提取（P1-B）与 find_value_usage。
+本模块不负责 JADX 调用；调用路径查询见 jadx_callpath。
+
+结构段（schema 1.1）是对反编译 Java 的**有界启发式**解析——反射、JNI、动态
+分发与混淆构造均不可见；未识别的语法被跳过而非报错。结构的不完整是文档化的
+启发式属性，绝不能被解释为「不存在」。
 """
 
 from __future__ import annotations
@@ -22,7 +27,9 @@ from apkscan.core.atomic import AtomicCreateUnsupportedError, atomic_create_byte
 from apkscan.core.recognition_codec import canonical_json_v1, parse_json_v1
 
 
-INDEX_SCHEMA_VERSION = "1.0"
+# 1.1：shard 增加必需的 structure 段（P1-B）。schema 参与 key material，
+# bump 即让所有 1.0 工件按既有漂移机制变为可重建的 CacheMiss，无迁移代码。
+INDEX_SCHEMA_VERSION = "1.1"
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -36,6 +43,7 @@ REASON_SHARD_DIGEST_MISMATCH = "shard_digest_mismatch"
 REASON_DUPLICATE_POSTING = "duplicate_posting"
 REASON_PATH_ESCAPE = "path_escape"
 REASON_NORMALIZATION_CONFLICT = "normalization_conflict"
+REASON_DUPLICATE_STRUCTURE = "duplicate_structure"
 
 # CacheUnavailable 的稳定 reason code。
 REASON_PERMISSION_DENIED = "permission_denied"
@@ -606,6 +614,121 @@ def _lineage_from_records(records: object) -> tuple[DexLineage, ...]:
     return tuple(out)
 
 
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_$][\w$]*")
+_QUALIFIED_CLASS_RE = re.compile(r"[A-Za-z_$][\w$]*(?:[.$][A-Za-z_$][\w$]*)*")
+#: 落盘标识符的硬上限：与 Limits.max_identifier_len 解耦——load 侧没有 Limits，
+#: 这里只拦「自由载荷通道」级别的异常长度。
+_MAX_PERSISTED_IDENTIFIER = 1024
+
+
+def _validate_shard_structure(shard_value: Mapping[str, object], files: set[str]) -> None:
+    """schema 1.1 structure 段的 fail-closed 校验；违规抛精确 reason code。
+
+    形状违规 / 失序 / path 不在 files → malformed；重名类或完全重复的
+    (name, arity, start_line) 三元组 → duplicate_structure。
+    """
+    raw = shard_value.get("structure")
+    if not isinstance(raw, dict) or set(raw) != {"classes"}:
+        _fail(REASON_MALFORMED, "$.structure")
+    classes = raw["classes"]
+    if not isinstance(classes, list):
+        _fail(REASON_MALFORMED, "$.structure.classes")
+    previous_name: str | None = None
+    for ci, cls in enumerate(classes):
+        prefix = f"$.structure.classes[{ci}]"
+        if not isinstance(cls, dict) or set(cls) != {"name", "path", "methods"}:
+            _fail(REASON_MALFORMED, prefix)
+        name = cls["name"]
+        if (
+            not isinstance(name, str)
+            or len(name) > _MAX_PERSISTED_IDENTIFIER
+            or _QUALIFIED_CLASS_RE.fullmatch(name) is None
+        ):
+            _fail(REASON_MALFORMED, f"{prefix}.name")
+        if previous_name is not None:
+            if name == previous_name:
+                _fail(REASON_DUPLICATE_STRUCTURE, f"{prefix}.name")
+            if name < previous_name:
+                _fail(REASON_MALFORMED, f"{prefix}.name")
+        previous_name = name
+        rel = cls["path"]
+        if not isinstance(rel, str):
+            _fail(REASON_MALFORMED, f"{prefix}.path")
+        _normalize_safe_relative_path(rel, f"{prefix}.path")
+        if rel not in files:
+            _fail(REASON_MALFORMED, f"{prefix}.path")
+        methods = cls["methods"]
+        if not isinstance(methods, list):
+            _fail(REASON_MALFORMED, f"{prefix}.methods")
+        seen_triples: set[tuple[str, int, int]] = set()
+        previous_order: tuple[int, str, int] | None = None
+        for mi, method in enumerate(methods):
+            m_prefix = f"{prefix}.methods[{mi}]"
+            if not isinstance(method, dict) or set(method) != {
+                "name",
+                "arity",
+                "start_line",
+                "end_line",
+                "body_digest",
+                "calls",
+            }:
+                _fail(REASON_MALFORMED, m_prefix)
+            mn = method["name"]
+            if (
+                not isinstance(mn, str)
+                or len(mn) > _MAX_PERSISTED_IDENTIFIER
+                or (mn != "<init>" and _IDENTIFIER_RE.fullmatch(mn) is None)
+            ):
+                _fail(REASON_MALFORMED, f"{m_prefix}.name")
+            arity = method["arity"]
+            if isinstance(arity, bool) or not isinstance(arity, int) or arity < 0:
+                _fail(REASON_MALFORMED, f"{m_prefix}.arity")
+            start = method["start_line"]
+            end = method["end_line"]
+            for field_name, field_value in (("start_line", start), ("end_line", end)):
+                if (
+                    isinstance(field_value, bool)
+                    or not isinstance(field_value, int)
+                    or field_value < 1
+                ):
+                    _fail(REASON_MALFORMED, f"{m_prefix}.{field_name}")
+            assert isinstance(start, int) and isinstance(end, int)
+            if end < start:
+                _fail(REASON_MALFORMED, f"{m_prefix}.end_line")
+            _validate_digest(method["body_digest"], f"{m_prefix}.body_digest")
+            triple = (mn, arity, start)
+            if triple in seen_triples:
+                _fail(REASON_DUPLICATE_STRUCTURE, m_prefix)
+            seen_triples.add(triple)
+            order = (start, mn, arity)
+            if previous_order is not None and order < previous_order:
+                _fail(REASON_MALFORMED, f"{m_prefix}.start_line")
+            previous_order = order
+            calls = method["calls"]
+            if not isinstance(calls, list):
+                _fail(REASON_MALFORMED, f"{m_prefix}.calls")
+            previous_call: tuple[int, str] | None = None
+            for ki, call in enumerate(calls):
+                c_prefix = f"{m_prefix}.calls[{ki}]"
+                if not isinstance(call, dict) or set(call) != {"callee", "line"}:
+                    _fail(REASON_MALFORMED, c_prefix)
+                callee = call["callee"]
+                if (
+                    not isinstance(callee, str)
+                    or len(callee) > _MAX_PERSISTED_IDENTIFIER
+                    or _IDENTIFIER_RE.fullmatch(callee) is None
+                ):
+                    _fail(REASON_MALFORMED, f"{c_prefix}.callee")
+                line = call["line"]
+                if isinstance(line, bool) or not isinstance(line, int) or line < 1:
+                    _fail(REASON_MALFORMED, f"{c_prefix}.line")
+                current_call = (line, callee)
+                # 同行同名的多个调用点是合法重复；只有降序才是形状违规。
+                if previous_call is not None and current_call < previous_call:
+                    _fail(REASON_MALFORMED, f"{c_prefix}.line")
+                previous_call = current_call
+
+
 def _manifest_record(manifest: JadxIndexManifest) -> dict[str, object]:
     """canonical_json_v1 可编码的 manifest 记录（显式手写，不依赖 asdict 的隐式形态）。"""
     return {
@@ -801,6 +924,11 @@ class JadxIndexStore:
                 seen_exact.add(item)
                 seen_folded.add(folded)
 
+            try:
+                _validate_shard_structure(shard_value, seen_exact)
+            except JadxIndexError as exc:
+                return CacheMiss(exc.code, f"shard {i} {exc.field_path}")
+
             shard_values.append(shard_value)
             shard_locators.append(f"{index_key}/shards/{shard_ref.shard_key}.json")
             shard_refs.append(shard_ref)
@@ -883,17 +1011,25 @@ class JadxIndexStore:
                 if current is None:
                     files: list[str] = []
                     postings: list[Mapping[str, object]] = []
+                    structure_classes: list[dict[str, object]] = []
                     coverages.append(manifest.coverage)
                 else:
                     files = list(current.files)
                     postings = [dict(p) for p in current.postings]
+                    structure_classes = [dict(c) for c in current.structure]
                     coverages.append(current.coverage)
+                # 发布闸门：重名类会让 shard 一落盘即不可加载——在发布前拒绝，
+                # 绝不产出注定 CacheMiss 的半成品工件。
+                class_names = [str(c.get("name", "")) for c in structure_classes]
+                if len(set(class_names)) != len(class_names):
+                    _fail(REASON_DUPLICATE_STRUCTURE, "$.scan.structure")
                 shard_record = {
                     "index_schema_version": manifest.index_schema_version,
                     "shard_key": shard_key,
                     "lineage": lineage.to_record(),
                     "files": files,
                     "postings": postings,
+                    "structure": {"classes": structure_classes},
                 }
                 shard_bytes = canonical_json_v1(shard_record)
                 path = self._shard_path(index_key, shard_key)
@@ -945,9 +1081,21 @@ class Limits:
     max_files: int = 5000
     max_file_bytes: int = 4 * 1024 * 1024
     max_value_len: int = _DEFAULT_MAX_VALUE_LEN
+    max_classes_per_file: int = 256
+    max_methods_per_class: int = 512
+    max_calls_per_method: int = 256
+    max_identifier_len: int = 256
 
     def __post_init__(self) -> None:
-        for name in ("max_files", "max_file_bytes", "max_value_len"):
+        for name in (
+            "max_files",
+            "max_file_bytes",
+            "max_value_len",
+            "max_classes_per_file",
+            "max_methods_per_class",
+            "max_calls_per_method",
+            "max_identifier_len",
+        ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 _fail(REASON_MALFORMED, f"$.limits.{name}")
@@ -965,6 +1113,235 @@ class ShardScanResult:
     truncated: int
     bytes_scanned: int
     scan_limit_hit: bool
+    #: 结构段 classes 列表（JSON 形态的 dict，内层为 list——发布时直接 canonical 编码）。
+    structure: tuple[Mapping[str, object], ...] = ()
+    structure_limit_hit: bool = False
+
+
+# -- 结构提取（P1-B）：有界启发式，只认 JADX 风格的良构输出 --------------------
+
+#: 类声明须与 `{` 同行（JADX 输出形态）；允许 extends/implements/泛型子句。
+_CLASS_DECL_RE = re.compile(r"\b(?:class|interface|enum)\s+([A-Za-z_$][\w$]*)[^{;]*\{")
+#: 成员方法：修饰符* 返回类型 名字(参数) [throws 子句] {——参数不允许嵌套括号。
+_METHOD_DECL_RE = re.compile(
+    r"^\s*(?:(?:public|private|protected|static|final|abstract|synchronized|native|strictfp)\s+)*"
+    r"[\w$<>\[\], ?]+\s+([A-Za-z_$][\w$]*)\s*\(([^()]*)\)\s*(?:throws[^{]*)?\{"
+)
+#: 构造器：无返回类型的 `Name(params) {`；是否真为构造器由「名字==类简单名」判定。
+_CTOR_DECL_RE = re.compile(
+    r"^\s*(?:(?:public|private|protected|static|final|synchronized)\s+)*"
+    r"([A-Za-z_$][\w$]*)\s*\(([^()]*)\)\s*(?:throws[^{]*)?\{"
+)
+_CALL_SITE_RE = re.compile(r"\b([A-Za-z_$][\w$]*)\s*\(")
+#: 语法关键字绝不是调用点；`new X(...)` 的构造器调用不是 P1-B 的边（文档化限制）。
+_CALL_KEYWORDS = frozenset(
+    {"if", "for", "while", "switch", "catch", "return", "new", "super", "this",
+     "synchronized", "do", "else", "try"}
+)
+
+
+def _sanitize_java_source(text: str) -> list[str]:
+    """把字符串/字符字面量内容与两种注释全部置空（保留行结构与逐行对齐）。
+
+    ★注释与字面量里的括号绝不参与配平（JADX 输出满是 ``/* renamed from: */``）；
+    块注释跨行由状态机跨行携带。返回行数恒等于 ``text.splitlines()``。
+    """
+    lines = text.splitlines()
+    sanitized: list[str] = []
+    state = "NORMAL"
+
+    for source_line in lines:
+        chars = list(source_line)
+        index = 0
+        while index < len(chars):
+            current = chars[index]
+            following = chars[index + 1] if index + 1 < len(chars) else ""
+
+            if state == "NORMAL":
+                if current == "/" and following == "/":
+                    # 行注释：本行剩余全部置空，状态不跨行。
+                    for j in range(index, len(chars)):
+                        chars[j] = " "
+                    break
+                if current == "/" and following == "*":
+                    chars[index] = " "
+                    chars[index + 1] = " "
+                    state = "BLOCK_COMMENT"
+                    index += 2
+                    continue
+                if current == '"':
+                    chars[index] = " "
+                    state = "STRING"
+                elif current == "'":
+                    chars[index] = " "
+                    state = "CHAR"
+                index += 1
+                continue
+
+            if state == "BLOCK_COMMENT":
+                if current == "*" and following == "/":
+                    chars[index] = " "
+                    chars[index + 1] = " "
+                    state = "NORMAL"
+                    index += 2
+                else:
+                    chars[index] = " "
+                    index += 1
+                continue
+
+            # STRING / CHAR：全部置空；反斜杠转义连吞一个字符；闭引号回 NORMAL。
+            closing = '"' if state == "STRING" else "'"
+            chars[index] = " "
+            if current == "\\":
+                if index + 1 < len(chars):
+                    chars[index + 1] = " "
+                    index += 2
+                else:
+                    index += 1
+            elif current == closing:
+                state = "NORMAL"
+                index += 1
+            else:
+                index += 1
+
+        sanitized.append("".join(chars))
+
+    return sanitized
+
+
+def _declared_arity(params: str) -> int:
+    text = params.strip()
+    if not text:
+        return 0
+    return len([part for part in text.split(",") if part.strip()])
+
+
+def _method_body_digest(lines: list[str], start_line: int, end_line: int) -> str:
+    """方法区域（含签名行与闭括号行）的规范化 digest：NFC + 逐行去首尾空白 + 删空行。"""
+    region = [
+        unicodedata.normalize("NFC", text).strip()
+        for text in lines[start_line - 1 : end_line]
+        if text.strip()
+    ]
+    return "sha256:" + hashlib.sha256("\n".join(region).encode("utf-8")).hexdigest()
+
+
+def _method_end_line(clean_lines: list[str], start_line: int) -> int:
+    """在已清理行上从签名行起做括号配平；找不到闭括号（截断文件）退回签名行。"""
+    brace = 0
+    for number in range(start_line, len(clean_lines) + 1):
+        clean = clean_lines[number - 1]
+        brace += clean.count("{") - clean.count("}")
+        if brace <= 0:
+            return number
+    return start_line
+
+
+def _method_calls(
+    clean_lines: list[str], start_line: int, end_line: int, limits: Limits
+) -> tuple[list[dict[str, object]], bool]:
+    """已清理方法体内（不含签名行）的调用点；返回 (calls, 是否触界)。"""
+    calls: list[dict[str, object]] = []
+    limited = False
+    for line_no in range(start_line + 1, end_line + 1):
+        clean = clean_lines[line_no - 1]
+        for match in _CALL_SITE_RE.finditer(clean):
+            callee = match.group(1)
+            if callee in _CALL_KEYWORDS or len(callee) > limits.max_identifier_len:
+                continue
+            if re.search(r"\bnew\s*$", clean[: match.start()]):
+                continue
+            if len(calls) >= limits.max_calls_per_method:
+                limited = True
+                break
+            calls.append({"callee": callee, "line": line_no})
+        if limited:
+            break
+    calls.sort(key=lambda call: (call["line"], call["callee"]))
+    return calls, limited
+
+
+def _extract_file_structure(
+    relative: str, text: str, limits: Limits
+) -> tuple[list[dict[str, object]], bool]:
+    """单文件的类/方法/调用点提取；返回 (classes, 是否触界)。
+
+    括号深度机：类声明推栈、深度回落弹栈；成员方法只在「类深度 + 1」识别，
+    方法体语句（更深一层）与匿名类不会被误判为成员。
+    """
+    lines = text.splitlines()
+    # ★匹配与配平全部走清理后的行；body_digest 仍然基于原始行（区域按打印形态摘要）。
+    clean_lines = _sanitize_java_source(text)
+    package = ""
+    for line in clean_lines:
+        match = re.match(r"\s*package\s+([\w.]+)\s*;", line)
+        if match:
+            package = match.group(1)
+            break
+
+    depth = 0
+    classes: list[dict[str, object]] = []
+    #: 栈元素：(简单名, 声明前深度, classes 下标)。限定名由简单名链拼出。
+    stack: list[tuple[str, int, int]] = []
+    limited = False
+
+    for number, clean in enumerate(clean_lines, 1):
+        class_match = _CLASS_DECL_RE.search(clean)
+        if class_match:
+            simple = class_match.group(1)
+            chain = [entry[0] for entry in stack] + [simple]
+            qualified = (f"{package}." if package else "") + "$".join(chain)
+            if len(classes) >= limits.max_classes_per_file or (
+                len(qualified) > limits.max_identifier_len
+            ):
+                limited = True
+            else:
+                classes.append({"name": qualified, "path": relative, "methods": []})
+                stack.append((simple, depth, len(classes) - 1))
+        elif stack:
+            simple, class_depth, class_index = stack[-1]
+            if depth == class_depth + 1:
+                name: str | None = None
+                params = ""
+                # ★构造器判定必须先行：方法正则的"返回类型"字符类含空格（为泛型
+                # `Map<String, String>` 服务），回溯时会把 `public` 当返回类型、
+                # 构造器名当方法名吞掉。
+                ctor_match = _CTOR_DECL_RE.match(clean)
+                if ctor_match and ctor_match.group(1) == simple:
+                    name, params = "<init>", ctor_match.group(2)
+                else:
+                    method_match = _METHOD_DECL_RE.match(clean)
+                    if method_match:
+                        name, params = method_match.group(1), method_match.group(2)
+                if name is not None and len(name) <= limits.max_identifier_len:
+                    methods = classes[class_index]["methods"]
+                    assert isinstance(methods, list)
+                    if len(methods) >= limits.max_methods_per_class:
+                        limited = True
+                    else:
+                        end = _method_end_line(clean_lines, number)
+                        calls, calls_limited = _method_calls(clean_lines, number, end, limits)
+                        limited = limited or calls_limited
+                        methods.append(
+                            {
+                                "name": name,
+                                "arity": _declared_arity(params),
+                                "start_line": number,
+                                "end_line": end,
+                                "body_digest": _method_body_digest(lines, number, end),
+                                "calls": calls,
+                            }
+                        )
+        depth += clean.count("{") - clean.count("}")
+        while stack and depth <= stack[-1][1]:
+            stack.pop()
+
+    for item in classes:
+        methods = item["methods"]
+        assert isinstance(methods, list)
+        methods.sort(key=lambda m: (m["start_line"], m["name"], m["arity"]))
+    classes.sort(key=lambda c: str(c["name"]))
+    return classes, limited
 
 
 def _scan_relative_path(root: Path, path: Path) -> str:
@@ -1035,6 +1412,8 @@ def scan_java_sources(
 
     postings: list[Mapping[str, object]] = []
     files: list[str] = []
+    structures: list[dict[str, object]] = []
+    structure_limit_hit = False
     read_failed = 0
     truncated = 0
     scanned = 0
@@ -1076,7 +1455,17 @@ def scan_java_sources(
                     # 允许重叠子串命中。
                     start = column_zero + 1
 
-    coverage = "complete" if not read_failed and not truncated and not scan_limit_hit else "partial"
+        file_classes, file_limited = _extract_file_structure(relative, text, limits)
+        structures.extend(file_classes)
+        structure_limit_hit = structure_limit_hit or file_limited
+
+    # 全 shard 的类按名升序——与 load 侧 canonical 校验同款序。
+    structures.sort(key=lambda item: str(item["name"]))
+    coverage = (
+        "complete"
+        if not read_failed and not truncated and not scan_limit_hit and not structure_limit_hit
+        else "partial"
+    )
     return ShardScanResult(
         lineage=lineage,
         files=tuple(files),
@@ -1088,6 +1477,8 @@ def scan_java_sources(
         truncated=truncated,
         bytes_scanned=bytes_scanned,
         scan_limit_hit=scan_limit_hit,
+        structure=tuple(structures),
+        structure_limit_hit=structure_limit_hit,
     )
 
 

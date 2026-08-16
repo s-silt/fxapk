@@ -70,3 +70,6 @@ ybku/
 /_perf_probe*.py
 *.pdf
 .enrich_cache/
+
+# 设计/过程文档只留本地，不进公开仓库（2026-08-16 用户指示）
+docs/
