@@ -13,6 +13,7 @@ import typer
 from apkscan.core import corpus_catalog
 from apkscan.core import recognition_labels as rlabels
 from apkscan.core import recognition_training as rtraining
+from apkscan.core.atomic import atomic_create_bytes
 
 
 split_app = typer.Typer(
@@ -234,18 +235,21 @@ def build(
         )
         encoded_text = rtraining.encode_split_manifest(manifest)
     except rtraining.SplitManifestError as exc:
-        typer.echo(f"error: {exc.reason_code}: {exc.detail}", err=True)
+        # 只输出稳定码：detail 含 case/日期/sha 等动态输入，回显会造成外带
+        # 泄漏面（codex 复审 P1）。
+        typer.echo(f"error: {exc.reason_code}", err=True)
         raise typer.Exit(code=2) from None
 
     encoded = encoded_text.encode("utf-8")
 
+    # 原子 create-only 发布：临时文件 fsync 后以 no-replace 原语落盘，
+    # 写中断绝不留截断目标文件（codex 复审 P1）。
     try:
-        with out.open("xb") as handle:
-            handle.write(encoded)
-    except FileExistsError:
-        _exit_error("out_exists")
+        published = atomic_create_bytes(out, encoded)
     except OSError:
         _exit_error("out_unwritable")
+    if not published:
+        _exit_error("out_exists")
 
     _print_manifest_summary(manifest, encoded)
 

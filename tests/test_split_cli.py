@@ -157,7 +157,9 @@ def test_build_missing_case_time_fails_without_output(tmp_path: Path) -> None:
     paths = _write_inputs(tmp_path, rows=[_catalog_row(SHA_A, "case-01")], time_table={})
     result = _build(paths)
     assert result.exit_code == 2
-    assert "time_missing" in _output(result)
+    out = _output(result)
+    assert "time_missing" in out
+    assert "case-01" not in out  # 稳定错误行：不回显动态输入
     assert not paths["out"].exists()
 
 
@@ -192,7 +194,9 @@ def test_build_rejects_unknown_policy_version(tmp_path: Path) -> None:
     paths = _write_inputs(tmp_path, rows=[_catalog_row(SHA_A, "case-01")], config=config)
     result = _build(paths)
     assert result.exit_code == 2
-    assert "policy_unknown" in _output(result)
+    out = _output(result)
+    assert "policy_unknown" in out
+    assert "split-v0" not in out  # 稳定错误行：不回显动态输入
 
 
 def test_build_missing_catalog_yields_honest_empty_manifest(tmp_path: Path) -> None:
@@ -232,3 +236,18 @@ def test_split_group_reachable_from_main_app() -> None:
     assert result.exit_code == 0
     assert "build" in result.output
     assert "validate" in result.output
+
+
+def test_build_write_failure_leaves_no_partial_file(tmp_path: Path, monkeypatch) -> None:
+    from apkscan.commands import split_cli
+
+    paths = _write_inputs(tmp_path, rows=[_catalog_row(SHA_A, "case-01")])
+
+    def _boom(path, data):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(split_cli, "atomic_create_bytes", _boom)
+    result = _build(paths)
+    assert result.exit_code == 2
+    assert "out_unwritable" in _output(result)
+    assert not paths["out"].exists()
