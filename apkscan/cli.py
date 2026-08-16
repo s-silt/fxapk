@@ -291,6 +291,14 @@ def analyze(
         "--extra-dex",
         help="额外 DEX（脱壳 dump 的 .dex 文件或含 .dex 的目录），逗号分隔；并入静态分析。",
     ),
+    jadx_cache_root: str | None = typer.Option(
+        None,
+        "--jadx-cache-root",
+        help=(
+            "jadx 持久索引 cache 目录（opt-in）。给定后 jadx 增强器在反编译产物上"
+            "构建/复用内容寻址索引（一次索引、多次廉价定向查询）；索引失败不影响分析本身。"
+        ),
+    ),
     dynamic: bool = typer.Option(
         False,
         "--dynamic",
@@ -335,7 +343,10 @@ def analyze(
 
         typer.echo(f"加载：{apk}")
         try:
-            ctx = load_apk(str(apk), config, extra_dex=extra_dex_files or None)
+            ctx = load_apk(
+                str(apk), config, extra_dex=extra_dex_files or None,
+                jadx_cache_root=jadx_cache_root,
+            )
         except ApkParseError as exc:
             typer.echo(f"错误：{exc}", err=True)
             raise typer.Exit(code=2) from exc

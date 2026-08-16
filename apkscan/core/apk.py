@@ -457,6 +457,7 @@ class ApkContext:
         apk_validation_ok: bool = True,
         extra_dex_report: dict[str, object] | None = None,
         hiddenapi_flags_baseline: int | None = None,
+        jadx_cache_root: str | None = None,
     ) -> None:
         # apk: androguard.core.apk.APK；dex_objs: list[DEX]
         self._apk = apk
@@ -471,6 +472,8 @@ class ApkContext:
         # 真实代码只以字符串池形式可见。注意与 _extra_dex_objs 的区别：这里存路径（含 androguard
         # 解析失败、但 jadx 更宽容的解析器可能仍能反编译的那些），供 jadx 自行取用。
         self.extra_dex_paths: list[str] = list(extra_dex_paths or [])
+        # jadx 持久索引 cache root（opt-in：None=不启用；jadx 增强器 getattr 兼容读取）。
+        self.jadx_cache_root: str | None = jadx_cache_root
         self.config = config
         # apk_path: APK 原始文件绝对路径（jadx/unpack 等增强器需要；无则空串，增强器应优雅跳过）。
         self.apk_path = apk_path
@@ -1034,6 +1037,7 @@ def load_apk(
     path: str,
     config: AnalysisConfig,
     extra_dex: list[str] | None = None,
+    jadx_cache_root: str | None = None,
 ) -> ApkContext:
     """加载 APK 并构造 ApkContext。
 
@@ -1041,6 +1045,7 @@ def load_apk(
 
     extra_dex: 额外的 .dex 文件路径列表（脱壳 dump 出来的）。其字符串并入 dex_strings()
                产出，使脱壳后的隐藏端点/SDK 也能被静态分析命中。单个 dex 失败不影响主流程。
+    jadx_cache_root: jadx 持久索引 cache root（opt-in；None=不启用，jadx 增强器现行为不变）。
     """
     # androguard 的 import 只允许出现在本文件。
     _silence_androguard_logging()  # 用 androguard 前才禁其 loguru（避免启动期白付 loguru）
@@ -1120,4 +1125,5 @@ def load_apk(
             requested_extra, len(extra_dex_objs), extra_dex_failures
         ),
         hiddenapi_flags_baseline=hiddenapi_baseline,
+        jadx_cache_root=jadx_cache_root,
     )

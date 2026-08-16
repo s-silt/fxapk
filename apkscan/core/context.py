@@ -47,6 +47,9 @@ class AnalysisContext(Protocol):
     #: 消费方一律 ``getattr(ctx, "extra_dex_paths", None) or []`` 兼容读取（对标 apk_path 的
     #: 既有做法），故不强制破坏手搓 ctx 的构造契约。
     extra_dex_paths: list[str]
+    #: jadx 持久索引的 cache root（opt-in：None/空串 = 不启用，jadx 增强器保持现行为）。
+    #: 消费方一律 ``getattr(ctx, "jadx_cache_root", None)`` 兼容读取，手搓 ctx 可不带此属性。
+    jadx_cache_root: str | None
 
     def permissions(self) -> list[str]:
         """声明的权限列表。"""

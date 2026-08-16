@@ -96,6 +96,7 @@ class FakeContext:
         manifest_anomaly: str | None = None,
         declared_sizes: dict[str, int] | None = None,
         extra_dex_paths: list[str] | None = None,
+        jadx_cache_root: str | None = None,
     ) -> None:
         self.package_name = package_name
         self.manifest_xml = manifest_xml
@@ -103,6 +104,8 @@ class FakeContext:
         self.apk_path = apk_path
         # 脱壳 dump 的额外 .dex 路径（jadx 增强器一并反编译用；默认空列表）。
         self.extra_dex_paths = list(extra_dex_paths or [])
+        # jadx 持久索引 cache root（opt-in；None=不启用，测试也可 setattr 事后挂）。
+        self.jadx_cache_root = jadx_cache_root
         self.platform = platform
         self.manifest_anomaly = manifest_anomaly
 

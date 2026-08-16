@@ -404,3 +404,26 @@ def test_build_digest_flags_manually_restored_leads() -> None:
     by_val = {lead["value"]: lead for lead in d["leads"]}
     assert by_val["restored.example.com"]["manually_restored"] == ["repack_identity"]
     assert by_val["clean.example.com"]["manually_restored"] == [], "判据说它干净的不该被标成人工放行"
+
+
+def test_digest_surfaces_jadx_index_status() -> None:
+    """P2-A 消费面锁：meta 带 jadx_index_status → digest 顶层出现 jadx_index 段。
+
+    删掉 build_digest 里的透出线（消费面接线）本测试必须变红。
+    """
+    key = "a1" * 32
+    report = {"meta": {"jadx_index_status": "built", "jadx_index_key": key}, "leads": []}
+    d = build_digest(report)
+    assert d["jadx_index"] == {"status": "built", "key": key}
+
+    # disabled（无 key）→ 只出 status；key 非 hex64 语法（如被塞了路径）绝不透出。
+    forged = {
+        "meta": {"jadx_index_status": "disabled", "jadx_index_key": "C:/evil/path"},
+        "leads": [],
+    }
+    d2 = build_digest(forged)
+    assert d2["jadx_index"] == {"status": "disabled"}
+
+    # 旧报告（无该键）：整段省略，不出现空壳。
+    d3 = build_digest({"meta": {}, "leads": []})
+    assert "jadx_index" not in d3
