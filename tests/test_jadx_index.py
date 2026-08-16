@@ -339,7 +339,9 @@ def test_shard_key_domain_separated_from_index_key() -> None:
 
 def test_key_fixed_vector() -> None:
     """★锁死一个规范向量：canonical_json_v1 编码或域分离前缀的任何漂移都在这里变红。
-    期望值为字面量——绝不与实现共享推导逻辑（假绿教训）。"""
+    期望值为字面量——绝不与实现共享推导逻辑（假绿教训）。
+    schema 1.0 时代的向量是 ebe1f5fd…3f7d；schema 参与 key material，P1-B bump 到
+    1.1 后向量合法更替为下值（实现跑一次后冻结，此后任何漂移在这里变红）。"""
     lin = DexLineage(
         DexRole.APK_DEX,
         0,
@@ -350,7 +352,7 @@ def test_key_fixed_vector() -> None:
     material = build_key_material([lin], "9.9.9", "sha256:" + "f" * 64)
     # 材料本身可 JSON 往返（canonical_json_v1 拒 NaN/Inf/重复键的前提下）。
     json.loads(canonical_json_v1(material))
-    assert key == "ebe1f5fded4666108898e45ac7500aa951aabd5f2a0cb1589e7dbacc456c3f7d"
+    assert key == "1b8e523fdf20fa397d92460bbfdc3a0ae0f61180143833a4b07a0deb771876cb"
 
 
 # ---------------------------------------------------------------------------
