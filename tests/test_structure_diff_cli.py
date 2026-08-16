@@ -145,7 +145,7 @@ def test_partial_index_args_rejected(tmp_path: Path, args: tuple[str, ...]) -> N
         str(tmp_path / "cache") if a == "PLACEHOLDER_ROOT" else a for a in args
     )
     code, _, _ = _diff_with_index(tmp_path, *resolved)
-    assert code != 0
+    assert code == 2  # 明确的参数拒绝码；崩溃（1）不算履约
 
 
 def test_apk_operand_rejected_without_touching_analysis(
@@ -167,7 +167,7 @@ def test_apk_operand_rejected_without_touching_analysis(
          "--jadx-cache-root", str(cache_root),
          "--jadx-index-old", key, "--jadx-index-new", key],
     )
-    assert result.exit_code != 0
+    assert result.exit_code == 2  # 明确拒绝，不是崩溃
 
 
 @pytest.mark.parametrize("bad_key", ["XYZ", "A" * 64, "a" * 63, "../../etc/x", "a" * 65])
@@ -179,7 +179,7 @@ def test_bad_key_syntax_rejected_before_filesystem(tmp_path: Path, bad_key: str)
         "--jadx-index-old", bad_key,
         "--jadx-index-new", "a" * 64,
     )
-    assert code != 0
+    assert code == 2  # 语法关的明确拒绝码
 
 
 # ---------------------------------------------------------------------------

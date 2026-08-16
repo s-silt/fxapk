@@ -489,17 +489,63 @@ def diff(
         "--online/--offline",
         help="参数是 APK 时是否联网富化（默认离线：diff 通常只看结构变化、更快更确定）。",
     ),
+    jadx_cache_root: Path | None = typer.Option(
+        None,
+        "--jadx-cache-root",
+        help="jadx 持久索引 cache 目录；启用结构 diff 时三参数必须齐备。",
+    ),
+    jadx_index_old: str | None = typer.Option(
+        None,
+        "--jadx-index-old",
+        help="旧版 jadx 索引 key（64 位小写 hex）。",
+    ),
+    jadx_index_new: str | None = typer.Option(
+        None,
+        "--jadx-index-new",
+        help="新版 jadx 索引 key（64 位小写 hex）。",
+    ),
 ) -> None:
     """对比两份分析结果，输出**调证增量**的稳定 JSON：新增 / 删除的线索、端点、发现，加身份 /
     加固 / 分类变化。每个参数可是 report.json（直接读）或 APK（现分析）——适合追踪同一 App 跨版本
     新增了哪些支付通道 / 钱包 / 后台入口、加固是否升级、SDK 是否变了。
 
+    提供任一 jadx 索引参数即启用**结构 diff 分支**：三参数必须齐备，且两个操作数必须都是
+    report.json——结构分支绝不现分析 APK（技术上为真，不是措辞上为真）；索引加载失败只让
+    ``structure_diff`` 段变 unavailable，报告级 diff 照常（fail-open）。
+
     ★★**本命令不脱敏，原样输出**：新增 / 删除的线索条目整条带出来，配对键本身就含 ``value``。
       与 ``jsonl`` 同理，它不受 ``digest`` 默认脱敏的保护。
     """
+    import hashlib as _hashlib
     import json as _json
+    import re as _re
 
     from apkscan.core.redact import warn_unredacted_agent_output
+
+    # 全部结构参数校验在读操作数**之前**：index 组合下 APK 不能进入 _report_dict_for
+    # 的分析分支，key 也不能在语法不合法时触碰文件系统。
+    index_args = (jadx_cache_root, jadx_index_old, jadx_index_new)
+    has_any_index_arg = any(value is not None for value in index_args)
+    if has_any_index_arg and not all(value is not None for value in index_args):
+        typer.echo(
+            "错误：--jadx-cache-root、--jadx-index-old、--jadx-index-new 必须同时提供。",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if has_any_index_arg:
+        if old.suffix.lower() != ".json" or new.suffix.lower() != ".json":
+            typer.echo(
+                "错误：提供 jadx 索引参数时，两个操作数必须是 report.json。", err=True
+            )
+            raise typer.Exit(code=2)
+        key_pattern = _re.compile(r"^[0-9a-f]{64}$")
+        assert isinstance(jadx_index_old, str) and isinstance(jadx_index_new, str)
+        if not key_pattern.fullmatch(jadx_index_old):
+            typer.echo("错误：--jadx-index-old 必须是 64 位小写十六进制 key。", err=True)
+            raise typer.Exit(code=2)
+        if not key_pattern.fullmatch(jadx_index_new):
+            typer.echo("错误：--jadx-index-new 必须是 64 位小写十六进制 key。", err=True)
+            raise typer.Exit(code=2)
 
     warn_unredacted_agent_output("diff")
 
@@ -507,7 +553,81 @@ def diff(
 
     old_dict = _report_dict_for(old, online=online)
     new_dict = _report_dict_for(new, online=online)
-    typer.echo(_json.dumps(diff_reports(old_dict, new_dict), ensure_ascii=False, indent=2))
+    output = diff_reports(old_dict, new_dict)
+
+    if has_any_index_arg:
+        assert isinstance(jadx_cache_root, Path)
+        assert isinstance(jadx_index_old, str) and isinstance(jadx_index_new, str)
+
+        from apkscan.core.jadx_index import (
+            CacheMiss,
+            CacheUnavailable,
+            JadxIndexError,
+            JadxIndexStore,
+            LoadedIndex,
+        )
+        from apkscan.core.jadx_structure_diff import diff_index_structure
+        from apkscan.core.structure_diff_report import project_structure_diff
+
+        class _IndexUnavailable(Exception):
+            """内部控制流异常；异常文本绝不直接进 JSON。"""
+
+            def __init__(self, reason: str) -> None:
+                super().__init__(reason)
+                self.reason = reason
+
+        def _stable_reason(value: object) -> str:
+            """把缓存/异常原因收敛为不泄露路径与异常文本的稳定 code。"""
+            if not isinstance(value, str):
+                return "index_unavailable"
+            lowered = value.lower()
+            if _re.fullmatch(r"[a-z][a-z0-9_]{0,63}", lowered):
+                return lowered
+            return "index_unavailable"
+
+        def _manifest_digest(index_key: str) -> str:
+            """读 cache 内 canonical manifest 字节算 digest（cache root 是信任边界，
+            不是真实性证据——输出只带 digest，绝不带路径或"官方"语义）。"""
+            manifest_path = jadx_cache_root / index_key / "manifest.json"
+            manifest_bytes = manifest_path.read_bytes()
+            return "sha256:" + _hashlib.sha256(manifest_bytes).hexdigest()
+
+        def _load_one(index_key: str) -> LoadedIndex:
+            store = JadxIndexStore(jadx_cache_root)
+            loaded = store.load_index(index_key)
+            if isinstance(loaded, (CacheMiss, CacheUnavailable)):
+                raise _IndexUnavailable(_stable_reason(loaded.reason))
+            if not isinstance(loaded, LoadedIndex):
+                raise _IndexUnavailable("index_unavailable")
+            return loaded
+
+        structure_section: dict[str, object]
+        try:
+            old_index = _load_one(jadx_index_old)
+            new_index = _load_one(jadx_index_new)
+            old_manifest_digest = _manifest_digest(jadx_index_old)
+            new_manifest_digest = _manifest_digest(jadx_index_new)
+            structural_diff = diff_index_structure(old_index, new_index)
+            structure_section = project_structure_diff(
+                structural_diff,
+                left_index_key=jadx_index_old,
+                right_index_key=jadx_index_new,
+                left_manifest_digest=old_manifest_digest,
+                right_manifest_digest=new_manifest_digest,
+            )
+        except _IndexUnavailable as exc:
+            structure_section = {"status": "unavailable", "reason": exc.reason}
+        except JadxIndexError as exc:
+            structure_section = {
+                "status": "unavailable",
+                "reason": _stable_reason(exc.code),
+            }
+        except Exception:  # noqa: BLE001 — 结构索引失败必须 fail-open
+            logger.exception("[diff] 结构 diff 分支异常（fail-open）")
+            structure_section = {"status": "unavailable", "reason": "index_unavailable"}
+        output["structure_diff"] = structure_section
+
+    typer.echo(_json.dumps(output, ensure_ascii=False, indent=2))
 
 
 @app.command()
