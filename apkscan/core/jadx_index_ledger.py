@@ -25,6 +25,7 @@ from apkscan.core import recognition_codec as codec
 from apkscan.core import recognition_contract as rc
 from apkscan.core.jadx_callpath import CallPath
 from apkscan.core.jadx_index import INDEX_SCHEMA_VERSION, JadxIndexError, UsageHit
+from apkscan.core.jadx_ownership import OwnershipProjection
 
 
 class IndexQueryState(StrEnum):
@@ -99,6 +100,30 @@ class CallPathQueryResult:
             raise JadxIndexError("invalid_query_tuples", "$")
 
 
+@dataclass(frozen=True, slots=True)
+class OwnershipQueryResult:
+    """一次 ownership projection 查询的完整结局（ownership 适配器的唯一输入载体）。"""
+
+    state: IndexQueryState
+    coverage: str | None
+    projection: OwnershipProjection
+    manifest_digest: str | None = None
+    baseline_manifest_digest: str | None = None
+    shard_digests: tuple[str, ...] = ()
+    reason_codes: tuple[str, ...] = ()
+    query_receipt_locator: rc.EvidenceLocator | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.state, IndexQueryState):
+            raise JadxIndexError("invalid_query_state", "$.state")
+        if self.coverage is not None and self.coverage not in ("complete", "partial"):
+            raise JadxIndexError("invalid_query_coverage", "$.coverage")
+        if not isinstance(self.projection, OwnershipProjection):
+            raise JadxIndexError("invalid_query_projection", "$.projection")
+        if not isinstance(self.shard_digests, tuple) or not isinstance(self.reason_codes, tuple):
+            raise JadxIndexError("invalid_query_tuples", "$")
+
+
 def _coverage_status(state: IndexQueryState, coverage: str | None) -> rc.CoverageStatus:
     """固定映射（见 spec 表）。★HIT/REBUILT 都沿用实际 coverage——
     命中或重建出一个 partial 索引绝不升格为 complete 覆盖。"""
@@ -150,9 +175,10 @@ def _project_outcome(
     *,
     action_id: str,
     action_type: str,
-    result: IndexQueryResult | CallPathQueryResult,
+    result: IndexQueryResult | CallPathQueryResult | OwnershipQueryResult,
     actor: rc.Actor,
     occurred_at: str,
+    baseline_digest: str | None = None,
 ) -> tuple[
     tuple[jl.LedgerEvent, ...],
     rc.SubjectRef,
@@ -188,6 +214,10 @@ def _project_outcome(
         )
     for index, digest in enumerate(result.shard_digests):
         anchors.append(_digest_anchor(digest, logical_id=f"action:{action_id}:shard:{index}"))
+    # baseline 锚在构造期加入（账本是 append-only 哈希链，事后替换 outcome
+    # 事件是禁手）；让「baseline 选择」本身可追溯可复核。
+    if baseline_digest is not None:
+        anchors.append(_digest_anchor(baseline_digest, logical_id=f"action:{action_id}:baseline"))
     # contract 要求 canonical tuple（JSON 规范序 + 无重复）——与其
     # _validate_canonical_tuple 的排序键同构。
     anchors.sort(key=_canonical_sort_key)
@@ -366,10 +396,78 @@ def append_jadx_callpath_projection(
     return result_events
 
 
+def append_jadx_ownership_projection(
+    events: tuple[jl.LedgerEvent, ...],
+    *,
+    action_id: str,
+    result: OwnershipQueryResult,
+    actor: rc.Actor,
+    occurred_at: str,
+) -> tuple[jl.LedgerEvent, ...]:
+    """把 ownership projection 结局合法地追加进账本；仅 INHERITED_OFFICIAL 匹配产观察。
+
+    UNKNOWN 区域一律零观察——unknown 不是发现；digest 相等的官方匹配才是
+    可定位的阳性事实。baseline manifest 锚随 outcome 落链，baseline 选择可复核。
+    """
+    result_events, subject, coverage, producer, outcome = _project_outcome(
+        events,
+        action_id=action_id,
+        action_type="jadx-ownership-projection",
+        result=result,
+        actor=actor,
+        occurred_at=occurred_at,
+        baseline_digest=result.baseline_manifest_digest,
+    )
+
+    if result.state in _POSITIVE_STATES:
+        anchors = outcome.output_anchors
+        anchor_id = anchors[0].anchor_id if anchors else coverage.assessment_digest
+        for item in result.projection.regions:
+            if item.ownership is not rc.OwnershipValue.INHERITED_OFFICIAL:
+                continue
+            region = item.region
+            locator = rc.EvidenceLocator(
+                anchor_id=anchor_id,
+                kind=rc.LocatorKind.LINE_RANGE,
+                value=region.path,
+                start=region.start_line,
+                end=region.end_line,
+            )
+            observation = codec.build_observation(
+                observation_type="jadx_ownership_match",
+                subjects=(subject,),
+                value=rc.ObservationValue(
+                    kind=rc.ObservationValueKind.CATEGORICAL,
+                    categorical=region.body_digest.replace(":", ".", 1),
+                    integer=None,
+                    boolean=None,
+                    reference=None,
+                ),
+                source_refs=(locator,),
+                scope=rc.EvidenceScope.DERIVED_REFERENCE,
+                strength=rc.ObservationStrength.OBSERVED,
+                input_observation_ids=(),
+                origin_outcome_id=outcome.outcome_id,
+                producer=producer,
+                # ★契约字段直接承载结论：官方匹配即 INHERITED_OFFICIAL；
+                #   本适配器绝不产出 suspect/third-party/shared 任一值。
+                ownership=rc.OwnershipValue.INHERITED_OFFICIAL,
+                coverage_assertions=(coverage,),
+            )
+            observation_event = jl.make_event(
+                result_events, jl.EventType.OBSERVATION_ADDED, actor, occurred_at, observation
+            )
+            result_events = jl.append_event(result_events, observation_event)
+
+    return result_events
+
+
 __all__ = [
     "CallPathQueryResult",
     "IndexQueryResult",
     "IndexQueryState",
+    "OwnershipQueryResult",
     "append_jadx_callpath_projection",
+    "append_jadx_ownership_projection",
     "append_jadx_query_projection",
 ]
