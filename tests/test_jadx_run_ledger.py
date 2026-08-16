@@ -20,6 +20,15 @@ from apkscan.core.models import AnalysisConfig
 from tests.conftest import FakeContext
 from tests.test_jadx_index_wiring import _apk, _patch
 
+
+@pytest.fixture(autouse=True)
+def _stub_resolve_jadx(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CI 机器没有真 jadx——resolve 必须 stub，否则本文件在装了 jadx 的机器上绿、
+    CI 上 disabled（环境巧合不是结论；同 conftest 的 adb 教训，P2-C 已犯过一次）。"""
+    from apkscan.analyzers import jadx as jadx_mod
+
+    monkeypatch.setattr(jadx_mod.tools, "resolve_jadx", lambda: (["jadx"], {}))
+
 def _ledger_name(ctx: FakeContext) -> str:
     """sidecar 是样本寻址的（同 out 目录多样本不冲突）。"""
     sha = hashlib.sha256(Path(ctx.apk_path).read_bytes()).hexdigest()
