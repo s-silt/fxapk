@@ -816,7 +816,9 @@ def _run_stage(state: _PipelineState, name: str, fn: "Callable[[_PipelineState],
 # PR9 不 create/mutate 任何 Lead/advice/exit code），其组装故障不该污染 --strict 门禁——与 closure.py 里
 # close 阶段同一视图已自带 guard、不下沉 case closure 的既定语义对齐（只有 analyze 侧接线漏了这层豁免）。
 # 故障仍完整记录于 meta.stage_status（保留 error 审计痕迹），仅切断降级传导。
-_ADDITIVE_STAGES: frozenset[str] = frozenset({"network_attribution", "control_chain", "asset_score"})
+_ADDITIVE_STAGES: frozenset[str] = frozenset(
+    {"network_attribution", "control_chain", "asset_score", "judgment_ledger"}
+)
 
 
 def _apply_stage_failures(state: _PipelineState) -> None:

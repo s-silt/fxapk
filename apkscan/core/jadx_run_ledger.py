@@ -35,7 +35,9 @@ from apkscan.core.jadx_ownership import project_ownership
 
 logger = logging.getLogger(__name__)
 
-_SIDECAR_NAME = "judgment_ledger.jsonl"
+def _sidecar_name(sample_sha256: str) -> str:
+    """样本寻址的 sidecar 名：同一 out 目录多样本各得其账本，绝不互相顶掉。"""
+    return f"judgment-ledger-{sample_sha256}.jsonl"
 _AUTO_POLICY_ID = "fxapk.pipeline.auto_policy"
 _PRODUCER_ID = "fxapk.jadx.index"
 
@@ -405,13 +407,22 @@ def _append_ownership_action_if_available(
     policy: rc.PolicyRef,
     actor: rc.Actor,
     occurred_at: str,
+    current_index_key: str | None,
 ) -> tuple[jl.LedgerEvent, ...]:
-    """重放 ownership 查询；任何前置条件不满足时不创建该动作。"""
+    """重放 ownership 查询；任何前置条件不满足时不创建该动作。
+
+    ownership 摘要只能为**当前样本的索引**追加动作：摘要 subject_index_key 必须
+    等于本次 run 解析出的 index key，否则无法证明摘要属于当前样本，fail-closed
+    放弃。cache 内容是 P1 声明的信任边界——load 后不再复读 manifest 字节做
+    TOCTOU 比对（能写 cache 的攻击者本就能伪造本阶段读取的一切工件）。
+    """
 
     if summary is None or summary.get("status") != "compared":
         return events
 
     subject_key = _valid_hex_key(summary.get("subject_index_key"))
+    if current_index_key is None or subject_key != current_index_key:
+        return events
     baseline_key = _valid_hex_key(summary.get("baseline_index_key"))
     declared_baseline_digest = _valid_digest(summary.get("baseline_manifest_digest"))
 
@@ -570,14 +581,14 @@ def _build_events(
         producers=(producer,),
     )
 
-    # contract 要求 allowed_conclusions 非空。本账本的问题是「索引观察面是否取得」，
-    # 结论对象是无值谓词（NONE）——不开放任何 categorical 结论，杜绝被误读成归因问题。
+    # contract 要求 allowed_conclusions 非空。NONE 是无宾语的一元谓词，表示
+    # JADX 索引观测面可用性；本账本只记录该观测面状态，不由此产生任何 claim。
     question = codec.build_question(
         question_type=rc.QuestionType.PLAN_REANALYSIS,
         subjects=subjects,
         allowed_conclusions=(
             rc.AllowedConclusion(
-                predicate="jadx-index-observation-surface",
+                predicate="jadx-index-observation-surface-available",
                 claim_modes=(rc.ClaimMode.POSITIVE,),
                 object_kind=rc.ObjectKind.NONE,
                 allowed_categorical_values=(),
@@ -656,6 +667,7 @@ def _build_events(
         input_anchor_ids=input_anchor_ids,
         summary=ownership_summary,
         cache_root=cache_root,
+        current_index_key=index_key,
         producer=system_producer,
         policy=policy,
         actor=actor,
@@ -669,19 +681,30 @@ def _build_events(
 
 def _anchor(
     *,
-    data: bytes,
-    event_count: int,
+    locator: str,
     replay_ok: bool,
+    digest: str | None = None,
+    event_count: int | None = None,
+    attempted_digest: str | None = None,
+    attempted_event_count: int | None = None,
     reason: str | None = None,
+    published: bool | None = None,
 ) -> dict[str, object]:
-    value: dict[str, object] = {
-        "locator": _SIDECAR_NAME,
-        "digest": _sha256_bytes(data),
-        "event_count": event_count,
-        "replay_ok": replay_ok,
-    }
+    """锚只写实际存在且语义匹配的字段：digest/event_count 只描述已验证的磁盘文件；
+    attempted_* 描述本次拟发布字节——冲突/失败时绝不冒充磁盘摘要。"""
+    value: dict[str, object] = {"locator": locator, "replay_ok": replay_ok}
+    if digest is not None:
+        value["digest"] = digest
+    if event_count is not None:
+        value["event_count"] = event_count
+    if attempted_digest is not None:
+        value["attempted_digest"] = attempted_digest
+    if attempted_event_count is not None:
+        value["attempted_event_count"] = attempted_event_count
     if reason is not None:
         value["reason"] = reason
+    if published is not None:
+        value["published"] = published
     return value
 
 
@@ -729,6 +752,7 @@ def build_and_publish(
     if sample_sha256 is None:
         return None
 
+    locator = _sidecar_name(sample_sha256)
     try:
         events = _build_events(
             meta=meta,
@@ -741,30 +765,29 @@ def build_and_publish(
     except Exception:  # noqa: BLE001 — ledger 是附加消费面，构造失败不得打断主分析
         logger.exception("JADX judgment ledger 构造失败")
         return _anchor(
-            data=b"",
-            event_count=0,
-            replay_ok=False,
-            reason=_REASON_LEDGER_BUILD_FAILED,
+            locator=locator, replay_ok=False, reason=_REASON_LEDGER_BUILD_FAILED
         )
 
-    target = Path(out_dir) / _SIDECAR_NAME
+    attempted_digest = _sha256_bytes(data)
+    attempted_event_count = len(events)
+    target = Path(out_dir) / locator
     try:
         published = atomic_create_bytes(target, data)
     except Exception:  # noqa: BLE001 — 原子发布失败必须留痕但不得传播
         logger.exception("JADX judgment ledger sidecar 发布失败")
         return _anchor(
-            data=data,
-            event_count=len(events),
-            replay_ok=False,
-            reason=_REASON_PUBLISH_FAILED,
+            locator=locator, replay_ok=False,
+            attempted_digest=attempted_digest,
+            attempted_event_count=attempted_event_count,
+            reason=_REASON_PUBLISH_FAILED, published=False,
         )
 
     if not published:
         return _anchor(
-            data=data,
-            event_count=len(events),
-            replay_ok=False,
-            reason=_REASON_ALREADY_EXISTS,
+            locator=locator, replay_ok=False,
+            attempted_digest=attempted_digest,
+            attempted_event_count=attempted_event_count,
+            reason=_REASON_ALREADY_EXISTS, published=False,
         )
 
     try:
@@ -772,16 +795,15 @@ def build_and_publish(
     except Exception:  # noqa: BLE001 — 文件已发布但未通过回读/replay，不能声称闭合
         logger.exception("JADX judgment ledger sidecar replay 失败")
         return _anchor(
-            data=data,
-            event_count=len(events),
-            replay_ok=False,
-            reason=_REASON_REPLAY_FAILED,
+            locator=locator, replay_ok=False,
+            attempted_digest=attempted_digest,
+            attempted_event_count=attempted_event_count,
+            reason=_REASON_REPLAY_FAILED, published=True,
         )
 
     return _anchor(
-        data=data,
-        event_count=len(replayed),
-        replay_ok=True,
+        locator=locator, digest=attempted_digest,
+        event_count=len(replayed), replay_ok=True,
     )
 
 

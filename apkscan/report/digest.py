@@ -574,11 +574,15 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
         # locator 指向，reason 保留在原始 meta 审计面。
         raw_ledger = meta.get("jadx_judgment_ledger")
         if isinstance(raw_ledger, dict):
+            # 白名单透传、源字段存在才输出：失败锚的 attempted_*/reason/published 一并
+            # 可见——digest 消费者必须能分清"已验证磁盘摘要"与"本次拟发布字节摘要"。
             jadx_index["ledger"] = {
-                "locator": raw_ledger.get("locator"),
-                "digest": raw_ledger.get("digest"),
-                "event_count": raw_ledger.get("event_count"),
-                "replay_ok": raw_ledger.get("replay_ok"),
+                key: raw_ledger[key]
+                for key in (
+                    "locator", "digest", "attempted_digest", "event_count",
+                    "attempted_event_count", "replay_ok", "reason", "published",
+                )
+                if key in raw_ledger
             }
         digest["jadx_index"] = jadx_index
 
