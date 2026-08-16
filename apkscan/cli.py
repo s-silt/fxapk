@@ -35,6 +35,7 @@ from apkscan.commands.corpus import corpus_app
 from apkscan.commands.case import case_app, closure_exit_code
 from apkscan.commands.enrich import enrich_app
 from apkscan.commands.jadx_query import jadx_app
+from apkscan.commands.reanalysis_cli import recognize_app
 from apkscan.commands.lead import lead_app
 from apkscan.commands.web import analyze_web
 
@@ -65,6 +66,7 @@ app.add_typer(case_app, name="case")
 app.add_typer(enrich_app, name="enrich")
 app.add_typer(jadx_app, name="jadx")
 app.add_typer(lead_app, name="lead")
+app.add_typer(recognize_app, name="recognize")
 
 # analyze-web 是**单个命令**（不是子命令组），故用 app.command() 注册而非 add_typer。
 # 函数体在 commands/web.py（逻辑不堆进 cli.py），它反过来惰性 import 本模块的 _write_reports
