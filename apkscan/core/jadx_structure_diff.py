@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import NoReturn
 
 from apkscan.core.jadx_index import (
-    REASON_DUPLICATE_STRUCTURE,
     REASON_MALFORMED,
     JadxIndexError,
     LoadedIndex,
@@ -54,6 +53,7 @@ class MethodRegion:
 @dataclass(frozen=True, slots=True)
 class ChangedMethod:
     class_name: str
+    path: str
     method: str
     left_regions: tuple[MethodRegion, ...]
     right_regions: tuple[MethodRegion, ...]
@@ -61,8 +61,9 @@ class ChangedMethod:
 
 @dataclass(frozen=True, slots=True)
 class StructuralDiff:
-    added_classes: tuple[str, ...]
-    removed_classes: tuple[str, ...]
+    #: 类身份是 (class_name, path)——schema 1.2 起同名不同路径是独立身份。
+    added_classes: tuple[tuple[str, str], ...]
+    removed_classes: tuple[tuple[str, str], ...]
     added_methods: tuple[MethodRegion, ...]
     removed_methods: tuple[MethodRegion, ...]
     changed_methods: tuple[ChangedMethod, ...]
@@ -88,8 +89,12 @@ def _validate_call(call: object, path: str) -> None:
 
 def _read_structure(
     index: LoadedIndex,
-) -> dict[str, tuple[str, list[MethodRegion]]]:
-    """聚合结构；同 shard 内允许同身份重载，跨 shard 重复类直接拒绝。"""
+) -> dict[tuple[str, str], list[MethodRegion]]:
+    """聚合结构；类身份为 (class_name, path)。
+
+    跨 shard 的同 (name, path) 是多 dex 脱壳 dump 重复类的常态——合并其方法
+    区域（digest 多重集随之翻倍，比对侧保守得 changed，绝不误判 match）；
+    同一 shard 内的精确重复由 _validate_shard_structure fail-closed 拦截。"""
     if not isinstance(index, LoadedIndex):
         _malformed("$")
     if index.coverage not in ("complete", "partial"):
@@ -97,8 +102,7 @@ def _read_structure(
     if not isinstance(index.shards, tuple):
         _malformed("$.shards")
 
-    classes: dict[str, tuple[str, list[MethodRegion]]] = {}
-    class_origin: dict[str, int] = {}
+    classes: dict[tuple[str, str], list[MethodRegion]] = {}
 
     for shard_index, shard in enumerate(index.shards):
         shard_path = f"$.shards[{shard_index}]"
@@ -148,14 +152,8 @@ def _read_structure(
             except JadxIndexError:
                 _malformed(f"{class_path}.path")
 
-            if class_name in class_origin and class_origin[class_name] != shard_index:
-                raise JadxIndexError(REASON_DUPLICATE_STRUCTURE, class_path)
-
-            existing = classes.get(class_name)
-            if existing is not None and existing[0] != normalized_path:
-                _malformed(f"{class_path}.path")
-
-            regions: list[MethodRegion] = []
+            identity = (class_name, normalized_path)
+            regions = classes.setdefault(identity, [])
             for method_index, raw_method in enumerate(raw_methods):
                 method_path = f"{class_path}.methods[{method_index}]"
                 required = {
@@ -201,12 +199,6 @@ def _read_structure(
                     _malformed(method_path)
                 regions.append(region)
 
-            if existing is None:
-                classes[class_name] = (normalized_path, regions)
-                class_origin[class_name] = shard_index
-            else:
-                existing[1].extend(regions)
-
     return classes
 
 
@@ -222,8 +214,8 @@ def _region_sort_key(region: MethodRegion) -> tuple[object, ...]:
 def _method_sort_key(region: MethodRegion) -> tuple[object, ...]:
     return (
         region.class_name,
-        region.method,
         region.path,
+        region.method,
         region.start_line,
         region.end_line,
         region.body_digest,
@@ -231,23 +223,23 @@ def _method_sort_key(region: MethodRegion) -> tuple[object, ...]:
 
 
 def diff_index_structure(left: LoadedIndex, right: LoadedIndex) -> StructuralDiff:
-    """返回两个 LoadedIndex 的确定性结构 diff。"""
+    """返回两个 LoadedIndex 的确定性结构 diff（类身份 = (class_name, path)）。"""
     left_classes = _read_structure(left)
     right_classes = _read_structure(right)
 
-    left_names = set(left_classes)
-    right_names = set(right_classes)
-    added_classes = tuple(sorted(right_names - left_names))
-    removed_classes = tuple(sorted(left_names - right_names))
+    left_identities = set(left_classes)
+    right_identities = set(right_classes)
+    added_classes = tuple(sorted(right_identities - left_identities))
+    removed_classes = tuple(sorted(left_identities - right_identities))
 
     added_methods: list[MethodRegion] = []
     removed_methods: list[MethodRegion] = []
     changed_methods: list[ChangedMethod] = []
     unchanged_methods = 0
 
-    for class_name in sorted(left_names & right_names):
-        left_regions = left_classes[class_name][1]
-        right_regions = right_classes[class_name][1]
+    for class_name, path in sorted(left_identities & right_identities):
+        left_regions = left_classes[(class_name, path)]
+        right_regions = right_classes[(class_name, path)]
 
         left_by_method: dict[str, list[MethodRegion]] = {}
         right_by_method: dict[str, list[MethodRegion]] = {}
@@ -275,6 +267,7 @@ def diff_index_structure(left: LoadedIndex, right: LoadedIndex) -> StructuralDif
                     changed_methods.append(
                         ChangedMethod(
                             class_name=class_name,
+                            path=path,
                             method=method,
                             left_regions=tuple(left_method_regions),
                             right_regions=tuple(right_method_regions),
@@ -283,7 +276,7 @@ def diff_index_structure(left: LoadedIndex, right: LoadedIndex) -> StructuralDif
 
     added_methods.sort(key=_method_sort_key)
     removed_methods.sort(key=_method_sort_key)
-    changed_methods.sort(key=lambda item: (item.class_name, item.method))
+    changed_methods.sort(key=lambda item: (item.class_name, item.path, item.method))
 
     return StructuralDiff(
         added_classes=added_classes,

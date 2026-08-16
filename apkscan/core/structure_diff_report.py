@@ -32,10 +32,16 @@ def _region_dict(region: MethodRegion) -> dict[str, object]:
     }
 
 
+def _class_dict(identity: tuple[str, str]) -> dict[str, object]:
+    """把类身份投影为机器可读对象（schema 1.2：(class_name, path)）。"""
+    return {"class_name": identity[0], "path": identity[1]}
+
+
 def _changed_dict(changed: ChangedMethod) -> dict[str, object]:
     """把变更方法投影为稳定、可序列化的机器可读对象。"""
     return {
         "class_name": changed.class_name,
+        "path": changed.path,
         "method": changed.method,
         "left_regions": [_region_dict(item) for item in changed.left_regions],
         "right_regions": [_region_dict(item) for item in changed.right_regions],
@@ -132,8 +138,14 @@ def project_structure_diff(
     }
 
     detail_groups: list[dict[str, object]] = [
-        _bounded_details("added_classes", added_classes, lambda item: item, limit),
-        _bounded_details("removed_classes", removed_classes, lambda item: item, limit),
+        _bounded_details(
+            "added_classes", added_classes,
+            lambda item: _class_dict(item), limit,  # type: ignore[arg-type]
+        ),
+        _bounded_details(
+            "removed_classes", removed_classes,
+            lambda item: _class_dict(item), limit,  # type: ignore[arg-type]
+        ),
         _bounded_details(
             "added_methods", added_methods,
             lambda item: _region_dict(item), limit,  # type: ignore[arg-type]

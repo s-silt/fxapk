@@ -149,8 +149,9 @@ def test_added_removed_changed_three_way(tmp_path: Path) -> None:
     right = _build_index(tmp_path, "r", {"com/a/W.java": W_RIGHT, "com/c/C.java": C_JAVA})
     diff = diff_index_structure(left, right)
 
-    assert diff.added_classes == ("com.c.C",)
-    assert diff.removed_classes == ("com.b.B",)
+    # schema 1.2 身份口径：类级明细是 (class_name, path) 对——混淆样本同名类可区分。
+    assert diff.added_classes == (("com.c.C", "com/c/C.java"),)
+    assert diff.removed_classes == (("com.b.B", "com/b/B.java"),)
 
     assert [(m.class_name, m.method) for m in diff.added_methods] == [("com.a.W", "h/0")]
     assert [(m.class_name, m.method) for m in diff.removed_methods] == [("com.a.W", "g/0")]
@@ -161,6 +162,7 @@ def test_added_removed_changed_three_way(tmp_path: Path) -> None:
     (changed,) = diff.changed_methods
     assert isinstance(changed, ChangedMethod)
     assert (changed.class_name, changed.method) == ("com.a.W", "f/0")
+    assert changed.path == "com/a/W.java"
     (left_region,) = changed.left_regions
     (right_region,) = changed.right_regions
     assert left_region.body_digest != right_region.body_digest
@@ -174,7 +176,8 @@ def test_class_level_add_remove_not_double_counted(tmp_path: Path) -> None:
     left = _build_index(tmp_path, "l", {"com/b/B.java": B_JAVA})
     right = _build_index(tmp_path, "r", {"com/c/C.java": C_JAVA})
     diff = diff_index_structure(left, right)
-    assert diff.added_classes == ("com.c.C",) and diff.removed_classes == ("com.b.B",)
+    assert diff.added_classes == (("com.c.C", "com/c/C.java"),)
+    assert diff.removed_classes == (("com.b.B", "com/b/B.java"),)
     assert diff.added_methods == () and diff.removed_methods == ()
     assert diff.changed_methods == () and diff.unchanged_methods == 0
 
@@ -250,8 +253,10 @@ def test_malformed_structure_fail_closed(tmp_path: Path) -> None:
     assert exc.value.code == "malformed"
 
 
-def test_cross_shard_duplicate_class_rejected(tmp_path: Path) -> None:
-    """单侧索引内跨 shard 重复类 → duplicate_structure（与 trace_callpath 同语义）。"""
+def test_cross_shard_duplicate_class_merges(tmp_path: Path) -> None:
+    """★schema 1.2：跨 shard 同 (name, path) 是多 dex 脱壳 dump 重复类的常态——
+    确定性合并聚合，不再 fail-closed；digest 多重集翻倍 → 对单份索引得 changed
+    （保守：绝不因副本存在而误报 match）。"""
     loaded = _build_index(tmp_path, "l", {"com/b/B.java": B_JAVA})
     (shard,) = loaded.shards
     forged = LoadedIndex(
@@ -260,9 +265,45 @@ def test_cross_shard_duplicate_class_rejected(tmp_path: Path) -> None:
         coverage=loaded.coverage,
         shards=(shard, dict(shard)),  # 同一类出现在两个 shard
     )
-    with pytest.raises(JadxIndexError) as exc:
-        diff_index_structure(forged, loaded)
-    assert exc.value.code == "duplicate_structure"
+    diff = diff_index_structure(forged, loaded)
+    assert diff.added_classes == () and diff.removed_classes == ()
+    (changed,) = diff.changed_methods
+    assert (changed.class_name, changed.method) == ("com.b.B", "only/0")
+    assert changed.path == "com/b/B.java"
+    assert len(changed.left_regions) == 2 and len(changed.right_regions) == 1
+    assert diff.unchanged_methods == 0
+
+
+def test_duplicate_names_distinct_paths_do_not_cross_pollute(tmp_path: Path) -> None:
+    """★混淆锁：无 package 的同名类（不同路径）各自独立身份——只有被改的那份
+    进 changed，另一份保持 unchanged，绝不因同名而互相污染。"""
+    shared = "class a {\n    void run() {\n        x = 1;\n    }\n}\n"
+    left = _build_index(
+        tmp_path,
+        "l",
+        {
+            "p000/a.java": shared,
+            "p001/a.java": "class a {\n    void run() {\n        y = 1;\n    }\n}\n",
+        },
+    )
+    right = _build_index(
+        tmp_path,
+        "r",
+        {
+            "p000/a.java": shared,
+            "p001/a.java": "class a {\n    void run() {\n        y = 2;\n    }\n}\n",
+        },
+    )
+    diff = diff_index_structure(left, right)
+    assert diff.added_classes == () and diff.removed_classes == ()
+    assert diff.added_methods == () and diff.removed_methods == ()
+    (changed,) = diff.changed_methods
+    assert (changed.class_name, changed.path, changed.method) == (
+        "a",
+        "p001/a.java",
+        "run/0",
+    )
+    assert diff.unchanged_methods == 1  # p000 副本不受牵连
 
 
 def test_diff_independent_of_shard_order(tmp_path: Path) -> None:

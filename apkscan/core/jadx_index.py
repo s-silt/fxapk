@@ -5,7 +5,7 @@ S2：受控 cache root、create-only 原子发布、fail-closed 加载校验链�
 S3：确定性枚举、bounded postings、结构提取（P1-B）与 find_value_usage。
 本模块不负责 JADX 调用；调用路径查询见 jadx_callpath。
 
-结构段（schema 1.1）是对反编译 Java 的**有界启发式**解析——反射、JNI、动态
+结构段（schema 1.2）是对反编译 Java 的**有界启发式**解析——反射、JNI、动态
 分发与混淆构造均不可见；未识别的语法被跳过而非报错。结构的不完整是文档化的
 启发式属性，绝不能被解释为「不存在」。
 """
@@ -27,9 +27,10 @@ from apkscan.core.atomic import AtomicCreateUnsupportedError, atomic_create_byte
 from apkscan.core.recognition_codec import canonical_json_v1, parse_json_v1
 
 
-# 1.1：shard 增加必需的 structure 段（P1-B）。schema 参与 key material，
-# bump 即让所有 1.0 工件按既有漂移机制变为可重建的 CacheMiss，无迁移代码。
-INDEX_SCHEMA_VERSION = "1.1"
+# 1.2：结构段类身份从 name 改为 (name, path)——真实混淆样本（脱壳 dump）里
+# 不同路径的同名类是常态，仅按 name 的唯一键会让索引整体不可建。schema 参与
+# key material，bump 即让旧工件按既有漂移机制变为可重建的 CacheMiss，无迁移代码。
+INDEX_SCHEMA_VERSION = "1.2"
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -622,10 +623,11 @@ _MAX_PERSISTED_IDENTIFIER = 1024
 
 
 def _validate_shard_structure(shard_value: Mapping[str, object], files: set[str]) -> None:
-    """schema 1.1 structure 段的 fail-closed 校验；违规抛精确 reason code。
+    """schema 1.2 structure 段的 fail-closed 校验；违规抛精确 reason code。
 
-    形状违规 / 失序 / path 不在 files → malformed；重名类或完全重复的
-    (name, arity, start_line) 三元组 → duplicate_structure。
+    形状违规 / 失序 / path 不在 files → malformed；完全重复的 (name, path) 类身份
+    或 (name, arity, start_line) 方法三元组 → duplicate_structure。同名不同 path
+    是混淆样本（脱壳 dump）的合法常态，不是违规。
     """
     raw = shard_value.get("structure")
     if not isinstance(raw, dict) or set(raw) != {"classes"}:
@@ -633,7 +635,7 @@ def _validate_shard_structure(shard_value: Mapping[str, object], files: set[str]
     classes = raw["classes"]
     if not isinstance(classes, list):
         _fail(REASON_MALFORMED, "$.structure.classes")
-    previous_name: str | None = None
+    previous_identity: tuple[str, str] | None = None
     for ci, cls in enumerate(classes):
         prefix = f"$.structure.classes[{ci}]"
         if not isinstance(cls, dict) or set(cls) != {"name", "path", "methods"}:
@@ -645,18 +647,19 @@ def _validate_shard_structure(shard_value: Mapping[str, object], files: set[str]
             or _QUALIFIED_CLASS_RE.fullmatch(name) is None
         ):
             _fail(REASON_MALFORMED, f"{prefix}.name")
-        if previous_name is not None:
-            if name == previous_name:
-                _fail(REASON_DUPLICATE_STRUCTURE, f"{prefix}.name")
-            if name < previous_name:
-                _fail(REASON_MALFORMED, f"{prefix}.name")
-        previous_name = name
         rel = cls["path"]
         if not isinstance(rel, str):
             _fail(REASON_MALFORMED, f"{prefix}.path")
         _normalize_safe_relative_path(rel, f"{prefix}.path")
         if rel not in files:
             _fail(REASON_MALFORMED, f"{prefix}.path")
+        identity = (name, rel)
+        if previous_identity is not None:
+            if identity == previous_identity:
+                _fail(REASON_DUPLICATE_STRUCTURE, f"{prefix}.path")
+            if identity < previous_identity:
+                _fail(REASON_MALFORMED, f"{prefix}.path")
+        previous_identity = identity
         methods = cls["methods"]
         if not isinstance(methods, list):
             _fail(REASON_MALFORMED, f"{prefix}.methods")
@@ -1018,10 +1021,14 @@ class JadxIndexStore:
                     postings = [dict(p) for p in current.postings]
                     structure_classes = [dict(c) for c in current.structure]
                     coverages.append(current.coverage)
-                # 发布闸门：重名类会让 shard 一落盘即不可加载——在发布前拒绝，
-                # 绝不产出注定 CacheMiss 的半成品工件。
-                class_names = [str(c.get("name", "")) for c in structure_classes]
-                if len(set(class_names)) != len(class_names):
+                # 发布闸门：完全相同的 (name, path) 类身份会让 shard 一落盘即
+                # 不可加载——在发布前拒绝，绝不产出注定 CacheMiss 的半成品工件。
+                # 同名不同 path（混淆样本常态）是合法形态，放行。
+                class_identities = [
+                    (str(c.get("name", "")), str(c.get("path", "")))
+                    for c in structure_classes
+                ]
+                if len(set(class_identities)) != len(class_identities):
                     _fail(REASON_DUPLICATE_STRUCTURE, "$.scan.structure")
                 shard_record = {
                     "index_schema_version": manifest.index_schema_version,
@@ -1340,7 +1347,7 @@ def _extract_file_structure(
         methods = item["methods"]
         assert isinstance(methods, list)
         methods.sort(key=lambda m: (m["start_line"], m["name"], m["arity"]))
-    classes.sort(key=lambda c: str(c["name"]))
+    classes.sort(key=lambda c: (str(c["name"]), str(c["path"])))
     return classes, limited
 
 
@@ -1459,8 +1466,8 @@ def scan_java_sources(
         structures.extend(file_classes)
         structure_limit_hit = structure_limit_hit or file_limited
 
-    # 全 shard 的类按名升序——与 load 侧 canonical 校验同款序。
-    structures.sort(key=lambda item: str(item["name"]))
+    # 全 shard 的类按 (name, path) 升序——与 load 侧 canonical 校验同款序。
+    structures.sort(key=lambda item: (str(item["name"]), str(item["path"])))
     coverage = (
         "complete"
         if not read_failed and not truncated and not scan_limit_hit and not structure_limit_hit

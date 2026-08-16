@@ -103,9 +103,10 @@ HELPER_JAVA = (
 # ---------------------------------------------------------------------------
 
 
-def test_schema_version_bumped_to_1_1() -> None:
-    """★P1-B 的 schema 演进锁：结构段落随 1.1 出场，1.0 工件按既有漂移机制拒收。"""
-    assert INDEX_SCHEMA_VERSION == "1.1"
+def test_schema_version_bumped_to_1_2() -> None:
+    """★schema 演进锁：1.2 起结构身份为 (name, path)——混淆样本不同路径同名类合法；
+    1.1 及更早工件按既有漂移机制拒收（版本同时进 key material 与 load 校验）。"""
+    assert INDEX_SCHEMA_VERSION == "1.2"
 
 
 # ---------------------------------------------------------------------------
@@ -379,13 +380,14 @@ def test_load_rejects_missing_structure_key(tmp_path: Path) -> None:
     assert isinstance(miss, CacheMiss) and miss.reason == "malformed"
 
 
-def test_load_rejects_duplicate_class_names(tmp_path: Path) -> None:
+def test_load_rejects_duplicate_class_identity(tmp_path: Path) -> None:
+    """完全相同的 (name, path) 重复仍是形状违规——身份放宽到 path 级不放走精确重复。"""
     store, manifest = _built_with_structure(tmp_path)
 
     def _dup(shard: dict) -> None:
         classes = shard["structure"]["classes"]
         classes.append(dict(classes[0]))
-        classes.sort(key=lambda c: str(c["name"]))
+        classes.sort(key=lambda c: (str(c["name"]), str(c["path"])))
 
     _rewrite_shard(tmp_path, manifest, _dup)
     miss = store.load_index(manifest.index_key)
@@ -427,6 +429,93 @@ def test_load_rejects_legacy_1_0_manifest_as_schema_drift(tmp_path: Path) -> Non
     manifest_path.write_bytes(canonical_json_v1(value))
     miss = store.load_index(manifest.index_key)
     assert isinstance(miss, CacheMiss) and miss.reason == "schema_drift"
+
+
+# ---------------------------------------------------------------------------
+# 混淆形态（schema 1.2 身份修复锁）：不同路径同名类必须可发布可加载
+# ---------------------------------------------------------------------------
+
+#: 脱壳 dump 常见形态：反编译产物无 package 声明，混淆名跨目录塌缩成同一简单名。
+OBF_RUN_JAVA = "class a {\n    void run() {\n        go();\n    }\n}\n"
+OBF_GO_JAVA = "class a {\n    void go() {\n    }\n}\n"
+
+
+def _built_with_duplicate_names(
+    tmp_path: Path,
+) -> tuple[JadxIndexStore, JadxIndexManifest]:
+    manifest = _make_manifest(tmp_path)
+    src = tmp_path / "java"
+    _java_tree(src, {"p000/a.java": OBF_RUN_JAVA, "p001/a.java": OBF_GO_JAVA})
+    scan = scan_java_sources(src, [], lineage=manifest.dex_lineage[0], limits=Limits())
+    store = JadxIndexStore(tmp_path / "cache")
+    result = store.build_index(tmp_path / "src", manifest, scan=scan)
+    assert isinstance(result, IndexBuildResult)
+    assert result.state == IndexBuildState.BUILT, result.diagnostics
+    return store, manifest
+
+
+def test_build_accepts_duplicate_simple_names_without_package(tmp_path: Path) -> None:
+    """★真样本混淆锁（2026-08-16 e2e 实证）：不同路径同名类必须 BUILT 且可往返。
+
+    旧身份（仅 name）让带脱壳 dump 的真实混淆样本索引整体 FAILED——
+    发布闸门与 load 校验的身份都必须是 (name, path)。"""
+    store, manifest = _built_with_duplicate_names(tmp_path)
+    loaded = store.load_index(manifest.index_key)
+    assert isinstance(loaded, LoadedIndex)
+    (shard,) = loaded.shards
+    structure = shard["structure"]
+    assert isinstance(structure, dict)
+    assert [(c["name"], c["path"]) for c in structure["classes"]] == [
+        ("a", "p000/a.java"),
+        ("a", "p001/a.java"),
+    ]
+
+
+def test_build_accepts_duplicate_qualified_names_across_paths(tmp_path: Path) -> None:
+    """多 dex 脱壳 dump 的重复类形态：同限定名不同相对路径 → BUILT。"""
+    manifest = _make_manifest(tmp_path)
+    src = tmp_path / "java"
+    _java_tree(
+        src,
+        {
+            "com/x/a.java": "package com.x;\n\nclass a {\n    void run() {\n    }\n}\n",
+            "dup/com/x/a.java": "package com.x;\n\nclass a {\n    void go() {\n    }\n}\n",
+        },
+    )
+    scan = scan_java_sources(src, [], lineage=manifest.dex_lineage[0], limits=Limits())
+    assert [(c["name"], c["path"]) for c in scan.structure] == [
+        ("com.x.a", "com/x/a.java"),
+        ("com.x.a", "dup/com/x/a.java"),
+    ]
+    store = JadxIndexStore(tmp_path / "cache")
+    result = store.build_index(tmp_path / "src", manifest, scan=scan)
+    assert isinstance(result, IndexBuildResult)
+    assert result.state == IndexBuildState.BUILT, result.diagnostics
+
+
+def test_build_rejects_same_identity_in_one_file(tmp_path: Path) -> None:
+    """同一文件内同 (name, path) 的两个声明是提取歧义 → 发布闸门照拒。"""
+    manifest = _make_manifest(tmp_path)
+    src = tmp_path / "java"
+    _java_tree(src, {"p000/a.java": "class a {\n}\n\nclass a {\n}\n"})
+    scan = scan_java_sources(src, [], lineage=manifest.dex_lineage[0], limits=Limits())
+    store = JadxIndexStore(tmp_path / "cache")
+    result = store.build_index(tmp_path / "src", manifest, scan=scan)
+    assert isinstance(result, IndexBuildResult)
+    assert result.state == IndexBuildState.FAILED
+    assert result.diagnostics == ("duplicate_structure at $.scan.structure",)
+
+
+def test_load_rejects_same_name_paths_out_of_order(tmp_path: Path) -> None:
+    """同名类按 path 二级升序是 canonical 序的一部分；失序 → malformed。"""
+    store, manifest = _built_with_duplicate_names(tmp_path)
+
+    def _swap(shard: dict) -> None:
+        shard["structure"]["classes"].reverse()
+
+    _rewrite_shard(tmp_path, manifest, _swap)
+    miss = store.load_index(manifest.index_key)
+    assert isinstance(miss, CacheMiss) and miss.reason == "malformed"
 
 
 # ---------------------------------------------------------------------------
