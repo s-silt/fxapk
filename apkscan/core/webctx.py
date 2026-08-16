@@ -297,6 +297,7 @@ class WebContext:
         self.extra_dex_paths: list[str] = []
         # 同理：无 jadx 面，持久索引在 Web 证据上恒不启用（协议要求该字段存在）。
         self.jadx_cache_root: str | None = None
+        self.jadx_baseline_index: str | None = None
         self._files: dict[str, bytes] = dict(files or {})
         self.origin = origin
         self.source_dir = source_dir

@@ -299,6 +299,15 @@ def analyze(
             "构建/复用内容寻址索引（一次索引、多次廉价定向查询）；索引失败不影响分析本身。"
         ),
     ),
+    jadx_baseline_index: str | None = typer.Option(
+        None,
+        "--jadx-baseline-index",
+        help=(
+            "调用方断言为官方参照的 jadx 索引 key（64 位小写 hex；须同时给"
+            " --jadx-cache-root）。产出 meta.jadx_ownership_summary 结构对比摘要——"
+            "仅结构匹配、非鉴真，不影响任何 verdict。"
+        ),
+    ),
     dynamic: bool = typer.Option(
         False,
         "--dynamic",
@@ -346,6 +355,7 @@ def analyze(
             ctx = load_apk(
                 str(apk), config, extra_dex=extra_dex_files or None,
                 jadx_cache_root=jadx_cache_root,
+                jadx_baseline_index=jadx_baseline_index,
             )
         except ApkParseError as exc:
             typer.echo(f"错误：{exc}", err=True)

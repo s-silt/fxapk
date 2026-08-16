@@ -66,6 +66,7 @@ from apkscan.core.jadx_index import (
     scan_java_sources,
     verify_dex_inputs,
 )
+from apkscan.core.jadx_ownership import project_ownership
 from apkscan.core.registry import BaseAnalyzer
 from apkscan.core.secrets import (
     SecretRules,
@@ -232,6 +233,10 @@ _INDEX_REASON_EMPTY_JADX_OUTPUT = "empty_jadx_output"
 _INDEX_REASON_BUILD_FAILED = "index_build_failed"
 _INDEX_REASON_INDEX_EXCEPTION = "index_exception"
 _INDEX_REASON_EXCLUDED_DEX = "excluded_dex"
+_INDEX_REASON_INVALID_BASELINE_KEY = "invalid_baseline_index_key"
+_INDEX_REASON_BASELINE_UNAVAILABLE = "baseline_index_unavailable"
+_INDEX_REASON_BASELINE_MANIFEST_UNAVAILABLE = "baseline_manifest_unavailable"
+_INDEX_REASON_SUBJECT_UNAVAILABLE = "subject_index_unavailable"
 
 
 @dataclass(frozen=True)
@@ -573,6 +578,131 @@ def _index_status_from_build(state: IndexBuildState, coverage: str) -> str:
     return "failed"
 
 
+def _stable_index_reason(value: object, fallback: str) -> str:
+    """把外部/缓存状态压成 receipt/meta 可见的稳定 reason code。
+
+    CacheMiss/CacheUnavailable 的 reason 字段数据类本身不校验——任何进入摘要
+    或 receipt 的单值 reason 都必须过同一语法闸，不合法即折叠。
+    """
+    if isinstance(value, str) and _REASON_CODE_RE.fullmatch(value) is not None:
+        return value
+    return fallback
+
+
+def _baseline_manifest_digest(cache_root: str, baseline_key: str) -> str | None:
+    """读 cache 内 canonical manifest 的文件字节算摘要。
+
+    cache 内 manifest.json 已由 P1 load 侧完成 canonical 自证——这里不得重新
+    实现 canonicalization，直接对文件字节 sha256。读失败 → None（旁路 fail-open）。
+    """
+    try:
+        manifest_path = Path(cache_root) / baseline_key / "manifest.json"
+        data = manifest_path.read_bytes()
+    except Exception:  # noqa: BLE001 - 摘要旁路 fail-open
+        logger.warning("[jadx-ownership] baseline manifest 摘要不可得", exc_info=True)
+        return None
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _unavailable_ownership_summary(reason: object) -> dict[str, object]:
+    """构造不暴露路径/异常文本的 unavailable 摘要。
+
+    失败摘要同样可能被下游直接展示——四个防误读字段与成功摘要保持一致，
+    无论比较是否成功都不代表真实性鉴定、不影响任何 verdict。
+    """
+    return {
+        "status": "unavailable",
+        "reason": _stable_index_reason(reason, _INDEX_REASON_BASELINE_UNAVAILABLE),
+        "baseline_designation": "caller_asserted_official",
+        "comparison_semantics": "structural_match_only",
+        "authenticity_asserted": False,
+        "verdict_effect": "none",
+    }
+
+
+def _project_jadx_baseline(
+    *,
+    cache_root: str,
+    subject_key: object,
+    baseline_key: object,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """加载 subject/baseline 索引并生成 ownership 摘要与 receipt baseline 块。
+
+    返回 ``(summary, receipt_baseline)``。纯 baseline 旁路：任意异常只转
+    unavailable，不向主分析传播。「official」身份由调用方断言、非鉴真——摘要
+    只输出结构匹配计数与防误读字段，绝不输出 ownership 枚举值。
+    """
+    if not isinstance(baseline_key, str) or re.fullmatch(
+        r"[0-9a-f]{64}", baseline_key
+    ) is None:
+        summary = _unavailable_ownership_summary(_INDEX_REASON_INVALID_BASELINE_KEY)
+        return summary, {"status": "unavailable", "reason": summary["reason"]}
+    if not isinstance(subject_key, str) or re.fullmatch(
+        r"[0-9a-f]{64}", subject_key
+    ) is None:
+        summary = _unavailable_ownership_summary(_INDEX_REASON_SUBJECT_UNAVAILABLE)
+        return summary, {"status": "unavailable", "reason": summary["reason"]}
+
+    try:
+        # subject 即使刚 built/reused 也必须从 store 再 load 一次：
+        # build_index 的返回值不带 shards，投影要吃完整 LoadedIndex。
+        store = JadxIndexStore(cache_root)
+        subject_loaded = store.load_index(subject_key)
+        if not isinstance(subject_loaded, LoadedIndex):
+            summary = _unavailable_ownership_summary(_INDEX_REASON_SUBJECT_UNAVAILABLE)
+            return summary, {"status": "unavailable", "reason": summary["reason"]}
+
+        baseline_loaded = store.load_index(baseline_key)
+        if not isinstance(baseline_loaded, LoadedIndex):
+            reason = _stable_index_reason(
+                getattr(baseline_loaded, "reason", None),
+                _INDEX_REASON_BASELINE_UNAVAILABLE,
+            )
+            return (
+                _unavailable_ownership_summary(reason),
+                {"status": "unavailable", "reason": reason},
+            )
+
+        manifest_digest = _baseline_manifest_digest(cache_root, baseline_key)
+        if manifest_digest is None:
+            summary = _unavailable_ownership_summary(
+                _INDEX_REASON_BASELINE_MANIFEST_UNAVAILABLE
+            )
+            return summary, {"status": "unavailable", "reason": summary["reason"]}
+
+        projection = project_ownership(subject_loaded, baseline_loaded)
+        counts = Counter(region.reason for region in projection.regions)
+        matches = counts.get("matches_official_baseline", 0)
+        modified = counts.get("modified_relative_to_baseline", 0)
+        absent = counts.get("absent_from_baseline", 0)
+        # 只有 P1-D 明确的三个 reason token 进主计数；其余（no_official_baseline、
+        # baseline_coverage_partial）归入 unattributed，保证四桶之和 == region 总数。
+        unattributed = len(projection.regions) - matches - modified - absent
+
+        summary = {
+            "status": "compared",
+            "baseline_designation": "caller_asserted_official",
+            "comparison_semantics": "structural_match_only",
+            "authenticity_asserted": False,
+            "verdict_effect": "none",
+            "baseline_index_key": baseline_loaded.manifest.index_key,
+            "subject_index_key": projection.subject_index_key,
+            "baseline_manifest_digest": manifest_digest,
+            "matches": matches,
+            "modified": modified,
+            "absent": absent,
+            "unattributed": unattributed,
+            "absence_claimable": bool(projection.absence_claimable),
+            "subject_coverage": projection.subject_coverage,
+            "baseline_coverage": projection.baseline_coverage,
+        }
+        return summary, {"status": "compared"}
+    except Exception:  # noqa: BLE001 - ownership 旁路必须 fail-open
+        logger.exception("[jadx-ownership] baseline 投影失败")
+        summary = _unavailable_ownership_summary(_INDEX_REASON_BASELINE_UNAVAILABLE)
+        return summary, {"status": "unavailable", "reason": summary["reason"]}
+
+
 _FINDING_SECRET = "JADX-HARDCODED-SECRET"
 #: config-chain 层②：方法内 密文→解密(→sink) 共现链（启发式、非数据流证明）。
 _FINDING_STRING_CHAIN = "STRING-CHAIN-DECRYPT"
@@ -590,6 +720,7 @@ class JadxAnalyzer(BaseAnalyzer):
         'jadx_index_key': 'record',
         'jadx_index_status': 'coverage',
         'jadx_java_files': 'coverage',
+        'jadx_ownership_summary': 'record',
         'jadx_receipt': 'coverage',
         'jadx_scan_truncated': 'coverage',
         'jadx_status': 'coverage',
@@ -609,6 +740,9 @@ class JadxAnalyzer(BaseAnalyzer):
         apk_path = (getattr(ctx, "apk_path", "") or "").strip()
         # 持久索引 opt-in：不给 cache root = 现行为 + disabled，文件系统零持久化。
         cache_root = (getattr(ctx, "jadx_cache_root", "") or "").strip()
+        # baseline 比较是索引之上的第二层 opt-in（须同时启用 cache root）。
+        baseline_index = getattr(ctx, "jadx_baseline_index", None)
+        baseline_requested = baseline_index is not None
         index_receipt = _index_receipt(
             status="disabled",
             reason_codes=(
@@ -880,6 +1014,32 @@ class JadxAnalyzer(BaseAnalyzer):
                     index_receipt.pop("key", None)
                     result.meta.pop("jadx_index_key", None)
                 result.meta["jadx_index_status"] = index_receipt["status"]
+
+            # --------------------------------------------------------------
+            # P2-C：baseline ownership 是 subject 索引之上的独立旁路。双 opt-in
+            # 后必须始终产生摘要——即使版本探测/物化/索引准备失败，也明确输出
+            # subject_index_unavailable，不许静默缺席（所以收口在索引块**外**，
+            # 读 meta 里的终态而非索引块局部状态）。baseline 结果只新增
+            # meta/receipt 字段，不改 subject 索引终态、result.error 或任何
+            # 既有产出（verdict 红线）。
+            # --------------------------------------------------------------
+            if cache_root and baseline_requested:
+                if result.meta.get("jadx_index_status") in {"built", "reused"}:
+                    baseline_summary, baseline_receipt = _project_jadx_baseline(
+                        cache_root=cache_root,
+                        subject_key=result.meta.get("jadx_index_key"),
+                        baseline_key=baseline_index,
+                    )
+                else:
+                    baseline_summary = _unavailable_ownership_summary(
+                        _INDEX_REASON_SUBJECT_UNAVAILABLE
+                    )
+                    baseline_receipt = {
+                        "status": "unavailable",
+                        "reason": baseline_summary["reason"],
+                    }
+                result.meta["jadx_ownership_summary"] = baseline_summary
+                index_receipt["baseline"] = baseline_receipt
         except Exception as exc:  # noqa: BLE001 - 任何异常转 error，不抛给 pipeline
             logger.exception("[jadx] 反编译/扫描异常")
             result.error = f"jadx 增强异常：{exc}"
@@ -888,6 +1048,16 @@ class JadxAnalyzer(BaseAnalyzer):
                 index_receipt["status"] = "failed"
                 _append_index_reason(index_receipt, _INDEX_REASON_INDEX_EXCEPTION)
                 result.meta["jadx_index_status"] = "failed"
+            # baseline 是摘要旁路：主分析异常时不再尝试投影，只给稳定 unavailable。
+            if cache_root and baseline_requested:
+                baseline_summary = _unavailable_ownership_summary(
+                    _INDEX_REASON_SUBJECT_UNAVAILABLE
+                )
+                result.meta["jadx_ownership_summary"] = baseline_summary
+                index_receipt["baseline"] = {
+                    "status": "unavailable",
+                    "reason": baseline_summary["reason"],
+                }
         finally:
             # 受检清理：进程树已在 _run_jadx 内验证终止后才走到这里；失败不再无痕，
             # 进 receipt 的 cleanup 块并使 complete=False（Java 面不得算完整覆盖）。
@@ -1368,6 +1538,24 @@ def _build_jadx_receipt(
             if isinstance(item, str) and item
         }
     )
+    # baseline 块（P2-C）独立收敛：只允许 compared，或 unavailable + 合法稳定 reason；
+    # 非法/异常形态折叠——异常文本与路径绝不进 receipt。
+    raw_baseline = receipt["index"].get("baseline")
+    if raw_baseline is not None:
+        if not isinstance(raw_baseline, dict):
+            receipt["index"]["baseline"] = {
+                "status": "unavailable",
+                "reason": _INDEX_REASON_INVALID_CACHE_STATE,
+            }
+        elif raw_baseline.get("status") == "compared":
+            receipt["index"]["baseline"] = {"status": "compared"}
+        else:
+            receipt["index"]["baseline"] = {
+                "status": "unavailable",
+                "reason": _stable_index_reason(
+                    raw_baseline.get("reason"), _INDEX_REASON_INVALID_CACHE_STATE
+                ),
+            }
     if scan is not None:
         receipt["scan"] = scan
     return receipt

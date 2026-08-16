@@ -97,6 +97,7 @@ class FakeContext:
         declared_sizes: dict[str, int] | None = None,
         extra_dex_paths: list[str] | None = None,
         jadx_cache_root: str | None = None,
+        jadx_baseline_index: str | None = None,
     ) -> None:
         self.package_name = package_name
         self.manifest_xml = manifest_xml
@@ -106,6 +107,8 @@ class FakeContext:
         self.extra_dex_paths = list(extra_dex_paths or [])
         # jadx 持久索引 cache root（opt-in；None=不启用，测试也可 setattr 事后挂）。
         self.jadx_cache_root = jadx_cache_root
+        # 调用方断言为官方参照的 jadx 索引 key（opt-in，须同时启用 cache root）。
+        self.jadx_baseline_index = jadx_baseline_index
         self.platform = platform
         self.manifest_anomaly = manifest_anomaly
 
