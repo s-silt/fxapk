@@ -50,6 +50,9 @@ class AnalysisContext(Protocol):
     #: jadx 持久索引的 cache root（opt-in：None/空串 = 不启用，jadx 增强器保持现行为）。
     #: 消费方一律 ``getattr(ctx, "jadx_cache_root", None)`` 兼容读取，手搓 ctx 可不带此属性。
     jadx_cache_root: str | None
+    #: 调用方断言为官方参照的 jadx 索引 key（opt-in；须同时启用 cache root 才生效）。
+    #: 「official」身份由调用方断言、非鉴真——消费方 getattr 兼容读取。
+    jadx_baseline_index: str | None
 
     def permissions(self) -> list[str]:
         """声明的权限列表。"""

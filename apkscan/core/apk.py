@@ -458,6 +458,7 @@ class ApkContext:
         extra_dex_report: dict[str, object] | None = None,
         hiddenapi_flags_baseline: int | None = None,
         jadx_cache_root: str | None = None,
+        jadx_baseline_index: str | None = None,
     ) -> None:
         # apk: androguard.core.apk.APK；dex_objs: list[DEX]
         self._apk = apk
@@ -474,6 +475,8 @@ class ApkContext:
         self.extra_dex_paths: list[str] = list(extra_dex_paths or [])
         # jadx 持久索引 cache root（opt-in：None=不启用；jadx 增强器 getattr 兼容读取）。
         self.jadx_cache_root: str | None = jadx_cache_root
+        # 调用方断言为官方参照的 jadx 索引 key（opt-in，须同时启用 cache root）。
+        self.jadx_baseline_index: str | None = jadx_baseline_index
         self.config = config
         # apk_path: APK 原始文件绝对路径（jadx/unpack 等增强器需要；无则空串，增强器应优雅跳过）。
         self.apk_path = apk_path
@@ -1038,6 +1041,7 @@ def load_apk(
     config: AnalysisConfig,
     extra_dex: list[str] | None = None,
     jadx_cache_root: str | None = None,
+    jadx_baseline_index: str | None = None,
 ) -> ApkContext:
     """加载 APK 并构造 ApkContext。
 
@@ -1126,4 +1130,5 @@ def load_apk(
         ),
         hiddenapi_flags_baseline=hiddenapi_baseline,
         jadx_cache_root=jadx_cache_root,
+        jadx_baseline_index=jadx_baseline_index,
     )
