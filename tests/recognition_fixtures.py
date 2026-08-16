@@ -467,7 +467,23 @@ def make_completed_action_ledger(
     return append_record(events, EventType.ACTION_OUTCOME_RECORDED, outcome)
 
 
+def make_candidate_label_feedback() -> object:
+    from apkscan.core.recognition_codec import build_candidate_label_feedback
+    from apkscan.core.recognition_contract import LabelKind
+
+    return build_candidate_label_feedback(
+        label_kind=LabelKind.FAMILY_ASSIGNMENT,
+        proposed_label_digest=DIGEST_A,
+        subject_refs=(SUBJECT,),
+        evidence_ref="bundle:2026/fixture-feedback",
+        reason_codes=("fixture-feedback",),
+        policy=make_policy(),
+        producer=make_producer(ProducerKind.SYSTEM),
+    )
+
+
 def make_full_ten_event_ledger() -> tuple[LedgerEvent, ...]:
+    """覆盖全部事件类型的金样账本（P4-B 起含第 11 类 FEEDBACK_QUEUED）。"""
     events = make_claim_ledger()
     original = events[-1].payload
     assert isinstance(original, ClaimCandidate)
@@ -506,9 +522,15 @@ def make_full_ten_event_ledger() -> tuple[LedgerEvent, ...]:
         gap_ids=(),
         reason_codes=("manual-review",),
     )
-    return append_record(
+    events = append_record(
         events,
         EventType.REVIEW_DECIDED,
         decision,
+        actor_kind=ActorKind.HUMAN,
+    )
+    return append_record(
+        events,
+        EventType.FEEDBACK_QUEUED,
+        make_candidate_label_feedback(),
         actor_kind=ActorKind.HUMAN,
     )

@@ -66,6 +66,14 @@ class ProducerKind(StrEnum):
     SYSTEM = "system"
 
 
+class LabelKind(StrEnum):
+    FAMILY_ASSIGNMENT = "family_assignment"
+    CLUE_JUDGMENT = "clue_judgment"
+    RELATION_JUDGMENT = "relation_judgment"
+    OWNERSHIP_JUDGMENT = "ownership_judgment"
+    REANALYSIS_OUTCOME = "reanalysis_outcome"
+
+
 class SubjectKind(StrEnum):
     CASE = "case"
     SAMPLE = "sample"
@@ -476,6 +484,20 @@ SharedValue: TypeAlias = (
     | AllowedConclusion
     | ActionAuthorization
 )
+@dataclass(frozen=True, slots=True)
+class CandidateLabelFeedback:
+    kind: Literal["candidate_label_feedback"]
+    schema_version: Literal["1.0"]
+    feedback_id: str
+    label_kind: LabelKind
+    proposed_label_digest: str
+    subject_refs: tuple[SubjectRef, ...]
+    evidence_ref: str | None
+    reason_codes: tuple[str, ...]
+    policy: PolicyRef
+    producer: ProducerRef
+
+
 DomainRecord: TypeAlias = (
     ReasoningRun
     | Question
@@ -485,6 +507,7 @@ DomainRecord: TypeAlias = (
     | NextAction
     | ActionOutcome
     | ReviewDecision
+    | CandidateLabelFeedback
 )
 ContractValue: TypeAlias = SharedValue | DomainRecord
 
@@ -1232,6 +1255,27 @@ def validate_coverage_collection(
         seen.add(key)
 
 
+def _validate_candidate_label_feedback(value: CandidateLabelFeedback, path: str) -> None:
+    _validate_record_header(
+        value.kind,
+        value.schema_version,
+        value.feedback_id,
+        path,
+        expected_kind="candidate_label_feedback",
+        id_prefix="feedback",
+    )
+    _validate_enum(value.label_kind, LabelKind, f"{path}.label_kind")
+    _validate_digest(value.proposed_label_digest, f"{path}.proposed_label_digest")
+    _validate_typed_tuple(value.subject_refs, f"{path}.subject_refs", SubjectRef, nonempty=True)
+    if value.evidence_ref is not None:
+        if not value.evidence_ref:
+            _invalid("empty_evidence_ref", f"{path}.evidence_ref")
+        _validate_text(value.evidence_ref, f"{path}.evidence_ref", max_length=256)
+    _validate_reason_codes(value.reason_codes, f"{path}.reason_codes")
+    _validate_policy(value.policy, f"{path}.policy")
+    _validate_producer(value.producer, f"{path}.producer")
+
+
 def validate_contract_value(value: ContractValue, *, field_path: str = "$") -> None:
     """Validate one shared contract value without coercion or normalization."""
     value_type = type(value)
@@ -1283,6 +1327,8 @@ def validate_contract_value(value: ContractValue, *, field_path: str = "$") -> N
         _validate_outcome(cast(ActionOutcome, value), field_path)
     elif value_type is ReviewDecision:
         _validate_review(cast(ReviewDecision, value), field_path)
+    elif value_type is CandidateLabelFeedback:
+        _validate_candidate_label_feedback(cast(CandidateLabelFeedback, value), field_path)
     else:
         _invalid("unsupported_contract_value", field_path)
 
@@ -1297,6 +1343,7 @@ __all__ = [
     "AllowedConclusion",
     "AuthorizationLevel",
     "CanonicalCodecError",
+    "CandidateLabelFeedback",
     "ClaimMode",
     "ClaimCandidate",
     "ClaimTask",
@@ -1314,6 +1361,7 @@ __all__ = [
     "DomainRecord",
     "GapEffect",
     "IdentityMismatchError",
+    "LabelKind",
     "JudgmentContractError",
     "LedgerIntegrityError",
     "LocatorKind",
