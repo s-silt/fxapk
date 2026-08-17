@@ -430,3 +430,117 @@ def test_labels_fixture_lines_are_actually_valid(tmp_path: Path) -> None:
     )
     label_set = load_recognition_labels(labels)
     assert len(label_set.effective) == 3
+
+
+# --------------------------------------------------- codex 复审补锁（P1/P2）
+
+
+def test_huge_integer_score_is_stable_error(tmp_path: Path) -> None:
+    paths = _write_case(
+        tmp_path,
+        labels_lines=[_relation_line(SHA_Q, SHA_R)],
+        params={"k": 1, "layers": ["gold_external"], "lineages": ["queue-external"]},
+        predictions={"rankings": [{"query_sha256": SHA_Q, "ranked": [[SHA_R, 10**400]]}]},
+    )
+    result = _run(paths, "pair")
+    assert result.exit_code == 2, _output(result)
+    assert "predictions_unreadable" in _output(result)
+    assert not paths["out"].exists()
+
+
+def test_huge_integer_gate_threshold_is_stable_error(tmp_path: Path) -> None:
+    paths = _write_case(
+        tmp_path,
+        labels_lines=[_family_line(SHA_A, "fam-x")],
+        params=_FAMILY_PARAMS,
+        predictions=_FAMILY_PREDICTIONS,
+        gates={"macro_f1": {"min": 10**400}},
+    )
+    result = _run(paths, "family")
+    assert result.exit_code == 2, _output(result)
+    assert "gates_invalid" in _output(result)
+
+
+def test_uppercase_sha_rejected_at_parse_layer(tmp_path: Path) -> None:
+    paths = _write_case(
+        tmp_path,
+        labels_lines=[_family_line(SHA_A, "fam-x")],
+        params=_FAMILY_PARAMS,
+        predictions={"predictions": [{"sample_sha256": "AA" * 32, "family_id": "fam-x"}]},
+    )
+    result = _run(paths, "family")
+    assert result.exit_code == 2
+    assert "predictions_unreadable" in _output(result)
+
+
+def test_gates_max_path_and_null_with_max(tmp_path: Path) -> None:
+    # max 通过：missing_prediction_count=0 ≤ 0
+    paths = _write_case(
+        tmp_path,
+        labels_lines=[_family_line(SHA_A, "fam-x")],
+        params=_FAMILY_PARAMS,
+        predictions=_FAMILY_PREDICTIONS,
+        gates={"missing_prediction_count": {"max": 0}},
+    )
+    assert _run(paths, "family").exit_code == 0
+    # max 失败：B 缺预测 → missing=1 > 0
+    sub = tmp_path / "maxfail"
+    sub.mkdir()
+    paths2 = _write_case(
+        sub,
+        labels_lines=[_family_line(SHA_A, "fam-x"), _family_line(SHA_B, "fam-x")],
+        params=_FAMILY_PARAMS,
+        predictions=_FAMILY_PREDICTIONS,
+        gates={"missing_prediction_count": {"max": 0}},
+    )
+    result = _run(paths2, "family")
+    assert result.exit_code == 4, _output(result)
+    # null + max 同样 fail（无数据不得视为达标）
+    sub2 = tmp_path / "nullmax"
+    sub2.mkdir()
+    paths3 = _write_case(
+        sub2,
+        labels_lines=[_family_line(SHA_A, "fam-x")],
+        params=_FAMILY_PARAMS,
+        predictions={"predictions": []},
+        gates={"macro_f1": {"max": 0.5}},
+    )
+    result3 = _run(paths3, "family")
+    assert result3.exit_code == 4, _output(result3)
+    assert _metrics(paths3)["gates"]["status"] == "fail"
+
+
+def test_gates_invalid_shapes_rejected(tmp_path: Path) -> None:
+    for bad in (
+        {"macro_f1": {"min": 0.5, "max": 0.9}},  # min/max 并存
+        {"macro_f1": {"min": True}},  # bool 阈值
+        {"macro_f1": {"min": "0.5"}},  # 字符串阈值
+        {"macro_f1": {}},  # 空规则
+    ):
+        paths = _write_case(
+            tmp_path,
+            labels_lines=[_family_line(SHA_A, "fam-x")],
+            params=_FAMILY_PARAMS,
+            predictions=_FAMILY_PREDICTIONS,
+            gates=bad,
+        )
+        paths["out"].unlink(missing_ok=True)
+        result = _run(paths, "family")
+        assert result.exit_code == 2, _output(result)
+        assert "gates_invalid" in _output(result)
+
+
+def test_metrics_output_is_canonical_bytes(tmp_path: Path) -> None:
+    paths = _write_case(
+        tmp_path,
+        labels_lines=[_family_line(SHA_A, "fam-x")],
+        params=_FAMILY_PARAMS,
+        predictions=_FAMILY_PREDICTIONS,
+    )
+    assert _run(paths, "family").exit_code == 0
+    raw = paths["out"].read_bytes()
+    doc = json.loads(raw.decode("utf-8"))
+    expected = (
+        json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True, separators=(",", ": ")) + "\n"
+    ).encode("utf-8")
+    assert raw == expected

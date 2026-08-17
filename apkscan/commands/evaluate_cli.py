@@ -162,11 +162,23 @@ def _load_labels(path: Path) -> tuple[Any, str]:
 
 
 def _sha256(value: object) -> bool:
+    # 只收 canonical 小写——与评测层口径一致，大写在解析层即拒（codex 复审 P2）。
     return (
         isinstance(value, str)
         and len(value) == 64
-        and all(char in "0123456789abcdefABCDEF" for char in value)
+        and all(char in "0123456789abcdef" for char in value)
     )
+
+
+def _finite_float(value: object) -> float | None:
+    """有限数值安全转换：超大 JSON 整数会让 float() 抛 OverflowError（codex 复审 P1）。"""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        converted = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return converted if math.isfinite(converted) else None
 
 
 def _load_predictions(path: Path, task: str) -> Any:
@@ -218,9 +230,7 @@ def _load_predictions(path: Path, task: str) -> Any:
                     not isinstance(item, list)
                     or len(item) != 2
                     or not _sha256(item[0])
-                    or not isinstance(item[1], (int, float))
-                    or isinstance(item[1], bool)
-                    or not math.isfinite(float(item[1]))
+                    or _finite_float(item[1]) is None
                 ):
                     _exit_error("predictions_unreadable")
                 ranked.append((item[0], float(item[1])))
@@ -360,11 +370,7 @@ def _load_gates(path: Path | None) -> Any:
         if set(rule) not in ({"min"}, {"max"}):
             _exit_error("gates_invalid")
         threshold = next(iter(rule.values()))
-        if (
-            not isinstance(threshold, (int, float))
-            or isinstance(threshold, bool)
-            or not math.isfinite(float(threshold))
-        ):
+        if _finite_float(threshold) is None:
             _exit_error("gates_invalid")
     return payload
 
