@@ -15,10 +15,53 @@ import hashlib
 from datetime import datetime
 from pathlib import Path
 
-from apkscan.core.integrity import evidence_id, sample_fingerprint
+import pytest
+
+from apkscan.core.integrity import evidence_id, sample_fingerprint, web_evidence_fingerprint
 
 
 # --------------------------- sample_fingerprint ---------------------------
+
+
+def test_web_evidence_fingerprint_is_order_independent() -> None:
+    first = web_evidence_fingerprint(
+        {"web/b.js": b"beta", "web/a.html": b"alpha"}, tool_version="9.9.9"
+    )
+    second = web_evidence_fingerprint(
+        {"web/a.html": b"alpha", "web/b.js": b"beta"}, tool_version="9.9.9"
+    )
+
+    assert first["kind"] == "web_evidence_set"
+    digest = first["sha256"]
+    assert isinstance(digest, str)
+    assert digest == second["sha256"]
+    assert len(digest) == 64
+    assert first["file_count"] == 2
+    assert first["size"] == len(b"alpha") + len(b"beta")
+    files = first["files"]
+    assert isinstance(files, list)
+    assert [item["path"] for item in files] == ["web/a.html", "web/b.js"]
+
+
+def test_web_evidence_fingerprint_changes_with_analyzed_bytes() -> None:
+    before = web_evidence_fingerprint({"web/app.js": b"one"}, tool_version="9.9.9")
+    after = web_evidence_fingerprint({"web/app.js": b"two"}, tool_version="9.9.9")
+
+    assert before["sha256"] != after["sha256"]
+    before_files = before["files"]
+    after_files = after["files"]
+    assert isinstance(before_files, list) and isinstance(after_files, list)
+    before_entry, after_entry = before_files[0], after_files[0]
+    assert isinstance(before_entry, dict) and isinstance(after_entry, dict)
+    assert before_entry["sha256"] == hashlib.sha256(b"one").hexdigest()
+    assert after_entry["sha256"] == hashlib.sha256(b"two").hexdigest()
+
+
+def test_web_evidence_fingerprint_rejects_nfc_path_collision() -> None:
+    with pytest.raises(ValueError, match="NFC-normalized path collision"):
+        web_evidence_fingerprint(
+            {"web/café.js": b"one", "web/cafe\u0301.js": b"two"}, tool_version="9.9.9"
+        )
 
 
 def test_sample_fingerprint_hashes_match_stdlib(tmp_path: Path) -> None:
@@ -181,7 +224,9 @@ def test_build_provenance_returns_commit_and_dirty(monkeypatch, tmp_path: Path) 
             )
         if "rev-parse" in args:
             return types.SimpleNamespace(returncode=0, stdout="abc123def456\n", stderr="")
-        return types.SimpleNamespace(returncode=0, stdout=" M apkscan/x.py\n", stderr="")  # status → dirty
+        return types.SimpleNamespace(
+            returncode=0, stdout=" M apkscan/x.py\n", stderr=""
+        )  # status → dirty
 
     monkeypatch.setattr(integrity.subprocess, "run", _fake_run)
     apk = tmp_path / "x.apk"
@@ -208,9 +253,7 @@ def test_build_provenance_rejects_enclosing_repository_for_wheel(
     def _fake_run(args, **k):  # noqa: ANN001, ANN003, ANN202
         calls.append(args)
         if "--show-toplevel" in args:
-            return types.SimpleNamespace(
-                returncode=0, stdout=str(outer_repo) + "\n", stderr=""
-            )
+            return types.SimpleNamespace(returncode=0, stdout=str(outer_repo) + "\n", stderr="")
         if "rev-parse" in args:
             return types.SimpleNamespace(returncode=0, stdout="unrelated-head\n", stderr="")
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -253,5 +296,13 @@ def test_build_provenance_failure_not_cached_reprobes(monkeypatch, tmp_path: Pat
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(integrity.subprocess, "run", _ok)
-    assert sample_fingerprint(str(apk), tool_version="1.0.0")["build_commit"] == "deadbeef"  # 恢复后重探取到
+    assert (
+        sample_fingerprint(str(apk), tool_version="1.0.0")["build_commit"] == "deadbeef"
+    )  # 恢复后重探取到
     monkeypatch.setattr(integrity, "_BUILD_PROVENANCE", None)  # 复原缓存，免污染后续
+
+
+def test_web_evidence_fingerprint_rejects_empty_set() -> None:
+    """空集指纹是跨案同值常量——纵深拒绝，不依赖上游闸。"""
+    with pytest.raises(ValueError, match="must not be empty"):
+        web_evidence_fingerprint({}, tool_version="9.9.9")

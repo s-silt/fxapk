@@ -294,10 +294,7 @@ def test_load_web_evidence_preserves_canonical_name_collisions(tmp_path: Path) -
 
     assert len(ctx.list_files()) == 2
     assert ctx.read_file(WEB_PREFIX + "resp.body.html") == b"<html>from explicit html</html>"
-    assert (
-        ctx.read_file(WEB_PREFIX + "resp.body.evidence-2.html")
-        == b"<html>from body</html>"
-    )
+    assert ctx.read_file(WEB_PREFIX + "resp.body.evidence-2.html") == b"<html>from body</html>"
     assert any("规范名" in error and "未丢失" in error for error in ctx.load_errors)
 
 
@@ -502,7 +499,9 @@ def test_bare_ip_in_web_config_is_ip_kind_not_domain() -> None:
     """
     from tests.doc_addresses import GLOBAL_FIXTURE_IP
 
-    html = f'<html><script>window.api = "https://{GLOBAL_FIXTURE_IP}:8443/x";</script></html>'.encode()
+    html = (
+        f'<html><script>window.api = "https://{GLOBAL_FIXTURE_IP}:8443/x";</script></html>'.encode()
+    )
     result = WebInlineConfigAnalyzer().analyze(_ctx({"web/i.html": html}))
 
     by = {ep.value: ep for ep in result.endpoints}
@@ -544,7 +543,9 @@ def test_multi_page_web_evidence_top_n_selection_end_to_end() -> None:
         ]
         if n == 3:
             parts.append('window.apiBase = "https://real-backend.fraud-x.cn/api/v1";')
-        files[f"web/page{n}.html"] = ("<html><script>" + "".join(parts) + "</script></html>").encode()
+        files[f"web/page{n}.html"] = (
+            "<html><script>" + "".join(parts) + "</script></html>"
+        ).encode()
 
     result = WebInlineConfigAnalyzer().analyze(_ctx(files))
     eps = [e for e in result.endpoints if e.kind in ("domain", "ip")]
@@ -555,14 +556,20 @@ def test_multi_page_web_evidence_top_n_selection_end_to_end() -> None:
     assert infra_lead.advice == "无需调证", f"known-infra 未被降噪：{infra_lead.advice}"
 
     report = Report(
-        package_name="", meta={}, leads=leads, endpoints=eps, findings=[],
+        package_name="",
+        meta={},
+        leads=leads,
+        endpoints=eps,
+        findings=[],
         analyzer_status=[{"name": "web_inline_config", "status": "ran"}],
     )
     selected, stats = _select_targets_with_stats(report, 6)
 
     # ② 每个来源文件都占得到名额——没有哪一份 HTML 能吃掉整个 Top-6
     groups = {tuple(sorted(ev.location for ev in ep.evidences)) for ep in selected}
-    assert len(groups) == 5, f"Top-6 只覆盖了 {len(groups)} 个来源文件：{[e.value for e in selected]}"
+    assert len(groups) == 5, (
+        f"Top-6 只覆盖了 {len(groups)} 个来源文件：{[e.value for e in selected]}"
+    )
 
     # ③ 顺延可见（顺延≠排除，它们仍在候选序列与 dropped 里）
     assert stats["source_deferred"] == 11, f"顺延数不对：{stats}"
@@ -591,7 +598,10 @@ def test_bare_ip_literal_noise_filtered_but_url_host_kept() -> None:
     # ★公网侧的夹具取 6to4 弃用段、且末段为 0：裸字面会被形态去噪拦下，而 is_private 为假，
     #   正好验到「URL 里的它照收、且不被误标私网」两件事。RFC 5737 文档段在这里不适用——
     #   ipaddress 把它判 private，验不到公网那一半。
-    for addr, private in (("192.88.99.0", False), ("10.0.0.7", True)):  # leak-scan: allow 见 tests/doc_addresses.GLOBAL_FIXTURE_NET
+    for addr, private in (
+        ("192.88.99.0", False),  # leak-scan: allow 见 tests/doc_addresses.GLOBAL_FIXTURE_NET
+        ("10.0.0.7", True),
+    ):
         html = f'<html><script>window.api = "http://{addr}/x";</script></html>'.encode()
         result = WebInlineConfigAnalyzer().analyze(_ctx({"web/i.html": html}))
         by = {ep.value: ep for ep in result.endpoints if ep.kind == "ip"}
@@ -715,9 +725,7 @@ def test_redirect_chain_covers_all_four_mechanisms() -> None:
     }
     result = WebRedirectChainAnalyzer().analyze(_ctx(files))
     mechanisms = {
-        hop["mechanism"]
-        for chain in result.meta["web_redirect_chain"]
-        for hop in chain["hops"]
+        hop["mechanism"] for chain in result.meta["web_redirect_chain"] for hop in chain["hops"]
     }
     assert mechanisms == {"meta-refresh", "location-assign", "location-call", "header-location"}
 
@@ -745,7 +753,9 @@ def test_redirect_chain_finding_lists_hops_in_order() -> None:
     result = WebRedirectChainAnalyzer().analyze(_ctx({"web/a.html": html}))
 
     finding = result.findings[0]
-    assert finding.id == "WEB-REDIRECT-CHAIN"  # leak-scan: allow finding.id 是属性访问，.id 恰为 TLD 导致误报
+    assert (
+        finding.id == "WEB-REDIRECT-CHAIN"
+    )  # leak-scan: allow finding.id 是属性访问，.id 恰为 TLD 导致误报
     assert finding.description.index(DOC_HOP1) < finding.description.index(DOC_HOP2)
     # 静态文本形态 ≠ 运行时真的这么跳（条件分流在静态里看不出走哪条）——措辞必须留这条边界。
     assert "静态" in finding.description
@@ -814,7 +824,9 @@ def test_request_recipe_confidence_is_low_and_wording_hedged() -> None:
     result = WebRequestRecipeAnalyzer().analyze(_ctx({"web/app.js": js}))
 
     finding = result.findings[0]
-    assert finding.id == "WEB-REQUEST-RECIPE"  # leak-scan: allow finding.id 是属性访问，.id 恰为 TLD 导致误报
+    assert (
+        finding.id == "WEB-REQUEST-RECIPE"
+    )  # leak-scan: allow finding.id 是属性访问，.id 恰为 TLD 导致误报
     assert finding.confidence == Confidence.LOW
     assert finding.severity == Severity.LOW
     assert "疑似" in finding.title
@@ -932,6 +944,42 @@ def test_analyze_web_end_to_end_writes_report_json(tmp_path: Path) -> None:
     assert rerun.exit_code == 0, rerun.output
     rerun_data = json.loads(report_path.read_text(encoding="utf-8"))
     assert rerun_data["meta"]["web_evidence"]["file_count"] == 3
+
+
+def test_analyze_web_report_can_be_packaged(tmp_path: Path) -> None:
+    """网页一级证据也必须带齐 Phase-1 三锚点，不能产出无法封包的报告。"""
+    from typer.testing import CliRunner
+
+    from apkscan import cli
+
+    root = _evidence_dir(tmp_path)
+    runner = CliRunner()
+    analyzed = runner.invoke(
+        cli.app, ["analyze-web", str(root), "--fmt", "json", "--origin", "case-synthetic"]
+    )
+    assert analyzed.exit_code == 0, analyzed.output
+
+    report_path = root / "out" / "case-synthetic.json"
+    package_path = root / "out" / "case-package.json"
+    packaged = runner.invoke(
+        cli.app,
+        [
+            "case",
+            "package",
+            str(report_path),
+            "--case-id",
+            "case-web-001",
+            "--producer",
+            "phase1-test",
+            "--out",
+            str(package_path),
+        ],
+    )
+
+    assert packaged.exit_code == 0, packaged.output
+    payload = json.loads(package_path.read_text(encoding="utf-8"))
+    assert len(payload["sample_sha256"]) == 64
+    assert payload["analysis_snapshot"] == "complete"
 
 
 def test_analyze_web_skips_android_only_analyzers(tmp_path: Path) -> None:

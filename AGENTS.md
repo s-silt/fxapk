@@ -239,6 +239,9 @@ fxapk digest out/<样本名>.json
 - `fxapk auto <apk>`：静态 +（有设备则）动态一把梭。`fxapk batch <dir>`：批量。
 - `fxapk analyze-web <证据目录>`：把**已落盘的网页证据**当一级输入（递归读 `.html` / `.body` /
   `.js` / `.headers`），产出与 `analyze` 同构的报告。**不联网重取**——证据是什么就分析什么。
+  报告会对本次实际进入分析器的文件按 NFC 相对路径、字节数与逐文件 SHA-256 生成确定性
+  `meta.evidence_manifest`，并把清单指纹写入 `meta.sample_sha256`；因此网页证据集可直接进入
+  `fxapk case package`。同一路径的 Unicode 规范化碰撞会拒绝生成指纹，不能静默覆盖。
   网页专属分析器**按文件分别**记录静态跳转候选，不把不同文件里的跳转拼成一条未经观测的链
   （拼出来的链是推断，不是观测）。
 - `fxapk enrich batch -t <目标清单> -o <输出目录>`：批量被动富化（每行一个 IP / 域名），产出
