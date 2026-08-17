@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from apkscan.core import visibility
+from apkscan.core.closure.layers import _runtime_layer
 from apkscan.core.closure.targets import _select_targets_with_stats
 from apkscan.core.models import LeadCategory, Report
 from apkscan.core.report_io import report_from_dict
@@ -1466,13 +1467,465 @@ def test_explicit_target_restores_contact_on_both_faces(tmp_path: Path) -> None:
         ev.get("source") for ep in payload["endpoints"] if ep.get("value") == ip
         for ev in ep.get("evidences") or []
     }
-    assert "runtime-pcap" in lead_sources, f"lead 面未恢复：{lead_sources}"
-    assert "runtime-pcap" in ep_sources, (
-        f"★endpoint 面未恢复：{ep_sources}——两个消费面对同一事实给出相反结论，"
+    assert lead_sources == {"runtime-pcap"}, f"lead 面未原子恢复：{lead_sources}"
+    assert ep_sources == {"runtime-pcap"}, (
+        f"★endpoint 面未原子恢复：{ep_sources}——两个消费面对同一事实给出相反结论，"
         "而闭环排序读的是 endpoint 面"
     )
     assert any(lead.get("is_runtime_contact") is True
                for lead in payload["leads"] if ip in str(lead.get("value")))
+    endpoint = next(ep for ep in payload["endpoints"] if ep.get("value") == ip)
+    runtime = endpoint["enrichment"]["runtime"]
+    assert runtime["target_attributed"] is True
+    inventory = payload["meta"][runtime_inventory.INVENTORY_META_KEY]
+    assert inventory["target_attributed"] == 1
+    assert payload["meta"][runtime_inventory.TARGET_ATTRIBUTED_SET_KEYS["pcap"]] == [ip]
+    carrier = f"tcp/{ip}:30110"
+    assert payload["meta"]["capture_signals"]["pcap_app_attribution"][carrier][
+        "is_target_app"
+    ] is True
+    typed_endpoint = next(
+        ep for ep in report_from_dict(payload).endpoints if ep.value == ip
+    )
+    layer = _runtime_layer(typed_endpoint)
+    assert layer["status"] == "complete"
+    layer_evidence = layer["evidence"]
+    assert isinstance(layer_evidence, dict)
+    assert layer_evidence["target_attributed"] is True
+    for field in ("out_bytes", "in_bytes", "connection_count"):
+        assert runtime[field] == next(
+            ep for ep in first["endpoints"] if ep.get("value") == ip
+        )["enrichment"]["runtime"][field]
+    assert payload["meta"]["runtime_pcap_merges"] == first["meta"]["runtime_pcap_merges"]
+
+
+def test_explicit_denial_replaces_target_on_every_face(tmp_path: Path) -> None:
+    """同一 PCAP 的 TARGET→DENIED 必须原子替换所有消费面且不重复计流量。
+
+    ★与上一条成对：上一条锁"升档到得了每个面"，本条锁"降档撤得掉每个面"。
+      此前 `_restamp_runtime_endpoint_evidence` 只动 evidences、绝不碰 enrichment，
+      于是反转归因后 `runtime.target_attributed` 留着旧 True；inventory 的目标集
+      只增不减，显式 DENIED 也撤不掉——闭环照旧把该 IP 当已确认目标通信。
+    """
+    ip = "100.64.9.50"
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps({
+        "package_name": "com.example.synthetic", "meta": {},
+        "leads": [], "endpoints": [], "findings": [], "analyzer_status": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    summary = _one_flow_summary(ip)
+
+    pcap_ingest.merge_into_report_json(str(path), summary, _attr(ip, is_target=True))
+    first = json.loads(path.read_text(encoding="utf-8"))
+    pcap_ingest.merge_into_report_json(str(path), summary, _attr(ip, is_target=False))
+    payload = json.loads(path.read_text(encoding="utf-8"))
+
+    lead = next(item for item in payload["leads"] if ip in str(item.get("value")))
+    endpoint = next(item for item in payload["endpoints"] if item.get("value") == ip)
+    runtime = endpoint["enrichment"]["runtime"]
+    assert {ev["source"] for ev in lead["source_refs"]} == {"runtime-derived"}
+    assert {ev["source"] for ev in endpoint["evidences"]} == {"runtime-derived"}
+    assert lead["is_runtime_contact"] is False
+    assert runtime["target_attributed"] is False
+    inventory = payload["meta"][runtime_inventory.INVENTORY_META_KEY]
+    assert inventory["target_attributed"] == 0
+    assert payload["meta"][runtime_inventory.TARGET_ATTRIBUTED_SET_KEYS["pcap"]] == []
+    carrier = f"tcp/{ip}:30110"
+    assert payload["meta"]["capture_signals"]["pcap_app_attribution"][carrier][
+        "is_target_app"
+    ] is False
+    typed_endpoint = next(
+        ep for ep in report_from_dict(payload).endpoints if ep.value == ip
+    )
+    layer = _runtime_layer(typed_endpoint)
+    assert layer["status"] != "complete"
+    layer_evidence = layer["evidence"]
+    assert isinstance(layer_evidence, dict)
+    assert layer_evidence["target_attributed"] is False
+    first_runtime = next(
+        ep for ep in first["endpoints"] if ep.get("value") == ip
+    )["enrichment"]["runtime"]
+    for field in ("out_bytes", "in_bytes", "connection_count"):
+        assert runtime[field] == first_runtime[field]
+    assert payload["meta"]["runtime_pcap_merges"] == first["meta"]["runtime_pcap_merges"]
+
+
+def test_reversing_one_fingerprint_preserves_another_target(tmp_path: Path) -> None:
+    """同 IP 多次抓包各自记账；反转 F1 不得擦掉 F2 的 TARGET。
+
+    ★这是 fingerprint 记账要防的核心事故：归因结论此前是全局一张表
+      （`merged_attr.update(app_attr)`，carrier 级后写者胜），目标集与端点
+      runtime 标志又只从"本次" fresh_eps 算——反转其中一次抓包的结论，
+      另一次抓包已确证的 TARGET 会被连带擦掉或凭空复活。
+    """
+    ip = "100.64.9.51"
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps({
+        "package_name": "com.example.synthetic", "meta": {},
+        "leads": [], "endpoints": [], "findings": [], "analyzer_status": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    first = _one_flow_summary(ip, 30110)
+    second = _one_flow_summary(ip, 30111)
+
+    pcap_ingest.merge_into_report_json(
+        str(path), first, _attr(ip, is_target=True, port=30110)
+    )
+    pcap_ingest.merge_into_report_json(
+        str(path), second, _attr(ip, is_target=True, port=30111)
+    )
+    pcap_ingest.merge_into_report_json(
+        str(path), first, _attr(ip, is_target=False, port=30110)
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+
+    endpoint = next(item for item in payload["endpoints"] if item.get("value") == ip)
+    assert endpoint["enrichment"]["runtime"]["target_attributed"] is True
+    assert payload["meta"][runtime_inventory.INVENTORY_META_KEY][
+        "target_attributed"
+    ] == 1
+    signals = payload["meta"]["capture_signals"]["pcap_app_attribution"]
+    assert signals[f"tcp/{ip}:30110"]["is_target_app"] is False
+    assert signals[f"tcp/{ip}:30111"]["is_target_app"] is True
+    ledger = payload["meta"]["runtime_pcap_attribution_ledger"]
+    assert len(ledger["captures"]) == 2
+
+    pcap_ingest.merge_into_report_json(
+        str(path), second, _attr(ip, is_target=False, port=30111)
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    endpoint = next(item for item in payload["endpoints"] if item.get("value") == ip)
+    assert endpoint["enrichment"]["runtime"]["target_attributed"] is False
+    assert payload["meta"][runtime_inventory.INVENTORY_META_KEY][
+        "target_attributed"
+    ] == 0
+
+
+def test_same_carrier_target_from_earlier_capture_survives_later_denial(
+    tmp_path: Path,
+) -> None:
+    """同一 carrier 在两次抓包里结论相反：TARGET 优先，后来的 DENIED 不得整表覆写。
+
+    ★这是投影语义与旧 ``merged_attr.update(app_attr)`` 的分水岭：F1 里目标持有过
+      该 socket 就是"目标连过该端点"的既成事实，F2 时段别的进程持有它不构成翻案
+      （账本里两个 fingerprint 的 verdict 都留着，可审计）。update() 是后写者胜，
+      恰好把这条既成事实擦掉。
+    """
+    ip = "100.64.9.64"
+    carrier = f"tcp/{ip}:30110"
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps({
+        "package_name": "com.example.synthetic", "meta": {},
+        "leads": [], "endpoints": [], "findings": [], "analyzer_status": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    first = _one_flow_summary(ip, 30110)
+    second = _one_flow_summary(ip, 30110)
+    # 同 carrier、不同内容指纹：改字节数即可（fingerprint 含 out/in 字节）。
+    second.flows[0].bytes_ = 1600
+    second.flows[0].payload_bytes = 800
+    assert pcap_ingest.summary_merge_fingerprint(
+        first
+    ) != pcap_ingest.summary_merge_fingerprint(second)
+
+    pcap_ingest.merge_into_report_json(str(path), first, _attr(ip, is_target=True))
+    pcap_ingest.merge_into_report_json(str(path), second, _attr(ip, is_target=False))
+    payload = json.loads(path.read_text(encoding="utf-8"))
+
+    endpoint = next(ep for ep in payload["endpoints"] if ep.get("value") == ip)
+    assert endpoint["enrichment"]["runtime"]["target_attributed"] is True
+    assert payload["meta"]["capture_signals"]["pcap_app_attribution"][carrier][
+        "is_target_app"
+    ] is True
+    assert payload["meta"][runtime_inventory.TARGET_ATTRIBUTED_SET_KEYS["pcap"]] == [ip]
+    captures = payload["meta"]["runtime_pcap_attribution_ledger"]["captures"]
+    stored = sorted(
+        capture["verdicts"][carrier]["is_target_app"]
+        for capture in captures.values()
+    )
+    assert stored == [False, True], "两个 fingerprint 的相反结论都要留痕可审计"
+
+
+def test_unrelated_nonempty_attribution_does_not_revive_denial(tmp_path: Path) -> None:
+    """非空表缺当前 carrier 仍是 MISSING，不得把先前 DENIED 误读成 TARGET。"""
+    ip = "100.64.9.52"
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps({
+        "package_name": "com.example.synthetic", "meta": {},
+        "leads": [], "endpoints": [], "findings": [], "analyzer_status": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    summary = _one_flow_summary(ip)
+    pcap_ingest.merge_into_report_json(
+        str(path), summary, _attr(ip, is_target=False)
+    )
+    unrelated = _attr("203.0.113.99", is_target=True, port=443)
+    pcap_ingest.merge_into_report_json(str(path), summary, unrelated)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+
+    lead = next(item for item in payload["leads"] if ip in str(item.get("value")))
+    endpoint = next(item for item in payload["endpoints"] if item.get("value") == ip)
+    assert {e["source"] for e in lead["source_refs"]} == {"runtime-derived"}
+    assert {e["source"] for e in endpoint["evidences"]} == {"runtime-derived"}
+    assert endpoint["enrichment"]["runtime"]["target_attributed"] is False
+
+
+def test_legacy_unscoped_attribution_is_quarantined_from_new_capture(
+    tmp_path: Path,
+) -> None:
+    """旧报告无 fingerprint 的归因只作历史留痕，不得冒充当前 PCAP 证据。"""
+    ip = "100.64.9.53"
+    carrier = f"tcp/{ip}:30110"
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps({
+        "package_name": "com.example.synthetic",
+        "meta": {
+            "capture_signals": {
+                "pcap_app_attribution": {
+                    carrier: {
+                        "is_target_app": True,
+                        "attribution": "legacy-confirmed",
+                    }
+                }
+            }
+        },
+        "leads": [], "endpoints": [], "findings": [], "analyzer_status": [],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(str(path), _one_flow_summary(ip), None)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    ledger = payload["meta"]["runtime_pcap_attribution_ledger"]
+    assert "legacy:unscoped" not in ledger["captures"]
+    assert ledger["legacy_unscoped"]["verdicts"][carrier]["is_target_app"] is True
+    endpoint = next(ep for ep in payload["endpoints"] if ep.get("value") == ip)
+    assert "target_attributed" not in endpoint["enrichment"]["runtime"]
+    assert payload["meta"].get(
+        runtime_inventory.TARGET_ATTRIBUTED_SET_KEYS["pcap"], []
+    ) == []
+
+
+def test_malformed_v1_ledger_is_sanitized_without_aborting_merge(
+    tmp_path: Path,
+) -> None:
+    """历史 ledger 是不可信输入；坏键/坏对象不得令整个公开 merge 静默放弃。"""
+    ip = "100.64.9.54"
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps({
+        "package_name": "com.example.synthetic",
+        "meta": {
+            "runtime_pcap_attribution_ledger": {
+                "version": 1,
+                "captures": {
+                    "valid": {
+                        "carrier_ips": {}, "sni_carriers": {}, "verdicts": {},
+                    },
+                    "malformed": "not-a-capture",
+                },
+            }
+        },
+        "leads": [], "endpoints": [], "findings": [], "analyzer_status": [],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    assert pcap_ingest.merge_into_report_json(
+        str(path), _one_flow_summary(ip)
+    ) >= 0
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    captures = payload["meta"]["runtime_pcap_attribution_ledger"]["captures"]
+    assert "malformed" not in captures
+    assert any(ep.get("value") == ip for ep in payload["endpoints"])
+
+
+def test_ledger_persists_only_bounded_projection_fields(tmp_path: Path) -> None:
+    """详细 socket 证据可留在既有 capture_signals，ledger 不得复制任意字段。"""
+    ip = "100.64.9.55"
+    carrier = f"tcp/{ip}:30110"
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps({
+        "package_name": "com.example.synthetic", "meta": {},
+        "leads": [], "endpoints": [], "findings": [], "analyzer_status": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    detailed = {
+        carrier: {
+            "is_target_app": False,
+            "attribution": "unattributed",
+            "score": 0.25,
+            "target_uid_among_candidates": True,
+            "uid": 4242,
+            "process_path": "/synthetic/private/path",
+            "unexpected": {"nested": "payload"},
+        }
+    }
+
+    pcap_ingest.merge_into_report_json(str(path), _one_flow_summary(ip), detailed)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    captures = payload["meta"]["runtime_pcap_attribution_ledger"]["captures"]
+    verdict = next(iter(captures.values()))["verdicts"][carrier]
+    assert set(verdict) == {
+        "is_target_app", "attribution", "score", "target_uid_among_candidates",
+    }
+    assert payload["meta"]["capture_signals"]["pcap_app_attribution"][carrier][
+        "uid"
+    ] == 4242
+
+
+def test_ambiguous_verdict_persists_denial_across_rounds(tmp_path: Path) -> None:
+    """``is_target_app`` 非 True（含 ambiguous 的 ``None``）按 DENIED 口径降档，
+    且该结论要经账本存续——下一轮无归因合并不得翻案。
+
+    ★与 runtime_evidence 模块头的口径一致（在表内且不为 True 即 DENIED），
+      这与旧私库分支"只认显式 bool"的口径**相反**；本条锁住不许回退。
+    """
+    ip = "100.64.9.56"
+    carrier = f"tcp/{ip}:30110"
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps({
+        "package_name": "com.example.synthetic", "meta": {},
+        "leads": [], "endpoints": [], "findings": [], "analyzer_status": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    summary = _one_flow_summary(ip)
+    ambiguous = {carrier: {"is_target_app": None, "attribution": "ambiguous"}}
+
+    pcap_ingest.merge_into_report_json(str(path), summary, ambiguous)
+    pcap_ingest.merge_into_report_json(str(path), summary, None)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+
+    endpoint = next(ep for ep in payload["endpoints"] if ep.get("value") == ip)
+    assert {e["source"] for e in endpoint["evidences"]} == {"runtime-derived"}
+    assert endpoint["enrichment"]["runtime"]["target_attributed"] is False
+    captures = payload["meta"]["runtime_pcap_attribution_ledger"]["captures"]
+    verdict = next(iter(captures.values()))["verdicts"][carrier]
+    assert verdict["is_target_app"] is None, "ambiguous 原样存续，不得硬化成 False"
+
+
+def test_unsupported_ledger_version_fails_closed_without_rewriting(
+    tmp_path: Path,
+) -> None:
+    """未来 schema 不能被旧实现静默降级；拒绝本轮并保持原文件字节不变。"""
+    path = tmp_path / "report.json"
+    original = json.dumps({
+        "package_name": "com.example.synthetic",
+        "meta": {
+            "runtime_pcap_attribution_ledger": {
+                "version": 99,
+                "captures": {"future": {"opaque": "preserve"}},
+            }
+        },
+        "leads": [], "endpoints": [], "findings": [], "analyzer_status": [],
+    }, ensure_ascii=False, indent=2)
+    path.write_text(original, encoding="utf-8")
+
+    assert pcap_ingest.merge_into_report_json(
+        str(path), _one_flow_summary("100.64.9.57")
+    ) == 0
+    assert path.read_text(encoding="utf-8") == original
+
+
+def test_carrier_ip_is_canonical_and_rejects_malformed_values() -> None:
+    assert pcap_ingest._carrier_ip("tcp/100.64.9.58:443") == "100.64.9.58"
+    assert pcap_ingest._carrier_ip("tcp/2001:db8::58:443") == "2001:db8::58"
+    assert pcap_ingest._carrier_ip("tcp/[2001:db8::58]:443") == "2001:db8::58"
+    assert pcap_ingest._carrier_ip("not-a-carrier") == ""
+    assert pcap_ingest._carrier_ip("tcp/999.999.999.999:443") == ""
+    assert pcap_ingest._carrier_ip("tcp/2001:db8::58:not-a-port") == ""
+
+
+def test_attribution_ledger_limit_rejects_new_history_without_forgetting(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """达到资源上限后拒绝新 fingerprint；不截尾、不擦除已记历史。
+
+    ★与 ``runtime_pcap_merges`` 名单"不截尾"同哲学：宁可漏、不可造——
+      截掉最老的记账等于让那份抓包的归因结论"失忆"，再并一次就凭空翻案。
+    """
+    monkeypatch.setattr(pcap_ingest, "_MAX_ATTRIBUTION_LEDGER_FINGERPRINTS", 2)
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps({
+        "package_name": "com.example.synthetic", "meta": {},
+        "leads": [], "endpoints": [], "findings": [], "analyzer_status": [],
+    }, ensure_ascii=False), encoding="utf-8")
+    ip = "100.64.9.59"
+    first = _one_flow_summary(ip, 30110)
+    second = _one_flow_summary(ip, 30111)
+    third = _one_flow_summary(ip, 30112)
+    assert pcap_ingest.merge_into_report_json(str(path), first) >= 0
+    assert pcap_ingest.merge_into_report_json(str(path), second) >= 0
+    before = path.read_bytes()
+
+    assert pcap_ingest.merge_into_report_json(str(path), third) == 0
+    assert path.read_bytes() == before
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert len(payload["meta"]["runtime_pcap_attribution_ledger"]["captures"]) == 2
+
+
+def test_pcap_projection_order_is_independent_of_flow_order() -> None:
+    """同一组观测只换输入顺序，不得制造报告 diff。"""
+    one = _one_flow_summary("100.64.9.61", 30110)
+    two = _one_flow_summary("100.64.9.60", 30111)
+    forward = pcap_ingest.PcapSummary(flows=[*one.flows, *two.flows])
+    reverse = pcap_ingest.PcapSummary(flows=list(reversed(forward.flows)))
+
+    assert [
+        (remote.ip, remote.port, remote.proto)
+        for remote in pcap_ingest.remote_endpoints(forward)
+    ] == [
+        (remote.ip, remote.port, remote.proto)
+        for remote in pcap_ingest.remote_endpoints(reverse)
+    ]
+    assert [
+        (lead.category.value, lead.value)
+        for lead in pcap_ingest.to_report_leads(forward)
+    ] == [
+        (lead.category.value, lead.value)
+        for lead in pcap_ingest.to_report_leads(reverse)
+    ]
+
+
+def test_explicit_denial_overrides_same_ip_legacy_target_set(tmp_path: Path) -> None:
+    """隔离留痕可保留，但同 IP 的当前明确 DENIED 必须从活动目标集移除。"""
+    ip = "100.64.9.62"
+    carrier = f"tcp/{ip}:30110"
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps({
+        "package_name": "com.example.synthetic",
+        "meta": {
+            "capture_signals": {
+                "pcap_app_attribution": {
+                    carrier: {
+                        "is_target_app": True,
+                        "attribution": "legacy-confirmed",
+                    }
+                }
+            },
+            runtime_inventory.TARGET_ATTRIBUTED_SET_KEYS["pcap"]: [ip],
+        },
+        "leads": [], "endpoints": [], "findings": [], "analyzer_status": [],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    pcap_ingest.merge_into_report_json(
+        str(path), _one_flow_summary(ip), _attr(ip, is_target=False)
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    meta = payload["meta"]
+    assert meta[runtime_inventory.TARGET_ATTRIBUTED_SET_KEYS["pcap"]] == []
+    assert meta[runtime_inventory.INVENTORY_META_KEY]["target_attributed"] == 0
+    assert meta["capture_signals"]["pcap_app_attribution"][carrier][
+        "is_target_app"
+    ] is False
+    assert meta["runtime_pcap_attribution_ledger"]["legacy_unscoped"][
+        "verdicts"
+    ][carrier]["is_target_app"] is True
+
+
+def test_fingerprint_distinguishes_delimiter_bearing_sni_sets() -> None:
+    """不可信 SNI 不能用逗号拼接成有歧义的幂等身份。"""
+    assert pcap_ingest._fingerprint_sni_fragment({
+        "api.example.test", "cdn.example.test",
+    }) == "sni=api.example.test,cdn.example.test", "正常 SNI 必须兼容旧指纹"
+    first = _one_flow_summary("100.64.9.63")
+    second = _one_flow_summary("100.64.9.63")
+    first.flows[0].sni = {"a,b", "c"}
+    second.flows[0].sni = {"a", "b,c"}
+
+    assert pcap_ingest.summary_merge_fingerprint(
+        first
+    ) != pcap_ingest.summary_merge_fingerprint(second)
 
 
 def test_empty_attribution_table_is_not_missing_attribution(tmp_path: Path) -> None:

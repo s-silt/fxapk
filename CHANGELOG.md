@@ -3,6 +3,21 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
+## Unreleased
+
+### Fixed
+
+- pcap 归因结论改为按抓包 fingerprint 记账（`meta.runtime_pcap_attribution_ledger`，
+  版本化、有界字段、fail-closed）：同一 IP 多次抓包各自留痕，反转其中一次的归因不再
+  擦掉另一次已确证的 TARGET；显式判否现在能把 IP 撤出目标集（此前 inventory 目标集只增
+  不减）、也能把端点 `runtime.target_attributed` 与 lead/endpoint 证据面一并原子更新
+  （此前幂等闸把结论更新一起冻住）。`capture_signals.pcap_app_attribution` 从共享草稿
+  （carrier 级后写者胜）变为账本投影的派生视图——**机器消费方注意**：同 carrier 跨抓包
+  结论相反时该表保留 TARGET 记录（既成事实优先），逐次原始结论在账本 captures 里可审计。
+  旧报告无 fingerprint 的归因迁入 `legacy_unscoped` 隔离留痕，不冒充当前抓包证据。
+  另修 `remote_endpoints`/域名迭代序不定（同观测换输入顺序产生报告 diff）与
+  fingerprint 的 SNI 逗号拼接歧义（含分隔符的异常值改结构化编码，正常值指纹不变）。
+
 ## 1.7.0 — 2026-08-17
 
 本版落地「认知闭环」识别线的机制层（P0–P5，PR #2–#23）：判断链合同、JADX 持久索引与

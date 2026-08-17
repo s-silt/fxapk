@@ -16,6 +16,7 @@ import hashlib
 import ipaddress
 import json
 import logging
+import math
 import socket
 import struct
 from collections.abc import Iterator
@@ -57,6 +58,7 @@ META_WRITE_CATEGORIES = {
     'runtime_merged': 'signal',
     'runtime_merged_inventory': 'record',
     'runtime_pcap_merges': 'record',
+    'runtime_pcap_attribution_ledger': 'record',
     # 带 --uid-sockets 回灌时写：与 capture 落**同一个键**，下游（closure 门控、报告）
     # 不必区分归因数据是哪条路径产的。见 merge_into_report_json。
     # 类别随 capture 侧的既有声明（signal）——同一个键两处类别不一致会被契约测试拦下。
@@ -78,6 +80,381 @@ _UNATTRIBUTED_SOURCE = "runtime-derived"
 #: 各处写字面量的话，这边改了名那边不会红。
 RUNTIME_PCAP_SOURCE = _SOURCE
 RUNTIME_UNATTRIBUTED_SOURCE = _UNATTRIBUTED_SOURCE
+
+_ATTRIBUTION_LEDGER_KEY = "runtime_pcap_attribution_ledger"
+_ATTRIBUTION_LEDGER_VERSION = 1
+_MAX_ATTRIBUTION_LEDGER_FINGERPRINTS = 4096
+_MAX_LEDGER_ATTRIBUTION_LENGTH = 128
+_ATTRIBUTION_RUNTIME_KEYS = (
+    "target_attributed",
+    "attribution",
+    "target_among_candidates",
+    "attribution_score",
+)
+
+
+class _AttributionLedgerRejected(ValueError):
+    """账本版本/资源边界不受当前实现支持；整次落盘须 fail-closed。"""
+
+
+def _safe_ledger_verdict(result: object) -> dict[str, object]:
+    """只保留 ledger 投影需要的有界字段；详细 socket 证据不在此复制。
+
+    ★``is_target_app`` 按 :mod:`runtime_evidence` 的口径存**三态**：``True`` / ``False`` /
+      ``None``（ambiguous、unattributed 或坏值一律归一成 ``None``）。三者都是"问过了"，
+      在表内且不为 True 即 DENIED——不能像旧私库草稿那样只认显式 bool，
+      否则 ambiguous 记录经账本一转手就丢了降档结论。
+    """
+    if not isinstance(result, dict):
+        return {}
+    is_target = result.get("is_target_app")
+    out: dict[str, object] = {
+        "is_target_app": is_target if isinstance(is_target, bool) else None,
+    }
+    attribution = result.get("attribution")
+    if isinstance(attribution, str):
+        out["attribution"] = attribution[:_MAX_LEDGER_ATTRIBUTION_LENGTH]
+    score = result.get("score")
+    if (
+        isinstance(score, (int, float))
+        and not isinstance(score, bool)
+        and math.isfinite(score)
+    ):
+        out["score"] = score
+    among = result.get("target_uid_among_candidates")
+    if isinstance(among, bool):
+        out["target_uid_among_candidates"] = among
+    return out
+
+
+def _parse_carrier(carrier: object) -> tuple[str, str] | None:
+    """校验 ``tcp|udp/ip:port``，返回（规范 carrier，规范 IP）。"""
+    if not isinstance(carrier, str) or carrier.count("/") != 1:
+        return None
+    proto, endpoint = carrier.split("/", 1)
+    if proto not in {"tcp", "udp"}:
+        return None
+    try:
+        if endpoint.startswith("["):
+            close = endpoint.find("]")
+            if close <= 1 or endpoint[close + 1 : close + 2] != ":":
+                return None
+            host = endpoint[1:close]
+            port_text = endpoint[close + 2 :]
+        else:
+            host, port_text = endpoint.rsplit(":", 1)
+        port = int(port_text)
+        if not 1 <= port <= 65535:
+            return None
+        address = ipaddress.ip_address(host)
+    except (ValueError, TypeError):
+        return None
+    canonical_ip = str(address)
+    return f"{proto}/{canonical_ip}:{port}", canonical_ip
+
+
+def _carrier_ip(carrier: str) -> str:
+    """从合法 carrier 取规范 IP；兼容裸/方括号 IPv6，坏值返回空串。"""
+    parsed = _parse_carrier(carrier)
+    return parsed[1] if parsed is not None else ""
+
+
+def _carrier_set_target_flag(
+    app_attr: dict[str, dict] | None,
+    carriers: set[str],
+) -> bool | None:
+    """一组 carrier 的 IP 级目标归属：True / False / None（缺信息）。
+
+    量词全部来自 :mod:`runtime_evidence`（唯一真源），此处只做组合，不自定判据：
+
+    - 任一 carrier 单独判为 TARGET → ``True``。目标连过该 IP 的任一端口，该 IP 即算
+      被目标连过（与 has_payload/state 的聚合哲学一致）；个别端口缺结论不掩盖已确认的
+      TARGET——这也是既有 ``_attr_block`` 逐端口 or-合并的既有语义。
+    - 整组按保守量词判 DENIED（全部在表内、无一 TARGET）→ ``False``。
+    - 其余 → ``None``：缺任一结论且无 TARGET 时保持 MISSING，不得用部分否定盖信息缺口。
+    """
+    if not carriers:
+        return None
+    if any(
+        runtime_evidence.verdict_for_carriers(app_attr, (carrier,))
+        is runtime_evidence.AttributionVerdict.TARGET
+        for carrier in carriers
+    ):
+        return True
+    if runtime_evidence.is_denied(
+        runtime_evidence.verdict_for_carriers(app_attr, carriers)
+    ):
+        return False
+    return None
+
+
+def _sanitize_ledger_capture(capture: object) -> dict | None:
+    """把历史 capture 收窄到版本 1 的可投影形状；坏对象直接隔离。"""
+    if not isinstance(capture, dict):
+        return None
+    carrier_ips: dict[str, str] = {}
+    raw_ips = capture.get("carrier_ips")
+    if isinstance(raw_ips, dict):
+        for carrier, value in raw_ips.items():
+            parsed = _parse_carrier(carrier)
+            if parsed is None or not isinstance(value, str):
+                continue
+            try:
+                stored_ip = str(ipaddress.ip_address(value))
+            except ValueError:
+                continue
+            if stored_ip == parsed[1]:
+                carrier_ips[parsed[0]] = stored_ip
+
+    verdicts: dict[str, dict[str, object]] = {}
+    raw_verdicts = capture.get("verdicts")
+    if isinstance(raw_verdicts, dict):
+        for carrier, result in raw_verdicts.items():
+            parsed = _parse_carrier(carrier)
+            safe = _safe_ledger_verdict(result)
+            if parsed is None or not safe:
+                continue
+            verdicts[parsed[0]] = safe
+            carrier_ips.setdefault(parsed[0], parsed[1])
+
+    sni_carriers: dict[str, list[str]] = {}
+    raw_sni = capture.get("sni_carriers")
+    if isinstance(raw_sni, dict):
+        for name, carriers in raw_sni.items():
+            if not isinstance(name, str) or not isinstance(carriers, list):
+                continue
+            valid = sorted({
+                parsed[0]
+                for carrier in carriers
+                if (parsed := _parse_carrier(carrier)) is not None
+            })
+            if valid:
+                sni_carriers[name[:253]] = valid
+    return {
+        "carrier_ips": dict(sorted(carrier_ips.items())),
+        "sni_carriers": dict(sorted(sni_carriers.items())),
+        "verdicts": dict(sorted(verdicts.items())),
+    }
+
+
+def _load_attribution_ledger(meta: dict) -> dict:
+    """读取/初始化按 PCAP fingerprint 记账的归因真源。
+
+    旧报告没有 fingerprint 级归因，只能把既有 carrier 结论和正向计数迁入 legacy；
+    这些无法解释的历史结论不得被新抓包静默擦除。
+    """
+    raw = meta.get(_ATTRIBUTION_LEDGER_KEY)
+    if isinstance(raw, dict) and "version" in raw:
+        if raw.get("version") != _ATTRIBUTION_LEDGER_VERSION:
+            raise _AttributionLedgerRejected("unsupported attribution ledger version")
+        captures = raw.get("captures")
+        if not isinstance(captures, dict):
+            raise _AttributionLedgerRejected("malformed attribution ledger captures")
+        if len(captures) > _MAX_ATTRIBUTION_LEDGER_FINGERPRINTS:
+            raise _AttributionLedgerRejected("attribution ledger exceeds resource limit")
+        clean_captures: dict[str, dict] = {}
+        for capture_id, capture in captures.items():
+            if (
+                not isinstance(capture_id, str)
+                or not capture_id
+                or len(capture_id) > 128
+            ):
+                continue
+            clean = _sanitize_ledger_capture(capture)
+            if clean is not None:
+                clean_captures[capture_id] = clean
+
+        legacy_target_ips: set[str] = set()
+        raw_targets = raw.get("legacy_target_ips")
+        if isinstance(raw_targets, list):
+            for value in raw_targets:
+                if not isinstance(value, str):
+                    continue
+                try:
+                    legacy_target_ips.add(str(ipaddress.ip_address(value)))
+                except ValueError:
+                    continue
+        floor = raw.get("legacy_target_count_floor")
+        clean_ledger: dict = {
+            "version": _ATTRIBUTION_LEDGER_VERSION,
+            "captures": clean_captures,
+            "legacy_target_ips": sorted(legacy_target_ips),
+            "legacy_target_count_floor": (
+                floor
+                if isinstance(floor, int) and not isinstance(floor, bool) and floor >= 0
+                else 0
+            ),
+        }
+        legacy_unscoped = _sanitize_ledger_capture(raw.get("legacy_unscoped"))
+        if legacy_unscoped is not None:
+            clean_ledger["legacy_unscoped"] = legacy_unscoped
+        meta[_ATTRIBUTION_LEDGER_KEY] = clean_ledger
+        return clean_ledger
+
+    legacy_results: dict[str, dict] = {}
+    signals = meta.get("capture_signals")
+    stored_attr = signals.get("pcap_app_attribution") if isinstance(signals, dict) else None
+    if isinstance(stored_attr, dict):
+        for carrier, result in stored_attr.items():
+            parsed = _parse_carrier(carrier)
+            safe = _safe_ledger_verdict(result)
+            if parsed is not None and safe:
+                legacy_results[parsed[0]] = safe
+
+    pcap_target_key = _inv.TARGET_ATTRIBUTED_SET_KEYS["pcap"]
+    raw_legacy_targets = meta.get(pcap_target_key)
+    legacy_targets = sorted({
+        value
+        for value in (raw_legacy_targets if isinstance(raw_legacy_targets, list) else [])
+        if isinstance(value, str) and value
+    })
+    previous = _inv.read_inventory(meta)
+    known_targets: set[str] = set()
+    for key in _inv.TARGET_ATTRIBUTED_SET_KEYS.values():
+        values = meta.get(key)
+        if isinstance(values, list):
+            known_targets.update(
+                value for value in values if isinstance(value, str) and value
+            )
+    legacy_floor = max(
+        _inv.migrate_count(previous, "target_attributed") - len(known_targets),
+        0,
+    )
+    ledger: dict = {
+        "version": _ATTRIBUTION_LEDGER_VERSION,
+        "captures": {},
+        "legacy_target_ips": legacy_targets,
+        "legacy_target_count_floor": legacy_floor,
+    }
+    if legacy_results:
+        # 老报告没有 fingerprint；仅隔离留痕，绝不参加新抓包的 carrier/IP 投影。
+        ledger["legacy_unscoped"] = {
+            "carrier_ips": {
+                carrier: _carrier_ip(carrier) for carrier in sorted(legacy_results)
+            },
+            "sni_carriers": {},
+            "verdicts": legacy_results,
+        }
+        if isinstance(signals, dict):
+            signals.pop("pcap_app_attribution", None)
+    meta[_ATTRIBUTION_LEDGER_KEY] = ledger
+    return ledger
+
+
+def _update_attribution_ledger(
+    meta: dict,
+    fingerprint: str,
+    summary: "PcapSummary",
+    app_attr: dict[str, dict] | None,
+) -> tuple[dict[str, dict], dict[str, bool], list[str]]:
+    """更新当前 fingerprint，并返回 carrier/IP/target-IP 三个确定性投影。"""
+    ledger = _load_attribution_ledger(meta)
+    captures = ledger["captures"]
+    if (
+        fingerprint not in captures
+        and len(captures) >= _MAX_ATTRIBUTION_LEDGER_FINGERPRINTS
+    ):
+        raise _AttributionLedgerRejected("attribution ledger fingerprint limit reached")
+    current = captures.get(fingerprint)
+    if not isinstance(current, dict):
+        current = {"carrier_ips": {}, "sni_carriers": {}, "verdicts": {}}
+    remotes = remote_endpoints(summary)
+    carrier_ips = {
+        f"{remote.proto}/{remote.ip}:{remote.port}": remote.ip
+        for remote in remotes
+    }
+    current["carrier_ips"] = {
+        carrier: carrier_ips[carrier] for carrier in sorted(carrier_ips)
+    }
+    current["sni_carriers"] = {
+        name: sorted(carriers)
+        for name, carriers in sorted(_sni_carriers(summary).items())
+    }
+    verdicts = current.get("verdicts")
+    verdicts = dict(verdicts) if isinstance(verdicts, dict) else {}
+    if isinstance(app_attr, dict):
+        for carrier in sorted(carrier_ips):
+            result = app_attr.get(carrier)
+            safe = _safe_ledger_verdict(result)
+            if safe:
+                verdicts[carrier] = safe
+    current["verdicts"] = verdicts
+    captures[fingerprint] = current
+
+    contributions: dict[str, list[tuple[str, dict]]] = {}
+    carrier_to_ip: dict[str, str] = {}
+    for capture_id in sorted(captures):
+        capture = captures.get(capture_id)
+        if not isinstance(capture, dict):
+            continue
+        ips = capture.get("carrier_ips")
+        values = capture.get("verdicts")
+        if not isinstance(ips, dict) or not isinstance(values, dict):
+            continue
+        for carrier, result in values.items():
+            if isinstance(carrier, str) and isinstance(result, dict):
+                contributions.setdefault(carrier, []).append((capture_id, result))
+                ip = ips.get(carrier)
+                if isinstance(ip, str) and ip:
+                    carrier_to_ip[carrier] = ip
+
+    carrier_projection: dict[str, dict] = {}
+    for carrier, items in sorted(contributions.items()):
+        targets = [item for item in items if item[1].get("is_target_app") is True]
+        chosen = min(targets or items, key=lambda item: item[0])[1]
+        carrier_projection[carrier] = dict(chosen)
+
+    ip_states: dict[str, list[bool]] = {}
+    for carrier, result in carrier_projection.items():
+        ip = carrier_to_ip.get(carrier) or _carrier_ip(carrier)
+        if ip:
+            ip_states.setdefault(ip, []).append(result.get("is_target_app") is True)
+    ip_projection = {
+        ip: any(states) for ip, states in sorted(ip_states.items()) if states
+    }
+    legacy_targets = {
+        value
+        for value in ledger.get("legacy_target_ips", [])
+        if isinstance(value, str) and value
+    }
+    # legacy 只有 IP 级历史状态、没有 fingerprint。可保留未被本轮解释的旧目标，
+    # 但同一 IP 一旦有完整 DENIED（全部在表内、无一 TARGET），旧状态只能留在
+    # quarantine，不能压过新证据。
+    legacy_targets.difference_update(
+        ip for ip, verdict in ip_projection.items() if verdict is False
+    )
+    target_ips = sorted({
+        *legacy_targets,
+        *(ip for ip, verdict in ip_projection.items() if verdict),
+    })
+    return carrier_projection, ip_projection, target_ips
+
+
+def _apply_inventory_attribution_projection(meta: dict, target_ips: list[str]) -> None:
+    """以 ledger 投影替换 pcap 那本目标账，并保留 probe 与 legacy floor。
+
+    ★这是全模块唯一允许**收缩**目标集的地方：``_inv.accumulate_values`` 的集合语义
+      只增不减（幂等所需），但显式 DENIED 是新证据、必须能把 IP 撤出目标集——
+      收缩的依据是账本全量投影，不是"本次没看到"。
+    """
+    meta[_inv.TARGET_ATTRIBUTED_SET_KEYS["pcap"]] = list(target_ips)
+    known: set[str] = set()
+    for key in _inv.TARGET_ATTRIBUTED_SET_KEYS.values():
+        values = meta.get(key)
+        if isinstance(values, list):
+            known.update(value for value in values if isinstance(value, str) and value)
+    ledger = meta.get(_ATTRIBUTION_LEDGER_KEY)
+    floor = (
+        ledger.get("legacy_target_count_floor", 0)
+        if isinstance(ledger, dict)
+        else 0
+    )
+    inventory = meta.get(_inv.INVENTORY_META_KEY)
+    if isinstance(inventory, dict):
+        inventory["target_attributed"] = max(
+            floor if isinstance(floor, int) and floor >= 0 else 0,
+            len(known),
+        )
 
 
 def _endpoint_source(proto: str, ip: str, port: object, app_attr: dict[str, dict] | None) -> str:
@@ -1540,7 +1917,9 @@ def remote_endpoints(summary: PcapSummary) -> list[RemoteEndpoint]:
             for p, w in sorted(conn_win.get(key, {}).items())
         ]
         re.state = _classify_state(re)
-    return list(agg.values())
+    # ★按聚合键排序输出：dict 保插入序＝flow 序，同一组观测换个输入顺序就产生报告 diff，
+    #   连带 fingerprint 的 join 串也不稳定。排序键即 (ip, port, proto)，语义无损。
+    return [agg[key] for key in sorted(agg)]
 
 
 #: SNI→运营方这条推断成立的前提：该 TLS 服务跑在**约定端口**上。
@@ -1680,7 +2059,7 @@ def to_report_leads(
 
     camouflage = sni_camouflage_carriers(summary)
     sni_carriers = _sni_carriers(summary)
-    for dom, src in domains.items():
+    for dom, src in sorted(domains.items()):
         key = (LeadCategory.DOMAIN.value, dom)
         if key in seen:
             continue
@@ -1838,7 +2217,7 @@ def to_runtime_endpoints(
     #   的竟是「有没有进 endpoints」这条与伪装判断毫不相干的分叉。
     camouflage = sni_camouflage_carriers(summary)
     sni_carriers = _sni_carriers(summary)
-    for dom, src in domains.items():
+    for dom, src in sorted(domains.items()):
         if dom in seen:
             continue
         seen.add(dom)
@@ -2059,6 +2438,43 @@ def _attr_block(app_attr: dict[str, dict] | None, re_: "RemoteEndpoint") -> dict
     return out
 
 
+def _attr_block_for_carriers(
+    app_attr: dict[str, dict] | None, carriers: set[str]
+) -> dict:
+    """一组 carrier 的 IP 级归因投影；缺任一结果且无 TARGET 时保持 MISSING。
+
+    与 :func:`_attr_block`（单 carrier）的关系：判据同源（runtime_evidence 组合，
+    见 :func:`_carrier_set_target_flag`），本函数解决的是**IP 级聚合**——端点 value
+    是裸 IP，它的 target_attributed 必须由该 IP 全部端口的结论一次算出，
+    不能在逐端口迭代里增量拼（拼出来的结论随 flow 顺序摇摆）。
+    """
+    flag = _carrier_set_target_flag(app_attr, carriers)
+    if flag is None or not app_attr:
+        return {}
+    hits = [app_attr[carrier] for carrier in sorted(carriers) if carrier in app_attr]
+    out: dict = {
+        "target_attributed": flag,
+        "attribution": sorted({
+            str(hit.get("attribution", "unknown"))
+            for hit in hits
+            if isinstance(hit, dict)
+        }),
+    }
+    if any(
+        isinstance(hit, dict) and hit.get("target_uid_among_candidates") is True
+        for hit in hits
+    ):
+        out["target_among_candidates"] = True
+    scores = [
+        hit["score"]
+        for hit in hits
+        if isinstance(hit, dict) and isinstance(hit.get("score"), (int, float))
+    ]
+    if scores:
+        out["attribution_score"] = max(scores)
+    return out
+
+
 def _runtime_endpoint_dicts(
     summary: PcapSummary, app_attr: dict[str, dict] | None = None
 ) -> list[dict]:
@@ -2083,7 +2499,13 @@ def _runtime_endpoint_dicts(
     #   整个覆盖掉——端口、字节、SNI 全丢一半。mitm 侧早就用 ``mitm_peers`` 列表累积解决了
     #   同一问题（见 capture._collect_flow_endpoints 的注释），pcap 侧此前没有。
     by_ip: dict[str, dict] = {}
-    for re_ in remote_endpoints(summary):
+    remotes = remote_endpoints(summary)
+    ip_carriers: dict[str, set[str]] = {}
+    for remote in remotes:
+        ip_carriers.setdefault(remote.ip, set()).add(
+            f"{remote.proto}/{remote.ip}:{remote.port}"
+        )
+    for re_ in remotes:
         sni = sorted(re_.sni)
         # 这个端点打出来的 SNI 里，哪些是"非标端口上的"——即无法据以判定运营方的（见
         # sni_camouflage_carriers）。记在端点上，读报告的人能一眼看出这条连接在伪装成谁。
@@ -2134,7 +2556,7 @@ def _runtime_endpoint_dicts(
                     "last_ts": re_.last_ts or None,
                     # ★target_attributed 只在**给了 socket 快照**时才写（见 _attr_block）。
                     #   没给就是缺，绝不因为"这是目标的 pcap"默认填 True——带外抓的是整机流量。
-                    **_attr_block(app_attr, re_),
+                    **_attr_block_for_carriers(app_attr, ip_carriers[re_.ip]),
                 }},
             }
             continue
@@ -2165,22 +2587,15 @@ def _runtime_endpoint_dicts(
             cur, new = rt.get(key), (re_.first_ts if key == "first_ts" else re_.last_ts) or None
             if new is not None:
                 rt[key] = new if cur is None else pick(cur, new)
-        # ★同 IP 多端口的归因**逐端口合并**，不能只认首个端口。此前 _attr_block 只在上面
-        #   「首次创建」分支调用，于是同一 IP 的 :443 属目标、:9000 属他进程时，IP 级
-        #   target_attributed 取决于哪个端口先被迭代到——结论随 flow 顺序摇摆。
+        # ★同 IP 多端口的归因按 **IP 级一次算出**（_attr_block_for_carriers），不逐端口
+        #   增量拼。此前逐端口 or-合并虽修了"只认首个端口"，但只能升不能降、且首创分支
+        #   与合并分支两套逻辑——同一 IP 的结论仍取决于哪个端口先被迭代到。
         #   聚合规则与 has_payload/state 同哲学：任一端口确属目标，该 IP 即算被目标连过。
-        extra = _attr_block(app_attr, re_)
+        extra = _attr_block_for_carriers(app_attr, ip_carriers[re_.ip])
         if extra:
-            if "target_attributed" in rt:
-                rt["target_attributed"] = bool(rt["target_attributed"]) or extra["target_attributed"]
-                rt["attribution"] = sorted(set(rt.get("attribution") or []) | set(extra["attribution"]))
-            else:
-                rt.update(extra)
-            if extra.get("target_among_candidates"):
-                rt["target_among_candidates"] = True
-            score, cur = extra.get("attribution_score"), rt.get("attribution_score")
-            if isinstance(score, (int, float)):
-                rt["attribution_score"] = score if not isinstance(cur, (int, float)) else max(cur, score)
+            for key in _ATTRIBUTION_RUNTIME_KEYS:
+                rt.pop(key, None)
+            rt.update(extra)
         ep["evidences"].append({
             # 逐端口诚实标记：同一 IP 下，属目标的端口与不属的端口各标各的来源。
             "source": _endpoint_source(re_.proto, re_.ip, re_.port, app_attr),
@@ -2281,22 +2696,100 @@ def _restamp_runtime_endpoint_evidence(payload: dict, fresh: list[dict]) -> int:
         evs = hit.get("evidences")
         if not isinstance(evs, list):
             continue
+        incoming = ep.get("evidences")
+        incoming = incoming if isinstance(incoming, list) else []
+        # 显式翻案（TARGET 恢复）走原位替换：同一观测只留一条、来源换成本轮结论，
+        # 不靠"撤销+追加"拼两条——那会让升档后旧的 runtime-derived 与新的 runtime-pcap 并存。
+        replaced = _replace_same_observation_evidence(evs, incoming)
         # 撤销：仅当本轮证据取代了旧证据（降档）才有事可做，返回 0 是常态、不是"无需更新"。
-        revoked = revoke_superseded_evidence(evs, ep["evidences"])
+        revoked = revoke_superseded_evidence(evs, incoming)
         seen = {
             (str(e.get("source")), str(e.get("location")), str(e.get("snippet")))
             for e in evs if isinstance(e, dict)
         }
         added = 0
-        for e in ep["evidences"]:
+        for e in incoming:
             sig = (str(e.get("source")), str(e.get("location")), str(e.get("snippet")))
             if sig not in seen:
                 seen.add(sig)
                 evs.append(e)
                 added += 1
-        if revoked or added:
+        # ★enrichment.runtime 的**归因结论键**同样要跟上本轮结论——幂等闸冻的是
+        #   字节数/连接数（观测强度），不是归因结论。此前这里对 enrichment 一概不碰，
+        #   于是 TARGET→DENIED 反转后 `target_attributed` 永远留着旧 True，
+        #   闭环排序读的正是它。仍然绝不碰计数键，闸要防的那件事一步都不放。
+        old_runtime = ((hit.get("enrichment") or {}).get("runtime") or {})
+        new_runtime = ((ep.get("enrichment") or {}).get("runtime") or {})
+        runtime_changed = False
+        if (
+            isinstance(old_runtime, dict)
+            and isinstance(new_runtime, dict)
+            and "target_attributed" in new_runtime
+        ):
+            before = {
+                key: old_runtime.get(key)
+                for key in _ATTRIBUTION_RUNTIME_KEYS
+                if key in old_runtime
+            }
+            for key in _ATTRIBUTION_RUNTIME_KEYS:
+                old_runtime.pop(key, None)
+            for key in _ATTRIBUTION_RUNTIME_KEYS:
+                if key in new_runtime:
+                    old_runtime[key] = new_runtime[key]
+            after = {
+                key: old_runtime.get(key)
+                for key in _ATTRIBUTION_RUNTIME_KEYS
+                if key in old_runtime
+            }
+            runtime_changed = before != after
+        if replaced or revoked or added or runtime_changed:
             restamped += 1
     return restamped
+
+
+def _serialized_evidence_identity(evidence: object) -> tuple[str, str, str]:
+    if not isinstance(evidence, dict):
+        return ("", "", "")
+    return (
+        str(evidence.get("location", "")),
+        str(evidence.get("snippet", "")),
+        str(evidence.get("scope", EvidenceScope.LEGACY_UNSPECIFIED.value)),
+    )
+
+
+def _replace_same_observation_evidence(existing: list, incoming: list) -> int:
+    """同一观测显式翻案时原位换来源，保留无关证据与原顺序。"""
+    replacements = {
+        _serialized_evidence_identity(evidence): evidence
+        for evidence in incoming
+        if isinstance(evidence, dict)
+    }
+    changed = 0
+    for index, evidence in enumerate(existing):
+        replacement = replacements.get(_serialized_evidence_identity(evidence))
+        if replacement is not None and evidence != replacement:
+            existing[index] = replacement
+            changed += 1
+    return changed
+
+
+def _lead_attribution_verdict(
+    lead: Lead,
+    summary: PcapSummary,
+    app_attr: dict[str, dict] | None,
+) -> bool | None:
+    """把 Lead 映回其 carrier，供显式 TARGET 原位撤销旧降档证据。"""
+    if lead.category is LeadCategory.IP:
+        carriers = {
+            f"{remote.proto}/{remote.ip}:{remote.port}"
+            for remote in remote_endpoints(summary)
+            if lead.value == format_peer(remote.ip, remote.port, remote.proto)
+        }
+    elif lead.category is LeadCategory.DOMAIN:
+        carriers = _sni_carriers(summary).get(lead.value, set())
+    else:
+        carriers = set()
+    return _carrier_set_target_flag(app_attr, carriers)
 
 
 def _inherit_recorded_downgrades(payload: dict, fresh_leads: list, fresh_eps: list[dict]) -> None:
@@ -2465,6 +2958,24 @@ def _merge_runtime_dns_endpoint_dicts(payload: dict, fresh: list[dict]) -> int:
     return added
 
 
+def _fingerprint_sni_fragment(values: set[str]) -> str:
+    """正常 SNI 保持旧指纹；含分隔符的异常值改用无歧义结构化编码。
+
+    ★SNI 是**不可信输入**（对端想写什么写什么）。逗号 join 会让 ``{"a,b","c"}`` 与
+      ``{"a","b,c"}`` 撞出同一段指纹——两份端点贡献不同的采集被幂等闸误判为同一份、
+      第二份静默丢失。走 JSON 编码即无歧义；只对含分隔符的异常值启用，
+      既有报告里已算好的正常指纹不作废。
+    """
+    ordered = sorted(values)
+    if all("," not in value and "\r" not in value and "\n" not in value for value in ordered):
+        return "sni=" + ",".join(ordered)
+    return "sni-json=" + json.dumps(
+        ordered,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
 def summary_merge_fingerprint(summary: PcapSummary) -> str:
     """这份采集结果的内容指纹，用于「同一份 pcap 别并第二次」。
 
@@ -2506,7 +3017,7 @@ def summary_merge_fingerprint(summary: PcapSummary) -> str:
         f"|out={re_.out_bytes}|in={re_.in_bytes}|conns={re_.connection_count}"
         f"|payload={int(bool(re_.has_payload))}"
         f"|ts={re_.first_ts}-{re_.last_ts}"
-        f"|sni={','.join(sorted(re_.sni))}"
+        f"|{_fingerprint_sni_fragment(re_.sni)}"
         for re_ in remote_endpoints(summary)
     ]
     # 无端点的采集（如纯 DNS）指纹恒定——这是对的：端点侧无贡献可累加，
@@ -2630,6 +3141,28 @@ def merge_into_report_json(
             logger.warning("[pcap] report.json 顶层非 dict，跳过：%s", path)
             return 0
         ensure_writable_report_version(payload.get("schema_version"))
+        # ★归因真源先行：按 fingerprint 记账后拿到三个确定性投影，本轮所有消费面
+        #   （lead 证据、端点 runtime、inventory、capture_signals）都从投影出发，
+        #   不再各自读"本次的 app_attr"——那正是跨抓包互相擦写的根源。
+        #   账本版本/资源边界不支持时在此抛出（_AttributionLedgerRejected），
+        #   由外层兜底 return 0，文件一个字节都不动（fail-closed）。
+        meta = payload.get("meta")
+        if not isinstance(meta, dict):
+            meta = {}
+            payload["meta"] = meta
+        fingerprint = summary_merge_fingerprint(summary)
+        carrier_projection, ip_projection, projected_target_ips = (
+            _update_attribution_ledger(meta, fingerprint, summary, app_attr)
+        )
+        current_carriers = {
+            f"{remote.proto}/{remote.ip}:{remote.port}"
+            for remote in remote_endpoints(summary)
+        }
+        effective_app_attr = {
+            carrier: carrier_projection[carrier]
+            for carrier in sorted(current_carriers)
+            if carrier in carrier_projection
+        }
         existing = payload.get("leads")
         if not isinstance(existing, list):
             existing = []
@@ -2645,8 +3178,18 @@ def merge_into_report_json(
         # meta 在下面才被规范化成 dict，此处用宽松取法，坏形状由 restore_index 兜底成空集。
         restored_index = restore_index(payload.get("meta"))
         pcap_domains: set[str] = set()   # 本次采集贡献的域名（用于 inventory，见下）
-        fresh_leads = to_report_leads(summary, app_attr)
-        fresh_eps = _runtime_endpoint_dicts(summary, app_attr)
+        fresh_leads = to_report_leads(summary, effective_app_attr)
+        fresh_eps = _runtime_endpoint_dicts(summary, effective_app_attr)
+        # ★端点的 target_attributed 以**账本 IP 投影**为准，不以本轮 effective 表为准：
+        #   同 IP 的另一次抓包（另一 fingerprint、另一端口）确证过 TARGET 时，
+        #   本轮哪怕判否，该 IP 仍是"目标连过"——carrier 各说各的，IP 级归账本裁。
+        for endpoint in fresh_eps:
+            value = str(endpoint.get("value", ""))
+            if value not in ip_projection:
+                continue
+            runtime = ((endpoint.get("enrichment") or {}).get("runtime") or {})
+            if isinstance(runtime, dict):
+                runtime["target_attributed"] = ip_projection[value]
         if not app_attr:
             # 本次没有任何端点拿到归因结论：不得用"没问过"去覆盖上一轮"问过、答案是否"的结论。
             #
@@ -2668,6 +3211,15 @@ def merge_into_report_json(
                 # 命中已存在键：不丢弃——把 runtime 证据并进原 lead、升为活体确认。
                 # ★confirmed 只计**证据**并入；仅抑制账本变化（ledger）不是「确认」，
                 #   混计会让日志把降档合并报成「runtime 确认 N 条」。
+                # 显式 TARGET 时，同一观测此前记下的降档证据要**原位翻案**（换来源），
+                # 不能只追加一条新证据让两个相反结论并存——消费方看到哪条全凭列表顺序。
+                if _lead_attribution_verdict(
+                    lead, summary, effective_app_attr
+                ) is True:
+                    refs = hit.get("source_refs")
+                    incoming_refs = lead_dict.get("source_refs")
+                    if isinstance(refs, list) and isinstance(incoming_refs, list):
+                        _replace_same_observation_evidence(refs, incoming_refs)
                 ev_merged, _ledger = merge_runtime_into_lead_dict(
                     hit, lead_dict, restored=restored_index
                 )
@@ -2682,15 +3234,10 @@ def merge_into_report_json(
             existing.append(lead_dict)
             added += 1
 
-        meta = payload.get("meta")
-        if not isinstance(meta, dict):
-            meta = {}
-            payload["meta"] = meta
-
         # ★幂等闸：同一份采集只并一次。Lead 侧本就按证据签名去重、天然幂等，但端点侧的
         #   字节数/连接数是**求和**的（跨端口累计所必需），重复并入会让计数凭空翻倍——
         #   而字节数正是闭环判"有无双向载荷"的输入，翻倍等于伪造观测强度。
-        fingerprint = summary_merge_fingerprint(summary)
+        #   （meta 与 fingerprint 已在账本记账时取好，见函数开头。）
         merged_fps = meta.get("runtime_pcap_merges")
         if not isinstance(merged_fps, list):
             merged_fps = []          # 旧报告没有该键 / 键被写坏 → 安全重建
@@ -2761,13 +3308,13 @@ def merge_into_report_json(
                 uid_attributed=app_attr is not None,
                 # ★只收**真的归到目标 app** 的那些端点值。传端点总数（或让下游拿总数顶替）
                 #   会把背景噪音写成"目标已确认通信"——实测 33 个接入节点里只有 1 个属目标。
-                target_attributed_values=[
-                    str(ep.get("value", ""))
-                    for ep in fresh_eps
-                    if ((ep.get("enrichment") or {}).get("runtime") or {}).get(
-                        "target_attributed") is True
-                ],
+                #   值取**账本全量投影**而非本次 fresh_eps：目标集是跨抓包的裁决结果，
+                #   本次没看到 ≠ 不再是目标，本次判否 = 从投影里退出（见下面的替换）。
+                target_attributed_values=projected_target_ips,
             )
+            # build_inventory 的集合语义只增不减；账本投影是唯一有权收缩目标集的裁决，
+            # 故在其后**整体替换** pcap 那本账（probe 的账与 legacy floor 原样保留）。
+            _apply_inventory_attribution_projection(meta, projected_target_ips)
             if app_attr is not None:
                 # 与 capture 落同一个键：下游（closure 门控 evaluate_capture_quality、报告）
                 # 读的是 capture_signals.pcap_app_attribution，不区分数据来自哪条路径。
@@ -2777,11 +3324,26 @@ def merge_into_report_json(
                 if not isinstance(signals, dict):
                     signals = {}
                     meta["capture_signals"] = signals
-                merged_attr = signals.get("pcap_app_attribution")
-                if not isinstance(merged_attr, dict):
-                    merged_attr = {}
-                merged_attr.update(app_attr)
-                signals["pcap_app_attribution"] = merged_attr
+                # ★不再 ``update(app_attr)`` 全局覆写——那是 carrier 级"后写者胜"，
+                #   反转一次抓包会连带擦掉另一次抓包已确证的结论。改为整表来自账本投影
+                #   （TARGET-wins、确定性），capture_signals 从共享草稿变成派生视图。
+                signal_projection = {
+                    carrier: dict(result)
+                    for carrier, result in sorted(carrier_projection.items())
+                }
+                # capture_signals 是既有的详细取证面：若当前输入与账本最终 verdict
+                # 一致，保留其 UID/process 等原始细节；ledger 自身仍只存安全投影字段。
+                if isinstance(app_attr, dict):
+                    for carrier, projected in signal_projection.items():
+                        current_result = app_attr.get(carrier)
+                        if (
+                            isinstance(current_result, dict)
+                            and isinstance(current_result.get("is_target_app"), bool)
+                            and current_result.get("is_target_app")
+                            is projected.get("is_target_app")
+                        ):
+                            signal_projection[carrier] = dict(current_result)
+                signals["pcap_app_attribution"] = signal_projection
             # 清单换过键名：旧键留着会让两套形状长期并存，读方各读一套。整块重建后清掉。
             for _stale in _inv.INVENTORY_META_ALIASES:
                 meta.pop(_stale, None)
