@@ -28,8 +28,10 @@ logger = logging.getLogger(__name__)
 
 META_WRITE_OWNER = "commands.web"
 META_WRITE_CATEGORIES = {
-    'online': 'signal',
-    'web_evidence': 'record',
+    "evidence_manifest": "record",
+    "online": "signal",
+    "sample_sha256": "record",
+    "web_evidence": "record",
 }
 META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
 
@@ -128,6 +130,18 @@ def analyze_web(
     typer.echo("运行分析流水线 ...")
     report = pipeline.run(ctx, ctx.config)  # type: ignore[arg-type]
     report.meta["online"] = online
+    try:
+        from apkscan import __version__
+        from apkscan.core.integrity import web_evidence_fingerprint
+
+        analyzed_files = {
+            path: data for path in ctx.list_files() if (data := ctx.read_file(path)) is not None
+        }
+        manifest = web_evidence_fingerprint(analyzed_files, tool_version=__version__)
+        report.meta["evidence_manifest"] = manifest
+        report.meta["sample_sha256"] = manifest["sha256"]
+    except Exception:
+        logger.exception("[analyze-web] 写入网页证据集指纹失败（已忽略，不影响报告产出）")
     report.meta["web_evidence"] = {
         "source_dir": ctx.source_dir,
         "origin": origin,

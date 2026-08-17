@@ -17,9 +17,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import platform
 import subprocess
+import unicodedata
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -47,7 +50,12 @@ def _build_provenance() -> dict:
     try:
         top = subprocess.run(
             ["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5, check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+            check=False,
         )
         if (
             top.returncode != 0
@@ -59,17 +67,30 @@ def _build_provenance() -> dict:
         #   解码，ASCII locale 下会抛 UnicodeDecodeError（不在 OSError/SubprocessError 内）。整段兜底 Exception。
         rev = subprocess.run(
             ["git", "-C", str(repo), "rev-parse", "HEAD"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5, check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+            check=False,
         )
         if rev.returncode == 0 and rev.stdout.strip():
             commit = rev.stdout.strip()
             st = subprocess.run(
                 ["git", "-C", str(repo), "status", "--porcelain"],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5, check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+                check=False,
             )
             dirty = bool(st.stdout.strip()) if st.returncode == 0 else None
     except Exception:  # noqa: BLE001 — 绝不抛：git/解码/任何异常 → build_commit=None
-        logger.debug("[integrity] git 溯源不可得（非源码树 / 无 git / 异常）→ build_commit=None", exc_info=True)
+        logger.debug(
+            "[integrity] git 溯源不可得（非源码树 / 无 git / 异常）→ build_commit=None",
+            exc_info=True,
+        )
     result = {"build_commit": commit, "build_dirty": dirty}
     # ★复审 #1：只缓存成功探测；失败态（commit=None）不缓存 → 下次重探（git 临时不可用后恢复仍能取到）。
     if commit is not None:
@@ -80,6 +101,67 @@ def _build_provenance() -> dict:
 def current_build_provenance() -> dict[str, object]:
     """返回当前源码构建坐标的副本，避免调用方改写进程缓存。"""
     return dict(_build_provenance())
+
+
+def web_evidence_fingerprint(files: Mapping[str, bytes], *, tool_version: str) -> dict[str, object]:
+    """返回网页分析实际消费的规范证据集指纹。
+
+    ``sample_fingerprint`` 钉住单个 APK 文件；网页分析的一级输入则是一组已落盘文件。
+    本函数不重新遍历目录，而是接收 :class:`WebContext` 已规范化、实际交给分析器的
+    ``{虚拟路径: 字节}``，避免“分析了一组、指纹算了另一组”的证据面漂移。
+
+    整体摘要的输入是按 NFC 路径排序的规范 JSON 清单，每项只含 ``path``、``size``、
+    ``sha256``。因此映射插入顺序和分析时间不影响 ``sha256``；任一被分析路径或字节变化
+    都会改变它。原始落盘文件仍由 Phase-1 package 逐项哈希固定，本指纹只标识本次分析
+    实际消费的证据集合。
+    """
+    # 空集合 fail-closed：空集指纹是跨案同值常量，进 corpus 会造成假同一性
+    # （上游 analyze-web 已拒空证据目录，此处是防御纵深——合并复核加固）。
+    if not files:
+        raise ValueError("web evidence set must not be empty")
+    entries: list[dict[str, object]] = []
+    seen_paths: set[str] = set()
+    total_size = 0
+    for raw_path, data in files.items():
+        if not isinstance(raw_path, str):
+            raise TypeError("web evidence path must be a string")
+        if not isinstance(data, bytes):
+            raise TypeError("web evidence content must be bytes")
+        path = unicodedata.normalize("NFC", raw_path)
+        if path in seen_paths:
+            raise ValueError(f"NFC-normalized path collision: {path}")
+        seen_paths.add(path)
+        size = len(data)
+        entries.append(
+            {
+                "path": path,
+                "size": size,
+                "sha256": hashlib.sha256(data).hexdigest(),
+            }
+        )
+        total_size += size
+
+    entries.sort(key=lambda item: str(item["path"]))
+    canonical = json.dumps(
+        entries,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return {
+        "kind": "web_evidence_set",
+        "sha256": hashlib.sha256(canonical).hexdigest(),
+        "sha1": hashlib.sha1(canonical).hexdigest(),
+        "md5": hashlib.md5(canonical).hexdigest(),
+        "size": total_size,
+        "file_count": len(entries),
+        "files": entries,
+        "analyzed_at": datetime.now(timezone.utc).isoformat(),
+        "tool_version": tool_version,
+        "platform": platform.platform(),
+        **_build_provenance(),
+    }
 
 
 def sample_fingerprint(apk_path: str, *, tool_version: str) -> dict:
@@ -114,7 +196,9 @@ def sample_fingerprint(apk_path: str, *, tool_version: str) -> dict:
                 size += len(chunk)
     except OSError:
         # 检材读不到（路径错 / 权限 / 占用）：容错降级为空 hash，不抛、不阻断 analyze。
-        logger.warning("[integrity] 检材指纹计算失败（读不到检材），降级为空 hash：%s", apk_path, exc_info=True)
+        logger.warning(
+            "[integrity] 检材指纹计算失败（读不到检材），降级为空 hash：%s", apk_path, exc_info=True
+        )
         ok = False
 
     return {
