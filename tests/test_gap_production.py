@@ -165,3 +165,37 @@ def test_query_producer_rejected_by_factory() -> None:
 
 def test_version_constant_present() -> None:
     assert GAP_PRODUCTION_VERSION == "gap-prod-v1"
+
+
+# --------------------------------------------------- codex 复审补锁（P1/P2）
+
+
+def test_runtime_unknown_blocked_claim_produces_gap() -> None:
+    """未评估（unknown）是责任来源：runtime 没做观测恰是最该补证的缺口。
+
+    与 visibility._INSUFFICIENT 的差异是有意分叉（见模块注释）；此测试锁住
+    「仅因未评估被封锁的主张必须产 gap、绝不落 unattributable」。
+    """
+    doc = _visibility(blocked=["runtime_contact_observed"], levels={"runtime": "unknown"})
+    (gap,) = _build(doc)
+    assert gap.reason_codes == ("runtime_visibility_unknown",)
+    assert gap.required_observation_types == ("runtime_capture",)
+
+
+def test_static_claim_with_unknown_source_attributes() -> None:
+    doc = _visibility(blocked=["no_sms_interception"], levels={"dex": "unknown"})
+    (gap,) = _build(doc)
+    assert gap.reason_codes == ("dex_visibility_unknown",)
+
+
+def test_malformed_source_values_rejected() -> None:
+    bad_level = _visibility(blocked=["no_sms_interception"])
+    bad_level["sources"]["dex"]["visibility"] = 7  # 非字符串档位
+    with pytest.raises(GapProductionError) as exc:
+        _build(bad_level)
+    assert exc.value.reason_code == "visibility_invalid"
+    bad_item = _visibility()
+    bad_item["blocked_claims"] = [123]  # 非字符串主张项
+    with pytest.raises(GapProductionError) as exc:
+        _build(bad_item)
+    assert exc.value.reason_code == "visibility_invalid"

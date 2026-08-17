@@ -10,6 +10,11 @@ GAP_PRODUCTION_VERSION: Final = "gap-prod-v1"
 
 _VISIBILITY_SCHEMA_VERSION: Final = "1.1"
 
+# ★与 visibility._INSUFFICIENT 的差异是**有意的**：本表多含 "unknown"（未评估）。
+#   visibility 层把「确证盲区」与「未评估」分开，服务的是报告措辞与 closure 封顶
+#   （前者封顶、后者豁免）；gap 层的问题是「还缺什么观察」——未评估恰是最该补证的，
+#   两者都必须产 gap。语义区分不丢：reason token 的档位后缀（…_visibility_unknown
+#   vs …_visibility_timeout）保留了它，由 P3-E3 的映射 v2 分流处置（codex 复审后显式化）。
 _VISIBILITY_INSUFFICIENT: Final = frozenset(
     {
         "partial",
