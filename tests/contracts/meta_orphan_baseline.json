@@ -233,10 +233,6 @@
       "runtime_endpoint_count": [
         "apkscan/dynamic/merge.py"
       ],
-      "runtime_merged_inventory": [
-        "apkscan/dynamic/pcap_ingest.py",
-        "apkscan/dynamic/probe_ingest.py"
-      ],
       "schemes": [
         "apkscan/analyzers/certificate.py"
       ],

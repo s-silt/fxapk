@@ -53,7 +53,10 @@ def test_baseline_file_is_wellformed_and_nonvacuous() -> None:
     #   119 → 118：control_chains 接进 digest 的 control_chains 段
     #              （见 evidence_exit_contract 的同名证据单元）。
     #   118 → 117：jadx_status 接进 visibility 的 Java 独立证据通道。
-    assert total == 117, f"三类存量应守恒为 117，实际 {total}"
+    #   117 → 116：runtime_merged_inventory 由 fingerprint 级归因账本投影消费
+    #              （pcap_ingest._apply_inventory_attribution_projection 读它并
+    #              据账本裁决改写 target_attributed），不再是只写不读的孤儿记录。
+    assert total == 116, f"三类存量应守恒为 116，实际 {total}"
     for category, group in baseline.items():
         for key, files in group.items():
             assert key, f"{category} 基线里有空键"
