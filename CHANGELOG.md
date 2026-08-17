@@ -3,9 +3,39 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
-## Unreleased
+## 1.7.0 — 2026-08-17
 
-### Fixed
+本版落地「认知闭环」识别线的机制层（P0–P5，PR #2–#23）：判断链合同、JADX 持久索引与
+结构查询、重分析请求的提案侧闭环、多任务标签契约、防泄漏切分与四任务评测指标。全线
+只读/离线、fail-closed、诚实空（空输出≠无缺口）；模型永远只能写 proposed，不碰证据权。
+
+### Added（识别线）
+
+- P0-A 判断链最小合同：Question/Observation/Claim/Gap/Action/Outcome 与 append-only
+  judgment ledger（严格 JSONL、可重放、旧证据不可改）。
+- JADX 持久索引：内容寻址 shard、DEX 复算校验、受控 cache root、create-only 发布与
+  fail-closed 加载校验链；一次索引、多次定向查询。`fxapk jadx` 新增 usage / callpath
+  只读查询子命令与查询账本 sidecar（阴性绝不产观察）。
+- JADX 结构层：`trace_callpath` 调用路径、结构 diff（接入 `fxapk diff`）、ownership
+  projection（来源归属摘要进报告可见面）。
+- 重分析提案侧：`ReanalysisRequest` 契约（AnalysisType 矩阵/PlanningContext/NextAction
+  投影）、planner 纯函数（准入谓词 v1、同 dedupe 合并、ceiling 过滤、receipt）、账本
+  ACTION_PROPOSED 投影与可验证 sidecar、`fxapk recognize reanalysis` CLI（双文件事务、
+  授权提示）。生产映射 v1 可能产生诚实空结果。
+- 多任务识别标签：`recognition_labels` 契约（family/clue/relation/ownership/reanalysis
+  五 kind、active/effective 双投影、模型只能写 proposed 的写入边界）、FEEDBACK_QUEUED
+  账本事件（CandidateLabelFeedback，模型禁入队）、`fxapk recognize labels validate`
+  只读校验器。
+- 防泄漏切分：split-manifest 契约与构建器（同案/确认家族/确认正例关系/显式派生的传递
+  闭包为原子单位，五切分互斥全覆盖，canonical 字节冻结 + 域分离 digest，加载端不信任
+  构建端逐项复验）、`fxapk recognize split build/validate`（原子 create-only、错误行
+  只出稳定码不回显动态输入）。
+- 评测指标层：`recognition_evaluation` 四任务纯函数（Family macro-F1/开放集；Pair
+  recall@k/NDCG@k/AP/确认误边；Group B-cubed/cannot-link/官方重打包误并；Clue 有效性
+  与 ownership 精度/证据引用完整率）与 promotion_eligible 推导——silver/gold_internal
+  与 dev 切分永远出不了晋级数字；负例纪律贯穿：无标签绝不当负例。
+
+### Fixed（识别线）
 
 - 修复真实混淆样本（含脱壳 dump）令 JADX 持久索引整体不可建的问题：结构段类身份从
   仅 `name` 改为 `(name, path)`（`INDEX_SCHEMA_VERSION` 1.1 → 1.2，旧工件按既有漂移
@@ -25,7 +55,7 @@ affect automated / CI / agent callers are called out explicitly**.
   `x.com` 一类占位名，不指向任何真实基础设施，后续逐步替换为保留域（`example.com` /
   `.test` / `.invalid`）。
 
-### Added
+### Added（串案线）
 
 - `corpus link-candidates` 结果增加稳定 `candidate_id`/`rank`、明确命名的
   `review_priority_score`/`uncapped_score`、特征与归一化版本、策略摘要，以及候选召回
@@ -42,7 +72,7 @@ affect automated / CI / agent callers are called out explicitly**.
   不改变规则分数/等级，也不能突破 deterministic caps。模型产物固定训练时的 rule policy digest、
   result/feature schema 与 normalization，跨规则版本不兼容时 fail closed。
 
-### Fixed
+### Fixed（串案线）
 
 - 修复同一第三方 native 组件在不同 APK 中被随机改名后绕过弱锚规则的问题：同一 SHA-256 须在
   至少三个不同真实样本间一一匹配到三个不同 basename，才标记为 `renamed-shared-component`；
