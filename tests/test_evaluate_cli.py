@@ -411,9 +411,13 @@ def test_tampered_manifest_rejected(tmp_path: Path) -> None:
 
 
 def test_evaluate_reachable_from_main_app() -> None:
+    # 不 grep 帮助正文——Rich 在 CI 上的着色/换行会打碎 "--gates" 这类子串
+    # （#26 首轮 CI 全矩阵实证）。接线锁只看：命令可达 + 出现在父组命令列表。
     result = runner.invoke(cli.app, ["recognize", "evaluate", "--help"])
     assert result.exit_code == 0
-    assert "--gates" in result.output
+    listing = runner.invoke(cli.app, ["recognize", "--help"])
+    assert listing.exit_code == 0
+    assert "evaluate" in listing.output
 
 
 def test_labels_fixture_lines_are_actually_valid(tmp_path: Path) -> None:
