@@ -1917,9 +1917,13 @@ def remote_endpoints(summary: PcapSummary) -> list[RemoteEndpoint]:
             for p, w in sorted(conn_win.get(key, {}).items())
         ]
         re.state = _classify_state(re)
-    # ★按聚合键排序输出：dict 保插入序＝flow 序，同一组观测换个输入顺序就产生报告 diff，
-    #   连带 fingerprint 的 join 串也不稳定。排序键即 (ip, port, proto)，语义无损。
-    return [agg[key] for key in sorted(agg)]
+    # ★按 (ip, port, proto) 排序输出：dict 保插入序＝flow 序，同一组观测换个输入顺序
+    #   就产生报告 diff。聚合键本身是 (proto, ip, port)，这里显式重排——读报告的人按 IP
+    #   找端点，同 IP 的多端口要挨在一起，不能被 tcp/udp 分栏拆开（codex 复审 P2）。
+    return [
+        agg[key]
+        for key in sorted(agg, key=lambda key: (key[1], key[2], key[0]))
+    ]
 
 
 #: SNI→运营方这条推断成立的前提：该 TLS 服务跑在**约定端口**上。

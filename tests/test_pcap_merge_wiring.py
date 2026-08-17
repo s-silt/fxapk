@@ -1855,19 +1855,35 @@ def test_attribution_ledger_limit_rejects_new_history_without_forgetting(
 
 
 def test_pcap_projection_order_is_independent_of_flow_order() -> None:
-    """同一组观测只换输入顺序，不得制造报告 diff。"""
+    """同一组观测只换输入顺序，不得制造报告 diff；且序契约是 (ip, port, proto)。
+
+    ★只断言"正反一致"锁不住契约本身（聚合键是 (proto, ip, port)，直接 sorted 也能
+      过"一致"断言，但会把同 IP 的多端口按 tcp/udp 分栏拆开——codex 复审 P2）。
+      样本刻意让 proto 与 ip/port 的序交叉：udp 流的 IP/端口都排在 tcp 流之前。
+    """
     one = _one_flow_summary("100.64.9.61", 30110)
     two = _one_flow_summary("100.64.9.60", 30111)
-    forward = pcap_ingest.PcapSummary(flows=[*one.flows, *two.flows])
+    udp = pcap_ingest.Flow(
+        proto="udp", src_ip="10.0.0.2", src_port=50001,
+        dst_ip="100.64.9.60", dst_port=30109,
+        packets=2, bytes_=200, payload_bytes=100, first_ts=1.0, last_ts=2.0,
+    )
+    forward = pcap_ingest.PcapSummary(flows=[*one.flows, *two.flows, udp])
     reverse = pcap_ingest.PcapSummary(flows=list(reversed(forward.flows)))
 
+    expected = [
+        ("100.64.9.60", 30109, "udp"),
+        ("100.64.9.60", 30111, "tcp"),
+        ("100.64.9.61", 30110, "tcp"),
+    ]
     assert [
         (remote.ip, remote.port, remote.proto)
         for remote in pcap_ingest.remote_endpoints(forward)
-    ] == [
+    ] == expected
+    assert [
         (remote.ip, remote.port, remote.proto)
         for remote in pcap_ingest.remote_endpoints(reverse)
-    ]
+    ] == expected
     assert [
         (lead.category.value, lead.value)
         for lead in pcap_ingest.to_report_leads(forward)
