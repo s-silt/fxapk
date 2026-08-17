@@ -15,6 +15,7 @@ from apkscan.core import judgment_ledger as jl
 from apkscan.core import reanalysis as rp
 from apkscan.core import reanalysis_contract as rxc
 from apkscan.core import reanalysis_ledger as rl
+from apkscan.commands.evaluate_cli import evaluate as _evaluate_command
 from apkscan.commands.labels_cli import labels_app
 from apkscan.commands.split_cli import split_app
 from apkscan.core import recognition_contract as rc
@@ -33,6 +34,9 @@ recognize_app.add_typer(labels_app, name="labels")
 
 # split 子组（P5-D）：防泄漏 split-manifest 的构建与只读复验。
 recognize_app.add_typer(split_app, name="split")
+
+# evaluate 单命令（P5-E）：四任务评测 + 显式阈值晋级门（exit 4=门未过）。
+recognize_app.command("evaluate")(_evaluate_command)
 
 DEFAULT_POLICY = rp.DEFAULT_ADMISSION_POLICY
 
