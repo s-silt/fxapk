@@ -211,3 +211,15 @@ def test_malformed_source_values_rejected() -> None:
     with pytest.raises(GapProductionError) as exc:
         _build(bad_item)
     assert exc.value.reason_code == "visibility_invalid"
+
+
+def test_duplicate_blocked_claims_rejected() -> None:
+    """重复主张必须在纯函数层拒绝：两个同名主张产同封印 gap，入账即
+    duplicate_record_id 崩整本账（codex 复审 P1 定点复现）。"""
+    doc = _visibility(
+        blocked=["no_sms_interception", "no_sms_interception"],
+        levels={"dex": "partial"},
+    )
+    with pytest.raises(GapProductionError) as exc:
+        _build(doc)
+    assert exc.value.reason_code == "visibility_invalid"

@@ -439,3 +439,31 @@ def test_ledger_out_without_proposals_publishes_nothing(ledger_file, tmp_path):
     receipt = json.loads((tmp_path / "requests.jsonl.receipt.json").read_text("utf-8"))
     assert receipt["ledger_sidecar"] == {"published": False, "reason": "no_proposals"}
     assert not sidecar_dir.exists() or not any(sidecar_dir.iterdir())
+
+
+def test_cross_question_dedupe_collision_fails_closed(tmp_path, monkeypatch):
+    """C5（codex 复审 P1）：两 question 同 reason 同映射 → 同 dedupe_key。
+    requests 双行而扩展账本静默跳一 = 三件套不一致——必须 fail-closed 拒发，
+    不留任何输出文件。"""
+    monkeypatch.setattr(
+        reanalysis_cli,
+        "DEFAULT_POLICY",
+        _mapped_policy(rxc.AnalysisType.JADX_CALLPATH),
+    )
+    second = _question("p3e2-collision-fixture")
+    events = _ledger_events(extra_question=second)
+    events = jl.append_event(
+        events,
+        jl.make_event(events, jl.EventType.GAP_IDENTIFIED, make_actor(), FIXED_TIME, _gap(second)),
+    )
+    ledger = tmp_path / "collision.jsonl"
+    _write_ledger(ledger, events)
+    out = tmp_path / "requests.jsonl"
+    sidecar_dir = tmp_path / "sidecar"
+    sidecar_dir.mkdir()
+    result = _invoke(ledger, out, "--ledger-out", str(sidecar_dir))
+    assert result.exit_code != 0
+    assert "ledger_projection_inconsistent" in result.output + result.stderr
+    assert not out.exists()
+    assert not (tmp_path / "requests.jsonl.receipt.json").exists()
+    assert not list(sidecar_dir.iterdir())

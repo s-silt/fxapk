@@ -431,12 +431,17 @@ def reanalysis(
         if ledger_out is None:
             ledger_sidecar = None
         elif planned:
-            extended, _projection_receipt = rl.append_reanalysis_proposals(
+            extended, projection_receipt = rl.append_reanalysis_proposals(
                 events,
                 planned=tuple(planned),
                 actor=_actor(),
                 occurred_at=_occurred_at(),
             )
+            if projection_receipt.appended != len(planned):
+                _fail(
+                    "ledger_projection_inconsistent: "
+                    "跨 question dedupe 归并导致计划动作数与账本追加数不一致"
+                )
             ledger_sidecar = rl.publish_reanalysis_ledger(
                 extended,
                 out_dir=str(ledger_out),

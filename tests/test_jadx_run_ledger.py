@@ -431,3 +431,52 @@ def test_visibility_ids_deterministic_across_runs(
         gap_ids = tuple(g.gap_id for g in _gaps(events) if g.question_id == vq.question_id)
         ids.append((vq.question_id, gap_ids))
     assert ids[0] == ids[1]
+
+
+def test_duplicate_claim_never_kills_main_ledger(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """L6 重复主张 → gap 生产层拒绝 → 显式 skip 簿记；主账本必须照常发布。"""
+    _patch(monkeypatch)
+    doc = _complete_visibility()
+    doc["blocked_claims"] = ["no_sms_interception", "no_sms_interception"]
+    doc["sources"]["dex"]["visibility"] = "partial"
+    monkeypatch.setattr("apkscan.core.visibility.assess", lambda *_a, **_k: doc)
+    ctx = _ctx_with_cache(tmp_path)
+    report, out_dir = _run(tmp_path, ctx)
+    events = _read_chain(out_dir / _ledger_name(ctx))  # 主账本可 replay
+    assert len(_questions(events)) == 1
+    anchor = report.meta["jadx_judgment_ledger"]["visibility_gaps"]
+    assert anchor == {"appended": False, "reason": "visibility_invalid"}
+
+
+def test_append_failure_is_transactional_not_fatal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """L7 事务式护栏：gap 绑到不存在的 question（追加层契约异常）→
+    回到原事件链 + 稳定 reason，绝不杀主账本。"""
+    _patch(monkeypatch)
+    from apkscan.core import gap_production as gp
+    from apkscan.core import recognition_codec as codec
+    from apkscan.core import recognition_contract as rc
+
+    def _rogue_gaps(_visibility, *, question_id, producer):
+        rogue = codec.build_evidence_gap(
+            question_id="question-sha256:" + "ff" * 32,  # 账本中不存在
+            claim_id=None,
+            effect=rc.GapEffect.BLOCKS_CLAIM,
+            reason_codes=("claim.fixture", "dex_visibility_partial"),
+            required_observation_types=("dex_string_surface",),
+            coverage_requirements=(),
+            producer=producer,
+        )
+        return (rogue,)
+
+    # 账本侧是函数内 from-import，同一模块对象——打在模块本体上才生效。
+    monkeypatch.setattr(gp, "build_visibility_gaps", _rogue_gaps)
+    ctx = _ctx_with_cache(tmp_path)
+    report, out_dir = _run(tmp_path, ctx)
+    events = _read_chain(out_dir / _ledger_name(ctx))
+    assert len(_questions(events)) == 1  # visibility 块整体回滚
+    anchor = report.meta["jadx_judgment_ledger"]["visibility_gaps"]
+    assert anchor == {"appended": False, "reason": "visibility_ledger_append_failed"}

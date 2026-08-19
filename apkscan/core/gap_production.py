@@ -92,12 +92,16 @@ def _validate_visibility(
         _fail("visibility_invalid", "blocked_claims must be a list or tuple")
 
     normalized_claims: list[str] = []
+    seen_claims: set[str] = set()
     for index, claim in enumerate(blocked_claims):
         if not isinstance(claim, str) or not claim:
             _fail(
                 "visibility_invalid",
                 f"blocked_claims[{index}] must be a non-empty string",
             )
+        if claim in seen_claims:
+            _fail("visibility_invalid", "blocked_claims 含重复主张")
+        seen_claims.add(claim)
         normalized_claims.append(claim)
 
     for source, source_value in sources.items():

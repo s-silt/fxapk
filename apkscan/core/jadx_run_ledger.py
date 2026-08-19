@@ -573,21 +573,29 @@ def _append_visibility_section(
             "reason": "no_blocked_claims",
         }
 
-    events = _append(
-        events,
-        jl.EventType.QUESTION_OPENED,
-        actor,
-        occurred_at,
-        visibility_question,
-    )
-    for gap in gaps:
+    original_events = events
+    try:
         events = _append(
             events,
-            jl.EventType.GAP_IDENTIFIED,
+            jl.EventType.QUESTION_OPENED,
             actor,
             occurred_at,
-            gap,
+            visibility_question,
         )
+        for gap in gaps:
+            events = _append(
+                events,
+                jl.EventType.GAP_IDENTIFIED,
+                actor,
+                occurred_at,
+                gap,
+            )
+    except Exception:
+        logger.exception("visibility ledger append failed")
+        return original_events, {
+            "appended": False,
+            "reason": "visibility_ledger_append_failed",
+        }
 
     return events, {
         "appended": True,
