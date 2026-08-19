@@ -30,7 +30,11 @@ from apkscan.core.recognition_codec import canonical_json_v1, parse_json_v1
 # 1.2：结构段类身份从 name 改为 (name, path)——真实混淆样本（脱壳 dump）里
 # 不同路径的同名类是常态，仅按 name 的唯一键会让索引整体不可建。schema 参与
 # key material，bump 即让旧工件按既有漂移机制变为可重建的 CacheMiss，无迁移代码。
-INDEX_SCHEMA_VERSION = "1.2"
+# 1.3：修正方法 arity 计数——泛型实参里的逗号此前被当成参数分隔符（`Map<String,
+# String> m` 算成 2），令方法身份 `cls#name/arity` 错位，callpath 按真实 arity 查
+# 假阴性、ownership 与 baseline 对不齐。字段集不变，只改既有 arity 的取值；仍须
+# bump，否则同一 index_key 下的旧 shard 会继续返回错误 arity。
+INDEX_SCHEMA_VERSION = "1.3"
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -1217,10 +1221,36 @@ def _sanitize_java_source(text: str) -> list[str]:
 
 
 def _declared_arity(params: str) -> int:
+    """按尖括号深度 0 处的逗号计参数个数。
+
+    只需跟踪尖括号：`_METHOD_DECL_RE` / `_CTOR_DECL_RE` 的参数捕获组是 `[^()]*`，
+    圆括号（含带参注解）根本进不来；数组维度 `int[][]` 也不含逗号。
+    不配对的 `>` 在混淆/截断产物里是常态，深度不得减到负数。
+    """
     text = params.strip()
     if not text:
         return 0
-    return len([part for part in text.split(",") if part.strip()])
+
+    arity = 0
+    angle_depth = 0
+    has_content = False
+    for char in text:
+        if char == "<":
+            angle_depth += 1
+        elif char == ">":
+            angle_depth = max(0, angle_depth - 1)
+        elif char == "," and angle_depth == 0:
+            if has_content:
+                arity += 1
+            has_content = False
+            continue
+
+        if not char.isspace():
+            has_content = True
+
+    if has_content:
+        arity += 1
+    return arity
 
 
 def _method_body_digest(lines: list[str], start_line: int, end_line: int) -> str:

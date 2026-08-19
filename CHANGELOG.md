@@ -7,6 +7,19 @@ affect automated / CI / agent callers are called out explicitly**.
 
 ### Fixed
 
+- **JADX 索引方法 arity 泛型感知计数（structure schema 1.2 → 1.3）**：`_declared_arity`
+  此前按 `split(",")` 计参数个数，而方法声明正则允许泛型，于是泛型实参里的逗号被当成
+  参数分隔符——`Map<String, String> m` 算成 2 个参数。方法身份是 `cls#name/arity`，
+  算错即令 `trace_callpath` 按真实 arity 查**得空**，而空结果在本模块语义里是「未观察到」
+  而非「不可达」，这类假阴性不会被任何既有断言揭穿；`jadx_ownership` 的方法身份
+  `(class_name, path, "name/arity")` 同样错位、与官方 baseline 对不齐。
+  真实混淆样本实测：162481 个方法声明中 930 个（0.57%）arity 算错。
+  **对 agent / CI 调用方的影响**：本次不改 structure 段字段集，只改既有 `arity` 的取值，
+  但 schema 参与 key material，**bump 令全部既有索引工件变为可重建的 CacheMiss**——
+  下次分析会重付一次 jadx 反编译（每样本 300–1200s）。已缓存 index_key 会变；
+  `fxapk jadx callpath` 的端点参数须按修正后的真实 arity 书写（此前对泛型参数方法
+  需要传错误的偏大 arity 才能命中，那是缺陷行为，不再兼容）。
+
 - pcap 归因结论改为按抓包 fingerprint 记账（`meta.runtime_pcap_attribution_ledger`，
   版本化、有界字段、fail-closed）：同一 IP 多次抓包各自留痕，反转其中一次的归因不再
   擦掉另一次已确证的 TARGET；显式判否现在能把 IP 撤出目标集（此前 inventory 目标集只增

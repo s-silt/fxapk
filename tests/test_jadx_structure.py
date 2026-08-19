@@ -103,10 +103,14 @@ HELPER_JAVA = (
 # ---------------------------------------------------------------------------
 
 
-def test_schema_version_bumped_to_1_2() -> None:
+def test_schema_version_bumped_to_1_3() -> None:
     """★schema 演进锁：1.2 起结构身份为 (name, path)——混淆样本不同路径同名类合法；
-    1.1 及更早工件按既有漂移机制拒收（版本同时进 key material 与 load 校验）。"""
-    assert INDEX_SCHEMA_VERSION == "1.2"
+    1.3 起 arity 按尖括号深度 0 的逗号计数——泛型实参逗号不再被误算成参数分隔符。
+    更早的工件按既有漂移机制拒收（版本同时进 key material 与 load 校验）。
+
+    arity 修正不改字段集，却必须 bump：不 bump 则同一 index_key 下的旧 shard
+    仍以错误 arity 命中缓存，方法身份永远修不过来。"""
+    assert INDEX_SCHEMA_VERSION == "1.3"
 
 
 # ---------------------------------------------------------------------------
