@@ -78,27 +78,19 @@ def _ledger_events(*, extra_question=None):
     )
     actor = make_actor()
     question = _question()
-    events = jl.append_event(
-        (), jl.make_event((), jl.EventType.RUN_OPENED, actor, FIXED_TIME, run)
-    )
+    events = jl.append_event((), jl.make_event((), jl.EventType.RUN_OPENED, actor, FIXED_TIME, run))
     events = jl.append_event(
         events,
-        jl.make_event(
-            events, jl.EventType.QUESTION_OPENED, actor, FIXED_TIME, question
-        ),
+        jl.make_event(events, jl.EventType.QUESTION_OPENED, actor, FIXED_TIME, question),
     )
     if extra_question is not None:
         events = jl.append_event(
             events,
-            jl.make_event(
-                events, jl.EventType.QUESTION_OPENED, actor, FIXED_TIME, extra_question
-            ),
+            jl.make_event(events, jl.EventType.QUESTION_OPENED, actor, FIXED_TIME, extra_question),
         )
     events = jl.append_event(
         events,
-        jl.make_event(
-            events, jl.EventType.GAP_IDENTIFIED, actor, FIXED_TIME, _gap(question)
-        ),
+        jl.make_event(events, jl.EventType.GAP_IDENTIFIED, actor, FIXED_TIME, _gap(question)),
     )
     return events
 
@@ -142,7 +134,7 @@ def test_default_policy_yields_empty_requests_and_receipt(ledger_file, tmp_path)
     assert result.exit_code == 0, result.output
     assert out.is_file() and out.read_bytes() == b""
     receipt = json.loads((tmp_path / "requests.jsonl.receipt.json").read_text("utf-8"))
-    assert receipt["ledger_profile"] == "p2d2-v1"
+    assert receipt["ledger_profile"] == "p3e2-v1"  # P3-E2 profile 演进
     assert receipt["questions_seen"] == 1
     assert receipt["gaps_seen"] == 1
     assert receipt["suppressed"]["unknown_reason"] == 1
@@ -160,6 +152,7 @@ def test_receipt_key_set_is_frozen(ledger_file, tmp_path):
         "matrix_version",
         "ledger_profile",
         "questions_seen",
+        "questions_planned",  # P3-E2 受控加键：实际进 planner 的 question 数
         "gaps_seen",
         "suppressed",
         "emitted",
@@ -177,9 +170,7 @@ def test_receipt_key_set_is_frozen(ledger_file, tmp_path):
 # ---------------------------------------------------------------- 非空产出与全序
 
 
-def test_mapped_policy_emits_decodable_proposed_requests(
-    ledger_file, tmp_path, monkeypatch
-):
+def test_mapped_policy_emits_decodable_proposed_requests(ledger_file, tmp_path, monkeypatch):
     monkeypatch.setattr(
         reanalysis_cli,
         "DEFAULT_POLICY",
@@ -277,9 +268,52 @@ def test_tampered_chain_fails_closed(tmp_path):
     assert not out.exists()
 
 
-def test_multi_question_ledger_is_unsupported_profile(tmp_path):
-    events = _ledger_events(extra_question=_question("p3d-second-question"))
+def test_multi_question_ledger_planned_per_question(tmp_path):
+    """p3e2-v1 语义演进：多 question 合法，逐 question 分桶规划。
+
+    此前 p2d2-v1 在此拒绝；P3-E2 起 visibility question 入账成为常态。
+    exit 0 本身即分桶证明——validate_planning_context 对跨 question 混装
+    fail-closed（gap_question_mismatch），不分桶到不了这里。
+    """
+    second = _question("p3e2-visibility-fixture")
+    events = _ledger_events(extra_question=second)
+    events = jl.append_event(
+        events,
+        jl.make_event(
+            events,
+            jl.EventType.GAP_IDENTIFIED,
+            make_actor(),
+            FIXED_TIME,
+            _gap(second, reason="p3e2-vis-reason"),
+        ),
+    )
     ledger = tmp_path / "multi.jsonl"
+    _write_ledger(ledger, events)
+    out = tmp_path / "requests.jsonl"
+    result = _invoke(ledger, out)
+    assert result.exit_code == 0, result.output + result.stderr
+    assert out.read_text(encoding="utf-8") == ""  # 默认空映射 → 诚实空
+    receipt = json.loads((tmp_path / "requests.jsonl.receipt.json").read_text("utf-8"))
+    assert receipt["ledger_profile"] == "p3e2-v1"
+    assert receipt["questions_seen"] == 2
+    assert receipt["gaps_seen"] == 2
+
+
+def test_run_only_ledger_is_unsupported_profile(tmp_path):
+    """零 question 仍拒：profile 演进只放宽上限，不放宽下限。"""
+    run = codec.build_reasoning_run(
+        execution_nonce="5" * 32,
+        purpose="p3e2_run_only_fixture",
+        subjects=(_SUBJECT,),
+        input_anchors=(make_anchor(),),
+        initial_coverage=(),
+        policies=(make_policy(),),
+        producers=(make_producer(),),
+    )
+    events = jl.append_event(
+        (), jl.make_event((), jl.EventType.RUN_OPENED, make_actor(), FIXED_TIME, run)
+    )
+    ledger = tmp_path / "runonly.jsonl"
     _write_ledger(ledger, events)
     out = tmp_path / "requests.jsonl"
     result = _invoke(ledger, out)
@@ -346,10 +380,7 @@ def test_ledger_out_publishes_extended_chain(ledger_file, tmp_path, monkeypatch)
     sidecar = receipt["ledger_sidecar"]
     assert sidecar["published"] is True and sidecar["replay_ok"] is True
     target = sidecar_dir / sidecar["locator"]
-    events = tuple(
-        jl.decode_event(line)
-        for line in target.read_text("utf-8").splitlines()
-    )
+    events = tuple(jl.decode_event(line) for line in target.read_text("utf-8").splitlines())
     projection = jl.replay(events)
     assert len(projection.actions) == 1
     assert dict(projection.action_statuses)[projection.actions[0].action_id] is (
@@ -377,9 +408,7 @@ def test_receipt_failure_rolls_back_requests(ledger_file, tmp_path, monkeypatch)
     assert not (tmp_path / "requests.jsonl.receipt.json").exists()
 
 
-def test_pair_failure_rolls_back_published_sidecar(
-    ledger_file, tmp_path, monkeypatch
-):
+def test_pair_failure_rolls_back_published_sidecar(ledger_file, tmp_path, monkeypatch):
     # codex 复审：--ledger-out 的 sidecar 先落盘，双文件失败时不得留孤儿。
     monkeypatch.setattr(
         reanalysis_cli,
@@ -410,3 +439,31 @@ def test_ledger_out_without_proposals_publishes_nothing(ledger_file, tmp_path):
     receipt = json.loads((tmp_path / "requests.jsonl.receipt.json").read_text("utf-8"))
     assert receipt["ledger_sidecar"] == {"published": False, "reason": "no_proposals"}
     assert not sidecar_dir.exists() or not any(sidecar_dir.iterdir())
+
+
+def test_cross_question_dedupe_collision_fails_closed(tmp_path, monkeypatch):
+    """C5（codex 复审 P1）：两 question 同 reason 同映射 → 同 dedupe_key。
+    requests 双行而扩展账本静默跳一 = 三件套不一致——必须 fail-closed 拒发，
+    不留任何输出文件。"""
+    monkeypatch.setattr(
+        reanalysis_cli,
+        "DEFAULT_POLICY",
+        _mapped_policy(rxc.AnalysisType.JADX_CALLPATH),
+    )
+    second = _question("p3e2-collision-fixture")
+    events = _ledger_events(extra_question=second)
+    events = jl.append_event(
+        events,
+        jl.make_event(events, jl.EventType.GAP_IDENTIFIED, make_actor(), FIXED_TIME, _gap(second)),
+    )
+    ledger = tmp_path / "collision.jsonl"
+    _write_ledger(ledger, events)
+    out = tmp_path / "requests.jsonl"
+    sidecar_dir = tmp_path / "sidecar"
+    sidecar_dir.mkdir()
+    result = _invoke(ledger, out, "--ledger-out", str(sidecar_dir))
+    assert result.exit_code != 0
+    assert "ledger_projection_inconsistent" in result.output + result.stderr
+    assert not out.exists()
+    assert not (tmp_path / "requests.jsonl.receipt.json").exists()
+    assert not list(sidecar_dir.iterdir())

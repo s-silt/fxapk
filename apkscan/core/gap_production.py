@@ -92,12 +92,16 @@ def _validate_visibility(
         _fail("visibility_invalid", "blocked_claims must be a list or tuple")
 
     normalized_claims: list[str] = []
+    seen_claims: set[str] = set()
     for index, claim in enumerate(blocked_claims):
         if not isinstance(claim, str) or not claim:
             _fail(
                 "visibility_invalid",
                 f"blocked_claims[{index}] must be a non-empty string",
             )
+        if claim in seen_claims:
+            _fail("visibility_invalid", "blocked_claims 含重复主张")
+        seen_claims.add(claim)
         normalized_claims.append(claim)
 
     for source, source_value in sources.items():
@@ -159,9 +163,17 @@ def build_visibility_gaps(
                 f"blocked claim has no insufficient required source: {claim_name}",
             )
 
+        # ★主张名必须进 reason（claim.<主张名> 令牌）：EvidenceGap 没有主张字段
+        #   （claim_id 属判断链 claim、此处恒 None），两个主张若责任来源完全相同，
+        #   内容体会逐字节一致 → 封印 id 相同 → 入账 duplicate_record_id 崩整本账
+        #   （P3-E2 真实 pipeline 实测暴露）。映射表天然忽略未知 reason，无副作用。
         reason_codes = tuple(
             sorted(
-                {f"{source_name}_visibility_{level}" for source_name, level in insufficient_sources}
+                {f"claim.{claim_name}"}
+                | {
+                    f"{source_name}_visibility_{level}"
+                    for source_name, level in insufficient_sources
+                }
             )
         )
         required_observation_types = tuple(
