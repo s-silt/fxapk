@@ -490,3 +490,46 @@ def test_append_failure_is_transactional_not_fatal(
     assert len(_questions(events)) == 1  # visibility 块整体回滚
     anchor = report.meta["jadx_judgment_ledger"]["visibility_gaps"]
     assert anchor == {"appended": False, "reason": "visibility_ledger_append_failed"}
+
+
+def test_e2e_first_nonempty_reanalysis_requests(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★P3 线里程碑锁（P3-E3 T6）：真入口 pipeline → sidecar →
+    fxapk recognize reanalysis 首次产出非空请求（jadx_callpath）。
+
+    java 面在本夹具由 stub jadx 产出（复杂度自然不完整——若某日夹具变
+    complete，用 visibility monkeypatch 把 java 打成 partial 即可，勿放宽谓词）。"""
+    from typer.testing import CliRunner
+
+    from apkscan import cli as apkscan_cli
+
+    _patch(monkeypatch)
+    doc = _complete_visibility()
+    doc["blocked_claims"] = ["static_endpoint_exhaustive"]
+    doc["sources"]["java"]["visibility"] = "partial"
+    monkeypatch.setattr("apkscan.core.visibility.assess", lambda *_a, **_k: doc)
+    ctx = _ctx_with_cache(tmp_path)
+    _report, out_dir = _run(tmp_path, ctx)
+    sidecar = out_dir / _ledger_name(ctx)
+    assert sidecar.exists()
+
+    requests_out = tmp_path / "requests.jsonl"
+    result = CliRunner().invoke(
+        apkscan_cli.app,
+        ["recognize", "reanalysis", str(sidecar), "--out", str(requests_out)],
+    )
+    assert result.exit_code == 0, result.output + (result.stderr or "")
+    lines = [l for l in requests_out.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert len(lines) == 1  # ★诚实空时代结束的那一行——受控夹具下恰一条
+    import json as _json
+
+    (row,) = [_json.loads(line) for line in lines]
+    assert row["analysis_type"] == "jadx_callpath"
+    assert row["reason_codes"] == [
+        "claim.static_endpoint_exhaustive",
+        "java_visibility_partial",
+    ]
+    receipt = _json.loads((tmp_path / "requests.jsonl.receipt.json").read_text("utf-8"))
+    assert receipt["emitted"] == {"count": 1, "by_type": {"jadx_callpath": 1}}
+    assert receipt["mapping_version"] == "p3-mapping-v2"

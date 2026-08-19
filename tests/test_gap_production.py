@@ -84,18 +84,22 @@ def test_single_blocked_claim_java_timeout_exact_fields() -> None:
     assert gap.gap_id.startswith("gap-sha256:")
 
 
-def test_multi_source_responsibility_aggregates_sorted() -> None:
+def test_multi_source_claim_splits_per_source() -> None:
+    """按源拆分（E3 复审裁决）：跨源聚合会让动作背上兑现不了的 criteria、
+    未授予源不留痕——每 claim × 每不足来源一个 gap。"""
     doc = _visibility(
         blocked=["static_endpoint_exhaustive"],
         levels={"dex": "partial", "java": "failed"},
     )
-    (gap,) = _build(doc)
-    assert gap.reason_codes == (
-        "claim.static_endpoint_exhaustive",
-        "dex_visibility_partial",
-        "java_visibility_failed",
-    )
-    assert gap.required_observation_types == ("dex_string_surface", "jadx_java_surface")
+    gaps = _build(doc)
+    assert [g.reason_codes for g in gaps] == [
+        ("claim.static_endpoint_exhaustive", "dex_visibility_partial"),
+        ("claim.static_endpoint_exhaustive", "java_visibility_failed"),
+    ]
+    assert [g.required_observation_types for g in gaps] == [
+        ("dex_string_surface",),
+        ("jadx_java_surface",),
+    ]
 
 
 def test_multiple_blocked_claims_sorted_and_deterministic() -> None:
@@ -104,17 +108,15 @@ def test_multiple_blocked_claims_sorted_and_deterministic() -> None:
         levels={"dex": "unavailable", "java": "partial", "resource": "unknown"},
     )
     gaps = _build(doc)
+    # claim 排序外层 × 该 claim 源表固定序内层（按源拆分后逐源一个 gap）
     assert [g.reason_codes for g in gaps] == [
-        # blocked claims 按排序序：no_remote_config（dex+resource）在前
-        ("claim.no_remote_config", "dex_visibility_unavailable", "resource_visibility_unknown"),
-        (
-            "claim.static_endpoint_exhaustive",
-            "dex_visibility_unavailable",
-            "java_visibility_partial",
-            "resource_visibility_unknown",
-        ),
+        ("claim.no_remote_config", "dex_visibility_unavailable"),
+        ("claim.no_remote_config", "resource_visibility_unknown"),
+        ("claim.static_endpoint_exhaustive", "dex_visibility_unavailable"),
+        ("claim.static_endpoint_exhaustive", "java_visibility_partial"),
+        ("claim.static_endpoint_exhaustive", "resource_visibility_unknown"),
     ]
-    assert len({g.gap_id for g in gaps}) == 2
+    assert len({g.gap_id for g in gaps}) == 5
     again = _build(doc)
     assert [g.gap_id for g in again] == [g.gap_id for g in gaps]
 

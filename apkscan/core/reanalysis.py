@@ -30,8 +30,30 @@ SUPPORTED_PREDICATE_VERSIONS = frozenset({"p3-admit-v1"})
 
 DEFAULT_ADMISSION_POLICY = AdmissionPolicy(
     "p3-admit-v1",
-    "p3-mapping-v1",
-    {},
+    "p3-mapping-v2",
+    {
+        "java_visibility_partial": (rxc.AnalysisType.JADX_CALLPATH,),
+        "java_visibility_stub_only": (rxc.AnalysisType.JADX_CALLPATH,),
+        "java_visibility_opaque": (rxc.AnalysisType.JADX_CALLPATH,),
+        "java_visibility_unavailable": (rxc.AnalysisType.JADX_CALLPATH,),
+        "java_visibility_unknown": (rxc.AnalysisType.JADX_CALLPATH,),
+        "java_visibility_timeout": (rxc.AnalysisType.JADX_CALLPATH,),
+        "java_visibility_failed": (rxc.AnalysisType.JADX_CALLPATH,),
+        "native_visibility_partial": (rxc.AnalysisType.NATIVE_BUILDINFO,),
+        "native_visibility_stub_only": (rxc.AnalysisType.NATIVE_BUILDINFO,),
+        "native_visibility_opaque": (rxc.AnalysisType.NATIVE_BUILDINFO,),
+        "native_visibility_unavailable": (rxc.AnalysisType.NATIVE_BUILDINFO,),
+        "native_visibility_unknown": (rxc.AnalysisType.NATIVE_BUILDINFO,),
+        "native_visibility_timeout": (rxc.AnalysisType.NATIVE_BUILDINFO,),
+        "native_visibility_failed": (rxc.AnalysisType.NATIVE_BUILDINFO,),
+        "runtime_visibility_partial": (rxc.AnalysisType.PCAP_RUNTIME,),
+        "runtime_visibility_stub_only": (rxc.AnalysisType.PCAP_RUNTIME,),
+        "runtime_visibility_opaque": (rxc.AnalysisType.PCAP_RUNTIME,),
+        "runtime_visibility_unavailable": (rxc.AnalysisType.PCAP_RUNTIME,),
+        "runtime_visibility_unknown": (rxc.AnalysisType.PCAP_RUNTIME,),
+        "runtime_visibility_timeout": (rxc.AnalysisType.PCAP_RUNTIME,),
+        "runtime_visibility_failed": (rxc.AnalysisType.PCAP_RUNTIME,),
+    },
     frozenset(),
 )
 
@@ -142,8 +164,7 @@ def plan_reanalysis(
             continue
 
         if gap.effect is rc.GapEffect.REDUCES_CONFIDENCE and not any(
-            reason in policy.reduces_confidence_whitelist
-            for reason in gap.reason_codes
+            reason in policy.reduces_confidence_whitelist for reason in gap.reason_codes
         ):
             suppressed_low_value += 1
             continue
@@ -178,12 +199,13 @@ def plan_reanalysis(
 
     planned: list[PlannedAction] = []
     subjects = context.question.subjects
-    input_anchor_ids = tuple(
-        sorted(anchor.anchor_id for anchor in context.anchors)
+    input_anchor_ids = tuple(sorted(anchor.anchor_id for anchor in context.anchors))
+    parameters_digest = (
+        "sha256:"
+        + hashlib.sha256(
+            codec.canonical_json_v1({"input_digest": context.sample_digest})
+        ).hexdigest()
     )
-    parameters_digest = "sha256:" + hashlib.sha256(
-        codec.canonical_json_v1({"input_digest": context.sample_digest})
-    ).hexdigest()
 
     for analysis_type in sorted(
         admitted_by_type,
