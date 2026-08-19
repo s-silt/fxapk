@@ -421,10 +421,20 @@ def test_visibility_ids_deterministic_across_runs(
     """L5 同样本两次独立构建 → visibility question/gap id 逐一相同。"""
     _patch(monkeypatch)
     ids: list[tuple[str, tuple[str, ...]]] = []
+    # ★同一份 APK 字节复制到两个目录：zipfile 会往 APK 里写时间戳，重建的
+    #   "同内容" APK 跨秒即不同 sha → subjects 不同 → 封印必然漂移（曾以
+    #   同秒巧合假绿过一轮）。确定性主张只对同字节样本成立。
+    source_apk: bytes | None = None
     for name in ("one", "two"):
         base = tmp_path / name
         base.mkdir()
-        ctx = _ctx_with_cache(base)
+        if source_apk is None:
+            source_apk = _apk(base).read_bytes()
+        else:
+            (base / "app.apk").write_bytes(source_apk)
+        # 不走 _ctx_with_cache：它会重建 APK（新时间戳）冲掉同字节副本。
+        ctx = FakeContext(apk_path=str(base / "app.apk"))
+        ctx.jadx_cache_root = str(base / "jadx-cache")
         _report, out_dir = _run(base, ctx)
         events = _read_chain(out_dir / _ledger_name(ctx))
         vq = _vis_question(events)
