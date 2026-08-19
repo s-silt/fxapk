@@ -516,3 +516,31 @@ def test_malformed_baseline_fail_closed(tmp_path: Path) -> None:
     with pytest.raises(JadxIndexError) as exc:
         project_ownership(subject, forged)
     assert exc.value.code == "malformed"
+
+
+def test_generic_overload_identities_survive_ownership(tmp_path: Path) -> None:
+    """★arity 经 MethodRegion.method 到 ownership 身份的接线锁。
+
+    ownership 身份是 `(class_name, path, "name/arity")`（_regions_by_identity），
+    而 "name/arity" 由 structure diff 用 structure 段的 arity 拼出。arity 若把泛型
+    实参里的逗号也算成参数分隔符，`handle(Map<String,String>)` 与
+    `handle(String,String)` 会塌缩成同一个 `handle/2`——两个不同方法的区间被混进
+    同一身份组，ownership 比对随之失真。这条走 project_ownership 真入口，
+    单测 arity 计数测不到这层传递。
+    """
+    src = (
+        "package com.a;\n"
+        "public class A {\n"
+        "    public void handle(Map<String, String> m) {\n"
+        "    }\n"
+        "    public void handle(String a, String b) {\n"
+        "    }\n"
+        "}\n"
+    )
+    subject = _build_index(tmp_path, "s", {"com/a/A.java": src})
+    baseline = _build_index(tmp_path, "b", {"com/a/A.java": src})
+    projection = project_ownership(subject, baseline)
+    assert sorted({item.region.method for item in projection.regions}) == [
+        "handle/1",
+        "handle/2",
+    ]

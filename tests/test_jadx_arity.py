@@ -47,6 +47,8 @@ def _scan(tmp_path: Path, source: str):
         ("Function<A, B> f", 1),
         ("int[] a, String... b", 2),
         ("Map<String, ? super Integer> m", 1),
+        ("final int a", 1),
+        ("@NonNull String x", 1),
     ],
 )
 def test_declared_arity_counts_top_level_commas(params: str, expected: int) -> None:
@@ -66,11 +68,29 @@ def test_declared_arity_counts_top_level_commas(params: str, expected: int) -> N
         ",int a",                # 前导逗号
         "int a,,int b",          # 中间空段
         "   ,   ",
+        "x",                     # 无类型的裸名字——折叠后是 1，与真实 f(String x) 撞身份
+        "int",                   # 只有类型没有名字
+        "Map<String,String>m",   # 类型与名字之间无分隔空白
     ],
 )
 def test_declared_arity_rejects_malformed_params(params: str) -> None:
-    """畸形一律 None：调用方据此丢弃声明，绝不产生可与真实重载碰撞的身份。"""
+    """畸形一律 None：调用方据此丢弃声明，绝不产生可与真实重载碰撞的身份。
+
+    合法 Java 形参必然是 `类型 名字` 两部分、中间有空白（`String... a` /
+    `int[] a` / `@NonNull String x` / `final int a` 都满足），所以「顶层段不含空白」
+    是一条零误杀的拒绝判据。
+    """
     assert _declared_arity(params) is None
+
+
+def test_declared_arity_heuristic_boundary_is_documented() -> None:
+    """诚实标注有界启发式的已知边界：漏写逗号这类语法错仍会被当成一个形参。
+
+    要根治须引入 Java 类型语法解析器，那是另一个量级、且与本模块「有界启发式、
+    未识别语法跳过而非报错」的定位不符。本用例把边界写成契约，避免它被误当成
+    「已经验证过语法」。
+    """
+    assert _declared_arity("int a int b") == 1
 
 
 def test_declared_arity_rejects_over_jvm_limit() -> None:
@@ -109,6 +129,33 @@ def test_malformed_declaration_never_reaches_structure(tmp_path: Path) -> None:
     assert ("f", 0) in entries, "良构声明必须照常入索引"
     assert not any(name == "g" for name, _ in entries), "畸形声明整条都不得入索引"
     assert scan.coverage == "partial", "丢弃了声明就不能再声称 complete"
+
+
+def test_generic_and_plain_overloads_get_distinct_identities(tmp_path: Path) -> None:
+    """★重载塌缩锁：泛型重载与普通重载必须落成两个独立身份。
+
+    旧的 `split(",")` 计数把 `handle(Map<String, String> m)` 也算成 2 个参数，
+    于是它与 `handle(String a, String b)` 塌缩成同一个 `handle/2`——`_index_methods`
+    按同 id **合并出边**（产生伪调用路径），`_regions_by_identity` 把两个不同方法的
+    区间混进同一身份组（ownership 比对失真）。与畸形参数那条不同，这发生在
+    **完全合法的 Java 代码**上：泛型重载很常见。
+    """
+    scan = _scan(
+        tmp_path,
+        "package com.a;\n"
+        "public class A {\n"
+        "    public void handle(Map<String, String> m) {\n"
+        "    }\n"
+        "    public void handle(String a, String b) {\n"
+        "    }\n"
+        "}\n",
+    )
+    entries = sorted(
+        (method["name"], method["arity"])
+        for cls in scan.structure
+        for method in cls["methods"]  # type: ignore[union-attr]
+    )
+    assert entries == [("handle", 1), ("handle", 2)], "两个重载必须是两个独立身份"
 
 
 def test_wellformed_generic_declaration_keeps_coverage_complete(tmp_path: Path) -> None:
