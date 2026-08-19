@@ -101,10 +101,12 @@ _PCAP = rxc.AnalysisType.PCAP_RUNTIME
 # ---------------------------------------------------------------- 默认策略与版本
 
 
-def test_default_policy_is_versioned_and_production_empty():
+def test_default_policy_is_versioned_and_production_populated():
+    """P3-E3 语义演进：生产映射从「刻意空表」翻转为 v2 实表（21 键，见
+    test_production_mapping_v2_shape 的逐键锁）；whitelist 仍空。"""
     policy = rp.DEFAULT_ADMISSION_POLICY
     assert policy.predicate_version and policy.mapping_version
-    assert not policy.reason_mapping
+    assert policy.reason_mapping  # 空表时代结束（P3-E3）
     assert not policy.reduces_confidence_whitelist
 
 
@@ -168,9 +170,7 @@ def test_coverage_only_gap_gets_fallback_success_criteria():
         _policy({"fixture-coverage-gap": (_CALLPATH,)}),
     )
     assert len(result.planned) == 1
-    assert result.planned[0].action.success_criteria == (
-        "coverage_requirements_satisfied",
-    )
+    assert result.planned[0].action.success_criteria == ("coverage_requirements_satisfied",)
 
 
 # ---------------------------------------------------------------- 准入谓词
@@ -250,9 +250,7 @@ def test_two_gaps_same_type_merge_into_exactly_one_action():
 
 def test_one_gap_two_types_produces_two_actions_not_deduped():
     gap = _gap(reasons=("fixture-dual-gap",))
-    policy = _policy(
-        {"fixture-dual-gap": (_CALLPATH, rxc.AnalysisType.JADX_STRUCTURAL_DIFF)}
-    )
+    policy = _policy({"fixture-dual-gap": (_CALLPATH, rxc.AnalysisType.JADX_STRUCTURAL_DIFF)})
     result = _plan(_context([gap]), policy)
     assert len(result.planned) == 2
     types = {planned.action.action_type for planned in result.planned}
@@ -263,9 +261,7 @@ def test_one_gap_two_types_produces_two_actions_not_deduped():
 
 def test_planned_actions_are_sorted_by_analysis_type():
     gap = _gap(reasons=("fixture-dual-gap",))
-    policy = _policy(
-        {"fixture-dual-gap": (rxc.AnalysisType.JADX_STRUCTURAL_DIFF, _CALLPATH)}
-    )
+    policy = _policy({"fixture-dual-gap": (rxc.AnalysisType.JADX_STRUCTURAL_DIFF, _CALLPATH)})
     result = _plan(_context([gap]), policy)
     listed = [planned.action.action_type for planned in result.planned]
     assert listed == sorted(listed)
@@ -286,17 +282,13 @@ def test_full_ceiling_matrix_filters_without_mutating_declaration():
                 _policy({reason: (analysis_type,)}),
             )
             required = rxc.ANALYSIS_AUTHORIZATION[analysis_type]
-            expected_emit = (
-                rxc.AUTHORIZATION_ORDER[required] <= rxc.AUTHORIZATION_ORDER[ceiling]
-            )
+            expected_emit = rxc.AUTHORIZATION_ORDER[required] <= rxc.AUTHORIZATION_ORDER[ceiling]
             if expected_emit:
                 assert len(result.planned) == 1, (ceiling, analysis_type)
                 assert result.planned[0].action.authorization_required is required
             else:
                 assert result.planned == (), (ceiling, analysis_type)
-                assert result.receipt.suppressed_by_ceiling == (
-                    (analysis_type.value, 1),
-                )
+                assert result.receipt.suppressed_by_ceiling == ((analysis_type.value, 1),)
 
 
 def test_ceiling_suppression_is_counted_by_type():
@@ -329,20 +321,14 @@ def test_attempt_nonce_is_deterministic_32_hex():
 
 def test_attempt_nonce_changes_with_question_but_not_dedupe():
     dedupe = "sha256:" + "a" * 64
-    one = rp.derive_attempt_nonce(
-        dedupe_key=dedupe, question_id="question-1", gap_ids=("gap-a",)
-    )
-    two = rp.derive_attempt_nonce(
-        dedupe_key=dedupe, question_id="question-2", gap_ids=("gap-a",)
-    )
+    one = rp.derive_attempt_nonce(dedupe_key=dedupe, question_id="question-1", gap_ids=("gap-a",))
+    two = rp.derive_attempt_nonce(dedupe_key=dedupe, question_id="question-2", gap_ids=("gap-a",))
     assert one != two
 
 
 def test_attempt_nonce_changes_with_gap_ids():
     dedupe = "sha256:" + "a" * 64
-    one = rp.derive_attempt_nonce(
-        dedupe_key=dedupe, question_id="question-1", gap_ids=("gap-a",)
-    )
+    one = rp.derive_attempt_nonce(dedupe_key=dedupe, question_id="question-1", gap_ids=("gap-a",))
     two = rp.derive_attempt_nonce(
         dedupe_key=dedupe, question_id="question-1", gap_ids=("gap-a", "gap-b")
     )
@@ -350,12 +336,8 @@ def test_attempt_nonce_changes_with_gap_ids():
 
 
 def test_attempt_nonce_changes_when_dedupe_fields_change():
-    one = rp.derive_attempt_nonce(
-        dedupe_key="sha256:" + "a" * 64, question_id="q", gap_ids=("g",)
-    )
-    two = rp.derive_attempt_nonce(
-        dedupe_key="sha256:" + "b" * 64, question_id="q", gap_ids=("g",)
-    )
+    one = rp.derive_attempt_nonce(dedupe_key="sha256:" + "a" * 64, question_id="q", gap_ids=("g",))
+    two = rp.derive_attempt_nonce(dedupe_key="sha256:" + "b" * 64, question_id="q", gap_ids=("g",))
     assert one != two
 
 
@@ -369,9 +351,7 @@ def test_planned_action_fields_are_wired_from_context():
     action = result.planned[0].action
     assert action.question_id == context.question.question_id
     assert action.subjects == context.question.subjects
-    assert action.input_anchor_ids == tuple(
-        sorted(anchor.anchor_id for anchor in context.anchors)
-    )
+    assert action.input_anchor_ids == tuple(sorted(anchor.anchor_id for anchor in context.anchors))
     assert action.attempt_nonce == rp.derive_attempt_nonce(
         dedupe_key=action.dedupe_key,
         question_id=action.question_id,
@@ -422,3 +402,84 @@ def test_planner_validates_context_fail_closed():
     broken = dataclasses.replace(_context([gap]), gaps=(), gap_statuses={})
     with pytest.raises(SchemaValidationError):
         _plan(broken, _policy())
+
+
+# --------------------------------------------- P3-E3：生产映射 v2（空表→实表）
+
+_V2_SOURCES = {
+    "java": _CALLPATH,
+    "native": rxc.AnalysisType.NATIVE_BUILDINFO,
+    "runtime": _PCAP,
+}
+_V2_LEVELS = ("partial", "stub_only", "opaque", "unavailable", "unknown", "timeout", "failed")
+
+
+def test_production_mapping_v2_shape():
+    """T1 表形状锁：21 键全展开、值合法、版本号 v2、whitelist 仍空。"""
+    policy = rp.DEFAULT_ADMISSION_POLICY
+    assert policy.mapping_version == "p3-mapping-v2"
+    assert policy.predicate_version == "p3-admit-v1"  # 谓词没动
+    assert not policy.reduces_confidence_whitelist
+    expected = {
+        f"{source}_visibility_{level}": (analysis,)
+        for source, analysis in _V2_SOURCES.items()
+        for level in _V2_LEVELS
+    }
+    assert dict(policy.reason_mapping) == expected
+
+
+def test_java_gap_yields_callpath_proposal():
+    """T2 java 缺口 → 恰 1 条 JADX_CALLPATH（BLOCKS_CLAIM → HIGH、OFFLINE）。"""
+    gap = _gap(
+        effect=GapEffect.BLOCKS_CLAIM,
+        reasons=("claim.static_endpoint_exhaustive", "java_visibility_timeout"),
+        required=("jadx_java_surface",),
+    )
+    planning = _plan(_context([gap]), rp.DEFAULT_ADMISSION_POLICY)
+    assert len(planning.planned) == 1
+    action = planning.planned[0].action
+    assert action.action_type == _CALLPATH.value
+    request = rxc.project_reanalysis_request(action, _context([gap]), planning.planned[0].meta)
+    assert request.priority_class is rxc.PriorityClass.HIGH
+    assert request.authorization is AuthorizationLevel.OFFLINE
+
+
+def test_runtime_gap_respects_ceiling():
+    """T3 runtime 缺口：OFFLINE ceiling 抑制入账；AUTHORIZED_DEVICE 放行 PCAP。"""
+    gap = _gap(
+        effect=GapEffect.BLOCKS_CLAIM,
+        reasons=("claim.runtime_contact_observed", "runtime_visibility_unavailable"),
+        required=("runtime_capture",),
+    )
+    low = _plan(_context([gap], ceiling=AuthorizationLevel.OFFLINE), rp.DEFAULT_ADMISSION_POLICY)
+    assert not low.planned
+    assert dict(low.receipt.suppressed_by_ceiling).get(_PCAP.value) == 1
+    high = _plan(_context([gap]), rp.DEFAULT_ADMISSION_POLICY)
+    assert [p.action.action_type for p in high.planned] == [_PCAP.value]
+
+
+def test_claim_tokens_alone_stay_unknown():
+    """T4 仅 claim.* 令牌 → unknown 抑制（身份令牌不驱动动作）。"""
+    gap = _gap(effect=GapEffect.BLOCKS_CLAIM, reasons=("claim.no_sms_interception",))
+    planning = _plan(_context([gap]), rp.DEFAULT_ADMISSION_POLICY)
+    assert not planning.planned
+    assert planning.receipt.suppressed_unknown_reason == 1
+
+
+def test_bookkeeping_gap_still_low_value():
+    """T5 簿记 gap（REDUCES_CONFIDENCE）→ 仍 low_value（whitelist 空锁）。"""
+    gap = _gap(
+        effect=GapEffect.REDUCES_CONFIDENCE, reasons=("index_observation_surface_unrecorded",)
+    )
+    planning = _plan(_context([gap]), rp.DEFAULT_ADMISSION_POLICY)
+    assert not planning.planned
+    assert planning.receipt.suppressed_low_value == 1
+
+
+def test_dex_resource_gaps_stay_unknown():
+    """T7 无执行器可补的面不虚授。"""
+    for reason in ("dex_visibility_partial", "resource_visibility_unknown"):
+        gap = _gap(effect=GapEffect.BLOCKS_CLAIM, reasons=(reason,))
+        planning = _plan(_context([gap]), rp.DEFAULT_ADMISSION_POLICY)
+        assert not planning.planned, reason
+        assert planning.receipt.suppressed_unknown_reason == 1, reason
