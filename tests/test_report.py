@@ -966,7 +966,7 @@ def test_html_marks_c2_servers(tmp_path: Path) -> None:
     # 未经人工认定不输出确定性 C2。
     assert "🎯" in text  # 高价值标注出现
     assert "确认 C2" not in text
-    assert "c2.gw.example.com" in text
+    assert text.count("c2.gw.example.com") >= 1
 
 
 def test_html_c2_badge_tiers_by_contact(tmp_path: Path) -> None:
@@ -1354,9 +1354,9 @@ def test_skip_advice_rows_collapsed_in_html(tmp_path: Path) -> None:
     report_html.render(rpt, str(out))
     html = out.read_text(encoding="utf-8")
     # 建议调证照常渲染；无需调证的值不再出现在文书里
-    assert "ctrl.backend.example.com" in html
-    assert "static.cdn.example.com" not in html
-    assert "sdk.assets.example.com" not in html
+    assert html.count("ctrl.backend.example.com") >= 1
+    assert html.count("static.cdn.example.com") == 0
+    assert html.count("sdk.assets.example.com") == 0
     for hidden in ("pay2.example.com", "kefu.example.com"):
         assert hidden not in html
     # N 精确锁（复审收紧）：四条路径各收敛 1 条，计数行措辞含精确数字
@@ -1368,7 +1368,8 @@ def test_skip_advice_rows_collapsed_in_html(tmp_path: Path) -> None:
     jout = tmp_path / "r.json"
     report_json.dump(rpt, str(jout))
     jtext = jout.read_text(encoding="utf-8")
-    assert "static.cdn.example.com" in jtext and "sdk.assets.example.com" in jtext
+    assert jtext.count("static.cdn.example.com") >= 1
+    assert jtext.count("sdk.assets.example.com") >= 1
 
 
 def test_polish_toc_and_offline_discipline(sample_report: Report, tmp_path: Path) -> None:
