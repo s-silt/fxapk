@@ -2,7 +2,7 @@
     版式对齐「思知」：具体 key 值与调证建议显著呈现。章节顺序：
       ① 概览（含加固 / uni 加密提示）
       ② ★ 调用插件 / 配置键值（CONFIG_KEY：Key=值 / 所属公司 / 调证建议 / 取证依据）
-      ③ 主控域名（DOMAIN/IP 中 advice=建议调证 的）
+      ③ 自有后端候选（DOMAIN/IP 中 advice=建议调证 的）
       ④ 通联域名 / IP（advice=无需调证 的，弱化 / 可折叠）
       ⑤ 第三方 SDK → 厂商
       ⑥ 支付 / 资金线索 · 联系方式线索
@@ -63,10 +63,10 @@
   .advice-need { background: #fee2e2; color: var(--hi); border: 1px solid #fca5a5; }
   .advice-skip { background: #e5e7eb; color: var(--lo); }
   .advice-todo { background: #fef3c7; color: var(--mid); }
-  /* C2 / 主控服务器醒目标注，比 advice 更抢眼。三档按「接触确认度」而非单纯深浅：
-       实连（最深红）＝ observed-contact 真抓到通信的确认 C2，最强；
-       运行时（告警橙·存疑）＝动态侧出现但未确认接触，刻意用橙提示「待核、勿全信」而非更强的红；
-       C2（红）＝纯静态疑似后端。深红仅留给确认档，避免把「出现在报告里」误呈成「实连」。 */
+  /* 自有后端候选醒目标注，比 advice 更抢眼。三档按「接触观测强弱」而非单纯深浅：
+       实连已观测（最深红）＝ observed-contact 真抓到连去该端点的通信，观测最强；
+       运行时出现（告警橙·存疑）＝动态侧出现但未确认接触，刻意用橙提示「待核、勿全信」而非更强的红；
+       疑似自有后端（红）＝纯静态提取候选。深红仅留给实连观测档；C2/主控认定属 Phase2 人工复核。 */
   .badge-c2 { background: #b91c1c; color: #fff; border: 1px solid #7f1d1d; }
   .badge-c2-runtime { background: #9a3412; color: #fff; border: 1px solid #7c2d12; }
   .badge-c2-live { background: #7f1d1d; color: #fff; border: 1px solid #450a0a; }
@@ -375,15 +375,15 @@
     {% endif %}
   {% endmacro %}
 
-  {#- C2 醒目徽标三档（信任分层）：
-        is_runtime_contact（observed-contact，真抓到连去该端点的通信）→ 深红「🎯 C2·实连」＝确认 C2；
-        仅 is_runtime_seen（动态侧出现，如手编/合成 runtime-derived）→ 橙「🎯 C2·运行时」＝出现未确认接触；
-        纯静态 is_c2 → 红「🎯 C2」＝疑似。观测强弱有别，勿把「出现在 runtime 报告里」呈成「实连」。 -#}
+  {#- 自有后端候选醒目徽标三档（观测强弱分层）：
+        is_runtime_contact（observed-contact，真抓到连去该端点的通信）→ 深红「🎯 实连已观测」；
+        仅 is_runtime_seen（动态侧出现，如手编/合成 runtime-derived）→ 橙「🎯 运行时出现」＝出现未确认接触；
+        纯静态 is_c2 → 红「🎯 疑似自有后端」＝未经动态观测或人工认定。C2/主控认定属 Phase2 人工复核。 -#}
   {% macro c2_badge(lead) %}
     {% if lead.is_c2 %}
-      {% if lead.is_runtime_contact %}<span class="badge badge-c2-live" title="真机抓包已观测到连去该端点的通信（observed-contact），确认 C2">🎯 C2·实连</span>
-      {% elif lead.is_runtime_seen %}<span class="badge badge-c2-runtime" title="运行时报告中出现，但未观测到真实接触该端点，未确认 C2 通信">🎯 C2·运行时</span>
-      {% else %}<span class="badge badge-c2" title="App 自有后端，疑似 C2/主控服务器">🎯 C2</span>{% endif %}
+      {% if lead.is_runtime_contact %}<span class="badge badge-c2-live" title="真机抓包已观测到连去该端点的通信（observed-contact）；是否为 C2/主控需 Phase2 人工认定">🎯 实连已观测</span>
+      {% elif lead.is_runtime_seen %}<span class="badge badge-c2-runtime" title="运行时报告中出现，未观测到真实接触该端点，未确认通信">🎯 运行时出现</span>
+      {% else %}<span class="badge badge-c2" title="静态提取的 App 自有后端候选，未经动态观测或人工认定">🎯 疑似自有后端</span>{% endif %}
     {% endif %}
   {% endmacro %}
 
@@ -462,9 +462,9 @@
     </tr>
   {% endmacro %}
 
-  {#- ============ ③ C2 / 主控域名（建议调证） ============ -#}
+  {#- ============ ③ 自有后端 / 高价值域名（建议调证） ============ -#}
   <section id="control-domains">
-    <h2><span class="num">③</span> 🎯 C2 / 主控域名 <span class="muted" style="font-size:13px;font-weight:400">（域名 / IP 中「建议调证」的高价值线索 = App 自有后端 / 命令服务器；「实连」= 真机抓到连去该端点的通信已确认，「运行时」= 运行时报告出现但未确认接触）</span></h2>
+    <h2><span class="num">③</span> 🎯 自有后端 / 高价值域名 <span class="muted" style="font-size:13px;font-weight:400">（域名 / IP 中「建议调证」的高价值线索 = App 自有后端候选；「实连已观测」= 真机抓到通信，「运行时出现」= 出现未确认接触；C2/主控认定属 Phase2 人工复核）</span></h2>
     {% if network_leads.need %}
     <table class="lead-table">
       <thead>
@@ -483,7 +483,7 @@
       </tbody>
     </table>
     {% else %}
-      <div class="empty">未识别到「建议调证」的主控域名 / IP。</div>
+      <div class="empty">未识别到「建议调证」的自有后端候选域名 / IP。</div>
     {% endif %}
   </section>
 
