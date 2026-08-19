@@ -75,7 +75,10 @@ def test_single_blocked_claim_java_timeout_exact_fields() -> None:
     assert gap.effect is rc.GapEffect.BLOCKS_CLAIM
     assert gap.claim_id is None
     assert gap.question_id == QUESTION_ID
-    assert gap.reason_codes == ("java_visibility_timeout",)
+    assert gap.reason_codes == (
+        "claim.static_endpoint_exhaustive",
+        "java_visibility_timeout",
+    )
     assert gap.required_observation_types == ("jadx_java_surface",)
     assert gap.coverage_requirements == ()
     assert gap.gap_id.startswith("gap-sha256:")
@@ -88,6 +91,7 @@ def test_multi_source_responsibility_aggregates_sorted() -> None:
     )
     (gap,) = _build(doc)
     assert gap.reason_codes == (
+        "claim.static_endpoint_exhaustive",
         "dex_visibility_partial",
         "java_visibility_failed",
     )
@@ -102,8 +106,13 @@ def test_multiple_blocked_claims_sorted_and_deterministic() -> None:
     gaps = _build(doc)
     assert [g.reason_codes for g in gaps] == [
         # blocked claims 按排序序：no_remote_config（dex+resource）在前
-        ("dex_visibility_unavailable", "resource_visibility_unknown"),
-        ("dex_visibility_unavailable", "java_visibility_partial", "resource_visibility_unknown"),
+        ("claim.no_remote_config", "dex_visibility_unavailable", "resource_visibility_unknown"),
+        (
+            "claim.static_endpoint_exhaustive",
+            "dex_visibility_unavailable",
+            "java_visibility_partial",
+            "resource_visibility_unknown",
+        ),
     ]
     assert len({g.gap_id for g in gaps}) == 2
     again = _build(doc)
@@ -178,14 +187,17 @@ def test_runtime_unknown_blocked_claim_produces_gap() -> None:
     """
     doc = _visibility(blocked=["runtime_contact_observed"], levels={"runtime": "unknown"})
     (gap,) = _build(doc)
-    assert gap.reason_codes == ("runtime_visibility_unknown",)
+    assert gap.reason_codes == (
+        "claim.runtime_contact_observed",
+        "runtime_visibility_unknown",
+    )
     assert gap.required_observation_types == ("runtime_capture",)
 
 
 def test_static_claim_with_unknown_source_attributes() -> None:
     doc = _visibility(blocked=["no_sms_interception"], levels={"dex": "unknown"})
     (gap,) = _build(doc)
-    assert gap.reason_codes == ("dex_visibility_unknown",)
+    assert gap.reason_codes == ("claim.no_sms_interception", "dex_visibility_unknown")
 
 
 def test_malformed_source_values_rejected() -> None:

@@ -23,10 +23,7 @@ from apkscan.core.atomic import atomic_create_bytes
 
 recognize_app = typer.Typer(
     add_completion=False,
-    help=(
-        "识别与取证重分析请求投影。生产映射 v1 可能产生诚实空结果；"
-        "空输出≠无缺口。"
-    ),
+    help=("识别与取证重分析请求投影。生产映射 v1 可能产生诚实空结果；空输出≠无缺口。"),
 )
 
 # labels 子组（P4-C）：只读标签校验器，挂在同一 recognize 命名空间下。
@@ -40,7 +37,7 @@ recognize_app.command("evaluate")(_evaluate_command)
 
 DEFAULT_POLICY = rp.DEFAULT_ADMISSION_POLICY
 
-_LEDGER_PROFILE = "p2d2-v1"
+_LEDGER_PROFILE = "p3e2-v1"
 _RECEIPT_SCHEMA_VERSION = "1.0"
 _PRODUCER_ID = "fxapk-recognize-reanalysis"
 _PRODUCER_VERSION = "1.0"
@@ -128,28 +125,20 @@ def _load_ledger(path: Path):
 def _event_count(events: Sequence[object], event_type: jl.EventType) -> int:
     """Count events of a specified ledger event type."""
 
-    return sum(
-        1
-        for event in events
-        if getattr(event, "event_type", None) is event_type
-    )
+    return sum(1 for event in events if getattr(event, "event_type", None) is event_type)
 
 
 def _validate_profile(events: Sequence[object], projection: object) -> str:
-    """Validate profile p2d2-v1 and return its raw sample SHA-256 value."""
+    """Validate profile p3e2-v1 and return its raw sample SHA-256 value."""
 
     run_count = _event_count(events, jl.EventType.RUN_OPENED)
     question_count = _event_count(events, jl.EventType.QUESTION_OPENED)
 
     projected_questions = getattr(projection, "questions", ())
-    if (
-        run_count != 1
-        or question_count != 1
-        or len(projected_questions) != 1
-    ):
+    if run_count != 1 or question_count < 1 or len(projected_questions) != question_count:
         _fail(
-            "unsupported_ledger_profile: p2d2-v1 requires exactly one "
-            "RUN_OPENED and one QUESTION_OPENED"
+            "unsupported_ledger_profile: p3e2-v1 requires exactly one "
+            "RUN_OPENED and at least one QUESTION_OPENED"
         )
 
     run = getattr(projection, "run", None)
@@ -158,9 +147,7 @@ def _validate_profile(events: Sequence[object], projection: object) -> str:
 
     subjects = getattr(run, "subjects", ())
     sample_subjects = tuple(
-        subject
-        for subject in subjects
-        if getattr(subject, "kind", None) is rc.SubjectKind.SAMPLE
+        subject for subject in subjects if getattr(subject, "kind", None) is rc.SubjectKind.SAMPLE
     )
 
     if len(sample_subjects) > 1:
@@ -258,18 +245,11 @@ def _sort_key(row: Mapping[str, object]) -> tuple[int, float, str, str]:
     try:
         rank = _PRIORITY_RANK[priority_class]
     except KeyError as exc:
-        raise ValueError(
-            f"unsupported request priority class: {priority_class}"
-        ) from exc
+        raise ValueError(f"unsupported request priority class: {priority_class}") from exc
 
     information_gain = priority.get("expected_information_gain")
-    if (
-        not isinstance(information_gain, (int, float))
-        or isinstance(information_gain, bool)
-    ):
-        raise ValueError(
-            "encoded request expected_information_gain is not numeric"
-        )
+    if not isinstance(information_gain, (int, float)) or isinstance(information_gain, bool):
+        raise ValueError("encoded request expected_information_gain is not numeric")
 
     dedupe_key = _required_string(row, "dedupe_key")
     request_id = _required_string(row, "request_id")
@@ -343,7 +323,7 @@ def _publish_pair(
 @recognize_app.command(
     "reanalysis",
     help=(
-        "从 p2d2-v1 judgment ledger 投影 proposed 重分析请求。"
+        "从 p3e2-v1 judgment ledger 投影 proposed 重分析请求。"
         "生产映射 v1 可能不映射任何缺口，因此空输出≠无缺口；"
         "合法空结果会发布零字节 requests 文件及 receipt。"
     ),
@@ -383,31 +363,61 @@ def reanalysis(
         gap_statuses = dict(getattr(projection, "gap_statuses"))
         anchors = getattr(projection, "anchors")
 
-        context = rxc.PlanningContext(
-            question=questions[0],
-            gaps=gaps,
-            gap_statuses=gap_statuses,
-            anchors=anchors,
-            supporting_observation_ids=(),
-            contradicting_observation_ids=(),
-            authorization_ceiling=ceiling,
-            sample_digest=f"sha256:{sample_sha256}",
-        )
+        planned: list[rp.PlannedAction] = []
+        planned_with_context: list[tuple[rp.PlannedAction, rxc.PlanningContext]] = []
+        planning_fields = _empty_planning_receipt()
+        planned_questions = 0
 
-        if gaps:
+        for question in questions:
+            question_gaps = tuple(gap for gap in gaps if gap.question_id == question.question_id)
+            # 空 gap 的 question 不进 planner（诚实空快路径的逐 question 形态）。
+            if not question_gaps:
+                continue
+            question_gap_statuses = {gap.gap_id: gap_statuses[gap.gap_id] for gap in question_gaps}
+            context = rxc.PlanningContext(
+                question=question,
+                gaps=question_gaps,
+                gap_statuses=question_gap_statuses,
+                anchors=anchors,
+                supporting_observation_ids=(),
+                contradicting_observation_ids=(),
+                authorization_ceiling=ceiling,
+                sample_digest=f"sha256:{sample_sha256}",
+            )
             planning = rp.plan_reanalysis(
                 context,
                 producer=_producer(),
                 policy=DEFAULT_POLICY,
             )
-            planned = planning.planned
-            planning_fields = _planning_receipt_fields(planning.receipt)
-        else:
-            planned = ()
-            planning_fields = _empty_planning_receipt()
+            question_fields = _planning_receipt_fields(planning.receipt)
+            planned_questions += 1
+
+            # 版本字段各 question 同策略同值，取实跑收据的（防未来策略注入时留空默认）。
+            for field in ("predicate_version", "mapping_version", "matrix_version"):
+                planning_fields[field] = question_fields[field]
+            for field in (
+                "gaps_seen",
+                "suppressed_not_open",
+                "suppressed_low_value",
+                "suppressed_unknown_reason",
+            ):
+                planning_fields[field] = cast(int, planning_fields[field]) + cast(
+                    int, question_fields[field]
+                )
+            for field in ("suppressed_by_ceiling", "emitted"):
+                aggregate_counts = _mapping_counts(
+                    cast(Sequence[tuple[str, int]], planning_fields[field])
+                )
+                for key, count in cast(Sequence[tuple[str, int]], question_fields[field]):
+                    aggregate_counts[key] = aggregate_counts.get(key, 0) + count
+                planning_fields[field] = tuple(sorted(aggregate_counts.items()))
+
+            for planned_action in planning.planned:
+                planned.append(planned_action)
+                planned_with_context.append((planned_action, context))
 
         encoded_rows: list[Mapping[str, object]] = []
-        for planned_action in planned:
+        for planned_action, context in planned_with_context:
             request = rxc.project_reanalysis_request(
                 planned_action.action, context, planned_action.meta
             )
@@ -423,7 +433,7 @@ def reanalysis(
         elif planned:
             extended, _projection_receipt = rl.append_reanalysis_proposals(
                 events,
-                planned=planned,
+                planned=tuple(planned),
                 actor=_actor(),
                 occurred_at=_occurred_at(),
             )
@@ -433,9 +443,7 @@ def reanalysis(
                 sample_sha256=sample_sha256,
             )
             if isinstance(ledger_sidecar, dict) and ledger_sidecar.get("ok") is True:
-                sidecar_to_rollback = Path(str(ledger_out)) / str(
-                    ledger_sidecar["locator"]
-                )
+                sidecar_to_rollback = Path(str(ledger_out)) / str(ledger_sidecar["locator"])
         else:
             ledger_sidecar = {
                 "published": False,
@@ -461,13 +469,12 @@ def reanalysis(
             "matrix_version": planning_fields["matrix_version"],
             "ledger_profile": _LEDGER_PROFILE,
             "questions_seen": len(questions),
+            "questions_planned": planned_questions,
             "gaps_seen": planning_fields["gaps_seen"],
             "suppressed": {
                 "not_open": planning_fields["suppressed_not_open"],
                 "low_value": planning_fields["suppressed_low_value"],
-                "unknown_reason": planning_fields[
-                    "suppressed_unknown_reason"
-                ],
+                "unknown_reason": planning_fields["suppressed_unknown_reason"],
                 "over_ceiling": {
                     "count": sum(over_ceiling_by_type.values()),
                     "by_type": over_ceiling_by_type,

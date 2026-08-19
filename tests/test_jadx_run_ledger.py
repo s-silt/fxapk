@@ -29,6 +29,7 @@ def _stub_resolve_jadx(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(jadx_mod.tools, "resolve_jadx", lambda: (["jadx"], {}))
 
+
 def _ledger_name(ctx: FakeContext) -> str:
     """sidecar 是样本寻址的（同 out 目录多样本不冲突）。"""
     sha = hashlib.sha256(Path(ctx.apk_path).read_bytes()).hexdigest()
@@ -82,9 +83,7 @@ def test_no_cache_root_no_ledger(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert "jadx_judgment_ledger" not in report.meta
 
 
-def test_ledger_written_and_replayable(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_ledger_written_and_replayable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """★启用索引 → sidecar 落盘、逐行 canonical、整链 replay 通过；
     事件序 RUN_OPENED→QUESTION_OPENED→ACTION_PROPOSED→ACTION_AUTHORIZED→OUTCOME；
     subject 是样本 sha256；actor 是具名自动策略、绝不伪装人签。"""
@@ -96,10 +95,16 @@ def test_ledger_written_and_replayable(
     events = _read_chain(ledger_path)
     kinds = [e.event_type for e in events]
     # ★精确事件序（单 usage 动作、hits=() 零观察、无 callpath、gap 驱动）。
+    #   P3-E2 起中段插入 visibility 块：QUESTION_OPENED + N×GAP_IDENTIFIED，
+    #   N 从 anchor 取（同夹具确定）。
+    vis_note = report.meta["jadx_judgment_ledger"]["visibility_gaps"]
+    assert vis_note["appended"] is True
     assert kinds == [
         jl.EventType.RUN_OPENED,
         jl.EventType.QUESTION_OPENED,
         jl.EventType.GAP_IDENTIFIED,
+        jl.EventType.QUESTION_OPENED,
+        *[jl.EventType.GAP_IDENTIFIED] * vis_note["gap_count"],
         jl.EventType.ACTION_PROPOSED,
         jl.EventType.ACTION_AUTHORIZED,
         jl.EventType.ACTION_OUTCOME_RECORDED,
@@ -137,9 +142,7 @@ def test_ledger_written_and_replayable(
     assert anchor["replay_ok"] is True
 
 
-def test_hash_failure_opens_no_ledger(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_hash_failure_opens_no_ledger(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """★哈希失败 → 不开账本流（绝不发空 subject）：无文件、无 meta 锚。"""
     _patch(monkeypatch)
     ctx = _ctx_with_cache(tmp_path)
@@ -218,15 +221,12 @@ def test_ownership_action_lands_when_compared(
     events = _read_chain(out2 / _ledger_name(ctx))
     actions = [e.payload for e in events if e.event_type is jl.EventType.ACTION_PROPOSED]
     assert [a.action_type for a in actions] == [
-        "jadx-usage-query", "jadx-ownership-projection",
+        "jadx-usage-query",
+        "jadx-ownership-projection",
     ]
-    observations = [
-        e for e in events if e.event_type is jl.EventType.OBSERVATION_ADDED
-    ]
+    observations = [e for e in events if e.event_type is jl.EventType.OBSERVATION_ADDED]
     assert observations, "自比全 match 必须产 ownership 匹配观察"
-    assert all(
-        e.payload.observation_type == "jadx_ownership_match" for e in observations
-    )
+    assert all(e.payload.observation_type == "jadx_ownership_match" for e in observations)
 
 
 def test_two_samples_share_out_dir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -261,19 +261,30 @@ def test_ownership_subject_key_mismatch_refused(
     report1, _ = _run(tmp_path, ctx)
     real_key = report1.meta["jadx_index_key"]
     forged_summary = dict(report1.meta.get("jadx_ownership_summary") or {})
-    forged_summary.update({
-        "status": "compared",
-        "subject_index_key": real_key,
-        "baseline_index_key": real_key,
-        "baseline_manifest_digest": "sha256:" + hashlib.sha256(
-            (Path(ctx.jadx_cache_root) / real_key / "manifest.json").read_bytes()
-        ).hexdigest(),
-    })
+    forged_summary.update(
+        {
+            "status": "compared",
+            "subject_index_key": real_key,
+            "baseline_index_key": real_key,
+            "baseline_manifest_digest": "sha256:"
+            + hashlib.sha256(
+                (Path(ctx.jadx_cache_root) / real_key / "manifest.json").read_bytes()
+            ).hexdigest(),
+        }
+    )
     # current_index_key 与摘要 subject 不一致（伪造成另一个 key）→ 拒落。
     events = jrl._append_ownership_action_if_available(
-        (), question=None, gap_id="gap-x", subjects=(), input_anchor_ids=(),  # type: ignore[arg-type]
-        summary=forged_summary, cache_root=str(ctx.jadx_cache_root),
-        producer=None, policy=None, actor=None, occurred_at="",  # type: ignore[arg-type]
+        (),
+        question=None,
+        gap_id="gap-x",
+        subjects=(),
+        input_anchor_ids=(),  # type: ignore[arg-type]
+        summary=forged_summary,
+        cache_root=str(ctx.jadx_cache_root),
+        producer=None,
+        policy=None,
+        actor=None,
+        occurred_at="",  # type: ignore[arg-type]
         current_index_key="f" * 64,
     )
     assert events == ()
@@ -294,3 +305,129 @@ def test_stage_failure_never_degrades_analysis_status(
     ctx = _ctx_with_cache(tmp_path)
     report, _ = _run(tmp_path, ctx)
     assert report.analysis_status == "complete"
+
+
+# ---------------------------------------------------------------------------
+# P3-E2：visibility gap 入账（spec 2026-08-19-p3e2-gap-ledger-wiring-design.md）
+# ---------------------------------------------------------------------------
+
+_VIS_PREDICATE = "analysis-visibility-recoverable"
+
+
+def _questions(events: tuple[jl.LedgerEvent, ...]) -> list[object]:
+    return [e.payload for e in events if e.event_type is jl.EventType.QUESTION_OPENED]
+
+
+def _gaps(events: tuple[jl.LedgerEvent, ...]) -> list[object]:
+    return [e.payload for e in events if e.event_type is jl.EventType.GAP_IDENTIFIED]
+
+
+def _vis_question(events: tuple[jl.LedgerEvent, ...]) -> object:
+    hits = [
+        q
+        for q in _questions(events)
+        if any(c.predicate == _VIS_PREDICATE for c in q.allowed_conclusions)
+    ]
+    assert len(hits) == 1, f"visibility question 数={len(hits)}"
+    return hits[0]
+
+
+def _complete_visibility(*_args: object, **_kw: object) -> dict:
+    sources = {
+        name: {"visibility": "complete", "why": [], "inputs_seen": []}
+        for name in ("dex", "java", "native", "resource", "runtime")
+    }
+    return {
+        "schema_version": "1.1",
+        "sources": sources,
+        "claims": {},
+        "blocked_claims": [],
+        "remediation": "not_attempted",
+        "notes": [],
+        "next_actions": [],
+        "degraded": False,
+    }
+
+
+def test_visibility_gaps_enter_ledger(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """L1 真入口：静态跑 runtime 恒 unknown → 至少一个 visibility gap 入账。"""
+    _patch(monkeypatch)
+    ctx = _ctx_with_cache(tmp_path)
+    report, out_dir = _run(tmp_path, ctx)
+    events = _read_chain(out_dir / _ledger_name(ctx))
+    vq = _vis_question(events)
+    vis_gaps = [g for g in _gaps(events) if g.question_id == vq.question_id]
+    assert vis_gaps, "visibility question 下必须挂 gap"
+    # runtime 未观测的具体档位由 assess 定（此夹具实测为 unavailable）；
+    # 锁稳定的主张令牌，不锁易变档位。
+    assert any("claim.runtime_contact_observed" in g.reason_codes for g in vis_gaps)
+    anchor = report.meta["jadx_judgment_ledger"]["visibility_gaps"]
+    assert anchor["appended"] is True
+    assert anchor["gap_count"] == len(vis_gaps)
+    assert anchor["question_id"] == vq.question_id
+
+
+def test_no_blocked_claims_keeps_single_question(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """L2 无封锁主张 → 不开空 question，事件形态与旧版一致。"""
+    _patch(monkeypatch)
+    monkeypatch.setattr("apkscan.core.visibility.assess", _complete_visibility)
+    ctx = _ctx_with_cache(tmp_path)
+    report, out_dir = _run(tmp_path, ctx)
+    events = _read_chain(out_dir / _ledger_name(ctx))
+    assert len(_questions(events)) == 1
+    anchor = report.meta["jadx_judgment_ledger"]["visibility_gaps"]
+    assert anchor == {"appended": False, "reason": "no_blocked_claims"}
+
+
+def test_missing_visibility_meta_skips_with_reason(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """L3 visibility 阶段崩掉 → meta 无键 → 显式 skip，主账本照常发布。"""
+    _patch(monkeypatch)
+
+    def _boom(*_args: object, **_kw: object) -> dict:
+        raise RuntimeError("visibility stage down")
+
+    monkeypatch.setattr("apkscan.core.visibility.assess", _boom)
+    ctx = _ctx_with_cache(tmp_path)
+    report, out_dir = _run(tmp_path, ctx)
+    events = _read_chain(out_dir / _ledger_name(ctx))  # 主账本仍可 replay
+    assert len(_questions(events)) == 1
+    anchor = report.meta["jadx_judgment_ledger"]["visibility_gaps"]
+    assert anchor == {"appended": False, "reason": "visibility_missing"}
+
+
+def test_invalid_visibility_shape_skips_with_reason(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """L4 形状非法 → gap 生产 fail-closed 转显式 skip，绝不杀主账本。"""
+    _patch(monkeypatch)
+    monkeypatch.setattr(
+        "apkscan.core.visibility.assess", lambda *_a, **_k: {"schema_version": "9.9"}
+    )
+    ctx = _ctx_with_cache(tmp_path)
+    report, out_dir = _run(tmp_path, ctx)
+    _read_chain(out_dir / _ledger_name(ctx))
+    anchor = report.meta["jadx_judgment_ledger"]["visibility_gaps"]
+    assert anchor["appended"] is False
+    assert anchor["reason"] == "visibility_invalid"
+
+
+def test_visibility_ids_deterministic_across_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """L5 同样本两次独立构建 → visibility question/gap id 逐一相同。"""
+    _patch(monkeypatch)
+    ids: list[tuple[str, tuple[str, ...]]] = []
+    for name in ("one", "two"):
+        base = tmp_path / name
+        base.mkdir()
+        ctx = _ctx_with_cache(base)
+        _report, out_dir = _run(base, ctx)
+        events = _read_chain(out_dir / _ledger_name(ctx))
+        vq = _vis_question(events)
+        gap_ids = tuple(g.gap_id for g in _gaps(events) if g.question_id == vq.question_id)
+        ids.append((vq.question_id, gap_ids))
+    assert ids[0] == ids[1]

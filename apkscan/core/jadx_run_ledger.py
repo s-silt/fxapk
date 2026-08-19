@@ -35,9 +35,12 @@ from apkscan.core.jadx_ownership import project_ownership
 
 logger = logging.getLogger(__name__)
 
+
 def _sidecar_name(sample_sha256: str) -> str:
     """样本寻址的 sidecar 名：同一 out 目录多样本各得其账本，绝不互相顶掉。"""
     return f"judgment-ledger-{sample_sha256}.jsonl"
+
+
 _AUTO_POLICY_ID = "fxapk.pipeline.auto_policy"
 _PRODUCER_ID = "fxapk.jadx.index"
 
@@ -426,11 +429,7 @@ def _append_ownership_action_if_available(
     baseline_key = _valid_hex_key(summary.get("baseline_index_key"))
     declared_baseline_digest = _valid_digest(summary.get("baseline_manifest_digest"))
 
-    if (
-        subject_key is None
-        or baseline_key is None
-        or declared_baseline_digest is None
-    ):
+    if subject_key is None or baseline_key is None or declared_baseline_digest is None:
         return events
 
     actual_baseline_digest = _manifest_digest(cache_root, baseline_key)
@@ -517,20 +516,96 @@ def _append_ownership_action_if_available(
     )
 
 
+def _append_visibility_section(
+    events: tuple[jl.LedgerEvent, ...],
+    *,
+    meta: Mapping[str, object],
+    subjects: tuple[rc.SubjectRef, ...],
+    actor: rc.Actor,
+    occurred_at: str,
+    system_producer: rc.ProducerRef,
+) -> tuple[tuple[jl.LedgerEvent, ...], dict[str, object]]:
+    from apkscan.core import gap_production
+
+    visibility = meta.get("visibility")
+    if visibility is None:
+        return events, {
+            "appended": False,
+            "reason": "visibility_missing",
+        }
+
+    # 非 Mapping 值不得进 gap 生产层：裸 AttributeError 会逃过本节的显式簿记口径。
+    if not isinstance(visibility, Mapping):
+        return events, {
+            "appended": False,
+            "reason": "visibility_invalid",
+        }
+
+    visibility_question = codec.build_question(
+        question_type=rc.QuestionType.PLAN_REANALYSIS,
+        subjects=subjects,
+        allowed_conclusions=(
+            rc.AllowedConclusion(
+                predicate="analysis-visibility-recoverable",
+                claim_modes=(rc.ClaimMode.POSITIVE,),
+                object_kind=rc.ObjectKind.NONE,
+                allowed_categorical_values=(),
+            ),
+        ),
+    )
+
+    try:
+        gaps = gap_production.build_visibility_gaps(
+            visibility,
+            question_id=visibility_question.question_id,
+            producer=system_producer,
+        )
+    except gap_production.GapProductionError as exc:
+        return events, {
+            "appended": False,
+            "reason": exc.reason_code,
+        }
+
+    # 无 gap 时不得把空 question 入账。
+    if not gaps:
+        return events, {
+            "appended": False,
+            "reason": "no_blocked_claims",
+        }
+
+    events = _append(
+        events,
+        jl.EventType.QUESTION_OPENED,
+        actor,
+        occurred_at,
+        visibility_question,
+    )
+    for gap in gaps:
+        events = _append(
+            events,
+            jl.EventType.GAP_IDENTIFIED,
+            actor,
+            occurred_at,
+            gap,
+        )
+
+    return events, {
+        "appended": True,
+        "gap_count": len(gaps),
+        "question_id": visibility_question.question_id,
+    }
+
+
 def _build_events(
     *,
     meta: Mapping[str, object],
     cache_root: str,
     sample_sha256: str,
-) -> tuple[jl.LedgerEvent, ...]:
+) -> tuple[tuple[jl.LedgerEvent, ...], dict[str, object]]:
     sample_digest = "sha256:" + sample_sha256
     index_block = _receipt_index(meta)
 
-    receipt_key = (
-        _valid_hex_key(index_block.get("key"))
-        if index_block is not None
-        else None
-    )
+    receipt_key = _valid_hex_key(index_block.get("key")) if index_block is not None else None
     flattened_key = _valid_hex_key(meta.get("jadx_index_key"))
 
     # receipt key 与兼容扁平 key 冲突时不选择任一 manifest，避免锚错索引。
@@ -643,6 +718,15 @@ def _build_events(
         gap,
     )
 
+    events, visibility_note = _append_visibility_section(
+        events,
+        meta=meta,
+        subjects=subjects,
+        actor=actor,
+        occurred_at=occurred_at,
+        system_producer=system_producer,
+    )
+
     input_anchor_ids = tuple(sorted(anchor.anchor_id for anchor in anchors))
     events = _append_usage_action(
         events,
@@ -676,7 +760,7 @@ def _build_events(
 
     jl.validate_event_chain(events)
     jl.replay(events)
-    return events
+    return events, visibility_note
 
 
 def _anchor(
@@ -689,10 +773,13 @@ def _anchor(
     attempted_event_count: int | None = None,
     reason: str | None = None,
     published: bool | None = None,
+    visibility_gaps: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """锚只写实际存在且语义匹配的字段：digest/event_count 只描述已验证的磁盘文件；
     attempted_* 描述本次拟发布字节——冲突/失败时绝不冒充磁盘摘要。"""
     value: dict[str, object] = {"locator": locator, "replay_ok": replay_ok}
+    if visibility_gaps is not None:
+        value["visibility_gaps"] = visibility_gaps
     if digest is not None:
         value["digest"] = digest
     if event_count is not None:
@@ -753,19 +840,21 @@ def build_and_publish(
         return None
 
     locator = _sidecar_name(sample_sha256)
+    visibility_note: dict[str, object] | None = None
     try:
-        events = _build_events(
+        events, visibility_note = _build_events(
             meta=meta,
             cache_root=cache_root,
             sample_sha256=sample_sha256,
         )
-        data = (
-            "\n".join(jl.encode_event(event) for event in events) + "\n"
-        ).encode("utf-8")
+        data = ("\n".join(jl.encode_event(event) for event in events) + "\n").encode("utf-8")
     except Exception:  # noqa: BLE001 — ledger 是附加消费面，构造失败不得打断主分析
         logger.exception("JADX judgment ledger 构造失败")
         return _anchor(
-            locator=locator, replay_ok=False, reason=_REASON_LEDGER_BUILD_FAILED
+            locator=locator,
+            replay_ok=False,
+            reason=_REASON_LEDGER_BUILD_FAILED,
+            visibility_gaps=visibility_note,
         )
 
     attempted_digest = _sha256_bytes(data)
@@ -776,18 +865,24 @@ def build_and_publish(
     except Exception:  # noqa: BLE001 — 原子发布失败必须留痕但不得传播
         logger.exception("JADX judgment ledger sidecar 发布失败")
         return _anchor(
-            locator=locator, replay_ok=False,
+            locator=locator,
+            replay_ok=False,
             attempted_digest=attempted_digest,
             attempted_event_count=attempted_event_count,
-            reason=_REASON_PUBLISH_FAILED, published=False,
+            reason=_REASON_PUBLISH_FAILED,
+            published=False,
+            visibility_gaps=visibility_note,
         )
 
     if not published:
         return _anchor(
-            locator=locator, replay_ok=False,
+            locator=locator,
+            replay_ok=False,
             attempted_digest=attempted_digest,
             attempted_event_count=attempted_event_count,
-            reason=_REASON_ALREADY_EXISTS, published=False,
+            reason=_REASON_ALREADY_EXISTS,
+            published=False,
+            visibility_gaps=visibility_note,
         )
 
     try:
@@ -795,15 +890,21 @@ def build_and_publish(
     except Exception:  # noqa: BLE001 — 文件已发布但未通过回读/replay，不能声称闭合
         logger.exception("JADX judgment ledger sidecar replay 失败")
         return _anchor(
-            locator=locator, replay_ok=False,
+            locator=locator,
+            replay_ok=False,
             attempted_digest=attempted_digest,
             attempted_event_count=attempted_event_count,
-            reason=_REASON_REPLAY_FAILED, published=True,
+            reason=_REASON_REPLAY_FAILED,
+            published=True,
+            visibility_gaps=visibility_note,
         )
 
     return _anchor(
-        locator=locator, digest=attempted_digest,
-        event_count=len(replayed), replay_ok=True,
+        locator=locator,
+        digest=attempted_digest,
+        event_count=len(replayed),
+        replay_ok=True,
+        visibility_gaps=visibility_note,
     )
 
 
