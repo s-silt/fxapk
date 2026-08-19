@@ -13,7 +13,15 @@ affect automated / CI / agent callers are called out explicitly**.
   算错即令 `trace_callpath` 按真实 arity 查**得空**，而空结果在本模块语义里是「未观察到」
   而非「不可达」，这类假阴性不会被任何既有断言揭穿；`jadx_ownership` 的方法身份
   `(class_name, path, "name/arity")` 同样错位、与官方 baseline 对不齐。
-  真实混淆样本实测：162481 个方法声明中 930 个（0.57%）arity 算错。
+  已在真实混淆样本（万级 Java 文件 / 万级类 / 五万级方法）上端到端验证：修复后提取不崩、
+  arity 分布合理。
+
+  同批补上参数段的 **fail-closed 缺口**：畸形参数（尖括号不配对 / 空参数段 / 超 JVM 255
+  参数上限）此前会被折叠成一个「看起来正常」的 arity——`f(,,,,)` 折叠后是 0，与真实的
+  `f()` 撞进同一个 `cls#name/arity` 身份，而 callpath 查询按同 id **合并出边**，等于让
+  敌对样本把伪造的调用边挂到真实方法上。参数段是样本可控输入，不可判定就必须说不可判定：
+  现在这类声明整条丢弃，并把该 shard 的 `coverage` 降为 `partial`（丢了声明就不再声称完整）。
+
   **对 agent / CI 调用方的影响**：本次不改 structure 段字段集，只改既有 `arity` 的取值，
   但 schema 参与 key material，**bump 令全部既有索引工件变为可重建的 CacheMiss**——
   下次分析会重付一次 jadx 反编译（每样本 300–1200s）。已缓存 index_key 会变；

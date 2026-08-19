@@ -5,7 +5,7 @@ S2：受控 cache root、create-only 原子发布、fail-closed 加载校验链�
 S3：确定性枚举、bounded postings、结构提取（P1-B）与 find_value_usage。
 本模块不负责 JADX 调用；调用路径查询见 jadx_callpath。
 
-结构段（schema 1.2）是对反编译 Java 的**有界启发式**解析——反射、JNI、动态
+结构段（版本见 ``INDEX_SCHEMA_VERSION``）是对反编译 Java 的**有界启发式**解析——反射、JNI、动态
 分发与混淆构造均不可见；未识别的语法被跳过而非报错。结构的不完整是文档化的
 启发式属性，绝不能被解释为「不存在」。
 """
@@ -627,7 +627,7 @@ _MAX_PERSISTED_IDENTIFIER = 1024
 
 
 def _validate_shard_structure(shard_value: Mapping[str, object], files: set[str]) -> None:
-    """schema 1.2 structure 段的 fail-closed 校验；违规抛精确 reason code。
+    """当前 schema（``INDEX_SCHEMA_VERSION``）structure 段的 fail-closed 校验；违规抛精确 reason code。
 
     形状违规 / 失序 / path 不在 files → malformed；完全重复的 (name, path) 类身份
     或 (name, arity, start_line) 方法三元组 → duplicate_structure。同名不同 path
@@ -1143,6 +1143,8 @@ _CTOR_DECL_RE = re.compile(
     r"^\s*(?:(?:public|private|protected|static|final|synchronized)\s+)*"
     r"([A-Za-z_$][\w$]*)\s*\(([^()]*)\)\s*(?:throws[^{]*)?\{"
 )
+#: JVM 方法参数上限（255 个 slot）；超出即该声明不是真实可编译方法，不予采信。
+_MAX_DECLARED_ARITY = 255
 _CALL_SITE_RE = re.compile(r"\b([A-Za-z_$][\w$]*)\s*\(")
 #: 语法关键字绝不是调用点；`new X(...)` 的构造器调用不是 P1-B 的边（文档化限制）。
 _CALL_KEYWORDS = frozenset(
@@ -1220,36 +1222,46 @@ def _sanitize_java_source(text: str) -> list[str]:
     return sanitized
 
 
-def _declared_arity(params: str) -> int:
-    """按尖括号深度 0 处的逗号计参数个数。
+def _declared_arity(params: str) -> int | None:
+    """按尖括号深度 0 处的逗号计参数个数；**参数段畸形时返回 None**。
 
     只需跟踪尖括号：`_METHOD_DECL_RE` / `_CTOR_DECL_RE` 的参数捕获组是 `[^()]*`，
     圆括号（含带参注解）根本进不来；数组维度 `int[][]` 也不含逗号。
-    不配对的 `>` 在混淆/截断产物里是常态，深度不得减到负数。
+
+    ★畸形一律返回 None 交调用方丢弃该声明，绝不折叠成一个「看起来正常」的 arity：
+    `f(,,,,)` 折叠后是 0，与真实的 `f()` 撞成同一个 `cls#name/arity` 身份，而
+    :func:`~apkscan.core.jadx_callpath._index_methods` 按同 id **合并出边**——
+    等于让敌对样本把伪造的调用边挂到真实方法上。参数段是样本可控输入，
+    不可判定就必须说不可判定。三类畸形：尖括号不配对、存在空参数段、超 JVM 上限。
     """
     text = params.strip()
     if not text:
         return 0
 
-    arity = 0
+    arity = 1
     angle_depth = 0
-    has_content = False
+    segment_has_content = False
     for char in text:
         if char == "<":
             angle_depth += 1
         elif char == ">":
-            angle_depth = max(0, angle_depth - 1)
+            if angle_depth == 0:
+                return None
+            angle_depth -= 1
         elif char == "," and angle_depth == 0:
-            if has_content:
-                arity += 1
-            has_content = False
+            if not segment_has_content:
+                return None
+            segment_has_content = False
+            arity += 1
             continue
 
         if not char.isspace():
-            has_content = True
+            segment_has_content = True
 
-    if has_content:
-        arity += 1
+    if angle_depth != 0 or not segment_has_content:
+        return None
+    if arity > _MAX_DECLARED_ARITY:
+        return None
     return arity
 
 
@@ -1351,9 +1363,14 @@ def _extract_file_structure(
                     if method_match:
                         name, params = method_match.group(1), method_match.group(2)
                 if name is not None and len(name) <= limits.max_identifier_len:
+                    arity = _declared_arity(params)
                     methods = classes[class_index]["methods"]
                     assert isinstance(methods, list)
-                    if len(methods) >= limits.max_methods_per_class:
+                    if arity is None:
+                        # 参数段不可判定 → 丢弃该声明，并按「不完整要说出来」标记截断。
+                        # 绝不落一个会与真实重载撞身份的 arity（见 _declared_arity）。
+                        limited = True
+                    elif len(methods) >= limits.max_methods_per_class:
                         limited = True
                     else:
                         end = _method_end_line(clean_lines, number)
@@ -1362,7 +1379,7 @@ def _extract_file_structure(
                         methods.append(
                             {
                                 "name": name,
-                                "arity": _declared_arity(params),
+                                "arity": arity,
                                 "start_line": number,
                                 "end_line": end,
                                 "body_digest": _method_body_digest(lines, number, end),
