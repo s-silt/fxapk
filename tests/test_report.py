@@ -1343,6 +1343,8 @@ def test_skip_advice_rows_collapsed_in_html(tmp_path: Path) -> None:
             Lead(
                 category=LeadCategory.SDK_SERVICE, value="sdk.assets.example.com", advice="无需调证"
             ),
+            Lead(category=LeadCategory.PAYMENT, value="pay2.example.com", advice="无需调证"),
+            Lead(category=LeadCategory.CONTACT, value="kefu.example.com", advice="无需调证"),
         ],
         endpoints=[],
         findings=[],
@@ -1355,6 +1357,10 @@ def test_skip_advice_rows_collapsed_in_html(tmp_path: Path) -> None:
     assert "ctrl.backend.example.com" in html
     assert "static.cdn.example.com" not in html
     assert "sdk.assets.example.com" not in html
+    for hidden in ("pay2.example.com", "kefu.example.com"):
+        assert hidden not in html
+    # N 精确锁（复审收紧）：四条路径各收敛 1 条，计数行措辞含精确数字
+    assert html.count("另有 1 条判为") == 4
     # 诚实计数指针（不展示 ≠ 不存在）
     assert "未在本文书展开" in html
     assert "report.json" in html
@@ -1380,9 +1386,8 @@ def test_polish_toc_and_offline_discipline(sample_report: Report, tmp_path: Path
         encoding="utf-8"
     )
     literal_urls = [
-        line
-        for line in template_text.splitlines()
-        if "http://" in line or "https://" in line
-        if "{{" not in line  # 数据值渲染处不算
+        line for line in template_text.splitlines() if "http://" in line or "https://" in line
     ]
-    assert literal_urls == []
+    assert literal_urls == []  # 模板任何行含字面 URL 都拒（复审收紧：{{ 行豁免是漏报面）
+    # P1 回归锁：既有 class 只增不改——旧类 top 必须与新类并存
+    assert 'class="top report-top"' in html
