@@ -7,6 +7,17 @@ affect automated / CI / agent callers are called out explicitly**.
 
 ### Fixed
 
+- **`fxapk jadx usage` 的命中现在带类/方法归属**：`UsageHit.class_context` /
+  `method_context` 一直在数据结构上、也一直被 CLI 的 JSON 输出透传，但
+  `find_value_usage` 从不给它们赋值——输出里**恒为 `null`**，且没有任何测试断言过。
+  现在用 structure 段中方法的行号区间反查 posting 所在的方法，把它们填实。
+  归属是 fail-closed 的：**恰好一个区间包含该行才归属**，落在 0 个（字段初始化器 /
+  静态块——class 段没有行号区间，无法单独定类）或 ≥2 个（区间重叠）一律留 `null`，绝不猜。
+  结构段缺失或形状异常时降级为无归属，不会让原本能返回的命中变成异常。
+  **对 agent / CI 调用方的影响**：字段与类型（`string | null`）都不变，只是 `null`
+  被填实；命中集合一字不增不减（有专门的回归锁）。归属覆盖面恒等于 posting 覆盖面——
+  为补归属去读索引之外的源文件是被禁止的（只读查询面绝不碰文件系统）。
+
 - **JADX 索引方法 arity 泛型感知计数（structure schema 1.2 → 1.3）**：`_declared_arity`
   此前按 `split(",")` 计参数个数，而方法声明正则允许泛型，于是泛型实参里的逗号被当成
   参数分隔符——`Map<String, String> m` 算成 2 个参数。方法身份是 `cls#name/arity`，

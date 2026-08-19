@@ -1583,6 +1583,60 @@ def _lineage_from_shard_record(record: Mapping[str, object], path: str) -> DexLi
         raise JadxIndexError(REASON_MALFORMED, f"{path}.lineage") from exc
 
 
+def _build_usage_context_index(
+    shard: Mapping[str, object],
+) -> dict[str, tuple[tuple[str, str, int, int, int], ...]]:
+    """按相对路径归组本 shard 的方法行号区间，供 usage 命中反查所属方法。
+
+    ★这里**刻意宽松**：structure 段的严格校验属于 load 期（``_validate_shard_structure``），
+    本函数只是给已找到的阳性命中补上下文。结构缺失或形状异常一律降级为「无法反查」
+    （返回空索引 / 跳过该条），绝不因此让本来能返回的命中变成异常——那会把一个
+    附加能力变成新的失败源。
+    """
+    structure = shard.get("structure")
+    if not isinstance(structure, Mapping):
+        return {}
+    classes = structure.get("classes")
+    if not isinstance(classes, list):
+        return {}
+
+    by_path: dict[str, list[tuple[str, str, int, int, int]]] = {}
+    for cls in classes:
+        if not isinstance(cls, Mapping):
+            return {}
+        class_name = cls.get("name")
+        class_path = cls.get("path")
+        methods = cls.get("methods")
+        if (
+            not isinstance(class_name, str)
+            or not isinstance(class_path, str)
+            or not isinstance(methods, list)
+        ):
+            return {}
+        for method in methods:
+            if not isinstance(method, Mapping):
+                continue
+            name = method.get("name")
+            arity = method.get("arity")
+            start_line = method.get("start_line")
+            end_line = method.get("end_line")
+            if (
+                not isinstance(name, str)
+                or isinstance(arity, bool)
+                or not isinstance(arity, int)
+                or isinstance(start_line, bool)
+                or not isinstance(start_line, int)
+                or isinstance(end_line, bool)
+                or not isinstance(end_line, int)
+                or start_line > end_line
+            ):
+                continue
+            by_path.setdefault(class_path, []).append(
+                (class_name, name, arity, start_line, end_line)
+            )
+    return {path: tuple(ranges) for path, ranges in by_path.items()}
+
+
 def find_value_usage(index: LoadedIndex, value: str) -> tuple[UsageHit, ...]:
     if (
         not isinstance(index, LoadedIndex)
@@ -1602,6 +1656,9 @@ def find_value_usage(index: LoadedIndex, value: str) -> tuple[UsageHit, ...]:
         postings = shard.get("postings")
         if not isinstance(postings, list):
             _fail(REASON_MALFORMED, f"$.shards[{shard_index}].postings")
+
+        # 每个 shard 只建一次区间表；postings 与 structure 同 shard、同路径坐标系。
+        context_index = _build_usage_context_index(shard)
 
         for posting_index, posting in enumerate(postings):
             path = f"$.shards[{shard_index}].postings[{posting_index}]"
@@ -1635,8 +1692,25 @@ def find_value_usage(index: LoadedIndex, value: str) -> tuple[UsageHit, ...]:
             except JadxIndexError as exc:
                 raise JadxIndexError(REASON_MALFORMED, path) from exc
 
-            if digest == value_digest:
-                hits.append(hit)
+            if digest != value_digest:
+                continue
+
+            # 归属反查 fail-closed：恰好一个方法区间包含该行才归属。0 个（字段初始化器 /
+            # 静态块——class 段没有行号区间，无法单独定类）或 ≥2 个（区间重叠）一律留
+            # None。命中集合不受影响：这里只给已找到的阳性命中补上下文，不增不减。
+            spans = [
+                span
+                for span in context_index.get(relative_path, ())
+                if span[3] <= line <= span[4]
+            ]
+            if len(spans) == 1:
+                class_name, method_name, method_arity, _, _ = spans[0]
+                hit = replace(
+                    hit,
+                    class_context=class_name,
+                    method_context=f"{method_name}/{method_arity}",
+                )
+            hits.append(hit)
 
     hits.sort(key=lambda hit: (hit.lineage.sort_key(), hit.relative_path, hit.line, hit.column))
     return tuple(hits)
