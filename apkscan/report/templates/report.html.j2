@@ -18,114 +18,754 @@
 <title>apkscan 调证报告 — {{ report.package_name }}</title>
 <style>
   :root {
-    --bg: #f5f6f8; --card: #ffffff; --ink: #1f2329; --muted: #6b7280;
-    --line: #e3e6ea; --accent: #1d4ed8; --accent-soft: #eef2ff;
-    --hi: #b91c1c; --mid: #b45309; --lo: #4b5563;
-    --warn-bg: #fef2f2; --warn-ink: #991b1b; --ok-bg: #ecfdf5; --ok-ink: #065f46;
+    --paper: #f6f7f9;
+    --card: #ffffff;
+    --line: #e3e6ea;
+    --ink: #1b2330;
+    --mid: #4b5563;
+    --lo: #8a93a0;
+    --brand: #1e3a8a;
+    --brand-soft: #eef2ff;
+    --mono: Consolas, "SF Mono", "JetBrains Mono", monospace;
+
+    --hi: #b91c1c;
+    --advice-mid: #a64b08;
+    --warn-bg: #fef2f2;
+    --warn-ink: #991b1b;
+    --ok-bg: #ecfdf5;
+    --ok-ink: #065f46;
   }
-  * { box-sizing: border-box; }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
   body {
-    margin: 0; background: var(--bg); color: var(--ink);
-    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC", Roboto, sans-serif;
-    line-height: 1.55; font-size: 14px;
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: system-ui, "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+    font-size: 14px;
+    line-height: 1.65;
   }
-  .wrap { max-width: 1180px; margin: 0 auto; padding: 24px 20px 64px; }
-  header.top {
-    background: linear-gradient(120deg, #111827, #1e3a8a);
-    color: #fff; border-radius: 12px; padding: 22px 26px; margin-bottom: 22px;
+
+  a {
+    color: var(--brand);
+    text-decoration-color: #a5b4d8;
+    text-underline-offset: 2px;
   }
-  header.top h1 { margin: 0 0 6px; font-size: 22px; }
-  header.top .pkg { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 15px; opacity: .95; }
-  header.top .sub { color: #c7d2fe; font-size: 12px; margin-top: 8px; }
-  section { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px 22px; margin-bottom: 20px; }
-  h2 { font-size: 18px; margin: 0 0 14px; padding-bottom: 8px; border-bottom: 2px solid var(--accent-soft); }
-  h2 .num { display: inline-block; min-width: 26px; color: var(--accent); }
-  h3 { font-size: 15px; margin: 18px 0 8px; color: #111827; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
-  th { background: #f8fafc; color: var(--muted); font-weight: 600; white-space: nowrap; }
-  tr:hover td { background: #fafbfc; }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; }
+
+  a:hover {
+    text-decoration-color: currentColor;
+  }
+
+  .report-layout {
+    width: 100%;
+  }
+
+  .wrap {
+    width: min(100%, 1080px);
+    margin: 0 auto;
+    padding: 24px 20px 64px;
+  }
+
+  #toc {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    margin: 0;
+    padding: 10px 20px;
+    background: rgba(246, 247, 249, .96);
+    border-bottom: 1px solid var(--line);
+    scrollbar-width: thin;
+  }
+
+  #toc:empty {
+    display: none;
+  }
+
+  #toc a {
+    flex: 0 0 auto;
+    max-width: 260px;
+    overflow: hidden;
+    padding: 5px 9px;
+    color: var(--mid);
+    font-size: 12px;
+    line-height: 1.4;
+    text-decoration: none;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--card);
+  }
+
+  #toc a:hover,
+  #toc a:focus-visible {
+    color: var(--brand);
+    border-color: #b8c3df;
+    background: var(--brand-soft);
+    outline: none;
+  }
+
+  header.report-top {
+    margin-bottom: 22px;
+    padding: 22px 26px;
+    color: #ffffff;
+    background: #172554;
+    border: 1px solid #243b76;
+    border-radius: 12px;
+  }
+
+  header.report-top h1 {
+    margin: 0 0 6px;
+    font-size: 22px;
+    line-height: 1.35;
+    letter-spacing: .01em;
+  }
+
+  header.report-top .pkg {
+    font-family: var(--mono);
+    font-size: 15px;
+    line-height: 1.5;
+    opacity: .96;
+    word-break: break-all;
+  }
+
+  header.report-top .sub {
+    margin-top: 8px;
+    color: #d5ddf5;
+    font-size: 12px;
+  }
+
+  section {
+    margin-bottom: 20px;
+    padding: 24px;
+    overflow-x: auto;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    scroll-margin-top: 18px;
+  }
+
+  h2 {
+    margin: 0 0 14px;
+    padding-bottom: 9px;
+    color: var(--ink);
+    font-size: 16.5px;
+    line-height: 1.45;
+    border-bottom: 1px solid var(--line);
+  }
+
+  h2 .num {
+    display: inline-flex;
+    min-width: 28px;
+    min-height: 28px;
+    align-items: center;
+    justify-content: center;
+    margin-right: 3px;
+    padding: 0 5px;
+    color: var(--brand);
+    font-size: 14px;
+    line-height: 1;
+    background: var(--brand-soft);
+    border: 1px solid #d8def1;
+    border-radius: 999px;
+  }
+
+  h3 {
+    margin: 18px 0 8px;
+    color: #111827;
+    font-size: 15px;
+    line-height: 1.5;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+
+  thead {
+    background: #f2f4f7;
+  }
+
+  th,
+  td {
+    padding: 8px 10px;
+    text-align: left;
+    vertical-align: top;
+    border-bottom: 1px solid var(--line);
+  }
+
+  th {
+    color: var(--mid);
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.45;
+    white-space: nowrap;
+  }
+
+  tbody tr:nth-child(even) td {
+    background: #fafbfc;
+  }
+
+  tbody tr:hover td {
+    background: #f4f7fb;
+  }
+
+  td .mono,
+  td.mono,
+  td .mono-strong {
+    word-break: break-all;
+  }
+
+  .mono {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    word-break: break-all;
+  }
+
   .mono-strong {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    word-break: break-all; font-size: 14px; font-weight: 700; color: #0f172a;
-    background: #f1f5f9; border: 1px solid var(--line); border-radius: 6px;
-    padding: 2px 6px; display: inline-block;
+    display: inline-block;
+    padding: 2px 6px;
+    color: #0f172a;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    font-weight: 700;
+    word-break: break-all;
+    background: #f1f5f9;
+    border: 1px solid var(--line);
+    border-radius: 6px;
   }
-  .muted { color: var(--muted); }
-  .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
-  ul.tight { margin: 4px 0; padding-left: 18px; }
-  ul.tight li { margin: 2px 0; }
-  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; }
-  .conf-high { background: #fee2e2; color: var(--hi); }
-  .conf-medium { background: #fef3c7; color: var(--mid); }
-  .conf-low { background: #e5e7eb; color: var(--lo); }
-  .advice-need { background: #fee2e2; color: var(--hi); border: 1px solid #fca5a5; }
-  .advice-skip { background: #e5e7eb; color: var(--lo); }
-  .advice-todo { background: #fef3c7; color: var(--mid); }
-  /* 自有后端候选醒目标注，比 advice 更抢眼。三档按「接触观测强弱」而非单纯深浅：
-       实连已观测（最深红）＝ observed-contact 真抓到连去该端点的通信，观测最强；
-       运行时出现（告警橙·存疑）＝动态侧出现但未确认接触，刻意用橙提示「待核、勿全信」而非更强的红；
-       疑似自有后端（红）＝纯静态提取候选。深红仅留给实连观测档；C2/主控认定属 Phase2 人工复核。 */
-  .badge-c2 { background: #b91c1c; color: #fff; border: 1px solid #7f1d1d; }
-  .badge-c2-runtime { background: #9a3412; color: #fff; border: 1px solid #7c2d12; }
-  .badge-c2-live { background: #7f1d1d; color: #fff; border: 1px solid #450a0a; }
-  tr.c2-row { background: #fff5f5; }
-  details.fold { margin: 8px 0 0; }
-  details.fold > summary { cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 600; padding: 4px 0; }
-  details.fold[open] > summary { color: var(--ink); }
-  .star { color: var(--hi); }
-  .tag { display: inline-block; padding: 1px 7px; border-radius: 6px; font-size: 11px; font-weight: 600; margin-right: 4px; }
-  .tag-cleartext { background: var(--warn-bg); color: var(--warn-ink); }
-  .tag-private { background: #eff6ff; color: #1e40af; }
-  .tag-susp { background: #fdf2f8; color: #9d174d; }
-  .sev { display: inline-block; padding: 1px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; }
-  .sev-CRITICAL { background: #fee2e2; color: #7f1d1d; }
-  .sev-HIGH { background: #ffedd5; color: #9a3412; }
-  .sev-MEDIUM { background: #fef3c7; color: #92400e; }
-  .sev-LOW { background: #ecfeff; color: #155e75; }
-  .sev-INFO { background: #eef2ff; color: #3730a3; }
-  .status { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
-  .st-ran { background: var(--ok-bg); color: var(--ok-ink); }
-  .st-skipped { background: #f3f4f6; color: #4b5563; }
-  .st-error { background: var(--warn-bg); color: var(--warn-ink); }
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
-  .stat { background: #f8fafc; border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
-  .stat .k { color: var(--muted); font-size: 12px; }
-  .stat .v { font-size: 22px; font-weight: 700; }
-  .kv { display: grid; grid-template-columns: 150px 1fr; gap: 4px 14px; }
-  .kv .k { color: var(--muted); }
-  .harden-warn { background: var(--warn-bg); color: var(--warn-ink); border: 1px solid #fecaca; border-radius: 10px; padding: 10px 14px; margin-top: 12px; font-weight: 600; }
-  .harden-ok { background: var(--ok-bg); color: var(--ok-ink); border: 1px solid #a7f3d0; border-radius: 10px; padding: 10px 14px; margin-top: 12px; }
-  .group-head { display: flex; align-items: center; gap: 10px; margin: 20px 0 6px; }
-  .group-head h3 { margin: 0; }
-  .group-head .count { background: var(--accent-soft); color: var(--accent); border-radius: 999px; padding: 0 8px; font-size: 12px; font-weight: 700; }
-  /* 线索行内警示（形态存疑 / SNI 伪装）。与 .harden-warn 同色系但更紧凑——它挂在表格单元格里，
-     不能用 harden-warn 那种大块留白。两条警示都必须在**读报告做研判**这一步就看得到：
-     等到 letters 出口阶段才提示，研判已经做完了。 */
-  .lead-warn { background: var(--warn-bg); color: var(--warn-ink); border-left: 3px solid #f87171; border-radius: 4px; padding: 5px 8px; margin-top: 5px; font-size: 12px; line-height: 1.5; }
-  /* 五层归属链折叠块：默认收起（多 IP 会很长），展开后每个落地 IP 一组标签-值。 */
-  .attr-chain { margin-top: 6px; font-size: 12px; }
-  .attr-chain > summary { cursor: pointer; color: var(--muted); font-weight: 600; }
-  .attr-ip { margin: 5px 0 0; padding-left: 8px; border-left: 2px solid var(--line); }
-  .attr-ip .attr-ip-val { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700; }
-  .attr-row { color: var(--muted); }
-  .attr-row .attr-k { color: var(--ink); }
-  /* 归属链最后那一行（恒未知、绝不从基础设施推断）故意标醒目色，防被读者跳过。
-     ★注释里刻意不复写该行的中文字面：测试要靠 count(字面) == 落地 IP 数 来断言"每个 IP 下
-       各出现一次"，样式表里多一份字面会把计数顶高、让断言变得不可用。 */
-  .attr-row-operator { color: var(--warn-ink); font-weight: 600; }
-  .lead-table th.c-val { width: 22%; }
-  .lead-table th.c-subj { width: 16%; }
-  .lead-table th.c-who { width: 16%; }
-  .footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 8px; }
-  code.snip { background: #f1f5f9; border-radius: 4px; padding: 0 4px; font-size: 12px; }
+
+  .muted {
+    color: var(--lo);
+  }
+
+  .empty {
+    margin: 2px 0;
+    padding: 6px 0 6px 12px;
+    color: var(--lo);
+    font-style: italic;
+    border-left: 3px solid var(--line);
+  }
+
+  ul.tight {
+    margin: 4px 0;
+    padding-left: 18px;
+  }
+
+  ul.tight li {
+    margin: 2px 0;
+  }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 9px;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.4;
+    white-space: nowrap;
+    border-radius: 999px;
+  }
+
+  .conf-high {
+    color: var(--hi);
+    background: #fee2e2;
+  }
+
+  .conf-medium {
+    color: var(--advice-mid);
+    background: #fef3c7;
+  }
+
+  .conf-low {
+    color: var(--mid);
+    background: #e5e7eb;
+  }
+
+  .advice-need {
+    color: var(--hi);
+    background: #fee2e2;
+    border: 1px solid #fca5a5;
+  }
+
+  .advice-skip {
+    color: #667180;
+    background: #edf0f3;
+    border: 1px solid #d9dee5;
+  }
+
+  .advice-todo {
+    color: var(--advice-mid);
+    background: #fff3cf;
+    border: 1px solid #f4d58a;
+  }
+
+  .badge-c2 {
+    color: #fff;
+    background: #b91c1c;
+    border: 1px solid #7f1d1d;
+  }
+
+  .badge-c2-runtime {
+    color: #fff;
+    background: #9a3412;
+    border: 1px solid #7c2d12;
+  }
+
+  .badge-c2-live {
+    color: #fff;
+    background: #7f1d1d;
+    border: 1px solid #450a0a;
+  }
+
+  tr.c2-row td,
+  tr.c2-row:nth-child(even) td {
+    background: #fff5f5;
+  }
+
+  tr.c2-row:hover td {
+    background: #ffeded;
+  }
+
+  details.fold {
+    margin: 8px 0 0;
+  }
+
+  details.fold > summary {
+    padding: 4px 0;
+    color: var(--lo);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  details.fold[open] > summary {
+    color: var(--ink);
+  }
+
+  .star {
+    color: var(--hi);
+  }
+
+  .tag {
+    display: inline-block;
+    margin-right: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.4;
+    border-radius: 999px;
+  }
+
+  .tag-cleartext {
+    color: var(--warn-ink);
+    background: var(--warn-bg);
+  }
+
+  .tag-private {
+    color: #1e40af;
+    background: #eff6ff;
+  }
+
+  .tag-susp {
+    color: #9d174d;
+    background: #fdf2f8;
+  }
+
+  .sev {
+    display: inline-block;
+    padding: 2px 8px;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.4;
+    border-radius: 999px;
+  }
+
+  .sev-CRITICAL {
+    color: #7f1d1d;
+    background: #fee2e2;
+  }
+
+  .sev-HIGH {
+    color: #9a3412;
+    background: #ffedd5;
+  }
+
+  .sev-MEDIUM {
+    color: #92400e;
+    background: #fef3c7;
+  }
+
+  .sev-LOW {
+    color: #155e75;
+    background: #ecfeff;
+  }
+
+  .sev-INFO {
+    color: #3730a3;
+    background: #eef2ff;
+  }
+
+  .status {
+    display: inline-block;
+    padding: 2px 9px;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.4;
+    border-radius: 999px;
+  }
+
+  .st-ran {
+    color: var(--ok-ink);
+    background: var(--ok-bg);
+  }
+
+  .st-skipped {
+    color: var(--mid);
+    background: #f3f4f6;
+  }
+
+  .st-error {
+    color: var(--warn-ink);
+    background: var(--warn-bg);
+  }
+
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+  }
+
+  .stat {
+    padding: 12px 14px;
+    background: #f8fafc;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+  }
+
+  .stat .k {
+    color: var(--lo);
+    font-size: 12px;
+  }
+
+  .stat .v {
+    color: var(--ink);
+    font-size: 22px;
+    font-weight: 700;
+    line-height: 1.35;
+  }
+
+  .kv {
+    display: grid;
+    grid-template-columns: 150px minmax(0, 1fr);
+    gap: 4px 14px;
+  }
+
+  .kv .k {
+    color: var(--lo);
+  }
+
+  .harden-warn {
+    margin-top: 12px;
+    padding: 10px 14px;
+    color: var(--warn-ink);
+    font-weight: 600;
+    background: var(--warn-bg);
+    border: 1px solid #fecaca;
+    border-radius: 10px;
+  }
+
+  .harden-ok {
+    margin-top: 12px;
+    padding: 10px 14px;
+    color: var(--ok-ink);
+    background: var(--ok-bg);
+    border: 1px solid #a7f3d0;
+    border-radius: 10px;
+  }
+
+  .group-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 20px 0 6px;
+  }
+
+  .group-head h3 {
+    margin: 0;
+  }
+
+  .group-head .count {
+    padding: 1px 8px;
+    color: var(--brand);
+    font-size: 12px;
+    font-weight: 700;
+    background: var(--brand-soft);
+    border-radius: 999px;
+  }
+
+  .lead-warn {
+    margin-top: 5px;
+    padding: 5px 8px;
+    color: var(--warn-ink);
+    font-size: 12px;
+    line-height: 1.5;
+    background: var(--warn-bg);
+    border-left: 3px solid #f87171;
+    border-radius: 4px;
+  }
+
+  .attr-chain {
+    margin-top: 6px;
+    font-size: 12px;
+  }
+
+  .attr-chain > summary {
+    color: var(--lo);
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .attr-ip {
+    margin: 5px 0 0;
+    padding-left: 8px;
+    border-left: 2px solid var(--line);
+  }
+
+  .attr-ip .attr-ip-val {
+    font-family: var(--mono);
+    font-weight: 700;
+  }
+
+  .attr-row {
+    color: var(--lo);
+  }
+
+  .attr-row .attr-k {
+    color: var(--ink);
+  }
+
+  .attr-row-operator {
+    color: var(--warn-ink);
+    font-weight: 600;
+  }
+
+  .lead-table th.c-val {
+    width: 22%;
+  }
+
+  .lead-table th.c-subj {
+    width: 16%;
+  }
+
+  .lead-table th.c-who {
+    width: 16%;
+  }
+
+  .footer {
+    margin-top: 8px;
+    color: var(--lo);
+    font-size: 12px;
+    text-align: center;
+  }
+
+  code.snip {
+    padding: 1px 4px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    background: #f1f5f9;
+    border-radius: 4px;
+  }
+
+  @media (min-width: 1280px) {
+    .report-layout {
+      display: grid;
+      grid-template-columns: 200px minmax(0, 1080px);
+      gap: 20px;
+      justify-content: center;
+      align-items: start;
+      padding: 24px 20px 64px;
+    }
+
+    #toc {
+      position: sticky;
+      top: 24px;
+      z-index: 10;
+      display: flex;
+      max-height: calc(100vh - 48px);
+      flex-direction: column;
+      gap: 3px;
+      overflow-x: hidden;
+      overflow-y: auto;
+      padding: 8px;
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }
+
+    #toc:empty {
+      display: none;
+    }
+
+    #toc a {
+      display: block;
+      width: 100%;
+      max-width: none;
+      padding: 7px 9px;
+      overflow: hidden;
+      border-color: transparent;
+      border-radius: 7px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .wrap {
+      width: 100%;
+      min-width: 0;
+      margin: 0;
+      padding: 0;
+    }
+  }
+
+  @media (max-width: 720px) {
+    .wrap {
+      padding: 16px 12px 48px;
+    }
+
+    #toc {
+      padding: 8px 12px;
+    }
+
+    header.report-top {
+      padding: 18px;
+      border-radius: 10px;
+    }
+
+    section {
+      padding: 18px 16px;
+      border-radius: 10px;
+    }
+
+    .kv {
+      grid-template-columns: 1fr;
+      gap: 1px;
+    }
+
+    .kv .k:not(:first-child) {
+      margin-top: 8px;
+    }
+
+    .cards {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @media (max-width: 440px) {
+    .cards {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  @page {
+    size: A4;
+    margin: 18mm 15mm;
+  }
+
+  @media print {
+    html {
+      scroll-behavior: auto;
+    }
+
+    body {
+      background: #ffffff;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+
+    .report-layout {
+      display: block;
+      padding: 0;
+    }
+
+    #toc {
+      display: none !important;
+    }
+
+    .wrap {
+      width: 100%;
+      max-width: none;
+      margin: 0;
+      padding: 0;
+    }
+
+    header.report-top {
+      color: #ffffff;
+      background: #172554 !important;
+      border-color: #243b76;
+      break-inside: avoid;
+    }
+
+    section {
+      overflow: visible;
+      break-inside: avoid;
+      box-shadow: none;
+    }
+
+    table {
+      break-inside: auto;
+    }
+
+    thead {
+      display: table-header-group;
+    }
+
+    tfoot {
+      display: table-footer-group;
+    }
+
+    tr,
+    td,
+    th {
+      break-inside: avoid;
+    }
+
+    tbody tr:hover td {
+      background: inherit;
+    }
+
+    tbody tr:nth-child(even) td {
+      background: #fafbfc;
+    }
+
+    tr.c2-row td,
+    tr.c2-row:nth-child(even) td {
+      background: #fff5f5;
+    }
+
+    a {
+      color: var(--brand);
+      text-decoration: none;
+    }
+  }
 </style>
 </head>
 <body>
-<div class="wrap">
+<div class="report-layout">
+  <nav id="toc" aria-label="目录"></nav>
 
-  <header class="top">
+  <div class="wrap">
+
+  <header class="report-top">
     <h1>APK 涉诈调证分析报告</h1>
     <div class="pkg">{{ report.package_name or "(未知包名)" }}</div>
     <div class="sub">apkscan · 调证线索清单 · 共 {{ lead_total }} 条线索 / {{ endpoint_total }} 个端点 / {{ findings|length }} 项技术发现</div>
@@ -277,9 +917,19 @@
   {% endmacro %}
 
   {#- ============ ★ 应用层加密配方（凭此可离线解密全部加密流量） ============ -#}
-  {% if crypto_recipe_leads %}
+  {% set crypto_recipe_visible_leads = [] %}
+  {% set crypto_recipe_skip = namespace(n=0) %}
+  {% for lead in crypto_recipe_leads %}
+    {% if (lead.advice|advice_label) != "无需调证" %}
+      {% set _ = crypto_recipe_visible_leads.append(lead) %}
+    {% else %}
+      {% set crypto_recipe_skip.n = crypto_recipe_skip.n + 1 %}
+    {% endif %}
+  {% endfor %}
+  {% if crypto_recipe_visible_leads or crypto_recipe_skip.n %}
   <section id="crypto-recipe">
     <h2><span class="star">★</span> 应用层加密配方 <span class="muted" style="font-size:13px;font-weight:400">（算法 / key / iv 推导 / 信封字段 —— 凭此可离线解密全部 {data,timestamp} 信封流量）</span></h2>
+    {% if crypto_recipe_visible_leads %}
     <table class="lead-table">
       <thead>
         <tr>
@@ -291,7 +941,7 @@
         </tr>
       </thead>
       <tbody>
-        {% for lead in crypto_recipe_leads %}
+        {% for lead in crypto_recipe_visible_leads %}
         <tr>
           <td><span class="mono-strong">{{ lead.value }}</span>
             {% if lead.where_to_request %}<div class="muted" style="font-size:12px">{{ lead.where_to_request }}</div>{% endif %}
@@ -306,13 +956,26 @@
         {% endfor %}
       </tbody>
     </table>
+    {% endif %}
+    {% if crypto_recipe_skip.n %}
+    <div class="muted">另有 {{ crypto_recipe_skip.n }} 条判为“无需调证”的记录未在本文书展开，完整清单见 report.json。</div>
+    {% endif %}
   </section>
   {% endif %}
 
   {#- ============ ② ★ 调用插件 / 配置键值 ============ -#}
   <section id="config-keys">
     <h2><span class="num">②</span> <span class="star">★</span> 调用插件 / 配置键值 <span class="muted" style="font-size:13px;font-weight:400">（具体 Key=值 / 所属公司 / 调证建议 / 取证依据）</span></h2>
-    {% if config_key_leads %}
+    {% set config_key_visible_leads = [] %}
+    {% set config_key_skip = namespace(n=0) %}
+    {% for lead in config_key_leads %}
+      {% if (lead.advice|advice_label) != "无需调证" %}
+        {% set _ = config_key_visible_leads.append(lead) %}
+      {% else %}
+        {% set config_key_skip.n = config_key_skip.n + 1 %}
+      {% endif %}
+    {% endfor %}
+    {% if config_key_visible_leads %}
     <table class="lead-table">
       <thead>
         <tr>
@@ -324,7 +987,7 @@
         </tr>
       </thead>
       <tbody>
-        {% for lead in config_key_leads %}
+        {% for lead in config_key_visible_leads %}
         <tr>
           <td><span class="mono-strong">{{ lead.value }}</span>
             {% if lead.notes %}<div class="muted" style="font-size:12px">{{ lead.notes }}</div>{% endif %}
@@ -342,8 +1005,11 @@
         {% endfor %}
       </tbody>
     </table>
-    {% else %}
+    {% elif not config_key_leads %}
       <div class="empty">未抠取到配置键值（如 GETUI_APPID / PUSH_APPKEY 等）。可能为非 uni-app 工程或 manifest meta-data 为空。</div>
+    {% endif %}
+    {% if config_key_skip.n %}
+    <div class="muted">另有 {{ config_key_skip.n }} 条判为“无需调证”的记录未在本文书展开，完整清单见 report.json。</div>
     {% endif %}
   </section>
 
@@ -524,8 +1190,15 @@
   <section id="contact-domains">
     <h2><span class="num">④</span> 通联域名 / IP <span class="muted" style="font-size:13px;font-weight:400">（「无需调证」的基础设施 / CDN / 公共服务，弱化展示）</span></h2>
     {% if network_leads.skip %}
+    {% set skip_ns = namespace(warning_count=0) %}
+    {% for lead in network_leads.skip %}
+      {% if lead.shape_uncertain or lead.sni_masquerade %}
+        {% set skip_ns.warning_count = skip_ns.warning_count + 1 %}
+      {% endif %}
+    {% endfor %}
+    {% if skip_ns.warning_count > 0 %}
     <details class="fold">
-      <summary>展开 {{ network_leads.skip|length }} 条「无需调证」域名 / IP</summary>
+      <summary>展开 {{ skip_ns.warning_count }} 条「无需调证」域名 / IP</summary>
       <table class="lead-table">
         <thead>
           <tr>
@@ -539,6 +1212,7 @@
         </thead>
         <tbody>
           {% for lead in network_leads.skip %}
+          {% if lead.shape_uncertain or lead.sni_masquerade %}
           <tr>
             {#- 警示与归属链在 skip（infra.ADVICE_SKIP）表里同样渲染。按现有判据这两个信号不会落到 skip 桶
                 （shape_uncertain 要求 advice 为 need 档、sni_masquerade 在 skip 时被清空），但
@@ -551,10 +1225,15 @@
             <td>{{ source_refs_cell(lead) }}</td>
             <td><span class="badge {{ lead.confidence|confidence_class }}">{{ lead.confidence|confidence_label }}</span></td>
           </tr>
+          {% endif %}
           {% endfor %}
         </tbody>
       </table>
     </details>
+    {% endif %}
+    {% if network_leads.skip|length > skip_ns.warning_count %}
+    <div class="muted">另有 {{ network_leads.skip|length - skip_ns.warning_count }} 条判为“无需调证”的记录未在本文书展开，完整清单见 report.json。</div>
+    {% endif %}
     {% else %}
       <div class="empty">无「无需调证」的通联域名 / IP。</div>
     {% endif %}
@@ -565,11 +1244,20 @@
     <h2><span class="num">⑤</span> 第三方 SDK → 厂商清单</h2>
     {% set sdk_leads = [] %}
     {% for group in lead_groups %}{% if group.category.value == "SDK_SERVICE" %}{% set _ = sdk_leads.extend(group.leads) %}{% endif %}{% endfor %}
-    {% if sdk_leads %}
+    {% set sdk_visible_leads = [] %}
+    {% set sdk_skip = namespace(n=0) %}
+    {% for lead in sdk_leads %}
+      {% if (lead.advice|advice_label) != "无需调证" %}
+        {% set _ = sdk_visible_leads.append(lead) %}
+      {% else %}
+        {% set sdk_skip.n = sdk_skip.n + 1 %}
+      {% endif %}
+    {% endfor %}
+    {% if sdk_visible_leads %}
     <table>
       <thead><tr><th>SDK / 服务</th><th>厂商（归属主体）</th><th>调证建议</th><th>向谁调取</th><th>可调取证据</th><th>置信度</th></tr></thead>
       <tbody>
-        {% for lead in sdk_leads %}
+        {% for lead in sdk_visible_leads %}
         <tr>
           <td>{{ lead.value }}</td>
           <td>{{ lead.subject or "—" }}</td>
@@ -581,8 +1269,11 @@
         {% endfor %}
       </tbody>
     </table>
-    {% else %}
+    {% elif not sdk_leads %}
       <div class="empty">未识别到第三方 SDK / 服务。</div>
+    {% endif %}
+    {% if sdk_skip.n %}
+    <div class="muted">另有 {{ sdk_skip.n }} 条判为“无需调证”的记录未在本文书展开，完整清单见 report.json。</div>
     {% endif %}
   </section>
 
@@ -596,12 +1287,22 @@
       {% if group.category.value == "CONTACT" %}{% set _ = contact_leads.extend(group.leads) %}{% endif %}
     {% endfor %}
 
+    {% set pay_visible_leads = [] %}
+    {% set pay_skip = namespace(n=0) %}
+    {% for lead in pay_leads %}
+      {% if (lead.advice|advice_label) != "无需调证" %}
+        {% set _ = pay_visible_leads.append(lead) %}
+      {% else %}
+        {% set pay_skip.n = pay_skip.n + 1 %}
+      {% endif %}
+    {% endfor %}
+
     <h3>支付 / 资金线索</h3>
-    {% if pay_leads %}
+    {% if pay_visible_leads %}
     <table>
       <thead><tr><th>线索值</th><th>归属主体</th><th>调证建议</th><th>向谁调取</th><th>可调取证据</th><th>置信度</th></tr></thead>
       <tbody>
-        {% for lead in pay_leads %}
+        {% for lead in pay_visible_leads %}
         <tr>
           <td><span class="mono-strong">{{ lead.value }}</span></td>
           <td>{{ lead.subject or "—" }}</td>
@@ -613,14 +1314,27 @@
         {% endfor %}
       </tbody>
     </table>
-    {% else %}<div class="empty">未提取到支付 / 资金线索。</div>{% endif %}
+    {% elif not pay_leads %}<div class="empty">未提取到支付 / 资金线索。</div>{% endif %}
+    {% if pay_skip.n %}
+    <div class="muted">另有 {{ pay_skip.n }} 条判为“无需调证”的记录未在本文书展开，完整清单见 report.json。</div>
+    {% endif %}
+
+    {% set contact_visible_leads = [] %}
+    {% set contact_skip = namespace(n=0) %}
+    {% for lead in contact_leads %}
+      {% if (lead.advice|advice_label) != "无需调证" %}
+        {% set _ = contact_visible_leads.append(lead) %}
+      {% else %}
+        {% set contact_skip.n = contact_skip.n + 1 %}
+      {% endif %}
+    {% endfor %}
 
     <h3>联系方式线索</h3>
-    {% if contact_leads %}
+    {% if contact_visible_leads %}
     <table>
       <thead><tr><th>线索值</th><th>类型 / 备注</th><th>调证建议</th><th>取证依据</th><th>置信度</th></tr></thead>
       <tbody>
-        {% for lead in contact_leads %}
+        {% for lead in contact_visible_leads %}
         <tr>
           <td><span class="mono-strong">{{ lead.value }}</span></td>
           <td>{{ lead.notes or lead.subject or "—" }}</td>
@@ -631,7 +1345,10 @@
         {% endfor %}
       </tbody>
     </table>
-    {% else %}<div class="empty">未提取到联系方式线索。</div>{% endif %}
+    {% elif not contact_leads %}<div class="empty">未提取到联系方式线索。</div>{% endif %}
+    {% if contact_skip.n %}
+    <div class="muted">另有 {{ contact_skip.n }} 条判为“无需调证”的记录未在本文书展开，完整清单见 report.json。</div>
+    {% endif %}
   </section>
 
   {#- ============ ⑥bis 其余类别线索 ============
@@ -646,11 +1363,21 @@
   <section id="other-leads">
     <h2><span class="num">⑥+</span> 其余线索 <span class="muted" style="font-size:13px;font-weight:400">（后台入口 / 自建 IM·C2 / 凭据 / 四方支付 / 短信转发 等，按研判优先级排序）</span></h2>
     {% for group in other_lead_groups %}
-    <h3>{{ group.label }} <span class="muted" style="font-size:13px;font-weight:400">（{{ group.leads|length }} 条）</span></h3>
+    {% set group_visible_leads = [] %}
+    {% set group_skip = namespace(n=0) %}
+    {% for lead in group.leads %}
+      {% if (lead.advice|advice_label) != "无需调证" %}
+        {% set _ = group_visible_leads.append(lead) %}
+      {% else %}
+        {% set group_skip.n = group_skip.n + 1 %}
+      {% endif %}
+    {% endfor %}
+    <h3>{{ group.label }} <span class="muted" style="font-size:13px;font-weight:400">（{{ group_visible_leads|length }} 条）</span></h3>
+    {% if group_visible_leads %}
     <table>
       <thead><tr><th>线索值</th><th>归属主体</th><th>调证建议</th><th>向谁调取</th><th>可调取证据</th><th>置信度</th></tr></thead>{# leak-scan: allow 表头逐字沿用 ⑥ 区块，改一处两节表格就不一致了 #}
       <tbody>
-        {% for lead in group.leads %}
+        {% for lead in group_visible_leads %}
         <tr>
           <td><span class="mono-strong">{{ lead.value }}</span></td>
           <td>{{ lead.subject or "—" }}</td>
@@ -663,6 +1390,10 @@
         {% endfor %}
       </tbody>
     </table>
+    {% endif %}
+    {% if group_skip.n %}
+    <div class="muted">另有 {{ group_skip.n }} 条判为“无需调证”的记录未在本文书展开，完整清单见 report.json。</div>
+    {% endif %}
     {% endfor %}
   </section>
   {% endif %}
@@ -801,6 +1532,27 @@
 
   <div class="footer">本报告由 apkscan 生成，仅用于授权的反诈调证场景。线索为机器提取，归属信息以人工核实为准。</div>
 
+  </div>
 </div>
+
+<script id="toc-script">
+  (() => {
+    const toc = document.getElementById("toc");
+    if (!toc) return;
+
+    const fragment = document.createDocumentFragment();
+    document.querySelectorAll("section h2").forEach((heading) => {
+      const section = heading.closest("section");
+      if (!section || !section.getAttribute("id")) return;
+
+      const link = document.createElement("a");
+      link.href = "#" + section.getAttribute("id");
+      link.textContent = heading.textContent.trim();
+      fragment.appendChild(link);
+    });
+
+    toc.appendChild(fragment);
+  })();
+</script>
 </body>
 </html>

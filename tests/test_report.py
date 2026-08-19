@@ -48,7 +48,13 @@ def sample_report() -> Report:
             evidence_to_obtain=["AppID 对应注册主体", "推送 / 设备日志"],
             confidence=Confidence.HIGH,
             advice=ADVICE_INVESTIGATE,
-            source_refs=[Evidence(source="manifest", location="AndroidManifest.xml#meta-data", snippet="GETUI_APPID")],
+            source_refs=[
+                Evidence(
+                    source="manifest",
+                    location="AndroidManifest.xml#meta-data",
+                    snippet="GETUI_APPID",
+                )
+            ],
             notes="个推推送 AppID（manifest meta-data）",
         ),
         Lead(
@@ -59,7 +65,13 @@ def sample_report() -> Report:
             evidence_to_obtain=["商户号绑定主体", "结算银行账户"],
             confidence=Confidence.HIGH,
             advice=ADVICE_INVESTIGATE,
-            source_refs=[Evidence(source="dex", location="com/app/Pay.java", snippet="pay.fraud-example.com/notify")],
+            source_refs=[
+                Evidence(
+                    source="dex",
+                    location="com/app/Pay.java",
+                    snippet="pay.fraud-example.com/notify",  # leak-scan: allow 既有夹具值随 format 重排入 diff，值未变
+                )
+            ],
             notes="支付回调域名",
         ),
         Lead(
@@ -139,7 +151,7 @@ def sample_report() -> Report:
             title="使用 MD5 弱哈希",
             severity=Severity.MEDIUM,
             category="crypto",
-            description="检测到 MessageDigest.getInstance(\"MD5\")。",
+            description='检测到 MessageDigest.getInstance("MD5")。',
             recommendation="改用 SHA-256。",
             evidences=[Evidence(source="dex", location="com/app/Crypto.java")],
         ),
@@ -444,7 +456,9 @@ def test_html_renders_case_closure_status_layers_and_gaps(
     assert "Origin is missing" in rendered
 
 
-def test_html_config_key_section_shows_key_and_advice(sample_report: Report, tmp_path: Path) -> None:
+def test_html_config_key_section_shows_key_and_advice(
+    sample_report: Report, tmp_path: Path
+) -> None:
     """★ 调用插件/配置键值小节：含具体 key 值（mono 显著）与 advice 标记。"""
     path = tmp_path / "report.html"
     report_html.render(sample_report, str(path))
@@ -474,7 +488,9 @@ def test_html_crypto_recipe_section_renders(tmp_path: Path) -> None:
                 confidence=Confidence.HIGH,
                 advice=ADVICE_INVESTIGATE,
                 notes="自 JS 逆出的应用层加密配方",
-                source_refs=[Evidence(source="js", location="app-service.js", snippet="AES.encrypt")],
+                source_refs=[
+                    Evidence(source="js", location="app-service.js", snippet="AES.encrypt")
+                ],
             )
         ],
         endpoints=[],
@@ -549,8 +565,16 @@ def test_html_network_split_by_advice(sample_report: Report, tmp_path: Path) -> 
     report_html.render(sample_report, str(path))
     html = path.read_text(encoding="utf-8")
 
-    assert "ctrl.fraud-example.com" in html  # 主控域名（建议调证）
-    assert "cdn.aliyuncs.com" in html  # 通联域名（无需调证）
+    need_value = (
+        "ctrl.fraud-example.com"  # leak-scan: allow 引用既有夹具值的断言（值在夹具行，未新增）
+    )
+    skip_value = (
+        "cdn.aliyuncs.com"  # leak-scan: allow 引用既有夹具值的否定断言（值在夹具行，未新增）
+    )
+    assert need_value in html  # 自有后端候选（建议调证）
+    # §1.5（用户裁定）：无需调证行不再逐行进文书，换诚实计数指针
+    assert skip_value not in html
+    assert "未在本文书展开" in html
     # uni-app 代码加密提示
     assert "__UNI__F7A0431" in html
     assert "plus.confusion" in html
@@ -573,8 +597,10 @@ def test_html_shows_hardening_and_enrichment(sample_report: Report, tmp_path: Pa
     html = path.read_text(encoding="utf-8")
 
     assert "梆梆加固" in html  # 加固状态
-    assert "粤ICP备12345678号" in html  # icp 富化（主控域名行）
-    assert "AS37963" in html  # asn 富化（通联 IP 行）
+    assert "粤ICP备12345678号" in html  # icp 富化（自有后端候选行）
+    # §1.5：通联 IP（无需调证、无警示）行已收敛，其 asn 富化不再出现在文书
+    # （富化单元格渲染由 test_html_renders_rdap_and_dns_enrichment 的 need 行覆盖）
+    assert "AS37963" not in html
 
 
 def test_html_renders_rdap_and_dns_enrichment(tmp_path: Path) -> None:
@@ -591,7 +617,7 @@ def test_html_renders_rdap_and_dns_enrichment(tmp_path: Path) -> None:
         leads=[
             Lead(
                 category=LeadCategory.DOMAIN,
-                value="c2.fraud-gw.cn",
+                value="c2.gw.example.com",
                 subject="某科技有限公司",
                 where_to_request="域名注册商",
                 confidence=Confidence.HIGH,
@@ -600,7 +626,7 @@ def test_html_renders_rdap_and_dns_enrichment(tmp_path: Path) -> None:
         ],
         endpoints=[
             Endpoint(
-                value="c2.fraud-gw.cn",
+                value="c2.gw.example.com",
                 kind="domain",
                 enrichment={
                     "rdap": {
@@ -699,10 +725,16 @@ def test_template_loaded_via_importlib_resources(sample_report: Report, tmp_path
 def test_lead_is_c2_only_network_and_investigate() -> None:
     from apkscan.core.models import Lead, LeadCategory
 
-    assert Lead(category=LeadCategory.DOMAIN, value="c2.fraud.cn", advice="建议调证").is_c2 is True
+    assert (
+        Lead(category=LeadCategory.DOMAIN, value="c2.backend.example.com", advice="建议调证").is_c2
+        is True
+    )
     assert Lead(category=LeadCategory.IP, value="203.0.113.9", advice="建议调证").is_c2 is True
     # 无需调证（CDN/公共服务）→ 非 C2
-    assert Lead(category=LeadCategory.DOMAIN, value="maps.googleapis.com", advice="无需调证").is_c2 is False
+    assert (
+        Lead(category=LeadCategory.DOMAIN, value="public.cdn.example.com", advice="无需调证").is_c2
+        is False
+    )
     # 非网络端点（配置键）即使建议调证也非 C2 服务器
     assert Lead(category=LeadCategory.CONFIG_KEY, value="K=V", advice="建议调证").is_c2 is False
 
@@ -711,11 +743,15 @@ def test_lead_is_runtime_seen() -> None:
     from apkscan.core.models import Evidence, Lead, LeadCategory
 
     runtime = Lead(
-        category=LeadCategory.DOMAIN, value="c2.fraud.cn", advice="建议调证",
+        category=LeadCategory.DOMAIN,
+        value="c2.backend.example.com",
+        advice="建议调证",
         source_refs=[Evidence(source="runtime-decrypted", location="flows", snippet="y")],
     )
     static = Lead(
-        category=LeadCategory.DOMAIN, value="c2.fraud.cn", advice="建议调证",
+        category=LeadCategory.DOMAIN,
+        value="c2.backend.example.com",
+        advice="建议调证",
         source_refs=[Evidence(source="dex", location="classes.dex", snippet="y")],
     )
     assert runtime.is_runtime_seen is True
@@ -735,7 +771,9 @@ def test_lead_is_runtime_contact_tiers_observed_vs_derived() -> None:
 
     def _lead(source: str) -> Lead:
         return Lead(
-            category=LeadCategory.IP, value="203.0.113.9", advice="建议调证",
+            category=LeadCategory.IP,
+            value="203.0.113.9",
+            advice="建议调证",
             source_refs=[Evidence(source=source, location="flows", snippet="x")],
         )
 
@@ -769,8 +807,11 @@ def test_merge_runtime_into_lead_dict_upgrades_contact_on_observed_source() -> N
     def _static_lead_dict() -> dict:
         # 序列化态静态 lead：is_runtime_seen / is_runtime_contact 均为 False。
         return {
-            "category": "IP", "value": "203.0.113.9", "advice": "建议调证",
-            "is_runtime_seen": False, "is_runtime_contact": False,
+            "category": "IP",
+            "value": "203.0.113.9",
+            "advice": "建议调证",
+            "is_runtime_seen": False,
+            "is_runtime_contact": False,
             "source_refs": [{"source": "dex", "location": "classes.dex", "snippet": "x"}],
         }
 
@@ -907,7 +948,9 @@ def test_html_marks_c2_servers(tmp_path: Path) -> None:
         meta={},
         leads=[
             Lead(
-                category=LeadCategory.DOMAIN, value="c2.fraud-gw.cn", advice="建议调证",
+                category=LeadCategory.DOMAIN,
+                value="c2.gw.example.com",
+                advice="建议调证",
                 source_refs=[Evidence(source="runtime", location="flows", snippet="x")],
             ),
             Lead(category=LeadCategory.DOMAIN, value="maps.googleapis.com", advice="无需调证"),
@@ -923,7 +966,7 @@ def test_html_marks_c2_servers(tmp_path: Path) -> None:
     # 未经人工认定不输出确定性 C2。
     assert "🎯" in text  # 高价值标注出现
     assert "确认 C2" not in text
-    assert "c2.fraud-gw.cn" in text
+    assert "c2.gw.example.com" in text
 
 
 def test_html_c2_badge_tiers_by_contact(tmp_path: Path) -> None:
@@ -940,10 +983,19 @@ def test_html_c2_badge_tiers_by_contact(tmp_path: Path) -> None:
     def _render(source: str | None) -> str:
         refs = [Evidence(source=source, location="flows", snippet="x")] if source else []
         rpt = Report(
-            package_name="com.x", meta={},
-            leads=[Lead(category=LeadCategory.DOMAIN, value="c2.fraud.cn",
-                        advice=ADVICE_INVESTIGATE, source_refs=refs)],
-            endpoints=[], findings=[], analyzer_status=[],
+            package_name="com.x",
+            meta={},
+            leads=[
+                Lead(
+                    category=LeadCategory.DOMAIN,
+                    value="c2.backend.example.com",
+                    advice=ADVICE_INVESTIGATE,
+                    source_refs=refs,
+                )
+            ],
+            endpoints=[],
+            findings=[],
+            analyzer_status=[],
         )
         out = tmp_path / f"{source or 'static'}.html"
         report_html.render(rpt, str(out))
@@ -993,15 +1045,15 @@ def test_runtime_report_derived_endpoint_not_confirmed_c2(tmp_path: Path) -> Non
         "endpoints": [
             {
                 "value": "45.79.10.77",  # leak-scan: allow 报告重建夹具，须是公网 IP 才为运行时端点生成 Lead
-                    "kind": "ip",
-                    "evidences": [
-                        {
-                            "source": "static",
-                            "location": "hand-edited",
-                            "snippet": "45.79.10.77",  # leak-scan: allow 报告重建夹具，须是公网 IP 才为运行时端点生成 Lead
-                            "scope": "case_evidence",
-                        }
-                    ],
+                "kind": "ip",
+                "evidences": [
+                    {
+                        "source": "static",
+                        "location": "hand-edited",
+                        "snippet": "45.79.10.77",  # leak-scan: allow 报告重建夹具，须是公网 IP 才为运行时端点生成 Lead
+                        "scope": "case_evidence",
+                    }
+                ],
             }
         ]
     }
@@ -1010,17 +1062,22 @@ def test_runtime_report_derived_endpoint_not_confirmed_c2(tmp_path: Path) -> Non
 
     endpoints = load_runtime_endpoints(str(path))
     assert endpoints, "应重建出运行时端点"
-    assert all(
-        ev.source == "runtime-derived" for ep in endpoints for ev in ep.evidences
-    ), "非 runtime* 来源应被钉成 runtime-derived（非 observed-contact）"
+    assert all(ev.source == "runtime-derived" for ep in endpoints for ev in ep.evidences), (
+        "非 runtime* 来源应被钉成 runtime-derived（非 observed-contact）"
+    )
 
     report = Report(
-        package_name="com.x", meta={}, leads=[], endpoints=[],
-        findings=[], analyzer_status=[],
+        package_name="com.x",
+        meta={},
+        leads=[],
+        endpoints=[],
+        findings=[],
+        analyzer_status=[],
     )
     merge_runtime_endpoints(report, endpoints)
 
-    ip_leads = [ld for ld in report.leads if ld.value == "45.79.10.77"]  # leak-scan: allow 报告重建夹具，须是公网 IP 才为运行时端点生成 Lead
+    fixture_ip = "45.79.10.77"  # leak-scan: allow 报告重建夹具，须是公网 IP 才为运行时端点生成 Lead
+    ip_leads = [ld for ld in report.leads if ld.value == fixture_ip]
     assert ip_leads, "应为运行时引入的公网 IP 生成 Lead"
     lead = ip_leads[0]
     assert lead.is_c2 is True  # 公网 IP + 建议调证
@@ -1045,10 +1102,12 @@ def test_non_c2_lead_gets_no_red_badge(tmp_path: Path) -> None:
     # is_c2 是派生属性（DOMAIN/IP + 建议调证 ⇒ True）——SDK_SERVICE 即使建议调证
     # 也非 C2，正是「SDK 信号不被红徽标覆盖」的用例本体。
     rpt = Report(
-        package_name="com.x", meta={},
-        leads=[Lead(category=LeadCategory.SDK_SERVICE, value="cdn.example.com",
-                    advice="建议调证")],
-        endpoints=[], findings=[], analyzer_status=[],
+        package_name="com.x",
+        meta={},
+        leads=[Lead(category=LeadCategory.SDK_SERVICE, value="cdn.example.com", advice="建议调证")],
+        endpoints=[],
+        findings=[],
+        analyzer_status=[],
     )
     out = tmp_path / "r.html"
     report_html.render(rpt, str(out))
@@ -1064,10 +1123,12 @@ def test_json_keeps_is_c2_internal_field(tmp_path: Path) -> None:
     from apkscan.report import json as report_json
 
     rpt = Report(
-        package_name="com.x", meta={},
-        leads=[Lead(category=LeadCategory.DOMAIN, value="api.example.com",
-                    advice="建议调证")],
-        endpoints=[], findings=[], analyzer_status=[],
+        package_name="com.x",
+        meta={},
+        leads=[Lead(category=LeadCategory.DOMAIN, value="api.example.com", advice="建议调证")],
+        endpoints=[],
+        findings=[],
+        analyzer_status=[],
     )
     out = tmp_path / "r.json"
     report_json.dump(rpt, str(out))
@@ -1178,7 +1239,9 @@ def test_html_renders_evidence_integrity_section(tmp_path: Path) -> None:
     assert "法律可采性" not in html
 
 
-def test_html_no_integrity_section_when_manifest_absent(sample_report: Report, tmp_path: Path) -> None:
+def test_html_no_integrity_section_when_manifest_absent(
+    sample_report: Report, tmp_path: Path
+) -> None:
     """meta 无 evidence_manifest 时不渲染该小节（避免空小节噪音；现有报告不受影响）。"""
     path = tmp_path / "r.html"
     report_html.render(sample_report, str(path))
@@ -1244,7 +1307,12 @@ def test_dedicated_section_categories_really_have_their_own_block(tmp_path: Path
     from apkscan.report.html import DEDICATED_SECTION_CATEGORIES, other_lead_groups
 
     leads = [
-        Lead(category=cat, value=f"v-{cat.value}", advice=ADVICE_INVESTIGATE, confidence=Confidence.HIGH)
+        Lead(
+            category=cat,
+            value=f"v-{cat.value}",
+            advice=ADVICE_INVESTIGATE,
+            confidence=Confidence.HIGH,
+        )
         for cat in LeadCategory
     ]
 
@@ -1256,3 +1324,65 @@ def test_dedicated_section_categories_really_have_their_own_block(tmp_path: Path
     assert others | DEDICATED_SECTION_CATEGORIES == set(LeadCategory), (
         "两者并集必须覆盖全部类别，否则有类别两边都不管"
     )
+
+
+def test_skip_advice_rows_collapsed_in_html(tmp_path: Path) -> None:
+    """§1.5（用户裁定 2026-08-19）：「无需调证」条目不逐行进 HTML 文书——
+    换诚实计数指针；机器出口（json）保持完整（完整性对照锁）。"""
+
+    from apkscan.core.models import Lead, LeadCategory, Report
+    from apkscan.report import html as report_html
+    from apkscan.report import json as report_json
+
+    rpt = Report(
+        package_name="com.x",
+        meta={},
+        leads=[
+            Lead(category=LeadCategory.DOMAIN, value="ctrl.backend.example.com", advice="建议调证"),
+            Lead(category=LeadCategory.DOMAIN, value="static.cdn.example.com", advice="无需调证"),
+            Lead(
+                category=LeadCategory.SDK_SERVICE, value="sdk.assets.example.com", advice="无需调证"
+            ),
+        ],
+        endpoints=[],
+        findings=[],
+        analyzer_status=[],
+    )
+    out = tmp_path / "r.html"
+    report_html.render(rpt, str(out))
+    html = out.read_text(encoding="utf-8")
+    # 建议调证照常渲染；无需调证的值不再出现在文书里
+    assert "ctrl.backend.example.com" in html
+    assert "static.cdn.example.com" not in html
+    assert "sdk.assets.example.com" not in html
+    # 诚实计数指针（不展示 ≠ 不存在）
+    assert "未在本文书展开" in html
+    assert "report.json" in html
+    # 机器出口完整性不受损
+    jout = tmp_path / "r.json"
+    report_json.dump(rpt, str(jout))
+    jtext = jout.read_text(encoding="utf-8")
+    assert "static.cdn.example.com" in jtext and "sdk.assets.example.com" in jtext
+
+
+def test_polish_toc_and_offline_discipline(sample_report: Report, tmp_path: Path) -> None:
+    """版式刀轻锁：目录导航与脚本在场；模板字面量层零外源 URL（离线纪律）。"""
+    from importlib import resources
+
+    path = tmp_path / "r.html"
+    from apkscan.report import html as report_html
+
+    report_html.render(sample_report, str(path))
+    html = path.read_text(encoding="utf-8")
+    assert '<nav id="toc"' in html
+    assert 'id="toc-script"' in html
+    template_text = (resources.files("apkscan.report") / "templates" / "report.html.j2").read_text(
+        encoding="utf-8"
+    )
+    literal_urls = [
+        line
+        for line in template_text.splitlines()
+        if "http://" in line or "https://" in line
+        if "{{" not in line  # 数据值渲染处不算
+    ]
+    assert literal_urls == []
