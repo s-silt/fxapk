@@ -14,9 +14,13 @@ import hashlib
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from apkscan.core.jadx_index import (
+    REASON_MALFORMED,
     DexInput,
     DexRole,
+    JadxIndexError,
     JadxIndexManifest,
     JadxIndexStore,
     Limits,
@@ -193,6 +197,175 @@ def test_context_enrichment_never_changes_hit_set(tmp_path: Path) -> None:
     )
     hits = find_value_usage(index, _TARGET)
     assert sorted((h.relative_path, h.line, h.column) for h in hits) == expected
+
+
+def test_non_matching_posting_still_fully_validated(tmp_path: Path) -> None:
+    """★锁住「非命中 posting 也必须当场揭穿」：这是本片刻意保留的既有语义。
+
+    补 context 时若图省事改成「先比 digest、不匹配就 continue」，非命中 posting 的
+    `_normalize_safe_relative_path`（防路径穿越）与行号范围校验就被跳过了。既有的
+    坏 posting 测试用的是**缺字段**记录，在键集合校验处就被拦下，抓不到这一层——
+    所以这里用**键齐全、类型合法、但路径含 `..`** 的非命中 posting。
+    """
+    index = _build_index(
+        tmp_path,
+        {
+            "com/a/A.java": (
+                "package com.a;\n"
+                "public class A {\n"
+                f'    public void handle(String v) {{ String x = "{_TARGET}"; }}\n'
+                "}\n"
+            )
+        },
+        [_TARGET],
+    )
+    shard = dict(index.shards[0])
+    postings = list(shard["postings"])  # type: ignore[arg-type]
+    postings.append(
+        {
+            "path": "../outside/Evil.java",
+            "line": 1,
+            "column": 1,
+            # 合法形态的 digest，但绝不等于 _TARGET 的 digest——即「非命中」
+            "value_digest": "sha256:" + "b" * 64,
+        }
+    )
+    shard["postings"] = postings
+
+    with pytest.raises(JadxIndexError) as exc:
+        find_value_usage(_replace_first_shard(index, shard), _TARGET)
+    assert exc.value.code == REASON_MALFORMED
+
+
+def test_hits_keep_production_sort_order(tmp_path: Path) -> None:
+    """★锁住返回顺序：命中集合那条自己 sorted，删掉生产排序也发现不了。"""
+    index = _build_index(
+        tmp_path,
+        {
+            "com/a/A.java": (
+                "package com.a;\n"
+                "public class A {\n"
+                "    public void handle(String v) {\n"
+                f'        String a = "{_TARGET}";\n'
+                f'        String b = "{_TARGET}";\n'
+                f'        String c = "{_TARGET}";\n'
+                "    }\n"
+                "}\n"
+            )
+        },
+        [_TARGET],
+    )
+    hits = find_value_usage(index, _TARGET)
+    assert len(hits) == 3
+    keys = [(h.relative_path, h.line, h.column) for h in hits]
+    assert keys == sorted(keys), "生产侧必须按 (path, line, column) 有序返回"
+
+
+def test_range_boundaries_are_inclusive(tmp_path: Path) -> None:
+    """区间端点含边界：命中恰好落在 start_line 或 end_line 上时仍归属。"""
+    index = _build_index(
+        tmp_path,
+        {
+            "com/a/A.java": (
+                "package com.a;\n"
+                "public class A {\n"
+                f'    public void handle(String v) {{ String x = "{_TARGET}"; }}\n'
+                "}\n"
+            )
+        },
+        [_TARGET],
+    )
+    line = find_value_usage(index, _TARGET)[0].line
+    for start, end in ((line, line + 3), (line - 3, line)):
+        shard = dict(index.shards[0])
+        shard["structure"] = {
+            "classes": [
+                {
+                    "name": "com.a.A",
+                    "path": "com/a/A.java",
+                    "methods": [
+                        {"name": "m", "arity": 0, "start_line": start, "end_line": end}
+                    ],
+                }
+            ]
+        }
+        hits = find_value_usage(_replace_first_shard(index, shard), _TARGET)
+        assert hits[0].method_context == "m/0", f"边界 {start}-{end} 应含 {line}"
+
+
+def test_bad_method_record_abandons_whole_lookup(tmp_path: Path) -> None:
+    """★坏 method 放弃整个反查，绝不让剩余区间冒充「唯一归属」。
+
+    构造：一个合法方法覆盖命中行 + 一个同样覆盖该行但 arity 非法的坏记录。
+    若实现只是跳过坏记录，剩下的合法方法就会被当成唯一匹配而归属——
+    真实状态是「不确定」，那样等于把不确定伪装成确定。
+    """
+    index = _build_index(
+        tmp_path,
+        {
+            "com/a/A.java": (
+                "package com.a;\n"
+                "public class A {\n"
+                f'    public void handle(String v) {{ String x = "{_TARGET}"; }}\n'
+                "}\n"
+            )
+        },
+        [_TARGET],
+    )
+    line = find_value_usage(index, _TARGET)[0].line
+    shard = dict(index.shards[0])
+    shard["structure"] = {
+        "classes": [
+            {
+                "name": "com.a.A",
+                "path": "com/a/A.java",
+                "methods": [
+                    {"name": "good", "arity": 0, "start_line": line - 1, "end_line": line + 1},
+                    # arity 用 bool——形态非法，且区间同样覆盖命中行
+                    {"name": "bad", "arity": True, "start_line": line - 1, "end_line": line + 1},
+                ],
+            }
+        ]
+    }
+    hits = find_value_usage(_replace_first_shard(index, shard), _TARGET)
+    assert len(hits) == 1
+    assert hits[0].class_context is None
+    assert hits[0].method_context is None
+
+
+def test_bad_class_record_abandons_whole_lookup(tmp_path: Path) -> None:
+    """坏 class 同样放弃整片反查——与坏 method 一个粒度，别处的合法类不得继续归属。"""
+    index = _build_index(
+        tmp_path,
+        {
+            "com/a/A.java": (
+                "package com.a;\n"
+                "public class A {\n"
+                f'    public void handle(String v) {{ String x = "{_TARGET}"; }}\n'
+                "}\n"
+            )
+        },
+        [_TARGET],
+    )
+    line = find_value_usage(index, _TARGET)[0].line
+    shard = dict(index.shards[0])
+    shard["structure"] = {
+        "classes": [
+            {
+                "name": "com.a.A",
+                "path": "com/a/A.java",
+                "methods": [
+                    {"name": "m", "arity": 0, "start_line": line - 1, "end_line": line + 1}
+                ],
+            },
+            # name 不是字符串——class 级形状异常
+            {"name": 42, "path": "com/a/B.java", "methods": []},
+        ]
+    }
+    hits = find_value_usage(_replace_first_shard(index, shard), _TARGET)
+    assert len(hits) == 1
+    assert hits[0].class_context is None
+    assert hits[0].method_context is None
 
 
 def test_missing_structure_section_degrades_to_none(tmp_path: Path) -> None:
