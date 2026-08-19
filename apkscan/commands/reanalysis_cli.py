@@ -23,7 +23,10 @@ from apkscan.core.atomic import atomic_create_bytes
 
 recognize_app = typer.Typer(
     add_completion=False,
-    help=("识别与取证重分析请求投影。生产映射 v1 可能产生诚实空结果；空输出≠无缺口。"),
+    help=(
+        "识别与取证重分析请求投影。生产映射 v2；未授予的缺口面按 "
+        "unknown/low_value/ceiling 如实计数于 receipt，空输出仍≠无缺口。"
+    ),
 )
 
 # labels 子组（P4-C）：只读标签校验器，挂在同一 recognize 命名空间下。
@@ -324,8 +327,8 @@ def _publish_pair(
     "reanalysis",
     help=(
         "从 p3e2-v1 judgment ledger 投影 proposed 重分析请求。"
-        "生产映射 v1 可能不映射任何缺口，因此空输出≠无缺口；"
-        "合法空结果会发布零字节 requests 文件及 receipt。"
+        "生产映射 v2；未授予的缺口面按 unknown/low_value/ceiling "
+        "如实计数于 receipt，空输出仍≠无缺口。"
     ),
 )
 def reanalysis(

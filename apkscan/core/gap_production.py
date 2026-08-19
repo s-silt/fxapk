@@ -133,6 +133,11 @@ def build_visibility_gaps(
     question_id: str,
     producer: rc.ProducerRef,
 ) -> tuple[rc.EvidenceGap, ...]:
+    """按 blocked claim 及其每个不足来源分别生成 evidence gap。
+
+    跨源聚合会让单个动作背上无法独立兑现的 criteria，使未授予来源无法留痕，
+    并导致 outcome 连带认领；按来源拆分后，各 gap 可独立进入 planner 记账。
+    """
     sources, blocked_claims = _validate_visibility(visibility)
 
     gaps: list[rc.EvidenceGap] = []
@@ -164,32 +169,29 @@ def build_visibility_gaps(
             )
 
         # ★主张名必须进 reason（claim.<主张名> 令牌）：EvidenceGap 没有主张字段
-        #   （claim_id 属判断链 claim、此处恒 None），两个主张若责任来源完全相同，
-        #   内容体会逐字节一致 → 封印 id 相同 → 入账 duplicate_record_id 崩整本账
-        #   （P3-E2 真实 pipeline 实测暴露）。映射表天然忽略未知 reason，无副作用。
-        reason_codes = tuple(
-            sorted(
-                {f"claim.{claim_name}"}
-                | {
-                    f"{source_name}_visibility_{level}"
-                    for source_name, level in insufficient_sources
-                }
+        #   （claim_id 属判断链 claim、此处恒 None）。每个不足来源独立产 gap，
+        #   令对应动作、criteria 与 outcome 可由 planner 分别记账。
+        for source_name, level in insufficient_sources:
+            reason_codes = tuple(
+                sorted(
+                    (
+                        f"claim.{claim_name}",
+                        f"{source_name}_visibility_{level}",
+                    )
+                )
             )
-        )
-        required_observation_types = tuple(
-            sorted({_OBSERVATION_TYPES[source_name] for source_name, _ in insufficient_sources})
-        )
+            required_observation_types = (_OBSERVATION_TYPES[source_name],)
 
-        gaps.append(
-            codec.build_evidence_gap(
-                question_id=question_id,
-                claim_id=None,
-                effect=rc.GapEffect.BLOCKS_CLAIM,
-                reason_codes=reason_codes,
-                required_observation_types=required_observation_types,
-                coverage_requirements=(),
-                producer=producer,
+            gaps.append(
+                codec.build_evidence_gap(
+                    question_id=question_id,
+                    claim_id=None,
+                    effect=rc.GapEffect.BLOCKS_CLAIM,
+                    reason_codes=reason_codes,
+                    required_observation_types=required_observation_types,
+                    coverage_requirements=(),
+                    producer=producer,
+                )
             )
-        )
 
     return tuple(gaps)

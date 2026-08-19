@@ -221,8 +221,8 @@ def test_reduces_confidence_whitelisted_reason_is_admitted():
     assert result.receipt.suppressed_low_value == 0
 
 
-def test_default_production_policy_plans_nothing():
-    # v1 生产能力 = 空：诚实空输出，receipt 记因，不报错。
+def test_unmapped_fixture_reason_stays_suppressed():
+    # P3-E3 改名改注：v2 实表下未映射 reason（夹具值）仍诚实抑制、receipt 记因。
     result = _plan(_context([_gap()]), rp.DEFAULT_ADMISSION_POLICY)
     assert result.planned == ()
     assert result.receipt.suppressed_unknown_reason == 1
@@ -483,3 +483,44 @@ def test_dex_resource_gaps_stay_unknown():
         planning = _plan(_context([gap]), rp.DEFAULT_ADMISSION_POLICY)
         assert not planning.planned, reason
         assert planning.receipt.suppressed_unknown_reason == 1, reason
+
+
+def test_real_producer_multisource_leaves_residual_trace():
+    """E3 复审 P1 锁：真 gap 生产器多源输出——已授予源出动作且 criteria 恰可兑现、
+    未授予源（dex）独立成 gap 计入 unknown 留痕。"""
+    from apkscan.core.gap_production import build_visibility_gaps
+
+    sources = {
+        name: {"visibility": "complete", "why": [], "inputs_seen": []}
+        for name in ("dex", "java", "native", "resource", "runtime")
+    }
+    sources["dex"]["visibility"] = "partial"
+    sources["java"]["visibility"] = "failed"
+    doc = {
+        "schema_version": "1.1",
+        "sources": sources,
+        "claims": {},
+        "blocked_claims": ["static_endpoint_exhaustive"],
+        "remediation": "not_attempted",
+        "notes": [],
+        "next_actions": [],
+        "degraded": True,
+    }
+    question = make_question()
+    gaps = build_visibility_gaps(doc, question_id=question.question_id, producer=_PRODUCER)
+    assert len(gaps) == 2
+    context = rxc.PlanningContext(
+        question=question,
+        gaps=gaps,
+        gap_statuses={gap.gap_id: GapStatus.OPEN for gap in gaps},
+        anchors=(make_anchor(),),
+        supporting_observation_ids=(),
+        contradicting_observation_ids=(),
+        authorization_ceiling=AuthorizationLevel.AUTHORIZED_DEVICE,
+        sample_digest=SAMPLE_DIGEST,
+    )
+    planning = _plan(context, rp.DEFAULT_ADMISSION_POLICY)
+    assert [p.action.action_type for p in planning.planned] == [_CALLPATH.value]
+    (planned,) = planning.planned
+    assert all("dex" not in c for c in planned.action.success_criteria)
+    assert planning.receipt.suppressed_unknown_reason == 1

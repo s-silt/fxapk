@@ -521,10 +521,15 @@ def test_e2e_first_nonempty_reanalysis_requests(
     )
     assert result.exit_code == 0, result.output + (result.stderr or "")
     lines = [l for l in requests_out.read_text(encoding="utf-8").splitlines() if l.strip()]
-    assert len(lines) >= 1  # ★诚实空时代结束的那一行
+    assert len(lines) == 1  # ★诚实空时代结束的那一行——受控夹具下恰一条
     import json as _json
 
-    rows = [_json.loads(line) for line in lines]
-    assert any(row["analysis_type"] == "jadx_callpath" for row in rows)
+    (row,) = [_json.loads(line) for line in lines]
+    assert row["analysis_type"] == "jadx_callpath"
+    assert row["reason_codes"] == [
+        "claim.static_endpoint_exhaustive",
+        "java_visibility_partial",
+    ]
     receipt = _json.loads((tmp_path / "requests.jsonl.receipt.json").read_text("utf-8"))
-    assert receipt["emitted"]["count"] >= 1
+    assert receipt["emitted"] == {"count": 1, "by_type": {"jadx_callpath": 1}}
+    assert receipt["mapping_version"] == "p3-mapping-v2"
