@@ -671,7 +671,7 @@ def test_html_render_empty_report(tmp_path: Path) -> None:
     assert "com.empty.app" in html
     # 各空线索区给出空提示，不崩溃
     assert "未抠取到配置键值" in html
-    assert "未识别到「建议调证」的主控域名" in html
+    assert "未识别到「建议调证」的自有后端候选域名" in html  # C2 语义纠错随动
 
 
 # --------------------------- 资源审计（exe-ready）---------------------------
@@ -928,7 +928,7 @@ def test_html_marks_c2_servers(tmp_path: Path) -> None:
 
 def test_html_c2_badge_tiers_by_contact(tmp_path: Path) -> None:
     """C2 徽标三档按观测强弱分层：observed-contact → 深红「实连」(badge-c2-live)；仅动态出现的
-    runtime-derived → 橙「运行时」(badge-c2-runtime)、**绝不实连**；纯静态 → 红「C2」(badge-c2)。
+    runtime-derived → 橙「运行时出现」(badge-c2-runtime)、**绝不实连**；纯静态 → 红「疑似自有后端」(badge-c2)。
 
     无修复即失败：旧模板把 runtime-derived 也当 is_runtime_seen 渲成 badge-c2-live——本测试对
     ``runtime-derived`` 断言 `badge-c2-live` 不出现，即钉住「手编 / 合成来源不得升『实连』」。
@@ -952,20 +952,20 @@ def test_html_c2_badge_tiers_by_contact(tmp_path: Path) -> None:
     # observed-contact（runtime-pcap）→ 实连已观测（不自称确认 C2）
     live = _render("runtime-pcap")
     assert 'class="badge badge-c2-live"' in live
-    assert "实连已观测" in live
+    assert ">🎯 实连已观测</span>" in live  # 锁徽标 span 本体，非注释/说明文字
 
     # 手编 / 合成 runtime-derived：只动态出现、未确认接触 → 运行时出现（中档），绝不实连
     derived = _render("runtime-derived")
     assert 'class="badge badge-c2-runtime"' in derived
     assert 'class="badge badge-c2-live"' not in derived  # ← 无修复即失败
-    assert "运行时出现" in derived
+    assert ">🎯 运行时出现</span>" in derived
 
     # 纯静态 → 疑似自有后端；静态档不得再自称 C2（语义纠错，class 名保留作内部兼容）
     static = _render(None)
     assert 'class="badge badge-c2"' in static
     assert 'class="badge badge-c2-live"' not in static
     assert 'class="badge badge-c2-runtime"' not in static
-    assert "疑似自有后端" in static
+    assert ">🎯 疑似自有后端</span>" in static
     assert "🎯 C2" not in static
 
     # 三档统一：全文不得出现确定性 C2 措辞
@@ -977,7 +977,7 @@ def test_html_c2_badge_tiers_by_contact(tmp_path: Path) -> None:
 def test_runtime_report_derived_endpoint_not_confirmed_c2(tmp_path: Path) -> None:
     """信任边界·端到端：手编 / 回灌 runtime_report.json（无 observed-contact 证据的 IP 端点）经
     load_runtime_endpoints → merge_runtime_endpoints，其 Lead 只 is_runtime_seen、不 is_runtime_contact，
-    渲染为「C2·运行时」而非「C2·实连」。
+    渲染为「运行时出现」而非「实连已观测」。
 
     无修复即失败：合成 / 非 runtime* 来源被钉成 ``runtime-derived``（仍 startswith runtime），旧徽标
     据宽口径 is_runtime_seen 会把它误呈成「实连/确认 C2」——办案人面的活体确认信任边界漏点。"""
@@ -1032,7 +1032,7 @@ def test_runtime_report_derived_endpoint_not_confirmed_c2(tmp_path: Path) -> Non
     text = out.read_text(encoding="utf-8")
     assert 'class="badge badge-c2-runtime"' in text
     assert 'class="badge badge-c2-live"' not in text  # ← 无修复即失败
-    assert "运行时出现" in text
+    assert ">🎯 运行时出现</span>" in text
     assert "C2·实连" not in text and "确认 C2" not in text
 
 

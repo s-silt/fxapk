@@ -2,7 +2,7 @@
     版式对齐「思知」：具体 key 值与调证建议显著呈现。章节顺序：
       ① 概览（含加固 / uni 加密提示）
       ② ★ 调用插件 / 配置键值（CONFIG_KEY：Key=值 / 所属公司 / 调证建议 / 取证依据）
-      ③ 主控域名（DOMAIN/IP 中 advice=建议调证 的）
+      ③ 自有后端候选（DOMAIN/IP 中 advice=建议调证 的）
       ④ 通联域名 / IP（advice=无需调证 的，弱化 / 可折叠）
       ⑤ 第三方 SDK → 厂商
       ⑥ 支付 / 资金线索 · 联系方式线索
@@ -464,7 +464,7 @@
 
   {#- ============ ③ 自有后端 / 高价值域名（建议调证） ============ -#}
   <section id="control-domains">
-    <h2><span class="num">③</span> 🎯 自有后端 / 高价值域名 <span class="muted" style="font-size:13px;font-weight:400">（域名 / IP 中「建议调证」的高价值线索 = App 自有后端；「实连已观测」= 真机抓到通信，「运行时出现」= 出现未确认接触；C2/主控认定属 Phase2 人工复核）</span></h2>
+    <h2><span class="num">③</span> 🎯 自有后端 / 高价值域名 <span class="muted" style="font-size:13px;font-weight:400">（域名 / IP 中「建议调证」的高价值线索 = App 自有后端候选；「实连已观测」= 真机抓到通信，「运行时出现」= 出现未确认接触；C2/主控认定属 Phase2 人工复核）</span></h2>
     {% if network_leads.need %}
     <table class="lead-table">
       <thead>
@@ -483,7 +483,7 @@
       </tbody>
     </table>
     {% else %}
-      <div class="empty">未识别到「建议调证」的主控域名 / IP。</div>
+      <div class="empty">未识别到「建议调证」的自有后端候选域名 / IP。</div>
     {% endif %}
   </section>
 
