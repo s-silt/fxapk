@@ -213,6 +213,38 @@ def test_trace_multihop_path_across_dex_shards(tmp_path: Path) -> None:
     assert all(e.resolution == "unique" for e in path.edges)
 
 
+def test_generic_param_endpoint_resolves_at_true_arity(tmp_path: Path) -> None:
+    """★P1-A 真入口锁：泛型参数方法的端点按真实 arity 可达。
+
+    旧的 `split(",")` 计数把 `Map<String, String> m` 记成 2 个参数，方法身份变成
+    `handle/2`，于是按真实 arity 查 `handle/1` 得空——空结果在本模块语义里是
+    「未观察到」而非「不可达」，假阴性因此不会被任何现有断言揭穿。这条用例把
+    修复钉在 trace_callpath 真入口上：单测 `_declared_arity` 测不到这层接线。
+    """
+    loaded = _build_single_tree_index(
+        tmp_path,
+        {
+            "com/a/A.java": (
+                "package com.a;\n"
+                "public class A {\n"
+                "    public void start() {\n"
+                "        handle(cfg);\n"
+                "    }\n"
+                "    public void handle(Map<String, String> m) {\n"
+                "    }\n"
+                "}\n"
+            )
+        },
+    )
+    paths = trace_callpath(loaded, "com.a.A#start/0", "com.a.A#handle/1")
+    assert len(paths) == 1
+    (path,) = paths
+    assert path.nodes == ("com.a.A#start/0", "com.a.A#handle/1")
+    assert [(e.caller_path, e.line) for e in path.edges] == [("com/a/A.java", 4)]
+    # 旧 buggy 计数下该方法会被登记成 arity=2；修复后这个端点必须不存在。
+    assert trace_callpath(loaded, "com.a.A#start/0", "com.a.A#handle/2") == ()
+
+
 def test_trace_accepts_arityless_endpoint_form(tmp_path: Path) -> None:
     loaded = _build_two_dex_index(tmp_path)
     paths = trace_callpath(loaded, "com.a.App#onCreate", "com.c.Net#get/1")

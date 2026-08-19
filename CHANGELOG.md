@@ -7,6 +7,31 @@ affect automated / CI / agent callers are called out explicitly**.
 
 ### Fixed
 
+- **JADX 索引方法 arity 泛型感知计数（structure schema 1.2 → 1.3）**：`_declared_arity`
+  此前按 `split(",")` 计参数个数，而方法声明正则允许泛型，于是泛型实参里的逗号被当成
+  参数分隔符——`Map<String, String> m` 算成 2 个参数。方法身份是 `cls#name/arity`，
+  算错即令 `trace_callpath` 按真实 arity 查**得空**，而空结果在本模块语义里是「未观察到」
+  而非「不可达」，这类假阴性不会被任何既有断言揭穿；`jadx_ownership` 的方法身份
+  `(class_name, path, "name/arity")` 同样错位、与官方 baseline 对不齐。
+  已在真实混淆样本（万级 Java 文件 / 万级类 / 五万级方法）上端到端验证：修复后提取不崩、
+  arity 分布合理。
+
+  同批补上参数段的 **fail-closed 缺口**：畸形参数此前会被折叠成一个「看起来正常」的
+  arity——`f(,,,,)` 折叠后是 0、`f(x)` 折叠后是 1，分别与真实的 `f()` / `f(String x)`
+  撞进同一个 `cls#name/arity` 身份，而 callpath 查询按同 id **合并出边**，等于让敌对
+  样本把伪造的调用边挂到真实方法上。现在四类一律判为不可判定：尖括号不配对、存在空的
+  顶层段、任一顶层段不含空白（合法形参必是 `类型 名字` 两部分）、形参个数超宽松上界。
+  参数段是样本可控输入，不可判定就必须说不可判定：
+  现在这类声明整条丢弃，并把该 shard 的 `coverage` 降为 `partial`（丢了声明就不再声称完整）。
+  真实混淆样本实测该加固**零误杀**：加固前后提取出的方法数完全一致，即良构样本一条都不会
+  被丢弃，它只在畸形/敌对输入上生效。
+
+  **对 agent / CI 调用方的影响**：本次不改 structure 段字段集，只改既有 `arity` 的取值，
+  但 schema 参与 key material，**bump 令全部既有索引工件变为可重建的 CacheMiss**——
+  下次分析会重付一次 jadx 反编译（每样本 300–1200s）。已缓存 index_key 会变；
+  `fxapk jadx callpath` 的端点参数须按修正后的真实 arity 书写（此前对泛型参数方法
+  需要传错误的偏大 arity 才能命中，那是缺陷行为，不再兼容）。
+
 - pcap 归因结论改为按抓包 fingerprint 记账（`meta.runtime_pcap_attribution_ledger`，
   版本化、有界字段、fail-closed）：同一 IP 多次抓包各自留痕，反转其中一次的归因不再
   擦掉另一次已确证的 TARGET；显式判否现在能把 IP 撤出目标集（此前 inventory 目标集只增

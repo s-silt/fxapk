@@ -5,7 +5,7 @@ S2：受控 cache root、create-only 原子发布、fail-closed 加载校验链�
 S3：确定性枚举、bounded postings、结构提取（P1-B）与 find_value_usage。
 本模块不负责 JADX 调用；调用路径查询见 jadx_callpath。
 
-结构段（schema 1.2）是对反编译 Java 的**有界启发式**解析——反射、JNI、动态
+结构段（版本见 ``INDEX_SCHEMA_VERSION``）是对反编译 Java 的**有界启发式**解析——反射、JNI、动态
 分发与混淆构造均不可见；未识别的语法被跳过而非报错。结构的不完整是文档化的
 启发式属性，绝不能被解释为「不存在」。
 """
@@ -30,7 +30,11 @@ from apkscan.core.recognition_codec import canonical_json_v1, parse_json_v1
 # 1.2：结构段类身份从 name 改为 (name, path)——真实混淆样本（脱壳 dump）里
 # 不同路径的同名类是常态，仅按 name 的唯一键会让索引整体不可建。schema 参与
 # key material，bump 即让旧工件按既有漂移机制变为可重建的 CacheMiss，无迁移代码。
-INDEX_SCHEMA_VERSION = "1.2"
+# 1.3：修正方法 arity 计数——泛型实参里的逗号此前被当成参数分隔符（`Map<String,
+# String> m` 算成 2），令方法身份 `cls#name/arity` 错位，callpath 按真实 arity 查
+# 假阴性、ownership 与 baseline 对不齐。字段集不变，只改既有 arity 的取值；仍须
+# bump，否则同一 index_key 下的旧 shard 会继续返回错误 arity。
+INDEX_SCHEMA_VERSION = "1.3"
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -623,7 +627,7 @@ _MAX_PERSISTED_IDENTIFIER = 1024
 
 
 def _validate_shard_structure(shard_value: Mapping[str, object], files: set[str]) -> None:
-    """schema 1.2 structure 段的 fail-closed 校验；违规抛精确 reason code。
+    """当前 schema（``INDEX_SCHEMA_VERSION``）structure 段的 fail-closed 校验；违规抛精确 reason code。
 
     形状违规 / 失序 / path 不在 files → malformed；完全重复的 (name, path) 类身份
     或 (name, arity, start_line) 方法三元组 → duplicate_structure。同名不同 path
@@ -1130,6 +1134,10 @@ class ShardScanResult:
 #: 类声明须与 `{` 同行（JADX 输出形态）；允许 extends/implements/泛型子句。
 _CLASS_DECL_RE = re.compile(r"\b(?:class|interface|enum)\s+([A-Za-z_$][\w$]*)[^{;]*\{")
 #: 成员方法：修饰符* 返回类型 名字(参数) [throws 子句] {——参数不允许嵌套括号。
+#: ★已知边界：形参上带**参数的注解**（`void f(@IntRange(from=0) int x)`）会让整条声明
+#: 匹配失败，于是该方法被静默漏掉，且不会置 limited、coverage 仍可能是 complete。
+#: 要收敛它需要一条「疑似方法声明」的宽松探测正则，而宽松正则的误报会把大量样本
+#: 打成 partial——收益与代价都要先量化，故留作已知边界而非静默假装不存在。
 _METHOD_DECL_RE = re.compile(
     r"^\s*(?:(?:public|private|protected|static|final|abstract|synchronized|native|strictfp)\s+)*"
     r"[\w$<>\[\], ?]+\s+([A-Za-z_$][\w$]*)\s*\(([^()]*)\)\s*(?:throws[^{]*)?\{"
@@ -1139,6 +1147,9 @@ _CTOR_DECL_RE = re.compile(
     r"^\s*(?:(?:public|private|protected|static|final|synchronized)\s+)*"
     r"([A-Za-z_$][\w$]*)\s*\(([^()]*)\)\s*(?:throws[^{]*)?\{"
 )
+#: 形参个数上限。JVM 的硬限是 255 个 **slot**（long/double 各占 2），按个数计只能是
+#: 宽松上界——这里要的正是宽松上界：超过它的声明必不是真实可编译方法，可直接不采信。
+_MAX_DECLARED_ARITY = 255
 _CALL_SITE_RE = re.compile(r"\b([A-Za-z_$][\w$]*)\s*\(")
 #: 语法关键字绝不是调用点；`new X(...)` 的构造器调用不是 P1-B 的边（文档化限制）。
 _CALL_KEYWORDS = frozenset(
@@ -1216,11 +1227,62 @@ def _sanitize_java_source(text: str) -> list[str]:
     return sanitized
 
 
-def _declared_arity(params: str) -> int:
+def _declared_arity(params: str) -> int | None:
+    """按尖括号深度 0 处的逗号计参数个数；**参数段畸形时返回 None**。
+
+    只需跟踪尖括号：`_METHOD_DECL_RE` / `_CTOR_DECL_RE` 的参数捕获组是 `[^()]*`，
+    圆括号（含带参注解）根本进不来；数组维度 `int[][]` 也不含逗号。
+
+    ★畸形一律返回 None 交调用方丢弃该声明，绝不折叠成一个「看起来正常」的 arity：
+    `f(,,,,)` 折叠后是 0、`f(x)` 折叠后是 1，都会与真实的 `f()` / `f(String x)` 撞成
+    同一个 `cls#name/arity` 身份，而 :func:`~apkscan.core.jadx_callpath._index_methods`
+    按同 id **合并出边**——等于让敌对样本把伪造的调用边挂到真实方法上。
+    参数段是样本可控输入，不可判定就必须说不可判定。
+
+    四类拒绝：尖括号不配对、存在空的顶层段、任一顶层段不含空白（合法形参必是
+    ``类型 名字`` 两部分，``String... a`` / ``int[] a`` / ``@NonNull String x`` /
+    ``final int a`` 都满足）、形参个数超上界。
+
+    ★这是**有界启发式**，与本模块整体定位一致：它不做完整的 Java 形参语法验证，
+    因此 ``int a int b``（漏写逗号）这类「平衡、非空、含空白但语法非法」的段仍会被
+    当成一个形参。要根治须引入类型语法解析器，那是另一个量级的东西。
+    """
     text = params.strip()
     if not text:
         return 0
-    return len([part for part in text.split(",") if part.strip()])
+
+    arity = 1
+    angle_depth = 0
+    segment_has_content = False
+    segment_has_space = False
+    for char in text:
+        if char == "<":
+            angle_depth += 1
+        elif char == ">":
+            if angle_depth == 0:
+                return None
+            angle_depth -= 1
+        elif char == "," and angle_depth == 0:
+            if not segment_has_content or not segment_has_space:
+                return None
+            segment_has_content = False
+            segment_has_space = False
+            arity += 1
+            continue
+
+        if char.isspace():
+            # 只有已出现过实义字符的段才算「类型与名字之间的分隔空白」，
+            # 否则 " , x" 的前导空白会冒充分隔。
+            if segment_has_content:
+                segment_has_space = True
+        else:
+            segment_has_content = True
+
+    if angle_depth != 0 or not segment_has_content or not segment_has_space:
+        return None
+    if arity > _MAX_DECLARED_ARITY:
+        return None
+    return arity
 
 
 def _method_body_digest(lines: list[str], start_line: int, end_line: int) -> str:
@@ -1321,9 +1383,17 @@ def _extract_file_structure(
                     if method_match:
                         name, params = method_match.group(1), method_match.group(2)
                 if name is not None and len(name) <= limits.max_identifier_len:
+                    arity = _declared_arity(params)
                     methods = classes[class_index]["methods"]
                     assert isinstance(methods, list)
-                    if len(methods) >= limits.max_methods_per_class:
+                    if arity is None:
+                        # 参数段不可判定 → 丢弃该声明，并按「不完整要说出来」标记。
+                        # 绝不落一个会与真实重载撞身份的 arity（见 _declared_arity）。
+                        # ★这里复用了 limited/structure_limit_hit 这个位，但语义上它是
+                        # 「解析拒绝」而非「撞资源上限」——两者都该让 coverage 降级，
+                        # 故安全效果正确；要区分二者需独立原因位，留待需要诊断时再拆。
+                        limited = True
+                    elif len(methods) >= limits.max_methods_per_class:
                         limited = True
                     else:
                         end = _method_end_line(clean_lines, number)
@@ -1332,7 +1402,7 @@ def _extract_file_structure(
                         methods.append(
                             {
                                 "name": name,
-                                "arity": _declared_arity(params),
+                                "arity": arity,
                                 "start_line": number,
                                 "end_line": end,
                                 "body_digest": _method_body_digest(lines, number, end),
