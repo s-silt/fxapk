@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import pytest
@@ -165,6 +166,139 @@ def test_manifest_rejects_schema_drift() -> None:
             index_schema_version="9.9",
         )
     assert _code_of(exc) == "schema_drift"
+
+
+def test_manifest_rejects_stale_key_with_new_options_digest() -> None:
+    """★P1-D codex 复审必须项：「旧 key + 新 options_digest」的不一致 manifest
+    构造即拒——否则它可凭旧 key 走 build_index 复用分支，拿旧 structure 数据
+    冒充新配置的产物（生产路径先派生后构造所以不触发，但存储层必须独立 fail-closed）。"""
+    lin = DexLineage(DexRole.APK_DEX, 0, "classes.dex", _digest(b"x"))
+    stale_key = derive_index_key([lin], "1.5.2", _OPTS)
+    new_opts = "sha256:" + "b" * 64
+    with pytest.raises(JadxIndexError) as exc:
+        JadxIndexManifest(
+            index_key=stale_key,
+            key_material=build_key_material([lin], "1.5.2", new_opts),
+            dex_lineage=(lin,),
+            jadx_version="1.5.2",
+            options_digest=new_opts,
+        )
+    assert _code_of(exc) == "key_mismatch"
+    assert exc.value.field_path == "$.index_key"
+
+
+def test_manifest_rejects_fabricated_index_key() -> None:
+    """64-hex 语法合法但编造的 index_key 同样拒绝——语法校验挡不住假 key。"""
+    lin = DexLineage(DexRole.APK_DEX, 0, "classes.dex", _digest(b"x"))
+    with pytest.raises(JadxIndexError) as exc:
+        JadxIndexManifest(
+            index_key="f" * 64,
+            key_material=build_key_material([lin], "1.5.2", _OPTS),
+            dex_lineage=(lin,),
+            jadx_version="1.5.2",
+            options_digest=_OPTS,
+        )
+    assert _code_of(exc) == "key_mismatch"
+
+
+def test_manifest_rejects_key_material_identity_mismatch() -> None:
+    """★P1 复审必须项：key_material 是身份的持久化副本，内容与顶层字段不一致即拒——
+    矛盾 manifest 一旦落盘 load 恒 CacheMiss，create-only 发布还会把 key 槽位毒化成死件。"""
+    lin = DexLineage(DexRole.APK_DEX, 0, "classes.dex", _digest(b"x"))
+    key = derive_index_key([lin], "1.5.2", _OPTS)
+    with pytest.raises(JadxIndexError) as exc:
+        JadxIndexManifest(
+            index_key=key,
+            key_material=build_key_material([lin], "1.5.2", "sha256:" + "b" * 64),
+            dex_lineage=(lin,),
+            jadx_version="1.5.2",
+            options_digest=_OPTS,
+        )
+    assert _code_of(exc) == "key_material_mismatch"
+    assert exc.value.field_path == "$.key_material"
+
+
+def test_manifest_snapshots_key_material_against_mutation() -> None:
+    """★P1 复审必须项：frozen 是浅冻结——构造后篡改调用方 dict（含内层 lineage 记录）
+    不得影响 manifest，否则先构造合法对象再改 material 就绕过了全部校验。"""
+    lin = DexLineage(DexRole.APK_DEX, 0, "classes.dex", _digest(b"x"))
+    key = derive_index_key([lin], "1.5.2", _OPTS)
+    material = build_key_material([lin], "1.5.2", _OPTS)
+    manifest = JadxIndexManifest(
+        index_key=key,
+        key_material=material,
+        dex_lineage=(lin,),
+        jadx_version="1.5.2",
+        options_digest=_OPTS,
+    )
+    material["options_digest"] = "sha256:" + "b" * 64  # 顶层篡改
+    records = material["dex_lineage"]
+    assert isinstance(records, list)
+    first = records[0]
+    assert isinstance(first, dict)
+    first["digest"] = _digest(b"tampered")  # 内层篡改（浅拷贝防不住这层）
+    assert manifest.key_material == build_key_material([lin], "1.5.2", _OPTS)
+
+
+def test_manifest_normalizes_pathological_key_material() -> None:
+    """遍历即炸的自定义 Mapping 归一为结构化拒绝——契约层的拒绝合同是
+    JadxIndexError，不许裸抛调用方容器自带的异常。"""
+
+    class _Booby(Mapping[str, object]):
+        def __getitem__(self, key: str) -> object:
+            raise RuntimeError("boom")
+
+        def __iter__(self) -> Iterator[str]:
+            raise RuntimeError("boom")
+
+        def __len__(self) -> int:
+            return 4
+
+    lin = DexLineage(DexRole.APK_DEX, 0, "classes.dex", _digest(b"x"))
+    key = derive_index_key([lin], "1.5.2", _OPTS)
+    with pytest.raises(JadxIndexError) as exc:
+        JadxIndexManifest(
+            index_key=key,
+            key_material=_Booby(),
+            dex_lineage=(lin,),
+            jadx_version="1.5.2",
+            options_digest=_OPTS,
+        )
+    assert _code_of(exc) == "invalid_key_material"
+
+
+def test_manifest_normalizes_cyclic_key_material() -> None:
+    """自引用的 key_material 在 canonical 编码阶段炸 RecursionError——同样归一为
+    结构化拒绝，不裸抛。"""
+    lin = DexLineage(DexRole.APK_DEX, 0, "classes.dex", _digest(b"x"))
+    key = derive_index_key([lin], "1.5.2", _OPTS)
+    material: dict[str, object] = dict(build_key_material([lin], "1.5.2", _OPTS))
+    material["dex_lineage"] = [material]  # 循环引用
+    with pytest.raises(JadxIndexError) as exc:
+        JadxIndexManifest(
+            index_key=key,
+            key_material=material,
+            dex_lineage=(lin,),
+            jadx_version="1.5.2",
+            options_digest=_OPTS,
+        )
+    assert _code_of(exc) == "invalid_key_material"
+
+
+def test_manifest_rejects_non_lineage_elements() -> None:
+    """dex_lineage 元素必须是 DexLineage：否则身份重算走不到，拒绝就不再是
+    结构化的 JadxIndexError。"""
+    lin = DexLineage(DexRole.APK_DEX, 0, "classes.dex", _digest(b"x"))
+    key = derive_index_key([lin], "1.5.2", _OPTS)
+    with pytest.raises(JadxIndexError) as exc:
+        JadxIndexManifest(
+            index_key=key,
+            key_material=build_key_material([lin], "1.5.2", _OPTS),
+            dex_lineage=(lin.to_record(),),  # type: ignore[arg-type]  # dict 冒充
+            jadx_version="1.5.2",
+            options_digest=_OPTS,
+        )
+    assert _code_of(exc) == "lineage_must_be_tuple"
 
 
 def test_cache_results_are_distinct_types() -> None:
