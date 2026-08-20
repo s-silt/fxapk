@@ -221,11 +221,20 @@ def test_callpath_paths_shape(tmp_path: Path) -> None:
     assert len(path["nodes"]) == 2
     (edge,) = path["edges"]
     assert edge["caller_path"] == "com/x/Alpha.java"
-    assert edge["resolution"] in ("unique", "ambiguous")
+    assert edge["resolution"] == "name_unique"
+    assert edge["scope"] == "method"
     assert isinstance(edge["line"], int) and edge["line"] >= 1
     # limits 回显（机器可读，读的人知道结果是 bounded 的）。
     limits = data["limits"]
-    assert set(limits) == {"max_depth", "max_paths", "max_visited"}
+    assert set(limits) == {
+        "max_depth",
+        "max_paths",
+        "max_visited",
+        "max_fanout",
+        "max_gaps",
+    }
+    assert "gaps" in data
+    assert "reason_codes" in data
 
 
 def test_callpath_empty_is_not_unreachable(tmp_path: Path) -> None:

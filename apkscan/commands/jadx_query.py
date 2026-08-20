@@ -103,6 +103,7 @@ def _edge_record(edge: CallPathEdge) -> dict[str, object]:
         "caller_path": edge.caller_path,
         "line": edge.line,
         "resolution": edge.resolution,
+        "scope": edge.scope,
     }
 
 
@@ -168,28 +169,38 @@ def jadx_callpath(
         return
     limits = CallPathLimits()
     try:
-        paths = trace_callpath(index, source, target, limits=limits)
+        trace = trace_callpath(index, source, target, limits=limits)
     except JadxIndexError as exc:
         _emit({"status": "unavailable", "reason": _reason_from_exception(exc)})
         return
     except Exception:  # noqa: BLE001
         _emit({"status": "unavailable", "reason": "index_unavailable"})
         return
-    records = [_path_record(path) for path in paths]
+    records = [_path_record(path) for path in trace.paths]
+    gap_records = [_edge_record(edge) for edge in trace.gaps]
     caveats: list[dict[str, str]] = []
     if not records:
         caveats.append({
             "code": "no_path_is_not_unreachable",
             "text": "空路径仅表示在索引覆盖与 bounded 查询限制内未观察到路径，绝不表示目标不可达。",
         })
+    if any(edge.scope != "method" for path in trace.paths for edge in path.edges):
+        caveats.append({
+            "code": "nested_edge_is_not_direct_execution",
+            "text": "路径含嵌套类型/lambda 体内的调用点：单纯调用外层方法不必然执行它，该边的执行取决于嵌套体何时被调用。",
+        })
     _emit({
         "status": "ok",
-        "coverage": index.coverage,
+        "coverage": trace.coverage,
         "paths": records,
+        "gaps": gap_records,
+        "reason_codes": list(trace.reason_codes),
         "limits": {
             "max_depth": limits.max_depth,
             "max_paths": limits.max_paths,
             "max_visited": limits.max_visited,
+            "max_fanout": limits.max_fanout,
+            "max_gaps": limits.max_gaps,
         },
         "caveats": caveats,
     })

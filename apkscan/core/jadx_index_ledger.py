@@ -347,7 +347,13 @@ def append_jadx_callpath_projection(
             payload = {
                 "nodes": list(path.nodes),
                 "edges": [
-                    {"caller_path": edge.caller_path, "line": edge.line} for edge in path.edges
+                    {
+                        "caller_path": edge.caller_path,
+                        "line": edge.line,
+                        "resolution": edge.resolution,
+                        "scope": edge.scope,
+                    }
+                    for edge in path.edges
                 ],
             }
             categorical = "sha256." + hashlib.sha256(codec.canonical_json_v1(payload)).hexdigest()
@@ -379,8 +385,8 @@ def append_jadx_callpath_projection(
                 source_refs=source_refs,
                 scope=rc.EvidenceScope.DERIVED_REFERENCE,
                 # OBSERVED 而非 DERIVED：契约要求 DERIVED 携带非空 input_observation_ids，
-                # 而 P1-B 不为单条边落独立观察；链上每个调用表达式都是直接观察到的
-                # 事实，由逐边 source_refs 锚定。未来若为边落独立观察，再升 DERIVED。
+                # 而 P1-B 不为单条边落独立观察；载荷如实携带链上调用表达式及其名字
+                # 判据状态，并由逐边 source_refs 锚定。未来若为边落独立观察，再升 DERIVED。
                 strength=rc.ObservationStrength.OBSERVED,
                 input_observation_ids=(),
                 origin_outcome_id=outcome.outcome_id,
