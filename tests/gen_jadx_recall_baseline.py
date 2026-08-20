@@ -1,10 +1,11 @@
 """召回基线的再生成与指纹工具（P2-a 出处可复现 + P1-d 自守护配套，非测试模块）。
 
-背景：`test_jadx_recall_baseline.py` 的基线字面量（MASTER_EXTRACTION /
-MASTER_PATHS）声称「master `bd58041` 实测生成」。此前生成脚本只存在于会话
-scratchpad，仓库内无法复现出处——第三轮复审（P2-a）点名。本模块把再生成入库，
-并提供基线指纹：改基线必然成为显式两步（改字面量 + 换指纹），且任何人随时可从
-git 历史重放 master 行为对账。
+背景：基线字面量（MASTER_EXTRACTION / MASTER_PATHS，现住纯数据模块
+`tests/jadx_recall_master_baseline.py`——CI 依赖对齐缘由见其 docstring）声称
+「master `bd58041` 实测生成」。此前生成脚本只存在于会话 scratchpad，仓库内
+无法复现出处——第三轮复审（P2-a）点名。本模块把再生成入库，并提供基线指纹：
+改基线必然成为显式两步（改字面量 + 换指纹），且任何人随时可从 git 历史重放
+master 行为对账。
 
 用法（子命令均从仓库根运行）：
 
@@ -61,9 +62,13 @@ verify 裁判两测）。
 
        python tests/gen_jadx_recall_baseline.py digest
 
-import 纪律：模块级只碰标准库（语料模块、apkscan、测试模块全部在子命令内延迟
-import）——``dump`` 必须能在 master 树的 sys.path 下运行，而 pytest 侧只需要
-:func:`baseline_fingerprint` 这个纯函数。
+import 纪律：模块级只碰标准库（语料模块、apkscan、基线数据模块、测试模块全部
+在子命令内延迟 import）——``dump`` 必须能在 master 树的 sys.path 下运行，而
+pytest 侧只需要 :func:`baseline_fingerprint` 这个纯函数。★replay/verify 的
+裁决链（:func:`diff_dump_against_pinned`）只许 import 纯数据模块
+（jadx_recall_master_baseline / jadx_recall_corpus）：CI 的 replay job 只装
+运行期依赖，从测试模块拿字面量会连带 ``import pytest`` 当场挂（PR #37 首跑
+实证——本地 venv 有 pytest，这类断裂只有 CI 同构环境才测得出）。
 """
 
 from __future__ import annotations
@@ -303,7 +308,10 @@ def diff_dump_against_pinned(dump: object) -> list[str]:
     不是 master 的 ``1.3`` 判对账失败（返回差异，exit 1）——分支自身的
     dump（1.6）冒充 master、或拿老 schema 树误测，都在这里现形。
     """
-    from tests.test_jadx_recall_baseline import MASTER_EXTRACTION, MASTER_PATHS
+    # ★只 import 纯数据模块：replay 裁决进程跑在 CI 的运行期依赖环境（不装
+    #   pytest），从测试模块拿字面量会连带 `import pytest` 挂掉（PR #37 首跑
+    #   实证）。基线字面量因此单独住 jadx_recall_master_baseline。
+    from tests.jadx_recall_master_baseline import MASTER_EXTRACTION, MASTER_PATHS
 
     dump = ensure_dump_shape(dump)
     schema = dump.get("index_schema")
@@ -452,6 +460,9 @@ def _cmd_replay(dump_out: str | None) -> int:
 
 
 def _cmd_digest() -> int:
+    # digest 在 dev 环境跑（白名单/放行集住测试模块，import 连带 pytest 无妨），
+    # 但 master 两面基线与 diff 裁决同源——都从纯数据模块拿，杜绝「文档说 A、
+    # 机器算 B」的来源分叉。
     from tests import test_jadx_recall_baseline as baseline
     from tests.jadx_recall_corpus import (
         CORPUS,
@@ -459,13 +470,14 @@ def _cmd_digest() -> int:
         PARITY_QUERIES,
         REMOVAL_QUERIES,
     )
+    from tests.jadx_recall_master_baseline import MASTER_EXTRACTION, MASTER_PATHS
 
     print(
         baseline_fingerprint(
             corpus=CORPUS,
             fanout_candidates=FANOUT_CANDIDATES,
-            master_extraction=baseline.MASTER_EXTRACTION,
-            master_paths=baseline.MASTER_PATHS,
+            master_extraction=MASTER_EXTRACTION,
+            master_paths=MASTER_PATHS,
             parity_queries=PARITY_QUERIES,
             removal_queries=REMOVAL_QUERIES,
             extraction_removals=baseline.INTENDED_EXTRACTION_REMOVALS,

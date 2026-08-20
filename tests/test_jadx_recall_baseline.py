@@ -50,7 +50,9 @@
 
 基线数据的来源与再生成：`MASTER_EXTRACTION` / `MASTER_PATHS` 由 master
 `bd58041` 的 scan_java_sources + trace_callpath 在同一语料上实测生成（非手写、
-非记忆）。生成/对账/指纹脚本已入库：`tests/gen_jadx_recall_baseline.py`
+非记忆），字面量住 `tests/jadx_recall_master_baseline.py`（纯数据模块——CI 的
+replay job 只装运行期依赖，裁决进程 import 基线不得连带 pytest，缘由见该模块
+docstring）。生成/对账/指纹脚本已入库：`tests/gen_jadx_recall_baseline.py`
 （replay / dump / verify / digest 四个子命令，完整流程见其模块 docstring）。
 2026-08-21 已用 `git archive bd58041` 导出树全量重放 dump 并 verify 对账两次
 （第二次为 dup 语料扩充后），与本模块字面量逐项一致；同日起该重放上 CI 端到
@@ -112,121 +114,13 @@ from tests.jadx_recall_corpus import (
     PARITY_QUERIES,
     REMOVAL_QUERIES,
 )
+from tests.jadx_recall_master_baseline import MASTER_EXTRACTION, MASTER_PATHS
 
 _OPTS = "sha256:" + "a" * 64
 
 #: oracle 限额：fanout/gaps 放到实际无穷（master 无此二闸），其余三个与 master
 #: 默认值一致（max_depth=16 / max_paths=8 / max_visited=100_000）。
 _ORACLE_LIMITS = CallPathLimits(max_fanout=10**9, max_gaps=10**9)
-
-# ---------------------------------------------------------------------------
-# master bd58041 基线（gen_baseline.py 实测生成，不是手写；改动须走再生成流程）
-# ---------------------------------------------------------------------------
-
-#: method_id -> master 提取到的 (callee, line) 集合。
-#: ★集合语义：同名同行的重复计数不入契约（语料里没有；BFS 消费侧本就按序去重）。
-MASTER_EXTRACTION: dict[str, set[tuple[str, int]]] = {
-    "com.rc.arrow.Arrow#arm/0": set(),
-    "com.rc.arrow.Arrow#fallback/0": set(),
-    "com.rc.arrow.Arrow#go/1": {
-        ("arm", 10),
-        ("armBlock", 12),
-        ("colon", 18),
-        ("fallback", 14),
-        ("lam", 5),
-        ("lamBlock", 7),
-        ("tailTwo", 21),
-    },
-    "com.rc.arrow.Arrow#lam/0": set(),
-    "com.rc.calls.Calls#chain/0": set(),
-    "com.rc.calls.Calls#check/1": {("probe", 9)},
-    "com.rc.calls.Calls#fail/0": set(),
-    "com.rc.calls.Calls#go/1": {
-        ("branch", 30),
-        ("caught", 38),
-        ("chain", 28),
-        ("check", 43),
-        ("fail", 44),
-        ("fin", 40),
-        ("local", 25),
-        ("loop", 33),
-        ("make", 42),
-        ("next", 28),
-        ("risky", 36),
-        ("self", 26),
-        ("size", 29),
-        ("size", 32),
-        ("stat", 27),
-    },
-    "com.rc.calls.Calls#probe/1": set(),
-    "com.rc.calls.Calls#size/0": set(),
-    "com.rc.chain.ChainA#top/0": {("mid", 5)},
-    "com.rc.chain.ChainB#mid/0": {("deep", 11)},
-    "com.rc.chain.ChainC#deep/0": set(),
-    # 同名并存构型（第四轮复审 N1）：ping@6 是匿名类方法声明伪边、ping@9 是
-    # 真实调用——同一 caller、同一简单名、不同行。锚定判据的「完全剔断」语义
-    # 靠它实证：只剔 @6 时该跳仍有支撑，路径必须留在对等侧。
-    "com.rc.dup.Dup#go/0": {("ping", 6), ("ping", 9), ("reg", 5)},
-    "com.rc.dup.Dup#reg/1": set(),
-    "com.rc.dup.P#ping/0": {("pong", 5)},
-    "com.rc.dup.P#pong/0": set(),
-    "com.rc.fan.M#go/0": {("foo", 5)},
-    "com.rc.nested.Nested#after/0": set(),
-    "com.rc.nested.Nested#attach/1": set(),
-    "com.rc.nested.Nested#go/0": {
-        ("Local", 15),
-        ("after", 23),
-        ("attach", 5),
-        ("m", 19),
-        ("mm", 20),
-        ("names", 10),
-        ("run", 6),
-        ("seed", 16),
-        ("sink", 7),
-    },
-    # 局部类自身入索引（master 既有行为）：体内调用同时归属局部类方法本体。
-    "com.rc.nested.Nested$Local#<init>/0": {("seed", 16)},
-    "com.rc.nested.Nested$Local#m/0": {("mm", 20)},
-    "com.rc.nested.S#sink/0": set(),
-    "com.rc.nested.T#run/0": {("tail", 5)},
-    "com.rc.nested.T#tail/0": set(),
-}
-for _i in range(FANOUT_CANDIDATES):
-    MASTER_EXTRACTION[f"com.rc.fan.C{_i:02d}#foo/0"] = set()
-
-#: "source => target" -> master 默认限额下找到的路径（节点序列，顺序有意义）。
-MASTER_PATHS: dict[str, tuple[tuple[str, ...], ...]] = {
-    "com.rc.fan.M#go/0 => com.rc.fan.C00#foo/0": (
-        ("com.rc.fan.M#go/0", "com.rc.fan.C00#foo/0"),
-    ),
-    "com.rc.fan.M#go/0 => com.rc.fan.C32#foo/0": (
-        ("com.rc.fan.M#go/0", "com.rc.fan.C32#foo/0"),
-    ),
-    "com.rc.chain.ChainA#top/0 => com.rc.chain.ChainC#deep/0": (
-        (
-            "com.rc.chain.ChainA#top/0",
-            "com.rc.chain.ChainB#mid/0",
-            "com.rc.chain.ChainC#deep/0",
-        ),
-    ),
-    "com.rc.dup.Dup#go/0 => com.rc.dup.P#pong/0": (
-        (
-            "com.rc.dup.Dup#go/0",
-            "com.rc.dup.P#ping/0",
-            "com.rc.dup.P#pong/0",
-        ),
-    ),
-    "com.rc.nested.Nested#go/0 => com.rc.nested.S#sink/0": (
-        ("com.rc.nested.Nested#go/0", "com.rc.nested.S#sink/0"),
-    ),
-    "com.rc.nested.Nested#go/0 => com.rc.nested.T#tail/0": (
-        (
-            "com.rc.nested.Nested#go/0",
-            "com.rc.nested.T#run/0",
-            "com.rc.nested.T#tail/0",
-        ),
-    ),
-}
 
 # ---------------------------------------------------------------------------
 # 有意变更清单：召回/精度的每次变化都必须在这里显式落名、给理由

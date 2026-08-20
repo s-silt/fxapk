@@ -151,7 +151,8 @@ jobs:
     # ★召回基线出处的端到端重放：从 origin 历史取 master 基线 commit（bd58041，
     #   全 SHA 钉在 tests/gen_jadx_recall_baseline.py 的 MASTER_COMMIT，workflow 不
     #   另存一份）的 apkscan 树，在该树的提取器下实测 tests/jadx_recall_corpus.py
-    #   语料，与 test_jadx_recall_baseline.py 钉住的基线字面量逐项对账。防的是
+    #   语料，与 tests/jadx_recall_master_baseline.py 钉住的基线字面量逐项对账
+    #   （纯数据模块——本 job 只装运行期依赖，裁决链不得连带 pytest）。防的是
     #   「MASTER_EXTRACTION/MASTER_PATHS 来自 master 实测」这句宣称烂掉：改语料、
     #   改基线字面量、换基线 commit 而没有真重放对齐，这里当场红——重放不再依赖
     #   执行者的命令行纪律。保证边界（如实）：commit SHA 内容寻址使「对账的树就是
