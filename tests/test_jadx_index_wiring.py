@@ -15,7 +15,7 @@ import pytest
 from apkscan.analyzers import jadx
 from apkscan.analyzers.jadx import JadxAnalyzer
 from apkscan.core import proctree
-from apkscan.core.jadx_index import DexRole, JadxIndexStore, LoadedIndex
+from apkscan.core.jadx_index import DexRole, JadxIndexStore, Limits, LoadedIndex
 from tests.conftest import FakeContext
 
 _JAVA_BODY = 'class C { String u = "https://cfg-host.example/api"; }\n'
@@ -437,3 +437,36 @@ def test_resolve_none_not_reresolved(
     assert ran == []  # 没有任何 jadx 进程（含 --version）被启动
     assert result.meta["jadx_status"] == "failed"
     assert result.meta["jadx_index_status"] == "disabled"
+
+
+# ---------------------------------------------------------------------------
+# P1-D：统一扫描上限——修「_MAX_JAVA_FILES 调了不生效」的死旋钮
+# ---------------------------------------------------------------------------
+
+
+def test_structure_scan_receives_configured_file_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★核心：structure 索引扫描必须真正读 `_MAX_JAVA_FILES`，而非硬编码默认 5000。
+
+    此前 structure 索引调用点写死 `Limits()`（取 dataclass 默认 max_files=5000），
+    与已经进 options_digest、驱动缓存自动重建的 `_MAX_JAVA_FILES` 完全脱节——调大
+    常量「看起来生效」（options_digest 变了、缓存会重建）但 structure 扫描仍然只扫
+    5000。走 JadxAnalyzer.analyze 真入口，spy 包一层 scan_java_sources 观察它实际
+    收到的 limits，而非只测 _declared_arity 这类下游细节测不到的这层接线。
+    """
+    real_scan_java_sources = jadx.scan_java_sources
+    seen_limits: list[Limits] = []
+
+    def _spy(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        limits = kwargs["limits"]
+        assert isinstance(limits, Limits)
+        seen_limits.append(limits)
+        return real_scan_java_sources(*args, **kwargs)
+
+    monkeypatch.setattr(jadx, "scan_java_sources", _spy)
+    _patch(monkeypatch)
+    JadxAnalyzer().analyze(_ctx(tmp_path))
+
+    assert seen_limits
+    assert seen_limits[-1].max_files == jadx._MAX_JAVA_FILES

@@ -7,6 +7,40 @@ affect automated / CI / agent callers are called out explicitly**.
 
 ### Fixed
 
+- **JADX 索引统一扫描上限，修一个「调了不生效的死旋钮」**：`_MAX_JAVA_FILES`（端点/密钥
+  扫描的文件数上限）一直在 `options_digest` 里，改它会改 `index_key`、触发缓存自动
+  重建；但 structure 索引（`usage`/`callpath`/`ownership` 的数据来源）构建那一行**硬
+  编码了空参数 `Limits()`**，用的是默认 `max_files=5000`，完全不读 `_MAX_JAVA_FILES`。
+  真实混淆样本反编译出万级 `.java` 时，端点扫描的上限调多大都不影响 structure 索引，
+  它始终只扫前 5000 个（按路径字母序，砍掉的是**系统性偏后**的部分，不是随机采样）。
+  现在 structure 索引真正读这个常量，且常量本身从 5000 调大到 12000（真实样本实测：
+  同一份混淆样本从只扫 5000 个文件 / 55104 个方法，涨到全部 10366 个文件 / 104379 个
+  方法，覆盖翻倍）。**不需要 bump schema**——`index_key` 已经把 `options_digest` 算在
+  内，调大常量本身就会让旧缓存自动变为可重建的 CacheMiss。
+
+  同时把报告穷尽性主张（`static_endpoint_exhaustive` 等）依赖的 java 源文件数封顶从
+  5000 提高到 12000：`jadx_receipt.complete` 此前只要撞上 5000 就恒为 `False`，实测的
+  真实混淆样本（万级 `.java`）现在能在这个维度达到 complete。封顶仍然存在——超过
+  12000 个文件照样阻断 complete；且 `static_endpoint_exhaustive` 还需要 dex/native/
+  resource 各源同时 complete，java 只是其一，不代表整个主张解封。
+
+  **诚实边界（本片刻意不动）**：单方法调用点数上限（`max_calls_per_method`，精确
+  256，有边界值回归锁）未变。含超大方法（如混淆生成的巨型 dispatch 方法）的样本，
+  structure 索引 coverage 仍会是 `partial`——这是对的，不应假装它已完整。
+
+  **同批加固（codex 复审）**：上限调大 2.4 倍放大了扫描面的资源上界（理论积
+  `12000 × 4MiB ≈ 47GiB`），两刀收口——① 端点扫描此前 `read_bytes()` 全量载入后才
+  截断，单文件内存峰值实际不受 4MiB 上限约束，改为有界读取（`bytes_total` 统计保持
+  「真实文件大小」语义）；② structure 扫描新增**聚合读取预算** `max_total_bytes`
+  （默认 512MiB，约为实测真实大样本的 6 倍余量），累计读取触顶即停、剩余文件不扫、
+  coverage 诚实降 `partial`——此前撞文件数、单文件截断都有硬帽，唯独聚合量没有，
+  敌对样本可用大量各自不超限的文件把总读取量堆起来。
+
+  **对 agent / CI 调用方的影响**：既有索引工件本身不变；下次分析会按新常量派生出
+  不同的 `options_digest`（进而不同的 `index_key`），旧工件不再命中、自动重建一份
+  新索引（约 +73% 扫描耗时，真实样本约多 6 分钟/样本，一次性成本，不重跑 jadx
+  反编译）；`usage`/`callpath` 此后能覆盖此前被截断掉的那部分代码。
+
 - **`fxapk jadx usage` 的命中现在带类/方法归属**：`UsageHit.class_context` /
   `method_context` 一直在数据结构上、也一直被 CLI 的 JSON 输出透传，但
   `find_value_usage` 从不给它们赋值——输出里**恒为 `null`**，且没有任何测试断言过。

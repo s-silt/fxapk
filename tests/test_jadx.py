@@ -438,6 +438,42 @@ def test_jadx_timeout_scales_with_extra_dex() -> None:
     assert JadxAnalyzer._jadx_timeout(10_000) == jadx._TIMEOUT_MAX  # 封顶
 
 
+# --- P1-D：统一扫描上限——修「_MAX_JAVA_FILES 调了不生效」的死旋钮 -----------
+
+
+def test_max_java_files_raised_to_12000() -> None:
+    assert jadx._MAX_JAVA_FILES == 12000
+
+
+def test_options_digest_changes_with_max_java_files(monkeypatch, tmp_path) -> None:
+    """`_MAX_JAVA_FILES` 是 key material：调大它必须触发缓存自动重建。"""
+    apk = tmp_path / "app.apk"
+    apk.write_bytes(b"PK\x03\x04placeholder")
+
+    monkeypatch.setattr(jadx, "_MAX_JAVA_FILES", 100)
+    d1 = jadx._options_digest(str(apk), [], 300.0)
+
+    monkeypatch.setattr(jadx, "_MAX_JAVA_FILES", 200)
+    d2 = jadx._options_digest(str(apk), [], 300.0)
+
+    assert d1 != d2
+
+
+def test_full_file_scan_enables_java_complete(monkeypatch, tmp_path) -> None:
+    """文件数未撞上限时，java 源应能保持 complete（B1：解封 java 源封顶）。"""
+    _patch_run_owned(
+        monkeypatch,
+        _writes('class C { String u = "https://cap.example.com/x"; }'),
+    )
+
+    result = JadxAnalyzer().analyze(_ctx(tmp_path))
+
+    assert "jadx_scan_truncated" not in result.meta
+    receipt = result.meta["jadx_receipt"]
+    assert receipt["complete"] is True
+    assert _java_vis(result.meta) == "complete"
+
+
 # --- B2：确定性截断 + coverage 缺口逐项使 Java 面非 complete ----------------
 
 
@@ -485,14 +521,16 @@ def test_read_failure_blocks_java_complete_but_keeps_positives(monkeypatch, tmp_
         return _owned(0)
 
     _patch_run_owned(monkeypatch, _handler)
-    real_read = Path.read_bytes
+    real_open = Path.open
 
-    def _flaky(self: Path) -> bytes:
-        if self.name == "Locked.java":
+    # 注入点跟随实现：扫描现在走 stat() + open("rb") 有界读取（不再 read_bytes 全量
+    # 载入）。只拦读模式——_handler 写夹具用的 write_text（mode="w"）必须放行。
+    def _flaky(self: Path, mode: str = "r", *args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        if self.name == "Locked.java" and "r" in mode:
             raise OSError("sharing violation (模拟句柄被占)")
-        return real_read(self)
+        return real_open(self, mode, *args, **kwargs)
 
-    monkeypatch.setattr(jadx.Path, "read_bytes", _flaky)
+    monkeypatch.setattr(jadx.Path, "open", _flaky)
     result = JadxAnalyzer().analyze(_ctx(tmp_path))
 
     assert result.meta["jadx_status"] == "ok"  # 进程本身干净退出

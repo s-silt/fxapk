@@ -88,7 +88,7 @@ _TIMEOUT = 300.0
 # 按 DEX 数量线性伸缩、封顶，让大 dump 有机会跑完，同时不至于无限拖住批处理。
 _TIMEOUT_PER_EXTRA_DEX = 30.0
 _TIMEOUT_MAX = 1200.0
-_MAX_JAVA_FILES = 5000
+_MAX_JAVA_FILES = 12000
 _MAX_FILE_BYTES = 4 * 1024 * 1024
 _SNIPPET_MAX = 200
 
@@ -880,8 +880,8 @@ class JadxAnalyzer(BaseAnalyzer):
             result.meta["jadx_status"] = status
             if outcome.truncated:
                 # 撞 _MAX_JAVA_FILES 上限截断扫描——与 jadx 进程本身的 partial/timeout 是
-                # 两个正交维度，单独落键：jadx_java_files==5000 时读的人才能分清「恰好 5000」
-                # 与「截断于 5000」。
+                # 两个正交维度，单独落键：jadx_java_files==_MAX_JAVA_FILES 时读的人才能
+                # 分清「恰好等于上限」与「截断于上限」。
                 result.meta["jadx_scan_truncated"] = True
             result.endpoints = outcome.endpoints
             result.findings = outcome.findings
@@ -970,7 +970,7 @@ class JadxAnalyzer(BaseAnalyzer):
                                         tmp,
                                         _index_values(outcome),
                                         lineage=lineage[0],
-                                        limits=Limits(),
+                                        limits=Limits(max_files=_MAX_JAVA_FILES),
                                     )
                                     built = store.build_index(
                                         materialized.root, manifest, scan=scan
@@ -1190,7 +1190,7 @@ class JadxAnalyzer(BaseAnalyzer):
 
         覆盖统计（receipt 的 scan 块）：total/selected/scanned/read_failed/truncated_files、
         bytes_total/bytes_scanned、scan_limit_hit、selected_paths_digest（选中集合的顺序敏感
-        sha256，证明两次枚举选了同一子集而不必把最多 5000 条路径塞进报告）。
+        sha256，证明两次枚举选了同一子集而不必把最多 _MAX_JAVA_FILES 条路径塞进报告）。
         """
         collector: dict[str, Endpoint] = {}
         secret_hits: dict[tuple[str, str], Finding] = {}
@@ -1232,13 +1232,18 @@ class JadxAnalyzer(BaseAnalyzer):
         scan_exceptions = 0  # 单文件扫描内部异常数：吞掉不炸，但必须留痕挡 complete
         for java, rel_nfc in selected:
             try:
-                data = java.read_bytes()
+                # ★有界读取：此前 read_bytes() 全量载入后才截断，单文件内存峰值实际
+                # 不受 _MAX_FILE_BYTES 约束——敌对样本放一个超大 .java 即可顶爆内存。
+                # bytes_total 保持「真实文件大小」语义（stat），截断判定不变。
+                file_size = java.stat().st_size
+                with java.open("rb") as stream:
+                    data = stream.read(_MAX_FILE_BYTES + 1)
             except Exception:
                 logger.exception("[jadx] 读取 .java 失败，跳过：%s", java)
                 read_failed += 1
                 continue
             files_scanned += 1
-            bytes_total += len(data)
+            bytes_total += file_size
             if len(data) > _MAX_FILE_BYTES:
                 truncated_files += 1
                 data = data[:_MAX_FILE_BYTES]

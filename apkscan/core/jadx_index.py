@@ -1091,6 +1091,11 @@ _DEFAULT_MAX_VALUE_LEN = 4096
 class Limits:
     max_files: int = 5000
     max_file_bytes: int = 4 * 1024 * 1024
+    #: 全次扫描累计读取字节数上界。max_files × max_file_bytes 是单文件全部触顶时的
+    #: 理论积（max_files 调到 12000 后约 47GiB）——聚合上界不能成为敌对样本可实际
+    #: 兑现的读取量。撞文件数、单文件截断此前都有硬帽，唯独聚合量没有：大量各自
+    #: 不超限的文件可以把总读取量堆起来。默认 512MiB 约为实测真实大样本的 6 倍余量。
+    max_total_bytes: int = 512 * 1024 * 1024
     max_value_len: int = _DEFAULT_MAX_VALUE_LEN
     max_classes_per_file: int = 256
     max_methods_per_class: int = 512
@@ -1101,6 +1106,7 @@ class Limits:
         for name in (
             "max_files",
             "max_file_bytes",
+            "max_total_bytes",
             "max_value_len",
             "max_classes_per_file",
             "max_methods_per_class",
@@ -1491,12 +1497,20 @@ def scan_java_sources(
     files: list[str] = []
     structures: list[dict[str, object]] = []
     structure_limit_hit = False
+    byte_budget_hit = False
     read_failed = 0
     truncated = 0
     scanned = 0
     bytes_scanned = 0
 
     for relative, path in selected:
+        if bytes_scanned >= limits.max_total_bytes:
+            # ★聚合读取预算：触顶即停、剩余文件不扫，coverage 诚实降 partial
+            # （scanned < files_total 且 read_failed/truncated/scan_limit_hit 皆无，
+            # 可辨识）。检查在读之前，最后一个已读文件最多让累计超出预算
+            # max_file_bytes，有界。
+            byte_budget_hit = True
+            break
         try:
             with path.open("rb") as stream:
                 data = stream.read(limits.max_file_bytes + 1)
@@ -1540,7 +1554,11 @@ def scan_java_sources(
     structures.sort(key=lambda item: (str(item["name"]), str(item["path"])))
     coverage = (
         "complete"
-        if not read_failed and not truncated and not scan_limit_hit and not structure_limit_hit
+        if not read_failed
+        and not truncated
+        and not scan_limit_hit
+        and not structure_limit_hit
+        and not byte_budget_hit
         else "partial"
     )
     return ShardScanResult(
