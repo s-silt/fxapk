@@ -25,6 +25,7 @@ from typing import NoReturn
 
 from apkscan.core.atomic import AtomicCreateUnsupportedError, atomic_create_bytes
 from apkscan.core.recognition_codec import canonical_json_v1, parse_json_v1
+from apkscan.core.recognition_contract import CanonicalCodecError
 
 
 # 1.2：结构段类身份从 name 改为 (name, path)——真实混淆样本（脱壳 dump）里
@@ -219,14 +220,35 @@ class JadxIndexManifest:
             _fail(REASON_INVALID_DIGEST, "$.index_key")
         # key_material 只允许四个受控键：未知键不参与 derive_index_key，却会随
         # canonical manifest 落盘——允许它们存在等于留一个不影响身份的自由载荷通道。
-        if not isinstance(self.key_material, Mapping) or set(self.key_material) != {
+        # 物化、canonical 编码、键检查收在同一道归一化边界里：调用方 Mapping 的
+        # 遍历异常（自定义容器）与循环引用的 RecursionError 都归一为结构化拒绝。
+        # 承诺面是标准容器与这些常见病态形态；完全任意的毒对象异常不做保证。
+        if not isinstance(self.key_material, Mapping):
+            _fail("invalid_key_material", "$.key_material")
+        try:
+            declared_dict = dict(self.key_material)
+            declared_material = canonical_json_v1(declared_dict)
+        except (
+            CanonicalCodecError,
+            KeyError,
+            RecursionError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ):
+            _fail("invalid_key_material", "$.key_material")
+        if set(declared_dict) != {
             "dex_lineage",
             "jadx_version",
             "options_digest",
             "index_schema_version",
         }:
             _fail("invalid_key_material", "$.key_material")
-        if not isinstance(self.dex_lineage, tuple):
+        # 元素类型一并锁死：非 DexLineage 元素会让下方身份重算抛裸 AttributeError，
+        # 拒绝就不再是结构化的 JadxIndexError。
+        if not isinstance(self.dex_lineage, tuple) or any(
+            not isinstance(item, DexLineage) for item in self.dex_lineage
+        ):
             _fail("lineage_must_be_tuple", "$.dex_lineage")
         if not isinstance(self.shard_refs, tuple) or any(
             not isinstance(ref, ShardRef) for ref in self.shard_refs
@@ -240,6 +262,33 @@ class JadxIndexManifest:
         _validate_digest(self.options_digest, "$.options_digest")
         if self.index_schema_version != INDEX_SCHEMA_VERSION:
             _fail(REASON_SCHEMA_DRIFT, "$.index_schema_version")
+        # key_material 是身份的持久化副本：内容必须与顶层身份字段的重算结果逐字节
+        # 一致——「顶层旧身份 + material 新身份」的矛盾 manifest 一旦落盘，load 恒
+        # CacheMiss，而 create-only 发布会让该 key 槽位被死件永久占住。比对通过后
+        # 存重算份的快照：frozen 只是浅冻结，存调用方引用等于允许构造后改写绕过
+        # 这里的全部校验。
+        canonical_material = build_key_material(
+            self.dex_lineage,
+            self.jadx_version,
+            self.options_digest,
+            self.index_schema_version,
+        )
+        if canonical_json_v1(canonical_material) != declared_material:
+            _fail("key_material_mismatch", "$.key_material")
+        object.__setattr__(self, "key_material", canonical_material)
+        # index_key 不是自由输入：必须恰为身份字段（lineage/version/digest/schema）
+        # 的重算值——64-hex 语法校验挡不住编造的 key。放行「旧 key + 新
+        # options_digest」的不一致 manifest，它就能凭旧 key 走 build_index 的
+        # 复用分支，拿旧 structure 数据冒充新配置的产物；load 侧的重算比对只护
+        # 磁盘读回，不护构造入口。
+        derived = derive_index_key(
+            self.dex_lineage,
+            self.jadx_version,
+            self.options_digest,
+            self.index_schema_version,
+        )
+        if derived != self.index_key:
+            _fail(REASON_KEY_MISMATCH, "$.index_key")
 
 
 @dataclass(frozen=True, slots=True)

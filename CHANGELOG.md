@@ -40,6 +40,27 @@ affect automated / CI / agent callers are called out explicitly**.
   不同的 `options_digest`（进而不同的 `index_key`），旧工件不再命中、自动重建一份
   新索引（约 +73% 扫描耗时，真实样本约多 6 分钟/样本，一次性成本，不重跑 jadx
   反编译）；`usage`/`callpath` 此后能覆盖此前被截断掉的那部分代码。
+- **JADX 索引 manifest 身份自洽 fail-closed**：`JadxIndexManifest.__post_init__` 此前
+  只对 `index_key` 做 64-hex 语法校验，不验证它确为身份字段（`dex_lineage` /
+  `jadx_version` / `options_digest` / `index_schema_version`）的重算值；而
+  `build_index()` 的复用分支只凭 `manifest.index_key` 查已有索引——程序化调用者提交
+  「旧 key + 新 options_digest」的不一致 manifest，会**复用旧 structure 数据冒充新配置
+  的产物**。生产路径先从新 digest 派生 key 再构造 manifest，不触发；load 侧的重算比对
+  只护磁盘读回，不护构造入口——存储层此前不满足独立 fail-closed。现在构造即重算比对，
+  不一致抛 `JadxIndexError("key_mismatch")`（复用入口在对象层面封死）；`dex_lineage`
+  元素类型一并锁死——非 `DexLineage` 元素此前会让身份重算抛裸 `AttributeError` 而非
+  结构化拒绝。
+  同批（本刀 codex 复审点名的 P1）：`key_material` 是身份的**持久化副本**，此前只查
+  四键集合、不核内容，且对象存的是调用方可变 `Mapping` 的引用（`frozen` 只是浅冻结）——
+  「顶层旧身份 + material 新身份」的矛盾 manifest 一旦落盘 load 恒 CacheMiss，
+  create-only 发布还会把该 key 槽位毒化成无法修复的死件；构造后改写调用方 dict 则让
+  校验整体作废。现在内容与顶层字段的重算结果逐字节比对（不一致抛
+  `key_material_mismatch`），通过后存重算份的快照，与调用方引用内外层全隔离；
+  物化 / canonical 编码 / 键检查收进同一道异常归一化边界——自定义 Mapping 的遍历
+  异常与循环引用的 `RecursionError` 都归一为 `invalid_key_material`，不再裸抛。
+  **对 agent / CI 调用方的影响**：正规派生 key 的调用不受影响（生产路径与全部既有夹具
+  实测零破坏）；只有身份不一致的 manifest 从「静默复用错误数据 / 落盘死件」变成构造期
+  结构化拒绝。
 
 - **`fxapk jadx usage` 的命中现在带类/方法归属**：`UsageHit.class_context` /
   `method_context` 一直在数据结构上、也一直被 CLI 的 JSON 输出透传，但
