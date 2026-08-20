@@ -636,6 +636,31 @@ def test_scan_limit_and_truncation_yield_partial(tmp_path: Path) -> None:
     assert truncated.truncated == 1 and truncated.coverage == "partial"
 
 
+def test_giant_method_keeps_structure_partial(tmp_path: Path) -> None:
+    """P1-D 诚实边界锁：文件全扫完（不撞 max_files）时，超大方法仍须因
+    calls_cap（单方法调用点数上限，默认 256）保持 partial——P1-D 只调 max_files，
+    刻意不碰 max_calls_per_method，不能让含巨型方法的样本被误判为 complete。"""
+    src = tmp_path / "java"
+    calls = "\n".join("foo();" for _ in range(300))
+    _java_tree(
+        src,
+        {
+            "com/x/C.java": (
+                "package com.x;\n"
+                "class C {\n"
+                "    void giant() {\n"
+                f"        {calls}\n"
+                "    }\n"
+                "    void foo() {}\n"
+                "}\n"
+            )
+        },
+    )
+    scan = scan_java_sources(src, [], lineage=_lin(), limits=Limits(max_files=100))
+    assert scan.scan_limit_hit is False  # 没撞文件上限
+    assert scan.coverage == "partial"  # 但因 calls_cap 仍不完整
+
+
 def test_build_with_scan_roundtrip_query(tmp_path: Path) -> None:
     """★端到端：扫描 → build(scan=) → load → find_value_usage 命中。"""
     manifest = _make_manifest(tmp_path)
