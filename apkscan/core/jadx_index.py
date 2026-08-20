@@ -35,7 +35,15 @@ from apkscan.core.recognition_contract import CanonicalCodecError
 # String> m` 算成 2），令方法身份 `cls#name/arity` 错位，callpath 按真实 arity 查
 # 假阴性、ownership 与 baseline 对不齐。字段集不变，只改既有 arity 的取值；仍须
 # bump，否则同一 index_key 下的旧 shard 会继续返回错误 arity。
-INDEX_SCHEMA_VERSION = "1.3"
+# 1.4：calls 记录扩为 {callee,line,qualifier,scope}，保存文本可确证的调用点上下文，
+# 供后续切片消费；当前 resolution 不据此收窄候选。形状变化必须 bump，否则旧 shard
+# 会在同一 index_key 下撞上 1.4 消费侧的 fail-closed 校验。
+# 1.5：calls 字段集不变，但记录集剔除方法/构造器声明伪调用，并修正 switch rule
+# 箭头的 scope。语义变化必须 bump，避免同一 index_key 继续复用旧 1.4 shard。
+# 1.6：形状仍不变，但 calls 剔除注解名伪调用，classes 首次纳入 record 条目/方法，
+# 并将 record 体调用从 method 纠正为 nested_type。内容语义变化必须 bump，避免
+# 同一 index_key 静默复用含伪边、缺类或错 scope 的旧 1.5 shard。
+INDEX_SCHEMA_VERSION = "1.6"
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -673,6 +681,22 @@ _QUALIFIED_CLASS_RE = re.compile(r"[A-Za-z_$][\w$]*(?:[.$][A-Za-z_$][\w$]*)*")
 #: 落盘标识符的硬上限：与 Limits.max_identifier_len 解耦——load 侧没有 Limits，
 #: 这里只拦「自由载荷通道」级别的异常长度。
 _MAX_PERSISTED_IDENTIFIER = 1024
+_CALL_QUALIFIER_LITERALS = frozenset({"", "this", "super", "<expr>", "<unknown>"})
+_CALL_SCOPES = frozenset({"method", "nested_type", "lambda", "unknown"})
+
+
+def _valid_call_qualifier(value: object) -> bool:
+    return isinstance(value, str) and (
+        value in _CALL_QUALIFIER_LITERALS
+        or (
+            len(value) <= _MAX_PERSISTED_IDENTIFIER
+            and _IDENTIFIER_RE.fullmatch(value) is not None
+        )
+    )
+
+
+def _valid_call_scope(value: object) -> bool:
+    return isinstance(value, str) and value in _CALL_SCOPES
 
 
 def _validate_shard_structure(shard_value: Mapping[str, object], files: set[str]) -> None:
@@ -766,7 +790,12 @@ def _validate_shard_structure(shard_value: Mapping[str, object], files: set[str]
             previous_call: tuple[int, str] | None = None
             for ki, call in enumerate(calls):
                 c_prefix = f"{m_prefix}.calls[{ki}]"
-                if not isinstance(call, dict) or set(call) != {"callee", "line"}:
+                if not isinstance(call, dict) or set(call) != {
+                    "callee",
+                    "line",
+                    "qualifier",
+                    "scope",
+                }:
                     _fail(REASON_MALFORMED, c_prefix)
                 callee = call["callee"]
                 if (
@@ -778,6 +807,10 @@ def _validate_shard_structure(shard_value: Mapping[str, object], files: set[str]
                 line = call["line"]
                 if isinstance(line, bool) or not isinstance(line, int) or line < 1:
                     _fail(REASON_MALFORMED, f"{c_prefix}.line")
+                if not _valid_call_qualifier(call["qualifier"]):
+                    _fail(REASON_MALFORMED, f"{c_prefix}.qualifier")
+                if not _valid_call_scope(call["scope"]):
+                    _fail(REASON_MALFORMED, f"{c_prefix}.scope")
                 current_call = (line, callee)
                 # 同行同名的多个调用点是合法重复；只有降序才是形状违规。
                 if previous_call is not None and current_call < previous_call:
@@ -1186,8 +1219,12 @@ class ShardScanResult:
 
 # -- 结构提取（P1-B）：有界启发式，只认 JADX 风格的良构输出 --------------------
 
-#: 类声明须与 `{` 同行（JADX 输出形态）；允许 extends/implements/泛型子句。
-_CLASS_DECL_RE = re.compile(r"\b(?:class|interface|enum)\s+([A-Za-z_$][\w$]*)[^{;]*\{")
+#: class/interface/enum/record 声明须与 `{` 同行（JADX 输出形态）；允许
+#: extends/implements/泛型子句。record 必须带「名字 + 形参括号」，避免误伤同名调用。
+_CLASS_DECL_RE = re.compile(
+    r"\b(?:class|interface|enum|record(?=\s+[A-Za-z_$][\w$]*[^{;=]*\())"
+    r"\s+([A-Za-z_$][\w$]*)[^{;]*\{"
+)
 #: 成员方法：修饰符* 返回类型 名字(参数) [throws 子句] {——参数不允许嵌套括号。
 #: ★已知边界：形参上带**参数的注解**（`void f(@IntRange(from=0) int x)`）会让整条声明
 #: 匹配失败，于是该方法被静默漏掉，且不会置 limited、coverage 仍可能是 complete。
@@ -1211,6 +1248,22 @@ _CALL_KEYWORDS = frozenset(
     {"if", "for", "while", "switch", "catch", "return", "new", "super", "this",
      "synchronized", "do", "else", "try"}
 )
+_CALL_AFTER_KEYWORDS = frozenset(
+    {"return", "throw", "yield", "assert", "else", "do", "case", "instanceof"}
+)
+_PENDING_LOCAL_TYPE_RE = re.compile(
+    r"(?:^|[^\w$.])"
+    r"(?:class|interface|enum|record(?=\s+[A-Za-z_$][\w$]*[^{;=]*\())"
+    r"\s+[A-Za-z_$][\w$]*[^{;]*$"
+)
+
+
+@dataclass(slots=True)
+class _NewEntry:
+    depth: int
+    ctor_paren_seen: bool = False
+    saw_bracket: bool = False
+    angle_depth: int = 0
 
 
 def _sanitize_java_source(text: str) -> list[str]:
@@ -1367,21 +1420,349 @@ def _method_calls(
     """已清理方法体内（不含签名行）的调用点；返回 (calls, 是否触界)。"""
     calls: list[dict[str, object]] = []
     limited = False
+    paren_depth = 0
+    rel_depth = 0
+    scope_stack: list[tuple[str, int]] = []
+    new_stack: list[_NewEntry] = []
+    pending_arrow: tuple[int, str] | None = None
+    expr_arrow_scopes: list[tuple[str, int]] = []
+    pending_type_decl = False
+    desync = False
+
+    def is_identifier_char(char: str) -> bool:
+        return char.isascii() and (char.isalnum() or char in "_$")
+
+    def previous_nonspace(line_index: int, cursor: int) -> tuple[int, int] | None:
+        lower_bound = start_line - 1
+        while line_index >= lower_bound:
+            clean = clean_lines[line_index]
+            while cursor >= 0 and clean[cursor].isspace():
+                cursor -= 1
+            if cursor >= 0:
+                return line_index, cursor
+            line_index -= 1
+            if line_index >= lower_bound:
+                cursor = len(clean_lines[line_index]) - 1
+        return None
+
+    def next_nonspace(line_index: int, cursor: int) -> tuple[int, int] | None:
+        upper_bound = end_line - 1
+        while line_index <= upper_bound:
+            clean = clean_lines[line_index]
+            while cursor < len(clean) and clean[cursor].isspace():
+                cursor += 1
+            if cursor < len(clean):
+                return line_index, cursor
+            line_index += 1
+            cursor = 0
+        return None
+
+    def declaration_on_left(line_index: int, start: int) -> bool:
+        position = previous_nonspace(line_index, start - 1)
+        if position is None:
+            return False
+        token_line, cursor = position
+        clean = clean_lines[token_line]
+        if not is_identifier_char(clean[cursor]):
+            return False
+        token_end = cursor + 1
+        while cursor >= 0 and is_identifier_char(clean[cursor]):
+            cursor -= 1
+        token = clean[cursor + 1 : token_end]
+        return (
+            _IDENTIFIER_RE.fullmatch(token) is not None
+            and token not in _CALL_AFTER_KEYWORDS
+        )
+
+    def declaration_on_right(line_index: int, open_paren: int) -> bool:
+        depth = 0
+        for scan_line in range(line_index, end_line):
+            clean = clean_lines[scan_line]
+            cursor = open_paren if scan_line == line_index else 0
+            while cursor < len(clean):
+                char = clean[cursor]
+                if char == "(":
+                    depth += 1
+                elif char == ")":
+                    depth -= 1
+                    if depth == 0:
+                        following = next_nonspace(scan_line, cursor + 1)
+                        return (
+                            following is not None
+                            and clean_lines[following[0]][following[1]] == "{"
+                        )
+                cursor += 1
+        # 括号无法配平时 fail-open：保留现状调用记录，避免误删真实调用点。
+        return False
+
+    def is_declaration_site(line_index: int, start: int, open_paren: int) -> bool:
+        return declaration_on_left(line_index, start) or declaration_on_right(
+            line_index, open_paren
+        )
+
+    def is_annotation_site(line_index: int, start: int) -> bool:
+        """沿点链回溯，链头左邻是 ``@`` 即判为注解位点（含限定名注解）。
+
+        判据 sound 的前提是合法 Java 的 token 序：``@`` 不是表达式运算符、不能作调用
+        接收者，故「``@`` + 点分标识符链 + ``(``」只可能是注解使用。真实的限定名调用
+        （``util.log.d(1)`` / ``this.a.b.c(x)``）链头左邻不是 ``@``；``chain().next(y)``
+        与 ``((Foo) x).bar()`` 回溯时撞上 ``)`` 即止。
+
+        ★fail-open：点链中断、越界、遇非标识符成分一律返回 False（保留调用点记录）。
+        错误方向只可能是漏剔，绝不误剔真实调用。
+        """
+        position = previous_nonspace(line_index, start - 1)
+        while position is not None:
+            row, column = position
+            char = clean_lines[row][column]
+            if char == "@":
+                return True
+            if char != ".":
+                return False
+            # 限定名点链：跳过 `.` 与其左侧一个完整标识符，继续看链头。
+            identifier_end = previous_nonspace(row, column - 1)
+            if identifier_end is None:
+                return False
+            identifier_row, identifier_column = identifier_end
+            if not is_identifier_char(clean_lines[identifier_row][identifier_column]):
+                return False
+            cursor = identifier_column
+            while cursor >= 0 and is_identifier_char(clean_lines[identifier_row][cursor]):
+                cursor -= 1
+            position = previous_nonspace(identifier_row, cursor)
+        return False
+
+    def arrow_kind(line_index: int, start: int) -> str:
+        balance = 0
+        lower_bound = start_line - 1
+        for scan_line in range(line_index, lower_bound - 1, -1):
+            clean = clean_lines[scan_line]
+            cursor = start - 1 if scan_line == line_index else len(clean) - 1
+            while cursor >= 0:
+                char = clean[cursor]
+                if char == ")":
+                    balance += 1
+                elif char == "(":
+                    balance -= 1
+                    if balance < 0:
+                        return "lambda"
+                elif balance == 0 and char in ";{}":
+                    first = next_nonspace(scan_line, cursor + 1)
+                    if first is None or first >= (line_index, start):
+                        return "unknown"
+                    token_line, token_start = first
+                    token_clean = clean_lines[token_line]
+                    token_end = token_start
+                    while (
+                        token_end < len(token_clean)
+                        and is_identifier_char(token_clean[token_end])
+                    ):
+                        token_end += 1
+                    token = token_clean[token_start:token_end]
+                    return "switch" if token in ("case", "default") else "lambda"
+                cursor -= 1
+        return "unknown"
+
+    def qualifier_at(line_index: int, start: int) -> str:
+        position = previous_nonspace(line_index, start - 1)
+        if position is None:
+            return "<unknown>"
+        token_line, cursor = position
+        if clean_lines[token_line][cursor] != ".":
+            return ""
+
+        position = previous_nonspace(token_line, cursor - 1)
+        if position is None:
+            return "<unknown>"
+        token_line, cursor = position
+        clean = clean_lines[token_line]
+        token_end = cursor + 1
+        while cursor >= 0 and is_identifier_char(clean[cursor]):
+            cursor -= 1
+        token = clean[cursor + 1 : token_end]
+        if not token:
+            return "<expr>"
+        if token in ("this", "super"):
+            return token
+        if token in _CALL_KEYWORDS:
+            return "<expr>"
+        before_token = previous_nonspace(token_line, cursor)
+        if (
+            before_token is not None
+            and clean_lines[before_token[0]][before_token[1]] == "."
+        ):
+            return "<expr>"
+        if len(token) > limits.max_identifier_len:
+            return "<expr>"
+        if _IDENTIFIER_RE.fullmatch(token) is None:
+            return "<unknown>"
+        return token
+
+    def call_scope() -> str:
+        if desync:
+            return "unknown"
+        if scope_stack:
+            kind = scope_stack[-1][0]
+            return "nested_type" if kind == "type" else kind
+        if expr_arrow_scopes:
+            return expr_arrow_scopes[-1][0]
+        return "method"
+
     for line_no in range(start_line + 1, end_line + 1):
         clean = clean_lines[line_no - 1]
-        for match in _CALL_SITE_RE.finditer(clean):
-            callee = match.group(1)
-            if callee in _CALL_KEYWORDS or len(callee) > limits.max_identifier_len:
+        call_matches = {match.start(): match for match in _CALL_SITE_RE.finditer(clean)}
+        local_type_openings = {
+            match.end() - 1 for match in _CLASS_DECL_RE.finditer(clean)
+        }
+        cursor = 0
+        while cursor < len(clean):
+            char = clean[cursor]
+            if pending_arrow is not None and not char.isspace():
+                arrow_depth, arrow_scope = pending_arrow
+                if char == "{":
+                    scope_stack.append((arrow_scope, rel_depth))
+                    pending_arrow = None
+                    rel_depth += 1
+                    cursor += 1
+                    continue
+                expr_arrow_scopes.append((arrow_scope, arrow_depth))
+                pending_arrow = None
+
+            match = call_matches.get(cursor)
+            if match is not None:
+                callee = match.group(1)
+                in_new_type = bool(
+                    new_stack
+                    and not new_stack[-1].ctor_paren_seen
+                    and not new_stack[-1].saw_bracket
+                    and paren_depth == new_stack[-1].depth
+                )
+                if (
+                    callee not in _CALL_KEYWORDS
+                    and len(callee) <= limits.max_identifier_len
+                    and not in_new_type
+                    and not is_annotation_site(line_no - 1, cursor)
+                    and not is_declaration_site(
+                        line_no - 1, cursor, match.end() - 1
+                    )
+                ):
+                    if len(calls) >= limits.max_calls_per_method:
+                        limited = True
+                        break
+                    calls.append({
+                        "callee": callee,
+                        "line": line_no,
+                        "qualifier": qualifier_at(line_no - 1, cursor),
+                        "scope": call_scope(),
+                    })
+
+            if (
+                clean.startswith("new", cursor)
+                and (cursor == 0 or not is_identifier_char(clean[cursor - 1]))
+                and (
+                    cursor + 3 == len(clean)
+                    or not is_identifier_char(clean[cursor + 3])
+                )
+            ):
+                new_stack.append(_NewEntry(paren_depth))
+
+            if (
+                clean.startswith("->", cursor)
+                and (cursor == 0 or clean[cursor - 1] != "-")
+            ):
+                kind = arrow_kind(line_no - 1, cursor)
+                if kind != "switch":
+                    pending_arrow = (paren_depth, kind)
+                cursor += 2
                 continue
-            if re.search(r"\bnew\s*$", clean[: match.start()]):
-                continue
-            if len(calls) >= limits.max_calls_per_method:
-                limited = True
-                break
-            calls.append({"callee": callee, "line": line_no})
+
+            if char == "(":
+                if (
+                    new_stack
+                    and not new_stack[-1].ctor_paren_seen
+                    and not new_stack[-1].saw_bracket
+                    and paren_depth == new_stack[-1].depth
+                    and new_stack[-1].angle_depth == 0
+                ):
+                    new_stack[-1].ctor_paren_seen = True
+                paren_depth += 1
+            elif char == ")":
+                paren_depth -= 1
+                if new_stack and paren_depth < new_stack[-1].depth:
+                    new_stack.pop()
+                if expr_arrow_scopes and paren_depth < expr_arrow_scopes[-1][1]:
+                    expr_arrow_scopes.pop()
+            elif char == "<" and new_stack:
+                top = new_stack[-1]
+                if not top.ctor_paren_seen and not top.saw_bracket:
+                    top.angle_depth += 1
+            elif char == ">" and new_stack:
+                top = new_stack[-1]
+                if not top.ctor_paren_seen and not top.saw_bracket:
+                    top.angle_depth = max(0, top.angle_depth - 1)
+            elif char == "[" and new_stack:
+                top = new_stack[-1]
+                if not top.ctor_paren_seen and paren_depth == top.depth:
+                    top.saw_bracket = True
+            elif char == ",":
+                if (
+                    new_stack
+                    and paren_depth == new_stack[-1].depth
+                    and new_stack[-1].angle_depth == 0
+                ):
+                    new_stack.pop()
+                if expr_arrow_scopes and expr_arrow_scopes[-1][1] == paren_depth:
+                    expr_arrow_scopes.pop()
+            elif char == ";":
+                while new_stack and new_stack[-1].depth >= paren_depth:
+                    new_stack.pop()
+                expr_arrow_scopes.clear()
+                pending_type_decl = False
+            elif char == "{" and (
+                cursor in local_type_openings or pending_type_decl
+            ):
+                scope_stack.append(("type", rel_depth))
+                pending_type_decl = False
+                rel_depth += 1
+            elif (
+                char == "{"
+                and new_stack
+                and new_stack[-1].ctor_paren_seen
+                and paren_depth == new_stack[-1].depth
+                and not new_stack[-1].saw_bracket
+            ):
+                scope_stack.append(("type", rel_depth))
+                new_stack.pop()
+                rel_depth += 1
+            elif (
+                char == "{"
+                and new_stack
+                and new_stack[-1].saw_bracket
+                and paren_depth == new_stack[-1].depth
+            ):
+                new_stack.pop()
+                rel_depth += 1
+            elif char == "{":
+                rel_depth += 1
+            elif char == "}":
+                rel_depth -= 1
+                if scope_stack and rel_depth == scope_stack[-1][1]:
+                    scope_stack.pop()
+                if rel_depth < 0:
+                    desync = True
+            cursor += 1
         if limited:
             break
-    calls.sort(key=lambda call: (call["line"], call["callee"]))
+        if _PENDING_LOCAL_TYPE_RE.search(clean) is not None:
+            pending_type_decl = True
+    calls.sort(
+        key=lambda call: (
+            call["line"],
+            call["callee"],
+            call["qualifier"],
+            call["scope"],
+        )
+    )
     return calls, limited
 
 

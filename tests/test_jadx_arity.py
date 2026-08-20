@@ -175,3 +175,32 @@ def test_wellformed_generic_declaration_keeps_coverage_complete(tmp_path: Path) 
     ]
     assert ("h", 2) in entries
     assert scan.coverage == "complete"
+
+
+def test_v14_call_records_keep_arity_identities_and_carry_qualifier_scope(
+    tmp_path: Path,
+) -> None:
+    """★schema 1.4 红态契约：calls 记录扩成
+    {callee, line, qualifier, scope}，同时方法身份 (name, arity) 逐字不变——
+    形状扩展绝不许扰动 P1-A 钉死的泛型感知 arity。"""
+    scan = _scan(
+        tmp_path,
+        "package com.a;\n"
+        "public class A {\n"
+        "    public void f(Map<String, String> m) {\n"
+        "        g(m);\n"
+        "    }\n"
+        "    public void g(Map<String, String> m) {\n"
+        "    }\n"
+        "}\n",
+    )
+    methods = [
+        dict(method)
+        for cls in scan.structure
+        for method in cls["methods"]  # type: ignore[union-attr]
+    ]
+    assert sorted((m["name"], m["arity"]) for m in methods) == [("f", 1), ("g", 1)]
+    (f_method,) = [m for m in methods if m["name"] == "f"]
+    assert [dict(c) for c in f_method["calls"]] == [
+        {"callee": "g", "line": 4, "qualifier": "", "scope": "method"}
+    ]

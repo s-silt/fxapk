@@ -473,10 +473,19 @@ def test_shard_key_domain_separated_from_index_key() -> None:
 
 def test_key_fixed_vector() -> None:
     """★锁死一个规范向量：canonical_json_v1 编码或域分离前缀的任何漂移都在这里变红。
-    期望值为字面量——绝不与实现共享推导逻辑（假绿教训）。
+    期望值为字面量——绝不与实现共享推导逻辑（假绿教训）。本测试是 schema bump
+    检查单的第 3 项（清单见 test_jadx_resolution_migration.py::
+    test_index_schema_version_bumped_to_1_6），bump 时向量必须重新独立复算。
     schema 1.0 时代的向量是 ebe1f5fd…3f7d，1.1 时代是 1b8e523f…76cb，1.2（类身份
-    (name, path) 化）时代是 977adae6…de6c；schema 参与 key material，1.3（arity 泛型
-    感知计数）bump 后向量合法更替为下值（实现跑一次后冻结，此后任何漂移在这里变红）。"""
+    (name, path) 化）时代是 977adae6…de6c，1.3（arity 泛型感知计数）时代是
+    1cea741b…c45e，1.4（calls 扩 qualifier/scope 四字段）时代是 70f5a03c…c29c，
+    1.5（声明剔除）时代是 2b6f801e…f2b1；schema 参与 key material，1.6（注解
+    使用剔除 + 局部 record 识别——内容语义 bump、形状不变）后向量合法更替为
+    下值。1.6 值的独立性论证（非复制实现输出）：手工按「material 形状 +
+    canonical_json_v1 + 前缀 fxapk.jadx.index/key/v1\\0 + sha256」复算，
+    schema="1.4" / "1.5" 输入分别逐字节复现 70f5…c29c 与 2b6f…f2b1
+    （证明派生规则未变、唯一变的 key material 输入是 index_schema_version），
+    schema="1.6" 输入得下值。"""
     lin = DexLineage(
         DexRole.APK_DEX,
         0,
@@ -487,7 +496,7 @@ def test_key_fixed_vector() -> None:
     material = build_key_material([lin], "9.9.9", "sha256:" + "f" * 64)
     # 材料本身可 JSON 往返（canonical_json_v1 拒 NaN/Inf/重复键的前提下）。
     json.loads(canonical_json_v1(material))
-    assert key == "1cea741be43ed503bdfb5dd81f00dab92695d9ed9a672d467d929444a0b0c45e"
+    assert key == "acd01fa5c853194cf05fb05706abc8c0ecc6cf47f1da6e6517c9820973499f05"
 
 
 # ---------------------------------------------------------------------------

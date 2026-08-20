@@ -10,7 +10,11 @@ from apkscan.core.jadx_index import (
     REASON_MALFORMED,
     JadxIndexError,
     LoadedIndex,
+    _IDENTIFIER_RE,
+    _MAX_PERSISTED_IDENTIFIER,
     _normalize_safe_relative_path,
+    _valid_call_qualifier,
+    _valid_call_scope,
     _validate_digest,
     _validate_shard_structure,
 )
@@ -74,15 +78,24 @@ class StructuralDiff:
 
 
 def _validate_call(call: object, path: str) -> None:
-    if not isinstance(call, Mapping) or set(call) != {"callee", "line"}:
+    if not isinstance(call, Mapping) or set(call) != {
+        "callee",
+        "line",
+        "qualifier",
+        "scope",
+    }:
         _malformed(path)
     callee = call["callee"]
     line = call["line"]
     if (
         not isinstance(callee, str)
+        or len(callee) > _MAX_PERSISTED_IDENTIFIER
+        or _IDENTIFIER_RE.fullmatch(callee) is None
         or isinstance(line, bool)
         or not isinstance(line, int)
         or line < 1
+        or not _valid_call_qualifier(call["qualifier"])
+        or not _valid_call_scope(call["scope"])
     ):
         _malformed(path)
 

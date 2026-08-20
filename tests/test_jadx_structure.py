@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Callable
 
 from apkscan.core.jadx_index import (
-    INDEX_SCHEMA_VERSION,
     CacheMiss,
     DexInput,
     DexLineage,
@@ -99,18 +98,14 @@ HELPER_JAVA = (
 
 
 # ---------------------------------------------------------------------------
-# schema 1.1
+# schema 演进锁：已并入单一真源，本文件不再钉版本字面量
 # ---------------------------------------------------------------------------
-
-
-def test_schema_version_bumped_to_1_3() -> None:
-    """★schema 演进锁：1.2 起结构身份为 (name, path)——混淆样本不同路径同名类合法；
-    1.3 起 arity 按尖括号深度 0 的逗号计数——泛型实参逗号不再被误算成参数分隔符。
-    更早的工件按既有漂移机制拒收（版本同时进 key material 与 load 校验）。
-
-    arity 修正不改字段集，却必须 bump：不 bump 则同一 index_key 下的旧 shard
-    仍以错误 arity 命中缓存，方法身份永远修不过来。"""
-    assert INDEX_SCHEMA_VERSION == "1.3"
+# 本文件曾有自己的 `assert INDEX_SCHEMA_VERSION == "X.Y"` 演进锁，与
+# test_jadx_resolution_migration.py 的锁重复钉同一常量——1.4→1.5、1.5→1.6
+# 两轮 bump 都恰好漏掉这里（红是能红，但每轮都得全仓库考古才找齐钉点）。
+# 锁已收敛为单一真源：
+#   test_jadx_resolution_migration.py::test_index_schema_version_bumped_to_1_6
+# （含完整版本演进史与 bump 检查单）。
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +145,9 @@ def test_extracts_classes_methods_and_call_sites(tmp_path: Path) -> None:
         assert m["body_digest"].startswith("sha256:") and len(m["body_digest"]) == 71
 
     # onCreate：只有 fetch 一个调用点；``new Helper(...)`` 不是 P1-B 的边。
-    assert [dict(c) for c in methods[0]["calls"]] == [{"callee": "fetch", "line": 6}]
+    assert [dict(c) for c in methods[0]["calls"]] == [
+        {"callee": "fetch", "line": 6, "qualifier": "h", "scope": "method"}
+    ]
     assert list(methods[1]["calls"]) == []
 
 
@@ -205,7 +202,9 @@ def test_constructor_recorded_as_init(tmp_path: Path) -> None:
         ("<init>", 1, 4, 6),
         ("init", 1, 8, 9),
     ]
-    assert [dict(c) for c in boot_cls["methods"][0]["calls"]] == [{"callee": "init", "line": 5}]
+    assert [dict(c) for c in boot_cls["methods"][0]["calls"]] == [
+        {"callee": "init", "line": 5, "qualifier": "", "scope": "method"}
+    ]
 
 
 def test_keywords_and_string_literals_are_not_call_sites(tmp_path: Path) -> None:
@@ -554,7 +553,9 @@ def test_braces_in_comments_and_char_literals_do_not_break_spans(tmp_path: Path)
         ("step", 12, 13),
     ]
     f_method = dict(cls["methods"][0])
-    assert [dict(c) for c in f_method["calls"]] == [{"callee": "step", "line": 9}]
+    assert [dict(c) for c in f_method["calls"]] == [
+        {"callee": "step", "line": 9, "qualifier": "", "scope": "method"}
+    ]
 
 
 def test_truncated_method_without_closing_brace_locked(tmp_path: Path) -> None:
@@ -640,7 +641,9 @@ def test_escaped_quotes_with_braces_do_not_break_spans(tmp_path: Path) -> None:
         ("f", 4, 8),
         ("step", 10, 11),
     ]
-    assert [dict(c) for c in dict(cls["methods"][0])["calls"]] == [{"callee": "step", "line": 7}]
+    assert [dict(c) for c in dict(cls["methods"][0])["calls"]] == [
+        {"callee": "step", "line": 7, "qualifier": "", "scope": "method"}
+    ]
 
 
 def test_sanitizer_preserves_line_count() -> None:
