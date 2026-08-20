@@ -1232,13 +1232,18 @@ class JadxAnalyzer(BaseAnalyzer):
         scan_exceptions = 0  # 单文件扫描内部异常数：吞掉不炸，但必须留痕挡 complete
         for java, rel_nfc in selected:
             try:
-                data = java.read_bytes()
+                # ★有界读取：此前 read_bytes() 全量载入后才截断，单文件内存峰值实际
+                # 不受 _MAX_FILE_BYTES 约束——敌对样本放一个超大 .java 即可顶爆内存。
+                # bytes_total 保持「真实文件大小」语义（stat），截断判定不变。
+                file_size = java.stat().st_size
+                with java.open("rb") as stream:
+                    data = stream.read(_MAX_FILE_BYTES + 1)
             except Exception:
                 logger.exception("[jadx] 读取 .java 失败，跳过：%s", java)
                 read_failed += 1
                 continue
             files_scanned += 1
-            bytes_total += len(data)
+            bytes_total += file_size
             if len(data) > _MAX_FILE_BYTES:
                 truncated_files += 1
                 data = data[:_MAX_FILE_BYTES]

@@ -521,14 +521,16 @@ def test_read_failure_blocks_java_complete_but_keeps_positives(monkeypatch, tmp_
         return _owned(0)
 
     _patch_run_owned(monkeypatch, _handler)
-    real_read = Path.read_bytes
+    real_open = Path.open
 
-    def _flaky(self: Path) -> bytes:
-        if self.name == "Locked.java":
+    # 注入点跟随实现：扫描现在走 stat() + open("rb") 有界读取（不再 read_bytes 全量
+    # 载入）。只拦读模式——_handler 写夹具用的 write_text（mode="w"）必须放行。
+    def _flaky(self: Path, mode: str = "r", *args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        if self.name == "Locked.java" and "r" in mode:
             raise OSError("sharing violation (模拟句柄被占)")
-        return real_read(self)
+        return real_open(self, mode, *args, **kwargs)
 
-    monkeypatch.setattr(jadx.Path, "read_bytes", _flaky)
+    monkeypatch.setattr(jadx.Path, "open", _flaky)
     result = JadxAnalyzer().analyze(_ctx(tmp_path))
 
     assert result.meta["jadx_status"] == "ok"  # 进程本身干净退出

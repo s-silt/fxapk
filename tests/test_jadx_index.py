@@ -636,14 +636,10 @@ def test_scan_limit_and_truncation_yield_partial(tmp_path: Path) -> None:
     assert truncated.truncated == 1 and truncated.coverage == "partial"
 
 
-def test_giant_method_keeps_structure_partial(tmp_path: Path) -> None:
-    """P1-D 诚实边界锁：文件全扫完（不撞 max_files）时，超大方法仍须因
-    calls_cap（单方法调用点数上限，默认 256）保持 partial——P1-D 只调 max_files，
-    刻意不碰 max_calls_per_method，不能让含巨型方法的样本被误判为 complete。"""
-    src = tmp_path / "java"
-    calls = "\n".join("foo();" for _ in range(300))
+def _giant_method_tree(root: Path, n_calls: int) -> None:
+    calls = "\n".join("foo();" for _ in range(n_calls))
     _java_tree(
-        src,
+        root,
         {
             "com/x/C.java": (
                 "package com.x;\n"
@@ -656,9 +652,49 @@ def test_giant_method_keeps_structure_partial(tmp_path: Path) -> None:
             )
         },
     )
-    scan = scan_java_sources(src, [], lineage=_lin(), limits=Limits(max_files=100))
+
+
+def test_giant_method_keeps_structure_partial(tmp_path: Path) -> None:
+    """P1-D 诚实边界锁：文件全扫完（不撞 max_files）时，超大方法仍须因
+    calls_cap（单方法调用点数上限，**精确 256**）保持 partial——P1-D 只调 max_files，
+    刻意不碰 max_calls_per_method。精确锁边界值：256 恰好达界 complete、257 触界
+    partial 且 calls 截断在 256——若有人把 cap 从 256 悄悄放宽到任何更大值，
+    257 侧断言必红（codex 复审：只断言「300 → partial」锁不住 cap 具体值）。"""
+    at_cap = tmp_path / "at-cap"
+    _giant_method_tree(at_cap, 256)
+    ok = scan_java_sources(at_cap, [], lineage=_lin(), limits=Limits(max_files=100))
+    assert ok.scan_limit_hit is False and ok.coverage == "complete"
+
+    over_cap = tmp_path / "over-cap"
+    _giant_method_tree(over_cap, 257)
+    scan = scan_java_sources(over_cap, [], lineage=_lin(), limits=Limits(max_files=100))
     assert scan.scan_limit_hit is False  # 没撞文件上限
-    assert scan.coverage == "partial"  # 但因 calls_cap 仍不完整
+    assert scan.coverage == "partial"  # 因 calls_cap 不完整
+    (cls,) = [c for c in scan.structure if c["name"] == "com.x.C"]
+    giant = next(m for m in cls["methods"] if m["name"] == "giant")  # type: ignore[union-attr]
+    assert len(giant["calls"]) == 256  # 截断点精确在 cap
+
+
+def test_total_byte_budget_stops_scan_honestly(tmp_path: Path) -> None:
+    """★聚合读取预算：max_files × max_file_bytes 的理论积（调大 max_files 后约
+    47GiB）不能成为敌对样本可实际兑现的读取量。累计读取触顶即停、剩余文件不扫，
+    coverage 诚实降 partial，且可与文件数上限（scan_limit_hit）、单文件截断
+    （truncated）、读失败（read_failed）区分：scanned < files_total 而三者皆零。"""
+    src = tmp_path / "java"
+    body = "x = 1;\n" * 40  # 每文件约 280 字节
+    _java_tree(src, {f"com/x/F{i}.java": body for i in range(6)})
+
+    capped = scan_java_sources(
+        src, [], lineage=_lin(), limits=Limits(max_files=100, max_total_bytes=300)
+    )
+    assert capped.coverage == "partial"
+    assert capped.scan_limit_hit is False
+    assert capped.read_failed == 0 and capped.truncated == 0
+    assert 0 < capped.scanned < capped.files_total  # 预算触顶提前停
+
+    unlimited = scan_java_sources(src, [], lineage=_lin(), limits=Limits(max_files=100))
+    assert unlimited.coverage == "complete"  # 默认预算远大于真实产物，不误伤
+    assert unlimited.scanned == unlimited.files_total
 
 
 def test_build_with_scan_roundtrip_query(tmp_path: Path) -> None:
