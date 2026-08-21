@@ -42,10 +42,38 @@ affect automated / CI / agent callers are called out explicitly**.
   新增 `gaps`、`reason_codes`，`limits` 回显新增 `max_fanout`（默认 `null`）与 `max_gaps`，
   边记录新增 `scope`，含嵌套体内边时新增 caveat；④ `resolution` 字面值 `unique` 改为
   `name_unique`，按旧名匹配的消费方须改；⑤ 默认无界 fanout 在极端重尾样本上更耗资源
-  （BFS 入列量此前不受 `max_visited` 约束，已另开切片收口）。
+  （BFS 入列量此前不受 `max_visited` 约束，见下方 Fixed 的「入列预算」条目）。
 
 ### Fixed
 
+- **JADX 调用图 BFS 加「入列预算」：队列占用以 `max_visited` 封顶（零语义变化）**：
+  `trace_callpath` 此前每出队一个方法节点就把 `calls × candidates` 全部入列（每项复制整条
+  路径元组），`max_visited` 只限制**出队**次数、对入列量没有任何约束——#37 把 fanout 默认
+  改为无界后这面更宽。合成夹具（10 候选 × 10 调用点 × 深度 3）实测 `max_visited=1000` 时
+  队列峰值 58,503、`max_visited=10` 时 820；真实混淆样本单方法调用点上限 256、单简单名
+  候选最大 3038 → 单节点即可入列约 78 万项，100k 次出队前内存即耗尽。
+  修法不加旋钮（`CallPathLimits` 字段集与 CLI `limits` 回显键集都有锁）：队列是纯 FIFO、
+  出队总次数 ≤ `max_visited`，所以全局入列序号 > `max_visited` 的项**永远不会被出队**——
+  只入列前 `max_visited` 项、其余丢弃并计数，循环结束后按 master 循环头的检查顺序补偿
+  reason（`paths_limited` / `visited_limited`）；单节点的展开改为**各调用点候选流的稳定
+  k 路归并**（`heapq.merge`，同 key 按调用点序出队，与 master 的稳定排序逐项相同）、
+  只拉取「剩余预算 + 1」项——第 remaining+1 项存在即判溢出——单节点内存与 CPU 为
+  O(calls + 剩余预算 · log calls)，外加每条流在产出前至多跳过 ≤ max_depth+1 个路径内环候选；
+  `max_fanout` 显式截断用 `islice` 惰性走前缀、不复制候选表。不再随 calls × candidates 线性
+  增长（codex 复审指出 `nsmallest` 版本仍会让预算耗尽前最后一个大扇出节点扫完全部候选、
+  切片会先复制 calls × max_fanout 个引用，均已改）。每个出队节点的
+  calls 形状校验、gap 登记、`fanout_limited` 登记与 `caller_path` 校验一律照常执行，
+  fail-closed 面不缩。
+  **等价性不是靠说的**：新增 `tests/test_jadx_callpath_budget.py`——两个合成夹具 × 8 组
+  端点 × 2112 组限额（含 `max_fanout=0`）的**完整 `CallPathTrace` 序列化**（路径节点序与
+  每条边六元组、gap 六元组、coverage、reason_codes）指纹必须与改动前 master 实测捕获的指纹
+  逐字节一致；另内嵌 master 的 BFS 原文作参考实现，在对抗复核给出的反例构型（选取阶段截断
+  漏计、预算耗尽后仍有幸存候选、环过滤、畸形 caller_path 异常面、省 arity 多起点）与 1500 例
+  含畸形调用点的随机小图上逐例比对返回值或异常；队列峰值 ≤ `max_visited`、展开拉取量 ≤
+  「剩余预算 + 流首项」两条资源锁无修复即红。
+  **对 agent / CI 调用方的影响**：无——paths / gaps / reason_codes / 异常行为逐字节不变，
+  `CallPathLimits` 字段集与 CLI 输出不变，不 bump schema、不触发索引重建；只是极端重尾
+  样本上 `fxapk jadx callpath` 的内存上界从「不可控」变为约 `max_visited × 路径长度`。
 - **JADX 索引统一扫描上限，修一个「调了不生效的死旋钮」**：`_MAX_JAVA_FILES`（端点/密钥
   扫描的文件数上限）一直在 `options_digest` 里，改它会改 `index_key`、触发缓存自动
   重建；但 structure 索引（`usage`/`callpath`/`ownership` 的数据来源）构建那一行**硬
