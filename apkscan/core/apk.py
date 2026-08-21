@@ -14,10 +14,11 @@ import re
 import struct
 import subprocess
 import zipfile
-from collections.abc import Iterator
+import zlib
+from collections.abc import Iterator, Mapping
 from functools import cached_property, lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO, NoReturn
 
 from apkscan.core import tools
 from apkscan.core.models import (
@@ -435,6 +436,222 @@ _MAX_DECOMPRESSED_FILE_BYTES = 500 * 1024 * 1024
 #: ~8MB），只挡病态累加，不误伤真实场景。
 _MAX_TOTAL_CACHE_BYTES = 256 * 1024 * 1024
 
+#: 有界解压时每次从 zip 读取压缩输入的块大小：压缩输入分块流式喂 decompressobj，不再一次性
+#: 按（可伪造的）compressed_size 物化——伪造巨大 compressed_size 此前可逼出 ≤ 整个 APK 体积的
+#: 一份额外拷贝。1MiB 兼顾吞吐与瞬时内存。
+_INFLATE_CHUNK_BYTES = 1024 * 1024
+
+
+class ZipEntryTooLargeError(RuntimeError):
+    """apkInspector 实际解压产出超过单条目硬上限。"""
+
+    entry: str | None
+    limit: int
+
+    def __init__(self, entry: str | None, limit: int) -> None:
+        self.entry = entry
+        self.limit = limit
+        display_entry = entry if entry is not None else "<未知条目>"
+        super().__init__(f"疑 zip 炸弹：条目 {display_entry} 实际解压产出超 {limit} 字节上限")
+
+
+_ZIP_EXTRACT_PATCHED = False
+
+
+def _bounded_extract_file_based_on_header_info(
+    apk_file: BinaryIO,
+    local_header_info: Mapping[str, Any],
+    central_directory_info: Mapping[str, Any],
+) -> tuple[bytes, str]:
+    """按 apkInspector 原分支提取条目，但按实际解压产出施加单文件硬上限。"""
+
+    cap = _MAX_DECOMPRESSED_FILE_BYTES
+    raw_entry = central_directory_info.get("filename")
+    entry = raw_entry if isinstance(raw_entry, str) else None
+
+    def _raise_too_large(indicator: str) -> NoReturn:
+        logger.warning(
+            "apkInspector 有界解压拒绝（疑 zip 炸弹）：条目 %s 实际产出超 %d 字节上限（%s）",
+            entry if entry is not None else "<未知条目>",
+            cap,
+            indicator,
+        )
+        raise ZipEntryTooLargeError(entry, cap)
+
+    def _bounded_read(size: int, indicator: str) -> bytes:
+        # ZIP 头字段正常为无符号整数。若异常调用者传入负数，也不能让 read(-1)
+        # 退化为无界读取；改为最多探测 cap + 1 字节。
+        read_size = cap + 1 if size < 0 else min(size, cap + 1)
+        data = apk_file.read(read_size)
+        if len(data) > cap:
+            _raise_too_large(indicator)
+        return data
+
+    def _bounded_inflate(
+        compressed_size: int,
+        indicator: str,
+        *,
+        require_pure: bool,
+    ) -> bytes:
+        """从 apk_file 当前位置分块读取至多 compressed_size 字节喂 decompressobj，产出封顶。
+
+        压缩输入不再一次性物化：原函数 ``read(compressed_size)`` 会把伪造的巨大
+        compressed_size 一口气读到 EOF（≤ 整个 APK 的一份拷贝）；现在每次只读
+        ``_INFLATE_CHUNK_BYTES``，瞬时额外内存 ≤ 块大小 + 产出上限。流语义与
+        ``zlib.decompress(whole, -15)`` 一致：短读（EOF）照原样、尾随垃圾忽略、
+        不完整流抛 ``zlib.error``。
+        """
+        c_obj = zlib.decompressobj(-15)
+        output = bytearray()
+        # 负值按原 read(-1) 语义读到 EOF；ZIP 头字段正常为无符号整数。
+        left: int | None = None if compressed_size < 0 else compressed_size
+        pending = b""
+
+        while True:
+            if not pending:
+                want = _INFLATE_CHUNK_BYTES if left is None else min(left, _INFLATE_CHUNK_BYTES)
+                if want <= 0:
+                    break
+                pending = apk_file.read(want)
+                if not pending:
+                    break  # EOF：与原函数 read(compressed_size) 的短读一致
+                if left is not None:
+                    left -= len(pending)
+            remaining = cap + 1 - len(output)
+            if remaining <= 0:
+                _raise_too_large(indicator)
+            output.extend(c_obj.decompress(pending, remaining))
+            if len(output) > cap:
+                _raise_too_large(indicator)
+            pending = c_obj.unconsumed_tail
+            if c_obj.eof:
+                break
+
+        # decompressobj 对截断流可能只留下 eof=False 而不主动抛错；
+        # zlib.decompress 对同类输入会抛 zlib.error，因此在这里显式对齐。
+        # ★不调 flush：受 max_length 截断的输出必伴随 unconsumed_tail、已在循环里继续处理，
+        #   到 eof（Z_STREAM_END）时 inflate 没有滞留输出；而 ``Decompress.flush(length)`` 的参数
+        #   是**初始缓冲区大小**不是上限——传 ``cap + 1 - len(output)`` 会让小文件也申请 ~500MiB
+        #   临时缓冲（codex 第三轮复审 P1；tracemalloc 实测 flush(500MiB) 峰值 500MiB）。
+        #   ``decompress(data, max_length)`` 则按需分块增长、不按 max_length 预分配
+        #   （CPython 3.11.15 / 3.12.10 实测 max_length=500MiB 峰值 0.1MiB），故 max_length 无须再切块。
+        if not c_obj.eof:
+            raise zlib.error("Error -5 while decompressing data: incomplete or truncated stream")
+
+        # 普通 DEFLATED 与 zlib.decompress 一致，忽略 unused_data。篡改分支
+        # 则保留原 apkInspector 的“必须是纯 deflate 流”判定：原函数把 compressed_size
+        # 范围内、deflate 流结束后仍存在的字节都算进 unused_data——流式读法下这些字节
+        # 可能尚未被读出（left > 0），须探测一个字节判定「文件里确实还有」。
+        if require_pure:
+            trailing = bool(c_obj.unused_data or c_obj.unconsumed_tail)
+            if not trailing and (left is None or left > 0):
+                trailing = bool(apk_file.read(1))
+            if trailing:
+                raise ValueError("Invalid or non-pure deflate")
+
+        return bytes(output)
+
+    filename_length = int(local_header_info["file_name_length"])
+    if (
+        int(local_header_info["compressed_size"]) == 0
+        or int(local_header_info["uncompressed_size"]) == 0
+    ):
+        compressed_size = int(central_directory_info["compressed_size"])
+        uncompressed_size = int(central_directory_info["uncompressed_size"])
+    else:
+        compressed_size = int(local_header_info["compressed_size"])
+        uncompressed_size = int(local_header_info["uncompressed_size"])
+
+    extra_field_length = int(local_header_info["extra_field_length"])
+    compression_method = int(local_header_info["compression_method"])
+
+    # Skip the offset + local header to reach the compressed data
+    local_header_size = 30
+    offset = int(central_directory_info["relative_offset_of_local_file_header"])
+    apk_file.seek(offset + local_header_size + filename_length + extra_field_length)
+
+    if compression_method == 0:  # Stored (no compression)
+        uncompressed_data = _bounded_read(uncompressed_size, "STORED")
+        extracted_data = uncompressed_data
+        indicator = "STORED"
+    elif compression_method == 8:
+        # -15 for windows size due to raw stream with no header or trailer；压缩输入分块流式读
+        extracted_data = _bounded_inflate(
+            compressed_size,
+            "DEFLATED",
+            require_pure=False,
+        )
+        indicator = "DEFLATED"
+    elif compressed_size == uncompressed_size:
+        compressed_data = _bounded_read(
+            uncompressed_size,
+            "STORED_TAMPERED",
+        )
+        extracted_data = compressed_data
+        indicator = "STORED_TAMPERED"
+    else:
+        cur_loc = apk_file.tell()
+        try:
+            extracted_data = _bounded_inflate(
+                compressed_size,
+                "DEFLATED_TAMPERED",
+                require_pure=True,
+            )
+            indicator = "DEFLATED_TAMPERED"
+        except ZipEntryTooLargeError:
+            # 实际解压已确认越界，不能再把同一数据按 STORED 回退读取。
+            raise
+        except Exception as exc:  # noqa: BLE001 - 与 apkInspector 原回退口径一致
+            logger.debug("%s", exc)
+            apk_file.seek(cur_loc)
+            compressed_data = _bounded_read(
+                uncompressed_size,
+                "STORED_TAMPERED",
+            )
+            extracted_data = compressed_data
+            indicator = "STORED_TAMPERED"
+
+    return extracted_data, indicator
+
+
+def _install_bounded_zip_extract_shim() -> None:
+    """幂等安装 apkInspector 实际解压产出上限。
+
+    现有 Level 1 闸信任 ZIP 中央目录声明的解压后大小，能快速拒绝明显超限条目，
+    但无法约束 apkInspector 根据 local header 读取后由 DEFLATE 实际产生的字节数。
+    本 Level 2 闸直接按实际产出封顶，阻止伪造声明大小的 zip 炸弹在内存中膨胀。
+
+    apkInspector.headers 按名导入了解压函数，因此同时替换 headers 与 extract
+    模块中的名字。安装失败时记录异常并恢复原行为，不阻塞 APK 加载。
+    """
+    global _ZIP_EXTRACT_PATCHED
+
+    if _ZIP_EXTRACT_PATCHED:
+        return
+
+    try:
+        import apkInspector.extract as _x
+        import apkInspector.headers as _h
+
+        original_headers_extract = _h.extract_file_based_on_header_info
+        original_extract_extract = _x.extract_file_based_on_header_info
+
+        try:
+            _h.extract_file_based_on_header_info = _bounded_extract_file_based_on_header_info
+            _x.extract_file_based_on_header_info = _bounded_extract_file_based_on_header_info
+        except Exception:
+            # 防止只替换成功一个模块时留下半安装状态。
+            _h.extract_file_based_on_header_info = original_headers_extract
+            _x.extract_file_based_on_header_info = original_extract_extract
+            raise
+
+        _ZIP_EXTRACT_PATCHED = True
+    except Exception:  # noqa: BLE001 - 安装失败记录后回退，不阻塞既有加载路径
+        logger.exception(
+            "安装 apkInspector 有界解压 shim 失败，"
+            "回退原行为（伪造声明大小的 zip 炸弹可能仍触发无界解压）"
+        )
+
 
 class ApkContext:
     """AnalysisContext 的真实实现，由 androguard 驱动。
@@ -758,6 +975,13 @@ class ApkContext:
             return None
         try:
             data = self._apk.get_file(path)
+        except ZipEntryTooLargeError as exc:
+            logger.warning(
+                "read_file 跳过（实际解压产出超 %d 字节上限，疑 zip 炸弹）：%s",
+                exc.limit,
+                path,
+            )
+            data = None
         except Exception:
             # androguard 对缺失文件抛 FileNotPresent；视为正常缺失但仍记录
             logger.debug("read_file 未命中：%s", path, exc_info=True)
@@ -1001,6 +1225,8 @@ _EAGERLY_DECOMPRESSED_RE = re.compile(r"^(AndroidManifest\.xml|resources\.arsc|c
 def _reject_if_zip_bomb(path: str) -> None:
     """交给 androguard 全量解析前的 zip 炸弹前置拦截（Level 1：信中央目录声明大小）。
 
+    Level 2（按实际解压产出封顶）见 :func:`_install_bounded_zip_extract_shim`，两者互补。
+
     androguard 的 ``APK(path)`` 在构造期解压 manifest / resources.arsc，``get_all_dex()`` 解压各 dex
     ——这些绕过 read_file 的逐条 file_size 闸，声明超上限时能炸出 OOM，故对**这些条目**仍 fail-fast。
 
@@ -1057,6 +1283,8 @@ def load_apk(
     # 的 lxml etree.Element 抛 ValueError 致整体 fail-fast。装幂等 shim 净化 nsmap，对齐
     # apktool 的宽容降级，让 manifest 可解（包名/组件/权限/证书等不再因此全丢）。
     _install_axml_nsmap_shim()
+    # apkInspector 信 local header 且 DEFLATE 无界；任何 APK 构造前先装实际产出闸（Level 2）。
+    _install_bounded_zip_extract_shim()
     # 本样本放行了哪些 hidden-api flag，要从**此刻**起算：集合是进程级的，batch 顺序跑多个
     # 样本时，不取基线就会把前一个样本的放行记录算到这一个头上。在任何 DEX 解析之前抓。
     hiddenapi_baseline = hiddenapi_flags_snapshot()
@@ -1092,6 +1320,15 @@ def load_apk(
                 dex_objs.append(DEX(dex_bytes))
             except Exception:
                 logger.exception("单个 DEX 解析失败，跳过：%s", path)
+    except ZipEntryTooLargeError as exc:
+        # ★DEX 是核心条目：Level 2 按实际产出拒读，与 Level 1 对核心条目声明超限的 fail-fast
+        #   同一口径——必须整体拒绝，不能落进下面的「可能加固」降级继续分析。否则把炸弹放在
+        #   classes2.dex 就能让已解析的主 DEX 一并清空（dex_objs=[]）、形成静态分析规避
+        #   （codex 复审 P2）。
+        raise ApkParseError(
+            f"拒绝加载 APK（DEX 条目 {exc.entry or '<未知条目>'} 实际解压超 {exc.limit} 字节上限，"
+            f"疑 zip 炸弹）：{path}"
+        ) from exc
     except Exception:
         # DEX 不可见（加固）不应使整体失败：manifest/资源/证书仍可用
         logger.exception("DEX 解析失败（可能加固），降级为无 DEX 字符串：%s", path)

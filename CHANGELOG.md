@@ -46,6 +46,30 @@ affect automated / CI / agent callers are called out explicitly**.
 
 ### Fixed
 
+- **zip 炸弹 Level 2：androguard / apkInspector 解压路径按实际产出封顶**：此前全部 zip 炸弹闸
+  都是 Level 1——只信 zip **中央目录**声明的解压后大小（`_reject_if_zip_bomb` /
+  `ApkContext.read_file` / 并行 worker `_lazy_read`）。但 androguard 4.1.4 的 `APK.get_file`
+  走 apkInspector 的 `extract_file_based_on_header_info`：它**优先用 local header 的大小**
+  （与中央目录可不一致），DEFLATE 时 `zlib.decompress(data, -15)` **完全无上限**——声明大小
+  只决定读多少压缩字节，不约束解压产出；中央目录声明 100 字节、实际膨胀到数 GB 照样全量
+  解压。`APK()` 构造期急切解压 manifest（arsc 在解析资源引用时解压）、`get_all_dex()` 解压
+  dex 走的都是这一条路。stdlib `zipfile` 按中央目录 file_size 截断、与 Level 1 自洽，只有这条
+  路失守。
+  现在与 AXML 投毒净化 shim 同模式：`load_apk()` 与并行 worker 惰性重开 APK 前幂等安装
+  `_install_bounded_zip_extract_shim()`，把 apkInspector 的解压函数替换为**分支逐一对齐**的
+  有界版本——STORED / STORED_TAMPERED 按上限+1 有界读取、DEFLATE 用 `decompressobj` +
+  `max_length` 循环、累计产出超 `_MAX_DECOMPRESSED_FILE_BYTES` 立刻抛 `ZipEntryTooLargeError`
+  并 warning（`APK()` 构造期也留痕）；DEFLATED_TAMPERED 的回退分支不得吞掉该异常。**压缩输入
+  也流式**：原函数按（可伪造的）`compressed_size` 一次性 `read`，伪造巨大值可逼出 ≤ 整个 APK
+  体积的一份额外拷贝；现在每次只读 1 MiB 喂 `decompressobj`（codex 第二轮复审 P2）。上限内
+  逐字节等价（含不完整 deflate 流照抛 `zlib.error`、尾随字节忽略）。`read_file` / `_lazy_read` 把该异常转成
+  warning + `None`（不再是 debug 级「未命中」）。
+  **对 agent / CI 调用方的影响**：正常样本零变化；只有「声明过闸、实际膨胀超上限」的条目从
+  「全量解压（可致 OOM）」变为「拒读 + warning」。核心条目超限时 `load_apk` 抛 `ApkParseError`
+  （与 Level 1 对核心条目的 fail-fast 一致）：manifest 在 `APK()` 构造期即被拦、由既有包装
+  转为 `ApkParseError`；DEX 的拒读则**专门捕获**后整体拒绝——不能落进「DEX 不可见（可能加固）
+  → 无 DEX 继续分析」的降级分支，否则把炸弹放在 `classes2.dex` 就能让已解析的主 DEX 一并
+  清空、形成静态分析规避（codex 复审 P2，已修并有端到端锁）。
 - **JADX 调用图 BFS 加「入列预算」：队列占用以 `max_visited` 封顶（零语义变化）**：
   `trace_callpath` 此前每出队一个方法节点就把 `calls × candidates` 全部入列（每项复制整条
   路径元组），`max_visited` 只限制**出队**次数、对入列量没有任何约束——#37 把 fanout 默认
