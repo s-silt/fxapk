@@ -171,8 +171,17 @@ class SnapshotContext:
         apk = self._ensure_worker_apk()
         if apk is None:
             return None
+        from apkscan.core.apk import ZipEntryTooLargeError
+
         try:
             return apk.get_file(path)
+        except ZipEntryTooLargeError as exc:
+            logger.warning(
+                "snapshot 惰性 read_file 跳过（实际解压产出超 %d 字节上限，疑 zip 炸弹）：%s",
+                exc.limit,
+                path,
+            )
+            return None
         except Exception:  # noqa: BLE001 — 缺失/读取失败按 None（与 ApkContext.read_file 一致）
             logger.debug("snapshot 惰性 read_file 未命中：%s", path, exc_info=True)
             return None
@@ -213,16 +222,24 @@ class SnapshotContext:
         try:
             from androguard.core.apk import APK
 
-            from apkscan.core.apk import _install_axml_nsmap_shim, _silence_androguard_logging
+            from apkscan.core.apk import (
+                _install_axml_nsmap_shim,
+                _install_bounded_zip_extract_shim,
+                _silence_androguard_logging,
+            )
 
             # 用 androguard 前先禁其 loguru（与 ApkContext.load_apk 同口径）：否则首次惰性重开会
             # 刷上百 MB DEBUG 到 worker stderr，淹没取证日志。
             _silence_androguard_logging()
-            # 与 load_apk 保持一致：worker 惰性重开 APK 也必须先装 AXML 投毒净化 shim。
+            # 与 load_apk 保持一致：worker 是独立进程，惰性重开 APK 前必须自己装两道进程级
+            # shim——AXML 投毒净化 + apkInspector 有界解压（zip 炸弹 Level 2）。
             _install_axml_nsmap_shim()
+            _install_bounded_zip_extract_shim()
             self._worker_apk = APK(self.apk_path)
         except Exception:  # noqa: BLE001 — worker 内重开失败兜底为 None（极罕见非文本读才走到）
-            logger.warning("snapshot worker 重开 APK 失败，非文本 read_file 将返 None", exc_info=True)
+            logger.warning(
+                "snapshot worker 重开 APK 失败，非文本 read_file 将返 None", exc_info=True
+            )
             self._worker_apk = False
             return None
         return self._worker_apk
