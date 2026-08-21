@@ -5,6 +5,45 @@ affect automated / CI / agent callers are called out explicitly**.
 
 ## Unreleased
 
+### Changed
+
+- **JADX 调用图判据诚实化、scope 标注与召回基线（structure schema 1.3 → 1.6）**：
+  - **三态名按判据自陈**：调用边的 `resolution` 由两态 `unique` / `ambiguous` 改为三态
+    `name_unique` / `ambiguous` / `not_in_index`——`unique` 改名 `name_unique`（只表示简单名
+    候选在索引覆盖内全局唯一，不是方法绑定，旧名暗示 JLS 绑定、超出文本提取能支撑的断言）；
+    新增 `not_in_index`（索引里没有该名字的可解析 body）只进新增的 `gaps`、绝不表示不可达、
+    也不专指动态调用。判据本就是「简单名在索引覆盖内的候选数 1 / >1 / 0」。
+  - **边与 gap 带 `scope`**（`method` / `nested_type` / `lambda` / `unknown`）：scope 不参与
+    候选解析与 resolution 判定（嵌套体内的调用照常可达），但进入 gap 身份与确定性排序。
+    `fxapk jadx callpath` 的边记录新增 `scope` 字段；返回路径含非 `method` 边时追加稳定
+    caveat `nested_edge_is_not_direct_execution`。账本投影载荷逐边扩 resolution/scope——
+    此前两条语义不同的路径会入账成同一 digest、同为 OBSERVED。
+  - **剔除三类伪边**：方法声明、构造器类型名、注解（含限定名，沿点链回溯判定）一律不再
+    记成调用点；判不准时 fail-open 保留。真实混淆样本实测 310,675 条调用记录剔除 6,995 条，
+    逐条回贴源码可归因、真实调用零损失。
+  - **`CallPathLimits` 新增两个可选限额**：`max_fanout`（默认 `None` = 无界，保持 master
+    原有的全候选展开；显式整数才启用确定性截断——真样本同名候选重尾，默认截断会在高扇出的
+    常见简单名上砍召回）与 `max_gaps`（默认 64，gap 登记上限，撞帽自报 `gaps_limited`）。
+  - **新增召回基线**（`tests/jadx_recall_corpus.py` + `tests/jadx_recall_master_baseline.py`）：
+    以 master 实测行为为准的四层契约（提取召回地板 / 提取新增须解释 / 遍历 oracle 保真 /
+    默认限额对等）；
+    CI 新增 `jadx-recall-replay` job，从 origin 历史取基线 commit 的树**实跑**语料与基线字面量
+    逐项对账——「基线来自 master 实测」不再靠执行者的命令行纪律。守门边界如实声明：仅改生产
+    代码这一层是机器强制，连守门文件一起改只保证不可静默。
+  - **schema 三连 bump 的原因**：1.4 calls 记录扩为 `{callee, line, qualifier, scope}`；
+    1.5 剔除方法/构造器声明伪调用并修正 switch rule 箭头的 scope；1.6 剔除注解伪调用、
+    record 类首次纳入结构段、record 体调用 scope 由 `method` 纠正为 `nested_type`。每次都是
+    内容语义变化，不 bump 则同一 `index_key` 会静默复用含伪边 / 缺类 / 错 scope 的旧 shard。
+
+  **对 agent / CI 调用方的影响**：① schema 参与 key material，**全部既有索引工件变为可重建的
+  CacheMiss**，下次分析重建一次 structure 索引（jadx 反编译每次分析本就重跑，不受影响）；
+  ② Python 接口 `trace_callpath()` 的返回值由 `tuple[CallPath, ...]` 改为
+  `CallPathTrace(paths, gaps, coverage, reason_codes)`；③ `fxapk jadx callpath` 的 JSON 顶层
+  新增 `gaps`、`reason_codes`，`limits` 回显新增 `max_fanout`（默认 `null`）与 `max_gaps`，
+  边记录新增 `scope`，含嵌套体内边时新增 caveat；④ `resolution` 字面值 `unique` 改为
+  `name_unique`，按旧名匹配的消费方须改；⑤ 默认无界 fanout 在极端重尾样本上更耗资源
+  （BFS 入列量此前不受 `max_visited` 约束，已另开切片收口）。
+
 ### Fixed
 
 - **JADX 索引统一扫描上限，修一个「调了不生效的死旋钮」**：`_MAX_JAVA_FILES`（端点/密钥
@@ -97,7 +136,8 @@ affect automated / CI / agent callers are called out explicitly**.
 
   **对 agent / CI 调用方的影响**：本次不改 structure 段字段集，只改既有 `arity` 的取值，
   但 schema 参与 key material，**bump 令全部既有索引工件变为可重建的 CacheMiss**——
-  下次分析会重付一次 jadx 反编译（每样本 300–1200s）。已缓存 index_key 会变；
+  下次分析会重建一次 structure 索引（jadx 反编译每次分析本就重跑，不因此多付）。已缓存
+  index_key 会变；
   `fxapk jadx callpath` 的端点参数须按修正后的真实 arity 书写（此前对泛型参数方法
   需要传错误的偏大 arity 才能命中，那是缺陷行为，不再兼容）。
 
