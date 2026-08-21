@@ -203,6 +203,9 @@ If you'd rather type commands yourself, these are the common ones. Full flags: `
 | Train an experimental reranker after the gate passes (otherwise `blocked`) | `fxapk corpus link-train --corpus <dir> --labels <labels.jsonl> --model-out <model.json>` |
 | Shadow-rerank deterministic candidates without expanding recall or bypassing caps | `fxapk corpus link-candidates --corpus <dir> --model <model.json>` |
 | Export leads as CSV | `fxapk export out/app.json` |
+| Diff two reports / flatten a report into agent-readable JSONL | `fxapk diff a.json b.json`, `fxapk jsonl out/app.json` |
+| Query a built JADX persistent index: where a value is used / whether a static call path exists between two methods (**bounded**; an empty result ≠ unreachable; `resolution` is only `name_unique` / `ambiguous` / `not_in_index` — not method binding) | `fxapk jadx usage <value> --jadx-cache-root <cache> --jadx-index <key>`, `fxapk jadx callpath 'cls#m/0' 'cls#n/1' --jadx-cache-root <cache> --jadx-index <key>` |
+| Recognition line (read-only / offline; models can only write `proposed`): project reanalysis requests from the judgment ledger / validate label files / build & validate leak-proof splits / evaluate with an explicit promotion gate (exit 4 when the gate fails — usable as a CI gate) | `fxapk recognize reanalysis <ledger> --out <requests.jsonl>`, `fxapk recognize labels validate …`, `fxapk recognize split build\|validate …`, `fxapk recognize evaluate …` |
 
 Every `corpus` command that reads or writes the sample library needs a library directory: pass
 `--corpus <dir>`, or set `FXAPK_CORPUS` beforehand. The library root holds sample data — keep it

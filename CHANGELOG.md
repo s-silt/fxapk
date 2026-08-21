@@ -3,10 +3,39 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
-## Unreleased
+## 1.8.0 — 2026-08-21
+
+本版以**强化与收口**为主（PR #25–#40）：识别线补齐评测 CLI 与 P3-E 三片（gap 生产 → 入账 →
+映射 v2，重分析请求首次非空）；JADX 线走完精度收尾（arity / usage 归属 / 扫描上限 / manifest
+身份自洽）并把调用图判据改成按事实自陈、加召回基线 CI 重放与入列预算；报告出口做 C2 文案
+纠错与版式精修；zip 炸弹补第二道「按实际产出封顶」闸。全线仍只读 / 离线 / fail-closed /
+诚实空。**对 agent / CI 调用方的契约变化集中在 `fxapk jadx callpath` 的输出面与 JADX 索引
+schema bump（见各条目「影响」段）。**
+
+### Added（识别线）
+
+- **`fxapk recognize evaluate`（P5-E）**：四任务识别评测 CLI + 显式阈值晋级门——门未过或
+  `not_eligible` 以**退出码 4** 结束，可直接当 CI 闸；null 指标门必 fail、canonical 输出、
+  manifest_digest 回显（内部域分离 digest）。采纳复审：数值溢出稳定拒、sha 小写口径统一。
+- **P3-E：可见性缺口 → 重分析请求的生产端闭环**（三片）：
+  - E1 `gap_production.build_visibility_gaps`——`blocked_claims` 的唯一入口产 `EvidenceGap`，
+    三口 fail-closed；`unknown`（未评估）**有意**计入责任来源（与 visibility 的 insufficient 分叉，
+    理由在模块注释）；gap reason 带 `claim.<主张名>` 令牌，防同因主张封印撞车。
+  - E2 visibility gap 入账——第二 visibility question 策略、anchor 簿记、profile `p3e2-v1`
+    逐 question 分桶规划；重复主张纯函数拒、visibility 追加事务式护栏、`--ledger-out` 三件套
+    一致性 fail-closed。
+  - E3 生产映射 v2 实表——java / native / runtime 三源 × 七档授予 → `CALLPATH` /
+    `NATIVE_BUILDINFO` / `PCAP`；dex / resource / `claim.*` / 簿记不授（宁计 unknown 不虚授）；
+    **gap 按 claim × source 拆分**，每个动作的 criteria 恰可兑现、未授予源独立留痕（native 请求
+    只带 native reason、java 只带 java，零跨源污染）。映射 v1 时代 `recognize reanalysis` 只会
+    产诚实空；v2 起 P3 线**首次产出非空请求**，且准入谓词一行未动、不靠放宽准入。
 
 ### Changed
 
+- **报告版式精修 v1 与无判别条目收敛**：样式整块重写（文书感设计令牌 / 目录导航 / `@page`
+  打印规则）；§1.5 无判别条目改为诚实计数指针（带 `shape_uncertain` / `sni_masquerade` 警示的
+  skip 行作为安全例外保留——「弱化可以，消失不行」两条既有锁在守）；机器出口不动。CSS 类名
+  改名只许「增类并存」不许改名（leak-scan 会把「标签.类名」形态的选择器误判成域名）。
 - **JADX 调用图判据诚实化、scope 标注与召回基线（structure schema 1.3 → 1.6）**：
   - **三态名按判据自陈**：调用边的 `resolution` 由两态 `unique` / `ambiguous` 改为三态
     `name_unique` / `ambiguous` / `not_in_index`——`unique` 改名 `name_unique`（只表示简单名
@@ -193,6 +222,11 @@ affect automated / CI / agent callers are called out explicitly**.
   `fxapk jadx callpath` 的端点参数须按修正后的真实 arity 书写（此前对泛型参数方法
   需要传错误的偏大 arity 才能命中，那是缺陷行为，不再兼容）。
 
+- **报告 C2 文案语义纠错**：静态档不再自称「C2」，徽标改为三档「实连已观测 / 运行时出现 /
+  疑似自有后端」（seen / contacted 分层措辞）；无人工认定不输出确定性 C2；③节、空态、总览里的
+  确定性旧称一并去除。对外文书的措辞边界：没观测到的不替人下结论。
+- **`analyze-web` 写入网页证据集指纹与 `evidence_manifest`**：纯网页报告此前没有证据清单，
+  过不了 `case package` 门禁；现在与 APK 报告同口径写入（空集 fail-closed、类型收窄）。
 - pcap 归因结论改为按抓包 fingerprint 记账（`meta.runtime_pcap_attribution_ledger`，
   版本化、有界字段、fail-closed）：同一 IP 多次抓包各自留痕，反转其中一次的归因不再
   擦掉另一次已确证的 TARGET；显式判否现在能把 IP 撤出目标集（此前 inventory 目标集只增
