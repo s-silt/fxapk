@@ -202,6 +202,9 @@ AI 看你给的是什么，自己挑命令：
 | 门槛通过后训练实验排序器（模型只写工作树外；不足即 `blocked`） | `fxapk corpus link-train --corpus <库> --labels <标签.jsonl> --model-out <模型.json>` |
 | 用实验模型 shadow 重排规则候选（不扩张召回、不突破规则 caps） | `fxapk corpus link-candidates --corpus <库> --model <模型.json>` |
 | 把线索导成 CSV | `fxapk export out/app.json` |
+| 两份报告比差异 / 把报告压成 agent 可读的 JSONL | `fxapk diff a.json b.json`、`fxapk jsonl out/app.json` |
+| 在已建的 JADX 持久索引里查某个值用在哪 / 两个方法间有没有静态调用路径（**bounded**；空结果≠不可达，`resolution` 只有 `name_unique` / `ambiguous` / `not_in_index` 三态、不是方法绑定） | `fxapk jadx usage <值> --jadx-cache-root <cache> --jadx-index <key>`、`fxapk jadx callpath 'cls#m/0' 'cls#n/1' --jadx-cache-root <cache> --jadx-index <key>` |
+| 识别线（全部只读 / 离线；模型只能写 proposed）：从判断账本投影重分析请求 / 校验标签文件 / 构建与校验防泄漏 split / 评测并过晋级门（门未过退出码 4，可当 CI 闸） | `fxapk recognize reanalysis <ledger> --out <requests.jsonl>`、`fxapk recognize labels validate …`、`fxapk recognize split build\|validate …`、`fxapk recognize evaluate …` |
 
 凡是读取或写入样本库的 `corpus` 子命令，都要指定库目录：`--corpus <库>`，或者先设好
 `FXAPK_CORPUS` 环境变量。库根会存样本数据，别放在代码仓库里面。
