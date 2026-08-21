@@ -8,9 +8,11 @@ not_in_index 只表示索引里没有该名字的可解析 body，不专指动�
 
 from __future__ import annotations
 
+import heapq
+import itertools
 import re
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 
 from apkscan.core.jadx_index import (
@@ -93,8 +95,7 @@ class CallPath:
         if not isinstance(self.edges, tuple) or len(self.edges) != len(self.nodes) - 1:
             raise JadxIndexError(REASON_MALFORMED, "$.edges")
         if any(
-            not isinstance(edge, CallPathEdge)
-            or edge.resolution == "not_in_index"
+            not isinstance(edge, CallPathEdge) or edge.resolution == "not_in_index"
             for edge in self.edges
         ):
             raise JadxIndexError(REASON_MALFORMED, "$.edges")
@@ -238,6 +239,29 @@ def _match_endpoints(
     return sorted(ident for ident in methods if ident.startswith(prefix))
 
 
+def _expansion_stream(
+    candidates: list[str],
+    fanout: int | None,
+    nodes: tuple[str, ...],
+    line: int,
+    resolution: str,
+    scope: str,
+) -> Iterator[tuple[str, int, str, str]]:
+    """单个调用点的候选流（按候选身份字典序，即 expansion_key 递增）。
+
+    ``fanout`` 为显式 ``max_fanout`` 时只走候选表前缀（与 master 的 ``candidates[:max_fanout]``
+    同一前缀），用 ``islice`` 惰性截断、不复制列表——预算耗尽时本流至多被拉取一次，不该为它
+    先分配 calls × max_fanout 个引用。路径内不回访节点：环自然终止，路径保持简单路径语义；
+    ★过滤必须发生在预算选取之前：若先取前 remaining 项再过滤，环候选会白占名额、把本应入列
+    的非环候选挤掉，与 master「完整排序后跳过」不再等价。每条流在产出一项前至多跳过
+    ``len(nodes)``（≤ max_depth + 1）个环候选。
+    """
+    for candidate in itertools.islice(candidates, fanout):
+        if candidate in nodes:
+            continue
+        yield candidate, line, resolution, scope
+
+
 def trace_callpath(
     index: LoadedIndex,
     source: str,
@@ -260,6 +284,18 @@ def trace_callpath(
     构型会保留全部简单名候选并标为 ambiguous，不再产生 owner 收窄导致的假唯一结论。
     代价是：即使本类自调用只有一个本类候选，只要索引中其他类存在同简单名方法，也会
     诚实降级为 ambiguous。
+
+    **入列预算（资源边界，零语义变化）**：队列是纯 FIFO、出队总次数 ≤ ``max_visited``，
+    故全局入列序号（初始 starts 计入）> ``max_visited`` 的项永远不会被出队——只入列前
+    ``max_visited`` 项、其余丢弃并计数（``dropped``），循环结束后按 master 循环头的检查
+    顺序补偿 reason：``dropped > 0`` 意味着 master 此刻队列非空、会先查 ``paths_limited``
+    再查 ``visited_limited``。单节点的展开是各调用点候选流的稳定 k 路归并
+    （``heapq.merge``，同 key 按调用点序出队，逐项等于 master 的稳定 ``sorted(expanded, key)``），
+    只拉取前 remaining+1 项：单节点代价 O(calls + (remaining+1)·log calls)，外加每条流在
+    产出前至多跳过 ≤ max_depth+1 个环候选；不为候选表做任何复制。每个出队节点的 calls
+    校验、gap 登记、``fanout_limited`` 登记与 ``caller_path`` 校验与预算无关、一律照常执行：
+    paths / gaps / reason_codes / 异常行为与无预算版本逐字节相同
+    （tests/test_jadx_callpath_budget.py 以 master 实测指纹与内嵌参考实现钉住）。
     """
     if not isinstance(index, LoadedIndex):
         raise JadxIndexError(REASON_MALFORMED, "$.index")
@@ -278,6 +314,11 @@ def trace_callpath(
             reason_codes=reasons,
         )
 
+    def expansion_key(
+        entry: tuple[str, int, str, str],
+    ) -> tuple[str, int, int]:
+        return entry[0], entry[1], _SCOPE_RANK[entry[3]]
+
     source_parts = _parse_endpoint(source)
     target_parts = _parse_endpoint(target)
     if source_parts is None or target_parts is None or source == target:
@@ -289,21 +330,29 @@ def trace_callpath(
     if not starts or not ends:
         return result(reasons=("endpoint_unmatched",))
 
-    queue: deque[tuple[str, tuple[str, ...], tuple[CallPathEdge, ...]]] = deque(
-        (node, (node,), ()) for node in starts
-    )
+    queue: deque[tuple[str, tuple[str, ...], tuple[CallPathEdge, ...]]] = deque()
+    for position, node in enumerate(starts):
+        if position >= limits.max_visited:
+            break
+        queue.append((node, (node,), ()))
+
+    enqueued = len(queue)
+    dropped = len(starts) - enqueued
     seen_sequences: set[tuple[str, ...]] = set()
     found: list[CallPath] = []
     gaps_by_key: dict[tuple[str, str, str, int, str], CallPathEdge] = {}
     reasons: set[str] = set()
     visited = 0
+
     while queue:
         if len(found) >= limits.max_paths:
             reasons.add("paths_limited")
             break
         if visited >= limits.max_visited:
+            # 入列预算使正常控制流不再能到达此分支；保留作防御性预算检查。
             reasons.add("visited_limited")
             break
+
         node, nodes, edges = queue.popleft()
         visited += 1
         if node in ends and len(nodes) > 1:
@@ -315,8 +364,8 @@ def trace_callpath(
             if methods[node][1]:
                 reasons.add("depth_limited")
             continue
+
         caller_path, calls = methods[node]
-        expanded: list[tuple[str, int, str, str]] = []
         validated_calls: list[tuple[int, str, str, str]] = []
         for call in calls:
             if not isinstance(call, Mapping) or set(call) != {
@@ -344,8 +393,9 @@ def trace_callpath(
             assert isinstance(qualifier, str) and isinstance(scope, str)
             validated_calls.append((line, callee, qualifier, scope))
 
-        for line, callee, _qualifier, scope in sorted(validated_calls):
-            candidates = list(by_name.get(callee, ()))
+        ordered_calls = sorted(validated_calls)
+        for line, callee, _qualifier, scope in ordered_calls:
+            candidates = by_name.get(callee, ())
             if not candidates:
                 gap = CallPathEdge(
                     caller=node,
@@ -355,25 +405,48 @@ def trace_callpath(
                     resolution="not_in_index",
                     scope=scope,
                 )
-                key = (gap.caller, gap.callee, gap.caller_path, gap.line, gap.scope)
+                key = (
+                    gap.caller,
+                    gap.callee,
+                    gap.caller_path,
+                    gap.line,
+                    gap.scope,
+                )
                 if key not in gaps_by_key:
                     if len(gaps_by_key) >= limits.max_gaps:
                         reasons.add("gaps_limited")
                     else:
                         gaps_by_key[key] = gap
                 continue
-            resolution = "name_unique" if len(candidates) == 1 else "ambiguous"
             if limits.max_fanout is not None and len(candidates) > limits.max_fanout:
-                candidates = candidates[: limits.max_fanout]
                 reasons.add("fanout_limited")
-            for candidate in candidates:
-                expanded.append((candidate, line, resolution, scope))
-        for candidate, line, resolution, scope in sorted(
-            expanded, key=lambda e: (e[0], e[1], _SCOPE_RANK[e[3]])
-        ):
-            # 路径内不回访节点：环自然终止，路径保持简单路径语义。
-            if candidate in nodes:
+
+        # 每个调用点一条候选流：候选表已按身份字典序排好，同一调用点的 line/scope 固定，
+        # 故单条流按 expansion_key 严格递增；各流按 ordered_calls 顺序参加**稳定** k 路归并
+        # （heapq.merge 同 key 按流序出队），结果与 master 的 sorted(expanded, key)（稳定
+        # 排序、构造序＝调用点序×候选序）逐项相同。只取前 remaining+1 项：前 remaining 项
+        # 入列、第 remaining+1 项存在即判溢出——单节点代价 O(calls + (remaining+1)·log calls)，
+        # 不再随 calls × candidates 线性增长（预算耗尽前最后一个大扇出节点也不例外）。
+        streams: list[Iterator[tuple[str, int, str, str]]] = []
+        for line, callee, _qualifier, scope in ordered_calls:
+            candidates = by_name.get(callee, ())
+            if not candidates:
                 continue
+            resolution = "name_unique" if len(candidates) == 1 else "ambiguous"
+            streams.append(
+                _expansion_stream(candidates, limits.max_fanout, nodes, line, resolution, scope)
+            )
+
+        remaining = limits.max_visited - enqueued
+        taken = list(itertools.islice(heapq.merge(*streams, key=expansion_key), remaining + 1))
+        if len(taken) > remaining:
+            # dropped 仅以 >0 参与判定：它意味着 master 的总入列数已超过 max_visited。
+            dropped += 1
+            # master 会为所有幸存候选构造 CallPathEdge；即使候选被预算丢弃，
+            # 也必须保留 caller_path 的 fail-closed 异常面。
+            _normalize_safe_relative_path(caller_path, "$.caller_path")
+
+        for candidate, line, resolution, scope in taken[:remaining]:
             edge = CallPathEdge(
                 caller=node,
                 callee=candidate,
@@ -382,13 +455,27 @@ def trace_callpath(
                 resolution=resolution,
                 scope=scope,
             )
-            queue.append((candidate, (*nodes, candidate), (*edges, edge)))
+            queue.append(
+                (
+                    candidate,
+                    (*nodes, candidate),
+                    (*edges, edge),
+                )
+            )
+            enqueued += 1
+
+    if dropped > 0 and len(found) >= limits.max_paths:
+        reasons.add("paths_limited")
     if visited >= limits.max_visited:
         # 即便本次展开恰好耗尽队列，达到 visited 帽也必须显式披露预算边界。
         reasons.add("visited_limited")
     found.sort(key=lambda path: (len(path.nodes), path.nodes))
     ordered_gaps = tuple(gaps_by_key[key] for key in sorted(gaps_by_key))
-    return result(tuple(found), ordered_gaps, tuple(sorted(reasons)))
+    return result(
+        paths=tuple(found),
+        gaps=ordered_gaps,
+        reasons=tuple(sorted(reasons)),
+    )
 
 
 __all__ = [
