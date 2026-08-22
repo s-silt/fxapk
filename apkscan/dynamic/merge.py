@@ -184,6 +184,13 @@ def merge_capture_quality(report: Report, runtime_report_path: str) -> dict[str,
     from apkscan.core.closure import evaluate_capture_quality
 
     signals = dict(raw_signals)
+    # ★P0-c：把「本轮运行的 APK 身份是否可确认」带进质量门。auto 在合并前已把 capture_apk_identity
+    #   写进 report.meta；身份为 unknown（装原包失败、设备上可能是此前旁路轮遗留的重打包版）时，
+    #   这一轮流量未必出自本次样本，不得据以判 complete。**只标注不门控是无效的**——机器消费方只读
+    #   quality，HTML 告警约束不了它们。
+    identity = report.meta.get("capture_apk_identity")
+    if isinstance(identity, Mapping):
+        signals["capture_apk_identity_which"] = str(identity.get("which") or "original")
     quality = evaluate_capture_quality(signals)
     signals["quality"] = quality
     report.meta["capture_signals"] = signals

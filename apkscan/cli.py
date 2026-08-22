@@ -884,6 +884,19 @@ def auto(
         help="脱壳后把去壳版重打包装回设备供 capture 抓（绕壳反 frida）。默认开；"
         "--no-repackage 关（重签必卸原包会清 app 数据/登录态）。",
     ),
+    allow_behavior_modification: bool = typer.Option(
+        False,
+        "--allow-behavior-modification",
+        help="第二道授权门：授权在**旁路轮**注入行为修改 shim（反检测/root 隐藏）。默认关；"
+        "与 --authorized-active 正交、不合并、不被继承。仅当第一遍 original 基线不足（秒退/零端点/"
+        "hook 未就绪）时才会用到，且旁路轮证据为 modified-runtime、不作独立结案依据。",
+    ),
+    antidetect: str = typer.Option(
+        "off",
+        "--antidetect",
+        help="旁路轮的行为修改 shim 档位：off（默认，不改样本行为）| java（注入 shim）| "
+        "native（预留，主仓暂无内置 native shim，取该值将报错）。需与 --allow-behavior-modification 同时给。",
+    ),
     strict_case: bool = typer.Option(
         False,
         "--strict-case/--no-strict-case",
@@ -926,6 +939,13 @@ def auto(
             except (click.Abort, EOFError):
                 typer.echo("（未读到输入，直接继续抓包）")
 
+        # ★与 capture 命令同口径：native 主仓无落点，显式拒绝而非静默当"未授权"跳过——
+        #   否则帮助说"将报错"、实际却只是悄悄不跑旁路，用户拿不到真实原因。
+        if antidetect not in ("off", "java"):
+            typer.echo(
+                f"--antidetect 取值非法：{antidetect!r}（可选 off / java；native 主仓暂无内置 native shim）"
+            )
+            raise typer.Exit(code=2)
         out = _resolve_out(out, apk)  # 未给 --out → 默认落到 APK 同目录下的 out/
         typer.echo(f"===== 一键全自动：{apk} =====")
         result = _auto.run(
@@ -940,6 +960,8 @@ def auto(
             strict_case=strict_case,
             on_progress=lambda m: typer.echo(f"... {m}"),
             confirm=_confirm,
+            allow_behavior_modification=allow_behavior_modification,
+            antidetect=antidetect,
         )
         _print_auto_result(result)
         if strict_case:

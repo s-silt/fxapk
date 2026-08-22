@@ -15,6 +15,7 @@ dict、绝不抛、回调被安全调用。
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -872,11 +873,12 @@ def test_cli_auto_strict_case_exit_codes(
 
 
 def test_run_repackage_no_device_skipped() -> None:
-    step, paths = auto._run_repackage(
+    step, wrapper_path = auto._run_repackage(
         "a.apk", "com.x", out_dir="o", has_device=False, on_progress=None
     )
     assert step["status"] == "skipped"
-    assert paths == []
+    # P0-c：第二元素改为 wrapper APK 路径（无设备 → 没重打包 → None，而非空列表）。
+    assert wrapper_path is None
 
 
 def test_run_repackage_invokes_repackage_run_with_serial(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1132,3 +1134,520 @@ def test_auto_no_device_threads_none_serial_to_doctor(
 
     assert doctor_calls["called"] is True
     assert doctor_calls["serial"] is None
+
+
+# ---------------------------------------------------------------------------
+# P0-c：两遍编排（第一遍 original 基线 → 判据 → 按需+需授权的旁路轮）
+# ---------------------------------------------------------------------------
+
+
+def _patch_capture_multi(monkeypatch: pytest.MonkeyPatch, results: list[dict]) -> list[dict]:
+    """记录**每一次** capture.run 调用（既有 _patch_capture 只记最后一次，两遍测试不够用）。
+
+    results 按调用序依次返回；用尽后重复最后一个。
+    """
+    import apkscan.dynamic.capture as capture_mod
+
+    calls: list[dict] = []
+
+    def _fake_run(package: str, *a: Any, **k: Any) -> dict:
+        calls.append({"package": package, "kwargs": k})
+        return results[min(len(calls) - 1, len(results) - 1)]
+
+    monkeypatch.setattr(capture_mod, "run", _fake_run)
+    return calls
+
+
+def _write_pass1_report(out_dir: str, *, endpoint_total: int = 3, signals: dict | None = None) -> str:
+    """在 pass1 子目录写一份第一遍 runtime_report.json（判据的输入）。"""
+    import json as _json
+    from pathlib import Path as _P
+
+    p = _P(out_dir) / "pass1-original"
+    p.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "package_name": "com.fraud.app",
+        "source": "runtime",
+        "runtime_variant": "original-runtime",
+        "endpoint_total": endpoint_total,
+        "capture_signals": {
+            "hook_ready_status": "confirmed",
+            "frida_retreated": False,
+            "frida_retreat_count": 0,
+            **(signals or {}),
+        },
+    }
+    f = p / "runtime_report.json"
+    f.write_text(_json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return str(f)
+
+
+def _auto_two_pass_env(monkeypatch: pytest.MonkeyPatch) -> Report:
+    """两遍编排测试的公共环境：静态 ok、有设备、脱壳 done、merge 打桩。"""
+    report = _patch_static_ok(monkeypatch, "com.fraud.app")
+    _patch_doctor(monkeypatch, ok=True)
+    _patch_merge(monkeypatch)
+    _set_device(monkeypatch, True)
+    _patch_unpack(monkeypatch, _dynamic_result(STATUS_DONE))
+    return report
+
+
+def _fake_repack_done(wrapper_path: str):
+    """替身：去壳重打包成功并产出 wrapper APK 路径。"""
+
+    def _inner(*a: Any, **k: Any):
+        return auto._step(auto._STEP_REPACKAGE, "done", "去壳版已装回"), wrapper_path
+
+    return _inner
+
+
+def test_pass1_runs_original_before_any_bypass(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """★第一遍必须抓原版：产物落 pass1-original，且不带任何行为修改授权。"""
+    _auto_two_pass_env(monkeypatch)
+    out = str(tmp_path)
+    rr = _write_pass1_report(out, endpoint_total=3)
+    calls = _patch_capture_multi(monkeypatch, [_dynamic_result(STATUS_DONE, report_paths=[rr])])
+
+    auto.run("sample.apk", out_dir=out)
+
+    assert calls, "第一遍必须跑"
+    first = calls[0]["kwargs"]
+    assert "pass1-original" in str(first.get("out"))
+    # 第一遍绝不注入行为修改 shim
+    assert first.get("allow_behavior_modification", False) is False
+    assert first.get("antidetect", "off") == "off"
+
+
+def test_no_bypass_when_pass1_healthy(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """第一遍健康（有端点、hook 就绪、未秒退）→ 不跑第二遍，只记一条说明性 skipped。"""
+    _auto_two_pass_env(monkeypatch)
+    out = str(tmp_path)
+    rr = _write_pass1_report(out, endpoint_total=3)
+    calls = _patch_capture_multi(monkeypatch, [_dynamic_result(STATUS_DONE, report_paths=[rr])])
+
+    result = auto.run("sample.apk", out_dir=out)
+
+    assert len(calls) == 1, "健康时不应有第二遍"
+    bypass = [s for s in result["steps"] if s["name"] == auto._STEP_BYPASS]
+    assert bypass and bypass[0]["status"] == "skipped"
+    assert "无需旁路" in bypass[0]["detail"]
+    # ★措辞不得替信号下结论：不能在 hook 状态未知时宣称"hook 就绪"（那是报告一个并不知道的事实）
+    assert "hook 就绪" not in bypass[0]["detail"]
+
+
+def test_bypass_suggested_but_unauthorized_is_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """★判据建议但未授权 → 结构化 skipped + 写明原因，绝不自动提权跑第二遍。"""
+    _auto_two_pass_env(monkeypatch)
+    out = str(tmp_path)
+    rr = _write_pass1_report(out, endpoint_total=0)  # 业务端点为零 → 建议旁路
+    calls = _patch_capture_multi(monkeypatch, [_dynamic_result(STATUS_DONE, report_paths=[rr])])
+
+    result = auto.run("sample.apk", out_dir=out)  # 不给授权
+
+    assert len(calls) == 1, "未授权时绝不能跑第二遍"
+    bypass = [s for s in result["steps"] if s["name"] == auto._STEP_BYPASS]
+    assert bypass and bypass[0]["status"] == "skipped"
+    assert "未取得行为修改授权" in bypass[0]["detail"]
+    assert "业务端点为零" in bypass[0]["detail"]  # 原因要可查
+
+
+def test_bypass_refused_without_pass1_baseline(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """★硬前置：第一遍没产出 original 基线 → 即便已授权也拒绝跑第二遍。
+
+    否则唯一的运行时证据将全部来自被我方诱导的那一轮，且无从对照。
+    """
+    _auto_two_pass_env(monkeypatch)
+    out = str(tmp_path)
+    calls = _patch_capture_multi(monkeypatch, [_dynamic_result(STATUS_ERROR, reason="设备掉线")])
+
+    result = auto.run(
+        "sample.apk", out_dir=out, allow_behavior_modification=True, antidetect="java"
+    )
+
+    # ★核心断言钉在**行为**上：没有基线就绝不能有第二次 capture、绝不能重打包。
+    #   （只断言 detail 措辞不够——判据函数自己也会拦，那样测的是判据不是这道硬前置。）
+    assert len(calls) == 1, "无基线时绝不能跑第二遍"
+    assert not any(s["name"].startswith("旁路轮·") for s in result["steps"]), (
+        "无基线时不应产生任何旁路轮实际步骤（重打包/抓包）"
+    )
+    bypass = [s for s in result["steps"] if s["name"] == auto._STEP_BYPASS]
+    assert bypass and bypass[0]["status"] == "skipped"
+    assert "基线" in bypass[0]["detail"]
+
+
+def test_bypass_runs_with_shim_when_authorized(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """★判据建议 + 已授权 → 跑第二遍：落 pass2-modified、带 shim 授权、且不把静态 report 传进去。"""
+    _auto_two_pass_env(monkeypatch)
+    out = str(tmp_path)
+    rr = _write_pass1_report(out, endpoint_total=0)
+    pass2_rr = str(tmp_path / "pass2-modified" / "runtime_report.json")
+    calls = _patch_capture_multi(
+        monkeypatch,
+        [
+            _dynamic_result(STATUS_DONE, report_paths=[rr]),
+            _dynamic_result(STATUS_DONE, report_paths=[pass2_rr]),
+        ],
+    )
+    wrapper = tmp_path / "wrapper.apk"
+    wrapper.write_bytes(b"PK\x03\x04wrapper")
+    monkeypatch.setattr(auto, "_run_repackage", _fake_repack_done(str(wrapper)))
+
+    auto.run("sample.apk", out_dir=out, allow_behavior_modification=True, antidetect="java")
+
+    assert len(calls) == 2, "已授权且判据建议时应跑第二遍"
+    second = calls[1]["kwargs"]
+    assert "pass2-modified" in str(second.get("out"))
+    assert second.get("allow_behavior_modification") is True
+    assert second.get("antidetect") == "java"
+    # ★第二遍不并入主报告：不把静态 report 传进旁路轮
+    assert second.get("report") is None
+
+
+def test_bypass_failure_does_not_retry_or_break_main(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """★旁路失败即退回 PCAP 主链：恰好尝试一次、不重试，主报告与第一遍产物不受影响。"""
+    report = _auto_two_pass_env(monkeypatch)
+    out = str(tmp_path)
+    rr = _write_pass1_report(out, endpoint_total=0)
+    calls = _patch_capture_multi(
+        monkeypatch,
+        [
+            _dynamic_result(STATUS_DONE, report_paths=[rr]),
+            _dynamic_result(STATUS_ERROR, reason="旁路轮抓包失败"),
+        ],
+    )
+    wrapper = tmp_path / "wrapper.apk"
+    wrapper.write_bytes(b"PK\x03\x04wrapper")
+    monkeypatch.setattr(auto, "_run_repackage", _fake_repack_done(str(wrapper)))
+
+    result = auto.run(
+        "sample.apk", out_dir=out, allow_behavior_modification=True, antidetect="java"
+    )
+
+    assert len(calls) == 2, "旁路失败后绝不重试（恰好两次：第一遍 + 一次旁路）"
+    assert isinstance(result, dict) and result.get("steps"), "旁路失败不得让 auto.run 抛"
+    # 主报告仍带第一遍的 original 身份，未被旁路失败污染
+    assert report.meta["capture_apk_identity"]["which"] == "original"
+    # 旁路失败 → 不挂 pass2 指针
+    assert "pass2_runtime_report" not in report.meta["capture_apk_identity"]
+
+
+def test_main_report_records_original_apk_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """★APK 身份贯穿：主报告 meta 记录实际抓的 APK 及其 sha256（路径可同名，哈希才是身份）。"""
+    import hashlib as _hl
+
+    report = _auto_two_pass_env(monkeypatch)
+    out = str(tmp_path)
+    apk = tmp_path / "sample.apk"
+    apk.write_bytes(b"PK\x03\x04original-sample")
+    expected = _hl.sha256(apk.read_bytes()).hexdigest()
+    rr = _write_pass1_report(out, endpoint_total=3)
+    _patch_capture_multi(monkeypatch, [_dynamic_result(STATUS_DONE, report_paths=[rr])])
+
+    auto.run(str(apk), out_dir=out)
+
+    identity = report.meta["capture_apk_identity"]
+    assert identity["which"] == "original"
+    assert identity["original"]["sha256"] == expected
+    assert identity["wrapper"] is None
+
+
+def test_bypass_records_wrapper_identity_and_pointer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """★旁路轮成功 → meta 记 wrapper 身份 + pass2 报告指针（该份是 modified-runtime，不并入主报告）。"""
+    import hashlib as _hl
+
+    report = _auto_two_pass_env(monkeypatch)
+    out = str(tmp_path)
+    rr = _write_pass1_report(out, endpoint_total=0)
+    pass2_rr = str(tmp_path / "pass2-modified" / "runtime_report.json")
+    _patch_capture_multi(
+        monkeypatch,
+        [
+            _dynamic_result(STATUS_DONE, report_paths=[rr]),
+            _dynamic_result(STATUS_DONE, report_paths=[pass2_rr]),
+        ],
+    )
+    wrapper = tmp_path / "wrapper.apk"
+    wrapper.write_bytes(b"PK\x03\x04deshelled-wrapper")
+    wrapper_sha = _hl.sha256(wrapper.read_bytes()).hexdigest()
+    monkeypatch.setattr(auto, "_run_repackage", _fake_repack_done(str(wrapper)))
+
+    auto.run("sample.apk", out_dir=out, allow_behavior_modification=True, antidetect="java")
+
+    identity = report.meta["capture_apk_identity"]
+    assert identity["wrapper"]["sha256"] == wrapper_sha
+    assert identity["wrapper"]["path"] == str(wrapper)
+    assert identity["pass2_runtime_report"] == pass2_rr
+
+
+def test_pass1_suggests_bypass_judgement_table() -> None:
+    """判据表：四条各自独立触发；健康态不建议；无基线一律不建议。"""
+    healthy = {"endpoint_total": 3, "capture_signals": {"hook_ready_status": "confirmed"}}
+    assert auto._pass1_suggests_bypass("done", healthy)[0] is False
+
+    ok, why = auto._pass1_suggests_bypass(
+        "done", {"endpoint_total": 0, "capture_signals": {"hook_ready_status": "confirmed"}}
+    )
+    assert ok and "业务端点为零" in why
+
+    ok, why = auto._pass1_suggests_bypass(
+        "done",
+        {
+            "endpoint_total": 3,
+            "capture_signals": {
+                "hook_ready_status": "confirmed",
+                "frida_retreated": True,
+                "frida_retreat_count": 3,
+            },
+        },
+    )
+    assert ok and "秒退" in why and "3 次" in why
+
+    ok, why = auto._pass1_suggests_bypass(
+        "done", {"endpoint_total": 3, "capture_signals": {"hook_ready_status": "none"}}
+    )
+    assert ok and "hook 未就绪" in why
+
+    ok, why = auto._pass1_suggests_bypass("degraded", healthy)
+    assert ok and "降级" in why
+
+    ok, why = auto._pass1_suggests_bypass("error", healthy)
+    assert ok is False and "基线" in why
+
+
+def test_bypass_refused_when_pass1_report_unreadable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """★硬前置守的另一半：第一遍 status=done 但产物读不回（写失败/坏 JSON）→ 仍拒绝旁路。
+
+    判据函数只看 status，看不到「报告到底读没读到」——这一条只有编排层的硬前置能拦。
+    删掉硬前置里的 runtime_report_path / pass1_payload 校验，本测试必红。
+    """
+    _auto_two_pass_env(monkeypatch)
+    out = str(tmp_path)
+    # done 但 report_paths 为空 → runtime_report_path 为空串
+    calls = _patch_capture_multi(monkeypatch, [_dynamic_result(STATUS_DONE, report_paths=[])])
+    monkeypatch.setattr(
+        auto, "_run_repackage", _fake_repack_done(str(tmp_path / "wrapper.apk"))
+    )
+
+    result = auto.run(
+        "sample.apk", out_dir=out, allow_behavior_modification=True, antidetect="java"
+    )
+
+    assert len(calls) == 1, "读不回第一遍产物时绝不能跑第二遍"
+    assert not any(s["name"].startswith("旁路轮·") for s in result["steps"])
+    bypass = [s for s in result["steps"] if s["name"] == auto._STEP_BYPASS]
+    assert bypass and bypass[0]["status"] == "skipped"
+
+
+def test_two_passes_use_distinct_device_floor_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """★★证据防丢（codex 复审 P0）：两遍的**设备侧** floor pcap 路径必须不同。
+
+    capture 承诺 pull 失败时保留远端 pcap 供手动重拉；若两遍共用固定远端路径，第二遍起手的
+    rm -f 会删掉第一遍特意保留的原始证据（不可恢复）。删掉 pass_tag 透传，本测试必红。
+    """
+    _auto_two_pass_env(monkeypatch)
+    out = str(tmp_path)
+    rr = _write_pass1_report(out, endpoint_total=0)
+    pass2_rr = str(tmp_path / "pass2-modified" / "runtime_report.json")
+    calls = _patch_capture_multi(
+        monkeypatch,
+        [
+            _dynamic_result(STATUS_DONE, report_paths=[rr]),
+            _dynamic_result(STATUS_DONE, report_paths=[pass2_rr]),
+        ],
+    )
+    wrapper = tmp_path / "wrapper.apk"
+    wrapper.write_bytes(b"PKw")
+    monkeypatch.setattr(auto, "_run_repackage", _fake_repack_done(str(wrapper)))
+
+    auto.run("sample.apk", out_dir=out, allow_behavior_modification=True, antidetect="java")
+
+    assert len(calls) == 2
+    tag1 = calls[0]["kwargs"].get("pass_tag")
+    tag2 = calls[1]["kwargs"].get("pass_tag")
+    assert tag1 and tag2 and tag1 != tag2, (
+        f"两遍必须用不同的设备侧 floor 路径标识，实得 {tag1!r} / {tag2!r}"
+    )
+
+
+def test_bypass_repackage_uses_main_out_dir_for_dump(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """★旁路轮重打包必须传主 out_dir（codex 复审 P1）：repackage 固定从 <out_dir>/dump 取脱壳 DEX，
+    而脱壳产物落主 out/dump。传 pass2 子目录会让它恒报「无料可重打包」。"""
+    _auto_two_pass_env(monkeypatch)
+    out = str(tmp_path)
+    rr = _write_pass1_report(out, endpoint_total=0)
+    _patch_capture_multi(
+        monkeypatch,
+        [_dynamic_result(STATUS_DONE, report_paths=[rr]), _dynamic_result(STATUS_DONE, report_paths=["x"])],
+    )
+    seen: dict = {}
+
+    def _spy_repack(*a: Any, **k: Any):
+        seen["out_dir"] = k.get("out_dir")
+        return auto._step(auto._STEP_REPACKAGE, "done", "ok"), str(tmp_path / "w.apk")
+
+    monkeypatch.setattr(auto, "_run_repackage", _spy_repack)
+
+    auto.run("sample.apk", out_dir=out, allow_behavior_modification=True, antidetect="java")
+
+    assert seen["out_dir"] == out, "重打包必须用主 out_dir（脱壳 DEX 在那），不能用 pass2 子目录"
+
+
+def test_bypass_records_actual_variant_not_assumed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """★据实记录旁路轮 variant（codex 复审 P1）：授权了但 frida 回退 subprocess 时 shim 没进去，
+    capture 会诚实写 original-runtime——主报告不得替它宣称 modified-runtime。"""
+    report = _auto_two_pass_env(monkeypatch)
+    out = str(tmp_path)
+    rr = _write_pass1_report(out, endpoint_total=0)
+    # 第二遍产物：capture 实测判定为 original-runtime（shim 实际未注入）
+    p2dir = tmp_path / "pass2-modified"
+    p2dir.mkdir(parents=True, exist_ok=True)
+    p2 = p2dir / "runtime_report.json"
+    p2.write_text(json.dumps({"runtime_variant": "original-runtime", "endpoint_total": 0}), encoding="utf-8")
+    _patch_capture_multi(
+        monkeypatch,
+        [
+            _dynamic_result(STATUS_DONE, report_paths=[rr]),
+            _dynamic_result(STATUS_DONE, report_paths=[str(p2)]),
+        ],
+    )
+    wrapper = tmp_path / "wrapper.apk"
+    wrapper.write_bytes(b"PK")
+    monkeypatch.setattr(auto, "_run_repackage", _fake_repack_done(str(wrapper)))
+
+    auto.run("sample.apk", out_dir=out, allow_behavior_modification=True, antidetect="java")
+
+    identity = report.meta["capture_apk_identity"]
+    assert identity["pass2_runtime_variant"] == "original-runtime", (
+        "必须读回 capture 的实测结论，不能假定旁路轮一定是 modified-runtime"
+    )
+
+
+def test_pass1_baseline_undecidable_refuses_bypass() -> None:
+    """★字段缺失 ≠ 端点为零（codex 复审 P1）：payload 缺 endpoint_total/endpoints → 基线不可判定，
+    拒绝据以推荐旁路（不可判定不得返回正常值）。"""
+    ok, why = auto._pass1_suggests_bypass("done", {"capture_signals": {}})
+    assert ok is False and "不可判定" in why
+    # 有合法 endpoints 数组时可退而按其长度判
+    ok, why = auto._pass1_suggests_bypass(
+        "done", {"endpoints": [], "capture_signals": {"hook_ready_status": "confirmed"}}
+    )
+    assert ok and "业务端点为零" in why
+
+
+def test_install_failure_marks_apk_identity_unknown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """★★跨运行污染防线（codex 复审新 P0）：装原包失败 → 设备上跑的可能是上次遗留的 wrapper，
+    身份必须标 unknown + 告警，绝不能想当然标 original。
+
+    复现场景：上一次旁路轮成功、wrapper 留在设备上；本次原包因签名不同 UPDATE_INCOMPATIBLE，
+    流水线继续但第一遍 spawn 的是那个 wrapper。若标 original，其流量会以干净轮身份进主报告。
+    """
+    report = _auto_two_pass_env(monkeypatch)
+    out = str(tmp_path)
+    rr = _write_pass1_report(out, endpoint_total=3)
+    _patch_capture_multi(monkeypatch, [_dynamic_result(STATUS_DONE, report_paths=[rr])])
+    # 装原包失败（签名冲突）
+    import apkscan.dynamic.provision as _prov
+
+    monkeypatch.setattr(
+        _prov, "install_apk",
+        lambda *a, **k: {"ok": False, "detail": "INSTALL_FAILED_UPDATE_INCOMPATIBLE"},
+    )
+
+    auto.run("sample.apk", out_dir=out)
+
+    identity = report.meta["capture_apk_identity"]
+    assert identity["which"] == "unknown", "装原包失败时身份不可确认，不得标 original"
+    assert "identity_warning" in identity
+    assert "不可确认" in identity["identity_warning"]
+
+
+def test_capture_degraded_still_yields_baseline(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """★degraded 判据必须在生产链路可达（codex 复审 P1）：capture 返回 degraded 时
+    _run_capture 应保留该状态并照常解析报告路径，否则旁路判据里的 degraded 分支永远走不到。"""
+    from apkscan.dynamic import STATUS_DEGRADED
+
+    import apkscan.dynamic.capture as capture_mod
+
+    rr = tmp_path / "runtime_report.json"
+    rr.write_text(json.dumps({"endpoint_total": 0}), encoding="utf-8")
+    monkeypatch.setattr(
+        capture_mod, "run",
+        lambda *a, **k: _dynamic_result(STATUS_DEGRADED, "无证据路径", report_paths=[str(rr)]),
+    )
+
+    step, path = auto._run_capture(
+        "com.fraud.app", out_dir=str(tmp_path), has_device=True, duration=1,
+        on_progress=None, confirm=None,
+    )
+
+    assert step["status"] == "degraded", "degraded 不应被折成 error（那会让基线与判据都丢失）"
+    assert path == str(rr), "degraded 轮同样产出了 runtime_report，必须解析出路径"
+
+
+def test_negative_endpoint_total_is_undecidable() -> None:
+    """★P2：负数计数是坏值，不能当合法基线（会输出「无需旁路」而掩盖问题）。"""
+    ok, why = auto._pass1_suggests_bypass("done", {"endpoint_total": -1, "capture_signals": {}})
+    assert ok is False and "不可判定" in why
+
+
+def test_unknown_identity_reaches_quality_gate(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """★★端到端门控锁（codex 复审 P0）：身份 unknown 必须一路传到 quality 门并封顶。
+
+    codex 的复现链：遗留 wrapper → 原包装失败 → which=unknown，但 capture 照写 original-runtime，
+    而闭环门只看 runtime_variant → 遗留 wrapper 的流量仍能升 complete。断掉 merge 里注入身份的
+    那几行，本测试必红。
+    """
+    from apkscan.dynamic import merge as merge_mod
+
+    report = _patch_static_ok(monkeypatch, "com.fraud.app")
+    _patch_doctor(monkeypatch, ok=True)
+    _set_device(monkeypatch, True)
+    _patch_unpack(monkeypatch, _dynamic_result(STATUS_DONE))
+    out = str(tmp_path)
+    # 第一遍产物：capture 诚实写 original-runtime（它不知道设备上装的是遗留 wrapper），
+    # 且计数满足 complete 条件
+    rr = _write_pass1_report(out, endpoint_total=3)
+    payload = json.loads(Path(rr).read_text(encoding="utf-8"))
+    payload["capture_signals"].update({
+        "channel_ready": True, "pcap_valid": True, "packet_count": 12,
+        "business_candidate_count": 1, "target_attributed_count": 1,
+        "bidirectional_target_count": 1, "runtime_variant": "original-runtime",
+    })
+    Path(rr).write_text(json.dumps(payload), encoding="utf-8")
+    _patch_capture_multi(monkeypatch, [_dynamic_result(STATUS_DONE, report_paths=[rr])])
+    # 装原包失败（遗留 wrapper 签名冲突）
+    import apkscan.dynamic.provision as _prov
+
+    monkeypatch.setattr(
+        _prov, "install_apk",
+        lambda *a, **k: {"ok": False, "detail": "INSTALL_FAILED_UPDATE_INCOMPATIBLE"},
+    )
+    # 只桩 load（让真 merge_capture_quality 跑），rerender 走真实现的 quality 注入
+    monkeypatch.setattr(merge_mod, "load_runtime_endpoints", lambda p: [])
+
+    auto.run("sample.apk", out_dir=out)
+
+    assert report.meta["capture_apk_identity"]["which"] == "unknown"
+    quality = report.meta.get("capture_quality") or {}
+    assert quality.get("capture_apk_identity_which") == "unknown", (
+        "身份必须传到 quality 门，否则机器消费方读不到（只标注不门控＝无效）"
+    )
+    assert quality.get("dynamic_status") != "complete", "身份不可确认的轮次不得判 complete"

@@ -1775,3 +1775,30 @@ def test_close_report_clears_stale_case_close_marker_on_unselected_lead() -> Non
     report.leads.append(stale)  # 无对应端点 → 本轮不被选为 target
     _close(report, ClosureConfig(online=False, require_dynamic=False), enrichers=[])
     assert "[case-close]" not in stale.notes  # 未选中 lead 的旧 marker 被清
+
+
+def test_capture_quality_unknown_identity_cannot_be_complete() -> None:
+    """★P0-c 门控：运行 APK 身份不可确认（装原包失败、设备上可能是遗留的重打包版）→ 封顶 PARTIAL。
+
+    只在 meta/HTML 标注是无效的——机器消费方只读 quality。本测试锁住标注必须进门控。
+    """
+    full_counts = {
+        "channel_ready": True,
+        "pcap_valid": True,
+        "packet_count": 12,
+        "business_candidate_count": 1,
+        "target_attributed_count": 1,
+        "bidirectional_target_count": 1,
+    }
+    unknown = evaluate_capture_quality({**full_counts, "capture_apk_identity_which": "unknown"})
+    assert unknown["dynamic_status"] == CLOSURE_PARTIAL
+    assert "identity unconfirmed" in str(unknown["reason"])
+
+    # original 对照：身份确认时同样计数仍 complete（证明降档只由身份触发）
+    ok = evaluate_capture_quality({**full_counts, "capture_apk_identity_which": "original"})
+    assert ok["dynamic_status"] == CLOSURE_COMPLETE
+    # 缺字段（旧报告）→ 与 original 同，向后兼容
+    legacy = evaluate_capture_quality(dict(full_counts))
+    assert legacy["dynamic_status"] == CLOSURE_COMPLETE
+    # 判据必须透传进返回体，否则闭环门二次求值时丢失（S2 踩过的空接线）
+    assert unknown["capture_apk_identity_which"] == "unknown"

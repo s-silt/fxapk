@@ -813,6 +813,26 @@
     {% endif %}
 
     {#- 数据完整性 / 采集说明：把降级与离线显式告知，避免"未采集"被误读为"采集为空" -#}
+    {#- P0-c：本次运行时证据采自哪个 APK（原版 / 去壳重打包版）+ 哈希。取证溯源硬要求：
+        路径可同名可覆盖，哈希才是身份；旁路轮另出的 runtime_report 也在此挂指针。 -#}
+    {% set apk_id = meta.get("capture_apk_identity") %}
+    {% if apk_id %}
+    <div class="kv">
+      <div class="k">抓包 APK</div><div class="mono">{% if apk_id.get("which") == "original" %}原版（original）{% elif apk_id.get("which") == "wrapper" %}去壳重打包版（wrapper）{% else %}⚠ 不可确认（unknown）{% endif %}</div>
+      {% if apk_id.get("identity_warning") %}
+      <div class="k">身份告警</div><div class="mono">{{ apk_id.get("identity_warning") }}</div>
+      {% endif %}
+      {% if apk_id.get("original") and apk_id.get("original").get("sha256") %}
+      <div class="k">原版 SHA256</div><div class="mono">{{ apk_id.get("original").get("sha256") }}</div>
+      {% endif %}
+      {% if apk_id.get("wrapper") and apk_id.get("wrapper").get("sha256") %}
+      <div class="k">去壳版 SHA256</div><div class="mono">{{ apk_id.get("wrapper").get("sha256") }}</div>
+      {% endif %}
+      {% if apk_id.get("pass2_runtime_report") %}
+      <div class="k">旁路轮报告</div><div class="mono">{{ apk_id.get("pass2_runtime_report") }}（{{ apk_id.get("pass2_runtime_variant") or "unknown" }}，未并入本报告）</div>
+      {% endif %}
+    </div>
+    {% endif %}
     {#- P0-a：行为修改 shim 注入轮 → 整轮运行时证据是被我方诱导出来的，必须在报告顶部明示。 -#}
     {% if meta.get("runtime_variant") == "modified-runtime" %}
     <div class="harden-warn">⚠ 本次运行时证据采自<b>行为修改轮</b>（modified-runtime）：本轮注入了含反检测 / root 隐藏 / 设备特征伪造的 shim，样本读到的环境值<b>可能</b>已被改写（hook 是否真的就绪见 capture_signals.hook_ready_status）。该轮端点<b>不作独立结案依据</b>（已封顶「部分」、不授「实连已观测」徽标），须由干净轮（original-runtime）、静态调用路径、设备落地物或服务端调证独立印证；被 hook 的 API 上报值本身亦不可作物证。</div>

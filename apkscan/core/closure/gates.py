@@ -84,7 +84,17 @@ def evaluate_capture_quality(meta: Mapping[str, object]) -> dict[str, object]:
     #   「已掌握运行时实连去向」。封顶 PARTIAL——否则本门产出的 complete 会与端点侧的 runtime-modified
     #   降钉、报告告警自相矛盾（机器可读字段与证据档位打架），且本门确实参与总闭环 checks。
     modified_runtime = str(raw.get("runtime_variant") or "") == "modified-runtime"
-    if modified_runtime and target_count > 0 and business_count > 0:
+    # ★P0-c：运行 APK 身份不可确认（装原包失败——最常见是此前旁路轮的去壳重打包版仍在设备上），
+    #   则这一轮抓到的流量**未必出自本次要分析的样本**。它与 modified-runtime 同样不足以独立结案：
+    #   只标注不门控是无效的——机器消费方只读这里，HTML 告警约束不了它们。
+    identity_unconfirmed = str(raw.get("capture_apk_identity_which") or "") == "unknown"
+    if identity_unconfirmed and target_count > 0 and business_count > 0:
+        status = CLOSURE_PARTIAL
+        reason = (
+            "running APK identity unconfirmed (install of the original APK failed; a leftover "
+            "repackaged build may still be on the device); evidence cannot be attributed to this sample"
+        )
+    elif modified_runtime and target_count > 0 and business_count > 0:
         status = CLOSURE_PARTIAL
         reason = (
             "runtime evidence captured under behavior-modification shim (modified-runtime); "
@@ -140,6 +150,9 @@ def evaluate_capture_quality(meta: Mapping[str, object]) -> dict[str, object]:
         # ★P0-a：variant 必须原样透传进结果——闭环门读的是 report.meta['capture_quality']（即本返回体），
         #   不透传则二次求值时判据丢失、modified 封顶守卫成为空接线（信号必须接线：gate 消费 + 报告可见）。
         "runtime_variant": str(raw.get("runtime_variant") or "original-runtime"),
+        # 同理透传身份判据：闭环门读的是 report.meta['capture_quality']（即本返回体），不透传则
+        # 二次求值时"身份不可确认"这一档丢失、守卫成空接线。
+        "capture_apk_identity_which": str(raw.get("capture_apk_identity_which") or "original"),
         "dynamic_status": status,
         "reason": reason,
         "floor_parse_status": floor_parse_status,
