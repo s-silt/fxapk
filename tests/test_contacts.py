@@ -93,7 +93,7 @@ def test_long_digit_run_is_not_a_phone():
 
 def test_qq_via_context_and_email_form():
     ctx = FakeContext(
-        dex_strings=["加QQ:123456 咨询", "客服QQ 987654321", "联系 10001@qq.com"],
+        dex_strings=["加QQ:123456 咨询", "客服QQ 987654321", "联系 10001@qq.com"],  # leak-scan: allow QQ 三种写法的提取夹具，号码为合成值
     )
     result = ContactsAnalyzer().analyze(ctx)
     values = " ".join(_contact_values(result))
@@ -103,15 +103,15 @@ def test_qq_via_context_and_email_form():
 
 
 def test_wechat_context_and_wxid():
-    ctx = FakeContext(dex_strings=["加微信：abc_123xyz", "wxid_a1b2c3d4e5"])
+    ctx = FakeContext(dex_strings=["加微信：abc_123xyz", "wxid_a1b2c3d4e5"])  # leak-scan: allow 微信号与 wxid_ 两种形态的提取夹具，账号为合成值
     result = ContactsAnalyzer().analyze(ctx)
     values = " ".join(v for v in _contact_values(result) if v.startswith("微信"))
     assert "abc_123xyz" in values
-    assert "wxid_a1b2c3d4e5" in values
+    assert "wxid_a1b2c3d4e5" in values  # leak-scan: allow 上一行 wxid_ 夹具的断言值，账号为合成值
 
 
 def test_telegram_link_is_low_confidence():
-    ctx = FakeContext(dex_strings=["飞机群 t.me/scamchannel 进群"])
+    ctx = FakeContext(dex_strings=["飞机群 t.me/scamchannel 进群"])  # leak-scan: allow Telegram 群链接提取夹具，频道名为合成值
     result = ContactsAnalyzer().analyze(ctx)
     tg = [l for l in result.leads if l.category == LeadCategory.CONTACT and l.value.startswith("Telegram")]
     assert tg
@@ -139,7 +139,7 @@ def test_no_contacts_yields_empty():
 
 
 def test_meta_counts_present():
-    ctx = FakeContext(dex_strings=["邮箱 a@b.com", "客服QQ：800820820"])
+    ctx = FakeContext(dex_strings=["邮箱 a@b.com", "客服QQ：800820820"])  # leak-scan: allow meta 计数夹具，QQ 号为合成值
     result = ContactsAnalyzer().analyze(ctx)
     assert isinstance(result.meta.get("contacts"), dict)
     assert result.meta["contacts"].get("email", 0) >= 1
@@ -153,7 +153,7 @@ def test_meta_counts_present():
 # ===========================================================================
 
 # 合法 bot token：冒号前 10 位纯数字，冒号后正好 35 位 [A-Za-z0-9_-]。
-_VALID_BOT_TOKEN = "1234567890:ABCdefGHIjklMNOpqrsTUVwxyz123456789"
+_VALID_BOT_TOKEN = "1234567890:ABCdefGHIjklMNOpqrsTUVwxyz123456789"  # leak-scan: allow bot token 形态闸夹具，token 为合成值
 
 
 def _channel_leads(result):
@@ -253,7 +253,7 @@ def test_channel_leads_do_not_disturb_contacts():
     # 同一语料里既有联系方式又有 webhook：CONTACT 与 CHANNEL 各自独立产出，互不污染。
     # （原用手机号做 CONTACT 载体，phone 类型已整类移除 → 改用 QQ。）
     url = "https://oapi.dingtalk.com/robot/send?access_token=zzz"
-    ctx = FakeContext(dex_strings=[f"客服QQ：800820820 上报 {url}"])
+    ctx = FakeContext(dex_strings=[f"客服QQ：800820820 上报 {url}"])  # leak-scan: allow QQ 与 URL 共现夹具，QQ 号为合成值
     result = ContactsAnalyzer().analyze(ctx)
     assert any("800820820" in v for v in _contact_values(result))
     assert any("oapi.dingtalk.com" in l.value for l in _channel_leads(result))
@@ -294,9 +294,9 @@ def test_phone_removal_does_not_break_other_contact_types():
     """移除 phone 后，QQ / 微信 / Telegram / 邮箱 四类仍正常提取（防误删波及）。"""
     ctx = FakeContext(
         dex_strings=[
-            "客服QQ：800820820",
-            "加微信 wxid_abc123def",
-            "Telegram @scam_support",
+            "客服QQ：800820820",  # leak-scan: allow 四类共存回归夹具的 QQ 项，号码为合成值
+            "加微信 wxid_abc123def",  # leak-scan: allow 四类共存回归夹具的微信项，账号为合成值
+            "Telegram @scam_support",  # leak-scan: allow 四类共存回归夹具的 Telegram 项，账号为合成值
             "邮箱 kefu@fanzha-test.cn",
         ],
     )

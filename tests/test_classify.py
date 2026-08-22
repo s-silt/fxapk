@@ -112,7 +112,7 @@ def test_pig_butchering_classification_emits_investigation_lead() -> None:
             value="gw.touzi-pay.com",
             advice="建议调证",
         ),
-        Lead(category=LeadCategory.CONTACT, value="客服 Telegram @kefu888"),
+        Lead(category=LeadCategory.CONTACT, value="客服 Telegram @kefu888"),  # leak-scan: allow classify 的 CONTACT Lead 夹具，Telegram 账号为合成值
     ]
     report.endpoints = [
         Endpoint(value="https://gw.touzi-pay.com/recharge", kind="url"),

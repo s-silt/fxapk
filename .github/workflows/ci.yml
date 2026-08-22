@@ -76,6 +76,8 @@ jobs:
     #   这一关对**全树**施压并要求恒为 0：清理过的树只要有人加回一条无豁免的公网字面
     #   （哪怕是改动既有行），这里就红。与上面的 diff 关是**互补**关系，不替代它：
     #   diff 关在 PR 上更严（strict 档连 domain/context 都拦），本关只压默认阻断判据。
+    #   默认档现在含三条案件值判据（人名 / 联系方式 / 二开包名），它们全树实测误报可控，
+    #   故与 ip/secret 同档——案件值一旦推上远端，改写历史也删不掉缓存副本。
     name: leak scan (full tree, must be 0)
     runs-on: ubuntu-latest
     steps:

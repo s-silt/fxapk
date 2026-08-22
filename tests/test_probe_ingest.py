@@ -56,7 +56,7 @@ _SAMPLE_LOG = "\n".join(
         "[nfc][LEAD-固证] IsoDep.transceive >>> 00A4040007A0000000031010  [LEAD-定人] SELECT AID=A0000000031010",
         "[netstat] [LEAD->接入节点] 198.51.100.12:30113  SYN_SENT",
         "[sdk] OpenInstall appKey = ehahb5  [LEAD]",
-        "[tg] TL_auth_signIn username=qq10000001  [LEAD->登录明文]",
+        "[tg] TL_auth_signIn username=qq10000001  [LEAD->登录明文]",  # leak-scan: allow 探针日志解析夹具，登录名为合成值
         "[nav] onCreate com.x.SplashActivity   <== 疑似 splash/loading/视频层",  # 无 LEAD，应被忽略
         "[wipe] 已就绪 —— 普通日志行，无 LEAD",  # 无 LEAD，应被忽略
     ]

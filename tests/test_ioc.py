@@ -77,7 +77,7 @@ def _make_report() -> dict:
             {
                 # 待核联系方式：缺 source_refs 键 + 缺若干字段（容错应留空）
                 "category": "CONTACT",
-                "value": "telegram @scammer",
+                "value": "telegram @scammer",  # leak-scan: allow IOC 导出容错夹具，Telegram 账号为合成值
                 "advice": "待核",
                 "confidence": "LOW",
             },

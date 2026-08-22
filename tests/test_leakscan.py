@@ -36,6 +36,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from apkscan.core import leakscan
 
 # --- 阳性夹具：字面量 + 带理由的行内豁免（绝不拼接绕过，见模块文档） ----------------
@@ -50,10 +52,23 @@ _OUTSIDE_DOMAIN = "synthetic-backend.top"  # leak-scan: allow domain 判据阳�
 _SECRET_VALUE = "Zk3Qw9Lm2Rt7Yb4Nc8Vp"  # leak-scan: allow secret 判据阳性夹具，合成随机串非真实凭据
 _CONTEXT_A = "办案"  # leak-scan: allow 语境词判据自测夹具
 _CONTEXT_B = "涉诈"  # leak-scan: allow 语境词判据自测夹具
+#: 触发 ``person_name`` 判据用：占位姓名 + 「案」。**形态真、值假**——判据有意不识别占位名
+#: （真人也可能就叫这个名字），所以它与真名一样命中，正是合格的阳性夹具。
+_CASE_NAME = "张三案"  # leak-scan: allow person_name 判据阳性夹具，占位姓名非案件当事人
+#: 触发 ``contact`` 判据用：QQ 与微信内部 id 两种形态，号码/账号均为合成值。
+_QQ_TEXT = "客服QQ：123456"  # leak-scan: allow contact 判据阳性夹具，合成 QQ 号
+_WXID_TEXT = "wxid_synth0fixture"  # leak-scan: allow contact 判据阳性夹具，合成微信内部 id
+#: 触发 ``package`` 判据用：随机化的包名段（连续辅音 10）。**刻意不用任何真实样本的包名**——
+#: 那是案件值；本判据要的只是"某段像随机串"这个形态，合成串同样成立。
+_REPACK_PACKAGE = "im.zxcvbnmqwr.messenger"  # leak-scan: allow package 判据阳性夹具，合成随机段包名
 
 #: 阴性夹具：文档保留段，扫描器必须放行（故这几行**不带**豁免注释）。
 _DOC_IP = "198.51.100.7"
 _DOC_IPV6 = "2001:db8::1"
+#: 阴性夹具：跨词边界的巧合（于/成 是姓氏字），以及公开的第三方包名与 Python 模块路径。
+_NOT_A_CASE_NAME = "用于串案索引"
+_STOCK_PACKAGE = "org.telegram.messenger"
+_MODULE_PATH = "apkscan.core.leakscan"
 
 
 def _diff(path: str, *added: str) -> str:
@@ -427,6 +442,374 @@ def test_neutral_technical_text_passes() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 判据 5：中文人名（「姓名 + 案」）
+# ---------------------------------------------------------------------------
+
+
+def test_person_name_with_case_marker_is_rejected() -> None:
+    """★这是本判据的起因：探针注释里的「对应<真名>案：<QQ 号>」曾整条漏过。"""
+    findings = leakscan.scan_diff(_diff("apkscan/x.js", f"// 对应{_CASE_NAME}：登录明文触发"))
+    names = [f for f in findings if f.rule == "person_name"]
+    assert names, "「姓名 + 案」必须被判为泄漏"
+    assert leakscan.blocking(findings), "person_name 判据必须默认阻断"
+
+
+def test_person_name_finding_does_not_echo_the_name() -> None:
+    """★脱敏：公开仓库的 CI 日志同样公开，把真名打进 Actions 输出＝换个地方泄漏。"""
+    findings = leakscan.scan_diff(_diff("apkscan/x.js", f"// 见{_CASE_NAME}"))
+    names = [f for f in findings if f.rule == "person_name"]
+    assert names
+    assert _CASE_NAME[:-1] not in names[0].value, f"finding 值回显了姓名：{names[0].value}"
+    assert names[0].value == "<中文姓名 2 字>案"
+
+
+def test_cross_word_boundary_coincidences_are_not_person_names() -> None:
+    """★汉语没有词边界，姓氏字大量兼任虚词——这是本判据唯一的误报来源。
+
+    「用**于串案**索引」会被读成 于(姓)+串+案，「当**成并案**依据」读成 成(姓)+并+案。
+    这几行都是本仓真实存在的技术文字，全树实测的误报**全部**是这一形态。
+    """
+    findings = leakscan.scan_diff(
+        _diff(
+            "apkscan/x.py",
+            f"# {_NOT_A_CASE_NAME}的域名规范化",
+            "# 会被当成并案依据的写法",
+            "# 报告阶段的逐案事实",
+            "# 本案的解决方案与应急预案已归档",
+            "# 该案由专案组按立案标准处理，涉案金额见结案报告",
+            "# 关联案件与同类案件另行归档",
+        )
+    )
+    assert not [f for f in findings if f.rule == "person_name"], (
+        f"跨词边界的巧合被误判成人名：{findings}"
+    )
+
+
+def test_case_compound_words_are_not_person_names() -> None:
+    """「案」后紧跟 例/卷/由… 时「案X」自身是普通词，不判（有意的漏报，见模块文档）。"""
+    findings = leakscan.scan_diff(_diff("README.md", "石墨文档案例库与档案卷宗管理"))
+    assert not [f for f in findings if f.rule == "person_name"]
+
+
+def test_name_plus_case_file_is_not_a_bypass() -> None:
+    """★「<真名>案件」必须照样命中——只挡「<真名>案」等于留了一条改措辞就能绕的缝。"""
+    findings = leakscan.scan_diff(_diff("apkscan/x.js", f"// 见{_CASE_NAME}件的样本"))
+    assert [f for f in findings if f.rule == "person_name"], (
+        f"「姓名 + 案件」是自然写法，必须与「姓名 + 案」同等对待：{findings}"
+    )
+
+
+def test_case_file_phrasing_does_not_reintroduce_false_positives() -> None:
+    """★放开「案件」后走的是**全字**检查，技术文本里的高频巧合必须仍被挡住。
+
+    这几行都是本仓真实存在的句子：「当**成当前案件**证据」会被读成 成+当前+案件，
+    「不是任何**真实案件**的值」读成 何+真实+案件——姓名候选里带虚词字即弃。
+    """
+    findings = leakscan.scan_diff(
+        _diff(
+            "apkscan/x.py",
+            "# 不能静默当成当前案件直接证据",
+            "# 钱包内容校验不能替代它属于当前案件",
+            "# 只能把整机流量里的背景连接当案件线索",
+            "# 样本包名是案件值，不进公开仓库",
+            "# 合成常量，不是任何真实案件的值",
+        )
+    )
+    assert not [f for f in findings if f.rule == "person_name"], (
+        f"「案件」形态的全字检查没挡住技术文本巧合：{findings}"
+    )
+
+
+def test_names_ending_in_ambiguous_chars_are_still_caught() -> None:
+    """★末字黑名单收窄的回归锁：这些字能作人名末字，收进黑名单就是确定性漏报。
+
+    曾把 成 / 民 / 新 / 真 收进表里（为了挡"成案""新案"这类词），代价是名字以这几个字
+    收尾的人整类查不出来，而实测表明多收它们换不来任何误报收益。
+
+    下面的姓名全是**占位名**（判据有意不识别占位——真人也可能就叫这个），扫描器会照常
+    命中，故该行按本仓纪律用带理由的行内豁免声明，而不是拼接绕过。
+    """
+    for name_with_case in ("李成案", "王民案", "刘新案", "李真案", "甄子丹案"):  # leak-scan: allow 末字歧义回归夹具，五个占位姓名非案件当事人
+        findings = leakscan.scan_diff(_diff("apkscan/x.js", f"// 对应{name_with_case}"))
+        assert [f for f in findings if f.rule == "person_name"], (
+            f"{name_with_case} 未命中——末字黑名单收得太宽会造成确定性漏报"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 判据 6：联系方式（QQ / 微信 / Telegram）
+# ---------------------------------------------------------------------------
+
+
+def test_qq_and_wxid_are_rejected() -> None:
+    findings = leakscan.scan_diff(
+        _diff("apkscan/x.js", f"// {_QQ_TEXT}", f"// {_WXID_TEXT}")
+    )
+    contacts = [f for f in findings if f.rule == "contact"]
+    assert len(contacts) == 2, f"QQ 与 wxid_ 两种形态都必须命中：{findings}"
+    assert leakscan.blocking(findings), "contact 判据必须默认阻断"
+
+
+def test_contact_finding_does_not_echo_the_account() -> None:
+    """★同样脱敏：只报形态与长度，账号本身由人打开文件看。"""
+    findings = leakscan.scan_diff(_diff("apkscan/x.js", f"// {_QQ_TEXT}"))
+    contacts = [f for f in findings if f.rule == "contact"]
+    assert contacts
+    assert "123456" not in contacts[0].value, f"finding 值回显了账号：{contacts[0].value}"
+    assert contacts[0].value.startswith("qq=<")
+
+
+def test_wechat_sdk_identifiers_are_not_contacts() -> None:
+    """``weixinJSBridge`` 这类 SDK 标识符不是联系方式——规则表的 blacklist 必须生效。
+
+    这条误报是 ``rules/contacts.yaml`` 早就踩过并写下结论的，护栏复用那份判断而不是
+    另写一套，正是为了不把同一个坑再踩一遍。
+    """
+    findings = leakscan.scan_diff(
+        _diff("apkscan/x.js", "if (window.weixinJSBridge) { wechat_sdk.init(); }")
+    )
+    assert not [f for f in findings if f.rule == "contact"], f"SDK 标识符被误判：{findings}"
+
+
+def test_bare_digits_without_a_platform_cue_are_not_contacts() -> None:
+    """没有平台触发词的裸数字不判——手机号那类误报正是这么来的（见规则表注释）。"""
+    findings = leakscan.scan_diff(
+        _diff("apkscan/x.py", 'TIMEOUT_MS = 123456', 'BUILD = "20260822"')
+    )
+    assert not [f for f in findings if f.rule == "contact"], f"裸数字被误判：{findings}"
+
+
+def test_contact_patterns_really_come_from_the_rules_file() -> None:
+    """★判据形态取自 ``rules/contacts.yaml``——复用而非另立一份，否则两份必然漂移。
+
+    断言的是**正则源串逐条相等**，不是"四个 kind 都在"：后者硬编码一份同名清单也能过，
+    那样接线断了测试照样绿。
+    """
+    from apkscan.core.registry import load_rules
+
+    data = load_rules("contacts")
+    assert isinstance(data, dict)
+    expected: set[tuple[str, str]] = {
+        (str(entry["kind"]), str(pattern))
+        for entry in data.get("types", [])
+        if isinstance(entry, dict)
+        and entry.get("kind") in {"qq", "wechat", "telegram", "telegram_bot"}
+        for pattern in entry.get("patterns") or []
+    }
+    assert expected, "规则表里读不到联系方式形态，本测试失去意义"
+    actual = {(kind, pattern.pattern) for kind, pattern, _black in leakscan._CONTACT_PATTERNS}
+    assert expected <= actual, (
+        f"规则表里的形态没有全部接进护栏，缺：{expected - actual}"
+    )
+
+
+def test_contact_falls_back_when_the_rules_file_is_unreadable(monkeypatch) -> None:
+    """★规则表读不到时**不许**退化成空判据。
+
+    其余"读不到规则就退化"的地方（如占位 IP 名单）退化方向是多报，安全；contact 退化成
+    空集却是**漏报**——正是本判据要防的事。故必须有内置兜底。
+    """
+    import apkscan.core.registry as registry
+
+    monkeypatch.setattr(registry, "load_rules", lambda name: (_ for _ in ()).throw(OSError("boom")))
+    patterns = leakscan._contact_patterns()
+    assert patterns, "读不到规则表时护栏不得整个消失"
+    kinds = {kind for kind, _p, _b in patterns}
+    assert kinds == {"qq", "wechat"}, f"兜底集应刻意窄于规则表：{kinds}"
+
+
+def test_contact_fallback_is_merged_per_kind(monkeypatch) -> None:
+    """★规则表**仍可解析、但少了某一类**时也要补兜底。
+
+    这是个静默失效的形态：YAML 照常解析、其余判据照常工作，只有被删掉的那一类判据
+    悄悄消失。护栏不允许存在"看起来在跑、实际少了一条"的状态。
+    """
+    import apkscan.core.registry as registry
+
+    def _only_telegram(name: str) -> dict:
+        assert name == "contacts"
+        return {"types": [{"kind": "telegram", "patterns": [r"t\.me/(\w+)"], "blacklist": []}]}
+
+    monkeypatch.setattr(registry, "load_rules", _only_telegram)
+    kinds = {kind for kind, _p, _b in leakscan._contact_patterns()}
+    assert kinds == {"telegram", "qq", "wechat"}, (
+        f"规则表缺 qq/wechat 时必须按 kind 补回兜底，实际：{kinds}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 判据 7：二开 / 改包样本包名
+# ---------------------------------------------------------------------------
+
+
+def test_opaque_repack_package_is_rejected() -> None:
+    findings = leakscan.scan_diff(_diff("apkscan/x.py", f'PKG = "{_REPACK_PACKAGE}"'))
+    packages = [f for f in findings if f.rule == "package"]
+    assert packages, f"含随机化段的包名必须被判为泄漏：{findings}"
+    assert leakscan.blocking(findings), "package 判据必须默认阻断"
+    assert "zxcvbnmqwr" not in packages[0].value, f"finding 值回显了包名：{packages[0].value}"
+    assert packages[0].value == "im.<10 字符不透明段>.messenger"
+
+
+def test_open_source_and_framework_packages_pass() -> None:
+    findings = leakscan.scan_diff(
+        _diff(
+            "apkscan/x.py",
+            f'UPSTREAM = "{_STOCK_PACKAGE}"',
+            'FRAMEWORK = "com.android.providers.settings"',
+            'ANDROIDX = "androidx.core.app"',
+            'XMPP = "org.jivesoftware.smack"',
+            'CIPHER = "net.sqlcipher.database"',
+        )
+    )
+    assert not [f for f in findings if f.rule == "package"], f"公开库包名被误判：{findings}"
+
+
+def test_packages_registered_in_the_rules_files_pass() -> None:
+    """★白名单复用 ``rules/bank_packages.yaml`` + ``rules/sdks.yaml``。
+
+    这样往规则表新增一个银行包名时，扫的是工作树里的当前文件，白名单跟着那一行一起生效，
+    不会因为新包名撞上辅音串启发而把 PR 门禁卡红。
+
+    取的是**规则表里当前真正会触发启发的那些包名**，不是硬编码一个——硬编码的话，
+    白名单接线断了（``_KNOWN_PACKAGES`` 变空）本条也能靠改判据蒙混过去。
+    """
+    assert leakscan._KNOWN_PACKAGES, "规则表里的已知第三方包名一个都没读到"
+    would_fire = [
+        package for package in sorted(leakscan._KNOWN_PACKAGES)
+        if any(leakscan._is_opaque_segment(label) for label in package.split("."))
+        and package.split(".")[0] in leakscan.PACKAGE_HEADS
+    ]
+    assert would_fire, "规则表里没有会触发辅音串启发的包名，本测试失去意义"
+    findings = leakscan.scan_diff(
+        _diff("apkscan/x.py", *[f'PKG = "{package}"' for package in would_fire])
+    )
+    assert not [f for f in findings if f.rule == "package"], (
+        f"规则表登记的公开包名被误判（白名单接线断了？）：{findings}"
+    )
+
+
+def test_rules_whitelist_does_not_fold_case() -> None:
+    """★白名单不得折叠大小写——那是一条真实的绕过路径。
+
+    ``_PACKAGE_RE`` 只匹配小写包名。若白名单把 YAML 里的 ``IM.ZXCVBNMQWR.MESSENGER``
+    折成小写收进来，那一行 YAML 自己因为是大写**不会**被判据命中，却给源码里的小写同名
+    包名开了一张免检票——一次改动就能让任意包名免检。不折叠后，想加白名单就必须在规则表
+    里写小写包名，而那一行会被判据自己命中，形成闭环。
+    """
+    import apkscan.core.registry as registry
+
+    def _uppercased(name: str) -> dict:
+        if name == "bank_packages":
+            return {"packages": {"IM.ZXCVBNMQWR.MESSENGER": "伪造项"}}
+        return {"sdks": []}
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(registry, "load_rules", _uppercased)
+        known = leakscan._known_packages()
+    assert known == frozenset(), f"非小写规则项不得进白名单：{known}"
+
+
+def test_legitimate_mixed_case_package_names_are_harmless() -> None:
+    """★不折叠大小写的副作用检查：规则表里确有合法的大写包名，被排除必须无害。
+
+    ``com.bankcomm.Bankcomm`` 这类（Android 包名允许大写）不进白名单，但它们本来就不在
+    ``_PACKAGE_RE`` 的匹配面内（该正则只认小写），故排除它们不会产生任何 finding。
+    """
+    findings = leakscan.scan_diff(
+        _diff(
+            "apkscan/x.py",
+            'BANK = "com.bankcomm.Bankcomm"',
+            'PAY = "com.eg.android.AlipayGphone"',
+        )
+    )
+    assert not [f for f in findings if f.rule == "package"], (
+        f"合法的大写包名被排除后产生了误报：{findings}"
+    )
+
+
+def test_python_module_paths_are_not_packages() -> None:
+    """Python 模块路径与属性链同形；不排除则整片误报（全树实测 15 处）。"""
+    findings = leakscan.scan_diff(
+        _diff(
+            "apkscan/x.py",
+            f"# 见 {_MODULE_PATH} 的实现",
+            "spec = importlib.util.find_spec(name)",
+            'monkeypatch.setattr("apkscan.config.fetch.fetch_config_object", rec)',
+        )
+    )
+    assert not [f for f in findings if f.rule == "package"], f"模块路径被误判成包名：{findings}"
+
+
+def test_package_rule_ignores_domain_shaped_values() -> None:
+    """末段是 TLD ⇒ 那是域名，归 ``domain`` 判据管，两条判据不重复报。"""
+    findings = leakscan.scan_diff(_diff("apkscan/x.py", 'HOST = "im.zxcvbnmqwr.com"'))  # leak-scan: allow 验证 domain 判据接手用的合成未注册域名
+    assert not [f for f in findings if f.rule == "package"]
+    assert [f for f in findings if f.rule == "domain"], "域名形态应由 domain 判据接手"
+
+
+def test_opaque_segment_thresholds_are_the_measured_ones() -> None:
+    """★两个阈值是全树实测定出来的，不是估的——改动前请重跑那一轮实测。
+
+    门槛取 4 会命中 ``sqlcipher`` / ``tendcloud`` 这类真实库名（全树 107 处），
+    取 6 则漏掉 ``rightkinghts`` 这类目标形态（其最长辅音串正好 5）。
+    """
+    assert leakscan.OPAQUE_SEGMENT_MIN_LEN == 8
+    assert leakscan.OPAQUE_SEGMENT_MIN_CONSONANT_RUN == 5
+    assert leakscan._max_consonant_run("zxcvbnmqwr") == 10
+    assert leakscan._max_consonant_run("sqlcipher") == 4  # 真实库名，必须落在门槛外
+    assert leakscan._is_opaque_segment("zxcvbnmqwr")
+    assert not leakscan._is_opaque_segment("messenger")
+    assert not leakscan._is_opaque_segment("telegram")
+
+
+def test_opaque_segment_accepts_digits_but_not_pure_numbers() -> None:
+    """★随机化的包名段常混数字；只认纯字母等于留了"加个数字就绕过"的缝。"""
+    assert leakscan._is_opaque_segment("zxcvbnm123"), "带数字的随机段必须仍算不透明"
+    assert not leakscan._is_opaque_segment("20260822"), "纯数字是版本号/序号，不是名字"
+    findings = leakscan.scan_diff(_diff("apkscan/x.py", 'PKG = "im.zxcvbnm123.messenger"'))  # leak-scan: allow package 判据阳性夹具，合成随机段包名
+    assert [f for f in findings if f.rule == "package"], f"数字段绕过没堵住：{findings}"
+
+
+def test_two_segment_package_is_covered() -> None:
+    """★``im.<随机段>`` 这种两段包名也要认——只扫 ≥3 段等于留一条去掉一段就绕过的缝。"""
+    findings = leakscan.scan_diff(_diff("apkscan/x.py", 'PKG = "im.zxcvbnmqwr"'))  # leak-scan: allow package 判据阳性夹具，合成两段随机包名
+    assert [f for f in findings if f.rule == "package"], f"两段包名漏扫：{findings}"
+
+
+def test_y_counts_as_a_vowel_and_that_is_a_measured_tradeoff() -> None:
+    """★``y`` 算元音是**实测过的取舍**，不是疏忽——本条把这个决定连同理由一起锁住。
+
+    把 y 也算辅音能堵住"插 y 稀释辅音串"的绕过，代价实测是全树 38 处误报，其中 37 处是
+    本仓标准合成包名 ``com.example.synthetic``（y 算辅音时 ``synth`` 连成 5 连辅音）、
+    另一处是 AOSP 的 ``com.android.org.conscrypt``。护栏防的是**无意**写入，不防主动规避
+    （主动规避有行内豁免这条正门），故不拿 38 处误报换那一条路径。
+    """
+    assert "y" in leakscan._PSEUDO_VOWELS
+    # 这两个真实名字必须落在门槛外——它们正是 y 算辅音时会炸出来的那 38 处。
+    assert not leakscan._is_opaque_segment("synthetic")
+    assert not leakscan._is_opaque_segment("conscrypt")
+    findings = leakscan.scan_diff(
+        _diff("apkscan/x.py", 'PKG = "com.example.synthetic"', 'AOSP = "com.android.org.conscrypt"')
+    )
+    assert not [f for f in findings if f.rule == "package"], f"y 口径变了会炸出误报：{findings}"
+
+
+def test_transliterated_library_names_are_not_packages() -> None:
+    """非英语来源（拼音 / 音译）的库名不得误报——它们是新增 SDK 的常见形态。"""
+    findings = leakscan.scan_diff(
+        _diff(
+            "apkscan/x.py",
+            'A = "com.zhangshangyinhang.mobile"',
+            'B = "cn.gongxiangdanche.app"',
+            'C = "com.kuaishouspeed.player"',
+            'D = "org.freedesktop.gstreamer"',
+        )
+    )
+    assert not [f for f in findings if f.rule == "package"], f"音译库名被误判：{findings}"
+
+
+# ---------------------------------------------------------------------------
 # 豁免机制
 # ---------------------------------------------------------------------------
 
@@ -544,11 +927,20 @@ def test_blocking_rules_are_the_precise_ones() -> None:
 
     ``exemption`` 与 ``bulk_exemption`` 是护栏**自身**的完整性检查（前者查"豁免没写理由"，
     后者查"同一条理由被复制到大量新增行"），两条都恒阻断：允许静默削弱护栏的护栏等于没有。
+
+    ``person_name`` / ``contact`` / ``package`` 三条案件值判据同样默认阻断。它们落到默认档
+    的前提是"误报可控"，而这是**实测**过的（全树 528 个文件上前两者各 0 条、contact 只命中
+    ``tests/`` 里的合成夹具）——改判据参数前请重跑那一轮实测，别只改这条断言。
     """
-    assert leakscan.BLOCKING_RULES == frozenset({"ip", "secret", "exemption", "bulk_exemption"})
+    assert leakscan.BLOCKING_RULES == frozenset({
+        "ip", "secret", "person_name", "contact", "package", "exemption", "bulk_exemption",
+    })
     assert set(leakscan.RULES) == {
-        "ip", "secret", "domain", "context", "exemption", "bulk_exemption",
+        "ip", "secret", "domain", "context", "person_name", "contact", "package",
+        "exemption", "bulk_exemption",
     }
+    # domain / context 仍只提示：它们对全树噪音太大，靠 PR diff 关的 strict 档兜住。
+    assert not (leakscan.BLOCKING_RULES & {"domain", "context"})
 
 
 def test_reserved_doc_networks_are_documented() -> None:
@@ -601,14 +993,20 @@ def test_positive_fixtures_still_fire_without_any_exemption() -> None:
             f'ipv6 = "{_PUBLIC_IPV6}"',
             f'host = "{_OUTSIDE_DOMAIN}"',
             f'api_key = "{_SECRET_VALUE}"',
+            f'case = "{_CASE_NAME}"',
+            f'qq = "{_QQ_TEXT}"',
+            f'wx = "{_WXID_TEXT}"',
+            f'pkg = "{_REPACK_PACKAGE}"',
         )
     )
-    assert _rules(findings) == {"ip", "secret", "domain"}, (
-        f"阳性夹具在无豁免行上必须照常命中，实际：{findings}"
-    )
+    assert _rules(findings) == {
+        "ip", "secret", "domain", "person_name", "contact", "package",
+    }, f"阳性夹具在无豁免行上必须照常命中，实际：{findings}"
     # 两个 IP 夹具都要各自命中，不能只中一个。
     assert {f.value for f in findings if f.rule == "ip"} == {_PUBLIC_IPV4, _PUBLIC_IPV6}
-    assert leakscan.blocking(findings), "ip / secret 判据必须阻断"
+    # 两条 contact 夹具（QQ / wxid_）也各自命中。
+    assert len([f for f in findings if f.rule == "contact"]) == 2
+    assert leakscan.blocking(findings), "ip / secret / 案件值三条判据必须阻断"
 
 
 def test_no_split_join_evasion_templates_in_this_file() -> None:

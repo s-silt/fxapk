@@ -25,6 +25,12 @@
 4. **判据可命名、可解释**。每条 finding 都带 ``rule`` 与 ``detail``，说明为什么判它，
    而不是给一个不可复核的分数。
 
+5. **案件值判据的 finding 值一律脱敏**（``person_name`` / ``contact`` / ``package``）。
+   公开仓库的 CI 日志同样公开：护栏把真名、QQ 号原样打进 Actions 输出，等于把泄漏面
+   从源码挪到日志。这三条只报"哪一行、命中了什么**形态**"，具体字面由人打开文件看。
+   ``ip`` / ``domain`` 判据仍打原值——那两类需要"看一眼就知道是不是保留段"，
+   且它们判的本就是"不该写进来的公开地址"，性质与案件值不同。
+
 已知盲点（有意接受，写在此处以便复核）
 ------------------------------------
 
@@ -34,6 +40,24 @@
 - ``domain`` 判据用的是**常见 TLD 白名单**，不是完整 IANA 表；名单外的 TLD 查不出来。
   ``info`` 有意不在名单里——仓库里 ``logger.info`` / ``severity.info`` 数以百计，
   收进来会把这条判据淹掉。
+- ``person_name`` **只认「姓名 + 案(件)」这一种形态**（见 :data:`SURNAME_CHARS`）。
+  曾试过第二形态「行内有强语境词（案件 / 嫌疑人 / 事主…）时扫全部姓名候选」，
+  全树实测 7 条命中里 **6 条是误报**——"向量""成员""高敏""方向锁"里的
+  向 / 成 / 高 / 方 都是姓氏字。召回换来的噪音会把这条判据淹掉，故不收。
+  代价：不带「案」字的真名（"嫌疑人<真名>的手机"）查不出来，须靠人工复核兜底。
+- ``person_name`` 有一类**确定性漏报**：姓名末字与「案」连成常见词时（"<某>方案"
+  "<某>文案"），判据分不开「何方 + 案」与「解决 + 方案」——人看字面也分不开。
+  这几个字（见 :data:`_NON_NAME_TAIL_CHARS`）已收到最窄，但无法清零。
+- ``package`` 判据靠**段内最长辅音串**识别随机化的二开包名段，识别不了可读性好的
+  改名（``im.telegramx.messenger`` 这类）。它只压住"随机串"这一种最常见形态。
+  同理，``y`` 按元音计（见 :data:`_PSEUDO_VOWELS`），插 y 稀释辅音串能绕过——
+  那是**主动规避**，而主动规避本来就有行内豁免这条正门，护栏不为它牺牲 38 处误报。
+- ``contact`` 判据**不收邮箱**：邮箱形态在源码里满地都是（库作者邮箱、``noreply@``、
+  资源引用），而域名部分已由 ``domain`` 判据覆盖。数字型 QQ 邮箱是例外，
+  规则表的 QQ 形态本来就直接匹配它的本地部分。
+- ``package`` 判据在 ``.py`` 文件里只看字符串与注释 token（见 :data:`_TEXT_TOKEN_RULES`），
+  故 ``from im.<随机段>.x import y`` 这种写法看不见。这是理论盲点：Android 包名不是
+  可 import 的 Python 模块，真实文件里不会出现。
 """
 
 from __future__ import annotations
@@ -62,8 +86,12 @@ __all__ = [
     "CONTEXT_TERMS",
     "Finding",
     "OID_ARC_PREFIXES",
+    "OPAQUE_SEGMENT_MIN_CONSONANT_RUN",
+    "OPAQUE_SEGMENT_MIN_LEN",
+    "PACKAGE_HEADS",
     "RESERVED_DOC_NETWORKS",
     "RULES",
+    "SURNAME_CHARS",
     "blocking",
     "expand_paths",
     "format_findings",
@@ -82,13 +110,25 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 #: 全部判据名（稳定标识，进 finding.rule / CLI 输出 / 测试断言）。
-RULES: tuple[str, ...] = ("ip", "secret", "domain", "context", "exemption", "bulk_exemption")
+RULES: tuple[str, ...] = (
+    "ip", "secret", "domain", "context", "person_name", "contact", "package",
+    "exemption", "bulk_exemption",
+)
 
 #: 默认阻断的判据。``ip`` / ``secret`` 判据精确，误报可控，直接当门禁；
 #: ``domain`` / ``context`` 噪音大，默认只报告（``strict=True`` 时全部阻断）。
 #: ``exemption``（豁免没写理由）与 ``bulk_exemption``（同一条理由被复制到大量新增行）恒阻断：
 #: 二者都是护栏**自身**的完整性检查，不允许静默削弱。
-BLOCKING_RULES: frozenset[str] = frozenset({"ip", "secret", "exemption", "bulk_exemption"})
+#:
+#: ★``person_name`` / ``contact`` / ``package`` 三条**案件值**判据同样默认阻断。
+#:   它们判的是本仓最硬的红线（真名、QQ/微信/Telegram 账号、样本包名），一旦推上远端
+#:   改写历史也删不掉缓存副本；而落到默认档的前提——"误报可控"——是**实测**过的：
+#:   在 528 个已跟踪文件、22 万行上，``person_name`` 与 ``package`` 各 **0 条**命中，
+#:   ``contact`` 命中的 15 行全部是 ``tests/`` 里的合成夹具（已逐条加带理由的行内豁免）。
+#:   分档不是拍脑袋定的，改判据参数前请重跑那一轮全树实测。
+BLOCKING_RULES: frozenset[str] = frozenset({
+    "ip", "secret", "person_name", "contact", "package", "exemption", "bulk_exemption",
+})
 
 #: 一次改动里，同一条豁免理由最多可出现在多少个新增行上。
 #:
@@ -526,6 +566,346 @@ def _context_findings(line: str) -> list[tuple[str, str]]:
 
 
 # ---------------------------------------------------------------------------
+# 判据 5：中文人名（「姓名 + 案」形态）
+# ---------------------------------------------------------------------------
+#
+# 起因：一份 frida 探针的头部注释写着「对应<真名>案：<QQ 号>触发…」，本模块当时只报了
+# 同一行的两个公网 IP，真名与 QQ **一条都没报**，靠人工复核才拦下。真名是本仓最硬的红线，
+# 却是唯一一类此前完全没有机器判据的值。
+#
+# 判据形态刻意窄：**姓氏字 + 1~2 个汉字（+ 可选的日期数字）+「案」**。
+# 只认这一种是因为中文里 2~3 字的正常词组俯拾皆是，宽一点就会把判据淹掉
+# （第二形态的实测数字见模块文档「已知盲点」）。
+
+#: 常见汉族姓氏用字（覆盖率优先，不求全）。只收单姓常见字；复姓（欧阳 / 上官…）由其
+#: **第二**个字落在表内间接覆盖（「欧阳」的「阳」在表里），报的位置一样对，只是脱敏值里
+#: 的字数少一个。
+SURNAME_CHARS: str = (
+    "王李张刘陈杨黄赵吴周徐孙马朱胡郭何高林罗郑梁谢宋唐许韩冯邓曹彭曾肖田董袁潘于蒋蔡余杜叶程苏魏吕丁任沈姚卢姜崔"
+    "钟谭陆汪范金石廖贾夏韦付方白邹孟熊秦邱江尹薛闫段雷侯龙史陶黎贺顾毛郝龚邵万钱严覃武戴莫孔向汤常温康施文牛樊"
+    "葛邢安齐易乔伍庞颜倪庄聂章鲁岳翟殷詹申欧耿关兰焦俞左柳甘祝包宁尚符舒阮柯纪梅童凌毕单季裴霍涂成苗谷盛曲翁"
+    "甄滕巫司蒲车宫景屠连商冀国代管路项祁邬蔺阳苍闻辛鞠储靳边扈桑咸练蓬岑薄禄阙巩闵解应鄂"
+)
+
+#: **与「案」连成常见词**的字，即不可能出现在人名末位的那一类。
+#:
+#: ★这是本判据的主要降噪手段，也是它能落到默认阻断档的原因。姓氏字大量兼任虚词与动词，
+#:   而汉语没有词边界，于是「用**于串案**索引」会被读成 于(姓)+串+案、「当**成并案**依据」
+#:   被读成 成(姓)+并+案——全树实测的误报**全部**是这一形态。它们的共同点是「案」前那个字
+#:   （串 / 并 / 逐 / 每）绝不会出现在人名末位，据此一刀切干净。
+#:
+#: ★这张表**刻意只收与「案」高频成词的字**，不收"看着像虚词"的字。每多收一个字就多一份
+#:   确定性漏报：曾把 新 / 原 / 旧 / 民 / 行 / 成 / 真 收进来，代价是名字以这几个字收尾的
+#:   人（<姓> + 成、<姓> + 民、<姓> + 新…）整类查不出来，而它们与「案」成词的频率并不高。
+#:   收窄后全树误报仍是 0——多收的那几个字换不来任何误报收益，只换来漏报。
+#:
+#: 判的是**位置**（人名末字）而不是「这个词是不是常见词」：后者需要词典，前者只需一张
+#: 几十字的表，且新增误报时该往哪加是自明的。**这张表是活的**，扩它不需要重新论证判据——
+#: 但每次扩之前请先问：这个字能不能作人名末字？能，就别加。
+_NON_NAME_TAIL_CHARS: frozenset[str] = frozenset(
+    # 「案X」构成普通词的修饰字：方案 / 预案 / 档案 / 草案 / 议案 / 提案 / 教案 / 图案…
+    "方预档草议提教图公答悬疑文"
+    # 公文动词：立案 / 查案 / 结案 / 破案…（本仓一句「等于替办 + 案 + 人」曾被读成人名）
+    "办立结备报销翻破定查审涉专"
+    # 量词 / 指代 / 范围词：串案 / 并案 / 逐案 / 每案 / 本案 / 该案 / 个案…
+    "串并逐每本该此全个积同类起多关联"
+    # 与「案」成词的性质词：重案 / 要案 / 大案 / 血案 / 命案 / 惨案 / 刑案
+    "重要大血命惨刑"
+)
+
+#: 只在「姓名 + **案件**」这条更宽的形态上使用的**全字**表（末字表 + 虚词 / 形容词 / 指代）。
+#:
+#: ★为什么要分两张表：放开「案件」是必要的（「<真名>案件」是自然写法，只挡「<真名>案」
+#:   等于留了一条一改措辞就能绕过的缝），但「案件」在技术文本里是高频词，
+#:   「当**成当前案件**证据」「不是任何**真实案件**的值」这类句子会被读成 成+当前+案件、
+#:   何+真实+案件。对这条形态改用**全字**检查（姓名候选里任何一个字落表即弃）正好分开：
+#:   真名（张三 / 刘超泉）的每个字都不在表里，而上面那些巧合总有一个虚词字命中。
+#:
+#: 这张表只在「案件」形态生效，故收字可以放开——它挡掉的是"疑似"，不会造成
+#: 「<真名>案」主形态的漏报。
+_NON_NAME_ANY_CHARS: frozenset[str] = _NON_NAME_TAIL_CHARS | frozenset(
+    "当前是实真历新原旧民行成受验核批督指参复经承在其某各这那些样种"
+    "被将把从对与和了的地得也都还就只即另因所如若则由为于向到过来去"
+)
+
+#: 「案」后紧跟这些字时，「案X」自身是普通词（案例 / 案卷 / 案由 / 案子…），不判。
+#: **「件」有意不在表内**——见 :data:`_NON_NAME_ANY_CHARS`，那条形态改用更严的全字检查。
+_CASE_COMPOUND_TAILS = "例卷由情底宗头值语标子"
+
+_PERSON_NAME_RE = re.compile(
+    rf"(?P<name>[{SURNAME_CHARS}][一-鿿]{{1,2}})"
+    rf"\s*(?:\d{{2,8}})?\s*案(?![{_CASE_COMPOUND_TAILS}])"
+)
+
+
+def _person_name_findings(line: str) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for match in _PERSON_NAME_RE.finditer(line):
+        name = match.group("name")
+        # 「<候选>案件」：技术文本里「案件」是高频词，改用全字检查（见 _NON_NAME_ANY_CHARS）。
+        # 「<候选>案」：只查末字，好让 <姓> + 成 / 民 / 新 这类真名不被误挡。
+        if line[match.end():match.end() + 1] == "件":
+            if set(name) & _NON_NAME_ANY_CHARS:
+                continue
+        elif name[-1] in _NON_NAME_TAIL_CHARS:
+            continue  # 跨词边界的巧合（"用于串案" / "当成并案"），不是人名
+        out.append((
+            f"<中文姓名 {len(name)} 字>案",  # 脱敏：CI 日志在公开仓库里同样公开
+            "疑似「真名 + 案」语境；案件当事人姓名一律不进公开仓库，"
+            "技术描述请去掉案件指代（同一事实写成「某样本」即可）",
+        ))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 判据 6：联系方式（QQ / 微信 / Telegram）
+# ---------------------------------------------------------------------------
+
+
+def _contact_patterns() -> tuple[tuple[str, "re.Pattern[str]", tuple[str, ...]], ...]:
+    """读 ``rules/contacts.yaml`` 里已实证调优的 QQ / 微信 / Telegram 形态。
+
+    ★复用而不另写一份：那张表是**本工具从样本里提取联系方式**用的，已经踩过并写下了
+      "裸 weixin/wechat 触发词会撞 ``weixinJSBridge``""手机号 12/12 全是误报所以整类移除"
+      这些结论。护栏与提取器共用一个口径，语义上也正好成立——**分析器能从样本里认出来的
+      联系方式形态，就是不该写进公开仓库的形态**；另立一份必然漂移。
+
+    只取 qq / wechat / telegram / telegram_bot 四类。有意**不取 email**：邮箱形态在源码里
+    满地都是（作者邮箱、``noreply@``、资源引用），而域名部分已由 ``domain`` 判据覆盖。
+    """
+    kinds = {"qq", "wechat", "telegram", "telegram_bot"}
+    out: list[tuple[str, "re.Pattern[str]", tuple[str, ...]]] = []
+    try:
+        from apkscan.core.registry import load_rules
+
+        data = load_rules("contacts")
+        types = data.get("types") if isinstance(data, dict) else None
+        for entry in types or []:
+            if not isinstance(entry, dict) or entry.get("kind") not in kinds:
+                continue
+            kind = str(entry["kind"])
+            black = tuple(
+                str(b).lower() for b in (entry.get("blacklist") or []) if isinstance(b, str)
+            )
+            for pattern in entry.get("patterns") or []:
+                if isinstance(pattern, str):
+                    out.append((kind, re.compile(pattern, re.IGNORECASE), black))
+    except Exception:  # noqa: BLE001 — 规则表坏了也不许让护栏静默消失，见下方兜底
+        logger.exception("[leakscan] 读 rules/contacts.yaml 失败，contact 判据退回内置兜底集")
+    # ★兜底**按 kind 合并**，不是"整表读不到才用"。规则表仍可解析、只是某一类被删掉时，
+    #   那一类判据会静默消失——护栏不允许有"看起来正常运行、实际少了一条"的状态。
+    covered = {kind for kind, _pattern, _black in out}
+    for kind, pattern, black in _CONTACT_FALLBACK:
+        if kind not in covered:
+            logger.warning(
+                "[leakscan] rules/contacts.yaml 没有可用的 %s 形态，该类退回内置兜底", kind
+            )
+            out.append((kind, pattern, black))
+    return tuple(out)
+
+
+#: 读不到规则表时的兜底形态。**刻意窄于规则表**，只保证护栏不整个消失——
+#: 这两条（QQ 号、微信内部 id）是形态最硬、误报最低的两种。
+#:
+#: ★为什么必须有兜底：其余"读不到规则就退化为空"的地方（如 :func:`_rule_noise_ips`）
+#:   退化方向是**多报**，安全；而 contact 判据退化为空集是**漏报**，那正是本判据要防的事。
+_CONTACT_FALLBACK: tuple[tuple[str, "re.Pattern[str]", tuple[str, ...]], ...] = (
+    ("qq", re.compile(r"(?i)(?:QQ|扣扣|企鹅)[号码群:：＠@\s]{0,3}(\d{5,11})"), ()),
+    ("wechat", re.compile(r"(?i)(wxid_[a-zA-Z0-9]{6,20})"), ()),
+)
+
+_CONTACT_PATTERNS = _contact_patterns()
+
+#: 命中值 → 人话（进 finding.detail）。
+_CONTACT_LABELS: dict[str, str] = {
+    "qq": "QQ 号",
+    "wechat": "微信号",
+    "telegram": "Telegram 账号",
+    "telegram_bot": "Telegram bot token",
+}
+
+
+def _contact_findings(line: str) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for kind, pattern, blacklist in _CONTACT_PATTERNS:
+        for match in pattern.finditer(line):
+            whole = match.group(0)
+            low = whole.lower()
+            if any(bad in low for bad in blacklist):
+                continue
+            # 脱敏：只报形态与长度。真值原样进 CI 日志＝把泄漏面从源码挪到公开的 Actions 输出。
+            value = f"{kind}=<{len(whole)} 字符>"
+            if value in seen:
+                continue  # 同一行被多条 pattern 命中（如「微信：x」与 wxid_ 各一条）只报一次
+            seen.add(value)
+            label = _CONTACT_LABELS.get(kind, kind)
+            out.append((
+                value,
+                f"疑似{label}字面；账号是可直接落地的案件值，一律不进公开仓库。"
+                "测试夹具请用明显合成的值并加带理由的行内豁免",
+            ))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 判据 7：二开 / 改包样本包名
+# ---------------------------------------------------------------------------
+#
+# 真实二开 IM（Telegram fork 之类）的包名里总有一段是**随机化的无意义串**：
+# ``im.<随机段>.messenger``。这类包名是样本身份，属于侦查积累，不进公开仓库。
+# 而正常代码里的第三方库包名（``org.telegram.messenger`` / ``com.android.*`` /
+# ``net.sqlcipher.*``）是公开事实，写进规则表是功能需要。判据要分开这两者。
+
+#: 反向域名的合法首段。以 :data:`_REVERSE_DNS_HEADS`（``domain`` 判据用它**排除**包名）
+#: 为基底反向使用——同一份事实，两条判据方向相反：那边"首段像 TLD ⇒ 不是域名"，
+#: 这边"首段像 TLD ⇒ 是包名"。补上 IM 二开惯用的 ``im`` 与几个新通用顶级段。
+#:
+#: ★首段限定是这条判据的主要降噪手段：没有它，``apkscan.core.leakscan`` /
+#:   ``importlib.util.find_spec`` 这类**Python 模块路径**会整片命中（全树实测 15 处）。
+PACKAGE_HEADS: frozenset[str] = _REVERSE_DNS_HEADS | frozenset({
+    "im", "app", "top", "xyz", "vip", "pro", "biz", "mobi", "dev", "co", "us", "in",
+    "ru", "fr", "jp", "kr", "site", "club", "shop", "one", "ai",
+})
+
+#: "不透明段"的判定阈值：段长 ≥ 8 **且** 段内最长连续辅音串 ≥ 5。
+#:
+#: 两个数是**实测**定出来的，不是估的。全树 528 个文件上，辅音串门槛取 4 会命中 107 处
+#: （``sqlcipher`` / ``tendcloud`` / ``chinamworld`` 这类真实库名、银行包名全撞上），
+#: 取 6 则漏掉目标形态之一（``rightkinghts`` 的最长辅音串正好是 5）。取 5 两头都成立：
+#: 目标形态全中，全树误报 0。调这两个数前请重跑那一轮全树实测。
+OPAQUE_SEGMENT_MIN_LEN = 8
+OPAQUE_SEGMENT_MIN_CONSONANT_RUN = 5
+
+#: 判辅音时 ``y`` **算元音**。
+#:
+#: ★这是个实测过的取舍，不是疏忽。把 y 也算辅音（或"两种口径取大"）确实能堵住"插几个 y
+#:   稀释辅音串"的绕过，但代价实测是全树 **38 处**误报——其中 37 处是本仓的标准合成包名
+#:   ``com.example.synthetic``（``synth`` 五个字母在 y 算辅音时连成一串），还有 AOSP 的
+#:   ``com.android.org.conscrypt``。护栏防的是**无意**把案件值写进来，不防主动规避
+#:   （真要规避，行内豁免本来就能关掉一切判据）。用 38 处误报换一条主动绕过路径不划算。
+_PSEUDO_VOWELS: frozenset[str] = frozenset("aeiouy")
+
+#: ★段数下限是 **2**（``im.<随机段>`` 这种两段包名也要认）。放宽到 2 段实测不引入任何
+#:   误报——首段限定与"不透明段"两道门已经把属性链挡在外面。
+_PACKAGE_RE = re.compile(
+    r"(?<![A-Za-z0-9_.$-])((?:[a-z][a-z0-9_]*)(?:\.[a-z][a-z0-9_]*){1,})(?![A-Za-z0-9_$-])"
+)
+
+
+def _max_consonant_run(segment: str) -> int:
+    """段内最长连续辅音串长度。数字与其他非字母字符断开计数，不计入串长。"""
+    best = current = 0
+    for char in segment:
+        if char.isalpha() and char not in _PSEUDO_VOWELS:
+            current += 1
+            best = max(best, current)
+        else:
+            current = 0
+    return best
+
+
+def _is_opaque_segment(segment: str) -> bool:
+    """该段是否像随机化的无意义串（而不是英文词或缩写）。
+
+    ★允许段内带数字（``zxcvbnm123`` 这类）：随机化的包名段常混数字，只认纯字母等于留了
+      一条"加个数字就绕过"的缝。纯数字段不算——那是版本号 / 序号，不是名字。
+    """
+    return (
+        len(segment) >= OPAQUE_SEGMENT_MIN_LEN
+        and segment.isalnum()
+        and not segment.isdigit()
+        and _max_consonant_run(segment) >= OPAQUE_SEGMENT_MIN_CONSONANT_RUN
+    )
+
+
+def _known_packages() -> frozenset[str]:
+    """规则表里登记的公开第三方包名（银行/支付 app + SDK 的 DEX 类前缀）。
+
+    ★同样是**复用既有判断**：这两张表记的就是"本工具认得的公开第三方包名"，与本判据要
+      放行的集合语义完全一致。复用还顺带解决了维护问题——往 ``bank_packages.yaml`` 新增
+      一个银行包名时，扫的是工作树里的当前文件，白名单自动跟着那一行一起生效，不会因为
+      新增的包名撞上辅音串启发而把 PR 门禁卡红。
+
+    ★**规则表项一律按原样取，绝不 ``lower()``**。这条不是风格问题，是堵一条真实的绕过：
+      :data:`_PACKAGE_RE` 只匹配小写包名，若白名单把 ``IM.ZXCVBNMQWR.MESSENGER`` 折成小写
+      收进来，那行 YAML 自己因为是大写**不会**被本判据命中，却把源码里的小写同名包名放行了
+      ——一次改动就能给任意包名开一张免检票。不折叠大小写后，想加白名单就必须在规则表里写
+      小写包名，而那一行会被本判据自己命中，形成闭环（要么它确实是公开库、判据不该报它，
+      要么审查者会在 diff 里看到一条 package finding）。
+
+    读不到就退化为空集：方向是**多报**（正常库名可能被误判），安全。
+    """
+    known: set[str] = set()
+    skipped: list[str] = []
+
+    def _take(raw: object) -> None:
+        if not isinstance(raw, str):
+            return
+        value = raw.strip().rstrip(".")
+        if not value:
+            return
+        if value != value.lower():
+            skipped.append(value)  # 见上：不折叠大小写，非小写项一律不进白名单
+            return
+        known.add(value)
+
+    try:
+        from apkscan.core.registry import load_rules
+
+        banks = load_rules("bank_packages")
+        packages = banks.get("packages") if isinstance(banks, dict) else None
+        if isinstance(packages, dict):
+            for package in packages:
+                _take(package)
+        sdks = load_rules("sdks")
+        rules = sdks.get("sdks") if isinstance(sdks, dict) else None
+        for rule in rules or []:
+            if not isinstance(rule, dict):
+                continue
+            for prefix in rule.get("dex_prefixes") or []:
+                _take(prefix)
+    except Exception:  # noqa: BLE001 — 读不到规则表只影响误报多少，不影响正确性
+        logger.warning("[leakscan] 读不到 bank_packages / sdks 规则表，已知第三方包名将被误报")
+    if skipped:
+        # 只记 debug：规则表里确有几个合法的大写包名（``com.bankcomm.Bankcomm`` 这类，
+        # Android 包名允许大写），它们**本来就不在** _PACKAGE_RE 的匹配面内（该正则只认
+        # 小写），跳过不会造成任何误报。每次 import 打 warning 只会把日志吵掉。
+        logger.debug(
+            "[leakscan] 规则表里 %d 个非小写包名项未进白名单（判据只匹配小写包名，无影响）：%s",
+            len(skipped), ", ".join(sorted(skipped)[:5]),
+        )
+    return frozenset(known)
+
+
+_KNOWN_PACKAGES = _known_packages()
+
+
+def _package_findings(line: str) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for match in _PACKAGE_RE.finditer(line):
+        package = match.group(1)
+        labels = package.split(".")
+        if labels[0] not in PACKAGE_HEADS:
+            continue  # 不是反向域名形态（Python 模块路径 / 属性链）
+        if labels[-1] in _COMMON_TLDS or labels[-1] in _RESERVED_TLDS:
+            continue  # 末段是 TLD ⇒ 这是域名，归 domain 判据管
+        if any(package == known or package.startswith(known + ".") for known in _KNOWN_PACKAGES):
+            continue  # 规则表登记过的公开第三方包名，写进代码是功能需要
+        opaque = [label for label in labels if _is_opaque_segment(label)]
+        if not opaque:
+            continue
+        # 脱敏：只报被判为随机串的那一段有多长，不回显包名本身（它是样本身份）。
+        masked = ".".join(f"<{len(x)} 字符不透明段>" if x in opaque else x for x in labels)
+        out.append((
+            masked,
+            "疑似二开 / 改包样本的包名（含随机化的无意义段）；样本包名是案件值，"
+            "不进公开仓库。真是公开第三方库请登记进 rules/ 对应规则表",
+        ))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # 扫描入口
 # ---------------------------------------------------------------------------
 
@@ -535,7 +915,15 @@ _DETECTORS: tuple[tuple[str, "object"], ...] = (
     ("secret", _secret_findings),
     ("domain", _domain_findings),
     ("context", _context_findings),
+    ("person_name", _person_name_findings),
+    ("contact", _contact_findings),
+    ("package", _package_findings),
 )
+
+#: 走 Python 文字 token 掩码的判据：只看字符串与注释，不看可执行代码。
+#: ``package`` 与 ``domain`` 同列——``importlib.util.find_spec`` 这类属性链与包名同形，
+#: 不掩码就会整片误报（首段限定挡掉了大部分，掩码把剩下的清零）。
+_TEXT_TOKEN_RULES: frozenset[str] = frozenset({"domain", "package"})
 
 
 def _python_domain_text_by_line(text: str) -> "dict[int, str] | None":
@@ -613,7 +1001,8 @@ def _scan_line(
         return []
     findings: list[Finding] = []
     for rule, detector in _DETECTORS:
-        detector_text = domain_text if rule == "domain" and domain_text is not None else line
+        use_masked = rule in _TEXT_TOKEN_RULES and domain_text is not None
+        detector_text = domain_text if use_masked else line
         for value, detail in detector(detector_text):  # type: ignore[operator]
             findings.append(
                 Finding(rule=rule, path=path, line_no=line_no, value=value, detail=detail)
