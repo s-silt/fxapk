@@ -753,6 +753,16 @@ def capture(
         "--mode",
         help="抓包模式：both（默认，mitm 明文 + 带外 pcap）/ floor-only（不设代理、只带外抓，加固 IM/反 frida 更稳）/ mitm-only（不起 floor）。",
     ),
+    allow_behavior_modification: bool = typer.Option(
+        False,
+        "--allow-behavior-modification",
+        help="第二道授权门：显式授权注入行为修改 shim（反检测/root 隐藏）。与 --authorized-active 正交、不合并、不被继承。",
+    ),
+    antidetect: str = typer.Option(
+        "off",
+        "--antidetect",
+        help="行为修改 shim 档位：off（默认，不改样本行为）| java（注入 shim）| native（预留，主仓暂无内置 native shim，取该值将报错）。",
+    ),
 ) -> None:
     """真机抓包：对运行中的目标应用做流量抓取，提取动态端点。
 
@@ -772,8 +782,21 @@ def capture(
         if mode not in ("both", "floor-only", "mitm-only", "no-proxy"):
             typer.echo(f"--mode 取值非法：{mode!r}（可选 both / floor-only / mitm-only）")
             raise typer.Exit(code=2)
+        if antidetect not in ("off", "java"):
+            typer.echo(
+                f"--antidetect 取值非法：{antidetect!r}（可选 off / java；native 主仓暂无内置 native shim）"
+            )
+            raise typer.Exit(code=2)
         out = _resolve_out_cwd(out)  # 未给 / 相对 → 绝对化到 cwd 下的 out/（口径确定）
-        result = _capture.run(package, out=out, duration=duration, serial=serial, mode=mode)
+        result = _capture.run(
+            package,
+            out=out,
+            duration=duration,
+            serial=serial,
+            mode=mode,
+            allow_behavior_modification=allow_behavior_modification,
+            antidetect=antidetect,
+        )
         _print_dynamic_result("抓包", result)
         # 业务失败返回非零退出码（在 adb 清理 finally 之前抛，仍会穿过 finally 收 server）。
         _raise_exit_for_status(result.get("status") if isinstance(result, dict) else None)
