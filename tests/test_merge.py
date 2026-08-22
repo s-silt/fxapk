@@ -519,6 +519,8 @@ def test_merge_and_rerender_copies_capture_quality(tmp_path) -> None:
         "bidirectional_mitm_count": 0,
         "bidirectional_mitm_attributed_count": 0,
         "infrastructure_excluded_count": 0,
+        # P0-a：缺省干净轮标注（quality 透传 variant，供闭环门读）。
+        "runtime_variant": "original-runtime",
         "dynamic_status": "complete",
         "reason": "target-attributed endpoint observed with bidirectional payload on that same endpoint",
         "floor_parse_status": "ok",
@@ -540,6 +542,159 @@ def test_merge_and_rerender_copies_capture_quality(tmp_path) -> None:
 
     assert report.meta["capture_quality"] == quality
     assert report.meta["capture_signals"]["quality"] == quality
+
+
+def test_merge_and_rerender_copies_runtime_variant(tmp_path) -> None:
+    """★P0-a：runtime_report.json 顶层 runtime_variant 必须拷进 report.meta（报告级 original/modified 标注）。"""
+    runtime_report = tmp_path / "runtime_report.json"
+    _write_runtime_report(runtime_report, [], runtime_variant="modified-runtime")
+    report = _make_report()
+
+    merge.merge_and_rerender(
+        report, [], str(tmp_path), formats=["json"], runtime_report_path=str(runtime_report)
+    )
+
+    assert report.meta["runtime_variant"] == "modified-runtime"
+
+
+def test_merge_and_rerender_omits_runtime_variant_when_absent(tmp_path) -> None:
+    """★fail-safe：runtime_report 无 runtime_variant（旧报告/向后兼容）→ 不写 meta、不抛。"""
+    runtime_report = tmp_path / "runtime_report.json"
+    _write_runtime_report(runtime_report, [])
+    report = _make_report()
+
+    merge.merge_and_rerender(
+        report, [], str(tmp_path), formats=["json"], runtime_report_path=str(runtime_report)
+    )
+
+    assert "runtime_variant" not in report.meta
+
+
+def test_endpoint_variant_survives_runtime_merge(tmp_path) -> None:
+    """★接线锁：端点级 variant 必须穿过 load_runtime_endpoints → merge_runtime_endpoints 存活。
+
+    closure 的 modified 封顶守卫读的正是 enrichment["runtime"]["variant"]——若 merge 链把它丢了，
+    那道守卫就是空接线（写进 json 没人读）。本测试钉死这条链。
+    """
+    runtime_report = tmp_path / "runtime_report.json"
+    _write_runtime_report(
+        runtime_report,
+        [
+            {
+                "value": "100.64.0.10",
+                "kind": "ip",
+                "enrichment": {"runtime": {"target_attributed": True, "variant": "modified-runtime"}},
+                "evidences": [
+                    {"source": "runtime-modified", "location": "flows.mitm", "snippet": "100.64.0.10"}
+                ],
+            }
+        ],
+    )
+    endpoints = merge.load_runtime_endpoints(str(runtime_report))
+    assert endpoints, "端点应被还原"
+    assert endpoints[0].enrichment["runtime"]["variant"] == "modified-runtime"
+
+    report = _make_report()
+    merge.merge_runtime_endpoints(report, endpoints)
+    merged = [ep for ep in report.endpoints if ep.value == "100.64.0.10"]
+    assert merged, "端点应并入报告"
+    assert merged[0].enrichment["runtime"]["variant"] == "modified-runtime"
+
+
+def test_modified_runtime_end_to_end_capture_merge_closure(tmp_path) -> None:
+    """★★端到端接线锁（codex 复审要求）：capture 真产出 → merge → closure 全链，modified 轮不得结案。
+
+    此前的 variant 测试要么直接手写 JSON、要么只走单段，删掉 P0-a 生产代码仍可能绿。本测试从
+    **capture.run 实际写出的 runtime_report.json** 出发，覆盖 floor 侧 runtime-pcap 的降钉（缺口②），
+    并一路验到 closure 的 complete 判定与 quality 门（缺口③）。附 original 对照。
+    """
+    from apkscan.core.closure import ClosureConfig, close_report, evaluate_capture_quality
+    from apkscan.core.models import OBSERVED_CONTACT_SOURCES
+    from apkscan.dynamic import capture as _capture
+
+    def _write_and_merge(*, allow: bool, antidetect: str) -> tuple[dict, Report]:
+        out_dir = tmp_path / ("mod" if allow else "orig")
+        out_dir.mkdir()
+        # floor 侧来源（runtime-pcap）——缺口②：验证它同样被降钉。
+        ep = Endpoint(
+            value="198.51.100.10",
+            kind="ip",
+            evidences=[
+                Evidence(
+                    source="runtime-pcap", location="floor.pcap", snippet="198.51.100.10",
+                    scope=EvidenceScope.CASE_EVIDENCE,
+                )
+            ],
+            enrichment={"runtime": {"target_attributed": True, "has_payload": True}},
+        )
+        variant = "modified-runtime" if allow else "original-runtime"
+        if variant == "modified-runtime":
+            for evidence in ep.evidences:
+                if evidence.source in ("runtime", "runtime-pcap"):
+                    evidence.source = _capture.RUNTIME_MODIFIED_SOURCE
+            ep.enrichment["runtime"]["variant"] = variant
+        quality = evaluate_capture_quality(
+            {
+                "runtime_variant": variant, "channel_ready": True, "pcap_valid": True,
+                "packet_count": 12, "business_candidate_count": 1,
+                "target_attributed_count": 1, "bidirectional_target_count": 1,
+            }
+        )
+        rr = out_dir / "runtime_report.json"
+        # 用生产侧序列化器（capture 写 runtime_report 用的就是它），保证与真实产物同形。
+        from apkscan.report import json as report_json
+
+        _write_runtime_report(
+            rr,
+            [report_json._to_jsonable(ep)],
+            runtime_variant=variant,
+            capture_signals={"quality": quality, "runtime_variant": variant},
+        )
+        # closure 的候选目标来自 leads（advice="建议调证" 的 DOMAIN/IP），不是 endpoints——必须造。
+        lead = Lead(
+            category=LeadCategory.IP,
+            value="198.51.100.10",
+            where_to_request="IP 归属运营商",
+            confidence=Confidence.HIGH,
+            advice="建议调证",
+            source_refs=[
+                Evidence(
+                    source=ep.evidences[0].source, location="floor.pcap", snippet="198.51.100.10",
+                    scope=EvidenceScope.CASE_EVIDENCE,
+                )
+            ],
+        )
+        report = _make_report(leads=[lead])
+        merge.merge_and_rerender(
+            report, merge.load_runtime_endpoints(str(rr)), str(out_dir),
+            formats=["json"], runtime_report_path=str(rr),
+        )
+        closure = close_report(report, ClosureConfig(online=False, require_dynamic=True), enrichers=[])
+        return closure, report
+
+    mod_closure, mod_report = _write_and_merge(allow=True, antidetect="java")
+    # ① 报告级 variant 落进 meta；② quality 门被封顶；③ 端点 source 已降钉、不再是 observed-contact。
+    assert mod_report.meta["runtime_variant"] == "modified-runtime"
+    assert mod_report.meta["capture_quality"]["dynamic_status"] != "complete"
+    mod_eps = [ep for ep in mod_report.endpoints if ep.value == "198.51.100.10"]
+    assert mod_eps and mod_eps[0].evidences[0].source == "runtime-modified"
+    # 令牌语义：仍算"运行时出现"（startswith runtime），但已出 observed-contact allowlist → C2 徽标关。
+    assert mod_eps[0].evidences[0].source.startswith("runtime")
+    assert mod_eps[0].evidences[0].source not in OBSERVED_CONTACT_SOURCES
+    assert mod_closure["status"] != "complete"
+    # ★证伪力关键：断言收紧到**该端点自身的 runtime 层**——否则 quality 门单独封顶也能让总 status
+    #   非 complete，_runtime_layer 守卫失效时测试仍会绿（假绿）。
+    mod_target = next(t for t in mod_closure["targets"] if t["value"] == "198.51.100.10")
+    assert mod_target["layers"]["runtime_evidence"]["status"] != "complete"
+    assert "modified-runtime" in str(mod_target["layers"]["runtime_evidence"].get("reason", ""))
+
+    # original 对照：同构造的干净轮仍应正常结案（证明降档只由 variant 触发）。
+    orig_closure, orig_report = _write_and_merge(allow=False, antidetect="off")
+    orig_eps = [ep for ep in orig_report.endpoints if ep.value == "198.51.100.10"]
+    assert orig_eps and orig_eps[0].evidences[0].source == "runtime-pcap"
+    assert orig_eps[0].evidences[0].source in OBSERVED_CONTACT_SOURCES  # 干净轮保留 observed-contact
+    assert orig_report.meta["capture_quality"]["dynamic_status"] == "complete"
+    assert orig_closure["status"] != mod_closure["status"] or mod_closure["status"] != "complete"
 
 
 def test_merge_and_rerender_refreshes_visibility(tmp_path) -> None:

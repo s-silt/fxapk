@@ -321,6 +321,14 @@ def derive_capture_quality(inventory: Mapping[str, object]) -> dict[str, object]
       都归到目标了」。pcap 回灌恒 False 时没暴露，一旦回灌能真做归因就是重大误报：
       某真实样本实测 33 个接入节点仅 1 个属目标（其余是设备自带推送等背景噪音），
       那个写法会报成 33，等于把无关第三方的接入节点写成"目标 app 已确认通信"。
+
+    ★P0-a 关联约束（现在安全、将来危险，动这里前必读）：本路径**不产出** ``runtime_variant``，
+      因而绕过 ``evaluate_capture_quality`` 的 modified-runtime 封顶守卫。当前无害，但**理由不是
+      "target_attributed_count 恒 0"**（有 UID 归因的 pcap 回灌下它可以 >0）——真正的封顶理由是
+      本路径**从不补** ``bidirectional_target_count`` / ``bidirectional_floor_count``，而质量门要求
+      同一端点上既归因又双向才判 complete，故本路径闭环上限恒为 partial；且回灌轮本就不注入
+      行为修改 shim。**若将来给本路径加上双向推断能力，必须同时补 ``runtime_variant``**，
+      否则诱导轮的回灌数据会从这条兜底路绕过封顶、拿到"已掌握实连去向"。
     """
     if not inventory:
         return {}

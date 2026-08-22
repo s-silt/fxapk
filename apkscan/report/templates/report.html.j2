@@ -813,6 +813,10 @@
     {% endif %}
 
     {#- 数据完整性 / 采集说明：把降级与离线显式告知，避免"未采集"被误读为"采集为空" -#}
+    {#- P0-a：行为修改 shim 注入轮 → 整轮运行时证据是被我方诱导出来的，必须在报告顶部明示。 -#}
+    {% if meta.get("runtime_variant") == "modified-runtime" %}
+    <div class="harden-warn">⚠ 本次运行时证据采自<b>行为修改轮</b>（modified-runtime）：本轮注入了含反检测 / root 隐藏 / 设备特征伪造的 shim，样本读到的环境值<b>可能</b>已被改写（hook 是否真的就绪见 capture_signals.hook_ready_status）。该轮端点<b>不作独立结案依据</b>（已封顶「部分」、不授「实连已观测」徽标），须由干净轮（original-runtime）、静态调用路径、设备落地物或服务端调证独立印证；被 hook 的 API 上报值本身亦不可作物证。</div>
+    {% endif %}
     {% if meta.get("dex_parse_failed") %}
     <div class="harden-warn">⚠ DEX 未能解析（加固或无 dex）：静态端点 / SDK / 支付线索严重不完整，强烈建议脱壳或真机动态补全后重新分析。</div>
     {% endif %}
