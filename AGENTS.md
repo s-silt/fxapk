@@ -106,6 +106,16 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 
 **动态：PCAP-first 保底，明文优先被动解密，探针是可选旁路（非必做）**：动态已转向**零注入 PCAP 底座**——`fxapk capture/auto` 起 floor PCAP，拿到接入节点 / SNI / QUIC Initial / socket 归因等被动证据即算**有观测产出**（不再以"抓到明文"为唯一成功标准）。但 `capture status=done` 只表示采集流程完成，不等于案件动态证据闭环：`case close` 只有观测到公网业务候选且能通过 socket/UID 归到目标 App 才把动态层判为 `complete`；有业务候选但归因不唯一为 `partial`；仅通道就绪或零业务流量为 `failed`。已知反诈拦截页不计业务候选。要明文时**优先走被动链路**：TLS Key Log + tshark 解密、socket 归因把流量落到进程 / UID / PID。Frida / native hook 降为**可选旁路**，仅当被动手段确实不够、且在 `--mode authorized-active` 授权下按需用。
 
+> **探针库**：首批 8 个探针（`coldstart-config` / `objstore-config` / `native-ssl` / `tls-keylog` /
+> `sms-forward-outbound` / `mqtt-xmpp-im` / `telegram-mtproto` / `push-c2-inbound`）已脱敏后随 wheel
+> 内置于 `apkscan/dynamic/frida_probes/`，手动 `frida -U -f <包名> -l <探针>.js -q -o probe.log` 注入；
+> 其余探针仍需自备。探针散落的 `[LEAD]` 行用 `fxapk probe-leads probe.log --into out/<样本>.json`
+> 聚成调证台账并回灌进报告。
+> ★**探针线索的 confidence 不再一律 HIGH**：它是 advice 的纯投影——单源探针 待核→LOW、建议调证→MEDIUM，
+> **永不 HIGH**；只有 merge 阶段与静态/pcap 二次印证（同 category+value、值有干净网络锚点、原 advice 为
+> 建议调证）才升 HIGH，仅升不降。即**探针来源的 HIGH 意味着"两源印证过"**，MEDIUM 只代表目前单源、不代表价值低。
+> confidence 只影响 closure 排位与展示排序，不作硬门（硬门读 advice）。
+
 **深度归因（拿到后端域名/IP/标识符后做服务器归因 + 调证报告）**：证据分级 + 对抗式核验 + **绝不编造**
 （Shodan 等可实查的源据实查；无 key 的源只给"应向谁查什么"的语句，不臆造结果）+ 辖区驱动的调证优先级
 + 固定结构输出研判报告。**这些原则本身就是全部要求**——不需要额外手册；若用户另给了打法文档就照它，
@@ -121,6 +131,13 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 
 1. **静态**：`analyze` → `report.json` + `digest`，确有产出。
 2. **动态**（有设备）：floor PCAP 保底；闭环完成要求 ≥1 个公网业务候选且明确归到目标 App。未唯一归因只能 `partial`，只有通道或零业务候选为 `failed`。要明文优先走**被动**解密（TLS keylog + tshark）。
+   ★`auto` / `capture` 现走**两遍**：**第一遍恒跑原版 APK**（绝不重打包、不注入）取 `original` 基线；
+   仅当基线不足才进**旁路轮**（去壳重打包、可选行为修改 shim），其证据标 `modified-runtime`
+   （`runtime_variant` 字段的两个取值就是 `original-runtime` / `modified-runtime`，带后缀）。
+   **旁路轮的观测不得单独结案**——诱导出来的行为不能当作样本自发行为。行为修改 shim 默认关，
+   需 `--allow-behavior-modification` + `--antidetect java` **双授权门**（与 `--mode authorized-active` 正交、不继承）。
+   ★`--antidetect` 目前**只接受 `off` / `java`**；`native` 是预留档、主仓暂无内置 native shim，**传入即报错**。
+   第二遍只产 `runtime_report.json` + 主报告挂指针，不出完整渲染态对照报告。
 3. **富化 / 判型**：每个「建议调证」端点判辖区 + 判前端/落地；富化源命中太少 = 源没跑全，别据残缺证据下结论。
 4. **降噪**：剔反诈拦截页 / 大厂共享 / CDN 边缘，别当落地机。
 5. **串案**：独特字值（appkey / 证书 / CNAME 模板）跨案自查。
@@ -192,8 +209,19 @@ fxapk selfcheck                  # 能力自检（稳定 JSON）：核心/版本
 git config core.hooksPath .githooks   # ★启用提交前泄漏扫描（改代码就必须开）
 ```
 
-★ 最后那条不是可选项。hook 只看**已 staged 的新增行**，默认阻断疑似真实地址 / 凭据 / 无理由豁免；
-放行单行需写理由（行内 `leak-scan: allow <理由>`）。CI 会对 PR diff 再扫一遍，`--no-verify` 绕不过。
+★ 最后那条不是可选项。hook 只看**已 staged 的新增行**，默认阻断疑似真实地址 / 凭据 / 无理由豁免，
+**以及三条案件值判据：中文人名（「姓+名+案」形态）、联系方式（QQ / 微信 / Telegram）、二开包名**
+（含随机化不透明段的反向域名形态）。这三条同为默认档阻断，且 **finding 值本身自动脱敏**——
+公开仓库的 CI 日志同样公开，回显真值等于换个地方泄漏，所以看到告警要自己回到那一行看是什么。
+**真是公开第三方库被误判**，正确做法是登记进 `rules/` 对应规则表（`bank_packages` / `sdks`），
+不是加行内豁免——豁免是给「判据要求真值字面」的夹具用的，不是给误报用的。
+放行单行需写理由（行内注释 `leak-scan:` `allow` `<理由>`，三段连写、中间只留空格），且**理由要逐条成立**：同一理由跨 ≥20 个新增行会触发
+`bulk_exemption` 阻断（防「用一句话批量按掉护栏」）。CI 会对 PR diff 再扫一遍，`--no-verify` 绕不过。
+★**自验档位要对得上 CI**：分支已经有 commit 时用 `leak-scan --base origin/master --strict`（＝CI 那条），
+`--staged` 只扫当前暂存的 diff，改动一旦 commit（多 commit 分支 / amend 后）它就看不到、会给出虚假的「未发现」。
+另：**说明性文字里别把豁免 token 连写成完整形态**（`leak-scan:` 紧跟 `allow`）——
+扫描器的匹配是 `leak-scan:\s*allow`，在**任何**行见到就当成真豁免指令，
+文档里照抄一次就会凭空多出一条理由为空的幽灵豁免（本节这两处即为此把 token 用反引号断开）。
 **测试夹具一律用文档保留段**（`192.0.2.0/24` / `198.51.100.0/24` / `203.0.113.0/24` /
 `2001:db8::/32` / `example.com`）——真实值一旦推上远端不可撤销，改写历史也删不掉平台缓存。
 
@@ -213,6 +241,14 @@ git config core.hooksPath .githooks   # ★启用提交前泄漏扫描（改代�
 
 常见坑：
 - **frida-server 从 GitHub releases 下载**——PC 在国内无代理会失败/慢。解决：挂代理；或手动下 `frida-server-<主机frida版本>-android-<abi>.xz`（版本须与 PC `frida --version` 一致，doctor 已自动对齐版本号）push 到 `/data/local/tmp/frida-server` 自起。
+- ★**Frida ≥17：GumJS 不再内置 Java bridge**。注入端一引用 `Java`，运行时就 send 一条 `frida:load-bridge`
+  向宿主要源码——frida-tools 的 CLI/REPL 自带应答器，**Python API 没有**。症状极具迷惑性：
+  会话建立、进程存活、命令不报错，但**所有 Java hook 静默失效、事件全空**。宿主侧应答已实现，
+  `fxapk doctor` 也已加检测项（能否取到 frida-tools 的 `bridges/java.js`）；装齐 frida-tools 即可，
+  真验收看 capture 报告里的 `frida_bridges` 状态，别只看「会话成功」。
+- ★**frida-server 能被 `frida-ps` 列出 ≠ 它以 root 在跑**。实测踩过：启动命令的引号被 adb 拆开，
+  它以 UID=2000 起来了，spawn/attach 一概失败，**现象酷似样本反 Frida**。doctor 已按 `/proc/<pid>/status`
+  读真实 UID 判这一项。
 - **mitmproxy CA** 仅 HTTPS 抓包要：先 `pip install mitmproxy` 跑一次 `mitmdump`（Ctrl-C 退）生成 `~/.mitmproxy`，再 `doctor --fix` 装系统证书。
 - **boot.img 必须与当前 ROM 版本匹配**，否则 bootloop。
 - 取证测试机建议用**一次性小米账号 + Magisk**，别登个人账号。
