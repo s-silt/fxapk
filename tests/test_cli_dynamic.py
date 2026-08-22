@@ -780,7 +780,7 @@ def test_capture_out_default_resolves_absolute(monkeypatch):
     monkeypatch.setattr(tools, "kill_adb_server", lambda: None)
     seen: dict[str, Any] = {}
 
-    def _fake_run(package: str, *, out: str, duration: int, serial=None, mode="both") -> dict[str, Any]:
+    def _fake_run(package: str, *, out: str, duration: int, serial=None, mode="both", **_kw) -> dict[str, Any]:
         seen["out"] = out
         return _done_result()
 
@@ -789,6 +789,39 @@ def test_capture_out_default_resolves_absolute(monkeypatch):
     assert res.exit_code == 0
     assert Path(seen["out"]).is_absolute()  # 已绝对化，口径确定（不再相对 cwd 的裸 "out"）
     assert Path(seen["out"]).name == "out"
+
+
+def test_cli_capture_rejects_native_antidetect(monkeypatch):
+    """★CLI fail-closed：--antidetect native 在调用动态模块前以 exit 2 拒绝。"""
+    from apkscan.core import tools
+
+    monkeypatch.setattr(tools, "kill_adb_server", lambda: None)
+    res = runner.invoke(cli.app, ["capture", "com.x", "--antidetect", "native"])
+    assert res.exit_code == 2
+
+
+def test_cli_capture_threads_behavior_flags(monkeypatch):
+    """★CLI 接线锁：--allow-behavior-modification --antidetect java 透传给 capture.run。
+
+    _fake_run 用显式参数（非 **kw 吞掉）——CLI 不透传则默认 False/off，seen 不匹配即红。
+    """
+    from apkscan.core import tools
+    from apkscan.dynamic import capture
+
+    monkeypatch.setattr(tools, "kill_adb_server", lambda: None)
+    seen: dict[str, Any] = {}
+
+    def _fake_run(package: str, *, out: str, duration: int, serial=None, mode="both", allow_behavior_modification=False, antidetect="off") -> dict[str, Any]:
+        seen["allow"] = allow_behavior_modification
+        seen["antidetect"] = antidetect
+        return _done_result()
+
+    monkeypatch.setattr(capture, "run", _fake_run)
+    res = runner.invoke(
+        cli.app, ["capture", "com.x", "--allow-behavior-modification", "--antidetect", "java"]
+    )
+    assert res.exit_code == 0
+    assert seen == {"allow": True, "antidetect": "java"}
 
 
 def test_resolve_out_cwd_absolutizes(tmp_path: Path, monkeypatch) -> None:

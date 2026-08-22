@@ -430,6 +430,8 @@ def run(
     serial: str | None = None,
     report: Any = None,
     mode: str = "both",
+    allow_behavior_modification: bool = False,
+    antidetect: str = "off",
 ) -> DynamicResult:
     """对运行中的目标应用做真机抓包，提取运行时端点。
 
@@ -452,6 +454,11 @@ def run(
         DynamicResult 契约 dict。前置不满足 → status="skipped" + playbook；
         满足并完成 → status="done"（artifacts/report_paths 填充）；
         过程异常 → status="error"。绝不抛异常给调用方。
+        allow_behavior_modification: 第二道行为修改授权门；默认 False（关）。与网络侧
+            authorized-active 正交——二者不合并、互不隐含。未取得该授权时，任何行为修改 shim
+            （反检测/root 隐藏）绝不注入。
+        antidetect: 行为修改 shim 档位；仅允许 off（默认，不注入）/ java（注入 shim）。java 仅在
+            allow_behavior_modification 同时为 True 时才实际注入；native 主仓暂无落点、取该值返回 error。
     """
     if out is not None:
         out_dir = out
@@ -464,6 +471,16 @@ def run(
     if mode not in _CAPTURE_MODES:
         logger.error("[capture] mode 取值非法：%r（可选 %s）", mode, "/".join(sorted(_CAPTURE_MODES)))
         return empty_result(STATUS_ERROR, f"mode 取值非法：{mode!r}（可选 {'/'.join(sorted(_CAPTURE_MODES))}）")
+    # ★行为修改档位校验（第二道授权门在 antidetect 之外，见 allow_behavior_modification）：只允许 off/java；
+    #    native 主仓暂无内置 native shim，取该值不静默降级而是拒绝——遵「不可判定不得返回正常值」。
+    if antidetect not in ("off", "java"):
+        logger.error(
+            "[capture] antidetect 取值非法：%r（可选 off/java；native 主仓暂无内置 native shim）", antidetect
+        )
+        return empty_result(
+            STATUS_ERROR,
+            f"antidetect 取值非法：{antidetect!r}（可选 off/java；native 主仓暂无内置 native shim）",
+        )
     use_mitm = mode not in ("floor-only", "no-proxy")
     use_floor = mode != "mitm-only"
     # ★floor-only=纯带外 pcap（反 frida/加固场景）→ 不需要也不注入 frida；其余模式靠 frida 做 SSL unpinning +
@@ -514,6 +531,7 @@ def run(
     return _capture(
         package, out_path, duration, serial, decision=decision, mitm=use_mitm, floor=use_floor,
         frida=use_frida, capabilities_plan=plan_dict,
+        allow_behavior_modification=allow_behavior_modification, antidetect=antidetect,
     )
 
 
@@ -614,6 +632,8 @@ def _capture(
     floor: bool = True,
     frida: bool = True,
     capabilities_plan: dict[str, Any] | None = None,
+    allow_behavior_modification: bool = False,
+    antidetect: str = "off",
 ) -> DynamicResult:
     """编排 mitmdump + adb 代理 + frida unpinning + 启 app，到时停并解析流量。
 
@@ -768,6 +788,8 @@ def _capture(
                 clipboard_events,
                 remote_control_events,
                 serial=serial,
+                allow_behavior_modification=allow_behavior_modification,
+                antidetect=antidetect,
             )
             if frida_session is None:
                 break  # frida-core 不可用/注入失败 → 回退 subprocess（下方处理）。
@@ -1422,6 +1444,45 @@ def _make_bridge_loader(script: Any, state: dict[str, Any]) -> Any:
     return _handler
 
 
+def _build_injection_source(
+    *,
+    allow_behavior_modification: bool = False,
+    antidetect: str = "off",
+) -> str:
+    """拼接注入脚本。除行为修改 shim 外的 8 段（Java bridge / unpinning / crypto / jsbridge /
+    sensitive-api / okhttp / sqlcipher / clipboard / accessibility / hook-ready）为观察型或解密使能型，
+    **无条件注入**；仅 ``FRIDA_ANTIDETECT_JS``（伪造 Build/隐藏 root/屏蔽模拟器特征、会改变样本行为）
+    受第二道授权门 + 档位双重门控。
+
+    ★fail-safe 收口：门条件用白名单精确值 ``antidetect == "java"``（而非 ``!= "off"``），任何未校验的
+    未知取值一律不注入；本函数不抛（保持 :func:`_start_frida_session` 的「绝不抛」契约，取值合法性由
+    ``run`` 上游校验并以 STATUS_ERROR 拒绝）。
+    """
+    parts = [
+        # ★必须最先：安装 Java lazy getter，否则下面所有 Java.perform 都在裸 GumJS 上跑。
+        _FRIDA_JAVA_BRIDGE_LOADER_JS,
+        FRIDA_UNPINNING_JS,
+        cryptohook.FRIDA_CRYPTO_HOOK_JS,
+        cryptohook.FRIDA_JSBRIDGE_HOOK_JS,
+        cryptohook.FRIDA_SENSITIVE_API_HOOK_JS,
+    ]
+    # ★唯一的行为修改 shim：必须同时取得显式授权门 + java 档位才注入（默认关，污染证据的旁路不裸奔）。
+    #   授权门用严格 `is True`——truthy 的非布尔值（如字符串 "false"、int 1）一律按未授权处理，
+    #   杜绝程序化/字符串配置经 truthiness 绕过第二道门（fail-closed）。
+    if allow_behavior_modification is True and antidetect == "java":
+        parts.append(cryptohook.FRIDA_ANTIDETECT_JS)
+    parts.extend(
+        [
+            cryptohook.FRIDA_OKHTTP_HOOK_JS,
+            cryptohook.FRIDA_SQLCIPHER_HOOK_JS,
+            cryptohook.FRIDA_CLIPBOARD_HOOK_JS,
+            cryptohook.FRIDA_ACCESSIBILITY_HOOK_JS,
+            _FRIDA_HOOK_READY_JS,  # ★#7：所有 hook 装完后显式 send hook_ready
+        ]
+    )
+    return "\n".join(parts)
+
+
 def _start_frida_session(
     package: str,
     sink: list[dict[str, Any]],
@@ -1433,6 +1494,9 @@ def _start_frida_session(
     clipboard_sink: list[dict[str, Any]] | None = None,
     remote_control_sink: list[dict[str, Any]] | None = None,
     serial: str | None = None,
+    *,
+    allow_behavior_modification: bool = False,
+    antidetect: str = "off",
 ) -> tuple[Any, Any]:
     """用 frida-core（``import frida``）spawn 目标 app 并注入 unpinning + 运行时 hook 套件。
 
@@ -1465,34 +1529,16 @@ def _start_frida_session(
         )
         return None, None
 
-    source = (
-        # ★必须最先：安装 Java lazy getter，否则下面所有 Java.perform 都在裸 GumJS 上跑。
-        _FRIDA_JAVA_BRIDGE_LOADER_JS
-        + "\n"
-        + FRIDA_UNPINNING_JS
-        + "\n"
-        + cryptohook.FRIDA_CRYPTO_HOOK_JS
-        + "\n"
-        + cryptohook.FRIDA_JSBRIDGE_HOOK_JS
-        + "\n"
-        + cryptohook.FRIDA_SENSITIVE_API_HOOK_JS
-        + "\n"
-        + cryptohook.FRIDA_ANTIDETECT_JS
-        + "\n"
-        + cryptohook.FRIDA_OKHTTP_HOOK_JS
-        + "\n"
-        + cryptohook.FRIDA_SQLCIPHER_HOOK_JS
-        + "\n"
-        + cryptohook.FRIDA_CLIPBOARD_HOOK_JS
-        + "\n"
-        + cryptohook.FRIDA_ACCESSIBILITY_HOOK_JS
-        + "\n"
-        + _FRIDA_HOOK_READY_JS  # ★#7：所有 hook 装完后显式 send hook_ready（在 Java.perform 内确认 ART 可用）
-    )
     device_handle: Any = None
     pid: Any = None
     session: Any = None
     try:
+        # ★在保护性 try 内构建注入脚本：万一某 JS 片段异常（非 str 等）也降级为 (None, None)，
+        #   守住本函数「绝不抛」契约（拼接异常不该穿透给调用方）。
+        source = _build_injection_source(
+            allow_behavior_modification=allow_behavior_modification,
+            antidetect=antidetect,
+        )
         # serial 钉定那台（-D 等价）；None 退回 USB（向后兼容）。
         if serial:
             device_handle = frida.get_device(serial, timeout=_FRIDA_USB_TIMEOUT)

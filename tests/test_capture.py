@@ -132,7 +132,7 @@ def _stub_orchestration(
     monkeypatch.setattr(
         capture,
         "_start_frida_session",
-        lambda package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None, serial=None: (None, None),
+        lambda package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None, serial=None, **_frida_kw: (None, None),
     )
     monkeypatch.setattr(capture, "_adb_reverse", lambda serial=None: (calls["adb"].append("reverse") or True))
     monkeypatch.setattr(capture, "_adb_set_proxy", lambda serial=None: (calls["adb"].append("proxy") or True))
@@ -1966,7 +1966,7 @@ def test_capped_sentinel_filtered_from_runtime_report(monkeypatch, tmp_path):
     _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
     monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None, serial=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None, serial=None, **_frida_kw):
         sink.append({"src": "cipher", "event": "init", "key_hex": "55f0"})
         sink.append({"_capped": True})  # 上限占位
         return object(), object()
@@ -1990,7 +1990,7 @@ def test_capture_done_collects_crypto_events_via_session(monkeypatch, tmp_path):
         {"src": "cipher", "event": "doFinal", "key_hex": "55f0", "plaintext_b64": "eyJhIjoxfQ=="},
     ]
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None, serial=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None, serial=None, **_frida_kw):
         # 模拟 on_message 回调把 2 条事件写进共享 sink。
         sink.extend(fake_events)
         return object(), object()  # 非 None 会话/脚本（teardown 对 dummy 容错）
@@ -2011,7 +2011,7 @@ def test_capture_collects_jsbridge_and_sensitive_api_events(monkeypatch, tmp_pat
     _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
     monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None, serial=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None, serial=None, **_frida_kw):
         if jsbridge_sink is not None:
             jsbridge_sink.append({"event": "register", "iface": "AndroidNative"})
         if api_sink is not None:
@@ -2044,7 +2044,7 @@ def test_capture_collects_antidetect_events(monkeypatch, tmp_path):
     monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
     monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None, serial=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None, serial=None, **_frida_kw):
         if antidetect_sink is not None:
             antidetect_sink.append({"kind": "root", "probe": "File.exists: /system/bin/su", "bypassed": True})
         return object(), object()
@@ -2065,7 +2065,7 @@ def test_capture_collects_credential_events_via_session(monkeypatch, tmp_path):
     # 不触真 adb pull（无 shared_prefs）。
     monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda pkg, op, sink, serial=None: None)
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None, serial=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None, serial=None, **_frida_kw):
         if credential_sink is not None:
             credential_sink.append(
                 {"source": "okhttp", "url": "https://api.fraud-c2.cn/login", "method": "POST",
@@ -2111,7 +2111,7 @@ def test_capture_collects_clipboard_events_via_session(monkeypatch, tmp_path):
     monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
     monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda pkg, op, sink, serial=None: None)
 
-    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None, serial=None):
+    def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None, serial=None, **_frida_kw):
         if clipboard_sink is not None:
             # 模拟 normalize_clipboard_event 已抽地址丢全文：sink 里只有地址、无剪贴板原文。
             clipboard_sink.append(
@@ -2214,8 +2214,12 @@ def test_pull_shared_prefs_extracts_via_run_as(monkeypatch, tmp_path):
     assert "Abc123Xyz789Def456Ghi012" not in token["value"]
 
 
-def test_frida_session_script_includes_antidetect(monkeypatch):
-    """会话注入脚本应含反检测绕过段（与 unpinning/crypto/jsbridge/api 拼接）。"""
+def _capture_injection_source(monkeypatch, **frida_kwargs) -> str:
+    """装一套假 frida，跑 _start_frida_session（真注入路径），回传送进 create_script 的脚本源。
+
+    frida_kwargs 透传给 _start_frida_session（allow_behavior_modification / antidetect），
+    用于验证行为修改 shim 的门控。
+    """
     import sys
     import types
 
@@ -2252,9 +2256,160 @@ def test_frida_session_script_includes_antidetect(monkeypatch):
             pass
 
     monkeypatch.setitem(sys.modules, "frida", types.SimpleNamespace(get_usb_device=lambda timeout=None: _FakeDevice()))
-    capture._start_frida_session("com.x", [], [], [], [])
-    assert "apkscan-antidetect" in captured["source"]
-    assert "addJavascriptInterface" in captured["source"]  # P1 也在
+    capture._start_frida_session("com.x", [], [], [], [], **frida_kwargs)
+    return captured["source"]
+
+
+def test_shim_injected_with_authorization(monkeypatch):
+    """取得第二道授权门 + java 档时，注入脚本才含行为修改 shim（与观察型 hook 一并拼接）。"""
+    source = _capture_injection_source(
+        monkeypatch, allow_behavior_modification=True, antidetect="java"
+    )
+    assert "apkscan-antidetect" in source
+    assert "addJavascriptInterface" in source  # 观察型 hook 仍无条件在
+
+
+def test_shim_not_injected_without_authorization(monkeypatch):
+    """★接线锁：默认（未授权）绝不注入行为修改 shim；但 unpinning / 观察型 hook 照常注入。"""
+    source = _capture_injection_source(monkeypatch)  # 默认 off / 未授权
+    assert "apkscan-antidetect" not in source
+    # 其余 8 段无条件注入不受影响（unpinning + jsbridge 仍在）。
+    assert "addJavascriptInterface" in source
+
+
+def test_shim_not_injected_when_authorized_but_antidetect_off(monkeypatch):
+    """授权门开、但档位仍为 off（默认）→ 不注入（两条件都要满足）。"""
+    source = _capture_injection_source(monkeypatch, allow_behavior_modification=True, antidetect="off")
+    assert "apkscan-antidetect" not in source
+
+
+def test_shim_not_injected_when_java_but_unauthorized(monkeypatch):
+    """档位 java、但未取得授权门 → 不注入（两条件都要满足）。"""
+    source = _capture_injection_source(monkeypatch, allow_behavior_modification=False, antidetect="java")
+    assert "apkscan-antidetect" not in source
+
+
+def test_shim_not_injected_with_truthy_nonbool_authorization(monkeypatch):
+    """★fail-closed：truthy 但非 True 的授权值（字符串 "false"、int 1 等）按未授权处理，不注入。
+
+    门用严格 is True——防程序化/字符串配置经 truthiness 绕过第二道授权门。
+    """
+    src_str = _capture_injection_source(monkeypatch, allow_behavior_modification="false", antidetect="java")
+    assert "apkscan-antidetect" not in src_str
+    src_int = _capture_injection_source(monkeypatch, allow_behavior_modification=1, antidetect="java")
+    assert "apkscan-antidetect" not in src_int
+
+
+def test_build_injection_source_failure_degrades_to_none(monkeypatch):
+    """★回归锁：脚本构建异常时 _start_frida_session 降级 (None, None)、不穿透（守"绝不抛"契约）。
+
+    锁住"source= 在保护性 try 内"这一修复——若将来把该调用移回 try 外，本测试必红。
+    """
+    import sys
+    import types
+
+    class _FakeSession:
+        def create_script(self, source):
+            raise AssertionError("构建失败时不应走到 create_script")
+
+        def detach(self):
+            pass
+
+    class _FakeDevice:
+        def spawn(self, argv):
+            return 1
+
+        def attach(self, pid):
+            return _FakeSession()
+
+        def resume(self, pid):
+            pass
+
+        def kill(self, pid):
+            pass
+
+    monkeypatch.setitem(sys.modules, "frida", types.SimpleNamespace(get_usb_device=lambda timeout=None: _FakeDevice()))
+
+    def _boom(**kwargs):
+        raise TypeError("刻意让脚本构建抛异常")
+
+    monkeypatch.setattr(capture, "_build_injection_source", _boom)
+    assert capture._start_frida_session("com.x", [], [], [], []) == (None, None)
+
+
+def test_capture_threads_behavior_flags_to_session(monkeypatch, tmp_path):
+    """★接线锁（全链 run→_capture→_start_frida_session）：授权参数必须一路透传到会话注入。
+
+    删掉 _capture→_start_frida_session 的透传，本测试必红——直接调 _start_frida_session 的门控
+    测试测不到 _capture 这一层（codex 复审指出的接线盲点）。
+    """
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    # ★收尾 pull 走真 adb（会 su -c ls / 回拉设备明文库）→ 连真机跑单测会碰设备、违反"全程不碰真机"。桩掉。
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    seen: dict[str, Any] = {}
+
+    def _rec_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None, serial=None, *, allow_behavior_modification=False, antidetect="off"):
+        seen["allow"] = allow_behavior_modification
+        seen["antidetect"] = antidetect
+        return object(), object()
+
+    monkeypatch.setattr(capture, "_start_frida_session", _rec_session)
+    capture.run(
+        "com.test.app", out_dir=str(tmp_path), duration=1,
+        allow_behavior_modification=True, antidetect="java",
+    )
+    assert seen == {"allow": True, "antidetect": "java"}
+
+
+def test_run_rejects_native_antidetect(monkeypatch, tmp_path):
+    """★fail-closed：antidetect=native 主仓无落点，run 在任何前置探测/设备副作用之前早退 STATUS_ERROR。"""
+    def _boom(*a, **k):
+        raise AssertionError("native 必须在 _detect_missing/设备副作用之前被拒绝")
+
+    monkeypatch.setattr(capture, "_detect_missing", _boom)
+    result = capture.run("com.test.app", out=str(tmp_path), antidetect="native")
+    assert result["status"] == "error"
+    assert "antidetect" in (result.get("reason") or "")
+
+
+def test_run_threads_behavior_flags_to_capture(monkeypatch, tmp_path):
+    """★接线锁（走真入口 run）：run 必须把 allow_behavior_modification / antidetect 透传给 _capture。
+
+    直接测 _start_frida_session 的门测不到 run→_capture 这一层——删掉该透传，本测试必红。
+    """
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(capture, "_detect_missing", lambda *a, **k: [])
+    monkeypatch.setattr(capture.capability_probe, "probe_available", lambda serial=None: {})
+
+    def _fake_capture(package, out_path, duration, serial=None, **kw):
+        seen.update(kw)
+        return capture.empty_result(capture.STATUS_DONE, "stub")
+
+    monkeypatch.setattr(capture, "_capture", _fake_capture)
+    capture.run(
+        "com.test.app", out=str(tmp_path), allow_behavior_modification=True, antidetect="java"
+    )
+    assert seen.get("allow_behavior_modification") is True
+    assert seen.get("antidetect") == "java"
+
+
+def test_run_default_does_not_authorize_behavior_modification(monkeypatch, tmp_path):
+    """★fail-safe 方向：run 缺省不授权行为修改（默认 False/off 透传给 _capture）。"""
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(capture, "_detect_missing", lambda *a, **k: [])
+    monkeypatch.setattr(capture.capability_probe, "probe_available", lambda serial=None: {})
+
+    def _fake_capture(package, out_path, duration, serial=None, **kw):
+        seen.update(kw)
+        return capture.empty_result(capture.STATUS_DONE, "stub")
+
+    monkeypatch.setattr(capture, "_capture", _fake_capture)
+    capture.run("com.test.app", out=str(tmp_path))
+    assert seen.get("allow_behavior_modification") is False
+    assert seen.get("antidetect") == "off"
 
 
 # ---------------------------------------------------------------------------
@@ -2893,7 +3048,7 @@ def test_capture_run_threads_serial_to_adb_and_frida(monkeypatch, tmp_path):
 
     def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None,
                       credential_sink=None, sqlcipher_sink=None, clipboard_sink=None,
-                      remote_control_sink=None, serial=None):
+                      remote_control_sink=None, serial=None, **_frida_kw):
         seen["session_serial"] = serial
         return None, None  # 回退 subprocess 路径
 
@@ -3148,7 +3303,7 @@ def test_run_consumes_decide_capture_from_report(monkeypatch, tmp_path):
     _set_capabilities(monkeypatch)
     seen: dict[str, Any] = {}
 
-    def _spy_capture(package, out_path, duration, serial=None, *, decision=None, mitm=True, floor=True, frida=True, capabilities_plan=None):
+    def _spy_capture(package, out_path, duration, serial=None, *, decision=None, mitm=True, floor=True, frida=True, capabilities_plan=None, **_kw):
         seen["decision"] = decision
         return capture.empty_result(STATUS_DONE, "ok")
 
@@ -3168,7 +3323,7 @@ def test_run_defaults_decision_when_no_report(monkeypatch, tmp_path):
     _set_capabilities(monkeypatch)
     seen: dict[str, Any] = {}
 
-    def _spy_capture(package, out_path, duration, serial=None, *, decision=None, mitm=True, floor=True, frida=True, capabilities_plan=None):
+    def _spy_capture(package, out_path, duration, serial=None, *, decision=None, mitm=True, floor=True, frida=True, capabilities_plan=None, **_kw):
         seen["decision"] = decision
         return capture.empty_result(STATUS_DONE, "ok")
 
@@ -3802,7 +3957,7 @@ def test_adb_pull_to_ascii_dest_direct(monkeypatch, tmp_path) -> None:
     """dest 纯 ASCII → 直接 pull 到 dest，不经暂存。"""
     calls: list[list[str]] = []
 
-    def _fake_adb(extra, serial=None):  # noqa: ANN001, ANN202
+    def _fake_adb(extra, serial=None):
         calls.append(extra)
         Path(extra[2]).write_bytes(b"\xd4\xc3\xb2\xa1PCAP")
         return True
@@ -3818,7 +3973,7 @@ def test_adb_pull_to_non_ascii_dest_stages(monkeypatch, tmp_path) -> None:
     """dest 含非 ASCII（中文/OneDrive）→ adb 只拉到 ASCII 暂存路径，再 move 到最终 dest。"""
     targeted: list[str] = []
 
-    def _fake_adb(extra, serial=None):  # noqa: ANN001, ANN202
+    def _fake_adb(extra, serial=None):
         targeted.append(extra[2])
         Path(extra[2]).write_bytes(b"PCAP")
         return True
