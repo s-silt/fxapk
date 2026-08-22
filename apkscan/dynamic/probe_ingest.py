@@ -424,12 +424,15 @@ def to_report_leads(leads: list[ProbeLead]) -> list[Lead]:
         notes = _COMPLIANCE_NOTE if pl.category in _SENSITIVE_CATS else "运行时探针实测捕获。"
         if advice_reason:
             notes = f"{notes}（{advice_reason}）"
+        # ★取消一律 HIGH：confidence 是 advice 的纯投影（advice 才是可撤销抑制机制治理的量，此处只读它）。
+        #   探针**单源**永不 HIGH——HIGH 只留给 merge 阶段与静态/pcap 二次印证的项（见 merge_into_report_json）。
+        confidence = Confidence.LOW if advice == infra.ADVICE_REVIEW else Confidence.MEDIUM
         out.append(
             Lead(
                 category=pl.category,
                 value=pl.value[:200],
                 where_to_request=pl.where_to_request or None,
-                confidence=Confidence.HIGH,
+                confidence=confidence,
                 advice=advice,
                 # ★同时封存 base_advice：这是判据链（含保底规则）的结论，探针路径此前完全没接
                 #   可撤销抑制机制——base 为 None 意味着将来任何一次降档都撤不回来。
@@ -872,6 +875,15 @@ def merge_into_report_json(report_json_path: str, leads: list[ProbeLead]) -> int
                 )
                 if ev_merged:
                     confirmed += 1
+                    # ★两源印证才配 HIGH：静态/pcap 已有该 (category,value) + runtime 探针又实测到，
+                    #   且该值有干净网络锚点、原 advice 为建议调证 → 升 HIGH（仅升不降；单源永不到这一步）。
+                    tgt = _network_target(str(hit.get("value", "")))
+                    if (
+                        tgt is not None
+                        and hit.get("advice") == infra.ADVICE_INVESTIGATE
+                        and hit.get("confidence") != Confidence.HIGH.value
+                    ):
+                        hit["confidence"] = Confidence.HIGH.value
                 continue
             # ★首次引入也要认墓碑（与 pcap 回灌同口径，理由见那里）。
             strip_restored_downgrades(lead_dict, restored_index)

@@ -8,6 +8,8 @@ probe_ingest 把独立 frida 探针(自备，`-l` 注入)吐到 console 的 `[ta
 from __future__ import annotations
 
 import json
+import pathlib as _pathlib
+import re
 
 import pytest
 
@@ -54,7 +56,7 @@ _SAMPLE_LOG = "\n".join(
         "[nfc][LEAD-固证] IsoDep.transceive >>> 00A4040007A0000000031010  [LEAD-定人] SELECT AID=A0000000031010",
         "[netstat] [LEAD->接入节点] 198.51.100.12:30113  SYN_SENT",
         "[sdk] OpenInstall appKey = ehahb5  [LEAD]",
-        "[tg] TL_auth_signIn username=qq888999  [LEAD->登录明文]",
+        "[tg] TL_auth_signIn username=qq10000001  [LEAD->登录明文]",
         "[nav] onCreate com.x.SplashActivity   <== 疑似 splash/loading/视频层",  # 无 LEAD，应被忽略
         "[wipe] 已就绪 —— 普通日志行，无 LEAD",  # 无 LEAD，应被忽略
     ]
@@ -1130,3 +1132,380 @@ def test_probe_merge_keeps_a_real_capture_quality_untouched(tmp_path) -> None:
             "bidirectional_target_count": 1}
     meta = _merged_meta(tmp_path, _ADDR_LOG, meta={"capture_quality": dict(real)})
     assert meta["capture_quality"] == real, "回灌把真采集的统计口径改了"
+
+
+# ---------------------------------------------------------------------------
+# P1-a：入库探针补 LEAD / 对齐 tag 后，合成 log 能回灌成正确 LeadCategory
+#   （探针 .js 本身入 apkscan/dynamic/frida_probes/，此处以其 console 格式的合成 log 验解析）
+# ---------------------------------------------------------------------------
+
+
+def test_p1a_sms_prefix_aligned_to_sms_forwarding() -> None:
+    """sms 探针行首 tag 改 [sms-fwd]→[sms] 后，回灌成 SMS_FORWARDING 而非兜底 CONFIG_KEY。"""
+    log = "[sms] [LEAD] 转发 destinationAddress=+10000000000 正文=验证码000000"
+    leads = probe_ingest.parse_probe_log(log)
+    assert len(leads) == 1
+    assert leads[0].category == LeadCategory.SMS_FORWARDING
+    # ★突变锚点：把探针前缀退回 [sms-fwd] → 落 _DEFAULT=CONFIG_KEY，此断言红
+    regressed = probe_ingest.parse_probe_log("[sms-fwd] [LEAD] 转发 destinationAddress=+10000000000")
+    assert regressed and regressed[0].category != LeadCategory.SMS_FORWARDING
+
+
+def test_p1a_mqtt_prefix_aligned_and_uppercase_slash_tag_unparseable() -> None:
+    """mqtt broker 行首 tag 改 [PAHO/broker]→[mqtt] 后回灌成 SELF_HOSTED_IM；
+    并证明大写+斜杠的原 tag `_TAG_RE` 根本提不出（别名方案不成立、改前缀是唯一解）。"""
+    ok = probe_ingest.parse_probe_log("[mqtt] [LEAD->broker] PAHO setServerURIs=tcp://100.64.5.6:1883")
+    assert len(ok) == 1 and ok[0].category == LeadCategory.SELF_HOSTED_IM
+    # ★负向锚点：原 [PAHO/broker] 前缀（大写+/）_TAG_RE 提不出 tag → 整行无 tag → 不产 lead
+    bad = probe_ingest.parse_probe_log("[PAHO/broker] [LEAD->broker] PAHO setServerURIs=tcp://100.64.5.6:1883")
+    assert bad == []
+
+
+def test_p1a_native_ssl_bare_peer_becomes_ip_lead() -> None:
+    """native-ssl 独立回灌行 [ssl][LEAD->TLS对端] <裸 ip:port> 回灌成 IP，且地址进 endpoints。"""
+    log = "[ssl][LEAD->TLS对端] 100.64.7.8:8443  (SSL_write libssl)"
+    leads = probe_ingest.parse_probe_log(log)
+    assert len(leads) == 1 and leads[0].category == LeadCategory.IP
+    # 裸值进得了 endpoints 取值（IP 类）
+    v4, _v6 = probe_ingest.probe_address_values(leads)
+    assert "100.64.7.8" in v4
+    # ★突变锚点：若退回 [peer ...] 包裹形态，_BRACKET_RE 会剥掉整块 → 取不出 IP
+    wrapped = probe_ingest.parse_probe_log("[ssl][LEAD->TLS对端] [peer 100.64.7.8:8443]  (SSL_write libssl)")
+    wv4, _ = probe_ingest.probe_address_values(wrapped)
+    assert "100.64.7.8" not in wv4
+    # ★突变锚点：前缀退回 [native ...]（native∈_SKIP_TAGS）→ 整行跳过
+    assert probe_ingest.parse_probe_log("[native][LEAD->TLS对端] 100.64.7.8:8443") == []
+
+
+def test_p1a_coldstart_lead_goes_config_key_via_tag_not_default() -> None:
+    """coldstart 补 LEAD 后回灌成 CONFIG_KEY，且 where_to_request 来自 _TAG_MAP['coldstart']（走 tag 路径而非兜底）。"""
+    log = "[coldstart][TENANT?][LEAD->配置端点] 疑似按企业号下发的配置端点 (启动): https://cfg.example.test/v1/settings"
+    leads = probe_ingest.parse_probe_log(log)
+    assert len(leads) == 1 and leads[0].category == LeadCategory.CONFIG_KEY
+    assert leads[0].where_to_request == probe_ingest._TAG_MAP["coldstart"][1]
+    # ★突变锚点：去掉 [LEAD → parser 不收
+    assert probe_ingest.parse_probe_log(
+        "[coldstart][TENANT?] 疑似按企业号下发的配置端点 (启动): https://cfg.example.test/v1/settings"
+    ) == []
+
+
+def test_p1a_objstore_lead_goes_config_key_via_tag() -> None:
+    """objstore 补 LEAD 后回灌成 CONFIG_KEY，where 来自 _TAG_MAP['objstore']。"""
+    log = "[objstore][阿里OSS][OBJSTORE锚点][LEAD->对象存储] (启动) https://examplebucket0001.oss.example.test/cfg"
+    leads = probe_ingest.parse_probe_log(log)
+    assert len(leads) == 1 and leads[0].category == LeadCategory.CONFIG_KEY
+    assert leads[0].where_to_request == probe_ingest._TAG_MAP["objstore"][1]
+
+
+def test_p1a_telegram_and_pushc2_still_ingest() -> None:
+    """回归锁：telegram(tg→SELF_HOSTED_IM) 与 push-c2(→SELF_HOSTED_IM) 本就能回灌，改动后不破。"""
+    tg = probe_ingest.parse_probe_log("[tg][DC][LEAD->接入节点] Datacenter.getCurrentAddress() = 100.64.10.11:30113")
+    assert len(tg) == 1 and tg[0].category == LeadCategory.SELF_HOSTED_IM
+    pc = probe_ingest.parse_probe_log('[push-c2] [LEAD-C2] onMessage host:port → "100.64.9.9:8443"')
+    assert len(pc) == 1 and pc[0].category == LeadCategory.SELF_HOSTED_IM
+
+
+# ---------------------------------------------------------------------------
+# P1-b：取消一律 HIGH —— confidence 按 advice 形态分级；二次印证才升 HIGH
+# ---------------------------------------------------------------------------
+
+
+def test_p1b_single_source_probe_never_high() -> None:
+    """探针单源（未 merge）永不 HIGH——这是取消一律 HIGH 的核心语义。"""
+    from apkscan.core.models import Confidence
+
+    leads = probe_ingest.to_report_leads(probe_ingest.parse_probe_log(_SAMPLE_LOG))
+    assert leads, "样本应产出线索"
+    assert all(l.confidence != Confidence.HIGH for l in leads), "单源探针不得有 HIGH"
+    # ★突变锚点：把 :confidence 退回恒 HIGH，此断言红
+
+
+def test_p1b_review_advice_maps_low_investigate_maps_medium() -> None:
+    """advice==待核→LOW；advice==建议调证→MEDIUM（confidence 是 advice 的纯投影）。"""
+    from apkscan.core.models import Confidence
+
+    # 被判据链压到「待核」的（已知基础设施域）→ REVIEW → LOW
+    infra_domain = sorted(infra.KNOWN_INFRA_EXACT)[0]
+    low = probe_ingest.to_report_leads(
+        probe_ingest.parse_probe_log(f"[push-c2] [LEAD->穿透] {infra_domain}")
+    )
+    assert low and low[0].advice == infra.ADVICE_REVIEW and low[0].confidence == Confidence.LOW
+    # 判据链零命中的可调证域 → INVESTIGATE → MEDIUM（.test/保留域会被判据压成待核，测不到这条，
+    # 故用一个判据链零命中的普通占位域（下一行已标行内豁免）
+    unknown = "api.the.com"  # leak-scan: allow 判据链零命中夹具，保留域会命中保留域判据、测不到最高档
+    med = probe_ingest.to_report_leads(
+        probe_ingest.parse_probe_log(f"[coldstart][LEAD->真后端] https://{unknown}/v1/s")
+    )
+    assert med and med[0].advice == infra.ADVICE_INVESTIGATE and med[0].confidence == Confidence.MEDIUM
+
+
+# （原 test_p1b_confidence_recovers_with_advice_not_stuck 已删：它 overclaim「抬回后回 MEDIUM」却没真做，
+#   真实语义由 test_p1b_confidence_is_pure_projection_of_advice 覆盖——codex 复审指出的重复+虚报。）
+
+
+# ---------------------------------------------------------------------------
+# P1-a 源文件级绑定：直接读入库的 frida_probes/*.js，锁住脱敏 + tag/LEAD 改动
+#   （codex 复审指出：只测合成 log 时，恢复 JS 改动测试不会红——必须绑真文件）
+# ---------------------------------------------------------------------------
+
+
+_PROBES_DIR = _pathlib.Path(probe_ingest.__file__).parent / "frida_probes"
+
+
+def _probe_text(name: str) -> str:
+    return (_PROBES_DIR / name).read_text(encoding="utf-8")
+
+
+def test_probes_dir_exists_with_first_batch() -> None:
+    for name in [
+        "telegram-mtproto-hook.js", "objstore-config-hook.js", "native-ssl-hook.js",
+        "mqtt-xmpp-im-hook.js", "sms-forward-outbound-hook.js", "coldstart-config-hook.js",
+        "push-c2-inbound-hook.js", "tls-keylog.js",
+    ]:
+        assert (_PROBES_DIR / name).is_file(), f"入库探针缺失: {name}"
+
+
+def test_sms_probe_file_uses_sms_tag() -> None:
+    """★源文件锁：sms 探针行首 tag 必须是 [sms]（改回 [sms-fwd] → 此断言红）。"""
+    t = _probe_text("sms-forward-outbound-hook.js")
+    assert "var TAG = '[sms]'" in t
+    assert "[sms-fwd]" not in t
+
+
+def test_mqtt_probe_file_broker_lines_use_mqtt_tag() -> None:
+    """★源文件锁：mqtt broker 输出行必须用 log('mqtt', ...)（改回 PAHO/HIVEMQ broker → 红）。"""
+    t = _probe_text("mqtt-xmpp-im-hook.js")
+    assert "log('mqtt', '[LEAD->broker]" in t
+    # 发 broker host:port 的行不得再用大写+斜杠 tag（那种 _TAG_RE 提不出）
+    assert "log('PAHO/broker', 'setServerURIs" not in t
+    assert "log('HIVEMQ/broker', cn.split" not in t
+
+
+def test_native_ssl_probe_has_bare_peer_lead_without_plaintext() -> None:
+    """★源文件锁：native-ssl 有 peerBare + 独立 [ssl][LEAD->TLS对端] 行，且该行不拼明文 preview。"""
+    t = _probe_text("native-ssl-hook.js")
+    assert "function peerBare(" in t
+    lead_lines = [ln for ln in t.splitlines() if "[ssl][LEAD->TLS对端]" in ln]
+    assert lead_lines, "应有独立 [ssl][LEAD->TLS对端] 回灌行"
+    for ln in lead_lines:
+        assert "preview(" not in ln, f"回灌行绝不能含明文 preview: {ln.strip()}"
+
+
+def test_coldstart_objstore_probe_files_have_lead_on_anchor_lines() -> None:
+    """★源文件锁：coldstart/objstore 的锚点行补了 [LEAD（去掉 → 红）。"""
+    cs = _probe_text("coldstart-config-hook.js")
+    assert "[coldstart][TENANT?][LEAD->配置端点]" in cs
+    obj = _probe_text("objstore-config-hook.js")
+    assert "[OBJSTORE锚点][LEAD->对象存储]" in obj
+
+
+def test_probe_lead_line_count_is_pinned() -> None:
+    """★源文件锁：每个探针的 [LEAD 行数**精确钉死**——任何增删（含误给非锚点行加 LEAD，
+    如 codex 复审举的 `[coldstart][debug][LEAD] ...`）都让计数漂移、本测试红，逼人工复审。
+
+    这条比"排除几个关键词"强：无法枚举所有"非锚点"文本，但能锁「LEAD 行集合就是复审过的这些」。
+    合法新增 LEAD 时须同步更新此表——那正是我们要的一次人工确认。
+    """
+    expected = {
+        "coldstart-config-hook.js": 2,
+        "objstore-config-hook.js": 2,
+        "native-ssl-hook.js": 2,
+        "sms-forward-outbound-hook.js": 3,
+        "mqtt-xmpp-im-hook.js": 4,
+        "telegram-mtproto-hook.js": 6,  # native connect 兜底改纯日志(去端口启发式 LEAD)后由 7 降为 6
+        "push-c2-inbound-hook.js": 4,
+    }
+    for name, n in expected.items():
+        got = _probe_text(name).count("[LEAD")
+        assert got == n, f"{name} 的 [LEAD 行数变为 {got}（预期 {n}）——增删 LEAD 须人工复审并更新此表"
+
+
+# ★脱敏锁的两条纯形态判据抽成模块级 helper：既供扫描测试用，又能被参数化测试直接钉死边界
+#   （codex 收尾复审指出：光修正则、回归绿≠边界严密，必须覆盖大小写/连字符截断等绕过 case）。
+_ALLOWED_IP_PREFIX = ("100.64.", "127.", "0.0.0.0", "255.",
+                      "192.0.2.", "198.51.100.", "203.0.113.")
+_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+# ★fail-closed：从 `im.` 起，一路吞到**明确分隔符**（空白/引号/反引号/`)`/`,`/`;`）为止的整个 token，
+#   任何未知字符（`-` `_` `$` Unicode…）都被吞进 token，使其 ≠ 占位从而判红——而不是「列举允许字符」
+#   逐个补（codex 最终确认指出：扩字符类永远补不全，`im.example$evil`/`im.exampleévil` 仍会在 im.example 处
+#   截断放行；应改为默认判脏、只对已知占位命名空间放行）。
+_IM_TOKEN_RE = re.compile(r'''(?i)\bim\.[^\s'"`),;]+''')
+
+
+def _forbidden_ips(text: str) -> list[str]:
+    """text 中所有**非**保留段/CGNAT/回环的公网 IPv4（真接入 IP → 应判红）。"""
+    return [ip for ip in _IPV4_RE.findall(text) if not ip.startswith(_ALLOWED_IP_PREFIX)]
+
+
+def _dirty_im_pkgs(text: str) -> list[str]:
+    """text 中所有**非**脱敏占位的 im.* 包名（真二开包名 → 应判红）。fail-closed：
+
+    只放行占位命名空间 `im.example` 与 `im.example.*`；其余任何 `im.<...>` token 一律视为脏。
+    因整个 token 吞到分隔符为止，`im.example-evil`/`im.example$evil`/`im.exampleévil` 都不再被截断成
+    `im.example` 而漏放。scope：只针对 `im.` 起头的 token（已知脏包均此形），`aim.`/`im_` 属不同 token。
+    """
+    out = []
+    for tok in _IM_TOKEN_RE.findall(text):
+        low = tok.rstrip(".").lower()
+        if not (low == "im.example" or low.startswith("im.example.")):
+            out.append(tok)
+    return out
+
+
+def test_committed_probes_have_no_case_values() -> None:
+    """★脱敏回归锁：入库探针不得含案件值（真名/QQ/二开包名/原 bucket 哈希/公网 IP）。
+
+    codex 复审纠正：把真值 base64 编码存进测试仍是把案件值提交进仓库（可逆、远端历史留痕），
+    base64 是掩盖不是脱敏。故改为**纯形态判据，源码里零案件值**：
+      ① 任何非保留段/CGNAT/回环的公网 IPv4 → 红（objective，抓 telegram 头部那两个真接入 IP）；
+      ② 任何 `im.<label>` 包名不以 `im.example.` 开头 → 红（抓真二开包名，放行脱敏占位 im.example.repacked*）；
+      ③ 正向：telegram 必须含占位 `im.example.repacked`（整段换回脏版则占位消失且 ② 触发）。
+    ①② 的边界由 test_im_scrub_lock_rejects_bypasses 参数化钉死；真名/QQ 的通用启发式判据留给
+    leak-scan 增补任务（见 spawn）。
+    """
+    for js in _PROBES_DIR.glob("*.js"):
+        txt = js.read_text(encoding="utf-8")
+        bad_ips = _forbidden_ips(txt)
+        assert not bad_ips, f"{js.name} 含疑似真公网 IP: {bad_ips}"
+        dirty = _dirty_im_pkgs(txt)
+        assert not dirty, f"{js.name} 含疑似真二开包名: {dirty}"
+    assert "im.example.repacked" in _probe_text("telegram-mtproto-hook.js")
+
+
+@pytest.mark.parametrize(
+    "text,should_flag",
+    [
+        # —— 脱敏占位：放行 ——
+        ("host = 'im.example';", False),
+        ("host = 'im.example.repacked1';", False),
+        ("host = 'im.example.repacked2.messenger';", False),
+        # —— 二开包名形态（合成值，非真案件 IOC）：判红 ——
+        ("pkg im.acme loaded", True),                 # 合成脏包（非 example 前缀→应判红）
+        ("host = 'im.exampleevil.app';", True),       # 缺结尾点（旧版被 startswith 错放）
+        ("host = 'IM.EXAMPLEEVIL.APP';", True),        # 大小写绕过
+        ("host = 'im.Exampleevil.app';", True),        # 混合大小写绕过
+        ("host = 'im.example-evil.app';", True),       # 连字符截断绕过（codex 定案指出）
+        ("host = 'im.example_evil.app';", True),       # 下划线截断绕过
+        ("host = 'im.example$evil.app';", True),       # 特殊字符截断绕过（codex 最终确认指出）
+        ("host = 'im.exampleévil.app';", True),        # Unicode 字符绕过（codex 最终确认指出）
+    ],
+)
+def test_im_scrub_lock_rejects_bypasses(text: str, should_flag: bool) -> None:
+    """★边界锁：codex 两轮复审列的大小写/连字符/下划线/特殊字符/Unicode 绕过必须都能被
+    _dirty_im_pkgs 抓到，脱敏占位 im.example[.*] 必须放行。任一方向漏判 → 脱敏锁形同虚设。
+    正例一律用合成值（im.acme 等），绝不用真案件包名（那本身就是把 IOC 写进公开仓库）。"""
+    flagged = bool(_dirty_im_pkgs(text))
+    assert flagged == should_flag, f"{text!r} 判定错误（flagged={flagged}, 期望={should_flag}）"
+
+
+
+# ---------------------------------------------------------------------------
+# P1-b Tier2：merge 二次印证才升 HIGH（codex 复审指出 Tier2 零覆盖）
+# ---------------------------------------------------------------------------
+
+
+def _seed_report(tmp_path, lead_dict: dict) -> str:
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps({"leads": [lead_dict]}, ensure_ascii=False), encoding="utf-8")
+    return str(p)
+
+
+def test_p1b_merge_upgrades_to_high_on_two_source_corroboration(tmp_path) -> None:
+    """静态已有 (SELF_HOSTED_IM, ip:port, 建议调证) + runtime 探针同值命中 + 有网络锚点 → 升 HIGH。"""
+    from apkscan.core.models import Confidence
+
+    val = "100.64.9.9:8443"  # 纯净 ip:port，_network_target 认得（探针带描述尾巴的 value 不算网络锚点）
+    seed = {
+        "category": "IP", "value": val,
+        "advice": infra.ADVICE_INVESTIGATE, "confidence": Confidence.MEDIUM.value,
+        "where_to_request": "x", "evidences": [],
+    }
+    path = _seed_report(tmp_path, seed)
+    added = probe_ingest.merge_into_report_json(
+        path, probe_ingest.parse_probe_log(f"[socket] [LEAD->对端] {val}")
+    )
+    assert added == 0  # 命中既有键、不新增
+    payload = json.loads(_pathlib.Path(path).read_text(encoding="utf-8"))
+    assert payload["leads"][0]["confidence"] == Confidence.HIGH.value
+
+
+def test_p1b_merge_no_upgrade_when_advice_not_investigate(tmp_path) -> None:
+    """★缺 INVESTIGATE 这一条件 → 不升 HIGH（删该条件即红）。"""
+    from apkscan.core.models import Confidence
+
+    val = "100.64.9.9:8443"
+    seed = {
+        "category": "IP", "value": val,
+        "advice": infra.ADVICE_REVIEW, "confidence": Confidence.LOW.value,  # 待核，不是建议调证
+        "where_to_request": "x", "evidences": [],
+    }
+    path = _seed_report(tmp_path, seed)
+    probe_ingest.merge_into_report_json(
+        path, probe_ingest.parse_probe_log(f"[socket] [LEAD->对端] {val}")
+    )
+    payload = json.loads(_pathlib.Path(path).read_text(encoding="utf-8"))
+    assert payload["leads"][0]["confidence"] != Confidence.HIGH.value
+
+
+def test_p1b_merge_no_upgrade_when_value_lacks_network_anchor(tmp_path) -> None:
+    """★缺网络锚点这一条件 → 不升 HIGH（value 不是干净网络标的）。"""
+    from apkscan.core.models import Confidence
+
+    val = "chat_key"  # CRYPTO_RECIPE 类，非网络锚点；抽出干净 chat_key 以确保 merge 真命中既有键
+    seed = {
+        "category": "CRYPTO_RECIPE", "value": val,
+        "advice": infra.ADVICE_INVESTIGATE, "confidence": Confidence.MEDIUM.value,
+        "where_to_request": "x", "evidences": [],
+    }
+    path = _seed_report(tmp_path, seed)
+    added = probe_ingest.merge_into_report_json(
+        path, probe_ingest.parse_probe_log(f"[ks][LEAD-固证] {val}")
+    )
+    assert added == 0, "前置：须真命中既有键，才测得到升 HIGH 那一步（否则测的是新增项，无意义）"
+    payload = json.loads(_pathlib.Path(path).read_text(encoding="utf-8"))
+    assert payload["leads"][0]["confidence"] != Confidence.HIGH.value
+
+
+def test_p1b_merge_no_upgrade_when_no_new_evidence(tmp_path) -> None:
+    """★锁 ev_merged 两源门（codex 指出该门无负向覆盖）：命中既有键但**没有新证据并入**
+    （incoming 与既有证据去重后为空）时，不得计确认、不得升 HIGH——即便值有网络锚点且 advice=建议调证。
+
+    把生产码的 `if ev_merged:` 变恒真，本测试红。
+    """
+    from apkscan.core.models import Confidence
+
+    val = "100.64.9.9:8443"
+    # 预置的既有 lead 已含与探针将产的**完全相同**的 runtime 证据（source/location/snippet/scope 全同）
+    # → merge 去重后无新证据 → ev_merged=False。
+    same_ev = {
+        "source": probe_ingest._RUNTIME_SOURCE,
+        "location": "frida-probe:socket",
+        "snippet": f"[socket] [LEAD->对端] {val}",
+        "scope": "case_evidence",
+    }
+    seed = {
+        "category": "IP", "value": val,
+        "advice": infra.ADVICE_INVESTIGATE, "confidence": Confidence.MEDIUM.value,
+        "where_to_request": "x", "source_refs": [same_ev],
+    }
+    path = _seed_report(tmp_path, seed)
+    probe_ingest.merge_into_report_json(path, probe_ingest.parse_probe_log(f"[socket] [LEAD->对端] {val}"))
+    payload = json.loads(_pathlib.Path(path).read_text(encoding="utf-8"))
+    assert payload["leads"][0]["confidence"] != Confidence.HIGH.value, (
+        "无新证据并入（ev_merged=False）不得升 HIGH——两源门必须真拦"
+    )
+
+
+def test_p1b_confidence_is_pure_projection_of_advice() -> None:
+    """★confidence 是 advice 的纯投影：同一探针路径，advice=待核→LOW、建议调证→MEDIUM，
+    随 advice 走、不带独立状态。这是"不产生撤不回降档"的基础——硬门读 advice（可撤销），
+    confidence 只读 advice、不自持降档账本。（注：merge 不重算持久 lead 的 confidence，
+    是已登记的 处置A 残留，恢复发生在重新 ingest 产出 fresh lead 时。）"""
+    from apkscan.core.models import Confidence
+
+    infra_domain = sorted(infra.KNOWN_INFRA_EXACT)[0]
+    low = probe_ingest.to_report_leads(probe_ingest.parse_probe_log(f"[push-c2] [LEAD->穿透] {infra_domain}"))[0]
+    assert low.advice == infra.ADVICE_REVIEW and low.confidence == Confidence.LOW
+    unknown = "api.the.com"  # leak-scan: allow 判据链零命中夹具
+    med = probe_ingest.to_report_leads(probe_ingest.parse_probe_log(f"[push-c2] [LEAD->穿透] {unknown}"))[0]
+    assert med.advice == infra.ADVICE_INVESTIGATE and med.confidence == Confidence.MEDIUM

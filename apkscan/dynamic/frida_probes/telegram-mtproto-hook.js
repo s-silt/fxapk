@@ -6,7 +6,7 @@
 
 /* ============================================================
  *  典型形态（合成示例）：登录账号触发 TL_auth_signIn 明文 + sendRequest，
- *  登录后设备 SYN_SENT 到接入节点（如 100.64.10.11:30113 / 100.64.10.12:30113，30113 为常见 DC 端口）。
+ *  登录后设备 SYN_SENT 到接入节点（如 100.64.10.11:<接入端口> / 100.64.10.12:<接入端口>；接入节点常用非标高端口，具体以本案报告为准）。
  *  本探针只在 Java/TLRPC 对象层 + Datacenter/getCurrentAddress + native connect 抓"明文字段+接入节点"，
  *  MTProto 的加密握手一概不碰(不解密、不改包、不外联)。唯一出口 console.log。
  *
@@ -190,7 +190,7 @@ Java.perform(function () {
     return any;
   }
 
-  /* ========== 2) DC 接入节点 IP:port(= 30113 那类锚点) ========== */
+  /* ========== 2) DC 接入节点 IP:port(非标高端口那类锚点) ========== */
   // 修正：原版 org.telegram.tgnet.ConnectionsManager 上并无 getDatacenterAddress 方法(原脚本空挂=假就位)。
   //       真实 DC 地址解析在 native(libtmessages.*.so) 与 Datacenter 类。这里：
   //       (a) 在 CM 上按方法名扫任何含 getDatacenter / getCurrentAddress / nativeGetDatacenter 的方法挂返回值；
@@ -338,7 +338,7 @@ Java.perform(function () {
       if (!once('DC:nocm')) hookDcAddress(null);
       console.log('[tg][未命中] 没找到 ConnectionsManager 类。下一步：');
       console.log('  · 加固/二级加载未释放→先跑 memdex-dump.js 或 dexload-hook.js 让真实 DEX 进表，再挂；');
-      console.log('  · 接入节点(:30113 那类)此刻仍可从文件尾部 [tg][native] connect 行看到；');
+      console.log('  · 接入节点(非标高端口那类)此刻仍可从文件尾部 [tg][native] connect 行看到；');
       console.log('  · 或在 REPL 调 fxTgScan() 看当前已载入、含 TL_auth/ConnectionsManager 的类名清单。');
     }
 
@@ -372,14 +372,15 @@ Java.perform(function () {
   setTimeout(function () { console.log('[tg] 三次定位(12s)…'); locateAndHook(); }, 12000);
 
   console.log('[tg] armed —— Telegram/TLRPC 层探针就位(不破 MTProto 加密)。');
-  console.log('[tg] 抓不到时：先 memdex-dump.js 释放真实 DEX，再在 REPL 调 fxTgScan() 看真实类名、fxTgRehook() 重挂；接入节点(:30113 那类)看 [tg][DC] 或 [tg][native] connect 行。');
+  console.log('[tg] 抓不到时：先 memdex-dump.js 释放真实 DEX，再在 REPL 调 fxTgScan() 看真实类名、fxTgRehook() 重挂；接入节点(非标高端口那类)看 [tg][DC] 或 [tg][native] connect 行。');
 });
 
 /* ============================================================
  *  native 兜底：org.telegram.tgnet 的核心走 libtmessages.*.so(JNI)，
  *  Java 层 sendRequest 若被改包绕过，可在 native connect 抓接入节点 IP:port。
- *  这里只读对端地址(= 接入节点溯源锚点)，不碰 MTProto 加密数据。
- *  接入节点 IP:port 的权威来源就是这里——任何真实出站连接(含连失败 SYN_SENT)都打。
+ *  这里只读对端地址(= 出站连接原始记录)，不碰 MTProto 加密数据、也不按端口猜协议。
+ *  native 行记录所有真实出站连接(含连失败 SYN_SENT)供人工对照；MTProto 接入节点的**归因**
+ *  以 [tg][DC](钩 Datacenter 真方法、有协议证据)为准。
  * ============================================================ */
 (function () {
   'use strict';
@@ -422,7 +423,17 @@ Java.perform(function () {
     return null;
   }
 
-  // libc connect 兜底：MTProto 接入节点(报告 :30113)的真实出站地址，连失败也打(SYN_SENT 也算锚点)
+  // libc connect 兜底：只**记录**真实出站地址(接入节点 IP:port 的原始来源，连失败 SYN_SENT 也记)。
+  // ★不在此按端口猜协议打 LEAD——端口不是 MTProto 归因证据（二开壳常同时有 XMPP:5222/MQTT:1883 等，
+  //   高端口白名单会把它们误标成 IM 接入节点）。权威 ingress LEAD 只出自 [tg][DC]（钩 Telegram
+  //   Datacenter 真方法、有协议证据）；native 行仅供人工对照 [tg][DC] 与本案报告判定。
+  function isLoopback(d) {
+    if (!d || d.charAt(0) === '<') return false;          // <af=..>/<sockaddr err> 非地址
+    var v4 = d.match(/^(\d{1,3})\./);
+    if (v4) return v4[1] === '127';                        // 127.0.0.0/8 整段(非仅 127.0.0.1)
+    // IPv6：parseSockaddr 产出 8 组全展开 hex，::1 => [0:0:0:0:0:0:0:1]
+    return /^\[(?:0:){7}1\]/.test(d) || d.indexOf('[::1]') === 0;
+  }
   try {
     var c = resolveExport('connect');
     if (c === null) {
@@ -432,15 +443,14 @@ Java.perform(function () {
         onEnter: function (args) {
           try {
             var dst = parseSockaddr(args[1]);
-            // 只打 MTProto 关心的非本地连接；30113 这类自建接入端口尤其留意
-            if (dst && dst.indexOf('127.0.0.1') === -1 && dst.indexOf('[::1]') === -1 && dst.indexOf('<af=') === -1) {
-              var flag = (dst.indexOf(':30113') !== -1) ? ' [LEAD->疑似 MTProto 接入节点(对照报告 :30113)]' : '';
-              console.log('[tg][native] connect fd=' + args[0].toInt32() + ' -> ' + dst + flag);
+            // 只记非本地、可解析的出站连接(排除回环 127/8 与 ::1、以及无法解析的地址族)
+            if (dst && dst.charAt(0) !== '<' && !isLoopback(dst)) {
+              console.log('[tg][native] connect fd=' + args[0].toInt32() + ' -> ' + dst + ' (非本地出站——接入节点候选，需对照 [tg][DC] 行与本案报告判定)');
             }
           } catch (e) { console.log('[tg][native] connect onEnter skip: ' + e); }
         }
       });
-      console.log('[tg][native] connect hooked @ ' + c + ' (抓 MTProto 接入节点 IP:port)');
+      console.log('[tg][native] connect hooked @ ' + c + ' (记录出站 IP:port，接入节点归因以 [tg][DC] 为准)');
     }
   } catch (e) { console.log('[tg][native] connect hook skip: ' + e); }
 

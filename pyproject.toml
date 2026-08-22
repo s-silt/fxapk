@@ -66,7 +66,8 @@ include = ["apkscan*"]
 [tool.setuptools.package-data]
 apkscan = ["rules/*.yaml", "rules/*.txt", "rules/**/*.yaml", "report/templates/*.j2"]
 # 内置 Frida JS hook 脚本（cryptohook 经 importlib.resources 读取，注入真机）——装后仍可读。
-"apkscan.dynamic" = ["frida_js/*.js"]
+# frida_probes/：手动 `-l` 注入的独立探针库（首批 8 个，脱敏后入库），随 wheel 分发供 pip 用户取用。
+"apkscan.dynamic" = ["frida_js/*.js", "frida_probes/*.js"]
 
 [tool.pytest.ini_options]
 markers = [

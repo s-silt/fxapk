@@ -29,7 +29,7 @@ function peerOf(sslPtr) {
 // 且带外壳会污染取值，故回灌必须用裸值。无则返回 ''（parser 遇空值丢弃，不产伪线索）。
 // ★依赖 getpeername（Frida 17 待迁移 API，见 P2）；该 API 修好前 peerBare 恒返回 '' → 本探针回灌收益随 P2 到位。
 function peerBare(sslPtr) {
-  var s = peerOf(sslPtr);            // ' [peer 1.2.3.4:443]' 或 ' [peer [::1]:443]' 或 ''
+  var s = peerOf(sslPtr);            // ' [peer 192.0.2.1:443]' 或 ' [peer [::1]:443]' 或 ''（示例用文档保留段）
   if (!s) return '';
   var m = s.match(/\[peer (.+)\]$/);
   return m ? m[1] : '';
