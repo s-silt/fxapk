@@ -521,6 +521,8 @@ def test_merge_and_rerender_copies_capture_quality(tmp_path) -> None:
         "infrastructure_excluded_count": 0,
         # P0-a：缺省干净轮标注（quality 透传 variant，供闭环门读）。
         "runtime_variant": "original-runtime",
+        # P0-c：缺省身份可确认（quality 同款透传，供闭环门读）。
+        "capture_apk_identity_which": "original",
         "dynamic_status": "complete",
         "reason": "target-attributed endpoint observed with bidirectional payload on that same endpoint",
         "floor_parse_status": "ok",

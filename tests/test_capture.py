@@ -434,6 +434,8 @@ def test_build_capture_quality_requires_target_attributed_business_traffic(
         "infrastructure_excluded_count": 0,
         # P0-a：缺省干净轮（未注入行为修改 shim）→ 判定不受影响，仍 complete。
         "runtime_variant": "original-runtime",
+        # P0-c：缺省身份可确认（跑的就是待分析的原版 APK）→ 判定不受影响。
+        "capture_apk_identity_which": "original",
         "dynamic_status": "complete",
         "reason": "target-attributed endpoint observed with bidirectional payload on that same endpoint",
         "floor_parse_status": "ok",
@@ -3578,7 +3580,7 @@ def test_frida_retreat_threshold_reached_falls_to_floor(monkeypatch, tmp_path):
     floor = {"started": False}
     monkeypatch.setattr(
         capture, "_start_floor_pcap",
-        lambda package, out_path, serial=None: floor.__setitem__("started", True) or object(),
+        lambda package, out_path, serial=None, **_kw: floor.__setitem__("started", True) or object(),
     )
     monkeypatch.setattr(capture, "_stop_floor_pcap", lambda handle, out_path: None)
 
@@ -3593,6 +3595,11 @@ def test_frida_retreat_threshold_reached_falls_to_floor(monkeypatch, tmp_path):
     assert floor["started"] is True
     pb = "\n".join(result["playbook"])
     assert "floor" in pb.lower() or "带外" in pb or "保底" in pb
+    # ★P0-c：秒退事实必须落盘——编排层据它判「第一遍是不是被反 frida 顶回来了、要不要跑旁路轮」。
+    #   只断言默认值不够（硬编码 False/0 也能过），这里验真实秒退后的 True/次数。
+    payload = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    assert payload["capture_signals"]["frida_retreated"] is True
+    assert payload["capture_signals"]["frida_retreat_count"] == 2
 
 
 def test_retreat_does_not_retry_subprocess_frida(monkeypatch, tmp_path):
@@ -3711,7 +3718,7 @@ def test_floor_first_starts_and_stops_pcap(monkeypatch, tmp_path):
     floor_calls: dict[str, Any] = {"started": False, "stopped": False, "handle": None}
     handle = object()
 
-    def _start_floor(package, out_path, serial=None):
+    def _start_floor(package, out_path, serial=None, **_kw):
         floor_calls["started"] = True
         return handle
 
@@ -3887,6 +3894,39 @@ def test_start_floor_pcap_launches_detached_tcpdump(monkeypatch, tmp_path):
     # ★ codex review P1:强制真 root（非 root 退出，逼 _adb_root_shell 走 su）+ 起后验活（tcpdump 秒退→失败）。
     assert 'id -u' in cmd and "|| exit 1" in cmd
     assert "kill -0" in cmd
+
+
+def test_start_floor_pcap_pass_tag_isolates_device_paths(monkeypatch, tmp_path):
+    """★★证据防丢（P0-c）：pass_tag 必须让**设备侧** pcap/pid 路径按 pass 区分。
+
+    _stop_floor_pcap 承诺「pull 失败时保留远端那份供手动重拉」；若两遍共用固定远端路径，
+    第二遍起手的 rm -f 会删掉第一遍特意保留的原始证据（不可恢复）。
+    把 capture 里加后缀的那两行还原成裸常量，本测试必红。
+    """
+    monkeypatch.setattr(capture.tools, "adb_path", lambda: "adb")
+    monkeypatch.setattr(capture, "_find_device_tcpdump", lambda serial: "/system/xbin/tcpdump")
+    launched: dict = {}
+    monkeypatch.setattr(
+        capture.provision, "_adb_root_shell",
+        lambda cmd, serial=None: (launched.__setitem__("cmd", cmd), True)[1],
+    )
+
+    h1 = capture._start_floor_pcap("com.x", tmp_path, pass_tag="pass1")
+    cmd1 = launched["cmd"]
+    h2 = capture._start_floor_pcap("com.x", tmp_path, pass_tag="pass2")
+    cmd2 = launched["cmd"]
+
+    assert h1 is not None and h2 is not None
+    # 两遍的设备侧 pcap / pid 路径都必须不同——否则第二遍的 rm -f 会删掉第一遍保留的证据
+    assert h1.remote_path != h2.remote_path, "设备侧 pcap 路径必须按 pass 区分"
+    assert h1.pid_path != h2.pid_path, "设备侧 pid 路径必须按 pass 区分"
+    assert h1.remote_path.endswith(".pass1") and h2.remote_path.endswith(".pass2")
+    # 起手的 rm -f 只能清自己那份，绝不能碰另一遍的
+    assert h1.remote_path not in cmd2, "第二遍的启动命令不得触及第一遍的设备侧 pcap"
+    assert h2.remote_path in cmd2 and h1.remote_path in cmd1
+    # 不传 pass_tag 时沿用原路径（向后兼容：单遍调用/既有测试）
+    h0 = capture._start_floor_pcap("com.x", tmp_path)
+    assert h0 is not None and h0.remote_path == capture._FLOOR_REMOTE_PCAP
 
 
 def test_start_floor_pcap_none_when_no_root(monkeypatch, tmp_path):
@@ -4344,3 +4384,23 @@ def test_response_edge_signals_no_false_positive_on_benign_infra() -> None:
     assert f(_resp(301, "https://www.foo.com/"), "foo.com")[0] is False
     # 真跨站（'-'边界非'.'边界）仍命中
     assert f(_resp(302, "https://evil-foo.com/"), "foo.com")[0] is True
+
+
+def test_capture_signals_expose_frida_retreat(monkeypatch, tmp_path):
+    """★producer 接线锁：秒退熔断必须落进 capture_signals，否则编排层判不出「第一遍被反 frida 顶回来了」。
+
+    删掉 capture 里写 frida_retreated / frida_retreat_count 的那两行，本测试必红。
+    """
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+
+    capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+
+    payload = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    signals = payload["capture_signals"]
+    # 字段必须存在（值为默认的未秒退态）——编排层据它判是否建议旁路
+    assert signals["frida_retreated"] is False
+    assert signals["frida_retreat_count"] == 0

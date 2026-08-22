@@ -447,6 +447,7 @@ def run(
     mode: str = "both",
     allow_behavior_modification: bool = False,
     antidetect: str = "off",
+    pass_tag: str = "",
 ) -> DynamicResult:
     """对运行中的目标应用做真机抓包，提取运行时端点。
 
@@ -547,6 +548,7 @@ def run(
         package, out_path, duration, serial, decision=decision, mitm=use_mitm, floor=use_floor,
         frida=use_frida, capabilities_plan=plan_dict,
         allow_behavior_modification=allow_behavior_modification, antidetect=antidetect,
+        pass_tag=pass_tag,
     )
 
 
@@ -649,6 +651,7 @@ def _capture(
     capabilities_plan: dict[str, Any] | None = None,
     allow_behavior_modification: bool = False,
     antidetect: str = "off",
+    pass_tag: str = "",
 ) -> DynamicResult:
     """编排 mitmdump + adb 代理 + frida unpinning + 启 app，到时停并解析流量。
 
@@ -693,6 +696,10 @@ def _capture(
     #   已开录、且收尾统一解析同一批文件——秒退前 grace 期内那段流量**已被 shim 诱导**。若按 frida_session
     #   判，就会把这段诱导流量标成 original-runtime（最危险的假标签：放行诱导证据升"实连已观测"/complete）。
     shim_injected_ever = False
+    # ★秒退熔断计数：必须在函数顶部初始化——收尾组装 capture_signals 时无条件读它们，而 floor-only /
+    #   前置失败等路径根本走不到下面注入段的赋值处（曾因此 UnboundLocalError）。
+    retreat_count = 0
+    retreated = False
     #: 传给 _start_frida_session 的可变信使：它在 script.load() 成功那一刻即置 injected=True，
     #: 使「已注入」这个事实不依赖函数能否正常返回（load→return 之间抛异常也返回 (None, None)）。
     shim_state: dict[str, bool] = {}
@@ -767,7 +774,7 @@ def _capture(
         #    _parse_flows 取得——两者互补，不重复。真机依赖封成可注入 runner，单测 mock。
         # TODO(real-device): -i any 接口名 / tcpdump AF_PACKET 权限需真机对齐。
         if floor and decision.floor_first:  # ★#8：mitm-only 模式不起 floor
-            floor_handle = _start_floor_pcap(package, out_path, serial)
+            floor_handle = _start_floor_pcap(package, out_path, serial, pass_tag=pass_tag)
             if floor_handle is not None:
                 playbook.append("① floor 保底：已起带外 pcap（代理前起手，抓直连后端 IP；零产出不可接受）")
                 logger.info("[capture] floor 带外 pcap 已启动（保底，代理前起手）")
@@ -797,8 +804,6 @@ def _capture(
         # TODO(real-device): 需真机验证后方可依赖——liveness/秒退计数只有真机才有真实副作用。
         if not frida:  # ★floor-only：纯带外 pcap，不注入 frida（契合反 frida/加固场景、不触发样本自检）。
             playbook.append("floor-only 模式：跳过 frida 注入（仅带外 pcap，不触发反 frida 检测）")
-        retreat_count = 0
-        retreated = False  # 达秒退阈值主动退 floor（区别于 frida-core 本就不可用→仍试 subprocess）
         while frida:  # floor-only（frida=False）跳过整段注入；其余模式等价 while True（靠内部 break 退出）
             frida_session, frida_script = _start_frida_session(
                 package,
@@ -1166,6 +1171,10 @@ def _capture(
         "frida_bridges": _frida_bridge_status(frida_session),
         "mitm_bytes": mitm_bytes,
         "endpoint_total": len(endpoints),
+        # ★P0-c：秒退熔断落盘。此前 retreated/retreat_count 只是局部变量、外部读不到，编排层无从判断
+        #   「第一遍是不是被样本的反 frida 顶回来了」——那正是决定要不要跑第二遍旁路的核心信号之一。
+        "frida_retreated": bool(retreated),
+        "frida_retreat_count": int(retreat_count),
         "warnings": list(warnings),
     }
     if pcap_app_attr:  # floor pcap 接入节点→app UID/进程 归因（真后端 vs 背景噪音）
@@ -2721,7 +2730,7 @@ def _push_tcpdump(serial: str | None) -> str | None:
 
 
 def _start_floor_pcap(
-    package: str, out_path: Path, serial: str | None = None
+    package: str, out_path: Path, serial: str | None = None, *, pass_tag: str = ""
 ) -> _FloorPcap | None:
     """起设备侧带外 pcap 保底（tcpdump -w 到设备 tmp）。返回句柄；起不来 → None，绝不阻断抓包。
 
@@ -2730,6 +2739,17 @@ def _start_floor_pcap(
     root 与 su 语法复用 ``provision`` 的健壮处理（adbd-root / 多形态 su / 单引号包裹）。
     """
     # TODO(real-device): 接口名(-i any) 与部分机型 tcpdump/AF_PACKET 权限仍需真机对齐；无 tcpdump/root → 降级。
+    #
+    # ★证据防丢（P0-c）：设备侧路径必须按 pass 区分。`_stop_floor_pcap` 承诺"pull 失败/本地无效时
+    #   **绝不删除**远端 pcap，留在设备上供手动重拉"——若两遍共用同一个固定远端路径，第二遍起手的
+    #   `rm -f` 就会把第一遍特意保留的那份原始 pcap 删掉，造成**不可恢复的 original 基线证据丢失**。
+    #   pass_tag 为空时沿用原路径（单遍调用/向后兼容）。
+    #   ★已知边界（预存在、非本机制引入）：pass_tag 只在**同一次运行内**消歧。跨运行时，下一次 run 的
+    #   pass1 起手 rm 仍会清掉上一次 run 因 pull 失败保留在设备上的 `.pass1`。仅影响"手动重拉"这一兜底
+    #   （本地 pull 成功的证据按各自 out_dir 隔离、不受影响）。若要根治需再叠 run 级标识（时间戳/case id），
+    #   代价是远端路径不再可预期、手动重拉要先列目录——本片不做。
+    remote_pcap = f"{_FLOOR_REMOTE_PCAP}.{pass_tag}" if pass_tag else _FLOOR_REMOTE_PCAP
+    remote_pid = f"{_FLOOR_PID_PATH}.{pass_tag}" if pass_tag else _FLOOR_PID_PATH
     try:
         if not tools.adb_path():
             return None
@@ -2750,18 +2770,18 @@ def _start_floor_pcap(
         #      非零 → floor 判失败降级，绝不假成功。
         launch = (
             '[ "$(id -u)" = 0 ] || exit 1; '
-            f"rm -f {_FLOOR_REMOTE_PCAP} {_FLOOR_PID_PATH}; "
-            f"nohup {tcpdump} -i any -s 0 -U -w {_FLOOR_REMOTE_PCAP} >/dev/null 2>&1 & "
-            f"echo $! > {_FLOOR_PID_PATH}; "
-            f"sleep 1; kill -0 $(cat {_FLOOR_PID_PATH} 2>/dev/null) 2>/dev/null"
+            f"rm -f {remote_pcap} {remote_pid}; "
+            f"nohup {tcpdump} -i any -s 0 -U -w {remote_pcap} >/dev/null 2>&1 & "
+            f"echo $! > {remote_pid}; "
+            f"sleep 1; kill -0 $(cat {remote_pid} 2>/dev/null) 2>/dev/null"
         )
         if not provision._adb_root_shell(launch, serial):
             logger.info("[capture] floor：tcpdump 未能以 root 起或起后即退（无 root / 无抓包权限），带外 pcap 不可用（降级）")
             return None
-        logger.info("[capture] floor：设备侧 tcpdump 已起（%s → %s，后台+pidfile）", tcpdump, _FLOOR_REMOTE_PCAP)
+        logger.info("[capture] floor：设备侧 tcpdump 已起（%s → %s，后台+pidfile）", tcpdump, remote_pcap)
         return _FloorPcap(
-            remote_path=_FLOOR_REMOTE_PCAP,
-            pid_path=_FLOOR_PID_PATH,
+            remote_path=remote_pcap,
+            pid_path=remote_pid,
             serial=serial,
             net_start=_snapshot_netstate(serial),  # 开抓网络态基线（漂移检测）
         )

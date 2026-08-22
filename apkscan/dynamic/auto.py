@@ -37,9 +37,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from apkscan.core import device
 from apkscan.core.models import ANALYSIS_MODE_PASSIVE, AnalysisConfig, Report
@@ -48,6 +51,7 @@ from apkscan.core.report_naming import report_base
 META_WRITE_OWNER = "dynamic.auto"
 META_WRITE_CATEGORIES = {
     'artifact_lineage': 'signal',
+    'capture_apk_identity': 'record',
     'online': 'signal',
     'target_serial': 'record',
 }
@@ -62,6 +66,11 @@ _STEP_INSTALL = "安装到设备"
 _STEP_UNPACK = "脱壳"
 _STEP_REPACKAGE = "去壳重打包"
 _STEP_CAPTURE = "抓包"
+# ★P0-c 第二遍（旁路）专用步骤名：与第一遍分开命名，否则同名步骤在 steps 里出现两次、
+#   消费方（CLI 展示 / 批量汇总）分不清哪条属于哪一遍，"重打包 skipped" 也会被误读成第一遍出了问题。
+_STEP_BYPASS = "旁路轮（行为修改）"
+_STEP_BYPASS_REPACKAGE = "旁路轮·去壳重打包"
+_STEP_BYPASS_CAPTURE = "旁路轮·抓包"
 _STEP_MERGE = "合并运行时端点"
 _STEP_CLOSE = "案件闭环"
 
@@ -69,6 +78,9 @@ _STEP_CLOSE = "案件闭环"
 _DONE = "done"
 _SKIPPED = "skipped"
 _ERROR = "error"
+# 抓包跑完但无可用证据路径（与 dynamic.STATUS_DEGRADED 同值）。第一遍即便 degraded 也算「跑出了基线」，
+# 可据以判断要不要旁路——它与「压根没跑起来」（skipped/error）是两回事。
+_DEGRADED = "degraded"
 
 # 默认报告格式（与 merge / cli 口径一致）。
 _DEFAULT_FORMATS = ["html", "json"]
@@ -114,6 +126,8 @@ def run(
     strict_case: bool = False,
     on_progress: Callable[[str], None] | None = None,
     confirm: Callable[[str], None] | None = None,
+    allow_behavior_modification: bool = False,
+    antidetect: str = "off",
 ) -> dict:
     """一键全自动：体检 → 静态 → 脱壳 → 抓包 → 合并，回一份结构化总报告。绝不抛。
 
@@ -195,10 +209,14 @@ def run(
 
         # 3.5) 安装 APK 到设备（脱壳/抓包 spawn 前置）：frida -f <包名> 要 spawn 的是**已安装**
         #      的 app；只分析 APK 文件而设备上没装 → "unable to find application"。仅有设备才做。
+        install_ok = True
         if has_device:
-            steps.append(
-                _run_install_app(apk_path, serial=target_serial, on_progress=on_progress)
-            )
+            install_step = _run_install_app(apk_path, serial=target_serial, on_progress=on_progress)
+            steps.append(install_step)
+            # ★身份可信性前提：装原包失败（最常见是上一次旁路轮留下的 wrapper 仍在设备上、签名不同
+            #   → UPDATE_INCOMPATIBLE），此时设备上跑的**不是**本次要分析的原版 APK。流水线仍继续
+            #   （抓到什么算什么），但绝不能把那一轮的证据标成 original-runtime——见下方 apk_identity。
+            install_ok = install_step.get("status") == _DONE
 
         # 3) 脱壳：仅有设备才做（产出 dex 由 unpack 内部 reanalyze 回灌）。
         unpack_step, unpack_paths, unpacked_report = _run_unpack(
@@ -219,31 +237,135 @@ def run(
             report = _adopt_unpacked_report(report, unpacked_report, apk_path=apk_path)
             package_name = report.package_name or package_name
 
-        # 3.6) 去壳重打包：把脱壳 DEX 装回去壳版，使 capture 抓去壳版（绕壳反 frida）。默认开，
-        #      --no-repackage 关。失败/无料优雅降级（重装原包），capture 仍跑原版，不中断流水线。
-        if repackage:
-            repack_step, _repack_paths = _run_repackage(
-                apk_path,
-                package_name,
-                out_dir=out_dir,
-                has_device=has_device,
-                serial=target_serial,
-                on_progress=on_progress,
-            )
-            steps.append(repack_step)
-
-        # 4) 抓包：有设备且有包名才做；先 confirm 提示用户操作 app 触发网络。
+        # 4) 第一遍（original 基线）：★始终跑原版 APK + floor PCAP，绝不重打包、绝不注入行为修改
+        #    shim。主报告**只采信这一遍**——它是「样本自发行为」的干净观测，是后续一切对照的基准。
+        #    产物落 out/pass1-original/，与第二遍物理隔离（两遍都会写 runtime_report.json/flows/pcap）。
+        pass1_out = str(Path(out_dir) / "pass1-original")
         capture_step, runtime_report_path = _run_capture(
             package_name,
-            out_dir=out_dir,
+            out_dir=pass1_out,
             has_device=has_device,
             serial=target_serial,
             duration=capture_duration,
             on_progress=on_progress,
             confirm=confirm,
             report=report,
+            # ★设备侧 floor pcap 的远端路径按 pass 区分：pull 失败时 capture 会**特意保留**远端那份
+            #   供手动重拉，两遍共用固定路径的话第二遍起手的 rm -f 会把它删掉（不可恢复的证据丢失）。
+            pass_tag="pass1",
         )
         steps.append(capture_step)
+
+        # 本次实际抓的 APK 身份。第一遍恒 original；第二遍成功启动才补 wrapper。
+        # ★路径可同名、可被覆盖，哈希才是身份——报告里必须能回答「这份证据采自哪个 APK」。
+        # ★``which`` 必须反映**设备上实际在跑什么**，不能想当然标 original：安装原包失败时（典型是
+        #   上一次旁路轮的 wrapper 仍在设备上、签名不同装不上），第一遍 spawn 到的是那个遗留 wrapper，
+        #   把它的流量标成 original-runtime 就是伪造证据身份——不可判定时标 unknown 并说明原因。
+        apk_identity: dict[str, Any] = {
+            "which": "original" if (install_ok or not has_device) else "unknown",
+            "original": {"path": apk_path, "sha256": _apk_sha256(apk_path)},
+            "wrapper": None,
+        }
+        if not (install_ok or not has_device):
+            apk_identity["identity_warning"] = (
+                "原包安装失败（可能是此前旁路轮的去壳重打包版仍在设备上），"
+                "本轮实际运行的 APK 身份不可确认；证据不得按 original-runtime 采信"
+            )
+        pass2_runtime_report: str | None = None
+        pass2_variant: str = ""  # 旁路轮实测 variant（由 capture 按是否真注入 shim 算出，不由本层假定）
+
+        # 4.5) 旁路轮（第二遍，modified-runtime）：仅当①第一遍确有基线产物、②判据建议、③取得显式
+        #      行为修改授权，三者同时成立才跑。任一不满足 → 结构化 skipped + 写明原因，绝不自动提权。
+        pass1_payload = _read_runtime_payload(runtime_report_path)
+        pass1_status = str(capture_step.get("status") or "")
+        if not (pass1_status in (_DONE, _DEGRADED) and runtime_report_path and pass1_payload):
+            # ★硬前置：没有 original 基线就绝不允许跑 modified——否则唯一的运行时证据将全部来自
+            #   被我方诱导的那一轮，且无从对照。这条比"判据建议与否"更优先。
+            steps.append(
+                _step(_STEP_BYPASS, _SKIPPED, "无第一遍 original 基线产物，拒绝执行旁路轮（先修环境/重抓）")
+            )
+        else:
+            suggests, reason = _pass1_suggests_bypass(pass1_status, pass1_payload)
+            if not suggests:
+                # 第一遍健康：不跑旁路是正常路径，记一条 skipped 让"为什么没跑"可查（非降级）。
+                steps.append(_step(_STEP_BYPASS, _SKIPPED, reason))
+            elif not (allow_behavior_modification is True and antidetect == "java"):
+                # ★判据是弱代理（见 _pass1_suggests_bypass 的诚实边界），故绝不自动提权：
+                #   只把建议摆出来，由人决定是否授权重跑。假阳的代价止于一次确认。
+                steps.append(
+                    _step(
+                        _STEP_BYPASS,
+                        _SKIPPED,
+                        f"判据建议旁路，但未取得行为修改授权（--allow-behavior-modification --antidetect java）：{reason}",
+                    )
+                )
+            elif not repackage:
+                steps.append(
+                    _step(_STEP_BYPASS, _SKIPPED, f"判据建议旁路且已授权，但调用方已禁用去壳重打包：{reason}")
+                )
+            else:
+                _emit(on_progress, f"旁路轮：{reason}（已授权，去壳重打包 + 行为修改 shim 重抓一遍）")
+                pass2_out = str(Path(out_dir) / "pass2-modified")
+                # ★恰好尝试一次、绝不重试；且全程不得影响第一遍已产出的主报告（旁路失败即退回 PCAP 主链）。
+                repack_step, wrapper_apk_path = _run_repackage(
+                    apk_path,
+                    package_name,
+                    # ★必须传主 out_dir，不能传 pass2_out：repackage 固定从 <out_dir>/dump 取脱壳 DEX，
+                    #   而脱壳产物落在主 out/dump（第 3 步产出）。传 pass2 子目录会让它找不到 DEX、
+                    #   旁路轮恒报"无料可重打包"；更糟的是若 pass2/dump 有旧残留还会用错 DEX。
+                    #   repack 自身产物落 <out_dir>/repack/，与两遍的 capture 产物目录不冲突。
+                    out_dir=out_dir,
+                    has_device=has_device,
+                    serial=target_serial,
+                    on_progress=on_progress,
+                )
+                repack_step = dict(repack_step, name=_STEP_BYPASS_REPACKAGE)
+                steps.append(repack_step)
+                if repack_step.get("status") == _DONE and wrapper_apk_path:
+                    apk_identity["wrapper"] = {
+                        "path": wrapper_apk_path,
+                        "sha256": _apk_sha256(wrapper_apk_path),
+                    }
+                    pass2_step, pass2_path = _run_capture(
+                        package_name,
+                        out_dir=pass2_out,
+                        has_device=has_device,
+                        serial=target_serial,
+                        duration=capture_duration,
+                        on_progress=on_progress,
+                        confirm=confirm,
+                        # ★不把静态 report 传进旁路轮：第二遍只产独立 runtime_report.json，
+                        #   不并入任何 Report、不跑第二份 closure（保 S2 的报告级 variant 单值不破）。
+                        report=None,
+                        allow_behavior_modification=True,
+                        antidetect="java",
+                        pass_tag="pass2",  # 设备侧 floor pcap 与第一遍分开，绝不覆盖 original 基线
+                    )
+                    pass2_step = dict(pass2_step, name=_STEP_BYPASS_CAPTURE)
+                    steps.append(pass2_step)
+                    if pass2_step.get("status") in (_DONE, _DEGRADED) and pass2_path:
+                        pass2_runtime_report = pass2_path
+                        # ★不假定旁路轮一定是 modified-runtime：capture 按**实际是否注入了 shim**
+                        #   计算 variant（frida 会话失败回退 subprocess 时它诚实写 original-runtime）。
+                        #   这里必须读回它的结论，否则主报告会宣称"诱导轮"而实际那轮根本没注入。
+                        pass2_variant = str(
+                            _read_runtime_payload(pass2_path).get("runtime_variant") or ""
+                        ) or "unknown"
+                else:
+                    steps.append(
+                        _step(_STEP_BYPASS_CAPTURE, _SKIPPED, "去壳重打包未产出 wrapper APK，旁路轮未执行")
+                    )
+
+        # 4.9) 落 APK 身份：★必须在合并**之前**写进 meta，否则 merge 重渲出的报告里没有这一栏——
+        #      「这份运行时证据采自哪个 APK（原版还是去壳重打包版）、哈希多少」是取证溯源的硬要求。
+        #      旁路轮若产出了独立 runtime_report，指针一并挂上（该份是 modified-runtime，不并入主报告）。
+        if report is not None:
+            if pass2_runtime_report:
+                apk_identity["pass2_runtime_report"] = pass2_runtime_report
+                # 旁路轮的**实测** variant（可能是 original-runtime——授权了但 frida 会话失败回退
+                # subprocess 时 shim 根本没进去）。据实记录，报告据此渲染，不替它宣称"诱导轮"。
+                apk_identity["pass2_runtime_variant"] = pass2_variant or "unknown"
+            report.meta["capture_apk_identity"] = apk_identity
 
         # 5) 合并：抓包成功且静态有 report 才把运行时端点并回主报告并重渲。
         if capture_step["status"] == _DONE and report is not None and runtime_report_path:
@@ -587,6 +709,28 @@ def _adopt_unpacked_report(
     return unpacked
 
 
+def _apk_sha256(path: str | None) -> str | None:
+    """算 APK 文件的 sha256（分块读，不整文件进内存）。路径缺失/不可读 → None（best-effort，绝不抛）。
+
+    ★P0-c：报告里必须写明「这一遍实际抓的是哪个 APK」——路径可以同名、可以被覆盖，哈希才是身份。
+    repackage 侧不产哈希（通读确认无 hashlib），故由本层新算。
+    """
+    if not path:
+        return None
+    try:
+        file_path = Path(path)
+        if not file_path.is_file():
+            return None
+        digest = hashlib.sha256()
+        with file_path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except Exception:  # noqa: BLE001 - 算不出哈希不该中断流水线，缺身份好过崩
+        logger.exception("[auto] 计算 APK sha256 失败（记为缺失，不中断）：%s", path)
+        return None
+
+
 def _run_repackage(
     apk_path: str,
     package_name: str,
@@ -595,25 +739,99 @@ def _run_repackage(
     has_device: bool,
     serial: str | None = None,
     on_progress: Callable[[str], None] | None,
-) -> tuple[dict, list[str]]:
+) -> tuple[dict, str | None]:
     """步骤 3.6：去壳重打包（仅有设备才做）。无设备 → skipped；异常 → error，均不中断流水线。
 
     去壳成功 → done（去壳版已装回，capture 将抓此版）；无料/判定不过 → repackage 内部降级 skipped
     （重装原包，capture 仍跑原版）。serial 透传（多设备消歧）。
+
+    ★P0-c：第二元素返回 **wrapper APK 路径**（仅 status==done 时非 None），供编排层把「设备上实际
+    在跑哪个 APK」的身份贯穿进报告。此前这里返回的是 ``_fold_dynamic_step`` 折出的 ``report_paths``——
+    而 ``repackage.run`` 只设 ``artifacts``、从不设 ``report_paths``，故那个返回值**恒为空列表**、
+    wrapper 路径从没被任何人读到过（不是「有值但被丢弃」，是压根没取对字段）。
     """
     if not has_device:
         _emit(on_progress, "步骤 3.6：去壳重打包（无设备，优雅跳过）")
-        return _step(_STEP_REPACKAGE, _SKIPPED, "未检测到在线设备，跳过去壳重打包"), []
+        return _step(_STEP_REPACKAGE, _SKIPPED, "未检测到在线设备，跳过去壳重打包"), None
 
     _emit(on_progress, "步骤 3.6：去壳重打包（脱壳 DEX 装回 → 重签 → 装去壳版供 capture 抓）")
     try:
         from apkscan.dynamic import repackage
 
         result = repackage.run(apk_path, out=out_dir, serial=serial, package_name=package_name)
-        return _fold_dynamic_step(_STEP_REPACKAGE, result)
+        step, _ = _fold_dynamic_step(_STEP_REPACKAGE, result)
+        # ★只有 done 才代表「去壳版真的装上了、设备在跑它」；skipped 是 repackage 内部降级重装原包
+        #   （四联判定不过/无料），error 是异常——两者设备上跑的都是原版，绝不能标成 wrapper。
+        wrapper_path: str | None = None
+        if step.get("status") == _DONE and isinstance(result, dict):
+            artifacts = result.get("artifacts") or []
+            if isinstance(artifacts, list) and artifacts:
+                wrapper_path = str(artifacts[0])
+        return step, wrapper_path
     except Exception as exc:  # noqa: BLE001 - 去壳重打包失败不中断流水线
         logger.exception("[auto] 去壳重打包步骤异常：%s", apk_path)
-        return _step(_STEP_REPACKAGE, _ERROR, f"去壳重打包异常：{exc}"), []
+        return _step(_STEP_REPACKAGE, _ERROR, f"去壳重打包异常：{exc}"), None
+
+
+def _pass1_suggests_bypass(capture_status: str, rr_payload: dict) -> tuple[bool, str]:
+    """据第一遍（original 基线）的产出，判断是否**建议**跑第二遍旁路。纯函数，绝不抛。
+
+    Returns:
+        ``(建议与否, 理由)``。理由恒为人可读的中文串——即便判"不建议"也给出原因，
+        调用方要拿它写进 skipped 步骤的 detail，说明"为什么没跑第二遍"。
+
+    ★判据的诚实边界（写死在这里，防后人把弱代理当强证据）：
+      - "业务端点为零" 与 "hook 未就绪" 都**区分不了**「样本装死/反检测顶回来了」与
+        「这个样本本来就没有业务流量」——两者在当前信号下形态相同。
+      - 第一遍不注入 shim，因此**没有**任何 antidetect 观测可用，"明确反检测"没有强信号。
+      → 故本函数只产出「建议」，第二遍必须另有显式授权才会真跑（见调用方）。弱代理的假阳
+        只会多花一次授权确认，不会自动把诱导观测灌进证据链。
+    """
+    if capture_status not in (_DONE, _DEGRADED):
+        return False, "第一遍未产出 original 基线（先修环境/重抓），不进第二遍"
+    signals = rr_payload.get("capture_signals")
+    signals = signals if isinstance(signals, dict) else {}
+    # ★字段缺失 ≠ 零。缺 endpoint_total 说明这份 payload 本身不可信（旧格式/写坏），此时既不能说
+    #   「端点为零」（那是替它下结论、并据以推荐一次会污染证据的旁路），也不该放行——按「基线不可判定」
+    #   拒绝，遵「不可判定不得返回正常值」。有合法 endpoints 数组时可退而求其次按其长度判。
+    total = rr_payload.get("endpoint_total")
+    if not isinstance(total, int) or isinstance(total, bool) or total < 0:
+        # 负数同样是坏值（计数不可能为负），退回按 endpoints 数组长度判，再不行就是不可判定。
+        eps = rr_payload.get("endpoints")
+        total = len(eps) if isinstance(eps, list) else None
+    if total is None:
+        return False, "第一遍基线不可判定（runtime_report 缺 endpoint_total/endpoints），拒绝据以推荐旁路"
+
+    reasons: list[str] = []
+    if total == 0:
+        reasons.append("业务端点为零")
+    if signals.get("frida_retreated") is True:
+        reasons.append(f"frida 秒退熔断（{signals.get('frida_retreat_count') or 0} 次）")
+    hook_status = signals.get("hook_ready_status")
+    if hook_status in ("unconfirmed", "none"):
+        reasons.append(f"frida hook 未就绪（{hook_status}，疑反 frida）")
+    if capture_status == _DEGRADED:
+        # `_fold_dynamic_step` 会把 DynamicResult 的 degraded 折成 error（全局既有行为，不在本片动），
+        # 但 `_run_capture` 局部还原了该状态——degraded＝「跑完了、只是没有可用证据路径」，与「压根没
+        # 跑起来」的 error 语义完全不同，正是判断要不要旁路的关键信号，故本分支在生产链路可达。
+        reasons.append("抓包降级（无证据路径）")
+    if not reasons:
+        # ★措辞不得替信号下结论：hook_ready_status 缺失时我们只是"没看到触发信号"，不等于"hook 就绪"
+        #   （那是在报告一个我们并不知道的事实）。只陈述已知：没有任何一条旁路判据被触发。
+        return False, "第一遍未出现旁路触发信号（业务端点非零、未秒退、无降级），无需旁路"
+    return True, "；".join(reasons)
+
+
+def _read_runtime_payload(runtime_report_path: str) -> dict:
+    """读回 runtime_report.json（供判据用）。缺失 / 坏 JSON → ``{}``（不抛，但记日志）。"""
+    if not runtime_report_path:
+        return {}
+    try:
+        payload = json.loads(Path(runtime_report_path).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - 读不回第一遍产物只影响"要不要建议旁路"，不该中断流水线
+        logger.exception("[auto] 读取第一遍 runtime_report.json 失败：%s", runtime_report_path)
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _run_capture(
@@ -626,6 +844,9 @@ def _run_capture(
     on_progress: Callable[[str], None] | None,
     confirm: Callable[[str], None] | None,
     report: object = None,
+    allow_behavior_modification: bool = False,
+    antidetect: str = "off",
+    pass_tag: str = "",
 ) -> tuple[dict, str]:
     """步骤 4：抓包（有设备 + 有包名才做）。先 confirm 提示用户操作 app 触发网络。
 
@@ -656,11 +877,25 @@ def _run_capture(
         from apkscan.dynamic import capture
 
         result = capture.run(
-            package_name, out=out_dir, duration=duration, serial=serial, report=report
+            package_name,
+            out=out_dir,
+            duration=duration,
+            serial=serial,
+            report=report,
+            allow_behavior_modification=allow_behavior_modification,
+            antidetect=antidetect,
+            pass_tag=pass_tag,
         )
         step, _ = _fold_dynamic_step(_STEP_CAPTURE, result)
+        # ★局部保留 degraded：`_fold_dynamic_step` 把它折成 error（全局既有行为，不在本片动），但抓包
+        #   的 degraded 语义是「跑完了、只是没有可用证据路径」——与「压根没跑起来」的 error 完全不同，
+        #   且它正是判断要不要跑旁路轮的关键信号之一。只在本函数还原该状态并照常解析报告路径，
+        #   使 degraded 判据在生产链路真正可达（否则那条分支只有纯函数测试能触发）。
+        raw_status = str(result.get("status") or "") if isinstance(result, dict) else ""
+        if raw_status == _DEGRADED and step["status"] == _ERROR:
+            step = dict(step, status=_DEGRADED)
         runtime_path = ""
-        if step["status"] == _DONE:
+        if step["status"] in (_DONE, _DEGRADED):
             runtime_path = _resolve_runtime_report_path(result, out_dir)
         return step, runtime_path
     except Exception as exc:  # noqa: BLE001 - 抓包失败不中断流水线
