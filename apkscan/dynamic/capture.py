@@ -42,7 +42,7 @@ from typing import Any
 
 from apkscan.core import device, infra, tools
 from apkscan.core.closure import evaluate_capture_quality
-from apkscan.core.models import Endpoint, Evidence
+from apkscan.core.models import OBSERVED_CONTACT_SOURCES, Endpoint, Evidence
 from apkscan.dynamic import (
     STATUS_DEGRADED,
     STATUS_DONE,
@@ -166,6 +166,13 @@ Java.perform(function () {
 # ★#8 合法抓包模式（both=mitm+floor；floor-only/no-proxy=不设代理只带外抓；mitm-only=不起 floor）。
 _CAPTURE_MODES = frozenset({"both", "floor-only", "mitm-only", "no-proxy"})
 
+#: P0-a：行为修改 shim 注入轮（modified-runtime）的 observed-contact 证据降钉令牌。仍以 "runtime" 开头
+#: → ``is_runtime_seen`` 保持 True（该值确实在运行时出现过）；但**不在**
+#: :data:`apkscan.core.models.OBSERVED_CONTACT_SOURCES` → ``is_runtime_contact`` 自动为 False，
+#: 关闭"确认接触/C2"徽标与网络角色信任门。
+#: ★绝不可把本令牌加进 OBSERVED_CONTACT_SOURCES 或任何既有 allowlist——加了本降档即自毁。
+RUNTIME_MODIFIED_SOURCE = "runtime-modified"
+
 
 def _build_capture_quality(
     floor_summary: pcap_ingest.PcapSummary | None,
@@ -173,8 +180,14 @@ def _build_capture_quality(
     pcap_app_attr: dict[str, Any],
     *,
     channel_ready: bool,
+    runtime_variant: str = "original-runtime",
 ) -> dict[str, object]:
-    """Build strict business-evidence quality without changing capture step semantics."""
+    """Build strict business-evidence quality without changing capture step semantics.
+
+    ★P0-a：``runtime_variant`` 必须随 raw 一并传进 :func:`evaluate_capture_quality`——闭环门读的是
+    ``report.meta['capture_quality']``（``_capture_meta`` 的**第一顺位**），只把 variant 放进
+    ``capture_signals``（第三顺位）在真采集路径下永远读不到，那道 modified 封顶守卫就成了空接线。
+    """
     raw_flows = getattr(floor_summary, "flows", []) if floor_summary is not None else []
     flows = raw_flows if isinstance(raw_flows, list) else []
     packet_count = sum(max(0, int(getattr(flow, "packets", 0) or 0)) for flow in flows)
@@ -294,6 +307,8 @@ def _build_capture_quality(
     bidirectional_count = floor_bidirectional + mitm_bidirectional
     bidirectional_target_count = floor_bidirectional + mitm_attr_bidirectional
     raw = {
+        # ★P0-a：随 quality 一并落盘，使闭环门（读 meta['capture_quality']）能看到本轮是否为诱导轮。
+        "runtime_variant": runtime_variant,
         "channel_ready": channel_ready,
         "pcap_valid": packet_count > 0,
         "packet_count": packet_count,
@@ -673,6 +688,14 @@ def _capture(
     # frida-core 不可用/注入失败时 frida_session 保持 None、回退 subprocess（无 key 回传）。
     frida_session: Any = None
     frida_script: Any = None
+    # ★P0-a sticky：本轮是否**曾经**把行为修改 shim 注入进目标进程（script.load()+resume() 成功即置位，
+    #   **绝不回退**）。不能用 frida_session 代替：会话秒退时它会被清成 None，但 MITM/floor 早在注入前就
+    #   已开录、且收尾统一解析同一批文件——秒退前 grace 期内那段流量**已被 shim 诱导**。若按 frida_session
+    #   判，就会把这段诱导流量标成 original-runtime（最危险的假标签：放行诱导证据升"实连已观测"/complete）。
+    shim_injected_ever = False
+    #: 传给 _start_frida_session 的可变信使：它在 script.load() 成功那一刻即置 injected=True，
+    #: 使「已注入」这个事实不依赖函数能否正常返回（load→return 之间抛异常也返回 (None, None)）。
+    shim_state: dict[str, bool] = {}
     crypto_events: list[dict[str, Any]] = []
     jsbridge_events: list[dict[str, Any]] = []  # P1：运行时 JS-bridge 暴露面/调用
     sensitive_api_events: list[dict[str, Any]] = []  # P1：运行时敏感 API 调用
@@ -790,7 +813,13 @@ def _capture(
                 serial=serial,
                 allow_behavior_modification=allow_behavior_modification,
                 antidetect=antidetect,
+                shim_state=shim_state,
             )
+            # ★sticky OR：以 shim_state 为准，而非返回值。shim 在 script.load() 那一刻就已进入目标进程，
+            #   而 load→return 之间任何异常都会让本次调用返回 (None, None)（那段流量却已被诱导）。
+            #   只按返回值置位会漏掉这个窗口 → 假 original。OR 语义保证曾注入过就永不回退。
+            if shim_state.get("injected"):
+                shim_injected_ever = True
             if frida_session is None:
                 break  # frida-core 不可用/注入失败 → 回退 subprocess（下方处理）。
             # frida-core liveness（治默认路径假成功）：resume 后短暂等待再验进程存活；
@@ -1153,11 +1182,29 @@ def _capture(
     mitm_channel_ok = proxy_set and reverse_set
     capture_signals["mitm_channel_ok"] = mitm_channel_ok
     _annotate_runtime_endpoints(endpoints, floor_summary, pcap_app_attr)
+    # ★P0-a variant 判据：本轮**曾经**注入过行为修改 shim 即为 modified-runtime（sticky，见
+    #   shim_injected_ever 的声明）。用「曾注入」而非「当前会话存活」：会话秒退会清空 frida_session，
+    #   但 MITM/floor 早在注入前开录、收尾统一解析同一批文件——秒退前 grace 期内那段流量已被诱导，
+    #   按"当前存活"判会把它标成 original（最危险的假标签）。回退 subprocess 从不注入 shim，
+    #   sticky 也不会置位，故不产生假 modified。
+    #   位置须在 _annotate_runtime_endpoints 之后：那里先对"归因否定"的端点做另一种 source 降级，
+    #   本 remap 只处理仍在 observed-contact allowlist 内的证据，两种语义不相互覆盖。
+    runtime_variant = "modified-runtime" if shim_injected_ever else "original-runtime"
+    if runtime_variant == "modified-runtime":
+        for endpoint in endpoints:
+            runtime_enrichment = endpoint.enrichment.setdefault("runtime", {})
+            if isinstance(runtime_enrichment, dict):
+                runtime_enrichment["variant"] = runtime_variant
+            for evidence in endpoint.evidences:
+                if evidence.source in OBSERVED_CONTACT_SOURCES:
+                    evidence.source = RUNTIME_MODIFIED_SOURCE
+    capture_signals["runtime_variant"] = runtime_variant
     capture_signals["quality"] = _build_capture_quality(
         floor_summary,
         mitm_endpoints,
         pcap_app_attr,
         channel_ready=mitm_channel_ok or floor_handle is not None,
+        runtime_variant=runtime_variant,
     )
     evidence_path_ok = mitm_channel_ok or floor_pcap is not None or len(endpoints) > 0 or mitm_bytes > 0
     if result["status"] == STATUS_DONE and not evidence_path_ok:
@@ -1187,6 +1234,7 @@ def _capture(
         budget_exceeded=budget_exceeded,
         capture_signals=capture_signals,
         capture_capabilities=capabilities_plan,
+        runtime_variant=runtime_variant,
     )
     report_paths = [report_path] if report_path else []
 
@@ -1497,6 +1545,7 @@ def _start_frida_session(
     *,
     allow_behavior_modification: bool = False,
     antidetect: str = "off",
+    shim_state: dict[str, bool] | None = None,
 ) -> tuple[Any, Any]:
     """用 frida-core（``import frida``）spawn 目标 app 并注入 unpinning + 运行时 hook 套件。
 
@@ -1598,6 +1647,12 @@ def _start_frida_session(
                 cryptohook.make_typed_handler(chan_sink, msg_type, normalize),
             )
         script.load()
+        # ★P0-a：shim 一旦 load 进目标进程，样本行为即可能被改写、流量即可能被诱导。此处**立刻**把
+        #   事实写进调用方持有的 shim_state（而不是靠返回值）——resume 之后到 return 之间的任何异常都会
+        #   让本函数返回 (None, None)，若 sticky 只在调用方按返回值置位，那段已被诱导的流量就会被标成
+        #   original-runtime（假 original，放行诱导证据升"实连已观测"/complete）。
+        if shim_state is not None and allow_behavior_modification is True and antidetect == "java":
+            shim_state["injected"] = True
         device_handle.resume(pid)
         logger.info("[capture] frida-core spawn+attach 成功：pid=%s package=%s", pid, package)
         return session, script
@@ -3482,6 +3537,7 @@ def _write_runtime_report(
     budget_exceeded: bool = False,
     capture_signals: dict[str, Any] | None = None,
     capture_capabilities: dict[str, Any] | None = None,
+    runtime_variant: str = "original-runtime",
 ) -> str:
     """把运行时端点写成 out/runtime_report.json（复用 report.json 的序列化）。
 
@@ -3493,6 +3549,11 @@ def _write_runtime_report(
 
     P0：``crypto_events`` 为运行时密钥 hook 抓到的活体 crypto 事件（key/iv/明文等），供
     merge 阶段反推「实测配方」优先解密信封；默认空数组（向后兼容）。
+
+    P0-a：``runtime_variant`` 标明本轮抓包是否注入了行为修改 shim——``original-runtime``＝未注入
+    （观测即样本自发行为，走既有 observed-contact/complete 链）；``modified-runtime``＝注入了反检测/
+    root 隐藏/Build 伪造 shim，观测**被我方诱导**（下游据此封顶 PARTIAL、不授"确认接触"徽标）。
+    缺省 original-runtime（fail-safe：不因缺省把诱导轮误标成干净轮）。
     返回报告路径；写出失败记日志返回空串（不抛）。
     """
     report_file = out_path / "runtime_report.json"
@@ -3500,6 +3561,9 @@ def _write_runtime_report(
         "package_name": package,
         "source": "runtime",
         "capture_complete": complete,
+        # P0-a：original-runtime（未注入行为修改 shim，观测＝样本自发行为）/ modified-runtime（注入了
+        # 反检测 shim，观测被我方诱导）。缺省 original-runtime；始终输出（与其余字段同款）。
+        "runtime_variant": runtime_variant,
         # P0-4：结构化采集信号（proxy_set/floor_started/floor_pulled/hook_ready/mitm_bytes/
         # endpoint_total/degraded），供下游/人工判这次抓包哪路成了、哪路降级，杜绝"假成功"。
         "capture_signals": dict(capture_signals or {}),

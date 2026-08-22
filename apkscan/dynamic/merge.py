@@ -76,6 +76,7 @@ META_WRITE_CATEGORIES = {
     'runtime_remote_control_unknown_packages': 'signal',
     'runtime_sensitive_apis': 'signal',
     'runtime_traced': 'coverage',
+    'runtime_variant': 'signal',
     'visibility': 'signal',
 }
 META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
@@ -207,6 +208,23 @@ def merge_capture_capabilities(report: Report, runtime_report_path: str) -> dict
     caps_dict = dict(caps)
     report.meta["capture_capabilities"] = caps_dict
     return caps_dict
+
+
+def merge_runtime_variant(report: Report, runtime_report_path: str) -> str:
+    """把 ``runtime_report.json`` 顶层 ``runtime_variant`` 拷进 ``report.meta['runtime_variant']``。
+
+    ``original-runtime``＝本轮未注入行为修改 shim（观测即样本自发行为）；``modified-runtime``＝注入了
+    反检测/root 隐藏/Build 伪造 shim，观测**被我方诱导**——报告级标注，供人工与下游据此分档。
+    缺失 / 非字符串 / 空 → 不写、返回 ``""``（不抛）。
+    """
+    payload = _read_runtime_payload(runtime_report_path)
+    if not isinstance(payload, Mapping):
+        return ""
+    variant = payload.get("runtime_variant")
+    if not isinstance(variant, str) or not variant:
+        return ""
+    report.meta["runtime_variant"] = variant
+    return variant
 
 
 def load_runtime_endpoints(runtime_report_path: str) -> list[Endpoint]:
@@ -2477,6 +2495,9 @@ def merge_and_rerender(
         caps = merge_capture_capabilities(report, rr_path)  # A1-3：能力计划快照 → report.meta
         if caps:
             stats["capture_capabilities_mode"] = caps.get("mode")
+        variant = merge_runtime_variant(report, rr_path)  # P0-a：original/modified 轮标注 → report.meta
+        if variant:
+            stats["runtime_variant"] = variant
         for step in _RUNTIME_MERGE_STEPS:
             _emit(on_progress, step.progress)
             sub = step.func(report, rr_path)

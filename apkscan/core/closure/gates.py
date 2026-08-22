@@ -80,7 +80,17 @@ def evaluate_capture_quality(meta: Mapping[str, object]) -> dict[str, object]:
         # 正是本次要堵的洞；两者都缺时按 0 → partial（fail-closed）。
         target_bidirectional = _non_negative_int(raw.get("bidirectional_floor_count"))
 
-    if target_count > 0 and business_count > 0 and target_bidirectional > 0:
+    # ★P0-a：行为修改 shim 注入轮（modified-runtime）的观测是**被我方诱导**出来的，不得据以主张
+    #   「已掌握运行时实连去向」。封顶 PARTIAL——否则本门产出的 complete 会与端点侧的 runtime-modified
+    #   降钉、报告告警自相矛盾（机器可读字段与证据档位打架），且本门确实参与总闭环 checks。
+    modified_runtime = str(raw.get("runtime_variant") or "") == "modified-runtime"
+    if modified_runtime and target_count > 0 and business_count > 0:
+        status = CLOSURE_PARTIAL
+        reason = (
+            "runtime evidence captured under behavior-modification shim (modified-runtime); "
+            "induced observation cannot independently establish a reached backend"
+        )
+    elif target_count > 0 and business_count > 0 and target_bidirectional > 0:
         status = CLOSURE_COMPLETE
         reason = "target-attributed endpoint observed with bidirectional payload on that same endpoint"
     elif target_count > 0 and business_count > 0 and bidirectional_count > 0:
@@ -127,6 +137,9 @@ def evaluate_capture_quality(meta: Mapping[str, object]) -> dict[str, object]:
         # 因基础设施判据被排除的对端数（公共解析器上的 DNS 等）。单列出来，
         # 免得"排除了噪音"与"本来就没流量"在读报告时长得一样。
         "infrastructure_excluded_count": _non_negative_int(raw.get("infrastructure_excluded_count")),
+        # ★P0-a：variant 必须原样透传进结果——闭环门读的是 report.meta['capture_quality']（即本返回体），
+        #   不透传则二次求值时判据丢失、modified 封顶守卫成为空接线（信号必须接线：gate 消费 + 报告可见）。
+        "runtime_variant": str(raw.get("runtime_variant") or "original-runtime"),
         "dynamic_status": status,
         "reason": reason,
         "floor_parse_status": floor_parse_status,

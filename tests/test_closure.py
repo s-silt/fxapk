@@ -111,6 +111,7 @@ def _endpoint(
     sni: bool = False,
     enrichment: dict | None = None,
     location: str = "synthetic",
+    variant: str | None = None,
 ) -> Endpoint:
     source = "runtime" if runtime else "dex"
     merged_enrichment = dict(enrichment or {})
@@ -120,6 +121,8 @@ def _endpoint(
             "has_payload": payload,
             "sni": "api.example.test" if sni else None,
         }
+        if variant is not None:
+            merged_enrichment["runtime"]["variant"] = variant
     return Endpoint(
         value=value,
         kind=kind,
@@ -269,6 +272,29 @@ def test_close_report_truncated_targets_yield_partial_with_gap() -> None:
         "dropped": ["198.51.100.16"],
     }
     assert any("198.51.100.16" in str(gap) for gap in closure["gaps"])
+
+
+def test_modified_runtime_endpoint_cannot_close_case() -> None:
+    """★P0-a：行为修改 shim 注入轮（modified-runtime）的端点不得独立结案。
+
+    即便 target_attributed=True + 五层富化齐全，诱导出来的观测也只能封顶 PARTIAL——须由 original 轮 /
+    静态调用路径 / 设备落地物 / 服务端调证独立印证。与同构造的 original 端点严格对照。
+    """
+    template = _complete_endpoint()
+    modified = _endpoint(
+        "198.51.100.10", runtime=True, target=True, payload=True,
+        variant="modified-runtime", enrichment=template.enrichment,
+    )
+
+    closure = _close(_report(modified), ClosureConfig(online=False, require_dynamic=False), enrichers=[])
+
+    assert closure["status"] != CLOSURE_COMPLETE
+    assert any("198.51.100.10" in str(gap) for gap in closure["gaps"])
+
+    # original 对照：同构造、无 variant → 仍应 complete（证明降档只由 variant 触发，未误伤干净轮）。
+    original = _complete_ip_endpoint("198.51.100.10")
+    closure_orig = _close(_report(original), ClosureConfig(online=False, require_dynamic=False), enrichers=[])
+    assert closure_orig["status"] == CLOSURE_COMPLETE
 
 
 def test_close_report_untruncated_targets_stay_complete() -> None:
@@ -462,6 +488,31 @@ def test_capture_channel_without_packets_is_failed() -> None:
     )
 
     assert quality["dynamic_status"] == CLOSURE_FAILED
+
+
+def test_capture_quality_modified_runtime_cannot_be_complete() -> None:
+    """★P0-a：modified-runtime 轮即便计数全满也不得判 complete（封顶 PARTIAL）。
+
+    否则本门产出的机器可读「已掌握运行时实连去向」资格，会与端点侧 runtime-modified 降钉、
+    报告告警自相矛盾；且本门参与总闭环 checks（gates 的 dynamic_health）。
+    """
+    full_counts = {
+        "channel_ready": True,
+        "pcap_valid": True,
+        "packet_count": 12,
+        "business_candidate_count": 1,
+        "target_attributed_count": 1,
+        "bidirectional_target_count": 1,
+    }
+    modified = evaluate_capture_quality({**full_counts, "runtime_variant": "modified-runtime"})
+    assert modified["dynamic_status"] == CLOSURE_PARTIAL
+
+    # original 对照：同样计数应仍判 complete（证明降档只由 variant 触发，未误伤干净轮）。
+    original = evaluate_capture_quality({**full_counts, "runtime_variant": "original-runtime"})
+    assert original["dynamic_status"] == CLOSURE_COMPLETE
+    # 缺字段（旧报告）→ 与 original 同（向后兼容，不因缺省压制）。
+    legacy = evaluate_capture_quality(dict(full_counts))
+    assert legacy["dynamic_status"] == CLOSURE_COMPLETE
 
 
 def test_capture_business_candidate_without_target_attribution_is_partial() -> None:

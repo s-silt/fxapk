@@ -429,7 +429,13 @@ def _runtime_layer(endpoint: Endpoint) -> dict[str, object]:
         "locations": sorted({ev.location for ev in runtime_evidence}),
         "target_attributed": runtime.get("target_attributed") is True,
         "has_payload": runtime.get("has_payload") is True,
+        "variant": runtime.get("variant"),
     }
+    # ★modified-runtime 守卫：行为修改 shim（反检测/root 隐藏/Build 伪造）注入轮的运行时观测是**被我方
+    #   诱导**出来的，不得独立升 complete——封顶 PARTIAL，需 original 轮 / 静态调用路径 / 设备落地物 /
+    #   服务端调证独立印证。必须在 target_attributed 判定之前，否则该判定会先行返回 COMPLETE。
+    if runtime.get("variant") == "modified-runtime":
+        return _layer(CLOSURE_PARTIAL, evidence, reason="modified-runtime cannot independently close")
     if runtime.get("target_attributed") is True:
         return _layer(CLOSURE_COMPLETE, evidence)
     if runtime.get("observed"):

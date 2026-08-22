@@ -432,6 +432,8 @@ def test_build_capture_quality_requires_target_attributed_business_traffic(
         "bidirectional_floor_count": 0,
         "bidirectional_mitm_count": 1,
         "infrastructure_excluded_count": 0,
+        # P0-a：缺省干净轮（未注入行为修改 shim）→ 判定不受影响，仍 complete。
+        "runtime_variant": "original-runtime",
         "dynamic_status": "complete",
         "reason": "target-attributed endpoint observed with bidirectional payload on that same endpoint",
         "floor_parse_status": "ok",
@@ -2351,7 +2353,7 @@ def test_capture_threads_behavior_flags_to_session(monkeypatch, tmp_path):
     monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
     seen: dict[str, Any] = {}
 
-    def _rec_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None, serial=None, *, allow_behavior_modification=False, antidetect="off"):
+    def _rec_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None, serial=None, *, allow_behavior_modification=False, antidetect="off", **_kw):
         seen["allow"] = allow_behavior_modification
         seen["antidetect"] = antidetect
         return object(), object()
@@ -2362,6 +2364,176 @@ def test_capture_threads_behavior_flags_to_session(monkeypatch, tmp_path):
         allow_behavior_modification=True, antidetect="java",
     )
     assert seen == {"allow": True, "antidetect": "java"}
+
+
+def _fake_session_injecting_shim(*a, **k):
+    """模拟真实 _start_frida_session：授权+java 时 script.load() 会把 shim 送进目标进程，
+    并**立刻**在 shim_state 上置位（真实现如此，见其内部注释）。返回存活会话。"""
+    if k.get("allow_behavior_modification") is True and k.get("antidetect") == "java":
+        state = k.get("shim_state")
+        if state is not None:
+            state["injected"] = True
+    return object(), object()
+
+
+def _run_capture_with_endpoint(monkeypatch, tmp_path, *, live_session: bool = False, **run_kwargs):
+    """驱动 capture.run 全链并让它产出一个 runtime 端点，回传 runtime_report.json 的 payload。
+
+    live_session=True 时模拟"in-core 会话建立并存活"（注入了 shim 的那条路径）；默认 False 走
+    _stub_orchestration 的 (None, None)，即 frida-core 不可用回退 subprocess（不注入 shim）。
+    ★桩顺序：必须在 _stub_orchestration 之后覆写，否则会被它的默认桩盖掉。
+    """
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
+    if live_session:
+        monkeypatch.setattr(capture, "_start_frida_session", _fake_session_injecting_shim)
+        monkeypatch.setattr(capture, "_frida_session_alive", lambda s: True)
+        monkeypatch.setattr(capture, "_teardown_frida_session", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(
+        capture,
+        "_parse_flows",
+        lambda f: [
+            Endpoint(
+                value="100.64.0.10",
+                kind="ip",
+                evidences=[Evidence(source="runtime", location="flows.mitm", snippet="100.64.0.10")],
+            )
+        ],
+    )
+    capture.run("com.test.app", out_dir=str(tmp_path), duration=1, **run_kwargs)
+    return json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+
+
+def test_runtime_report_default_variant_is_original(monkeypatch, tmp_path):
+    """★fail-safe 缺省：未授权行为修改 → original-runtime，端点 source/既有 source 字段均不变。"""
+    payload = _run_capture_with_endpoint(monkeypatch, tmp_path)
+    assert payload["runtime_variant"] == "original-runtime"
+    assert payload["source"] == "runtime"  # 既有契约不破
+    ep = payload["endpoints"][0]
+    assert ep["evidences"][0]["source"] == "runtime"  # 未降钉
+    assert "variant" not in ep.get("enrichment", {}).get("runtime", {})
+
+
+def test_runtime_report_variant_modified_when_shim_injected(monkeypatch, tmp_path):
+    """★授权 + java + in-core 会话存活 → modified-runtime：端点 stamp variant 且 source 降钉。"""
+    payload = _run_capture_with_endpoint(
+        monkeypatch, tmp_path, live_session=True,
+        allow_behavior_modification=True, antidetect="java",
+    )
+    assert payload["runtime_variant"] == "modified-runtime"
+    ep = payload["endpoints"][0]
+    assert ep["enrichment"]["runtime"]["variant"] == "modified-runtime"
+    # observed-contact 令牌被降钉 → 下游 is_runtime_contact=False（C2 徽标关）
+    assert ep["evidences"][0]["source"] == "runtime-modified"
+
+
+def test_authorized_but_subprocess_fallback_stays_original(monkeypatch, tmp_path):
+    """★★假标签防线：授权开 + java，但 in-core 会话失败回退 subprocess（不注入 shim）→ 必须仍是 original。
+
+    subprocess 路径 _start_frida_unpinning 不注入行为修改 shim，此时打 modified 就是假标签
+    （过度压制合法证据）。判据里的 `frida_session is not None` 就是为这条存在——删掉它本测试必红。
+    """
+    payload = _run_capture_with_endpoint(
+        monkeypatch, tmp_path, allow_behavior_modification=True, antidetect="java"
+    )  # _stub_orchestration 的 _start_frida_session 恒返回 (None, None)
+    assert payload["runtime_variant"] == "original-runtime"
+    assert payload["endpoints"][0]["evidences"][0]["source"] == "runtime"
+
+
+def test_fast_exit_after_injection_still_marks_modified(monkeypatch, tmp_path):
+    """★★假 original 防线（codex 复审逮到）：shim 已注入 + app 已 resume，随后会话秒退 → 仍须 modified。
+
+    秒退会把 frida_session 清成 None，但 MITM/floor 早在注入前开录、收尾统一解析同一批文件——
+    grace 期内那段流量**已被 shim 诱导**。若按"当前会话存活"判就会标成 original，让诱导证据
+    升「实连已观测」/complete。sticky 标志（曾注入即置位、不回退）就是为这条存在。
+    """
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(
+        capture,
+        "_parse_flows",
+        lambda f: [
+            Endpoint(
+                value="100.64.0.10",
+                kind="ip",
+                evidences=[Evidence(source="runtime", location="flows.mitm", snippet="100.64.0.10")],
+            )
+        ],
+    )
+    # 会话建立成功（shim 已 load + app 已 resume，shim_state 已置位）……
+    monkeypatch.setattr(capture, "_start_frida_session", _fake_session_injecting_shim)
+    # ……但 liveness 判定为秒退 → frida_session 被清空、走 subprocess 回退。
+    monkeypatch.setattr(capture, "_frida_session_alive", lambda s: False)
+    monkeypatch.setattr(capture, "_teardown_frida_session", lambda *a, **k: None)
+
+    capture.run(
+        "com.test.app", out_dir=str(tmp_path), duration=1,
+        allow_behavior_modification=True, antidetect="java",
+    )
+    payload = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    assert payload["runtime_variant"] == "modified-runtime"
+    assert payload["endpoints"][0]["evidences"][0]["source"] == "runtime-modified"
+
+
+def test_shim_loaded_then_session_error_still_marks_modified(monkeypatch, tmp_path):
+    """★★假 original 防线之二（codex 复审逮到）：shim 已 load、app 已 resume，但函数返回前抛异常
+    → 返回 (None, None)。此时流量已被诱导，本轮仍须标 modified。
+
+    sticky 若只按返回值置位就会漏掉这个窗口。现实现让 _start_frida_session 在 script.load() 成功
+    那一刻即写 shim_state，调用方按 shim_state 做 OR——与函数能否正常返回无关。
+    """
+    def _load_then_boom(*a, **k):
+        # 模拟：shim 已进目标进程（置位），随后 resume→return 之间抛异常 → 回退路径返回 (None, None)
+        if k.get("allow_behavior_modification") is True and k.get("antidetect") == "java":
+            state = k.get("shim_state")
+            if state is not None:
+                state["injected"] = True
+        return None, None
+
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_start_frida_session", _load_then_boom)
+    monkeypatch.setattr(
+        capture,
+        "_parse_flows",
+        lambda f: [
+            Endpoint(
+                value="100.64.0.10",
+                kind="ip",
+                evidences=[Evidence(source="runtime", location="flows.mitm", snippet="100.64.0.10")],
+            )
+        ],
+    )
+    capture.run(
+        "com.test.app", out_dir=str(tmp_path), duration=1,
+        allow_behavior_modification=True, antidetect="java",
+    )
+    payload = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    assert payload["runtime_variant"] == "modified-runtime"
+    assert payload["endpoints"][0]["evidences"][0]["source"] == "runtime-modified"
+
+
+def test_modified_variant_reaches_capture_quality_gate(monkeypatch, tmp_path):
+    """★★空接线防线：variant 必须真的到达闭环门读的那份 quality（不是只躺在 capture_signals 里）。
+
+    闭环门 `_capture_meta` 取 meta 的**第一顺位** capture_quality；只把 variant 放进 capture_signals
+    （第三顺位）在真采集路径下永远读不到，modified 封顶守卫就成了空接线。本测试走真入口 capture.run
+    读实际写出的 quality —— 断掉 _build_capture_quality 或 evaluate_capture_quality 任一处的透传即红。
+    """
+    payload = _run_capture_with_endpoint(
+        monkeypatch, tmp_path, live_session=True,
+        allow_behavior_modification=True, antidetect="java",
+    )
+    quality = payload["capture_signals"]["quality"]
+    assert quality["runtime_variant"] == "modified-runtime"
+    # 判据真被消费：计数即便满足 complete 条件，也因 modified 被封顶 partial。
+    assert quality["dynamic_status"] != "complete"
 
 
 def test_run_rejects_native_antidetect(monkeypatch, tmp_path):
