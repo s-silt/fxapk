@@ -3,6 +3,69 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
+## 1.9.0 — 2026-08-23
+
+本版以**运行时证据契约**为主（PR #42–#49）：动态侧把「样本自发的行为」与「被我们诱导出来的行为」
+在证据层彻底分开——行为修改 shim 从裸奔改为默认关 + 双授权门，运行时证据分 `original-runtime` /
+`modified-runtime` 两档且后者不得单独结案，`auto` 改成两遍编排（先原版基线、按需旁路）。
+另：首批 8 个 frida 探针脱敏后随包内置；探针线索的 confidence 不再一律 HIGH，改为 advice 的
+纯投影、仅二次印证才升；leak-scan 补三条案件值判据并进默认阻断档；3 个 native 探针迁到
+Frida 16/17 双向兼容。
+
+> **★对 agent / CI / 自动化调用方的契约变化（本版最需要注意的一节）**
+>
+> 1. **`auto` / `capture` 的默认行为变了**：第一遍恒跑**原版 APK**取基线（绝不重打包 / 注入），
+>    仅当基线不足才进旁路轮。此前单遍即可能改包，现在不会。
+> 2. **行为修改 shim 默认关**。要用需 `--allow-behavior-modification` + `--antidetect java`
+>    **双授权门**（与 `--mode authorized-active` **正交、不继承**）。此前无开关、默认注入。
+>    `--antidetect` 目前只接受 `off` / `java`，`native` 为预留档、传入即报错。
+> 3. **闭环结论可能从 `complete` 变 `partial`**：标 `modified-runtime` 的观测不再单独构成
+>    动态闭环依据——诱导出来的行为不能当作样本自发行为。依赖退出码的 CI 需要重新校准基线。
+> 4. **探针线索的 `confidence` 语义变了**：不再一律 `HIGH`。它现在是 advice 的纯投影，
+>    单源探针 待核→`LOW`、建议调证→`MEDIUM`、**永不 HIGH**；只有 merge 阶段与静态 / pcap
+>    二次印证才升 `HIGH`。按 `confidence == HIGH` 过滤的下游逻辑会拿到明显更少、但含义更强的结果。
+> 5. **leak-scan 三条新判据进默认阻断档**：此前能过的提交（含中文人名 /
+>    QQ 微信 Telegram 账号 / 二开样本包名）现在会被**本地 pre-commit 直接拦**。
+
+### Added
+
+- **首批 8 个 frida 探针随包内置**（`apkscan/dynamic/frida_probes/`，已进 wheel package-data）：
+  `coldstart-config` / `objstore-config` / `native-ssl` / `tls-keylog` / `sms-forward-outbound` /
+  `mqtt-xmpp-im` / `telegram-mtproto` / `push-c2-inbound`。手动 `-l` 注入后用
+  `fxapk probe-leads <log> --into <report.json>` 聚成调证台账并回灌。入库前已脱敏（真名 / 账号 /
+  二开包名 / 桶名 / 真实接入 IP 全部换成合成值与保留段），另有源级回归锁防止真值回流。
+- **leak-scan 补三条案件值判据**（`person_name` / `contact` / `package`），全部进
+  `BLOCKING_RULES`。形态门槛均由全树实测定出、误报为 0；**finding 值本身自动脱敏**——
+  公开仓库的 CI 日志同样公开，回显真值等于换个地方泄漏。公开第三方库若被误判，
+  应登记进 `rules/` 对应规则表，而不是加行内豁免。
+
+### Changed
+
+- **运行时证据分档（P0-a）**：新增 `runtime_variant`（`original-runtime` / `modified-runtime`）
+  与 `runtime-modified` source 令牌；后者不进 observed-contact allowlist，自动失去独立结案资格。
+- **`auto` 两遍编排（P0-c）**：第一遍原版基线，仅在基线不足且已授权时进旁路轮；
+  第二遍只产 `runtime_report.json` + 主报告挂指针（不出完整渲染态对照报告）。
+  APK 身份（`apk_identity.which` / `.wrapper`）贯穿进报告。
+- **探针线索 confidence 改为 advice 的纯投影**（见上方契约变化 4）。confidence 只影响 closure
+  排位与展示排序，**不作硬门**（硬门读 advice），故降档不会关掉任何出口、不产生撤不回的降档。
+
+### Fixed
+
+- **行为修改 shim 加开关 + 第二道授权门（P0-b）**，默认关，止住此前的裸奔注入。
+- **3 个 native 探针迁 Frida 16/17 双向兼容**：Frida 17 移除了静态
+  `Module.getExportByName / findExportByName / enumerateExportsSync`，原写法在 17 下解析全失效。
+  改为内联的特性探测式 `resolveExport`，全走 `find*` 变体保 null 语义（17 的 `get*` 找不到会抛，
+  会让缺符号的 strip ROM 上探针崩）。只换符号解析层，取证行为零改动。
+- **`_repack_paths` 恒为空**：`_fold_dynamic_step` 取 `report_paths` 而 `repackage.run` 只设
+  `artifacts`，wrapper 路径从未被任何人读到过。
+- 设备侧 floor pcap 此前两遍共用固定路径会互相覆盖；antidetect 测试补上两个真机收尾 pull 的
+  stub，守住「不碰真机」契约。
+
+### Docs
+
+- `AGENTS.md` 补齐 8-17 后的四项新能力（探针库与分级语义、leak-scan 新判据与自验档位、
+  两遍编排、Frida 17 的 Java bridge 与 frida-server UID 两个真机坑）。
+
 ## 1.8.0 — 2026-08-21
 
 本版以**强化与收口**为主（PR #25–#40）：识别线补齐评测 CLI 与 P3-E 三片（gap 生产 → 入账 →
