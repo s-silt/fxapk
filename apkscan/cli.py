@@ -1258,7 +1258,9 @@ def probe_leads(
     json_out: str = typer.Option("", "--json", help="台账 JSON 输出路径（程序化消费/入图）。"),
     into: str = typer.Option("", "--into", help="把线索追加进已有 report.json 的 leads（去重）。"),
 ) -> None:
-    """把独立探针(自备，`-l` 注入)散落的 `[LEAD]` 输出聚成**调证台账**，并可回灌进 report.json。
+    """把独立探针(`-l` 注入)散落的 `[LEAD]` 输出聚成**调证台账**，并可回灌进 report.json。
+
+    首批 8 个探针已脱敏后随包内置于 `apkscan/dynamic/frida_probes/`，其余自备。
 
     薄包装：读探针日志 → parse_probe_log（按 LeadCategory 分类+where_to_request）→ 去重 →
     build_ledger_md / to_ledger_dict / merge_into_report_json。绝不抛——读不到 / 坏文件打印
