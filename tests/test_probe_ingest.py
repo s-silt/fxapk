@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import pathlib as _pathlib
 import re
+import shutil
+import subprocess
 
 import pytest
 
@@ -1397,6 +1399,89 @@ def test_im_scrub_lock_rejects_bypasses(text: str, should_flag: bool) -> None:
     flagged = bool(_dirty_im_pkgs(text))
     assert flagged == should_flag, f"{text!r} 判定错误（flagged={flagged}, 期望={should_flag}）"
 
+
+# ---------------------------------------------------------------------------
+# P2：3 个 native 探针的 Frida 16/17 双向兼容导出解析（源级守卫；真机行为延后）
+#   Frida 17 移除静态 Module.getExportByName/findExportByName/enumerateExportsSync，
+#   改用 Process.(get|find)ModuleByName 实例方法 + Module.(get|find)GlobalExportByName。
+#   探针单文件加载、无 import → 兼容 helper 内联进每个 native 探针。
+# ---------------------------------------------------------------------------
+
+_NATIVE_PROBES = ["native-ssl-hook.js", "tls-keylog.js", "telegram-mtproto-hook.js"]
+
+
+def test_native_probes_have_compat_resolver() -> None:
+    """A. 证明真迁到 17 API（不是没改/仍旧 API）：每个 native 探针内联 resolveExport，
+    特性探测（typeof，非版本 sniff），全局与模块解析都走 null 安全的 find* 变体。"""
+    for name in _NATIVE_PROBES:
+        t = _probe_text(name)
+        assert "function resolveExport(" in t, f"{name} 缺内联 resolveExport helper"
+        assert "typeof Module.getGlobalExportByName === 'function'" in t, (
+            f"{name} 必须用特性探测选路（非 Frida.version 版本 sniff）"
+        )
+        assert "Module.findGlobalExportByName(" in t, f"{name} 全局解析须用 null 安全 findGlobalExportByName"
+        assert "Process.findModuleByName(" in t, f"{name} 模块解析须用 null 安全 findModuleByName"
+
+
+def test_native_probes_quarantine_legacy_static_api() -> None:
+    """B. 老静态 API 只准留在 helper 的「Frida≤16 兜底」那一行，不得作为独立解析路径。
+    因 helper 为兼容会同时含新老名字，故用**计数**把老 API 钉死：findExportByName 恰 1 次（兜底行），
+    getExportByName/enumerateExportsSync 清零，会抛的 Process.getModuleByName 禁用。"""
+    for name in _NATIVE_PROBES:
+        t = _probe_text(name)
+        assert t.count("Module.findExportByName(") == 1, (
+            f"{name} 的 Module.findExportByName( 应恰 1 次（仅 helper 的 16 兜底）；"
+            f"实为 {t.count('Module.findExportByName(')}——>1 有调用点没走 helper，0 丢了 16 兼容"
+        )
+        assert t.count("Module.getExportByName(") == 0, f"{name} 残留已移除的静态 Module.getExportByName("
+        assert t.count("Module.enumerateExportsSync(") == 0, f"{name} 残留已移除的 enumerateExportsSync("
+        assert "Process.getModuleByName(" not in t, (
+            f"{name} 用了会抛的 Process.getModuleByName（缺模块即崩 strip ROM）；须用 findModuleByName"
+        )
+
+
+def test_native_probes_call_sites_route_through_resolver() -> None:
+    """C. 每个原生符号查找调用点确实改成走 resolveExport（正则容忍空格）。"""
+    ssl = _probe_text("native-ssl-hook.js")
+    for pat in [r"resolveExport\(\s*null\s*,\s*'getpeername'\s*\)",
+                r"resolveExport\(\s*mod\s*,\s*'SSL_get_fd'\s*\)",
+                r"resolveExport\(\s*m\s*,\s*'SSL_read'\s*\)",
+                r"resolveExport\(\s*m\s*,\s*'SSL_write'\s*\)"]:
+        assert re.search(pat, ssl), f"native-ssl 未按契约走 helper: {pat}"
+    assert "mod.enumerateExports()" in ssl, (
+        "native-ssl 的实例方法 mod.enumerateExports()（枚举兜底那段）不该被误迁成静态 API——它 16/17 都成立"
+    )
+
+    keylog = _probe_text("tls-keylog.js")
+    for pat in [r"resolveExport\(\s*mod\s*,\s*'SSL_CTX_new'\s*\)",
+                r"resolveExport\(\s*mod\s*,\s*'SSL_CTX_set_keylog_callback'\s*\)",
+                r"resolveExport\(\s*mod\.name\s*,\s*'SSL_CTX_set_keylog_callback'\s*\)"]:
+        assert re.search(pat, keylog), f"tls-keylog 未按契约走 helper: {pat}"
+
+    tg = _probe_text("telegram-mtproto-hook.js")
+    assert re.search(r"resolveExport\(\s*null\s*,\s*'connect'\s*\)", tg), "telegram 全局 connect 解析缺失"
+    assert re.search(r"resolveExport\(\s*'libc\.so'\s*,\s*'connect'\s*\)", tg), (
+        "telegram 丢了 libc.so 兜底层（|| resolveExport('libc.so','connect')）"
+    )
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="CI 无 node，node --check 语法关跳过")
+def test_all_probes_pass_node_syntax_check() -> None:
+    """语法关：内联 helper 最易引入括号/大括号失衡，node --check 兜底（只验语法、非 Frida 运行时语义）。"""
+    for js in sorted(_PROBES_DIR.glob("*.js")):
+        r = subprocess.run(["node", "--check", str(js)], capture_output=True, text=True)
+        assert r.returncode == 0, f"{js.name} 语法错误:\n{r.stderr}"
+
+
+def test_frida_js_untouched_by_native_migration() -> None:
+    """scope 边界：frida_js/ 8 个内置 hook 全 Java 层、靠 bridge 跑，本次迁移不碰它们；
+    此测证明迁移没外溢到 Java 层（不该出现 native 符号 API）。"""
+    js_dir = _pathlib.Path(probe_ingest.__file__).parent / "frida_js"
+    for f in js_dir.glob("*.js"):
+        t = f.read_text(encoding="utf-8")
+        for banned in ("Module.getExportByName(", "Module.findExportByName(",
+                       "Module.enumerateExportsSync("):
+            assert banned not in t, f"{f.name} 出现 native 符号 API（迁移越界到 Java 层）: {banned}"
 
 
 # ---------------------------------------------------------------------------

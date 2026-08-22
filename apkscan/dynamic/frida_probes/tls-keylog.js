@@ -7,6 +7,27 @@
 // 改：符号被 strip 时见末尾提示；要换落盘路径改 KEYLOG_PATH
 'use strict';
 
+// ---- Frida 16/17 双向兼容的导出符号解析（内联，勿抽公共模块：探针单文件加载、无 import）----
+// 契约：resolveExport(moduleName|null, symbolName) -> NativePointer | null
+//   · 保 null 语义——模块或符号缺失一律返 null、绝不抛（缺符号的 strip ROM 上探针不能崩）。
+//   · 特性探测选路、不 sniff 版本号：Frida 17 移除了静态 Module.getExportByName/findExportByName，
+//     改用 Process.(get|find)ModuleByName 的实例方法 + Module.(get|find)GlobalExportByName 全局解析；
+//     16 及以下仍走静态 Module.findExportByName。
+function resolveExport(moduleName, symbolName) {
+  try {
+    if (typeof Module.getGlobalExportByName === 'function') {
+      // Frida 17+：静态 Module.findExportByName 已被移除
+      if (moduleName === null) {
+        return Module.findGlobalExportByName(symbolName);      // 全局：缺失返 null，不抛
+      }
+      var m = Process.findModuleByName(moduleName);            // 模块缺失返 null，不抛
+      return m ? m.findExportByName(symbolName) : null;        // 符号缺失返 null，不抛
+    }
+  } catch (e) { return null; }
+  // Frida ≤16：老静态 API（17 下上面已 return，走不到这里）
+  try { return Module.findExportByName(moduleName, symbolName); } catch (e) { return null; }
+}
+
 var KEYLOG_PATH = '/data/local/tmp/fx_sslkeylog.txt';
 var _kf = null;
 function writeKey(line) {
@@ -24,8 +45,8 @@ var keylogCb = new NativeCallback(function (ssl, linePtr) {
 
 var installed = 0;
 function arm(mod) {
-  var ctxNew = Module.findExportByName(mod, 'SSL_CTX_new');
-  var setCb = Module.findExportByName(mod, 'SSL_CTX_set_keylog_callback');
+  var ctxNew = resolveExport(mod, 'SSL_CTX_new');
+  var setCb = resolveExport(mod, 'SSL_CTX_set_keylog_callback');
   if (!ctxNew || !setCb) return false;
   var SSL_CTX_set_keylog_callback = new NativeFunction(setCb, 'void', ['pointer', 'pointer']);
   // 每个新建 SSL_CTX 都装上我们的回调
@@ -46,7 +67,7 @@ if (!hit) {
   // 兜底：遍历所有模块找带 SSL_CTX_set_keylog_callback 的
   Process.enumerateModules().forEach(function (mod) {
     try {
-      if (!hit && Module.findExportByName(mod.name, 'SSL_CTX_set_keylog_callback')) { if (arm(mod.name)) hit = true; }
+      if (!hit && resolveExport(mod.name, 'SSL_CTX_set_keylog_callback')) { if (arm(mod.name)) hit = true; }
     } catch (e) {}
   });
 }
