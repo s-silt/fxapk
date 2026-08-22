@@ -2040,6 +2040,9 @@ def test_capture_collects_antidetect_events(monkeypatch, tmp_path):
     _set_capabilities(monkeypatch)
     _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=None)
     monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    # 不触真机收尾 pull（守住本文件"全程不碰真机"契约）。
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
 
     def _fake_session(package, sink, jsbridge_sink=None, api_sink=None, antidetect_sink=None, credential_sink=None, sqlcipher_sink=None, clipboard_sink=None, remote_control_sink=None, serial=None):
         if antidetect_sink is not None:
