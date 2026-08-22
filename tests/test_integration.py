@@ -53,8 +53,8 @@ def _rich_ctx() -> FakeContext:
             "cn.jpush.android.api.JPushInterface",
             "com.alipay.sdk.app.PayTask",
             '{"mch_id":"1900000109"}',
-            "加QQ:123456 咨询",
-            "客服微信：abc_def123",
+            "加QQ:123456 咨询",  # leak-scan: allow 端到端夹具的 QQ 项，号码为合成值
+            "客服微信：abc_def123",  # leak-scan: allow 端到端夹具的微信项，账号为合成值
             "充值 USDT TRC20",
         ],
         native_libs=["lib/arm64-v8a/libjiagu.so"],
