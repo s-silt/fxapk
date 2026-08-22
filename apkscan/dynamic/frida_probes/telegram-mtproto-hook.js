@@ -404,24 +404,26 @@ Java.perform(function () {
     } catch (e) { return '<sockaddr err ' + e + '>'; }
   }
 
-  // 跨 Frida 版本健壮解析导出符号：
-  //   新版 Frida(17+) Module.getExportByName 找不到会"抛异常"而非返 null；旧版返 null。
-  //   故 try getExportByName → catch 后 findExportByName(返 null) → 再 enumerateExportsSync('libc.so') 整表兜底。
-  function resolveExport(name) {
-    // 1) 全进程导出表(快路径)
-    try { var p = Module.getExportByName(null, name); if (p && !p.isNull()) return p; } catch (e) {}
-    try { if (Module.findExportByName) { var p2 = Module.findExportByName(null, name); if (p2 && !p2.isNull()) return p2; } } catch (e) {}
-    // 2) 显式 libc.so 兜底(某些 ROM 全局表里查不到，但 libc 模块内有)
-    try {
-      var hit = null;
-      Module.enumerateExportsSync('libc.so').forEach(function (ex) {
-        if (hit) return;
-        if (ex.name === name) hit = ex.address;
-      });
-      if (hit) return hit;
-    } catch (e) {}
-    return null;
-  }
+// ---- Frida 16/17 双向兼容的导出符号解析（内联，勿抽公共模块：探针单文件加载、无 import）----
+// 契约：resolveExport(moduleName|null, symbolName) -> NativePointer | null
+//   · 保 null 语义——模块或符号缺失一律返 null、绝不抛（缺符号的 strip ROM 上探针不能崩）。
+//   · 特性探测选路、不 sniff 版本号：Frida 17 移除了静态 Module.getExportByName/findExportByName，
+//     改用 Process.(get|find)ModuleByName 的实例方法 + Module.(get|find)GlobalExportByName 全局解析；
+//     16 及以下仍走静态 Module.findExportByName。
+function resolveExport(moduleName, symbolName) {
+  try {
+    if (typeof Module.getGlobalExportByName === 'function') {
+      // Frida 17+：静态 Module.findExportByName 已被移除
+      if (moduleName === null) {
+        return Module.findGlobalExportByName(symbolName);      // 全局：缺失返 null，不抛
+      }
+      var m = Process.findModuleByName(moduleName);            // 模块缺失返 null，不抛
+      return m ? m.findExportByName(symbolName) : null;        // 符号缺失返 null，不抛
+    }
+  } catch (e) { return null; }
+  // Frida ≤16：老静态 API（17 下上面已 return，走不到这里）
+  try { return Module.findExportByName(moduleName, symbolName); } catch (e) { return null; }
+}
 
   // libc connect 兜底：只**记录**真实出站地址(接入节点 IP:port 的原始来源，连失败 SYN_SENT 也记)。
   // ★不在此按端口猜协议打 LEAD——端口不是 MTProto 归因证据（二开壳常同时有 XMPP:5222/MQTT:1883 等，
@@ -435,7 +437,7 @@ Java.perform(function () {
     return /^\[(?:0:){7}1\]/.test(d) || d.indexOf('[::1]') === 0;
   }
   try {
-    var c = resolveExport('connect');
+    var c = resolveExport(null, 'connect') || resolveExport('libc.so', 'connect');
     if (c === null) {
       console.log('[tg][native] connect 符号未命中(全局表+libc.so 均无) — 下一步：Module.enumerateModules() 找含 connect 的 libc/bionic 模块，或换静态偏移');
     } else {

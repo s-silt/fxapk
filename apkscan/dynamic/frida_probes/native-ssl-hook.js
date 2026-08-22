@@ -7,10 +7,31 @@
 // 改：符号被 strip 见末尾提示；只要明文不要五元组可忽略 [peer] 段
 'use strict';
 
+// ---- Frida 16/17 双向兼容的导出符号解析（内联，勿抽公共模块：探针单文件加载、无 import）----
+// 契约：resolveExport(moduleName|null, symbolName) -> NativePointer | null
+//   · 保 null 语义——模块或符号缺失一律返 null、绝不抛（缺符号的 strip ROM 上探针不能崩）。
+//   · 特性探测选路、不 sniff 版本号：Frida 17 移除了静态 Module.getExportByName/findExportByName，
+//     改用 Process.(get|find)ModuleByName 的实例方法 + Module.(get|find)GlobalExportByName 全局解析；
+//     16 及以下仍走静态 Module.findExportByName。
+function resolveExport(moduleName, symbolName) {
+  try {
+    if (typeof Module.getGlobalExportByName === 'function') {
+      // Frida 17+：静态 Module.findExportByName 已被移除
+      if (moduleName === null) {
+        return Module.findGlobalExportByName(symbolName);      // 全局：缺失返 null，不抛
+      }
+      var m = Process.findModuleByName(moduleName);            // 模块缺失返 null，不抛
+      return m ? m.findExportByName(symbolName) : null;        // 符号缺失返 null，不抛
+    }
+  } catch (e) { return null; }
+  // Frida ≤16：老静态 API（17 下上面已 return，走不到这里）
+  try { return Module.findExportByName(moduleName, symbolName); } catch (e) { return null; }
+}
+
 // ---- 对端五元组解析：SSL* → fd → getpeername → ip:port ----
 var _sslGetFd = null, _getpeername = null;
-try { var gp = Module.findExportByName(null, 'getpeername'); if (gp) _getpeername = new NativeFunction(gp, 'int', ['int', 'pointer', 'pointer']); } catch (e) {}
-function bindGetFd(mod) { try { var p = Module.findExportByName(mod, 'SSL_get_fd'); if (p && !_sslGetFd) _sslGetFd = new NativeFunction(p, 'int', ['pointer']); } catch (e) {} }
+try { var gp = resolveExport(null, 'getpeername'); if (gp) _getpeername = new NativeFunction(gp, 'int', ['int', 'pointer', 'pointer']); } catch (e) {}
+function bindGetFd(mod) { try { var p = resolveExport(mod, 'SSL_get_fd'); if (p && !_sslGetFd) _sslGetFd = new NativeFunction(p, 'int', ['pointer']); } catch (e) {} }
 function peerOf(sslPtr) {
   try {
     if (!_sslGetFd || !_getpeername || sslPtr.isNull()) return '';
@@ -27,7 +48,7 @@ function peerOf(sslPtr) {
 
 // 裸对端 ip:port（无 [peer] 包裹）——专供回灌行：probe_ingest 的 _BRACKET_RE 会把 [peer ...] 整块剥掉，
 // 且带外壳会污染取值，故回灌必须用裸值。无则返回 ''（parser 遇空值丢弃，不产伪线索）。
-// ★依赖 getpeername（Frida 17 待迁移 API，见 P2）；该 API 修好前 peerBare 恒返回 '' → 本探针回灌收益随 P2 到位。
+// ★依赖 getpeername：其符号解析已走 resolveExport（Frida 16/17 双向兼容）；解析不到时 peerBare 返 '' 而非抛。
 function peerBare(sslPtr) {
   var s = peerOf(sslPtr);            // ' [peer 192.0.2.1:443]' 或 ' [peer [::1]:443]' 或 ''（示例用文档保留段）
   if (!s) return '';
@@ -77,8 +98,8 @@ var hit = false;
 // 1) 常见承载模块直接按导出名挂
 ['libssl.so', 'libflutter.so', 'libboringssl.so', 'libconscrypt_jni.so', 'libcronet.so', 'libmonochrome.so'].forEach(function (m) {
   try {
-    var rd = Module.findExportByName(m, 'SSL_read');
-    var wr = Module.findExportByName(m, 'SSL_write');
+    var rd = resolveExport(m, 'SSL_read');
+    var wr = resolveExport(m, 'SSL_write');
     if (rd || wr) { bindGetFd(m); hookPair(m, rd, wr); hit = true; }
   } catch (e) {}
 });
