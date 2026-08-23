@@ -14,6 +14,7 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from apkscan.core import infra
+from apkscan.core.coverage import collect_coverage
 from apkscan.report import letters
 from apkscan.core.models import (
     Confidence,
@@ -482,6 +483,10 @@ def _render_template(template: Any, report: Report) -> str:
         endpoint_total=len(report.endpoints),
         enrichment_by_endpoint=enrichment_by_endpoint,
         meta=report.meta or {},
+        # ★覆盖缺口在 meta 里是散落的 <analyzer>_<suffix> 键，模板没法自己筛；
+        #   这里按 core/coverage.py 的协议算好传进去（只含非零项）。没有它，
+        #   读 HTML 的人看不到「哪些分析器没扫全」，会把 count=0 读成「样本确实没有」。
+        coverage_gaps=collect_coverage(report.meta or {}),
         analyzer_status=report.analyzer_status or [],
         enricher_status=report.enricher_status or [],
         findings=report.findings or [],

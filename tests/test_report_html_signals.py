@@ -352,3 +352,60 @@ def test_html_escapes_downgrade_reason_payload() -> None:
     html = report_html.render_to_string(_report([lead]))
     assert "<img src=x onerror=alert(1)>" not in html
     assert "&lt;img" in html
+
+
+# ---------------------------------------------------------------------------
+# 路线 D2：可见性 / 保留意见 / 目标排除 / 扫描缺口 —— 送达**人**，不只送达 digest
+# ---------------------------------------------------------------------------
+
+
+def _render(meta: dict) -> str:
+    return report_html.render_to_string(
+        Report(package_name="com.example.synthetic", leads=[], endpoints=[],
+               findings=[], analyzer_status=[], meta=meta)
+    )
+
+
+def test_html_surfaces_closure_reservations_and_exclusions() -> None:
+    """★closure 的 warn 级保留意见与目标排除原因必须出现在人读报告里。
+
+    此前它们只存在于 report.json 的 closure.checks / target_selection，digest 也没投影——
+    于是一份 complete 报告的读者不知道它带着「目标集可能不全」这样的限定，
+    而「没有调证目标」会被读成「样本真没有端点」。
+
+    突变：删模板里那两个区块，或删 digest 的 checks/target_selection 投影 → 本测试红。
+    """
+    html = _render({
+        "closure": {
+            "status": "complete", "targets": [],
+            "checks": [{"id": "evidence_visibility", "status": "warn",
+                        "reason": "目标全由运行时归因，目标集可能不全"}],
+            "target_selection": {"repack_excluded": 2},
+        }
+    })
+    assert "目标集可能不全" in html, "warn 级保留意见没送达人读出口"
+    assert "重打包件隔离" in html, "目标被排除的原因没解释，读者会以为样本没有端点"
+    assert "这不代表样本没有对应端点" in html, "缺少防误读的明示"
+
+
+def test_html_surfaces_visibility_and_coverage_gaps() -> None:
+    """★「未发现 ≠ 已穷尽」：可见性与扫描缺口必须让读报告的人看见。"""
+    html = _render({
+        "visibility": {
+            "blocked_claims": ["静态端点已穷尽"],
+            "sources": {"resource": {"visibility": "partial",
+                                     "why": ["card_merchant 资源面未扫全"]}},
+        },
+        "card_merchant_oversize_skipped": 1,
+    })
+    assert "静态端点已穷尽" in html, "不成立的断言没被列出来"
+    assert "card_merchant 资源面未扫全" in html, "各来源可见性依据没渲出"
+    assert "card_merchant_oversize_skipped" in html, "扫描缺口没渲出"
+    assert "不代表样本没有" in html, "缺少「未发现≠不存在」的明示"
+
+
+def test_html_without_new_signals_renders_clean() -> None:
+    """反向护栏：旧报告没有这些字段时整段不渲染，不留空壳标题。"""
+    html = _render({"closure": {"status": "complete", "targets": []}})
+    assert "结论的保留意见" not in html
+    assert "看到了多少" not in html
