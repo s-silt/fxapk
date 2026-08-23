@@ -156,6 +156,10 @@ def evaluate_capture_quality(meta: Mapping[str, object]) -> dict[str, object]:
         "dynamic_status": status,
         "reason": reason,
         "floor_parse_status": floor_parse_status,
+        # 质量输入是从哪来的：真采集 / 回灌派生 / 取证面 overlay。★读报告的人要能分清
+        #   「complete 出自真采集」与「partial 出自回灌派生」——同一个 partial，两种来源的
+        #   下一步动作完全不同（前者补采集面，后者去做归因）。取值见 :func:`_capture_meta`。
+        "quality_input_source": str(raw.get("quality_input_source") or "unknown"),
     }
 
 
@@ -168,15 +172,48 @@ def _capture_meta(report: Report) -> dict[str, Any]:
       端点，正确结论是 **partial**（观测到了去向，只是做不了唯一归因）。
       回灌清单此前**没有任何生产消费方**，这个函数就是那个消费方。
 
+    ★``capture_signals`` **不在优先链里**：它是**详细取证面**（``pcap_app_attribution``
+      这类归因细节），``pcap-leads`` 回灌路径也会写它（见 ``pcap_ingest`` 的 app 归因分支，
+      那条路**从不写** ``capture_quality``）。此前它排在优先链末位、被整体当成质量摘要返回，
+      于是**做过 UID 归因的报告**拿到一个没有任何计数字段的 dict → ``business_count=0`` →
+      判 **failed**；而**没做归因**的同一份清单反而走派生、判 partial —— 证据更强结论更差。
+      现在它只作为派生基线之上的 **overlay**：signals 的取证细节优先保留，派生基线补它缺的计数。
+
     ★顺序不能反：真采集的统计口径更完整（含双向载荷、UID 归因），有它就不该被回灌的
       派生值覆盖。回灌只在真采集缺位时兜底，且 :func:`derive_capture_quality` 保证
       ``target_attributed_count=0``、不补 ``bidirectional_*`` —— 上限 partial，绝不抬成 complete。
+
+    ★空 dict 必须原样返回（不写 ``quality_input_source``）：``dynamic_required`` 靠"取不到任何
+      采集输入"判断这是纯静态报告，给它塞键会让静态报告凭空要求动态证据。
     """
-    for key in ("capture_quality", "runtime_capture_quality", "capture_signals"):
+    for key in ("capture_quality", "runtime_capture_quality"):
         value = report.meta.get(key)
         if isinstance(value, Mapping):
-            return dict(value)
-    return dict(derive_capture_quality(read_inventory(report.meta)))
+            merged: dict[str, Any] = dict(value)
+            # ★不能用 setdefault：merge 阶段会把 evaluate_capture_quality 的**返回体**写回
+            #   meta["capture_quality"]，而那一步没有来源信息、透传出的是占位 "unknown"。
+            #   于是二次求值时该键已存在，setdefault 无从纠正 → 来源永远显示 "unknown"。
+            #   "unknown" 是「没标注」而非一个有效来源，此处按缺失处理、据实覆写。
+            if not str(merged.get("quality_input_source") or "").strip() or (
+                merged.get("quality_input_source") == "unknown"
+            ):
+                merged["quality_input_source"] = key
+            return merged
+
+    derived: dict[str, Any] = dict(derive_capture_quality(read_inventory(report.meta)))
+    signals = report.meta.get("capture_signals")
+    if isinstance(signals, Mapping):
+        overlay: dict[str, Any] = dict(signals)
+        for derived_key, derived_value in derived.items():
+            overlay.setdefault(derived_key, derived_value)
+        overlay["quality_input_source"] = (
+            "capture_signals+inventory" if derived else "capture_signals"
+        )
+        return overlay
+
+    if derived:
+        derived["quality_input_source"] = "inventory"
+    return derived
 
 
 def _source_summary(targets: Sequence[Mapping[str, object]]) -> dict[str, int]:
