@@ -174,3 +174,48 @@ def test_not_letter_ready_skipped_by_letters() -> None:
     }
     drafts = build_letters(report)
     assert drafts == []  # 待核 + 无受文机关 → 不套打
+
+
+# ---------------------------------------------------------------------------
+# 资源面覆盖缺口（路线 B 样板）：count=0 必须能区分「确实没有」与「没扫全」
+# ---------------------------------------------------------------------------
+
+
+def _meta(ctx: _Ctx) -> dict:
+    return CardMerchantAnalyzer().analyze(ctx).meta
+
+
+def test_oversize_resource_skip_writes_coverage() -> None:
+    """★超大资源被整个跳过时，报告里必须留下痕迹。
+
+    此前这里是裸 `continue`、连日志都没有：H5 bundle 常有 2–10MB，卡商文案恰最可能落在里面，
+    而读报告的人只会看到 card_merchant_count=0，与「样本确实没有」完全同形。
+
+    突变：把 `oversize += 1` 删掉 → 键缺失 → 本测试红。
+    """
+    big = b"x" * (4_000_001)          # 超 _MAX_RESOURCE_BYTES
+    ctx = _Ctx(files=["assets/big.json", "assets/hit.json"],
+               contents={"assets/big.json": big,
+                         "assets/hit.json": "专业卡商一手货源".encode()})
+    meta = _meta(ctx)
+    assert meta.get("card_merchant_oversize_skipped") == 1, "超大资源被跳过却没留痕迹"
+    # 缺口与命中互不影响：没被跳过的那份照常扫出线索。
+    assert meta.get("card_merchant_count", 0) >= 1
+
+
+def test_read_failure_is_counted_not_swallowed() -> None:
+    """读取失败要计数——读不到 ≠ 里面没有。突变：删 `read_failed += 1` → 红。"""
+
+    class _BoomCtx(_Ctx):
+        def read_file(self, path: str):
+            raise OSError("合成读失败")
+
+    meta = _meta(_BoomCtx(files=["assets/a.json"]))
+    assert meta.get("card_merchant_read_failed") == 1
+
+
+def test_clean_scan_writes_no_coverage_keys() -> None:
+    """★缺失=无事件：一切正常时不得写零值，否则消费方会把「没发生」渲染成缺口警告。"""
+    meta = _meta(_Ctx(files=["assets/ok.json"], contents={"assets/ok.json": b"nothing here"}))
+    for suffix in ("list_failed", "read_failed", "oversize_skipped", "budget_exhausted"):
+        assert f"card_merchant_{suffix}" not in meta

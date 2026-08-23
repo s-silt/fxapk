@@ -63,6 +63,11 @@ class BackendCredentialAnalyzer(BaseAnalyzer):
     meta_key_categories = {
         'backend_credential_count': 'record',
         'dex_strings_truncated': 'coverage',
+        # 资源面覆盖缺口：让 count=0 能区分「确实没有」与「没扫全」。
+        'backend_credential_list_failed': 'coverage',
+        'backend_credential_read_failed': 'coverage',
+        'backend_credential_oversize_skipped': 'coverage',
+        'backend_credential_budget_exhausted': 'coverage',
     }
     meta_keys = frozenset(meta_key_categories)
     requires: list[str] = []
@@ -79,7 +84,20 @@ class BackendCredentialAnalyzer(BaseAnalyzer):
         _ok, dex_strings = collect_dex_strings(ctx, self.name, max_strings=_MAX_DEX_STRINGS, result=result)
         for s in dex_strings:
             self._scan_text(s, "dex", "dex_strings", patterns, hits)
-        self._scan_resources(ctx, patterns, hits)
+        resource_coverage = self._scan_resources(ctx, patterns, hits)
+        # 只写实际发生的覆盖缺口；缺失键即「没发生过这类缺口」（见 core/coverage.py 的约定）。
+        # ★键名写成字面量而非 coverage_meta_key(self.name, ...) 动态拼：meta_scan 契约要求
+        #   「声明的键」与「代码里静态可见的写入」双向对齐，动态拼键会让扫描器只看到 <dynamic>、
+        #   等于绕过整套契约。字面量虽啰嗦，但护栏能核。
+        for suffix, value in resource_coverage.items():
+            if suffix == "list_failed":
+                result.meta["backend_credential_list_failed"] = value
+            elif suffix == "read_failed":
+                result.meta["backend_credential_read_failed"] = value
+            elif suffix == "oversize_skipped":
+                result.meta["backend_credential_oversize_skipped"] = value
+            elif suffix == "budget_exhausted":
+                result.meta["backend_credential_budget_exhausted"] = value
 
         for value, (title, source, location) in sorted(hits.items()):
             try:
@@ -129,16 +147,21 @@ class BackendCredentialAnalyzer(BaseAnalyzer):
 
     def _scan_resources(
         self, ctx: "AnalysisContext", patterns: list[_Pattern], hits: dict[str, tuple[str, str, str]]
-    ) -> None:
+    ) -> dict[str, int]:
         """扫描 APK 内文本资源（H5/JS/json/配置里的硬编码凭据）。绝不抛。"""
         try:
             files = [p for p in ctx.list_files() if isinstance(p, str)]
         except Exception:
             logger.exception("[%s] 读取 list_files 失败", self.name)
-            return
+            return {"list_failed": 1}
         total = 0
+        read_failed = 0
+        oversize = 0
+        budget_hit = False
         for path in files:
             if total >= _MAX_TOTAL_RESOURCE_BYTES:
+                # 达到总预算＝剩余资源根本没看，必须向下游暴露这个缺口。
+                budget_hit = True
                 logger.warning("[%s] 文本资源扫描达总预算，停止", self.name)
                 break
             if not is_text_resource(
@@ -148,9 +171,15 @@ class BackendCredentialAnalyzer(BaseAnalyzer):
             try:
                 data = ctx.read_file(path)
             except Exception:
+                # 单个资源读失败不中断扫描，但要计数——读不到 ≠ 里面没有。
+                read_failed += 1
                 logger.exception("[%s] 读取资源失败：%s", self.name, path)
                 continue
-            if not data or len(data) > _MAX_RESOURCE_BYTES:
+            if not data:
+                continue  # 空文件不是覆盖缺口，静默跳过
+            if len(data) > _MAX_RESOURCE_BYTES:
+                # 超大资源被整个跳过，是覆盖缺口而非「未命中」。
+                oversize += 1
                 continue
             total += len(data)
             text = (
@@ -159,6 +188,16 @@ class BackendCredentialAnalyzer(BaseAnalyzer):
                 else str(data)
             )
             self._scan_text(text, "resource", path, patterns, hits)
+
+        return {
+            key: value
+            for key, value in {
+                "read_failed": read_failed,
+                "oversize_skipped": oversize,
+                "budget_exhausted": int(budget_hit),
+            }.items()
+            if value
+        }
 
     def _build_lead(
         self,

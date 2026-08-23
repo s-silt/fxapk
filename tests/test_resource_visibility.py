@@ -184,3 +184,41 @@ def test_analyzer_meta_keys_reach_visibility() -> None:
     assert a["sources"]["resource"]["visibility"] == VIS_PARTIAL, (
         "分析器数出了读失败，可见性却没读到——键名对不上，信号是死的"
     )
+
+
+# ---------------------------------------------------------------------------
+# 分析器自报的资源面覆盖缺口（路线 B）：count=0 不得被当成「样本确实没有」
+# ---------------------------------------------------------------------------
+
+
+def test_analyzer_coverage_gap_blocks_complete() -> None:
+    """★接线锁：业务分析器自报「没扫全」时，资源维不得再判 complete。
+
+    此前 complete 只看 endpoints 的成功计数 resource_files_scanned，看不见
+    card_merchant / sms_forwarding 这些**业务分析器**各自跳过了什么——于是
+    「H5 bundle 超上限被整个跳过」与「样本确实没有四方支付网关」在报告里完全同形。
+
+    突变：把 _resource_visibility 里 collect_coverage 那段判据删掉 → 回到 complete → 本测试红。
+    """
+    a = _assess({"resource_files_scanned": 12, "card_merchant_oversize_skipped": 1})
+    src = a["sources"]["resource"]
+    assert src["visibility"] == VIS_PARTIAL, "分析器自报没扫全，资源维却仍称完整可见"
+    assert any("card_merchant_oversize_skipped" in str(w) for w in src["why"]), \
+        "缺口没写进 why —— 读报告的人看不到是哪个分析器没扫全"
+
+
+def test_analyzer_coverage_gap_blocks_exhaustive_claim() -> None:
+    """缺口必须真的拦住「静态已穷尽」类断言，而不只是把档位改个字符串。"""
+    a = _assess({"resource_files_scanned": 12, "sms_forwarding_read_failed": 3})
+    claim = a["claims"]
+    assert a["sources"]["resource"]["visibility"] == VIS_PARTIAL
+    assert "resource" not in claim.get("unassessed_sources", []), "确证缺口不得被记成未评估"
+
+
+def test_zero_valued_coverage_keys_do_not_downgrade() -> None:
+    """★缺失=无事件：零值不该被当成缺口（否则每份干净报告都被降级）。
+
+    collect_coverage 只收真值，这条锁住那个约定在消费侧也成立。
+    """
+    a = _assess({"resource_files_scanned": 12, "card_merchant_oversize_skipped": 0})
+    assert a["sources"]["resource"]["visibility"] == VIS_COMPLETE
