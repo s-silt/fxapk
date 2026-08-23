@@ -104,6 +104,12 @@ class WebViewJsBridgeAnalyzer(BaseAnalyzer):
         'dex_strings_truncated': 'coverage',
         'webview_signal_count': 'record',
         'webview_signals': 'signal',
+        # H5 资源面覆盖缺口：桥接调用常散布在整份 bundle 里，被截断/丢弃的部分有没有桥接
+        # 本次分析并不知道——空信号必须能区分「确实没有 JSBridge」与「没扫全」。
+        'webview_jsbridge_files_truncated': 'coverage',
+        'webview_jsbridge_read_failed': 'coverage',
+        'webview_jsbridge_content_truncated': 'coverage',
+        'webview_jsbridge_budget_exhausted': 'coverage',
     }
     meta_keys = frozenset(meta_key_categories)
     # 待定：明细可能只是留档，也可能应直接驱动 Finding；先按信号报警。
@@ -126,7 +132,19 @@ class WebViewJsBridgeAnalyzer(BaseAnalyzer):
 
         # 仅当存在需要扫资源的信号时才读 H5 文本（省 IO）。
         need_resources = any(sig.resource_tokens for sig in signals)
-        resource_texts = self._collect_resource_texts(ctx) if need_resources else []
+        resource_coverage: dict[str, int] = {}
+        resource_texts = (
+            self._collect_resource_texts(ctx, resource_coverage) if need_resources else []
+        )
+        # 覆盖缺口落 meta：键名写字面量，meta_scan 契约要求写入静态可核。
+        if resource_coverage.get("files_truncated"):
+            result.meta["webview_jsbridge_files_truncated"] = resource_coverage["files_truncated"]
+        if resource_coverage.get("read_failed"):
+            result.meta["webview_jsbridge_read_failed"] = resource_coverage["read_failed"]
+        if resource_coverage.get("content_truncated"):
+            result.meta["webview_jsbridge_content_truncated"] = resource_coverage["content_truncated"]
+        if resource_coverage.get("budget_exhausted"):
+            result.meta["webview_jsbridge_budget_exhausted"] = 1
 
         matched: list[str] = []
         for sig in signals:
@@ -154,24 +172,40 @@ class WebViewJsBridgeAnalyzer(BaseAnalyzer):
     # 数据源
     # ------------------------------------------------------------------
 
-    def _collect_resource_texts(self, ctx: "AnalysisContext") -> list[tuple[str, str]]:
-        """读 assets/www 下 .js/.html 文本（带文件数/大小上限）。失败/缺失 → []，不抛。"""
+    def _collect_resource_texts(
+        self, ctx: "AnalysisContext", coverage: dict[str, int] | None = None
+    ) -> list[tuple[str, str]]:
+        """读 assets/www 下 .js/.html 文本（带文件数/大小上限）。失败/缺失 → []，不抛。
+
+        ``coverage`` 非 None 时把本次的覆盖缺口计数写进去（调用方再落 meta）：
+        ★H5 桥接调用常散布在压缩后的整份 bundle 里，被截断/被丢弃的那部分里有没有桥接，
+        本次分析根本不知道——空结果与「确实没有 JSBridge」必须能区分。
+        """
         out: list[tuple[str, str]] = []
         paths = [p for p in _collect_file_paths(ctx, self.name) if _is_h5_resource(p)]
+        cov = coverage if coverage is not None else {}
+        # ★文件数上限是个**静默切片**：超过 500 个 H5 资源时，多出来的连循环都进不去、
+        #   既无日志也无痕迹。这是本文件最隐蔽的一处覆盖缺口。
+        if len(paths) > _MAX_RESOURCE_FILES:
+            cov["files_truncated"] = len(paths) - _MAX_RESOURCE_FILES
         total_bytes = 0
         for path in paths[:_MAX_RESOURCE_FILES]:
             # ★累计预算：达上限即停止读剩余资源（防 500×4MB≈2GB 累计撑爆内存）。
             if total_bytes >= _MAX_TOTAL_RESOURCE_BYTES:
+                cov["budget_exhausted"] = 1
                 logger.info("[%s] 累计读入达上限 %d 字节，跳过剩余资源", self.name, _MAX_TOTAL_RESOURCE_BYTES)
                 break
             try:
                 raw = ctx.read_file(path)
             except Exception:  # noqa: BLE001 — 单文件读取失败不影响其余
+                cov["read_failed"] = cov.get("read_failed", 0) + 1
                 logger.exception("[%s] 读取资源失败，跳过：%s", self.name, path)
                 continue
             if not isinstance(raw, (bytes, bytearray)) or not raw:
                 continue
             if len(raw) > _MAX_RESOURCE_BYTES:
+                # 截断前段继续扫（不是整个跳过）→ 记 content_truncated 而非 oversize_skipped。
+                cov["content_truncated"] = cov.get("content_truncated", 0) + 1
                 logger.debug(
                     "[%s] 资源超 %d 字节，截断前段扫描（尾部桥接调用可能漏）：%s",
                     self.name,
