@@ -16,7 +16,11 @@ from apkscan.core.evidence_scope import (
     project_serialized_closure,
     project_serialized_leads,
 )
-from apkscan.core.models import OBSERVED_CONTACT_SOURCES, EvidenceScope
+from apkscan.core.models import (
+    OBSERVED_CONTACT_SOURCES,
+    EvidenceScope,
+    display_lead_category,
+)
 from apkscan.core.redact import redact_value, scrub_pii
 from apkscan.core.restore import restore_index, restored_sources_for
 
@@ -100,7 +104,8 @@ def _compact_lead(
         downgrades = {k: _scrub_field(v, pii_flag) or "" for k, v in downgrades.items()}
     runtime_seen, runtime_contact = _runtime_flags(lead)
     return {
-        "category": category,
+        # 未识别类别显式标注（raw_category 见 Lead.raw_category）；已知类别原样。
+        "category": display_lead_category(category, lead.get("raw_category")),
         "value": value,
         "subject": subject,
         "advice": lead.get("advice"),
@@ -188,6 +193,21 @@ def _integrity(report: dict[str, Any]) -> dict[str, Any]:
     crit = [str(c) for c in _list(report.get("critical_failures")) if str(c)]
     if crit:
         warnings.append(f"关键分析器失败：{'、'.join(crit)}")
+
+    # ★analysis_status 必须被**消费**而不只是透传：报告自称 partial/failed 时，即使
+    #   completeness=1.0 且无 critical_failures（如仅 pipeline 阶段崩溃降的档），摘要也不得
+    #   自称 reliable——否则"部分完成"在唯一被下游读取的出口上消失。
+    if isinstance(status, str) and status in ("partial", "failed"):
+        # 存盘形状：stage_status 由 pipeline 写在 meta 下（pipeline._run_stage →
+        # meta["stage_status"]）；根级仅容错手工/合成报告。缺失/坏形状只丢细节，不丢主告警。
+        stages = report.get("stage_status")
+        if not isinstance(stages, list):
+            meta_block = report.get("meta")
+            stages = meta_block.get("stage_status") if isinstance(meta_block, dict) else None
+        bad = [str(s.get("name")) for s in (stages if isinstance(stages, list) else [])
+               if isinstance(s, dict) and s.get("status") in ("error", "failed")]
+        detail = f"（失败阶段：{'、'.join(bad)}）" if bad else ""
+        warnings.append(f"分析状态为 {status}{detail}：结论基础不完整，勿据此下确定性结论")
 
     es = [s for s in _list(report.get("enricher_status")) if isinstance(s, dict)]
     attempted = ok = 0

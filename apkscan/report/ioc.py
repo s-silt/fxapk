@@ -32,6 +32,7 @@ import logging
 from typing import Any
 
 from apkscan.core.evidence_scope import project_serialized_leads
+from apkscan.core.models import display_lead_category
 from apkscan.core.restore import restore_index, restored_sources_for
 
 logger = logging.getLogger(__name__)
@@ -106,7 +107,8 @@ def _lead_to_row(
 ) -> dict[str, Any]:
     """把单条 Lead dict 映射成一行 IOC dict（列见 IOC_COLUMNS）。"""
     return {
-        "type": _str_or_empty(lead.get("category")),
+        # 未识别类别显式标注「（未识别类别）」（见 Lead.raw_category）；已知类别原样。
+        "type": display_lead_category(lead.get("category"), lead.get("raw_category")),
         "value": _str_or_empty(lead.get("value")),
         "subject": _str_or_empty(lead.get("subject")),
         "where_to_request": _str_or_empty(lead.get("where_to_request")),

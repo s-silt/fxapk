@@ -777,3 +777,82 @@ def test_stage_attribution_clears_stale_views_after_non_hit_refresh() -> None:
 
     assert "attribution" not in endpoint.enrichment
     assert "domain_control" not in endpoint.enrichment
+
+
+# --- D1-b：Lead 全局去重 ----------------------------------------------------
+
+
+class _DedupPaymentAnalyzerA(BaseAnalyzer):
+    name = "dedup_payment_a"
+    requires: list[str] = []
+
+    def analyze(self, ctx) -> AnalyzerResult:  # noqa: ARG002
+        return AnalyzerResult(
+            analyzer=self.name,
+            leads=[
+                Lead(
+                    category=LeadCategory.PAYMENT,
+                    value="collect-fixture",
+                    source_refs=[
+                        Evidence(source="dex", location="A;->a", snippet="collect-fixture")
+                    ],
+                )
+            ],
+        )
+
+
+class _DedupPaymentAnalyzerB(BaseAnalyzer):
+    name = "dedup_payment_b"
+    requires: list[str] = []
+
+    def analyze(self, ctx) -> AnalyzerResult:  # noqa: ARG002
+        return AnalyzerResult(
+            analyzer=self.name,
+            leads=[
+                Lead(
+                    category=LeadCategory.PAYMENT,
+                    value="collect-fixture",
+                    advice="建议调证",
+                    source_refs=[
+                        Evidence(
+                            source="resource",
+                            location="res/values/strings.xml",
+                            snippet="collect-fixture",
+                        )
+                    ],
+                )
+            ],
+        )
+
+
+def test_leads_deduped_globally_across_analyzers(monkeypatch, fake_ctx):
+    """★D1-b：两个分析器各产一条同 (category, value) 的 Lead → 终态恰 1 条、
+    source_refs 并集、advice 由后来者填空。
+
+    ★必须走 ``pipeline.run`` 真入口——只调 ``_dedup_leads`` 的单测测不到接线
+    （删掉调用点它照样绿）。
+    """
+    monkeypatch.setattr(
+        pipeline,
+        "discover_analyzers",
+        lambda: [_DedupPaymentAnalyzerA(), _DedupPaymentAnalyzerB()],
+    )
+    monkeypatch.setattr(pipeline, "discover_enrichers", lambda: [])
+    monkeypatch.setattr(pipeline, "detect_capabilities", lambda online=True: set())
+
+    report = pipeline.run(fake_ctx, AnalysisConfig(online=False))
+
+    matches = [
+        lead
+        for lead in report.leads
+        if lead.category is LeadCategory.PAYMENT and lead.value == "collect-fixture"
+    ]
+    assert len(matches) == 1, f"同 (category, value) 的 Lead 应恰 1 条，实得 {len(matches)}"
+    merged = matches[0]
+    # 证据并集：两个分析器的 source_refs 都在。
+    assert {(ev.source, ev.location) for ev in merged.source_refs} == {
+        ("dex", "A;->a"),
+        ("resource", "res/values/strings.xml"),
+    }
+    # advice 填空：首条为空，由后来者的「建议调证」补上。
+    assert merged.advice == "建议调证"

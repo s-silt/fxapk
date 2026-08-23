@@ -30,6 +30,7 @@ from apkscan.core.models import (
     AnalysisConfig,
     Endpoint,
     Evidence,
+    Lead,
     LeadCategory,
     Report,
     seal_base_advice,
@@ -398,6 +399,11 @@ def _stage_run_analyzers(state: _PipelineState) -> None:
         else:
             state.analyzer_status.append({"name": name, "status": "ran", "reason": ""})
 
+    # Lead 全局去重：不同分析器各产一条同 (category, value) 的 Lead，此前全程无去重、
+    # 各出口看到重复记录。★插入点定死在 analyzer 循环结束后、_dedup_endpoints 之前——
+    # 此刻 downgrades 为空、seal_base_advice / apply_repack_quarantine 未跑、端点派生的
+    # DOMAIN/IP Lead 也还没进来，与 downgrade 账本零交互。挪位置就要处理账本交互。
+    state.leads = _dedup_leads(state.leads)
     # 端点按 value 去重合并（不同分析器可能产出同一 value 的 Endpoint）。
     state.endpoints = _dedup_endpoints(state.endpoints)
 
@@ -887,6 +893,37 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
 # ---------------------------------------------------------------------------
 
 #: 逃生开关：设 FXAPK_NO_PARALLEL 强制串行（排障 / 兼容）。
+
+
+def _dedup_leads(leads: list[Lead]) -> list[Lead]:
+    """按 (category, 归一化 value) 全局去重合并 Lead（不同分析器可能各产一条同值线索）。
+
+    合并规则（保首条 + note 留痕）：
+    - source_refs：证据并集（重复不是伪造，是多来源佐证）。
+    - advice：首条为空则用后来者填空；两边都有且不同**不擅自合并成第三种档位**，把冲突
+      写进 notes 留痕——既不伪造，也不静默丢。
+    - 归一化：DOMAIN/IP 走 :func:`infra.match_key`（IP 剥 :port/proto、域名小写），与
+      Lead↔Endpoint 配对同一把钥匙；其余类别只 strip、**不 casefold**（中文人名 / PAYMENT
+      字面区分大小写有语义）。
+
+    analyzer 注册顺序稳定 → survivor 稳定 → 输出可复现。
+    """
+    merged: dict[tuple[LeadCategory, str], Lead] = {}
+    for ld in leads:
+        kind = ld.category.value.lower()
+        norm = infra.match_key(kind, ld.value) if kind in ("domain", "ip") else ld.value.strip()
+        key = (ld.category, norm)
+        cur = merged.get(key)
+        if cur is None:
+            merged[key] = ld
+            continue
+        cur.source_refs.extend(ld.source_refs)        # 证据并集
+        if not cur.advice and ld.advice:              # 填空
+            cur.advice = ld.advice
+        elif cur.advice and ld.advice and cur.advice != ld.advice:
+            note = f"（去重合并：另有分析器判为 {ld.advice}）"
+            cur.notes = (cur.notes + note) if cur.notes else note
+    return list(merged.values())
 
 
 def _dedup_endpoints(endpoints: list[Endpoint]) -> list[Endpoint]:

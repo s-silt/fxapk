@@ -39,6 +39,14 @@ def _to_jsonable(obj: Any) -> Any:
             d["is_c2"] = obj.is_c2
             d["is_runtime_seen"] = obj.is_runtime_seen
             d["is_runtime_contact"] = obj.is_runtime_contact
+            # UNKNOWN 类别写回**原始串**（往返保真）：category 只是本版本不认识，不是不存在；
+            # 写成 "unknown" 会把别人（新版本/外部工具）的类别改掉。
+            if obj.raw_category:
+                d["category"] = obj.raw_category
+            # raw_category **不落盘**：载入时可从未识别的 category 字面完整重建（report_io），
+            # 落盘反而给每条 Lead 添一个机器可见新键、打破 schema 1.2 的键集合冻结契约
+            # （test_report_schema_contract）。要让它入盘须 bump schema 1.3。
+            d.pop("raw_category", None)
         # Evidence 注入确定性 evidence_id（仅 source|location，不含 snippet），让每条证据带
         # 可回溯锚点 —— 同条证据跨报告 / 跨文件 id 稳定（取证完整性背书层）。
         if isinstance(obj, Evidence):
