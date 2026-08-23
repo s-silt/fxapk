@@ -379,6 +379,15 @@ class ApiSurfaceAnalyzer(BaseAnalyzer):
     meta_key_categories = {
         'api_surface': 'signal',
         'dex_strings_truncated': 'coverage',
+        # 两条扫描线各自的覆盖缺口：空接口面必须能区分「样本确实没有」与「没扫全」。
+        # 分 native / asset 记而不合并——处置动作不同（前者调 .so 上限，后者调 asset 配额）。
+        'api_surface_native_oversize_skipped': 'coverage',
+        'api_surface_native_read_failed': 'coverage',
+        'api_surface_native_budget_exhausted': 'coverage',
+        'api_surface_asset_list_failed': 'coverage',
+        'api_surface_asset_oversize_skipped': 'coverage',
+        'api_surface_asset_read_failed': 'coverage',
+        'api_surface_asset_budget_exhausted': 'coverage',
     }
     meta_keys = frozenset(meta_key_categories)
     requires: list[str] = []  # Android 扫 dex/.so/assets；Web 只扫已落盘文本证据
@@ -495,8 +504,14 @@ class ApiSurfaceAnalyzer(BaseAnalyzer):
         直接在字节上跑路径正则（不先抽全部 ASCII 串），只产出路径本身、内存 O(命中数)。
         """
         budget = _MAX_TOTAL_SO_BYTES
+        oversize = 0
+        read_failed = 0
+        budget_hit = False
         for path in app_so_paths(ctx, self.name, max_libs=_MAX_LIBS):
             if budget <= 0:
+                # ★这条 docstring 早写着「本次未命中不等于样本无此接口」——现在把它落成数据，
+                #   否则 api_surface 的空接口面与「样本确实没有接口」在报告里完全同形。
+                budget_hit = True
                 logger.info("[%s] .so 累计读入达上限，剩余库未扫——本次未命中不等于样本无此接口", self.name)
                 break
             try:
@@ -505,13 +520,18 @@ class ApiSurfaceAnalyzer(BaseAnalyzer):
                 logger.debug("[%s] 查声明大小失败：%s", self.name, path, exc_info=True)
                 declared = None
             if declared is not None and declared > _MAX_SO_BYTES:
+                oversize += 1
                 continue  # 超大库不读、不膨胀进内存
             try:
                 data = ctx.read_file(path)
             except Exception:
+                read_failed += 1
                 logger.debug("[%s] 读 .so 失败，跳过：%s", self.name, path, exc_info=True)
                 continue
-            if not data or len(data) > _MAX_SO_BYTES:
+            if not data:
+                continue  # 空库不是覆盖缺口
+            if len(data) > _MAX_SO_BYTES:
+                oversize += 1
                 continue
             budget -= len(data)
             for m in _PATH_RE_BYTES.findall(data):
@@ -519,6 +539,15 @@ class ApiSurfaceAnalyzer(BaseAnalyzer):
                     raw.setdefault(m.decode("ascii"), set()).add("native")
                 except UnicodeDecodeError:
                     continue  # 段字符类限 ASCII，理论不至；防御性跳过
+
+        # 覆盖缺口落进 meta：空接口面必须能区分「样本确实没有」与「没扫全」。
+        # 键名写字面量而非动态拼——meta_scan 契约要求写入静态可核（见 core/coverage.py）。
+        if oversize:
+            result.meta["api_surface_native_oversize_skipped"] = oversize
+        if read_failed:
+            result.meta["api_surface_native_read_failed"] = read_failed
+        if budget_hit:
+            result.meta["api_surface_native_budget_exhausted"] = 1
 
     def _scan_assets(
         self, ctx: "AnalysisContext", raw: dict[str, set[str]], result: AnalyzerResult
@@ -531,13 +560,19 @@ class ApiSurfaceAnalyzer(BaseAnalyzer):
             files = ctx.list_files()
         except Exception:
             logger.exception("[%s] list_files 失败，跳过 assets 扫描", self.name)
+            result.meta["api_surface_asset_list_failed"] = 1
             return
         budget = _MAX_TOTAL_ASSET_BYTES
         scanned = 0
+        oversize = 0
+        read_failed = 0
+        budget_hit = False
         for path in files:
             if not isinstance(path, str):
                 continue
             if scanned >= _MAX_ASSETS or budget <= 0:
+                # ★此前这里连日志都没有：达上限即静默停扫，空接口面与「确实没有」完全同形。
+                budget_hit = True
                 break
             is_web_text = (
                 getattr(ctx, "platform", "android") == "web"
@@ -553,19 +588,32 @@ class ApiSurfaceAnalyzer(BaseAnalyzer):
             except Exception:
                 declared = None
             if declared is not None and declared > _MAX_ASSET_BYTES:
+                oversize += 1
                 continue
             try:
                 data = ctx.read_file(path)
             except Exception:
+                read_failed += 1
                 logger.debug("[%s] 读 asset 失败，跳过：%s", self.name, path, exc_info=True)
                 continue
-            if not data or len(data) > _MAX_ASSET_BYTES:
+            if not data:
+                continue  # 空文件不是覆盖缺口
+            if len(data) > _MAX_ASSET_BYTES:
+                oversize += 1
                 continue
             budget -= len(data)
             scanned += 1
             text = data.decode("utf-8", "ignore")
             for m in _PATH_RE.findall(text):
                 raw.setdefault(m, set()).add("asset")
+
+        # 同 .so 线：缺口落 meta，键名写字面量以便 meta_scan 静态核对。
+        if oversize:
+            result.meta["api_surface_asset_oversize_skipped"] = oversize
+        if read_failed:
+            result.meta["api_surface_asset_read_failed"] = read_failed
+        if budget_hit:
+            result.meta["api_surface_asset_budget_exhausted"] = 1
 
     # ------------------------------------------------------------------
     # Finding 组装
