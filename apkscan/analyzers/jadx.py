@@ -49,6 +49,8 @@ from apkscan.core.models import (
     Severity,
 )
 from apkscan.core import infra, proctree, tools
+from apkscan.core.tld_policy import BARE_STRICT_TLDS as _SAFE_BARE_TLDS
+from apkscan.core.tld_policy import url_host_tld_ok
 from apkscan.core.jadx_index import (
     CacheMiss,
     CacheUnavailable,
@@ -92,15 +94,8 @@ _MAX_JAVA_FILES = 12000
 _MAX_FILE_BYTES = 4 * 1024 * 1024
 _SNIPPET_MAX = 200
 
-# 裸域名安全 TLD 白名单（与 js_bundle / endpoints 同口径，剔除与代码撞车的伪 TLD）。
-_SAFE_BARE_TLDS: frozenset[str] = frozenset(
-    {
-        "com", "cn", "net", "org", "gov", "edu", "biz", "io", "co",
-        "xyz", "vip", "club", "shop", "site", "app", "tech", "cloud",
-        "fun", "ltd", "pro", "wang", "ren", "mobi", "asia", "icu",
-        "hk", "tw", "mo", "jp", "kr", "sg", "us", "uk", "ru", "de", "fr",
-    }
-)
+# 裸域名安全 TLD 白名单：单一真源在 core.tld_policy（BARE_STRICT_TLDS，顶部 import 别名），
+# 与 js_bundle / endpoints 同口径。URL 派生 host 走宽集 url_host_tld_ok，两档不许交叉。
 _PACKAGE_ROOTS: frozenset[str] = frozenset(
     {"com", "cn", "org", "net", "io", "edu", "android", "androidx",
      "java", "javax", "kotlin", "kotlinx", "dalvik",
@@ -1342,7 +1337,10 @@ class JadxAnalyzer(BaseAnalyzer):
                 #   反之在已知库包路径（*/com/squareup/* 等）下则降档。此前只有域名分支标。
                 _add(collector, host, "ip", location, is_private=_ip_private(ip),
                      tier=infra.domain_source_tier(location, len(lit)))
-            elif _safe_domain(host):
+            elif url_host_tld_ok(host):
+                # C1：URL 派生 host 走**宽集**（tld_policy.URL_HOST_TLDS）——http(s):// 已
+                #   确立域名性，再过裸域名窄集会把 .top/.cc/.info 等真 C2 域名误杀。
+                #   下方 _DOMAIN_RE 裸域名分支仍走 _safe_domain 窄集，两档不许交叉。
                 _add(collector, host, "domain", location,
                      tier=infra.domain_source_tier(location, len(lit)))
         for m in _IPV4_RE.finditer(lit):
