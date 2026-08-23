@@ -9,6 +9,26 @@
       "type": "未定"
     },
     "closure": {
+      "checks": [
+        {
+          "evidence_refs": [],
+          "id": "static_health",
+          "reason": "static analysis completed",
+          "status": "pass"
+        },
+        {
+          "evidence_refs": [],
+          "id": "dynamic_evidence",
+          "reason": "dynamic evidence was not required",
+          "status": "not_applicable"
+        },
+        {
+          "evidence_refs": [],
+          "id": "evidence_visibility",
+          "reason": "static inputs not assessed for: java, resource; exhaustiveness claims withheld, but no confirmed blind spot",
+          "status": "warn"
+        }
+      ],
       "gaps": [
         "no investigation target selected"
       ],
@@ -57,6 +77,26 @@
       "type": "未定"
     },
     "closure": {
+      "checks": [
+        {
+          "evidence_refs": [],
+          "id": "static_health",
+          "reason": "static analysis completed",
+          "status": "pass"
+        },
+        {
+          "evidence_refs": [],
+          "id": "dynamic_evidence",
+          "reason": "dynamic evidence was not required",
+          "status": "not_applicable"
+        },
+        {
+          "evidence_refs": [],
+          "id": "evidence_visibility",
+          "reason": "static inputs not assessed for: java, resource; exhaustiveness claims withheld, but no confirmed blind spot",
+          "status": "warn"
+        }
+      ],
       "gaps": [
         "no investigation target selected"
       ],
@@ -102,6 +142,26 @@
       "type": "未定"
     },
     "closure": {
+      "checks": [
+        {
+          "evidence_refs": [],
+          "id": "static_health",
+          "reason": "static analysis completed",
+          "status": "pass"
+        },
+        {
+          "evidence_refs": [],
+          "id": "dynamic_evidence",
+          "reason": "dynamic evidence was not required",
+          "status": "not_applicable"
+        },
+        {
+          "evidence_refs": [],
+          "id": "evidence_visibility",
+          "reason": "static inputs not assessed for: java, resource; exhaustiveness claims withheld, but no confirmed blind spot",
+          "status": "warn"
+        }
+      ],
       "gaps": [
         "no investigation target selected"
       ],
@@ -147,6 +207,26 @@
       "type": "未定"
     },
     "closure": {
+      "checks": [
+        {
+          "evidence_refs": [],
+          "id": "static_health",
+          "reason": "static analysis completed",
+          "status": "pass"
+        },
+        {
+          "evidence_refs": [],
+          "id": "dynamic_evidence",
+          "reason": "dynamic evidence was not required",
+          "status": "not_applicable"
+        },
+        {
+          "evidence_refs": [],
+          "id": "evidence_visibility",
+          "reason": "static inputs not fully visible (resource); targets rely on static extraction",
+          "status": "warn"
+        }
+      ],
       "gaps": [
         "no investigation target selected",
         "target set may be incomplete: static inputs not fully visible (resource)"
@@ -202,6 +282,26 @@
       "type": "未定"
     },
     "closure": {
+      "checks": [
+        {
+          "evidence_refs": [],
+          "id": "static_health",
+          "reason": "static analysis completed",
+          "status": "pass"
+        },
+        {
+          "evidence_refs": [],
+          "id": "dynamic_evidence",
+          "reason": "dynamic evidence was not required",
+          "status": "not_applicable"
+        },
+        {
+          "evidence_refs": [],
+          "id": "evidence_visibility",
+          "reason": "static inputs not assessed for: java, resource; exhaustiveness claims withheld, but no confirmed blind spot",
+          "status": "warn"
+        }
+      ],
       "gaps": [
         "no investigation target selected"
       ],
@@ -252,6 +352,26 @@
       "type": "未定"
     },
     "closure": {
+      "checks": [
+        {
+          "evidence_refs": [],
+          "id": "static_health",
+          "reason": "static analysis completed",
+          "status": "pass"
+        },
+        {
+          "evidence_refs": [],
+          "id": "dynamic_evidence",
+          "reason": "dynamic evidence was not required",
+          "status": "not_applicable"
+        },
+        {
+          "evidence_refs": [],
+          "id": "evidence_visibility",
+          "reason": "static inputs not fully visible (dex); targets rely on static extraction",
+          "status": "warn"
+        }
+      ],
       "gaps": [
         "no investigation target selected",
         "target set may be incomplete: static inputs not fully visible (dex)"
@@ -297,6 +417,26 @@
       "type": "未定"
     },
     "closure": {
+      "checks": [
+        {
+          "evidence_refs": [],
+          "id": "static_health",
+          "reason": "static analysis completed",
+          "status": "pass"
+        },
+        {
+          "evidence_refs": [],
+          "id": "dynamic_evidence",
+          "reason": "dynamic evidence was not required",
+          "status": "not_applicable"
+        },
+        {
+          "evidence_refs": [],
+          "id": "evidence_visibility",
+          "reason": "static inputs not assessed for: java, resource; exhaustiveness claims withheld, but no confirmed blind spot",
+          "status": "warn"
+        }
+      ],
       "gaps": [
         "no investigation target selected"
       ],
@@ -343,6 +483,26 @@
       "type": "未定"
     },
     "closure": {
+      "checks": [
+        {
+          "evidence_refs": [],
+          "id": "static_health",
+          "reason": "static analysis completed",
+          "status": "pass"
+        },
+        {
+          "evidence_refs": [],
+          "id": "dynamic_evidence",
+          "reason": "dynamic evidence was not required",
+          "status": "not_applicable"
+        },
+        {
+          "evidence_refs": [],
+          "id": "evidence_visibility",
+          "reason": "static inputs not assessed for: java, resource; exhaustiveness claims withheld, but no confirmed blind spot",
+          "status": "warn"
+        }
+      ],
       "gaps": [
         "no investigation target selected"
       ],
@@ -395,6 +555,26 @@
       "type": "未定"
     },
     "closure": {
+      "checks": [
+        {
+          "evidence_refs": [],
+          "id": "static_health",
+          "reason": "static analysis completed",
+          "status": "pass"
+        },
+        {
+          "evidence_refs": [],
+          "id": "dynamic_evidence",
+          "reason": "dynamic evidence was not required",
+          "status": "not_applicable"
+        },
+        {
+          "evidence_refs": [],
+          "id": "evidence_visibility",
+          "reason": "static inputs not assessed for: java, resource; exhaustiveness claims withheld, but no confirmed blind spot",
+          "status": "warn"
+        }
+      ],
       "gaps": [
         "no investigation target selected"
       ],

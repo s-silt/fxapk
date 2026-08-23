@@ -12,6 +12,7 @@ import re
 from collections import Counter
 from typing import Any
 
+from apkscan.core.coverage import collect_coverage
 from apkscan.core.evidence_scope import (
     project_serialized_closure,
     project_serialized_leads,
@@ -512,7 +513,27 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
         "source_summary": closure.get("source_summary")
         if isinstance(closure.get("source_summary"), dict)
         else {},
+        # ★逐项检查的结论原样带出：warn 级的保留意见（"目标集可能不全"、"静态输入未评估"）
+        #   此前只存在于 report.json 的 closure.checks 里，digest 与人读出口都看不到——
+        #   于是一份 complete 报告的读者不知道它带着什么保留。
+        "checks": [c for c in (closure.get("checks") or []) if isinstance(c, dict)]
+        if isinstance(closure.get("checks"), list)
+        else [],
+        # ★目标为何被排除：repack 隔离 / advice 不一致 / 范围外 / 人工恢复。这些计数器此前
+        #   只写进 closure.target_selection、零消费方——读者只看到"没有调证目标"，
+        #   会理解成"样本真没有端点"，而那正是这些计数器立项要防的误读。
     }
+    _selection = {
+        key: value
+        for key, value in (closure.get("target_selection") or {}).items()
+        if value and key in (
+            "truncated", "repack_excluded", "inconsistent_excluded",
+            "manually_restored", "source_deferred", "scope_excluded",
+        )
+    } if isinstance(closure.get("target_selection"), dict) else {}
+    # 与 coverage 同口径：没有排除事件就整键不出现（缺失=无事件），空字典占位是噪音。
+    if _selection:
+        compact_closure["target_selection"] = _selection
 
     network_attribution = _compact_network_attribution(meta.get("network_attribution"))
     role_candidate_count = (
@@ -551,6 +572,11 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
         "overseas_targets": overseas_targets,
         "closure": compact_closure,
     }
+    # ★扫描覆盖缺口（core/coverage.py 协议）：哪些分析器没扫全。仅非零项，且**无缺口时整键不出现**
+    #   （缺失=无事件）。没有这一段，各 count=0 分不清「样本确实没有」与「这一面根本没扫到」。
+    _coverage = collect_coverage(meta)
+    if _coverage:
+        digest["coverage"] = _coverage
     # jadx 持久索引状态透出（消费面之一：不透出等于没接）。兼容旧报告：只有 meta
     # 明确带 jadx_index_status 时才输出整段；key 按 hex64 语法校验后才带（绝非路径）。
     if "jadx_index_status" in meta:

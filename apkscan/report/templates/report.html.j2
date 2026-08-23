@@ -881,6 +881,31 @@
       </tbody>
     </table>
     {% endif %}
+    {#- 逐项检查的保留意见：warn 级结论此前只存在于 report.json，读 HTML 的人看不到
+        "目标集可能不全""静态输入未评估"这类限定，于是把 complete 读成"毫无保留"。 -#}
+    {% set checks = closure.get("checks") or [] %}
+    {% set flagged = checks | selectattr("status", "in", ["warn", "fail"]) | list %}
+    {% if flagged %}
+    <h3>结论的保留意见</h3>
+    <ul class="tight">
+      {% for check in flagged %}
+      <li><strong>{{ check.get("id") or "check" }}</strong>（{{ check.get("status") }}）：{{ check.get("reason") or "未给出理由" }}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+
+    {#- 目标为何被排除：只显示"没有调证目标"会被读成"样本真没有端点"。 -#}
+    {% set selection = closure.get("target_selection") or {} %}
+    {% if selection %}
+    <h3>目标筛选</h3>
+    <p class="muted">下列端点未进入调证目标，原因如下——<strong>这不代表样本没有对应端点</strong>：</p>
+    <ul class="tight">
+      {% for key, count in selection.items() %}
+      <li>{{ {"truncated":"因数量上限截断","repack_excluded":"重打包件隔离（证据可能来自原版而非改包方）","inconsistent_excluded":"档位与账本不一致（fail-closed 排除）","manually_restored":"人工恢复放行","source_deferred":"来源待定","scope_excluded":"超出本次证据范围"}.get(key, key) }}：{{ count }}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+
     {% if closure.get("gaps") %}
     <h3>未闭环项</h3>
     <ul class="tight">{% for gap in closure.get("gaps") %}<li>{{ gap }}</li>{% endfor %}</ul>
@@ -888,6 +913,43 @@
     {% if closure.get("next_actions") %}
     <h3>下一步</h3>
     <ul class="tight">{% for action in closure.get("next_actions") %}<li>{{ action }}</li>{% endfor %}</ul>
+    {% endif %}
+  </section>
+  {% endif %}
+
+  {#- ============ 看到了多少：可见性与扫描缺口 ============
+      ★这一段管的是「未发现 ≠ 已穷尽」。此前 visibility 求值与各分析器的覆盖缺口只进
+      report.json 与 digest（AI 读的那份），读 HTML 的人看不到「哪些维度没看全」
+      「为什么降级」，于是把 count=0 读成"样本确实没有"。 -#}
+  {% set vis = meta.get("visibility") %}
+  {% set cov = coverage_gaps %}
+  {% if vis or cov %}
+  <section id="visibility">
+    <h2>看到了多少 <span class="muted" style="font-size:13px;font-weight:400">（本次分析的可见范围；「未发现」只在可见范围内成立）</span></h2>
+    {% if vis and vis.get("blocked_claims") %}
+    <h3>不能下的结论</h3>
+    <p class="muted">下列断言因输入不完整而<strong>不成立</strong>，报告中如出现类似措辞请以此处为准：</p>
+    <ul class="tight">{% for claim in vis.get("blocked_claims") %}<li>{{ claim }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% if vis and vis.get("sources") %}
+    <h3>各来源可见性</h3>
+    <table>
+      <thead><tr><th>来源</th><th>可见性</th><th>依据</th></tr></thead>
+      <tbody>
+      {% for name, info in vis.get("sources").items() %}
+        <tr>
+          <td>{{ name }}</td>
+          <td>{{ info.get("visibility") if info is mapping else info }}</td>
+          <td class="muted">{% if info is mapping %}{{ (info.get("why") or []) | join("；") }}{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    {% if cov %}
+    <h3>扫描缺口</h3>
+    <p class="muted">下列分析器<strong>未扫全</strong>其资源面——它们的「未发现」不代表样本没有：</p>
+    <ul class="tight">{% for key, value in cov.items() %}<li>{{ key }} = {{ value }}</li>{% endfor %}</ul>
     {% endif %}
   </section>
   {% endif %}
