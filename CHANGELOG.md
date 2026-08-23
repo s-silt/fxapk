@@ -3,6 +3,72 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
+## 1.10.0 — 2026-08-24
+
+本版只做一件事：**堵住「状态沉默」**（PR #51–#58）。
+
+一次跨全链路的只读审计发现，同一份事实经过 `analyzer → meta → visibility → closure →
+digest/HTML/letters` 时缺少统一的「覆盖度、失败态、身份、来源」状态协议，于是多个出口会把
+**「没扫到」呈现成「没有」**。八片修复分五条路线依次落地，每片都以「痕迹能不能送达最终读者」
+为验收标准，而不是「测试有没有绿」。
+
+> **★对 agent / CI / 自动化调用方的契约变化**
+>
+> 1. **`fxapk probe-leads --into` 现在必须带 `--sample-sha`**。探针日志本身不含样本标识，
+>    此前不做任何校验——A 样本的探针线索可静默写进 B 的报告，还会让同值静态线索升到 HIGH
+>    （制造跨样本假印证）。缺参 / 不符 / 目标报告无 sha 一律 **exit 2**。
+>    ⚠️ 写死 `probe-leads x.log --into report.json` 的既有脚本会失败；无 `--sample-sha` 的
+>    旧报告需重跑 `analyze` 生成 `meta.sample_sha256` 后才能回灌。
+> 2. **闭环结论可能变化，两个方向都有**：
+>    - 变**好**：做过 UID 归因的 pcap 回灌报告此前被判 `failed`（详见 Fixed 第一条），现在按证据判；
+>    - 变**保守**：pcap 解析失败且零观测现在判 `failed` 并说明「空结果不等于零流量」而非当作零流量；
+>      业务分析器自报资源面未扫全时，可见性资源维从 `complete` 降为 `partial`。
+>    依赖退出码（0/5/6）的自动化需要重新校准基线。
+> 3. **`digest` 新增三处输出**：`closure.checks`（逐项检查的保留意见）、`closure.target_selection`
+>    （目标为何被排除，仅非零项）、`coverage`（哪些分析器没扫全，仅非零项）。后两者**无事件时整键不出现**。
+> 4. **`report.meta` 新增覆盖度键族** `<analyzer>_<suffix>`（见 `apkscan/core/coverage.py`）
+>    与 `runtime_merge_steps`（各并回子步骤的 ok/error 结局）。均遵「缺失=无事件」，不写零值。
+> 5. **未知 `LeadCategory` 不再被 typed loader 丢弃**：归入新增的 `UNKNOWN` 成员并保留原始串，
+>    序列化时写回原值。此前同一份 report.json，digest 看得见该 Lead、HTML 看不见。
+
+### Added
+
+- **`apkscan/core/coverage.py`**：静态扫描覆盖度协议（七种缺口后缀）。9 个分析器
+  （7 个关键词分析器 + `api_surface` + `webview_jsbridge`）在超大资源跳过 / 读取失败 /
+  累计预算耗尽 / 枚举失败 / 条数截断处记录缺口——此前这些位置多数连日志都没有，而
+  uni-app / RN 的 H5 bundle 常有 2–10MB，四方支付网关、短信 webhook、后台凭据恰最可能就在里面。
+- **HTML 报告新增「看到了多少」段**与 closure 段内两个区块：不能下的结论（`blocked_claims`）、
+  各来源可见性与依据、扫描缺口、结论的保留意见、目标筛选原因。每处都明写「未发现不代表没有」。
+- **`apkscan/core/tld_policy.py`**：TLD 双档策略的单一真源 + `POLICY_VERSION`。
+
+### Changed
+
+- **`visibility` 资源维消费分析器自报的覆盖缺口**：有缺口即判 `partial` 并写明是哪个分析器。
+  此前 `complete` 只看 endpoints 的成功计数，看不见业务分析器各自跳过了什么。
+- **`digest._integrity` 消费 `analysis_status`**：`partial` / `failed` 时追加 warning（含失败阶段名）
+  并令 `reliable=False`。此前它读了该字段却只透传——报告自称「部分完成」，摘要却说「可靠」。
+- **pipeline 新增 Lead 全局去重**（按 `(category, 归一化值)`，DOMAIN/IP 走 `infra.match_key`）：
+  保首条 + 证据并集 + advice 冲突写进 notes 留痕。去重点在 `seal_base_advice` 之前，与撤销账本零交互。
+
+### Fixed
+
+- **动态闭环质量的方向倒挂**：`capture_signals` 是详细取证面（无计数字段），却排在
+  `_capture_meta` 的优先链里被整体当作质量摘要，屏蔽了运行时清单的派生基线。结果是
+  **做过 UID 归因的报告判 `failed`、没做归因的判 `partial`——证据更强反而结论更差**，
+  且 `failed` 那份的输出里 `target_attributed_count=1` 与 reason「未观测到目标业务候选」自相矛盾。
+  现降为派生基线之上的 overlay，并新增 `quality_input_source` 让质量输入来源可见。
+- **jadx 的 URL 派生 host 错用了裸域名那档的窄集**：`.top/.cc/.info/.online/.live/.work` 等
+  29 个 TLD 的域名在该通道被静默滤掉——不建 Lead、不做 ICP/WHOIS/ASN 富化、无计数无日志。
+  而 jadx 正是为加固样本（DEX 字符串池拿不全）设的通道。双档本身是刻意设计（窄集治裸 token
+  防 JS 属性访问形态（`<对象>.top` / `<对象>.info` 这类点分代码串）被误判为域名，宽集治
+  URL host 防误杀真 C2），故做法是收进单一真源
+  并只修 jadx 这个 outlier；防漂移测试用 `is`（同一对象）而非 `==`（内容相等）。
+- **pcap 解析失败且零观测时报告里毫无痕迹**：inventory 写入整块在 `if observed:` 内，闭环
+  拿不到 `parse_status`，把「这份采集根本没读成」误当成「样本确实没有对外通信」。
+- **merge 子步骤崩溃与「跑完没结果」同形**：编排层 `stats[dest] = sub.get(src, 0)` 把两者压成
+  同一个 0——「样本没有凭据」与「凭据解析器崩了」处置相反（结案 vs 重跑）。现逐步骤记
+  `runtime_merge_steps[name] = {status, error_type}`，一步崩不阻断其余。
+
 ## 1.9.0 — 2026-08-23
 
 本版以**运行时证据契约**为主（PR #42–#49）：动态侧把「样本自发的行为」与「被我们诱导出来的行为」
