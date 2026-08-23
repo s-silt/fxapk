@@ -71,6 +71,9 @@ META_WRITE_CATEGORIES = {
     'runtime_endpoint_count': 'record',
     'runtime_jsbridge': 'signal',
     'runtime_merged': 'signal',
+    # 各并回子步骤的结局：ok（跑完了，可能没结果）/ error（崩了）。★没有它，
+    # 「样本没有凭据」与「凭据解析器崩了」都是 runtime_credential_count=0，无从分辨。
+    'runtime_merge_steps': 'coverage',
     'runtime_remote_control': 'signal',
     'runtime_remote_control_targets': 'signal',
     'runtime_remote_control_unknown_packages': 'signal',
@@ -2505,11 +2508,25 @@ def merge_and_rerender(
         variant = merge_runtime_variant(report, rr_path)  # P0-a：original/modified 轮标注 → report.meta
         if variant:
             stats["runtime_variant"] = variant
+        # ★每个子步骤的结局要能被下游分辨：`ok`（跑完了，可能没结果）/ `error`（崩了）。
+        #   此前 `stats[dest]=sub.get(src,0)` 把两者压成同一个 0——「样本没有凭据」与
+        #   「凭据解析器崩了」在报告里完全同形，而后者的正确处置是重跑而非结案。
+        #   各 step 函数自身「绝不抛」的契约不变；这里兜的是它们兜不住的意外。
+        step_status: dict[str, dict[str, str]] = {}
         for step in _RUNTIME_MERGE_STEPS:
             _emit(on_progress, step.progress)
-            sub = step.func(report, rr_path)
+            name = getattr(step.func, "__name__", str(step.func))
+            try:
+                sub = step.func(report, rr_path)
+                step_status[name] = {"status": "ok", "error_type": ""}
+            except Exception as exc:  # noqa: BLE001 —— 一步崩了不阻断其余，但必须留痕
+                sub = {}
+                step_status[name] = {"status": "error", "error_type": type(exc).__name__}
+                logger.exception("[merge] 运行时并回子步骤 %s 失败", name)
             for dest_key, src_key in step.stat_map:
                 stats[dest_key] = sub.get(src_key, 0)
+        # 落 meta 供出口读：数字仍在，但 status=error 时那些数字**不可用**（不是「零」）。
+        report.meta["runtime_merge_steps"] = step_status
 
     # 可见性快照是**派生视图**，不是证据：上面这些 merge 步骤刚写入 runtime_merged /
     # capture_quality / capture_signals，而它们正是 visibility 判定运行时那一维的输入。

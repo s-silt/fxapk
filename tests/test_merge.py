@@ -1591,3 +1591,48 @@ def test_decrypt_runtime_brand_hints_only_when_match(tmp_path) -> None:
     merge.decrypt_runtime_messages(report, rr_path)
     assert "runtime_brand_hints" not in report.meta
     assert "runtime_crypto_recipe" not in report.meta  # 无 key 事件 → 无实测配方
+
+
+# ======================================================================
+# 子步骤失败态不塌缩成 0（路线 E3）
+# ======================================================================
+
+
+def test_merge_substep_exception_reports_error_not_zero(tmp_path, monkeypatch) -> None:
+    """★「样本没有凭据」与「凭据解析器崩了」不得都是 count=0。
+
+    此前编排层 `stats[dest] = sub.get(src, 0)`：某个子步骤崩掉时，各 step 函数自身
+    「绝不抛」的契约会让它返回空统计，与「跑完了确实没结果」完全同形。而两者的正确处置
+    相反——前者结案、后者重跑。
+
+    突变：把编排层的 try/except 去掉（或不写 step_status）→ 无从分辨 → 本测试红。
+    """
+    runtime_report = tmp_path / "runtime_report.json"
+    _write_runtime_report(runtime_report, [])
+    report = _make_report()
+
+    # 让第一条子步骤抛异常（模拟解析器崩溃，而非"跑完没结果"）
+    victim = merge._RUNTIME_MERGE_STEPS[0]
+    boom_name = getattr(victim.func, "__name__", "")
+    assert boom_name, "前置：子步骤函数应有 __name__ 供账本记名"
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("合成的解析器崩溃")
+
+    monkeypatch.setattr(merge, "_RUNTIME_MERGE_STEPS",
+                        (victim._replace(func=_boom),) + merge._RUNTIME_MERGE_STEPS[1:])
+
+    merge.merge_and_rerender(
+        report, [], str(tmp_path), formats=["json"], runtime_report_path=str(runtime_report)
+    )
+
+    steps = report.meta.get("runtime_merge_steps")
+    assert isinstance(steps, dict), "子步骤结局没进 meta，下游无从分辨崩溃与空结果"
+    entry = steps.get("_boom") or steps.get(boom_name)
+    assert entry, f"崩掉的子步骤没被记名（现有：{sorted(steps)}）"
+    assert entry["status"] == "error", "解析器崩溃被记成了正常完成"
+    assert entry["error_type"] == "RuntimeError", "错误类型没留下，排查时无从下手"
+
+    # 其余步骤照常跑完（一步崩不阻断全局），且它们标 ok 而非 error。
+    others = [v for k, v in steps.items() if k not in ("_boom", boom_name)]
+    assert others and all(v["status"] == "ok" for v in others), "一步崩掉不该污染其余步骤的结局"
