@@ -111,6 +111,11 @@ class CardMerchantAnalyzer(BaseAnalyzer):
     meta_key_categories = {
         'card_merchant_count': 'record',
         'dex_strings_truncated': 'coverage',
+        # 资源面覆盖缺口：让 card_merchant_count=0 能区分「确实没有」与「没扫全」。
+        'card_merchant_list_failed': 'coverage',
+        'card_merchant_read_failed': 'coverage',
+        'card_merchant_oversize_skipped': 'coverage',
+        'card_merchant_budget_exhausted': 'coverage',
     }
     meta_keys = frozenset(meta_key_categories)
     requires: list[str] = []  # 关键词文本通用（dex/H5），缺数据自然空跑
@@ -136,7 +141,20 @@ class CardMerchantAnalyzer(BaseAnalyzer):
                 self._scan_text(s, "dex", "dex_strings", keywords, whitelist, hit)
 
         # 2) 文本资源（H5 / JS / json / xml 里的文案）。
-        self._scan_resources(ctx, keywords, whitelist, hit)
+        resource_coverage = self._scan_resources(ctx, keywords, whitelist, hit)
+        # 只写实际发生的覆盖缺口；缺失键即「没发生过这类缺口」（见 core/coverage.py 的约定）。
+        # ★键名写成字面量而非 coverage_meta_key(self.name, ...) 动态拼：meta_scan 契约要求
+        #   「声明的键」与「代码里静态可见的写入」双向对齐，动态拼键会让扫描器只看到 <dynamic>、
+        #   等于绕过整套契约。字面量虽啰嗦，但护栏能核。
+        for suffix, value in resource_coverage.items():
+            if suffix == "list_failed":
+                result.meta["card_merchant_list_failed"] = value
+            elif suffix == "read_failed":
+                result.meta["card_merchant_read_failed"] = value
+            elif suffix == "oversize_skipped":
+                result.meta["card_merchant_oversize_skipped"] = value
+            elif suffix == "budget_exhausted":
+                result.meta["card_merchant_budget_exhausted"] = value
 
         if hit.keywords:
             result.leads.append(self._build_lead(hit, evidence_to_obtain, where_to_request))
@@ -239,17 +257,27 @@ class CardMerchantAnalyzer(BaseAnalyzer):
         keywords: list[_Keyword],
         whitelist: tuple[str, ...],
         hit: _Hit,
-    ) -> None:
-        """扫描 APK 内文本资源（H5/JS/json/xml）里的关键词。绝不抛。"""
+    ) -> dict[str, int]:
+        """扫描 APK 内文本资源（H5/JS/json/xml）里的关键词。绝不抛。
+
+        返回本次扫描的**覆盖缺口计数**（只含非零项，缺失=无事件）。★为什么要返回而不是只记日志：
+        超大资源被整个跳过时，``card_merchant_count=0`` 与「样本确实没有卡商文案」在报告里
+        长得一模一样——而 H5 bundle 常有 2–10MB，卡商文案恰最可能落在里面。
+        """
         try:
             files = [p for p in ctx.list_files() if isinstance(p, str)]
         except Exception:
             logger.exception("[%s] 读取 list_files 失败", self.name)
-            return
+            return {"list_failed": 1}
 
         total = 0
+        read_failed = 0
+        oversize = 0
+        budget_hit = False
         for path in files:
             if total >= _MAX_TOTAL_RESOURCE_BYTES:
+                # 达到总预算＝剩余资源根本没看，必须向下游暴露这个缺口。
+                budget_hit = True
                 logger.warning("[%s] 文本资源扫描达总预算，停止", self.name)
                 break
             if not is_text_resource(
@@ -259,9 +287,15 @@ class CardMerchantAnalyzer(BaseAnalyzer):
             try:
                 data = ctx.read_file(path)
             except Exception:
+                # 单个资源读失败不中断扫描，但要计数——读不到 ≠ 里面没有。
+                read_failed += 1
                 logger.exception("[%s] 读取资源失败：%s", self.name, path)
                 continue
-            if not data or len(data) > _MAX_RESOURCE_BYTES:
+            if not data:
+                continue  # 空文件不是覆盖缺口，静默跳过
+            if len(data) > _MAX_RESOURCE_BYTES:
+                # 超大资源被整个跳过，是覆盖缺口而非「未命中」。
+                oversize += 1
                 continue
             total += len(data)
             text = (
@@ -270,6 +304,16 @@ class CardMerchantAnalyzer(BaseAnalyzer):
                 else str(data)
             )
             self._scan_text(text, "resource", path, keywords, whitelist, hit)
+
+        return {
+            key: value
+            for key, value in {
+                "read_failed": read_failed,
+                "oversize_skipped": oversize,
+                "budget_exhausted": int(budget_hit),
+            }.items()
+            if value
+        }
 
     @staticmethod
     def _is_whitelisted_context(

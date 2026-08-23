@@ -344,6 +344,19 @@ def _resource_visibility(meta: dict) -> tuple[str, list[str]]:
             "其内容未进入本次分析"
         )
         return VIS_PARTIAL, why
+    # ★各关键词分析器自报的资源面覆盖缺口（core/coverage.py 的协议）。必须排在下面
+    #   「已扫描 N 个 → COMPLETE」之前：那一档只看 endpoints 的成功计数，看不见
+    #   card_merchant / sms_forwarding / wallet_secret 这些**业务分析器**各自跳过了什么。
+    #   H5 bundle 常有 2–10MB，超上限被整个跳过时，四方支付网关、短信 webhook、后台凭据
+    #   恰最可能就在里面——不拦这一档，「7 个分析器都没扫全」照样签发「资源层完整可见」。
+    # 局部导入：本模块刻意不在顶层依赖 apkscan 内部模块（纯判据层、便于独立测试）。
+    from apkscan.core.coverage import collect_coverage
+
+    gaps = collect_coverage(meta)
+    if gaps:
+        detail = "、".join(f"{key}={value}" for key, value in sorted(gaps.items()))
+        why.append(f"部分分析器的资源面未扫全（{detail}）：这些分析器的 count=0 不代表样本没有")
+        return VIS_PARTIAL, why
     scanned = meta.get("resource_files_scanned")
     if isinstance(scanned, int) and scanned > 0:
         # 措辞只认领**文本**资源：二进制资产（图片/字体/so 之外的 blob）本就不在文本扫描面内，

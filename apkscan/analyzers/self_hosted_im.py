@@ -96,6 +96,11 @@ class SelfHostedImAnalyzer(BaseAnalyzer):
         'dex_strings_truncated': 'coverage',
         'self_hosted_im_channel_count': 'record',
         'self_hosted_im_fingerprints': 'record',
+        # 资源面覆盖缺口：让 count=0 能区分「确实没有」与「没扫全」。
+        'self_hosted_im_list_failed': 'coverage',
+        'self_hosted_im_read_failed': 'coverage',
+        'self_hosted_im_oversize_skipped': 'coverage',
+        'self_hosted_im_budget_exhausted': 'coverage',
     }
     meta_keys = frozenset(meta_key_categories)
     # 信道 URL 走文本（dex/H5/资源），库指纹走 dex 字符串；缺数据自然空跑。
@@ -114,7 +119,20 @@ class SelfHostedImAnalyzer(BaseAnalyzer):
             self._scan_channel(s, "dex", "dex_strings", hits)
 
         # 2) 文本资源（H5/JS/json/xml 里的信道地址）。
-        self._scan_resources(ctx, hits)
+        resource_coverage = self._scan_resources(ctx, hits)
+        # 只写实际发生的覆盖缺口；缺失键即「没发生过这类缺口」（见 core/coverage.py 的约定）。
+        # ★键名写成字面量而非 coverage_meta_key(self.name, ...) 动态拼：meta_scan 契约要求
+        #   「声明的键」与「代码里静态可见的写入」双向对齐，动态拼键会让扫描器只看到 <dynamic>、
+        #   等于绕过整套契约。字面量虽啰嗦，但护栏能核。
+        for suffix, value in resource_coverage.items():
+            if suffix == "list_failed":
+                result.meta["self_hosted_im_list_failed"] = value
+            elif suffix == "read_failed":
+                result.meta["self_hosted_im_read_failed"] = value
+            elif suffix == "oversize_skipped":
+                result.meta["self_hosted_im_oversize_skipped"] = value
+            elif suffix == "budget_exhausted":
+                result.meta["self_hosted_im_budget_exhausted"] = value
 
         # 3) IM 库指纹（弱证据，仅 dex 包名）。
         matched_fps = self._match_fingerprints(fingerprints, dex_strings)
@@ -181,17 +199,25 @@ class SelfHostedImAnalyzer(BaseAnalyzer):
         except Exception:
             logger.exception("[%s] 扫描控制信道 URL 失败：%s", self.name, location)
 
-    def _scan_resources(self, ctx: "AnalysisContext", hits: dict[str, _Hit]) -> None:
+    def _scan_resources(self, ctx: "AnalysisContext", hits: dict[str, _Hit]) -> dict[str, int]:
         """扫描 APK 内文本资源（H5/JS/json/xml）里的控制信道 URL。绝不抛。"""
         try:
             files = [p for p in ctx.list_files() if isinstance(p, str)]
         except Exception:
             logger.exception("[%s] 读取 list_files 失败", self.name)
-            return
+            return {"list_failed": 1}
 
         total = 0
+
+        read_failed = 0
+
+        oversize = 0
+
+        budget_hit = False
         for path in files:
             if total >= _MAX_TOTAL_RESOURCE_BYTES:
+                # 达到总预算＝剩余资源根本没看，必须向下游暴露这个缺口。
+                budget_hit = True
                 logger.warning("[%s] 文本资源扫描达总预算，停止", self.name)
                 break
             if not is_text_resource(
@@ -201,9 +227,15 @@ class SelfHostedImAnalyzer(BaseAnalyzer):
             try:
                 data = ctx.read_file(path)
             except Exception:
+                # 单个资源读失败不中断扫描，但要计数——读不到 ≠ 里面没有。
+                read_failed += 1
                 logger.exception("[%s] 读取资源失败：%s", self.name, path)
                 continue
-            if not data or len(data) > _MAX_RESOURCE_BYTES:
+            if not data:
+                continue  # 空文件不是覆盖缺口，静默跳过
+            if len(data) > _MAX_RESOURCE_BYTES:
+                # 超大资源被整个跳过，是覆盖缺口而非「未命中」。
+                oversize += 1
                 continue
             total += len(data)
             text = (
@@ -212,6 +244,16 @@ class SelfHostedImAnalyzer(BaseAnalyzer):
                 else str(data)
             )
             self._scan_channel(text, "resource", path, hits)
+
+        return {
+            key: value
+            for key, value in {
+                "read_failed": read_failed,
+                "oversize_skipped": oversize,
+                "budget_exhausted": int(budget_hit),
+            }.items()
+            if value
+        }
 
     # ------------------------------------------------------------------
     # 扫描：IM 库包名指纹（弱证据）
