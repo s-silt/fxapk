@@ -1314,3 +1314,47 @@ def test_ingest_and_advice_calibers_differ_on_purpose() -> None:
     #   192.88.99.x 那类依赖标准库特殊段分类的地址，而那正是另一项待清理的债
     #   （见任务「测试夹具不再依赖 ipaddress 的特殊段分类偶然性」）。
     #   本条锁的是"两层判据在 CGNAT 上有意分歧"，不需要第三组数据。
+
+
+# ======================================================================
+# 解析失败 + 零观测：空结果不等于零流量（路线 E2）
+# ======================================================================
+
+
+def test_parse_error_with_zero_flows_reaches_meta_and_closure(tmp_path) -> None:
+    """★解析失败且零观测时，inventory 仍要写进 meta 并带上真实 parse_status。
+
+    此前 inventory 写入整块在 `if observed:` 里，于是一份读不成的 pcap（坏文件 / 截断 /
+    不支持的链路层）在 meta 里毫无痕迹——闭环拿不到 parse_status，只能按「没有业务候选」判，
+    把「这份采集根本没读成」误当成「样本确实没有对外通信」。
+
+    突变：把 elif 补偿块删掉 → meta 无 inventory → 闭环把空当零流量 → 本测试红。
+    """
+    from apkscan.core.closure.gates import evaluate_capture_quality
+    from apkscan.core.runtime_inventory import (
+        INVENTORY_META_KEY,
+        derive_capture_quality,
+        read_inventory,
+    )
+
+    p = tmp_path / "report.json"
+    p.write_text(json.dumps({"leads": [], "meta": {}}, ensure_ascii=False), encoding="utf-8")
+
+    # 坏字节：解析不出任何 flow / DNS
+    summary = pcap_ingest.parse_pcap_bytes(b"\x00\x01\x02not-a-pcap")
+    assert summary.parse_status != "ok", "前置：这份输入应当解析失败"
+    assert not summary.flows and not summary.dns_queries, "前置：零观测"
+
+    pcap_ingest.merge_into_report_json(str(p), summary)
+    meta = json.loads(p.read_text(encoding="utf-8")).get("meta", {})
+
+    inv = meta.get(INVENTORY_META_KEY)
+    assert isinstance(inv, dict), "解析失败的采集在 meta 里毫无痕迹"
+    assert inv.get("parse_status") == summary.parse_status, "parse_status 没如实带出来"
+    assert meta.get("runtime_merged") is True, "这条路走过了（哪怕失败），不该显示为纯静态"
+
+    # 闭环必须把它读成「采集失败、需重抓」而不是「零流量」。
+    quality = evaluate_capture_quality(derive_capture_quality(read_inventory(meta)))
+    assert quality["floor_parse_status"] == summary.parse_status
+    assert "does not imply zero traffic" in str(quality["reason"]), \
+        "闭环把「没读成」当成了「确实没有流量」"

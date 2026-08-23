@@ -3352,6 +3352,25 @@ def merge_into_report_json(
             for _stale in _inv.INVENTORY_META_ALIASES:
                 meta.pop(_stale, None)
 
+        elif summary.parse_status != "ok":
+            # ★解析失败且零观测：**空结果不等于零流量**。此前 inventory 写入整块在
+            #   ``if observed:`` 里，于是一份解析失败的 pcap（坏文件 / 截断 / 不支持的链路层）
+            #   在 meta 里毫无痕迹——闭环拿不到 parse_status，只能按「没有业务候选」判，
+            #   把「这份采集根本没读成」误当成「样本确实没有对外通信」。
+            #   写一份零贡献但带真实 parse_status 的清单，让 derive_capture_quality 的
+            #   floor_parse_status 通路把它变成「采集失败、需重抓」而非「零流量」。
+            if _inv.INVENTORY_META_KEY not in meta:
+                meta["runtime_merged"] = True  # 这条路走过了（哪怕失败），不是「纯静态」
+                meta[_inv.INVENTORY_META_KEY] = _inv.build_inventory(
+                    meta,
+                    source="pcap",
+                    endpoint_values=(),
+                    domain_values=(),
+                    parse_status=summary.parse_status,
+                    uid_attributed=False,
+                    target_attributed_values=(),
+                )
+
         # ★刷新派生视图：visibility 快照是**算出来的**，不是证据。上面往 meta 追加了
         #   ``runtime_merged`` / inventory，不重算就会落盘一份自相矛盾的报告——实测过
         #   「23 个运行时端点、27 条活体确认线索，快照却写着『未做运行时观测（纯静态分析）』」。
