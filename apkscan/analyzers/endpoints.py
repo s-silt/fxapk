@@ -30,7 +30,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from apkscan.core import infra
+from apkscan.core import infra, tld_policy
+from apkscan.core.tld_policy import BARE_STRICT_TLDS as _SAFE_BARE_TLDS
+from apkscan.core.tld_policy import URL_HOST_TLDS as _COMMON_TLDS
 from apkscan.core.models import AnalyzerResult, Confidence, Evidence, Finding, Severity
 from apkscan.core.registry import BaseAnalyzer, load_rules
 from apkscan.analyzers._common import EndpointCollector
@@ -201,92 +203,15 @@ _FILE_EXT_TLDS: frozenset[str] = frozenset(
 )
 
 # 常见 TLD：末段命中即认可为域名（不再走类名/包名启发式）。
-_COMMON_TLDS: frozenset[str] = frozenset(
-    {
-        # RFC 2606 / RFC 6761 保留 TLD：永不进入根区、永不解析，故零误报风险。
-        # 收进来是为了让「刻意用保留 TLD 保证绝不撞真实域名」的测试夹具与文档示例照常被识别为域名。
-        "test",
-        "example",
-        "invalid",
-        "localhost",
-
-        "com",
-        "cn",
-        "net",
-        "org",
-        "gov",
-        "edu",
-        "info",
-        "biz",
-        "co",
-        "io",
-        "me",
-        "tv",
-        "cc",
-        "top",
-        "xyz",
-        "vip",
-        "club",
-        "shop",
-        "site",
-        "online",
-        "app",
-        "wang",
-        "ltd",
-        "pro",
-        "asia",
-        "mobi",
-        "ren",
-        "win",
-        "link",
-        "live",
-        "fun",
-        "work",
-        "store",
-        "tech",
-        "icu",
-        "cloud",
-        "hk",
-        "tw",
-        "mo",
-        "jp",
-        "kr",
-        "sg",
-        "us",
-        "uk",
-        "ru",
-        "de",
-        "fr",
-        "in",
-        "ph",
-        "my",
-        "th",
-        "vn",
-        "id",
-        "to",
-        "ws",
-        "la",
-        "im",
-        "so",  # 注意：.so 文件已在 _is_resource_target / 上游排除
-        "gg",
-        "ai",
-        "dev",
-    }
-)
+# 单一真源在 core.tld_policy（URL_HOST_TLDS，顶部 import 别名）；宽窄双轨的完整
+# 设计理由（为什么不与 _SAFE_BARE_TLDS 统一）见该模块 docstring。
 
 # 裸域名提取的"安全 TLD 白名单"：仅当末段属此集合才认裸域名。
 # 刻意剔除与压缩 JS / 代码标识符高频撞车的短 TLD（id/top/to/me/cc/in/so/ai/im/
 # info/store/online/work/link/live/win/name/...）——这些真域名仍可经 URL 的 host 抽到，
 # 但作为"裸点分串"出现时几乎全是 a.id / rect.top / f32.store / console.info 之类的代码。
 # 这是 JS 混合应用（uni-app/H5+）里把域名误报压到可用水平的关键。
-_SAFE_BARE_TLDS: frozenset[str] = frozenset(
-    {
-        "com", "cn", "net", "org", "gov", "edu", "biz", "io", "co",
-        "xyz", "vip", "club", "shop", "site", "app", "tech", "cloud",
-        "fun", "ltd", "pro", "wang", "ren", "mobi", "asia", "icu",
-        "hk", "tw", "mo", "jp", "kr", "sg", "us", "uk", "ru", "de", "fr",
-    }
-)
+# 单一真源在 core.tld_policy（BARE_STRICT_TLDS，顶部 import 别名）。
 
 # 作为"注册主体段"(SLD，TLD 前一段)出现时几乎一定是代码而非域名的常见词。
 _CODE_WORDS: frozenset[str] = frozenset(
@@ -1046,12 +971,12 @@ def _url_host_tld_ok(host: str) -> bool:
     裸域名通道有 :func:`_is_strict_bare_domain` 的 TLD 白名单挡着，**URL 通道却没有**，于是
     ``http://www.任意小写词`` 都能派生出一个"域名端点"，还带着 tier=app 被判"建议调证"，直接污染调证清单。
 
-    判据用 ``_COMMON_TLDS``（61 条，含 top/cc/info/me/online/xyz 等真 C2 常用 TLD）而**不用**更窄的
-    ``_SAFE_BARE_TLDS``（35 条，缺 top/cc/info）——后者会把真 C2 误杀，与"宁可漏、不可造"里更该守的
-    "不可误杀真线索"冲突。多段 host 只看末段。
+    判据用 ``_COMMON_TLDS``（65 条，含 top/cc/info/me/online/xyz 等真 C2 常用 TLD）而**不用**更窄的
+    ``_SAFE_BARE_TLDS``（36 条，缺 top/cc/info）——后者会把真 C2 误杀，与"宁可漏、不可造"里更该守的
+    "不可误杀真线索"冲突。多段 host 只看末段。判定实现已收进单一真源
+    :func:`apkscan.core.tld_policy.url_host_tld_ok`，此处仅委托。
     """
-    labels = host.lower().rsplit(".", 1)
-    return len(labels) == 2 and labels[-1] in _COMMON_TLDS
+    return tld_policy.url_host_tld_ok(host)
 
 
 def _looks_like_domain(domain: str) -> bool:

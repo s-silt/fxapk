@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from apkscan.core import infra
+from apkscan.core.tld_policy import BARE_STRICT_TLDS as _SAFE_BARE_TLDS
 from apkscan.core.models import (
     AnalyzerResult,
     Evidence,
@@ -243,14 +244,8 @@ _CODE_WORDS: frozenset[str] = frozenset(
 # 刻意剔除与 JS 代码 / 数据撞车的伪 TLD（value/abs/opacity/style/path/length…
 # 以及股票后缀 sh/sz、和易与属性撞车的 top/to/me/id/in 等）——这些真域名仍可经
 # 字面量里的完整 URL（http(s)://）的 host 通道抽到。与 endpoints 分析器保持一致口径。
-_SAFE_BARE_TLDS: frozenset[str] = frozenset(
-    {
-        "com", "cn", "net", "org", "gov", "edu", "biz", "io", "co",
-        "xyz", "vip", "club", "shop", "site", "app", "tech", "cloud",
-        "fun", "ltd", "pro", "wang", "ren", "mobi", "asia", "icu",
-        "hk", "tw", "mo", "jp", "kr", "sg", "us", "uk", "ru", "de", "fr",
-    }
-)
+# 单一真源在 core.tld_policy（BARE_STRICT_TLDS，顶部 import 别名）；宽窄双轨的
+# 设计理由见该模块 docstring。
 
 # 反向域名包名常见根段：裸域名首段命中即视为 Java/Kotlin 反向包名（非域名）。
 _PACKAGE_ROOTS: frozenset[str] = frozenset(
