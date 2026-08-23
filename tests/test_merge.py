@@ -542,8 +542,12 @@ def test_merge_and_rerender_copies_capture_quality(tmp_path) -> None:
         runtime_report_path=str(runtime_report),
     )
 
-    assert report.meta["capture_quality"] == quality
-    assert report.meta["capture_signals"]["quality"] == quality
+    # 路线 A 新增来源透传键：merge 这一步没有来源信息，故存盘态是占位 "unknown"
+    # （闭环二次求值时由 _capture_meta 据实覆写为 "capture_quality"，见 T-A5）。
+    # 此处**只增不改**：其余 16 项断言一字未动。
+    expected = {**quality, "quality_input_source": "unknown"}
+    assert report.meta["capture_quality"] == expected
+    assert report.meta["capture_signals"]["quality"] == expected
 
 
 def test_merge_and_rerender_copies_runtime_variant(tmp_path) -> None:

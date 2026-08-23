@@ -439,6 +439,9 @@ def test_build_capture_quality_requires_target_attributed_business_traffic(
         "dynamic_status": "complete",
         "reason": "target-attributed endpoint observed with bidirectional payload on that same endpoint",
         "floor_parse_status": "ok",
+        # 路线 A 新增的来源透传键。本用例走的是真采集（_build_capture_quality 直接构造，
+        # 不经 _capture_meta），故来源未标注 → "unknown"。此处**只增不改**：其余 16 项断言一字未动。
+        "quality_input_source": "unknown",
     }
 
 

@@ -413,3 +413,143 @@ def test_attributed_values_are_a_union_not_a_sum() -> None:
     built = _merge(meta, "probe", uid=True, endpoints=["198.51.100.7"],
                    attributed=["198.51.100.7"])
     assert built["target_attributed"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 路线 A：capture_signals 是取证面 overlay，不得充当质量摘要
+#   缺陷形态：`_capture_meta` 的优先链把 capture_signals 整体当质量摘要返回，屏蔽清单派生。
+#   而 pcap-leads 回灌路径**会写** capture_signals（归因细节，无任何计数字段）、**不写**
+#   capture_quality —— 于是「做过 UID 归因」的报告反而 business_count=0 → failed，
+#   「没做归因」的同一份清单走派生 → partial。**证据更强，结论更差。**
+# ---------------------------------------------------------------------------
+
+_ATTRIB_SIGNALS: dict = {"pcap_app_attribution": {"tcp/100.64.1.10:443": {"is_target_app": True}}}
+_STATUS_RANK = {"failed": 0, "partial": 1, "complete": 2}
+
+
+def _quality_of(report: Report) -> dict:
+    """按生产路径求采集质量：_capture_meta 取输入 → evaluate_capture_quality 分档。"""
+    from apkscan.core.closure.gates import _capture_meta
+
+    return evaluate_capture_quality(_capture_meta(report))
+
+
+def test_capture_signals_presence_does_not_mask_inventory_derivation() -> None:
+    """★T-A1：报告里有 capture_signals（归因细节）时，清单派生**仍然生效**。
+
+    突变：把 "capture_signals" 放回 `_capture_meta` 的优先链 → 返回的 dict 没有任何计数字段
+    → business_count=0 → failed → 本测试红。
+    """
+    report = _pcap_only_report(remote_endpoints=2, domain_leads=0,
+                               uid_attributed=True, target_attributed=1)
+    report.meta["capture_signals"] = dict(_ATTRIB_SIGNALS)
+
+    quality = _quality_of(report)
+    assert quality["dynamic_status"] == "partial", "有归因细节反而判 failed —— 方向倒挂复现"
+    assert quality["business_candidate_count"] == 2, "清单派生被 capture_signals 屏蔽了"
+    assert quality["target_attributed_count"] == 1
+    assert "bidirectional" in str(quality["reason"])
+
+
+def test_stronger_attribution_evidence_never_yields_worse_status() -> None:
+    """★T-A2 不变量：同一份清单，**多**一份归因证据不得让结论变差。
+
+    这是本次修复的核心不变量——教用户「别给 socket 快照，结论反而好看」是最坏的取证工具行为。
+    """
+    def _mk() -> Report:
+        return _pcap_only_report(remote_endpoints=2, domain_leads=0,
+                                 uid_attributed=True, target_attributed=1)
+
+    strong = _mk()
+    strong.meta["capture_signals"] = dict(_ATTRIB_SIGNALS)  # 做了 UID 归因
+    weak = _mk()                                            # 没做归因
+
+    s_status = _quality_of(strong)["dynamic_status"]
+    w_status = _quality_of(weak)["dynamic_status"]
+    assert _STATUS_RANK[s_status] >= _STATUS_RANK[w_status], (
+        f"证据更强反而更差：有归因={s_status} < 无归因={w_status}"
+    )
+
+
+def test_attributed_target_never_reported_as_no_candidate() -> None:
+    """★T-A3 自洽不变量：不得同时出现「已归因到目标」与「未观测到目标业务候选」。
+
+    缺陷版正是这个形态：target_attributed_count=1 与 reason "no target business candidate
+    observed" 出现在**同一份输出**里，机器结论与自身证据自相矛盾。
+    """
+    report = _pcap_only_report(remote_endpoints=2, uid_attributed=True, target_attributed=1)
+    report.meta["capture_signals"] = dict(_ATTRIB_SIGNALS)
+
+    quality = _quality_of(report)
+    contradictory = (
+        quality["dynamic_status"] == "failed"
+        and int(quality["target_attributed_count"]) > 0
+        and int(quality["business_candidate_count"]) > 0
+    )
+    assert not contradictory, f"结论与自身证据矛盾：{quality['reason']}"
+
+
+@pytest.mark.parametrize(
+    "setup,expected",
+    [
+        ("capture_quality", "capture_quality"),
+        ("runtime_capture_quality", "runtime_capture_quality"),
+        ("signals_and_inventory", "capture_signals+inventory"),
+        ("signals_only", "capture_signals"),
+        ("inventory_only", "inventory"),
+    ],
+)
+def test_quality_input_source_is_reported(setup: str, expected: str) -> None:
+    """★T-A4：质量输入来自哪里必须可见——同一个 partial，出自真采集还是回灌派生，
+    下一步动作完全不同（前者补采集面，后者去做归因）。"""
+    if setup == "signals_only":
+        # 无清单、只有取证面：构造一份不带 runtime 清单的报告
+        report = _pcap_only_report()
+        report.meta.pop(inv.INVENTORY_META_KEY, None)
+        report.meta["capture_signals"] = dict(_ATTRIB_SIGNALS)
+    else:
+        report = _pcap_only_report(remote_endpoints=2, uid_attributed=True, target_attributed=1)
+        if setup == "capture_quality":
+            report.meta["capture_quality"] = {"channel_ready": True, "business_candidate_count": 3}
+        elif setup == "runtime_capture_quality":
+            report.meta["runtime_capture_quality"] = {"channel_ready": True}
+        elif setup == "signals_and_inventory":
+            report.meta["capture_signals"] = dict(_ATTRIB_SIGNALS)
+
+    assert _quality_of(report)["quality_input_source"] == expected
+
+
+def test_modified_runtime_overlay_still_caps_at_partial() -> None:
+    """★T-A6：overlay 路径不得成为 modified-runtime 封顶守卫的旁路。
+
+    signals 里带 runtime_variant=modified-runtime 时，即便清单派生出业务候选，
+    也只能到 partial —— 诱导出来的行为不能当作样本自发行为据以结案。
+    """
+    report = _pcap_only_report(remote_endpoints=2, uid_attributed=True, target_attributed=1)
+    report.meta["capture_signals"] = {**_ATTRIB_SIGNALS, "runtime_variant": "modified-runtime"}
+
+    quality = _quality_of(report)
+    assert quality["dynamic_status"] == "partial"
+    assert quality["runtime_variant"] == "modified-runtime"
+    assert "modified-runtime" in str(quality["reason"])
+
+
+def test_quality_input_source_survives_merge_roundtrip() -> None:
+    """★T-A5：来源戳经「merge 存盘 → closure 二次求值」往返后仍准确。
+
+    真实流水线里 merge 会把 :func:`evaluate_capture_quality` 的**返回体**写回
+    ``meta["capture_quality"]``，而那一步没有来源信息、透传出的是占位 ``"unknown"``。
+    若 `_capture_meta` 用 ``setdefault``，二次求值时该键已存在 → 来源永远冻死在 "unknown"。
+
+    ★本测试刻意用**存盘后的形状**而不是裸 dict 构造夹具：T-A4 用裸 dict 时该缺陷测不出来
+      —— 夹具比真实流程干净，就会把缺陷盖住。
+    """
+    stored = evaluate_capture_quality(
+        {"channel_ready": True, "business_candidate_count": 3, "packet_count": 5, "pcap_valid": True}
+    )
+    assert stored["quality_input_source"] == "unknown", "前置：存盘态本就带 unknown 占位"
+
+    report = _pcap_only_report()
+    report.meta["capture_quality"] = stored
+
+    assert _quality_of(report)["quality_input_source"] == "capture_quality"
