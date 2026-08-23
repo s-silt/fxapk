@@ -15,8 +15,9 @@ from apkscan.core.models import (
     Report,
     Severity,
 )
-from apkscan.core.report_io import load_report, write_report
+from apkscan.core.report_io import load_report, report_from_dict, write_report
 from apkscan.report import json as report_json
+from apkscan.report.digest import build_digest
 
 
 def _report() -> Report:
@@ -248,3 +249,76 @@ def test_report_json_to_dict_never_emits_legacy_source_status_strings() -> None:
     assert payload["meta"]["closure"]["targets"][0]["source_status"] == {
         "fofa": {"status": "failed", "error_type": "rate_limited"}
     }
+
+
+# --- D1-c：未知 LeadCategory 三出口一致 --------------------------------------
+
+
+def _unknown_category_payload() -> dict:
+    """report.json **存盘形状**的最小夹具：含一条本版本不认识的 category="future_x" 线索。"""
+    return {
+        "package_name": "com.example.synthetic",
+        "meta": {"package_name": "com.example.synthetic"},
+        "leads": [
+            {
+                "category": "future_x",
+                "value": "future-fixture",
+                "confidence": "HIGH",
+                "advice": "待核",
+                "notes": "",
+                "source_refs": [
+                    {
+                        "source": "dex",
+                        "location": "X;->y",
+                        "snippet": "future-fixture",
+                        "scope": "case_evidence",
+                    }
+                ],
+            }
+        ],
+        "endpoints": [],
+        "findings": [],
+        "analyzer_status": [],
+        "enricher_status": [],
+        "schema_version": "1.2",
+        "analysis_status": "complete",
+        "completeness": 1.0,
+        "critical_failures": [],
+        "skipped_analyzers": [],
+    }
+
+
+def test_unknown_category_preserved_and_roundtrips(tmp_path):
+    """★D1-c：未知 category 不再被 typed loader 丢弃——归入 UNKNOWN + 保留原始串，
+    write_report 往返后 JSON 里 category **仍是**原始串（不把别人的类别改掉）。"""
+    report = report_from_dict(_unknown_category_payload())
+
+    matches = [lead for lead in report.leads if lead.value == "future-fixture"]
+    assert len(matches) == 1, "未知 category 的 Lead 被 typed loader 丢弃了"
+    lead = matches[0]
+    assert lead.category is LeadCategory.UNKNOWN
+    assert lead.raw_category == "future_x"
+
+    out = tmp_path / "report.json"
+    write_report(report, out, render_existing_html=False)
+    written = json.loads(out.read_text(encoding="utf-8"))
+    cats = [
+        item.get("category")
+        for item in written["leads"]
+        if item.get("value") == "future-fixture"
+    ]
+    assert cats == ["future_x"], f"往返后 category 应写回原始串，实得 {cats!r}"
+
+
+def test_unknown_category_visible_in_digest(tmp_path):
+    """★D1-c：typed load → write_report → digest 全链后，未知 category 的 Lead 仍在
+    digest 出口可见，且 category 显式标注「（未识别类别）」。"""
+    report = report_from_dict(_unknown_category_payload())
+    out = tmp_path / "report.json"
+    write_report(report, out, render_existing_html=False)
+    written = json.loads(out.read_text(encoding="utf-8"))
+
+    digest = build_digest(written)
+    rows = [row for row in digest["leads"] if row.get("value") == "future-fixture"]
+    assert rows, "未知 category 的 Lead 在 digest 出口消失了"
+    assert rows[0]["category"] == "future_x（未识别类别）"

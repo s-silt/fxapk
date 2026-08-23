@@ -180,6 +180,26 @@ def test_integrity_nan_completeness_not_reliable() -> None:
     assert d3["integrity"]["reliable"] is False
 
 
+def test_partial_status_makes_integrity_unreliable() -> None:
+    """★D1-a：analysis_status=partial（即使 completeness=1.0、无 critical_failures，如仅
+    pipeline 阶段崩溃降档）→ reliable=False，warning 同时点名 status 与失败阶段。
+
+    夹具用**存盘形状**：stage_status 由 pipeline 写在 meta 下（pipeline.run →
+    ``state.meta["stage_status"]``），不是根级——根级形状比真实流程干净，会把缺陷盖住。
+    """
+    report = {
+        "leads": [],
+        "analysis_status": "partial",
+        "completeness": 1.0,
+        "critical_failures": [],
+        "enricher_status": [],
+        "meta": {"stage_status": [{"name": "enrich", "status": "error"}]},
+    }
+    integ = build_digest(report)["integrity"]
+    assert integ["reliable"] is False
+    assert any("partial" in w and "enrich" in w for w in integ["warnings"])
+
+
 def test_integrity_no_enrichment_attempts_not_flagged() -> None:
     """零富化尝试（离线/无端点）→ enrichment_ok_rate=None，不因此告警（不是失败）。"""
     report = {"leads": [], "analysis_status": "complete", "completeness": 1.0,

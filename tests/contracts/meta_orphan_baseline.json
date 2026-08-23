@@ -322,9 +322,6 @@
       "runtime_traced": [
         "apkscan/dynamic/merge.py"
       ],
-      "stage_status": [
-        "apkscan/core/pipeline.py"
-      ],
       "strings_scanned": [
         "apkscan/analyzers/crypto.py"
       ],

@@ -56,7 +56,10 @@ def test_baseline_file_is_wellformed_and_nonvacuous() -> None:
     #   117 → 116：runtime_merged_inventory 由 fingerprint 级归因账本投影消费
     #              （pcap_ingest._apply_inventory_attribution_projection 读它并
     #              据账本裁决改写 target_attributed），不再是只写不读的孤儿记录。
-    assert total == 116, f"三类存量应守恒为 116，实际 {total}"
+    #   116 → 115：stage_status 接进 digest 的 _integrity——analysis_status 为
+    #              partial/failed 时读它取失败阶段名写进 warning 并令 reliable=False。
+    #              此前它只写不读：报告自称"部分完成"、摘要却说"可靠"（路线 D1-a）。
+    assert total == 115, f"三类存量应守恒为 115，实际 {total}"
     for category, group in baseline.items():
         for key, files in group.items():
             assert key, f"{category} 基线里有空键"

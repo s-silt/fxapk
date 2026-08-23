@@ -55,6 +55,32 @@ class LeadCategory(Enum):
     SELF_HOSTED_IM = "SELF_HOSTED_IM"  # 自建 IM/C2 控制信道（团伙落地强连边，向云厂商/IDC 调服务器归属与信道日志）
     WALLET_SECRET = "WALLET_SECRET"  # 钱包私钥/助记词（高敏，直接掌控资金；境外/链上路径：派生地址上链回溯+交易所冻结）
     BACKEND_CREDENTIAL = "BACKEND_CREDENTIAL"  # 硬编码后端/管理凭据（Basic-Auth/DB DSN/云AK；高敏，供有权机关依法登录取证、调服务器镜像/日志）
+    # ★兜底成员：report.json 里出现本版本不认识的 category 时，typed loader 不再丢弃该 Lead，
+    #   而是归入 UNKNOWN 并把原始串留在 Lead.raw_category（序列化时写回原始串，往返保真）。
+    #   「没识别出类别」不等于「这条线索不存在」——丢弃会让 digest（raw 读）看得见、HTML
+    #   （typed 重渲）看不见，同一份报告两个出口对不上。
+    UNKNOWN = "unknown"
+
+
+#: 当前版本认识的全部类别字面（含 UNKNOWN 自身的 "unknown"）。
+_KNOWN_CATEGORY_VALUES: frozenset[str] = frozenset(c.value for c in LeadCategory)
+
+
+def display_lead_category(category: object, raw_category: object = None) -> str:
+    """序列化 lead 的 category 展示名（digest / letters / ioc 共用一处，别各写一份）。
+
+    未识别类别显式标成 ``<原始串>（未识别类别）``，不让下游把它当正常类别静默混过；
+    已知类别原样返回。两个参数都按 report.json 存盘形状的原始值传入（str / None / 缺失）。
+
+    ★判「未识别」靠**枚举成员资格**而非 ``raw_category`` 字段：``raw_category`` 不落盘
+      （见 :attr:`Lead.raw_category`），且外部/手工报告从未经过 typed loader、根本没有这个
+      字段——按成员资格判，三个 raw 读出口对任何来路的报告都标得出来。
+    """
+    cat = str(category or "")
+    raw = raw_category if isinstance(raw_category, str) and raw_category else ""
+    if raw or cat == LeadCategory.UNKNOWN.value or (cat and cat not in _KNOWN_CATEGORY_VALUES):
+        return f"{raw or cat}（未识别类别）"
+    return cat
 
 
 class EvidenceScope(Enum):
@@ -249,6 +275,13 @@ class Lead:
     #:   往下滑（棘轮），最后恢复到的比原始状态还低。撤空账本后也不删——留作审计痕迹，也是再次
     #:   抑制时的锚点。
     legacy_effective_advice: str | None = None
+    #: :attr:`category` 为 :attr:`LeadCategory.UNKNOWN` 时的**原始类别串**（report.json 里
+    #: 本版本不认识的 category 字面）。非空时序列化把 ``category`` 字段写回这个原始串——
+    #: 往返保真，不把别人的类别改掉；展示层据它渲染「<原始串>（未识别类别）」。
+    #: 已知类别恒为 ``None``。追加在字段末尾，避免影响位置参数构造。
+    #: ★仅存在于内存：**不落盘**（report/json.py 序列化时剔除）——它可从未识别的 category
+    #:   字面在载入时完整重建，落盘会给每条 Lead 添机器可见新键、打破 schema 1.2 键集合冻结。
+    raw_category: str | None = None
 
     @property
     def is_c2(self) -> bool:

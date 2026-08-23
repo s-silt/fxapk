@@ -27,6 +27,7 @@ from typing import Any
 
 from apkscan.core import infra
 from apkscan.core.evidence_scope import project_serialized_leads
+from apkscan.core.models import display_lead_category
 from apkscan.core.registry import load_rules
 from apkscan.core.restore import restore_index, restored_sources_for
 
@@ -598,7 +599,9 @@ def _lead_to_letter(
     return {
         # 结构化回带：消费方不必去正文里捞这句（与 sni_masquerade 同理）。
         "manually_restored": restored_sources,
-        "category": category,
+        # 渲染面：未识别类别显式标注「（未识别类别）」（见 Lead.raw_category）；已知类别原样。
+        # 模板/归因查找仍用上面的结构化 category，不受影响。
+        "category": display_lead_category(category, lead.get("raw_category")),
         "subject": subject,  # 标的归属（公司/人）
         "recipient": recipient,  # 受文机关（取自 where_to_request）
         "target": target,  # 标的 = Lead.value

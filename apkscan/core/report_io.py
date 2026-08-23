@@ -130,11 +130,18 @@ def report_from_dict(payload: Mapping[str, object]) -> Report:
     for item in raw_leads if isinstance(raw_leads, list) else []:
         if not isinstance(item, Mapping):
             continue
+        raw_category: str | None = None
         try:
             category = LeadCategory(str(item.get("category", "")))
         except ValueError:
-            logger.warning("Unknown LeadCategory in report.json; skipping: %s", item.get("category"))
-            continue
+            # ★不 skip：丢弃会让三个 raw 读出口（digest/letters/ioc）看得见这条 Lead、
+            #   typed 重渲的出口（HTML）看不见。归入 UNKNOWN + 保留原始串，序列化写回原始串。
+            raw_category = str(item.get("category", ""))
+            logger.warning(
+                "Unknown LeadCategory in report.json; preserved as UNKNOWN: %s",
+                item.get("category"),
+            )
+            category = LeadCategory.UNKNOWN
         subject = item.get("subject")
         where = item.get("where_to_request")
         base_advice = _advice_or_none(item.get("base_advice"), "base_advice")
@@ -175,6 +182,7 @@ def report_from_dict(payload: Mapping[str, object]) -> Report:
                 base_advice=base_advice,
                 downgrades=_str_mapping(item.get("downgrades")),
                 legacy_effective_advice=legacy_advice,
+                raw_category=raw_category,
             )
         )
 
