@@ -50,7 +50,8 @@ _STOP = (
     "把 floor 结果回灌交活。**记住：带外 pcap 已保证你不会『零产出』，明文是上限不是底线。**"
 )
 _MERGE = (
-    "【回灌串案】所有路线产出统一 `--into` 同一 report.json：`fxapk probe-leads probe.log --into report.json`（探针）/ "
+    "【回灌串案】所有路线产出统一 `--into` 同一 report.json：`fxapk probe-leads probe.log --into report.json "
+    "--sample-sha <样本sha256>`（探针；日志无样本标识，须显式声明并与报告 meta.sample_sha256 相符）/ "
     "`fxapk pcap-leads capture.pcap --into report.json`（pcap），合并进同一 report.leads 串案，"
     "并按台账末尾「取证完备性」诊断（定人 / 穿透 / 固证）补抓缺的轴。"
 )

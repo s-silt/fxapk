@@ -1257,6 +1257,11 @@ def probe_leads(
     md: str = typer.Option("", "--md", help="台账 markdown 输出路径（默认打到终端）。"),
     json_out: str = typer.Option("", "--json", help="台账 JSON 输出路径（程序化消费/入图）。"),
     into: str = typer.Option("", "--into", help="把线索追加进已有 report.json 的 leads（去重）。"),
+    sample_sha: str = typer.Option(
+        "",
+        "--sample-sha",
+        help="探针日志所属样本的 sha256（用 --into 时必填，须等于目标报告 meta.sample_sha256）。",
+    ),
 ) -> None:
     """把独立探针(`-l` 注入)散落的 `[LEAD]` 输出聚成**调证台账**，并可回灌进 report.json。
 
@@ -1306,6 +1311,26 @@ def probe_leads(
                 typer.echo(f"错误：写台账 JSON 失败：{json_out}（{exc}）", err=True)
                 raise typer.Exit(code=1) from exc
         if into:
+            # ★样本身份门（fail-closed）：探针日志本身不含任何样本标识（[LEAD] 行无 sha/包名），
+            #   无法自证归属，只能由操作者用 --sample-sha 显式断言、再与目标报告核对。
+            #   不核对就合并的后果不止"混进别人的线索"——merge_into_report_json 对命中已有
+            #   (category, value) 的线索会升 confidence 到 HIGH（两源印证语义），跨样本回灌
+            #   等于制造假印证。校验必须在 _warn_report_path_revision / 合并之前。
+            their = _sample_id_of(into)  # 读 into 的 meta.sample_sha256，读不到返回 ""
+            if not sample_sha:
+                typer.echo(
+                    "错误：--into 需配 --sample-sha 显式声明日志所属样本"
+                    "（探针日志本身不含样本标识）。",
+                    err=True,
+                )
+                raise typer.Exit(code=2)
+            if not their or str(their) != str(sample_sha):
+                typer.echo(
+                    f"错误：--sample-sha 与目标报告不符（报告={their or '缺失'}）。"
+                    f"探针线索只能写回同一样本的报告。",
+                    err=True,
+                )
+                raise typer.Exit(code=2)
             _warn_report_path_revision(into)
             added = probe_ingest.merge_into_report_json(into, leads)
             typer.echo(f"已追加 {added} 条探针线索进 {into}（去重）。")
