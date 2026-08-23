@@ -888,14 +888,19 @@ def test_probe_leads_into_warns_before_mutating_old_report(tmp_path: Path) -> No
     import json as _json
 
     rp = tmp_path / "report.json"
-    _write_min_report_json(rp, leads=[], meta={"tool_version": "0.0.0-old"})
+    _write_min_report_json(
+        rp, leads=[], meta={"tool_version": "0.0.0-old", "sample_sha256": "0" * 64}
+    )
     log = tmp_path / "probe.log"
     log.write_text(
         "[http][LEAD] GET https://backend.example.test/api",
         encoding="utf-8",
     )
 
-    res = runner.invoke(cli.app, ["probe-leads", str(log), "--into", str(rp)])
+    res = runner.invoke(
+        cli.app,
+        ["probe-leads", str(log), "--into", str(rp), "--sample-sha", "0" * 64],
+    )
 
     assert res.exit_code == 0
     assert "分析修订与当前 fxapk 不一致" in res.stderr
@@ -1154,6 +1159,8 @@ def test_probe_leads_into_rerenders_html(monkeypatch, tmp_path: Path):
     from apkscan.dynamic import probe_ingest
 
     rp = tmp_path / "report.json"
+    # 身份门要求 --into 目标先存在且带 sample_sha256；_fake_merge 随后会整体覆写它。
+    _write_min_report_json(rp, leads=[], meta={"sample_sha256": "0" * 64})
     hp = tmp_path / "report.html"
     hp.write_text("<html>STALE</html>", encoding="utf-8")
 
@@ -1187,7 +1194,10 @@ def test_probe_leads_into_rerenders_html(monkeypatch, tmp_path: Path):
     log = tmp_path / "probe.log"
     log.write_text("[LEAD] x", encoding="utf-8")
 
-    res = runner.invoke(cli.app, ["probe-leads", str(log), "--into", str(rp)])
+    res = runner.invoke(
+        cli.app,
+        ["probe-leads", str(log), "--into", str(rp), "--sample-sha", "0" * 64],
+    )
     assert res.exit_code == 0
     html = hp.read_text(encoding="utf-8")
     assert "STALE" not in html
