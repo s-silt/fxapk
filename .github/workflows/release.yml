@@ -10,6 +10,11 @@ on:
   push:
     tags: ["v*"]
 
+# 顶层默认只读；publish job 在自己内部声明所需的 id-token / contents 写权限
+# （job 级 permissions 完全覆盖顶层，不是叠加）。
+permissions:
+  contents: read
+
 jobs:
   # ★发布前的版本契约闸：tag 可能打在**未过 CI** 的 commit 上，而
   #   test_fallback_version_contract_holds（锁 _FALLBACK_VERSION == pyproject version）
