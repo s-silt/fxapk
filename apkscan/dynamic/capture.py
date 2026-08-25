@@ -63,6 +63,8 @@ from apkscan.dynamic import (
 from apkscan.dynamic.capture_plan import CaptureDecision, decide_capture
 from apkscan.report import json as report_json
 
+from apkscan.core.redact import redact_url
+
 logger = logging.getLogger(__name__)
 
 # 抓包用的本机代理监听端口（mitmproxy 默认 8080）。
@@ -3614,7 +3616,11 @@ def _config_message_from_flow(flow: object) -> dict[str, Any] | None:
 
     # 护栏②：限大小——明文配置含可读字段，超 32KB 不留（隐私 + 防大段明文落盘）。
     if len(resp_body.encode("utf-8", errors="ignore")) > _MAX_CONFIG_BODY_BYTES:
-        logger.info("[capture] 明文配置响应超 %d 字节，跳过保留：%s", _MAX_CONFIG_BODY_BYTES, url)
+        logger.info(
+            "[capture] 明文配置响应超 %d 字节，跳过保留：%s",
+            _MAX_CONFIG_BODY_BYTES,
+            redact_url(url),
+        )
         return None
 
     flow_id, ts = _flow_meta(flow)

@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
+from apkscan.core.redact import redact_url, safe_exception_text
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = 10.0
@@ -177,7 +179,11 @@ def fetch_config_object(
         return FetchResult(url, False, None, None, "非 http(s) URL")
     safe, why = _target_is_safe(url)  # 第一层：预解析校验
     if not safe:
-        logger.warning("[remote_config] 拒绝下载（SSRF 预解析防护）%s：%s", url, why)
+        logger.warning(
+            "[remote_config] 拒绝下载（SSRF 预解析防护）%s：%s",
+            redact_url(url),
+            why,
+        )
         return FetchResult(url, False, None, None, f"目标被 SSRF 防护拒绝：{why}")
     session = _build_guarded_session()  # 第二层：连接层实连 IP 校验（防 DNS-rebinding）
     if session is None:
@@ -208,7 +214,11 @@ def fetch_config_object(
             chunks.append(chunk)
         return FetchResult(url, True, b"".join(chunks), status, None)
     except Exception as exc:  # noqa: BLE001 — requests 各类异常（含 rebinding 掐断）一律降级，绝不抛
-        logger.warning("[remote_config] 下载失败 %s：%s", url, type(exc).__name__)
+        logger.warning(
+            "[remote_config] 下载失败 %s：%s",
+            redact_url(url),
+            safe_exception_text(exc),
+        )
         return FetchResult(url, False, None, None, f"下载异常：{type(exc).__name__}")
     finally:
         if resp is not None:

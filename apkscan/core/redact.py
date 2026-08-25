@@ -33,7 +33,9 @@ fxapk 会提取个人隐私数据 / 钱包私钥助记词 / 后端凭据 / 运�
 
 from __future__ import annotations
 
+import hashlib
 import re
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 import sys
 
 #: 会把线索原值打到 stdout、且**不做任何脱敏**的命令。它们不受 ``digest`` 那个开关保护——
@@ -145,3 +147,110 @@ def scrub_pii(text: object) -> tuple[str, bool]:
         if n:
             hit = True
     return s, hit
+
+
+_URL_TOKEN_RE = re.compile(
+    r"""(?ix)
+    \b
+    (?:
+        https?|wss?|ftp
+    )
+    ://
+    [^\s<>"'\]\[(){}]+
+    """
+)
+
+_URL_HASH_LENGTH = 12
+_REDACTED_URL = "<redacted-url>"
+_REDACTED_QUERY = "***"
+_REDACTED_FRAGMENT = "***"
+
+
+def _url_fingerprint(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()[
+        :_URL_HASH_LENGTH
+    ]
+
+
+def _safe_netloc(parts: SplitResult) -> str:
+    """Build a netloc without URL userinfo."""
+    hostname = parts.hostname
+    if not hostname:
+        return ""
+
+    # urlsplit().hostname removes IPv6 brackets.
+    host = f"[{hostname}]" if ":" in hostname else hostname
+
+    try:
+        port = parts.port
+    except ValueError:
+        # An invalid port makes the URL unsafe to reproduce in logs.
+        return ""
+
+    return f"{host}:{port}" if port is not None else host
+
+
+def redact_url(value: object, *, include_fingerprint: bool = True) -> str:
+    """Return a stable URL representation safe for logs and error artifacts.
+
+    The representation removes userinfo and replaces query and fragment
+    contents. It never returns the original value when parsing fails.
+    """
+    raw = value if isinstance(value, str) else str(value)
+    fingerprint = _url_fingerprint(raw)
+
+    try:
+        parts = urlsplit(raw)
+        netloc = _safe_netloc(parts)
+
+        if not parts.scheme or not netloc:
+            rendered = _REDACTED_URL
+        else:
+            rendered = urlunsplit(
+                (
+                    parts.scheme.lower(),
+                    netloc,
+                    parts.path,
+                    _REDACTED_QUERY if parts.query else "",
+                    _REDACTED_FRAGMENT if parts.fragment else "",
+                )
+            )
+    except (TypeError, ValueError, UnicodeError):
+        rendered = _REDACTED_URL
+
+    if include_fingerprint:
+        return f"{rendered} [url:{fingerprint}]"
+    return rendered
+
+
+def scrub_urls(text: object) -> tuple[str, bool]:
+    """Redact absolute URLs embedded in free text."""
+    raw = text if isinstance(text, str) else str(text)
+    changed = False
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal changed
+        changed = True
+        return redact_url(match.group(0))
+
+    return _URL_TOKEN_RE.sub(replace, raw), changed
+
+
+def safe_exception_text(
+    exc: BaseException,
+    *,
+    include_message: bool = False,
+) -> str:
+    """Return an exception representation safe for logs and artifacts.
+
+    Type-only output is the default because URL redaction cannot prove that
+    arbitrary exception text contains no other credentials.
+    """
+    exception_type = type(exc).__name__
+    if not include_message:
+        return exception_type
+
+    message, _ = scrub_urls(str(exc))
+    message, _ = scrub_pii(message)
+    message = message.strip()
+    return f"{exception_type}: {message}" if message else exception_type
