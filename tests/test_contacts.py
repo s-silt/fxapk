@@ -11,6 +11,7 @@ from apkscan.analyzers.contacts import ContactsAnalyzer
 from apkscan.core.models import Confidence, LeadCategory
 
 from tests.conftest import FakeContext
+from urllib.parse import urlsplit
 
 
 def _contact_values(result) -> list[str]:
@@ -256,7 +257,11 @@ def test_channel_leads_do_not_disturb_contacts():
     ctx = FakeContext(dex_strings=[f"客服QQ：800820820 上报 {url}"])  # leak-scan: allow QQ 与 URL 共现夹具，QQ 号为合成值
     result = ContactsAnalyzer().analyze(ctx)
     assert any("800820820" in v for v in _contact_values(result))
-    assert any("oapi.dingtalk.com" in l.value for l in _channel_leads(result))
+    # 取 hostname 精确比对：子串写法下 <host>.attacker.invalid 也会通过，
+    # 那正是「把伪装成该 webhook 服务的外部地址当成它」的漏判。
+    # 期望值取自上面夹具 url 自身，不在断言里重复硬编码域名。
+    channel_hosts = {urlsplit(l.value).hostname or l.value for l in _channel_leads(result)}
+    assert urlsplit(url).hostname in channel_hosts
 
 
 # ===========================================================================
