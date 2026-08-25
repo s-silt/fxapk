@@ -1080,3 +1080,87 @@ def test_analyze_web_reports_load_errors_to_stderr(tmp_path: Path) -> None:
         webctx.MAX_EVIDENCE_BYTES = monkey
 
     assert "警告" in result.output or result.exit_code == 2
+
+
+# ---------------------------------------------------------------------------
+# 结束标签的分析逃逸（CodeQL py/bad-tag-filter）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("end_tag", "label"),
+    [
+        ("</script>", "标准"),
+        ("</script >", "尾随空格"),
+        ("</script\t\n>", "尾随制表与换行"),
+        ("</script bar>", "带被忽略的垃圾属性"),
+        ("</script\t\nfoo=1>", "垃圾属性跨行"),
+        ("</SCRIPT >", "大小写混合"),
+        ("</script/>", "带斜杠"),
+    ],
+)
+def test_inline_config_survives_sloppy_script_end_tags(end_tag: str, label: str) -> None:
+    r"""★HTML 允许结束标签里带被忽略的垃圾，浏览器照样闭合 script。
+
+    原正则只认 `</script\s*>`，于是"浏览器正常执行、本分析器识别不到"的落地页
+    可以被主动构造出来，整块内联配置静默漏掉。本工具面对的正是会规避分析的样本，
+    所以这不是"畸形标签罕不罕见"的问题。
+    """
+    html = (
+        f'<html><script>window.apiUrl = "https://{DOC_HOST}/api/v1";{end_tag}</html>'
+    ).encode()
+
+    result = WebInlineConfigAnalyzer().analyze(_ctx({"web/index.html": html}))
+
+    values = [ep.value for ep in result.endpoints]
+    assert f"https://{DOC_HOST}/api/v1" in values, f"{label} 的结束标签没被认出，配置整块漏掉"
+
+
+def test_fake_end_tag_does_not_close_the_block() -> None:
+    """`</scriptfoo>` 不是 script 结束标签，不得据此闭合——否则块会被提前截断。"""
+    html = (
+        f'<html><script>var a = 1;</scriptfoo>'
+        f'window.apiUrl = "https://{DOC_HOST}/api/v1";</script></html>'
+    ).encode()
+
+    result = WebInlineConfigAnalyzer().analyze(_ctx({"web/index.html": html}))
+
+    values = [ep.value for ep in result.endpoints]
+    assert f"https://{DOC_HOST}/api/v1" in values, "伪结束标签把块截断了，后半段配置丢失"
+
+
+def test_two_blocks_stay_independent_with_sloppy_end_tags() -> None:
+    """两个块各自闭合，不跨块吞并——含垃圾结束标签时同样成立。"""
+    html = (
+        f'<html><script>window.apiUrl = "https://{DOC_HOST}/one";</script bar>'
+        f'<p>x</p>'
+        f'<script>window.cdnUrl = "https://{DOC_HOST}/two";</script></html>'
+    ).encode()
+
+    result = WebInlineConfigAnalyzer().analyze(_ctx({"web/index.html": html}))
+
+    values = [ep.value for ep in result.endpoints]
+    assert f"https://{DOC_HOST}/one" in values
+    assert f"https://{DOC_HOST}/two" in values
+
+
+def test_script_regex_has_no_catastrophic_backtracking() -> None:
+    """★对抗输入下必须线性完成：扫描上限达 4MB，指数回溯会把分析器挂死。
+
+    两种压力形态：末尾缺 `>` 的长尾、以及大量近似结束标签。
+    """
+    import time
+
+    from apkscan.analyzers.web_evidence import _SCRIPT_BLOCK_RE
+
+    # ① 开标签后长尾且始终不闭合
+    unterminated = "<script>x</script" + " " * 200_000
+    start = time.monotonic()
+    assert _SCRIPT_BLOCK_RE.search(unterminated) is None
+    assert time.monotonic() - start < 5.0
+
+    # ② 大量近似结束标签，最后才真正闭合
+    near_miss = "<script>" + "</scriptfoo>" * 20_000 + "</script>"
+    start = time.monotonic()
+    assert _SCRIPT_BLOCK_RE.search(near_miss) is not None
+    assert time.monotonic() - start < 5.0
