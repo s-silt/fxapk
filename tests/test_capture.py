@@ -99,6 +99,12 @@ def _set_capabilities(
     monkeypatch.setattr(_cp, "probe_available", _fake_probe)
 
 
+#: _stub_orchestration 会把 _clear_stale_proxy 换成"无残留"桩；针对残留路径的用例
+#: 需要用回真实实现，故在此留一份未被 patch 的引用。
+_REAL_CLEAR_STALE_PROXY = capture._clear_stale_proxy
+_REAL_ADB_CLEAR_PROXY = capture._adb_clear_proxy
+
+
 def _stub_orchestration(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -136,7 +142,15 @@ def _stub_orchestration(
     )
     monkeypatch.setattr(capture, "_adb_reverse", lambda serial=None: (calls["adb"].append("reverse") or True))
     monkeypatch.setattr(capture, "_adb_set_proxy", lambda serial=None: (calls["adb"].append("proxy") or True))
-    monkeypatch.setattr(capture, "_adb_clear_proxy", lambda serial=None: calls["adb"].append("clear_proxy"))
+    # 主机端口就绪探测：单测里默认"已就绪"。不 stub 会真去 connect 本机 8080、
+    # 每个用例白等满超时（实测把整份用例拖到分钟级）。
+    monkeypatch.setattr(capture, "_mitm_port_ready", lambda *a, **k: True)
+    monkeypatch.setattr(
+        capture, "_adb_clear_proxy",
+        lambda serial=None: (calls["adb"].append("clear_proxy"), True)[1],
+    )
+    # 起手残留探测默认"无残留"；专项用例各自覆写。
+    monkeypatch.setattr(capture, "_clear_stale_proxy", lambda serial=None: capture._STALE_PROXY_NONE)
     monkeypatch.setattr(capture, "_adb_remove_reverse", lambda serial=None: calls["adb"].append("remove_reverse"))
     # 设备在线时也必须保持单测零副作用；专项 floor / UID / timeline 用例会各自覆写。
     monkeypatch.setattr(capture, "_start_floor_pcap", lambda *args, **kwargs: None)
@@ -3093,7 +3107,10 @@ def test_adb_proxy_reverse_helpers_thread_serial(monkeypatch):
     capture._adb_remove_reverse("emulator-5554")
 
     assert all(s == "emulator-5554" for _, s in seen)
-    assert len(seen) == 4  # 每个 helper 各 1 次 _adb（set_proxy 读回确认后不走 root 兜底）
+    # 4 个 helper：set_proxy 1 次（读回确认后不走 root 兜底）+ reverse 1 次 + remove_reverse 1 次
+    # + clear_proxy 5 次（★全局代理是一组键，必须逐个 delete，只删 http_proxy 会留下
+    #   global_http_proxy_host/port 让设备继续走回环代理——真机实证的断网根因）。
+    assert len(seen) == 8
 
 
 def test_adb_set_proxy_requires_readback_confirmation(monkeypatch):
@@ -4453,10 +4470,11 @@ def test_stale_proxy_is_cleared_before_capture(monkeypatch, tmp_path):
     monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
     monkeypatch.setattr(capture, "_adb_reverse", lambda serial=None: True)
     monkeypatch.setattr(capture, "_adb_set_proxy", lambda serial=None: True)
-    # 设备上读回的正是本工具的目标值 → 认定为上一轮残留
+    monkeypatch.setattr(capture, "_clear_stale_proxy", _REAL_CLEAR_STALE_PROXY)  # 用回真实实现
+    # 设备上读回的正是本工具写下的整组键 → 认定为上一轮残留
     monkeypatch.setattr(
-        capture, "_proxy_readback",
-        lambda serial=None: f"{capture._PROXY_HOST}:{capture._PROXY_PORT}",
+        capture, "_proxy_settings_residue",
+        lambda serial=None: {"http_proxy": f"{capture._PROXY_HOST}:{capture._PROXY_PORT}"},
     )
     cleared = {"n": 0}
     monkeypatch.setattr(
@@ -4480,20 +4498,23 @@ def test_clear_stale_proxy_never_touches_a_foreign_proxy(monkeypatch):
         lambda serial=None: (cleared.__setitem__("n", cleared["n"] + 1), True)[1],
     )
     # 别人的代理（不同主机/不同端口）→ 不动
-    monkeypatch.setattr(capture, "_proxy_readback", lambda serial=None: "10.0.0.9:3128")
-    assert capture._clear_stale_proxy() == capture._STALE_PROXY_NONE
     monkeypatch.setattr(
-        capture, "_proxy_readback", lambda serial=None: f"{capture._PROXY_HOST}:9999"
+        capture, "_proxy_settings_residue", lambda serial=None: {"http_proxy": "10.0.0.9:3128"}
     )
-    assert capture._clear_stale_proxy() == capture._STALE_PROXY_NONE
+    assert _REAL_CLEAR_STALE_PROXY() == capture._STALE_PROXY_NONE
+    monkeypatch.setattr(
+        capture, "_proxy_settings_residue",
+        lambda serial=None: {"http_proxy": f"{capture._PROXY_HOST}:9999"},
+    )
+    assert _REAL_CLEAR_STALE_PROXY() == capture._STALE_PROXY_NONE
     assert cleared["n"] == 0
 
-    # 恰好是本工具的目标值 → 清
+    # 恰好是本工具写下的值 → 清
     monkeypatch.setattr(
-        capture, "_proxy_readback",
-        lambda serial=None: f"{capture._PROXY_HOST}:{capture._PROXY_PORT}",
+        capture, "_proxy_settings_residue",
+        lambda serial=None: {"http_proxy": f"{capture._PROXY_HOST}:{capture._PROXY_PORT}"},
     )
-    assert capture._clear_stale_proxy() == capture._STALE_PROXY_CLEARED
+    assert _REAL_CLEAR_STALE_PROXY() == capture._STALE_PROXY_CLEARED
     assert cleared["n"] == 1
 
 
@@ -4510,10 +4531,15 @@ def test_stale_proxy_clear_failure_is_never_reported_as_cleared(monkeypatch, tmp
     monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
     monkeypatch.setattr(capture, "_adb_reverse", lambda serial=None: True)
     monkeypatch.setattr(capture, "_adb_set_proxy", lambda serial=None: True)
-    # 设备上一直读回目标值 = 怎么删都删不掉
+    monkeypatch.setattr(capture, "_clear_stale_proxy", _REAL_CLEAR_STALE_PROXY)  # 用回真实实现
+    monkeypatch.setattr(capture, "_adb_clear_proxy", _REAL_ADB_CLEAR_PROXY)
+    # 整组键怎么删都还在 = 清不掉（真机上 http_proxy 清了但 host/port 还在就是这种）
     monkeypatch.setattr(
-        capture, "_proxy_readback",
-        lambda serial=None: f"{capture._PROXY_HOST}:{capture._PROXY_PORT}",
+        capture, "_proxy_settings_residue",
+        lambda serial=None: {
+            "global_http_proxy_host": capture._PROXY_HOST,
+            "global_http_proxy_port": str(capture._PROXY_PORT),
+        },
     )
     monkeypatch.setattr(capture, "_adb", lambda extra, serial=None: True)  # delete 退出 0
 
@@ -4524,15 +4550,82 @@ def test_stale_proxy_clear_failure_is_never_reported_as_cleared(monkeypatch, tmp
     assert "并已清除" not in trail, "清不掉却报告已清除——假成功"
 
 
-def test_adb_clear_proxy_requires_readback_confirmation(monkeypatch):
-    """delete 退出 0 但读回仍有值 → 必须返回 False。"""
+def test_adb_clear_proxy_requires_whole_group_readback(monkeypatch):
+    """★真机根因：delete 退出 0、http_proxy 读回为 null，但整组里仍有残留 → 必须返回 False。"""
     monkeypatch.setattr(capture, "_adb", lambda extra, serial=None: True)
-    monkeypatch.setattr(capture, "_proxy_readback", lambda serial=None: "127.0.0.1:8080")
-    assert capture._adb_clear_proxy() is False
+    monkeypatch.setattr(
+        capture, "_proxy_settings_residue",
+        lambda serial=None: {"global_http_proxy_host": "127.0.0.1", "global_http_proxy_port": "8080"},
+    )
+    assert _REAL_ADB_CLEAR_PROXY() is False, "整组仍有残留却报告清干净"
 
-    monkeypatch.setattr(capture, "_proxy_readback", lambda serial=None: "")
-    assert capture._adb_clear_proxy() is True
+    monkeypatch.setattr(capture, "_proxy_settings_residue", lambda serial=None: {})
+    assert _REAL_ADB_CLEAR_PROXY() is True
 
-    # adb 命令本身失败 → False，且不该再看读回
     monkeypatch.setattr(capture, "_adb", lambda extra, serial=None: False)
-    assert capture._adb_clear_proxy() is False
+    assert _REAL_ADB_CLEAR_PROXY() is False
+
+
+# ---------------------------------------------------------------------------
+# 真机根因：全局代理是一组键，不是一个键
+# ---------------------------------------------------------------------------
+def test_clear_proxy_deletes_every_proxy_key(monkeypatch):
+    """★只删 http_proxy 不够：ConnectivityService 读的是 global_http_proxy_host/port。
+
+    真机实证过：只删 http_proxy 后 `settings get global http_proxy` 返回 null，
+    但系统组件仍往 127.0.0.1:8080 发，走系统网络栈的应用因此没网。
+    """
+    deleted: list[str] = []
+
+    def _fake_adb(extra, serial=None):
+        if extra[:4] == ["shell", "settings", "delete", "global"]:
+            deleted.append(extra[4])
+        return True
+
+    monkeypatch.setattr(capture, "_adb", _fake_adb)
+    monkeypatch.setattr(capture, "_proxy_settings_residue", lambda serial=None: {})
+
+    assert _REAL_ADB_CLEAR_PROXY() is True
+    assert "http_proxy" in deleted
+    assert "global_http_proxy_host" in deleted, "漏删 global_http_proxy_host —— 真机断网根因"
+    assert "global_http_proxy_port" in deleted, "漏删 global_http_proxy_port —— 真机断网根因"
+    assert "global_http_proxy_exclusion_list" in deleted
+    assert "global_proxy_pac_url" in deleted
+
+
+def test_stale_detection_sees_host_port_keys_even_when_http_proxy_is_null(monkeypatch):
+    """★残留检测也必须查整组：http_proxy 为 null 不代表设备没挂着回环代理。"""
+    monkeypatch.setattr(
+        capture, "_proxy_settings_residue",
+        lambda serial=None: {
+            "global_http_proxy_host": capture._PROXY_HOST,
+            "global_http_proxy_port": str(capture._PROXY_PORT),
+        },
+    )
+    cleared = {"n": 0}
+    monkeypatch.setattr(
+        capture, "_adb_clear_proxy",
+        lambda serial=None: (cleared.__setitem__("n", cleared["n"] + 1), True)[1],
+    )
+
+    assert _REAL_CLEAR_STALE_PROXY() == capture._STALE_PROXY_CLEARED
+    assert cleared["n"] == 1
+
+
+def test_stale_detection_leaves_a_foreign_proxy_group_alone(monkeypatch):
+    """别人的代理（不同主机）整组都不动。"""
+    monkeypatch.setattr(
+        capture, "_proxy_settings_residue",
+        lambda serial=None: {
+            "global_http_proxy_host": "10.0.0.9",
+            "global_http_proxy_port": "3128",
+        },
+    )
+    cleared = {"n": 0}
+    monkeypatch.setattr(
+        capture, "_adb_clear_proxy",
+        lambda serial=None: (cleared.__setitem__("n", cleared["n"] + 1), True)[1],
+    )
+
+    assert _REAL_CLEAR_STALE_PROXY() == capture._STALE_PROXY_NONE
+    assert cleared["n"] == 0
