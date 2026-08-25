@@ -727,10 +727,18 @@ def _capture(
     try:
         # 0-) 起手先清上一轮遗留的死代理。与本轮是否走 mitm 无关——遗留代理会让设备
         #     整机无网，floor-only 同样什么都抓不到。
-        if _clear_stale_proxy(serial):
-            playbook.append("起手：清除上一轮遗留的设备全局代理")
+        stale = _clear_stale_proxy(serial)
+        if stale == _STALE_PROXY_CLEARED:
+            playbook.append("起手：清除上一轮遗留的设备全局代理（读回确认）")
             warnings.append(
                 "检测到上一轮遗留的设备全局代理并已清除（上次抓包未正常收尾，设备此前可能无法联网）"
+            )
+        elif stale == _STALE_PROXY_FAILED:
+            # ★清不掉 = 设备此刻仍无网。绝不写成"已清除"，也不静默继续。
+            playbook.append("起手：检测到遗留的设备全局代理但**清除失败**（设备可能仍无法联网）")
+            warnings.append(
+                f"设备残留全局代理 {_PROXY_HOST}:{_PROXY_PORT} 清除失败——设备当前很可能无法联网，"
+                "本轮抓包结果不可信；请手动执行 adb shell settings delete global http_proxy"
             )
 
         # 0) HTTPS 命门：把 mitmproxy CA 装入设备系统信任库。失败不中止抓包
@@ -1877,14 +1885,36 @@ def _adb_set_proxy(serial: str | None = None) -> bool:
     return False
 
 
-def _adb_clear_proxy(serial: str | None = None) -> None:
-    """还原设备全局代理：settings delete global http_proxy。"""
+def _adb_clear_proxy(serial: str | None = None) -> bool:
+    """还原设备全局代理（``settings delete global http_proxy``），**读回确认**后才算成功。
+
+    ★返回值必须可信：调用方据此写审计记录。只看 ``settings delete`` 的退出码不够——
+    退出 0 不代表真删掉（同 ``settings put`` 那侧的已知问题：可能被策略拦、需 root）。
+    若谎称已清，设备实际仍挂着死代理、持续无网，报告却写"已恢复"。
+    """
     if not _adb(["shell", "settings", "delete", "global", "http_proxy"], serial):
         logger.warning("[capture] 清除设备全局代理失败（请手动还原）")
+        return False
+    remaining = _proxy_readback(serial)
+    if remaining:
+        logger.warning(
+            "[capture] 清除设备全局代理后读回仍为 %r——设备可能仍无法联网（请手动还原）",
+            remaining,
+        )
+        return False
+    return True
 
 
-def _clear_stale_proxy(serial: str | None = None) -> bool:
-    """起手清掉**上一轮遗留**的死代理；清了返回 True，没有遗留返回 False。
+#: _clear_stale_proxy 的三种结局。布尔装不下"清不掉"这一态——而它恰恰是必须让人看见的那一态。
+_STALE_PROXY_NONE = "none"
+_STALE_PROXY_CLEARED = "cleared"
+_STALE_PROXY_FAILED = "failed"
+
+
+def _clear_stale_proxy(serial: str | None = None) -> str:
+    """起手处理**上一轮遗留**的死代理。
+
+    返回 ``none``（无残留）/ ``cleared``（已清掉，读回确认）/ ``failed``（有残留但清不掉）。
 
     为什么需要：``finally`` 只在进程正常走到收尾时才执行。被 kill -9、断电或宿主
     进程崩溃时，设备上会留下指向 loopback 的全局代理，而 ``adb reverse`` 早已随
@@ -1896,14 +1926,14 @@ def _clear_stale_proxy(serial: str | None = None) -> bool:
     target = f"{_PROXY_HOST}:{_PROXY_PORT}"
     current = _proxy_readback(serial)
     if current != target:
-        return False
+        return _STALE_PROXY_NONE
     logger.warning(
         "[capture] 检测到设备残留全局代理 %s（上一轮未正常收尾），先清除——"
         "该值指向 loopback 且无反向端口时设备将无法联网",
         target,
     )
-    _adb_clear_proxy(serial)
-    return True
+    # ★清不掉要如实回报：设备此刻仍无网，绝不能让调用方写出"已清除"的假记录。
+    return _STALE_PROXY_CLEARED if _adb_clear_proxy(serial) else _STALE_PROXY_FAILED
 
 
 def _adb_reverse(serial: str | None = None) -> bool:

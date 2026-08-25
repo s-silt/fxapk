@@ -4477,15 +4477,15 @@ def test_clear_stale_proxy_never_touches_a_foreign_proxy(monkeypatch):
     cleared = {"n": 0}
     monkeypatch.setattr(
         capture, "_adb_clear_proxy",
-        lambda serial=None: cleared.__setitem__("n", cleared["n"] + 1),
+        lambda serial=None: (cleared.__setitem__("n", cleared["n"] + 1), True)[1],
     )
-    # 别人的代理（不同主机/不同端口）
+    # 别人的代理（不同主机/不同端口）→ 不动
     monkeypatch.setattr(capture, "_proxy_readback", lambda serial=None: "10.0.0.9:3128")
-    assert capture._clear_stale_proxy() is False
+    assert capture._clear_stale_proxy() == capture._STALE_PROXY_NONE
     monkeypatch.setattr(
         capture, "_proxy_readback", lambda serial=None: f"{capture._PROXY_HOST}:9999"
     )
-    assert capture._clear_stale_proxy() is False
+    assert capture._clear_stale_proxy() == capture._STALE_PROXY_NONE
     assert cleared["n"] == 0
 
     # 恰好是本工具的目标值 → 清
@@ -4493,5 +4493,46 @@ def test_clear_stale_proxy_never_touches_a_foreign_proxy(monkeypatch):
         capture, "_proxy_readback",
         lambda serial=None: f"{capture._PROXY_HOST}:{capture._PROXY_PORT}",
     )
-    assert capture._clear_stale_proxy() is True
+    assert capture._clear_stale_proxy() == capture._STALE_PROXY_CLEARED
     assert cleared["n"] == 1
+
+
+def test_stale_proxy_clear_failure_is_never_reported_as_cleared(monkeypatch, tmp_path):
+    """★sol 复审严重项：清不掉时**绝不能**写"已清除"。
+
+    `settings delete` 退出 0 不代表真删掉（可能被策略拦/需 root）。若谎称已清，
+    设备实际仍挂死代理、持续无网，报告却说已恢复——这是最坏的一种假成功。
+    """
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_adb_reverse", lambda serial=None: True)
+    monkeypatch.setattr(capture, "_adb_set_proxy", lambda serial=None: True)
+    # 设备上一直读回目标值 = 怎么删都删不掉
+    monkeypatch.setattr(
+        capture, "_proxy_readback",
+        lambda serial=None: f"{capture._PROXY_HOST}:{capture._PROXY_PORT}",
+    )
+    monkeypatch.setattr(capture, "_adb", lambda extra, serial=None: True)  # delete 退出 0
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+
+    trail = str(result.get("reason", "")) + " ".join(result.get("playbook", []))
+    assert "清除失败" in trail or "无法联网" in trail
+    assert "并已清除" not in trail, "清不掉却报告已清除——假成功"
+
+
+def test_adb_clear_proxy_requires_readback_confirmation(monkeypatch):
+    """delete 退出 0 但读回仍有值 → 必须返回 False。"""
+    monkeypatch.setattr(capture, "_adb", lambda extra, serial=None: True)
+    monkeypatch.setattr(capture, "_proxy_readback", lambda serial=None: "127.0.0.1:8080")
+    assert capture._adb_clear_proxy() is False
+
+    monkeypatch.setattr(capture, "_proxy_readback", lambda serial=None: "")
+    assert capture._adb_clear_proxy() is True
+
+    # adb 命令本身失败 → False，且不该再看读回
+    monkeypatch.setattr(capture, "_adb", lambda extra, serial=None: False)
+    assert capture._adb_clear_proxy() is False

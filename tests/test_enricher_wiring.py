@@ -496,3 +496,65 @@ def test_deferred_marking_respects_applies_to(drop_http: _CountingHttp) -> None:
 
     source_status = domain.enrichment.get("source_status") or {}
     assert "ripestat_bgp" not in source_status
+
+
+def test_deferred_marking_is_replaced_by_real_outcome_at_closure(
+    drop_http: _CountingHttp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★sol 复审关注点：普通解析标了 deferred，结案跑完必须被**真实结果**取代。
+
+    否则 deferred 会变成"终态"，让结案时的真实查询结果永远写不进去——
+    等于把一个占位状态固化成了结论。
+    """
+    from apkscan.enrichers import multisource
+
+    class _RipeSession:
+        def get(self, url: str, params: dict[str, Any] | None = None, **kwargs: Any):  # noqa: ANN401
+            class _R:
+                status_code = 200
+
+                @staticmethod
+                def raise_for_status() -> None:
+                    return None
+
+                @staticmethod
+                def json() -> dict[str, Any]:
+                    if "prefix-overview" in url:
+                        return {"data": {"resource": "192.0.2.0/24", "asns": [{"asn": "64500"}]}}
+                    return {"data": {}}
+
+            return _R()
+
+    monkeypatch.setattr(
+        multisource.RipeStatBgpEnricher, "__init__",
+        lambda self, session=None: super(multisource.RipeStatBgpEnricher, self).__init__(
+            _RipeSession()
+        ),
+    )
+
+    endpoint = _ip("192.0.2.50")
+
+    # ① 普通解析：只留下 deferred 占位
+    enrich_selected_targets([endpoint], discover_enrichers(), include_case_close=False)
+    assert endpoint.enrichment["source_status"]["ripestat_bgp"] == {
+        "status": "skipped",
+        "reason": "deferred_case_close",
+    }
+
+    # ② 结案：真实结果必须顶掉占位
+    enrich_selected_targets([endpoint], discover_enrichers(), include_case_close=True)
+    entry = endpoint.enrichment["source_status"]["ripestat_bgp"]
+    assert entry["status"] != "skipped", "deferred 占位没有被结案的真实结果取代"
+    assert entry.get("reason") != "deferred_case_close"
+    assert endpoint.enrichment["ripestat_bgp"]["origin_asn"] == 64500
+
+
+def test_deferred_marking_is_idempotent(drop_http: _CountingHttp) -> None:
+    """重复跑普通解析不得叠加或改写已有 reason。"""
+    endpoint = _ip("192.0.2.51")
+
+    enrich_selected_targets([endpoint], discover_enrichers(), include_case_close=False)
+    first = dict(endpoint.enrichment["source_status"]["ripestat_bgp"])
+    enrich_selected_targets([endpoint], discover_enrichers(), include_case_close=False)
+
+    assert endpoint.enrichment["source_status"]["ripestat_bgp"] == first
