@@ -4407,3 +4407,91 @@ def test_capture_signals_expose_frida_retreat(monkeypatch, tmp_path):
     # 字段必须存在（值为默认的未秒退态）——编排层据它判是否建议旁路
     assert signals["frida_retreated"] is False
     assert signals["frida_retreat_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 设备全局代理：绝不把设备打断网
+# ---------------------------------------------------------------------------
+def test_reverse_failure_must_not_set_device_proxy(monkeypatch, tmp_path):
+    """★真机事故的根因锁：adb reverse 没建起来时**不得**设全局代理。
+
+    代理值是 loopback，设备侧无人监听该端口；一设下去整机 HTTP(S) 立刻全断，
+    既抓不到东西，样本也会走进网络异常分支。宁可放弃 MITM（floor 兜底）。
+    """
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_adb_reverse", lambda serial=None: False)  # reverse 失败
+    monkeypatch.setattr(capture, "_clear_stale_proxy", lambda serial=None: False)
+    set_calls = {"n": 0}
+    monkeypatch.setattr(
+        capture, "_adb_set_proxy",
+        lambda serial=None: (set_calls.__setitem__("n", set_calls["n"] + 1), True)[1],
+    )
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+
+    assert set_calls["n"] == 0, "reverse 失败后仍设了设备全局代理——会把设备打断网"
+    data = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
+    assert data["capture_signals"]["mitm_channel_ok"] is False
+    # 降级原因必须讲清，不能静默跳过（playbook 在 run() 返回值里）
+    trail = str(result.get("reason", "")) + " ".join(result.get("playbook", []))
+    assert "断网" in trail or "跳过" in trail
+
+
+def test_stale_proxy_is_cleared_before_capture(monkeypatch, tmp_path):
+    """★上一轮被强杀会把死代理留在设备上（finally 跑不到），设备将持续无网。
+
+    起手必须先读回、清掉，且与本轮是否走 mitm 无关。
+    """
+    _set_capabilities(monkeypatch)
+    _stub_orchestration(monkeypatch, mitm=_FakeProc(), frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_adb_reverse", lambda serial=None: True)
+    monkeypatch.setattr(capture, "_adb_set_proxy", lambda serial=None: True)
+    # 设备上读回的正是本工具的目标值 → 认定为上一轮残留
+    monkeypatch.setattr(
+        capture, "_proxy_readback",
+        lambda serial=None: f"{capture._PROXY_HOST}:{capture._PROXY_PORT}",
+    )
+    cleared = {"n": 0}
+    monkeypatch.setattr(
+        capture, "_adb_clear_proxy",
+        lambda serial=None: cleared.__setitem__("n", cleared["n"] + 1),
+    )
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+
+    # 起手清 1 次 + finally 收尾清 1 次
+    assert cleared["n"] >= 1
+    trail = str(result.get("reason", "")) + " ".join(result.get("playbook", []))
+    assert "遗留" in trail, "清了残留代理却没留痕，读报告的人不知道设备此前无网"
+
+
+def test_clear_stale_proxy_never_touches_a_foreign_proxy(monkeypatch):
+    """只清恰好等于本工具目标值的代理；用户自己配的其它代理一律不动。"""
+    cleared = {"n": 0}
+    monkeypatch.setattr(
+        capture, "_adb_clear_proxy",
+        lambda serial=None: cleared.__setitem__("n", cleared["n"] + 1),
+    )
+    # 别人的代理（不同主机/不同端口）
+    monkeypatch.setattr(capture, "_proxy_readback", lambda serial=None: "10.0.0.9:3128")
+    assert capture._clear_stale_proxy() is False
+    monkeypatch.setattr(
+        capture, "_proxy_readback", lambda serial=None: f"{capture._PROXY_HOST}:9999"
+    )
+    assert capture._clear_stale_proxy() is False
+    assert cleared["n"] == 0
+
+    # 恰好是本工具的目标值 → 清
+    monkeypatch.setattr(
+        capture, "_proxy_readback",
+        lambda serial=None: f"{capture._PROXY_HOST}:{capture._PROXY_PORT}",
+    )
+    assert capture._clear_stale_proxy() is True
+    assert cleared["n"] == 1

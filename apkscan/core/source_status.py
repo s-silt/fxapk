@@ -38,6 +38,9 @@ _DETAILED_FAILURES = frozenset(
     }
 )
 _SKIPPED_REASONS = {
+    #: 结案专属源（case_close_only）在普通解析里不执行。必须显式记，否则"尚未结案所以没查"
+    #: 与"查了没有数据"在报告里长得一模一样，读的人会把前者当成后者。
+    "deferred_case_close": "deferred_case_close",
     "not_applicable": "not_applicable",
     "skipped-budget": "budget_exhausted",
     "skipped_budget": "budget_exhausted",

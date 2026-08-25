@@ -454,6 +454,34 @@ def _source_status_from_payload(payload: object) -> tuple[str, str | None]:
     return "hit", None
 
 
+def _mark_case_close_deferred(
+    endpoints: list[Endpoint], enrichers: list[BaseEnricher]
+) -> None:
+    """给普通解析里被 case-close 门挡下的源记 ``skipped/deferred_case_close``。
+
+    只标**适用于该端点类型**的源（``applies_to`` 匹配），且**不覆盖**已有状态——
+    本轮真跑过的结果永远优先。
+    """
+    deferred = [e for e in enrichers if getattr(e, "case_close_only", False)]
+    if not deferred:
+        return
+    for endpoint in endpoints:
+        source_status = endpoint.enrichment.setdefault("source_status", {})
+        if not isinstance(source_status, dict):
+            source_status = {}
+            endpoint.enrichment["source_status"] = source_status
+        for enricher in deferred:
+            if endpoint.kind not in (getattr(enricher, "applies_to", []) or []):
+                continue
+            provider = _provider_name(enricher)
+            if provider in source_status:
+                continue
+            source_status[provider] = {
+                "status": "skipped",
+                "reason": "deferred_case_close",
+            }
+
+
 def enrich_selected_targets(
     endpoints: list[Endpoint],
     enrichers: list[BaseEnricher],
@@ -471,6 +499,10 @@ def enrich_selected_targets(
         for enricher in enrichers
         if include_case_close or not getattr(enricher, "case_close_only", False)
     ]
+    if not include_case_close:
+        # ★被 case-close 门挡下的源必须留痕：不记的话，报告里"结案才查所以现在没有"
+        #   和"查过、没查到"完全无法区分，读的人会把前者读成后者。
+        _mark_case_close_deferred(endpoints, enrichers)
     if not selected:
         return []
     if not include_case_close:

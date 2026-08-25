@@ -447,3 +447,52 @@ def test_resolved_ip_enrichment_passes_include_case_close(
     assert calls == [resolved_ip], "结案专属富化器没有在解析 IP 上被调用"
     resolved = domain.enrichment.get("resolved_ip_enrichment") or {}
     assert resolved[resolved_ip]["probe_case_close_only"]["probed"] is True
+
+
+# --------------------------------------------------------------------------- #
+# 结案专属源在普通解析里的留痕
+# --------------------------------------------------------------------------- #
+def test_case_close_only_source_is_marked_deferred_not_silent(
+    drop_http: _CountingHttp,
+) -> None:
+    """★普通解析不跑结案专属源，但必须留痕。
+
+    不留痕的话，"尚未结案所以没查"和"查过、没查到"在报告里长得一模一样，
+    读的人会把前者读成后者——这正是本仓反复强调的"不可判定不得表现成正常值"。
+    """
+    endpoint = _ip("192.0.2.40")
+
+    enrich_selected_targets(
+        [endpoint], discover_enrichers(), include_case_close=False
+    )
+
+    source_status = endpoint.enrichment.get("source_status")
+    assert isinstance(source_status, dict)
+    entry = source_status.get("ripestat_bgp")
+    assert entry is not None, "结案专属源被静默跳过，报告里查不出它没跑过"
+    assert entry["status"] == "skipped"
+    assert entry["reason"] == "deferred_case_close"
+
+
+def test_deferred_marking_never_overwrites_a_real_outcome(
+    drop_http: _CountingHttp,
+) -> None:
+    """本轮真跑出来的结果永远优先，不能被 deferred 标记盖掉。"""
+    endpoint = _ip("192.0.2.41")
+    endpoint.enrichment["source_status"] = {"ripestat_bgp": {"status": "hit"}}
+
+    enrich_selected_targets(
+        [endpoint], discover_enrichers(), include_case_close=False
+    )
+
+    assert endpoint.enrichment["source_status"]["ripestat_bgp"]["status"] == "hit"
+
+
+def test_deferred_marking_respects_applies_to(drop_http: _CountingHttp) -> None:
+    """只标适用于该端点类型的源：ripestat 只适用 IP，域名端点不该被标。"""
+    domain = Endpoint(value="only-domain.example", kind="domain", is_suspicious=True)
+
+    enrich_selected_targets([domain], discover_enrichers(), include_case_close=False)
+
+    source_status = domain.enrichment.get("source_status") or {}
+    assert "ripestat_bgp" not in source_status

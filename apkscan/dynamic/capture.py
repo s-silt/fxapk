@@ -725,6 +725,14 @@ def _capture(
     warnings: list[str] = []
 
     try:
+        # 0-) 起手先清上一轮遗留的死代理。与本轮是否走 mitm 无关——遗留代理会让设备
+        #     整机无网，floor-only 同样什么都抓不到。
+        if _clear_stale_proxy(serial):
+            playbook.append("起手：清除上一轮遗留的设备全局代理")
+            warnings.append(
+                "检测到上一轮遗留的设备全局代理并已清除（上次抓包未正常收尾，设备此前可能无法联网）"
+            )
+
         # 0) HTTPS 命门：把 mitmproxy CA 装入设备系统信任库。失败不中止抓包
         #    （HTTP 仍可抓），但把降级原因写进 playbook + reason，确保不假成功。
         if mitm:  # ★#8：floor-only 不走 mitm，就不该往设备系统信任库装 mitmproxy CA。
@@ -786,15 +794,21 @@ def _capture(
             reverse_set = _adb_reverse(serial)
             if reverse_set:
                 playbook.append(f"adb reverse tcp:{_PROXY_PORT} tcp:{_PROXY_PORT}")
+                proxy_attempted = True
+                proxy_set = _adb_set_proxy(serial)
+                if proxy_set:
+                    playbook.append(f"adb 设全局代理 {_PROXY_HOST}:{_PROXY_PORT}")
             else:
-                # 无 reverse：设备代理指向本机 loopback 却无反向端口 → MITM 通道不可用（floor 兜底）。
+                # ★真机事故根因：reverse 没建起来时**绝不能**再设全局代理。代理值是
+                #   loopback，设备侧没有任何进程监听该端口，一设下去整机 HTTP(S) 立刻
+                #   全断——既抓不到东西，样本也会走进网络异常分支（行为全变）；
+                #   进程若非正常退出，死代理还会留在设备上让它持续无网。
+                #   此处宁可放弃 MITM 通道（floor 带外 pcap 仍保底），也不动设备网络。
                 warnings.append(
-                    f"adb reverse tcp:{_PROXY_PORT} 失败——设备代理指向 loopback 但无反向端口，MITM 通道可能不可用"
+                    f"adb reverse tcp:{_PROXY_PORT} 失败——已跳过设置设备全局代理"
+                    "（若仍设成 loopback 会使设备断网），MITM 通道不可用，本轮仅靠 floor 兜底"
                 )
-            proxy_attempted = True
-            proxy_set = _adb_set_proxy(serial)
-            if proxy_set:
-                playbook.append(f"adb 设全局代理 {_PROXY_HOST}:{_PROXY_PORT}")
+                playbook.append("跳过：adb reverse 未建立，不设全局代理以免设备断网")
 
         # 4) frida 注入：优先 frida-core 通道（SSL unpinning + 运行时密钥 hook，可回传活体 key）；
         #    frida-core 不可用 / attach 失败 → 回退现有 subprocess 路径（仅 unpinning，无 key 回传）。
@@ -1867,6 +1881,29 @@ def _adb_clear_proxy(serial: str | None = None) -> None:
     """还原设备全局代理：settings delete global http_proxy。"""
     if not _adb(["shell", "settings", "delete", "global", "http_proxy"], serial):
         logger.warning("[capture] 清除设备全局代理失败（请手动还原）")
+
+
+def _clear_stale_proxy(serial: str | None = None) -> bool:
+    """起手清掉**上一轮遗留**的死代理；清了返回 True，没有遗留返回 False。
+
+    为什么需要：``finally`` 只在进程正常走到收尾时才执行。被 kill -9、断电或宿主
+    进程崩溃时，设备上会留下指向 loopback 的全局代理，而 ``adb reverse`` 早已随
+    连接断开失效——**设备从此持续无网**，下一轮抓包同样什么都抓不到。
+
+    ★只清恰好等于本工具目标值（``127.0.0.1:8080``）的代理，绝不动用户自己配置的
+    其它代理：判据是**完全相等**，不做前缀或端口的模糊匹配。
+    """
+    target = f"{_PROXY_HOST}:{_PROXY_PORT}"
+    current = _proxy_readback(serial)
+    if current != target:
+        return False
+    logger.warning(
+        "[capture] 检测到设备残留全局代理 %s（上一轮未正常收尾），先清除——"
+        "该值指向 loopback 且无反向端口时设备将无法联网",
+        target,
+    )
+    _adb_clear_proxy(serial)
+    return True
 
 
 def _adb_reverse(serial: str | None = None) -> bool:
