@@ -64,6 +64,7 @@ _LEGACY_PROVIDER_KEYS = frozenset(
         "rdap",
         "ripestat_bgp",
         "shodan",
+        "spamhaus",
         "urlscan",
         "virustotal",
         "whois",

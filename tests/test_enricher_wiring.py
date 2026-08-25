@@ -265,3 +265,46 @@ def test_ripestat_new_data_calls_are_actually_requested(
     assert payload["whois_netname"] == "EXAMPLE-NET"
     assert payload["registered_organization"] == "Example Corp"
     assert payload["abuse_complaint_contacts"] == ["abuse@example.invalid"]
+
+
+# --------------------------------------------------------------------------- #
+# 结案路径：域名 → 解析 IP → 富化
+# --------------------------------------------------------------------------- #
+def test_resolved_ips_of_a_domain_reach_spamhaus_on_closure(
+    drop_http: _CountingHttp,
+) -> None:
+    """★锁住"域名端点的解析 IP 也被检查"这条链路。
+
+    普通解析的 ``_enrichment_targets`` **不展开**域名的解析 IP，只处理独立 IP 端点；
+    结案路径的 ``_enrich_resolved_ips`` 才会为每个解析 IP 造 transient 端点去富化。
+    没有这条锁，"函数调通了但真实业务对象（域名）走不到"这类缺口测不出来。
+
+    ★夹具必须用**全球可路由**地址：``_normalized_public_ip`` 明确排除私网/回环/
+    文档段（192.0.2/198.51.100/203.0.113）与 CGNAT（100.64/10），
+    用保留段会被判 ``excluded_nonpublic``、整条链路根本不触发。
+    此处取众所周知的公共 DNS 服务地址，与本仓分析对象无关。
+    """
+    from apkscan.core.closure import ClosureConfig
+    from apkscan.core.closure.sources import _enrich_resolved_ips
+
+    public_ip = "8.8.8.8"  # leak-scan: allow 该链路要求全球可路由地址，保留段会被 _normalized_public_ip 排除
+    drop_http.text = (
+        '{"cidr":"8.8.8.0/24","sblid":"SBL000009","rir":"arin"}\n'  # leak-scan: allow 同上，需与上面的夹具地址同段
+        '{"type":"metadata","timestamp":1700000000,"size":0,"records":1}'
+    )
+
+    domain = Endpoint(value="resolved.example", kind="domain", is_suspicious=True)
+    domain.enrichment["dns"] = {"ips": [public_ip]}
+    # provider_payload_if_hit 只认「本源已记 hit」的载荷，缺状态时解析 IP 取不到。
+    domain.enrichment["source_status"] = {"dns": {"status": "hit"}}
+
+    spamhaus_only = [e for e in discover_enrichers() if e.name == "spamhaus"]
+    _enrich_resolved_ips(domain, spamhaus_only, ClosureConfig(online=True))
+
+    resolved = domain.enrichment.get("resolved_ip_enrichment")
+    assert isinstance(resolved, dict)
+    assert public_ip in resolved, "域名的解析 IP 没有进入结案富化"
+    payload = resolved[public_ip].get("spamhaus")
+    assert isinstance(payload, dict)
+    assert payload["network_listed"] is True
+    assert payload["matched_cidr"] == "8.8.8.0/24"  # leak-scan: allow 同上
