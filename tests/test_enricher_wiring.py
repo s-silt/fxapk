@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -165,7 +166,13 @@ def test_ripestat_is_case_close_only_and_reachable_there(
     closing = _ip("192.0.2.21")
     stats = enrich_selected_targets([closing], discover_enrichers(), include_case_close=True)
     assert "ripestat_bgp" in _providers(stats)
-    assert any("stat.ripe.net" in url for url in seen), "结案路径没够着 ripestat"
+    # ★断言主机身份要解析 hostname 精确比对，不能用子串：
+    #   `https://stat.ripe.net.attacker.example/`、`https://stat.ripe.net@attacker.example/`
+    #   都含这个子串，会让"确实请求了 RIPEstat"这个断言假通过。这条测的正是"请求发往哪里"，
+    #   子串在这里不够。
+    assert any(urlsplit(url).hostname == "stat.ripe.net" for url in seen), (
+        "结案路径没够着 ripestat"
+    )
 
 
 def test_ripestat_new_data_calls_are_actually_requested(
@@ -252,10 +259,17 @@ def test_ripestat_new_data_calls_are_actually_requested(
     endpoint = _ip("192.0.2.30")
     enrich_selected_targets([endpoint], discover_enrichers(), include_case_close=True)
 
-    # 三个新 data call 都被请求到
-    assert any("routing-history" in url for url in requested)
-    assert any("/whois/" in url for url in requested)
-    assert any("abuse-contact-finder" in url for url in requested)
+    # 三个新 data call 都被请求到。★主机用 hostname 精确比对，路径才用片段匹配——
+    #   只看路径片段的话，请求被引到别的主机上也照样通过。
+    def _called(path_fragment: str) -> bool:
+        return any(
+            urlsplit(url).hostname == "stat.ripe.net" and path_fragment in urlsplit(url).path
+            for url in requested
+        )
+
+    assert _called("routing-history")
+    assert _called("/whois/")
+    assert _called("abuse-contact-finder")
 
     # 归一后的字段真的落进了 endpoint.enrichment（不是产出了没人接）
     payload = endpoint.enrichment.get("ripestat_bgp")
