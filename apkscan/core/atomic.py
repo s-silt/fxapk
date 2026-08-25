@@ -115,7 +115,7 @@ def _allocate_private_temporary(target: Path) -> tuple[Path, int]:
             f".{target.name}.{os.getpid()}.{uuid4().hex}.tmp"
         )
         try:
-            descriptor = os.open(candidate, flags, _PRIVATE_FILE_MODE)
+            descriptor = os.open(candidate, flags, 0o644)  # MUTANT: 验证 CI 上的权限断言是否有区分力
         except FileExistsError:
             continue
         return candidate, descriptor
