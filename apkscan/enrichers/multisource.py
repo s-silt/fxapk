@@ -156,7 +156,7 @@ def _routing_prefix_relation(
 
     ★这是本次扩展的核心判据：``by_origin`` 里混着**覆盖本网段的超网**宣告
     （实测查一个 /24 会带回宣告 /8、/7 的历史 AS）。超网宣告说的是"上游大段归谁"，
-    不是"这个网段归谁"，把它当成归属会把调证函发错对象，故必须分桶。
+    不是"这个网段归谁"，混为一谈会把归属指向上游大段的持有者，故必须分桶。
     """
     if candidate.version != reference.version:
         return None
@@ -179,7 +179,7 @@ def _fold_routing_history(
     """把 routing-history 的 ``by_origin`` 折叠成"每个 origin 一条"的归属史。
 
     RIPEstat 按 origin→prefix→timeline 三层返回，同一 origin 的连续宣告会被切成许多
-    时间片；办案要看的是"哪个 AS、从什么时候到什么时候宣告过本网段"，故按 origin 合并
+    时间片；本函数要还原的是"哪个 AS、从什么时候到什么时候宣告过本网段"，故按 origin 合并
     时间窗。超网宣告分到单独的桶（见 :func:`_routing_prefix_relation`）。
     """
     reference = _ripestat_network(reference_resource)
@@ -372,7 +372,7 @@ def _normalize_ripestat_whois(data: Mapping[str, object]) -> dict[str, object]:
     APNIC/RIPE 用 ``inetnum/netname/descr/country``——两套字段名都要认。
 
     ★取证纪律：只取**注册持有方**。``abuse-c`` / ``tech-c`` / ``admin-c`` 常是上游 IDC
-    或代理商的联系人，拿它当持有方会把调证函发错对象，故一律不参与持有方判断。
+    或代理商的联系人，拿它当持有方会把归属指向错误的主体，故一律不参与持有方判断。
     """
     values = _collect_whois_values(data.get("records"))
     descriptions = values.get("descr", [])[:_WHOIS_MAX_DESCRIPTIONS]
@@ -413,7 +413,7 @@ def _normalize_ripestat_whois(data: Mapping[str, object]) -> dict[str, object]:
 
 def _normalize_abuse_contacts(data: Mapping[str, object]) -> dict[str, object]:
     """归一投诉/协查联系人。字段名刻意带 ``abuse_``，与注册持有方字段泾渭分明——
-    这两者混用是发错调证对象的常见成因。"""
+    这两者混用是归属判断出错的常见成因。"""
     contacts: list[str] = []
     raw_contacts = data.get("abuse_contacts")
     if isinstance(raw_contacts, list):
