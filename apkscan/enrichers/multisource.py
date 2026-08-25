@@ -109,7 +109,9 @@ def _bounded_scalar_list(value: object) -> list[str | int | float | bool]:
 def _ripestat_asn(value: object) -> int | None:
     """把 RIPEstat 的 ASN 值（常为字符串 ``"701"``）转成合法 int；不合法返回 None。
 
-    ★bool 是 int 的子类，必须先排除——``True`` 会被 int() 静默转成 1，凭空造出 AS1。
+    ★显式排除 bool：它是 int 的子类，一旦此处的 ``str()`` 归一被去掉，``int(True)`` 就会
+    静默变成 AS1。当前经 ``str()`` 后 ``int("True")`` 本就会抛 ValueError，这道检查是
+    防御性的——不要因为"看起来冗余"而删掉。
     """
     if isinstance(value, bool):
         return None

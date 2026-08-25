@@ -1333,7 +1333,8 @@ def test_ripestat_auxiliary_failures_never_drop_primary_result() -> None:
 
 
 def test_ripestat_asn_rejects_bool_and_out_of_range() -> None:
-    """bool 是 int 子类，不排除会凭空造出 AS1。"""
+    """ASN 归一的取值边界。bool 当前由 ``str()`` 挡住（``int("True")`` 抛 ValueError），
+    显式检查是防 ``str()`` 被移除的第二道闸，故此处只锁对外行为、不锁实现路径。"""
     assert _ripestat_asn("64500") == 64500
     assert _ripestat_asn(True) is None
     assert _ripestat_asn(False) is None
