@@ -9,6 +9,12 @@ on:
     branches: [master, main]
   workflow_dispatch:
 
+# GITHUB_TOKEN 的最小权限。本工作流全部 job 只做 checkout + 跑检查，没有任何写操作
+# （不发 PR 评论、不上传 SARIF、不推分支、不建 release），故顶层一刀切成只读即可；
+# 将来某个 job 真需要写权限时，在**该 job 内**单独声明，不要放回顶层。
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: lint + typecheck
