@@ -34,6 +34,9 @@ fxapk 会提取个人隐私数据 / 钱包私钥助记词 / 后端凭据 / 运�
 from __future__ import annotations
 
 import hashlib
+import os
+import traceback
+from collections.abc import Callable
 import re
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 import sys
@@ -236,6 +239,47 @@ def scrub_urls(text: object) -> tuple[str, bool]:
     return _URL_TOKEN_RE.sub(replace, raw), changed
 
 
+class PublicDiagnosticError(Exception):
+    """携带**固定公开文案**与稳定错误码的领域异常基类。
+
+    与普通异常的区别：普通异常的消息由第三方库或不可信输入决定，:func:`safe_exception_text`
+    只能塌缩成类型名；实现本契约的异常承诺**消息由封闭的错误码→文案映射重新生成**，
+    不拼路径、原始 token、响应正文或下游异常消息，因而可以原样展示——读的人据此知道
+    "哪一项校验没过"，而不是只看到一个 ``ValueError``。
+
+    ★**继承本类不等于被信任**。Python 无法密封继承层次：任何代码都能继承它并让
+    ``public_message`` 返回任意文本。放行与否由 :data:`_PUBLIC_DIAGNOSTIC_RENDERERS`
+    的**精确类型**注册表决定（``type(exc)`` 精确匹配，不走 isinstance），未注册的一律
+    塌缩成类型名。子类还必须让 ``public_message`` 由构造时校验过的 code 重新生成，
+    **不能取自 ``str(self)`` / ``self.args``**——那两者可被事后改写。
+    """
+
+    @property
+    def public_message(self) -> str:
+        raise NotImplementedError
+
+    @property
+    def diagnostic_code(self) -> str:
+        raise NotImplementedError
+
+
+#: **精确类型** → 公开文案 renderer。只有登记在此的类型才允许把文案送出边界。
+#: 由各异常模块在定义处调用 :func:`register_public_diagnostic` 填充（避免 redact 反向依赖它们）。
+_PUBLIC_DIAGNOSTIC_RENDERERS: dict[type, "Callable[[BaseException], str]"] = {}
+
+
+def register_public_diagnostic(
+    exc_type: type, renderer: "Callable[[BaseException], str]"
+) -> None:
+    """登记一个可公开的异常类型及其文案 renderer。
+
+    Args:
+        exc_type: **精确**异常类型（子类不自动继承该信任）。
+        renderer: 取该异常 → 固定公开文案；必须由校验过的 code 重新生成，不读 ``args``。
+    """
+    _PUBLIC_DIAGNOSTIC_RENDERERS[exc_type] = renderer
+
+
 def safe_exception_text(
     exc: BaseException,
     *,
@@ -246,6 +290,11 @@ def safe_exception_text(
     Type-only output is the default because URL redaction cannot prove that
     arbitrary exception text contains no other credentials.
     """
+    renderer = _PUBLIC_DIAGNOSTIC_RENDERERS.get(type(exc))
+    if renderer is not None:
+        # 精确类型命中才放行。用 type() 而非 isinstance：外部子类继承 PublicDiagnosticError
+        # 就能覆写 public_message 返回任意文本，isinstance 会把它一并放行。
+        return renderer(exc)
     exception_type = type(exc).__name__
     if not include_message:
         return exception_type
@@ -254,3 +303,34 @@ def safe_exception_text(
     message, _ = scrub_pii(message)
     message = message.strip()
     return f"{exception_type}: {message}" if message else exception_type
+
+
+def safe_exception_diagnostic(exc: BaseException, *, frame_limit: int = 5) -> str:
+    """给出异常的**类型与调用位置**，但绝不含异常消息。
+
+    ``logger.exception`` / ``exc_info=True`` 会把 traceback **连同 ``str(exc)``** 写进日志；
+    第三方库（requests / json / ssl）的异常消息里常夹带完整 URL、响应正文片段、带 key 的
+    查询串——只脱敏显式传入的 URL 参数堵不住这条路。本函数替代 traceback 转发：保留
+    「哪一行、经什么调用路径失败」的排障线索（末 ``frame_limit`` 帧的文件名:行号:函数名），
+    丢掉异常消息、源码行、绝对路径与异常链文本。
+
+    Args:
+        exc: 目标异常。
+        frame_limit: 保留末几帧，默认 5。
+
+    Returns:
+        ``"RuntimeError at fetch.py:211:_download <- cli.py:468:main"``；
+        无 traceback（未被 raise 过）时退化为纯类型名 ``"RuntimeError"``。
+    """
+    frames = traceback.extract_tb(exc.__traceback__)[-frame_limit:]
+    where = " <- ".join(
+        f"{os.path.basename(frame.filename)}:{frame.lineno}:{frame.name}" for frame in frames
+    )
+    exception_type = type(exc).__name__
+    if not where:
+        return exception_type
+    return f"{exception_type} at {where}"
+
+    @property
+    def diagnostic_code(self) -> str:
+        raise NotImplementedError

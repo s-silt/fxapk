@@ -37,6 +37,7 @@ import time
 import zipfile
 from pathlib import Path
 
+from apkscan.core.redact import safe_exception_diagnostic
 from apkscan.core import device, tools
 from apkscan.core.models import AnalysisConfig
 from apkscan.dynamic import (
@@ -95,9 +96,9 @@ def run(
 
     try:
         package = package_name or _resolve_package_name(apk_path)
-    except Exception as exc:  # noqa: BLE001 — load_apk 失败转 error，不抛
+    except Exception:  # noqa: BLE001 — load_apk 失败转 error，不抛
         logger.exception("[repack] load_apk 取包名失败：%s", apk_path)
-        return empty_result(STATUS_ERROR, f"加载 APK 取包名失败：{exc}")
+        return empty_result(STATUS_ERROR, "加载 APK 取包名失败（详见日志）")
 
     if not package or not device.is_valid_package(package):
         logger.error("[repack] 包名缺失/形态非法，拒绝重打包：%r", package)
@@ -109,9 +110,9 @@ def run(
     playbook: list[str] = []
     try:
         return _repackage_impl(apk_path, package, out_dir, serial, playbook)
-    except Exception as exc:  # noqa: BLE001 — 任何意外都转 DynamicResult，绝不抛给调用方
+    except Exception:  # noqa: BLE001 — 任何意外都转 DynamicResult，绝不抛给调用方
         logger.exception("[repack] 重打包异常：%s", apk_path)
-        result = empty_result(STATUS_ERROR, f"重打包执行异常：{exc}")
+        result = empty_result(STATUS_ERROR, "重打包执行异常（详见日志）")
         result["playbook"] = playbook
         return result
 
@@ -140,9 +141,9 @@ def _repackage_impl(
     replaced = repack_dir / f"{base}-deshelled-unsigned.apk"
     try:
         _replace_dex_in_zip(Path(apk_path), mapping, replaced)
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         logger.exception("[repack] zip 替换 DEX 失败")
-        return _err(f"zip 替换 DEX 失败：{exc}", playbook)
+        return _err("zip 替换 DEX 失败（详见日志）", playbook)
 
     # S5/S6：zipalign → apksigner 重签 + verify。
     aligned = repack_dir / f"{base}-deshelled-aligned.apk"
@@ -412,8 +413,10 @@ def _run_tool(args: list[str], extra_env: dict[str, str] | None = None) -> tuple
             logger.warning("[repack] 工具超时（%ss）：%s", _TOOL_TIMEOUT, args[0])
             return 1, f"工具超时（{_TOOL_TIMEOUT}s）"
         except OSError as exc:
-            logger.warning("[repack] 工具执行失败：%s（%s）", args[0], exc)
-            return 1, f"工具执行失败：{exc}"
+            logger.warning(
+                "[repack] 工具执行失败：%s（%s）", args[0], safe_exception_diagnostic(exc)
+            )
+            return 1, "工具执行失败（详见日志）"
         tail = _read_tail(log_path)
         return rc, tail
     finally:

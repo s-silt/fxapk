@@ -14,6 +14,7 @@ import pytest
 
 from apkscan.core import atomic, case_package
 from apkscan.core.case_package import (
+    CasePackageErrorCode,
     CasePackageError,
     create_case_package,
     create_case_review,
@@ -217,7 +218,10 @@ def test_package_integrity_projects_unreadable_artifact_as_failed(
     status = project_case_status(manifest)
 
     assert verified["status"] == "failed"
-    assert any("artifact unreadable" in issue for issue in verified["issues"])
+    # issues 已收敛成固定文案 + 本地序号：不回显包内路径（来自待校验的包，是不可信输入），
+    # 也不回显 OS 异常消息（可能带绝对路径、挂载点、账户名）。
+    assert any("is unreadable" in issue for issue in verified["issues"])
+    assert all("OSError" not in issue for issue in verified["issues"])
     assert status["package_integrity"] == "failed"
 
 
@@ -699,7 +703,7 @@ def test_same_artifact_cannot_claim_case_and_batch_scopes(tmp_path) -> None:  # 
     result = verify_case_package(manifest)
 
     assert result["status"] == "failed"
-    assert any("duplicate artifact path" in issue for issue in result["issues"])
+    assert any("duplicates an earlier artifact path" in issue for issue in result["issues"])
 
 
 def test_batch_or_legacy_only_report_cannot_snapshot_complete_closure(tmp_path) -> None:  # noqa: ANN001
@@ -810,7 +814,7 @@ def test_complete_closure_requires_direct_evidence_for_every_target(tmp_path) ->
     ]
     report.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
-    with pytest.raises(CasePackageError, match="batch-only.example"):
+    with pytest.raises(CasePackageError) as excinfo:
         create_case_package(
             report,
             tmp_path / "case-package.json",
@@ -819,6 +823,10 @@ def test_complete_closure_requires_direct_evidence_for_every_target(tmp_path) ->
         )
 
 
+
+    # 断错误码而非文案；并锁住案件目标值不得回显进公开诊断。
+    assert excinfo.value.code is CasePackageErrorCode.CLOSURE_TARGET_LACKS_EVIDENCE
+    assert "batch-only.example" not in excinfo.value.public_message
 def test_unrelated_direct_endpoint_cannot_license_batch_only_closure_target(
     tmp_path,
 ) -> None:  # noqa: ANN001
@@ -853,7 +861,7 @@ def test_unrelated_direct_endpoint_cannot_license_batch_only_closure_target(
     ]
     report.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
-    with pytest.raises(CasePackageError, match="batch-only.example"):
+    with pytest.raises(CasePackageError) as excinfo:
         create_case_package(
             report,
             tmp_path / "case-package.json",
@@ -862,6 +870,10 @@ def test_unrelated_direct_endpoint_cannot_license_batch_only_closure_target(
         )
 
 
+
+    # 断错误码而非文案；并锁住案件目标值不得回显进公开诊断。
+    assert excinfo.value.code is CasePackageErrorCode.CLOSURE_TARGET_LACKS_EVIDENCE
+    assert "batch-only.example" not in excinfo.value.public_message
 def test_complete_closure_without_target_inventory_is_rejected(tmp_path) -> None:  # noqa: ANN001
     report = _write_report(tmp_path, closure="complete")
     payload = json.loads(report.read_text(encoding="utf-8"))

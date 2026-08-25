@@ -20,6 +20,7 @@ from functools import cached_property, lru_cache
 from pathlib import Path
 from typing import Any, BinaryIO, NoReturn
 
+from apkscan.core.redact import safe_exception_diagnostic, safe_exception_text
 from apkscan.core import tools
 from apkscan.core.models import (
     AnalysisConfig,
@@ -602,7 +603,7 @@ def _bounded_extract_file_based_on_header_info(
             # 实际解压已确认越界，不能再把同一数据按 STORED 回退读取。
             raise
         except Exception as exc:  # noqa: BLE001 - 与 apkInspector 原回退口径一致
-            logger.debug("%s", exc)
+            logger.debug("%s", safe_exception_diagnostic(exc))
             apk_file.seek(cur_loc)
             compressed_data = _bounded_read(
                 uncompressed_size,
@@ -1142,12 +1143,14 @@ def _load_extra_dex(extra_dex: list[str]) -> tuple[list, list[dict[str, str]]]:
             # Android 10+ DEX 常因 androguard 不认 hidden-api flag 抛 ValueError
             # （HiddenApiClassDataItem.*ApiFlag），是已知库限制、会成批出现，整坨 traceback
             # 纯噪音。仍如实记录（不 swallow），只是不再刷屏。
-            logger.warning("解析额外 DEX 失败，跳过：%s（%s: %s）", path, type(exc).__name__, exc)
+            logger.warning(
+                "解析额外 DEX 失败，跳过：%s（%s）", path, safe_exception_diagnostic(exc)
+            )
             failures.append({
                 "path": str(path),
                 "sha256": digest,
                 "error_type": type(exc).__name__,
-                "error": str(exc)[:200],
+                "error": safe_exception_text(exc),
             })
     return out, failures
 

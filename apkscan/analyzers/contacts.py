@@ -23,6 +23,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from apkscan.core.redact import safe_exception_diagnostic
 from apkscan.analyzers._common import (
     DEX_TRUNCATED_META_KEY,
 )
@@ -402,7 +403,11 @@ class ContactsAnalyzer(BaseAnalyzer):
             resp.raise_for_status()
             payload = resp.json()
         except Exception as exc:  # noqa: BLE001 — getMe 失败不得炸主流程
-            logger.warning("[%s] Telegram getMe 失败（保留静态线索）：%s", self.name, exc)
+            logger.warning(
+                "[%s] Telegram getMe 失败（保留静态线索）：%s",
+                self.name,
+                safe_exception_diagnostic(exc),
+            )
             return None
         if not isinstance(payload, dict) or not payload.get("ok"):
             return None

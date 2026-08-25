@@ -17,6 +17,7 @@ from pathlib import Path
 import time
 from typing import Iterable, Iterator, Mapping, Sequence
 
+from apkscan.core.redact import safe_exception_text
 from apkscan.core.atomic import atomic_write_text
 from apkscan.core.case_identity import normalize_case_id
 from apkscan.core.json_contract import (
@@ -162,7 +163,7 @@ def _validate_row(row: object) -> str | None:
         try:
             normalized = normalize_case_id(case_id)
         except ValueError as exc:
-            return str(exc)
+            return safe_exception_text(exc)
         if normalized != case_id:
             return "case_id 必须已按 NFC/首尾空白规则规范化"
     state = row.get("record_state", RECORD_ACTIVE)

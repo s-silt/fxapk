@@ -39,6 +39,7 @@ import xml.parsers.expat as expat
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from apkscan.core.redact import safe_exception_diagnostic
 from apkscan.analyzers._common import as_str_list as _as_str_list
 from apkscan.analyzers._common import truncate as _truncate
 from apkscan.core.models import (
@@ -192,8 +193,12 @@ class FirebaseAnalyzer(BaseAnalyzer):
         # 产出：databaseURL → domain Endpoint；project_id → CONFIG_KEY Lead；写 meta。
         try:
             self._emit_database_endpoint(config, result)
-        except Exception:
-            logger.exception("[%s] 构造 databaseURL Endpoint 失败", self.name)
+        except Exception as exc:
+            logger.error(
+                "[%s] 构造 databaseURL Endpoint 失败（%s）",
+                self.name,
+                safe_exception_diagnostic(exc),
+            )
 
         try:
             self._emit_project_lead(config, template, result)

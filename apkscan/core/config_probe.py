@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import logging
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
+
+from apkscan.core.redact import safe_exception_diagnostic, urlunsplit
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +64,9 @@ def _host_of(value: str) -> str | None:
     if "://" in v:
         try:
             return urlsplit(v).hostname
-        except ValueError:
-            logger.debug("[config_probe] URL 解析失败：%r", v, exc_info=True)
+        except ValueError as exc:
+            # 不记 v 原文：解析已失败，不能假设 redact_url 认得它；只留类型与帧位置。
+            logger.debug("[config_probe] URL 解析失败（%s）", safe_exception_diagnostic(exc))
             return None
     return v.split("/", 1)[0] or None
 
