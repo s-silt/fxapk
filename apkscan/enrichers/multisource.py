@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import base64
+import ipaddress
 import logging
+import math
 import os
 import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from html import unescape
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
@@ -28,11 +31,59 @@ _MAX_RECORDS = 20
 #  改此串**必须**同步 closure._FOFA_FIELDS（有漂移守卫测试兜底），否则 closure 会按错位取值静默污染归属。
 FOFA_QUERY_FIELDS = "host,ip,port,protocol,title,server,country,region,city,as_number,as_organization"
 _MAX_TEXT = 500
-_METADATA_ONLY_KEYS = {"source", "count", "pulse_count", "passive_dns_status", "_via"}
+#: 这些键只是元数据，**不构成"查到了东西"的证据**——参与 has_values 会把
+#: "主查询无记录 + 辅助端点失败"错报成 hit（即把没查到伪装成查到了）。
+_METADATA_ONLY_KEYS = {
+    "source",
+    "count",
+    "pulse_count",
+    "passive_dns_status",
+    "_via",
+    "upstream_lookup_status",
+    "upstream_error_type",
+    "routing_history_lookup_status",
+    "routing_history_error_type",
+    "whois_lookup_status",
+    "whois_error_type",
+    "abuse_contact_lookup_status",
+    "abuse_contact_error_type",
+    "routing_history_min_peers",
+    "routing_origin_changed_status",
+    "routing_history_truncated",
+    "routing_history_visibility_degraded",
+    "whois_truncated",
+    "abuse_contacts_truncated",
+}
 
 #: 单个端点最多留多少条被动 DNS 记录。取"够看清落地变迁"的量：此类域名换 IP 频繁，
 #: 全量可达数百条，落进报告只会把人淹掉；按时间倒序留最近这些足以还原案发时点前后的落点。
 _MAX_PASSIVE_DNS = 40
+
+#: RIPEstat 各 data call 共用的调用方标识（官方要求带上，便于对方侧排障）。
+_RIPESTAT_SOURCEAPP = "fxapk-case-close"
+
+#: routing-history 的处理上限。默认查询窗从 2000 年起，老网段能返回上万条 timeline，
+#: 不设限会把报告撑爆、也拖慢结案。超限即置 ``routing_history_truncated``，绝不静默截断。
+_ROUTING_HISTORY_MAX_ORIGINS = 256
+_ROUTING_HISTORY_MAX_PREFIXES_PER_ORIGIN = 128
+_ROUTING_HISTORY_MAX_TIMELINES = 20_000
+_ROUTING_HISTORY_MAX_OUTPUT_PREFIXES = 128
+#: routing-history 的可见度阈值。低于该 peer 数的宣告不返回——这意味着"未见到第二个
+#: origin"不能反推"没换过手"，故该值随结论一并写进报告供复核。
+_ROUTING_HISTORY_MIN_PEERS = 10
+
+#: RIPEstat whois 记录的处理上限（records 是分组的 key/value 列表，同 key 可重复出现）。
+_WHOIS_MAX_RECORD_GROUPS = 128
+_WHOIS_MAX_FIELDS_PER_GROUP = 512
+_WHOIS_MAX_VALUES_PER_KEY = 64
+_WHOIS_MAX_DESCRIPTIONS = 32
+_WHOIS_MAX_AUTHORITIES = 16
+
+_ABUSE_CONTACT_MAX_ITEMS = 32
+
+#: 合法 ASN 取值范围（0 与 4294967295 为保留值）。
+_RIPESTAT_MIN_ASN = 1
+_RIPESTAT_MAX_ASN = 4_294_967_294
 
 
 class _ProviderResponseError(RuntimeError):
@@ -79,6 +130,371 @@ def _bounded_scalar_list(value: object) -> list[str | int | float | bool]:
         if scalar is not None:
             compact.append(scalar)
     return compact
+
+
+def _ripestat_asn(value: object) -> int | None:
+    """把 RIPEstat 的 ASN 值（常为字符串 ``"701"``）转成合法 int；不合法返回 None。
+
+    ★显式排除 bool：它是 int 的子类，一旦此处的 ``str()`` 归一被去掉，``int(True)`` 就会
+    静默变成 AS1。当前经 ``str()`` 后 ``int("True")`` 本就会抛 ValueError，这道检查是
+    防御性的——不要因为"看起来冗余"而删掉。
+    """
+    if isinstance(value, bool):
+        return None
+    try:
+        asn = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    if not _RIPESTAT_MIN_ASN <= asn <= _RIPESTAT_MAX_ASN:
+        return None
+    return asn
+
+
+def _bounded_text(value: object) -> str | None:
+    """字符串专用的封顶清洗：HTML 实体还原 + 去空白 + 长度封顶；非字符串/空串返回 None。
+
+    RIPEstat 的 whois 值里带 HTML 实体（如 ``S&amp;T``），不还原会把转义符写进报告。
+    """
+    if not isinstance(value, str):
+        return None
+    bounded = _bounded_scalar(unescape(value).strip())
+    return bounded if isinstance(bounded, str) and bounded else None
+
+
+def _ripestat_network(value: object) -> ipaddress.IPv4Network | ipaddress.IPv6Network | None:
+    """把前缀或裸 IP 字符串解析成网络对象；裸 IP 视作单主机网段。解析不了返回 None。"""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    try:
+        return ipaddress.ip_network(text, strict=False)
+    except ValueError:
+        try:
+            address = ipaddress.ip_address(text)
+        except ValueError:
+            return None
+        return ipaddress.ip_network(f"{address}/{address.max_prefixlen}", strict=False)
+
+
+def _routing_prefix_relation(
+    candidate: ipaddress.IPv4Network | ipaddress.IPv6Network,
+    reference: ipaddress.IPv4Network | ipaddress.IPv6Network,
+) -> str | None:
+    """判断 routing-history 里的前缀与当前网段的关系；无关返回 None。
+
+    ★这是本次扩展的核心判据：``by_origin`` 里混着**覆盖本网段的超网**宣告
+    （实测查一个 /24 会带回宣告 /8、/7 的历史 AS）。超网宣告说的是"上游大段归谁"，
+    不是"这个网段归谁"，混为一谈会把归属指向上游大段的持有者，故必须分桶。
+    """
+    if candidate.version != reference.version:
+        return None
+    if candidate == reference:
+        return "exact"
+    # 用地址区间包含判断，不用 subnet_of/supernet_of：后者在 v4/v6 联合类型下不满足静态类型检查，
+    # 且要求两侧同类；整数区间比较语义完全等价，也更直白。
+    candidate_low, candidate_high = int(candidate.network_address), int(candidate.broadcast_address)
+    reference_low, reference_high = int(reference.network_address), int(reference.broadcast_address)
+    if candidate_low >= reference_low and candidate_high <= reference_high:
+        return "more_specific"
+    if candidate_low <= reference_low and candidate_high >= reference_high:
+        return "supernet"
+    return None
+
+
+def _fold_routing_history(
+    data: Mapping[str, object], reference_resource: object
+) -> dict[str, object]:
+    """把 routing-history 的 ``by_origin`` 折叠成"每个 origin 一条"的归属史。
+
+    RIPEstat 按 origin→prefix→timeline 三层返回，同一 origin 的连续宣告会被切成许多
+    时间片；本函数要还原的是"哪个 AS、从什么时候到什么时候宣告过本网段"，故按 origin 合并
+    时间窗。超网宣告分到单独的桶（见 :func:`_routing_prefix_relation`）。
+    """
+    reference = _ripestat_network(reference_resource)
+    if reference is None:
+        return {}
+
+    latest_max_peers = _dict(data.get("latest_max_ff_peers"))
+    # ★_list_of_dicts 默认 limit=_MAX_RECORDS(20)，会先砍到 20 条再返回——必须显式传本函数的上限，
+    #   并按**原始长度**判截断，否则 `len(已截断列表) > 上限` 恒为假，静默丢数据还报告"未截断"。
+    raw_by_origin = data.get("by_origin")
+    total_origins = len(raw_by_origin) if isinstance(raw_by_origin, list) else 0
+    raw_origins = _list_of_dicts(raw_by_origin, limit=_ROUTING_HISTORY_MAX_ORIGINS)
+    truncated = total_origins > _ROUTING_HISTORY_MAX_ORIGINS
+    #: 可见度比例算出越界/非有限值 → 标降级，让下游知道这批比例不完整而不是"没有比例"。
+    degraded = False
+    timeline_count = 0
+
+    effective: dict[int, dict[str, object]] = {}
+    supernets: dict[int, dict[str, object]] = {}
+
+    for origin_entry in raw_origins[:_ROUTING_HISTORY_MAX_ORIGINS]:
+        origin_asn = _ripestat_asn(origin_entry.get("origin"))
+        if origin_asn is None:
+            continue
+
+        raw_prefix_list = origin_entry.get("prefixes")
+        total_prefixes = len(raw_prefix_list) if isinstance(raw_prefix_list, list) else 0
+        raw_prefixes = _list_of_dicts(
+            raw_prefix_list, limit=_ROUTING_HISTORY_MAX_PREFIXES_PER_ORIGIN
+        )
+        if total_prefixes > _ROUTING_HISTORY_MAX_PREFIXES_PER_ORIGIN:
+            truncated = True
+
+        for prefix_entry in raw_prefixes[:_ROUTING_HISTORY_MAX_PREFIXES_PER_ORIGIN]:
+            candidate = _ripestat_network(prefix_entry.get("prefix"))
+            if candidate is None:
+                continue
+            relation = _routing_prefix_relation(candidate, reference)
+            if relation is None:
+                continue
+
+            target = supernets if relation == "supernet" else effective
+            bucket = target.setdefault(
+                origin_asn,
+                {
+                    "origin_asn": origin_asn,
+                    "prefixes": [],
+                    "first_seen": None,
+                    "last_seen": None,
+                    "max_visibility_ratio": None,
+                    "_max_prefix_length": -1,
+                },
+            )
+
+            prefix_text = _bounded_text(str(candidate))
+            prefixes = bucket.get("prefixes")
+            if prefix_text is not None and isinstance(prefixes, list) and prefix_text not in prefixes:
+                if len(prefixes) < _ROUTING_HISTORY_MAX_OUTPUT_PREFIXES:
+                    prefixes.append(prefix_text)
+                else:
+                    truncated = True
+
+            max_prefix_length = bucket.get("_max_prefix_length")
+            if not isinstance(max_prefix_length, int) or candidate.prefixlen > max_prefix_length:
+                bucket["_max_prefix_length"] = candidate.prefixlen
+
+            # ★时间片必须全取：砍剩前 20 段会让 first_seen/last_seen 算错（RIPEstat 把连续宣告
+            #   切成许多段，且顺序不保证按时间排列），直接产出错误的"归属起止时间"。
+            raw_timeline_list = prefix_entry.get("timelines")
+            total_timelines = len(raw_timeline_list) if isinstance(raw_timeline_list, list) else 0
+            remaining = _ROUTING_HISTORY_MAX_TIMELINES - timeline_count
+            if remaining <= 0:
+                truncated = True
+                break
+            raw_timelines = _list_of_dicts(raw_timeline_list, limit=remaining)
+            if total_timelines > remaining:
+                truncated = True
+
+            # 可见度分母按 IP 版本取（v4/v6 的全表 peer 数不同）；分母不可用则不产比例，
+            # 绝不拿 0 或非数当分母（会抛或产出无意义的 inf）。
+            denominator_raw = latest_max_peers.get(f"v{candidate.version}")
+            denominator: float | None = None
+            if not isinstance(denominator_raw, bool):
+                try:
+                    parsed_denominator = float(str(denominator_raw))
+                except (TypeError, ValueError):
+                    parsed_denominator = 0.0
+                if math.isfinite(parsed_denominator) and parsed_denominator > 0:
+                    denominator = parsed_denominator
+
+            for timeline in raw_timelines[:remaining]:
+                timeline_count += 1
+                start = _bounded_text(timeline.get("starttime"))
+                end = _bounded_text(timeline.get("endtime"))
+
+                current_first = bucket.get("first_seen")
+                if start is not None and (not isinstance(current_first, str) or start < current_first):
+                    bucket["first_seen"] = start
+                current_last = bucket.get("last_seen")
+                if end is not None and (not isinstance(current_last, str) or end > current_last):
+                    bucket["last_seen"] = end
+
+                peers_raw = timeline.get("full_peers_seeing")
+                if denominator is None or isinstance(peers_raw, bool):
+                    continue
+                try:
+                    peers = float(str(peers_raw))
+                except (TypeError, ValueError):
+                    continue
+                if not math.isfinite(peers) or peers < 0:
+                    continue
+                ratio = round(peers / denominator, 4)
+                # ★除法结果必须再校验一次：极小分母 + 大分子会得到 inf，而 inf 会让
+                #   core.enrichment 的严格 JSON 校验拒掉**整个 provider payload**，
+                #   连已经到手的 prefix-overview 主结果一起丢。比例 >1 说明源数据自相
+                #   矛盾（可见 peer 数超过全表 peer 数），同样不可信。
+                #   刻意不 clamp——那会把源数据异常掩盖成一个看起来正常的值。
+                if not math.isfinite(ratio) or not 0.0 <= ratio <= 1.0:
+                    degraded = True
+                    continue
+                current_ratio = bucket.get("max_visibility_ratio")
+                if not isinstance(current_ratio, (int, float)) or ratio > current_ratio:
+                    bucket["max_visibility_ratio"] = ratio
+
+        if timeline_count >= _ROUTING_HISTORY_MAX_TIMELINES:
+            # 恰好用满预算 ≠ 后面还有数据：只有确实还剩未处理的 origin 才算截断。
+            if origin_entry is not raw_origins[-1]:
+                truncated = True
+            break
+
+    def finalize(items: dict[int, dict[str, object]]) -> list[dict[str, object]]:
+        """按前缀特异性降序排列（越特异越贴近"这个网段归谁"），同特异性按 ASN 稳定排序。"""
+
+        def sort_key(item: Mapping[str, object]) -> tuple[int, int]:
+            # ★不能写 `item.get(...) or -1`：合法的 /0 前缀长度为 0 是 falsy，会被误当缺失。
+            length = item.get("_max_prefix_length")
+            asn = item.get("origin_asn")
+            return (
+                -(length if isinstance(length, int) and not isinstance(length, bool) else -1),
+                asn if isinstance(asn, int) and not isinstance(asn, bool) else 0,
+            )
+
+        return [
+            {
+                key: value
+                for key, value in {
+                    "origin_asn": item.get("origin_asn"),
+                    "prefixes": item.get("prefixes"),
+                    "first_seen": item.get("first_seen"),
+                    "last_seen": item.get("last_seen"),
+                    "max_visibility_ratio": item.get("max_visibility_ratio"),
+                }.items()
+                if value not in (None, "", [])
+            }
+            for item in sorted(items.values(), key=sort_key)
+        ]
+
+    return {
+        "origins": sorted(effective),
+        "history": finalize(effective),
+        "supernets": finalize(supernets),
+        "truncated": truncated,
+        "visibility_degraded": degraded,
+    }
+
+
+def _collect_whois_values(records: object) -> tuple[dict[str, list[str]], bool]:
+    """把 RIPEstat whois 的分组 key/value 列表收成 ``{小写键: [值...]}``。
+
+    ★同一个 key 会重复出现（实测 APNIC 一条记录里 ``descr`` 三条、``tech-c`` 两条），
+    直接 ``{kv["key"]: kv["value"]}`` 会静默只留最后一条——地址、单位名都会丢。
+    """
+    values: dict[str, list[str]] = {}
+    if not isinstance(records, list):
+        return values, False
+
+    # ★每一层截断都要能被上报：静默丢字段会让"只有这些登记信息"成为错误结论。
+    truncated = len(records) > _WHOIS_MAX_RECORD_GROUPS
+    for group in records[:_WHOIS_MAX_RECORD_GROUPS]:
+        if isinstance(group, list) and len(group) > _WHOIS_MAX_FIELDS_PER_GROUP:
+            truncated = True
+        for field_entry in _list_of_dicts(group, limit=_WHOIS_MAX_FIELDS_PER_GROUP):
+            raw_key = field_entry.get("key")
+            if not isinstance(raw_key, str):
+                continue
+            key = unescape(raw_key).strip().casefold()
+            value = _bounded_text(field_entry.get("value"))
+            if not key or value is None:
+                continue
+            key_values = values.setdefault(key, [])
+            if value in key_values:
+                continue
+            if len(key_values) < _WHOIS_MAX_VALUES_PER_KEY:
+                key_values.append(value)
+            else:
+                truncated = True
+    return values, truncated
+
+
+def _first_whois_value(values: Mapping[str, list[str]], aliases: tuple[str, ...]) -> str | None:
+    """按别名优先级取第一个有值的字段（不同 RIR 用不同字段名表达同一件事）。"""
+    for alias in aliases:
+        candidates = values.get(alias)
+        if candidates:
+            return candidates[0]
+    return None
+
+
+def _normalize_ripestat_whois(data: Mapping[str, object]) -> dict[str, object]:
+    """跨 RIR 归一 whois：ARIN 用 ``NetRange/NetName/Organization/RegDate``，
+    APNIC/RIPE 用 ``inetnum/netname/descr/country``——两套字段名都要认。
+
+    ★取证纪律：只取**注册持有方**。``abuse-c`` / ``tech-c`` / ``admin-c`` 常是上游 IDC
+    或代理商的联系人，拿它当持有方会把归属指向错误的主体，故一律不参与持有方判断。
+    """
+    values, truncated = _collect_whois_values(data.get("records"))
+    all_descriptions = values.get("descr", [])
+    descriptions = all_descriptions[:_WHOIS_MAX_DESCRIPTIONS]
+    if len(all_descriptions) > _WHOIS_MAX_DESCRIPTIONS:
+        truncated = True
+    organization = _first_whois_value(
+        values, ("organization", "org-name", "organisation", "owner", "org")
+    )
+    # APNIC/RIPE 常只用首条 descr 表示登记主体（后续几条是通信地址）。
+    if organization is None and descriptions:
+        organization = descriptions[0]
+
+    authorities: list[str] = []
+    raw_authorities = data.get("authorities")
+    if isinstance(raw_authorities, list):
+        # 这一项原先无上限——外部输入一律要有界。
+        if len(raw_authorities) > _WHOIS_MAX_AUTHORITIES:
+            truncated = True
+        for raw_authority in raw_authorities[:_WHOIS_MAX_AUTHORITIES]:
+            authority = _bounded_text(raw_authority)
+            if authority is None:
+                continue
+            folded = _bounded_text(authority.casefold())
+            if folded is not None and folded not in authorities:
+                authorities.append(folded)
+
+    return {
+        key: value
+        for key, value in {
+            "whois_network": _first_whois_value(
+                values, ("cidr", "inetnum", "inet6num", "netrange")
+            ),
+            "whois_netname": _first_whois_value(values, ("netname",)),
+            "registered_organization": organization,
+            "registration_descriptions": descriptions,
+            "registration_country": _first_whois_value(values, ("country",)),
+            "registration_date": _first_whois_value(
+                values, ("regdate", "created", "registration-date")
+            ),
+            "authoritative_rirs": authorities,
+            "whois_truncated": truncated or None,
+        }.items()
+        if value not in (None, "", [])
+    }
+
+
+def _normalize_abuse_contacts(data: Mapping[str, object]) -> dict[str, object]:
+    """归一投诉/协查联系人。字段名刻意带 ``abuse_``，与注册持有方字段泾渭分明——
+    这两者混用是归属判断出错的常见成因。"""
+    contacts: list[str] = []
+    truncated = False
+    raw_contacts = data.get("abuse_contacts")
+    if isinstance(raw_contacts, list):
+        truncated = len(raw_contacts) > _ABUSE_CONTACT_MAX_ITEMS
+        for raw_contact in raw_contacts[:_ABUSE_CONTACT_MAX_ITEMS]:
+            contact = _bounded_text(raw_contact)
+            if contact is not None and contact not in contacts:
+                contacts.append(contact)
+
+    authoritative_rir = _bounded_text(data.get("authoritative_rir"))
+    if authoritative_rir is not None:
+        authoritative_rir = _bounded_text(authoritative_rir.casefold())
+
+    return {
+        key: value
+        for key, value in {
+            "abuse_complaint_contacts": contacts,
+            "abuse_contact_authoritative_rir": authoritative_rir,
+            "abuse_contacts_truncated": truncated or None,
+        }.items()
+        if value not in (None, "", [])
+    }
 
 
 def _compact_mapping(value: object, fields: tuple[str, ...]) -> dict[str, object]:
@@ -348,12 +764,15 @@ class RipeStatBgpEnricher(_PassiveLookupEnricher):
     applies_to = ["ip"]
     _URL = "https://stat.ripe.net/data/prefix-overview/data.json"
     _NEIGHBOURS_URL = "https://stat.ripe.net/data/asn-neighbours/data.json"
+    _ROUTING_HISTORY_URL = "https://stat.ripe.net/data/routing-history/data.json"
+    _WHOIS_URL = "https://stat.ripe.net/data/whois/data.json"
+    _ABUSE_CONTACT_URL = "https://stat.ripe.net/data/abuse-contact-finder/data.json"
 
     def _lookup(self, endpoint: Endpoint, credential: str) -> object:
         del credential
         response = self._http.get(
             self._URL,
-            params={"resource": endpoint.value, "sourceapp": "fxapk-case-close"},
+            params={"resource": endpoint.value, "sourceapp": _RIPESTAT_SOURCEAPP},
             timeout=_TIMEOUT,
         )
         response.raise_for_status()
@@ -366,59 +785,91 @@ class RipeStatBgpEnricher(_PassiveLookupEnricher):
         first_asn: object = asns[0] if isinstance(asns, list) and asns else None
         if isinstance(first_asn, Mapping):
             first_asn = first_asn.get("asn")
-        if first_asn in (None, ""):
-            return result
-        try:
-            neighbour_response = self._http.get(
-                self._NEIGHBOURS_URL,
-                params={"resource": f"AS{first_asn}", "sourceapp": "fxapk-case-close"},
-                timeout=_TIMEOUT,
-            )
-            neighbour_response.raise_for_status()
-            neighbour_payload = neighbour_response.json()
-            if _provider_declared_error(neighbour_payload, self.name):
-                raise _ProviderResponseError
-            result["asn_neighbours"] = neighbour_payload
-        except Exception as exc:  # noqa: BLE001 - retain prefix evidence on upstream lookup failure
-            result["upstream_lookup"] = {
-                "status": "failed",
-                "error_type": _safe_error_type(exc),
-            }
+        if first_asn not in (None, ""):
+            try:
+                neighbour_response = self._http.get(
+                    self._NEIGHBOURS_URL,
+                    params={"resource": f"AS{first_asn}", "sourceapp": _RIPESTAT_SOURCEAPP},
+                    timeout=_TIMEOUT,
+                )
+                neighbour_response.raise_for_status()
+                neighbour_payload = neighbour_response.json()
+                if _provider_declared_error(neighbour_payload, self.name):
+                    raise _ProviderResponseError
+                result["asn_neighbours"] = neighbour_payload
+            except Exception as exc:  # noqa: BLE001 - retain prefix evidence on upstream lookup failure
+                result["upstream_lookup"] = {
+                    "status": "failed",
+                    "error_type": _safe_error_type(exc),
+                }
+
+        # 三个辅助 data call：各自独立 try，任一失败只记自己的状态，
+        # 既不影响主结果（prefix-overview 已到手），也不影响彼此。
+        auxiliary_calls: tuple[tuple[str, str, dict[str, object], str], ...] = (
+            (
+                "routing_history",
+                self._ROUTING_HISTORY_URL,
+                {
+                    "resource": endpoint.value,
+                    "min_peers": _ROUTING_HISTORY_MIN_PEERS,
+                    "sourceapp": _RIPESTAT_SOURCEAPP,
+                },
+                "routing_history_lookup",
+            ),
+            (
+                "whois",
+                self._WHOIS_URL,
+                {"resource": endpoint.value, "sourceapp": _RIPESTAT_SOURCEAPP},
+                "whois_lookup",
+            ),
+            (
+                "abuse_contact",
+                self._ABUSE_CONTACT_URL,
+                {"resource": endpoint.value, "sourceapp": _RIPESTAT_SOURCEAPP},
+                "abuse_contact_lookup",
+            ),
+        )
+        for result_key, url, params, status_key in auxiliary_calls:
+            try:
+                auxiliary_response = self._http.get(url, params=params, timeout=_TIMEOUT)
+                auxiliary_response.raise_for_status()
+                auxiliary_payload = auxiliary_response.json()
+                if _provider_declared_error(auxiliary_payload, self.name):
+                    raise _ProviderResponseError
+                result[result_key] = auxiliary_payload
+            except Exception as exc:  # noqa: BLE001 - 辅助端点互不影响，也不拖累主结果
+                result[status_key] = {
+                    "status": "failed",
+                    "error_type": _safe_error_type(exc),
+                }
         return result
 
     def _normalize(self, payload: object, endpoint: Endpoint) -> dict[str, object]:
-        del endpoint
         root = _dict(payload)
         prefix_payload = _dict(root.get("prefix_overview")) if "prefix_overview" in root else root
         data = _dict(prefix_payload.get("data"))
         asns = data.get("asns")
-        origin_asn: object = None
+        origin_asn: int | None = None
         holder: object = data.get("holder")
         if isinstance(asns, list) and asns:
             first = asns[0]
             if isinstance(first, Mapping):
-                origin_asn = first.get("asn")
+                origin_asn = _ripestat_asn(first.get("asn"))
                 holder = first.get("holder") or holder
             else:
-                origin_asn = first
+                origin_asn = _ripestat_asn(first)
         neighbour_data = _dict(_dict(root.get("asn_neighbours")).get("data"))
         upstreams: set[int] = set()
         for neighbour in _list_of_dicts(neighbour_data.get("neighbours")):
             if str(neighbour.get("type") or "").lower() != "left":
                 continue
-            raw_asn = neighbour.get("asn")
-            if isinstance(raw_asn, bool):
-                continue
-            try:
-                asn_number = int(str(raw_asn))
-            except (TypeError, ValueError):
-                continue
-            if 1 <= asn_number <= 4_294_967_294:
+            asn_number = _ripestat_asn(neighbour.get("asn"))
+            if asn_number is not None:
                 upstreams.add(asn_number)
-        normalized = {
+        normalized: dict[str, object] = {
             key: value
             for key, value in {
-                "origin_asn": _bounded_scalar(origin_asn),
+                "origin_asn": origin_asn,
                 "asn_holder": _bounded_scalar(holder),
                 "prefix": _bounded_scalar(data.get("resource")),
                 "announced": _bounded_scalar(data.get("announced")),
@@ -427,12 +878,70 @@ class RipeStatBgpEnricher(_PassiveLookupEnricher):
             }.items()
             if value not in (None, "", [])
         }
-        upstream_lookup = _dict(root.get("upstream_lookup"))
-        if upstream_lookup.get("status") == "failed":
-            normalized["upstream_lookup_status"] = "failed"
-            error_type = _bounded_scalar(upstream_lookup.get("error_type"))
+
+        # routing-history：以 prefix-overview 给出的网段为参照系折叠历史宣告。
+        reference_resource = data.get("resource") or endpoint.value
+        routing_data = _dict(_dict(root.get("routing_history")).get("data"))
+        if routing_data:
+            routing = _fold_routing_history(routing_data, reference_resource)
+            historical_origins = routing.get("origins")
+            if isinstance(historical_origins, list):
+                relevant_origins = {
+                    asn for asn in historical_origins if isinstance(asn, int) and not isinstance(asn, bool)
+                }
+                if origin_asn is not None:
+                    relevant_origins.add(origin_asn)
+                normalized["routing_history_origins"] = historical_origins
+                # ★只用"精确/更特异"前缀的 origin 判变更：超网换手说的是上游大段易主，
+                #   不代表这个网段易主，混进来会造出大量假的"归属发生过变更"。
+                # ★★"没看到第二个 origin" ≠ "确定没换过手"：本次请求带 min_peers=10，
+                #   低可见度的历史宣告天然被过滤；若结果还被截断，未处理部分同样可能有
+                #   别的 origin。所以只有"≥2 个 origin"这一侧是可靠的——
+                #   发现多个 origin 一定输出 True；否则只在数据完整时才敢输出 False，
+                #   数据不完整时**不输出该字段**，避免把"不可判定"写成"未变更"。
+                incomplete = bool(routing.get("truncated")) or bool(
+                    routing.get("visibility_degraded")
+                )
+                if len(relevant_origins) > 1:
+                    normalized["routing_origin_changed"] = True
+                elif not incomplete:
+                    normalized["routing_origin_changed"] = False
+                else:
+                    normalized["routing_origin_changed_status"] = "undetermined"
+                # 该判定所依据的可见度阈值，写进报告便于复核结论强度。
+                normalized["routing_history_min_peers"] = _ROUTING_HISTORY_MIN_PEERS
+            history = routing.get("history")
+            if isinstance(history, list) and history:
+                normalized["routing_history"] = history
+            supernets = routing.get("supernets")
+            if isinstance(supernets, list) and supernets:
+                normalized["routing_history_supernets"] = supernets
+            if routing.get("truncated") is True:
+                normalized["routing_history_truncated"] = True
+            if routing.get("visibility_degraded") is True:
+                normalized["routing_history_visibility_degraded"] = True
+
+        whois_data = _dict(_dict(root.get("whois")).get("data"))
+        if whois_data:
+            normalized.update(_normalize_ripestat_whois(whois_data))
+
+        abuse_data = _dict(_dict(root.get("abuse_contact")).get("data"))
+        if abuse_data:
+            normalized.update(_normalize_abuse_contacts(abuse_data))
+
+        for payload_key, status_field, error_field in (
+            ("upstream_lookup", "upstream_lookup_status", "upstream_error_type"),
+            ("routing_history_lookup", "routing_history_lookup_status", "routing_history_error_type"),
+            ("whois_lookup", "whois_lookup_status", "whois_error_type"),
+            ("abuse_contact_lookup", "abuse_contact_lookup_status", "abuse_contact_error_type"),
+        ):
+            lookup = _dict(root.get(payload_key))
+            if lookup.get("status") != "failed":
+                continue
+            normalized[status_field] = "failed"
+            error_type = _bounded_scalar(lookup.get("error_type"))
             if error_type is not None:
-                normalized["upstream_error_type"] = error_type
+                normalized[error_field] = error_type
         return normalized
 
 

@@ -35,6 +35,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import socket
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,6 +68,23 @@ logger = logging.getLogger(__name__)
 # 抓包用的本机代理监听端口（mitmproxy 默认 8080）。
 _PROXY_HOST = "127.0.0.1"
 _PROXY_PORT = 8080
+
+#: 等主机代理端口就绪的上限（秒）。mitmdump 拉起到绑定端口通常远小于此。
+_MITM_PORT_READY_TIMEOUT = 5.0
+
+#: ★Android 的全局代理**不是一个键，是一组键**（AOSP Settings.Global）。
+#  真机实证：只 `settings delete global http_proxy` 之后，`settings get global http_proxy`
+#  确实返回 null，但 ConnectivityService 读的是 global_http_proxy_host/port——它们还在，
+#  系统组件与 WebView 于是继续往 127.0.0.1:8080 发，设备表现为"部分应用没网"
+#  （自带网络栈直连的 App 不受影响，所以现象是"个别 APK 有问题"而非整机断网）。
+#  故读回与清理都必须覆盖整组，只看 http_proxy 会得出"已清干净"的假结论。
+_PROXY_SETTING_KEYS: tuple[str, ...] = (
+    "http_proxy",
+    "global_http_proxy_host",
+    "global_http_proxy_port",
+    "global_http_proxy_exclusion_list",
+    "global_proxy_pac_url",
+)
 
 # mitmdump 子进程在 duration 到点后额外等待的缓冲（秒），给落盘 flow 文件留时间。
 _STOP_BUFFER = 10.0
@@ -535,6 +553,20 @@ def run(
         logger.info("[capture] %s；返回手册（playbook）", reason)
         result = empty_result(STATUS_SKIPPED, reason)
         result["playbook"] = _build_playbook(package, out_dir, duration)
+        # ★即便本轮因缺前置不抓包，也必须先清掉上一轮遗留的死代理：清理原本只在
+        #   _capture 内部做，而这里是**早退**路径——设备挂着死代理时，只要下一轮恰好
+        #   缺任一前置（mitmproxy 没装、frida-server 没起…），清理就永远轮不到执行，
+        #   设备会一直无网。"下一轮会自愈"必须在这条路径上也成立。
+        stale = _clear_stale_proxy(serial)
+        if stale == _STALE_PROXY_CLEARED:
+            result["playbook"].insert(0, "起手：已清除上一轮遗留的设备全局代理（读回确认）")
+        elif stale == _STALE_PROXY_FAILED:
+            result["playbook"].insert(
+                0,
+                "起手：检测到遗留的设备全局代理但**清除失败**——设备很可能仍无法联网，"
+                "请手动逐个执行 adb shell settings delete global "
+                f"{{{'/'.join(_PROXY_SETTING_KEYS)}}}",
+            )
         return result
 
     # --- 前置满足：真·抓包编排 ------------------------------------------
@@ -720,11 +752,28 @@ def _capture(
     proxy_set = False
     proxy_attempted = False  # 是否尝试过写设备代理（读回未确认也要在 finally 清理，避免遗留死代理）
     reverse_set = False
+    original_proxy = ""  # 抓包前设备原有的全局代理，收尾 compare-and-restore 回去
     # 抓包加固产生的告警（CA 未装系统库 / frida 版本不一致），收尾并入 reason，
     # 不假成功——但都不阻断抓包（HTTP 仍可抓；frida 不匹配仍尝试注入）。
     warnings: list[str] = []
 
     try:
+        # 0-) 起手先清上一轮遗留的死代理。与本轮是否走 mitm 无关——遗留代理会让设备
+        #     整机无网，floor-only 同样什么都抓不到。
+        stale = _clear_stale_proxy(serial)
+        if stale == _STALE_PROXY_CLEARED:
+            playbook.append("起手：清除上一轮遗留的设备全局代理（读回确认）")
+            warnings.append(
+                "检测到上一轮遗留的设备全局代理并已清除（上次抓包未正常收尾，设备此前可能无法联网）"
+            )
+        elif stale == _STALE_PROXY_FAILED:
+            # ★清不掉 = 设备此刻仍无网。绝不写成"已清除"，也不静默继续。
+            playbook.append("起手：检测到遗留的设备全局代理但**清除失败**（设备可能仍无法联网）")
+            warnings.append(
+                f"设备残留全局代理 {_PROXY_HOST}:{_PROXY_PORT} 清除失败——设备当前很可能无法联网，"
+                "本轮抓包结果不可信；请手动执行 adb shell settings delete global http_proxy"
+            )
+
         # 0) HTTPS 命门：把 mitmproxy CA 装入设备系统信任库。失败不中止抓包
         #    （HTTP 仍可抓），但把降级原因写进 playbook + reason，确保不假成功。
         if mitm:  # ★#8：floor-only 不走 mitm，就不该往设备系统信任库装 mitmproxy CA。
@@ -784,17 +833,31 @@ def _capture(
         # 3) adb 代理 + reverse，把设备流量回流到主机 mitmproxy。★#8：floor-only 模式跳过（无代理）。
         if mitm:
             reverse_set = _adb_reverse(serial)
-            if reverse_set:
-                playbook.append(f"adb reverse tcp:{_PROXY_PORT} tcp:{_PROXY_PORT}")
-            else:
-                # 无 reverse：设备代理指向本机 loopback 却无反向端口 → MITM 通道不可用（floor 兜底）。
+            if reverse_set and not _mitm_port_ready():
+                # 进程起来 ≠ 端口就绪。此刻设代理，设备会连到一个还没人听的端口 → 整机断网。
                 warnings.append(
-                    f"adb reverse tcp:{_PROXY_PORT} 失败——设备代理指向 loopback 但无反向端口，MITM 通道可能不可用"
+                    f"主机 {_PROXY_HOST}:{_PROXY_PORT} 未在监听（mitmdump 未就绪/端口被占）"
+                    "——已跳过设置设备全局代理以免设备断网，MITM 通道不可用"
                 )
-            proxy_attempted = True
-            proxy_set = _adb_set_proxy(serial)
-            if proxy_set:
-                playbook.append(f"adb 设全局代理 {_PROXY_HOST}:{_PROXY_PORT}")
+                playbook.append("跳过：主机代理端口未就绪，不设全局代理以免设备断网")
+            elif reverse_set:
+                playbook.append(f"adb reverse tcp:{_PROXY_PORT} tcp:{_PROXY_PORT}")
+                original_proxy = _proxy_readback(serial)  # 收尾 compare-and-restore 用
+                proxy_attempted = True
+                proxy_set = _adb_set_proxy(serial)
+                if proxy_set:
+                    playbook.append(f"adb 设全局代理 {_PROXY_HOST}:{_PROXY_PORT}")
+            else:
+                # ★真机事故根因：reverse 没建起来时**绝不能**再设全局代理。代理值是
+                #   loopback，设备侧没有任何进程监听该端口，一设下去整机 HTTP(S) 立刻
+                #   全断——既抓不到东西，样本也会走进网络异常分支（行为全变）；
+                #   进程若非正常退出，死代理还会留在设备上让它持续无网。
+                #   此处宁可放弃 MITM 通道（floor 带外 pcap 仍保底），也不动设备网络。
+                warnings.append(
+                    f"adb reverse tcp:{_PROXY_PORT} 失败——已跳过设置设备全局代理"
+                    "（若仍设成 loopback 会使设备断网），MITM 通道不可用，本轮仅靠 floor 兜底"
+                )
+                playbook.append("跳过：adb reverse 未建立，不设全局代理以免设备断网")
 
         # 4) frida 注入：优先 frida-core 通道（SSL unpinning + 运行时密钥 hook，可回传活体 key）；
         #    frida-core 不可用 / attach 失败 → 回退现有 subprocess 路径（仅 unpinning，无 key 回传）。
@@ -964,15 +1027,42 @@ def _capture(
                 playbook.append(f"① floor 保底：带外 pcap 已停并落盘 {floor_pcap.name}")
             else:
                 playbook.append("① floor 保底：带外 pcap 收尾未取到（降级，见日志）")
+        proxy_restored = True
         if proxy_attempted:
-            # ★P1：只要尝试过写代理就清理——即便读回未确认（settings put 可能已生效），
+            # ★P1：只要尝试过写代理就还原——即便读回未确认（settings put 可能已生效），
             # 也避免把设备全局代理遗留成死的 127.0.0.1:8080。
-            _adb_clear_proxy(serial)
-            playbook.append("还原：清除设备全局代理")
-        if reverse_set:
+            # ★compare-and-restore 而非无条件删除：设备抓包前可能本就有代理（用户的公司
+            #   代理/别的工具），无条件 delete 属于越权改用户环境；当前值若已非本工具所写，
+            #   更不该覆盖。
+            proxy_restored = _restore_proxy(serial, original_proxy)
+            if proxy_restored:
+                playbook.append("还原：设备全局代理已恢复到抓包前状态")
+            else:
+                playbook.append("还原：设备全局代理**恢复失败**（设备可能仍无法联网，需手动处理）")
+                warnings.append(
+                    "收尾还原设备全局代理失败——设备可能仍无法联网。请手动逐个执行："
+                    + "；".join(
+                        f"adb shell settings delete global {key}" for key in _PROXY_SETTING_KEYS
+                    )
+                )
+        # ★★代理没还原掉时，**不能**再拆 reverse、也不能停 mitmdump：设备此刻仍把流量
+        #   发往 127.0.0.1:8080，那条 reverse + 本机代理正是它仅存的出网通道。拆掉等于
+        #   亲手把设备打成确定性断网——宁可留下一个待清理的进程/转发规则，也不能这么干。
+        if reverse_set and proxy_restored:
             _adb_remove_reverse(serial)
             playbook.append(f"还原：adb reverse --remove tcp:{_PROXY_PORT}")
-        _terminate(mitm_proc, "mitmdump")
+        elif reverse_set:
+            playbook.append(
+                f"保留 adb reverse tcp:{_PROXY_PORT}：设备代理未能还原，"
+                "此时拆掉会让设备彻底断网（请先手动清代理键，再执行 adb reverse --remove）"
+            )
+        if proxy_restored:
+            _terminate(mitm_proc, "mitmdump")
+        else:
+            playbook.append(
+                "保留 mitmdump 进程：设备代理未能还原，停掉它会让设备彻底断网"
+                "（清完代理键后请手动结束该进程）"
+            )
 
     # 6) 解析 flows，提运行时端点，写 runtime_report.json。
     artifacts: list[str] = []
@@ -1836,6 +1926,29 @@ def _check_frida_version_match(serial: str | None = None) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 
 
+def _proxy_settings_residue(serial: str | None = None) -> tuple[bool, dict[str, str]]:
+    """读回**整组**全局代理键。返回 ``(读取是否全部成功, 仍有值的键→值)``。
+
+    ★只读 ``http_proxy`` 会漏：清它之后 ConnectivityService 仍按
+    ``global_http_proxy_host``/``global_http_proxy_port`` 走回环代理。
+
+    ★``read_ok`` 必须单独回报：``_adb_capture`` 用 ``None`` 表示超时/非零退出，
+    把它和真正的 ``null`` 一起压成"没值"，会让"命令根本没跑成"伪装成"设备很干净"——
+    清理后的验证一旦这样误判，就会在设备仍挂着代理时报告清理成功。
+    """
+    residue: dict[str, str] = {}
+    read_ok = True
+    for key in _PROXY_SETTING_KEYS:
+        out = _adb_capture(["shell", "settings", "get", "global", key], serial)
+        if out is None:
+            read_ok = False  # 读不到 ≠ 没设置
+            continue
+        val = out.strip()
+        if val and val != "null":
+            residue[key] = val
+    return read_ok, residue
+
+
 def _proxy_readback(serial: str | None = None) -> str:
     """读回设备全局 HTTP 代理值（``settings get global http_proxy``，去空白）；取不到/未设返回空串。"""
     out = _adb_capture(["shell", "settings", "get", "global", "http_proxy"], serial)
@@ -1863,10 +1976,134 @@ def _adb_set_proxy(serial: str | None = None) -> bool:
     return False
 
 
-def _adb_clear_proxy(serial: str | None = None) -> None:
-    """还原设备全局代理：settings delete global http_proxy。"""
-    if not _adb(["shell", "settings", "delete", "global", "http_proxy"], serial):
-        logger.warning("[capture] 清除设备全局代理失败（请手动还原）")
+def _adb_clear_proxy(serial: str | None = None) -> bool:
+    """还原设备全局代理（``settings delete global http_proxy``），**读回确认**后才算成功。
+
+    ★返回值必须可信：调用方据此写审计记录。只看 ``settings delete`` 的退出码不够——
+    退出 0 不代表真删掉（同 ``settings put`` 那侧的已知问题：可能被策略拦、需 root）。
+    若谎称已清，设备实际仍挂着死代理、持续无网，报告却写"已恢复"。
+    """
+    failed_keys: list[str] = []
+    for key in _PROXY_SETTING_KEYS:
+        if not _adb(["shell", "settings", "delete", "global", key], serial):
+            failed_keys.append(key)
+    if len(failed_keys) == len(_PROXY_SETTING_KEYS):
+        # ★adb 层面整个不通（设备掉线/adb 不可用）时，后面的读回同样拿不到真实状态，
+        #   空结果会被误读成"已清干净"。这种情况必须直接判失败，不能靠读回背书。
+        logger.warning(
+            "[capture] 清除设备全局代理失败：adb 命令全部未成功，设备状态未知（请手动还原）"
+        )
+        return False
+    if failed_keys:
+        logger.warning("[capture] 清除设备全局代理键失败：%s（请手动还原）", failed_keys)
+    # ★读回确认必须查整组：只查 http_proxy 会在 global_http_proxy_host/port 仍在时
+    #   给出"已清干净"的假结论，而那正是设备继续走回环代理的原因。
+    read_ok, residue = _proxy_settings_residue(serial)
+    if residue:
+        logger.warning(
+            "[capture] 清除后设备仍残留代理键 %r——部分应用/系统组件可能仍无法联网"
+            "（请手动执行 settings delete global 逐个清除）",
+            residue,
+        )
+        return False
+    if not read_ok:
+        # 读回本身没跑成 → 设备当前状态未知，不能宣称已清干净。
+        logger.warning("[capture] 清除后读回未全部成功，设备代理状态未知（请手动确认）")
+        return False
+    return True
+
+
+def _mitm_port_ready(timeout: float = _MITM_PORT_READY_TIMEOUT) -> bool:
+    """确认**主机侧**代理端口真的在监听。进程起来 ≠ 端口就绪。
+
+    ★为什么必须查：``_start_mitmdump`` 只保证进程被拉起，端口绑定要晚一点。
+    此刻若把设备全局代理设成 loopback，设备会连到一个还没人听的端口——整机断网，
+    而 mitmproxy 随后就绪也救不回来（应用已经失败/退避）。端口被别的进程占着、
+    或 mitmdump 启动即退出，同样只有探端口才看得出来。
+
+    只连主机自己的回环，不接触被测设备，也不发任何数据。
+    """
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        try:
+            with socket.create_connection((_PROXY_HOST, _PROXY_PORT), timeout=0.5):
+                return True
+        except OSError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.2)
+
+
+def _restore_proxy(serial: str | None, original: str) -> bool:
+    """收尾还原设备全局代理：**compare-and-restore**，不是无条件删除。
+
+    ★两个理由：
+    1. 抓包开始前设备上可能本来就有代理（用户的公司代理、另一个工具）。无条件
+       ``settings delete`` 会把它一并抹掉，属于越权改用户环境。
+    2. 当前值若已不是本工具写下的那个，说明中途被别人改过——此时更不该覆盖，
+       原样留着比"恢复"成我们记的旧值更安全。
+    """
+    target = f"{_PROXY_HOST}:{_PROXY_PORT}"
+    current = _proxy_readback(serial)
+    if current and current != target:
+        # 明确是**别人的**值（被中途改过 / 本就存在）→ 不动别人的设置。
+        logger.debug("[capture] 收尾时设备代理为 %r，非本工具所写，保持原样", current)
+        return True
+    if not current:
+        # ★读回为空有两种可能：确实没设成功，或**读回本身失败**（命令超时/设备抖动）。
+        #   后者下若直接跳过，就会把一个可能已生效的死代理留在设备上。此处按原有保证
+        #   保守清理：宁可多删一次不存在的键，也不留死代理。
+        return _adb_clear_proxy(serial)
+    if original and original != target:
+        _adb(["shell", "settings", "put", "global", "http_proxy", original], serial)
+        if _proxy_readback(serial) == original:
+            logger.info("[capture] 已把设备全局代理还原为抓包前的值")
+            return True
+        logger.warning("[capture] 还原设备原有代理失败（请手动还原为 %r）", original)
+        return False
+    return _adb_clear_proxy(serial)
+
+
+#: _clear_stale_proxy 的三种结局。布尔装不下"清不掉"这一态——而它恰恰是必须让人看见的那一态。
+_STALE_PROXY_NONE = "none"
+_STALE_PROXY_CLEARED = "cleared"
+_STALE_PROXY_FAILED = "failed"
+
+
+def _clear_stale_proxy(serial: str | None = None) -> str:
+    """起手处理**上一轮遗留**的死代理。
+
+    返回 ``none``（无残留）/ ``cleared``（已清掉，读回确认）/ ``failed``（有残留但清不掉）。
+
+    为什么需要：``finally`` 只在进程正常走到收尾时才执行。被 kill -9、断电或宿主
+    进程崩溃时，设备上会留下指向 loopback 的全局代理，而 ``adb reverse`` 早已随
+    连接断开失效——**设备从此持续无网**，下一轮抓包同样什么都抓不到。
+
+    ★只清恰好等于本工具目标值（``127.0.0.1:8080``）的代理，绝不动用户自己配置的
+    其它代理：判据是**完全相等**，不做前缀或端口的模糊匹配。
+    """
+    target = f"{_PROXY_HOST}:{_PROXY_PORT}"
+    _read_ok, residue = _proxy_settings_residue(serial)
+    if not residue:
+        # 读不到时按"无残留"处理：此处是**起手探测**，宁可不动设备，也不要基于
+        # 读不到就去删键（那会在 adb 抖动时误清用户配置）。真正的把关在收尾还原侧。
+        return _STALE_PROXY_NONE
+    # 判据仍是"确属本工具留下的"：http_proxy 恰为目标值，或 host/port 恰为目标主机与端口。
+    # 别人的代理（不同主机/端口）一律不动。
+    ours = residue.get("http_proxy") == target or (
+        residue.get("global_http_proxy_host") == _PROXY_HOST
+        and residue.get("global_http_proxy_port") == str(_PROXY_PORT)
+    )
+    if not ours:
+        logger.debug("[capture] 设备存在代理键 %r，非本工具所写，保持原样", residue)
+        return _STALE_PROXY_NONE
+    logger.warning(
+        "[capture] 检测到设备残留全局代理键 %r（上一轮未正常收尾），先清除——"
+        "指向 loopback 且无反向端口时，走系统网络栈的应用会连不上网",
+        residue,
+    )
+    # ★清不掉要如实回报：设备此刻仍无网，绝不能让调用方写出"已清除"的假记录。
+    return _STALE_PROXY_CLEARED if _adb_clear_proxy(serial) else _STALE_PROXY_FAILED
 
 
 def _adb_reverse(serial: str | None = None) -> bool:
