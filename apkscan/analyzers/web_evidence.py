@@ -266,7 +266,15 @@ def _add_host_endpoint(
 # ---------------------------------------------------------------------------
 
 # 内联 <script> 块（非贪婪；不含 src= 的外链脚本体本就为空，无需另判）。
-_SCRIPT_BLOCK_RE = re.compile(r"<script\b[^>]*>(.*?)</script\s*>", re.IGNORECASE | re.DOTALL)
+# ★结束标签用 `(?=[\s/>])` 卡边界后再吃到 `>`：HTML 允许结束标签里带被忽略的垃圾，
+#   `</script bar>`、`</script\t\nfoo=1>` 浏览器照样当结束标签，而原先的 `</script\s*>`
+#   匹配不到——于是"浏览器正常执行、本分析器却识别不到"的落地页可以被**主动构造**出来，
+#   整块内联配置（C2 地址、备用域名池）会静默漏掉。这不是"畸形标签罕不罕见"的问题：
+#   本工具的输入本就是会主动规避分析的样本，扫描上限只限制处理规模、不缓解这种逃逸。
+#   lookahead 同时挡住 `</scriptfoo>`（那不是结束标签）；`[^>]*` 是平坦量词，无嵌套回溯。
+_SCRIPT_BLOCK_RE = re.compile(
+    r"<script\b[^>]*>(.*?)</script(?=[\s/>])[^>]*>", re.IGNORECASE | re.DOTALL
+)
 
 # window.X = "..." / globalThis.X = '...'（值限单行、有界长度，防灾难性回溯）。
 _WINDOW_ASSIGN_RE = re.compile(
