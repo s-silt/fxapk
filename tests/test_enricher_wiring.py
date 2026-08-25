@@ -270,41 +270,180 @@ def test_ripestat_new_data_calls_are_actually_requested(
 # --------------------------------------------------------------------------- #
 # 结案路径：域名 → 解析 IP → 富化
 # --------------------------------------------------------------------------- #
-def test_resolved_ips_of_a_domain_reach_spamhaus_on_closure(
-    drop_http: _CountingHttp,
-) -> None:
-    """★锁住"域名端点的解析 IP 也被检查"这条链路。
 
-    普通解析的 ``_enrichment_targets`` **不展开**域名的解析 IP，只处理独立 IP 端点；
-    结案路径的 ``_enrich_resolved_ips`` 才会为每个解析 IP 造 transient 端点去富化。
-    没有这条锁，"函数调通了但真实业务对象（域名）走不到"这类缺口测不出来。
+# --------------------------------------------------------------------------- #
+# 结案路径：域名 → 解析 IP → 富化 → 落盘
+# --------------------------------------------------------------------------- #
+def _patch_public_ip_filter(monkeypatch: pytest.MonkeyPatch, allowed: str) -> None:
+    """让 TEST-NET 地址通过公网过滤，从而能走完真实链路。
 
-    ★夹具必须用**全球可路由**地址：``_normalized_public_ip`` 明确排除私网/回环/
-    文档段（192.0.2/198.51.100/203.0.113）与 CGNAT（100.64/10），
-    用保留段会被判 ``excluded_nonpublic``、整条链路根本不触发。
-    此处取众所周知的公共 DNS 服务地址，与本仓分析对象无关。
+    ★为什么要 patch 而不是直接写一个真公网地址：``_normalized_public_ip`` 排除全部
+    私网/回环/文档段（192.0.2、198.51.100、203.0.113）与 CGNAT（100.64/10），
+    而标准库里**不存在**既被判为全球可路由、又不代表真实公网空间的 IPv4 段。
+    只 patch 这一个过滤判据，接线本身（close_report → _enrich_resolved_ips →
+    enrich_selected_targets → spamhaus）仍是真的。
+
+    ★patch 打在**定义它的子模块** ``closure.sources`` 上：该函数只在子模块内部被互相
+    调用，打到包命名空间够不着，会静默失效（测试照绿但已不测原来那件事）。
     """
-    from apkscan.core.closure import ClosureConfig
-    from apkscan.core.closure.sources import _enrich_resolved_ips
+    from apkscan.core.closure import sources as closure_sources
 
-    public_ip = "8.8.8.8"  # leak-scan: allow 该链路要求全球可路由地址，保留段会被 _normalized_public_ip 排除
+    monkeypatch.setattr(
+        closure_sources,
+        "_normalized_public_ip",
+        lambda value: value if str(value).strip() == allowed else None,
+    )
+
+
+def test_closure_entrypoint_reaches_resolved_ip_and_lands_in_report(
+    drop_http: _CountingHttp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★从**公开结案入口** close_report 出发，锁到落盘 JSON。
+
+    上一层的接线锁只证明了 ``_enrich_resolved_ips`` 这条私有函数链能通，
+    并不能证明真实结案编排一定调用它、也不能证明结果活到序列化之后。
+    这条把两端都补上：调 close_report，再把报告 JSON 序列化一遍做断言。
+    """
+    import json
+
+    from apkscan.core.closure import ClosureConfig, close_report
+    from apkscan.core.models import Confidence, Evidence, Lead, LeadCategory, Report
+
+    resolved_ip = "198.51.100.77"
+    _patch_public_ip_filter(monkeypatch, resolved_ip)
     drop_http.text = (
-        '{"cidr":"8.8.8.0/24","sblid":"SBL000009","rir":"arin"}\n'  # leak-scan: allow 同上，需与上面的夹具地址同段
+        '{"cidr":"198.51.100.0/24","sblid":"SBL000077","rir":"arin"}\n'
         '{"type":"metadata","timestamp":1700000000,"size":0,"records":1}'
     )
 
-    domain = Endpoint(value="resolved.example", kind="domain", is_suspicious=True)
-    domain.enrichment["dns"] = {"ips": [public_ip]}
-    # provider_payload_if_hit 只认「本源已记 hit」的载荷，缺状态时解析 IP 取不到。
+    # ★端点必须带本案证据：闭环目标选择要求 has_case_evidence，否则计入 scope_excluded
+    #   （批量/跨案参考材料不占当前案件的闭环名额）——缺这条会静默选不中，
+    #   表现成"结案没跑富化"，很容易被误读成接线断了。
+    domain = Endpoint(
+        value="resolved.example",
+        kind="domain",
+        evidences=[Evidence(source="dex", location="synthetic", snippet="resolved.example")],
+        is_suspicious=True,
+    )
+    domain.enrichment["dns"] = {"ips": [resolved_ip]}
+    # provider_payload_if_hit 只认已记 hit 的载荷；缺状态时解析 IP 取不到。
+    domain.enrichment["source_status"] = {"dns": {"status": "hit"}}
+    report = Report(
+        package_name="com.example.synthetic",
+        meta={},
+        leads=[
+            Lead(
+                category=LeadCategory.DOMAIN,
+                value=domain.value,
+                confidence=Confidence.HIGH,
+                advice="建议调证",
+            )
+        ],
+        endpoints=[domain],
+        findings=[],
+        analyzer_status=[{"name": "manifest", "status": "ran"}],
+    )
+
+    spamhaus_only = [e for e in discover_enrichers() if e.name == "spamhaus"]
+    close_report(report, ClosureConfig(online=True), enrichers=spamhaus_only)
+
+    # ① 结案编排真的驱动到了解析 IP
+    resolved = report.endpoints[0].enrichment.get("resolved_ip_enrichment")
+    assert isinstance(resolved, dict), "close_report 没有产出 resolved_ip_enrichment"
+    assert resolved_ip in resolved
+    payload = resolved[resolved_ip].get("spamhaus")
+    assert isinstance(payload, dict)
+    assert payload["network_listed"] is True
+    assert payload["matched_cidr"] == "198.51.100.0/24"
+
+    # ② 证据活过序列化（"落进 report.json"这句话的实际含义）
+    serialized = json.loads(
+        json.dumps(
+            {"endpoints": [ep.enrichment for ep in report.endpoints]},
+            ensure_ascii=False,
+            default=str,
+        )
+    )
+    landed = serialized["endpoints"][0]["resolved_ip_enrichment"][resolved_ip]["spamhaus"]
+    assert landed["network_listed"] is True
+    assert landed["evidence_type"] == "third_party_network_list"
+
+
+def test_resolved_ip_cap_is_disclosed_not_silent(
+    drop_http: _CountingHttp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★一个域名最多只查 8 个解析 IP，第 9 个起不可达——这个上限必须被披露。
+
+    否则"这 8 个都没被列入"会被读成"该域名全部解析地址都没被列入"。
+    """
+    from apkscan.core.closure import ClosureConfig
+    from apkscan.core.closure import sources as closure_sources
+    from apkscan.core.closure.sources import _MAX_RESOLVED_IPS_PER_TARGET, _enrich_resolved_ips
+
+    # ★期望值**写死 8**，不拿被测常量算：用 _MAX_RESOLVED_IPS_PER_TARGET 反算期望，
+    #   改动该常量时测试会跟着变、永远不红（实测过这个突变逃逸）。上限是对外契约，
+    #   真要调整就该显式改这里的数字。
+    expected_cap = 8
+    assert _MAX_RESOLVED_IPS_PER_TARGET == expected_cap, "解析 IP 上限变更须同步本契约"
+    total = expected_cap + 3
+    ips = [f"198.51.100.{index}" for index in range(10, 10 + total)]
+    monkeypatch.setattr(closure_sources, "_normalized_public_ip", lambda value: str(value).strip())
+
+    domain = Endpoint(value="many.example", kind="domain", is_suspicious=True)
+    domain.enrichment["dns"] = {"ips": ips}
     domain.enrichment["source_status"] = {"dns": {"status": "hit"}}
 
     spamhaus_only = [e for e in discover_enrichers() if e.name == "spamhaus"]
     _enrich_resolved_ips(domain, spamhaus_only, ClosureConfig(online=True))
 
-    resolved = domain.enrichment.get("resolved_ip_enrichment")
-    assert isinstance(resolved, dict)
-    assert public_ip in resolved, "域名的解析 IP 没有进入结案富化"
-    payload = resolved[public_ip].get("spamhaus")
-    assert isinstance(payload, dict)
-    assert payload["network_listed"] is True
-    assert payload["matched_cidr"] == "8.8.8.0/24"  # leak-scan: allow 同上
+    selection = domain.enrichment.get("resolved_ip_selection")
+    assert isinstance(selection, dict)
+    assert selection["observed"] == total
+    assert selection["selected"] == expected_cap
+    assert selection["truncated"] == total - expected_cap
+    # 未被选中的地址确实没有被检查——不能让人以为全查过了
+    checked = domain.enrichment.get("resolved_ip_enrichment") or {}
+    assert len(checked) == expected_cap
+
+
+def test_resolved_ip_enrichment_passes_include_case_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★锁住 ``include_case_close=True`` 真的传到解析 IP 这一层。
+
+    用 spamhaus 测不到这条：它 ``case_close_only=False``，无论该参数真假都会跑。
+    必须用一个**结案专属**的富化器，才能让"参数被传错"暴露出来。
+    """
+    from apkscan.core.closure import ClosureConfig
+    from apkscan.core.closure import sources as closure_sources
+    from apkscan.core.closure.sources import _enrich_resolved_ips
+    from apkscan.core.models import EnrichmentResult
+    from apkscan.core.registry import BaseEnricher
+
+    calls: list[str] = []
+
+    class _CaseCloseOnlyProbe(BaseEnricher):
+        name = "probe_case_close_only"
+        applies_to = ["ip"]
+        case_close_only = True  # 只有 include_case_close=True 才会被选中
+
+        def enrich(self, ep: Endpoint) -> EnrichmentResult:
+            calls.append(ep.value)
+            return EnrichmentResult(provider=self.name, ok=True, data={"probed": True})
+
+    resolved_ip = "198.51.100.88"
+    monkeypatch.setattr(
+        closure_sources,
+        "_normalized_public_ip",
+        lambda value: value if str(value).strip() == resolved_ip else None,
+    )
+
+    domain = Endpoint(value="probe.example", kind="domain", is_suspicious=True)
+    domain.enrichment["dns"] = {"ips": [resolved_ip]}
+    domain.enrichment["source_status"] = {"dns": {"status": "hit"}}
+
+    _enrich_resolved_ips(domain, [_CaseCloseOnlyProbe()], ClosureConfig(online=True))
+
+    assert calls == [resolved_ip], "结案专属富化器没有在解析 IP 上被调用"
+    resolved = domain.enrichment.get("resolved_ip_enrichment") or {}
+    assert resolved[resolved_ip]["probe_case_close_only"]["probed"] is True
