@@ -429,6 +429,7 @@ ALLOWED_DOMAINS: frozenset[str] = frozenset({
     "rdap.org",
     "ripe.net",
     "shodan.io",
+    "spamhaus.org",
     "stat.ripe.net",
     "urlscan.io",
     "virustotal.com",
