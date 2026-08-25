@@ -34,6 +34,8 @@ from typing import Any
 from apkscan.core.atomic import atomic_write_bytes
 from apkscan.core.models import Endpoint, Evidence
 
+from apkscan.core.redact import redact_url, safe_exception_text
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -191,8 +193,13 @@ def _fetch_one(
     try:
         fetched = fetch_config_object(url)
     except Exception as exc:  # noqa: BLE001 — 单个候选失败不得中断整批
-        logger.warning("[config_probe] 下载异常 %s", url, exc_info=True)
-        return ProbeOutcome(url=url, status="failed", host=host, path=path, error=str(exc))
+        error = safe_exception_text(exc)
+        logger.warning(
+            "[config_probe] 下载异常 %s（%s）",
+            redact_url(url),
+            error,
+        )
+        return ProbeOutcome(url=url, status="failed", host=host, path=path, error=error)
     if not fetched.ok or fetched.raw is None:
         return ProbeOutcome(url=url, status="failed", host=host, path=path,
                             error=fetched.error or "下载失败")
@@ -204,10 +211,15 @@ def _fetch_one(
     try:
         result = decode_config_blob(blob, recipe=recipe)
     except Exception as exc:  # noqa: BLE001 — 解码失败仍是「取到了」，别退化成「没取成」
-        logger.warning("[config_probe] 解码异常 %s", url, exc_info=True)
+        error = f"解码异常：{safe_exception_text(exc)}"
+        logger.warning(
+            "[config_probe] 解码异常 %s（%s）",
+            redact_url(url),
+            safe_exception_text(exc),
+        )
         # 抛异常与「解码链走不通」是同一种处境：字节在手上，内容不知道。
         return ProbeOutcome(url=url, status="undecoded", host=host, path=path,
-                            error=f"解码异常：{exc}", sha256=sha, size=len(blob),
+                            error=error, sha256=sha, size=len(blob),
                             stored_path=stored)
 
     domains = tuple(result.domains)
