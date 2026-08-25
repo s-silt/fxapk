@@ -7,6 +7,7 @@
 """
 
 from __future__ import annotations
+from apkscan.core import atomic as atomic_io
 
 from concurrent.futures import ThreadPoolExecutor
 import copy
@@ -279,19 +280,23 @@ def test_json_dump_interrupted_write_preserves_existing_report_and_cleans_temp(
 ) -> None:
     path = tmp_path / "report.json"
     path.write_text("stable-old-report", encoding="utf-8")
-    original_write_text = Path.write_text
+    original_write_text_to_stream = atomic_io._write_text_to_stream
 
-    def partial_write_then_fail(self, data, *args, **kwargs):  # noqa: ANN001, ANN202
-        original_write_text(self, data[:31], *args, **kwargs)
+    def partial_write_then_fail(stream, data):  # noqa: ANN001, ANN202
+        original_write_text_to_stream(stream, data[:31])
         raise OSError("synthetic interrupted write")
 
-    monkeypatch.setattr(Path, "write_text", partial_write_then_fail)
+    monkeypatch.setattr(
+        atomic_io,
+        "_write_text_to_stream",
+        partial_write_then_fail,
+    )
 
     with pytest.raises(OSError, match="synthetic interrupted write"):
         report_json.dump(sample_report, str(path))
 
     assert path.read_text(encoding="utf-8") == "stable-old-report"
-    assert list(tmp_path.glob("report.json.*.tmp")) == []
+    assert list(tmp_path.glob(".report.json.*.tmp")) == []
 
 
 def test_json_dump_strict_json_failure_does_not_touch_existing_report(
@@ -316,17 +321,29 @@ def test_concurrent_json_dump_uses_unique_temps_and_keeps_complete_json(
 ) -> None:
     path = tmp_path / "report.json"
     barrier = threading.Barrier(2)
-    temp_names: list[str] = []
-    original_write_text = Path.write_text
+    observed_temp_sets: list[set[str]] = []
+    observed_temp_sets_lock = threading.Lock()
+    original_write = atomic_io._write_text_to_stream
 
-    def synchronized_temp_write(self, data, *args, **kwargs):  # noqa: ANN001, ANN202
-        written = original_write_text(self, data, *args, **kwargs)
-        if self.name.endswith(".tmp"):
-            temp_names.append(self.name)
-            barrier.wait(timeout=5)
-        return written
+    def synchronized_temp_write(stream, data):  # noqa: ANN001, ANN202
+        original_write(stream, data)
 
-    monkeypatch.setattr(Path, "write_text", synchronized_temp_write)
+        # 两个 writer 都完成临时文件写入后，才允许任一 writer 执行 replace。
+        barrier.wait(timeout=5)
+
+        observed = {
+            temporary.name
+            for temporary in tmp_path.glob(f".{path.name}.*.tmp")
+        }
+        with observed_temp_sets_lock:
+            observed_temp_sets.append(observed)
+
+    monkeypatch.setattr(
+        atomic_io,
+        "_write_text_to_stream",
+        synchronized_temp_write,
+    )
+
     first = copy.deepcopy(sample_report)
     first.package_name = "com.example.first"
     second = copy.deepcopy(sample_report)
@@ -340,10 +357,16 @@ def test_concurrent_json_dump_uses_unique_temps_and_keeps_complete_json(
         for future in futures:
             future.result(timeout=10)
 
-    assert len(set(temp_names)) == 2
+    assert len(observed_temp_sets) == 2
+    assert all(len(observed) == 2 for observed in observed_temp_sets)
+    assert observed_temp_sets[0] == observed_temp_sets[1]
+
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["package_name"] in {"com.example.first", "com.example.second"}
-    assert list(tmp_path.glob("report.json.*.tmp")) == []
+    assert payload["package_name"] in {
+        "com.example.first",
+        "com.example.second",
+    }
+    assert list(tmp_path.glob(f".{path.name}.*.tmp")) == []
 
 
 # --------------------------- helpers ---------------------------

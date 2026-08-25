@@ -8,6 +8,7 @@ pcap_ingest 吃一个**带外抓的 pcap**（网关 tcpdump / PCAPdroid 免 root
 """
 
 from __future__ import annotations
+from apkscan.core import atomic as atomic_io
 
 import json
 import struct
@@ -300,23 +301,35 @@ def test_merge_into_report_json_appends(tmp_path) -> None:
 
 
 def test_merge_atomic_keeps_old_content_when_write_fails(tmp_path, monkeypatch) -> None:
-    """回灌写盘中途抛异常 → report.json 保持旧内容完整、绝不留半截坏 JSON。"""
+    """回灌写盘中途抛异常 -> report.json 保持旧内容完整、绝不留半截坏 JSON。"""
     p = tmp_path / "report.json"
-    original = {"leads": [{"category": "DOMAIN", "value": "已存在.example", "advice": "建议调证"}]}
-    p.write_text(json.dumps(original, ensure_ascii=False, indent=2), encoding="utf-8")
+    original = {
+        "leads": [
+            {
+                "category": "DOMAIN",
+                "value": "已存在.example",
+                "advice": "建议调证",
+            }
+        ]
+    }
+    p.write_text(
+        json.dumps(original, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
-    # 让原子写在替换目标文件前爆掉（模拟磁盘满 / 进程被杀）。
+    # 临时文件已经独占创建，但尚未 replace 目标文件时模拟写盘失败。
     def boom(*_a, **_k):
         raise OSError("disk full (simulated)")
 
-    monkeypatch.setattr(pcap_ingest.atomic_write_text.__module__ + ".Path.write_text", boom, raising=True)
+    monkeypatch.setattr(atomic_io, "_write_text_to_stream", boom)
 
     summary = pcap_ingest.parse_pcap_bytes(_sample_pcap())
     added = pcap_ingest.merge_into_report_json(str(p), summary)
-    assert added == 0  # 写失败保底返 0
-    # 关键：原文件仍是可解析的完整旧内容，未被半截覆盖
+
+    assert added == 0
     reloaded = json.loads(p.read_text(encoding="utf-8"))
     assert reloaded == original
+    assert list(tmp_path.glob("report.json.*.tmp")) == []
 
 
 # ======================================================================

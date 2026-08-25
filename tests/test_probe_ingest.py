@@ -6,6 +6,7 @@ probe_ingest 把独立 frida 探针(自备，`-l` 注入)吐到 console 的 `[ta
 """
 
 from __future__ import annotations
+from apkscan.core import atomic as atomic_io
 
 import json
 import pathlib as _pathlib
@@ -466,19 +467,33 @@ def test_merge_into_report_json_appends_and_dedups(tmp_path) -> None:
 
 def test_merge_atomic_keeps_old_content_when_write_fails(tmp_path, monkeypatch) -> None:
     p = tmp_path / "report.json"
-    original = {"leads": [{"category": "PAYMENT", "value": "已存在 2088", "advice": "建议调证"}]}
-    p.write_text(json.dumps(original, ensure_ascii=False, indent=2), encoding="utf-8")
+    original = {
+        "leads": [
+            {
+                "category": "PAYMENT",
+                "value": "已存在 2088",
+                "advice": "建议调证",
+            }
+        ]
+    }
+    p.write_text(
+        json.dumps(original, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
+    # 临时文件已经独占创建，但尚未 replace 目标文件时模拟写盘失败。
     def boom(*_a, **_k):
         raise OSError("disk full (simulated)")
 
-    monkeypatch.setattr(probe_ingest.atomic_write_text.__module__ + ".Path.write_text", boom, raising=True)
+    monkeypatch.setattr(atomic_io, "_write_text_to_stream", boom)
 
     pls = probe_ingest.parse_probe_log(_SAMPLE_LOG)
     added = probe_ingest.merge_into_report_json(str(p), pls)
+
     assert added == 0
     reloaded = json.loads(p.read_text(encoding="utf-8"))
     assert reloaded == original
+    assert list(tmp_path.glob("report.json.*.tmp")) == []
 
 
 # ======================================================================
