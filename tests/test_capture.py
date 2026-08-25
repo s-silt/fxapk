@@ -4474,7 +4474,7 @@ def test_stale_proxy_is_cleared_before_capture(monkeypatch, tmp_path):
     # 设备上读回的正是本工具写下的整组键 → 认定为上一轮残留
     monkeypatch.setattr(
         capture, "_proxy_settings_residue",
-        lambda serial=None: {"http_proxy": f"{capture._PROXY_HOST}:{capture._PROXY_PORT}"},
+        lambda serial=None: (True, {"http_proxy": f"{capture._PROXY_HOST}:{capture._PROXY_PORT}"}),
     )
     cleared = {"n": 0}
     monkeypatch.setattr(
@@ -4499,12 +4499,12 @@ def test_clear_stale_proxy_never_touches_a_foreign_proxy(monkeypatch):
     )
     # 别人的代理（不同主机/不同端口）→ 不动
     monkeypatch.setattr(
-        capture, "_proxy_settings_residue", lambda serial=None: {"http_proxy": "10.0.0.9:3128"}
+        capture, "_proxy_settings_residue", lambda serial=None: (True, {"http_proxy": "10.0.0.9:3128"})
     )
     assert _REAL_CLEAR_STALE_PROXY() == capture._STALE_PROXY_NONE
     monkeypatch.setattr(
         capture, "_proxy_settings_residue",
-        lambda serial=None: {"http_proxy": f"{capture._PROXY_HOST}:9999"},
+        lambda serial=None: (True, {"http_proxy": f"{capture._PROXY_HOST}:9999"}),
     )
     assert _REAL_CLEAR_STALE_PROXY() == capture._STALE_PROXY_NONE
     assert cleared["n"] == 0
@@ -4512,7 +4512,7 @@ def test_clear_stale_proxy_never_touches_a_foreign_proxy(monkeypatch):
     # 恰好是本工具写下的值 → 清
     monkeypatch.setattr(
         capture, "_proxy_settings_residue",
-        lambda serial=None: {"http_proxy": f"{capture._PROXY_HOST}:{capture._PROXY_PORT}"},
+        lambda serial=None: (True, {"http_proxy": f"{capture._PROXY_HOST}:{capture._PROXY_PORT}"}),
     )
     assert _REAL_CLEAR_STALE_PROXY() == capture._STALE_PROXY_CLEARED
     assert cleared["n"] == 1
@@ -4536,10 +4536,10 @@ def test_stale_proxy_clear_failure_is_never_reported_as_cleared(monkeypatch, tmp
     # 整组键怎么删都还在 = 清不掉（真机上 http_proxy 清了但 host/port 还在就是这种）
     monkeypatch.setattr(
         capture, "_proxy_settings_residue",
-        lambda serial=None: {
+        lambda serial=None: (True, {
             "global_http_proxy_host": capture._PROXY_HOST,
             "global_http_proxy_port": str(capture._PROXY_PORT),
-        },
+        }),
     )
     monkeypatch.setattr(capture, "_adb", lambda extra, serial=None: True)  # delete 退出 0
 
@@ -4555,11 +4555,11 @@ def test_adb_clear_proxy_requires_whole_group_readback(monkeypatch):
     monkeypatch.setattr(capture, "_adb", lambda extra, serial=None: True)
     monkeypatch.setattr(
         capture, "_proxy_settings_residue",
-        lambda serial=None: {"global_http_proxy_host": "127.0.0.1", "global_http_proxy_port": "8080"},
+        lambda serial=None: (True, {"global_http_proxy_host": "127.0.0.1", "global_http_proxy_port": "8080"}),
     )
     assert _REAL_ADB_CLEAR_PROXY() is False, "整组仍有残留却报告清干净"
 
-    monkeypatch.setattr(capture, "_proxy_settings_residue", lambda serial=None: {})
+    monkeypatch.setattr(capture, "_proxy_settings_residue", lambda serial=None: (True, {}))
     assert _REAL_ADB_CLEAR_PROXY() is True
 
     monkeypatch.setattr(capture, "_adb", lambda extra, serial=None: False)
@@ -4583,7 +4583,7 @@ def test_clear_proxy_deletes_every_proxy_key(monkeypatch):
         return True
 
     monkeypatch.setattr(capture, "_adb", _fake_adb)
-    monkeypatch.setattr(capture, "_proxy_settings_residue", lambda serial=None: {})
+    monkeypatch.setattr(capture, "_proxy_settings_residue", lambda serial=None: (True, {}))
 
     assert _REAL_ADB_CLEAR_PROXY() is True
     assert "http_proxy" in deleted
@@ -4597,10 +4597,10 @@ def test_stale_detection_sees_host_port_keys_even_when_http_proxy_is_null(monkey
     """★残留检测也必须查整组：http_proxy 为 null 不代表设备没挂着回环代理。"""
     monkeypatch.setattr(
         capture, "_proxy_settings_residue",
-        lambda serial=None: {
+        lambda serial=None: (True, {
             "global_http_proxy_host": capture._PROXY_HOST,
             "global_http_proxy_port": str(capture._PROXY_PORT),
-        },
+        }),
     )
     cleared = {"n": 0}
     monkeypatch.setattr(
@@ -4616,10 +4616,10 @@ def test_stale_detection_leaves_a_foreign_proxy_group_alone(monkeypatch):
     """别人的代理（不同主机）整组都不动。"""
     monkeypatch.setattr(
         capture, "_proxy_settings_residue",
-        lambda serial=None: {
+        lambda serial=None: (True, {
             "global_http_proxy_host": "10.0.0.9",
             "global_http_proxy_port": "3128",
-        },
+        }),
     )
     cleared = {"n": 0}
     monkeypatch.setattr(
@@ -4629,3 +4629,75 @@ def test_stale_detection_leaves_a_foreign_proxy_group_alone(monkeypatch):
 
     assert _REAL_CLEAR_STALE_PROXY() == capture._STALE_PROXY_NONE
     assert cleared["n"] == 0
+
+
+# ---------------------------------------------------------------------------
+# codex 复审：三条"会把设备留在断网状态"的缺陷
+# ---------------------------------------------------------------------------
+def test_stale_proxy_is_cleared_even_when_prerequisites_missing(monkeypatch, tmp_path):
+    """★缺前置而早退时也必须清残留。
+
+    清理原本只在 _capture 内部做，而缺 mitmproxy/frida 时 run() 在进入 _capture 前就
+    返回了——设备挂着死代理时，只要下一轮恰好缺任一前置，清理就永远轮不到执行，
+    "下一轮会自愈"根本不成立。
+    """
+    monkeypatch.setattr(capture, "_detect_missing", lambda *a, **k: ["mitmproxy 未安装"])
+    monkeypatch.setattr(capture, "_clear_stale_proxy", lambda serial=None: capture._STALE_PROXY_CLEARED)
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+
+    assert result["status"] == "skipped"
+    assert any("遗留" in str(x) for x in result["playbook"]), "早退路径没有清理遗留代理"
+
+
+def test_prerequisite_early_exit_reports_clear_failure_honestly(monkeypatch, tmp_path):
+    """早退路径上清不掉，同样不得谎称已清。"""
+    monkeypatch.setattr(capture, "_detect_missing", lambda *a, **k: ["mitmproxy 未安装"])
+    monkeypatch.setattr(capture, "_clear_stale_proxy", lambda serial=None: capture._STALE_PROXY_FAILED)
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+
+    trail = " ".join(result["playbook"])
+    assert "清除失败" in trail
+    assert "已清除" not in trail
+
+
+def test_residue_readback_failure_is_not_mistaken_for_clean(monkeypatch):
+    """★_adb_capture 用 None 表示命令没跑成；把它和真正的 null 一起当"没值"，
+    会让"命令根本没执行"伪装成"设备很干净"。"""
+    monkeypatch.setattr(capture, "_adb_capture", lambda extra, serial=None: None)
+
+    read_ok, residue = capture._proxy_settings_residue()
+
+    assert read_ok is False, "读回失败却报告读取成功"
+    assert residue == {}
+
+    # 清理侧据此不得宣称成功
+    monkeypatch.setattr(capture, "_adb", lambda extra, serial=None: True)
+    assert _REAL_ADB_CLEAR_PROXY() is False
+
+
+def test_reverse_and_mitm_are_kept_when_proxy_restore_fails(monkeypatch, tmp_path):
+    """★最狠的一条：代理没还原掉时还去拆 reverse / 停 mitmdump，
+    等于亲手掐断设备仅存的出网通道，把它打成确定性断网。"""
+    _set_capabilities(monkeypatch)
+    mitm_proc = _FakeProc()
+    _stub_orchestration(monkeypatch, mitm=mitm_proc, frida=_FakeProc())
+    monkeypatch.setattr(capture, "_parse_flows", lambda f: [])
+    monkeypatch.setattr(capture, "_pull_shared_prefs_credentials", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_pull_exported_databases", lambda *a, **k: None)
+    monkeypatch.setattr(capture, "_restore_proxy", lambda serial, original: False)  # 还原失败
+    removed = {"n": 0}
+    monkeypatch.setattr(
+        capture, "_adb_remove_reverse",
+        lambda serial=None: removed.__setitem__("n", removed["n"] + 1),
+    )
+    terminated: list[str] = []
+    monkeypatch.setattr(capture, "_terminate", lambda proc, name: terminated.append(name))
+
+    result = capture.run("com.test.app", out_dir=str(tmp_path), duration=1)
+
+    assert removed["n"] == 0, "代理未还原却拆掉了 reverse——设备会彻底断网"
+    assert "mitmdump" not in terminated, "代理未还原却停了 mitmdump——设备会彻底断网"
+    trail = " ".join(result["playbook"])
+    assert "保留" in trail and "断网" in trail
