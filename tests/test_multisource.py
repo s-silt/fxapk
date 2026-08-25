@@ -18,6 +18,11 @@ from apkscan.enrichers.multisource import (
     QuakePassiveEnricher,
     RipeStatBgpEnricher,
     SourceOutcome,
+    _fold_routing_history,
+    _normalize_abuse_contacts,
+    _normalize_ripestat_whois,
+    _ripestat_asn,
+    _routing_prefix_relation,
     UrlscanPassiveEnricher,
     VirusTotalPassiveEnricher,
     ZoomEyePassiveEnricher,
@@ -1165,3 +1170,298 @@ def test_abuseipdb_is_not_wired_into_five_layer_attribution() -> None:
     assert providers == []
     assert services == []
     assert locations == []
+
+
+# --------------------------------------------------------------------------- #
+# RIPEstat 扩展：routing-history / whois / abuse-contact-finder
+# 所有示例地址一律用 RFC 5737 文档保留段，绝不出现真实案件值。
+# --------------------------------------------------------------------------- #
+
+
+class _RipeFullSession:
+    """覆盖全部五个 data call 的成功路径。"""
+
+    def __init__(self) -> None:
+        self.urls: list[str] = []
+
+    def get(self, url: str, **kwargs):  # noqa: ANN003
+        self.urls.append(url)
+        if "prefix-overview" in url:
+            return _Response(
+                {
+                    "data": {
+                        "resource": "100.64.100.0/24",
+                        "asns": [{"asn": "64500", "holder": "Example Network Ltd"}],
+                    }
+                }
+            )
+        if "asn-neighbours" in url:
+            return _Response({"data": {"neighbours": [{"asn": "64501", "type": "left"}]}})
+        if "routing-history" in url:
+            return _Response(
+                {
+                    "data": {
+                        "latest_max_ff_peers": {"v4": 100, "v6": 200},
+                        "by_origin": [
+                            {
+                                "origin": "64500",
+                                "prefixes": [
+                                    {
+                                        "prefix": "100.64.100.0/24",
+                                        "timelines": [
+                                            {
+                                                "starttime": "2024-03-01T00:00:00",
+                                                "endtime": "2024-03-31T23:59:59",
+                                                "full_peers_seeing": 50.0,
+                                            },
+                                            {
+                                                "starttime": "2024-01-01T00:00:00",
+                                                "endtime": "2024-01-31T23:59:59",
+                                                "full_peers_seeing": 80.0,
+                                            },
+                                        ],
+                                    }
+                                ],
+                            },
+                            {
+                                "origin": "64510",
+                                "prefixes": [
+                                    {
+                                        "prefix": "100.64.0.0/16",
+                                        "timelines": [
+                                            {
+                                                "starttime": "2010-01-01T00:00:00",
+                                                "endtime": "2010-12-31T23:59:59",
+                                                "full_peers_seeing": 10.0,
+                                            }
+                                        ],
+                                    }
+                                ],
+                            },
+                        ],
+                    }
+                }
+            )
+        if "whois" in url:
+            return _Response(
+                {
+                    "data": {
+                        "authorities": ["APNIC"],
+                        "records": [
+                            [
+                                {"key": "inetnum", "value": "100.64.100.0/24"},
+                                {"key": "netname", "value": "EXAMPLE-NET"},
+                                {"key": "descr", "value": "Example Cloud &amp; Data Co."},
+                                {"key": "descr", "value": "No.1 Example Road"},
+                                {"key": "country", "value": "CN"},
+                                {"key": "tech-c", "value": "TC1-AP"},
+                            ]
+                        ],
+                    }
+                }
+            )
+        if "abuse-contact-finder" in url:
+            return _Response(
+                {"data": {"abuse_contacts": ["abuse@example.invalid"], "authoritative_rir": "APNIC"}}
+            )
+        raise AssertionError(f"unexpected URL: {url}")
+
+
+def test_ripestat_routing_history_separates_supernet_from_effective() -> None:
+    """超网宣告不得混进本网段的归属史——否则调证函会发给上游大段的持有者。"""
+    result = RipeStatBgpEnricher(session=_RipeFullSession()).enrich(_ip())
+
+    assert result.ok is True
+    assert result.data["routing_history_origins"] == [64500]
+    history = result.data["routing_history"]
+    assert [item["origin_asn"] for item in history] == [64500]
+    supernets = result.data["routing_history_supernets"]
+    assert [item["origin_asn"] for item in supernets] == [64510]
+
+
+def test_ripestat_routing_origin_change_ignores_supernet_churn() -> None:
+    """只有超网换过手时，本网段不算发生归属变更。"""
+    result = RipeStatBgpEnricher(session=_RipeFullSession()).enrich(_ip())
+
+    assert result.data["routing_origin_changed"] is False
+
+
+def test_ripestat_routing_history_merges_timelines_per_origin() -> None:
+    """同一 origin 的分段时间片合并成一个首见/末见区间，可见度取最大比例。"""
+    result = RipeStatBgpEnricher(session=_RipeFullSession()).enrich(_ip())
+
+    entry = result.data["routing_history"][0]
+    assert entry["first_seen"] == "2024-01-01T00:00:00"
+    assert entry["last_seen"] == "2024-03-31T23:59:59"
+    assert entry["max_visibility_ratio"] == pytest.approx(0.8)
+
+
+def test_ripestat_whois_and_abuse_contacts_are_normalized() -> None:
+    result = RipeStatBgpEnricher(session=_RipeFullSession()).enrich(_ip())
+
+    assert result.data["whois_network"] == "100.64.100.0/24"
+    assert result.data["whois_netname"] == "EXAMPLE-NET"
+    # HTML 实体还原，且多条同名 descr 全部保留
+    assert result.data["registered_organization"] == "Example Cloud & Data Co."
+    assert result.data["registration_descriptions"] == [
+        "Example Cloud & Data Co.",
+        "No.1 Example Road",
+    ]
+    assert result.data["registration_country"] == "CN"
+    assert result.data["authoritative_rirs"] == ["apnic"]
+    assert result.data["abuse_complaint_contacts"] == ["abuse@example.invalid"]
+    assert result.data["abuse_contact_authoritative_rir"] == "apnic"
+
+
+def test_ripestat_auxiliary_failures_never_drop_primary_result() -> None:
+    """三个辅助 data call 全挂，主结果（prefix-overview）必须完好。"""
+
+    class _OnlyPrimarySession:
+        def get(self, url: str, **kwargs):  # noqa: ANN003
+            if "prefix-overview" in url:
+                return _Response({"data": {"resource": "100.64.100.0/24", "asns": [64500]}})
+            raise RuntimeError("auxiliary down")
+
+    result = RipeStatBgpEnricher(session=_OnlyPrimarySession()).enrich(_ip())
+
+    assert result.ok is True
+    assert result.data["origin_asn"] == 64500
+    assert result.data["routing_history_lookup_status"] == "failed"
+    assert result.data["whois_lookup_status"] == "failed"
+    assert result.data["abuse_contact_lookup_status"] == "failed"
+    assert "routing_history" not in result.data
+
+
+def test_ripestat_asn_rejects_bool_and_out_of_range() -> None:
+    """bool 是 int 子类，不排除会凭空造出 AS1。"""
+    assert _ripestat_asn("64500") == 64500
+    assert _ripestat_asn(True) is None
+    assert _ripestat_asn(False) is None
+    assert _ripestat_asn(0) is None
+    assert _ripestat_asn(-1) is None
+    assert _ripestat_asn(4_294_967_295) is None
+    assert _ripestat_asn("not-an-asn") is None
+    assert _ripestat_asn(None) is None
+
+
+def test_routing_prefix_relation_classifies_by_containment() -> None:
+    import ipaddress
+
+    reference = ipaddress.ip_network("100.64.100.0/24")
+    assert _routing_prefix_relation(ipaddress.ip_network("100.64.100.0/24"), reference) == "exact"
+    assert (
+        _routing_prefix_relation(ipaddress.ip_network("100.64.100.128/25"), reference)
+        == "more_specific"
+    )
+    assert _routing_prefix_relation(ipaddress.ip_network("100.64.0.0/16"), reference) == "supernet"
+    assert _routing_prefix_relation(ipaddress.ip_network("100.65.0.0/24"), reference) is None
+    # 跨 IP 版本不得相互判定
+    assert _routing_prefix_relation(ipaddress.ip_network("2001:db8::/32"), reference) is None
+
+
+def test_whois_contact_fields_never_become_registrant() -> None:
+    """★取证纪律：abuse/tech-c/admin-c 是上游 IDC 或代理商的联系人，
+    拿它当网段持有方会把调证函发错对象。"""
+    data = {
+        "records": [
+            [
+                {"key": "inetnum", "value": "100.64.100.0/24"},
+                {"key": "abuse-c", "value": "Upstream IDC Abuse Desk"},
+                {"key": "tech-c", "value": "Reseller Tech Contact"},
+                {"key": "admin-c", "value": "Reseller Admin Contact"},
+            ]
+        ]
+    }
+
+    normalized = _normalize_ripestat_whois(data)
+
+    assert "registered_organization" not in normalized
+    assert normalized["whois_network"] == "100.64.100.0/24"
+
+
+def test_whois_normalizes_arin_style_field_names() -> None:
+    """ARIN 用 NetRange/NetName/Organization/RegDate，与 APNIC 那套完全不同名。"""
+    data = {
+        "authorities": ["ARIN"],
+        "records": [
+            [
+                {"key": "CIDR", "value": "203.0.113.0/24"},
+                {"key": "NetName", "value": "EXAMPLE-ARIN"},
+                {"key": "Organization", "value": "Example Corp (EXC)"},
+                {"key": "RegDate", "value": "2023-12-28"},
+            ]
+        ],
+    }
+
+    normalized = _normalize_ripestat_whois(data)
+
+    assert normalized["whois_network"] == "203.0.113.0/24"
+    assert normalized["whois_netname"] == "EXAMPLE-ARIN"
+    assert normalized["registered_organization"] == "Example Corp (EXC)"
+    assert normalized["registration_date"] == "2023-12-28"
+    assert normalized["authoritative_rirs"] == ["arin"]
+
+
+def test_fold_routing_history_marks_truncation() -> None:
+    """超上限必须显式标 truncated，绝不静默截断（静默截断会被读成"历史就这些"）。"""
+    origins = [
+        {
+            "origin": str(64500 + index),
+            "prefixes": [
+                {
+                    "prefix": "100.64.100.0/24",
+                    "timelines": [{"starttime": "2024-01-01T00:00:00", "endtime": "2024-01-02T00:00:00"}],
+                }
+            ],
+        }
+        for index in range(300)
+    ]
+
+    folded = _fold_routing_history({"by_origin": origins}, "100.64.100.0/24")
+
+    assert folded["truncated"] is True
+    assert len(folded["origins"]) <= 256
+
+
+def test_fold_routing_history_survives_malformed_payload() -> None:
+    """字段缺失/类型错乱不得抛异常——富化失败绝不能炸结案流程。"""
+    folded = _fold_routing_history(
+        {
+            "by_origin": [
+                "not-a-dict",
+                {"origin": None, "prefixes": []},
+                {"origin": "64500", "prefixes": [{"prefix": "bad-prefix", "timelines": None}]},
+                {
+                    "origin": "64500",
+                    "prefixes": [
+                        {
+                            "prefix": "100.64.100.0/24",
+                            "timelines": [{"starttime": None, "full_peers_seeing": "NaN"}],
+                        }
+                    ],
+                },
+            ],
+            "latest_max_ff_peers": {"v4": 0},
+        },
+        "100.64.100.0/24",
+    )
+
+    assert folded["origins"] == [64500]
+    # 分母为 0 时不得产出比例字段（更不能抛 ZeroDivisionError）
+    assert "max_visibility_ratio" not in folded["history"][0]
+
+
+def test_fold_routing_history_without_reference_returns_empty() -> None:
+    assert _fold_routing_history({"by_origin": []}, None) == {}
+
+
+def test_abuse_contacts_dedupe_and_lowercase_rir() -> None:
+    normalized = _normalize_abuse_contacts(
+        {
+            "abuse_contacts": ["a@example.invalid", "a@example.invalid", 123, None],
+            "authoritative_rir": "RIPE",
+        }
+    )
+
+    assert normalized["abuse_complaint_contacts"] == ["a@example.invalid"]
+    assert normalized["abuse_contact_authoritative_rir"] == "ripe"
