@@ -16,6 +16,7 @@ from pathlib import Path
 import click
 import typer
 
+from apkscan.core.redact import safe_exception_text
 from apkscan.core import device
 from apkscan.core.apk import ApkParseError
 from apkscan.core.apk import load_apk
@@ -362,7 +363,7 @@ def analyze(
                 jadx_baseline_index=jadx_baseline_index,
             )
         except ApkParseError as exc:
-            typer.echo(f"错误：{exc}", err=True)
+            typer.echo(f"错误：APK 解析失败：{apk}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=2) from exc
 
         # ★加载**之后**才报数：脱壳 dump 的 DEX 成批不被 androguard 接受是常态，
@@ -453,7 +454,7 @@ def _report_dict_for(path: Path, *, online: bool) -> dict:
             # None，保证 diff/jsonl 后续 dumps 出的每行都是严格合法 JSON（jq / JSON.parse 不炸）。
             data = _json.loads(path.read_text(encoding="utf-8"), parse_constant=lambda _c: None)
         except Exception as exc:  # noqa: BLE001 — 坏 JSON → 友好报错而非 traceback
-            typer.echo(f"错误：无法读取报告 JSON：{path}（{exc}）", err=True)
+            typer.echo(f"错误：无法读取报告 JSON：{path}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=3) from exc
         return data if isinstance(data, dict) else {}
 
@@ -465,7 +466,7 @@ def _report_dict_for(path: Path, *, online: bool) -> dict:
     try:
         ctx = load_apk(str(path), config)
     except ApkParseError as exc:
-        typer.echo(f"错误：{exc}", err=True)
+        typer.echo(f"错误：APK 解析失败：{path}（{safe_exception_text(exc)}）", err=True)
         raise typer.Exit(code=2) from exc
     report = pipeline.run(ctx, config)  # type: ignore[arg-type]
     data = report_json.to_dict(report)
@@ -668,7 +669,7 @@ def jsonl(
         # parse_constant：NaN/Infinity → None，保证每行输出严格合法 JSON（见 _report_dict_for）。
         data = _json.loads(report.read_text(encoding="utf-8"), parse_constant=lambda _c: None)
     except Exception as exc:  # noqa: BLE001 — 坏 JSON → 友好报错而非 traceback
-        typer.echo(f"错误：无法读取报告 JSON：{report}（{exc}）", err=True)
+        typer.echo(f"错误：无法读取报告 JSON：{report}（{safe_exception_text(exc)}）", err=True)
         raise typer.Exit(code=3) from exc
     for event in report_to_events(data):
         typer.echo(_json.dumps(event, ensure_ascii=False))
@@ -1070,13 +1071,13 @@ def export(
             typer.echo(f"错误：找不到报告文件：{report_json}", err=True)
             raise typer.Exit(code=1) from None
         except OSError as exc:
-            typer.echo(f"错误：读取报告文件失败：{report_json}（{exc}）", err=True)
+            typer.echo(f"错误：读取报告文件失败：{report_json}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=1) from exc
 
         try:
             report = _json.loads(raw)
         except (ValueError, UnicodeDecodeError) as exc:
-            typer.echo(f"错误：报告 JSON 解析失败：{report_json}（{exc}）", err=True)
+            typer.echo(f"错误：报告 JSON 解析失败：{report_json}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=1) from exc
 
         from apkscan.report import ioc
@@ -1091,7 +1092,7 @@ def export(
         try:
             ioc.write_csv(rows, str(out_path))
         except OSError as exc:
-            typer.echo(f"错误：写出 CSV 失败：{out_path}（{exc}）", err=True)
+            typer.echo(f"错误：写出 CSV 失败：{out_path}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=1) from exc
 
         scope = "（仅 建议调证）" if only_investigate else ""
@@ -1100,7 +1101,7 @@ def export(
         raise
     except Exception as exc:  # noqa: BLE001 - 兜底任何意外，转友好提示而非 traceback
         logger.exception("[cli] export 导出 IOC CSV 异常")
-        typer.echo(f"错误：导出失败：{exc}", err=True)
+        typer.echo(f"错误：导出失败：{safe_exception_text(exc)}", err=True)
         raise typer.Exit(code=1) from exc
 
 
@@ -1142,13 +1143,13 @@ def digest(
             typer.echo(f"错误：找不到报告文件：{report_json}", err=True)
             raise typer.Exit(code=1) from None
         except OSError as exc:
-            typer.echo(f"错误：读取报告文件失败：{report_json}（{exc}）", err=True)
+            typer.echo(f"错误：读取报告文件失败：{report_json}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=1) from exc
 
         try:
             report = _json.loads(raw)
         except (ValueError, UnicodeDecodeError) as exc:
-            typer.echo(f"错误：报告 JSON 解析失败：{report_json}（{exc}）", err=True)
+            typer.echo(f"错误：报告 JSON 解析失败：{report_json}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=1) from exc
 
         _warn_report_revision(report)
@@ -1160,7 +1161,7 @@ def digest(
         raise
     except Exception as exc:  # noqa: BLE001 - 兜底任何意外，转友好提示而非 traceback
         logger.exception("[cli] digest 生成摘要异常")
-        typer.echo(f"错误：生成摘要失败：{exc}", err=True)
+        typer.echo(f"错误：生成摘要失败：{safe_exception_text(exc)}", err=True)
         raise typer.Exit(code=1) from exc
 
 
@@ -1214,13 +1215,13 @@ def letters(
             typer.echo(f"错误：找不到报告文件：{report_json}", err=True)
             raise typer.Exit(code=1) from None
         except OSError as exc:
-            typer.echo(f"错误：读取报告文件失败：{report_json}（{exc}）", err=True)
+            typer.echo(f"错误：读取报告文件失败：{report_json}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=1) from exc
 
         try:
             report = _json.loads(raw)
         except (ValueError, UnicodeDecodeError) as exc:
-            typer.echo(f"错误：报告 JSON 解析失败：{report_json}（{exc}）", err=True)
+            typer.echo(f"错误：报告 JSON 解析失败：{report_json}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=1) from exc
 
         _warn_report_revision(report)
@@ -1234,7 +1235,7 @@ def letters(
         try:
             paths = letters_mod.write_letters(drafts, out_dir)
         except OSError as exc:
-            typer.echo(f"错误：写出文书失败：{out_dir}（{exc}）", err=True)
+            typer.echo(f"错误：写出文书失败：{out_dir}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=1) from exc
 
         letters_dir = Path(out_dir) / "letters"
@@ -1247,7 +1248,7 @@ def letters(
         raise
     except Exception as exc:  # noqa: BLE001 - 兜底任何意外，转友好提示而非 traceback
         logger.exception("[cli] letters 套打调证文书异常")
-        typer.echo(f"错误：套打失败：{exc}", err=True)
+        typer.echo(f"错误：套打失败：{safe_exception_text(exc)}", err=True)
         raise typer.Exit(code=1) from exc
 
 
@@ -1284,7 +1285,7 @@ def probe_leads(
             typer.echo(f"错误：找不到探针日志：{log}", err=True)
             raise typer.Exit(code=1) from None
         except OSError as exc:
-            typer.echo(f"错误：读取探针日志失败：{log}（{exc}）", err=True)
+            typer.echo(f"错误：读取探针日志失败：{log}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=1) from exc
 
         from apkscan.dynamic import probe_ingest
@@ -1298,7 +1299,7 @@ def probe_leads(
                 Path(md).write_text(ledger_md, encoding="utf-8")
                 typer.echo(f"台账(markdown) → {md}")
             except OSError as exc:
-                typer.echo(f"错误：写台账失败：{md}（{exc}）", err=True)
+                typer.echo(f"错误：写台账失败：{md}（{safe_exception_text(exc)}）", err=True)
                 raise typer.Exit(code=1) from exc
         if json_out:
             try:
@@ -1308,7 +1309,7 @@ def probe_leads(
                 )
                 typer.echo(f"台账(JSON) → {json_out}")
             except OSError as exc:
-                typer.echo(f"错误：写台账 JSON 失败：{json_out}（{exc}）", err=True)
+                typer.echo(f"错误：写台账 JSON 失败：{json_out}（{safe_exception_text(exc)}）", err=True)
                 raise typer.Exit(code=1) from exc
         if into:
             # ★样本身份门（fail-closed）：探针日志本身不含任何样本标识（[LEAD] 行无 sha/包名），
@@ -1345,7 +1346,7 @@ def probe_leads(
         raise
     except Exception as exc:  # noqa: BLE001 - 兜底任何意外，转友好提示而非 traceback
         logger.exception("[cli] probe-leads 聚合台账异常")
-        typer.echo(f"错误：聚合台账失败：{exc}", err=True)
+        typer.echo(f"错误：聚合台账失败：{safe_exception_text(exc)}", err=True)
         raise typer.Exit(code=1) from exc
 
 
@@ -1474,7 +1475,7 @@ def pcap_leads(
                 Path(md).write_text(ledger, encoding="utf-8")
                 typer.echo(f"台账(markdown) → {md}")
             except OSError as exc:
-                typer.echo(f"错误：写台账失败：{md}（{exc}）", err=True)
+                typer.echo(f"错误：写台账失败：{md}（{safe_exception_text(exc)}）", err=True)
                 raise typer.Exit(code=1) from exc
         if json_out:
             try:
@@ -1484,7 +1485,7 @@ def pcap_leads(
                 )
                 typer.echo(f"台账(JSON) → {json_out}")
             except OSError as exc:
-                typer.echo(f"错误：写台账 JSON 失败：{json_out}（{exc}）", err=True)
+                typer.echo(f"错误：写台账 JSON 失败：{json_out}（{safe_exception_text(exc)}）", err=True)
                 raise typer.Exit(code=1) from exc
         if into:
             _warn_report_path_revision(into)
@@ -1501,7 +1502,7 @@ def pcap_leads(
         raise
     except Exception as exc:  # noqa: BLE001 - 兜底任何意外，转友好提示而非 traceback
         logger.exception("[cli] pcap-leads 聚合台账异常")
-        typer.echo(f"错误：聚合台账失败：{exc}", err=True)
+        typer.echo(f"错误：聚合台账失败：{safe_exception_text(exc)}", err=True)
         raise typer.Exit(code=1) from exc
 
 
@@ -1530,12 +1531,12 @@ def capture_plan_cmd(
             typer.echo(f"错误：找不到报告文件：{report_json}", err=True)
             raise typer.Exit(code=1) from None
         except OSError as exc:
-            typer.echo(f"错误：读取报告失败：{report_json}（{exc}）", err=True)
+            typer.echo(f"错误：读取报告失败：{report_json}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=1) from exc
         try:
             report = _json.loads(raw)
         except (ValueError, UnicodeDecodeError) as exc:
-            typer.echo(f"错误：报告 JSON 解析失败：{report_json}（{exc}）", err=True)
+            typer.echo(f"错误：报告 JSON 解析失败：{report_json}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=1) from exc
 
         from apkscan.dynamic import capture_plan
@@ -1555,7 +1556,7 @@ def capture_plan_cmd(
         raise
     except Exception as exc:  # noqa: BLE001 - 兜底任何意外，转友好提示而非 traceback
         logger.exception("[cli] capture-plan 生成打法异常")
-        typer.echo(f"错误：生成打法失败：{exc}", err=True)
+        typer.echo(f"错误：生成打法失败：{safe_exception_text(exc)}", err=True)
         raise typer.Exit(code=1) from exc
 
 
@@ -1621,7 +1622,7 @@ def config_probe_cmd(
     try:
         payload = _json.loads(report_path.read_text(encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001 — CLI 边界：坏输入给明确退出码
-        typer.echo(f"错误：读不了 {report_path}：{exc}", err=True)
+        typer.echo(f"错误：读不了 {report_path}：{safe_exception_text(exc)}", err=True)
         raise typer.Exit(code=2) from exc
     if not isinstance(payload, dict):
         typer.echo("错误：report.json 顶层不是对象。", err=True)
@@ -1702,7 +1703,7 @@ def config_probe_cmd(
     except Exception as exc:  # noqa: BLE001 — 已经发出去的请求不能白发
         # ★回灌失败时必须把成果吐到 stdout：这些字节是**实发请求**换来的，
         #   报个错就退出等于把它们扔了，而对方那边的请求已经发生、不可撤销。
-        typer.echo(f"错误：回灌 {into} 失败：{exc}", err=True)
+        typer.echo(f"错误：回灌 {into} 失败：{safe_exception_text(exc)}", err=True)
         typer.echo("以下是本次取回的完整结果（请自行保存，勿重复发起请求）：", err=True)
         typer.echo(_json.dumps(result.to_meta(), ensure_ascii=False, indent=2))
         raise typer.Exit(code=1) from exc
@@ -1915,7 +1916,7 @@ def port_normalize_cmd(
         try:
             return _json.loads(_Path(path).read_text(encoding="utf-8"))
         except Exception as exc:  # noqa: BLE001 — CLI 边界：坏输入give 明确退出码
-            typer.echo(f"错误：读取{what}失败（{path}）：{exc}", err=True)
+            typer.echo(f"错误：读取{what}失败（{path}）：{safe_exception_text(exc)}", err=True)
             raise typer.Exit(code=2) from None
 
     raw_declared = _load(declared_path, "--declared")
@@ -2465,7 +2466,7 @@ def leak_scan_cmd(
             try:
                 diff_text = Path(diff_path).read_bytes().decode("utf-8", errors="replace")
             except OSError as exc:
-                typer.echo(f"错误：读不到 diff 文件 {diff_path}：{exc}", err=True)
+                typer.echo(f"错误：读不到 diff 文件 {diff_path}：{safe_exception_text(exc)}", err=True)
                 raise typer.Exit(code=2) from None
         else:
             # 无 -U 上下文行：只要新增行，少读一大截无关内容。
@@ -2487,7 +2488,7 @@ def leak_scan_cmd(
             try:
                 proc = subprocess.run(cmd, capture_output=True, timeout=120, check=False)
             except (OSError, subprocess.SubprocessError) as exc:
-                typer.echo(f"错误：取 git diff 失败（{' '.join(cmd)}）：{exc}", err=True)
+                typer.echo(f"错误：取 git diff 失败（{' '.join(cmd)}）：{safe_exception_text(exc)}", err=True)
                 raise typer.Exit(code=2) from None
             if proc.returncode != 0:
                 detail = proc.stderr.decode("utf-8", errors="replace").strip()

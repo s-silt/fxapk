@@ -21,6 +21,7 @@ from pathlib import Path
 
 import typer
 
+from apkscan.core.redact import safe_exception_text
 from apkscan.core.models import AnalysisConfig
 from apkscan.core.webctx import load_web_evidence
 
@@ -104,11 +105,11 @@ def analyze_web(
             exclude_dirs=(out_dir,),
         )
     except FileNotFoundError as exc:
-        typer.echo(f"错误：{exc}", err=True)
+        typer.echo(f"错误：证据目录不可读：{evidence_dir}（{safe_exception_text(exc)}）", err=True)
         raise typer.Exit(code=2)
     except Exception as exc:
         logger.exception("[analyze-web] 读取网页证据失败：%s", evidence_dir)
-        typer.echo(f"错误：读取网页证据失败：{evidence_dir}（{exc}）", err=True)
+        typer.echo(f"错误：读取网页证据失败：{evidence_dir}（{safe_exception_text(exc)}）", err=True)
         raise typer.Exit(code=1)
 
     file_count = len(ctx.list_files())

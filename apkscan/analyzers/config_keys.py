@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from typing import TYPE_CHECKING, Any
 
+from apkscan.core.redact import safe_exception_diagnostic, safe_exception_text
 from apkscan.core.models import (
     AnalyzerResult,
     Confidence,
@@ -455,9 +456,10 @@ class ConfigKeysAnalyzer(BaseAnalyzer):
                 # ★不打整坨 traceback：投毒资源会成批出现（实测一个样本刷出几十屏），
                 #   traceback 淹没真实输出且无增量信息。按类型计数 + 一行摘要即可，
                 #   计数最终进 meta，"部分输入不可解析"这个事实不会丢。
+                #   异常摘要必须脱敏：资源内容/解析器回显不得进日志（截断不是脱敏）。
                 logger.warning(
-                    "[%s] 解析配置文件键值失败：%s（%s: %s）",
-                    self.name, path, type(exc).__name__, str(exc)[:120],
+                    "[%s] 解析配置文件键值失败：%s（%s）",
+                    self.name, path, safe_exception_diagnostic(exc),
                 )
                 sink[type(exc).__name__] = sink.get(type(exc).__name__, 0) + 1
         return keys
@@ -482,8 +484,12 @@ class ConfigKeysAnalyzer(BaseAnalyzer):
         except expat.ExpatError as exc:
             # 不打 traceback：ExpatError 随投毒资源成批出现，逐条整坨会把真实输出淹掉，
             # 且每条 traceback 都一样、无增量信息。计数进 meta，事实不丢。
+            # 位置取 ExpatError 的结构化属性，不解析异常原文——原文格式随 expat 版本变，
+            # 且可能回显被投毒资源的内容。
             logger.warning(
-                "[%s] 配置 XML 解析失败：%s（%s）", self.name, path, str(exc)[:120]
+                "[%s] 配置 XML 解析失败：%s（%s，line=%s，column=%s）",
+                self.name, path, safe_exception_text(exc),
+                getattr(exc, "lineno", None), getattr(exc, "offset", None),
             )
             sink["ExpatError"] = sink.get("ExpatError", 0) + 1
             return []

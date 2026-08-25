@@ -473,7 +473,8 @@ def test_dexdump_zero_exit_but_no_dex_error(
     result = unpack.run("sample.apk", out_dir=str(tmp_path / "out"))
 
     assert result["status"] == STATUS_ERROR
-    assert "未 dump" in result["reason"] or "未 dump 出" in result["reason"]
+    assert "未生成任何 DEX" in result["reason"]
+    assert str(tmp_path) not in result["reason"]  # 不回显目录路径
     assert result["artifacts"] == []
 
 
@@ -614,9 +615,15 @@ def test_dexdump_timeout_salvages_partial_dex(
 
 
 def test_dexdump_timeout_captures_output_tail(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """超时路径保留 frida-dexdump 真实输出尾部（旧实现把它连临时文件一起丢了，排障无据）。"""
+    """超时路径的排障线索不丢：公开固定提示 + 原文进日志。
+
+    旧实现把输出尾部连临时文件一起丢了、排障无据；后来直接把尾部拼进 reason 修好了排障，
+    但那是把任意子进程输出透传到公开通道。现在两头都要：reason 给分类后的固定提示，
+    原文只留在受控日志里。
+    """
+    caplog.set_level("ERROR")
     _all_capabilities_ok(monkeypatch)
     _patch_package_name(monkeypatch)
 
@@ -632,4 +639,13 @@ def test_dexdump_timeout_captures_output_tail(
 
     assert result["status"] == STATUS_ERROR
     assert "超时" in result["reason"]
-    assert "frida-server" in result["reason"]  # 真实输出尾部已并入 reason
+    # 排障能力仍在，但形式变了：公开的是**分类后的固定提示**，原文只进受控日志。
+    # 旧实现直接把输出尾部拼进 reason —— 子进程输出是任意文本（命令行/设备路径/token/
+    # 服务响应体，甚至换行伪造日志行），没有可靠的通用脱敏办法。
+    assert "无法连接 frida-server" in result["reason"]
+    assert "Failed to attach" not in result["reason"]  # 原文不得外泄
+    assert "unable to connect" not in result["reason"]
+    # 原文改走 evidence-only（log_evidence）：默认终端 handler 整条丢弃它，
+    # 只有显式配置的证据 handler 才收 —— 所以这里断的是「公开面没有原文」，
+    # 「证据面留得住」由 tests/test_log_public_boundary.py 走真 handler 验。
+    assert "Failed to attach" not in result["reason"]

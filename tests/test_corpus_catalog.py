@@ -550,7 +550,7 @@ def test_missing_catalog_with_projected_case_facts_fails_closed(tmp_path: Path) 
 
     result = runner.invoke(cli.app, ["corpus", "ls", "--corpus", str(tmp_path)])
     assert result.exit_code == 1
-    assert "catalog" in result.stderr
+    assert "CatalogCorruptError" in result.stderr
 
 
 def test_deleted_catalog_never_reactivates_quarantined_manifest_row(tmp_path: Path) -> None:
@@ -569,7 +569,7 @@ def test_deleted_catalog_never_reactivates_quarantined_manifest_row(tmp_path: Pa
     result = runner.invoke(cli.app, ["corpus", "ls", "--corpus", str(tmp_path)])
 
     assert result.exit_code == 1
-    assert "catalog" in result.stderr
+    assert "CatalogCorruptError" in result.stderr
     assert '"count"' not in result.stdout
 
 
@@ -697,7 +697,7 @@ def test_corrupt_catalog_query_never_falls_back_to_active_manifest(tmp_path: Pat
     result = runner.invoke(cli.app, ["corpus", "ls", "--corpus", str(tmp_path)])
 
     assert result.exit_code == 1
-    assert "catalog" in result.stderr
+    assert "CatalogCorruptError" in result.stderr
     assert '"count"' not in result.stdout
 
 
@@ -967,7 +967,10 @@ def test_corpus_mutation_clis_report_corrupt_catalog_without_traceback(tmp_path:
     for command in commands:
         result = runner.invoke(cli.app, command)
         assert result.exit_code == 1, result.output
-        assert "catalog" in result.stderr
+        # 断言异常**类型名**而非旧的 str(exc) 文案：错误串已按脱敏规则收敛成
+        # 「<操作>失败：<路径>（<类型名>）」，异常消息不再外泄。
+        assert "CatalogCorruptError" in result.stderr
+        assert "not-json" not in result.stderr
         assert result.exception is not None
         assert result.exception.__class__.__name__ == "SystemExit"
 
@@ -1012,7 +1015,8 @@ def test_manifest_restore_refuses_corrupt_catalog_before_writing(tmp_path: Path)
     restored = corpus.restore_manifest(tmp_path, snapshot.name)
 
     assert restored["applied"] is False
-    assert "catalog" in str(restored["error"])
+    # 错误字段已收敛成异常类型名（脱敏规则：不外泄异常消息）。
+    assert str(restored["error"]) == "CatalogCorruptError"
     assert corpus.manifest_path(tmp_path).read_bytes() == manifest_before
 
 

@@ -8,6 +8,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
+from apkscan.core.redact import safe_exception_text
 from apkscan.attribution.models import AttributionEvidence
 from apkscan.network.entities import NetworkEntity, NetworkEntityType
 from apkscan.network.fingerprints import (
@@ -721,7 +722,7 @@ def convert_pcap_summary(
         try:
             key = _flow_sort_key(flow)
         except (AttributeError, TypeError, ValueError) as exc:
-            issues.append(ConversionIssue(stage="pcap.flow", index=index, reason=str(exc)))
+            issues.append(ConversionIssue(stage="pcap.flow", index=index, reason=safe_exception_text(exc)))
             continue
         valid_flows.append((key, index, flow))
     flow_occurrences: dict[tuple[object, ...], int] = {}
@@ -742,7 +743,7 @@ def convert_pcap_summary(
             )
         except (AttributeError, TypeError, ValueError) as exc:
             issues.append(
-                ConversionIssue(stage="pcap.flow", index=original_index, reason=str(exc))
+                ConversionIssue(stage="pcap.flow", index=original_index, reason=safe_exception_text(exc))
             )
             continue
         flow_occurrences[identity_key] = occurrence + 1
@@ -762,7 +763,7 @@ def convert_pcap_summary(
         try:
             key = _dns_sort_key(record)
         except (AttributeError, TypeError, ValueError) as exc:
-            issues.append(ConversionIssue(stage="pcap.dns", index=index, reason=str(exc)))
+            issues.append(ConversionIssue(stage="pcap.dns", index=index, reason=safe_exception_text(exc)))
             continue
         valid_records.append((key, index, record))
     dns_occurrences: dict[tuple[str, int, int, int, float, str], int] = {}
@@ -783,7 +784,7 @@ def convert_pcap_summary(
             )
         except (AttributeError, TypeError, ValueError) as exc:
             issues.append(
-                ConversionIssue(stage="pcap.dns", index=original_index, reason=str(exc))
+                ConversionIssue(stage="pcap.dns", index=original_index, reason=safe_exception_text(exc))
             )
             continue
         dns_occurrences[key] = occurrence + 1
@@ -803,7 +804,7 @@ def convert_pcap_summary(
         try:
             normalized_queries.add(normalize_domain(_required_string("DNS query", query)))
         except (TypeError, ValueError) as exc:
-            issues.append(ConversionIssue(stage="pcap.dns_query", index=index, reason=str(exc)))
+            issues.append(ConversionIssue(stage="pcap.dns_query", index=index, reason=safe_exception_text(exc)))
     for query in sorted(normalized_queries - record_names):
         query_entity = _entity(NetworkEntityType.DOMAIN, query, "pcap")
         attributes: dict[str, Any] = {"qname": query}
@@ -1085,7 +1086,7 @@ def convert_http_requests(
                     occurrence=occurrence,
                 )
         except (AttributeError, TypeError, ValueError) as exc:
-            issues.append(ConversionIssue(stage="http.request", index=index, reason=str(exc)))
+            issues.append(ConversionIssue(stage="http.request", index=index, reason=safe_exception_text(exc)))
             continue
         entities.extend(new_entities)
         observations.append(observation)
@@ -1286,7 +1287,7 @@ def convert_mitmproxy_flows(
                     response_headers.pop("location", None)
                     issues.append(
                         ConversionIssue(
-                            stage="mitm.redirect", index=index, reason=str(exc)
+                            stage="mitm.redirect", index=index, reason=safe_exception_text(exc)
                         )
                     )
                 else:
@@ -1386,7 +1387,7 @@ def convert_mitmproxy_flows(
                     )
                 )
         except (AttributeError, StopIteration, TypeError, ValueError) as exc:
-            issues.append(ConversionIssue(stage="mitm.flow", index=index, reason=str(exc)))
+            issues.append(ConversionIssue(stage="mitm.flow", index=index, reason=safe_exception_text(exc)))
     return _make_result(
         entities=entities, observations=observations, evidence=evidence, issues=issues
     )

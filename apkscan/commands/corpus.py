@@ -32,7 +32,7 @@ from apkscan.core.json_contract import (
     parse_finite_json_float as _parse_finite_float,
     reject_nonfinite_json_constant as _reject_json_constant,
 )
-from apkscan.core.redact import warn_unredacted_agent_output
+from apkscan.core.redact import safe_exception_diagnostic, safe_exception_text, warn_unredacted_agent_output
 
 logger = logging.getLogger(__name__)
 
@@ -105,10 +105,12 @@ def _query_entries(
         _catalog.CatalogCorruptError,
         _corpus.ManifestCorruptError,
     ) as exc:
-        typer.echo(
-            "错误：无法读取或校验语料库索引。" if safe_errors else f"错误：{exc}",
-            err=True,
-        )
+        # 两个分支共用同一句文案，只在非 safe_errors 时追加**异常类型名**（不含消息），
+        # 避免两串各自漂移。
+        message = "错误：无法读取或校验语料库索引"
+        if not safe_errors:
+            message += f"（{safe_exception_text(exc)}）"
+        typer.echo(message, err=True)
         raise typer.Exit(code=1) from exc
     return _corpus.visible_entries(entries, include_quarantined=include_quarantined)
 
@@ -158,8 +160,8 @@ def corpus_add(
             _corpus.ManifestShrinkError,
         ) as exc:
             # 写盘/锁/catalog 完整性失败不得伪装成幂等跳过，也不应中止整批其余输入。
-            logger.warning("写入失败，跳过 %s：%s", rp, exc)
-            typer.echo(f"跳过（写入失败）：{rp}：{exc}", err=True)
+            logger.warning("写入失败，跳过 %s：%s", rp, safe_exception_diagnostic(exc))
+            typer.echo(f"跳过（写入失败）：{rp}：{safe_exception_text(exc)}", err=True)
             failed += 1
             continue
         if result.get("collision"):
@@ -380,7 +382,7 @@ def corpus_link_candidates(
         try:
             result = _linkage_ml.rerank_rule_candidates(result, artifact)
         except (_linkage_ml.ArtifactValidationError, _linkage_ml.PairFeatureError) as exc:
-            typer.echo(f"错误：实验模型无法应用：{exc}", err=True)
+            typer.echo(f"错误：实验模型无法应用：{safe_exception_text(exc)}", err=True)
             raise typer.Exit(code=1) from exc
         result["candidates"] = result["candidates"][:limit]
         result["count"] = len(result["candidates"])
@@ -419,7 +421,7 @@ def _load_private_linkage_model(path: Path) -> _linkage_ml.LinkageModelArtifact:
         typer.echo("错误：无法读取实验模型文件。", err=True)
         raise typer.Exit(code=1) from exc
     except _linkage_ml.ArtifactValidationError as exc:
-        typer.echo(f"错误：实验模型文件无效：{exc}", err=True)
+        typer.echo(f"错误：实验模型文件无效：{safe_exception_text(exc)}", err=True)
         raise typer.Exit(code=2) from exc
 
 
@@ -486,10 +488,10 @@ def corpus_link_evaluate(
     try:
         result = _linkage_evaluation.evaluate_linkage_rules(entries, validated)
     except _linkage_labels.LabelValidationError as exc:
-        typer.echo(f"错误：标签真值冲突：{exc}", err=True)
+        typer.echo(f"错误：标签真值冲突：{safe_exception_text(exc)}", err=True)
         raise typer.Exit(code=2) from exc
     except _linkage_evaluation.LinkageEvaluationError as exc:
-        typer.echo(f"错误：串案评测失败：{exc}", err=True)
+        typer.echo(f"错误：串案评测失败：{safe_exception_text(exc)}", err=True)
         raise typer.Exit(code=1) from exc
     result["input_options"] = {
         "engine": engine,
@@ -555,7 +557,7 @@ def corpus_link_discover(
         typer.echo("错误：私有标签存在语义冲突。", err=True)
         raise typer.Exit(code=2) from exc
     except ValueError as exc:
-        typer.echo(f"错误：串案锚发现参数无效：{exc}", err=True)
+        typer.echo(f"错误：串案锚发现参数无效：{safe_exception_text(exc)}", err=True)
         raise typer.Exit(code=2) from exc
     result["input_options"] = {
         "include_quarantined": include_quarantined,
@@ -603,7 +605,7 @@ def corpus_link_explain(
             evidence_values=evidence_values,
         )
     except _linkage_review.LinkageReviewError as exc:
-        typer.echo(f"错误：候选解释失败：{exc}", err=True)
+        typer.echo(f"错误：候选解释失败：{safe_exception_text(exc)}", err=True)
         raise typer.Exit(code=2) from exc
     result["input_options"] = {"include_quarantined": include_quarantined}
     _print(result)
@@ -647,7 +649,7 @@ def corpus_link_groups(
             evidence_values=evidence_values,
         )
     except _linkage_review.LinkageReviewError as exc:
-        typer.echo(f"错误：复核关系图生成失败：{exc}", err=True)
+        typer.echo(f"错误：复核关系图生成失败：{safe_exception_text(exc)}", err=True)
         raise typer.Exit(code=2) from exc
     result["input_options"] = {"include_quarantined": include_quarantined}
     _print(result)
@@ -704,7 +706,7 @@ def corpus_link_readiness(
         _linkage_ml.PairFeatureError,
         _linkage_evaluation.LinkageEvaluationError,
     ) as exc:
-        typer.echo(f"错误：训练就绪检查失败：{exc}", err=True)
+        typer.echo(f"错误：训练就绪检查失败：{safe_exception_text(exc)}", err=True)
         raise typer.Exit(code=1) from exc
     result["experimental"] = True
     result["privacy"] = {
@@ -773,7 +775,7 @@ def corpus_link_train(
         _linkage_ml.PairFeatureError,
         ValueError,
     ) as exc:
-        typer.echo(f"错误：实验模型训练失败：{exc}", err=True)
+        typer.echo(f"错误：实验模型训练失败：{safe_exception_text(exc)}", err=True)
         raise typer.Exit(code=1) from exc
 
     artifact = result.pop("artifact", None)
@@ -848,7 +850,7 @@ def corpus_reindex(
         _corpus.ManifestCorruptError,
         _corpus.ManifestShrinkError,
     ) as exc:
-        typer.echo(f"错误：{exc}", err=True)
+        typer.echo(f"错误：重建索引失败：{root}（{safe_exception_text(exc)}）", err=True)
         raise typer.Exit(code=1) from exc
     _print({"reindexed": len(entries), "corpus": str(root)})
 
@@ -879,7 +881,7 @@ def corpus_reconcile(
         _catalog.CatalogCorruptError,
         _corpus.ManifestCorruptError,
     ) as exc:
-        typer.echo(f"错误：{exc}", err=True)
+        typer.echo(f"错误：对账失败：{root}（{safe_exception_text(exc)}）", err=True)
         raise typer.Exit(code=1) from exc
     _print(result)
     counts = result.get("counts")
@@ -932,7 +934,7 @@ def corpus_quarantine_version(
             root, tool_versions, reason=reason, apply=apply
         )
     except ValueError as exc:
-        typer.echo(f"错误：{exc}", err=True)
+        typer.echo(f"错误：隔离参数无效（{safe_exception_text(exc)}）", err=True)
         raise typer.Exit(code=2) from exc
     except (
         OSError,
@@ -940,7 +942,7 @@ def corpus_quarantine_version(
         _catalog.CatalogCorruptError,
         _corpus.ManifestCorruptError,
     ) as exc:
-        typer.echo(f"错误：{exc}", err=True)
+        typer.echo(f"错误：按工具版本隔离失败：{root}（{safe_exception_text(exc)}）", err=True)
         raise typer.Exit(code=1) from exc
     _print(result)
 
@@ -979,7 +981,7 @@ def corpus_migrate_catalog(
         _catalog.CatalogCorruptError,
         _corpus.ManifestCorruptError,
     ) as exc:
-        typer.echo(f"错误：{exc}", err=True)
+        typer.echo(f"错误：目录迁移失败：{root}（{safe_exception_text(exc)}）", err=True)
         raise typer.Exit(code=1) from exc
     _print({**result, "reversibility": _CATALOG_MIGRATION_IRREVERSIBLE})
 
@@ -1018,10 +1020,10 @@ def _verify_or_exit(root: Path) -> dict:
                     _corpus.VERIFY_ORPHAN: 0,
                     corruption_key: 1,
                 },
-                "error": str(exc),
+                "error": safe_exception_text(exc),
             }
         )
-        typer.echo(f"错误：{exc}", err=True)
+        typer.echo(f"错误：语料库校验失败：{root}（{safe_exception_text(exc)}）", err=True)
         raise typer.Exit(code=1) from exc
 
 

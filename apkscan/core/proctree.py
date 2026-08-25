@@ -33,6 +33,8 @@ import sys
 import time
 from dataclasses import dataclass
 
+from apkscan.core.redact import safe_exception_text
+
 logger = logging.getLogger(__name__)
 
 #: 门进程放弃码：stdin 在收到命令前就 EOF（父进程 assign 失败后主动收口）→ 未执行任何命令。
@@ -94,7 +96,7 @@ def run_owned(
     except _SpawnFailed as exc:
         logger.exception("[proctree] 启动失败：%s", cmd[:1])
         return OwnedRun(
-            returncode=None, stdout="", stderr=str(exc), timed_out=False,
+            returncode=None, stdout="", stderr=safe_exception_text(exc), timed_out=False,
             ownership_complete=False, termination_complete=True,
             forced_tree_kill=False, reason_codes=_codes("spawn_failed"),
         )
@@ -104,7 +106,7 @@ def run_owned(
         # 所有权与终止都按「未确认」计，绝不宣称受控。
         logger.exception("[proctree] 内部故障（fail closed，按未确认定性）：%s", cmd[:1])
         return OwnedRun(
-            returncode=None, stdout="", stderr=str(exc), timed_out=False,
+            returncode=None, stdout="", stderr=safe_exception_text(exc), timed_out=False,
             ownership_complete=False, termination_complete=False,
             forced_tree_kill=False, reason_codes=_codes("internal_error"),
         )
@@ -294,7 +296,7 @@ if sys.platform == "win32":
             # internal_error，不能在清理未确认时伪造 termination_complete=True。
             if job is not None:
                 _kernel32.CloseHandle(job)
-            raise _SpawnFailed(str(exc)) from exc
+            raise _SpawnFailed(safe_exception_text(exc)) from exc
         except Exception:
             # 门进程都没起来：先归还 Job 句柄再交由 run_owned 保守定性，
             # 不留无主内核对象。只有上面的 Popen OSError 才明确属于 spawn_failed。
@@ -412,7 +414,7 @@ else:
                 start_new_session=True, text=True, encoding="utf-8", errors="replace",
             )
         except OSError as exc:
-            raise _SpawnFailed(str(exc)) from exc
+            raise _SpawnFailed(safe_exception_text(exc)) from exc
         pgid = proc.pid  # setsid 后组长即子进程自身
         timed_out = False
         forced = False

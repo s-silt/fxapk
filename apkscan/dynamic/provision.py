@@ -38,6 +38,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from apkscan.core import device, tools
+from apkscan.core.redact import redact_url, safe_exception_diagnostic, safe_exception_text
 
 logger = logging.getLogger(__name__)
 
@@ -371,8 +372,12 @@ def _extract_xz_to(compressed: bytes, dest: Path) -> str:
     try:
         raw = _bounded_lzma_decompress(compressed, _FRIDA_MAX_SERVER_BYTES)
     except ValueError as exc:
-        logger.error("[provision] frida-server 解压超上限：%s", exc)
-        return str(exc)
+        # 返回静态文案而非 str(exc)：将来若有别的 ValueError 构造点拼入路径/URL，
+        # 这里会连带把它回显给用户。
+        logger.error(
+            "[provision] frida-server 解压超上限（%s）", safe_exception_diagnostic(exc)
+        )
+        return "frida-server 解压数据超过大小上限"
     except lzma.LZMAError:
         logger.exception("[provision] frida-server lzma 解压失败")
         return "内容不是有效的 .xz（lzma 解压失败）"
@@ -414,7 +419,8 @@ def _download_and_extract(url: str, dest: Path, on_progress: Callable[[str], Non
     certificate`` 下不动 GitHub。requests 已是本项目运行期依赖，零新增。解压复用
     :func:`_extract_xz_to`（含体积下限兜底 + 写盘）。
     """
-    _emit(on_progress, f"下载 frida-server：{url}")
+    safe_url = redact_url(url)
+    _emit(on_progress, f"下载 frida-server：{safe_url}")
     try:
         import requests
 
@@ -427,28 +433,51 @@ def _download_and_extract(url: str, dest: Path, on_progress: Callable[[str], Non
             if len(buf) > _FRIDA_MAX_DOWNLOAD_BYTES:
                 resp.close()
                 logger.error(
-                    "[provision] frida-server 下载体积超上限 %d 字节，中止：%s", _FRIDA_MAX_DOWNLOAD_BYTES, url
+                    "[provision] frida-server 下载体积超上限 %d 字节，中止：%s",
+                    _FRIDA_MAX_DOWNLOAD_BYTES,
+                    safe_url,
                 )
-                return f"下载体积超上限 {_FRIDA_MAX_DOWNLOAD_BYTES} 字节，中止（疑异常/被替换资产）：{url}"
+                return f"下载体积超上限 {_FRIDA_MAX_DOWNLOAD_BYTES} 字节，中止（疑异常/被替换资产）：{safe_url}"
         compressed = bytes(buf)
     except requests.exceptions.HTTPError as exc:
         code = getattr(exc.response, "status_code", "?")
-        logger.exception("[provision] frida-server 下载 HTTP 错误（%s）：%s", code, url)
+        logger.error(
+            "[provision] frida-server 下载 HTTP 错误（%s）：%s（%s）",
+            code,
+            safe_url,
+            safe_exception_diagnostic(exc),
+        )
         if code == 404:
-            return f"该 frida 版本/ABI 不存在（HTTP 404）：{url}"
-        return f"下载失败 HTTP {code}：{url}"
+            return f"该 frida 版本/ABI 不存在（HTTP 404）：{safe_url}"
+        return f"下载失败 HTTP {code}：{safe_url}"
     except requests.exceptions.SSLError as exc:
-        logger.exception("[provision] frida-server 下载 SSL 校验失败：%s", url)
-        return f"SSL 证书校验失败（certifi 仍不通？）：{exc}"
-    except requests.exceptions.Timeout:
-        logger.exception("[provision] frida-server 下载超时：%s", url)
-        return f"下载超时（>{_DOWNLOAD_TIMEOUT}s）：{url}"
+        logger.error(
+            "[provision] frida-server 下载 SSL 校验失败：%s（%s）",
+            safe_url,
+            safe_exception_diagnostic(exc),
+        )
+        return f"SSL 证书校验失败（certifi 仍不通？）：{safe_url}"
+    except requests.exceptions.Timeout as exc:
+        logger.error(
+            "[provision] frida-server 下载超时：%s（%s）",
+            safe_url,
+            safe_exception_diagnostic(exc),
+        )
+        return f"下载超时（>{_DOWNLOAD_TIMEOUT}s）：{safe_url}"
     except requests.exceptions.RequestException as exc:
-        logger.exception("[provision] frida-server 下载失败：%s", url)
-        return f"无网络或无法访问 GitHub（{exc}）：{url}"
-    except Exception:
-        logger.exception("[provision] frida-server 下载异常：%s", url)
-        return f"下载异常：{url}"
+        logger.error(
+            "[provision] frida-server 下载失败：%s（%s）",
+            safe_url,
+            safe_exception_diagnostic(exc),
+        )
+        return f"无网络或无法访问 GitHub（{safe_exception_text(exc)}）：{safe_url}"
+    except Exception as exc:
+        logger.error(
+            "[provision] frida-server 下载异常：%s（%s）",
+            safe_url,
+            safe_exception_diagnostic(exc),
+        )
+        return f"下载异常（{safe_exception_text(exc)}）：{safe_url}"
 
     _emit(on_progress, "lzma 解压 frida-server")
     return _extract_xz_to(compressed, dest)

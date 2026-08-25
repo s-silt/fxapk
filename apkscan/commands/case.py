@@ -11,6 +11,7 @@ from typing import Mapping
 
 import typer
 
+from apkscan.core.redact import safe_exception_text
 from apkscan.core.closure import ClosureConfig, close_report
 from apkscan.core.case_package import (
     CasePackageError,
@@ -101,7 +102,7 @@ def close_command(
             refresh=refresh,
         )
     except ValueError as exc:
-        typer.echo(f"错误：闭环参数无效：{exc}", err=True)
+        typer.echo(f"错误：闭环参数无效：{safe_exception_text(exc)}", err=True)
         raise typer.Exit(code=2) from exc
 
     try:
@@ -150,7 +151,7 @@ def package_command(
             batch_reference=batch_reference,
         )
     except (CasePackageError, OSError, ValueError, UnicodeError) as exc:
-        typer.echo(f"错误：Phase-1 证据包生成失败（{type(exc).__name__}）：{exc}", err=True)
+        typer.echo(f"错误：Phase-1 证据包生成失败（{type(exc).__name__}）：{safe_exception_text(exc)}", err=True)
         raise typer.Exit(code=2) from exc
     typer.echo(f"Phase-1 证据包：{out}")
     typer.echo(f"package_id：{payload.get('package_id')}")
@@ -176,7 +177,7 @@ def review_command(
             findings=finding,
         )
     except (CasePackageError, OSError, ValueError, UnicodeError) as exc:
-        typer.echo(f"错误：Phase-2 复核记录生成失败（{type(exc).__name__}）：{exc}", err=True)
+        typer.echo(f"错误：Phase-2 复核记录生成失败（{type(exc).__name__}）：{safe_exception_text(exc)}", err=True)
         raise typer.Exit(code=2) from exc
     typer.echo(f"Phase-2 复核记录：{out}")
     typer.echo(f"复核状态：{payload.get('status')}")

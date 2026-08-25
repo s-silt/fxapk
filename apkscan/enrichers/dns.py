@@ -33,6 +33,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from apkscan.core.redact import redact_url, safe_exception_diagnostic
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
 from apkscan.enrichers import _http
@@ -165,7 +166,11 @@ def _resolve_doh(domain: str) -> tuple[list[str], list[str], list[dict[str, str]
             }
         except Exception as exc:  # noqa: BLE001 - 单提供方失败试下一个，不中断
             last_exc = exc
-            logger.debug("DoH 提供方失败，试下一个：%s（%s: %s）", url, type(exc).__name__, exc)
+            logger.debug(
+                "DoH 提供方失败，试下一个：%s（%s）",
+                redact_url(url),
+                safe_exception_diagnostic(exc),
+            )
             continue
     if last_exc is not None:
         raise last_exc
@@ -309,7 +314,9 @@ class DnsEnricher(BaseEnricher):
         try:
             ips, cnames, rejected_answers, resolution = _resolve_doh(domain)
         except Exception as exc:  # noqa: BLE001 — 富化失败不得炸主流程
-            doh_err = f"{type(exc).__name__}: {exc}"
+            # 不带异常消息：DoH 提供方的异常里可能有完整 URL（含 key）与响应片段，
+            # 而 doh_err 会进 EnrichmentResult.error → typical_error → 报告。
+            doh_err = type(exc).__name__
             logger.debug("DoH 解析失败，回退系统解析器：%s（%s）", domain, exc)
 
         if not ips:

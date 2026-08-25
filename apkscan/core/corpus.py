@@ -55,6 +55,8 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
 from typing import Any, Mapping
 
+from apkscan.core.corpus_errors import CorpusRecordError, CorpusRecordErrorCode
+from apkscan.core.redact import safe_exception_diagnostic, safe_exception_text
 from apkscan.core.atomic import atomic_create_bytes, atomic_write_bytes, atomic_write_text
 from apkscan.core import corpus_catalog
 from apkscan.core.evidence_scope import (
@@ -1133,7 +1135,7 @@ def restore_manifest(corpus_dir: str | Path, snapshot_name: str) -> dict:
     ) as exc:
         return {
             "applied": False,
-            "error": str(exc),
+            "error": safe_exception_text(exc),
             "restored_entries": None,
             "current_entries": len(load_manifest(root)),
             "pre_restore_snapshot": None,
@@ -1173,8 +1175,10 @@ def _restore_manifest_locked(
         return {**base, "error": f"快照不存在或名字越出快照目录：{snapshot_name!r}"}
     try:
         data = target.read_bytes()
-    except OSError as exc:
-        return {**base, "error": f"读取快照失败：{target}：{exc}"}
+    except OSError:
+        # 既不回显快照路径（可能带账户名/工作区），也不回显 OS 异常消息。
+        logger.exception("读取快照失败：%s", target)
+        return {**base, "error": "读取快照失败（详见日志）"}
     try:
         raw_restored_rows: list[dict] = []
         for number, line in enumerate(data.decode("utf-8").splitlines(), 1):
@@ -1591,7 +1595,11 @@ def _add_report_locked(
             try:
                 on_disk = report_file.read_bytes()
             except OSError as exc:
-                logger.warning("路径碰撞目标无法读取，拒绝覆盖：%s：%s", report_path, exc)
+                logger.warning(
+                    "路径碰撞目标无法读取，拒绝覆盖：%s：%s",
+                    report_path,
+                    safe_exception_diagnostic(exc),
+                )
                 return {
                     **base,
                     "added": False,
@@ -2236,31 +2244,31 @@ def _case_package_inventory_row(package_path: Path) -> tuple[dict[str, object] |
             if isinstance(item, dict) and item.get("kind") == "report"
         ]
         if len(reports) != 1:
-            raise ValueError(f"case package must contain one report artifact, found {len(reports)}")
+            raise CorpusRecordError(CorpusRecordErrorCode.PACKAGE_REPORT_ARTIFACT_COUNT)
         artifact = reports[0]
         rel = artifact.get("path")
         if not isinstance(rel, str) or not rel:
-            raise ValueError("case package report artifact path is missing")
+            raise CorpusRecordError(CorpusRecordErrorCode.PACKAGE_REPORT_PATH_MISSING)
         candidate = Path(rel)
         if candidate.is_absolute():
-            raise ValueError("case package report artifact path is absolute")
+            raise CorpusRecordError(CorpusRecordErrorCode.PACKAGE_REPORT_PATH_ABSOLUTE)
         package_root = package_path.parent.resolve()
         report_path = (package_root / candidate).resolve()
         if not report_path.is_relative_to(package_root):
-            raise ValueError("case package report artifact escapes package root")
+            raise CorpusRecordError(CorpusRecordErrorCode.PACKAGE_REPORT_PATH_ESCAPES_ROOT)
         expected_hash = artifact.get("sha256")
         expected_size = artifact.get("size")
         if not isinstance(expected_hash, str) or len(expected_hash) != 64:
-            raise ValueError("case package report artifact sha256 is invalid")
+            raise CorpusRecordError(CorpusRecordErrorCode.PACKAGE_REPORT_SHA256_INVALID)
         if not isinstance(expected_size, int) or isinstance(expected_size, bool):
-            raise ValueError("case package report artifact size is invalid")
+            raise CorpusRecordError(CorpusRecordErrorCode.PACKAGE_REPORT_SIZE_INVALID)
         report_bytes = report_path.read_bytes()
         if len(report_bytes) != expected_size:
-            raise ValueError("case package report artifact size changed after verification")
+            raise CorpusRecordError(CorpusRecordErrorCode.PACKAGE_REPORT_SIZE_CHANGED)
         if hashlib.sha256(report_bytes).hexdigest() != expected_hash:
-            raise ValueError("case package report artifact hash changed after verification")
+            raise CorpusRecordError(CorpusRecordErrorCode.PACKAGE_REPORT_HASH_CHANGED)
     except (OSError, UnicodeError, ValueError, RecursionError) as exc:
-        return None, str(exc) or type(exc).__name__
+        return None, safe_exception_text(exc)
     return {
         "case_id": case_id,
         "report_path": str(report_path),
@@ -2345,14 +2353,14 @@ def reconcile_inventory(
                 parse_float=_parse_finite_float,
             )
             if not isinstance(row, dict):
-                raise ValueError("inventory 行必须是对象")
+                raise CorpusRecordError(CorpusRecordErrorCode.INVENTORY_ROW_NOT_OBJECT)
             raw_case_id = row.get("case_id")
             if not isinstance(raw_case_id, str):
-                raise ValueError("case_id 必须是字符串")
+                raise CorpusRecordError(CorpusRecordErrorCode.CASE_ID_NOT_STRING)
             case_id = corpus_catalog.normalize_case_id(raw_case_id)
             raw_path = row.get("report_path")
             if not isinstance(raw_path, str) or not raw_path.strip():
-                raise ValueError("report_path 不能为空")
+                raise CorpusRecordError(CorpusRecordErrorCode.REPORT_PATH_EMPTY)
             report_file = Path(raw_path.strip())
             if not report_file.is_absolute():
                 report_file = inventory.parent / report_file
@@ -2360,9 +2368,9 @@ def reconcile_inventory(
             expected_size = row.get("_artifact_size")
             expected_hash = row.get("_artifact_sha256")
             if isinstance(expected_size, int) and len(raw_bytes) != expected_size:
-                raise ValueError("case package report artifact size changed before reconcile")
+                raise CorpusRecordError(CorpusRecordErrorCode.PACKAGE_REPORT_SIZE_CHANGED)
             if isinstance(expected_hash, str) and hashlib.sha256(raw_bytes).hexdigest() != expected_hash:
-                raise ValueError("case package report artifact hash changed before reconcile")
+                raise CorpusRecordError(CorpusRecordErrorCode.PACKAGE_REPORT_HASH_CHANGED)
             raw_text = raw_bytes.decode("utf-8")
             report = json.loads(
                 raw_text,
@@ -2370,15 +2378,15 @@ def reconcile_inventory(
                 parse_float=_parse_finite_float,
             )
             if not isinstance(report, dict):
-                raise ValueError("report 顶层必须是对象")
+                raise CorpusRecordError(CorpusRecordErrorCode.REPORT_ROOT_NOT_OBJECT)
             entry = manifest_entry(report)
             key = _key_of(entry)
             if entry.get("sample_sha256_synthetic"):
-                raise ValueError("report 缺少 sample_sha256")
+                raise CorpusRecordError(CorpusRecordErrorCode.REPORT_MISSING_SAMPLE_SHA256)
             if not entry.get("tool_version") or not entry.get("ruleset_digest"):
-                raise ValueError("report 缺少 tool_version/ruleset_digest")
+                raise CorpusRecordError(CorpusRecordErrorCode.REPORT_MISSING_TOOL_IDENTITY)
         except (OSError, UnicodeError, ValueError, RecursionError) as exc:
-            item.update({"status": "invalid_report", "reason": str(exc) or type(exc).__name__})
+            item.update({"status": "invalid_report", "reason": safe_exception_text(exc)})
             counts["invalid_report"] += 1
             items.append(item)
             continue

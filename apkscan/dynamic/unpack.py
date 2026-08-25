@@ -23,10 +23,12 @@ from __future__ import annotations
 import logging
 import subprocess
 import tempfile
+from enum import Enum
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from apkscan.core.logsetup import log_evidence
 from apkscan.core import device, tools
 from apkscan.core.models import AnalysisConfig
 from apkscan.dynamic import (
@@ -93,9 +95,9 @@ def run(
     # 2) 取包名（脱壳/重分析都要）。load_apk 失败 → error，不抛。
     try:
         package_name = _resolve_package_name(apk_path)
-    except Exception as exc:  # noqa: BLE001 - 转成 DynamicResult，不抛给 CLI
+    except Exception:  # noqa: BLE001 - 转成 DynamicResult，不抛给 CLI
         logger.exception("load_apk 取包名失败：%s", apk_path)
-        result = empty_result(STATUS_ERROR, f"加载 APK 取包名失败：{exc}")
+        result = empty_result(STATUS_ERROR, "加载 APK 取包名失败（详见日志）")
         return result
 
     if not package_name:
@@ -115,9 +117,9 @@ def run(
     playbook: list[str] = []
     try:
         dumped = _dexdump(package_name, dump_dir, playbook, serial)
-    except Exception as exc:  # noqa: BLE001 - dump 任何异常都转 error
+    except Exception:  # noqa: BLE001 - dump 任何异常都转 error
         logger.exception("frida-dexdump 脱壳异常：package=%s", package_name)
-        result = empty_result(STATUS_ERROR, f"frida-dexdump 执行异常：{exc}")
+        result = empty_result(STATUS_ERROR, "frida-dexdump 执行异常（详见日志）")
         result["playbook"] = playbook
         return result
 
@@ -143,11 +145,11 @@ def run(
                 f"apkscan analyze {apk_path} --extra-dex {dump_dir} "
                 "（脱壳产物已自动回灌重分析）"
             )
-        except Exception as exc:  # noqa: BLE001 - 重分析失败不丢脱壳产物
+        except Exception:  # noqa: BLE001 - 重分析失败不丢脱壳产物
             logger.exception("脱壳后重分析失败：%s", apk_path)
             result = empty_result(
                 STATUS_DONE,
-                f"脱壳成功（{len(artifacts)} 个 DEX），但重分析失败：{exc}",
+                f"脱壳成功（{len(artifacts)} 个 DEX），但重分析失败（详见日志）",
             )
             result["artifacts"] = artifacts
             result["playbook"] = playbook
@@ -299,41 +301,33 @@ def _dexdump(
                 "frida-dexdump 超时但已 dump %d 个 DEX，按部分成功返回（壳可能未脱完）", len(partial)
             )
             return partial
-        logger.error(
-            "frida-dexdump 超时且无产物：package=%s\n输出尾部：%s", package_name, tail
-        )
+        logger.error("frida-dexdump 超时且无产物：package=%s", package_name)
+        # 输出尾部走 evidence-only：默认终端不收，只有显式配置的证据 handler 才落盘。
+        log_evidence(logger, "frida-dexdump 超时输出尾部：%s", tail)
         return (
             f"frida-dexdump 超时（{_DEXDUMP_TIMEOUT}s 未完成）且未 dump 出任何 .dex。"
-            f"输出尾部：{tail.strip()}{device.frida_spawn_hint(tail)}"
+            f"{dexdump_public_hint(tail)}"
         )
 
     assert proc is not None  # 非超时路径 subprocess.run 已正常返回
     if proc.returncode != 0:
         logger.error(
-            "frida-dexdump 非零退出（%s）：package=%s\n输出尾部：%s",
-            proc.returncode,
-            package_name,
-            tail,
+            "frida-dexdump 非零退出（%s）：package=%s", proc.returncode, package_name
         )
+        log_evidence(logger, "frida-dexdump 非零退出输出尾部：%s", tail)
         return (
             f"frida-dexdump 非零退出（returncode={proc.returncode}）。"
-            f"输出尾部：{tail.strip()}"
-            f"{device.frida_spawn_hint(tail)}"
+            f"{dexdump_public_hint(tail)}"
         )
 
     dumped = _collect_dex(dump_dir)
     if not dumped:
-        logger.error(
-            "frida-dexdump 退出 0 但未产出 .dex：package=%s\n输出尾部：%s",
-            package_name,
-            tail,
-        )
-        return (
-            f"frida-dexdump 未 dump 出任何 .dex（目录 {dump_dir} 为空）。"
-            f"输出尾部：{tail.strip()}"
-        )
+        logger.error("frida-dexdump 退出 0 但未产出 .dex：package=%s", package_name)
+        log_evidence(logger, "frida-dexdump 零产物输出尾部：%s", tail)
+        # 与其他失败分支同一条出口：目录与输出尾部都不进公开文案（上面的 logger 已收）。
+        return f"frida-dexdump 未生成任何 DEX 文件。{dexdump_public_hint(tail)}"
 
-    logger.debug("frida-dexdump 输出尾部：%s", tail)
+    log_evidence(logger, "frida-dexdump 输出尾部：%s", tail)
     return dumped
 
 
@@ -345,6 +339,85 @@ def _read_log_tail(log_path: str, limit: int = _STDOUT_TAIL) -> str:
         logger.debug("读取 frida-dexdump 日志失败：%s", log_path, exc_info=True)
         return ""
     return text[-limit:]
+
+
+class DexdumpDiagnosticCode(str, Enum):
+    """frida-dexdump 失败原因的稳定诊断码。"""
+
+    APP_NOT_FOUND = "app_not_found"
+    GADGET_REQUIRED = "gadget_required"
+    SERVER_UNREACHABLE = "server_unreachable"
+    UNKNOWN_FAILURE = "unknown_failure"
+
+
+#: 诊断码 → **固定**公开文案。封闭集合：不含子进程输出原文。
+_DEXDUMP_PUBLIC_MESSAGES: dict[DexdumpDiagnosticCode, str] = {
+    DexdumpDiagnosticCode.APP_NOT_FOUND: (
+        "（目标 app 未安装在设备上，或包名不正确：frida -f <包名> 要 spawn 的是已安装的 app。"
+        "fxapk auto 会自动 adb install；手动则 `adb install -r <apk>` 装好后重试）"
+    ),
+    DexdumpDiagnosticCode.GADGET_REQUIRED: (
+        "（疑似 frida-server 未以 root 运行：spawn 注入必须 root frida-server。"
+        "请先 `adb shell su -c 'pkill frida-server'` 杀掉非 root 实例再重跑）"
+    ),
+    DexdumpDiagnosticCode.SERVER_UNREACHABLE: (
+        "（无法连接 frida-server：检查服务是否已启动、端口转发是否建立、设备是否在线）"
+    ),
+    DexdumpDiagnosticCode.UNKNOWN_FAILURE: "（未识别到具体失败原因，原始输出见日志）",
+}
+
+
+#: 「需要 Gadget / 非 root」的**已知肯定**模式（有限枚举，不靠单词共现猜测）。
+_DEXDUMP_GADGET_PATTERNS = (
+    "need frida gadget",
+    "needs frida gadget",
+    "gadget is required",
+    "requires frida gadget",
+    "need gadget",
+    "jailed",
+)
+
+#: 否定句：命中即不判为「需要 Gadget」。
+_DEXDUMP_GADGET_NEGATIONS = (
+    "do not need gadget",
+    "does not need gadget",
+    "doesn't need gadget",
+    "do not need frida gadget",
+    "does not need frida gadget",
+    "doesn't need frida gadget",
+)
+
+
+def _classify_dexdump_output(output: str) -> DexdumpDiagnosticCode:
+    """把 frida-dexdump 的**原始输出**分类成稳定诊断码。
+
+    ★为什么不是直接把输出尾部回显给用户：子进程输出是任意文本，可能带命令行、设备路径、
+    token、服务响应体，甚至用换行伪造日志行——它没有可靠的通用脱敏办法，截断更不是脱敏。
+    这里的做法是"公开稳定提示 + 私有原始证据"：原文只进受控日志，用户看到的是分类后的
+    固定文案。**未识别也必须返回码**（而非空串），否则失败路径会退化成"排障无据"，
+    那正是这个函数要防的回归。
+    """
+    low = output.lower()
+    # ★否定句先行排除：靠 "need"+"gadget" 共现会把 "you do not need gadget" 判成需要 Gadget。
+    #   宁可落到 UNKNOWN_FAILURE（有兜底文案 + 原文在日志），也不给错误的操作指引。
+    if any(neg in low for neg in _DEXDUMP_GADGET_NEGATIONS):
+        return DexdumpDiagnosticCode.UNKNOWN_FAILURE
+    if "unable to find application" in low:
+        return DexdumpDiagnosticCode.APP_NOT_FOUND
+    if any(pat in low for pat in _DEXDUMP_GADGET_PATTERNS):
+        return DexdumpDiagnosticCode.GADGET_REQUIRED
+    if (
+        "unable to connect to frida-server" in low
+        or "failed to connect to frida-server" in low
+        or "unable to connect to remote frida-server" in low
+    ):
+        return DexdumpDiagnosticCode.SERVER_UNREACHABLE
+    return DexdumpDiagnosticCode.UNKNOWN_FAILURE
+
+
+def dexdump_public_hint(output: str) -> str:
+    """原始输出 → 可公开的固定提示（绝不回显原文）。"""
+    return _DEXDUMP_PUBLIC_MESSAGES[_classify_dexdump_output(output)]
 
 
 def _collect_dex(dump_dir: Path) -> list[Path]:

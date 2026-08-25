@@ -497,9 +497,9 @@ def _run_doctor(
         )
         # 体检本身跑完即 done（结论是否 ok 写进 detail，不阻断后续：无设备时静态仍要跑）。
         return _step(_STEP_DOCTOR, _DONE, detail)
-    except Exception as exc:  # noqa: BLE001 - 体检失败不中断流水线
+    except Exception:  # noqa: BLE001 - 体检失败不中断流水线
         logger.exception("[auto] 环境体检步骤异常")
-        return _step(_STEP_DOCTOR, _ERROR, f"环境体检异常：{exc}")
+        return _step(_STEP_DOCTOR, _ERROR, "环境体检发生未预期异常（详见日志）")
 
 
 def _run_static(
@@ -545,9 +545,9 @@ def _run_static(
             f"端点 {len(report.endpoints)}，线索 {len(report.leads)}"
         )
         return _step(_STEP_STATIC, _DONE, detail), report, package_name, report_paths, base
-    except Exception as exc:  # noqa: BLE001 - load_apk(ApkParseError 等)/pipeline 失败不中断流水线
+    except Exception:  # noqa: BLE001 - load_apk(ApkParseError 等)/pipeline 失败不中断流水线
         logger.exception("[auto] 静态分析步骤异常：%s", apk_path)
-        return _step(_STEP_STATIC, _ERROR, f"静态分析失败：{exc}"), None, "", [], base
+        return _step(_STEP_STATIC, _ERROR, "静态分析发生未预期异常（详见日志）"), None, "", [], base
 
 
 def _write_reports(report: object, *, out_dir: str, formats: list[str], base: str) -> list[str]:
@@ -620,9 +620,9 @@ def _run_install_app(
         from apkscan.dynamic import provision
 
         res = provision.install_apk(apk_path, serial=serial)
-    except Exception as exc:  # noqa: BLE001 — 安装异常不中断流水线
+    except Exception:  # noqa: BLE001 — 安装异常不中断流水线
         logger.exception("[auto] 安装 APK 异常：%s", apk_path)
-        return _step(_STEP_INSTALL, _ERROR, f"安装 APK 异常：{exc}")
+        return _step(_STEP_INSTALL, _ERROR, "安装 APK 发生未预期异常（详见日志）")
     detail = str(res.get("detail") or "")
     if res.get("ok"):
         return _step(_STEP_INSTALL, _DONE, detail or "APK 已安装到设备")
@@ -660,9 +660,9 @@ def _run_unpack(
         )
         step, paths = _fold_dynamic_step(_STEP_UNPACK, result)
         return step, paths, holder[0] if holder else None
-    except Exception as exc:  # noqa: BLE001 - 脱壳失败不中断流水线
+    except Exception:  # noqa: BLE001 - 脱壳失败不中断流水线
         logger.exception("[auto] 脱壳步骤异常：%s", apk_path)
-        return _step(_STEP_UNPACK, _ERROR, f"脱壳异常：{exc}"), [], None
+        return _step(_STEP_UNPACK, _ERROR, "脱壳发生未预期异常（详见日志）"), [], None
 
 
 #: 描述**本次运行**而非样本内容的 meta 键。脱壳回灌报告由 unpack 自己跑一遍 pipeline 产出，
@@ -768,9 +768,9 @@ def _run_repackage(
             if isinstance(artifacts, list) and artifacts:
                 wrapper_path = str(artifacts[0])
         return step, wrapper_path
-    except Exception as exc:  # noqa: BLE001 - 去壳重打包失败不中断流水线
+    except Exception:  # noqa: BLE001 - 去壳重打包失败不中断流水线
         logger.exception("[auto] 去壳重打包步骤异常：%s", apk_path)
-        return _step(_STEP_REPACKAGE, _ERROR, f"去壳重打包异常：{exc}"), None
+        return _step(_STEP_REPACKAGE, _ERROR, "去壳重打包发生未预期异常（详见日志）"), None
 
 
 def _pass1_suggests_bypass(capture_status: str, rr_payload: dict) -> tuple[bool, str]:
@@ -898,9 +898,9 @@ def _run_capture(
         if step["status"] in (_DONE, _DEGRADED):
             runtime_path = _resolve_runtime_report_path(result, out_dir)
         return step, runtime_path
-    except Exception as exc:  # noqa: BLE001 - 抓包失败不中断流水线
+    except Exception:  # noqa: BLE001 - 抓包失败不中断流水线
         logger.exception("[auto] 抓包步骤异常：%s", package_name)
-        return _step(_STEP_CAPTURE, _ERROR, f"抓包异常：{exc}"), ""
+        return _step(_STEP_CAPTURE, _ERROR, "抓包发生未预期异常（详见日志）"), ""
 
 
 def _run_merge(
@@ -948,9 +948,9 @@ def _run_merge(
             f"重渲报告 {len(report_paths)} 份"
         )
         return _step(_STEP_MERGE, _DONE, detail), [str(p) for p in report_paths]
-    except Exception as exc:  # noqa: BLE001 - 合并失败不破坏已产出静态报告
+    except Exception:  # noqa: BLE001 - 合并失败不破坏已产出静态报告
         logger.exception("[auto] 合并运行时端点步骤异常")
-        return _step(_STEP_MERGE, _ERROR, f"合并运行时端点失败：{exc}"), []
+        return _step(_STEP_MERGE, _ERROR, "合并运行时端点发生未预期异常（详见日志）"), []
 
 
 def _run_closure(

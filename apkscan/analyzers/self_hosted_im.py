@@ -29,6 +29,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from apkscan.core.redact import safe_exception_diagnostic
 from apkscan.analyzers._common import (
     TEXT_RESOURCE_PREFIXES,
     TEXT_RESOURCE_SUFFIXES,
@@ -196,8 +197,13 @@ class SelfHostedImAnalyzer(BaseAnalyzer):
                         sample_source=source,
                         sample_location=location,
                     )
-        except Exception:
-            logger.exception("[%s] 扫描控制信道 URL 失败：%s", self.name, location)
+        except Exception as exc:
+            logger.error(
+                "[%s] 扫描控制信道 URL 失败：%s（%s）",
+                self.name,
+                location,
+                safe_exception_diagnostic(exc),
+            )
 
     def _scan_resources(self, ctx: "AnalysisContext", hits: dict[str, _Hit]) -> dict[str, int]:
         """扫描 APK 内文本资源（H5/JS/json/xml）里的控制信道 URL。绝不抛。"""
