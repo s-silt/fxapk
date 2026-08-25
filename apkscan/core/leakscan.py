@@ -430,6 +430,7 @@ ALLOWED_DOMAINS: frozenset[str] = frozenset({
     "ripe.net",
     "shodan.io",
     "spamhaus.org",
+    "www.spamhaus.org",  # DROP 清单的实际下载端点带 www，匹配是精确的（同 ripe.net / stat.ripe.net）
     "stat.ripe.net",
     "urlscan.io",
     "virustotal.com",
