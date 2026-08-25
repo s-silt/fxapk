@@ -1466,3 +1466,231 @@ def test_abuse_contacts_dedupe_and_lowercase_rir() -> None:
 
     assert normalized["abuse_complaint_contacts"] == ["a@example.invalid"]
     assert normalized["abuse_contact_authoritative_rir"] == "ripe"
+
+
+# --------------------------------------------------------------------------- #
+# codex 复审挑出的 6 个问题的回归测试
+# --------------------------------------------------------------------------- #
+
+
+def test_routing_origin_changed_is_undetermined_when_truncated() -> None:
+    """★codex#1：截断时"没看到第二个 origin"不等于"确定没换过手"。
+
+    请求带 min_peers 阈值、结果又被截断，未处理部分仍可能有别的 origin，
+    此时输出 False 会被读成"归属从未变更"这一确定结论。
+    """
+    origins = [
+        {
+            "origin": "64500",
+            "prefixes": [
+                {
+                    "prefix": "100.64.100.0/24",
+                    "timelines": [
+                        {"starttime": "2024-01-01T00:00:00", "endtime": "2024-01-02T00:00:00"}
+                    ],
+                }
+            ],
+        }
+    ] * 300
+
+    class _TruncatedSession:
+        def get(self, url: str, **kwargs):  # noqa: ANN003
+            if "prefix-overview" in url:
+                return _Response(
+                    {"data": {"resource": "100.64.100.0/24", "asns": [{"asn": "64500"}]}}
+                )
+            if "routing-history" in url:
+                return _Response({"data": {"by_origin": origins}})
+            raise RuntimeError("not needed")
+
+    result = RipeStatBgpEnricher(session=_TruncatedSession()).enrich(_ip())
+
+    assert result.data["routing_history_truncated"] is True
+    assert "routing_origin_changed" not in result.data
+    assert result.data["routing_origin_changed_status"] == "undetermined"
+    # 判定依据的阈值须随结论落进报告，供复核结论强度
+    assert result.data["routing_history_min_peers"] == 10
+
+
+def test_routing_origin_changed_true_survives_truncation() -> None:
+    """发现 ≥2 个 origin 这一侧是可靠的，截断也照样输出 True。"""
+    entries = [
+        {
+            "origin": str(asn),
+            "prefixes": [
+                {
+                    "prefix": "100.64.100.0/24",
+                    "timelines": [
+                        {"starttime": "2024-01-01T00:00:00", "endtime": "2024-01-02T00:00:00"}
+                    ],
+                }
+            ],
+        }
+        for asn in range(64500, 64500 + 300)
+    ]
+
+    folded = _fold_routing_history({"by_origin": entries}, "100.64.100.0/24")
+
+    assert folded["truncated"] is True
+    assert len(folded["origins"]) > 1
+
+
+def test_visibility_ratio_never_emits_non_finite() -> None:
+    """★codex#2：极小分母会算出 inf，而 inf 会让核心层拒收整个 provider payload，
+    把已经到手的主结果一起连坐丢掉。越界比例同样不可信（可见 peer 数不可能超过全表）。"""
+    folded = _fold_routing_history(
+        {
+            "latest_max_ff_peers": {"v4": 1e-320},
+            "by_origin": [
+                {
+                    "origin": "64500",
+                    "prefixes": [
+                        {
+                            "prefix": "100.64.100.0/24",
+                            "timelines": [
+                                {
+                                    "starttime": "2024-01-01T00:00:00",
+                                    "endtime": "2024-01-02T00:00:00",
+                                    "full_peers_seeing": 1e300,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+        "100.64.100.0/24",
+    )
+
+    entry = folded["history"][0]
+    assert "max_visibility_ratio" not in entry
+    assert folded["visibility_degraded"] is True
+    # 整条 payload 必须仍可 JSON 序列化（inf 会让 json.dumps(allow_nan=False) 抛）
+    json.dumps(folded, allow_nan=False)
+
+
+def test_visibility_ratio_rejects_above_one() -> None:
+    folded = _fold_routing_history(
+        {
+            "latest_max_ff_peers": {"v4": 100},
+            "by_origin": [
+                {
+                    "origin": "64500",
+                    "prefixes": [
+                        {
+                            "prefix": "100.64.100.0/24",
+                            "timelines": [
+                                {
+                                    "starttime": "2024-01-01T00:00:00",
+                                    "endtime": "2024-01-02T00:00:00",
+                                    "full_peers_seeing": 101,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+        "100.64.100.0/24",
+    )
+
+    assert "max_visibility_ratio" not in folded["history"][0]
+    assert folded["visibility_degraded"] is True
+
+
+def test_auxiliary_failure_status_never_upgrades_no_record_to_hit() -> None:
+    """★codex#3：主查询查无记录时，辅助端点的失败状态不得把结果撑成 hit——
+    那等于把"没查到"伪装成"查到了"。"""
+
+    class _EmptyPrimaryFailingAuxSession:
+        def get(self, url: str, **kwargs):  # noqa: ANN003
+            if "prefix-overview" in url:
+                return _Response({"data": {}})
+            raise RuntimeError("auxiliary down")
+
+    result = RipeStatBgpEnricher(session=_EmptyPrimaryFailingAuxSession()).enrich(_ip())
+
+    assert result.ok is True
+    assert result.data["_source_status"] == "no_record"
+    assert result.data["routing_history_lookup_status"] == "failed"
+
+
+def test_whois_truncation_is_reported() -> None:
+    """★codex#4：whois 各层截断此前全部静默——"只有这些登记信息"会成为错误结论。"""
+    data = {
+        "records": [
+            [{"key": "inetnum", "value": "100.64.100.0/24"}]
+            + [{"key": "descr", "value": f"Example Line {index}"} for index in range(70)]
+        ]
+    }
+
+    normalized = _normalize_ripestat_whois(data)
+
+    assert normalized["whois_truncated"] is True
+    assert len(normalized["registration_descriptions"]) == 32
+
+
+def test_whois_authorities_are_bounded() -> None:
+    """authorities 此前完全无上限——外部输入一律要有界。"""
+    data = {
+        "records": [[{"key": "inetnum", "value": "100.64.100.0/24"}]],
+        "authorities": [f"rir{index}" for index in range(40)],
+    }
+
+    normalized = _normalize_ripestat_whois(data)
+
+    assert len(normalized["authoritative_rirs"]) == 16
+    assert normalized["whois_truncated"] is True
+
+
+def test_abuse_contacts_truncation_is_reported() -> None:
+    normalized = _normalize_abuse_contacts(
+        {"abuse_contacts": [f"a{index}@example.invalid" for index in range(40)]}
+    )
+
+    assert len(normalized["abuse_complaint_contacts"]) == 32
+    assert normalized["abuse_contacts_truncated"] is True
+
+
+def test_whois_recognizes_inet6num() -> None:
+    """★codex#5：RIPE/APNIC 的 IPv6 对象用 inet6num，此前归一结果为空。"""
+    data = {
+        "authorities": ["RIPE"],
+        "records": [
+            [
+                {"key": "inet6num", "value": "2001:db8::/32"},
+                {"key": "netname", "value": "EXAMPLE-V6"},
+                {"key": "descr", "value": "Example IPv6 Holder"},
+            ]
+        ],
+    }
+
+    normalized = _normalize_ripestat_whois(data)
+
+    assert normalized["whois_network"] == "2001:db8::/32"
+    assert normalized["whois_netname"] == "EXAMPLE-V6"
+    assert normalized["registered_organization"] == "Example IPv6 Holder"
+
+
+def test_exactly_exhausted_timeline_budget_is_not_truncation() -> None:
+    """★codex#6：恰好用满预算 ≠ 后面还有数据。"""
+    folded = _fold_routing_history(
+        {
+            "by_origin": [
+                {
+                    "origin": "64500",
+                    "prefixes": [
+                        {
+                            "prefix": "100.64.100.0/24",
+                            "timelines": [
+                                {"starttime": "2024-01-01T00:00:00", "endtime": "2024-01-02T00:00:00"}
+                            ],
+                        }
+                    ],
+                }
+            ]
+        },
+        "100.64.100.0/24",
+    )
+
+    assert folded["truncated"] is False

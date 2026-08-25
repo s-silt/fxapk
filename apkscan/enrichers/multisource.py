@@ -31,7 +31,29 @@ _MAX_RECORDS = 20
 #  改此串**必须**同步 closure._FOFA_FIELDS（有漂移守卫测试兜底），否则 closure 会按错位取值静默污染归属。
 FOFA_QUERY_FIELDS = "host,ip,port,protocol,title,server,country,region,city,as_number,as_organization"
 _MAX_TEXT = 500
-_METADATA_ONLY_KEYS = {"source", "count", "pulse_count", "passive_dns_status", "_via"}
+#: 这些键只是元数据，**不构成"查到了东西"的证据**——参与 has_values 会把
+#: "主查询无记录 + 辅助端点失败"错报成 hit（即把没查到伪装成查到了）。
+_METADATA_ONLY_KEYS = {
+    "source",
+    "count",
+    "pulse_count",
+    "passive_dns_status",
+    "_via",
+    "upstream_lookup_status",
+    "upstream_error_type",
+    "routing_history_lookup_status",
+    "routing_history_error_type",
+    "whois_lookup_status",
+    "whois_error_type",
+    "abuse_contact_lookup_status",
+    "abuse_contact_error_type",
+    "routing_history_min_peers",
+    "routing_origin_changed_status",
+    "routing_history_truncated",
+    "routing_history_visibility_degraded",
+    "whois_truncated",
+    "abuse_contacts_truncated",
+}
 
 #: 单个端点最多留多少条被动 DNS 记录。取"够看清落地变迁"的量：此类域名换 IP 频繁，
 #: 全量可达数百条，落进报告只会把人淹掉；按时间倒序留最近这些足以还原案发时点前后的落点。
@@ -46,12 +68,16 @@ _ROUTING_HISTORY_MAX_ORIGINS = 256
 _ROUTING_HISTORY_MAX_PREFIXES_PER_ORIGIN = 128
 _ROUTING_HISTORY_MAX_TIMELINES = 20_000
 _ROUTING_HISTORY_MAX_OUTPUT_PREFIXES = 128
+#: routing-history 的可见度阈值。低于该 peer 数的宣告不返回——这意味着"未见到第二个
+#: origin"不能反推"没换过手"，故该值随结论一并写进报告供复核。
+_ROUTING_HISTORY_MIN_PEERS = 10
 
 #: RIPEstat whois 记录的处理上限（records 是分组的 key/value 列表，同 key 可重复出现）。
 _WHOIS_MAX_RECORD_GROUPS = 128
 _WHOIS_MAX_FIELDS_PER_GROUP = 512
 _WHOIS_MAX_VALUES_PER_KEY = 64
 _WHOIS_MAX_DESCRIPTIONS = 32
+_WHOIS_MAX_AUTHORITIES = 16
 
 _ABUSE_CONTACT_MAX_ITEMS = 32
 
@@ -195,6 +221,8 @@ def _fold_routing_history(
     total_origins = len(raw_by_origin) if isinstance(raw_by_origin, list) else 0
     raw_origins = _list_of_dicts(raw_by_origin, limit=_ROUTING_HISTORY_MAX_ORIGINS)
     truncated = total_origins > _ROUTING_HISTORY_MAX_ORIGINS
+    #: 可见度比例算出越界/非有限值 → 标降级，让下游知道这批比例不完整而不是"没有比例"。
+    degraded = False
     timeline_count = 0
 
     effective: dict[int, dict[str, object]] = {}
@@ -292,12 +320,22 @@ def _fold_routing_history(
                 if not math.isfinite(peers) or peers < 0:
                     continue
                 ratio = round(peers / denominator, 4)
+                # ★除法结果必须再校验一次：极小分母 + 大分子会得到 inf，而 inf 会让
+                #   core.enrichment 的严格 JSON 校验拒掉**整个 provider payload**，
+                #   连已经到手的 prefix-overview 主结果一起丢。比例 >1 说明源数据自相
+                #   矛盾（可见 peer 数超过全表 peer 数），同样不可信。
+                #   刻意不 clamp——那会把源数据异常掩盖成一个看起来正常的值。
+                if not math.isfinite(ratio) or not 0.0 <= ratio <= 1.0:
+                    degraded = True
+                    continue
                 current_ratio = bucket.get("max_visibility_ratio")
                 if not isinstance(current_ratio, (int, float)) or ratio > current_ratio:
                     bucket["max_visibility_ratio"] = ratio
 
         if timeline_count >= _ROUTING_HISTORY_MAX_TIMELINES:
-            truncated = True
+            # 恰好用满预算 ≠ 后面还有数据：只有确实还剩未处理的 origin 才算截断。
+            if origin_entry is not raw_origins[-1]:
+                truncated = True
             break
 
     def finalize(items: dict[int, dict[str, object]]) -> list[dict[str, object]]:
@@ -332,10 +370,11 @@ def _fold_routing_history(
         "history": finalize(effective),
         "supernets": finalize(supernets),
         "truncated": truncated,
+        "visibility_degraded": degraded,
     }
 
 
-def _collect_whois_values(records: object) -> dict[str, list[str]]:
+def _collect_whois_values(records: object) -> tuple[dict[str, list[str]], bool]:
     """把 RIPEstat whois 的分组 key/value 列表收成 ``{小写键: [值...]}``。
 
     ★同一个 key 会重复出现（实测 APNIC 一条记录里 ``descr`` 三条、``tech-c`` 两条），
@@ -343,9 +382,13 @@ def _collect_whois_values(records: object) -> dict[str, list[str]]:
     """
     values: dict[str, list[str]] = {}
     if not isinstance(records, list):
-        return values
+        return values, False
 
+    # ★每一层截断都要能被上报：静默丢字段会让"只有这些登记信息"成为错误结论。
+    truncated = len(records) > _WHOIS_MAX_RECORD_GROUPS
     for group in records[:_WHOIS_MAX_RECORD_GROUPS]:
+        if isinstance(group, list) and len(group) > _WHOIS_MAX_FIELDS_PER_GROUP:
+            truncated = True
         for field_entry in _list_of_dicts(group, limit=_WHOIS_MAX_FIELDS_PER_GROUP):
             raw_key = field_entry.get("key")
             if not isinstance(raw_key, str):
@@ -355,9 +398,13 @@ def _collect_whois_values(records: object) -> dict[str, list[str]]:
             if not key or value is None:
                 continue
             key_values = values.setdefault(key, [])
-            if value not in key_values and len(key_values) < _WHOIS_MAX_VALUES_PER_KEY:
+            if value in key_values:
+                continue
+            if len(key_values) < _WHOIS_MAX_VALUES_PER_KEY:
                 key_values.append(value)
-    return values
+            else:
+                truncated = True
+    return values, truncated
 
 
 def _first_whois_value(values: Mapping[str, list[str]], aliases: tuple[str, ...]) -> str | None:
@@ -376,8 +423,11 @@ def _normalize_ripestat_whois(data: Mapping[str, object]) -> dict[str, object]:
     ★取证纪律：只取**注册持有方**。``abuse-c`` / ``tech-c`` / ``admin-c`` 常是上游 IDC
     或代理商的联系人，拿它当持有方会把归属指向错误的主体，故一律不参与持有方判断。
     """
-    values = _collect_whois_values(data.get("records"))
-    descriptions = values.get("descr", [])[:_WHOIS_MAX_DESCRIPTIONS]
+    values, truncated = _collect_whois_values(data.get("records"))
+    all_descriptions = values.get("descr", [])
+    descriptions = all_descriptions[:_WHOIS_MAX_DESCRIPTIONS]
+    if len(all_descriptions) > _WHOIS_MAX_DESCRIPTIONS:
+        truncated = True
     organization = _first_whois_value(
         values, ("organization", "org-name", "organisation", "owner", "org")
     )
@@ -388,7 +438,10 @@ def _normalize_ripestat_whois(data: Mapping[str, object]) -> dict[str, object]:
     authorities: list[str] = []
     raw_authorities = data.get("authorities")
     if isinstance(raw_authorities, list):
-        for raw_authority in raw_authorities:
+        # 这一项原先无上限——外部输入一律要有界。
+        if len(raw_authorities) > _WHOIS_MAX_AUTHORITIES:
+            truncated = True
+        for raw_authority in raw_authorities[:_WHOIS_MAX_AUTHORITIES]:
             authority = _bounded_text(raw_authority)
             if authority is None:
                 continue
@@ -399,7 +452,9 @@ def _normalize_ripestat_whois(data: Mapping[str, object]) -> dict[str, object]:
     return {
         key: value
         for key, value in {
-            "whois_network": _first_whois_value(values, ("cidr", "inetnum", "netrange")),
+            "whois_network": _first_whois_value(
+                values, ("cidr", "inetnum", "inet6num", "netrange")
+            ),
             "whois_netname": _first_whois_value(values, ("netname",)),
             "registered_organization": organization,
             "registration_descriptions": descriptions,
@@ -408,6 +463,7 @@ def _normalize_ripestat_whois(data: Mapping[str, object]) -> dict[str, object]:
                 values, ("regdate", "created", "registration-date")
             ),
             "authoritative_rirs": authorities,
+            "whois_truncated": truncated or None,
         }.items()
         if value not in (None, "", [])
     }
@@ -417,8 +473,10 @@ def _normalize_abuse_contacts(data: Mapping[str, object]) -> dict[str, object]:
     """归一投诉/协查联系人。字段名刻意带 ``abuse_``，与注册持有方字段泾渭分明——
     这两者混用是归属判断出错的常见成因。"""
     contacts: list[str] = []
+    truncated = False
     raw_contacts = data.get("abuse_contacts")
     if isinstance(raw_contacts, list):
+        truncated = len(raw_contacts) > _ABUSE_CONTACT_MAX_ITEMS
         for raw_contact in raw_contacts[:_ABUSE_CONTACT_MAX_ITEMS]:
             contact = _bounded_text(raw_contact)
             if contact is not None and contact not in contacts:
@@ -433,6 +491,7 @@ def _normalize_abuse_contacts(data: Mapping[str, object]) -> dict[str, object]:
         for key, value in {
             "abuse_complaint_contacts": contacts,
             "abuse_contact_authoritative_rir": authoritative_rir,
+            "abuse_contacts_truncated": truncated or None,
         }.items()
         if value not in (None, "", [])
     }
@@ -752,7 +811,7 @@ class RipeStatBgpEnricher(_PassiveLookupEnricher):
                 self._ROUTING_HISTORY_URL,
                 {
                     "resource": endpoint.value,
-                    "min_peers": 10,
+                    "min_peers": _ROUTING_HISTORY_MIN_PEERS,
                     "sourceapp": _RIPESTAT_SOURCEAPP,
                 },
                 "routing_history_lookup",
@@ -835,7 +894,22 @@ class RipeStatBgpEnricher(_PassiveLookupEnricher):
                 normalized["routing_history_origins"] = historical_origins
                 # ★只用"精确/更特异"前缀的 origin 判变更：超网换手说的是上游大段易主，
                 #   不代表这个网段易主，混进来会造出大量假的"归属发生过变更"。
-                normalized["routing_origin_changed"] = len(relevant_origins) > 1
+                # ★★"没看到第二个 origin" ≠ "确定没换过手"：本次请求带 min_peers=10，
+                #   低可见度的历史宣告天然被过滤；若结果还被截断，未处理部分同样可能有
+                #   别的 origin。所以只有"≥2 个 origin"这一侧是可靠的——
+                #   发现多个 origin 一定输出 True；否则只在数据完整时才敢输出 False，
+                #   数据不完整时**不输出该字段**，避免把"不可判定"写成"未变更"。
+                incomplete = bool(routing.get("truncated")) or bool(
+                    routing.get("visibility_degraded")
+                )
+                if len(relevant_origins) > 1:
+                    normalized["routing_origin_changed"] = True
+                elif not incomplete:
+                    normalized["routing_origin_changed"] = False
+                else:
+                    normalized["routing_origin_changed_status"] = "undetermined"
+                # 该判定所依据的可见度阈值，写进报告便于复核结论强度。
+                normalized["routing_history_min_peers"] = _ROUTING_HISTORY_MIN_PEERS
             history = routing.get("history")
             if isinstance(history, list) and history:
                 normalized["routing_history"] = history
@@ -844,6 +918,8 @@ class RipeStatBgpEnricher(_PassiveLookupEnricher):
                 normalized["routing_history_supernets"] = supernets
             if routing.get("truncated") is True:
                 normalized["routing_history_truncated"] = True
+            if routing.get("visibility_degraded") is True:
+                normalized["routing_history_visibility_degraded"] = True
 
         whois_data = _dict(_dict(root.get("whois")).get("data"))
         if whois_data:
