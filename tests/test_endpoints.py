@@ -20,6 +20,7 @@ from apkscan.analyzers.endpoints import EndpointsAnalyzer
 from apkscan.core.models import AnalyzerResult, Endpoint
 
 from tests.conftest import FakeContext
+from urllib.parse import urlsplit
 
 
 def _analyze(
@@ -411,7 +412,14 @@ def test_real_domain_kept_alongside_noise():
     )
     values = {e.value for e in result.endpoints}
     assert "https://real.heika-gw.cn/api" in values
-    assert not any("schemas.android.com" in v for v in values)
+    # 按 hostname 的**边界判断**排除，与生产规则同语义（endpoints.py:823
+    # `host == nh or host.endswith("." + nh)`）：裸子串写法既会把
+    # not-schemas.android.com.evil 误当噪音放过，也说不清排掉的到底是哪个主机。
+    hosts = {urlsplit(v).hostname or v for v in values}
+    assert not any(
+        host == "schemas.android.com" or host.endswith(".schemas.android.com")
+        for host in hosts
+    )
 
 
 # --- 类名 / 包名 / 文件名不误判为域名 ------------------------------------
