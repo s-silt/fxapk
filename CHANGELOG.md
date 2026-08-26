@@ -3,6 +3,45 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
+## 1.10.1 — 2026-08-26
+
+本版收口 `1.10.0` 之后的安全与运维修复，重点是**不让外部服务的错误信息、子进程输出与
+文件写入路径越过公开边界，同时保持富化失败可分类、可重试**。
+
+### Added
+
+- 归属富化接入 RIPEstat 的 routing-history / whois / abuse-contact 三个 data call，
+  以及 Spamhaus DROP 清单（整表缓存 + 最长前缀匹配）。
+
+### Fixed
+
+- 富化器对外只写稳定错误分类码，不再把 provider URL、查询参数、响应正文或代理信息带入
+  `report.json` / `enricher_status`；原始异常仅保留在受控日志的安全诊断中。
+- 统一 ASN、证书、ICP、IP-RDAP、Spamhaus、WHOIS、DNS 与多源富化的错误分类逻辑，区分
+  HTTP 状态、超时、响应错误、请求编码错误、解析错误、无记录与输入无效。共享分类器
+  `safe_error_type()` 同时覆盖 `requests.Timeout` 与内置 `TimeoutError`。
+- WHOIS 数据文件缺失改为固定码 `data_unavailable`，本次运行后续域名继续短路且不再触网；
+  删除按首行截断异常消息的旧实现——截断不构成脱敏。
+- DNS 的 DoH 与系统解析器双失败改为固定码 `dns_resolution_failed`，不再回显解析器异常
+  文本；DoH 已返回被拒答案（Fake-IP／私网）时仍按有效观测处理，不误判为"域名不存在"。
+- 重打包链路的 zipalign、apksigner 重签与验签、keytool 生成调试密钥库四处不再把子进程
+  输出尾部拼进对外结果；不可信子进程输出可能包含敏感诊断信息，原始输出改走仅证据日志
+  （默认终端不接收），对外只保留固定文案与返回码。
+- 修复畸形脚本结束标签导致的网页内联配置漏检、真机全局代理影响设备联网，以及证据／临时
+  文件权限依赖主机 `umask` 的问题。
+
+### Changed
+
+- 终端日志被明确为公开边界：带 traceback 的记录只输出固定文案，异常消息、异常链与注记
+  不再渲染到终端；原始证据改由仅证据通道承载。
+- 领域校验错误改用封闭错误码与固定文案，构造器只接受枚举值，公开文案由错误码重新生成，
+  不受异常参数事后改写影响。
+- 静态守卫覆盖范围扩至 WHOIS、DNS 两个富化器，并加强检测：覆盖 `logger.exception`、
+  关键字参数与 f-string 内的子进程输出变量；`repr()` 移出安全出口白名单；仅按完整访问
+  形态放行 `diagnostic_code`、`public_message`、`code` 等稳定属性。
+- 判定主机身份的测试断言统一改为解析后比对 hostname 与 path，不再使用子串匹配。
+- CI 的 `GITHUB_TOKEN` 权限收敛到最小范围。
+
 ## 1.10.0 — 2026-08-24
 
 本版只做一件事：**堵住「状态沉默」**（PR #51–#58）。
