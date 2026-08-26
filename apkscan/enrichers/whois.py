@@ -18,6 +18,8 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from apkscan.core.enrichment import safe_error_type
+from apkscan.core.redact import safe_exception_diagnostic
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
 
@@ -34,21 +36,6 @@ CACHE_FILE = CACHE_DIR / "whois.json"
 # 「Error trying to connect to socket: ...」——对富化失败属预期内噪音，抬高其级别静默
 # （与 androguard loguru 同思路：不影响我方结构化降级，只是不让它喧哗）。
 logging.getLogger("whois").setLevel(logging.CRITICAL)
-
-
-def _short_err(exc: object) -> str:
-    """把异常压成一行短摘要：取首个非空行、截到 120 字符。
-
-    必要性：whois 服务器（如 VeriSign .com）会把整段 NOTICE / TERMS OF USE 法律声明塞进
-    响应，python-whois 又把它带进异常消息——直接打日志会刷出几十行 boilerplate 噪音。
-    取「No match for X」/「timed out」这类首行关键信息即可。
-    """
-    text = str(exc).strip()
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped:
-            return stripped[:120]
-    return text[:120] or type(exc).__name__
 
 
 def _first(value: Any) -> Any:
@@ -183,51 +170,64 @@ class WhoisEnricher(BaseEnricher):
         domain = (ep.value or "").strip().lower()
         if not domain:
             return EnrichmentResult(
-                provider=self.name, ok=False, error="空域名，跳过 WHOIS 查询"
+                provider=self.name,
+                ok=False,
+                error="invalid_input",
             )
 
-        # 0) 系统性不可用（如 whois 库数据文件未打进 exe）→ 本次起跳过所有查询，
-        #    避免对每个域名重复刷同一条 traceback（已在首次失败时记过一次清晰提示）。
+        # 系统性不可用（如 whois 库数据文件未打进 exe）时，本次运行跳过后续查询。
         if getattr(self, "_data_unavailable", False):
             return EnrichmentResult(
-                provider=self.name, ok=False, error="WHOIS 不可用（数据文件缺失），已跳过"
+                provider=self.name,
+                ok=False,
+                error="data_unavailable",
             )
 
-        # 1) 缓存命中直接返回（不消耗网络）。持锁读，避免与并发写 os.replace 撞车（Windows race）。
+        # 缓存命中直接返回，不消耗网络。
         cache = self._load_cache_locked()
         cached = cache.get(domain)
         if isinstance(cached, dict):
             logger.debug("WHOIS 缓存命中：%s", domain)
             return EnrichmentResult(provider=self.name, ok=True, data=dict(cached))
 
-        # 2) 网络查询，全部异常吞成 ok=False（不刷 traceback：富化失败很常见）。
+        # ★query_whois / _query 保持原样抛错（RDAP fallback 依赖它判断要不要兜底）；
+        #   只在本公开边界把异常转成稳定分类码——error 会进报告 JSON 与 enricher_status，
+        #   而 whois 服务器的异常消息里常整段夹带 NOTICE/TERMS 法律声明与查询目标。
         try:
             data = self._query(domain)
         except FileNotFoundError as exc:
-            # whois 库数据文件（public_suffix_list.dat）缺失 —— 系统性失败（常见于打包 exe
-            # 未收 whois 数据）。记一次清晰提示后本次禁用 WHOIS，不再逐域名刷 traceback。
             self._data_unavailable = True
-            logger.warning("WHOIS 数据文件缺失，本次运行跳过所有 WHOIS 查询：%s", exc)
-            return EnrichmentResult(
-                provider=self.name, ok=False, error=f"WHOIS 数据缺失: {exc}"
+            logger.warning(
+                "WHOIS 数据文件缺失，本次运行跳过所有 WHOIS 查询：%s",
+                safe_exception_diagnostic(exc),
             )
-        except Exception as exc:  # noqa: BLE001 — 富化失败不得炸主流程
-            short = _short_err(exc)
-            logger.debug("WHOIS 查询失败：%s（%s）", domain, short)
             return EnrichmentResult(
-                provider=self.name, ok=False, error=f"{type(exc).__name__}: {short}"
+                provider=self.name,
+                ok=False,
+                error="data_unavailable",
+            )
+        except Exception as exc:  # noqa: BLE001 - 富化失败不得炸主流程
+            error_type = safe_error_type(exc)
+            logger.debug(
+                "WHOIS 查询失败：%s（%s）",
+                domain,
+                safe_exception_diagnostic(exc),
+            )
+            return EnrichmentResult(
+                provider=self.name,
+                ok=False,
+                error=error_type,
             )
 
-        # 3) 区分"查到了"与"全空"：全空可能是网络抖动/限速/无应答，
-        #    不写缓存（避免把偶发空响应永久固化成"该域名 WHOIS 为空"），返回 ok=False。
+        # 区分「查到了」与「全空」：全空可能是网络抖动/限速/无应答，不写缓存
+        # （避免把偶发空响应永久固化成「该域名 WHOIS 为空」）。
         if not any(v not in (None, "") for v in data.values()):
             logger.debug("WHOIS 返回全空，不缓存（可能限速/无应答）：%s", domain)
             return EnrichmentResult(
                 provider=self.name,
                 ok=False,
-                error="WHOIS 无有效记录（可能限速/无应答，未缓存）",
+                error="no_record",
             )
 
-        # 4) 有有效字段才写缓存。
         self._save_cache_entry(domain, data)
         return EnrichmentResult(provider=self.name, ok=True, data=data)

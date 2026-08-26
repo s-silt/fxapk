@@ -28,6 +28,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from apkscan.core.enrichment import safe_error_type
+from apkscan.core.redact import safe_exception_diagnostic
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
 from apkscan.enrichers import _http
@@ -178,7 +180,7 @@ class IcpEnricher(BaseEnricher):
         domain = (ep.value or "").strip().lower()
         if not domain:
             return EnrichmentResult(
-                provider=self.name, ok=False, error="空域名，跳过 ICP 查询"
+                provider=self.name, ok=False, error="invalid_input"
             )
 
         # 1) 缓存命中直接返回（不消耗网络）。仅缓存成功结果。
@@ -191,7 +193,10 @@ class IcpEnricher(BaseEnricher):
 
         # 2) 查询。区分两类失败：
         #    - IcpUnavailable：预期内不可用 → 附人工核验链接，明确提示人工核。
-        #    - 其它异常：网络/HTTP/解析错误 → 同样优雅降级到人工核，但 error 带异常信息。
+        #    - 其它异常：网络/HTTP/解析错误 → 同样优雅降级到人工核。
+        #    ★两类的 error 都只放**稳定分类码**：它会进报告 JSON 与 enricher_status，
+        #      而异常消息可能夹带 provider URL（含 key）与响应正文。人工核验指引本就在
+        #      data["hint"]／data["miit_url"]／data["lookup_url"] 里，不必挤进 error。
         try:
             data = self._query(domain)
         except IcpUnavailable as exc:
@@ -206,16 +211,17 @@ class IcpEnricher(BaseEnricher):
                 provider=self.name,
                 ok=False,
                 data=_manual_data(domain),
-                error=MANUAL_HINT,
+                error="provider_unavailable",
             )
         except Exception as exc:  # noqa: BLE001 — 富化失败不得炸主流程
-            logger.debug("ICP 查询失败：%s（%s）", domain, exc, exc_info=True)
-            manual = _manual_data(domain)
+            logger.debug(
+                "ICP 查询失败：%s（%s）", domain, safe_exception_diagnostic(exc)
+            )
             return EnrichmentResult(
                 provider=self.name,
                 ok=False,
-                data=manual,
-                error=f"{type(exc).__name__}: {exc}（{MANUAL_HINT}）",
+                data=_manual_data(domain),
+                error=safe_error_type(exc),
             )
 
         # 3) 成功才写缓存（失败/需人工核不缓存，便于后续接入 provider 后重查）。

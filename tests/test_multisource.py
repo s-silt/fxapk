@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+import socket
 from collections.abc import Iterator, Mapping
 
 import pytest
 import requests
 
-from apkscan.core.enrichment import enrich_selected_targets
+from apkscan.core.enrichment import enrich_selected_targets, safe_error_type
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
 from apkscan.enrichers.multisource import (
@@ -1694,3 +1695,17 @@ def test_exactly_exhausted_timeline_budget_is_not_truncation() -> None:
     )
 
     assert folded["truncated"] is False
+
+
+def test_safe_error_type_classifies_builtin_timeout() -> None:
+    """内置 TimeoutError 也归 timeout —— DoH / socket 那条路抛的是它，不是 requests.Timeout。"""
+    assert safe_error_type(TimeoutError("https://canary.example.test/?key=SECRET")) == "timeout"
+
+
+def test_safe_error_type_classifies_socket_timeout() -> None:
+    """socket.timeout 同样归 timeout。
+
+    3.10+ 里 socket.timeout 就是 TimeoutError 的别名，本条看似冗余——但它锁的是
+    「socket 超时归 timeout」这条**契约**：将来别名关系若变，这条会先红。
+    """
+    assert safe_error_type(socket.timeout("/cases/CASE-CANARY")) == "timeout"

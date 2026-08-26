@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 
+from apkscan.core.enrichment import safe_error_type
 from apkscan.enrichers import _http
 
 from apkscan.core.models import Endpoint, EnrichmentResult
@@ -216,7 +217,7 @@ class IpRdapEnricher(BaseEnricher):
     def enrich(self, ep: Endpoint) -> EnrichmentResult:
         ip = (ep.value or "").strip()
         if not ip:
-            return EnrichmentResult(provider=self.name, ok=False, error="空 IP，跳过 IP-RDAP 查询")
+            return EnrichmentResult(provider=self.name, ok=False, error="invalid_input")
 
         # 1) 缓存命中直接返回（不消耗网络）。持锁读，避免与并发写 os.replace 撞车（Windows race）。
         cache = self._load_cache_locked()
@@ -230,12 +231,14 @@ class IpRdapEnricher(BaseEnricher):
             data = self._query(ip)
         except Exception as exc:  # noqa: BLE001 — 富化失败不得炸主流程
             logger.debug("IP-RDAP 查询失败：%s（%s）", ip, exc)
-            return EnrichmentResult(provider=self.name, ok=False, error=f"{type(exc).__name__}: {exc}")
+            return EnrichmentResult(
+                provider=self.name, ok=False, error=safe_error_type(exc)
+            )
 
         # 3) 区分"查到了"与"全空"：全空（限速/无应答/无记录）不缓存，便于重试。
         if not _has_values(data):
             logger.debug("IP-RDAP 返回无有效登记字段，不缓存：%s", ip)
-            return EnrichmentResult(provider=self.name, ok=False, error="IP-RDAP 无有效记录（未缓存）")
+            return EnrichmentResult(provider=self.name, ok=False, error="no_record")
 
         self._save_cache_entry(ip, data)
         return EnrichmentResult(provider=self.name, ok=True, data=data)

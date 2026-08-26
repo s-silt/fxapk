@@ -155,7 +155,7 @@ def test_enrich_network_error_returns_not_ok(fake_requests: _FakeRequests) -> No
     assert result.provider == "asn"
     assert result.ok is False
     assert result.error
-    assert "TimeoutError" in result.error
+    assert result.error == "timeout"
     assert result.data == {}
 
 
@@ -165,8 +165,9 @@ def test_enrich_api_status_fail_returns_not_ok(fake_requests: _FakeRequests) -> 
     )
     result = AsnEnricher().enrich(_ep("10.0.0.1"))
     assert result.ok is False
-    assert result.error
-    assert "private range" in result.error
+    # provider 在 HTTP 200 里声明查询失败（status != success）→ provider_response_error。
+    # 不是 parse_error（JSON 已解析成功），也不是 invalid_input（我方参数合法）。
+    assert result.error == "provider_response_error"
 
 
 def test_enrich_http_error_returns_not_ok(fake_requests: _FakeRequests) -> None:
@@ -184,7 +185,7 @@ def test_enrich_does_not_raise_on_arbitrary_exception(
     fake_requests.raises = ValueError("bad json")
     result = AsnEnricher().enrich(_ep())
     assert result.ok is False
-    assert "ValueError" in result.error
+    assert result.error == "parse_error"
 
 
 def test_failed_query_not_cached(

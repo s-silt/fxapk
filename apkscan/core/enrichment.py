@@ -12,6 +12,7 @@ import logging
 import math
 import os
 import threading
+import requests
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
@@ -36,6 +37,50 @@ logger = logging.getLogger(__name__)
 #: 默认 8 个 worker。每个端点由单一 worker 串行跑其匹配的全部富化器，故同一 ep.enrichment
 #: 无并发写竞争；只有跨端点共享的 provider 统计需加锁聚合。
 ENRICH_MAX_WORKERS = 8
+
+
+class ProviderResponseError(RuntimeError):
+    """Sanitized marker for provider-declared errors in HTTP 200 responses."""
+
+
+def _http_status_code(exc: Exception) -> int | None:
+    """取异常携带的 HTTP 状态码；无则 None。
+
+    ``not isinstance(value, bool)``：``bool`` 是 ``int`` 子类，某些 mock 会把
+    ``status_code`` 设成 True/False，不排掉会变成 ``http_True``。
+    """
+    response = getattr(exc, "response", None)
+    value = getattr(response, "status_code", None)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def safe_error_type(exc: Exception) -> str:
+    """把富化失败归成**稳定、可公开**的分类码。
+
+    富化器的异常来自联网查第三方 API，消息里可能夹带完整 URL（含 API key）、
+    响应正文、代理地址。落进 ``EnrichmentResult.error`` 就会进报告 JSON 与
+    ``enricher_status``，因此对外只给分类码，异常原文留日志。
+
+    分类顺序有意义，勿调换：``UnicodeError`` 是 ``ValueError`` 子类，但语义是**请求侧**
+    编码失败（如非 latin-1 的 key/header 塞进 HTTP 头），不是响应解析失败——放到
+    ``ValueError`` 之后会误报成 ``parse_error``，把病根指向错误方向。
+    """
+    status_code = _http_status_code(exc)
+    if status_code is not None:
+        return f"http_{status_code}"
+    if isinstance(exc, requests.Timeout):
+        return "timeout"
+    # 内置 TimeoutError（socket.timeout 在 3.10+ 就是它的别名）也归 timeout：
+    # 富化器既有走 requests 的，也有走 socket / DoH 的，两条路的超时对调用方是同一件事。
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    if isinstance(exc, ProviderResponseError):
+        return "provider_response_error"
+    if isinstance(exc, UnicodeError):
+        return "request_encoding_error"
+    if isinstance(exc, ValueError):
+        return "parse_error"
+    return type(exc).__name__
 
 
 def _enrichment_targets(endpoints: list[Endpoint]) -> list[Endpoint]:

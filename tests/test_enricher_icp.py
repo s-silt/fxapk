@@ -120,7 +120,8 @@ def test_default_no_provider_returns_manual_hint() -> None:
     assert isinstance(result, EnrichmentResult)
     assert result.provider == "icp"
     assert result.ok is False
-    assert result.error == icp_mod.MANUAL_HINT
+    # error 只放稳定分类码；人工核验指引在 data["hint"]（见下一条断言）。
+    assert result.error == "provider_unavailable"
     # data 给出人工核验所需链接。
     assert result.data["status"] == "manual_required"
     assert result.data["miit_url"] == icp_mod.MIIT_BEIAN_URL
@@ -202,11 +203,10 @@ def test_provider_network_error_returns_not_ok(
     assert isinstance(result, EnrichmentResult)
     assert result.provider == "icp"
     assert result.ok is False
-    assert result.error
-    assert "TimeoutError" in result.error
+    assert result.error == "timeout"
     # 即便网络异常，也仍附上人工核验链接。
     assert result.data["status"] == "manual_required"
-    assert icp_mod.MANUAL_HINT in result.error
+    assert result.data["hint"] == icp_mod.MANUAL_HINT
 
 
 def test_provider_http_error_returns_not_ok(fake_requests: _FakeRequests) -> None:
@@ -233,7 +233,7 @@ def test_enrich_does_not_raise_on_arbitrary_exception(
     fake_requests.raises = ValueError("bad json")
     result = _ProviderEnricher().enrich(_ep("boom.cn"))
     assert result.ok is False
-    assert "ValueError" in result.error
+    assert result.error == "parse_error"
 
 
 def test_provider_failed_query_not_cached(

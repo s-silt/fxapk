@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import sys
+import logging
 import types
 from datetime import datetime
 from pathlib import Path
@@ -158,23 +159,35 @@ def test_enrich_missing_fields_become_none(fake_whois: _FakeWhoisModule):
 
 
 def test_enrich_network_error_returns_not_ok(fake_whois: _FakeWhoisModule):
-    fake_whois.raises = TimeoutError("connection timed out")
+    """TimeoutError 应归类为 timeout，且公开错误不得包含 URL、密钥或路径。"""
+    fake_whois.raises = TimeoutError(
+        "https://canary.example.test/?key=SECRET /cases/CASE-CANARY"
+    )
     result = WhoisEnricher().enrich(_ep())
 
     assert isinstance(result, EnrichmentResult)
     assert result.provider == "whois"
     assert result.ok is False
-    assert result.error
-    assert "TimeoutError" in result.error
+    assert result.error == "timeout"
+    # error 会进报告 JSON 与 enricher_status —— 异常消息里的目标、凭据、路径一律不得随行。
+    assert "canary.example.test" not in (result.error or "")
+    assert "SECRET" not in (result.error or "")
+    assert "/cases/CASE-CANARY" not in (result.error or "")
     assert result.data == {}
 
 
 def test_enrich_does_not_raise_on_arbitrary_exception(fake_whois: _FakeWhoisModule):
-    fake_whois.raises = ValueError("unparseable whois response")
+    """ValueError 应归类为 parse_error，且公开错误不得包含 URL、密钥或路径。"""
+    fake_whois.raises = ValueError(
+        "https://canary.example.test/?key=SECRET /cases/CASE-CANARY"
+    )
     # 不应抛出。
     result = WhoisEnricher().enrich(_ep())
     assert result.ok is False
-    assert "ValueError" in result.error
+    assert result.error == "parse_error"
+    assert "canary.example.test" not in (result.error or "")
+    assert "SECRET" not in (result.error or "")
+    assert "/cases/CASE-CANARY" not in (result.error or "")
 
 
 def test_failed_query_not_cached(fake_whois: _FakeWhoisModule, _isolated_cache: Path):
@@ -270,32 +283,40 @@ def test_missing_data_file_disables_whois_for_run(
 
     r1 = enr.enrich(_ep("a.fraud-gw.cn"))
     assert r1.ok is False
-    assert "数据" in (r1.error or "")
+    assert r1.error == "data_unavailable"
+    # 文件名与中文说明都不进公开 error（它会进报告）——排障信息在日志里。
+    assert "public_suffix_list.dat" not in (r1.error or "")
+    assert "缺失" not in (r1.error or "")
     assert len(fake_whois.calls) == 1  # 触网一次
 
     # 第二个域名：已禁用 → 短路，不再触网。
     r2 = enr.enrich(_ep("b.fraud-gw.cn"))
     assert r2.ok is False
-    assert len(fake_whois.calls) == 1  # 仍只 1 次（被短路）
+    assert r2.error == "data_unavailable"
+    assert len(fake_whois.calls) == 1  # 仍只 1 次（被短路，不再触网）
 
 
-def test_short_err_strips_whois_boilerplate() -> None:
-    """WHOIS 大段 VeriSign 法律声明 boilerplate → 只留首行关键信息（去噪）。"""
-    from apkscan.enrichers.whois import _short_err
+def test_whois_logs_safe_exception_diagnostic(
+    fake_whois: _FakeWhoisModule,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """日志走 safe_exception_diagnostic —— 有帧位置可排障，无异常消息。
 
-    boilerplate = (
-        'No match for "MAPS.GOOGLEAPIS.COM".\n\n'
-        ">>> Last update of whois database: 2026-06-09T16:04:21Z <<<\n\n"
-        "NOTICE: The expiration date displayed ...\n\n"
-        "TERMS OF USE: You are not authorized ...\n"
+    ★这条防的是「把泄露从 error 字段搬到日志」：logger 的默认 handler 指向 stderr，
+    写进日志不等于私密。
+    """
+    fake_whois.raises = RuntimeError(
+        "https://canary.example.test/?key=SECRET /cases/CASE-CANARY"
     )
-    out = _short_err(Exception(boilerplate))
-    assert out == 'No match for "MAPS.GOOGLEAPIS.COM".'
-    assert "NOTICE" not in out
-    assert "TERMS OF USE" not in out
 
+    with caplog.at_level(logging.DEBUG, logger=whois_mod.__name__):
+        result = WhoisEnricher().enrich(_ep())
 
-def test_short_err_caps_length() -> None:
-    from apkscan.enrichers.whois import _short_err
+    assert result.error == "RuntimeError"
 
-    assert len(_short_err(Exception("x" * 500))) <= 120
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "WHOIS 查询失败" in messages
+    assert "RuntimeError at" in messages   # 类型 + 帧位置仍在
+    assert "canary.example.test" not in messages
+    assert "SECRET" not in messages
+    assert "/cases/CASE-CANARY" not in messages
