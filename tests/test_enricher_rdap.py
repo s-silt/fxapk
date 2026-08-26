@@ -21,6 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from urllib.parse import urlsplit
 
 import apkscan.enrichers.rdap as rdap_mod
 from apkscan.core.models import Endpoint, EnrichmentResult
@@ -184,8 +185,13 @@ def test_rdap_success_extracts_fields(
     # HTTPS rdap.org，带 domain；whois 未被触发。
     assert len(fake_requests.calls) == 1
     url, _kwargs = fake_requests.calls[0]
-    assert url.startswith("https://")
-    assert "fraud-gw.com" in url
+    parts = urlsplit(url)
+    assert parts.scheme == "https"
+    # 断 hostname 与 path 而非子串：子串写法下把 host 换成 <bootstrap>.attacker.invalid
+    # 并把目标域名塞进 query，断言照样通过——等于测试认不出「请求发错了主机」。
+    # 目标域名取自被测端点自身（_ep 的默认值），不在断言里重复硬编码。
+    assert parts.hostname == urlsplit(rdap_mod.RDAP_URL).hostname
+    assert parts.path == f"/domain/{_ep().value}"
     assert fake_whois.calls == []
 
 
