@@ -37,6 +37,7 @@ import time
 import zipfile
 from pathlib import Path
 
+from apkscan.core.logsetup import log_evidence
 from apkscan.core.redact import safe_exception_diagnostic
 from apkscan.core import device, tools
 from apkscan.core.models import AnalysisConfig
@@ -341,7 +342,11 @@ def _zipalign(src: Path, dst: Path, playbook: list[str]) -> str | None:
     playbook.append(f"zipalign -f 4 {src.name} {dst.name}")
     rc, tail = _run_tool(args, env)
     if rc != 0 or not dst.is_file():
-        return f"zipalign 失败（rc={rc}）：{tail.strip()}"
+        # 子进程输出属于不可信诊断信息，不能进入公开错误面；截断不是脱敏。
+        # 原文走 evidence-only（默认终端 handler 整条丢弃），公开面只留固定文案 + rc。
+        if tail:
+            log_evidence(logger, "[repack] zipalign 失败输出尾部（rc=%s）：%s", rc, tail)
+        return f"zipalign 失败（rc={rc}，原始输出见 evidence 日志）"
     return None
 
 
@@ -365,11 +370,19 @@ def _ensure_keystore_and_sign(src: Path, dst: Path, playbook: list[str]) -> str 
     playbook.append(f"apksigner sign --ks <debug.keystore> {dst.name}")
     rc, tail = _run_tool(sign_args, env)
     if rc != 0:
-        return f"apksigner 重签失败（rc={rc}）：{tail.strip()}"
+        if tail:
+            log_evidence(
+                logger, "[repack] apksigner 重签失败输出尾部（rc=%s）：%s", rc, tail
+            )
+        return f"apksigner 重签失败（rc={rc}，原始输出见 evidence 日志）"
     # verify 二次确认签名有效。
     rc2, tail2 = _run_tool([*cmd, "verify", str(dst)], env)
     if rc2 != 0:
-        return f"apksigner verify 未通过（rc={rc2}）：{tail2.strip()}"
+        if tail2:
+            log_evidence(
+                logger, "[repack] apksigner verify 失败输出尾部（rc=%s）：%s", rc2, tail2
+            )
+        return f"apksigner verify 未通过（rc={rc2}，原始输出见 evidence 日志）"
     return None
 
 
@@ -389,7 +402,12 @@ def _ensure_debug_keystore() -> str | None:
     ]
     rc, tail = _run_tool(args, env)
     if rc != 0 or not _KEYSTORE_PATH.is_file():
-        return f"生成 debug keystore 失败（rc={rc}）：{tail.strip()}"
+        # 不可信子进程输出可能包含敏感诊断信息，只写入受限证据面，不进公开返回值。
+        if tail:
+            log_evidence(
+                logger, "[repack] keytool 生成 keystore 失败输出尾部（rc=%s）：%s", rc, tail
+            )
+        return f"生成 debug keystore 失败（rc={rc}，原始输出见 evidence 日志）"
     return None
 
 

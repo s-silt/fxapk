@@ -25,6 +25,7 @@ import threading
 import time
 from typing import Any
 
+from apkscan.core.enrichment import ProviderResponseError
 from apkscan.enrichers import _http
 
 #: 本模块 ``requests`` 符号 = 有界 shim（http=None 默认路径的 get/post 均流式限体，codex B1）。
@@ -158,8 +159,12 @@ def lookup_ip(ip: str, *, http: Any = None, timeout: int = IPINFO_TIMEOUT) -> di
     if not isinstance(payload, dict):
         raise ValueError(f"ip-api 返回非对象：{type(payload).__name__}")
     if payload.get("status") != "success":
+        # ★HTTP 200 且 JSON 已成功解析，是 provider **自己声明**这次查询失败
+        #   （如 "private range"）——既不是我方参数非法，也不是响应解析失败。
+        #   用专用类型让 safe_error_type 归成 provider_response_error，
+        #   而不是靠解析消息文本来猜（那会把业务失败绑定到某个具体字串）。
         message = payload.get("message") or payload.get("status") or "unknown"
-        raise ValueError(f"ip-api 查询未成功：{message}")
+        raise ProviderResponseError(f"ip-api 查询未成功：{message}")
 
     info = _extract(payload)
     _cache_put(ip, info)

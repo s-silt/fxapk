@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
 
+from apkscan.core.enrichment import safe_error_type
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
 from apkscan.enrichers import _http
@@ -146,7 +147,7 @@ class SpamhausDropEnricher(BaseEnricher):
                 provider=self.name,
                 ok=False,
                 data={},
-                error=f"Spamhaus DROP 清单不可用：{exc}",
+                error=safe_error_type(exc),
             )
 
         data: dict[str, Any] = {

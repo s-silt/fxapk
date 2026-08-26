@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 
+from apkscan.core.enrichment import safe_error_type
 from apkscan.enrichers import _http
 
 from apkscan.core.models import Endpoint, EnrichmentResult
@@ -226,7 +227,7 @@ class CertsEnricher(BaseEnricher):
     def enrich(self, ep: Endpoint) -> EnrichmentResult:
         value = (ep.value or "").strip().lower().rstrip(".")
         if not value:
-            return EnrichmentResult(provider=self.name, ok=False, error="空值，跳过 crt.sh 查询")
+            return EnrichmentResult(provider=self.name, ok=False, error="invalid_input")
 
         # 1) 缓存命中直接返回（不再触网）。持锁读，避免与并发写 os.replace 撞车（Windows race）。
         cache = self._load_cache_locked()
@@ -242,7 +243,7 @@ class CertsEnricher(BaseEnricher):
             # 不带 exc_info：超时/限流/502 很常见，整段 traceback 是噪音；消息已含异常摘要。
             logger.debug("certs(crt.sh) 查询失败：%s（%s）", value, exc)
             return EnrichmentResult(
-                provider=self.name, ok=False, error=f"{type(exc).__name__}: {exc}"
+                provider=self.name, ok=False, error=safe_error_type(exc)
             )
 
         # 3) 成功才写缓存（失败不缓存，便于后续重试）。查无结果（空列表）也缓存，避免对慢接口复查。

@@ -17,6 +17,7 @@ from __future__ import annotations
 import pytest
 
 import apkscan.enrichers._ipinfo as ipinfo_mod
+from apkscan.core.enrichment import ProviderResponseError, safe_error_type
 from apkscan.enrichers._ipinfo import lookup_ip, lookup_ips_batch
 
 
@@ -112,13 +113,32 @@ def test_lookup_ip_http_error_raises() -> None:
         lookup_ip("1.2.3.4", http=http)
 
 
-def test_lookup_ip_status_fail_raises_valueerror() -> None:
+def test_lookup_ip_status_fail_raises_provider_response_error() -> None:
+    """provider 在 HTTP 200 里声明 status != success → ProviderResponseError。
+
+    与「响应结构不对」区分开：这里 JSON 解析是成功的，是对方说这次查不了。
+    ProviderResponseError 仍是 RuntimeError 子类，既有的宽泛捕获不受影响。
+    """
     http = _FakeRequests()
     http.response = _FakeResponse(
         {"status": "fail", "message": "private range", "query": "10.0.0.1"}
     )
-    with pytest.raises(ValueError, match="private range"):
+    with pytest.raises(ProviderResponseError, match="private range"):
         lookup_ip("10.0.0.1", http=http)
+
+
+def test_status_fail_classifies_as_provider_response_error() -> None:
+    """该异常经共享分类器后是 provider_response_error，不是 parse_error。"""
+    http = _FakeRequests()
+    http.response = _FakeResponse(
+        {"status": "fail", "message": "private range", "query": "10.0.0.1"}
+    )
+    try:
+        lookup_ip("10.0.0.1", http=http)
+    except Exception as exc:  # noqa: BLE001 - 测试分类结果
+        assert safe_error_type(exc) == "provider_response_error"
+    else:  # pragma: no cover - 上面必抛
+        raise AssertionError("expected ProviderResponseError")
 
 
 def test_lookup_ip_non_object_raises_valueerror() -> None:
@@ -415,9 +435,9 @@ def test_lookup_ips_batch_skips_non_success_item(
 
     assert set(result) == {"1.1.1.1"}
     assert "10.0.0.1" not in result
-    # 被跳过的 IP 未入缓存：随后单查会触网。
+    # 被跳过的 IP 未入缓存：随后单查会触网（单查的 status!=success 抛 ProviderResponseError）。
     http.response = _FakeResponse({"status": "fail", "message": "x", "query": "10.0.0.1"})
-    with pytest.raises(ValueError):
+    with pytest.raises(ProviderResponseError):
         lookup_ip("10.0.0.1", http=http)
     assert len(http.calls) == 1
 

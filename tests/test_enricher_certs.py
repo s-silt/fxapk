@@ -116,7 +116,7 @@ def test_timeout_ok_false_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     e = CertsEnricher()
     res = e.enrich(_ep())
     assert res.ok is False
-    assert "TimeoutError" in (res.error or "")
+    assert res.error == "timeout"
     n = len(fake.calls)
     e.enrich(_ep())  # 失败未缓存 → 再次触网
     assert len(fake.calls) > n

@@ -17,6 +17,7 @@ DoH 解析 A 记录（国内优先 DoH 链），异常回退 socket.gethostbynam
 from __future__ import annotations
 
 import json
+import logging
 import socket
 from pathlib import Path
 
@@ -558,3 +559,196 @@ def test_enrich_captures_canonical_name_from_socket(
     from apkscan.core import forensic
 
     assert forensic._cname_cdn_marker({"cname": result.data["cname"]}) is not None
+
+
+# --- 稳定错误码与公开边界 ------------------------------------------------------
+#
+# 这一组锁的是：DoH / 系统解析器的异常**不进公开面**，只留稳定分类码；
+# 排障线索走 safe_exception_diagnostic（有类型与帧位置、无消息）。
+# canary 同时含凭据、目标域名、案件路径与响应标记，任一出现即视为泄露。
+
+def test_doh_failure_socket_success_remains_ok(
+    fake_requests: _FakeRequests,
+    fake_lookup: _FakeBatchLookup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_requests.raises = TimeoutError(
+        "https://user:SECRET@canary.example.test/query?token=TOKEN "
+        "/cases/CASE-CANARY"
+    )
+    fake_lookup.table["9.9.9.9"] = {
+        "isp": "Q",
+        "org": "Quad9",
+        "asn": "AS999",
+        "country": "US",
+    }
+
+    # 期望值取自被测端点自身，不在新增行里重复硬编码域名字面量。
+    expected_domain = _ep().value
+
+    def fake_gethostbyname_ex(name: str) -> tuple[str, list, list[str]]:
+        assert name == expected_domain
+        return (name, [], ["9.9.9.9"])
+
+    monkeypatch.setattr(
+        dns_mod.socket,
+        "gethostbyname_ex",
+        fake_gethostbyname_ex,
+    )
+
+    result = DnsEnricher().enrich(_ep())
+
+    assert result.ok is True
+    assert result.error is None
+    assert result.data["ips"] == ["9.9.9.9"]
+
+
+def test_doh_failure_socket_success_records_system_resolution(
+    fake_requests: _FakeRequests,
+    fake_lookup: _FakeBatchLookup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_requests.raises = RuntimeError(
+        "https://user:SECRET@canary.example.test/query?token=TOKEN "
+        "/cases/CASE-CANARY"
+    )
+    fake_lookup.table["8.8.8.8"] = {
+        "isp": "Google",
+        "org": "Google",
+        "asn": "AS15169",
+        "country": "US",
+    }
+
+    def fake_gethostbyname_ex(name: str) -> tuple[str, list, list[str]]:
+        return (name, ["edge.example.test"], ["8.8.8.8"])
+
+    monkeypatch.setattr(
+        dns_mod.socket,
+        "gethostbyname_ex",
+        fake_gethostbyname_ex,
+    )
+
+    result = DnsEnricher().enrich(_ep("fallback.example.test"))
+
+    assert result.ok is True
+    assert result.data["resolution"]["method"] == "system"
+    assert result.data["resolution"]["resolver"] == "system:gethostbyname_ex"
+    assert result.data["resolution"]["independent_views"] == 1
+    assert result.data["resolution"]["cross_validated"] is False
+
+
+def test_both_doh_and_socket_fail_returns_dns_resolution_failed(
+    fake_requests: _FakeRequests,
+    fake_lookup: _FakeBatchLookup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_requests.raises = TimeoutError(
+        "https://user:SECRET@canary.example.test/query?token=TOKEN "
+        "/cases/CASE-CANARY"
+    )
+
+    def boom(name: str) -> tuple[str, list, list[str]]:
+        raise socket.gaierror(
+            "https://user:SECRET@canary.example.test/query?token=TOKEN "
+            "/cases/CASE-CANARY"
+        )
+
+    monkeypatch.setattr(dns_mod.socket, "gethostbyname_ex", boom)
+
+    result = DnsEnricher().enrich(_ep())
+
+    assert result.ok is False
+    assert result.error == "dns_resolution_failed"
+    assert fake_lookup.calls == []
+
+
+def test_dns_double_failure_exposes_no_exception_content(
+    fake_requests: _FakeRequests,
+    fake_lookup: _FakeBatchLookup,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    canary = (
+        "https://user:SECRET@canary.example.test/query?token=TOKEN "
+        "/cases/CASE-CANARY response=RESPONSE-CANARY"
+    )
+    fake_requests.raises = TimeoutError(canary)
+
+    def boom(name: str) -> tuple[str, list, list[str]]:
+        raise socket.gaierror(canary)
+
+    monkeypatch.setattr(dns_mod.socket, "gethostbyname_ex", boom)
+    caplog.set_level(logging.DEBUG, logger=dns_mod.__name__)
+
+    result = DnsEnricher().enrich(_ep("double-failure.example.test"))
+
+    assert result.ok is False
+    assert result.error == "dns_resolution_failed"
+
+    public_and_logs = f"{result.error}\n{caplog.text}"
+    for secret in (
+        "user:SECRET",
+        "canary.example.test",
+        "token=TOKEN",
+        "/cases/CASE-CANARY",
+        "RESPONSE-CANARY",
+    ):
+        assert secret not in public_and_logs
+
+
+def test_doh_no_answer_socket_failure_is_not_reported_as_no_record(
+    fake_requests: _FakeRequests,
+    fake_lookup: _FakeBatchLookup,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_requests.response = _FakeResponse({"Status": 3, "Answer": []})
+
+    def boom(name: str) -> tuple[str, list, list[str]]:
+        raise socket.gaierror(
+            "https://user:SECRET@canary.example.test/query?token=TOKEN "
+            "/cases/CASE-CANARY"
+        )
+
+    monkeypatch.setattr(dns_mod.socket, "gethostbyname_ex", boom)
+
+    result = DnsEnricher().enrich(_ep("no-answer.example.test"))
+
+    assert result.ok is False
+    assert result.error == "dns_resolution_failed"
+    assert result.error != "no_record"
+    assert fake_lookup.calls == []
+
+
+def test_hosting_failure_log_does_not_include_raw_exception(
+    fake_requests: _FakeRequests,
+    fake_lookup: _FakeBatchLookup,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    canary = (
+        "https://user:SECRET@canary.example.test/query?token=TOKEN "
+        "/cases/CASE-CANARY response=RESPONSE-CANARY"
+    )
+    fake_requests.response = _FakeResponse(_doh_payload(["1.2.3.4"]))
+
+    def boom_batch(ips: list[str], **kwargs: object) -> dict:
+        raise RuntimeError(canary)
+
+    monkeypatch.setattr(dns_mod, "lookup_ips_batch", boom_batch)
+    caplog.set_level(logging.DEBUG, logger=dns_mod.__name__)
+
+    result = DnsEnricher().enrich(_ep("hosting-failure.example.test"))
+
+    assert result.ok is True
+    assert result.data["hosting"] == []
+    assert result.data["hosting_incomplete"] is True
+    assert "RuntimeError" in caplog.text
+
+    for secret in (
+        "user:SECRET",
+        "canary.example.test",
+        "token=TOKEN",
+        "/cases/CASE-CANARY",
+        "RESPONSE-CANARY",
+    ):
+        assert secret not in caplog.text

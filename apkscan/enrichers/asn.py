@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from apkscan.core.enrichment import safe_error_type
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
 from apkscan.enrichers import _http, _ipinfo
@@ -130,7 +131,7 @@ class AsnEnricher(BaseEnricher):
         ip = (ep.value or "").strip()
         if not ip:
             return EnrichmentResult(
-                provider=self.name, ok=False, error="空 IP，跳过 ASN 查询"
+                provider=self.name, ok=False, error="invalid_input"
             )
 
         # 1) 缓存命中且未过期直接返回（不消耗网络）。过期（超 TTL / 无时间戳的旧缓存）→ 重查，
@@ -152,7 +153,7 @@ class AsnEnricher(BaseEnricher):
             # 消息已含异常摘要，排障足够。
             logger.debug("ASN 查询失败：%s（%s）", ip, exc)
             return EnrichmentResult(
-                provider=self.name, ok=False, error=f"{type(exc).__name__}: {exc}"
+                provider=self.name, ok=False, error=safe_error_type(exc)
             )
 
         # 3) 成功才写缓存（失败不缓存，便于后续重试）。

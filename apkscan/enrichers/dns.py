@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from apkscan.core.redact import redact_url, safe_exception_diagnostic
+from apkscan.core.enrichment import safe_error_type
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
 from apkscan.enrichers import _http
@@ -218,8 +219,12 @@ class DnsEnricher(BaseEnricher):
         try:
             text = CACHE_FILE.read_text(encoding="utf-8")
             data = json.loads(text)
-        except Exception:
-            logger.warning("DNS 缓存读取/解析失败，忽略：%s", CACHE_FILE, exc_info=True)
+        except Exception as exc:  # noqa: BLE001 - 缓存损坏不应中断富化主流程
+            logger.warning(
+                "DNS 缓存读取/解析失败，忽略：%s（%s）",
+                CACHE_FILE,
+                safe_exception_diagnostic(exc),
+            )
             return {}
         if not isinstance(data, dict):
             logger.warning("DNS 缓存顶层非 dict，忽略：%s", CACHE_FILE)
@@ -250,8 +255,12 @@ class DnsEnricher(BaseEnricher):
                 )
                 tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
                 tmp.replace(CACHE_FILE)
-            except Exception:
-                logger.warning("DNS 缓存写入失败：%s", CACHE_FILE, exc_info=True)
+            except Exception as exc:  # noqa: BLE001 - 缓存写入失败不应中断富化主流程
+                logger.warning(
+                    "DNS 缓存写入失败：%s（%s）",
+                    CACHE_FILE,
+                    safe_exception_diagnostic(exc),
+                )
 
     # ------------------------------------------------------------------ 托管
     def _hosting(self, ips: list[str]) -> tuple[list[dict[str, Any]], bool]:
@@ -269,7 +278,11 @@ class DnsEnricher(BaseEnricher):
         try:
             table = lookup_ips_batch(ips, http=requests, timeout=HOSTING_TIMEOUT)
         except Exception as exc:  # noqa: BLE001 — 托管整批失败不阻塞 IP 列表，但标 incomplete
-            logger.debug("DNS 托管批量查询失败（限速/网络？不缓存该结果）：%s（%s）", ips, exc)
+            logger.debug(
+                "DNS 托管批量查询失败（限速/网络？不缓存该结果）：%s（%s）",
+                ips,
+                safe_exception_diagnostic(exc),
+            )
             return [], True
         hosting: list[dict[str, Any]] = []
         for ip in ips:
@@ -292,7 +305,7 @@ class DnsEnricher(BaseEnricher):
         domain = (ep.value or "").strip().lower()
         if not domain:
             return EnrichmentResult(
-                provider=self.name, ok=False, error="空域名，跳过 DNS 查询"
+                provider=self.name, ok=False, error="invalid_input"
             )
 
         # 1) 缓存命中且未过期直接返回（不消耗网络）。过期（超 TTL / 无时间戳的旧缓存）→ 重查。
@@ -310,14 +323,20 @@ class DnsEnricher(BaseEnricher):
         cnames: list[str] = []
         rejected_answers: list[dict[str, str]] = []
         resolution: dict[str, Any] = {}
-        doh_err: str | None = None
+        # ★两个分类码只用于调试统计，绝不拼进公开 error：DoH 提供方的异常里可能有
+        #   完整 URL（含 key）与响应片段，而 error 会进 report.json 与 enricher_status。
+        doh_exc: str | None = None
+        socket_exc: str | None = None
         try:
             ips, cnames, rejected_answers, resolution = _resolve_doh(domain)
         except Exception as exc:  # noqa: BLE001 — 富化失败不得炸主流程
-            # 不带异常消息：DoH 提供方的异常里可能有完整 URL（含 key）与响应片段，
-            # 而 doh_err 会进 EnrichmentResult.error → typical_error → 报告。
-            doh_err = type(exc).__name__
-            logger.debug("DoH 解析失败，回退系统解析器：%s（%s）", domain, exc)
+            doh_exc = safe_error_type(exc)
+            logger.debug(
+                "DoH 解析失败，回退系统解析器：%s（%s；分类=%s）",
+                domain,
+                safe_exception_diagnostic(exc),
+                doh_exc,
+            )
 
         if not ips:
             try:
@@ -329,11 +348,22 @@ class DnsEnricher(BaseEnricher):
                 )
                 resolution = socket_resolution
             except Exception as exc:  # noqa: BLE001 — 富化失败不得炸主流程
-                logger.debug("DNS 解析失败（DoH+系统解析器）：%s（%s）", domain, exc)
-                err = doh_err or f"{type(exc).__name__}: {exc}"
-                return EnrichmentResult(
-                    provider=self.name, ok=False, error=f"DNS 解析失败: {err}"
+                socket_exc = safe_error_type(exc)
+                logger.debug(
+                    "DNS 系统解析器回退失败：%s（%s；DoH 分类=%s；系统分类=%s）",
+                    domain,
+                    safe_exception_diagnostic(exc),
+                    doh_exc or "none",
+                    socket_exc,
                 )
+                # ★DoH 已返回拒绝答案（Fake-IP/私网）时，它仍是一次**有效观测**：
+                #   保留证据走下面的 no_usable_public_a，不能误判成「双解析器失败」。
+                if not rejected_answers:
+                    return EnrichmentResult(
+                        provider=self.name,
+                        ok=False,
+                        error="dns_resolution_failed",
+                    )
 
         if not ips:
             if rejected_answers:
@@ -351,7 +381,7 @@ class DnsEnricher(BaseEnricher):
                     data["cname"] = cnames
                 return EnrichmentResult(provider=self.name, ok=True, data=data)
             return EnrichmentResult(
-                provider=self.name, ok=False, error="DNS 无 A 记录（解析为空）"
+                provider=self.name, ok=False, error="no_record"
             )
 
         # 3) 对每个 IP 查托管归属。

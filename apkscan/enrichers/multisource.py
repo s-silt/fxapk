@@ -14,10 +14,14 @@ from html import unescape
 from typing import Any, Mapping
 from urllib.parse import urlsplit
 
-import requests
 
 from apkscan.enrichers import _http
 
+from apkscan.core.enrichment import (
+    ProviderResponseError as _ProviderResponseError,
+    _http_status_code,
+    safe_error_type as _safe_error_type,
+)
 from apkscan.core.closure import SOURCE_STATUSES
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
@@ -84,10 +88,6 @@ _ABUSE_CONTACT_MAX_ITEMS = 32
 #: 合法 ASN 取值范围（0 与 4294967295 为保留值）。
 _RIPESTAT_MIN_ASN = 1
 _RIPESTAT_MAX_ASN = 4_294_967_294
-
-
-class _ProviderResponseError(RuntimeError):
-    """Sanitized marker for provider-declared errors in HTTP 200 responses."""
 
 
 @dataclass(frozen=True)
@@ -627,30 +627,6 @@ def _safe_host_reference(value: object) -> str | None:
     authority = f"{host}:{port}" if port is not None else host
     scheme = parsed.scheme.lower()
     return f"{scheme}://{authority}" if scheme in {"http", "https"} else authority
-
-
-def _http_status_code(exc: Exception) -> int | None:
-    response = getattr(exc, "response", None)
-    value = getattr(response, "status_code", None)
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-
-def _safe_error_type(exc: Exception) -> str:
-    status_code = _http_status_code(exc)
-    if status_code is not None:
-        return f"http_{status_code}"
-    if isinstance(exc, requests.Timeout):
-        return "timeout"
-    if isinstance(exc, _ProviderResponseError):
-        return "provider_response_error"
-    # ★UnicodeError（UnicodeEncodeError 等）是 ValueError 子类，但语义是**请求侧**编码失败
-    #   （如非 latin-1 的 key/header 塞进 HTTP 头），不是响应解析失败——须在 ValueError 前甄别，
-    #   否则误报成 parse_error，把病根（密钥/参数被污染）指向错误方向。
-    if isinstance(exc, UnicodeError):
-        return "request_encoding_error"
-    if isinstance(exc, ValueError):
-        return "parse_error"
-    return type(exc).__name__
 
 
 def _credential(names: tuple[str, ...]) -> str:
