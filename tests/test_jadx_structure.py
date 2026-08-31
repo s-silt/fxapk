@@ -496,8 +496,31 @@ def test_build_accepts_duplicate_qualified_names_across_paths(tmp_path: Path) ->
     assert result.state == IndexBuildState.BUILT, result.diagnostics
 
 
-def test_build_rejects_same_identity_in_one_file(tmp_path: Path) -> None:
-    """同一文件内同 (name, path) 的两个声明是提取歧义 → 发布闸门照拒。"""
+def test_build_gate_rejects_duplicate_identity_from_external_scan(tmp_path: Path) -> None:
+    """发布门直达（codex 复审 P2）：绕过扫描层、直接注入重复 (name, path) 结构 → build 拒绝。
+
+    扫描层先去重使既有测试触达不到这道闸；此测试锁住「即使 scan 结果来自外部/被篡改，
+    build 也不会产出注定 CacheMiss 的半成品 shard」。
+    """
+    import dataclasses
+
+    manifest = _make_manifest(tmp_path)
+    src = tmp_path / "java"
+    _java_tree(src, {"p000/a.java": "class a {\n}\n"})
+    scan = scan_java_sources(src, [], lineage=manifest.dex_lineage[0], limits=Limits())
+    assert scan.structure, "前置：真实扫描至少产出一条结构"
+    dup_scan = dataclasses.replace(
+        scan, structure=[*scan.structure, dict(scan.structure[0])]
+    )
+    store = JadxIndexStore(tmp_path / "cache")
+    result = store.build_index(tmp_path / "src", manifest, scan=dup_scan)
+    assert isinstance(result, IndexBuildResult)
+    assert result.state == IndexBuildState.FAILED
+    assert any("duplicate_structure" in d for d in result.diagnostics), result.diagnostics
+
+
+def test_build_deduplicates_same_identity_in_one_file_as_partial(tmp_path: Path) -> None:
+    """扫描层保留首个同身份声明并降级；存储层仍拒绝外部注入的重复结构。"""
     manifest = _make_manifest(tmp_path)
     src = tmp_path / "java"
     _java_tree(src, {"p000/a.java": "class a {\n}\n\nclass a {\n}\n"})
@@ -505,8 +528,11 @@ def test_build_rejects_same_identity_in_one_file(tmp_path: Path) -> None:
     store = JadxIndexStore(tmp_path / "cache")
     result = store.build_index(tmp_path / "src", manifest, scan=scan)
     assert isinstance(result, IndexBuildResult)
-    assert result.state == IndexBuildState.FAILED
-    assert result.diagnostics == ("duplicate_structure at $.scan.structure",)
+    assert result.state == IndexBuildState.BUILT
+    assert result.coverage == "partial"
+    assert [(item["name"], item["path"]) for item in scan.structure] == [
+        ("a", "p000/a.java")
+    ]
 
 
 def test_load_rejects_same_name_paths_out_of_order(tmp_path: Path) -> None:

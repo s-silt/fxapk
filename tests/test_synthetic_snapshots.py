@@ -70,20 +70,25 @@ def test_sample_names_unique() -> None:
     assert not dup, f"SAMPLES 出现重名样本 {dup}，后者会静默覆盖前者"
 
 
-def test_visibility_projection_includes_java_source() -> None:
-    """B2 新增的 Java 通道必须进入语义快照，删除或漂移时基线才能报警。"""
+def test_visibility_projection_includes_manifest_and_java_sources() -> None:
+    """Manifest/Java 通道必须进入语义快照，删除或漂移时基线才能报警。"""
     run = snapshot.SampleRun(
         report=None,  # type: ignore[arg-type] - 此投影只读取 raw
         raw={
             "meta": {
                 "visibility": {
-                    "sources": {"java": {"visibility": "timeout"}},
+                    "sources": {
+                        "manifest": {"visibility": "unavailable"},
+                        "java": {"visibility": "timeout"},
+                    },
                 }
             }
         },
         digest={},
     )
-    assert snapshot._project_visibility(run)["sources"]["java"] == "timeout"
+    sources = snapshot._project_visibility(run)["sources"]
+    assert sources["manifest"] == "unavailable"
+    assert sources["java"] == "timeout"
 
 
 @pytest.mark.parametrize("sample", SAMPLES, ids=lambda s: s.name)

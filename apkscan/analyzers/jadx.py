@@ -18,6 +18,7 @@ jadx 反编译出可读 Java 后，真实接口与硬编码密钥往往在字符
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import ipaddress
 import json
@@ -394,6 +395,23 @@ def _apk_dex_ordinal(member_name: str, suffix: str | None) -> int:
     return int(suffix) - 1
 
 
+def _open_apk_dex_member(
+    archive: zipfile.ZipFile, info: zipfile.ZipInfo
+) -> IO[bytes]:
+    """读取顶层 DEX，并兼容仅误置 ZIP encrypted bit 的 APK。
+
+    部分 APK 的 central/local header 把 bit 0 置为 1，但载荷并未加密；JADX 会正常
+    读取，Python ``zipfile`` 却在解压前要求口令。这里只对已通过顶层 classes*.dex
+    白名单的成员清除 ZipInfo 视图中的 bit 0；真实加密载荷仍会在解压或 CRC 校验时
+    fail-closed，不能进入 lineage。
+    """
+    if info.flag_bits & 0x1:
+        readable = copy.copy(info)
+        readable.flag_bits &= ~0x1
+        return archive.open(readable, "r")
+    return archive.open(info, "r")
+
+
 def _materialize_dex_inputs(
     apk_path: str,
     extra_dex_paths: Sequence[str],
@@ -449,7 +467,7 @@ def _materialize_dex_inputs(
                 for ordinal, info in valid_members:
                     relative = f"apk/{info.filename}"
                     destination = Path(root) / relative
-                    with archive.open(info, "r") as source:
+                    with _open_apk_dex_member(archive, info) as source:
                         digest, written = _copy_stream_limited(
                             source, destination,
                             total_remaining=total_budget - total_written,
@@ -466,7 +484,7 @@ def _materialize_dex_inputs(
                     )
         except _DexMaterializeError:
             raise
-        except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
+        except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile, zlib.error) as exc:
             raise _DexMaterializeError(
                 _INDEX_REASON_DEX_MATERIALIZE_FAILED,
                 f"读取 APK ZIP 失败：{exc}",
@@ -986,6 +1004,10 @@ class JadxAnalyzer(BaseAnalyzer):
                                                 index_receipt,
                                                 _INDEX_REASON_BUILD_FAILED,
                                             )
+                                            for diagnostic in built.diagnostics:
+                                                reason, separator, _ = str(diagnostic).partition(" at ")
+                                                if separator and re.fullmatch(r"[a-z0-9_]+", reason):
+                                                    _append_index_reason(index_receipt, reason)
                             else:
                                 # 未知返回形态不能当 miss，更不能覆盖已有 cache。
                                 index_receipt["status"] = "unavailable"

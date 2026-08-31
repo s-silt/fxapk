@@ -80,7 +80,6 @@ META_WRITE_CATEGORIES = {
     'runtime_sensitive_apis': 'signal',
     'runtime_traced': 'coverage',
     'runtime_variant': 'signal',
-    'visibility': 'signal',
 }
 META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
 # 待定：数据库清单可能只是动态留档，也可能应驱动受害数据取证；先按信号报警。
@@ -2534,9 +2533,11 @@ def merge_and_rerender(
     # —— 同一个文件里自相矛盾，且 next_actions 还在建议"去抓包"。
     # assess 自带兜底、绝不抛，不破坏本函数「异常不外抛」的契约。
     try:
-        from apkscan.core import visibility as _visibility
+        # Reuse the shared writer so merge cannot erase confirmed visibility gaps from
+        # reports whose raw metadata was trimmed outside the tool.
+        from apkscan.core.closure import refresh_visibility_snapshot
 
-        report.meta["visibility"] = _visibility.assess({"meta": report.meta})
+        refresh_visibility_snapshot(report.meta)
         stats["visibility_refreshed"] = True
     except Exception:  # noqa: BLE001 - 重算失败不得影响已完成的合并
         logger.exception("[merge] 可见性重求值失败，保留分析期快照")

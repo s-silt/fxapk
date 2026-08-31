@@ -29,7 +29,7 @@ def _producer(kind: rc.ProducerKind = rc.ProducerKind.SYSTEM) -> rc.ProducerRef:
     )
 
 
-_ALL_SOURCES = ("dex", "java", "native", "resource", "runtime")
+_ALL_SOURCES = ("manifest", "dex", "java", "native", "resource", "runtime")
 
 
 def _visibility(
@@ -80,6 +80,19 @@ def test_single_blocked_claim_java_timeout_exact_fields() -> None:
         "java_visibility_timeout",
     )
     assert gap.required_observation_types == ("jadx_java_surface",)
+
+
+def test_manifest_unavailable_produces_attributable_gap() -> None:
+    doc = _visibility(
+        blocked=["static_endpoint_exhaustive"],
+        levels={"manifest": "unavailable"},
+    )
+    (gap,) = _build(doc)
+    assert gap.reason_codes == (
+        "claim.static_endpoint_exhaustive",
+        "manifest_visibility_unavailable",
+    )
+    assert gap.required_observation_types == ("manifest_surface",)
     assert gap.coverage_requirements == ()
     assert gap.gap_id.startswith("gap-sha256:")
 

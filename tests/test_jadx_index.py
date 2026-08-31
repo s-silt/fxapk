@@ -818,6 +818,41 @@ def test_giant_method_keeps_structure_partial(tmp_path: Path) -> None:
     assert len(giant["calls"]) == 256  # 截断点精确在 cap
 
 
+def test_scan_deduplicates_repeated_class_identity_as_partial(tmp_path: Path) -> None:
+    """JADX 可生成同路径同限定名的重复声明；扫描层保留首条并诚实降级，
+    不能把整个可查询索引挡在发布门外。存储层的重复结构拒绝仍保持不变。"""
+    src = tmp_path / "java"
+    _java_tree(
+        src,
+        {
+            "com/x/Outer.java": (
+                "package com.x;\n"
+                "class Outer {\n"
+                "    class Dup {}\n"
+                "    class Dup {}\n"
+                "}\n"
+            )
+        },
+    )
+
+    manifest = _make_manifest(tmp_path)
+    scan = scan_java_sources(
+        src, [], lineage=manifest.dex_lineage[0], limits=Limits()
+    )
+
+    identities = [(item["name"], item["path"]) for item in scan.structure]
+    assert identities.count(("com.x.Outer$Dup", "com/x/Outer.java")) == 1
+    assert scan.structure_limit_hit is True
+    assert scan.coverage == "partial"
+
+    built = JadxIndexStore(tmp_path / "cache").build_index(
+        tmp_path / "src", manifest, scan=scan
+    )
+    assert isinstance(built, IndexBuildResult)
+    assert built.state == IndexBuildState.BUILT
+    assert built.coverage == "partial"
+
+
 def test_total_byte_budget_stops_scan_honestly(tmp_path: Path) -> None:
     """★聚合读取预算：max_files × max_file_bytes 的理论积（调大 max_files 后约
     47GiB）不能成为敌对样本可实际兑现的读取量。累计读取触顶即停、剩余文件不扫，

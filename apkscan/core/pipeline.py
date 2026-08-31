@@ -82,6 +82,7 @@ META_WRITE_CATEGORIES = {
     'analysis_environment': 'coverage',
     'analysis_started_at': 'record',
     'analyzer_receipts': 'coverage',
+    'apk_validation_ok': 'signal',
     'apk_validation_warning': 'signal',
     'asset_scores': 'signal',
     'config_probe_plan': 'signal',
@@ -416,6 +417,9 @@ def _stage_degradation_flags(state: _PipelineState) -> None:
         meta["dex_parse_failed"] = True
         logger.warning("DEX 不可用（加固/无 dex），静态端点/SDK/支付线索严重不完整")
     if getattr(ctx, "apk_validation_ok", True) is False:
+        # 布尔键是机器可判定状态（codex 复审 P1）：缺失 = 校验通过（「缺失=无事件」契约），
+        # 出现且为 False = Manifest/包名/组件/权限面不可信。中文 warning 仅供人读。
+        meta["apk_validation_ok"] = False
         meta["apk_validation_warning"] = "APK 合法性校验异常，分析结果可能不可靠（详见日志）"
     # 额外 DEX（脱壳产物）的加载账目：requested/loaded/failed。脱壳 dump 的 DEX 成批
     # 不被 androguard 接受是常态（Android 10+ hidden-api flag），只有把失败数带进 meta，

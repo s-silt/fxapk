@@ -16,6 +16,7 @@ import subprocess
 import zipfile
 import zlib
 from collections.abc import Iterator, Mapping
+from contextvars import ContextVar
 from functools import cached_property, lru_cache
 from pathlib import Path
 from typing import Any, BinaryIO, NoReturn
@@ -458,6 +459,12 @@ class ZipEntryTooLargeError(RuntimeError):
 
 _ZIP_EXTRACT_PATCHED = False
 
+#: DEX 实际解压累计器（Level 2.5）：每次 ``load_apk`` 建立独立作用域，兼容并发/嵌套调用；
+#: ``None`` 表示当前调用不在 fxapk 的 APK 加载生命周期内，不启用跨条目聚合。
+_dex_extract_total_bytes: ContextVar[int | None] = ContextVar(
+    "dex_extract_total_bytes", default=None
+)
+
 
 def _bounded_extract_file_based_on_header_info(
     apk_file: BinaryIO,
@@ -612,6 +619,21 @@ def _bounded_extract_file_based_on_header_info(
             extracted_data = compressed_data
             indicator = "STORED_TAMPERED"
 
+    if entry is not None and _APK_DEX_MEMBER_RE.fullmatch(entry):
+        previous_total = _dex_extract_total_bytes.get()
+        if previous_total is not None:
+            # Level 2.5：对 classes*.dex 的实际解压产出跨条目累计。声明可低报骗过
+            # Level 1，但每条真实膨胀都会计入这里；单条不超限、总量超限仍拒绝。
+            actual_total = previous_total + len(extracted_data)
+            _dex_extract_total_bytes.set(actual_total)
+        else:
+            actual_total = None
+        if actual_total is not None and actual_total > _DEX_TOTAL_LIMIT_BYTES:
+            logger.warning(
+                "apkInspector 有界解压拒绝（聚合）：classes*.dex 实际解压累计 %d 字节 > %d 上限（末条 %s）",
+                actual_total, _DEX_TOTAL_LIMIT_BYTES, entry,
+            )
+            raise ZipEntryTooLargeError(entry, _DEX_TOTAL_LIMIT_BYTES)
     return extracted_data, indicator
 
 
@@ -1224,6 +1246,46 @@ def _dt(value: Any) -> str:
 #: 超上限才真能把我们炸出 OOM；其余条目由 read_file 的逐条闸拦住即可。
 _EAGERLY_DECOMPRESSED_RE = re.compile(r"^(AndroidManifest\.xml|resources\.arsc|classes\d*\.dex)$")
 
+# DEX 聚合预算（Level 1.5）：单个核心条目没超 zip-bomb 上限、但大量 classesN.dex 的
+# **总解压量**仍可击穿内存。口径须与 analyzers/jadx.py 的物化预算常量同步
+# （_MAX_MATERIALIZE_DEX_BYTES / _MAX_MATERIALIZE_TOTAL_BYTES / _MAX_MATERIALIZE_DEX_COUNT），
+# 改任何一处必须同步另一处（doctor 模式的「须与权威同步」注释）。
+_APK_DEX_MEMBER_RE = re.compile(r"^classes(\d*)\.dex$")
+_DEX_SINGLE_LIMIT_BYTES = 256 * 1024 * 1024
+_DEX_TOTAL_LIMIT_BYTES = 1024 * 1024 * 1024
+_DEX_COUNT_LIMIT = 200
+
+
+def _reject_if_dex_budget_exceeded(path: str) -> None:
+    """按声明大小预检 DEX 聚合预算，防单条不超限、总量击穿内存的矩阵炸弹。
+
+    androguard ``get_all_dex()`` 一次性解压全部 classes*.dex，循环前内存已付出；
+    预算必须在它之前按中央目录声明拦（与 _reject_if_zip_bomb 同一 Level 1 思路）。
+    无效 Manifest 降级路径同样走到 get_all_dex，此闸两路共保。
+    """
+    try:
+        with zipfile.ZipFile(path) as zf:
+            infos = zf.infolist()
+    except Exception:  # noqa: BLE001 - 打不开/非 zip：交既有错误路径，不在此提前判死
+        return
+    total = 0
+    count = 0
+    for info in infos:
+        if _APK_DEX_MEMBER_RE.fullmatch(info.filename) is None:
+            continue
+        if info.file_size > _DEX_SINGLE_LIMIT_BYTES:
+            raise ApkParseError(
+                f"拒绝加载 APK（DEX 条目 {info.filename} 声明解压 {info.file_size} 字节 > "
+                f"{_DEX_SINGLE_LIMIT_BYTES} 上限）：{path}"
+            )
+        total += info.file_size
+        count += 1
+    if count > _DEX_COUNT_LIMIT or total > _DEX_TOTAL_LIMIT_BYTES:
+        raise ApkParseError(
+            f"拒绝加载 APK（{count} 个 DEX 条目共声明解压 {total} 字节，超出 "
+            f"{_DEX_COUNT_LIMIT} 个 / {_DEX_TOTAL_LIMIT_BYTES} 字节聚合预算）：{path}"
+        )
+
 
 def _reject_if_zip_bomb(path: str) -> None:
     """交给 androguard 全量解析前的 zip 炸弹前置拦截（Level 1：信中央目录声明大小）。
@@ -1293,49 +1355,57 @@ def load_apk(
     hiddenapi_baseline = hiddenapi_flags_snapshot()
     # zip 炸弹前置拦截：在 androguard 全量解析（内部解压 DEX/manifest）前先按声明大小拒炸弹。
     _reject_if_zip_bomb(path)
+    # DEX 聚合预算（codex 复审 P2）：单条不超限、总量击穿内存的矩阵炸弹在 get_all_dex 前拦。
+    _reject_if_dex_budget_exceeded(path)
     from androguard.core.apk import APK
     from androguard.core.dex import DEX
 
+    budget_token = _dex_extract_total_bytes.set(0)
     try:
-        apk = APK(path)
-    except Exception as exc:  # noqa: BLE001 - 转成清晰的领域异常
-        logger.exception("APK 解析失败：%s", path)
-        raise ApkParseError(f"无法解析 APK：{path}（{exc}）") from exc
+        try:
+            apk = APK(path)
+        except Exception as exc:  # noqa: BLE001 - 转成清晰的领域异常
+            logger.exception("APK 解析失败：%s", path)
+            raise ApkParseError(f"无法解析 APK：{path}（{exc}）") from exc
 
-    apk_validation_ok = True
-    try:
-        if not apk.is_valid_APK():
-            raise ApkParseError(f"非法 APK（结构校验未通过）：{path}")
-    except ApkParseError:
-        raise
-    except Exception:  # noqa: BLE001 - is_valid_APK 自身异常不应阻塞，但要记录并标记
-        logger.exception("is_valid_APK 检测异常，继续尝试加载：%s", path)
-        apk_validation_ok = False
+        apk_validation_ok = True
+        try:
+            if not apk.is_valid_APK():
+                # Manifest 字符串池/资源头投毒会令 Androguard 判整包 invalid，但 ZIP 与
+                # classes*.dex 仍可被 JADX 正常消费。这里降级而非整体拒绝，使 DEX/JADX
+                # 观察面不被一个坏 Manifest 静默压掉；最终报告通过 apk_validation_ok 明示
+                # Manifest/包名/组件面不可信。真正的 ZIP/核心 DEX 炸弹仍在前后两层硬拒绝。
+                logger.warning("APK 结构校验未通过，降级继续 DEX/JADX 分析：%s", path)
+                apk_validation_ok = False
+        except Exception:  # noqa: BLE001 - is_valid_APK 自身异常不应阻塞，但要记录并标记
+            logger.exception("is_valid_APK 检测异常，继续尝试加载：%s", path)
+            apk_validation_ok = False
 
-    dex_objs: list = []
-    dex_available = True
-    try:
-        # ★ 提速（实测 22.8s→8.8s，2.6x）：只建 DEX 对象（字符串池/类/方法即够静态分析），从已解析的
-        #   apk 直接取各 classes*.dex 字节构造 DEX。**不走 AnalyzeAPK**——后者会重复解析一遍 APK，
-        #   还构建并丢弃 androguard 最耗时的 Analysis 交叉引用图（本项目从不使用 dx）。
-        for dex_bytes in apk.get_all_dex():
-            try:
-                dex_objs.append(DEX(dex_bytes))
-            except Exception:
-                logger.exception("单个 DEX 解析失败，跳过：%s", path)
-    except ZipEntryTooLargeError as exc:
-        # ★DEX 是核心条目：Level 2 按实际产出拒读，与 Level 1 对核心条目声明超限的 fail-fast
-        #   同一口径——必须整体拒绝，不能落进下面的「可能加固」降级继续分析。否则把炸弹放在
-        #   classes2.dex 就能让已解析的主 DEX 一并清空（dex_objs=[]）、形成静态分析规避
-        #   （codex 复审 P2）。
-        raise ApkParseError(
-            f"拒绝加载 APK（DEX 条目 {exc.entry or '<未知条目>'} 实际解压超 {exc.limit} 字节上限，"
-            f"疑 zip 炸弹）：{path}"
-        ) from exc
-    except Exception:
-        # DEX 不可见（加固）不应使整体失败：manifest/资源/证书仍可用
-        logger.exception("DEX 解析失败（可能加固），降级为无 DEX 字符串：%s", path)
-        dex_objs = []
+        dex_objs: list = []
+        dex_available = True
+        try:
+            # ★ 提速（实测 22.8s→8.8s，2.6x）：只建 DEX 对象（字符串池/类/方法即够静态分析），
+            #   从已解析的 apk 直接取各 classes*.dex 字节构造 DEX。**不走 AnalyzeAPK**——后者会
+            #   重复解析一遍 APK，还构建并丢弃最耗时的 Analysis 交叉引用图（本项目从不使用 dx）。
+            for dex_bytes in apk.get_all_dex():
+                try:
+                    dex_objs.append(DEX(dex_bytes))
+                except Exception:
+                    logger.exception("单个 DEX 解析失败，跳过：%s", path)
+        except ZipEntryTooLargeError as exc:
+            # DEX 是核心条目：Level 2/2.5 实际产出拒读与 Level 1 声明超限同为 fail-fast，
+            # 不能落进下面的「可能加固」降级，否则可借 classes2.dex 清空已解析主 DEX。
+            raise ApkParseError(
+                f"拒绝加载 APK（DEX 条目 {exc.entry or '<未知条目>'} 实际解压超 {exc.limit} 字节上限，"
+                f"疑 zip 炸弹）：{path}"
+            ) from exc
+        except Exception:
+            # DEX 不可见（加固）不应使整体失败：manifest/资源/证书仍可用
+            logger.exception("DEX 解析失败（可能加固），降级为无 DEX 字符串：%s", path)
+            dex_objs = []
+    finally:
+        # 异常、连续样本、并发/嵌套调用都恢复调用前状态，不把实际产出账串到别的样本。
+        _dex_extract_total_bytes.reset(budget_token)
     # 额外 DEX（脱壳 dump）解析；失败的单个 dex 已在 _load_extra_dex 内跳过，
     # 失败明细随 context 带出，最终落到 meta.extra_dex_visibility 与 visibility.dex。
     requested_extra = list(extra_dex or [])

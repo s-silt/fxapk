@@ -18,6 +18,7 @@ import warnings as _warnings
 from typing import Any
 
 from apkscan.core import infra
+from apkscan.core import visibility
 from apkscan.core.models import (
     Confidence,
     Endpoint,
@@ -1636,3 +1637,32 @@ def test_merge_substep_exception_reports_error_not_zero(tmp_path, monkeypatch) -
     # 其余步骤照常跑完（一步崩不阻断全局），且它们标 ok 而非 error。
     others = [v for k, v in steps.items() if k not in ("_boom", boom_name)]
     assert others and all(v["status"] == "ok" for v in others), "一步崩掉不该污染其余步骤的结局"
+
+
+def test_merge_refresh_preserves_confirmed_visibility_gap_after_metadata_trim(
+    tmp_path,
+) -> None:
+    """运行时合并重算不能把旧报告已确认的 DEX 盲区抹成 complete。"""
+    snapshot = visibility.assess({"meta": {"is_hardened": True, "packed": "某壳"}})
+    report = _make_report(
+        meta={
+            # 模拟工具体外裁剪：只留下派生快照和运行时合并所需的质量信号。
+            "visibility": snapshot,
+            "capture_quality": {"dynamic_status": "partial"},
+        }
+    )
+    runtime_report = tmp_path / "runtime_report.json"
+    _write_runtime_report(runtime_report, [])
+
+    merge.merge_and_rerender(
+        report,
+        [],
+        str(tmp_path),
+        formats=["json"],
+        runtime_report_path=str(runtime_report),
+    )
+
+    current = report.meta["visibility"]
+    assert current["sources"]["dex"]["visibility"] == visibility.VIS_STUB_ONLY
+    assert "static_endpoint_exhaustive" in current["blocked_claims"]
+    assert any("沿用先前快照" in w for w in current["sources"]["dex"]["why"])

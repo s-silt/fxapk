@@ -15,7 +15,14 @@ import pytest
 from apkscan.analyzers import jadx
 from apkscan.analyzers.jadx import JadxAnalyzer
 from apkscan.core import proctree
-from apkscan.core.jadx_index import DexRole, JadxIndexStore, Limits, LoadedIndex
+from apkscan.core.jadx_index import (
+    DexRole,
+    IndexBuildResult,
+    IndexBuildState,
+    JadxIndexStore,
+    Limits,
+    LoadedIndex,
+)
 from tests.conftest import FakeContext
 
 _JAVA_BODY = 'class C { String u = "https://cfg-host.example/api"; }\n'
@@ -277,6 +284,29 @@ def test_jadx_zero_output_produces_no_index(
     assert not (cache.exists() and list(cache.rglob("manifest.json")))
 
 
+def test_failed_index_build_surfaces_stable_diagnostic_reason(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """发布门拒绝时回执必须保留稳定原因码，不能只剩笼统 build_failed。"""
+    _patch(monkeypatch)
+    monkeypatch.setattr(
+        JadxIndexStore,
+        "build_index",
+        lambda self, source_root, manifest, *, scan=None: IndexBuildResult(
+            state=IndexBuildState.FAILED,
+            coverage="failed",
+            diagnostics=("duplicate_structure at $.scan.structure",),
+        ),
+    )
+
+    result = JadxAnalyzer().analyze(_ctx(tmp_path))
+
+    assert result.meta["jadx_index_status"] == "failed"
+    reasons = result.meta["jadx_receipt"]["index"]["reason_codes"]
+    assert "index_build_failed" in reasons
+    assert "duplicate_structure" in reasons
+
+
 # ---------------------------------------------------------------------------
 # 复审补锁（codex P2-A 复审：fail-open 闭合、流闸、最终 run 语义、卫生边界）
 # ---------------------------------------------------------------------------
@@ -376,6 +406,43 @@ def test_duplicate_zip_member_rejects_indexing(
     assert result.meta["jadx_status"] == "ok"
 
 
+def test_false_encrypted_dex_flag_still_builds_index(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """APK 可把未加密 DEX 的 ZIP bit 0 误置为 1；JADX 能读时，lineage 物化也应
+    以 CRC 校验后的真实明文继续，不能因 Python zipfile 的口令前置闸禁用索引。"""
+    _patch(monkeypatch)
+    apk = _apk(tmp_path)
+    raw = bytearray(apk.read_bytes())
+    for signature, flag_offset in ((b"PK\x03\x04", 6), (b"PK\x01\x02", 8)):
+        cursor = 0
+        while True:
+            cursor = raw.find(signature, cursor)
+            if cursor < 0:
+                break
+            offset = cursor + flag_offset
+            flags = int.from_bytes(raw[offset : offset + 2], "little") | 0x1
+            raw[offset : offset + 2] = flags.to_bytes(2, "little")
+            cursor += len(signature)
+    apk.write_bytes(raw)
+
+    with zipfile.ZipFile(apk, "r") as archive:
+        info = archive.getinfo("classes.dex")
+        assert info.flag_bits & 0x1
+        with pytest.raises(RuntimeError, match="password required"):
+            archive.open(info, "r")
+
+    ctx = FakeContext(apk_path=str(apk))
+    ctx.jadx_cache_root = str(tmp_path / "jadx-cache")
+    result = JadxAnalyzer().analyze(ctx)
+
+    assert result.meta["jadx_status"] == "ok"
+    assert result.meta["jadx_index_status"] == "built"
+    assert "index_exception" not in result.meta["jadx_receipt"]["index"]["reason_codes"]
+    loaded = _load(ctx, result.meta["jadx_index_key"])
+    assert loaded.manifest.dex_lineage[0].digest.startswith("sha256:")
+
+
 def test_forged_unavailable_reason_not_leaked_into_receipt(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -470,3 +537,134 @@ def test_structure_scan_receives_configured_file_limit(
 
     assert seen_limits
     assert seen_limits[-1].max_files == jadx._MAX_JAVA_FILES
+
+
+# ---------------------------------------------------------------------------
+# codex 复审补锁（P2-1/P2-2）：真加密 / CRC 损坏反例 + 从物化真入口驱动的预算闸
+# ---------------------------------------------------------------------------
+
+def _patch_central_flag(data: bytes, flag: int) -> bytes:
+    """把 zip 中央目录第一个条目的 general purpose flag 改成指定值（字节级）。"""
+    marker = data.find(b"PK\x01\x02")
+    assert marker != -1, "central directory record not found"
+    offset = marker + 8
+    return data[:offset] + flag.to_bytes(2, "little") + data[offset + 2:]
+
+
+def _corrupt_first_data_byte(data: bytes, name: str) -> bytes:
+    """篡改 local header 之后的数据首字节，制造 CRC 损坏（不改任何目录声明）。"""
+    marker = data.find(b"PK\x03\x04")
+    assert marker != -1, "local file header not found"
+    name_len = int.from_bytes(data[marker + 26:marker + 28], "little")
+    extra_len = int.from_bytes(data[marker + 28:marker + 30], "little")
+    payload = marker + 30 + name_len + extra_len
+    assert data[marker + 30:marker + 30 + name_len] == name.encode("ascii")
+    return data[:payload] + bytes([data[payload] ^ 0xFF]) + data[payload + 1:]
+
+
+def _zipcrypto_archive(payload: bytes, password: bytes) -> bytes:
+    """Build a structurally valid one-file traditional ZipCrypto archive."""
+    import io
+    import zlib
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("classes.dex", payload)
+    raw = bytearray(buf.getvalue())
+    local = raw.find(b"PK\x03\x04")
+    central = raw.find(b"PK\x01\x02")
+    eocd = raw.find(b"PK\x05\x06")
+    assert min(local, central, eocd) >= 0
+    name_len = int.from_bytes(raw[local + 26:local + 28], "little")
+    extra_len = int.from_bytes(raw[local + 28:local + 30], "little")
+    data_at = local + 30 + name_len + extra_len
+
+    table: list[int] = []
+    for value in range(256):
+        crc = value
+        for _ in range(8):
+            crc = (crc >> 1) ^ (0xEDB88320 if crc & 1 else 0)
+        table.append(crc)
+
+    keys = [0x12345678, 0x23456789, 0x34567890]
+
+    def update_keys(clear: int) -> None:
+        keys[0] = ((keys[0] >> 8) ^ table[(keys[0] ^ clear) & 0xFF]) & 0xFFFFFFFF
+        keys[1] = ((keys[1] + (keys[0] & 0xFF)) * 134775813 + 1) & 0xFFFFFFFF
+        high = (keys[1] >> 24) & 0xFF
+        keys[2] = ((keys[2] >> 8) ^ table[(keys[2] ^ high) & 0xFF]) & 0xFFFFFFFF
+
+    for byte in password:
+        update_keys(byte)
+
+    crc32 = zlib.crc32(payload) & 0xFFFFFFFF
+    clear_header = bytes(range(11)) + bytes([crc32 >> 24])
+    encrypted = bytearray()
+    for clear in clear_header + payload:
+        temp = (keys[2] | 2) & 0xFFFFFFFF
+        encrypted.append(clear ^ (((temp * (temp ^ 1)) >> 8) & 0xFF))
+        update_keys(clear)
+
+    raw[data_at:data_at + len(payload)] = encrypted
+    shift = len(clear_header)
+    central += shift
+    eocd += shift
+    encrypted_size = len(encrypted)
+    raw[local + 6:local + 8] = (1).to_bytes(2, "little")
+    raw[local + 18:local + 22] = encrypted_size.to_bytes(4, "little")
+    raw[central + 8:central + 10] = (1).to_bytes(2, "little")
+    raw[central + 20:central + 24] = encrypted_size.to_bytes(4, "little")
+    old_central_offset = int.from_bytes(raw[eocd + 16:eocd + 20], "little")
+    raw[eocd + 16:eocd + 20] = (old_central_offset + shift).to_bytes(4, "little")
+    return bytes(raw)
+
+
+def test_materialize_rejects_true_zipcrypto_payload(tmp_path: Path) -> None:
+    """合法 ZipCrypto 可凭密码解密，但清位兼容必须在 CRC 路径 fail-closed。"""
+    import zipfile as zf_mod
+
+    payload = b"dex-payload-clear"
+    password = b"fixture-password"
+    apk_path = tmp_path / "zipcrypto.apk"
+    apk_path.write_bytes(_zipcrypto_archive(payload, password))
+    with zf_mod.ZipFile(apk_path) as archive:
+        info = archive.getinfo("classes.dex")
+        assert info.flag_bits & 0x1
+        assert archive.read(info, pwd=password) == payload
+
+    with pytest.raises(jadx._DexMaterializeError) as exc:
+        jadx._materialize_dex_inputs(str(apk_path), [])
+    assert exc.value.code == "dex_materialize_failed"
+    assert isinstance(exc.value.__cause__, zf_mod.BadZipFile)
+    assert "Bad CRC-32" in str(exc.value.__cause__)
+
+
+def test_materialize_rejects_corrupted_crc_payload(tmp_path: Path) -> None:
+    """bit0=0 的普通条目数据损坏 → CRC 校验拒绝，证明清位兼容之外的 CRC 闸仍在。"""
+    import io
+    import zipfile as zf_mod
+
+    buf = io.BytesIO()
+    with zf_mod.ZipFile(buf, "w", compression=zf_mod.ZIP_STORED) as zf:
+        zf.writestr("classes.dex", b"dex-payload-clear")
+    raw = _corrupt_first_data_byte(buf.getvalue(), "classes.dex")
+
+    apk_path = tmp_path / "bad-crc.apk"
+    apk_path.write_bytes(raw)
+    with pytest.raises(jadx._DexMaterializeError) as exc:
+        jadx._materialize_dex_inputs(str(apk_path), [])
+    assert exc.value.code == "dex_materialize_failed"
+
+
+def test_materialize_total_budget_enforced_at_real_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """总预算闸从 _materialize_dex_inputs 真入口驱动：物化调用点改成无界读取时本测试必须变红。"""
+    monkeypatch.setattr(jadx, "_MAX_MATERIALIZE_TOTAL_BYTES", 32)
+    apk = tmp_path / "budget.apk"
+    with zipfile.ZipFile(apk, "w") as zf:
+        zf.writestr("classes.dex", b"x" * 40)
+        zf.writestr("classes2.dex", b"y" * 40)
+    with pytest.raises(jadx._DexMaterializeError) as exc:
+        jadx._materialize_dex_inputs(str(apk), [])
+    assert exc.value.code == "materialize_budget_exceeded"

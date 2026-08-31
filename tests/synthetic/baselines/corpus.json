@@ -83,6 +83,7 @@
       "sources": {
         "dex": "complete",
         "java": "unknown",
+        "manifest": "complete",
         "native": "complete",
         "resource": "unknown",
         "runtime": "unavailable"
@@ -171,6 +172,7 @@
       "sources": {
         "dex": "complete",
         "java": "unknown",
+        "manifest": "complete",
         "native": "complete",
         "resource": "unknown",
         "runtime": "unavailable"
@@ -257,6 +259,7 @@
       "sources": {
         "dex": "complete",
         "java": "unknown",
+        "manifest": "complete",
         "native": "complete",
         "resource": "unknown",
         "runtime": "unavailable"
@@ -349,6 +352,7 @@
       "sources": {
         "dex": "complete",
         "java": "unknown",
+        "manifest": "complete",
         "native": "complete",
         "resource": "partial",
         "runtime": "unavailable"
@@ -441,6 +445,7 @@
       "sources": {
         "dex": "complete",
         "java": "unknown",
+        "manifest": "complete",
         "native": "complete",
         "resource": "unknown",
         "runtime": "unavailable"
@@ -549,6 +554,7 @@
       "sources": {
         "dex": "stub_only",
         "java": "unknown",
+        "manifest": "complete",
         "native": "complete",
         "resource": "unknown",
         "runtime": "unavailable"
@@ -637,6 +643,7 @@
       "sources": {
         "dex": "complete",
         "java": "unknown",
+        "manifest": "complete",
         "native": "complete",
         "resource": "unknown",
         "runtime": "unavailable"
@@ -725,6 +732,7 @@
       "sources": {
         "dex": "complete",
         "java": "unknown",
+        "manifest": "complete",
         "native": "complete",
         "resource": "unknown",
         "runtime": "unavailable"
@@ -813,6 +821,7 @@
       "sources": {
         "dex": "complete",
         "java": "unknown",
+        "manifest": "complete",
         "native": "complete",
         "resource": "unknown",
         "runtime": "unavailable"
