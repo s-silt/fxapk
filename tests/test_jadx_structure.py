@@ -496,8 +496,8 @@ def test_build_accepts_duplicate_qualified_names_across_paths(tmp_path: Path) ->
     assert result.state == IndexBuildState.BUILT, result.diagnostics
 
 
-def test_build_rejects_same_identity_in_one_file(tmp_path: Path) -> None:
-    """同一文件内同 (name, path) 的两个声明是提取歧义 → 发布闸门照拒。"""
+def test_build_deduplicates_same_identity_in_one_file_as_partial(tmp_path: Path) -> None:
+    """扫描层保留首个同身份声明并降级；存储层仍拒绝外部注入的重复结构。"""
     manifest = _make_manifest(tmp_path)
     src = tmp_path / "java"
     _java_tree(src, {"p000/a.java": "class a {\n}\n\nclass a {\n}\n"})
@@ -505,8 +505,11 @@ def test_build_rejects_same_identity_in_one_file(tmp_path: Path) -> None:
     store = JadxIndexStore(tmp_path / "cache")
     result = store.build_index(tmp_path / "src", manifest, scan=scan)
     assert isinstance(result, IndexBuildResult)
-    assert result.state == IndexBuildState.FAILED
-    assert result.diagnostics == ("duplicate_structure at $.scan.structure",)
+    assert result.state == IndexBuildState.BUILT
+    assert result.coverage == "partial"
+    assert [(item["name"], item["path"]) for item in scan.structure] == [
+        ("a", "p000/a.java")
+    ]
 
 
 def test_load_rejects_same_name_paths_out_of_order(tmp_path: Path) -> None:

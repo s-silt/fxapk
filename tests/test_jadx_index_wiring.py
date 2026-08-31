@@ -15,7 +15,14 @@ import pytest
 from apkscan.analyzers import jadx
 from apkscan.analyzers.jadx import JadxAnalyzer
 from apkscan.core import proctree
-from apkscan.core.jadx_index import DexRole, JadxIndexStore, Limits, LoadedIndex
+from apkscan.core.jadx_index import (
+    DexRole,
+    IndexBuildResult,
+    IndexBuildState,
+    JadxIndexStore,
+    Limits,
+    LoadedIndex,
+)
 from tests.conftest import FakeContext
 
 _JAVA_BODY = 'class C { String u = "https://cfg-host.example/api"; }\n'
@@ -277,6 +284,29 @@ def test_jadx_zero_output_produces_no_index(
     assert not (cache.exists() and list(cache.rglob("manifest.json")))
 
 
+def test_failed_index_build_surfaces_stable_diagnostic_reason(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """发布门拒绝时回执必须保留稳定原因码，不能只剩笼统 build_failed。"""
+    _patch(monkeypatch)
+    monkeypatch.setattr(
+        JadxIndexStore,
+        "build_index",
+        lambda self, source_root, manifest, *, scan=None: IndexBuildResult(
+            state=IndexBuildState.FAILED,
+            coverage="failed",
+            diagnostics=("duplicate_structure at $.scan.structure",),
+        ),
+    )
+
+    result = JadxAnalyzer().analyze(_ctx(tmp_path))
+
+    assert result.meta["jadx_index_status"] == "failed"
+    reasons = result.meta["jadx_receipt"]["index"]["reason_codes"]
+    assert "index_build_failed" in reasons
+    assert "duplicate_structure" in reasons
+
+
 # ---------------------------------------------------------------------------
 # 复审补锁（codex P2-A 复审：fail-open 闭合、流闸、最终 run 语义、卫生边界）
 # ---------------------------------------------------------------------------
@@ -374,6 +404,43 @@ def test_duplicate_zip_member_rejects_indexing(
         in result.meta["jadx_receipt"]["index"]["reason_codes"]
     )
     assert result.meta["jadx_status"] == "ok"
+
+
+def test_false_encrypted_dex_flag_still_builds_index(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """APK 可把未加密 DEX 的 ZIP bit 0 误置为 1；JADX 能读时，lineage 物化也应
+    以 CRC 校验后的真实明文继续，不能因 Python zipfile 的口令前置闸禁用索引。"""
+    _patch(monkeypatch)
+    apk = _apk(tmp_path)
+    raw = bytearray(apk.read_bytes())
+    for signature, flag_offset in ((b"PK\x03\x04", 6), (b"PK\x01\x02", 8)):
+        cursor = 0
+        while True:
+            cursor = raw.find(signature, cursor)
+            if cursor < 0:
+                break
+            offset = cursor + flag_offset
+            flags = int.from_bytes(raw[offset : offset + 2], "little") | 0x1
+            raw[offset : offset + 2] = flags.to_bytes(2, "little")
+            cursor += len(signature)
+    apk.write_bytes(raw)
+
+    with zipfile.ZipFile(apk, "r") as archive:
+        info = archive.getinfo("classes.dex")
+        assert info.flag_bits & 0x1
+        with pytest.raises(RuntimeError, match="password required"):
+            archive.open(info, "r")
+
+    ctx = FakeContext(apk_path=str(apk))
+    ctx.jadx_cache_root = str(tmp_path / "jadx-cache")
+    result = JadxAnalyzer().analyze(ctx)
+
+    assert result.meta["jadx_status"] == "ok"
+    assert result.meta["jadx_index_status"] == "built"
+    assert "index_exception" not in result.meta["jadx_receipt"]["index"]["reason_codes"]
+    loaded = _load(ctx, result.meta["jadx_index_key"])
+    assert loaded.manifest.dex_lineage[0].digest.startswith("sha256:")
 
 
 def test_forged_unavailable_reason_not_leaked_into_receipt(

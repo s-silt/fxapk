@@ -1926,6 +1926,7 @@ def scan_java_sources(
     postings: list[Mapping[str, object]] = []
     files: list[str] = []
     structures: list[dict[str, object]] = []
+    structure_identities: set[tuple[str, str]] = set()
     structure_limit_hit = False
     byte_budget_hit = False
     read_failed = 0
@@ -1977,7 +1978,13 @@ def scan_java_sources(
                     start = column_zero + 1
 
         file_classes, file_limited = _extract_file_structure(relative, text, limits)
-        structures.extend(file_classes)
+        for class_record in file_classes:
+            identity = (str(class_record["name"]), str(class_record["path"]))
+            if identity in structure_identities:
+                structure_limit_hit = True
+                continue
+            structure_identities.add(identity)
+            structures.append(class_record)
         structure_limit_hit = structure_limit_hit or file_limited
 
     # 全 shard 的类按 (name, path) 升序——与 load 侧 canonical 校验同款序。

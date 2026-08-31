@@ -1305,9 +1305,12 @@ def load_apk(
     apk_validation_ok = True
     try:
         if not apk.is_valid_APK():
-            raise ApkParseError(f"非法 APK（结构校验未通过）：{path}")
-    except ApkParseError:
-        raise
+            # Manifest 字符串池/资源头投毒会令 Androguard 判整包 invalid，但 ZIP 与
+            # classes*.dex 仍可被 JADX 正常消费。这里降级而非整体拒绝，使 DEX/JADX
+            # 观察面不被一个坏 Manifest 静默压掉；最终报告通过 apk_validation_ok 明示
+            # Manifest/包名/组件面不可信。真正的 ZIP/核心 DEX 炸弹仍在前后两层硬拒绝。
+            logger.warning("APK 结构校验未通过，降级继续 DEX/JADX 分析：%s", path)
+            apk_validation_ok = False
     except Exception:  # noqa: BLE001 - is_valid_APK 自身异常不应阻塞，但要记录并标记
         logger.exception("is_valid_APK 检测异常，继续尝试加载：%s", path)
         apk_validation_ok = False
