@@ -3,6 +3,30 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
+## 1.11.0 — 2026-08-31
+
+本版强化异常 APK 的 JADX/DEX 可见性与资源边界：对可安全证明为误置 encrypted bit 的顶层
+DEX 继续物化，对无效 Manifest 做显式降级而非丢弃全部静态上下文，并将每一处降级状态贯穿到
+机器可读的 visibility、运行时合并与后续重分析规划。
+
+### Added
+
+- 新增 DEX 物化的单文件、总字节与数量预算，并按实际解压产出跨条目累计；中央目录低报大小、
+  真加密、CRC 损坏、重复核心成员和 zip bomb 继续 fail-closed。
+- 新增无效 Manifest 的 `apk_validation_ok=False` 机器状态及正式 `manifest` 可见性来源；
+  closure 重算与运行时合并后仍保留该盲区，不再把 Manifest/组件面的「未发现」呈现成完整结论。
+- 新增真 ZipCrypto/CRC 损坏反例、pipeline 传播桥、重复结构发布门和预算常量同步等回归锁；
+  关键闸门均做突变验证。
+
+### Changed
+
+- `androguard.is_valid_APK()` 失败时，保留可读取的 DEX/JADX 上下文继续分析；报告和 visibility
+  明确标记 Manifest、包名、组件和权限面不可信。
+- JADX 扫描层遇到相同 `(class name, path)` 的重复声明时保留首条并将 coverage 降为 `partial`；
+  存储/加载层对外部注入或损坏索引中的重复结构仍拒绝发布。
+- 顶层 `classes*.dex` 的 ZIP encrypted bit 兼容仅在成员白名单与有界物化路径内生效；
+  真加密和完整性异常保持稳定错误分类。
+
 ## 1.10.1 — 2026-08-26
 
 本版收口 `1.10.0` 之后的安全与运维修复，重点是**不让外部服务的错误信息、子进程输出与
