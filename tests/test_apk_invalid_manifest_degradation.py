@@ -41,17 +41,34 @@ def test_invalid_manifest_degrades_but_keeps_dex_jadx_analysis_available(
     assert ctx._apk.dex_batches_consumed == 1
 
 
-def test_dex_aggregate_budget_rejects_before_androguard(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """单条不超 zip-bomb 上限、总量超聚合预算的 DEX 矩阵在 androguard 解压前被拒。"""
+def test_dex_aggregate_budget_rejects_before_androguard(tmp_path: Path) -> None:
+    """单条不超 zip-bomb/单文件上限、总量超聚合预算的 DEX 矩阵在 androguard 解压前被拒。
+
+    用字节级放大 central directory 声明构造（不占实际磁盘），走真实常量路径、
+    不 monkeypatch——改小源码常量或拆掉预算闸时本测试必须变红（突变验证过）。
+    """
     import zipfile
 
+    per_dex_declared = 256 * 1024 * 1024  # 恰不超单文件上限，也不超 zip-bomb 的 500MB
     sample = tmp_path / "dex-matrix.apk"
     with zipfile.ZipFile(sample, "w") as zf:
-        zf.writestr(zipfile.ZipInfo("classes.dex"), b"dex\n035\x00" + b"\x00" * 64)
+        for i in range(5):  # 5 × 256MB = 1.25GB > 1GiB 总预算
+            zf.writestr(f"classes{i + 1}.dex" if i else "classes.dex", b"x")
 
-    monkeypatch.setattr(apk_mod, "_DEX_TOTAL_LIMIT_BYTES", 16)
+    raw = bytearray(sample.read_bytes())
+    marker = 0
+    patched = 0
+    while True:
+        marker = raw.find(b"PK\x01\x02", marker)
+        if marker == -1:
+            break
+        raw[marker + 20:marker + 24] = per_dex_declared.to_bytes(4, "little")  # compressed
+        raw[marker + 24:marker + 28] = per_dex_declared.to_bytes(4, "little")  # uncompressed
+        patched += 1
+        marker += 4
+    assert patched == 5, patched
+    sample.write_bytes(bytes(raw))
+
     with pytest.raises(apk_mod.ApkParseError, match="聚合预算"):
         apk_mod.load_apk(str(sample), AnalysisConfig(online=False))
 
