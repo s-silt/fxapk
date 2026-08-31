@@ -562,30 +562,81 @@ def _corrupt_first_data_byte(data: bytes, name: str) -> bytes:
     return data[:payload] + bytes([data[payload] ^ 0xFF]) + data[payload + 1:]
 
 
-def test_materialize_rejects_true_zipcrypto_payload(tmp_path: Path) -> None:
-    """真加密形态（bit0=1 + 12 字节加密头 + 密文）不能靠清位兼容混进 lineage。"""
+def _zipcrypto_archive(payload: bytes, password: bytes) -> bytes:
+    """Build a structurally valid one-file traditional ZipCrypto archive."""
     import io
+    import zlib
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("classes.dex", payload)
+    raw = bytearray(buf.getvalue())
+    local = raw.find(b"PK\x03\x04")
+    central = raw.find(b"PK\x01\x02")
+    eocd = raw.find(b"PK\x05\x06")
+    assert min(local, central, eocd) >= 0
+    name_len = int.from_bytes(raw[local + 26:local + 28], "little")
+    extra_len = int.from_bytes(raw[local + 28:local + 30], "little")
+    data_at = local + 30 + name_len + extra_len
+
+    table: list[int] = []
+    for value in range(256):
+        crc = value
+        for _ in range(8):
+            crc = (crc >> 1) ^ (0xEDB88320 if crc & 1 else 0)
+        table.append(crc)
+
+    keys = [0x12345678, 0x23456789, 0x34567890]
+
+    def update_keys(clear: int) -> None:
+        keys[0] = ((keys[0] >> 8) ^ table[(keys[0] ^ clear) & 0xFF]) & 0xFFFFFFFF
+        keys[1] = ((keys[1] + (keys[0] & 0xFF)) * 134775813 + 1) & 0xFFFFFFFF
+        high = (keys[1] >> 24) & 0xFF
+        keys[2] = ((keys[2] >> 8) ^ table[(keys[2] ^ high) & 0xFF]) & 0xFFFFFFFF
+
+    for byte in password:
+        update_keys(byte)
+
+    crc32 = zlib.crc32(payload) & 0xFFFFFFFF
+    clear_header = bytes(range(11)) + bytes([crc32 >> 24])
+    encrypted = bytearray()
+    for clear in clear_header + payload:
+        temp = (keys[2] | 2) & 0xFFFFFFFF
+        encrypted.append(clear ^ (((temp * (temp ^ 1)) >> 8) & 0xFF))
+        update_keys(clear)
+
+    raw[data_at:data_at + len(payload)] = encrypted
+    shift = len(clear_header)
+    central += shift
+    eocd += shift
+    encrypted_size = len(encrypted)
+    raw[local + 6:local + 8] = (1).to_bytes(2, "little")
+    raw[local + 18:local + 22] = encrypted_size.to_bytes(4, "little")
+    raw[central + 8:central + 10] = (1).to_bytes(2, "little")
+    raw[central + 20:central + 24] = encrypted_size.to_bytes(4, "little")
+    old_central_offset = int.from_bytes(raw[eocd + 16:eocd + 20], "little")
+    raw[eocd + 16:eocd + 20] = (old_central_offset + shift).to_bytes(4, "little")
+    return bytes(raw)
+
+
+def test_materialize_rejects_true_zipcrypto_payload(tmp_path: Path) -> None:
+    """合法 ZipCrypto 可凭密码解密，但清位兼容必须在 CRC 路径 fail-closed。"""
     import zipfile as zf_mod
 
-    payload = b"dex-payload-clear"  # 明文写盘 → central 记录的是明文 CRC
-    buf = io.BytesIO()
-    with zf_mod.ZipFile(buf, "w", compression=zf_mod.ZIP_STORED) as zf:
-        zf.writestr("classes.dex", payload)
-    # 换成 ZipCrypto 形态：数据前插 12 字节加密头 + 模拟密文流，
-    # central CRC 保持明文值——清位读出的字节流 CRC 必然 mismatch。
-    raw = buf.getvalue()
-    marker = raw.find(b"PK\x03\x04")
-    name_len = int.from_bytes(raw[marker + 26:marker + 28], "little")
-    data_at = marker + 30 + name_len
-    encrypted = b"\xa5" * 12 + b"\x00" * (len(payload) + 8)
-    raw = raw[:data_at] + encrypted + raw[data_at + len(payload):]
-    raw = _patch_central_flag(raw, 0x1)
-
+    payload = b"dex-payload-clear"
+    password = b"fixture-password"
     apk_path = tmp_path / "zipcrypto.apk"
-    apk_path.write_bytes(raw)
+    apk_path.write_bytes(_zipcrypto_archive(payload, password))
+    with zf_mod.ZipFile(apk_path) as archive:
+        info = archive.getinfo("classes.dex")
+        assert info.flag_bits & 0x1
+        assert archive.read(info, pwd=password) == payload
+
     with pytest.raises(jadx._DexMaterializeError) as exc:
         jadx._materialize_dex_inputs(str(apk_path), [])
     assert exc.value.code == "dex_materialize_failed"
+    assert isinstance(exc.value.__cause__, zf_mod.BadZipFile)
+    assert "Bad CRC-32" in str(exc.value.__cause__)
 
 
 def test_materialize_rejects_corrupted_crc_payload(tmp_path: Path) -> None:

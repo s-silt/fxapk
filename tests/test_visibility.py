@@ -125,15 +125,15 @@ def test_legacy_report_jadx_status_ok_is_unknown_not_complete():
     assert b["sources"]["java"]["visibility"] == V.VIS_TIMEOUT
 
 
-def test_internal_error_fallback_keeps_five_source_schema(monkeypatch) -> None:  # noqa: ANN001
-    """求值内部异常时仍返回完整五源形状，不能只在正常路径存在 java。"""
+def test_internal_error_fallback_keeps_six_source_schema(monkeypatch) -> None:  # noqa: ANN001
+    """求值内部异常时仍返回完整六源形状，不能只在正常路径存在新增 source。"""
     def _boom(meta):  # noqa: ANN001
         raise RuntimeError("visibility 内部故障（模拟）")
 
     monkeypatch.setattr(V, "_dex_visibility", _boom)
     assessment = V.assess(_report(dex_available=True))
     assert list(assessment["sources"]) == [
-        "dex", "java", "native", "resource", "runtime",
+        "manifest", "dex", "java", "native", "resource", "runtime",
     ]
     assert assessment["sources"]["java"]["visibility"] == V.VIS_UNKNOWN
 

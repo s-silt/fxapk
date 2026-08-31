@@ -335,7 +335,7 @@ def _vis_question(events: tuple[jl.LedgerEvent, ...]) -> object:
 def _complete_visibility(*_args: object, **_kw: object) -> dict:
     sources = {
         name: {"visibility": "complete", "why": [], "inputs_seen": []}
-        for name in ("dex", "java", "native", "resource", "runtime")
+        for name in ("manifest", "dex", "java", "native", "resource", "runtime")
     }
     return {
         "schema_version": "1.1",

@@ -59,7 +59,7 @@ REM_REANALYZED = "reanalyzed_with_extra_dex"
 #: 「静态端点已穷尽」「未发现硬编码凭据」必须 Java 面完整才有资格下。其他主张（通讯录/短信/
 #: 远程配置）由 DEX/资源面独立支撑，不因 JADX 失败被无关阻断。
 _CLAIM_REQUIREMENTS: dict[str, tuple[str, ...]] = {
-    "static_endpoint_exhaustive": ("dex", "java", "native", "resource"),
+    "static_endpoint_exhaustive": ("manifest", "dex", "java", "native", "resource"),
     "no_contact_harvesting": ("dex",),
     "no_sms_interception": ("dex",),
     "no_remote_config": ("dex", "resource"),
@@ -95,6 +95,7 @@ INSUFFICIENT = _INSUFFICIENT
 #: 每个可见性维度实际消费的 ``report.meta`` 原始信号键。快照会记录本轮见到的键集合，
 #: 让后续刷新能区分「合法新增信号」与「旧报告被裁掉了部分输入」。
 _INPUT_KEYS_BY_SOURCE: dict[str, tuple[str, ...]] = {
+    "manifest": ("apk_validation_ok",),
     "dex": (
         "dex_available", "dex_scanned", "dex_strings_truncated", "dex_string_pool",
         "is_hardened", "hardening_structural", "extra_dex_visibility", "artifact_lineage",
@@ -126,6 +127,16 @@ def _meta(report: Any) -> dict:
         return {}
     m = report.get("meta")
     return m if isinstance(m, dict) else {}
+
+
+def _manifest_visibility(meta: dict) -> tuple[str, list[str]]:
+    """Manifest 校验是稀疏事件：键缺失表示本次没有校验失败事件。"""
+    if meta.get("apk_validation_ok") is False:
+        return VIS_UNAVAILABLE, [
+            "APK 合法性校验未通过（apk_validation_ok=False）："
+            "Manifest/包名/组件/权限面不可信，相关『未发现』不构成完整结论"
+        ]
+    return VIS_COMPLETE, []
 
 
 def _dex_visibility(meta: dict) -> tuple[str, list[str]]:
@@ -418,6 +429,12 @@ def _next_actions(sources: dict, remediation: str, meta: dict) -> list[str]:
     dex = sources.get("dex", {}).get("visibility")
     runtime = sources.get("runtime", {}).get("visibility")
 
+    if sources.get("manifest", {}).get("visibility") == VIS_UNAVAILABLE:
+        actions.append(
+            "Manifest 校验失败：重新取得原始 APK，并用 Android 安装/解析工具交叉核验包名、组件与权限；"
+            "在核验前保留 DEX/JADX 阳性发现，但不得把 Manifest 面的『未发现』当成不存在"
+        )
+
     if dex in (VIS_STUB_ONLY, VIS_UNAVAILABLE) and remediation != REM_REANALYZED:
         actions.append(
             "DEX 不可见且未脱壳回灌：跑 `fxapk unpack <apk>`（真机 + frida-dexdump）后重新分析——"
@@ -526,9 +543,17 @@ def reassess_derived(assessment: dict, meta: dict) -> dict:
     closure 可能把裁剪报告中丢失的确证盲区从旧快照回填进 ``sources``。此时不仅
     ``claims``，连逐源说明和补救动作也必须同步，否则机器字段与人读建议会各说各话。
     """
-    sources = assessment.get("sources")
-    if not isinstance(sources, dict):
+    raw_sources = assessment.get("sources")
+    if not isinstance(raw_sources, dict):
         return assessment
+    sources = dict(raw_sources)
+    if "manifest" not in sources:
+        manifest_vis, manifest_why = _manifest_visibility(meta)
+        sources["manifest"] = {
+            "visibility": manifest_vis,
+            "why": manifest_why,
+            "inputs_seen": list(input_keys_seen(meta, "manifest")),
+        }
 
     claims, blocked = _derive_claims(sources)
     remediation = str(assessment.get("remediation") or REM_NOT_ATTEMPTED)
@@ -549,6 +574,7 @@ def reassess_derived(assessment: dict, meta: dict) -> dict:
         )
     return {
         **assessment,
+        "sources": sources,
         "claims": claims,
         "blocked_claims": sorted(blocked),
         "notes": notes,
@@ -578,7 +604,13 @@ def assess(report: Any) -> dict[str, Any]:
         rt_vis, rt_why = _runtime_visibility(meta)
         res_vis, res_why = _resource_visibility(meta)
         java_vis, java_why = _java_visibility(meta)
+        manifest_vis, manifest_why = _manifest_visibility(meta)
         sources = {
+            "manifest": {
+                "visibility": manifest_vis,
+                "why": manifest_why,
+                "inputs_seen": list(input_keys_seen(meta, "manifest")),
+            },
             "dex": {
                 "visibility": dex_vis,
                 "why": dex_why,
@@ -615,14 +647,6 @@ def assess(report: Any) -> dict[str, Any]:
         for src, info in sources.items():
             for w in info["why"]:
                 notes.append(f"[{src}] {w}")
-        # Manifest 校验降级（codex 复审 P1）：sources 无 manifest 维度，但该面不可信
-        # 必须在机器可读输出里显式可见——否则 Manifest/包名/组件/权限的「未发现」会被
-        # 当成完整结论消费。键由 pipeline 按「缺失=无事件」契约写入。
-        if meta.get("apk_validation_ok") is False:
-            notes.append(
-                "[manifest] APK 合法性校验未通过（apk_validation_ok=False）："
-                "Manifest/包名/组件/权限面不可信，相关「未发现」不构成完整结论"
-            )
         notes.extend(rem_why)
         notes.extend(_attribution_caveat(meta))
         next_actions = _next_actions(sources, rem, meta)
@@ -649,7 +673,7 @@ def assess(report: Any) -> dict[str, Any]:
             "schema_version": "1.1",
             "sources": {
                 k: {"visibility": VIS_UNKNOWN, "why": [], "inputs_seen": []}
-                for k in ("dex", "java", "native", "resource", "runtime")
+                for k in ("manifest", "dex", "java", "native", "resource", "runtime")
             },
             "claims": {}, "blocked_claims": sorted(_CLAIM_REQUIREMENTS),
             "remediation": REM_NOT_ATTEMPTED,

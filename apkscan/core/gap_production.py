@@ -36,7 +36,7 @@ _VISIBILITY_LEVELS: Final = frozenset(
 
 # 与 visibility._CLAIM_REQUIREMENTS 同源的生产侧副本。
 _CLAIM_REQUIREMENTS: Final[dict[str, tuple[str, ...]]] = {
-    "static_endpoint_exhaustive": ("dex", "java", "native", "resource"),
+    "static_endpoint_exhaustive": ("manifest", "dex", "java", "native", "resource"),
     "no_contact_harvesting": ("dex",),
     "no_sms_interception": ("dex",),
     "no_remote_config": ("dex", "resource"),
@@ -46,6 +46,7 @@ _CLAIM_REQUIREMENTS: Final[dict[str, tuple[str, ...]]] = {
 }
 
 _OBSERVATION_TYPES: Final[dict[str, str]] = {
+    "manifest": "manifest_surface",
     "dex": "dex_string_surface",
     "java": "jadx_java_surface",
     "native": "native_string_surface",

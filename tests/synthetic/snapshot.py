@@ -171,7 +171,7 @@ def _project_visibility(run: SampleRun) -> dict:
     sources = vis.get("sources") or {}
     claims = vis.get("claims") or {}
     grades: dict[str, Any] = {}
-    for name in ("dex", "java", "native", "resource", "runtime"):
+    for name in ("manifest", "dex", "java", "native", "resource", "runtime"):
         src = sources.get(name, _ABSENT)
         # 源整个缺席 → 哨兵；源在但形状不是 dict（schema 破坏）→ 原值直接现形。
         grades[name] = src.get("visibility", _ABSENT) if isinstance(src, dict) else src

@@ -492,7 +492,7 @@ def test_real_producer_multisource_leaves_residual_trace():
 
     sources = {
         name: {"visibility": "complete", "why": [], "inputs_seen": []}
-        for name in ("dex", "java", "native", "resource", "runtime")
+        for name in ("manifest", "dex", "java", "native", "resource", "runtime")
     }
     sources["dex"]["visibility"] = "partial"
     sources["java"]["visibility"] = "failed"
