@@ -1224,6 +1224,46 @@ def _dt(value: Any) -> str:
 #: 超上限才真能把我们炸出 OOM；其余条目由 read_file 的逐条闸拦住即可。
 _EAGERLY_DECOMPRESSED_RE = re.compile(r"^(AndroidManifest\.xml|resources\.arsc|classes\d*\.dex)$")
 
+# DEX 聚合预算（Level 1.5）：单个核心条目没超 zip-bomb 上限、但大量 classesN.dex 的
+# **总解压量**仍可击穿内存。口径须与 analyzers/jadx.py 的物化预算常量同步
+# （_MAX_MATERIALIZE_DEX_BYTES / _MAX_MATERIALIZE_TOTAL_BYTES / _MAX_MATERIALIZE_DEX_COUNT），
+# 改任何一处必须同步另一处（doctor 模式的「须与权威同步」注释）。
+_APK_DEX_MEMBER_RE = re.compile(r"^classes(\d*)\.dex$")
+_DEX_SINGLE_LIMIT_BYTES = 256 * 1024 * 1024
+_DEX_TOTAL_LIMIT_BYTES = 1024 * 1024 * 1024
+_DEX_COUNT_LIMIT = 200
+
+
+def _reject_if_dex_budget_exceeded(path: str) -> None:
+    """按声明大小预检 DEX 聚合预算，防单条不超限、总量击穿内存的矩阵炸弹。
+
+    androguard ``get_all_dex()`` 一次性解压全部 classes*.dex，循环前内存已付出；
+    预算必须在它之前按中央目录声明拦（与 _reject_if_zip_bomb 同一 Level 1 思路）。
+    无效 Manifest 降级路径同样走到 get_all_dex，此闸两路共保。
+    """
+    try:
+        with zipfile.ZipFile(path) as zf:
+            infos = zf.infolist()
+    except Exception:  # noqa: BLE001 - 打不开/非 zip：交既有错误路径，不在此提前判死
+        return
+    total = 0
+    count = 0
+    for info in infos:
+        if _APK_DEX_MEMBER_RE.fullmatch(info.filename) is None:
+            continue
+        if info.file_size > _DEX_SINGLE_LIMIT_BYTES:
+            raise ApkParseError(
+                f"拒绝加载 APK（DEX 条目 {info.filename} 声明解压 {info.file_size} 字节 > "
+                f"{_DEX_SINGLE_LIMIT_BYTES} 上限）：{path}"
+            )
+        total += info.file_size
+        count += 1
+    if count > _DEX_COUNT_LIMIT or total > _DEX_TOTAL_LIMIT_BYTES:
+        raise ApkParseError(
+            f"拒绝加载 APK（{count} 个 DEX 条目共声明解压 {total} 字节，超出 "
+            f"{_DEX_COUNT_LIMIT} 个 / {_DEX_TOTAL_LIMIT_BYTES} 字节聚合预算）：{path}"
+        )
+
 
 def _reject_if_zip_bomb(path: str) -> None:
     """交给 androguard 全量解析前的 zip 炸弹前置拦截（Level 1：信中央目录声明大小）。
@@ -1293,6 +1333,8 @@ def load_apk(
     hiddenapi_baseline = hiddenapi_flags_snapshot()
     # zip 炸弹前置拦截：在 androguard 全量解析（内部解压 DEX/manifest）前先按声明大小拒炸弹。
     _reject_if_zip_bomb(path)
+    # DEX 聚合预算（codex 复审 P2）：单条不超限、总量击穿内存的矩阵炸弹在 get_all_dex 前拦。
+    _reject_if_dex_budget_exceeded(path)
     from androguard.core.apk import APK
     from androguard.core.dex import DEX
 

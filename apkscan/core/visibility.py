@@ -615,6 +615,14 @@ def assess(report: Any) -> dict[str, Any]:
         for src, info in sources.items():
             for w in info["why"]:
                 notes.append(f"[{src}] {w}")
+        # Manifest 校验降级（codex 复审 P1）：sources 无 manifest 维度，但该面不可信
+        # 必须在机器可读输出里显式可见——否则 Manifest/包名/组件/权限的「未发现」会被
+        # 当成完整结论消费。键由 pipeline 按「缺失=无事件」契约写入。
+        if meta.get("apk_validation_ok") is False:
+            notes.append(
+                "[manifest] APK 合法性校验未通过（apk_validation_ok=False）："
+                "Manifest/包名/组件/权限面不可信，相关「未发现」不构成完整结论"
+            )
         notes.extend(rem_why)
         notes.extend(_attribution_caveat(meta))
         next_actions = _next_actions(sources, rem, meta)

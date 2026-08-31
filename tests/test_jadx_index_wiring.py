@@ -537,3 +537,83 @@ def test_structure_scan_receives_configured_file_limit(
 
     assert seen_limits
     assert seen_limits[-1].max_files == jadx._MAX_JAVA_FILES
+
+
+# ---------------------------------------------------------------------------
+# codex 复审补锁（P2-1/P2-2）：真加密 / CRC 损坏反例 + 从物化真入口驱动的预算闸
+# ---------------------------------------------------------------------------
+
+def _patch_central_flag(data: bytes, flag: int) -> bytes:
+    """把 zip 中央目录第一个条目的 general purpose flag 改成指定值（字节级）。"""
+    marker = data.find(b"PK\x01\x02")
+    assert marker != -1, "central directory record not found"
+    offset = marker + 8
+    return data[:offset] + flag.to_bytes(2, "little") + data[offset + 2:]
+
+
+def _corrupt_first_data_byte(data: bytes, name: str) -> bytes:
+    """篡改 local header 之后的数据首字节，制造 CRC 损坏（不改任何目录声明）。"""
+    marker = data.find(b"PK\x03\x04")
+    assert marker != -1, "local file header not found"
+    name_len = int.from_bytes(data[marker + 26:marker + 28], "little")
+    extra_len = int.from_bytes(data[marker + 28:marker + 30], "little")
+    payload = marker + 30 + name_len + extra_len
+    assert data[marker + 30:marker + 30 + name_len] == name.encode("ascii")
+    return data[:payload] + bytes([data[payload] ^ 0xFF]) + data[payload + 1:]
+
+
+def test_materialize_rejects_true_zipcrypto_payload(tmp_path: Path) -> None:
+    """真加密形态（bit0=1 + 12 字节加密头 + 密文）不能靠清位兼容混进 lineage。"""
+    import io
+    import zipfile as zf_mod
+
+    payload = b"dex-payload-clear"  # 明文写盘 → central 记录的是明文 CRC
+    buf = io.BytesIO()
+    with zf_mod.ZipFile(buf, "w", compression=zf_mod.ZIP_STORED) as zf:
+        zf.writestr("classes.dex", payload)
+    # 换成 ZipCrypto 形态：数据前插 12 字节加密头 + 模拟密文流，
+    # central CRC 保持明文值——清位读出的字节流 CRC 必然 mismatch。
+    raw = buf.getvalue()
+    marker = raw.find(b"PK\x03\x04")
+    name_len = int.from_bytes(raw[marker + 26:marker + 28], "little")
+    data_at = marker + 30 + name_len
+    encrypted = b"\xa5" * 12 + b"\x00" * (len(payload) + 8)
+    raw = raw[:data_at] + encrypted + raw[data_at + len(payload):]
+    raw = _patch_central_flag(raw, 0x1)
+
+    apk_path = tmp_path / "zipcrypto.apk"
+    apk_path.write_bytes(raw)
+    with pytest.raises(jadx._DexMaterializeError) as exc:
+        jadx._materialize_dex_inputs(str(apk_path), [])
+    assert exc.value.code == "dex_materialize_failed"
+
+
+def test_materialize_rejects_corrupted_crc_payload(tmp_path: Path) -> None:
+    """bit0=0 的普通条目数据损坏 → CRC 校验拒绝，证明清位兼容之外的 CRC 闸仍在。"""
+    import io
+    import zipfile as zf_mod
+
+    buf = io.BytesIO()
+    with zf_mod.ZipFile(buf, "w", compression=zf_mod.ZIP_STORED) as zf:
+        zf.writestr("classes.dex", b"dex-payload-clear")
+    raw = _corrupt_first_data_byte(buf.getvalue(), "classes.dex")
+
+    apk_path = tmp_path / "bad-crc.apk"
+    apk_path.write_bytes(raw)
+    with pytest.raises(jadx._DexMaterializeError) as exc:
+        jadx._materialize_dex_inputs(str(apk_path), [])
+    assert exc.value.code == "dex_materialize_failed"
+
+
+def test_materialize_total_budget_enforced_at_real_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """总预算闸从 _materialize_dex_inputs 真入口驱动：物化调用点改成无界读取时本测试必须变红。"""
+    monkeypatch.setattr(jadx, "_MAX_MATERIALIZE_TOTAL_BYTES", 32)
+    apk = tmp_path / "budget.apk"
+    with zipfile.ZipFile(apk, "w") as zf:
+        zf.writestr("classes.dex", b"x" * 40)
+        zf.writestr("classes2.dex", b"y" * 40)
+    with pytest.raises(jadx._DexMaterializeError) as exc:
+        jadx._materialize_dex_inputs(str(apk), [])
+    assert exc.value.code == "materialize_budget_exceeded"
