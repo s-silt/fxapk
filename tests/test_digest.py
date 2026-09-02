@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
 from apkscan import cli
+from apkscan.core import pipeline
+from apkscan.core.models import AnalysisConfig, Endpoint, EnrichmentResult
+from apkscan.core.registry import BaseEnricher
 from apkscan.report.digest import build_digest
 
 runner = CliRunner()
@@ -121,7 +125,7 @@ def test_no_redact_keeps_freetext_plaintext() -> None:
 
 
 def test_integrity_flags_low_completeness_and_enrichment() -> None:
-    """★codex #4：分析完整度/富化命中率低 + 关键分析器失败 → integrity.reliable=False + warnings。"""
+    """分析完整度/富化成功终态率低 + 关键分析器失败 → integrity.reliable=False + warnings。"""
     report = {
         "leads": [],
         "analysis_status": "partial",
@@ -138,7 +142,7 @@ def test_integrity_flags_low_completeness_and_enrichment() -> None:
     assert integ["enrichment_ok_rate"] == round(3 / 14, 4)
     assert any("完整度" in w for w in integ["warnings"])
     assert any("关键分析器失败" in w for w in integ["warnings"])
-    assert any("富化命中率" in w for w in integ["warnings"])
+    assert any("富化成功终态率" in w for w in integ["warnings"])
 
 
 def test_integrity_reliable_when_healthy() -> None:
@@ -207,6 +211,134 @@ def test_integrity_no_enrichment_attempts_not_flagged() -> None:
     integ = build_digest(report)["integrity"]
     assert integ["enrichment_ok_rate"] is None
     assert integ["reliable"] is True
+
+
+def _run_enrichment_stage(monkeypatch, endpoints, enrichers, **config_overrides):  # noqa: ANN001
+    state = SimpleNamespace(
+        config=AnalysisConfig(online=True, **config_overrides),
+        meta={},
+        endpoints=endpoints,
+        enricher_status=[],
+    )
+    monkeypatch.setattr(pipeline, "_enrichment_targets", lambda _endpoints: endpoints)
+    monkeypatch.setattr(pipeline, "discover_enrichers", lambda: enrichers)
+    pipeline._stage_enrich(state)
+    return state
+
+
+def _digest_from_pipeline_state(state) -> dict:  # noqa: ANN001
+    return build_digest(
+        {
+            "meta": state.meta,
+            "leads": [],
+            "analysis_status": "complete",
+            "completeness": 1.0,
+            "critical_failures": [],
+            "enricher_status": state.enricher_status,
+        }
+    )
+
+
+def test_pipeline_digest_exposes_consistent_high_cardinality_deferral(monkeypatch) -> None:
+    class _Rdap(BaseEnricher):
+        name = "rdap"
+        applies_to = ["domain"]
+
+        def enrich(self, ep: Endpoint) -> EnrichmentResult:
+            raise AssertionError(f"熔断后不得查询 {ep.kind}")
+
+    class _MissingKey(BaseEnricher):
+        name = "icp"
+        applies_to = ["domain"]
+        required_env = ("FXAPK_SYNTHETIC_MISSING_DIGEST_KEY",)
+
+        def enrich(self, ep: Endpoint) -> EnrichmentResult:
+            raise AssertionError(f"缺凭据不得查询 {ep.kind}")
+
+    monkeypatch.delenv("FXAPK_SYNTHETIC_MISSING_DIGEST_KEY", raising=False)
+    endpoints = [Endpoint(value=f"node-{index}.example.test", kind="domain") for index in range(33)]
+    state = _run_enrichment_stage(
+        monkeypatch,
+        endpoints,
+        [_Rdap(), _MissingKey()],
+        enrich_max_targets=32,
+    )
+    report_plan = state.meta["enrichment_plan"]
+    report_execution = state.meta["enrichment_execution"]
+
+    digest = _digest_from_pipeline_state(state)
+
+    assert report_plan["provider_plan"]["rdap"] == {
+        "applicable": 33,
+        "selected": 0,
+        "deferred": 33,
+        "disabled": 0,
+        "skipped": 0,
+        "configured": True,
+        "mode_allowed": True,
+        "status": "deferred",
+        "reason": "target_cap",
+    }
+    assert report_plan["provider_plan"]["icp"] == {
+        "applicable": 33,
+        "selected": 0,
+        "deferred": 0,
+        "disabled": 33,
+        "skipped": 0,
+        "configured": False,
+        "mode_allowed": True,
+        "status": "disabled",
+        "reason": "credential_not_configured",
+    }
+    assert report_plan["estimated_provider_invocations"] == {"rdap": 0, "icp": 0}
+    assert report_execution["status"] == "not_run"
+    assert report_execution["attempted_total"] == 0
+    assert endpoints[0].enrichment["source_status"] == {
+        "rdap": {"status": "skipped", "reason": "target_cap"},
+        "icp": {"status": "disabled", "reason": "credential_not_configured"},
+    }
+    assert digest["enrichment"]["status"] == "deferred_high_cardinality"
+    assert digest["enrichment"]["candidate_total"] == 33
+    assert digest["enrichment"]["provider_plan"] == report_plan["provider_plan"]
+    assert digest["enrichment"]["estimated_provider_invocations"] == {"rdap": 0, "icp": 0}
+    assert digest["integrity"]["reliable"] is False
+    assert any("联网富化整轮未执行" in item for item in digest["integrity"]["warnings"])
+
+
+def test_pipeline_digest_treats_no_record_as_successful_terminal_outcome(monkeypatch) -> None:
+    class _NoRecord(BaseEnricher):
+        name = "rdap"
+        applies_to = ["domain"]
+
+        def enrich(self, ep: Endpoint) -> EnrichmentResult:
+            return EnrichmentResult(
+                provider=self.name,
+                ok=True,
+                data={"_source_status": "no_record"},
+            )
+
+    endpoint = Endpoint(value="empty.example.test", kind="domain")
+    state = _run_enrichment_stage(monkeypatch, [endpoint], [_NoRecord()])
+
+    digest = _digest_from_pipeline_state(state)
+
+    assert endpoint.enrichment["source_status"]["rdap"] == {"status": "no_record"}
+    assert state.enricher_status == [
+        {
+            "provider": "rdap",
+            "attempted": 1,
+            "ok": 0,
+            "no_record": 1,
+            "failed": 0,
+            "typical_error": None,
+        }
+    ]
+    assert state.meta["enrichment_execution"]["status"] == "completed"
+    assert state.meta["enrichment_execution"]["failed_total"] == 0
+    assert digest["enrichment"]["execution_status"] == "completed"
+    assert digest["enrichment"]["attempted_total"] == 1
+    assert digest["integrity"]["enrichment_ok_rate"] == 1.0
+    assert digest["integrity"]["reliable"] is True
 
 
 def test_build_digest_bad_input_never_throws() -> None:

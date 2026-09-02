@@ -291,6 +291,7 @@ def test_provider_official_domains_pass() -> None:
             '_URL = "https://fofa.info/api/v1/search/all"',
             '_URL = "https://quake.360.net/api/v3/search/quake_service"',
             '_URL = "https://hunter.qianxin.com/openApi/search"',
+            '_URL = "https://api.8450.cn/api/icp"',
         )
     )
     assert not [f for f in findings if f.rule == "domain"], f"提供方官方域被误判：{findings}"

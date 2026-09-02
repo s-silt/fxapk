@@ -275,6 +275,7 @@ def test_provider_ok_false_cannot_become_a_hit_from_payload_values() -> None:
             "provider": provider.name,
             "attempted": 1,
             "ok": 0,
+            "no_record": 0,
             "failed": 1,
             "typical_error": "provider_reported_failure",
         }

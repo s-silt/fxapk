@@ -25,6 +25,10 @@ from apkscan.core.models import (
     ANALYSIS_MODE_PASSIVE,
     ANALYSIS_MODES,
     ANALYSIS_STATUS_COMPLETE,
+    DEFAULT_ANALYZE_ENRICH_MAX_TARGETS,
+    DEFAULT_ANALYZE_STATIC_IP_MAX_TARGETS,
+    MAX_ANALYZE_ENRICH_TARGETS,
+    MAX_ANALYZE_STATIC_IP_TARGETS,
     AnalysisConfig,
     LeadCategory,
     Report,
@@ -327,6 +331,28 @@ def analyze(
             "下载样本引用的远程配置对象、Telegram getMe 在线核验等）。"
         ),
     ),
+    enrich_max_targets: int = typer.Option(
+        DEFAULT_ANALYZE_ENRICH_MAX_TARGETS,
+        "--enrich-max-targets",
+        min=1,
+        max=MAX_ANALYZE_ENRICH_TARGETS,
+        help=(
+            "普通 analyze 单轮联网富化候选总数硬门；超过时本轮零联网，"
+            "先审阅报告 meta.enrichment_plan。"
+        ),
+    ),
+    enrich_static_ip_max_targets: int = typer.Option(
+        DEFAULT_ANALYZE_STATIC_IP_MAX_TARGETS,
+        "--enrich-static-ip-max-targets",
+        min=1,
+        max=MAX_ANALYZE_STATIC_IP_TARGETS,
+        help="普通 analyze 单轮纯静态 IP 候选子上限；超过时本轮零联网。",
+    ),
+    enrichment_dry_run: bool = typer.Option(
+        False,
+        "--enrichment-dry-run",
+        help="只生成联网富化计划和预计供应商调用量，不调用任何富化源。",
+    ),
     strict: bool = typer.Option(
         False,
         "--strict",
@@ -349,7 +375,15 @@ def analyze(
         formats = _parse_formats(fmt)
         _validate_mode(mode)
         out = _resolve_out(out, apk)  # 未给 --out → 默认落到 APK 同目录下的 out/
-        config = AnalysisConfig(online=online, out_dir=out, formats=formats, mode=mode)
+        config = AnalysisConfig(
+            online=online,
+            out_dir=out,
+            formats=formats,
+            mode=mode,
+            enrich_max_targets=enrich_max_targets,
+            enrich_static_ip_max_targets=enrich_static_ip_max_targets,
+            enrichment_dry_run=enrichment_dry_run,
+        )
 
         extra_dex_files = _resolve_extra_dex(extra_dex)
         if extra_dex_files:

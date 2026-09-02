@@ -12,9 +12,95 @@ from pathlib import Path
 import pytest
 
 import apkscan.enrichers.shodan as sh_mod
-from apkscan.core import forensic
-from apkscan.core.models import Endpoint
+from apkscan.core import forensic, pipeline
+from apkscan.core.closure import ClosureConfig, close_report
+from apkscan.core.models import (
+    AnalysisConfig,
+    Confidence,
+    Endpoint,
+    EnrichmentResult,
+    Evidence,
+    Lead,
+    LeadCategory,
+    Report,
+)
 from apkscan.enrichers.shodan import ShodanEnricher
+
+
+class _CountingShodan(ShodanEnricher):
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def enrich(self, ep: Endpoint) -> EnrichmentResult:
+        self.calls.append(ep.value)
+        return EnrichmentResult(
+            provider=self.name,
+            ok=True,
+            data={"_source_status": "no_record"},
+        )
+
+
+def test_ordinary_analyze_defers_shodan_without_calling_it(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    endpoint = Endpoint(value="api.example.test", kind="domain")
+    shodan = _CountingShodan()
+    state = SimpleNamespace(
+        config=AnalysisConfig(online=True),
+        meta={},
+        endpoints=[endpoint],
+        enricher_status=[],
+    )
+    monkeypatch.setattr(pipeline, "_enrichment_targets", lambda _endpoints: [endpoint])
+    monkeypatch.setattr(pipeline, "discover_enrichers", lambda: [shodan])
+
+    pipeline._stage_enrich(state)
+
+    assert shodan.calls == []
+    assert endpoint.enrichment["source_status"]["shodan"] == {
+        "status": "skipped",
+        "reason": "deferred_case_close",
+    }
+
+
+def test_case_close_calls_shodan_only_for_its_bounded_selection(monkeypatch) -> None:
+    monkeypatch.setenv("FXAPK_SHODAN_KEY", "synthetic-shodan-key")
+    endpoints = [
+        Endpoint(
+            value=f"198.51.100.{10 + index}",
+            kind="ip",
+            is_suspicious=True,
+            evidences=[Evidence(source="runtime-pcap", location="capture.pcap")],
+        )
+        for index in range(2)
+    ]
+    report = Report(
+        package_name="com.example.synthetic",
+        meta={},
+        leads=[
+            Lead(
+                category=LeadCategory.IP,
+                value=endpoint.value,
+                confidence=Confidence.HIGH,
+                advice="建议调证",
+            )
+            for endpoint in endpoints
+        ],
+        endpoints=endpoints,
+        findings=[],
+        analyzer_status=[],
+    )
+    shodan = _CountingShodan()
+
+    close_report(
+        report,
+        ClosureConfig(online=True, max_targets=1, require_dynamic=False),
+        enrichers=[shodan],
+    )
+
+    assert len(shodan.calls) == 1
+    assert shodan.calls[0] in {endpoint.value for endpoint in endpoints}
+
 
 # 取自真实 scanme.nmap.org 响应的精简样例（字段形态一致）。
 _HOST_PAYLOAD = {

@@ -22,6 +22,7 @@ import pytest
 import apkscan.enrichers.icp as icp_mod
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.enrichers.icp import IcpEnricher, IcpUnavailable
+from apkscan.selfcheck import build_credential_components
 
 
 # --- 通用打桩 -------------------------------------------------------------
@@ -44,9 +45,11 @@ class _FakeResponse:
         self,
         json_data: object,
         raise_for_status_exc: Exception | None = None,
+        status_code: int = 200,
     ) -> None:
         self._json = json_data
         self._raise_for_status_exc = raise_for_status_exc
+        self.status_code = status_code
 
     def raise_for_status(self) -> None:
         if self._raise_for_status_exc is not None:
@@ -65,6 +68,13 @@ class _FakeRequests:
         self.raises: Exception | None = None
 
     def get(self, url: str, **kwargs: object) -> _FakeResponse:
+        self.calls.append((url, dict(kwargs)))
+        if self.raises is not None:
+            raise self.raises
+        assert self.response is not None, "测试未配置 response"
+        return self.response
+
+    def post(self, url: str, **kwargs: object) -> _FakeResponse:
         self.calls.append((url, dict(kwargs)))
         if self.raises is not None:
             raise self.raises
@@ -95,7 +105,7 @@ def _ep(value: str = "pay.fraud-gw.cn") -> Endpoint:
 
 def _success_payload() -> dict[str, str]:
     return {
-        "subject": "诈骗网关有限公司",
+        "subject": "示例网关有限公司",
         "license_no": "京ICP备12345678号-1",
         "site_name": "支付网关",
         "nature": "企业",
@@ -109,6 +119,428 @@ def test_name_and_applies_to() -> None:
     enr = IcpEnricher()
     assert enr.name == "icp"
     assert enr.applies_to == ["domain"]
+    assert enr.required_env == ("FXAPK_ICP_HAPI_KEY",)
+
+
+def test_custom_provider_does_not_require_hapi_key() -> None:
+    assert _ProviderEnricher().required_env == ()
+
+
+def test_selfcheck_does_not_gate_custom_provider_on_hapi_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("FXAPK_ICP_HAPI_KEY", raising=False)
+    monkeypatch.setattr(
+        "apkscan.core.registry.discover_enrichers",
+        lambda: [_ProviderEnricher()],
+    )
+
+    assert build_credential_components() == []
+
+
+def test_hapi_bearer_request_maps_documented_record(
+    fake_requests: _FakeRequests,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """防回归：HAPI key 只能进请求头，备案记录必须映射到统一 ICP 字段。"""
+    token = "synthetic-hapi-token-for-test"
+    monkeypatch.setenv("FXAPK_ICP_HAPI_KEY", token)
+    fake_requests.response = _FakeResponse(
+        {
+            "code": 200,
+            "msg": "success",
+            "params": {
+                "list": [
+                    {
+                        "unitName": "示例科技有限公司",
+                        "natureName": "企业",
+                        "serviceLicence": "京ICP备00000000号-1",
+                        "mainLicence": "京ICP备00000000号",
+                        "serviceName": "示例网站",
+                        "updateRecordTime": "2026-08-31",
+                        "domain": "example.test",
+                    }
+                ]
+            },
+        }
+    )
+
+    result = IcpEnricher().enrich(_ep("WWW.Example.TEST"))
+
+    assert result.ok is True
+    assert result.data == {
+        "subject": "示例科技有限公司",
+        "license_no": "京ICP备00000000号-1",
+        "main_license_no": "京ICP备00000000号",
+        "site_name": "示例网站",
+        "nature": "企业",
+        "approval_time": "2026-08-31",
+        "provider_name": "hapi",
+    }
+    assert len(fake_requests.calls) == 1
+    url, kwargs = fake_requests.calls[0]
+    assert url == "https://api.8450.cn/api/icp"
+    assert kwargs["headers"] == {"Authorization": f"Bearer {token}"}
+    assert kwargs["data"] == {
+        "type": "web",
+        "search": "www.example.test",
+        "pageNum": "1",
+        "pageSize": "10",
+    }
+    assert token not in url
+    assert token not in json.dumps(kwargs["data"], ensure_ascii=False)
+
+
+def test_hapi_empty_result_is_no_record_not_provider_failure(
+    fake_requests: _FakeRequests,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolated_cache: Path,
+) -> None:
+    """防回归：查询成功但空结果必须是 no_record，且不能写成成功缓存。"""
+    monkeypatch.setenv("FXAPK_ICP_HAPI_KEY", "synthetic-hapi-token-for-test")
+    fake_requests.response = _FakeResponse(
+        {"code": 200, "msg": "success", "params": {"list": []}}
+    )
+
+    result = IcpEnricher().enrich(_ep("no-record.example.test"))
+
+    assert result.ok is True
+    assert result.error is None
+    assert result.data == {"_source_status": "no_record", "provider_name": "hapi"}
+    assert not _isolated_cache.exists()
+
+
+def test_hapi_declared_auth_error_is_stable_and_never_leaks_token(
+    fake_requests: _FakeRequests,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """防回归：HAPI 业务错误只落稳定分类码，不落 token 或上游正文。"""
+    token = "synthetic-hapi-token-for-test"
+    monkeypatch.setenv("FXAPK_ICP_HAPI_KEY", token)
+    fake_requests.response = _FakeResponse(
+        {"code": 505, "msg": f"bad token {token}", "params": None}
+    )
+
+    result = IcpEnricher().enrich(_ep("auth-error.example.test"))
+
+    assert result.ok is False
+    assert result.error == "authentication_failed"
+    assert token not in json.dumps(result.data, ensure_ascii=False)
+    assert token not in str(result.error)
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (507, "quota_insufficient"),
+        (511, "rate_limited"),
+        (530, "provider_unavailable"),
+        (599, "provider_error"),
+    ],
+)
+def test_hapi_business_errors_have_stable_categories(
+    fake_requests: _FakeRequests,
+    monkeypatch: pytest.MonkeyPatch,
+    code: int,
+    expected: str,
+) -> None:
+    monkeypatch.setenv("FXAPK_ICP_HAPI_KEY", "synthetic-hapi-token-for-test")
+    fake_requests.response = _FakeResponse(
+        {"code": code, "msg": "provider detail must not escape", "params": None}
+    )
+
+    result = IcpEnricher().enrich(_ep(f"business-{code}.example.test"))
+
+    assert result.ok is False
+    assert result.error == expected
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected"),
+    [
+        (401, "authentication_failed"),
+        (403, "authentication_failed"),
+        (402, "quota_insufficient"),
+        (429, "rate_limited"),
+        (500, "provider_unavailable"),
+        (503, "provider_unavailable"),
+        (400, "invalid_request"),
+        (418, "invalid_request"),
+    ],
+)
+def test_hapi_http_errors_have_stable_categories(
+    fake_requests: _FakeRequests,
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    expected: str,
+) -> None:
+    monkeypatch.setenv("FXAPK_ICP_HAPI_KEY", "synthetic-hapi-token-for-test")
+    fake_requests.response = _FakeResponse(
+        {"code": 200, "params": []}, status_code=status_code
+    )
+
+    result = IcpEnricher().enrich(_ep(f"http-{status_code}.example.test"))
+
+    assert result.ok is False
+    assert result.error == expected
+
+
+def test_hapi_nested_wrapper_is_unwrapped(
+    fake_requests: _FakeRequests,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FXAPK_ICP_HAPI_KEY", "synthetic-hapi-token-for-test")
+    fake_requests.response = _FakeResponse(
+        {
+            "code": 200,
+            "params": {
+                "data": {
+                    "list": [
+                        {
+                            "companyName": "嵌套示例公司",
+                            "serviceLicence": "京ICP备00000001号-1",
+                            "domainName": "nested.example.test",
+                        }
+                    ]
+                }
+            },
+        }
+    )
+
+    result = IcpEnricher().enrich(_ep("nested.example.test"))
+
+    assert result.ok is True
+    assert result.data["subject"] == "嵌套示例公司"
+    assert result.data["license_no"] == "京ICP备00000001号-1"
+
+
+def test_hapi_unknown_nonempty_wrapper_is_parse_error_and_not_cached(
+    fake_requests: _FakeRequests,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolated_cache: Path,
+) -> None:
+    monkeypatch.setenv("FXAPK_ICP_HAPI_KEY", "synthetic-hapi-token-for-test")
+    fake_requests.response = _FakeResponse(
+        {"code": 200, "params": {"data": {"unexpected": "shape"}}}
+    )
+
+    result = IcpEnricher().enrich(_ep("bad-wrapper.example.test"))
+
+    assert result.ok is False
+    assert result.error == "parse_error"
+    assert not _isolated_cache.exists()
+
+
+def test_hapi_explicit_mismatched_candidates_are_no_record(
+    fake_requests: _FakeRequests,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolated_cache: Path,
+) -> None:
+    monkeypatch.setenv("FXAPK_ICP_HAPI_KEY", "synthetic-hapi-token-for-test")
+    fake_requests.response = _FakeResponse(
+        {
+            "code": 200,
+            "params": {
+                "list": [
+                    {
+                        "unitName": "甲公司",
+                        "serviceLicence": "京ICP备00000002号",
+                        "domain": "other.example.test",
+                    },
+                    {
+                        "unitName": "乙公司",
+                        "serviceLicence": "京ICP备00000003号",
+                        "domain": "unrelated.example.test",
+                    },
+                ]
+            },
+        }
+    )
+
+    result = IcpEnricher().enrich(_ep("wanted.example.test"))
+
+    assert result.ok is True
+    assert result.data["_source_status"] == "no_record"
+    assert not _isolated_cache.exists()
+
+
+def test_hapi_parent_domain_record_matches_subdomain(
+    fake_requests: _FakeRequests,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FXAPK_ICP_HAPI_KEY", "synthetic-hapi-token-for-test")
+    fake_requests.response = _FakeResponse(
+        {
+            "code": 200,
+            "params": {
+                "list": [
+                    {
+                        "companyName": "根域主体",
+                        "serviceLicence": "京ICP备00000004号",
+                        "domain": "example.test",
+                    }
+                ]
+            },
+        }
+    )
+
+    result = IcpEnricher().enrich(_ep("api.example.test"))
+
+    assert result.ok is True
+    assert result.data["subject"] == "根域主体"
+
+
+def test_hapi_root_query_does_not_accept_child_domain_record(
+    fake_requests: _FakeRequests,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FXAPK_ICP_HAPI_KEY", "synthetic-hapi-token-for-test")
+    fake_requests.response = _FakeResponse(
+        {
+            "code": 200,
+            "params": {
+                "list": [
+                    {
+                        "unitName": "子域主体",
+                        "serviceLicence": "京ICP备00000008号",
+                        "domain": "api.example.test",
+                    }
+                ]
+            },
+        }
+    )
+
+    result = IcpEnricher().enrich(_ep("example.test"))
+
+    assert result.ok is True
+    assert result.data["_source_status"] == "no_record"
+
+
+def test_hapi_root_query_does_not_accept_www_child_record(
+    fake_requests: _FakeRequests,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FXAPK_ICP_HAPI_KEY", "synthetic-hapi-token-for-test")
+    fake_requests.response = _FakeResponse(
+        {
+            "code": 200,
+            "params": {
+                "list": [
+                    {
+                        "unitName": "WWW 子域主体",
+                        "serviceLicence": "京ICP备00000014号",
+                        "domain": "www.example.test",
+                    }
+                ]
+            },
+        }
+    )
+
+    result = IcpEnricher().enrich(_ep("example.test"))
+
+    assert result.ok is True
+    assert result.data["_source_status"] == "no_record"
+
+
+def test_hapi_multiple_ancestors_choose_nearest_domain(
+    fake_requests: _FakeRequests,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FXAPK_ICP_HAPI_KEY", "synthetic-hapi-token-for-test")
+    fake_requests.response = _FakeResponse(
+        {
+            "code": 200,
+            "params": {
+                "list": [
+                    {
+                        "unitName": "较远主体",
+                        "serviceLicence": "京ICP备00000009号",
+                        "domain": "example.test",
+                    },
+                    {
+                        "unitName": "最近主体",
+                        "serviceLicence": "京ICP备00000010号",
+                        "domain": "b.example.test",
+                    },
+                ]
+            },
+        }
+    )
+
+    result = IcpEnricher().enrich(_ep("a.b.example.test"))
+
+    assert result.ok is True
+    assert result.data["subject"] == "最近主体"
+
+
+def test_hapi_same_domain_conflict_is_no_record(
+    fake_requests: _FakeRequests,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FXAPK_ICP_HAPI_KEY", "synthetic-hapi-token-for-test")
+    fake_requests.response = _FakeResponse(
+        {
+            "code": 200,
+            "params": {
+                "list": [
+                    {
+                        "unitName": "候选甲",
+                        "serviceLicence": "京ICP备00000011号",
+                        "domain": "example.test",
+                    },
+                    {
+                        "unitName": "候选乙",
+                        "serviceLicence": "京ICP备00000012号",
+                        "domain": "example.test",
+                    },
+                ]
+            },
+        }
+    )
+
+    result = IcpEnricher().enrich(_ep("api.example.test"))
+
+    assert result.ok is True
+    assert result.data["_source_status"] == "no_record"
+
+
+def test_hapi_main_license_alias_is_authoritative(
+    fake_requests: _FakeRequests,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FXAPK_ICP_HAPI_KEY", "synthetic-hapi-token-for-test")
+    fake_requests.response = _FakeResponse(
+        {
+            "code": 200,
+            "params": {
+                "mainLicense": "京ICP备00000013号",
+                "domain": "alias.example.test",
+            },
+        }
+    )
+
+    result = IcpEnricher().enrich(_ep("alias.example.test"))
+
+    assert result.ok is True
+    assert result.data["license_no"] == "京ICP备00000013号"
+    assert result.data["main_license_no"] == "京ICP备00000013号"
+
+
+def test_hapi_record_without_authoritative_fields_is_parse_error(
+    fake_requests: _FakeRequests,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolated_cache: Path,
+) -> None:
+    monkeypatch.setenv("FXAPK_ICP_HAPI_KEY", "synthetic-hapi-token-for-test")
+    fake_requests.response = _FakeResponse(
+        {"code": 200, "params": {"domain": "empty.example.test"}}
+    )
+
+    result = IcpEnricher().enrich(_ep("empty.example.test"))
+
+    assert result.ok is False
+    assert result.error == "parse_error"
+    assert not _isolated_cache.exists()
 
 
 # --- 默认无 provider：优雅降级到人工核 ------------------------------------
@@ -151,7 +583,7 @@ def test_provider_success_extracts_fields(fake_requests: _FakeRequests) -> None:
     assert result.provider == "icp"
     assert result.ok is True
     assert result.error is None
-    assert result.data["subject"] == "诈骗网关有限公司"
+    assert result.data["subject"] == "示例网关有限公司"
     assert result.data["license_no"] == "京ICP备12345678号-1"
     assert result.data["site_name"] == "支付网关"
     assert result.data["nature"] == "企业"
@@ -261,12 +693,13 @@ def test_provider_result_written_to_cache(
     fake_requests: _FakeRequests, _isolated_cache: Path
 ) -> None:
     fake_requests.response = _FakeResponse(_success_payload())
-    _ProviderEnricher().enrich(_ep("cache-me.cn"))
+    _ProviderEnricher().enrich(_ep("cache-me.test"))
 
     assert _isolated_cache.is_file()
     cache = json.loads(_isolated_cache.read_text(encoding="utf-8"))
-    assert "cache-me.cn" in cache
-    assert cache["cache-me.cn"]["subject"] == "诈骗网关有限公司"
+    key = next(key for key in cache if key.endswith("|cache-me.test"))
+    assert key.startswith("custom:")
+    assert cache[key]["subject"] == "示例网关有限公司"
 
 
 def test_cache_hit_skips_network(fake_requests: _FakeRequests) -> None:
@@ -281,7 +714,7 @@ def test_cache_hit_skips_network(fake_requests: _FakeRequests) -> None:
     fake_requests.response = _FakeResponse({"subject": "SHOULD NOT BE USED"})
     second = enr.enrich(_ep("repeat.cn"))
     assert second.ok is True
-    assert second.data["subject"] == "诈骗网关有限公司"
+    assert second.data["subject"] == "示例网关有限公司"
     assert len(fake_requests.calls) == 1  # 没有新增网络调用
 
 
@@ -293,7 +726,7 @@ def test_cache_hit_across_instances(fake_requests: _FakeRequests) -> None:
     # 新实例也能读到磁盘缓存。
     result = _ProviderEnricher().enrich(_ep("persist.cn"))
     assert result.ok is True
-    assert result.data["subject"] == "诈骗网关有限公司"
+    assert result.data["subject"] == "示例网关有限公司"
     assert len(fake_requests.calls) == 1
 
 
@@ -311,11 +744,101 @@ def test_domain_normalized_lowercase_in_cache(
     fake_requests: _FakeRequests, _isolated_cache: Path
 ) -> None:
     fake_requests.response = _FakeResponse(_success_payload())
-    _ProviderEnricher().enrich(_ep("MixedCase.CN"))
+    _ProviderEnricher().enrich(_ep("MixedCase.TEST"))
     cache = json.loads(_isolated_cache.read_text(encoding="utf-8"))
-    assert "mixedcase.cn" in cache
+    assert any(key.endswith("|mixedcase.test") for key in cache)
     # 触网时用归一化后的域名。
-    assert "mixedcase.cn" in fake_requests.calls[0][0]
+    assert "mixedcase.test" in fake_requests.calls[0][0]
+
+
+def test_custom_cache_cannot_satisfy_hapi_query(
+    fake_requests: _FakeRequests,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_requests.response = _FakeResponse(_success_payload())
+    _ProviderEnricher().enrich(_ep("isolated.example.test"))
+    assert len(fake_requests.calls) == 1
+
+    monkeypatch.setenv("FXAPK_ICP_HAPI_KEY", "synthetic-hapi-token-for-test")
+    fake_requests.response = _FakeResponse(
+        {
+            "code": 200,
+            "params": {
+                "list": [
+                    {
+                        "unitName": "HAPI 主体",
+                        "serviceLicence": "京ICP备00000005号",
+                        "domain": "isolated.example.test",
+                    }
+                ]
+            },
+        }
+    )
+
+    result = IcpEnricher().enrich(_ep("isolated.example.test"))
+
+    assert result.ok is True
+    assert result.data["subject"] == "HAPI 主体"
+    assert len(fake_requests.calls) == 2
+
+
+def test_hapi_cache_cannot_satisfy_custom_provider_query(
+    fake_requests: _FakeRequests,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FXAPK_ICP_HAPI_KEY", "synthetic-hapi-token-for-test")
+    fake_requests.response = _FakeResponse(
+        {
+            "code": 200,
+            "params": {
+                "list": [
+                    {
+                        "unitName": "HAPI 主体",
+                        "serviceLicence": "京ICP备00000006号",
+                        "domain": "reverse.example.test",
+                    }
+                ]
+            },
+        }
+    )
+    IcpEnricher().enrich(_ep("reverse.example.test"))
+    assert len(fake_requests.calls) == 1
+
+    fake_requests.response = _FakeResponse(_success_payload())
+    result = _ProviderEnricher().enrich(_ep("reverse.example.test"))
+
+    assert result.ok is True
+    assert result.data["subject"] == "示例网关有限公司"
+    assert len(fake_requests.calls) == 2
+
+
+def test_hapi_success_cache_skips_second_request(
+    fake_requests: _FakeRequests,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FXAPK_ICP_HAPI_KEY", "synthetic-hapi-token-for-test")
+    fake_requests.response = _FakeResponse(
+        {
+            "code": 200,
+            "params": {
+                "list": [
+                    {
+                        "unitName": "缓存主体",
+                        "serviceLicence": "京ICP备00000007号",
+                        "domain": "hapi-cache.example.test",
+                    }
+                ]
+            },
+        }
+    )
+
+    first = IcpEnricher().enrich(_ep("hapi-cache.example.test"))
+    second = IcpEnricher().enrich(_ep("hapi-cache.example.test"))
+
+    assert first.ok is True
+    assert second.ok is True
+    assert second.data["provider_name"] == "hapi"
+    assert len(fake_requests.calls) == 1
 
 
 def test_unavailable_logged_once_for_multiple_domains(

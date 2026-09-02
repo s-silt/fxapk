@@ -23,6 +23,8 @@ from apkscan.core.models import (
     ANALYSIS_MODE_PASSIVE,
     Endpoint,
     EnrichmentResult,
+    EvidenceScope,
+    OBSERVED_CONTACT_SOURCES,
 )
 from apkscan.core.registry import BaseEnricher
 from apkscan.core.source_status import provider_payload_if_hit
@@ -38,9 +40,22 @@ logger = logging.getLogger(__name__)
 #: 无并发写竞争；只有跨端点共享的 provider 统计需加锁聚合。
 ENRICH_MAX_WORKERS = 8
 
+#: 普通 ``analyze`` 的按供应商调用预算。HAPI/ICP 是额度型源，单 APK 最多查 20 个；
+#: Shodan 另由 ``case_close_only`` 门限制到结案目标集，不在普通静态分析消耗额度。
+DEFAULT_ANALYZE_PROVIDER_LIMITS: dict[str, int] = {"icp": 20}
+
 
 class ProviderResponseError(RuntimeError):
     """Sanitized marker for provider-declared errors in HTTP 200 responses."""
+
+
+def _endpoint_runtime_observed(endpoint: Endpoint) -> bool:
+    """端点是否有 observed-contact 级运行时实连证据。"""
+    return any(
+        evidence.scope is EvidenceScope.CASE_EVIDENCE
+        and str(evidence.source) in OBSERVED_CONTACT_SOURCES
+        for evidence in endpoint.evidences
+    )
 
 
 def _http_status_code(exc: Exception) -> int | None:
@@ -97,23 +112,55 @@ def _enrichment_targets(endpoints: list[Endpoint]) -> list[Endpoint]:
       tier 由 analyze 阶段的抽取器写进 ``enrichment``、``_dedup_endpoints`` 合并，本函数跑在
       enrich 阶段，读得到。
 
-    ★**IP 必须走 IP 判据**，不能跟着域名一起走 ``effective_advice``——那是域名接口（内部调
-      ``classify_domain`` 并叠 tier 降档），拿它判 IP 会造出新的漂移：一个带 library-file tier
-      的公网 IP 会在这里被压成待核、不再富化，而它最终的 Lead 走 ``classify_ip``、很可能仍是
-      最高档，于是「该核查的 IP 却没有 ASN/RDAP 富化结果」。tier 的生产侧也没有从模型上限制
-      只写给域名，指望它对 IP 恒为 None 是靠不住的。
+    ★IP 走 :func:`infra.effective_ip_advice`：保留 IP 自身判据，同时把仅见于第三方库/超大
+      字符串表的纯静态 IP 压到待核，避免成千上万公共节点触发 ASN/RDAP/测绘查询。设备上真连过
+      的 observed-contact IP 不受该来源档限制。
     """
     targets: list[Endpoint] = []
     for ep in endpoints:
+        runtime_observed = _endpoint_runtime_observed(ep)
         if ep.kind == "domain":
-            advice = infra.effective_advice(ep.value, ep.enrichment.get("tier"))
+            advice = (
+                infra.classify_domain(ep.value)[0]
+                if runtime_observed
+                else infra.effective_advice(ep.value, ep.enrichment.get("tier"))
+            )
         elif ep.kind == "ip":
-            advice, _reason = infra.classify_ip(ep.value)
+            context = " ".join((ev.snippet or "") for ev in ep.evidences)
+            advice = infra.effective_ip_advice(
+                ep.value,
+                ep.enrichment.get("tier"),
+                context=context,
+                runtime_observed=runtime_observed,
+            )
         else:
             continue  # 非 domain/ip 本就不被 WHOIS/ICP/ASN 路由
         if advice == infra.ADVICE_INVESTIGATE:
             targets.append(ep)
     return targets
+
+
+def _low_tier_static_suppressed(endpoint: Endpoint) -> bool:
+    """是否仅因低可信静态来源档而被排除出普通联网目标。"""
+    tier = endpoint.enrichment.get("tier")
+    if (
+        endpoint.kind not in ("domain", "ip")
+        or tier not in (infra.TIER_LIBRARY_FILE, infra.TIER_BULK_STRING)
+        or _endpoint_runtime_observed(endpoint)
+    ):
+        return False
+    if endpoint.kind == "domain":
+        return (
+            infra.classify_domain(endpoint.value)[0] == infra.ADVICE_INVESTIGATE
+            and infra.effective_advice(endpoint.value, tier) != infra.ADVICE_INVESTIGATE
+        )
+    context = " ".join((evidence.snippet or "") for evidence in endpoint.evidences)
+    base_advice = infra.classify_ip(endpoint.value, context=context)[0]
+    return (
+        base_advice == infra.ADVICE_INVESTIGATE
+        and infra.effective_ip_advice(endpoint.value, tier, context=context)
+        != infra.ADVICE_INVESTIGATE
+    )
 
 
 def _enrich_endpoints(
@@ -135,11 +182,11 @@ def _enrich_endpoints(
     - 每个端点由**单一** worker 串行跑其匹配的全部富化器 → 同一 ``ep.enrichment``
       无并发写竞争；端点之间互不共享 enrichment dict。
     - ``endpoints`` 列表**原地不动、顺序不变**（只就地写 ``ep.enrichment``，绝不重排）。
-    - 跨端点共享的 provider 统计用锁聚合，``attempted/ok/failed/typical_error`` 准确。
+    - 跨端点共享的 provider 统计用锁聚合，``attempted/ok/no_record/failed/typical_error`` 准确。
     - ip-api 免费档限速由 ``_ipinfo`` 内部的进程级线程安全限速器担保（asn 单查走 45/min·1.4s 闸、
       dns 批量走 /batch 15/min·4.0s 独立闸）——并发下仍是全局闸，本层只管并发分发。
 
-    返回每个富化器的聚合状态 [{provider, attempted, ok, failed, typical_error}]，
+    返回每个富化器的聚合状态 [{provider, attempted, ok, no_record, failed, typical_error}]，
     使富化器层的系统性失败（如某 provider 全部失败）在报告里透明可见，
     而非打散进各 endpoint 难以察觉。
     """
@@ -164,7 +211,14 @@ def _stat(stats: dict[str, dict], provider: str) -> dict:
     """取/建某 provider 的统计条目（调用方须持 stats 的锁）。"""
     return stats.setdefault(
         provider,
-        {"provider": provider, "attempted": 0, "ok": 0, "failed": 0, "typical_error": None},
+        {
+            "provider": provider,
+            "attempted": 0,
+            "ok": 0,
+            "no_record": 0,
+            "failed": 0,
+            "typical_error": None,
+        },
     )
 
 
@@ -345,7 +399,7 @@ def _run_enrichers_on_endpoint(
             elif status == "no_record":
                 # 成功但零信息：显式标注，避免与"查到了"在报告里视觉混淆。
                 data.setdefault("note", "查询无结果")
-                _note_fail(st, "查询无结果")
+                st["no_record"] += 1
             else:
                 _note_fail(st, error_type or result.error or "富化失败")
         if status != "hit":
@@ -527,12 +581,48 @@ def _mark_case_close_deferred(
             }
 
 
+def mark_enrichment_skipped(
+    endpoints: list[Endpoint],
+    enrichers: list[BaseEnricher],
+    *,
+    reason: str,
+) -> None:
+    """为一次明确未执行的联网计划逐端点/供应商记审计状态，不覆盖已有结果。"""
+    mark_enrichment_unexecuted(endpoints, enrichers, status="skipped", reason=reason)
+
+
+def mark_enrichment_unexecuted(
+    endpoints: list[Endpoint],
+    enrichers: list[BaseEnricher],
+    *,
+    status: str,
+    reason: str,
+) -> None:
+    """记录未执行原因；``disabled`` 与调度性 ``skipped`` 保持正交。"""
+    if status not in {"disabled", "skipped"}:
+        raise ValueError(f"unsupported unexecuted enrichment status: {status}")
+    for endpoint in endpoints:
+        source_status = endpoint.enrichment.setdefault("source_status", {})
+        if not isinstance(source_status, dict):
+            source_status = {}
+            endpoint.enrichment["source_status"] = source_status
+        for enricher in enrichers:
+            if endpoint.kind not in (getattr(enricher, "applies_to", []) or []):
+                continue
+            provider = _provider_name(enricher)
+            source_status.setdefault(
+                provider,
+                {"status": status, "reason": reason},
+            )
+
+
 def enrich_selected_targets(
     endpoints: list[Endpoint],
     enrichers: list[BaseEnricher],
     *,
     mode: str = ANALYSIS_MODE_PASSIVE,
     include_case_close: bool = False,
+    provider_limits: Mapping[str, int] | None = None,
 ) -> list[dict]:
     """Enrich an explicit bounded target set and record per-target source outcomes.
 
@@ -551,7 +641,67 @@ def enrich_selected_targets(
     if not selected:
         return []
     if not include_case_close:
-        return _run_enrichment(endpoints, selected, gate=_mode_gate(mode))
+        allowed_by_mode = _mode_gate(mode)
+        limits = {
+            str(provider): max(0, int(limit))
+            for provider, limit in (provider_limits or {}).items()
+        }
+        allowed_endpoint_ids: dict[str, set[int]] = {}
+        for enricher in selected:
+            provider = _provider_name(enricher)
+            if provider not in limits:
+                continue
+            if getattr(enricher, "active", False) and mode != ANALYSIS_MODE_AUTHORIZED_ACTIVE:
+                continue
+            if not _provider_configured(enricher):
+                continue
+            matching_with_order = [
+                (index, endpoint)
+                for index, endpoint in enumerate(endpoints)
+                if endpoint.kind in (getattr(enricher, "applies_to", []) or [])
+            ]
+            tier_priority = {
+                infra.TIER_APP: 0,
+                None: 1,
+                infra.TIER_LIBRARY_FILE: 2,
+                infra.TIER_BULK_STRING: 3,
+            }
+            matching_with_order.sort(
+                key=lambda item: (
+                    not _endpoint_runtime_observed(item[1]),
+                    tier_priority.get(item[1].enrichment.get("tier"), 1),
+                    not bool(item[1].is_suspicious),
+                    item[0],
+                )
+            )
+            matching = [endpoint for _index, endpoint in matching_with_order]
+            allowed_endpoint_ids[provider] = {
+                id(endpoint) for endpoint in matching[:limits[provider]]
+            }
+            mark_enrichment_skipped(
+                matching[limits[provider]:],
+                [enricher],
+                reason="provider_budget_exhausted",
+            )
+
+        def ordinary_gate(endpoint: Endpoint, enricher: BaseEnricher) -> bool:
+            provider = _provider_name(enricher)
+            if not allowed_by_mode(endpoint, enricher):
+                _record_source_status(endpoint, provider, "skipped")
+                endpoint.enrichment["source_status"][provider]["reason"] = "active_mode_blocked"
+                return False
+            if not _provider_configured(enricher):
+                _record_source_status(endpoint, provider, "disabled")
+                endpoint.enrichment["source_status"][provider]["reason"] = (
+                    "credential_not_configured"
+                )
+                return False
+            allowed = allowed_endpoint_ids.get(provider)
+            if allowed is not None and id(endpoint) not in allowed:
+                return False
+            return True
+
+        return _run_enrichment(endpoints, selected, gate=ordinary_gate)
 
     allowed_by_mode = _mode_gate(mode)
 

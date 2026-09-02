@@ -134,6 +134,8 @@ class ShodanEnricher(BaseEnricher):
     phase = "overseas"
     active = False
     required_env = _ENV_KEYS
+    # 额度型全量测绘源只在 case close 的有界高价值目标集运行；普通静态 analyze 不消费额度。
+    case_close_only = True
 
     def __init__(self) -> None:
         # 缓存写入串行化，避免并发富化时写坏 JSON 文件。

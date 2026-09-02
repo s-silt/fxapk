@@ -1568,3 +1568,30 @@ def effective_advice(domain: str, tier: object) -> str:
     if advice == ADVICE_INVESTIGATE and tier in (TIER_LIBRARY_FILE, TIER_BULK_STRING):
         return ADVICE_REVIEW
     return advice
+
+
+def effective_ip_advice(
+    value: str,
+    tier: object,
+    *,
+    context: str = "",
+    runtime_observed: bool = False,
+) -> str:
+    """普通联网目标筛选使用的 IP 最终研判。
+
+    与 Lead 侧的来源档策略保持同向：仅静态出现在第三方库文件/超大字符串表中的公网 IP
+    不自动送往 ASN/RDAP/测绘平台；真机 observed-contact 证据优先，仍允许进入富化。
+    ``classify_ip`` 继续负责私网、OID、公共 DNS 与地址形态判据，本函数只叠加来源档。
+    """
+    advice, _reason = classify_ip(
+        value,
+        context=context,
+        runtime_observed=runtime_observed,
+    )
+    if (
+        advice == ADVICE_INVESTIGATE
+        and not runtime_observed
+        and tier in (TIER_LIBRARY_FILE, TIER_BULK_STRING)
+    ):
+        return ADVICE_REVIEW
+    return advice

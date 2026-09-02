@@ -818,6 +818,15 @@ ANALYSIS_MODE_PASSIVE = "passive"
 ANALYSIS_MODE_AUTHORIZED_ACTIVE = "authorized-active"
 ANALYSIS_MODES: tuple[str, ...] = (ANALYSIS_MODE_PASSIVE, ANALYSIS_MODE_AUTHORIZED_ACTIVE)
 
+#: 普通 ``analyze`` 联网富化的安全默认值。超过任一硬门时本轮**零联网**，由操作者先审阅
+#: ``meta.enrichment_plan`` 再缩小目标或显式调整上限；不能悄悄截前 N 个，因为端点顺序不是
+#: 风险优先级，任意截断既可能漏掉真后端，也仍会无谓消耗额度。
+DEFAULT_ANALYZE_ENRICH_MAX_TARGETS = 32
+DEFAULT_ANALYZE_STATIC_IP_MAX_TARGETS = 16
+#: 普通 analyze 的绝对硬顶；更大目标集必须转 ``enrich batch --dry-run``，不能靠调参绕过。
+MAX_ANALYZE_ENRICH_TARGETS = 200
+MAX_ANALYZE_STATIC_IP_TARGETS = 100
+
 
 @dataclass
 class AnalysisConfig:
@@ -828,6 +837,12 @@ class AnalysisConfig:
     formats: list[str] = field(default_factory=lambda: ["html", "json"])
     #: 网络模式（见 ANALYSIS_MODES）。默认 passive：主动富化器被 pipeline 代码层硬屏蔽。
     mode: str = ANALYSIS_MODE_PASSIVE
+    #: 普通静态分析单轮联网富化候选总数硬门。
+    enrich_max_targets: int = DEFAULT_ANALYZE_ENRICH_MAX_TARGETS
+    #: 普通静态分析单轮**非运行时实连** IP 候选子上限。
+    enrich_static_ip_max_targets: int = DEFAULT_ANALYZE_STATIC_IP_MAX_TARGETS
+    #: 只生成联网计划与预计调用量，不调用任何富化源。
+    enrichment_dry_run: bool = False
 
 
 #: report.json 结构版本。消费方（AI / CI / 第三方工具）据此判断字段布局；发生破坏性字段变更时 bump。
@@ -868,7 +883,7 @@ class Report:
     endpoints: list[Endpoint]
     findings: list[Finding]
     analyzer_status: list[dict]  # 每个分析器：name/ran|skipped|error/reason
-    # 每个富化器的聚合状态：provider/attempted/ok/failed/typical_error。
+    # 每个富化器的聚合状态：provider/attempted/ok/no_record/failed/typical_error。
     # 默认空，便于离线/无富化时仍可构造。
     enricher_status: list[dict] = field(default_factory=list)
     # ---- 结果可信度地基（消费方据此判断这份报告有多可信 / 是否完整）----

@@ -211,22 +211,40 @@ def _integrity(report: dict[str, Any]) -> dict[str, Any]:
         warnings.append(f"分析状态为 {status}{detail}：结论基础不完整，勿据此下确定性结论")
 
     es = [s for s in _list(report.get("enricher_status")) if isinstance(s, dict)]
-    attempted = ok = 0
+    attempted = terminal_ok = 0
     dirty = False
     for s in es:
-        a, o = _nonneg_count(s.get("attempted")), _nonneg_count(s.get("ok"))
-        if a is None or o is None or o > a:  # 脏条目 / ok>attempted 无意义 → 跳过并标数据质量问题
+        a = _nonneg_count(s.get("attempted"))
+        o = _nonneg_count(s.get("ok"))
+        no_record = _nonneg_count(s.get("no_record")) if "no_record" in s else 0
+        if (
+            a is None
+            or o is None
+            or no_record is None
+            or o + no_record > a
+        ):  # 脏条目 / 成功终态数超过 attempted 无意义
             dirty = True
             continue
         attempted += a
-        ok += o
-    enrich_rate = round(ok / attempted, 4) if attempted else None
+        terminal_ok += o + no_record
+    enrich_rate = round(terminal_ok / attempted, 4) if attempted else None
     if dirty:
         warnings.append("富化统计含异常条目（计数非法/ok>attempted）：命中率仅据可解析条目，结果可能不可信")
     if enrich_rate is not None and enrich_rate < _ENRICH_WARN:
         warnings.append(
-            f"富化命中率 {enrich_rate} 低于 {_ENRICH_WARN}：富化源可能未跑全（限速/密钥/网络），勿据残缺证据下结论"
+            f"富化成功终态率 {enrich_rate} 低于 {_ENRICH_WARN}：富化源可能未跑全（限速/密钥/网络），勿据残缺证据下结论"
         )
+    meta_block = report.get("meta")
+    if isinstance(meta_block, dict):
+        plan = meta_block.get("enrichment_plan")
+        execution = meta_block.get("enrichment_execution")
+        plan_status = plan.get("status") if isinstance(plan, dict) else None
+        if plan_status == "deferred_high_cardinality":
+            warnings.append("联网富化整轮未执行：候选超过普通 analyze 安全上限，须缩小目标或转有预算批量入口")
+        elif plan_status == "dry_run":
+            warnings.append("联网富化处于 dry-run：仅生成计划，未执行任何供应商查询")
+        if isinstance(execution, dict) and execution.get("status") == "completed_with_gaps":
+            warnings.append("联网富化已运行但存在失败、缺凭据、模式拦截或供应商预算延后，不能视为全源覆盖")
     return {
         "analysis_status": status,
         "completeness": completeness,
@@ -235,6 +253,62 @@ def _integrity(report: dict[str, Any]) -> dict[str, Any]:
         "reliable": not warnings,
         "warnings": warnings,
     }
+
+
+def _compact_enrichment(meta: dict[str, Any]) -> dict[str, Any]:
+    """把联网计划/执行审计压成 digest 可见的小结构，不带端点原值。"""
+    raw_plan = meta.get("enrichment_plan")
+    raw_execution = meta.get("enrichment_execution")
+    if not isinstance(raw_plan, dict) and not isinstance(raw_execution, dict):
+        return {}
+    plan = raw_plan if isinstance(raw_plan, dict) else {}
+    execution = raw_execution if isinstance(raw_execution, dict) else {}
+    compact: dict[str, Any] = {
+        "status": plan.get("status"),
+        "candidate_total": _nonneg_count(plan.get("candidate_total")),
+        "static_ip_candidate_total": _nonneg_count(plan.get("static_ip_candidate_total")),
+        "low_tier_static_excluded": _nonneg_count(plan.get("low_tier_static_excluded")),
+        "target_limit": _nonneg_count(plan.get("target_limit")),
+        "static_ip_limit": _nonneg_count(plan.get("static_ip_limit")),
+        "limit_clamped": bool(plan.get("limit_clamped")),
+        "execution_status": execution.get("status"),
+        "execution_reason": execution.get("reason"),
+        "attempted_total": _nonneg_count(execution.get("attempted_total")),
+    }
+    raw_skipped = execution.get("skipped_by_reason")
+    if isinstance(raw_skipped, dict):
+        compact["skipped_by_reason"] = {
+            str(reason): count
+            for reason, raw_count in raw_skipped.items()
+            if (count := _nonneg_count(raw_count)) is not None and count
+        }
+    raw_provider_plan = plan.get("provider_plan")
+    if isinstance(raw_provider_plan, dict):
+        provider_plan: dict[str, dict[str, Any]] = {}
+        for provider, value in raw_provider_plan.items():
+            if not isinstance(value, dict):
+                continue
+            item: dict[str, Any] = {
+                key: count
+                for key in ("applicable", "selected", "deferred", "disabled", "skipped")
+                if (count := _nonneg_count(value.get(key))) is not None
+            }
+            for key in ("configured", "mode_allowed"):
+                if isinstance(value.get(key), bool):
+                    item[key] = value[key]
+            for key in ("status", "reason"):
+                if isinstance(value.get(key), str) and value[key]:
+                    item[key] = value[key]
+            provider_plan[str(provider)] = item
+        compact["provider_plan"] = provider_plan
+    raw_estimates = plan.get("estimated_provider_invocations")
+    if isinstance(raw_estimates, dict):
+        compact["estimated_provider_invocations"] = {
+            str(provider): count
+            for provider, raw_count in raw_estimates.items()
+            if (count := _nonneg_count(raw_count)) is not None
+        }
+    return {key: value for key, value in compact.items() if value is not None}
 
 
 def _neg_score(value: object) -> float:
@@ -572,6 +646,9 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
         "overseas_targets": overseas_targets,
         "closure": compact_closure,
     }
+    enrichment = _compact_enrichment(meta)
+    if enrichment:
+        digest["enrichment"] = enrichment
     # ★扫描覆盖缺口（core/coverage.py 协议）：哪些分析器没扫全。仅非零项，且**无缺口时整键不出现**
     #   （缺失=无事件）。没有这一段，各 count=0 分不清「样本确实没有」与「这一面根本没扫到」。
     _coverage = collect_coverage(meta)
