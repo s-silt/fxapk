@@ -3,6 +3,41 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
+## 1.12.0 — 2026-09-04
+
+本版收紧证据语义并给普通 analyze 的联网富化加上不可绕过的预算硬门：任何画像信号都不再
+自动升级为承载/运营结论，高基数集合整轮零联网并留完整审计账本。
+
+### Added
+
+- 普通 analyze 富化预算门：候选总数默认 32、纯静态 IP 默认 16，绝对硬顶 200/100（CLI 与
+  程序化调用一致）；超限整轮零联网并写 `meta.enrichment_plan`（`deferred_high_cardinality`，
+  含逐供应商 selected/deferred 与 estimated 估算）；`--enrichment-dry-run` 只出计划不发请求；
+  HAPI/ICP 每轮单源 20 条预算，缺 key 记 `disabled/credential_not_configured` 不占预算。
+- 五态统计（hit/no_record/failed/skipped/disabled）分离计数：`no_record` 不再计入失败，
+  `completed_with_gaps` 只由真实 failed 触发；digest 投影 `enrichment` 审计段与 meta 一致。
+- CloudFront 默认分发域与自定义域 CNAME 的五层归因，保留 Distribution 检索键；未取得
+  Origin 时闭环保持 `partial`。
+- `overseas_targets` 明确为 Shodan/CT 已画像投影，新增候选总数/已画像/未画像三计数
+  （`overseas_candidate_total` / `overseas_unprofiled_hosts`），零画像不再被误读为零候选。
+- Shodan HTTP 白名单头与 Cookie 名解析（不保存 Cookie 值）；补 RIPEstat `asn_holder` 回退。
+- 公共入口级对抗回归：CDN 画像不得成为承载商或调证对象、ISO 辖区白名单、批量硬顶
+  fail-closed、pipeline→digest 审计一致性等。
+
+### Changed
+
+- **CDN/边缘画像降级为候选证据**：Shodan 的 org/product/banner 只作为 `edge_candidates`，
+  不再直接完成 hosting 层或进入调证对象；ASN 缺失 + BGP/RDAP 完整 + CDN 画像的组合不再
+  产生 `complete` 闭环。
+- **辖区判定改用完整 ISO alpha-2 白名单**：损坏或虚构的国家串（如无法识别的值）保持
+  `unknown`，不再猜测为境外。
+- 共享签名、原生库、构建环境、配置对象、favicon 与技术栈统一降为待复核关联候选，
+  不自动形成主体或并案结论。
+- Shodan 仅在 case close 有界目标集或受硬顶保护的批量入口执行；普通 analyze 明确记
+  `deferred_case_close`。
+- AGENTS.md 与 .env.example 的披露表述与实现对齐（analyze 默认联网的第三方披露边界、
+  auto 旁路双门、Shodan 候选能力）。
+
 ## 1.11.0 — 2026-08-31
 
 本版强化异常 APK 的 JADX/DEX 可见性与资源边界：对可安全证明为误置 encrypted bit 的顶层
