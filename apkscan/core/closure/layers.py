@@ -12,6 +12,8 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 
 from apkscan.core.models import Endpoint, EvidenceScope
+from apkscan.core.attribution import classify_network
+from apkscan.network.categories import CAT_CDN, CAT_SECURITY_PROXY
 from apkscan.core.source_status import normalize_source_status_map, provider_payload_if_hit
 
 from apkscan.core.closure._shared import (
@@ -137,6 +139,19 @@ def _origin_status(enrichment: Mapping[str, object]) -> dict[str, object]:
     edge_details = _edge_details(enrichment)
     edge = edge_details.get("name")
     if not edge:
+        shodan = _provider_payload(enrichment, "shodan")
+        shodan_org = shodan.get("org")
+        if isinstance(shodan_org, str) and classify_network(shodan_org) in {
+            CAT_CDN,
+            CAT_SECURITY_PROXY,
+        }:
+            return {
+                "required": True,
+                "status": "missing",
+                "edge_candidate": shodan_org,
+                "candidate_source": "shodan",
+                "reason": "CDN or edge profile is a candidate; Origin remains unverified",
+            }
         return {"required": False, "status": "not_applicable"}
     origin = _mapping(enrichment.get("origin"))
     origin_ips = origin.get("ips")
@@ -305,23 +320,27 @@ def _hosting_layer(enrichment: Mapping[str, object]) -> dict[str, object]:
     hosting = _mapping(attribution.get("hosting_provider"))
     passive_providers, passive_services, passive_locations = _passive_hosting_evidence(enrichment)
     passive_provider = passive_providers[0] if passive_providers else {}
+    # Shodan 的 org、端口和 banner 是已扫描到的边缘画像，不能证明该 IP 的承载租户或 Origin。
+    # 它们保留在候选证据中供人工复核，但不得成为 hosting provider 或 completion signal。
+    shodan_candidate: dict[str, object] = {}
+    if shodan.get("org") not in (None, ""):
+        shodan_candidate["org"] = shodan.get("org")
+    for key in ("asn", "country", "ports", "services"):
+        value = shodan.get(key)
+        if value not in (None, "", [], {}):
+            shodan_candidate[key] = value
     provider = (
-        shodan.get("org")
-        or passive_provider.get("name")
+        passive_provider.get("name")
         or hosting.get("name")
         or asn.get("org")
         or asn.get("isp")
     )
     provider_source = (
-        "shodan"
-        if shodan.get("org")
-        else passive_provider.get("source")
+        passive_provider.get("source")
         or hosting.get("source")
         or "asn"
     )
-    raw_services = shodan.get("services")
-    services = list(raw_services) if isinstance(raw_services, list) else []
-    services.extend(passive_services)
+    services = list(passive_services)
     raw_ports = shodan.get("ports")
     ports = raw_ports if isinstance(raw_ports, list) else []
     matched_signals = (
@@ -352,6 +371,7 @@ def _hosting_layer(enrichment: Mapping[str, object]) -> dict[str, object]:
         "provider": provider,
         "provider_source": provider_source,
         "provider_candidates": passive_providers,
+        "edge_candidates": [shodan_candidate] if shodan_candidate else [],
         "asn": asn.get("asn") or shodan.get("asn"),
         "country": asn.get("country") or shodan.get("country"),
         "ports": ports,
@@ -368,7 +388,11 @@ def _hosting_layer(enrichment: Mapping[str, object]) -> dict[str, object]:
             evidence,
             reason="provider found without corroborating product, facility, or reassignment evidence",
         )
-    return _layer(CLOSURE_FAILED, reason="hosting or delivery provider is missing")
+    return _layer(
+        CLOSURE_FAILED,
+        evidence,
+        reason="hosting or delivery provider is missing",
+    )
 
 
 def _request_layer(hosting: Mapping[str, object], origin: Mapping[str, object]) -> dict[str, object]:

@@ -74,6 +74,14 @@ def test_classify_placeholder_country_is_unknown(placeholder: str) -> None:
     )
 
 
+@pytest.mark.parametrize("invalid_country", ["Atlantis", "ZZZ", "US??"])
+def test_classify_invalid_country_is_unknown(invalid_country: str) -> None:
+    assert (
+        forensic.classify_jurisdiction("infra.example", asn={"country": invalid_country})
+        == forensic.JURIS_UNKNOWN
+    )
+
+
 def test_classify_no_signal_is_unknown() -> None:
     assert forensic.classify_jurisdiction("evilbackend.example.com") == forensic.JURIS_UNKNOWN
 

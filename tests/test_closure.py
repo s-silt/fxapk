@@ -184,10 +184,25 @@ def _complete_endpoint() -> Endpoint:
                 "ports": [443],
                 "services": [{"port": 443, "product": "nginx"}],
             },
+            "attribution": {
+                "hosting_provider": {
+                    "name": "Example Hosting Ltd",
+                    "facility": "synthetic-datacenter",
+                },
+            },
+            # 明确的被动承载服务记录；Shodan org/banner 不再承担完整 hosting 夹具的职责。
+            "fofa": {
+                "records": [[
+                    "https://api.example.test", "198.51.100.10", 443, "https",
+                    "Example API", "nginx", "US", "California", "Los Angeles", 64500,
+                    "Example Hosting Ltd",
+                ]],
+            },
             "source_status": {
                 "ip_rdap": {"status": "hit"},
                 "ripestat_bgp": {"status": "hit"},
                 "shodan": {"status": "hit"},
+                "fofa": {"status": "hit"},
                 "urlscan": {"status": "no_record"},
             },
         },
@@ -669,6 +684,61 @@ def test_assemble_target_closure_builds_all_investigation_layers() -> None:
     assert target["status"] == CLOSURE_COMPLETE
 
 
+def test_close_report_shodan_cdn_profile_cannot_close_hosting_or_request_target() -> None:
+    """Shodan 的 CDN org/banner 画像只能保留为边缘候选，不能替代承载或 Origin。"""
+    endpoint = _endpoint(
+        "198.51.100.10",
+        runtime=True,
+        target=True,
+        payload=True,
+        enrichment={
+            "ip_rdap": {
+                "netname": "EXAMPLE-NET",
+                "org": "Example Registry Ltd",
+                "country": "US",
+                "handle": "NET-198-51-100-0-1",
+                "cidr": "198.51.100.0/24",
+            },
+            "ripestat_bgp": {
+                "origin_asn": 64500,
+                "asn_holder": "Example Network Ltd",
+                "prefix": "198.51.100.0/24",
+                "upstreams": [64501],
+            },
+            "shodan": {
+                "org": "Cloudflare, Inc.",
+                "ports": [443],
+                "services": [{"port": 443, "product": "nginx"}],
+            },
+            "source_status": {
+                "ip_rdap": {"status": "hit"},
+                "ripestat_bgp": {"status": "hit"},
+                "shodan": {"status": "hit"},
+            },
+        },
+    )
+    report = _report(endpoint)
+
+    closure = _close(
+        report,
+        ClosureConfig(online=False, require_dynamic=False),
+        enrichers=[],
+    )
+
+    target = closure["targets"][0]
+    assert closure["status"] == CLOSURE_PARTIAL
+    assert target["status"] == CLOSURE_PARTIAL
+    assert target["layers"]["hosting_delivery"]["status"] != CLOSURE_COMPLETE
+    candidates = target["layers"]["hosting_delivery"]["evidence"].get("edge_candidates", [])
+    assert candidates and candidates[0]["org"] == "Cloudflare, Inc."
+    assert target["origin"]["status"] == "missing"
+    assert target["origin"]["edge_candidate"] == "Cloudflare, Inc."
+    request = target["layers"]["request_target"]
+    assert request["status"] != CLOSURE_COMPLETE
+    assert request.get("evidence", {}).get("provider") != "Cloudflare, Inc."
+    assert report.leads[0].where_to_request != "Cloudflare, Inc."
+
+
 def test_registration_without_country_or_handle_stays_partial() -> None:
     endpoint = _complete_endpoint()
     endpoint.enrichment["ip_rdap"].pop("country")
@@ -702,6 +772,8 @@ def test_bgp_without_upstream_evidence_stays_partial() -> None:
 
 def test_parent_asn_and_bare_port_cannot_complete_hosting_or_request_layers() -> None:
     endpoint = _complete_endpoint()
+    endpoint.enrichment.pop("fofa")
+    endpoint.enrichment["source_status"].pop("fofa")
     endpoint.enrichment["shodan"] = {
         "org": "Example Hosting Ltd",
         "ports": [443],
@@ -1338,6 +1410,17 @@ def _full_ip_enrichers() -> list[_FakeEnricher]:
                 "org": "Example Hosting Ltd",
                 "ports": [443],
                 "services": [{"port": 443, "product": "nginx"}],
+            },
+        ),
+        _FakeEnricher(
+            "fofa",
+            ["ip"],
+            {
+                "records": [[
+                    "https://api.example.test", "198.51.100.10", 443, "https",
+                    "Example API", "nginx", "US", "California", "Los Angeles", 64500,
+                    "Example Hosting Ltd",
+                ]],
             },
         ),
     ]

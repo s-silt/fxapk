@@ -684,7 +684,7 @@ def cluster_fronting(ip_views: list[dict[str, Any]]) -> int:
 _ONLINE_ASORG_SOURCES = ("fofa", "hunter", "quake", "virustotal", "shodan", "ripestat_bgp")
 #: 从资产记录里取"网络运营方"的字段——★只取 as_org 类，绝不取 company（Hunter 的 ICP 备案主体=服务运营方，
 #: service_operator 恒 unknown，不得从数据推断）。
-_ONLINE_ASORG_FIELDS = ("as_organization", "as_org")
+_ONLINE_ASORG_FIELDS = ("as_organization", "as_org", "asn_holder")
 _ATTRIBUTION_PROVIDER_SOURCES = (
     "asn",
     "dns",

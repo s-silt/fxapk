@@ -22,6 +22,39 @@ JURIS_DOMESTIC = "国内"
 JURIS_FOREIGN = "国外"
 JURIS_UNKNOWN = "未知"
 
+# ISO 3166-1 alpha-2 codes accepted by common enrichment APIs. Values outside
+# this set are not evidence of a foreign jurisdiction.
+_ISO_COUNTRY_CODES = frozenset(
+    """
+    ad ae af ag ai al am ao aq ar as at au aw ax az ba bb bd be bf bg bh bi bj bl bm bn bo bq
+    br bs bt bv bw by bz ca cc cd cf cg ch ci ck cl cm cn co cr cu cv cw cx cy cz de dj dk dm
+    do dz ec ee eg eh er es et fi fj fk fm fo fr ga gb gd ge gf gg gh gi gl gm gn gp gq gr gs
+    gt gu gw gy hk hm hn hr ht hu id ie il im in io iq ir is it je jm jo jp ke kg kh ki km kn
+    kp kr kw ky kz la lb lc li lk lr ls lt lu lv ly ma mc md me mf mg mh mk ml mm mn mo mp mq
+    mr ms mt mu mv mw mx my mz na nc ne nf ng ni nl no np nr nu nz om pa pe pf pg ph pk pl pm
+    pn pr ps pt pw py qa re ro rs ru rw sa sb sc sd se sg sh si sj sk sl sm sn so sr ss st sv
+    sx sy sz tc td tf tg th tj tk tl tm tn to tr tt tv tw tz ua ug um us uy uz va vc ve vg vi
+    vn vu wf ws ye yt za zm zw
+    """.split()
+)
+
+# APIs also commonly return country names. Keep names explicit rather than
+# treating every non-empty string as foreign evidence.
+_VALID_COUNTRY_NAMES = frozenset(
+    {
+        "china", "prc", "people's republic of china", "中国", "中国大陆",
+        "united states", "united states of america", "usa", "america",
+        "united kingdom", "great britain", "england", "germany", "france",
+        "japan", "singapore", "india", "russia", "russian federation",
+        "canada", "australia", "new zealand", "south korea", "korea, republic of",
+        "netherlands", "italy", "spain", "switzerland", "sweden", "norway",
+        "denmark", "finland", "ireland", "israel", "turkey", "brazil",
+        "mexico", "argentina", "chile", "south africa", "united arab emirates",
+        "hong kong", "hong kong, china", "taiwan", "taiwan, province of china",
+        "macao", "macau", "macao, china",
+    }
+)
+
 
 def _country_is_domestic(country: str) -> bool:
     """基础设施归属是否明确指向中国大陆；港澳台常见长名称不得误吞。"""
@@ -46,6 +79,9 @@ def _country_signal(country: str) -> str | None:
         "not available", "not applicable", "undetermined", "undisclosed", "unspecified",
         "unassigned", "private", "reserved", "xx", "zz",
     }:
+        return None
+    compact = normalized.replace(" ", "")
+    if compact not in _ISO_COUNTRY_CODES and normalized not in _VALID_COUNTRY_NAMES:
         return None
     return JURIS_DOMESTIC if _country_is_domestic(normalized) else JURIS_FOREIGN
 

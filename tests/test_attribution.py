@@ -864,6 +864,10 @@ def test_online_as_org_helper_priority_shape_and_fields() -> None:
     assert A._online_as_org({}) is None
 
 
+def test_online_as_org_accepts_ripestat_asn_holder_fallback() -> None:
+    assert A._online_as_org({"ripestat_bgp": {"asn_holder": "RIPE Network Ltd"}}) == "RIPE Network Ltd"
+
+
 def test_cidr_ip_pool_weak_signal_matches_and_stays_weak() -> None:
     """★network.cidrs / ip_pool 匹配器（schema 此前有 ip_pool=3 权重但 _score_one_edge 无匹配代码）：观测 IP
     落规则 CIDR → ip_pool 弱信号命中；弱信号（非强信号）单独至多 possible，不据 IP 池就 confirmed。"""
