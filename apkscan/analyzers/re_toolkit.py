@@ -457,7 +457,7 @@ class ReToolkitAnalyzer(BaseAnalyzer):
             )
 
         recommendation_parts = [
-            "把内置的 hook/反检测工具链作为团伙工具链指纹并簇串案（同套自研工具疑同团伙）。",
+            "记录内置 hook/反检测工具链作为关联候选；工具类型相同不能证明同一主体，须比较独特代码哈希、配置与目标范围等独立锚点。",
         ]
         if anti_frida:
             recommendation_parts.append(

@@ -16,7 +16,7 @@
    **没有**文件缓存，指望富化器自己记住是错的；本层按 ``target + provider`` 记录成功/
    查无记录的终态。失败、缺 key、主动模式阻断都不算完成，补 key 或重跑时只补缺失源。
 3. **限频现状是分化的**，多数 key-gated 源不自限频。本层的保护只有两件：dry-run 预算
-   与保守的单次运行上限（``DEFAULT_MAX_TARGETS``）。不声称"复用各源已有限频"。
+   与不可绕过的单次运行硬上限（``MAX_BATCH_TARGETS``）。不声称"复用各源已有限频"。
 """
 
 from __future__ import annotations
@@ -43,8 +43,10 @@ from apkscan.report.ioc import _csv_safe
 
 logger = logging.getLogger(__name__)
 
-#: 单次运行的目标上限。key-gated 源多数不自限频，靠这个保守闸门兜住"一口气烧掉整天配额"。
-#: 需要更多就显式抬高（命令行 ``--max-targets``），让抬高这件事是**有意识的**。
+#: 单次运行硬上限。批量入口会执行 Shodan 等额度型 ``case_close_only`` 源，故调用方与命令行
+#: 都不得把目标集抬过此值；更大清单须拆分并逐轮 dry-run 复核预算。
+MAX_BATCH_TARGETS = 200
+#: 默认即取硬上限；保留旧名字供调用方使用。
 DEFAULT_MAX_TARGETS = 200
 
 #: 账本 / 明细 NDJSON 每行的固定键。``target`` 是续跑判重的主键。

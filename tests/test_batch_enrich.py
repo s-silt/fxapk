@@ -645,8 +645,31 @@ def test_cli_max_targets_caps_a_single_run(tmp_path: Path, monkeypatch) -> None:
     assert len(stub.calls) == 1
 
 
+def test_cli_max_targets_cannot_bypass_absolute_batch_cap(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    stub = _CountingEnricher()
+    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [stub])
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "enrich",
+            "batch",
+            "--targets",
+            str(_write_targets(tmp_path)),
+            "--out",
+            str(tmp_path),
+            "--no-dry-run",
+            "--max-targets",
+            str(batch_enrich.DEFAULT_MAX_TARGETS + 1),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert stub.calls == []
+
+
 def test_cli_active_enrichers_are_never_used(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
-    """★批量入口全程被动：``active=True`` 的源一律不纳入（对目标零流量）。"""
+    """★批量入口只纳入 ``active=False`` 源；第三方查询披露边界由各源说明。"""
 
     class _ActiveEnricher(BaseEnricher):
         name = "active_stub"

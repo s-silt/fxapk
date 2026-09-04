@@ -2,10 +2,11 @@
 
 验证合规关键控制（不发真实网络，用假富化器记录被调端点）：
 - 第①遍 attribution 富化器对所有目标跑、并据其结果定辖区；
-- 第②遍 overseas **被动**富化器（shodan/certs）仅对【国外 + 未知】端点跑（境内走调证、不碰）；
+- 第②遍 overseas 第三方数据富化器（shodan/certs）仅对【国外 + 未知】端点跑；
 - 辖区内部信号**绝不泄漏**进 ep.enrichment（report.json 不含 _jurisdiction 等内部键）。
 
-★ 本仓已无任何主动探测能力：overseas 富化器全部被动（active=False，读第三方公开库 / OSINT，对目标零流量）。
+★ 本仓已无任何主动探测能力：overseas 富化器均为 active=False，不直连目标业务服务，但会向
+第三方数据源提交目标标识。
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ class _RecordingEnricher(BaseEnricher):
         self.name = name
         self.applies_to = ["ip", "domain"]
         self.phase = phase
-        self.active = False  # 本仓富化器全部被动（对目标零流量）
+        self.active = False  # 不直连目标业务服务；第三方披露边界由对应源说明。
         self._data = data or {}
         self.seen: set[str] = set()
         self._lock = threading.Lock()
@@ -73,6 +74,10 @@ def test_two_phase_gating_overseas_foreign_and_unknown_not_domestic() -> None:
     # 第②遍境外被动取证：仅【国外 + 未知】（境内走调证、完全不碰）。
     assert overseas.seen == {"evil-us.com", "evil-unk.com"}
     assert "evil-cnhost.com" not in overseas.seen
+    assert domestic.enrichment["source_status"]["shodan"] == {
+        "status": "skipped",
+        "reason": "jurisdiction_gate",
+    }
 
     # 辖区内部信号绝不泄漏进 ep.enrichment（避免进 report.json 被误当 provider）。
     for ep in targets:
@@ -88,6 +93,26 @@ def test_two_phase_no_overseas_enrichers_is_noop_beyond_attribution() -> None:
     assert any(s["provider"] == "asn" for s in stats)
     assert "asn" in foreign.enrichment
     assert "_jurisdiction" not in foreign.enrichment
+
+
+def test_two_phase_conflicting_hosting_signals_remain_eligible_for_followup() -> None:
+    endpoint = _ep("mixed.example")
+    dns = _RecordingEnricher(
+        "dns",
+        phase="attribution",
+        data={"hosting": [{"ip": "198.51.100.31", "country": "China"}]},
+    )
+    asn = _RecordingEnricher(
+        "asn",
+        phase="attribution",
+        data={"country": "United States"},
+    )
+    overseas = _RecordingEnricher("shodan", phase="overseas", data={"ports": [443]})
+
+    _run_enrichment([endpoint], [dns, asn, overseas])
+
+    assert overseas.seen == {"mixed.example"}
+    assert endpoint.enrichment["source_status"]["shodan"] == {"status": "hit"}
 
 
 def test_plain_selected_enrichment_does_not_run_case_close_only_provider() -> None:
@@ -115,19 +140,19 @@ def test_apply_forensic_domestic_flip_suppresses_overseas_evidence() -> None:
     ev: list[str] = []
     notes = _apply_forensic(
         infra.ADVICE_INVESTIGATE, "x.com", ev, "",
-        shodan={"country": "China", "ip": "1.2.3.4", "ports": [80],
+        shodan={"country": "China", "ip": "198.51.100.32", "ports": [80],
                 "services": [{"port": 80, "product": "nginx"}]},
     )
     assert "国内" in notes  # 最终标「国内·可调证」
-    assert not any("源站被动归属" in e for e in ev)
+    assert not any("基础设施候选归属" in e for e in ev)
     assert not any("Shodan 开放端口" in e for e in ev)
 
-    # 对照：归属国外 → 境外源站被动定位证据渲染（源站归属 + 开放端口/服务）。
+    # 对照：归属国外 → 境外基础设施候选证据渲染（候选归属 + 开放端口/服务）。
     ev2: list[str] = []
     _apply_forensic(
         infra.ADVICE_INVESTIGATE, "y.com", ev2, "",
         shodan={"country": "United States", "ip": "198.51.100.48", "ports": [80],
                 "services": [{"port": 80, "product": "nginx"}]},
     )
-    assert any("源站被动归属" in e for e in ev2)
+    assert any("基础设施候选归属" in e for e in ev2)
     assert any("Shodan 开放端口" in e for e in ev2)

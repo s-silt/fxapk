@@ -80,7 +80,7 @@ def test_shared_config_objects_clusters_by_url_and_sha() -> None:
     sha_clusters = [c for c in clusters if c["key_type"] == "sha256"]
     assert len(url_clusters) == 1 and url_clusters[0]["samples"] == ["s1", "s2"]
     assert url_clusters[0]["key"] == "https://shared/c.dat"
-    assert len(sha_clusters) == 1 and sha_clusters[0]["samples"] == ["s1", "s2"]  # 内容一致强锚
+    assert len(sha_clusters) == 1 and sha_clusters[0]["samples"] == ["s1", "s2"]  # 内容一致候选
     assert all("s3" not in c["samples"] for c in clusters)  # 独有对象不成簇
 
 

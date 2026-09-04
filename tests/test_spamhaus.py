@@ -308,6 +308,6 @@ def test_repeated_failure_does_not_storm_upstream(monkeypatch: pytest.MonkeyPatc
 def test_enricher_declares_passive_no_credential() -> None:
     enricher = SpamhausDropEnricher()
 
-    assert enricher.active is False          # 对目标零流量
+    assert enricher.active is False          # 不直连目标业务服务
     assert enricher.required_env == ()       # 零 key
     assert enricher.applies_to == ["ip"]

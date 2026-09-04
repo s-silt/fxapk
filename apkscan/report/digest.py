@@ -1,8 +1,9 @@
 """把 report.json 压成 **AI agent（agent-agnostic）/ 程序友好** 的紧凑摘要（compact digest）。
 
 report.json 完整但冗长（端点全表 / 技术附录 / 富化原始数据），AI agent（Codex）逐字解析既费
-token 又难抓重点。本模块抽出**可办案化的核心**：按优先级排序的调证线索 + 计数摘要，键名稳定、
-结构扁平，供低 token 消费、直接决策。纯函数（report dict → digest dict），绝不抛。
+token 又难抓重点。本模块抽出按优先级排序的候选线索与计数摘要，键名稳定、结构扁平，供低 token
+摘要分流与回查定位。digest 不替代 canonical report 或原始 evidence；正式结论与调证动作必须回查。
+纯函数（report dict → digest dict），绝不抛。
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from apkscan.core.evidence_scope import (
     project_serialized_closure,
     project_serialized_leads,
 )
+from apkscan.core.leads import _overseas_target_coverage, _project_overseas_profiles
 from apkscan.core.models import (
     OBSERVED_CONTACT_SOURCES,
     EvidenceScope,
@@ -211,22 +213,40 @@ def _integrity(report: dict[str, Any]) -> dict[str, Any]:
         warnings.append(f"分析状态为 {status}{detail}：结论基础不完整，勿据此下确定性结论")
 
     es = [s for s in _list(report.get("enricher_status")) if isinstance(s, dict)]
-    attempted = ok = 0
+    attempted = terminal_ok = 0
     dirty = False
     for s in es:
-        a, o = _nonneg_count(s.get("attempted")), _nonneg_count(s.get("ok"))
-        if a is None or o is None or o > a:  # 脏条目 / ok>attempted 无意义 → 跳过并标数据质量问题
+        a = _nonneg_count(s.get("attempted"))
+        o = _nonneg_count(s.get("ok"))
+        no_record = _nonneg_count(s.get("no_record")) if "no_record" in s else 0
+        if (
+            a is None
+            or o is None
+            or no_record is None
+            or o + no_record > a
+        ):  # 脏条目 / 成功终态数超过 attempted 无意义
             dirty = True
             continue
         attempted += a
-        ok += o
-    enrich_rate = round(ok / attempted, 4) if attempted else None
+        terminal_ok += o + no_record
+    enrich_rate = round(terminal_ok / attempted, 4) if attempted else None
     if dirty:
         warnings.append("富化统计含异常条目（计数非法/ok>attempted）：命中率仅据可解析条目，结果可能不可信")
     if enrich_rate is not None and enrich_rate < _ENRICH_WARN:
         warnings.append(
-            f"富化命中率 {enrich_rate} 低于 {_ENRICH_WARN}：富化源可能未跑全（限速/密钥/网络），勿据残缺证据下结论"
+            f"富化成功终态率 {enrich_rate} 低于 {_ENRICH_WARN}：富化源可能未跑全（限速/密钥/网络），勿据残缺证据下结论"
         )
+    meta_block = report.get("meta")
+    if isinstance(meta_block, dict):
+        plan = meta_block.get("enrichment_plan")
+        execution = meta_block.get("enrichment_execution")
+        plan_status = plan.get("status") if isinstance(plan, dict) else None
+        if plan_status == "deferred_high_cardinality":
+            warnings.append("联网富化整轮未执行：候选超过普通 analyze 安全上限，须缩小目标或转有预算批量入口")
+        elif plan_status == "dry_run":
+            warnings.append("联网富化处于 dry-run：仅生成计划，未执行任何供应商查询")
+        if isinstance(execution, dict) and execution.get("status") == "completed_with_gaps":
+            warnings.append("联网富化已运行但存在失败、缺凭据、模式拦截或供应商预算延后，不能视为全源覆盖")
     return {
         "analysis_status": status,
         "completeness": completeness,
@@ -235,6 +255,62 @@ def _integrity(report: dict[str, Any]) -> dict[str, Any]:
         "reliable": not warnings,
         "warnings": warnings,
     }
+
+
+def _compact_enrichment(meta: dict[str, Any]) -> dict[str, Any]:
+    """把联网计划/执行审计压成 digest 可见的小结构，不带端点原值。"""
+    raw_plan = meta.get("enrichment_plan")
+    raw_execution = meta.get("enrichment_execution")
+    if not isinstance(raw_plan, dict) and not isinstance(raw_execution, dict):
+        return {}
+    plan = raw_plan if isinstance(raw_plan, dict) else {}
+    execution = raw_execution if isinstance(raw_execution, dict) else {}
+    compact: dict[str, Any] = {
+        "status": plan.get("status"),
+        "candidate_total": _nonneg_count(plan.get("candidate_total")),
+        "static_ip_candidate_total": _nonneg_count(plan.get("static_ip_candidate_total")),
+        "low_tier_static_excluded": _nonneg_count(plan.get("low_tier_static_excluded")),
+        "target_limit": _nonneg_count(plan.get("target_limit")),
+        "static_ip_limit": _nonneg_count(plan.get("static_ip_limit")),
+        "limit_clamped": bool(plan.get("limit_clamped")),
+        "execution_status": execution.get("status"),
+        "execution_reason": execution.get("reason"),
+        "attempted_total": _nonneg_count(execution.get("attempted_total")),
+    }
+    raw_skipped = execution.get("skipped_by_reason")
+    if isinstance(raw_skipped, dict):
+        compact["skipped_by_reason"] = {
+            str(reason): count
+            for reason, raw_count in raw_skipped.items()
+            if (count := _nonneg_count(raw_count)) is not None and count
+        }
+    raw_provider_plan = plan.get("provider_plan")
+    if isinstance(raw_provider_plan, dict):
+        provider_plan: dict[str, dict[str, Any]] = {}
+        for provider, value in raw_provider_plan.items():
+            if not isinstance(value, dict):
+                continue
+            item: dict[str, Any] = {
+                key: count
+                for key in ("applicable", "selected", "deferred", "disabled", "skipped")
+                if (count := _nonneg_count(value.get(key))) is not None
+            }
+            for key in ("configured", "mode_allowed"):
+                if isinstance(value.get(key), bool):
+                    item[key] = value[key]
+            for key in ("status", "reason"):
+                if isinstance(value.get(key), str) and value[key]:
+                    item[key] = value[key]
+            provider_plan[str(provider)] = item
+        compact["provider_plan"] = provider_plan
+    raw_estimates = plan.get("estimated_provider_invocations")
+    if isinstance(raw_estimates, dict):
+        compact["estimated_provider_invocations"] = {
+            str(provider): count
+            for provider, raw_count in raw_estimates.items()
+            if (count := _nonneg_count(raw_count)) is not None
+        }
+    return {key: value for key, value in compact.items() if value is not None}
 
 
 def _neg_score(value: object) -> float:
@@ -342,7 +418,7 @@ def _compact_findings(report: dict) -> dict[str, Any]:
     #   却不知道被丢的是什么、也无从去 report.json 里定位——等于知道自己瞎但不知道瞎在哪。
     #   带上 ID（不带标题/证据，token 仍然便宜）才能按图索骥。
     #   实证：本轮补的三条 LOW 出口（版本标记词、绝对路径条目的落盘解压风险、
-    #   未知远控目标）在默认 digest 里只体现为 omitted 计数，操作提示对决策面完全消失。
+    #   未知远控目标）在默认 digest 里只体现为 omitted 计数，操作提示会从摘要分流面完全消失。
     omitted_ids = sorted(
         {str(f.get("id") or "") for f in items} - kept_ids - {""}
     )[:_OMITTED_ID_CAP]
@@ -466,6 +542,9 @@ def _compact_visibility(raw: object) -> dict[str, Any]:
 def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
     """report.json 解析出的对象 → 紧凑摘要 dict（线索按优先级排序）。绝不抛。
 
+    本摘要只用于初筛、分流和定位须回查的字段，不能替代 canonical report 或原始 evidence，亦不能
+    独立支撑正式结论、调证动作或报告发布。
+
     ``redact=True``（**默认**）：钱包私钥 / 助记词、后端凭据、个人隐私数据、加密配方等高敏类别的
     value 按类别脱敏，自由文本里的结构化 PII 一并抹掉。明文原值只留在本地完整报告里。
 
@@ -493,11 +572,20 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
     by_advice = Counter(str(lead.get("advice") or "未研判") for lead in leads)
     by_category = Counter(str(lead.get("category") or "?") for lead in leads)
 
-    # 结构化境外源站段（被动定位的海外后端/控制者：IP 归属/ASN/开放端口/服务 banner/技术栈/关联子域，
-    # 按主机聚合，机器可读）。由 pipeline 写入 meta["overseas_targets"]，已做辖区门控（仅国外+未知）；
-    # 此处原样透传供 agent 直查——纯被动 OSINT 定位，对目标零流量。
-    overseas_targets = meta.get("overseas_targets")
-    overseas_targets = overseas_targets if isinstance(overseas_targets, list) else []
+    # 结构化境外基础设施画像段：IP/ASN/开放端口/服务 banner/技术栈/关联子域按主机聚合。
+    # 它是 Shodan/CT 命中的 profile-only 投影，不是境外/辖区未知候选全表。候选分母及
+    # ASN-only 等未画像缺口由 overseas_target_coverage 单列，避免把列表长度 0 读成没有候选。
+    raw_overseas_targets = meta.get("overseas_targets")
+    raw_overseas_targets = (
+        raw_overseas_targets if isinstance(raw_overseas_targets, list) else []
+    )
+    final_leads_for_scope: object = leads if isinstance(report.get("leads"), list) else None
+    overseas_targets = _project_overseas_profiles(
+        raw_overseas_targets, final_leads_for_scope
+    )
+    overseas_target_coverage = _overseas_target_coverage(
+        report.get("endpoints"), raw_overseas_targets, final_leads_for_scope
+    )
 
     closure = project_serialized_closure(report)
     closure_targets = closure.get("targets")
@@ -551,7 +639,13 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
             "by_advice": dict(by_advice),
             "by_category": dict(by_category),
             "comm_sessions": len(meta.get("comm_sessions") or []),
+            # 兼容键：它的真实语义是「已画像主机数」，不是全部候选数。
             "overseas_target_hosts": len(overseas_targets),
+            "overseas_candidate_hosts_total": overseas_target_coverage[
+                "candidate_hosts_total"
+            ],
+            "overseas_profiled_hosts": overseas_target_coverage["profiled_hosts"],
+            "overseas_unprofiled_hosts": overseas_target_coverage["unprofiled_hosts"],
             "attributed_role_candidates": role_candidate_count,
         },
         "integrity": _integrity(report),  # run 级完整性红旗（reliable=False 时结果可能不可信）
@@ -570,8 +664,12 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
             for lead in leads_sorted
         ],
         "overseas_targets": overseas_targets,
+        "overseas_target_coverage": overseas_target_coverage,
         "closure": compact_closure,
     }
+    enrichment = _compact_enrichment(meta)
+    if enrichment:
+        digest["enrichment"] = enrichment
     # ★扫描覆盖缺口（core/coverage.py 协议）：哪些分析器没扫全。仅非零项，且**无缺口时整键不出现**
     #   （缺失=无事件）。没有这一段，各 count=0 分不清「样本确实没有」与「这一面根本没扫到」。
     _coverage = collect_coverage(meta)

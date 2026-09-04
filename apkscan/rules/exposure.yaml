@@ -1,16 +1,16 @@
-# 技术栈 / 后台框架指纹规则（串案用）。
+# 技术栈 / 后台框架指纹规则（人工复核候选）。
 #
-# ★ 定位与边界（务必守住）：本库是**取证串案情报**，不是攻击工具。
-#   - 只描述「哪种被动 banner 指纹 = 是什么技术栈 / 后台框架」，用于**同后台 = 疑同团伙**并簇串案。
+# ★ 定位与边界（务必守住）：本库只生成弱候选，不是主体归因或攻击工具。
+#   - 只描述「哪种第三方 banner 记录 = 什么技术栈 / 后台框架」；相同框架不能证明同一后端或主体。
 #   - **只识别、不研判漏洞、不给利用方向**；绝不含 exploit / PoC / 利用代码 / 注入串 / webshell / 具体命令。
 #
 # 指纹字段（对齐被动 enrichers 真实输出，小写子串匹配，任一命中即该条命中）：
 #   server / x_powered_by / title  ← 服务 banner 的 Server / X-Powered-By / <title>
 #   cookie                         ← Set-Cookie 名（离散 token，精确匹配）
-#   product / cpe / module         ← shodan.services[]（被动，对目标零流量）
+#   product / cpe / module         ← shodan.services[]（第三方既有记录，可能过期）
 
 # -------------------------------------------------------------------------
-# 技术栈 / 后台框架指纹（仅识别 → 同后台串案；不含漏洞方向、不含利用靶单）
+# 技术栈 / 后台框架指纹（仅识别 → 弱候选；不含漏洞方向、不含利用靶单）
 # -------------------------------------------------------------------------
 tech_stack:
   - name: "PHP"
@@ -19,7 +19,7 @@ tech_stack:
     cookie: ["phpsessid"]
     product: ["php"]
     cpe: ["cpe:/a:php:php", "cpe:2.3:a:php:php"]
-    note: "后端为 PHP 语言栈（后续 PHP 框架 / 面板研判的前置锚点）"
+    note: "PHP 语言栈；相同语言栈较常见，仅作弱候选，须由独立锚点复核"
 
   - name: "ThinkPHP"
     server: ["thinkphp"]
@@ -27,23 +27,23 @@ tech_stack:
     product: ["thinkphp"]
     title: ["thinkphp"]
     cpe: ["cpe:2.3:a:thinkphp:thinkphp"]
-    note: "ThinkPHP 框架（涉诈 / 赌博后台高发）；★ 同后台疑同团伙基础设施，建议并簇串案"
+    note: "ThinkPHP 框架；相同框架较常见，仅作弱候选，须由独立锚点复核"
 
   - name: "Laravel"
-    cookie: ["laravel_session", "xsrf-token"]
+    cookie: ["laravel_session"]
     x_powered_by: ["laravel"]
     title: ["laravel"]
-    note: "Laravel 框架；★ 同后台疑同团伙基础设施，建议并簇串案"
+    note: "Laravel 框架；相同框架较常见，仅作弱候选，须由独立锚点复核"
 
   - name: "CodeIgniter"
     cookie: ["ci_session"]
     title: ["codeigniter"]
-    note: "CodeIgniter 框架；★ 同后台疑同团伙基础设施，建议并簇串案"
+    note: "CodeIgniter 框架；相同框架较常见，仅作弱候选，须由独立锚点复核"
 
   - name: "Yii"
     cookie: ["_identity", "yii_csrf"]
     title: ["yii"]
-    note: "Yii 框架；★ 同后台疑同团伙基础设施，建议并簇串案"
+    note: "Yii 框架；相同框架较常见，仅作弱候选，须由独立锚点复核"
 
   - name: "Spring / Java"
     cookie: ["jsessionid"]
@@ -51,57 +51,56 @@ tech_stack:
     server: ["tomcat", "jetty"]
     product: ["tomcat", "spring", "jetty"]
     title: ["whitelabel error page"]
-    note: "Java / Spring 栈；★ 同后台疑同团伙基础设施，建议并簇串案"
+    note: "Java / Spring 栈；相同框架较常见，仅作弱候选，须由独立锚点复核"
 
   - name: "Python (Flask / Django / Werkzeug)"
     server: ["werkzeug", "gunicorn"]
-    cookie: ["sessionid", "csrftoken", "session"]
+    cookie: ["sessionid", "csrftoken"]
     title: ["werkzeug", "django", "traceback (most recent call last)"]
-    note: "Python Web 栈（Flask / Django / Werkzeug）；★ 同后台疑同团伙基础设施，建议并簇串案"
+    note: "Python Web 栈（Flask / Django / Werkzeug）；相同框架较常见，仅作弱候选，须由独立锚点复核"
 
   - name: "Node / Express"
     x_powered_by: ["express"]
     product: ["express"]
     title: ["express"]
-    note: "Node / Express 栈；★ 同后台疑同团伙基础设施，建议并簇串案"
+    note: "Node / Express 栈；相同框架较常见，仅作弱候选，须由独立锚点复核"
 
   - name: "phpMyAdmin"
     title: ["phpmyadmin"]
     cookie: ["phpmyadmin", "pma"]
-    note: "phpMyAdmin 数据库管理入口指纹；★ 同后台疑同团伙基础设施，建议并簇串案"
+    note: "phpMyAdmin 数据库管理入口指纹；相同框架较常见，仅作弱候选，须由独立锚点复核"
 
   - name: "宝塔面板 (BaoTa)"
     title: ["宝塔", "baota", "bt-panel"]
     cookie: ["bt_user_info"]
-    note: "宝塔服务器面板指纹；★ 同后台疑同团伙基础设施，建议并簇串案"
+    note: "宝塔服务器面板指纹；相同框架较常见，仅作弱候选，须由独立锚点复核"
 
   - name: "WordPress"
     x_powered_by: ["wordpress"]
     title: ["wordpress"]
-    cookie: ["wordpress_", "wp-settings"]
-    note: "WordPress 站点指纹；★ 同后台疑同团伙基础设施，建议并簇串案"
+    note: "WordPress 站点指纹；相同框架较常见，仅作弱候选，须由独立锚点复核"
 
   - name: "Jeecg-Boot 低代码后台"
     title: ["jeecg"]
     cookie: ["jeecg"]
-    note: "Jeecg-Boot 低代码后台（涉诈 / 赌博后台高发）；★ 同后台疑同团伙基础设施，建议并簇串案"
+    note: "Jeecg-Boot 低代码后台；相同框架较常见，仅作弱候选，须由独立锚点复核"
 
   - name: "若依 RuoYi 后台"
     title: ["ruoyi", "若依"]
-    note: "若依 RuoYi 后台（涉诈后台高发）；★ 同后台疑同团伙基础设施，建议并簇串案"
+    note: "若依 RuoYi 后台；相同框架较常见，仅作弱候选，须由独立锚点复核"
 
   - name: "通达 OA"
     title: ["通达", "tongda"]
-    note: "通达 OA（被涉诈 / 赌博团伙改造为后台高发）；★ 同后台疑同团伙基础设施，建议并簇串案"
+    note: "通达 OA；相同框架较常见，仅作弱候选，须由独立锚点复核"
 
   - name: "泛微 e-cology / e-office"
     title: ["泛微", "weaver", "e-cology", "e-office"]
-    note: "泛微 OA（e-cology / e-office）；★ 同后台疑同团伙基础设施，建议并簇串案"
+    note: "泛微 OA（e-cology / e-office）；相同框架较常见，仅作弱候选，须由独立锚点复核"
 
   - name: "致远 OA (Seeyon)"
     title: ["致远", "seeyon"]
-    note: "致远 OA（Seeyon）；★ 同后台疑同团伙基础设施，建议并簇串案"
+    note: "致远 OA（Seeyon）；相同框架较常见，仅作弱候选，须由独立锚点复核"
 
   - name: "ThinkAdmin"
     title: ["thinkadmin"]
-    note: "ThinkAdmin（ThinkPHP 系后台）；★ 同后台疑同团伙基础设施，建议并簇串案"
+    note: "ThinkAdmin（ThinkPHP 系后台）；相同框架较常见，仅作弱候选，须由独立锚点复核"

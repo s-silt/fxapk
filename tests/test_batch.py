@@ -255,7 +255,7 @@ def test_run_folder_empty_folder(
 
 
 # ---------------------------------------------------------------------------
-# 跨样本团伙聚类接线（读各包主报告 → correlate → 写 case_correlation.json）
+# 跨样本关联候选聚类接线（读各包主报告 → correlate → 写 case_correlation.json）
 # ---------------------------------------------------------------------------
 
 
@@ -298,7 +298,10 @@ def test_run_correlation_clusters_shared_c2(tmp_path: Path) -> None:
     clusters = batch._run_correlation(analyzed, str(out))
     assert len(clusters) == 1
     assert set(clusters[0]["members"]) == {"sha_a", "sha_b"}
-    assert (out / "case_correlation.json").is_file()
+    artifact = json.loads((out / "case_correlation.json").read_text(encoding="utf-8"))
+    assert artifact["clusters"] == clusters
+    assert "人工复核" in artifact["disclaimer"]
+    assert "不能独立认定" in artifact["disclaimer"]
 
 
 def test_run_correlation_missing_report_is_safe(tmp_path: Path) -> None:
@@ -382,7 +385,7 @@ def test_cli_batch_prints_clusters(
             {
                 "cluster_id": 1,
                 "members": ["sha_a", "sha_b"],
-                "shared": [{"kind": "c2", "value": "evil.com"}],
+                "shared": [{"kind": "c2", "value": "infra.example"}],
             }
         ],
         "summary": {"total": 2, "analyzed": 2, "skipped": 0, "failed": 0, "had_device": False, "clusters": 1},
@@ -392,8 +395,14 @@ def test_cli_batch_prints_clusters(
     _patch_run_folder(monkeypatch, result)
     res = runner.invoke(cli.app, ["batch", str(tmp_path)])
     assert res.exit_code == 0
-    assert "团伙簇" in res.output
-    assert "evil.com" in res.output  # 并案依据（共享 C2）
+    assert "关联候选簇" in res.output
+    assert "共享指纹" in res.output
+    assert "不能独立认定" in res.output
+    assert "\u56e2\u4f19\u7c07" not in res.output
+    assert "\u5e76\u6848\u4f9d\u636e：" not in res.output
+    assert "c2×1" in res.output
+    assert "stdout 不输出原值" in res.output
+    assert "infra.example" not in res.output
 
 
 def test_cli_batch_prints_summary_counts(

@@ -400,28 +400,314 @@ def test_enrichment_targets_respect_source_tier():
     assert pipeline._enrichment_targets([bulk_tier]) == [], "超大字符串表档终判待核，不该再查"
 
 
-def test_enrichment_targets_judge_ips_by_ip_criteria_not_domain_ones():
-    """富化目标筛选对 IP 只走 ``classify_ip``，不读 tier——降档的 IP 也照旧富化。
+def test_enrichment_targets_skip_static_low_tier_ips(monkeypatch):
+    """仅见于第三方库/超大字符串表的静态 IP 保留为候选，但不得自动联网烧额度。"""
+    synthetic_ip = "100.64.0.9"
+    monkeypatch.setattr(
+        infra, "classify_ip", lambda *_args, **_kwargs: (infra.ADVICE_INVESTIGATE, "synthetic")
+    )
 
-    ★本条锁的语义在 IP 接上 tier 降档消费后**换了理由但行为不变**：现在
-    ``leads._ip_lead`` 会把 library-file/bulk-string 档的 IP 降为「待核」，但那是
-    **留给人核**、不是排除——人核时手里得有 ASN/RDAP 结果，所以富化侧必须继续把
-    这些 IP 当目标（见 ``leads.py`` IP 侧降档注释的第 2 条有意差别）。若把这里改成
-    ``effective_advice``（域名接口）判 IP，降档 IP 就会被静默跳过富化，
-    「该核查的 IP 却没有 ASN/RDAP 结果」。
-
-    ★把实现里 IP 那条分支改回 ``effective_advice`` 则本条变红。
-    """
-    public_ip = "45.76.1.1"  # leak-scan: allow pipeline 闭环目标夹具，非公网不会进 closure 候选
-    # 前置断言：IP 判据对它判最高档——本测试要锁的正是这个结论不被域名侧的 tier 规则改写。
-    assert infra.classify_ip(public_ip)[0] == infra.ADVICE_INVESTIGATE
-
-    tiered_ip = Endpoint(value=public_ip, kind="ip", evidences=[],
+    tiered_ip = Endpoint(value=synthetic_ip, kind="ip", evidences=[],
                          enrichment={"tier": infra.TIER_LIBRARY_FILE})
 
-    assert pipeline._enrichment_targets([tiered_ip]) == [tiered_ip], (
-        "IP 的最终 Lead 判最高档，富化就不该因为域名侧的 tier 规则被跳过"
+    assert pipeline._enrichment_targets([tiered_ip]) == []
+
+
+def test_enrichment_targets_keep_runtime_observed_low_tier_ip(monkeypatch):
+    """运行时实连是更强证据，不受静态来源 tier 门影响。"""
+    synthetic_ip = "100.64.0.9"
+    monkeypatch.setattr(
+        infra, "classify_ip", lambda *_args, **_kwargs: (infra.ADVICE_INVESTIGATE, "synthetic")
     )
+    endpoint = Endpoint(
+        value=synthetic_ip,
+        kind="ip",
+        evidences=[Evidence(source="runtime-pcap", location="capture.pcap")],
+        enrichment={"tier": infra.TIER_BULK_STRING},
+    )
+
+    assert pipeline._enrichment_targets([endpoint]) == [endpoint]
+
+
+def _synthetic_suspicious_domains(count: int) -> list[Endpoint]:
+    return [
+        Endpoint(value=f"h{i}." + "synthetic-c2a" + ".vip", kind="domain")
+        for i in range(count)
+    ]
+
+
+def test_analyze_high_cardinality_defers_all_enrichment(monkeypatch):
+    """超过总目标硬门时本轮零联网，不能任意截前 N 个继续查询。"""
+    queried: list[str] = []
+
+    class _Spy(BaseEnricher):
+        name = "rdap"
+        applies_to = ["domain"]
+
+        def enrich(self, ep: Endpoint) -> EnrichmentResult:
+            queried.append(ep.value)
+            return EnrichmentResult(provider=self.name, ok=True, data={"registrar": "x"})
+
+    from types import SimpleNamespace
+
+    endpoints = _synthetic_suspicious_domains(33)
+    state = SimpleNamespace(
+        config=AnalysisConfig(online=True, enrich_max_targets=32),
+        meta={},
+        endpoints=endpoints,
+        enricher_status=[],
+    )
+    monkeypatch.setattr(pipeline, "discover_enrichers", lambda: [_Spy()])
+
+    pipeline._stage_enrich(state)
+
+    assert queried == []
+    assert state.meta["enriched_target_count"] == 0
+    plan = state.meta["enrichment_plan"]
+    assert plan["status"] == "deferred_high_cardinality"
+    assert plan["candidate_total"] == 33
+    assert plan["target_limit"] == 32
+    assert plan["provider_plan"]["rdap"]["selected"] == 0
+    assert plan["provider_plan"]["rdap"]["deferred"] == 33
+    assert plan["provider_plan"]["rdap"]["reason"] == "target_cap"
+    assert plan["estimated_provider_invocations"]["rdap"] == 0
+    assert all(
+        ep.enrichment["source_status"]["rdap"] == {
+            "status": "skipped",
+            "reason": "target_cap",
+        }
+        for ep in endpoints
+    )
+
+
+def test_analyze_explicit_limit_cannot_bypass_absolute_cap(monkeypatch):
+    """即使程序调用方传入极大上限，普通 analyze 仍受绝对硬顶并整轮零联网。"""
+    queried: list[str] = []
+
+    class _Spy(BaseEnricher):
+        name = "rdap"
+        applies_to = ["domain"]
+
+        def enrich(self, ep: Endpoint) -> EnrichmentResult:
+            queried.append(ep.value)
+            return EnrichmentResult(provider=self.name, ok=True, data={"registrar": "x"})
+
+    from types import SimpleNamespace
+
+    state = SimpleNamespace(
+        config=AnalysisConfig(online=True, enrich_max_targets=10_000),
+        meta={},
+        endpoints=_synthetic_suspicious_domains(201),
+        enricher_status=[],
+    )
+    monkeypatch.setattr(pipeline, "discover_enrichers", lambda: [_Spy()])
+
+    pipeline._stage_enrich(state)
+
+    assert queried == []
+    plan = state.meta["enrichment_plan"]
+    assert plan["requested_target_limit"] == 10_000
+    assert plan["target_limit"] == 200
+    assert plan["limit_clamped"] is True
+    assert plan["status"] == "deferred_high_cardinality"
+
+
+def test_analyze_static_ip_subcap_defers_all_enrichment(monkeypatch):
+    """总数未超限时，纯静态 IP 数超过子限额也必须触发零联网熔断。"""
+    queried: list[str] = []
+
+    class _Spy(BaseEnricher):
+        name = "asn"
+        applies_to = ["ip"]
+
+        def enrich(self, ep: Endpoint) -> EnrichmentResult:
+            queried.append(ep.value)
+            return EnrichmentResult(provider=self.name, ok=True, data={"asn": "synthetic"})
+
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        infra, "classify_ip", lambda *_args, **_kwargs: (infra.ADVICE_INVESTIGATE, "synthetic")
+    )
+    endpoints = [
+        Endpoint(
+            value=f"100.64.{40 + i // 200}.{40 + i % 200}",
+            kind="ip",
+            enrichment={"tier": infra.TIER_APP},
+        )
+        for i in range(17)
+    ]
+    state = SimpleNamespace(
+        config=AnalysisConfig(online=True, enrich_max_targets=32, enrich_static_ip_max_targets=16),
+        meta={},
+        endpoints=endpoints,
+        enricher_status=[],
+    )
+    monkeypatch.setattr(pipeline, "discover_enrichers", lambda: [_Spy()])
+
+    pipeline._stage_enrich(state)
+
+    assert queried == []
+    assert state.meta["enrichment_plan"]["static_ip_candidate_total"] == 17
+    assert state.meta["enrichment_plan"]["status"] == "deferred_high_cardinality"
+
+
+def test_analyze_enrichment_dry_run_never_calls_provider(monkeypatch):
+    queried: list[str] = []
+
+    class _Spy(BaseEnricher):
+        name = "rdap"
+        applies_to = ["domain"]
+
+        def enrich(self, ep: Endpoint) -> EnrichmentResult:
+            queried.append(ep.value)
+            return EnrichmentResult(provider=self.name, ok=True, data={"registrar": "x"})
+
+    from types import SimpleNamespace
+
+    state = SimpleNamespace(
+        config=AnalysisConfig(online=True, enrichment_dry_run=True),
+        meta={},
+        endpoints=_synthetic_suspicious_domains(1),
+        enricher_status=[],
+    )
+    monkeypatch.setattr(pipeline, "discover_enrichers", lambda: [_Spy()])
+
+    pipeline._stage_enrich(state)
+
+    assert queried == []
+    assert state.meta["enrichment_plan"]["status"] == "dry_run"
+    assert state.meta["enrichment_plan"]["estimated_provider_invocations"]["rdap"] == 1
+
+
+def test_analyze_hapi_provider_budget_is_bounded(monkeypatch):
+    queried: list[str] = []
+
+    class _SpyHapi(BaseEnricher):
+        name = "icp"
+        applies_to = ["domain"]
+
+        def enrich(self, ep: Endpoint) -> EnrichmentResult:
+            queried.append(ep.value)
+            return EnrichmentResult(provider=self.name, ok=True, data={"subject": "synthetic"})
+
+    from types import SimpleNamespace
+
+    endpoints = _synthetic_suspicious_domains(21)
+    state = SimpleNamespace(
+        config=AnalysisConfig(online=True),
+        meta={},
+        endpoints=endpoints,
+        enricher_status=[],
+    )
+    monkeypatch.setattr(pipeline, "discover_enrichers", lambda: [_SpyHapi()])
+
+    pipeline._stage_enrich(state)
+
+    assert len(queried) == 20
+    skipped = [
+        ep for ep in endpoints
+        if ep.enrichment.get("source_status", {}).get("icp", {}).get("reason")
+        == "provider_budget_exhausted"
+    ]
+    assert len(skipped) == 1
+    assert state.meta["enrichment_execution"]["status"] == "completed_with_gaps"
+    assert state.meta["enrichment_execution"]["skipped_by_reason"] == {
+        "provider_budget_exhausted": 1,
+    }
+
+
+def test_provider_budget_prioritizes_runtime_contact_over_input_order():
+    """供应商子预算不是任意截前 N 个：末尾的 observed-contact 必须优先保留。"""
+    queried: list[str] = []
+
+    class _SpyHapi(BaseEnricher):
+        name = "icp"
+        applies_to = ["domain"]
+
+        def enrich(self, ep: Endpoint) -> EnrichmentResult:
+            queried.append(ep.value)
+            return EnrichmentResult(provider=self.name, ok=True, data={"subject": "synthetic"})
+
+    endpoints = _synthetic_suspicious_domains(21)
+    runtime_endpoint = endpoints[-1]
+    runtime_endpoint.evidences.append(
+        Evidence(source="runtime-pcap", location="capture.pcap")
+    )
+
+    pipeline.enrich_selected_targets(
+        endpoints,
+        [_SpyHapi()],
+        provider_limits={"icp": 20},
+    )
+
+    assert runtime_endpoint.value in queried
+    assert endpoints[19].value not in queried
+    assert endpoints[19].enrichment["source_status"]["icp"]["reason"] == (
+        "provider_budget_exhausted"
+    )
+
+
+def test_ordinary_missing_provider_key_is_disabled_without_spending_budget(monkeypatch):
+    """缺凭据是 disabled，不是 failed，也不占额度队列。"""
+    queried: list[str] = []
+
+    class _Keyed(BaseEnricher):
+        name = "icp"
+        applies_to = ["domain"]
+        required_env = ("FXAPK_TEST_MISSING_PROVIDER_KEY",)
+
+        def enrich(self, ep: Endpoint) -> EnrichmentResult:
+            queried.append(ep.value)
+            return EnrichmentResult(provider=self.name, ok=True, data={"subject": "x"})
+
+    monkeypatch.delenv("FXAPK_TEST_MISSING_PROVIDER_KEY", raising=False)
+    endpoints = _synthetic_suspicious_domains(21)
+
+    pipeline.enrich_selected_targets(
+        endpoints,
+        [_Keyed()],
+        provider_limits={"icp": 20},
+    )
+
+    assert queried == []
+    assert all(
+        endpoint.enrichment["source_status"]["icp"]
+        == {"status": "disabled", "reason": "credential_not_configured"}
+        for endpoint in endpoints
+    )
+
+
+def test_low_tier_static_ip_has_explicit_skip_reason(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        infra, "classify_ip", lambda *_args, **_kwargs: (infra.ADVICE_INVESTIGATE, "synthetic")
+    )
+    endpoint = Endpoint(
+        value="100.64.0.10",
+        kind="ip",
+        enrichment={"tier": infra.TIER_LIBRARY_FILE},
+    )
+
+    class _Spy(BaseEnricher):
+        name = "asn"
+        applies_to = ["ip"]
+
+        def enrich(self, ep: Endpoint) -> EnrichmentResult:  # pragma: no cover - 必须被门挡下
+            raise AssertionError("low-tier static IP must not be queried")
+
+    state = SimpleNamespace(
+        config=AnalysisConfig(online=True), meta={}, endpoints=[endpoint], enricher_status=[]
+    )
+    monkeypatch.setattr(pipeline, "discover_enrichers", lambda: [_Spy()])
+
+    pipeline._stage_enrich(state)
+
+    assert endpoint.enrichment["source_status"]["asn"] == {
+        "status": "skipped",
+        "reason": "low_trust_static_source",
+    }
 
 
 def test_online_skips_infra_domain_enrichment(monkeypatch, fake_ctx):
@@ -677,6 +963,60 @@ def test_domain_lead_dns_hosting_in_evidence_and_notes():
     blob = " ".join(lead.evidence_to_obtain) + " " + (lead.notes or "")
     assert "45.76.1.1" in blob  # leak-scan: allow pipeline 闭环目标夹具，非公网不会进 closure 候选
     assert "Vultr" in blob
+
+
+def test_domain_lead_uses_hit_cloudfront_cname_as_exact_aws_request_target() -> None:
+    from apkscan.core.leads import _domain_lead
+
+    custom_hostname = "portal.infra.example"
+    distribution = ".".join(("d111111abcdef8", "cloudfront", "net"))
+    endpoint = Endpoint(
+        value=custom_hostname,
+        kind="domain",
+        enrichment={
+            "source_status": {"dns": {"status": "hit"}},
+            "dns": {"cname": [distribution]},
+        },
+    )
+
+    lead = _domain_lead(endpoint)
+
+    assert lead.where_to_request == "CDN / 分发服务商：Amazon Web Services, Inc."
+    evidence = "\n".join(lead.evidence_to_obtain)
+    assert custom_hostname in evidence
+    assert distribution in evidence
+    for expected in (
+        "CloudFront Distribution",
+        "AWS 账号",
+        "Distribution ID",
+        "Alternate Domain Names",
+        "Origin",
+        "OAC/OAI",
+        "访问日志",
+        "CloudTrail",
+        "关联 AWS 资源",
+        "边缘地址不得写成 Origin",
+    ):
+        assert expected in evidence
+
+
+def test_domain_lead_does_not_use_non_hit_cloudfront_cname_as_aws_target() -> None:
+    from apkscan.core.leads import _domain_lead
+
+    distribution = ".".join(("d111111abcdef8", "cloudfront", "net"))
+    endpoint = Endpoint(
+        value="portal.infra.example",
+        kind="domain",
+        enrichment={
+            "source_status": {"dns": {"status": "failed"}},
+            "dns": {"cname": [distribution]},
+        },
+    )
+
+    lead = _domain_lead(endpoint)
+
+    assert "Amazon Web Services, Inc." not in (lead.where_to_request or "")
+    assert distribution not in "\n".join(lead.evidence_to_obtain)
 
 
 def test_whois_enricher_not_routed_by_pipeline():

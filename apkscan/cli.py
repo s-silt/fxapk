@@ -25,6 +25,10 @@ from apkscan.core.models import (
     ANALYSIS_MODE_PASSIVE,
     ANALYSIS_MODES,
     ANALYSIS_STATUS_COMPLETE,
+    DEFAULT_ANALYZE_ENRICH_MAX_TARGETS,
+    DEFAULT_ANALYZE_STATIC_IP_MAX_TARGETS,
+    MAX_ANALYZE_ENRICH_TARGETS,
+    MAX_ANALYZE_STATIC_IP_TARGETS,
     AnalysisConfig,
     LeadCategory,
     Report,
@@ -57,6 +61,14 @@ META_WRITE_CATEGORIES = {
 META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
 
 logger = logging.getLogger(__name__)
+
+_NETWORK_MODE_HELP = (
+    "静态富化/在线核验网络模式：passive（默认，这些步骤不直连目标业务服务；"
+    "会把目标标识提交给第三方数据源，"
+    "DNS 查询可能被解析服务或权威 DNS 观察）| authorized-active（显式授权下才放行会向目标 / "
+    "其基础设施发起请求的动作：下载样本引用的远程配置对象、Telegram getMe 在线核验等）。"
+    "该选项不是设备网络沙箱；启用动态分析时，被启动 APK 自身的网络流量不受它阻断。"
+)
 
 app = typer.Typer(
     add_completion=False,
@@ -321,11 +333,29 @@ def analyze(
     mode: str = typer.Option(
         ANALYSIS_MODE_PASSIVE,
         "--mode",
+        help=_NETWORK_MODE_HELP,
+    ),
+    enrich_max_targets: int = typer.Option(
+        DEFAULT_ANALYZE_ENRICH_MAX_TARGETS,
+        "--enrich-max-targets",
+        min=1,
+        max=MAX_ANALYZE_ENRICH_TARGETS,
         help=(
-            "网络模式：passive（默认，只跑被动 OSINT 富化、对目标零流量）| "
-            "authorized-active（显式授权下才放行会向目标 / 其基础设施发起请求的动作："
-            "下载样本引用的远程配置对象、Telegram getMe 在线核验等）。"
+            "普通 analyze 单轮联网富化候选总数硬门；超过时本轮零联网，"
+            "先审阅报告 meta.enrichment_plan。"
         ),
+    ),
+    enrich_static_ip_max_targets: int = typer.Option(
+        DEFAULT_ANALYZE_STATIC_IP_MAX_TARGETS,
+        "--enrich-static-ip-max-targets",
+        min=1,
+        max=MAX_ANALYZE_STATIC_IP_TARGETS,
+        help="普通 analyze 单轮纯静态 IP 候选子上限；超过时本轮零联网。",
+    ),
+    enrichment_dry_run: bool = typer.Option(
+        False,
+        "--enrichment-dry-run",
+        help="只生成联网富化计划和预计供应商调用量，不调用任何富化源。",
     ),
     strict: bool = typer.Option(
         False,
@@ -349,7 +379,15 @@ def analyze(
         formats = _parse_formats(fmt)
         _validate_mode(mode)
         out = _resolve_out(out, apk)  # 未给 --out → 默认落到 APK 同目录下的 out/
-        config = AnalysisConfig(online=online, out_dir=out, formats=formats, mode=mode)
+        config = AnalysisConfig(
+            online=online,
+            out_dir=out,
+            formats=formats,
+            mode=mode,
+            enrich_max_targets=enrich_max_targets,
+            enrich_static_ip_max_targets=enrich_static_ip_max_targets,
+            enrichment_dry_run=enrichment_dry_run,
+        )
 
         extra_dex_files = _resolve_extra_dex(extra_dex)
         if extra_dex_files:
@@ -387,7 +425,7 @@ def analyze(
         report.meta["online"] = config.online
 
         # 取证完整性背书：检材指纹（多算法 + 分析环境）落 meta["evidence_manifest"]，
-        # 并把 sha256 提到顶层快捷键 meta["sample_sha256"]（CSV 导出 / 团伙聚类已预留引用）。
+        # 并把 sha256 提到顶层快捷键 meta["sample_sha256"]（CSV 导出 / 关联候选聚类已预留引用）。
         # 纯函数容错、绝不抛；外层仍包 try 兜底任何意外，失败只 logging 不炸 analyze。
         try:
             from apkscan import __version__
@@ -757,7 +795,7 @@ def capture(
     allow_behavior_modification: bool = typer.Option(
         False,
         "--allow-behavior-modification",
-        help="第二道授权门：显式授权注入行为修改 shim（反检测/root 隐藏）。与 --authorized-active 正交、不合并、不被继承。",
+        help="第二道授权门：显式授权注入行为修改 shim（反检测/root 隐藏）。该门只控制行为修改，不改变抓包 --mode，也不授权其他主动网络动作。",
     ),
     antidetect: str = typer.Option(
         "off",
@@ -882,15 +920,17 @@ def auto(
     repackage: bool = typer.Option(
         True,
         "--repackage/--no-repackage",
-        help="脱壳后把去壳版重打包装回设备供 capture 抓（绕壳反 frida）。默认开；"
-        "--no-repackage 关（重签必卸原包会清 app 数据/登录态）。",
+        help="允许旁路轮尝试把去壳版重打包装回设备供 capture 重抓。即使默认开，也只有第一遍 "
+        "original 基线已产出、判据建议旁路，且同时给出 --allow-behavior-modification "
+        "--antidetect java 时才会执行；--no-repackage 禁用。重签安装会卸载原包并清空 app 数据/登录态。",
     ),
     allow_behavior_modification: bool = typer.Option(
         False,
         "--allow-behavior-modification",
         help="第二道授权门：授权在**旁路轮**注入行为修改 shim（反检测/root 隐藏）。默认关；"
-        "与 --authorized-active 正交、不合并、不被继承。仅当第一遍 original 基线不足（秒退/零端点/"
-        "hook 未就绪）时才会用到，且旁路轮证据为 modified-runtime、不作独立结案依据。",
+        "与 --mode authorized-active 正交、不合并、不被继承。仅当第一遍 original 基线不足（秒退/零端点/"
+        "hook 未就绪）且判据建议旁路时才会用到。旁路轮的 runtime_variant 按 shim 是否实际注入记录，"
+        "不能仅凭授权参数断定为 modified-runtime，也不能作为独立结案依据。",
     ),
     antidetect: str = typer.Option(
         "off",
@@ -906,13 +946,14 @@ def auto(
     mode: str = typer.Option(
         ANALYSIS_MODE_PASSIVE,
         "--mode",
-        help="网络模式：passive（默认，静态富化只跑被动 OSINT）| authorized-active（显式授权下才放行会向目标发起请求的动作，如远程配置对象下载、Telegram getMe 核验）。",
+        help=_NETWORK_MODE_HELP,
     ),
 ) -> None:
-    """一键全自动：体检 → 静态分析 → 脱壳 → 抓包 → 合并 → 案件闭环。
+    """一键全自动：体检 → 静态分析 → 脱壳 → 原版基线抓包 → 合并 → 案件闭环。
 
     无设备时优雅跳过脱壳/抓包，仍产出静态报告。实现由 apkscan.dynamic.auto 提供
-    （纯结构化返回 + 回调）；本命令是唯一打印 / 交互（提示操作 app）的薄包装。
+    （纯结构化返回 + 回调）；本命令是唯一打印 / 交互（提示操作 app）的薄包装。只有第一遍基线已产出、
+    判据建议旁路且行为修改双门已显式给出时，才尝试去壳重打包并重抓。
     """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     # auto 流水线含体检/脱壳/抓包，全经 adb；finally 收掉自起的 adb server。
@@ -1002,7 +1043,7 @@ def batch(
     mode: str = typer.Option(
         ANALYSIS_MODE_PASSIVE,
         "--mode",
-        help="网络模式：passive（默认，静态富化只跑被动 OSINT）| authorized-active（显式授权下才放行会向目标发起请求的动作，如远程配置对象下载、Telegram getMe 核验）。",
+        help=_NETWORK_MODE_HELP,
     ),
 ) -> None:
     """批量分析文件夹：扫描没分析过的 APK，逐个「静态 + launch-only 动态」产出报告。
@@ -1122,9 +1163,10 @@ def digest(
 ) -> None:
     """把 report.json 压成**紧凑摘要 JSON** 打印到 stdout（供任意 AI agent / 脚本低 token 消费）。
 
-    线索按优先级排序（最高档 > 待核 > 无需再核；同档高可信、C2 在前），只保留可直接使用的扁平
-    字段 + 计数摘要，去掉端点全表 / 技术附录 / 富化原始数据等冗长内容。绝不抛——读不到 / 坏 JSON
-    打印友好错误并退出码 1。
+    线索按优先级排序（最高档 > 待核 > 无需再核；同档高可信、C2 在前），只保留用于摘要分流与
+    回查定位的扁平字段 + 计数摘要，去掉端点全表 / 技术附录 / 富化原始数据等冗长内容。digest 不能
+    替代 canonical report 或原始 evidence；形成正式结论、调证动作或报告前必须回查二者。绝不抛——
+    读不到 / 坏 JSON 打印友好错误并退出码 1。
 
     ★**默认脱敏**（本命令的默认值曾是明文，已翻转）。理由是这个出口的实际用法：本工具的主推
       路径就是把 digest 的输出喂给 AI，而报告里可能含钱包私钥 / 助记词、个人手机号 / 身份证 /
@@ -2026,16 +2068,28 @@ def _print_batch_result(result: object) -> None:
     )
     clusters = result.get("clusters") or []
     if clusters:
-        typer.echo(f"团伙簇：{len(clusters)} 个（共享强指纹串并，详见 case_correlation.json）")
+        typer.echo(
+            f"关联候选簇：{len(clusters)} 个（共享指纹召回，仅供人工复核；"
+            "不能独立认定同一主体，也不会自动并案。详见 case_correlation.json）"
+        )
         for c in clusters:
             if not isinstance(c, dict):
                 continue
             members = c.get("members") or []
             shared = c.get("shared") or []
-            keys = "、".join(
-                f"{s.get('kind')}={s.get('value')}" for s in shared[:3] if isinstance(s, dict)
+            kind_counts: dict[str, int] = {}
+            for fingerprint in shared:
+                if not isinstance(fingerprint, dict):
+                    continue
+                kind = str(fingerprint.get("kind") or "unknown")
+                kind_counts[kind] = kind_counts.get(kind, 0) + 1
+            kinds = "、".join(
+                f"{kind}×{count}" for kind, count in sorted(kind_counts.items())[:3]
+            ) or "未标注类型"
+            typer.echo(
+                f"  候选簇#{c.get('cluster_id')}：{len(members)} 个样本，"
+                f"共享指纹类型：{kinds}（stdout 不输出原值）"
             )
-            typer.echo(f"  簇#{c.get('cluster_id')}：{len(members)} 个样本，并案依据：{keys}")
     for item in result.get("analyzed") or []:
         if isinstance(item, dict):
             typer.echo(f"[OK]   {item.get('apk')} → {item.get('out_dir')}")

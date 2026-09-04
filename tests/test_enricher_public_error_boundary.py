@@ -147,6 +147,7 @@ def test_endpoint_and_source_status_keep_only_stable_error_type() -> None:
             "provider": "fallback_probe",
             "attempted": 1,
             "ok": 1,
+            "no_record": 0,
             "failed": 0,
             "typical_error": None,
         }

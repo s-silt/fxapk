@@ -27,6 +27,8 @@ from apkscan.core.models import (
     ANALYSIS_STATUS_COMPLETE,
     ANALYSIS_STATUS_FAILED,
     ANALYSIS_STATUS_PARTIAL,
+    MAX_ANALYZE_ENRICH_TARGETS,
+    MAX_ANALYZE_STATIC_IP_TARGETS,
     AnalysisConfig,
     Endpoint,
     Evidence,
@@ -63,12 +65,18 @@ from apkscan.core.leads import (
 # 联网富化执行已物理拆到 apkscan/core/enrichment.py（纯搬移）；在此 re-export 供 _stage_enrich 调用，
 # 并保持既有 `pipeline._run_enrichment` / `pipeline.ENRICH_MAX_WORKERS` 等测试访问路径不变。
 from apkscan.core.enrichment import (
+    DEFAULT_ANALYZE_PROVIDER_LIMITS,
     ENRICH_MAX_WORKERS,  # noqa: F401 — re-export：保 pipeline.ENRICH_MAX_WORKERS 测试访问路径
+    _endpoint_runtime_observed,
     _enrich_endpoints,  # noqa: F401 — re-export：保 pipeline._enrich_endpoints 测试访问路径
     _enrichment_targets,
+    _low_tier_static_suppressed,
     _mode_gate,  # noqa: F401 - compatibility re-export
+    _provider_configured,
     _run_enrichment,  # noqa: F401 - compatibility re-export
     enrich_selected_targets,
+    mark_enrichment_skipped,
+    mark_enrichment_unexecuted,
 )
 
 # 分析器进程池并行 + 内存封顶决策已物理拆到 apkscan/core/parallel.py（纯搬移）；_stage_run_analyzers
@@ -92,6 +100,8 @@ META_WRITE_CATEGORIES = {
     'dex_strings_truncated': 'coverage',
     'dex_strings_truncated_by': 'coverage',
     'enriched_target_count': 'record',
+    'enrichment_execution': 'coverage',
+    'enrichment_plan': 'coverage',
     'enrichment_skipped_offline': 'coverage',
     'extra_dex_visibility': 'coverage',
     'jadx_judgment_ledger': 'coverage',
@@ -546,6 +556,27 @@ def _fetch_decode_one(
     }
 
 
+def _enrichment_reason_counts(endpoints: list[Endpoint]) -> tuple[dict[str, int], dict[str, int]]:
+    """汇总逐端点 source_status 的跳过原因及按供应商预算延后数。"""
+    skipped_by_reason: dict[str, int] = {}
+    provider_deferred: dict[str, int] = {}
+    for endpoint in endpoints:
+        statuses = endpoint.enrichment.get("source_status")
+        if not isinstance(statuses, dict):
+            continue
+        for provider, entry in statuses.items():
+            if not isinstance(entry, dict):
+                continue
+            reason = entry.get("reason")
+            if not isinstance(reason, str) or not reason:
+                continue
+            skipped_by_reason[reason] = skipped_by_reason.get(reason, 0) + 1
+            if reason == "provider_budget_exhausted":
+                provider_name = str(provider)
+                provider_deferred[provider_name] = provider_deferred.get(provider_name, 0) + 1
+    return skipped_by_reason, provider_deferred
+
+
 def _stage_enrich(state: _PipelineState) -> None:
     """联网富化（两遍）——**只对"高度可疑"端点（建议调证）查**，不再有一个查一个。
 
@@ -556,18 +587,173 @@ def _stage_enrich(state: _PipelineState) -> None:
     供审计。offline → 仅记跳过标志。"""
     config = state.config
     meta = state.meta
+    requested_target_limit = max(1, int(getattr(config, "enrich_max_targets", 32)))
+    requested_static_ip_limit = max(
+        1, int(getattr(config, "enrich_static_ip_max_targets", 16))
+    )
+    target_limit = min(requested_target_limit, MAX_ANALYZE_ENRICH_TARGETS)
+    static_ip_limit = min(requested_static_ip_limit, MAX_ANALYZE_STATIC_IP_TARGETS)
+    limit_clamped = (
+        target_limit != requested_target_limit
+        or static_ip_limit != requested_static_ip_limit
+    )
     if not config.online:
         meta["enrichment_skipped_offline"] = True
+        meta["enrichment_plan"] = {
+            "policy_version": "analyze-enrichment-budget/v1",
+            "status": "offline",
+            "requested_target_limit": requested_target_limit,
+            "requested_static_ip_limit": requested_static_ip_limit,
+            "target_limit": target_limit,
+            "static_ip_limit": static_ip_limit,
+            "limit_clamped": limit_clamped,
+            "candidate_total": 0,
+            "estimated_provider_invocations": {},
+        }
+        meta["enrichment_execution"] = {"status": "not_run", "reason": "offline"}
         logger.info("offline 模式：跳过全部富化器（归属信息未查询，非查无结果）")
         return
 
     targets = _enrichment_targets(state.endpoints)
+    all_discovered = list(discover_enrichers())
     discovered = [
         enricher
-        for enricher in discover_enrichers()
+        for enricher in all_discovered
         if not getattr(enricher, "case_close_only", False)
     ]
+    case_close_only = [
+        enricher for enricher in all_discovered if getattr(enricher, "case_close_only", False)
+    ]
     mode = getattr(config, "mode", ANALYSIS_MODE_PASSIVE)
+    static_ip_targets = [
+        endpoint
+        for endpoint in targets
+        if endpoint.kind == "ip" and not _endpoint_runtime_observed(endpoint)
+    ]
+    candidate_by_kind = {
+        kind: sum(1 for endpoint in targets if endpoint.kind == kind)
+        for kind in ("domain", "ip")
+    }
+    over_cap = len(targets) > target_limit or len(static_ip_targets) > static_ip_limit
+    dry_run = bool(getattr(config, "enrichment_dry_run", False))
+    provider_plan: dict[str, dict[str, object]] = {}
+    estimated_invocations: dict[str, int] = {}
+    for enricher in discovered:
+        provider = getattr(enricher, "name", "") or type(enricher).__name__
+        applicable = sum(
+            1
+            for endpoint in targets
+            if endpoint.kind in (getattr(enricher, "applies_to", []) or [])
+        )
+        limit = DEFAULT_ANALYZE_PROVIDER_LIMITS.get(provider)
+        mode_allowed = mode == ANALYSIS_MODE_AUTHORIZED_ACTIVE or not getattr(
+            enricher, "active", False
+        )
+        configured = _provider_configured(enricher)
+        selected = min(applicable, limit) if limit is not None else applicable
+        deferred = max(0, applicable - selected)
+        disabled = 0
+        skipped = 0
+        status = "selected" if selected else "not_applicable"
+        reason: str | None = None
+        if not configured:
+            selected = 0
+            deferred = 0
+            disabled = applicable
+            status = "disabled"
+            reason = "credential_not_configured"
+        elif not mode_allowed:
+            selected = 0
+            deferred = 0
+            skipped = applicable
+            status = "skipped"
+            reason = "active_mode_blocked"
+        elif over_cap:
+            selected = 0
+            deferred = applicable
+            status = "deferred"
+            reason = "target_cap"
+        elif deferred:
+            status = "partially_selected"
+            reason = "provider_budget_exhausted"
+        provider_plan[provider] = {
+            "applicable": applicable,
+            "selected": selected,
+            "deferred": deferred,
+            "disabled": disabled,
+            "skipped": skipped,
+            "configured": configured,
+            "mode_allowed": mode_allowed,
+            "status": status,
+            **({"reason": reason} if reason else {}),
+        }
+        estimated_invocations[provider] = selected
+
+    low_tier_static_endpoints = [
+        endpoint for endpoint in state.endpoints if _low_tier_static_suppressed(endpoint)
+    ]
+    mark_enrichment_skipped(
+        low_tier_static_endpoints,
+        discovered,
+        reason="low_trust_static_source",
+    )
+    plan = {
+        "policy_version": "analyze-enrichment-budget/v1",
+        "status": "ready",
+        "candidate_total": len(targets),
+        "candidate_by_kind": candidate_by_kind,
+        "static_ip_candidate_total": len(static_ip_targets),
+        "low_tier_static_excluded": len(low_tier_static_endpoints),
+        "requested_target_limit": requested_target_limit,
+        "requested_static_ip_limit": requested_static_ip_limit,
+        "target_limit": target_limit,
+        "static_ip_limit": static_ip_limit,
+        "limit_clamped": limit_clamped,
+        "provider_limits": dict(DEFAULT_ANALYZE_PROVIDER_LIMITS),
+        "provider_plan": provider_plan,
+        "estimate_kind": "upper_bound",
+        "estimated_provider_invocations": estimated_invocations,
+    }
+    if over_cap or dry_run:
+        reason = "target_cap" if over_cap else "dry_run"
+        plan["status"] = "deferred_high_cardinality" if over_cap else "dry_run"
+        meta["enrichment_plan"] = plan
+        for enricher in discovered:
+            if not _provider_configured(enricher):
+                mark_enrichment_unexecuted(
+                    targets,
+                    [enricher],
+                    status="disabled",
+                    reason="credential_not_configured",
+                )
+            elif mode != ANALYSIS_MODE_AUTHORIZED_ACTIVE and getattr(enricher, "active", False):
+                mark_enrichment_skipped(targets, [enricher], reason="active_mode_blocked")
+            else:
+                mark_enrichment_skipped(targets, [enricher], reason=reason)
+        mark_enrichment_skipped(targets, case_close_only, reason="deferred_case_close")
+        skipped_by_reason, provider_deferred = _enrichment_reason_counts(state.endpoints)
+        state.enricher_status = []
+        meta["enriched_target_count"] = 0
+        meta["enrichment_execution"] = {
+            "status": "not_run",
+            "reason": reason,
+            "attempted_total": 0,
+            "failed_total": 0,
+            "skipped_by_reason": skipped_by_reason,
+            "provider_deferred": provider_deferred,
+        }
+        logger.warning(
+            "联网富化未执行：%s（候选=%d/%d，纯静态 IP=%d/%d）；"
+            "先审阅 meta.enrichment_plan 后缩小范围或显式调整上限",
+            reason,
+            len(targets),
+            target_limit,
+            len(static_ip_targets),
+            static_ip_limit,
+        )
+        return
+
+    meta["enrichment_plan"] = plan
     active_enrichers = [e for e in discovered if getattr(e, "active", False)]
     if mode == ANALYSIS_MODE_AUTHORIZED_ACTIVE:
         if active_enrichers:
@@ -590,11 +776,30 @@ def _stage_enrich(state: _PipelineState) -> None:
         )
     state.enricher_status = enrich_selected_targets(
         targets,
-        discovered,
+        all_discovered,
         mode=mode,
         include_case_close=False,
+        provider_limits=DEFAULT_ANALYZE_PROVIDER_LIMITS,
     )
     meta["enriched_target_count"] = len(targets)
+    skipped_by_reason, provider_deferred = _enrichment_reason_counts(state.endpoints)
+    failed_total = sum(int(item.get("failed", 0)) for item in state.enricher_status)
+    gap_reasons = {
+        "provider_budget_exhausted",
+        "credential_not_configured",
+        "active_mode_blocked",
+    }
+    has_gaps = failed_total > 0 or any(reason in gap_reasons for reason in skipped_by_reason)
+    meta["enrichment_execution"] = {
+        "status": "completed_with_gaps" if has_gaps else "completed",
+        "attempted_total": sum(
+            int(item.get("attempted", 0)) for item in state.enricher_status
+        ),
+        "failed_total": failed_total,
+        "skipped_by_reason": skipped_by_reason,
+        "provider_deferred": provider_deferred,
+        "providers": state.enricher_status,
+    }
     net_eps = sum(1 for ep in state.endpoints if ep.kind in ("domain", "ip"))
     logger.info(
         "联网富化：仅对 %d 个高度可疑端点（建议调证）查归属，跳过其余 %d 个域名/IP（infra/已知/私网）",

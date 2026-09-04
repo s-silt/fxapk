@@ -7,7 +7,8 @@ cli.py 以引用主 app、避免本模块反向 import cli 造成循环）。纯
 ★配额闸门：``--dry-run``（**默认开**）只静态估算、代码路径上不碰富化调度，必须显式
 ``--no-dry-run`` 才真发请求。宁可让人多敲一个参数，也不让"手一抖烧掉整天配额"发生。
 
-★全程被动：本命令只用 ``active=False`` 的富化器（各源自身即被动 OSINT 查询），对目标零流量。
+★本命令只用 ``active=False`` 的富化器，不直接连接目标业务服务；查询会把目标标识提交给第三方
+数据源，DNS 查询还可能被解析服务或权威 DNS 观察。
 """
 
 from __future__ import annotations
@@ -124,7 +125,8 @@ def batch(
         _batch.DEFAULT_MAX_TARGETS,
         "--max-targets",
         min=1,
-        help="单次运行目标上限（多数 key-gated 源不自限频，靠此闸门兜住）。",
+        max=_batch.MAX_BATCH_TARGETS,
+        help="单次运行目标上限；不得超过内置硬顶，因该入口会执行 Shodan 等额度型来源。",
     ),
     resume: bool = typer.Option(True, "--resume/--no-resume", help="续跑：跳过明细 NDJSON 里已完成的目标（默认开）。"),
 ) -> None:
@@ -132,6 +134,12 @@ def batch(
 
     退出码：0 正常；2 输入/输出不可用（清单缺失、无可用目标、目录不可写）。
     """
+    if max_targets > _batch.MAX_BATCH_TARGETS:
+        typer.echo(
+            f"--max-targets 不得超过批量富化硬顶 {_batch.MAX_BATCH_TARGETS}。",
+            err=True,
+        )
+        raise typer.Exit(2)
     source = Path(targets_file)
     try:
         raw = source.read_text(encoding="utf-8")

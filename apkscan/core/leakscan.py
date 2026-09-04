@@ -416,6 +416,7 @@ ALLOWED_DOMAINS: frozenset[str] = frozenset({
     "example.org",
     # OSINT / 资产库 / 注册数据提供方
     "abuseipdb.com",
+    "api.8450.cn",
     "censys.io",
     "crt.sh",
     "daydaymap.com",

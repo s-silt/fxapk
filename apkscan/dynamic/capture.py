@@ -490,8 +490,8 @@ def run(
         DynamicResult 契约 dict。前置不满足 → status="skipped" + playbook；
         满足并完成 → status="done"（artifacts/report_paths 填充）；
         过程异常 → status="error"。绝不抛异常给调用方。
-        allow_behavior_modification: 第二道行为修改授权门；默认 False（关）。与网络侧
-            authorized-active 正交——二者不合并、互不隐含。未取得该授权时，任何行为修改 shim
+        allow_behavior_modification: 第二道行为修改授权门；默认 False（关）。与上层 ``analyze`` / ``auto``
+            的网络模式 ``--mode authorized-active`` 正交——二者不合并、互不隐含。未取得该授权时，任何行为修改 shim
             （反检测/root 隐藏）绝不注入。
         antidetect: 行为修改 shim 档位；仅允许 off（默认，不注入）/ java（注入 shim）。java 仅在
             allow_behavior_modification 同时为 True 时才实际注入；native 主仓暂无落点、取该值返回 error。

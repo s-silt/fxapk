@@ -634,6 +634,32 @@ def _normalize_domain(domain: str) -> str:
     return d.strip(".")
 
 
+#: 云分发服务分配给租户的专属域名形态。它与厂商官网/公共静态资源不同：
+#: 完整分发域名可由服务商定位到具体分发配置与账户，不得被整域 KNOWN_INFRA 豁免吞掉。
+#: 当前只收已有稳定形态的 CloudFront 默认分发域；自定义域另由 DNS CNAME 候选处理。
+_TENANT_DISTRIBUTION_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
+    (
+        "Amazon Web Services, Inc.",
+        re.compile(r"^(?P<resource>d[a-z0-9]{13})\.cloudfront\.net$"),  # leak-scan: allow 公开 CDN 分发域形态判据，非案件 IOC
+    ),
+)
+
+
+def tenant_distribution(domain: str) -> tuple[str, str] | None:
+    """识别可由分发服务商反查的租户级默认分发域名。
+
+    返回 ``(服务商法定名称, 完整分发域名)``；这个域名是服务商检索键，
+    但不是 CloudFront Distribution ID，也不单独证明 App 运营者。形态不命中返回 ``None``。
+    """
+    normalized = _normalize_domain(domain)
+    if not normalized:
+        return None
+    for provider, pattern in _TENANT_DISTRIBUTION_PATTERNS:
+        if pattern.fullmatch(normalized):
+            return provider, normalized
+    return None
+
+
 #: 对象存储的**租户桶**子域形态：``<桶名>.<服务端点>``。
 #:
 #: 为什么非要把它从"云厂商整域豁免"里挖出来：五家云厂商的那几个后缀（见下方各条正则）
@@ -1201,6 +1227,17 @@ def classify_domain(domain: str) -> tuple[str, str]:
     - 无效 / 私网/回环 IP 字面   → ("待核", "...")
     - 其它（疑似 App 自有服务）  → ("建议调证", "疑似 App 自有服务，建议落地核查归属")
     """
+    # ★必须排在 KNOWN_INFRA 之前：租户级分发域名的后缀本身是公共 CDN，
+    #   若先走整域豁免，可向服务商检索的分发键会被静默丢掉。
+    distribution = tenant_distribution(domain)
+    if distribution is not None:
+        provider, distribution_domain = distribution
+        return ADVICE_INVESTIGATE, (
+            f"租户级 CDN 分发域名（{provider}）：{distribution_domain} 是可由服务商定位"
+            "具体分发配置的检索键；可依法调取账户、分发、绑定域名、回源配置、访问日志"
+            "与控制面审计记录；该域名不是 Distribution ID，也不单独证明 App 运营者"
+        )
+
     # ★必须排在 KNOWN_INFRA 之前：桶域名的后缀正是云厂商域，先走那条就被整域豁免吃掉了。
     bucket = tenant_bucket(domain)
     if bucket is not None:
@@ -1566,5 +1603,32 @@ def effective_advice(domain: str, tier: object) -> str:
     """
     advice, _reason = classify_domain(domain)
     if advice == ADVICE_INVESTIGATE and tier in (TIER_LIBRARY_FILE, TIER_BULK_STRING):
+        return ADVICE_REVIEW
+    return advice
+
+
+def effective_ip_advice(
+    value: str,
+    tier: object,
+    *,
+    context: str = "",
+    runtime_observed: bool = False,
+) -> str:
+    """普通联网目标筛选使用的 IP 最终研判。
+
+    与 Lead 侧的来源档策略保持同向：仅静态出现在第三方库文件/超大字符串表中的公网 IP
+    不自动送往 ASN/RDAP/测绘平台；真机 observed-contact 证据优先，仍允许进入富化。
+    ``classify_ip`` 继续负责私网、OID、公共 DNS 与地址形态判据，本函数只叠加来源档。
+    """
+    advice, _reason = classify_ip(
+        value,
+        context=context,
+        runtime_observed=runtime_observed,
+    )
+    if (
+        advice == ADVICE_INVESTIGATE
+        and not runtime_observed
+        and tier in (TIER_LIBRARY_FILE, TIER_BULK_STRING)
+    ):
         return ADVICE_REVIEW
     return advice

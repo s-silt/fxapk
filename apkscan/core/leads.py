@@ -10,9 +10,10 @@ from __future__ import annotations
 import ipaddress
 import logging
 import re
+from collections.abc import Mapping
 
 from apkscan.core import appframework, exposure, forensic, infra
-from apkscan.core.attribution import classify_network
+from apkscan.core.attribution import classify_network, tenant_distribution_edge
 from apkscan.core.restore import is_restored, restore_index
 from apkscan.core.models import (
     DOWNGRADE_EVIDENCE_SCOPE,
@@ -181,12 +182,197 @@ def _as_dict(value: object) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _build_overseas_targets(endpoints: list[Endpoint]) -> list[dict]:
-    """把各端点的境外被动富化(shodan/certs)聚合成**结构化、按主机**的列表，写 report.meta["overseas_targets"]。
+def _endpoint_parts(endpoint: object) -> tuple[str, str, dict]:
+    """容错取出 Endpoint 或已序列化 endpoint 的分类、值与富化块。"""
+    if isinstance(endpoint, Endpoint):
+        return endpoint.kind, endpoint.value, _as_dict(endpoint.enrichment)
+    if isinstance(endpoint, Mapping):
+        return (
+            str(endpoint.get("kind") or ""),
+            str(endpoint.get("value") or ""),
+            _as_dict(endpoint.get("enrichment")),
+        )
+    return "", "", {}
 
-    供 digest / HTML / Codex **机器可读**地查询/聚合/交叉比对（源站归属/端口/服务/技术栈/关联子域），
-    免去从 evidence_to_obtain 的自然语言串里解析。全程被动 OSINT，对目标零流量。辖区门控与渲染层
-    同口径：只收【国外 + 未知】主机，境内主机不进（境内走调证）。绝不抛（坏字段安全跳过）。
+
+def _is_overseas_routing_candidate(kind: str, value: str, enrichment: dict) -> bool:
+    """是否属于两阶段富化的高价值 domain/IP 候选。
+
+    与 ``core.enrichment._enrichment_targets`` 共用同一组公共判据，但不反向导入该编排模块，
+    避免 leads/enrichment 循环依赖。这个门使「未画像数」不会把已知 SDK/CDN 和私网噪音全数进去。
+    """
+    if kind == "domain":
+        return infra.effective_advice(value, enrichment.get("tier")) == infra.ADVICE_INVESTIGATE
+    if kind == "ip":
+        advice, _reason = infra.classify_ip(value)
+        return advice == infra.ADVICE_INVESTIGATE
+    return False
+
+
+def _lead_network_key(lead: object) -> tuple[str, str] | None:
+    """取最终 Lead 的 domain/IP 匹配键；非最高档或坏结构返回 None。"""
+    if isinstance(lead, Lead):
+        category: object = lead.category
+        value = lead.value
+        advice = lead.advice
+    elif isinstance(lead, Mapping):
+        category = lead.get("category")
+        value = str(lead.get("value") or "")
+        advice = lead.get("advice")
+    else:
+        return None
+    if advice != infra.ADVICE_INVESTIGATE or not value:
+        return None
+
+    if isinstance(category, LeadCategory):
+        category_name = category.value
+    elif isinstance(category, Mapping):
+        category_name = str(
+            category.get("_value_")
+            or category.get("value")
+            or category.get("_name_")
+            or category.get("name")
+            or ""
+        )
+    else:
+        category_name = str(category or "")
+    category_name = category_name.rsplit(".", 1)[-1].upper()
+    if category_name not in {LeadCategory.DOMAIN.value, LeadCategory.IP.value}:
+        return None
+    kind = category_name.lower()
+    normalized = infra.match_key(kind, value).strip().lower().rstrip(".")
+    return (kind, normalized) if normalized else None
+
+
+def _final_network_target_keys(final_leads: object) -> set[tuple[str, str]] | None:
+    """最终/安全投影 Lead 中的最高档网络标的；None 表示旧报告未提供 leads。"""
+    if not isinstance(final_leads, (list, tuple)):
+        return None
+    return {
+        key
+        for lead in final_leads
+        if (key := _lead_network_key(lead)) is not None
+    }
+
+
+def _project_overseas_profiles(
+    profiled_targets: object,
+    final_leads: object,
+) -> list[dict]:
+    """profile-only 列表按最终 DOMAIN/IP 调证标的做不变更原数据的展示投影。"""
+    target_items = profiled_targets if isinstance(profiled_targets, (list, tuple)) else []
+    final_keys = _final_network_target_keys(final_leads)
+    allowed_values = {value for _kind, value in final_keys} if final_keys is not None else None
+    projected: list[dict] = []
+    for target in target_items:
+        if not isinstance(target, Mapping):
+            continue
+        host = str(target.get("host") or "").strip().lower().rstrip(".")
+        if not host or (allowed_values is not None and host not in allowed_values):
+            continue
+        projected.append(dict(target))
+    return projected
+
+
+def _supported_jurisdiction(value: str, enrichment: dict) -> str:
+    """只用结果协议许可的 DNS/ASN/Shodan hit 判基础设施辖区。"""
+    try:
+        return forensic.classify_jurisdiction(
+            value,
+            dns=provider_payload_if_hit(enrichment, "dns"),
+            asn=provider_payload_if_hit(enrichment, "asn"),
+            shodan=provider_payload_if_hit(enrichment, "shodan"),
+        )
+    except Exception:  # noqa: BLE001 — 覆盖统计不得中断报告；保守记未知
+        logger.debug("[overseas_targets] 辖区判定失败：%s", value, exc_info=True)
+        return forensic.JURIS_UNKNOWN
+
+
+def _overseas_target_coverage(
+    endpoints: object,
+    profiled_targets: object,
+    final_leads: object = None,
+) -> dict[str, object]:
+    """统计境外/辖区未知候选与 Shodan/CT 画像之间的覆盖缺口。
+
+    ``overseas_targets`` 从设计上就是 **profile-only**：只收 Shodan 或证书透明度
+    已返回实质画像的主机。因此候选全集需独立从 endpoint 路由面计算：先以
+    最终/安全投影后 ``advice=建议调证`` 的 DOMAIN/IP Lead 值限定分母，再严格只读 ``source_status=hit``
+    许可的 DNS/ASN/Shodan payload 判辖区。没有可用归属信号的路由候选保守记为
+    「未知」，不会因 Shodan/CT 无记录或失败而从覆盖分母消失。
+
+    返回仅含聚合计数，不增加新的原值导出面。旧报告若只有 profile 列表而缺
+    leads/endpoints，profile 主机仍并入分母，保证 ``profiled <= total``。
+    """
+    candidate_jurisdiction: dict[str, str] = {}
+    final_keys = _final_network_target_keys(final_leads)
+    endpoint_items = endpoints if isinstance(endpoints, (list, tuple)) else []
+    for endpoint in endpoint_items:
+        kind, value, enrichment = _endpoint_parts(endpoint)
+        endpoint_key = (
+            kind,
+            infra.match_key(kind, value).strip().lower().rstrip("."),
+        )
+        if not value:
+            continue
+        if final_keys is not None:
+            if endpoint_key not in final_keys:
+                continue
+        elif not _is_overseas_routing_candidate(kind, value, enrichment):
+            continue
+        jurisdiction = _supported_jurisdiction(value, enrichment)
+        if jurisdiction == forensic.JURIS_DOMESTIC:
+            continue
+        candidate_jurisdiction[endpoint_key[1]] = jurisdiction
+
+    profiled_hosts: set[str] = set()
+    target_items = _project_overseas_profiles(profiled_targets, final_leads)
+    for target in target_items:
+        if not isinstance(target, Mapping):
+            continue
+        host = str(target.get("host") or "").strip().lower().rstrip(".")
+        if not host:
+            continue
+        profiled_hosts.add(host)
+        candidate_jurisdiction.setdefault(
+            host,
+            str(target.get("jurisdiction") or forensic.JURIS_UNKNOWN),
+        )
+
+    candidate_hosts = set(candidate_jurisdiction)
+    profiled_in_scope = candidate_hosts & profiled_hosts
+    by_jurisdiction = {
+        forensic.JURIS_FOREIGN: sum(
+            value == forensic.JURIS_FOREIGN for value in candidate_jurisdiction.values()
+        ),
+        forensic.JURIS_UNKNOWN: sum(
+            value != forensic.JURIS_FOREIGN for value in candidate_jurisdiction.values()
+        ),
+    }
+    return {
+        "scope": "profile-only",
+        "candidate_hosts_total": len(candidate_hosts),
+        "profiled_hosts": len(profiled_in_scope),
+        "unprofiled_hosts": len(candidate_hosts - profiled_in_scope),
+        "by_jurisdiction": by_jurisdiction,
+        "note": (
+            "overseas_targets 只列 Shodan/CT 已返回实质画像的主机，不是境外/"
+            "辖区未知候选全表；profiled_hosts=0 不表示没有候选。候选分母只纳入"
+            "最终/安全投影后仍为建议调证的 DOMAIN/IP，辖区只读状态许可的 "
+            "DNS/ASN/Shodan payload。"
+        ),
+    }
+
+
+def _build_overseas_targets(endpoints: list[Endpoint]) -> list[dict]:
+    """把各端点已命中的 Shodan/CT 画像聚合成**结构化、按主机**的列表。
+
+    供 digest / HTML / Codex **机器可读**地查询/聚合/交叉比对（候选归属/端口/服务/技术栈/关联子域），
+    免去从 evidence_to_obtain 的自然语言串里解析。字段只形成基础设施候选，不能单独确认 Origin、家族
+    或运营者。该列表是 **profile-only 投影**，不是境外/辖区未知候选全表；只有
+    ASN/DNS 归属或 Shodan/CT 无记录的候选不会入列表，它们由
+    :func:`_overseas_target_coverage` 计入未画像分母。辖区门控只收【国外 + 未知】主机。
+    绝不抛（坏字段安全跳过）。
 
     每条结构（契约 D）：{host, ip, jurisdiction, asn, org, country, ports[],
     services[{port, product, version}], tech_stack[], related_subdomains[]}
@@ -203,25 +389,13 @@ def _build_overseas_targets(endpoints: list[Endpoint]) -> list[dict]:
         if not (shodan or certs):
             continue
 
-        try:
-            juris = forensic.classify_jurisdiction(
-                ep.value,
-                icp=provider_payload_if_hit(e, "icp"),
-                rdap=provider_payload_if_hit(e, "rdap"),
-                whois=provider_payload_if_hit(e, "whois"),
-                dns=provider_payload_if_hit(e, "dns"),
-                asn=asn,
-                shodan=shodan,
-            )
-        except Exception:  # noqa: BLE001 — 辖区判定失败不得炸主流程；保守判未知
-            logger.debug("[overseas_targets] 辖区判定失败：%s", ep.value, exc_info=True)
-            juris = forensic.JURIS_UNKNOWN
+        juris = _supported_jurisdiction(ep.value, e)
         if juris == forensic.JURIS_DOMESTIC:
             continue  # 境内不呈现境外目标（与渲染层一致）
 
         entry: dict[str, object] = {"host": ep.value, "jurisdiction": juris}
 
-        # 源站被动归属（shodan 优先，IP 端点用自身值兜底，asn 富化再兜底）：识别真实源站、归属哪。
+        # 基础设施候选归属（shodan 优先，IP 端点用自身值兜底，asn 富化再兜底）。
         ip = shodan.get("ip") or (ep.value if ep.kind == "ip" else "") or asn.get("ip")
         if ip:
             entry["ip"] = ip
@@ -253,12 +427,12 @@ def _build_overseas_targets(endpoints: list[Endpoint]) -> list[dict]:
         if services:
             entry["services"] = services
 
-        # 技术栈/后台框架指纹（被动 banner → 同后台疑同团伙串案）。
+        # 技术栈/后台框架指纹：常见弱候选，须由独立锚点复核。
         tech = exposure.assess_tech_stack(shodan)
         if tech:
             entry["tech_stack"] = tech
 
-        # 关联子域（crt.sh CT 日志 + shodan 关联主机名；去重，疑同团伙 → 并簇串案）。
+        # 关联子域候选（crt.sh CT 日志 + shodan 关联主机名；去重，不代表控制关系）。
         subs = [h for h in (certs.get("related_hostnames") or []) if isinstance(h, str)]
         for h in shodan.get("hostnames") or []:
             if isinstance(h, str) and h not in subs:
@@ -416,7 +590,7 @@ _OFFLINE_NOTE = "离线扫描：未做 WHOIS/ICP/ASN 归属查询，归属待联
 def _apply_forensic(
     advice: str, host: str, evidence_to_obtain: list[str], notes: str, **enr: object
 ) -> str:
-    """对「建议调证」的后端 Lead 按服务器辖区追加取证路径（国内调证 / 国外取证）。
+    """对「建议调证」的后端 Lead 按基础设施辖区候选追加分层取证路径。
 
     就地向 evidence_to_obtain 追加路径证据，返回带辖区标签的 notes。非建议调证（infra/私网/
     待核）不标——只给真后端分流。绝不抛（forensic 为纯函数）。
@@ -427,22 +601,20 @@ def _apply_forensic(
     fp = forensic.forensic_path(juris)
     evidence_to_obtain.extend(fp.evidence)
 
-    # 海外取证第一步：解析 IP 全为 CDN/反代时，提示先用公开情报被动穿透 CDN 定位真实源站 IP。
-    # 放在源站定位之前——给随后的 Shodan 端口/服务加上下文（那是 CDN 边缘端口、非源站）。
-    if juris == forensic.JURIS_FOREIGN:
-        evidence_to_obtain.extend(
-            forensic.render_origin_hint(enr.get("dns"), enr.get("asn"))
-        )
+    # CDN/反代边界不因辖区改变：任何边缘都不能写成 Origin，并应列出分发侧依法调证字段。
+    evidence_to_obtain.extend(
+        forensic.render_origin_hint(enr.get("dns"), enr.get("asn"))
+    )
 
-    # ★ 境外被动取证证据按**最终辖区**门控（与两遍富化同口径，落到渲染层）：仅【国外 + 未知】渲染；
+    # ★ 境外候选证据按**最终辖区**门控（与两遍富化同口径，落到渲染层）：仅【国外 + 未知】渲染；
     #   国内（含 shodan country 把国外/未知翻成国内的情形）：一概不渲染——避免一条最终标
-    #   「国内·可调证」的 Lead 上挂着境外取证痕迹（合规呈现自相矛盾、不可审计）。全程被动 OSINT。
+    #   「国内·评估依法调证」的 Lead 上挂着境外候选富化痕迹（呈现自相矛盾、不可审计）。
     if juris in (forensic.JURIS_FOREIGN, forensic.JURIS_UNKNOWN):
-        # 境外源站被动定位（Shodan）：源站归属(IP/ASN/geo) + 开放端口/服务指纹 + 关联主机名（串案）。
+        # 境外基础设施候选（Shodan）：归属(IP/ASN/geo) + 端口/服务记录 + 关联主机名候选。
         evidence_to_obtain.extend(forensic.render_overseas_targets(enr.get("shodan")))
-        # 证书透明度（被动 crt.sh）：CT 日志关联子域（含历史/影子子域），疑同团伙基础设施→并簇串案。
+        # 证书透明度（crt.sh）：CT 日志关联子域候选；共享证书/多租户须排除。
         evidence_to_obtain.extend(forensic.render_related_subdomains(enr.get("certs")))
-        # 技术栈/后台框架指纹（被动 banner，shodan）：仅识别 → 同后台疑同团伙串案，不研判漏洞。
+        # 技术栈/后台框架指纹（Shodan banner）：仅作弱候选，不研判漏洞。
         _tech = exposure.assess_tech_stack(enr.get("shodan"))
         evidence_to_obtain.extend(forensic.render_tech_stack(_tech))
     return f"{notes}；{fp.label}" if notes else fp.label
@@ -474,9 +646,11 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
     if icp.get("subject") or icp.get("license_no"):
         where = "工信部 ICP 备案系统 / 备案服务商"
         if icp.get("license_no"):
-            evidence_to_obtain.append(f"ICP 备案号 {icp.get('license_no')} 主体实名信息")
+            evidence_to_obtain.append(
+                f"ICP 备案号 {icp.get('license_no')} 的备案主体与接入信息（登记关系，不等于 App 运营关系）"
+            )
         else:
-            evidence_to_obtain.append("ICP 备案主体实名信息")
+            evidence_to_obtain.append("ICP 备案主体与接入信息（登记关系，不等于 App 运营关系）")
     elif rdap_registrar:
         where = f"域名注册商：{rdap_registrar}"
         evidence_to_obtain.append("RDAP/WHOIS 注册人/注册邮箱/注册时间")
@@ -491,7 +665,36 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
 
     # infra 分级：命中已知基础设施→无需调证；私网/无效→待核；否则→建议调证。
     advice, cls_reason = infra.classify_domain(ep.value)
+    distribution_edge = tenant_distribution_edge(ep.value, dns)
+    cdn = forensic.cdn_vendor(dns)
+    if distribution_edge is not None:
+        provider = str(distribution_edge.get("request_target") or "")
+        distribution_domain = str(distribution_edge.get("distribution_domain") or "")
+        custom_hostname = str(distribution_edge.get("custom_hostname") or "")
+        where = f"CDN / 分发服务商：{provider}"
+        cname_evidence = (
+            f"DNS CNAME 将自定义域名 {custom_hostname} 指向完整分发域名 "
+            f"{distribution_domain}；"
+            if custom_hostname
+            else f"根据完整分发域名 {distribution_domain} "
+        )
+        evidence_to_obtain.append(
+            f"{cname_evidence}检索对应 CloudFront Distribution；"
+            "依法调取 AWS 账号、Distribution ID/配置、Alternate Domain Names、Origin 及 "
+            "OAC/OAI、访问日志、CloudTrail 与关联 AWS 资源；边缘地址不得写成 Origin"
+        )
+    elif cdn:
+        request_provider = (
+            "Amazon Web Services, Inc."
+            if "cloudfront" in cdn.casefold()
+            else f"{cdn}（需核实法定主体）"
+        )
+        distribution_target = f"CDN / 分发服务商候选：{request_provider}"
+        where = f"{where}；{distribution_target}" if where else distribution_target
     notes = _endpoint_notes(ep, online, enriched)
+    if subject:
+        registration_boundary = "主体字段来自域名备案/注册记录，仅表示登记关系，不等于 App 运营者"
+        notes = f"{notes}；{registration_boundary}" if notes else registration_boundary
 
     # 对象存储桶模板：判据链把它降到待核，而**降档的理由必须跟到线索上**——否则出口只看得到
     # 一条没有来由的「待核」，读的人无从知道「这是个桶名占位符、下一步该去取运行时真桶名」。
@@ -500,7 +703,7 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
     if advice == infra.ADVICE_REVIEW and infra.tenant_bucket_template(ep.value) is not None:
         notes = f"{notes}；{cls_reason}" if notes else cls_reason
 
-    # dns 富化：把当前解析 IP / 托管 ASN 体现为调证落点（向云厂商调租户/访问日志）。
+    # DNS 富化：把当前解析 IP / 托管 ASN 作为解析时点候选呈现，不直接把解析 IP 当租户落点。
     hosting_note = _dns_hosting_note(dns)
     if hosting_note:
         evidence_to_obtain.append(hosting_note)
@@ -646,9 +849,17 @@ def _ip_lead(
     evidence_to_obtain: list[str] = []
     enriched = bool(asn)
 
-    if subject:
+    cdn = forensic.cdn_vendor(None, asn)
+    if cdn:
+        where = f"CDN / 分发服务商：{subject or cdn}"
+        evidence_to_obtain.append(
+            "核实该边缘 IP 的分发服务关系，依法调取账户/租户、分发与绑定域名、回源配置、访问日志及控制面审计记录；边缘 IP 不得写成 Origin"
+        )
+    elif subject:
         where = f"云厂商 / IDC：{subject}"
-        evidence_to_obtain.append("该 IP 在涉案时间段的租户/实名/访问日志")
+        evidence_to_obtain.append(
+            "核实资源持有与实际承载角色后，依法调取该 IP 在涉案时段的租户/实名/访问日志"
+        )
     else:
         where = "云厂商 / IDC（需人工核 ASN 归属）"
         evidence_to_obtain.append("ASN 归属及租户信息")
@@ -822,9 +1033,10 @@ def _passive_dns_note(enrichment: dict) -> str:
 
 
 def _dns_hosting_note(dns: dict) -> str:
-    """把 dns 富化的解析 IP / 托管 ASN 压成一句调证落点说明（无数据 → 空串）。
+    """把 DNS 富化的解析 IP / 托管 ASN 压成一句角色中立的候选说明（无数据 → 空串）。
 
-    形如「当前解析 IP <ip1>(AS20473 Vultr), <ip2>(AS20473 Vultr)→向云厂商调租户/访问日志」。
+    当前解析只证明解析时点的基础设施关系；必须先区分资源持有、承载、CDN 边缘和 Origin，
+    不能直接把共享边缘 IP 当作 App 租户落点。
     """
     ips = dns.get("ips") or []
     hosting = dns.get("hosting") or []
@@ -854,7 +1066,10 @@ def _dns_hosting_note(dns: dict) -> str:
 
     if not parts:
         return ""
-    return f"当前解析 IP {', '.join(parts)}→向云厂商/IDC 调该 IP 在涉案时段的租户/访问日志"
+    return (
+        f"当前解析 IP {', '.join(parts)}，仅为解析时点的基础设施/承载候选；"
+        "须先核实资源持有、承载、CDN 边缘与 Origin 角色，再确定相应调证对象和字段"
+    )
 
 
 def _endpoint_notes(ep: Endpoint, online: bool = True, enriched: bool = False) -> str:

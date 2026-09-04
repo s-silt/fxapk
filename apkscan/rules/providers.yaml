@@ -82,6 +82,10 @@ network_categories:
       - hosting
   security_proxy:
     org_keywords:
+      - imperva
+      - incapsula
+      - sucuri
+      - section.io  # leak-scan: allow 公开安全代理服务商规则，非案件 IOC
       - 加速乐
       - jiasule
       - yunaq

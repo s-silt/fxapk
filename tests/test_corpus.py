@@ -181,7 +181,7 @@ def test_manifest_entry_extracts_key_fields() -> None:
     assert e["sample_sha256_synthetic"] is False
     assert e["tool_version"] == "0.9.0" and e["ruleset_digest"] == "deadbeef"
     assert e["package_name"] == "com.fraud.app"
-    assert e["sign_sha256"] == "CERT-SHA"  # 共享证书串案强锚
+    assert e["sign_sha256"] == "CERT-SHA"  # 保留证书摘要供候选召回，不在此判家族/主体
     assert e["packer"] == "packer-x" and e["is_hardened"] is True
     assert e["app_type"] == "fraud" and e["app_score"] == 88
     assert e["mode"] == "passive" and e["analysis_status"] == "complete"
@@ -764,7 +764,7 @@ def test_find_by_and_query(tmp_path: Path) -> None:
     entries = corpus.load_manifest(tmp_path)
     assert len(corpus.find_by(entries, "s1", by="sample_sha256")) == 1
     assert len(corpus.find_by(entries, "com.b", by="package_name")) == 1
-    # 两样本共享同一签名证书 → 证书反查命中两条（串案强信号）
+    # 两样本共享同一签名证书 → 证书反查命中两条候选，不在查询层判家族/主体
     assert len(corpus.find_by(entries, "CERT-SHA", by="sign_sha256")) == 2
     assert corpus.find_by(entries, "nope", by="sample_sha256") == []
     assert corpus.find_by(entries, "x", by="unknown_field") == []  # 不支持字段 → 空
