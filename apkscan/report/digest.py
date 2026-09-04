@@ -1,8 +1,9 @@
 """把 report.json 压成 **AI agent（agent-agnostic）/ 程序友好** 的紧凑摘要（compact digest）。
 
 report.json 完整但冗长（端点全表 / 技术附录 / 富化原始数据），AI agent（Codex）逐字解析既费
-token 又难抓重点。本模块抽出**可办案化的核心**：按优先级排序的调证线索 + 计数摘要，键名稳定、
-结构扁平，供低 token 消费、直接决策。纯函数（report dict → digest dict），绝不抛。
+token 又难抓重点。本模块抽出按优先级排序的候选线索与计数摘要，键名稳定、结构扁平，供低 token
+摘要分流与回查定位。digest 不替代 canonical report 或原始 evidence；正式结论与调证动作必须回查。
+纯函数（report dict → digest dict），绝不抛。
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from apkscan.core.evidence_scope import (
     project_serialized_closure,
     project_serialized_leads,
 )
+from apkscan.core.leads import _overseas_target_coverage, _project_overseas_profiles
 from apkscan.core.models import (
     OBSERVED_CONTACT_SOURCES,
     EvidenceScope,
@@ -416,7 +418,7 @@ def _compact_findings(report: dict) -> dict[str, Any]:
     #   却不知道被丢的是什么、也无从去 report.json 里定位——等于知道自己瞎但不知道瞎在哪。
     #   带上 ID（不带标题/证据，token 仍然便宜）才能按图索骥。
     #   实证：本轮补的三条 LOW 出口（版本标记词、绝对路径条目的落盘解压风险、
-    #   未知远控目标）在默认 digest 里只体现为 omitted 计数，操作提示对决策面完全消失。
+    #   未知远控目标）在默认 digest 里只体现为 omitted 计数，操作提示会从摘要分流面完全消失。
     omitted_ids = sorted(
         {str(f.get("id") or "") for f in items} - kept_ids - {""}
     )[:_OMITTED_ID_CAP]
@@ -540,6 +542,9 @@ def _compact_visibility(raw: object) -> dict[str, Any]:
 def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
     """report.json 解析出的对象 → 紧凑摘要 dict（线索按优先级排序）。绝不抛。
 
+    本摘要只用于初筛、分流和定位须回查的字段，不能替代 canonical report 或原始 evidence，亦不能
+    独立支撑正式结论、调证动作或报告发布。
+
     ``redact=True``（**默认**）：钱包私钥 / 助记词、后端凭据、个人隐私数据、加密配方等高敏类别的
     value 按类别脱敏，自由文本里的结构化 PII 一并抹掉。明文原值只留在本地完整报告里。
 
@@ -567,11 +572,20 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
     by_advice = Counter(str(lead.get("advice") or "未研判") for lead in leads)
     by_category = Counter(str(lead.get("category") or "?") for lead in leads)
 
-    # 结构化境外源站段（被动定位的海外后端/控制者：IP 归属/ASN/开放端口/服务 banner/技术栈/关联子域，
-    # 按主机聚合，机器可读）。由 pipeline 写入 meta["overseas_targets"]，已做辖区门控（仅国外+未知）；
-    # 此处原样透传供 agent 直查——纯被动 OSINT 定位，对目标零流量。
-    overseas_targets = meta.get("overseas_targets")
-    overseas_targets = overseas_targets if isinstance(overseas_targets, list) else []
+    # 结构化境外基础设施画像段：IP/ASN/开放端口/服务 banner/技术栈/关联子域按主机聚合。
+    # 它是 Shodan/CT 命中的 profile-only 投影，不是境外/辖区未知候选全表。候选分母及
+    # ASN-only 等未画像缺口由 overseas_target_coverage 单列，避免把列表长度 0 读成没有候选。
+    raw_overseas_targets = meta.get("overseas_targets")
+    raw_overseas_targets = (
+        raw_overseas_targets if isinstance(raw_overseas_targets, list) else []
+    )
+    final_leads_for_scope: object = leads if isinstance(report.get("leads"), list) else None
+    overseas_targets = _project_overseas_profiles(
+        raw_overseas_targets, final_leads_for_scope
+    )
+    overseas_target_coverage = _overseas_target_coverage(
+        report.get("endpoints"), raw_overseas_targets, final_leads_for_scope
+    )
 
     closure = project_serialized_closure(report)
     closure_targets = closure.get("targets")
@@ -625,7 +639,13 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
             "by_advice": dict(by_advice),
             "by_category": dict(by_category),
             "comm_sessions": len(meta.get("comm_sessions") or []),
+            # 兼容键：它的真实语义是「已画像主机数」，不是全部候选数。
             "overseas_target_hosts": len(overseas_targets),
+            "overseas_candidate_hosts_total": overseas_target_coverage[
+                "candidate_hosts_total"
+            ],
+            "overseas_profiled_hosts": overseas_target_coverage["profiled_hosts"],
+            "overseas_unprofiled_hosts": overseas_target_coverage["unprofiled_hosts"],
             "attributed_role_candidates": role_candidate_count,
         },
         "integrity": _integrity(report),  # run 级完整性红旗（reliable=False 时结果可能不可信）
@@ -644,6 +664,7 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
             for lead in leads_sorted
         ],
         "overseas_targets": overseas_targets,
+        "overseas_target_coverage": overseas_target_coverage,
         "closure": compact_closure,
     }
     enrichment = _compact_enrichment(meta)

@@ -380,7 +380,8 @@ class ManifestAnalyzer(BaseAnalyzer):
                 ),
                 recommendation=(
                     "研判其 hook 目标（xposedscope 指定的目标包名）与 AccessibilityService / 无障碍权限，"
-                    "确认是否劫持第三方 app；把 Xposed 模块身份作为团伙工具链指纹并簇串案。"
+                    "确认是否劫持第三方 app；记录 Xposed 模块身份与目标范围作为关联候选，"
+                    "须由独特代码哈希、配置或运行时目标等独立锚点复核。"
                 ),
                 evidences=ev,
                 references=["https://developer.android.com/topic/security"],

@@ -419,6 +419,76 @@ def test_html_render_writes_file(sample_report: Report, tmp_path: Path) -> None:
     assert html.lstrip().lower().startswith("<!doctype html")
 
 
+def test_html_overseas_section_uses_candidate_boundaries(
+    sample_report: Report, tmp_path: Path
+) -> None:
+    sample_report.leads.append(
+        Lead(
+            category=LeadCategory.DOMAIN,
+            value="infra.example",
+            advice=ADVICE_INVESTIGATE,
+            source_refs=[Evidence(source="dex", location="classes.dex")],
+        )
+    )
+    sample_report.endpoints.append(
+        Endpoint(
+            value="infra.example",
+            kind="domain",
+            evidences=[Evidence(source="dex", location="classes.dex")],
+        )
+    )
+    sample_report.meta["overseas_targets"] = [
+        {
+            "host": "infra.example",
+            "jurisdiction": "未知",
+            "ip": "198.51.100.42",
+            "asn": "AS64500",
+            "org": "Example Hosting",
+            "ports": [443],
+            "services": [{"port": 443, "product": "nginx"}],
+            "tech_stack": [{"name": "PHP"}],
+            "related_subdomains": ["api.infra.example"],
+        }
+    ]
+    path = tmp_path / "report.html"
+    report_html.render(sample_report, str(path))
+    html = path.read_text(encoding="utf-8")
+
+    assert "境外或辖区未知的基础设施与 Origin 候选" in html
+    assert "基础设施候选归属" in html
+    assert "不能据此认定同一 Origin、家族或运营主体" in html
+    assert "境外源站被动定位" not in html
+
+
+def test_html_network_table_renders_request_fields_and_role_boundaries(
+    sample_report: Report, tmp_path: Path
+) -> None:
+    sample_report.leads.append(
+        Lead(
+            category=LeadCategory.DOMAIN,
+            value="distribution.example",
+            subject="Example registration record",
+            where_to_request="CDN / 分发服务商：Example Provider",
+            evidence_to_obtain=[
+                "调取账户、Distribution、绑定域名、Origin 配置、访问日志与控制面审计记录",
+                "边缘地址不得写成 Origin 或运营者地址",
+            ],
+            confidence=Confidence.HIGH,
+            advice=ADVICE_INVESTIGATE,
+            source_refs=[Evidence(source="dex", location="classes.dex")],
+        )
+    )
+    path = tmp_path / "network-boundaries.html"
+    report_html.render(sample_report, str(path))
+    html = path.read_text(encoding="utf-8")
+
+    assert "后端 / 高价值端点候选" in html
+    assert "登记/资源主体（非运营者认定）" in html
+    assert "拟调字段 / 证据边界" in html
+    assert "调取账户、Distribution、绑定域名、Origin 配置、访问日志与控制面审计记录" in html
+    assert "边缘地址不得写成 Origin" in html
+
+
 def test_html_contains_section_titles(sample_report: Report, tmp_path: Path) -> None:
     path = tmp_path / "report.html"
     report_html.render(sample_report, str(path))
@@ -720,7 +790,7 @@ def test_html_render_empty_report(tmp_path: Path) -> None:
     assert "com.empty.app" in html
     # 各空线索区给出空提示，不崩溃
     assert "未抠取到配置键值" in html
-    assert "未识别到「建议调证」的自有后端候选域名" in html  # C2 语义纠错随动
+    assert "未识别到「建议调证」的后端 / 高价值端点候选" in html
 
 
 # --------------------------- 资源审计（exe-ready）---------------------------
@@ -993,8 +1063,8 @@ def test_html_marks_c2_servers(tmp_path: Path) -> None:
 
 
 def test_html_c2_badge_tiers_by_contact(tmp_path: Path) -> None:
-    """C2 徽标三档按观测强弱分层：observed-contact → 深红「实连」(badge-c2-live)；仅动态出现的
-    runtime-derived → 橙「运行时出现」(badge-c2-runtime)、**绝不实连**；纯静态 → 红「疑似自有后端」(badge-c2)。
+    """兼容徽标三档按观测强弱分层：observed-contact → 深红「实连」(badge-c2-live)；仅动态出现的
+    runtime-derived → 橙「运行时出现」(badge-c2-runtime)、**绝不实连**；纯静态 → 红「高价值端点候选」(badge-c2)。
 
     无修复即失败：旧模板把 runtime-derived 也当 is_runtime_seen 渲成 badge-c2-live——本测试对
     ``runtime-derived`` 断言 `badge-c2-live` 不出现，即钉住「手编 / 合成来源不得升『实连』」。
@@ -1035,12 +1105,12 @@ def test_html_c2_badge_tiers_by_contact(tmp_path: Path) -> None:
     assert 'class="badge badge-c2-live"' not in derived  # ← 无修复即失败
     assert ">🎯 运行时出现</span>" in derived
 
-    # 纯静态 → 疑似自有后端；静态档不得再自称 C2（语义纠错，class 名保留作内部兼容）
+    # 纯静态 → 高价值端点候选；静态档不得自称 App 自有或 C2（class 名保留作内部兼容）
     static = _render(None)
     assert 'class="badge badge-c2"' in static
     assert 'class="badge badge-c2-live"' not in static
     assert 'class="badge badge-c2-runtime"' not in static
-    assert ">🎯 疑似自有后端</span>" in static
+    assert ">🎯 高价值端点候选</span>" in static
     assert "🎯 C2" not in static
 
     # 三档统一：全文不得出现确定性 C2 措辞
@@ -1273,15 +1343,16 @@ def test_html_no_integrity_section_when_manifest_absent(
 
 
 def test_every_lead_category_is_rendered_in_html(tmp_path: Path) -> None:
-    """★每个 LeadCategory 的线索都必须在 HTML 报告里看得见——一个都不许丢。
+    """★受控内部 HTML 证据视图须呈现每个 LeadCategory；它不是脱敏发布投影。
 
     起因是实测发现的真缺陷：模板原先逐个 `{% if group.category.value == "PAYMENT" %}`
     硬编码挑类别，没被挑中的**整类消失**。一份交付出去的真实报告里，7 条运行时凭据 +
-    1 条短信转发线索在 HTML 中完全不可见，而 CATEGORY_LABELS 给它们都起了中文标签、
+    1 条短信转发线索在内部 HTML 中完全不可见，而 CATEGORY_LABELS 给它们都起了中文标签、
     CATEGORY_ORDER 还把高敏那几类排在最前面——设计上要显示，实现漏了。
 
     ★这条测试遍历 **LeadCategory 全枚举**，不是写死名单：将来新增类别若忘了接线，
-      这里直接红。锁的是「报告不会安静地吞掉一整类线索」这个契约。
+      这里直接红。锁的是「内部证据视图不会安静地吞掉一整类线索」这个契约；对外材料另走
+      经审核的安全投影，不复用这条原值输出路径。
     """
     leads = [
         Lead(

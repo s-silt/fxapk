@@ -1,15 +1,15 @@
-"""Shodan 富化器：海外服务器**被动 IP 归属**取证（开放端口 / 服务 banner / 产品版本 / 归属）。
+"""Shodan 富化器：境外基础设施候选（开放端口 / 服务 banner / 产品版本 / 归属）。
 
-对「建议调证」的 IP / 域名查 Shodan 已扫库（``/shodan/host/{ip}``）：对目标**零流量**——Shodan 早替我们
-扫过，我们只读它的库，属**被动 OSINT**。用于识别「这是不是真实源站、归属在哪」，一次拿到：
+对「建议调证」的 IP / 域名查 Shodan 已有数据库（``/shodan/host/{ip}``）。本模块不直接连接目标
+业务服务，但会把目标标识提交给 Shodan；记录可能过期，只能形成基础设施与 Origin 候选：
 
 - 开放端口 ``ports`` + 每服务 ``product``/``version``/``cpe``/``http.server``/``http.title``（服务 banner
-  与技术栈指纹——同后台 / 同栈可作**串案**信号）；
-- ``hostnames``（历史 / 关联主机名，疑同团伙基础设施，可并簇串案）、``org``/``isp``/``asn``/归属国
-  （反哺辖区判定与源站归属识别）。
+  与技术栈指纹——相同常见栈只能作弱候选）；
+- ``hostnames``（历史 / 关联主机名候选）、``org``/``isp``/``asn``/归属国
+  （反哺基础设施辖区候选与承载归属识别）。
 
-★ 用途见 ``core/forensic`` 海外（国外）分支：难直接调证 → **被动定位真实源站 IP + 提取归属标识**
-（不主动探测 / 不接触任何第三方基础设施），据此并簇串案、指向可依法协作的落点。
+★ 用途见 ``core/forensic`` 境外分支：区分资源登记、承载、CDN 边缘和 Origin 候选，并按合法渠道
+评估调证或协作。单一 Shodan 记录不能确认 Origin、家族或运营者。
 
 **opt-in**：仅当配置 ``FXAPK_SHODAN_KEY``（或 ``SHODAN_API_KEY``）时启用；未配置 → 跳过(ok=False)，
 核心分析不受影响。key 走项目根 ``.env``（见 ``core/dotenv``），不硬编码、不入库。仅在 ``--online`` 下
@@ -25,8 +25,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
+from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +50,12 @@ SHODAN_TIMEOUT = 12
 #: 归一化截断上限（防止个别巨型主机塞爆缓存 / 报告）。
 _MAX_SERVICES = 40
 _MAX_HOSTNAMES = 30
+_MAX_HTTP_HEADER_VALUES = 20
+_MAX_COOKIE_NAMES = 20
+_MAX_HTTP_HEADER_VALUE_LENGTH = 512
+
+# RFC 7230 token 的可见 ASCII 子集；只把合法 Cookie 名写入报告，绝不保留 Cookie 值。
+_COOKIE_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,128}$")
 
 CACHE_DIR = Path(".apkscan_cache")
 CACHE_FILE = CACHE_DIR / "shodan.json"
@@ -77,10 +85,75 @@ def _as_dict(value: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _http_header_values(http: dict[str, Any], name: str) -> list[str]:
+    """从 Shodan ``http.headers`` 中按大小写无关方式取一个响应头的非空值。
+
+    Shodan banner 的头值可能是字符串或字符串列表；其它形态安全忽略。数量和长度均有界，避免异常
+    banner 撑大缓存或报告。此函数只供明确白名单头使用，不复制完整响应头集合。
+    """
+    headers = http.get("headers")
+    if not isinstance(headers, dict):
+        return []
+
+    target = name.casefold()
+    values: list[str] = []
+    seen: set[str] = set()
+    for raw_name, raw_value in headers.items():
+        if not isinstance(raw_name, str) or raw_name.strip().casefold() != target:
+            continue
+        candidates = raw_value if isinstance(raw_value, (list, tuple)) else [raw_value]
+        for candidate in candidates:
+            if not isinstance(candidate, str):
+                continue
+            value = candidate.strip()[:_MAX_HTTP_HEADER_VALUE_LENGTH]
+            folded = value.casefold()
+            if not value or folded in seen:
+                continue
+            seen.add(folded)
+            values.append(value)
+            if len(values) >= _MAX_HTTP_HEADER_VALUES:
+                return values
+    return values
+
+
+def _cookie_names(http: dict[str, Any]) -> list[str]:
+    """从 ``Set-Cookie`` 白名单头提取 Cookie 名；不保留值或属性。
+
+    ``SimpleCookie`` 能处理常见的多条/合并头与 ``Expires`` 中的逗号。遇到非标准但仍以合法
+    ``name=value`` 开头的头时，仅回退取首个名字；坏输入安全跳过。
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+    for value in _http_header_values(http, "set-cookie"):
+        parsed_names: list[str] = []
+        jar = SimpleCookie()
+        try:
+            jar.load(value)
+            parsed_names.extend(str(name) for name in jar)
+        except (CookieError, ValueError):
+            pass
+
+        if not parsed_names:
+            first_pair = value.split(";", 1)[0]
+            candidate, separator, _ = first_pair.partition("=")
+            if separator:
+                parsed_names.append(candidate.strip())
+
+        for raw_name in parsed_names:
+            name = raw_name.strip().lower()
+            if not _COOKIE_NAME_RE.fullmatch(name) or name in seen:
+                continue
+            seen.add(name)
+            names.append(name)
+            if len(names) >= _MAX_COOKIE_NAMES:
+                return names
+    return names
+
+
 def _parse_host(payload: dict[str, Any]) -> dict[str, Any]:
     """把 ``/shodan/host`` 原始 JSON 归一成稳定扁平字段（缺字段安全留空）。
 
-    只保留**被动归属 / 服务 banner / 技术栈指纹**字段（识别真实源站与归属、供同栈串案）；
+    只保留基础设施候选归属 / 服务 banner / 技术栈指纹字段（供分层和人工复核）；
     不采集任何漏洞 / 利用向的字段。
     """
     services: list[dict[str, Any]] = []
@@ -96,9 +169,11 @@ def _parse_host(payload: dict[str, Any]) -> dict[str, Any]:
                 "module": shodan_meta.get("module"),
                 "product": svc.get("product"),
                 "version": svc.get("version"),
-                "cpe": svc.get("cpe") or svc.get("cpe23"),  # 技术栈指纹（供 exposure 串案），非漏洞判定
+                "cpe": svc.get("cpe") or svc.get("cpe23"),  # 技术栈弱候选，非漏洞判定
                 "http_server": http.get("server"),
                 "http_title": http.get("title"),
+                "x_powered_by": _http_header_values(http, "x-powered-by"),
+                "cookie_names": _cookie_names(http),
             }
         )
         if len(services) >= _MAX_SERVICES:
@@ -123,14 +198,14 @@ def _parse_host(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 class ShodanEnricher(BaseEnricher):
-    """对 IP / 域名查 Shodan 已扫库，产出服务器**被动归属画像**（opt-in，配 FXAPK_SHODAN_KEY 才启用）。
+    """对 IP / 域名查 Shodan 已扫库，产出基础设施候选画像（opt-in，配 FXAPK_SHODAN_KEY 才启用）。
 
-    产出仅用于识别「是否真实源站、归属在哪、同栈可否串案」，对目标零流量、不做任何漏洞 / 利用判定。
+    产出仅用于候选分层和人工复核，不确认 Origin、家族或运营者，也不做任何漏洞 / 利用判定。
     """
 
     name = "shodan"
     applies_to = ["ip", "domain"]
-    #: 境外归属阶段（两遍富化第二遍）；被动（active=False，查 Shodan 库、对目标零流量），仅对国外(+未知)端点跑。
+    #: 境外归属阶段（两遍富化第二遍）；active=False（查 Shodan 库、不直连目标业务服务），仅对国外(+未知)端点跑。
     phase = "overseas"
     active = False
     required_env = _ENV_KEYS

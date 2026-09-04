@@ -965,6 +965,60 @@ def test_domain_lead_dns_hosting_in_evidence_and_notes():
     assert "Vultr" in blob
 
 
+def test_domain_lead_uses_hit_cloudfront_cname_as_exact_aws_request_target() -> None:
+    from apkscan.core.leads import _domain_lead
+
+    custom_hostname = "portal.infra.example"
+    distribution = ".".join(("d111111abcdef8", "cloudfront", "net"))
+    endpoint = Endpoint(
+        value=custom_hostname,
+        kind="domain",
+        enrichment={
+            "source_status": {"dns": {"status": "hit"}},
+            "dns": {"cname": [distribution]},
+        },
+    )
+
+    lead = _domain_lead(endpoint)
+
+    assert lead.where_to_request == "CDN / 分发服务商：Amazon Web Services, Inc."
+    evidence = "\n".join(lead.evidence_to_obtain)
+    assert custom_hostname in evidence
+    assert distribution in evidence
+    for expected in (
+        "CloudFront Distribution",
+        "AWS 账号",
+        "Distribution ID",
+        "Alternate Domain Names",
+        "Origin",
+        "OAC/OAI",
+        "访问日志",
+        "CloudTrail",
+        "关联 AWS 资源",
+        "边缘地址不得写成 Origin",
+    ):
+        assert expected in evidence
+
+
+def test_domain_lead_does_not_use_non_hit_cloudfront_cname_as_aws_target() -> None:
+    from apkscan.core.leads import _domain_lead
+
+    distribution = ".".join(("d111111abcdef8", "cloudfront", "net"))
+    endpoint = Endpoint(
+        value="portal.infra.example",
+        kind="domain",
+        enrichment={
+            "source_status": {"dns": {"status": "failed"}},
+            "dns": {"cname": [distribution]},
+        },
+    )
+
+    lead = _domain_lead(endpoint)
+
+    assert "Amazon Web Services, Inc." not in (lead.where_to_request or "")
+    assert distribution not in "\n".join(lead.evidence_to_obtain)
+
+
 def test_whois_enricher_not_routed_by_pipeline():
     """避免 whois 双查：独立 WhoisEnricher 的 applies_to 应为空，pipeline 不再路由它。"""
     from apkscan.enrichers.whois import WhoisEnricher

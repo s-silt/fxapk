@@ -12,6 +12,8 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 
 from apkscan.core.models import Endpoint, EvidenceScope
+from apkscan.core.attribution import classify_network
+from apkscan.network.categories import CAT_CDN, CAT_SECURITY_PROXY
 from apkscan.core.source_status import normalize_source_status_map, provider_payload_if_hit
 
 from apkscan.core.closure._shared import (
@@ -109,16 +111,47 @@ def _attribution_for_endpoint(enrichment: Mapping[str, object]) -> dict[str, Any
     return attribution
 
 
-def _edge_provider(enrichment: Mapping[str, object]) -> str | None:
+def _domain_edge_provider(enrichment: Mapping[str, object]) -> dict[str, Any]:
+    """取域名级分发服务候选。
+
+    该层描述「完整分发域→分发产品」，不得被折叠成某个解析 IP 的运营者属性。
+    """
+    attribution = _mapping(enrichment.get("attribution"))
+    return _mapping(attribution.get("domain_edge_provider"))
+
+
+def _edge_details(enrichment: Mapping[str, object]) -> dict[str, Any]:
+    """取 edge 结构：域名级租户分发事实优先，再回落现有 per-IP 归因。"""
+    domain_edge = _domain_edge_provider(enrichment)
+    if domain_edge.get("name"):
+        return domain_edge
     attribution = _attribution_for_endpoint(enrichment)
-    edge = _mapping(attribution.get("edge_provider"))
+    return _mapping(attribution.get("edge_provider"))
+
+
+def _edge_provider(enrichment: Mapping[str, object]) -> str | None:
+    edge = _edge_details(enrichment)
     name = edge.get("name")
     return str(name) if name else None
 
 
 def _origin_status(enrichment: Mapping[str, object]) -> dict[str, object]:
-    edge = _edge_provider(enrichment)
+    edge_details = _edge_details(enrichment)
+    edge = edge_details.get("name")
     if not edge:
+        shodan = _provider_payload(enrichment, "shodan")
+        shodan_org = shodan.get("org")
+        if isinstance(shodan_org, str) and classify_network(shodan_org) in {
+            CAT_CDN,
+            CAT_SECURITY_PROXY,
+        }:
+            return {
+                "required": True,
+                "status": "missing",
+                "edge_candidate": shodan_org,
+                "candidate_source": "shodan",
+                "reason": "CDN or edge profile is a candidate; Origin remains unverified",
+            }
         return {"required": False, "status": "not_applicable"}
     origin = _mapping(enrichment.get("origin"))
     origin_ips = origin.get("ips")
@@ -130,8 +163,20 @@ def _origin_status(enrichment: Mapping[str, object]) -> dict[str, object]:
     missing: dict[str, object] = {
         "required": True,
         "status": "missing",
-        "edge_provider": edge,
+        "edge_provider": str(edge),
     }
+    for source_key, target_key in (
+        ("product", "edge_product"),
+        ("source", "edge_source"),
+        ("distribution_domain", "distribution_domain"),
+        ("custom_hostname", "custom_hostname"),
+        ("request_target", "request_target"),
+        ("request_evidence_fields", "request_evidence_fields"),
+        ("boundary", "boundary"),
+    ):
+        value = edge_details.get(source_key)
+        if value not in (None, "", [], {}):
+            missing[target_key] = value
     if has_origin or (isinstance(candidates, list) and candidates):
         missing["evidence"] = {
             "candidates": origin_ips or candidates or [origin.get("ip")],
@@ -275,23 +320,27 @@ def _hosting_layer(enrichment: Mapping[str, object]) -> dict[str, object]:
     hosting = _mapping(attribution.get("hosting_provider"))
     passive_providers, passive_services, passive_locations = _passive_hosting_evidence(enrichment)
     passive_provider = passive_providers[0] if passive_providers else {}
+    # Shodan 的 org、端口和 banner 是已扫描到的边缘画像，不能证明该 IP 的承载租户或 Origin。
+    # 它们保留在候选证据中供人工复核，但不得成为 hosting provider 或 completion signal。
+    shodan_candidate: dict[str, object] = {}
+    if shodan.get("org") not in (None, ""):
+        shodan_candidate["org"] = shodan.get("org")
+    for key in ("asn", "country", "ports", "services"):
+        value = shodan.get(key)
+        if value not in (None, "", [], {}):
+            shodan_candidate[key] = value
     provider = (
-        shodan.get("org")
-        or passive_provider.get("name")
+        passive_provider.get("name")
         or hosting.get("name")
         or asn.get("org")
         or asn.get("isp")
     )
     provider_source = (
-        "shodan"
-        if shodan.get("org")
-        else passive_provider.get("source")
+        passive_provider.get("source")
         or hosting.get("source")
         or "asn"
     )
-    raw_services = shodan.get("services")
-    services = list(raw_services) if isinstance(raw_services, list) else []
-    services.extend(passive_services)
+    services = list(passive_services)
     raw_ports = shodan.get("ports")
     ports = raw_ports if isinstance(raw_ports, list) else []
     matched_signals = (
@@ -322,6 +371,7 @@ def _hosting_layer(enrichment: Mapping[str, object]) -> dict[str, object]:
         "provider": provider,
         "provider_source": provider_source,
         "provider_candidates": passive_providers,
+        "edge_candidates": [shodan_candidate] if shodan_candidate else [],
         "asn": asn.get("asn") or shodan.get("asn"),
         "country": asn.get("country") or shodan.get("country"),
         "ports": ports,
@@ -338,7 +388,11 @@ def _hosting_layer(enrichment: Mapping[str, object]) -> dict[str, object]:
             evidence,
             reason="provider found without corroborating product, facility, or reassignment evidence",
         )
-    return _layer(CLOSURE_FAILED, reason="hosting or delivery provider is missing")
+    return _layer(
+        CLOSURE_FAILED,
+        evidence,
+        reason="hosting or delivery provider is missing",
+    )
 
 
 def _request_layer(hosting: Mapping[str, object], origin: Mapping[str, object]) -> dict[str, object]:
@@ -359,16 +413,26 @@ def _request_layer(hosting: Mapping[str, object], origin: Mapping[str, object]) 
         if edge:
             if infrastructure_provider and infrastructure_provider != edge:
                 request_evidence["edge_infrastructure_provider"] = infrastructure_provider
-            request_evidence["provider"] = edge
+            request_evidence["provider"] = origin.get("request_target") or edge
             request_evidence["edge_provider"] = edge
-        request_evidence["evidence_fields"] = [
-            "customer identity",
-            "domain and account binding",
-            "payment records",
-            "control-plane login logs",
-            "origin configuration",
-            "access and origin logs",
-        ]
+        requested_fields = origin.get("request_evidence_fields")
+        if isinstance(requested_fields, list) and requested_fields:
+            request_evidence["evidence_fields"] = [
+                str(field) for field in requested_fields if str(field).strip()
+            ]
+        else:
+            request_evidence["evidence_fields"] = [
+                "customer identity",
+                "domain and account binding",
+                "payment records",
+                "control-plane login logs",
+                "origin configuration",
+                "access and origin logs",
+            ]
+        for key in ("edge_product", "distribution_domain", "custom_hostname", "boundary"):
+            value = origin.get(key)
+            if value not in (None, "", [], {}):
+                request_evidence[key] = value
         return _layer(CLOSURE_PARTIAL, request_evidence, reason="Origin must be obtained first")
     if origin.get("required") is True:
         origin_evidence = _mapping(origin.get("evidence"))
@@ -569,17 +633,31 @@ def assemble_target_closure(endpoint: Endpoint) -> dict[str, object]:
         )
         resolved_targets.append(_single_target_closure(resolved_endpoint))
 
+    domain_edge = _domain_edge_provider(endpoint.enrichment)
+    parent_origin = _origin_status(endpoint.enrichment) if domain_edge else None
+
     layers = {"runtime_evidence": _runtime_layer(endpoint)}
     for name in LAYER_NAMES[1:]:
         layers[name] = _aggregate_layer(name, resolved_targets)
-    origins = [target.get("origin") for target in resolved_targets]
-    required_origins = [origin for origin in origins if isinstance(origin, Mapping) and origin.get("required")]
-    if not required_origins:
-        origin: dict[str, object] = {"required": False, "status": "not_applicable"}
-    elif all(item.get("status") == CLOSURE_COMPLETE for item in required_origins):
-        origin = {"required": True, "status": CLOSURE_COMPLETE}
+
+    if parent_origin is not None and parent_origin.get("required") is True:
+        # resolved child 是 IP 视角，它不能自行重建「完整分发域→CloudFront」的域名级事实。
+        # 用父域 Origin 门重算受文层，防止聚合时退成普通 AWS 云主机调证。
+        origin = parent_origin
+        layers["request_target"] = _request_layer(layers["hosting_delivery"], origin)
     else:
-        origin = {"required": True, "status": "missing"}
+        origins = [target.get("origin") for target in resolved_targets]
+        required_origins = [
+            origin
+            for origin in origins
+            if isinstance(origin, Mapping) and origin.get("required")
+        ]
+        if not required_origins:
+            origin = {"required": False, "status": "not_applicable"}
+        elif all(item.get("status") == CLOSURE_COMPLETE for item in required_origins):
+            origin = {"required": True, "status": CLOSURE_COMPLETE}
+        else:
+            origin = {"required": True, "status": "missing"}
     statuses = {str(layer.get("status")) for layer in layers.values()}
     status = CLOSURE_COMPLETE if statuses == {CLOSURE_COMPLETE} else CLOSURE_PARTIAL
     if origin.get("required") is True and origin.get("status") != CLOSURE_COMPLETE:

@@ -52,13 +52,13 @@ def _load_main_report(report_paths: list[str]) -> dict | None:
             try:
                 return json.loads(Path(p).read_text(encoding="utf-8"))
             except (OSError, ValueError):
-                logger.warning("[batch] 读主报告失败（跳过聚类）：%s", p, exc_info=True)
+                logger.warning("[batch] 读主报告失败（跳过关联候选聚类）：%s", p, exc_info=True)
                 return None
     return None
 
 
 def _run_correlation(analyzed: list[dict], out_dir: str) -> list[dict]:
-    """读各包主报告 → 跨样本团伙聚类 → 写 ``<out_dir>/case_correlation.json``。绝不抛，返回簇列表。"""
+    """读各包主报告并生成关联候选簇，写 ``case_correlation.json``。绝不抛。"""
     samples: list[tuple[str, dict]] = []
     for entry in analyzed:
         rep = _load_main_report(entry.get("report_paths") or [])
@@ -67,7 +67,7 @@ def _run_correlation(analyzed: list[dict], out_dir: str) -> list[dict]:
     try:
         clusters = correlate.correlate(samples)
     except Exception:
-        logger.exception("[batch] 团伙聚类异常（忽略）")
+        logger.exception("[batch] 关联候选聚类异常（忽略）")
         return []
     payload = [
         {
@@ -81,7 +81,15 @@ def _run_correlation(analyzed: list[dict], out_dir: str) -> list[dict]:
         out = Path(out_dir) / "case_correlation.json"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(
-            json.dumps({"clusters": payload}, ensure_ascii=False, indent=2), encoding="utf-8"
+            json.dumps(
+                {
+                    "clusters": payload,
+                    "disclaimer": correlate.CORRELATION_DISCLAIMER,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
         )
     except OSError:
         logger.warning("[batch] 写 case_correlation.json 失败（忽略）", exc_info=True)
@@ -196,7 +204,7 @@ def run_folder(
             logger.exception("[batch] 处理 APK 异常（已隔离，继续下一个）：%s", apk)
             failed.append({"apk": name, "sha256": sha, "detail": "处理异常（详见日志）"})
 
-    # 跨样本团伙聚类（纯离线后处理：读各包主报告，按共享强指纹串并换皮包）。
+    # 跨样本关联候选聚类：只按共享指纹召回，主体关系与是否并案留给人工复核。
     clusters = _run_correlation(analyzed, out_dir)
 
     summary = {
@@ -207,7 +215,7 @@ def run_folder(
         "had_device": had_device,
         "clusters": len(clusters),
     }
-    cluster_note = f" / 团伙簇 {len(clusters)}" if clusters else ""
+    cluster_note = f" / 关联候选簇 {len(clusters)}" if clusters else ""
     _emit(
         on_progress,
         f"批量完成：分析 {summary['analyzed']} / 跳过 {summary['skipped']}"

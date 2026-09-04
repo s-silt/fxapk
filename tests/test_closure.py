@@ -184,10 +184,25 @@ def _complete_endpoint() -> Endpoint:
                 "ports": [443],
                 "services": [{"port": 443, "product": "nginx"}],
             },
+            "attribution": {
+                "hosting_provider": {
+                    "name": "Example Hosting Ltd",
+                    "facility": "synthetic-datacenter",
+                },
+            },
+            # 明确的被动承载服务记录；Shodan org/banner 不再承担完整 hosting 夹具的职责。
+            "fofa": {
+                "records": [[
+                    "https://api.example.test", "198.51.100.10", 443, "https",
+                    "Example API", "nginx", "US", "California", "Los Angeles", 64500,
+                    "Example Hosting Ltd",
+                ]],
+            },
             "source_status": {
                 "ip_rdap": {"status": "hit"},
                 "ripestat_bgp": {"status": "hit"},
                 "shodan": {"status": "hit"},
+                "fofa": {"status": "hit"},
                 "urlscan": {"status": "no_record"},
             },
         },
@@ -669,6 +684,61 @@ def test_assemble_target_closure_builds_all_investigation_layers() -> None:
     assert target["status"] == CLOSURE_COMPLETE
 
 
+def test_close_report_shodan_cdn_profile_cannot_close_hosting_or_request_target() -> None:
+    """Shodan 的 CDN org/banner 画像只能保留为边缘候选，不能替代承载或 Origin。"""
+    endpoint = _endpoint(
+        "198.51.100.10",
+        runtime=True,
+        target=True,
+        payload=True,
+        enrichment={
+            "ip_rdap": {
+                "netname": "EXAMPLE-NET",
+                "org": "Example Registry Ltd",
+                "country": "US",
+                "handle": "NET-198-51-100-0-1",
+                "cidr": "198.51.100.0/24",
+            },
+            "ripestat_bgp": {
+                "origin_asn": 64500,
+                "asn_holder": "Example Network Ltd",
+                "prefix": "198.51.100.0/24",
+                "upstreams": [64501],
+            },
+            "shodan": {
+                "org": "Cloudflare, Inc.",
+                "ports": [443],
+                "services": [{"port": 443, "product": "nginx"}],
+            },
+            "source_status": {
+                "ip_rdap": {"status": "hit"},
+                "ripestat_bgp": {"status": "hit"},
+                "shodan": {"status": "hit"},
+            },
+        },
+    )
+    report = _report(endpoint)
+
+    closure = _close(
+        report,
+        ClosureConfig(online=False, require_dynamic=False),
+        enrichers=[],
+    )
+
+    target = closure["targets"][0]
+    assert closure["status"] == CLOSURE_PARTIAL
+    assert target["status"] == CLOSURE_PARTIAL
+    assert target["layers"]["hosting_delivery"]["status"] != CLOSURE_COMPLETE
+    candidates = target["layers"]["hosting_delivery"]["evidence"].get("edge_candidates", [])
+    assert candidates and candidates[0]["org"] == "Cloudflare, Inc."
+    assert target["origin"]["status"] == "missing"
+    assert target["origin"]["edge_candidate"] == "Cloudflare, Inc."
+    request = target["layers"]["request_target"]
+    assert request["status"] != CLOSURE_COMPLETE
+    assert request.get("evidence", {}).get("provider") != "Cloudflare, Inc."
+    assert report.leads[0].where_to_request != "Cloudflare, Inc."
+
+
 def test_registration_without_country_or_handle_stays_partial() -> None:
     endpoint = _complete_endpoint()
     endpoint.enrichment["ip_rdap"].pop("country")
@@ -702,6 +772,8 @@ def test_bgp_without_upstream_evidence_stays_partial() -> None:
 
 def test_parent_asn_and_bare_port_cannot_complete_hosting_or_request_layers() -> None:
     endpoint = _complete_endpoint()
+    endpoint.enrichment.pop("fofa")
+    endpoint.enrichment["source_status"].pop("fofa")
     endpoint.enrichment["shodan"] = {
         "org": "Example Hosting Ltd",
         "ports": [443],
@@ -807,6 +879,140 @@ def test_unconfirmed_origin_candidate_cannot_satisfy_cdn_origin_gate() -> None:
     assert "origin configuration" in cast(
         list[str], target["layers"]["request_target"]["evidence"]["evidence_fields"]
     )
+    assert "origin" in target["gaps"]
+    assert target["status"] == CLOSURE_PARTIAL
+
+
+def _cloudfront_distribution_endpoint(*, with_resolved_ip: bool) -> Endpoint:
+    distribution = ".".join(("d111111abcdef8", "cloudfront", "net"))
+    ip = "198.51.100.63"
+    enrichment: dict[str, object] = {}
+    if with_resolved_ip:
+        enrichment = {
+            "dns": {
+                "ips": [ip],
+                "hosting": [
+                    {
+                        "ip": ip,
+                        "asn": "AS16509",
+                        "org": "Amazon Web Services, Inc.",
+                        "country": "US",
+                    }
+                ],
+            },
+            "source_status": {"dns": {"status": "hit"}},
+            "resolved_ip_enrichment": {
+                ip: {
+                    "asn": {
+                        "asn": "AS16509",
+                        "org": "Amazon Web Services, Inc.",
+                        "country": "US",
+                    },
+                    "source_status": {"asn": {"status": "hit"}},
+                }
+            },
+        }
+    endpoint = _endpoint(distribution, kind="domain", enrichment=enrichment)
+    closure_sources._set_attribution(endpoint)
+    return endpoint
+
+
+def _assert_cloudfront_distribution_closure(target: _TargetClosure) -> None:
+    assert target["origin"]["required"] is True
+    assert target["origin"]["status"] == "missing"
+    assert target["origin"]["edge_provider"] == "Amazon CloudFront"
+    assert target["origin"]["distribution_domain"] == ".".join(
+        ("d111111abcdef8", "cloudfront", "net")
+    )
+    request = target["layers"]["request_target"]
+    assert request["status"] == CLOSURE_PARTIAL
+    assert request["evidence"]["provider"] == "Amazon Web Services, Inc."
+    assert request["evidence"]["edge_provider"] == "Amazon CloudFront"
+    assert request["evidence"]["distribution_domain"] == target["origin"][
+        "distribution_domain"
+    ]
+    fields = cast(list[str], request["evidence"]["evidence_fields"])
+    field_blob = "\n".join(fields)
+    assert target["origin"]["distribution_domain"] in field_blob
+    for expected in (
+        "Distribution ID",
+        "Alternate Domain Names",
+        "Origin configuration",
+        "OAC/OAI",
+        "access logs",
+        "CloudTrail",
+        "associated AWS resources",
+        "edge addresses are not Origin",
+    ):
+        assert expected in field_blob
+    assert "origin" in target["gaps"]
+    assert target["status"] == CLOSURE_PARTIAL
+
+
+def test_cloudfront_distribution_requires_origin_without_dns() -> None:
+    target = _assemble_target(_cloudfront_distribution_endpoint(with_resolved_ip=False))
+
+    _assert_cloudfront_distribution_closure(target)
+
+
+def test_cloudfront_distribution_origin_gate_survives_resolved_ip_aggregation() -> None:
+    target = _assemble_target(_cloudfront_distribution_endpoint(with_resolved_ip=True))
+
+    _assert_cloudfront_distribution_closure(target)
+
+
+def test_custom_hostname_cloudfront_cname_keeps_origin_gate_and_aws_request() -> None:
+    custom_hostname = "portal.infra.example"
+    distribution = ".".join(("d111111abcdef8", "cloudfront", "net"))
+    ip = "198.51.100.64"
+    endpoint = _endpoint(
+        custom_hostname,
+        kind="domain",
+        enrichment={
+            "source_status": {"dns": {"status": "hit"}},
+            "dns": {
+                "cname": [distribution],
+                "ips": [ip],
+                "hosting": [
+                    {
+                        "ip": ip,
+                        "asn": "AS16509",
+                        "org": "Amazon Web Services, Inc.",
+                        "country": "US",
+                    }
+                ],
+            },
+            "resolved_ip_enrichment": {
+                ip: {
+                    "source_status": {"asn": {"status": "hit"}},
+                    "asn": {
+                        "asn": "AS16509",
+                        "org": "Amazon Web Services, Inc.",
+                        "country": "US",
+                    },
+                }
+            },
+        },
+    )
+    closure_sources._set_attribution(endpoint)
+
+    target = _assemble_target(endpoint)
+
+    assert target["origin"]["required"] is True
+    assert target["origin"]["status"] == "missing"
+    assert target["origin"]["edge_provider"] == "Amazon CloudFront"
+    assert target["origin"]["custom_hostname"] == custom_hostname
+    assert target["origin"]["distribution_domain"] == distribution
+    request = target["layers"]["request_target"]
+    assert request["status"] == CLOSURE_PARTIAL
+    assert request["evidence"]["provider"] == "Amazon Web Services, Inc."
+    assert request["evidence"]["custom_hostname"] == custom_hostname
+    assert request["evidence"]["distribution_domain"] == distribution
+    field_blob = "\n".join(cast(list[str], request["evidence"]["evidence_fields"]))
+    assert custom_hostname in field_blob
+    assert distribution in field_blob
+    for expected in ("Distribution ID", "OAC/OAI", "access logs", "CloudTrail"):
+        assert expected in field_blob
     assert "origin" in target["gaps"]
     assert target["status"] == CLOSURE_PARTIAL
 
@@ -1204,6 +1410,17 @@ def _full_ip_enrichers() -> list[_FakeEnricher]:
                 "org": "Example Hosting Ltd",
                 "ports": [443],
                 "services": [{"port": 443, "product": "nginx"}],
+            },
+        ),
+        _FakeEnricher(
+            "fofa",
+            ["ip"],
+            {
+                "records": [[
+                    "https://api.example.test", "198.51.100.10", 443, "https",
+                    "Example API", "nginx", "US", "California", "Los Angeles", 64500,
+                    "Example Hosting Ltd",
+                ]],
             },
         ),
     ]

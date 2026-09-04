@@ -70,8 +70,11 @@ def test_release_cert_yields_signing_lead_no_debug_finding():
     assert lead.value == "f" * 64  # value = sha256
     assert lead.subject == cert.subject
     assert lead.confidence == Confidence.HIGH
-    assert lead.where_to_request == "证书指纹用于跨样本关联同一开发者；无直接调证对象"
-    assert lead.evidence_to_obtain == ["相同签名指纹的其他涉诈App"]
+    assert "无直接调证对象" in (lead.where_to_request or "")
+    assert "本地/受控语料" in (lead.where_to_request or "")
+    evidence = "\n".join(lead.evidence_to_obtain)
+    assert "相同签名材料" in evidence
+    assert "不得据此直接认定开发者或运营主体" in evidence
 
     # source_refs: Evidence(source="cert", location=subject)
     assert lead.source_refs
@@ -100,6 +103,9 @@ def test_debug_flag_yields_high_finding():
     assert len(debug) == 1
     assert debug[0].severity == Severity.HIGH
     assert debug[0].category == "signing"
+    assert "表明非正规渠道发布" not in debug[0].description
+    assert "不能单独证明" in debug[0].description
+    assert "不得仅凭该指纹" in debug[0].recommendation
     # Lead 仍照常产出
     assert any(l.category == LeadCategory.SIGNING for l in result.leads)
 

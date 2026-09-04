@@ -172,7 +172,8 @@ def _enrich_endpoints(
     """对每个端点按 applies_to 跑匹配的富化器，结果写入 endpoint.enrichment[provider]。
 
     ``gate``（可选）：额外的 (端点, 富化器)→bool 谓词，返回 False 则跳过该富化器（不计入统计）。
-    不传则对匹配 applies_to 的富化器全跑（向后兼容；本仓当前富化器全部为被动，对目标零流量）。
+    不传则对匹配 applies_to 的富化器全跑（向后兼容；本仓当前富化器均不直连目标业务服务，
+    但会把目标标识提交给第三方数据源，DNS 查询还可能被解析服务或权威 DNS 观察）。
 
     按端点并发（``ThreadPoolExecutor``，worker 数 = ``ENRICH_MAX_WORKERS``）：富化是
     I/O 密集（whois/rdap 单次可达 ~30s 超时），串行双重循环单包可达 7 分钟，按端点并发
@@ -426,7 +427,7 @@ def _enricher_phase(enricher: BaseEnricher) -> str:
 
 
 def _classify_endpoint_jurisdiction(ep: Endpoint) -> str:
-    """据第①遍归属富化结果判该端点服务器辖区（国内/国外/未知）。绝不抛（失败→未知，保守）。"""
+    """据第①遍富化结果判该端点基础设施辖区候选。绝不抛（失败→未知，保守）。"""
     e = ep.enrichment
     try:
         return forensic.classify_jurisdiction(
@@ -459,11 +460,11 @@ def _run_enrichment(
     gate: "Callable[[Endpoint, BaseEnricher], bool] | None" = None,
 ) -> list[dict]:
     """两遍富化编排（**单遍并发·每端点内两阶段**，无跨端点栅栏）：
-    每个端点在自己的 worker 里串行跑 ①归属(attribution) → 定辖区 → ②境外被动取证(overseas)，
+    每个端点在自己的 worker 里串行跑 ①归属(attribution) → 定基础设施辖区候选 → ②境外候选富化(overseas)，
     端点之间互不等待——慢端点（如 30s WHOIS 超时）不再阻塞其它端点的第②阶段（去掉旧版两遍之间的栅栏）。
 
-    第②遍只对【国外 + 未知】端点跑（境内走调证、不做境外取证）；overseas 富化器全部**被动**
-    （shodan/certs 读公开库，对目标零流量）。辖区结果仅为 worker 内局部变量，**绝不写入 ep.enrichment**
+    第②遍只对【国外 + 未知】端点跑；overseas 富化器读取 Shodan/crt.sh 等第三方数据，
+    不直连目标业务服务，但会向数据源提交目标标识。辖区结果仅为 worker 内局部变量，**绝不写入 ep.enrichment**
     （避免 ``_jurisdiction`` 等内部键泄漏进 report.json）。
 
     ``gate=None`` **fail-closed**：缺省按 passive 门控（拦 active 富化器）。这样任何调用方（现在或
@@ -489,7 +490,22 @@ def _run_enrichment(
         # 定辖区（worker 内局部，绝不写回 ep.enrichment）。
         juris = _classify_endpoint_jurisdiction(ep)
         if juris not in (forensic.JURIS_FOREIGN, forensic.JURIS_UNKNOWN):
-            return  # 境内：走调证、不做境外被动取证
+            # 境内基础设施信号按现行路由不跑 overseas 源，但必须留下逐源回执；
+            # 否则“被辖区门跳过”会在报告里伪装成“源不存在/忘了跑”。
+            raw_status = ep.enrichment.setdefault("source_status", {})
+            if not isinstance(raw_status, dict):
+                raw_status = {}
+                ep.enrichment["source_status"] = raw_status
+            for enricher in overseas:
+                if ep.kind not in (getattr(enricher, "applies_to", []) or []):
+                    continue
+                provider = _provider_name(enricher)
+                ep.enrichment.pop(provider, None)
+                raw_status[provider] = {
+                    "status": "skipped",
+                    "reason": "jurisdiction_gate",
+                }
+            return
 
         # ② 境外被动取证富化（同 worker 内串行，组内顺序由 overseas 排序保证确定性）。
         _run_enrichers_on_endpoint(ep, overseas, stats, stats_lock, gate)

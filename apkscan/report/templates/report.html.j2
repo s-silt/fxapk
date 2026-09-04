@@ -2,7 +2,7 @@
     版式对齐「思知」：具体 key 值与调证建议显著呈现。章节顺序：
       ① 概览（含加固 / uni 加密提示）
       ② ★ 调用插件 / 配置键值（CONFIG_KEY：Key=值 / 所属公司 / 调证建议 / 取证依据）
-      ③ 自有后端候选（DOMAIN/IP 中 advice=建议调证 的）
+      ③ 后端 / 高价值端点候选（DOMAIN/IP 中 advice=建议调证 的）
       ④ 通联域名 / IP（advice=无需调证 的，弱化 / 可折叠）
       ⑤ 第三方 SDK → 厂商
       ⑥ 支付 / 资金线索 · 联系方式线索
@@ -1127,15 +1127,15 @@
     {% endif %}
   {% endmacro %}
 
-  {#- 自有后端候选醒目徽标三档（观测强弱分层）：
+  {#- 高价值端点候选醒目徽标三档（观测强弱分层）：
         is_runtime_contact（observed-contact，真抓到连去该端点的通信）→ 深红「🎯 实连已观测」；
         仅 is_runtime_seen（动态侧出现，如手编/合成 runtime-derived）→ 橙「🎯 运行时出现」＝出现未确认接触；
-        纯静态 is_c2 → 红「🎯 疑似自有后端」＝未经动态观测或人工认定。C2/主控认定属 Phase2 人工复核。 -#}
+        纯静态 is_c2 → 红「🎯 高价值端点候选」＝未经动态观测或人工认定。C2/主控认定属 Phase2 人工复核。 -#}
   {% macro c2_badge(lead) %}
     {% if lead.is_c2 %}
       {% if lead.is_runtime_contact %}<span class="badge badge-c2-live" title="真机抓包已观测到连去该端点的通信（observed-contact）；是否为 C2/主控需 Phase2 人工认定">🎯 实连已观测</span>
       {% elif lead.is_runtime_seen %}<span class="badge badge-c2-runtime" title="运行时报告中出现，未观测到真实接触该端点，未确认通信">🎯 运行时出现</span>
-      {% else %}<span class="badge badge-c2" title="静态提取的 App 自有后端候选，未经动态观测或人工认定">🎯 疑似自有后端</span>{% endif %}
+      {% else %}<span class="badge badge-c2" title="静态提取的高价值业务端点候选，未确认 App 自有、C2 或运营者">🎯 高价值端点候选</span>{% endif %}
     {% endif %}
   {% endmacro %}
 
@@ -1175,7 +1175,7 @@
   {% endmacro %}
 
   {#- 五层基础设施归属链（resource_holder → origin_network → hosting → edge → service_operator）。
-        视图与限长（最多 5 个落地 IP）全在 letters.attribution_chain_view，两个出口口径一致。
+        视图与限长（最多 5 个解析/观测 IP）全在 letters.attribution_chain_view，两个出口口径一致。
         ★「实际运营者：未知（不从基础设施归属推断）」这句每个 IP 下都必须出现——它防的是
           把某层基础设施持有方当成 App 运营者，是本项目最重的那类错误。 -#}
   {% macro attribution_chain(lead) %}
@@ -1185,7 +1185,7 @@
         <summary>{{ attribution_chain_heading }}</summary>
         {% for ip, rows in chain.ips %}
         <div class="attr-ip">
-          <div>落地 IP <span class="attr-ip-val">{{ ip or "（未知）" }}</span></div>
+          <div>解析/观测 IP <span class="attr-ip-val">{{ ip or "（未知）" }}</span></div>
           {% for label, value in rows %}
           <div class="attr-row{% if label == "实际运营者" %} attr-row-operator{% endif %}"><span class="attr-k">{{ label }}</span>：{{ value }}</div>
           {% endfor %}
@@ -1208,23 +1208,25 @@
       <td>{{ advice_badge(lead.advice) }}</td>
       <td>{{ lead.subject or "—" }}</td>
       <td>{{ lead.where_to_request or "—" }}</td>
+      <td>{% if lead.evidence_to_obtain %}<ul class="tight">{% for item in lead.evidence_to_obtain %}<li>{{ item }}</li>{% endfor %}</ul>{% else %}<span class="muted">—</span>{% endif %}</td>
       <td>{{ enrich_cell(lead.value) }}{{ attribution_chain(lead) }}</td>
       <td>{{ source_refs_cell(lead) }}</td>
       <td><span class="badge {{ lead.confidence|confidence_class }}">{{ lead.confidence|confidence_label }}</span></td>
     </tr>
   {% endmacro %}
 
-  {#- ============ ③ 自有后端 / 高价值域名（建议调证） ============ -#}
+  {#- ============ ③ 后端 / 高价值端点候选（建议调证） ============ -#}
   <section id="control-domains">
-    <h2><span class="num">③</span> 🎯 自有后端 / 高价值域名 <span class="muted" style="font-size:13px;font-weight:400">（域名 / IP 中「建议调证」的高价值线索 = App 自有后端候选；「实连已观测」= 真机抓到通信，「运行时出现」= 出现未确认接触；C2/主控认定属 Phase2 人工复核）</span></h2>
+    <h2><span class="num">③</span> 🎯 后端 / 高价值端点候选 <span class="muted" style="font-size:13px;font-weight:400">（域名 / IP 中「建议调证」的高价值候选；该档位不等于 App 自有或运营者认定。「实连已观测」= 真机抓到通信，「运行时出现」= 出现未确认接触；C2/主控认定属 Phase2 人工复核）</span></h2>
     {% if network_leads.need %}
     <table class="lead-table">
       <thead>
         <tr>
           <th class="c-val">域名 / IP</th>
           <th>调证建议</th>
-          <th class="c-subj">归属主体</th>
+          <th class="c-subj">登记/资源主体（非运营者认定）</th>
           <th class="c-who">向谁调取</th>
+          <th>拟调字段 / 证据边界</th>
           <th>归属富化</th>
           <th>取证依据（APK 内位置）</th>
           <th>置信度</th>
@@ -1235,24 +1237,27 @@
       </tbody>
     </table>
     {% else %}
-      <div class="empty">未识别到「建议调证」的自有后端候选域名 / IP。</div>
+      <div class="empty">未识别到「建议调证」的后端 / 高价值端点候选。</div>
     {% endif %}
   </section>
 
-  {#- ============ ★ 境外源站被动定位（结构化：源站归属 / 端口 / 服务 / 技术栈 / 关联子域） ============ -#}
-  {% set overseas_targets = meta.get("overseas_targets") or [] %}
-  {% if overseas_targets %}
+  {#- ============ ★ 境外或辖区未知的基础设施与 Origin 候选（overseas_targets 仅为已命中 Shodan/CT 的 profile-only 列表） ============ -#}
+  {% set overseas_candidate_total = overseas_target_coverage.get("candidate_hosts_total", 0) %}
+  {% set overseas_profiled = overseas_target_coverage.get("profiled_hosts", 0) %}
+  {% set overseas_unprofiled = overseas_target_coverage.get("unprofiled_hosts", 0) %}
+  {% if overseas_targets or overseas_candidate_total %}
   <section id="overseas-targets">
-    <h2><span class="star">★</span> 🛰 境外源站被动定位 <span class="muted" style="font-size:13px;font-weight:400">（被动 OSINT，对目标零流量：源站归属 / 开放端口 / 服务 banner / 技术栈后台指纹 / 关联子域；仅【国外 + 未知】服务器，国内走调证不在此列）</span></h2>
+    <h2><span class="star">★</span> 🛰 境外或辖区未知的基础设施与 Origin 候选 <span class="muted" style="font-size:13px;font-weight:400">（候选 {{ overseas_candidate_total }} 个；Shodan/CT 已画像 {{ overseas_profiled }} 个；未画像 {{ overseas_unprofiled }} 个。“未知”不得写成境外；若执行第三方查询，会向数据源披露目标标识，DNS 还可能被解析服务或权威 DNS 观察）</span></h2>
+    {% if overseas_targets %}
     <table class="lead-table">
       <thead>
         <tr>
           <th class="c-val">主机</th>
           <th>辖区</th>
-          <th>源站归属（IP / ASN / 归属）</th>
+          <th>基础设施候选归属（IP / ASN / 归属）</th>
           <th>开放端口 / 服务</th>
           <th>技术栈 / 后台指纹</th>
-          <th>关联子域（crt.sh）</th>
+          <th>关联主机名候选（CT / Shodan）</th>
         </tr>
       </thead>
       <tbody>
@@ -1268,7 +1273,10 @@
         {% endfor %}
       </tbody>
     </table>
-    <div class="muted" style="font-size:12px;margin-top:6px">全程被动 OSINT（RDAP / DNS / ASN / 证书透明度 / Shodan 已扫库），对目标零流量、不主动探测；同源站 / 同后台指纹 → 疑同团伙基础设施，可并簇串案。完整结构化数据见 report.json 的 endpoints[].enrichment 与摘要 digest 的 overseas_targets 段。</div>
+    {% else %}
+      <div class="empty">本次有 {{ overseas_candidate_total }} 个境外/辖区未知路由候选，但 Shodan/CT 未形成可用画像（可能未运行、未配置、无记录或失败）；候选值与 DNS/ASN 归属、逐源回执见 report.json 的 leads 与 endpoints[].enrichment。</div>
+    {% endif %}
+    <div class="muted" style="font-size:12px;margin-top:6px"><strong>覆盖边界：</strong><code>overseas_targets</code> 只列 Shodan 或证书透明度已返回实质画像的主机，不是候选全表；“已画像 0 个”不表示“没有境外/辖区未知候选”。候选分母仅统计最终/安全投影后仍为“建议调证”的 DOMAIN/IP，辖区只使用状态许可的 DNS/ASN/Shodan 数据；无可用归属信号时保守记为“未知”。RDAP / DNS / ASN / 证书透明度 / Shodan 等结果只形成登记、承载、边缘、Origin 与关联资产候选，可能过期；相同记录、证书或技术栈都是弱候选，不能据此认定同一 Origin、家族或运营主体，须由独立锚点和角色证据复核。原始画像结构见 <code>report.meta.overseas_targets</code>，安全投影后的候选及归属明细回查 <code>report.leads</code> 与 <code>report.endpoints[].enrichment</code>，digest 以 <code>overseas_target_coverage</code> 单列覆盖计数。</div>
   </section>
   {% endif %}
 
@@ -1290,7 +1298,7 @@
           <tr>
             <th class="c-val">域名 / IP</th>
             <th>调证建议</th>
-            <th class="c-subj">归属主体</th>
+            <th class="c-subj">登记/资源主体（非运营者认定）</th>
             <th>归属富化</th>
             <th>取证依据（APK 内位置）</th>
             <th>置信度</th>

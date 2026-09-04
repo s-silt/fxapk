@@ -2,7 +2,7 @@
 
 职责（见设计文档 §4 certificate 行）：
 - 用 ctx.certificates() 拿 CertInfo 列表。
-- 每张证书 → Lead(category=SIGNING)：证书指纹用于跨样本关联同一开发者，
+- 每张证书 → Lead(category=SIGNING)：证书指纹用于跨样本召回相同签名材料候选，
   无直接调证对象（指纹本身不归属某家厂商），但相同指纹的其他涉诈 App 是可调取证据。
 - 调试证书（is_debug 或 issuer/subject 含 "Android Debug" 等特征）→ Finding(HIGH)：
   正规上架应用不会用 debug.keystore 签名，涉诈批量打包样本常残留。
@@ -141,13 +141,15 @@ class CertificateAnalyzer(BaseAnalyzer):
             snippet=f"sha256={sha256}" if sha256 else "",
         )
 
-        # 1) SIGNING 线索：证书指纹 → 跨样本关联同一开发者
+        # 1) SIGNING 线索：证书指纹 → 召回相同签名材料候选。
         lead = Lead(
             category=LeadCategory.SIGNING,
             value=sha256 or f"cert[{idx}]",
             subject=subject or None,
-            where_to_request="证书指纹用于跨样本关联同一开发者；无直接调证对象",
-            evidence_to_obtain=["相同签名指纹的其他涉诈App"],
+            where_to_request="无直接调证对象；指纹仅供本地/受控语料关联复核",
+            evidence_to_obtain=[
+                "召回相同签名指纹的样本，核对是否使用相同签名材料；共享、泄露、调试证书或重打包继承尚未排除，不得据此直接认定开发者或运营主体"
+            ],
             confidence=Confidence.HIGH,
             source_refs=[cert_ev],
             notes=self._lead_notes(cert, issuer, subject),
@@ -164,13 +166,13 @@ class CertificateAnalyzer(BaseAnalyzer):
                     category="signing",
                     description=(
                         "该 APK 使用 Android SDK 自带的调试证书（Android Debug）签名。"
-                        "正规上架应用应使用开发者正式 release 证书，"
-                        "调试签名常见于临时/批量打包的涉诈或测试样本，"
-                        f"表明非正规渠道发布。subject={subject!r} issuer={issuer!r}"
+                        "这提示非正式发布构建或临时/批量打包的可能性，但合法测试、内测或临时构建"
+                        "也可能使用该证书；不能单独证明分发渠道非正规或样本性质，须结合获取来源、"
+                        f"安装与分发证据核实。subject={subject!r} issuer={issuer!r}"
                     ),
                     recommendation=(
-                        "结合分发渠道核实是否为非官方/灰产打包；"
-                        "以该指纹检索是否存在相同调试证书签名的其他涉诈样本。"
+                        "核对获取渠道、安装来源、构建身份与发布主体；调试证书可能被大量无关构建共享，"
+                        "不得仅凭该指纹关联开发者、运营者或作并案结论。"
                     ),
                     evidences=[cert_ev],
                     references=[

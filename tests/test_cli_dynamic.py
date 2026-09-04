@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,50 @@ def _isolate_adb(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tools, "adb_server_running", lambda *a, **k: False)
 
 runner = CliRunner()
+
+
+def test_behavior_modification_help_uses_real_cli_syntax() -> None:
+    """授权说明不得虚构选项、提前断定 variant，且要披露旁路执行的全部门。"""
+    capture_help = inspect.signature(cli.capture).parameters["allow_behavior_modification"].default.help
+    auto_help = inspect.signature(cli.auto).parameters["allow_behavior_modification"].default.help
+    repackage_help = inspect.signature(cli.auto).parameters["repackage"].default.help
+
+    assert "--authorized-active" not in capture_help
+    assert "不改变抓包 --mode" in capture_help
+    assert "--mode authorized-active" in auto_help
+    assert "按 shim 是否实际注入记录" in auto_help
+    assert "证据为 modified-runtime" not in auto_help
+    assert "original 基线已产出" in repackage_help
+    assert "判据建议旁路" in repackage_help
+    assert "--allow-behavior-modification --antidetect java" in repackage_help
+
+
+def test_analysis_mode_help_discloses_third_party_and_dns_visibility() -> None:
+    """三个联网入口的 passive 帮助都要披露第三方提交与 DNS 可观察边界。"""
+    helps = [
+        inspect.signature(command).parameters["mode"].default.help
+        for command in (cli.analyze, cli.auto, cli.batch)
+    ]
+
+    assert len(set(helps)) == 1
+    for help_text in helps:
+        assert "静态富化/在线核验网络模式" in help_text
+        assert "这些步骤不直连目标业务服务" in help_text
+        assert "目标标识提交给第三方数据源" in help_text
+        assert "DNS 查询可能被解析服务或权威 DNS 观察" in help_text
+        assert "APK 自身的网络流量不受它阻断" in help_text
+        assert "对目标零流量" not in help_text
+
+
+def test_digest_help_requires_canonical_report_review() -> None:
+    """digest 只能作为分流定位摘要，命令帮助不得再把它描述成可直接决策的报告。"""
+    help_text = inspect.getdoc(cli.digest) or ""
+
+    assert "摘要分流" in help_text
+    assert "回查定位" in help_text
+    assert "canonical report" in help_text
+    assert "原始 evidence" in help_text
+    assert "可直接使用" not in help_text
 
 
 def _make_report(package_name: str = "com.x") -> Report:

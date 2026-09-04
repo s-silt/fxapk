@@ -20,3 +20,5 @@ network_categories:
       - 帝联
       - chinacache        # 蓝汛
       - 蓝汛
+      - alibaba cloud (kunlun)  # 阿里 CDN 归属记录的专指形态；不使用裸 kunlun
+      - tencent tcdn             # 腾讯 CDN 归属记录的专指形态；不使用裸 tcdn

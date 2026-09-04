@@ -1,7 +1,7 @@
 # AGENTS.md — fxapk 操作指南（给 AI agent）
 
 本仓库是 **fxapk（apkscan）**：APK **调证取证分析 CLI**。你（agent）通过命令行驱动它对样本做
-全套静态/动态分析 + 境外源站 IP 被动归属，产出**可直接使用的线索（leads）**。本文件让你在新机
+按能力门控的静态/动态证据采集 + 境外基础设施候选的被动归属，产出**仍需过证据门的线索（leads）**。本文件让你在新机
 clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件只讲**怎么跑**。
 
 > **本文件假定：一个 agent 独立跑完全程。** 没有第二个 agent 接力、没有外部私有目录兜底——
@@ -15,14 +15,14 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 
 ## 0.0 ★首次在一台新机器上驱动本工具：先把这三条告诉用户
 
-**这三件事不加任何参数就会发生。**前两条会在外部留下删不掉的记录、或不可逆地改动那台设备；
+**这三件事在对应命令的默认路径上会发生。**前两条可能在外部留下删不掉的记录、或改动那台设备；
 第三条是安全方向的默认值，列在这里是免得你以为还要额外加参数。你在这台机器上第一次要跑
 `analyze` / `doctor` / `auto` 之前，**先把对应那条如实讲给用户**，别默默跑掉：
 
 | 默认行为 | 会发生什么 | 用户想避开时 |
 |---|---|---|
-| `analyze` **默认联网** | 不碰目标服务器，但会把样本里的域名 / IP 拿去查公开数据库（WHOIS / RDAP / 备案 / 测绘平台）。查询记录留在那些平台上——**这等于向第三方平台披露你正在分析的对象** | `--offline` |
-| `doctor` / `auto` **默认改设备** | 部署 frida-server、装抓包 CA；`auto` 还可能脱壳、重打包重签名、**卸载原应用并清空其数据**、安装并运行待分析样本 | `doctor --no-fix`；`auto` 只在专用测试机上跑 |
+| `analyze` **默认联网** | 会把筛选后的域名 / IP 交给 WHOIS、RDAP、备案或测绘等第三方服务；DNS 查询还可能被递归解析器和权威 DNS 观察到。默认富化不主动访问样本声明的业务 URL，但不能表述为“对目标零流量” | `--offline`；仅预演用 `--enrichment-dry-run` |
+| `doctor` / `auto` **默认改设备** | `doctor` 可部署 frida-server、安装抓包 CA；有设备时 `auto` 会安装样本、尝试脱壳并运行原版基线。只有去壳版的重打包、重签名及替换安装受“原版基线不足 + 工具建议旁路 + 显式行为修改/Java 双门”约束 | `doctor --no-fix`；`auto` 只在已授权的专用测试机上跑，旁路另需显式参数 |
 | `digest` **默认脱敏** | 钱包私钥 / 助记词、个人隐私数据、后端凭据在摘要里打码。**这是给你看的那份**——你读到的 digest 默认就是脱敏的 | 确需明文加 `--no-redact`（完整明文一直在本地 `report.json` 里） |
 
 ★第二条尤其要先问再做：`auto --fix` 会不可逆地改动那台设备。用户没有明确说「这是专用测试机 /
@@ -41,7 +41,8 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 （★这些都会把线索原值打到 stdout，运行时各自往 stderr 打一行提醒，看到了别忽略；corpus 那几条
 经台账的 key_iocs 带出，而台账不按类别过滤高敏。★这份名单是人工维护的、必然滞后——判断方法是
 问「它的 stdout 里会不会出现线索值」）、`fxapk export` 的 CSV、HTML / PDF
-报告、生成的文书、`corpus` 存证、以及 `report.json` 本身。你要把内容转给任何第三方服务时，
+报告、生成的文书、`corpus` 存证、`batch` 生成的 `case_correlation.json`、以及 `report.json` 本身。核心生成的 HTML/PDF 是受控内部证据视图，
+不是已脱敏的发布版或可直接外发的正式报告。你要把内容转给任何第三方服务时，
 `digest` 才走有限范围的类别/PII 脱敏；另有几条**独立的安全投影**：
 `corpus link-discover|link-explain|link-groups` 默认 `--evidence-values omit`，
 `link-labels-validate|link-evaluate|link-readiness|link-train` 只输出聚合结果。前三条若显式改成
@@ -63,7 +64,7 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 | 用户想要 | 直接执行 |
 |---|---|
 | 分析一个 APK（静态 + 联网富化） | `fxapk analyze <apk> --out out`（**默认联网**；不想外发域名 / IP 加 `--offline`）然后 `fxapk digest out/<名>.json` |
-| 一把梭（有真机：体检→静态→脱壳→去壳重打包→抓包→合并→闭环） | `fxapk auto <apk> --fix --strict-case` |
+| 一把梭（有真机：体检→静态→尝试脱壳→原版基线抓包→合并→闭环；仅旁路门全部满足时去壳重打包并重抓） | `fxapk auto <apk> --fix --strict-case` |
 | 已有报告补跑多源富化 + 五层闭环 | `fxapk case close <report.json>`（默认严格：partial=5、failed=6） |
 | 批量整个文件夹 | `fxapk batch <dir>` |
 | 准备真机环境 / 排查动态为什么跑不起来 | `fxapk doctor`（**默认就会动手修**；只想看现状用 `--no-fix`） |
@@ -71,7 +72,8 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 | 串案 / 资产沉淀 /「这值见过没」反查 | `fxapk corpus add <report.json...>`（历次报告入库、跨版本回归）；`fxapk corpus seen <值> [--by sign_sha256\|so_sha256]`（按共享签名证书或 native 库哈希反查）；`fxapk corpus link-candidates`（rules-v2 可解释候选，分数只是复核优先级）；`link-explain` / `link-groups`（默认匿名复核视图）；`link-evaluate` / `link-readiness`（只输出聚合评测/训练门）；`fxapk corpus shared-native`（共享 .so 簇）；`fxapk corpus ls` 过滤列举 |
 | 反推配置端口的运行时归一化规则 | `fxapk port-normalize --declared <声明端口.json> --report <report.json>`（详见 §0.6.2） |
 
-- 决策只读 `fxapk digest <report.json>`（低 token、已按"建议调证 > 待核"排序）；要细节再读 `out/<名>.json` 全量。
+- 先用 `fxapk digest <report.json>` 做低 token 分流和定位；形成五层归因、调证结论或正式报告时，
+  必须回查 canonical `report.json` 中对应的结构化字段与原始证据。`digest` 是摘要，不能替代证据核验。
 - 命令失败/缺前置 → 看它打印的 `playbook`（每条是可直接复制的修复命令），照着修，**别自己另起炉灶手搓**。
 - 只有当**没有**对应 fxapk 命令、或要改 fxapk 代码本身时，才进入"分析/开发"模式（见第 5 节）。
 
@@ -79,32 +81,41 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 
 ## 0.5 分析 APK：标准动作 + 调证重点 + 汇报模板（核心办案逻辑）
 
-**主工具（操作机已装，优先用，别空跑外部付费源）**：`fxapk`（本仓库，APK 取证→端点/IP/标识符+富化+corpus 反查台账）。富化全被动（rdap/whois/dns/asn/icp/shodan 等），对目标零主动流量。
+**主工具（操作机已装，优先用，别空跑外部付费源）**：`fxapk`（本仓库，APK 取证→端点/IP/标识符+富化+corpus 反查台账）。默认富化不直连目标业务服务，但会向第三方数据源提交域名/IP，DNS 查询还可能被解析服务或权威 DNS 观察；动态运行 APK 的自身流量另行发生，不受静态富化的 `--mode` 阻断。
 
 **标准动作（先跑命令、据产物决策，别空想）**
 1. 有设备优先 `fxapk auto <apk> --online --out out --strict-case`；纯静态则先 `fxapk analyze <apk> --online --out out`。
 2. 对已有报告执行 `fxapk case close out/<名>.json`，把多源覆盖、五层归因和未闭环项写回原报告。
-3. `fxapk digest out/<名>.json` 读紧凑摘要；仅在核对五层原始证据时翻 `report.json` 全量。
+3. `fxapk digest out/<名>.json` 读紧凑摘要并定位重点；形成正式结论时，按相关目标回查
+   canonical `report.json` 的结构化字段与原始证据，不能只凭摘要下结论。
 4. 不手搓逆向、不逐步复述工具过程、不把整份 report 倒出来。
 
 **调证重点优先级（本办案口径，覆盖工具默认的"高敏物证优先"）**
-1. **可依法调证的后端服务器（第一优先）**：后端域名/IP，**登记主体在国内**（阿里云/腾讯云/华为云/电信·联通·移动/国内 IDC/有 ICP）→ 向该境内云·IDC·ICP 调租户实名 + 访问/登录日志。★ **纠偏**：fxapk 会把命中云/CDN 关键字的端点标「无需调证」折叠——但**只要 ASN/ICP 登记主体是国内提供商就不能忽略**，主动从 `endpoints[].enrichment` 的 asn/icp（org/isp 含 阿里云/Aliyun/腾讯/Tencent/华为/电信/联通/移动/ChinaNet，或归属国=中国大陆）捞出来列为调证目标。区分：App 自有/疑似后端要调；纯第三方 SDK/公共 CDN 共享域名（百度地图/umeng/个推下发）即便国内也是噪音。
-2. **运营基础设施（第二优先）**：后台入口(admin_panel)、自建 IM/C2、短信验证码转发、硬编码后端凭据 → 可登录取证的运营端。
-3. **境外服务器**：列出并做**被动 IP 归属**（RDAP/DNS/ASN/证书透明度 + 端口/技术栈作识别信号）、穿透 CDN 定位真实源站；不调证、不主动探测。
-4. **降级、不再当重点**：钱包私钥/助记词、收款/四方支付——本口径下是死胡同。报告**保留但不高亮、digest 不排前、不作汇报重点**；仅用户明确要资金线时才展开。
+1. **可依法调证的后端服务器（第一优先）**：先证明端点属于 App 自有/疑似业务后端，再按辖区、承载关系和可达法律渠道确定调证对象。IP 资源持有者/起源 ASN、承载或 CDN 服务商、域名注册主体与 ICP 备案主体是不同角色：前两者可提供与其服务关系相符的资源、租户或日志记录；ICP 只证明备案/接入登记，不能当作云服务商，也不能据此向备案主体索取云租户或控制面日志。任何一层都不能单独证明端点由 App 运营；纯第三方 SDK、公共解析服务和共享 CDN 仍须排除。CDN 边缘不得写成 Origin 或运营者，但分发服务商可以是账户或租户、分发与绑定域名、回源配置、访问日志和控制面审计记录的调证对象；具体字段按服务商口径填写。
+2. **运营基础设施（第二优先）**：后台入口(admin_panel)、自建 IM/C2、短信验证码转发、硬编码后端凭据 → 作为运营基础设施线索和调证标的；发现凭据不构成登录、修改或访问外部系统的授权。
+3. **境外基础设施**：列出并做**被动归属**（RDAP/DNS/ASN/证书透明度 + 端口/技术栈作识别信号），把边缘、承载方、Origin 候选和运营者分层。是否调证取决于合法可达渠道，不得按境内/境外一刀切；未经授权不主动探测。
+4. **资金与高敏物证**：默认降低展示优先级，但不是“死胡同”。核心 HTML/PDF、JSON 和文书属于受控内部证据视图，可能含原值；对外发布或普通流转的正式报告必须另做经审核的安全投影，以证据编号和哈希定位，未经明确授权不得带出原值。需要资金线或身份线时再按授权范围展开。
 
-**汇报模板（固定、限长、只产可办案信息）**
+**即时汇报模板（限长，只用于进度摘要；不得代替正式报告）**
 ```
 ## <app名> 研判（sha256 前12位）
 - 涉诈类型：<app_classification>
-- 可调证后端（按优先级，≤6 条）：· <域名/IP> | 登记主体<国内云/IDC/ICP> | 调证落点：<向谁>，取<什么证据>
+- 可调证后端（按优先级，≤6 条）：· <域名/IP> | 运行时关系<已证实/候选> | 资源持有/ASN<主体> | 承载/CDN<主体> | Origin/运营者<已证实/未确认> | 依法可触达对象：<向谁>，取<什么证据>
 - 运营端线索：后台/自建IM/短信转发/后端凭据（有则列+调证落点）
-- 境外 IP 归属 + 独特标识（被动）：<N 条>，<真实源站 IP / ASN·org 归属 / 证书透明度子域 / 技术栈指纹>（不调证，穿透 CDN 定位源站）
+- 境外/辖区未知基础设施候选：候选<N 条>，Shodan/CT 已画像<P 条>，未画像<U 条>；已画像项再列<Origin 候选 IP / ASN·org 归属 / 证书透明度子域 / 技术栈指纹>（按证据分层和合法渠道决定下一步）
 - 下一步取证动作：<1-3 条可执行>
 （钱包/收款/四方支付：默认不展开，除非要资金线）
 ```
 
-**动态：PCAP-first 保底，明文优先被动解密，探针是可选旁路（非必做）**：动态已转向**零注入 PCAP 底座**——`fxapk capture/auto` 起 floor PCAP，拿到接入节点 / SNI / QUIC Initial / socket 归因等被动证据即算**有观测产出**（不再以"抓到明文"为唯一成功标准）。但 `capture status=done` 只表示采集流程完成，不等于案件动态证据闭环：`case close` 只有观测到公网业务候选且能通过 socket/UID 归到目标 App 才把动态层判为 `complete`；有业务候选但归因不唯一为 `partial`；仅通道就绪或零业务流量为 `failed`。已知反诈拦截页不计业务候选。要明文时**优先走被动链路**：TLS Key Log + tshark 解密、socket 归因把流量落到进程 / UID / PID。Frida / native hook 降为**可选旁路**，仅当被动手段确实不够、且在 `--mode authorized-active` 授权下按需用。
+**动态：PCAP-first 保底，明文优先被动解密，探针是可选旁路（非必做）**：`fxapk capture --mode floor-only`
+可在不使用 Frida 的情况下采集 floor PCAP，但仍需 adb 可用、设备 root（su）与设备侧 tcpdump。它可拿到接入节点 / SNI /
+QUIC Initial / socket 归因等被动证据；
+默认 `capture` 与 `auto` 当前仍要求 Frida，不能把默认模式描述成可无 Frida 降级运行。但 `capture status=done`
+只表示采集流程完成，不等于动态证据闭环：`case close` 只有同一公网业务候选同时满足目标 App 归因、
+业务端点判定与双向载荷门，才把动态层判为 `complete`；归因不唯一、APK 身份未知或只有 modified-runtime
+证据时最多为 `partial`；仅通道就绪或零业务流量为 `failed`。
+已知反诈拦截页不计业务候选。要明文时优先走 TLS Key Log + tshark 解密、socket 归因。默认 `both`
+使用 Frida/mitm；行为修改 shim 仍须同时给 `--allow-behavior-modification --antidetect java`，不能与抓包模式混为一谈。
 
 > **探针库**：首批 8 个探针（`coldstart-config` / `objstore-config` / `native-ssl` / `tls-keylog` /
 > `sms-forward-outbound` / `mqtt-xmpp-im` / `telegram-mtproto` / `push-c2-inbound`）已脱敏后随 wheel
@@ -130,16 +141,21 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 分析一个样本**未走完闭环不算完成**。开工前先说清「这次要走到哪一步」；收工前逐条自检（动作见 §0.5 / 各命令）：
 
 1. **静态**：`analyze` → `report.json` + `digest`，确有产出。
-2. **动态**（有设备）：floor PCAP 保底；闭环完成要求 ≥1 个公网业务候选且明确归到目标 App。未唯一归因只能 `partial`，只有通道或零业务候选为 `failed`。要明文优先走**被动**解密（TLS keylog + tshark）。
-   ★`auto` / `capture` 现走**两遍**：**第一遍恒跑原版 APK**（绝不重打包、不注入）取 `original` 基线；
-   仅当基线不足才进**旁路轮**（去壳重打包、可选行为修改 shim），其证据标 `modified-runtime`
+2. **动态**（有设备）：用 `capture --mode floor-only` 建立无需 Frida 的 floor PCAP 底座；它仍需设备、
+   adb 可用、设备 root（su）与设备侧 tcpdump，默认 `capture`/`auto` 当前仍要求 Frida。闭环完成要求同一公网业务候选通过目标 App
+   归因、业务端点和双向载荷门；未唯一归因、APK 身份未知或只有 modified-runtime 证据时最多为 `partial`，
+   只有通道或零业务候选为 `failed`。要明文优先走**被动**解密（TLS keylog + tshark）。
+   ★`capture` 每次只采一个窗口；`auto` 第一轮尝试安装并运行原版 APK 取得基线，安装身份不能确认时必须把
+   `meta.capture_apk_identity.which` 标为 `unknown`。仅当第一轮有可读基线、判据建议旁路且调用方显式授权时，`auto` 才进入第二个**旁路轮**
+   （去壳重打包，并请求启用已由双门授权的 Java 行为修改 shim）；只有实际注入行为修改 shim 的证据才标 `modified-runtime`
    （`runtime_variant` 字段的两个取值就是 `original-runtime` / `modified-runtime`，带后缀）。
    **旁路轮的观测不得单独结案**——诱导出来的行为不能当作样本自发行为。行为修改 shim 默认关，
    需 `--allow-behavior-modification` + `--antidetect java` **双授权门**（与 `--mode authorized-active` 正交、不继承）。
    ★`--antidetect` 目前**只接受 `off` / `java`**；`native` 是预留档、主仓暂无内置 native shim，**传入即报错**。
    第二遍只产 `runtime_report.json` + 主报告挂指针，不出完整渲染态对照报告。
-3. **富化 / 判型**：每个「建议调证」端点判辖区 + 判前端/落地；富化源命中太少 = 源没跑全，别据残缺证据下结论。
-4. **降噪**：剔反诈拦截页 / 大厂共享 / CDN 边缘，别当落地机。
+3. **富化 / 判型**：每个「建议调证」端点判辖区 + 判前端/落地；覆盖情况必须读逐目标、逐来源回执，
+   区分 `hit` / `no_record` / `failed` / `skipped` / `disabled`。命中少可能是真无记录，不能据命中数反推“源没跑全”。
+4. **降噪**：剔反诈拦截页和大厂共享端点；CDN 边缘不能当落地机，但仍保留其分发关系与可调证记录类型。
 5. **串案**：独特字值（appkey / 证书 / CNAME 模板）跨案自查。
 6. **五层闭环（收工前必跑）**：`fxapk case close <report.json>`。逐目标核验 ①运行时业务证据；② IP 资源登记持有者；③ BGP 前缀/起源 ASN；④云/IDC/CDN/防红分发关系；⑤最终调证对象（向谁调、取什么）。CDN/边缘没有 Origin 必须保持 `partial`。
 7. **状态验收**：只有 `report.meta.closure.status=complete` 才能称完成。`partial` / `failed` 必须原样汇报 `gaps` 和 `next_actions`，不能把“命令跑完”表述成“案件闭环”。自动流程用 `fxapk auto <apk> --strict-case`，退出码 `0/5/6` 分别对应 `complete/partial/failed`。
@@ -160,7 +176,7 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 | 必须手动补 | 为什么不能自动 | 什么时候做 |
 |---|---|---|
 | `fxapk corpus add out/<名>.json` | 库根含案件数据，须显式 `--corpus`／`FXAPK_CORPUS` 指向**工作树外** | **每次分析完都做**，否则串案/家族反查没有数据 |
-| `fxapk corpus seen <值> --by so_sha256` / `corpus shared-native` | 跨样本操作，要先有库 | 想确认"这个样本属于哪个家族"时 |
+| `fxapk corpus seen <值> --by so_sha256` / `corpus shared-native` | 跨样本操作，要先有库 | 想召回家族候选，并结合其他独立锚点复核时 |
 | `fxapk config-channel --prefix … --domain …` | 前缀常量与基域**要你自己从样本常量里判断**哪个是 | 报告显示配置下发但静态无 URL 时 |
 | `fxapk port-normalize --declared … --report …` | 声明端口来自**你的解密结果**，工具自己拿不到 | 解出配置里的 raw 端口后 |
 
@@ -172,12 +188,14 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
   硬编码成后端地址 + 存在 native 库 → **别对这个 127.x 调证**（对内网空调证）。真后端由 `.so` 运行时
   经下发通道（DNS TXT / 远程配置 / OSS 对象）决定。转去：① 动态抓包拿实际连接的公网 `IP:端口`；
   ② 或逆向 `.so` 的下发通道解出配置。
-- **`meta.native_lib_hashes` 有值**：核心 `.so` 的 sha256 是**比签名证书更硬的家族锚点**（同族常逐字节
-  相同）。入库后用 `corpus seen <sha> --by so_sha256` 一击拉出全家族样本。
+- **`meta.native_lib_hashes` 有值**：核心 `.so` 的 sha256 可作高价值候选锚点。入库后用
+  `corpus seen <sha> --by so_sha256` 召回共享该值的样本，再排除公共库、SDK、壳组件、构建产物和正版重打包继承；
+  单个共享哈希不能直接认定同一家族或同一运营主体。
 - **解出了配置里的 raw 端口**：先别当成真实端口。部分家族运行时按固定规则归一化（如
   `真实 = 声明 + IP末段 + 常量`）。用 `port-normalize` 把**你解密的声明端口**与**报告里的实测端口**
   （`endpoints[].enrichment.runtime.remote_endpoints`）配对反推该规则——规则一致是很强的家族证据，
-  规则不一致说明不是同一支。配对不足或过于齐整时它会判 `degenerate` 拒给结论，**别硬套**。
+  规则不一致只说明该归一化假设未获支持，不足以单独排除同源。配对不足或过于齐整时它会判
+  `degenerate` 拒给结论，**别硬套**。
 - **`DEX-STRING-POOL-OPAQUE`（字符串池疑被整体混淆）**：★ 这条是**关于报告本身可信度**的警告，不是样本
   的一条罪状。命中意味着 dex 字符串常量疑被编译期整体加密 → `endpoints` / `contacts` / `config_keys`
   这些全靠字符串池的分析器会集体抽空。**此时本报告里这些项的「未发现」不可解读为「不存在」**，
@@ -222,8 +240,8 @@ git config core.hooksPath .githooks   # ★启用提交前泄漏扫描（改代�
 另：**说明性文字里别把豁免 token 连写成完整形态**（`leak-scan:` 紧跟 `allow`）——
 扫描器的匹配是 `leak-scan:\s*allow`，在**任何**行见到就当成真豁免指令，
 文档里照抄一次就会凭空多出一条理由为空的幽灵豁免（本节这两处即为此把 token 用反引号断开）。
-**测试夹具一律用文档保留段**（`192.0.2.0/24` / `198.51.100.0/24` / `203.0.113.0/24` /
-`2001:db8::/32` / `example.com`）——真实值一旦推上远端不可撤销，改写历史也删不掉平台缓存。
+**测试夹具优先使用文档保留地址和域名。**如果被测分支必须具备公网地址语义、厂商域边界或其他
+保留值无法触发的性质，改用 mock 或可审计的合成夹具，并逐行说明必要性、通过严格泄漏扫描；不得拿真实案件值充当夹具。
 
 命令两种等价调用方式：`fxapk <cmd> ...`（装好后）或 `python -m apkscan.cli <cmd> ...`（免装）。
 
@@ -237,7 +255,8 @@ git config core.hooksPath .githooks   # ★启用提交前泄漏扫描（改代�
 2. **一键体检 + 自愈**：`fxapk doctor`（默认即 `--fix`）—— 自动按设备 ABI（K40＝arm64-v8a）+ 主机 frida 版本**下载并部署 frida-server、起进程、把 mitmproxy CA 装进系统信任库**，逐项报 OK / 怎么修。这一步能修的都自动修，别手动逐个搞。
 3. **装 APK 绕过 MIUI「USB 安装要插 SIM」闸**：root 后不用开"USB 安装"那个 SIM 限制开关，直接
    `adb push x.apk /data/local/tmp/ && adb shell su -c 'pm install -r -t /data/local/tmp/x.apk'`。
-4. **验证**：`frida-ps -U` 能列出设备进程 = frida 通；`fxapk doctor --no-fix`（纯体检、什么都不改）全绿即可开跑 `fxapk auto`。
+4. **验证**：`frida-ps -U` 能列出设备进程只证明枚举通道可用，不证明 frida-server 以 root 运行，
+   也不证明 attach、Java bridge 或目标 hook 已就绪。先用 `fxapk doctor --no-fix` 做基础体检，再用真实 attach/hook smoke 验收所需能力。
 
 常见坑：
 - **frida-server 从 GitHub releases 下载**——PC 在国内无代理会失败/慢。解决：挂代理；或手动下 `frida-server-<主机frida版本>-android-<abi>.xz`（版本须与 PC `frida --version` 一致，doctor 已自动对齐版本号）push 到 `/data/local/tmp/frida-server` 自起。
@@ -255,18 +274,18 @@ git config core.hooksPath .githooks   # ★启用提交前泄漏扫描（改代�
 
 ---
 
-## 2. 全套分析（核心流程）
+## 2. 标准分析流程（按能力门控）
 
 ```bash
 # ① 跑分析 → 产出报告（默认联网富化；--offline 跳过所有联网富化）
 fxapk analyze <sample.apk> --online --out out --fmt html,json
 #   产物：out/<样本名>.json（完整报告） + out/<样本名>.html（人看）
 
-# ② 把完整报告压成【紧凑调证摘要】供你（agent）低 token 消费、直接决策
+# ② 把完整报告压成【紧凑调证摘要】供你（agent）低 token 初筛和定位
 fxapk digest out/<样本名>.json
 #   摘要：leads 按优先级排序（建议调证 > 待核 > 无需调证；高可信/C2 在前）+ 计数摘要。
 #   高敏值（钱包私钥/助记词、后端凭据、个人隐私数据、加密配方）默认**已脱敏**——这条命令的输出
-#   通常直接进你的上下文，安全的那一档就是默认档。
+#   通常直接进你的上下文；默认档只是有限脱敏，不等于已经净化或可以直接外发。
 #   ★ 确需明文原值（核对取证细节）时才显式关掉：fxapk digest out/<样本名>.json --no-redact
 #     关掉之后那份输出别再贴给第三方服务；完整明文一直在本地 report.json 里，不受此开关影响。
 ```
@@ -285,9 +304,11 @@ fxapk digest out/<样本名>.json
   零请求，确认预算后再 `--no-dry-run` 真跑。源不适用于该目标（如域名源拿到 IP）与查了没记录
   是**分开标注**的——工具失败 ≠ 阴性结果。
 - `fxapk case close <report.json>`：对已有报告执行主目标选择、有限重富化、五层归因与严格验收；默认原地写回 JSON，并刷新已存在的同名 HTML。
-- `fxapk unpack` / `fxapk capture`：真机脱壳 / 抓包（需 adb 设备 + frida；`analyze --dynamic` 会自动接力）。
-- `fxapk repackage <apk>`：脱壳后把**去壳版**重打包（zip 替 DEX + apksigner 重签）装回设备，使 capture 抓去壳版（绕壳反 frida）。需 apksigner/zipalign + 设备；auto 默认含此步（`--no-repackage` 关；重签必卸原包会清 app 数据）。能力边界：治不了 VMP/重 native/反模拟器壳，多数样本预期降级、capture 仍跑原版。
-- `fxapk corpus`（**资产沉淀主线**）：`corpus add <report.json...>` 把历次报告入库——主键 `(sample_sha256, tool_version, ruleset_digest)`，同版本同规则幂等跳过、换版本并存做**跨版本回归基线**；`corpus seen <值> [--by sample_sha256|package_name|sign_sha256|so_sha256]`「这值见过没」反查（`--by sign_sha256` 按共享签名证书一击串案；`--by so_sha256` 按 native 库哈希一击拉全家族——同族核心 `.so` 常逐字节相同，比签名更硬）；`corpus shared-native` 列出被 ≥2 样本共享的 `.so`（家族簇）；另有 `corpus ls`（过滤列举）/ `reindex`（自愈索引）/ `events`（吐 JSONL 喂 agent）。★库根须 `--corpus` 或环境变量 `FXAPK_CORPUS` 显式指向 **git 工作树外**（含真实案件数据），否则拒跑（exit 2）。
+- `fxapk unpack` / `fxapk capture`：真机脱壳 / 抓包。`unpack` 需要 frida；只有
+  `capture --mode floor-only` 可在无 frida 时运行，但仍需 adb 可用、设备 root（su）与设备侧 tcpdump；默认 `capture` 与 `auto` 当前仍要求 frida；
+  `analyze --dynamic` 会自动接力。
+- `fxapk repackage <apk>`：脱壳后把**去壳版**重打包（zip 替 DEX + apksigner 重签）装回设备，使 capture 抓去壳版（绕壳反 frida）。需 apksigner/zipalign + 设备；`auto` 只有在原版基线已取得、旁路被建议、显式同时开启 `--allow-behavior-modification --antidetect java` 且未设置 `--no-repackage` 时才调用此步（重签必卸原包会清 app 数据）。能力边界：治不了 VMP/重 native/反模拟器壳，多数样本预期降级、capture 仍跑原版。
+- `fxapk corpus`（**资产沉淀主线**）：`corpus add <report.json...>` 把历次报告入库——主键 `(sample_sha256, tool_version, ruleset_digest, evidence_surface)`，同样本、版本、规则和证据面才幂等跳过；换版本、规则或证据面可并存做**跨版本/证据面回归基线**。`corpus seen <值> [--by sample_sha256|package_name|sign_sha256|so_sha256]` 用签名证书或 native 库哈希召回候选；`corpus shared-native` 只列出被 ≥2 样本共享的 `.so` 组件。共享值本身不等于家族或主体结论，须排除公共库、SDK、壳、构建链和正版重打包继承；另有 `corpus ls`（过滤列举）/ `reindex`（自愈索引）/ `events`（吐 JSONL 喂 agent）。★库根须 `--corpus` 或环境变量 `FXAPK_CORPUS` 显式指向 **git 工作树外**（含真实数据），否则拒跑（exit 2）。
 - `fxapk corpus link-candidates --corpus <库>`：按非弱技术锚的倒排索引召回并排序人工复核候选；
   `review_priority_score` 不是概率，不得据此认定同一运营主体。命令会原样输出样本、案件和证据值。
   同一 native SHA 若能在至少三个不同真实样本间一一匹配到三个不同 basename，会以
@@ -335,28 +356,34 @@ fxapk digest out/<样本名>.json
 
 ---
 
-## 3. 境外源站 IP 被动归属（联网富化，`--online` 时生效）
+## 3. 境外或辖区未知的基础设施与 Origin 候选（联网富化，`--online` 时生效）
 
-对「建议调证」的域名/IP 端点做**两遍富化**（全程被动、对目标零流量，绝不主动探测 / 攻击）：
-1. **第①遍·归属** → 判服务器**辖区**（国内/境外/未知）：rdap/whois/dns/asn/icp。
-2. **第②遍·境外源站被动归属**（仅**境外+未知**端点）：识别"这是不是真源站、归属哪、跟哪些资产关联"。
+对「建议调证」的域名/IP 端点做**两遍富化**：不向目标业务服务发起 HTTP/TCP 主动探测；查询会把域名/IP 提交给第三方数据源，DNS 查询还可能被解析服务或权威 DNS 观察。
+1. **第①遍·归属** → 形成基础设施辖区候选、登记与承载信号（国内/境外/未知）：rdap/whois/dns/asn/icp；这些结果不证明物理源站或运营者辖区。
+2. **第②遍·境外基础设施与 Origin 候选**（仅**境外+未知**端点）：收集承载、边缘、Origin 候选和关联资产信号；任何单一来源都不能独立确认 Origin 或运营者。
 
 | 开关（写进 `.env`） | 能力 | 性质 |
 |---|---|---|
-| `FXAPK_SHODAN_KEY` | Shodan 被动查库：host/IP/ASN/org/country/开放端口/服务 banner/产品版本/关联主机名——判断是否真源站、归属哪家 | 被动·对目标零流量 |
-| crt.sh（免 key，默认开） | 证书透明度关联子域 → 提取独特标识、串案 | 被动 |
+| `FXAPK_SHODAN_KEY` | Shodan 查第三方既有数据库：host/IP/ASN/org/country/开放端口/服务 banner/产品版本/关联主机名——提供基础设施与 Origin 候选信号，不能单源确认运营者 | 不直连目标业务服务；目标标识会提交给 Shodan |
+| crt.sh（免 key，默认开） | 证书透明度/SAN 关联子域候选 → 供串并复核；共享证书和多租户关系须排除 | 被动 |
 
-**技术栈指纹（`exposure`，纯映射·零网络·零 payload·默认开）**：把 shodan 已采集的被动 banner 映射到**技术栈/后台框架指纹**（PHP/Laravel/ThinkPHP/Spring/致远/泛微/通达OA…），作为**同后台=疑同团伙的串案信号**——**仅识别、只用于串并**，不做漏洞方向研判、不利用。
+**技术栈指纹（`exposure`，纯映射·零网络·零 payload·默认开）**：把 shodan 已采集的被动 banner 映射到**技术栈/后台框架指纹**。相同框架十分常见，只能作为人工复核的弱候选信号，不能据此认定同一后端、家族或运营主体；不做漏洞方向研判、不利用。
 
-**结果在哪看**：境外归属证据并进对应 Lead 的 `evidence_to_obtain`/`notes`（自动进 `digest`），例如
-`Shodan 归属：ASN4134 / 80(nginx 1.18) …`、`技术栈/后台指纹（仅识别·串案用）：PHP、Jeecg-Boot…`、`关联子域(crt.sh)：…建议并簇串案`。
-结构化 `overseas_targets` 段每主机带 `tech_stack[]` / `related_subdomains[]` 字段供 agent 直读。
+**结果在哪看**：候选证据并进对应 Lead 的 `evidence_to_obtain`/`notes`（自动进 `digest`）。当前可见前缀包括
+`基础设施候选归属：…`、`Shodan 开放端口 / 服务：…`、`技术栈/后台框架指纹（常见弱候选；不能据此认定同一后端、家族或运营者）：…`、`关联子域候选(crt.sh)：…`；这些是字段示例，不是主体结论。
+结构化 `overseas_targets` 段每主机带 `tech_stack[]` / `related_subdomains[]` 字段供 agent 直读，
+但它是 **profile-only** 投影：只列 Shodan 或 CT 已返回实质画像的主机，不是境外/辖区未知候选全表。
+ASN-only、Shodan/CT 无记录/失败/未配置的最终高价值候选可能不在该列表；必须同时读 digest
+的 `overseas_target_coverage` 与 `summary.overseas_candidate_hosts_total / overseas_profiled_hosts /
+overseas_unprofiled_hosts`。其中辖区只用逐源状态许可的 DNS/ASN/Shodan payload 判定，
+无可用信号保守记「未知」；分母只纳入最终/安全投影后仍为「建议调证」的
+DOMAIN/IP，「已画像 0」绝不等于「候选 0」。
 
 **取证原则（辖区分流）**：
-- **国内服务器** → 走「调证」：向境内云厂商/IDC/ICP 依法调取日志/租户实名。
-- **境外服务器** → **不走调证**：目标是**被动定位真实源站服务器 IP + 提取独特标识**（ASN/org 归属、证书透明度子域、技术栈指纹），供后续依授权途径处置，**不主动探测、不攻击**。
-  - ★ 若解析 IP 全是 **CDN/反代（如 Cloudflare）** → 那是边缘节点**非源站**：取证落点会提示
-    「先被动穿透 CDN 定位真实源站 IP（历史 DNS/证书透明度 SAN/源站泄露/错配/邮件头），再做归属」。**别向 CDN 调证。**
+- **境内基础设施**：先证明它与目标业务有关，再按角色分别处理：向资源持有/承载/CDN 服务商调其实际掌握的资源、租户、分发或日志字段；向备案系统/接入信息渠道核 ICP 主体与接入关系。不得把 ICP 备案主体写成云服务商或向其套用云控制面字段。
+- **境外基础设施**：先做被动归属与角色分层；是否调证、保全或协查取决于合法可达渠道，不能因境外属性自动排除。
+  - ★ 若解析 IP 全是 **CDN/反代**，它们是边缘节点而非 Origin。不得把边缘写成源站或运营者；
+    但可向分发服务商依法调取账户或租户、分发与绑定域名、回源配置、访问日志和控制面审计记录；具体字段按服务商口径填写。
 
 ---
 
@@ -386,14 +413,14 @@ fxapk digest out/<样本名>.json
 - **与 `analysis_status` 是两码事**：那个说的是**工具**跑没跑好，这个说的是**样本内容**看没看见。
   「分析器全成功 + DEX 是壳桩 + 六条结论没资格下」完全可以同时成立。
 
-**② `repack_identity` —— 这是自研马甲包，还是正版被重打包**
+**② `repack_identity` —— 重打包身份倾向（不直接决定资产归属）**
 
-两种形态的**接口 / 域名 / 构建路径归属完全相反**：
+该 verdict 只决定隔离和复核策略，不能批量给接口、域名或构建路径定归属：
 
-| verdict | 这些资产属于谁 | 能否作线索 |
+| verdict | 身份研判 | 资产处理 |
 |---|---|---|
-| `self_built` | 团伙自建 | 可以 |
-| `repack_suspected` | **被仿冒的正版厂商** | **不可以**——列进清单＝向无关企业发函 |
+| `self_built` | 疑似自建 | 逐资产排除公共 SDK、共享基础设施与壳组件后，才作为调证候选 |
+| `repack_suspected` | **继承与新增范围未定** | 先隔离可能继承的资产；与官方同版本包差分后再判断哪些是新增或篡改 |
 | `unknown` | 未定 | 先人工核 |
 
 判为 `repack_suspected` 时，工具只声明「疑似被重签名」，**永远不会说「植入了什么」**——那必须与
@@ -407,13 +434,15 @@ fxapk digest out/<样本名>.json
 
 - 一切以 **leads** 为中心：每条带 `category`/`value`/`subject`/`advice`(建议调证/待核/无需调证)/
   `where_to_request`/`evidence_to_obtain`/`notes`。**优先看 advice=建议调证 的**。
-- **结构化境外源站归属**：`digest` 输出含顶层 `overseas_targets`（也在 `report.meta["overseas_targets"]`），
+- **结构化境外基础设施画像**：原始画像存于 `report.meta["overseas_targets"]`；`digest`
+  在顶层输出按最终/安全 Lead 作用域投影后的 `overseas_targets`，
   **按主机机器可读**——`[{host, ip, jurisdiction, asn, org, country, ports[],
-  services[{port,product,version}], tech_stack[], related_subdomains[]}]`。要"列所有源站开放端口"
-  "按技术栈指纹比对疑同团伙""汇总关联子域串案"时**直接读这个段**，别去解析 evidence 的自然语言串。
-  仅【境外+未知】主机入此段（国内走调证不在此列）。
+  services[{port,product,version}], tech_stack[], related_subdomains[]}]`。要列候选主机端口、比较技术栈或
+  汇总关联子域时可直接读这个段，但它仅是 Shodan/CT 已命中的 **profile-only** 列表；
+  要判断是否还有 ASN-only 等未画像候选，必须先读 `overseas_target_coverage`。仅【境外+未知】
+  路由候选进入该覆盖口径，其中每项仍须按来源强度和角色边界复核。
 - `report.meta` 还含 `app_classification`(涉诈类型研判)、`sample_sha256`(检材指纹)、`enriched_target_count` 等。
-- 先 `digest` 拿摘要决策；要细节再读 `out/<样本名>.json` 全量（`endpoints[].enrichment` 有富化原始数据）。
+- 先用 `digest` 做摘要分流和定位；形成正式结论时回查 `out/<样本名>.json` 中对应的结构化字段与原始证据。
 
 ---
 

@@ -32,6 +32,7 @@ from apkscan.network.categories import (  # 网络类别规范取值（与角色
     CAT_UNKNOWN,
 )
 from apkscan.network.fingerprints import parse_asn as _parse_asn  # 共享 ASN 解析契约（与角色层同一份）
+from apkscan.core.infra import tenant_distribution
 from apkscan.core.source_status import provider_payload_if_hit
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,17 @@ CONF_HIGH = "high"
 CONF_MEDIUM = "medium"
 CONF_LOW = "low"
 CONF_UNKNOWN = "unknown"
+
+_CLOUDFRONT_REQUEST_FIELDS: tuple[str, ...] = (
+    "AWS account/customer identity and payment records",
+    "CloudFront Distribution ID and configuration",
+    "Alternate Domain Names and domain/account binding",
+    "Origin configuration and OAC/OAI",
+    "CloudFront access logs and origin logs",
+    "CloudTrail and control-plane audit logs",
+    "associated AWS resources",
+    "boundary: CloudFront edge addresses are not Origin or service-operator addresses",
+)
 
 # 网络类型分类（origin_network / hosting_provider 用）——规范取值 import 自 network.categories（与角色层同一份）。
 #: 云/CDN 类别（这些类别下的 ASN 不足以独立坐实 edge——共享租户多，见 _score_edge 负证据）。
@@ -672,7 +684,7 @@ def cluster_fronting(ip_views: list[dict[str, Any]]) -> int:
 _ONLINE_ASORG_SOURCES = ("fofa", "hunter", "quake", "virustotal", "shodan", "ripestat_bgp")
 #: 从资产记录里取"网络运营方"的字段——★只取 as_org 类，绝不取 company（Hunter 的 ICP 备案主体=服务运营方，
 #: service_operator 恒 unknown，不得从数据推断）。
-_ONLINE_ASORG_FIELDS = ("as_organization", "as_org")
+_ONLINE_ASORG_FIELDS = ("as_organization", "as_org", "asn_holder")
 _ATTRIBUTION_PROVIDER_SOURCES = (
     "asn",
     "dns",
@@ -774,6 +786,86 @@ def attribution_from_enrichment(enrichment: dict[str, Any], ip: str = "") -> dic
     return build_ip_attribution(ip, signals)
 
 
+def tenant_distribution_edge(domain: str, dns: object = None) -> dict[str, Any] | None:
+    """识别端点自身或其已许可 DNS CNAME 中的租户级默认分发域。
+
+    ``dns`` 必须是调用方经 :func:`provider_payload_if_hit` 筛过的 payload；本函数不从
+    ``source_status`` 旁路读数据。因此 failed/skipped/no_record 的旧 CNAME 不能升级为 edge。
+    返回的层只识别分发产品与法定服务商，不识别租户、Origin 或运营者。
+    """
+    direct = tenant_distribution(str(domain or ""))
+    distribution = direct
+    source = "tenant_distribution_domain"
+    custom_hostname = ""
+
+    if distribution is None and isinstance(dns, dict):
+        raw_cname = dns.get("cname")
+        if isinstance(raw_cname, str):
+            cname_chain = [raw_cname]
+        else:
+            cname_chain = _as_list(raw_cname)
+        for candidate in cname_chain:
+            if not isinstance(candidate, str):
+                continue
+            # DNS CNAME 必须是精确主机名；不能复用 tenant_distribution 对 URL/端口的
+            # 容错，把拼接字符串或伪造 URL 误当成服务商可检索的 Distribution 键。
+            candidate_domain = candidate.strip().lower().rstrip(".")
+            if not candidate_domain or any(mark in candidate_domain for mark in (":", "/", "@")):
+                continue
+            hit = tenant_distribution(candidate_domain)
+            if hit is None:
+                continue
+            distribution = hit
+            source = "dns_cname_tenant_distribution"
+            custom_hostname = str(domain or "").strip().lower().rstrip(".")
+            break
+
+    if distribution is None:
+        return None
+
+    request_target, distribution_domain = distribution
+    request_fields = [
+        *_CLOUDFRONT_REQUEST_FIELDS,
+        (
+            "CloudFront Distribution lookup key (complete distribution domain): "
+            f"{distribution_domain}"
+        ),
+    ]
+    matched_signals = [f"distribution_domain:{distribution_domain}"]
+    extra: dict[str, Any] = {}
+    if custom_hostname:
+        extra["custom_hostname"] = custom_hostname
+        request_fields.append(
+            "Custom hostname / Alternate Domain Name to verify in the Distribution: "
+            f"{custom_hostname}"
+        )
+        matched_signals.append(
+            f"dns_cname:{custom_hostname}->{distribution_domain}"
+        )
+
+    return _layer(
+        name="Amazon CloudFront",
+        id="aws.cloudfront.tenant_distribution",
+        product="Amazon CloudFront",
+        role="cdn",
+        category=CAT_CDN,
+        source=source,
+        matched_signals=matched_signals,
+        weak_signals=[],
+        confidence=CONF_MEDIUM,
+        tier="probable",
+        scope="domain",
+        distribution_domain=distribution_domain,
+        request_target=request_target,
+        request_evidence_fields=request_fields,
+        boundary=(
+            "provider-issued tenant distribution hostname; it does not identify "
+            "the customer, Origin, or service operator"
+        ),
+        **extra,
+    )
+
+
 def build_endpoint_attribution(kind: str, value: str, enrichment: dict[str, Any]) -> dict[str, Any] | None:
     """端点级归因入口（pipeline 用）：把一个端点的 enrichment 映射成 **per-IP** 五层归因。无信号 → None。绝不抛。
 
@@ -782,7 +874,9 @@ def build_endpoint_attribution(kind: str, value: str, enrichment: dict[str, Any]
       （IpRdapEnricher）→ resource_holder。
     - 域名端点：``enrichment['dns']['hosting']``（每解析 IP 一条 {ip,asn,org,isp}）→ 每 IP 一条五层；
       ``dns['cname']`` 是**域名级共享** edge 信号，喂给每个 IP 的 edge 层。hosting 缺时退化用 ``dns['ips']``
-      （ASN 未知，但 CNAME 仍可识别 edge）。
+      （ASN 未知，但 CNAME 仍可识别 edge）。云厂商颁发的租户级默认分发域另作
+      ``domain_edge_provider`` 保留，并以「继承自域名」的明确来源投影到每个解析 IP；
+      这只识别分发产品/服务商，不把边缘 IP 认成 Origin 或运营者地址。
     ★域名端点的 per-IP resource_holder 分两级：结案后 ``resolved_ip_enrichment[ip]`` 的 ip_rdap 补全（吸收
     进顶层归因）；纯 analyze 未逐 IP 查 RDAP 的解析 IP 标 ``deferred='case_close'``（区分「未查询」与「查无」）。
     """
@@ -790,13 +884,19 @@ def build_endpoint_attribution(kind: str, value: str, enrichment: dict[str, Any]
         return None
     kind_s = _s(kind)
     ips: list[dict[str, Any]] = []
+    domain_edge_provider: dict[str, Any] | None = None
+    dns_e: dict[str, Any] = {}
+
+    if kind_s == "domain":
+        # 只把 source_status 许可的 DNS payload 交给 CNAME 识别；失败/跳过的旧值不得复活。
+        dns_e = provider_payload_if_hit(enrichment, "dns")
+        domain_edge_provider = tenant_distribution_edge(str(value or ""), dns_e)
 
     if kind_s == "ip":
         att = attribution_from_enrichment(enrichment, ip=str(value or ""))
         if att is not None:
             ips.append(att)
     elif kind_s == "domain":
-        dns_e = provider_payload_if_hit(enrichment, "dns")
         cname_raw = dns_e.get("cname")
         cname = cname_raw if isinstance(cname_raw, list) else None
         # hosting 建 ip→info 映射（每 IP 的 asn/org/isp）。★hosting **常少于** ips——部分 IP 的托管查询限速/失败
@@ -864,9 +964,24 @@ def build_endpoint_attribution(kind: str, value: str, enrichment: dict[str, Any]
                 rh["deferred"] = "case_close"
             ips.append(att)
 
-    if not ips:
+    if domain_edge_provider is not None:
+        # 这是域名级的分发关系，不是 IP 本身的租户属性。但每条 per-IP 五层都必须
+        # 看到它，否则同一域的某个解析 IP 会被退化成普通 AWS 云主机并把边缘当 Origin。
+        for ip_attribution in ips:
+            inherited_edge = dict(domain_edge_provider)
+            inherited_edge["inherited_from_domain"] = True
+            ip_attribution["edge_provider"] = inherited_edge
+
+    if not ips and domain_edge_provider is None:
         return None
-    return {"endpoint": str(value or ""), "kind": kind_s or "unknown", "ips": ips}
+    result: dict[str, Any] = {
+        "endpoint": str(value or ""),
+        "kind": kind_s or "unknown",
+        "ips": ips,
+    }
+    if domain_edge_provider is not None:
+        result["domain_edge_provider"] = domain_edge_provider
+    return result
 
 
 def build_domain_control(value: str, enrichment: dict[str, Any]) -> dict[str, Any] | None:
