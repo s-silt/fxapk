@@ -5,7 +5,7 @@
   - 域名 RDAP（rdap 富化器，applies_to=['domain']）= 域名注册方，**不是** IP 资源持有方；
   - ip-api 的 ISP/org（asn 富化器）= 网络运营方，粒度粗、非权威登记。
 故本富化器专供 core/attribution 的 ``resource_holder`` 层（第 1 层）——此前恒 unknown，因为没有 IP 级
-权威登记源。被动 OSINT（对目标零流量，HTTPS）。
+权威登记源。本模块不直连目标业务服务，但会把 IP 提交给 RDAP 服务。
 
 错误处理（符合规范）：网络/HTTP/解析异常 → ok=False 不抛不静默；查无有效记录（全空）→ 不缓存，便于重试。
 """

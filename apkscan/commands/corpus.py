@@ -229,8 +229,8 @@ def corpus_ls(
 #: seen --by 的列表维度取值（非标量 SEEN_FIELDS，走专用列表反查）。
 _CONFIG_OBJECT_BY = "config-object"
 _SO_SHA256_BY = "so_sha256"
-#: 自建构建环境标识。★比 .so 哈希更耐用：同族样本的 .so 名与 sha256 逐份随机化，
-#: 而构建路径是编译器写进 __FILE__ 的，改名/重打包/重签名都动不了它。
+#: 自建构建环境标识。它与 .so 哈希/名称一样只用于候选召回；构建路径来自 __FILE__，
+#: 对已编译产物做改名、重打包或重签名通常不会改变它，但不能据此认定家族或主体。
 _BUILD_ENV_BY = "build-env"
 _DOMAIN_BY = "domain"
 _CNAME_BY = "cname"
@@ -240,7 +240,7 @@ _CNAME_BY = "cname"
 def corpus_seen(
     value: str = typer.Argument(
         ...,
-        help="要反查的值（样本哈希 / 包名 / 签名证书摘要 / 域名 / CNAME边 / 配置对象 / .so / 构建环境）。",
+        help="要反查的值（样本哈希 / 包名 / 签名证书摘要 / 域名 / CNAME边 / 配置对象 / .so SHA-256或精确名称 / 构建环境）。",
     ),
     by: str = typer.Option(
         "sample_sha256", "--by",
@@ -251,7 +251,11 @@ def corpus_seen(
     ),
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
-    """见过没？按样本哈希 / 包名 / 共享签名证书 / 共享远程配置对象 / 共享 .so 家族指纹 / **自建构建环境** 一击反查库内记录。"""
+    """按指定值反查库内匹配记录。
+
+    除样本哈希本身外，共享签名证书、配置对象、.so SHA-256/名称或构建环境等命中只做候选召回，
+    不能单独认定同一家族或主体；须回到原始证据并结合独立锚点复核。
+    """
     warn_unredacted_agent_output("corpus seen")
     root = resolve_corpus(corpus)
     entries = _query_entries(root, include_quarantined=include_quarantined)
@@ -261,7 +265,7 @@ def corpus_seen(
         _print({"seen": bool(hits), "by": by, "value": value, "count": len(hits), "hits": hits})
         return
     if by == _SO_SHA256_BY:
-        # .so 家族硬指纹是列表维度（一样本多 .so）：按 sha256/name 反查同族样本（A1 家族反查基石）。
+        # .so 是列表维度（一样本多 .so）：按 sha256/name 召回匹配候选，不在这里判家族或主体。
         hits = _corpus.find_by_native_lib(entries, value)
         _print({"seen": bool(hits), "by": by, "value": value, "count": len(hits), "hits": hits})
         return
@@ -298,7 +302,10 @@ def corpus_shared_config(
     include_quarantined: bool = typer.Option(False, "--include-quarantined"),
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
-    """跨样本共享的远程配置对象簇：同一 OSS 对象(url) 或同一配置内容(sha256) 被 ≥2 样本引用——串案强锚。"""
+    """列出跨样本共享的配置 URL 或内容 SHA-256，供关联候选召回。
+
+    URL 或内容相同不能单独认定同一家族或主体；须排除公开对象、镜像、复用与重打包继承并结合独立证据。
+    """
     warn_unredacted_agent_output("corpus shared-config")
     root = resolve_corpus(corpus)
     clusters = _corpus.shared_config_objects(
@@ -312,12 +319,13 @@ def corpus_shared_native(
     include_quarantined: bool = typer.Option(False, "--include-quarantined"),
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
-    """跨样本共享同一 .so（sha256 逐字节相同）被 ≥2 样本引用——家族串案锚点候选。
+    """列出被 ≥2 个样本引用的相同 .so SHA-256，供关联候选召回。
 
-    ★不是每个簇都是强锚：加固壳运行时库与第三方 SDK/引擎库逐字节相同，凡用同款组件的
-    样本全都共享它，**共享它只说明用了同一个第三方组件、不说明同一开发主体**。这类簇带
+    相同 SHA-256 只证明所取字节相同，不能单独认定同一家族或主体；加固壳运行时库、第三方
+    SDK/引擎、公开构建产物和重打包继承都可能被不同样本共享。已知通用组件簇带
     ``weak_anchor=true`` 与 ``weak_anchor_reason``（壳产品名 / third-party-sdk），并排在结果末尾。
-    只标注不删除：共享事实仍要看得见，静默丢弃会让人以为压根没这回事。
+    ``weak_anchor=false`` 只表示未命中当前弱锚规则，不代表已确认家族或主体。字段与排序保持兼容，
+    所有结果均须回到原始证据并结合独立锚点复核。
     """
     warn_unredacted_agent_output("corpus shared-native")
     root = resolve_corpus(corpus)

@@ -1,8 +1,8 @@
-"""favicon / 应用图标 mmh3 指纹分析器 —— 产测绘引擎 pivot 锚点线索。
+"""favicon / 应用图标 mmh3 指纹分析器 —— 产测绘引擎 pivot 候选。
 
-杀猪盘换皮但复用同一套后台前端 / 图标。一个 favicon hash 能把单包后端扩成同团伙站群：
-办案人把 hash 丢 FOFA/Quake/ZoomEye/Shodan/Censys 反查同 hash 的全部公网 IP/域名（后台
-面板与钓鱼站群），再向机房/IDC 调服务器租用主体。也是团伙聚类的强连边键。
+32 位 mmh3 适合在 FOFA/Quake/ZoomEye/Shodan/Censys 中召回候选，但存在哈希碰撞、
+通用图标、模板复用和测绘库过期问题。命中只能作人工复核入口，不得直接写成同一后台、
+站群、家族或运营主体，更不能据此直接向机房/IDC 调证。
 
 职责：
 - 从 ctx.list_files() 定位图标：res/mipmap*/、res/drawable* 下 ic_launcher*.png|.webp；
@@ -11,7 +11,7 @@
 - denylist（命中即跳过、不产线索）：常见/空白/通用模板图标的 hash + 显然的空白占位
   内容（空字节 / 全透明纯色占位）。否则通用图标撞库产海量噪音。
 - 命中（非 denylist）→ Lead(category=CONFIG_KEY)：value=favicon_mmh3=<hash>，
-  notes 带 FOFA/Shodan/ZoomEye 一键查询串；并写 result.meta["favicon_mmh3"]=<int> 供团伙聚类。
+  notes 带 FOFA/Shodan/ZoomEye 查询串；并写 result.meta["favicon_mmh3"]=<int> 供候选召回。
 - 本期不主动发测绘查询（只产查询串 Lead）。
 
 约束：
@@ -132,7 +132,7 @@ class FaviconAnalyzer(BaseAnalyzer):
             return
         emitted.add(h)
 
-        # meta 并簇键（首个非 denylist 命中即写；供 dynamic/correlate 当强连边）。
+        # meta 候选键（首个非 denylist 命中即写）；32 位值不是主体连边证据。
         if _META_KEY not in result.meta:
             result.meta[_META_KEY] = h
 
@@ -142,13 +142,14 @@ class FaviconAnalyzer(BaseAnalyzer):
         return Lead(
             category=LeadCategory.CONFIG_KEY,
             value=f"favicon_mmh3={h}",
-            subject="待核（测绘 pivot 锚点）",
-            where_to_request="FOFA / Quake / ZoomEye / Shodan / Censys 测绘平台",
+            subject="待核（32 位测绘 pivot 候选）",
+            where_to_request="公开测绘平台候选检索：FOFA / Quake / ZoomEye / Shodan / Censys（无直接调证对象）",
             evidence_to_obtain=[
-                "同 favicon hash 的全部公网 IP/域名（后台面板与钓鱼站群）",
-                "据此向机房/IDC 调服务器租用主体",
+                "召回同 favicon mmh3 的公网 IP/域名候选，不将命中数量解读为同一站群",
+                "逐项比对图标原始字节或 SHA-256、页面上下文、TLS/域名及运行时锚点，排除 32 位碰撞、通用图标和模板复用",
+                "只有独立证据确认候选资产与目标业务有关后，再单独核实承载商与可调字段",
             ],
-            confidence=Confidence.HIGH,
+            confidence=Confidence.MEDIUM,
             source_refs=[
                 Evidence(
                     source="resource",
@@ -157,7 +158,7 @@ class FaviconAnalyzer(BaseAnalyzer):
                 )
             ],
             notes=_query_strings(h),
-            advice="建议调证",
+            advice="待核",
         )
 
     # ------------------------------------------------------------------

@@ -2,7 +2,7 @@
 
 覆盖：crt.sh JSON 归一（多行 name_value/通配/CN 去重）、只保留本域子域（过滤无关 SAN）、
 超时/HTTP 错误 → ok=False、空结果 ok=True 且缓存、缓存命中不复触网、礼貌限速间隔、
-攻击面渲染并入「关联子域(crt.sh)…串案」证据行、classify_jurisdiction 接受 certs kwarg。
+候选渲染并入「关联子域候选(crt.sh)…独立锚点复核」证据行、classify_jurisdiction 接受 certs kwarg。
 """
 
 from __future__ import annotations
@@ -198,7 +198,7 @@ def test_render_related_subdomains() -> None:
     blob = "\n".join(lines)
     assert "api.evil.example" in blob and "pay.evil.example" in blob
     assert "crt.sh" in blob
-    assert "串案" in blob
+    assert "共享证书" in blob and "独立锚点" in blob
 
 
 def test_render_related_subdomains_truncates() -> None:

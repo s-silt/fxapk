@@ -1,15 +1,26 @@
-"""跨样本团伙聚类（apkscan.dynamic.correlate）测试。
+"""跨样本关联候选聚类（apkscan.dynamic.correlate）测试。
 
-纯读各样本 report.json（dict）→ 抽强指纹 → 倒排 + union-find 聚类 → 团伙簇。
-强指纹=高区分度：签名 sha256(非调试证书) / is_c2 域名 / uni AppID / 链上收款地址。
-全离线纯函数，不碰真机。
+纯读各样本 report.json（dict）→ 抽候选指纹 → 倒排 + union-find 聚类 → 关联候选簇。
+共享指纹只用于人工复核召回，不能独立认定主体或自动并案。全离线纯函数，不碰真机。
 """
 
 from __future__ import annotations
 
 import pytest
 
-from apkscan.dynamic.correlate import Cluster, Fingerprint, correlate, extract_fingerprints
+from apkscan.dynamic.correlate import (
+    CORRELATION_DISCLAIMER,
+    Cluster,
+    Fingerprint,
+    correlate,
+    extract_fingerprints,
+)
+
+
+def test_correlation_disclaimer_preserves_evidence_boundary() -> None:
+    assert "人工复核" in CORRELATION_DISCLAIMER
+    assert "不能独立认定" in CORRELATION_DISCLAIMER
+    assert "不会自动形成并案结论" in CORRELATION_DISCLAIMER
 
 
 def _report(
@@ -88,7 +99,7 @@ def test_extract_fingerprints_all_kinds() -> None:
 
 def test_extract_skips_debug_cert() -> None:
     fps = extract_fingerprints(_report(sign="DBG", subject="CN=Android Debug,O=Android,C=US"))
-    assert not any(f.kind == "sign" for f in fps)  # 调试证书海量样本共用，不作并簇键
+    assert not any(f.kind == "sign" for f in fps)  # 调试证书海量样本共用，不作候选聚类键
 
 
 def test_extract_ignores_empty_values() -> None:
@@ -124,7 +135,7 @@ def test_correlate_transitive_via_different_keys() -> None:
     )
     assert len(clusters) == 1
     assert set(clusters[0].members) == {"a", "b", "c"}
-    # shared 须精确列全两条并案依据（a~b 签名 + b~c uni），
+    # shared 须精确列全两条候选连接（a~b 签名 + b~c uni），
     # 只断言 >=2 会漏掉半数共享指纹却不报红——这里锁定精确集合。
     shared = {(f.kind, f.value) for f in clusters[0].shared}
     assert shared == {("sign", "S1"), ("uni_appid", "U1")}

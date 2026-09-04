@@ -1,11 +1,11 @@
 """后台框架/技术栈指纹研判（纯函数）：把被动采集的服务器 banner 映射到「技术栈 / 后台框架」。
 
-★ 定位与边界：本模块是**取证串案情报**，用于团伙串并，不是攻击工具。
+★ 定位与边界：本模块产生**人工复核候选**，不是主体归因或攻击工具。
 - 只做：从 shodan **被动采集的服务 banner 指纹**匹配 ``rules/exposure.yaml`` 的技术栈
   规则 → 识别「这台服务器是什么栈 / 什么后台框架」（PHP / Laravel / ThinkPHP / Spring / 致远 /
-  泛微 / 通达 OA…）。**零网络、零 payload**，对目标零流量，绝不发起任何动作。
-- 用途：**同后台框架 = 疑同团伙基础设施**——多个样本命中同一后台 / 面板指纹，可并簇串案。仅做识别，
-  不研判漏洞、不给利用方向。
+  泛微 / 通达 OA…）。本映射函数自身零网络、零 payload；输入数据由上游第三方查询获得。
+- 用途：相同框架十分常见，只能作为待复核的弱候选；不能据此认定同一后端、家族或运营主体。
+  仅做识别，不研判漏洞、不给利用方向。
 
 匹配：逐字段·小写子串·任一命中即该条命中（与既有 rules 风格一致）。
 """
@@ -23,9 +23,7 @@ logger = logging.getLogger(__name__)
 _RULES_NAME = "exposure"
 
 #: 指纹字段（须与被动 enrichers 真实输出对齐；规则与主机指纹都按这些键比对）。
-_FP_KEYS = (
-    "server", "x_powered_by", "title", "product", "cpe", "cookie", "module",
-)
+_FP_KEYS = ("server", "x_powered_by", "title", "product", "cpe", "cookie", "module")
 
 # 规则只读一次（进程级缓存；YAML 解析失败安全回退空）。
 _RULES_LOCK = threading.Lock()
@@ -50,11 +48,20 @@ def _add(fp: dict[str, set[str]], field: str, value: object) -> None:
         fp[field].add(value.strip().lower())
 
 
+def _add_many(fp: dict[str, set[str]], field: str, value: object) -> None:
+    """加入一个字符串或字符串序列；坏字段安全跳过。"""
+    if isinstance(value, str):
+        _add(fp, field, value)
+    elif isinstance(value, (list, tuple, set)):
+        for item in value:
+            _add(fp, field, item)
+
+
 def build_host_fingerprint(shodan: object) -> dict[str, set[str]]:
     """把一台主机的 shodan **被动 banner** 拍平成小写字符串集合（供规则子串匹配）。
 
-    数据来自对目标**零流量**的被动采集：Shodan 已扫库的服务 banner（product / version /
-    http.server / http.title / cpe / module）。坏字段安全跳过。
+    数据来自 Shodan 已有服务 banner；本函数不联网，但上游查询会把目标标识提交给 Shodan。只接收
+    product / http.server / http.title / X-Powered-By / Set-Cookie 名 / cpe / module，坏字段安全跳过。
     """
     sh = shodan if isinstance(shodan, dict) else {}
     fp: dict[str, set[str]] = {k: set() for k in _FP_KEYS}
@@ -67,6 +74,8 @@ def build_host_fingerprint(shodan: object) -> dict[str, set[str]]:
         _add(fp, "server", svc.get("http_server"))
         _add(fp, "title", svc.get("http_title"))
         _add(fp, "module", svc.get("module"))
+        _add_many(fp, "x_powered_by", svc.get("x_powered_by"))
+        _add_many(fp, "cookie", svc.get("cookie_names"))
         cpe = svc.get("cpe")
         for c in cpe if isinstance(cpe, list) else [cpe]:
             _add(fp, "cpe", c)
@@ -103,7 +112,8 @@ def _matches(rule: dict[str, Any], fp: dict[str, set[str]]) -> bool:
 def assess_tech_stack(shodan: object) -> list[dict[str, Any]]:
     """据被动 banner 指纹识别技术栈 / 后台框架，返回 [{name, note}]。绝不抛（坏规则 / 坏字段安全跳过）。
 
-    仅识别栈 / 后台框架，用作**同后台 = 疑同团伙**的串案信号；不研判漏洞、不给利用方向。
+    仅识别栈 / 后台框架，用作人工复核的弱候选；不能单独证明同一后端、家族或运营主体，
+    不研判漏洞、不给利用方向。
     """
     rules = _rules()
     fp = build_host_fingerprint(shodan)

@@ -58,10 +58,10 @@ class BaseEnricher(ABC):
     applies_to:  适用的端点类型，元素为 "domain" / "ip"。
     phase:       富化阶段（两遍富化调度用）：
                  - ``"attribution"``（默认）：第①遍，查归属（rdap/whois/dns/asn/icp），
-                   定服务器辖区（国内/国外/未知）。
-                 - ``"overseas"``：第②遍，境外被动取证（shodan/certs），**仅对国外(+未知)端点跑**。
-    active:      **是否会向目标发起连接的标记**。本仓当前富化器全部为被动（``active=False``），
-                 只读第三方公开库 / OSINT，对目标零流量；保留该标记以便审计声明「不接触目标」。
+                   定基础设施辖区候选（国内/国外/未知）。
+                 - ``"overseas"``：第②遍，境外候选富化（shodan/certs），**仅对国外(+未知)端点跑**。
+    active:      **是否会向目标业务服务发起连接的标记**。本仓当前富化器均为 ``active=False``，
+                 但第三方查询仍会向数据源披露目标标识，DNS 还可能被解析服务或权威 DNS 观察。
     """
 
     name: str = ""

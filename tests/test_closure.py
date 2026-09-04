@@ -811,6 +811,140 @@ def test_unconfirmed_origin_candidate_cannot_satisfy_cdn_origin_gate() -> None:
     assert target["status"] == CLOSURE_PARTIAL
 
 
+def _cloudfront_distribution_endpoint(*, with_resolved_ip: bool) -> Endpoint:
+    distribution = ".".join(("d111111abcdef8", "cloudfront", "net"))
+    ip = "198.51.100.63"
+    enrichment: dict[str, object] = {}
+    if with_resolved_ip:
+        enrichment = {
+            "dns": {
+                "ips": [ip],
+                "hosting": [
+                    {
+                        "ip": ip,
+                        "asn": "AS16509",
+                        "org": "Amazon Web Services, Inc.",
+                        "country": "US",
+                    }
+                ],
+            },
+            "source_status": {"dns": {"status": "hit"}},
+            "resolved_ip_enrichment": {
+                ip: {
+                    "asn": {
+                        "asn": "AS16509",
+                        "org": "Amazon Web Services, Inc.",
+                        "country": "US",
+                    },
+                    "source_status": {"asn": {"status": "hit"}},
+                }
+            },
+        }
+    endpoint = _endpoint(distribution, kind="domain", enrichment=enrichment)
+    closure_sources._set_attribution(endpoint)
+    return endpoint
+
+
+def _assert_cloudfront_distribution_closure(target: _TargetClosure) -> None:
+    assert target["origin"]["required"] is True
+    assert target["origin"]["status"] == "missing"
+    assert target["origin"]["edge_provider"] == "Amazon CloudFront"
+    assert target["origin"]["distribution_domain"] == ".".join(
+        ("d111111abcdef8", "cloudfront", "net")
+    )
+    request = target["layers"]["request_target"]
+    assert request["status"] == CLOSURE_PARTIAL
+    assert request["evidence"]["provider"] == "Amazon Web Services, Inc."
+    assert request["evidence"]["edge_provider"] == "Amazon CloudFront"
+    assert request["evidence"]["distribution_domain"] == target["origin"][
+        "distribution_domain"
+    ]
+    fields = cast(list[str], request["evidence"]["evidence_fields"])
+    field_blob = "\n".join(fields)
+    assert target["origin"]["distribution_domain"] in field_blob
+    for expected in (
+        "Distribution ID",
+        "Alternate Domain Names",
+        "Origin configuration",
+        "OAC/OAI",
+        "access logs",
+        "CloudTrail",
+        "associated AWS resources",
+        "edge addresses are not Origin",
+    ):
+        assert expected in field_blob
+    assert "origin" in target["gaps"]
+    assert target["status"] == CLOSURE_PARTIAL
+
+
+def test_cloudfront_distribution_requires_origin_without_dns() -> None:
+    target = _assemble_target(_cloudfront_distribution_endpoint(with_resolved_ip=False))
+
+    _assert_cloudfront_distribution_closure(target)
+
+
+def test_cloudfront_distribution_origin_gate_survives_resolved_ip_aggregation() -> None:
+    target = _assemble_target(_cloudfront_distribution_endpoint(with_resolved_ip=True))
+
+    _assert_cloudfront_distribution_closure(target)
+
+
+def test_custom_hostname_cloudfront_cname_keeps_origin_gate_and_aws_request() -> None:
+    custom_hostname = "portal.infra.example"
+    distribution = ".".join(("d111111abcdef8", "cloudfront", "net"))
+    ip = "198.51.100.64"
+    endpoint = _endpoint(
+        custom_hostname,
+        kind="domain",
+        enrichment={
+            "source_status": {"dns": {"status": "hit"}},
+            "dns": {
+                "cname": [distribution],
+                "ips": [ip],
+                "hosting": [
+                    {
+                        "ip": ip,
+                        "asn": "AS16509",
+                        "org": "Amazon Web Services, Inc.",
+                        "country": "US",
+                    }
+                ],
+            },
+            "resolved_ip_enrichment": {
+                ip: {
+                    "source_status": {"asn": {"status": "hit"}},
+                    "asn": {
+                        "asn": "AS16509",
+                        "org": "Amazon Web Services, Inc.",
+                        "country": "US",
+                    },
+                }
+            },
+        },
+    )
+    closure_sources._set_attribution(endpoint)
+
+    target = _assemble_target(endpoint)
+
+    assert target["origin"]["required"] is True
+    assert target["origin"]["status"] == "missing"
+    assert target["origin"]["edge_provider"] == "Amazon CloudFront"
+    assert target["origin"]["custom_hostname"] == custom_hostname
+    assert target["origin"]["distribution_domain"] == distribution
+    request = target["layers"]["request_target"]
+    assert request["status"] == CLOSURE_PARTIAL
+    assert request["evidence"]["provider"] == "Amazon Web Services, Inc."
+    assert request["evidence"]["custom_hostname"] == custom_hostname
+    assert request["evidence"]["distribution_domain"] == distribution
+    field_blob = "\n".join(cast(list[str], request["evidence"]["evidence_fields"]))
+    assert custom_hostname in field_blob
+    assert distribution in field_blob
+    for expected in ("Distribution ID", "OAC/OAI", "access logs", "CloudTrail"):
+        assert expected in field_blob
+    assert "origin" in target["gaps"]
+    assert target["status"] == CLOSURE_PARTIAL
+
+
 def test_confirmed_origin_without_origin_provider_keeps_request_partial() -> None:
     endpoint = _complete_endpoint()
     endpoint.enrichment["attribution"] = {

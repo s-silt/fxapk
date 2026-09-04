@@ -1,8 +1,8 @@
-"""native 库指纹：对 App 自有 .so 逐个算 sha256 写进 report.meta，作**家族级硬指纹**。
+"""native 库指纹：对 App 自有 .so 逐个算 sha256 写进 report.meta，供跨样本候选召回。
 
-依据（家族取证经验）：同族样本的核心业务 .so 常**逐字节相同**（同一构建），其 sha256 是比签名证书更硬的
-家族锚点——解密配方、下发通道格式都随该 .so 走。把哈希登记进报告后，corpus 可 ``--by so_sha256`` 一击
-反查全家族样本（见 core/corpus 的 native_lib 列表维度）。
+相同 sha256 只证明所取字节相同，不能单独证明样本属于同一家族，也不能证明开发、运营或控制主体相同；
+第三方组件、加固壳、公开构建产物与重打包继承都可能产生相同字节。corpus 还保留按精确库名查询的兼容入口，
+但同名比同哈希更弱，只能召回待复核记录。是否形成家族或主体结论须结合独立锚点与原始证据复核。
 
 纯静态、有界读、绝不抛：单 .so 超上限或读失败即跳过；结果按 sha256 去重、稳定排序（可复现）。
 不做任何配方存储/重放（那是案件数据，靠智能体首次破解）。
@@ -30,7 +30,7 @@ _MAX_LIBS = 40
 
 
 class NativeFingerprintAnalyzer(BaseAnalyzer):
-    """对 App .so 逐个算 sha256 → meta["native_lib_hashes"]（家族级硬指纹，供 corpus --by so_sha256 反查）。"""
+    """对 App .so 逐个算 sha256 → meta["native_lib_hashes"]，仅供候选召回。"""
 
     name: str = "native_fingerprint"
     meta_key_categories = {

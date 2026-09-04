@@ -515,6 +515,126 @@ def test_build_endpoint_attribution_domain_per_ip_never_collapses() -> None:
     assert by_ip["198.51.100.21"]["edge_provider"]["name"] == "Cloudflare"
 
 
+def test_cloudfront_tenant_distribution_is_domain_edge_even_without_dns() -> None:
+    """服务商颁发的完整 CloudFront 分发域本身就是域名级 edge 事实。
+
+    没有 DNS IP 不得把它压成 ``None``；产品角色与法定调证主体也不得塌缩。
+    """
+    distribution = ".".join(("d111111abcdef8", "cloudfront", "net"))
+
+    attribution = A.build_endpoint_attribution("domain", distribution, {})
+
+    assert attribution is not None
+    assert attribution["ips"] == []
+    edge = attribution["domain_edge_provider"]
+    assert edge["name"] == "Amazon CloudFront"
+    assert edge["product"] == "Amazon CloudFront"
+    assert edge["source"] == "tenant_distribution_domain"
+    assert edge["distribution_domain"] == distribution
+    assert edge["request_target"] == "Amazon Web Services, Inc."
+    assert edge["scope"] == "domain"
+    assert "inherited_from_domain" not in edge
+
+
+def test_cloudfront_tenant_distribution_reaches_every_resolved_ip() -> None:
+    """域名级分发关系投影到每个 IP，且明示其继承来源，不把 ASN 云主机当 Origin。"""
+    distribution = ".".join(("d111111abcdef8", "cloudfront", "net"))
+    attribution = A.build_endpoint_attribution(
+        "domain",
+        distribution,
+        {
+            "dns": {
+                "ips": ["198.51.100.61", "198.51.100.62"],
+                "hosting": [
+                    {
+                        "ip": "198.51.100.61",
+                        "asn": "AS16509",
+                        "org": "Amazon Web Services, Inc.",
+                        "country": "US",
+                    },
+                    {
+                        "ip": "198.51.100.62",
+                        "asn": "AS16509",
+                        "org": "Amazon Web Services, Inc.",
+                        "country": "US",
+                    },
+                ],
+            }
+        },
+    )
+
+    assert attribution is not None
+    assert len(attribution["ips"]) == 2
+    for ip_attribution in attribution["ips"]:
+        edge = ip_attribution["edge_provider"]
+        assert edge["name"] == "Amazon CloudFront"
+        assert edge["source"] == "tenant_distribution_domain"
+        assert edge["distribution_domain"] == distribution
+        assert edge["inherited_from_domain"] is True
+        assert ip_attribution["service_operator"]["name"] is None
+
+
+def test_custom_hostname_cloudfront_cname_preserves_distribution_lookup_key() -> None:
+    """已命中的精确 CNAME 同时保留自定义域与服务商可检索的完整分发域。"""
+    custom_hostname = "portal.infra.example"
+    distribution = ".".join(("d111111abcdef8", "cloudfront", "net"))
+    attribution = A.build_endpoint_attribution(
+        "domain",
+        custom_hostname,
+        {
+            "source_status": {"dns": {"status": "hit"}},
+            "dns": {
+                "cname": [distribution],
+                "ips": ["198.51.100.64"],
+                "hosting": [
+                    {
+                        "ip": "198.51.100.64",
+                        "asn": "AS16509",
+                        "org": "Amazon Web Services, Inc.",
+                        "country": "US",
+                    }
+                ],
+            },
+        },
+    )
+
+    assert attribution is not None
+    edge = attribution["domain_edge_provider"]
+    assert edge["source"] == "dns_cname_tenant_distribution"
+    assert edge["custom_hostname"] == custom_hostname
+    assert edge["distribution_domain"] == distribution
+    assert edge["request_target"] == "Amazon Web Services, Inc."
+    request_fields = "\n".join(edge["request_evidence_fields"])
+    assert custom_hostname in request_fields
+    assert distribution in request_fields
+    inherited = attribution["ips"][0]["edge_provider"]
+    assert inherited["custom_hostname"] == custom_hostname
+    assert inherited["distribution_domain"] == distribution
+    assert inherited["inherited_from_domain"] is True
+
+
+def test_custom_hostname_does_not_trust_non_hit_or_forged_cloudfront_cname() -> None:
+    """失败状态的旧值及后缀拼接/URL 伪值都不能升级为租户分发关系。"""
+    custom_hostname = "portal.infra.example"
+    distribution = ".".join(("d111111abcdef8", "cloudfront", "net"))
+    stale = {
+        "source_status": {"dns": {"status": "failed"}},
+        "dns": {"cname": [distribution]},
+    }
+    forged_suffix = {
+        "source_status": {"dns": {"status": "hit"}},
+        "dns": {"cname": [f"{distribution}.attacker.example"]},
+    }
+    forged_url = {
+        "source_status": {"dns": {"status": "hit"}},
+        "dns": {"cname": [f"https://{distribution}/path"]},
+    }
+
+    assert A.build_endpoint_attribution("domain", custom_hostname, stale) is None
+    assert A.build_endpoint_attribution("domain", custom_hostname, forged_suffix) is None
+    assert A.build_endpoint_attribution("domain", custom_hostname, forged_url) is None
+
+
 def test_domain_analyze_ip_resource_holder_marked_deferred() -> None:
     """★analyze 路径：域名解析 IP 无 resolved_ip_enrichment（IP-RDAP 未逐 IP 查）→ resource_holder
     须显式标 deferred='case_close'，区分「未查询」与结案后 name=None 的「查无登记方」。"""

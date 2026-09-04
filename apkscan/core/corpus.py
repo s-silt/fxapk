@@ -614,8 +614,9 @@ def shared_build_environments(entries: list[dict]) -> list[dict]:
 def _native_lib_hashes(report: dict) -> list[dict]:
     """报告登记的 App .so 指纹（meta["native_lib_hashes"]，由 native_fingerprint 分析器产）。
 
-    每项 ``{name, sha256, size}``——同族样本核心 .so 常逐字节相同，其 sha256 是家族级硬指纹，供
-    ``corpus seen <sha> --by so_sha256`` 一击反查全家族。按 sha256 去重排序确定；空/坏 → 空列表。绝不抛。
+    每项 ``{name, sha256, size}``，供 ``corpus seen --by so_sha256`` 召回字节相同或名称相同的候选。
+    SHA-256 相同只证明所取字节相同；名称相同甚至不证明内容相同。两者均不能单独认定家族或主体。
+    按 sha256 去重排序确定；空/坏 → 空列表。绝不抛。
     """
     objects: dict[str, dict] = {}
     for h in _meta(report).get("native_lib_hashes") or []:
@@ -623,7 +624,7 @@ def _native_lib_hashes(report: dict) -> list[dict]:
             continue
         sha = _s(h.get("sha256")).strip().lower()
         # ★形状校验：sha256 须 64 位十六进制——否则坏/导入的旧报告能凭任意串（截断哈希 / 占位符 / 路径）
-        #   造出假家族簇。size 须非负 int，否则记 None。不合形状即丢，绝不索引。
+        #   造出虚假的共享哈希候选簇。size 须非负 int，否则记 None。不合形状即丢，绝不索引。
         if len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha):
             continue
         size = h.get("size")
@@ -753,11 +754,12 @@ def manifest_entry(report: dict, case_id: str | None = None) -> dict:
         # 但登记于此，供 upsert 检出「同主键不同依赖版本」时告警（codex P1，不静默丢 dep 变体报告）。
         "dependency_versions": meta.get("dependency_versions")
         if isinstance(meta.get("dependency_versions"), dict) else None,
-        # App .so 家族级硬指纹（列表维度）：供 corpus seen --by so_sha256 一击反查全家族。
+        # App .so 指纹（列表维度）：仅供 corpus seen --by so_sha256 召回待复核候选。
         "native_lib_hashes": _native_lib_hashes(report),
         # 自建构建环境标识（列表维度）：.so 名与 sha256 都随机化时仍能串案的锚，见 _build_environments。
         "build_environments": _build_environments(report),
-        "sign_sha256": meta.get("sign_sha256"),  # 签名证书摘要 = 共享证书串案强锚
+        # 签名证书摘要用于候选召回；共享证书不能单独证明家族、开发者或运营主体相同。
+        "sign_sha256": meta.get("sign_sha256"),
         # ---- 加固 / 分类 ----
         "packer": meta.get("packer"),
         "is_hardened": bool(meta.get("is_hardened", False)),
@@ -2549,10 +2551,11 @@ def find_by_cname(entries: list[dict], value: str) -> list[dict]:
 
 def shared_config_objects(entries: list[dict]) -> list[dict]:
     """跨样本共享的远程配置对象簇：同一 url（同一 OSS 对象）或同一 sha256（配置内容字节相同）被 **≥2 个
-    不同样本** 引用——串案强锚（"样本 A 与 B 拉同一 bucket/config.dat" 或 "配置内容完全一致"）。
+    不同样本** 引用，供关联候选召回。URL 或内容相同不能单独认定同一家族或主体；须排除公开对象、镜像、
+    复用与重打包继承，并结合独立证据复核。
 
     返回按样本数降序的簇 ``[{key_type: url|sha256, key, samples: [sample_sha256...]}]``（url 与 sha256 各成
-    簇：内容一致的 sha256 簇是比 url 更强的佐证）。绝不抛。
+    簇；内容一致的 sha256 是比 URL 相同更具体的候选信号，但仍不是主体结论）。绝不抛。
     """
     groups: dict[tuple[str, str], set[str]] = {}
     for entry in entries:
@@ -2578,10 +2581,11 @@ def shared_config_objects(entries: list[dict]) -> list[dict]:
 
 
 def find_by_native_lib(entries: list[dict], value: str) -> list[dict]:
-    """按 .so 家族硬指纹反查样本：``value`` 匹配任一 native lib 的 sha256（大小写归一）或精确 name。
+    """按 .so SHA-256 或精确名称召回匹配样本候选。
 
-    A1 家族配方库的反查基石——核心业务 .so 逐字节相同即同族，一击拉出全家族样本。列表维度
-    （``native_lib_hashes`` 是列表，非 :func:`find_by` 的标量字段）。空值 → 空列表。绝不抛。
+    为保持既有 API，``value`` 仍匹配任一 native lib 的 sha256（大小写归一）或精确 ``name``。
+    哈希命中只证明记录的字节相同，名称命中只证明观测名称相同；返回值不构成家族或主体结论。
+    ``native_lib_hashes`` 是列表，非 :func:`find_by` 的标量字段。空值 → 空列表。绝不抛。
     """
     target = _s(value).strip()
     if not target:
@@ -2673,9 +2677,11 @@ def native_anchor_policy_snapshot() -> dict[str, object]:
 
 
 def native_anchor_weakness(name: str) -> str | None:
-    """该 ``.so`` 库名是否属**非单一主体独有**（共享它不足以并簇）→ 返回理由；否则 None。
+    """按库名识别已知通用组件并返回弱候选理由；未命中返回 None。
 
-    ★为什么必须降噪：``shared_native_libs`` 原先把「被 ≥2 样本共享的 .so」一律当强锚，
+    ``None`` 只表示当前规则未把该名称识别为通用组件，不表示锚点已被验证为强，也不表示家族或主体相同。
+
+    ★为什么必须降噪：``shared_native_libs`` 若把「被 ≥2 样本共享的 .so」直接当家族或主体证据，
     而实测有两类共享**与主体归属无关**：
 
     1. **加固壳运行时库** —— 同一款商用加固的壳 so 逐字节相同，凡用该加固的样本全都共享它。
@@ -2686,8 +2692,8 @@ def native_anchor_weakness(name: str) -> str | None:
     与 :mod:`apkscan.analyzers.build_provenance` 对第三方 SDK 构建路径的处置同一思路。
 
     ★判据只用**可命名、可解释**的名单（壳产品名 / 已知 SDK 库名），**绝不用统计阈值**：
-    「被很多样本共享」也完全可能是真的强关联（同族核心业务库正是如此），按频次降噪会把
-    最有价值的锚点误杀。
+    被很多样本共享的业务代码仍可能是较高价值的关联候选，按频次降噪会误杀候选；但即便没有
+    命中弱锚规则，也须结合独立证据复核，不能直接认定家族或主体。
     """
     base = posixpath.basename(_s(name).strip().replace("\\", "/")).lower()
     if not base:
@@ -2704,7 +2710,8 @@ def native_anchor_weakness(name: str) -> str | None:
 
     # ★先问「这是不是本应用自己的业务代码容器」。Flutter 的 libapp.so、Unity 的
     #   libil2cpp.so 装的是这个 App 自己的全部业务逻辑——两份样本共享同一份**逐字节相同**的
-    #   业务代码容器，是最强的同族证据，恰恰不能当第三方降噪掉。
+    #   业务代码容器，是较高特异性的关联候选，不能仅因框架名被当作第三方运行时降噪掉；
+    #   但字节相同仍不能单独认定家族或主体。
     #   而第三方名单是按子串匹配的，"libil2cpp" 就在里面（它服务于另一个用途：给扫描器
     #   划定输入范围）。同一张表被两处消费、目的相反，这里按用途取自己的口径。
     try:
@@ -2728,14 +2735,13 @@ def native_anchor_weakness(name: str) -> str | None:
 
 
 def shared_native_libs(entries: list[dict]) -> list[dict]:
-    """跨样本共享同一 .so（sha256 逐字节相同）被 **≥2 个不同样本** 引用——家族串案锚点候选。
+    """列出被 **≥2 个不同样本** 引用的相同 .so SHA-256，供关联候选召回。
 
     返回 ``[{sha256, name, samples, weak_anchor, weak_anchor_reason}]``。绝不抛。
 
-    ★ ``weak_anchor=True`` 的簇是**加固壳/第三方 SDK 撞出来的假聚簇**，不足以并案
-    （见 :func:`native_anchor_weakness`）。**标注而非删除**：读结果的人需要看见
-    「这簇是加固壳撞的」，静默丢弃会让人以为压根没有这个共享事实。
-    排序把强锚放前面（弱锚沉底），同强弱内仍按样本数降序。
+    ★ ``weak_anchor=True`` 表示名称命中已知加固壳/第三方 SDK 规则，不能据此并案。
+    ``weak_anchor=False`` 只表示未命中当前弱锚规则，不表示家族或主体已确认。标注而非删除，
+    以保留共享事实；排序把未命名为通用组件的候选放前、已标弱候选沉底，同组内按样本数降序。
     """
     groups: dict[str, set[str]] = {}
     names: dict[str, set[str]] = {}

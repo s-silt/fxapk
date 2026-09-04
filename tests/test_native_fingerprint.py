@@ -1,4 +1,4 @@
-"""native_fingerprint 分析器 + corpus so_sha256 家族反查（A1 框架）。零真实样本：合成 .so 字节。"""
+"""native_fingerprint 分析器 + corpus so_sha256 候选召回。零真实样本：合成 .so 字节。"""
 from __future__ import annotations
 
 import hashlib
@@ -29,7 +29,7 @@ def test_analyzer_hashes_app_so_into_meta() -> None:
 
 
 def test_analyzer_dedups_identical_so() -> None:
-    """两个同字节 .so（换皮包同一核心库）→ 去重为一条指纹。"""
+    """两个路径中的同字节 .so → 去重为一条指纹；不在分析器内推断来源。"""
     ctx = FakeContext(files={"lib/a/libx.so": _SO_A, "lib/b/liby.so": _SO_A},
                       native_libs=["lib/a/libx.so", "lib/b/liby.so"])
     hashes = NativeFingerprintAnalyzer().analyze(ctx).meta["native_lib_hashes"]
@@ -85,7 +85,7 @@ def test_declared_size_gate_skips_oversized_so() -> None:
 
 
 def test_native_lib_hashes_rejects_malformed_sha256() -> None:
-    """★P2 无修复即失败：meta 里 sha256 非 64 位十六进制（截断/非 hex/占位）→ 丢弃，不造假家族簇。
+    """★P2 无修复即失败：meta 里 sha256 非 64 位十六进制（截断/非 hex/占位）→ 丢弃，不造假候选簇。
 
     修前只判 `if sha`（任意非空串即收录），坏/导入的旧报告能凭 "deadbeef" 这类串造出假簇。断言坏形状被丢、
     负 size 归 None，修前必失败。
@@ -120,8 +120,8 @@ def test_manifest_entry_records_native_lib_hashes() -> None:
     assert shas == {_sha(_SO_A), _sha(_SO_B)}
 
 
-def test_find_by_so_sha256_pulls_family() -> None:
-    """★A1 家族反查：同核心 .so（_SO_A）的两样本 + 一无关样本 → --by so_sha256 只拉出前两个。"""
+def test_find_by_so_sha256_returns_matching_candidates() -> None:
+    """同一 .so SHA-256 的两条记录 + 一条不匹配记录 → 只召回前两条候选。"""
     entries = [_entry("s1", _SO_A, _SO_B), _entry("s2", _SO_A), _entry("s3", _SO_B)]
     hits = corpus.find_by_native_lib(entries, _sha(_SO_A))
     samples = sorted(e["sample_sha256"] for e in hits)
@@ -134,8 +134,19 @@ def test_find_by_so_sha256_case_insensitive_and_empty() -> None:
     assert corpus.find_by_native_lib(entries, "") == []
 
 
-def test_shared_native_libs_clusters_family() -> None:
-    """跨样本同一 .so sha256 被 ≥2 样本引用 → 家族簇。"""
+def test_find_by_native_name_is_candidate_recall_not_hash_equivalence() -> None:
+    """同名、不同字节的 .so 都会命中兼容查询，因此名称结果只能是候选召回。"""
+    entries = [
+        _named_entry("s1", ("libshared.so", _SO_A)),
+        _named_entry("s2", ("libshared.so", _SO_B)),
+    ]
+    hits = corpus.find_by_native_lib(entries, "libshared.so")
+    assert sorted(entry["sample_sha256"] for entry in hits) == ["s1", "s2"]
+    assert len({entry["native_lib_hashes"][0]["sha256"] for entry in hits}) == 2
+
+
+def test_shared_native_libs_groups_matching_candidates() -> None:
+    """跨样本同一 .so SHA-256 被 ≥2 样本引用 → 形成待复核候选簇。"""
     entries = [_entry("s1", _SO_A), _entry("s2", _SO_A), _entry("s3", _SO_B)]
     clusters = corpus.shared_native_libs(entries)
     core = [c for c in clusters if c["sha256"] == _sha(_SO_A)]
@@ -178,11 +189,11 @@ def test_native_anchor_weakness_names_packer_and_sdk() -> None:
 
 
 def test_business_code_container_is_not_downgraded_as_third_party() -> None:
-    """★★本应用自己的业务代码容器是**最强**的同族证据，不能被第三方名单降噪掉。
+    """本应用自己的业务代码容器是较高特异性的候选，不能被第三方名单误降噪。
 
     Flutter 的 libapp.so、Unity 的 libil2cpp.so 装着这个 App 的全部业务逻辑。
-    两份样本共享同一份逐字节相同的业务代码容器，说明的正是「同一开发主体」——
-    与"共享了同一个第三方组件"恰好相反。
+    两份样本共享同一份逐字节相同的业务代码容器，比共享框架运行时更具体，但仍须排除
+    公开构建产物与重打包继承，不能单独认定家族或主体。
 
     这里踩过的坑：第三方名单按**子串**匹配，而 "libil2cpp" 就在名单里（它在那儿服务的是
     另一个用途——给扫描器划定输入范围）。同一张表被两处消费、目的相反，串案这一侧必须
@@ -192,7 +203,7 @@ def test_business_code_container_is_not_downgraded_as_third_party() -> None:
     """
     for own in ("libil2cpp.so", "libapp.so", "lib/arm64-v8a/libil2cpp.so"):
         assert corpus.native_anchor_weakness(own) is None, (
-            f"{own} 被当第三方降噪了——Unity/Flutter 家族最强的锚点会被丢弃"
+            f"{own} 被当第三方降噪了——Unity/Flutter 业务代码候选会被丢弃"
         )
     # 与之相对：框架**引擎**库仍是第三方，照旧降噪。
     assert corpus.native_anchor_weakness("libunity.so") == "third-party-sdk"
@@ -237,8 +248,8 @@ def test_native_anchor_weakness_normalizes_path_and_case() -> None:
     assert corpus.native_anchor_weakness(_PACKER_SO_PREFIX) is not None
 
 
-def test_shared_native_libs_annotates_packer_but_keeps_business_strong() -> None:
-    """★核心用例：加固壳簇被标 weak_anchor，真业务 .so 簇仍是强簇（且弱锚沉底）。"""
+def test_shared_native_libs_annotates_packer_and_keeps_specific_candidate_first() -> None:
+    """加固壳簇标 weak_anchor，未命名为通用组件的业务候选排在其前。"""
     packer_blob = b"\x7fELF" + b"packer-runtime" * 30
     entries = [
         _named_entry("s1", ("libclientcore.so", _SO_A), (_PACKER_SO, packer_blob)),
@@ -254,7 +265,7 @@ def test_shared_native_libs_annotates_packer_but_keeps_business_strong() -> None
     packer = next(c for c in clusters if c["sha256"] == _sha(packer_blob))
     assert packer["weak_anchor"] is True
     assert packer["weak_anchor_reason"].startswith("packer:")
-    # ★标注而非删除：共享事实仍在（多个样本都列出），只是不当强锚
+    # ★标注而非删除：共享事实仍在（多个样本都列出），但不升级成家族或主体结论
     assert packer["samples"] == ["s1", "s2", "s3"]
 
     # 弱锚沉底：加固壳簇样本更多（3>2），若只按样本数排会排在前面
@@ -293,7 +304,7 @@ def test_shared_native_libs_classification_is_input_order_independent() -> None:
 
     真实场景：同一份 .so 在一个样本里叫业务名、在另一个样本里被改名成壳名（重打包/改名
     对抗），于是一个 sha 对应多个观测名。若分类取"第一个见到的名字"，那么 manifest 的
-    入库顺序（= 谁先 corpus add）就会决定这簇是强锚还是弱锚 —— 同一份证据两次运行给出
+    入库顺序（= 谁先 corpus add）就会决定这簇是否命中弱锚标注 —— 同一份证据两次运行给出
     相反结论，这类不确定性在串案里是直接的误判源。
 
     判据：把 entries 正序与逆序各跑一遍，``name`` / ``weak_anchor`` / ``weak_anchor_reason``
@@ -348,8 +359,32 @@ def test_shared_native_libs_missing_name_is_not_weak() -> None:
     assert cluster["weak_anchor"] is False and cluster["weak_anchor_reason"] is None
 
 
+def test_corpus_cli_help_marks_shared_values_as_candidates() -> None:
+    """用户可见 help 必须阻止把共享证书、配置或 native 命中直接升级为归属结论。"""
+    from typer.testing import CliRunner
+
+    from apkscan import cli
+
+    runner = CliRunner()
+    seen = runner.invoke(cli.app, ["corpus", "seen", "--help"])
+    shared_native = runner.invoke(cli.app, ["corpus", "shared-native", "--help"])
+    shared_config = runner.invoke(cli.app, ["corpus", "shared-config", "--help"])
+    assert seen.exit_code == shared_native.exit_code == shared_config.exit_code == 0
+
+    seen_help = " ".join(seen.stdout.split())
+    native_help = " ".join(shared_native.stdout.split())
+    config_help = " ".join(shared_config.stdout.split())
+    assert "命中只做候选召回" in seen_help
+    assert "不能单独认定同一家族或主体" in seen_help
+    assert "供关联候选召回" in native_help
+    assert "weak_anchor=false" in native_help
+    assert "不代表已确认家族或主体" in native_help
+    assert "不能单独认定同一家族或主体" in config_help
+    assert "家族级硬指纹" not in seen_help + native_help
+
+
 def test_cli_seen_by_so_sha256(tmp_path) -> None:
-    """★CLI 端到端：corpus seen <so_sha> --by so_sha256 一击拉出同族样本。"""
+    """CLI 端到端：corpus seen --by so_sha256 只召回哈希匹配候选。"""
     import json
 
     from typer.testing import CliRunner
@@ -380,7 +415,7 @@ def test_cli_seen_by_so_sha256(tmp_path) -> None:
     payload = json.loads(seen.stdout)
     assert payload["seen"] is True and payload["count"] == 2  # fam1 + fam2，不含 other
 
-    # ★shared-native：核心 .so 被 2 样本共享 → 家族簇
+    # ★shared-native：同一 .so 字节被 2 样本共享 → 待复核候选簇
     shared = runner.invoke(cli.app, ["corpus", "shared-native", "--corpus", str(corpus_dir)])
     assert shared.exit_code == 0, shared.stdout
     clusters = json.loads(shared.stdout)["clusters"]
@@ -397,7 +432,7 @@ def test_cli_shared_native_surfaces_weak_anchor(tmp_path) -> None:
     """★降噪信号必须走到消费方：weak_anchor / weak_anchor_reason 要出现在 CLI 的 JSON 里。
 
     只在 core 函数里算出来不算做完——``corpus shared-native`` 是唯一生产消费方，
-    字段没渲染出去，看报告的人照旧会把加固壳簇当强锚。
+    字段没渲染出去，看报告的人可能把加固壳簇误作高特异性候选。
     """
     import json
 

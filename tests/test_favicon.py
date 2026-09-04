@@ -3,7 +3,7 @@
 覆盖：
 - mipmap/drawable 下 ic_launcher.png → CONFIG_KEY Lead（value=favicon_mmh3=<hash>）。
 - Lead notes 含 FOFA / Shodan / ZoomEye 一键查询串；where_to_request 指向测绘平台。
-- result.meta["favicon_mmh3"] = <int>，供团伙聚类当并簇键。
+- result.meta["favicon_mmh3"] = <int>，供人工复核候选召回。
 - assets/www/static 下 favicon.* 也能定位。
 - denylist 命中（全透明/空白占位）→ 跳过，不产线索。
 - 无图标 / 坏字节 / read_file 抛异常 → 不抛、error 为 None。
@@ -46,7 +46,7 @@ def test_mipmap_ic_launcher_yields_lead_and_meta() -> None:
     assert result.error is None
     expected_hash = favicon_hash(_ICON_BYTES)
 
-    # meta 并簇键。
+    # meta 候选检索键。
     assert result.meta["favicon_mmh3"] == expected_hash
     assert isinstance(result.meta["favicon_mmh3"], int)
 
@@ -56,11 +56,14 @@ def test_mipmap_ic_launcher_yields_lead_and_meta() -> None:
     lead = leads[0]
 
     assert lead.value == f"favicon_mmh3={expected_hash}"
-    assert lead.subject == "待核（测绘 pivot 锚点）"
-    assert lead.confidence == Confidence.HIGH
-    assert lead.advice == "建议调证"
+    assert "32 位测绘 pivot" in (lead.subject or "")
+    assert lead.confidence == Confidence.MEDIUM
+    assert lead.advice == "待核"
     assert "测绘" in (lead.where_to_request or "")
-    assert any("公网 IP" in e for e in lead.evidence_to_obtain)
+    assert "无直接调证对象" in (lead.where_to_request or "")
+    evidence = "\n".join(lead.evidence_to_obtain)
+    assert "候选" in evidence and "32 位碰撞" in evidence
+    assert "独立证据" in evidence
 
     # notes 必含三家平台一键查询串。
     assert f'icon_hash="{expected_hash}"' in lead.notes  # FOFA
@@ -105,7 +108,7 @@ def test_denylisted_blank_icon_skipped() -> None:
 
     assert result.error is None
     assert not [lead for lead in result.leads if lead.category == LeadCategory.CONFIG_KEY]
-    # denylist 命中不应写 meta 并簇键（否则把通用图标当强连边）。
+    # denylist 命中不应写 meta 候选键（否则通用图标会制造大量误召回）。
     assert "favicon_mmh3" not in result.meta
 
 

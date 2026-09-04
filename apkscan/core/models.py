@@ -142,7 +142,7 @@ SNI_MASQUERADE_KEY: str = "sni_masquerade"
 #: （mitm 实测上游服务器 IP）/ ``runtime-pcap``（pcap 解出的真实 dst_ip）。其余 ``runtime*`` 子来源
 #: ——手编 / 合成兜底的 ``runtime-derived``（见 ``dynamic.merge._RUNTIME_DERIVED_SOURCE``）、
 #: ``*-decrypted``、``runtime-tshark`` 等——只证明「该值出现在 runtime 报告里」，不证明真接触。
-#: **信任边界的单一真源**：办案人面的 :attr:`Lead.is_runtime_contact`「实连/确认 C2」徽标与机器面的
+#: **信任边界的单一真源**：展示面的 :attr:`Lead.is_runtime_contact`「实连已观测」徽标与机器面的
 #: attribution 运行时行为角色门（``attribution.assemble`` 引用本常量）共用它，两面同口径、不各判一套。
 #: allowlist 而非 denylist：新出现的 content-derived 来源默认**不算** observed-contact（守 no-over-
 #: inference 契约的安全方向）。
@@ -154,7 +154,7 @@ OBSERVED_CONTACT_SOURCES: frozenset[str] = frozenset({"runtime", "runtime-pcap"}
 #: ★为什么必须显式撤销：证据去重签名含 ``source``，两条只差来源的证据会各自留下；而
 #:   :attr:`Lead.is_runtime_contact` 是**存在量词**——只要旧的 ``runtime-pcap`` 还在，
 #:   降档就等于没发生。真实路径是「先没采到 socket 快照就回灌了一次，后来补上快照重跑」：
-#:   第二次已经算出这条流不属于目标应用，报告却仍显示「已抓到通信的确认 C2」。
+#:   第二次已经算出这条流不属于目标应用，报告却仍显示「实连已观测」。
 #: ★反向不成立、也不要加：新证据是 ``runtime-pcap``（这次没做归因）时，绝不撤销已有的
 #:   ``runtime-derived``。前者是缺信息、后者是否定证据，缺信息不得给否定证据翻案。
 SUPERSEDED_EVIDENCE_SOURCES: dict[str, frozenset[str]] = {
@@ -285,11 +285,11 @@ class Lead:
 
     @property
     def is_c2(self) -> bool:
-        """是否疑似诈骗 App 的 **C2 / 主控后端服务器**（调证最该盯的落点）。
+        """是否进入网络端点的**高价值复核候选集**（字段名为兼容旧 schema 保留）。
 
-        判定：网络端点（DOMAIN/IP）且研判为「建议调证」——即 App 自有后端，已排除 CDN /
-        SDK / 公共服务（googleapis、地图、jsdelivr 等）/ 开源库内嵌站点。这类是 App 真实
-        通信或硬编码的命令与后端服务器，是还原资金流 / 冒充关系 / 服务器归属的首要目标。
+        判定仅为 DOMAIN/IP 且 advice=「建议调证」。这表示当前规则未把它降为已知共享/
+        第三方端点，并不证明 App 自有、实际通信、C2、主控或运营者身份。运行时接触需再看
+        :attr:`is_runtime_contact`，业务归属与运营者仍须结合证据链人工复核。
         """
         return self.category in (LeadCategory.DOMAIN, LeadCategory.IP) and self.advice == "建议调证"
 
@@ -300,7 +300,7 @@ class Lead:
 
         **注意**这是「动态侧出现」的宽口径信号，**不**等同于 observed-contact 级确认：手编 / 合成
         兜底的 ``runtime-derived`` 也 startswith ``runtime``、也命中本属性，但它只表示「该值出现在
-        runtime 报告里」、不证明真接触。要「已抓到通信的确认 C2」这档最强断言，用严一档的
+        runtime 报告里」、不证明真接触。要判断「已观测到端点实连」，用严一档的
         :attr:`is_runtime_contact`（仅 :data:`OBSERVED_CONTACT_SOURCES`）。徽标分层即据此二者分档，
         避免把「出现在报告里」误呈成「实连」。
         """
@@ -317,12 +317,12 @@ class Lead:
         仅当某条证据 source ∈ :data:`OBSERVED_CONTACT_SOURCES`（``runtime`` = mitm 实测上游 /
         ``runtime-pcap`` = pcap 解出真实 dst_ip）才为真——即真观测到了到该端点的网络流；``runtime-derived``
         （合成 / 非 runtime* 兜底）、``*-decrypted``、``runtime-tshark`` 等只算 :attr:`is_runtime_seen`
-        的「运行时出现」、**不**算接触。C2 若 ``is_runtime_contact`` 即「**已抓到通信的确认 C2**」；
-        仅 ``is_runtime_seen`` 而非 contact 只到「运行时出现、未确认接触」。与 attribution 运行时行为
+        的「运行时出现」、**不**算接触。``is_runtime_contact`` 只表示「**实连已观测**」，不确认
+        C2/主控性质；仅 ``is_runtime_seen`` 而非 contact 只到「运行时出现、未确认接触」。与 attribution 运行时行为
         角色的信任门（``attribution.assemble`` 引用同一 :data:`OBSERVED_CONTACT_SOURCES`）**同口径**：
         办案人徽标与机器面角色统一以 observed-contact 源标签为准、不再各判一套。注意本属性只据 source
         **标签**分档——标签本身的诚实性由 producer 侧保证：合成 / 派生路径须钉 ``runtime-derived`` 等非
-        contact 源（见 ``dynamic.merge._RUNTIME_DERIVED_SOURCE``），凡仍盖裸 ``runtime`` 的进程内生产者
+        contact 源（见 ``dynamic.merge._RUNTIME_DERIVED_SOURCE``）。凡仍盖裸 ``runtime`` 的进程内生产者
         （如 dead-drop 从回包体抽出、App 未直连的二级 C2）会绕过本档、属 producer 侧待收紧项，非本属性能判。
         """
         return any(
@@ -538,7 +538,7 @@ def merge_runtime_into_lead_dict(
     *,
     restored: "set[tuple[str, str, str]] | None" = None,
 ) -> tuple[bool, bool]:
-    """把一条 **runtime** 观测（已序列化的 lead dict）并进已存在的 lead dict，升为活体确认。
+    """把一条 **runtime** 观测（已序列化的 lead dict）并进已存在的 lead dict，刷新运行时分档。
 
     回灌层（pcap_ingest / probe_ingest）在 ``report.json`` 上做原地字典合并：命中已存在
     ``(category, value)`` 时不丢弃，而是把新 lead 里 source 以 ``runtime`` 开头的 Evidence
@@ -546,8 +546,8 @@ def merge_runtime_into_lead_dict(
     ``is_runtime_seen``；若并入 / 已有任一 :data:`OBSERVED_CONTACT_SOURCES`（runtime / runtime-pcap）
     证据，同步升 ``is_runtime_contact``——否则 pcap 实抓（``runtime-pcap``）并进旧静态 lead 后，dict
     上的 ``is_runtime_contact`` 会陈旧为 ``false``，与 :attr:`Lead.is_runtime_contact` 属性重算值矛盾、
-    下游按该字段筛「确认接触」会漏掉真确认的 C2。语义对齐 :attr:`Lead.is_runtime_seen` /
-    :attr:`Lead.is_runtime_contact` 与 ``dynamic/merge.py`` 的「静态命中同名 → 追加 runtime 证据、升活体确认」。
+    下游按该字段筛「确认接触」会漏掉已观测实连端点。语义对齐 :attr:`Lead.is_runtime_seen` /
+    :attr:`Lead.is_runtime_contact` 与 ``dynamic/merge.py`` 的「静态命中同名 → 追加 runtime 证据、刷新分档」。
 
     只搬 runtime Evidence（``existing`` 可能是静态 lead，静态证据原样保留）。
 
@@ -571,7 +571,7 @@ def merge_runtime_into_lead_dict(
 
     Returns:
         ``(evidence_merged, ledger_changed)`` 二元组，**两个语义不能合并成一个 bool**：
-        前者=真并入了新的当前案件 runtime 证据（调用方据此计「活体确认」并升 runtime 位），
+        前者=真并入了新的当前案件 runtime 证据（调用方据此计运行时合并并刷新 runtime 位），
         后者=抑制账本/档位发生了变化（值得落盘，但**不是**确认——账本不是证据）。
         合成一个的话，仅账本变化的合并会被计进「runtime 确认 N 条」的日志与统计，语义失真。
     """
@@ -697,7 +697,7 @@ def merge_runtime_into_lead_dict(
             ledger_changed = True
 
     # 派生位始终据全量 source_refs 重算。只有当前案件直接证据可升位；批次参考、旧版未说明
-    # 或坏 scope 即使 source 标签写成 runtime-pcap，也不得伪造「活体确认」。
+    # 或坏 scope 即使 source 标签写成 runtime-pcap，也不得伪造「实连已观测」。
     existing["is_runtime_seen"] = any(
         isinstance(ref, dict)
         and _scope_value(ref) == EvidenceScope.CASE_EVIDENCE.value
@@ -810,7 +810,8 @@ class ComponentSet:
     providers: list[Component] = field(default_factory=list)
 
 
-#: 分析网络模式。``passive``（默认）：只跑**被动**富化器（查第三方 OSINT 库，对目标零流量）；
+#: 分析网络模式。``passive``（默认）：不直连目标业务服务，但第三方查询会披露目标标识，DNS 还可能
+#: 被解析服务或权威 DNS 观察；
 #: ``authorized-active``：显式授权下才放行会**向目标发流量**的主动富化器（经
 #: SaaS 实例 live 探测目标端口/SSL/HTTP）。默认被动，契合取证「不接触目标」定位——主动探测须操作者
 #: 明确授权、且在报告中留痕。

@@ -1,7 +1,7 @@
 """ShodanEnricher 单测：mock 网络（requests），不发真实请求。
 
 覆盖 opt-in 门控（未配 key → 跳过）、IP host 解析、domain→resolve→host、404 查无记录（缓存避免复查）、
-网络异常 ok=False、缓存命中跳过触网、Shodan 归属国喂 forensic 辖区判定、境外源站被动定位渲染。
+网络异常 ok=False、缓存命中跳过触网、Shodan 归属国喂 forensic 辖区候选判定、境外基础设施候选渲染。
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 import apkscan.enrichers.shodan as sh_mod
-from apkscan.core import forensic
+from apkscan.core import exposure, forensic
 from apkscan.core.models import Endpoint
 from apkscan.enrichers.shodan import ShodanEnricher
 
@@ -44,7 +44,17 @@ _HOST_PAYLOAD = {
             "product": "Apache httpd",
             "version": "2.4.7",
             "cpe": ["cpe:/a:apache:http_server:2.4.7"],
-            "http": {"server": "Apache/2.4.7 (Ubuntu)", "title": "Go ahead and ScanMe!"},
+            "http": {
+                "server": "Apache/2.4.7 (Ubuntu)",
+                "title": "Go ahead and ScanMe!",
+                "headers": {
+                    "X-Powered-By": ["Express", "PHP/8.2"],
+                    "Set-Cookie": [
+                        "laravel_session=private-value; Path=/; HttpOnly",
+                        "XSRF-TOKEN=another-private-value; Path=/",
+                    ],
+                },
+            },
         },
     ],
 }
@@ -114,6 +124,33 @@ def test_ip_host_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
     svc80 = next(s for s in d["services"] if s["port"] == 80)
     assert svc80["product"] == "Apache httpd" and svc80["version"] == "2.4.7"
     assert svc80["http_server"] == "Apache/2.4.7 (Ubuntu)"
+    assert svc80["x_powered_by"] == ["Express", "PHP/8.2"]
+    assert svc80["cookie_names"] == ["laravel_session", "xsrf-token"]
+    assert "private-value" not in repr(svc80)  # Cookie 值不得进入归一结果 / 缓存 / 报告。
+    names = {stack["name"] for stack in exposure.assess_tech_stack(d)}
+    assert {"Node / Express", "Laravel"} <= names  # parser → fingerprint → rules 真接通。
+
+
+def test_http_header_fingerprint_parser_is_bounded_and_bad_input_safe() -> None:
+    payload = {
+        "data": [
+            {
+                "port": 80,
+                "http": {
+                    "headers": {
+                        "x-powered-by": "Express",
+                        "SET-COOKIE": "PHPSESSID=opaque; Path=/; HttpOnly",
+                        "x-ignored": {"bad": "shape"},
+                    }
+                },
+            },
+            {"port": 81, "http": {"headers": ["not", "a", "mapping"]}},
+        ]
+    }
+    services = sh_mod._parse_host(payload)["services"]
+    assert services[0]["x_powered_by"] == ["Express"]
+    assert services[0]["cookie_names"] == ["phpsessid"]
+    assert services[1]["x_powered_by"] == [] and services[1]["cookie_names"] == []
 
 
 def test_domain_resolves_then_host(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -226,7 +263,7 @@ def test_forensic_uses_shodan_country() -> None:
 
 
 def test_render_overseas_targets() -> None:
-    # 境外源站被动定位：源站归属(IP/ASN/org/geo) + 开放端口/服务指纹 + 关联主机名(串案)；零漏洞/利用。
+    # 境外基础设施候选：候选归属 + 端口/服务记录 + 关联主机名；零漏洞/利用。
     lines = forensic.render_overseas_targets({
         "ip": "198.51.100.36",
         "asn": "AS63949",
@@ -240,12 +277,12 @@ def test_render_overseas_targets() -> None:
         "hostnames": ["a.example", "b.example"],
     })
     blob = "\n".join(lines)
-    assert "源站被动归属" in blob and "198.51.100.36" in blob and "Linode" in blob
+    assert "基础设施候选归属" in blob and "198.51.100.36" in blob and "Linode" in blob
     assert "80(Apache httpd 2.4.7)" in blob
     assert "22(OpenSSH 6.6.1p1)" in blob
-    # 纯被动定位：绝不含漏洞方向 / CVE / 利用。
+    # 候选归属：绝不含漏洞方向 / CVE / 利用。
     assert "CVE" not in blob and "漏洞" not in blob and "利用" not in blob
-    assert "a.example" in blob and "串案" in blob
+    assert "a.example" in blob and "独立锚点" in blob
 
 
 def test_render_overseas_targets_empty_on_miss() -> None:

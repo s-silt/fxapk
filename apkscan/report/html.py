@@ -15,6 +15,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from apkscan.core import infra
 from apkscan.core.coverage import collect_coverage
+from apkscan.core.leads import _overseas_target_coverage, _project_overseas_profiles
 from apkscan.report import letters
 from apkscan.core.models import (
     Confidence,
@@ -99,7 +100,7 @@ DEDICATED_SECTION_CATEGORIES: frozenset[LeadCategory] = frozenset(
     {
         LeadCategory.CRYPTO_RECIPE,      # ★ 应用层加密配方（专章）
         LeadCategory.CONFIG_KEY,         # ② 调用插件 / 配置键值
-        LeadCategory.DOMAIN,             # ③ C2 / 主控域名 + ④ 通联域名
+        LeadCategory.DOMAIN,             # ③ 高价值域名候选 + ④ 其余通联域名
         LeadCategory.IP,                 # 同上
         LeadCategory.SDK_SERVICE,        # ⑤ 第三方 SDK → 厂商清单
         LeadCategory.PAYMENT,            # ⑥ 支付 / 资金
@@ -442,6 +443,11 @@ def _render_template(template: Any, report: Report) -> str:
     lead_groups = group_leads_by_category(report.leads)
     endpoints = split_endpoints(report.endpoints)
     enrichment_by_endpoint = {ep.value: _endpoint_enrichment(ep) for ep in report.endpoints}
+    raw_overseas_targets = (report.meta or {}).get("overseas_targets") or []
+    overseas_targets = _project_overseas_profiles(raw_overseas_targets, report.leads)
+    overseas_target_coverage = _overseas_target_coverage(
+        report.endpoints, raw_overseas_targets, report.leads
+    )
     config_key_leads = sort_leads_by_confidence(
         [
             lead
@@ -483,6 +489,10 @@ def _render_template(template: Any, report: Report) -> str:
         endpoint_total=len(report.endpoints),
         enrichment_by_endpoint=enrichment_by_endpoint,
         meta=report.meta or {},
+        overseas_targets=overseas_targets,
+        # overseas_targets 只是 Shodan/CT 命中画像；分母须另从 endpoint 路由面计算，
+        # 否则 ASN-only 候选会在 HTML 里消失，「0 条画像」还会被误读成「0 个候选」。
+        overseas_target_coverage=overseas_target_coverage,
         # ★覆盖缺口在 meta 里是散落的 <analyzer>_<suffix> 键，模板没法自己筛；
         #   这里按 core/coverage.py 的协议算好传进去（只含非零项）。没有它，
         #   读 HTML 的人看不到「哪些分析器没扫全」，会把 count=0 读成「样本确实没有」。

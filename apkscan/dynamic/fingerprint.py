@@ -1,8 +1,8 @@
 """图标 / favicon mmh3 指纹 —— 测绘引擎 pivot 的纯函数实现（零第三方依赖）。
 
-杀猪盘换皮但复用同一套后台前端 / 图标。一个 favicon hash 能把单包后端扩成同团伙站群：
-办案人把 hash 丢 FOFA/Quake/Shodan/Censys 反查同 hash 的全部公网 IP/域名（后台面板与
-钓鱼站群），再向机房/IDC 调服务器租用主体。也是团伙聚类的强连边键。
+favicon mmh3 可用于 FOFA/Quake/Shodan/Censys 候选检索，但它只是 32 位值，存在碰撞、
+通用图标和模板复用。相同值不能单独认定同一后端、站群、家族或运营主体；须再比对原始
+图标字节或 SHA-256、页面上下文、TLS/域名与运行时证据。
 
 本模块只提供两个纯函数：
 - ``mmh3_x86_32``：纯 Python MurmurHash3 x86 32-bit，返回**有符号** 32-bit int

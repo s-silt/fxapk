@@ -646,7 +646,7 @@ def test_cli_max_targets_caps_a_single_run(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_cli_active_enrichers_are_never_used(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
-    """★批量入口全程被动：``active=True`` 的源一律不纳入（对目标零流量）。"""
+    """★批量入口只纳入 ``active=False`` 源；第三方查询披露边界由各源说明。"""
 
     class _ActiveEnricher(BaseEnricher):
         name = "active_stub"

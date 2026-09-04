@@ -63,7 +63,10 @@
         "DOMAIN": 1
       },
       "comm_sessions": 0,
+      "overseas_candidate_hosts_total": 0,
+      "overseas_profiled_hosts": 0,
       "overseas_target_hosts": 0,
+      "overseas_unprofiled_hosts": 0,
       "total_leads": 2
     }
   },
@@ -128,7 +131,10 @@
         "BACKEND_CREDENTIAL": 1
       },
       "comm_sessions": 0,
+      "overseas_candidate_hosts_total": 0,
+      "overseas_profiled_hosts": 0,
       "overseas_target_hosts": 0,
+      "overseas_unprofiled_hosts": 0,
       "total_leads": 1
     }
   },
@@ -193,7 +199,10 @@
         "CARD_MERCHANT": 1
       },
       "comm_sessions": 0,
+      "overseas_candidate_hosts_total": 0,
+      "overseas_profiled_hosts": 0,
       "overseas_target_hosts": 0,
+      "overseas_unprofiled_hosts": 0,
       "total_leads": 1
     }
   },
@@ -262,7 +271,10 @@
         "CRYPTO_RECIPE": 1
       },
       "comm_sessions": 0,
+      "overseas_candidate_hosts_total": 0,
+      "overseas_profiled_hosts": 0,
       "overseas_target_hosts": 0,
+      "overseas_unprofiled_hosts": 0,
       "total_leads": 1
     }
   },
@@ -338,7 +350,10 @@
         "PAYMENT": 1
       },
       "comm_sessions": 0,
+      "overseas_candidate_hosts_total": 0,
+      "overseas_profiled_hosts": 0,
       "overseas_target_hosts": 0,
+      "overseas_unprofiled_hosts": 0,
       "total_leads": 3
     }
   },
@@ -403,7 +418,10 @@
       "by_advice": {},
       "by_category": {},
       "comm_sessions": 0,
+      "overseas_candidate_hosts_total": 0,
+      "overseas_profiled_hosts": 0,
       "overseas_target_hosts": 0,
+      "overseas_unprofiled_hosts": 0,
       "total_leads": 0
     }
   },
@@ -469,7 +487,10 @@
         "SDK_SERVICE": 1
       },
       "comm_sessions": 0,
+      "overseas_candidate_hosts_total": 0,
+      "overseas_profiled_hosts": 0,
       "overseas_target_hosts": 0,
+      "overseas_unprofiled_hosts": 0,
       "total_leads": 2
     }
   },
@@ -535,7 +556,10 @@
         "SELF_HOSTED_IM": 1
       },
       "comm_sessions": 0,
+      "overseas_candidate_hosts_total": 0,
+      "overseas_profiled_hosts": 0,
       "overseas_target_hosts": 0,
+      "overseas_unprofiled_hosts": 0,
       "total_leads": 2
     }
   },
@@ -606,7 +630,10 @@
         "WALLET_SECRET": 1
       },
       "comm_sessions": 0,
+      "overseas_candidate_hosts_total": 0,
+      "overseas_profiled_hosts": 0,
       "overseas_target_hosts": 0,
+      "overseas_unprofiled_hosts": 0,
       "total_leads": 1
     }
   }
