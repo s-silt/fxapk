@@ -3,6 +3,46 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
+## 1.13.0 — 2026-09-09
+
+本版补齐 JADX 证据链的查询与衔接：新查询值可查有界源码快照、主/备用索引全覆盖、
+家族候选比较可复用、查询回执进入底稿；终端输出对查询输入值只显示摘要。
+
+### Added
+
+- `fxapk jadx usage/callpath --apk-sha256 <SHA> [--index-map <映射>]`：按原 APK SHA 经
+  cache 根 `fxapk-jadx-index-map.json` 同时查询主索引与全部备用索引，逐索引保留来源
+  （index_manifest_sha256 / dex_lineage）与缺口；单索引诊断仍可用 `--jadx-index`。
+- `fxapk jadx compare <当前报告> <候选报告>`：对照两份报告与对应索引，输出家族候选的
+  共同点、差异与代码定位；跨类/包/路径匹配相同方法区域（body digest），按 native 字节
+  哈希比较重命名库；恒不认定同一运营者（`operator_identity_asserted=false`，附公共组件/
+  重打包继承/共同供应商替代解释），同 SHA 判 `same_sample_not_independent`。
+- `--out` 查询/比较回执：包含精确输入值（`query_inputs`）与绑定哈希，已存在且内容不同即
+  拒写（不覆盖既有证据）；重新查询用新文件。终端 stdout 对输入值只显示
+  `<query-value-sha256:…>` 摘要（结构化投影，仅打码字符串值、键名不受单字符查询值影响）。
+- analyze 启用 `--jadx-cache-root` 时自动保留有界 Java 源码快照（`query-sources/`，
+  schema `jadx-query-sources-1`）：总量 128 MiB、12000 文件、单文件 4 MiB 封顶，查询最多
+  检查 8 份快照、记录 10000 个命中，触限明确降级；快照不可变（同哈希冲突即拒）且查询前
+  全量校验（schema/manifest 绑定/逐文件哈希）；旧 1.6 索引保持字节不变。
+- 底稿衔接：`case_digest --jadx-receipt`（多次可叠加）把查询/比较回执接入 JSON/Markdown
+  底稿，逐回执保留事实与缺口（配套私有工具，不在本包）。
+
+### Changed
+
+- 查询覆盖如实分层：旧索引只为建库时选定值保存 postings，索引 `coverage=complete` 不再
+  意味着任意新值已覆盖——`usage` 另报 `query_coverage`，无快照或覆盖不足记
+  `query_value_coverage_unknown`；空结果≠不存在（caveat 保留）。
+- 索引映射读取区分「格式无效」（records/alternate_indexes 畸形即报错）与「合法但无该
+  SHA」（`apk_mapping_not_found`，partial 而非阴性）。
+- 快照查询异常不再吞掉已取得的索引命中（记 `source_query_failed`，query_coverage 降
+  partial）；上游反编译降级/排除 DEX 的原因传入快照回执（`jadx_run_degraded`/
+  `dex_excluded`），partial 必有 reason。
+- 独立比较函数（`compare_structure` / `compare_report_features`）返回值自带
+  `operator_identity_asserted=false` 与 caveats，单独消费不丢失约束。
+- AGENTS.md：新增「执行、授权与完成边界」（授权按终点区分、缺失信息只阻塞依赖步骤、
+  任务交付与案件闭环分别验收）；设备排查默认 `doctor --no-fix`，corpus 入库/五层闭环改按
+  本次范围与授权执行。
+
 ## 1.12.0 — 2026-09-04
 
 本版收紧证据语义并给普通 analyze 的联网富化加上不可绕过的预算硬门：任何画像信号都不再
