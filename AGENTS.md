@@ -4,14 +4,25 @@
 按能力门控的静态/动态证据采集 + 境外基础设施候选的被动归属，产出**仍需过证据门的线索（leads）**。本文件让你在新机
 clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件只讲**怎么跑**。
 
-> **本文件假定：一个 agent 独立跑完全程。** 没有第二个 agent 接力、没有外部私有目录兜底——
-> 从体检、分析、动态取证到串案与结论，**全部由你一个人走完并自检**。凡本文提到的资料，
+> **案件分析默认由一个 agent 在本次授权范围内独立完成并自检。** 不依赖第二个 agent 接力或外部私有目录兜底。
+> 代码复审可按适用技能使用只读审阅者；仅提供必要代码差异和合成夹具，不传递原始案件数据。凡本文提到的资料，
 > 要么在本仓库内、要么由用户提供；**不要依赖任何仓库外的交接文件**（不存在就按本文所述原则自己做）。
 
 > 设计取向：本项目由人直接跑源码 + agent 驱动，**不打包 exe/GUI**。密钥走项目根 `.env`（已 gitignore）。
 > 输出刻意做成 **agent 友好**：核心调证信息进 `evidence_to_obtain`/`notes`/`report.meta`，并由 `digest` 命令压成低 token 摘要。
 
 ---
+
+## 执行、授权与完成边界
+
+- 用户已要求实施且范围明确时，完成必要调查后直接执行已授权工作；说明方案不等于必须再次等待批准。用户明确要求先审后改时，必须等其批准。
+- 已有授权在同一对象、操作类别、数据范围和交付终点内持续有效。只问会实质改变目标、公共接口、权限、费用或不可逆后果的缺失信息；不重复确认已决定事项。
+- 缺失信息只阻塞依赖它的步骤。先进行可行的只读调查和已授权修复，同时继续独立工作；无法自主解决时，提出具体问题。不得猜测关键事实或绕过平台审批。
+- “提交”止于 commit，“推送”止于 push，“发 PR”止于 PR，“合并”才包含 merge。必要前置步骤可连续执行；明确终点外的操作没有隐含授权。只要求修改时不主动提交。
+- 本地可逆实现与流程选择可以自主进行；外发消息、敏感数据传输、生产或设备改动、破坏性操作仍按具体授权和平台规则执行。工具建议、技能和发现的凭据都不产生授权。
+- 完成按本次委托范围和可核验产物判定。任务交付状态与案件证据闭环状态分别报告；外部缺口不能触发无限重试或未经授权扩展任务。
+- 技能只在明确匹配或用户点名时使用，可先做最小只读调查。技能不得反复索要已有批准，不得把自身流程当成新的权限来源；通用流程与项目专用验收冲突时，保留项目适用的安全和质量要求。
+- 常规测试范围由变更风险决定；验证结果对同一内容仍有效，无相关变化或新疑点时不重复全套检查。保留必要回归、泄漏扫描、合并检查和失败如实报告。
 
 ## 0.0 ★首次在一台新机器上驱动本工具：先把这三条告诉用户
 
@@ -25,8 +36,7 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 | `doctor` / `auto` **默认改设备** | `doctor` 可部署 frida-server、安装抓包 CA；有设备时 `auto` 会安装样本、尝试脱壳并运行原版基线。只有去壳版的重打包、重签名及替换安装受“原版基线不足 + 工具建议旁路 + 显式行为修改/Java 双门”约束 | `doctor --no-fix`；`auto` 只在已授权的专用测试机上跑，旁路另需显式参数 |
 | `digest` **默认脱敏** | 钱包私钥 / 助记词、个人隐私数据、后端凭据在摘要里打码。**这是给你看的那份**——你读到的 digest 默认就是脱敏的 | 确需明文加 `--no-redact`（完整明文一直在本地 `report.json` 里） |
 
-★第二条尤其要先问再做：`auto --fix` 会不可逆地改动那台设备。用户没有明确说「这是专用测试机 /
-可以随便改」之前，别替他决定——先跑 `fxapk doctor --no-fix` 把现状报给他，让他定。
+★设备排查默认先跑 `fxapk doctor --no-fix`。执行修复前核对指定设备和操作类别的已有授权；未授权时先报告现状及具体改动，再请求批准。已获授权的同类修复不重复确认。专用测试机身份本身不等于清数据、替换样本或行为修改授权；旁路双门仍须单独满足。
 
 ★第三条的方向别搞反：`digest` 现在**默认就开着脱敏**，你不需要额外加参数来保护高敏值；
 反过来，当用户确实要看原值时才加 `--no-redact`，并且提醒他那份输出别再贴给第三方服务。
@@ -57,9 +67,9 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 
 ## 0. 行为铁律：直接用 fxapk 跑，别空想 / 别手搓
 
-你是来**驱动 fxapk 出结果**的，不是来手动逆向、读源码猜结论、或大段推演的。收到「分析这个 APK / 查这些线索 / 准备设备 / 为什么动态跑不起来」一类请求时——**先跑对应 fxapk 命令，再据产物决策**。命令产物（`report.json` / `digest` / `corpus` 台账）才是事实来源，不是你的推测。
+优先**驱动 fxapk 出结果**，不以手工推测替代证据。必要只读补充分析按本节的工具缺口规则执行。收到「分析这个 APK / 查这些线索 / 准备设备 / 为什么动态跑不起来」一类请求时——**先跑对应 fxapk 命令，再据产物决策**。命令产物（`report.json` / `digest` / `corpus` 台账）才是事实来源，不是你的推测。
 
-按意图直接选一条执行（别在跑命令前就长篇分析）：
+先核对本次范围和对应授权，再按意图选命令执行；下表不产生额外联网、设备改动或写回授权：
 
 | 用户想要 | 直接执行 |
 |---|---|
@@ -67,15 +77,15 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 | 一把梭（有真机：体检→静态→尝试脱壳→原版基线抓包→合并→闭环；仅旁路门全部满足时去壳重打包并重抓） | `fxapk auto <apk> --fix --strict-case` |
 | 已有报告补跑多源富化 + 五层闭环 | `fxapk case close <report.json>`（默认严格：partial=5、failed=6） |
 | 批量整个文件夹 | `fxapk batch <dir>` |
-| 准备真机环境 / 排查动态为什么跑不起来 | `fxapk doctor`（**默认就会动手修**；只想看现状用 `--no-fix`） |
+| 准备真机环境 / 排查动态为什么跑不起来 | `fxapk doctor --no-fix`；指定设备及修复类别已获授权后再用 `fxapk doctor` |
 | 真机脱壳 / 去壳重打包 / 抓包（单步） | `fxapk unpack <apk>` / `fxapk repackage <apk>` / `fxapk capture <pkg>` |
 | 串案 / 资产沉淀 /「这值见过没」反查 | `fxapk corpus add <report.json...>`（历次报告入库、跨版本回归）；`fxapk corpus seen <值> [--by sign_sha256\|so_sha256]`（按共享签名证书或 native 库哈希反查）；`fxapk corpus link-candidates`（rules-v2 可解释候选，分数只是复核优先级）；`link-explain` / `link-groups`（默认匿名复核视图）；`link-evaluate` / `link-readiness`（只输出聚合评测/训练门）；`fxapk corpus shared-native`（共享 .so 簇）；`fxapk corpus ls` 过滤列举 |
 | 反推配置端口的运行时归一化规则 | `fxapk port-normalize --declared <声明端口.json> --report <report.json>`（详见 §0.6.2） |
 
 - 先用 `fxapk digest <report.json>` 做低 token 分流和定位；形成五层归因、调证结论或正式报告时，
   必须回查 canonical `report.json` 中对应的结构化字段与原始证据。`digest` 是摘要，不能替代证据核验。
-- 命令失败/缺前置 → 看它打印的 `playbook`（每条是可直接复制的修复命令），照着修，**别自己另起炉灶手搓**。
-- 只有当**没有**对应 fxapk 命令、或要改 fxapk 代码本身时，才进入"分析/开发"模式（见第 5 节）。
+- 命令失败/缺前置 → 先读 `playbook` 并核对影响；在已有授权内修复。playbook 不产生安装、联网、设备修改或清数据的新授权。
+- 优先使用 fxapk；工具不存在、执行失败经排查仍无法解决，或无法提供下一步输入时，可对已授权检材进行只读补充分析，记录方法和证据出处。改工具代码时另按第 5 节执行，不用推测替代产物。
 
 ---
 
@@ -84,11 +94,11 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 **主工具（操作机已装，优先用，别空跑外部付费源）**：`fxapk`（本仓库，APK 取证→端点/IP/标识符+富化+corpus 反查台账）。默认富化不直连目标业务服务，但会向第三方数据源提交域名/IP，DNS 查询还可能被解析服务或权威 DNS 观察；动态运行 APK 的自身流量另行发生，不受静态富化的 `--mode` 阻断。
 
 **标准动作（先跑命令、据产物决策，别空想）**
-1. 有设备优先 `fxapk auto <apk> --online --out out --strict-case`；纯静态则先 `fxapk analyze <apk> --online --out out`。
-2. 对已有报告执行 `fxapk case close out/<名>.json`，把多源覆盖、五层归因和未闭环项写回原报告。
+1. 在本次范围内且指定设备操作已获授权时优先 `fxapk auto <apk> --online --out out --strict-case`；纯静态则先 `fxapk analyze <apk> --online --out out`。
+2. 本次包含闭环且允许联网富化和报告写回时，对已有报告执行 `fxapk case close out/<名>.json`，把多源覆盖、五层归因和未闭环项写回原报告。
 3. `fxapk digest out/<名>.json` 读紧凑摘要并定位重点；形成正式结论时，按相关目标回查
    canonical `report.json` 的结构化字段与原始证据，不能只凭摘要下结论。
-4. 不手搓逆向、不逐步复述工具过程、不把整份 report 倒出来。
+4. 不重复实现工具已有能力；必要只读补充分析按 §0 执行。不逐步复述工具过程、不把整份 report 倒出来。
 
 **调证重点优先级（本办案口径，覆盖工具默认的"高敏物证优先"）**
 1. **可依法调证的后端服务器（第一优先）**：先证明端点属于 App 自有/疑似业务后端，再按辖区、承载关系和可达法律渠道确定调证对象。IP 资源持有者/起源 ASN、承载或 CDN 服务商、域名注册主体与 ICP 备案主体是不同角色：前两者可提供与其服务关系相符的资源、租户或日志记录；ICP 只证明备案/接入登记，不能当作云服务商，也不能据此向备案主体索取云租户或控制面日志。任何一层都不能单独证明端点由 App 运营；纯第三方 SDK、公共解析服务和共享 CDN 仍须排除。CDN 边缘不得写成 Origin 或运营者，但分发服务商可以是账户或租户、分发与绑定域名、回源配置、访问日志和控制面审计记录的调证对象；具体字段按服务商口径填写。
@@ -132,16 +142,16 @@ QUIC Initial / socket 归因等被动证据；
 + 固定结构输出研判报告。**这些原则本身就是全部要求**——不需要额外手册；若用户另给了打法文档就照它，
 没有就按此执行。
 
-**禁止**：dump 全 report；手搓逆向；逐步复述工具过程；铺开"无需调证"的 SDK/CDN 噪音；把钱包/收款当重点。
+**禁止**：dump 全 report；以手工推测替代证据；逐步复述工具过程；铺开"无需调证"的 SDK/CDN 噪音；把钱包/收款当重点。
 
 ---
 
 ## 0.6 工作流闭环：别做一半就当完成
 
-分析一个样本**未走完闭环不算完成**。开工前先说清「这次要走到哪一步」；收工前逐条自检（动作见 §0.5 / 各命令）：
+开工前根据用户要求说明本次范围；以下是完整案件分析流程，仅执行本次范围及授权内的步骤。完成静态分析等约定交付可以称“本次任务完成”，但未过证据门不得称“案件已闭环”。外部条件缺失时交付现有产物、缺口和下一步，不无限重跑。
 
 1. **静态**：`analyze` → `report.json` + `digest`，确有产出。
-2. **动态**（有设备）：用 `capture --mode floor-only` 建立无需 Frida 的 floor PCAP 底座；它仍需设备、
+2. **动态**（本次包含动态且设备操作已授权）：用 `capture --mode floor-only` 建立无需 Frida 的 floor PCAP 底座；它仍需设备、
    adb 可用、设备 root（su）与设备侧 tcpdump，默认 `capture`/`auto` 当前仍要求 Frida。闭环完成要求同一公网业务候选通过目标 App
    归因、业务端点和双向载荷门；未唯一归因、APK 身份未知或只有 modified-runtime 证据时最多为 `partial`，
    只有通道或零业务候选为 `failed`。要明文优先走**被动**解密（TLS keylog + tshark）。
@@ -156,9 +166,9 @@ QUIC Initial / socket 归因等被动证据；
 3. **富化 / 判型**：每个「建议调证」端点判辖区 + 判前端/落地；覆盖情况必须读逐目标、逐来源回执，
    区分 `hit` / `no_record` / `failed` / `skipped` / `disabled`。命中少可能是真无记录，不能据命中数反推“源没跑全”。
 4. **降噪**：剔反诈拦截页和大厂共享端点；CDN 边缘不能当落地机，但仍保留其分发关系与可调证记录类型。
-5. **串案**：独特字值（appkey / 证书 / CNAME 模板）跨案自查。
-6. **五层闭环（收工前必跑）**：`fxapk case close <report.json>`。逐目标核验 ①运行时业务证据；② IP 资源登记持有者；③ BGP 前缀/起源 ASN；④云/IDC/CDN/防红分发关系；⑤最终调证对象（向谁调、取什么）。CDN/边缘没有 Origin 必须保持 `partial`。
-7. **状态验收**：只有 `report.meta.closure.status=complete` 才能称完成。`partial` / `failed` 必须原样汇报 `gaps` 和 `next_actions`，不能把“命令跑完”表述成“案件闭环”。自动流程用 `fxapk auto <apk> --strict-case`，退出码 `0/5/6` 分别对应 `complete/partial/failed`。
+5. **串案**（本次范围包含且已提供授权库时）：独特字值（appkey / 证书 / CNAME 模板）跨案自查。
+6. **五层闭环（本次包含闭环且允许联网与写回时执行）**：`fxapk case close <report.json>`。逐目标核验 ①运行时业务证据；② IP 资源登记持有者；③ BGP 前缀/起源 ASN；④云/IDC/CDN/防红分发关系；⑤最终调证对象（向谁调、取什么）。CDN/边缘没有 Origin 必须保持 `partial`。
+7. **状态验收**：只有 `report.meta.closure.status=complete` 才能称“案件证据闭环完成”；本次委托是否完成另按约定范围验收。`partial` / `failed` 必须原样汇报 `gaps` 和 `next_actions`，不能把“命令跑完”表述成“案件闭环”。自动流程用 `fxapk auto <apk> --strict-case`，退出码 `0/5/6` 分别对应 `complete/partial/failed`。
 
 收工必说清 **做了什么 / 没做什么（为什么）/ 风险 / 下一步**——别把半程当终点、别自认为完成。
 
@@ -171,11 +181,11 @@ QUIC Initial / socket 归因等被动证据；
 读报告的 `analyzer_status`（skipped 会如实带原因），别假定"跑完就是全跑了"。
 
 **下面这些永远不会自动发生**——它们要么需要你提供工具拿不到的输入，要么是跨样本操作。
-跑完 `analyze` 就收工 = 漏掉半个系统：
+完整分析任务还需按范围补充下表；用户仅要求静态分析或只读检查时不自动扩展：
 
 | 必须手动补 | 为什么不能自动 | 什么时候做 |
 |---|---|---|
-| `fxapk corpus add out/<名>.json` | 库根含案件数据，须显式 `--corpus`／`FXAPK_CORPUS` 指向**工作树外** | **每次分析完都做**，否则串案/家族反查没有数据 |
+| `fxapk corpus add out/<名>.json` | 库根含案件数据，须显式 `--corpus`／`FXAPK_CORPUS` 指向**工作树外** | 本次包含入库、库路径明确且写入已获授权时执行；否则记录未入库，不阻塞静态报告交付 |
 | `fxapk corpus seen <值> --by so_sha256` / `corpus shared-native` | 跨样本操作，要先有库 | 想召回家族候选，并结合其他独立锚点复核时 |
 | `fxapk config-channel --prefix … --domain …` | 前缀常量与基域**要你自己从样本常量里判断**哪个是 | 报告显示配置下发但静态无 URL 时 |
 | `fxapk port-normalize --declared … --report …` | 声明端口来自**你的解密结果**，工具自己拿不到 | 解出配置里的 raw 端口后 |
@@ -447,6 +457,7 @@ DOMAIN/IP，「已画像 0」绝不等于「候选 0」。
 ---
 
 ## 5. 开发约定（改代码时）
+- 文档、指令或 PR 元数据变更采用相关格式、引用、差异及泄漏检查，不因无代码变化重复代码测试；涉及代码行为时保留以下必需检查。
 - Python type hints；测试用 **pytest**（不要 unittest）。跑全套：`python -m pytest -q`；快跑（排除重型）：`python -m pytest -q -m "not slow"`。
   - `@pytest.mark.slow` 标记的真 spawn 端到端等价测试需本地 `*.apk` 样本（`FXAPK_TEST_APK` 或仓库内任一 `*.apk`），无样本自动 skip（CI 不挂）。
 - 富化器（`apkscan/enrichers/*.py`）继承 `BaseEnricher`，自动发现；失败吞成 `EnrichmentResult(ok=False)`
@@ -455,7 +466,7 @@ DOMAIN/IP，「已画像 0」绝不等于「候选 0」。
   - `FXAPK_NO_PARALLEL=1` 强制串行（排障/兼容）；`FXAPK_MAX_WORKERS=N` 钳死 worker 数（=1 即强制串行）。
   - `FXAPK_WORKER_BASE_MB` / `FXAPK_MEM_SAFETY`（0<v≤1）现场覆盖内存封顶的标定（单 worker 估算 / 安全系数）。
   - ★ 改并行或快照路径须守不变量 **「串行 == 并行 逐字节一致」**（由 slow 等价测试背书）；分析器输出须确定（跨进程 PYTHONHASHSEED 不同，set 派生的顺序要显式排序）。
-- **合并前必过三关（本地）**：`python -m ruff check apkscan tests` + `python -m pyright apkscan` + `python -m pytest -q`——CI（`.github/workflows/ci.yml`）这三样都跑，**只跑 pytest/pyright 不够，ruff 必跑**（曾因一个未用 import F401 把 CI 刷红）。
+- **代码合并前必过三关（本地）**：`python -m ruff check apkscan tests` + `python -m pyright apkscan` + `python -m pytest -q`——CI（`.github/workflows/ci.yml`）这三样都跑，**只跑 pytest/pyright 不够，ruff 必跑**（曾因一个未用 import F401 把 CI 刷红）。
 - **CI 环境对齐**：CI 装的是 `pip install -e "."`。新增**可选依赖**必须进 `pyproject` 对应 extra（如 pcap 深度解析→`pcap`/`dynamic`），且 ci.yml 两个 job 都要装上它，否则 CI 缺包报 `ModuleNotFoundError`/pyright 解析失败。依赖某可选 extra 的测试在模块顶部 `pytest.importorskip("<pkg>")`，未装该 extra 的环境优雅跳过。
 - **合并前等 CI 绿**：开 PR 后 `gh run watch <id> --exit-status` 等 CI 跑完再 `gh pr merge`——别本地绿就盲合（本地与 CI 环境/依赖/平台不一致，本地缺 ruff、CI 缺可选依赖都坑过）。
 - commit：conventional commits OK，中文 OK；**不要** `--no-verify` / 不要 force push 到 master；未经指示不主动 commit。
