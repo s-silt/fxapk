@@ -205,8 +205,15 @@ AI 看你给的是什么，自己挑命令：
 | 用实验模型 shadow 重排规则候选（不扩张召回、不突破规则 caps） | `fxapk corpus link-candidates --corpus <库> --model <模型.json>` |
 | 把线索导成 CSV | `fxapk export out/app.json` |
 | 两份报告比差异 / 把报告压成 agent 可读的 JSONL | `fxapk diff a.json b.json`、`fxapk jsonl out/app.json` |
-| 在已建的 JADX 持久索引里查某个值用在哪 / 两个方法间有没有静态调用路径（**bounded**；空结果≠不可达，`resolution` 只有 `name_unique` / `ambiguous` / `not_in_index` 三态、不是方法绑定） | `fxapk jadx usage <值> --jadx-cache-root <cache> --jadx-index <key>`、`fxapk jadx callpath 'cls#m/0' 'cls#n/1' --jadx-cache-root <cache> --jadx-index <key>` |
+| 查询 JADX 使用位置或启发式调用路径；按原 APK SHA 查询主及全部备用索引 | `fxapk jadx usage <值> --jadx-cache-root <cache> --apk-sha256 <sha> --out <receipt.json>`；`fxapk jadx callpath 'cls#m/0' 'cls#n/1' --jadx-cache-root <cache> --apk-sha256 <sha>`；单索引诊断仍可用 `--jadx-index <key>` |
+| 对照两份报告与对应 JADX 索引，整理家族候选的共同点、差异和代码定位 | `fxapk jadx compare <subject-report.json> <candidate-report.json> --jadx-cache-root <cache> --out <comparison.json>`；相似性不代表同一运营者 |
 | 识别线（全部只读 / 离线；模型只能写 proposed）：从判断账本投影重分析请求 / 校验标签文件 / 构建与校验防泄漏 split / 评测并过晋级门（门未过退出码 4，可当 CI 闸） | `fxapk recognize reanalysis <ledger> --out <requests.jsonl>`、`fxapk recognize labels validate …`、`fxapk recognize split build\|validate …`、`fxapk recognize evaluate …` |
+
+JADX 多索引查询默认读取 cache 根的 `fxapk-jadx-index-map.json`，也可用 `--index-map` 指定映射。
+旧 1.6 索引只为建库时选定值保存 postings，因此索引 `coverage=complete` 不保证任意新值已覆盖；
+查询另报 `query_coverage`。启用 `--jadx-cache-root` 的新分析会在 `query-sources` 保存有界 Java 快照，
+供后续新值查询，保持原索引字节不变；缺快照或覆盖不足会明确标记。快照和 `--out` 回执包含受控材料，
+保留在本地证据目录，不公开提交。`callpath` 的 `name_unique` 仅是候选简单名唯一，不证明方法绑定。
 
 凡是读取或写入样本库的 `corpus` 子命令，都要指定库目录：`--corpus <库>`，或者先设好
 `FXAPK_CORPUS` 环境变量。库根会存样本数据，别放在代码仓库里面。

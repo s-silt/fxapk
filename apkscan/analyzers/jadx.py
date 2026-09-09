@@ -732,6 +732,7 @@ class JadxAnalyzer(BaseAnalyzer):
         'jadx_endpoint_count': 'record',
         'jadx_index_key': 'record',
         'jadx_index_status': 'coverage',
+        'jadx_query_sources': 'record',
         'jadx_java_files': 'coverage',
         'jadx_ownership_summary': 'record',
         'jadx_receipt': 'coverage',
@@ -1031,6 +1032,24 @@ class JadxAnalyzer(BaseAnalyzer):
                     index_receipt.pop("key", None)
                     result.meta.pop("jadx_index_key", None)
                 result.meta["jadx_index_status"] = index_receipt["status"]
+
+                # Preserve the actual decompiler view for later, previously
+                # unknown queries. Frozen 1.6 shards remain byte-identical.
+                if index_receipt["status"] in {"built", "reused", "partial"}:
+                    from apkscan.core.jadx_sources import capture_sources
+
+                    try:
+                        source_receipt = capture_sources(
+                            Path(cache_root), str(result.meta["jadx_index_key"]), Path(tmp),
+                            coverage="complete" if status == "ok" and not excluded_paths else "partial",
+                            coverage_reasons=sorted(
+                                (["jadx_run_degraded"] if status != "ok" else [])
+                                + (["dex_excluded"] if excluded_paths else [])
+                            ),
+                        )
+                    except Exception:  # noqa: BLE001 - optional query material must not fail analysis
+                        source_receipt = {"coverage": "partial", "reason_codes": ["source_capture_failed"]}
+                    result.meta["jadx_query_sources"] = source_receipt
 
             # --------------------------------------------------------------
             # P2-C：baseline ownership 是 subject 索引之上的独立旁路。双 opt-in

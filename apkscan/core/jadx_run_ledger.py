@@ -785,7 +785,10 @@ def _anchor(
 ) -> dict[str, object]:
     """锚只写实际存在且语义匹配的字段：digest/event_count 只描述已验证的磁盘文件；
     attempted_* 描述本次拟发布字节——冲突/失败时绝不冒充磁盘摘要。"""
-    value: dict[str, object] = {"locator": locator, "replay_ok": replay_ok}
+    value: dict[str, object] = {
+        "locator": locator, "replay_ok": replay_ok,
+        "observation_surface_only": True, "actual_usage_query_count": 0,
+    }
     if visibility_gaps is not None:
         value["visibility_gaps"] = visibility_gaps
     if digest is not None:

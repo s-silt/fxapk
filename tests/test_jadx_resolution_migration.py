@@ -381,7 +381,9 @@ def test_migration_reason_is_stable_code_only(tmp_path: Path) -> None:
         ]
     )
     assert code == 0 and data is not None
-    assert data == {"status": "miss", "reason": "schema_drift"}
+    assert data["status"] == "miss" and data["reason"] == "schema_drift"
+    assert data["index_key"] == key
+    assert data["query_type"] == "callpath"
     assert re.fullmatch(r"[a-z][a-z0-9_]*", data["reason"]) is not None
     assert "$." not in raw
     assert "Traceback" not in raw

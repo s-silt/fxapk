@@ -725,6 +725,7 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
                 for key in (
                     "locator", "digest", "attempted_digest", "event_count",
                     "attempted_event_count", "replay_ok", "reason", "published",
+                    "observation_surface_only", "actual_usage_query_count",
                 )
                 if key in raw_ledger
             }
