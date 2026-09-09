@@ -31,9 +31,12 @@ def digest_bytes(data: bytes) -> str:
 
 
 def contained(root: Path, relative: str) -> Path:
-    """Statically reject absolute paths, traversal and existing links.
+    """Statically reject absolute paths, traversal and existing symlinks.
 
     Concurrent changes and replacement after checks are not guarded against.
+    Paths whose ``resolve()`` differs from ``absolute()`` for benign reasons
+    (Windows 8.3 short names, case normalization, macOS /var aliases) are
+    accepted: only an actual symlink on the path is rejected.
     """
     root = root.absolute()
     path = root / relative
@@ -42,7 +45,7 @@ def contained(root: Path, relative: str) -> Path:
     if not path.resolve().is_relative_to(root.resolve()):
         raise ValueError("path_outside_root")
     for part in (path, *path.parents):
-        if part.is_symlink() or (part.exists() and part.resolve() != part.absolute()):
+        if part.is_symlink():
             raise ValueError("linked_path")
         if part == root:
             break

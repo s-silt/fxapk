@@ -1,6 +1,7 @@
 """Offline regressions for query coverage, alternate indexes and report handoff."""
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,49 @@ from apkscan.core.jadx_sources import capture_sources, query_sources
 from tests import test_jadx_query_cli as fixture
 
 SHA = "ab" * 32
+
+
+def _bare_cache(tmp_path: Path, root: Path = None):
+    cache = tmp_path / "cache"
+    key = SHA
+    (cache / key).mkdir(parents=True, exist_ok=True)
+    (cache / key / "manifest.json").write_bytes(b"{}")
+    return cache, key, root if root is not None else tmp_path
+
+
+def test_capture_survives_runner_path_normalization(tmp_path):
+    """CI runner paths arrive as Windows 8.3 short names (C:\\Users\\RUNNER~1\\...)
+    or macOS aliased temp roots; resolve() != absolute() for these benign forms
+    must not be judged as a linked path (regression: source_unreadable on CI)."""
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "A.java").write_text("// benign\n", encoding="utf-8")
+    target = root
+    if sys.platform == "win32":
+        import ctypes
+        buf = ctypes.create_unicode_buffer(1024)
+        if ctypes.windll.kernel32.GetShortPathNameW(str(root), buf, 1024):
+            target = Path(buf.value)
+    cache, key, source = _bare_cache(tmp_path, target)
+    receipt = capture_sources(cache, key, source, coverage="complete")
+    assert receipt["file_count"] == 1
+    assert receipt["reason_codes"] == []
+
+
+def test_capture_rejects_real_symlink_source(tmp_path):
+    """A genuine symlink component on the source path is still rejected."""
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "A.java").write_text("// benign\n", encoding="utf-8")
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(real, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation unavailable on this platform/permission")
+    cache, key, source = _bare_cache(tmp_path, link)
+    receipt = capture_sources(cache, key, source, coverage="complete")
+    assert "source_unreadable" in receipt["reason_codes"]
+    assert receipt["file_count"] == 0
 
 
 def _source_index(tmp_path, monkeypatch):
