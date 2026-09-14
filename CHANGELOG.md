@@ -3,6 +3,41 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
+## 1.13.1 — 2026-09-14
+
+本版修复多源富化的归属查询错误并引入两阶段入口：先免 Key 基础核验、再按证据缺口选 API；
+逐源回执可审计，凭据绝不进入任何输出。
+
+### Added
+
+- 新免 Key 基础核验源：双视角 DoH（dns.google + cloudflare-dns，A/AAAA/CNAME/NS 8 视图带
+  冲突检测，NS 只查所给名称并声明不证明父级委派）、Team Cymru origin ASN（DNS TXT 反查，
+  前缀包含校验拒串答，登记国≠地理国语义声明）、InternetDB（标注 `source_family=shodan`
+  防同源误当独立印证，`live_scan=false`）。
+- `fxapk enrich inventory`：零联网盘点全部已实现来源、凭据配置状态与产品权限标记，只出
+  变量名不出值。
+- `fxapk enrich batch --stage baseline|api [--providers ...] [--credential-slot 1|2]`：
+  按阶段与缺口选源；`--credential-slot` 显式选择 Quake/DayDayMap 凭据槽，不自动换号规避
+  限频；微步/WhoisXML 等按产品显式选择（未核权限不发请求）。
+- 逐源回执：起止时间、出口（direct/system_proxy）、接口 origin、响应 SHA-256、HTTP 状态、
+  错误分类与凭据槽位；DayDayMap 纳入核心计划与执行。
+- 鉴权/额度/权限错误停止重复请求（熔断）；瞬时错误每 10 个目标放行一次试探并可恢复。
+
+### Changed
+
+- 适配修复：Quake/FOFA 统一 HTTPS 完整端点校验（无效 URL 预演即阻止）；ZoomEye 迁移 v2
+  POST/qbase64；Censys 正确读取 `result.resource` 并保留服务观察时间；Hunter 缩小查询页并
+  保留 ICP company/number；Shodan 域名解析失败与库中无记录分离（旧 note 缓存识别重试，
+  无记录缓存防额度损耗）。
+- 凭据净化全面收紧：回执 endpoint 只记 origin（不含 path）；脱敏覆盖环境密钥原值与去除
+  空白后的值；`business_code` 与全部环境密钥比对，命中即置空。
+- 全部富化请求禁重定向（`redirect_not_followed` 不跟随，不向重定向目标发请求）。
+- DNS 视图截断或拒收记录（私网/保留段）时 `coverage_complete=false` 并计入缺口汇总。
+- CONTRACTS 版本失效（censys/zoomeye/shodan/quake=2）作用于 batch 账本续跑；case close
+  的有限重富化沿用既有规则，不改写旧报告终态。
+- 新增提供方域登记进泄漏扫描白名单（zoomeye.ai / dns.google / cloudflare-dns.com /
+  cymru.com / threatbook.cn / whoisxmlapi.com）。
+
 ## 1.13.0 — 2026-09-09
 
 本版补齐 JADX 证据链的查询与衔接：新查询值可查有界源码快照、主/备用索引全覆盖、
