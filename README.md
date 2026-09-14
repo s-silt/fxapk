@@ -243,6 +243,8 @@ Phase 1 到 corpus 的机器接口优先直接传经校验的 `case-package.json
 BGP 宣告、托管分发、最终归属对象）；`partial` 是还有明确缺口；`failed` 是静态就跪了、或者要求动态
 却没抓到业务流量、或者压根没有能收口的主目标。前面套着 CDN、源站还没定位出来的，不会判 complete。
 
+CONTRACTS 版本失效仅作用于 batch 账本续跑；case close 的有限重富化沿用其既有规则，不改写旧报告终态。
+
 ### 两阶段交接与四种状态
 
 公共协议不绑定 OneDrive、某个 AI 或某台机器。Phase 1 负责产生报告、附件和不可变

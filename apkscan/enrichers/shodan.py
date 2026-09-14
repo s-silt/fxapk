@@ -282,7 +282,7 @@ class ShodanEnricher(BaseEnricher):
         if kind == "domain":
             ip = self._resolve(value, key)
             if not ip:
-                raise _ShodanMiss(f"Shodan 无法解析域名为 IP：{value}")
+                raise ValueError("dns_resolution_failed")
         else:
             ip = value
 
@@ -316,7 +316,13 @@ class ShodanEnricher(BaseEnricher):
         if isinstance(cached, dict) and self._cache_is_fresh(cached):
             logger.debug("Shodan 缓存命中：%s", value)
             data = {k: v for k, v in cached.items() if k != _CACHED_AT_KEY}
-            return EnrichmentResult(provider=self.name, ok=True, data=data)
+            # Older caches contain only note/source and were incorrectly counted as hits.
+            if "无法解析" in str(data.get("note", "")):
+                cached = None  # Failed DNS must be retried, not cached as a host miss.
+            else:
+                if "库中无该主机记录" in str(data.get("note", "")):
+                    data["_source_status"] = "no_record"
+                return EnrichmentResult(provider=self.name, ok=True, data=data)
         if isinstance(cached, dict):
             logger.debug("Shodan 缓存过期，重查：%s", value)
 
@@ -325,12 +331,14 @@ class ShodanEnricher(BaseEnricher):
             data = self._query(value, ep.kind, key)
         except _ShodanMiss as miss:
             # 库中无记录：缓存空标记避免复查（耗额度），按"查询无结果"返回（ok=True 无值）。
-            entry = {"note": str(miss), "source": "shodan"}
+            entry = {"note": str(miss), "source": "shodan", "_source_status": "no_record"}
             self._save_cache_entry(value, entry)
             return EnrichmentResult(provider=self.name, ok=True, data=entry)
         except Exception as exc:  # noqa: BLE001 — 富化失败不得炸主流程
             # requests 的异常文本可能包含带 key 的完整 URL，只保留异常类型，避免密钥进日志/报告。
             error_type = type(exc).__name__
+            if isinstance(exc, ValueError) and str(exc) == "dns_resolution_failed":
+                error_type = "dns_resolution_failed"
             logger.debug("Shodan 查询失败：%s（%s）", value, error_type)
             return EnrichmentResult(provider=self.name, ok=False, error=error_type)
 

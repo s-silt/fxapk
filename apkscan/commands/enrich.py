@@ -129,6 +129,9 @@ def batch(
         help="单次运行目标上限；不得超过内置硬顶，因该入口会执行 Shodan 等额度型来源。",
     ),
     resume: bool = typer.Option(True, "--resume/--no-resume", help="续跑：跳过明细 NDJSON 里已完成的目标（默认开）。"),
+    stage: str = typer.Option("all", "--stage", help="baseline=免 Key 基础核验；api=按配置补充；all=两类来源。"),
+    providers: str = typer.Option("", "--providers", help="可选，逗号分隔的精确源名；显式选择产品源表示已核本次查询范围。"),
+    credential_slot: int = typer.Option(0, "--credential-slot", min=0, max=2, help="Quake/DayDayMap 凭据槽：0=首个已配置；1/2=明确选择。不会因限频自动换账户。"),
 ) -> None:
     """批量富化一份目标清单。
 
@@ -159,9 +162,20 @@ def batch(
     from apkscan.core.registry import discover_enrichers
 
     enrichers = [e for e in discover_enrichers() if getattr(e, "active", False) is False]
+    from apkscan.core.enrichment_profiles import configuration_issues, select_enrichers
+
+    try:
+        enrichers = select_enrichers(enrichers, stage, providers)
+        for enricher in enrichers:
+            if enricher.name in {"quake", "daydaymap"}:
+                enricher.credential_slot = credential_slot
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(2) from exc
 
     import os
 
+    config_issues = configuration_issues(enrichers, os.environ)
     completed: dict[str, set[str]] = {}
     ledger_warnings: tuple[str, ...] = ()
     resume_incomplete = False
@@ -204,14 +218,19 @@ def batch(
         "will_process": len(capped),
         "over_max_targets": over_cap,
         "estimated_requests": _batch.budget_total(budget),
+        "stage": stage,
+        "selected_providers": [e.name for e in enrichers],
+        "request_estimate_note": "计划查询单元；DNS全类型按8次计，旧适配器的重定向/辅助查询可能增加请求；不是计费次数。",
         "resume_complete": resume_complete,
-        "safe_to_execute": resume_complete,
+        "safe_to_execute": resume_complete and not config_issues,
+        "configuration_issues": config_issues,
         "budget_reliable": resume_complete,
         "budget": [
             {
                 "provider": line.provider,
                 "status": line.status,
                 "targets": line.targets,
+                "request_units_per_target": line.request_units,
                 **({"reason": line.reason} if line.reason else {}),
             }
             for line in budget
@@ -234,6 +253,11 @@ def batch(
             summary["note"] = "未发任何请求。确认预算后加 --no-dry-run 真跑。"
         _print(summary)
         return
+
+    if config_issues:
+        summary["error"] = "配置校验未通过，未发送请求；只输出变量名，不回显配置值。"
+        _print(summary)
+        raise typer.Exit(2)
 
     if resume_incomplete:
         # ★fail closed：账本没被完整读回 → "哪些已经查过"这个判据是残缺的。
@@ -308,8 +332,29 @@ def batch(
 
     summary["dry_run"] = False
     summary["processed"] = len(records)
+    from collections import Counter
+
+    outcomes: dict[str, Counter] = {}
+    for record in records:
+        for provider, status in record.get("source_status", {}).items():
+            outcomes.setdefault(provider, Counter())[status["status"]] += 1
+    summary["source_outcomes"] = {p: dict(c) for p, c in sorted(outcomes.items())}
+    # DNS 命中仍可能截断或拒收部分记录；不能仅凭 hit 判定覆盖完整。
+    summary["completed_with_gaps"] = any(
+        any(status in c for status in ("failed", "skipped", "disabled")) for c in outcomes.values()
+    ) or any(r.get("enrichment", {}).get("dns_records", {}).get("coverage_complete") is False for r in records)
     summary["ledger_bad_lines_skipped"] = bad_ledger_lines or 0
     _note_ledger_limits(summary, (*ledger_warnings, *rebuild_warnings))
     summary["csv"] = str(csv_path)
     summary["ndjson"] = str(ndjson_path)
     _print(summary)
+
+
+@enrich_app.command(name="inventory")
+def inventory() -> None:
+    """零联网盘点已实现来源和凭据配置状态，不输出任何值。"""
+    import os
+    from apkscan.core.enrichment_profiles import api_inventory
+    from apkscan.core.registry import discover_enrichers
+
+    _print(api_inventory(discover_enrichers(), os.environ))

@@ -26,6 +26,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -125,6 +126,7 @@ class BudgetLine:
     status: str
     targets: int
     reason: str = ""
+    request_units: int = 1
 
 
 def classify_target(raw: object) -> Target | None:
@@ -189,7 +191,12 @@ def _required_env(enricher: object) -> tuple[str, ...]:
 
 
 def _is_configured(enricher: object, env: Mapping[str, str]) -> bool:
+    if getattr(enricher, "requires_product_check", False) and not getattr(enricher, "explicitly_selected", False):
+        return False
     required = _required_env(enricher)
+    slot = getattr(enricher, "credential_slot", 0)
+    if slot and _provider_name(enricher) in {"quake", "daydaymap"}:
+        return slot <= len(required) and bool(env.get(required[slot - 1], "").strip())
     return not required or any((env.get(name) or "").strip() for name in required)
 
 
@@ -245,17 +252,20 @@ def estimate_budget(
                     provider=provider,
                     status="disabled",
                     targets=0,
-                    reason="缺 " + " / ".join(_required_env(enricher)),
+                    reason=("product_permission_not_checked: use explicit --providers after checking scope"
+                            if getattr(enricher, "requires_product_check", False) and not getattr(enricher, "explicitly_selected", False)
+                            else "缺 " + " / ".join(_required_env(enricher))),
                 )
             )
             continue
-        lines.append(BudgetLine(provider=provider, status="would_query", targets=matched))
+        units = max(1, int(getattr(enricher, "request_budget", 1)))
+        lines.append(BudgetLine(provider=provider, status="would_query", targets=matched, request_units=units))
     return lines
 
 
 def budget_total(lines: Iterable[BudgetLine]) -> int:
     """会真发出的请求总数（只计 ``would_query``）。"""
-    return sum(line.targets for line in lines if line.status == "would_query")
+    return sum(line.targets * line.request_units for line in lines if line.status == "would_query")
 
 
 @dataclass(frozen=True)
@@ -442,16 +452,22 @@ def completed_from_records(
     与 :func:`read_ledger` 分开，是为了让调用方能**只读一次**账本就同时拿到续跑判据与
     :attr:`LedgerScan.limit_warnings`——否则想看告警就得再扫一遍文件。
     """
+    from apkscan.core.enrichment_profiles import CONTRACTS
+
     done: dict[str, set[str]] = {}
     for record in records:
         value = record.get(LEDGER_KEY)
         statuses = record.get("source_status")
+        contracts = record.get("source_contracts")
+        contracts = contracts if isinstance(contracts, Mapping) else {}
         if not isinstance(value, str) or not value or not isinstance(statuses, Mapping):
             continue
         completed = {
             str(provider)
             for provider, status in statuses.items()
             if source_status_value(status) in LEDGER_COMPLETE_STATUSES
+            and (provider not in CONTRACTS or
+                 contracts.get(provider) == CONTRACTS[provider])
         }
         if completed:
             done.setdefault(value, set()).update(completed)
@@ -525,6 +541,7 @@ def enrich_targets(
     逐目标（而非一次传全部）调度：单个目标炸掉不连坐其余目标，且明细可以边跑边落盘（续跑）。
     """
     from apkscan.core.enrichment import enrich_selected_targets
+    from apkscan.core.enrichment_profiles import CONTRACTS
 
     records: list[dict[str, Any]] = []
     configured_env = env or {}
@@ -537,6 +554,7 @@ def enrich_targets(
         if not typed:
             continue
         endpoint = Endpoint(value=target.value, kind=target.kind, is_suspicious=True)
+        started_at = datetime.now(timezone.utc).isoformat()
         try:
             enrich_selected_targets(
                 [endpoint],
@@ -569,6 +587,11 @@ def enrich_targets(
                 "kind": target.kind,
                 "source_status": _status_map(endpoint),
                 "enrichment": _provider_payloads(endpoint),
+                "source_contracts": {_provider_name(e): CONTRACTS.get(_provider_name(e), 1) for e in typed},
+                "started_at": started_at,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "receipts": {_provider_name(e): dict(getattr(e, "receipt", {})) for e in typed
+                             if isinstance(getattr(e, "receipt", None), dict)},
             }
         )
     return records

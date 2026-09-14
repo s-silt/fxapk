@@ -436,6 +436,14 @@ ALLOWED_DOMAINS: frozenset[str] = frozenset({
     "urlscan.io",
     "virustotal.com",
     "zoomeye.org",
+    "zoomeye.ai",  # ZoomEye v2 端点换域（api.zoomeye.ai）；旧 .org 端点并存
+    # DoH 解析器 / DNS 反查 ASN（免 Key 基础核验层，2026-09-14 两阶段富化）
+    "dns.google",
+    "cloudflare-dns.com",
+    "cymru.com",
+    # 按产品显式选择的商业源（requires_product_check）
+    "threatbook.cn",
+    "whoisxmlapi.com",
     # 备案 / 注册局 / 标准与工具站
     "beian.miit.gov.cn",
     "iana.org",
@@ -476,6 +484,10 @@ ALLOWED_DOMAIN_SUFFIXES: tuple[str, ...] = (
     ".rdap.org",
     ".urlscan.io",
     ".zoomeye.org",
+    ".zoomeye.ai",
+    ".cymru.com",
+    ".threatbook.cn",
+    ".whoisxmlapi.com",
     ".miit.gov.cn",
     ".github.com",
     ".github.io",

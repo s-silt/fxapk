@@ -642,7 +642,7 @@ def test_urlscan_uses_optional_configured_api_key(monkeypatch) -> None:  # noqa:
 
 
 def test_zoomeye_uses_configured_api_url(monkeypatch) -> None:  # noqa: ANN001
-    configured_url = "https://api.example.test/host/search"
+    configured_url = "https://api.example.test/v2/search"
     monkeypatch.setenv("FXAPK_ZOOMEYE_KEY", "synthetic-zoomeye-key")
     monkeypatch.setenv("FXAPK_ZOOMEYE_URL", configured_url)
 
@@ -650,9 +650,10 @@ def test_zoomeye_uses_configured_api_url(monkeypatch) -> None:  # noqa: ANN001
         def __init__(self) -> None:
             self.url = ""
 
-        def get(self, url: str, **kwargs):  # noqa: ANN003
+        def post(self, url: str, **kwargs):  # noqa: ANN003
             self.url = url
-            return _Response({"matches": []})
+            assert "qbase64" in kwargs["json"]
+            return _Response({"code": 60000, "data": []})
 
     session = _CaptureSession()
     result = ZoomEyePassiveEnricher(session=session).enrich(_ip())
@@ -753,7 +754,7 @@ def test_provider_specific_error_codes_are_failed_and_sanitized(
 @pytest.mark.parametrize(
     ("status_code", "ok", "source_status", "error_type"),
     [
-        (404, True, "no_record", "http_404"),
+        (404, False, "failed", "http_404"),
         (401, False, "failed", "http_401"),
         (403, False, "failed", "http_403"),
         (429, False, "failed", "http_429"),
@@ -819,6 +820,12 @@ def test_all_multisource_adapters_are_passive_case_close_only() -> None:
         "otx",
         "urlscan",
         "abuseipdb",
+        "dns_records",
+        "cymru",
+        "internetdb",
+        "daydaymap",
+        "threatbook",
+        "whoisxml",
     }
     assert all(enricher.case_close_only for enricher in enrichers)
     assert all(enricher.active is False for enricher in enrichers)

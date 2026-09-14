@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import ipaddress
 import logging
 import math
 import os
+import re
 import urllib.request
+from datetime import datetime, timezone
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from html import unescape
@@ -24,6 +27,7 @@ from apkscan.core.enrichment import (
 )
 from apkscan.core.closure import SOURCE_STATUSES
 from apkscan.core.models import Endpoint, EnrichmentResult
+from apkscan.core.redact import scrub_pii, scrub_urls
 from apkscan.core.registry import BaseEnricher
 
 logger = logging.getLogger(__name__)
@@ -530,12 +534,17 @@ _ASSET_FIELDS = (
     "asn",
     "as_number",
     "as_org",
+    "asn_org",
+    "icp_reg_name",
+    "company",
+    "number",
     "as_organization",
     "isp",
     "org",
     "organization",
     "updated_at",
     "timestamp",
+    "time_stamp",
 )
 _SERVICE_FIELDS = (
     "name",
@@ -550,6 +559,8 @@ _SERVICE_FIELDS = (
     "title",
     "web_title",
     "status_code",
+    "scan_time",
+    "observed_at",
 )
 _LOCATION_FIELDS = (
     "country",
@@ -570,6 +581,7 @@ _ASN_FIELDS = (
     "organization",
     "country_code",
     "bgp_prefix",
+    "description",
 )
 
 
@@ -608,7 +620,75 @@ def _provider_declared_error(payload: object, provider: str = "") -> bool:
         return True
     if provider == "hunter" and code not in (None, 0, 200, "0", "200"):
         return True
+    if provider == "zoomeye" and code not in (None, 60000, "60000"):
+        return True
     return False
+
+
+def _api_endpoint(env_name: str, base: str, path: str) -> str:
+    """Accept a configured HTTPS base or full endpoint, never silently query a homepage."""
+    value = (os.environ.get(env_name) or base).strip().rstrip("/")
+    parsed = urlsplit(value)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("invalid_api_endpoint")
+    return value + path if not parsed.path else value
+
+
+class _ServiceError(_ProviderResponseError):
+    def __init__(self, category: str, code: object = None) -> None:
+        super().__init__(category)
+        self.category = category
+        text = str(code or "")
+        self.code = text if re.fullmatch(r"[A-Za-z0-9_-]{1,24}", text) else None
+
+
+def _business_error(payload: object) -> _ServiceError:
+    data = _dict(payload)
+    # Inspect messages only to classify; never retain upstream free text or credentials.
+    message = str(data.get("message") or data.get("msg") or data.get("error") or "").lower()
+    category = "provider_response_error"
+    if any(s in message for s in ("quota", "credit", "limitation", "余额", "积分", "配额", "不足")):
+        category = "quota_insufficient"
+    elif any(s in message for s in ("无 api", "无权限", "访问权限", "付费账号", "access restricted", "subscription")):
+        category = "permission_denied"
+    elif any(s in message for s in ("api key", "api-key", "token", "unauthorized", "认证", "鉴权")):
+        category = "authentication_failed"
+    elif any(s in message for s in ("rate limit", "too many", "频率", "频繁")):
+        category = "rate_limited"
+    elif any(s in message for s in ("参数", "格式", "page_size", "invalid query", "时间范围")):
+        category = "invalid_request"
+    return _ServiceError(category, data.get("code"))
+
+
+def _environment_secrets() -> set[str]:
+    return {value for name, raw in os.environ.items()
+            if any(word in name.upper() for word in ("KEY", "TOKEN", "SECRET", "PASSWORD"))
+            for value in (raw, raw.strip()) if value}
+
+
+def _provider_origin(url: str) -> str:
+    parsed = urlsplit(url)
+    return f"{parsed.scheme}://{parsed.hostname}"
+
+
+def _reject_redirect(response: Any) -> None:
+    status = getattr(response, "status_code", None)
+    if isinstance(status, int) and 300 <= status < 400:
+        raise _ServiceError("redirect_not_followed")
+
+
+def _safe_provider_note(payload: object) -> str:
+    """Keep the diagnostic, never the request credential or full provider body."""
+    data = _dict(payload)
+    value = data.get("message") or data.get("msg") or data.get("verbose_msg") or data.get("messages")
+    if not isinstance(value, str):
+        return ""
+    for secret in sorted(_environment_secrets(), key=len, reverse=True):
+        value = value.replace(secret, "[REDACTED]")
+    value = re.sub(r"(?i)((?:api[-_]?key|token|secret|password)\s*[:=]\s*)[^\s,;]+", r"\1[REDACTED]", value)
+    value, _ = scrub_urls(value)
+    value, _ = scrub_pii(value)
+    return value[:160]
 
 
 def _safe_host_reference(value: object) -> str | None:
@@ -650,6 +730,27 @@ class _PassiveLookupEnricher(BaseEnricher, ABC):
         self._http = session if session is not None else _http.CappedSession()
         if self.bypass_system_proxy:
             self._http.trust_env = False  # 忽略 HTTP(S)_PROXY / 系统代理 → 直连（境内源必须）
+        self.receipt: dict[str, object] = {}
+        self._blocked_error: str | None = None
+        self._blocked_targets = 0
+        self._consecutive_failures = 0
+
+    def _check_response(self, response: Any) -> None:
+        url = getattr(response, "url", None)
+        if isinstance(url, str):
+            parsed = urlsplit(url)
+            if parsed.scheme in {"https", "http"} and parsed.hostname:
+                self.receipt["endpoint"] = f"{parsed.scheme}://{parsed.hostname}"
+        content = getattr(response, "content", None)
+        if isinstance(content, bytes):
+            self.receipt["response_sha256"] = hashlib.sha256(content).hexdigest()
+        status = getattr(response, "status_code", None)
+        if isinstance(status, int):
+            self.receipt["http_status"] = status
+        if status in (401, 403, 402, 429):
+            raise _ServiceError({401: "authentication_failed", 403: "permission_denied", 402: "quota_insufficient", 429: "rate_limited"}[status], status)
+        _reject_redirect(response)
+        response.raise_for_status()
 
     def _egress_label(self) -> str:
         """本富化器请求走的出口：绕代理直连 → 'direct'；否则随系统/环境代理（配了代理即 'system_proxy'）。
@@ -684,7 +785,23 @@ class _PassiveLookupEnricher(BaseEnricher, ABC):
 
     def enrich(self, ep: Endpoint) -> EnrichmentResult:
         via = self._egress_label()  # 本次请求出口（direct=绕代理直连 / system_proxy=随系统代理）——记进每条结果溯源
+        self.receipt = {"started_at": datetime.now(timezone.utc).isoformat(), "via": via}
+        if getattr(self, "requires_product_check", False) and not getattr(self, "explicitly_selected", False):
+            self.receipt.update(network_attempted=False, reason="product_permission_not_checked")
+            return EnrichmentResult(provider=self.name, ok=True, data={"_source_status": "disabled", "_error_type": "product_permission_not_checked"})
+        if self._blocked_error:
+            self._blocked_targets += 1
+            if self._blocked_error in {"authentication_failed", "permission_denied", "quota_insufficient"} or self._blocked_targets < 10:
+                self.receipt.update(network_attempted=False, blocked_by=self._blocked_error)
+                return EnrichmentResult(provider=self.name, ok=True, data={"_source_status": "skipped", "_error_type": self._blocked_error})
+            self._blocked_targets = 0
         credential = _credential(self.required_env)
+        slot = getattr(self, "credential_slot", 0)
+        if slot and len(self.required_env) > 1 and self.name in {"quake", "daydaymap"}:
+            credential = (os.environ.get(self.required_env[slot - 1]) or "").strip() if slot <= len(self.required_env) else ""
+        if self.required_env:
+            self.receipt["credential_slot"] = next((i + 1 for i, name in enumerate(self.required_env)
+                                                    if credential and os.environ.get(name, "").strip() == credential), None)
         if self.required_env and not credential:
             return EnrichmentResult(
                 provider=self.name,
@@ -693,18 +810,36 @@ class _PassiveLookupEnricher(BaseEnricher, ABC):
                 error="disabled",
             )
         try:
+            self.receipt["network_attempted"] = True
             payload = self._lookup(ep, credential)
             if _provider_declared_error(payload, self.name):
-                raise _ProviderResponseError
+                self.receipt["provider_message"] = _safe_provider_note(payload)
+                raise _business_error(payload)
             data = self._normalize(payload, ep)
+            if data.get("_source_status") != "failed":
+                self._blocked_error = None
+                self._blocked_targets = 0
+                self._consecutive_failures = 0
         except Exception as exc:  # noqa: BLE001 - provider failures never stop case closure
-            error_type = _safe_error_type(exc)
-            if _http_status_code(exc) == 404:
+            error_type = exc.category if isinstance(exc, _ServiceError) else _safe_error_type(exc)
+            self.receipt.update(finished_at=datetime.now(timezone.utc).isoformat(), error_type=error_type)
+            if error_type == "redirect_not_followed":
+                self.receipt["reason"] = error_type
+            if isinstance(exc, _ServiceError):
+                self.receipt["business_code"] = None if exc.code and any(secret in exc.code for secret in _environment_secrets()) else exc.code
+            if _http_status_code(exc) == 404 and self.name in {"censys", "virustotal", "otx", "internetdb"}:
+                self._consecutive_failures = 0
+                self._blocked_error = None
+                self._blocked_targets = 0
                 return EnrichmentResult(
                     provider=self.name,
                     ok=True,
                     data={"_source_status": "no_record", "_error_type": error_type, "_via": via},
                 )
+            self._consecutive_failures += 1
+            if error_type in {"authentication_failed", "permission_denied", "quota_insufficient", "rate_limited", "provider_response_error"} or self._consecutive_failures >= 3:
+                self._blocked_error = error_type
+                self._blocked_targets = 0
             return EnrichmentResult(
                 provider=self.name,
                 ok=False,
@@ -718,7 +853,9 @@ class _PassiveLookupEnricher(BaseEnricher, ABC):
             try:
                 records = self._passive_dns(ep, credential)
             except Exception as exc:  # noqa: BLE001 — 单段失败不得拖垮整条富化结果
-                error_type = _safe_error_type(exc)
+                error_type = exc.category if isinstance(exc, _ServiceError) else _safe_error_type(exc)
+                if error_type == "redirect_not_followed":
+                    self.receipt["reason"] = error_type
                 logger.warning("[%s] 被动 DNS 查询失败（%s）：%s", self.name, error_type, ep.value)
                 data["passive_dns_status"] = f"failed:{error_type}"
             else:
@@ -730,8 +867,9 @@ class _PassiveLookupEnricher(BaseEnricher, ABC):
             key not in _METADATA_ONLY_KEYS and value not in (None, "", [], {})
             for key, value in data.items()
         )
-        data["_source_status"] = "hit" if has_values else "no_record"
+        data.setdefault("_source_status", "hit" if has_values else "no_record")
         data["_via"] = via
+        self.receipt["finished_at"] = datetime.now(timezone.utc).isoformat()
         return EnrichmentResult(provider=self.name, ok=True, data=data)
 
 
@@ -749,9 +887,9 @@ class RipeStatBgpEnricher(_PassiveLookupEnricher):
         response = self._http.get(
             self._URL,
             params={"resource": endpoint.value, "sourceapp": _RIPESTAT_SOURCEAPP},
-            timeout=_TIMEOUT,
+            allow_redirects=False, timeout=_TIMEOUT,
         )
-        response.raise_for_status()
+        self._check_response(response)
         prefix_payload = response.json()
         if _provider_declared_error(prefix_payload, self.name):
             raise _ProviderResponseError
@@ -766,8 +904,11 @@ class RipeStatBgpEnricher(_PassiveLookupEnricher):
                 neighbour_response = self._http.get(
                     self._NEIGHBOURS_URL,
                     params={"resource": f"AS{first_asn}", "sourceapp": _RIPESTAT_SOURCEAPP},
-                    timeout=_TIMEOUT,
+                    allow_redirects=False, timeout=_TIMEOUT,
                 )
+                if 300 <= getattr(neighbour_response, "status_code", 0) < 400:
+                    self.receipt["reason"] = "redirect_not_followed"
+                _reject_redirect(neighbour_response)
                 neighbour_response.raise_for_status()
                 neighbour_payload = neighbour_response.json()
                 if _provider_declared_error(neighbour_payload, self.name):
@@ -776,7 +917,7 @@ class RipeStatBgpEnricher(_PassiveLookupEnricher):
             except Exception as exc:  # noqa: BLE001 - retain prefix evidence on upstream lookup failure
                 result["upstream_lookup"] = {
                     "status": "failed",
-                    "error_type": _safe_error_type(exc),
+                    "error_type": exc.category if isinstance(exc, _ServiceError) else _safe_error_type(exc),
                 }
 
         # 三个辅助 data call：各自独立 try，任一失败只记自己的状态，
@@ -807,7 +948,10 @@ class RipeStatBgpEnricher(_PassiveLookupEnricher):
         )
         for result_key, url, params, status_key in auxiliary_calls:
             try:
-                auxiliary_response = self._http.get(url, params=params, timeout=_TIMEOUT)
+                auxiliary_response = self._http.get(url, params=params, allow_redirects=False, timeout=_TIMEOUT)
+                if 300 <= getattr(auxiliary_response, "status_code", 0) < 400:
+                    self.receipt["reason"] = "redirect_not_followed"
+                _reject_redirect(auxiliary_response)
                 auxiliary_response.raise_for_status()
                 auxiliary_payload = auxiliary_response.json()
                 if _provider_declared_error(auxiliary_payload, self.name):
@@ -816,7 +960,7 @@ class RipeStatBgpEnricher(_PassiveLookupEnricher):
             except Exception as exc:  # noqa: BLE001 - 辅助端点互不影响，也不拖累主结果
                 result[status_key] = {
                     "status": "failed",
-                    "error_type": _safe_error_type(exc),
+                    "error_type": exc.category if isinstance(exc, _ServiceError) else _safe_error_type(exc),
                 }
         return result
 
@@ -927,7 +1071,8 @@ class FofaPassiveEnricher(_PassiveLookupEnricher):
     required_env = ("FXAPK_FOFA_KEY",)
 
     def _lookup(self, endpoint: Endpoint, credential: str) -> object:
-        base_url = (os.environ.get("FXAPK_FOFA_URL") or "https://fofa.info/api/v1/search/all").rstrip("/")
+        base_url = _api_endpoint("FXAPK_FOFA_URL", "https://fofa.info", "/api/v1/search/all")
+        self.receipt["endpoint"] = _provider_origin(base_url)
         query = f'ip="{endpoint.value}"' if endpoint.kind == "ip" else f'domain="{endpoint.value}"'
         response = self._http.get(
             base_url,
@@ -937,9 +1082,9 @@ class FofaPassiveEnricher(_PassiveLookupEnricher):
                 "fields": FOFA_QUERY_FIELDS,
                 "size": _MAX_RECORDS,
             },
-            timeout=_TIMEOUT,
+            allow_redirects=False, timeout=_TIMEOUT,
         )
-        response.raise_for_status()
+        self._check_response(response)
         return response.json()
 
     def _normalize(self, payload: object, endpoint: Endpoint) -> dict[str, object]:
@@ -964,15 +1109,16 @@ class QuakePassiveEnricher(_PassiveLookupEnricher):
     required_env = ("FXAPK_QUAKE_KEY", "FXAPK_QUAKE_KEY2")
 
     def _lookup(self, endpoint: Endpoint, credential: str) -> object:
-        url = os.environ.get("FXAPK_QUAKE_URL") or "https://quake.360.net/api/v3/search/quake_service"
+        url = _api_endpoint("FXAPK_QUAKE_URL", "https://quake.360.net", "/api/v3/search/quake_service")
+        self.receipt["endpoint"] = _provider_origin(url)
         query = f'ip:"{endpoint.value}"' if endpoint.kind == "ip" else f'domain:"{endpoint.value}"'
         response = self._http.post(
             url,
             headers={"X-QuakeToken": credential},
             json={"query": query, "start": 0, "size": _MAX_RECORDS},
-            timeout=_TIMEOUT,
+            allow_redirects=False, timeout=_TIMEOUT,
         )
-        response.raise_for_status()
+        self._check_response(response)
         return response.json()
 
     def _normalize(self, payload: object, endpoint: Endpoint) -> dict[str, object]:
@@ -998,12 +1144,12 @@ class HunterPassiveEnricher(_PassiveLookupEnricher):
                 "api-key": credential,
                 "search": base64.urlsafe_b64encode(query.encode("utf-8")).decode("ascii"),
                 "page": 1,
-                "page_size": _MAX_RECORDS,
+                "page_size": 10,
                 "is_web": 3,
             },
-            timeout=_TIMEOUT,
+            allow_redirects=False, timeout=_TIMEOUT,
         )
-        response.raise_for_status()
+        self._check_response(response)
         return response.json()
 
     def _normalize(self, payload: object, endpoint: Endpoint) -> dict[str, object]:
@@ -1017,23 +1163,28 @@ class ZoomEyePassiveEnricher(_PassiveLookupEnricher):
     name = "zoomeye"
     applies_to = ["ip", "domain"]
     required_env = ("FXAPK_ZOOMEYE_KEY", "ZOOMEYE_API_KEY")
-    _URL = "https://api.zoomeye.org/host/search"
+    _URL = "https://api.zoomeye.ai/v2/search"
+    bypass_system_proxy = True
 
     def _lookup(self, endpoint: Endpoint, credential: str) -> object:
-        query = f'ip:"{endpoint.value}"' if endpoint.kind == "ip" else f'hostname:"{endpoint.value}"'
-        url = os.environ.get("FXAPK_ZOOMEYE_URL") or self._URL
-        response = self._http.get(
+        query = f'ip="{endpoint.value}"' if endpoint.kind == "ip" else f'domain="{endpoint.value}"'
+        url = _api_endpoint("FXAPK_ZOOMEYE_URL", "https://api.zoomeye.ai", "/v2/search")
+        if url.endswith("/host/search"):
+            url = url[:-len("/host/search")] + "/v2/search"
+        self.receipt["endpoint"] = _provider_origin(url)
+        response = self._http.post(
             url,
-            params={"query": query, "page": 1},
+            json={"qbase64": base64.b64encode(query.encode()).decode("ascii"), "page": 1, "pagesize": _MAX_RECORDS,
+                  "fields": "ip,port,domain,asn,organization,isp,country,province,city"},
             headers={"API-KEY": credential},
-            timeout=_TIMEOUT,
+            allow_redirects=False, timeout=_TIMEOUT,
         )
-        response.raise_for_status()
+        self._check_response(response)
         return response.json()
 
     def _normalize(self, payload: object, endpoint: Endpoint) -> dict[str, object]:
         del endpoint
-        records = _compact_asset_records(_dict(payload).get("matches"))
+        records = _compact_asset_records(_dict(payload).get("data"))
         return {"records": records, "count": len(records), "source": "zoomeye"} if records else {}
 
 
@@ -1054,15 +1205,19 @@ class CensysPassiveEnricher(_PassiveLookupEnricher):
         response = self._http.get(
             self._URL.format(ip=endpoint.value),
             headers=headers,
-            timeout=_TIMEOUT,
+            allow_redirects=False, timeout=_TIMEOUT,
         )
-        response.raise_for_status()
+        self._check_response(response)
         return response.json()
 
     def _normalize(self, payload: object, endpoint: Endpoint) -> dict[str, object]:
         del endpoint
         root = _dict(payload)
         result = _dict(root.get("result") or root.get("data"))
+        if "resource" in result:
+            result = _dict(result["resource"])
+            if not result:
+                raise ValueError("invalid_censys_resource")
         services = [
             service
             for item in _list_of_dicts(result.get("services"))
@@ -1139,9 +1294,9 @@ class VirusTotalPassiveEnricher(_PassiveLookupEnricher):
             f"{self._BASE}/{collection}/{endpoint.value}/resolutions",
             headers={"x-apikey": credential},
             params={"limit": _MAX_PASSIVE_DNS},
-            timeout=_TIMEOUT,
+            allow_redirects=False, timeout=_TIMEOUT,
         )
-        response.raise_for_status()
+        self._check_response(response)
         payload = response.json()
         peer_kind = "domain" if endpoint.kind == "ip" else "ip"
         peer_field = "host_name" if endpoint.kind == "ip" else "ip_address"
@@ -1162,9 +1317,9 @@ class VirusTotalPassiveEnricher(_PassiveLookupEnricher):
         response = self._http.get(
             f"{self._BASE}/{collection}/{endpoint.value}",
             headers={"x-apikey": credential},
-            timeout=_TIMEOUT,
+            allow_redirects=False, timeout=_TIMEOUT,
         )
-        response.raise_for_status()
+        self._check_response(response)
         return response.json()
 
     def _normalize(self, payload: object, endpoint: Endpoint) -> dict[str, object]:
@@ -1217,9 +1372,9 @@ class OtxPassiveEnricher(_PassiveLookupEnricher):
         response = self._http.get(
             f"{self._BASE}/{indicator_type}/{endpoint.value}/passive_dns",
             headers={"X-OTX-API-KEY": credential},
-            timeout=_TIMEOUT,
+            allow_redirects=False, timeout=_TIMEOUT,
         )
-        response.raise_for_status()
+        self._check_response(response)
         payload = response.json()
         peer_kind = "domain" if endpoint.kind == "ip" else "ip"
         peer_field = "hostname" if endpoint.kind == "ip" else "address"
@@ -1241,9 +1396,9 @@ class OtxPassiveEnricher(_PassiveLookupEnricher):
         response = self._http.get(
             f"{self._BASE}/{indicator_type}/{endpoint.value}/general",
             headers={"X-OTX-API-KEY": credential},
-            timeout=_TIMEOUT,
+            allow_redirects=False, timeout=_TIMEOUT,
         )
-        response.raise_for_status()
+        self._check_response(response)
         return response.json()
 
     def _normalize(self, payload: object, endpoint: Endpoint) -> dict[str, object]:
@@ -1287,9 +1442,9 @@ class UrlscanPassiveEnricher(_PassiveLookupEnricher):
             self._URL,
             params={"q": query, "size": _MAX_RECORDS},
             headers=headers,
-            timeout=_TIMEOUT,
+            allow_redirects=False, timeout=_TIMEOUT,
         )
-        response.raise_for_status()
+        self._check_response(response)
         return response.json()
 
     def _normalize(self, payload: object, endpoint: Endpoint) -> dict[str, object]:
@@ -1346,11 +1501,11 @@ class AbuseIpDbPassiveEnricher(_PassiveLookupEnricher):
             self._URL,
             headers={"Key": credential, "Accept": "application/json"},
             params={"ipAddress": endpoint.value, "maxAgeInDays": self._MAX_AGE_DAYS},
-            timeout=_TIMEOUT,
+            allow_redirects=False, timeout=_TIMEOUT,
         )
         # 401（key 配错）在此抛 HTTPError → 基类记 failed。绝不在子类里 catch 成空 dict，
         # 那会把「没查」伪装成「查过没有」。
-        response.raise_for_status()
+        self._check_response(response)
         return response.json()
 
     def _normalize(self, payload: object, endpoint: Endpoint) -> dict[str, object]:
@@ -1370,6 +1525,11 @@ class AbuseIpDbPassiveEnricher(_PassiveLookupEnricher):
 
 def configured_case_close_enrichers() -> list[BaseEnricher]:
     """Return all built-in bounded passive adapters in deterministic order."""
+    from apkscan.enrichers.infrastructure import (
+        CymruEnricher, DayDayMapEnricher, DnsRecordsEnricher, InternetDbEnricher,
+        ThreatBookEnricher, WhoisXmlEnricher,
+    )
+
     return [
         RipeStatBgpEnricher(),
         FofaPassiveEnricher(),
@@ -1381,6 +1541,12 @@ def configured_case_close_enrichers() -> list[BaseEnricher]:
         OtxPassiveEnricher(),
         UrlscanPassiveEnricher(),
         AbuseIpDbPassiveEnricher(),
+        DnsRecordsEnricher(),
+        CymruEnricher(),
+        InternetDbEnricher(),
+        DayDayMapEnricher(),
+        ThreatBookEnricher(),
+        WhoisXmlEnricher(),
     ]
 
 
