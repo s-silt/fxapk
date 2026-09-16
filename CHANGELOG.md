@@ -3,6 +3,36 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
+## 1.14.0 — 2026-09-16
+
+本版统一工具链解析并收紧其失败语义：未激活虚拟环境不再误用系统 Frida；工具配置
+fail-closed（损坏即不可用，绝不静默回退）；TShark 探测与执行同源；mitmproxy 独立环境。
+
+### Added
+
+- 工具解析三级：显式 `fxapk-tools.json`（`sys.prefix` 级或 `FXAPK_TOOLCHAIN_FILE`，须绝对
+  路径）> 当前解释器 scripts 目录（仅 frida 系）> PATH；无永久 PATH 改动。
+- `tools/TOOLCHAIN.md`：固定版本清单（jadx 1.5.6 / apktool 3.0.3 / platform-tools 37.0.1 /
+  tshark 4.6.8 / androguard 4.1.4 / frida 17.18.0 / frida-tools 14.10.4 /
+  frida-dexdump 2.0.1）与 mitmproxy 12.2.3 独立环境说明（其 typing-extensions 上限与
+  Pydantic 冲突，不得塞进主环境）。
+- `tools/toolchain-requirements.txt` 与 `tools/Use-Toolchain.ps1`（会话级工具选定，
+  dot-source 后恢复 `$ErrorActionPreference`，不动用户/系统 PATH）。
+- 新增 45 项工具链解析回归（fail-closed 边界、三级优先级、frozen 兼容、64KiB 上限）。
+
+### Changed
+
+- fail-closed 收紧：配置文件存在但为目录/悬空链接、`schema` 非 int、工具路径相对或不可
+  执行、显式指定的配置文件不存在——一律报不可用并记 warning，**不静默回退 PATH**；
+  仅「配置确实不存在」才走正常解析。
+- frozen（打包 exe）态完全不读工具链配置、不查解释器 scripts，保持既有回退行为；
+  `_FRIDA_TOOLS` 之外的源码工具（adb/tshark/jadx）为「配置 > PATH」（jadx 另有 addon
+  回退，不属本层）。
+- `tshark_backend`（探测/明文 HTTP/TLS 解密）与 `doctor` 统一走 `tools.executable_path`，
+  消除「探测可用但执行换人」的不一致。
+- 测试环境隔离：conftest autouse fixture 使单测不受开发者已装工具与 console scripts
+  影响（PATH 分支不被 patch，仍可测）。
+
 ## 1.13.1 — 2026-09-14
 
 本版修复多源富化的归属查询错误并引入两阶段入口：先免 Key 基础核验、再按证据缺口选 API；
