@@ -1,0 +1,5 @@
+# Tested Python tool versions; install with the same Python that runs fxapk.
+androguard==4.1.4
+frida==17.18.0
+frida-tools==14.10.4
+frida-dexdump==2.0.1

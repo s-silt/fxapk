@@ -645,7 +645,7 @@ def _check_pcap_capabilities() -> list[dict]:
     - tshark 深度后端：PATH 有 tshark 才能抽明文 HTTP + 用 keylog 解密 TLS。
     均非关键项（不进 _CRITICAL、不影响整体 ok），仅报告可用状态。
     """
-    import shutil
+    from apkscan.core import tools
 
     items: list[dict] = [
         _item(_NAME_QUIC_META, True, "可用（纯 stdlib：QUIC 长包头 / 版本 / DCID / SCID 解析）"),
@@ -665,11 +665,11 @@ def _check_pcap_capabilities() -> list[dict]:
                 ["pip install fxapk[pcap]"],
             )
         )
-    if shutil.which("tshark"):
-        items.append(_item(_NAME_TSHARK, True, "可用（tshark 在 PATH → 明文 HTTP 抽取 + TLS Key Log 解密）"))
+    if tools.executable_path("tshark"):
+        items.append(_item(_NAME_TSHARK, True, "可用（tshark 工具解析成功 → 明文 HTTP 抽取 + TLS Key Log 解密）"))
     else:
         items.append(
-            _item(_NAME_TSHARK, False, "不可用：PATH 无 tshark（可选深度后端；装 Wireshark/tshark 启用明文 HTTP/解密）")
+            _item(_NAME_TSHARK, False, "不可用：未解析到 tshark（可选深度后端；装 Wireshark/tshark 启用明文 HTTP/解密）")
         )
     return items
 

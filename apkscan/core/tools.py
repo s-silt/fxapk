@@ -1,10 +1,10 @@
-"""内置工具解析层：frozen 时用包内自调用 / 同目录 adb；源码时用 PATH。
+"""工具解析层：显式工具配置、当前 Python 环境、PATH 与既有 frozen 调度。
 
 终极目标的"自包含 onedir 胖 exe"里，frida / frida-tools / frida-dexdump / mitmproxy
 被打进包，adb 三件套随包放在 exe 同目录。本模块统一回答两个问题：
 
 1. **怎么调起某个工具**：frozen 时不靠 PATH，而是回到 exe 自身（dispatch 入口按工具名
-   自调用内置库）；源码时用 shutil.which 找 PATH 上的可执行文件。
+   自调用内置库）；源码优先显式配置、当前解释器的脚本目录，再回退 PATH。
 2. **某个工具是否可用**：frozen 时基于"内置库是否打进包"（importlib.util.find_spec），
    adb 看 exe 同目录是否有 adb.exe；源码时沿用 shutil.which（与现有 device.has_* 一致）。
 
@@ -18,10 +18,12 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 import shutil
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,72 @@ logger = logging.getLogger(__name__)
 _FRIDA_TOOLS: frozenset[str] = frozenset(
     {"frida", "frida-ps", "frida-trace", "frida-dexdump", "mitmdump", "mitmproxy", "mitmweb"}
 )
+
+
+def _toolchain_file() -> Path:
+    """Per-environment configuration; never read configuration from a sample directory."""
+    return Path(os.environ.get("FXAPK_TOOLCHAIN_FILE") or Path(sys.prefix) / "fxapk-tools.json")
+
+
+def _configured_tool(name: str) -> str | None:
+    """None means unconfigured; an invalid explicit selection fails closed with ''."""
+    try:
+        override = os.environ.get("FXAPK_TOOLCHAIN_FILE")
+        if override and not Path(override).is_absolute():
+            raise ValueError("toolchain configuration path must be absolute")
+        config = _toolchain_file()
+        if not os.path.lexists(config) and not override:
+            return None
+        if not config.is_file():
+            raise ValueError("toolchain configuration must be a regular file")
+        if config.stat().st_size > 65536:
+            raise ValueError("toolchain configuration exceeds 64 KiB")
+        data = json.loads(config.read_text(encoding="utf-8-sig"))
+        if (
+            not isinstance(data, dict)
+            or type(data.get("schema")) is not int
+            or data.get("schema") != 1
+        ):
+            raise ValueError("unsupported toolchain schema")
+        mapping = data.get("tools")
+        if not isinstance(mapping, dict):
+            raise ValueError("tools must be an object")
+        if name not in mapping:
+            return None
+        value = mapping[name]
+        if not isinstance(value, str) or not value or not Path(value).is_absolute():
+            raise ValueError("tool path must be absolute")
+        resolved = shutil.which(value)
+        if not resolved:
+            raise ValueError("configured executable is unavailable")
+        return resolved
+    except (OSError, ValueError, TypeError):
+        logger.warning("[tools] Invalid toolchain selection for %s; PATH fallback disabled", name)
+        return ""
+
+
+def _python_scripts_dir() -> Path:
+    return Path(sysconfig.get_path("scripts"))
+
+
+def executable_path(name: str) -> str:
+    """Resolve without permanent PATH changes.
+
+    Frozen: only shutil.which(name), ignoring toolchain configuration and scripts.
+    Source: explicit configuration > interpreter scripts (only _FRIDA_TOOLS) > PATH.
+    Tools outside _FRIDA_TOOLS (adb/tshark/jadx) use configuration > PATH;
+    jadx's additional addon fallback belongs to resolve_jadx, not this function.
+    """
+    if frozen():
+        return shutil.which(name) or ""
+    selected = _configured_tool(name)
+    if selected is not None:
+        return selected
+    if name in _FRIDA_TOOLS:
+        local = _python_scripts_dir() / (name + (".exe" if os.name == "nt" else ""))
+        if local.is_file() and os.access(local, os.X_OK):
+            return str(local)
+    return shutil.which(name) or ""
 
 
 def frozen() -> bool:
@@ -62,7 +130,7 @@ def adb_path() -> str:
     """adb 可执行路径。
 
     frozen：优先包内随附的 adb.exe（``sys._MEIPASS`` / exe 同级），回退 PATH；
-    源码：  PATH（shutil.which）。
+    源码：显式工具配置，再回退 PATH。
     找不到 → ""（不抛）。
     """
     if frozen():
@@ -74,14 +142,14 @@ def adb_path() -> str:
                     return str(cand)
             except OSError:
                 logger.exception("[tools] 探测随包 adb 失败：%s", cand)
-    return shutil.which("adb") or ""
+    return executable_path("adb")
 
 
 def frida_invocation(tool: str) -> list[str]:
     """返回调用某内置工具的命令前缀（argv 列表）。
 
     frozen：``[sys.executable, tool]``（经 dispatch 入口自调用内置库）；
-    源码：  ``[shutil.which(tool)]``（缺则 ``[]``）。
+    源码：显式配置 > 当前解释器脚本目录 > PATH（缺则 ``[]``）。
 
     tool ∈ _FRIDA_TOOLS。未知名只记 warning（不抛），仍按规则返回。
     """
@@ -89,7 +157,7 @@ def frida_invocation(tool: str) -> list[str]:
         logger.warning("[tools] 未知内置工具名：%s", tool)
     if frozen():
         return [sys.executable, tool]
-    exe = shutil.which(tool)
+    exe = executable_path(tool)
     return [exe] if exe else []
 
 
@@ -138,12 +206,16 @@ def resolve_jadx() -> tuple[list[str], dict[str, str]] | None:
     """解析 jadx 启动方式：返回 ``(命令前缀 argv, 需注入的环境变量)``；都不可用返回 None。
 
     优先级：
+    0. 环境级工具配置中的绝对路径；配置失效不回退。
     1. PATH 上的 jadx（用户自管，与既有行为一致，不注入 JAVA_HOME）；
     2. 插件包 ``jadx-addon/``（独立下载随包自带 JRE）——返回包内 jadx.bat 完整路径，并把
        ``JAVA_HOME`` 注入指向包内 JRE，使**无系统 Java** 的机器也能跑（GUI 一键导入即用）。
 
     完整路径而非裸名：Windows 上 jadx 是 .bat，裸名经 subprocess 启动会 WinError 2。
     """
+    selected = _configured_tool("jadx")
+    if selected is not None:
+        return ([selected], {}) if selected else None
     on_path = shutil.which("jadx")
     if on_path:
         return [on_path], {}
@@ -295,19 +367,19 @@ def _has_module(name: str) -> bool:
 
 def has_frida() -> bool:
     """frida CLI 可用。frozen：看 frida_tools 是否在包内；源码：PATH 有 frida。"""
-    return _has_module("frida_tools") if frozen() else shutil.which("frida") is not None
+    return _has_module("frida_tools") if frozen() else bool(frida_invocation("frida"))
 
 
 def has_frida_dexdump() -> bool:
     """frida-dexdump 可用。frozen：看 frida_dexdump 是否在包内；源码：PATH 有 frida-dexdump。"""
-    return _has_module("frida_dexdump") if frozen() else shutil.which("frida-dexdump") is not None
+    return _has_module("frida_dexdump") if frozen() else bool(frida_invocation("frida-dexdump"))
 
 
 def has_mitmproxy() -> bool:
     """mitmproxy/mitmdump 可用。frozen：看 mitmproxy 是否在包内；源码：PATH 有 mitmproxy/mitmdump。"""
     if frozen():
         return _has_module("mitmproxy")
-    return shutil.which("mitmproxy") is not None or shutil.which("mitmdump") is not None
+    return bool(frida_invocation("mitmproxy") or frida_invocation("mitmdump"))
 
 
 __all__ = [

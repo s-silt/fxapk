@@ -69,14 +69,14 @@ def test_tab_in_field_defense() -> None:
 
 
 def test_run_tshark_absent_returns_none(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    monkeypatch.setattr(tshark_backend.shutil, "which", lambda _n: None)
+    monkeypatch.setattr(tshark_backend.tools.shutil, "which", lambda _n: None)
     assert tshark_backend.run_tshark_http("x.pcap") is None
     assert tshark_backend.extract_http("x.pcap") == []  # tshark 缺 → 空、不抛
     assert tshark_backend.has_tshark() is False
 
 
 def test_run_tshark_mocked_subprocess(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    monkeypatch.setattr(tshark_backend.shutil, "which", lambda _n: "/usr/bin/tshark")
+    monkeypatch.setattr(tshark_backend.tools.shutil, "which", lambda _n: "/usr/bin/tshark")
 
     def _fake_run(cmd, **kw):  # 新实现把 stdout 落临时文件（内存有界）→ mock 写进去
         kw["stdout"].write(_TSV.encode("utf-8"))
@@ -90,7 +90,7 @@ def test_run_tshark_mocked_subprocess(monkeypatch) -> None:  # type: ignore[no-u
 def test_run_tshark_timeout_returns_none(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     import subprocess as _sp
 
-    monkeypatch.setattr(tshark_backend.shutil, "which", lambda _n: "/usr/bin/tshark")
+    monkeypatch.setattr(tshark_backend.tools.shutil, "which", lambda _n: "/usr/bin/tshark")
 
     def _boom(*a, **k):
         raise _sp.TimeoutExpired(cmd="tshark", timeout=60)
@@ -150,7 +150,7 @@ def test_parse_decrypted_robust() -> None:
 
 
 def test_run_tshark_decrypt_rejects_bad_keylog(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(tshark_backend.shutil, "which", lambda _n: "/usr/bin/tshark")
+    monkeypatch.setattr(tshark_backend.tools.shutil, "which", lambda _n: "/usr/bin/tshark")
     assert tshark_backend.run_tshark_decrypt("x.pcap", str(tmp_path / "missing")) is None  # 缺
     empty = tmp_path / "empty.keys"
     empty.write_text("", encoding="utf-8")
@@ -162,14 +162,14 @@ def test_run_tshark_decrypt_rejects_bad_keylog(monkeypatch, tmp_path) -> None:
 
 
 def test_run_tshark_decrypt_absent_tshark(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(tshark_backend.shutil, "which", lambda _n: None)
+    monkeypatch.setattr(tshark_backend.tools.shutil, "which", lambda _n: None)
     kl = tmp_path / "tls.keys"
     kl.write_text("CLIENT_RANDOM aa bb\n", encoding="utf-8")
     assert tshark_backend.run_tshark_decrypt("x.pcap", str(kl)) is None  # tshark 缺 → None、不抛
 
 
 def test_run_tshark_decrypt_mocked(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(tshark_backend.shutil, "which", lambda _n: "/usr/bin/tshark")
+    monkeypatch.setattr(tshark_backend.tools.shutil, "which", lambda _n: "/usr/bin/tshark")
     kl = tmp_path / "tls.keys"
     kl.write_text("CLIENT_RANDOM aa bb\n", encoding="utf-8")
     captured: dict = {}
@@ -212,7 +212,7 @@ def test_cleartext_to_endpoints_unchanged() -> None:
 
 def test_run_tshark_decrypt_ssl_fallback_old_wireshark(monkeypatch, tmp_path) -> None:
     """★复审 Finding2：旧 Wireshark(<3.0) 的 tls.keylog_file 是未知 pref → 非零+空产出 → 回退 ssl.keylog_file。"""
-    monkeypatch.setattr(tshark_backend.shutil, "which", lambda _n: "/usr/bin/tshark")
+    monkeypatch.setattr(tshark_backend.tools.shutil, "which", lambda _n: "/usr/bin/tshark")
     kl = tmp_path / "tls.keys"
     kl.write_text("CLIENT_RANDOM aa bb\n", encoding="utf-8")
     calls: list[str] = []
@@ -233,7 +233,7 @@ def test_run_tshark_decrypt_ssl_fallback_old_wireshark(monkeypatch, tmp_path) ->
 
 def test_run_tshark_decrypt_no_fallback_when_tls_ok(monkeypatch, tmp_path) -> None:
     """tls.keylog_file 有产出 → 不回退、只跑一次（现代 Wireshark 不因未知 ssl 别名多跑/破功）。"""
-    monkeypatch.setattr(tshark_backend.shutil, "which", lambda _n: "/usr/bin/tshark")
+    monkeypatch.setattr(tshark_backend.tools.shutil, "which", lambda _n: "/usr/bin/tshark")
     kl = tmp_path / "tls.keys"
     kl.write_text("CLIENT_RANDOM aa bb\n", encoding="utf-8")
     calls: list[str] = []
@@ -280,7 +280,7 @@ def test_parse_decrypted_credentials_robust() -> None:
 
 
 def test_extract_decrypted_credentials_mocked(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(tshark_backend.shutil, "which", lambda _n: "/usr/bin/tshark")
+    monkeypatch.setattr(tshark_backend.tools.shutil, "which", lambda _n: "/usr/bin/tshark")
     kl = tmp_path / "tls.keys"
     kl.write_text("CLIENT_RANDOM aa bb\n", encoding="utf-8")
 

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +18,17 @@ from apkscan.core.models import (
     Component,
     ComponentSet,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_toolchain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unit tests must not discover the developer's installed toolchain or console scripts."""
+    from apkscan.core import tools
+
+    missing = Path(__file__).parent / "__absent_toolchain__"
+    monkeypatch.delenv("FXAPK_TOOLCHAIN_FILE", raising=False)
+    monkeypatch.setattr(tools, "_toolchain_file", lambda: missing / "tools.json")
+    monkeypatch.setattr(tools, "_python_scripts_dir", lambda: missing)
 
 
 @pytest.fixture(autouse=True)

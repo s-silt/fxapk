@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import ipaddress
 import logging
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -20,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from apkscan.core import tools
 from apkscan.core.models import Endpoint, Evidence
 
 logger = logging.getLogger(__name__)
@@ -83,7 +83,7 @@ class HttpRequest:
 
 def has_tshark() -> bool:
     """PATH 上是否有 tshark（可选深度后端；缺则静默禁用）。"""
-    return shutil.which("tshark") is not None
+    return bool(tools.executable_path("tshark"))
 
 
 def run_tshark_http(pcap_path: str, timeout: float = _TSHARK_TIMEOUT) -> str | None:
@@ -93,7 +93,7 @@ def run_tshark_http(pcap_path: str, timeout: float = _TSHARK_TIMEOUT) -> str | N
     只读回 _MAX_OUTPUT 字节（内存有界，绝不 OOM）；UTF-8 解码（tshark 全平台输出 UTF-8，errors=replace 永不抛）；
     达上限即丢拦腰截断的末行（防半截假域名）。
     """
-    bin_ = shutil.which("tshark")
+    bin_ = tools.executable_path("tshark")
     if not bin_:
         return None
     cmd = [bin_, "-r", str(pcap_path), "-Y", "http.request", "-T", "fields", "-E", "occurrence=f"]
@@ -208,7 +208,7 @@ def _run_tshark_decrypt(
 
     keylog 校验：文件存在、非空、且确含 NSS 标签才放行（门控：无密钥不动 TLS）。内存/超时/截断防护见 _run_decrypt_once。
     """
-    bin_ = shutil.which("tshark")
+    bin_ = tools.executable_path("tshark")
     if not bin_:
         return None
     kp = Path(keylog_path)
