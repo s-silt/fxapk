@@ -12,7 +12,7 @@ from typing import Any
 
 from apkscan.core.models import Endpoint
 from apkscan.enrichers.multisource import (
-    _PassiveLookupEnricher, _ServiceError, _business_error, _compact_asset_records,
+    _PassiveLookupEnricher, _ServiceError, _business_error, _asset_result,
     _dict, _TIMEOUT, _provider_origin, _reject_redirect,
 )
 
@@ -164,6 +164,7 @@ class InternetDbEnricher(_PassiveLookupEnricher):
 
 class DayDayMapEnricher(_PassiveLookupEnricher):
     name = "daydaymap"
+    bypass_system_proxy = True
     applies_to = ["ip", "domain"]
     required_env = ("FXAPK_DAYDAYMAP_KEY", "FXAPK_DAYDAYMAP_KEY2")
     _URL = "https://www.daydaymap.com/api/v1/raymap/search/all"
@@ -185,9 +186,10 @@ class DayDayMapEnricher(_PassiveLookupEnricher):
         items = data.get("list")
         if not isinstance(items, list):
             raise ValueError("invalid_daydaymap_list")
-        records = _compact_asset_records(items)
-        return {"records": records, "count": len(records), "source": "daydaymap",
-                "attribution_scope": "cohosted_sites_not_ip_owner" if endpoint.kind == "ip" else "queried_domain"} if records else {}
+        result = _asset_result(items, source=self.name, total=data.get("total"))
+        if result:
+            result["attribution_scope"] = "cohosted_sites_not_ip_owner" if endpoint.kind == "ip" else "queried_domain"
+        return result
 
 
 class ThreatBookEnricher(_PassiveLookupEnricher):

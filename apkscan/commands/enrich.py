@@ -103,7 +103,14 @@ def _rebuild_csv_from_ledger(
 
 def _append_ndjson(records: list[dict[str, object]], path: Path) -> None:
     """明细按行 append（**不覆盖**）——它同时是续跑账本，覆盖等于把已完成记录丢掉。"""
-    with open(path, "a", encoding="utf-8", newline="\n") as handle:
+    with open(path, "ab+") as handle:
+        # A killed process may leave a partial final JSON/UTF-8 line. Preserve it
+        # as a bad line, but never concatenate the next valid record onto it.
+        handle.seek(0, os.SEEK_END)
+        if handle.tell():
+            handle.seek(-1, os.SEEK_END)
+            if handle.read(1) != b"\n":
+                handle.write(b"\n")
         for record in records:
             handle.write(
                 _json.dumps(
@@ -111,9 +118,23 @@ def _append_ndjson(records: list[dict[str, object]], path: Path) -> None:
                     ensure_ascii=False,
                     sort_keys=True,
                     allow_nan=False,
-                )
-                + "\n"
+                ).encode("utf-8")
+                + b"\n"
             )
+
+
+def _has_coverage_gaps(value: object) -> bool:
+    if isinstance(value, dict):
+        if "coverage_complete" in value and value["coverage_complete"] is not True:
+            return True
+        if any((key.endswith("_status") and isinstance(item, str) and item.startswith("failed"))
+               or ((key == "truncated" or key.endswith("_truncated")) and item is True)
+               for key, item in value.items()):
+            return True
+        return any(_has_coverage_gaps(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_has_coverage_gaps(item) for item in value)
+    return False
 
 
 @enrich_app.command(name="batch")
@@ -167,7 +188,7 @@ def batch(
     try:
         enrichers = select_enrichers(enrichers, stage, providers)
         for enricher in enrichers:
-            if enricher.name in {"quake", "daydaymap"}:
+            if enricher.name in {"quake", "daydaymap", "daydaymap_profile"}:
                 enricher.credential_slot = credential_slot
     except ValueError as exc:
         typer.echo(str(exc), err=True)
@@ -180,9 +201,11 @@ def batch(
     ledger_warnings: tuple[str, ...] = ()
     resume_incomplete = False
     resume_complete = True
+    resume_bad_lines = 0
     if resume:
         # 只扫一遍账本：同时拿到续跑判据与超限告警（分两次读会白读一遍大文件）。
         scan = _batch.scan_ledger(ndjson_path)
+        resume_bad_lines = scan.bad_lines
         completed = _batch.completed_from_records(scan.records)
         ledger_warnings = scan.limit_warnings
         resume_incomplete = scan.resume_incomplete
@@ -201,15 +224,15 @@ def batch(
     capped = pending[:max_targets]
     over_cap = len(pending) - len(capped)
 
-    # ★预算算在 ``eligible``（本源适用、key 齐全的全部目标）上，而不是 ``capped``（本次待处理的）。
+    # 预算使用完整输入，保留 disabled / already_done / not_applicable 的区别。
     #   ``completed`` 一并传进去，``estimate_budget`` 内部会把已完成的从 ``matched`` 里扣掉，
     #   所以 ``estimated_requests`` 不受影响；差别只在**逐源状态说得对不对**：
     #   若只喂 ``capped``，全部源都已完成时 ``capped`` 为空，于是每个源都被算成
     #   ``not_applicable``——一个只吃 ip 的源、目标就是 IP、上轮刚查成功，却报"不吃这种目标"。
-    #   喂 ``eligible`` 才能让它如实报 ``already_done``。
+    #   不能预先过滤未配置的目标，否则 disabled 会错报为 not_applicable。
     #   ★被 ``--max-targets`` 截掉的那部分仍如实计入预算行（它们确实还要查），
     #     顶层的 ``over_max_targets`` 单独说明本次只处理前 N 个。
-    budget = _batch.estimate_budget(eligible, enrichers, os.environ, completed)
+    budget = _batch.estimate_budget(targets, enrichers, os.environ, completed)
     summary: dict[str, object] = {
         "targets_in_list": len(targets),
         "skipped_unparseable": skipped,
@@ -220,8 +243,9 @@ def batch(
         "estimated_requests": _batch.budget_total(budget),
         "stage": stage,
         "selected_providers": [e.name for e in enrichers],
-        "request_estimate_note": "计划查询单元；DNS全类型按8次计，旧适配器的重定向/辅助查询可能增加请求；不是计费次数。",
+        "request_estimate_note": "含已建模辅助调用的请求预算上界；DNS按8次、RIPEstat按5次、VT/OTX按2次、Shodan域名按2次及IP按1次；不是计费次数，其他旧适配器的内部请求仍可能增加。",
         "resume_complete": resume_complete,
+        "ledger_bad_lines_skipped": resume_bad_lines,
         "safe_to_execute": resume_complete and not config_issues,
         "configuration_issues": config_issues,
         "budget_reliable": resume_complete,
@@ -231,6 +255,7 @@ def batch(
                 "status": line.status,
                 "targets": line.targets,
                 "request_units_per_target": line.request_units,
+                "estimated_requests": line.requests if line.requests is not None else line.targets * line.request_units,
                 **({"reason": line.reason} if line.reason else {}),
             }
             for line in budget
@@ -311,17 +336,12 @@ def batch(
         typer.echo(f"输出目录不可用 {out_dir}：{type(exc).__name__}", err=True)
         raise typer.Exit(2)
 
-    records = _batch.enrich_targets(
-        capped,
-        enrichers,
-        mode=ANALYSIS_MODE_PASSIVE,
-        env=os.environ,
-        completed=completed,
-    )
-
     rebuild_warnings = []
     try:
-        _append_ndjson(records, ndjson_path)
+        records = _batch.enrich_targets(
+            capped, enrichers, mode=ANALYSIS_MODE_PASSIVE, env=os.environ,
+            completed=completed, on_record=lambda record: _append_ndjson([record], ndjson_path),
+        )
         # CSV 从账本全量重建（不是只写本轮记录）：账本是 append-only 事件流，CSV 是当前快照。
         bad_ledger_lines = _rebuild_csv_from_ledger(
             ndjson_path, csv_path, rebuild_warnings
@@ -342,7 +362,10 @@ def batch(
     # DNS 命中仍可能截断或拒收部分记录；不能仅凭 hit 判定覆盖完整。
     summary["completed_with_gaps"] = any(
         any(status in c for status in ("failed", "skipped", "disabled")) for c in outcomes.values()
-    ) or any(r.get("enrichment", {}).get("dns_records", {}).get("coverage_complete") is False for r in records)
+    ) or any(
+        _has_coverage_gaps(data)
+        for r in records for data in r.get("enrichment", {}).values()
+    )
     summary["ledger_bad_lines_skipped"] = bad_ledger_lines or 0
     _note_ledger_limits(summary, (*ledger_warnings, *rebuild_warnings))
     summary["csv"] = str(csv_path)

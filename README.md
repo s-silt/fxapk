@@ -209,6 +209,23 @@ AI 看你给的是什么，自己挑命令：
 | 对照两份报告与对应 JADX 索引，整理家族候选的共同点、差异和代码定位 | `fxapk jadx compare <subject-report.json> <candidate-report.json> --jadx-cache-root <cache> --out <comparison.json>`；相似性不代表同一运营者 |
 | 识别线（全部只读 / 离线；模型只能写 proposed）：从判断账本投影重分析请求 / 校验标签文件 / 构建与校验防泄漏 split / 评测并过晋级门（门未过退出码 4，可当 CI 闸） | `fxapk recognize reanalysis <ledger> --out <requests.jsonl>`、`fxapk recognize labels validate …`、`fxapk recognize split build\|validate …`、`fxapk recognize evaluate …` |
 
+被动资源画像可显式选择 `fofa_profile,fofa_host,daydaymap_profile`。先按已授权目标清单预演：
+
+```bash
+fxapk enrich batch -t targets.txt -o enrich_out --stage api --providers fofa_profile,fofa_host,daydaymap_profile
+```
+
+核对服务、披露范围与预算后，同一命令加 `--no-dry-run` 执行。FOFA 传统 11 列结果保持兼容；
+增强搜索、HOST 聚合分别记录，两者同属 FOFA，不能当成两个独立来源。搜索只取有界首屏，
+结果记录已报告总量、实际返回量与覆盖状态；未知总量、缺字段和权限失败不等于“没有资产”。
+产品、证书和测绘时间帮助判断服务类型，不能单独确认云实例、租户账号或运营者。
+
+批量结果每完成一个目标就写入 `enrich.ndjson`；`enrich.csv` 是从该文件重建的当前投影。
+响应哈希是核对锚点，归一化服务字段是有界、脱敏预览，**不是完整原始响应存档**。
+新版画像契约会使受影响来源的旧记录进入补查计划，先 dry-run 核对预算；命中有界首屏后
+不会自动翻页。权限/额度错误及连续失败熔断后，本轮其余目标标记跳过；调整配置或恢复服务后
+重新启动有界批次。`--credential-slot 2` 支持 Quake、DayDayMap 及其画像，不会自动换号。
+
 JADX 多索引查询默认读取 cache 根的 `fxapk-jadx-index-map.json`，也可用 `--index-map` 指定映射。
 旧 1.6 索引只为建库时选定值保存 postings，因此索引 `coverage=complete` 不保证任意新值已覆盖；
 查询另报 `query_coverage`。启用 `--jadx-cache-root` 的新分析会在 `query-sources` 保存有界 Java 快照，

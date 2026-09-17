@@ -23,6 +23,8 @@ domain 端点：先用 Shodan ``/dns/resolve`` 解析成 IP 再 host 查询（�
 from __future__ import annotations
 
 import json
+import hashlib
+import ipaddress
 import logging
 import os
 import re
@@ -34,6 +36,8 @@ from typing import Any
 
 
 from apkscan.enrichers import _http
+from apkscan.enrichers._profile import bounded_profile, coverage
+from apkscan.enrichers.multisource import _ServiceError, _reject_redirect
 
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
@@ -65,6 +69,7 @@ CACHE_FILE = CACHE_DIR / "shodan.json"
 CACHE_TTL_SECONDS = 24 * 60 * 60
 #: 缓存条目里记录写入时刻的字段名（epoch 秒）。旧缓存无此字段 → 视为过期、触发重查。
 _CACHED_AT_KEY = "_cached_at"
+_PROFILE_CONTRACT = 3
 
 
 def _api_key() -> str:
@@ -174,6 +179,9 @@ def _parse_host(payload: dict[str, Any]) -> dict[str, Any]:
                 "http_title": http.get("title"),
                 "x_powered_by": _http_header_values(http, "x-powered-by"),
                 "cookie_names": _cookie_names(http),
+                "observed_at": svc.get("timestamp"),
+                "banner": bounded_profile(svc.get("data")),
+                "tls": bounded_profile(svc.get("ssl")),
             }
         )
         if len(services) >= _MAX_SERVICES:
@@ -193,6 +201,8 @@ def _parse_host(payload: dict[str, Any]) -> dict[str, Any]:
         "country": payload.get("country_name") or payload.get("country_code"),
         "os": payload.get("os"),
         "tags": [t for t in (payload.get("tags") or []) if isinstance(t, str)],
+        "last_update": payload.get("last_update"),
+        **coverage(len(payload.get("data") or []), len(services), limit=_MAX_SERVICES),
         "source": "shodan",
     }
 
@@ -209,12 +219,17 @@ class ShodanEnricher(BaseEnricher):
     phase = "overseas"
     active = False
     required_env = _ENV_KEYS
+    request_budget = 2
+    request_budget_by_kind = {"ip": 1, "domain": 2}
     # 额度型全量测绘源只在 case close 的有界高价值目标集运行；普通静态 analyze 不消费额度。
     case_close_only = True
 
     def __init__(self) -> None:
         # 缓存写入串行化，避免并发富化时写坏 JSON 文件。
         self._lock = threading.Lock()
+        self.receipt: dict[str, Any] = {}
+        self._blocked_error: str | None = None
+        self._consecutive_failures = 0
 
     # ------------------------------------------------------------------ 缓存
     def _load_cache(self) -> dict[str, dict[str, Any]]:
@@ -244,13 +259,15 @@ class ShodanEnricher(BaseEnricher):
         stamped = entry.get(_CACHED_AT_KEY)
         if not isinstance(stamped, (int, float)):
             return False
-        return (time.time() - stamped) < CACHE_TTL_SECONDS
+        return (not isinstance(stamped, bool) and 0 <= time.time() - stamped < CACHE_TTL_SECONDS
+                and (entry.get("_profile_contract") == _PROFILE_CONTRACT
+                     or entry.get("_source_status") == "no_record"))
 
     def _save_cache_entry(self, value: str, entry: dict[str, Any]) -> None:
         with self._lock:
             cache = self._load_cache()
             # 打时间戳供 TTL 过期判断（见 CACHE_TTL_SECONDS）。
-            cache[value] = {**entry, _CACHED_AT_KEY: time.time()}
+            cache[value] = {**entry, _CACHED_AT_KEY: time.time(), "_profile_contract": _PROFILE_CONTRACT}
             try:
                 CACHE_DIR.mkdir(parents=True, exist_ok=True)
                 # 原子写：临时文件 + replace，避免崩溃/并发留半截坏缓存。
@@ -264,17 +281,31 @@ class ShodanEnricher(BaseEnricher):
                 logger.warning("Shodan 缓存写入失败：%s", CACHE_FILE, exc_info=True)
 
     # ------------------------------------------------------------------ 查询
+    def _check_response(self, response: Any) -> None:
+        status = getattr(response, "status_code", None)
+        item = {"http_status": status}
+        content = getattr(response, "content", None)
+        if isinstance(content, bytes):
+            item["response_sha256"] = hashlib.sha256(content).hexdigest()
+        self.receipt.setdefault("responses", []).append(item)
+        if status in (401, 403, 402, 429):
+            raise _ServiceError({401: "authentication_failed", 403: "permission_denied",
+                                 402: "quota_insufficient", 429: "rate_limited"}[status])
+        _reject_redirect(response)
+
     def _resolve(self, domain: str, key: str) -> str | None:
         """用 Shodan dns/resolve 把域名解析成 IP；解析不到返回 None。网络异常向上抛由 enrich 兜底。"""
         resp = _http.capped_get(
-            RESOLVE_URL, params={"hostnames": domain, "key": key}, timeout=SHODAN_TIMEOUT
+            RESOLVE_URL, params={"hostnames": domain, "key": key}, timeout=SHODAN_TIMEOUT,
+            allow_redirects=False,
         )
+        self._check_response(resp)
         resp.raise_for_status()
         payload = resp.json()
         if isinstance(payload, dict):
             ip = payload.get(domain)
             if isinstance(ip, str) and ip.strip():
-                return ip.strip()
+                return str(ipaddress.ip_address(ip.strip()))
         return None
 
     def _query(self, value: str, kind: str, key: str) -> dict[str, Any]:
@@ -286,17 +317,27 @@ class ShodanEnricher(BaseEnricher):
         else:
             ip = value
 
-        resp = _http.capped_get(HOST_URL.format(ip=ip), params={"key": key}, timeout=SHODAN_TIMEOUT)
+        resp = _http.capped_get(HOST_URL.format(ip=ip), params={"key": key}, timeout=SHODAN_TIMEOUT,
+                                allow_redirects=False)
+        self._check_response(resp)
         if resp.status_code == 404:
             raise _ShodanMiss(f"Shodan 库中无该主机记录：{ip}")
         resp.raise_for_status()
         payload = resp.json()
         if not isinstance(payload, dict):
             raise ValueError(f"Shodan 返回非对象：{type(payload).__name__}")
+        if not isinstance(payload.get("data"), list):
+            raise _ServiceError("invalid_host_profile")
+        returned_ip = payload.get("ip_str") or payload.get("ip")
+        if not isinstance(returned_ip, (str, int)) or isinstance(returned_ip, bool):
+            raise _ServiceError("invalid_host_profile")
+        if ipaddress.ip_address(returned_ip) != ipaddress.ip_address(ip):
+            raise _ServiceError("profile_target_mismatch")
         return _parse_host(payload)
 
     # ------------------------------------------------------------------ 入口
     def enrich(self, ep: Endpoint) -> EnrichmentResult:
+        self.receipt = {"network_attempted": False, "started_at": time.time()}
         value = (ep.value or "").strip()
         if not value:
             return EnrichmentResult(provider=self.name, ok=False, error="空值，跳过 Shodan 查询")
@@ -315,7 +356,8 @@ class ShodanEnricher(BaseEnricher):
         cached = cache.get(value)
         if isinstance(cached, dict) and self._cache_is_fresh(cached):
             logger.debug("Shodan 缓存命中：%s", value)
-            data = {k: v for k, v in cached.items() if k != _CACHED_AT_KEY}
+            data = {k: v for k, v in cached.items() if k not in {_CACHED_AT_KEY, "_profile_contract"}}
+            self.receipt.update(cache_hit=True, cached_at=cached.get(_CACHED_AT_KEY))
             # Older caches contain only note/source and were incorrectly counted as hits.
             if "无法解析" in str(data.get("note", "")):
                 cached = None  # Failed DNS must be retried, not cached as a host miss.
@@ -327,21 +369,32 @@ class ShodanEnricher(BaseEnricher):
             logger.debug("Shodan 缓存过期，重查：%s", value)
 
         # 2) 网络查询。
+        if self._blocked_error:
+            return EnrichmentResult(provider=self.name, ok=True,
+                data={"_source_status": "skipped", "_error_type": self._blocked_error})
         try:
+            self.receipt["network_attempted"] = True
             data = self._query(value, ep.kind, key)
         except _ShodanMiss as miss:
+            self._consecutive_failures = 0
             # 库中无记录：缓存空标记避免复查（耗额度），按"查询无结果"返回（ok=True 无值）。
             entry = {"note": str(miss), "source": "shodan", "_source_status": "no_record"}
             self._save_cache_entry(value, entry)
             return EnrichmentResult(provider=self.name, ok=True, data=entry)
         except Exception as exc:  # noqa: BLE001 — 富化失败不得炸主流程
             # requests 的异常文本可能包含带 key 的完整 URL，只保留异常类型，避免密钥进日志/报告。
-            error_type = type(exc).__name__
+            error_type = exc.category if isinstance(exc, _ServiceError) else type(exc).__name__
+            self._consecutive_failures += 1
+            if error_type in {"authentication_failed", "permission_denied", "quota_insufficient", "rate_limited"} or self._consecutive_failures >= 3:
+                self._blocked_error = error_type
+            self.receipt["error_type"] = error_type
             if isinstance(exc, ValueError) and str(exc) == "dns_resolution_failed":
                 error_type = "dns_resolution_failed"
             logger.debug("Shodan 查询失败：%s（%s）", value, error_type)
-            return EnrichmentResult(provider=self.name, ok=False, error=error_type)
+            return EnrichmentResult(provider=self.name, ok=False, error=error_type,
+                                    data={"_source_status": "failed", "_error_type": error_type})
 
         # 3) 成功才写缓存（失败不缓存，便于后续重试）。
+        self._consecutive_failures = 0
         self._save_cache_entry(value, data)
         return EnrichmentResult(provider=self.name, ok=True, data=data)

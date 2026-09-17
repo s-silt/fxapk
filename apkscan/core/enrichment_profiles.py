@@ -6,17 +6,18 @@ from typing import Any
 from urllib.parse import urlsplit
 
 BASELINE = frozenset({"rdap", "ip_rdap", "asn", "certs", "ripestat_bgp", "dns_records", "cymru", "internetdb"})
-OPTIONAL = frozenset({"threatbook", "whoisxml"})
+OPTIONAL = frozenset({"threatbook", "whoisxml", "fofa_profile", "fofa_host", "daydaymap_profile"})
 # Version invalidation is deliberately narrow: old trustworthy sources remain resumable.
-CONTRACTS = {"censys": 2, "zoomeye": 2, "shodan": 2, "quake": 2}
+CONTRACTS = {"censys": 3, "zoomeye": 3, "shodan": 3, "quake": 3,
+             "hunter": 2, "daydaymap": 2, "virustotal": 2, "otx": 2, "urlscan": 2}
 
 
 def configuration_issues(enrichers: Sequence[Any], env: Mapping[str, str]) -> list[dict[str, str]]:
     issues = []
     for e in enrichers:
-        if e.name not in {"fofa", "quake", "zoomeye"}:
+        if e.name not in {"fofa", "fofa_profile", "fofa_host", "quake", "zoomeye"}:
             continue
-        name = f"FXAPK_{e.name.upper()}_URL"
+        name = "FXAPK_FOFA_URL" if e.name.startswith("fofa") else f"FXAPK_{e.name.upper()}_URL"
         value = env.get(name, "").strip()
         if not value:
             continue

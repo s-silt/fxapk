@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 
 
 from apkscan.enrichers import _http
+from apkscan.enrichers._profile import SENSITIVE_HEADER_RE, coverage, service_profile
 
 from apkscan.core.enrichment import (
     ProviderResponseError as _ProviderResponseError,
@@ -46,6 +47,7 @@ _METADATA_ONLY_KEYS = {
     "count",
     "pulse_count",
     "passive_dns_status",
+    "passive_dns_coverage",
     "_via",
     "upstream_lookup_status",
     "upstream_error_type",
@@ -589,8 +591,10 @@ def _compact_asset_records(value: object) -> list[dict[str, object]]:
     compact: list[dict[str, object]] = []
     for record in _list_of_dicts(value):
         item = _compact_mapping(record, _ASSET_FIELDS)
+        item.update(service_profile(record))
         for nested_field in ("service", "portinfo"):
             nested = _compact_mapping(record.get(nested_field), _SERVICE_FIELDS)
+            nested.update(service_profile(_dict(record.get(nested_field))))
             if nested:
                 item[nested_field] = nested
         for nested_field in ("location", "geoinfo"):
@@ -606,6 +610,20 @@ def _compact_asset_records(value: object) -> list[dict[str, object]]:
         if item:
             compact.append(item)
     return compact
+
+
+def _asset_result(rows: object, *, source: str, total: object = None, limit: int = _MAX_RECORDS) -> dict[str, object]:
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise ValueError("invalid_asset_records")
+    records = _compact_asset_records(rows[:limit])
+    if not rows and coverage(total, 0)["truncated"] is True:
+        raise ValueError("asset_results_missing")
+    if rows and not records:
+        raise ValueError("asset_fields_unrecognized")
+    if not records:
+        return {}
+    return {"records": records, "count": len(records), "source": source,
+            **coverage(total, len(records), limit=limit, observed=len(rows))}
 
 
 def _provider_declared_error(payload: object, provider: str = "") -> bool:
@@ -645,12 +663,12 @@ class _ServiceError(_ProviderResponseError):
 def _business_error(payload: object) -> _ServiceError:
     data = _dict(payload)
     # Inspect messages only to classify; never retain upstream free text or credentials.
-    message = str(data.get("message") or data.get("msg") or data.get("error") or "").lower()
+    message = str(data.get("message") or data.get("msg") or data.get("errmsg") or data.get("error") or "").lower()
     category = "provider_response_error"
-    if any(s in message for s in ("quota", "credit", "limitation", "余额", "积分", "配额", "不足")):
-        category = "quota_insufficient"
-    elif any(s in message for s in ("无 api", "无权限", "访问权限", "付费账号", "access restricted", "subscription")):
+    if any(s in message for s in ("无 api", "无权限", "没有权限", "访问权限", "付费账号", "permission", "access restricted", "subscription")):
         category = "permission_denied"
+    elif any(s in message for s in ("quota", "credit", "余额", "积分", "配额")):
+        category = "quota_insufficient"
     elif any(s in message for s in ("api key", "api-key", "token", "unauthorized", "认证", "鉴权")):
         category = "authentication_failed"
     elif any(s in message for s in ("rate limit", "too many", "频率", "频繁")):
@@ -680,12 +698,13 @@ def _reject_redirect(response: Any) -> None:
 def _safe_provider_note(payload: object) -> str:
     """Keep the diagnostic, never the request credential or full provider body."""
     data = _dict(payload)
-    value = data.get("message") or data.get("msg") or data.get("verbose_msg") or data.get("messages")
+    value = data.get("message") or data.get("msg") or data.get("errmsg") or data.get("verbose_msg") or data.get("messages")
     if not isinstance(value, str):
         return ""
     for secret in sorted(_environment_secrets(), key=len, reverse=True):
         value = value.replace(secret, "[REDACTED]")
     value = re.sub(r"(?i)((?:api[-_]?key|token|secret|password)\s*[:=]\s*)[^\s,;]+", r"\1[REDACTED]", value)
+    value = SENSITIVE_HEADER_RE.sub(r"\1: [redacted]", value)
     value, _ = scrub_urls(value)
     value, _ = scrub_pii(value)
     return value[:160]
@@ -735,18 +754,25 @@ class _PassiveLookupEnricher(BaseEnricher, ABC):
         self._blocked_targets = 0
         self._consecutive_failures = 0
 
-    def _check_response(self, response: Any) -> None:
+    def _check_response(self, response: Any, *, operation: str = "primary") -> None:
+        request_receipt: dict[str, object] = {"operation": operation}
         url = getattr(response, "url", None)
         if isinstance(url, str):
             parsed = urlsplit(url)
             if parsed.scheme in {"https", "http"} and parsed.hostname:
-                self.receipt["endpoint"] = f"{parsed.scheme}://{parsed.hostname}"
+                request_receipt["endpoint"] = f"{parsed.scheme}://{parsed.hostname}"
         content = getattr(response, "content", None)
         if isinstance(content, bytes):
-            self.receipt["response_sha256"] = hashlib.sha256(content).hexdigest()
+            request_receipt["response_sha256"] = hashlib.sha256(content).hexdigest()
         status = getattr(response, "status_code", None)
         if isinstance(status, int):
-            self.receipt["http_status"] = status
+            request_receipt["http_status"] = status
+        responses = self.receipt.setdefault("responses", [])
+        if isinstance(responses, list):
+            responses.append(request_receipt)
+        # Keep the primary response anchor; auxiliary calls get separate receipts.
+        for key, value in request_receipt.items():
+            self.receipt.setdefault(key, value)
         if status in (401, 403, 402, 429):
             raise _ServiceError({401: "authentication_failed", 403: "permission_denied", 402: "quota_insufficient", 429: "rate_limited"}[status], status)
         _reject_redirect(response)
@@ -786,18 +812,17 @@ class _PassiveLookupEnricher(BaseEnricher, ABC):
     def enrich(self, ep: Endpoint) -> EnrichmentResult:
         via = self._egress_label()  # 本次请求出口（direct=绕代理直连 / system_proxy=随系统代理）——记进每条结果溯源
         self.receipt = {"started_at": datetime.now(timezone.utc).isoformat(), "via": via}
+        self._passive_dns_coverage: dict[str, object] = {}
         if getattr(self, "requires_product_check", False) and not getattr(self, "explicitly_selected", False):
             self.receipt.update(network_attempted=False, reason="product_permission_not_checked")
             return EnrichmentResult(provider=self.name, ok=True, data={"_source_status": "disabled", "_error_type": "product_permission_not_checked"})
         if self._blocked_error:
             self._blocked_targets += 1
-            if self._blocked_error in {"authentication_failed", "permission_denied", "quota_insufficient"} or self._blocked_targets < 10:
-                self.receipt.update(network_attempted=False, blocked_by=self._blocked_error)
-                return EnrichmentResult(provider=self.name, ok=True, data={"_source_status": "skipped", "_error_type": self._blocked_error})
-            self._blocked_targets = 0
+            self.receipt.update(network_attempted=False, blocked_by=self._blocked_error)
+            return EnrichmentResult(provider=self.name, ok=True, data={"_source_status": "skipped", "_error_type": self._blocked_error})
         credential = _credential(self.required_env)
         slot = getattr(self, "credential_slot", 0)
-        if slot and len(self.required_env) > 1 and self.name in {"quake", "daydaymap"}:
+        if slot and len(self.required_env) > 1 and self.name in {"quake", "daydaymap", "daydaymap_profile"}:
             credential = (os.environ.get(self.required_env[slot - 1]) or "").strip() if slot <= len(self.required_env) else ""
         if self.required_env:
             self.receipt["credential_slot"] = next((i + 1 for i, name in enumerate(self.required_env)
@@ -862,6 +887,8 @@ class _PassiveLookupEnricher(BaseEnricher, ABC):
                 if records:
                     data["passive_dns"] = records
                 data["passive_dns_status"] = "hit" if records else "no_record"
+                if self._passive_dns_coverage:
+                    data["passive_dns_coverage"] = self._passive_dns_coverage
 
         has_values = any(
             key not in _METADATA_ONLY_KEYS and value not in (None, "", [], {})
@@ -875,6 +902,7 @@ class _PassiveLookupEnricher(BaseEnricher, ABC):
 
 class RipeStatBgpEnricher(_PassiveLookupEnricher):
     name = "ripestat_bgp"
+    request_budget = 5
     applies_to = ["ip"]
     _URL = "https://stat.ripe.net/data/prefix-overview/data.json"
     _NEIGHBOURS_URL = "https://stat.ripe.net/data/asn-neighbours/data.json"
@@ -908,8 +936,7 @@ class RipeStatBgpEnricher(_PassiveLookupEnricher):
                 )
                 if 300 <= getattr(neighbour_response, "status_code", 0) < 400:
                     self.receipt["reason"] = "redirect_not_followed"
-                _reject_redirect(neighbour_response)
-                neighbour_response.raise_for_status()
+                self._check_response(neighbour_response, operation="asn_neighbours")
                 neighbour_payload = neighbour_response.json()
                 if _provider_declared_error(neighbour_payload, self.name):
                     raise _ProviderResponseError
@@ -951,8 +978,7 @@ class RipeStatBgpEnricher(_PassiveLookupEnricher):
                 auxiliary_response = self._http.get(url, params=params, allow_redirects=False, timeout=_TIMEOUT)
                 if 300 <= getattr(auxiliary_response, "status_code", 0) < 400:
                     self.receipt["reason"] = "redirect_not_followed"
-                _reject_redirect(auxiliary_response)
-                auxiliary_response.raise_for_status()
+                self._check_response(auxiliary_response, operation=result_key)
                 auxiliary_payload = auxiliary_response.json()
                 if _provider_declared_error(auxiliary_payload, self.name):
                     raise _ProviderResponseError
@@ -1073,6 +1099,7 @@ class FofaPassiveEnricher(_PassiveLookupEnricher):
     def _lookup(self, endpoint: Endpoint, credential: str) -> object:
         base_url = _api_endpoint("FXAPK_FOFA_URL", "https://fofa.info", "/api/v1/search/all")
         self.receipt["endpoint"] = _provider_origin(base_url)
+        self.receipt["requested_fields"] = FOFA_QUERY_FIELDS.split(",")
         query = f'ip="{endpoint.value}"' if endpoint.kind == "ip" else f'domain="{endpoint.value}"'
         response = self._http.get(
             base_url,
@@ -1091,16 +1118,21 @@ class FofaPassiveEnricher(_PassiveLookupEnricher):
         del endpoint
         root = _dict(payload)
         rows = root.get("results")
+        if not isinstance(rows, list):
+            raise ValueError("invalid_fofa_results")
         normalized = []
         if isinstance(rows, list):
             for row in rows[:_MAX_RECORDS]:
-                if not isinstance(row, list):
-                    continue
-                compact = [_bounded_scalar(value) for value in row[:11]]
+                if not isinstance(row, list) or len(row) != len(FOFA_QUERY_FIELDS.split(",")):
+                    raise ValueError("fofa_field_count_mismatch")
+                compact = [_bounded_scalar(value) for value in row]
                 if compact and any(value is not None for value in compact):
                     compact[0] = _safe_host_reference(row[0]) if row else None
                     normalized.append(compact)
-        return {"records": normalized, "count": len(normalized), "source": "fofa"} if normalized else {}
+        if not rows and coverage(root.get("size"), 0)["truncated"] is True:
+            raise ValueError("fofa_results_missing")
+        return {"records": normalized, "count": len(normalized), "source": "fofa",
+                **coverage(root.get("size"), len(normalized), observed=len(rows))} if normalized else {}
 
 
 class QuakePassiveEnricher(_PassiveLookupEnricher):
@@ -1123,8 +1155,9 @@ class QuakePassiveEnricher(_PassiveLookupEnricher):
 
     def _normalize(self, payload: object, endpoint: Endpoint) -> dict[str, object]:
         del endpoint
-        records = _compact_asset_records(_dict(payload).get("data"))
-        return {"records": records, "count": len(records), "source": "quake"} if records else {}
+        root = _dict(payload)
+        total = root.get("total_count", _dict(_dict(root.get("meta")).get("pagination")).get("total"))
+        return _asset_result(root.get("data"), source=self.name, total=total)
 
 
 class HunterPassiveEnricher(_PassiveLookupEnricher):
@@ -1155,8 +1188,8 @@ class HunterPassiveEnricher(_PassiveLookupEnricher):
     def _normalize(self, payload: object, endpoint: Endpoint) -> dict[str, object]:
         del endpoint
         data = _dict(_dict(payload).get("data"))
-        records = _compact_asset_records(data.get("arr") or data.get("list"))
-        return {"records": records, "count": len(records), "source": "hunter"} if records else {}
+        return _asset_result(data.get("arr") if "arr" in data else data.get("list"),
+                             source=self.name, total=data.get("total"), limit=10)
 
 
 class ZoomEyePassiveEnricher(_PassiveLookupEnricher):
@@ -1175,7 +1208,8 @@ class ZoomEyePassiveEnricher(_PassiveLookupEnricher):
         response = self._http.post(
             url,
             json={"qbase64": base64.b64encode(query.encode()).decode("ascii"), "page": 1, "pagesize": _MAX_RECORDS,
-                  "fields": "ip,port,domain,asn,organization,isp,country,province,city"},
+                  "sub_type": "v6" if endpoint.kind == "ip" and ":" in endpoint.value else "web" if endpoint.kind == "domain" else "v4",
+                  "fields": "ip,port,domain,asn,organization.name,isp.name,country.name,province.name,city.name,protocol,service,title,product,version,os,device,header,banner,ssl,update_time"},
             headers={"API-KEY": credential},
             allow_redirects=False, timeout=_TIMEOUT,
         )
@@ -1184,8 +1218,8 @@ class ZoomEyePassiveEnricher(_PassiveLookupEnricher):
 
     def _normalize(self, payload: object, endpoint: Endpoint) -> dict[str, object]:
         del endpoint
-        records = _compact_asset_records(_dict(payload).get("data"))
-        return {"records": records, "count": len(records), "source": "zoomeye"} if records else {}
+        root = _dict(payload)
+        return _asset_result(root.get("data"), source=self.name, total=root.get("total"))
 
 
 class CensysPassiveEnricher(_PassiveLookupEnricher):
@@ -1211,24 +1245,28 @@ class CensysPassiveEnricher(_PassiveLookupEnricher):
         return response.json()
 
     def _normalize(self, payload: object, endpoint: Endpoint) -> dict[str, object]:
-        del endpoint
         root = _dict(payload)
         result = _dict(root.get("result") or root.get("data"))
         if "resource" in result:
             result = _dict(result["resource"])
             if not result:
                 raise ValueError("invalid_censys_resource")
-        services = [
-            service
-            for item in _list_of_dicts(result.get("services"))
-            if (service := _compact_mapping(item, _SERVICE_FIELDS))
-        ]
+        raw_services = result.get("services", [])
+        if not isinstance(raw_services, list):
+            raise ValueError("invalid_censys_services")
+        if any(not isinstance(item, dict) for item in raw_services):
+            raise _ServiceError("invalid_service_entries")
+        services = [{**_compact_mapping(item, _SERVICE_FIELDS), **service_profile(item)}
+                    for item in _list_of_dicts(raw_services)]
         if not result:
-            return {}
+            raise ValueError("invalid_censys_resource")
         normalized: dict[str, object] = {}
         ip = _bounded_scalar(result.get("ip") or result.get("ip_address"))
         if ip is not None:
+            if ipaddress.ip_address(str(ip)) != ipaddress.ip_address(endpoint.value):
+                raise ValueError("censys_ip_mismatch")
             normalized["ip"] = ip
+        normalized.update(service_profile(result))
         location = _compact_mapping(result.get("location"), _LOCATION_FIELDS)
         if location:
             normalized["location"] = location
@@ -1239,6 +1277,7 @@ class CensysPassiveEnricher(_PassiveLookupEnricher):
             normalized["services"] = services
         if normalized:
             normalized["source"] = "censys"
+            normalized.update(coverage(len(raw_services), len(services), observed=len(raw_services)))
         return normalized
 
 
@@ -1277,6 +1316,7 @@ def _epoch_to_date(value: object) -> str | None:
 
 class VirusTotalPassiveEnricher(_PassiveLookupEnricher):
     name = "virustotal"
+    request_budget = 2
     applies_to = ["ip", "domain"]
     required_env = ("FXAPK_VT_KEY", "VT_API_KEY")
     _BASE = "https://www.virustotal.com/api/v3"
@@ -1296,12 +1336,15 @@ class VirusTotalPassiveEnricher(_PassiveLookupEnricher):
             params={"limit": _MAX_PASSIVE_DNS},
             allow_redirects=False, timeout=_TIMEOUT,
         )
-        self._check_response(response)
+        self._check_response(response, operation="passive_dns")
         payload = response.json()
         peer_kind = "domain" if endpoint.kind == "ip" else "ip"
         peer_field = "host_name" if endpoint.kind == "ip" else "ip_address"
+        rows = _dict(payload).get("data")
+        if _provider_declared_error(payload, self.name) or not isinstance(rows, list):
+            raise _ServiceError("invalid_passive_dns_response")
         records: list[dict[str, object]] = []
-        for item in _list_of_dicts(_dict(payload).get("data"), limit=_MAX_PASSIVE_DNS):
+        for item in _list_of_dicts(rows, limit=_MAX_PASSIVE_DNS):
             attributes = _dict(item.get("attributes"))
             record = _passive_dns_record(
                 value=attributes.get(peer_field),
@@ -1309,7 +1352,13 @@ class VirusTotalPassiveEnricher(_PassiveLookupEnricher):
                 last_seen=_epoch_to_date(attributes.get("date")),
             )
             if record:
+                stamp = attributes.get("date")
+                if isinstance(stamp, int) and _epoch_to_date(stamp):
+                    record["last_seen_utc"] = datetime.fromtimestamp(stamp, tz=timezone.utc).isoformat()
                 records.append(record)
+        more = bool(_dict(_dict(payload).get("links")).get("next"))
+        self._passive_dns_coverage = coverage(None if more else len(rows), len(records),
+                                             limit=_MAX_PASSIVE_DNS, observed=len(rows), more=more)
         return records
 
     def _lookup(self, endpoint: Endpoint, credential: str) -> object:
@@ -1360,6 +1409,7 @@ class VirusTotalPassiveEnricher(_PassiveLookupEnricher):
 
 class OtxPassiveEnricher(_PassiveLookupEnricher):
     name = "otx"
+    request_budget = 2
     applies_to = ["ip", "domain"]
     required_env = ("FXAPK_OTX_KEY", "OTX_API_KEY")
     _BASE = "https://otx.alienvault.com/api/v1/indicators"
@@ -1368,18 +1418,21 @@ class OtxPassiveEnricher(_PassiveLookupEnricher):
     def _passive_dns(self, endpoint: Endpoint, credential: str) -> list[dict[str, object]]:
         """OTX 的 ``/passive_dns``：带 ``first``/``last`` 时间窗，比 VT 只给一个日期更有用——
         能直接看出"案发那天这个域名指向谁"。"""
-        indicator_type = "IPv4" if endpoint.kind == "ip" else "domain"
+        indicator_type = ("IPv6" if ":" in endpoint.value else "IPv4") if endpoint.kind == "ip" else "domain"
         response = self._http.get(
             f"{self._BASE}/{indicator_type}/{endpoint.value}/passive_dns",
             headers={"X-OTX-API-KEY": credential},
             allow_redirects=False, timeout=_TIMEOUT,
         )
-        self._check_response(response)
+        self._check_response(response, operation="passive_dns")
         payload = response.json()
         peer_kind = "domain" if endpoint.kind == "ip" else "ip"
         peer_field = "hostname" if endpoint.kind == "ip" else "address"
+        rows = _dict(payload).get("passive_dns")
+        if _provider_declared_error(payload, self.name) or not isinstance(rows, list):
+            raise _ServiceError("invalid_passive_dns_response")
         records: list[dict[str, object]] = []
-        for item in _list_of_dicts(_dict(payload).get("passive_dns"), limit=_MAX_PASSIVE_DNS):
+        for item in _list_of_dicts(rows, limit=_MAX_PASSIVE_DNS):
             record = _passive_dns_record(
                 value=item.get(peer_field),
                 kind=peer_kind,
@@ -1389,10 +1442,12 @@ class OtxPassiveEnricher(_PassiveLookupEnricher):
             )
             if record:
                 records.append(record)
+        self._passive_dns_coverage = coverage(_dict(payload).get("count", len(rows)), len(records),
+                                             limit=_MAX_PASSIVE_DNS, observed=len(rows))
         return records
 
     def _lookup(self, endpoint: Endpoint, credential: str) -> object:
-        indicator_type = "IPv4" if endpoint.kind == "ip" else "domain"
+        indicator_type = ("IPv6" if ":" in endpoint.value else "IPv4") if endpoint.kind == "ip" else "domain"
         response = self._http.get(
             f"{self._BASE}/{indicator_type}/{endpoint.value}/general",
             headers={"X-OTX-API-KEY": credential},
@@ -1454,13 +1509,16 @@ class UrlscanPassiveEnricher(_PassiveLookupEnricher):
         for record in records:
             page = _dict(record.get("page"))
             task = _dict(record.get("task"))
-            item = _compact_mapping(page, ("domain", "ip", "asn", "asnname", "country"))
+            item = _compact_mapping(page, ("domain", "ip", "asn", "asnname", "country", "title", "server"))
+            item.update(_compact_mapping(task, ("time",)))
             scan_id = _bounded_scalar(task.get("uuid"))
             if scan_id is not None:
                 item["scan_id"] = scan_id
             if item:
                 compact.append(item)
-        return {"records": compact, "count": len(compact), "source": "urlscan"} if compact else {}
+        return {"records": compact, "count": len(compact), "source": "urlscan",
+                **coverage(_dict(payload).get("total"), len(compact),
+                           more=bool(_dict(payload).get("has_more")))} if compact else {}
 
 
 #: AbuseIPDB 响应字段 → 本仓归一化字段名（本仓一律 snake_case，与其它 provider 对齐）。

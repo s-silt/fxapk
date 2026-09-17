@@ -3,6 +3,27 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
+## Unreleased
+
+- 被动画像：新增显式选择的 `fofa_profile`、`fofa_host`、`daydaymap_profile`；保留原 FOFA
+  11 列接口兼容性，增强画像单独记录字段、总量、截断与来源家族，不自动扩展查询目标。
+- 修复 Quake、Hunter、Censys、ZoomEye 的嵌套产品、证书及观察时间丢失；ZoomEye 使用 v2
+  字段名称和对应的 IPv4/IPv6/web 集合。Shodan 保留测绘时间与证书，拒绝串答和凭据重定向，
+  旧版画像缓存及未来时间缓存不再满足新版画像请求；`no_record` 在 TTL 内仍可复用。
+  服务预览按全树节点与字符预算限制，净化密钥值、敏感头行，以及 name/value 头列表中的敏感值；
+  这不是对任意自由文本的全面脱敏保证。
+- 批量查询逐目标追加 NDJSON，落盘失败立即停止；预算包括 RIPEstat、VT、OTX 与 Shodan
+  的已建模辅助调用。多次响应各留哈希回执，辅助查询不再覆盖主查询锚点。
+- DayDayMap 与 Hunter 使用直连策略；权限不足不再误判为额度不足；错误熔断后停止当前
+  有界批次，不对后续目标隐式试探。新增画像支持 DayDayMap 第二凭据槽，不自动换账户。
+- 记录 VT/OTX 历史解析的截断状态并修复 OTX IPv6 路径；服务时间和证书保留在画像与分项记录中，
+  `digest` 闭环摘要不含这些字段；
+  FOFA 的多种视图按同一来源处理。受影响来源提升响应契约版本，旧记录仍保留，但续跑时
+  不再以旧版缺字段结果跳过新版查询（TTL 内的 `no_record` 豁免）；升级后先执行 dry-run 检查新增预算。
+
+这些数据仍是第三方历史观察，不能单独证明云租户、具体云资源实例或实际运营者；
+权限不足、未知覆盖和有界截断继续如实保留，不自动翻页消耗额外额度。
+
 ## 1.14.0 — 2026-09-16
 
 本版统一工具链解析并收紧其失败语义：未激活虚拟环境不再误用系统 Frida；工具配置

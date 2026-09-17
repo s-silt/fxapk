@@ -28,7 +28,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from apkscan.core.json_contract import (
     parse_finite_json_float,
@@ -127,6 +127,7 @@ class BudgetLine:
     targets: int
     reason: str = ""
     request_units: int = 1
+    requests: int | None = None
 
 
 def classify_target(raw: object) -> Target | None:
@@ -195,7 +196,7 @@ def _is_configured(enricher: object, env: Mapping[str, str]) -> bool:
         return False
     required = _required_env(enricher)
     slot = getattr(enricher, "credential_slot", 0)
-    if slot and _provider_name(enricher) in {"quake", "daydaymap"}:
+    if slot and _provider_name(enricher) in {"quake", "daydaymap", "daydaymap_profile"}:
         return slot <= len(required) and bool(env.get(required[slot - 1], "").strip())
     return not required or any((env.get(name) or "").strip() for name in required)
 
@@ -259,13 +260,18 @@ def estimate_budget(
             )
             continue
         units = max(1, int(getattr(enricher, "request_budget", 1)))
-        lines.append(BudgetLine(provider=provider, status="would_query", targets=matched, request_units=units))
+        by_kind = getattr(enricher, "request_budget_by_kind", {})
+        requests = sum(max(1, int(by_kind.get(t.kind, units))) for t in targets
+                       if t.kind in applies_to and provider not in progress.get(t.value, set()))
+        lines.append(BudgetLine(provider=provider, status="would_query", targets=matched,
+                                request_units=units, requests=requests))
     return lines
 
 
 def budget_total(lines: Iterable[BudgetLine]) -> int:
     """会真发出的请求总数（只计 ``would_query``）。"""
-    return sum(line.targets * line.request_units for line in lines if line.status == "would_query")
+    return sum(line.requests if line.requests is not None else line.targets * line.request_units
+               for line in lines if line.status == "would_query")
 
 
 @dataclass(frozen=True)
@@ -532,6 +538,7 @@ def enrich_targets(
     mode: str = ANALYSIS_MODE_PASSIVE,
     env: Mapping[str, str] | None = None,
     completed: Mapping[str, set[str]] | None = None,
+    on_record: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[dict[str, Any]]:
     """逐目标跑富化，返回每目标一条明细记录。
 
@@ -580,6 +587,8 @@ def enrich_targets(
                     "error": "enrich_failed",
                 }
             )
+            if on_record is not None:
+                on_record(records[-1])
             continue
         records.append(
             {
@@ -594,6 +603,9 @@ def enrich_targets(
                              if isinstance(getattr(e, "receipt", None), dict)},
             }
         )
+        # Persistence errors must stop the run, not become provider failures.
+        if on_record is not None:
+            on_record(records[-1])
     return records
 
 

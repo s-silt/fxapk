@@ -175,7 +175,9 @@ class _FakeRequests:
         self.mapping = mapping
         self.calls: list[str] = []
 
-    def get(self, url: str, params: dict | None = None, timeout: float | None = None) -> _Resp:
+    def get(self, url: str, params: dict | None = None, timeout: float | None = None,
+            *, allow_redirects: bool = False) -> _Resp:
+        assert allow_redirects is False
         self.calls.append(url)
         for frag, (status, payload) in self.mapping.items():
             if frag in url:

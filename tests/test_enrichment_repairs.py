@@ -104,7 +104,7 @@ def test_source_stops_after_account_failure_and_retains_safe_receipt(monkeypatch
 def test_old_censys_empty_does_not_suppress_repaired_query():
     old = {"target": "1.1.1.1", "source_status": {"censys": {"status": "no_record"}, "fofa": "hit"}}
     assert completed_from_records([old]) == {"1.1.1.1": {"fofa"}}
-    repaired = {**old, "source_contracts": {"censys": 2}}
+    repaired = {**old, "source_contracts": {"censys": 3}}
     assert completed_from_records([repaired]) == {"1.1.1.1": {"censys", "fofa"}}
 
 
@@ -241,7 +241,7 @@ def test_receipt_endpoint_drops_path(monkeypatch):
     assert adapter.receipt["endpoint"] == "https://api.example.test"
 
 
-def test_transient_breaker_probes_eleventh_target(monkeypatch):
+def test_business_error_stops_current_batch_even_if_upstream_recovers(monkeypatch):
     monkeypatch.setenv("FXAPK_HUNTER_KEY", "SYNTHETIC")
     session = Session({"code": 503})
     adapter = HunterPassiveEnricher(session=session)
@@ -249,9 +249,9 @@ def test_transient_breaker_probes_eleventh_target(monkeypatch):
     for _ in range(9):
         assert adapter.enrich(ip()).data["_source_status"] == "skipped"
     session.response = Response({"code": 200, "data": {"arr": []}})
-    assert adapter.enrich(ip()).data["_source_status"] == "no_record"
-    assert adapter.enrich(ip()).data["_source_status"] == "no_record"
-    assert len(session.calls) == 3
+    for _ in range(20):
+        assert adapter.enrich(ip()).data["_source_status"] == "skipped"
+    assert len(session.calls) == 1
 
 
 @pytest.mark.parametrize("extra", [[{"type": 1, "data": "10.0.0.1"}], [{"type": 5, "data": "example.test"}] * 100])
@@ -296,17 +296,19 @@ def test_account_breaker_never_probes(category):
         assert adapter.enrich(ip()).data["_source_status"] == "skipped"
 
 
-def test_failed_probe_restarts_interval(monkeypatch):
+def test_new_bounded_batch_can_query_after_operator_rechecks_failure(monkeypatch):
     monkeypatch.setenv("FXAPK_HUNTER_KEY", "SYNTHETIC")
     session = Session({"code": 503})
     adapter = HunterPassiveEnricher(session=session)
-    for _ in range(2):
-        assert adapter.enrich(ip()).data["_source_status"] == "failed"
-        for _ in range(9):
-            assert adapter.enrich(ip()).data["_source_status"] == "skipped"
+    assert adapter.enrich(ip()).data["_source_status"] == "failed"
+    for _ in range(20):
+        assert adapter.enrich(ip()).data["_source_status"] == "skipped"
     session.response = Response({"code": 200, "data": {"arr": []}})
-    assert adapter.enrich(ip()).data["_source_status"] == "no_record"
-    assert len(session.calls) == 3
+    # New instance represents a separately planned run, not hidden probes in the
+    # still-running batch. Account/permission failures still need external change.
+    next_batch = HunterPassiveEnricher(session=session)
+    assert next_batch.enrich(ip()).data["_source_status"] == "no_record"
+    assert len(session.calls) == 2
 
 
 def test_dns_redirect_views_fail_without_following():

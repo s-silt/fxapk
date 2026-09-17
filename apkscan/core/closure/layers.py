@@ -185,6 +185,9 @@ def _origin_status(enrichment: Mapping[str, object]) -> dict[str, object]:
     return missing
 
 
+_PROFILE_VIEWS = {"fofa_profile": "fofa", "fofa_host": "fofa", "daydaymap_profile": "daydaymap"}
+
+
 def _passive_hosting_evidence(
     enrichment: Mapping[str, object],
 ) -> tuple[list[dict[str, str]], list[dict[str, object]], list[dict[str, object]]]:
@@ -195,7 +198,9 @@ def _passive_hosting_evidence(
     def add_provider(source: str, value: object) -> None:
         if not isinstance(value, str) or not value.strip():
             return
-        entry = {"source": source, "name": value.strip()}
+        entry = {"source": _PROFILE_VIEWS.get(source, source), "name": value.strip()}
+        if source in _PROFILE_VIEWS:
+            entry["evidence_scope"] = "profile_candidate"
         if entry not in providers:
             providers.append(entry)
 
@@ -214,6 +219,10 @@ def _passive_hosting_evidence(
             "module",
             "hostname",
             "hostnames",
+            "os", "device", "device_type", "manufacturer", "components", "component", "software",
+            "cpe", "cpe23", "observed_at", "timestamp", "time", "time_stamp",
+            "update_time", "last_updated_at", "lastupdatetime", "scan_time",
+            "cert", "certificate", "certificates", "tls", "ssl",
         )
         summary: dict[str, object] = {"source": source}
         for record in records:
@@ -221,14 +230,17 @@ def _passive_hosting_evidence(
                 value = record.get(field)
                 if field not in summary and value not in (None, "", [], {}):
                     summary[field] = value
-        if len(summary) > 1 and summary not in services:
-            services.append(summary)
+        if len(summary) > 1:
+            if source in _PROFILE_VIEWS:
+                summary["source_family"] = _PROFILE_VIEWS[source]
+            if summary not in services:
+                services.append(summary)
 
     def add_location(source: str, record: Mapping[str, object]) -> None:
         summary = {
-            key: record.get(key)
+            key: record.get(key) or record.get(f"{key}.name")
             for key in ("country", "country_code", "region", "province", "city")
-            if record.get(key) not in (None, "", [], {})
+            if (record.get(key) or record.get(f"{key}.name")) not in (None, "", [], {})
         }
         if summary:
             entry: dict[str, object] = {"source": source, **summary}
@@ -261,9 +273,9 @@ def _passive_hosting_evidence(
                 },
             )
 
-    for source in ("quake", "hunter", "zoomeye", "urlscan"):
+    for source in ("quake", "hunter", "zoomeye", "urlscan", "daydaymap", "fofa_profile", "fofa_host", "daydaymap_profile"):
         payload = _provider_payload(enrichment, source)
-        raw_records = payload.get("records")
+        raw_records = [payload["profile"]] if source == "fofa_host" and isinstance(payload.get("profile"), dict) else payload.get("records")
         if not isinstance(raw_records, list):
             continue
         for raw_record in raw_records[:20]:
@@ -276,8 +288,11 @@ def _passive_hosting_evidence(
                 record.get("as_organization")
                 or record.get("as_org")
                 or record.get("organization")
+                or record.get("organization.name")
                 or record.get("org")
                 or record.get("isp")
+                or record.get("isp.name")
+                or record.get("asn_org")
                 or record.get("asnname")
                 or autonomous_system.get("organization")
                 or autonomous_system.get("org")
@@ -319,7 +334,8 @@ def _hosting_layer(enrichment: Mapping[str, object]) -> dict[str, object]:
     attribution = _attribution_for_endpoint(enrichment)
     hosting = _mapping(attribution.get("hosting_provider"))
     passive_providers, passive_services, passive_locations = _passive_hosting_evidence(enrichment)
-    passive_provider = passive_providers[0] if passive_providers else {}
+    passive_provider = next((p for p in passive_providers
+                             if p.get("evidence_scope") != "profile_candidate"), {})
     # Shodan 的 org、端口和 banner 是已扫描到的边缘画像，不能证明该 IP 的承载租户或 Origin。
     # 它们保留在候选证据中供人工复核，但不得成为 hosting provider 或 completion signal。
     shodan_candidate: dict[str, object] = {}
@@ -360,6 +376,7 @@ def _hosting_layer(enrichment: Mapping[str, object]) -> dict[str, object]:
     }
     detailed_service = any(
         isinstance(service, Mapping)
+        and service.get("source") not in _PROFILE_VIEWS
         and any(service.get(field) not in (None, "", [], {}) for field in service_detail_fields)
         for service in services
     )
@@ -382,7 +399,7 @@ def _hosting_layer(enrichment: Mapping[str, object]) -> dict[str, object]:
     evidence = {key: value for key, value in evidence.items() if value not in (None, "", [])}
     if provider and (detailed_service or corroborating_signals or delivery_detail):
         return _layer(CLOSURE_COMPLETE, evidence)
-    if provider:
+    if provider or passive_providers:
         return _layer(
             CLOSURE_PARTIAL,
             evidence,

@@ -964,8 +964,10 @@ def test_csv_no_record_then_hit_adopts_the_new_payload() -> None:
 
 
 def _ledger_line(target: str, provider: str, status: str = "hit") -> bytes:
+    from apkscan.core.enrichment_profiles import CONTRACTS
     return (
-        json.dumps({"target": target, "kind": "ip", "source_status": {provider: status}}).encode(
+        json.dumps({"target": target, "kind": "ip", "source_status": {provider: status},
+                    "source_contracts": {provider: CONTRACTS.get(provider, 1)}}).encode(
             "utf-8"
         )
         + b"\n"
@@ -1356,3 +1358,15 @@ def test_healthy_ledger_still_skips_completed_targets_without_requerying(
     assert payload["already_done_skipped"] == 2
     assert exploding.calls == [], "已完成目标被重查（烧配额）"
     assert payload["ledger_bad_lines_skipped"] == 2
+
+
+
+def test_dry_run_includes_bad_ledger_lines(tmp_path, monkeypatch):
+    listing = _write_targets(tmp_path)
+    (tmp_path / "enrich.ndjson").write_bytes(b"not-json\n")
+    stub = _CountingEnricher()
+    monkeypatch.setattr("apkscan.core.registry.discover_enrichers", lambda: [stub])
+    result = runner.invoke(cli.app, ["enrich", "batch", "--targets", str(listing), "--out", str(tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["ledger_bad_lines_skipped"] == 1
+    assert stub.calls == []

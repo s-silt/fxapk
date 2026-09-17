@@ -477,7 +477,7 @@ def test_ripestat_empty_response_is_no_record() -> None:
                     {
                         "ip": "198.51.100.10",
                         "port": 443,
-                        "service": {"name": "https", "banner": "COOKIE-SENTINEL"},
+                        "service": {"name": "https", "banner": "Set-Cookie: COOKIE-SENTINEL"},
                     }
                 ]
             },
@@ -500,13 +500,13 @@ def test_ripestat_empty_response_is_no_record() -> None:
         (
             ZoomEyePassiveEnricher(),
             {
-                "matches": [
+                "data": [
                     {
                         "ip": "198.51.100.10",
                         "portinfo": {
                             "port": 443,
                             "service": "https",
-                            "banner": "COOKIE-SENTINEL",
+                            "banner": "Set-Cookie: COOKIE-SENTINEL",
                         },
                     }
                 ]
@@ -518,7 +518,7 @@ def test_ripestat_empty_response_is_no_record() -> None:
                 "result": {
                     "ip": "198.51.100.10",
                     "services": [
-                        {"port": 443, "service_name": "HTTP", "banner": "COOKIE-SENTINEL"}
+                        {"port": 443, "service_name": "HTTP", "banner": "Set-Cookie: COOKIE-SENTINEL"}
                     ],
                     "location": {"country": "US", "raw": "COOKIE-SENTINEL"},
                     "autonomous_system": {"asn": 64500, "name": "Example"},
