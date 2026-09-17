@@ -3,7 +3,7 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
-## Unreleased
+## 1.15.0 — 2026-09-17
 
 - 被动画像：新增显式选择的 `fofa_profile`、`fofa_host`、`daydaymap_profile`；保留原 FOFA
   11 列接口兼容性，增强画像单独记录字段、总量、截断与来源家族，不自动扩展查询目标。
