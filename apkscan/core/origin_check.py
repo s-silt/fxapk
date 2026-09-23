@@ -166,7 +166,12 @@ class _PinnedConnection(http.client.HTTPConnection):
     def connect(self) -> None:
         sock = socket.create_connection((self.address, self.port), self.timeout)
         try:
-            self.sock = ssl.create_default_context().wrap_socket(sock, server_hostname=self.host) if self.tls else sock
+            if self.tls:
+                context = ssl.create_default_context()
+                context.minimum_version = ssl.TLSVersion.TLSv1_2
+                self.sock = context.wrap_socket(sock, server_hostname=self.host)
+            else:
+                self.sock = sock
         except Exception:
             sock.close()
             raise

@@ -309,3 +309,18 @@ def test_slow_response_headers_obey_total_deadline(tmp_path, monkeypatch):
     worker.join(2)
     assert result["status"] == "failed"
     assert elapsed < 0.7, elapsed
+
+
+def test_pinned_https_enforces_tls12_floor(monkeypatch):
+    context = SimpleNamespace(minimum_version=None)
+    sock = SimpleNamespace(close=lambda: None)
+    def wrap_socket(value, *, server_hostname):
+        assert context.minimum_version == oc.ssl.TLSVersion.TLSv1_2
+        assert value is sock and server_hostname == "origin.example.test"
+        return sock
+    context.wrap_socket = wrap_socket
+    monkeypatch.setattr(oc.ssl, "create_default_context", lambda: context)
+    monkeypatch.setattr(oc.socket, "create_connection", lambda *a: sock)
+    connection = oc._PinnedConnection(plan()["candidate"], "192.0.2.1")
+    connection.connect()
+    connection.close()
