@@ -289,12 +289,15 @@ def test_close_report_truncated_targets_yield_partial_with_gap() -> None:
     assert any("198.51.100.16" in str(gap) for gap in closure["gaps"])
 
 
-def test_modified_runtime_endpoint_cannot_close_case() -> None:
+def test_modified_runtime_endpoint_cannot_close_case(monkeypatch) -> None:
     """★P0-a：行为修改 shim 注入轮（modified-runtime）的端点不得独立结案。
 
     即便 target_attributed=True + 五层富化齐全，诱导出来的观测也只能封顶 PARTIAL——须由 original 轮 /
     静态调用路径 / 设备落地物 / 服务端调证独立印证。与同构造的 original 端点严格对照。
     """
+    # Isolate the runtime gate using an explicit synthetic hosting-delivery
+    # fact. Real metadata refresh alone no longer proves that relationship.
+    monkeypatch.setattr("apkscan.core.closure._set_attribution", lambda ep: None)
     template = _complete_endpoint()
     modified = _endpoint(
         "198.51.100.10", runtime=True, target=True, payload=True,
@@ -312,7 +315,8 @@ def test_modified_runtime_endpoint_cannot_close_case() -> None:
     assert closure_orig["status"] == CLOSURE_COMPLETE
 
 
-def test_close_report_untruncated_targets_stay_complete() -> None:
+def test_close_report_untruncated_targets_stay_complete(monkeypatch) -> None:
+    monkeypatch.setattr("apkscan.core.closure._set_attribution", lambda ep: None)
     report = _report(_complete_ip_endpoint("198.51.100.10"), _complete_ip_endpoint("198.51.100.11"))
 
     closure = _close(report, ClosureConfig(online=False, require_dynamic=False), enrichers=[])
@@ -793,7 +797,7 @@ def test_parent_asn_and_bare_port_cannot_complete_hosting_or_request_layers() ->
     assert target["status"] == CLOSURE_PARTIAL
 
 
-def test_fofa_product_evidence_can_complete_hosting_without_shodan() -> None:
+def test_fofa_banner_cannot_override_conflicting_hosting_candidate() -> None:
     endpoint = _complete_endpoint()
     endpoint.enrichment.pop("shodan")
     endpoint.enrichment["fofa"] = {
@@ -821,11 +825,11 @@ def test_fofa_product_evidence_can_complete_hosting_without_shodan() -> None:
 
     hosting = target["layers"]["hosting_delivery"]
     services = cast(list[dict[str, object]], hosting["evidence"]["services"])
-    assert hosting["status"] == CLOSURE_COMPLETE
-    assert hosting["evidence"]["provider"] == "FOFA Hosting Ltd"
+    assert hosting["status"] == CLOSURE_PARTIAL
+    assert hosting["evidence"]["provider"] == "Example Hosting Ltd"
     assert services[0]["server"] == "nginx"
-    assert target["layers"]["request_target"]["status"] == CLOSURE_COMPLETE
-    assert target["status"] == CLOSURE_COMPLETE
+    assert target["layers"]["request_target"]["status"] == CLOSURE_PARTIAL
+    assert target["status"] == CLOSURE_PARTIAL
 
 
 def test_fofa_fields_match_enricher_query_no_drift() -> None:
@@ -1061,7 +1065,8 @@ def test_confirmed_origin_uses_origin_provider_as_request_target() -> None:
     assert request["status"] == CLOSURE_COMPLETE
     assert request["evidence"]["provider"] == "Origin Host Ltd"
     assert request["evidence"]["origin_ip"] == "203.0.113.20"
-    assert target["status"] == CLOSURE_COMPLETE
+    assert target["layers"]["hosting_delivery"]["status"] == CLOSURE_PARTIAL
+    assert target["status"] == CLOSURE_PARTIAL
 
 
 def test_cdn_without_origin_cannot_be_complete() -> None:
@@ -1442,7 +1447,8 @@ def test_close_report_reenriches_runtime_ip_and_writes_closure() -> None:
         enrichers=enrichers,
     )
 
-    assert closure["status"] == CLOSURE_COMPLETE
+    assert closure["status"] == CLOSURE_PARTIAL
+    assert closure["targets"][0]["layers"]["hosting_delivery"]["status"] == CLOSURE_PARTIAL
     assert report.meta["closure"] is closure
     assert endpoint.enrichment["ip_rdap"]["netname"] == "EXAMPLE-NET"
     assert endpoint.enrichment["ripestat_bgp"]["origin_asn"] == 64500
@@ -1841,6 +1847,7 @@ def test_offline_close_marks_configured_source_without_cache_as_incomplete() -> 
 def test_unconfigured_source_is_disabled_without_blocking_offline_closure(
     monkeypatch,
 ) -> None:
+    monkeypatch.setattr("apkscan.core.closure._set_attribution", lambda ep: None)
     endpoint = _complete_endpoint()
     report = _report(endpoint)
     enricher = _FakeEnricher("unconfigured_optional", ["ip"], {"record": "MUST-NOT-RUN"})

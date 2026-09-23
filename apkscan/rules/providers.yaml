@@ -122,11 +122,142 @@ edge_providers:
       http:
         headers:
           # 源站未提供 Server 时 EdgeOne 可能补 Server: TencentEdgeOne（可被源站配置改/删 → 需配合其它强信号）。
-          - {name: server, regex: "tencentedgeone", weight: 6}
+          - {name: server, regex: "^tencentedgeone$", weight: 6}
+          - {name: eo-cache-status, regex: "^(hit|miss|refreshhit)$", weight: 4}
+          - {name: eo-log-uuid, regex: ".+", weight: 4}
       dns:
         cname_suffix:
           - {value: ".eo.dnse.com", weight: 8}
-    provenance: {source: public_docs, note: "EdgeOne 官方支持增删改响应头，单 Server 头不足以 confirmed"}
+    provenance:
+      source: public_docs
+      url: https://cloud.tencent.com/document/product/1552/87655  # leak-scan: allow 产品指纹的公开来源或厂商边界说明，非案件值：cloud.tencent.com
+      note: "默认响应头可配置；Server 可能透传源站。多个 HTTP 头仍是同一信号面"
+
+  - id: cdn.tencent
+    name: 腾讯云 CDN
+    category: cdn
+    role: reverse_proxy
+    signals:
+      dns:
+        cname_suffix:
+          - {value: ".cdn.dnsv1.com", weight: 8}
+          - {value: ".dsa.dnsv1.com", weight: 8}
+      http:
+        headers:
+          - {name: x-nws-log-uuid, regex: ".+", weight: 5}
+    provenance:
+      source: public_docs
+      urls:
+        - https://intl.cloud.tencent.com/zh/document/product/228/5734  # leak-scan: allow 产品指纹的公开来源或厂商边界说明，非案件值：intl.cloud.tencent.com
+        - https://intl.cloud.tencent.com/ind/document/product/228/42177  # leak-scan: allow 产品指纹的公开来源或厂商边界说明，非案件值：intl.cloud.tencent.com
+      note: "X-Cache-Lookup 非独占；只用专用 CNAME 和请求追踪头"
+
+  - id: cdn.huawei
+    name: 华为云 CDN
+    category: cdn
+    role: reverse_proxy
+    signals:
+      dns:
+        cname_suffix:
+          - {value: ".c.cdnhwc1.com", weight: 8}
+      http:
+        headers:
+          - {name: x-hcs-proxy-type, regex: "^[01]$", weight: 5}
+    provenance:
+      source: public_docs
+      urls:
+        - https://support.huaweicloud.com/cdn_faq/cdn_faq_0111.html  # leak-scan: allow 产品指纹的公开来源或厂商边界说明，非案件值：support.huaweicloud.com
+        - https://support.huaweicloud.com/cdn_faq/cdn_faq_0245.html  # leak-scan: allow 产品指纹的公开来源或厂商边界说明，非案件值：support.huaweicloud.com
+
+  - id: cdn.volcengine
+    name: 火山引擎 CDN
+    category: cdn
+    role: reverse_proxy
+    signals:
+      http:
+        headers:
+          - {name: x-bdcdn-logid, regex: ".+", weight: 4}
+          - {name: x-bdcdn-cache-status, regex: ".+", weight: 4}
+    provenance:
+      source: public_docs
+      url: https://www.volcengine.com/docs/6454/1319866  # leak-scan: allow 产品指纹的公开来源或厂商边界说明，非案件值：www.volcengine.com
+      note: "官方保留 CDN 响应头；不将整个 volces.com 或通用字节链路头当作 CDN"  # leak-scan: allow 产品指纹的公开来源或厂商边界说明，非案件值：volces.com
+
+  - id: cdn.baidu_bos
+    name: 百度智能云 BOS CDN
+    category: cdn
+    role: reverse_proxy
+    signals:
+      dns:
+        cname_suffix:
+          - {value: ".cdn.bcebos.com", weight: 8}
+    provenance:
+      source: public_docs
+      url: https://cloud.baidu.com/doc/BOS/s/ckaqihkra-en  # leak-scan: allow 产品指纹的公开来源或厂商边界说明，非案件值：cloud.baidu.com
+      note: "仅覆盖 BOS CDN 加速地址，不覆盖所有百度 CDN；普通 bcebos.com 是存储域名"  # leak-scan: allow 产品指纹的公开来源或厂商边界说明，非案件值：bcebos.com
+
+  - id: cdn.qiniu
+    name: 七牛云 CDN
+    category: cdn
+    role: reverse_proxy
+    signals:
+      dns:
+        cname_suffix:
+          - {value: ".qiniudns.com", weight: 8}
+    provenance:
+      source: public_docs
+      url: https://developer.qiniu.com/fusion/13363/fusion-api-domain-management  # leak-scan: allow 产品指纹的公开来源或厂商边界说明，非案件值：developer.qiniu.com
+
+  - id: cdn.upyun
+    name: 又拍云 CDN
+    category: cdn
+    role: reverse_proxy
+    signals:
+      dns:
+        cname_suffix:
+          - {value: ".b0.aicdn.com", weight: 8}
+    provenance:
+      source: public_docs
+      url: https://help.upyun.com/knowledge-base/cdn-quick-start/  # leak-scan: allow 产品指纹的公开来源或厂商边界说明，非案件值：help.upyun.com
+      note: "只覆盖官方静态加速示例后缀；不泛化到直播推流等其他 aicdn.com 地址"  # leak-scan: allow 产品指纹的公开来源或厂商边界说明，非案件值：aicdn.com
+
+  - id: cdn.kingsoft
+    name: 金山云 CDN
+    category: cdn
+    role: reverse_proxy
+    signals:
+      dns:
+        cname_suffix:
+          - {value: ".ksyuncdn.com", weight: 8}
+    provenance:
+      source: public_docs
+      url: https://docs.ksyun.com/documents/41418  # leak-scan: allow 产品指纹的公开来源或厂商边界说明，非案件值：docs.ksyun.com
+
+  - id: waf.huawei
+    name: 华为云 WAF
+    category: security_proxy
+    role: waf
+    signals:
+      dns:
+        cname_suffix:
+          - {value: ".vip1.huaweicloudwaf.com", weight: 8}
+    provenance:
+      source: public_docs
+      url: https://support.huaweicloud.com/eu/api-waf/CreateHost.html  # leak-scan: allow 产品指纹的公开来源或厂商边界说明，非案件值：support.huaweicloud.com
+      note: "仅覆盖官方示例后缀；接入域名不证明防护已启用或未旁路"
+
+  - id: waf.tencent
+    name: 腾讯云 WAF
+    category: security_proxy
+    role: waf
+    signals:
+      dns:
+        cname_suffix:
+          - {value: ".qcloudwzgj.com", weight: 8}
+    provenance:
+      source: public_docs
+      url: https://cloud.tencent.com/document/product/627/43213  # leak-scan: allow 产品指纹的公开来源或厂商边界说明，非案件值：cloud.tencent.com
+      note: "官方多个接入后缀中的一个；不按 qcloud 任意通配，不证明防护状态"
 
   - id: cdn.aliyun
     name: 阿里云 CDN/DCDN
@@ -148,6 +279,22 @@ edge_providers:
           - {value: ".kunlunaq.com", weight: 8}
           - {value: ".kunlungr.com", weight: 8}
     provenance: {source: public_docs}
+
+  - id: cdn.aliyun_esa
+    name: 阿里云 ESA
+    category: cdn
+    role: reverse_proxy
+    signals:
+      http:
+        headers:
+          - {name: server, regex: "^esa$", weight: 4}
+          - {name: eagleid, weight: 3}
+          - {name: via, regex: "(^|[, ])ens-cache[0-9]+[.]", weight: 2}
+    # 同一次响应的多个头属于同一信号面，最多 probable，不证明客户身份或源站。
+    provenance:
+      source: public_docs
+      url: https://help.aliyun.com/zh/edge-security-acceleration/esa/support/troubleshooting-guide-for-unable-to-access-the-esa-website-after-login/  # leak-scan: allow 产品指纹的公开来源或厂商边界说明，非案件值：help.aliyun.com
+      note: "EagleId 是官方请求追踪字段；Server/Via 为辅助指纹，需官方节点查询或独立证据核验"
 
   - id: waf.jiasule
     name: 加速乐（知道创宇）

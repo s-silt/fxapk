@@ -359,7 +359,8 @@ def score_edge_provider(observed: dict[str, Any], *, rules: dict[str, Any] | Non
     ``observed``（从 PCAP/tshark/证书/DNS 被动抽的信号，扁平）常见键：``cname_chain``[list] / ``nameservers``[list]
     / ``response_headers``{name→value} / ``cookies``[list of name] / ``body_sha256`` / ``favicon_mmh3`` /
     ``tls_spki`` / ``tls_ja4s`` / ``asn``(int) / ``ip`` / ``origin_category`` / ``x_cache_only``(bool) / ``server_nginx_only``(bool)。
-    对 rules['edge_providers'] 每条累加命中权重，取最高分者；★confirmed 另要求 **≥2 个不同强信号**（单一强信号最多
+    对 rules['edge_providers'] 每条累加命中权重，按档位、分数选主候选，同时保留其他达阈值候选；候选排序不表示代理链顺序。
+    ★confirmed 另要求 **≥2 个不同强信号**（单一强信号最多
     probable——防单条被配置/伪造的头就坐实）；负证据（公共云 only / 通用 X-Cache / nginx）扣分。规则的 FingerprintHub
     风格嵌套 schema：``signals.dns.{cname_suffix,ns_suffix}`` / ``signals.http.{headers,cookies,body_hashes,favicon}`` /
     ``signals.tls.{spki_sha256,ja4s}`` / ``signals.network.{asns,cidrs}`` + ``negative_signals[]`` + ``provenance{}``。
@@ -387,6 +388,7 @@ def score_edge_provider(observed: dict[str, Any], *, rules: dict[str, Any] | Non
     # 的弱候选"压过"分数略低却有 ≥2 强信号、应 confirmed 的候选"（负证据在选定后才扣会漏这个重排）。
     best: dict[str, Any] | None = None
     best_key: tuple[int, float] | None = None
+    candidates: list[tuple[tuple[int, float], dict[str, Any]]] = []
     for prov in edges:
         if not isinstance(prov, dict):
             continue
@@ -401,21 +403,30 @@ def score_edge_provider(observed: dict[str, Any], *, rules: dict[str, Any] | Non
         if tier is None:
             continue
         key = (_TIER_RANK[tier], final)
+        candidate = {
+            "name": prov.get("name") or prov.get("id"),
+            "id": prov.get("id"),
+            "role": prov.get("role") or "reverse_proxy",
+            "category": prov.get("category") or CAT_SECURITY_PROXY,
+            "source": prov.get("id") or "edge_fingerprint",
+            "provenance": prov.get("provenance") if isinstance(prov.get("provenance"), dict) else None,
+            "matched_signals": matched,
+            "weak_signals": list(weak) + neg_fired,
+            "confidence": _EDGE_CONF[tier],
+            "tier": tier,
+            "score": round(final, 1),
+        }
+        candidates.append((key, candidate))
         if best_key is None or key > best_key:
             best_key = key
-            best = {
-                "name": prov.get("name") or prov.get("id"),
-                "id": prov.get("id"),
-                "role": prov.get("role") or "reverse_proxy",
-                "category": prov.get("category") or CAT_SECURITY_PROXY,
-                "source": prov.get("id") or "edge_fingerprint",
-                "provenance": prov.get("provenance") if isinstance(prov.get("provenance"), dict) else None,
-                "matched_signals": matched,
-                "weak_signals": list(weak) + neg_fired,
-                "confidence": _EDGE_CONF[tier],
-                "tier": tier,
-                "score": round(final, 1),
-            }
+            best = candidate
+    if best is not None and len(candidates) > 1:
+        # CDN/WAF 串接、响应头透传、同厂商规则重叠均可能多命中；不得丢弃或伪造链路次序。
+        best["other_candidates"] = [
+            candidate for _, candidate in sorted(candidates, key=lambda row: row[0], reverse=True)
+            if candidate is not best
+        ]
+        best["selection_scope"] = "ranked_fingerprints_not_exclusive_or_topology"
     return best
 
 
@@ -689,6 +700,7 @@ _ATTRIBUTION_PROVIDER_SOURCES = (
     "asn",
     "dns",
     "ip_rdap",
+    "response_headers",
     *_ONLINE_ASORG_SOURCES,
 )
 
@@ -737,7 +749,8 @@ def attribution_from_enrichment(enrichment: dict[str, Any], ip: str = "") -> dic
 
     映射（诚实、按各富化器**真实 schema**）：``asn`` 子键 {asn,org,isp,country} → origin_network + hosting_provider；
     ``dns`` 子键的 ``cname``（DnsEnricher 实际输出位置）→ edge 的 CNAME 强信号。响应头信号保留在
-    ``signals["response_headers"]`` 契约里（PCAP-first 下响应头来自被动抓包），当前无富化器写入即为空。
+    ``enrichment["response_headers"]`` → 同 IP 的已采集响应头；调用方保留 Host/SNI、时间和证据锚，
+    不从同 IP 的其他站点画像补成当前业务响应。受 source_status 正向许可约束。
     ★resource_holder **仅**由 ``ip_rdap`` 子键（IpRdapEnricher，IP 资源登记方）填——绝不用域名 rdap
     （applies_to=['domain']，域名注册方）或 asn 的 ip-api ISP（网络运营方）冒充 IP 资源持有方。
     """
@@ -747,17 +760,20 @@ def attribution_from_enrichment(enrichment: dict[str, Any], ip: str = "") -> dic
     asn_e = provider_payload_if_hit(enrichment, "asn")
     dns_e = provider_payload_if_hit(enrichment, "dns")
     ip_rdap = provider_payload_if_hit(enrichment, "ip_rdap")
+    response_headers = provider_payload_if_hit(enrichment, "response_headers")
     tls_e = enrichment.get("tls")
     tls_e = tls_e if isinstance(tls_e, dict) else {}
     # ip-api org/isp 优先；均空时回落 case-close 在线源（FOFA/Hunter/Shodan…）的 as_org 补网络运营方。
     # 提前算并纳入早期返回判据——否则只有 fofa/hunter（无 asn/dns/ip_rdap）时会在提取 as_org 前误返回 None。
     online_org = _online_as_org(enrichment)
-    if not asn_e and not dns_e and not ip_rdap and not online_org and not tls_e:
+    if not asn_e and not dns_e and not ip_rdap and not online_org and not tls_e and not response_headers:
         return None
     signals: dict[str, Any] = {
         "country": asn_e.get("country"),
         "asn": {"asn": asn_e.get("asn"), "org": asn_e.get("org") or asn_e.get("isp") or online_org},
     }
+    if response_headers:
+        signals["response_headers"] = response_headers
     # ★IP-RDAP（IpRdapEnricher，applies_to=['ip']）是 IP **资源登记方** → resource_holder（第 1 层）。
     # 区别于域名 rdap（注册方）与 asn 的 ISP，故用它、不用那两者冒充 IP 资源持有方。
     if ip_rdap.get("netname") or ip_rdap.get("org"):

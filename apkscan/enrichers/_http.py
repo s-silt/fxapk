@@ -39,6 +39,9 @@ def _cap_body(resp: requests.Response, max_bytes: int) -> requests.Response:
         resp.close()
     resp._content = b"".join(chunks)  # requests 内部字段：预设后 .content/.json()/.text 直接可用
     resp._content_consumed = True  # type: ignore[attr-defined]
+    from apkscan.core.response_evidence import retain_response
+
+    retain_response(resp)
     return resp
 
 

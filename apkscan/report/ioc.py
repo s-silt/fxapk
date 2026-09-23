@@ -55,6 +55,7 @@ IOC_COLUMNS: list[str] = [
     #   人放回来的——不带这列，进了情报平台的行就与判据确认的线索长得一模一样，机器消费方
     #   完全看不到人工判断介入过。它是该行 provenance 的必要组成，不是可选装饰。
     "manually_restored",
+    "origin_check_summary",
 ]
 
 # 研判建议中代表「应进情报平台当 IOC」的取值（only_investigate 过滤依据）。
@@ -127,6 +128,8 @@ def _lead_to_row(
         "shape_uncertain": bool(lead.get("shape_uncertain", False)),
         # 人工放行的抑制来源（见 IOC_COLUMNS 处的说明）。多条以 ``|`` 连接，稳定排序。
         "manually_restored": "|".join(sorted(restored_sources_for(lead, restored_index or set()))),
+        "origin_check_summary": "\n".join(str(ev.get("snippet", "")) for ev in lead.get("source_refs", [])
+                                           if isinstance(ev, dict) and ev.get("source") == "origin-check"),
     }
 
 

@@ -333,7 +333,19 @@ def _run_enrichers_on_endpoint(
             _stat(stats, provider)["attempted"] += 1
 
         try:
-            result = enricher.enrich(ep)
+            from apkscan.core.response_evidence import capture_responses
+
+            with capture_responses(getattr(enricher, "raw_response_dir", None)) as raw_responses:
+                try:
+                    result = enricher.enrich(ep)
+                finally:
+                    if getattr(enricher, "raw_response_dir", None) is not None:
+                        ep.enrichment.setdefault("raw_response_evidence", {})[provider] = {
+                            "artifacts": raw_responses,
+                            "status": ("retained" if raw_responses and all(
+                                item["status"] == "retained" for item in raw_responses
+                            ) else "unavailable"),
+                        }
         except Exception:  # noqa: BLE001 - 富化失败不阻塞主流程
             logger.exception("富化器执行异常：provider=%s endpoint=%s", provider, ep.value)
             _record_provider_failure(
