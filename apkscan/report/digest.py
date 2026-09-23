@@ -731,6 +731,11 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
             }
         digest["jadx_index"] = jadx_index
 
+    origin_checks = meta.get("origin_checks")
+    if isinstance(origin_checks, list):
+        digest["origin_checks"] = [{key: row.get(key) for key in
+            ("check_id", "status", "origin_status", "evidence_status", "enrichment_status", "source_outcomes")}
+            for row in origin_checks if isinstance(row, dict)]
     if network_attribution is not None:
         digest["network_attribution"] = network_attribution
     # ★告警（codex C1）：redact 模式下自由文本命中并抹掉了结构化 PII → 显式标记，不静默

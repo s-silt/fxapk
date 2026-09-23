@@ -3,6 +3,15 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
+## 1.16.0 — 2026-09-23
+
+- 多源富化增加逐目标、逐来源覆盖回执与不可变记录快照；显式开启时保存 HTTP 响应实体及哈希，响应留存缺口继续标记为 partial。
+- 新增 `origin-check`：默认生成离线核验计划，显式授权主动模式后执行有界对比；候选对比结果不等于确认源站或运营者。
+- 收紧承载层闭环条件，补充国内服务商指纹与冲突候选表达，避免仅凭组织名称或 banner 确认承载关系。
+- 将核验结果投影到报告、摘要及 IOC，保留原始报告；修复 PDF 长表格内容溢出。
+- 响应归档在续跑时重新核对实体大小和哈希；候选 HTTP 读取包含响应头总截止时间。连续核验须重新指定原始基线报告，禁止将派生报告串接造成旧证据引用错位。
+- Hunter 每日 500 免费积分的账户级硬限制尚未实现，本版不承诺自动控制该额度。
+
 ## 1.15.0 — 2026-09-17
 
 - 被动画像：新增显式选择的 `fofa_profile`、`fofa_host`、`daydaymap_profile`；保留原 FOFA

@@ -334,8 +334,7 @@ def _hosting_layer(enrichment: Mapping[str, object]) -> dict[str, object]:
     attribution = _attribution_for_endpoint(enrichment)
     hosting = _mapping(attribution.get("hosting_provider"))
     passive_providers, passive_services, passive_locations = _passive_hosting_evidence(enrichment)
-    passive_provider = next((p for p in passive_providers
-                             if p.get("evidence_scope") != "profile_candidate"), {})
+    passive_names = sorted({item["name"] for item in passive_providers})
     # Shodan 的 org、端口和 banner 是已扫描到的边缘画像，不能证明该 IP 的承载租户或 Origin。
     # 它们保留在候选证据中供人工复核，但不得成为 hosting provider 或 completion signal。
     shodan_candidate: dict[str, object] = {}
@@ -345,17 +344,14 @@ def _hosting_layer(enrichment: Mapping[str, object]) -> dict[str, object]:
         value = shodan.get(key)
         if value not in (None, "", [], {}):
             shodan_candidate[key] = value
-    provider = (
-        passive_provider.get("name")
-        or hosting.get("name")
-        or asn.get("org")
-        or asn.get("isp")
-    )
-    provider_source = (
-        passive_provider.get("source")
-        or hosting.get("source")
-        or "asn"
-    )
+    # Measurement AS/ISP labels remain network candidates. Record order and
+    # generic application banners cannot establish a hosting relationship.
+    provider = hosting.get("name") or asn.get("org") or asn.get("isp")
+    provider_source = hosting.get("source") or "asn"
+    if not provider and len(passive_names) == 1:
+        provider = passive_names[0]
+        provider_source = "passive_network_candidate"
+    conflicts = sorted(set(passive_names) | ({str(provider)} if provider else set()))
     services = list(passive_services)
     raw_ports = shodan.get("ports")
     ports = raw_ports if isinstance(raw_ports, list) else []
@@ -364,25 +360,9 @@ def _hosting_layer(enrichment: Mapping[str, object]) -> dict[str, object]:
         if isinstance(hosting.get("matched_signals"), list)
         else []
     )
-    corroborating_signals = [value for value in matched_signals if value != "origin_asn_category"]
-    service_detail_fields = {
-        "product",
-        "version",
-        "server",
-        "title",
-        "web_title",
-        "http_title",
-        "module",
-    }
-    detailed_service = any(
-        isinstance(service, Mapping)
-        and service.get("source") not in _PROFILE_VIEWS
-        and any(service.get(field) not in (None, "", [], {}) for field in service_detail_fields)
-        for service in services
-    )
     delivery_detail = any(
         hosting.get(field) not in (None, "", [], {})
-        for field in ("facility", "datacenter", "region", "reassignment", "instance")
+        for field in ("facility", "datacenter", "reassignment", "instance")
     )
     evidence = {
         "provider": provider,
@@ -395,11 +375,14 @@ def _hosting_layer(enrichment: Mapping[str, object]) -> dict[str, object]:
         "services": services,
         "locations": passive_locations,
         "matched_signals": matched_signals,
+        "unresolved_provider_candidates": conflicts if len(conflicts) > 1 else [],
     }
     evidence = {key: value for key, value in evidence.items() if value not in (None, "", [])}
-    if provider and (detailed_service or corroborating_signals or delivery_detail):
+    if len(conflicts) > 1:
+        return _layer(CLOSURE_PARTIAL, evidence, reason="network/hosting provider candidates disagree; relationship must be verified")
+    if provider and hosting.get("name") and delivery_detail:
         return _layer(CLOSURE_COMPLETE, evidence)
-    if provider or passive_providers:
+    if provider:
         return _layer(
             CLOSURE_PARTIAL,
             evidence,

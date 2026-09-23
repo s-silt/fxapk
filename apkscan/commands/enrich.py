@@ -153,6 +153,8 @@ def batch(
     stage: str = typer.Option("all", "--stage", help="baseline=免 Key 基础核验；api=按配置补充；all=两类来源。"),
     providers: str = typer.Option("", "--providers", help="可选，逗号分隔的精确源名；显式选择产品源表示已核本次查询范围。"),
     credential_slot: int = typer.Option(0, "--credential-slot", min=0, max=2, help="Quake/DayDayMap 凭据槽：0=首个已配置；1/2=明确选择。不会因限频自动换账户。"),
+    case_id: str = typer.Option("", "--case-id", help="显式绑定覆盖回执的稳定身份；不从路径猜测。"),
+    retain_responses: bool = typer.Option(False, "--retain-responses", help="在输出目录受控保存原始HTTP响应正文及哈希；可能含敏感内容。"),
 ) -> None:
     """批量富化一份目标清单。
 
@@ -166,7 +168,8 @@ def batch(
         raise typer.Exit(2)
     source = Path(targets_file)
     try:
-        raw = source.read_text(encoding="utf-8")
+        target_bytes = source.read_bytes()
+        raw = target_bytes.decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         typer.echo(f"读不了目标清单 {targets_file}：{type(exc).__name__}", err=True)
         raise typer.Exit(2)
@@ -179,6 +182,17 @@ def batch(
     destination = Path(out_dir)
     csv_path = destination / "enrich.csv"
     ndjson_path = destination / "enrich.ndjson"
+    scope_path = destination / "enrichment-scope.json"
+    try:
+        if scope_path.exists():
+            scope = _json.loads(scope_path.read_text(encoding="utf-8"))
+            if not isinstance(scope, dict) or scope.get("schema") != "enrichment-scope-1" or scope.get("case_id") != case_id:
+                raise ValueError("case_scope_mismatch")
+        elif case_id and ndjson_path.exists():
+            raise ValueError("legacy_ledger_has_no_case_binding")
+    except (OSError, ValueError):
+        typer.echo("富化目录与本案未绑定或身份不符；请用新的本案输出目录，保留旧证据。", err=True)
+        raise typer.Exit(2)
 
     from apkscan.core.registry import discover_enrichers
 
@@ -188,6 +202,8 @@ def batch(
     try:
         enrichers = select_enrichers(enrichers, stage, providers)
         for enricher in enrichers:
+            if retain_responses:
+                enricher.raw_response_dir = destination / "raw-responses"
             if enricher.name in {"quake", "daydaymap", "daydaymap_profile"}:
                 enricher.credential_slot = credential_slot
     except ValueError as exc:
@@ -234,6 +250,8 @@ def batch(
     #     顶层的 ``over_max_targets`` 单独说明本次只处理前 N 个。
     budget = _batch.estimate_budget(targets, enrichers, os.environ, completed)
     summary: dict[str, object] = {
+        "case_id": case_id,
+        "raw_response_retention": retain_responses,
         "targets_in_list": len(targets),
         "skipped_unparseable": skipped,
         "no_configured_provider_skipped": len(targets) - len(eligible),
@@ -261,6 +279,43 @@ def batch(
             for line in budget
         ],
     }
+    def write_coverage() -> None:
+        import hashlib
+        from uuid import uuid4
+        from apkscan.core.enrichment_coverage import build_coverage
+
+        scan = _batch.scan_ledger(ndjson_path)
+        coverage = build_coverage(targets, enrichers, scan.records, os.environ, case_id=case_id)
+        if retain_responses:
+            observed = [state for row in coverage["targets"] for state in row["source_status"].values()
+                        if state["status"] in {"hit", "no_record", "failed"}]
+            from apkscan.core.response_evidence import verify_retention
+            archive_checks = [verify_retention(state.get("raw_response_evidence"), destination)
+                              for state in observed]
+            coverage["response_archive_complete"] = bool(observed) and all(archive_checks)
+            summary["response_archive_complete"] = coverage["response_archive_complete"]
+            summary["completed_with_gaps"] = bool(summary.get("completed_with_gaps")) or not coverage["response_archive_complete"]
+        coverage["target_list_sha256"] = hashlib.sha256(target_bytes).hexdigest()
+        coverage["ledger_complete"] = scan.resume_complete and scan.bad_lines == 0
+        coverage["ledger_bad_lines"] = scan.bad_lines
+        if not coverage["ledger_complete"]:
+            coverage["coverage_complete"] = False
+        destination.mkdir(parents=True, exist_ok=True)
+        receipt_id = uuid4().hex
+        selected_values = {target.value for target in targets}
+        snapshot = "".join(_json.dumps(record, ensure_ascii=False) + "\n" for record in scan.records
+                           if record.get("target") in selected_values).encode("utf-8")
+        snapshot_path = destination / f"records-{receipt_id}.ndjson"
+        with snapshot_path.open("xb") as stream:
+            stream.write(snapshot)
+        coverage["ledger_relpath"] = snapshot_path.name
+        coverage["ledger_sha256"] = hashlib.sha256(snapshot).hexdigest()
+        path = destination / f"coverage-{receipt_id}.json"
+        with path.open("x", encoding="utf-8") as stream:
+            _json.dump(coverage, stream, ensure_ascii=False, indent=2)
+        summary["coverage"] = str(path)
+        summary["coverage_complete"] = coverage["coverage_complete"]
+        summary["completed_with_gaps"] = bool(summary.get("completed_with_gaps")) or not coverage["coverage_complete"]
     _note_ledger_limits(summary, ledger_warnings)
 
     if dry_run:
@@ -306,6 +361,16 @@ def batch(
         _print(summary)
         raise typer.Exit(2)
 
+    if case_id:
+        try:
+            destination.mkdir(parents=True, exist_ok=True)
+            if not scope_path.exists():
+                with scope_path.open("x", encoding="utf-8") as stream:
+                    _json.dump({"schema": "enrichment-scope-1", "case_id": case_id}, stream, ensure_ascii=False)
+        except OSError as exc:
+            typer.echo(f"案件绑定写入失败：{type(exc).__name__}", err=True)
+            raise typer.Exit(2) from exc
+
     if not capped:
         # ★没有待查目标 ≠ 无事可做：账本在、CSV 缺失或过期时必须重建快照（纯本地、零配额）。
         #   否则续跑逻辑会永久判定"都已完成"，CSV 再也不会被生成。
@@ -327,6 +392,11 @@ def batch(
             summary["ledger_bad_lines_skipped"] = bad_ledger_lines
             summary["csv"] = str(csv_path)
             summary["ndjson"] = str(ndjson_path)
+        try:
+            write_coverage()
+        except OSError as exc:
+            typer.echo(f"覆盖回执写入失败：{type(exc).__name__}", err=True)
+            raise typer.Exit(2) from exc
         _print(summary)
         return
 
@@ -370,6 +440,11 @@ def batch(
     _note_ledger_limits(summary, (*ledger_warnings, *rebuild_warnings))
     summary["csv"] = str(csv_path)
     summary["ndjson"] = str(ndjson_path)
+    try:
+        write_coverage()
+    except OSError as exc:
+        typer.echo(f"覆盖回执写入失败：{type(exc).__name__}", err=True)
+        raise typer.Exit(2) from exc
     _print(summary)
 
 

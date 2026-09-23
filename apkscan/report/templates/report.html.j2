@@ -719,11 +719,40 @@
       overflow: visible;
       break-inside: avoid;
       box-shadow: none;
+      padding: 16px;
+      margin-bottom: 12px;
     }
 
     table {
       break-inside: auto;
     }
+
+    th,
+    td {
+      white-space: normal;
+      overflow-wrap: anywhere;
+      padding: 6px 4px;
+    }
+
+    .lead-table {
+      table-layout: fixed;
+      font-size: 10px;
+    }
+
+    .lead-table th {
+      font-size: 10px;
+    }
+
+    .lead-table th.c-val { width: 18%; }
+    .lead-table th.c-subj,
+    .lead-table th.c-who { width: 12%; }
+
+    #control-domains th:nth-child(2),
+    #control-domains th:nth-child(8) { width: 6%; }
+    #control-domains th:nth-child(7) { width: 24%; }
+    .lead-table .mono,
+    .lead-table .mono-strong { font-size: inherit; }
+    .lead-table ul { padding-left: 12px; }
 
     thead {
       display: table-header-group;
@@ -1543,6 +1572,16 @@
     </table>
     {% else %}<div class="empty">无导出组件信息。</div>{% endif %}
 
+    {% if meta.get('origin_checks') %}
+    <h3>源站候选核验与多源服务商线索</h3>
+    {% for check in meta.get('origin_checks', []) %}
+    <div style="margin:12px 0; overflow-wrap:anywhere; word-break:break-word">
+      <strong>{{ check.target }} · {{ check.status }} · 源站未确认</strong>
+      <p>{{ check.detail }}</p>
+      <p class="muted">证据 ID：{{ check.evidence_id }}；回执：{{ check.receipt }}；仅限指定资源关联。</p>
+    </div>
+    {% endfor %}
+    {% endif %}
     <h3>技术发现 / crypto{% if findings %}（{{ findings|length }}）{% endif %}</h3>
     {% if findings %}
     <table>

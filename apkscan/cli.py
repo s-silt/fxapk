@@ -43,6 +43,7 @@ from apkscan.commands.jadx_query import jadx_app
 from apkscan.commands.reanalysis_cli import recognize_app
 from apkscan.commands.lead import lead_app
 from apkscan.commands.web import analyze_web
+from apkscan.commands.origin_check import origin_check
 
 META_WRITE_OWNER = "cli"
 META_WRITE_CATEGORIES = {
@@ -85,6 +86,7 @@ app.add_typer(recognize_app, name="recognize")
 # 函数体在 commands/web.py（逻辑不堆进 cli.py），它反过来惰性 import 本模块的 _write_reports
 # 等共用出口——注册放这里是为了让那份反向依赖始终是函数体内的、不成环。
 app.command(name="analyze-web")(analyze_web)
+app.command(name="origin-check")(origin_check)
 
 # 合法输出格式（--fmt）。全非法时回退而非静默产出零报告。
 _VALID_FORMATS = ("html", "json", "pdf")

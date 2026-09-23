@@ -285,14 +285,17 @@ def test_profiles_are_only_hosting_candidates(sources):
     assert _hosting_layer(data)["status"] != "complete"
 
 
-def test_legacy_hosting_completion_unchanged():
+def test_hosting_completion_requires_delivery_and_no_conflicting_profile():
     from apkscan.core.closure.layers import _hosting_layer
     data = {"ip_rdap": {"org": "Legacy"}, "asn": {"org": "Legacy"},
             "attribution": {"hosting_provider": {"name": "Legacy", "matched_signals": ["rdap_org"]}}}
+    assert _hosting_layer(data)["status"] == "partial"
+    data["attribution"]["hosting_provider"]["instance"] = "synthetic-instance"
     assert _hosting_layer(data)["status"] == "complete"
     data["fofa_profile"] = {"records": [{"org": "Candidate", "product": "Proxy"}]}
     result = _hosting_layer(data)
-    assert result["status"] == "complete" and result["evidence"]["provider"] == "Legacy"
+    assert result["status"] == "partial" and result["evidence"]["provider"] == "Legacy"
+    assert result["evidence"]["unresolved_provider_candidates"] == ["Candidate", "Legacy"]
 
 
 @pytest.mark.parametrize("adapter", ["fofa", "daydaymap"])
