@@ -137,7 +137,7 @@ HTML/JSON 留在本地输出目录；`digest` 用于初筛和定位。正式判�
 | AI 操作约定与授权边界 | [AGENTS.md](AGENTS.md) |
 | 多轮采集、阶段二与 handoff | [PRE-REPORT-WORKFLOW.md](PRE-REPORT-WORKFLOW.md) |
 | 代码分层与证据语义 | [ARCHITECTURE.md](ARCHITECTURE.md) |
-| 配套能力与工具链 | [COMPANION-TOOLS.md](COMPANION-TOOLS.md) · [tools/TOOLCHAIN.md](tools/TOOLCHAIN.md) · [发布验证记录](TOOLCHAIN-REVIEW.md) |
+| 配套能力与工具链 | [COMPANION-TOOLS.md](COMPANION-TOOLS.md) · [tools/TOOLCHAIN.md](tools/TOOLCHAIN.md) |
 | 版本变更 | [CHANGELOG.md](CHANGELOG.md) |
 
 源码开发先启用 `git config core.hooksPath .githooks`。代码行为变更运行 Ruff、Pyright、pytest 和严格增量泄漏扫描；纯文档变更检查格式、引用、相关契约与泄漏，合并仍须通过必需 CI。夹具使用合成数据，案件原值与密钥不得入库。具体检查见 [使用手册](USAGE.md#从源码改代码)。

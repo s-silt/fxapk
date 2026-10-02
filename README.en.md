@@ -134,7 +134,7 @@ Use only within lawful authorization. Shared CDN, ASN, certificates or technical
 | Agent operations and authorization | [AGENTS.md](AGENTS.md) |
 | Capture rounds, Phase 2 and handoff | [PRE-REPORT-WORKFLOW.md](PRE-REPORT-WORKFLOW.md) |
 | Architecture and evidence semantics | [ARCHITECTURE.md](ARCHITECTURE.md) |
-| Companion tools | [COMPANION-TOOLS.en.md](COMPANION-TOOLS.en.md) · [tools/TOOLCHAIN.md](tools/TOOLCHAIN.md) · [Release validation](TOOLCHAIN-REVIEW.md) |
+| Companion tools | [COMPANION-TOOLS.en.md](COMPANION-TOOLS.en.md) · [tools/TOOLCHAIN.md](tools/TOOLCHAIN.md) |
 | Changes | [CHANGELOG.md](CHANGELOG.md) |
 
 Enable `git config core.hooksPath .githooks` before development. For behavior changes, run Ruff, Pyright, pytest and the strict incremental leak scan. Documentation-only changes require format, reference, relevant contract and leak checks; required CI must still pass before merging. Use synthetic fixtures; never commit case values or credentials. License: [MIT](LICENSE).
