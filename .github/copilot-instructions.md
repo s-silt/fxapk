@@ -1,17 +1,17 @@
 # fxapk 仓库指令（Copilot code review 与 coding agent 通用）
 
-fxapk 是 APK 静态/动态分析 CLI（Python 3.11+，包名 `apkscan`）。审查与写代码时按下列
+fxapk 是 APK 静态/动态分析 CLI（Python 3.11+，发行包名 `fxapk`，导入包名 `apkscan`）。审查与写代码时按下列
 优先级执行；**数据红线 > 正确性 > 工程约定**。
 
 ## 数据红线（逐行严查新增内容）
 
 1. **测试与文档只允许保留值**：域名用 `example.com` / `.test` / `.invalid`；IP 用文档保留段
    `192.0.2.0/24`、`198.51.100.0/24`、`203.0.113.0/24`、`2001:db8::/32`；测试需要
-   「公网、非私有」语义时用 `100.64.0.0/10`（RFC 6598）。**新增行禁止**引入真实可注册 TLD
+   `not is_private` 语义时可用 `100.64.0.0/10`（RFC 6598，共享地址空间，`is_global=False`，不是公网或文档保留段）。**新增行禁止**引入真实可注册 TLD
    的编造域名（`.cn`/`.shop`/`.vip` 等属历史遗留，不得新增）。
 2. 不得出现任何真实服务标识：真实后端域名/IP、存储桶名、AppKey、凭据、个人信息。
    合成夹具值必须一眼可辨为合成。
-3. `leak-scan: allow <理由>` 行内豁免必须给**具体**理由；同一理由批量豁免多行是红旗，
+3. 行内豁免写 `leak-scan:` + `allow` + **具体的逐行理由**；同一理由批量豁免多行是红旗，
    应改值而不是豁免。
 4. 面向公开的文本（注释/文档/输出文案）保持中性技术表述。
 
@@ -33,6 +33,6 @@ fxapk 是 APK 静态/动态分析 CLI（Python 3.11+，包名 `apkscan`）。审
 10. Python type hints 必须；测试用 pytest（不用 unittest）。
 11. 新增可选依赖必须进 `pyproject` 对应 extra，且 `ci.yml` 相应 job 安装；依赖可选 extra 的
     测试在模块顶部 `pytest.importorskip`。
-12. `tests/synthetic/` 基线只能经 `tools/update_synthetic_baseline.py` 在 PR diff 中更新，
-    CI 运行期间不得改写。
+12. `tests/synthetic/baselines/` 语义快照只经 `tools/update_synthetic_baseline.py` 更新；
+    类别检出 `baseline.json` 按该目录 README 的独立流程生成。两者须审阅并提交 diff，CI 不得改写。
 13. Commit 用 conventional 前缀，中文正文可；PR 保持单一主题。

@@ -16,14 +16,18 @@ one environment. Run `pip check` in both environments. Core static analysis stil
 supports the Python versions declared by the project.
 
 ```powershell
-.venv\Scripts\python.exe -m venv .venv/toolchain/mitmproxy-env
+py -3.12 -m venv .venv/toolchain/mitmproxy-env
 .venv/toolchain/mitmproxy-env/Scripts/python.exe -m pip install mitmproxy==12.2.3
 .venv/toolchain/mitmproxy-env/Scripts/python.exe -m pip check
 ```
 
-Python command resolution prefers console scripts in the current interpreter's
-scripts directory, then falls back to PATH. This prevents an unactivated venv
-from silently calling another Python installation's Frida or mitmproxy.
+The example uses the Windows Python launcher to select Python 3.12 explicitly.
+If it is unavailable, use the absolute path to an installed Python 3.12+ interpreter;
+do not create this environment with a Python 3.11 project interpreter.
+
+For Frida and mitmproxy console scripts, resolution prefers the current interpreter's
+scripts directory, then falls back to PATH. The fallback can still select a different
+installation; use explicit mappings when a fixed executable is required.
 Frozen application dispatch is unchanged.
 
 For independently installed native tools, create `fxapk-tools.json` under
@@ -60,9 +64,9 @@ inside fxapk; dot-sourcing is only needed for bare commands such as `jadx`.
 Unlike fxapk's own resolution, the session script requires every listed tool to be
 ready and does not support the JADX addon fallback.
 
-The tested native release targets are JADX 1.5.6, Apktool 3.0.3, Android
+The native version targets recorded for the integration environment are JADX 1.5.6, Apktool 3.0.3, Android
 Platform-Tools 37.0.1 and Wireshark/TShark 4.6.8 (stable, not the 4.7 development
-branch). Download from the respective official publishers, verify their published
+branch); this does not certify real-device compatibility or your installed versions. Download from the respective official publishers, verify their published
 checksums, and record exact paths and hashes locally. Apktool is an auxiliary
 manual tool; fxapk's current repackager uses ZIP replacement plus SDK signing tools.
 

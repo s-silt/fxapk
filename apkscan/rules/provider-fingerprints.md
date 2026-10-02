@@ -40,12 +40,12 @@
 X-Amz-* 也可能来自兼容实现，不能仅凭接口兼容性确认 AWS。
 X-Cache、Age、X-Cache-Lookup、nginx/openresty、泛化的 volces.com/bcebos.com 不单独用于锁定 CDN。 <!-- leak-scan: allow 公开厂商文档或产品地址约定说明，非案件值：bcebos.com, volces.com -->
 管理 API 文档中的示例头不是业务数据面指纹：例如百度域名配置 API 的 Server: BCE-CDN，
-本轮未据此添加业务站点规则。
+该头不作为业务站点规则。
 
 ## 遇到 CDN 后继续查什么
 
 目标分别记录为“边缘产品”“源站候选”“源站关联验证”“服务商调证方向”；识别出 CDN 后不直接结束调查。
-以下是证据驱动的核查路线。本补丁新增指定候选的有界核验，不枚举发现源站，也没有重跑既有样本分析。
+以下是证据驱动的核查路线。内置入口只对指定候选做有界核验，不枚举发现源站。
 
 1. 保存实际业务请求的时间及时区、完整 CNAME 链、连接 IP/端口、Host/SNI、路径、状态码、响应头、
    请求 ID 和证据文件哈希。EagleId、EO-LOG-UUID、X-NWS-LOG-UUID 等保留完整原值在受控证据中，
@@ -62,7 +62,8 @@ X-Cache、Age、X-Cache-Lookup、nginx/openresty、泛化的 volces.com/bcebos.c
    证据锚和需要核验的加速配置、回源记录、账号关系。具备相应手续时由获授权的调查方向服务商调取，
    技术侧不以“找不到源站”否定已发现的服务商线索，也不自动完成对外发送。
 
-研究查询只涉及上述厂商公开文档。本轮回归使用合成域名和保留 IP，不调用外部资产平台、不消耗账户积分。
+上述官方资料的核对日期保留在文首；它不保证厂商当前接入约定未变。规则回归使用合成输入，
+不是对实际服务或案件目标的联网验收。
 
 ## 候选核验接入现有接口
 
@@ -101,9 +102,9 @@ IP 候选使用 `--candidate-ip` 固定连接地址，`--candidate-url` 的域�
 3. 新 `report.json`：端点 enrichment、分层 attribution、Lead/source_refs、Finding 和 meta.origin_checks；
    不将核验器连接标作 APK 实连。已有线索研判不被升级，新候选保持待核。
 4. 现有 digest 接收状态与覆盖统计；HTML/PDF 增加源站核验小节；IOC CSV 末列追加 origin_check_summary，原列位置不变。
-5. 私有分发中的 `_线索清单工具.origin_checks` 使用原有 ClueRecord、包校验和 render_case_rows 接口生成稳定记录片段，
-   再按现行稳定线索合并/XLSX 构建流程使用。该步骤要求回执、正文、富化快照与 coverage 已作为 evidence
-   注册到新包；不伪造 Phase2 复核，也不直接覆盖共享清单。
+5. 自建清单/XLSX 集成是可选外部步骤，不随核心发布、也不是运行该命令的前置条件。
+   集成前应将回执、正文、富化快照与 coverage 作为 evidence 注册到新包并验包；
+   不伪造 Phase2 复核，不直接覆盖共享清单。
 
 PDF 生成失败会返回非零并记录 projection-status；清单尚未投影时明确记录 requires_verified_package_projection。
 resource_match 只表示完整响应正文相同；content_differs 不排除缓存、重写与动态内容；所有结果均保留源站未确认。

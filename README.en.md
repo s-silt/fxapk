@@ -61,7 +61,7 @@ fxapk selfcheck
 
 The [v1.17.0 release](https://github.com/s-silt/fxapk/releases/tag/v1.17.0) includes a wheel, source archive and `SHA256SUMS.txt`. Before installing a downloaded wheel, compare `Get-FileHash <file> -Algorithm SHA256` in PowerShell, or run `sha256sum -c SHA256SUMS.txt` on Linux. These files are not a complete offline dependency bundle.
 
-To work from the same source version:
+To obtain the released source, clone its tag; use the default master branch for current development:
 
 ```bash
 git clone --branch v1.17.0 https://github.com/s-silt/fxapk.git
@@ -137,4 +137,4 @@ Use only within lawful authorization. Shared CDN, ASN, certificates or technical
 | Companion tools | [COMPANION-TOOLS.en.md](COMPANION-TOOLS.en.md) · [tools/TOOLCHAIN.md](tools/TOOLCHAIN.md) |
 | Changes | [CHANGELOG.md](CHANGELOG.md) |
 
-Enable `git config core.hooksPath .githooks` before development. Run Ruff, Pyright, pytest and the strict incremental leak scan before integration. Use synthetic fixtures; never commit case values or credentials. License: [MIT](LICENSE).
+Enable `git config core.hooksPath .githooks` before development. For behavior changes, run Ruff, Pyright, pytest and the strict incremental leak scan. Documentation-only changes require format, reference, relevant contract and leak checks; required CI must still pass before merging. Use synthetic fixtures; never commit case values or credentials. License: [MIT](LICENSE).

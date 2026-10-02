@@ -12,7 +12,7 @@
 | 分析一个 APK（**默认联网**查归属） | `fxapk analyze app.apk --out out` |
 | 同上，但**不联网**（样本里的域名 / IP 不外发） | `fxapk analyze app.apk --offline --out out` |
 | 授权联网留存 HTTP 跳转与响应（不执行 JS；私有 HAR） | `fxapk capture-web https://example.invalid/start --authorized --out private/capture.har` |
-| 分析存下来的网页文件 | `fxapk analyze-web <目录> --out out` |
+| 分析存下来的 HTML/JS/HAR（默认离线；`--online` 只开启富化） | `fxapk analyze-web <目录> --out out` |
 | 批量跑一个文件夹 | `fxapk batch <目录>` |
 | 一把梭：体检→静态→脱壳重分析→PCAP→通用探针→定向采集→合并（接了 root 机才跑动态；没设备就跳过，静态报告照出）。**会改设备**，只在专用测试机上跑 | `fxapk auto app.apk --out out` |
 | 同上，当验收门用（退出码 0/5/6 = complete/partial/failed） | `fxapk auto app.apk --out out --strict-case` |
@@ -150,23 +150,25 @@ catalog 是案件绑定的真源、manifest 只是可重建的派生索引，恢
 
 ### 先分清：自己写的包，还是正版被人改过
 
-`repack_identity` 会给三种判定，这一步得先做，因为两种情况下接口、域名、构建路径的归属正好相反。
-自己写的包，这些都是开发方自己的；正版被重打包的，这些属于被冒名的那家厂商 —— 照着去查就会找错
-对象，找到一家毫不相干的公司头上。
+`repack_identity` 返回 `self_built`、`repack_suspected` 或 `unknown`。自建判定也不意味着
+所有接口、域名或构建路径都属于运营方，仍须排除公共 SDK、壳与共享设施。疑似重打包时，
+继承和新增范围尚未确定；须与官方同版本包差分，逐资产核对，不能一概归给原厂或样本运营者。
 
 判成重打包时，工具只说「看起来被重新签过名」，不会说「植入了什么」。想认定植入，得拿官方同版本的
 包逐个文件比对，光看这个样本本身给不出这种结论。
 
 ## 输出
 
-- `out/report.html` — 单文件内部证据视图，可在手机上打开；含原值，外发前另做审核
-- `out/report.json` — 完整数据，给机器读或者接着加工
+以下用 `app.apk` 为例，文件基名来自输入名；网页报告按证据目录名或来源标注命名。
+
+- `out/app.html` — 单文件内部证据视图，可在手机上打开；含原值，外发前另做审核
+- `out/app.json` — 完整数据，给机器读或者接着加工
 - `report.meta.closure` — 验收结论、五层证据、来源覆盖、缺口和下一步该干什么
 - `case-package.json` — Phase-1 报告/附件作用域、字节哈希与分析/闭环快照
 - `case-review.json` — Phase-2 对精确 `package_id + manifest_sha256` 的复核记录
 - 加 `--fmt pdf` 可以导 PDF（要本机装了 Chrome 或 Edge）
 
-## 想让同一个样本跑出同一份报告
+## 固定依赖与复现边界
 
 结论是解析出来的，而解析归上游库管。androguard 换个版本，dex 里读出来的东西就可能不一样；报告也就
 跟着不一样了。所以仓里放了一份 [`requirements.lock`](requirements.lock)，把整棵运行时依赖钉死：
@@ -177,10 +179,12 @@ python -m venv .venv-forensic
 .venv-forensic/bin/pip install --no-deps .
 ```
 
-第二条命令的 `--no-deps` 别省 —— 省了 pip 会重新算一遍依赖，把刚锁住的版本又升上去。
+最后一条安装命令保留 `--no-deps`，防止再次解析依赖偏离锁。Windows 对应解释器为
+`.venv-forensic\Scripts\python.exe`，用它的 `-m pip` 执行两条安装命令。
 
-平时随便装就行，用不着这个。只有要复现一份旧报告、或者要让两个人跑出一模一样的结果时才需要。报告
-自己也记着当时实际用的版本（`meta.dependency_versions`），跟这份锁对一下就知道环境一不一样。
+复现旧报告应使用当时保存的代码、规则和依赖锁；当前锁不代表所有历史环境。报告中的
+`meta.dependency_versions` 可帮助核对。还需保存检材哈希、参数、外部工具、缓存与原始响应，
+以及动态采集的设备和时间条件。联网数据、时间戳和设备状态会变化，固定依赖并不保证整份报告逐字节相同。
 
 ## 从源码改代码
 
@@ -190,13 +194,14 @@ clone 完先跑一次，把提交前的检查装上：
 git config core.hooksPath .githooks
 ```
 
-它只看你这次 staged 的新增行。像真实 IP、像密钥、写了豁免却没给理由的，直接拦下不让提交；域名和
-一些敏感词只提示不拦（想连这些一起拦，加 `FXAPK_LEAK_SCAN_STRICT=1`）。确实要放行某一行，就在行内
-写 `leak-scan:` + `allow` + 逐行理由，理由必须写。CI 会再扫一遍 PR diff，所以 `--no-verify` 只绕得过本地
-这道。
+hook 只看 staged 新增行。默认阻断疑似真实 IP、凭据、案件人名、联系方式、二开包名、
+无理由及批量豁免；域名和语境规则在 strict 档也阻断。行内例外须写 `leak-scan:` + `allow` +
+成立的逐行理由，不能批量压掉告警。已有提交用 `fxapk leak-scan --base origin/master --strict`
+核对整个候选 diff；CI 也扫 PR diff 及已跟踪源码/测试，不能用空暂存区的结果代替。
 
-测试数据一律用文档保留段：`192.0.2.0/24`、`198.51.100.0/24`、`203.0.113.0/24`、`2001:db8::/32`、
-`example.com`。真实地址推上去就收不回来了，改写历史也删不掉平台那边的缓存副本，唯一靠谱的办法是
+测试数据优先用文档保留段：`192.0.2.0/24`、`198.51.100.0/24`、`203.0.113.0/24`、`2001:db8::/32`、
+`example.com`。若被测判据无法用保留值触发，应使用 mock 或有逐行理由的合成夹具，
+不能使用真实案件值。真实地址推上去就收不回来了，改写历史也删不掉平台那边的缓存副本，唯一靠谱的办法是
 一开始就别写进去。
 
 ## 合规边界

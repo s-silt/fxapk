@@ -1,102 +1,74 @@
-# 外部依赖与配套工具（自备，本项目不提供）
+# 内置能力、外部依赖与配套工具
 
 *English: [COMPANION-TOOLS.en.md](COMPANION-TOOLS.en.md)*
 
-fxapk 仓库**只提供核心分析 CLI**。核心分析零环境、开箱即用；而在线富化、动态分析、配套脚本 /
-MCP / 探针库等能力**都依赖外部资源（API Key、外部工具、你自建的脚本）**——这些**本项目一律不随仓库
-提供，需要你自行申请 / 安装 / 搭建**。缺失时对应命令给出提示，核心分析不受影响。
+fxapk 需要 Python 3.11+ 及 [pyproject.toml](pyproject.toml) 声明的运行依赖。
+安装包含静态分析、报告、证据包、Phase-2 复核、富化适配器和内置探针；
+第三方凭据、设备及外部可执行工具由使用者配置。
 
-> 一句话：**核心在仓库里，钥匙和配套工具自备。** 本项目不附带任何 API Key、探针库、MCP 服务或报告 / 消息脚本。
+## 仓库提供什么
 
----
+| 随包提供 | 仍需准备 |
+| --- | --- |
+| 静态分析器、规则、HTML/JSON、可选 PDF、CSV 和文书出口 | 检材；PDF 另需本机 Chrome/Edge/Chromium |
+| `analyze`、`case close`、`enrich batch` 等入口的富化适配器 | 对应服务凭据、账户权益、查询授权及预算 |
+| 动态编排与内置 hook；8 个 Frida 探针 | adb、root 设备、tcpdump，以及所选模式需要的 Frida/mitmproxy 等工具 |
+| corpus、Phase-1 包与 Phase-2 CLI | 工作树外的案件/语料库目录；人工复核 |
 
-## 0. 本仓库提供 / 不提供
+内置探针位于 `apkscan/dynamic/frida_probes/`：`coldstart-config`、`objstore-config`、
+`native-ssl`、`tls-keylog`、`sms-forward-outbound`、`mqtt-xmpp-im`、
+`telegram-mtproto`、`push-c2-inbound`。其他探针、MCP 服务、自定义表格模板和消息桥接需自备。
+包内脚本不等于主机工具或设备侧 frida-server 已安装，也不表示所有探针都会自动运行。
 
-| | 内容 |
-|---|---|
-| ✅ 提供（随 `pip install fxapk`） | 静态分析核心、报告渲染、`--mode` 门控、`case close` 闭环、内置的被动富化**接线**（读你配置的 Key） |
-| ❌ 不提供（需自备 / 自建） | 任何**第三方 API Key**、动态分析**外部工具**（jadx / adb / frida / mitmproxy）、**MCP 服务**、**frida 探针库**、报告 / 表格 / 消息 **配套脚本** |
-
----
-
-## 1. 核心分析 —— 零配置
-
-```bash
-pip install fxapk
-fxapk analyze app.apk --out out
-```
-
-不需要 JDK / 模拟器 / 真机 / 任何 Key。以下各节都是**可选增强**。
-
-## 2. 在线富化 API Key（自备）
-
-fxapk 内置了对若干**被动 OSINT / 网络空间测绘**源的接线（读第三方已公开的登记 / 扫库数据）。仓库
-**只提供接线，不提供 Key**——你需要自行到各服务申请，写进项目根 `.env`（见 `.env.example`，已 gitignore）。
-**全部可选**：不配只是缺对应源的富化，核心分析与 `case close` 仍可运行，未配置的内置源在来源状态里
-记为 `disabled`。表中 DayDayMap 明确标为“外部配套”，其 key 只是统一预留，fxapk 核心不会调用、也不会
-生成对应 `source_status`。
-
-| 环境变量 | 服务 | 申请入口 |
-|---|---|---|
-| `FXAPK_SHODAN_KEY` | Shodan | account.shodan.io |
-| `FXAPK_FOFA_KEY` / `FXAPK_FOFA_URL` | FOFA | fofa.info |
-| `FXAPK_HUNTER_KEY` | Hunter | hunter.qianxin.com |
-| `FXAPK_QUAKE_KEY` / `FXAPK_QUAKE_KEY2` / `FXAPK_QUAKE_URL` | Quake | quake.360.net |
-| `FXAPK_CENSYS_ORG_ID` / `FXAPK_CENSYS_TOKEN` | Censys | censys.io |
-| `FXAPK_DAYDAYMAP_KEY` / `FXAPK_DAYDAYMAP_KEY2` | DayDayMap（外部配套，核心未内置） | daydaymap.com |
-| `FXAPK_ZOOMEYE_KEY` / `FXAPK_ZOOMEYE_URL` | ZoomEye | zoomeye.org |
-| `FXAPK_VT_KEY` | VirusTotal | virustotal.com |
-| `FXAPK_OTX_KEY` | AlienVault OTX | otx.alienvault.com |
-| `FXAPK_URLSCAN_KEY` | urlscan.io | urlscan.io |
-| `FXAPK_ABUSEIPDB_KEY` | AbuseIPDB | abuseipdb.com |
-
-> Key 均为你与各服务之间的凭据，`.env` 已 gitignore、不会入库；**本项目不分发任何 Key**。
-
-## 3. 可选 Python 扩展
-
-| 能力 | 安装 | 用途 |
-|---|---|---|
-| 解密扩展 | `pip install cryptography` | 解密运行时 `{data,timestamp}` 加密信封 |
-
-## 4. 动态分析外部工具（自装）
-
-动态脱壳 / 抓包需要**你自行安装**的外部工具 + 一台已 root 的真机 / 模拟器。fxapk 会自动探测、缺失即降级并打印修复提示（见 `fxapk selfcheck` / `fxapk doctor`）。
-
-| 工具 / 能力 | 自行安装 | 用途 |
-|---|---|---|
-| jadx | 装到 PATH（或用 fxapk-jadx 插件包） | 深度反编译补端点 / 密钥 |
-| adb | Android platform-tools | 设备通信 |
-| frida / frida-tools | `pip install frida-tools` + 设备侧 frida-server | 运行时注入 |
-| frida-dexdump | `pip install frida-dexdump` | 脱壳 |
-| mitmproxy | `pip install mitmproxy` | 抓包解析 |
-| 设备 | 已 root 的真机 / 模拟器 + adb 连上 | 真机脱壳 / 抓包 |
-
-## 5. PDF 导出
-
-`--fmt pdf` 需本机已装 **Chrome / Edge**（无头渲染）。未装则跳过 PDF、HTML / JSON 照常产出。
-
-## 6. 配套工具（本项目不提供，自行搭建）
-
-除上面的 Key 与外部工具外，一些围绕 fxapk 报告的**辅助工作流**可以自己搭建。**这些脚本 / 服务不在本仓库、
-不随 fxapk 发布**——如需，请按自己的流程实现，凭据与实现均自备：
-
-- **独立 / 批量富化脚本、富化 MCP 服务**：在 fxapk 之外对 IP / 域名做批量富化或即时查询。fxapk 只在
-  `case close` 内置了被动富化接线（第 2 节的 Key）；独立脚本 / MCP 需自建。
-- **跨报告关联 MCP 服务**：把多份 `report.json` 的 IOC 做交叉检索。协议侧走标准 MCP，`report.json` schema
-  见仓库；实现自备。
-- **报告 / 表格生成脚本**：把 `report.json` / IOC CSV 二次加工成自定义模板。fxapk 自带 HTML / JSON /
-  可选 PDF 与 `fxapk export`（IOC CSV）；更花哨的模板自己写。
-- **动态分析探针库（frida 脚本）**：动态引擎可加载 `-l <脚本>.js` 形式的 frida 探针，但**本项目不附带
-  任何探针库**——探针脚本请自行编写 / 维护。
-- **消息 / 交接集成**：任何把结果推送到聊天 / 工单系统的桥接，均非本项目内容，自行配置。
-
----
-
-## 缺失时的行为（优雅降级）
-
-fxapk 对所有可选项都**缺则降级、绝不崩**：未配 Key 的源记 `disabled`、未装的工具对应命令打印一句话修复
-指引、核心静态分析始终可跑。用 `fxapk selfcheck`（或 `fxapk doctor`）一眼看哪些就绪、哪些缺、各自怎么补。
+## 离线静态起步
 
 ```bash
-fxapk selfcheck            # 逐项列出核心 / Key / 外部工具 / 动态能力的就绪状态 + 修复指引
+python -m pip install "fxapk==1.17.0"
+fxapk analyze app.apk --offline --out out
+fxapk digest out/app.json
 ```
+
+基础静态分析不要求 JDK、设备或 API Key；依赖外部能力的分析器可能 skipped。
+`analyze` 省略 `--offline` 时默认联网富化，会向第三方及 DNS 提交目标标识。
+`analyze-web` 读取已保存的 HTML/JS/HAR，默认不联网，显式 `--online` 只开启富化。
+
+## 在线富化与凭据
+
+以 [.env.example](.env.example) 为配置变量清单，不把真实密钥写入公开文件。
+普通分析按能力和端点门控调用基础富化；Shodan 仅用于 `case close` 的有界目标集或
+`enrich batch`，不在普通 `analyze` 消耗其额度。DayDayMap 已内置并有逐来源回执。
+ThreatBook、WhoisXML 等产品还要求核对账户权限并在 batch 中显式选择。
+
+```bash
+fxapk case source-catalog --category all
+fxapk enrich inventory
+fxapk enrich batch -t targets.txt -o enrich_out
+```
+
+目录和 inventory 不查询目标，也不证明账户可用；batch 默认 dry-run。核对目标、披露范围、
+服务权限与预算后才加 `--no-dry-run`。画像选择、凭据槽和覆盖边界见 [USAGE.md](USAGE.md)。
+配置不等于执行；逐来源区分 `hit/no_record/failed/skipped/disabled`，失败不代表无记录。
+
+## 可选依赖与设备工具
+
+| 用途 | 配置依据 |
+| --- | --- |
+| 支持的 PCAP 深度解密 | `python -m pip install "fxapk[pcap]"`；`dynamic` extra 同样声明 cryptography，不安装设备工具 |
+| 实验串案排序器 | `python -m pip install "fxapk[ml]"`；仍须通过独立标签与训练门 |
+| jadx、adb、tshark、Frida、frida-dexdump | [工具链安装与路径配置](tools/TOOLCHAIN.md)、[固定 Python 工具版本](tools/toolchain-requirements.txt) |
+| mitmproxy | 按工具链文档安装在独立环境，并显式映射可执行文件 |
+
+默认 `capture`/`auto` 仍要求 Frida；显式 `capture --mode floor-only` 不用 Frida，
+但需要 adb、设备 root 和设备侧 tcpdump。缺少前置条件可能阻断该步骤，不能保证所有命令自动降级。
+先用 `fxapk selfcheck` 查看总体能力，再在设备检查已授权时用 `fxapk doctor --no-fix`。
+selfcheck 不逐个验证 API Key 或账户权益；doctor 默认修设备，不能把它当成只读自检。
+
+## 导出与外部集成
+
+PDF 由本机浏览器渲染。普通 analyze 的 PDF 失败会提示跳过，只有 `--fmt` 中选中的其他格式
+才会另行写出；`origin-check` 的投影失败有独立非零退出与状态回执。必须核对实际产物。
+HTML/PDF、JSON、CSV 和文书可能含原值，不能当作已脱敏发布版；digest 也只做有限脱敏。
+
+自定义 MCP、XLSX、消息/工单桥接不是运行核心 CLI 的前置条件。外部集成须保留报告/附件哈希、
+来源、作用域和复核状态，不能用外部“成功”替代证据门。旧 workflow 的兼容边界见
+[交接工作流](PRE-REPORT-WORKFLOW.md)。

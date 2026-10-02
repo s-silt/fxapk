@@ -155,7 +155,9 @@ QUIC Initial / socket 归因等被动证据；
    adb 可用、设备 root（su）与设备侧 tcpdump，默认 `capture`/`auto` 当前仍要求 Frida。闭环完成要求同一公网业务候选通过目标 App
    归因、业务端点和双向载荷门；未唯一归因、APK 身份未知或只有 modified-runtime 证据时最多为 `partial`，
    只有通道或零业务候选为 `failed`。要明文优先走**被动**解密（TLS keylog + tshark）。
-   ★`capture` 每次只采一个窗口；`auto` 第一轮尝试安装并运行原版 APK 取得基线，安装身份不能确认时必须把
+   ★`capture` 每次只采一个窗口；`auto` CLI 默认在脱壳重分析后进行 PCAP、通用探针、定向采集三轮观察，
+   `--single-round` 保留旧单轮，程序化 `auto.run` 默认仍为单轮。三轮分别留档，失败、身份和载荷计数不跨轮拼接。
+   以下“基线/旁路”是另一条行为修改边界，不等于观察轮次数：`auto` 先尝试安装并运行原版 APK 取得基线，安装身份不能确认时必须把
    `meta.capture_apk_identity.which` 标为 `unknown`。仅当第一轮有可读基线、判据建议旁路且调用方显式授权时，`auto` 才进入第二个**旁路轮**
    （去壳重打包，并请求启用已由双门授权的 Java 行为修改 shim）；只有实际注入行为修改 shim 的证据才标 `modified-runtime`
    （`runtime_variant` 字段的两个取值就是 `original-runtime` / `modified-runtime`，带后缀）。
@@ -221,6 +223,15 @@ QUIC Initial / socket 归因等被动证据；
 
 ---
 
+## 0.7 Phase-2 与报告前材料
+
+使用 `fxapk case phase2 --help` 查看已内置的包清单、triage、判决、materialize 与 gate 入口。
+`--case-dir` 指向含直接子包目录的案件目录，不能把多个案件的 handoff 根当作一个案。
+`case review` 必须携带 PASS 的 `--gate-receipt`，回执同目录的 `coverage.json` 和
+`decisions.jsonl` 须齐全且哈希匹配；接受复核不能把 partial 闭环变成 complete。
+`case prepare-materials` 只生成待复核材料，不自动出具正式结论；保留历史包与原始附件。
+命令和旧 workflow 兼容边界见 [PRE-REPORT-WORKFLOW.md](PRE-REPORT-WORKFLOW.md)。
+
 ## 1. 环境准备（新机 clone 后一次性）
 
 ```bash
@@ -278,7 +289,7 @@ git config core.hooksPath .githooks   # ★启用提交前泄漏扫描（改代�
 - ★**frida-server 能被 `frida-ps` 列出 ≠ 它以 root 在跑**。实测踩过：启动命令的引号被 adb 拆开，
   它以 UID=2000 起来了，spawn/attach 一概失败，**现象酷似样本反 Frida**。doctor 已按 `/proc/<pid>/status`
   读真实 UID 判这一项。
-- **mitmproxy CA** 仅 HTTPS 抓包要：先 `pip install mitmproxy` 跑一次 `mitmdump`（Ctrl-C 退）生成 `~/.mitmproxy`，再 `doctor --fix` 装系统证书。
+- **mitmproxy CA** 用于 HTTPS 中间人抓包：按 [工具链说明](tools/TOOLCHAIN.md) 在独立环境安装并映射 `mitmdump`，运行一次（Ctrl-C 退）生成 `~/.mitmproxy`，再按设备修复授权执行 `doctor --fix` 安装系统证书。
 - **boot.img 必须与当前 ROM 版本匹配**，否则 bootloop。
 - 取证测试机建议用**一次性小米账号 + Magisk**，别登个人账号。
 
@@ -303,7 +314,7 @@ fxapk digest out/<样本名>.json
 其它常用：
 - `fxapk auto <apk>`：静态 +（有设备则）动态一把梭。`fxapk batch <dir>`：批量。
 - `fxapk analyze-web <证据目录>`：把**已落盘的网页证据**当一级输入（递归读 `.html` / `.body` /
-  `.js` / `.headers`），产出与 `analyze` 同构的报告。**不联网重取**——证据是什么就分析什么。
+  `.js` / `.headers` / HAR），产出与 `analyze` 同构的报告。**不联网重取**——证据是什么就分析什么；默认离线，`--online` 仅开启归属富化。
   报告会对本次实际进入分析器的文件按 NFC 相对路径、字节数与逐文件 SHA-256 生成确定性
   `meta.evidence_manifest`，并把清单指纹写入 `meta.sample_sha256`；因此网页证据集可直接进入
   `fxapk case package`。同一路径的 Unicode 规范化碰撞会拒绝生成指纹，不能静默覆盖。
@@ -368,7 +379,9 @@ fxapk digest out/<样本名>.json
 
 ## 3. 境外或辖区未知的基础设施与 Origin 候选（联网富化，`--online` 时生效）
 
-对「建议调证」的域名/IP 端点做**两遍富化**：不向目标业务服务发起 HTTP/TCP 主动探测；查询会把域名/IP 提交给第三方数据源，DNS 查询还可能被解析服务或权威 DNS 观察。
+富化执行采用**两遍门控**。普通 `analyze` 不调用标记为 `case_close_only` 的 Shodan；
+该源由 `case close` 的有界目标集或 `enrich batch` 调用。其他来源仍按各自能力、配置与端点条件执行。
+对「建议调证」的域名/IP 端点：不向目标业务服务发起 HTTP/TCP 主动探测；查询会把域名/IP 提交给第三方数据源，DNS 查询还可能被解析服务或权威 DNS 观察。
 1. **第①遍·归属** → 形成基础设施辖区候选、登记与承载信号（国内/境外/未知）：rdap/whois/dns/asn/icp；这些结果不证明物理源站或运营者辖区。
 2. **第②遍·境外基础设施与 Origin 候选**（仅**境外+未知**端点）：收集承载、边缘、Origin 候选和关联资产信号；任何单一来源都不能独立确认 Origin 或运营者。
 
@@ -402,7 +415,7 @@ DOMAIN/IP，「已画像 0」绝不等于「候选 0」。
 对每个建议调证端点，富化后组装成**五层不塌缩**归因链：
 `resource_holder`（IP 资源登记方，IP-RDAP）→ `origin_network`（BGP Origin ASN）→ `hosting_provider`（云 / IDC）→ `edge_provider`（CDN / WAF / 防红代理，多信号加权指纹）→ `service_operator`（实际运营者，**恒 unknown，绝不从 ASN / RDAP 推断**）。域名按解析到的每个 IP **逐个产链**（per-IP，不合并成一份）。
 
-★核心纪律：**IP 落在某云厂商 ASN ≠ App 由该厂商运营**。每层带 `confidence` / `source`，查不到即 unknown；edge 的 `confirmed` 须 ≥2 个独立强信号（单一响应头可伪造，最多 `probable`），负证据（只命中公有云 ASN / 通用 X-Cache / nginx）抑制误判。`fxapk letters` 会把这条链渲染进调证函的「基础设施归属链」段，直接支撑"向谁调证"。
+★核心纪律：**IP 落在某云厂商 ASN ≠ App 由该厂商运营**。每层带 `confidence` / `source`，查不到即 unknown；edge 的 `confirmed` 须达到分数阈值且有 ≥2 个不同强信号面（单一响应头可伪造，最多 `probable`），负证据（只命中公有云 ASN / 通用 X-Cache / nginx）抑制误判。`fxapk letters` 会把这条链渲染进调证函的「基础设施归属链」段，作为"向谁调证"的复核线索；该等级不证明信号独立性、源站或实际运营者。
 
 ---
 
@@ -459,7 +472,7 @@ DOMAIN/IP，「已画像 0」绝不等于「候选 0」。
 ## 5. 开发约定（改代码时）
 - 文档、指令或 PR 元数据变更采用相关格式、引用、差异及泄漏检查，不因无代码变化重复代码测试；涉及代码行为时保留以下必需检查。
 - Python type hints；测试用 **pytest**（不要 unittest）。跑全套：`python -m pytest -q`；快跑（排除重型）：`python -m pytest -q -m "not slow"`。
-  - `@pytest.mark.slow` 标记的真 spawn 端到端等价测试需本地 `*.apk` 样本（`FXAPK_TEST_APK` 或仓库内任一 `*.apk`），无样本自动 skip（CI 不挂）。
+  - `@pytest.mark.slow` 标记的真 spawn 端到端等价测试需本地 `*.apk` 样本（必须显式设置 `FXAPK_TEST_APK`；不扫描工作树中的 APK），无样本自动 skip（CI 不挂）。
 - 富化器（`apkscan/enrichers/*.py`）继承 `BaseEnricher`，自动发现；失败吞成 `EnrichmentResult(ok=False)`
   **不抛、不裸 except、不在 try 里 swallow log**。新增富化器标 `phase`（attribution / overseas）。
 - **分析器并行**（`apkscan/core/pipeline.py` + `snapshot.py`）：android 多核默认走**进程池并行**（绕 GIL；把 ApkContext 物化成可 pickle 的 `SnapshotContext` 发各 worker）。worker 数按 `min(CPU, 分析器数, 可用内存可容纳数)` 封顶防 OOM，**Linux cgroup 感知**（容器里取 cgroup 限额而非宿主机内存）。逃生 / 调优开关（env）：
@@ -467,7 +480,7 @@ DOMAIN/IP，「已画像 0」绝不等于「候选 0」。
   - `FXAPK_WORKER_BASE_MB` / `FXAPK_MEM_SAFETY`（0<v≤1）现场覆盖内存封顶的标定（单 worker 估算 / 安全系数）。
   - ★ 改并行或快照路径须守不变量 **「串行 == 并行 逐字节一致」**（由 slow 等价测试背书）；分析器输出须确定（跨进程 PYTHONHASHSEED 不同，set 派生的顺序要显式排序）。
 - **代码合并前必过三关（本地）**：`python -m ruff check apkscan tests` + `python -m pyright apkscan` + `python -m pytest -q`——CI（`.github/workflows/ci.yml`）这三样都跑，**只跑 pytest/pyright 不够，ruff 必跑**（曾因一个未用 import F401 把 CI 刷红）。
-- **CI 环境对齐**：CI 装的是 `pip install -e "."`。新增**可选依赖**必须进 `pyproject` 对应 extra（如 pcap 深度解析→`pcap`/`dynamic`），且 ci.yml 两个 job 都要装上它，否则 CI 缺包报 `ModuleNotFoundError`/pyright 解析失败。依赖某可选 extra 的测试在模块顶部 `pytest.importorskip("<pkg>")`，未装该 extra 的环境优雅跳过。
+- **CI 环境对齐**：CI 装的是 `pip install -e "."`。新增**可选依赖**必须进 `pyproject` 对应 extra（如 pcap 深度解析→`pcap`/`dynamic`），且 ci.yml 中需要该能力的检查 job 都要装上它，否则 CI 缺包报 `ModuleNotFoundError`/pyright 解析失败。依赖某可选 extra 的测试在模块顶部 `pytest.importorskip("<pkg>")`，未装该 extra 的环境优雅跳过。
 - **合并前等 CI 绿**：开 PR 后 `gh run watch <id> --exit-status` 等 CI 跑完再 `gh pr merge`——别本地绿就盲合（本地与 CI 环境/依赖/平台不一致，本地缺 ruff、CI 缺可选依赖都坑过）。
 - commit：conventional commits OK，中文 OK；**不要** `--no-verify` / 不要 force push 到 master；未经指示不主动 commit。
 
