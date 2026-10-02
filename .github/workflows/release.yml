@@ -61,6 +61,10 @@ jobs:
           # Idempotent: if the version already exists (e.g. a tag re-push /
           # history rewrite re-triggers this run), skip instead of failing.
           skip-existing: true
+      - name: Hash release archives
+        run: |
+          cd dist
+          sha256sum *.whl *.tar.gz > SHA256SUMS.txt
       # 打 tag 时顺带建 GitHub Release（正文自动从上个 Release 以来的 PR 生成）。
       # ★ 幂等：Release 已存在（tag 重推）则跳过，不失败——与上面 skip-existing 同philosophy。
       # 历史上 v1.0.0 只发了 PyPI、漏建 Release 就是因为这步以前靠手动。
@@ -73,7 +77,8 @@ jobs:
             exit 0
           fi
           gh release create "$GITHUB_REF_NAME" \
+            dist/*.whl dist/*.tar.gz dist/SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" \
-            --title "$GITHUB_REF_NAME" \
+            --title "fxapk $GITHUB_REF_NAME" \
             --generate-notes \
             --verify-tag
