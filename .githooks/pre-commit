@@ -5,11 +5,11 @@
 # 安装（clone 后跑一次）：
 #     git config core.hooksPath .githooks
 #
-# 判据只看**已 staged 的新增行**。默认阻断 ip / secret / exemption 三条（精确、误报可控）；
+# 判据只看**已 staged 的新增行**。默认阻断 IP、凭据、案件人名、联系方式、二开包名及无效/批量豁免；
 # domain / context 如实报告但不变红。要连它们一起阻断：
 #     FXAPK_LEAK_SCAN_STRICT=1 git commit ...
 #
-# 放行某行：行内加 `leak-scan: allow <理由>`（理由必须写）。
+# 放行某行：行内依次写 `leak-scan:`、`allow` 和成立的逐行理由。
 # 本 hook 是本地第一道；CI 对 PR diff 再扫一遍，故 --no-verify 绕不过最终门禁。
 
 set -e

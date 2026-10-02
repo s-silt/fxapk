@@ -12,9 +12,9 @@ If you'd rather type commands yourself, these are the common ones. Full flags: `
 | Analyse an APK (**online by default**) | `fxapk analyze app.apk --out out` |
 | Same, but **offline** (no domain / IP leaves the machine) | `fxapk analyze app.apk --offline --out out` |
 | Capture authorized HTTP responses (GET only, no browser JS) | `fxapk capture-web https://example.invalid/start --authorized --out private/capture.har` |
-| Analyse saved web files | `fxapk analyze-web <dir> --out out` |
+| Analyse saved HTML/JS/HAR (offline by default; `--online` enables enrichment only) | `fxapk analyze-web <dir> --out out` |
 | Run a whole folder | `fxapk batch <dir>` |
-| Full pipeline: doctor → static → unpack → capture → merge (dynamic steps only with a rooted device; without one they're skipped and you still get the static report) | `fxapk auto app.apk --out out` |
+| Full pipeline: doctor → static → unpack/reanalyze → PCAP → general probes → targeted capture → merge (changes an authorized test device; without a device, dynamic steps are skipped) | `fxapk auto app.apk --out out` |
 | Same, as an acceptance gate (exit 0/5/6 = complete/partial/failed) | `fxapk auto app.apk --out out --strict-case` |
 | Top up an existing report with multi-source lookups and five-layer attribution | `fxapk case close out/app.json` |
 | Review an exact evidence package (requires a valid PASS receipt and its sibling materials) | `fxapk case review out/case-package.json --reviewer reviewer --status accepted --gate-receipt phase2/gate-receipt.json --out out/case-review.json` |
@@ -72,10 +72,10 @@ claims that can't be made yet; `next_actions` says how to close the gap.
 
 ### Self-built shell vs. a repackaged legitimate app
 
-`repack_identity` returns a three-state verdict, and it needs reading first: interface, domain and
-build-path **ownership inverts** between the two. A self-built app's belong to its operator; a
-repackaged one's belong to the **impersonated vendor**, so listing them as investigation leads points
-at an uninvolved company.
+`repack_identity` returns `self_built`, `repack_suspected` or `unknown`. Self-built does not mean
+every endpoint, domain or build path belongs to the operator: exclude SDKs, packers and shared
+infrastructure individually. For suspected repacks, inherited and added assets remain unresolved
+until compared with the official build of the same version. Do not assign all assets to either party.
 
 When a sample looks repackaged, the tool states only that it appears **resigned** — never that
 something was injected. Establishing that requires a file-by-file diff against the official build of
@@ -83,9 +83,47 @@ the same version, which the sample alone cannot provide.
 
 ## Output
 
-- `out/report.html` — self-contained single file (internal evidence view; review sensitive values before sharing)
-- `out/report.json` — full structured data (machine-readable)
+For `app.apk`, the basename is `app`; web reports use the evidence directory/origin label.
+
+- `out/app.html` — self-contained single file (internal evidence view; review sensitive values before sharing)
+- `out/app.json` — full structured data (machine-readable)
 - `--fmt pdf` — optional PDF export (needs local Chrome / Edge)
+
+## Capture, enrichment and handoff
+
+CLI `auto` defaults to three observation rounds after unpack/reanalysis: PCAP, general probes,
+then supported targeted observers. Use `--single-round` for the older route; programmatic
+`auto.run` remains opt-in. Rounds retain separate identity, failures, artifacts and quality.
+They do not grant behavior-modification authorization, or allow combining unrelated payload
+counts into complete evidence. Default capture/auto still require Frida; explicit
+`capture --mode floor-only` needs adb, root and device-side tcpdump.
+
+Passive profiles are explicitly selected as `fofa_profile,fofa_host,daydaymap_profile` in
+`enrich batch --stage api --providers ...`. Batch defaults to dry-run; add `--no-dry-run`
+only with target disclosure, provider access and budget authorized. FOFA views are one source
+family, not independent corroboration. Results are bounded first-page observations; missing
+fields, unknown totals and permission failures do not establish absence. Quake and DayDayMap
+(including its profile) support `--credential-slot 2`; credentials never rotate automatically.
+
+Use `case package` to freeze report/attachment hashes, then `corpus reconcile` to preview library
+changes (explicit `--apply` writes). `case phase2 --help` lists inventory, triage, decision,
+materialize and gate commands. The case directory contains direct child package directories;
+the manifest determines report names. Keep `coverage.json` and `decisions.jsonl` beside the gate
+receipt. `case review` requires that matching PASS receipt. `case prepare-materials` produces
+review materials, not a final report or attribution decision.
+
+Package integrity, analysis, closure and review are separate states. Accepted review does not
+turn partial closure into complete closure. Preserve historical packages and generate new
+materials in a working copy. Legacy scripts and native CLI have different filename assumptions;
+see the [handoff workflow](PRE-REPORT-WORKFLOW.md) and the extended [Chinese reference](USAGE.md).
+
+## Reproducibility
+
+Use the code, rules and `requirements.lock` saved for the intended version, in an isolated
+environment. Install the lock first, then the project with `--no-deps`. The report records
+`meta.dependency_versions`; current pins do not recreate every historical environment.
+Preserve sample hashes, parameters, external tools, caches, raw responses, device state and
+capture times. Fixed dependencies alone cannot make online/dynamic reports byte-identical.
 
 ## Developing from source
 
@@ -95,14 +133,17 @@ Run this once after cloning to enable the pre-commit sensitive-data scan:
 git config core.hooksPath .githooks
 ```
 
-It looks only at **staged added lines**. Three classes block the commit by default: suspected real
-addresses, suspected credentials, and un-justified exemptions; domains and context words are reported
-but do not block (`FXAPK_LEAK_SCAN_STRICT=1` blocks those too). To allow a single line you must state
-why — add `leak-scan:` followed by `allow` and a line-specific reason inline. CI scans the PR diff again, so `--no-verify` does not get
-past the final gate.
+The hook scans **staged added lines**. Default blockers include suspected real IPs, credentials, case
+names, contact identifiers, secondary package names, unjustified exemptions and bulk exemptions.
+Strict mode also blocks domain/context findings. An inline exception needs `leak-scan:` followed by
+`allow` and a valid line-specific reason. For committed changes, run
+`fxapk leak-scan --base origin/master --strict`; an empty staging area does not validate the branch.
+CI checks the PR diff and tracked source/tests independently.
 
-Test fixtures must use documentation-reserved ranges (`192.0.2.0/24` / `198.51.100.0/24` /
-`203.0.113.0/24` / `2001:db8::/32` / `example.com`). A real address, once pushed, is **irreversible** —
+Prefer documentation-reserved ranges for test fixtures (`192.0.2.0/24` / `198.51.100.0/24` /
+`203.0.113.0/24` / `2001:db8::/32` / `example.com`). If a predicate cannot be exercised with these,
+use mocks or auditable synthetic fixtures with line-specific reasons, never case values. A real
+address, once pushed, is **irreversible** —
 rewriting history does not remove the platform's cached copies, so the only reliable fix is never
 writing it in the first place.
 

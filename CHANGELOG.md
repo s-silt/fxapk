@@ -3,6 +3,13 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
+## Unreleased
+
+- 全面审校公开文档：同步中英文依赖、内置探针和富化入口，纠正三轮采集、复核门、归属与复现边界，明确已发布状态和验证范围。
+- 对齐开发指令、泄漏扫描口径与合成基线更新流程；不修改运行行为、依赖版本或 1.17.0 发行物。
+
+以下为各版本发布时的历史记录；当前操作以 README、USAGE 和 AGENTS 为准。
+
 ## 1.17.0 — 2026-10-02
 
 - 集成验收修复：运行时端点不再借静态同值线索自动排除；复核回执必须同时绑定当前覆盖与判决材料；入库包身份必须匹配报告字节；长判决替代链改为迭代校验。
