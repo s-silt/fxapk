@@ -3,7 +3,7 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
-## 1.17.0.dev0 — unreleased integration candidate
+## 1.17.0 — 2026-10-02
 
 - 集成验收修复：运行时端点不再借静态同值线索自动排除；复核回执必须同时绑定当前覆盖与判决材料；入库包身份必须匹配报告字节；长判决替代链改为迭代校验。
 - 补充 OneDrive handoff 衔接约定与中文路径换盘回归，保留历史包和旧 workflow；对齐采集质量元数据类别、已消费键基线及 Windows 测试输入契约。
