@@ -265,7 +265,7 @@ jobs:
           /tmp/smoke/bin/fxapk --version
           # ★关键：rules/*.yaml 等 package-data 真打进 wheel 且可被 importlib.resources 读到。
           #   纯源码测试跑不出这类“忘打数据文件 → pip 装完加载不了规则”的发布事故。
-          /tmp/smoke/bin/python -c "from apkscan.core.registry import load_rules; assert all(load_rules(n) for n in ('packers','re_toolkit','app_types')), 'packaged rules missing from wheel'; print('packaged rules load OK')"
+          /tmp/smoke/bin/python -I -c "import sys, apkscan; from pathlib import Path; from importlib.resources import files; from apkscan.core.registry import load_rules; assert Path(apkscan.__file__).is_relative_to(Path(sys.prefix)), 'checkout shadowed installed wheel'; assert all(load_rules(n) for n in ('packers','re_toolkit','app_types','source_access')), 'packaged rules missing from wheel'; assert list(files('apkscan.dynamic').joinpath('frida_js').iterdir()), 'packaged hooks missing'; assert list(files('apkscan').joinpath('report/templates').iterdir()), 'packaged templates missing'; print('installed wheel resources OK')"
 
   audit:
     name: dependency audit

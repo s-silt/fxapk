@@ -153,7 +153,8 @@ def lookup_ip(ip: str, *, http: Any = None, timeout: int = IPINFO_TIMEOUT) -> di
 
     client = http if http is not None else requests
     _respect_rate_limit()
-    resp = client.get(IPINFO_API_URL.format(ip=ip), params={"fields": IPINFO_FIELDS}, timeout=timeout)
+    resp = client.get(IPINFO_API_URL.format(ip=ip), params={"fields": IPINFO_FIELDS}, timeout=timeout, allow_redirects=False)
+    _http.reject_redirect(resp)
     resp.raise_for_status()
     payload = resp.json()
     if not isinstance(payload, dict):
@@ -199,7 +200,8 @@ def lookup_ips_batch(
         chunk = todo[start : start + IPINFO_BATCH_MAX]
         _respect_batch_rate_limit()
         body = [{"query": ip, "fields": IPINFO_FIELDS} for ip in chunk]
-        resp = client.post(IPINFO_BATCH_URL, json=body, timeout=timeout)
+        resp = client.post(IPINFO_BATCH_URL, json=body, timeout=timeout, allow_redirects=False)
+        _http.reject_redirect(resp)
         resp.raise_for_status()
         payload = resp.json()
         if not isinstance(payload, list):

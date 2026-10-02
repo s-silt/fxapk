@@ -12,6 +12,8 @@ pcapng 的 Enhanced Packet Block（best-effort）。**绝不抛**：坏包/坏�
 
 from __future__ import annotations
 
+from apkscan.core.bounded_io import read_limited
+
 import hashlib
 import ipaddress
 import json
@@ -635,10 +637,19 @@ def _has_pcap_magic(data: bytes) -> bool:
     )
 
 
+MAX_CAPTURE_BYTES = 256 * 1024 * 1024
+
+
 def parse_pcap(path: str) -> PcapSummary:
     """读 pcap 文件并解析；文件缺失/坏 → **带失败态**的 summary（不抛）。"""
     try:
-        data = Path(path).read_bytes()
+        file = Path(path)
+        if file.stat().st_size > MAX_CAPTURE_BYTES:
+            return PcapSummary(parse_status="resource_limit", error="capture exceeds byte budget; split offline before parsing")
+        with file.open("rb") as stream:
+            data = read_limited(stream, MAX_CAPTURE_BYTES)
+        if len(data) > MAX_CAPTURE_BYTES:
+            return PcapSummary(parse_status="resource_limit", error="capture grew beyond byte budget while reading")
     except OSError as exc:
         logger.exception("[pcap] 读取 pcap 失败：%s", path)
         return PcapSummary(parse_status="read_error", error=f"{type(exc).__name__}: {exc}")
@@ -648,6 +659,8 @@ def parse_pcap(path: str) -> PcapSummary:
 def parse_pcap_bytes(data: bytes) -> PcapSummary:
     """解析 pcap/pcapng 字节，聚合出 flows + DNS 查询。绝不抛。失败态写 parse_status/error。"""
     summ = PcapSummary()
+    if len(data) > MAX_CAPTURE_BYTES:
+        return PcapSummary(parse_status="resource_limit", error="capture exceeds byte budget")
     if not _has_pcap_magic(data):
         # 坏 magic / 过短 = 非 pcap/pcapng：显式标失败，不与「合法零流量」混同（否则 pcap-leads 误判采集成功）。
         summ.parse_status = "unparseable"
@@ -1958,11 +1971,12 @@ def sni_camouflage_carriers(summary: PcapSummary) -> dict[str, list[str]]:
       打出网易云音乐、jsDelivr 镜像、有道、BootCDN 的 SNI。回灌把这些域名一并当业务线索，
       于是生成的是一封指名网易/有道的调证函——把无关企业写成了嫌疑方，本项目最重的那类错误。
       白名单挡不住：团伙下次换个域名就绕过去了。而**推断链**本身是可以判的——「ClientHello
-      里写着 X，所以这台机器归 X 的运营方」这一步，只在 X 确实是跑在约定端口上的 TLS 服务时
-      才成立。端口一非标，这条推断就没有前提，与域名有多知名无关。
+      里写着 X，所以这台机器归 X 的运营方」不能单凭 SNI 成立。非标端口是本规则沿用的
+      实战降档线索；标准端口同样不证明域名、承载 IP 与运营主体一致。
 
     ★只在**全部**承载端点都非标时才算：只要该域名在某个标准端口上也出现过，就说明它确实作为
-      TLS 服务被访问过，不该因为另有一条非标连接而整体降级。
+      TLS 名称使用过，不因另有一条非标连接而按本启发式整体降级。实际承载 IP 仍独立保留，
+      该例外不代表名称真实性、DNS 对应关系或运营者身份已核验。
 
     绝不抛；无 SNI / 无 flows → 空 dict。
     """
@@ -2365,6 +2379,9 @@ def to_ledger_dict(
             "in_bytes": re.in_bytes,
             "packets": re.packets,
             "connection_count": re.connection_count,
+            "first_ts": re.first_ts or None,
+            "last_ts": re.last_ts or None,
+            "sni_identity_verified": False,
             "sni": sorted(re.sni),
             "no_sni": not re.sni,
             "quic_versions": sorted(re.quic_versions),  # h3 归因（明文长包头元数据）
@@ -2407,6 +2424,7 @@ def to_ledger_dict(
                 "qtype": r.qtype,
                 "rcode": r.rcode,
                 "txid": r.txid,
+                "observed_at": r.ts or None,
                 "answers": r.answers,
             }
             for r in summary.dns_records

@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import pytest
+import requests
 
 from apkscan.core.enrichment import enrich_selected_targets
 from apkscan.core.models import Endpoint
@@ -45,10 +46,24 @@ class _CountingHttp:
         self.text = text
         self.calls = 0
 
-    def capped_get(self, url: str, timeout: float | None = None) -> _Response:
+    @staticmethod
+    def reject_redirect(response):
+        assert response.status_code == 200
+
+    def capped_get(self, url: str, timeout: float | None = None, **kwargs: Any) -> _Response:
         del url, timeout
         self.calls += 1
         return _Response(self.text)
+
+
+@pytest.fixture(autouse=True)
+def no_external_transports(monkeypatch):
+    """Discovery stays real; no provider may escape via a loopback HTTP proxy."""
+    def denied(*args, **kwargs):
+        raise requests.RequestException("external transport disabled in wiring tests")
+    monkeypatch.setattr(requests.sessions.Session, "request", denied)
+    monkeypatch.setattr("apkscan.enrichers.rdap.query_whois", denied)
+    monkeypatch.setattr("apkscan.enrichers.whois.query_whois", denied)
 
 
 @pytest.fixture()

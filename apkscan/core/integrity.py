@@ -11,7 +11,10 @@
 - ``md5`` / ``sha1`` 仅作兼容冗余，**完整性以 sha256 为准**。
 - 任何自证（指纹 / .sha256 旁文件）均为**工具产物自证，不替代司法鉴定机构的证据保全**。
 
-容错铁律：纯函数对坏输入容错——文件读不到返回带空 hash 的 dict 且**绝不抛**。
+容错铁律：``sample_fingerprint`` 对坏输入容错——文件读不到返回带空 hash 的 dict 且**绝不抛**。
+SHA-256 原语（``sha256_hex`` / ``sha256_text`` / ``sha256_file`` / ``sha256_canonical_json``）
+供需要单独计算 SHA-256 的调用方使用。``sha256_file`` 读不到文件会抛 ``OSError``。
+``sample_fingerprint`` 仍在同一次读取里同时累计 sha256/sha1/md5，读失败时按上面的容错铁律降级。
 """
 
 from __future__ import annotations
@@ -30,6 +33,46 @@ logger = logging.getLogger(__name__)
 
 # 1 MiB 流式分块（与 dynamic/ledger.py 的 apk_sha256 同一范式）：大 APK 不一次性读进内存。
 _READ_CHUNK = 1 << 20
+
+
+def sha256_hex(data: bytes) -> str:
+    """``data`` 的小写十六进制 SHA-256。字节哈希只走这里。"""
+    return hashlib.sha256(data).hexdigest()
+
+
+def sha256_text(text: str) -> str:
+    """``text`` 按 UTF-8 编码后的小写十六进制 SHA-256。"""
+    return sha256_hex(text.encode("utf-8"))
+
+
+def sha256_file(path: str | Path) -> str:
+    """流式读取文件，返回小写十六进制 SHA-256。
+
+    路径不存在、目标是目录或读取失败时抛 ``OSError``。缺文件要当成空字节哈希的
+    调用方先自己判断，再改调 :func:`sha256_hex`。
+    """
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(_READ_CHUNK), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sha256_canonical_json(payload: object, *, allow_nan: bool = False) -> str:
+    """规范 JSON（键排序、紧凑分隔、UTF-8）的 SHA-256。
+
+    ``allow_nan`` 默认 False，包身份一类持久化哈希拒绝 NaN / Infinity。
+    已经在内存里、且历史上按 ``json.dumps`` 默认值取摘要的调用方传 ``allow_nan=True``。
+    """
+    raw = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=allow_nan,
+    )
+    return sha256_text(raw)
+
 
 #: git 溯源进程内缓存（一次运行不变，避免每份报告都 fork git）。
 _BUILD_PROVENANCE: dict | None = None
@@ -136,7 +179,7 @@ def web_evidence_fingerprint(files: Mapping[str, bytes], *, tool_version: str) -
             {
                 "path": path,
                 "size": size,
-                "sha256": hashlib.sha256(data).hexdigest(),
+                "sha256": sha256_hex(data),
             }
         )
         total_size += size
@@ -151,7 +194,7 @@ def web_evidence_fingerprint(files: Mapping[str, bytes], *, tool_version: str) -
     ).encode("utf-8")
     return {
         "kind": "web_evidence_set",
-        "sha256": hashlib.sha256(canonical).hexdigest(),
+        "sha256": sha256_hex(canonical),
         "sha1": hashlib.sha1(canonical).hexdigest(),
         "md5": hashlib.md5(canonical).hexdigest(),
         "size": total_size,
@@ -221,4 +264,4 @@ def evidence_id(source: str, location: str) -> str:
     随机 / 时间字段（如信封时间戳），纳入会导致同一条证据的 id 在多次运行间漂移，破坏
     「可回溯」的稳定锚点。source|location 才是该证据在检材内的稳定坐标。
     """
-    return hashlib.sha256(f"{source}|{location}".encode("utf-8")).hexdigest()[:16]
+    return sha256_text(f"{source}|{location}")[:16]

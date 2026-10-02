@@ -54,9 +54,6 @@
       "runtime_dead_drop_relations": [
         "apkscan/dynamic/merge.py"
       ],
-      "runtime_decrypted": [
-        "apkscan/dynamic/merge.py"
-      ],
       "runtime_jsbridge": [
         "apkscan/dynamic/merge.py"
       ],
@@ -83,9 +80,6 @@
       ],
       "web_request_recipe": [
         "apkscan/analyzers/web_evidence.py"
-      ],
-      "webview_signals": [
-        "apkscan/analyzers/webview_jsbridge.py"
       ]
     },
     "record": {
@@ -227,9 +221,6 @@
       "runtime_db_digests": [
         "apkscan/dynamic/merge.py"
       ],
-      "runtime_decrypt_stats": [
-        "apkscan/dynamic/merge.py"
-      ],
       "runtime_endpoint_count": [
         "apkscan/dynamic/merge.py"
       ],
@@ -268,9 +259,6 @@
       ],
       "web_inline_config_count": [
         "apkscan/analyzers/web_evidence.py"
-      ],
-      "webview_signal_count": [
-        "apkscan/analyzers/webview_jsbridge.py"
       ]
     },
     "coverage": {

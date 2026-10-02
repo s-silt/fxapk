@@ -1,0 +1,271 @@
+{
+  "gate": {
+    "blockers": [
+      "G5: coverage 审计失败 clue_not_accepted",
+      "G6: coverage 中 pending_with_action 数量为 4",
+      "G7: human parent lead:c4f1127ac913e67ef3d303132e250888aa8a04a4eb90f5699397bdf1c10ba79c 未在 coverage 中形成非 skeleton 物化",
+      "G7: human parent lead:e7a42b57e8242b97aacfdf63a9c066fa6a16a4196be09b6760e8da804536dd4c 未在 coverage 中形成非 skeleton 物化"
+    ],
+    "declarations": [
+      "HONEST_GAP[G10]: 排除桶∩established 仅覆盖 Phase1 报告内 runtime 信号（G8）。包外 pcap established 端点未接入（期3 pcap_survey），本 gate 对其不设防。接入 --survey 后本行消失、G9 变硬门。"
+    ],
+    "ok": false,
+    "warnings": []
+  },
+  "inventory": {
+    "candidates": [
+      {
+        "candidate_id": "p1:7b39c45c72a52e7a6bd7f34106401e5c2013a67e07d1f9885fc68dcc31429c72",
+        "collection": "leads",
+        "display_value": "100.64.0.20",
+        "evidence_id": "ev-carry-a",
+        "has_evidence": true,
+        "manifest_sha256": "5f7c872199e02f14c1ec931f0c2f47598073b7bf15ba26be3b7b945695c48566",
+        "package_id": "543460f7e7d6f8388bf1472d394c79c07be1a7671bbfa9cc10723ea724661f48",
+        "parent_id": "lead:c4f1127ac913e67ef3d303132e250888aa8a04a4eb90f5699397bdf1c10ba79c",
+        "report_relpath": "report.json",
+        "scope": "case_evidence"
+      },
+      {
+        "candidate_id": "p1:bd76188a377f8b4c8faf1916fa33340fecb18a768506c28844c9c3845f9636f1",
+        "collection": "leads",
+        "display_value": "100.64.0.20",
+        "evidence_id": "ev-carry-b",
+        "has_evidence": true,
+        "manifest_sha256": "b4d3b7b16d5d3577eac1d4ab67420f39e13a766534a2e77e4526b6946cf9785d",
+        "package_id": "6c35a94d7ff294955da3909bc0b6373b416fce1945a77ab60040246befca30d9",
+        "parent_id": "lead:c4f1127ac913e67ef3d303132e250888aa8a04a4eb90f5699397bdf1c10ba79c",
+        "report_relpath": "report.json",
+        "scope": "case_evidence"
+      },
+      {
+        "candidate_id": "p1:186000761eeff9120318a9bba915e5de6d7bb9c612b8efe00a6b6f4c3f683c62",
+        "collection": "leads",
+        "display_value": "hold.example.test",
+        "evidence_id": "ev-hold",
+        "has_evidence": true,
+        "manifest_sha256": "b330bc1642e02cb4124ea8a57273945225cbad8f5e6546dbdaf8ef270c5889c0",
+        "package_id": "7a31780ccf886876593a801a7cb73844eaeb62aeaf81346db67b19a92003a970",
+        "parent_id": "lead:c2b040a4d0fc3bc05181d1dd1c49cc816d5faec17ab37fa108153e0201bdbeaa",
+        "report_relpath": "report.json",
+        "scope": "case_evidence"
+      },
+      {
+        "candidate_id": "p1:5a09f6b24ed63e08dc8d1b5a19d7d49e007b895f2e41983f202ffe7af1ca4859",
+        "collection": "leads",
+        "display_value": "100.64.0.30",
+        "evidence_id": "ev-block-a",
+        "has_evidence": true,
+        "manifest_sha256": "361079540b0fd9bec7b780bd5f1878328953811407111e7be4e9b80b5ebd819e",
+        "package_id": "86f55d837ebe6f33b637f1f387794aca4030928bbac29278c3c0344550628ad0",
+        "parent_id": "lead:e7a42b57e8242b97aacfdf63a9c066fa6a16a4196be09b6760e8da804536dd4c",
+        "report_relpath": "report.json",
+        "scope": "case_evidence"
+      },
+      {
+        "candidate_id": "p1:fea007baf90eefc38474070c57579677aaa7c781a28a86a37840c3aa57e259fa",
+        "collection": "leads",
+        "display_value": "100.64.0.30",
+        "evidence_id": "ev-block-b",
+        "has_evidence": true,
+        "manifest_sha256": "4ff669518340dfd4fb006fac87c1dac33bb8c0ecc6cfd3e1b9c214a99bc33585",
+        "package_id": "a45e0ae824581d4626afa81cf574e5bfdf2c146d0050cb15721ca6de7947697e",
+        "parent_id": "lead:e7a42b57e8242b97aacfdf63a9c066fa6a16a4196be09b6760e8da804536dd4c",
+        "report_relpath": "report.json",
+        "scope": "case_evidence"
+      }
+    ],
+    "case_id": "CASE-GOLDEN-REPLAY",
+    "fingerprint": "2b5bbce160852c344dfc99feb5d3dd1ce6457fbaf5d9445758d8c0fbc0d24f70",
+    "issues": [],
+    "packages": [
+      {
+        "directory_name": "pkg-carry",
+        "manifest_sha256": "5f7c872199e02f14c1ec931f0c2f47598073b7bf15ba26be3b7b945695c48566",
+        "package_id": "543460f7e7d6f8388bf1472d394c79c07be1a7671bbfa9cc10723ea724661f48",
+        "report_sha256": "eefce36d44c56981c194a6e75d19dedabf19f68134fb25d47e17d2c3fe72107f"
+      },
+      {
+        "directory_name": "pkg-carry-extra",
+        "manifest_sha256": "b4d3b7b16d5d3577eac1d4ab67420f39e13a766534a2e77e4526b6946cf9785d",
+        "package_id": "6c35a94d7ff294955da3909bc0b6373b416fce1945a77ab60040246befca30d9",
+        "report_sha256": "a8999b2daf2d2d36425fbb3d026655465d9c31a7fdb7533b5c2696b78e19827a"
+      },
+      {
+        "directory_name": "pkg-hold",
+        "manifest_sha256": "b330bc1642e02cb4124ea8a57273945225cbad8f5e6546dbdaf8ef270c5889c0",
+        "package_id": "7a31780ccf886876593a801a7cb73844eaeb62aeaf81346db67b19a92003a970",
+        "report_sha256": "a2886f1441fb150b1e400726809427efb20a75679640f10bcccfe0b5b195a134"
+      },
+      {
+        "directory_name": "pkg-block",
+        "manifest_sha256": "361079540b0fd9bec7b780bd5f1878328953811407111e7be4e9b80b5ebd819e",
+        "package_id": "86f55d837ebe6f33b637f1f387794aca4030928bbac29278c3c0344550628ad0",
+        "report_sha256": "352c3defcb485294b0479f6c2c24868e245da6edd62dbe9dd2b70b9b3e551d8e"
+      },
+      {
+        "directory_name": "pkg-block-extra",
+        "manifest_sha256": "4ff669518340dfd4fb006fac87c1dac33bb8c0ecc6cfd3e1b9c214a99bc33585",
+        "package_id": "a45e0ae824581d4626afa81cf574e5bfdf2c146d0050cb15721ca6de7947697e",
+        "report_sha256": "85b63ab196d07b0d914b7c2edeaf6667d97a996f394759eb6585193969746e63"
+      }
+    ],
+    "schema_version": "1.0",
+    "stats": {
+      "blocker_count": 0,
+      "candidate_count": 5,
+      "package_count": 5
+    }
+  },
+  "materialize": {
+    "coverage": {
+      "case_id": "CASE-GOLDEN-REPLAY",
+      "decisions_fingerprint": "b8902e3250a620b8b98a700d74171008115b6c713a4cd65b7bd3637aede31c08",
+      "entries": [
+        {
+          "candidate_id": "p1:186000761eeff9120318a9bba915e5de6d7bb9c612b8efe00a6b6f4c3f683c62",
+          "disposition": "report_only",
+          "materialized_from": "decision:<decision:1>",
+          "reason": "[判决 <decision:1>] synthetic hold"
+        },
+        {
+          "candidate_id": "p1:5a09f6b24ed63e08dc8d1b5a19d7d49e007b895f2e41983f202ffe7af1ca4859",
+          "disposition": "pending_with_action",
+          "materialized_from": "skeleton",
+          "next_action": "在 queue.md 复核该 parent 并用 decide 记录判决",
+          "reason": "human 队列尚未判决（T1:runtime_contact）"
+        },
+        {
+          "candidate_id": "p1:7b39c45c72a52e7a6bd7f34106401e5c2013a67e07d1f9885fc68dcc31429c72",
+          "disposition": "pending_with_action",
+          "materialized_from": "skeleton",
+          "next_action": "在 queue.md 复核该 parent 并用 decide 记录判决",
+          "reason": "human 队列尚未判决（T1:advice=建议调证）"
+        },
+        {
+          "candidate_id": "p1:bd76188a377f8b4c8faf1916fa33340fecb18a768506c28844c9c3845f9636f1",
+          "disposition": "pending_with_action",
+          "materialized_from": "skeleton",
+          "next_action": "在 queue.md 复核该 parent 并用 decide 记录判决",
+          "reason": "human 队列尚未判决（T1:advice=建议调证）"
+        },
+        {
+          "candidate_id": "p1:fea007baf90eefc38474070c57579677aaa7c781a28a86a37840c3aa57e259fa",
+          "disposition": "pending_with_action",
+          "materialized_from": "skeleton",
+          "next_action": "在 queue.md 复核该 parent 并用 decide 记录判决",
+          "reason": "human 队列尚未判决（T1:runtime_contact）"
+        }
+      ],
+      "inventory_fingerprint": "2b5bbce160852c344dfc99feb5d3dd1ce6457fbaf5d9445758d8c0fbc0d24f70",
+      "materializer_version": "phase2-materialize/1.1",
+      "schema_version": "1.0"
+    },
+    "report": {
+      "case_id": "CASE-GOLDEN-REPLAY",
+      "decisions_fingerprint": "b8902e3250a620b8b98a700d74171008115b6c713a4cd65b7bd3637aede31c08",
+      "entry_count": 5,
+      "schema_version": "phase2-materialize/1.1",
+      "stale_decisions": [
+        "<decision:2>",
+        "<decision:3>"
+      ],
+      "warning_count": 2
+    }
+  },
+  "replay": {
+    "items": [
+      {
+        "classification": "carry_with_note",
+        "decision_id": "<decision:2>",
+        "detail": "点名成员仍在、判决沿用；新增成员将物化为 duplicate_or_merged，请确认是否应单独 accept",
+        "key": "lead:c4f1127ac913e67ef3d303132e250888aa8a04a4eb90f5699397bdf1c10ba79c",
+        "next_action": "确认后沿用，无需迁移",
+        "scope": "parent"
+      },
+      {
+        "classification": "blocked_stale",
+        "decision_id": "<decision:3>",
+        "detail": "排除判决的前提被推翻：当前证据含 runtime 信号",
+        "key": "lead:e7a42b57e8242b97aacfdf63a9c066fa6a16a4196be09b6760e8da804536dd4c",
+        "next_action": "复核新 runtime 证据后重新 decide 并 supersede",
+        "scope": "parent"
+      }
+    ],
+    "new_fingerprint": "2b5bbce160852c344dfc99feb5d3dd1ce6457fbaf5d9445758d8c0fbc0d24f70",
+    "old_fingerprint": "18f47269f7f876290da6238d23e45990ed8d363af429ce42af2a1aae2634809d",
+    "summary": {
+      "blocked_stale": 1,
+      "carry_with_note": 1,
+      "removed": 0,
+      "unchanged": 1
+    }
+  },
+  "triage": {
+    "case_id": "CASE-GOLDEN-REPLAY",
+    "inventory_fingerprint": "2b5bbce160852c344dfc99feb5d3dd1ce6457fbaf5d9445758d8c0fbc0d24f70",
+    "issues": [],
+    "parents": [
+      {
+        "bucket": "human",
+        "collection": "leads",
+        "conflicts": [],
+        "display": "hold.example.test",
+        "member_candidate_ids": [
+          "p1:186000761eeff9120318a9bba915e5de6d7bb9c612b8efe00a6b6f4c3f683c62"
+        ],
+        "merged_into": [],
+        "packages": 1,
+        "parent_id": "lead:c2b040a4d0fc3bc05181d1dd1c49cc816d5faec17ab37fa108153e0201bdbeaa",
+        "signals": [],
+        "tier": "T2:待核静态 DOMAIN conf=LOW",
+        "why": "advice=待核且三个 runtime 字段均显式为 False，进入 T2 形态组批展示"
+      },
+      {
+        "bucket": "human",
+        "collection": "leads",
+        "conflicts": [],
+        "display": "100.64.0.20",
+        "member_candidate_ids": [
+          "p1:7b39c45c72a52e7a6bd7f34106401e5c2013a67e07d1f9885fc68dcc31429c72",
+          "p1:bd76188a377f8b4c8faf1916fa33340fecb18a768506c28844c9c3845f9636f1"
+        ],
+        "merged_into": [],
+        "packages": 2,
+        "parent_id": "lead:c4f1127ac913e67ef3d303132e250888aa8a04a4eb90f5699397bdf1c10ba79c",
+        "signals": [
+          "advice=建议调证"
+        ],
+        "tier": "T1:advice=建议调证",
+        "why": "存在需逐条复核的运行时或调证信号"
+      },
+      {
+        "bucket": "human",
+        "collection": "leads",
+        "conflicts": [],
+        "display": "100.64.0.30",
+        "member_candidate_ids": [
+          "p1:5a09f6b24ed63e08dc8d1b5a19d7d49e007b895f2e41983f202ffe7af1ca4859",
+          "p1:fea007baf90eefc38474070c57579677aaa7c781a28a86a37840c3aa57e259fa"
+        ],
+        "merged_into": [],
+        "packages": 2,
+        "parent_id": "lead:e7a42b57e8242b97aacfdf63a9c066fa6a16a4196be09b6760e8da804536dd4c",
+        "signals": [
+          "runtime_contact"
+        ],
+        "tier": "T1:runtime_contact",
+        "why": "存在需逐条复核的运行时或调证信号"
+      }
+    ],
+    "schema_version": "phase2-triage/1.0",
+    "totals": {
+      "auto": 0,
+      "candidates": 5,
+      "human": 3,
+      "parents": 3,
+      "t1": 2,
+      "t2_groups": 1
+    }
+  }
+}

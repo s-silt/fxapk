@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import unicodedata
 from datetime import datetime, timezone
@@ -19,6 +18,7 @@ from apkscan.core import infra
 from apkscan.core.atomic import atomic_create_bytes
 from apkscan.core.case_identity import normalize_case_id
 from apkscan.core.evidence_scope import project_serialized_closure
+from apkscan.core.integrity import sha256_canonical_json, sha256_file
 from apkscan.core.json_contract import (
     JsonContractError,
     parse_finite_json_float,
@@ -32,7 +32,6 @@ CASE_REVIEW_SCHEMA_VERSION = "1.0"
 _REVIEW_STATUSES = frozenset({"accepted", "changes_requested"})
 _ANALYSIS_STATUSES = frozenset({"complete", "partial", "failed"})
 _CLOSURE_STATUSES = frozenset({"not_run", "complete", "partial", "failed"})
-_CHUNK = 1 << 20
 _MAX_TOOL_VERSION_LENGTH = 120
 
 
@@ -61,6 +60,7 @@ class CasePackageErrorCode(str, Enum):
     REVIEWER_REQUIRED = "reviewer_required"
     INVALID_REVIEW_STATUS = "invalid_review_status"
     REVIEW_REQUIRES_VERIFIED_INTEGRITY = "review_requires_verified_integrity"
+    REVIEW_GATE_RECEIPT_INVALID = "review_gate_receipt_invalid"
 
 
 #: 错误码 → **固定**公开文案。封闭集合：不含路径、原始 token、非法枚举原值、
@@ -97,6 +97,8 @@ _CASE_PACKAGE_MESSAGES: dict[CasePackageErrorCode, str] = {
     CasePackageErrorCode.INVALID_REVIEW_STATUS: "invalid review status",
     CasePackageErrorCode.REVIEW_REQUIRES_VERIFIED_INTEGRITY:
         "cannot review package whose integrity is not verified",
+    CasePackageErrorCode.REVIEW_GATE_RECEIPT_INVALID:
+        "phase2 gate receipt is not a PASS receipt covering this exact package",
 }
 
 
@@ -170,22 +172,12 @@ def _is_offset_timestamp(value: object) -> bool:
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(_CHUNK), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    # 名字留在本模块：校验器的测试会替换 ``case_package._sha256`` 模拟不可读附件。
+    return sha256_file(path)
 
 
 def _canonical_sha256(payload: Mapping[str, object]) -> str:
-    raw = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return sha256_canonical_json(payload)
 
 
 def _report_identity(values: Mapping[str, object]) -> tuple[str, str, str]:
@@ -398,6 +390,52 @@ def _load_object(path: Path) -> dict[str, object]:
     return value
 
 
+class ArtifactPathVerdict(str, Enum):
+    """包内相对路径落到包根之后的位置。"""
+
+    INSIDE = "inside"
+    UNSAFE = "unsafe"
+    ESCAPES = "escapes"
+    UNRESOLVED = "unresolved"
+
+
+def resolve_package_artifact_path(
+    package_dir: Path,
+    relative_path: str,
+    *,
+    strict: bool = False,
+    reject_absolute: bool = True,
+) -> tuple[ArtifactPathVerdict, Path | None]:
+    """把包内登记的相对路径解析到包根下，并判断有没有越出包根。
+
+    返回 ``(INSIDE, resolved)`` 时路径落在 ``package_dir.resolve()`` 之内。
+    ``UNSAFE`` 是空路径；``reject_absolute=True`` 时绝对路径也是 ``UNSAFE``。
+    ``ESCAPES`` 是解析后不再位于包根之内，包括 ``..`` 和指向包外的符号链接。
+    ``UNRESOLVED`` 只在 ``strict=True`` 且目标不存在或解析失败时出现。
+    ``strict=False`` 与校验器原来的 ``Path.resolve()`` 一样，解析过程中的
+    ``OSError`` 原样抛出。
+
+    ``reject_absolute`` 默认 True，这是 :func:`verify_case_package` 的口径。
+    Phase2 清单沿用原先的查找：绝对路径若 ``resolve(strict=True)`` 之后仍是包内
+    已存在文件，则接受，因此那里传 ``reject_absolute=False``。两套策略各自保持
+    原来的接受范围。
+    """
+    candidate = Path(relative_path)
+    if not relative_path or (reject_absolute and candidate.is_absolute()):
+        return ArtifactPathVerdict.UNSAFE, None
+    root = package_dir.resolve()
+    if strict:
+        try:
+            resolved = (package_dir / candidate).resolve(strict=True)
+        except OSError:
+            return ArtifactPathVerdict.UNRESOLVED, None
+    else:
+        resolved = (root / candidate).resolve()
+    if not resolved.is_relative_to(root):
+        return ArtifactPathVerdict.ESCAPES, None
+    return ArtifactPathVerdict.INSIDE, resolved
+
+
 def verify_case_package(manifest_path: str | Path) -> dict[str, object]:
     """校验 manifest 自身 package_id、路径边界和全部附件字节哈希；绝不把 READY 当完整性。"""
     manifest = Path(manifest_path)
@@ -448,7 +486,6 @@ def verify_case_package(manifest_path: str | Path) -> dict[str, object]:
     artifacts = raw_artifacts if isinstance(raw_artifacts, list) else []
     if not artifacts:
         issues.append("package has no artifacts")
-    root = manifest.parent.resolve()
     report_count = 0
     report_artifact: Path | None = None
     seen_artifact_paths: set[Path] = set()
@@ -457,12 +494,11 @@ def verify_case_package(manifest_path: str | Path) -> dict[str, object]:
             issues.append(f"artifact[{index}] is not an object")
             continue
         rel = str(item.get("path", ""))
-        candidate = Path(rel)
-        if not rel or candidate.is_absolute():
+        verdict, resolved = resolve_package_artifact_path(manifest.parent, rel)
+        if verdict is ArtifactPathVerdict.UNSAFE:
             issues.append(f"artifact[{index}] has unsafe path")
             continue
-        resolved = (root / candidate).resolve()
-        if not resolved.is_relative_to(root):
+        if verdict is not ArtifactPathVerdict.INSIDE or resolved is None:
             issues.append(f"artifact[{index}] escapes package root")
             continue
         if resolved in seen_artifact_paths:
@@ -566,8 +602,13 @@ def create_case_review(
     reviewer: str,
     status: str,
     findings: Iterable[str] = (),
+    gate_receipt: str | Path | None = None,
 ) -> dict[str, object]:
-    """Phase-2 只写独立 review，不修改 Phase-1 包；同一执行者顺序担任两角色合法。"""
+    """Phase-2 只写独立 review，不修改 Phase-1 包；同一执行者顺序担任两角色合法。
+
+    ``gate_receipt`` 必填。必须是覆盖本包精确 package_id + manifest_sha256 的 PASS
+    ``phase2 gate`` 回执，其哈希写入 review 的 ``phase2_gate``。缺回执或回执不合格即拒绝出具。
+    """
     actor = str(reviewer).strip()
     decision = str(status).strip()
     if not actor:
@@ -579,18 +620,75 @@ def create_case_review(
     if verified["status"] != "verified":
         raise CasePackageError(CasePackageErrorCode.REVIEW_REQUIRES_VERIFIED_INTEGRITY)
     package = _load_object(manifest)
+    manifest_sha256 = _sha256(manifest)
     payload: dict[str, object] = {
         "schema_version": CASE_REVIEW_SCHEMA_VERSION,
         "phase": "phase2",
         "package_id": package["package_id"],
-        "manifest_sha256": _sha256(manifest),
+        "manifest_sha256": manifest_sha256,
         "reviewer": actor,
         "status": decision,
         "findings": [str(item) for item in findings if str(item).strip()],
         "reviewed_at": _now(),
     }
+    if gate_receipt is None:
+        raise CasePackageError(CasePackageErrorCode.REVIEW_GATE_RECEIPT_INVALID)
+    from apkscan.core.phase2.link import (
+        GateReceiptError,
+        load_receipt_for_package,
+        receipt_sibling,
+    )
+
+    receipt_path = Path(gate_receipt)
+    coverage_path = receipt_sibling(receipt_path, "coverage.json")
+    decisions_path = receipt_sibling(receipt_path, "decisions.jsonl")
+    # 回执不能脱离实际门禁输入：两份当前字节都必须仍在并与回执一致。
+    if not coverage_path.is_file() or not decisions_path.is_file():
+        raise CasePackageError(CasePackageErrorCode.REVIEW_GATE_RECEIPT_INVALID)
+    try:
+        payload["phase2_gate"] = load_receipt_for_package(
+            receipt_path,
+            package_id=str(package["package_id"]),
+            manifest_sha256=manifest_sha256,
+            case_id=package.get("case_id"),
+            coverage_path=coverage_path,
+            decisions_path=decisions_path,
+        )
+    except (GateReceiptError, OSError) as exc:
+        raise CasePackageError(CasePackageErrorCode.REVIEW_GATE_RECEIPT_INVALID) from exc
     _write_new_json(Path(review_path), payload)
     return payload
+
+
+def _gate_binding_ok(
+    review: Mapping[str, object],
+    manifest_sha256: str,
+    current_receipt_sha256: str | None = None,
+) -> bool:
+    """可选 ``phase2_gate`` 一旦出现就必须形状合法；缺失即旧式未绑定 review。
+
+    stale 只有一个定义，见 :func:`apkscan.core.phase2.chain.review_stale`：
+    review 声明的 manifest 哈希与当前 manifest 字节对不上。调用方给出当前回执
+    哈希时，回执字节对不上也是 stale；没给则只核绑定形状，不把「未对账」当成 stale。
+    """
+    from apkscan.core.phase2.chain import is_sha256, review_stale
+    from apkscan.core.phase2.link import is_valid_review_binding
+
+    if not is_sha256(manifest_sha256):
+        return False
+    if review_stale(review, current_manifest_sha256=manifest_sha256):
+        return False
+    if "phase2_gate" not in review:
+        return True
+    if not is_valid_review_binding(review.get("phase2_gate")):
+        return False
+    if current_receipt_sha256 is None:
+        return True
+    return not review_stale(
+        review,
+        current_manifest_sha256=manifest_sha256,
+        current_receipt_sha256=current_receipt_sha256,
+    )
 
 
 def _review_status(
@@ -621,6 +719,7 @@ def _review_status(
         or not _is_offset_timestamp(review.get("reviewed_at"))
         or not isinstance(findings, list)
         or not all(isinstance(item, str) for item in findings)
+        or not _gate_binding_ok(review, _sha256(manifest))
     ):
         return "stale"
     decision = str(review.get("status", ""))
@@ -676,9 +775,11 @@ def project_case_status(
 __all__ = [
     "CASE_PACKAGE_SCHEMA_VERSION",
     "CASE_REVIEW_SCHEMA_VERSION",
+    "ArtifactPathVerdict",
     "CasePackageError",
     "create_case_package",
     "create_case_review",
     "project_case_status",
+    "resolve_package_artifact_path",
     "verify_case_package",
 ]

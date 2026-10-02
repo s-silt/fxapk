@@ -1434,6 +1434,8 @@ def add_report(
     report: dict,
     raw_text: str,
     case_id: str | None = None,
+    *,
+    package_id: str | None = None,
 ) -> dict:
     """Store immutable report bytes and atomically union explicit case bindings.
 
@@ -1447,6 +1449,12 @@ def add_report(
     # revision without tool/rules anchors is not reproducible.
     if case_id is not None:
         corpus_catalog.normalize_case_id(case_id)
+    if package_id is not None and (
+        not isinstance(package_id, str)
+        or len(package_id) != 64
+        or set(package_id) - set("0123456789abcdef")
+    ):
+        raise ValueError("package_id 必须是 64 位小写十六进制 SHA-256")
     raw_text.encode("utf-8")
     parsed_report = _strict_json_object(raw_text)
     if not _same_json_value(parsed_report, report):
@@ -1458,7 +1466,9 @@ def add_report(
     for component in key:
         component.encode("utf-8")
     with corpus_catalog.catalog_write_lock(corpus_dir):
-        return _add_report_locked(corpus_dir, parsed_report, raw_text, case_id=case_id)
+        return _add_report_locked(
+            corpus_dir, parsed_report, raw_text, case_id=case_id, package_id=package_id
+        )
 
 
 def _create_report_exclusive(path: Path, data: bytes) -> bool:
@@ -1478,10 +1488,12 @@ def _add_report_locked(
     raw_text: str,
     *,
     case_id: str | None,
+    package_id: str | None = None,
 ) -> dict:
     """Implementation of :func:`add_report`; caller holds catalog lock."""
     root = Path(corpus_dir)
     normalized_case = corpus_catalog.normalize_case_id(case_id) if case_id is not None else None
+    cited_package = package_id if isinstance(package_id, str) and package_id else None
     entry = manifest_entry(report)
     incoming_bytes = raw_text.encode("utf-8")
     incoming_hash = hashlib.sha256(incoming_bytes).hexdigest()
@@ -1574,12 +1586,22 @@ def _add_report_locked(
         )
         catalog_changed = catalog_changed or case_bound
     entry = corpus_catalog.materialize(entry, catalog_rows)
+    existing_packages = existing.get("package_ids") if isinstance(existing, dict) else None
+    merged = {
+        item for item in existing_packages
+        if isinstance(item, str) and len(item) == 64 and set(item) <= set("0123456789abcdef")
+    } if isinstance(existing_packages, list) else set()
+    if cited_package:
+        merged.add(cited_package)
+        entry["package_ids"] = sorted(merged)
     new_entries, added = upsert(entries, entry)
     report_path = entry["report_path"]
     base = {
         "report_path": report_path,
         "key": list(key),
         "synthetic": entry.get("sample_sha256_synthetic", False),
+        "case_id": normalized_case,
+        "package_ids": sorted(merged),
     }
 
     if added:
@@ -1690,6 +1712,23 @@ def _add_report_locked(
     else:
         if catalog_changed:
             corpus_catalog._save_catalog_unlocked(root, catalog_rows)
+        if cited_package and isinstance(existing, dict):
+            prior = existing.get("package_ids")
+            known = {
+                item for item in prior
+                if isinstance(item, str)
+                and len(item) == 64
+                and set(item) <= set("0123456789abcdef")
+            } if isinstance(prior, list) else set()
+            if cited_package not in known:
+                patched: list[dict] = []
+                for item in entries:
+                    updated = dict(item)
+                    if _key_of(updated) == key:
+                        updated["package_ids"] = sorted(known | {cited_package})
+                    patched.append(updated)
+                entries = patched
+                manifest_needs_refresh = True
         if catalog_changed or manifest_needs_refresh:
             refreshed = [corpus_catalog.materialize(item, catalog_rows) for item in entries]
             _save_manifest_unlocked(root, refreshed, catalog_rows=catalog_rows)
@@ -1741,6 +1780,7 @@ def _reindex_locked(corpus_dir: str | Path, *, allow_shrink: bool = False) -> li
     old_case: dict[tuple[str, ...], str] = {}
     old_hash: dict[tuple[str, ...], tuple[str, str | None]] = {}
     old_hash_by_path: dict[Path, str] = {}
+    old_packages: dict[tuple[str, ...], list[str]] = {}
     current_manifest = load_manifest_strict(root)
     corpus_catalog.assert_manifest_catalog_coverage(
         current_manifest, catalog_rows, root
@@ -1758,6 +1798,14 @@ def _reindex_locked(corpus_dir: str | Path, *, allow_shrink: bool = False) -> li
             )
             if resolved_old_path is not None:
                 old_hash_by_path[resolved_old_path] = recorded
+        raw_packages = e.get("package_ids")
+        if isinstance(raw_packages, list):
+            packages = sorted({
+                item for item in raw_packages
+                if isinstance(item, str) and len(item) == 64 and set(item) <= set("0123456789abcdef")
+            })
+            if packages:
+                old_packages[key] = packages
 
     entries: list[dict] = []
     seen_report_keys: dict[tuple[str, ...], Path] = {}
@@ -1826,6 +1874,9 @@ def _reindex_locked(corpus_dir: str | Path, *, allow_shrink: bool = False) -> li
             carried = old_case.get(entry_key)
             if carried:
                 entry["case_id"] = carried
+            carried_packages = old_packages.get(entry_key)
+            if carried_packages:
+                entry["package_ids"] = carried_packages
             # ★哈希照抄不重算（洗白风险见函数 docstring）；旧记录没有哈希则新记录也没有——
             #   reindex 不发明完整性基准，补录是 backfill_report_hashes 的显式职责。
             carried_hash = old_hash.get(entry_key)
@@ -2405,7 +2456,9 @@ def reconcile_inventory(
             item["reason"] = reason
         mutation_conflict: str | None = None
         if apply and status in {"missing_record", "case_unbound"}:
-            result = add_report(root, report, raw_text, case_id=case_id)
+            raw_package_id = row.get("package_id")
+            cited_package = raw_package_id if isinstance(raw_package_id, str) and raw_package_id else None
+            result = add_report(root, report, raw_text, case_id=case_id, package_id=cited_package)
             added += int(bool(result.get("added")))
             bound += int(bool(result.get("case_bound")))
             if result.get("content_conflict") or result.get("collision"):

@@ -21,6 +21,87 @@ from apkscan.core.models import (
 
 
 @pytest.fixture(autouse=True)
+def _no_external_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unit tests may use loopback fixtures, never real DNS/provider services.
+
+    Individual tests can replace these functions with fakes. Forgetting to
+    mock an HTTP/DNS call must fail locally instead of spending API quota or
+    disclosing a sample-derived identifier to a third party.
+    """
+    import ipaddress
+    import socket
+    from urllib.parse import urlsplit
+    import requests
+
+    def local_host(host: object) -> bool:
+        if host is None:
+            return True
+        if isinstance(host, bytes):
+            host = host.decode("ascii", errors="replace")
+        if host in ("localhost", "localhost."):
+            return True
+        try:
+            return ipaddress.ip_address(str(host)).is_loopback
+        except ValueError:
+            return False
+
+    def require_local(host: object) -> None:
+        if not local_host(host):
+            raise OSError("external network disabled in unit tests")
+
+    original_connect = socket.socket.connect
+    original_connect_ex = socket.socket.connect_ex
+    original_sendto = socket.socket.sendto
+    original_getaddrinfo = socket.getaddrinfo
+    original_gethostbyname = socket.gethostbyname
+    original_gethostbyname_ex = socket.gethostbyname_ex
+
+    def connect(sock, address):
+        if sock.family in (socket.AF_INET, socket.AF_INET6):
+            require_local(address[0])
+        return original_connect(sock, address)
+
+    def connect_ex(sock, address):
+        if sock.family in (socket.AF_INET, socket.AF_INET6):
+            require_local(address[0])
+        return original_connect_ex(sock, address)
+
+    def sendto(sock, data, *args):
+        if sock.family in (socket.AF_INET, socket.AF_INET6):
+            require_local(args[-1][0])
+        return original_sendto(sock, data, *args)
+
+    def getaddrinfo(host, *args, **kwargs):
+        require_local(host)
+        return original_getaddrinfo(host, *args, **kwargs)
+
+    def gethostbyname(host):
+        require_local(host)
+        return original_gethostbyname(host)
+
+    def gethostbyname_ex(host):
+        require_local(host)
+        return original_gethostbyname_ex(host)
+
+    original_request = requests.sessions.Session.request
+
+    def request(session, method, url, **kwargs):
+        # A loopback proxy can otherwise relay an external URL past socket guards.
+        target = url.decode("ascii") if isinstance(url, bytes) else str(url)
+        if not local_host(urlsplit(target).hostname):
+            raise requests.RequestException("external HTTP disabled in unit tests")
+        return original_request(session, method, url, **kwargs)
+
+    monkeypatch.setattr(requests.sessions.Session, "request", request)
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
+    monkeypatch.setattr(socket.socket, "sendto", sendto)
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    monkeypatch.setattr(socket, "gethostbyname", gethostbyname)
+    monkeypatch.setattr(socket, "gethostbyname_ex", gethostbyname_ex)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_toolchain(monkeypatch: pytest.MonkeyPatch) -> None:
     """Unit tests must not discover the developer's installed toolchain or console scripts."""
     from apkscan.core import tools

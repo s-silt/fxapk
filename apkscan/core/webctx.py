@@ -20,6 +20,8 @@
 
 from __future__ import annotations
 
+from apkscan.core.bounded_io import read_limited
+
 import logging
 import os
 import posixpath
@@ -409,7 +411,11 @@ def load_web_evidence(
             continue
 
         try:
-            data = real.read_bytes()
+            with real.open("rb") as stream:
+                data = read_limited(stream, MAX_EVIDENCE_BYTES)
+            if len(data) > MAX_EVIDENCE_BYTES:
+                errors.append(f"{rel}: 读取期间超过单份字节上限，未读入")
+                continue
         except OSError as exc:
             # 不静默跳过：读不出来是本次分析的实测缺口，必须让报告看得见。
             errors.append(f"{rel}: 读取失败（{type(exc).__name__}）")

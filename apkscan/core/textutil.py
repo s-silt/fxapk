@@ -32,15 +32,23 @@ def truncate(text: str, limit: int) -> str:
 def strip_url_tail(url: str) -> str:
     """去掉 URL 尾部常见标点噪音（句号、逗号、引号、闭合括号等）。"""
     url = url.strip()
-    # 去尾部成对/标点
-    while url and url[-1] in ".,;:'\")]}>" + "”’、，。；":
-        # 闭合括号若有对应开括号则保留
-        if url[-1] == ")" and url.count("(") > url.count(")"):
-            break
-        if url[-1] == "]" and url.count("[") > url.count("]"):
-            break
-        url = url[:-1]
-    return url
+    # Keep the original bracket rule, but avoid copying/counting the whole
+    # prefix for every trailing character (quadratic on long punctuation).
+    end = len(url)
+    bracket_counts: dict[str, tuple[int, int]] = {}
+    while end and url[end - 1] in ".,;:'\")]}>" + "”’、，。；":
+        tail = url[end - 1]
+        if tail in ")]":
+            if tail not in bracket_counts:
+                opening = "(" if tail == ")" else "["
+                bracket_counts[tail] = (url.count(opening), url.count(tail))
+            opens, closes = bracket_counts[tail]
+            if opens > closes:
+                break
+            bracket_counts[tail] = (opens, closes - 1)
+        end -= 1
+    return url if end == len(url) else url[:end]
+
 
 
 def host_from_url(url: str) -> str:

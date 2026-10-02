@@ -1,0 +1,320 @@
+{
+  "gate": {
+    "blockers": [],
+    "declarations": [
+      "HONEST_GAP[G10]: 排除桶∩established 仅覆盖 Phase1 报告内 runtime 信号（G8）。包外 pcap established 端点未接入（期3 pcap_survey），本 gate 对其不设防。接入 --survey 后本行消失、G9 变硬门。"
+    ],
+    "ok": true,
+    "warnings": []
+  },
+  "inventory": {
+    "candidates": [
+      {
+        "candidate_id": "p1:15599125e04b1803d92cddcbceeafcee7551a8ce513d49cc310fa2e8f747c8d9",
+        "collection": "endpoints",
+        "display_value": "100.64.0.1",
+        "evidence_id": "ev-endpoint",
+        "has_evidence": true,
+        "manifest_sha256": "2cf8fe52298b2942e55a0ac8dfc67b7171c37eb598c3278e89b94dbb627e2dee",
+        "package_id": "7e49956681fe997f046e9ebdbcf2524fdd0e4d726fad504467ed0d15b1f40049",
+        "parent_id": "endpoint:e4c4068dd3d108a6f0d321ab61fbfb14efd5807ec0b4b93b5e307003973ee94f",
+        "report_relpath": "report.json",
+        "scope": "case_evidence"
+      },
+      {
+        "candidate_id": "p1:391658c8123ee8c7df4039b3af2a6ccefd6dbd70ca708908c50aa4939ef960cc",
+        "collection": "findings",
+        "display_value": "synthetic finding",
+        "evidence_id": "ev-finding",
+        "has_evidence": true,
+        "manifest_sha256": "2cf8fe52298b2942e55a0ac8dfc67b7171c37eb598c3278e89b94dbb627e2dee",
+        "package_id": "7e49956681fe997f046e9ebdbcf2524fdd0e4d726fad504467ed0d15b1f40049",
+        "parent_id": "finding:d538b253af404531b262a2763836870d0d5f4e70b0ff9f13daeac7a10173ecb1",
+        "report_relpath": "report.json",
+        "scope": "case_evidence"
+      },
+      {
+        "candidate_id": "p1:8336fdcbec37a9ffb5ef13155475f0a9a956c7e27a1c16ca696a0dfe5b96e708",
+        "collection": "leads",
+        "display_value": "100.64.0.1:443/tcp",
+        "evidence_id": "ev-mirror",
+        "has_evidence": true,
+        "manifest_sha256": "2cf8fe52298b2942e55a0ac8dfc67b7171c37eb598c3278e89b94dbb627e2dee",
+        "package_id": "7e49956681fe997f046e9ebdbcf2524fdd0e4d726fad504467ed0d15b1f40049",
+        "parent_id": "lead:0dbc423fb822d0e40b290f6ce9c7a04dae50205521a653e955685807d0c4b366",
+        "report_relpath": "report.json",
+        "scope": "case_evidence"
+      },
+      {
+        "candidate_id": "p1:b50675a388096b0ed5879e2986639804736da38efa6974c3f8687996bb7328da",
+        "collection": "leads",
+        "display_value": "seen.example.test",
+        "evidence_id": "ev-seen",
+        "has_evidence": true,
+        "manifest_sha256": "2cf8fe52298b2942e55a0ac8dfc67b7171c37eb598c3278e89b94dbb627e2dee",
+        "package_id": "7e49956681fe997f046e9ebdbcf2524fdd0e4d726fad504467ed0d15b1f40049",
+        "parent_id": "lead:514547047b3462b10f73d2aa14da21f7d824fac1b9bdfba65132a3bc50c96ba0",
+        "report_relpath": "report.json",
+        "scope": "case_evidence"
+      },
+      {
+        "candidate_id": "p1:4bd2b4544112282fabf62d9687ae493453185e2c1924063c3e7582d4cd3a17f4",
+        "collection": "leads",
+        "display_value": "missing.example.test",
+        "evidence_id": "ev-missing",
+        "has_evidence": true,
+        "manifest_sha256": "2cf8fe52298b2942e55a0ac8dfc67b7171c37eb598c3278e89b94dbb627e2dee",
+        "package_id": "7e49956681fe997f046e9ebdbcf2524fdd0e4d726fad504467ed0d15b1f40049",
+        "parent_id": "lead:7ed2c6d0c6c12cfd1eb47e824258e728f5274302bb79d4bf9e8d02475927fd01",
+        "report_relpath": "report.json",
+        "scope": "case_evidence"
+      },
+      {
+        "candidate_id": "p1:f0a4053f6df7be881d6e2396b2e68e6d0d149e7ab4afa900a7621bfae9c91618",
+        "collection": "leads",
+        "display_value": "nullstate.example.test",
+        "evidence_id": "ev-null",
+        "has_evidence": true,
+        "manifest_sha256": "2cf8fe52298b2942e55a0ac8dfc67b7171c37eb598c3278e89b94dbb627e2dee",
+        "package_id": "7e49956681fe997f046e9ebdbcf2524fdd0e4d726fad504467ed0d15b1f40049",
+        "parent_id": "lead:8a89ecdf04248c3afd99cede40eba87a1ba128ade76808defd354519d9432992",
+        "report_relpath": "report.json",
+        "scope": "case_evidence"
+      },
+      {
+        "candidate_id": "p1:581a402520d77453afb50bbb3784307436e78b37e527e8afbc1a14a91f2d05c7",
+        "collection": "leads",
+        "display_value": "ledger.example.test",
+        "evidence_id": "ev-ledger",
+        "has_evidence": true,
+        "manifest_sha256": "2cf8fe52298b2942e55a0ac8dfc67b7171c37eb598c3278e89b94dbb627e2dee",
+        "package_id": "7e49956681fe997f046e9ebdbcf2524fdd0e4d726fad504467ed0d15b1f40049",
+        "parent_id": "lead:ee1e5797fa6d24f840258bc67499f8c66080d9df3e61e9d21b0e4c0f37bbcee3",
+        "report_relpath": "report.json",
+        "scope": "case_evidence"
+      }
+    ],
+    "case_id": "CASE-GOLDEN-SINGLE",
+    "fingerprint": "c66a52576b408a78d65216fa8d64112d3ff6463b97a46aef5ac0d71dea300662",
+    "issues": [],
+    "packages": [
+      {
+        "directory_name": "pkg",
+        "manifest_sha256": "2cf8fe52298b2942e55a0ac8dfc67b7171c37eb598c3278e89b94dbb627e2dee",
+        "package_id": "7e49956681fe997f046e9ebdbcf2524fdd0e4d726fad504467ed0d15b1f40049",
+        "report_sha256": "254e2577a506e68c18d391678baa2b980c464b551059b91ca2fe06f207e3a3b5"
+      }
+    ],
+    "schema_version": "1.0",
+    "stats": {
+      "blocker_count": 0,
+      "candidate_count": 7,
+      "package_count": 1
+    }
+  },
+  "materialize": {
+    "coverage": {
+      "case_id": "CASE-GOLDEN-SINGLE",
+      "decisions_fingerprint": "c52a33d62a0c78c094f2fbd8a44cf9df8fdbe32aa6658579e42be2fcd96a7087",
+      "entries": [
+        {
+          "candidate_id": "p1:15599125e04b1803d92cddcbceeafcee7551a8ce513d49cc310fa2e8f747c8d9",
+          "disposition": "duplicate_or_merged",
+          "materialized_from": "auto:triage",
+          "reason": "[auto:triage R1-MIRROR] endpoint host 规范化后与同案 lead 网络身份同值，判决挂 lead"
+        },
+        {
+          "candidate_id": "p1:391658c8123ee8c7df4039b3af2a6ccefd6dbd70ca708908c50aa4939ef960cc",
+          "disposition": "report_only",
+          "materialized_from": "auto:triage",
+          "reason": "[auto:triage finding:LOW] 分析叙事（finding）非逐值调证对象"
+        },
+        {
+          "candidate_id": "p1:4bd2b4544112282fabf62d9687ae493453185e2c1924063c3e7582d4cd3a17f4",
+          "disposition": "report_only",
+          "materialized_from": "decision:<decision:1>",
+          "reason": "[判决 <decision:1>] synthetic human review"
+        },
+        {
+          "candidate_id": "p1:581a402520d77453afb50bbb3784307436e78b37e527e8afbc1a14a91f2d05c7",
+          "disposition": "excluded_with_reason",
+          "materialized_from": "auto:triage",
+          "reason": "[auto:triage R4-LEDGER] Phase1 降档台账 advice=无需调证 downgrades=['(空)']"
+        },
+        {
+          "candidate_id": "p1:8336fdcbec37a9ffb5ef13155475f0a9a956c7e27a1c16ca696a0dfe5b96e708",
+          "disposition": "report_only",
+          "materialized_from": "decision:<decision:2>",
+          "reason": "[判决 <decision:2>] synthetic human review"
+        },
+        {
+          "candidate_id": "p1:b50675a388096b0ed5879e2986639804736da38efa6974c3f8687996bb7328da",
+          "disposition": "report_only",
+          "materialized_from": "decision:<decision:3>",
+          "reason": "[判决 <decision:3>] synthetic human review"
+        },
+        {
+          "candidate_id": "p1:f0a4053f6df7be881d6e2396b2e68e6d0d149e7ab4afa900a7621bfae9c91618",
+          "disposition": "report_only",
+          "materialized_from": "decision:<decision:4>",
+          "reason": "[判决 <decision:4>] synthetic human review"
+        }
+      ],
+      "inventory_fingerprint": "c66a52576b408a78d65216fa8d64112d3ff6463b97a46aef5ac0d71dea300662",
+      "materializer_version": "phase2-materialize/1.1",
+      "schema_version": "1.0"
+    },
+    "report": {
+      "case_id": "CASE-GOLDEN-SINGLE",
+      "decisions_fingerprint": "c52a33d62a0c78c094f2fbd8a44cf9df8fdbe32aa6658579e42be2fcd96a7087",
+      "entry_count": 7,
+      "schema_version": "phase2-materialize/1.1",
+      "stale_decisions": [],
+      "warning_count": 0
+    }
+  },
+  "replay": {
+    "items": [],
+    "new_fingerprint": "c66a52576b408a78d65216fa8d64112d3ff6463b97a46aef5ac0d71dea300662",
+    "old_fingerprint": "c66a52576b408a78d65216fa8d64112d3ff6463b97a46aef5ac0d71dea300662",
+    "summary": {
+      "blocked_stale": 0,
+      "carry_with_note": 0,
+      "removed": 0,
+      "unchanged": 4
+    }
+  },
+  "triage": {
+    "case_id": "CASE-GOLDEN-SINGLE",
+    "inventory_fingerprint": "c66a52576b408a78d65216fa8d64112d3ff6463b97a46aef5ac0d71dea300662",
+    "issues": [],
+    "parents": [
+      {
+        "bucket": "auto:duplicate_or_merged",
+        "collection": "endpoints",
+        "conflicts": [],
+        "display": "100.64.0.1",
+        "member_candidate_ids": [
+          "p1:15599125e04b1803d92cddcbceeafcee7551a8ce513d49cc310fa2e8f747c8d9"
+        ],
+        "merged_into": [
+          "lead:0dbc423fb822d0e40b290f6ce9c7a04dae50205521a653e955685807d0c4b366"
+        ],
+        "packages": 1,
+        "parent_id": "endpoint:e4c4068dd3d108a6f0d321ab61fbfb14efd5807ec0b4b93b5e307003973ee94f",
+        "signals": [
+          "R1-MIRROR"
+        ],
+        "tier": "R1-MIRROR",
+        "why": "endpoint host 规范化后与同案 lead 网络身份同值，判决挂 lead"
+      },
+      {
+        "bucket": "auto:report_only",
+        "collection": "findings",
+        "conflicts": [],
+        "display": "synthetic finding",
+        "member_candidate_ids": [
+          "p1:391658c8123ee8c7df4039b3af2a6ccefd6dbd70ca708908c50aa4939ef960cc"
+        ],
+        "merged_into": [],
+        "packages": 1,
+        "parent_id": "finding:d538b253af404531b262a2763836870d0d5f4e70b0ff9f13daeac7a10173ecb1",
+        "signals": [
+          "severity=LOW"
+        ],
+        "tier": "finding:LOW",
+        "why": "分析叙事（finding）非逐值调证对象"
+      },
+      {
+        "bucket": "human",
+        "collection": "leads",
+        "conflicts": [],
+        "display": "100.64.0.1:443/tcp",
+        "member_candidate_ids": [
+          "p1:8336fdcbec37a9ffb5ef13155475f0a9a956c7e27a1c16ca696a0dfe5b96e708"
+        ],
+        "merged_into": [],
+        "packages": 1,
+        "parent_id": "lead:0dbc423fb822d0e40b290f6ce9c7a04dae50205521a653e955685807d0c4b366",
+        "signals": [],
+        "tier": "T2:待核静态 IP conf=LOW",
+        "why": "advice=待核且三个 runtime 字段均显式为 False，进入 T2 形态组批展示"
+      },
+      {
+        "bucket": "human",
+        "collection": "leads",
+        "conflicts": [],
+        "display": "seen.example.test",
+        "member_candidate_ids": [
+          "p1:b50675a388096b0ed5879e2986639804736da38efa6974c3f8687996bb7328da"
+        ],
+        "merged_into": [],
+        "packages": 1,
+        "parent_id": "lead:514547047b3462b10f73d2aa14da21f7d824fac1b9bdfba65132a3bc50c96ba0",
+        "signals": [
+          "runtime_seen"
+        ],
+        "tier": "T1:runtime_seen",
+        "why": "存在需逐条复核的运行时或调证信号"
+      },
+      {
+        "bucket": "human",
+        "collection": "leads",
+        "conflicts": [],
+        "display": "missing.example.test",
+        "member_candidate_ids": [
+          "p1:4bd2b4544112282fabf62d9687ae493453185e2c1924063c3e7582d4cd3a17f4"
+        ],
+        "merged_into": [],
+        "packages": 1,
+        "parent_id": "lead:7ed2c6d0c6c12cfd1eb47e824258e728f5274302bb79d4bf9e8d02475927fd01",
+        "signals": [
+          "runtime字段不完整"
+        ],
+        "tier": "T1:runtime字段不完整",
+        "why": "advice=无需调证，但三个 runtime 字段未全部显式为 False，禁止自动排除"
+      },
+      {
+        "bucket": "human",
+        "collection": "leads",
+        "conflicts": [],
+        "display": "nullstate.example.test",
+        "member_candidate_ids": [
+          "p1:f0a4053f6df7be881d6e2396b2e68e6d0d149e7ab4afa900a7621bfae9c91618"
+        ],
+        "merged_into": [],
+        "packages": 1,
+        "parent_id": "lead:8a89ecdf04248c3afd99cede40eba87a1ba128ade76808defd354519d9432992",
+        "signals": [
+          "runtime字段不完整"
+        ],
+        "tier": "T1:runtime字段不完整",
+        "why": "advice=无需调证，但三个 runtime 字段未全部显式为 False，禁止自动排除"
+      },
+      {
+        "bucket": "auto:excluded_with_reason",
+        "collection": "leads",
+        "conflicts": [],
+        "display": "ledger.example.test",
+        "member_candidate_ids": [
+          "p1:581a402520d77453afb50bbb3784307436e78b37e527e8afbc1a14a91f2d05c7"
+        ],
+        "merged_into": [],
+        "packages": 1,
+        "parent_id": "lead:ee1e5797fa6d24f840258bc67499f8c66080d9df3e61e9d21b0e4c0f37bbcee3",
+        "signals": [],
+        "tier": "R4-LEDGER",
+        "why": "Phase1 降档台账 advice=无需调证 downgrades=['(空)']"
+      }
+    ],
+    "schema_version": "phase2-triage/1.0",
+    "totals": {
+      "auto": 3,
+      "candidates": 7,
+      "human": 4,
+      "parents": 7,
+      "t1": 3,
+      "t2_groups": 1
+    }
+  }
+}

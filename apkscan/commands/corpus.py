@@ -28,6 +28,7 @@ from apkscan.core import linkage_ml as _linkage_ml
 from apkscan.core import linkage_review as _linkage_review
 from apkscan.core import linkage_training as _linkage_training
 from apkscan.core.atomic import atomic_create_bytes
+from apkscan.core.integrity import sha256_file, sha256_hex
 from apkscan.core.json_contract import (
     parse_finite_json_float as _parse_finite_float,
     reject_nonfinite_json_constant as _reject_json_constant,
@@ -35,6 +36,38 @@ from apkscan.core.json_contract import (
 from apkscan.core.redact import safe_exception_diagnostic, safe_exception_text, warn_unredacted_agent_output
 
 logger = logging.getLogger(__name__)
+
+
+def _package_binding(package: Path | None, explicit_case: str) -> tuple[str, str | None, str | None]:
+    """从已验包取 case_id 与 package_id。没有包就沿用调用方手写的案件号。
+
+    包里的 case_id 与 ``--case`` 冲突即拒绝，不挑一个。
+    """
+    if package is None:
+        return explicit_case, None, None
+    from apkscan.core.case_package import verify_case_package
+
+    checked = verify_case_package(package)
+    if checked.get("status") != "verified":
+        raise typer.BadParameter("case-package 未通过完整性校验", param_hint="--package")
+    package_id = checked.get("package_id")
+    if not isinstance(package_id, str) or len(package_id) != 64:
+        raise typer.BadParameter("验包结果没有合法 package_id", param_hint="--package")
+    payload = _json.loads(package.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or not isinstance(payload.get("case_id"), str):
+        raise typer.BadParameter("case-package 没有 case_id", param_hint="--package")
+    bound = payload["case_id"]
+    if explicit_case and explicit_case != bound:
+        raise typer.BadParameter(
+            "与 case-package 的 case_id 冲突，拒绝入库", param_hint="--case"
+        )
+    report_hashes = [
+        item.get("sha256") for item in payload.get("artifacts", [])
+        if isinstance(item, dict) and item.get("kind") == "report"
+    ]
+    if len(report_hashes) != 1 or not isinstance(report_hashes[0], str):
+        raise typer.BadParameter("case-package 缺少唯一报告哈希", param_hint="--package")
+    return bound, package_id, report_hashes[0]
 
 
 corpus_app = typer.Typer(
@@ -119,10 +152,28 @@ def _query_entries(
 def corpus_add(
     reports: list[Path] = typer.Argument(..., exists=True, help="一个或多个 report.json 文件。"),
     case: str = typer.Option("", "--case", help="显式案件关联；同一报告可重复入库绑定多个案件。"),
+    package: Path | None = typer.Option(
+        None,
+        "--package",
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="已验签的 case-package.json。给出后 case_id 与 package_id 取自该包，不再手写 --case。",
+    ),
     corpus: str = typer.Option("", "--corpus", help=f"语料库根目录（默认取环境变量 {ENV_CORPUS}）。"),
 ) -> None:
     """把一份/多份 report.json 入库（原样存证 + 登记索引，按样本×版本×规则幂等去重）。"""
     root = resolve_corpus(corpus)
+    bound_case, bound_package, bound_report_hash = _package_binding(package, case)
+    if bound_report_hash is not None:
+        # 先核完所有输入再写库；允许跨机器的逐字节副本，不靠文件名冒充包成员。
+        try:
+            if any(sha256_file(path) != bound_report_hash for path in reports):
+                raise typer.BadParameter("输入报告不属于指定包", param_hint="--package")
+        except OSError as exc:
+            raise typer.BadParameter("无法核对输入报告哈希", param_hint="--package") from exc
+    if bound_case:
+        case = bound_case
     if not case:
         typer.echo(
             "警告：未指定 --case，本次入库无案件归属（串案维度将退化为纯样本维度）。", err=True
@@ -132,7 +183,10 @@ def corpus_add(
     for rp in reports:
         try:
             # read_bytes().decode 而非 read_text：后者会把 CRLF 归一为 LF，破坏原样存证的字节保真。
-            raw = rp.read_bytes().decode("utf-8")
+            raw_bytes = rp.read_bytes()
+            if bound_report_hash is not None and sha256_hex(raw_bytes) != bound_report_hash:
+                raise ValueError("report_changed_after_package_check")
+            raw = raw_bytes.decode("utf-8")
             # NaN/Infinity 不是 RFC-8259 JSON；入库必须拒绝，不能归一成 None 后继续存证。
             report = _json.loads(
                 raw,
@@ -150,7 +204,9 @@ def corpus_add(
             failed += 1
             continue
         try:
-            result = _corpus.add_report(root, report, raw, case_id=case or None)
+            result = _corpus.add_report(
+                root, report, raw, case_id=case or None, package_id=bound_package
+            )
         except (
             OSError,
             TimeoutError,

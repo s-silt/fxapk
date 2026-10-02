@@ -26,7 +26,7 @@ from apkscan.core.enrichment import (
     _http_status_code,
     safe_error_type as _safe_error_type,
 )
-from apkscan.core.closure import SOURCE_STATUSES
+from apkscan.core.source_status import SOURCE_STATUSES
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.redact import scrub_pii, scrub_urls
 from apkscan.core.registry import BaseEnricher
@@ -862,7 +862,7 @@ class _PassiveLookupEnricher(BaseEnricher, ABC):
                     data={"_source_status": "no_record", "_error_type": error_type, "_via": via},
                 )
             self._consecutive_failures += 1
-            if error_type in {"authentication_failed", "permission_denied", "quota_insufficient", "rate_limited", "provider_response_error"} or self._consecutive_failures >= 3:
+            if error_type in {"authentication_failed", "permission_denied", "quota_insufficient", "rate_limited", "local_rate_limit", "provider_response_error"} or self._consecutive_failures >= 3:
                 self._blocked_error = error_type
                 self._blocked_targets = 0
             return EnrichmentResult(
@@ -1168,6 +1168,18 @@ class HunterPassiveEnricher(_PassiveLookupEnricher):
     #: hunter.qianxin.com 须境内直连——经境外代理返 403（用户跑工具常开境外代理）。强制绕代理直连。
     #: 它是境内定人最有用的源（ICP 备案 company + 机房城市），不能被代理静默打断。
     bypass_system_proxy = True
+
+    def enrich(self, ep: Endpoint) -> EnrichmentResult:
+        # Optional local billing policy. No documented free-only API switch has
+        # been verified, so fail closed before reading credentials or querying.
+        # Legacy provider-default behavior remains unchanged when not selected.
+        mode = os.environ.get("FXAPK_HUNTER_CREDIT_MODE", "provider_default").strip()
+        if mode != "provider_default":
+            reason = "free_only_billing_unverified" if mode == "free_only" else "invalid_billing_policy"
+            self.receipt = {"network_attempted": False, "reason": reason}
+            return EnrichmentResult(provider=self.name, ok=True,
+                                    data={"_source_status": "disabled", "_error_type": reason})
+        return super().enrich(ep)
 
     def _lookup(self, endpoint: Endpoint, credential: str) -> object:
         query = f'ip="{endpoint.value}"' if endpoint.kind == "ip" else f'domain="{endpoint.value}"'

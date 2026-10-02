@@ -59,7 +59,10 @@ def test_baseline_file_is_wellformed_and_nonvacuous() -> None:
     #   116 → 115：stage_status 接进 digest 的 _integrity——analysis_status 为
     #              partial/failed 时读它取失败阶段名写进 warning 并令 reliable=False。
     #              此前它只写不读：报告自称"部分完成"、摘要却说"可靠"（路线 D1-a）。
-    assert total == 115, f"三类存量应守恒为 115，实际 {total}"
+    #   115 → 111：capture_sequence 按 webview_signals / webview_signal_count 选采集轮；
+    #              auto 读取 runtime_decrypt_stats 写逐轮解密账本；merge 读取
+    #              runtime_decrypted 累积跨轮状态（仅内部消费，不等于出口已覆盖）。
+    assert total == 111, f"三类存量应守恒为 111，实际 {total}"
     for category, group in baseline.items():
         for key, files in group.items():
             assert key, f"{category} 基线里有空键"

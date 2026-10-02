@@ -9,6 +9,7 @@ from apkscan import cli
 from apkscan.commands import case as case_command
 from apkscan.core.models import Report
 from apkscan.report import json as report_json
+from tests.test_case_package import _passing_receipt
 
 runner = CliRunner()
 
@@ -189,6 +190,7 @@ def test_case_package_status_and_review_cli_keep_phase_boundary(tmp_path) -> Non
             str(package_path),
         ],
     )
+    receipt_path = _passing_receipt(tmp_path, package_path)
     reviewed = runner.invoke(
         cli.app,
         [
@@ -201,6 +203,8 @@ def test_case_package_status_and_review_cli_keep_phase_boundary(tmp_path) -> Non
             "accepted",
             "--out",
             str(review_path),
+            "--gate-receipt",
+            str(receipt_path),
         ],
     )
     shown = runner.invoke(
@@ -214,3 +218,28 @@ def test_case_package_status_and_review_cli_keep_phase_boundary(tmp_path) -> Non
     status = json.loads(shown.stdout)
     assert status["package_integrity"] == "verified"
     assert status["review"] == "accepted"
+
+
+def test_case_review_refuses_missing_gate_receipt(tmp_path) -> None:  # noqa: ANN001
+    report_path = _write_report(tmp_path)
+    package_path = tmp_path / "case-package.json"
+    review_path = tmp_path / "case-review.json"
+    packaged = runner.invoke(
+        cli.app,
+        [
+            "case", "package", str(report_path),
+            "--case-id", "case-001", "--producer", "analyst-a", "--out", str(package_path),
+        ],
+    )
+    assert packaged.exit_code == 0, packaged.output
+
+    reviewed = runner.invoke(
+        cli.app,
+        [
+            "case", "review", str(package_path),
+            "--reviewer", "analyst-a", "--status", "accepted", "--out", str(review_path),
+        ],
+    )
+
+    assert reviewed.exit_code == 2
+    assert not review_path.exists()

@@ -187,14 +187,17 @@ class RevisionProvenance:
     evidence_surface: str | None
     record_state: str
     report_bytes_sha256: str | None
+    #: Phase1 不可变包身份。旧 manifest 没有这个字段时为空，不从目录名补。
+    package_ids: tuple[str, ...] = ()
 
-    def summary(self) -> dict[str, str | None]:
+    def summary(self) -> dict[str, str | None | list[str]]:
         return {
             "tool_version": self.tool_version,
             "ruleset_digest": self.ruleset_digest,
             "evidence_surface": self.evidence_surface,
             "record_state": self.record_state,
             "report_bytes_sha256": self.report_bytes_sha256,
+            "package_ids": list(self.package_ids),
         }
 
 
@@ -404,12 +407,18 @@ def _revision_provenance(entry: dict[str, Any]) -> RevisionProvenance:
         if raw_state in {_RECORD_ACTIVE, _RECORD_QUARANTINED}
         else _RECORD_UNKNOWN
     )
+    raw_packages = entry.get("package_ids")
+    package_ids = tuple(sorted({
+        item for item in raw_packages
+        if isinstance(item, str) and _sha256(item) == item
+    })) if isinstance(raw_packages, list) else ()
     return RevisionProvenance(
         tool_version=_clean_text(entry.get("tool_version"), max_length=512),
         ruleset_digest=_clean_text(entry.get("ruleset_digest"), max_length=512),
         evidence_surface=_clean_text(entry.get("evidence_surface"), max_length=64),
         record_state=record_state,
         report_bytes_sha256=_sha256(entry.get("report_bytes_sha256")),
+        package_ids=package_ids,
     )
 
 
@@ -420,6 +429,7 @@ def _provenance_sort_key(item: RevisionProvenance) -> tuple[str, ...]:
         item.evidence_surface,
         item.record_state,
         item.report_bytes_sha256,
+        ",".join(item.package_ids),
     ))
 
 
@@ -848,11 +858,6 @@ def _broad_shared_anchors(
                     frozenset(sample.config_sha256).union(sample.config_urls),
                 )
 
-    def _related(left_id: str, right_id: str) -> bool:
-        left_keys = subject_keys[left_id]
-        right_keys = subject_keys[right_id]
-        return bool(left_keys[0] & right_keys[0]) or bool(left_keys[1] & right_keys[1])
-
     # 同一批样本常共享多枚锚（SDK 栈就是一组 .so 同进同出），按成员集缓存簇统计。
     stats_cache: dict[frozenset[str], tuple[int, int, int]] = {}
 
@@ -870,11 +875,19 @@ def _broad_shared_anchors(
                 item = parent[item]
             return item
 
-        for left_id, right_id in combinations(ordered, 2):
-            if _related(left_id, right_id):
-                left_root, right_root = _find(left_id), _find(right_id)
-                if left_root != right_root:
-                    parent[left_root] = right_root
+        # A shared subject key induces a clique. Connecting each member to
+        # one representative preserves exactly the same connected components
+        # without comparing every pair in a large shared-library bucket.
+        # Keep signing and configuration namespaces distinct, as before.
+        representatives: dict[tuple[int, str], str] = {}
+        for member in ordered:
+            for family, values in enumerate(subject_keys[member]):
+                for value in values:
+                    subject_key = (family, value)
+                    representative = representatives.setdefault(subject_key, member)
+                    left_root, right_root = _find(member), _find(representative)
+                    if left_root != right_root:
+                        parent[left_root] = right_root
         groups = len({_find(member) for member in ordered})
         cases: set[str] = set()
         for member in ordered:
@@ -906,7 +919,7 @@ def _intersection(left: tuple[str, ...], right: tuple[str, ...]) -> list[str]:
 
 def _render_provenance(
     revisions: Iterable[RevisionProvenance],
-) -> list[dict[str, str | None]]:
+) -> list[dict[str, str | None | list[str]]]:
     return [
         revision.summary()
         for revision in sorted(set(revisions), key=_provenance_sort_key)
@@ -1348,6 +1361,11 @@ def rank_link_candidates(
             {
                 "sample_sha256": sample.sample_sha256,
                 "case_ids": list(sample.case_ids),
+                "package_ids": sorted({
+                    package_id
+                    for revision in sample.revisions
+                    for package_id in revision.package_ids
+                }),
                 "relation": (
                     "possible_duplicate_report"
                     if sample.synthetic_identity

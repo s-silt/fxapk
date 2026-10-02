@@ -1,0 +1,944 @@
+schema_version: fxapk-provider-research/1.0
+verified_on: '2026-10-02'
+methodology:
+  quota_policy: Only official numeric claims are populated; no account entitlements or live service health verified.
+  free_policy: Free means price/access category, not legal applicability to institutional, government or commercial
+    forensic use.
+  attribution_policy: Never merge resource holder, BGP origin network, hosting provider, edge/CDN provider and service
+    operator. ASN names, shared IPs, ICP or certificates alone cannot establish service operator.
+  independence_policy: Variants and products in the same source family are not independent corroboration.
+  runtime_scope: This catalog grants no permission to query case indicators, upload APKs, publish URLs, request
+    on-demand scans, buy credits, or create API keys.
+  default_for_unknown: Treat undocumented entitlement/license status as unknown; never infer allowed from a configured
+    credential or adapter.
+  observational_limits: Retain retrieved_at separately from observed_at. Empty search or no_record is not exculpatory
+    evidence. BGP, CDN, hosting, shared-IP and CT relationships change over time.
+sources:
+- provider_key: rdap
+  name: Domain RDAP
+  access_tiers:
+  - tier: free_no_registration
+    evidence_status: confirmed
+    registration_required: false
+    api_access: public_registration_query
+    quota_value: null
+  api_access_caveat: Use the IANA bootstrap registry and authoritative RDAP referral; not every ccTLD has the same
+    deployment or access policy. Public registrant data may be redacted.
+  capabilities:
+  - domain_registration
+  - registrar
+  - registration_events
+  - nameservers
+  - registration_entity_if_public
+  usage_terms_caveat: Public registration data is not proof of the present service operator; follow each registry
+    terms, redaction and rate limits.
+  official_urls:
+  - https://www.icann.org/rdap/ # leak-scan: allow ICANN 官方 RDAP 说明，供目录权限与注册信息能力核验
+  - https://www.rfc-editor.org/rfc/rfc9537.html # leak-scan: allow RFC 9537 官方规范，说明登记信息的隐藏与删减
+  - https://www.iana.org/assignments/rdap-dns/rdap-dns.xhtml
+  verified_on: '2026-10-02'
+  quota_value: null
+  account_live_health: not_checked
+  source_family: registration
+  evidence_roles:
+  - domain_registration
+  institutional_use_status: review_registry_terms
+- provider_key: ip_rdap
+  name: RIR IP RDAP
+  access_tiers:
+  - tier: free_no_registration
+    evidence_status: confirmed
+    registration_required: false
+    api_access: public_registration_query
+    quota_value: null
+  api_access_caveat: Query the responsible RIR using authoritative bootstrap/referral. No universal public quota
+    or SLA established in this research.
+  capabilities:
+  - ip_resource_registration
+  - netname
+  - allocation_range
+  - registered_holder
+  - abuse_contact_if_public
+  usage_terms_caveat: Registered resource holder is different from BGP origin, hosting provider, tenant and service
+    operator. Respect RIR acceptable-use and rate limits.
+  official_urls:
+  - https://www.arin.net/resources/registry/whois/rdap/ # leak-scan: allow ARIN 官方公共 RDAP 文档，供 IP 登记服务说明
+  - https://www.iana.org/assignments/rdap-ipv4/rdap-ipv4.xhtml
+  - https://www.iana.org/assignments/rdap-ipv6/rdap-ipv6.xhtml
+  verified_on: '2026-10-02'
+  quota_value: null
+  account_live_health: not_checked
+  source_family: registration
+  evidence_roles:
+  - resource_holder
+  institutional_use_status: review_rir_terms
+- provider_key: ripestat_bgp
+  name: RIPEstat Data API
+  access_tiers:
+  - tier: free_no_registration
+    evidence_status: confirmed
+    registration_required: false
+    api_access: public_api
+    quota_value:
+      max_concurrency_per_ip: 8
+      regular_daily_request_registration_threshold: 1000
+  api_access_caveat: Public Data API; RIPE requests registration/contact when regularly exceeding 1000 requests/day,
+    not a hard daily free quota. Check per-endpoint methodology, supported version and history availability.
+  capabilities:
+  - bgp_origin_asns
+  - announced_prefixes
+  - routing_history
+  - ris_visibility
+  - rir_context
+  usage_terms_caveat: Terms apply; operational/public data has no implied evidential guarantee. Present BGP origin
+    is not historical control or service operator.
+  official_urls:
+  - https://stat.ripe.net/docs/data-api/ripestat-data-api
+  - https://www.ripe.net/about-us/legal/ripestat-service-terms-and-conditions
+  verified_on: '2026-10-02'
+  quota_value:
+  - tier: free_no_registration
+    value:
+      max_concurrency_per_ip: 8
+      regular_daily_request_registration_threshold: 1000
+  account_live_health: not_checked
+  source_family: ripe_ris
+  evidence_roles:
+  - origin_network
+  institutional_use_status: review_service_terms
+- provider_key: cymru
+  name: Team Cymru IP to ASN
+  access_tiers:
+  - tier: free_no_registration
+    evidence_status: confirmed
+    registration_required: false
+    api_access: dns_or_whois
+    quota_value: null
+  api_access_caveat: Community mapping over DNS/WHOIS; prefer DNS and batching for repeated use. Registry country
+    is not physical geolocation; mappings and upstream peers may be incomplete.
+  capabilities:
+  - bgp_origin_asns
+  - bgp_prefix
+  - asn_registry_description
+  - registry_country
+  - allocation_date
+  usage_terms_caveat: Officially free community service; bulk runs should be a few thousand addresses and repeated
+    large queries should use DNS. BGP and registry labels do not identify a tenant or service operator.
+  official_urls:
+  - https://www.team-cymru.com/ip-asn-mapping # leak-scan: allow Team Cymru 官方 IP ASN 映射服务说明
+  verified_on: '2026-10-02'
+  quota_value: null
+  account_live_health: not_checked
+  source_family: cymru
+  evidence_roles:
+  - origin_network
+  institutional_use_status: review_community_service_terms
+- provider_key: dns_records
+  name: DNS / public DoH
+  access_tiers:
+  - tier: free_no_registration
+    evidence_status: confirmed
+    registration_required: false
+    api_access: public_resolver_no_authentication
+    quota_value: null
+  api_access_caveat: Cloudflare public DoH requires no authentication. DNS JSON has no standardized schema; prefer
+    DNS wire format for critical parsers. DNS answers depend on resolver, query time and geography.
+  capabilities:
+  - current_dns_rrsets
+  - a_aaaa
+  - cname_chain
+  - mx
+  - ns
+  - txt
+  - dnssec_status
+  - ttl
+  usage_terms_caveat: Queries disclose names to the resolver and can trigger recursive authoritative DNS traffic;
+    private/sensitive names require approved disclosure. DNS records establish observations and delivery hints,
+    not ownership.
+  official_urls:
+  - https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/make-api-requests/ # leak-scan: allow Cloudflare 官方 DoH 请求格式说明
+  - https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/make-api-requests/dns-json/ # leak-scan: allow Cloudflare 官方 DNS JSON 格式与协议差异说明
+  verified_on: '2026-10-02'
+  quota_value: null
+  account_live_health: not_checked
+  source_family: dns
+  evidence_roles:
+  - edge_provider_candidate
+  - hosting_delivery_candidate
+  institutional_use_status: review_resolver_terms
+- provider_key: certs
+  name: Certificate Transparency / crt.sh
+  access_tiers:
+  - tier: free_no_registration
+    evidence_status: confirmed_public_ct_unconfirmed_crtsh_sla
+    registration_required: false
+    api_access: public_ct_data
+    quota_value: null
+  api_access_caveat: CT logs are publicly queryable. crt.sh is a public CT search frontend; this research did not
+    establish a contractual JSON API quota or SLA. Do not promise complete, current or stable search results.
+  capabilities:
+  - certificate_names
+  - san_domain_candidates
+  - issuer
+  - validity
+  - certificate_history
+  usage_terms_caveat: Certificate names are association candidates; shared/wildcard certificates and CDN issuance
+    do not prove common control. Avoid automatic connections to discovered names.
+  official_urls:
+  - https://certificate.transparency.dev/howctworks/
+  - https://crt.sh/
+  - https://github.com/crtsh
+  verified_on: '2026-10-02'
+  quota_value: null
+  account_live_health: not_checked
+  source_family: certificate_transparency
+  evidence_roles:
+  - certificate_association
+  institutional_use_status: review_crtsh_terms
+- provider_key: asn
+  name: ip-api.com
+  access_tiers:
+  - tier: free_no_registration
+    evidence_status: confirmed
+    registration_required: false
+    api_access: http_only_free_json
+    quota_value:
+      requests_per_minute_per_ip: 45
+  - tier: paid_api
+    evidence_status: confirmed
+    registration_required: true
+    api_access: https_and_commercial_support
+    quota_value: null
+  api_access_caveat: Free JSON is HTTP only and not authenticated in transit. Rate-limit headers X-Rl/X-Ttl must
+    be obeyed. The existing adapter calls this source; do not call it an authoritative ASN ownership service.
+  capabilities:
+  - asn_label
+  - isp_label
+  - organization_label
+  - geolocation_estimate
+  - hosting_flag
+  - proxy_flag
+  usage_terms_caveat: Official free endpoint prohibits commercial use. Institutional/government forensic suitability
+    is not established merely by being free; review the intended use and purchase terms. For sensitive case data
+    prefer HTTPS authoritative sources.
+  official_urls:
+  - https://ip-api.com/docs/api:json
+  verified_on: '2026-10-02'
+  quota_value:
+  - tier: free_no_registration
+    value:
+      requests_per_minute_per_ip: 45
+  account_live_health: not_checked
+  source_family: ip_api
+  evidence_roles:
+  - origin_network_candidate
+  - hosting_delivery_candidate
+  institutional_use_status: free_use_requires_license_review
+- provider_key: internetdb
+  name: Shodan InternetDB
+  access_tiers:
+  - tier: free_no_registration
+    evidence_status: confirmed
+    registration_required: false
+    api_access: keyless_lookup
+    quota_value: null
+  - tier: paid_enterprise_license
+    evidence_status: confirmed
+    registration_required: true
+    api_access: commercial_license
+    quota_value: null
+  api_access_caveat: No account/key is required; compact IP lookup has no banners and is updated weekly, not live
+    service verification. CVEs are inferred from service metadata.
+  capabilities:
+  - observed_ports
+  - cpes
+  - hostnames
+  - tags
+  - potential_cves
+  usage_terms_caveat: Officially free for non-commercial use; monetized/product use requires an enterprise license.
+    Government/institutional suitability still needs license review. InternetDB and Shodan are the same source family.
+  official_urls:
+  - https://internetdb.shodan.io/
+  - https://blog.shodan.io/introducing-the-internetdb-api/
+  verified_on: '2026-10-02'
+  quota_value: null
+  account_live_health: not_checked
+  source_family: shodan
+  evidence_roles:
+  - service_observation
+  institutional_use_status: free_use_requires_license_review
+- provider_key: fofa
+  name: FOFA
+  access_tiers:
+  - tier: registered_free
+    evidence_status: confirmed
+    registration_required: true
+    api_access: not_confirmed_for_free_search_api
+    quota_value:
+      ui_queries_per_month: 300
+      ui_records_per_month: 3000
+  - tier: paid_membership_personal
+    evidence_status: confirmed
+    registration_required: true
+    api_access: search_api_and_host_aggregation
+    quota_value:
+      search_api_exportable_fields: 37
+      search_api_requests_per_second: 1
+  - tier: paid_membership_professional
+    evidence_status: confirmed
+    registration_required: true
+    api_access: search_api_host_aggregation_and_stats
+    quota_value:
+      search_api_exportable_fields: 41
+      search_api_requests_per_second: 1
+  - tier: paid_membership_business
+    evidence_status: confirmed
+    registration_required: true
+    api_access: search_api_host_aggregation_and_stats
+    quota_value:
+      search_api_exportable_fields: 48
+      search_api_requests_per_second: 2
+  - tier: paid_enterprise
+    evidence_status: confirmed
+    registration_required: true
+    api_access: contract_and_custom_quota
+    quota_value: null
+  - tier: paid_points
+    evidence_status: confirmed
+    registration_required: true
+    api_access: endpoint_permission_must_be_checked
+    quota_value: null
+  api_access_caveat: Free UI quotas are not free search API entitlement. Paid field/endpoint limits differ by plan;
+    verify account scope, including profile/host variants.
+  capabilities:
+  - indexed_service_search
+  - banners
+  - http_title
+  - certificate_data
+  - asn_label
+  - icp_clues
+  usage_terms_caveat: Free is non-commercial; Business/Enterprise expressly allow commercial use. Personal/Professional
+    and F-points do not establish institutional/commercial rights. FOFA variants are one family.
+  official_urls:
+  - https://fofa.info/vip
+  - https://fofa.info/api
+  - https://github.com/FofaInfo/GoFOFA/blob/main/USER_GUIDE.md
+  verified_on: '2026-10-02'
+  quota_value:
+  - tier: registered_free
+    value:
+      ui_queries_per_month: 300
+      ui_records_per_month: 3000
+  - tier: paid_membership_personal
+    value:
+      search_api_exportable_fields: 37
+      search_api_requests_per_second: 1
+  - tier: paid_membership_professional
+    value:
+      search_api_exportable_fields: 41
+      search_api_requests_per_second: 1
+  - tier: paid_membership_business
+    value:
+      search_api_exportable_fields: 48
+      search_api_requests_per_second: 2
+  account_live_health: not_checked
+  source_family: fofa
+  evidence_roles:
+  - service_observation
+  - hosting_delivery_candidate
+  institutional_use_status: business_or_enterprise_explicit_commercial_permission
+- provider_key: fofa_profile
+  name: FOFA
+  access_tiers:
+  - tier: registered_free
+    evidence_status: confirmed
+    registration_required: true
+    api_access: not_confirmed_for_free_search_api
+    quota_value:
+      ui_queries_per_month: 300
+      ui_records_per_month: 3000
+  - tier: paid_membership_personal
+    evidence_status: confirmed
+    registration_required: true
+    api_access: search_api_and_host_aggregation
+    quota_value:
+      search_api_exportable_fields: 37
+      search_api_requests_per_second: 1
+  - tier: paid_membership_professional
+    evidence_status: confirmed
+    registration_required: true
+    api_access: search_api_host_aggregation_and_stats
+    quota_value:
+      search_api_exportable_fields: 41
+      search_api_requests_per_second: 1
+  - tier: paid_membership_business
+    evidence_status: confirmed
+    registration_required: true
+    api_access: search_api_host_aggregation_and_stats
+    quota_value:
+      search_api_exportable_fields: 48
+      search_api_requests_per_second: 2
+  - tier: paid_enterprise
+    evidence_status: confirmed
+    registration_required: true
+    api_access: contract_and_custom_quota
+    quota_value: null
+  - tier: paid_points
+    evidence_status: confirmed
+    registration_required: true
+    api_access: endpoint_permission_must_be_checked
+    quota_value: null
+  api_access_caveat: Free UI quotas are not free search API entitlement. Paid field/endpoint limits differ by plan;
+    verify account scope, including profile/host variants.
+  capabilities:
+  - extended_indexed_resource_fields
+  - cloud_asset_labels
+  - service_fingerprints
+  usage_terms_caveat: Free is non-commercial; Business/Enterprise expressly allow commercial use. Personal/Professional
+    and F-points do not establish institutional/commercial rights. FOFA variants are one family.
+  official_urls:
+  - https://fofa.info/vip
+  - https://fofa.info/api
+  - https://github.com/FofaInfo/GoFOFA/blob/main/USER_GUIDE.md
+  verified_on: '2026-10-02'
+  quota_value:
+  - tier: registered_free
+    value:
+      ui_queries_per_month: 300
+      ui_records_per_month: 3000
+  - tier: paid_membership_personal
+    value:
+      search_api_exportable_fields: 37
+      search_api_requests_per_second: 1
+  - tier: paid_membership_professional
+    value:
+      search_api_exportable_fields: 41
+      search_api_requests_per_second: 1
+  - tier: paid_membership_business
+    value:
+      search_api_exportable_fields: 48
+      search_api_requests_per_second: 2
+  account_live_health: not_checked
+  source_family: fofa
+  evidence_roles:
+  - service_observation
+  - hosting_delivery_candidate
+  institutional_use_status: business_or_enterprise_explicit_commercial_permission
+- provider_key: fofa_host
+  name: FOFA
+  access_tiers:
+  - tier: registered_free
+    evidence_status: confirmed
+    registration_required: true
+    api_access: not_confirmed_for_free_search_api
+    quota_value:
+      ui_queries_per_month: 300
+      ui_records_per_month: 3000
+  - tier: paid_membership_personal
+    evidence_status: confirmed
+    registration_required: true
+    api_access: search_api_and_host_aggregation
+    quota_value:
+      search_api_exportable_fields: 37
+      search_api_requests_per_second: 1
+  - tier: paid_membership_professional
+    evidence_status: confirmed
+    registration_required: true
+    api_access: search_api_host_aggregation_and_stats
+    quota_value:
+      search_api_exportable_fields: 41
+      search_api_requests_per_second: 1
+  - tier: paid_membership_business
+    evidence_status: confirmed
+    registration_required: true
+    api_access: search_api_host_aggregation_and_stats
+    quota_value:
+      search_api_exportable_fields: 48
+      search_api_requests_per_second: 2
+  - tier: paid_enterprise
+    evidence_status: confirmed
+    registration_required: true
+    api_access: contract_and_custom_quota
+    quota_value: null
+  - tier: paid_points
+    evidence_status: confirmed
+    registration_required: true
+    api_access: endpoint_permission_must_be_checked
+    quota_value: null
+  api_access_caveat: Free UI quotas are not free search API entitlement. Paid field/endpoint limits differ by plan;
+    verify account scope, including profile/host variants.
+  capabilities:
+  - host_aggregation
+  - protocols
+  - ports
+  - products
+  - asn_label
+  usage_terms_caveat: Free is non-commercial; Business/Enterprise expressly allow commercial use. Personal/Professional
+    and F-points do not establish institutional/commercial rights. FOFA variants are one family.
+  official_urls:
+  - https://fofa.info/vip
+  - https://fofa.info/api
+  - https://github.com/FofaInfo/GoFOFA/blob/main/USER_GUIDE.md
+  verified_on: '2026-10-02'
+  quota_value:
+  - tier: registered_free
+    value:
+      ui_queries_per_month: 300
+      ui_records_per_month: 3000
+  - tier: paid_membership_personal
+    value:
+      search_api_exportable_fields: 37
+      search_api_requests_per_second: 1
+  - tier: paid_membership_professional
+    value:
+      search_api_exportable_fields: 41
+      search_api_requests_per_second: 1
+  - tier: paid_membership_business
+    value:
+      search_api_exportable_fields: 48
+      search_api_requests_per_second: 2
+  account_live_health: not_checked
+  source_family: fofa
+  evidence_roles:
+  - service_observation
+  - hosting_delivery_candidate
+  institutional_use_status: business_or_enterprise_explicit_commercial_permission
+- provider_key: shodan
+  name: Shodan full API
+  access_tiers:
+  - tier: registered_academic_edu
+    evidence_status: official_document_confirmed_not_account_verified
+    registration_required: true
+    api_access: academic_api_download_without_api_vuln_filter
+    quota_value:
+      advertised_query_credits_per_month: 100
+      advertised_scan_credits_per_month: 100
+      advertised_monitoring_ips: 16
+    caveat: Advertised limits are not account balance or authorization for active scans; institutional-use license must be reviewed separately.
+  - tier: registered_free
+    evidence_status: confirmed
+    registration_required: true
+    api_access: free_key_not_full_entitlement
+    quota_value: null
+  - tier: paid_membership
+    evidence_status: confirmed
+    registration_required: true
+    api_access: ip_lookup_search_dns_history
+    quota_value: null
+  - tier: paid_api_subscription
+    evidence_status: confirmed
+    registration_required: true
+    api_access: plan_specific_credits
+    quota_value: null
+  - tier: paid_enterprise
+    evidence_status: confirmed
+    registration_required: true
+    api_access: bulk_and_streaming
+    quota_value: null
+  api_access_caveat: API key creation is free; current feature tour marks IP Lookup API and API Search as Membership
+    required. Query and scan credits are separate. Filters and later result pages consume query credits; no purchased
+    plan/account was checked.
+  capabilities:
+  - full_ip_service_banners
+  - host_search
+  - historical_service_data
+  - dns_database
+  - tls_certificate
+  - potential_cves
+  usage_terms_caveat: License and product scope must cover institutional/commercial use. Existing-index lookup must
+    remain separate from on-demand scanning; scan API is an active network action. Same source family as InternetDB.
+  official_urls:
+  - https://help.shodan.io/the-basics/academic-upgrade
+  - https://developer.shodan.io/api/requirements
+  - https://account.shodan.io/billing/tour
+  - https://help.shodan.io/the-basics/credit-types-explained
+  - https://developer.shodan.io/api
+  verified_on: '2026-10-02'
+  quota_value: null
+  account_live_health: not_checked
+  source_family: shodan
+  evidence_roles:
+  - service_observation
+  - hosting_delivery_candidate
+  institutional_use_status: review_license_and_api_plan
+- provider_key: censys
+  name: Censys Platform API
+  access_tiers:
+  - tier: registered_free
+    evidence_status: confirmed
+    registration_required: true
+    api_access: host_web_property_certificate_lookup_only
+    quota_value:
+      credits_per_month: 100
+  - tier: paid_starter_credits
+    evidence_status: confirmed
+    registration_required: true
+    api_access: global_data_and_collections_except_live_rescan
+    quota_value: null
+  - tier: paid_search_or_core
+    evidence_status: confirmed
+    registration_required: true
+    api_access: global_data_and_collections_plan_specific
+    quota_value: null
+  api_access_caveat: Current API v3 Free only permits lookup/bulk-lookup endpoints, not search. Starter/Search/Core
+    organization needs API Access role; new PAT/base URL differs from Legacy Search. Credits must not be equated
+    with endpoint permission.
+  capabilities:
+  - host_lookup
+  - web_property_lookup
+  - certificate_lookup
+  - paid_asset_search
+  - service_tls_http_context
+  - plan_specific_history
+  usage_terms_caveat: API scripted access is governed by Censys Terms; verify organization plan, data rights and
+    rate limits. Infrastructure observations are not tenant/operator proof.
+  official_urls:
+  - https://docs.censys.com/reference/get-started # leak-scan: allow Censys 官方 API 入门与访问角色文档
+  - https://docs.censys.com/docs/platform-credits-free-starter # leak-scan: allow Censys 官方 Free Starter 积分与套餐说明
+  - https://censys.com/resources/pricing # leak-scan: allow Censys 官方套餐定价资料，不涉及实际购买
+  verified_on: '2026-10-02'
+  quota_value:
+  - tier: registered_free
+    value:
+      credits_per_month: 100
+  account_live_health: not_checked
+  source_family: censys
+  evidence_roles:
+  - service_observation
+  - hosting_delivery_candidate
+  api_base: https://api.platform.censys.io/v3/global/
+  institutional_use_status: review_license_and_organization_scope
+- provider_key: virustotal
+  name: VirusTotal
+  access_tiers:
+  - tier: registered_public_free
+    evidence_status: confirmed
+    registration_required: true
+    api_access: basic_lookup_and_public_endpoints
+    quota_value:
+      requests_per_minute: 4
+  - tier: paid_premium_api
+    evidence_status: confirmed
+    registration_required: true
+    api_access: premium_endpoints_and_contract_quota
+    quota_value: null
+  api_access_caveat: Public/Premium endpoints differ. Public search is not a general Intelligence/hunting API; advanced
+    relations/behavior/hunting may require Premium. This research confirms 4/min, but leaves daily/monthly quotas
+    unknown unless account evidence establishes them.
+  capabilities:
+  - file_hash_reputation
+  - domain_ip_url_reputation
+  - analysis_verdicts
+  - relationship_context_if_entitled
+  - premium_behavior_and_hunting
+  usage_terms_caveat: Official Public API scope is non-commercial/academic; commercial or government use belongs
+    to Private/Premium agreements. Hash/report lookup must be separate from uploading case APKs or submitting URLs.
+  official_urls:
+  - https://docs.virustotal.com/docs/difference-public-private
+  - https://docs.virustotal.com/docs/api-overview
+  - https://docs.virustotal.com/reference/public-vs-premium-api
+  - https://docs.virustotal.com/docs/quota-consumption
+  verified_on: '2026-10-02'
+  quota_value:
+  - tier: registered_public_free
+    value:
+      requests_per_minute: 4
+  account_live_health: not_checked
+  source_family: virustotal
+  evidence_roles:
+  - threat_intelligence
+  institutional_use_status: public_api_not_for_commercial_or_government
+- provider_key: urlscan
+  name: urlscan.io
+  access_tiers:
+  - tier: free_no_registration_limited
+    evidence_status: confirmed
+    registration_required: false
+    api_access: minor_unauthenticated_read_quotas
+    quota_value: null
+  - tier: registered_free
+    evidence_status: confirmed
+    registration_required: true
+    api_access: search_and_results_api
+    quota_value:
+      search_requests_per_day: 1000
+  - tier: commercial_trial
+    evidence_status: confirmed
+    registration_required: true
+    api_access: sales_arranged_time_limited_trial
+    quota_value: null
+  - tier: paid_api_or_pro
+    evidence_status: confirmed
+    registration_required: true
+    api_access: plan_specific_api_and_threat_hunting
+    quota_value: null
+  api_access_caveat: Use API key for useful quota. Quotas differ by action and minute/hour/day and may apply to
+    both UI and API; query current quota endpoint before a job. Anonymous access is limited, not a reliable unrestricted
+    free tier.
+  capabilities:
+  - archived_url_search
+  - historical_http_requests
+  - redirects
+  - page_title
+  - tls_context
+  - contacted_ips_domains
+  - screenshots_if_available
+  usage_terms_caveat: Search/retrieve existing scans is passive with respect to target HTTP; submitting a scan makes
+    urlscan browse the URL and can publish case data. Public is public; Unlisted is visible to vetted Pro customers;
+    Private is restricted. OEM/product use needs separate review.
+  official_urls:
+  - https://urlscan.io/docs/api/
+  - https://urlscan.io/pricing/
+  - https://urlscan.io/docs/search/
+  - https://docs.urlscan.io/pages/faq
+  verified_on: '2026-10-02'
+  quota_value:
+  - tier: registered_free
+    value:
+      search_requests_per_day: 1000
+  account_live_health: not_checked
+  source_family: urlscan
+  evidence_roles:
+  - archived_web_observation
+  - threat_intelligence
+  institutional_use_status: review_oem_and_data_handling_terms
+- provider_key: hunter
+  name: Qianxin Hunter / 鹰图
+  access_tiers:
+  - tier: registered_free_or_trial
+    evidence_status: unverified_current_entitlement
+    registration_required: true
+    api_access: unknown
+    quota_value: null
+  - tier: paid_membership_or_api_package
+    evidence_status: unverified_current_entitlement
+    registration_required: true
+    api_access: unknown
+    quota_value: null
+  api_access_caveat: Official Hunter help-center entry could not be read in this research (site returned 403 in
+    the cloud browser). No current gift amount, API entitlement, pricing or concurrency can be confirmed; leave
+    unknown. Do not substitute an unrelated email-finding product with the same name.
+  capabilities:
+  - indexed_network_asset_search
+  - service_protocol_fingerprints
+  - web_title
+  - icp_clues
+  - asn_and_isp_labels
+  usage_terms_caveat: Review current Qianxin Hunter terms and institution/commercial/API rights before case use.
+    Indexed asset/ASN/ICP labels do not identify the service operator.
+  official_urls:
+  - https://hunter.qianxin.com/home/helpcenter
+  - https://www.qianxin.com/support/product
+  verified_on: '2026-10-02'
+  quota_value: null
+  account_live_health: not_checked
+  source_family: hunter
+  evidence_roles:
+  - service_observation
+  - hosting_delivery_candidate
+  institutional_use_status: unknown_terms_and_entitlement
+  research_status: current_tiers_not_publicly_verified
+- provider_key: quake
+  name: 360 Quake
+  access_tiers:
+  - tier: registered_account
+    evidence_status: confirmed_token_auth_only
+    registration_required: true
+    api_access: token_authenticated_index_query
+    quota_value: null
+  - tier: registered_free_or_trial
+    evidence_status: unverified_current_gift
+    registration_required: true
+    api_access: quota_and_plan_dependent
+    quota_value: null
+  - tier: paid_membership_or_points
+    evidence_status: unverified_current_pricing
+    registration_required: true
+    api_access: quota_and_plan_dependent
+    quota_value: null
+  api_access_caveat: Official Quake MCP repository documents account API Token and point consumption consistent
+    with API usage. Current recurring/free gift amount and paid package entitlement were not confirmed; older SDK/example
+    balances or expired campaigns are not price evidence.
+  capabilities:
+  - indexed_asset_search
+  - service_banners
+  - asset_aggregation
+  - time_filtered_observations
+  - product_fingerprints
+  usage_terms_caveat: Use only legally authorized asset research; official MCP repository prohibits unauthorized
+    access/scanning and harmful activity. Buying points is not permission to probe case infrastructure. Institutional
+    data-use rights remain to be checked.
+  official_urls:
+  - https://github.com/360-Quake/quake-mcp/blob/main/README_CN.md
+  - https://quake.360.net/quake/#/help
+  verified_on: '2026-10-02'
+  quota_value: null
+  account_live_health: not_checked
+  source_family: quake
+  evidence_roles:
+  - service_observation
+  - hosting_delivery_candidate
+  institutional_use_status: review_current_contract
+  research_status: api_auth_and_point_model_confirmed_quota_unknown
+- provider_key: zoomeye
+  name: ZoomEye
+  access_tiers:
+  - tier: registered_free_points
+    evidence_status: confirmed_free_balance_model
+    registration_required: true
+    api_access: api_key_search_subject_to_fields_and_balance
+    quota_value: null
+  - tier: paid_points
+    evidence_status: confirmed_paid_balance_model
+    registration_required: true
+    api_access: field_and_plan_specific
+    quota_value: null
+  - tier: paid_membership
+    evidence_status: confirmed_plan_gating
+    registration_required: true
+    api_access: field_and_plan_specific
+    quota_value: null
+  api_access_caveat: Current official v2 SDK uses API-KEY header and POST /v2/search; /v2/userinfo reports plan
+    and separate general/paid point balances. No fixed free-point gift verified. Some fields/options are plan-gated;
+    SDK sample balances and max page size are not free quotas.
+  capabilities:
+  - indexed_asset_search
+  - http_and_protocol_banners
+  - tls_fingerprints
+  - service_fingerprints
+  - domain_ip_asn_pivots
+  - observation_time
+  usage_terms_caveat: Confirm current license and institution/commercial rights. Search labels and certificates
+    only support candidates; not proof of control. Do not create/reset a key merely for public documentation research.
+  official_urls:
+  - https://www.zoomeye.ai/agent/doc
+  - https://github.com/zoomeye-ai/ZoomEye-python
+  - https://github.com/zoomeye-ai/ZoomEye-python/blob/master/api.md
+  verified_on: '2026-10-02'
+  quota_value: null
+  account_live_health: not_checked
+  source_family: zoomeye
+  evidence_roles:
+  - service_observation
+  - hosting_delivery_candidate
+  api_base: https://api.zoomeye.ai/v2/
+  institutional_use_status: review_current_license
+  research_status: auth_and_balance_model_confirmed_numeric_quota_unknown
+  official_document_updated_on: '2024-12-04'
+- provider_key: daydaymap
+  name: DayDayMap
+  access_tiers:
+  - tier: registered_account
+    evidence_status: documented_registered_users_or_above
+    registration_required: true
+    api_access: registered_user_api_key_query
+    quota_value: null
+  - tier: registered_free_or_trial
+    evidence_status: unverified_current_gift
+    registration_required: true
+    api_access: unknown_quota
+    quota_value: null
+  - tier: paid_membership
+    evidence_status: documented_data_access_gating
+    registration_required: true
+    api_access: current_plan_specific_unknown
+    quota_value: null
+  api_access_caveat: Official API-auth page states registered users and above may use API-KEY and POST /api/v1/raymap/search/all.
+    Gifted quota and current pricing were not verified; account API access does not guarantee every field.
+  capabilities:
+  - indexed_asset_search
+  - web_fingerprints
+  - icp_clues
+  - asn_and_network_labels
+  usage_terms_caveat: Review institution/commercial license; masked/limited IPv6 or restricted data must not be
+    treated as absent. Both adapters belong to one source family.
+  official_urls:
+  - https://www.daydaymap.com/help/document?type=api-auth
+  - https://www.daydaymap.com/help/document?type=question-coding
+  verified_on: '2026-10-02'
+  quota_value: null
+  account_live_health: not_checked
+  source_family: daydaymap
+  evidence_roles:
+  - service_observation
+  - hosting_delivery_candidate
+  institutional_use_status: review_current_license
+  research_status: registered_api_right_documented_quota_unknown
+  official_document_updated_on: '2024-04-08'
+- provider_key: daydaymap_profile
+  name: DayDayMap
+  access_tiers:
+  - tier: registered_account
+    evidence_status: documented_registered_users_or_above
+    registration_required: true
+    api_access: registered_user_api_key_query
+    quota_value: null
+  - tier: registered_free_or_trial
+    evidence_status: unverified_current_gift
+    registration_required: true
+    api_access: unknown_quota
+    quota_value: null
+  - tier: paid_membership
+    evidence_status: documented_data_access_gating
+    registration_required: true
+    api_access: current_plan_specific_unknown
+    quota_value: null
+  api_access_caveat: Official API-auth page states registered users and above may use API-KEY and POST /api/v1/raymap/search/all.
+    Gifted quota and current pricing were not verified; account API access does not guarantee every field.
+  capabilities:
+  - extended_indexed_resource_fields
+  - cloud_or_cdn_hints
+  - certificate_related_fields_if_entitled
+  usage_terms_caveat: Review institution/commercial license; masked/limited IPv6 or restricted data must not be
+    treated as absent. Both adapters belong to one source family.
+  official_urls:
+  - https://www.daydaymap.com/help/document?type=api-auth
+  - https://www.daydaymap.com/help/document?type=question-coding
+  verified_on: '2026-10-02'
+  quota_value: null
+  account_live_health: not_checked
+  source_family: daydaymap
+  evidence_roles:
+  - service_observation
+  - hosting_delivery_candidate
+  institutional_use_status: review_current_license
+  research_status: registered_api_right_documented_quota_unknown
+  official_document_updated_on: '2024-04-08'
+- provider_key: otx
+  name: LevelBlue AlienVault OTX
+  access_tiers:
+  - tier: registered_free
+    evidence_status: confirmed
+    registration_required: true
+    api_access: api_key_indicator_lookup_and_pulse_api
+    quota_value: null
+  - tier: paid_commercial_licensing
+    evidence_status: unknown_no_api_package_confirmed
+    registration_required: true
+    api_access: unknown
+    quota_value: null
+  api_access_caveat: Official SDK documents API-key indicator/pulse access. No current fixed API quota or paid OTX
+    API package confirmed. A paid USM/security product is not proof of broader OTX API entitlement.
+  capabilities:
+  - community_indicator_reputation
+  - ip_domain_url_hash_context
+  - pulse_references
+  - passive_dns_if_available
+  - related_indicators
+  usage_terms_caveat: OTX EULA says free to end users for non-commercial use; institution/government/commercial
+    suitability requires license review despite broad product marketing. Community pulse claims are leads with possible
+    false positives. Do not upload cases or create pulses automatically.
+  official_urls:
+  - https://otx.alienvault.com/api/
+  - https://github.com/AlienVault-OTX/OTX-Python-SDK
+  - https://www.levelblue.com/legal/otx-eula-terms # leak-scan: allow LevelBlue 官方 OTX 用途许可条款
+  - https://levelblue.com/open-threat-exchange # leak-scan: allow LevelBlue 官方 OTX 免费社区产品介绍，不替代用途许可
+  verified_on: '2026-10-02'
+  quota_value: null
+  account_live_health: not_checked
+  source_family: otx
+  evidence_roles:
+  - threat_intelligence
+  - passive_dns_candidate
+  institutional_use_status: free_use_requires_license_review
+  research_status: free_api_documented_license_restricted_quota_unknown

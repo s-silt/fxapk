@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, is_dataclass
+from dataclasses import dataclass, field, is_dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -28,15 +28,15 @@ _RETREAT_THRESHOLD_PACKED = 2  # 加固样本反检测秒退风险高 → 更早
 
 # 铁律永远第一条——这是治"几小时零产出"的行为约束。
 _DIRECTIVES = (
-    "【铁律·先读】抓包总预算 ≤60min，到点就交已有结果——『零产出』不可接受（带外 pcap 起手必有接入节点）。"
+    "【铁律·先读】抓包总预算 ≤60min，到点就交已有结果——『零产出』不可接受（带外 pcap 优先留证，零流量必须说明原因）。"
     "四条：① floor 优先（先带外保底再谈明文）；② 每步带时间盒；③ frida 秒退 fail-fast（累计 ≤2~3 次就弃明文、退 floor、别死磕）；"
     "④ 达停止门即停（见末条），不追求『全都要』。口径：个人安全研究 / 授权取证，措辞用『去 pin / 流量解析 / 离线解密自有抓包』。"
 )
 _BASELINE = (
     "【第0步·保底·≤15min】不碰 App 本体先带外抓一份 pcap：设备端 PCAPdroid（免 root VpnService、按 UID 只抓目标 App）"
     "或 网关 / 旁路由 tcpdump → `fxapk pcap-leads capture.pcap --into report.json`。"
-    "✅停止门：拿到 ≥1 个接入节点 IP:port + SNI + DNS = 案子已有可调证产出（穿透真源站锚点）。"
-    "反 frida / pinning / native 协议对带外 pcap 全无效化——所以它永远先跑、永远有结果。"
+    "✅停止门：拿到 ≥1 个接入节点 IP:port + SNI + DNS = 案子已有可调证产出（待核验的基础设施线索，不能直接认定源站或运营者）。"
+    "带外 pcap 优先，但仍可能漏采、未触发业务或无法归因；不能保证拿到接入节点或源站。"
 )
 _PINNING = (
     "【TLS pinning·≤30min·达不到就退】mitm 起了但证书告警 / 0 流量：按存活率从高到低试，任一成即停："
@@ -47,7 +47,7 @@ _PINNING = (
 _STOP = (
     "【停止门·够了就停，别空耗】任一达成即停，不追求『全都要』：① 接入节点 ≥1 → floor 达成、案子可调证；"
     "② 明文经 crypto_recipe 离线解 或 tls-keylog 解出 → 明文达成；③ frida 秒退累计 ≥3 或总时长超 60min → 弃明文、"
-    "把 floor 结果回灌交活。**记住：带外 pcap 已保证你不会『零产出』，明文是上限不是底线。**"
+    "把 floor 结果回灌交活。**记住：带外 pcap 不保证有流量；缺采、归因不足和缺少双向业务载荷必须显式保留。**"
 )
 _MERGE = (
     "【回灌串案】所有路线产出统一 `--into` 同一 report.json：`fxapk probe-leads probe.log --into report.json "
@@ -158,6 +158,7 @@ class CaptureDecision:
     total_budget_sec: int  # 抓包总预算（铁律 ≤60min）。
     signals: dict[str, bool]  # 原始信号，供上层透明展示 / 调试。
     reasons: tuple[str, ...]  # 决策依据（人读）。
+    evidence_readiness: dict[str, Any] = field(default_factory=dict)
 
 
 def decide_capture(report: Any) -> CaptureDecision:
@@ -199,7 +200,39 @@ def decide_capture(report: Any) -> CaptureDecision:
             "anti_frida": s.anti_frida,
         },
         reasons=tuple(reasons),
+        evidence_readiness=capture_evidence_readiness(report),
     )
+
+
+
+def capture_evidence_readiness(report: Any) -> dict[str, Any]:
+    """Make acquisition gaps machine-readable without claiming capture success."""
+    from apkscan.core.closure.gates import evaluate_capture_quality
+    rep = _as_dict(report)
+    meta = _as_dict(rep.get("meta"))
+    quality = meta.get("capture_quality", meta.get("runtime_capture_quality"))
+    if not isinstance(quality, dict) or not quality:
+        return {"status": "not_supplied", "gaps": ["capture_quality_missing"],
+                "operator_identity_verified": False}
+    try:
+        result = evaluate_capture_quality(quality)
+    except (TypeError, ValueError, OverflowError):
+        return {"status": "invalid_quality", "gaps": ["capture_quality_invalid"],
+                "operator_identity_verified": False}
+    gaps = []
+    if not result["target_attributed_count"]:
+        gaps.append("target_app_attribution_missing")
+    if not result["bidirectional_target_count"]:
+        gaps.append("same_target_bidirectional_payload_missing")
+    if result["runtime_variant"] == "modified-runtime":
+        gaps.append("behavior_modified_observation_not_independent")
+    if quality.get("capture_apk_identity_which") in (None, "", "unknown"):
+        gaps.append("running_apk_identity_requires_confirmation")
+    if result["floor_parse_status"] not in ("ok", "absent", ""):
+        gaps.append("packet_capture_parse_incomplete")
+    return {"status": "needs_review" if gaps else "quality_checks_satisfied",
+            "dynamic_quality_status": result["dynamic_status"], "gaps": gaps,
+            "operator_identity_verified": False}
 
 
 def plan_capture(report: Any) -> list[str]:

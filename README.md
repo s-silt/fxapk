@@ -175,9 +175,10 @@ AI 看你给的是什么，自己挑命令：
 |---|---|
 | 分析一个 APK（**默认联网**查归属） | `fxapk analyze app.apk --out out` |
 | 同上，但**不联网**（样本里的域名 / IP 不外发） | `fxapk analyze app.apk --offline --out out` |
+| 授权联网留存 HTTP 跳转与响应（不执行 JS；私有 HAR） | `fxapk capture-web https://example.invalid/start --authorized --out private/capture.har` |
 | 分析存下来的网页文件 | `fxapk analyze-web <目录> --out out` |
 | 批量跑一个文件夹 | `fxapk batch <目录>` |
-| 一把梭：体检→静态→脱壳→抓包→合并（接了 root 机才跑动态；没设备就跳过，静态报告照出）。**会改设备**，只在专用测试机上跑 | `fxapk auto app.apk --out out` |
+| 一把梭：体检→静态→脱壳重分析→PCAP→通用探针→定向采集→合并（接了 root 机才跑动态；没设备就跳过，静态报告照出）。**会改设备**，只在专用测试机上跑 | `fxapk auto app.apk --out out` |
 | 同上，当验收门用（退出码 0/5/6 = complete/partial/failed） | `fxapk auto app.apk --out out --strict-case` |
 | 给已有报告补齐多源查询与五层归属 | `fxapk case close out/app.json` |
 | 固化 Phase-1 证据包（报告和附件须在输出目录树内） | `fxapk case package out/app.json --case-id CASE-001 --producer analyst --out out/case-package.json` |
@@ -365,14 +366,37 @@ git config core.hooksPath .githooks
 ## 合规边界
 
 仅用于授权范围内的安全研究与分析。工具只做静态、动态分析和信息提取，不提供任何针对第三方的攻击、
-漏洞利用或主动探测能力。
+漏洞利用或未授权主动探测能力。授权 HTTP 留存入口 capture-web 需要显式 --authorized，
+且仅在指定目标与额外主机允许清单内执行有界 GET。
 
 默认被动：境外服务器只做被动归属（RDAP / WHOIS / DNS / ASN / 证书透明度），对目标零主动流量。少数
 确实要向目标发请求的能力（比如去取样本自己引用的那个配置对象）默认关着，只有显式加
 `--mode authorized-active` 才启用。脱壳只针对样本自身，在你自己的授权分析机上进行。
+
+详见 [联网采集、三轮动态与报告前材料工作流](PRE-REPORT-WORKFLOW.md)。
 
 请在合法授权范围内使用。
 
 ## License
 
 [MIT](LICENSE)
+
+
+### 报告前材料的工程入口
+
+分层、兼容边界及尚待真实环境验收的项目见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+以下命令不替代原始证据核验；脱敏视图也不是完整隐私清洗证明。
+
+```bash
+# 只读查询来源产品目录，不发起第三方查询、不证明账户权益
+fxapk case source-catalog --category all
+# 已有报告生成服务商角色复核队列，默认不输出目标真值
+fxapk case provider-plan private/report.json --out private/provider-plan.json
+# 在一个案件目录的子包目录内固化报告；附件资格由操作者显式指定
+fxapk case package private/demo/pkg/report.json --case-id DEMO --producer analyst --out private/demo/pkg/case-package.json
+# 串联已验包和报告前材料；coverage/clues 可配对提供，缺失会保留缺口
+fxapk case prepare-materials private/demo --out private/demo/pre-report.json
+```
+
+`review_required`、`partial` 和 `failed` 均不是完成确认。三轮抓包分别留档；某一轮成功不能清除
+另一轮失败，也不能跨轮拼接计数后宣称完整。真机兼容性与服务商账户实测须单独验收。

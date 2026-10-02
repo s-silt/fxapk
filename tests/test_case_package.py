@@ -488,6 +488,72 @@ def test_package_verifier_rejects_recomputed_path_escape(tmp_path) -> None:  # n
     assert any("escapes package root" in issue for issue in result["issues"])
 
 
+def test_resolve_package_artifact_path_keeps_both_absolute_path_policies(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    package.mkdir()
+    report = package / "report.json"
+    report.write_text("{}", encoding="utf-8")
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}", encoding="utf-8")
+
+    verdict, resolved = case_package.resolve_package_artifact_path(package, "report.json")
+    assert verdict is case_package.ArtifactPathVerdict.INSIDE
+    assert resolved == report.resolve()
+
+    unsafe, _ = case_package.resolve_package_artifact_path(package, str(report.resolve()))
+    assert unsafe is case_package.ArtifactPathVerdict.UNSAFE
+
+    escapes, _ = case_package.resolve_package_artifact_path(package, "../outside.json")
+    assert escapes is case_package.ArtifactPathVerdict.ESCAPES
+
+    missing, _ = case_package.resolve_package_artifact_path(
+        package, "missing.json", strict=True,
+    )
+    assert missing is case_package.ArtifactPathVerdict.UNRESOLVED
+
+    absolute_inside, resolved_abs = case_package.resolve_package_artifact_path(
+        package, str(report.resolve()), strict=True, reject_absolute=False,
+    )
+    assert absolute_inside is case_package.ArtifactPathVerdict.INSIDE
+    assert resolved_abs == report.resolve()
+    absolute_outside, _ = case_package.resolve_package_artifact_path(
+        package, str(outside.resolve()), strict=True, reject_absolute=False,
+    )
+    assert absolute_outside is case_package.ArtifactPathVerdict.ESCAPES
+
+
+def _passing_receipt(tmp_path: Path, manifest: Path) -> Path:
+    """合成一张覆盖该包的 PASS 回执。只给复核绑定测试用，不代表跑过 phase2 gate。"""
+    import hashlib
+
+    package = json.loads(manifest.read_text(encoding="utf-8"))
+    coverage = tmp_path / "coverage.json"
+    decisions = tmp_path / "decisions.jsonl"
+    coverage.write_bytes(b'{"entries":[]}\n')
+    decisions.write_bytes(b"")
+    coverage_sha256 = hashlib.sha256(coverage.read_bytes()).hexdigest()
+    receipt = {
+        "schema_version": "phase2-gate-receipt/1.0",
+        "case_id": package["case_id"],
+        "result": "PASS",
+        "inventory_fingerprint": "c" * 64,
+        "packages": [{
+            "package_id": package["package_id"],
+            "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+            "directory_name": "pkg",
+        }],
+        "coverage_sha256": coverage_sha256,
+        "decisions_sha256": hashlib.sha256(decisions.read_bytes()).hexdigest(),
+        "blocker_count": 0,
+        "warning_count": 0,
+        "previous_link": "coverage",
+        "previous_sha256": coverage_sha256,
+    }
+    path = tmp_path / "gate-receipt.json"
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+    return path
+
+
 def test_review_is_bound_to_exact_package_and_becomes_stale_after_change(tmp_path) -> None:  # noqa: ANN001
     report = _write_report(tmp_path, closure="partial")
     manifest = tmp_path / "case-package.json"
@@ -499,6 +565,7 @@ def test_review_is_bound_to_exact_package_and_becomes_stale_after_change(tmp_pat
         reviewer="same-analyst",
         status="accepted",
         findings=["reviewed"],
+        gate_receipt=_passing_receipt(tmp_path, manifest),
     )
 
     before = project_case_status(manifest, review)
@@ -962,6 +1029,7 @@ def test_review_required_fields_are_validated_before_projecting_status(
         reviewer="reviewer-a",
         status="accepted",
         findings=["checked"],
+        gate_receipt=_passing_receipt(tmp_path, manifest),
     )
     payload = json.loads(review.read_text(encoding="utf-8"))
     payload[field] = bad_value
@@ -970,3 +1038,24 @@ def test_review_required_fields_are_validated_before_projecting_status(
     status = project_case_status(manifest, review)
 
     assert status["review"] == "stale"
+
+
+def test_old_review_without_gate_binding_still_projects_accepted(tmp_path) -> None:  # noqa: ANN001
+    """P7 只强制新出具。旧 review 没有 phase2_gate 时，其余形状合法仍投影 accepted。"""
+    report = _write_report(tmp_path)
+    manifest = tmp_path / "case-package.json"
+    review = tmp_path / "case-review.json"
+    create_case_package(report, manifest, case_id="case-001", producer="analyst-a")
+    create_case_review(
+        manifest,
+        review,
+        reviewer="reviewer-a",
+        status="accepted",
+        findings=["checked"],
+        gate_receipt=_passing_receipt(tmp_path, manifest),
+    )
+    payload = json.loads(review.read_text(encoding="utf-8"))
+    del payload["phase2_gate"]
+    review.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    assert project_case_status(manifest, review)["review"] == "accepted"

@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+from apkscan.core.enrichment_budget import EnrichmentBudget
+
 import ipaddress
 import os
 from typing import Mapping, Sequence
@@ -117,6 +119,10 @@ def _ensure_source_status_coverage(
             }
         elif not config.online:
             raw_statuses[provider] = {"status": "skipped", "reason": "offline"}
+        elif (config.max_source_calls is not None and current.get("status") == "skipped"
+              and current.get("reason") == "run_source_budget_exhausted"):
+            # Budget admission is an actual recorded outcome, not a missing result.
+            continue
         else:
             raw_statuses[provider] = {"status": "failed", "reason": "missing_outcome"}
 
@@ -203,6 +209,7 @@ def _enrich_resolved_ips(
     endpoint: Endpoint,
     enrichers: Sequence[object],
     config: ClosureConfig,
+    *, budget: "EnrichmentBudget | None" = None,
 ) -> None:
     from apkscan.core.enrichment import enrich_selected_targets
 
@@ -234,6 +241,7 @@ def _enrich_resolved_ips(
                 pending,  # type: ignore[arg-type]
                 mode=config.mode,
                 include_case_close=True,
+                budget=budget,
             )
         _ensure_source_status_coverage(transient, typed_enrichers, config)
         _set_attribution(transient)

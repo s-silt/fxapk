@@ -14,7 +14,7 @@ import os
 import threading
 import requests
 from collections.abc import Mapping
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import TYPE_CHECKING
 
 from apkscan.core import forensic, infra
@@ -27,6 +27,7 @@ from apkscan.core.models import (
     OBSERVED_CONTACT_SOURCES,
 )
 from apkscan.core.registry import BaseEnricher
+from apkscan.core.enrichment_budget import EnrichmentBudget
 from apkscan.core.source_status import provider_payload_if_hit
 
 if TYPE_CHECKING:
@@ -80,6 +81,9 @@ def safe_error_type(exc: Exception) -> str:
     编码失败（如非 latin-1 的 key/header 塞进 HTTP 头），不是响应解析失败——放到
     ``ValueError`` 之后会误报成 ``parse_error``，把病根指向错误方向。
     """
+    from apkscan.enrichers._rate_limit import RequestThrottled
+    if isinstance(exc, RequestThrottled):
+        return "local_rate_limit"
     status_code = _http_status_code(exc)
     if status_code is not None:
         return f"http_{status_code}"
@@ -194,18 +198,38 @@ def _enrich_endpoints(
     stats: dict[str, dict] = {}
     stats_lock = threading.Lock()
 
-    if endpoints:
-        # max_workers 不超过端点数，避免端点少时空建大量线程。
-        workers = max(1, min(ENRICH_MAX_WORKERS, len(endpoints)))
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="enrich") as pool:
-            # list() 强制求值 → 任一 worker 内未捕获异常会在此重抛（_run_enrichers_on_endpoint
-            # 内部已逐 enrich try/except，正常不会到这；这里是兜底，不让异常被 executor 静默吞掉）。
-            list(pool.map(
-                lambda ep: _run_enrichers_on_endpoint(ep, enrichers, stats, stats_lock, gate),
-                endpoints,
-            ))
+    def enrich_one(ep: Endpoint) -> None:
+        _run_enrichers_on_endpoint(ep, enrichers, stats, stats_lock, gate)
 
+    _dispatch_bounded(endpoints, enrich_one)
     return list(stats.values())
+
+
+def _dispatch_bounded(endpoints: list[Endpoint], run_one: "Callable[[Endpoint], None]") -> None:
+    """Share bounded admission across single- and two-phase enrichment."""
+    if not endpoints:
+        return
+    workers = max(1, min(ENRICH_MAX_WORKERS, len(endpoints)))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="enrich") as pool:
+        # Executor.map eagerly submits all inputs on Python <3.14. Refill on
+        # completion so a slow endpoint cannot hold otherwise idle workers.
+        remaining = iter(endpoints)
+        pending = set()
+        window = workers * 2
+        while True:
+            while len(pending) < window:
+                try:
+                    endpoint = next(remaining)
+                except StopIteration:
+                    break
+                pending.add(pool.submit(run_one, endpoint))
+            if not pending:
+                break
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                # Unexpected gate/scheduler errors stop further dispatch.
+                # Already admitted work may finish; no automatic retry.
+                future.result()
 
 
 def _stat(stats: dict[str, dict], provider: str) -> dict:
@@ -413,6 +437,8 @@ def _run_enrichers_on_endpoint(
                 # 成功但零信息：显式标注，避免与"查到了"在报告里视觉混淆。
                 data.setdefault("note", "查询无结果")
                 st["no_record"] += 1
+            elif status in {"skipped", "disabled"}:
+                st[status] = st.get(status, 0) + 1
             else:
                 _note_fail(st, error_type or result.error or "富化失败")
         if status != "hit":
@@ -522,10 +548,7 @@ def _run_enrichment(
         # ② 境外被动取证富化（同 worker 内串行，组内顺序由 overseas 排序保证确定性）。
         _run_enrichers_on_endpoint(ep, overseas, stats, stats_lock, gate)
 
-    if targets:
-        workers = max(1, min(ENRICH_MAX_WORKERS, len(targets)))
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="enrich") as pool:
-            list(pool.map(_enrich_one_two_phase, targets))
+    _dispatch_bounded(targets, _enrich_one_two_phase)
 
     return list(stats.values())
 
@@ -554,7 +577,7 @@ def _source_status_from_payload(payload: object) -> tuple[str, str | None]:
         if isinstance(key, str) and key.startswith("_"):
             payload.pop(key, None)
     if marker is not marker_missing:
-        if marker in {"hit", "no_record", "failed", "skipped", "disabled"}:
+        if isinstance(marker, str) and marker in {"hit", "no_record", "failed", "skipped", "disabled"}:
             return (
                 str(marker),
                 error_type.strip()
@@ -651,12 +674,21 @@ def enrich_selected_targets(
     mode: str = ANALYSIS_MODE_PASSIVE,
     include_case_close: bool = False,
     provider_limits: Mapping[str, int] | None = None,
+    budget: EnrichmentBudget | None = None,
 ) -> list[dict]:
     """Enrich an explicit bounded target set and record per-target source outcomes.
 
     Ordinary analysis calls this with ``include_case_close=False`` so key-gated measurement
     providers cannot multiply quota usage across every static endpoint. Case closure opts in.
     """
+    # A caller-supplied limit is a hard endpoint-invocation ceiling in both paths.
+    # It is not an account-wide monetary quota or a bound on adapter subrequests.
+    limits: dict[str, int] = {}
+    for provider, limit in (provider_limits or {}).items():
+        if (not isinstance(provider, str) or not provider or isinstance(limit, bool)
+                or not isinstance(limit, int) or limit < 0):
+            raise ValueError("invalid_provider_budget")
+        limits[provider] = limit
     selected = [
         enricher
         for enricher in enrichers
@@ -668,50 +700,47 @@ def enrich_selected_targets(
         _mark_case_close_deferred(endpoints, enrichers)
     if not selected:
         return []
-    if not include_case_close:
-        allowed_by_mode = _mode_gate(mode)
-        limits = {
-            str(provider): max(0, int(limit))
-            for provider, limit in (provider_limits or {}).items()
+    allowed_by_mode = _mode_gate(mode)
+    allowed_endpoint_ids: dict[str, set[int]] = {}
+    for enricher in selected:
+        provider = _provider_name(enricher)
+        if provider not in limits:
+            continue
+        if getattr(enricher, "active", False) and mode != ANALYSIS_MODE_AUTHORIZED_ACTIVE:
+            continue
+        if not _provider_configured(enricher):
+            continue
+        matching_with_order = [
+            (index, endpoint)
+            for index, endpoint in enumerate(endpoints)
+            if endpoint.kind in (getattr(enricher, "applies_to", []) or [])
+        ]
+        tier_priority = {
+            infra.TIER_APP: 0,
+            None: 1,
+            infra.TIER_LIBRARY_FILE: 2,
+            infra.TIER_BULK_STRING: 3,
         }
-        allowed_endpoint_ids: dict[str, set[int]] = {}
-        for enricher in selected:
-            provider = _provider_name(enricher)
-            if provider not in limits:
-                continue
-            if getattr(enricher, "active", False) and mode != ANALYSIS_MODE_AUTHORIZED_ACTIVE:
-                continue
-            if not _provider_configured(enricher):
-                continue
-            matching_with_order = [
-                (index, endpoint)
-                for index, endpoint in enumerate(endpoints)
-                if endpoint.kind in (getattr(enricher, "applies_to", []) or [])
-            ]
-            tier_priority = {
-                infra.TIER_APP: 0,
-                None: 1,
-                infra.TIER_LIBRARY_FILE: 2,
-                infra.TIER_BULK_STRING: 3,
-            }
-            matching_with_order.sort(
-                key=lambda item: (
-                    not _endpoint_runtime_observed(item[1]),
-                    tier_priority.get(item[1].enrichment.get("tier"), 1),
-                    not bool(item[1].is_suspicious),
-                    item[0],
-                )
+        matching_with_order.sort(
+            key=lambda item: (
+                not _endpoint_runtime_observed(item[1]),
+                tier_priority.get(item[1].enrichment.get("tier"), 1),
+                not bool(item[1].is_suspicious),
+                item[0],
             )
-            matching = [endpoint for _index, endpoint in matching_with_order]
-            allowed_endpoint_ids[provider] = {
-                id(endpoint) for endpoint in matching[:limits[provider]]
-            }
-            mark_enrichment_skipped(
-                matching[limits[provider]:],
-                [enricher],
-                reason="provider_budget_exhausted",
-            )
+        )
+        matching = [endpoint for _index, endpoint in matching_with_order]
+        allowed_endpoint_ids[provider] = {
+            id(endpoint) for endpoint in matching[:limits[provider]]
+        }
+        mark_enrichment_skipped(
+            matching[limits[provider]:],
+            [enricher],
+            reason="provider_budget_exhausted",
+        )
 
+
+    if not include_case_close:
         def ordinary_gate(endpoint: Endpoint, enricher: BaseEnricher) -> bool:
             provider = _provider_name(enricher)
             if not allowed_by_mode(endpoint, enricher):
@@ -726,6 +755,12 @@ def enrich_selected_targets(
                 return False
             allowed = allowed_endpoint_ids.get(provider)
             if allowed is not None and id(endpoint) not in allowed:
+                _record_source_status(endpoint, provider, "skipped")
+                endpoint.enrichment["source_status"][provider]["reason"] = "provider_budget_exhausted"
+                return False
+            if budget is not None and not budget.admit(provider):
+                _record_source_status(endpoint, provider, "skipped")
+                endpoint.enrichment["source_status"][provider]["reason"] = "run_source_budget_exhausted"
                 return False
             return True
 
@@ -744,6 +779,13 @@ def enrich_selected_targets(
             return False
         if not _provider_configured(enricher):
             source_status[provider] = {"status": "disabled", "reason": "credential_not_configured"}
+            return False
+        allowed = allowed_endpoint_ids.get(provider)
+        if allowed is not None and id(endpoint) not in allowed:
+            source_status[provider] = {"status": "skipped", "reason": "provider_budget_exhausted"}
+            return False
+        if budget is not None and not budget.admit(provider):
+            source_status[provider] = {"status": "skipped", "reason": "run_source_budget_exhausted"}
             return False
         # Provider will execute now; discard any cached status so the fresh payload decides hit/failure.
         source_status.pop(provider, None)

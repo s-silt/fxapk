@@ -78,7 +78,7 @@ def _pyproject_version() -> str:
 def _run(venv_python: str, code: str) -> str:
     """在隔离 venv 内执行单行 Python，返回 stdout（去首尾空白）。"""
     result = subprocess.run(
-        [venv_python, "-c", code],
+        [venv_python, "-I", "-c", code],
         capture_output=True,
         text=True,
     )

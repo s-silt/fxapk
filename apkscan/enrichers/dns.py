@@ -151,7 +151,9 @@ def _resolve_doh(domain: str) -> tuple[list[str], list[str], list[dict[str, str]
                 params={"name": domain, "type": "A"},
                 headers={"accept": "application/dns-json"},
                 timeout=DNS_TIMEOUT,
+                allow_redirects=False,
             )
+            _http.reject_redirect(resp)
             resp.raise_for_status()
             payload = resp.json()
             if not isinstance(payload, dict):

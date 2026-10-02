@@ -52,6 +52,10 @@ META_WRITE_OWNER = "dynamic.auto"
 META_WRITE_CATEGORIES = {
     'artifact_lineage': 'signal',
     'capture_apk_identity': 'record',
+    'capture_rounds': 'record',
+    'capture_quality': 'coverage',
+    'capture_adaptation': 'record',
+    'cross_round_decryption': 'record',
     'online': 'signal',
     'target_serial': 'record',
 }
@@ -120,6 +124,7 @@ def run(
     online: bool = True,
     auto_fix: bool = True,
     capture_duration: int = 60,
+    three_rounds: bool = False,
     formats: list[str] | None = None,
     mode: str = ANALYSIS_MODE_PASSIVE,
     repackage: bool = True,
@@ -241,20 +246,50 @@ def run(
         #    shim。主报告**只采信这一遍**——它是「样本自发行为」的干净观测，是后续一切对照的基准。
         #    产物落 out/pass1-original/，与第二遍物理隔离（两遍都会写 runtime_report.json/flows/pcap）。
         pass1_out = str(Path(out_dir) / "pass1-original")
-        capture_step, runtime_report_path = _run_capture(
-            package_name,
-            out_dir=pass1_out,
-            has_device=has_device,
-            serial=target_serial,
-            duration=capture_duration,
-            on_progress=on_progress,
-            confirm=confirm,
-            report=report,
-            # ★设备侧 floor pcap 的远端路径按 pass 区分：pull 失败时 capture 会**特意保留**远端那份
-            #   供手动重拉，两遍共用固定路径的话第二遍起手的 rm -f 会把它删掉（不可恢复的证据丢失）。
-            pass_tag="pass1",
-        )
-        steps.append(capture_step)
+        capture_round_paths: list[str] = []
+        round_records: list[dict] = []
+        if three_rounds and has_device and package_name:
+            from apkscan.dynamic.capture_sequence import run_rounds, targeted_hooks
+            from apkscan.dynamic.capture_adaptation import build_capture_adaptation
+            if isinstance(report, Report):
+                report.meta["capture_adaptation"] = build_capture_adaptation(
+                    report, unpacked=unpacked_report is not None,
+                    targeted_observers=targeted_hooks(report, unpacked=unpacked_report is not None),
+                )
+            round_records = run_rounds(
+                package_name, report=report, unpacked=unpacked_report is not None,
+                out_dir=pass1_out, duration=capture_duration, serial=target_serial,
+                sample_sha256=_apk_sha256(apk_path),
+                before_round=lambda message: _confirm(confirm, message),
+            )
+            for record in round_records:
+                steps.append(_step(f"抓包轮{record['round']}:{record['kind']}", record["status"], record["reason"]))
+                if record["status"] in (_DONE, _DEGRADED):
+                    path = record.get("runtime_report_path")
+                    if path:
+                        capture_round_paths.append(path)
+            runtime_report_path = next((record.get("runtime_report_path", "") for record in round_records
+                                        if record.get("kind") == "pcap"), "")
+            capture_step = _step(_STEP_CAPTURE, _DONE if capture_round_paths else _ERROR,
+                                 f"三轮采集产生 {len(capture_round_paths)} 份运行时材料；逐轮状态见步骤")
+        else:
+            capture_step, runtime_report_path = _run_capture(
+                package_name,
+                out_dir=pass1_out,
+                has_device=has_device,
+                serial=target_serial,
+                duration=capture_duration,
+                on_progress=on_progress,
+                confirm=confirm,
+                report=report,
+                # ★设备侧 floor pcap 的远端路径按 pass 区分：pull 失败时 capture 会**特意保留**远端那份
+                #   供手动重拉，两遍共用固定路径的话第二遍起手的 rm -f 会把它删掉（不可恢复的证据丢失）。
+                pass_tag="pass1",
+            )
+            steps.append(capture_step)
+            if runtime_report_path:
+                capture_round_paths.append(runtime_report_path)
+
 
         # 本次实际抓的 APK 身份。第一遍恒 original；第二遍成功启动才补 wrapper。
         # ★路径可同名、可被覆盖，哈希才是身份——报告里必须能回答「这份证据采自哪个 APK」。
@@ -277,7 +312,9 @@ def run(
         # 4.5) 旁路轮（第二遍，modified-runtime）：仅当①第一遍确有基线产物、②判据建议、③取得显式
         #      行为修改授权，三者同时成立才跑。任一不满足 → 结构化 skipped + 写明原因，绝不自动提权。
         pass1_payload = _read_runtime_payload(runtime_report_path)
-        pass1_status = str(capture_step.get("status") or "")
+        pass1_status = (str(next((record.get("status", "error") for record in round_records
+                                 if record.get("kind") == "pcap"), "error")) if three_rounds and round_records
+                        else str(capture_step.get("status") or ""))
         if not (pass1_status in (_DONE, _DEGRADED) and runtime_report_path and pass1_payload):
             # ★硬前置：没有 original 基线就绝不允许跑 modified——否则唯一的运行时证据将全部来自
             #   被我方诱导的那一轮，且无从对照。这条比"判据建议与否"更优先。
@@ -285,7 +322,8 @@ def run(
                 _step(_STEP_BYPASS, _SKIPPED, "无第一遍 original 基线产物，拒绝执行旁路轮（先修环境/重抓）")
             )
         else:
-            suggests, reason = _pass1_suggests_bypass(pass1_status, pass1_payload)
+            suggests, reason = _pass1_suggests_bypass(pass1_status, pass1_payload,
+                **({"instrumentation_expected": False} if three_rounds and round_records else {}))
             if not suggests:
                 # 第一遍健康：不跑旁路是正常路径，记一条 skipped 让"为什么没跑"可查（非降级）。
                 steps.append(_step(_STEP_BYPASS, _SKIPPED, reason))
@@ -366,19 +404,56 @@ def run(
                 # subprocess 时 shim 根本没进去）。据实记录，报告据此渲染，不替它宣称"诱导轮"。
                 apk_identity["pass2_runtime_variant"] = pass2_variant or "unknown"
             report.meta["capture_apk_identity"] = apk_identity
+            if three_rounds and round_records:
+                report.meta["capture_rounds"] = [
+                    {key: value for key, value in record.items() if key != "result"}
+                    for record in round_records
+                ]
 
         # 5) 合并：抓包成功且静态有 report 才把运行时端点并回主报告并重渲。
-        if capture_step["status"] == _DONE and report is not None and runtime_report_path:
-            merge_step, merge_paths = _run_merge(
-                report,
-                runtime_report_path,
-                out_dir=out_dir,
-                base=base,
-                formats=fmts,
-                on_progress=on_progress,
-            )
-            steps.append(merge_step)
-            _extend_unique(report_paths, merge_paths)
+        if capture_step["status"] == _DONE and report is not None and capture_round_paths:
+            for round_path in capture_round_paths:
+                namespace = None
+                if three_rounds:
+                    from apkscan.core.integrity import sha256_file
+                    expected = next((record.get("runtime_report_sha256") for record in round_records
+                                     if record.get("runtime_report_path") == round_path), None)
+                    try:
+                        unchanged = expected is not None and sha256_file(round_path) == expected
+                    except OSError:
+                        unchanged = False
+                    if not unchanged:
+                        steps.append(_step(_STEP_MERGE, _ERROR, "运行时材料已变化或缺失，拒绝合并"))
+                        continue
+                    namespace = f"capture:{expected}"
+                merge_step, merge_paths = _run_merge(
+                    report,
+                    round_path,
+                    out_dir=out_dir,
+                    base=base,
+                    formats=fmts,
+                    on_progress=on_progress,
+                    **({"evidence_namespace": namespace} if namespace else {}),
+                )
+                steps.append(merge_step)
+                _extend_unique(report_paths, merge_paths)
+                if three_rounds:
+                    for row in report.meta.get("capture_rounds", []):
+                        if row.get("runtime_report_path") == round_path:
+                            row["merge_status"] = merge_step["status"]
+                            payload = _read_runtime_payload(round_path)
+                            row["artifact_verified"] = True
+                            row["identity_which"] = apk_identity.get("which", "unknown")
+                            original_identity = apk_identity.get("original")
+                            row["original_sample_sha256"] = (
+                                original_identity.get("sha256") if isinstance(original_identity, dict) else None)
+                            row["runtime_variant"] = payload.get("runtime_variant", "unknown")
+                            row["package_matches"] = payload.get("package_name") == report.package_name
+                            row["quality_after_merge"] = (
+                                dict(report.meta.get("capture_quality", {}))
+                                if merge_step["status"] == _DONE else {}
+                            )
+                            row["decryption_after_merge"] = dict(report.meta.get("runtime_decrypt_stats", {}))
         else:
             steps.append(
                 _step(
@@ -387,6 +462,14 @@ def run(
                     "抓包未成功或无静态报告，无运行时端点可并入",
                 )
             )
+
+        if three_rounds and isinstance(report, Report) and round_records:
+            from apkscan.dynamic.capture_sequence import complement_decryption
+            report.meta["cross_round_decryption"] = complement_decryption(report, round_records)
+            from apkscan.core.closure import evaluate_capture_quality, refresh_visibility_snapshot
+            report.meta["capture_quality"] = evaluate_capture_quality(
+                {"sequence_rounds": report.meta.get("capture_rounds", [])})
+            refresh_visibility_snapshot(report.meta)
 
         # 6) 案件闭环：无论动态是否完整，只要静态报告存在都执行并把缺口显式写入报告。
         if report is not None:
@@ -773,7 +856,7 @@ def _run_repackage(
         return _step(_STEP_REPACKAGE, _ERROR, "去壳重打包发生未预期异常（详见日志）"), None
 
 
-def _pass1_suggests_bypass(capture_status: str, rr_payload: dict) -> tuple[bool, str]:
+def _pass1_suggests_bypass(capture_status: str, rr_payload: dict, *, instrumentation_expected: bool = True) -> tuple[bool, str]:
     """据第一遍（original 基线）的产出，判断是否**建议**跑第二遍旁路。纯函数，绝不抛。
 
     Returns:
@@ -805,10 +888,10 @@ def _pass1_suggests_bypass(capture_status: str, rr_payload: dict) -> tuple[bool,
     reasons: list[str] = []
     if total == 0:
         reasons.append("业务端点为零")
-    if signals.get("frida_retreated") is True:
+    if instrumentation_expected and signals.get("frida_retreated") is True:
         reasons.append(f"frida 秒退熔断（{signals.get('frida_retreat_count') or 0} 次）")
     hook_status = signals.get("hook_ready_status")
-    if hook_status in ("unconfirmed", "none"):
+    if instrumentation_expected and hook_status in ("unconfirmed", "none"):
         reasons.append(f"frida hook 未就绪（{hook_status}，疑反 frida）")
     if capture_status == _DEGRADED:
         # `_fold_dynamic_step` 会把 DynamicResult 的 degraded 折成 error（全局既有行为，不在本片动），
@@ -911,6 +994,7 @@ def _run_merge(
     base: str,
     formats: list[str],
     on_progress: Callable[[str], None] | None,
+    evidence_namespace: str | None = None,
 ) -> tuple[dict, list[str]]:
     """步骤 5：把运行时端点并回主报告并重渲。失败 → error，但不破坏已产出静态报告。
 
@@ -929,6 +1013,10 @@ def _run_merge(
             return _step(_STEP_MERGE, _SKIPPED, "无有效静态报告，跳过合并"), []
 
         endpoints = merge.load_runtime_endpoints(runtime_report_path)
+        if evidence_namespace is not None:
+            for endpoint in endpoints:
+                for evidence in endpoint.evidences:
+                    evidence.location = evidence_namespace + "::" + evidence.location
         stats = merge.merge_and_rerender(
             report,
             endpoints,
@@ -937,6 +1025,7 @@ def _run_merge(
             formats=list(formats),
             on_progress=on_progress,
             runtime_report_path=runtime_report_path,
+            **({"evidence_namespace": evidence_namespace} if evidence_namespace else {}),
         )
         merged = stats.get("merged", 0)
         new_leads = stats.get("new_leads", 0)

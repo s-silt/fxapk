@@ -206,7 +206,7 @@ class IpRdapEnricher(BaseEnricher):
     # ------------------------------------------------------------------ 查询
     def _query(self, ip: str) -> dict[str, Any]:
         """RDAP 网络查询；网络/HTTP/解析异常向上抛由 enrich() 兜底。"""
-        resp = _http.capped_get(IP_RDAP_URL.format(ip=ip), timeout=IP_RDAP_TIMEOUT)
+        resp = _http.guarded_get(_http.capped_requests, IP_RDAP_URL.format(ip=ip), timeout=IP_RDAP_TIMEOUT)
         resp.raise_for_status()
         payload = resp.json()
         if not isinstance(payload, dict):

@@ -317,7 +317,8 @@ class SpamhausDropEnricher(BaseEnricher):
     @classmethod
     def _download_table(cls) -> _DropTable:
         """下载 JSON Lines 清单，跳过并校验末尾元数据行。"""
-        response = _http.capped_get(DROP_URL, timeout=HTTP_TIMEOUT_SECONDS)
+        response = _http.capped_get(DROP_URL, timeout=HTTP_TIMEOUT_SECONDS, allow_redirects=False)
+        _http.reject_redirect(response)
         response.raise_for_status()
 
         raw_records: list[dict[str, Any]] = []
