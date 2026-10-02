@@ -20,6 +20,7 @@ from apkscan.core.case_package import (
     project_case_status,
 )
 from apkscan.core.models import ANALYSIS_MODE_PASSIVE, ANALYSIS_MODES
+from apkscan.commands.phase2 import build_phase2_typer
 from apkscan.core.report_compat import report_revision_warnings
 from apkscan.core.report_io import load_report, write_report
 
@@ -28,6 +29,11 @@ logger = logging.getLogger(__name__)
 case_app = typer.Typer(
     add_completion=False,
     help="案件闭环：运行时端点再富化、多源覆盖、五层归因和严格验收。",
+)
+case_app.add_typer(
+    build_phase2_typer(deprecated_alias=False),
+    name="phase2",
+    help="Phase2 独立复核。旧入口 fxapk phase2 本版仍可用，下一版删除。",
 )
 
 
@@ -83,6 +89,7 @@ def close_command(
     max_targets: int = typer.Option(6, "--max-targets", min=1, max=50, help="最多闭环主目标数。"),
     strict: bool = typer.Option(True, "--strict/--no-strict", help="未闭环时返回非零退出码。"),
     refresh: bool = typer.Option(False, "--refresh", help="忽略成功来源状态，重新执行联网查询。"),
+    max_source_calls: int | None = typer.Option(None, "--max-source-calls", min=0, help="本次闭环及解析 IP 共用的富化器调用上限；不等于积分/金额上限。"),
 ) -> None:
     """Close an existing report in place and refresh a sibling HTML report when present."""
     try:
@@ -100,6 +107,7 @@ def close_command(
             mode=mode,
             max_targets=max_targets,
             refresh=refresh,
+            max_source_calls=max_source_calls,
         )
     except ValueError as exc:
         typer.echo(f"错误：闭环参数无效：{safe_exception_text(exc)}", err=True)
@@ -166,6 +174,10 @@ def review_command(
     status: str = typer.Option(..., "--status", help="accepted | changes_requested。"),
     out: Path = typer.Option(..., "--out", help="不可变 case-review.json 输出路径。"),
     finding: list[str] = typer.Option([], "--finding", help="复核发现，可重复。"),
+    gate_receipt: Path = typer.Option(
+        ..., "--gate-receipt", exists=True, dir_okay=False, readable=True,
+        help="`fxapk case phase2 gate` 产出的 gate-receipt.json；必填，必须 PASS 且覆盖本包。",
+    ),
 ) -> None:
     """对精确 package 哈希出具独立 Phase-2 复核记录，不修改 Phase-1 证据。"""
     try:
@@ -175,12 +187,14 @@ def review_command(
             reviewer=reviewer,
             status=status,
             findings=finding,
+            gate_receipt=gate_receipt,
         )
     except (CasePackageError, OSError, ValueError, UnicodeError) as exc:
         typer.echo(f"错误：Phase-2 复核记录生成失败（{type(exc).__name__}）：{safe_exception_text(exc)}", err=True)
         raise typer.Exit(code=2) from exc
     typer.echo(f"Phase-2 复核记录：{out}")
     typer.echo(f"复核状态：{payload.get('status')}")
+    typer.echo(f"Phase2 门禁绑定：{'已绑定' if 'phase2_gate' in payload else '未绑定'}")
 
 
 @case_app.command("status")
@@ -212,3 +226,109 @@ __all__ = [
     "review_command",
     "status_command",
 ]
+
+
+@case_app.command("provider-plan")
+def provider_plan_command(
+    report_json: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True),
+    out: Path | None = typer.Option(None, "--out", help="新建 JSON 核验工作清单；拒绝覆盖。"),
+    max_targets: int = typer.Option(200, "--max-targets", min=1, max=200),
+    evidence_values: str = typer.Option("omit", "--evidence-values", help="omit 或 raw；raw 含私有对象原值。"),
+) -> None:
+    """离线准备服务商角色核验清单；不查询、不改原报告、不表示服务商已落实。"""
+    from apkscan.core.atomic import atomic_create_bytes
+    from apkscan.core.closure.layers import assemble_target_closure
+    from apkscan.core.closure.targets import _select_targets_with_stats
+    from apkscan.core.integrity import sha256_hex
+    from apkscan.core.json_io import read_json_bounded
+    from apkscan.core.provider_review import build_provider_review_plan
+    from apkscan.core.report_io import report_from_dict
+
+    if evidence_values not in {"omit", "raw"}:
+        typer.echo("错误：evidence-values 必须是 omit 或 raw", err=True)
+        raise typer.Exit(code=2)
+    if evidence_values == "raw":
+        typer.echo("警告：raw 清单含未脱敏的目标与服务商原值，仅供本地授权复核。", err=True)
+    try:
+        payload, raw = read_json_bounded(report_json, 128 * 1024 * 1024, 64)
+        if not isinstance(payload, dict):
+            raise ValueError("report root must be an object")
+        report = report_from_dict(payload)
+        targets, selection = _select_targets_with_stats(report, max_targets)
+        plan = build_provider_review_plan(
+            [assemble_target_closure(endpoint) for endpoint in targets],
+            evidence_values=evidence_values, max_targets=max_targets,
+        )
+        # Keep identity binding, but not the source filename or excluded target
+        # values, in the default projection. Hashes are references, not proof
+        # that the case material has been comprehensively anonymized.
+        plan["source_report_sha256"] = sha256_hex(raw)
+        plan["target_selection"] = {
+            key: value for key, value in selection.items()
+            if isinstance(value, int) and not isinstance(value, bool)
+        }
+        plan["truncated"] = bool(plan["truncated"] or selection.get("truncated"))
+        encoded = (json.dumps(plan, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
+        if out is not None:
+            if not atomic_create_bytes(out, encoded):
+                typer.echo("错误：输出已存在，拒绝覆盖", err=True)
+                raise typer.Exit(code=2)
+            typer.echo("服务商核验工作清单已生成；仍需复核，不是正式报告或身份确认。")
+        else:
+            typer.echo(encoded.decode("utf-8"), nl=False)
+    except (OSError, ValueError, TypeError, OverflowError, RecursionError) as exc:
+        typer.echo(f"错误：无法准备核验清单（{type(exc).__name__}）", err=True)
+        raise typer.Exit(code=2) from exc
+
+
+@case_app.command("prepare-materials")
+def prepare_materials_command(
+    case_dir: Path = typer.Argument(..., exists=True, file_okay=False, readable=True),
+    out: Path = typer.Option(..., "--out", help="新建报告前材料 JSON，不覆盖原件。"),
+    coverage: Path | None = typer.Option(None, "--coverage", exists=True, dir_okay=False),
+    clues: Path | None = typer.Option(None, "--clues", exists=True, dir_okay=False),
+    runs: Path | None = typer.Option(None, "--runs", exists=True, dir_okay=False, help="可选 RunRecord JSONL；只保留声明及逐次状态，不冒充运行证明。"),
+    max_targets: int = typer.Option(200, "--max-targets", min=1, max=200),
+    evidence_values: str = typer.Option("omit", "--evidence-values"),
+) -> None:
+    """离线串联已验包、阶段二覆盖、运行历史及服务商核验队列；停在正式报告前。"""
+    from apkscan.core.atomic import atomic_create_bytes
+    from apkscan.core.phase2.inventory import load_clue_records, load_coverage_snapshot
+    from apkscan.core.phase2.preparation import prepare_case_materials
+
+    if (coverage is None) != (clues is None) or evidence_values not in {"omit", "raw"}:
+        typer.echo("错误：coverage/clues 必须配对；evidence-values 必须是 omit 或 raw", err=True)
+        raise typer.Exit(code=2)
+    if evidence_values == "raw":
+        typer.echo("警告：raw 材料含未脱敏对象，仅供本地授权复核。", err=True)
+    try:
+        payload = prepare_case_materials(
+            case_dir, coverage=load_coverage_snapshot(coverage) if coverage else None,
+            clue_records=load_clue_records(clues) if clues else None,
+            runs=load_clue_records(runs) if runs else (),
+            evidence_values=evidence_values, max_targets=max_targets,
+        )
+        encoded = (json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
+        if not atomic_create_bytes(out, encoded):
+            typer.echo("错误：输出已存在，拒绝覆盖", err=True)
+            raise typer.Exit(code=2)
+    except (OSError, ValueError, TypeError, OverflowError, RecursionError) as exc:
+        typer.echo(f"错误：准备材料失败（{type(exc).__name__}）", err=True)
+        raise typer.Exit(code=2) from exc
+    typer.echo(f"报告前材料已生成：{payload['state']}；尚未出具正式报告或服务商确认。")
+    if payload["state"] == "blocked":
+        raise typer.Exit(code=1)
+
+
+@case_app.command("source-catalog")
+def source_catalog_command(
+    category: str = typer.Option("all", "--category", help="all / free / registered / paid"),
+) -> None:
+    """查看有日期和官方来源的富化产品目录，不读取密钥或调用外部 API。"""
+    from apkscan.core.source_catalog import source_catalog
+    try:
+        payload = source_catalog(category=category)
+    except ValueError as exc:
+        typer.echo(f"错误：来源目录参数或数据无效（{type(exc).__name__}）", err=True)
+        raise typer.Exit(2) from exc
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False))

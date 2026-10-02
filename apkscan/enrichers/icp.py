@@ -320,7 +320,8 @@ class IcpEnricher(BaseEnricher):
         if endpoint == HAPI_URL:
             return self._query_hapi(domain)
 
-        resp = requests.get(endpoint, timeout=ICP_TIMEOUT)
+        resp = requests.get(endpoint, timeout=ICP_TIMEOUT, allow_redirects=False)
+        _http.reject_redirect(resp)
         resp.raise_for_status()
         payload = resp.json()
         if not isinstance(payload, dict):
@@ -343,10 +344,12 @@ class IcpEnricher(BaseEnricher):
                 "pageSize": "10",
             },
             timeout=ICP_TIMEOUT,
+            allow_redirects=False,
         )
         status_code = int(getattr(resp, "status_code", 0) or 0)
         if status_code and not 200 <= status_code <= 299:
             raise HapiResponseError(_hapi_http_error_type(status_code))
+        _http.reject_redirect(resp)
         resp.raise_for_status()
         payload = resp.json()
         if not isinstance(payload, dict):

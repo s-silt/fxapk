@@ -1,0 +1,150 @@
+{
+  "gate": {
+    "blockers": [],
+    "declarations": [
+      "HONEST_GAP[G10]: 排除桶∩established 仅覆盖 Phase1 报告内 runtime 信号（G8）。包外 pcap established 端点未接入（期3 pcap_survey），本 gate 对其不设防。接入 --survey 后本行消失、G9 变硬门。"
+    ],
+    "ok": true,
+    "warnings": []
+  },
+  "inventory": {
+    "candidates": [
+      {
+        "candidate_id": "p1:50bd32d7237745c32824fbe5962070b2b54fa65dd430062d1ff923889565d59f",
+        "collection": "leads",
+        "display_value": "100.64.0.10",
+        "evidence_id": "ev-prop-b",
+        "has_evidence": true,
+        "manifest_sha256": "21eec955bd6a87da74bac882c1e63903bccb08e4a6719353474e6058db8d13f3",
+        "package_id": "9a2c6ecf84ef81c6265a8a69b273ef756ea1e4a12e9c43e2f5c9e3621ee16a34",
+        "parent_id": "lead:2d1fc3d3b99736dbab8b1a2f9627dcc3908e44c9dcb931c61c0a6150a7568b6f",
+        "report_relpath": "report.json",
+        "scope": "case_evidence"
+      },
+      {
+        "candidate_id": "p1:04002eaf241a488df54646a77049771c8ae26629f161a6d089e924fefb702d83",
+        "collection": "leads",
+        "display_value": "100.64.0.10",
+        "evidence_id": "ev-prop",
+        "has_evidence": true,
+        "manifest_sha256": "232047fecc639c2932d3b9489a9ac6c530d5653ec43b3863f0d2f9d4fbe2d0f3",
+        "package_id": "fd31f4579247cc740527b03dd41215b5eecd2d66e2f72b01911824a1401de904",
+        "parent_id": "lead:2d1fc3d3b99736dbab8b1a2f9627dcc3908e44c9dcb931c61c0a6150a7568b6f",
+        "report_relpath": "report.json",
+        "scope": "case_evidence"
+      }
+    ],
+    "case_id": "CASE-GOLDEN-PROP",
+    "fingerprint": "29c017b688f7aa8f8eb2b6dee83feb3e09b17683642ba22ad7dfd0000d5bfa4e",
+    "issues": [],
+    "packages": [
+      {
+        "directory_name": "pkg-2",
+        "manifest_sha256": "21eec955bd6a87da74bac882c1e63903bccb08e4a6719353474e6058db8d13f3",
+        "package_id": "9a2c6ecf84ef81c6265a8a69b273ef756ea1e4a12e9c43e2f5c9e3621ee16a34",
+        "report_sha256": "c5fb083fee5c3a97ac62b83c4491ef933f54d8942601bb33920118e4cdc7a9bd"
+      },
+      {
+        "directory_name": "pkg-1",
+        "manifest_sha256": "232047fecc639c2932d3b9489a9ac6c530d5653ec43b3863f0d2f9d4fbe2d0f3",
+        "package_id": "fd31f4579247cc740527b03dd41215b5eecd2d66e2f72b01911824a1401de904",
+        "report_sha256": "476f246ee7411790a7bfbc1c8851c56f1a27314e58befefefcf069a7883ecf87"
+      }
+    ],
+    "schema_version": "1.0",
+    "stats": {
+      "blocker_count": 0,
+      "candidate_count": 2,
+      "package_count": 2
+    }
+  },
+  "materialize": {
+    "coverage": {
+      "case_id": "CASE-GOLDEN-PROP",
+      "decisions_fingerprint": "c1cce9b07e3ccb467817e38b6a2fcab112b01b6efe48ad51e80211eb6cf14e3c",
+      "entries": [
+        {
+          "candidate_id": "p1:04002eaf241a488df54646a77049771c8ae26629f161a6d089e924fefb702d83",
+          "clue_id": "CL-PROP-1",
+          "disposition": "accepted_clue",
+          "materialized_from": "decision:<decision:1>",
+          "provenance": {
+            "candidate_id": "p1:04002eaf241a488df54646a77049771c8ae26629f161a6d089e924fefb702d83",
+            "collection": "leads",
+            "evidence_id": "ev-prop",
+            "manifest_sha256": "232047fecc639c2932d3b9489a9ac6c530d5653ec43b3863f0d2f9d4fbe2d0f3",
+            "package_id": "fd31f4579247cc740527b03dd41215b5eecd2d66e2f72b01911824a1401de904",
+            "parent_id": "lead:2d1fc3d3b99736dbab8b1a2f9627dcc3908e44c9dcb931c61c0a6150a7568b6f",
+            "report_relpath": "report.json",
+            "scope": "case_evidence"
+          }
+        },
+        {
+          "candidate_id": "p1:50bd32d7237745c32824fbe5962070b2b54fa65dd430062d1ff923889565d59f",
+          "disposition": "duplicate_or_merged",
+          "materialized_from": "decision:<decision:1>",
+          "merged_into_candidate_id": "p1:04002eaf241a488df54646a77049771c8ae26629f161a6d089e924fefb702d83",
+          "propagation": "accepted_parent_unselected_member",
+          "reason": "同 parent 证据成员，结论由判决 <decision:1> 点名的 accepted candidate 承载",
+          "source_decision_id": "<decision:1>"
+        }
+      ],
+      "inventory_fingerprint": "29c017b688f7aa8f8eb2b6dee83feb3e09b17683642ba22ad7dfd0000d5bfa4e",
+      "materializer_version": "phase2-materialize/1.1",
+      "schema_version": "1.0"
+    },
+    "report": {
+      "case_id": "CASE-GOLDEN-PROP",
+      "decisions_fingerprint": "c1cce9b07e3ccb467817e38b6a2fcab112b01b6efe48ad51e80211eb6cf14e3c",
+      "entry_count": 2,
+      "schema_version": "phase2-materialize/1.1",
+      "stale_decisions": [],
+      "warning_count": 0
+    }
+  },
+  "replay": {
+    "items": [],
+    "new_fingerprint": "29c017b688f7aa8f8eb2b6dee83feb3e09b17683642ba22ad7dfd0000d5bfa4e",
+    "old_fingerprint": "29c017b688f7aa8f8eb2b6dee83feb3e09b17683642ba22ad7dfd0000d5bfa4e",
+    "summary": {
+      "blocked_stale": 0,
+      "carry_with_note": 0,
+      "removed": 0,
+      "unchanged": 1
+    }
+  },
+  "triage": {
+    "case_id": "CASE-GOLDEN-PROP",
+    "inventory_fingerprint": "29c017b688f7aa8f8eb2b6dee83feb3e09b17683642ba22ad7dfd0000d5bfa4e",
+    "issues": [],
+    "parents": [
+      {
+        "bucket": "human",
+        "collection": "leads",
+        "conflicts": [],
+        "display": "100.64.0.10",
+        "member_candidate_ids": [
+          "p1:04002eaf241a488df54646a77049771c8ae26629f161a6d089e924fefb702d83",
+          "p1:50bd32d7237745c32824fbe5962070b2b54fa65dd430062d1ff923889565d59f"
+        ],
+        "merged_into": [],
+        "packages": 2,
+        "parent_id": "lead:2d1fc3d3b99736dbab8b1a2f9627dcc3908e44c9dcb931c61c0a6150a7568b6f",
+        "signals": [
+          "advice=建议调证"
+        ],
+        "tier": "T1:advice=建议调证",
+        "why": "存在需逐条复核的运行时或调证信号"
+      }
+    ],
+    "schema_version": "phase2-triage/1.0",
+    "totals": {
+      "auto": 0,
+      "candidates": 2,
+      "human": 1,
+      "parents": 1,
+      "t1": 1,
+      "t2_groups": 0
+    }
+  }
+}

@@ -347,19 +347,23 @@ def _components(
         if start not in remaining:
             continue
         pending = [start]
-        members: set[str] = set()
+        members: set[str] = {start}
         while pending:
             current = pending.pop()
-            if current in members:
-                continue
-            members.add(current)
-            pending.extend(sorted(adjacency[current] - members, reverse=True))
+            # Mark on enqueue: each vertex occupies the stack at most once,
+            # including dense graphs. Traversal order is not observable;
+            # members, edges and components are sorted explicitly below.
+            for neighbor in adjacency[current]:
+                if neighbor not in members:
+                    members.add(neighbor)
+                    pending.append(neighbor)
         remaining.difference_update(members)
         member_tuple = tuple(sorted(members))
         component_pairs = {
-            (member, neighbor) if member < neighbor else (neighbor, member)
+            (member, neighbor)
             for member in members
             for neighbor in adjacency[member]
+            if member < neighbor
         }
         edges = [edge_by_pair[pair] for pair in component_pairs]
         edges.sort(

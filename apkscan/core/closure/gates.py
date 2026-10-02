@@ -36,6 +36,9 @@ def _non_negative_int(value: object) -> int:
 
 def evaluate_capture_quality(meta: Mapping[str, object]) -> dict[str, object]:
     """Separate channel readiness from target-attributed business evidence."""
+    if "sequence_rounds" in meta:
+        from .sequence import evaluate_sequence
+        return evaluate_sequence(meta["sequence_rounds"], evaluate_capture_quality)
     raw = _mapping(meta.get("quality"))
     raw.update({key: value for key, value in meta.items() if key not in raw})
 
@@ -186,6 +189,9 @@ def _capture_meta(report: Report) -> dict[str, Any]:
     ★空 dict 必须原样返回（不写 ``quality_input_source``）：``dynamic_required`` 靠"取不到任何
       采集输入"判断这是纯静态报告，给它塞键会让静态报告凭空要求动态证据。
     """
+    if report.meta.get("capture_rounds"):
+        return {"sequence_rounds": report.meta["capture_rounds"],
+                "quality_input_source": "capture_rounds"}
     for key in ("capture_quality", "runtime_capture_quality"):
         value = report.meta.get(key)
         if isinstance(value, Mapping):

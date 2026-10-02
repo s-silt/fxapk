@@ -151,11 +151,12 @@ class _DeadlineSocket:
 
 
 class _PinnedConnection(http.client.HTTPConnection):
-    def __init__(self, request: dict[str, Any], address: str):
-        super().__init__(request["host"], request["port"], timeout=TIMEOUT)
+    def __init__(self, request: dict[str, Any], address: str, *, timeout: float | None = None):
+        timeout = TIMEOUT if timeout is None else timeout
+        super().__init__(request["host"], request["port"], timeout=timeout)
         self.address = address
         self.tls = request["scheme"] == "https"
-        deadline = time.monotonic() + TIMEOUT
+        deadline = time.monotonic() + timeout
 
         class DeadlineResponse(http.client.HTTPResponse):
             def __init__(self, sock: Any, *args: Any, **kwargs: Any):

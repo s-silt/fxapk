@@ -174,8 +174,20 @@ def _runtime_contact_observed(endpoint: Any) -> bool:
     """Whether a runtime source OBSERVED a network flow to this endpoint's own peer IP
     (pcap ``dst_ip`` / mitm upstream), as opposed to deriving the value from a Host /
     :authority header, a decrypted body, or a tool probe — none of which prove a contact."""
+    runtime = _as_dict(_as_dict(getattr(endpoint, "enrichment", None)).get("runtime"))
+    if runtime.get("sequence_identity_unconfirmed") is True:
+        return False
+    selected_refs = runtime.get("selected_evidence_refs")
+    if "selected_observation_ref" in runtime and (
+        not isinstance(runtime["selected_observation_ref"], str)
+        or not isinstance(selected_refs, list) or not selected_refs
+        or any(not isinstance(ref, str) or not ref.startswith(runtime["selected_observation_ref"] + "::")
+               for ref in selected_refs)
+    ):
+        return False
     return any(
-        getattr(ev, "scope", EvidenceScope.LEGACY_UNSPECIFIED) is EvidenceScope.CASE_EVIDENCE
+        (selected_refs is None or getattr(ev, "location", "") in selected_refs)
+        and getattr(ev, "scope", EvidenceScope.LEGACY_UNSPECIFIED) is EvidenceScope.CASE_EVIDENCE
         and str(getattr(ev, "source", "")) in _OBSERVED_CONTACT_SOURCES
         for ev in getattr(endpoint, "evidences", []) or []
     )
@@ -387,6 +399,10 @@ class NetworkObservations:
         #   （复审 CONFIRMED：无条件 eager 会让域名端点等的资源信号被 per-endpoint except 连累丢失）。
         if is_this_ip:
             runtime = _as_dict(enrichment.get("runtime"))
+            if runtime.get("sequence_identity_unconfirmed") is True or (
+                "selected_observation_ref" in runtime and not _runtime_contact_observed(endpoint)
+            ):
+                runtime = {}
             edge_hosts = _as_dict(runtime.get("edge_hosts"))
             contact_observed = _runtime_contact_observed(endpoint)
             first_contact_ts = _runtime_first_contact_ts(endpoint)
@@ -611,7 +627,12 @@ def _runtime_first_contact_ts(ep: Any) -> float | None:
     ★超 float 域的巨整数（手编/被投毒 report.json 的任意精度整数字面量，如 10**400）按**越界拒为 None**：
     先受控 float() 吞 OverflowError，再判 isfinite/≤0——否则 math.isfinite(huge_int) 会在内部转 float 时抛
     OverflowError，令本 helper 食言"绝不抛"、把整端点信号连累丢失（复审 CONFIRMED）。"""
-    ts = _as_dict(_as_dict(getattr(ep, "enrichment", None)).get("runtime")).get("first_contact_ts")
+    runtime = _as_dict(_as_dict(getattr(ep, "enrichment", None)).get("runtime"))
+    if runtime.get("sequence_identity_unconfirmed") is True or (
+        "selected_observation_ref" in runtime and not _runtime_contact_observed(ep)
+    ):
+        return None
+    ts = runtime.get("first_contact_ts")
     if isinstance(ts, bool) or not isinstance(ts, (int, float)):
         return None
     try:

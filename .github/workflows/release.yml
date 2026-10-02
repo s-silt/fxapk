@@ -33,6 +33,7 @@ jobs:
         run: python -m pip install -e ".[dev]"
       - name: 版本契约（同步 + PEP440 规范）
         run: |
+          python -c "import os, tomllib; from pathlib import Path; version = tomllib.loads(Path('pyproject.toml').read_text())['project']['version']; assert os.environ['GITHUB_REF_NAME'] == 'v' + version, 'release tag does not match artifact version'"
           python -m pytest -q \
             tests/test_version_shadowing.py::test_fallback_version_contract_holds \
             tests/test_version_shadowing.py::test_pyproject_version_is_pep440_canonical

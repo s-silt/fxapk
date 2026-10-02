@@ -780,6 +780,7 @@ def test_quarantined_revision_marks_candidate_and_preserves_bilateral_provenance
         "evidence_surface": "static",
         "record_state": "quarantined",
         "report_bytes_sha256": "1" * 64,
+        "package_ids": [],
     }
     assert support["provenance"][s2_side][0]["record_state"] == "active"
     assert support["matches"][0]["provenance"] == support["provenance"]
@@ -806,6 +807,7 @@ def test_same_sample_multiple_cases_is_reported_without_self_pair() -> None:
         {
             "sample_sha256": _sample("same"),
             "case_ids": ["case-a", "case-b"],
+            "package_ids": [],
             "relation": "exact_artifact_identity",
             "synthetic_identity": False,
             "ownership_unresolved": False,

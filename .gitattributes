@@ -3,3 +3,5 @@
 # 运行时行为，并让 test_cryptohook 的 LF-only 断言在 Windows CI 上失败。
 # 仓内所有 .js 一律 LF（既覆盖 frida 资源，也避免将来新增 JS 资源重蹈覆辙）。
 *.js text eol=lf
+# Phase2 金标准按字节比对。autocrlf 把 JSON checkout 成 CRLF 会让比对失败。
+tests/golden/phase2/*.json text eol=lf

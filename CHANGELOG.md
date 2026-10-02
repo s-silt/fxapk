@@ -3,6 +3,29 @@
 Notable changes to fxapk. Versioning is semantic; **behavior changes that
 affect automated / CI / agent callers are called out explicitly**.
 
+## 1.17.0.dev0 — unreleased integration candidate
+
+- 集成验收修复：运行时端点不再借静态同值线索自动排除；复核回执必须同时绑定当前覆盖与判决材料；入库包身份必须匹配报告字节；长判决替代链改为迭代校验。
+- 补充 OneDrive handoff 衔接约定与中文路径换盘回归，保留历史包和旧 workflow；对齐采集质量元数据类别、已消费键基线及 Windows 测试输入契约。
+
+- 可选 HTTP origin/group 共享滚动限频、在途限制与 Retry-After 冷却；保持请求契约、无自动重试，不承诺跨进程账户限额。
+- 可选 Hunter free_only 在免费扣费保证未知时暂停请求；默认旧路径不变，不将调用数上限冒充积分上限。
+- PCAP 台账补留 DNS 与连接观测时间，SNI 名称身份未核实标记；不据公共名字排除独立承载 IP。
+
+- 后续分层整理：共享有界 JSON 输入下沉到 core.json_io，运行历史纯审阅拆出，采集层不反向依赖 Phase2；保持旧导入兼容。
+- 显式 provider_limits 同时约束普通与结案路径；新增可选 --max-source-calls，为单次闭环的主目标与解析 IP 共用调用预算（不等于账户积分/金额上限）。
+- 新增带日期与官方出处的来源产品目录，区分免费免注册、注册赠送/试用及付费产品；不将目录当作账户已授权。
+- 自动流程增加有限信号的抓包辅助计划，不执行 AI 生成代码；锁定公共 SNI 域名不会连带排除真实连接 IP 的跨层回归。
+
+- Integrate package-bound Phase2 inventory, coverage and pre-report materials, with provider-role review worklists.
+- Add bounded JSON escaped-URL extraction and structured HAR request/response evidence.
+- Add explicit authorized HTTP capture with pinned public-IP transport, verified TLS and scoped redirects; browser JS execution is not included.
+- CLI auto defaults to three post-unpack capture rounds (PCAP, general probes, supported targeted observers); --single-round preserves the previous route. Programmatic auto.run remains opt-in for compatibility.
+- Bind Phase2 reads to the manifest-registered report and verified snapshot hashes; ignore unrelated legacy filenames.
+- Preserve per-round artifact hashes and observation namespaces; support bounded same-sample cross-round recipe reuse for supported envelopes, without modifying ciphertext artifacts.
+- Bound both enrichment dispatch paths and incremental evidence reads; improve linkage and URL-tail hot paths.
+- No runtime dependency or tested device-toolchain pin is changed without matching compatibility evidence.
+
 ## 1.16.0 — 2026-09-23
 
 - 多源富化增加逐目标、逐来源覆盖回执与不可变记录快照；显式开启时保存 HTTP 响应实体及哈希，响应留存缺口继续标记为 partial。

@@ -213,7 +213,9 @@ class CertsEnricher(BaseEnricher):
             CRTSH_URL,
             params={"q": f"%.{domain}", "output": "json"},
             timeout=CRTSH_TIMEOUT,
+            allow_redirects=False,
         )
+        _http.reject_redirect(resp)
         resp.raise_for_status()
         # crt.sh 偶发返回空体 / HTML 错误页：按"无结果"归一，不抛（json() 失败才抛）。
         text = (resp.text or "").strip()

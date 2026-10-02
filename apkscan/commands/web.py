@@ -158,3 +158,34 @@ def analyze_web(
 
 
 __all__ = ["analyze_web"]
+
+
+def capture_web(
+    url: str = typer.Argument(..., help="明确授权采集的 HTTP(S) 网址"),
+    out: Path = typer.Option(..., "--out", help="新建私有 HAR 文件，拒绝覆盖"),
+    authorized: bool = typer.Option(False, "--authorized", help="确认对输入网址及允许的跳转主机有采集授权"),
+    allow_host: list[str] = typer.Option([], "--allow-host", help="允许的额外跳转主机，可重复"),
+    max_hops: int = typer.Option(5, "--max-hops", min=1, max=10),
+) -> None:
+    """联网抓取授权 HTTP 跳转与响应，供 analyze-web 分析；不执行网页 JS。"""
+    import json
+    from apkscan.core.atomic import atomic_create_bytes
+    from apkscan.core.web_capture import capture_http
+    if not authorized:
+        typer.echo("未授权：须显式 --authorized；未发起请求。", err=True)
+        raise typer.Exit(code=2)
+    if out.exists():
+        typer.echo("输出已存在，拒绝覆盖；未发起请求。", err=True)
+        raise typer.Exit(code=2)
+    try:
+        result = capture_http(url, authorized=True, allowed_hosts=tuple(allow_host), max_hops=max_hops)
+        raw = (json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode()
+        if not atomic_create_bytes(out, raw):
+            raise ValueError("output_exists")
+    except (OSError, ValueError, TypeError) as exc:
+        typer.echo(f"采集失败：{type(exc).__name__}", err=True)
+        raise typer.Exit(code=2) from exc
+    status = result["_capture"]["status"]
+    typer.echo(f"HTTP 证据已保存：{status}。HAR 含私有原值；JS/XHR、登录态和子资源未采集。")
+    if status != "captured_http":
+        raise typer.Exit(code=1)

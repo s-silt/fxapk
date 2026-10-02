@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import requests
+from apkscan.enrichers._rate_limit import request_slot
 
 #: 单次富化响应体硬上限（16MB）：远超任何合法 RDAP / Shodan / FOFA / certspotter JSON，
 #: 拦住异常 / 被劫持 / 压缩炸弹式的巨型响应。
@@ -21,6 +22,13 @@ _MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
 class ResponseTooLarge(requests.RequestException):
     """响应体超过 _MAX_RESPONSE_BYTES——作为 requests 异常上抛，被既有 provider 错误处理捕获。"""
+
+
+def reject_redirect(response: Any) -> None:
+    """Fixed API endpoints must not accept redirect bodies as provider evidence."""
+    status = getattr(response, "status_code", 200)
+    if isinstance(status, int) and 300 <= status < 400:
+        raise requests.RequestException("unexpected_provider_redirect")
 
 
 def _cap_body(resp: requests.Response, max_bytes: int) -> requests.Response:
@@ -55,23 +63,39 @@ class CappedSession(requests.Session):
 
     def get(self, url: str | bytes, **kwargs: Any) -> requests.Response:  # type: ignore[override]
         kwargs.setdefault("stream", True)
-        return _cap_body(super().get(url, **kwargs), _MAX_RESPONSE_BYTES)
+        with request_slot(url, allow_redirects=kwargs.get("allow_redirects", True)) as slot:
+            response = super().get(url, **kwargs)
+            if slot is not None:
+                slot.observe(response)
+            return _cap_body(response, _MAX_RESPONSE_BYTES)
 
     def post(self, url: str | bytes, **kwargs: Any) -> requests.Response:  # type: ignore[override]
         kwargs.setdefault("stream", True)
-        return _cap_body(super().post(url, **kwargs), _MAX_RESPONSE_BYTES)
+        with request_slot(url, allow_redirects=kwargs.get("allow_redirects", True)) as slot:
+            response = super().post(url, **kwargs)
+            if slot is not None:
+                slot.observe(response)
+            return _cap_body(response, _MAX_RESPONSE_BYTES)
 
 
 def capped_get(url: str, **kwargs: Any) -> requests.Response:
     """requests.get 的有界替身：body 超 _MAX_RESPONSE_BYTES 即中止（用于不走共享 session 的直连富化器）。"""
     kwargs.setdefault("stream", True)
-    return _cap_body(requests.get(url, **kwargs), _MAX_RESPONSE_BYTES)
+    with request_slot(url, allow_redirects=kwargs.get("allow_redirects", True)) as slot:
+        response = requests.get(url, **kwargs)
+        if slot is not None:
+            slot.observe(response)
+        return _cap_body(response, _MAX_RESPONSE_BYTES)
 
 
 def capped_post(url: str, **kwargs: Any) -> requests.Response:
     """requests.post 的有界替身：body 超 _MAX_RESPONSE_BYTES 即中止（明文 ip-api /batch 等 POST 源用）。"""
     kwargs.setdefault("stream", True)
-    return _cap_body(requests.post(url, **kwargs), _MAX_RESPONSE_BYTES)
+    with request_slot(url, allow_redirects=kwargs.get("allow_redirects", True)) as slot:
+        response = requests.post(url, **kwargs)
+        if slot is not None:
+            slot.observe(response)
+        return _cap_body(response, _MAX_RESPONSE_BYTES)
 
 
 class _CappedRequests:
@@ -110,6 +134,16 @@ def _host_is_public(host: str) -> bool:
     （requests 会再解析一次，可能拿到不同 IP）。完整防护需固定 IP 连接 + 保留 Host 头，本工具威胁模型下
     （入口 rdap.org 固定、referral 命中概率低）取预解析拒绝为相称缓解；字面私网 IP（如元数据端点）无 DNS、直接命中。
     """
+    # Numeric addresses do not need DNS; preserve the same address predicates.
+    # This also keeps metadata/private-address rejection independent of resolver
+    # availability and the test harness's external-DNS guard.
+    try:
+        literal = ipaddress.ip_address(host.split("%", 1)[0])
+    except ValueError:
+        pass
+    else:
+        return not (literal.is_private or literal.is_loopback or literal.is_link_local
+                    or literal.is_reserved or literal.is_multicast or literal.is_unspecified)
     try:
         infos = socket.getaddrinfo(host, None)
     except (socket.gaierror, UnicodeError, ValueError):

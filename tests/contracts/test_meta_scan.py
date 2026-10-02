@@ -627,9 +627,12 @@ def test_common_meta_writes_have_explicit_compensation() -> None:
 def _owners_for_access(file: str, key: str) -> set[str]:
     module = Path(file).stem
     if module == "web_evidence":
+        from apkscan.core.registry import discover_analyzers
+        # The shared reader accepts every registered web analyzer, including HAR.
         return {
-            name for name in ("web_inline_config", "web_redirect_chain", "web_request_recipe")
-            if key.startswith(f"{name}_") or key == name
+            analyzer.name for analyzer in discover_analyzers()
+            if "web" in (getattr(analyzer, "requires", None) or [])
+            and (key.startswith(f"{analyzer.name}_") or key == analyzer.name)
         }
     return {module}
 

@@ -385,7 +385,7 @@ class ShodanEnricher(BaseEnricher):
             # requests 的异常文本可能包含带 key 的完整 URL，只保留异常类型，避免密钥进日志/报告。
             error_type = exc.category if isinstance(exc, _ServiceError) else type(exc).__name__
             self._consecutive_failures += 1
-            if error_type in {"authentication_failed", "permission_denied", "quota_insufficient", "rate_limited"} or self._consecutive_failures >= 3:
+            if error_type in {"authentication_failed", "permission_denied", "quota_insufficient", "rate_limited", "local_rate_limit"} or self._consecutive_failures >= 3:
                 self._blocked_error = error_type
             self.receipt["error_type"] = error_type
             if isinstance(exc, ValueError) and str(exc) == "dns_resolution_failed":

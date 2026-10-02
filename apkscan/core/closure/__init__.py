@@ -279,6 +279,8 @@ def close_report(
     from apkscan.core.enrichment import enrich_selected_targets
     from apkscan.core.registry import discover_enrichers
 
+    from apkscan.core.enrichment_budget import EnrichmentBudget
+    budget = EnrichmentBudget(total=config.max_source_calls) if config.max_source_calls is not None else None
     canonicalize_report_source_status(report)
     selected, target_selection = _select_targets_with_stats(report, config.max_targets)
     available = list(enrichers) if enrichers is not None else list(discover_enrichers())
@@ -296,10 +298,11 @@ def close_report(
                 pending,  # type: ignore[arg-type]
                 mode=config.mode,
                 include_case_close=True,
+                budget=budget,
             )
         _ensure_source_status_coverage(endpoint, typed_enrichers, config)
         if endpoint.kind == "domain":
-            _enrich_resolved_ips(endpoint, typed_enrichers, config)
+            _enrich_resolved_ips(endpoint, typed_enrichers, config, budget=budget)
         # 顶层归因在逐 IP 富化之后再建，才能吸收 resolved_ip_enrichment（P1-3：否则文书/摘要读顶层恒 unknown）。
         _set_attribution(endpoint)
 
@@ -308,6 +311,8 @@ def close_report(
     closure = evaluate_closure(
         report, targets, require_dynamic=config.require_dynamic, target_selection=target_selection
     )
+    if budget is not None:
+        closure["source_budget"] = budget.snapshot()
     report.meta["closure"] = closure
     _refresh_derived_views(report, online=config.online)
     _update_target_leads(report, targets)

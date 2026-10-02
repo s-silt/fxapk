@@ -17,6 +17,7 @@ from apkscan.core.models import (
     DOWNGRADE_SNI_MASQUERADE,
     DOWNGRADE_SOURCE_TIER,
     Endpoint,
+    OBSERVED_CONTACT_SOURCES,
     EvidenceScope,
     Report,
     advice_is_consistent,
@@ -74,6 +75,16 @@ def _runtime_info(endpoint: Endpoint) -> dict[str, Any]:
         # attribution, or ranking claims for this case.
         return {"observed": False}
     runtime = _mapping(endpoint.enrichment.get("runtime"))
+    refs = runtime.get("selected_evidence_refs")
+    if runtime.get("sequence_identity_unconfirmed") is True or (
+        "selected_observation_ref" in runtime and (
+            not isinstance(refs, list) or not isinstance(runtime["selected_observation_ref"], str)
+            or any(not isinstance(ref, str) or not ref.startswith(runtime["selected_observation_ref"] + "::") for ref in refs)
+            or not any(
+                ev.scope is EvidenceScope.CASE_EVIDENCE and ev.source in OBSERVED_CONTACT_SOURCES
+                and ev.location in refs for ev in endpoint.evidences))
+    ):
+        return {"observed": True, "sequence_identity_unconfirmed": True}
     runtime["observed"] = True
     return runtime
 

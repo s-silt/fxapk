@@ -81,7 +81,7 @@ def _advice_or_none(value: object, field_name: str) -> str | None:
     text = value.strip()
     if text not in VALID_ADVICE:
         if text:
-            logger.warning("report.json 里的 %s 取值非法，按不可考处理：%r", field_name, text)
+            logger.warning("report.json 里的 %s 取值非法，按不可考处理（原值不写日志）", field_name)
         return None
     return text
 
@@ -138,8 +138,7 @@ def report_from_dict(payload: Mapping[str, object]) -> Report:
             #   typed 重渲的出口（HTML）看不见。归入 UNKNOWN + 保留原始串，序列化写回原始串。
             raw_category = str(item.get("category", ""))
             logger.warning(
-                "Unknown LeadCategory in report.json; preserved as UNKNOWN: %s",
-                item.get("category"),
+                "Unknown LeadCategory in report.json; preserved as UNKNOWN (value omitted)",
             )
             category = LeadCategory.UNKNOWN
         subject = item.get("subject")
@@ -154,9 +153,8 @@ def report_from_dict(payload: Mapping[str, object]) -> Report:
             # ★下一刀要重审这段文案：一旦开始给旧 lead **补算** base_advice，「两个锚点并存」
             #   就成了迁移期的正常过渡态，那时再说「被手改」就不对了，得按当时的迁移策略改写。
             logger.warning(
-                "report.json 的 lead %r 同时带 base_advice 与 legacy_effective_advice；"
-                "按 base_advice 计算档位，快照原样保留：%r / %r",
-                item.get("value"), base_advice, legacy_advice,
+                "report.json 的 lead 同时带 base_advice 与 legacy_effective_advice；"
+                "按 base_advice 计算档位，快照原样保留（线索原值不写日志）",
             )
         leads.append(
             Lead(

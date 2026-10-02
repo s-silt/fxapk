@@ -468,6 +468,7 @@ def run(
     allow_behavior_modification: bool = False,
     antidetect: str = "off",
     pass_tag: str = "",
+    selected_hooks: tuple[str, ...] | None = None,
 ) -> DynamicResult:
     """对运行中的目标应用做真机抓包，提取运行时端点。
 
@@ -498,6 +499,12 @@ def run(
     """
     if out is not None:
         out_dir = out
+
+    if selected_hooks is not None and (
+        not isinstance(selected_hooks, tuple) or not selected_hooks
+        or any(not isinstance(name, str) or name not in _SELECTABLE_HOOKS for name in selected_hooks)
+    ):
+        return empty_result(STATUS_ERROR, "invalid requested hook profile")
 
     # 消费 decide_capture：把静态报告的规避信号落成引擎可读决策（绝不抛，坏 report→默认决策）。
     decision = decide_capture(report)
@@ -583,6 +590,7 @@ def run(
         frida=use_frida, capabilities_plan=plan_dict,
         allow_behavior_modification=allow_behavior_modification, antidetect=antidetect,
         pass_tag=pass_tag,
+        **({"selected_hooks": selected_hooks} if selected_hooks is not None else {}),
     )
 
 
@@ -686,6 +694,7 @@ def _capture(
     allow_behavior_modification: bool = False,
     antidetect: str = "off",
     pass_tag: str = "",
+    selected_hooks: tuple[str, ...] | None = None,
 ) -> DynamicResult:
     """编排 mitmdump + adb 代理 + frida unpinning + 启 app，到时停并解析流量。
 
@@ -884,6 +893,7 @@ def _capture(
                 allow_behavior_modification=allow_behavior_modification,
                 antidetect=antidetect,
                 shim_state=shim_state,
+                **({"selected_hooks": selected_hooks} if selected_hooks is not None else {}),
             )
             # ★sticky OR：以 shim_state 为准，而非返回值。shim 在 script.load() 那一刻就已进入目标进程，
             #   而 load→return 之间任何异常都会让本次调用返回 (None, None)（那段流量却已被诱导）。
@@ -1318,6 +1328,9 @@ def _capture(
     def _clean(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return [e for e in events if not e.get("_capped")]
 
+    if selected_hooks is not None:
+        capture_signals["requested_hooks"] = list(selected_hooks)
+
     report_path = _write_runtime_report(
         package,
         out_path,
@@ -1593,42 +1606,43 @@ def _make_bridge_loader(script: Any, state: dict[str, Any]) -> Any:
     return _handler
 
 
+_SELECTABLE_HOOKS = frozenset({
+    "crypto", "jsbridge", "sensitive_api", "okhttp", "sqlcipher", "clipboard", "accessibility",
+})
+
+
 def _build_injection_source(
     *,
     allow_behavior_modification: bool = False,
     antidetect: str = "off",
+    selected_hooks: tuple[str, ...] | None = None,
 ) -> str:
-    """拼接注入脚本。除行为修改 shim 外的 8 段（Java bridge / unpinning / crypto / jsbridge /
-    sensitive-api / okhttp / sqlcipher / clipboard / accessibility / hook-ready）为观察型或解密使能型，
-    **无条件注入**；仅 ``FRIDA_ANTIDETECT_JS``（伪造 Build/隐藏 root/屏蔽模拟器特征、会改变样本行为）
-    受第二道授权门 + 档位双重门控。
-
-    ★fail-safe 收口：门条件用白名单精确值 ``antidetect == "java"``（而非 ``!= "off"``），任何未校验的
-    未知取值一律不注入；本函数不抛（保持 :func:`_start_frida_session` 的「绝不抛」契约，取值合法性由
-    ``run`` 上游校验并以 STATUS_ERROR 拒绝）。
-    """
-    parts = [
-        # ★必须最先：安装 Java lazy getter，否则下面所有 Java.perform 都在裸 GumJS 上跑。
-        _FRIDA_JAVA_BRIDGE_LOADER_JS,
-        FRIDA_UNPINNING_JS,
-        cryptohook.FRIDA_CRYPTO_HOOK_JS,
-        cryptohook.FRIDA_JSBRIDGE_HOOK_JS,
-        cryptohook.FRIDA_SENSITIVE_API_HOOK_JS,
-    ]
-    # ★唯一的行为修改 shim：必须同时取得显式授权门 + java 档位才注入（默认关，污染证据的旁路不裸奔）。
-    #   授权门用严格 `is True`——truthy 的非布尔值（如字符串 "false"、int 1）一律按未授权处理，
-    #   杜绝程序化/字符串配置经 truthiness 绕过第二道门（fail-closed）。
+    """Use bundled observers only; sample strings are never executable script."""
+    hooks = {
+        "crypto": cryptohook.FRIDA_CRYPTO_HOOK_JS,
+        "jsbridge": cryptohook.FRIDA_JSBRIDGE_HOOK_JS,
+        "sensitive_api": cryptohook.FRIDA_SENSITIVE_API_HOOK_JS,
+        "okhttp": cryptohook.FRIDA_OKHTTP_HOOK_JS,
+        "sqlcipher": cryptohook.FRIDA_SQLCIPHER_HOOK_JS,
+        "clipboard": cryptohook.FRIDA_CLIPBOARD_HOOK_JS,
+        "accessibility": cryptohook.FRIDA_ACCESSIBILITY_HOOK_JS,
+    }
+    if selected_hooks is not None and (
+        not isinstance(selected_hooks, tuple) or not selected_hooks
+        or any(not isinstance(name, str) or name not in hooks for name in selected_hooks)
+    ):
+        raise ValueError("invalid requested hook profile")
+    selected = set(hooks) if selected_hooks is None else set(selected_hooks)
+    parts = [_FRIDA_JAVA_BRIDGE_LOADER_JS, FRIDA_UNPINNING_JS]
+    for name in ("crypto", "jsbridge", "sensitive_api"):
+        if name in selected:
+            parts.append(hooks[name])
     if allow_behavior_modification is True and antidetect == "java":
         parts.append(cryptohook.FRIDA_ANTIDETECT_JS)
-    parts.extend(
-        [
-            cryptohook.FRIDA_OKHTTP_HOOK_JS,
-            cryptohook.FRIDA_SQLCIPHER_HOOK_JS,
-            cryptohook.FRIDA_CLIPBOARD_HOOK_JS,
-            cryptohook.FRIDA_ACCESSIBILITY_HOOK_JS,
-            _FRIDA_HOOK_READY_JS,  # ★#7：所有 hook 装完后显式 send hook_ready
-        ]
-    )
+    for name in ("okhttp", "sqlcipher", "clipboard", "accessibility"):
+        if name in selected:
+            parts.append(hooks[name])
+    parts.append(_FRIDA_HOOK_READY_JS)
     return "\n".join(parts)
 
 
@@ -1647,6 +1661,7 @@ def _start_frida_session(
     allow_behavior_modification: bool = False,
     antidetect: str = "off",
     shim_state: dict[str, bool] | None = None,
+    selected_hooks: tuple[str, ...] | None = None,
 ) -> tuple[Any, Any]:
     """用 frida-core（``import frida``）spawn 目标 app 并注入 unpinning + 运行时 hook 套件。
 
@@ -1688,6 +1703,7 @@ def _start_frida_session(
         source = _build_injection_source(
             allow_behavior_modification=allow_behavior_modification,
             antidetect=antidetect,
+            **({"selected_hooks": selected_hooks} if selected_hooks is not None else {}),
         )
         # serial 钉定那台（-D 等价）；None 退回 USB（向后兼容）。
         if serial:

@@ -62,7 +62,10 @@ class _FakeHttp:
         self._lock = threading.Lock()
         self.delay = 0.0
 
-    def capped_get(self, url: str, timeout: float | None = None) -> _FakeResponse:
+    def capped_get(
+        self, url: str, timeout: float | None = None, *, allow_redirects: bool
+    ) -> _FakeResponse:
+        assert allow_redirects is False
         del url, timeout
         with self._lock:
             self.calls += 1
@@ -95,7 +98,7 @@ def _ip(value: str) -> Endpoint:
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, fake: _FakeHttp) -> _FakeHttp:
-    monkeypatch.setattr(spamhaus, "_http", fake)
+    monkeypatch.setattr(spamhaus._http, "capped_get", fake.capped_get)
     return fake
 
 

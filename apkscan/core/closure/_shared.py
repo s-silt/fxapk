@@ -37,8 +37,11 @@ class ClosureConfig:
     max_targets: int = 6
     refresh: bool = False
     require_dynamic: bool | None = None
+    max_source_calls: int | None = None
 
     def __post_init__(self) -> None:
+        if self.max_source_calls is not None and (type(self.max_source_calls) is not int or self.max_source_calls < 0):
+            raise ValueError("invalid_total_source_budget")
         if self.mode not in ANALYSIS_MODES:
             raise ValueError(f"unsupported analysis mode: {self.mode}")
         if self.max_targets <= 0:

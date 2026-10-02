@@ -72,7 +72,7 @@ class _FakeRequests:
         self.text = text
         self.calls: list[dict] = []
 
-    def get(self, url, params=None, timeout=None):  # type: ignore[no-untyped-def]
+    def get(self, url, params=None, timeout=None, **kwargs):  # type: ignore[no-untyped-def]
         self.calls.append({"url": url, "params": params or {}, "timeout": timeout})
         if self.exc is not None:
             raise self.exc

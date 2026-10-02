@@ -42,7 +42,7 @@ from apkscan.commands.enrich import enrich_app
 from apkscan.commands.jadx_query import jadx_app
 from apkscan.commands.reanalysis_cli import recognize_app
 from apkscan.commands.lead import lead_app
-from apkscan.commands.web import analyze_web
+from apkscan.commands.web import analyze_web, capture_web
 from apkscan.commands.origin_check import origin_check
 
 META_WRITE_OWNER = "cli"
@@ -82,10 +82,27 @@ app.add_typer(jadx_app, name="jadx")
 app.add_typer(lead_app, name="lead")
 app.add_typer(recognize_app, name="recognize")
 
+
+@app.command(
+    name="phase2",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True, "help_option_names": []},
+    add_help_option=False,
+)
+def phase2_command(ctx: typer.Context) -> None:
+    """已并入 ``fxapk case phase2`` 的别名。本版参数与退出码不变，下一版删除。"""
+    from apkscan.commands.phase2 import main as phase2_main
+
+    typer.echo(
+        "fxapk phase2 已并入 fxapk case phase2，本版仍可用，下一版删除。",
+        err=True,
+    )
+    raise typer.Exit(code=phase2_main(list(ctx.args) or ["--help"]))
+
 # analyze-web 是**单个命令**（不是子命令组），故用 app.command() 注册而非 add_typer。
 # 函数体在 commands/web.py（逻辑不堆进 cli.py），它反过来惰性 import 本模块的 _write_reports
 # 等共用出口——注册放这里是为了让那份反向依赖始终是函数体内的、不成环。
 app.command(name="analyze-web")(analyze_web)
+app.command(name="capture-web")(capture_web)
 app.command(name="origin-check")(origin_check)
 
 # 合法输出格式（--fmt）。全非法时回退而非静默产出零报告。
@@ -913,6 +930,10 @@ def auto(
         "--fix/--no-fix",
         help="体检时对 frida-server / CA 等可自动修的项调 provision 自动修复（--no-fix 仅体检不动设备）。",
     ),
+    three_rounds: bool = typer.Option(
+        True, "--three-rounds/--single-round",
+        help="脱壳重分析后按 PCAP、通用探针、定向采集顺序执行；各轮分别留存，默认开启。",
+    ),
     duration: int = typer.Option(60, "--duration", min=1, help="抓包时长（秒，下限 1）。"),
     fmt: str = typer.Option(
         "html,json",
@@ -998,6 +1019,7 @@ def auto(
             online=online,
             auto_fix=auto_fix,
             capture_duration=duration,
+            three_rounds=three_rounds,
             formats=formats,
             mode=mode,
             repackage=repackage,
