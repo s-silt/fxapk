@@ -16,10 +16,14 @@ one environment. Run `pip check` in both environments. Core static analysis stil
 supports the Python versions declared by the project.
 
 ```powershell
-.venv\Scripts\python.exe -m venv .venv/toolchain/mitmproxy-env
+py -3.12 -m venv .venv/toolchain/mitmproxy-env
 .venv/toolchain/mitmproxy-env/Scripts/python.exe -m pip install mitmproxy==12.2.3
 .venv/toolchain/mitmproxy-env/Scripts/python.exe -m pip check
 ```
+
+The example uses the Windows Python launcher to select Python 3.12 explicitly.
+If it is unavailable, use the absolute path to an installed Python 3.12+ interpreter;
+do not create this environment with a Python 3.11 project interpreter.
 
 For Frida and mitmproxy console scripts, resolution prefers the current interpreter's
 scripts directory, then falls back to PATH. The fallback can still select a different
