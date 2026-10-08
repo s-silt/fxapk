@@ -55,6 +55,7 @@ jobs:
         run: |
           python -m pip install --upgrade build
           python -m build
+          python -m build plugins/fxapk-android-ui --outdir plugin-dist
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
@@ -63,7 +64,9 @@ jobs:
           skip-existing: true
       - name: Hash release archives
         run: |
-          cd dist
+          mkdir release-assets
+          cp dist/*.whl dist/*.tar.gz plugin-dist/*.whl plugin-dist/*.tar.gz release-assets/
+          cd release-assets
           sha256sum *.whl *.tar.gz > SHA256SUMS.txt
       # 打 tag 时顺带建 GitHub Release（正文自动从上个 Release 以来的 PR 生成）。
       # ★ 幂等：Release 已存在（tag 重推）则跳过，不失败——与上面 skip-existing 同philosophy。
@@ -77,8 +80,8 @@ jobs:
             exit 0
           fi
           gh release create "$GITHUB_REF_NAME" \
-            dist/*.whl dist/*.tar.gz dist/SHA256SUMS.txt \
+            release-assets/*.whl release-assets/*.tar.gz release-assets/SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" \
-            --title "fxapk $GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
             --generate-notes \
             --verify-tag

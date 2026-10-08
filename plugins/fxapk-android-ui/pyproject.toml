@@ -6,6 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "fxapk-android-ui"
 version = "0.1.0"
 description = "Optional Android CLI UI observation plugin for fxapk"
+readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.11"
 dependencies = ["fxapk>=1.18.0", "typer"]
 

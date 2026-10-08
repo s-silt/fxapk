@@ -23,6 +23,7 @@
 | 并列查看包完整性、分析、闭环、复核四种状态 | `fxapk case status out/case-package.json --review out/case-review.json` |
 | 把报告压成一页要点（**默认脱敏**） | `fxapk digest out/app.json` |
 | 同上，但要看高敏值的明文原值 | `fxapk digest out/app.json --no-redact` |
+| Android UI 截图、布局和固定动作（可选插件） | [完整安装与计划示例](ANDROID-UI.md)；`fxapk ui --help` |
 | 真机抓包 | `fxapk capture <包名>` |
 | 设备体检（**默认就会动手修**：装 frida-server / CA 证书） | `fxapk doctor` |
 | 只体检、什么都不改 | `fxapk doctor --no-fix` |
@@ -253,17 +254,6 @@ fxapk case prepare-materials private/demo --out private/demo/pre-report.json
 
 ## 可选 Android UI 插件
 
-核心包不包含 Android CLI，也不会因安装插件自动操作设备。UI 命令由可信的 `fxapk-android-ui` 安装包提供；插件代码在宿主 Python 进程内运行，不是沙箱。需另外准备 Android CLI，并在已授权的专用测试设备上指定 `--serial` 和目标 `--package`。
+核心 1.18.0 配合独立 `fxapk-android-ui 0.1.0` 提供 `ui capabilities`、`ui snapshot` 与 `ui run-plan`。Android CLI 与 adb 另行安装；所有设备命令显式指定 `--serial`，观察/计划还须指定 `--package` 与新的 `--out` 目录。
 
-```bash
-# 从已审核的插件源码安装；先按本机 Python 环境准备依赖。
-python -m pip install .
-python -m pip install ./plugins/fxapk-android-ui
-fxapk ui capabilities --serial TEST_SERIAL
-fxapk ui snapshot --serial TEST_SERIAL --package com.example.synthetic --out evidence/ui
-fxapk ui run-plan --serial TEST_SERIAL --package com.example.synthetic --plan inputs/ui-plan.json --out evidence/ui-plan
-```
-
-动作计划仅接受固定动作，不能提供任意 shell 命令。计划须匹配设备与包名；前台身份未知、切包、超时、失败或预算耗尽须保留失败/部分结果。截图和布局保留文件哈希；轮内观察另外绑定样本、轮次和运行时报告。UI 观察与 PCAP、探针证据互补，不能单独证明业务连接或分析闭环。
-
-截图、布局及动作结果可能含个人信息或业务凭据，属于受控证据文件；摘要的有限脱敏不覆盖这些文件。对外流转前另做审核。Android CLI 兼容性、权限弹窗、切包及短连接归因仍需已授权真机验收。
+完整安装、真实参数、合成计划、权限、输出和失败恢复见 [Android UI 指南](ANDROID-UI.md)。安装插件不会自动为 `auto`/`capture` CLI 接入 UI 观察；轮内接入目前由程序化 API 显式开启。截图、布局与诊断可能含原值，有限摘要脱敏不覆盖这些文件。

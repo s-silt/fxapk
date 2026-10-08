@@ -5,11 +5,14 @@ affect automated / CI / agent callers are called out explicitly**.
 
 ## Unreleased
 
-## 1.18.0 — 2026-10-08 (unreleased)
+## 1.18.0 — 2026-10-08
 
 - Phase-2 survey inputs are bounded and validated. Legacy or incomplete surveys retain the unassessed declaration; only complete, case/inventory/sample/capture-bound inputs remove it. Gate receipts pin the exact survey snapshot and review rejects changed or missing snapshots.
 - HAR response bodies now reach inline configuration, redirect and request-recipe analyzers through a shared bounded input contract, with source/entry/body hashes and truncation provenance. JavaScript is not executed.
 - Censys review worklists now require a bound IP before allocating a new query; existing results and shared budgets retain their prior semantics.
+- Document Android CLI installation, exact UI commands, a synthetic plan, permissions, outputs and recovery in Chinese and English. Keep standalone UI commands distinct from explicitly enabled programmatic capture integration.
+- Align new GitHub release titles with their version tags; attach independently versioned UI plugin wheel/source archives and MIT notices alongside the core artifacts and checksums. Only the core distribution is published to PyPI by this workflow.
+- Include command guides and the synthetic UI plan in the core source archive so downloaded sources retain the documented example.
 - Add the optional Android UI plugin and fixed action surface. Inputs, foreground scope, deadlines, partial results and artifact bindings are checked; screenshot/layout files may contain sensitive values and are not sanitized for external sharing.
 - Leak-scan, top-level version and help entrypoints do not load credential files. Analysis commands keep the existing environment-loading behavior.
 - Keep the historical CFB/CFB8 import fallback compatible with older installed cryptography versions; invalid key/IV diagnostics no longer include their raw values.

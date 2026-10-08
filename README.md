@@ -12,17 +12,17 @@
 </p>
 <p align="center">
   <a href="https://github.com/s-silt/fxapk/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/s-silt/fxapk/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.17.0">v1.17.0</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
+  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.18.0">v1.18.0</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
 </p>
 
 CLI 命令 `fxapk`，兼容别名 `apkscan`，PyPI 包名 `fxapk`。面向直接运行源码或 Python 包的人与 AI 助手，不提供 exe 或 GUI。
 
-当前已发布版本为 **1.17.0**；**1.18.0 待发布源码** 收紧 Survey 完整性与证据绑定，补齐 HAR 正文语义分析及 Censys 的 IP 前置条件，并提供可选 Android UI 观察插件。升级保留历史包和旧版流程；代码发布不会迁移案件、修改设备或自动补查第三方服务。变更见 [CHANGELOG.md](CHANGELOG.md)。
+本版本 **1.18.0** 收紧 Survey 完整性与证据绑定，补齐 HAR 正文语义分析及 Censys 的 IP 前置条件，并提供可选 Android UI 观察插件。升级保留历史包和旧版流程；代码发布不会迁移案件、修改设备或自动补查第三方服务。变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 | 核心能力 | 说明 |
 | --- | --- |
 | **静态提取** | 解析 APK 中的配置、端点、组件与加固信号；能力不足时明确标记缺口 |
-| **动态证据** | 在已授权设备上采集 PCAP、socket 归因及可用探针信息，分轮保留证据 |
+| **动态证据** | 在已授权设备上采集 PCAP、socket 归因及可用探针信息，分轮保留证据；可选 UI 插件补留截图与布局 |
 | **基础设施归属** | 分开记录资源持有者、BGP、承载/CDN 与运营者，保留逐来源回执 |
 | **包与复核** | 固化报告和附件哈希，独立记录 Phase-2 覆盖、判决与复核状态 |
 
@@ -55,17 +55,17 @@ APK / 已落盘网页证据        已授权设备采集
 ### 1. 安装与核对版本
 
 ```bash
-python -m pip install "fxapk==1.17.0"
+python -m pip install "fxapk==1.18.0"
 fxapk --version
 fxapk selfcheck
 ```
 
-[v1.17.0 发布页](https://github.com/s-silt/fxapk/releases/tag/v1.17.0) 提供 wheel、源码归档和 `SHA256SUMS.txt`。手动下载时，先用 `Get-FileHash <文件> -Algorithm SHA256`（PowerShell）或 `sha256sum -c SHA256SUMS.txt`（Linux）核对附件，再安装 wheel。它不是离线依赖全集。
+[v1.18.0 发布页](https://github.com/s-silt/fxapk/releases/tag/v1.18.0) 提供核心 1.18.0 与独立 UI 插件 0.1.0 的 wheel、源码归档和 `SHA256SUMS.txt`。手动下载时，先用 `Get-FileHash <文件> -Algorithm SHA256`（PowerShell）或 `sha256sum -c SHA256SUMS.txt`（Linux）核对附件，再安装 wheel。它不是离线依赖全集。
 
 需要同一发行版源码时，按标签获取；日常开发可 clone 默认 master：
 
 ```bash
-git clone --branch v1.17.0 https://github.com/s-silt/fxapk.git
+git clone --branch v1.18.0 https://github.com/s-silt/fxapk.git
 cd fxapk
 python -m pip install -e .
 ```
@@ -91,6 +91,7 @@ HTML/JSON 留在本地输出目录；`digest` 用于初筛和定位。正式判�
 | 真机环境排查 | `fxapk doctor --no-fix`，先检查，再按授权修复 |
 | 不用 Frida 的 PCAP 底座 | `fxapk capture <包名> --mode floor-only`，仍需 adb、root 与设备侧 tcpdump |
 | 多轮自动采集 | `fxapk auto app.apk --strict-case`，仅在操作已授权的专用设备上运行 |
+| Android UI 截图、布局与固定计划 | 安装可选插件后使用 `fxapk ui ...`；见 [安装与完整示例](ANDROID-UI.md) |
 | 已有报告的补查与闭环 | `fxapk case close out/app.json`，需要联网和报告写回授权 |
 | 完整命令与复现环境 | [使用手册](USAGE.md) · `fxapk --help` |
 
@@ -134,6 +135,7 @@ HTML/JSON 留在本地输出目录；`digest` 用于初筛和定位。正式判�
 | 内容 | 文档 |
 | --- | --- |
 | 命令、输出、语料库与复现环境 | [USAGE.md](USAGE.md) |
+| Android CLI 安装、权限、动作计划与恢复 | [ANDROID-UI.md](ANDROID-UI.md) |
 | AI 操作约定与授权边界 | [AGENTS.md](AGENTS.md) |
 | 多轮采集、阶段二与报告前材料 | [PRE-REPORT-WORKFLOW.md](PRE-REPORT-WORKFLOW.md) |
 | 代码分层与证据语义 | [ARCHITECTURE.md](ARCHITECTURE.md) |
