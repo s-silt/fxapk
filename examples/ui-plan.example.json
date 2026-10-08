@@ -1,0 +1,12 @@
+{
+  "schema_version": "ui-plan/1",
+  "serial": "TEST_SERIAL",
+  "package": "com.example.synthetic",
+  "max_steps": 3,
+  "max_duration_sec": 45,
+  "actions": [
+    {"kind": "launch"},
+    {"kind": "wait_for_foreground", "timeout_sec": 5},
+    {"kind": "snapshot", "no_idle": true}
+  ]
+}

@@ -12,17 +12,17 @@
 </p>
 <p align="center">
   <a href="https://github.com/s-silt/fxapk/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/s-silt/fxapk/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.17.0">v1.17.0</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
+  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.18.0">v1.18.0</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
 </p>
 
 CLI command and PyPI package: `fxapk`; compatible command alias: `apkscan`. Run from Python or source, directly or through an AI assistant. No exe or GUI is provided.
 
-The published version is **1.17.0**. The **unreleased 1.18.0 source** strengthens survey completeness and evidence binding, shares HAR bodies with semantic analyzers, fixes the Censys IP prerequisite, and adds an optional Android UI observation plugin. Upgrades preserve historical packages and the legacy route; releasing code does not migrate cases, modify devices, or automatically query third-party services. See [CHANGELOG.md](CHANGELOG.md).
+Version **1.18.0** strengthens survey completeness and evidence binding, shares HAR bodies with semantic analyzers, fixes the Censys IP prerequisite, and adds an optional Android UI observation plugin. Upgrades preserve historical packages and the legacy route; releasing code does not migrate cases, modify devices, or automatically query third-party services. See [CHANGELOG.md](CHANGELOG.md).
 
 | Capability | Scope |
 | --- | --- |
 | **Static extraction** | APK configuration, endpoints, components and packer signals; unavailable capabilities remain explicit |
-| **Dynamic evidence** | PCAP, socket attribution and available probes on authorized devices, with separate round records |
+| **Dynamic evidence** | PCAP, socket attribution and available probes on authorized devices, with separate round records; optional UI screenshots and layouts |
 | **Infrastructure attribution** | Resource holder, BGP, hosting/CDN and operator roles stay distinct, with per-source receipts |
 | **Packaging and review** | Hash-bound reports and attachments, separate Phase-2 coverage, decisions and review status |
 
@@ -54,17 +54,17 @@ Requires **Python 3.11+**. Start with offline static analysis; review the [defau
 ### 1. Install and check the version
 
 ```bash
-python -m pip install "fxapk==1.17.0"
+python -m pip install "fxapk==1.18.0"
 fxapk --version
 fxapk selfcheck
 ```
 
-The [v1.17.0 release](https://github.com/s-silt/fxapk/releases/tag/v1.17.0) includes a wheel, source archive and `SHA256SUMS.txt`. Before installing a downloaded wheel, compare `Get-FileHash <file> -Algorithm SHA256` in PowerShell, or run `sha256sum -c SHA256SUMS.txt` on Linux. These files are not a complete offline dependency bundle.
+The [v1.18.0 release](https://github.com/s-silt/fxapk/releases/tag/v1.18.0) includes core 1.18.0 and independent UI plugin 0.1.0 wheels/source archives, plus `SHA256SUMS.txt`. Before installing a downloaded wheel, compare `Get-FileHash <file> -Algorithm SHA256` in PowerShell, or run `sha256sum -c SHA256SUMS.txt` on Linux. These files are not a complete offline dependency bundle.
 
 To obtain the released source, clone its tag; use the default master branch for current development:
 
 ```bash
-git clone --branch v1.17.0 https://github.com/s-silt/fxapk.git
+git clone --branch v1.18.0 https://github.com/s-silt/fxapk.git
 cd fxapk
 python -m pip install -e .
 ```
@@ -88,6 +88,7 @@ An AI assistant can follow [AGENTS.md](AGENTS.md), given a sample path and expli
 | Device inspection | `fxapk doctor --no-fix`; authorize repairs separately |
 | PCAP without Frida | `fxapk capture <package> --mode floor-only`; still requires adb, root and device-side tcpdump |
 | Multi-round automatic capture | `fxapk auto app.apk --strict-case` on an authorized dedicated device |
+| Android UI snapshots, layouts and fixed plans | Install the optional plugin, then use `fxapk ui ...`; see [installation and examples](ANDROID-UI.en.md) |
 | Enrichment and closure | `fxapk case close out/app.json`; requires network and report-write authorization |
 | Full command reference | [USAGE.en.md](USAGE.en.md) · `fxapk --help` |
 
@@ -131,6 +132,7 @@ Use only within lawful authorization. Shared CDN, ASN, certificates or technical
 | Topic | Reference |
 | --- | --- |
 | Commands, outputs and corpus | [USAGE.en.md](USAGE.en.md) · [Chinese reference](USAGE.md) |
+| Android CLI setup, permissions, plans and recovery | [ANDROID-UI.en.md](ANDROID-UI.en.md) |
 | Agent operations and authorization | [AGENTS.md](AGENTS.md) |
 | Capture rounds, Phase 2 and pre-report materials | [PRE-REPORT-WORKFLOW.md](PRE-REPORT-WORKFLOW.md) |
 | Architecture and evidence semantics | [ARCHITECTURE.md](ARCHITECTURE.md) |

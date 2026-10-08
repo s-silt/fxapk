@@ -23,7 +23,7 @@ fxapk 需要 Python 3.11+ 及 [pyproject.toml](pyproject.toml) 声明的运行�
 ## 离线静态起步
 
 ```bash
-python -m pip install "fxapk==1.17.0"
+python -m pip install "fxapk==1.18.0"
 fxapk analyze app.apk --offline --out out
 fxapk digest out/app.json
 ```
@@ -56,6 +56,7 @@ fxapk enrich batch -t targets.txt -o enrich_out
 | 支持的 PCAP 深度解密 | `python -m pip install "fxapk[pcap]"`；`dynamic` extra 同样声明 cryptography，不安装设备工具 |
 | 实验串案排序器 | `python -m pip install "fxapk[ml]"`；仍须通过独立标签与训练门 |
 | jadx、adb、tshark、Frida、frida-dexdump | [工具链安装与路径配置](tools/TOOLCHAIN.md)、[固定 Python 工具版本](tools/toolchain-requirements.txt) |
+| Android UI 插件 | 独立 `fxapk-android-ui 0.1.0`（核心 1.18.0+）；外部 Android CLI、adb 与授权设备；见 [完整指南](ANDROID-UI.md) |
 | mitmproxy | 按工具链文档安装在独立环境，并显式映射可执行文件 |
 
 默认 `capture`/`auto` 仍要求 Frida；显式 `capture --mode floor-only` 不用 Frida，

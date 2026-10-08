@@ -20,6 +20,7 @@ If you'd rather type commands yourself, these are the common ones. Full flags: `
 | Review an exact evidence package (requires a valid PASS receipt and its sibling materials) | `fxapk case review out/case-package.json --reviewer reviewer --status accepted --gate-receipt phase2/gate-receipt.json --out out/case-review.json` |
 | Squeeze a report into a one-page summary (**redacted by default**) | `fxapk digest out/app.json` |
 | Same, but with raw values for the sensitive fields | `fxapk digest out/app.json --no-redact` |
+| Android UI screenshots, layouts and fixed actions (optional plugin) | [Setup and plan examples](ANDROID-UI.en.md); `fxapk ui --help` |
 | Capture traffic on a device | `fxapk capture <package>` |
 | Device health check (**fixes by default**: deploys frida-server / installs CA) | `fxapk doctor` |
 | Check only, change nothing | `fxapk doctor --no-fix` |
@@ -155,19 +156,14 @@ Use only within lawful authorization. Default enrichment queries third-party ser
 
 [MIT](LICENSE)
 
+## Explicit transient recovery
+
+Use `fxapk enrich batch --help` to inspect `--recover-transient`, `--provider-interval` (default 2 seconds) and `--retry-delay` (default 15 seconds). First dry-run the bounded batch, including recovery calls; add `--no-dry-run` only within the authorized query scope. Recovery is opt-in: one provider receives at most one additional adapter call in the batch, and each attempt is retained. Server cooldowns and local rate limits still apply; Retry-After over 60 seconds defers recovery, and a failed retry stops that source. Authentication, upstream permissions, paid-credit uncertainty and quota errors do not become automatic retry candidates. A failed Shodan DNS resolution remains scoped to that target. Resume skips existing successful targets without erasing earlier gaps.
+
+FOFA relay upstream permission denial is distinct from relay-key authentication failure. Hunter reads the current account balance and uses durable reservations under a conservative local 500-point daily cap; this is not a guarantee of provider-wide free entitlement or control over another client's spending. Preserve partial results and read per-source receipts instead of treating failures as no records.
+
 ## Optional Android UI plugin
 
-The core distribution does not include Android CLI. Installing the plugin does not automatically operate a device. UI commands come from the trusted `fxapk-android-ui` distribution; plugin code runs in the host Python process without sandbox isolation. Prepare Android CLI separately and select an authorized test device with `--serial` and the target `--package`.
+Core 1.18.0 with independent `fxapk-android-ui 0.1.0` provides `ui capabilities`, `ui snapshot` and `ui run-plan`. Install Android CLI and adb separately. Device commands require an explicit `--serial`; observations/plans also require `--package` and a new `--out` directory.
 
-```bash
-# Install reviewed plugin source after preparing dependencies in your Python environment.
-python -m pip install .
-python -m pip install ./plugins/fxapk-android-ui
-fxapk ui capabilities --serial TEST_SERIAL
-fxapk ui snapshot --serial TEST_SERIAL --package com.example.synthetic --out evidence/ui
-fxapk ui run-plan --serial TEST_SERIAL --package com.example.synthetic --plan inputs/ui-plan.json --out evidence/ui-plan
-```
-
-Plans accept fixed actions rather than arbitrary shell commands and must match the selected device and package. Unknown foreground identity, app switches, deadlines, failures and exhausted budgets retain failed or partial results. Screenshots and layouts retain file hashes; round observations also bind the sample, round and runtime report. UI observations complement PCAP/probe evidence and cannot independently establish business traffic or closure.
-
-Screenshots, layouts and action results may contain personal information or credentials. They are controlled evidence files, outside the digest's limited redaction coverage, and require separate review before sharing. Android CLI compatibility, permission dialogs, app switches and short-connection attribution still require authorized device acceptance.
+See the [Android UI guide](ANDROID-UI.en.md) for installation, exact flags, a synthetic plan, permissions, outputs and recovery. Installing the plugin does not automatically attach UI observations to auto/capture CLI commands; round integration currently requires the programmatic API. Screenshots, layouts and diagnostics may contain raw values; digest redaction does not cover these files.

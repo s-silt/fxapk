@@ -24,7 +24,7 @@ probe runs automatically.
 ## Start offline
 
 ```bash
-python -m pip install "fxapk==1.17.0"
+python -m pip install "fxapk==1.18.0"
 fxapk analyze app.apk --offline --out out
 fxapk digest out/app.json
 ```
@@ -60,6 +60,7 @@ not execution: distinguish `hit/no_record/failed/skipped/disabled`; failure is n
 | Supported deep PCAP decryption | `python -m pip install "fxapk[pcap]"`; the `dynamic` extra also declares cryptography, not device tools |
 | Experimental linkage reranker | `python -m pip install "fxapk[ml]"`; independent-label and training gates still apply |
 | jadx, adb, tshark, Frida and frida-dexdump | [Toolchain setup](tools/TOOLCHAIN.md) and [Python tool pins](tools/toolchain-requirements.txt) |
+| Android UI plugin | Independent `fxapk-android-ui 0.1.0` (core 1.18.0+); external Android CLI, adb and an authorized device; see the [full guide](ANDROID-UI.en.md) |
 | mitmproxy | A separate environment with explicit executable mappings, as described in the toolchain guide |
 
 Default capture/auto still require Frida. Explicit `capture --mode floor-only` needs no Frida,
