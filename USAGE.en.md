@@ -162,7 +162,9 @@ Use `fxapk enrich batch --help` to inspect `--recover-transient`, `--provider-in
 
 FOFA relay upstream permission denial is distinct from relay-key authentication failure. Hunter reads the current account balance and uses durable reservations under a conservative local 500-point daily cap; this is not a guarantee of provider-wide free entitlement or control over another client's spending. Preserve partial results and read per-source receipts instead of treating failures as no records.
 
-## Optional Android UI plugin
+Hunter's default `provider_default` mode checks the account's current free balance before searching and reserves credits in a durable local ledger. Unknown balance or a failed reservation stops the search. Reservations for the same account share a conservative 500-point daily cap using UTC+8 dates. The default ledger is `.fxapk/hunter-quota.sqlite3` under the user directory; `FXAPK_HUNTER_QUOTA_DB` must select an absolute path. This does not control other clients or guarantee free entitlement or server-side billing. Explicit `FXAPK_HUNTER_CREDIT_MODE=free_only` still returns `disabled / free_only_billing_unverified` before requests. See [.env.example](.env.example).
+
+## Android UI observation
 
 Core 1.18.0 with independent `fxapk-android-ui 0.1.0` provides `ui capabilities`, `ui snapshot` and `ui run-plan`. Install Android CLI and adb separately. Device commands require an explicit `--serial`; observations/plans also require `--package` and a new `--out` directory.
 

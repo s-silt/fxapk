@@ -1,27 +1,25 @@
-# Changelog
+# 更新记录
 
-Notable changes to fxapk. Versioning is semantic; **behavior changes that
-affect automated / CI / agent callers are called out explicitly**.
+记录 fxapk 的主要变更，版本遵循语义化版本规范。影响自动化、CI 或 agent 调用方的行为变更会明确说明。
+新增版本条目默认使用中文；命令、版本号、字段及接口标识符保持原样。历史版本记录保留发布时的语言与内容。
 
-## Unreleased
+## 待发布
 
 ## 1.18.0 — 2026-10-08
 
-- Phase-2 survey inputs are bounded and validated. Legacy or incomplete surveys retain the unassessed declaration; only complete, case/inventory/sample/capture-bound inputs remove it. Gate receipts pin the exact survey snapshot and review rejects changed or missing snapshots.
-- HAR response bodies now reach inline configuration, redirect and request-recipe analyzers through a shared bounded input contract, with source/entry/body hashes and truncation provenance. JavaScript is not executed.
-- Censys review worklists now require a bound IP before allocating a new query; existing results and shared budgets retain their prior semantics.
-- Document Android CLI installation, exact UI commands, a synthetic plan, permissions, outputs and recovery in Chinese and English. Keep standalone UI commands distinct from explicitly enabled programmatic capture integration.
-- Align new GitHub release titles with their version tags; attach independently versioned UI plugin wheel/source archives and MIT notices alongside the core artifacts and checksums. Only the core distribution is published to PyPI by this workflow.
-- Include command guides and the synthetic UI plan in the core source archive so downloaded sources retain the documented example.
-- Add the optional Android UI plugin and fixed action surface. Inputs, foreground scope, deadlines, partial results and artifact bindings are checked; screenshot/layout files may contain sensitive values and are not sanitized for external sharing.
-- Leak-scan, top-level version and help entrypoints do not load credential files. Analysis commands keep the existing environment-loading behavior.
-- Keep the historical CFB/CFB8 import fallback compatible with older installed cryptography versions; invalid key/IV diagnostics no longer include their raw values.
-- Harden Android CLI process-tree ownership and UTF-8 output, reject existing UI output directories, bind action receipts to the selected device/package/plan and preserve shared capture budgets. Explicit root actions keep fixed commands and foreground checks.
-- Distinguish FOFA relay upstream permission errors from relay-key authentication; Hunter checks the live account balance and shares durable reservations under a conservative local 500-point daily cap. No general account entitlement or paid-credit guarantee is implied.
-- Add explicit bounded transient recovery: preserve every attempt, honor server cooldowns, permit at most one extra adapter call per provider, and keep Shodan DNS misses target-scoped with normalized timeout/local-rate errors.
-- Preserve capture round order, original/modified-runtime authorization gates, historical package identities and existing analysis patches. Synthetic tests do not constitute real-device acceptance.
-
-
+- 对阶段二 Survey 输入实施有界读取与校验。旧式或不完整输入保留 `unassessed` 声明；只有完整且与案件、清单、样本和抓包绑定一致的输入才去除该声明。门禁回执固定实际判读的 Survey 快照，复核拒绝已变更或缺失的快照。
+- HAR 响应正文通过共享的有界输入契约进入内联配置、重定向和请求配方分析，保留来源、条目及正文哈希和截断来源信息；不执行 JavaScript。
+- Censys 复核工作单在分配新查询前必须取得绑定的 IP；已有结果与共享预算的语义保持兼容。
+- 补齐中英文 Android CLI 安装、精确 UI 命令、合成计划、权限、输出和恢复指南；独立 UI 命令与须显式启用的程序化抓包接入分别说明。
+- 新建 GitHub Release 的标题与版本标签一致；核心安装包、校验和与独立版本的 UI 插件 wheel、源码归档及 MIT 声明一并提供。本工作流仅将核心发行包发布到 PyPI。
+- 核心源码归档包含命令指南与合成 UI 计划，下载源码后仍可取得文档中的示例。
+- 新增可选 Android UI 插件与固定动作接口，校验输入、前台作用域、截止时间、部分结果及工件绑定。截图与布局可能包含敏感原值，不能视为已脱敏的外发材料。
+- 泄漏扫描、顶层版本与帮助入口不加载凭据文件；分析命令保留原有环境配置加载行为。
+- 保留历史 CFB/CFB8 导入回退，兼容较旧的已安装 cryptography 版本；非法 key/IV 的诊断不再包含其原值。
+- 加固 Android CLI 进程树归属与 UTF-8 输出，拒绝复用已有 UI 输出目录；动作回执绑定所选设备、包名和计划，并沿用共享采集预算。显式 root 动作继续使用固定命令与前台检查。
+- 区分 FOFA 中转的上游权限错误与中转 Key 鉴权错误。Hunter 查询实时账户余额，并在保守的本机每日 500 积分上限内共享持久化预留；不据此承诺所有账户的免费权益或禁止服务端扣付费积分。
+- 新增须显式启用的有界瞬时故障恢复：保留每次尝试，遵守服务端冷却，每个来源最多增加一次适配器调用；Shodan DNS 未命中限定于该目标，超时与本机限频错误统一归一化。
+- 保留采集轮次顺序、原版与修改运行时的授权门、历史包身份及既有分析补丁。合成测试不构成真机验收。
 - 全面审校公开文档：同步中英文依赖、内置探针和富化入口，纠正三轮采集、复核门、归属与复现边界，明确已发布状态和验证范围。
 - 对齐开发指令、泄漏扫描口径与合成基线更新流程；明确 mitmproxy 隔离环境的 Python 版本；删除过时、重复的阶段性工具链复核页，将发布验证链接归入工作流说明，不修改运行行为、依赖版本或 1.17.0 发行物。
 

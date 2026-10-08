@@ -76,6 +76,13 @@ fxapk enrich batch -t targets.txt -o enrich_out --stage api --providers fofa_pro
 Hunter 每次补试仍重新核验同一账户免费余额并预留积分。原失败与补试分别追加留痕，
 已有成功目标由 `--resume` 跳过；恢复成功不抹除历史缺口或直接改写已发布报告。
 
+Hunter 默认 `provider_default` 在搜索前读取账户免费余额，并在本机持久化账本中预留积分。
+同账户按 UTC+8 日期共享保守的每日 500 积分上限；余额未知或预留失败时停止搜索。
+默认账本位于用户目录的 `.fxapk/hunter-quota.sqlite3`，`FXAPK_HUNTER_QUOTA_DB` 可指定绝对路径。
+该约束不控制其他客户端，也不证明所有账户均享有免费额度或服务端不会扣付费积分。
+显式 `FXAPK_HUNTER_CREDIT_MODE=free_only` 仍在请求前返回
+`disabled / free_only_billing_unverified`；账户配置见 [.env.example](.env.example)。
+
 JADX 多索引查询默认读取 cache 根的 `fxapk-jadx-index-map.json`，也可用 `--index-map` 指定映射。
 旧 1.6 索引只为建库时选定值保存 postings，因此索引 `coverage=complete` 不保证任意新值已覆盖；
 查询另报 `query_coverage`。启用 `--jadx-cache-root` 的新分析会在 `query-sources` 保存有界 Java 快照，

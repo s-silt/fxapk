@@ -125,11 +125,17 @@ status、source_statuses、closure；逐次失败记录保留，父链缺失/环
 
 ## 验证与使用限制
 
-集成提交已通过本地 Ruff、Pyright、7330 项测试（14 项跳过）及跨平台 CI；旧版流程
+历史集成提交已通过本地 Ruff、Pyright、7330 项测试（14 项跳过）及跨平台 CI；旧版流程
 的 161 项兼容测试通过。这些是集成时的执行记录，不能代替当前候选的 CI。
 1.17.0 的 [发布候选 CI](https://github.com/s-silt/fxapk/actions/runs/37006902961) 与
 [发行构建](https://github.com/s-silt/fxapk/actions/runs/37007666701) 已通过；
 [Release](https://github.com/s-silt/fxapk/releases/tag/v1.17.0) 提供安装包及校验和。
+1.18.0 标签对应提交的[跨平台 CI](https://github.com/s-silt/fxapk/actions/runs/37750331718)
+与[发行构建](https://github.com/s-silt/fxapk/actions/runs/37751235930)已通过；
+[v1.18.0 Release](https://github.com/s-silt/fxapk/releases/tag/v1.18.0) 提供核心 1.18.0、
+独立 UI 插件 0.1.0 的四个归档与 `SHA256SUMS.txt`。已核对发布附件哈希、包元数据、
+源码与标签一致性，并在临时环境安装自有 wheel 检查帮助与插件发现。
+这些是该标签及发行物的执行记录；后续文档提交以自身 CI 为准。
 测试使用合成数据，没有真实 APK、设备或第三方账户实测；目录迁移回归不等于真实跨盘或
 文件同步冲突验收。Python 层的测试外网保护不能替代操作系统网络隔离。
 

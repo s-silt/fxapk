@@ -2,6 +2,10 @@
 
 本次发行版本为 **$tag**。功能变更、兼容要求与能力边界见[版本记录](https://github.com/$repository/blob/$tag/CHANGELOG.md)和[中文项目首页](https://github.com/$repository/blob/$tag/README.md)。发布说明默认使用中文；命令、版本号与接口标识符保持原样。
 
+### 本版变更
+
+$changes
+
 ## 安装包
 
 核心 **fxapk $core_version** 提供 wheel 与源码归档，并由本流程发布到 PyPI。可选 **fxapk-android-ui $plugin_version** 独立版本，仅通过本页附件分发；Android CLI 和 adb 由使用者另行准备。核心要求 Python $requires_python，插件要求以其包元数据为准。
