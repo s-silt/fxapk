@@ -337,6 +337,8 @@ def test_concurrent_json_dump_uses_unique_temps_and_keeps_complete_json(
         }
         with observed_temp_sets_lock:
             observed_temp_sets.append(observed)
+        # 两个线程都完成观察后，才允许任一 writer 返回并替换临时文件。
+        barrier.wait(timeout=5)
 
     monkeypatch.setattr(
         atomic_io,

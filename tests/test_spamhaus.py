@@ -10,11 +10,12 @@ import json
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from apkscan.core.models import Endpoint
+from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.enrichers import spamhaus
 from apkscan.enrichers.spamhaus import SpamhausDropEnricher
 
@@ -255,6 +256,90 @@ def test_concurrent_endpoints_download_only_once(monkeypatch: pytest.MonkeyPatch
 
     assert fake.calls == 1
     assert results and all(results)
+
+
+def test_late_lock_caller_reuses_newly_published_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """调用方等锁期间发布的新表不能被锁前的旧时间误判为未来缓存。"""
+    fake = _install(monkeypatch, _FakeHttp(_lines(_R1)))
+    now = [1700000000.0]
+    waiting = threading.Event()
+    published = threading.Event()
+    results: list[EnrichmentResult] = []
+
+    class PausedCondition(threading.Condition):
+        def __enter__(self) -> bool:
+            if threading.current_thread().name == "late-lock-caller":
+                waiting.set()
+                assert published.wait(timeout=5)
+            return super().__enter__()
+
+    # 只替换本模块的时钟引用，不污染 stdlib time 或其他富化器。
+    monkeypatch.setattr(
+        spamhaus, "time", SimpleNamespace(time=lambda: now[0], monotonic=time.monotonic),
+    )
+    monkeypatch.setattr(SpamhausDropEnricher, "_condition", PausedCondition())
+
+    def delayed_lookup() -> None:
+        results.append(SpamhausDropEnricher().enrich(_ip("192.0.2.10")))
+
+    late = threading.Thread(target=delayed_lookup, name="late-lock-caller")
+    late.start()
+    try:
+        assert waiting.wait(timeout=5)
+        now[0] += 1.0
+        owner = SpamhausDropEnricher().enrich(_ip("192.0.2.11"))
+    finally:
+        published.set()
+        late.join(timeout=10)
+    assert not late.is_alive()
+    assert owner.ok is True and owner.data["matched_cidr"] == "192.0.2.0/24"
+    assert len(results) == 1
+    assert results[0].ok is True and results[0].data["matched_cidr"] == "192.0.2.0/24"
+    assert fake.calls == 1
+
+
+@pytest.mark.parametrize("keep_memory", [True, False])
+def test_future_cache_still_triggers_redownload(
+    monkeypatch: pytest.MonkeyPatch, keep_memory: bool,
+) -> None:
+    fake = _install(monkeypatch, _FakeHttp(_lines(_R1)))
+    now = [1700000000.0]
+    monkeypatch.setattr(
+        spamhaus, "time", SimpleNamespace(time=lambda: now[0], monotonic=time.monotonic),
+    )
+    first = SpamhausDropEnricher().enrich(_ip("192.0.2.10"))
+    assert first.ok is True and fake.calls == 1
+    if not keep_memory:
+        SpamhausDropEnricher._table = None
+    now[0] -= 1.0
+
+    result = SpamhausDropEnricher().enrich(_ip("192.0.2.11"))
+
+    assert result.ok is True and result.data["matched_cidr"] == "192.0.2.0/24"
+    assert fake.calls == 2
+    assert json.loads(spamhaus.CACHE_FILE.read_text(encoding="utf-8"))["cached_at"] == now[0]
+
+
+@pytest.mark.parametrize(("elapsed", "expected_calls"), [(59.9, 1), (60.0, 2)])
+def test_failed_refresh_cooldown_boundary_is_preserved(
+    monkeypatch: pytest.MonkeyPatch, elapsed: float, expected_calls: int,
+) -> None:
+    fake = _install(monkeypatch, _FakeHttp(exc=RuntimeError("synthetic failure")))
+    monotonic_now = [100.0]
+    monkeypatch.setattr(
+        spamhaus, "time",
+        SimpleNamespace(time=lambda: 1700000000.0, monotonic=lambda: monotonic_now[0]),
+    )
+    first = SpamhausDropEnricher().enrich(_ip("192.0.2.10"))
+    assert first.ok is False and first.data == {} and fake.calls == 1
+    monotonic_now[0] += elapsed
+
+    result = SpamhausDropEnricher().enrich(_ip("192.0.2.11"))
+
+    assert result.ok is False and result.data == {}
+    assert fake.calls == expected_calls
 
 
 def test_expired_cache_triggers_redownload(monkeypatch: pytest.MonkeyPatch) -> None:
