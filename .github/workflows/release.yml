@@ -68,7 +68,25 @@ jobs:
           cp dist/*.whl dist/*.tar.gz plugin-dist/*.whl plugin-dist/*.tar.gz release-assets/
           cd release-assets
           sha256sum *.whl *.tar.gz > SHA256SUMS.txt
-      # 打 tag 时顺带建 GitHub Release（正文自动从上个 Release 以来的 PR 生成）。
+      - name: 生成中文发行说明
+        run: |
+          python - <<'PY'
+          import os
+          import string
+          import tomllib
+          from pathlib import Path
+
+          core = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
+          plugin = tomllib.loads(Path("plugins/fxapk-android-ui/pyproject.toml").read_text(encoding="utf-8"))["project"]
+          template = string.Template(Path(".github/release-notes-template.md").read_text(encoding="utf-8"))
+          notes = template.substitute(
+              tag=os.environ["GITHUB_REF_NAME"], repository=os.environ["GITHUB_REPOSITORY"],
+              commit=os.environ["GITHUB_SHA"], core_version=core["version"],
+              plugin_version=plugin["version"], requires_python=core["requires-python"],
+          )
+          Path("release-notes.md").write_text(notes, encoding="utf-8")
+          PY
+      # 打 tag 时顺带建 GitHub Release，默认使用中文模板，不自动生成英文 PR 摘要。
       # ★ 幂等：Release 已存在（tag 重推）则跳过，不失败——与上面 skip-existing 同philosophy。
       # 历史上 v1.0.0 只发了 PyPI、漏建 Release 就是因为这步以前靠手动。
       - name: Create GitHub Release
@@ -83,5 +101,5 @@ jobs:
             release-assets/*.whl release-assets/*.tar.gz release-assets/SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" \
-            --generate-notes \
+            --notes-file release-notes.md \
             --verify-tag
