@@ -466,7 +466,7 @@ def test_snapshot_does_not_credit_output_after_unverified_tree_cleanup(plugin, f
     assert not (out / "screen.png").exists()
 
 
-def test_android_cli_timeout_stops_windows_wrapper_descendant(plugin, tmp_path):
+def test_android_cli_timeout_stops_windows_wrapper_descendant(plugin, tmp_path, monkeypatch):
     import sys
     import time
 
@@ -475,11 +475,25 @@ def test_android_cli_timeout_stops_windows_wrapper_descendant(plugin, tmp_path):
 
     if sys.platform != "win32":
         pytest.skip("Windows command wrapper timeout regression")
+    from apkscan.core import proctree
+    from tests.windows_timeout_observation import WindowsTimeoutObservation
+
     child = tmp_path / "synthetic_child.py"
-    child.write_text("import os, time\nprint(os.getpid(), flush=True)\ntime.sleep(30)\n", encoding="utf-8")
+    identity_path = tmp_path / "synthetic-child-identity.json"
+    child.write_text(
+        "import json, os, time\nfrom pathlib import Path\nimport psutil\n"
+        f"target = Path({str(identity_path)!r})\n"
+        "temporary = target.with_suffix('.tmp')\n"
+        "temporary.write_text(json.dumps({'pid': os.getpid(), "
+        "'ppid': os.getppid(), 'create_time': psutil.Process().create_time()}), encoding='utf-8')\n"
+        "temporary.replace(target)\n"
+        "print(os.getpid(), flush=True)\ntime.sleep(30)\n", encoding="utf-8",
+    )
     wrapper = tmp_path / "synthetic_android.cmd"
     executable = getattr(sys, "_base_executable", None) or sys.executable
     wrapper.write_text(f'@echo off\n"{executable}" "{child}"\n', encoding="utf-8")
+    observation = WindowsTimeoutObservation(child, identity_path)
+    observation.install(monkeypatch, proctree)
     started = time.monotonic()
     result = AndroidCli(str(wrapper), timeout_sec=1.0).version()
     elapsed = time.monotonic() - started
@@ -493,10 +507,6 @@ def test_android_cli_timeout_stops_windows_wrapper_descendant(plugin, tmp_path):
         if pid is not None:
             assert not psutil.pid_exists(pid), "child survived the wrapper timeout"
     finally:
-        if pid is not None:
-            try:
-                process = psutil.Process(pid)
-                if str(child) in process.cmdline():
-                    process.kill()
-            except psutil.NoSuchProcess:
-                pass
+        observation.finish()
+        observation.cleanup_original(pid)
+        observation.emit_and_close(pid, result, elapsed)

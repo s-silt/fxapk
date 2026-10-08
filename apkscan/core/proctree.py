@@ -11,7 +11,7 @@
   把它 assign 进带 ``JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`` 的 Job，**assign 成功后**才把真实
   命令写给它执行——门在收到命令前不产生任何子进程，故 ``gate -> cmd.exe -> java -> 后代``
   必然全员入 Job，不存在「先启动后入组」的竞态窗口。超时 ``TerminateJobObject`` 一击整树，
-  并轮询 Job 计数确认归零。assign 失败则**不放行**（fail closed：宁可不跑，不跑无主 JVM）。
+  并核对 Job 成员通知及等待原进程句柄退出。跟踪或 assign 失败则**不放行**（fail closed）。
 - **POSIX**：``start_new_session=True`` 新进程组（setsid 在 exec 前完成，同样无竞态），
   超时 ``killpg(SIGKILL)``，随后扫描进程组确认无存活成员。已知边界：后代若自行调用
   ``setsid()/setpgid()`` 脱离进程组则不可见也杀不到（覆盖协作式工具链如 jadx/java；对抗性
@@ -30,6 +30,7 @@ import json
 import logging
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 
@@ -138,6 +139,11 @@ if sys.platform == "win32":
     _JobObjectBasicAccountingInformation = 1
     _PROCESS_SET_QUOTA = 0x0100
     _PROCESS_TERMINATE = 0x0001
+    _SYNCHRONIZE = 0x100000
+    _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    _WAIT_TIMEOUT = 258
+    _JobObjectAssociateCompletionPortInformation = 7
+    _JOB_OBJECT_MSG_NEW_PROCESS = 6
 
     class _IO_COUNTERS(ctypes.Structure):
         _fields_ = [(n, ctypes.c_ulonglong) for n in (
@@ -180,6 +186,9 @@ if sys.platform == "win32":
             ("TotalTerminatedProcesses", wintypes.DWORD),
         ]
 
+    class _JOBOBJECT_ASSOCIATE_COMPLETION_PORT(ctypes.Structure):
+        _fields_ = [("CompletionKey", wintypes.LPVOID), ("CompletionPort", wintypes.HANDLE)]
+
     # ★显式声明 WinAPI 原型：不声明时 ctypes 默认按 c_int（32 位）传参/取返回值——
     #   HANDLE 是指针宽度，64 位进程里默认约定属未定义行为（实践上内核句柄虽只用低
     #   32 位，仍不该赌）。声明后 ctypes 负责正确的宽度与符号扩展。
@@ -202,6 +211,154 @@ if sys.platform == "win32":
     _kernel32.TerminateJobObject.restype = wintypes.BOOL
     _kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
     _kernel32.CloseHandle.restype = wintypes.BOOL
+    _kernel32.CreateIoCompletionPort.argtypes = (
+        wintypes.HANDLE, wintypes.HANDLE, ctypes.c_size_t, wintypes.DWORD
+    )
+    _kernel32.CreateIoCompletionPort.restype = wintypes.HANDLE
+    _kernel32.GetQueuedCompletionStatus.argtypes = (
+        wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(ctypes.c_size_t),
+        ctypes.POINTER(wintypes.LPVOID), wintypes.DWORD,
+    )
+    _kernel32.GetQueuedCompletionStatus.restype = wintypes.BOOL
+    _kernel32.IsProcessInJob.argtypes = (
+        wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)
+    )
+    _kernel32.IsProcessInJob.restype = wintypes.BOOL
+    _kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    _kernel32.WaitForSingleObject.restype = wintypes.DWORD
+
+    def _job_process_counts(job: int) -> tuple[int, int] | None:
+        acct = _JOBOBJECT_BASIC_ACCOUNTING_INFORMATION()
+        if not _kernel32.QueryInformationJobObject(
+            job, _JobObjectBasicAccountingInformation,
+            ctypes.byref(acct), ctypes.sizeof(acct), None,
+        ):
+            return None
+        return int(acct.ActiveProcesses), int(acct.TotalProcesses)
+
+    class _JobExitTracker:
+        """Job 放行前订阅成员；只等待经归属核实的原句柄，绝不按数字 PID 终止进程。
+
+        通知并不保证送达，故成功还必须与 Job 生命周期成员总数对账；缺失按未确认计。
+        """
+
+        def __init__(self, job: int) -> None:
+            self.job = job
+            self.handles: list[int] = []
+            self.seen = 0
+            self.failed = False
+            self.lock = threading.Lock()
+            self.stop = threading.Event()
+            self.changed = threading.Event()
+            port = _kernel32.CreateIoCompletionPort(wintypes.HANDLE(-1), None, 0, 1)
+            if not port:
+                raise ctypes.WinError(ctypes.get_last_error())
+            self.port = int(port)
+            association = _JOBOBJECT_ASSOCIATE_COMPLETION_PORT(1, self.port)
+            if not _kernel32.SetInformationJobObject(
+                job, _JobObjectAssociateCompletionPortInformation,
+                ctypes.byref(association), ctypes.sizeof(association),
+            ):
+                error = ctypes.get_last_error()
+                _kernel32.CloseHandle(self.port)
+                raise ctypes.WinError(error)
+            self.thread = threading.Thread(target=self._collect, daemon=True)
+            try:
+                self.thread.start()
+            except Exception:
+                _kernel32.CloseHandle(self.port)
+                raise
+
+        def _capture(self, pid: int) -> None:
+            handle = _kernel32.OpenProcess(
+                _SYNCHRONIZE | _PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+            )
+            if not handle:
+                # ERROR_INVALID_PARAMETER means the notified process object is already gone.
+                if ctypes.get_last_error() != 87:
+                    self.failed = True
+                return
+            member = wintypes.BOOL()
+            if not _kernel32.IsProcessInJob(handle, self.job, ctypes.byref(member)) or not member.value:
+                # A recycled PID or unverified membership cannot become an owned handle.
+                _kernel32.CloseHandle(handle)
+                self.failed = True
+                return
+            self.handles.append(int(handle))
+
+        def _collect(self) -> None:
+            try:
+                while not self.stop.is_set():
+                    message = wintypes.DWORD()
+                    key = ctypes.c_size_t()
+                    pid = wintypes.LPVOID()
+                    if not _kernel32.GetQueuedCompletionStatus(
+                        self.port, ctypes.byref(message), ctypes.byref(key), ctypes.byref(pid), 50
+                    ):
+                        if ctypes.get_last_error() == _WAIT_TIMEOUT:
+                            continue
+                        self.failed = True
+                        return
+                    if key.value != 1:
+                        self.failed = True
+                        return
+                    if message.value == _JOB_OBJECT_MSG_NEW_PROCESS:
+                        with self.lock:
+                            if self.seen >= 4096 or not pid.value:
+                                self.failed = True
+                                return
+                            self._capture(int(pid.value))
+                            self.seen += 1
+                    self.changed.set()
+            except Exception:  # noqa: BLE001 - background failures must invalidate confirmation
+                logger.exception("[proctree] Job 成员退出跟踪失败")
+                self.failed = True
+            finally:
+                self.changed.set()
+
+        def wait(self, timeout: float) -> bool:
+            deadline = time.monotonic() + max(0.0, timeout)
+            while True:
+                if not self.lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+                    return False
+                try:
+                    handles, seen, failed = list(self.handles), self.seen, self.failed
+                finally:
+                    self.lock.release()
+                if failed:
+                    return False
+                counts = _job_process_counts(self.job)
+                if counts is None:
+                    return False
+                if counts == (0, seen):
+                    states = []
+                    for handle in handles:
+                        state = _kernel32.WaitForSingleObject(handle, 0)
+                        if state not in (0, _WAIT_TIMEOUT):
+                            logger.error("[proctree] 原进程句柄等待失败：%d", ctypes.get_last_error())
+                            return False
+                        states.append(state)
+                    if all(state == 0 for state in states) and _job_process_counts(self.job) == counts:
+                        if not self.lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+                            return False
+                        try:
+                            return not self.failed and self.seen == seen
+                        finally:
+                            self.lock.release()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self.changed.wait(min(_QUIESCE_INTERVAL, remaining))
+                self.changed.clear()
+
+        def close(self) -> None:
+            self.stop.set()
+            self.thread.join(timeout=1.0)
+            if self.thread.is_alive():
+                raise RuntimeError("Job exit tracker did not stop within its shutdown budget")
+            for handle in self.handles:
+                _kernel32.CloseHandle(handle)
+            _kernel32.CloseHandle(self.port)
 
     def _create_kill_on_close_job() -> int | None:
         """建 Job 并置 KILL_ON_JOB_CLOSE（父进程崩溃时句柄关闭 → 整树兜底清理）。失败 → None。"""
@@ -276,6 +433,12 @@ if sys.platform == "win32":
         cmd: list[str], *, timeout: float, env: dict[str, str] | None
     ) -> OwnedRun:
         job = _create_kill_on_close_job()
+        tracker: _JobExitTracker | None = None
+        if job is not None:
+            try:
+                tracker = _JobExitTracker(job)
+            except Exception:  # noqa: BLE001 - fail closed before releasing any command
+                logger.exception("[proctree] 无法建立 Job 成员退出跟踪")
         # ★门进程必须用 base 解释器，不能用 sys.executable：uv 建的 venv 里
         #   Scripts\python.exe 是 trampoline 启动器——真解释器是它的**子进程**，而
         #   AssignProcessToJobObject 不追溯已存在的子进程。用 trampoline 起门时，
@@ -295,13 +458,21 @@ if sys.platform == "win32":
             # 只有门进程 Popen 本身失败才是 spawn_failed；启动后的 OSError 必须走
             # internal_error，不能在清理未确认时伪造 termination_complete=True。
             if job is not None:
-                _kernel32.CloseHandle(job)
+                try:
+                    if tracker is not None:
+                        tracker.close()
+                finally:
+                    _kernel32.CloseHandle(job)
             raise _SpawnFailed(safe_exception_text(exc)) from exc
         except Exception:
             # 门进程都没起来：先归还 Job 句柄再交由 run_owned 保守定性，
             # 不留无主内核对象。只有上面的 Popen OSError 才明确属于 spawn_failed。
             if job is not None:
-                _kernel32.CloseHandle(job)
+                try:
+                    if tracker is not None:
+                        tracker.close()
+                finally:
+                    _kernel32.CloseHandle(job)
             raise
         assert proc.stdin is not None
         timed_out = False
@@ -309,12 +480,14 @@ if sys.platform == "win32":
         owned = False
         reasons: list[str] = []
         try:
-            if job is not None and _assign_pid_to_job(job, proc.pid):
+            if job is not None and tracker is not None and _assign_pid_to_job(job, proc.pid):
                 owned = True
             if not owned:
                 # fail closed：门未入 Job 就不放行命令。关 stdin → 门读到 EOF 自退，
                 # 不产生任何子进程；本次执行按 job_assignment_failed 定性。
                 reasons.append("job_assignment_failed")
+                if job is not None and tracker is None:
+                    reasons.append("exit_tracking_unavailable")
                 proc.stdin.close()
                 stdout, stderr = _drain(proc)
                 return OwnedRun(
@@ -340,7 +513,14 @@ if sys.platform == "win32":
                     forced = True
                     reasons.append("descendants_after_root_exit")
                     _kernel32.TerminateJobObject(job, 1)
+            cleanup_started = time.monotonic()
             terminated = _job_wait_quiesce(job)
+            assert tracker is not None
+            # Job 归零不代表原进程对象已 signal；两阶段共用原有确认预算。
+            exits_confirmed = tracker.wait(_QUIESCE_BUDGET - (time.monotonic() - cleanup_started))
+            terminated = terminated and exits_confirmed
+            if not exits_confirmed:
+                reasons.append("process_exit_unverified")
             if not terminated:
                 reasons.append("survivors_after_kill")
             returncode: int | None = None if timed_out else proc.returncode
@@ -356,7 +536,11 @@ if sys.platform == "win32":
             )
         finally:
             if job is not None:
-                _kernel32.CloseHandle(job)  # KILL_ON_JOB_CLOSE：兜底再清一次
+                try:
+                    if tracker is not None:
+                        tracker.close()
+                finally:
+                    _kernel32.CloseHandle(job)  # KILL_ON_JOB_CLOSE：兜底再清一次
 
 else:
     # -----------------------------------------------------------------------
