@@ -2,7 +2,7 @@
 
 [中文](README.md) · **English**
 
-Optional Android CLI UI observation plugin, version 0.1.0, for fxapk 1.18.0+ and Python 3.11+.
+Optional Android CLI UI observation plugin, version 0.1.1, for fxapk 1.18.1+ and Python 3.11+.
 
 Install the core and plugin in the same environment. From the fxapk source root:
 
@@ -16,6 +16,6 @@ The plugin provides `ui capabilities`, `ui snapshot` and `ui run-plan`. It requi
 
 Installation does not automatically attach UI observations to auto/capture commands. Screenshots, layouts and diagnostic output may contain sensitive values; digest redaction does not cover these files.
 
-Installation, sample plans, permissions, outputs and capture integration: [English guide](https://github.com/s-silt/fxapk/blob/v1.18.0/ANDROID-UI.en.md) · [中文指南](https://github.com/s-silt/fxapk/blob/v1.18.0/ANDROID-UI.md).
+Installation, sample plans, permissions, outputs and capture integration: [English guide](https://github.com/s-silt/fxapk/blob/v1.18.1/ANDROID-UI.en.md) · [中文指南](https://github.com/s-silt/fxapk/blob/v1.18.1/ANDROID-UI.md).
 
 License: [MIT](LICENSE). Third-party tools and dependencies retain their own licenses.

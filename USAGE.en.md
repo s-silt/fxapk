@@ -166,6 +166,6 @@ Hunter's default `provider_default` mode checks the account's current free balan
 
 ## Android UI observation
 
-Core 1.18.0 with independent `fxapk-android-ui 0.1.0` provides `ui capabilities`, `ui snapshot` and `ui run-plan`. Install Android CLI and adb separately. Device commands require an explicit `--serial`; observations/plans also require `--package` and a new `--out` directory.
+Core 1.18.1 with independent `fxapk-android-ui 0.1.1` provides `ui capabilities`, `ui snapshot` and `ui run-plan`. Install Android CLI and adb separately. Device commands require an explicit `--serial`; observations/plans also require `--package` and a new `--out` directory.
 
 See the [Android UI guide](ANDROID-UI.en.md) for installation, exact flags, a synthetic plan, permissions, outputs and recovery. Installing the plugin does not automatically attach UI observations to auto/capture CLI commands; round integration currently requires the programmatic API. Screenshots, layouts and diagnostics may contain raw values; digest redaction does not cover these files.

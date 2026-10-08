@@ -12,12 +12,12 @@
 </p>
 <p align="center">
   <a href="https://github.com/s-silt/fxapk/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/s-silt/fxapk/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.18.0">v1.18.0</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
+  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.18.1">v1.18.1</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
 </p>
 
 CLI 命令 `fxapk`，兼容别名 `apkscan`，PyPI 包名 `fxapk`。面向直接运行源码或 Python 包的人与 AI 助手，不提供 exe 或 GUI。
 
-本版本 **1.18.0** 收紧 Survey 完整性与证据绑定，补齐 HAR 正文语义分析及 Censys 的 IP 前置条件，并提供可选 Android UI 观察插件。升级保留历史包和旧版流程；代码发布不会迁移案件、修改设备或自动补查第三方服务。变更见 [CHANGELOG.md](CHANGELOG.md)。
+补丁版本 **1.18.1** 修正共享缓存的并发时钟取样和 Windows 受控进程退出确认，补齐测试同步与中文发行说明，并统一用户文档和安装包指引。升级保留历史包和旧版流程；代码发布不会迁移案件、修改设备或自动补查第三方服务。变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 | 核心能力 | 说明 |
 | --- | --- |
@@ -55,17 +55,17 @@ APK / 已落盘网页证据        已授权设备采集
 ### 1. 安装与核对版本
 
 ```bash
-python -m pip install "fxapk==1.18.0"
+python -m pip install "fxapk==1.18.1"
 fxapk --version
 fxapk selfcheck
 ```
 
-[v1.18.0 发布页](https://github.com/s-silt/fxapk/releases/tag/v1.18.0) 提供核心 1.18.0 与独立 UI 插件 0.1.0 的 wheel、源码归档和 `SHA256SUMS.txt`。手动下载时，先用 `Get-FileHash <文件> -Algorithm SHA256`（PowerShell）或 `sha256sum -c SHA256SUMS.txt`（Linux）核对附件，再安装 wheel。它不是离线依赖全集。
+[v1.18.1 发布页](https://github.com/s-silt/fxapk/releases/tag/v1.18.1) 提供核心 1.18.1 与独立 UI 插件 0.1.1 的 wheel、源码归档和 `SHA256SUMS.txt`。手动下载时，先用 `Get-FileHash <文件> -Algorithm SHA256`（PowerShell）或 `sha256sum -c SHA256SUMS.txt`（Linux）核对附件，再安装 wheel。它不是离线依赖全集。
 
 需要同一发行版源码时，按标签获取；日常开发可 clone 默认 master：
 
 ```bash
-git clone --branch v1.18.0 https://github.com/s-silt/fxapk.git
+git clone --branch v1.18.1 https://github.com/s-silt/fxapk.git
 cd fxapk
 python -m pip install -e .
 ```
