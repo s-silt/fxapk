@@ -72,6 +72,7 @@ jobs:
         run: |
           python - <<'PY'
           import os
+          import re
           import string
           import tomllib
           from pathlib import Path
@@ -79,7 +80,18 @@ jobs:
           core = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
           plugin = tomllib.loads(Path("plugins/fxapk-android-ui/pyproject.toml").read_text(encoding="utf-8"))["project"]
           template = string.Template(Path(".github/release-notes-template.md").read_text(encoding="utf-8"))
+          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          heading = re.search(r"(?m)^## " + re.escape(core["version"]) + r"(?: — [^\n]+)?$", changelog)
+          if heading is None:
+              raise SystemExit("缺少与发行版本一致的 CHANGELOG 条目")
+          section = changelog[heading.end():]
+          section = re.split(r"(?m)^## ", section, maxsplit=1)[0].strip()
+          # 历史记录说明不属于本版变更；只消费已有中文条目，不生成英文 PR 摘要。
+          section = section.split("\n以下为各版本发布时的历史记录；", 1)[0].strip()
+          if not section:
+              raise SystemExit("发行版本的 CHANGELOG 条目为空")
           notes = template.substitute(
+              changes=section,
               tag=os.environ["GITHUB_REF_NAME"], repository=os.environ["GITHUB_REPOSITORY"],
               commit=os.environ["GITHUB_SHA"], core_version=core["version"],
               plugin_version=plugin["version"], requires_python=core["requires-python"],
