@@ -8,7 +8,7 @@
 <p align="center"><strong>中文</strong> &nbsp;·&nbsp; <a href="README.en.md">English</a></p>
 <p align="center">
   <a href="#how">怎么工作</a> &nbsp;·&nbsp; <a href="#start">快速开始</a> &nbsp;·&nbsp;
-  <a href="#handoff">证据交接</a> &nbsp;·&nbsp; <a href="#limits">边界</a> &nbsp;·&nbsp; <a href="#docs">文档</a>
+  <a href="#packages">证据包与复核</a> &nbsp;·&nbsp; <a href="#limits">边界</a> &nbsp;·&nbsp; <a href="#docs">文档</a>
 </p>
 <p align="center">
   <a href="https://github.com/s-silt/fxapk/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/s-silt/fxapk/actions/workflows/ci.yml/badge.svg"></a>
@@ -17,7 +17,7 @@
 
 CLI 命令 `fxapk`，兼容别名 `apkscan`，PyPI 包名 `fxapk`。面向直接运行源码或 Python 包的人与 AI 助手，不提供 exe 或 GUI。
 
-**1.17.0** 纳入 Phase-2 包校验与判决门禁、多轮采集留档、网页 HTTP/HAR 证据入口和服务商角色复核清单。升级保留历史包和旧 workflow；代码发布不会迁移案件、修改设备或自动补查第三方服务。变更见 [CHANGELOG.md](CHANGELOG.md)。
+当前已发布版本为 **1.17.0**；**1.18.0 待发布源码** 收紧 Survey 完整性与证据绑定，补齐 HAR 正文语义分析及 Censys 的 IP 前置条件，并提供可选 Android UI 观察插件。升级保留历史包和旧版流程；代码发布不会迁移案件、修改设备或自动补查第三方服务。变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 | 核心能力 | 说明 |
 | --- | --- |
@@ -94,15 +94,15 @@ HTML/JSON 留在本地输出目录；`digest` 用于初筛和定位。正式判�
 | 已有报告的补查与闭环 | `fxapk case close out/app.json`，需要联网和报告写回授权 |
 | 完整命令与复现环境 | [使用手册](USAGE.md) · `fxapk --help` |
 
-<a id="handoff"></a>
+<a id="packages"></a>
 
-## 证据包与 OneDrive 交接
+## 证据包与阶段二复核
 
-代码仓库与案件材料分开。handoff 可保留原有 `cases/`、`corpus/` 和历史 workflow；`FXAPK_CORPUS` 指向代码工作树外的库目录。旧脚本的 `FXAPK_ROOT` 指向当前源码，`FXAPK_HANDOFF_ROOT` 指向交接根。
+代码仓库与案件材料分开。证据包、语料库与历史材料保存在工作树外；`FXAPK_CORPUS` 显式指向库目录。阶段间以清单登记的相对路径、内容哈希和复核回执衔接，不依赖特定存储服务或目录名称。
 
 新版 `case phase2 ... --case-dir <案件目录>` 读取直接子包目录内的 `case-package.json`，按 manifest 登记的报告路径与哈希验包。旧脚本固定读取 `report.json` 的地方，遇其他报告名应使用新版 CLI，不要重命名历史证据来迁就脚本。升级时保留原件，在工作副本生成新的阶段二材料。
 
-`case review` 必须提供 `--gate-receipt`；回执同目录的 `coverage.json` 和 `decisions.jsonl` 也必须齐全且哈希匹配。`corpus add --package` 要求输入报告与包登记内容逐字节一致。详细命令与兼容边界见 [交接工作流](PRE-REPORT-WORKFLOW.md)。
+`case review` 必须提供 `--gate-receipt`；回执同目录的 `coverage.json` 和 `decisions.jsonl` 也必须齐全且哈希匹配。`corpus add --package` 要求输入报告与包登记内容逐字节一致。详细命令与兼容边界见 [报告前材料工作流](PRE-REPORT-WORKFLOW.md)。
 
 | 状态 | 回答什么 |
 | --- | --- |
@@ -125,7 +125,7 @@ HTML/JSON 留在本地输出目录；`digest` 用于初筛和定位。正式判�
 
 `corpus link-discover/link-explain/link-groups` 默认 `--evidence-values omit`，显式 `raw` 会恢复原值；`link-labels-validate/link-evaluate/link-readiness/link-train` 只输出聚合结果。这些独立投影不扩大 `digest` 的保证。
 
-只在合法授权范围内采集与分析。共享 CDN、ASN、证书或技术锚不能单独证明运营者或同一主体；来源目录也不证明账户权限、免费额度或预算充足。本版有合成回归与跨平台 CI，没有以此宣称真实设备、全部第三方账户或 OneDrive 同步冲突已验收。
+只在合法授权范围内采集与分析。共享 CDN、ASN、证书或技术锚不能单独证明运营者或同一主体；来源目录也不证明账户权限、免费额度或预算充足。本版有合成回归与跨平台 CI，没有以此宣称真实设备、全部第三方账户或文件同步冲突已验收。
 
 <a id="docs"></a>
 
@@ -135,7 +135,7 @@ HTML/JSON 留在本地输出目录；`digest` 用于初筛和定位。正式判�
 | --- | --- |
 | 命令、输出、语料库与复现环境 | [USAGE.md](USAGE.md) |
 | AI 操作约定与授权边界 | [AGENTS.md](AGENTS.md) |
-| 多轮采集、阶段二与 handoff | [PRE-REPORT-WORKFLOW.md](PRE-REPORT-WORKFLOW.md) |
+| 多轮采集、阶段二与报告前材料 | [PRE-REPORT-WORKFLOW.md](PRE-REPORT-WORKFLOW.md) |
 | 代码分层与证据语义 | [ARCHITECTURE.md](ARCHITECTURE.md) |
 | 配套能力与工具链 | [COMPANION-TOOLS.md](COMPANION-TOOLS.md) · [tools/TOOLCHAIN.md](tools/TOOLCHAIN.md) |
 | 版本变更 | [CHANGELOG.md](CHANGELOG.md) |

@@ -5,7 +5,7 @@ The receipt records exactly which immutable packages (``package_id`` +
 ``manifest_sha256``), which inventory, and which coverage/decision bytes the
 gate judged.  ``case review`` may only bind an accepted review to a PASS
 receipt that names the reviewed package; any later change to the package,
-coverage or decisions yields a different receipt and the old review cannot be
+coverage, decisions or a supplied survey yields a different receipt and the old review cannot be
 re-bound to it.
 """
 from __future__ import annotations
@@ -16,6 +16,8 @@ from typing import Any, Mapping
 
 from apkscan.core.atomic import atomic_write_text
 from apkscan.core.integrity import sha256_hex
+from apkscan.core.json_io import read_json_bounded
+from apkscan.core.phase2.survey import SurveyLimits
 from apkscan.core.phase2.chain import chain_link, file_sha256, is_sha256
 
 GATE_RECEIPT_SCHEMA_VERSION = "phase2-gate-receipt/1.0"
@@ -37,6 +39,8 @@ def build_gate_receipt(
     coverage_path: Path,
     decisions_path: Path,
     decisions_ledger: str,
+    survey_sha256: str | None = None,
+    survey_assessment: str | None = None,
 ) -> dict[str, object]:
     packages = sorted(
         (
@@ -61,6 +65,12 @@ def build_gate_receipt(
         "blocker_count": len(report.blockers),
         "warning_count": len(report.warnings),
     }
+    if survey_sha256 is not None or survey_assessment is not None:
+        if (not is_sha256(survey_sha256) or not isinstance(survey_assessment, str)
+                or survey_assessment not in {"complete", "partial", "unassessed"}):
+            raise GateReceiptError("survey receipt binding is malformed")
+        body["survey_sha256"] = survey_sha256
+        body["survey_assessment"] = survey_assessment
     # 回执的上一环只钉 coverage。判决账本必须已是文件：自动结案由 gate 先补一份
     # 显式空账本，再把那份文件的字节哈希写进来。缺文件抛 OSError，不记空哈希。
     return chain_link("gate-receipt", body, previous_sha256=str(body["coverage_sha256"]))
@@ -92,7 +102,8 @@ def load_receipt_for_package(
 
     When ``coverage_path`` / ``decisions_path`` are given, their current bytes must
     still match what the gate judged; an edited coverage or decision ledger after a
-    PASS makes the receipt stale.
+    PASS makes the receipt stale. A receipt with survey metadata also requires
+    its unchanged, bounded ``survey.json`` sibling, even without explicit paths.
     """
     try:
         raw = receipt_path.read_bytes()
@@ -121,6 +132,21 @@ def load_receipt_for_package(
         raise GateReceiptError("coverage changed after the phase2 gate; rerun gate")
     if decisions_path is not None and receipt.get("decisions_sha256") != _file_sha256(decisions_path):
         raise GateReceiptError("decisions changed after the phase2 gate; rerun gate")
+    if "survey_sha256" in receipt or "survey_assessment" in receipt:
+        digest = receipt.get("survey_sha256")
+        assessment = receipt.get("survey_assessment")
+        if (not is_sha256(digest) or not isinstance(assessment, str)
+                or assessment not in {"complete", "partial", "unassessed"}):
+            raise GateReceiptError("survey receipt binding is malformed")
+        bounds = SurveyLimits()
+        try:
+            _, survey_raw = read_json_bounded(
+                receipt_sibling(receipt_path, "survey.json"), bounds.max_bytes, bounds.max_json_depth,
+            )
+        except (OSError, UnicodeError, ValueError, OverflowError, RecursionError) as exc:
+            raise GateReceiptError("survey snapshot is unreadable; rerun gate") from exc
+        if sha256_hex(survey_raw) != digest:
+            raise GateReceiptError("survey changed after the phase2 gate; rerun gate")
     return {
         "receipt_sha256": sha256_hex(raw),
         "inventory_fingerprint": str(fingerprint),

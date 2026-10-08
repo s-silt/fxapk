@@ -28,6 +28,10 @@ SOURCE_FAMILIES = {
     "icp": "icp_registration", "urlscan": "urlscan", "otx": "otx",
     "virustotal": "virustotal",
 }
+# Target support of the current CLI adapters, not broader provider product features.
+_IP_ONLY_WORKLIST_PROVIDERS = frozenset({
+    "ip_rdap", "cymru", "asn", "ripestat_bgp", "internetdb", "censys",
+})
 # These are candidate evidence sources, not interchangeable identity authorities.
 _ROLE_SOURCES = {
     "resource_holder": ("ip_rdap",),
@@ -231,8 +235,10 @@ def build_source_worklist(plan: Mapping[str, Any], *, query_budget: int = 32) ->
                     row["status"], row["action"] = status, action
         for provider, row in providers.items():
             state = row["status"]
-            needs_ip = (target.get("target_kind") in ("domain", "url")
-                        and provider in {"ip_rdap", "cymru", "asn", "ripestat_bgp", "internetdb"})
+            # The Censys host lookup requires an explicit IP kind, including for unknown input.
+            needs_ip = ((provider == "censys" and target.get("target_kind") != "ip")
+                        or (target.get("target_kind") in ("domain", "url")
+                            and provider in _IP_ONLY_WORKLIST_PROVIDERS))
             if state == "not_queried" and needs_ip:
                 outcome = "await_resolved_ip_evidence"
                 action = "bind_observed_or_time_scoped_resolved_ip_before_source_query"

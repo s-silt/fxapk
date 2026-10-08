@@ -15,6 +15,11 @@ from apkscan.enrichers.infrastructure import (
 from apkscan.enrichers.multisource import CensysPassiveEnricher, HunterPassiveEnricher, QuakePassiveEnricher, ZoomEyePassiveEnricher
 
 
+@pytest.fixture(autouse=True)
+def isolate_hunter_quota(tmp_path, monkeypatch):
+    monkeypatch.setenv("FXAPK_HUNTER_QUOTA_DB", str(tmp_path / "hunter.sqlite3"))
+
+
 class Response:
     def __init__(self, body, status=200):
         self.body = body
@@ -97,7 +102,7 @@ def test_source_stops_after_account_failure_and_retains_safe_receipt(monkeypatch
     assert len(session.calls) == 1
     assert records[0]["source_status"]["hunter"]["error_type"] == category
     assert records[1]["source_status"]["hunter"]["status"] == "skipped"
-    assert records[0]["receipts"]["hunter"]["response_sha256"]
+    assert records[0]["receipts"]["hunter"]["responses"][0]["response_sha256"]
     assert "SYNTHETIC" not in json.dumps(records)
 
 
@@ -303,12 +308,13 @@ def test_new_bounded_batch_can_query_after_operator_rechecks_failure(monkeypatch
     assert adapter.enrich(ip()).data["_source_status"] == "failed"
     for _ in range(20):
         assert adapter.enrich(ip()).data["_source_status"] == "skipped"
-    session.response = Response({"code": 200, "data": {"arr": []}})
+    session.response = Response({"code": 200, "data": {"arr": [], "rest_free_point": 500,
+        "day_free_point": 500, "personal_info": {"phone": "10000000000"}}})
     # New instance represents a separately planned run, not hidden probes in the
     # still-running batch. Account/permission failures still need external change.
     next_batch = HunterPassiveEnricher(session=session)
     assert next_batch.enrich(ip()).data["_source_status"] == "no_record"
-    assert len(session.calls) == 2
+    assert len(session.calls) == 3  # Failed preflight, then successful preflight + search.
 
 
 def test_dns_redirect_views_fail_without_following():

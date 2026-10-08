@@ -114,7 +114,9 @@ def is_valid_package(package: str) -> bool:
     return bool(package) and _PACKAGE_RE.match(package) is not None
 
 
-def _run(args: list[str], timeout: float = _DEFAULT_TIMEOUT) -> subprocess.CompletedProcess | None:
+def _run(
+    args: list[str], timeout: float = _DEFAULT_TIMEOUT, *, log_args: list[str] | None = None,
+) -> subprocess.CompletedProcess | None:
     """运行外部命令并捕获输出。任何失败（缺命令/超时/非零退出/异常）返回 None，绝不抛。
 
     ``adb`` 走 tools.adb_path()（frozen 用同目录随包 adb.exe，源码用 PATH）；
@@ -140,10 +142,14 @@ def _run(args: list[str], timeout: float = _DEFAULT_TIMEOUT) -> subprocess.Compl
             check=False,
         )
     except subprocess.TimeoutExpired:
-        logger.warning("命令超时（%ss）：%s", timeout, " ".join(args))
+        logger.warning("命令超时（%ss）：%s", timeout, " ".join(log_args if log_args is not None else args))
         return None
-    except Exception:
-        logger.exception("命令执行异常：%s", " ".join(args))
+    except Exception as exc:
+        if log_args is not None:
+            # Subprocess exceptions can carry the original argv in their traceback/message.
+            logger.warning("命令执行异常（%s）：%s", type(exc).__name__, " ".join(log_args))
+        else:
+            logger.exception("命令执行异常：%s", " ".join(args))
         return None
 
 

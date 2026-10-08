@@ -2,7 +2,7 @@
   "gate": {
     "blockers": [],
     "declarations": [
-      "HONEST_GAP[G10]: 排除桶∩established 仅覆盖 Phase1 报告内 runtime 信号（G8）。包外 pcap established 端点未接入（期3 pcap_survey），本 gate 对其不设防。接入 --survey 后本行消失、G9 变硬门。"
+      "HONEST_GAP[G10]: 排除桶∩established 仅覆盖 Phase1 报告内 runtime 信号（G8）。包外 pcap survey 未完整绑定当前案件、样本与登记抓包，不能据此作穷尽性排除。已提供的 established 观察仍触发 G9；完整且已验证的 --survey 才消除此声明。"
     ],
     "ok": true,
     "warnings": []

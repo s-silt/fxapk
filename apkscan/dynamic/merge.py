@@ -84,6 +84,7 @@ META_WRITE_CATEGORIES = {
     'runtime_sensitive_apis': 'signal',
     'runtime_traced': 'coverage',
     'runtime_variant': 'signal',
+    'ui_observations': 'record',
 }
 META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
 # 待定：数据库清单可能只是动态留档，也可能应驱动受害数据取证；先按信号报警。
@@ -2571,6 +2572,42 @@ def _merge_and_rerender(
         variant = merge_runtime_variant(report, rr_path)  # P0-a：original/modified 轮标注 → report.meta
         if variant:
             stats["runtime_variant"] = variant
+        payload = _read_runtime_payload(rr_path)
+        ui_observations = payload.get("ui_observations") if isinstance(payload, Mapping) else None
+        if isinstance(ui_observations, list):
+            existing = report.meta.get("ui_observations")
+            merged_observations = [
+                dict(item) for item in existing if isinstance(item, Mapping)
+            ] if isinstance(existing, list) else []
+            try:
+                from apkscan.core.integrity import sha256_file
+                current_runtime_sha = sha256_file(rr_path)
+            except OSError:
+                current_runtime_sha = ""
+            for observation_index, item in enumerate(ui_observations, 1):
+                if not isinstance(item, Mapping):
+                    continue
+                observation = dict(item)
+                observation["runtime_report_path"] = str(Path(rr_path).resolve())
+                observation["runtime_report_sha256"] = current_runtime_sha
+                if not any(observation.get(field) for field in ("round_id", "observation_id", "receipt_path", "path")):
+                    observation["observation_id"] = f"runtime-ui-{observation_index}"
+                key = (
+                    observation["runtime_report_path"],
+                    str(observation.get("round_id") or observation.get("observation_id") or
+                        observation.get("receipt_path") or observation.get("path") or
+                        len(merged_observations)),
+                )
+                merged_observations = [
+                    prior for prior in merged_observations
+                    if (str(prior.get("runtime_report_path") or ""),
+                        str(prior.get("round_id") or prior.get("observation_id") or
+                            prior.get("receipt_path") or prior.get("path") or -1)) != key
+                ]
+                merged_observations.append(observation)
+            if merged_observations:
+                report.meta["ui_observations"] = merged_observations
+                stats["ui_observation_count"] = len(merged_observations)
         # ★每个子步骤的结局要能被下游分辨：`ok`（跑完了，可能没结果）/ `error`（崩了）。
         #   此前 `stats[dest]=sub.get(src,0)` 把两者压成同一个 0——「样本没有凭据」与
         #   「凭据解析器崩了」在报告里完全同形，而后者的正确处置是重跑而非结案。

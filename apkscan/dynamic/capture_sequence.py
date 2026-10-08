@@ -51,7 +51,8 @@ def targeted_hooks(report: Any, *, unpacked: bool) -> tuple[str, ...]:
 def run_rounds(package: str, *, report: Any, unpacked: bool, out_dir: str,
                duration: int = 60, serial: str | None = None, sample_sha256: str | None = None,
                runner: Callable[..., Any] | None = None,
-               before_round: Callable[[str], None] | None = None) -> list[dict[str, Any]]:
+               before_round: Callable[[str], None] | None = None,
+               during_round: Callable[..., object] | None = None) -> list[dict[str, Any]]:
     """Keep separate outputs and failures; completion is not evidence completeness."""
     if isinstance(duration, bool) or not isinstance(duration, int) or duration < 1:
         raise ValueError("invalid_round_duration")
@@ -79,12 +80,31 @@ def run_rounds(package: str, *, report: Any, unpacked: bool, out_dir: str,
             try:
                 if before_round is not None:
                     before_round(f"第 {number}/3 轮 {name}，约 {seconds} 秒；请在授权样本上触发待观察业务")
-                result = runner(package, out=str(out), duration=seconds, serial=serial, report=report,
-                                mode=mode, pass_tag=f"round{number}",
-                                **({"selected_hooks": hooks} if hooks is not None else {}))
+                kwargs: dict[str, Any] = {}
+                if hooks is not None:
+                    kwargs["selected_hooks"] = hooks
+                if during_round is not None:
+                    def interaction_callback(
+                        *, deadline_monotonic: float | None = None,
+                        n=number, k=name, m=mode, directory=out,
+                    ) -> object:
+                        if deadline_monotonic is None:
+                            return during_round(n, k, m, directory)
+                        return capture._invoke_interaction(
+                            during_round, n, k, m, directory,
+                            deadline_monotonic=deadline_monotonic,
+                        )
+
+                    kwargs["interaction"] = interaction_callback
+                result = runner(
+                    package, out=str(out), duration=seconds, serial=serial, report=report,
+                    mode=mode, pass_tag=f"round{number}", **kwargs,
+                )
                 if not isinstance(result, Mapping) or result.get("status") not in ("done", "degraded", "skipped", "error"):
                     raise ValueError("invalid_capture_result")
                 record.update(status=result["status"], reason=str(result.get("reason") or ""), result=dict(result))
+                if isinstance(result.get("ui_observations"), list):
+                    record["ui_observations"] = [item for item in result["ui_observations"] if isinstance(item, Mapping)]
                 if result["status"] in ("done", "degraded"):
                     artifact = out / "runtime_report.json"
                     if artifact.is_file() and not artifact.is_symlink():

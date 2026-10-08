@@ -77,4 +77,4 @@ they are not sanitized publications. Digest redaction is also limited.
 
 Custom MCP, XLSX and messaging bridges are not prerequisites for the core CLI. Integrations must
 preserve report/attachment hashes, provenance, scope and review state; their success cannot replace
-evidence gates. See the [handoff workflow](PRE-REPORT-WORKFLOW.md) for legacy compatibility.
+evidence gates. See the [pre-report workflow](PRE-REPORT-WORKFLOW.md) for legacy compatibility.

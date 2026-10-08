@@ -27,6 +27,7 @@ import os
 import posixpath
 import zlib
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 
 from apkscan.core.models import AnalysisConfig, CertInfo, ComponentSet
@@ -266,6 +267,24 @@ def is_text_evidence(name: str) -> bool:
     if low.endswith(BINARY_EVIDENCE_SUFFIXES):
         return False
     return low.endswith(TEXT_EVIDENCE_SUFFIXES)
+
+
+@dataclass(frozen=True)
+class WebBodyInput:
+    """Bounded derived text, separate from the original evidence inventory.
+
+    ``location`` retains the source HAR entry and adds only a static scanning
+    suffix. Hashes bind the original source bytes and decoded exported body;
+    ``data`` may be BOM-normalized UTF-8 and never represents executed code.
+    """
+
+    location: str
+    data: bytes
+    source_file: str
+    source_sha256: str
+    entry_ref: str
+    body_sha256: str
+    body_truncated: bool
 
 
 class WebContext:
@@ -624,6 +643,7 @@ def _iter_files(root: Path, errors: list[str], excluded: set[Path] | None = None
 
 __all__ = [
     "WebContext",
+    "WebBodyInput",
     "load_web_evidence",
     "is_text_evidence",
     "WEB_PREFIX",

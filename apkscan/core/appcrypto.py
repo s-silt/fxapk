@@ -28,6 +28,7 @@ import logging
 import re
 import warnings
 from dataclasses import dataclass
+from importlib import import_module
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -165,10 +166,10 @@ def decrypt_envelope(
 def _import_cfb() -> Any:
     """前向兼容地拿到 CFB mode 类（48→49 从 primitives 移到 decrepit）。"""
     try:
-        from cryptography.hazmat.decrepit.ciphers.modes import CFB  # 新位置（≥43 已有）
+        CFB = import_module("cryptography.hazmat.decrepit.ciphers.modes").CFB  # 可选的新位置
 
         return CFB
-    except ImportError:
+    except (ImportError, AttributeError):
         from cryptography.hazmat.primitives.ciphers.modes import CFB  # 旧位置（≤48）
 
         return CFB
@@ -177,10 +178,10 @@ def _import_cfb() -> Any:
 def _import_cfb8() -> Any:
     """前向兼容地拿到 CFB8 mode 类（同 CFB，48→49 从 primitives 移到 decrepit）。"""
     try:
-        from cryptography.hazmat.decrepit.ciphers.modes import CFB8  # 新位置
+        CFB8 = import_module("cryptography.hazmat.decrepit.ciphers.modes").CFB8  # 新位置
 
         return CFB8
-    except ImportError:
+    except (ImportError, AttributeError):
         from cryptography.hazmat.primitives.ciphers.modes import CFB8  # 旧位置（≤48）
 
         return CFB8
@@ -201,7 +202,7 @@ def _build_key(recipe: CryptoRecipe) -> bytes:
         try:
             return bytes.fromhex(raw)
         except ValueError:
-            logger.warning("[appcrypto] key_encoding=hex 但 key 非合法 hex：%r", raw[:16])
+            logger.warning("[appcrypto] key_encoding=hex 但 key 非合法 hex，保留原密文")
             return b""
     # 默认 utf8（CryptoJS enc.Utf8.parse 口径：原始字符按 UTF-8 字节当 key）。
     return raw.encode("utf-8")
@@ -230,7 +231,7 @@ def _derive_iv(recipe: CryptoRecipe, timestamp: int | str) -> bytes:
             try:
                 return bytes.fromhex(iv_val)
             except ValueError:
-                logger.warning("[appcrypto] fixed iv_value 非合法 hex：%r", iv_val[:16])
+                logger.warning("[appcrypto] fixed iv_value 非合法 hex，保留原密文")
                 return b""
         return iv_val.encode("utf-8")
     if derive == "same_as_key":

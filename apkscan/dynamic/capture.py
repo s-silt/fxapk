@@ -25,6 +25,7 @@ status="skipped" + 手册（playbook，给出可手动复现的完整取证步�
 
 from __future__ import annotations
 
+import inspect
 import ipaddress
 import json
 import logging
@@ -39,6 +40,7 @@ import socket
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 from apkscan.core import device, infra, tools
@@ -469,6 +471,7 @@ def run(
     antidetect: str = "off",
     pass_tag: str = "",
     selected_hooks: tuple[str, ...] | None = None,
+    interaction: Callable[..., object] | None = None,
 ) -> DynamicResult:
     """对运行中的目标应用做真机抓包，提取运行时端点。
 
@@ -589,7 +592,7 @@ def run(
         package, out_path, duration, serial, decision=decision, mitm=use_mitm, floor=use_floor,
         frida=use_frida, capabilities_plan=plan_dict,
         allow_behavior_modification=allow_behavior_modification, antidetect=antidetect,
-        pass_tag=pass_tag,
+        pass_tag=pass_tag, interaction=interaction,
         **({"selected_hooks": selected_hooks} if selected_hooks is not None else {}),
     )
 
@@ -695,6 +698,7 @@ def _capture(
     antidetect: str = "off",
     pass_tag: str = "",
     selected_hooks: tuple[str, ...] | None = None,
+    interaction: Callable[..., object] | None = None,
 ) -> DynamicResult:
     """编排 mitmdump + adb 代理 + frida unpinning + 启 app，到时停并解析流量。
 
@@ -720,6 +724,7 @@ def _capture(
     flows_file = out_path / "flows.mitm"
     # ③ 时间盒：采集起点（_monotonic 可 monkeypatch）。超 decision.total_budget_sec 交付部分。
     capture_started_at = _monotonic()
+    capture_deadline = capture_started_at + decision.total_budget_sec
     budget_exceeded = False
     # ① floor：带外 pcap 保底 runner 句柄（floor_first 时起手启动，finally 收尾停）。
     floor_handle: Any = None
@@ -767,6 +772,7 @@ def _capture(
     # 抓包加固产生的告警（CA 未装系统库 / frida 版本不一致），收尾并入 reason，
     # 不假成功——但都不阻断抓包（HTTP 仍可抓；frida 不匹配仍尝试注入）。
     warnings: list[str] = []
+    ui_observations: list[dict[str, Any]] = []
 
     try:
         # 0-) 起手先清上一轮遗留的死代理。与本轮是否走 mitm 无关——遗留代理会让设备
@@ -840,6 +846,16 @@ def _capture(
                 logger.info("[capture] floor 带外 pcap 已启动（保底，代理前起手）")
             else:
                 logger.info("[capture] floor 带外 pcap 未起（无设备侧 runner），仅靠主抓包链")
+
+        # Start UID sampling before either Frida path can spawn/resume the app.
+        # Startup connections may finish before the later UI callback begins.
+        if _budget_remaining(capture_started_at, decision.total_budget_sec) > 0:
+            try:
+                socket_sampler = _SocketSampler(package, out_path, serial)
+                socket_sampler.start()
+            except Exception:
+                logger.exception("[capture] 初始化 socket 时间线采样失败（忽略）")
+                socket_sampler = None
 
         # 3) adb 代理 + reverse，把设备流量回流到主机 mitmproxy。★#8：floor-only 模式跳过（无代理）。
         if mitm:
@@ -970,6 +986,28 @@ def _capture(
                 playbook.append(warn)
                 warnings.append(warn)
 
+        if interaction is not None and _budget_remaining(capture_started_at, decision.total_budget_sec) > 0:
+            try:
+                interaction_result = _invoke_interaction(
+                    interaction, deadline_monotonic=capture_deadline,
+                )
+                if isinstance(interaction_result, dict):
+                    observation = dict(interaction_result)
+                    observation.setdefault("round_id", pass_tag or "capture")
+                    observation.setdefault("observed_at", time.time())
+                    observation.setdefault("status", "complete")
+                    try:
+                        json.dumps(observation, ensure_ascii=False)
+                        ui_observations.append(observation)
+                    except (TypeError, ValueError):
+                        logger.exception("[capture] UI interaction result is not JSON serializable")
+                        warnings.append("UI interaction result not serializable")
+                playbook.append(f"UI interaction completed: {type(interaction_result).__name__}")
+            except Exception as exc:  # noqa: BLE001 - UI failure must not skip capture cleanup
+                logger.exception("[capture] UI interaction failed")
+                playbook.append(f"UI interaction failed: {type(exc).__name__}")
+                warnings.append(f"UI interaction failed: {type(exc).__name__}")
+
         # 4) 抓 duration 秒——③ 时间盒：受 decision.total_budget_sec 约束，超预算交付已捕获部分。
         playbook.append(f"采集流量约 {duration} 秒")
         budget_left = _budget_remaining(capture_started_at, decision.total_budget_sec)
@@ -994,12 +1032,6 @@ def _capture(
                 logger.warning("[capture] %s", warn)
                 playbook.append(warn)
                 warnings.append(warn)
-            try:
-                socket_sampler = _SocketSampler(package, out_path, serial)
-                socket_sampler.start()
-            except Exception:
-                logger.exception("[capture] 初始化 socket 时间线采样失败（忽略）")
-                socket_sampler = None
             _wait(wait_for)
             if socket_sampler is not None:
                 socket_timeline = socket_sampler.stop()
@@ -1349,6 +1381,7 @@ def _capture(
         capture_signals=capture_signals,
         capture_capabilities=capabilities_plan,
         runtime_variant=runtime_variant,
+        ui_observations=ui_observations,
     )
     report_paths = [report_path] if report_path else []
 
@@ -1368,6 +1401,8 @@ def _capture(
     result["artifacts"] = artifacts
     result["report_paths"] = report_paths
     result["playbook"] = playbook
+    if ui_observations:
+        result["ui_observations"] = ui_observations
     _cleanup_diag(out_path)  # 清掉 .diag/ 下空的 mitmdump/frida stderr 日志（成功时纯杂物）
     return result
 
@@ -2731,6 +2766,25 @@ def _pull_exported_tmp_dir(dump_dir: Path, serial: str | None = None) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _invoke_interaction(
+    callback: Callable[..., object], *args: object, deadline_monotonic: float,
+) -> object:
+    """Pass a deadline when supported; never retry a callback after it executes.
+
+    Legacy no-keyword callbacks remain caller-trusted, cooperative code. Only
+    adapters accepting the deadline can bound their individual device commands.
+    """
+    try:
+        signature = inspect.signature(callback)
+    except (TypeError, ValueError):
+        return callback(*args)
+    try:
+        signature.bind(*args, deadline_monotonic=deadline_monotonic)
+    except TypeError:
+        return callback(*args)
+    return callback(*args, deadline_monotonic=deadline_monotonic)
+
+
 def _wait(duration: float) -> None:
     """采集等待。隔离为函数便于测试 monkeypatch（避免真睡 duration 秒）。"""
     time.sleep(max(0.0, duration))
@@ -3817,6 +3871,7 @@ def _write_runtime_report(
     capture_signals: dict[str, Any] | None = None,
     capture_capabilities: dict[str, Any] | None = None,
     runtime_variant: str = "original-runtime",
+    ui_observations: list[dict[str, Any]] | None = None,
 ) -> str:
     """把运行时端点写成 out/runtime_report.json（复用 report.json 的序列化）。
 
@@ -3865,6 +3920,7 @@ def _write_runtime_report(
         # 第二波（最后）：无障碍远控（目标银行/支付包名清单 + 远控手势 + 屏幕录制）。
         # ★ launch-only 抓不到，多数需引导式人工动态——多数情况下为空数组，属预期。
         "remote_control_events": list(remote_control_events or []),
+        "ui_observations": list(ui_observations or []),
     }
     if not complete:
         payload["note"] = "抓包未完整（代理未起或编排中断），运行时端点可能不全。"

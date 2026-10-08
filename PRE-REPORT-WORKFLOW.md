@@ -5,10 +5,11 @@
 
 ## 在线采集与三轮动态流程
 
-    fxapk capture-web https://example.invalid/start --authorized --out /private/web/capture.har
-    fxapk analyze-web /private/web --online --out /private/web-analysis
-    fxapk auto /private/sample.apk --online --three-rounds --out /private/run
+    fxapk capture-web https://example.invalid/start --authorized --out evidence/web/capture.har
+    fxapk analyze-web evidence/web --online --out outputs/web-analysis
+    fxapk auto inputs/sample.apk --online --three-rounds --out outputs/run
 
+示例从代码工作树外的专用分析目录运行，输入与输出使用相对路径。
 示例域名不可用，执行时替换为有授权的目标。capture-web 只发 GET，同主机跳转自动跟随，
 额外主机须 --allow-host 明确列出；DNS 解析仍受操作系统解析器时限影响；不继承代理、netrc、浏览器登录态或 cookie。复用主线的
 公共 IP 校验、IP 钉定、TLS 验证和响应读取总截止机制；次数/体积有界。它不执行 JS，
@@ -31,15 +32,15 @@ PCAP 单文件默认上限 256 MiB，超限明确 resource_limit，需先拆分�
 
 单份 Phase1 report.json，生成服务商角色核验清单：
 
-    fxapk case provider-plan /private/report.json --out /private/provider-plan.json
+    fxapk case provider-plan evidence/report.json --out materials/provider-plan.json
 
 一个包含已登记 case-package.json 的案件目录，串联包完整性、各阶段材料、
 家族候选、阶段二覆盖及可选运行历史：
 
-    fxapk case prepare-materials /private/case --out /private/materials.json
-    fxapk case prepare-materials /private/case --coverage /private/coverage.json --clues /private/clues.jsonl --runs /private/runs.jsonl --out /private/materials-reviewed.json
+    fxapk case prepare-materials cases/CASE-001 --out materials/materials.json
+    fxapk case prepare-materials cases/CASE-001 --coverage phase2/coverage.json --clues phase2/clues.jsonl --runs phase2/runs.jsonl --out materials/materials-reviewed.json
 
-请使用自己的私有工作目录；示例路径不是实际文件。输出拒绝覆盖。coverage/clues
+请使用代码工作树外的受控分析目录；示例路径不是实际文件。输出拒绝覆盖。coverage/clues
 必须一起传入。默认省略目标/实体原值，显式 --evidence-values raw 才保留相应原值。
 omit 仍包含证据包标识、内容哈希、计数及结构关系，**不是完全匿名化或可公开发布保证**。
 
@@ -47,20 +48,22 @@ omit 仍包含证据包标识、内容哈希、计数及结构关系，**不是�
 成功退出只说明材料已生成，state=review_required 仍须复核；blocked 输出后退出 1，
 参数、读取或输出冲突退出 2。不要把退出 0 当作服务商确认或结案 PASS。
 
-## OneDrive handoff 的兼容边界
+## 材料目录与阶段间数据契约
 
-代码仍放在 Git 工作树，handoff 继续存放 `cases/`、`corpus/` 和历史材料；不把证据目录
-当作源码根。私有 companion 工具通过进程环境变量 `FXAPK_ROOT` 指向当前源码工作树，
-`FXAPK_CORPUS` 指向 handoff 下的 `corpus`。旧 workflow 的 `FXAPK_HANDOFF_ROOT` 仍指向
-handoff 根，机器身份、角色和本地索引沿用原有显式配置。不要复制 OneDrive 的 `.env`
-到源码或提交配置值；companion 的配置来源仍为当前项目和进程环境。
+代码保存在 Git 工作树，证据包、语料库与历史材料保存在工作树外的案件材料目录。
+`FXAPK_CORPUS` 显式指向库目录；不要把证据目录当作源码根，也不要将材料目录中的
+`.env` 复制到源码或提交配置值。外部集成的本地配置与公共 CLI 的证据契约分别维护。
+
+来源绑定沿用现有环境变量 `FXAPK_HANDOFF_ROOT` 指定案件材料根，
+`manifest_relpath` 相对此根；未配置即拒绝，不回退到仓库或猜测目录。
+这是兼容接口名，不要求目录使用同名，也不绑定特定存储服务。
 
 新版 `case phase2 ... --case-dir <案件目录>` 读取直接子目录中的 `case-package.json`，
 以 manifest 登记的报告路径和哈希为准，支持中文、空格及换盘后的相对路径。
-应指定包含 Phase1 包的那层目录，不把 handoff 根或包含多个案件的 `cases/` 当作一个案。
-历史 `run.json` / `manifest.json` / `READY` 仍由原 workflow 读取，不冒充 Phase1 包。
+应指定包含 Phase1 包的那层目录，不把材料根或包含多个案件的 `cases/` 当作一个案。
+历史 `run.json` / `manifest.json` / `READY` 保留原有读取约定，不冒充 Phase1 包。
 
-旧 workflow 脚本保持原样。其 Phase2 triage 仍有固定 `report.json` 的读取约定；
+旧版外部集成脚本保持原样。其 Phase2 triage 仍有固定 `report.json` 的读取约定；
 manifest 登记其他文件名时应使用新版 `fxapk case phase2`，不要为迁就旧脚本重命名或
 覆盖不可变包。现行 Phase1 1.0 包与候选标识保持兼容，但缺失身份或哈希的旧材料仍需补证，
 不会自动升格为已验包。已有 Phase2 判决、清单及回执继续留存；新版门禁不把旧 PASS 字样
@@ -103,7 +106,7 @@ hit/no_record/failed/skipped/disabled 保留不同下一步；鉴权、权限、
 
 ## 阶段二兼容与边界
 
-接入的是经脱敏审查的通用声明契约，**不是完整复制私有阶段二系统**。
+阶段二入口采用经脱敏审查的通用声明契约，覆盖已登记证据包及其复核材料。
 沿用已有包、coverage、clue 五元组来源绑定与家族规则引擎。
 可选 RunRecord JSONL 至少含 case_id、run_id、run_type，可含 parent_run_id、
 status、source_statuses、closure；逐次失败记录保留，父链缺失/环/重复 ID 拒绝。
@@ -122,13 +125,13 @@ status、source_statuses、closure；逐次失败记录保留，父链缺失/环
 
 ## 验证与使用限制
 
-集成提交已通过本地 Ruff、Pyright、7330 项测试（14 项跳过）及跨平台 CI；旧 workflow
+集成提交已通过本地 Ruff、Pyright、7330 项测试（14 项跳过）及跨平台 CI；旧版流程
 的 161 项兼容测试通过。这些是集成时的执行记录，不能代替当前候选的 CI。
 1.17.0 的 [发布候选 CI](https://github.com/s-silt/fxapk/actions/runs/37006902961) 与
 [发行构建](https://github.com/s-silt/fxapk/actions/runs/37007666701) 已通过；
 [Release](https://github.com/s-silt/fxapk/releases/tag/v1.17.0) 提供安装包及校验和。
 测试使用合成数据，没有真实 APK、设备或第三方账户实测；目录迁移回归不等于真实跨盘或
-OneDrive 同步冲突验收。Python 层的测试外网保护不能替代操作系统网络隔离。
+文件同步冲突验收。Python 层的测试外网保护不能替代操作系统网络隔离。
 
 ## 设计参考
 
@@ -142,3 +145,24 @@ OneDrive 同步冲突验收。Python 层的测试外网保护不能替代操作�
 - Censys 历史数据：https://docs.censys.com/docs/platform-historical-data <!-- leak-scan: allow Censys 官方公开功能文档，非案件目标 -->
 
 后续接入应先核对相应服务的实际套餐、许可和可用历史跨度；本次未购买或开通。
+
+
+## Survey 输入完整性契约
+
+`fxapk case phase2 gate --survey inputs/survey.json` 有界读取输入，先校验端点、IP 和观察状态。合法旧式 `endpoints` 清单仍可提供 G9 正向连接证据，但保持 `unassessed`，不能据空列表删除 G10 的未核验声明。畸形输入、未知版本、错误案件/清单/样本/抓包绑定须报材料错误。
+
+新契约为 `phase2-survey/1.0`，字段如下：
+
+| 字段 | 契约 |
+| --- | --- |
+| `schema_version` | `phase2-survey/1.0` |
+| `case_id` / `inventory_fingerprint` | 当前已验证案件与证据清单的精确身份 |
+| `status` / `truncated` | `complete`、`partial` 或 `unassessed`；显式布尔截断标记 |
+| `endpoints` | `ip` 与非空 `observations` 数组；新版本支持 `established`、`established_then_reset`、`syn_only` |
+| `capture_bindings` | 每项包含 `package_id`、`sample_sha256`、`artifact_path`、`sha256`；须精确匹配不可变包登记的 case-evidence PCAP/PCAPNG |
+
+只有 `complete` 且未截断、覆盖当前全部包的全部登记抓包、每包至少一份抓包，才去除 G10。`partial` 和截断结果仍保留声明，已发现的 established 连接继续参与 G9。默认限制为 8 MiB、JSON 深度32、端点10万、总观察25万；超限不会当成空结果。
+
+门禁将实际判读的原始字节原子留为 `phase2/survey.json`，回执记录其哈希和 assessment。复核时快照必须仍在且字节一致；迁移材料须连同 coverage、decisions、survey 与 gate receipt 一起保留。旧式无 survey 的历史回执继续兼容。
+
+这些检查证明输入身份、登记范围与生成方完整性声明一致，不会重新解析 PCAP，也不证明生成方确已找到所有连接。未登记抓包、未知观察语义、解析器覆盖不足和真实流量缺口应继续单列；不得把 gate PASS 当成端点归属或案件闭环证明。

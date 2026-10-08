@@ -1134,8 +1134,8 @@ class GateReport:
 
 _G10_DECLARATION = (
     "HONEST_GAP[G10]: 排除桶∩established 仅覆盖 Phase1 报告内 runtime 信号（G8）。"
-    "包外 pcap established 端点未接入（期3 pcap_survey），本 gate 对其不设防。"
-    "接入 --survey 后本行消失、G9 变硬门。"
+    "包外 pcap survey 未完整绑定当前案件、样本与登记抓包，不能据此作穷尽性排除。"
+    "已提供的 established 观察仍触发 G9；完整且已验证的 --survey 才消除此声明。"
 )
 
 
@@ -1274,6 +1274,7 @@ def run_gate(
     *,
     case_id: str,
     survey_established_hosts: set[str] | None = None,
+    survey_assessed: bool | None = None,
     allow_pending: bool = False,
 ) -> GateReport:
     blockers: list[str] = []
@@ -1471,7 +1472,9 @@ def run_gate(
                     f"{','.join(sorted(matched_hosts))}"
                 )
 
-    if survey_established_hosts is None:
+    # None preserves the historical programmatic API; CLI always supplies the
+    # validated completeness bit, independently of positive G9 observations.
+    if survey_established_hosts is None or survey_assessed is False:
         declarations.append(_G10_DECLARATION)
 
     return GateReport(
@@ -1483,29 +1486,12 @@ def run_gate(
 
 
 def extract_established_hosts(survey: Mapping[str, Any]) -> set[str]:
-    """从 pcap_survey to_dict 输出提取 established 端点的规范化 host（G9 用，期3）。
+    """Validate legacy endpoint/state shapes and extract normalized positive IPs."""
+    from .survey import validate_established_hosts
 
-    established 判定 = 端点任一 observation 的 state 以 "established" 开头（与 pcap_survey 同口径）。
-    host 走与 proposal 侧同一个 normalize_host，避免 100.64.0.2 与 100.64.0.2:443 比不上。
-    """
-    hosts: set[str] = set()
-    endpoints = survey.get("endpoints", ()) if isinstance(survey, Mapping) else ()
-    if not isinstance(endpoints, (list, tuple)):
-        return hosts
-    for endpoint in endpoints:
-        if not isinstance(endpoint, Mapping):
-            continue
-        observations = endpoint.get("observations", ())
-        established = isinstance(observations, (list, tuple)) and any(
-            isinstance(obs, Mapping) and str(obs.get("state", "")).startswith("established")
-            for obs in observations
-        )
-        if not established:
-            continue
-        host = normalize_host("ip", str(endpoint.get("ip", "")))
-        if host:
-            hosts.add(host)
-    return hosts
+    return validate_established_hosts(
+        survey, allow_unknown_states="schema_version" not in survey,
+    )
 
 
 def _batch_existing_active_parents(
