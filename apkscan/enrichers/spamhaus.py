@@ -178,10 +178,10 @@ class SpamhausDropEnricher(BaseEnricher):
     def _get_table(cls) -> _DropTable:
         """取得新鲜清单；同一进程中只允许一个线程负责刷新。"""
         while True:
-            now = time.time()
-            monotonic_now = time.monotonic()
-
             with cls._condition:
+                now = time.time()
+                monotonic_now = time.monotonic()
+
                 # 先取到局部变量再判空——直接对 ClassVar 判断，静态检查无法收窄 Optional。
                 shared_table = cls._table
                 if shared_table is not None and cls._table_is_fresh(shared_table, now):
