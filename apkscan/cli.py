@@ -82,6 +82,17 @@ app.add_typer(jadx_app, name="jadx")
 app.add_typer(lead_app, name="lead")
 app.add_typer(recognize_app, name="recognize")
 
+# Optional command groups are discovered after core registration. A missing or
+# broken plugin must not prevent the core CLI from importing.
+try:
+    from apkscan.plugins.registry import register_plugin_clis
+
+    _PLUGIN_CLI_STATUS = register_plugin_clis(app)
+except Exception:  # noqa: BLE001 - import-time plugin failure stays optional
+    logger = logging.getLogger(__name__)
+    logger.exception("[plugins] CLI registration failed")
+    _PLUGIN_CLI_STATUS: list[dict[str, str]] = []
+
 
 @app.command(
     name="phase2",
@@ -2606,7 +2617,13 @@ def main() -> None:
     # 装「错误定位标识」日志格式器（WARNING+ 末尾带 [@模块.函数:行号]，便于按日志反馈定位）。
     setup_logging()
     # 从项目根 .env 兜底加载密钥（FXAPK_SHODAN_KEY 等）；真实环境变量优先，绝不抛。
-    load_dotenv()
+    # Public offline entrypoints also run in pre-commit/CI; they never need keys.
+    # Keep loading for analysis and other existing commands for compatibility.
+    import sys
+
+    argv = sys.argv[1:]
+    if not (argv[:1] in (["leak-scan"], ["ui"]) or argv in (["--version"], ["--help"])):
+        load_dotenv()
     app()
 
 

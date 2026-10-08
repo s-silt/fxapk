@@ -255,6 +255,23 @@ def test_domain_resolves_then_host(monkeypatch: pytest.MonkeyPatch) -> None:
     assert any("/shodan/host/198.51.100.36" in c for c in fake.calls)
 
 
+def test_dns_misses_do_not_trip_provider_breaker(monkeypatch):
+    monkeypatch.setenv("FXAPK_SHODAN_KEY", "testkey")
+    fake = _FakeRequests({
+        "/dns/resolve": (200, {}),
+        "/shodan/host/198.51.100.36": (200, _HOST_PAYLOAD),
+    })
+    monkeypatch.setattr(sh_mod._http, "capped_get", fake.get)
+    adapter = ShodanEnricher()
+    for name in ("one.example", "two.example", "three.example"):
+        result = adapter.enrich(_ep(name, "domain"))
+        assert result.error == "dns_resolution_failed"
+        assert adapter.receipt["error_type"] == "dns_resolution_failed"
+    result = adapter.enrich(_ep("198.51.100.36", "ip"))
+    assert result.ok and result.data.get("ports")
+    assert adapter._blocked_error is None
+
+
 def test_host_404_miss_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FXAPK_SHODAN_KEY", "testkey")
     fake = _FakeRequests({})  # 全 404 → 库中无记录

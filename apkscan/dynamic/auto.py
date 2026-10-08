@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any
 
 from apkscan.core import device
+from apkscan.plugins.contracts import CaptureRoundContext, AndroidUiPlugin
 from apkscan.core.models import ANALYSIS_MODE_PASSIVE, AnalysisConfig, Report
 from apkscan.core.report_naming import report_base
 
@@ -133,6 +134,8 @@ def run(
     confirm: Callable[[str], None] | None = None,
     allow_behavior_modification: bool = False,
     antidetect: str = "off",
+    during_round: Callable[..., object] | None = None,
+    android_ui_plugin: AndroidUiPlugin | None = None,
 ) -> dict:
     """一键全自动：体检 → 静态 → 脱壳 → 抓包 → 合并，回一份结构化总报告。绝不抛。
 
@@ -251,6 +254,30 @@ def run(
         if three_rounds and has_device and package_name:
             from apkscan.dynamic.capture_sequence import run_rounds, targeted_hooks
             from apkscan.dynamic.capture_adaptation import build_capture_adaptation
+            interaction_callback: Callable[..., object] | None = during_round
+            if android_ui_plugin is not None:
+                if target_serial is None:
+                    steps.append(_step("Android UI 插件", _SKIPPED, "未钉定设备 serial，跳过 UI round driver"))
+                else:
+                    plugin = android_ui_plugin
+
+                    def plugin_round_interaction(
+                        number: int, kind: str, capture_mode: str, round_dir: Path,
+                        *, deadline_monotonic: float | None = None,
+                    ) -> object:
+                        context = CaptureRoundContext(
+                            serial=target_serial,
+                            package_name=package_name,
+                            round_id=f"round{number}-{kind}",
+                            round_kind=kind,
+                            out_dir=round_dir,
+                            sample_sha256=_apk_sha256(apk_path),
+                            capture_mode=capture_mode,
+                            deadline_monotonic=deadline_monotonic,
+                        )
+                        return plugin.run_round(context)
+
+                    interaction_callback = plugin_round_interaction
             if isinstance(report, Report):
                 report.meta["capture_adaptation"] = build_capture_adaptation(
                     report, unpacked=unpacked_report is not None,
@@ -261,6 +288,7 @@ def run(
                 out_dir=pass1_out, duration=capture_duration, serial=target_serial,
                 sample_sha256=_apk_sha256(apk_path),
                 before_round=lambda message: _confirm(confirm, message),
+                during_round=interaction_callback,
             )
             for record in round_records:
                 steps.append(_step(f"抓包轮{record['round']}:{record['kind']}", record["status"], record["reason"]))

@@ -30,6 +30,7 @@ from apkscan.core.restore import restore_index, restored_sources_for
 # 排序优先级：建议调证 > 待核 > 无需调证；同档高可信在前；C2 在前。
 _ADVICE_RANK = {"建议调证": 0, "待核": 1, "无需调证": 2}
 _CONF_RANK = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+_UI_OBSERVATION_STATUSES = frozenset({"complete", "partial", "failed", "unavailable", "skipped", "unknown"})
 
 
 def _lead_sort_key(lead: dict[str, Any]) -> tuple[int, int, int, str]:
@@ -667,6 +668,17 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
         "overseas_target_coverage": overseas_target_coverage,
         "closure": compact_closure,
     }
+    ui_observations = meta.get("ui_observations")
+    if isinstance(ui_observations, list):
+        clean_ui_observations = [item for item in ui_observations if isinstance(item, dict)]
+        digest["ui"] = {
+            "observation_count": len(clean_ui_observations),
+            "statuses": [
+                status if isinstance(status := item.get("status"), str)
+                and status in _UI_OBSERVATION_STATUSES else "unknown"
+                for item in clean_ui_observations
+            ],
+        }
     enrichment = _compact_enrichment(meta)
     if enrichment:
         digest["enrichment"] = enrichment

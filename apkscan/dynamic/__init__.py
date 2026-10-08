@@ -24,7 +24,7 @@
 
 from __future__ import annotations
 
-from typing import TypedDict
+from typing import Any, TypedDict
 
 
 class DynamicResult(TypedDict):
@@ -35,6 +35,7 @@ class DynamicResult(TypedDict):
     artifacts: list[str]
     playbook: list[str]
     report_paths: list[str]
+    ui_observations: list[dict[str, Any]]
 
 
 # status 取值常量，供实现方与调用方共用，避免裸字符串拼写漂移。
@@ -52,6 +53,7 @@ def empty_result(status: str = STATUS_SKIPPED, reason: str = "") -> DynamicResul
         artifacts=[],
         playbook=[],
         report_paths=[],
+        ui_observations=[],
     )
 
 

@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import re
+import threading
 import urllib.request
 from datetime import datetime, timezone
 from abc import ABC, abstractmethod
@@ -30,6 +31,7 @@ from apkscan.core.source_status import SOURCE_STATUSES
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.redact import scrub_pii, scrub_urls
 from apkscan.core.registry import BaseEnricher
+from apkscan.core.hunter_quota import HunterQuotaError
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,8 @@ _MAX_TEXT = 500
 #: 这些键只是元数据，**不构成"查到了东西"的证据**——参与 has_values 会把
 #: "主查询无记录 + 辅助端点失败"错报成 hit（即把没查到伪装成查到了）。
 _METADATA_ONLY_KEYS = {
+    "history_scope",
+    "query_window",
     "source",
     "count",
     "pulse_count",
@@ -667,11 +671,11 @@ def _business_error(payload: object) -> _ServiceError:
     category = "provider_response_error"
     if any(s in message for s in ("无 api", "无权限", "没有权限", "访问权限", "付费账号", "permission", "access restricted", "subscription")):
         category = "permission_denied"
-    elif any(s in message for s in ("quota", "credit", "余额", "积分", "配额")):
+    elif any(s in message for s in ("quota", "credit", "余额", "积分", "配额", "已用完")):
         category = "quota_insufficient"
     elif any(s in message for s in ("api key", "api-key", "token", "unauthorized", "认证", "鉴权")):
         category = "authentication_failed"
-    elif any(s in message for s in ("rate limit", "too many", "频率", "频繁")):
+    elif any(s in message for s in ("rate limit", "too many", "频率", "频繁", "请求太多")):
         category = "rate_limited"
     elif any(s in message for s in ("参数", "格式", "page_size", "invalid query", "时间范围")):
         category = "invalid_request"
@@ -767,12 +771,19 @@ class _PassiveLookupEnricher(BaseEnricher, ABC):
         status = getattr(response, "status_code", None)
         if isinstance(status, int):
             request_receipt["http_status"] = status
+        if status == 429:
+            from apkscan.enrichers._rate_limit import retry_after_seconds
+
+            delay = retry_after_seconds(getattr(response, "headers", {}))
+            if delay is not None:
+                self.receipt["retry_after_seconds"] = delay
         responses = self.receipt.setdefault("responses", [])
         if isinstance(responses, list):
             responses.append(request_receipt)
         # Keep the primary response anchor; auxiliary calls get separate receipts.
-        for key, value in request_receipt.items():
-            self.receipt.setdefault(key, value)
+        if operation == "primary":
+            for key, value in request_receipt.items():
+                self.receipt.setdefault(key, value)
         if status in (401, 403, 402, 429):
             raise _ServiceError({401: "authentication_failed", 403: "permission_denied", 402: "quota_insufficient", 429: "rate_limited"}[status], status)
         _reject_redirect(response)
@@ -846,6 +857,11 @@ class _PassiveLookupEnricher(BaseEnricher, ABC):
                 self._blocked_targets = 0
                 self._consecutive_failures = 0
         except Exception as exc:  # noqa: BLE001 - provider failures never stop case closure
+            if isinstance(exc, HunterQuotaError):
+                self.receipt.update(finished_at=datetime.now(timezone.utc).isoformat(), error_type=exc.category)
+                return EnrichmentResult(provider=self.name, ok=exc.skipped,
+                    data={"_source_status": "skipped" if exc.skipped else "failed",
+                          "_error_type": exc.category, "_via": via}, error=None if exc.skipped else exc.category)
             error_type = exc.category if isinstance(exc, _ServiceError) else _safe_error_type(exc)
             self.receipt.update(finished_at=datetime.now(timezone.utc).isoformat(), error_type=error_type)
             if error_type == "redirect_not_followed":
@@ -1098,21 +1114,41 @@ class FofaPassiveEnricher(_PassiveLookupEnricher):
 
     def _lookup(self, endpoint: Endpoint, credential: str) -> object:
         base_url = _api_endpoint("FXAPK_FOFA_URL", "https://fofa.info", "/api/v1/search/all")
+        profile = os.environ.get("FXAPK_FOFA_FIELD_PROFILE", "full")
+        if profile not in {"full", "basic"}:
+            raise ValueError("invalid_fofa_field_profile")
+        fields = "host,ip,port" if profile == "basic" else FOFA_QUERY_FIELDS
+        if urlsplit(base_url).hostname == "fofoapi.com" and profile == "full":  # leak-scan: allow public relay API hostname required for provider-specific protocol compatibility
+            aliases = {"country": "location.country", "region": "location.region",
+                       "city": "location.city", "as_number": "asn", "as_organization": "org"}
+            fields = ",".join(aliases.get(field, field) for field in fields.split(","))
         self.receipt["endpoint"] = _provider_origin(base_url)
-        self.receipt["requested_fields"] = FOFA_QUERY_FIELDS.split(",")
+        self.receipt["requested_fields"] = fields.split(",")
         query = f'ip="{endpoint.value}"' if endpoint.kind == "ip" else f'domain="{endpoint.value}"'
         response = self._http.get(
             base_url,
             params={
                 "key": credential,
                 "qbase64": base64.b64encode(query.encode("utf-8")).decode("ascii"),
-                "fields": FOFA_QUERY_FIELDS,
+                "fields": fields,
                 "size": _MAX_RECORDS,
             },
             allow_redirects=False, timeout=_TIMEOUT,
         )
         self._check_response(response)
-        return response.json()
+        payload = response.json()
+        # This relay labels an upstream key failure explicitly. It is not proof
+        # that the configured relay key is invalid. Preserve this target's failure
+        # without stopping unrelated targets after one response; the shared
+        # three-consecutive-failure breaker still applies. Never retry it here.
+        note = _safe_provider_note(payload)
+        if (urlsplit(base_url).hostname == "fofoapi.com"  # leak-scan: allow public relay API hostname required for provider-specific protocol compatibility
+                and self.receipt.get("http_status") == 200
+                and _provider_declared_error(payload, self.name)
+                and note.strip() == "[官方错误信息] [-403] 访问权限不足"):
+            self.receipt.update(provider_message=note, error_scope="upstream")
+            raise _ServiceError("upstream_permission_denied", "-403")
+        return payload
 
     def _normalize(self, payload: object, endpoint: Endpoint) -> dict[str, object]:
         del endpoint
@@ -1121,11 +1157,19 @@ class FofaPassiveEnricher(_PassiveLookupEnricher):
         if not isinstance(rows, list):
             raise ValueError("invalid_fofa_results")
         normalized = []
+        requested = self.receipt.get("requested_fields", FOFA_QUERY_FIELDS.split(","))
+        if not isinstance(requested, list):
+            raise ValueError("invalid_fofa_requested_fields")
         if isinstance(rows, list):
             for row in rows[:_MAX_RECORDS]:
-                if not isinstance(row, list) or len(row) != len(FOFA_QUERY_FIELDS.split(",")):
+                if not isinstance(row, list) or len(row) != len(requested):
                     raise ValueError("fofa_field_count_mismatch")
-                compact = [_bounded_scalar(value) for value in row]
+                values = dict(zip(requested, row))
+                for remote, canonical in {"location.country": "country", "location.region": "region",
+                                          "location.city": "city", "asn": "as_number", "org": "as_organization"}.items():
+                    if remote in values:
+                        values[canonical] = values[remote]
+                compact = [_bounded_scalar(values.get(field)) for field in FOFA_QUERY_FIELDS.split(",")]
                 if compact and any(value is not None for value in compact):
                     compact[0] = _safe_host_reference(row[0]) if row else None
                     normalized.append(compact)
@@ -1168,20 +1212,61 @@ class HunterPassiveEnricher(_PassiveLookupEnricher):
     #: hunter.qianxin.com 须境内直连——经境外代理返 403（用户跑工具常开境外代理）。强制绕代理直连。
     #: 它是境内定人最有用的源（ICP 备案 company + 机房城市），不能被代理静默打断。
     bypass_system_proxy = True
+    request_budget = 2  # Account balance preflight + bounded search (upper bound).
+
+    def __init__(self, session: Any | None = None) -> None:
+        super().__init__(session)
+        self._quota_call_lock = threading.Lock()
 
     def enrich(self, ep: Endpoint) -> EnrichmentResult:
-        # Optional local billing policy. No documented free-only API switch has
-        # been verified, so fail closed before reading credentials or querying.
-        # Legacy provider-default behavior remains unchanged when not selected.
-        mode = os.environ.get("FXAPK_HUNTER_CREDIT_MODE", "provider_default").strip()
-        if mode != "provider_default":
-            reason = "free_only_billing_unverified" if mode == "free_only" else "invalid_billing_policy"
-            self.receipt = {"network_attempted": False, "reason": reason}
-            return EnrichmentResult(provider=self.name, ok=True,
-                                    data={"_source_status": "disabled", "_error_type": reason})
-        return super().enrich(ep)
+        # Serialize both billing-policy receipts and account-quota operations
+        # when the scheduler shares this adapter between endpoint threads.
+        with self._quota_call_lock:
+            mode = os.environ.get("FXAPK_HUNTER_CREDIT_MODE", "provider_default").strip()
+            if mode != "provider_default":
+                reason = "free_only_billing_unverified" if mode == "free_only" else "invalid_billing_policy"
+                self.receipt = {"network_attempted": False, "reason": reason}
+                return EnrichmentResult(provider=self.name, ok=True,
+                                        data={"_source_status": "disabled", "_error_type": reason})
+            return super().enrich(ep)
 
     def _lookup(self, endpoint: Endpoint, credential: str) -> object:
+        from apkscan.core.hunter_quota import account_balance, local_day, quota_store
+        from apkscan.core.response_evidence import capture_responses
+
+        self.receipt.update(network_attempted=False, search_attempted=False)
+        with quota_store() as budget:
+            # userInfo contains personal account data, not target evidence.
+            # Do not persist its body via --retain-responses.
+            with capture_responses(None):
+                self.receipt["network_attempted"] = True
+                response = self._http.get("https://hunter.qianxin.com/openApi/userInfo",
+                    params={"api-key": credential}, allow_redirects=False, timeout=_TIMEOUT)
+            self._check_response(response, operation="account_quota")
+            account_payload = response.json()
+            if _provider_declared_error(account_payload, self.name):
+                raise _business_error(account_payload)
+            if _dict(account_payload).get("code") not in (200, "200"):
+                raise HunterQuotaError("hunter_account_balance_unknown")
+            account, remaining, limit = account_balance(account_payload)
+            day = local_day()
+            self.receipt["quota"] = {"day": day, "daily_limit": 500, "free_remaining_before": remaining}
+            reservation = budget.reserve(account, remaining, limit, day)
+            self.receipt["quota"] = reservation
+            self.receipt["search_attempted"] = True
+            payload = self._search(endpoint, credential)
+            if not _provider_declared_error(payload, self.name):
+                budget.settle(account, reservation, payload)
+            return payload
+
+    def _search(self, endpoint: Endpoint, credential: str) -> object:
+        from datetime import timedelta
+        from apkscan.core.hunter_quota import CHINA_TIME, PAGE_SIZE
+
+        now = datetime.now(CHINA_TIME)
+        window = {"start_time": (now - timedelta(days=29)).strftime("%Y-%m-%d %H:%M:%S"),
+                  "end_time": now.strftime("%Y-%m-%d %H:%M:%S")}
+        self.receipt["query_window"] = {**window, "timezone": "UTC+08:00"}
         query = f'ip="{endpoint.value}"' if endpoint.kind == "ip" else f'domain="{endpoint.value}"'
         response = self._http.get(
             self._URL,
@@ -1189,8 +1274,10 @@ class HunterPassiveEnricher(_PassiveLookupEnricher):
                 "api-key": credential,
                 "search": base64.urlsafe_b64encode(query.encode("utf-8")).decode("ascii"),
                 "page": 1,
-                "page_size": 10,
+                "page_size": PAGE_SIZE,
                 "is_web": 3,
+                # Older history automatically uses paid/equity credits.
+                **window,
             },
             allow_redirects=False, timeout=_TIMEOUT,
         )
@@ -1200,8 +1287,20 @@ class HunterPassiveEnricher(_PassiveLookupEnricher):
     def _normalize(self, payload: object, endpoint: Endpoint) -> dict[str, object]:
         del endpoint
         data = _dict(_dict(payload).get("data"))
-        return _asset_result(data.get("arr") if "arr" in data else data.get("list"),
-                             source=self.name, total=data.get("total"), limit=10)
+        rows = data.get("arr") if "arr" in data else data.get("list")
+        # Hunter returns arr=null for successful searches with zero matches.
+        # Missing records or an unknown/nonzero total must still fail closed.
+        total = data.get("total")
+        if ("arr" in data or "list" in data) and rows is None and (
+            type(total) is int and total == 0 or total == "0"
+        ):
+            rows = []
+        result = _asset_result(rows,
+                               source=self.name, total=data.get("total"), limit=10)
+        result["history_scope"] = "recent_29_days_free_credit_only"
+        if "query_window" in self.receipt:
+            result["query_window"] = self.receipt["query_window"]
+        return result
 
 
 class ZoomEyePassiveEnricher(_PassiveLookupEnricher):

@@ -19,6 +19,8 @@ from apkscan.core.phase2.inventory import (
     load_coverage_snapshot,
 )
 from apkscan.core.phase2.link import build_gate_receipt, write_gate_receipt
+from apkscan.core.atomic import atomic_write_bytes
+from apkscan.core.phase2.survey import load_survey
 from apkscan.core.phase2.triage import build_triage, render_queue_md
 from apkscan.core.phase2.decision import (
     DecisionError,
@@ -28,7 +30,6 @@ from apkscan.core.phase2.decision import (
     build_decision,
     build_decisions_from_intents,
     classify_replay_change,
-    extract_established_hosts,
     load_decisions,
     materialize_case,
     members_hash,
@@ -356,22 +357,27 @@ def _cmd_gate(args: argparse.Namespace) -> int:
         decisions = load_decisions(
             decisions_path, members_by_parent=parent_members,
             known_clue_ids=known, expected_case_id=inventory.case_id)
-        survey_hosts = None
-        if args.survey:  # 期3：pcap_survey 端点全集 → G9 包外 established 硬门、G10 声明消失
-            survey_hosts = extract_established_hosts(
-                json.loads(Path(args.survey).read_text(encoding="utf-8")))
+        survey = load_survey(Path(args.survey), inventory=inventory, case_dir=case_dir) if args.survey else None
+        survey_hosts = set(survey.established_hosts) if survey is not None else None
         report = run_gate(inventory, triage, decisions, clue_records, coverage,
                           case_id=inventory.case_id, survey_established_hosts=survey_hosts,
+                          survey_assessed=survey.complete if survey is not None else False,
                           allow_pending=args.allow_pending)
     except (OSError, UnicodeError, ValueError, DecisionError) as exc:
         print(f"gate 执行失败：{exc}", file=sys.stderr)
         return 2
     receipt_path = case_dir / "phase2" / "gate-receipt.json"
     try:
+        if survey is not None:
+            # Snapshot the exact bounded bytes already judged; do not reread a
+            # mutable source between G9/G10 assessment and receipt hashing.
+            atomic_write_bytes(receipt_path.parent / "survey.json", survey.raw)
         write_gate_receipt(receipt_path, build_gate_receipt(
             inventory, report, coverage_path=coverage_path,
             decisions_path=decisions_path,
             decisions_ledger="present",
+            survey_sha256=survey.sha256 if survey is not None else None,
+            survey_assessment=survey.assessment if survey is not None else None,
         ))
     except OSError as exc:
         print(f"写 gate 回执失败：{exc}", file=sys.stderr)
@@ -686,7 +692,7 @@ def build_parser() -> argparse.ArgumentParser:
     ga.add_argument("--clues", default=None, help="clue_records.jsonl 路径")
     ga.add_argument("--allow-pending", action="store_true", help="pending>0 降为 warning")
     ga.add_argument("--survey", default=None,
-                    help="pcap_survey to_dict JSON：接入 G9 包外 established 硬门（不给则 G10 声明未设防）")
+                    help="survey JSON：legacy 仅接入 G9；phase2-survey/1.0 完整绑定当前案件与全部登记抓包后消除 G10")
     ga.set_defaults(func=_cmd_gate)
 
     db = sub.add_parser("decide-batch", help="T2 组批判决（tier 前缀 + --expect 硬门）")

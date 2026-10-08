@@ -17,7 +17,9 @@ from apkscan.analyzers.web_evidence import _iter_text, coverage_meta_categories_
 from apkscan.core.json_contract import reject_nonfinite_json_constant
 from apkscan.core.models import AnalyzerResult, Evidence
 from apkscan.core.registry import BaseAnalyzer
-from apkscan.core.webctx import WebContext, canonical_evidence_name, looks_binary
+from apkscan.core.webctx import (
+    WebBodyInput, WebContext, canonical_evidence_name, looks_binary, normalize_text_bytes,
+)
 
 if TYPE_CHECKING:
     from apkscan.core.context import AnalysisContext
@@ -60,136 +62,172 @@ class WebHarAnalyzer(BaseAnalyzer):
     meta_keys = frozenset(meta_key_categories)
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
-        result = AnalyzerResult(analyzer=self.name)
-        collector = EndpointCollector()
-        records, bodies = [], {}
-        gaps: dict[str, int] = {}
-        total_body = 0
-        examined = 0
-
-        def gap(code: str) -> None:
-            gaps[code] = gaps.get(code, 0) + 1
-
-        for path, text in _iter_text(ctx, self.name, (".har", ".har.json"), result):
-            try:
-                payload = json.loads(text.lstrip("\ufeff"), parse_constant=reject_nonfinite_json_constant)
-            except (ValueError, RecursionError):
-                gap("invalid_har_json")
-                continue
-            log = payload.get("log") if isinstance(payload, dict) else None
-            entries = log.get("entries") if isinstance(log, dict) else None
-            if not isinstance(entries, list):
-                gap("missing_entries")
-                continue
-            for index, entry in enumerate(entries):
-                if examined >= MAX_ENTRIES:
-                    gap("entry_budget_exceeded")
-                    break
-                examined += 1
-                if not isinstance(entry, Mapping):
-                    gap("invalid_entry")
-                    continue
-                request, response = entry.get("request"), entry.get("response")
-                if not isinstance(request, Mapping) or not isinstance(response, Mapping):
-                    gap("missing_request_or_response")
-                    continue
-                url = _http_url(request.get("url"))
-                if not url:
-                    gap("invalid_request_url")
-                    continue
-                location = f"{path}#/log/entries/{index}"
-                observed = _timestamp(entry.get("startedDateTime"))
-                evidence = Evidence(source="web", location=location + "/request/url", observed_at=observed)
-                collector.add(url, "url", evidence)
-                host = urlsplit(url).hostname or ""
-                try:
-                    ip = ipaddress.ip_address(host)
-                    kind, private = "ip", not ip.is_global
-                except ValueError:
-                    kind, private = "domain", False
-                collector.add(host, kind, evidence, is_private=private)
-                status = response.get("status")
-                status = status if isinstance(status, int) and not isinstance(status, bool) and 0 <= status <= 599 else None
-                method = request.get("method")
-                method = method.upper() if isinstance(method, str) and len(method) <= 32 and method.isascii() and method.isalpha() else "UNKNOWN"
-                row = {"method": method, "entry_ref": location, "request_url": url, "status": status,
-                       "response_recorded": bool(status and status >= 100),
-                       "observed_at": observed, "target_app_attribution_verified": False,
-                       "body_state": "absent"}
-                # An explicit redirect relationship, never inferred from adjacent requests.
-                redirect = _http_url(response.get("redirectURL"), url)
-                if redirect and status is not None and 300 <= status < 400:
-                    row["redirect_url"] = redirect
-                    collector.add(redirect, "url", Evidence(source="web", location=location + "/response/redirectURL",
-                                                          observed_at=observed))
-                server_ip = entry.get("serverIPAddress")
-                if isinstance(server_ip, str):
-                    try:
-                        row["server_ip"] = str(ipaddress.ip_address(server_ip))
-                    except ValueError:
-                        gap("invalid_server_ip")
-                content = response.get("content")
-                content = content if isinstance(content, Mapping) else {}
-                body = content.get("text")
-                if isinstance(body, str):
-                    if len(body) > MAX_BODY_BYTES * 2:
-                        row["body_state"] = "over_limit"
-                        gap("body_budget_exceeded")
-                    else:
-                        try:
-                            encoding = content.get("encoding")
-                            if encoding not in (None, "", "base64"):
-                                raise ValueError("unsupported_body_encoding")
-                            raw = base64.b64decode(body, validate=True) if encoding == "base64" else body.encode("utf-8")
-                            if len(raw) > MAX_BODY_BYTES or total_body + len(raw) > MAX_TOTAL_BODY_BYTES:
-                                row["body_state"] = "over_limit"
-                                gap("body_budget_exceeded")
-                            else:
-                                total_body += len(raw)
-                                row["body_state"] = "captured"
-                                row["body_sha256"] = hashlib.sha256(raw).hexdigest()
-                                # Reuse the static extractor without executing returned code.
-                                virtual = canonical_evidence_name(location + "/response/content.body", raw)
-                                if not looks_binary(raw) and entry.get("_body_content_encoding") in (None, "", "identity"):
-                                    bodies[virtual] = raw
-                        except (ValueError, UnicodeError, binascii.Error):
-                            row["body_state"] = "decode_error"
-                            gap("body_decode_error")
-                else:
-                    gap("body_not_exported")
-                if observed is None:
-                    gap("observation_time_missing")
-                if not row["response_recorded"]:
-                    gap("response_not_recorded")
-                if entry.get("_body_content_encoding") not in (None, "", "identity"):
-                    gap("content_encoding_not_decoded")
-                    if row["body_state"] == "captured":
-                        row["body_state"] = "captured_encoded"
-                if entry.get("_body_truncated") is True:
-                    gap("exported_body_truncated")
-                    if row["body_state"] == "captured":
-                        row["body_state"] = "captured_truncated"
-                records.append(row)
+        result, bodies = decode_har_evidence(ctx)
         if bodies:
-            body_result = EndpointsAnalyzer().analyze(WebContext(ctx.config, files=bodies))
+            body_result = EndpointsAnalyzer().analyze(WebContext(
+                ctx.config, files={body.location: body.data for body in bodies},
+            ))
             if body_result.error:
-                gap("body_analysis_failed")
+                result.meta["web_har_summary"]["gaps"]["body_analysis_failed"] = 1
             for endpoint in body_result.endpoints:
                 for evidence in endpoint.evidences:
                     evidence.source = "web"
-                result.endpoints.append(endpoint)
-        result.endpoints.extend(collector.endpoints({"url": 0, "domain": 1, "ip": 2}))
-        failed = gaps.get("invalid_har_json", 0) + gaps.get("missing_entries", 0)
-        if failed:
-            result.meta["web_har_read_failed"] = int(result.meta.get("web_har_read_failed", 0)) + failed
-        if gaps.get("entry_budget_exceeded") or gaps.get("body_budget_exceeded"):
-            result.meta["web_har_items_truncated"] = gaps.get("entry_budget_exceeded", 0) + gaps.get("body_budget_exceeded", 0)
-        if gaps.get("exported_body_truncated"):
-            result.meta["web_har_content_truncated"] = gaps["exported_body_truncated"]
-        result.meta["web_har_records"] = records
-        result.meta["web_har_summary"] = {
-            "examined_entries": examined, "processed_entries": len(records), "decoded_body_bytes": total_body,
-            "gaps": dict(sorted(gaps.items())), "complete_export_verified": False,
-            "network_requests": 0, "target_app_attribution_verified": False,
-        }
+            result.endpoints = body_result.endpoints + result.endpoints
         return result
+
+
+def decode_har_evidence(ctx: "AnalysisContext") -> tuple[AnalyzerResult, tuple[WebBodyInput, ...]]:
+    """Decode bounded HAR exports for independent static consumers.
+
+    No context mutation or analyzer-order dependency. The result carries HAR
+    records/coverage; virtual bodies carry their exact entry and source hashes.
+    """
+    result = AnalyzerResult(analyzer="web_har")
+    collector = EndpointCollector()
+    records: list[dict[str, object]] = []
+    bodies: list[WebBodyInput] = []
+    raw_inputs: dict[str, bytes] = {}
+    gaps: dict[str, int] = {}
+    total_body = 0
+    examined = 0
+
+    def gap(code: str) -> None:
+        gaps[code] = gaps.get(code, 0) + 1
+
+    for path, text in _iter_text(ctx, "web_har", (".har", ".har.json"), result, raw_inputs=raw_inputs):
+        source_sha256 = hashlib.sha256(raw_inputs[path]).hexdigest()
+        try:
+            payload = json.loads(text.lstrip("\ufeff"), parse_constant=reject_nonfinite_json_constant)
+        except (ValueError, RecursionError):
+            gap("invalid_har_json")
+            continue
+        log = payload.get("log") if isinstance(payload, dict) else None
+        entries = log.get("entries") if isinstance(log, dict) else None
+        if not isinstance(entries, list):
+            gap("missing_entries")
+            continue
+        for index, entry in enumerate(entries):
+            if examined >= MAX_ENTRIES:
+                gap("entry_budget_exceeded")
+                break
+            examined += 1
+            if not isinstance(entry, Mapping):
+                gap("invalid_entry")
+                continue
+            request, response = entry.get("request"), entry.get("response")
+            if not isinstance(request, Mapping) or not isinstance(response, Mapping):
+                gap("missing_request_or_response")
+                continue
+            url = _http_url(request.get("url"))
+            if not url:
+                gap("invalid_request_url")
+                continue
+            location = f"{path}#/log/entries/{index}"
+            observed = _timestamp(entry.get("startedDateTime"))
+            evidence = Evidence(source="web", location=location + "/request/url", observed_at=observed)
+            collector.add(url, "url", evidence)
+            host = urlsplit(url).hostname or ""
+            try:
+                ip = ipaddress.ip_address(host)
+                kind, private = "ip", not ip.is_global
+            except ValueError:
+                kind, private = "domain", False
+            collector.add(host, kind, evidence, is_private=private)
+            status = response.get("status")
+            status = status if isinstance(status, int) and not isinstance(status, bool) and 0 <= status <= 599 else None
+            method = request.get("method")
+            method = method.upper() if isinstance(method, str) and len(method) <= 32 and method.isascii() and method.isalpha() else "UNKNOWN"
+            row: dict[str, object] = {
+                "source_file": path, "source_sha256": source_sha256,
+                "body_truncated": entry.get("_body_truncated") is True,
+                "method": method, "entry_ref": location, "request_url": url, "status": status,
+                "response_recorded": bool(status and status >= 100),
+                "observed_at": observed, "target_app_attribution_verified": False,
+                "body_state": "absent",
+            }
+            # An explicit redirect relationship, never inferred from adjacent requests.
+            redirect = _http_url(response.get("redirectURL"), url)
+            if redirect and status is not None and 300 <= status < 400:
+                row["redirect_url"] = redirect
+                collector.add(redirect, "url", Evidence(source="web", location=location + "/response/redirectURL",
+                                                      observed_at=observed))
+            server_ip = entry.get("serverIPAddress")
+            if isinstance(server_ip, str):
+                try:
+                    row["server_ip"] = str(ipaddress.ip_address(server_ip))
+                except ValueError:
+                    gap("invalid_server_ip")
+            content = response.get("content")
+            content = content if isinstance(content, Mapping) else {}
+            body = content.get("text")
+            if isinstance(body, str):
+                if len(body) > MAX_BODY_BYTES * 2:
+                    row["body_state"] = "over_limit"
+                    gap("body_budget_exceeded")
+                else:
+                    try:
+                        encoding = content.get("encoding")
+                        if encoding not in (None, "", "base64"):
+                            raise ValueError("unsupported_body_encoding")
+                        raw = base64.b64decode(body, validate=True) if encoding == "base64" else body.encode("utf-8")
+                        if len(raw) > MAX_BODY_BYTES or total_body + len(raw) > MAX_TOTAL_BODY_BYTES:
+                            row["body_state"] = "over_limit"
+                            gap("body_budget_exceeded")
+                        else:
+                            total_body += len(raw)
+                            row["body_state"] = "captured"
+                            row["body_sha256"] = hashlib.sha256(raw).hexdigest()
+                            # Publish derived inputs without mutating ctx's evidence inventory.
+                            plain, decode_error = normalize_text_bytes(raw)
+                            if decode_error is not None:
+                                gap("body_text_decode_error")
+                            elif not looks_binary(plain) and entry.get("_body_content_encoding") in (None, "", "identity"):
+                                virtual = canonical_evidence_name(location + "/response/content.body", plain)
+                                mime = content.get("mimeType")
+                                mime = mime.split(";", 1)[0].strip().lower() if isinstance(mime, str) else ""
+                                if virtual.endswith(".txt") and mime in (
+                                    "application/javascript", "text/javascript",
+                                    "application/ecmascript", "text/ecmascript",
+                                ):
+                                    virtual = virtual[:-4] + ".js"
+                                row["body_location"] = virtual
+                                row["body_text_sha256"] = hashlib.sha256(plain).hexdigest()
+                                bodies.append(WebBodyInput(
+                                    location=virtual, data=plain, source_file=path,
+                                    source_sha256=source_sha256, entry_ref=location,
+                                    body_sha256=hashlib.sha256(raw).hexdigest(),
+                                    body_truncated=entry.get("_body_truncated") is True,
+                                ))
+                    except (ValueError, UnicodeError, binascii.Error):
+                        row["body_state"] = "decode_error"
+                        gap("body_decode_error")
+            else:
+                gap("body_not_exported")
+            if observed is None:
+                gap("observation_time_missing")
+            if not row["response_recorded"]:
+                gap("response_not_recorded")
+            if entry.get("_body_content_encoding") not in (None, "", "identity"):
+                gap("content_encoding_not_decoded")
+                if row["body_state"] == "captured":
+                    row["body_state"] = "captured_encoded"
+            if entry.get("_body_truncated") is True:
+                gap("exported_body_truncated")
+                if row["body_state"] == "captured":
+                    row["body_state"] = "captured_truncated"
+            records.append(row)
+    result.endpoints.extend(collector.endpoints({"url": 0, "domain": 1, "ip": 2}))
+    failed = gaps.get("invalid_har_json", 0) + gaps.get("missing_entries", 0)
+    if failed:
+        result.meta["web_har_read_failed"] = int(result.meta.get("web_har_read_failed", 0)) + failed
+    if gaps.get("entry_budget_exceeded") or gaps.get("body_budget_exceeded"):
+        result.meta["web_har_items_truncated"] = gaps.get("entry_budget_exceeded", 0) + gaps.get("body_budget_exceeded", 0)
+    if gaps.get("exported_body_truncated"):
+        result.meta["web_har_content_truncated"] = gaps["exported_body_truncated"]
+    result.meta["web_har_records"] = records
+    result.meta["web_har_summary"] = {
+        "examined_entries": examined, "processed_entries": len(records), "decoded_body_bytes": total_body,
+        "gaps": dict(sorted(gaps.items())), "complete_export_verified": False,
+        "network_requests": 0, "target_app_attribution_verified": False,
+    }
+    return result, tuple(bodies)

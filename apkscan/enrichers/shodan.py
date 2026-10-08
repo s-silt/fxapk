@@ -39,6 +39,7 @@ from apkscan.enrichers import _http
 from apkscan.enrichers._profile import bounded_profile, coverage
 from apkscan.enrichers.multisource import _ServiceError, _reject_redirect
 
+from apkscan.core.enrichment import safe_error_type
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
 
@@ -288,6 +289,12 @@ class ShodanEnricher(BaseEnricher):
         if isinstance(content, bytes):
             item["response_sha256"] = hashlib.sha256(content).hexdigest()
         self.receipt.setdefault("responses", []).append(item)
+        if status == 429:
+            from apkscan.enrichers._rate_limit import retry_after_seconds
+
+            delay = retry_after_seconds(getattr(response, "headers", {}))
+            if delay is not None:
+                self.receipt["retry_after_seconds"] = delay
         if status in (401, 403, 402, 429):
             raise _ServiceError({401: "authentication_failed", 403: "permission_denied",
                                  402: "quota_insufficient", 429: "rate_limited"}[status])
@@ -383,13 +390,16 @@ class ShodanEnricher(BaseEnricher):
             return EnrichmentResult(provider=self.name, ok=True, data=entry)
         except Exception as exc:  # noqa: BLE001 — 富化失败不得炸主流程
             # requests 的异常文本可能包含带 key 的完整 URL，只保留异常类型，避免密钥进日志/报告。
-            error_type = exc.category if isinstance(exc, _ServiceError) else type(exc).__name__
-            self._consecutive_failures += 1
-            if error_type in {"authentication_failed", "permission_denied", "quota_insufficient", "rate_limited", "local_rate_limit"} or self._consecutive_failures >= 3:
-                self._blocked_error = error_type
-            self.receipt["error_type"] = error_type
+            error_type = exc.category if isinstance(exc, _ServiceError) else safe_error_type(exc)
             if isinstance(exc, ValueError) and str(exc) == "dns_resolution_failed":
                 error_type = "dns_resolution_failed"
+                # A domain-specific DNS miss is not a provider outage. Do not
+                # suppress unrelated IP lookups after several unresolved names.
+            else:
+                self._consecutive_failures += 1
+                if error_type in {"authentication_failed", "permission_denied", "quota_insufficient", "rate_limited", "local_rate_limit"} or self._consecutive_failures >= 3:
+                    self._blocked_error = error_type
+            self.receipt["error_type"] = error_type
             logger.debug("Shodan 查询失败：%s（%s）", value, error_type)
             return EnrichmentResult(provider=self.name, ok=False, error=error_type,
                                     data={"_source_status": "failed", "_error_type": error_type})

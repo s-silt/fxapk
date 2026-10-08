@@ -8,7 +8,7 @@
 <p align="center"><a href="README.md">中文</a> &nbsp;·&nbsp; <strong>English</strong></p>
 <p align="center">
   <a href="#how">How it works</a> &nbsp;·&nbsp; <a href="#start">Quick start</a> &nbsp;·&nbsp;
-  <a href="#handoff">Handoff</a> &nbsp;·&nbsp; <a href="#limits">Limits</a> &nbsp;·&nbsp; <a href="#docs">Docs</a>
+  <a href="#packages">Packages and review</a> &nbsp;·&nbsp; <a href="#limits">Limits</a> &nbsp;·&nbsp; <a href="#docs">Docs</a>
 </p>
 <p align="center">
   <a href="https://github.com/s-silt/fxapk/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/s-silt/fxapk/actions/workflows/ci.yml/badge.svg"></a>
@@ -17,7 +17,7 @@
 
 CLI command and PyPI package: `fxapk`; compatible command alias: `apkscan`. Run from Python or source, directly or through an AI assistant. No exe or GUI is provided.
 
-**1.17.0** adds package-bound Phase-2 review gates, per-round capture records, HTTP/HAR evidence inputs and provider-role review plans. Publishing the code does not migrate historical cases, change devices or query third-party services. See [CHANGELOG.md](CHANGELOG.md).
+The published version is **1.17.0**. The **unreleased 1.18.0 source** strengthens survey completeness and evidence binding, shares HAR bodies with semantic analyzers, fixes the Censys IP prerequisite, and adds an optional Android UI observation plugin. Upgrades preserve historical packages and the legacy route; releasing code does not migrate cases, modify devices, or automatically query third-party services. See [CHANGELOG.md](CHANGELOG.md).
 
 | Capability | Scope |
 | --- | --- |
@@ -91,15 +91,15 @@ An AI assistant can follow [AGENTS.md](AGENTS.md), given a sample path and expli
 | Enrichment and closure | `fxapk case close out/app.json`; requires network and report-write authorization |
 | Full command reference | [USAGE.en.md](USAGE.en.md) · `fxapk --help` |
 
-<a id="handoff"></a>
+<a id="packages"></a>
 
-## Evidence packages and handoff
+## Evidence packages and Phase-2 review
 
-Keep code separate from case materials. Existing handoff `cases/`, `corpus/` and legacy workflow directories can remain in place. `FXAPK_CORPUS` points outside the code worktree. For legacy scripts, set `FXAPK_ROOT` to the active source checkout and `FXAPK_HANDOFF_ROOT` to the handoff root.
+Keep evidence packages, the corpus and historical materials outside the code worktree. Set `FXAPK_CORPUS` explicitly to the corpus directory. Stages exchange manifest-registered relative paths, content hashes and review receipts; they do not depend on a storage service or directory name.
 
 `case phase2 ... --case-dir <case-directory>` reads `case-package.json` in direct child package directories and verifies manifest-registered paths and hashes. Legacy scripts that assume `report.json` need the new CLI when the manifest names another file; do not rename historical evidence. Generate new Phase-2 materials in a working copy.
 
-`case review` requires `--gate-receipt` plus matching `coverage.json` and `decisions.jsonl` beside the receipt. `corpus add --package` requires byte-identical report content. See the [handoff workflow](PRE-REPORT-WORKFLOW.md) for details.
+`case review` requires `--gate-receipt` plus matching `coverage.json` and `decisions.jsonl` beside the receipt. `corpus add --package` requires byte-identical report content. See the [pre-report workflow](PRE-REPORT-WORKFLOW.md) for details.
 
 | State | Meaning |
 | --- | --- |
@@ -122,7 +122,7 @@ These states are independent. An accepted review cannot turn partial closure int
 
 `corpus link-discover/link-explain/link-groups` default to `--evidence-values omit`; explicit `raw` restores original values. `link-labels-validate/link-evaluate/link-readiness/link-train` return aggregates. These separate projections do not broaden the digest guarantee.
 
-Use only within lawful authorization. Shared CDN, ASN, certificates or technical anchors cannot alone establish an operator or common ownership. The source catalog does not prove account access, free quota or available budget. Synthetic regression and cross-platform CI do not establish real-device, provider-account or OneDrive sync-conflict acceptance.
+Use only within lawful authorization. Shared CDN, ASN, certificates or technical anchors cannot alone establish an operator or common ownership. The source catalog does not prove account access, free quota or available budget. Synthetic regression and cross-platform CI do not establish real-device, provider-account or file-sync conflict acceptance.
 
 <a id="docs"></a>
 
@@ -132,7 +132,7 @@ Use only within lawful authorization. Shared CDN, ASN, certificates or technical
 | --- | --- |
 | Commands, outputs and corpus | [USAGE.en.md](USAGE.en.md) · [Chinese reference](USAGE.md) |
 | Agent operations and authorization | [AGENTS.md](AGENTS.md) |
-| Capture rounds, Phase 2 and handoff | [PRE-REPORT-WORKFLOW.md](PRE-REPORT-WORKFLOW.md) |
+| Capture rounds, Phase 2 and pre-report materials | [PRE-REPORT-WORKFLOW.md](PRE-REPORT-WORKFLOW.md) |
 | Architecture and evidence semantics | [ARCHITECTURE.md](ARCHITECTURE.md) |
 | Companion tools | [COMPANION-TOOLS.en.md](COMPANION-TOOLS.en.md) · [tools/TOOLCHAIN.md](tools/TOOLCHAIN.md) |
 | Changes | [CHANGELOG.md](CHANGELOG.md) |

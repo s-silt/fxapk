@@ -267,6 +267,23 @@ def run_selfcheck(*, online: bool = True, probe_network: bool = True) -> dict[st
     # 凭据就绪度：紧跟联网项——两者一起才回答得了"某个源为什么没有结果"。
     components += build_credential_components()
 
+    try:
+        from apkscan.plugins.registry import discover_plugins
+
+        _plugins, plugin_statuses = discover_plugins()
+        for plugin in plugin_statuses:
+            components.append(
+                _component(
+                    f"plugin:{plugin['name']}",
+                    "plugin",
+                    plugin["status"],
+                    "可选 fxapk 插件" if plugin["status"] == _STATUS_OK else plugin.get("reason", "插件不可用"),
+                    "安装对应 fxapk 插件包" if plugin["status"] != _STATUS_OK else "",
+                )
+            )
+    except Exception:  # noqa: BLE001 - plugin discovery must not break selfcheck
+        logger.exception("[selfcheck] 插件发现异常，插件项跳过")
+
     summary = Counter(c["status"] for c in components)
     # 整体 ok：核心就绪 + 无「配了却连不上」的硬故障（missing/disabled 是可选能力未启用，可接受）。
     ok = not any(c["status"] == _STATUS_UNREACHABLE for c in components)

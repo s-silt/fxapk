@@ -89,7 +89,7 @@ For `app.apk`, the basename is `app`; web reports use the evidence directory/ori
 - `out/app.json` — full structured data (machine-readable)
 - `--fmt pdf` — optional PDF export (needs local Chrome / Edge)
 
-## Capture, enrichment and handoff
+## Capture, enrichment and evidence contracts
 
 CLI `auto` defaults to three observation rounds after unpack/reanalysis: PCAP, general probes,
 then supported targeted observers. Use `--single-round` for the older route; programmatic
@@ -115,7 +115,7 @@ review materials, not a final report or attribution decision.
 Package integrity, analysis, closure and review are separate states. Accepted review does not
 turn partial closure into complete closure. Preserve historical packages and generate new
 materials in a working copy. Legacy scripts and native CLI have different filename assumptions;
-see the [handoff workflow](PRE-REPORT-WORKFLOW.md) and the extended [Chinese reference](USAGE.md).
+see the [pre-report workflow](PRE-REPORT-WORKFLOW.md) and the extended [Chinese reference](USAGE.md).
 
 ## Reproducibility
 
@@ -154,3 +154,20 @@ Use only within lawful authorization. Default enrichment queries third-party ser
 ## License
 
 [MIT](LICENSE)
+
+## Optional Android UI plugin
+
+The core distribution does not include Android CLI. Installing the plugin does not automatically operate a device. UI commands come from the trusted `fxapk-android-ui` distribution; plugin code runs in the host Python process without sandbox isolation. Prepare Android CLI separately and select an authorized test device with `--serial` and the target `--package`.
+
+```bash
+# Install reviewed plugin source after preparing dependencies in your Python environment.
+python -m pip install .
+python -m pip install ./plugins/fxapk-android-ui
+fxapk ui capabilities --serial TEST_SERIAL
+fxapk ui snapshot --serial TEST_SERIAL --package com.example.synthetic --out evidence/ui
+fxapk ui run-plan --serial TEST_SERIAL --package com.example.synthetic --plan inputs/ui-plan.json --out evidence/ui-plan
+```
+
+Plans accept fixed actions rather than arbitrary shell commands and must match the selected device and package. Unknown foreground identity, app switches, deadlines, failures and exhausted budgets retain failed or partial results. Screenshots and layouts retain file hashes; round observations also bind the sample, round and runtime report. UI observations complement PCAP/probe evidence and cannot independently establish business traffic or closure.
+
+Screenshots, layouts and action results may contain personal information or credentials. They are controlled evidence files, outside the digest's limited redaction coverage, and require separate review before sharing. Android CLI compatibility, permission dialogs, app switches and short-connection attribution still require authorized device acceptance.

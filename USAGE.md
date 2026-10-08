@@ -63,6 +63,18 @@ fxapk enrich batch -t targets.txt -o enrich_out --stage api --providers fofa_pro
 不会自动翻页。权限/额度错误及连续失败熔断后，本轮其余目标标记跳过；调整配置或恢复服务后
 重新启动有界批次。`--credential-slot 2` 支持 Quake、DayDayMap 及其画像，不会自动换号。
 
+配置 `https://fofoapi.com` 时，HTTP 200 中明确标注的“官方错误信息 [-403] 访问权限不足” <!-- leak-scan: allow public relay API hostname required for provider-specific protocol compatibility -->
+记为 `failed/upstream_permission_denied`，不能据此判定本机中转 Key 无效。该查询不自动重试，
+其他目标继续按原预算查询；连续三次失败仍停查。本机 Key 鉴权、额度错误及 HTTP 401/403
+继续立即停查该来源，其他接口的权限错误处理不变。
+
+服务恢复后，可在同一有界批次中加 `--recover-transient`，先 dry-run 核对包含恢复调用的预算，
+再加 `--no-dry-run`。该模式按来源间隔调用（`--provider-interval` 默认 2 秒），瞬时限流、
+超时或解析失败冷却后，每个来源在整个批次最多补试一次（`--retry-delay` 默认 15 秒）。
+服务端 Retry-After 超过 60 秒时本轮延后；再次失败停查该来源。鉴权、权限、额度错误不自动重试，
+Hunter 每次补试仍重新核验同一账户免费余额并预留积分。原失败与补试分别追加留痕，
+已有成功目标由 `--resume` 跳过；恢复成功不抹除历史缺口或直接改写已发布报告。
+
 JADX 多索引查询默认读取 cache 根的 `fxapk-jadx-index-map.json`，也可用 `--index-map` 指定映射。
 旧 1.6 索引只为建库时选定值保存 postings，因此索引 `coverage=complete` 不保证任意新值已覆盖；
 查询另报 `query_coverage`。启用 `--jadx-cache-root` 的新分析会在 `query-sources` 保存有界 Java 快照，
@@ -91,7 +103,7 @@ JADX 多索引查询默认读取 cache 根的 `fxapk-jadx-index-map.json`，也�
 Phase 1 到 corpus 的机器接口优先直接传经校验的 `case-package.json`；也兼容显式 JSONL inventory，
 每行必须给出字符串 `case_id` 和 `report_path`。`corpus reconcile` 默认纯只读，只把缺记录/缺绑定
 列为计划；加 `--apply` 后仍只新增不可变报告或并入案件关联，遇字节冲突、隔离记录或包哈希变化会
-非零退出，不覆盖、不解隔离。Phase 2 始终消费并复核精确 package 哈希，不依赖 OneDrive 临时目录。
+非零退出，不覆盖、不解隔离。Phase 2 始终消费并复核精确 package 哈希，不依赖临时材料目录或特定存储服务。
 
 验收结论写在 `report.meta.closure`：`complete` 是主目标那五层都拿到了证据（运行时、资源登记、
 BGP 宣告、托管分发、最终归属对象）；`partial` 是还有明确缺口；`failed` 是静态就跪了、或者要求动态
@@ -99,9 +111,9 @@ BGP 宣告、托管分发、最终归属对象）；`partial` 是还有明确缺
 
 CONTRACTS 版本失效仅作用于 batch 账本续跑；case close 的有限重富化沿用其既有规则，不改写旧报告终态。
 
-### 两阶段交接与四种状态
+### 阶段间证据契约与四种状态
 
-公共协议不绑定 OneDrive、某个 AI 或某台机器。Phase 1 负责产生报告、附件和不可变
+公共协议不绑定存储服务、某个 AI 或某台机器。Phase 1 负责产生报告、附件和不可变
 `case-package.json`；Phase 2 只读校验 Phase-1 包，再产生独立 `case-review.json`。同一个人可以
 按顺序执行两个阶段，但 Phase 2 不得覆盖 Phase 1；要求修改时应产生新的 package，再对新哈希复核。
 Phase-1 包还会固定报告的三个复现锚点：64 位十六进制 `sample_sha256`、非空规范化
@@ -238,3 +250,20 @@ fxapk case prepare-materials private/demo --out private/demo/pre-report.json
 ## License
 
 [MIT](LICENSE)
+
+## 可选 Android UI 插件
+
+核心包不包含 Android CLI，也不会因安装插件自动操作设备。UI 命令由可信的 `fxapk-android-ui` 安装包提供；插件代码在宿主 Python 进程内运行，不是沙箱。需另外准备 Android CLI，并在已授权的专用测试设备上指定 `--serial` 和目标 `--package`。
+
+```bash
+# 从已审核的插件源码安装；先按本机 Python 环境准备依赖。
+python -m pip install .
+python -m pip install ./plugins/fxapk-android-ui
+fxapk ui capabilities --serial TEST_SERIAL
+fxapk ui snapshot --serial TEST_SERIAL --package com.example.synthetic --out evidence/ui
+fxapk ui run-plan --serial TEST_SERIAL --package com.example.synthetic --plan inputs/ui-plan.json --out evidence/ui-plan
+```
+
+动作计划仅接受固定动作，不能提供任意 shell 命令。计划须匹配设备与包名；前台身份未知、切包、超时、失败或预算耗尽须保留失败/部分结果。截图和布局保留文件哈希；轮内观察另外绑定样本、轮次和运行时报告。UI 观察与 PCAP、探针证据互补，不能单独证明业务连接或分析闭环。
+
+截图、布局及动作结果可能含个人信息或业务凭据，属于受控证据文件；摘要的有限脱敏不覆盖这些文件。对外流转前另做审核。Android CLI 兼容性、权限弹窗、切包及短连接归因仍需已授权真机验收。

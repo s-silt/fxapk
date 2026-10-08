@@ -18,6 +18,7 @@ import json as _json
 import logging
 import os
 from pathlib import Path
+from typing import Annotated
 from uuid import uuid4
 
 import typer
@@ -155,6 +156,9 @@ def batch(
     credential_slot: int = typer.Option(0, "--credential-slot", min=0, max=2, help="Quake/DayDayMap 凭据槽：0=首个已配置；1/2=明确选择。不会因限频自动换账户。"),
     case_id: str = typer.Option("", "--case-id", help="显式绑定覆盖回执的稳定身份；不从路径猜测。"),
     retain_responses: bool = typer.Option(False, "--retain-responses", help="在输出目录受控保存原始HTTP响应正文及哈希；可能含敏感内容。"),
+    recover_transient: Annotated[bool, typer.Option("--recover-transient", help="预算内按来源节流；瞬时故障冷却后每源最多补试一次，保留全部回执。")] = False,
+    retry_delay: Annotated[float, typer.Option("--retry-delay", min=1, max=60, help="恢复前等待秒数；同时遵守服务端 Retry-After，超过60秒则延后。")] = 15,
+    provider_interval: Annotated[float, typer.Option("--provider-interval", min=0, max=60, help="恢复模式下同一来源两次目标调用之间的最小间隔秒数。")] = 2,
 ) -> None:
     """批量富化一份目标清单。
 
@@ -249,6 +253,9 @@ def batch(
     #   ★被 ``--max-targets`` 截掉的那部分仍如实计入预算行（它们确实还要查），
     #     顶层的 ``over_max_targets`` 单独说明本次只处理前 N 个。
     budget = _batch.estimate_budget(targets, enrichers, os.environ, completed)
+    from apkscan.core.enrichment_recovery import recovery_budget
+
+    extra_budget = recovery_budget(budget, enrichers) if recover_transient else {}
     summary: dict[str, object] = {
         "case_id": case_id,
         "raw_response_retention": retain_responses,
@@ -258,10 +265,10 @@ def batch(
         "already_done_skipped": len(eligible) - len(pending),
         "will_process": len(capped),
         "over_max_targets": over_cap,
-        "estimated_requests": _batch.budget_total(budget),
+        "estimated_requests": _batch.budget_total(budget) + sum(extra_budget.values()),
         "stage": stage,
         "selected_providers": [e.name for e in enrichers],
-        "request_estimate_note": "含已建模辅助调用的请求预算上界；DNS按8次、RIPEstat按5次、VT/OTX按2次、Shodan域名按2次及IP按1次；不是计费次数，其他旧适配器的内部请求仍可能增加。",
+        "request_estimate_note": "含已建模辅助调用的请求预算上界；DNS按8次、RIPEstat按5次、VT/OTX及Hunter按2次、Shodan域名按2次及IP按1次；不是计费次数。Hunter每次先核账户免费余额，账户每日最多500积分，单页预留10积分。",
         "resume_complete": resume_complete,
         "ledger_bad_lines_skipped": resume_bad_lines,
         "safe_to_execute": resume_complete and not config_issues,
@@ -279,6 +286,19 @@ def batch(
             for line in budget
         ],
     }
+    if recover_transient:
+        summary["recovery_policy"] = {
+            "max_extra_calls_per_provider": 1, "extra_request_budget": extra_budget,
+            "retry_delay_seconds": retry_delay, "provider_interval_seconds": provider_interval,
+            "authentication_or_quota_retry": False,
+        }
+    if any(line.provider == "hunter" for line in budget):
+        summary["hunter_free_credit_policy"] = {
+            "daily_limit": 500, "reservation_per_search": 10,
+            "remaining_balance": "checked_live_before_each_search",
+            "scope": "account_shared_local_store", "dry_run_reserves_credits": False,
+        }
+
     def write_coverage() -> None:
         import hashlib
         from uuid import uuid4
@@ -408,10 +428,19 @@ def batch(
 
     rebuild_warnings = []
     try:
-        records = _batch.enrich_targets(
-            capped, enrichers, mode=ANALYSIS_MODE_PASSIVE, env=os.environ,
-            completed=completed, on_record=lambda record: _append_ndjson([record], ndjson_path),
-        )
+        if recover_transient:
+            from apkscan.core.enrichment_recovery import enrich_with_recovery
+
+            records = enrich_with_recovery(
+                capped, enrichers, mode=ANALYSIS_MODE_PASSIVE, env=os.environ,
+                completed=completed, on_record=lambda record: _append_ndjson([record], ndjson_path),
+                retry_delay=retry_delay, provider_interval=provider_interval,
+            )
+        else:
+            records = _batch.enrich_targets(
+                capped, enrichers, mode=ANALYSIS_MODE_PASSIVE, env=os.environ,
+                completed=completed, on_record=lambda record: _append_ndjson([record], ndjson_path),
+            )
         # CSV 从账本全量重建（不是只写本轮记录）：账本是 append-only 事件流，CSV 是当前快照。
         bad_ledger_lines = _rebuild_csv_from_ledger(
             ndjson_path, csv_path, rebuild_warnings
@@ -421,7 +450,9 @@ def batch(
         raise typer.Exit(2)
 
     summary["dry_run"] = False
-    summary["processed"] = len(records)
+    summary["processed"] = len({record["target"] for record in records})
+    if recover_transient:
+        summary["attempt_records"] = len(records)
     from collections import Counter
 
     outcomes: dict[str, Counter] = {}

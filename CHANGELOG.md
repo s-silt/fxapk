@@ -5,6 +5,20 @@ affect automated / CI / agent callers are called out explicitly**.
 
 ## Unreleased
 
+## 1.18.0 — 2026-10-08 (unreleased)
+
+- Phase-2 survey inputs are bounded and validated. Legacy or incomplete surveys retain the unassessed declaration; only complete, case/inventory/sample/capture-bound inputs remove it. Gate receipts pin the exact survey snapshot and review rejects changed or missing snapshots.
+- HAR response bodies now reach inline configuration, redirect and request-recipe analyzers through a shared bounded input contract, with source/entry/body hashes and truncation provenance. JavaScript is not executed.
+- Censys review worklists now require a bound IP before allocating a new query; existing results and shared budgets retain their prior semantics.
+- Add the optional Android UI plugin and fixed action surface. Inputs, foreground scope, deadlines, partial results and artifact bindings are checked; screenshot/layout files may contain sensitive values and are not sanitized for external sharing.
+- Leak-scan, top-level version and help entrypoints do not load credential files. Analysis commands keep the existing environment-loading behavior.
+- Keep the historical CFB/CFB8 import fallback compatible with older installed cryptography versions; invalid key/IV diagnostics no longer include their raw values.
+- Harden Android CLI process-tree ownership and UTF-8 output, reject existing UI output directories, bind action receipts to the selected device/package/plan and preserve shared capture budgets. Explicit root actions keep fixed commands and foreground checks.
+- Distinguish FOFA relay upstream permission errors from relay-key authentication; Hunter checks the live account balance and shares durable reservations under a conservative local 500-point daily cap. No general account entitlement or paid-credit guarantee is implied.
+- Add explicit bounded transient recovery: preserve every attempt, honor server cooldowns, permit at most one extra adapter call per provider, and keep Shodan DNS misses target-scoped with normalized timeout/local-rate errors.
+- Preserve capture round order, original/modified-runtime authorization gates, historical package identities and existing analysis patches. Synthetic tests do not constitute real-device acceptance.
+
+
 - 全面审校公开文档：同步中英文依赖、内置探针和富化入口，纠正三轮采集、复核门、归属与复现边界，明确已发布状态和验证范围。
 - 对齐开发指令、泄漏扫描口径与合成基线更新流程；明确 mitmproxy 隔离环境的 Python 版本；删除过时、重复的阶段性工具链复核页，将发布验证链接归入工作流说明，不修改运行行为、依赖版本或 1.17.0 发行物。
 
@@ -13,7 +27,7 @@ affect automated / CI / agent callers are called out explicitly**.
 ## 1.17.0 — 2026-10-02
 
 - 集成验收修复：运行时端点不再借静态同值线索自动排除；复核回执必须同时绑定当前覆盖与判决材料；入库包身份必须匹配报告字节；长判决替代链改为迭代校验。
-- 补充 OneDrive handoff 衔接约定与中文路径换盘回归，保留历史包和旧 workflow；对齐采集质量元数据类别、已消费键基线及 Windows 测试输入契约。
+- 补充阶段间证据契约与中文路径迁移回归，保留历史包和旧版流程；对齐采集质量元数据类别、已消费键基线及 Windows 测试输入契约。
 
 - 可选 HTTP origin/group 共享滚动限频、在途限制与 Retry-After 冷却；保持请求契约、无自动重试，不承诺跨进程账户限额。
 - 可选 Hunter free_only 在免费扣费保证未知时暂停请求；默认旧路径不变，不将调用数上限冒充积分上限。
@@ -765,7 +779,7 @@ observed-contact 结论（历史复发两次）。
 - `corpus restore` 恢复一份 catalog 建立**之前**的旧快照时，输出新增 `catalog_boundary` 警告。
   此前这种恢复会照常返回 `applied: true` 与 `restored_entries`、看起来成功，实际库并未回退——
   一个报成功却没生效的回滚比明确失败更危险。未跨越该边界时不出这条，避免退化成人人略过的噪音。
-- 新增公共两阶段案件交接协议：`fxapk case package/status/review` 生成不可变 Phase-1 证据包、
+- 新增公共两阶段案件数据协议：`fxapk case package/status/review` 生成不可变 Phase-1 证据包、
   对精确包哈希出具独立 Phase-2 复核记录，并并列呈现包完整性、分析、闭环、复核四种正交状态。
   协议不绑定目录、机器或具体执行者，同一人也可按顺序执行两个阶段。
 - Phase-1 manifest 的每个附件显式标记 `case_evidence` 或 `batch_reference`，校验相对路径边界、
@@ -1552,7 +1566,7 @@ CFB8 解密 / IOC 导出 / 富化器内存与 SSRF / 报告转义与脱敏）；
 - `.env.example` 增补 `FXAPK_DAYDAYMAP_KEY` / `FXAPK_DAYDAYMAP_KEY2` 槽位与 DayDayMap 调用要点（POST /
   标准而非 urlsafe base64 keyword / API-KEY 请求头 / 响应仅含请求 fields）+ 多账号轮换规则（KEY→KEY2，
   仅配额/限频错误才切换）+ IP 维度返回的 ICP 备案属该 IP 上共同托管站点、非 IP 持有人的语义差异（#210、#211）。
-  DayDayMap 由 OneDrive 多源富化工具消费，主仓 `analyze` 不直接调用。
+  当时 DayDayMap 由外部多源富化工具消费，主仓 `analyze` 不直接调用。
 
 ## 1.1.0 — 2026-07-19
 
@@ -1676,7 +1690,7 @@ Theme: **PCAP-first 网络证据 + 五层基础设施归属 + 资产沉淀**—�
 ### Safety
 
 - 语料库含真实案件数据（IOC/案件号），根目录**必须**经 `--corpus` 或环境变量
-  `FXAPK_CORPUS` 显式指向库外（OneDrive），二者皆缺即**拒跑**（exit 2），绝不默认 `./corpus`；
+  `FXAPK_CORPUS` 显式指向代码工作树外，二者皆缺即**拒跑**（exit 2），绝不默认 `./corpus`；
   且根目录若落在 git 工作树内一律拒跑（防案件数据随 `git add` 混进公开仓库）。
 - CI 守卫 + `.gitignore` 覆盖真正的 PII 载荷 `*.report.json`（报告全文），而不仅是派生索引
   `manifest.jsonl` / `ioc_index.jsonl`——git 跟踪的文件里出现任一即 CI 红。

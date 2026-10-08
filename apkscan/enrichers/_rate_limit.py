@@ -26,6 +26,21 @@ class RequestThrottled(requests.RequestException):
     """Stable local admission failure; no target, config or secret in the message."""
 
 
+def retry_after_seconds(headers: Any) -> float | None:
+    """Read untrusted Retry-After without truncating a long server cooldown."""
+    raw = headers.get("Retry-After") if hasattr(headers, "get") else None
+    if not isinstance(raw, str) or len(raw) > 128:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        try:
+            value = parsedate_to_datetime(raw).timestamp() - time.time()
+        except (ValueError, TypeError, OverflowError):
+            return None
+    return max(0.0, value) if math.isfinite(value) else None
+
+
 @dataclass(frozen=True)
 class RatePolicy:
     requests: int

@@ -6,7 +6,7 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 
 > **案件分析默认由一个 agent 在本次授权范围内独立完成并自检。** 不依赖第二个 agent 接力或外部私有目录兜底。
 > 代码复审可按适用技能使用只读审阅者；仅提供必要代码差异和合成夹具，不传递原始案件数据。凡本文提到的资料，
-> 要么在本仓库内、要么由用户提供；**不要依赖任何仓库外的交接文件**（不存在就按本文所述原则自己做）。
+> 要么在本仓库内、要么由用户提供；**不要依赖隐含的仓库外资料**（不存在就按本文所述原则自己做）。
 
 > 设计取向：本项目由人直接跑源码 + agent 驱动，**不打包 exe/GUI**。密钥走项目根 `.env`（已 gitignore）。
 > 输出刻意做成 **agent 友好**：核心调证信息进 `evidence_to_obtain`/`notes`/`report.meta`，并由 `digest` 命令压成低 token 摘要。
@@ -226,11 +226,11 @@ QUIC Initial / socket 归因等被动证据；
 ## 0.7 Phase-2 与报告前材料
 
 使用 `fxapk case phase2 --help` 查看已内置的包清单、triage、判决、materialize 与 gate 入口。
-`--case-dir` 指向含直接子包目录的案件目录，不能把多个案件的 handoff 根当作一个案。
+`--case-dir` 指向含直接子包目录的案件目录，不能把包含多个案件的材料根当作一个案。
 `case review` 必须携带 PASS 的 `--gate-receipt`，回执同目录的 `coverage.json` 和
 `decisions.jsonl` 须齐全且哈希匹配；接受复核不能把 partial 闭环变成 complete。
 `case prepare-materials` 只生成待复核材料，不自动出具正式结论；保留历史包与原始附件。
-命令和旧 workflow 兼容边界见 [PRE-REPORT-WORKFLOW.md](PRE-REPORT-WORKFLOW.md)。
+命令和旧版流程兼容边界见 [PRE-REPORT-WORKFLOW.md](PRE-REPORT-WORKFLOW.md)。
 
 ## 1. 环境准备（新机 clone 后一次性）
 

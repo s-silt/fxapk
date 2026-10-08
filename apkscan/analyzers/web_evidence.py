@@ -144,6 +144,9 @@ def _iter_text(
     analyzer: str,
     suffixes: tuple[str, ...],
     result: AnalyzerResult,
+    *,
+    include_har_bodies: bool = False,
+    raw_inputs: dict[str, bytes] | None = None,
 ) -> list[tuple[str, str]]:
     """读上下文里命中后缀的证据为文本。绝不抛；读失败/截断如实记 meta。
 
@@ -175,11 +178,44 @@ def _iter_text(
             if data is not None:
                 failed += 1
             continue
+        if raw_inputs is not None:
+            raw_inputs[path] = bytes(data)
         text = bytes(data).decode("utf-8", errors="replace")
         if len(text) > MAX_SCAN_CHARS:
             text = text[:MAX_SCAN_CHARS]
             truncated = True
         out.append((path, text))
+
+    if include_har_bodies and getattr(ctx, "platform", "") == "web":
+        # The decoder reads only original HAR files, so this cannot recurse.
+        # No shared mutable cache: standalone and concurrent calls see the same
+        # bounded input, regardless of when web_har itself runs.
+        from apkscan.analyzers.web_har import decode_har_evidence
+
+        har_result, bodies = decode_har_evidence(ctx)
+        # Literal source keys and suffixes keep both sides of the static
+        # contract explicit: these reads consume only HAR's coverage flags.
+        if har_result.meta.get("web_har_list_failed"):
+            result.meta[coverage_meta_key(analyzer, "list_failed")] = True
+        if har_result.meta.get("web_har_files_truncated"):
+            result.meta[coverage_meta_key(analyzer, "files_truncated")] = True
+        failed += int(har_result.meta.get("web_har_read_failed", 0))
+        if har_result.meta.get("web_har_content_truncated"):
+            truncated = True
+        if har_result.meta.get("web_har_items_truncated"):
+            truncated = True
+        gaps = har_result.meta["web_har_summary"]["gaps"]
+        failed += sum(gaps.get(code, 0) for code in (
+            "body_decode_error", "body_text_decode_error", "content_encoding_not_decoded",
+        ))
+        for body in bodies:
+            if not body.location.lower().endswith(suffixes):
+                continue
+            if len(out) >= MAX_FILES:
+                result.meta[coverage_meta_key(analyzer, "files_truncated")] = True
+                break
+            truncated = truncated or body.body_truncated
+            out.append((body.location, body.data.decode("utf-8", errors="replace")))
 
     # 读失败必须成为**数据**而非只是一行日志：否则"扫了 1 份"与"扫全了"在报告里完全一样。
     if failed:
@@ -334,7 +370,7 @@ class WebInlineConfigAnalyzer(BaseAnalyzer):
         collector = EndpointCollector()
         hits: list[_ConfigHit] = []
 
-        for path, text in _iter_text(ctx, self.name, _HTML_SUFFIXES, result):
+        for path, text in _iter_text(ctx, self.name, _HTML_SUFFIXES, result, include_har_bodies=True):
             try:
                 for block in _SCRIPT_BLOCK_RE.finditer(text):
                     body = block.group(1)
@@ -466,7 +502,7 @@ class WebRedirectChainAnalyzer(BaseAnalyzer):
 
         suffixes = _HTML_SUFFIXES + _SCRIPT_SUFFIXES + _HEADER_SUFFIXES
         hops: list[_Hop] = []
-        for path, text in _iter_text(ctx, self.name, suffixes, result):
+        for path, text in _iter_text(ctx, self.name, suffixes, result, include_har_bodies=True):
             try:
                 hops.extend(self._scan(text, path))
             except Exception:
@@ -632,7 +668,7 @@ class WebRequestRecipeAnalyzer(BaseAnalyzer):
         suffixes = _HTML_SUFFIXES + _SCRIPT_SUFFIXES
         recipes: list[_Recipe] = []
 
-        for path, text in _iter_text(ctx, self.name, suffixes, result):
+        for path, text in _iter_text(ctx, self.name, suffixes, result, include_har_bodies=True):
             try:
                 recipes.extend(self._scan(text, path))
             except Exception:

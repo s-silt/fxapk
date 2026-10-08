@@ -232,3 +232,28 @@ def test_from_meta_none_when_empty() -> None:
     assert CryptoRecipe.from_meta(None) is None
     assert CryptoRecipe.from_meta({}) is None
     assert CryptoRecipe.from_meta("not a dict") is None
+
+
+def test_invalid_hex_key_is_not_logged(caplog) -> None:
+    secret = "private-key-fixture"
+    with caplog.at_level(logging.WARNING):
+        assert appcrypto._build_key(CryptoRecipe(key=secret, key_encoding="hex")) == b""
+    assert secret[:16] not in caplog.text
+    assert "key_encoding=hex" in caplog.text
+
+
+def test_invalid_hex_iv_is_not_logged(caplog) -> None:
+    value = "private-iv-fixture"
+    with caplog.at_level(logging.WARNING):
+        assert appcrypto._derive_iv(CryptoRecipe(key_encoding="hex", iv_derive="fixed", iv_value=value), 0) == b""
+    assert value[:16] not in caplog.text
+    assert "iv_value" in caplog.text
+
+
+@pytest.mark.parametrize("symbol", ["CFB", "CFB8"])
+def test_mode_symbol_missing_keeps_legacy_fallback(monkeypatch, symbol) -> None:
+    from types import SimpleNamespace
+    from cryptography.hazmat.primitives.ciphers import modes
+    monkeypatch.setattr(appcrypto, "import_module", lambda name: SimpleNamespace())
+    helper = appcrypto._import_cfb if symbol == "CFB" else appcrypto._import_cfb8
+    assert helper() is getattr(modes, symbol)
