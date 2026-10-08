@@ -2,7 +2,7 @@
 
 [项目首页](README.md) · [命令手册](USAGE.md) · [English](ANDROID-UI.en.md)
 
-本指南对应核心 `fxapk 1.18.0` 与可选插件 `fxapk-android-ui 0.1.0`。插件通过 Google Android CLI 保存截图与布局，并通过 adb 执行有界固定动作。UI 观察补充 PCAP、探针和静态证据；截图成功不证明业务连接、运营者归属或案件闭环。
+本指南对应核心 `fxapk 1.18.1` 与可选插件 `fxapk-android-ui 0.1.1`。插件通过 Google Android CLI 保存截图与布局，并通过 adb 执行有界固定动作。UI 观察补充 PCAP、探针和静态证据；截图成功不证明业务连接、运营者归属或案件闭环。
 
 ## 安装与前置条件
 
@@ -13,8 +13,8 @@
 从发布页下载并核对 `SHA256SUMS.txt` 后，可安装核心与独立插件 wheel：
 
 ```bash
-python -m pip install "fxapk==1.18.0"
-python -m pip install ./fxapk_android_ui-0.1.0-py3-none-any.whl
+python -m pip install "fxapk==1.18.1"
+python -m pip install ./fxapk_android_ui-0.1.1-py3-none-any.whl
 fxapk --version
 fxapk ui --help
 ```

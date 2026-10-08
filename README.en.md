@@ -12,12 +12,12 @@
 </p>
 <p align="center">
   <a href="https://github.com/s-silt/fxapk/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/s-silt/fxapk/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.18.0">v1.18.0</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
+  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.18.1">v1.18.1</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
 </p>
 
 CLI command and PyPI package: `fxapk`; compatible command alias: `apkscan`. Run from Python or source, directly or through an AI assistant. No exe or GUI is provided.
 
-Version **1.18.0** strengthens survey completeness and evidence binding, shares HAR bodies with semantic analyzers, fixes the Censys IP prerequisite, and adds an optional Android UI observation plugin. Upgrades preserve historical packages and the legacy route; releasing code does not migrate cases, modify devices, or automatically query third-party services. See [CHANGELOG.md](CHANGELOG.md).
+Patch version **1.18.1** fixes concurrent shared-cache clock sampling and Windows owned-process exit confirmation, completes test synchronization and Chinese release notes, and updates user documentation and package guidance. Upgrades preserve historical packages and the legacy route; releasing code does not migrate cases, modify devices, or automatically query third-party services. See [CHANGELOG.md](CHANGELOG.md).
 
 | Capability | Scope |
 | --- | --- |
@@ -54,17 +54,17 @@ Requires **Python 3.11+**. Start with offline static analysis; review the [defau
 ### 1. Install and check the version
 
 ```bash
-python -m pip install "fxapk==1.18.0"
+python -m pip install "fxapk==1.18.1"
 fxapk --version
 fxapk selfcheck
 ```
 
-The [v1.18.0 release](https://github.com/s-silt/fxapk/releases/tag/v1.18.0) includes core 1.18.0 and independent UI plugin 0.1.0 wheels/source archives, plus `SHA256SUMS.txt`. Before installing a downloaded wheel, compare `Get-FileHash <file> -Algorithm SHA256` in PowerShell, or run `sha256sum -c SHA256SUMS.txt` on Linux. These files are not a complete offline dependency bundle.
+The [v1.18.1 release](https://github.com/s-silt/fxapk/releases/tag/v1.18.1) includes core 1.18.1 and independent UI plugin 0.1.1 wheels/source archives, plus `SHA256SUMS.txt`. Before installing a downloaded wheel, compare `Get-FileHash <file> -Algorithm SHA256` in PowerShell, or run `sha256sum -c SHA256SUMS.txt` on Linux. These files are not a complete offline dependency bundle.
 
 To obtain the released source, clone its tag; use the default master branch for current development:
 
 ```bash
-git clone --branch v1.18.0 https://github.com/s-silt/fxapk.git
+git clone --branch v1.18.1 https://github.com/s-silt/fxapk.git
 cd fxapk
 python -m pip install -e .
 ```

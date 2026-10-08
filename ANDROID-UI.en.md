@@ -2,7 +2,7 @@
 
 [Project overview](README.en.md) · [Command reference](USAGE.en.md) · [中文](ANDROID-UI.md)
 
-This guide covers core `fxapk 1.18.0` and optional `fxapk-android-ui 0.1.0`. The plugin saves screenshots and layouts using Google's Android CLI and performs bounded fixed actions through adb. UI observations complement PCAP, probes and static evidence; successful screenshots do not establish business connections, operator attribution or case closure.
+This guide covers core `fxapk 1.18.1` and optional `fxapk-android-ui 0.1.1`. The plugin saves screenshots and layouts using Google's Android CLI and performs bounded fixed actions through adb. UI observations complement PCAP, probes and static evidence; successful screenshots do not establish business connections, operator attribution or case closure.
 
 ## Installation and prerequisites
 
@@ -13,8 +13,8 @@ Obtain Android CLI for your platform from the [official download page](https://d
 Download the release files and verify `SHA256SUMS.txt` before installing the independent plugin wheel:
 
 ```bash
-python -m pip install "fxapk==1.18.0"
-python -m pip install ./fxapk_android_ui-0.1.0-py3-none-any.whl
+python -m pip install "fxapk==1.18.1"
+python -m pip install ./fxapk_android_ui-0.1.1-py3-none-any.whl
 fxapk --version
 fxapk ui --help
 ```
