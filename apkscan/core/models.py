@@ -109,9 +109,35 @@ class Evidence:
     scope: EvidenceScope = EvidenceScope.CASE_EVIDENCE
 
 
+# 未核重建标签。大小写和首尾空白归一后仍不能单独充当当前案件直接证据。
+# scope 令牌不在这里修剪：带空格的 ``case_evidence`` 仍是坏令牌。
+_NON_DIRECT_CASE_SOURCES = frozenset({
+    "derived-native",
+    "external-web-observation",
+})
+
+
+def evidence_source_is_direct(source: object) -> bool:
+    """来源标签能否独立支撑当前案件直接证据。
+
+    只排除未核 native 重建和外部网页观察。比较前做 strip + casefold。
+    缺失或非字符串来源保持原有「只看 scope」的结论，不扩大排除面。
+    """
+    if not isinstance(source, str):
+        return True
+    return source.strip().casefold() not in _NON_DIRECT_CASE_SOURCES
+
+
 def has_case_evidence(evidences: list[Evidence]) -> bool:
-    """是否至少有一条当前案件直接证据；批次参考和旧版未说明均不具备独立结论资格。"""
-    return any(ev.scope is EvidenceScope.CASE_EVIDENCE for ev in evidences)
+    """是否至少有一条当前案件直接证据；批次参考和旧版未说明均不具备独立结论资格。
+
+    ``derived-native`` 与 ``external-web-observation`` 即使被标成 case_evidence，
+    也不能单独或彼此组合充当直接证据。其它来源的 case_evidence 仍然有效。
+    """
+    return any(
+        ev.scope is EvidenceScope.CASE_EVIDENCE and evidence_source_is_direct(ev.source)
+        for ev in evidences
+    )
 
 
 @dataclass
@@ -844,6 +870,10 @@ class AnalysisConfig:
     enrich_static_ip_max_targets: int = DEFAULT_ANALYZE_STATIC_IP_MAX_TARGETS
     #: 只生成联网计划与预计调用量，不调用任何富化源。
     enrichment_dry_run: bool = False
+    #: 本地 web supplement 配置路径。实时 CDP 授权只读这份调用方配置。
+    web_supplement: str | None = None
+    #: 程序化调用可直接传已解析对象。与路径同时出现则拒绝执行。
+    web_supplement_request: dict | None = None
 
 
 #: report.json 结构版本。消费方（AI / CI / 第三方工具）据此判断字段布局；发生破坏性字段变更时 bump。

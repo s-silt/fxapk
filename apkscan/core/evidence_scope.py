@@ -24,6 +24,7 @@ from apkscan.core.models import (
     DOWNGRADE_EVIDENCE_SCOPE,
     OBSERVED_CONTACT_SOURCES,
     EvidenceScope,
+    evidence_source_is_direct,
 )
 
 EVIDENCE_SCOPE_DOWNGRADE_NOTE = (
@@ -58,6 +59,7 @@ def serialized_case_evidence_refs(
         for ref in raw
         if isinstance(ref, Mapping)
         and _scope(ref.get("scope")) == EvidenceScope.CASE_EVIDENCE.value
+        and evidence_source_is_direct(ref.get("source"))
     ]
 
 

@@ -56,6 +56,7 @@ _KNOWN_PATHS = {
     ("apkscan/core/pipeline.py", "_stage_build_leads"),      # 静态主链
     ("apkscan/dynamic/merge.py", "_build_runtime_leads"),    # 动态回灌
     ("apkscan/cli.py", "_merge_config_probe_into_report"),   # config-probe 跨轮回灌
+    ("apkscan/core/web_supplement_runtime.py", "apply_verified"),  # 动态网页补采回灌
 }
 
 

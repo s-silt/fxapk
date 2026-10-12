@@ -25,6 +25,13 @@ from apkscan.core.json_contract import (
     reject_nonfinite_json_constant,
 )
 from apkscan.core.models import EvidenceScope, Report, has_case_evidence
+from apkscan.core import rea_intake as rea_intake
+from apkscan.core.rea_intake import (
+    ReaDirectIntakeError,
+    ReaIntakeBudget,
+    ReaIntakeCode,
+    refuse_unverified_rea_direct_intake,
+)
 from apkscan.core.report_io import load_report
 
 CASE_PACKAGE_SCHEMA_VERSION = "1.0"
@@ -61,6 +68,8 @@ class CasePackageErrorCode(str, Enum):
     INVALID_REVIEW_STATUS = "invalid_review_status"
     REVIEW_REQUIRES_VERIFIED_INTEGRITY = "review_requires_verified_integrity"
     REVIEW_GATE_RECEIPT_INVALID = "review_gate_receipt_invalid"
+    UNVERIFIED_REA_DIRECT_INTAKE = "unverified_rea_direct_intake"
+    REA_RECOGNITION_BUDGET = "rea_recognition_budget_exhausted"
 
 
 #: 错误码 → **固定**公开文案。封闭集合：不含路径、原始 token、非法枚举原值、
@@ -99,6 +108,10 @@ _CASE_PACKAGE_MESSAGES: dict[CasePackageErrorCode, str] = {
         "cannot review package whose integrity is not verified",
     CasePackageErrorCode.REVIEW_GATE_RECEIPT_INVALID:
         "phase2 gate receipt is not a PASS receipt covering this exact package",
+    CasePackageErrorCode.UNVERIFIED_REA_DIRECT_INTAKE:
+        "unverified REA observation cannot be admitted as direct case evidence",
+    CasePackageErrorCode.REA_RECOGNITION_BUDGET:
+        "unverified REA recognition exceeded the intake read budget",
 }
 
 
@@ -334,6 +347,7 @@ def create_case_package(
 
     artifacts: list[dict[str, object]] = []
     seen: dict[Path, tuple[str, EvidenceScope]] = {}
+    recognition_budget = ReaIntakeBudget(rea_intake.INTAKE_READ_BUDGET_BYTES)
 
     def add(path: str | Path, *, kind: str, scope: EvidenceScope) -> None:
         resolved = Path(path).resolve()
@@ -343,6 +357,18 @@ def create_case_package(
             return
         if prior is not None:
             raise CasePackageError(CasePackageErrorCode.ARTIFACT_KIND_SCOPE_CONFLICT)
+        if scope is EvidenceScope.CASE_EVIDENCE:
+            try:
+                refuse_unverified_rea_direct_intake(
+                    Path(path), root=root, budget=recognition_budget
+                )
+            except ReaDirectIntakeError as exc:
+                code = (
+                    CasePackageErrorCode.REA_RECOGNITION_BUDGET
+                    if exc.code is ReaIntakeCode.RECOGNITION_BUDGET
+                    else CasePackageErrorCode.UNVERIFIED_REA_DIRECT_INTAKE
+                )
+                raise CasePackageError(code) from exc
         seen[resolved] = classification
         artifacts.append(_relative_artifact(resolved, root, kind=kind, scope=scope))
 
@@ -489,6 +515,7 @@ def verify_case_package(manifest_path: str | Path) -> dict[str, object]:
     report_count = 0
     report_artifact: Path | None = None
     seen_artifact_paths: set[Path] = set()
+    recognition_budget = ReaIntakeBudget(rea_intake.INTAKE_READ_BUDGET_BYTES)
     for index, item in enumerate(artifacts):
         if not isinstance(item, Mapping):
             issues.append(f"artifact[{index}] is not an object")
@@ -528,6 +555,23 @@ def verify_case_package(manifest_path: str | Path) -> dict[str, object]:
             if not resolved.is_file():
                 issues.append(f"artifact[{index}] is missing")
                 continue
+            if scope == EvidenceScope.CASE_EVIDENCE.value:
+                try:
+                    # 用清单里的词法路径，避免 resolve() 跟着目录联接把 bundle 祖先丢掉。
+                    # 守卫内部还会再解析物理路径，两条链都保留。
+                    refuse_unverified_rea_direct_intake(
+                        manifest.parent / rel,
+                        root=manifest.parent,
+                        budget=recognition_budget,
+                    )
+                except ReaDirectIntakeError as exc:
+                    issues.append(f"artifact[{index}] {exc.public_message}")
+                    if exc.code is ReaIntakeCode.RECOGNITION_BUDGET:
+                        return {
+                            "status": "failed",
+                            "issues": issues,
+                            "package_id": package_id,
+                        }
             actual_hash = _sha256(resolved)
             actual_size = resolved.stat().st_size
         except OSError:

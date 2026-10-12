@@ -16,7 +16,10 @@ from apkscan.core.evidence_scope import (
 def _meta_event(report: dict) -> dict:
     m = report.get("meta")
     meta = m if isinstance(m, dict) else {}
-    return {
+    from apkscan.core.dex_query import project_dex_handoff, project_dex_query
+    from apkscan.core.runtime_diagnostics import project_runtime_diagnostics
+
+    event = {
         "type": "meta",
         "package": meta.get("package_name") or report.get("package_name"),
         "sample_sha256": meta.get("sample_sha256"),
@@ -29,6 +32,16 @@ def _meta_event(report: dict) -> dict:
         "tool_version": meta.get("tool_version"),
         "ruleset_digest": meta.get("ruleset_digest"),
     }
+    dex_view = project_dex_query(meta)
+    if dex_view is not None:
+        event["dex_query"] = dex_view
+    handoff = project_dex_handoff(meta)
+    if handoff is not None:
+        event["dex_query_handoff"] = handoff
+    diagnostics = project_runtime_diagnostics(meta)
+    if diagnostics is not None:
+        event["runtime_diagnostics"] = diagnostics
+    return event
 
 
 def _lead_event(lead: dict) -> dict:
