@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fxapk-asc"
+version = "0.1.0"
+description = "Optional isolated ASC worker for fxapk dex query. Not a core dependency."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "droidasc==0.1.1.post5",
+    "axml==0.0.2",
+    "mutf8==1.1.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

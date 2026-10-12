@@ -16,7 +16,7 @@ from apkscan.core.phase2.inventory import ReviewCandidate, _stable_parent_id
 from apkscan.core.phase2.triage import normalize_host
 
 _KINDS = {"DOMAIN": "domain", "IP": "ip", "URL": "url"}
-_STATIC_SOURCES = frozenset({"dex", "resource", "native", "manifest", "cert"})
+_STATIC_SOURCES = frozenset({"dex", "resource", "native", "manifest", "cert", "static-dex-xref"})
 _SCOPES = frozenset({"case_evidence", "batch_reference", "legacy_unspecified", "parent"})
 
 
@@ -71,7 +71,7 @@ class PackageEvidenceIndex:
                     row = self.by_host[host][candidate.candidate_id]
                     source = evidence.get("source")
                     stage = ("dynamic" if isinstance(source, str) and source.startswith("runtime") else
-                             "web" if web or source in ("web", "http", "browser") else
+                             "web" if web or source in ("web", "http", "browser", "external-web-observation") else
                              "static" if isinstance(source, str) and source in _STATIC_SOURCES else "unknown")
                     row["stages"].add(stage)
                     observed = evidence.get("observed_at")
