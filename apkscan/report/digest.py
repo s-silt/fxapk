@@ -19,6 +19,10 @@ from apkscan.core.evidence_scope import (
     project_serialized_leads,
 )
 from apkscan.core.leads import _overseas_target_coverage, _project_overseas_profiles
+from apkscan.core.web_observations import digest_web_observations
+from apkscan.core.native_handoff import project_native_handoff
+from apkscan.core.web_observation_plan import project_plan_for_digest
+from apkscan.core.web_supplement import project_for_digest
 from apkscan.core.models import (
     OBSERVED_CONTACT_SOURCES,
     EvidenceScope,
@@ -668,6 +672,18 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
         "overseas_target_coverage": overseas_target_coverage,
         "closure": compact_closure,
     }
+    native_handoff = project_native_handoff(report)
+    if native_handoff:
+        digest["native_recovery"] = native_handoff
+    if "web_observations" in meta:
+        digest["web_observations"] = digest_web_observations(meta.get("web_observations"))
+    if "web_supplement" in meta or "web_observation_plan" in meta:
+        digest["web_supplement"] = project_for_digest(meta.get("web_supplement"))
+        digest["web_observation_plan"] = project_plan_for_digest(
+            meta.get("web_observation_plan"),
+            meta.get("web_supplement"),
+            meta.get("web_supplement_runtime"),
+        )
     ui_observations = meta.get("ui_observations")
     if isinstance(ui_observations, list):
         clean_ui_observations = [item for item in ui_observations if isinstance(item, dict)]
@@ -754,4 +770,17 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
     #   （提醒操作者上游把受害人 PII 写进了 subject/notes 等自由文本，脱敏虽已兜底但源头应修）。
     if redact and pii_flag[0]:
         digest["redaction_warning"] = "自由文本字段命中并抹除了结构化 PII（手机号/证件号/邮箱/卡号）；上游不应把受害人 PII 写入自由文本"
+    from apkscan.core.dex_query import project_dex_handoff, project_dex_query
+
+    dex_view = project_dex_query(meta)
+    if dex_view is not None:
+        digest["dex_query"] = dex_view
+    dex_handoff = project_dex_handoff(meta)
+    if dex_handoff is not None:
+        digest["dex_query_handoff"] = dex_handoff
+    from apkscan.core.runtime_diagnostics import project_runtime_diagnostics
+
+    diagnostics = project_runtime_diagnostics(meta)
+    if diagnostics is not None:
+        digest["runtime_diagnostics"] = diagnostics
     return digest

@@ -88,12 +88,27 @@ HTML/JSON 留在本地输出目录；`digest` 用于初筛和定位。正式判�
 | 任务 | 入口与条件 |
 | --- | --- |
 | 已保存的网页、JS 或 HAR | `fxapk analyze-web <目录> --out out`，读取本地材料；富化联网行为另按参数控制 |
+| 自动网页补采 | 第一次分析：`analyze` / `analyze-web` / `auto` 加 `--web-supplement <本地JSON>`。已有报告只补网页：`fxapk supplement-web <report.json> --web-supplement <config> --out <new-out-dir>`，不重跑 APK、不碰设备、不做闭环。agent 读 `meta.web_observation_plan.agent_handoff` 和最新回执，digest 会重算这份 handoff。它不是授权，也不新增闭环。`inspect` 独立于 trace。`source=cdp` 且 `provider=rea|inspect` 会跳过。真实 WebView 同窗口尚未在实机验收 |
+| 授权网页观察 | 见下方短节。REA 与 CDP trace 不是同一条采集 |
 | 真机环境排查 | `fxapk doctor --no-fix`，先检查，再按授权修复 |
 | 不用 Frida 的 PCAP 底座 | `fxapk capture <包名> --mode floor-only`，仍需 adb、root 与设备侧 tcpdump |
 | 多轮自动采集 | `fxapk auto app.apk --strict-case`，仅在操作已授权的专用设备上运行 |
 | Android UI 截图、布局与固定计划 | 安装可选插件后使用 `fxapk ui ...`；见 [安装与完整示例](ANDROID-UI.md) |
 | 已有报告的补查与闭环 | `fxapk case close out/app.json`，需要联网和报告写回授权 |
 | 完整命令与复现环境 | [使用手册](USAGE.md) · `fxapk --help` |
+
+### 网页观察（短节）
+
+下面只说手工采集和 `attach`，不包括 `--web-supplement` 自动解析。`import`、`inspect`、`trace` 只采集；`attach` 只把核验过的观察挂进新目录的 `meta.web_observations`。这几条不自动闭环，也不把观察晋级成 leads、endpoints 或 runtime。自动解析是另一条路：`analyze` / `analyze-web` / `auto` 的 `--web-supplement` 校验后把低信任候选送进现有解析器，可以新增待核、LOW、`batch_reference`（`EvidenceScope.BATCH_REFERENCE`）候选。它不升旧线索，不自动富化，也不改变案件闭环。
+
+- `fxapk rea import` 读本地 REA 完整 CLI JSON。`capabilities` 只查本机 REA 版本，浏览器标 `not_probed`；通过后再 `inspect`。inspect 不导航、不点击。
+- `fxapk rea trace` 是独立的 `fxapk-cdp-trace`。调用方自己打开 Chrome 的回环 CDP。需要 `pip install -e "./plugins/fxapk-rea[trace]"`。缺依赖时采集失败，原因码 `trace_dependency_missing`。默认不点击、不导航、不附着相关 target。`--related-origin` 与 `--pause-related-start` 默认 false，且都要 `--related-targets`；origin 最多 8 个 exact origin，pause 只恢复自己 waiting 的相关 target。
+- `fxapk rea capabilities --provider trace` 或 `--provider attach` 只查本地前置（websockets 版本，或 attach 的 `offline_available`）。浏览器为 `not_probed`。`status=ok` 不是实测。省略 `--provider` 时仍只探测本机 REA。
+- `fxapk rea attach --bundle <观察目录> --report <原报告.json> --out <新目录>` 在新目录重核原件并生成 `report.json`、`report.digest.json`、`report.html`。接着用平常的 `fxapk digest`。没有名为 `verify` 的子命令。
+
+本机 native 地址恢复是另一条只读命令，不启动设备、不闭环。插件只认 PE/ELF，没有 Mach-O，也不提取 IPA 切片。Windows 上的 Ghidra 只接受 x86/x64 原生 PE，不要在 Windows 上抽出 Android `.so` 再 inspect。Linux/macOS 上 `fxapk rea native extract` 可抽出单个 `lib/<abi>/<name>.so`；结构合法的 ELF 可以交给 Ghidra，但这条 Linux 实跑尚未在本仓库验收。`--toolchain` 里的 `node` 键当前不使用，node 用 `--node` 或已有 node 字段。`capabilities` 用 REA `providers` 的 `analysis_provider_candidates` 报告可用性。`inspect` 跑 function / address-to-file-offset / read-bytes。IDA/Hopper 不在本机门里宣称可用。字节配方只重算声明过的文件偏移，不表示所有静态算法都能自动破解，`relation_verified` 保持 false。没有 native 历史只表示 `not_probed`，不表示引擎缺失。attach 复制 native recovery 与网页观察附件；PCAP 等未搬运类型仍只指向 `source_artifact_base`。
+
+换机复跑 trace 需要 Python 3.11+、已启动的 Chrome，以及上面的 `[trace]` extra。REA inspect 另要 Node 和 REA 6.4.0 的 `rea.mjs`。REA 6.4.0 的完整 CLI JSON 也可以作为 `--web-supplement` 的 `source=rea-json`，由 fxapk 离线校验后解析进同一次主报告；`inspect` 仍是单独入口。同窗口调度的是 trace，不是 REA inspect。命令和限额见 [plugins/fxapk-rea/README.md](plugins/fxapk-rea/README.md)。新机可选 `pip install -e ./plugins/fxapk-rea`，不代替 Android UI 插件。
 
 <a id="packages"></a>
 

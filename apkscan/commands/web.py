@@ -70,11 +70,21 @@ def analyze_web(
         "--online/--offline",
         help="是否对抽出的 IP/域名做被动归属富化（默认关）。绝不抓取证据里的 URL。",
     ),
+    web_supplement: str | None = typer.Option(
+        None,
+        "--web-supplement",
+        help="本地网页补采配置 JSON。explicit supplement 才把已验证观察解析进候选；不把目录当普通网页证据。",
+    ),
 ) -> None:
     """分析已落盘的网页证据目录，产出与 ``analyze`` 同构的报告。"""
     # 复用 analyze 的报告写出与摘要打印：report 文件名/格式/`.sha256` 旁文件是**同一份契约**，
     # 各写一份必然漂移。函数体内惰性 import：cli.py 在模块级注册本命令，顶层反向 import 会成环。
-    from apkscan.cli import _parse_formats, _print_summary, _write_reports
+    from apkscan.cli import (
+        _exit_if_report_delivery_failed,
+        _parse_formats,
+        _print_summary,
+        _write_reports,
+    )
     from apkscan.core import pipeline
 
     formats = _parse_formats(fmt)
@@ -100,7 +110,7 @@ def analyze_web(
         # 当作新证据递归吃回去，形成自污染反馈。自定义输出若位于证据树内也同样排除。
         ctx = load_web_evidence(
             evidence_dir,
-            AnalysisConfig(online=online),
+            AnalysisConfig(online=online, out_dir=str(out_dir), web_supplement=web_supplement),
             origin=origin,
             exclude_dirs=(out_dir,),
         )
@@ -153,7 +163,7 @@ def analyze_web(
 
     base = _sanitize_base(origin or Path(ctx.source_dir or str(evidence_dir)).name)
     out_dir.mkdir(parents=True, exist_ok=True)
-    _write_reports(report, out_dir, formats, base)
+    _exit_if_report_delivery_failed(_write_reports(report, out_dir, formats, base))
     _print_summary(report)
 
 

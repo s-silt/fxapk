@@ -7,11 +7,17 @@
 
 from __future__ import annotations
 
+import hashlib
+import inspect
 import json
 import logging
 import math
 import os
 import threading
+import time
+from contextlib import contextmanager
+
+import psutil
 import requests
 from collections.abc import Mapping
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -201,35 +207,149 @@ def _enrich_endpoints(
     def enrich_one(ep: Endpoint) -> None:
         _run_enrichers_on_endpoint(ep, enrichers, stats, stats_lock, gate)
 
-    _dispatch_bounded(endpoints, enrich_one)
+    def on_unstarted(pending: list[Endpoint]) -> None:
+        _skip_unstarted_endpoints(pending, enrichers)
+
+    _dispatch_bounded(endpoints, enrich_one, on_unstarted)
     return list(stats.values())
 
 
-def _dispatch_bounded(endpoints: list[Endpoint], run_one: "Callable[[Endpoint], None]") -> None:
+_SLEEP_SLICE_SECONDS = 0.05
+_real_sleep = time.sleep
+_sleep_patch_depth = 0
+_sleep_patch_lock = threading.Lock()
+_admission_lock = threading.Lock()
+_cancel_sleep = threading.Event()
+
+
+def _sliced_sleep(seconds: float) -> None:
+    """把一次长 sleep 切成短片。
+
+    Windows 上 ``_thread.interrupt_main`` 不会提前结束正在进行的 ``time.sleep``，
+    只在它返回后的下一条字节码抛出。工作线程收不到这个中断，改看 ``_cancel_sleep``。
+    """
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds <= 0:
+        _real_sleep(seconds)
+        return
+    deadline = time.monotonic() + float(seconds)
+    try:
+        while True:
+            if _cancel_sleep.is_set():
+                raise KeyboardInterrupt
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            _real_sleep(min(_SLEEP_SLICE_SECONDS, remaining))
+    except KeyboardInterrupt:
+        _cancel_sleep.set()
+        raise
+
+
+@contextmanager
+def _interruptible_sleep():
+    """只在 sleep 仍是解释器原函数时切片。外部替身保持原样。"""
+    global _sleep_patch_depth
+    owns_patch = False
+    with _sleep_patch_lock:
+        owns_patch = time.sleep is _real_sleep or time.sleep is _sliced_sleep
+        if time.sleep is _real_sleep:
+            time.sleep = _sliced_sleep
+        if owns_patch:
+            _sleep_patch_depth += 1
+    try:
+        yield
+    finally:
+        if not owns_patch:
+            return
+        with _sleep_patch_lock:
+            _sleep_patch_depth -= 1
+            if _sleep_patch_depth == 0 and time.sleep is _sliced_sleep:
+                time.sleep = _real_sleep
+
+
+def _dispatch_on_caller(
+    endpoints: list[Endpoint],
+    run_one: "Callable[[Endpoint], None]",
+    on_unstarted: "Callable[[list[Endpoint]], None] | None",
+) -> None:
+    """单 worker 时在调用线程上执行。长 sleep 可被取消，并结束本次新拉起的子进程。"""
+    baseline = _live_child_pids()
+    pending = list(endpoints)
+    try:
+        with _interruptible_sleep():
+            try:
+                while pending:
+                    run_one(pending.pop(0))
+            except KeyboardInterrupt:
+                _cancel_sleep.set()
+                _terminate_new_children(baseline)
+                if on_unstarted is not None:
+                    on_unstarted(pending)
+                raise
+    except KeyboardInterrupt:
+        _cancel_sleep.set()
+        _terminate_new_children(baseline)
+        raise
+
+
+def _wait_bounded(pending: set) -> tuple:
+    """真实 wait 带短超时，主线程才能在片间看见 KeyboardInterrupt。测试替身沿用原签名。"""
+    if "timeout" in inspect.signature(wait).parameters:
+        return wait(pending, timeout=_SLEEP_SLICE_SECONDS, return_when=FIRST_COMPLETED)
+    return wait(pending, return_when=FIRST_COMPLETED)
+
+
+def _dispatch_bounded(
+    endpoints: list[Endpoint],
+    run_one: "Callable[[Endpoint], None]",
+    on_unstarted: "Callable[[list[Endpoint]], None] | None" = None,
+) -> None:
     """Share bounded admission across single- and two-phase enrichment."""
     if not endpoints:
         return
+    _cancel_sleep.clear()
     workers = max(1, min(ENRICH_MAX_WORKERS, len(endpoints)))
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="enrich") as pool:
-        # Executor.map eagerly submits all inputs on Python <3.14. Refill on
-        # completion so a slow endpoint cannot hold otherwise idle workers.
-        remaining = iter(endpoints)
-        pending = set()
-        window = workers * 2
-        while True:
-            while len(pending) < window:
-                try:
-                    endpoint = next(remaining)
-                except StopIteration:
-                    break
-                pending.add(pool.submit(run_one, endpoint))
-            if not pending:
-                break
-            done, pending = wait(pending, return_when=FIRST_COMPLETED)
-            for future in done:
-                # Unexpected gate/scheduler errors stop further dispatch.
-                # Already admitted work may finish; no automatic retry.
-                future.result()
+    # 一个端点窗口放在调用线程上。多端点仍用线程池，但 sleep 会看取消事件，避免退出时一直 join。
+    if workers == 1:
+        _dispatch_on_caller(endpoints, run_one, on_unstarted)
+        return
+    baseline = _live_child_pids()
+    remaining = iter(endpoints)
+    with _interruptible_sleep():
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="enrich") as pool:
+            pending: set = set()
+            owner: dict = {}
+            window = workers * 2
+            try:
+                while True:
+                    while len(pending) < window and not _cancel_sleep.is_set():
+                        try:
+                            endpoint = next(remaining)
+                        except StopIteration:
+                            break
+                        future = pool.submit(run_one, endpoint)
+                        pending.add(future)
+                        owner[future] = endpoint
+                    if not pending:
+                        break
+                    done, pending = _wait_bounded(pending)
+                    for future in done:
+                        owner.pop(future, None)
+                        # Unexpected gate/scheduler errors stop further dispatch.
+                        # Already admitted work may finish; no automatic retry.
+                        future.result()
+            except KeyboardInterrupt:
+                _cancel_sleep.set()
+                _terminate_new_children(baseline)
+                skipped = list(remaining)
+                for future in pending:
+                    if future.cancel():
+                        endpoint = owner.get(future)
+                        if endpoint is not None:
+                            skipped.append(endpoint)
+                if on_unstarted is not None:
+                    on_unstarted(skipped)
+                raise
 
 
 def _stat(stats: dict[str, dict], provider: str) -> dict:
@@ -245,6 +365,63 @@ def _stat(stats: dict[str, dict], provider: str) -> dict:
             "typical_error": None,
         },
     )
+
+
+def _live_child_pids() -> set[int]:
+    """当前进程已经拉起的子进程。取消时只结束这次调用新出现的那些。"""
+    try:
+        return {proc.pid for proc in psutil.Process().children(recursive=True)}
+    except psutil.Error:
+        return set()
+
+
+def _terminate_new_children(before: set[int]) -> None:
+    """结束本次富化新拉起的子进程并等待退出。不把仍在运行的线程标成已终止。"""
+    try:
+        procs = [proc for proc in psutil.Process().children(recursive=True) if proc.pid not in before]
+    except psutil.Error:
+        return
+    for proc in procs:
+        try:
+            proc.kill()
+        except psutil.Error:
+            continue
+    deadline = time.monotonic() + 2.0
+    for proc in procs:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            proc.wait(timeout=remaining)
+        except (psutil.TimeoutExpired, psutil.Error, KeyboardInterrupt):
+            continue
+
+
+def _record_cancel(endpoint: Endpoint, provider: str, status: str) -> None:
+    """取消回执改来源状态。已有载荷进入历史，不再留在当前槽位。"""
+    _retire_provider_observation(endpoint, provider, reason="cancelled")
+    _stamp_latest_retirement(endpoint, provider, "cancelled")
+    _record_source_status(endpoint, provider, status)
+    raw = endpoint.enrichment.get("source_status")
+    if isinstance(raw, dict):
+        entry = raw.get(provider)
+        if isinstance(entry, dict):
+            entry["reason"] = "cancelled"
+
+
+def _skip_later_enrichers(endpoint: Endpoint, enrichers: list[BaseEnricher], index: int) -> None:
+    for later in enrichers[index + 1:]:
+        if endpoint.kind not in (getattr(later, "applies_to", []) or []):
+            continue
+        _record_cancel(endpoint, _provider_name(later), "skipped")
+
+
+def _skip_unstarted_endpoints(endpoints: list[Endpoint], enrichers: list[BaseEnricher]) -> None:
+    for endpoint in endpoints:
+        for enricher in enrichers:
+            if endpoint.kind not in (getattr(enricher, "applies_to", []) or []):
+                continue
+            _record_cancel(endpoint, _provider_name(enricher), "skipped")
 
 
 def _record_source_status(
@@ -264,6 +441,96 @@ def _record_source_status(
     raw[provider] = entry
 
 
+_HISTORY_KEY = "enrichment_history"
+
+
+def _copy_json_object(value: object) -> dict[str, object] | None:
+    if not isinstance(value, Mapping):
+        return None
+    try:
+        copied = _strict_json_copy(value, set())
+    except (TypeError, ValueError):
+        return None
+    return copied if isinstance(copied, dict) else None
+
+
+def _history_has_payload(history: list[object], provider: str, payload: dict[str, object]) -> bool:
+    for item in history:
+        if (
+            isinstance(item, dict)
+            and item.get("provider") == provider
+            and item.get("payload") == payload
+        ):
+            return True
+    return False
+
+
+def _retire_provider_observation(endpoint: Endpoint, provider: str, *, reason: str) -> None:
+    """把当前 provider 载荷移入 enrichment_history。没有旧载荷时不造记录，复制失败则保留原值。"""
+    current = endpoint.enrichment.get(provider)
+    if not isinstance(current, Mapping):
+        endpoint.enrichment.pop(provider, None)
+        return
+    payload = _copy_json_object(current)
+    if payload is None:
+        logger.warning("旧观察无法归档，保留当前载荷：provider=%s", provider)
+        return
+    if not payload:
+        endpoint.enrichment.pop(provider, None)
+        return
+    status_map = endpoint.enrichment.get("source_status")
+    outcome: dict[str, object] = {"status": "unknown"}
+    if isinstance(status_map, dict):
+        copied_outcome = _copy_json_object(status_map.get(provider))
+        if copied_outcome:
+            outcome = copied_outcome
+    observed = payload.get("observed_at")
+    if not isinstance(observed, str) or not observed.strip():
+        observed = "unknown"
+    evidence = None
+    raw_evidence = endpoint.enrichment.get("raw_response_evidence")
+    if isinstance(raw_evidence, dict):
+        evidence = _copy_json_object(raw_evidence.get(provider))
+    history = endpoint.enrichment.get(_HISTORY_KEY)
+    if not isinstance(history, list):
+        history = []
+        endpoint.enrichment[_HISTORY_KEY] = history
+    if not _history_has_payload(history, provider, payload):
+        identity = json.dumps(
+            {"provider": provider, "payload": payload, "source_outcome": outcome},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        )
+        record: dict[str, object] = {
+            "record_type": "retired_provider_observation",
+            "provider": provider,
+            "endpoint_kind": endpoint.kind,
+            "endpoint_value": endpoint.value,
+            "payload": payload,
+            "source_outcome": outcome,
+            "observed_at": observed,
+            "invalidated_because": reason,
+            "run_identity": "unknown",
+            "observation_sha256": hashlib.sha256(identity.encode()).hexdigest(),
+        }
+        if evidence is not None:
+            record["raw_response_evidence"] = evidence
+        history.append(record)
+    endpoint.enrichment.pop(provider, None)
+
+
+def _stamp_latest_retirement(endpoint: Endpoint, provider: str, reason: str) -> None:
+    """本轮刚归档、原因还是 superseded 的记录，在结果确定后改成实际原因。"""
+    history = endpoint.enrichment.get(_HISTORY_KEY)
+    if not isinstance(history, list):
+        return
+    for item in reversed(history):
+        if not isinstance(item, dict) or item.get("provider") != provider:
+            continue
+        if item.get("invalidated_because") == "superseded":
+            item["invalidated_because"] = reason
+        return
+
+
 def _record_provider_failure(
     endpoint: Endpoint,
     provider: str,
@@ -271,10 +538,9 @@ def _record_provider_failure(
     error_type: str,
     message: str,
 ) -> None:
-    # A failed provider has no admissible evidence payload.  Keep only the
-    # typed source outcome so stale/partial provider bytes cannot be consumed
-    # later by attribution or closure code.
-    endpoint.enrichment.pop(provider, None)
+    # 失败没有可采纳的当前载荷。旧载荷先进入历史，再从当前槽位移除。
+    _retire_provider_observation(endpoint, provider, reason="provider_exception")
+    _stamp_latest_retirement(endpoint, provider, "provider_exception")
     _record_source_status(endpoint, provider, "failed", error_type=error_type)
 
 
@@ -345,7 +611,7 @@ def _run_enrichers_on_endpoint(
 
     在单一 worker 内调用：同一 ep.enrichment 无并发写竞争；跨端点共享的 stats 用锁聚合。
     """
-    for enricher in enrichers:
+    for index, enricher in enumerate(enrichers):
         applies_to = list(getattr(enricher, "applies_to", []) or [])
         if ep.kind not in applies_to:
             continue
@@ -360,8 +626,16 @@ def _run_enrichers_on_endpoint(
             from apkscan.core.response_evidence import capture_responses
 
             with capture_responses(getattr(enricher, "raw_response_dir", None)) as raw_responses:
+                before_pids = _live_child_pids()
                 try:
                     result = enricher.enrich(ep)
+                except KeyboardInterrupt:
+                    _terminate_new_children(before_pids)
+                    _record_cancel(ep, provider, "failed")
+                    with stats_lock:
+                        _note_fail(_stat(stats, provider), "cancelled")
+                    _skip_later_enrichers(ep, enrichers, index)
+                    raise
                 finally:
                     if getattr(enricher, "raw_response_dir", None) is not None:
                         ep.enrichment.setdefault("raw_response_evidence", {})[provider] = {
@@ -442,8 +716,11 @@ def _run_enrichers_on_endpoint(
             else:
                 _note_fail(st, error_type or result.error or "富化失败")
         if status != "hit":
-            ep.enrichment.pop(provider, None)
+            _retire_provider_observation(ep, provider, reason=status)
+            _stamp_latest_retirement(ep, provider, status)
         else:
+            _retire_provider_observation(ep, provider, reason="superseded")
+            _stamp_latest_retirement(ep, provider, "replaced_by_hit")
             ep.enrichment[provider] = data
         _record_source_status(ep, provider, status, error_type=error_type)
 
@@ -538,7 +815,7 @@ def _run_enrichment(
                 if ep.kind not in (getattr(enricher, "applies_to", []) or []):
                     continue
                 provider = _provider_name(enricher)
-                ep.enrichment.pop(provider, None)
+                _retire_provider_observation(ep, provider, reason="jurisdiction_gate")
                 raw_status[provider] = {
                     "status": "skipped",
                     "reason": "jurisdiction_gate",
@@ -548,13 +825,26 @@ def _run_enrichment(
         # ② 境外被动取证富化（同 worker 内串行，组内顺序由 overseas 排序保证确定性）。
         _run_enrichers_on_endpoint(ep, overseas, stats, stats_lock, gate)
 
-    _dispatch_bounded(targets, _enrich_one_two_phase)
+    def on_unstarted(pending: list[Endpoint]) -> None:
+        _skip_unstarted_endpoints(pending, enrichers)
+
+    _dispatch_bounded(targets, _enrich_one_two_phase, on_unstarted)
 
     return list(stats.values())
 
 
 def _provider_name(enricher: BaseEnricher) -> str:
     return getattr(enricher, "name", "") or type(enricher).__name__
+
+
+def _authorize_provider_call(budget: EnrichmentBudget | None, provider: str) -> str:
+    """取消和预算在同一把锁里决定。取消优先，已拒绝的调用不计入 admitted。"""
+    with _admission_lock:
+        if _cancel_sleep.is_set():
+            return "cancelled"
+        if budget is not None and not budget.admit(provider):
+            return "budget"
+    return "ok"
 
 
 def _provider_configured(enricher: BaseEnricher) -> bool:
@@ -744,10 +1034,12 @@ def enrich_selected_targets(
         def ordinary_gate(endpoint: Endpoint, enricher: BaseEnricher) -> bool:
             provider = _provider_name(enricher)
             if not allowed_by_mode(endpoint, enricher):
+                _retire_provider_observation(endpoint, provider, reason="active_mode_blocked")
                 _record_source_status(endpoint, provider, "skipped")
                 endpoint.enrichment["source_status"][provider]["reason"] = "active_mode_blocked"
                 return False
             if not _provider_configured(enricher):
+                _retire_provider_observation(endpoint, provider, reason="credential_not_configured")
                 _record_source_status(endpoint, provider, "disabled")
                 endpoint.enrichment["source_status"][provider]["reason"] = (
                     "credential_not_configured"
@@ -755,13 +1047,20 @@ def enrich_selected_targets(
                 return False
             allowed = allowed_endpoint_ids.get(provider)
             if allowed is not None and id(endpoint) not in allowed:
+                # 单源名额未启动：沿用原缓存。状态改为 skipped，旧载荷仍在，但不算当前 hit。
                 _record_source_status(endpoint, provider, "skipped")
                 endpoint.enrichment["source_status"][provider]["reason"] = "provider_budget_exhausted"
                 return False
-            if budget is not None and not budget.admit(provider):
+            decision = _authorize_provider_call(budget, provider)
+            if decision == "cancelled":
+                _record_cancel(endpoint, provider, "skipped")
+                return False
+            if decision == "budget":
+                _retire_provider_observation(endpoint, provider, reason="run_source_budget_exhausted")
                 _record_source_status(endpoint, provider, "skipped")
                 endpoint.enrichment["source_status"][provider]["reason"] = "run_source_budget_exhausted"
                 return False
+            _retire_provider_observation(endpoint, provider, reason="superseded")
             return True
 
         return _run_enrichment(endpoints, selected, gate=ordinary_gate)
@@ -775,19 +1074,28 @@ def enrich_selected_targets(
             source_status = {}
             endpoint.enrichment["source_status"] = source_status
         if not allowed_by_mode(endpoint, enricher):
+            _retire_provider_observation(endpoint, provider, reason="active_mode_blocked")
             source_status[provider] = {"status": "skipped", "reason": "active_mode_blocked"}
             return False
         if not _provider_configured(enricher):
+            _retire_provider_observation(endpoint, provider, reason="credential_not_configured")
             source_status[provider] = {"status": "disabled", "reason": "credential_not_configured"}
             return False
         allowed = allowed_endpoint_ids.get(provider)
         if allowed is not None and id(endpoint) not in allowed:
+            # 单源名额未启动：沿用原缓存。状态改为 skipped，旧载荷仍在，但不算当前 hit。
             source_status[provider] = {"status": "skipped", "reason": "provider_budget_exhausted"}
             return False
-        if budget is not None and not budget.admit(provider):
+        decision = _authorize_provider_call(budget, provider)
+        if decision == "cancelled":
+            _record_cancel(endpoint, provider, "skipped")
+            return False
+        if decision == "budget":
+            _retire_provider_observation(endpoint, provider, reason="run_source_budget_exhausted")
             source_status[provider] = {"status": "skipped", "reason": "run_source_budget_exhausted"}
             return False
-        # Provider will execute now; discard any cached status so the fresh payload decides hit/failure.
+        # 先归档旧观察，再清掉缓存状态。本次 hit/失败由新结果决定。
+        _retire_provider_observation(endpoint, provider, reason="superseded")
         source_status.pop(provider, None)
         return True
 

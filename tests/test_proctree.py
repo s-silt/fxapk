@@ -67,7 +67,10 @@ def test_timeout_kills_whole_tree_including_grandchild() -> None:
     pid = int(pid_lines[0]) if pid_lines else None
     try:
         assert res.timed_out is True
-        assert res.returncode is None
+        # 旧断言把 returncode 锁成 None，那是超时路径跳过 poll/wait 的错误语义。
+        # 强杀之后必须回收真实退出码，同时保留 timeout，不能再把已退出进程塌成 null。
+        assert isinstance(res.returncode, int)
+        assert res.returncode != 0
         assert res.ownership_complete is True
         assert "timeout" in res.reason_codes
         assert res.termination_complete is True, "整树终止未获确认"

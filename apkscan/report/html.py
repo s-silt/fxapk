@@ -15,6 +15,8 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from apkscan.core import infra
 from apkscan.core.coverage import collect_coverage
+from apkscan.core.web_observations import GAP_LABELS, digest_web_observations
+from apkscan.core.web_supplement import project_for_digest
 from apkscan.core.leads import _overseas_target_coverage, _project_overseas_profiles
 from apkscan.report import letters
 from apkscan.core.models import (
@@ -465,6 +467,13 @@ def _render_template(template: Any, report: Report) -> str:
         ]
     )
     network_leads = network_leads_by_advice(report.leads)
+    from apkscan.core.dex_query import project_dex_handoff, project_dex_query
+    from apkscan.core.runtime_diagnostics import project_runtime_diagnostics
+
+    meta_map = report.meta if isinstance(report.meta, dict) else {}
+    dex_query_view = project_dex_query(meta_map)
+    dex_query_handoff = project_dex_handoff(meta_map)
+    runtime_diagnostics_view = project_runtime_diagnostics(meta_map)
     return template.render(
         report=report,
         # 没有专属区块的类别（后台入口 / 自建 IM·C2 / 后端凭据 / 四方支付 / 短信转发 …）。
@@ -501,6 +510,22 @@ def _render_template(template: Any, report: Report) -> str:
         enricher_status=report.enricher_status or [],
         findings=report.findings or [],
         finding_evidences=finding_evidence_views(report.findings or []),
+        web_observations_view=(
+            digest_web_observations(report.meta.get("web_observations"))
+            if isinstance(report.meta, dict) and "web_observations" in report.meta
+            else None
+        ),
+        web_observation_labels=GAP_LABELS,
+        web_supplement_view=(
+            project_for_digest(report.meta.get("web_supplement"))
+            if isinstance(report.meta, dict) and (
+                "web_supplement" in report.meta or "web_observation_plan" in report.meta
+            )
+            else None
+        ),
+        dex_query_view=dex_query_view,
+        dex_query_handoff=dex_query_handoff,
+        runtime_diagnostics_view=runtime_diagnostics_view,
     )
 
 

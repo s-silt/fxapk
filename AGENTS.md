@@ -13,6 +13,25 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 
 ---
 
+## 网页观察：人 → agent → fxapk → 提供方 → 报告 → agent
+
+人给出范围和授权。agent 调用 fxapk。fxapk 调度可选提供方并写报告。agent 再读证据决定下一次 fxapk 调用。这里没有第二个自主编排器，handoff 也不是授权。
+
+先读 `meta.web_observation_plan.agent_handoff`，以及 `meta.web_supplement` 与 `meta.web_supplement_runtime` 的最新回执。digest 会按白名单状态重算 handoff，不照抄报告里的指令。缺少必要事实时只暂停依赖它的补采步骤，继续其余已授权工作，并报告具体缺口。
+
+- 无网页信号且无明示材料：不动作。`mode=off`：保持关闭，不要建议把它打开。
+- 有信号但缺配置、而且还没有这份报告：准备本地材料，或调用方已经授权的 CDP 目标，再在下一次本来要跑的 `analyze` / `analyze-web` / `auto` 上传 `--web-supplement`。不要为了导入 bundle 另起 `auto`、安装或 `capture`。
+- 报告已经在：只补网页材料时用固定命令 `fxapk supplement-web <report.json> --web-supplement <config> --out <new-out-dir>`。它只读已有报告，不重跑 APK 分析、不碰设备、不做闭环。命令模板不是授权。插件缺失时 `--help` 仍可用，真正执行给出稳定的不可用原因。
+- `fxapk rea inspect` 是独立 REA 入口。自动同窗口 CDP 只接受 `trace` / `fxapk-cdp-trace`。`rea-json` 是离线材料。`bundle` 在核验回执前提供方未知。配置 `provider=rea|inspect` 且 `source=cdp` 会跳过，原因 `provider_mismatch`，不会改写成 trace。
+- `fxapk rea attach` 只把观察挂到新目录。解析进主报告用 `--web-supplement`，已有报告则用 `supplement-web`。同一 URL、frame 或点击不会因此变成已核验。
+- 插件不新增案件闭环。`auto` 仅在本次范围本来包含闭环时走既有步骤。真实 Android WebView 尚未实机验收。本地技能只编码方法，仓库外 reverse-skill 不是已嵌入的可执行文件。
+
+细节见 [skills/fxapk-web-evidence/SKILL.md](skills/fxapk-web-evidence/SKILL.md)。
+
+## Native 地址恢复
+
+`digest` 里的 `native_recovery` 只给固定命令，不启动 REA。`native_tool_missing` 没有本地探测回执时是 `not_probed`。插件当前只认 PE/ELF，没有 Mach-O，也不提取 IPA 切片。Windows 上 Ghidra 不分析 Android ELF：用 x86/x64 原生 PE 做 inspect 示例。Linux/macOS 上才用 `fxapk rea native extract <apk> --member lib/<abi>/<name>.so` 再 inspect；结构合法的 ELF 只表示 Ghidra 可以接手，Linux 实跑未验收。不要写成 Windows 上 `C:/toolchain` 加抽出 `.so` 再 inspect。`--toolchain` 的 `ghidra`/`java` 只进入该次子进程环境；其中的 `node` 键当前不使用，node 用 `--node` 或已有 node 字段显式配置。`address-to-file-offset` 的 `file_offset` 才是配方偏移，虚拟地址不是文件偏移。`read-bytes --length` 只留下观察，不自动 recover。配方必须显式文件偏移和期望字节，只重算声明过的变换，不表示所有静态算法都能自动破解；重算通过仍是 `relation_verified=false`。不要把 IDA/Hopper 写成已支持。二进制读取上限 64MiB，超出失败，不截断。attach 会搬走 native recovery 与网页观察附件；PCAP 等未搬运类型仍只在 `source_artifact_base`。
+
 ## 执行、授权与完成边界
 
 - 用户已要求实施且范围明确时，完成必要调查后直接执行已授权工作；说明方案不等于必须再次等待批准。用户明确要求先审后改时，必须等其批准。
@@ -313,6 +332,7 @@ fxapk digest out/<样本名>.json
 
 其它常用：
 - `fxapk auto <apk>`：静态 +（有设备则）动态一把梭。`fxapk batch <dir>`：批量。
+- 网页补采的路由、提供方边界和 agent handoff 见文首「网页观察」。`analyze` / `analyze-web` / `auto` 接受 `--web-supplement <本地JSON>`。已有报告只补网页材料用 `fxapk supplement-web <report.json> --web-supplement <config> --out <new-out-dir>`，不因此重跑 APK。普通 HTML / HAR 仍走 `fxapk analyze-web`。手工命令仍是 `fxapk rea import|inspect|trace|attach`；`inspect` 与 trace 不是同一个提供方。没有 `fxapk rea verify`。
 - `fxapk analyze-web <证据目录>`：把**已落盘的网页证据**当一级输入（递归读 `.html` / `.body` /
   `.js` / `.headers` / HAR），产出与 `analyze` 同构的报告。**不联网重取**——证据是什么就分析什么；默认离线，`--online` 仅开启归属富化。
   报告会对本次实际进入分析器的文件按 NFC 相对路径、字节数与逐文件 SHA-256 生成确定性

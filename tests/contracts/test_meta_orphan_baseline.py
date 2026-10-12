@@ -62,7 +62,8 @@ def test_baseline_file_is_wellformed_and_nonvacuous() -> None:
     #   115 → 111：capture_sequence 按 webview_signals / webview_signal_count 选采集轮；
     #              auto 读取 runtime_decrypt_stats 写逐轮解密账本；merge 读取
     #              runtime_decrypted 累积跨轮状态（仅内部消费，不等于出口已覆盖）。
-    assert total == 111, f"三类存量应守恒为 111，实际 {total}"
+    #   111 → 110：runtime_brand_hints 由 dynamic.merge._retain_brand_hints 读取并累计。
+    assert total == 110, f"三类存量应守恒为 110，实际 {total}"
     for category, group in baseline.items():
         for key, files in group.items():
             assert key, f"{category} 基线里有空键"

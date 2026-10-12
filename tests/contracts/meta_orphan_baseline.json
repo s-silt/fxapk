@@ -36,9 +36,6 @@
       "runtime_antidetect": [
         "apkscan/dynamic/merge.py"
       ],
-      "runtime_brand_hints": [
-        "apkscan/dynamic/merge.py"
-      ],
       "runtime_clipboard": [
         "apkscan/dynamic/merge.py"
       ],

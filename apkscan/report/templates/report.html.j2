@@ -983,6 +983,78 @@
   </section>
   {% endif %}
 
+  {% if web_supplement_view %}
+  <section id="web-supplement">
+    <h2>网页自动补采 <span class="muted" style="font-size:13px;font-weight:400">（候选，不是案件闭环）</span></h2>
+    <p>{{ web_supplement_view.get("summary_line") }}</p>
+    <div class="kv">
+      <div class="k">状态</div><div>{{ web_supplement_view.get("status") }}</div>
+      <div class="k">原因</div><div class="mono">{{ web_supplement_view.get("reason") }}</div>
+      <div class="k">最近状态</div><div>{{ web_supplement_view.get("latest_status") }}</div>
+      <div class="k">最近原因</div><div class="mono">{{ web_supplement_view.get("latest_reason") }}</div>
+      <div class="k">尝试 / 失败</div><div class="mono">{{ web_supplement_view.get("attempt_count", 0) }} / {{ web_supplement_view.get("failure_count", 0) }}</div>
+      <div class="k">候选</div><div class="mono">{{ (web_supplement_view.get("parse_counts") or {}).get("endpoints", 0) }}</div>
+      <div class="k">关系省略</div><div class="mono">{{ web_supplement_view.get("relation_omitted", 0) }}</div>
+    </div>
+  </section>
+  {% endif %}
+
+  {% if web_observations_view %}
+  <section id="web-observations">
+    <h2>外部网页观察 <span class="muted" style="font-size:13px;font-weight:400">（已核对副本的计数与固定缺口；来源未认证，不能当作案件闭环）</span></h2>
+    <div class="kv">
+      <div class="k">状态</div><div>{{ web_observations_view.get("status") }}</div>
+      <div class="k">条数</div><div class="mono">{{ web_observations_view.get("count") }}</div>
+      <div class="k">请求 / 脚本</div><div class="mono">{{ web_observations_view.get("request_count") }} / {{ web_observations_view.get("script_count") }}</div>
+      <div class="k">来源认证</div><div>否</div>
+      <div class="k">闭环已评估</div><div>否</div>
+    </div>
+    {% for row in web_observations_view.get("observations") or [] %}
+    <h3>观察 {{ loop.index }} <span class="muted">{{ row.get("provider") }} · {{ row.get("status") }}</span></h3>
+    <div class="mono">{{ row.get("relative_path") or "—" }}</div>
+    <div class="mono">{{ row.get("source_sha256") or "—" }}</div>
+    <ul class="tight">
+      {% for gap in row.get("gaps") or [] %}
+      <li>{{ web_observation_labels.get(gap, "未分类缺口") }}</li>
+      {% endfor %}
+    </ul>
+    {% endfor %}
+    <ul class="tight">
+      {% for action in web_observations_view.get("actions") or [] %}
+      <li>{{ action }}</li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+
+  {% if dex_query_view %}
+  <section id="dex-query">
+    <h2>DEX 定点查询 <span class="muted" style="font-size:13px;font-weight:400">（静态引用；不是运行时观测，也不评估闭环）</span></h2>
+    {% for receipt in dex_query_view.get("receipts") or [] %}
+    <ul class="tight">
+      {% for member in receipt.get("members") or [] %}
+      <li class="mono">{{ member.get("name") }} · {{ member.get("status") }} · hits {{ member.get("hit_count") }}</li>
+      {% endfor %}
+    </ul>
+    {% endfor %}
+    <ul class="tight">
+      {% for action in (dex_query_handoff or {}).get("actions") or [] %}
+      <li class="mono">{{ action.get("command") }}</li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+  {% if runtime_diagnostics_view %}
+  <section id="runtime-diagnostics">
+    <h2>覆盖诊断 <span class="muted" style="font-size:13px;font-weight:400">（frida_detection={{ runtime_diagnostics_view.get("frida_detection") }}；endpoints_added={{ runtime_diagnostics_view.get("endpoints_added") }}；closure_evaluated={{ runtime_diagnostics_view.get("closure_evaluated") }}）</span></h2>
+    <ul class="tight">
+      {% for item in runtime_diagnostics_view.get("items") or [] %}
+      <li>{{ item.get("class") }} · {{ item.get("event") }} · {{ item.get("window_id") }} · {{ item.get("runtime_variant") }}</li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+
   {#- ============ 证据完整性（可复现 / 可回溯 / 完整性校验背书层；措辞克制，不打包票） ============ -#}
   {% set manifest = meta.get("evidence_manifest") %}
   {% if manifest %}

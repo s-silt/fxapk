@@ -33,16 +33,19 @@ from apkscan.core.models import (
     LeadCategory,
     Report,
 )
+from apkscan.core.report_delivery import ReportDelivery, combine_deliveries
 from apkscan.core.report_naming import report_base
 
 # 样本库 / 案件子命令已物理拆到 apkscan/commands/（纯搬移）；add_typer 留此处以引用主 app。
 from apkscan.commands.corpus import corpus_app
 from apkscan.commands.case import case_app, closure_exit_code
 from apkscan.commands.enrich import enrich_app
+from apkscan.commands.dex_query import dex_app
 from apkscan.commands.jadx_query import jadx_app
 from apkscan.commands.reanalysis_cli import recognize_app
 from apkscan.commands.lead import lead_app
 from apkscan.commands.web import analyze_web, capture_web
+from apkscan.commands.web_supplement import supplement_web
 from apkscan.commands.origin_check import origin_check
 
 META_WRITE_OWNER = "cli"
@@ -78,6 +81,7 @@ app = typer.Typer(
 app.add_typer(corpus_app, name="corpus")
 app.add_typer(case_app, name="case")
 app.add_typer(enrich_app, name="enrich")
+app.add_typer(dex_app, name="dex")
 app.add_typer(jadx_app, name="jadx")
 app.add_typer(lead_app, name="lead")
 app.add_typer(recognize_app, name="recognize")
@@ -115,6 +119,7 @@ def phase2_command(ctx: typer.Context) -> None:
 app.command(name="analyze-web")(analyze_web)
 app.command(name="capture-web")(capture_web)
 app.command(name="origin-check")(origin_check)
+app.command(name="supplement-web")(supplement_web)
 
 # 合法输出格式（--fmt）。全非法时回退而非静默产出零报告。
 _VALID_FORMATS = ("html", "json", "pdf")
@@ -271,21 +276,39 @@ def _resolve_out_cwd(out: str | None) -> str:
 def _raise_exit_for_status(status: object) -> None:
     """按 DynamicResult 的 status 决定命令退出码：
 
-    - ``STATUS_ERROR`` → ``typer.Exit(1)``（执行出错）；
-    - ``STATUS_SKIPPED`` → ``typer.Exit(2)``（缺 frida/mitmproxy/root 等前置 → 零产出高发场景，
-      与 error 分开，便于调用方/脚本区分「跑错了」与「没跑起来」）；
-    - ``STATUS_DEGRADED`` → ``typer.Exit(3)``（抓包跑完但无任何证据路径：代理未起/MITM 0 字节/
-      floor 未拉回/端点 0 → 脚本调用方不能当成功，独立码便于区分「降级无产出」）；
-    - 其它（done/未知）→ 不抛，正常返回 0。
-    """
-    from apkscan.dynamic import STATUS_DEGRADED, STATUS_ERROR, STATUS_SKIPPED
+    - ``done`` → 不抛，进程退出码 0；
+    - ``error`` → 1（执行出错，也用于非 dict、缺 status、空值和未知 status）；
+    - ``skipped`` → 2（缺前置，没跑起来）；
+    - ``degraded`` → 3（跑完但无可用证据）。
 
+    只有已定义的 ``done`` 算成功。人工取消不走这里，``auto`` 用退出码 130。
+    """
+    from apkscan.dynamic import STATUS_DEGRADED, STATUS_DONE, STATUS_ERROR, STATUS_SKIPPED
+
+    if status == STATUS_DONE:
+        return
     if status == STATUS_ERROR:
         raise typer.Exit(code=1)
     if status == STATUS_SKIPPED:
         raise typer.Exit(code=2)
     if status == STATUS_DEGRADED:
         raise typer.Exit(code=3)
+    raise typer.Exit(code=1)
+
+
+def _exit_if_report_delivery_failed(delivery: object) -> None:
+    """必需 json/html 失败，或请求了输出但一份都没写成 → 退出码 1。
+
+    先于 analyze 的 strict 3/4 和 auto 的闭环 5/6。可选 PDF 缺工具只记 skipped，
+    不单独把已写成的 canonical JSON 判失败。返回值不是写出结果时不在这里猜成功。
+    """
+    from apkscan.core.report_delivery import ReportDelivery
+
+    if not isinstance(delivery, ReportDelivery) or not delivery.blocks_success():
+        return
+    failed = ",".join(delivery.failed) if delivery.failed else "无成功产物"
+    typer.echo(f"必需报告写出失败：{failed}", err=True)
+    raise typer.Exit(code=1)
 
 
 def _strict_exit_code(report: Report) -> int | None:
@@ -387,6 +410,11 @@ def analyze(
         "--enrichment-dry-run",
         help="只生成联网富化计划和预计供应商调用量，不调用任何富化源。",
     ),
+    web_supplement: str | None = typer.Option(
+        None,
+        "--web-supplement",
+        help="本地网页补采配置 JSON。mode=auto 时由 fxapk 选择插件并解析；实时 CDP 必须由该配置显式 authorized=true。",
+    ),
     strict: bool = typer.Option(
         False,
         "--strict",
@@ -409,6 +437,9 @@ def analyze(
         formats = _parse_formats(fmt)
         _validate_mode(mode)
         out = _resolve_out(out, apk)  # 未给 --out → 默认落到 APK 同目录下的 out/
+        from apkscan.core.web_supplement_runtime import static_web_arguments
+
+        static_web, _static_request = static_web_arguments(web_supplement, None)
         config = AnalysisConfig(
             online=online,
             out_dir=out,
@@ -417,6 +448,7 @@ def analyze(
             enrich_max_targets=enrich_max_targets,
             enrich_static_ip_max_targets=enrich_static_ip_max_targets,
             enrichment_dry_run=enrichment_dry_run,
+            web_supplement=static_web,
         )
 
         extra_dex_files = _resolve_extra_dex(extra_dex)
@@ -478,7 +510,14 @@ def analyze(
 
         out_dir = Path(out)
         out_dir.mkdir(parents=True, exist_ok=True)
-        _write_reports(report, out_dir, formats, base)
+        if not (dynamic and device_detected):
+            from apkscan.core.web_supplement_runtime import route_stripped_cdp
+
+            route_stripped_cdp(
+                report, web_supplement, None,
+                dynamic=dynamic, device=device_detected, observer_started=False,
+            )
+        deliveries: list[object] = [_write_reports(report, out_dir, formats, base)]
 
         _print_summary(report)
 
@@ -490,8 +529,12 @@ def analyze(
                 # base 透传：merge 重渲必须用与静态写出同一 base，否则静态写 <apk>.* 而
                 # 重渲写 report.* 产两套报告。
                 _run_dynamic_after_static(
-                    str(apk), ctx.package_name or "", out, report, formats, base
+                    str(apk), ctx.package_name or "", out, report, formats, base,
+                    web_supplement=web_supplement,
+                    delivery_sink=deliveries,
                 )
+
+        _exit_if_report_delivery_failed(combine_deliveries(deliveries))
 
         # --strict：所有工作（写报告 / 入账 / 动态）完成后，据完整度决定退出码，供 CI / Agent 判定。
         # 非严格默认退 0（尽力而为，向后兼容）。退出穿过 finally 正常收尾（与 capture 同范式）。
@@ -982,6 +1025,11 @@ def auto(
         "--mode",
         help=_NETWORK_MODE_HELP,
     ),
+    web_supplement: str | None = typer.Option(
+        None,
+        "--web-supplement",
+        help="本地网页补采配置 JSON。与 analyze 同一份契约；无授权 CDP 目标时不改设备。",
+    ),
 ) -> None:
     """一键全自动：体检 → 静态分析 → 脱壳 → 原版基线抓包 → 合并 → 案件闭环。
 
@@ -1002,18 +1050,33 @@ def auto(
         formats = _parse_formats(fmt)
         _validate_mode(mode)
 
-        def _confirm(msg: str) -> None:
-            """抓包前提示用户操作 app 触发网络，并等回车（CLI 落点；GUI 用弹窗）。
+        def _confirm(msg: str) -> bool:
+            """交互终端才读确认。非交互在读取前跳过，按本次已有授权继续。
 
-            确认提示只是「准备好就继续」的暂停闸（返回值本就不使用）。无 stdin / EOF /
-            Ctrl-C 时 click.confirm 抛 Abort —— 这不是错误，直接继续抓包，不刷 ERROR+traceback。
+            交互下拒绝、Abort 或 Ctrl+C 都是取消，不再当成 EOF 继续抓包。
             """
+            from apkscan.dynamic.cancel import AutoCancelled
+
             typer.echo("")
             typer.echo(f">>> {msg}")
+            interactive = False
             try:
-                typer.confirm("已准备好，开始抓包？", default=True)
-            except (click.Abort, EOFError):
-                typer.echo("（未读到输入，直接继续抓包）")
+                import sys
+
+                interactive = sys.stdin is not None and bool(sys.stdin.isatty())
+            except Exception:
+                logger.exception("[cli] 无法判断是否交互终端，按非交互继续")
+                interactive = False
+            if not interactive:
+                typer.echo("（非交互运行：确认前已跳过交互，按本次授权继续）")
+                return True
+            try:
+                accepted = typer.confirm("已准备好，开始抓包？", default=True)
+            except (click.Abort, EOFError, KeyboardInterrupt) as exc:
+                raise AutoCancelled("confirm_cancelled") from exc
+            if accepted is False:
+                raise AutoCancelled("confirm_refused")
+            return True
 
         # ★与 capture 命令同口径：native 主仓无落点，显式拒绝而非静默当"未授权"跳过——
         #   否则帮助说"将报错"、实际却只是悄悄不跑旁路，用户拿不到真实原因。
@@ -1039,8 +1102,18 @@ def auto(
             confirm=_confirm,
             allow_behavior_modification=allow_behavior_modification,
             antidetect=antidetect,
+            web_supplement=web_supplement,
         )
+        if isinstance(result, dict) and result.get("status") == "cancelled":
+            _print_auto_result(result)
+            typer.echo("已取消：停止后续抓包、旁路和闭环。", err=True)
+            from apkscan.dynamic.cancel import CANCEL_EXIT_CODE
+
+            raise typer.Exit(code=CANCEL_EXIT_CODE)
         _print_auto_result(result)
+        _exit_if_report_delivery_failed(
+            result.get("report_delivery") if isinstance(result, dict) else None
+        )
         if strict_case:
             status = result.get("status") if isinstance(result, dict) else "failed"
             code = closure_exit_code(status)
@@ -2216,8 +2289,27 @@ def _resolve_extra_dex(spec: str) -> list[str]:
     return files
 
 
+def _defer_cdp_pre_observer(
+    report: Report, out: str, formats: list[str], base: str, web_supplement: str | None,
+    delivery_sink: list[object] | None = None,
+) -> None:
+    from apkscan.core.web_supplement_runtime import route_stripped_cdp
+
+    route_stripped_cdp(
+        report, web_supplement, None,
+        dynamic=True, device=True, observer_started=False,
+    )
+    meta = getattr(report, "meta", None)
+    if isinstance(meta, dict) and meta.get("web_supplement_runtime"):
+        written = _write_reports(report, Path(out), formats, base)
+        if delivery_sink is not None:
+            delivery_sink.append(written)
+
+
 def _run_dynamic_after_static(
     apk_path: str, package: str, out: str, report: Report, formats: list[str], base: str,
+    web_supplement: str | None = None,
+    delivery_sink: list[object] | None = None,
 ) -> None:
     """--dynamic：静态完成且有设备时，顺序执行 unpack + capture，并把运行时端点并回主报告。
 
@@ -2242,22 +2334,37 @@ def _run_dynamic_after_static(
 
     if not package:
         typer.echo("未知包名，跳过抓包（capture 需目标包名）。")
+        _defer_cdp_pre_observer(report, out, formats, base, web_supplement, delivery_sink)
         return
 
     try:
         from apkscan.dynamic import capture as _capture
     except ImportError:
         typer.echo("该功能未安装：apkscan.dynamic.capture 不可用，跳过抓包。")
+        _defer_cdp_pre_observer(report, out, formats, base, web_supplement, delivery_sink)
         return
 
     try:
-        capture_result = _capture.run(package, out=out)
+        from apkscan.core.models import AnalysisConfig
+        from apkscan.core.web_supplement_runtime import make_capture_observer
+
+        observer = make_capture_observer(
+            AnalysisConfig(out_dir=out, web_supplement=web_supplement),
+            report=report, publish_dir=out,
+        )
+        capture_result = _capture.run(package, out=out, web_observer=observer)
     except Exception:
         logger.exception("动态抓包执行异常（不影响已产出的静态报告）")
         typer.echo("抓包执行异常（详见日志），已跳过。")
+        _defer_cdp_pre_observer(report, out, formats, base, web_supplement, delivery_sink)
         return
 
     _print_dynamic_result("抓包", capture_result)
+    meta = getattr(report, "meta", None)
+    if isinstance(meta, dict) and meta.get("web_supplement_runtime"):
+        written = _write_reports(report, Path(out), formats, base)
+        if delivery_sink is not None:
+            delivery_sink.append(written)
 
     # 抓包成功（done）才把运行时端点并回主报告并重渲；skipped/error 不调 merge。
     status = capture_result.get("status") if isinstance(capture_result, dict) else None
@@ -2266,11 +2373,14 @@ def _run_dynamic_after_static(
     if status != STATUS_DONE:
         return
 
-    _merge_runtime_into_report(capture_result, out, report, formats, base)
+    _merge_runtime_into_report(
+        capture_result, out, report, formats, base, delivery_sink=delivery_sink,
+    )
 
 
 def _merge_runtime_into_report(
     capture_result: object, out: str, report: Report, formats: list[str], base: str,
+    delivery_sink: list[object] | None = None,
 ) -> None:
     """把 capture 抓到的运行时端点并回主报告并重渲；任何失败不破坏已产出的静态报告。"""
     try:
@@ -2302,9 +2412,17 @@ def _merge_runtime_into_report(
         )
         for p in report_paths:
             typer.echo(f"  - {p}")
+        delivery = stats.get("report_delivery")
+        if delivery_sink is not None and delivery is not None:
+            delivery_sink.append(delivery)
+        if isinstance(delivery, ReportDelivery) and delivery.blocks_success():
+            typer.echo("报告重渲未完成。", err=True)
     except Exception:
         logger.exception("运行时端点并入/重渲异常（不影响已产出的静态报告）")
         typer.echo("运行时端点并入异常（详见日志），静态报告不受影响。")
+        if delivery_sink is not None:
+            required = tuple(fmt for fmt in formats if fmt in ("json", "html"))
+            delivery_sink.append(ReportDelivery(required, (), required, ()))
 
 
 def _resolve_runtime_report_path(capture_result: object, out: str) -> str:
@@ -2367,27 +2485,32 @@ def _print_dynamic_result(label: str, result: object) -> None:
                 typer.echo(f"    - {it}")
 
 
-def _write_reports(report: Report, out_dir: Path, formats: list[str], base: str) -> None:
+def _write_reports(report: Report, out_dir: Path, formats: list[str], base: str) -> ReportDelivery:
     """按 formats 写出报告，文件名用 ``base``（APK 名去后缀）：``<base>.{json,html,pdf}``。
 
     report.html / report.json 由其它 agent 实现。``runtime_report.json`` 不在此处写
     （那是 capture 的独立契约名）。
 
-    写完后对每个产物算 sha256，落 ``<base>.sha256`` 旁文件（对标 sha256sum 格式），作为
-    报告自证完整性的可复现校验锚点（工具产物自证，不替代司法鉴定机构的证据保全）。
+    写完后只对本次成功产物算 sha256，落 ``<base>.sha256`` 旁文件。失败格式留在回执里，
+    目录中已有的旧文件不算这次成功。PDF 缺工具记 skipped，不与 JSON 失败混成一类。
     """
-    written: list[Path] = []  # 实际落盘成功的产物，供生成 .sha256 旁文件
+    written_paths: list[Path] = []
+    written: list[str] = []
+    failed: list[str] = []
+    skipped: list[str] = []
 
     if "json" in formats:
+        path = out_dir / f"{base}.json"
         try:
             from apkscan.report import json as report_json
 
-            path = out_dir / f"{base}.json"
             report_json.dump(report, str(path))
-            written.append(path)
+            written_paths.append(path)
+            written.append("json")
             typer.echo(f"已写出 JSON 报告：{path}")
         except Exception:
             logger.exception("写出 JSON 报告失败（report.json 模块可能尚未就绪）")
+            failed.append("json")
 
     html_path = out_dir / f"{base}.html"
     if "html" in formats:
@@ -2395,30 +2518,36 @@ def _write_reports(report: Report, out_dir: Path, formats: list[str], base: str)
             from apkscan.report import html as report_html
 
             report_html.render(report, str(html_path))
-            written.append(html_path)
+            written_paths.append(html_path)
+            written.append("html")
             typer.echo(f"已写出 HTML 报告：{html_path}")
         except Exception:
             logger.exception("写出 HTML 报告失败（report.html 模块可能尚未就绪）")
+            failed.append("html")
 
     if "pdf" in formats:
         # PDF 派生自 HTML：html 已写则复用，否则 pdf.render 内部渲临时 HTML 再转。
+        path = out_dir / f"{base}.pdf"
         try:
             from apkscan.report import pdf as report_pdf
 
-            path = out_dir / f"{base}.pdf"
             html_source = str(html_path) if ("html" in formats and html_path.is_file()) else None
             if report_pdf.render(report, str(path), html_source=html_source):
-                written.append(path)
+                written_paths.append(path)
+                written.append("pdf")
                 typer.echo(f"已写出 PDF 报告：{path}")
             else:
+                skipped.append("pdf")
                 typer.echo(
                     "PDF 导出跳过：未找到 Chrome/Edge/Chromium 或转换失败（详见日志）；"
                     "HTML/JSON 不受影响。"
                 )
         except Exception:
             logger.exception("写出 PDF 报告失败")
+            skipped.append("pdf")
 
-    _write_sha256_sidecar(out_dir, base, written)
+    _write_sha256_sidecar(out_dir, base, written_paths)
+    return ReportDelivery(tuple(formats), tuple(written), tuple(failed), tuple(skipped))
 
 
 def _write_sha256_sidecar(out_dir: Path, base: str, products: list[Path]) -> None:
