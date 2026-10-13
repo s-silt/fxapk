@@ -131,6 +131,27 @@ def test_ui_receives_absolute_capture_deadline(monkeypatch, tmp_path):
     assert result["ui_observations"][0]["status"] == "complete"
 
 
+def test_ui_time_is_inside_requested_window_with_larger_total_budget(monkeypatch, tmp_path):
+    _prepare(monkeypatch)
+    clock = {"now": 100.0}
+    monkeypatch.setattr(capture, "_monotonic", lambda: clock["now"])
+    deadlines = []
+    waits = []
+    monkeypatch.setattr(capture, "_wait", waits.append)
+
+    def interaction(*, deadline_monotonic):
+        deadlines.append(deadline_monotonic)
+        clock["now"] += 3.0
+
+    capture._capture(
+        "com.example.synthetic", tmp_path, 10, "device-1",
+        decision=replace(capture.decide_capture(None), total_budget_sec=3600),
+        mitm=False, floor=False, frida=False, interaction=interaction,
+    )
+    assert deadlines == [110.0]
+    assert waits == [7.0]
+
+
 def test_sampler_start_cannot_spend_budget_then_start_ui(monkeypatch, tmp_path):
     _prepare(monkeypatch)
     clock = {"now": 0.0}

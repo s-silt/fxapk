@@ -946,3 +946,32 @@ def test_non_case_scope_cannot_corroborate_unverified_native(
     )[0]
     assert lead.confidence is Confidence.LOW
     assert lead.advice == "待核"
+
+
+@pytest.mark.parametrize("upstream_provider", ["ghidra", "other"])
+def test_overview_workflow_keeps_exact_upstream_provider(native, upstream_provider):
+    sha = "a" * 64
+    identity = {"id": "rea-workflow", "version": "1"}
+    data = {
+        "subject": {"digest": {"sha256": sha}},
+        "provider": identity,
+        "operation": "binary_overview",
+        "analysis_profile": {
+            "provider": identity,
+            "parameters": {
+                "workflow_revision": 2,
+                "upstream_analysis_profile": {
+                    "provider": {"id": upstream_provider, "version": "12.1.4"},
+                },
+            },
+        },
+        "normalized_result": {"segments": [{"name": "synthetic"}]},
+    }
+    raw = json.dumps({"ok": True, "meta": {"command": "analyze"}, "data": data}).encode()
+    if upstream_provider != "ghidra":
+        with pytest.raises(native.NativeError, match="envelope_not_complete"):
+            native._envelope(raw, binary_sha=sha, provider="ghidra", operation="overview", query=None)
+    else:
+        result = native._envelope(raw, binary_sha=sha, provider="ghidra", operation="overview", query=None)
+        assert result["data"]["provider"]["id"] == "rea-workflow"
+        assert native._native_provider_identity(result["data"], "overview")["version"] == "12.1.4"

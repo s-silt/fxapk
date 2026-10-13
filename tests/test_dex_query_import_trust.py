@@ -231,3 +231,11 @@ def test_tampered_receipts_without_apk_stay_unverified(tmp_path: Path) -> None:
         assert snippets
         assert all("xref=unverified" in item for item in snippets)
         _assert_runtime_kept(merged)
+
+
+def test_absolute_compiler_paths_are_not_relative_attachment_claims():
+    from apkscan.core.dex_query import _reject_unknown_claims
+
+    _reject_unknown_claims({"meta": {"build_paths": [{"path": "/app/compiler/source.go"}]}}, set())
+    with pytest.raises(DexQueryError, match="path_escape"):
+        _reject_unknown_claims({"meta": {"attachment": {"path": "../dex-query/escape.json"}}}, set())

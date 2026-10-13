@@ -15,15 +15,18 @@ from urllib.parse import urlsplit
 from apkscan.core.atomic import atomic_create_bytes
 
 from .evidence import EvidenceError, origin_of
+from .trace_limits import MAX_RAW_BYTES
 
 _MAX_MESSAGE = 256 * 1024
-_MAX_ENVELOPE = 256 * 1024
+_MAX_ENVELOPE = MAX_RAW_BYTES
 # Room for the detach ack and capture.stopped_reason without another full dump per event.
 _TAIL_RESERVE = 512
 _MAX_HTTP = 64 * 1024
 _MAX_EVENTS = 1024
 _MAX_SOURCES = 64
 _MAX_SOURCE_CHARS = 48 * 1024
+# Keep room in the envelope for request/response and identity records.
+_MAX_SOURCE_BYTES = 128 * 1024
 _MAX_STACK = 32
 _MAX_PARENT_FETCHES = 32
 _MAX_CHILD_TARGETS = 8
@@ -531,6 +534,8 @@ def _minimal_failure(
                 "acked_methods": list(client.command_acks)[:16],
             },
             "async_call_stack_depth": _MAX_STACK,
+            "max_envelope_bytes": _MAX_ENVELOPE,
+            "max_source_bytes": _MAX_SOURCE_BYTES,
             "detach_acked": client.detach_acked,
             "socket_closed": client.socket_closed,
             "stopped_reason": reason_code,
@@ -594,6 +599,7 @@ class _Client:
         self.socket_closed = False
         self.fetch_queue: list[dict[str, Any]] = []
         self.source_keys: set[tuple[str, int, int, str]] = set()
+        self.source_bytes = 0
         self.target_id = ""
         self._draining = False
         self.stop_fetching = False
@@ -1042,7 +1048,7 @@ class _Client:
         if life is None or (origin is not None and not self._origin_allowed(life.get("origin"))):
             self.filtered["off_origin"] += 1
             return None
-        return {
+        stored = {
             "scriptId": params.get("scriptId"),
             "url": _kept_url(params.get("url"), origin, self.filtered, self.allow_origins),
             "executionContextId": context_id,
@@ -1050,6 +1056,10 @@ class _Client:
             "startColumn": params.get("startColumn"),
             "hash": params.get("hash"),
         }
+        length = params.get("length")
+        if type(length) is int and length >= 0:
+            stored["length"] = length
+        return stored
 
     def _request_params(self, params: dict[str, Any], origin: str | None) -> dict[str, Any] | None:
         request = _as_dict(params.get("request"))
@@ -1125,6 +1135,14 @@ class _Client:
         context_id = params.get("executionContextId")
         if not isinstance(script_id, str) or type(context_id) is not int:
             return
+        # Chrome reports the script length before source retrieval. Do not ask
+        # for a known oversized vendor bundle: the reply can close the bounded
+        # WebSocket before any requests are observed. Retain its metadata and
+        # an explicit coverage gap, never a truncated or invented source body.
+        length = params.get("length")
+        if type(length) is int and length > _MAX_SOURCE_CHARS:
+            self._gap("source_unavailable")
+            return
         life = self._context_for(str(record["sessionId"]), context_id)
         if life is None or not self._origin_allowed(life.get("origin")):
             self._gap("source_unavailable")
@@ -1135,6 +1153,7 @@ class _Client:
                 "sessionId": record["sessionId"],
                 "seq": record["seq"],
                 "contextId": context_id,
+                "length": length,
                 "gen": life.get("_gen"),
                 "unique": life.get("uniqueId"),
             }
@@ -1179,6 +1198,12 @@ class _Client:
             return
         if len(self.sources) >= _MAX_SOURCES:
             raise EvidenceError("trace_limit")
+        length = record.get("length")
+        if self.source_bytes >= _MAX_SOURCE_BYTES or (
+            type(length) is int and length > _MAX_SOURCE_BYTES - self.source_bytes
+        ):
+            self._gap("source_unavailable")
+            return
         try:
             result = self.call("Debugger.getScriptSource", {"scriptId": script_id}, session=session)
         except EvidenceError as exc:
@@ -1204,7 +1229,12 @@ class _Client:
             "sourceText": text,
             "sha256": hashlib.sha256(encoded).hexdigest(),
         }
+        source_size = len(json.dumps(item, ensure_ascii=False).encode("utf-8")) + 2
+        if self.source_bytes + source_size > _MAX_SOURCE_BYTES:
+            self._gap("source_unavailable")
+            return
         self._charge("sources", item)
+        self.source_bytes += source_size
         self.source_keys.add(key)
         self.sources.append(item)
 

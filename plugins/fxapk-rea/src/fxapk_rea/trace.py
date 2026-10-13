@@ -19,10 +19,10 @@ from .evidence import (
 )
 from .runtime import validate_scope
 from .trace_actions import project_actions
+from .trace_limits import MAX_RAW_BYTES
 from .trace_parents import debugger_sessions, parent_stacks, walk_groups
 from .trace_targets import split_targets
 
-MAX_RAW_BYTES = 256 * 1024
 _SCHEMA = "fxapk-cdp-trace/1"
 _OBSERVATION_SCHEMA = "fxapk-cdp-trace-observation/1"
 _PRODUCER = "fxapk-cdp-trace"

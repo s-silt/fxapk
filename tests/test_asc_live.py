@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -13,8 +14,7 @@ import pytest
 from apkscan.core.dex_query import DexQueryLimits, query_apk
 from tests.fixtures.dex_query.dexgen import build_dex, sample_classes, wide_classes, zip_bytes
 
-_VENV = Path("out_asc_diagnostics_20261012/toolchain/venv/Scripts/python.exe")
-_EVIDENCE = Path("out_asc_diagnostics_20261012/a0-members.json")
+_VENV = Path(os.environ.get("FXAPK_ASC_TEST_PYTHON", sys.executable))
 
 
 def _require_worker() -> list[str]:
@@ -49,7 +49,7 @@ def _apk_handler_names(apk: Path) -> list[str]:
     return json.loads(result.stdout)
 
 
-def _asc_on_041() -> dict[str, object]:
+def _asc_on_041(directory: Path) -> dict[str, object]:
     dex = build_dex(sample_classes(), version="041").data
     script = (
         "import json, sys\n"
@@ -63,7 +63,7 @@ def _asc_on_041() -> dict[str, object]:
         "except Exception as exc:\n"
         "    print(json.dumps({'raised': True, 'type': type(exc).__name__}))\n"
     )
-    path = _EVIDENCE.with_name("a0-dex041.bin")
+    path = directory / "a0-dex041.bin"
     path.write_bytes(dex)
     result = subprocess.run(
         [str(_VENV), "-I", "-c", script, str(path)],
@@ -130,7 +130,7 @@ def test_live_asc_matches_independent_offsets_for_every_zip_location(tmp_path: P
         "process_limit_enforced": receipt["consumption"]["process_limit_enforced"],
         "platform": sys.platform,
         "apk_handler_names": upstream,
-        "dex041_asc_attempt": _asc_on_041(),
+        "dex041_asc_attempt": _asc_on_041(tmp_path),
         "jadx": "not available",
         "members": {
             name: {
@@ -142,4 +142,6 @@ def test_live_asc_matches_independent_offsets_for_every_zip_location(tmp_path: P
             for name, row in by_name.items()
         },
     }
-    _EVIDENCE.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    (tmp_path / "a0-members.json").write_text(
+        json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )

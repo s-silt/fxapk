@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json
 import sys
+import pytest
 
 from typer.testing import CliRunner
 
 from apkscan.cli import app
 
 
-def test_missing_plugin_query_is_unavailable_and_hides_the_query() -> None:
+def test_missing_plugin_query_is_unavailable_and_hides_the_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("apkscan.core.dex_query.resolve_worker_argv", lambda: None)
     loaded = {name for name in sys.modules if name == "droidasc" or name.startswith("droidasc.")}
     token = "xref-token-example"
     help_result = CliRunner().invoke(app, ["dex", "--help"])

@@ -1581,7 +1581,7 @@ def test_metadata_only_oversize_keeps_minimal_failure_envelope(plugin_src: Path,
     huge.origin = _ORIGIN
     huge.session_id = _SESSION
     huge.target_id = "T"
-    huge.gaps.append("m" * (300 * 1024))
+    huge.gaps.append("m" * (runtime._MAX_ENVELOPE + 1024))
     assert huge.events == [] and huge.sources == []
     runtime._preserve_partial(tmp_path, huge, "T", _SESSION, _ORIGIN, EvidenceError("trace_oversize"))
     raw = (tmp_path / "cdp-trace-original.json").read_bytes()
@@ -1604,7 +1604,7 @@ def test_metadata_only_oversize_keeps_minimal_failure_envelope(plugin_src: Path,
     enabled.target_id = "T"
     enabled.debugger_enable_observed = True
     enabled.command_acks = ["Debugger.enable", "Runtime.enable"]
-    enabled.gaps.append("m" * (300 * 1024))
+    enabled.gaps.append("m" * (runtime._MAX_ENVELOPE + 1024))
     runtime._preserve_partial(tmp_path / "enabled", enabled, "T", _SESSION, _ORIGIN, EvidenceError("trace_oversize"))
     enabled_saved = json.loads((tmp_path / "enabled" / "cdp-trace-original.json").read_text(encoding="utf-8"))
     assert enabled_saved["capture"]["debugger_enabled"] is True
@@ -1722,6 +1722,8 @@ def test_transport_failure_survives_cleanup_exception(
 
 def test_budget_failure_survives_cleanup_exception(plugin_src: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     runtime = _runtime(plugin_src)
+    monkeypatch.setattr(runtime, "_MAX_SOURCE_BYTES", 1024 * 1024)
+    monkeypatch.setattr(runtime, "_MAX_ENVELOPE", 256 * 1024)
     from fxapk_rea.evidence import EvidenceError
 
     class _Peer:

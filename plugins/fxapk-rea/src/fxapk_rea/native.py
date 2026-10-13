@@ -520,6 +520,20 @@ def _dict(value: object, code: str) -> dict[str, Any]:
     return value
 
 
+def _native_provider_identity(data: dict[str, Any], operation: str) -> dict[str, Any]:
+    identity = _dict(data.get("provider"), "envelope_not_complete")
+    if operation == "overview" and identity.get("id") == "rea-workflow":
+        profile = _dict(data.get("analysis_profile"), "envelope_not_complete")
+        parameters = _dict(profile.get("parameters"), "envelope_not_complete")
+        if profile.get("provider") != identity or parameters.get("workflow_revision") != 2:
+            raise NativeError("envelope_not_complete")
+        upstream = _dict(parameters.get("upstream_analysis_profile"), "envelope_not_complete")
+        if data.get("operation") != "binary_overview" or not data.get("normalized_result"):
+            raise NativeError("envelope_not_complete")
+        return _dict(upstream.get("provider"), "envelope_not_complete")
+    return identity
+
+
 def _envelope(raw: bytes, *, binary_sha: str, provider: str, operation: str, query: str | None) -> dict[str, Any]:
     value = _loads(raw)
     if not isinstance(value, dict) or value.get("ok") is not True:
@@ -534,11 +548,15 @@ def _envelope(raw: bytes, *, binary_sha: str, provider: str, operation: str, que
     digest = _dict(subject.get("digest"), "envelope_not_complete")
     if digest.get("sha256") != binary_sha or _SHA.fullmatch(binary_sha) is None:
         raise NativeError("envelope_not_complete")
-    identity = _dict(data.get("provider"), "envelope_not_complete")
+    identity = _native_provider_identity(data, operation)
     version = identity.get("version")
     if identity.get("id") != provider or not isinstance(version, str) or not version:
         raise NativeError("envelope_not_complete")
-    if data.get("operation") != _ENVELOPE_OPERATION[operation]:
+    expected_operation = (
+        "binary_overview" if operation == "overview" and data["provider"].get("id") == "rea-workflow"
+        else _ENVELOPE_OPERATION[operation]
+    )
+    if data.get("operation") != expected_operation:
         raise NativeError("envelope_not_complete")
     parameters = data.get("parameters")
     if operation == "function":
@@ -636,7 +654,7 @@ def inspect(
             "schema_version": "fxapk-native-inspect/1",
             "status": "captured",
             "provider": provider,
-            "provider_version": data["provider"]["version"],
+            "provider_version": _native_provider_identity(data, operation)["version"],
             "operation": operation,
             "rea_command": OPERATIONS[operation],
             "query": query,

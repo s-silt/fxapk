@@ -13,6 +13,7 @@ import urllib.request
 from pathlib import Path
 
 import pytest
+import psutil
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "tools" / "rea_trace_fixture.py"
@@ -55,7 +56,7 @@ def server(tmp_path: Path):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=ROOT,
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
     )
     assert proc.stdout is not None
     line = proc.stdout.readline()
@@ -68,7 +69,7 @@ def server(tmp_path: Path):
         yield proc, out, meta
     finally:
         if proc.poll() is None:
-            proc.send_signal(signal.CTRL_BREAK_EVENT)
+            proc.send_signal(signal.CTRL_BREAK_EVENT if sys.platform == "win32" else signal.SIGINT)
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
@@ -91,7 +92,10 @@ def test_stdout_identity_and_both_loopback_hosts(server) -> None:
     assert meta["origin"].startswith("http://127.0.0.1:")
     assert meta["secondary_origin"].startswith("http://localhost:")
     assert meta["origin"].rsplit(":", 1)[-1] == meta["secondary_origin"].rsplit(":", 1)[-1]
-    assert meta["pid"] == _proc.pid
+    # Windows venv python.exe can be a redirector spawning the interpreter.
+    assert meta["pid"] in {
+        _proc.pid, *(child.pid for child in psutil.Process(_proc.pid).children(recursive=True))
+    }
     status, body, _headers = _fetch(meta["origin"] + "/?mode=direct")
     assert status == 200 and b'id="load"' in body
     status, body, _headers = _fetch(meta["secondary_origin"] + "/api?branch=direct")
@@ -226,7 +230,7 @@ def test_log_hashes_and_refuse_overwrite(server, tmp_path: Path) -> None:
     assert proc.poll() is None
 
 
-def test_ctrl_break_exits_zero(server) -> None:
+def test_stop_signal_exits_zero(server) -> None:
     proc, _out, _meta = server
-    proc.send_signal(signal.CTRL_BREAK_EVENT)
+    proc.send_signal(signal.CTRL_BREAK_EVENT if sys.platform == "win32" else signal.SIGINT)
     assert proc.wait(timeout=5) == 0

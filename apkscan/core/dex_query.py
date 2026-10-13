@@ -20,7 +20,7 @@ import tempfile
 import zlib
 import zipfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 from apkscan.core.atomic import atomic_create_bytes
@@ -1585,7 +1585,7 @@ def _reject_unknown_claims(report: Mapping[str, Any], copied: set[str]) -> None:
     _collect_claim_paths(report, claims)
     for value in claims:
         normalized = value.replace("\\", "/")
-        if Path(value).is_absolute() or (len(value) > 2 and value[1] == ":"):
+        if PurePosixPath(normalized).is_absolute() or Path(value).is_absolute() or (len(value) > 2 and value[1] == ":"):
             continue
         if normalized.startswith("/") or ".." in normalized.split("/"):
             raise DexQueryError("path_escape")

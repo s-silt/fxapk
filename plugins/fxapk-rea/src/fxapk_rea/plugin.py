@@ -210,7 +210,12 @@ def inspect_command(
             raise EvidenceError("execution_receipt_exists")
         if not execution["ok"]:
             raise EvidenceError("rea_execution_failed")
-        raw = read_bounded(out / "execution/stdout.bin")
+        raw_ref = (
+            "execution/after-navigation/stdout.bin"
+            if execution.get("navigation_retry")
+            else "execution/stdout.bin"
+        )
+        raw = read_bounded(out / raw_ref)
         receipt, files = project(raw)
         parameters = parse_json(raw)["data"]["parameters"]
         if (
@@ -225,6 +230,13 @@ def inspect_command(
             "kind": "local_cdp_observation",
             "execution_ref": "execution.json",
             "console_text_requested": console_text,
+            "stdout_ref": raw_ref,
+            "navigation_retry": bool(execution.get("navigation_retry")),
+            "window_scope": (
+                "new_observation_window_after_navigation"
+                if execution.get("navigation_retry")
+                else "requested_observation_window"
+            ),
         }
         publish(out, receipt, files)
     except (EvidenceError, OSError) as exc:

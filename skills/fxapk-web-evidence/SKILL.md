@@ -125,7 +125,7 @@ python tools/rea_trace_fixture.py --out "D:\evidence\fixture-run"
 
 异步从 parent 到点击的链若缺一跳，覆盖保持 `partial`。动态脚本要核对插入或加载来源，以及异步祖先；只拿到文本不算点击链完成。`eval` 的 `sourceURL` 是声明名，不能单独证明网络来源。
 
-源码 UTF-8 文本哈希、CDP 的 UTF-16 坐标、网络原始字节是三种表示。正文 shape 不是 payload。信任前保留原件哈希和 JSON Pointer。trace 单份源码先按 `48 * 1024` 个字符拒绝，再把 UTF-8 字节算进整包 `256 * 1024` 字节。字符上限不是 48 KiB。事件 1024、源码份数 64、观察 60 秒这些既有上限仍在。
+源码 UTF-8 文本哈希、CDP 的 UTF-16 坐标、网络原始字节是三种表示。正文 shape 不是 payload。信任前保留原件哈希和 JSON Pointer。trace 单份源码先按 `48 * 1024` 个字符拒绝，再把 UTF-8 字节算进整包 `1024 * 1024` 字节。字符上限不是 48 KiB。Chrome 的 scriptParsed.length 明确超过 48 * 1024 时，保留该字段和脚本元数据，跳过源码请求并记 source_unavailable，继续预算内观察；不会把未获取源码的脚本写成已验证源码。源码条目另有 128 KiB 的累计 JSON 字节配额，超出这部分配额时跳过该源码并记录 source_unavailable，给请求与身份事件保留空间；整包 1 MiB 上限由采集与导入共享，其他硬上限不变。未知长度或实际读取超限仍受原有拒绝规则约束。事件 1024、源码份数 64、观察 60 秒这些既有上限仍在。
 
 trace 的跨 frame 祖先按该祖先自己的 frame、loader 和 epoch 记。非零行列在依据明确时按 UTF-16 代码单元换算。`parentId` 来自有界 `Debugger.getStackTrace`，并保留原响应指针。worker 没有 frame 时保留 worker 身份，覆盖保持 partial。这些句子只描述 trace。REA import/inspect 没有这条桥。
 
@@ -163,3 +163,5 @@ REA bundle 不能直接交给 `fxapk analyze-web` 或案件直接证据入口。
 交付时写明：做了哪条命令、原件哈希、看见的边、没看见的作用域、为什么停。未过证据门不称案件闭环。
 
 人工复核可抄 [references/synthetic-acceptance.md](references/synthetic-acceptance.md) 的记录模板。填完模板不是新的机器收据，也不是闭环。
+
+REA 6.4.0 可用 python -m fxapk_rea.rea_compat --root <rea-agents包目录> --apply 显式安装哈希钉定的本地导航兼容修复；未知依赖修改拒绝覆盖，实际补丁身份见 capabilities/execution.json。失效源码保留声明并记 provider_unavailable。上游 target_changed 防护不移除：inspect 只在安全退出后对原目标及来源重开一次新窗口，保留首轮失败原件；新窗口只说明导航后的观察，不能冒称覆盖导航全过程，后者另用 trace。第二轮仍失败则如实失败。

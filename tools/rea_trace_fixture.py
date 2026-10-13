@@ -256,9 +256,9 @@ def main(argv: list[str] | None = None) -> int:
         "secondary_origin": f"http://localhost:{bound_port}",
         "pid": os.getpid(),
     }
+    _install_stop(httpd)
     sys.stdout.buffer.write(json.dumps(identity, separators=(",", ":")).encode("ascii") + b"\n")
     sys.stdout.buffer.flush()
-    _install_stop(httpd)
     try:
         httpd.serve_forever(poll_interval=0.2)
     finally:

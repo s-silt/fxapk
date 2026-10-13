@@ -283,6 +283,8 @@ def test_no_extra_dex_keeps_base_invocation(monkeypatch, tmp_path) -> None:
 
     assert "-Pdex-input.verify-checksum=no" not in calls[0]["cmd"]
     assert calls[0]["timeout"] == jadx._TIMEOUT
+    command = calls[0]["cmd"]
+    assert command[command.index("--threads-count") + 1] == "1"
     # 仅原 APK 一个输入（末位是 apk 路径）
     assert calls[0]["cmd"][-1].endswith("app.apk")
 

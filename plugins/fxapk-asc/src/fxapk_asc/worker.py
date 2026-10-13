@@ -10,7 +10,6 @@ import hashlib
 import importlib
 import importlib.metadata
 import json
-import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -135,7 +134,19 @@ def _query_member(data: bytes, queries: list[str], max_hits: int) -> dict[str, o
         dex = dex_type(data)
         manager = manager_type(dex)
         scanner = manager._get_code_scanner()
-        locator = manager._get_str_locator(True)
+        # DEX strings are MUTF-8. ASC's regex locator encodes queries as UTF-8,
+        # which misses supplementary characters and embedded NUL literals.
+        # Decode each string once and retain only requested exact values.
+        query_indexes: dict[str, list[int]] = {query: [] for query in queries}
+        strings_partial = False
+        for index in range(dex.header.strings[1]):
+            try:
+                value = dex.get_string(index)
+            except Exception:
+                strings_partial = True
+                continue
+            if value in query_indexes:
+                query_indexes[value].append(index)
     except Exception:
         return {
             "status": "failed",
@@ -146,13 +157,12 @@ def _query_member(data: bytes, queries: list[str], max_hits: int) -> dict[str, o
         }
     hits: list[dict[str, object]] = []
     truncated = False
-    partial = False
+    partial = strings_partial
     for query in queries:
         if truncated:
             break
         try:
-            # ASC 把查询字节当正则。默认字面量，避免 '.' 命中别的常量。
-            indexes = locator.locate(re.escape(query))
+            indexes = query_indexes[query]
         except Exception:
             partial = True
             continue

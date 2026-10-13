@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 from apkscan.core.proctree import run_owned
 
 from .evidence import EvidenceError, MAX_INPUT_BYTES, origin_of, read_bounded
+from .rea_compat import provenance
 
 SUPPORTED_REA = frozenset({"6.4.0"})
 
@@ -124,6 +125,7 @@ class ReaRuntime:
             "rea_version": None,
             "supported_rea_versions": sorted(SUPPORTED_REA),
             "browser": "not_probed",
+            "compatibility_patch": provenance(self.executable),
             "capabilities": {"import": "available", "inspect": "unavailable"},
         }
         try:
@@ -172,4 +174,44 @@ class ReaRuntime:
         ]
         if console_text:
             args.append("--include-console-text")
-        return run_bounded(args, out, timeout=observation_ms / 1000 + 30)
+        result = run_bounded(args, out, timeout=observation_ms / 1000 + 30)
+        result["compatibility_patch"] = provenance(self.executable)
+        tree = result.get("process_tree", {})
+        retry_safe = (
+            tree.get("ownership_complete") is True
+            and tree.get("termination_complete") is True
+            and not tree.get("timed_out")
+            and not tree.get("forced_tree_kill")
+            and not result.get("errors")
+            and not any(s.get("truncated") for s in result.get("streams", {}).values())
+        )
+        if retry_safe and _navigation_changed(out):
+            # REA intentionally refuses mixed-document inventories. Start exactly
+            # one NEW window with the same target/origin; never clear its guard or
+            # combine the two documents. Retain the first attempt byte for byte.
+            retry = run_bounded(args, out / "after-navigation", timeout=observation_ms / 1000 + 30)
+            retry["compatibility_patch"] = result["compatibility_patch"]
+            retry["navigation_retry"] = {
+                "reason": "target_changed",
+                "scope": "new_observation_window_after_navigation",
+                "previous_execution": result,
+                "previous_stdout_ref": "execution/stdout.bin",
+            }
+            return retry
+        return result
+
+
+def _navigation_changed(out: Path) -> bool:
+    try:
+        value = json.loads(read_bounded(out / "stdout.bin"))
+        data = value.get("data") if isinstance(value, dict) else None
+        details = data.get("details") if isinstance(data, dict) else None
+        return (
+            isinstance(details, dict)
+            and isinstance(data, dict)
+            and data.get("code") == "target_unavailable"
+            and details.get("operation") == "inspect_web_page"
+            and details.get("reason") == "target_changed"
+        )
+    except (OSError, ValueError, EvidenceError):
+        return False

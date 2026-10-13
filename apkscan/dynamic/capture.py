@@ -1121,10 +1121,10 @@ def _capture(
                 playbook.append(warn)
                 warnings.append(warn)
         if web_observer is None:
-            window_end = _monotonic() + wait_for
-            if interaction is not None and _budget_remaining(capture_started_at, decision.total_budget_sec) > 0:
+            window_end = min(capture_deadline, _monotonic() + wait_for)
+            if interaction is not None and _monotonic() < window_end:
                 _record_ui_interaction(
-                    interaction, capture_deadline, pass_tag, ui_observations, playbook, warnings,
+                    interaction, window_end, pass_tag, ui_observations, playbook, warnings,
                 )
             leftover = window_end - _monotonic()
             if leftover > 0:

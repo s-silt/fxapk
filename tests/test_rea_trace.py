@@ -19,7 +19,7 @@ _DIAGNOSTIC = "unverified REA observation cannot be admitted as direct case evid
 _ORIGIN = "http://127.0.0.1:8765"
 _SESSION = "SESSION-A"
 _OTHER = "SESSION-B"
-_MAX_RAW = 256 * 1024
+_MAX_RAW = 1024 * 1024
 
 
 @pytest.fixture
@@ -1025,6 +1025,10 @@ def test_total_envelope_keeps_valid_partial_without_byte_slice(
 
     peer = _ScriptPeer(6, 48000)
     runtime = _install_runtime(monkeypatch, peer)
+    # Exercise the independent hard envelope limit above the normal source
+    # allocation; source backpressure must never disable this bound.
+    monkeypatch.setattr(runtime, "_MAX_SOURCE_BYTES", 1024 * 1024)
+    monkeypatch.setattr(runtime, "_MAX_ENVELOPE", 256 * 1024)
     with pytest.raises(EvidenceError, match="trace_oversize"):
         runtime.capture(endpoint="http://127.0.0.1:9999", target="T", origin=_ORIGIN, observation_ms=0, out=tmp_path)
     assert peer.closed
@@ -1036,6 +1040,49 @@ def test_total_envelope_keeps_valid_partial_without_byte_slice(
     assert saved["capture"]["stopped_reason"] == "trace_oversize"
     assert saved["capture"]["socket_closed"] is True
     assert "complete" not in saved["capture"]
+
+
+def test_reported_large_script_is_not_fetched_but_small_sources_survive(
+    plugin_src: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del plugin_src
+
+    class SizedPeer(_ScriptPeer):
+        def send(self, raw: str) -> None:
+            super().send(raw)
+            for item in self.q:
+                if item.get("method") == "Debugger.scriptParsed":
+                    params = item["params"]
+                    assert isinstance(params, dict)
+                    params["length"] = 2_000_000 if params["scriptId"] == "10" else 8
+
+    peer = SizedPeer(2, 8)
+    runtime = _install_runtime(monkeypatch, peer)
+    raw = runtime.capture(endpoint="http://127.0.0.1:9999", target="T", origin=_ORIGIN, observation_ms=0, out=tmp_path)
+    payload = json.loads(raw)
+    assert peer.fetches == 1
+    assert peer.closed
+    assert "source_unavailable" in payload["completeness"]["gaps"]
+    assert payload["sources"][0]["scriptId"] == "11"
+    scripts = [event["params"] for event in payload["events"] if event["method"] == "Debugger.scriptParsed"]
+    assert scripts[0]["length"] == 2_000_000
+    assert not any(source["scriptId"] == "10" for source in payload["sources"])
+    assert (tmp_path / "ready.json").exists()
+
+
+def test_source_allocation_leaves_room_for_observation(
+    plugin_src: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    del plugin_src
+    peer = _ScriptPeer(6, 48000)
+    runtime = _install_runtime(monkeypatch, peer)
+    raw = runtime.capture(endpoint="http://127.0.0.1:9999", target="T", origin=_ORIGIN, observation_ms=0, out=tmp_path)
+    payload = json.loads(raw)
+    assert len(raw) <= 256 * 1024
+    assert 0 < len(payload["sources"]) < 6
+    assert "source_unavailable" in payload["completeness"]["gaps"]
+    assert not payload["capture"].get("stopped_reason")
+    assert (tmp_path / "ready.json").exists()
 
 
 def test_source_command_error_is_unavailable_but_transport_and_deadline_propagate(

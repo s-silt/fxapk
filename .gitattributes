@@ -5,3 +5,5 @@
 *.js text eol=lf
 # Phase2 金标准按字节比对。autocrlf 把 JSON checkout 成 CRLF 会让比对失败。
 tests/golden/phase2/*.json text eol=lf
+# Mixed newline/UTF-16 trace fixture is byte-sensitive on all platforms.
+tests/fixtures/rea_trace/inline.html -text

@@ -17,6 +17,7 @@ from apkscan.core.atomic import atomic_create_bytes
 from apkscan.core.web_observations import classify_gaps
 
 from .bundlecompat import FLAGS, assess
+from .trace_limits import MAX_RAW_BYTES as _MAX_TRACE
 
 _RAW_NAMES = {
     "rea-web-observation/1": "rea-original.json",
@@ -37,7 +38,6 @@ _PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*){0,8}")
 _CONTEXT_REQUIRED = frozenset({"schema_version", "sample_sha256", "target_id", "origin"})
 _CONTEXT_OPTIONAL = frozenset({"package_name", "process_id", "webview_target_id", "recorded_at"})
 _MAX_RAW = 16 * 1024 * 1024
-_MAX_TRACE = 256 * 1024
 _MAX_OBSERVATION = 2 * 1024 * 1024
 _MAX_CONTEXT = 8192
 _MAX_READY = 64 * 1024

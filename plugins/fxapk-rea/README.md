@@ -112,7 +112,7 @@ target ID 可用 REA 的 `list-browser-targets` 查询。观察窗口从 REA 实
 
 跨 frame 的异步祖先用祖先自己的 frame、loader 和 epoch 核对，不用请求所在 frame 冒充祖先。缺偏移或 frame 未知仍然拒绝配对。非零 `startLine` / `startColumn` 只在依据明确时按 CDP 的 UTF-16 代码单元换算，并认 LF、CR、CRLF、U+2028、U+2029。`parentId` 用有界的 `Debugger.getStackTrace` 补取：缓存、去环、限深、限次数，debuggerId 必须落到对应 session。补到的栈和原始响应都留 JSON Pointer。浏览器没有 parentId 时不编造，缺口保持 `unresolved_parent_id`。这些都只属于 trace。REA provider 没有同等桥。
 
-原始包上限 256 KiB（`256 * 1024` 字节）。事件最多 1024 条，源码最多 64 份。单份源码上限是 `48 * 1024` 个字符，不是 48 KiB。源码写入包内时还要受整包 256 KiB 的 UTF-8 字节预算约束。JSON 记账含逗号和空格。async stack depth 固定 32。采集按单条 JSON 增量记账，上一条源码计入预算后才取下一条。超限整次失败，留下仍是合法 JSON 的已筛选部分原件，并在 `capture.stopped_reason` 记录原因；不按字节截断，也不把这份原件当成完整成功采集。失败的命令回包不会继续取源码。只有 `Debugger.getScriptSource` 的命令错误记为 `source_unavailable`。`trace_limit`、`trace_oversize`、`trace_deadline`、`top_frame_origin_rejected` 和 CDP 传输失败会结束采集并关闭自己的 socket，不写成功的 observation。清理自己的 detach 或 socket 失败时同样不能记成功。落盘事件只保留投影所需字段，不是完整 CDP 协议。请求头、Cookie、postData 和站外 URL 在写入前丢掉。相对路径和 `sourceURL` 可以保留，但不表示那是一次网络下载。选定的 session 和 origin 对每条事件都生效，包括启动阶段和等待命令回包的时候。
+原始包上限 1 MiB（`1024 * 1024` 字节），采集、导入、挂载与补充报告共用同一硬上限。事件最多 1024 条，源码最多 64 份。单份源码上限是 `48 * 1024` 个字符，不是 48 KiB。源码写入包内时还要受整包 1 MiB 的 UTF-8 字节预算约束。JSON 记账含逗号和空格。async stack depth 固定 32。采集按单条 JSON 增量记账，上一条源码计入预算后才取下一条。Chrome 在 scriptParsed 中明确报告 length 超过 48 * 1024 时，保留该长度和脚本元数据，不请求其源码，并记录 source_unavailable；这类已知超限脚本不终止其余观察。长度缺失或不可信时不假设源码可收，实际读取仍受原有上限限制。源码条目另有 128 KiB 的累计 JSON 字节配额，超出这部分配额时跳过该源码并记录 source_unavailable，给请求与身份事件保留空间；整包 1 MiB 以共享常量校验，其他硬上限不变。其他预算超限整次失败，留下仍是合法 JSON 的已筛选部分原件，并在 `capture.stopped_reason` 记录原因；不按字节截断，也不把这份原件当成完整成功采集。失败的命令回包不会继续取源码。只有 `Debugger.getScriptSource` 的命令错误记为 `source_unavailable`。`trace_limit`、`trace_oversize`、`trace_deadline`、`top_frame_origin_rejected` 和 CDP 传输失败会结束采集并关闭自己的 socket，不写成功的 observation。清理自己的 detach 或 socket 失败时同样不能记成功。落盘事件只保留投影所需字段，不是完整 CDP 协议。请求头、Cookie、postData 和站外 URL 在写入前丢掉。相对路径和 `sourceURL` 可以保留，但不表示那是一次网络下载。选定的 session 和 origin 对每条事件都生效，包括启动阶段和等待命令回包的时候。
 
 `import` 只读取本地完整 CLI JSON（REA `--format json --full-output`），核验 provider/operation、target/origin 绑定、窗口、脚本内容哈希和大小。可加 `--expected-sha256` 核验输入原件哈希。成功的离线 import 在回执上写 `acquisition.kind=offline_import`，只表示这份记录来自本地文件导入。`project` 本身不写获取模式。`--expected-sha256` 只做可选字节核对，回执不因此增加 `expected_sha256_checked`，也不把认证、APK 身份、点击或闭环改成 true。
 `inspect` 成功时写 `acquisition.kind=local_cdp_observation`，不会被离线导入的 kind 覆盖。
@@ -187,3 +187,9 @@ python -m pyright apkscan plugins/fxapk-rea/src
 CI 使用合成输入与 Python 子进程测试，不要求下载 REA 或浏览器。真实合成网页 smoke 的原件保留在本地实验目录，不进入公开仓库。
 
 MIT；REA、Node、浏览器及各依赖遵循各自许可。
+
+### REA 6.4.0 导航兼容修复
+
+显式运行 python -m fxapk_rea.rea_compat --root <rea-agents包目录> --apply。去掉 --apply 只核验。安装器仅接受已知 6.4.0 源文件哈希或本补丁哈希，未知修改拒绝覆盖，可重复执行；本插件不在普通采集时修改依赖。capabilities 和 execution.json 记录实际补丁 ID 与源码 SHA-256。此补丁不是上游新版。
+
+已销毁脚本的明确 CDP -32000 错误记作 script_sources/provider_unavailable，保留脚本声明及其他证据；格式错误、其他协议错误、取消和传输故障仍失败。REA 原有跨文档 target_changed 防护保留。fxapk inspect 遇到此明确错误、且进程完整退出时，只允许对原 target/origin 再开一次新观察窗口；首轮原件和回执保留，输出注明 new_observation_window_after_navigation。新窗口不覆盖导航前历史，不混合文档；第二次仍变化则失败。导航过程使用 trace 另存。
