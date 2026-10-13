@@ -779,3 +779,55 @@ def test_stop_does_not_claim_success_when_process_survives(monkeypatch: pytest.M
     assert proc.killed is True
     assert supplement._LIVE[7] is proc
     supplement._LIVE.pop(7, None)
+
+
+def test_runtime_receipt_keeps_capture_started(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    verified = _verified_runtime_bundle(tmp_path)
+    proc = _Proc()
+    material = tmp_path / "round-c" / "web-supplement-cdp"
+    plugin = _Plugin(proc, material, write_ready=True, verified=verified)
+    _install(monkeypatch, plugin)
+    report = _report()
+    observer = CaptureWindowObserver(
+        {**_request(tmp_path), "out_dir": str(tmp_path / "round-c")},
+        report=report, publish_dir=str(tmp_path / "publish"),
+    )
+    result = overlap_web_observation(
+        interaction=None, web_observer=observer, deadline=None, window_seconds=0.3,
+    )
+    assert result is not None
+    assert result["status"] == "executed"
+    rounds = report.meta["web_supplement_runtime"]
+    assert rounds[-1]["capture_started"] is True
+    assert report.meta["web_supplement"]["boundary"]["capture_started"] is True
+
+
+def test_observer_branch_records_interaction_receipt(tmp_path: Path) -> None:
+    class Observer:
+        def start(self, deadline: float | None) -> None:
+            del deadline
+
+        def wait_ready(self, deadline: float | None) -> str:
+            del deadline
+            return "ready"
+
+        def finish(self) -> dict[str, Any]:
+            return {"status": "skipped", "reason": "not_live_cdp", "live_cdp": False}
+
+    ui_observations: list[dict[str, Any]] = []
+    playbook: list[str] = []
+    warnings: list[str] = []
+    overlap_web_observation(
+        interaction=lambda **_kwargs: {"action": "tap", "selector": "#ok"},
+        web_observer=Observer(),
+        deadline=None,
+        window_seconds=0.05,
+        ui_observations=ui_observations,
+        playbook=playbook,
+        warnings=warnings,
+        pass_tag="pcap",
+    )
+    assert [item["action"] for item in ui_observations] == ["tap"]
+    assert ui_observations[0]["status"] == "complete"
+    assert ui_observations[0]["round_id"] == "pcap"
+    assert playbook == ["UI interaction completed: dict"]

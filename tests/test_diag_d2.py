@@ -252,3 +252,32 @@ def test_error_round_is_not_a_decryption_source(tmp_path: Path) -> None:
     assert result["plaintext_endpoints"] == 0
     assert report.endpoints == []
     assert "error_round_not_a_payload_source" in result["gaps"]
+
+
+def test_error_capture_ignores_stale_report_not_in_report_paths(monkeypatch, tmp_path: Path) -> None:
+    out_dir = tmp_path / "pass1-original"
+    _write_failed(out_dir, window="stale", with_endpoint=True)
+    report = _report()
+
+    def fake_run(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "status": "error",
+            "reason": "synthetic_failure",
+            "report_paths": [],
+            "artifacts": [],
+            "playbook": [],
+        }
+
+    monkeypatch.setattr(capture, "run", fake_run)
+    step, path = auto._run_capture(
+        "example.invalid",
+        out_dir=str(out_dir),
+        has_device=True,
+        duration=1,
+        on_progress=None,
+        confirm=None,
+        report=report,
+    )
+    assert step["status"] == "error"
+    assert path == ""
+    assert "runtime_diagnostics" not in report.meta

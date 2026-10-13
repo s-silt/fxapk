@@ -2383,3 +2383,68 @@ def test_blank_iframe_budget_rejects_ninth_and_churn_stays_bounded(
     assert client.paused_children == []
     assert client.parent_of == {}
     assert len(client.naturally_detached) <= limit
+
+
+def test_error_script_source_sends_still_hit_command_budget(
+    plugin_src: Path, tmp_path: Path,
+) -> None:
+    runtime = _runtime(plugin_src)
+    from fxapk_rea.evidence import EvidenceError
+
+    class _ErrorSourcePeer(_ScriptedPeer):
+        def send(self, raw: str) -> None:
+            message = json.loads(raw)
+            self.sent.append(message)
+            if message["method"] == "Debugger.getScriptSource":
+                self.q.append({
+                    "id": message["id"],
+                    "error": {"code": -32000, "message": "no source"},
+                })
+                return
+            result = self.handler(self, message)
+            self.q.append({"id": message["id"], "result": result if isinstance(result, dict) else {}})
+
+    def handler(peer: _ScriptedPeer, message: dict) -> dict:
+        method = message["method"]
+        session = message.get("sessionId")
+        if method == "Target.getTargetInfo":
+            return {"targetInfo": {"targetId": "T", "type": "page", "url": _ORIGIN + "/"}}
+        if method == "Target.attachToTarget":
+            return {"sessionId": "S"}
+        if method == "Runtime.enable" and session == "S":
+            peer.q.append(_page_context())
+        if method == "Debugger.enable" and session == "S":
+            for index in range(150):
+                peer.q.append(
+                    {
+                        "sessionId": "S",
+                        "method": "Debugger.scriptParsed",
+                        "params": {
+                            "scriptId": f"s{index}",
+                            "url": "",
+                            "executionContextId": 1,
+                            "startLine": 0,
+                            "startColumn": 0,
+                            "length": 1,
+                        },
+                    }
+                )
+            return {"debuggerId": "dbg-S"}
+        if method == "Page.getFrameTree":
+            return {"frameTree": {"frame": {"id": "F", "loaderId": "L", "url": _ORIGIN + "/"}}}
+        return {}
+
+    peer = _ErrorSourcePeer(handler)
+    closed = {"ok": False}
+
+    def _close() -> None:
+        closed["ok"] = True
+
+    peer.close = _close
+    with pytest.raises(EvidenceError, match="trace_limit"):
+        _peer_capture(runtime, peer, tmp_path)
+    assert len(peer.sent) <= 128
+    assert closed["ok"] is True
+    saved = json.loads((tmp_path / "cdp-trace-original.json").read_text(encoding="utf-8"))
+    assert saved["capture"]["stopped_reason"] == "trace_limit"
+    assert saved["capture"]["socket_closed"] is True

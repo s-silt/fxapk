@@ -374,3 +374,21 @@ def test_b1_native_budget_accepts_40mib_and_preflights_cumulative(
     monkeypatch.setattr(web.Path, "open", fail_open)
     with pytest.raises(SupplementRefusal, match="oversize"):
         _prepare_native_history(tmp_path / "missing-report.json", payload)
+
+
+def test_native_attach_carries_dex_receipt(native, monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    recovery, body = _recover(native, monkeypatch, tmp_path)
+    receipt = {"schema": "dex-query-receipt/1", "query_values": ["xref-token-example"]}
+    blob = (json.dumps(receipt, sort_keys=True) + "\n").encode("utf-8")
+    receipt_id = _sha(blob)
+    payload = _report(_sha(body))
+    payload["meta"]["dex_query"] = {
+        "receipts": [{"receipt_id": receipt_id, "sha256": receipt_id, "members": []}],
+    }
+    report = tmp_path / "input.json"
+    report.write_text(json.dumps(payload), encoding="utf-8")
+    (tmp_path / "dex-query").mkdir()
+    (tmp_path / "dex-query" / f"{receipt_id}.json").write_bytes(blob)
+    out = tmp_path / "attached"
+    native.attach(recovery, report, out)
+    assert (out / "dex-query" / f"{receipt_id}.json").read_bytes() == blob

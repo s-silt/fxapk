@@ -1333,7 +1333,12 @@ def _run_capture(
             from apkscan.dynamic.merge import import_runtime_diagnostics_only
 
             bounded = bounded_runtime_report(out_dir)
-            if bounded is not None:
+            produced = {
+                Path(item).resolve()
+                for item in (result.get("report_paths") or [])
+                if isinstance(item, str)
+            } if isinstance(result, dict) else set()
+            if bounded is not None and bounded in produced:
                 runtime_path = str(bounded)
                 import_runtime_diagnostics_only(report, runtime_path)
         return step, runtime_path

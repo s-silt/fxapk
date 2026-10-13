@@ -585,6 +585,7 @@ class _Client:
         self.next_id = 0
         self.events: list[dict[str, Any]] = []
         self.commands: list[dict[str, Any]] = []
+        self.sent_commands = 0
         self.sources: list[dict[str, Any]] = []
         self.contexts: dict[int, dict[str, Any]] = {}
         self.context_gen: dict[int, int] = {}
@@ -643,7 +644,7 @@ class _Client:
     def call(self, method: str, params: dict[str, Any] | None = None, session: str | None = None) -> Any:
         cleanup = method in {"Target.detachFromTarget", "Runtime.runIfWaitingForDebugger"}
         limit = MAX_COMMANDS if cleanup else MAX_COMMANDS - (2 * _MAX_CHILD_TARGETS + 1)
-        if len(self.commands) + self.depth >= limit:
+        if self.sent_commands >= limit:
             raise EvidenceError("trace_limit")
         self.next_id += 1
         command_id = self.next_id
@@ -652,6 +653,7 @@ class _Client:
             message["params"] = params
         if session:
             message["sessionId"] = session
+        self.sent_commands += 1
         self.websocket.send(json.dumps(message))
         self.depth += 1
         succeeded = False

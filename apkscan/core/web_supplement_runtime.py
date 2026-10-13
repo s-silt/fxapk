@@ -312,6 +312,7 @@ def apply_verified(
     publish_dir: str,
     material_dir: str,
     live_cdp: bool,
+    capture_started: bool = False,
 ) -> dict[str, Any]:
     """Parse an already verified bundle into the main report. Bytes stay out of JSON."""
     from apkscan.core.web_supplement import (  # stable parse/publish/merge API
@@ -342,6 +343,7 @@ def apply_verified(
             "status": "failed", "reason": "parse_failed", "live_cdp": live_cdp,
             "material_path": material_dir,
         }
+        receipt["capture_started"] = capture_started
         _remember_runtime(report, receipt, material_dir)
         return _jsonable_receipt(receipt)
     endpoints = getattr(report, "endpoints", None)
@@ -353,6 +355,7 @@ def apply_verified(
             "status": "failed", "reason": "parse_failed", "live_cdp": live_cdp,
             "material_path": material_dir,
         }
+        receipt["capture_started"] = capture_started
         _remember_runtime(report, receipt, material_dir)
         return _jsonable_receipt(receipt)
     seen_list = meta.get("_web_supplement_raws")
@@ -369,6 +372,7 @@ def apply_verified(
             "status": "failed", "reason": "parse_failed", "live_cdp": live_cdp,
             "material_path": material_dir,
         }
+        receipt["capture_started"] = capture_started
         _remember_runtime(report, receipt, material_dir)
         return _jsonable_receipt(receipt)
     duplicate = bool(counts.get("duplicate"))
@@ -460,6 +464,7 @@ def apply_verified(
     coverage = parsed.get("coverage")
     if isinstance(coverage, dict) and coverage:
         receipt["coverage"] = coverage
+    receipt["capture_started"] = capture_started
     _remember_runtime(report, receipt, material_dir)
     return _jsonable_receipt(receipt)
 
@@ -662,6 +667,7 @@ class CaptureWindowObserver:
                 receipt = apply_verified(
                     self._report, verified, publish_dir=self._publish_dir,
                     material_dir=material_dir, live_cdp=observed,
+                    capture_started=observed,
                 )
             except Exception:
                 logger.exception("[web-supplement] dynamic backfill failed")

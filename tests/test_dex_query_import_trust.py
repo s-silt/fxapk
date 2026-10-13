@@ -432,3 +432,118 @@ def test_directory_before_dex_uses_inventory_ordinal(tmp_path: Path) -> None:
     summary = merged["meta"]["dex_query"]["receipts"][0]
     assert summary["xref_verified"] is True
     assert summary["members"][0]["ordinal"] == members[0].ordinal
+
+
+def _uleb(value: int) -> bytes:
+    encoded = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            encoded.append(byte | 0x80)
+        else:
+            encoded.append(byte)
+            return bytes(encoded)
+
+
+def _shared_string_dex(count: int, text_len: int) -> bytes:
+    blob = _uleb(text_len) + b"A" * text_len + b"\x00"
+    ids_off = 0x70
+    data_off = ids_off + 4 * count
+    size = data_off + len(blob)
+    data = bytearray(size)
+    data[:8] = b"dex\n035\x00"
+    struct.pack_into("<I", data, 32, size)
+    struct.pack_into("<I", data, 36, 0x70)
+    struct.pack_into("<I", data, 40, 0x12345678)
+    struct.pack_into("<I", data, 56, count)
+    struct.pack_into("<I", data, 60, ids_off)
+    for index in range(count):
+        struct.pack_into("<I", data, ids_off + 4 * index, data_off)
+    data[data_off:] = blob
+    return bytes(data)
+
+
+def _descriptor_bomb_dex(count: int, text_len: int) -> bytes:
+    strings = [b"L" + b"A" * text_len + b";", b"m", b"V", b"V"]
+    blob = b"".join(_uleb(len(item)) + item + b"\x00" for item in strings)
+    ids_off = 0x70
+    types_off = ids_off + 4 * len(strings)
+    protos_off = types_off + 4 * 2
+    methods_off = protos_off + 12
+    data_off = methods_off + 8 * count
+    size = data_off + len(blob)
+    data = bytearray(size)
+    data[:8] = b"dex\n035\x00"
+    struct.pack_into("<I", data, 32, size)
+    struct.pack_into("<I", data, 36, 0x70)
+    struct.pack_into("<I", data, 40, 0x12345678)
+    struct.pack_into("<I", data, 56, len(strings))
+    struct.pack_into("<I", data, 60, ids_off)
+    struct.pack_into("<I", data, 64, 2)
+    struct.pack_into("<I", data, 68, types_off)
+    struct.pack_into("<I", data, 72, 1)
+    struct.pack_into("<I", data, 76, protos_off)
+    struct.pack_into("<I", data, 88, count)
+    struct.pack_into("<I", data, 92, methods_off)
+    cursor = data_off
+    for index, item in enumerate(strings):
+        struct.pack_into("<I", data, ids_off + 4 * index, cursor)
+        cursor += len(_uleb(len(item))) + len(item) + 1
+    struct.pack_into("<I", data, types_off, 0)
+    struct.pack_into("<I", data, types_off + 4, 2)
+    struct.pack_into("<III", data, protos_off, 3, 1, 0)
+    for index in range(count):
+        struct.pack_into("<HHI", data, methods_off + 8 * index, 0, 0, 1)
+    data[data_off:] = blob
+    return bytes(data)
+
+
+def test_shared_string_offsets_and_descriptor_fanout_stay_bounded(tmp_path: Path) -> None:
+    from apkscan.core.dex_query import _DexParseError, _parse_dex, _verify_xref_hits
+
+    data = _shared_string_dex(2000, 64 * 1024)
+    with pytest.raises(_DexParseError):
+        _parse_dex(data)
+
+    apk = tmp_path / "shared.apk"
+    apk.write_bytes(zip_bytes([("classes.dex", data)], compress=False))
+    members, _skipped, _truncated = inventory_dex_members(apk)
+    receipt = {
+        "members": [{
+            "name": members[0].name,
+            "ordinal": members[0].ordinal,
+            "sha256": members[0].sha256,
+            "status": "hit",
+            "hits": [],
+        }],
+    }
+    check = _verify_xref_hits(apk.read_bytes(), receipt)
+    assert check.verified is False
+    assert check.status == "parse_unavailable"
+
+    with pytest.raises(_DexParseError):
+        _parse_dex(_descriptor_bomb_dex(2000, 64 * 1024))
+    assert _parse_dex(build_dex(sample_classes(_VALUE)).data).methods
+
+
+def test_only_partial_hits_yield_no_exact_hits(tmp_path: Path) -> None:
+    dex = build_dex(sample_classes(_VALUE))
+    claimed = _hit(dex.hits[0].descriptor, dex.hits[0].code_unit_offset, dex.hits[0].file_offset)
+    apk, receipt = _apk_receipt(tmp_path, "partial-only", dex.data, [claimed])
+    receipt["members"][0]["hits"][0]["precision"] = "partial"
+    _resign(receipt)
+    receipt_path = tmp_path / "partial-only.json"
+    _store(receipt_path, receipt)
+    report_path = tmp_path / "partial-only-report.json"
+    _write_report(report_path, str(receipt["apk_sha256"]))
+    out = tmp_path / "partial-imported"
+    result = import_receipt(receipt_path, report_path, out, apk=apk)
+    assert result["status"] == "imported"
+    merged = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    summary = merged["meta"]["dex_query"]["receipts"][0]
+    assert summary["xref_verified"] is False
+    assert summary["xref_verification"] == "no_exact_hits"
+    snippets = _static_snippets(merged)
+    assert snippets
+    assert all("xref=unverified" in item for item in snippets)

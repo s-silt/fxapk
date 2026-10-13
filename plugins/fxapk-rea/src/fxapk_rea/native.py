@@ -1454,12 +1454,20 @@ def attach(bundle: Path, report_path: Path, out: Path) -> dict[str, Any]:
         "source_artifact_base": str(report_path.parent.resolve()),
     }
     preserved = _web_observation_bytes(report_path, report)
+    from apkscan.core.dex_query import DexQueryError, collect_receipt_files
+
+    try:
+        dex_receipts = collect_receipt_files(report_path.parent, meta)
+    except DexQueryError as exc:
+        raise NativeError(exc.reason) from None
     _claim(out)
     _place_web_observations(out, preserved)
     _write(out / snapshot, original)
     for relative, blob in snapshots:
         _write(out / relative, blob)
     for relative, blob in prior_files:
+        _write(out / relative, blob)
+    for relative, blob in dex_receipts.items():
         _write(out / relative, blob)
     if fresh:
         root = out / "native_recovery" / digest

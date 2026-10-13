@@ -6,7 +6,10 @@ import hashlib
 import json
 import sys
 
-from apkscan.core.dex_query import DexQueryLimits, capabilities, query_apk
+import pytest
+
+import apkscan.core.dex_query as dex_query
+from apkscan.core.dex_query import DexQueryError, DexQueryLimits, capabilities, query_apk
 from tests.fixtures.dex_query.dexgen import build_dex, sample_classes, wide_classes, zip_bytes
 
 _WORKER = [
@@ -77,3 +80,28 @@ def test_capabilities_probe_does_not_mark_the_engine_executed() -> None:
     assert payload["engine_executed"] is False
     assert payload["memory_limit_enforced"] is True
     assert payload["reason"] is None
+
+
+def test_forced_tree_kill_result_is_rejected(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from apkscan.core.proctree import OwnedRun
+
+    def fake_run(*_args: object, **_kwargs: object) -> OwnedRun:
+        return OwnedRun(
+            returncode=0,
+            stdout=json.dumps({"schema_version": "asc-worker-result/1", "op": "query"}),
+            stderr="",
+            timed_out=False,
+            ownership_complete=True,
+            termination_complete=True,
+            forced_tree_kill=True,
+            reason_codes=(),
+            memory_limit_enforced=True,
+            process_limit_enforced=True,
+        )
+
+    monkeypatch.setattr(dex_query, "run_owned", fake_run)
+    apk = tmp_path / "app.apk"
+    apk.write_bytes(zip_bytes([("classes.dex", build_dex(sample_classes()).data)]))
+    with pytest.raises(DexQueryError) as caught:
+        query_apk(apk, ["token.example.invalid"], worker_argv=["fake-worker"], limits=_LIMITS)
+    assert caught.value.reason == "worker_tree_killed"

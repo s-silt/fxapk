@@ -738,6 +738,10 @@ def overlap_web_observation(
     web_observer: Any,
     deadline: float | None,
     window_seconds: float,
+    ui_observations: list[dict[str, Any]] | None = None,
+    playbook: list[str] | None = None,
+    warnings: list[str] | None = None,
+    pass_tag: str = "",
 ) -> dict[str, Any] | None:
     """Start observation, wait briefly for ready, then run UI inside the same window.
 
@@ -765,10 +769,15 @@ def overlap_web_observation(
                 logger.exception("[capture] web observation readiness failed")
                 ready = "failed"
         if interaction is not None and _monotonic() < end:
-            try:
-                _invoke_interaction(interaction, deadline_monotonic=end)
-            except Exception:
-                logger.exception("[capture] UI interaction during web observation failed")
+            if ui_observations is not None and playbook is not None and warnings is not None:
+                _record_ui_interaction(
+                    interaction, end, pass_tag, ui_observations, playbook, warnings,
+                )
+            else:
+                try:
+                    _invoke_interaction(interaction, deadline_monotonic=end)
+                except Exception:
+                    logger.exception("[capture] UI interaction during web observation failed")
         leftover = end - _monotonic()
         if leftover > 0:
             _wait(leftover)
@@ -1135,6 +1144,10 @@ def _capture(
                 web_observer=web_observer,
                 deadline=capture_deadline,
                 window_seconds=wait_for,
+                ui_observations=ui_observations,
+                playbook=playbook,
+                warnings=warnings,
+                pass_tag=pass_tag,
             )
             if isinstance(web_receipt, dict):
                 result["web_observation"] = {

@@ -830,35 +830,13 @@ def _preserved_dex_receipts(report: Path, payload: dict[str, Any]) -> list[tuple
     meta = payload.get("meta")
     if not isinstance(meta, dict) or "dex_query" not in meta:
         return []
-    raw = meta.get("dex_query")
-    receipts = raw.get("receipts") if isinstance(raw, dict) else None
-    if not isinstance(receipts, list):
-        raise AttachError("dex_receipt_mismatch")
-    copied: list[tuple[str, bytes]] = []
-    seen: set[str] = set()
-    for item in receipts:
-        receipt_id = item.get("receipt_id") if isinstance(item, dict) else None
-        expected = item.get("sha256") if isinstance(item, dict) else None
-        if (
-            not isinstance(receipt_id, str)
-            or len(receipt_id) != 64
-            or any(char not in "0123456789abcdef" for char in receipt_id)
-            or receipt_id in seen
-            or not isinstance(expected, str)
-            or len(expected) != 64
-            or any(char not in "0123456789abcdef" for char in expected)
-        ):
-            raise AttachError("dex_receipt_mismatch")
-        seen.add(receipt_id)
-        relative = f"dex-query/{receipt_id}.json"
-        try:
-            blob = _read_file(report.parent, relative, _MAX_REPORT)
-        except AttachError:
-            raise AttachError("dex_receipt_mismatch") from None
-        if hashlib.sha256(blob).hexdigest() != expected:
-            raise AttachError("dex_receipt_mismatch")
-        copied.append((relative, blob))
-    return copied
+    from apkscan.core.dex_query import DexQueryError, collect_receipt_files
+
+    try:
+        collected = collect_receipt_files(report.parent, meta)
+    except DexQueryError as exc:
+        raise AttachError(exc.reason) from None
+    return list(collected.items())
 
 
 def _preserved_native(report: Path, payload: dict[str, Any]) -> list[tuple[str, bytes]]:

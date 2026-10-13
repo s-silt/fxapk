@@ -419,7 +419,7 @@ def project_dex_query(meta: Mapping[str, Any] | None) -> dict[str, Any] | None:
             if "xref_verified" in item:
                 projected["xref_verified"] = item.get("xref_verified") is True
             verification = item.get("xref_verification")
-            if verification in {"not_verified_locally", "verified_against_apk", "parse_unavailable"}:
+            if verification in {"not_verified_locally", "verified_against_apk", "parse_unavailable", "no_exact_hits"}:
                 projected["xref_verification"] = verification
             projected_receipts.append(projected)
     return {"receipts": projected_receipts}
@@ -488,6 +488,8 @@ def _invoke_worker(
         return None, "output_limit"
     if not owned.ownership_complete or not owned.termination_complete:
         return None, "provider_unavailable"
+    if owned.forced_tree_kill:
+        return None, "worker_tree_killed"
     if owned.returncode != 0:
         return None, "provider_unavailable"
     try:
@@ -976,6 +978,8 @@ def _verify_xref_hits(apk_bytes: bytes, receipt: Mapping[str, Any]) -> _XrefChec
             verified.add(id(hit))
     if parse_failed:
         return _XrefCheck(False, "parse_unavailable", frozenset(verified))
+    if not verified:
+        return _XrefCheck(False, "no_exact_hits", frozenset())
     return _XrefCheck(True, "verified_against_apk", frozenset(verified))
 
 
@@ -1117,8 +1121,17 @@ def _parse_dex_bytes(data: bytes) -> _ParsedDex:
     _require_table(method_ids_off, method_ids_size, 8, limit)
     _require_table(class_defs_off, class_defs_size, 32, limit)
     strings: list[str] = []
+    decoded_strings: dict[int, str] = {}
+    total_string_chars = 0
     for index in range(string_ids_size):
-        text, _end = _decode_mutf8(data, _u32(data, string_ids_off + 4 * index), limit)
+        offset = _u32(data, string_ids_off + 4 * index)
+        text = decoded_strings.get(offset)
+        if text is None:
+            text, _end = _decode_mutf8(data, offset, limit)
+            decoded_strings[offset] = text
+        total_string_chars += len(text)
+        if total_string_chars > 2 * limit:
+            raise _DexParseError()
         strings.append(text)
     type_ids: list[int] = []
     for index in range(type_ids_size):
@@ -1136,6 +1149,7 @@ def _parse_dex_bytes(data: bytes) -> _ParsedDex:
             raise _DexParseError()
         protos.append((return_idx, _type_list(data, params_off, limit, len(type_ids))))
     descriptors: list[str] = []
+    total_descriptor_chars = 0
     for index in range(method_ids_size):
         base = method_ids_off + 8 * index
         class_idx, proto_idx, name_idx = struct.unpack_from("<HHI", data, base)
@@ -1143,9 +1157,13 @@ def _parse_dex_bytes(data: bytes) -> _ParsedDex:
             raise _DexParseError()
         return_idx, param_idxs = protos[proto_idx]
         params = "".join(strings[type_ids[item]] for item in param_idxs)
-        descriptors.append(
+        descriptor = (
             f"{strings[type_ids[class_idx]]}->{strings[name_idx]}({params}){strings[type_ids[return_idx]]}"
         )
+        total_descriptor_chars += len(descriptor)
+        if total_descriptor_chars > 8 * limit:
+            raise _DexParseError()
+        descriptors.append(descriptor)
     methods: dict[str, _DexCode] = {}
     for index in range(class_defs_size):
         class_data_off = _u32(data, class_defs_off + 32 * index + 24)
@@ -1609,6 +1627,41 @@ def _copy_dex_receipts(report_path: Path, specs: list[tuple[str, str]]) -> list[
             raise DexQueryError("tampered_attachment")
         copied.append((relative, blob))
     return copied
+
+
+def collect_receipt_files(report_dir: Path, meta: Mapping[str, Any]) -> dict[str, bytes]:
+    if not isinstance(meta, Mapping) or "dex_query" not in meta:
+        return {}
+    raw = meta["dex_query"]
+    receipts = raw.get("receipts") if isinstance(raw, Mapping) else None
+    if not isinstance(receipts, list):
+        raise DexQueryError("dex_receipt_mismatch")
+    collected: dict[str, bytes] = {}
+    seen: set[str] = set()
+    limit = DexQueryLimits().input_bytes
+    for item in receipts:
+        receipt_id = item.get("receipt_id") if isinstance(item, dict) else None
+        digest = item.get("sha256") if isinstance(item, dict) else None
+        if (
+            not isinstance(receipt_id, str)
+            or _HEX64.fullmatch(receipt_id) is None
+            or receipt_id in seen
+            or not isinstance(digest, str)
+            or _HEX64.fullmatch(digest) is None
+        ):
+            raise DexQueryError("dex_receipt_mismatch")
+        seen.add(receipt_id)
+        relative = f"dex-query/{receipt_id}.json"
+        try:
+            blob = _read_relative(report_dir, relative, limit)
+        except DexQueryError as exc:
+            if exc.reason == "attachment_missing":
+                raise DexQueryError("dex_receipt_missing") from None
+            raise DexQueryError("dex_receipt_mismatch") from None
+        if hashlib.sha256(blob).hexdigest() != digest:
+            raise DexQueryError("dex_receipt_mismatch")
+        collected[relative] = blob
+    return collected
 
 
 def _copy_raw_responses(report_path: Path, report: Mapping[str, Any]) -> list[tuple[str, bytes]]:

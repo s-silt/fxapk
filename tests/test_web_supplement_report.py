@@ -711,3 +711,43 @@ def test_same_parsed_and_attached_sha_is_copied_once(
     assert rows == [sha_a, sha_b]
     names = sorted(path.name for path in (second / "external_observations").iterdir())
     assert names == sorted([sha_a, sha_b])
+
+
+def test_supplement_carries_dex_receipt_and_attach_verifies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib
+
+    from tests.test_rea_attach import _rea_bundle
+
+    _install_plugin(monkeypatch)
+    attachment = importlib.import_module("fxapk_rea.attachment")
+    receipt = {"schema": "dex-query-receipt/1", "query_values": ["xref-token-example"]}
+    blob = (json.dumps(receipt, sort_keys=True) + "\n").encode("utf-8")
+    receipt_id = hashlib.sha256(blob).hexdigest()
+    report = _report(tmp_path / "in" / "report.json")
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    payload["meta"]["dex_query"] = {
+        "receipts": [{"receipt_id": receipt_id, "sha256": receipt_id, "members": []}],
+    }
+    report.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    (tmp_path / "in" / "dex-query").mkdir()
+    (tmp_path / "in" / "dex-query" / f"{receipt_id}.json").write_bytes(blob)
+
+    bundle = _bundle(tmp_path, f'var API_BASE = "http://127.0.0.1:9/{MARKER}";\n')
+    config = _config(tmp_path / "supplement.json", {
+        "schema_version": "fxapk.web_supplement.v1",
+        "mode": "auto",
+        "source": "bundle",
+        "path": str(bundle),
+    })
+    supplemented = tmp_path / "supplemented"
+    result = _invoke(report, config, supplemented)
+    assert result.exit_code == 0, result.output
+    assert (supplemented / "dex-query" / f"{receipt_id}.json").read_bytes() == blob
+
+    bundle_b = tmp_path / "bundle-b"
+    _rea_bundle(tmp_path, bundle_b, text="const B = 2;\n")
+    final = tmp_path / "final"
+    attachment.attach(bundle_b, supplemented / "report.json", final)
+    assert (final / "dex-query" / f"{receipt_id}.json").read_bytes() == blob

@@ -110,6 +110,7 @@ def supplement_report(report_path: Path, config_path: Path, out_dir: Path) -> di
         raise SupplementRefusal("invalid_report")
     prior_snapshots = _prepare_prior_snapshots(report_path, payload)
     native_files = _prepare_native_history(report_path, payload)
+    dex_receipts = _prepare_dex_receipts(report_path, meta)
     endpoints, endpoint_rows = _endpoints(payload.get("endpoints"))
     leads, lead_rows = _leads(payload.get("leads"))
     findings, finding_rows = _findings(payload.get("findings"))
@@ -186,6 +187,8 @@ def supplement_report(report_path: Path, config_path: Path, out_dir: Path) -> di
     _place_trees(out_dir, verified_files)
     _place_prior_snapshots(out_dir, prior_snapshots)
     _place_native_history(out_dir, native_files)
+    for relative, blob in dex_receipts.items():
+        _create_or_same(out_dir / Path(relative), blob)
     snapshot = _snapshot_input(out_dir, original, report_path)
     meta["supplement_web_input"] = snapshot
     written = _emit(payload, state, out_dir)
@@ -1105,6 +1108,15 @@ def _prepare_native_history(
             prepared.append((relative, blob))
         _align_native_history_item(item, prepared[-len(planned):])
     return prepared
+
+
+def _prepare_dex_receipts(source_report: Path, meta: dict[str, Any]) -> dict[str, bytes]:
+    from apkscan.core.dex_query import DexQueryError, collect_receipt_files
+
+    try:
+        return collect_receipt_files(source_report.parent, meta)
+    except DexQueryError as exc:
+        raise SupplementRefusal(exc.reason) from None
 
 
 def _align_native_history_item(item: dict[str, Any], files: list[tuple[str, bytes]]) -> None:
