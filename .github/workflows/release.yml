@@ -56,6 +56,8 @@ jobs:
           python -m pip install --upgrade build
           python -m build
           python -m build plugins/fxapk-android-ui --outdir plugin-dist
+          python -m build plugins/fxapk-rea --outdir plugin-dist
+          python -m build plugins/fxapk-asc --outdir plugin-dist
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
@@ -79,6 +81,8 @@ jobs:
 
           core = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
           plugin = tomllib.loads(Path("plugins/fxapk-android-ui/pyproject.toml").read_text(encoding="utf-8"))["project"]
+          rea = tomllib.loads(Path("plugins/fxapk-rea/pyproject.toml").read_text(encoding="utf-8"))["project"]
+          asc = tomllib.loads(Path("plugins/fxapk-asc/pyproject.toml").read_text(encoding="utf-8"))["project"]
           template = string.Template(Path(".github/release-notes-template.md").read_text(encoding="utf-8"))
           changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
           heading = re.search(r"(?m)^## " + re.escape(core["version"]) + r"(?: — [^\n]+)?$", changelog)
@@ -95,6 +99,7 @@ jobs:
               tag=os.environ["GITHUB_REF_NAME"], repository=os.environ["GITHUB_REPOSITORY"],
               commit=os.environ["GITHUB_SHA"], core_version=core["version"],
               plugin_version=plugin["version"], requires_python=core["requires-python"],
+              rea_version=rea["version"], asc_version=asc["version"],
           )
           Path("release-notes.md").write_text(notes, encoding="utf-8")
           PY

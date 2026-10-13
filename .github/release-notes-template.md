@@ -8,7 +8,7 @@ $changes
 
 ## 安装包
 
-核心 **fxapk $core_version** 提供 wheel 与源码归档，并由本流程发布到 PyPI。可选 **fxapk-android-ui $plugin_version** 独立版本，仅通过本页附件分发；Android CLI 和 adb 由使用者另行准备。核心要求 Python $requires_python，插件要求以其包元数据为准。
+核心 **fxapk $core_version** 提供 wheel 与源码归档，并由本流程发布到 PyPI。可选插件均为独立版本，仅通过本页附件分发，不发布到 PyPI：**fxapk-android-ui $plugin_version**（Android CLI 与 adb 自备）、**fxapk-rea $rea_version**（默认关闭，需在进程环境显式设置 `FXAPK_ENABLE_REA=1`；`trace` 另装 `[trace]` extra）、**fxapk-asc $asc_version**（`fxapk dex` 隔离 worker，macOS 上以 `memory_limit_unavailable` 拒绝执行）。核心要求 Python $requires_python，插件要求以其包元数据为准。
 
 ```bash
 python -m pip install "fxapk==$core_version"
@@ -17,7 +17,7 @@ fxapk --version
 fxapk ui --help
 ```
 
-安装前用附件 `SHA256SUMS.txt` 核对四个归档。它们不是完整离线依赖包，安装可能下载声明依赖。许可见各归档内的 MIT 声明，第三方工具和依赖遵循各自许可。[安卓 UI 指南](https://github.com/$repository/blob/$tag/ANDROID-UI.md)。
+安装前用附件 `SHA256SUMS.txt` 核对全部归档。它们不是完整离线依赖包，安装可能下载声明依赖。许可见各归档内的 MIT 声明，第三方工具和依赖遵循各自许可。[安卓 UI 指南](https://github.com/$repository/blob/$tag/ANDROID-UI.md)。
 
 ## 来源与使用边界
 
