@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -119,6 +120,7 @@ def test_snapshot_rejects_a_changed_size(tmp_path: Path, monkeypatch: pytest.Mon
     assert caught.value.reason == "input_rejected"
 
 
+@pytest.mark.skipif(sys.platform == "darwin", reason="RLIMIT_AS not enforceable on macOS; dex worker memory limit unavailable")
 def test_query_does_not_hash_and_inventory_separately(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sample = build_dex(sample_classes("api.example.invalid"))
     apk = tmp_path / "app.apk"

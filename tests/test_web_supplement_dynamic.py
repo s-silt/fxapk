@@ -355,6 +355,7 @@ def _cdp_request(tmp_path: Path, origins: list[str]) -> dict[str, object]:
 def test_sync_cdp_keeps_every_origin_and_disables_actions(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
+    pytest.importorskip("websockets")
     monkeypatch.syspath_prepend(str(Path("plugins/fxapk-rea/src")))
     from fxapk_rea import supplement
 
@@ -465,6 +466,7 @@ def test_too_many_origins_reject_without_trace(monkeypatch: pytest.MonkeyPatch, 
 
 
 def test_start_does_not_overwrite_request_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    pytest.importorskip("websockets")
     monkeypatch.syspath_prepend(str(Path("plugins/fxapk-rea/src")))
     from fxapk_rea import supplement
 
@@ -511,6 +513,7 @@ def _spawned_creationflags(
 def test_windows_spawn_passes_nonzero_hidden_flag(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
+    pytest.importorskip("websockets")
     monkeypatch.syspath_prepend(str(Path("plugins/fxapk-rea/src")))
     from fxapk_rea import supplement
 
@@ -526,11 +529,13 @@ def test_windows_spawn_passes_nonzero_hidden_flag(
 def test_non_windows_spawn_passes_zero_creationflags(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
+    pytest.importorskip("websockets")
     flags = _spawned_creationflags(monkeypatch, tmp_path, platform="linux", pid=79)
     assert flags == 0
 
 
 def test_start_payload_keeps_every_origin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    pytest.importorskip("websockets")
     monkeypatch.syspath_prepend(str(Path("plugins/fxapk-rea/src")))
     from fxapk_rea import supplement
 
@@ -552,6 +557,7 @@ def test_start_payload_keeps_every_origin(monkeypatch: pytest.MonkeyPatch, tmp_p
 
 
 def test_start_reports_occupied_output_directory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    pytest.importorskip("websockets")
     monkeypatch.syspath_prepend(str(Path("plugins/fxapk-rea/src")))
     from fxapk_rea import supplement
 
@@ -570,6 +576,7 @@ def test_start_reports_occupied_output_directory(monkeypatch: pytest.MonkeyPatch
 
 
 def test_sync_reports_occupied_output_directory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    pytest.importorskip("websockets")
     monkeypatch.syspath_prepend(str(Path("plugins/fxapk-rea/src")))
     from fxapk_rea import supplement
 
@@ -586,6 +593,7 @@ def test_sync_reports_occupied_output_directory(monkeypatch: pytest.MonkeyPatch,
 
 
 def test_start_does_not_overwrite_request_symlink(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    pytest.importorskip("websockets")
     monkeypatch.syspath_prepend(str(Path("plugins/fxapk-rea/src")))
     from fxapk_rea import supplement
 

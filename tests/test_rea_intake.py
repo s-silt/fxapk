@@ -453,6 +453,19 @@ def test_recursive_json_document_has_stable_diagnostic(tmp_path: Path) -> None:
     _assert_web_refused(tmp_path)
 
 
+def test_sixty_deep_json_document_is_refused_on_every_platform(tmp_path: Path) -> None:
+    (tmp_path / "observation.json").write_text("[" * 60 + "0" + "]" * 60, encoding="utf-8")
+    (tmp_path / "app.js").write_text("console.log(1)\n", encoding="utf-8")
+    _assert_web_refused(tmp_path)
+
+
+def test_shallow_json_list_stays_ordinary_web_evidence(tmp_path: Path) -> None:
+    (tmp_path / "observation.json").write_text("[" * 10 + "0" + "]" * 10, encoding="utf-8")
+    (tmp_path / "app.js").write_text("console.log(1)\n", encoding="utf-8")
+    ctx = load_web_evidence(tmp_path, AnalysisConfig(online=False))
+    assert len(ctx.list_files()) == 2
+
+
 def test_multimember_gzip_envelope_is_recognized(tmp_path: Path) -> None:
     raw = json.dumps(_envelope()).encode()
     middle = len(raw) // 2

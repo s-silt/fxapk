@@ -19,6 +19,7 @@ _WORKER = [
 _LIMITS = DexQueryLimits(timeout_sec=20, memory_bytes=256 * 1024 * 1024)
 
 
+@pytest.mark.skipif(sys.platform == "darwin", reason="RLIMIT_AS not enforceable on macOS; dex worker memory limit unavailable")
 def test_query_receipt_binds_each_member_including_duplicate_bytes(tmp_path) -> None:
     sample = build_dex(sample_classes())
     wide = build_dex(wide_classes())
@@ -74,6 +75,7 @@ def test_query_receipt_binds_each_member_including_duplicate_bytes(tmp_path) -> 
     assert token not in projected
 
 
+@pytest.mark.skipif(sys.platform == "darwin", reason="RLIMIT_AS not enforceable on macOS; dex worker memory limit unavailable")
 def test_capabilities_probe_does_not_mark_the_engine_executed() -> None:
     payload = capabilities(worker_argv=_WORKER, limits=_LIMITS)
     assert payload["available"] is True

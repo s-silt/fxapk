@@ -7,4 +7,5 @@
 `fxapk.plugins` 进程内加载表，避免宿主导入 ASC。
 
 依赖锁定见 `requirements.lock`。Linux 的 `RLIMIT_AS` 已在代码里实现，但本仓库的
-实跑记录只覆盖 Windows 作业对象。
+实跑记录只覆盖 Windows 作业对象。macOS 上 `RLIMIT_AS` 不可用，`dex query` 以
+`memory_limit_unavailable` 拒绝执行，不降级运行。

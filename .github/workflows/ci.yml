@@ -205,6 +205,8 @@ jobs:
           python -m pip install -r requirements.lock
           # --no-deps：不加会让 pip 重新解析依赖，把刚锁住的版本又升上去，这一关就白跑了。
           python -m pip install --no-deps .
+          # fxapk-rea 的运行时依赖只有 core+typer（都在锁内），websockets 是可选 trace 附加项，不装。
+          python -m pip install --no-deps -e ./plugins/fxapk-rea
           # 有意不装 build/setuptools/wheel：锁环境对齐真实取证部署、不混构建工具链，
           # test_version_artifacts 的产物级测试在本关按 skip 通过（矩阵关 + package-smoke 已覆盖）。
           # pytest/pytest-xdist 是锁外的测试工具，不属于取证运行时依赖。

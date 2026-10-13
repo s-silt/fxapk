@@ -155,6 +155,7 @@ def _assert_runtime_kept(report: dict[str, object]) -> None:
     assert kept["source_refs"][0]["snippet"] == "observed"
 
 
+@pytest.mark.skipif(sys.platform == "darwin", reason="RLIMIT_AS not enforceable on macOS; dex worker memory limit unavailable")
 def test_query_apk_import_marks_xref_verified(tmp_path: Path) -> None:
     dex = build_dex(sample_classes(_VALUE))
     apk = tmp_path / "app.apk"
@@ -408,6 +409,7 @@ def test_unknown_and_truncated_payloads_are_not_guessed_as_one_unit() -> None:
         _instruction_width(struct.pack("<HHI", 0x0300, 3, 1), 0)
 
 
+@pytest.mark.skipif(sys.platform == "darwin", reason="RLIMIT_AS not enforceable on macOS; dex worker memory limit unavailable")
 def test_directory_before_dex_uses_inventory_ordinal(tmp_path: Path) -> None:
     dex = build_dex(sample_classes(_VALUE))
     apk = tmp_path / "directories.apk"

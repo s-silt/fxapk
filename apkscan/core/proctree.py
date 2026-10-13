@@ -32,6 +32,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from apkscan.core.redact import safe_exception_text
@@ -772,8 +773,15 @@ else:
         max_stderr_bytes: int | None = None,
     ) -> OwnedRun:
         # RLIMIT_NPROC 是用户级而不是这棵进程树的硬顶，不能拿来冒充进程数限额。
-        # 内存用 RLIMIT_AS。本机没有 Linux 实跑，这条路径保持未验证。
-        preexec = None
+        # 内存用 RLIMIT_AS。macOS 上 RLIMIT_AS 不生效、preexec 内 setrlimit 必败 → 不 spawn，
+        # 直接 fail-closed 回 memory_limit_unavailable。本机没有 Linux 实跑，这条路径保持未验证。
+        if memory_bytes is not None and sys.platform == "darwin":
+            return OwnedRun(
+                returncode=None, stdout="", stderr="", timed_out=False,
+                ownership_complete=False, termination_complete=True,
+                forced_tree_kill=False, reason_codes=_codes("memory_limit_unavailable"),
+            )
+        preexec: Callable[[], None] | None = None
         if memory_bytes is not None:
             try:
                 import resource
@@ -785,16 +793,25 @@ else:
                     ownership_complete=False, termination_complete=True,
                     forced_tree_kill=False, reason_codes=_codes("memory_limit_unavailable"),
                 )
+            limit_bytes = memory_bytes
 
-            def preexec() -> None:
+            def _limit_address_space() -> None:
                 import resource
-                resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
+                resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
+
+            preexec = _limit_address_space
 
         try:
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
                 start_new_session=True, text=True, encoding="utf-8", errors="replace",
                 preexec_fn=preexec,
+            )
+        except subprocess.SubprocessError:
+            return OwnedRun(
+                returncode=None, stdout="", stderr="", timed_out=False,
+                ownership_complete=False, termination_complete=True,
+                forced_tree_kill=False, reason_codes=_codes("memory_limit_unavailable"),
             )
         except OSError as exc:
             raise _SpawnFailed(safe_exception_text(exc)) from exc

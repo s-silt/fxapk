@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import cast
 
 from apkscan.core.atomic import atomic_create_bytes
+from apkscan.core.json_io import json_depth
 from apkscan.core.redact import PublicDiagnosticError, register_public_diagnostic
 
 MARKER_NAME = "fxapk-rea-bundle.json"
@@ -35,6 +36,7 @@ _RECOGNIZER_NAMES = (
 _MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
 _PREFIX_BYTES = 65536
 _MAX_ANCESTORS = 256
+_MAX_RECOGNITION_DEPTH = 48
 # 识别读取自己的合计上限，默认与网页正文上限同为 96 MiB，但是独立开关。
 # 注入识别预算不得改 MAX_TOTAL_BYTES，正文载入仍走原来的合计控制。
 INTAKE_READ_BUDGET_BYTES = 96 * 1024 * 1024
@@ -375,11 +377,14 @@ def _matches_rea_contract(
         return fail_closed
     try:
         value = json.loads(text)
+        too_deep = json_depth(value) > _MAX_RECOGNITION_DEPTH
     except RecursionError:
         return True
     except ValueError:
         # 语法损坏不是契约命中。保留标记名在读到这里之前已经拒绝。
         return False
+    if too_deep:
+        return True
     return isinstance(value, dict) and _is_rea_object(value)
 
 

@@ -66,6 +66,7 @@ def test_make_capture_observer_forwards_related_targets() -> None:
 def test_plugin_transports_related_targets_and_keeps_legacy_origins(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
+    pytest.importorskip("websockets")
     monkeypatch.syspath_prepend(str(Path("plugins/fxapk-rea/src")))
     from fxapk_rea import supplement, supplement_worker
 
@@ -155,6 +156,7 @@ def _ready(directory: Path) -> None:
 def test_sync_failure_keeps_stable_reason_and_start_evidence(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
+    pytest.importorskip("websockets")
     monkeypatch.syspath_prepend(str(Path("plugins/fxapk-rea/src")))
     from fxapk_rea.evidence import EvidenceError
     from fxapk_rea import supplement

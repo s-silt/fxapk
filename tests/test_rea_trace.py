@@ -15,6 +15,8 @@ from apkscan.core.models import AnalysisConfig
 from apkscan.core.redact import safe_exception_text
 from apkscan.core.webctx import load_web_evidence
 
+pytest.importorskip("websockets")
+
 _DIAGNOSTIC = "unverified REA observation cannot be admitted as direct case evidence"
 _ORIGIN = "http://127.0.0.1:8765"
 _SESSION = "SESSION-A"

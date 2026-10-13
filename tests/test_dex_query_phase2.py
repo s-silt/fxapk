@@ -6,6 +6,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from apkscan.core.dex_query import DexQueryLimits, import_receipt, query_apk
 from apkscan.core.integrity import evidence_id
 from apkscan.core.models import Endpoint
@@ -79,6 +81,7 @@ def _xref_refs(report: dict[str, object]) -> list[dict[str, object]]:
     return found
 
 
+@pytest.mark.skipif(sys.platform == "darwin", reason="RLIMIT_AS not enforceable on macOS; dex worker memory limit unavailable")
 def test_imported_dex_xref_is_visible_to_phase2(tmp_path: Path) -> None:
     domain = build_dex(sample_classes(_DOMAIN))
     ip = build_dex(sample_classes(_IP))

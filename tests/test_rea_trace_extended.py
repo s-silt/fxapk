@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("websockets")
+
 _ORIGIN = "http://127.0.0.1:8765"
 _OTHER = "https://outside.test"
 _SESSION = "SESSION-A"

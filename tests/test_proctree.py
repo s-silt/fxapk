@@ -134,6 +134,19 @@ def test_windows_job_failure_fails_closed_command_never_runs(
     assert not marker.exists(), "所有权未建立时命令不得被放行"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX 实现只在非 win32 绑定")
+def test_darwin_memory_limit_unavailable_fails_closed_without_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """macOS 上 RLIMIT_AS 不生效：preexec 内 setrlimit 必败，必须先于 spawn fail closed。"""
+    monkeypatch.setattr(proctree.sys, "platform", "darwin")
+    res = proctree.run_owned([sys.executable, "-c", "pass"], timeout=5.0, memory_bytes=4096)
+    assert res.returncode is None
+    assert res.ownership_complete is False
+    assert res.termination_complete is True
+    assert res.reason_codes == ("memory_limit_unavailable",)
+
+
 def test_internal_error_reported_not_raised(monkeypatch: pytest.MonkeyPatch) -> None:
     """「绝不抛」契约覆盖未知内部故障：impl 半路抛非 OSError → 转 internal_error 结局，
     所有权与终止都按未确认计（fail closed），绝不宣称受控。"""

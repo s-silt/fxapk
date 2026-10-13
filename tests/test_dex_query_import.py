@@ -61,6 +61,7 @@ def _report(sample: str) -> dict[str, object]:
     }
 
 
+@pytest.mark.skipif(sys.platform == "darwin", reason="RLIMIT_AS not enforceable on macOS; dex worker memory limit unavailable")
 def test_import_keeps_dynamic_evidence_and_hides_non_lead_query_text(tmp_path: Path) -> None:
     domain = build_dex(sample_classes(_DOMAIN))
     ip = build_dex(sample_classes(_IP))

@@ -186,15 +186,17 @@ def test_error_rounds_index_inside_file_and_ignore_outside(tmp_path: Path) -> No
 
 def test_error_round_symlink_is_not_indexed(tmp_path: Path) -> None:
     real = _write_failed(tmp_path / "real", window="real")
-    out = tmp_path / "round1-pcap"
-    out.mkdir()
-    link = out / "runtime_report.json"
+    probe = tmp_path / "probe-link"
     try:
-        link.symlink_to(real)
+        probe.symlink_to(real)
     except OSError as exc:
         pytest.skip(f"symlink_unavailable:{type(exc).__name__}")
+    out = tmp_path / "round1-pcap"
+    link = out / "runtime_report.json"
 
     def runner(package: str, **kwargs: object) -> dict[str, object]:
+        out.mkdir()
+        link.symlink_to(real)
         return {"status": "error", "reason": "synthetic_failure", "report_paths": [str(link)]}
 
     rows = run_rounds(

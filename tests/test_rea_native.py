@@ -153,6 +153,9 @@ def test_capabilities_backend_unavailable_and_elf_mismatch(native, monkeypatch, 
         lambda self: {"status": "unavailable", "reason": "rea_missing", "rea_version": None},
     )
     monkeypatch.setattr(native.sys, "platform", "win32")
+    from fxapk_rea import runtime as rea_runtime
+
+    monkeypatch.setattr(rea_runtime.shutil, "which", lambda *_args, **_kwargs: None)
     info = native.capabilities(provider="ghidra")
     assert info["status"] == "unavailable"
     assert info["reason"] == "rea_missing"
