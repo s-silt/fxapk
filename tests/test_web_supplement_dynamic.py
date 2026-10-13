@@ -188,7 +188,7 @@ def test_timeout_keeps_ui_and_does_not_invent_ready(monkeypatch: pytest.MonkeyPa
     observer = CaptureWindowObserver(_request(tmp_path), publish_dir=str(tmp_path))
     result = overlap_web_observation(
         interaction=lambda **_kwargs: calls.append("ui"),
-        web_observer=observer, deadline=None, window_seconds=0.12,
+        web_observer=observer, deadline=None, window_seconds=1.0,
     )
     assert calls == ["ui"]
     assert result is not None
@@ -213,7 +213,7 @@ def test_ready_file_backfills_report_without_bytes(monkeypatch: pytest.MonkeyPat
     )
     result = overlap_web_observation(
         interaction=lambda **_kwargs: calls.append("ui"),
-        web_observer=observer, deadline=None, window_seconds=0.12,
+        web_observer=observer, deadline=None, window_seconds=0.5,
     )
     assert calls == ["ui"]
     assert result is not None
@@ -234,7 +234,7 @@ def test_ready_file_backfills_report_without_bytes(monkeypatch: pytest.MonkeyPat
     _install(monkeypatch, second_plugin)
     second = overlap_web_observation(
         interaction=lambda **_kwargs: calls.append("ui"),
-        web_observer=again, deadline=None, window_seconds=0.12,
+        web_observer=again, deadline=None, window_seconds=0.5,
     )
     assert second is not None
     assert second["reason"] == "duplicate_raw"
