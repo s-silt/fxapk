@@ -99,6 +99,8 @@ HTML/JSON 留在本地输出目录；`digest` 用于初筛和定位。正式判�
 
 ### 网页观察（短节）
 
+REA 插件默认关闭：即使已安装，也不会被 fxapk 导入、注册命令或用于自动补采。仅在明确需要时，为该进程设置 `FXAPK_ENABLE_REA=1`；PowerShell 使用 `$env:FXAPK_ENABLE_REA='1'`，Linux/macOS 使用 `FXAPK_ENABLE_REA=1 fxapk rea --help`。未启用时核心命令仍可用，`selfcheck` 对已安装的 REA 报 `disabled`。启用插件不代表授权浏览器、设备或联网操作，agent 不得自行设置该开关。
+
 下面只说手工采集和 `attach`，不包括 `--web-supplement` 自动解析。`import`、`inspect`、`trace` 只采集；`attach` 只把核验过的观察挂进新目录的 `meta.web_observations`。这几条不自动闭环，也不把观察晋级成 leads、endpoints 或 runtime。自动解析是另一条路：`analyze` / `analyze-web` / `auto` 的 `--web-supplement` 校验后把低信任候选送进现有解析器，可以新增待核、LOW、`batch_reference`（`EvidenceScope.BATCH_REFERENCE`）候选。它不升旧线索，不自动富化，也不改变案件闭环。
 
 - `fxapk rea import` 读本地 REA 完整 CLI JSON。`capabilities` 只查本机 REA 版本，浏览器标 `not_probed`；通过后再 `inspect`。inspect 不导航、不点击。

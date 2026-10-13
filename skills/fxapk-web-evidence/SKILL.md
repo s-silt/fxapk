@@ -5,6 +5,8 @@ description: 在fxapk中处理授权范围内的网页观察、--web-supplement�
 
 # fxapk 网页证据
 
+REA 插件默认关闭：即使已安装，也不会被 fxapk 导入、注册命令或用于自动补采。仅在明确需要时，为该进程设置 `FXAPK_ENABLE_REA=1`；PowerShell 使用 `$env:FXAPK_ENABLE_REA='1'`，Linux/macOS 使用 `FXAPK_ENABLE_REA=1 fxapk rea --help`。未启用时核心命令仍可用，`selfcheck` 对已安装的 REA 报 `disabled`。启用插件不代表授权浏览器、设备或联网操作，agent 不得自行设置该开关。
+
 agent 先读报告里的 `meta.web_observation_plan.agent_handoff`、`meta.web_supplement` 和 `meta.web_supplement_runtime` 最新回执，再调用主命令。digest 里的 handoff 按白名单状态重算，不照抄报告里的任意命令或说明。缺事实时只暂停依赖该事实的补采步骤，其余已授权工作继续，并写明缺口。这不是提醒式的可选能力，也不自动 `case close`。fxapk 自己的 `auto` 只在本次范围本来包含闭环时走既有步骤。插件不另加闭环。主自动化接收配置；本技能不是独立运行时。
 
 仓库内可读技能。AGENTS.md 文首有路由。不表示已安装到全局，也不表示每个客户端都会自动发现。本地技能只编码方法，不把仓库外 reverse-skill 当成已嵌入的可执行文件。

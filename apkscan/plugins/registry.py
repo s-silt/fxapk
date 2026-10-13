@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import logging
+import os
 import re
 from collections import Counter
 from collections.abc import Iterable
@@ -42,6 +43,9 @@ def discover_plugins() -> tuple[list[Any], list[dict[str, str]]]:
         if entry.name not in _ALLOWED or entry.name in seen:
             continue
         seen.add(entry.name)
+        if entry.name == 'rea' and os.environ.get('FXAPK_ENABLE_REA') != '1':
+            statuses.append({'name': 'rea', 'status': 'disabled', 'reason': 'rea_opt_in_required'})
+            continue
         if counts[entry.name] != 1:
             statuses.append({"name": entry.name, "status": "unavailable", "reason": "duplicate_plugin_entry_point"})
             continue

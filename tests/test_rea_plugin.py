@@ -421,6 +421,7 @@ def test_malformed_input_is_bounded_structured_error(rea, tmp_path, raw):
 
 
 def test_exact_plugin_entry_is_discoverable_and_has_no_round_hook(rea, monkeypatch):
+    monkeypatch.setenv("FXAPK_ENABLE_REA", "1")
     entry = SimpleNamespace(
         name="rea",
         value="fxapk_rea.plugin:plugin_factory",

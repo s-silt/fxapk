@@ -15,6 +15,8 @@ clone 后**直接知道怎么操作**。项目背景见 `README.md`；本文件�
 
 ## 网页观察：人 → agent → fxapk → 提供方 → 报告 → agent
 
+REA 插件默认关闭：即使已安装，也不会被 fxapk 导入、注册命令或用于自动补采。仅在明确需要时，为该进程设置 `FXAPK_ENABLE_REA=1`；PowerShell 使用 `$env:FXAPK_ENABLE_REA='1'`，Linux/macOS 使用 `FXAPK_ENABLE_REA=1 fxapk rea --help`。未启用时核心命令仍可用，`selfcheck` 对已安装的 REA 报 `disabled`。启用插件不代表授权浏览器、设备或联网操作，agent 不得自行设置该开关。
+
 人给出范围和授权。agent 调用 fxapk。fxapk 调度可选提供方并写报告。agent 再读证据决定下一次 fxapk 调用。这里没有第二个自主编排器，handoff 也不是授权。
 
 先读 `meta.web_observation_plan.agent_handoff`，以及 `meta.web_supplement` 与 `meta.web_supplement_runtime` 的最新回执。digest 会按白名单状态重算 handoff，不照抄报告里的指令。缺少必要事实时只暂停依赖它的补采步骤，继续其余已授权工作，并报告具体缺口。

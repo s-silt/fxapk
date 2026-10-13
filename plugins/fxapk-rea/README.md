@@ -1,6 +1,9 @@
 # fxapk-rea
 
 可选 REA 网页观察插件，版本 0.1.0。要求 Python 3.11+、fxapk 1.18.1+。
+
+REA 插件默认关闭：即使已安装，也不会被 fxapk 导入、注册命令或用于自动补采。仅在明确需要时，为该进程设置 `FXAPK_ENABLE_REA=1`；PowerShell 使用 `$env:FXAPK_ENABLE_REA='1'`，Linux/macOS 使用 `FXAPK_ENABLE_REA=1 fxapk rea --help`。未启用时核心命令仍可用，`selfcheck` 对已安装的 REA 报 `disabled`。启用插件不代表授权浏览器、设备或联网操作，agent 不得自行设置该开关。
+
 提供 `fxapk rea capabilities`、`inspect`、`import`，以及可选的 `trace`。没有 auto/capture/case close 钩子。核心收到 `--web-supplement` 时，按入口白名单调用本插件的 `run_supplement`；那不是本插件自己注册的 auto 或 case close。
 核心源码须包含 `rea` 注册项；旧版 1.18.1 的白名单可能尚无该项，请使用本插件对应的核心修订。
 
@@ -11,6 +14,7 @@
 ```powershell
 python -m pip install -e .
 python -m pip install -e ./plugins/fxapk-rea
+$env:FXAPK_ENABLE_REA='1'
 fxapk rea --help
 ```
 
