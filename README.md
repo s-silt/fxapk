@@ -8,7 +8,7 @@
 <p align="center"><strong>中文</strong> &nbsp;·&nbsp; <a href="README.en.md">English</a></p>
 <p align="center">
   <a href="https://github.com/s-silt/fxapk/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/s-silt/fxapk/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.18.1">v1.18.1</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
+  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.19.0">v1.19.0</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
 </p>
 
 命令 `fxapk`（别名 `apkscan`），PyPI 包名 `fxapk`。面向直接运行源码或 Python 包的人与 AI 助手，不提供 exe 或 GUI。变更见 [CHANGELOG.md](CHANGELOG.md)。
@@ -37,13 +37,13 @@ APK / 已落盘网页证据        已授权设备采集
 ## 快速开始
 
 ```bash
-python -m pip install "fxapk==1.18.1"     # 或 clone 后 python -m pip install -e .
+python -m pip install "fxapk==1.19.0"     # 或 clone 后 python -m pip install -e .
 fxapk selfcheck
 fxapk analyze app.apk --offline --out out
 fxapk digest out/app.json
 ```
 
-[发布页](https://github.com/s-silt/fxapk/releases/tag/v1.18.1) 提供 wheel、源码归档与 `SHA256SUMS.txt`，安装前核对哈希。联网服务密钥按 [.env.example](.env.example) 在本地配置，不写入报告或仓库。命令未注册到 PATH 时用 `python -m apkscan.cli` 代替 `fxapk`。
+[发布页](https://github.com/s-silt/fxapk/releases/tag/v1.19.0) 提供 wheel、源码归档与 `SHA256SUMS.txt`，安装前核对哈希。联网服务密钥按 [.env.example](.env.example) 在本地配置，不写入报告或仓库。命令未注册到 PATH 时用 `python -m apkscan.cli` 代替 `fxapk`。
 
 `digest` 用于初筛和定位；正式判断必须回查 `report.json` 的结构化字段与原始证据。让 AI 助手操作时，给它 [AGENTS.md](AGENTS.md)、样本路径、是否允许联网及设备操作范围。
 

@@ -5,6 +5,8 @@
 
 ## 待发布
 
+## 1.19.0 — 2026-10-14
+
 - 新增网页证据链补采：`analyze` / `analyze-web` / `auto` 接受 `--web-supplement <本地JSON>`，新增 `fxapk supplement-web` 只对已有报告补网页材料。低信任候选以待核 / LOW / `batch_reference` 进入现有解析器，不自动富化、不改闭环。
 - 新增可选插件 `fxapk-rea`（`import` / `inspect` / `trace` / `attach` / `native ...`）：REA 6.4.0 离线导入与观察、独立 `fxapk-cdp-trace` 同窗口采集、观察挂载与 PE/ELF 地址恢复。**插件默认关闭**，仅进程环境 `FXAPK_ENABLE_REA=1` 时导入、注册命令或参与自动补采；`selfcheck` 对已安装但未启用的 REA 报 `disabled`。
 - 新增 `fxapk dex capabilities|query|import` 与可选插件 `fxapk-asc`：DEX 字符串引用查询在 `python -I` 隔离 worker 中执行，回执绑定 APK 身份；带 `--apk` 导入时按指令边界核验每条 exact 引用，矛盾整次拒绝 `xref_mismatch`，无可核验引用记 `no_exact_hits`。导入线索带 `evidence_id` 与 `case_evidence`，Phase-2 可见。

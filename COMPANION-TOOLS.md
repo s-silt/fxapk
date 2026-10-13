@@ -23,7 +23,7 @@ fxapk 需要 Python 3.11+ 及 [pyproject.toml](pyproject.toml) 声明的运行�
 ## 离线静态起步
 
 ```bash
-python -m pip install "fxapk==1.18.1"
+python -m pip install "fxapk==1.19.0"
 fxapk analyze app.apk --offline --out out
 fxapk digest out/app.json
 ```
