@@ -531,10 +531,21 @@ def test_shared_string_offsets_and_descriptor_fanout_stay_bounded(tmp_path: Path
 
 
 def _param_fanout_dex(
-    proto_count: int, param_count: int, text_len: int, method_count: int,
+    proto_count: int,
+    param_count: int,
+    text_len: int,
+    method_count: int,
+    *,
+    param_string: bytes | None = None,
+    pad: int = 0,
 ) -> bytes:
     """proto_count 个 proto 共享同一份 param_count 项 type_list；参数类型名长 text_len。"""
-    strings = [b"LA;", b"m", b"V", b"L" + b"A" * (text_len - 2) + b";"]
+    big = (
+        param_string
+        if param_string is not None
+        else b"I" if text_len == 1 else b"L" + b"A" * (text_len - 2) + b";"
+    )
+    strings = [b"LA;", b"m", b"V", big]
     string_blob = b"".join(_uleb(len(item)) + item + b"\x00" for item in strings)
     ids_off = 0x70
     types_off = ids_off + 4 * len(strings)
@@ -544,9 +555,9 @@ def _param_fanout_dex(
     list_off = data_off + len(string_blob)
     list_off += (4 - list_off % 4) % 4
     size = list_off + 4 + 2 * param_count
-    data = bytearray(size)
+    data = bytearray(size + pad)
     data[:8] = b"dex\n035\x00"
-    struct.pack_into("<I", data, 32, size)
+    struct.pack_into("<I", data, 32, size + pad)
     struct.pack_into("<I", data, 36, 0x70)
     struct.pack_into("<I", data, 40, 0x12345678)
     struct.pack_into("<I", data, 56, len(strings))
@@ -675,6 +686,141 @@ def test_methods_sharing_one_code_item_share_insns_bytes() -> None:
     assert first.insns is last.insns
 
 
+def test_empty_type_descriptor_is_rejected() -> None:
+    """类型表项指向空字符串：合法 DEX 不存在，直接拒。"""
+    from apkscan.core.dex_query import _DexParseError, _parse_dex
+
+    data = _param_fanout_dex(1, 4000, 8, 4000, param_string=b"")
+    with pytest.raises(_DexParseError):
+        _parse_dex(data)
+
+
+def test_shared_proto_params_join_once_within_time_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """4000 个方法共享一份 4000 参数 proto：params 文本只 join 一次。"""
+    import time
+
+    import apkscan.core.dex_query as dex_query
+    from apkscan.core.dex_query import _parse_dex
+
+    joins: list[int] = []
+    real_join = getattr(dex_query, "_join_params", None)
+
+    def spy(*args: object) -> object:
+        joins.append(1)
+        assert real_join is not None
+        return real_join(*args)
+
+    monkeypatch.setattr(dex_query, "_join_params", spy, raising=False)
+    data = _param_fanout_dex(1, 4000, 1, 4000, pad=2 * 1024 * 1024)
+    start = time.perf_counter()
+    parsed = _parse_dex(data)
+    elapsed = time.perf_counter() - start
+    assert parsed is not None
+    assert len(joins) == 1
+    assert elapsed < 1.0
+
+
+def _shared_classdata_dex(classdef_count: int, field_count: int) -> bytes:
+    """classdef_count 个 class_def 共享同一份含 field_count 个零 ULEB 字段的 class_data。"""
+    strings = [b"LA;", b"V"]
+    string_blob = b"".join(_uleb(len(item)) + item + b"\x00" for item in strings)
+    ids_off = 0x70
+    types_off = ids_off + 4 * len(strings)
+    class_defs_off = types_off + 4
+    data_off = class_defs_off + 32 * classdef_count
+    class_data_off = data_off + len(string_blob)
+    class_data_off += (4 - class_data_off % 4) % 4
+    class_data = (
+        _uleb(field_count) + _uleb(0) + _uleb(0) + _uleb(0)
+        + b"\x00" * (2 * field_count + 16)
+    )
+    size = class_data_off + len(class_data)
+    data = bytearray(size)
+    data[:8] = b"dex\n035\x00"
+    struct.pack_into("<I", data, 32, size)
+    struct.pack_into("<I", data, 36, 0x70)
+    struct.pack_into("<I", data, 40, 0x12345678)
+    struct.pack_into("<I", data, 56, len(strings))
+    struct.pack_into("<I", data, 60, ids_off)
+    struct.pack_into("<I", data, 64, 1)
+    struct.pack_into("<I", data, 68, types_off)
+    struct.pack_into("<I", data, 96, classdef_count)
+    struct.pack_into("<I", data, 100, class_defs_off)
+    cursor = data_off
+    for index, item in enumerate(strings):
+        struct.pack_into("<I", data, ids_off + 4 * index, cursor)
+        cursor += len(_uleb(len(item))) + len(item) + 1
+    struct.pack_into("<I", data, types_off, 0)
+    for index in range(classdef_count):
+        struct.pack_into("<I", data, class_defs_off + 32 * index, 0)
+        struct.pack_into("<I", data, class_defs_off + 32 * index + 24, class_data_off)
+    data[data_off:data_off + len(string_blob)] = string_blob
+    data[class_data_off:class_data_off + len(class_data)] = class_data
+    return bytes(data)
+
+
+def _overlapping_classdata_dex(starts: int) -> bytes:
+    """class_data 区为重复 \\x7f\\x00\\x00\\x00 模式：每 4 字节起点解出 (127,0,0,0)+127 field。"""
+    strings = [b"LA;", b"V"]
+    string_blob = b"".join(_uleb(len(item)) + item + b"\x00" for item in strings)
+    ids_off = 0x70
+    types_off = ids_off + 4 * len(strings)
+    class_defs_off = types_off + 4
+    data_off = class_defs_off + 32 * starts
+    region_off = data_off + len(string_blob)
+    region_off += (4 - region_off % 4) % 4
+    region = b"\x7f\x00\x00\x00" * (starts + 300)
+    size = region_off + len(region)
+    data = bytearray(size)
+    data[:8] = b"dex\n035\x00"
+    struct.pack_into("<I", data, 32, size)
+    struct.pack_into("<I", data, 36, 0x70)
+    struct.pack_into("<I", data, 40, 0x12345678)
+    struct.pack_into("<I", data, 56, len(strings))
+    struct.pack_into("<I", data, 60, ids_off)
+    struct.pack_into("<I", data, 64, 1)
+    struct.pack_into("<I", data, 68, types_off)
+    struct.pack_into("<I", data, 96, starts)
+    struct.pack_into("<I", data, 100, class_defs_off)
+    cursor = data_off
+    for index, item in enumerate(strings):
+        struct.pack_into("<I", data, ids_off + 4 * index, cursor)
+        cursor += len(_uleb(len(item))) + len(item) + 1
+    struct.pack_into("<I", data, types_off, 0)
+    for index in range(starts):
+        struct.pack_into("<I", data, class_defs_off + 32 * index, 0)
+        struct.pack_into(
+            "<I", data, class_defs_off + 32 * index + 24, region_off + 4 * index,
+        )
+    data[data_off:data_off + len(string_blob)] = string_blob
+    data[region_off:region_off + len(region)] = region
+    return bytes(data)
+
+
+def test_class_defs_sharing_one_class_data_parse_once() -> None:
+    """1000 个 class_def 指向同一 class_data：seen 去重后只解析一次。"""
+    import time
+
+    from apkscan.core.dex_query import _parse_dex
+
+    data = _shared_classdata_dex(1000, 1000)
+    start = time.perf_counter()
+    parsed = _parse_dex(data)
+    assert time.perf_counter() - start < 0.5
+    assert parsed is not None
+
+
+def test_overlapping_class_data_entries_hit_cumulative_budget() -> None:
+    """重叠 class_data 起点让累计 field 数超过 2*limit：fail closed。"""
+    from apkscan.core.dex_query import _DexParseError, _parse_dex
+
+    data = _overlapping_classdata_dex(64)
+    with pytest.raises(_DexParseError):
+        _parse_dex(data)
+
+
 def test_only_partial_hits_yield_no_exact_hits(tmp_path: Path) -> None:
     dex = build_dex(sample_classes(_VALUE))
     claimed = _hit(dex.hits[0].descriptor, dex.hits[0].code_unit_offset, dex.hits[0].file_offset)
@@ -763,3 +909,32 @@ def test_read_relative_uses_bounded_stream_and_stats_before_read(
         dex_query._read_relative(tmp_path, f"dex-query/{oversized}.json", 64)
     assert excinfo.value.reason == "oversize"
     assert calls == [64]
+
+
+def test_collect_receipt_files_stat_size_lie_still_hits_byte_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stat 报 5B 但实际读 15B（竞态/虚报）：按剩余预算读，越界仍 dex_receipt_oversize。"""
+    import os
+
+    import apkscan.core.dex_query as dex_query
+    from apkscan.core.dex_query import collect_receipt_files
+
+    monkeypatch.setattr(
+        dex_query, "DexQueryLimits", lambda: DexQueryLimits(input_bytes=20)
+    )
+    meta = _receipt_dir(tmp_path, 2, b"0123456789abcde")
+    real_stat = Path.stat
+
+    def fake_stat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
+        result = real_stat(self, *args, **kwargs)
+        if self.suffix == ".json":
+            fields = list(result)
+            fields[6] = 5
+            return os.stat_result(tuple(fields))
+        return result
+
+    monkeypatch.setattr(Path, "stat", fake_stat)
+    with pytest.raises(DexQueryError) as excinfo:
+        collect_receipt_files(tmp_path, meta)
+    assert excinfo.value.reason == "dex_receipt_oversize"

@@ -139,12 +139,20 @@ def test_darwin_memory_limit_unavailable_fails_closed_without_spawn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """macOS 上 RLIMIT_AS 不生效：preexec 内 setrlimit 必败，必须先于 spawn fail closed。"""
+    spawned: list[object] = []
+
+    def _no_spawn(*_args: object, **_kwargs: object) -> None:
+        spawned.append(1)
+        raise AssertionError("spawned")
+
+    monkeypatch.setattr(proctree.subprocess, "Popen", _no_spawn)
     monkeypatch.setattr(proctree.sys, "platform", "darwin")
     res = proctree.run_owned([sys.executable, "-c", "pass"], timeout=5.0, memory_bytes=4096)
     assert res.returncode is None
     assert res.ownership_complete is False
     assert res.termination_complete is True
     assert res.reason_codes == ("memory_limit_unavailable",)
+    assert not spawned
 
 
 def test_internal_error_reported_not_raised(monkeypatch: pytest.MonkeyPatch) -> None:

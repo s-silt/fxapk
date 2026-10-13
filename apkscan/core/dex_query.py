@@ -117,8 +117,11 @@ class _DexParseState:
     def __init__(self) -> None:
         self.type_lists: dict[int, tuple[int, ...]] = {}
         self.param_entries = 0
+        self.proto_params: dict[int, tuple[str, int]] = {}
         self.code_items: dict[int, _DexCode] = {}
         self.code_bytes = 0
+        self.class_data_seen: set[int] = set()
+        self.class_entries = 0
 
 
 @dataclass(frozen=True)
@@ -1148,7 +1151,7 @@ def _parse_dex_bytes(data: bytes) -> _ParsedDex:
     type_ids: list[int] = []
     for index in range(type_ids_size):
         descriptor_idx = _u32(data, type_ids_off + 4 * index)
-        if descriptor_idx >= len(strings):
+        if descriptor_idx >= len(strings) or not strings[descriptor_idx]:
             raise _DexParseError()
         type_ids.append(descriptor_idx)
     state = _DexParseState()
@@ -1169,14 +1172,21 @@ def _parse_dex_bytes(data: bytes) -> _ParsedDex:
         if class_idx >= len(type_ids) or proto_idx >= len(protos) or name_idx >= len(strings):
             raise _DexParseError()
         return_idx, param_idxs = protos[proto_idx]
+        cached = state.proto_params.get(proto_idx)
+        if cached is None:
+            params = ""
+            params_len = sum(len(strings[type_ids[item]]) for item in param_idxs)
+        else:
+            params, params_len = cached
         descriptor_len = (
             len(strings[type_ids[class_idx]]) + 2 + len(strings[name_idx]) + 1
-            + sum(len(strings[type_ids[item]]) for item in param_idxs)
-            + 1 + len(strings[type_ids[return_idx]])
+            + params_len + 1 + len(strings[type_ids[return_idx]])
         )
         if total_descriptor_chars + descriptor_len > 8 * limit:
             raise _DexParseError()
-        params = "".join(strings[type_ids[item]] for item in param_idxs)
+        if cached is None:
+            params = _join_params(strings, type_ids, param_idxs)
+            state.proto_params[proto_idx] = (params, params_len)
         descriptor = (
             f"{strings[type_ids[class_idx]]}->{strings[name_idx]}({params}){strings[type_ids[return_idx]]}"
         )
@@ -1189,8 +1199,17 @@ def _parse_dex_bytes(data: bytes) -> _ParsedDex:
             continue
         if class_data_off >= limit:
             raise _DexParseError()
+        if class_data_off in state.class_data_seen:
+            continue
+        state.class_data_seen.add(class_data_off)
         _read_class_methods(data, class_data_off, limit, descriptors, methods, state)
     return _ParsedDex(tuple(strings), methods)
+
+
+def _join_params(
+    strings: list[str], type_ids: list[int], param_idxs: tuple[int, ...],
+) -> str:
+    return "".join(strings[type_ids[item]] for item in param_idxs)
 
 
 def _read_class_methods(
@@ -1210,6 +1229,9 @@ def _read_class_methods(
     if static_count > remaining // 2 or instance_count > remaining // 2:
         raise _DexParseError()
     if direct_count + virtual_count > len(descriptors):
+        raise _DexParseError()
+    state.class_entries += static_count + instance_count + direct_count + virtual_count
+    if state.class_entries > 2 * limit:
         raise _DexParseError()
     for _index in range(static_count + instance_count):
         _diff, pos = _uleb128(data, pos, limit)
@@ -1706,19 +1728,20 @@ def collect_receipt_files(report_dir: Path, meta: Mapping[str, Any]) -> dict[str
         relative = f"dex-query/{receipt_id}.json"
         try:
             target = _resolve_relative(report_dir, relative)
-            if total + target.stat().st_size > limit:
-                raise DexQueryError("dex_receipt_oversize")
-            blob = _read_resolved(target, limit)
+            remaining = limit - total
+            blob = _read_resolved(target, min(limit, remaining))
         except DexQueryError as exc:
             if exc.reason == "attachment_missing":
                 raise DexQueryError("dex_receipt_missing") from None
-            if exc.reason == "dex_receipt_oversize":
-                raise
+            if exc.reason in {"oversize", "dex_receipt_oversize"}:
+                raise DexQueryError("dex_receipt_oversize") from None
             raise DexQueryError("dex_receipt_mismatch") from None
         if hashlib.sha256(blob).hexdigest() != digest:
             raise DexQueryError("dex_receipt_mismatch")
-        collected[relative] = blob
         total += len(blob)
+        if total > limit:
+            raise DexQueryError("dex_receipt_oversize")
+        collected[relative] = blob
     return collected
 
 
