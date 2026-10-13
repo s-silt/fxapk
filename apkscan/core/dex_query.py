@@ -24,6 +24,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 from apkscan.core.atomic import atomic_create_bytes
+from apkscan.core.bounded_io import read_limited
 from apkscan.core.integrity import evidence_id
 from apkscan.core.proctree import run_owned
 
@@ -45,6 +46,7 @@ _DOMAIN_RE = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+"
 )
 _HEX64 = re.compile(r"[0-9a-f]{64}")
+_MAX_RECEIPT_FILES = 64
 
 
 class DexQueryError(Exception):
@@ -107,6 +109,16 @@ class _DexCode:
 class _ParsedDex:
     strings: tuple[str, ...]
     methods: Mapping[str, _DexCode]
+
+
+class _DexParseState:
+    """单次解析的共享缓存与累计预算；每个 _parse_dex_bytes 一份，不落模块全局。"""
+
+    def __init__(self) -> None:
+        self.type_lists: dict[int, tuple[int, ...]] = {}
+        self.param_entries = 0
+        self.code_items: dict[int, _DexCode] = {}
+        self.code_bytes = 0
 
 
 @dataclass(frozen=True)
@@ -1139,6 +1151,7 @@ def _parse_dex_bytes(data: bytes) -> _ParsedDex:
         if descriptor_idx >= len(strings):
             raise _DexParseError()
         type_ids.append(descriptor_idx)
+    state = _DexParseState()
     protos: list[tuple[int, tuple[int, ...]]] = []
     for index in range(proto_ids_size):
         base = proto_ids_off + 12 * index
@@ -1147,7 +1160,7 @@ def _parse_dex_bytes(data: bytes) -> _ParsedDex:
         params_off = _u32(data, base + 8)
         if shorty_idx >= len(strings) or return_idx >= len(type_ids):
             raise _DexParseError()
-        protos.append((return_idx, _type_list(data, params_off, limit, len(type_ids))))
+        protos.append((return_idx, _type_list(data, params_off, limit, len(type_ids), state)))
     descriptors: list[str] = []
     total_descriptor_chars = 0
     for index in range(method_ids_size):
@@ -1156,13 +1169,18 @@ def _parse_dex_bytes(data: bytes) -> _ParsedDex:
         if class_idx >= len(type_ids) or proto_idx >= len(protos) or name_idx >= len(strings):
             raise _DexParseError()
         return_idx, param_idxs = protos[proto_idx]
+        descriptor_len = (
+            len(strings[type_ids[class_idx]]) + 2 + len(strings[name_idx]) + 1
+            + sum(len(strings[type_ids[item]]) for item in param_idxs)
+            + 1 + len(strings[type_ids[return_idx]])
+        )
+        if total_descriptor_chars + descriptor_len > 8 * limit:
+            raise _DexParseError()
         params = "".join(strings[type_ids[item]] for item in param_idxs)
         descriptor = (
             f"{strings[type_ids[class_idx]]}->{strings[name_idx]}({params}){strings[type_ids[return_idx]]}"
         )
-        total_descriptor_chars += len(descriptor)
-        if total_descriptor_chars > 8 * limit:
-            raise _DexParseError()
+        total_descriptor_chars += descriptor_len
         descriptors.append(descriptor)
     methods: dict[str, _DexCode] = {}
     for index in range(class_defs_size):
@@ -1171,7 +1189,7 @@ def _parse_dex_bytes(data: bytes) -> _ParsedDex:
             continue
         if class_data_off >= limit:
             raise _DexParseError()
-        _read_class_methods(data, class_data_off, limit, descriptors, methods)
+        _read_class_methods(data, class_data_off, limit, descriptors, methods, state)
     return _ParsedDex(tuple(strings), methods)
 
 
@@ -1181,6 +1199,7 @@ def _read_class_methods(
     limit: int,
     descriptors: list[str],
     methods: dict[str, _DexCode],
+    state: _DexParseState,
 ) -> None:
     pos = start
     static_count, pos = _uleb128(data, pos, limit)
@@ -1206,7 +1225,7 @@ def _read_class_methods(
                 raise _DexParseError()
             if code_off == 0:
                 continue
-            code = _read_code_item(data, code_off, limit)
+            code = _read_code_item(data, code_off, limit, state)
             descriptor = descriptors[method_idx]
             previous = methods.get(descriptor)
             if previous is not None and previous != code:
@@ -1214,26 +1233,45 @@ def _read_class_methods(
             methods[descriptor] = code
 
 
-def _read_code_item(data: bytes, code_off: int, limit: int) -> _DexCode:
+def _read_code_item(
+    data: bytes, code_off: int, limit: int, state: _DexParseState,
+) -> _DexCode:
+    cached = state.code_items.get(code_off)
+    if cached is not None:
+        return cached
     if code_off <= 0 or code_off % 4 or code_off + 16 > limit:
         raise _DexParseError()
     insns_size = struct.unpack_from("<HHHHII", data, code_off)[5]
     if insns_size > (limit - (code_off + 16)) // 2:
         raise _DexParseError()
-    insns_off = code_off + 16
-    insns = data[insns_off:insns_off + insns_size * 2]
-    if len(insns) != insns_size * 2:
+    insns_len = insns_size * 2
+    if state.code_bytes + insns_len > 2 * limit:
         raise _DexParseError()
-    return _DexCode(insns_off, insns_size, insns)
+    insns_off = code_off + 16
+    insns = data[insns_off:insns_off + insns_len]
+    if len(insns) != insns_len:
+        raise _DexParseError()
+    code = _DexCode(insns_off, insns_size, insns)
+    state.code_bytes += insns_len
+    state.code_items[code_off] = code
+    return code
 
 
-def _type_list(data: bytes, offset: int, limit: int, type_count: int) -> tuple[int, ...]:
+def _type_list(
+    data: bytes, offset: int, limit: int, type_count: int, state: _DexParseState,
+) -> tuple[int, ...]:
     if offset == 0:
         return ()
+    cached = state.type_lists.get(offset)
+    if cached is not None:
+        return cached
     if offset % 4 or offset + 4 > limit:
         raise _DexParseError()
     size = _u32(data, offset)
     if size > (limit - (offset + 4)) // 2:
+        raise _DexParseError()
+    state.param_entries += size
+    if state.param_entries > 2 * limit:
         raise _DexParseError()
     params: list[int] = []
     for index in range(size):
@@ -1241,7 +1279,9 @@ def _type_list(data: bytes, offset: int, limit: int, type_count: int) -> tuple[i
         if type_idx >= type_count:
             raise _DexParseError()
         params.append(type_idx)
-    return tuple(params)
+    result = tuple(params)
+    state.type_lists[offset] = result
+    return result
 
 
 def _decode_mutf8(data: bytes, pos: int, limit: int) -> tuple[str, int]:
@@ -1566,7 +1606,7 @@ def _reject_relative(relative: str) -> None:
         raise DexQueryError("path_escape")
 
 
-def _read_relative(root: Path, relative: str, limit: int) -> bytes:
+def _resolve_relative(root: Path, relative: str) -> Path:
     _reject_relative(relative)
     current = root
     if current.is_symlink():
@@ -1583,12 +1623,21 @@ def _read_relative(root: Path, relative: str, limit: int) -> bytes:
         raise
     except (OSError, ValueError) as exc:
         raise DexQueryError("path_escape") from exc
-    if current.stat().st_size > limit:
+    return current
+
+
+def _read_resolved(target: Path, limit: int) -> bytes:
+    if target.stat().st_size > limit:
         raise DexQueryError("oversize")
-    blob = current.read_bytes()
+    with target.open("rb") as stream:
+        blob = read_limited(stream, limit)
     if len(blob) > limit:
         raise DexQueryError("oversize")
     return blob
+
+
+def _read_relative(root: Path, relative: str, limit: int) -> bytes:
+    return _read_resolved(_resolve_relative(root, relative), limit)
 
 
 def _dex_receipt_specs(report: Mapping[str, Any]) -> list[tuple[str, str]]:
@@ -1636,9 +1685,12 @@ def collect_receipt_files(report_dir: Path, meta: Mapping[str, Any]) -> dict[str
     receipts = raw.get("receipts") if isinstance(raw, Mapping) else None
     if not isinstance(receipts, list):
         raise DexQueryError("dex_receipt_mismatch")
+    if len(receipts) > _MAX_RECEIPT_FILES:
+        raise DexQueryError("dex_receipt_oversize")
     collected: dict[str, bytes] = {}
     seen: set[str] = set()
     limit = DexQueryLimits().input_bytes
+    total = 0
     for item in receipts:
         receipt_id = item.get("receipt_id") if isinstance(item, dict) else None
         digest = item.get("sha256") if isinstance(item, dict) else None
@@ -1653,14 +1705,20 @@ def collect_receipt_files(report_dir: Path, meta: Mapping[str, Any]) -> dict[str
         seen.add(receipt_id)
         relative = f"dex-query/{receipt_id}.json"
         try:
-            blob = _read_relative(report_dir, relative, limit)
+            target = _resolve_relative(report_dir, relative)
+            if total + target.stat().st_size > limit:
+                raise DexQueryError("dex_receipt_oversize")
+            blob = _read_resolved(target, limit)
         except DexQueryError as exc:
             if exc.reason == "attachment_missing":
                 raise DexQueryError("dex_receipt_missing") from None
+            if exc.reason == "dex_receipt_oversize":
+                raise
             raise DexQueryError("dex_receipt_mismatch") from None
         if hashlib.sha256(blob).hexdigest() != digest:
             raise DexQueryError("dex_receipt_mismatch")
         collected[relative] = blob
+        total += len(blob)
     return collected
 
 

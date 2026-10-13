@@ -7,6 +7,7 @@ import hashlib
 import json
 import struct
 import sys
+import tracemalloc
 from pathlib import Path
 
 import pytest
@@ -529,6 +530,151 @@ def test_shared_string_offsets_and_descriptor_fanout_stay_bounded(tmp_path: Path
     assert _parse_dex(build_dex(sample_classes(_VALUE)).data).methods
 
 
+def _param_fanout_dex(
+    proto_count: int, param_count: int, text_len: int, method_count: int,
+) -> bytes:
+    """proto_count 个 proto 共享同一份 param_count 项 type_list；参数类型名长 text_len。"""
+    strings = [b"LA;", b"m", b"V", b"L" + b"A" * (text_len - 2) + b";"]
+    string_blob = b"".join(_uleb(len(item)) + item + b"\x00" for item in strings)
+    ids_off = 0x70
+    types_off = ids_off + 4 * len(strings)
+    protos_off = types_off + 4 * 3
+    methods_off = protos_off + 12 * proto_count
+    data_off = methods_off + 8 * method_count
+    list_off = data_off + len(string_blob)
+    list_off += (4 - list_off % 4) % 4
+    size = list_off + 4 + 2 * param_count
+    data = bytearray(size)
+    data[:8] = b"dex\n035\x00"
+    struct.pack_into("<I", data, 32, size)
+    struct.pack_into("<I", data, 36, 0x70)
+    struct.pack_into("<I", data, 40, 0x12345678)
+    struct.pack_into("<I", data, 56, len(strings))
+    struct.pack_into("<I", data, 60, ids_off)
+    struct.pack_into("<I", data, 64, 3)
+    struct.pack_into("<I", data, 68, types_off)
+    struct.pack_into("<I", data, 72, proto_count)
+    struct.pack_into("<I", data, 76, protos_off)
+    if method_count:
+        struct.pack_into("<I", data, 88, method_count)
+        struct.pack_into("<I", data, 92, methods_off)
+    cursor = data_off
+    for index, item in enumerate(strings):
+        struct.pack_into("<I", data, ids_off + 4 * index, cursor)
+        cursor += len(_uleb(len(item))) + len(item) + 1
+    for index, string_idx in enumerate((0, 2, 3)):
+        struct.pack_into("<I", data, types_off + 4 * index, string_idx)
+    for index in range(proto_count):
+        struct.pack_into("<III", data, protos_off + 12 * index, 2, 1, list_off)
+    for index in range(method_count):
+        struct.pack_into("<HHI", data, methods_off + 8 * index, 0, 0, 1)
+    struct.pack_into("<I", data, list_off, param_count)
+    for index in range(param_count):
+        struct.pack_into("<H", data, list_off + 4 + 2 * index, 2)
+    data[data_off:data_off + len(string_blob)] = string_blob
+    return bytes(data)
+
+
+def _shared_code_dex(method_count: int, insns_len: int) -> bytes:
+    """method_count 个 direct 方法共享同一个 code_off 的 code_item。"""
+    strings = [b"LA;", b"V"] + [f"m{i:04d}".encode() for i in range(method_count)]
+    string_blob = b"".join(_uleb(len(item)) + item + b"\x00" for item in strings)
+    ids_off = 0x70
+    types_off = ids_off + 4 * len(strings)
+    protos_off = types_off + 4 * 2
+    methods_off = protos_off + 12
+    class_defs_off = methods_off + 8 * method_count
+    data_off = class_defs_off + 32
+    code_off = data_off + len(string_blob)
+    code_off += (4 - code_off % 4) % 4
+    class_data_off = code_off + 16 + insns_len
+    class_data = _uleb(0) + _uleb(0) + _uleb(method_count) + _uleb(0)
+    for index in range(method_count):
+        class_data += _uleb(0 if index == 0 else 1) + _uleb(1) + _uleb(code_off)
+    size = class_data_off + len(class_data)
+    data = bytearray(size)
+    data[:8] = b"dex\n035\x00"
+    struct.pack_into("<I", data, 32, size)
+    struct.pack_into("<I", data, 36, 0x70)
+    struct.pack_into("<I", data, 40, 0x12345678)
+    struct.pack_into("<I", data, 56, len(strings))
+    struct.pack_into("<I", data, 60, ids_off)
+    struct.pack_into("<I", data, 64, 2)
+    struct.pack_into("<I", data, 68, types_off)
+    struct.pack_into("<I", data, 72, 1)
+    struct.pack_into("<I", data, 76, protos_off)
+    struct.pack_into("<I", data, 88, method_count)
+    struct.pack_into("<I", data, 92, methods_off)
+    struct.pack_into("<I", data, 96, 1)
+    struct.pack_into("<I", data, 100, class_defs_off)
+    cursor = data_off
+    for index, item in enumerate(strings):
+        struct.pack_into("<I", data, ids_off + 4 * index, cursor)
+        cursor += len(_uleb(len(item))) + len(item) + 1
+    struct.pack_into("<I", data, types_off, 0)
+    struct.pack_into("<I", data, types_off + 4, 1)
+    struct.pack_into("<III", data, protos_off, 1, 1, 0)
+    for index in range(method_count):
+        struct.pack_into("<HHI", data, methods_off + 8 * index, 0, 0, 2 + index)
+    struct.pack_into("<I", data, class_defs_off, 0)
+    struct.pack_into("<I", data, class_defs_off + 8, 1)
+    struct.pack_into("<I", data, class_defs_off + 24, class_data_off)
+    struct.pack_into("<HHHHII", data, code_off, 1, 0, 0, 0, 0, insns_len // 2)
+    data[data_off:data_off + len(string_blob)] = string_blob
+    data[class_data_off:class_data_off + len(class_data)] = class_data
+    return bytes(data)
+
+
+def _parse_peak(data: bytes) -> tuple[object, int]:
+    from apkscan.core.dex_query import _DexParseError, _parse_dex
+
+    tracemalloc.start()
+    try:
+        try:
+            parsed: object = _parse_dex(data)
+        except _DexParseError:
+            parsed = None
+        _current, peak = tracemalloc.get_traced_memory()
+        return parsed, peak
+    finally:
+        tracemalloc.stop()
+
+
+def test_descriptor_budget_blocks_fanout_before_allocating() -> None:
+    """4096 个参数全部指向一个 ~4KiB 类型名：descriptor 展开 ~16 MiB，必须在 join 前拒。"""
+    from apkscan.core.dex_query import _DexParseError, _parse_dex
+
+    data = _param_fanout_dex(proto_count=1, param_count=4096, text_len=4096, method_count=1)
+    tracemalloc.start()
+    try:
+        with pytest.raises(_DexParseError):
+            _parse_dex(data)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 4 * 1024 * 1024
+
+
+def test_shared_type_list_expands_once_under_budget() -> None:
+    """2000 个 proto 共享一份 2000 项 type_list：去重展开计入预算一次，正常解析。"""
+    data = _param_fanout_dex(proto_count=2000, param_count=2000, text_len=8, method_count=0)
+    parsed, peak = _parse_peak(data)
+    assert parsed is not None
+    assert peak < 4 * 1024 * 1024
+
+
+def test_methods_sharing_one_code_item_share_insns_bytes() -> None:
+    """1000 个方法指向同一 16 KiB code_item：不重切，insns 是同一对象。"""
+    data = _shared_code_dex(1000, 16 * 1024)
+    parsed, peak = _parse_peak(data)
+    assert parsed is not None
+    assert peak < 2 * 1024 * 1024
+    methods = parsed.methods  # type: ignore[union-attr]
+    first = methods["LA;->m0000()V"]
+    last = methods["LA;->m0999()V"]
+    assert first.insns is last.insns
+
+
 def test_only_partial_hits_yield_no_exact_hits(tmp_path: Path) -> None:
     dex = build_dex(sample_classes(_VALUE))
     claimed = _hit(dex.hits[0].descriptor, dex.hits[0].code_unit_offset, dex.hits[0].file_offset)
@@ -549,3 +695,71 @@ def test_only_partial_hits_yield_no_exact_hits(tmp_path: Path) -> None:
     snippets = _static_snippets(merged)
     assert snippets
     assert all("xref=unverified" in item for item in snippets)
+
+
+def _receipt_dir(root: Path, count: int, payload: bytes) -> dict[str, object]:
+    dex_dir = root / "dex-query"
+    dex_dir.mkdir()
+    receipts = []
+    for index in range(count):
+        receipt_id = f"{index:064x}"
+        (dex_dir / f"{receipt_id}.json").write_bytes(payload)
+        receipts.append({
+            "receipt_id": receipt_id,
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        })
+    return {"dex_query": {"receipts": receipts}}
+
+
+def test_collect_receipt_files_refuses_more_than_64(tmp_path: Path) -> None:
+    from apkscan.core.dex_query import collect_receipt_files
+
+    meta = _receipt_dir(tmp_path, 65, b'{"ok":true}')
+    with pytest.raises(DexQueryError) as excinfo:
+        collect_receipt_files(tmp_path, meta)
+    assert excinfo.value.reason == "dex_receipt_oversize"
+
+
+def test_collect_receipt_files_byte_budget_is_cumulative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import apkscan.core.dex_query as dex_query
+    from apkscan.core.dex_query import collect_receipt_files
+
+    monkeypatch.setattr(
+        dex_query, "DexQueryLimits", lambda: DexQueryLimits(input_bytes=20)
+    )
+    meta = _receipt_dir(tmp_path, 2, b"0123456789abcde")
+    with pytest.raises(DexQueryError) as excinfo:
+        collect_receipt_files(tmp_path, meta)
+    assert excinfo.value.reason == "dex_receipt_oversize"
+
+
+def test_read_relative_uses_bounded_stream_and_stats_before_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import apkscan.core.dex_query as dex_query
+
+    dex_dir = tmp_path / "dex-query"
+    dex_dir.mkdir()
+    receipt_id = "a" * 64
+    payload = b'{"ok":true}'
+    (dex_dir / f"{receipt_id}.json").write_bytes(payload)
+    calls: list[int] = []
+    real_read_limited = dex_query.read_limited
+
+    def spy(stream, max_bytes):  # noqa: ANN001, ANN202
+        calls.append(max_bytes)
+        return real_read_limited(stream, max_bytes)
+
+    monkeypatch.setattr(dex_query, "read_limited", spy)
+    blob = dex_query._read_relative(tmp_path, f"dex-query/{receipt_id}.json", 64)
+    assert blob == payload
+    assert calls == [64]
+
+    oversized = "b" * 64
+    (dex_dir / f"{oversized}.json").write_bytes(b"x" * 128)
+    with pytest.raises(DexQueryError) as excinfo:
+        dex_query._read_relative(tmp_path, f"dex-query/{oversized}.json", 64)
+    assert excinfo.value.reason == "oversize"
+    assert calls == [64]
