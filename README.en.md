@@ -2,141 +2,91 @@
 
 <p align="center">
   APK forensic analysis CLI<br>
-  <sub>Turn samples, traffic and saved web evidence into traceable leads.<br>Preserve sources, coverage and gaps; outputs support review, not automatic attribution.</sub>
+  <sub>Turns samples, traffic and existing web evidence into leads, preserving sources, coverage and open items.<br>Outputs support review; they do not replace original evidence or human attribution.</sub>
 </p>
 
 <p align="center"><a href="README.md">中文</a> &nbsp;·&nbsp; <strong>English</strong></p>
-<p align="center">
-  <a href="#how">How it works</a> &nbsp;·&nbsp; <a href="#start">Quick start</a> &nbsp;·&nbsp;
-  <a href="#packages">Packages and review</a> &nbsp;·&nbsp; <a href="#limits">Limits</a> &nbsp;·&nbsp; <a href="#docs">Docs</a>
-</p>
 <p align="center">
   <a href="https://github.com/s-silt/fxapk/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/s-silt/fxapk/actions/workflows/ci.yml/badge.svg"></a>
   <a href="https://github.com/s-silt/fxapk/releases/tag/v1.18.1">v1.18.1</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
 </p>
 
-CLI command and PyPI package: `fxapk`; compatible command alias: `apkscan`. Run from Python or source, directly or through an AI assistant. No exe or GUI is provided.
+Command `fxapk` (alias `apkscan`), PyPI package `fxapk`. For people and AI assistants running the source or the Python package directly; no exe or GUI is provided. See [CHANGELOG.md](CHANGELOG.md) for changes.
 
-Patch version **1.18.1** fixes concurrent shared-cache clock sampling and Windows owned-process exit confirmation, completes test synchronization and Chinese release notes, and updates user documentation and package guidance. Upgrades preserve historical packages and the legacy route; releasing code does not migrate cases, modify devices, or automatically query third-party services. See [CHANGELOG.md](CHANGELOG.md).
-
-| Capability | Scope |
+| Core capability | Description |
 | --- | --- |
-| **Static extraction** | APK configuration, endpoints, components and packer signals; unavailable capabilities remain explicit |
-| **Dynamic evidence** | PCAP, socket attribution and available probes on authorized devices, with separate round records; optional UI screenshots and layouts |
-| **Infrastructure attribution** | Resource holder, BGP, hosting/CDN and operator roles stay distinct, with per-source receipts |
-| **Packaging and review** | Hash-bound reports and attachments, separate Phase-2 coverage, decisions and review status |
-
-<a id="how"></a>
-
-## How it works
+| **Static extraction** | Parses configuration, endpoints, components and packer signals in the APK; marks gaps explicitly when a capability is missing |
+| **Dynamic evidence** | Collects PCAP, socket attribution and probe data on authorized devices, recorded per round; an optional UI plugin adds screenshots and layouts |
+| **Infrastructure attribution** | Records resource holder, BGP, hosting/CDN and operator roles separately, with per-source receipts |
+| **Packaging and review** | Hash-pins reports and attachments; Phase-2 coverage, decisions and review status are recorded independently |
 
 ```text
-APK / saved web evidence       Authorized device capture
-             └────────► Structured report ◄────────┘
-                              │
-                    Sources, coverage and gaps
-                              │
-                   Immutable Phase-1 package
-                              │
-              Phase-2 inventory → decisions → gate
-                              │
-                  Independent review materials
+APK / saved web evidence        Authorized device capture
+          │                            │
+          └────► Structured report ◄───┘
+                         │
+           Sources, coverage, gaps and next steps
+                         │
+            Immutable Phase-1 evidence package
+                         │
+        Phase-2 inventory → human decision → gate
 ```
 
-Core static analysis needs no JDK or device. Some analyzers and dynamic capabilities require additional tools. `selfcheck` reports available capabilities; `analyzer_status` and `source_status` report what actually ran. Not found does not mean absent, and capture completion does not establish evidence closure.
-
-<a id="start"></a>
+Static analysis needs no JDK or device; some analyzers and dynamic capabilities need additional tools. `selfcheck` shows current capabilities; `analyzer_status` and `source_status` in the report describe what actually ran. Not found does not mean absent, and a completed capture does not mean evidence closure.
 
 ## Quick start
 
-Requires **Python 3.11+**. Start with offline static analysis; review the [default behaviors](#limits) before online or device operations.
-
-### 1. Install and check the version
-
 ```bash
-python -m pip install "fxapk==1.18.1"
-fxapk --version
+python -m pip install "fxapk==1.18.1"     # or clone, then python -m pip install -e .
 fxapk selfcheck
-```
-
-The [v1.18.1 release](https://github.com/s-silt/fxapk/releases/tag/v1.18.1) includes core 1.18.1 and independent UI plugin 0.1.1 wheels/source archives, plus `SHA256SUMS.txt`. Before installing a downloaded wheel, compare `Get-FileHash <file> -Algorithm SHA256` in PowerShell, or run `sha256sum -c SHA256SUMS.txt` on Linux. These files are not a complete offline dependency bundle.
-
-To obtain the released source, clone its tag; use the default master branch for current development:
-
-```bash
-git clone --branch v1.18.1 https://github.com/s-silt/fxapk.git
-cd fxapk
-python -m pip install -e .
-```
-
-Configure local service credentials using [.env.example](.env.example); keep them out of reports, shared commands and public repositories. `selfcheck` does not validate every account entitlement; query receipts record actual provider outcomes.
-
-### 2. Analyze and read the digest
-
-```bash
 fxapk analyze app.apk --offline --out out
 fxapk digest out/app.json
 ```
 
-An AI assistant can follow [AGENTS.md](AGENTS.md), given a sample path and explicit network/device scope. If the command is not on PATH, use `python -m apkscan.cli` instead of `fxapk`. Use the digest for navigation; verify conclusions against structured reports and original evidence.
+The [release page](https://github.com/s-silt/fxapk/releases/tag/v1.18.1) provides the wheel, source archives and `SHA256SUMS.txt`; verify hashes before installing. Configure online-service credentials locally per [.env.example](.env.example); they are never written into reports or the repository. If the command is not on PATH, use `python -m apkscan.cli` instead of `fxapk`.
 
-### 3. Continue within the authorized scope
+`digest` is for triage and navigation; formal conclusions must go back to the structured fields and original evidence in `report.json`. When delegating to an AI assistant, give it [AGENTS.md](AGENTS.md), the sample path, and whether network and device operations are in scope.
 
-| Task | Entry point and requirements |
+| Task | Entry point |
 | --- | --- |
-| Saved HTML, JS or HAR | `fxapk analyze-web <directory> --out out`; reads local evidence, with enrichment controlled separately |
-| Device inspection | `fxapk doctor --no-fix`; authorize repairs separately |
-| PCAP without Frida | `fxapk capture <package> --mode floor-only`; still requires adb, root and device-side tcpdump |
-| Multi-round automatic capture | `fxapk auto app.apk --strict-case` on an authorized dedicated device |
-| Android UI snapshots, layouts and fixed plans | Install the optional plugin, then use `fxapk ui ...`; see [installation and examples](ANDROID-UI.en.md) |
-| Enrichment and closure | `fxapk case close out/app.json`; requires network and report-write authorization |
+| Saved web pages, JS or HAR | `fxapk analyze-web <directory> --out out` |
+| Web supplement | Add `--web-supplement <local JSON>` to the first analysis; for an existing report use `fxapk supplement-web <report.json> --web-supplement <config> --out <new-out-dir>` (does not re-run the APK, does not touch devices) |
+| Device troubleshooting | `fxapk doctor --no-fix`, then repair per authorization |
+| PCAP floor without Frida | `fxapk capture <package> --mode floor-only` (still needs adb, root and device-side tcpdump) |
+| Multi-round automatic capture | `fxapk auto app.apk --strict-case` (authorized dedicated devices only) |
+| Android UI screenshots and action plans | Optional plugin `fxapk ui ...`, see [ANDROID-UI.en.md](ANDROID-UI.en.md) |
+| Follow-up queries and closure on an existing report | `fxapk case close out/app.json` (requires network and write-back authorization) |
 | Full command reference | [USAGE.en.md](USAGE.en.md) · `fxapk --help` |
 
-<a id="packages"></a>
+### Optional REA plugin (web observation / native address recovery)
+
+Disabled by default: even when installed it is not imported, registers no commands, and is not used for automatic supplement. Only when explicitly needed, set `FXAPK_ENABLE_REA=1` for that process (PowerShell `$env:FXAPK_ENABLE_REA='1'`). Enabling it does not authorize browser, device or network operations. `import` / `inspect` / `trace` only collect; `attach` only mounts verified observations into a new directory; they do not close cases automatically and do not promote observations into leads or runtime. Real Android WebView has not been device-verified. Commands, limits and boundaries: [plugins/fxapk-rea/README.md](plugins/fxapk-rea/README.md).
 
 ## Evidence packages and Phase-2 review
 
-Keep evidence packages, the corpus and historical materials outside the code worktree. Set `FXAPK_CORPUS` explicitly to the corpus directory. Stages exchange manifest-registered relative paths, content hashes and review receipts; they do not depend on a storage service or directory name.
+The code repository and case materials are kept separate: evidence packages, the corpus and historical materials live outside the worktree, and `FXAPK_CORPUS` points explicitly at the corpus directory. `case phase2 ... --case-dir <case-directory>` verifies a package by manifest-registered paths and hashes; `case review` requires `--gate-receipt`, and matching `coverage.json` and `decisions.jsonl` must sit beside it. On upgrade, preserve originals and generate new Phase-2 materials in a working copy. See [PRE-REPORT-WORKFLOW.md](PRE-REPORT-WORKFLOW.md) for details.
 
-`case phase2 ... --case-dir <case-directory>` reads `case-package.json` in direct child package directories and verifies manifest-registered paths and hashes. Legacy scripts that assume `report.json` need the new CLI when the manifest names another file; do not rename historical evidence. Generate new Phase-2 materials in a working copy.
-
-`case review` requires `--gate-receipt` plus matching `coverage.json` and `decisions.jsonl` beside the receipt. `corpus add --package` requires byte-identical report content. See the [pre-report workflow](PRE-REPORT-WORKFLOW.md) for details.
-
-| State | Meaning |
+| State | What it answers |
 | --- | --- |
-| `package_integrity` | Manifest, paths and attachment hashes agree |
-| `analysis` | Analyzers completed their work |
-| `closure` | Runtime, attribution and evidence-request targets satisfy evidence gates |
-| `review` | The exact package hash was reviewed |
+| `package_integrity` | Whether manifest, paths and attachment hashes agree |
+| `analysis` | Whether analyzers ran completely |
+| `closure` | Whether runtime, attribution and evidence-request targets pass the evidence gates |
+| `review` | Whether the exact package hash was accepted on review |
 
-These states are independent. An accepted review cannot turn partial closure into complete closure; changed materials invalidate previous reviews. `auto --strict-case` exits `0 / 5 / 6` for `complete / partial / failed`.
-
-<a id="limits"></a>
+The four states do not imply each other. `review=accepted` does not turn `closure=partial` into complete. `auto --strict-case` exits `0 / 5 / 6` for `complete / partial / failed`.
 
 ## Defaults and limits
 
-- **`analyze` is online by default.** Domain/IP queries go to third-party enrichment services; recursive and authoritative DNS may observe queries. Default enrichment does not directly fetch sample business URLs, but it does not promise zero observable traffic. Use `--offline`.
-- **`doctor` repairs devices by default; `auto` installs and runs samples.** Automatic bypass additionally needs an original baseline, a recommendation and both `--allow-behavior-modification --antidetect java`. Modified-runtime evidence cannot independently close a case. Default capture/auto still require Frida.
-- **`digest` provides limited redaction by default.** Sensitive category values and some pattern-shaped PII in lead text are masked. Names, addresses, non-Chinese phone numbers and other free text are not guaranteed to be removed. `--no-redact` restores raw values.
+- **`analyze` is online by default.** Domain/IP values go to third-party enrichment services and DNS queries may be observed; it does not proactively fetch sample business URLs but does not promise zero traffic. For offline use `--offline`.
+- **`doctor` repairs devices by default; `auto` installs and runs the sample.** The unpack-and-repackage bypass additionally needs an original baseline, a tool recommendation, and the `--allow-behavior-modification --antidetect java` double gate; behavior-modification evidence cannot close a case alone.
+- **`digest` applies limited redaction by default.** Sensitive category values and fixed-pattern privacy fields in lead free text are masked; names, addresses, overseas numbers and other free text are not guaranteed to be removed. `--no-redact` restores raw values.
 
-**Review other raw-value outputs separately:** `jsonl`, `diff`, `lead show/restore/replay`, `corpus events/ls/seen/shared-config/shared-native/shared-build-env/link-candidates`, `probe-leads`, `pcap-leads`, CSV, HTML/PDF, generated letters, corpus records, `case_correlation.json` and `report.json`. Internal evidence views are not sanitized publications.
+Other outputs emit sensitive values as-is and need separate review: `jsonl`, `diff`, `lead show/restore/replay`, `corpus events/ls/seen/shared-config/shared-native/shared-build-env/link-candidates`, `probe-leads`, `pcap-leads`, CSV, HTML/PDF, generated documents, corpus records, `case_correlation.json` and `report.json`. `corpus link-discover/link-explain/link-groups` default to `--evidence-values omit`; explicit `raw` restores original values; `link-labels-validate/link-evaluate/link-readiness/link-train` output aggregates only.
 
-`corpus link-discover/link-explain/link-groups` default to `--evidence-values omit`; explicit `raw` restores original values. `link-labels-validate/link-evaluate/link-readiness/link-train` return aggregates. These separate projections do not broaden the digest guarantee.
+Collect and analyze only within lawful authorization. Shared CDN, ASN, certificates or technical anchors alone cannot prove an operator or common ownership. This version has synthetic regression and cross-platform CI; it does not claim real-device or all third-party account acceptance.
 
-Use only within lawful authorization. Shared CDN, ASN, certificates or technical anchors cannot alone establish an operator or common ownership. The source catalog does not prove account access, free quota or available budget. Synthetic regression and cross-platform CI do not establish real-device, provider-account or file-sync conflict acceptance.
+## Development
 
-<a id="docs"></a>
+Before developing from source run `git config core.hooksPath .githooks`. For code behavior changes run Ruff, Pyright, pytest and the strict incremental leak scan; fixtures use synthetic data, and case values or credentials must never enter the repository. See [USAGE.en.md](USAGE.en.md#developing-from-source), [ARCHITECTURE.md](ARCHITECTURE.md), [COMPANION-TOOLS.en.md](COMPANION-TOOLS.en.md).
 
-## Documentation and development
-
-| Topic | Reference |
-| --- | --- |
-| Commands, outputs and corpus | [USAGE.en.md](USAGE.en.md) · [Chinese reference](USAGE.md) |
-| Android CLI setup, permissions, plans and recovery | [ANDROID-UI.en.md](ANDROID-UI.en.md) |
-| Agent operations and authorization | [AGENTS.md](AGENTS.md) |
-| Capture rounds, Phase 2 and pre-report materials | [PRE-REPORT-WORKFLOW.md](PRE-REPORT-WORKFLOW.md) |
-| Architecture and evidence semantics | [ARCHITECTURE.md](ARCHITECTURE.md) |
-| Companion tools | [COMPANION-TOOLS.en.md](COMPANION-TOOLS.en.md) · [tools/TOOLCHAIN.md](tools/TOOLCHAIN.en.md) |
-| Changes | [CHANGELOG.md](CHANGELOG.md) |
-
-Enable `git config core.hooksPath .githooks` before development. For behavior changes, run Ruff, Pyright, pytest and the strict incremental leak scan. Documentation-only changes require format, reference, relevant contract and leak checks; required CI must still pass before merging. Use synthetic fixtures; never commit case values or credentials. License: [MIT](LICENSE).
+License: [MIT](LICENSE).

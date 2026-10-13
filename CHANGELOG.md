@@ -5,6 +5,14 @@
 
 ## 待发布
 
+- 新增网页证据链补采：`analyze` / `analyze-web` / `auto` 接受 `--web-supplement <本地JSON>`，新增 `fxapk supplement-web` 只对已有报告补网页材料。低信任候选以待核 / LOW / `batch_reference` 进入现有解析器，不自动富化、不改闭环。
+- 新增可选插件 `fxapk-rea`（`import` / `inspect` / `trace` / `attach` / `native ...`）：REA 6.4.0 离线导入与观察、独立 `fxapk-cdp-trace` 同窗口采集、观察挂载与 PE/ELF 地址恢复。**插件默认关闭**，仅进程环境 `FXAPK_ENABLE_REA=1` 时导入、注册命令或参与自动补采；`selfcheck` 对已安装但未启用的 REA 报 `disabled`。
+- 新增 `fxapk dex capabilities|query|import` 与可选插件 `fxapk-asc`：DEX 字符串引用查询在 `python -I` 隔离 worker 中执行，回执绑定 APK 身份；带 `--apk` 导入时按指令边界核验每条 exact 引用，矛盾整次拒绝 `xref_mismatch`，无可核验引用记 `no_exact_hits`。导入线索带 `evidence_id` 与 `case_evidence`，Phase-2 可见。
+- 新增运行时诊断与取消/交付退出语义：取消退出码 130，报告交付失败退出码 1；富化可取消，取消后晚到的结果不发布；provider 失败相互隔离；进程树按所有权清理。
+- 修正复审发现的证据边界问题：trace 截断标记跨栈传播、detach 后子 session 归属失效、命令预算按已发送数计入错误响应、投影失败保留原件；attach 搬运上一轮解析进报告的观察树与 DEX 回执文件并拒绝缺失/损坏/链接；`capture_started` 只接受严格布尔并写入已保存回执；UI 交互回执在网页观察分支同样保存；单轮失败路径不再导入上次运行的诊断。
+- JADX 固定 `--threads-count 1` 以保证证据输出可复现；UI 捕获截止时间按请求窗口计算；REA trace 原始包上限 1 MiB，源码超限记 `source_unavailable` 不冒充已捕获。
+- 精简公开文档（README、AGENTS、USAGE、ARCHITECTURE、PRE-REPORT-WORKFLOW、插件 README 与网页证据技能），去除重复叙述与设备特定步骤，内容边界不变。
+
 ## 1.18.1 — 2026-10-08
 
 - Windows 受控执行在返回前有界确认本次 Job 成员的原进程句柄已退出；Job 活跃计数归零不再单独代表终止完成。成员通知缺失、原句柄等待失败或预算耗尽均保守报告未确认，并保留原超时断言与真实存活进程的反例测试。

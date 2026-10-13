@@ -1,171 +1,134 @@
-# fxapk command and data reference
+# fxapk command and data conventions
 
 [Project overview](README.en.md) · [中文](USAGE.md)
 
-## Command table
+Full flags: `fxapk --help`; if `fxapk` is not installed as a command, use `python -m apkscan.cli`.
 
-If you'd rather type commands yourself, these are the common ones. Full flags: `fxapk --help`; if
-`fxapk` isn't on your PATH, swap in `python -m apkscan.cli`.
+## Command table
 
 | Goal | Command |
 |---|---|
-| Analyse an APK (**online by default**) | `fxapk analyze app.apk --out out` |
-| Same, but **offline** (no domain / IP leaves the machine) | `fxapk analyze app.apk --offline --out out` |
-| Capture authorized HTTP responses (GET only, no browser JS) | `fxapk capture-web https://example.invalid/start --authorized --out private/capture.har` |
-| Analyse saved HTML/JS/HAR (offline by default; `--online` enables enrichment only) | `fxapk analyze-web <dir> --out out` |
-| Run a whole folder | `fxapk batch <dir>` |
-| Full pipeline: doctor → static → unpack/reanalyze → PCAP → general probes → targeted capture → merge (changes an authorized test device; without a device, dynamic steps are skipped) | `fxapk auto app.apk --out out` |
-| Same, as an acceptance gate (exit 0/5/6 = complete/partial/failed) | `fxapk auto app.apk --out out --strict-case` |
-| Top up an existing report with multi-source lookups and five-layer attribution | `fxapk case close out/app.json` |
-| Review an exact evidence package (requires a valid PASS receipt and its sibling materials) | `fxapk case review out/case-package.json --reviewer reviewer --status accepted --gate-receipt phase2/gate-receipt.json --out out/case-review.json` |
-| Squeeze a report into a one-page summary (**redacted by default**) | `fxapk digest out/app.json` |
-| Same, but with raw values for the sensitive fields | `fxapk digest out/app.json --no-redact` |
-| Android UI screenshots, layouts and fixed actions (optional plugin) | [Setup and plan examples](ANDROID-UI.en.md); `fxapk ui --help` |
+| Analyse an APK (**online by default** for attribution) | `fxapk analyze app.apk --out out`; add `--offline` for no network |
+| Authorized online retention of HTTP redirects and responses (no JS execution) | `fxapk capture-web https://example.invalid/start --authorized --out private/capture.har` |
+| Analyse saved HTML/JS/HAR (offline by default) | `fxapk analyze-web <dir> --out out`; `--online` enables attribution enrichment only |
+| Batch | `fxapk batch <dir>` |
+| Full pipeline (dynamic runs only on a rooted device; **modifies the device**) | `fxapk auto app.apk --out out`; add `--strict-case` for the acceptance gate (exit 0/5/6 = complete/partial/failed) |
+| Multi-source lookups and five-layer attribution on an existing report | `fxapk case close out/app.json` |
+| Freeze a Phase-1 evidence package | `fxapk case package out/app.json --case-id CASE-001 --producer analyst --out out/case-package.json` |
+| Verify a package and reconcile against the out-of-worktree corpus (dry-run by default) | `fxapk corpus reconcile out/case-package.json --corpus <dir> [--apply]` |
+| Phase-2 review record | `fxapk case review out/case-package.json --reviewer reviewer --status accepted --gate-receipt phase2/gate-receipt.json --out out/case-review.json` |
+| View the four states side by side | `fxapk case status out/case-package.json --review out/case-review.json` |
+| One-page digest (**redacted by default**) | `fxapk digest out/app.json`; add `--no-redact` for raw values |
+| Android UI screenshots, layouts and fixed actions (optional plugin) | `fxapk ui --help`, see [ANDROID-UI.en.md](ANDROID-UI.en.md) |
 | Capture traffic on a device | `fxapk capture <package>` |
-| Device health check (**fixes by default**: deploys frida-server / installs CA) | `fxapk doctor` |
-| Check only, change nothing | `fxapk doctor --no-fix` |
-| Environment self-check (what works / doesn't / how to fix) | `fxapk selfcheck` |
-| Batch-enrich a target list (`--dry-run` by default: estimates quota, sends nothing; resumable) | `fxapk enrich batch -t targets.txt -o enrich_out` |
-| Ingest a report into the corpus | `fxapk corpus add out/app.json --corpus <dir>` |
-| See whether detection improved or regressed across versions | `fxapk corpus regress --corpus <dir>` |
-| Have I seen this value before (look it up across samples) | `fxapk corpus seen <value> --corpus <dir>` |
-| Find samples built in the same environment | `fxapk corpus shared-build-env --corpus <dir>` |
-| Rank explainable technical-link candidates (raw identifiers; review priority, not probability) | `fxapk corpus link-candidates --corpus <dir>` |
-| Validate an append-only private label file outside the worktree (aggregate only) | `fxapk corpus link-labels-validate --labels <labels.jsonl>` |
-| Evaluate rules-v2 against independent labels (circular labels excluded; aggregate only) | `fxapk corpus link-evaluate --corpus <dir> --labels <labels.jsonl>` |
-| Discover recurring anchors inside reviewed groups (raw values omitted by default) | `fxapk corpus link-discover --corpus <dir> --labels <labels.jsonl>` |
-| Explain a pair / build anonymous review groups (defaults to `omit`) | `fxapk corpus link-explain <SHA> <SHA> --corpus <dir>` / `fxapk corpus link-groups --corpus <dir>` |
-| Check the train/holdout component-split data gate (aggregate only) | `fxapk corpus link-readiness --corpus <dir> --labels <labels.jsonl>` |
-| Train an experimental reranker after the gate passes (otherwise `blocked`) | `fxapk corpus link-train --corpus <dir> --labels <labels.jsonl> --model-out <model.json>` |
-| Shadow-rerank deterministic candidates without expanding recall or bypassing caps | `fxapk corpus link-candidates --corpus <dir> --model <model.json>` |
-| Export leads as CSV | `fxapk export out/app.json` |
-| Diff two reports / flatten a report into agent-readable JSONL | `fxapk diff a.json b.json`, `fxapk jsonl out/app.json` |
-| Query a built JADX persistent index: where a value is used / whether a static call path exists between two methods (**bounded**; an empty result ≠ unreachable; `resolution` is only `name_unique` / `ambiguous` / `not_in_index` — not method binding) | `fxapk jadx usage <value> --jadx-cache-root <cache> --jadx-index <key>`, `fxapk jadx callpath 'cls#m/0' 'cls#n/1' --jadx-cache-root <cache> --jadx-index <key>` |
-| Recognition line (read-only / offline; models can only write `proposed`): project reanalysis requests from the judgment ledger / validate label files / build & validate leak-proof splits / evaluate with an explicit promotion gate (exit 4 when the gate fails — usable as a CI gate) | `fxapk recognize reanalysis <ledger> --out <requests.jsonl>`, `fxapk recognize labels validate …`, `fxapk recognize split build\|validate …`, `fxapk recognize evaluate …` |
+| Device health check | `fxapk doctor --no-fix` checks only; `fxapk doctor` **makes repairs** (installs frida-server / CA) |
+| Environment self-check | `fxapk selfcheck` |
+| Batch target lists (default `--dry-run` only estimates quota; `--resume` supported) | `fxapk enrich batch -t targets.txt -o enrich_out` |
+| Report ingest / cross-version regression / reverse lookup / shared build environment | `fxapk corpus add out/app.json` / `regress` / `seen <value>` / `shared-build-env` (all need `--corpus <dir>`) |
+| Cross-case candidates (raw values; scores are not probabilities) | `fxapk corpus link-candidates --corpus <dir> [--model <model.json>]` |
+| Label validation / offline evaluation / duplicate-anchor discovery (aggregate output; discover emits no raw values by default) | `fxapk corpus link-labels-validate --labels <jsonl>` / `link-evaluate` / `link-discover` |
+| Explain a candidate / anonymous relationship graph | `fxapk corpus link-explain <SHA> <SHA>` / `link-groups` (default `--evidence-values omit`) |
+| Training gate / experimental reranker (model writes only outside the worktree) | `fxapk corpus link-readiness` / `link-train --model-out <model.json>` |
+| Export CSV / diff / JSONL | `fxapk export out/app.json` / `fxapk diff a.json b.json` / `fxapk jsonl out/app.json` |
+| JADX usage locations, call paths, family comparison | `fxapk jadx usage <value> --jadx-cache-root <cache> --apk-sha256 <sha>` / `jadx callpath` / `jadx compare <a.json> <b.json>` |
+| DEX string-reference query and import (optional fxapk-asc isolated worker) | `fxapk dex query` / `fxapk dex import`, see [plugins/fxapk-asc/README.md](plugins/fxapk-asc/README.md) |
+| Recognition line (read-only/offline; exit 4 when the promotion gate fails) | `fxapk recognize reanalysis` / `labels validate` / `split build\|validate` / `evaluate` |
 
-Every `corpus` command that reads or writes the sample library needs a library directory: pass
-`--corpus <dir>`, or set `FXAPK_CORPUS` beforehand. The library root holds sample data — keep it
-outside the code repository.
+## Passive resource profiles and batch enrichment
 
-After upgrading to rules-v2, an older manifest without `repack_identity_verdict` makes
-`link-candidates` return `status=partial` plus a structured `migration.next_action`, because the
-repack ownership cap cannot be trusted without that projection. Run
-`fxapk corpus reindex --corpus <dir>` explicitly to rebuild it from the stored reports; report bytes
-are not changed. A present value outside `self_built|repack_suspected|unknown` is also treated as
-unassessed. If fields are still missing afterwards, those reports were never assessed and must
-be re-analysed with the current fxapk, then re-added/reindexed. Reindex never converts unassessed to
-`unknown`. For large connected components, `link-groups` emits the exact
-`transitive_only_pair_count` and at most 100 stable preview pairs instead of materializing the full
-transitive closure.
+`enrich batch` can explicitly select `--providers fofa_profile,fofa_host,daydaymap_profile`. Dry-run first to verify the services, disclosure scope and budget, then add `--no-dry-run`. Search returns a bounded first page only and records reported totals, actual returns and coverage status; unknown totals, missing fields and permission failures do not mean "no assets". Product, certificate and survey times help judge the service type; they cannot alone confirm a cloud instance, tenant or operator.
 
-The verdict lands in `report.meta.closure`: `complete` means all five layers of the primary target
-carry evidence (runtime, resource registration, BGP announcement, hosting / distribution, final
-attributed party); `partial` means there's a named gap; `failed` means static analysis itself failed,
-or dynamic evidence was required but no business traffic was captured, or there was no target to
-close on at all. A target still behind a CDN with no origin located never counts as complete.
+Results append per target to `enrich.ndjson`; `enrich.csv` is a rebuilt projection. Response hashes are reconciliation anchors and normalized fields are bounded redacted previews, not raw-response archives. After permission/quota errors and consecutive-failure breakers, the remaining targets of that run are marked skipped. `--credential-slot 2` supports Quake, DayDayMap and their profiles; it does not rotate credentials automatically.
 
-### Don't confuse "couldn't see it" with "the tool failed"
+When `https://fofoapi.com` is configured, an HTTP 200 explicitly marked "official error message [-403] insufficient access permission" <!-- leak-scan: allow public relay API hostname required for provider-specific protocol compatibility -->
+is recorded as `failed/upstream_permission_denied`; it cannot be used to declare the local relay key invalid.
 
-`visibility` in the report says whether the **sample's content** was visible; `analysis_status` says
-whether the **tooling** ran healthy. Every analyzer succeeding (`analysis_status=complete`) while the
-DEX is a stub and six conclusions are off the table — both true at once. `blocked_claims` names the
-claims that can't be made yet; `next_actions` says how to close the gap.
+After service recovery add `--recover-transient`: calls are spaced per source (`--provider-interval`, default 2 s); transient rate limits, timeouts or resolution failures get at most one retry per source (`--retry-delay`, default 15 s); Retry-After over 60 s defers; authentication, permission and quota errors are not retried. The original failure and the retry are recorded separately — recovery does not erase historical gaps.
 
-### Self-built shell vs. a repackaged legitimate app
+Hunter reads the account's free balance before searching and reserves credits in a local ledger (`~/.fxapk/hunter-quota.sqlite3`, overridable via `FXAPK_HUNTER_QUOTA_DB`); the same account shares a daily 500-point cap by UTC+8 date, and an unknown balance or failed reservation stops the search. `FXAPK_HUNTER_CREDIT_MODE=free_only` returns `disabled / free_only_billing_unverified` before any request. Account configuration: [.env.example](.env.example).
 
-`repack_identity` returns `self_built`, `repack_suspected` or `unknown`. Self-built does not mean
-every endpoint, domain or build path belongs to the operator: exclude SDKs, packers and shared
-infrastructure individually. For suspected repacks, inherited and added assets remain unresolved
-until compared with the official build of the same version. Do not assign all assets to either party.
+## JADX index
 
-When a sample looks repackaged, the tool states only that it appears **resigned** — never that
-something was injected. Establishing that requires a file-by-file diff against the official build of
-the same version, which the sample alone cannot provide.
+Multi-index queries read `fxapk-jadx-index-map.json` at the cache root by default (or `--index-map`). Older 1.6 indexes keep postings only for the values selected when the index was built; `coverage=complete` does not guarantee coverage of new values, and queries also report `query_coverage`. New analyses run with `--jadx-cache-root` save bounded Java snapshots under `query-sources` for later queries on new values. Snapshots and the `--out` receipt contain controlled material — do not publish them. `callpath`'s `name_unique` only means the simple name is unique; it does not prove method binding. `jadx compare` similarity does not mean the same operator.
+
+## Corpus
+
+Every `corpus` subcommand needs `--corpus <dir>` or `FXAPK_CORPUS` pointing at a library directory **outside the git worktree**.
+
+- Report content can be rebuilt into `manifest.jsonl`; human-confirmed cross-case links, quarantine state and ingest order live only in the non-derived `catalog.jsonl`. One report can bind multiple `case_id`s; ordinary queries exclude `quarantined` by default. For legacy/dev versions run `corpus versions` to audit first, then explicitly `corpus quarantine-version --apply`; the tool never deletes historical evidence automatically.
+- After rules-v2, an older manifest without `repack_identity_verdict` makes `link-candidates` return `status=partial` plus `migration.next_action`; run `fxapk corpus reindex --corpus <dir>` to rebuild the projection (report bytes are not changed). If the field is still missing afterwards, that report was never evaluated and must be re-analysed with the current fxapk — "unassessed" cannot be rewritten as `unknown`.
+- The case-level IOC index only accepts `Lead.source_refs[]` / `Endpoint.evidences[]` entries carrying at least one explicit `case_evidence` scope.
+- `corpus migrate-catalog` moves the old `manifest.case_id` into `catalog.jsonl`: dry-run first, then `--apply`. **Migration is not reversible — back up the whole directory before `--apply`**: a manifest restored by `corpus restore` is re-materialized into the catalog immediately, and deleting `catalog.jsonl` by hand fail-closes the whole library.
+- `corpus reconcile` is read-only and lists the plan by default; `--apply` only adds immutable reports or merges case relations. Byte conflicts, quarantine records or package-hash changes exit non-zero. Phase 2 always consumes exact package hashes.
+
+## Cross-stage evidence contract and the four states
+
+Phase 1 produces the report, attachments and the immutable `case-package.json`; Phase 2 is read-only verification producing a separate `case-review.json` and must not overwrite Phase 1. A package requires three reproduction anchors: a 64-hex `sample_sha256`, a non-empty `tool_version` and a 16-hex `ruleset_digest`; a missing field or an `unknown` placeholder refuses the package.
+
+- `package_integrity`: whether manifest, path boundaries and attachment hashes agree
+- `analysis`: whether analyzers/pipeline ran completely
+- `closure`: whether runtime, attribution and evidence-request targets are closed
+- `review`: whether the exact package hash was accepted, change-requested or invalidated
+
+The four states do not imply each other; after a report or attachment changes, old reviews show `stale`. `closure=complete` requires evidence on all five layers of the primary target (runtime, resource registration, BGP announcement, hosting/distribution, final attributed party); a target still fronted by a CDN with no origin located is not judged complete.
+
+Since report schema 1.2 every Evidence carries `scope`: `case_evidence` (direct evidence for the current case), `batch_reference` (batch/cross-case reference, review aid only — cannot be promoted to "recommend evidence request" or satisfy closure), `legacy_unspecified` (migrated old reports). This qualification gate applies to digests, evidence-request letters, IOCs, JSONL and HTML/PDF; `--only-investigate` excludes reference values. Closure goes through the same safe projection: a claimed `complete` with an empty target list is consumed as `failed`, and a target without explicit `case_evidence` can only be consumed as `partial`; Phase-1 packaging rejects a false `complete` outright. `evidence_scope` cannot be revoked with `lead restore/replay`.
+
+Persisted JSON rejects `NaN` / `Infinity`; a failed write does not overwrite an existing report.
+
+### Two field groups not to confuse
+
+- `visibility` (was the sample's content visible) vs `analysis_status` (did the tooling run healthy): every analyzer succeeding while the DEX is a stub and six conclusions cannot be made can both be true at once. `blocked_claims` names the conclusions that cannot be made; `next_actions` says how to close the gap.
+- `repack_identity`: `self_built` still requires excluding public SDKs, packers and shared infrastructure; under `repack_suspected` the inherited vs added scope is unresolved and must be diffed against the official package of the same version. The tool only says "suspected re-signing", not "what was injected".
 
 ## Output
 
-For `app.apk`, the basename is `app`; web reports use the evidence directory/origin label.
+- `out/app.html` — single-file internal evidence view containing raw values; review separately before sharing
+- `out/app.json` — full data; `report.meta.closure` holds the acceptance verdict, five-layer evidence, source coverage, gaps and next steps
+- `case-package.json` / `case-review.json` — Phase-1 package and Phase-2 review record
+- `--fmt pdf` exports PDF (needs local Chrome or Edge)
 
-- `out/app.html` — self-contained single file (internal evidence view; review sensitive values before sharing)
-- `out/app.json` — full structured data (machine-readable)
-- `--fmt pdf` — optional PDF export (needs local Chrome / Edge)
+## Pinned dependencies and reproduction
 
-## Capture, enrichment and evidence contracts
+Parsing is owned by upstream libraries — a different androguard version may produce a different report. [`requirements.lock`](requirements.lock) pins the runtime dependencies:
 
-CLI `auto` defaults to three observation rounds after unpack/reanalysis: PCAP, general probes,
-then supported targeted observers. Use `--single-round` for the older route; programmatic
-`auto.run` remains opt-in. Rounds retain separate identity, failures, artifacts and quality.
-They do not grant behavior-modification authorization, or allow combining unrelated payload
-counts into complete evidence. Default capture/auto still require Frida; explicit
-`capture --mode floor-only` needs adb, root and device-side tcpdump.
+```bash
+python -m venv .venv-forensic
+.venv-forensic/bin/pip install -r requirements.lock
+.venv-forensic/bin/pip install --no-deps .
+```
 
-Passive profiles are explicitly selected as `fofa_profile,fofa_host,daydaymap_profile` in
-`enrich batch --stage api --providers ...`. Batch defaults to dry-run; add `--no-dry-run`
-only with target disclosure, provider access and budget authorized. FOFA views are one source
-family, not independent corroboration. Results are bounded first-page observations; missing
-fields, unknown totals and permission failures do not establish absence. Quake and DayDayMap
-(including its profile) support `--credential-slot 2`; credentials never rotate automatically.
-
-Use `case package` to freeze report/attachment hashes, then `corpus reconcile` to preview library
-changes (explicit `--apply` writes). `case phase2 --help` lists inventory, triage, decision,
-materialize and gate commands. The case directory contains direct child package directories;
-the manifest determines report names. Keep `coverage.json` and `decisions.jsonl` beside the gate
-receipt. `case review` requires that matching PASS receipt. `case prepare-materials` produces
-review materials, not a final report or attribution decision.
-
-Package integrity, analysis, closure and review are separate states. Accepted review does not
-turn partial closure into complete closure. Preserve historical packages and generate new
-materials in a working copy. Legacy scripts and native CLI have different filename assumptions;
-see the [pre-report workflow](PRE-REPORT-WORKFLOW.md) and the extended [Chinese reference](USAGE.md).
-
-## Reproducibility
-
-Use the code, rules and `requirements.lock` saved for the intended version, in an isolated
-environment. Install the lock first, then the project with `--no-deps`. The report records
-`meta.dependency_versions`; current pins do not recreate every historical environment.
-Preserve sample hashes, parameters, external tools, caches, raw responses, device state and
-capture times. Fixed dependencies alone cannot make online/dynamic reports byte-identical.
+To reproduce an old report use the code, rules and dependency lock of that time (`meta.dependency_versions` can be checked), and preserve the sample hashes, parameters, external tools, caches and raw responses. Online data and device state change over time; pinned dependencies do not guarantee byte-identical output.
 
 ## Developing from source
-
-Run this once after cloning to enable the pre-commit sensitive-data scan:
 
 ```bash
 git config core.hooksPath .githooks
 ```
 
-The hook scans **staged added lines**. Default blockers include suspected real IPs, credentials, case
-names, contact identifiers, secondary package names, unjustified exemptions and bulk exemptions.
-Strict mode also blocks domain/context findings. An inline exception needs `leak-scan:` followed by
-`allow` and a valid line-specific reason. For committed changes, run
-`fxapk leak-scan --base origin/master --strict`; an empty staging area does not validate the branch.
-CI checks the PR diff and tracked source/tests independently.
+The hook scans staged added lines and by default blocks suspected real IPs, credentials, case names, contact identifiers, secondary package names, and unjustified or bulk exemptions. An inline exception must be written as `leak-scan:` + `allow` + a per-line reason. For committed changes use `fxapk leak-scan --base origin/master --strict` to check the entire candidate diff. Prefer the reserved ranges for test data — `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`, `2001:db8::/32`, `example.com`; when a reserved value cannot trigger the code path, use a mock or a justified synthetic fixture. A real address cannot be taken back once pushed.
 
-Prefer documentation-reserved ranges for test fixtures (`192.0.2.0/24` / `198.51.100.0/24` /
-`203.0.113.0/24` / `2001:db8::/32` / `example.com`). If a predicate cannot be exercised with these,
-use mocks or auditable synthetic fixtures with line-specific reasons, never case values. A real
-address, once pushed, is **irreversible** —
-rewriting history does not remove the platform's cached copies, so the only reliable fix is never
-writing it in the first place.
+Code behavior changes pass `python -m ruff check apkscan tests`, `python -m pyright apkscan` and `python -m pytest -q` locally.
 
-## Compliance
+## Compliance boundaries
 
-Use only within lawful authorization. Default enrichment queries third-party services and DNS; it does not directly request sample business URLs, but it does not guarantee zero observable traffic. Active collection requires the corresponding explicit authorization flags. Device operations require an authorized test device.
+For authorized security research and analysis only; no offensive or exploitation capability is provided. Passive by default: overseas servers get passive attribution only (RDAP / WHOIS / DNS / ASN / CT), sample business URLs are not actively fetched, but DNS queries may be observed. The few capabilities that send requests to a target are off by default and enabled only by explicit authorization flags; `capture-web` needs `--authorized` and performs bounded GETs only on targets inside the allowlist. Unpacking applies to the sample itself and runs on an authorized analysis machine.
+
+## Pre-report materials
+
+```bash
+fxapk case source-catalog --category all                      # read-only source catalog; sends no queries
+fxapk case provider-plan private/report.json --out private/provider-plan.json   # provider-role review queue
+fxapk case package private/demo/pkg/report.json --case-id DEMO --producer analyst --out private/demo/pkg/case-package.json
+fxapk case prepare-materials private/demo --out private/demo/pre-report.json
+```
+
+`review_required`, `partial` and `failed` are not confirmations of completion. The three capture rounds are filed separately; counts are not spliced across rounds. See [PRE-REPORT-WORKFLOW.md](PRE-REPORT-WORKFLOW.md) and [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Optional Android UI plugin
+
+`fxapk-android-ui 0.1.1` provides `ui capabilities` / `ui snapshot` / `ui run-plan`; device commands take an explicit `--serial`, and observations/plans also require `--package` and a new `--out`. Installing the plugin does not automatically attach UI observation to `auto`/`capture`. Screenshots, layouts and diagnostics may contain raw values. See [ANDROID-UI.en.md](ANDROID-UI.en.md).
 
 ## License
 
 [MIT](LICENSE)
-
-## Explicit transient recovery
-
-Use `fxapk enrich batch --help` to inspect `--recover-transient`, `--provider-interval` (default 2 seconds) and `--retry-delay` (default 15 seconds). First dry-run the bounded batch, including recovery calls; add `--no-dry-run` only within the authorized query scope. Recovery is opt-in: one provider receives at most one additional adapter call in the batch, and each attempt is retained. Server cooldowns and local rate limits still apply; Retry-After over 60 seconds defers recovery, and a failed retry stops that source. Authentication, upstream permissions, paid-credit uncertainty and quota errors do not become automatic retry candidates. A failed Shodan DNS resolution remains scoped to that target. Resume skips existing successful targets without erasing earlier gaps.
-
-FOFA relay upstream permission denial is distinct from relay-key authentication failure. Hunter reads the current account balance and uses durable reservations under a conservative local 500-point daily cap; this is not a guarantee of provider-wide free entitlement or control over another client's spending. Preserve partial results and read per-source receipts instead of treating failures as no records.
-
-Hunter's default `provider_default` mode checks the account's current free balance before searching and reserves credits in a durable local ledger. Unknown balance or a failed reservation stops the search. Reservations for the same account share a conservative 500-point daily cap using UTC+8 dates. The default ledger is `.fxapk/hunter-quota.sqlite3` under the user directory; `FXAPK_HUNTER_QUOTA_DB` must select an absolute path. This does not control other clients or guarantee free entitlement or server-side billing. Explicit `FXAPK_HUNTER_CREDIT_MODE=free_only` still returns `disabled / free_only_billing_unverified` before requests. See [.env.example](.env.example).
-
-## Android UI observation
-
-Core 1.18.1 with independent `fxapk-android-ui 0.1.1` provides `ui capabilities`, `ui snapshot` and `ui run-plan`. Install Android CLI and adb separately. Device commands require an explicit `--serial`; observations/plans also require `--package` and a new `--out` directory.
-
-See the [Android UI guide](ANDROID-UI.en.md) for installation, exact flags, a synthetic plan, permissions, outputs and recovery. Installing the plugin does not automatically attach UI observations to auto/capture CLI commands; round integration currently requires the programmatic API. Screenshots, layouts and diagnostics may contain raw values; digest redaction does not cover these files.
