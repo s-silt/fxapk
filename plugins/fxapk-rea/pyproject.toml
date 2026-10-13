@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fxapk-rea"
+version = "0.1.0"
+description = "Optional REA browser observation and offline evidence import for fxapk"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+dependencies = ["fxapk>=1.18.1", "typer"]
+
+[project.optional-dependencies]
+trace = ["websockets>=13.1,<14"]
+
+[project.entry-points."fxapk.plugins"]
+rea = "fxapk_rea.plugin:plugin_factory"
+
+[tool.setuptools.packages.find]
+where = ["src"]

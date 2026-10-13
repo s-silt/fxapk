@@ -8,6 +8,7 @@ from typing import Any
 
 from apkscan.core.integrity import sha256_file
 from apkscan.dynamic import capture
+from apkscan.dynamic.cancel import AutoCancelled
 from apkscan.dynamic.capture_plan import _as_dict
 
 logger = logging.getLogger(__name__)
@@ -48,11 +49,36 @@ def targeted_hooks(report: Any, *, unpacked: bool) -> tuple[str, ...]:
     return tuple(name for name in ("crypto", "okhttp", "jsbridge", "sqlcipher") if name in selected)
 
 
+def bounded_runtime_report(out_dir: str | Path) -> Path | None:
+    """只接受这个输出目录里面的 runtime_report.json。
+
+    符号链接、目录外路径和缺失文件都不算这次产物。不制造替代路径。
+    """
+    root = Path(out_dir)
+    candidate = root / "runtime_report.json"
+    try:
+        if candidate.is_symlink() or not candidate.is_file():
+            return None
+        resolved = candidate.resolve()
+        root_resolved = root.resolve()
+    except OSError:
+        return None
+    if resolved.name != "runtime_report.json" or resolved.is_symlink():
+        return None
+    try:
+        resolved.relative_to(root_resolved)
+    except ValueError:
+        return None
+    return resolved
+
+
 def run_rounds(package: str, *, report: Any, unpacked: bool, out_dir: str,
                duration: int = 60, serial: str | None = None, sample_sha256: str | None = None,
                runner: Callable[..., Any] | None = None,
-               before_round: Callable[[str], None] | None = None,
-               during_round: Callable[..., object] | None = None) -> list[dict[str, Any]]:
+               before_round: Callable[[str], object] | None = None,
+               during_round: Callable[..., object] | None = None,
+               web_observer_factory: Callable[[int, str, Path], Any] | None = None,
+               ) -> list[dict[str, Any]]:
     """Keep separate outputs and failures; completion is not evidence completeness."""
     if isinstance(duration, bool) or not isinstance(duration, int) or duration < 1:
         raise ValueError("invalid_round_duration")
@@ -96,6 +122,8 @@ def run_rounds(package: str, *, report: Any, unpacked: bool, out_dir: str,
                         )
 
                     kwargs["interaction"] = interaction_callback
+                if web_observer_factory is not None:
+                    kwargs["web_observer"] = web_observer_factory(number, name, out)
                 result = runner(
                     package, out=str(out), duration=seconds, serial=serial, report=report,
                     mode=mode, pass_tag=f"round{number}", **kwargs,
@@ -105,13 +133,21 @@ def run_rounds(package: str, *, report: Any, unpacked: bool, out_dir: str,
                 record.update(status=result["status"], reason=str(result.get("reason") or ""), result=dict(result))
                 if isinstance(result.get("ui_observations"), list):
                     record["ui_observations"] = [item for item in result["ui_observations"] if isinstance(item, Mapping)]
-                if result["status"] in ("done", "degraded"):
-                    artifact = out / "runtime_report.json"
-                    if artifact.is_file() and not artifact.is_symlink():
+                if result["status"] in ("done", "degraded", "error"):
+                    artifact = bounded_runtime_report(out)
+                    if artifact is not None:
                         record["runtime_report_path"] = str(artifact)
                         record["runtime_report_sha256"] = sha256_file(artifact)
-                    else:
+                        if result["status"] == "error":
+                            from apkscan.dynamic.merge import import_runtime_diagnostics_only
+
+                            import_runtime_diagnostics_only(report, str(artifact))
+                    elif result["status"] in ("done", "degraded"):
                         record.update(status="degraded", reason="runtime_report_missing_or_unsafe")
+            except AutoCancelled:
+                record.update(status="skipped", reason="cancelled")
+                records.append(record)
+                raise
             except Exception as exc:  # noqa: BLE001 - failure remains visible; later rounds can complement it
                 logger.exception("[capture-sequence] round failed")
                 record.update(status="error", reason=f"capture_round_failed:{type(exc).__name__}")
@@ -151,6 +187,9 @@ def complement_decryption(report: Any, records: list[dict[str, Any]]) -> dict[st
     seen_hashes: set[str] = set()
     for record in records:
         path, expected = record.get("runtime_report_path"), record.get("runtime_report_sha256")
+        if record.get("status") == "error":
+            summary["gaps"].append("error_round_not_a_payload_source")
+            continue
         if record.get("sample_sha256") != sample_hash:
             summary["gaps"].append("round_sample_identity_mismatch")
             continue

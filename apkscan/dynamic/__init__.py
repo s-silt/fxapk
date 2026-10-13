@@ -24,7 +24,7 @@
 
 from __future__ import annotations
 
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 
 class DynamicResult(TypedDict):
@@ -36,6 +36,7 @@ class DynamicResult(TypedDict):
     playbook: list[str]
     report_paths: list[str]
     ui_observations: list[dict[str, Any]]
+    web_observation: NotRequired[dict[str, Any]]
 
 
 # status 取值常量，供实现方与调用方共用，避免裸字符串拼写漂移。

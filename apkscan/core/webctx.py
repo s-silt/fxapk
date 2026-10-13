@@ -30,7 +30,12 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+from apkscan.core import rea_intake
 from apkscan.core.models import AnalysisConfig, CertInfo, ComponentSet
+from apkscan.core.rea_intake import (
+    refuse_unverified_rea_direct_intake,
+    refuse_unverified_rea_directory,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -388,6 +393,8 @@ def load_web_evidence(
 
     Raises:
         FileNotFoundError: 目录不存在或不是目录（调用方应转成用户可读错误 + 非零退出）。
+        ReaDirectIntakeError: 目录里有可识别的未验证 REA 观察。拒绝整次载入，
+            不把这些文件静默丢掉后继续出一份看起来干净的报告。
     """
     root = Path(evidence_dir)
     if not root.is_dir():
@@ -399,6 +406,14 @@ def load_web_evidence(
     excluded = {Path(path).resolve(strict=False) for path in exclude_dirs}
 
     evidence_files = sorted(_iter_files(root, errors, excluded))
+    provenance_cache: dict[str, bool] = {}
+    # 识别预算与正文合计上限是两套控制。这里只读识别预算，不读 MAX_TOTAL_BYTES。
+    recognition_budget = rea_intake.ReaIntakeBudget(rea_intake.INTAKE_READ_BUDGET_BYTES)
+    refuse_unverified_rea_directory(root, cache=provenance_cache, budget=recognition_budget)
+    for real in evidence_files:
+        refuse_unverified_rea_direct_intake(
+            real, root=root, cache=provenance_cache, budget=recognition_budget
+        )
     source_names: set[str] = set()
     for real in evidence_files:
         try:

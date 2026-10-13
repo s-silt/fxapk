@@ -1155,7 +1155,9 @@ class JadxAnalyzer(BaseAnalyzer):
             logger.warning("[jadx] 无可用 jadx（PATH 与插件包 jadx-addon 均无），跳过反编译")
             return _JadxRun(status="failed", options_digest=digest, process=None)
         jadx_cmd, extra_env = effective_resolved
-        cmd = [*jadx_cmd, "--no-res"]
+        # Concurrent JADX passes can emit different try/finally bodies for the
+        # same DEX. Keep evidence source bytes reproducible across worker lanes.
+        cmd = [*jadx_cmd, "--no-res", "--threads-count", "1"]
         if dex_inputs:
             # dump DEX 常从进程内存抓取，checksum/signature 与磁盘态不一致，jadx 默认
             # verify-checksum=yes 会拒载它们。关掉校验让脱壳 DEX 也能反编译（正规 APK 无副作用）。
@@ -1461,7 +1463,7 @@ def _options_digest(apk_path: str, dex_inputs: list[str], timeout: float) -> str
         return {"name": os.path.basename(path), "size": size}
 
     payload = {
-        "jadx_args": ["--no-res"] + (["-Pdex-input.verify-checksum=no"] if dex_inputs else []),
+        "jadx_args": ["--no-res", "--threads-count", "1"] + (["-Pdex-input.verify-checksum=no"] if dex_inputs else []),
         "apk": _identity(apk_path),
         "extra_dex": [_identity(p) for p in dex_inputs],
         "timeout": timeout,

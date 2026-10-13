@@ -18,7 +18,7 @@ from apkscan.config.asset_score import rank_assets
 from apkscan.config.chain import build_control_chains
 from apkscan.config.decode import decode_config_blob
 from apkscan.config.fetch import fetch_config_object
-from apkscan.core import appframework, config_probe_run, infra
+from apkscan.core import appframework, config_probe_run
 from apkscan.core.appcrypto import CryptoRecipe
 from apkscan.core.attribution import build_domain_control, build_endpoint_attribution, cluster_fronting
 from apkscan.core.models import (
@@ -31,7 +31,6 @@ from apkscan.core.models import (
     MAX_ANALYZE_STATIC_IP_TARGETS,
     AnalysisConfig,
     Endpoint,
-    Evidence,
     Lead,
     LeadCategory,
     Report,
@@ -50,6 +49,10 @@ from apkscan.core.registry import (
     discover_enrichers,
     platform_capabilities,
     ruleset_digest,
+)
+from apkscan.core.stage_preservation import (
+    dedup_endpoints as _preserve_endpoints,
+    dedup_leads as _preserve_leads,
 )
 
 # 端点 → Lead 生成已物理拆到 apkscan/core/leads.py（纯搬移）；在此 re-export 供 stage 调用，
@@ -275,6 +278,8 @@ class _PipelineState:
     completeness: float = 1.0
     critical_failures: list = field(default_factory=list)
     skipped_analyzers: list = field(default_factory=list)
+    #: 仅含 external-web-observation 证据的端点，富化前暂存，避免低可信候选外发。
+    web_only_endpoints: list = field(default_factory=list)
 
 
 def _canonicalize_ctx_config(ctx: "AnalysisContext", config: AnalysisConfig) -> None:
@@ -453,6 +458,14 @@ def _stage_degradation_flags(state: _PipelineState) -> None:
                 "额外 DEX：请求 %s 个，成功并入 %s 个，失败 %s 个——静态 DEX 面不完整",
                 extra_report.get("requested"), extra_report.get("loaded"), failed,
             )
+
+
+def _stage_web_supplement(state: _PipelineState) -> None:
+    """分析器之后、富化之前接入网页补采候选。无配置也写确定性 plan，不调用插件。"""
+    from apkscan.core.web_supplement import apply_static
+
+    apply_static(state)
+    state.endpoints = _dedup_endpoints(state.endpoints)
 
 
 def _stage_remote_config_fetch(state: _PipelineState) -> None:
@@ -851,12 +864,17 @@ def _stage_build_leads(state: _PipelineState) -> None:
     #   第三方常量降档。取不到（没跑该分析器、或形状不对）时 framework 为未识别，判据退回
     #   宽口径，行为与接线前一致。
     framework = appframework.framework_from_meta(state.meta.get(appframework.META_KEY))
+    from apkscan.core.web_supplement import clamp_web_only_leads, restore_held_endpoints
+
+    restore_held_endpoints(state)
+    state.endpoints = _dedup_endpoints(state.endpoints)
     state.leads.extend(
         build_endpoint_leads(
             state.endpoints, online=state.config.online, framework=framework
         )
     )
     _apply_default_advice(state.leads)
+    clamp_web_only_leads(state.leads)
     # ★接缝：所有判据链生产者都跑完、任何抑制机制动手之前。此刻 advice 恰好就是「判据链的
     #   结论」，封存为 base_advice。位置错一步就毁：放到隔离之后，被压成待核的档位会被烙进
     #   base，撤销时再也回不去（棘轮）。
@@ -1072,6 +1090,7 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     state.meta["analysis_started_at"] = started_at
     _run_stage(state, "analyze", _stage_run_analyzers)              # 分析器执行 + 聚合 + 端点去重
     _run_stage(state, "degradation_flags", _stage_degradation_flags)  # 降级标志入 meta
+    _run_stage(state, "web_supplement", _stage_web_supplement)      # 自动网页补采；失败不中断主分析
     _run_stage(state, "remote_config_fetch", _stage_remote_config_fetch)  # 授权档：下载+解码远程配置，回灌端点
     _run_stage(state, "enrich", _stage_enrich)                     # 联网富化（两遍，主动/被动硬隔离）
     _run_stage(state, "attribution", _stage_attribution)           # 五层不塌缩基础设施归因（per-IP）
@@ -1117,75 +1136,18 @@ def _dedup_leads(leads: list[Lead]) -> list[Lead]:
 
     analyzer 注册顺序稳定 → survivor 稳定 → 输出可复现。
     """
-    merged: dict[tuple[LeadCategory, str], Lead] = {}
-    for ld in leads:
-        kind = ld.category.value.lower()
-        norm = infra.match_key(kind, ld.value) if kind in ("domain", "ip") else ld.value.strip()
-        key = (ld.category, norm)
-        cur = merged.get(key)
-        if cur is None:
-            merged[key] = ld
-            continue
-        cur.source_refs.extend(ld.source_refs)        # 证据并集
-        if not cur.advice and ld.advice:              # 填空
-            cur.advice = ld.advice
-        elif cur.advice and ld.advice and cur.advice != ld.advice:
-            note = f"（去重合并：另有分析器判为 {ld.advice}）"
-            cur.notes = (cur.notes + note) if cur.notes else note
-    return list(merged.values())
+    return _preserve_leads(leads)
 
 
 def _dedup_endpoints(endpoints: list[Endpoint]) -> list[Endpoint]:
     """按 value 去重合并端点（不同分析器可能产出同一 value 的 Endpoint）。
 
     合并规则：
-    - evidences：按 (source, location, snippet, scope) 去重后并集（保持首次出现顺序）。
+    - evidences：按 (source, location, snippet, scope, observed_at) 去重后并集（保持首次出现顺序）。
     - is_cleartext / is_private / is_suspicious：取并集（任一为 True 即 True）。
     - enrichment：浅合并（后者补充先者缺的键，已有键不覆盖）。
     - kind：以首次出现为准（同一 value 一般同 kind）。
 
     保持端点首次出现的相对顺序，便于报告稳定。
     """
-    merged: dict[str, Endpoint] = {}
-    for ep in endpoints:
-        existing = merged.get(ep.value)
-        if existing is None:
-            # 拷贝一份，避免就地修改分析器产出的对象。
-            merged[ep.value] = Endpoint(
-                value=ep.value,
-                kind=ep.kind,
-                evidences=list(ep.evidences),
-                is_cleartext=ep.is_cleartext,
-                is_private=ep.is_private,
-                is_suspicious=ep.is_suspicious,
-                enrichment=dict(ep.enrichment),
-            )
-            continue
-
-        existing.evidences.extend(ep.evidences)
-        existing.is_cleartext = existing.is_cleartext or ep.is_cleartext
-        existing.is_private = existing.is_private or ep.is_private
-        existing.is_suspicious = existing.is_suspicious or ep.is_suspicious
-        for key, val in ep.enrichment.items():
-            if key == "tier":
-                # C1：来源可信度档特殊处理（域名与 IP 通用）——多来源取最可信档（app > library-file
-                #   > bulk-string），避免"既来自 app 文件又来自 library 文件"被错降。
-                existing.enrichment["tier"] = infra.best_tier(
-                    existing.enrichment.get("tier"), val
-                )
-                continue
-            existing.enrichment.setdefault(key, val)
-
-    # evidences 去重（保持顺序）。
-    for ep in merged.values():
-        seen: set[tuple[str, str, str, object]] = set()
-        deduped: list[Evidence] = []
-        for ev in ep.evidences:
-            key = (ev.source, ev.location, ev.snippet, ev.scope)
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append(ev)
-        ep.evidences = deduped
-
-    return list(merged.values())
+    return _preserve_endpoints(endpoints)

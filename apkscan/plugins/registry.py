@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import logging
+import os
 import re
 from collections import Counter
 from collections.abc import Iterable
@@ -15,6 +16,7 @@ logger = logging.getLogger(__name__)
 _ENTRYPOINT_GROUP = "fxapk.plugins"
 _ALLOWED = {
     "android_ui": ("fxapk-android-ui", "fxapk_android_ui.plugin:plugin_factory"),
+    "rea": ("fxapk-rea", "fxapk_rea.plugin:plugin_factory"),
 }
 
 
@@ -41,6 +43,9 @@ def discover_plugins() -> tuple[list[Any], list[dict[str, str]]]:
         if entry.name not in _ALLOWED or entry.name in seen:
             continue
         seen.add(entry.name)
+        if entry.name == 'rea' and os.environ.get('FXAPK_ENABLE_REA') != '1':
+            statuses.append({'name': 'rea', 'status': 'disabled', 'reason': 'rea_opt_in_required'})
+            continue
         if counts[entry.name] != 1:
             statuses.append({"name": entry.name, "status": "unavailable", "reason": "duplicate_plugin_entry_point"})
             continue

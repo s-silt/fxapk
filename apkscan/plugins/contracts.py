@@ -61,3 +61,12 @@ class AndroidUiPlugin(FxapkPlugin, Protocol):
     api_version: str
 
     def run_round(self, context: CaptureRoundContext) -> dict[str, Any]: ...
+
+
+class WebSupplementPlugin(FxapkPlugin, Protocol):
+    """Optional web observation. Core calls this; it does not import the plugin package."""
+
+    name: str
+    api_version: str
+
+    def run_supplement(self, request: dict[str, Any]) -> dict[str, Any]: ...

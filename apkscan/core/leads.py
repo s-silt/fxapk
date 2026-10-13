@@ -24,6 +24,7 @@ from apkscan.core.models import (
     SNI_MASQUERADE_KEY,
     Confidence,
     Endpoint,
+    Evidence,
     EvidenceScope,
     Lead,
     LeadCategory,
@@ -35,10 +36,35 @@ from apkscan.core.source_status import provider_payload_if_hit
 
 logger = logging.getLogger(__name__)
 
+#: 未核 native 重建。external-web-observation 恒不能佐证；其它来源须 CASE_EVIDENCE。
+_UNVERIFIED_NATIVE_SOURCE = "derived-native"
+_EXTERNAL_WEB_SOURCE = "external-web-observation"
+
 _EVIDENCE_SCOPE_NOTE = (
     "仅由批量/跨案参考或旧版未声明作用域的材料支撑；可作复核线索，"
     "但不能单独作为当前案件调证或闭环依据"
 )
+
+
+def _only_unverified_native(evidences: list[Evidence]) -> bool:
+    """存在 derived-native，且没有其它来源以 CASE_EVIDENCE 独立佐证。
+
+    external-web-observation 即使 scope 是 CASE_EVIDENCE 也不能佐证。
+    其它任意来源的 scope 不是 CASE_EVIDENCE（batch / legacy 等）也不能佐证。
+    其它来源确为 CASE_EVIDENCE 时返回 False，沿用原档。没有 derived-native 时
+    返回 False，本闸不启用。
+    """
+    saw_native = False
+    for ev in evidences:
+        source = ev.source if isinstance(ev.source, str) else ""
+        if source == _UNVERIFIED_NATIVE_SOURCE:
+            saw_native = True
+            continue
+        if source == _EXTERNAL_WEB_SOURCE:
+            continue
+        if ev.scope is EvidenceScope.CASE_EVIDENCE:
+            return False
+    return saw_native
 
 
 def _apply_evidence_scope(lead: Lead, endpoint: Endpoint) -> None:
@@ -743,6 +769,11 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
         #   位点的 LOW 则跟着降档一起去掉——那些是当年没有结构化降档记录时，借 confidence
         #   当可见标记的历史代偿，现在 downgrades 就是那个标记。
         confidence = Confidence.LOW
+    # 未核 derived-native：其它来源非 CASE_EVIDENCE，或仅为 external-web-observation 时，
+    # 不得升 MEDIUM / 建议调证。其它来源的 CASE_EVIDENCE 仍按原档。
+    if _only_unverified_native(ep.evidences):
+        confidence = Confidence.LOW
+        advice = infra.ADVICE_REVIEW
 
     # 伪装 SNI：该域名只在**非标准 TLS 端口**上作为 SNI 出现过（判据见
     # ``dynamic.pcap_ingest.sni_camouflage_carriers``，事实随 Endpoint 一起传过来）。
@@ -942,6 +973,11 @@ def _ip_lead(
         # 与域名侧一致：LOW 编码的是"静态出处只有库文件/超大字符串表"这一证据强度事实，
         # 撤销降档后该事实依然成立，故留在判据链里、不随降档走。
         confidence = Confidence.LOW
+    # 未核 derived-native：其它来源非 CASE_EVIDENCE，或仅为 external-web-observation 时，
+    # 不得维持原档。其它来源的 CASE_EVIDENCE 仍按原档。
+    if _only_unverified_native(ep.evidences):
+        confidence = Confidence.LOW
+        advice = infra.ADVICE_REVIEW
 
     # ★Lead 构造提前到降档之前（与 _domain_lead 同）：apply_downgrade 要有 Lead 才能记账，
     #   此刻的 advice 正好同时作为 base_advice 封存，随后的档位一律由 helper 算出。

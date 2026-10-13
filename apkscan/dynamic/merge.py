@@ -179,6 +179,55 @@ def _read_runtime_payload(runtime_report_path: str) -> Any:
     return result
 
 
+def import_runtime_diagnostics_only(report: object, runtime_report_path: str) -> None:
+    """把失败轮里已经落盘的诊断并进主报告。不读取端点，也不改闭环。"""
+    from apkscan.core.models import Report as ReportModel
+
+    if not isinstance(report, ReportModel):
+        return
+    try:
+        payload = _read_runtime_payload(runtime_report_path)
+        if not isinstance(payload, Mapping):
+            return
+        observations = payload.get("process_observations")
+        if not isinstance(observations, list):
+            return
+        from apkscan.core.runtime_diagnostics import merge_process_observations
+
+        merge_process_observations(
+            report, _stamp_process_observations(runtime_report_path, observations),
+        )
+    except Exception:
+        logger.exception("[merge] 失败轮诊断并入失败：%s", runtime_report_path)
+
+
+def _stamp_process_observations(
+    runtime_report_path: str, observations: list[object],
+) -> list[object]:
+    from apkscan.core.integrity import sha256_file
+
+    try:
+        observation_sha = sha256_file(runtime_report_path)
+    except OSError:
+        observation_sha = ""
+    try:
+        observation_path = str(Path(runtime_report_path).resolve())
+    except OSError:
+        observation_path = ""
+    stamped_observations: list[object] = []
+    for raw_observation in observations:
+        if isinstance(raw_observation, Mapping):
+            stamped = dict(raw_observation)
+            if observation_sha:
+                stamped["source_report_sha256"] = observation_sha
+            if observation_path:
+                stamped["source_report_path"] = observation_path
+            stamped_observations.append(stamped)
+        else:
+            stamped_observations.append(raw_observation)
+    return stamped_observations
+
+
 def merge_capture_quality(report: Report, runtime_report_path: str) -> dict[str, object]:
     """Copy normalized capture-quality evidence into the main report metadata."""
     payload = _read_runtime_payload(runtime_report_path)
@@ -435,6 +484,11 @@ def merge_runtime_endpoints(report: Report, endpoints: list[Endpoint]) -> dict[s
             stats["new_leads"],
             stats["total_endpoints"],
         )
+    except ValueError as exc:
+        if exc.args and exc.args[0] == "runtime_observation_budget_exceeded":
+            logger.error("[merge] 运行时观测超出预算，端点合并未继续")
+            raise
+        logger.exception("[merge] 运行时端点并入异常")
     except Exception:  # noqa: BLE001 - 合并失败不得抛给调用方（不破坏已产出静态报告）
         logger.exception("[merge] 运行时端点并入异常")
     return stats
@@ -557,11 +611,11 @@ def decrypt_runtime_messages(report: Report, runtime_report_path: str, *,
         # 冒充对象（webName/品牌/行业词）从活体明文抽出，写进 meta 供报告呈现。
         brand_hints = cryptohook.brand_hints_from_events(events) if events else []
         if brand_hints:
-            report.meta["runtime_brand_hints"] = brand_hints
-            logger.info("[merge] 运行时明文捕获冒充对象线索：%s", "、".join(brand_hints[:5]))
+            retained = _retain_brand_hints(report, brand_hints)
+            logger.info("[merge] 运行时明文捕获冒充对象线索：%s", "、".join(retained[:5]))
             # 同一份 brand_hints 既留档进 meta、也走 Finding 出口——只写 meta 时
             # 读报告的人看不到它（见 _add_brand_hint_finding 的说明）。
-            _add_brand_hint_finding(report, brand_hints)
+            _add_brand_hint_finding(report, brand_hints, display=retained)
 
         # 候选配方（按优先级）：实测合并配方优先、纯静态配方兜底。逐信封依次尝试、首个解出即用。
         # 关键：「实测优先但绝不回归静态」——实测拿到二进制 key 覆盖、却与静态 iv 推导口径不兼容
@@ -1011,8 +1065,16 @@ _BRAND_HINT_COMPLIANCE_NOTE = (
 )
 
 
-def _add_brand_hint_finding(report: Report, brand_hints: list[str]) -> None:
+def _add_brand_hint_finding(
+    report: Report,
+    brand_hints: list[str],
+    *,
+    display: list[str] | None = None,
+) -> None:
     """运行时明文里出现的品牌/行业词 → 产 observation Finding（冒充对象研判材料）。
+
+    ``brand_hints`` 只为本轮新观察盖证据。``display`` 是累计词表，只进说明，
+    不把更早轮次重新盖成本轮来源或位置。缺省时说明与证据使用同一份本轮词表。
 
     ★为什么必须有这个出口：这批词是从**活体解密明文**里抽出来的（webName / 品牌名 /
       行业词），是判断「这个壳假装成什么」最直接的材料。原实现只写进
@@ -1024,13 +1086,22 @@ def _add_brand_hint_finding(report: Report, brand_hints: list[str]) -> None:
       所以只陈述观察到什么、由人去判断，不替人下「冒充 X」的结论
       （与重打包件不写「植入/注入」同一条纪律）。
     """
-    # ★幂等：同一 Report 上重复合并（重跑动态、重渲染）不得堆出同 ID 的多条 Finding，
-    #   否则 digest 计数与 HTML/PDF 会重复，且「重跑改变既有结果」本身就不可信。
-    if any(f.id == "RUNTIME-BRAND-HINTS" for f in report.findings):
+    # ★幂等：同一 Report 上重复合并（重跑动态、重渲染）不得堆出同 ID 的多条 Finding。
+    #   后一轮只并入新的词条证据；展示句可以摘要，证据和 meta 保留全部已观察词。
+    current = [hint for hint in brand_hints if isinstance(hint, str) and hint]
+    shown = current if display is None else [hint for hint in display if isinstance(hint, str) and hint]
+    existing = next((f for f in report.findings if f.id == "RUNTIME-BRAND-HINTS"), None)
+    if existing is not None:
+        seen = {(ev.source, ev.location, ev.snippet) for ev in existing.evidences}
+        for hint in current:
+            evidence = scoped_evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=hint[:160])
+            key = (evidence.source, evidence.location, evidence.snippet)
+            if key in seen:
+                continue
+            existing.evidences.append(evidence)
+            seen.add(key)
+        existing.description = _brand_hint_description(shown)
         return
-    shown = brand_hints[:12]
-    more = len(brand_hints) - len(shown)
-    label = "、".join(shown) + (f"（另有 {more} 条）" if more > 0 else "")
     report.findings.append(
         Finding(
             id="RUNTIME-BRAND-HINTS",
@@ -1043,12 +1114,7 @@ def _add_brand_hint_finding(report: Report, brand_hints: list[str]) -> None:
             #   而 title 却写得克制——两处自相矛盾，且分类会进统计与筛选，
             #   比正文更容易被当成结论。目前能确定的只有「明文出现这些词」。
             category="runtime_plaintext_identity_hint",
-            description=(
-                f"运行时解密明文中出现下列品牌/行业词：{label}。"
-                "这类词常见于壳应用向服务端上报的 webName / 站点标题字段，"
-                "可作为该样本对外身份呈现的候选材料。"
-                f"\n\n{_BRAND_HINT_COMPLIANCE_NOTE}"
-            ),
+            description=_brand_hint_description(shown),
             recommendation=(
                 "研判：把这些词与应用图标、界面文案、域名注册信息比对，确认对外呈现的业务身份；"
                 "★注意同名不等于冒充——行业通用词、第三方 SDK 文案、被仿冒方自身接口字段"
@@ -1056,10 +1122,41 @@ def _add_brand_hint_finding(report: Report, brand_hints: list[str]) -> None:
             ),
             evidences=[
                 scoped_evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=hint[:160])
-                for hint in shown
+                for hint in current
             ],
             references=[],
         )
+    )
+
+
+def _retain_brand_hints(report: Report, brand_hints: list[str]) -> list[str]:
+    """保留更早轮次已经观察到的品牌词，再追加本轮新词。"""
+    merged: list[str] = []
+    prior = report.meta.get("runtime_brand_hints")
+    if isinstance(prior, list):
+        for item in prior:
+            if isinstance(item, str) and item not in merged:
+                merged.append(item)
+    for item in brand_hints:
+        if item not in merged:
+            merged.append(item)
+    report.meta["runtime_brand_hints"] = merged
+    return merged
+
+
+def _brand_hint_description(brand_hints: list[str]) -> str:
+    ordered: list[str] = []
+    for hint in brand_hints:
+        if hint and hint not in ordered:
+            ordered.append(hint)
+    shown = ordered[:12]
+    more = len(ordered) - len(shown)
+    label = "、".join(shown) + (f"（另有 {more} 条）" if more > 0 else "")
+    return (
+        f"运行时解密明文中出现下列品牌/行业词：{label}。"
+        "这类词常见于壳应用向服务端上报的 webName / 站点标题字段，"
+        "可作为该样本对外身份呈现的候选材料。"
+        f"\n\n{_BRAND_HINT_COMPLIANCE_NOTE}"
     )
 
 
@@ -2500,10 +2597,11 @@ def merge_and_rerender(
         sample_bound = (isinstance(sample_hash, str) and len(sample_hash) == 64
                         and all(c in "0123456789abcdef" for c in sample_hash))
         rounds = report.meta.get("capture_rounds")
-        if isinstance(rounds, list) and rounds:
-            sample_bound = sample_bound and any(
-                isinstance(row, Mapping) and row.get("sample_sha256") == sample_hash
-                and evidence_namespace == "capture:" + str(row.get("runtime_report_sha256")) for row in rounds)
+        round_bound = isinstance(rounds, list) and any(
+            isinstance(row, Mapping) and row.get("sample_sha256") == sample_hash
+            and evidence_namespace == "capture:" + str(row.get("runtime_report_sha256") or "")
+            for row in rounds)
+        sample_bound = sample_bound and round_bound
         try:
             verified = sample_bound and (isinstance(identity, Mapping) and identity.get("which") == "original"
                         and isinstance(payload, Mapping) and payload.get("package_name") == report.package_name
@@ -2608,6 +2706,18 @@ def _merge_and_rerender(
             if merged_observations:
                 report.meta["ui_observations"] = merged_observations
                 stats["ui_observation_count"] = len(merged_observations)
+        process_observations = (
+            payload.get("process_observations") if isinstance(payload, Mapping) else None
+        )
+        if isinstance(process_observations, list):
+            try:
+                from apkscan.core.runtime_diagnostics import merge_process_observations
+
+                merge_process_observations(
+                    report, _stamp_process_observations(rr_path, process_observations),
+                )
+            except Exception:
+                logger.exception("[merge] 运行时覆盖诊断并入失败")
         # ★每个子步骤的结局要能被下游分辨：`ok`（跑完了，可能没结果）/ `error`（崩了）。
         #   此前 `stats[dest]=sub.get(src,0)` 把两者压成同一个 0——「样本没有凭据」与
         #   「凭据解析器崩了」在报告里完全同形，而后者的正确处置是重跑而非结案。
@@ -2652,17 +2762,38 @@ def _merge_and_rerender(
     except OSError:
         logger.exception("[merge] 创建输出目录失败：%s", out_dir)
 
+    from apkscan.core.report_delivery import ReportDelivery
+
     report_paths: list[str] = []
+    requested: list[str] = []
+    written_formats: list[str] = []
+    failed_formats: list[str] = []
     if "json" in fmts:
+        requested.append("json")
         json_path = _rerender_json(report, out_path, base, on_progress)
         if json_path:
             report_paths.append(json_path)
+            written_formats.append("json")
+        else:
+            failed_formats.append("json")
     if "html" in fmts:
+        requested.append("html")
         html_path = _rerender_html(report, out_path, base, on_progress)
         if html_path:
             report_paths.append(html_path)
+            written_formats.append("html")
+        else:
+            failed_formats.append("html")
+    if "pdf" in fmts:
+        requested.append("pdf")
 
     stats["report_paths"] = report_paths
+    stats["report_delivery"] = ReportDelivery(
+        tuple(requested),
+        tuple(written_formats),
+        tuple(failed_formats),
+        ("pdf",) if "pdf" in fmts else (),
+    )
     return stats
 
 

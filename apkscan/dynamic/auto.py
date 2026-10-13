@@ -45,13 +45,20 @@ from pathlib import Path
 from typing import Any
 
 from apkscan.core import device
+from apkscan.dynamic.cancel import AutoCancelled
 from apkscan.plugins.contracts import CaptureRoundContext, AndroidUiPlugin
 from apkscan.core.models import ANALYSIS_MODE_PASSIVE, AnalysisConfig, Report
 from apkscan.core.report_naming import report_base
+from apkscan.core.stage_preservation import (
+    extend_phase_history,
+    merge_carried_evidence,
+    preserved_web_meta,
+)
 
 META_WRITE_OWNER = "dynamic.auto"
 META_WRITE_CATEGORIES = {
     'artifact_lineage': 'signal',
+    '_web_supplement_raws': 'record',
     'capture_apk_identity': 'record',
     'capture_rounds': 'record',
     'capture_quality': 'coverage',
@@ -59,6 +66,10 @@ META_WRITE_CATEGORIES = {
     'cross_round_decryption': 'record',
     'online': 'signal',
     'target_serial': 'record',
+    'web_observation_plan': 'coverage',
+    'web_observations': 'record',
+    'web_supplement': 'coverage',
+    'web_supplement_runtime': 'record',
 }
 META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
 
@@ -102,20 +113,64 @@ def _emit(on_progress: Callable[[str], None] | None, msg: str) -> None:
         logger.exception("[auto] on_progress 回调异常（已忽略）")
 
 
-def _confirm(confirm: Callable[[str], None] | None, msg: str) -> None:
-    """安全调用确认回调（抓包前提示用户操作 app）：None 不等待直接继续；异常吞 + logging。"""
+def _confirm(confirm: Callable[[str], object] | None, msg: str) -> bool:
+    """抓包前确认。None 表示调用方在读取前就选定了非交互，按原授权继续。
+
+    返回 False、Abort、KeyboardInterrupt，或回调自己失败，都不是同意。
+    这些情况抛 ``AutoCancelled``，调用方停止尚未发生的抓包、旁路和闭环。
+    """
     if confirm is None:
-        logger.info("[auto] confirm 回调为空，跳过抓包前用户确认，直接继续")
-        return
+        logger.info("[auto] confirm 为空，确认前跳过交互，按原授权继续")
+        return True
     try:
-        confirm(msg)
-    except Exception:
-        logger.exception("[auto] confirm 回调异常（已忽略，继续抓包）")
+        result = confirm(msg)
+    except AutoCancelled:
+        raise
+    except KeyboardInterrupt as exc:
+        raise AutoCancelled("confirm_cancelled") from exc
+    except Exception as exc:
+        if type(exc).__name__ == "Abort":
+            raise AutoCancelled("confirm_cancelled") from exc
+        logger.exception("[auto] confirm 回调失败，停止后续抓包")
+        raise AutoCancelled("confirm_callback_failed") from exc
+    if result is False:
+        raise AutoCancelled("confirm_refused")
+    return True
 
 
 def _step(name: str, status: str, detail: str) -> dict:
     """构造单步结果。"""
     return {"name": name, "status": status, "detail": detail}
+
+
+def _finish_run(
+    *,
+    status: str,
+    closure: dict[str, object],
+    strict_case: bool,
+    steps: list[dict],
+    report_paths: list[str],
+    package_name: str,
+    out_dir: str,
+    delivery_sink: list[object],
+    cancel_reason: str = "",
+) -> dict:
+    """组装 run 的返回。写出回执与闭环状态分开，取消不改写成闭环失败。"""
+    from apkscan.core.report_delivery import combine_deliveries
+
+    payload: dict[str, object] = {
+        "status": status,
+        "closure": closure,
+        "strict_case": bool(strict_case),
+        "steps": steps,
+        "report_paths": report_paths,
+        "package_name": package_name,
+        "out_dir": out_dir,
+        "report_delivery": combine_deliveries(delivery_sink),
+    }
+    if cancel_reason:
+        payload["cancel_reason"] = cancel_reason
+    return payload
 
 
 def run(
@@ -131,16 +186,18 @@ def run(
     repackage: bool = True,
     strict_case: bool = False,
     on_progress: Callable[[str], None] | None = None,
-    confirm: Callable[[str], None] | None = None,
+    confirm: Callable[[str], object] | None = None,
     allow_behavior_modification: bool = False,
     antidetect: str = "off",
     during_round: Callable[..., object] | None = None,
     android_ui_plugin: AndroidUiPlugin | None = None,
+    web_supplement: str | None = None,
+    web_supplement_request: dict | None = None,
 ) -> dict:
-    """一键全自动：体检 → 静态 → 脱壳 → 抓包 → 合并，回一份结构化总报告。绝不抛。
+    """一键全自动：体检 → 静态 → 脱壳 → 抓包 → 合并，回一份结构化总报告。
 
-    每一步独立 try/except、失败不中断后续、必 logging；全程仅 on_progress/confirm
-    回调 + 结构化返回（GUI-ready）。
+    普通步骤失败不中断后续。确认拒绝、Ctrl+C 和确认回调失败返回 status=cancelled，
+    不再启动后续抓包、旁路和闭环。全程仅 on_progress/confirm 回调 + 结构化返回。
 
     Args:
         apk_path: 待分析的 APK 文件路径。
@@ -151,11 +208,12 @@ def run(
         formats: 报告格式，默认 ``["html", "json"]``。
         strict_case: 标记调用方要求严格闭环；核心仍结构化返回，不抛出或退出进程。
         on_progress: 可选进度回调（GUI 弹窗 / CLI echo；None → no-op）。
-        confirm: 抓包前的「提示用户操作 app」钩子（GUI 弹窗 / CLI 等回车）；
-                 None 则不等待直接继续。
+        confirm: 抓包前的确认钩子。None 表示按已有授权继续。返回 False、Abort、
+                 KeyboardInterrupt 或回调异常都会取消后续步骤。
 
     Returns:
-        dict：{status, closure, steps, report_paths, package_name, out_dir}。绝不抛异常给调用方。
+        dict：{status, closure, steps, report_paths, package_name, out_dir, report_delivery}。
+        取消时 status 为 cancelled，closure.status 为 not_run。函数本身不把取消抛给调用方。
     """
     fmts = list(formats) if formats else list(_DEFAULT_FORMATS)
     steps: list[dict] = []
@@ -172,6 +230,7 @@ def run(
         "gaps": ["case closure did not run"],
         "next_actions": ["rerun case closure after static analysis succeeds"],
     }
+    delivery_sink: list[object] = []
 
     try:
         # 0) 设备探测 + **钉定单台 serial**：必须在体检之前选定。多设备/一机多 transport
@@ -198,10 +257,27 @@ def run(
         # 2) 静态分析（load_apk → pipeline.run → 写报告）。
         static_step, report, package_name, static_paths, base = _run_static(
             apk_path, out_dir=out_dir, online=online, formats=fmts, mode=mode,
-            on_progress=on_progress,
+            on_progress=on_progress, web_supplement=web_supplement,
+            web_supplement_request=web_supplement_request,
+            delivery_sink=delivery_sink,
         )
         steps.append(static_step)
         _extend_unique(report_paths, static_paths)
+        if report is not None and not has_device:
+            from apkscan.core.web_supplement_runtime import route_stripped_cdp
+
+            route_stripped_cdp(
+                report, web_supplement, web_supplement_request,
+                dynamic=True, device=False, observer_started=False,
+            )
+            if isinstance(getattr(report, "meta", None), dict) and report.meta.get("web_supplement_runtime"):
+                _extend_unique(
+                    report_paths,
+                    _write_reports(
+                        report, out_dir=out_dir, formats=fmts, base=base,
+                        delivery_sink=delivery_sink,
+                    ),
+                )
 
         # 2.5) 把选定 serial 记入静态报告 meta，便于排查（report 此时才有，可能为 None：静态失败时）。
         if target_serial is not None and report is not None:
@@ -254,41 +330,45 @@ def run(
         if three_rounds and has_device and package_name:
             from apkscan.dynamic.capture_sequence import run_rounds, targeted_hooks
             from apkscan.dynamic.capture_adaptation import build_capture_adaptation
-            interaction_callback: Callable[..., object] | None = during_round
-            if android_ui_plugin is not None:
-                if target_serial is None:
-                    steps.append(_step("Android UI 插件", _SKIPPED, "未钉定设备 serial，跳过 UI round driver"))
-                else:
-                    plugin = android_ui_plugin
-
-                    def plugin_round_interaction(
-                        number: int, kind: str, capture_mode: str, round_dir: Path,
-                        *, deadline_monotonic: float | None = None,
-                    ) -> object:
-                        context = CaptureRoundContext(
-                            serial=target_serial,
-                            package_name=package_name,
-                            round_id=f"round{number}-{kind}",
-                            round_kind=kind,
-                            out_dir=round_dir,
-                            sample_sha256=_apk_sha256(apk_path),
-                            capture_mode=capture_mode,
-                            deadline_monotonic=deadline_monotonic,
-                        )
-                        return plugin.run_round(context)
-
-                    interaction_callback = plugin_round_interaction
+            interaction_callback = _window_callbacks(
+                during_round, android_ui_plugin,
+                serial=target_serial, package_name=package_name, sample_sha256=_apk_sha256(apk_path),
+            )
+            if android_ui_plugin is not None and target_serial is None:
+                steps.append(_step("Android UI 插件", _SKIPPED, "未钉定设备 serial，跳过 UI round driver"))
             if isinstance(report, Report):
                 report.meta["capture_adaptation"] = build_capture_adaptation(
                     report, unpacked=unpacked_report is not None,
                     targeted_observers=targeted_hooks(report, unpacked=unpacked_report is not None),
                 )
+            def _deferring_capture(package: str, **kwargs: Any) -> Any:
+                from apkscan.dynamic import capture as capture_mod
+
+                meta = getattr(report, "meta", None)
+                before = len(meta.get("web_supplement_runtime") or []) if isinstance(meta, dict) else 0
+                try:
+                    return capture_mod.run(package, **kwargs)
+                except Exception:
+                    after = meta.get("web_supplement_runtime") if isinstance(meta, dict) else None
+                    if not (isinstance(after, list) and len(after) > before):
+                        from apkscan.core.web_supplement_runtime import note_cdp_round_not_executed
+
+                        note_cdp_round_not_executed(
+                            report, web_supplement, web_supplement_request,
+                            round_id=str(kwargs.get("pass_tag") or ""),
+                        )
+                    raise
+
             round_records = run_rounds(
                 package_name, report=report, unpacked=unpacked_report is not None,
                 out_dir=pass1_out, duration=capture_duration, serial=target_serial,
                 sample_sha256=_apk_sha256(apk_path),
                 before_round=lambda message: _confirm(confirm, message),
                 during_round=interaction_callback,
+                web_observer_factory=_web_observer_factory(
+                    out_dir, web_supplement, web_supplement_request, report,
+                ),
+                runner=_deferring_capture,
             )
             for record in round_records:
                 steps.append(_step(f"抓包轮{record['round']}:{record['kind']}", record["status"], record["reason"]))
@@ -301,6 +381,11 @@ def run(
             capture_step = _step(_STEP_CAPTURE, _DONE if capture_round_paths else _ERROR,
                                  f"三轮采集产生 {len(capture_round_paths)} 份运行时材料；逐轮状态见步骤")
         else:
+            single_interaction = _single_window_interaction(
+                during_round, android_ui_plugin,
+                serial=target_serial, package_name=package_name, sample_sha256=_apk_sha256(apk_path),
+                directory=Path(pass1_out),
+            )
             capture_step, runtime_report_path = _run_capture(
                 package_name,
                 out_dir=pass1_out,
@@ -310,14 +395,45 @@ def run(
                 on_progress=on_progress,
                 confirm=confirm,
                 report=report,
+                interaction=single_interaction,
+                web_observer=_one_web_observer(
+                    pass1_out, web_supplement, web_supplement_request, report=report, publish_dir=out_dir,
+                ),
                 # ★设备侧 floor pcap 的远端路径按 pass 区分：pull 失败时 capture 会**特意保留**远端那份
                 #   供手动重拉，两遍共用固定路径的话第二遍起手的 rm -f 会把它删掉（不可恢复的证据丢失）。
                 pass_tag="pass1",
             )
             steps.append(capture_step)
+            if (
+                has_device
+                and report is not None
+                and (
+                    not package_name
+                    or (
+                        capture_step.get("status") == _ERROR
+                        and "未预期异常" in str(capture_step.get("detail") or "")
+                    )
+                )
+            ):
+                from apkscan.core.web_supplement_runtime import route_stripped_cdp
+
+                route_stripped_cdp(
+                    report, web_supplement, web_supplement_request,
+                    dynamic=True, device=True, observer_started=False,
+                )
             if runtime_report_path:
                 capture_round_paths.append(runtime_report_path)
 
+
+        if report is not None and isinstance(getattr(report, "meta", None), dict):
+            if report.meta.get("web_supplement_runtime"):
+                _extend_unique(
+                    report_paths,
+                    _write_reports(
+                        report, out_dir=out_dir, formats=fmts, base=base,
+                        delivery_sink=delivery_sink,
+                    ),
+                )
 
         # 本次实际抓的 APK 身份。第一遍恒 original；第二遍成功启动才补 wrapper。
         # ★路径可同名、可被覆盖，哈希才是身份——报告里必须能回答「这份证据采自哪个 APK」。
@@ -461,6 +577,7 @@ def run(
                     base=base,
                     formats=fmts,
                     on_progress=on_progress,
+                    delivery_sink=delivery_sink,
                     **({"evidence_namespace": namespace} if namespace else {}),
                 )
                 steps.append(merge_step)
@@ -509,25 +626,51 @@ def run(
                 mode=mode,
                 require_dynamic=has_device,
                 on_progress=on_progress,
+                delivery_sink=delivery_sink,
             )
             steps.append(close_step)
             _extend_unique(report_paths, close_paths)
         else:
             steps.append(_step(_STEP_CLOSE, _SKIPPED, "无有效静态报告，案件闭环失败"))
+    except AutoCancelled as exc:
+        logger.info("[auto] 人工取消，停止后续抓包、旁路和闭环：%s", exc.code)
+        steps.append(_step("人工取消", _SKIPPED, "用户取消或确认失败，后续抓包、旁路和闭环未执行"))
+        closure = {
+            "schema_version": "1.0",
+            "status": "not_run",
+            "checks": [],
+            "targets": [],
+            "source_summary": {},
+            "gaps": ["cancelled_before_closure"],
+            "next_actions": [],
+        }
+        return _finish_run(
+            status="cancelled",
+            closure=closure,
+            strict_case=strict_case,
+            steps=steps,
+            report_paths=report_paths,
+            package_name=package_name,
+            out_dir=out_dir,
+            delivery_sink=delivery_sink,
+            cancel_reason=exc.reason,
+        )
     except Exception:
         # 顶层兜底：任何未预期异常都转成结构化结果，绝不抛给调用方（GUI 单按钮要稳）。
+        # 人工取消已在上面单独返回，不会被这里收成普通失败。
         logger.exception("[auto] run 未预期异常（已转结构化结果）")
         steps.append(_step("一键全自动", _ERROR, "流水线发生未预期异常（详见日志）"))
 
-    return {
-        "status": str(closure.get("status") or "failed"),
-        "closure": closure,
-        "strict_case": bool(strict_case),
-        "steps": steps,
-        "report_paths": report_paths,
-        "package_name": package_name,
-        "out_dir": out_dir,
-    }
+    return _finish_run(
+        status=str(closure.get("status") or "failed"),
+        closure=closure,
+        strict_case=strict_case,
+        steps=steps,
+        report_paths=report_paths,
+        package_name=package_name,
+        out_dir=out_dir,
+        delivery_sink=delivery_sink,
+    )
 
 
 def analyze_static(
@@ -559,17 +702,21 @@ def analyze_static(
         dict：{steps, report_paths, package_name, out_dir}，结构与 ``run`` 一致
         （steps 仅含一个「静态分析」步骤），便于 GUI 复用同一套结果解析。绝不抛。
     """
+    from apkscan.core.report_delivery import combine_deliveries
+
     fmts = list(formats) if formats else list(_DEFAULT_FORMATS)
+    delivery_sink: list[object] = []
     try:
         static_step, _report, package_name, static_paths, _base = _run_static(
             apk_path, out_dir=out_dir, online=online, formats=fmts, mode=mode,
-            on_progress=on_progress,
+            on_progress=on_progress, delivery_sink=delivery_sink,
         )
         return {
             "steps": [static_step],
             "report_paths": list(static_paths),
             "package_name": package_name,
             "out_dir": out_dir,
+            "report_delivery": combine_deliveries(delivery_sink),
         }
     except Exception:
         # _run_static 自身已吞异常；此处为外层兜底，确保任何意外都转结构化结果，绝不抛。
@@ -613,6 +760,103 @@ def _run_doctor(
         return _step(_STEP_DOCTOR, _ERROR, "环境体检发生未预期异常（详见日志）")
 
 
+def _window_callbacks(
+    during_round: Callable[..., object] | None,
+    android_ui_plugin: AndroidUiPlugin | None,
+    *,
+    serial: str | None,
+    package_name: str,
+    sample_sha256: str | None,
+) -> Callable[..., object] | None:
+    """Keep the caller callback and the Android UI plugin in one capture window."""
+    if during_round is None and (android_ui_plugin is None or serial is None):
+        return None
+
+    def invoke(
+        number: int, kind: str, capture_mode: str, directory: Path,
+        *, deadline_monotonic: float | None = None,
+    ) -> object:
+        outcome: object = None
+        if during_round is not None:
+            from apkscan.dynamic.capture import _invoke_interaction
+
+            if deadline_monotonic is None:
+                outcome = during_round(number, kind, capture_mode, directory)
+            else:
+                outcome = _invoke_interaction(
+                    during_round, number, kind, capture_mode, directory,
+                    deadline_monotonic=deadline_monotonic,
+                )
+        if android_ui_plugin is not None and serial is not None:
+            outcome = android_ui_plugin.run_round(CaptureRoundContext(
+                serial=serial,
+                package_name=package_name,
+                round_id=f"round{number}-{kind}",
+                round_kind=kind,
+                out_dir=directory,
+                sample_sha256=sample_sha256,
+                capture_mode=capture_mode,
+                deadline_monotonic=deadline_monotonic,
+            ))
+        return outcome
+
+    return invoke
+
+
+def _single_window_interaction(
+    during_round: Callable[..., object] | None,
+    android_ui_plugin: AndroidUiPlugin | None,
+    *,
+    serial: str | None,
+    package_name: str,
+    sample_sha256: str | None,
+    directory: Path,
+) -> Callable[..., object] | None:
+    bound = _window_callbacks(
+        during_round, android_ui_plugin,
+        serial=serial, package_name=package_name, sample_sha256=sample_sha256,
+    )
+    if bound is None:
+        return None
+
+    def interaction(*, deadline_monotonic: float | None = None) -> object:
+        return bound(1, "pcap", "single", directory, deadline_monotonic=deadline_monotonic)
+
+    return interaction
+
+
+def _web_config(out_dir: str, path: str | None, request: dict | None) -> AnalysisConfig:
+    return AnalysisConfig(
+        online=False, out_dir=out_dir, web_supplement=path, web_supplement_request=request,
+    )
+
+
+def _one_web_observer(
+    out_dir: str, path: str | None, request: dict | None, report: object | None = None,
+    publish_dir: str | None = None,
+) -> object | None:
+    from apkscan.core.web_supplement_runtime import make_capture_observer
+
+    if not path and request is None:
+        return None
+    return make_capture_observer(
+        _web_config(out_dir, path, request), report=report, publish_dir=publish_dir or out_dir,
+    )
+
+
+def _web_observer_factory(
+    out_dir: str, path: str | None, request: dict | None, report: object | None = None,
+):
+    if not path and request is None:
+        return None
+
+    def factory(number: int, kind: str, directory: Path) -> object | None:
+        del number, kind
+        return _one_web_observer(str(directory), path, request, report=report, publish_dir=out_dir)
+
+    return factory
+
+
 def _run_static(
     apk_path: str,
     *,
@@ -621,6 +865,9 @@ def _run_static(
     formats: list[str],
     mode: str = ANALYSIS_MODE_PASSIVE,
     on_progress: Callable[[str], None] | None,
+    web_supplement: str | None = None,
+    web_supplement_request: dict | None = None,
+    delivery_sink: list[object] | None = None,
 ) -> tuple[dict, Report | None, str, list[str], str]:
     """步骤 2：静态分析 load_apk → pipeline.run → 写报告。
 
@@ -637,7 +884,13 @@ def _run_static(
         from apkscan.core import pipeline
         from apkscan.core.apk import load_apk
 
-        config = AnalysisConfig(online=online, out_dir=out_dir, formats=list(formats), mode=mode)
+        from apkscan.core.web_supplement_runtime import static_web_arguments
+
+        static_path, static_request = static_web_arguments(web_supplement, web_supplement_request)
+        config = AnalysisConfig(
+            online=online, out_dir=out_dir, formats=list(formats), mode=mode,
+            web_supplement=static_path, web_supplement_request=static_request,
+        )
         ctx = load_apk(apk_path, config)
         package_name = ctx.package_name or ""
         # base 升级：拿到包名后用「APK 名→包名」回退链重算，覆盖 apk 名清理后为空的边界。
@@ -649,25 +902,38 @@ def _run_static(
         # （与 cli.analyze 一致，离线扫描下运行时端点不被当成已联网核实）。
         report.meta["online"] = config.online
 
-        report_paths = _write_reports(report, out_dir=out_dir, formats=formats, base=base)
+        report_paths = _write_reports(
+            report, out_dir=out_dir, formats=formats, base=base, delivery_sink=delivery_sink,
+        )
 
         detail = (
             f"静态分析完成：包名 {package_name or '(未知)'}，"
             f"端点 {len(report.endpoints)}，线索 {len(report.leads)}"
         )
         return _step(_STEP_STATIC, _DONE, detail), report, package_name, report_paths, base
+    except AutoCancelled:
+        raise
     except Exception:  # noqa: BLE001 - load_apk(ApkParseError 等)/pipeline 失败不中断流水线
         logger.exception("[auto] 静态分析步骤异常：%s", apk_path)
         return _step(_STEP_STATIC, _ERROR, "静态分析发生未预期异常（详见日志）"), None, "", [], base
 
 
-def _write_reports(report: object, *, out_dir: str, formats: list[str], base: str) -> list[str]:
-    """写出静态报告（``<base>.json`` / ``<base>.html``）。单格式失败不致命，记 logging 跳过。
+def _write_reports(
+    report: object,
+    *,
+    out_dir: str,
+    formats: list[str],
+    base: str,
+    delivery_sink: list[object] | None = None,
+) -> list[str]:
+    """写出静态报告（``<base>.json`` / ``<base>.html``）。单格式失败不致命，记 logging。
 
     不依赖 cli 私有函数：直接惰性 import report.{json,html}，与 merge 重渲口径一致。
     文件名用 ``base``（APK 名去后缀），与 cli.analyze / merge 重渲严格同 base。
-    返回成功写出的报告路径列表。
+    返回成功写出的报告路径列表。失败格式写入 ``delivery_sink``，不把旧文件当成这次成功。
     """
+    from apkscan.core.report_delivery import ReportDelivery
+
     out_path = Path(out_dir)
     try:
         out_path.mkdir(parents=True, exist_ok=True)
@@ -675,24 +941,43 @@ def _write_reports(report: object, *, out_dir: str, formats: list[str], base: st
         logger.exception("[auto] 创建输出目录失败：%s", out_dir)
 
     paths: list[str] = []
+    requested: list[str] = []
+    written_formats: list[str] = []
+    failed_formats: list[str] = []
+    skipped: list[str] = []
     if "json" in formats:
+        requested.append("json")
         target = out_path / f"{base}.json"
         try:
             from apkscan.report import json as report_json
 
             report_json.dump(report, str(target))  # type: ignore[arg-type]
             paths.append(str(target))
+            written_formats.append("json")
         except Exception:
             logger.exception("[auto] 写出 %s 失败：%s", target.name, target)
+            failed_formats.append("json")
     if "html" in formats:
+        requested.append("html")
         target = out_path / f"{base}.html"
         try:
             from apkscan.report import html as report_html
 
             report_html.render(report, str(target))  # type: ignore[arg-type]
             paths.append(str(target))
+            written_formats.append("html")
         except Exception:
             logger.exception("[auto] 写出 %s 失败：%s", target.name, target)
+            failed_formats.append("html")
+    if "pdf" in formats:
+        requested.append("pdf")
+        skipped.append("pdf")
+    if delivery_sink is not None and requested:
+        delivery_sink.append(
+            ReportDelivery(
+                tuple(requested), tuple(written_formats), tuple(failed_formats), tuple(skipped),
+            )
+        )
     return paths
 
 
@@ -789,6 +1074,20 @@ def _run_unpack(
 _RUN_SCOPED_META_KEYS = ("online", "mode", "target_serial")
 
 
+def _apply_preserved_web_meta(meta: dict, preserved: dict) -> None:
+    """字面写入，便于 meta 契约扫描看见键。只覆盖本函数返回的显式投影。"""
+    if "_web_supplement_raws" in preserved:
+        meta["_web_supplement_raws"] = preserved["_web_supplement_raws"]
+    if "web_supplement" in preserved:
+        meta["web_supplement"] = preserved["web_supplement"]
+    if "web_observation_plan" in preserved:
+        meta["web_observation_plan"] = preserved["web_observation_plan"]
+    if "web_observations" in preserved:
+        meta["web_observations"] = preserved["web_observations"]
+    if "web_supplement_runtime" in preserved:
+        meta["web_supplement_runtime"] = preserved["web_supplement_runtime"]
+
+
 def _adopt_unpacked_report(
     static_report: Report | None, unpacked: Report, *, apk_path: str
 ) -> Report:
@@ -797,15 +1096,30 @@ def _adopt_unpacked_report(
     ★「脱壳成功」与「脱壳结果已成为当前报告的输入」是两件事，必须分开记录：前者只说 DEX dump
     出来了，后者才说明最终报告/闭环看到了那些 DEX。二者混为一谈时，「步骤显示脱壳成功、报告却
     还是壳桩」这种情况从数据上根本看不出来。
+
+    被取代的原报告整份归档（不嵌套旧快照），原报告上脱壳重分析无法再生的端点、线索和
+    REA 去重键并入当前报告。当前对象已有的档位、降档和样本事实保持不动。
     """
     meta = unpacked.meta if isinstance(unpacked.meta, dict) else {}
+    unpacked.meta = meta
     prior = static_report.meta if static_report is not None and isinstance(
         static_report.meta, dict
     ) else {}
-    inherited = [k for k in _RUN_SCOPED_META_KEYS if k in prior and k not in meta]
-    for key in inherited:
-        meta[key] = prior[key]
-    meta["artifact_lineage"] = {
+    existing = meta.get("artifact_lineage")
+    existing_lineage = dict(existing) if isinstance(existing, dict) else {}
+    if existing_lineage:
+        inherited = list(existing_lineage.get("inherited_run_context") or [])
+        for key in _RUN_SCOPED_META_KEYS:
+            if key in prior and key not in meta:
+                meta[key] = prior[key]
+    else:
+        inherited = [k for k in _RUN_SCOPED_META_KEYS if k in prior and k not in meta]
+        for key in inherited:
+            meta[key] = prior[key]
+    _apply_preserved_web_meta(meta, preserved_web_meta(prior, meta))
+    if static_report is not None:
+        merge_carried_evidence(unpacked, static_report)
+    lineage = {
         "active_input": "unpacked",           # 当前报告基于脱壳回灌的 DEX
         "apk_path": apk_path,
         "unpacked_dex_count": meta.get("unpacked_dex_count", 0),
@@ -813,6 +1127,8 @@ def _adopt_unpacked_report(
         "superseded_static_packed": prior.get("packed"),
         "inherited_run_context": inherited,   # 哪些运行上下文是从被取代的静态报告接过来的
     }
+    lineage.update(extend_phase_history(static_report, existing_lineage, apk_path))
+    meta["artifact_lineage"] = lineage
     logger.info(
         "[auto] 后续流程切换到脱壳回灌报告（%s 个 DEX，继承运行上下文 %s）：%s",
         meta.get("unpacked_dex_count", 0), inherited or "无", apk_path,
@@ -953,11 +1269,13 @@ def _run_capture(
     serial: str | None = None,
     duration: int,
     on_progress: Callable[[str], None] | None,
-    confirm: Callable[[str], None] | None,
+    confirm: Callable[[str], object] | None,
     report: object = None,
     allow_behavior_modification: bool = False,
     antidetect: str = "off",
     pass_tag: str = "",
+    web_observer: object | None = None,
+    interaction: Callable[..., object] | None = None,
 ) -> tuple[dict, str]:
     """步骤 4：抓包（有设备 + 有包名才做）。先 confirm 提示用户操作 app 触发网络。
 
@@ -996,6 +1314,8 @@ def _run_capture(
             allow_behavior_modification=allow_behavior_modification,
             antidetect=antidetect,
             pass_tag=pass_tag,
+            web_observer=web_observer,
+            interaction=interaction,
         )
         step, _ = _fold_dynamic_step(_STEP_CAPTURE, result)
         # ★局部保留 degraded：`_fold_dynamic_step` 把它折成 error（全局既有行为，不在本片动），但抓包
@@ -1008,7 +1328,22 @@ def _run_capture(
         runtime_path = ""
         if step["status"] in (_DONE, _DEGRADED):
             runtime_path = _resolve_runtime_report_path(result, out_dir)
+        elif step["status"] == _ERROR:
+            from apkscan.dynamic.capture_sequence import bounded_runtime_report
+            from apkscan.dynamic.merge import import_runtime_diagnostics_only
+
+            bounded = bounded_runtime_report(out_dir)
+            produced = {
+                Path(item).resolve()
+                for item in (result.get("report_paths") or [])
+                if isinstance(item, str)
+            } if isinstance(result, dict) else set()
+            if bounded is not None and bounded in produced:
+                runtime_path = str(bounded)
+                import_runtime_diagnostics_only(report, runtime_path)
         return step, runtime_path
+    except AutoCancelled:
+        raise
     except Exception:  # noqa: BLE001 - 抓包失败不中断流水线
         logger.exception("[auto] 抓包步骤异常：%s", package_name)
         return _step(_STEP_CAPTURE, _ERROR, "抓包发生未预期异常（详见日志）"), ""
@@ -1023,6 +1358,7 @@ def _run_merge(
     formats: list[str],
     on_progress: Callable[[str], None] | None,
     evidence_namespace: str | None = None,
+    delivery_sink: list[object] | None = None,
 ) -> tuple[dict, list[str]]:
     """步骤 5：把运行时端点并回主报告并重渲。失败 → error，但不破坏已产出静态报告。
 
@@ -1060,11 +1396,23 @@ def _run_merge(
         report_paths = stats.get("report_paths") or []
         if not isinstance(report_paths, list):
             report_paths = []
+        delivery = stats.get("report_delivery")
+        if delivery_sink is not None and delivery is not None:
+            delivery_sink.append(delivery)
         detail = (
             f"运行时端点并入：新增端点 {merged}，新增线索 {new_leads}；"
             f"重渲报告 {len(report_paths)} 份"
         )
+        from apkscan.core.report_delivery import ReportDelivery
+
+        if isinstance(delivery, ReportDelivery) and delivery.blocks_success():
+            return (
+                _step(_STEP_MERGE, _ERROR, "报告重渲未完成"),
+                [str(p) for p in report_paths],
+            )
         return _step(_STEP_MERGE, _DONE, detail), [str(p) for p in report_paths]
+    except AutoCancelled:
+        raise
     except Exception:  # noqa: BLE001 - 合并失败不破坏已产出静态报告
         logger.exception("[auto] 合并运行时端点步骤异常")
         return _step(_STEP_MERGE, _ERROR, "合并运行时端点发生未预期异常（详见日志）"), []
@@ -1079,6 +1427,7 @@ def _run_closure(
     mode: str,
     require_dynamic: bool,
     on_progress: Callable[[str], None] | None,
+    delivery_sink: list[object] | None = None,
 ) -> tuple[dict, dict[str, object], list[str]]:
     """Run deterministic case gates and persist them without raising to callers."""
     _emit(on_progress, "步骤 6/6：多源富化、五层归因与案件闭环验收")
@@ -1105,7 +1454,28 @@ def _run_closure(
                 require_dynamic=require_dynamic,
             ),
         )
-        paths = report_io.write_report(report, Path(out_dir) / f"{base}.json")
+        try:
+            paths = report_io.write_report(report, Path(out_dir) / f"{base}.json")
+        except AutoCancelled:
+            raise
+        except Exception:
+            logger.exception("[auto] 案件闭环结果写回失败")
+            if delivery_sink is not None:
+                from apkscan.core.report_delivery import ReportDelivery
+
+                delivery_sink.append(ReportDelivery(("json",), (), ("json",), ()))
+            return (
+                _step(_STEP_CLOSE, _ERROR, "闭环结果未能写回报告"),
+                closure,
+                [],
+            )
+        if delivery_sink is not None:
+            from apkscan.core.report_delivery import ReportDelivery
+
+            written = ["json"]
+            if any(str(path).endswith(".html") for path in paths):
+                written.append("html")
+            delivery_sink.append(ReportDelivery(tuple(written), tuple(written), (), ()))
         targets = closure.get("targets")
         gaps = closure.get("gaps")
         target_count = len(targets) if isinstance(targets, list) else 0
@@ -1115,6 +1485,8 @@ def _run_closure(
             f"主目标 {target_count}；未闭环项 {gap_count}"
         )
         return _step(_STEP_CLOSE, _DONE, detail), closure, paths
+    except AutoCancelled:
+        raise
     except Exception as exc:  # noqa: BLE001 - auto core always returns structured failure
         logger.exception("[auto] 案件闭环步骤异常")
         reason = f"case closure execution failed ({type(exc).__name__})"

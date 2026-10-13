@@ -32,6 +32,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from apkscan.core.redact import safe_exception_text
@@ -78,6 +79,12 @@ class OwnedRun:
     #: 根进程正常退出但仍有后代存活、被本层强杀 → True（该次运行不得算完整覆盖）。
     forced_tree_kill: bool
     reason_codes: tuple[str, ...]
+    #: 作业/地址空间限额生效后可读到的峰值；未采样为 None。不是事后截断 stdout。
+    peak_memory_bytes: int | None = None
+    #: 调用方要求了内存限额且该限额已写进作业或 RLIMIT，命令才被放行。
+    memory_limit_enforced: bool = False
+    #: Windows 作业活跃进程数限额已写入。POSIX 没有等价的整树进程数硬顶。
+    process_limit_enforced: bool = False
 
 
 class _SpawnFailed(RuntimeError):
@@ -88,12 +95,92 @@ def _codes(*items: str) -> tuple[str, ...]:
     return tuple(sorted(set(c for c in items if c)))
 
 
+def _reap_returncode(proc: subprocess.Popen[str], reasons: list[str]) -> int | None:
+    """Popen.returncode 只在 poll/wait 之后才有值。管道 EOF、超时强杀和输出上限都要回收真实退出码。
+
+    回收不到时保留 None，并记 process_exit_unverified。超时原因与退出码分开保留，不把已退出进程写成 null。
+    """
+    if proc.poll() is None:
+        try:
+            proc.wait(timeout=_ROOT_EXIT_GRACE)
+        except subprocess.TimeoutExpired:
+            reasons.append("process_exit_unverified")
+    return proc.returncode
+
+
+def _communicate_capped(
+    proc: subprocess.Popen[str],
+    payload: str | None,
+    timeout: float,
+    max_stdout_bytes: int | None,
+    max_stderr_bytes: int | None,
+) -> tuple[str, str, bool, bool]:
+    """边读边计数字节。超限只表示要杀整树，不把读完再切片当成内存限额。"""
+    exceeded = threading.Event()
+    chunks: dict[str, bytearray] = {"out": bytearray(), "err": bytearray()}
+
+    def pump(stream: object, key: str, limit: int | None) -> None:
+        raw = getattr(stream, "buffer", None)
+        if raw is None:
+            return
+        while True:
+            block = raw.read(65536)
+            if not block:
+                return
+            chunks[key].extend(block)
+            if limit is not None and len(chunks[key]) > limit:
+                del chunks[key][limit:]
+                exceeded.set()
+                return
+
+    if payload is not None and proc.stdin is not None:
+        proc.stdin.write(payload)
+        proc.stdin.close()
+    threads = [
+        threading.Thread(target=pump, args=(proc.stdout, "out", max_stdout_bytes), daemon=True),
+        threading.Thread(target=pump, args=(proc.stderr, "err", max_stderr_bytes), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + timeout
+    while any(thread.is_alive() for thread in threads):
+        if exceeded.is_set() or time.monotonic() >= deadline:
+            break
+        time.sleep(_QUIESCE_INTERVAL)
+    timed_out = time.monotonic() >= deadline and not exceeded.is_set()
+    for thread in threads:
+        thread.join(timeout=1.0)
+    stdout = bytes(chunks["out"]).decode("utf-8", errors="replace")
+    stderr = bytes(chunks["err"]).decode("utf-8", errors="replace")
+    return stdout, stderr, exceeded.is_set(), timed_out
+
+
 def run_owned(
-    cmd: list[str], *, timeout: float, env: dict[str, str] | None = None
+    cmd: list[str],
+    *,
+    timeout: float,
+    env: dict[str, str] | None = None,
+    memory_bytes: int | None = None,
+    max_processes: int | None = None,
+    max_stdout_bytes: int | None = None,
+    max_stderr_bytes: int | None = None,
 ) -> OwnedRun:
-    """执行 ``cmd``，限时 ``timeout`` 秒，保证进程树被拥有并在结束时整树终止。绝不抛。"""
+    """执行 ``cmd``，限时 ``timeout`` 秒，保证进程树被拥有并在结束时整树终止。绝不抛。
+
+    内存和进程数限额是可选的。调用方没要求时，行为与原来的作业终止一致。
+    要求了限额但写不进内核对象时，不放行命令。
+    """
+    extra: dict[str, int] = {}
+    if memory_bytes is not None:
+        extra["memory_bytes"] = memory_bytes
+    if max_processes is not None:
+        extra["max_processes"] = max_processes
+    if max_stdout_bytes is not None:
+        extra["max_stdout_bytes"] = max_stdout_bytes
+    if max_stderr_bytes is not None:
+        extra["max_stderr_bytes"] = max_stderr_bytes
     try:
-        return _run_owned_impl(cmd, timeout=timeout, env=env)
+        return _run_owned_impl(cmd, timeout=timeout, env=env, **extra)
     except _SpawnFailed as exc:
         logger.exception("[proctree] 启动失败：%s", cmd[:1])
         return OwnedRun(
@@ -135,6 +222,9 @@ if sys.platform == "win32":
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
     _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+    _JOB_OBJECT_LIMIT_ACTIVE_PROCESS = 0x0008
+    _JOB_OBJECT_LIMIT_PROCESS_MEMORY = 0x0100
+    _JOB_OBJECT_LIMIT_JOB_MEMORY = 0x0200
     _JobObjectExtendedLimitInformation = 9
     _JobObjectBasicAccountingInformation = 1
     _PROCESS_SET_QUOTA = 0x0100
@@ -380,6 +470,49 @@ if sys.platform == "win32":
             return None
         return job
 
+    def _create_limited_job(memory_bytes: int | None, max_processes: int | None) -> int | None:
+        """写入作业内存和活跃进程数硬顶。任一要求的限额写不进去就关掉作业并返回 None。"""
+        if memory_bytes is not None and memory_bytes <= 0:
+            return None
+        if max_processes is not None and max_processes <= 0:
+            return None
+        job = _kernel32.CreateJobObjectW(None, None)
+        if not job:
+            logger.error("[proctree] CreateJobObjectW 失败：%d", ctypes.get_last_error())
+            return None
+        info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        flags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if memory_bytes is not None:
+            flags |= _JOB_OBJECT_LIMIT_JOB_MEMORY | _JOB_OBJECT_LIMIT_PROCESS_MEMORY
+            info.JobMemoryLimit = memory_bytes
+            info.ProcessMemoryLimit = memory_bytes
+        if max_processes is not None:
+            flags |= _JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+            info.BasicLimitInformation.ActiveProcessLimit = max_processes
+        info.BasicLimitInformation.LimitFlags = flags
+        ok = _kernel32.SetInformationJobObject(
+            job, _JobObjectExtendedLimitInformation,
+            ctypes.byref(info), ctypes.sizeof(info),
+        )
+        if not ok:
+            logger.error(
+                "[proctree] 作业限额 SetInformationJobObject 失败：%d",
+                ctypes.get_last_error(),
+            )
+            _kernel32.CloseHandle(job)
+            return None
+        return job
+
+    def _peak_job_memory(job: int) -> int | None:
+        info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        ok = _kernel32.QueryInformationJobObject(
+            job, _JobObjectExtendedLimitInformation,
+            ctypes.byref(info), ctypes.sizeof(info), None,
+        )
+        if not ok:
+            return None
+        return int(info.PeakJobMemoryUsed)
+
     def _assign_pid_to_job(job: int, pid: int) -> bool:
         hproc = _kernel32.OpenProcess(
             _PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, pid
@@ -430,9 +563,27 @@ if sys.platform == "win32":
             time.sleep(_QUIESCE_INTERVAL)
 
     def _run_owned_impl(
-        cmd: list[str], *, timeout: float, env: dict[str, str] | None
+        cmd: list[str],
+        *,
+        timeout: float,
+        env: dict[str, str] | None,
+        memory_bytes: int | None = None,
+        max_processes: int | None = None,
+        max_stdout_bytes: int | None = None,
+        max_stderr_bytes: int | None = None,
     ) -> OwnedRun:
-        job = _create_kill_on_close_job()
+        limited = memory_bytes is not None or max_processes is not None
+        if limited:
+            job = _create_limited_job(memory_bytes, max_processes)
+            if job is None:
+                reason = "memory_limit_unavailable" if memory_bytes is not None else "job_assignment_failed"
+                return OwnedRun(
+                    returncode=None, stdout="", stderr="", timed_out=False,
+                    ownership_complete=False, termination_complete=True,
+                    forced_tree_kill=False, reason_codes=_codes(reason),
+                )
+        else:
+            job = _create_kill_on_close_job()
         tracker: _JobExitTracker | None = None
         if job is not None:
             try:
@@ -498,13 +649,31 @@ if sys.platform == "win32":
             assert job is not None  # owned=True 蕴含 job 建立成功
             payload = json.dumps(cmd, ensure_ascii=False) + "\n"
             try:
-                stdout, stderr = proc.communicate(input=payload, timeout=timeout)
+                if max_stdout_bytes is None and max_stderr_bytes is None:
+                    stdout, stderr = proc.communicate(input=payload, timeout=timeout)
+                else:
+                    stdout, stderr, capped, cap_timed_out = _communicate_capped(
+                        proc, payload, timeout, max_stdout_bytes, max_stderr_bytes,
+                    )
+                    if capped or cap_timed_out:
+                        _kernel32.TerminateJobObject(job, 1)
+                        if capped:
+                            reasons.append("output_limit")
+                        if cap_timed_out:
+                            timed_out = True
+                            reasons.append("timeout")
             except subprocess.TimeoutExpired:
                 timed_out = True
                 reasons.append("timeout")
                 _kernel32.TerminateJobObject(job, 1)
                 stdout, stderr = _drain(proc)
             if not timed_out:
+                # 限额读取只等到管道 EOF，不会像 communicate 那样回收 returncode。
+                if proc.poll() is None:
+                    try:
+                        proc.wait(timeout=_ROOT_EXIT_GRACE)
+                    except subprocess.TimeoutExpired:
+                        pass
                 # 门（含其子命令）已退出：宽限后 Job 计数仍 >0 说明有脱管后代 → 强杀整树。
                 active = _job_active_after_grace(job)
                 if active is None:
@@ -523,7 +692,8 @@ if sys.platform == "win32":
                 reasons.append("process_exit_unverified")
             if not terminated:
                 reasons.append("survivors_after_kill")
-            returncode: int | None = None if timed_out else proc.returncode
+            # 超时路径此前把 returncode 强制写成 None，正常退出码和被强杀的真实退出码都消失。
+            returncode = _reap_returncode(proc, reasons)
             if returncode == _GATE_ABORT_EXIT:
                 # 理论不可达（owned 才发命令），防御性定性为放弃执行。
                 reasons.append("gate_aborted")
@@ -533,6 +703,9 @@ if sys.platform == "win32":
                 timed_out=timed_out, ownership_complete=owned,
                 termination_complete=terminated, forced_tree_kill=forced,
                 reason_codes=_codes(*reasons),
+                peak_memory_bytes=_peak_job_memory(job),
+                memory_limit_enforced=memory_bytes is not None and owned,
+                process_limit_enforced=max_processes is not None and owned,
             )
         finally:
             if job is not None:
@@ -590,12 +763,55 @@ else:
             time.sleep(_QUIESCE_INTERVAL)
 
     def _run_owned_impl(
-        cmd: list[str], *, timeout: float, env: dict[str, str] | None
+        cmd: list[str],
+        *,
+        timeout: float,
+        env: dict[str, str] | None,
+        memory_bytes: int | None = None,
+        max_processes: int | None = None,
+        max_stdout_bytes: int | None = None,
+        max_stderr_bytes: int | None = None,
     ) -> OwnedRun:
+        # RLIMIT_NPROC 是用户级而不是这棵进程树的硬顶，不能拿来冒充进程数限额。
+        # 内存用 RLIMIT_AS。macOS 上 RLIMIT_AS 不生效、preexec 内 setrlimit 必败 → 不 spawn，
+        # 直接 fail-closed 回 memory_limit_unavailable。本机没有 Linux 实跑，这条路径保持未验证。
+        if memory_bytes is not None and sys.platform == "darwin":
+            return OwnedRun(
+                returncode=None, stdout="", stderr="", timed_out=False,
+                ownership_complete=False, termination_complete=True,
+                forced_tree_kill=False, reason_codes=_codes("memory_limit_unavailable"),
+            )
+        preexec: Callable[[], None] | None = None
+        if memory_bytes is not None:
+            try:
+                import resource
+                if memory_bytes <= 0 or not hasattr(resource, "RLIMIT_AS"):
+                    raise OSError("memory limit unavailable")
+            except Exception:
+                return OwnedRun(
+                    returncode=None, stdout="", stderr="", timed_out=False,
+                    ownership_complete=False, termination_complete=True,
+                    forced_tree_kill=False, reason_codes=_codes("memory_limit_unavailable"),
+                )
+            limit_bytes = memory_bytes
+
+            def _limit_address_space() -> None:
+                import resource
+                resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
+
+            preexec = _limit_address_space
+
         try:
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
                 start_new_session=True, text=True, encoding="utf-8", errors="replace",
+                preexec_fn=preexec,
+            )
+        except subprocess.SubprocessError:
+            return OwnedRun(
+                returncode=None, stdout="", stderr="", timed_out=False,
+                ownership_complete=False, termination_complete=True,
+                forced_tree_kill=False, reason_codes=_codes("memory_limit_unavailable"),
             )
         except OSError as exc:
             raise _SpawnFailed(safe_exception_text(exc)) from exc
@@ -606,13 +822,30 @@ else:
         completed = False
         try:
             try:
-                stdout, stderr = proc.communicate(timeout=timeout)
+                if max_stdout_bytes is None and max_stderr_bytes is None:
+                    stdout, stderr = proc.communicate(timeout=timeout)
+                else:
+                    stdout, stderr, capped, cap_timed_out = _communicate_capped(
+                        proc, None, timeout, max_stdout_bytes, max_stderr_bytes,
+                    )
+                    if capped or cap_timed_out:
+                        _posix_kill_group(pgid)
+                        if capped:
+                            reasons.append("output_limit")
+                        if cap_timed_out:
+                            timed_out = True
+                            reasons.append("timeout")
             except subprocess.TimeoutExpired:
                 timed_out = True
                 reasons.append("timeout")
                 _posix_kill_group(pgid)
                 stdout, stderr = _drain(proc)
             if not timed_out:
+                if proc.poll() is None:
+                    try:
+                        proc.wait(timeout=_ROOT_EXIT_GRACE)
+                    except subprocess.TimeoutExpired:
+                        pass
                 # 根已退出：宽限后仍有脱管后代才强杀整组，该次运行不算完整覆盖。
                 if _posix_pids_after_grace(pgid):
                     forced = True
@@ -622,10 +855,12 @@ else:
             if not terminated:
                 reasons.append("survivors_after_kill")
             result = OwnedRun(
-                returncode=None if timed_out else proc.returncode,
+                returncode=_reap_returncode(proc, reasons),
                 stdout=stdout, stderr=stderr, timed_out=timed_out,
                 ownership_complete=True, termination_complete=terminated,
                 forced_tree_kill=forced, reason_codes=_codes(*reasons),
+                memory_limit_enforced=memory_bytes is not None,
+                process_limit_enforced=False,
             )
             completed = True
             return result

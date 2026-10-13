@@ -67,7 +67,10 @@ def test_timeout_kills_whole_tree_including_grandchild() -> None:
     pid = int(pid_lines[0]) if pid_lines else None
     try:
         assert res.timed_out is True
-        assert res.returncode is None
+        # 旧断言把 returncode 锁成 None，那是超时路径跳过 poll/wait 的错误语义。
+        # 强杀之后必须回收真实退出码，同时保留 timeout，不能再把已退出进程塌成 null。
+        assert isinstance(res.returncode, int)
+        assert res.returncode != 0
         assert res.ownership_complete is True
         assert "timeout" in res.reason_codes
         assert res.termination_complete is True, "整树终止未获确认"
@@ -129,6 +132,27 @@ def test_windows_job_failure_fails_closed_command_never_runs(
     assert res.returncode is None
     assert res.termination_complete is True  # 门进程未产子、自身已退
     assert not marker.exists(), "所有权未建立时命令不得被放行"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX 实现只在非 win32 绑定")
+def test_darwin_memory_limit_unavailable_fails_closed_without_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """macOS 上 RLIMIT_AS 不生效：preexec 内 setrlimit 必败，必须先于 spawn fail closed。"""
+    spawned: list[object] = []
+
+    def _no_spawn(*_args: object, **_kwargs: object) -> None:
+        spawned.append(1)
+        raise AssertionError("spawned")
+
+    monkeypatch.setattr(proctree.subprocess, "Popen", _no_spawn)
+    monkeypatch.setattr(proctree.sys, "platform", "darwin")
+    res = proctree.run_owned([sys.executable, "-c", "pass"], timeout=5.0, memory_bytes=4096)
+    assert res.returncode is None
+    assert res.ownership_complete is False
+    assert res.termination_complete is True
+    assert res.reason_codes == ("memory_limit_unavailable",)
+    assert not spawned
 
 
 def test_internal_error_reported_not_raised(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -40,7 +40,7 @@ import socket
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from apkscan.core import device, infra, tools
@@ -458,6 +458,22 @@ def _annotate_runtime_endpoints(
                     evidence.source = pcap_ingest.RUNTIME_UNATTRIBUTED_SOURCE
 
 
+def _report_sample_sha256(report: object) -> str | None:
+    """只接受报告里已经写明的 64 位样本哈希。没有就不编。"""
+    meta = getattr(report, "meta", None)
+    if not isinstance(meta, Mapping) and isinstance(report, Mapping):
+        meta = report.get("meta")
+    if not isinstance(meta, Mapping):
+        return None
+    sha = meta.get("sample_sha256")
+    if not isinstance(sha, str) or len(sha) != 64:
+        return None
+    lowered = sha.lower()
+    if any(character not in "0123456789abcdef" for character in lowered):
+        return None
+    return lowered
+
+
 def run(
     package: str,
     out_dir: str = "out",
@@ -472,6 +488,7 @@ def run(
     pass_tag: str = "",
     selected_hooks: tuple[str, ...] | None = None,
     interaction: Callable[..., object] | None = None,
+    web_observer: Any | None = None,
 ) -> DynamicResult:
     """对运行中的目标应用做真机抓包，提取运行时端点。
 
@@ -592,7 +609,8 @@ def run(
         package, out_path, duration, serial, decision=decision, mitm=use_mitm, floor=use_floor,
         frida=use_frida, capabilities_plan=plan_dict,
         allow_behavior_modification=allow_behavior_modification, antidetect=antidetect,
-        pass_tag=pass_tag, interaction=interaction,
+        pass_tag=pass_tag, interaction=interaction, web_observer=web_observer,
+        sample_sha256=_report_sample_sha256(report),
         **({"selected_hooks": selected_hooks} if selected_hooks is not None else {}),
     )
 
@@ -683,6 +701,100 @@ def _build_playbook(package: str, out_dir: str, duration: int) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+def _record_ui_interaction(
+    interaction: Callable[..., object],
+    deadline: float,
+    pass_tag: str,
+    ui_observations: list[dict[str, Any]],
+    playbook: list[str],
+    warnings: list[str],
+) -> None:
+    try:
+        interaction_result = _invoke_interaction(interaction, deadline_monotonic=deadline)
+        if isinstance(interaction_result, dict):
+            observation = dict(interaction_result)
+            observation.setdefault("round_id", pass_tag or "capture")
+            observation.setdefault("observed_at", time.time())
+            observation.setdefault("status", "complete")
+            try:
+                json.dumps(observation, ensure_ascii=False)
+                ui_observations.append(observation)
+            except (TypeError, ValueError):
+                logger.exception("[capture] UI interaction result is not JSON serializable")
+                warnings.append("UI interaction result not serializable")
+        playbook.append(f"UI interaction completed: {type(interaction_result).__name__}")
+    except Exception as exc:  # noqa: BLE001 - UI failure must not skip capture cleanup
+        logger.exception("[capture] UI interaction failed")
+        playbook.append(f"UI interaction failed: {type(exc).__name__}")
+        warnings.append(f"UI interaction failed: {type(exc).__name__}")
+
+
+_READY_STARTUP_SEC = 2.0
+
+
+def overlap_web_observation(
+    *,
+    interaction: Callable[..., object] | None,
+    web_observer: Any,
+    deadline: float | None,
+    window_seconds: float,
+    ui_observations: list[dict[str, Any]] | None = None,
+    playbook: list[str] | None = None,
+    warnings: list[str] | None = None,
+    pass_tag: str = "",
+) -> dict[str, Any] | None:
+    """Start observation, wait briefly for ready, then run UI inside the same window.
+
+    The window length is ``window_seconds`` measured from this call. Ready and UI
+    time is not added on top of that budget. Observer failures stay in the receipt
+    and still run the original UI callback. The observer is always finished.
+    """
+    start = _monotonic()
+    end = start + max(0.0, float(window_seconds))
+    if deadline is not None:
+        end = min(end, deadline)
+    ready_end = min(end, start + _READY_STARTUP_SEC)
+    receipt: dict[str, Any] | None = None
+    ready = "failed"
+    try:
+        try:
+            web_observer.start(end)
+        except Exception:
+            logger.exception("[capture] web observation start failed")
+            ready = "failed"
+        else:
+            try:
+                ready = web_observer.wait_ready(ready_end)
+            except Exception:
+                logger.exception("[capture] web observation readiness failed")
+                ready = "failed"
+        if interaction is not None and _monotonic() < end:
+            if ui_observations is not None and playbook is not None and warnings is not None:
+                _record_ui_interaction(
+                    interaction, end, pass_tag, ui_observations, playbook, warnings,
+                )
+            else:
+                try:
+                    _invoke_interaction(interaction, deadline_monotonic=end)
+                except Exception:
+                    logger.exception("[capture] UI interaction during web observation failed")
+        leftover = end - _monotonic()
+        if leftover > 0:
+            _wait(leftover)
+    finally:
+        try:
+            finished = web_observer.finish()
+            if isinstance(finished, dict):
+                receipt = finished
+        except Exception:
+            logger.exception("[capture] web observation cleanup failed")
+            receipt = {"status": "failed", "reason": "parse_failed", "live_cdp": False}
+    if receipt is not None and ready == "timeout" and receipt.get("status") not in {"ok", "executed", "unavailable"}:
+        receipt["reason"] = "timeout"
+        receipt["status"] = "failed"
+    return receipt
+
+
 def _capture(
     package: str,
     out_path: Path,
@@ -699,6 +811,8 @@ def _capture(
     pass_tag: str = "",
     selected_hooks: tuple[str, ...] | None = None,
     interaction: Callable[..., object] | None = None,
+    web_observer: Any | None = None,
+    sample_sha256: str | None = None,
 ) -> DynamicResult:
     """编排 mitmdump + adb 代理 + frida unpinning + 启 app，到时停并解析流量。
 
@@ -739,6 +853,7 @@ def _capture(
     # frida-core 不可用/注入失败时 frida_session 保持 None、回退 subprocess（无 key 回传）。
     frida_session: Any = None
     frida_script: Any = None
+    observed_pid: int | None = None
     # ★P0-a sticky：本轮是否**曾经**把行为修改 shim 注入进目标进程（script.load()+resume() 成功即置位，
     #   **绝不回退**）。不能用 frida_session 代替：会话秒退时它会被清成 None，但 MITM/floor 早在注入前就
     #   已开录、且收尾统一解析同一批文件——秒退前 grace 期内那段流量**已被 shim 诱导**。若按 frida_session
@@ -911,6 +1026,10 @@ def _capture(
                 shim_state=shim_state,
                 **({"selected_hooks": selected_hooks} if selected_hooks is not None else {}),
             )
+            if frida_session is not None:
+                raw_pid = getattr(frida_session, "pid", None)
+                if isinstance(raw_pid, int) and not isinstance(raw_pid, bool):
+                    observed_pid = raw_pid
             # ★sticky OR：以 shim_state 为准，而非返回值。shim 在 script.load() 那一刻就已进入目标进程，
             #   而 load→return 之间任何异常都会让本次调用返回 (None, None)（那段流量却已被诱导）。
             #   只按返回值置位会漏掉这个窗口 → 假 original。OR 语义保证曾注入过就永不回退。
@@ -986,33 +1105,11 @@ def _capture(
                 playbook.append(warn)
                 warnings.append(warn)
 
-        if interaction is not None and _budget_remaining(capture_started_at, decision.total_budget_sec) > 0:
-            try:
-                interaction_result = _invoke_interaction(
-                    interaction, deadline_monotonic=capture_deadline,
-                )
-                if isinstance(interaction_result, dict):
-                    observation = dict(interaction_result)
-                    observation.setdefault("round_id", pass_tag or "capture")
-                    observation.setdefault("observed_at", time.time())
-                    observation.setdefault("status", "complete")
-                    try:
-                        json.dumps(observation, ensure_ascii=False)
-                        ui_observations.append(observation)
-                    except (TypeError, ValueError):
-                        logger.exception("[capture] UI interaction result is not JSON serializable")
-                        warnings.append("UI interaction result not serializable")
-                playbook.append(f"UI interaction completed: {type(interaction_result).__name__}")
-            except Exception as exc:  # noqa: BLE001 - UI failure must not skip capture cleanup
-                logger.exception("[capture] UI interaction failed")
-                playbook.append(f"UI interaction failed: {type(exc).__name__}")
-                warnings.append(f"UI interaction failed: {type(exc).__name__}")
-
         # 4) 抓 duration 秒——③ 时间盒：受 decision.total_budget_sec 约束，超预算交付已捕获部分。
         playbook.append(f"采集流量约 {duration} 秒")
         budget_left = _budget_remaining(capture_started_at, decision.total_budget_sec)
+        wait_for = 0.0
         if budget_left <= 0:
-            # 前置步骤（CA/frida 重试）已耗尽预算 → 不再采集，直接交付已捕获部分。
             budget_exceeded = True
             warn = (
                 f"③ 时间盒：抓包总预算 {decision.total_budget_sec}s 已耗尽，"
@@ -1022,7 +1119,7 @@ def _capture(
             playbook.append(warn)
             warnings.append(warn)
         else:
-            wait_for = min(duration, budget_left)
+            wait_for = float(min(duration, budget_left))
             if wait_for < duration:
                 budget_exceeded = True
                 warn = (
@@ -1032,10 +1129,37 @@ def _capture(
                 logger.warning("[capture] %s", warn)
                 playbook.append(warn)
                 warnings.append(warn)
-            _wait(wait_for)
-            if socket_sampler is not None:
-                socket_timeline = socket_sampler.stop()
-                socket_sampler = None
+        if web_observer is None:
+            window_end = min(capture_deadline, _monotonic() + wait_for)
+            if interaction is not None and _monotonic() < window_end:
+                _record_ui_interaction(
+                    interaction, window_end, pass_tag, ui_observations, playbook, warnings,
+                )
+            leftover = window_end - _monotonic()
+            if leftover > 0:
+                _wait(leftover)
+        else:
+            web_receipt = overlap_web_observation(
+                interaction=interaction,
+                web_observer=web_observer,
+                deadline=capture_deadline,
+                window_seconds=wait_for,
+                ui_observations=ui_observations,
+                playbook=playbook,
+                warnings=warnings,
+                pass_tag=pass_tag,
+            )
+            if isinstance(web_receipt, dict):
+                result["web_observation"] = {
+                    "status": web_receipt.get("status") if web_receipt.get("status") in {
+                        "ok", "skipped", "failed", "unavailable", "executed",
+                    } else "failed",
+                    "reason": str(web_receipt.get("reason") or "parse_failed"),
+                    "live_cdp": bool(web_receipt.get("live_cdp")),
+                }
+        if socket_sampler is not None:
+            socket_timeline = socket_sampler.stop()
+            socket_sampler = None
         # ★P1(#10)：抓包窗口末、app 仍活、连接仍在时抓目标 UID 的 socket 快照——供把带外整机
         #   pcap 的接入节点绑定到【本 app】的连接（整机 pcap 未绑 UID 时的锚）。best-effort、不阻断。
         uid_snapshot = _capture_uid_socket_snapshot(package, out_path, serial)
@@ -1363,6 +1487,19 @@ def _capture(
     if selected_hooks is not None:
         capture_signals["requested_hooks"] = list(selected_hooks)
 
+    raw_uid = pcap_app_attr.get("target_uid")
+    observed_uid = raw_uid if isinstance(raw_uid, int) and not isinstance(raw_uid, bool) else None
+    from apkscan.core.runtime_diagnostics import observation_from_capture
+
+    process_observations = [observation_from_capture(
+        pid=observed_pid,
+        uid=observed_uid,
+        hook_status=hook_status,
+        retreated=bool(retreated),
+        runtime_variant=runtime_variant,
+        pass_tag=pass_tag,
+        apk_sha256=sample_sha256,
+    )]
     report_path = _write_runtime_report(
         package,
         out_path,
@@ -1382,6 +1519,7 @@ def _capture(
         capture_capabilities=capabilities_plan,
         runtime_variant=runtime_variant,
         ui_observations=ui_observations,
+        process_observations=process_observations,
     )
     report_paths = [report_path] if report_path else []
 
@@ -3872,6 +4010,7 @@ def _write_runtime_report(
     capture_capabilities: dict[str, Any] | None = None,
     runtime_variant: str = "original-runtime",
     ui_observations: list[dict[str, Any]] | None = None,
+    process_observations: list[dict[str, Any]] | None = None,
 ) -> str:
     """把运行时端点写成 out/runtime_report.json（复用 report.json 的序列化）。
 
@@ -3922,6 +4061,8 @@ def _write_runtime_report(
         "remote_control_events": list(remote_control_events or []),
         "ui_observations": list(ui_observations or []),
     }
+    if process_observations is not None:
+        payload["process_observations"] = list(process_observations)
     if not complete:
         payload["note"] = "抓包未完整（代理未起或编排中断），运行时端点可能不全。"
     try:

@@ -272,13 +272,16 @@ def run_selfcheck(*, online: bool = True, probe_network: bool = True) -> dict[st
 
         _plugins, plugin_statuses = discover_plugins()
         for plugin in plugin_statuses:
+            fix = '' if plugin['status'] == _STATUS_OK else '安装对应 fxapk 插件包'
+            if plugin['name'] == 'rea' and plugin['status'] == _STATUS_DISABLED:
+                fix = '如需使用 REA，请在该进程环境显式设置 FXAPK_ENABLE_REA=1'
             components.append(
                 _component(
                     f"plugin:{plugin['name']}",
                     "plugin",
                     plugin["status"],
                     "可选 fxapk 插件" if plugin["status"] == _STATUS_OK else plugin.get("reason", "插件不可用"),
-                    "安装对应 fxapk 插件包" if plugin["status"] != _STATUS_OK else "",
+                    fix,
                 )
             )
     except Exception:  # noqa: BLE001 - plugin discovery must not break selfcheck

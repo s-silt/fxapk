@@ -94,7 +94,7 @@ def _patch_static_ok(
     monkeypatch.setattr(
         auto,
         "_write_reports",
-        lambda report, *, out_dir, formats, base: [f"{out_dir}/{base}.html"],
+        lambda report, *, out_dir, formats, base, **_extra: [f"{out_dir}/{base}.html"],
     )
     return report
 
@@ -114,7 +114,9 @@ def test_analyze_static_threads_mode_to_config(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(pipeline_mod, "run", _run)
     monkeypatch.setattr(
-        auto, "_write_reports", lambda report, *, out_dir, formats, base: [f"{out_dir}/{base}.html"]
+        auto,
+        "_write_reports",
+        lambda report, *, out_dir, formats, base, **_extra: [f"{out_dir}/{base}.html"],
     )
 
     auto.analyze_static("sample.apk", out_dir="out", mode="authorized-active")
@@ -579,10 +581,10 @@ def test_callbacks_none_does_not_raise(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _status_of(result["steps"], auto._STEP_CAPTURE) == STATUS_DONE
 
 
-def test_confirm_exception_is_swallowed_capture_continues(
+def test_confirm_callback_failure_is_not_consent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """confirm 回调自身抛异常应被吞掉，不阻断抓包（GUI 回调不得炸内核）。"""
+    """确认回调失败不是用户同意。停止抓包，返回 cancelled，不继续闭环。"""
     _patch_doctor(monkeypatch, ok=True)
     _patch_static_ok(monkeypatch, "com.fraud.app")
     _set_device(monkeypatch, True)
@@ -593,8 +595,8 @@ def test_confirm_exception_is_swallowed_capture_continues(
         raise RuntimeError("gui confirm exploded")
 
     result = auto.run("sample.apk", out_dir="out", confirm=_boom_confirm)
-    assert cap_calls["called"] is True
-    assert _status_of(result["steps"], auto._STEP_CAPTURE) == STATUS_DONE
+    assert cap_calls["called"] is False
+    assert result["status"] == "cancelled"
 
 
 # ---------------------------------------------------------------------------
@@ -663,7 +665,7 @@ def test_report_paths_deduplicated(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(apk_mod, "load_apk", lambda *a, **k: _FakeCtx("com.fraud.app"))
     monkeypatch.setattr(pipeline_mod, "run", lambda ctx, config: report)
     monkeypatch.setattr(
-        auto, "_write_reports", lambda report, *, out_dir, formats, base: ["out/report.json"]
+        auto, "_write_reports", lambda report, *, out_dir, formats, base, **_extra: ["out/report.json"]
     )
     _set_device(monkeypatch, True)
     _patch_unpack(monkeypatch, _dynamic_result(STATUS_DONE))
