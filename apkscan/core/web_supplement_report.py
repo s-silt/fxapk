@@ -37,7 +37,7 @@ from apkscan.core.models import (
 )
 from apkscan.core.report_schema import UnsupportedReportSchema, ensure_writable_report_version
 from apkscan.core.web_observation_plan import load_config_path, parse_config
-from apkscan.core.web_supplement import apply_static, discover_plugins, restore_held_endpoints
+from apkscan.core.web_supplement import apply_static, restore_held_endpoints
 from apkscan.report.json import _to_jsonable
 
 logger = logging.getLogger(__name__)
@@ -425,8 +425,10 @@ def _reverify_trees(trees: list[tuple[str, Path]]) -> list[tuple[str, dict[str, 
 
 
 def _plugin() -> Any | None:
+    from apkscan.core import web_supplement
+
     try:
-        plugins, _statuses = discover_plugins()
+        plugins, _statuses = web_supplement.discover_plugins()
     except Exception:
         logger.exception("[supplement-web] plugin discovery failed")
         return None

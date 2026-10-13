@@ -217,7 +217,7 @@ def _relations(attempt: dict[str, Any]) -> list[dict[str, Any]]:
 
 def project_attempts(attempts: list[dict[str, Any]], *, round_id: str) -> dict[str, Any]:
     """Deterministic cumulative projection. Counts the first success per raw hash."""
-    from apkscan.core.web_supplement import _record
+    from apkscan.core.web_supplement import _record, _strict_bool
 
     totals = {key: 0 for key in _COUNT_KEYS}
     hashes: list[str] = []
@@ -229,6 +229,7 @@ def project_attempts(attempts: list[dict[str, Any]], *, round_id: str) -> dict[s
     reason = "parse_failed"
     provider = ""
     live = False
+    started = False
     coverage: dict[str, Any] = {}
     for attempt in attempts:
         item_status = str(attempt.get("status") or "")
@@ -242,6 +243,7 @@ def project_attempts(attempts: list[dict[str, Any]], *, round_id: str) -> dict[s
         if isinstance(boundary, dict):
             live = live or boundary.get("live_cdp") is True
         live = live or attempt.get("live_cdp") is True
+        started = started or _strict_bool(attempt.get("capture_started"), attempt.get("boundary"))
         from apkscan.core.web_observation_plan import clean_coverage
 
         coverage = clean_coverage(attempt.get("coverage")) if "coverage" in attempt else {}
@@ -279,6 +281,7 @@ def project_attempts(attempts: list[dict[str, Any]], *, round_id: str) -> dict[s
         relative_paths=paths,
         relations=relations,
         live_cdp=live,
+        capture_started=started,
         coverage=coverage or None,
     )
     record["attempts"] = [copy.deepcopy(item) for item in attempts]
@@ -307,7 +310,7 @@ def publish_runtime_projection(
     *,
     round_id: str,
 ) -> None:
-    from apkscan.core.web_supplement import _record
+    from apkscan.core.web_supplement import _record, _strict_bool
 
     attempts = load_attempts(meta)
     known = {_fingerprint(item) for item in attempts}
@@ -347,6 +350,7 @@ def publish_runtime_projection(
             relative_paths=paths,
             relations=_relations(item),
             live_cdp=item.get("live_cdp") is True,
+            capture_started=_strict_bool(item.get("capture_started"), item.get("boundary")),
             coverage=item.get("coverage"),
         )
         token = _fingerprint(attempt)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import struct
 import sys
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from tests.fixtures.dex_query.dexgen import (
     sample_classes,
     zip_bytes,
 )
+from tests.test_dex_query_inventory import _raw_zip
 
 _WORKER = [sys.executable, "tests/fixtures/dex_query/fake_worker.py"]
 _VALUE = "api.example.invalid"
@@ -239,3 +241,194 @@ def test_absolute_compiler_paths_are_not_relative_attachment_claims():
     _reject_unknown_claims({"meta": {"build_paths": [{"path": "/app/compiler/source.go"}]}}, set())
     with pytest.raises(DexQueryError, match="path_escape"):
         _reject_unknown_claims({"meta": {"attachment": {"path": "../dex-query/escape.json"}}}, set())
+
+
+def _hit(descriptor: str, offset: int, file_offset: int) -> dict[str, object]:
+    return {
+        "value_sha256": hashlib.sha256(_VALUE.encode("utf-8")).hexdigest(),
+        "descriptor": descriptor,
+        "offset": offset,
+        "offset_unit": "code_units",
+        "file_offset": file_offset,
+        "precision": "exact",
+    }
+
+
+def _apk_receipt(tmp_path: Path, name: str, data: bytes, hits: list[dict[str, object]]):
+    apk = tmp_path / f"{name}.apk"
+    apk.write_bytes(zip_bytes([("classes.dex", data)]))
+    members, skipped, truncated = inventory_dex_members(apk)
+    member = members[0]
+    receipt = _receipt_from_worker(
+        {"members": [{
+            "name": member.name,
+            "ordinal": member.ordinal,
+            "sha256": member.sha256,
+            "status": "hit",
+            "precision": "exact",
+            "truncated": False,
+            "hits": hits,
+        }]},
+        hashlib.sha256(apk.read_bytes()).hexdigest(),
+        [_VALUE],
+        members,
+        skipped,
+        truncated,
+        _LIMITS,
+    )
+    return apk, receipt
+
+
+def _import_case(tmp_path: Path, name: str, apk: Path, receipt: dict[str, object], *, with_apk: bool):
+    receipt_path = tmp_path / f"{name}.json"
+    _store(receipt_path, receipt)
+    report_path = tmp_path / f"{name}-report.json"
+    _write_report(report_path, str(receipt["apk_sha256"]))
+    out = tmp_path / name
+    if with_apk:
+        return import_receipt(receipt_path, report_path, out, apk=apk), out
+    return import_receipt(receipt_path, report_path, out), out
+
+
+def test_operand_lookalike_is_xref_mismatch_and_unverified_without_apk(tmp_path: Path) -> None:
+    dex = build_dex(sample_classes(_VALUE))
+    hit = dex.hits[0]
+    index = dex.strings.index(_VALUE)
+    data = bytearray(dex.data)
+    data[hit.file_offset:hit.file_offset + 6] = struct.pack("<HHH", 0x0013, 0x001A, index)
+    claimed = _hit(hit.descriptor, hit.code_unit_offset + 1, hit.file_offset + 2)
+    apk, receipt = _apk_receipt(tmp_path, "operand", bytes(data), [claimed])
+    out = tmp_path / "operand"
+    with pytest.raises(DexQueryError) as caught:
+        _import_case(tmp_path, "operand", apk, receipt, with_apk=True)
+    assert caught.value.reason == "xref_mismatch"
+    assert not out.exists()
+    result, unverified = _import_case(tmp_path, "operand-plain", apk, receipt, with_apk=False)
+    assert result["status"] == "imported"
+    merged = json.loads((unverified / "report.json").read_text(encoding="utf-8"))
+    summary = merged["meta"]["dex_query"]["receipts"][0]
+    assert summary["xref_verified"] is False
+    assert summary["xref_verification"] == "not_verified_locally"
+
+
+def test_jumbo_const_string_at_instruction_boundary_verifies(tmp_path: Path) -> None:
+    dex = build_dex(sample_classes(_VALUE))
+    hit = dex.hits[0]
+    index = dex.strings.index(_VALUE)
+    data = bytearray(dex.data)
+    data[hit.file_offset:hit.file_offset + 6] = struct.pack("<HI", 0x001B, index)
+    claimed = _hit(hit.descriptor, hit.code_unit_offset, hit.file_offset)
+    apk, receipt = _apk_receipt(tmp_path, "jumbo", bytes(data), [claimed])
+    result, out = _import_case(tmp_path, "jumbo-out", apk, receipt, with_apk=True)
+    assert result["status"] == "imported"
+    merged = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    summary = merged["meta"]["dex_query"]["receipts"][0]
+    assert summary["xref_verified"] is True
+    assert summary["xref_verification"] == "verified_against_apk"
+    assert all("xref=verified" in item for item in _static_snippets(merged))
+
+
+@pytest.mark.parametrize("word", [0x0073, 0x0100, 0x0200, 0x0300])
+def test_malformed_method_stays_unverified_while_other_method_matches(
+    tmp_path: Path, word: int,
+) -> None:
+    dex = build_dex(sample_classes(_VALUE))
+    bad, good = dex.hits
+    index = dex.strings.index(_VALUE)
+    data = bytearray(dex.data)
+    data[bad.file_offset:bad.file_offset + 6] = struct.pack("<HHH", word, 0x001A, index)
+    hits = [
+        _hit(bad.descriptor, bad.code_unit_offset + 1, bad.file_offset + 2),
+        _hit(good.descriptor, good.code_unit_offset, good.file_offset),
+    ]
+    apk, receipt = _apk_receipt(tmp_path, f"malformed-{word:04x}", bytes(data), hits)
+    result, out = _import_case(tmp_path, f"malformed-out-{word:04x}", apk, receipt, with_apk=True)
+    assert result["status"] == "imported"
+    merged = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    summary = merged["meta"]["dex_query"]["receipts"][0]
+    assert summary["xref_verified"] is False
+    assert summary["xref_verification"] == "parse_unavailable"
+    by_location = {
+        ref["location"]: ref["snippet"]
+        for lead in merged["leads"]
+        for ref in lead["source_refs"]
+        if ref.get("source") == "static-dex-xref"
+    }
+    good_key = f"classes.dex!{good.descriptor}@code_units:{good.code_unit_offset}"
+    bad_key = f"classes.dex!{bad.descriptor}@code_units:{bad.code_unit_offset + 1}"
+    assert "xref=verified" in by_location[good_key]
+    assert "xref=unverified" in by_location[bad_key]
+
+
+@pytest.mark.parametrize(
+    ("insns", "width", "wanted", "found"),
+    [
+        (struct.pack("<HHH", 0x0000, 0x001A, 7), 1, {0, 1}, {1: 7}),
+        (struct.pack("<HHHH", 0x0013, 0x001A, 0x001A, 9), 2, {1, 2}, {2: 9}),
+        (struct.pack("<HHHHHH", 0x0003, 0x001B, 0x0000, 0x001B, 4, 0), 3, {1, 3}, {3: 4}),
+        (struct.pack("<HHHHHH", 0x00FA, 0x001A, 0x001B, 0x0000, 0x001A, 3), 4, {1, 2, 4}, {4: 3}),
+        (struct.pack("<HHHHHHH", 0x0018, 0x001A, 0, 0, 0, 0x001A, 5), 5, {1, 5}, {5: 5}),
+        (
+            struct.pack("<HHHHHH", 0x0100, 1, 0x001A, 0, 0, 0) + struct.pack("<HH", 0x001A, 11),
+            6,
+            {2, 6},
+            {6: 11},
+        ),
+        (
+            struct.pack("<HHHHHH", 0x0200, 1, 0x001B, 0, 0, 0) + struct.pack("<HI", 0x001B, 12),
+            6,
+            {2, 6},
+            {6: 12},
+        ),
+        (
+            struct.pack("<HHIH", 0x0300, 2, 1, 0x001A) + struct.pack("<HH", 0x001A, 8),
+            5,
+            {4, 5},
+            {5: 8},
+        ),
+    ],
+)
+def test_instruction_width_ignores_operand_and_payload_lookalikes(
+    insns: bytes, width: int, wanted: set[int], found: dict[int, int],
+) -> None:
+    from apkscan.core.dex_query import _const_string_indexes, _instruction_width
+
+    assert _instruction_width(insns, 0) == width
+    assert _const_string_indexes(insns, wanted) == found
+
+
+def test_unknown_and_truncated_payloads_are_not_guessed_as_one_unit() -> None:
+    from apkscan.core.dex_query import _DexParseError, _instruction_width
+
+    with pytest.raises(_DexParseError):
+        _instruction_width(struct.pack("<H", 0x0073), 0)
+    with pytest.raises(_DexParseError):
+        _instruction_width(struct.pack("<HHH", 0x0100, 1, 0), 0)
+    with pytest.raises(_DexParseError):
+        _instruction_width(struct.pack("<HHI", 0x0300, 3, 1), 0)
+
+
+def test_directory_before_dex_uses_inventory_ordinal(tmp_path: Path) -> None:
+    dex = build_dex(sample_classes(_VALUE))
+    apk = tmp_path / "directories.apk"
+    apk.write_bytes(_raw_zip([
+        ("assets/", 0, b"", 0),
+        ("assets/empty/", 0, b"", 0),
+        ("classes.dex", 0, dex.data, len(dex.data)),
+    ]))
+    members, _skipped, _truncated = inventory_dex_members(apk)
+    assert [item.name for item in members] == ["classes.dex"]
+    assert members[0].sha256 == dex.sha256
+    receipt_path = tmp_path / "receipt.json"
+    receipt = query_apk(apk, [_VALUE], worker_argv=_WORKER, limits=_LIMITS, out=receipt_path)
+    assert receipt["members"][0]["ordinal"] == members[0].ordinal
+    assert receipt["members"][0]["name"] == members[0].name
+    report_path = tmp_path / "report.json"
+    _write_report(report_path, receipt["apk_sha256"])
+    out = tmp_path / "imported"
+    result = import_receipt(receipt_path, report_path, out, apk=apk)
+    assert result["status"] == "imported"
+    merged = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    summary = merged["meta"]["dex_query"]["receipts"][0]
+    assert summary["xref_verified"] is True
+    assert summary["members"][0]["ordinal"] == members[0].ordinal

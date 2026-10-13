@@ -222,6 +222,11 @@ _admission_lock = threading.Lock()
 _cancel_sleep = threading.Event()
 
 
+def _request_cancel() -> None:
+    with _admission_lock:
+        _cancel_sleep.set()
+
+
 def _sliced_sleep(seconds: float) -> None:
     """把一次长 sleep 切成短片。
 
@@ -241,7 +246,7 @@ def _sliced_sleep(seconds: float) -> None:
                 return
             _real_sleep(min(_SLEEP_SLICE_SECONDS, remaining))
     except KeyboardInterrupt:
-        _cancel_sleep.set()
+        _request_cancel()
         raise
 
 
@@ -259,12 +264,11 @@ def _interruptible_sleep():
     try:
         yield
     finally:
-        if not owns_patch:
-            return
-        with _sleep_patch_lock:
-            _sleep_patch_depth -= 1
-            if _sleep_patch_depth == 0 and time.sleep is _sliced_sleep:
-                time.sleep = _real_sleep
+        if owns_patch:
+            with _sleep_patch_lock:
+                _sleep_patch_depth -= 1
+                if _sleep_patch_depth == 0 and time.sleep is _sliced_sleep:
+                    time.sleep = _real_sleep
 
 
 def _dispatch_on_caller(
@@ -281,13 +285,13 @@ def _dispatch_on_caller(
                 while pending:
                     run_one(pending.pop(0))
             except KeyboardInterrupt:
-                _cancel_sleep.set()
+                _request_cancel()
                 _terminate_new_children(baseline)
                 if on_unstarted is not None:
                     on_unstarted(pending)
                 raise
     except KeyboardInterrupt:
-        _cancel_sleep.set()
+        _request_cancel()
         _terminate_new_children(baseline)
         raise
 
@@ -339,7 +343,7 @@ def _dispatch_bounded(
                         # Already admitted work may finish; no automatic retry.
                         future.result()
             except KeyboardInterrupt:
-                _cancel_sleep.set()
+                _request_cancel()
                 _terminate_new_children(baseline)
                 skipped = list(remaining)
                 for future in pending:
@@ -629,6 +633,8 @@ def _run_enrichers_on_endpoint(
                 before_pids = _live_child_pids()
                 try:
                     result = enricher.enrich(ep)
+                    if _cancel_sleep.is_set():
+                        raise KeyboardInterrupt
                 except KeyboardInterrupt:
                     _terminate_new_children(before_pids)
                     _record_cancel(ep, provider, "failed")
@@ -703,26 +709,33 @@ def _run_enrichers_on_endpoint(
         if not result.ok and status != "failed":
             status = "failed"
             error_type = error_type or "provider_reported_failure"
-        with stats_lock:
-            st = _stat(stats, provider)
-            if status == "hit":
-                st["ok"] += 1
-            elif status == "no_record":
-                # 成功但零信息：显式标注，避免与"查到了"在报告里视觉混淆。
-                data.setdefault("note", "查询无结果")
-                st["no_record"] += 1
-            elif status in {"skipped", "disabled"}:
-                st[status] = st.get(status, 0) + 1
+        with _admission_lock:
+            if _cancel_sleep.is_set():
+                _record_cancel(ep, provider, "failed")
+                with stats_lock:
+                    _note_fail(_stat(stats, provider), "cancelled")
+                _skip_later_enrichers(ep, enrichers, index)
+                raise KeyboardInterrupt
+            with stats_lock:
+                st = _stat(stats, provider)
+                if status == "hit":
+                    st["ok"] += 1
+                elif status == "no_record":
+                    # 成功但零信息：显式标注，避免与"查到了"在报告里视觉混淆。
+                    data.setdefault("note", "查询无结果")
+                    st["no_record"] += 1
+                elif status in {"skipped", "disabled"}:
+                    st[status] = st.get(status, 0) + 1
+                else:
+                    _note_fail(st, error_type or result.error or "富化失败")
+            if status != "hit":
+                _retire_provider_observation(ep, provider, reason=status)
+                _stamp_latest_retirement(ep, provider, status)
             else:
-                _note_fail(st, error_type or result.error or "富化失败")
-        if status != "hit":
-            _retire_provider_observation(ep, provider, reason=status)
-            _stamp_latest_retirement(ep, provider, status)
-        else:
-            _retire_provider_observation(ep, provider, reason="superseded")
-            _stamp_latest_retirement(ep, provider, "replaced_by_hit")
-            ep.enrichment[provider] = data
-        _record_source_status(ep, provider, status, error_type=error_type)
+                _retire_provider_observation(ep, provider, reason="superseded")
+                _stamp_latest_retirement(ep, provider, "replaced_by_hit")
+                ep.enrichment[provider] = data
+            _record_source_status(ep, provider, status, error_type=error_type)
 
 
 def _note_fail(st: dict, msg: str) -> None:

@@ -6,7 +6,15 @@ import json
 import sys
 from pathlib import Path
 
-from apkscan.core.dex_query import DexQueryLimits, import_receipt, project_dex_handoff, query_apk
+import pytest
+
+from apkscan.core.dex_query import (
+    DexQueryLimits,
+    import_receipt,
+    project_dex_handoff,
+    project_dex_query,
+    query_apk,
+)
 from apkscan.core.jsonl import report_to_events
 from tests.fixtures.dex_query.dexgen import build_dex, sample_classes, zip_bytes
 
@@ -117,6 +125,56 @@ def test_import_keeps_dynamic_evidence_and_hides_non_lead_query_text(tmp_path: P
         assert "fxapk case close" not in public
     stored = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert _TOKEN in stored["query_values"]
+    canonical_counts = [
+        member["hit_count"]
+        for item in merged["meta"]["dex_query"]["receipts"]
+        for member in item["members"]
+    ]
+    assert sum(canonical_counts) > 0
+    digest_doc = json.loads(digest)
+    digest_counts = [
+        member["hit_count"]
+        for item in digest_doc["dex_query"]["receipts"]
+        for member in item["members"]
+    ]
+    assert digest_counts == canonical_counts
+    wrapped = project_dex_query({"dex_query": project_dex_query(merged["meta"])})
+    assert wrapped is not None
+    wrapped_counts = [
+        member["hit_count"]
+        for item in wrapped["receipts"]
+        for member in item["members"]
+    ]
+    assert wrapped_counts == canonical_counts
+    event_counts = [
+        member["hit_count"]
+        for event in report_to_events(merged)
+        if isinstance(event.get("dex_query"), dict)
+        for item in event["dex_query"]["receipts"]
+        for member in item["members"]
+    ]
+    assert event_counts == canonical_counts
+    assert sum(event_counts) > 0
+
+
+@pytest.mark.parametrize("count", [True, False, -1, "2"])
+def test_invalid_hit_count_projects_to_zero(count: object) -> None:
+    projected = project_dex_query({"dex_query": {"receipts": [{"members": [{
+        "name": "classes.dex",
+        "hit_count": count,
+    }]}]}})
+    assert projected is not None
+    assert projected["receipts"][0]["members"][0]["hit_count"] == 0
+
+
+def test_raw_hits_override_stale_hit_count() -> None:
+    projected = project_dex_query({"dex_query": {"receipts": [{"members": [
+        {"name": "classes.dex", "hits": [{}, {}], "hit_count": 99},
+        {"name": "assets/payload.dex", "hits": "stale", "hit_count": 4},
+    ]}]}})
+    assert projected is not None
+    counts = [member["hit_count"] for member in projected["receipts"][0]["members"]]
+    assert counts == [2, 0]
 
 
 def test_mode_off_handoff_has_no_action() -> None:

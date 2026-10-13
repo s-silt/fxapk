@@ -98,6 +98,34 @@ def test_inventory_rejects_crc_path_and_duplicate_before_using_the_member(tmp_pa
     assert duplicate_error.value.reason == "duplicate_member"
 
 
+def test_directory_entries_keep_dex_hash_and_drive_roots_are_rejected(tmp_path) -> None:
+    built = build_dex(sample_classes())
+    archive = tmp_path / "directories.apk"
+    archive.write_bytes(_raw_zip([
+        ("assets/", 0, b"", 0),
+        ("assets/empty/", 0, b"", 0),
+        ("classes.dex", 0, built.data, len(built.data)),
+    ]))
+    members, skipped, truncated = inventory_dex_members(archive)
+    assert [item.name for item in members] == ["classes.dex"]
+    assert members[0].sha256 == built.sha256
+    assert skipped == []
+    assert truncated is False
+    dangerous = (
+        "C:/classes.dex",
+        "a//classes.dex",
+        "//classes.dex",
+        "assets/../classes.dex",
+        "../classes.dex",
+    )
+    for index, name in enumerate(dangerous):
+        escaped = tmp_path / f"dangerous-{index}.apk"
+        escaped.write_bytes(_raw_zip([(name, 0, built.data, len(built.data))]))
+        with pytest.raises(DexQueryError) as caught:
+            inventory_dex_members(escaped)
+        assert caught.value.reason == "path_rejected"
+
+
 def test_member_cap_skips_later_dex_without_inflating_it(tmp_path) -> None:
     built = build_dex(sample_classes())
     garbage = b"not-deflate"

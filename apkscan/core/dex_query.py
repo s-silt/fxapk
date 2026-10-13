@@ -371,6 +371,16 @@ def import_receipt(
     }
 
 
+def _member_hit_count(member: Mapping[str, Any]) -> int:
+    if "hits" in member:
+        hits = member.get("hits")
+        return len(hits) if isinstance(hits, list) else 0
+    count = member.get("hit_count")
+    if type(count) is int and count >= 0:
+        return count
+    return 0
+
+
 def project_dex_query(meta: Mapping[str, Any] | None) -> dict[str, Any] | None:
     """默认投影只保留哈希、覆盖和定位，不复制 query 原文。"""
     if not isinstance(meta, Mapping) or "dex_query" not in meta:
@@ -400,7 +410,7 @@ def project_dex_query(meta: Mapping[str, Any] | None) -> dict[str, Any] | None:
                         "status": member.get("status"),
                         "reason": member.get("reason"),
                         "precision": member.get("precision"),
-                        "hit_count": len(member_hits) if isinstance(member_hits := member.get("hits"), list) else 0,
+                        "hit_count": _member_hit_count(member),
                     }
                     for member in item.get("members", [])
                     if isinstance(member, dict)
@@ -931,12 +941,37 @@ def _verify_xref_hits(apk_bytes: bytes, receipt: Mapping[str, Any]) -> _XrefChec
         if not isinstance(hits, list):
             parse_failed = True
             continue
+        wanted: dict[str, set[int]] = {}
         for hit in hits:
             if not isinstance(hit, dict) or hit.get("grade") != "static-reference":
                 continue
             if hit.get("precision") != "exact":
                 continue
-            if not _exact_hit_matches(parsed, hit, by_hash):
+            offset = hit.get("offset")
+            descriptor = hit.get("descriptor")
+            if (
+                isinstance(offset, bool) or not isinstance(offset, int) or offset < 0
+                or not isinstance(descriptor, str) or descriptor not in parsed.methods
+            ):
+                continue
+            wanted.setdefault(descriptor, set()).add(offset)
+        decoded: dict[str, Mapping[int, int] | None] = {}
+        for descriptor, offsets in wanted.items():
+            try:
+                decoded[descriptor] = _const_string_indexes(parsed.methods[descriptor].insns, offsets)
+            except _DexParseError:
+                parse_failed = True
+                decoded[descriptor] = None
+        for hit in hits:
+            if not isinstance(hit, dict) or hit.get("grade") != "static-reference":
+                continue
+            if hit.get("precision") != "exact":
+                continue
+            descriptor = hit.get("descriptor")
+            if isinstance(descriptor, str) and descriptor in decoded and decoded[descriptor] is None:
+                continue
+            refs = decoded[descriptor] if isinstance(descriptor, str) and descriptor in decoded else None
+            if not _exact_hit_matches(parsed, hit, by_hash, string_refs=refs):
                 raise DexQueryError("xref_mismatch")
             verified.add(id(hit))
     if parse_failed:
@@ -944,7 +979,13 @@ def _verify_xref_hits(apk_bytes: bytes, receipt: Mapping[str, Any]) -> _XrefChec
     return _XrefCheck(True, "verified_against_apk", frozenset(verified))
 
 
-def _exact_hit_matches(parsed: _ParsedDex, hit: Mapping[str, Any], by_hash: Mapping[str, str]) -> bool:
+def _exact_hit_matches(
+    parsed: _ParsedDex,
+    hit: Mapping[str, Any],
+    by_hash: Mapping[str, str],
+    *,
+    string_refs: Mapping[int, int] | None = None,
+) -> bool:
     # code_units 是相对该方法 insns 起点的下标。file_offset 须等于 insns 文件偏移 + offset*2。
     if hit.get("offset_unit") != "code_units":
         return False
@@ -961,7 +1002,10 @@ def _exact_hit_matches(parsed: _ParsedDex, hit: Mapping[str, Any], by_hash: Mapp
             return False
         if file_offset != code.insns_off + offset * 2:
             return False
-    string_index = _const_string_index(code.insns, offset)
+    if string_refs is None:
+        string_index = _const_string_index(code.insns, offset)
+    else:
+        string_index = string_refs.get(offset)
     value_sha = hit.get("value_sha256")
     expected = by_hash.get(value_sha) if isinstance(value_sha, str) else None
     if string_index is None or string_index >= len(parsed.strings) or expected is None:
@@ -969,20 +1013,79 @@ def _exact_hit_matches(parsed: _ParsedDex, hit: Mapping[str, Any], by_hash: Mapp
     return parsed.strings[string_index] == expected
 
 
+def _instruction_width(insns: bytes, offset: int) -> int:
+    units = len(insns) // 2
+    if offset >= units:
+        raise _DexParseError()
+    word = struct.unpack_from("<H", insns, offset * 2)[0]
+    op = word & 0xFF
+    if op == 0 and word != 0:
+        if offset % 2 or offset + 2 > units:
+            raise _DexParseError()
+        count = struct.unpack_from("<H", insns, offset * 2 + 2)[0]
+        if word == 0x0100:
+            width = 4 + 2 * count
+        elif word == 0x0200:
+            width = 2 + 4 * count
+        elif word == 0x0300 and offset + 4 <= units:
+            if count not in (1, 2, 4, 8):
+                raise _DexParseError()
+            size = struct.unpack_from("<I", insns, offset * 2 + 4)[0]
+            width = 4 + (count * size + 1) // 2
+        else:
+            raise _DexParseError()
+    elif (
+        op in (0x00, 0x01, 0x04, 0x07, 0x1D, 0x1E, 0x21, 0x27, 0x28)
+        or 0x0A <= op <= 0x12
+        or 0x7B <= op <= 0x8F
+        or 0xB0 <= op <= 0xCF
+    ):
+        width = 1
+    elif (
+        op in (
+            0x02, 0x05, 0x08, 0x13, 0x15, 0x16, 0x19, 0x1A, 0x1C, 0x1F, 0x20,
+            0x22, 0x23, 0x29, 0xFE, 0xFF,
+        )
+        or 0x2D <= op <= 0x3D
+        or 0x44 <= op <= 0x6D
+        or 0x90 <= op <= 0xAF
+        or 0xD0 <= op <= 0xE2
+    ):
+        width = 2
+    elif (
+        op in (0x03, 0x06, 0x09, 0x14, 0x17, 0x1B, 0x24, 0x25, 0x26, 0x2A, 0x2B, 0x2C, 0xFC, 0xFD)
+        or 0x6E <= op <= 0x72
+        or 0x74 <= op <= 0x78
+    ):
+        width = 3
+    elif op in (0xFA, 0xFB):
+        width = 4
+    elif op == 0x18:
+        width = 5
+    else:
+        raise _DexParseError()
+    if offset + width > units:
+        raise _DexParseError()
+    return width
+
+
+def _const_string_indexes(insns: bytes, wanted: set[int]) -> dict[int, int]:
+    found: dict[int, int] = {}
+    if not wanted:
+        return found
+    offset = 0
+    last = max(wanted)
+    while offset < len(insns) // 2 and offset <= last:
+        width = _instruction_width(insns, offset)
+        opcode = insns[offset * 2]
+        if offset in wanted and opcode in (0x1A, 0x1B):
+            found[offset] = struct.unpack_from("<H" if opcode == 0x1A else "<I", insns, offset * 2 + 2)[0]
+        offset += width
+    return found
+
+
 def _const_string_index(insns: bytes, offset: int) -> int | None:
-    start = offset * 2
-    if start < 0 or start + 2 > len(insns):
-        return None
-    opcode = struct.unpack_from("<H", insns, start)[0] & 0xFF
-    if opcode == 0x1A:
-        if start + 4 > len(insns):
-            return None
-        return struct.unpack_from("<H", insns, start + 2)[0]
-    if opcode == 0x1B:
-        if start + 6 > len(insns):
-            return None
-        return struct.unpack_from("<I", insns, start + 2)[0]
-    return None
+    return _const_string_indexes(insns, {offset}).get(offset)
 
 
 def _parse_dex(data: bytes) -> _ParsedDex:
@@ -1347,7 +1450,10 @@ def _inflate_bounded(blob: bytes, uncompressed: int) -> bytes:
 def _bad_zip_name(name: str) -> bool:
     if not name or "\x00" in name or "\\" in name or name.startswith("/"):
         return True
-    return any(part in {"", ".", ".."} for part in name.split("/"))
+    if len(name) > 1 and name[1] == ":":
+        return True
+    parts = name.removesuffix("/").split("/")
+    return any(part in {"", ".", ".."} for part in parts)
 
 
 def _is_dex_name(name: object) -> bool:

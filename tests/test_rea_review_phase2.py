@@ -146,6 +146,7 @@ def test_r2_missing_history_flags_are_reconstructed_only_on_output(native, monke
 
 
 def test_r4_web_attach_keeps_native_closure_and_web_receipts(native, monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    monkeypatch.setenv("FXAPK_ENABLE_REA", "1")
     recovery, body = _recover(native, monkeypatch, tmp_path)
     attached = _attach_report(native, recovery, tmp_path, body)
     bundle = tmp_path / "bundle"

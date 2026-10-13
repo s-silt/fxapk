@@ -1717,6 +1717,392 @@ def test_transport_failure_survives_cleanup_exception(
     saved = json.loads((tmp_path / "cdp-trace-original.json").read_text(encoding="utf-8"))
     assert saved["capture"]["stopped_reason"] == "cdp_setup_failed"
     assert "trace_cleanup_failed" in saved["completeness"]["gaps"]
+
+
+def _bindable_frame(script_id: str = "7") -> dict:
+    return {
+        "functionName": "send",
+        "scriptId": script_id,
+        "url": "",
+        "lineNumber": 0,
+        "columnNumber": 0,
+    }
+
+
+def _parent_chain(count: int) -> dict:
+    node: dict = {"callFrames": [_bindable_frame()]}
+    for _index in range(count - 1):
+        node = {"callFrames": [_bindable_frame()], "parent": node}
+    return node
+
+
+def _cdp_request(request_id: str, stack: dict) -> dict:
+    return {
+        "sessionId": "S",
+        "method": "Network.requestWillBeSent",
+        "params": {
+            "requestId": request_id,
+            "frameId": "F",
+            "loaderId": "L",
+            "timestamp": 1.5,
+            "documentURL": _ORIGIN + "/",
+            "request": {"url": _ORIGIN + "/api", "method": "GET"},
+            "initiator": {"type": "script", "stack": stack},
+        },
+    }
+
+
+def _page_context() -> dict:
+    return {
+        "sessionId": "S",
+        "method": "Runtime.executionContextCreated",
+        "params": {
+            "context": {
+                "id": 1,
+                "uniqueId": "page",
+                "origin": _ORIGIN,
+                "auxData": {"frameId": "F", "isDefault": True},
+            }
+        },
+    }
+
+
+def _page_script() -> dict:
+    return {
+        "sessionId": "S",
+        "method": "Debugger.scriptParsed",
+        "params": {
+            "scriptId": "7",
+            "url": "",
+            "executionContextId": 1,
+            "startLine": 0,
+            "startColumn": 0,
+            "length": 26,
+        },
+    }
+
+
+def test_per_stack_truncation_does_not_downgrade_other_requests(
+    plugin_src: Path, tmp_path: Path,
+) -> None:
+    runtime = _runtime(plugin_src)
+    text = "function send(){return 1}\n"
+    stacks = {
+        "req-33": {"callFrames": [_bindable_frame() for _index in range(33)]},
+        "req-32": {"callFrames": [_bindable_frame() for _index in range(32)]},
+        "req-depth33": _parent_chain(33),
+        "req-depth32": _parent_chain(32),
+        "req-nondict": {"callFrames": [None, _bindable_frame()]},
+        "req-marker": {"callFrames": [_bindable_frame()], "truncated": True},
+        "req-plain": {"callFrames": [_bindable_frame()]},
+    }
+
+    def handler(peer: _ScriptedPeer, message: dict) -> dict:
+        method = message["method"]
+        session = message.get("sessionId")
+        if method == "Target.getTargetInfo":
+            return {"targetInfo": {"targetId": "T", "type": "page", "url": _ORIGIN + "/"}}
+        if method == "Target.attachToTarget":
+            return {"sessionId": "S"}
+        if method == "Runtime.enable" and session == "S":
+            peer.q.append(_page_context())
+        if method == "Debugger.enable" and session == "S":
+            peer.q.append(_page_script())
+            return {"debuggerId": "dbg-S"}
+        if method == "Debugger.getScriptSource":
+            return {"scriptSource": text}
+        if method == "Network.enable" and session == "S":
+            for request_id, stack in stacks.items():
+                peer.q.append(_cdp_request(request_id, stack))
+        if method == "Page.getFrameTree":
+            return {"frameTree": {"frame": {"id": "F", "loaderId": "L", "url": _ORIGIN + "/"}}}
+        return {}
+
+    raw = _peer_capture(runtime, _ScriptedPeer(handler), tmp_path)
+    saved = json.loads(raw)
+    receipt = _project(plugin_src, raw)
+    by_id = {item["request_id"]: item for item in receipt["requests"]}
+
+    def stored_stack(request_id: str) -> dict:
+        for event in saved["events"]:
+            params = event.get("params")
+            if event.get("method") == "Network.requestWillBeSent" and isinstance(params, dict):
+                if params.get("requestId") == request_id:
+                    initiator = params["initiator"]
+                    return initiator["stack"]
+        raise AssertionError(request_id)
+
+    tall = stored_stack("req-33")
+    assert tall.get("truncated") is True
+    assert len(tall["callFrames"]) == 32
+    assert by_id["req-33"]["observed_identity_bridge"] is False
+    assert "async_parent_truncated" in by_id["req-33"]["gaps"]
+    assert stored_stack("req-32").get("truncated") is not True
+    assert by_id["req-32"]["observed_identity_bridge"] is True
+    assert "async_parent_truncated" not in by_id["req-32"]["gaps"]
+    node = stored_stack("req-depth33")
+    marked = False
+    while isinstance(node, dict):
+        marked = marked or node.get("truncated") is True
+        parent = node.get("parent")
+        node = parent if isinstance(parent, dict) else {}
+        if not parent:
+            break
+    assert marked is True
+    assert by_id["req-depth33"]["observed_identity_bridge"] is False
+    assert "async_parent_truncated" in by_id["req-depth33"]["gaps"]
+    assert by_id["req-depth32"]["observed_identity_bridge"] is True
+    assert "async_parent_truncated" not in by_id["req-depth32"]["gaps"]
+    assert stored_stack("req-nondict")["callFrames"][0] == {}
+    assert by_id["req-nondict"]["observed_identity_bridge"] is False
+    assert stored_stack("req-marker").get("truncated") is True
+    assert by_id["req-marker"]["observed_identity_bridge"] is False
+    assert "async_parent_truncated" in by_id["req-marker"]["gaps"]
+    assert by_id["req-plain"]["observed_identity_bridge"] is True
+    assert "async_parent_truncated" not in by_id["req-plain"]["gaps"]
+
+
+def test_detach_event_blocks_only_later_child_references(
+    plugin_src: Path, tmp_path: Path,
+) -> None:
+    runtime = _runtime(plugin_src)
+    text = "function send(){return 1}\n"
+
+    def handler(peer: _ScriptedPeer, message: dict) -> dict:
+        method = message["method"]
+        session = message.get("sessionId")
+        if method == "Target.getTargetInfo":
+            return {"targetInfo": {"targetId": "T", "type": "page", "url": _ORIGIN + "/"}}
+        if method == "Target.attachToTarget":
+            return {"sessionId": "S"}
+        if method == "Runtime.enable" and session == "S":
+            peer.q.append(_page_context())
+        if method == "Debugger.enable" and session == "S":
+            peer.q.append(_page_script())
+            return {"debuggerId": "dbg-S"}
+        if method == "Debugger.getScriptSource":
+            return {"scriptSource": text}
+        if method == "Network.enable" and session == "S":
+            peer.q.append(_cdp_request("req-early", {"callFrames": [_bindable_frame()]}))
+        if method == "Target.setAutoAttach" and session == "S":
+            peer.q.append(
+                {
+                    "sessionId": "S",
+                    "method": "Target.attachedToTarget",
+                    "params": {
+                        "sessionId": "SI",
+                        "waitingForDebugger": False,
+                        "targetInfo": {
+                            "targetId": "IFRAME-1",
+                            "type": "iframe",
+                            "url": _ORIGIN + "/iframe.html",
+                        },
+                    },
+                }
+            )
+        if method == "Runtime.enable" and session == "SI":
+            peer.q.append(
+                {
+                    "sessionId": "SI",
+                    "method": "Runtime.executionContextCreated",
+                    "params": {
+                        "context": {
+                            "id": 1,
+                            "uniqueId": "iframe-u",
+                            "origin": _ORIGIN,
+                            "auxData": {"frameId": "IFRAME-F", "isDefault": True},
+                        }
+                    },
+                }
+            )
+        if method == "Debugger.enable" and session == "SI":
+            peer.q.append(
+                {
+                    "sessionId": "SI",
+                    "method": "Debugger.scriptParsed",
+                    "params": {
+                        "scriptId": "I7",
+                        "url": "",
+                        "executionContextId": 1,
+                        "startLine": 0,
+                        "startColumn": 0,
+                        "length": len(text),
+                    },
+                }
+            )
+            return {"debuggerId": "dbg-I"}
+        if method == "Page.getFrameTree" and session == "SI":
+            return {"frameTree": {"frame": {"id": "IFRAME-F", "url": _ORIGIN + "/iframe.html"}}}
+        if method == "Debugger.getStackTrace":
+            return {"stackTrace": {"callFrames": [_bindable_frame("I7")]}}
+        if method == "Page.getFrameTree" and session == "S":
+            peer.q.append(
+                {
+                    "sessionId": "S",
+                    "method": "Target.detachedFromTarget",
+                    "params": {
+                        "sessionId": "NOPE",
+                        "targetId": "FOREIGN",
+                        "url": "http://secret.invalid/a",
+                        "headers": {"Cookie": "nope"},
+                    },
+                }
+            )
+            peer.q.append(
+                {
+                    "method": "Target.detachedFromTarget",
+                    "params": {"sessionId": "GHOST", "targetId": "GHOST-T"},
+                }
+            )
+            peer.q.append(
+                {
+                    "method": "Target.detachedFromTarget",
+                    "params": {
+                        "sessionId": "SI",
+                        "targetId": "IFRAME-1",
+                        "url": "http://secret.invalid/b",
+                        "headers": {"Authorization": "nope"},
+                    },
+                }
+            )
+            peer.q.append(
+                _cdp_request(
+                    "req-late",
+                    {
+                        "callFrames": [_bindable_frame()],
+                        "parentId": {"id": "stack-iframe", "debuggerId": "dbg-I"},
+                    },
+                )
+            )
+            return {"frameTree": {"frame": {"id": "F", "loaderId": "L", "url": _ORIGIN + "/"}}}
+        return {}
+
+    raw = _peer_capture(runtime, _ScriptedPeer(handler), tmp_path, related_targets=True)
+    saved = json.loads(raw)
+    detaches = [event for event in saved["events"] if event.get("method") == "Target.detachedFromTarget"]
+    assert detaches == [
+        {
+            "method": "Target.detachedFromTarget",
+            "sessionId": "S",
+            "seq": detaches[0]["seq"],
+            "params": {"sessionId": "SI", "targetId": "IFRAME-1"},
+        }
+    ]
+    assert not any(
+        isinstance(event.get("params"), dict) and event["params"].get("sessionId") in {"NOPE", "GHOST"}
+        for event in saved["events"]
+    )
+    late_at = next(
+        index
+        for index, event in enumerate(saved["events"])
+        if isinstance(event.get("params"), dict) and event["params"].get("requestId") == "req-late"
+    )
+    detach_at = saved["events"].index(detaches[0])
+    assert detach_at < late_at
+    assert any(item.get("stackTraceId") == "stack-iframe" for item in saved["parent_stacks"])
+    receipt = _project(plugin_src, raw)
+    by_id = {item["request_id"]: item for item in receipt["requests"]}
+    assert by_id["req-early"]["observed_identity_bridge"] is True
+    assert "missing_context" not in by_id["req-early"]["gaps"]
+    assert by_id["req-late"]["observed_identity_bridge"] is False
+    assert "missing_context" in by_id["req-late"]["gaps"]
+
+
+def test_command_budget_stops_before_send_and_keeps_cleanup(
+    plugin_src: Path, tmp_path: Path,
+) -> None:
+    runtime = _runtime(plugin_src)
+    from fxapk_rea.evidence import EvidenceError
+
+    emitted = {"iframes": False}
+
+    def handler(peer: _ScriptedPeer, message: dict) -> dict:
+        method = message["method"]
+        session = message.get("sessionId")
+        if method == "Target.getTargetInfo":
+            return {"targetInfo": {"targetId": "T", "type": "page", "url": _ORIGIN + "/"}}
+        if method == "Target.attachToTarget":
+            return {"sessionId": "S"}
+        if method == "Runtime.enable" and session == "S":
+            peer.q.append(_page_context())
+        if method == "Debugger.enable" and session == "S":
+            for index in range(64):
+                peer.q.append(
+                    {
+                        "sessionId": "S",
+                        "method": "Debugger.scriptParsed",
+                        "params": {
+                            "scriptId": f"s{index}",
+                            "url": "",
+                            "executionContextId": 1,
+                            "startLine": 0,
+                            "startColumn": 0,
+                            "length": 1,
+                        },
+                    }
+                )
+            return {"debuggerId": "dbg-S"}
+        if method == "Debugger.getScriptSource":
+            return {"scriptSource": "a"}
+        if method == "Network.enable" and session == "S":
+            for index in range(32):
+                peer.q.append(
+                    _cdp_request(
+                        f"p{index}",
+                        {
+                            "callFrames": [],
+                            "parentId": {"id": f"stack-{index}", "debuggerId": "dbg-S"},
+                        },
+                    )
+                )
+        if method == "Debugger.getStackTrace":
+            return {"stackTrace": {"callFrames": []}}
+        if method == "Target.setAutoAttach" and session == "S" and not emitted["iframes"]:
+            emitted["iframes"] = True
+            for index in range(8):
+                peer.q.append(
+                    {
+                        "sessionId": "S",
+                        "method": "Target.attachedToTarget",
+                        "params": {
+                            "sessionId": f"IF{index}",
+                            "waitingForDebugger": False,
+                            "targetInfo": {
+                                "targetId": f"T{index}",
+                                "type": "iframe",
+                                "url": _ORIGIN + f"/frame-{index}",
+                            },
+                        },
+                    }
+                )
+        if method == "Page.getFrameTree" and isinstance(session, str) and session.startswith("IF"):
+            return {"frameTree": {"frame": {"id": f"C-{session}", "url": _ORIGIN + "/child"}}}
+        if method == "Page.getFrameTree":
+            return {"frameTree": {"frame": {"id": "F", "loaderId": "L", "url": _ORIGIN + "/"}}}
+        return {}
+
+    peer = _ScriptedPeer(handler)
+    closed = {"ok": False}
+
+    def _close() -> None:
+        closed["ok"] = True
+
+    peer.close = _close
+    with pytest.raises(EvidenceError, match="trace_limit"):
+        _peer_capture(runtime, peer, tmp_path, related_targets=True)
+    ordinary_limit = 128 - (2 * 8 + 1)
+    total = 0
+    for message in peer.sent:
+        method = message["method"]
+        cleanup = method in {"Target.detachFromTarget", "Runtime.runIfWaitingForDebugger"}
+        assert total < (128 if cleanup else ordinary_limit)
+        total += 1
+    assert total <= 128
+    assert any(item["method"] == "Target.detachFromTarget" for item in peer.sent)
+    assert closed["ok"] is True
+    saved = json.loads((tmp_path / "cdp-trace-original.json").read_text(encoding="utf-8"))
+    assert saved["capture"]["stopped_reason"] == "trace_limit"
+    assert saved["capture"]["socket_closed"] is True
     assert saved["capture"]["socket_closed"] is True
 
 

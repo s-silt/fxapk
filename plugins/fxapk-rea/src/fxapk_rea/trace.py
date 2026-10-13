@@ -19,7 +19,7 @@ from .evidence import (
 )
 from .runtime import validate_scope
 from .trace_actions import project_actions
-from .trace_limits import MAX_RAW_BYTES
+from .trace_limits import MAX_COMMANDS as _MAX_COMMANDS, MAX_RAW_BYTES
 from .trace_parents import debugger_sessions, parent_stacks, walk_groups
 from .trace_targets import split_targets
 
@@ -49,7 +49,6 @@ _ALWAYS_GAPS = (
 )
 _MAX_EVENTS = 1024
 _MAX_SOURCES = 64
-_MAX_COMMANDS = 128
 _MAX_DEPTH = 48
 _MAX_SOURCE_CHARS = 48 * 1024
 
@@ -262,7 +261,12 @@ def run_trace(
         related_origins=allow[1:],
         pause_related_start=pause_related_start,
     )
-    receipt, files = project_trace(raw)
+    try:
+        receipt, files = project_trace(raw)
+    except EvidenceError:
+        if len(raw) <= MAX_RAW_BYTES:
+            atomic_create_bytes(out / "cdp-trace-original.json", raw)
+        raise
     return _publish(out, raw, receipt, files)
 
 

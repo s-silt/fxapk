@@ -1142,3 +1142,23 @@ def test_system_exit_closes_socket_and_is_not_swallowed(
         runtime.capture(endpoint="http://127.0.0.1:9999", target="T", origin=_ORIGIN, observation_ms=0, out=tmp_path)
     assert peer.closed
     assert not (tmp_path / "observation.json").exists()
+
+
+def test_project_failure_preserves_exact_raw_and_skips_observation(
+    plugin_src: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del plugin_src
+    from fxapk_rea.evidence import EvidenceError
+
+    trace = importlib.import_module("fxapk_rea.trace")
+    raw = b'{"schema_version":"not-a-trace","producer":"fxapk-cdp-trace"}'
+
+    def _capture(**_kwargs: object) -> bytes:
+        return raw
+
+    monkeypatch.setattr("fxapk_rea.trace_runtime.capture", _capture)
+    out = tmp_path / "projected"
+    with pytest.raises(EvidenceError):
+        trace.run_trace("http://127.0.0.1:9999", "T", _ORIGIN, 0, out)
+    assert (out / "cdp-trace-original.json").read_bytes() == raw
+    assert not (out / "observation.json").exists()

@@ -591,3 +591,123 @@ def test_attach_supplement_repeat_keeps_manifest_and_refuses_changed_hash(
     assert refused.exit_code == 2
     assert not refused_out.exists()
     assert (tampered / "external_observations" / raw_sha / "manifest.json").read_bytes() == original
+
+
+def _tree_bytes(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+
+def test_attach_preserves_parsed_trees_and_refuses_damaged_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib
+
+    from tests.test_rea_attach import _rea_bundle
+
+    _install_plugin(monkeypatch)
+    attachment = importlib.import_module("fxapk_rea.attachment")
+    bundle_a = tmp_path / "bundle-a"
+    bundle_b = tmp_path / "bundle-b"
+    sha_a = _rea_bundle(tmp_path, bundle_a, text="const ALPHA = 1;\n")
+    sha_b = _rea_bundle(tmp_path, bundle_b, text="const BETA = 2;\n")
+    assert sha_a != sha_b
+    report = _report(tmp_path / "in" / "report.json")
+    before = report.read_bytes()
+    config_a = _config(tmp_path / "supplement-a.json", {
+        "schema_version": "fxapk.web_supplement.v1",
+        "mode": "auto",
+        "source": "bundle",
+        "path": str(bundle_a),
+    })
+    parsed = tmp_path / "parsed"
+    first = _invoke(report, config_a, parsed)
+    assert first.exit_code == 0, first.output
+    assert report.read_bytes() == before
+    parsed_report = json.loads((parsed / "report.json").read_text(encoding="utf-8"))
+    assert "web_observations" not in parsed_report["meta"]
+    assert f"external_observations/{sha_a}/" in json.dumps(parsed_report)
+    original = _tree_bytes(parsed / "external_observations" / sha_a)
+    attached = tmp_path / "attached"
+    attachment.attach(bundle_b, parsed / "report.json", attached)
+    assert report.read_bytes() == before
+    published = json.loads((attached / "report.json").read_text(encoding="utf-8"))
+    assert f"external_observations/{sha_a}/" in json.dumps(published)
+    assert [item["source_sha256"] for item in published["meta"]["web_observations"]] == [sha_b]
+    copied = _tree_bytes(attached / "external_observations" / sha_a)
+    assert copied == original
+    config_b = _config(tmp_path / "supplement-b.json", {
+        "schema_version": "fxapk.web_supplement.v1",
+        "mode": "auto",
+        "source": "bundle",
+        "path": str(bundle_b),
+    })
+    again = tmp_path / "again"
+    second = _invoke(attached / "report.json", config_b, again)
+    assert second.exit_code == 0, second.output
+    assert "missing_observation" not in second.output
+    assert report.read_bytes() == before
+
+    def refuse(name: str, mutate) -> None:
+        source = tmp_path / name / "src"
+        shutil.copytree(parsed, source)
+        mutate(source)
+        destination = tmp_path / name / "out"
+        with pytest.raises(attachment.AttachError):
+            attachment.attach(bundle_b, source / "report.json", destination)
+        assert not destination.exists()
+
+    def tamper(source: Path) -> None:
+        raw = source / "external_observations" / sha_a / "rea-original.json"
+        raw.write_bytes(raw.read_bytes() + b" ")
+
+    def missing(source: Path) -> None:
+        shutil.rmtree(source / "external_observations" / sha_a)
+
+    def link(source: Path) -> None:
+        tree = source / "external_observations" / sha_a
+        held = tmp_path / name_held
+        if held.exists():
+            shutil.rmtree(held)
+        shutil.move(tree, held)
+        try:
+            tree.symlink_to(held, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlink creation unavailable on this platform/permission")
+
+    name_held = "held-a"
+    refuse("tampered", tamper)
+    refuse("missing", missing)
+    refuse("symlink", link)
+
+
+def test_same_parsed_and_attached_sha_is_copied_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib
+
+    from tests.test_rea_attach import _case, _rea_bundle
+
+    _install_plugin(monkeypatch)
+    attachment = importlib.import_module("fxapk_rea.attachment")
+    bundle_a = tmp_path / "bundle-a"
+    bundle_b = tmp_path / "bundle-b"
+    sha_a = _rea_bundle(tmp_path, bundle_a, text="const ALPHA = 1;\n")
+    sha_b = _rea_bundle(tmp_path, bundle_b, text="const BETA = 2;\n")
+    case = tmp_path / "case.json"
+    _case(case)
+    first = tmp_path / "first"
+    attachment.attach(bundle_a, case, first)
+    payload = json.loads((first / "report.json").read_text(encoding="utf-8"))
+    payload["meta"]["parsed_ref"] = f"external_observations/{sha_a}/rea-original.json"
+    (first / "report.json").write_text(json.dumps(payload), encoding="utf-8")
+    second = tmp_path / "second"
+    attachment.attach(bundle_b, first / "report.json", second)
+    published = json.loads((second / "report.json").read_text(encoding="utf-8"))
+    rows = [item["source_sha256"] for item in published["meta"]["web_observations"]]
+    assert rows == [sha_a, sha_b]
+    names = sorted(path.name for path in (second / "external_observations").iterdir())
+    assert names == sorted([sha_a, sha_b])

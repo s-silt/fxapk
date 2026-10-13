@@ -372,3 +372,95 @@ def test_canonical_and_digest_agree_after_runtime_failure() -> None:
         "leads": [], "endpoints": [], "meta": report.meta,
     })["web_observation_plan"]["agent_handoff"]["why"]
     assert raw == compact == "review_failure"
+
+
+def _started(meta: dict) -> bool:
+    boundary = meta["web_supplement"]["boundary"]
+    digest = build_digest({"leads": [], "endpoints": [], "meta": meta})
+    assert digest["web_supplement"]["capture_started"] is boundary["capture_started"]
+    return boundary["capture_started"] is True
+
+
+def test_capture_started_aggregates_strict_bools_not_live_cdp() -> None:
+    true_top: dict = {}
+    commit_supplement(true_top, {
+        "status": "executed",
+        "reason": "executed",
+        "capture_started": True,
+        "live_cdp": False,
+    })
+    assert _started(true_top) is True
+    assert true_top["web_supplement"]["boundary"]["live_cdp"] is False
+
+    false_overrides: dict = {}
+    commit_supplement(false_overrides, {
+        "status": "executed",
+        "reason": "executed",
+        "capture_started": False,
+        "live_cdp": True,
+        "boundary": {"capture_started": True, "live_cdp": True},
+    })
+    assert _started(false_overrides) is False
+
+    from_boundary: dict = {}
+    commit_supplement(from_boundary, {
+        "status": "executed",
+        "reason": "executed",
+        "boundary": {"capture_started": True},
+    })
+    assert _started(from_boundary) is True
+
+    string_value: dict = {}
+    commit_supplement(string_value, {
+        "status": "executed",
+        "reason": "executed",
+        "capture_started": "true",
+        "boundary": {"capture_started": "true"},
+    })
+    assert _started(string_value) is False
+
+    live_only: dict = {}
+    commit_supplement(live_only, {
+        "status": "executed",
+        "reason": "executed",
+        "live_cdp": True,
+    })
+    assert _started(live_only) is False
+    assert live_only["web_supplement"]["boundary"]["live_cdp"] is True
+
+    aggregated: dict = {}
+    commit_supplement(aggregated, {
+        "status": "executed",
+        "reason": "executed",
+        "capture_started": True,
+        "raw_sha256": ["ab" * 32],
+    })
+    commit_supplement(aggregated, {
+        "status": "failed",
+        "reason": "parse_failed",
+        "capture_started": False,
+        "raw_sha256": ["cd" * 32],
+    })
+    assert _started(aggregated) is True
+
+    report = Report("com.example.synthetic", {}, [], [], [], [])
+    _remember_runtime(report, {
+        "status": "executed",
+        "reason": "executed",
+        "capture_started": True,
+        "live_cdp": False,
+        "raw_sha256": "ef" * 32,
+    }, "round-started")
+    assert _started(report.meta) is True
+    assert report.meta["web_supplement"]["boundary"]["live_cdp"] is False
+
+    quiet = Report("com.example.synthetic", {}, [], [], [], [])
+    _remember_runtime(quiet, {
+        "status": "executed",
+        "reason": "executed",
+        "capture_started": False,
+        "live_cdp": True,
+        "raw_sha256": "11" * 32,
+    }, "round-live")
+    assert _started(quiet.meta) is False
+    assert quiet.meta["web_supplement"]["boundary"]["live_cdp"] is True

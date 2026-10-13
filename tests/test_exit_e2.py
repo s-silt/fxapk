@@ -174,3 +174,157 @@ def test_without_cancel_both_providers_run_and_budget_is_kept(monkeypatch: pytes
     assert second.calls == [endpoint.value]
     assert budget.snapshot()["admitted"] == 2
     assert endpoint.enrichment["quick-provider"]["org"] == "SYNTHETIC-OK"
+
+
+def _no_enrich_threads() -> None:
+    names = [item.name for item in threading.enumerate() if item.name.startswith("enrich") and item.is_alive()]
+    assert names == []
+
+
+def test_late_blocking_result_is_cancelled_not_published(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("apkscan.core.enrichment.ENRICH_MAX_WORKERS", 2)
+    from apkscan.core import enrichment
+
+    release = threading.Event()
+    started = threading.Event()
+
+    class _Wait(BaseEnricher):
+        name = "blocking-provider"
+        applies_to = ["domain"]
+
+        def enrich(self, endpoint: Endpoint) -> EnrichmentResult:
+            del endpoint
+            started.set()
+            release.wait(timeout=10)
+            return EnrichmentResult(
+                provider=self.name,
+                ok=True,
+                data={"org": "SYNTHETIC-LATE", "_source_status": "hit"},
+            )
+
+    class _Next(BaseEnricher):
+        name = "following-provider"
+        applies_to = ["domain"]
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def enrich(self, endpoint: Endpoint) -> EnrichmentResult:
+            self.calls.append(endpoint.value)
+            return EnrichmentResult(
+                provider=self.name,
+                ok=True,
+                data={"org": "SYNTHETIC-FOLLOWING", "_source_status": "hit"},
+            )
+
+    def _interrupt(_pending: set) -> tuple:
+        assert started.wait(timeout=10)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(enrichment, "_wait_bounded", _interrupt)
+    helper = threading.Thread(
+        target=lambda: (enrichment._cancel_sleep.wait(timeout=10), release.set()),
+        daemon=True,
+    )
+    helper.start()
+    blocking = _Wait()
+    following = _Next()
+    endpoints = [Endpoint(kind="domain", value=f"target-{index}.example.invalid") for index in range(2)]
+    status = "returned"
+    try:
+        enrich_selected_targets(
+            endpoints, [blocking, following], include_case_close=True, budget=EnrichmentBudget(total=6),
+        )
+    except KeyboardInterrupt:
+        status = "keyboard_interrupt"
+    finally:
+        release.set()
+        helper.join(timeout=5)
+    assert status == "keyboard_interrupt"
+    assert following.calls == []
+    assert all("SYNTHETIC-LATE" not in str(item.enrichment) for item in endpoints)
+    for endpoint in endpoints:
+        assert endpoint.enrichment["source_status"]["blocking-provider"] == {
+            "status": "failed",
+            "reason": "cancelled",
+        }
+        assert endpoint.enrichment["source_status"]["following-provider"]["status"] == "skipped"
+    _no_enrich_threads()
+
+
+def test_cancel_during_payload_normalization_does_not_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("apkscan.core.enrichment.ENRICH_MAX_WORKERS", 1)
+    from apkscan.core import enrichment
+
+    def _strict(payload: dict) -> dict:
+        enrichment._cancel_sleep.set()
+        return payload
+
+    monkeypatch.setattr(enrichment, "_strict_provider_payload", _strict)
+
+    class _Hit(BaseEnricher):
+        name = "blocking-provider"
+        applies_to = ["domain"]
+
+        def enrich(self, endpoint: Endpoint) -> EnrichmentResult:
+            del endpoint
+            return EnrichmentResult(
+                provider=self.name,
+                ok=True,
+                data={"org": "SYNTHETIC-LATE", "_source_status": "hit"},
+            )
+
+    class _Next(BaseEnricher):
+        name = "following-provider"
+        applies_to = ["domain"]
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def enrich(self, endpoint: Endpoint) -> EnrichmentResult:
+            self.calls.append(endpoint.value)
+            return EnrichmentResult(
+                provider=self.name, ok=True, data={"org": "SYNTHETIC-FOLLOWING", "_source_status": "hit"},
+            )
+
+    following = _Next()
+    endpoint = Endpoint(kind="domain", value="target-0.example.invalid")
+    status = "returned"
+    try:
+        enrich_selected_targets(
+            [endpoint], [_Hit(), following], include_case_close=True, budget=EnrichmentBudget(total=6),
+        )
+    except KeyboardInterrupt:
+        status = "keyboard_interrupt"
+    assert status == "keyboard_interrupt"
+    assert following.calls == []
+    assert "SYNTHETIC-LATE" not in str(endpoint.enrichment)
+    assert endpoint.enrichment["source_status"]["blocking-provider"] == {
+        "status": "failed",
+        "reason": "cancelled",
+    }
+    assert endpoint.enrichment["source_status"]["following-provider"]["status"] == "skipped"
+
+
+def test_custom_sleep_keyboard_interrupt_is_not_swallowed() -> None:
+    from apkscan.core import enrichment
+
+    original = time.sleep
+
+    def _custom(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    time.sleep = _custom
+    raised = False
+    try:
+        with enrichment._interruptible_sleep():
+            time.sleep(1)
+    except KeyboardInterrupt:
+        raised = True
+    finally:
+        current = time.sleep
+        time.sleep = original
+    assert raised is True
+    assert current is _custom

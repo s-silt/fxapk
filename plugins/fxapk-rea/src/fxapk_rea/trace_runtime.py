@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 from apkscan.core.atomic import atomic_create_bytes
 
 from .evidence import EvidenceError, origin_of
-from .trace_limits import MAX_RAW_BYTES
+from .trace_limits import MAX_COMMANDS, MAX_RAW_BYTES
 
 _MAX_MESSAGE = 256 * 1024
 _MAX_ENVELOPE = MAX_RAW_BYTES
@@ -62,6 +62,7 @@ _KEEP = frozenset(
         "Network.responseReceived",
         "Network.loadingFailed",
         "Network.loadingFinished",
+        "Target.detachedFromTarget",
     }
 )
 
@@ -156,6 +157,7 @@ def capture(
     finally:
         # Children cleanup can raise. Detach and socket close still run, and a
         # later budget error while recording the gap cannot skip the close.
+        client.stop_fetching = True
         cleanup_ok = False
         cleanup_error: Exception | None = None
         try:
@@ -639,6 +641,10 @@ class _Client:
         self._pending: list[dict[str, Any]] = []
 
     def call(self, method: str, params: dict[str, Any] | None = None, session: str | None = None) -> Any:
+        cleanup = method in {"Target.detachFromTarget", "Runtime.runIfWaitingForDebugger"}
+        limit = MAX_COMMANDS if cleanup else MAX_COMMANDS - (2 * _MAX_CHILD_TARGETS + 1)
+        if len(self.commands) + self.depth >= limit:
+            raise EvidenceError("trace_limit")
         self.next_id += 1
         command_id = self.next_id
         message: dict[str, Any] = {"id": command_id, "method": method}
@@ -836,7 +842,13 @@ class _Client:
             self._on_target_info(params)
             return
         if not isinstance(event_session, str):
-            return
+            if method != "Target.detachedFromTarget":
+                return
+            detached_child = params.get("sessionId")
+            derived = self.parent_of.get(detached_child) if isinstance(detached_child, str) else None
+            if not isinstance(derived, str) or not derived:
+                return
+            event_session = derived
         if event_session != self.session_id and event_session not in self.accepted:
             return
         if method == "Target.attachedToTarget" and (
@@ -845,8 +857,17 @@ class _Client:
             self._on_attached(params, event_session)
             return
         if method == "Target.detachedFromTarget":
+            child = params.get("sessionId")
+            if (
+                not isinstance(child, str)
+                or (
+                    child not in self.accepted
+                    and child not in self.attached_children
+                    and child not in self.provisional
+                )
+            ):
+                return
             self._on_detached(params)
-            return
         if method == "Page.frameNavigated" and event_session == self.session_id:
             raw_frame = params.get("frame")
             frame = raw_frame if isinstance(raw_frame, dict) else {}
@@ -991,6 +1012,8 @@ class _Client:
     def _filter(
         self, method: str, session: str, params: dict[str, Any], origin: str | None
     ) -> dict[str, Any] | None:
+        if method == "Target.detachedFromTarget":
+            return {key: params[key] for key in ("sessionId", "targetId") if isinstance(params.get(key), str)}
         if method == "Runtime.executionContextCreated":
             return self._context_params(params, origin, session)
         if method == "Debugger.scriptParsed":
@@ -1795,13 +1818,16 @@ def _sanitize_stack(
     depth: int,
     allow: list[str] | None = None,
 ) -> dict[str, Any] | None:
-    if not isinstance(stack, dict) or depth >= _MAX_STACK:
+    if not isinstance(stack, dict):
         return None
+    if depth >= _MAX_STACK:
+        return {"callFrames": [], "truncated": True}
     frames = []
     raw_frames = stack.get("callFrames")
     if isinstance(raw_frames, list):
         for frame in raw_frames[:_MAX_STACK]:
             if not isinstance(frame, dict):
+                frames.append({})
                 continue
             frames.append(
                 {
@@ -1813,6 +1839,8 @@ def _sanitize_stack(
                 }
             )
     stored: dict[str, Any] = {"callFrames": frames}
+    if stack.get("truncated") is True or (isinstance(raw_frames, list) and len(raw_frames) > _MAX_STACK):
+        stored["truncated"] = True
     if isinstance(stack.get("parent"), dict):
         stored["parent"] = _sanitize_stack(stack["parent"], origin, filtered, depth + 1, allow)
     parent_id = stack.get("parentId")

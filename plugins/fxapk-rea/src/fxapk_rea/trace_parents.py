@@ -119,18 +119,19 @@ def walk_groups(
     ) -> tuple[list[tuple[str, list[tuple[Any, str]], str, str | None]], bool]:
         if not isinstance(node, dict):
             return [], False
+        cut = node.get("truncated") is True
         groups: list[tuple[str, list[tuple[Any, str]], str, str | None]] = [
             (kind, frames_of(node, path), session, None)
         ]
         if depth >= _MAX_PARENT_DEPTH:
-            return groups, isinstance(node.get("parent"), dict) or isinstance(node.get("parentId"), dict)
+            return groups, cut or isinstance(node.get("parent"), dict) or isinstance(node.get("parentId"), dict)
         parent = node.get("parent")
         if isinstance(parent, dict):
             nested, truncated = walk(parent, path + "/parent", session, depth + 1, "async")
-            return groups + nested, truncated
+            return groups + nested, truncated or cut
         parent_id = node.get("parentId")
         if not isinstance(parent_id, dict):
-            return groups, False
+            return groups, cut
         stack_id = parent_id.get("id")
         debugger_id = parent_id.get("debuggerId")
         if not isinstance(stack_id, str) or not isinstance(debugger_id, str):
@@ -139,7 +140,7 @@ def walk_groups(
         key = (debugger_id, stack_id)
         located = fetched.get(key)
         if owner is None or located is None or key in seen:
-            return groups, False
+            return groups, cut
         seen.add(key)
         index, parent_stack, has_request = located
         pointer = f"cdp-trace-original.json#/parent_stacks/{index}/result/stackTrace"
@@ -150,7 +151,7 @@ def walk_groups(
         if request_ref and nested:
             kind_n, frames_n, session_n, _prior = nested[0]
             nested[0] = (kind_n, frames_n, session_n, request_ref)
-        return groups + nested, truncated
+        return groups + nested, truncated or cut
 
     if not isinstance(stack, dict):
         return [], False, False

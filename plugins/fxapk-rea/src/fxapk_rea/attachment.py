@@ -702,6 +702,33 @@ def _existing(
     return prepared, total
 
 
+def _parsed_web_trees(
+    report: Path, payload: dict[str, Any], excluded: set[str], new_sha: str
+) -> list[tuple[str, dict[str, bytes]]]:
+    from apkscan.core.web_supplement_report import (
+        SupplementRefusal,
+        _accepted_files,
+        _bounded_files,
+        _referenced_trees,
+    )
+
+    groups: list[tuple[str, dict[str, bytes]]] = []
+    try:
+        trees = _referenced_trees(payload, report.parent)
+        for sha, root in trees:
+            if sha in excluded:
+                continue
+            if sha == new_sha:
+                raise AttachError("duplicate_observation")
+            verified = _verify_bundle(root)
+            if verified["raw_sha"] != sha:
+                raise AttachError("existing_observation_mismatch")
+            groups.append((sha, _accepted_files(sha, verified["copies"], _bounded_files(root))))
+    except SupplementRefusal as exc:
+        raise AttachError(exc.reason) from None
+    return groups
+
+
 def _publish_tree(out: Path, groups: list[tuple[str, dict[str, bytes]]]) -> None:
     for sha, copies in groups:
         root = out / "external_observations" / sha
@@ -749,6 +776,13 @@ def attach(
     kept, kept_bytes = _existing(
         report, meta.get("web_observations"), verified["raw_sha"], meta.get("sample_sha256")
     )
+    extras = _parsed_web_trees(
+        report,
+        payload,
+        {item["source_sha256"] for item, _blobs in kept},
+        verified["raw_sha"],
+    )
+    extra_bytes = sum(len(blob) for _sha, blobs in extras for blob in blobs.values())
     entry = _entry(verified, identity, context_pointer)
     copies = dict(verified["copies"])
     if context_bytes is not None:
@@ -756,7 +790,7 @@ def attach(
     manifest = _manifest(verified["raw_sha"], copies)
     entry["manifest_sha256"] = hashlib.sha256(manifest).hexdigest()
     copies["manifest.json"] = manifest
-    if kept_bytes + sum(len(blob) for blob in copies.values()) > _MAX_ATTACHMENT_BYTES:
+    if kept_bytes + extra_bytes + sum(len(blob) for blob in copies.values()) > _MAX_ATTACHMENT_BYTES:
         raise AttachError("oversize")
     meta["web_observations"] = [item for item, _blobs in kept] + [entry]
     encoded_report = (
@@ -783,6 +817,7 @@ def attach(
     except FileExistsError:
         raise AttachError("output_exists") from None
     groups = [(verified["raw_sha"], copies)]
+    groups.extend(extras)
     groups.extend((item["source_sha256"], blobs) for item, blobs in kept)
     _publish_tree(out, groups)
     _publish_native(out, native_files)
