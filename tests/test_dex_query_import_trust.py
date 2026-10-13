@@ -538,6 +538,7 @@ def _param_fanout_dex(
     *,
     param_string: bytes | None = None,
     pad: int = 0,
+    same_name: bool = False,
 ) -> bytes:
     """proto_count 个 proto 共享同一份 param_count 项 type_list；参数类型名长 text_len。"""
     big = (
@@ -545,7 +546,8 @@ def _param_fanout_dex(
         if param_string is not None
         else b"I" if text_len == 1 else b"L" + b"A" * (text_len - 2) + b";"
     )
-    strings = [b"LA;", b"m", b"V", big]
+    names = [f"m{i}".encode() for i in range(max(method_count, 1))]
+    strings = [b"LA;", b"V", big, *names]
     string_blob = b"".join(_uleb(len(item)) + item + b"\x00" for item in strings)
     ids_off = 0x70
     types_off = ids_off + 4 * len(strings)
@@ -573,12 +575,13 @@ def _param_fanout_dex(
     for index, item in enumerate(strings):
         struct.pack_into("<I", data, ids_off + 4 * index, cursor)
         cursor += len(_uleb(len(item))) + len(item) + 1
-    for index, string_idx in enumerate((0, 2, 3)):
+    for index, string_idx in enumerate((0, 1, 2)):
         struct.pack_into("<I", data, types_off + 4 * index, string_idx)
     for index in range(proto_count):
-        struct.pack_into("<III", data, protos_off + 12 * index, 2, 1, list_off)
+        struct.pack_into("<III", data, protos_off + 12 * index, 1, 1, list_off)
     for index in range(method_count):
-        struct.pack_into("<HHI", data, methods_off + 8 * index, 0, 0, 1)
+        name_idx = 3 if same_name else 3 + index
+        struct.pack_into("<HHI", data, methods_off + 8 * index, 0, 0, name_idx)
     struct.pack_into("<I", data, list_off, param_count)
     for index in range(param_count):
         struct.pack_into("<H", data, list_off + 4 + 2 * index, 2)
@@ -819,6 +822,82 @@ def test_overlapping_class_data_entries_hit_cumulative_budget() -> None:
     data = _overlapping_classdata_dex(64)
     with pytest.raises(_DexParseError):
         _parse_dex(data)
+
+
+def _shared_method_defs_dex(classdef_count: int) -> bytes:
+    """classdef_count 个 class_def 各有独立 class_data，但都声明同一个 method。"""
+    strings = [b"LA;", b"m", b"V"]
+    string_blob = b"".join(_uleb(len(item)) + item + b"\x00" for item in strings)
+    ids_off = 0x70
+    types_off = ids_off + 4 * len(strings)
+    protos_off = types_off + 4 * 2
+    methods_off = protos_off + 12
+    class_defs_off = methods_off + 8
+    data_off = class_defs_off + 32 * classdef_count
+    code_off = data_off + len(string_blob)
+    code_off += (4 - code_off % 4) % 4
+    insns_len = 4
+    entry = b"\x00\x00\x01\x00" + b"\x00\x01" + _uleb(code_off)
+    region_off = code_off + 16 + insns_len
+    size = region_off + len(entry) * classdef_count
+    data = bytearray(size)
+    data[:8] = b"dex\n035\x00"
+    struct.pack_into("<I", data, 32, size)
+    struct.pack_into("<I", data, 36, 0x70)
+    struct.pack_into("<I", data, 40, 0x12345678)
+    struct.pack_into("<I", data, 56, len(strings))
+    struct.pack_into("<I", data, 60, ids_off)
+    struct.pack_into("<I", data, 64, 2)
+    struct.pack_into("<I", data, 68, types_off)
+    struct.pack_into("<I", data, 72, 1)
+    struct.pack_into("<I", data, 76, protos_off)
+    struct.pack_into("<I", data, 88, 1)
+    struct.pack_into("<I", data, 92, methods_off)
+    struct.pack_into("<I", data, 96, classdef_count)
+    struct.pack_into("<I", data, 100, class_defs_off)
+    cursor = data_off
+    for index, item in enumerate(strings):
+        struct.pack_into("<I", data, ids_off + 4 * index, cursor)
+        cursor += len(_uleb(len(item))) + len(item) + 1
+    struct.pack_into("<I", data, types_off, 0)
+    struct.pack_into("<I", data, types_off + 4, 2)
+    struct.pack_into("<III", data, protos_off, 2, 1, 0)
+    struct.pack_into("<HHI", data, methods_off, 0, 0, 1)
+    for index in range(classdef_count):
+        struct.pack_into("<I", data, class_defs_off + 32 * index, 0)
+        struct.pack_into("<I", data, class_defs_off + 32 * index + 8, 1)
+        struct.pack_into(
+            "<I", data, class_defs_off + 32 * index + 24, region_off + len(entry) * index,
+        )
+    struct.pack_into("<HHHHII", data, code_off, 1, 0, 0, 0, 0, insns_len // 2)
+    data[data_off:data_off + len(string_blob)] = string_blob
+    for index in range(classdef_count):
+        start = region_off + len(entry) * index
+        data[start:start + len(entry)] = entry
+    return bytes(data)
+
+
+def test_duplicate_method_ids_descriptors_are_rejected() -> None:
+    """两个 method_ids 展开出同一 descriptor：合法 DEX method_ids 唯一，直接拒。"""
+    from apkscan.core.dex_query import _DexParseError, _parse_dex
+
+    data = _param_fanout_dex(1, 8, 8, 2, same_name=True)
+    with pytest.raises(_DexParseError):
+        _parse_dex(data)
+
+
+def test_distinct_class_data_reusing_unique_descriptor_stays_fast() -> None:
+    """2000 份独立 class_data 都声明 method 0：descriptor 同对象，dict 走身份快路径。"""
+    import time
+
+    from apkscan.core.dex_query import _parse_dex
+
+    data = _shared_method_defs_dex(2000)
+    start = time.perf_counter()
+    parsed = _parse_dex(data)
+    assert time.perf_counter() - start < 0.5
+    assert parsed is not None
+    assert len(parsed.methods) == 1  # type: ignore[union-attr]
 
 
 def test_only_partial_hits_yield_no_exact_hits(tmp_path: Path) -> None:

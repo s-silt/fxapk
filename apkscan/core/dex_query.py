@@ -1165,6 +1165,7 @@ def _parse_dex_bytes(data: bytes) -> _ParsedDex:
             raise _DexParseError()
         protos.append((return_idx, _type_list(data, params_off, limit, len(type_ids), state)))
     descriptors: list[str] = []
+    seen_descriptors: set[str] = set()
     total_descriptor_chars = 0
     for index in range(method_ids_size):
         base = method_ids_off + 8 * index
@@ -1190,6 +1191,9 @@ def _parse_dex_bytes(data: bytes) -> _ParsedDex:
         descriptor = (
             f"{strings[type_ids[class_idx]]}->{strings[name_idx]}({params}){strings[type_ids[return_idx]]}"
         )
+        if descriptor in seen_descriptors:
+            raise _DexParseError()
+        seen_descriptors.add(descriptor)
         total_descriptor_chars += descriptor_len
         descriptors.append(descriptor)
     methods: dict[str, _DexCode] = {}
