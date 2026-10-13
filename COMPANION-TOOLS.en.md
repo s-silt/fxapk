@@ -24,7 +24,7 @@ probe runs automatically.
 ## Start offline
 
 ```bash
-python -m pip install "fxapk==1.18.1"
+python -m pip install "fxapk==1.19.0"
 fxapk analyze app.apk --offline --out out
 fxapk digest out/app.json
 ```

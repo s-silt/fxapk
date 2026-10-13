@@ -9,7 +9,7 @@ description = "Optional REA browser observation and offline evidence import for 
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
-dependencies = ["fxapk>=1.18.1", "typer"]
+dependencies = ["fxapk>=1.19.0", "typer"]
 
 [project.optional-dependencies]
 trace = ["websockets>=13.1,<14"]
