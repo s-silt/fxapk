@@ -110,10 +110,10 @@ def test_endpoint_value_matches_kind(kind: str, value: str, expected: bool) -> N
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        ("हिन्दी.com", True),
+        ("हिन्दी.example", True),
         ("例子.example", True),
         ("under_score.example", True),
-        ("xn--j2bd4cyah0f.com", True),
+        ("xn--j2bd4cyah0f.example", True),
         ("%s.example.com", False),
         ("/dir/file.json", False),
         ("a.example.com?x", False),
