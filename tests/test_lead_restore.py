@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from apkscan import cli
@@ -856,3 +857,31 @@ def test_restores_file_roundtrip_and_upsert(tmp_path: Path) -> None:
     with lead_cmd.restores_path(tmp_path).open("a", encoding="utf-8") as fh:
         fh.write("{不是 json\n")
     assert len(lead_cmd.load_restores(tmp_path)) == 1
+
+
+def test_cli_restore_oversize_ledger_does_not_half_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """账本超限必须在写报告之前失败：报告与 restores.jsonl 都保持原字节。"""
+    monkeypatch.setattr(lead_cmd, "REPORT_JSON_MAX_BYTES", 64)
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    ledger = corpus_dir / lead_cmd.RESTORES_NAME
+    ledger.write_bytes(b'{"k":"' + b"a" * 80 + b'"}\n')
+    ledger_before = ledger.read_bytes()
+    report = tmp_path / "report.json"
+    _write_pressed_report(report)
+    report_before = report.read_bytes()
+
+    res = runner.invoke(cli.app, [
+        "lead", "restore", str(report), "--value", _VALUE,
+        "--source", DOWNGRADE_REPACK_IDENTITY, "--note", "已差分核实",
+        "--corpus", str(corpus_dir),
+    ])
+
+    rendered = (res.stdout or "") + (res.stderr or "")
+    assert res.exit_code == 1
+    assert "样本库恢复凭据读取失败，未修改报告" in rendered
+    assert "Traceback" not in rendered
+    assert report.read_bytes() == report_before
+    assert ledger.read_bytes() == ledger_before

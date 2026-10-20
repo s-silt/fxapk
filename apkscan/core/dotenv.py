@@ -1,12 +1,14 @@
 """零依赖 ``.env`` 加载（源码运行时从项目根 .env 读 API key 等密钥）。
 
 设计取向（见使用方向）：项目今后由用户直接跑源码 + Codex 驱动，不再打包 exe/GUI，
-故密钥走项目根 ``.env``（已 gitignore）。本模块在入口把 .env 的键值**兜底**注入
+故密钥走项目根 ``.env``（已 gitignore）。本模块在入口把 .env 里白名单内的键**兜底**注入
 ``os.environ``：
 
 - **真实环境变量优先**：已在 ``os.environ`` 的键不覆盖（CI / 临时 export 仍然有效）。
 - **绝不抛**：.env 缺失 / 编码坏 / 坏行都安全跳过，不影响主流程。
-- 查找顺序：当前工作目录 ``.env`` → 仓库根 ``.env``（cwd 先注入、优先）。
+- 查找顺序：仓库根 ``.env``（源码运行）→ ``~/.fxapk/.env``（pip 安装）。仍不读当前工作目录的
+  ``.env``——证据目录可能是攻击者交付的，其中的 ``.env`` 不得注入进程环境。显式传入 ``path``
+  时只读该路径。
 """
 
 from __future__ import annotations
@@ -20,16 +22,65 @@ logger = logging.getLogger(__name__)
 #: 仓库根（apkscan/core/dotenv.py → parents[2] == 仓库根），用于在非项目根目录运行时兜底找 .env。
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
+#: pip 安装后的用户级受信任位置。无家目录时 Path.home() 抛 RuntimeError/KeyError，退化为 None。
+_USER_ENV: Path | None
+try:
+    _USER_ENV = Path.home() / ".fxapk" / ".env"
+except (RuntimeError, KeyError):
+    _USER_ENV = None
+
+# 只放凭证/提供方配置。PATH、JAVA_HOME、FXAPK_TOOLCHAIN_FILE、FXAPK_TCPDUMP_BIN、
+# FXAPK_ENABLE_REA、FXAPK_HANDOFF_ROOT、FXAPK_CORPUS 这类执行路径/安全门/数据根变量
+# 只能由真实进程环境设置，不得加入。
+_INJECTABLE_KEYS: frozenset[str] = frozenset(
+    {
+        "CENSYS_API_TOKEN",
+        "FXAPK_ABUSEIPDB_KEY",
+        "FXAPK_CENSYS_ORG_ID",
+        "FXAPK_CENSYS_TOKEN",
+        "FXAPK_DAYDAYMAP_KEY",
+        "FXAPK_DAYDAYMAP_KEY2",
+        "FXAPK_FEISHU_APP_ID",
+        "FXAPK_FEISHU_APP_SECRET",
+        "FXAPK_FEISHU_CHAT_ID",
+        "FXAPK_FOFA_FIELD_PROFILE",
+        "FXAPK_FOFA_KEY",
+        "FXAPK_FOFA_URL",
+        "FXAPK_HTTP_RATE_LIMITS",
+        "FXAPK_HUNTER_CREDIT_MODE",
+        "FXAPK_HUNTER_KEY",
+        "FXAPK_HUNTER_QUOTA_DB",
+        "FXAPK_ICP_HAPI_KEY",
+        "FXAPK_OTX_KEY",
+        "FXAPK_QUAKE_KEY",
+        "FXAPK_QUAKE_KEY2",
+        "FXAPK_QUAKE_URL",
+        "FXAPK_SHODAN_KEY",
+        "FXAPK_THREATBOOK_KEY",
+        "FXAPK_URLSCAN_KEY",
+        "FXAPK_VT_KEY",
+        "FXAPK_WHOISXML_KEY",
+        "FXAPK_ZOOMEYE_KEY",
+        "FXAPK_ZOOMEYE_URL",
+        "NGHIMMO_API_KEY",
+        "OTX_API_KEY",
+        "VT_API_KEY",
+        "ZOOMEYE_API_KEY",
+    }
+)
+
 
 def _candidate_paths(explicit: "str | os.PathLike[str] | None") -> list[Path]:
     if explicit is not None:
         return [Path(explicit)]
-    # cwd 先于仓库根：用户在哪运行就优先用哪的 .env；去重保持顺序。
-    out: list[Path] = []
-    for p in (Path.cwd() / ".env", _REPO_ROOT / ".env"):
-        if p not in out:
-            out.append(p)
-    return out
+    # 不读 cwd .env：证据目录可能是攻击者交付的，其中的 .env 不得注入进程环境。
+    # 仓库根优先；两条路径相同（或无家目录）时只保留前者。
+    found: list[Path] = []
+    for path in (_REPO_ROOT / ".env", _USER_ENV):
+        if path is None or path in found:
+            continue
+        found.append(path)
+    return found
 
 
 def _strip_inline_comment(val: str) -> str:
@@ -74,7 +125,10 @@ def _parse_line(raw: str) -> "tuple[str, str] | None":
 
 
 def load_dotenv(path: "str | os.PathLike[str] | None" = None) -> int:
-    """把 .env 键值兜底注入 ``os.environ``（已存在的真实环境变量不覆盖）。返回注入条数。绝不抛。"""
+    """把 .env 白名单内的键兜底注入 ``os.environ``（已存在的真实环境变量不覆盖；其余键拒绝并告警）。
+
+    返回注入条数。绝不抛。
+    """
     injected = 0
     for p in _candidate_paths(path):
         try:
@@ -93,6 +147,7 @@ def load_dotenv(path: "str | os.PathLike[str] | None" = None) -> int:
         except Exception:
             logger.debug(".env 读取失败，跳过：%s", p, exc_info=True)
             continue
+        rejected: set[str] = set()
         for raw in text.splitlines():
             parsed = _parse_line(raw)
             if parsed is None:
@@ -104,13 +159,23 @@ def load_dotenv(path: "str | os.PathLike[str] | None" = None) -> int:
                 # "明明配了 key 却说没配"，离病根极远。想显式置空请用真实环境变量。
                 logger.debug(".env 空占位跳过（不掩蔽低优先级来源）：%s（%s）", key, p)
                 continue
-            if key in os.environ:  # 真实环境变量 / cwd 已注入的优先，不覆盖
+            if key not in _INJECTABLE_KEYS:
+                # 执行路径 / 安全门 / 数据根只记键名：不注入，告警也绝不带值。
+                rejected.add(key)
+                continue
+            if key in os.environ:  # 真实环境变量优先，不覆盖
                 continue
             os.environ[key] = val
             injected += 1
             # 只记键名与来源文件，绝不回显值——多 .env 并存时"这个值到底来自哪份文件"
             # 是排障第一问，此前零信号。
             logger.debug(".env 注入 %s ← %s", key, p)
+        if rejected:
+            logger.warning(
+                ".env 拒绝注入非凭证键 %s（%s）；这些变量须在真实进程环境中设置，不得经 .env 注入",
+                ", ".join(sorted(rejected)),
+                p,
+            )
     if injected:
         logger.debug(".env 共注入 %d 个键到环境变量", injected)
     return injected

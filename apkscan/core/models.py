@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import ipaddress
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -151,6 +154,46 @@ class Endpoint:
     is_private: bool = False  # 内网/回环 IP
     is_suspicious: bool = False
     enrichment: dict = field(default_factory=dict)  # whois/icp/asn 结果
+
+
+# domain 拒绝式校验用的禁用集：空白、控制字符，以及会切开 URL 的符号。
+# 不判断名字是否真实存在，只保证值不能改变 URL 结构。
+_DOMAIN_FORBIDDEN_RE = re.compile(r"[\s\x00-\x1f\x7f/\\?#%@:\[\]<>\x22\x27`^{}|]")
+
+# 双向控制符（Cf 的子集）。不能整类拒绝 Cf：IDN 需要 U+200C / U+200D。
+_DOMAIN_BIDI_CONTROLS = frozenset(
+    "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+)
+
+
+def endpoint_value_matches_kind(value: str, kind: str) -> bool:
+    """ip/domain 端点的值是否符合其 kind；不符合的值不得作为 provider 查询目标（会被拼进 URL path）。
+
+    domain 是「不能改变 URL 结构」的拒绝式校验：总长 1–253（允许末尾一个 ``.``），
+    按 ``.`` 切开后每段非空且不超过 63。另拒 Cc/Cs（含 C1 与孤立代理项）和双向控制符；
+    不整类拒绝 Cf（IDN 需要 U+200C/U+200D）。不判断该名字是否真实存在。
+    """
+    if kind == "ip":
+        if "%" in value:
+            return False
+        try:
+            ipaddress.ip_address(value)
+        except ValueError:
+            return False
+        return True
+    if kind == "domain":
+        rejected_scalar = any(
+            ch in _DOMAIN_BIDI_CONTROLS or unicodedata.category(ch) in {"Cc", "Cs"}
+            for ch in value
+        )
+        if not 1 <= len(value) <= 253 or _DOMAIN_FORBIDDEN_RE.search(value) or rejected_scalar:
+            return False
+        # 末尾一个点是根点，不构成空标签；多出来的空段（``a..b``、``..``）仍拒绝。
+        body = value[:-1] if value.endswith(".") else value
+        if not body:
+            return False
+        return all(label and len(label) <= 63 for label in body.split("."))
+    return True
 
 
 #: ``Endpoint.enrichment`` 里存放「本域名只作为非标端口的 SNI 出现过」这一事实的键，

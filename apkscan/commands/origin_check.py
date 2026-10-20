@@ -6,6 +6,12 @@ from pathlib import Path
 
 import typer
 
+from apkscan.core.json_io import (
+    REPORT_JSON_MAX_BYTES,
+    load_json_file,
+    loads_bounded,
+    read_bytes_bounded,
+)
 from apkscan.core.origin_check import build_plan, run_check
 from apkscan.core.origin_projection import publish_projection, validate_report_binding
 from apkscan.core.origin_enrichment import enrich_origin_candidates
@@ -28,8 +34,8 @@ def origin_check(
             raise ValueError("mode must be passive or authorized-active")
         plan = build_plan(reference_url, candidate_url, case_id=case_id,
                           source_note=source_note, candidate_ip=candidate_ip)
-        baseline_bytes = report.read_bytes()
-        payload = json.loads(baseline_bytes)
+        baseline_bytes = read_bytes_bounded(report, REPORT_JSON_MAX_BYTES)
+        payload = loads_bounded(baseline_bytes)
         if not isinstance(payload, dict):
             raise ValueError("Report must be a JSON object")
         validate_report_binding(payload, plan)
@@ -46,7 +52,7 @@ def origin_check(
             return
         typer.echo("将向指定参考地址和候选地址各发送一次 GET；选定富化源将收到域名/IP。完整证据保存在受控输出目录。", err=True)
         receipt = run_check(plan, out)
-        data = json.loads(receipt.read_text(encoding="utf-8"))
+        data = load_json_file(receipt, limit=REPORT_JSON_MAX_BYTES)
         try:
             data["provider_enrichment"] = enrich_origin_candidates(data, receipt.parent, enrich_providers)
         except (OSError, ValueError) as exc:

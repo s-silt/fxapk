@@ -22,12 +22,14 @@ from apkscan.core.models import (
     LeadCategory,
     Report,
     Severity,
+    endpoint_value_matches_kind,
 )
 from apkscan.core.evidence_scope import project_serialized_closure
 from apkscan.core.json_contract import (
     parse_finite_json_float,
     reject_nonfinite_json_constant,
 )
+from apkscan.core.json_io import REPORT_JSON_MAX_BYTES, load_json_file
 from apkscan.core.report_schema import (
     ensure_writable_report_version,
     migrate_report_payload,
@@ -186,20 +188,30 @@ def report_from_dict(payload: Mapping[str, object]) -> Report:
 
     endpoints: list[Endpoint] = []
     raw_endpoints = payload.get("endpoints")
+    mismatched_endpoints = 0
     for item in raw_endpoints if isinstance(raw_endpoints, list) else []:
         if not isinstance(item, Mapping):
             continue
+        value = str(item.get("value", ""))
+        kind = str(item.get("kind", ""))
+        if not endpoint_value_matches_kind(value, kind):
+            mismatched_endpoints += 1
         enrichment = item.get("enrichment")
         endpoints.append(
             Endpoint(
-                value=str(item.get("value", "")),
-                kind=str(item.get("kind", "")),
+                value=value,
+                kind=kind,
                 evidences=_evidences(item.get("evidences")),
                 is_cleartext=bool(item.get("is_cleartext", False)),
                 is_private=bool(item.get("is_private", False)),
                 is_suspicious=bool(item.get("is_suspicious", False)),
                 enrichment=dict(enrichment) if isinstance(enrichment, Mapping) else {},
             )
+        )
+    if mismatched_endpoints > 0:
+        logger.warning(
+            "report 中有 %d 个 ip/domain 端点的值不符合其 kind，已保留但富化时将跳过",
+            mismatched_endpoints,
         )
 
     findings: list[Finding] = []
@@ -271,8 +283,9 @@ def report_from_dict(payload: Mapping[str, object]) -> Report:
 
 def load_report(path: str | Path) -> Report:
     """Load a UTF-8 report JSON object and reconstruct its typed model."""
-    payload = json.loads(
-        Path(path).read_text(encoding="utf-8"),
+    payload = load_json_file(
+        Path(path),
+        limit=REPORT_JSON_MAX_BYTES,
         parse_constant=reject_nonfinite_json_constant,
         parse_float=parse_finite_json_float,
     )

@@ -33,6 +33,12 @@ from apkscan.core.json_contract import (
     parse_finite_json_float as _parse_finite_float,
     reject_nonfinite_json_constant as _reject_json_constant,
 )
+from apkscan.core.json_io import (
+    REPORT_JSON_MAX_BYTES,
+    load_json_file,
+    loads_bounded,
+    read_bytes_bounded,
+)
 from apkscan.core.redact import safe_exception_diagnostic, safe_exception_text, warn_unredacted_agent_output
 
 logger = logging.getLogger(__name__)
@@ -53,7 +59,7 @@ def _package_binding(package: Path | None, explicit_case: str) -> tuple[str, str
     package_id = checked.get("package_id")
     if not isinstance(package_id, str) or len(package_id) != 64:
         raise typer.BadParameter("验包结果没有合法 package_id", param_hint="--package")
-    payload = _json.loads(package.read_text(encoding="utf-8"))
+    payload = load_json_file(package, limit=REPORT_JSON_MAX_BYTES)
     if not isinstance(payload, dict) or not isinstance(payload.get("case_id"), str):
         raise typer.BadParameter("case-package 没有 case_id", param_hint="--package")
     bound = payload["case_id"]
@@ -183,12 +189,12 @@ def corpus_add(
     for rp in reports:
         try:
             # read_bytes().decode 而非 read_text：后者会把 CRLF 归一为 LF，破坏原样存证的字节保真。
-            raw_bytes = rp.read_bytes()
+            raw_bytes = read_bytes_bounded(rp, REPORT_JSON_MAX_BYTES)
             if bound_report_hash is not None and sha256_hex(raw_bytes) != bound_report_hash:
                 raise ValueError("report_changed_after_package_check")
             raw = raw_bytes.decode("utf-8")
             # NaN/Infinity 不是 RFC-8259 JSON；入库必须拒绝，不能归一成 None 后继续存证。
-            report = _json.loads(
+            report = loads_bounded(
                 raw,
                 parse_constant=_reject_json_constant,
                 parse_float=_parse_finite_float,

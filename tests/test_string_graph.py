@@ -6,11 +6,22 @@
 
 from __future__ import annotations
 
+import random
+import re
+import time
+
 from apkscan.config.string_graph import (
     SUPPRESSION_PARAM_TABLE,
     SUPPRESSION_THIRD_PARTY,
     StringChain,
+    _BLOCK_START_RE,
+    _CALL_ARGS_RE,
+    _CLASS_START_RE,
+    _MAX_SECRETS_PER_METHOD,
+    _brace_pairs,
+    _call_args,
     _looks_ciphertext,
+    _mask,
     _match_block,
     scan_java_source,
 )
@@ -343,6 +354,20 @@ def test_jadx_scan_java_emits_string_chain_finding(tmp_path) -> None:
     assert "d" in chain[0].description  # 方法名进描述
 
 
+def test_scan_java_scope_budget_counted_in_suppressed(monkeypatch, tmp_path) -> None:
+    """字节预算触发时 ``_scan_java`` 的 suppressed 带 ``scope-budget``（文件数）。
+
+    analyze 把这份 dict 原样写入 ``result.meta["decrypt_candidates_suppressed"]``。
+    """
+    from apkscan.analyzers.jadx import JadxAnalyzer
+
+    monkeypatch.setattr("apkscan.config.string_graph._MAX_SCOPE_WORK_BYTES", 1024)
+    java = "void big(){" + ("y" * 4_000) + "}" + _aes_method("z", _SECRET)
+    (tmp_path / "C.java").write_text(java, encoding="utf-8")
+    outcome = JadxAnalyzer()._scan_java(tmp_path)
+    assert outcome.suppressed.get("scope-budget") == 1
+
+
 # ── 精度回归：真实 jadx 输出形态的四类误报 ───────────────────────────────────────
 # 一次真实样本跑出 36 条 decrypt_candidates，其中 34 条不是密文；换个样本 31 条全错。
 # 四类误报里 3 类经 _looks_ciphertext 的 infra.looks_like_encoding 兜底放行——那个函数
@@ -614,3 +639,309 @@ def test_real_app_ciphertext_survives_all_suppression() -> None:
         chains = scan_java_source(src, "sources/nfc/share/nfcshare/App.java")
         assert len(chains) == 1, secret
         assert chains[0].consumer == "x"
+
+
+def test_brace_pairs_agree_with_match_block() -> None:
+    """掩码文本上每个 ``{``：单遍栈配对与 ``_match_block`` 下标一致。"""
+    samples = (
+        "void m(){ if (ok) { a(); } }",
+        'class A { void m(){ String s = "{ not a }"; } }',
+        "void m(){ /* } { */ int x = 1; }",
+        "void m(){ // }\n int x = 1; }",
+        "class A { void m(){ char c = '{'; } void n(){} }",
+        "void m() throws Exception { int x = 1; }",
+        "enum E { A, B; void m(){ } }",
+        "void outer(){ new X(){ void inner(){ } }; }",
+    )
+    for src in samples:
+        masked = _mask(src)
+        pairs = _brace_pairs(masked)
+        opens = [i for i, ch in enumerate(masked) if ch == "{"]
+        assert opens, src
+        for i in opens:
+            assert pairs[i] == _match_block(masked, i), (src, i)
+
+
+def test_deep_nesting_finishes_within_five_seconds() -> None:
+    """约 20 万层 ``m(){`` 里放一条会成链的密文：5 秒内返回、不抛。"""
+    depth = 200_000
+    src = "m(){" * depth + f'x("{_SECRET}");' + "}" * depth
+    assert len(src) <= 4 * 1024 * 1024
+    started = time.perf_counter()
+    chains = scan_java_source(src, "loc")
+    assert time.perf_counter() - started < 5
+    assert len(chains) == 1
+    assert chains[0].secret == _SECRET
+    assert chains[0].consumer == "x"
+
+
+def test_many_ciphertext_literals_capped_and_fast() -> None:
+    """单个方法体里约 5 万个密文样字面量 + ``x(v)``：5 秒内返回，条数不超过额度。"""
+    parts = [f'String v="{i:032x}";' for i in range(50_000)]
+    parts.append("x(v);")
+    src = "void m(){" + "".join(parts) + "}"
+    started = time.perf_counter()
+    chains = scan_java_source(src, "loc")
+    assert time.perf_counter() - started < 5
+    assert len(chains) <= _MAX_SECRETS_PER_METHOD
+
+
+def test_throws_and_class_without_brace_finish_quickly() -> None:
+    """无 ``{`` 的 throws 链与 class 头（各约 1MB）5 秒内返回空、不抛。"""
+    throws_src = "a() throws " * (1_048_576 // len("a() throws "))
+    class_src = "class A " * (1_048_576 // len("class A "))
+    for src in (throws_src, class_src):
+        assert len(src) >= 1_000_000
+        started = time.perf_counter()
+        assert scan_java_source(src, "loc") == []
+        assert time.perf_counter() - started < 5
+
+
+def test_call_args_regex_matches_legacy_on_ordinary_samples() -> None:
+    """正常样例上，``\\b`` 与实参 1024 上界不改变旧正则的 ``(callee, args)`` 命中。"""
+    legacy = re.compile(r"(\w+)\s*\(([^;{}]*)\)")
+    samples = (
+        "helper(bar(x), y)",
+        "decrypt(ctx, s, 0)",
+        "foo  (  a , b )",
+        'foo("a(b)")',
+        "f(a)g(b)",
+        "f(x)(y)",
+        "dec(\n  ctx,\t s )",
+    )
+    for src in samples:
+        got = [(m.group(1), m.group(2)) for m in _CALL_ARGS_RE.finditer(src)]
+        expect = [(m.group(1), m.group(2)) for m in legacy.finditer(src)]
+        assert got == expect, src
+
+
+def test_long_nested_calls_finish_within_five_seconds() -> None:
+    """约 20 万层 ``f(`` 嵌套、实参段无 ``;{}``：5 秒内返回、不抛。"""
+    src = (
+        'm(){ String v = "' + _SECRET + '"; '
+        + "f(" * 200_000
+        + "v"
+        + ")" * 200_000
+        + "; }"
+    )
+    assert len(src) <= 4 * 1024 * 1024
+    started = time.perf_counter()
+    scan_java_source(src, "loc")
+    assert time.perf_counter() - started < 5
+
+
+def test_call_args_matches_reference_regex() -> None:
+    """``_call_args`` 与参照正则的 ``(callee, 实参文本)`` 一致：手写样例 + 固定种子模糊。"""
+    samples = (
+        "helper(bar(x), y)",
+        "decrypt(ctx, s, 0)",
+        "foo  (  a , b )",
+        "dec(\n  ctx,\t s )",
+        "f(a)g(b)",
+        "f(x)(y)",
+        "a(b;c)d(e)",
+        "x (y)",
+        "变量(a)",
+    )
+    for src in samples:
+        got = _call_args(src)
+        expect = [(m.group(1), m.group(2)) for m in _CALL_ARGS_RE.finditer(src)]
+        assert got == expect, src
+    rng = random.Random(20261021)
+    alphabet = "ab_1 \n(),;{}é"
+    for _ in range(2000):
+        src = "".join(rng.choice(alphabet) for _ in range(rng.randrange(0, 201)))
+        got = _call_args(src)
+        expect = [(m.group(1), m.group(2)) for m in _CALL_ARGS_RE.finditer(src)]
+        assert got == expect, src
+
+
+# 旧类头/方法头：测试里的字面常量，用来锁「合法 Java 上与新正则相同」。
+_OLD_CLASS_START_RE = re.compile(r"\b(?:class|interface|enum)\s+(\w+)[^{;]{0,4096}\{")
+_OLD_BLOCK_START_RE = re.compile(
+    r"\b([A-Za-z_]\w*)\s*\([^;{}()]*\)\s*(?:throws[^{;]{0,1024})?\{"
+)
+
+
+def test_class_and_block_headers_match_legacy_on_ordinary_java() -> None:
+    """泛型、多 implements、嵌套类、enum、interface、多异常 throws、无 throws：名字与结束位置相同。"""
+    samples = (
+        "class Foo<T extends Bar> { void m() { } }",
+        "class Foo implements A, B, C { void m() { } }",
+        "class Outer { class Inner { void m() { } } }",
+        "enum E { A, B; void m() { } }",
+        "interface I { void m(); }",
+        "void m() throws java.io.IOException, java.lang.IllegalStateException { int x = 1; }",
+        "void m() { int x = 1; }",
+        "class Foo extends bar.Baz implements a.B, c.D { void load() throws IOException { } }",
+        "interface I extends J, K { default void n() { } }",
+        "enum Color implements Paint { RED; void paint() throws Exception { } }",
+    )
+    for src in samples:
+        masked = _mask(src)
+        got_class = [(m.group(1), m.end()) for m in _CLASS_START_RE.finditer(masked)]
+        old_class = [(m.group(1), m.end()) for m in _OLD_CLASS_START_RE.finditer(masked)]
+        assert got_class == old_class, src
+        got_block = [(m.group(1), m.end()) for m in _BLOCK_START_RE.finditer(masked)]
+        old_block = [(m.group(1), m.end()) for m in _OLD_BLOCK_START_RE.finditer(masked)]
+        assert got_block == old_block, src
+
+
+def test_eight_assigned_secrets_and_unclosed_calls_finish_quickly() -> None:
+    """单方法 8 条赋值密文后接 20 万层未闭合 ``f(``：5 秒内返回，且输入含 ``{``。"""
+    parts = [f'String v{i} = "{i:040x}"; ' for i in range(8)]
+    src = "m(){ " + "".join(parts) + ("f(" * 200_000) + "}"
+    assert "{" in src and len(src) <= 4 * 1024 * 1024
+    started = time.perf_counter()
+    scan_java_source(src, "loc")
+    assert time.perf_counter() - started < 5
+
+
+def test_class_headers_with_trailing_brace_finish_quickly() -> None:
+    """12.5 万个 ``class A `` 后补 ``{ }``：5 秒内返回，不靠全文无 ``{`` 的早退。"""
+    src = "class A " * 125_000 + "{ }"
+    assert "{" in src and len(src) <= 4 * 1024 * 1024
+    started = time.perf_counter()
+    scan_java_source(src, "loc")
+    assert time.perf_counter() - started < 5
+
+
+def test_throws_clauses_with_trailing_brace_finish_quickly() -> None:
+    """9.5 万个 ``a() throws `` 后补 ``{ }``：5 秒内返回，不靠全文无 ``{`` 的早退。"""
+    src = "a() throws " * 95_000 + "{ }"
+    assert "{" in src and len(src) <= 4 * 1024 * 1024
+    started = time.perf_counter()
+    scan_java_source(src, "loc")
+    assert time.perf_counter() - started < 5
+
+
+def _aes_method(name: str, secret: str) -> str:
+    """小解密方法：赋值密文 + Cipher.getInstance + doFinal。"""
+    return (
+        f'void {name}(){{ String k = "{secret}"; '
+        f'Cipher c = Cipher.getInstance("AES"); c.doFinal(k); }}'
+    )
+
+
+def test_empty_method_prefix_cannot_crowd_out_decrypt_method() -> None:
+    """2 万个空方法排在真实解密方法前：个数不再截断，末尾的链仍被检出。"""
+    src = "void e(){}" * 20_000 + _aes_method("z", _SECRET)
+    stats: dict[str, int] = {}
+    chains = scan_java_source(src, "loc", stats=stats)
+    assert stats.get("scope_budget_truncated", 0) == 0
+    assert len(chains) == 1
+    assert chains[0].method == "z"
+    assert chains[0].secret == _SECRET
+    assert chains[0].decrypt_calls
+
+
+def test_byte_budget_keeps_small_method_inside_large_outer(monkeypatch) -> None:
+    """大外层包住小解密方法：字节预算按 body 升序，小方法先算，截断记 1。"""
+    monkeypatch.setattr("apkscan.config.string_graph._MAX_SCOPE_WORK_BYTES", 1024)
+    small = _aes_method("z", _SECRET)
+    src = "void outer(){" + ("x" * 4_000) + small + "}"
+    stats: dict[str, int] = {}
+    chains = scan_java_source(src, "loc", stats=stats)
+    assert stats["scope_budget_truncated"] == 1
+    assert len(chains) == 1
+    assert chains[0].method == "z"
+    assert chains[0].secret == _SECRET
+
+
+def test_byte_budget_keeps_small_sibling_after_large_block(monkeypatch) -> None:
+    """大嵌套块在前、兄弟小解密方法在后：小方法仍被检出，截断记 1。"""
+    monkeypatch.setattr("apkscan.config.string_graph._MAX_SCOPE_WORK_BYTES", 1024)
+    src = "void big(){" + ("y" * 4_000) + "}" + _aes_method("z", _SECRET)
+    stats: dict[str, int] = {}
+    chains = scan_java_source(src, "loc", stats=stats)
+    assert stats["scope_budget_truncated"] == 1
+    assert len(chains) == 1
+    assert chains[0].method == "z"
+    assert chains[0].secret == _SECRET
+
+
+def test_throws_type_use_annotation_forms_method_scope() -> None:
+    """``throws @A IOException`` 仍是方法域，方法内解密链可检出。"""
+    src = (
+        f'void m() throws @A IOException {{ String k = "{_SECRET}"; '
+        f'Cipher c = Cipher.getInstance("AES"); c.doFinal(k); }}'
+    )
+    chains = scan_java_source(src, "loc")
+    assert len(chains) == 1
+    assert chains[0].method == "m"
+    assert chains[0].secret == _SECRET
+
+
+def test_class_header_string_class_literal_stays_one_scope() -> None:
+    """注解参数里的 ``String.class`` 不当成下一个 class 声明，类域仍产出 ``class:C``。"""
+    src = (
+        f'class C extends @A(String.class) Base {{ '
+        f'static String K="{_SECRET}"; void m(){{ dec(K); }} }}'
+    )
+    chains = scan_java_source(src, "loc")
+    assert len(chains) == 1
+    assert chains[0].method == "class:C"
+    assert chains[0].secret == _SECRET
+    assert chains[0].consumer == "dec"
+
+
+def test_throws_at_overlap_search_finishes_within_one_second() -> None:
+    """``$$@`` 与 throws 字符类重叠：``_BLOCK_START_RE.search`` 1 秒内返回。"""
+    samples = (
+        "a() throws " + "$$@" * 40 + ";",
+        "void m() throws " + "$$@" * 40 + " {}",
+    )
+    for src in samples:
+        started = time.perf_counter()
+        _BLOCK_START_RE.search(src)
+        assert time.perf_counter() - started < 1
+
+
+def test_long_class_name_search_finishes_within_one_second() -> None:
+    """超长类名：``_CLASS_START_RE.search`` 1 秒内返回；有 ``{`` 时 group(1) 为整个标识符。"""
+    name = "a" * 200_000
+    no_brace = "class " + name + ";"
+    with_brace = "class " + name + " {}"
+    for src in (no_brace, with_brace):
+        started = time.perf_counter()
+        match = _CLASS_START_RE.search(src)
+        assert time.perf_counter() - started < 1
+    assert match is not None and match.group(1) == name
+
+
+def test_redos_headers_scan_within_five_seconds() -> None:
+    """上述 throws / 类头输入走 ``scan_java_source``：5 秒内返回、不抛。"""
+    name = "a" * 200_000
+    samples = (
+        "a() throws " + "$$@" * 40 + ";",
+        "void m() throws " + "$$@" * 40 + " {}",
+        "class " + name + ";",
+        "class " + name + " {}",
+    )
+    for src in samples:
+        started = time.perf_counter()
+        scan_java_source(src, "loc")
+        assert time.perf_counter() - started < 5
+
+
+def test_dotted_or_dollar_class_tokens_are_not_quadratic_starts() -> None:
+    """``.class`` / ``$class`` 不再当类头起点：finditer 1 秒内，scan 5 秒内不抛。"""
+    samples = (
+        "class " + "a.class " * 20_000 + ";",
+        "a() throws " + "a.class " * 20_000 + ";",
+        "class " + "a$class " * 20_000 + "{ }",
+    )
+    for src in samples:
+        started = time.perf_counter()
+        list(_CLASS_START_RE.finditer(src))
+        assert time.perf_counter() - started < 1
+        started = time.perf_counter()
+        scan_java_source(src, "loc")
+        assert time.perf_counter() - started < 5
+
+
+def test_annotation_interface_is_still_a_class_start() -> None:
+    """``@interface`` 的 ``interface`` 前邻不是 ``.`` / ``$`` / 标识符，仍是起点。"""
+    match = _CLASS_START_RE.search("@interface Foo { }")
+    assert match is not None
+    assert match.group(1) == "Foo"

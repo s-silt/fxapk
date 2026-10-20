@@ -266,7 +266,7 @@ class RdapEnricher(BaseEnricher):
         ★经 ``_http.guarded_get`` 手动跟随 rdap.org bootstrap 的 3xx referral，跟随前逐跳校验目标 host
         非私网/保留地址（SSRF 防护，codex B3）——敌意 referral 无法把请求引向内网/云元数据端点。
         """
-        url = RDAP_URL.format(domain=domain)
+        url = RDAP_URL.format(domain=_http.path_segment(domain))
         resp = _http.guarded_get(requests, url, timeout=RDAP_TIMEOUT)
         resp.raise_for_status()
         payload = resp.json()

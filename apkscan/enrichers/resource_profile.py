@@ -10,6 +10,7 @@ import base64
 from urllib.parse import urlsplit
 
 from apkscan.core.models import Endpoint
+from apkscan.enrichers import _http
 from apkscan.enrichers.multisource import (
     _PassiveLookupEnricher, _ServiceError, _api_endpoint, _business_error,
     _dict, _provider_origin, _TIMEOUT,
@@ -83,7 +84,7 @@ class FofaHostProfileEnricher(_PassiveLookupEnricher):
         search = _api_endpoint("FXAPK_FOFA_URL", "https://fofa.info", "/api/v1/search/all")
         if not search.endswith("/api/v1/search/all"):
             raise _ServiceError("unsupported_host_api_base")
-        url = search[:-len("search/all")] + "host/" + endpoint.value
+        url = search[:-len("search/all")] + "host/" + _http.path_segment(endpoint.value)
         self.receipt.update(endpoint=_provider_origin(url), api_path=urlsplit(url).path)
         response = self._http.get(url, params={"key": credential}, allow_redirects=False, timeout=_TIMEOUT)
         self._check_response(response)

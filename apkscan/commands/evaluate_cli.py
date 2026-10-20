@@ -15,6 +15,12 @@ from apkscan.core import recognition_evaluation as evaluation
 from apkscan.core import recognition_labels as rlabels
 from apkscan.core import recognition_training as rtraining
 from apkscan.core.atomic import atomic_create_bytes
+from apkscan.core.json_io import (
+    SMALL_JSON_MAX_BYTES,
+    load_json_file,
+    loads_bounded,
+    read_bytes_bounded,
+)
 
 
 evaluate_app = typer.Typer(
@@ -55,7 +61,7 @@ def _exit_error(message: str) -> None:
 
 def _read_json(path: Path, error_message: str) -> Any:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return load_json_file(path, limit=SMALL_JSON_MAX_BYTES)
     except Exception:
         _exit_error(error_message)
 
@@ -126,7 +132,7 @@ def _validate_params(task: str, payload: Any) -> dict[str, Any]:
 
 def _load_manifest(path: Path) -> tuple[Any, str]:
     try:
-        encoded = path.read_bytes()
+        encoded = read_bytes_bounded(path, SMALL_JSON_MAX_BYTES)
         text = encoded.decode("utf-8")
     except Exception:
         _exit_error("manifest_unreadable")
@@ -141,12 +147,12 @@ def _load_manifest(path: Path) -> tuple[Any, str]:
 
     # 回显 manifest 自身的域分离 digest（切分的规范身份），不是文件字节 sha256；
     # load 已验证 digest 与内容一致，此处读取即可信。
-    return manifest, str(json.loads(text)["manifest_digest"])
+    return manifest, str(loads_bounded(text)["manifest_digest"])
 
 
 def _load_labels(path: Path) -> tuple[Any, str]:
     try:
-        encoded = path.read_bytes()
+        encoded = read_bytes_bounded(path, SMALL_JSON_MAX_BYTES)
     except Exception:
         _exit_error("labels_unreadable")
 
@@ -183,7 +189,7 @@ def _finite_float(value: object) -> float | None:
 
 def _load_predictions(path: Path, task: str) -> Any:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = load_json_file(path, limit=SMALL_JSON_MAX_BYTES)
     except Exception:
         _exit_error("predictions_unreadable")
 

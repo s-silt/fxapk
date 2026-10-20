@@ -5,6 +5,11 @@
 
 ## 待发布
 
+- **行为变更**：`.env` 只从仓库根（源码运行）与 `~/.fxapk/.env`（pip 安装）读取，不再读当前目录的 `.env`；且只注入 `.env.example` 所列密钥与服务配置键。`PATH`、`JAVA_HOME`、`FXAPK_TOOLCHAIN_FILE`、`FXAPK_TCPDUMP_BIN`、`FXAPK_ENABLE_REA`、`FXAPK_HANDOFF_ROOT`、`FXAPK_CORPUS` 等执行路径、安全门与数据根变量只能由真实进程环境设置，`.env` 里出现时跳过并 WARNING 列出键名（不输出值）。原先放在 `.env` 里的 `FXAPK_CORPUS` 需改为环境变量或 `--corpus`。
+- `scan_java_source` 的作用域配对、调用实参、类头与 `throws` 匹配改为线性扫描，并设累计字节预算（按作用域从小到大记账，触发时只跳过最大的外层作用域，并计入 `decrypt_candidates_suppressed` 的 `scope-budget`）；深嵌套或大量密文字面量的反编译源码不再导致二次方耗时。正常输入的命中结果不变；`throws` 与类头支持 TYPE_USE 注解。
+- 报告里 kind 为 `ip` / `domain` 的端点值不符合其类型时（如 `%s.` 模板串或路径），加载时保留并告警，富化时跳过、不发请求；VirusTotal、OTX、Censys、FOFA、Shodan、ip-api、RDAP 的 URL 路径对端点值做单段编码。
+- report、case-package、corpus、evaluate/split 的 manifest/labels/预测文件、识别标签逐行解析，以及 CLI、lead、enrich、origin-check、jadx-query、phase2 的报告与清单读取入口改为有界读取：报告 128 MiB、其余 16 MiB，JSON 深度 64；超限与深嵌套按各入口既有的坏输入路径处理。
+
 ## 1.19.1 — 2026-10-20
 
 - 补齐 REA/ASC 的正式插件交付：发行附件包含核心 1.19.1、Android UI 0.1.2、REA 0.1.1、ASC 0.1.1 的 wheel 与源码包，以及覆盖全部八个归档的 `SHA256SUMS.txt`。核心沿用 PyPI 发布流程；三个可选插件仅通过 GitHub Release 附件分发。

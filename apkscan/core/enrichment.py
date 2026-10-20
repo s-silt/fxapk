@@ -31,6 +31,7 @@ from apkscan.core.models import (
     EnrichmentResult,
     EvidenceScope,
     OBSERVED_CONTACT_SOURCES,
+    endpoint_value_matches_kind,
 )
 from apkscan.core.registry import BaseEnricher
 from apkscan.core.enrichment_budget import EnrichmentBudget
@@ -615,6 +616,9 @@ def _run_enrichers_on_endpoint(
 
     在单一 worker 内调用：同一 ep.enrichment 无并发写竞争；跨端点共享的 stats 用锁聚合。
     """
+    if not endpoint_value_matches_kind(ep.value, ep.kind):
+        logger.debug("跳过富化：端点值不符合 kind=%s", ep.kind)
+        return
     for index, enricher in enumerate(enrichers):
         applies_to = list(getattr(enricher, "applies_to", []) or [])
         if ep.kind not in applies_to:

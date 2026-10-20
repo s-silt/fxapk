@@ -16,6 +16,12 @@ import typer
 
 from apkscan.core.atomic import atomic_create_bytes
 from apkscan.core.jadx_sources import contained, digest_bytes, query_sources
+from apkscan.core.json_io import (
+    REPORT_JSON_MAX_BYTES,
+    SMALL_JSON_MAX_BYTES,
+    loads_bounded,
+    read_bytes_bounded,
+)
 
 from apkscan.core.jadx_callpath import CallPath, CallPathEdge, CallPathLimits, trace_callpath
 from apkscan.core.jadx_index import (
@@ -120,8 +126,8 @@ def _selection(cache: Path, key: str | None, apk_sha: str | None, mapping: Path 
         raise typer.BadParameter("--apk-sha256 必须是 64 位小写十六进制")
     path = mapping or cache / "fxapk-jadx-index-map.json"
     try:
-        raw = path.read_bytes()
-        data = json.loads(raw.decode("utf-8-sig"))
+        raw = read_bytes_bounded(path, SMALL_JSON_MAX_BYTES)
+        data = loads_bounded(raw.decode("utf-8-sig"))
         keys = []
         if not isinstance(data, dict) or not isinstance(data.get("records"), list):
             raise ValueError("invalid")
@@ -291,8 +297,8 @@ def jadx_compare(
     bindings = []
     keys = []
     for path in (subject_report, candidate_report):
-        raw = path.read_bytes()
-        report = json.loads(raw)
+        raw = read_bytes_bounded(path, REPORT_JSON_MAX_BYTES)
+        report = loads_bounded(raw)
         sha, synthetic = sample_identity(report)
         if synthetic or _JADX_INDEX_KEY_RE.fullmatch(sha) is None:
             raise typer.BadParameter("比较报告必须含真实原 APK SHA-256")

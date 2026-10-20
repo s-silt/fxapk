@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from pathlib import Path
 from typing import Any
@@ -14,6 +13,7 @@ from apkscan.core import corpus_catalog
 from apkscan.core import recognition_labels as rlabels
 from apkscan.core import recognition_training as rtraining
 from apkscan.core.atomic import atomic_create_bytes
+from apkscan.core.json_io import SMALL_JSON_MAX_BYTES, load_json_file, read_bytes_bounded
 
 
 split_app = typer.Typer(
@@ -47,7 +47,7 @@ def _exit_error(message: str) -> None:
 
 def _read_json(path: Path, error_message: str) -> Any:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return load_json_file(path, limit=SMALL_JSON_MAX_BYTES)
     except Exception:
         _exit_error(error_message)
 
@@ -131,7 +131,7 @@ def _load_config(path: Path) -> dict[str, Any]:
 
 def _load_labels(path: Path) -> tuple[Any, str]:
     try:
-        label_bytes = path.read_bytes()
+        label_bytes = read_bytes_bounded(path, SMALL_JSON_MAX_BYTES)
     except Exception:
         _exit_error("labels_unreadable at line 0")
 
@@ -264,7 +264,7 @@ def validate(
 ) -> None:
     """只读加载并校验 split-manifest。"""
     try:
-        encoded = manifest.read_bytes()
+        encoded = read_bytes_bounded(manifest, SMALL_JSON_MAX_BYTES)
         text = encoded.decode("utf-8")
     except Exception:
         _exit_error("manifest_unreadable")

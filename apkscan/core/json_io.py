@@ -25,14 +25,64 @@ def read_json_bounded(path: Path, limit: int, depth_limit: int) -> tuple[Any, by
         raw = read_limited(stream, limit)
     if len(raw) > limit:
         raise OverflowError(f"file size exceeds {limit} while reading")
-    payload = json.loads(
-        raw.decode("utf-8"),
-        parse_constant=reject_nonfinite_json_constant,
-        parse_float=parse_finite_json_float,
-    )
-    if json_depth(payload) > depth_limit:
+    try:
+        payload = json.loads(
+            raw.decode("utf-8"),
+            parse_constant=reject_nonfinite_json_constant,
+            parse_float=parse_finite_json_float,
+        )
+        depth = json_depth(payload)
+    except RecursionError as exc:
+        raise OverflowError(f"JSON depth exceeds {depth_limit}") from exc
+    if depth > depth_limit:
         raise OverflowError(f"JSON depth exceeds {depth_limit}")
     return payload, raw
+
+
+#: 与既有 report ingestion 一致的默认上限（case.py / phase2 inventory）。
+REPORT_JSON_MAX_BYTES = 128 * 1024 * 1024
+SMALL_JSON_MAX_BYTES = 16 * 1024 * 1024  # manifest / labels / meta / 参数文件
+JSON_MAX_DEPTH = 64
+
+
+class BoundedJsonError(ValueError):
+    """输入超过字节或深度上限。继承 ValueError：既有 ``except ValueError`` / JSONDecodeError 处理路径照常接住。"""
+
+
+def read_bytes_bounded(path: Path, limit: int) -> bytes:
+    """``Path.read_bytes`` 的有界版：超过 limit 抛 BoundedJsonError，不预分配。"""
+    with path.open("rb") as stream:
+        raw = read_limited(stream, limit)
+    if len(raw) > limit:
+        raise BoundedJsonError(f"file exceeds {limit} bytes")
+    return raw
+
+
+def read_text_bounded(path: Path, limit: int) -> str:
+    """``Path.read_text(encoding="utf-8")`` 的有界版，保持其通用换行归一（\\r\\n、\\r → \\n）。"""
+    text = read_bytes_bounded(path, limit).decode("utf-8")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def loads_bounded(text: str | bytes, depth_limit: int = JSON_MAX_DEPTH, **kwargs: Any) -> Any:
+    """``json.loads`` + 深度上限；深嵌套触发的 RecursionError 映射为 BoundedJsonError。
+
+    bytes 交给 json.loads 自动识别编码。
+    """
+    try:
+        value = json.loads(text, **kwargs)
+        depth = json_depth(value)
+    except RecursionError as exc:
+        raise BoundedJsonError("JSON nesting too deep") from exc
+    if depth > depth_limit:
+        raise BoundedJsonError(f"JSON depth exceeds {depth_limit}")
+    return value
+
+
+def load_json_file(
+    path: Path, *, limit: int, depth_limit: int = JSON_MAX_DEPTH, **kwargs: Any
+) -> Any:
+    return loads_bounded(read_text_bounded(path, limit), depth_limit, **kwargs)
 
 
 def json_depth(value: Any, current: int = 0) -> int:

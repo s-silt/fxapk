@@ -138,10 +138,10 @@ def _warn_report_revision(payload: object) -> None:
 
 def _warn_report_path_revision(path: str) -> None:
     """尽力读取 ``--into`` 报告并告警；读失败留给既有合并边界处理。"""
-    import json as _json
+    from apkscan.core.json_io import REPORT_JSON_MAX_BYTES, load_json_file
 
     try:
-        payload = _json.loads(Path(path).read_text(encoding="utf-8"))
+        payload = load_json_file(Path(path), limit=REPORT_JSON_MAX_BYTES)
     except (OSError, ValueError, UnicodeError):
         return
     _warn_report_revision(payload)
@@ -557,13 +557,15 @@ def _report_dict_for(path: Path, *, online: bool) -> dict:
 
     JSON 读取 / APK 解析失败 → 友好报错 + 非零退出（3=坏输入 JSON，2=APK 解析失败），不打 traceback。
     """
-    import json as _json
+    from apkscan.core.json_io import REPORT_JSON_MAX_BYTES, load_json_file
 
     if path.suffix.lower() == ".json":
         try:
             # parse_constant：把 NaN/Infinity（json.loads 默认接受、但非 RFC-8259 合法）归一化为
             # None，保证 diff/jsonl 后续 dumps 出的每行都是严格合法 JSON（jq / JSON.parse 不炸）。
-            data = _json.loads(path.read_text(encoding="utf-8"), parse_constant=lambda _c: None)
+            data = load_json_file(
+                path, limit=REPORT_JSON_MAX_BYTES, parse_constant=lambda _c: None
+            )
         except Exception as exc:  # noqa: BLE001 — 坏 JSON → 友好报错而非 traceback
             typer.echo(f"错误：无法读取报告 JSON：{path}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=3) from exc
@@ -714,8 +716,10 @@ def diff(
         def _manifest_digest(index_key: str) -> str:
             """读 cache 内 canonical manifest 字节算 digest（cache root 是信任边界，
             不是真实性证据——输出只带 digest，绝不带路径或"官方"语义）。"""
+            from apkscan.core.json_io import SMALL_JSON_MAX_BYTES, read_bytes_bounded
+
             manifest_path = jadx_cache_root / index_key / "manifest.json"
-            manifest_bytes = manifest_path.read_bytes()
+            manifest_bytes = read_bytes_bounded(manifest_path, SMALL_JSON_MAX_BYTES)
             return "sha256:" + _hashlib.sha256(manifest_bytes).hexdigest()
 
         def _load_one(index_key: str) -> LoadedIndex:
@@ -774,11 +778,14 @@ def jsonl(
     warn_unredacted_agent_output("jsonl")
     import json as _json
 
+    from apkscan.core.json_io import REPORT_JSON_MAX_BYTES, load_json_file
     from apkscan.core.jsonl import report_to_events
 
     try:
         # parse_constant：NaN/Infinity → None，保证每行输出严格合法 JSON（见 _report_dict_for）。
-        data = _json.loads(report.read_text(encoding="utf-8"), parse_constant=lambda _c: None)
+        data = load_json_file(
+            report, limit=REPORT_JSON_MAX_BYTES, parse_constant=lambda _c: None
+        )
     except Exception as exc:  # noqa: BLE001 — 坏 JSON → 友好报错而非 traceback
         typer.echo(f"错误：无法读取报告 JSON：{report}（{safe_exception_text(exc)}）", err=True)
         raise typer.Exit(code=3) from exc
@@ -1211,20 +1218,28 @@ def export(
     薄包装：读 report.json → leads_to_ioc_rows → write_csv。绝不抛——读不到文件 / 坏 JSON
     都打印友好提示并退出码 1。CSV 为 UTF-8 with BOM（Excel 打开中文不乱码）。
     """
-    import json as _json
+    from apkscan.core.json_io import (
+        REPORT_JSON_MAX_BYTES,
+        BoundedJsonError,
+        loads_bounded,
+        read_text_bounded,
+    )
 
     try:
         try:
-            raw = report_json.read_text(encoding="utf-8")
+            raw = read_text_bounded(report_json, REPORT_JSON_MAX_BYTES)
         except FileNotFoundError:
             typer.echo(f"错误：找不到报告文件：{report_json}", err=True)
             raise typer.Exit(code=1) from None
+        except BoundedJsonError as exc:
+            typer.echo(f"错误：读取报告文件失败：{report_json}（{safe_exception_text(exc)}）", err=True)
+            raise typer.Exit(code=1) from exc
         except OSError as exc:
             typer.echo(f"错误：读取报告文件失败：{report_json}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=1) from exc
 
         try:
-            report = _json.loads(raw)
+            report = loads_bounded(raw)
         except (ValueError, UnicodeDecodeError) as exc:
             typer.echo(f"错误：报告 JSON 解析失败：{report_json}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=1) from exc
@@ -1286,18 +1301,28 @@ def digest(
     """
     import json as _json
 
+    from apkscan.core.json_io import (
+        REPORT_JSON_MAX_BYTES,
+        BoundedJsonError,
+        loads_bounded,
+        read_text_bounded,
+    )
+
     try:
         try:
-            raw = report_json.read_text(encoding="utf-8")
+            raw = read_text_bounded(report_json, REPORT_JSON_MAX_BYTES)
         except FileNotFoundError:
             typer.echo(f"错误：找不到报告文件：{report_json}", err=True)
             raise typer.Exit(code=1) from None
+        except BoundedJsonError as exc:
+            typer.echo(f"错误：读取报告文件失败：{report_json}（{safe_exception_text(exc)}）", err=True)
+            raise typer.Exit(code=1) from exc
         except OSError as exc:
             typer.echo(f"错误：读取报告文件失败：{report_json}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=1) from exc
 
         try:
-            report = _json.loads(raw)
+            report = loads_bounded(raw)
         except (ValueError, UnicodeDecodeError) as exc:
             typer.echo(f"错误：报告 JSON 解析失败：{report_json}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=1) from exc
@@ -1356,20 +1381,28 @@ def letters(
     且 where_to_request 为真实受文机关的线索成文（证书指纹/解密配方等占位 Lead 自动跳过）。
     绝不抛——读不到文件 / 坏 JSON 都打印友好提示并退出码 1。每份文书顶部带免责声明草稿标注。
     """
-    import json as _json
+    from apkscan.core.json_io import (
+        REPORT_JSON_MAX_BYTES,
+        BoundedJsonError,
+        loads_bounded,
+        read_text_bounded,
+    )
 
     try:
         try:
-            raw = report_json.read_text(encoding="utf-8")
+            raw = read_text_bounded(report_json, REPORT_JSON_MAX_BYTES)
         except FileNotFoundError:
             typer.echo(f"错误：找不到报告文件：{report_json}", err=True)
             raise typer.Exit(code=1) from None
+        except BoundedJsonError as exc:
+            typer.echo(f"错误：读取报告文件失败：{report_json}（{safe_exception_text(exc)}）", err=True)
+            raise typer.Exit(code=1) from exc
         except OSError as exc:
             typer.echo(f"错误：读取报告文件失败：{report_json}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=1) from exc
 
         try:
-            report = _json.loads(raw)
+            report = loads_bounded(raw)
         except (ValueError, UnicodeDecodeError) as exc:
             typer.echo(f"错误：报告 JSON 解析失败：{report_json}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=1) from exc
@@ -1674,17 +1707,27 @@ def capture_plan_cmd(
     """
     import json as _json
 
+    from apkscan.core.json_io import (
+        REPORT_JSON_MAX_BYTES,
+        BoundedJsonError,
+        loads_bounded,
+        read_text_bounded,
+    )
+
     try:
         try:
-            raw = report_json.read_text(encoding="utf-8")
+            raw = read_text_bounded(report_json, REPORT_JSON_MAX_BYTES)
         except FileNotFoundError:
             typer.echo(f"错误：找不到报告文件：{report_json}", err=True)
             raise typer.Exit(code=1) from None
+        except BoundedJsonError as exc:
+            typer.echo(f"错误：读取报告失败：{report_json}（{safe_exception_text(exc)}）", err=True)
+            raise typer.Exit(code=1) from exc
         except OSError as exc:
             typer.echo(f"错误：读取报告失败：{report_json}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=1) from exc
         try:
-            report = _json.loads(raw)
+            report = loads_bounded(raw)
         except (ValueError, UnicodeDecodeError) as exc:
             typer.echo(f"错误：报告 JSON 解析失败：{report_json}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=1) from exc
@@ -1768,9 +1811,10 @@ def config_probe_cmd(
 
     from apkscan.core.appcrypto import CryptoRecipe
     from apkscan.core.config_probe_run import run_plan
+    from apkscan.core.json_io import REPORT_JSON_MAX_BYTES, load_json_file
 
     try:
-        payload = _json.loads(report_path.read_text(encoding="utf-8"))
+        payload = load_json_file(report_path, limit=REPORT_JSON_MAX_BYTES)
     except Exception as exc:  # noqa: BLE001 — CLI 边界：坏输入给明确退出码
         typer.echo(f"错误：读不了 {report_path}：{safe_exception_text(exc)}", err=True)
         raise typer.Exit(code=2) from exc
@@ -1869,10 +1913,10 @@ def _sample_id_of(report_json_path: str) -> str:
     只用于「两份报告是不是同一个样本」这一道校验，所以读不到就返回空——由调用方按
     fail-closed 处理（宁可拦下让人确认，也不能把一个案子的取回结果写进另一个案子）。
     """
-    import json as _json
+    from apkscan.core.json_io import REPORT_JSON_MAX_BYTES, load_json_file
 
     try:
-        payload = _json.loads(Path(report_json_path).read_text(encoding="utf-8"))
+        payload = load_json_file(Path(report_json_path), limit=REPORT_JSON_MAX_BYTES)
     except Exception:  # noqa: BLE001 — 读不出就是「对不上」，交调用方拦下
         logger.debug("[config-probe] 读不了 %s，无法校验样本身份", report_json_path,
                      exc_info=True)
@@ -1902,6 +1946,7 @@ def _merge_config_probe_into_report(report_json_path: str, result: object) -> tu
     import json as _json
 
     from apkscan.core.atomic import atomic_write_text
+    from apkscan.core.json_io import REPORT_JSON_MAX_BYTES, load_json_file
     from apkscan.core.leads import (
         _VERDICT_REPACK_SUSPECTED,
         _apply_default_advice,
@@ -1913,7 +1958,7 @@ def _merge_config_probe_into_report(report_json_path: str, result: object) -> tu
     from apkscan.report import json as report_json
 
     path = Path(report_json_path)
-    payload = _json.loads(path.read_text(encoding="utf-8"))
+    payload = load_json_file(path, limit=REPORT_JSON_MAX_BYTES)
     if not isinstance(payload, dict):
         raise typer.BadParameter(f"{report_json_path} 顶层不是对象")
     ensure_writable_report_version(payload.get("schema_version"))
@@ -2062,9 +2107,11 @@ def port_normalize_cmd(
         observed_ports_from_report,
     )
 
+    from apkscan.core.json_io import SMALL_JSON_MAX_BYTES, load_json_file
+
     def _load(path: str, what: str) -> object:
         try:
-            return _json.loads(_Path(path).read_text(encoding="utf-8"))
+            return load_json_file(_Path(path), limit=SMALL_JSON_MAX_BYTES)
         except Exception as exc:  # noqa: BLE001 — CLI 边界：坏输入give 明确退出码
             typer.echo(f"错误：读取{what}失败（{path}）：{safe_exception_text(exc)}", err=True)
             raise typer.Exit(code=2) from None
@@ -2448,14 +2495,14 @@ def _rerender_html_if_present(report_json_path: str) -> str:
     返回重渲的 html 路径；同目录无对应 html 则不重渲、不新建（返回空串）。绝不抛——读/解析/
     渲染失败只 logging 并返回空串，不影响已回灌的 report.json（--into 主产物）。
     """
-    import json as _json
+    from apkscan.core.json_io import REPORT_JSON_MAX_BYTES, load_json_file
 
     rp = Path(report_json_path)
     html_path = rp.with_suffix(".html")
     if not html_path.is_file():
         return ""  # 无对应 report.html：不主动生成（尊重用户只要 JSON 的场景）
     try:
-        payload = _json.loads(rp.read_text(encoding="utf-8"))
+        payload = load_json_file(rp, limit=REPORT_JSON_MAX_BYTES)
         if not isinstance(payload, dict):
             logger.warning("[cli] --into 重渲跳过：report.json 顶层非对象：%s", rp)
             return ""

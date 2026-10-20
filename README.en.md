@@ -43,7 +43,7 @@ fxapk analyze app.apk --offline --out out
 fxapk digest out/app.json
 ```
 
-The [release page](https://github.com/s-silt/fxapk/releases/tag/v1.19.1) provides the wheel, source archives and `SHA256SUMS.txt`; verify hashes before installing. Configure online-service credentials locally per [.env.example](.env.example); they are never written into reports or the repository. If the command is not on PATH, use `python -m apkscan.cli` instead of `fxapk`.
+The [release page](https://github.com/s-silt/fxapk/releases/tag/v1.19.1) provides the wheel, source archives and `SHA256SUMS.txt`; verify hashes before installing. Put online-service credentials in the repository-root `.env` or `~/.fxapk/.env` per [.env.example](.env.example) (a `.env` in the current directory is not read); they are never written into reports or the repository. If the command is not on PATH, use `python -m apkscan.cli` instead of `fxapk`.
 
 `digest` is for triage and navigation; formal conclusions must go back to the structured fields and original evidence in `report.json`. When delegating to an AI assistant, give it [AGENTS.md](AGENTS.md), the sample path, and whether network and device operations are in scope.
 
