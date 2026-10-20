@@ -27,7 +27,6 @@ from apkscan.core.redact import warn_unredacted_agent_output
 from apkscan.core import report_io
 from apkscan.core.json_io import (
     REPORT_JSON_MAX_BYTES,
-    SMALL_JSON_MAX_BYTES,
     load_json_file,
     loads_bounded,
     read_text_bounded,
@@ -79,12 +78,16 @@ def restores_path(corpus_dir: str | Path) -> Path:
 
 
 def load_restores(corpus_dir: str | Path) -> list[dict]:
-    """读 restores.jsonl → 记录列表。文件不存在 → 空列表；坏行跳过并 warning，绝不抛。"""
+    """读 restores.jsonl → 记录列表。
+
+    文件不存在 → 空列表；坏行跳过并 warning。
+    文件不可读或超限抛出，由调用方在写任何东西之前处理。
+    """
     path = restores_path(corpus_dir)
     if not path.exists():
         return []
     out: list[dict] = []
-    for lineno, line in enumerate(read_text_bounded(path, SMALL_JSON_MAX_BYTES).splitlines(), 1):
+    for lineno, line in enumerate(read_text_bounded(path, REPORT_JSON_MAX_BYTES).splitlines(), 1):
         text = line.strip()
         if not text:
             continue
@@ -254,13 +257,25 @@ def lead_restore(
             1,
         )
 
+    # ★账本超限/不可读必须发生在写报告之前。写完再读，失败时报告已改；
+    #   超限若被吞成残缺列表，随后的 save_restores 还会覆盖账本。
+    entries: list[dict] = []
+    if corpus_root is not None:
+        try:
+            entries = load_restores(corpus_root)
+        except (OSError, UnicodeError, ValueError):
+            _fail(
+                f"错误：样本库恢复凭据读取失败，未修改报告：{restores_path(corpus_root)}",
+                1,
+            )
+            raise
+
     written = report_io.write_report(rep, path, render_existing_html=True)
 
     stored = 0
     if corpus_root is not None:
         raw = _load_report_payload(path)
         sha, synthetic = _corpus.sample_identity(raw)
-        entries = load_restores(corpus_root)
         for lead in lifted:
             entries = upsert_restore(entries, {
                 "sample_sha256": sha,
@@ -302,7 +317,16 @@ def lead_replay(
     path = Path(report)
     raw = _load_report_payload(path)
     sha, _synthetic = _corpus.sample_identity(raw)
-    entries = [e for e in load_restores(corpus_root)
+    # 先读账本再改报告。这里只读，失败时报告尚未改写。
+    try:
+        loaded_entries = load_restores(corpus_root)
+    except (OSError, UnicodeError, ValueError):
+        _fail(
+            f"错误：样本库恢复凭据读取失败，未修改报告：{restores_path(corpus_root)}",
+            1,
+        )
+        raise
+    entries = [e for e in loaded_entries
                if str(e.get("sample_sha256", "")).strip().lower() == sha.lower()]
     if not entries:
         typer.echo(_replay_payload(sha, entries=[], results=[], lifted=0, written=[],

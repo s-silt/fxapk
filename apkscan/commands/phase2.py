@@ -22,7 +22,6 @@ from apkscan.core.phase2.link import build_gate_receipt, write_gate_receipt
 from apkscan.core.atomic import atomic_write_bytes
 from apkscan.core.json_io import (
     REPORT_JSON_MAX_BYTES,
-    SMALL_JSON_MAX_BYTES,
     BoundedJsonError,
     load_json_file,
     loads_bounded,
@@ -80,7 +79,7 @@ def _inventory_previous_sha256(case_dir: Path, inventory: object) -> str:
 def _inventory_file_matches(path: Path, case_dir: Path, inventory: object) -> bool:
     """已有清单必须解析成与本次清单相同的对象。半份文件解析失败，不能钉成上一环。"""
     try:
-        recorded = load_json_file(path, limit=SMALL_JSON_MAX_BYTES)
+        recorded = load_json_file(path, limit=REPORT_JSON_MAX_BYTES)
     except (OSError, UnicodeError, json.JSONDecodeError, BoundedJsonError):
         return False
     return recorded == _inventory_envelope(case_dir, inventory)
@@ -523,7 +522,7 @@ def _cmd_decide_file(args: argparse.Namespace) -> int:
     #   accepts 非数组、clue 台账坏 JSON 或记录非对象——一律转成退出码 2，绝不漏成 traceback。
     try:
         intents = [loads_bounded(line) for line in
-                   read_text_bounded(intents_path, SMALL_JSON_MAX_BYTES).splitlines()
+                   read_text_bounded(intents_path, REPORT_JSON_MAX_BYTES).splitlines()
                    if line.strip()]
         decisions = build_decisions_from_intents(
             inventory, triage, intents, case_id=inventory.case_id, decided_by=decided_by)

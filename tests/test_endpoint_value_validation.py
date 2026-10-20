@@ -122,6 +122,11 @@ def test_endpoint_value_matches_kind(kind: str, value: str, expected: bool) -> N
         ("a..example", False),
         ("", False),
         ("a" * 64 + ".example", False),
+        ("a\u0080.example", False),
+        ("a\ud800.example", False),
+        ("a\u202e.example", False),
+        ("a\u2066.example", False),
+        ("a\u200d.example", True),
     ],
 )
 def test_domain_rejection_keeps_url_structure(value: str, expected: bool) -> None:
