@@ -883,3 +883,42 @@ def test_class_header_string_class_literal_stays_one_scope() -> None:
     assert chains[0].method == "class:C"
     assert chains[0].secret == _SECRET
     assert chains[0].consumer == "dec"
+
+
+def test_throws_at_overlap_search_finishes_within_one_second() -> None:
+    """``$$@`` 与 throws 字符类重叠：``_BLOCK_START_RE.search`` 1 秒内返回。"""
+    samples = (
+        "a() throws " + "$$@" * 40 + ";",
+        "void m() throws " + "$$@" * 40 + " {}",
+    )
+    for src in samples:
+        started = time.perf_counter()
+        _BLOCK_START_RE.search(src)
+        assert time.perf_counter() - started < 1
+
+
+def test_long_class_name_search_finishes_within_one_second() -> None:
+    """超长类名：``_CLASS_START_RE.search`` 1 秒内返回；有 ``{`` 时 group(1) 为整个标识符。"""
+    name = "a" * 200_000
+    no_brace = "class " + name + ";"
+    with_brace = "class " + name + " {}"
+    for src in (no_brace, with_brace):
+        started = time.perf_counter()
+        match = _CLASS_START_RE.search(src)
+        assert time.perf_counter() - started < 1
+    assert match is not None and match.group(1) == name
+
+
+def test_redos_headers_scan_within_five_seconds() -> None:
+    """上述 throws / 类头输入走 ``scan_java_source``：5 秒内返回、不抛。"""
+    name = "a" * 200_000
+    samples = (
+        "a() throws " + "$$@" * 40 + ";",
+        "void m() throws " + "$$@" * 40 + " {}",
+        "class " + name + ";",
+        "class " + name + " {}",
+    )
+    for src in samples:
+        started = time.perf_counter()
+        scan_java_source(src, "loc")
+        assert time.perf_counter() - started < 5

@@ -28,11 +28,11 @@ _STR_LIT_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
 
 # 方法定义起点：``name(params) {``，name 非控制关键字（排除 if/for/while… 的块）。params 不含 ;{}() 括号，
 # 故不跨语句、不吃嵌套泛型参数（少数复杂签名漏掉，可接受——启发式）。在**掩码文本**上匹配（见 _mask）。
-# throws 允许 TYPE_USE 注解（含无嵌套括号的参数）。``@`` 不在前一字符类里，交替不歧义，不会指数回溯；
+# throws 允许 TYPE_USE 注解（含无嵌套括号的参数）。``@`` 分支用原子组，避免与 ``[\w\s.,$]`` 重叠回溯；
 # 注解参数在下一个括号处止，仍线性。
 _BLOCK_START_RE = re.compile(
     r"\b([A-Za-z_]\w*)\s*\([^;{}()]*\)\s*"
-    r"(?:throws(?:[\w\s.,$]|@[\w.$]+(?:\s*\([^(){};]*\))?)*)?\{"
+    r"(?:throws(?:[\w\s.,$]|(?>@[\w.$]+(?:\s*\([^(){};]*\))?))*)?\{"
 )
 _CONTROL_KW = frozenset({
     "if", "for", "while", "switch", "catch", "synchronized", "try", "do", "else", "return",
@@ -42,9 +42,10 @@ _NEW_PREFIX_RE = re.compile(r"\bnew\s+$")
 # 类/枚举/接口体：额外当一个作用域扫——**字段常量密文召回**（``static K="密文"`` 在方法体外、``decrypt(K)`` 在
 # 某方法里，两者同在类体内 → 复用"赋值再消费"逻辑绑上；同串在方法内已绑的按密文去重、不重复）。
 # 负向前瞻只认不被 ``.`` / 标识符字符前邻的关键字：``String.class`` 这类字面量不再被当成下一个声明。
+# 类名用占有量词，一次取完整标识符，避免与其后 ``[^{;]`` 循环重叠回溯。
 # 每个字符只被一个起点扫过（线性）。
 _CLASS_START_RE = re.compile(
-    r"\b(?:class|interface|enum)\s+(\w+)"
+    r"\b(?:class|interface|enum)\s+(\w++)"
     r"(?:(?!(?<![\w.$])(?:class|interface|enum)\b)[^{;])*\{"
 )
 
