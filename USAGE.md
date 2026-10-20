@@ -127,7 +127,7 @@ fxapk case prepare-materials private/demo --out private/demo/pre-report.json
 
 ## 可选 Android UI 插件
 
-`fxapk-android-ui 0.1.1` 提供 `ui capabilities` / `ui snapshot` / `ui run-plan`；设备命令显式 `--serial`，观察/计划还须 `--package` 与新的 `--out`。安装插件不会自动为 `auto`/`capture` 接入 UI 观察。截图、布局与诊断可能含原值。见 [ANDROID-UI.md](ANDROID-UI.md)。
+`fxapk-android-ui 0.1.2` 提供 `ui capabilities` / `ui snapshot` / `ui run-plan`；设备命令显式 `--serial`，观察/计划还须 `--package` 与新的 `--out`。安装插件不会自动为 `auto`/`capture` 接入 UI 观察。截图、布局与诊断可能含原值。见 [ANDROID-UI.md](ANDROID-UI.md)。
 
 ## License
 
