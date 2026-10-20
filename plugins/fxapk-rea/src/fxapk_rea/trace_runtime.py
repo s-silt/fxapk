@@ -528,7 +528,7 @@ def _minimal_failure(
         "origin": origin[:2048],
         "capture": {
             "id": client.capture_id,
-            "tool_version": "0.1.0",
+            "tool_version": "0.1.1",
             "started_at": client.started_at,
             "debugger_enabled": debugger_enabled,
             "commands_summary": {
@@ -735,7 +735,7 @@ class _Client:
     ) -> dict[str, Any]:
         capture: dict[str, Any] = {
             "id": self.capture_id,
-            "tool_version": "0.1.0",
+            "tool_version": "0.1.1",
             "started_at": self.started_at,
             "debugger_enabled": True,
             "async_call_stack_depth": _MAX_STACK,

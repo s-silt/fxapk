@@ -13,9 +13,18 @@ $changes
 ```bash
 python -m pip install "fxapk==$core_version"
 python -m pip install ./fxapk_android_ui-$plugin_version-py3-none-any.whl
+python -m pip install ./fxapk_rea-$rea_version-py3-none-any.whl
+python -m pip install ./fxapk_asc-$asc_version-py3-none-any.whl
 fxapk --version
 fxapk ui --help
+fxapk dex --help
 ```
+
+以上命令在下载附件所在目录执行；仅安装需要的插件即可。REA 安装后保持关闭，
+需明确启用时才为该进程设置 `FXAPK_ENABLE_REA=1` 并运行 `fxapk rea --help`。
+`trace` 的可选依赖可通过
+`python -m pip install "./fxapk_rea-$rea_version-py3-none-any.whl[trace]"` 安装。
+插件不会自动启动浏览器、查询第三方或连接设备。
 
 安装前用附件 `SHA256SUMS.txt` 核对全部归档。它们不是完整离线依赖包，安装可能下载声明依赖。许可见各归档内的 MIT 声明，第三方工具和依赖遵循各自许可。[安卓 UI 指南](https://github.com/$repository/blob/$tag/ANDROID-UI.md)。
 
