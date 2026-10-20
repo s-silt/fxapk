@@ -324,7 +324,7 @@ class ShodanEnricher(BaseEnricher):
         else:
             ip = value
 
-        resp = _http.capped_get(HOST_URL.format(ip=ip), params={"key": key}, timeout=SHODAN_TIMEOUT,
+        resp = _http.capped_get(HOST_URL.format(ip=_http.path_segment(ip)), params={"key": key}, timeout=SHODAN_TIMEOUT,
                                 allow_redirects=False)
         self._check_response(resp)
         if resp.status_code == 404:

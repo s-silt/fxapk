@@ -1348,7 +1348,7 @@ class CensysPassiveEnricher(_PassiveLookupEnricher):
         if organization:
             headers["X-Organization-ID"] = organization
         response = self._http.get(
-            self._URL.format(ip=endpoint.value),
+            self._URL.format(ip=_http.path_segment(endpoint.value)),
             headers=headers,
             allow_redirects=False, timeout=_TIMEOUT,
         )
@@ -1442,7 +1442,7 @@ class VirusTotalPassiveEnricher(_PassiveLookupEnricher):
         """
         collection = "ip_addresses" if endpoint.kind == "ip" else "domains"
         response = self._http.get(
-            f"{self._BASE}/{collection}/{endpoint.value}/resolutions",
+            f"{self._BASE}/{collection}/{_http.path_segment(endpoint.value)}/resolutions",
             headers={"x-apikey": credential},
             params={"limit": _MAX_PASSIVE_DNS},
             allow_redirects=False, timeout=_TIMEOUT,
@@ -1475,7 +1475,7 @@ class VirusTotalPassiveEnricher(_PassiveLookupEnricher):
     def _lookup(self, endpoint: Endpoint, credential: str) -> object:
         collection = "ip_addresses" if endpoint.kind == "ip" else "domains"
         response = self._http.get(
-            f"{self._BASE}/{collection}/{endpoint.value}",
+            f"{self._BASE}/{collection}/{_http.path_segment(endpoint.value)}",
             headers={"x-apikey": credential},
             allow_redirects=False, timeout=_TIMEOUT,
         )
@@ -1531,7 +1531,7 @@ class OtxPassiveEnricher(_PassiveLookupEnricher):
         能直接看出"案发那天这个域名指向谁"。"""
         indicator_type = ("IPv6" if ":" in endpoint.value else "IPv4") if endpoint.kind == "ip" else "domain"
         response = self._http.get(
-            f"{self._BASE}/{indicator_type}/{endpoint.value}/passive_dns",
+            f"{self._BASE}/{indicator_type}/{_http.path_segment(endpoint.value)}/passive_dns",
             headers={"X-OTX-API-KEY": credential},
             allow_redirects=False, timeout=_TIMEOUT,
         )
@@ -1560,7 +1560,7 @@ class OtxPassiveEnricher(_PassiveLookupEnricher):
     def _lookup(self, endpoint: Endpoint, credential: str) -> object:
         indicator_type = ("IPv6" if ":" in endpoint.value else "IPv4") if endpoint.kind == "ip" else "domain"
         response = self._http.get(
-            f"{self._BASE}/{indicator_type}/{endpoint.value}/general",
+            f"{self._BASE}/{indicator_type}/{_http.path_segment(endpoint.value)}/general",
             headers={"X-OTX-API-KEY": credential},
             allow_redirects=False, timeout=_TIMEOUT,
         )

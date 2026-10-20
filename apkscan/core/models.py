@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import ipaddress
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -151,6 +153,25 @@ class Endpoint:
     is_private: bool = False  # 内网/回环 IP
     is_suspicious: bool = False
     enrichment: dict = field(default_factory=dict)  # whois/icp/asn 结果
+
+
+# ``\w`` 含 Unicode，故 IDN 原文、下划线和单标签主机都过；``/ ? # % \ @ :``、空白和 ``..`` 进不来。
+_HOSTNAME_RE = re.compile(r"(?=.{1,253}\.?\Z)[\w-]{1,63}(?:\.[\w-]{1,63})*\.?")
+
+
+def endpoint_value_matches_kind(value: str, kind: str) -> bool:
+    """ip/domain 端点的值是否符合其 kind；不符合的值不得作为 provider 查询目标（会被拼进 URL path）。"""
+    if kind == "ip":
+        if "%" in value:
+            return False
+        try:
+            ipaddress.ip_address(value)
+        except ValueError:
+            return False
+        return True
+    if kind == "domain":
+        return _HOSTNAME_RE.fullmatch(value) is not None
+    return True
 
 
 #: ``Endpoint.enrichment`` 里存放「本域名只作为非标端口的 SNI 出现过」这一事实的键，

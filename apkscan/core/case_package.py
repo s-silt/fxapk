@@ -24,6 +24,7 @@ from apkscan.core.json_contract import (
     parse_finite_json_float,
     reject_nonfinite_json_constant,
 )
+from apkscan.core.json_io import REPORT_JSON_MAX_BYTES, load_json_file
 from apkscan.core.models import EvidenceScope, Report, has_case_evidence
 from apkscan.core import rea_intake as rea_intake
 from apkscan.core.rea_intake import (
@@ -400,8 +401,9 @@ def create_case_package(
 
 def _load_object(path: Path) -> dict[str, object]:
     try:
-        value = json.loads(
-            path.read_text(encoding="utf-8"),
+        value = load_json_file(
+            path,
+            limit=REPORT_JSON_MAX_BYTES,
             parse_constant=reject_nonfinite_json_constant,
             parse_float=parse_finite_json_float,
         )

@@ -14,10 +14,13 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 from collections import Counter
 from dataclasses import dataclass, replace
+
+logger = logging.getLogger(__name__)
 
 
 # Java 字符串字面量（含转义）。
@@ -25,7 +28,10 @@ _STR_LIT_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
 
 # 方法定义起点：``name(params) {``，name 非控制关键字（排除 if/for/while… 的块）。params 不含 ;{}() 括号，
 # 故不跨语句、不吃嵌套泛型参数（少数复杂签名漏掉，可接受——启发式）。在**掩码文本**上匹配（见 _mask）。
-_BLOCK_START_RE = re.compile(r"\b([A-Za-z_]\w*)\s*\([^;{}()]*\)\s*(?:throws[^{;]*)?\{")
+# throws 后只有（限定）类型名与逗号；不含 ``(``，所以扫描在下一个方法头的 ``(`` 处就停，线性。
+_BLOCK_START_RE = re.compile(
+    r"\b([A-Za-z_]\w*)\s*\([^;{}()]*\)\s*(?:throws[\w\s.,$]*)?\{"
+)
 _CONTROL_KW = frozenset({
     "if", "for", "while", "switch", "catch", "synchronized", "try", "do", "else", "return",
 })
@@ -33,7 +39,11 @@ _CONTROL_KW = frozenset({
 _NEW_PREFIX_RE = re.compile(r"\bnew\s+$")
 # 类/枚举/接口体：额外当一个作用域扫——**字段常量密文召回**（``static K="密文"`` 在方法体外、``decrypt(K)`` 在
 # 某方法里，两者同在类体内 → 复用"赋值再消费"逻辑绑上；同串在方法内已绑的按密文去重、不重复）。
-_CLASS_START_RE = re.compile(r"\b(?:class|interface|enum)\s+(\w+)[^{;]*\{")
+# 类头（extends/implements/类型参数/permits）里不会再出现这三个保留字，故在下一个关键字处停止与旧写法对合法
+# Java 结果相同，且每个字符只被一个起点扫过（线性）。
+_CLASS_START_RE = re.compile(
+    r"\b(?:class|interface|enum)\s+(\w+)(?:(?!\b(?:class|interface|enum)\b)[^{;])*\{"
+)
 
 # 解密调用（Java crypto API + 通用 decrypt/base64 解码）。★不含裸 ``AES/`` transformation 串——那是常量非
 # 调用（``Cipher.getInstance("AES/…")`` 已由 Cipher.getInstance 覆盖真解密点），单列它会把常量表方法误判有解密。
@@ -41,6 +51,11 @@ _DECRYPT_RE = re.compile(
     r"Cipher\.getInstance|\.doFinal\s*\(|Base64\.(?:decode|getDecoder)|SecretKeySpec"
     r"|IvParameterSpec|GCMParameterSpec|\.decrypt\s*\(",
     re.IGNORECASE,
+)
+# 与上面各分支等价的 casefold 子串。ASCII 正文不含任一则正则不可能命中（IGNORECASE 在 ASCII 上就是 lower）。
+_DECRYPT_NEEDLES = (
+    "cipher.getinstance", ".dofinal", "base64.decode", "base64.getdecoder",
+    "secretkeyspec", "ivparameterspec", "gcmparameterspec", ".decrypt",
 )
 
 # 无歧义**非密文**的 base64/PEM 前缀（免疫，避免内嵌证书/公钥/图片/cert-pin 与 Base64.decode 共现成假链）：
@@ -51,6 +66,11 @@ _SINK_RE = re.compile(
     r"new\s+URL\s*\(|openConnection\s*\(|HttpURLConnection|OkHttpClient|Request\.Builder"
     r"|\.loadUrl\s*\(|\.newCall\s*\(|Runtime\.getRuntime|\.baseUrl\s*\(|Retrofit",
     re.IGNORECASE,
+)
+# ``new\s+URL`` 的必要子串是 ``url``（空白不固定）；其余分支与字面一一对应。
+_SINK_NEEDLES = (
+    "url", "openconnection", "httpurlconnection", "okhttpclient", "request.builder",
+    ".loadurl", ".newcall", "runtime.getruntime", ".baseurl", "retrofit",
 )
 
 _B64_RE = re.compile(r"^[A-Za-z0-9+/]{24,}={0,2}$")
@@ -141,6 +161,8 @@ _FRAMEWORK_ACCESSOR_RE = re.compile(r"^(?:get|put|set)[A-Z]")
 _MAX_SECRETS_PER_METHOD = 8
 _MAX_CHAINS_PER_FILE = 200
 _MAX_TEXT_BYTES = 4 * 1024 * 1024  # 与 jadx.py 单文件上限一致
+_MAX_SCOPES = 20_000
+_MAX_SCOPE_WORK_BYTES = 8 * _MAX_TEXT_BYTES  # 深嵌套时已处理 body 累计上限
 _MAX_SECRET_LEN = 2048  # 保留完整密文供 AI 解密（大多数配置密文 <2KB；仅防畸形超长字面量）
 
 
@@ -162,6 +184,15 @@ class StringChain:
     location: str  # 源文件相对路径
     consumer: str | None = None  # 密文被直接传进的函数名（疑似改名的解密 helper；None=未被直接消费）
     suppressed: str | None = None  # 压制原因（SUPPRESSION_*）；None=正常候选
+
+
+def _pattern_hits(body: str, pattern: re.Pattern[str], needles: tuple[str, ...]) -> tuple[str, ...]:
+    """方法体内 ``pattern`` 的去重命中。ASCII 且 casefold 后不含 needle 时直接空。"""
+    if body.isascii():
+        folded = body.lower()
+        if not any(needle in folded for needle in needles):
+            return ()
+    return tuple(sorted({m.group(0).strip() for m in pattern.finditer(body)}))
 
 
 def scan_java_source(text: str, location: str) -> list[StringChain]:
@@ -189,18 +220,43 @@ def scan_java_source(text: str, location: str) -> list[StringChain]:
         text = text[:_MAX_TEXT_BYTES]
     chains: list[StringChain] = []
     seen: set[str] = set()  # 按**密文**去重（本文件内）：嵌套方法/匿名类里的同串只出一条（外层方法先命中即保留）
-    for name, body, is_class in _extract_scopes(text):
-        candidates = [
-            (lit, _consumer_before(body, m.start()) or _consumer_via_var(body, m.start()))
-            for m in _STR_LIT_RE.finditer(body)
-            if _looks_ciphertext(lit := m.group(1))
-        ]
-        if not candidates:
+    worked = 0
+    for k, (name, open_idx, end_idx, is_class) in enumerate(_extract_scopes(text)):
+        body_len = end_idx - open_idx - 1
+        if k >= _MAX_SCOPES or worked + body_len > _MAX_SCOPE_WORK_BYTES:
+            reason = "max_scopes" if k >= _MAX_SCOPES else "scope_work_bytes"
+            logger.debug(
+                "[string-graph] 作用域预算停止：scope=%d open_idx=%d reason=%s",
+                k, open_idx, reason,
+            )
+            break
+        worked += body_len
+        body = text[open_idx + 1:end_idx]
+        # 先按出现顺序收下额度内的密文样字面量，再算 consumer（与事后切片同结果，避免对每个字面量扫整段 body）。
+        literals: list[tuple[str, int]] = []
+        for m in _STR_LIT_RE.finditer(body):
+            lit = m.group(1)
+            if not _looks_ciphertext(lit):
+                continue
+            literals.append((lit, m.start()))
+            if len(literals) >= _MAX_SECRETS_PER_METHOD:
+                break
+        if not literals:
             continue
         # ★类作用域（is_class）**不看类级 decrypts / sinks**（太粗、会跨方法误绑）——只走"该密文被 consumer 消费"档。
-        decrypts = () if is_class else tuple(sorted({m.group(0).strip() for m in _DECRYPT_RE.finditer(body)}))
-        sinks = () if is_class else tuple(sorted({m.group(0).strip() for m in _SINK_RE.finditer(body)}))
-        for secret, consumer in candidates[:_MAX_SECRETS_PER_METHOD]:
+        decrypts = () if is_class else _pattern_hits(body, _DECRYPT_RE, _DECRYPT_NEEDLES)
+        sinks = () if is_class else _pattern_hits(body, _SINK_RE, _SINK_NEEDLES)
+        # 调用实参全表只在本 scope 需要走「赋值再消费」时算一次，候选之间复用。
+        calls: list[tuple[str, str]] | None = None
+        candidates: list[tuple[str, str | None]] = []
+        for lit, pos in literals:
+            consumer = _consumer_before(body, pos)
+            if consumer is None and _ASSIGN_RE.search(body[max(0, pos - 48):pos]) is not None:
+                if calls is None:
+                    calls = _call_args(body)
+                consumer = _consumer_via_var(body, pos, calls)
+            candidates.append((lit, consumer))
+        for secret, consumer in candidates:
             if not decrypts and consumer is None:  # 既无标准解密、又没被消费 → 不绑
                 continue
             key = secret[:64]
@@ -270,10 +326,35 @@ def _is_non_decrypt_consumer(name: str) -> bool:
 # 方法内轻量 def-use（非全 taint）：抓赋值目标变量名，再看它是否作某调用的实参。单个 ``=`` 才算赋值（``==`` 因
 # 尾随第二个 ``=`` 破坏 ``\s*$`` 天然不匹配）。
 _ASSIGN_RE = re.compile(r"(\w+)\s*=\s*$")
+# 参照定义：仅用于等价性测试，生产路径走 _call_args（线性）。
 _CALL_ARGS_RE = re.compile(r"(\w+)\s*\(([^;{}]*)\)")
+_CALL_HEAD_RE = re.compile(r"\b(\w+)\s*\(")
+_SEG_BREAK_RE = re.compile(r"[;{}]")
 
 
-def _consumer_via_var(body: str, quote_pos: int) -> str | None:
+def _call_args(body: str) -> list[tuple[str, str]]:
+    """与 ``_CALL_ARGS_RE.finditer`` 结果相同的 ``(callee, 实参文本)`` 列表，线性时间。
+
+    实参段贪婪吃到下一个 ``;{}`` 之前、再回退到该段内最后一个 ``)``。一个段里最多一次成功匹配：
+    成功后段内剩余部分再没有 ``)``；失败则段内后续起点也必然失败。
+    """
+    out: list[tuple[str, str]] = []
+    pos = 0
+    n = len(body)
+    while (head := _CALL_HEAD_RE.search(body, pos)) is not None:
+        args_start = head.end()
+        brk = _SEG_BREAK_RE.search(body, args_start)
+        seg_end = brk.start() if brk is not None else n
+        close = body.rfind(")", args_start, seg_end)
+        if close >= 0:
+            out.append((head.group(1), body[args_start:close]))
+        pos = seg_end  # 本段至多一次匹配（见上），直接跳到段尾
+        if pos >= n:
+            break
+    return out
+
+
+def _consumer_via_var(body: str, quote_pos: int, calls: list[tuple[str, str]]) -> str | None:
     """密文字面量若 ``var = "…"`` 赋给局部变量、且该变量随后被当某调用实参，返回被调函数名；否则 None。"""
     assign = _ASSIGN_RE.search(body[max(0, quote_pos - 48):quote_pos])
     if assign is None:
@@ -282,11 +363,10 @@ def _consumer_via_var(body: str, quote_pos: int) -> str | None:
     if var in _CONTROL_KW:
         return None
     var_re = re.compile(r"\b" + re.escape(var) + r"\b")
-    for call in _CALL_ARGS_RE.finditer(body):
-        callee = call.group(1)
+    for callee, args in calls:
         if _is_non_decrypt_consumer(callee):
             continue
-        if var_re.search(call.group(2)):  # 该变量出现在这个调用的实参里
+        if var_re.search(args):  # 该变量出现在这个调用的实参里
             return callee
     return None
 
@@ -384,32 +464,37 @@ def _entropy(s: str) -> float:
     return -sum((c / n) * math.log2(c / n) for c in Counter(s).values())
 
 
-def _extract_scopes(text: str) -> list[tuple[str, str, bool]]:
-    """把源码切成 ``[(作用域名, 体文本, is_class)]``——方法体（is_class=False）+ 类/枚举/接口体（is_class=True）。
+def _extract_scopes(text: str) -> list[tuple[str, int, int, bool]]:
+    """把源码切成 ``[(作用域名, open_idx, end_idx, is_class)]``——方法域在前、类/枚举/接口域在后。
 
-    ★先 _mask 出等长掩码文本（注释/字符串内容置空），在**掩码文本**上定位起点与括号配对——从根上封死「注释里的
-    ``name(){`` 被当方法起点」「字符串里的花括号破坏配对」两类误绑；体则从**原文**按同一下标切出（保留密文内容）。
+    ★先 _mask 出等长掩码文本（注释/字符串内容置空），在**掩码文本**上定位起点，花括号用 :func:`_brace_pairs`
+    一次配对——从根上封死「注释里的 ``name(){`` 被当方法起点」「字符串里的花括号破坏配对」两类误绑。体不在这里
+    切片（深嵌套时每域一份 body 会到 O(n·depth)）；调用方按 ``text[open_idx + 1:end_idx]`` 从原文取。
     前邻 ``new`` 的匿名类体不当方法作用域；控制关键字块排除；配对失败（不平衡）的块跳过。类体额外成域用于字段常量召回。
     """
+    # 两个起点正则都要求 ``{``。全文没有 ``{`` 时不可能有作用域，直接返回。
+    if "{" not in text:
+        return []
     masked = _mask(text)
-    scopes: list[tuple[str, str, bool]] = []  # (作用域名, 体文本, is_class)
+    pairs = _brace_pairs(masked)
+    scopes: list[tuple[str, int, int, bool]] = []  # (作用域名, open_idx, end_idx, is_class)
     for match in _BLOCK_START_RE.finditer(masked):
         if match.group(1) in _CONTROL_KW:
             continue
         if _NEW_PREFIX_RE.search(masked[max(0, match.start() - 16):match.start()]):
             continue  # ``new X(){...}`` 匿名类体：不当方法（内部真方法各自成体）
         open_idx = match.end() - 1  # 指向 '{'（掩码与原文同下标）
-        end_idx = _match_block(masked, open_idx)
+        end_idx = pairs.get(open_idx)
         if end_idx is not None:
-            scopes.append((match.group(1), text[open_idx + 1:end_idx], False))  # body 从原文切、保留密文内容
+            scopes.append((match.group(1), open_idx, end_idx, False))
     # 类/枚举/接口体也各成一个作用域（is_class=True）：召回"字段常量密文 + 方法内解密"（方法作用域切不到的类级
     # 字段）。★类作用域**只走"该密文被某调用消费"档**、不走"类里有某解密"档——否则类里任一 decrypt 会把无关密文
     # 全绑上（盲窗在类粒度复活、跨方法误绑）。放在方法之后 → 方法内已绑的同串按密文去重先保留（标签更精确）。
     for match in _CLASS_START_RE.finditer(masked):
         open_idx = match.end() - 1
-        end_idx = _match_block(masked, open_idx)
+        end_idx = pairs.get(open_idx)
         if end_idx is not None:
-            scopes.append((f"class:{match.group(1)}", text[open_idx + 1:end_idx], True))
+            scopes.append((f"class:{match.group(1)}", open_idx, end_idx, True))
     return scopes
 
 
@@ -462,6 +547,22 @@ def _mask(text: str) -> str:
             chars[i] = " "
         i += 1
     return "".join(chars)
+
+
+def _brace_pairs(masked: str) -> dict[int, int]:
+    """掩码文本上单遍栈配对：每个 ``{`` 下标 → 配对 ``}`` 下标。
+
+    未闭合的 ``{`` 不进字典；多余的 ``}``（栈空）忽略。掩码里字符串/注释内容已是空格，故与
+    :func:`_match_block` 在同一掩码上的结果一致。
+    """
+    pairs: dict[int, int] = {}
+    stack: list[int] = []
+    for i, ch in enumerate(masked):
+        if ch == "{":
+            stack.append(i)
+        elif ch == "}" and stack:
+            pairs[stack.pop()] = i
+    return pairs
 
 
 def _match_block(text: str, open_idx: int) -> int | None:

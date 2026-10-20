@@ -10,7 +10,7 @@ from __future__ import annotations
 import ipaddress
 import socket
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 import requests
 from apkscan.enrichers._rate_limit import request_slot
@@ -18,6 +18,11 @@ from apkscan.enrichers._rate_limit import request_slot
 #: 单次富化响应体硬上限（16MB）：远超任何合法 RDAP / Shodan / FOFA / certspotter JSON，
 #: 拦住异常 / 被劫持 / 压缩炸弹式的巨型响应。
 _MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+
+
+def path_segment(value: str) -> str:
+    """把外部来的值编码成**单个** URL path segment：``/ ? # %`` 等全部转义，只保留 ``:``（IPv6 字面量）。"""
+    return quote(value, safe=":")
 
 
 class ResponseTooLarge(requests.RequestException):

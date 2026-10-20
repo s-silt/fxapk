@@ -153,7 +153,7 @@ def lookup_ip(ip: str, *, http: Any = None, timeout: int = IPINFO_TIMEOUT) -> di
 
     client = http if http is not None else requests
     _respect_rate_limit()
-    resp = client.get(IPINFO_API_URL.format(ip=ip), params={"fields": IPINFO_FIELDS}, timeout=timeout, allow_redirects=False)
+    resp = client.get(IPINFO_API_URL.format(ip=_http.path_segment(ip)), params={"fields": IPINFO_FIELDS}, timeout=timeout, allow_redirects=False)
     _http.reject_redirect(resp)
     resp.raise_for_status()
     payload = resp.json()

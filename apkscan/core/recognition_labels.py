@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, NoReturn, cast
 
+from apkscan.core.json_io import SMALL_JSON_MAX_BYTES, read_text_bounded
+
 __all__ = [
     "RecognitionLabelRecord",
     "RecognitionLabelSet",
@@ -803,7 +805,7 @@ def load_recognition_labels(path: str | Path) -> RecognitionLabelSet:
     """Load and strictly validate a recognition-label JSONL file."""
 
     source = Path(path)
-    text = source.read_text(encoding="utf-8")
+    text = read_text_bounded(source, SMALL_JSON_MAX_BYTES)
 
     # 「首个违规行」= 全文件行号最小者：逐行错误与跨记录错误都收集后取最小行
     # （codex 复审 P1：早行的跨记录违规不能被晚行的行内违规抢报）。

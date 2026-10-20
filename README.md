@@ -43,7 +43,7 @@ fxapk analyze app.apk --offline --out out
 fxapk digest out/app.json
 ```
 
-[发布页](https://github.com/s-silt/fxapk/releases/tag/v1.19.1) 提供 wheel、源码归档与 `SHA256SUMS.txt`，安装前核对哈希。联网服务密钥按 [.env.example](.env.example) 在本地配置，不写入报告或仓库。命令未注册到 PATH 时用 `python -m apkscan.cli` 代替 `fxapk`。
+[发布页](https://github.com/s-silt/fxapk/releases/tag/v1.19.1) 提供 wheel、源码归档与 `SHA256SUMS.txt`，安装前核对哈希。联网服务密钥按 [.env.example](.env.example) 写入仓库根 `.env` 或 `~/.fxapk/.env`（不读当前目录的 `.env`），不写入报告或仓库。命令未注册到 PATH 时用 `python -m apkscan.cli` 代替 `fxapk`。
 
 `digest` 用于初筛和定位；正式判断必须回查 `report.json` 的结构化字段与原始证据。让 AI 助手操作时，给它 [AGENTS.md](AGENTS.md)、样本路径、是否允许联网及设备操作范围。
 
