@@ -323,3 +323,20 @@ def test_phase2_inventory_match_deep_json_matches_bad_json(tmp_path: Path) -> No
     deep.write_text(_nested_arrays(200_000), encoding="utf-8")
     assert phase2._inventory_file_matches(bad, tmp_path, object()) is False
     assert phase2._inventory_file_matches(deep, tmp_path, object()) is False
+
+
+def test_load_clue_records_deep_line_is_value_error(tmp_path: Path) -> None:
+    from apkscan.core.phase2.inventory import load_clue_records
+
+    path = tmp_path / "clues.jsonl"
+    path.write_text(_nested_arrays(200_000), encoding="utf-8")
+    with pytest.raises(ValueError) as excinfo:
+        load_clue_records(path)
+    assert not isinstance(excinfo.value, RecursionError)
+
+
+def test_inventory_match_limit_is_four_times_report_max() -> None:
+    import apkscan.commands.phase2 as phase2
+    from apkscan.core.json_io import REPORT_JSON_MAX_BYTES
+
+    assert phase2._INVENTORY_MAX_BYTES == 4 * REPORT_JSON_MAX_BYTES

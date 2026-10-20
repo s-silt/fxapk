@@ -10,6 +10,7 @@ from apkscan.core.bounded_io import read_limited
 from apkscan.core.json_io import (
     read_json_bounded as _read_json_bounded,
     json_depth as _json_depth,
+    loads_bounded,
 )
 
 import json
@@ -940,8 +941,8 @@ def load_clue_records(path: Path, *, max_bytes: int = 64 * 1024 * 1024) -> list[
     for line_number, line in enumerate(raw.decode("utf-8").splitlines(), 1):
         if not line.strip():
             continue
-        item = json.loads(line, parse_constant=reject_nonfinite_json_constant,
-                          parse_float=parse_finite_json_float)
+        item = loads_bounded(line, 64, parse_constant=reject_nonfinite_json_constant,
+                             parse_float=parse_finite_json_float)
         if not isinstance(item, dict):
             raise ValueError(f"clue line {line_number} is not an object")
         if _json_depth(item) > 64:

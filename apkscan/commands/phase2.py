@@ -46,6 +46,8 @@ from apkscan.core.phase2.decision import (
     show_parent_members,
 )
 
+_INVENTORY_MAX_BYTES = 4 * REPORT_JSON_MAX_BYTES  # 自产快照：生产端 25 万候选约 157 MiB，留余量
+
 
 def _coverage_decisions_sha256(coverage: object) -> str | None:
     """coverage 钉过的判决账本字节。旧 coverage 没有这个字段时返回 None。"""
@@ -79,7 +81,7 @@ def _inventory_previous_sha256(case_dir: Path, inventory: object) -> str:
 def _inventory_file_matches(path: Path, case_dir: Path, inventory: object) -> bool:
     """已有清单必须解析成与本次清单相同的对象。半份文件解析失败，不能钉成上一环。"""
     try:
-        recorded = load_json_file(path, limit=REPORT_JSON_MAX_BYTES)
+        recorded = load_json_file(path, limit=_INVENTORY_MAX_BYTES)
     except (OSError, UnicodeError, json.JSONDecodeError, BoundedJsonError):
         return False
     return recorded == _inventory_envelope(case_dir, inventory)
