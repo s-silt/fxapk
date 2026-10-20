@@ -922,3 +922,26 @@ def test_redos_headers_scan_within_five_seconds() -> None:
         started = time.perf_counter()
         scan_java_source(src, "loc")
         assert time.perf_counter() - started < 5
+
+
+def test_dotted_or_dollar_class_tokens_are_not_quadratic_starts() -> None:
+    """``.class`` / ``$class`` 不再当类头起点：finditer 1 秒内，scan 5 秒内不抛。"""
+    samples = (
+        "class " + "a.class " * 20_000 + ";",
+        "a() throws " + "a.class " * 20_000 + ";",
+        "class " + "a$class " * 20_000 + "{ }",
+    )
+    for src in samples:
+        started = time.perf_counter()
+        list(_CLASS_START_RE.finditer(src))
+        assert time.perf_counter() - started < 1
+        started = time.perf_counter()
+        scan_java_source(src, "loc")
+        assert time.perf_counter() - started < 5
+
+
+def test_annotation_interface_is_still_a_class_start() -> None:
+    """``@interface`` 的 ``interface`` 前邻不是 ``.`` / ``$`` / 标识符，仍是起点。"""
+    match = _CLASS_START_RE.search("@interface Foo { }")
+    assert match is not None
+    assert match.group(1) == "Foo"
