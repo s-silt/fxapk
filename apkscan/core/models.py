@@ -155,12 +155,17 @@ class Endpoint:
     enrichment: dict = field(default_factory=dict)  # whois/icp/asn 结果
 
 
-# ``\w`` 含 Unicode，故 IDN 原文、下划线和单标签主机都过；``/ ? # % \ @ :``、空白和 ``..`` 进不来。
-_HOSTNAME_RE = re.compile(r"(?=.{1,253}\.?\Z)[\w-]{1,63}(?:\.[\w-]{1,63})*\.?")
+# domain 拒绝式校验用的禁用集：空白、控制字符，以及会切开 URL 的符号。
+# 不判断名字是否真实存在，只保证值不能改变 URL 结构。
+_DOMAIN_FORBIDDEN_RE = re.compile(r"[\s\x00-\x1f\x7f/\\?#%@:\[\]<>\x22\x27`^{}|]")
 
 
 def endpoint_value_matches_kind(value: str, kind: str) -> bool:
-    """ip/domain 端点的值是否符合其 kind；不符合的值不得作为 provider 查询目标（会被拼进 URL path）。"""
+    """ip/domain 端点的值是否符合其 kind；不符合的值不得作为 provider 查询目标（会被拼进 URL path）。
+
+    domain 是「不能改变 URL 结构」的拒绝式校验：总长 1–253（允许末尾一个 ``.``），
+    按 ``.`` 切开后每段非空且不超过 63。不判断该名字是否真实存在。
+    """
     if kind == "ip":
         if "%" in value:
             return False
@@ -170,7 +175,13 @@ def endpoint_value_matches_kind(value: str, kind: str) -> bool:
             return False
         return True
     if kind == "domain":
-        return _HOSTNAME_RE.fullmatch(value) is not None
+        if not 1 <= len(value) <= 253 or _DOMAIN_FORBIDDEN_RE.search(value):
+            return False
+        # 末尾一个点是根点，不构成空标签；多出来的空段（``a..b``、``..``）仍拒绝。
+        body = value[:-1] if value.endswith(".") else value
+        if not body:
+            return False
+        return all(label and len(label) <= 63 for label in body.split("."))
     return True
 
 

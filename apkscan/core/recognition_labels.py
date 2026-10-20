@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, NoReturn, cast
 
-from apkscan.core.json_io import SMALL_JSON_MAX_BYTES, read_text_bounded
+from apkscan.core.json_io import SMALL_JSON_MAX_BYTES, loads_bounded, read_text_bounded
 
 __all__ = [
     "RecognitionLabelRecord",
@@ -361,7 +361,7 @@ def _parse_json_object(text: str, line: int) -> dict[str, object]:
         _fail("jsonl_invalid", line)
 
     try:
-        parsed = json.loads(
+        parsed = loads_bounded(
             text,
             parse_constant=_reject_json_constant,
             object_pairs_hook=_object_from_pairs,

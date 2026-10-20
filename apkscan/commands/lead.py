@@ -25,6 +25,13 @@ from apkscan.commands.corpus import ENV_CORPUS, resolve_corpus
 from apkscan.core import corpus as _corpus
 from apkscan.core.redact import warn_unredacted_agent_output
 from apkscan.core import report_io
+from apkscan.core.json_io import (
+    REPORT_JSON_MAX_BYTES,
+    SMALL_JSON_MAX_BYTES,
+    load_json_file,
+    loads_bounded,
+    read_text_bounded,
+)
 from apkscan.core.models import Lead, lift_downgrade
 from apkscan.core.restore import (
     MANUAL_RESTORES_KEY,
@@ -50,7 +57,7 @@ def _fail(message: str, code: int = 2) -> None:
 
 def _load_report_payload(path: Path) -> dict:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = load_json_file(path, limit=REPORT_JSON_MAX_BYTES)
     except FileNotFoundError:
         _fail(f"错误：报告不存在：{path}", 1)
     except (OSError, ValueError) as exc:
@@ -77,12 +84,12 @@ def load_restores(corpus_dir: str | Path) -> list[dict]:
     if not path.exists():
         return []
     out: list[dict] = []
-    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    for lineno, line in enumerate(read_text_bounded(path, SMALL_JSON_MAX_BYTES).splitlines(), 1):
         text = line.strip()
         if not text:
             continue
         try:
-            item = json.loads(text)
+            item = loads_bounded(text)
         except ValueError:
             logger.warning("恢复凭据第 %d 行不是合法 JSON，跳过", lineno)
             continue

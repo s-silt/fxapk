@@ -28,9 +28,11 @@ _STR_LIT_RE = re.compile(r'"((?:[^"\\]|\\.)*)"')
 
 # 方法定义起点：``name(params) {``，name 非控制关键字（排除 if/for/while… 的块）。params 不含 ;{}() 括号，
 # 故不跨语句、不吃嵌套泛型参数（少数复杂签名漏掉，可接受——启发式）。在**掩码文本**上匹配（见 _mask）。
-# throws 后只有（限定）类型名与逗号；不含 ``(``，所以扫描在下一个方法头的 ``(`` 处就停，线性。
+# throws 允许 TYPE_USE 注解（含无嵌套括号的参数）。``@`` 不在前一字符类里，交替不歧义，不会指数回溯；
+# 注解参数在下一个括号处止，仍线性。
 _BLOCK_START_RE = re.compile(
-    r"\b([A-Za-z_]\w*)\s*\([^;{}()]*\)\s*(?:throws[\w\s.,$]*)?\{"
+    r"\b([A-Za-z_]\w*)\s*\([^;{}()]*\)\s*"
+    r"(?:throws(?:[\w\s.,$]|@[\w.$]+(?:\s*\([^(){};]*\))?)*)?\{"
 )
 _CONTROL_KW = frozenset({
     "if", "for", "while", "switch", "catch", "synchronized", "try", "do", "else", "return",
@@ -39,10 +41,11 @@ _CONTROL_KW = frozenset({
 _NEW_PREFIX_RE = re.compile(r"\bnew\s+$")
 # 类/枚举/接口体：额外当一个作用域扫——**字段常量密文召回**（``static K="密文"`` 在方法体外、``decrypt(K)`` 在
 # 某方法里，两者同在类体内 → 复用"赋值再消费"逻辑绑上；同串在方法内已绑的按密文去重、不重复）。
-# 类头（extends/implements/类型参数/permits）里不会再出现这三个保留字，故在下一个关键字处停止与旧写法对合法
-# Java 结果相同，且每个字符只被一个起点扫过（线性）。
+# 负向前瞻只认不被 ``.`` / 标识符字符前邻的关键字：``String.class`` 这类字面量不再被当成下一个声明。
+# 每个字符只被一个起点扫过（线性）。
 _CLASS_START_RE = re.compile(
-    r"\b(?:class|interface|enum)\s+(\w+)(?:(?!\b(?:class|interface|enum)\b)[^{;])*\{"
+    r"\b(?:class|interface|enum)\s+(\w+)"
+    r"(?:(?!(?<![\w.$])(?:class|interface|enum)\b)[^{;])*\{"
 )
 
 # 解密调用（Java crypto API + 通用 decrypt/base64 解码）。★不含裸 ``AES/`` transformation 串——那是常量非
@@ -161,8 +164,8 @@ _FRAMEWORK_ACCESSOR_RE = re.compile(r"^(?:get|put|set)[A-Z]")
 _MAX_SECRETS_PER_METHOD = 8
 _MAX_CHAINS_PER_FILE = 200
 _MAX_TEXT_BYTES = 4 * 1024 * 1024  # 与 jadx.py 单文件上限一致
-_MAX_SCOPES = 20_000
-_MAX_SCOPE_WORK_BYTES = 8 * _MAX_TEXT_BYTES  # 深嵌套时已处理 body 累计上限
+# 空/小作用域的固定开销很小，不再按个数截断；总工作量只由下面的字节预算约束。
+_MAX_SCOPE_WORK_BYTES = 8 * _MAX_TEXT_BYTES  # 深嵌套时已处理 body 累计上限（按 body 升序记账）
 _MAX_SECRET_LEN = 2048  # 保留完整密文供 AI 解密（大多数配置密文 <2KB；仅防畸形超长字面量）
 
 
@@ -195,7 +198,12 @@ def _pattern_hits(body: str, pattern: re.Pattern[str], needles: tuple[str, ...])
     return tuple(sorted({m.group(0).strip() for m in pattern.finditer(body)}))
 
 
-def scan_java_source(text: str, location: str) -> list[StringChain]:
+def scan_java_source(
+    text: str,
+    location: str,
+    *,
+    stats: dict[str, int] | None = None,
+) -> list[StringChain]:
     """扫一份 Java 源码文本，产方法作用域内的 密文→解密/消费(→sink) 共现链。绝不抛。
 
     绑链门（二档，均在**同一方法体内**——方法级作用域，跨方法不误绑）：某密文候选串字面量满足其一即绑——
@@ -210,6 +218,9 @@ def scan_java_source(text: str, location: str) -> list[StringChain]:
     ★唯一的真早退：第三方路径**且**全文无任何标准解密 API 迹象（:func:`_has_decrypt_hint`）——这类文件既
     藏不住"标准解密绑定的密文"，又占真实 APK 文件数的绝大多数，扫它们纯是浪费。代价是这些文件里仅靠
     ``consumer`` 成立的**弱档**链不再被计数（那一档本就是噪音主源），换来第三方目录不必全量扫。
+
+    ``stats`` 非空且本文件因作用域字节预算停止计算时，``stats["scope_budget_truncated"]`` 加 1
+    （每个文件至多一次）。
     """
     if not isinstance(text, str) or not text:
         return []
@@ -218,17 +229,20 @@ def scan_java_source(text: str, location: str) -> list[StringChain]:
         return []
     if len(text) > _MAX_TEXT_BYTES:
         text = text[:_MAX_TEXT_BYTES]
-    chains: list[StringChain] = []
-    seen: set[str] = set()  # 按**密文**去重（本文件内）：嵌套方法/匿名类里的同串只出一条（外层方法先命中即保留）
+    scopes = _extract_scopes(text)
+    # 按 body 升序先算小方法；预算触发时剩下的都是更大的外层作用域。产链仍按源码顺序，
+    # 预算未触发时与原先逐字相同（去重仍是外层先命中即保留）。
+    order = sorted(range(len(scopes)), key=lambda k: (scopes[k][2] - scopes[k][1] - 1, k))
+    prepared: list[
+        tuple[str, bool, tuple[str, ...], tuple[str, ...], list[tuple[str, str | None]]] | None
+    ] = [None] * len(scopes)
     worked = 0
-    for k, (name, open_idx, end_idx, is_class) in enumerate(_extract_scopes(text)):
+    skipped = 0
+    for seen_i, k in enumerate(order):
+        name, open_idx, end_idx, is_class = scopes[k]
         body_len = end_idx - open_idx - 1
-        if k >= _MAX_SCOPES or worked + body_len > _MAX_SCOPE_WORK_BYTES:
-            reason = "max_scopes" if k >= _MAX_SCOPES else "scope_work_bytes"
-            logger.debug(
-                "[string-graph] 作用域预算停止：scope=%d open_idx=%d reason=%s",
-                k, open_idx, reason,
-            )
+        if worked + body_len > _MAX_SCOPE_WORK_BYTES:
+            skipped = len(order) - seen_i
             break
         worked += body_len
         body = text[open_idx + 1:end_idx]
@@ -256,6 +270,20 @@ def scan_java_source(text: str, location: str) -> list[StringChain]:
                     calls = _call_args(body)
                 consumer = _consumer_via_var(body, pos, calls)
             candidates.append((lit, consumer))
+        prepared[k] = (name, is_class, decrypts, sinks, candidates)
+    if skipped:
+        if stats is not None:
+            stats["scope_budget_truncated"] = stats.get("scope_budget_truncated", 0) + 1
+        logger.warning(
+            "[string-graph] 作用域字节预算停止：location=%s skipped_scopes=%d",
+            location, skipped,
+        )
+    chains: list[StringChain] = []
+    seen: set[str] = set()  # 按**密文**去重（本文件内）：嵌套方法/匿名类里的同串只出一条（外层方法先命中即保留）
+    for item in prepared:
+        if item is None:
+            continue
+        name, _is_class, decrypts, sinks, candidates = item
         for secret, consumer in candidates:
             if not decrypts and consumer is None:  # 既无标准解密、又没被消费 → 不绑
                 continue

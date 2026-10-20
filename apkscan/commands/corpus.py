@@ -35,7 +35,6 @@ from apkscan.core.json_contract import (
 )
 from apkscan.core.json_io import (
     REPORT_JSON_MAX_BYTES,
-    SMALL_JSON_MAX_BYTES,
     load_json_file,
     loads_bounded,
     read_bytes_bounded,
@@ -60,7 +59,7 @@ def _package_binding(package: Path | None, explicit_case: str) -> tuple[str, str
     package_id = checked.get("package_id")
     if not isinstance(package_id, str) or len(package_id) != 64:
         raise typer.BadParameter("验包结果没有合法 package_id", param_hint="--package")
-    payload = load_json_file(package, limit=SMALL_JSON_MAX_BYTES)
+    payload = load_json_file(package, limit=REPORT_JSON_MAX_BYTES)
     if not isinstance(payload, dict) or not isinstance(payload.get("case_id"), str):
         raise typer.BadParameter("case-package 没有 case_id", param_hint="--package")
     bound = payload["case_id"]

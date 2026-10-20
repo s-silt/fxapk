@@ -64,8 +64,11 @@ def read_text_bounded(path: Path, limit: int) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def loads_bounded(text: str, depth_limit: int = JSON_MAX_DEPTH, **kwargs: Any) -> Any:
-    """``json.loads`` + 深度上限；深嵌套触发的 RecursionError 映射为 BoundedJsonError。"""
+def loads_bounded(text: str | bytes, depth_limit: int = JSON_MAX_DEPTH, **kwargs: Any) -> Any:
+    """``json.loads`` + 深度上限；深嵌套触发的 RecursionError 映射为 BoundedJsonError。
+
+    bytes 交给 json.loads 自动识别编码。
+    """
     try:
         value = json.loads(text, **kwargs)
         depth = json_depth(value)

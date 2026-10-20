@@ -24,6 +24,7 @@ from uuid import uuid4
 import typer
 
 from apkscan.core import batch_enrich as _batch
+from apkscan.core.json_io import SMALL_JSON_MAX_BYTES, load_json_file
 from apkscan.core.models import ANALYSIS_MODE_PASSIVE
 
 logger = logging.getLogger(__name__)
@@ -189,7 +190,7 @@ def batch(
     scope_path = destination / "enrichment-scope.json"
     try:
         if scope_path.exists():
-            scope = _json.loads(scope_path.read_text(encoding="utf-8"))
+            scope = load_json_file(scope_path, limit=SMALL_JSON_MAX_BYTES)
             if not isinstance(scope, dict) or scope.get("schema") != "enrichment-scope-1" or scope.get("case_id") != case_id:
                 raise ValueError("case_scope_mismatch")
         elif case_id and ndjson_path.exists():

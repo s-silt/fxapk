@@ -354,6 +354,20 @@ def test_jadx_scan_java_emits_string_chain_finding(tmp_path) -> None:
     assert "d" in chain[0].description  # 方法名进描述
 
 
+def test_scan_java_scope_budget_counted_in_suppressed(monkeypatch, tmp_path) -> None:
+    """字节预算触发时 ``_scan_java`` 的 suppressed 带 ``scope-budget``（文件数）。
+
+    analyze 把这份 dict 原样写入 ``result.meta["decrypt_candidates_suppressed"]``。
+    """
+    from apkscan.analyzers.jadx import JadxAnalyzer
+
+    monkeypatch.setattr("apkscan.config.string_graph._MAX_SCOPE_WORK_BYTES", 1024)
+    java = "void big(){" + ("y" * 4_000) + "}" + _aes_method("z", _SECRET)
+    (tmp_path / "C.java").write_text(java, encoding="utf-8")
+    outcome = JadxAnalyzer()._scan_java(tmp_path)
+    assert outcome.suppressed.get("scope-budget") == 1
+
+
 # ── 精度回归：真实 jadx 输出形态的四类误报 ───────────────────────────────────────
 # 一次真实样本跑出 36 条 decrypt_candidates，其中 34 条不是密文；换个样本 31 条全错。
 # 四类误报里 3 类经 _looks_ciphertext 的 infra.looks_like_encoding 兜底放行——那个函数
@@ -801,12 +815,71 @@ def test_throws_clauses_with_trailing_brace_finish_quickly() -> None:
     assert time.perf_counter() - started < 5
 
 
-def test_max_scopes_processes_only_the_first_scope(monkeypatch) -> None:
-    """把 ``_MAX_SCOPES`` 调成 1：只处理第一个作用域，结果由该前缀决定。"""
-    monkeypatch.setattr("apkscan.config.string_graph._MAX_SCOPES", 1)
-    first = "aa" * 20
-    second = "bb" * 20
-    src = f'void first(){{ x("{first}"); }} void second(){{ x("{second}"); }}'
+def _aes_method(name: str, secret: str) -> str:
+    """小解密方法：赋值密文 + Cipher.getInstance + doFinal。"""
+    return (
+        f'void {name}(){{ String k = "{secret}"; '
+        f'Cipher c = Cipher.getInstance("AES"); c.doFinal(k); }}'
+    )
+
+
+def test_empty_method_prefix_cannot_crowd_out_decrypt_method() -> None:
+    """2 万个空方法排在真实解密方法前：个数不再截断，末尾的链仍被检出。"""
+    src = "void e(){}" * 20_000 + _aes_method("z", _SECRET)
+    stats: dict[str, int] = {}
+    chains = scan_java_source(src, "loc", stats=stats)
+    assert stats.get("scope_budget_truncated", 0) == 0
+    assert len(chains) == 1
+    assert chains[0].method == "z"
+    assert chains[0].secret == _SECRET
+    assert chains[0].decrypt_calls
+
+
+def test_byte_budget_keeps_small_method_inside_large_outer(monkeypatch) -> None:
+    """大外层包住小解密方法：字节预算按 body 升序，小方法先算，截断记 1。"""
+    monkeypatch.setattr("apkscan.config.string_graph._MAX_SCOPE_WORK_BYTES", 1024)
+    small = _aes_method("z", _SECRET)
+    src = "void outer(){" + ("x" * 4_000) + small + "}"
+    stats: dict[str, int] = {}
+    chains = scan_java_source(src, "loc", stats=stats)
+    assert stats["scope_budget_truncated"] == 1
+    assert len(chains) == 1
+    assert chains[0].method == "z"
+    assert chains[0].secret == _SECRET
+
+
+def test_byte_budget_keeps_small_sibling_after_large_block(monkeypatch) -> None:
+    """大嵌套块在前、兄弟小解密方法在后：小方法仍被检出，截断记 1。"""
+    monkeypatch.setattr("apkscan.config.string_graph._MAX_SCOPE_WORK_BYTES", 1024)
+    src = "void big(){" + ("y" * 4_000) + "}" + _aes_method("z", _SECRET)
+    stats: dict[str, int] = {}
+    chains = scan_java_source(src, "loc", stats=stats)
+    assert stats["scope_budget_truncated"] == 1
+    assert len(chains) == 1
+    assert chains[0].method == "z"
+    assert chains[0].secret == _SECRET
+
+
+def test_throws_type_use_annotation_forms_method_scope() -> None:
+    """``throws @A IOException`` 仍是方法域，方法内解密链可检出。"""
+    src = (
+        f'void m() throws @A IOException {{ String k = "{_SECRET}"; '
+        f'Cipher c = Cipher.getInstance("AES"); c.doFinal(k); }}'
+    )
     chains = scan_java_source(src, "loc")
-    assert [c.secret for c in chains] == [first]
-    assert [c.method for c in chains] == ["first"]
+    assert len(chains) == 1
+    assert chains[0].method == "m"
+    assert chains[0].secret == _SECRET
+
+
+def test_class_header_string_class_literal_stays_one_scope() -> None:
+    """注解参数里的 ``String.class`` 不当成下一个 class 声明，类域仍产出 ``class:C``。"""
+    src = (
+        f'class C extends @A(String.class) Base {{ '
+        f'static String K="{_SECRET}"; void m(){{ dec(K); }} }}'
+    )
+    chains = scan_java_source(src, "loc")
+    assert len(chains) == 1
+    assert chains[0].method == "class:C"
+    assert chains[0].secret == _SECRET
+    assert chains[0].consumer == "dec"

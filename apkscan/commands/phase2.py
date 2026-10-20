@@ -20,6 +20,14 @@ from apkscan.core.phase2.inventory import (
 )
 from apkscan.core.phase2.link import build_gate_receipt, write_gate_receipt
 from apkscan.core.atomic import atomic_write_bytes
+from apkscan.core.json_io import (
+    REPORT_JSON_MAX_BYTES,
+    SMALL_JSON_MAX_BYTES,
+    BoundedJsonError,
+    load_json_file,
+    loads_bounded,
+    read_text_bounded,
+)
 from apkscan.core.phase2.survey import load_survey
 from apkscan.core.phase2.triage import build_triage, render_queue_md
 from apkscan.core.phase2.decision import (
@@ -72,8 +80,8 @@ def _inventory_previous_sha256(case_dir: Path, inventory: object) -> str:
 def _inventory_file_matches(path: Path, case_dir: Path, inventory: object) -> bool:
     """已有清单必须解析成与本次清单相同的对象。半份文件解析失败，不能钉成上一环。"""
     try:
-        recorded = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        recorded = load_json_file(path, limit=SMALL_JSON_MAX_BYTES)
+    except (OSError, UnicodeError, json.JSONDecodeError, BoundedJsonError):
         return False
     return recorded == _inventory_envelope(case_dir, inventory)
 
@@ -337,7 +345,7 @@ def _cmd_gate(args: argparse.Namespace) -> int:
         inventory = build_inventory(case_dir, case_id=args.case_id)
         triage = build_triage(inventory, case_dir)
         parent_members = {p.parent_id: p.member_candidate_ids for p in triage.parents}
-        coverage = json.loads(coverage_path.read_text(encoding="utf-8"))
+        coverage = load_json_file(coverage_path, limit=REPORT_JSON_MAX_BYTES)
         clue_file = Path(args.clues) if args.clues else case_dir / "clue_records.jsonl"
         clue_records = load_clue_records(clue_file) if clue_file.exists() else []
         known = {str(cid) for c in clue_records if isinstance((cid := c.get("clue_id")), str)}
@@ -514,8 +522,9 @@ def _cmd_decide_file(args: argparse.Namespace) -> int:
     # ★解析意图 / 构造判决 / 载 clue 台账全纳入一个 try（复审 P2#2/#6）：坏输入——非对象行、
     #   accepts 非数组、clue 台账坏 JSON 或记录非对象——一律转成退出码 2，绝不漏成 traceback。
     try:
-        intents = [json.loads(line) for line in
-                   intents_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        intents = [loads_bounded(line) for line in
+                   read_text_bounded(intents_path, SMALL_JSON_MAX_BYTES).splitlines()
+                   if line.strip()]
         decisions = build_decisions_from_intents(
             inventory, triage, intents, case_id=inventory.case_id, decided_by=decided_by)
         clue_records = load_clue_records(Path(args.clues)) if args.clues else []

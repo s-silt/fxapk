@@ -1234,6 +1234,8 @@ class JadxAnalyzer(BaseAnalyzer):
         secret_hits: dict[tuple[str, str], Finding] = {}
         chain_objs: dict[tuple[str, str], StringChain] = {}  # config-chain 层②：按 (文件, 密文) 去重（嵌套不重复）
         suppressed: Counter[str] = Counter()  # 压制原因 → 条数（同样按 (文件, 密文) 去重后计）
+        # 本次扫描共享：作用域字节预算每个文件至多 +1，扫完并入 suppressed["scope-budget"]。
+        scope_budget_stats: dict[str, int] = {}
 
         candidates: list[tuple[Path, str]] = []  # (磁盘路径, NFC 规范化相对路径)
         discovery_failed = False
@@ -1304,7 +1306,7 @@ class JadxAnalyzer(BaseAnalyzer):
                 logger.exception("[jadx] 扫描 .java 失败，跳过：%s", rel)
             # config-chain 层②：方法作用域内 密文→解密/消费(→sink) 共现链（启发式、独立 try 不连累端点/密钥扫描）。
             try:
-                for chain in scan_java_source(text, rel):
+                for chain in scan_java_source(text, rel, stats=scope_budget_stats):
                     key = (chain.location, chain.secret[:64])
                     chain_objs.setdefault(key, chain)
             except Exception:
@@ -1318,6 +1320,10 @@ class JadxAnalyzer(BaseAnalyzer):
                 suppressed[chain.suppressed] += 1
             else:
                 chains.append(chain)
+        # 经 outcome.suppressed → result.meta["decrypt_candidates_suppressed"] 留痕（analyze 里已有这条赋值）。
+        budget_files = scope_budget_stats.get("scope_budget_truncated", 0)
+        if budget_files > 0:
+            suppressed["scope-budget"] += budget_files
         findings = list(secret_hits.values()) + [_chain_finding(c) for c in chains]
         decrypt = [_chain_candidate(c) for c in chains]
         return _ScanOutcome(
