@@ -32,6 +32,7 @@ from apkscan.core.models import (
     Report,
     merge_runtime_into_lead_dict,
 )
+from apkscan.core.json_io import BoundedJsonError
 from apkscan.core.report_io import load_report, write_report
 from apkscan.core.restore import (
     MANUAL_RESTORES_KEY,
@@ -884,4 +885,73 @@ def test_cli_restore_oversize_ledger_does_not_half_commit(
     assert "样本库恢复凭据读取失败，未修改报告" in rendered
     assert "Traceback" not in rendered
     assert report.read_bytes() == report_before
+    assert ledger.read_bytes() == ledger_before
+
+
+@pytest.mark.parametrize("exc", [OSError("disk full"), BoundedJsonError("ledger too large")])
+def test_cli_restore_ledger_write_failure_rolls_back_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc: Exception,
+) -> None:
+    """锁住账本写入失败（IO / 超限）：报告与 HTML 回滚到原字节，不把异常打成 traceback。"""
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    ledger = corpus_dir / lead_cmd.RESTORES_NAME
+    ledger.write_text(
+        '{"sample_sha256": "' + ("f" * 64) + '", "category": "DOMAIN", '
+        '"value": "other.example.com", "source": "x", "note": "n", "at": "t"}\n',
+        encoding="utf-8",
+    )
+    report = tmp_path / "report.json"
+    _write_pressed_report(report)
+    html_path = report.with_suffix(".html")
+    html_path.write_text("<html>old</html>", encoding="utf-8")
+    report_before = report.read_bytes()
+    html_before = html_path.read_bytes()
+    ledger_before = ledger.read_bytes()
+
+    def _disk_full(*_args: object, **_kwargs: object) -> None:
+        assert report.read_bytes() != report_before, "前提：写账本时报告确已改写"
+        assert html_path.read_bytes() != html_before, "前提：写账本时 HTML 确已重渲"
+        raise exc
+
+    monkeypatch.setattr(lead_cmd, "save_restores", _disk_full)
+
+    res = runner.invoke(cli.app, [
+        "lead", "restore", str(report), "--value", _VALUE,
+        "--source", DOWNGRADE_REPACK_IDENTITY, "--note", "已差分核实",
+        "--corpus", str(corpus_dir),
+    ])
+
+    rendered = (res.stdout or "") + (res.stderr or "")
+    assert res.exit_code == 1
+    assert "报告已回滚" in rendered
+    assert "Traceback" not in rendered
+    assert not isinstance(res.exception, (OSError, ValueError))
+    assert report.read_bytes() == report_before
+    assert html_path.read_bytes() == html_before
+    assert ledger.read_bytes() == ledger_before
+    assert list(tmp_path.rglob("*.tmp")) == []
+
+
+def test_save_restores_refuses_oversize_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """锁住账本写前超限拒绝：save_restores 抛 ValueError，预置账本字节不变。"""
+    monkeypatch.setattr(lead_cmd, "REPORT_JSON_MAX_BYTES", 32)
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    ledger = corpus_dir / lead_cmd.RESTORES_NAME
+    ledger_before = b'{"k":"v"}\n'
+    ledger.write_bytes(ledger_before)
+
+    with pytest.raises(ValueError):
+        lead_cmd.save_restores(corpus_dir, [{
+            "sample_sha256": "a" * 64,
+            "category": "DOMAIN",
+            "value": "long.example.com",
+            "source": "x",
+            "note": "n",
+            "at": "t",
+        }])
+
     assert ledger.read_bytes() == ledger_before
