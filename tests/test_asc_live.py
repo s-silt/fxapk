@@ -11,15 +11,24 @@ from pathlib import Path
 
 import pytest
 
+from apkscan.core import dex_query as dq
 from apkscan.core.dex_query import DexQueryLimits, query_apk
 from tests.fixtures.dex_query.dexgen import build_dex, sample_classes, wide_classes, zip_bytes
+from tests.test_dex_query_versions import _ASC_RELEASES
 
 _VENV = Path(os.environ.get("FXAPK_ASC_TEST_PYTHON", sys.executable))
 
 
+def _missing_asc_live(detail: str) -> None:
+    """缺 ASC 真跑件时 skip；FXAPK_REQUIRE_ASC_LIVE=1 时 fail。"""
+    if os.environ.get("FXAPK_REQUIRE_ASC_LIVE") == "1":
+        pytest.fail(f"{detail}——本环境声明必须真跑、缺件是 CI 配置错误")
+    pytest.skip(detail)
+
+
 def _require_worker() -> list[str]:
     if not _VENV.exists():
-        pytest.skip("隔离 ASC venv 不存在")
+        _missing_asc_live("隔离 ASC venv 不存在")
     probe = subprocess.run(
         [str(_VENV), "-I", "-c", "import droidasc, fxapk_asc.worker"],
         capture_output=True,
@@ -27,7 +36,7 @@ def _require_worker() -> list[str]:
         check=False,
     )
     if probe.returncode != 0:
-        pytest.skip("隔离 venv 里没有 droidasc 或 fxapk-asc")
+        _missing_asc_live("隔离 venv 里没有 droidasc 或 fxapk-asc")
     return [str(_VENV), "-I", "-m", "fxapk_asc.worker"]
 
 
@@ -150,3 +159,30 @@ def test_live_asc_matches_independent_offsets_for_every_zip_location(tmp_path: P
     (tmp_path / "a0-members.json").write_text(
         json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+
+
+def test_live_installed_provider_matches_independent_manifest() -> None:
+    worker = _require_worker()
+    script = (
+        "import hashlib, importlib.metadata, json\n"
+        "import droidasc.asc_core.findrefs.findrefs_manager as findrefs\n"
+        "digest = hashlib.sha256(open(findrefs.__file__, 'rb').read()).hexdigest()\n"
+        "print(json.dumps({'version': importlib.metadata.version('droidasc'),"
+        " 'findrefs_sha256': digest}))\n"
+    )
+    result = subprocess.run(
+        [str(_VENV), "-I", "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    version = payload["version"]
+    assert version == dq.PINNED_VERSION
+    assert payload["findrefs_sha256"] == _ASC_RELEASES[version]["findrefs_sha256"]
+    caps = dq.capabilities(worker_argv=worker)
+    assert caps["available"] is True
+    assert caps["reason"] is None
+    assert caps["provider_version"] == dq.PINNED_VERSION
+    assert caps["provider_revision"] == _ASC_RELEASES[version]["revision"]

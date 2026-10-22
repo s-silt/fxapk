@@ -10,6 +10,32 @@ import subprocess
 
 import pytest
 
+# 值来自官方 npm 归档、按 LF 规范化计算、不得从生产常量反算。
+# 复核：`npm pack <npm_spec>` 取归档，核对 integrity/shasum 后解出
+# package/dist/browser/CdpPageCaptureScripts.js 重算 upstream_sha256。
+# 夹具是归档原文件（MIT，见同目录 LICENSE）。
+_REA_UPSTREAM = {
+    "6.4.0": {
+        "npm_spec": "rea-agents@6.4.0",
+        "integrity": (
+            "sha512-Vj1zWfSlna5bphGoaoI/TcVBuYvze9u+OyPC3Shz8YkBqaCTqB4COnnRoX7XDwMpwI24ZlFEel2yEj0k8LTWEQ=="
+        ),
+        "shasum": "c919f5c7742ab2abf601db422e4e8fea36d511c2",
+        "upstream_sha256": "f8fd2f45455450ec46319c27be749c1aae9ae605dfd901664483c75f6272cfed",
+        "patched_sha256": "410967ab384e3425ad67a6dba345a278aea546d108c7af7bb143c2b549620233",
+    },
+    "6.7.0": {
+        "npm_spec": "rea-agents@6.7.0",
+        "integrity": (
+            "sha512-yhIx2ioJYYT1C/tONfYeitC6LhnKmCh+ZwRUOgYuhSc733lGhkkt73zhug9WmLgxoMdKuqIYGCoBfD4fXkOhFw=="
+        ),
+        "shasum": "11f23ba377303a5c28b3162180cf2bf3f3643708",
+        "upstream_sha256": "df0b5c301189bf70e9e610ab40c6da56774f014c5d444aa1561db8008c910d68",
+        "patched_sha256": "08eec4efbc3229785276d6fba9b134ba7095ecdc9bbd296847046cc8925984fe",
+    },
+}
+_REA_UPSTREAM_DIR = Path(__file__).parent / "fixtures" / "rea_upstream"
+
 
 @pytest.fixture
 def compat(monkeypatch):
@@ -40,6 +66,43 @@ def test_pinned_repair_dry_run_idempotence_and_unknown_source(compat, tmp_path, 
         compat.repair(tmp_path, apply=True)
     assert target.read_bytes() == b"local changes"
     assert compat.provenance(str(launcher))["status"] == "not_detected"
+
+
+def test_upstream_fixtures_match_official_archive_manifest() -> None:
+    for version, manifest in _REA_UPSTREAM.items():
+        raw = (_REA_UPSTREAM_DIR / version / "CdpPageCaptureScripts.js").read_bytes()
+        digest = hashlib.sha256(raw.replace(b"\r\n", b"\n")).hexdigest()
+        assert digest == manifest["upstream_sha256"]
+
+
+def test_production_hashes_match_official_archive_manifest(compat) -> None:
+    assert compat.BEFORE_SHA256 == _REA_UPSTREAM["6.4.0"]["upstream_sha256"]
+    assert compat.AFTER_SHA256 == _REA_UPSTREAM["6.4.0"]["patched_sha256"]
+    assert compat.BEFORE_670_SHA256 == _REA_UPSTREAM["6.7.0"]["upstream_sha256"]
+    assert compat.AFTER_670_SHA256 == _REA_UPSTREAM["6.7.0"]["patched_sha256"]
+
+
+@pytest.mark.parametrize("version", ["6.4.0", "6.7.0"])
+def test_repair_on_official_upstream_source(compat, tmp_path, version) -> None:
+    manifest = _REA_UPSTREAM[version]
+    (tmp_path / "package.json").write_text(
+        json.dumps({"name": "rea-agents", "version": version}),
+        encoding="utf-8",
+    )
+    fixture = _REA_UPSTREAM_DIR / version / "CdpPageCaptureScripts.js"
+    target = tmp_path / compat.RELATIVE
+    target.parent.mkdir(parents=True)
+    shutil.copyfile(fixture, target)
+    original = target.read_bytes()
+    dry = compat.repair(tmp_path)
+    assert dry["changed"] is True
+    assert dry["before_sha256"] == manifest["upstream_sha256"]
+    assert dry["after_sha256"] == manifest["patched_sha256"]
+    assert target.read_bytes() == original
+    compat.repair(tmp_path, apply=True)
+    patched = hashlib.sha256(target.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+    assert patched == manifest["patched_sha256"]
+    assert compat.repair(tmp_path, apply=True)["changed"] is False
 
 
 def test_missing_source_only_is_recoverable_javascript(compat, tmp_path):
