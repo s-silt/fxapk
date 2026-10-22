@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fxapk-asc"
-version = "0.1.1"
+version = "0.1.2"
 description = "Optional isolated ASC worker for fxapk dex query. Not a core dependency."
 readme = "README.md"
 license = { file = "LICENSE" }

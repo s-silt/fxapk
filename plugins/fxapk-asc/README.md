@@ -13,10 +13,10 @@ MUTF-8 精确匹配、隔离内存/超时及原件身份检查保持不变。
 
 从所选 GitHub Release 下载核心及 ASC 的 wheel，并按该发行的 `SHA256SUMS.txt`
 校验文件。使用 Python 3.11+ 的独立虚拟环境，先安装该发行的核心，再安装同页
-`fxapk_asc-0.1.1-py3-none-any.whl`：
+`fxapk_asc-0.1.2-py3-none-any.whl`：
 
 ```powershell
-python -m pip install ./fxapk_asc-0.1.1-py3-none-any.whl
+python -m pip install ./fxapk_asc-0.1.2-py3-none-any.whl
 fxapk dex --help
 ```
 

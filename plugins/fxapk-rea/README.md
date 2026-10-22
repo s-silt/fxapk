@@ -1,6 +1,6 @@
 # fxapk-rea
 
-可选 REA 网页观察与 Native 地址恢复插件，版本 0.1.1。要求 Python 3.11+、fxapk 1.19.0+。
+可选 REA 网页观察与 Native 地址恢复插件，版本 0.1.2。要求 Python 3.11+、fxapk 1.19.0+。
 
 **默认关闭**：即使已安装，也不会被 fxapk 导入、注册命令或用于自动补采。仅在明确需要时为该进程设置 `FXAPK_ENABLE_REA=1`（PowerShell `$env:FXAPK_ENABLE_REA='1'`；Linux/macOS `FXAPK_ENABLE_REA=1 fxapk rea --help`）。未启用时核心命令照常可用，`selfcheck` 对已安装的 REA 报 `disabled`。启用不等于授权浏览器、设备或联网操作，agent 不得自行设置该开关。
 
@@ -10,9 +10,9 @@
 
 正式附件安装：先从所选 GitHub Release 下载核心与 REA wheel，按该发行的
 `SHA256SUMS.txt` 校验，在独立 Python 虚拟环境安装核心，再执行
-`python -m pip install ./fxapk_rea-0.1.1-py3-none-any.whl`。
+`python -m pip install ./fxapk_rea-0.1.2-py3-none-any.whl`。
 需要 trace 时使用
-`python -m pip install "./fxapk_rea-0.1.1-py3-none-any.whl[trace]"`。
+`python -m pip install "./fxapk_rea-0.1.2-py3-none-any.whl[trace]"`。
 附件不是完整离线依赖包，安装可能下载声明依赖；安装后仍默认关闭。
 插件源码采用 MIT 许可（见 `LICENSE`），第三方工具与依赖遵循各自许可。
 
