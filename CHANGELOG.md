@@ -5,6 +5,8 @@
 
 ## 待发布
 
+- CI 新增 `pytest (ASC provider, locked)` 关：droidasc 按测试清单中的官方轮子 sha256 走 hash 校验安装，其余按 `plugins/fxapk-asc/requirements.lock` 安装，设 `FXAPK_REQUIRE_ASC_LIVE=1` 后 ASC 真跑测试缺件即失败、不再静默 skip。ASC 身份表（核心与 worker）与 REA 兼容修补的四个源码哈希改为对照官方发布物独立算出的字面量清单（PyPI 轮子与 npm 归档 integrity），REA 6.4.0 / 6.7.0 的目标文件原文作为夹具（MIT），在其上不替换哈希真跑修补。droidasc 的 revision 是上游 git commit，发布物内不含，仍只能人工核对。
+
 ## 1.21.0 — 2026-10-22
 
 - REA 插件（0.1.2）同时接受已验收的 REA 6.4.0 与 6.7.0：`python -m fxapk_rea.rea_compat --root <rea-agents包目录> --apply` 按版本核对脚本生命周期兼容修复的原始与修改后哈希，未知版本或源码仍拒绝、不覆盖本地改动；trace 回执中的插件版本标识更新为 0.1.2。
