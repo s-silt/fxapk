@@ -1107,3 +1107,37 @@ def test_rollback_html_restores_through_hardlink(tmp_path: Path) -> None:
     assert failed == []
     assert alias.read_bytes() == b"old"
     assert os.stat(alias).st_ino == os.stat(html).st_ino
+
+
+def test_cli_restore_rollback_notice_failure_keeps_original_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """回滚提示写 stderr 失败时，原中断仍原样抛出（退出码 130），报告照样回滚。"""
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    report = tmp_path / "report.json"
+    _write_pressed_report(report)
+    report_before = report.read_bytes()
+
+    def _interrupt(*_args: object, **_kwargs: object) -> None:
+        raise KeyboardInterrupt()
+
+    real_secho = lead_cmd.typer.secho
+
+    def _secho(message: object = None, *args: object, **kwargs: object) -> None:
+        if "回滚" in str(message):
+            raise OSError("stderr broken")
+        real_secho(message, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(lead_cmd, "save_restores", _interrupt)
+    monkeypatch.setattr(lead_cmd.typer, "secho", _secho)
+
+    res = runner.invoke(cli.app, [
+        "lead", "restore", str(report), "--value", _VALUE,
+        "--source", DOWNGRADE_REPACK_IDENTITY, "--note", "已差分核实",
+        "--corpus", str(corpus_dir),
+    ])
+
+    assert res.exit_code == 130, res.output
+    assert not isinstance(res.exception, OSError)
+    assert report.read_bytes() == report_before

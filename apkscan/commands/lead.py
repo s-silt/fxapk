@@ -353,7 +353,11 @@ def lead_restore(
         except BaseException:
             # typer.Exit（_load_report_payload 已提示原因）、Ctrl-C 等中断也必须回滚，并告诉用户回滚结果。
             failed = _rollback_report(path, report_before, html_path, html_before)
-            typer.secho(f"{_rollback_message(failed)}。", fg=typer.colors.RED, err=True)
+            try:
+                typer.secho(f"{_rollback_message(failed)}。", fg=typer.colors.RED, err=True)
+            except OSError:
+                # stderr 不可写时不能让提示失败顶替原异常（Ctrl-C 的退出语义会变）。
+                logger.debug("回滚结果提示输出失败", exc_info=True)
             raise
 
     typer.echo(json.dumps({
