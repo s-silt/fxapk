@@ -5,6 +5,8 @@
 
 ## 待发布
 
+- `lead restore --corpus` 写完报告后若样本库 `restores.jsonl` 写入失败（权限、磁盘、IO 或超限），把报告 JSON 与同名 HTML 回滚到写前字节并以退出码 1 报错，不再留下「报告已解除抑制、账本无凭据」的半提交状态，也不再抛 traceback；回滚本身失败时提示人工核对。`restores.jsonl` 写出前检查序列化大小不超过 128 MiB 的读取上限，超限拒写、保留旧账本。
+
 ## 1.20.0 — 2026-10-21
 
 - **行为变更**：`.env` 只从仓库根（源码运行）与 `~/.fxapk/.env`（pip 安装）读取，不再读当前目录的 `.env`；且只注入 `.env.example` 所列密钥与服务配置键。`PATH`、`JAVA_HOME`、`FXAPK_TOOLCHAIN_FILE`、`FXAPK_TCPDUMP_BIN`、`FXAPK_ENABLE_REA`、`FXAPK_HANDOFF_ROOT`、`FXAPK_CORPUS` 等执行路径、安全门与数据根变量只能由真实进程环境设置，`.env` 里出现时跳过并 WARNING 列出键名（不输出值）。原先放在 `.env` 里的 `FXAPK_CORPUS` 需改为环境变量或 `--corpus`。

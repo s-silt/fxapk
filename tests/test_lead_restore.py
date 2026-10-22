@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,7 @@ from apkscan.core.models import (
     Report,
     merge_runtime_into_lead_dict,
 )
+from apkscan.core.json_io import BoundedJsonError
 from apkscan.core.report_io import load_report, write_report
 from apkscan.core.restore import (
     MANUAL_RESTORES_KEY,
@@ -885,3 +887,257 @@ def test_cli_restore_oversize_ledger_does_not_half_commit(
     assert "Traceback" not in rendered
     assert report.read_bytes() == report_before
     assert ledger.read_bytes() == ledger_before
+
+
+@pytest.mark.parametrize("exc", [OSError("disk full"), BoundedJsonError("ledger too large")])
+def test_cli_restore_ledger_write_failure_rolls_back_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exc: Exception,
+) -> None:
+    """锁住账本写入失败（IO / 超限）：报告与 HTML 回滚到原字节，不把异常打成 traceback。"""
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    ledger = corpus_dir / lead_cmd.RESTORES_NAME
+    ledger.write_text(
+        '{"sample_sha256": "' + ("f" * 64) + '", "category": "DOMAIN", '
+        '"value": "other.example.com", "source": "x", "note": "n", "at": "t"}\n',
+        encoding="utf-8",
+    )
+    report = tmp_path / "report.json"
+    _write_pressed_report(report)
+    html_path = report.with_suffix(".html")
+    html_path.write_text("<html>old</html>", encoding="utf-8")
+    report_before = report.read_bytes()
+    html_before = html_path.read_bytes()
+    ledger_before = ledger.read_bytes()
+
+    def _disk_full(*_args: object, **_kwargs: object) -> None:
+        assert report.read_bytes() != report_before, "前提：写账本时报告确已改写"
+        assert html_path.read_bytes() != html_before, "前提：写账本时 HTML 确已重渲"
+        raise exc
+
+    monkeypatch.setattr(lead_cmd, "save_restores", _disk_full)
+
+    res = runner.invoke(cli.app, [
+        "lead", "restore", str(report), "--value", _VALUE,
+        "--source", DOWNGRADE_REPACK_IDENTITY, "--note", "已差分核实",
+        "--corpus", str(corpus_dir),
+    ])
+
+    rendered = (res.stdout or "") + (res.stderr or "")
+    assert res.exit_code == 1
+    assert "报告已回滚" in rendered
+    assert "Traceback" not in rendered
+    assert not isinstance(res.exception, (OSError, ValueError))
+    assert report.read_bytes() == report_before
+    assert html_path.read_bytes() == html_before
+    assert ledger.read_bytes() == ledger_before
+    assert list(tmp_path.rglob("*.tmp")) == []
+
+
+def test_save_restores_refuses_oversize_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """锁住账本写前超限拒绝：save_restores 抛 ValueError，预置账本字节不变。"""
+    monkeypatch.setattr(lead_cmd, "REPORT_JSON_MAX_BYTES", 32)
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    ledger = corpus_dir / lead_cmd.RESTORES_NAME
+    ledger_before = b'{"k":"v"}\n'
+    ledger.write_bytes(ledger_before)
+
+    with pytest.raises(ValueError):
+        lead_cmd.save_restores(corpus_dir, [{
+            "sample_sha256": "a" * 64,
+            "category": "DOMAIN",
+            "value": "long.example.com",
+            "source": "x",
+            "note": "n",
+            "at": "t",
+        }])
+
+    assert ledger.read_bytes() == ledger_before
+
+
+def test_cli_restore_interrupt_after_write_rolls_back_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """写账本前 KeyboardInterrupt：报告、HTML、账本回到原字节，并告知回滚结果。"""
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    ledger = corpus_dir / lead_cmd.RESTORES_NAME
+    ledger.write_text(
+        '{"sample_sha256": "' + ("f" * 64) + '", "category": "DOMAIN", '
+        '"value": "other.example.com", "source": "x", "note": "n", "at": "t"}\n',
+        encoding="utf-8",
+    )
+    report = tmp_path / "report.json"
+    _write_pressed_report(report)
+    html_path = report.with_suffix(".html")
+    html_path.write_text("<html>old</html>", encoding="utf-8")
+    report_before = report.read_bytes()
+    html_before = html_path.read_bytes()
+    ledger_before = ledger.read_bytes()
+
+    def _interrupt(*_args: object, **_kwargs: object) -> None:
+        assert report.read_bytes() != report_before, "前提：中断时报告确已改写"
+        assert html_path.read_bytes() != html_before, "前提：中断时 HTML 确已重渲"
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(lead_cmd, "save_restores", _interrupt)
+
+    res = runner.invoke(cli.app, [
+        "lead", "restore", str(report), "--value", _VALUE,
+        "--source", DOWNGRADE_REPACK_IDENTITY, "--note", "已差分核实",
+        "--corpus", str(corpus_dir),
+    ])
+
+    rendered = (res.stdout or "") + (res.stderr or "")
+    assert "报告已回滚、未修改" in rendered
+    assert report.read_bytes() == report_before
+    assert html_path.read_bytes() == html_before
+    assert ledger.read_bytes() == ledger_before
+    # Typer 的 main 把 KeyboardInterrupt 收成 click.exceptions.Exit(130) 再 sys.exit(130)。
+    # CliRunner 得到的是 SystemExit，不是 KeyboardInterrupt。
+    assert res.exit_code == 130
+    assert isinstance(res.exception, SystemExit)
+
+
+def test_cli_restore_reread_failure_reports_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """重读刚写出的报告失败（typer.Exit）：回滚并同时留下原错误与回滚结果。"""
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    ledger = corpus_dir / lead_cmd.RESTORES_NAME
+    ledger.write_text(
+        '{"sample_sha256": "' + ("f" * 64) + '", "category": "DOMAIN", '
+        '"value": "other.example.com", "source": "x", "note": "n", "at": "t"}\n',
+        encoding="utf-8",
+    )
+    report = tmp_path / "report.json"
+    _write_pressed_report(report)
+    html_path = report.with_suffix(".html")
+    html_path.write_text("<html>old</html>", encoding="utf-8")
+    report_before = report.read_bytes()
+    html_before = html_path.read_bytes()
+
+    def _reread_fails(_path: Path) -> dict:
+        assert report.read_bytes() != report_before, "前提：重读失败时报告确已改写"
+        assert html_path.read_bytes() != html_before, "前提：重读失败时 HTML 确已重渲"
+        lead_cmd._fail("错误：报告读取/解析失败：x", 1)
+        return {}
+
+    monkeypatch.setattr(lead_cmd, "_load_report_payload", _reread_fails)
+
+    res = runner.invoke(cli.app, [
+        "lead", "restore", str(report), "--value", _VALUE,
+        "--source", DOWNGRADE_REPACK_IDENTITY, "--note", "已差分核实",
+        "--corpus", str(corpus_dir),
+    ])
+
+    rendered = (res.stdout or "") + (res.stderr or "")
+    assert res.exit_code == 1, rendered
+    assert "报告读取/解析失败" in rendered
+    assert "报告已回滚、未修改" in rendered
+    assert report.read_bytes() == report_before
+    assert html_path.read_bytes() == html_before
+
+
+def test_cli_restore_partial_rollback_names_failed_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """账本写入失败且 HTML 原地回滚再失败：点名失败文件，JSON 仍恢复，不打 traceback。"""
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    ledger = corpus_dir / lead_cmd.RESTORES_NAME
+    ledger.write_text(
+        '{"sample_sha256": "' + ("f" * 64) + '", "category": "DOMAIN", '
+        '"value": "other.example.com", "source": "x", "note": "n", "at": "t"}\n',
+        encoding="utf-8",
+    )
+    report = tmp_path / "report.json"
+    _write_pressed_report(report)
+    html_path = report.with_suffix(".html")
+    html_path.write_text("<html>old</html>", encoding="utf-8")
+    report_before = report.read_bytes()
+
+    def _disk_full(*_args: object, **_kwargs: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(lead_cmd, "save_restores", _disk_full)
+    original_write_bytes = lead_cmd.Path.write_bytes
+
+    def _write_bytes(self: Path, data: bytes) -> int:
+        if self == html_path:
+            raise OSError("html write failed")
+        return original_write_bytes(self, data)
+
+    monkeypatch.setattr(lead_cmd.Path, "write_bytes", _write_bytes)
+
+    res = runner.invoke(cli.app, [
+        "lead", "restore", str(report), "--value", _VALUE,
+        "--source", DOWNGRADE_REPACK_IDENTITY, "--note", "已差分核实",
+        "--corpus", str(corpus_dir),
+    ])
+
+    rendered = (res.stdout or "") + (res.stderr or "")
+    assert res.exit_code == 1, rendered
+    assert "报告回滚失败" in rendered
+    assert "report.html" in rendered
+    assert report.read_bytes() == report_before
+    assert "Traceback" not in rendered
+
+
+def test_rollback_html_restores_through_hardlink(tmp_path: Path) -> None:
+    """HTML 回滚原地写回，硬链接别名与报告指向同一 inode 且内容恢复。"""
+    alias = tmp_path / "alias.html"
+    html = tmp_path / "report.html"
+    alias.write_bytes(b"old")
+    try:
+        os.link(alias, html)
+    except OSError:
+        pytest.skip("os.link 不可用")
+    html.write_bytes(b"new")
+    report_json = tmp_path / "report.json"
+    report_json_bytes = b'{"snapshot":true}'
+    report_json.write_bytes(b'{"dirty":true}')
+
+    failed = lead_cmd._rollback_report(report_json, report_json_bytes, html, b"old")
+
+    assert failed == []
+    assert alias.read_bytes() == b"old"
+    assert os.stat(alias).st_ino == os.stat(html).st_ino
+
+
+def test_cli_restore_rollback_notice_failure_keeps_original_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """回滚提示写 stderr 失败时，原中断仍原样抛出（退出码 130），报告照样回滚。"""
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    report = tmp_path / "report.json"
+    _write_pressed_report(report)
+    report_before = report.read_bytes()
+
+    def _interrupt(*_args: object, **_kwargs: object) -> None:
+        raise KeyboardInterrupt()
+
+    real_secho = lead_cmd.typer.secho
+
+    def _secho(message: object = None, *args: object, **kwargs: object) -> None:
+        if "回滚" in str(message):
+            raise OSError("stderr broken")
+        real_secho(message, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(lead_cmd, "save_restores", _interrupt)
+    monkeypatch.setattr(lead_cmd.typer, "secho", _secho)
+
+    res = runner.invoke(cli.app, [
+        "lead", "restore", str(report), "--value", _VALUE,
+        "--source", DOWNGRADE_REPACK_IDENTITY, "--note", "已差分核实",
+        "--corpus", str(corpus_dir),
+    ])
+
+    assert res.exit_code == 130, res.output
+    assert not isinstance(res.exception, OSError)
+    assert report.read_bytes() == report_before

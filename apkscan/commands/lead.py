@@ -27,6 +27,7 @@ from apkscan.core.redact import warn_unredacted_agent_output
 from apkscan.core import report_io
 from apkscan.core.json_io import (
     REPORT_JSON_MAX_BYTES,
+    BoundedJsonError,
     load_json_file,
     loads_bounded,
     read_text_bounded,
@@ -102,10 +103,16 @@ def load_restores(corpus_dir: str | Path) -> list[dict]:
 
 
 def save_restores(corpus_dir: str | Path, entries: list[dict]) -> None:
-    """原子全量重写 restores.jsonl（与 manifest 同策略：要么旧内容完整、要么新内容完整）。"""
+    """原子全量重写 restores.jsonl（与 manifest 同策略：要么旧内容完整、要么新内容完整）。
+
+    超限会导致下次 load_restores 必然失败，所以写前拒绝、账本保持旧内容。
+    """
     from apkscan.core.atomic import atomic_write_text
 
     body = "".join(json.dumps(e, ensure_ascii=False, sort_keys=True) + "\n" for e in entries)
+    encoded = body.encode("utf-8")
+    if len(encoded) > REPORT_JSON_MAX_BYTES:
+        raise BoundedJsonError(f"restores ledger exceeds {REPORT_JSON_MAX_BYTES} bytes")
     atomic_write_text(str(restores_path(corpus_dir)), body)
 
 
@@ -199,6 +206,43 @@ def lead_show(
     ))
 
 
+def _rollback_report(
+    path: Path,
+    report_before: bytes,
+    html_path: Path,
+    html_before: bytes | None,
+) -> list[Path]:
+    """把报告与既有 HTML 写回快照。返回回滚失败的路径；空列表表示全部恢复。"""
+    from apkscan.core.atomic import atomic_write_bytes
+
+    failed: list[Path] = []
+    try:
+        atomic_write_bytes(path, report_before)
+    except OSError as exc:
+        logger.warning("报告回滚失败：%s（%s）", path, exc)
+        logger.debug("报告回滚失败：%s", path, exc_info=True)
+        failed.append(path)
+    if html_before is not None:
+        try:
+            # report_html.render 是 Path.write_text 原地写，回滚用同一方式才能把硬链接/符号链接指向的同一文件一并恢复，原子替换会断开链接、外部别名仍留新内容。
+            html_path.write_bytes(html_before)
+        except OSError as exc:
+            logger.warning("报告回滚失败：%s（%s）", html_path, exc)
+            logger.debug("报告回滚失败：%s", html_path, exc_info=True)
+            failed.append(html_path)
+    return failed
+
+
+def _rollback_message(failed: list[Path]) -> str:
+    """把回滚结果收成一句给用户的话。"""
+    if not failed:
+        return "报告已回滚、未修改"
+    return (
+        "报告回滚失败，以下文件可能已解除抑制但账本无凭据，请手工核对："
+        + "、".join(str(p) for p in failed)
+    )
+
+
 @lead_app.command("restore")
 def lead_restore(
     report: str = typer.Argument(..., help="report.json 路径（**原地**改写）。"),
@@ -270,24 +314,51 @@ def lead_restore(
             )
             raise
 
-    written = report_io.write_report(rep, path, render_existing_html=True)
-
     stored = 0
-    if corpus_root is not None:
-        raw = _load_report_payload(path)
-        sha, synthetic = _corpus.sample_identity(raw)
-        for lead in lifted:
-            entries = upsert_restore(entries, {
-                "sample_sha256": sha,
-                "sample_sha256_synthetic": synthetic,
-                "category": lead.category.value,
-                "value": lead.value,
-                "source": source,
-                "note": note,
-                "at": _now_iso(),
-            })
-            stored += 1
-        save_restores(corpus_root, entries)
+    if corpus_root is None:
+        written = report_io.write_report(rep, path, render_existing_html=True)
+    else:
+        try:
+            report_before = path.read_bytes()
+            html_path = path.with_suffix(".html")
+            html_before = html_path.read_bytes() if html_path.is_file() else None
+        except OSError:
+            _fail(f"错误：报告读取失败，未修改报告：{path}", 1)
+            raise
+        # ★账本写失败时报告必须回滚，否则报告已解除抑制而账本无凭据；身份依赖写出后的报告，所以无法先算账本。
+        try:
+            written = report_io.write_report(rep, path, render_existing_html=True)
+            raw = _load_report_payload(path)
+            sha, synthetic = _corpus.sample_identity(raw)
+            for lead in lifted:
+                entries = upsert_restore(entries, {
+                    "sample_sha256": sha,
+                    "sample_sha256_synthetic": synthetic,
+                    "category": lead.category.value,
+                    "value": lead.value,
+                    "source": source,
+                    "note": note,
+                    "at": _now_iso(),
+                })
+                stored += 1
+            save_restores(corpus_root, entries)
+        except (OSError, ValueError) as exc:
+            failed = _rollback_report(path, report_before, html_path, html_before)
+            _fail(
+                f"错误：报告或样本库恢复凭据写入失败，{_rollback_message(failed)}。"
+                f"恢复凭据：{restores_path(corpus_root)}（{exc}）",
+                1,
+            )
+            raise
+        except BaseException:
+            # typer.Exit（_load_report_payload 已提示原因）、Ctrl-C 等中断也必须回滚，并告诉用户回滚结果。
+            failed = _rollback_report(path, report_before, html_path, html_before)
+            try:
+                typer.secho(f"{_rollback_message(failed)}。", fg=typer.colors.RED, err=True)
+            except OSError:
+                # stderr 不可写时不能让提示失败顶替原异常（Ctrl-C 的退出语义会变）。
+                logger.debug("回滚结果提示输出失败", exc_info=True)
+            raise
 
     typer.echo(json.dumps({
         "lifted": [
