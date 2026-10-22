@@ -15,6 +15,16 @@ _PAGE = f"{_ORIGIN}/"
 _SCRIPT = f"{_ORIGIN}/app.js"
 
 
+def test_unknown_attachment_state_is_preserved() -> None:
+    payload = _payload()
+    payload["data"]["normalized_result"]["target"]["attached"] = None
+    raw = json.dumps(payload).encode()
+    receipt, files = project(raw)
+    assert receipt["target"]["attached"] is None
+    assert files["rea-original.json"] == raw
+    assert receipt["coverage"]["status"] == "partial"
+
+
 def _artifact(text: str) -> dict[str, object]:
     raw = text.encode("utf-8")
     return {

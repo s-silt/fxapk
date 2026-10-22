@@ -19,7 +19,7 @@ REA 插件默认关闭：即使已安装也不导入、不注册命令、不用�
 | 普通 HTML / HAR | `fxapk analyze-web`，不走 REA |
 | 还没有报告 | 在本来要跑的 `analyze` / `analyze-web` / `auto` 上加 `--web-supplement <本地JSON>` |
 | 已有报告，只补网页 | `fxapk supplement-web <report.json> --web-supplement <config> --out <new-out-dir>`（不重跑 APK、不碰设备、不闭环） |
-| 已保存的 REA 6.4.0 完整 CLI JSON | `source=rea-json`，或单独 `fxapk rea import` |
+| 已保存的 REA 6.4.0 / 6.7.0 的 inspect_web_page 完整 CLI JSON | `source=rea-json`，或单独 `fxapk rea import` |
 | 已核验 bundle | `source=bundle`；核验前提供方未知 |
 | 现场单个 CDP target | `source=cdp` 且授权完整；缺插件或目标时停在该步并保留稳定原因 |
 | 相关 target（同源 Worker / OOPIF） | `related_targets=true`；不含 service / shared worker |
@@ -82,4 +82,4 @@ REA bundle 不能直接交给 `fxapk analyze-web` 或案件直接证据入口；
 
 交付时写明：做了哪条命令、原件哈希、看见的边、没看见的作用域、为什么停。未过证据门不称案件闭环。人工复核可抄 [references/synthetic-acceptance.md](references/synthetic-acceptance.md) 的记录模板；填完模板不是新的机器收据。
 
-REA 6.4.0 导航兼容修复：`python -m fxapk_rea.rea_compat --root <rea-agents包目录> --apply`，哈希钉定、未知修改拒绝；失效源码记 `provider_unavailable`；inspect 只在安全退出后对原目标重开一次新窗口，首轮原件保留，第二轮仍失败则如实失败。
+REA 6.4.0 / 6.7.0 导航兼容修复：`python -m fxapk_rea.rea_compat --root <rea-agents包目录> --apply`，按版本分别哈希钉定、未知修改拒绝；失效源码记 `provider_unavailable`；inspect 只在安全退出后对原目标重开一次新窗口，首轮原件保留，第二轮仍失败则如实失败。

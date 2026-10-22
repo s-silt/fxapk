@@ -20,7 +20,7 @@ from typing import Any
 from apkscan.core.atomic import atomic_create_bytes
 
 from .evidence import EvidenceError
-from .runtime import ReaRuntime, run_bounded
+from .runtime import SUPPORTED_REA, ReaRuntime, run_bounded
 
 SUPPORTED_PROVIDERS = frozenset({"ghidra", "ida", "hopper"})
 OPERATIONS = {
@@ -329,7 +329,7 @@ def _host_limits() -> dict[str, Any]:
         "live_target_verified": False,
         "engine_executed_for_target": False,
         "binary_read_limit_bytes": MAX_BINARY_BYTES,
-        "supported_rea_versions": ["6.4.0"],
+        "supported_rea_versions": sorted(SUPPORTED_REA),
         "supported_providers": sorted(SUPPORTED_PROVIDERS),
         "read_only_operations": sorted(OPERATIONS),
     }

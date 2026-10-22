@@ -1,4 +1,4 @@
 # Direct worker dependencies. Provider source identity is verified at runtime.
-droidasc==0.1.1.post5
+droidasc==0.1.2.post2
 axml==0.0.2
 mutf8==1.1.0

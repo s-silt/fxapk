@@ -38,9 +38,17 @@ META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
 WORKER_REQUEST_SCHEMA = "asc-worker-request/1"
 WORKER_RESULT_SCHEMA = "asc-worker-result/1"
 PINNED_PROVIDER = "asc"
-PINNED_VERSION = "0.1.1.post5"
-PINNED_REVISION = "d3d75ab7a3c092345102d2ec66ab614ad4a6cc75"
-PINNED_FINDREFS_SHA256 = "99f170737a2a9fb67e4a7a681b98fbc0f56d9e53601cb33f3125b37fd6487b7c"
+PINNED_VERSION = "0.1.2.post2"
+PINNED_REVISION = "b93cbd0798131312b6dc083198e6decbca28a12e"
+PINNED_FINDREFS_SHA256 = "19bab436bf154df6ca1da9cbede95e004de8260a6b22a5d2231862f94efde503"
+# Preserve exact legacy identities for rollback and immutable receipt replay.
+SUPPORTED_IDENTITIES = {
+    PINNED_VERSION: (PINNED_REVISION, PINNED_FINDREFS_SHA256),
+    "0.1.1.post5": (
+        "d3d75ab7a3c092345102d2ec66ab614ad4a6cc75",
+        "99f170737a2a9fb67e4a7a681b98fbc0f56d9e53601cb33f3125b37fd6487b7c",
+    ),
+}
 SOURCE_STATIC_XREF = "static-dex-xref"
 _DOMAIN_RE = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+"
@@ -140,6 +148,14 @@ def resolve_worker_argv() -> list[str] | None:
     return [sys.executable, "-I", "-m", "fxapk_asc.worker"]
 
 
+def _supported_identity(payload: Mapping[str, Any], *, source_hash: bool = True) -> bool:
+    version = payload.get("provider_version")
+    expected = SUPPORTED_IDENTITIES.get(version) if isinstance(version, str) else None
+    return expected is not None and payload.get("provider_revision") == expected[0] and (
+        not source_hash or payload.get("findrefs_sha256") == expected[1]
+    )
+
+
 def _unavailable(reason: str = "provider_unavailable") -> dict[str, object]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -167,11 +183,7 @@ def capabilities(
         return _unavailable(reason or "provider_unavailable")
     version = payload.get("provider_version")
     revision = payload.get("provider_revision")
-    if (
-        version != PINNED_VERSION
-        or revision != PINNED_REVISION
-        or payload.get("findrefs_sha256") != PINNED_FINDREFS_SHA256
-    ):
+    if not _supported_identity(payload):
         return _unavailable("provider_version_mismatch")
     if payload.get("runtime_encoding") == "rejected":
         return _unavailable("runtime_encoding_rejected")
@@ -180,8 +192,8 @@ def capabilities(
     return {
         "schema_version": SCHEMA_VERSION,
         "provider": PINNED_PROVIDER,
-        "provider_version": PINNED_VERSION,
-        "provider_revision": PINNED_REVISION,
+        "provider_version": version,
+        "provider_revision": revision,
         "available": True,
         "reason": None,
         "engine_executed": False,
@@ -284,11 +296,7 @@ def query_apk(
         payload, reason = _invoke_worker(argv, request, bounds, query=True)
     if payload is None:
         raise DexQueryError(reason or "provider_unavailable")
-    if (
-        payload.get("provider_version") != PINNED_VERSION
-        or payload.get("provider_revision") != PINNED_REVISION
-        or payload.get("findrefs_sha256") != PINNED_FINDREFS_SHA256
-    ):
+    if not _supported_identity(payload):
         raise DexQueryError("provider_version_mismatch")
     if payload.get("reason") == "runtime_encoding_rejected" or payload.get("runtime_encoding") != "mutf8-1.1.0":
         raise DexQueryError("runtime_encoding_rejected")
@@ -616,8 +624,8 @@ def _receipt_from_worker(
     receipt: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "provider": PINNED_PROVIDER,
-        "provider_version": PINNED_VERSION,
-        "provider_revision": PINNED_REVISION,
+        "provider_version": payload.get("provider_version", PINNED_VERSION),
+        "provider_revision": payload.get("provider_revision", PINNED_REVISION),
         "apk_sha256": apk_hash,
         "query_kind": "string-xref",
         "query_summary_sha256": summary,
@@ -730,10 +738,7 @@ def _validate_receipt(receipt: Mapping[str, Any]) -> None:
         raise DexQueryError("invalid_schema")
     if receipt.get("provider") != PINNED_PROVIDER:
         raise DexQueryError("unsupported_provider")
-    if (
-        receipt.get("provider_version") != PINNED_VERSION
-        or receipt.get("provider_revision") != PINNED_REVISION
-    ):
+    if not _supported_identity(receipt, source_hash=False):
         raise DexQueryError("provider_version_mismatch")
     if receipt.get("engine_executed") is not True:
         raise DexQueryError("engine_not_executed")

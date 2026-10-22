@@ -14,9 +14,16 @@ import sys
 from pathlib import Path
 from typing import Any
 
-PINNED_VERSION = "0.1.1.post5"
-PINNED_REVISION = "d3d75ab7a3c092345102d2ec66ab614ad4a6cc75"
-PINNED_FINDREFS_SHA256 = "99f170737a2a9fb67e4a7a681b98fbc0f56d9e53601cb33f3125b37fd6487b7c"
+PINNED_VERSION = "0.1.2.post2"
+PINNED_REVISION = "b93cbd0798131312b6dc083198e6decbca28a12e"
+PINNED_FINDREFS_SHA256 = "19bab436bf154df6ca1da9cbede95e004de8260a6b22a5d2231862f94efde503"
+SUPPORTED_IDENTITIES = {
+    PINNED_VERSION: (PINNED_REVISION, PINNED_FINDREFS_SHA256),
+    "0.1.1.post5": (
+        "d3d75ab7a3c092345102d2ec66ab614ad4a6cc75",
+        "99f170737a2a9fb67e4a7a681b98fbc0f56d9e53601cb33f3125b37fd6487b7c",
+    ),
+}
 _SUPPORTED_MAGIC = {b"035", b"037", b"038", b"039"}
 
 
@@ -47,7 +54,8 @@ def _identity() -> dict[str, str]:
     except importlib.metadata.PackageNotFoundError:
         version = ""
     digest = _findrefs_sha256()
-    revision = PINNED_REVISION if digest == PINNED_FINDREFS_SHA256 else "unknown"
+    expected = SUPPORTED_IDENTITIES.get(version)
+    revision = expected[0] if expected is not None and digest == expected[1] else "unknown"
     return {
         "provider_version": version,
         "provider_revision": revision,
