@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -955,3 +956,154 @@ def test_save_restores_refuses_oversize_ledger(
         }])
 
     assert ledger.read_bytes() == ledger_before
+
+
+def test_cli_restore_interrupt_after_write_rolls_back_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """写账本前 KeyboardInterrupt：报告、HTML、账本回到原字节，并告知回滚结果。"""
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    ledger = corpus_dir / lead_cmd.RESTORES_NAME
+    ledger.write_text(
+        '{"sample_sha256": "' + ("f" * 64) + '", "category": "DOMAIN", '
+        '"value": "other.example.com", "source": "x", "note": "n", "at": "t"}\n',
+        encoding="utf-8",
+    )
+    report = tmp_path / "report.json"
+    _write_pressed_report(report)
+    html_path = report.with_suffix(".html")
+    html_path.write_text("<html>old</html>", encoding="utf-8")
+    report_before = report.read_bytes()
+    html_before = html_path.read_bytes()
+    ledger_before = ledger.read_bytes()
+
+    def _interrupt(*_args: object, **_kwargs: object) -> None:
+        assert report.read_bytes() != report_before, "前提：中断时报告确已改写"
+        assert html_path.read_bytes() != html_before, "前提：中断时 HTML 确已重渲"
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(lead_cmd, "save_restores", _interrupt)
+
+    res = runner.invoke(cli.app, [
+        "lead", "restore", str(report), "--value", _VALUE,
+        "--source", DOWNGRADE_REPACK_IDENTITY, "--note", "已差分核实",
+        "--corpus", str(corpus_dir),
+    ])
+
+    rendered = (res.stdout or "") + (res.stderr or "")
+    assert "报告已回滚、未修改" in rendered
+    assert report.read_bytes() == report_before
+    assert html_path.read_bytes() == html_before
+    assert ledger.read_bytes() == ledger_before
+    # Typer 的 main 把 KeyboardInterrupt 收成 click.exceptions.Exit(130) 再 sys.exit(130)。
+    # CliRunner 得到的是 SystemExit，不是 KeyboardInterrupt。
+    assert res.exit_code == 130
+    assert isinstance(res.exception, SystemExit)
+
+
+def test_cli_restore_reread_failure_reports_rollback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """重读刚写出的报告失败（typer.Exit）：回滚并同时留下原错误与回滚结果。"""
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    ledger = corpus_dir / lead_cmd.RESTORES_NAME
+    ledger.write_text(
+        '{"sample_sha256": "' + ("f" * 64) + '", "category": "DOMAIN", '
+        '"value": "other.example.com", "source": "x", "note": "n", "at": "t"}\n',
+        encoding="utf-8",
+    )
+    report = tmp_path / "report.json"
+    _write_pressed_report(report)
+    html_path = report.with_suffix(".html")
+    html_path.write_text("<html>old</html>", encoding="utf-8")
+    report_before = report.read_bytes()
+    html_before = html_path.read_bytes()
+
+    def _reread_fails(_path: Path) -> dict:
+        assert report.read_bytes() != report_before, "前提：重读失败时报告确已改写"
+        assert html_path.read_bytes() != html_before, "前提：重读失败时 HTML 确已重渲"
+        lead_cmd._fail("错误：报告读取/解析失败：x", 1)
+        return {}
+
+    monkeypatch.setattr(lead_cmd, "_load_report_payload", _reread_fails)
+
+    res = runner.invoke(cli.app, [
+        "lead", "restore", str(report), "--value", _VALUE,
+        "--source", DOWNGRADE_REPACK_IDENTITY, "--note", "已差分核实",
+        "--corpus", str(corpus_dir),
+    ])
+
+    rendered = (res.stdout or "") + (res.stderr or "")
+    assert res.exit_code == 1, rendered
+    assert "报告读取/解析失败" in rendered
+    assert "报告已回滚、未修改" in rendered
+    assert report.read_bytes() == report_before
+    assert html_path.read_bytes() == html_before
+
+
+def test_cli_restore_partial_rollback_names_failed_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """账本写入失败且 HTML 原地回滚再失败：点名失败文件，JSON 仍恢复，不打 traceback。"""
+    corpus_dir = tmp_path / "corpus"
+    corpus_dir.mkdir()
+    ledger = corpus_dir / lead_cmd.RESTORES_NAME
+    ledger.write_text(
+        '{"sample_sha256": "' + ("f" * 64) + '", "category": "DOMAIN", '
+        '"value": "other.example.com", "source": "x", "note": "n", "at": "t"}\n',
+        encoding="utf-8",
+    )
+    report = tmp_path / "report.json"
+    _write_pressed_report(report)
+    html_path = report.with_suffix(".html")
+    html_path.write_text("<html>old</html>", encoding="utf-8")
+    report_before = report.read_bytes()
+
+    def _disk_full(*_args: object, **_kwargs: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(lead_cmd, "save_restores", _disk_full)
+    original_write_bytes = lead_cmd.Path.write_bytes
+
+    def _write_bytes(self: Path, data: bytes) -> int:
+        if self == html_path:
+            raise OSError("html write failed")
+        return original_write_bytes(self, data)
+
+    monkeypatch.setattr(lead_cmd.Path, "write_bytes", _write_bytes)
+
+    res = runner.invoke(cli.app, [
+        "lead", "restore", str(report), "--value", _VALUE,
+        "--source", DOWNGRADE_REPACK_IDENTITY, "--note", "已差分核实",
+        "--corpus", str(corpus_dir),
+    ])
+
+    rendered = (res.stdout or "") + (res.stderr or "")
+    assert res.exit_code == 1, rendered
+    assert "报告回滚失败" in rendered
+    assert "report.html" in rendered
+    assert report.read_bytes() == report_before
+    assert "Traceback" not in rendered
+
+
+def test_rollback_html_restores_through_hardlink(tmp_path: Path) -> None:
+    """HTML 回滚原地写回，硬链接别名与报告指向同一 inode 且内容恢复。"""
+    alias = tmp_path / "alias.html"
+    html = tmp_path / "report.html"
+    alias.write_bytes(b"old")
+    try:
+        os.link(alias, html)
+    except OSError:
+        pytest.skip("os.link 不可用")
+    html.write_bytes(b"new")
+    report_json = tmp_path / "report.json"
+    report_json_bytes = b'{"snapshot":true}'
+    report_json.write_bytes(b'{"dirty":true}')
+
+    failed = lead_cmd._rollback_report(report_json, report_json_bytes, html, b"old")
+
+    assert failed == []
+    assert alias.read_bytes() == b"old"
+    assert os.stat(alias).st_ino == os.stat(html).st_ino

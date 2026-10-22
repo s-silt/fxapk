@@ -211,18 +211,36 @@ def _rollback_report(
     report_before: bytes,
     html_path: Path,
     html_before: bytes | None,
-) -> bool:
-    """把报告与既有 HTML 写回快照。全部成功返回 True，任一 OSError 返回 False。"""
+) -> list[Path]:
+    """把报告与既有 HTML 写回快照。返回回滚失败的路径；空列表表示全部恢复。"""
     from apkscan.core.atomic import atomic_write_bytes
 
+    failed: list[Path] = []
     try:
         atomic_write_bytes(path, report_before)
-        if html_before is not None:
-            atomic_write_bytes(html_path, html_before)
-    except OSError:
-        logger.warning("报告回滚失败：%s", path, exc_info=True)
-        return False
-    return True
+    except OSError as exc:
+        logger.warning("报告回滚失败：%s（%s）", path, exc)
+        logger.debug("报告回滚失败：%s", path, exc_info=True)
+        failed.append(path)
+    if html_before is not None:
+        try:
+            # report_html.render 是 Path.write_text 原地写，回滚用同一方式才能把硬链接/符号链接指向的同一文件一并恢复，原子替换会断开链接、外部别名仍留新内容。
+            html_path.write_bytes(html_before)
+        except OSError as exc:
+            logger.warning("报告回滚失败：%s（%s）", html_path, exc)
+            logger.debug("报告回滚失败：%s", html_path, exc_info=True)
+            failed.append(html_path)
+    return failed
+
+
+def _rollback_message(failed: list[Path]) -> str:
+    """把回滚结果收成一句给用户的话。"""
+    if not failed:
+        return "报告已回滚、未修改"
+    return (
+        "报告回滚失败，以下文件可能已解除抑制但账本无凭据，请手工核对："
+        + "、".join(str(p) for p in failed)
+    )
 
 
 @lead_app.command("restore")
@@ -325,24 +343,17 @@ def lead_restore(
                 stored += 1
             save_restores(corpus_root, entries)
         except (OSError, ValueError) as exc:
-            if _rollback_report(path, report_before, html_path, html_before):
-                _fail(
-                    "错误：报告或样本库恢复凭据写入失败，报告已回滚、未修改，恢复凭据："
-                    f"{restores_path(corpus_root)}（{exc}）",
-                    1,
-                )
-            else:
-                _fail(
-                    "错误：报告或样本库恢复凭据写入失败，且报告回滚失败，"
-                    f"报告可能已解除抑制但账本无凭据，请手工核对：{path}",
-                    1,
-                )
+            failed = _rollback_report(path, report_before, html_path, html_before)
+            _fail(
+                f"错误：报告或样本库恢复凭据写入失败，{_rollback_message(failed)}。"
+                f"恢复凭据：{restores_path(corpus_root)}（{exc}）",
+                1,
+            )
             raise
-        except Exception:
-            # typer.Exit（_load_report_payload 已给出友好提示）与 HTML 渲染等意外异常：
-            # 同样回滚，原样重抛；回滚失败时改报需人工核对。
-            if not _rollback_report(path, report_before, html_path, html_before):
-                _fail(f"错误：报告回滚失败，报告可能已解除抑制但账本无凭据，请手工核对：{path}", 1)
+        except BaseException:
+            # typer.Exit（_load_report_payload 已提示原因）、Ctrl-C 等中断也必须回滚，并告诉用户回滚结果。
+            failed = _rollback_report(path, report_before, html_path, html_before)
+            typer.secho(f"{_rollback_message(failed)}。", fg=typer.colors.RED, err=True)
             raise
 
     typer.echo(json.dumps({
