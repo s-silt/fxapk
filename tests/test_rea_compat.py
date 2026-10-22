@@ -17,14 +17,16 @@ def compat(monkeypatch):
     return importlib.import_module("fxapk_rea.rea_compat")
 
 
-def test_pinned_repair_dry_run_idempotence_and_unknown_source(compat, tmp_path, monkeypatch):
-    (tmp_path / "package.json").write_text('{"name":"rea-agents","version":"6.4.0"}')
+@pytest.mark.parametrize("version", ["6.4.0", "6.7.0"])
+def test_pinned_repair_dry_run_idempotence_and_unknown_source(compat, tmp_path, monkeypatch, version):
+    (tmp_path / "package.json").write_text(json.dumps({"name": "rea-agents", "version": version}))
     target = tmp_path / compat.RELATIVE
     target.parent.mkdir(parents=True)
     before = ("// fixture\n" + compat._OLD).encode()
     after = (compat._IMPORT + "// fixture\n" + compat._NEW).encode()
-    monkeypatch.setattr(compat, "BEFORE_SHA256", hashlib.sha256(before).hexdigest())
-    monkeypatch.setattr(compat, "AFTER_SHA256", hashlib.sha256(after).hexdigest())
+    suffix = "_670" if version == "6.7.0" else ""
+    monkeypatch.setattr(compat, f"BEFORE{suffix}_SHA256", hashlib.sha256(before).hexdigest())
+    monkeypatch.setattr(compat, f"AFTER{suffix}_SHA256", hashlib.sha256(after).hexdigest())
     target.write_bytes(before)
     assert compat.repair(tmp_path)["changed"]
     assert target.read_bytes() == before

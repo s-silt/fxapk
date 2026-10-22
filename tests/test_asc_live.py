@@ -34,7 +34,12 @@ def _require_worker() -> list[str]:
 def _apk_handler_names(apk: Path) -> list[str]:
     script = (
         "import json, mmap, sys\n"
-        "from droidasc.asc_client.apk_handler import _parse_cd_dex_entries\n"
+        "try:\n"
+        "    from droidasc.asc_client.apk.loader import _parse_cd_dex_entries\n"
+        "except ModuleNotFoundError as exc:\n"
+        "    if exc.name != 'droidasc.asc_client.apk':\n"
+        "        raise\n"
+        "    from droidasc.asc_client.apk_handler import _parse_cd_dex_entries\n"
         "with open(sys.argv[1], 'rb') as handle:\n"
         "    mapped = mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ)\n"
         "    print(json.dumps([item[0] for item in _parse_cd_dex_entries(mapped)]))\n"
