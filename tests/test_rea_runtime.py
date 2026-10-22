@@ -58,7 +58,7 @@ def test_nonzero_exit_cannot_pass(runtime, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "version,available", [("6.4.0", True), ("6.5.0", False), ("nonsense", False)]
+    "version,available", [("6.4.0", True), ("6.7.0", True), ("6.5.0", False), ("nonsense", False)]
 )
 def test_runtime_requires_verified_version(runtime, tmp_path, monkeypatch, version, available):
     executable = tmp_path / "rea"

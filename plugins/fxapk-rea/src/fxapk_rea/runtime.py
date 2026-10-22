@@ -19,7 +19,7 @@ from apkscan.core.proctree import run_owned
 from .evidence import EvidenceError, MAX_INPUT_BYTES, origin_of, read_bounded
 from .rea_compat import provenance
 
-SUPPORTED_REA = frozenset({"6.4.0"})
+SUPPORTED_REA = frozenset({"6.4.0", "6.7.0"})
 
 
 def validate_endpoint(endpoint: str) -> str:

@@ -10,7 +10,7 @@ readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.11"
 dependencies = [
-    "droidasc==0.1.1.post5",
+    "droidasc==0.1.2.post2",
     "axml==0.0.2",
     "mutf8==1.1.0",
 ]

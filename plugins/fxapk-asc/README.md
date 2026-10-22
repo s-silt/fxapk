@@ -1,7 +1,10 @@
 # fxapk-asc
 
-可选插件。`fxapk dex query` 通过隔离进程调用固定版本的 ASC（droidasc 0.1.1.post5，
-修订 d3d75ab7a3c092345102d2ec66ab614ad4a6cc75）。核心包不依赖本插件。
+可选插件。`fxapk dex query` 通过隔离进程调用固定版本的 ASC（droidasc 0.1.2.post2，
+修订 b93cbd0798131312b6dc083198e6decbca28a12e）。核心包不依赖本插件。
+旧版 0.1.1.post5 的固定修订和源码哈希仍可用于回退与旧回执重放；版本、修订和
+源码哈希必须来自同一受支持组合，新回执记录实际执行版本，不把旧证据改写成新版。
+MUTF-8 精确匹配、隔离内存/超时及原件身份检查保持不变。
 
 未安装时 `fxapk dex capabilities` 返回 `provider_unavailable`。本插件不注册进
 `fxapk.plugins` 进程内加载表，避免宿主导入 ASC。

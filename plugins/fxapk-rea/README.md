@@ -26,7 +26,7 @@ $env:FXAPK_ENABLE_REA='1'
 fxapk rea --help
 ```
 
-- 离线 `import` 不需要 Node、REA 或浏览器。在线 `inspect` 只验收 REA **6.4.0**，其他版本拒绝执行。
+- 离线 `import` 不需要 Node、REA 或浏览器。在线 `inspect` 支持 REA **6.4.0 / 6.7.0**，其他版本拒绝执行；旧版可用于回退。
 - `trace` 不依赖 Node 或 REA，只依赖 `[trace]` extra 和调用方已启动并打开页面的 Chrome（数字回环 HTTP CDP）。缺 extra 时 `--help` 仍可用，采集失败原因为 `trace_dependency_missing`。
 - Node 与浏览器另行准备；插件不安装软件、不注册全局 MCP、不启动浏览器。Windows 把 `--rea` 指向安装包的 `scripts/rea.mjs`，可用 `--node` 指定 Node；不执行 `.cmd`/`.bat` 或 npx 下载。
 
@@ -36,7 +36,7 @@ fxapk rea --help
 
 **自动补采**：`analyze` / `analyze-web` / `auto` 加 `--web-supplement <本地JSON>`；已有报告用 `fxapk supplement-web <report.json> --web-supplement <config> --out <new-out-dir>`（只读报告，不重跑 APK、不碰设备、不闭环）。fxapk 按配置和本机能力调度本插件，低信任候选以待核 / LOW / `batch_reference` 进入现有解析器；同值旧线索保持原等级，不自动富化。
 
-- `source=bundle` 与 `source=rea-json`（REA 6.4.0 完整 CLI JSON）做离线校验。`source=cdp` 还需 `authorized=true`、数字回环 `endpoint`、`target` 和 exact `exact_origins`。
+- `source=bundle` 与 `source=rea-json`（REA 6.4.0 / 6.7.0 的 `inspect_web_page` 完整 CLI JSON）做离线校验。`source=cdp` 还需 `authorized=true`、数字回环 `endpoint`、`target` 和 exact `exact_origins`。
 - 同窗口实时采集只接受 `trace` / `fxapk-cdp-trace`。`provider=rea|inspect` 且 `source=cdp` 以 `provider_mismatch` 跳过，不改写成 trace。`inspect` 始终是独立入口。
 - 配置可带严格布尔 `related_targets`（默认 false）。`navigate`、`click_selector`、`pause_related_start` 不是配置字段：需要时先在授权的 `fxapk rea trace` 显式传参，再把 bundle 交给 `supplement-web`。
 - 是否回填以报告里的 `meta.web_supplement` / `meta.web_supplement_runtime` 为准。真实 Android WebView 尚未实机验收。
@@ -58,6 +58,8 @@ fxapk rea attach --bundle out/cdp-trace-01 --report D:/evidence/sample-report.js
 **capabilities**：只查本地前置，浏览器恒 `not_probed`；`status=ok` 不是实测。
 
 **inspect**：连接调用方准备的数字回环 CDP，绑定 target ID 与单个 exact origin。只观察：不导航、不点击、不读 Cookie/存储、不抓 source map，没有 trace 的跨 frame / worker / parentId 桥。控制台文字须 `--console-text`。origin 过滤只限制证据采集范围，不是流量防火墙。target ID 可用 REA `list-browser-targets` 查询。观察窗口从 REA 实际附加开始。
+
+验收时保持 inspect 观察期间的文档不变；不要在启动子进程后用整页刷新制造请求。同源刷新也会触发 `target_changed`，适配层随后重试的新窗口可能开始于加载完成之后，得到 `status=ok`、零请求。应核对 `execution.json` 的 `navigation_retry`、保留的首轮输出以及最终 `capture_window`；零请求只描述最终窗口，不代表页面没有发过请求。验证页面导航请求用 `trace --navigate`；验证 inspect 可用同一文档内已授权的操作，诊断用静态资源 GET 须单独标注，不能计作业务流程成功。inspect 没有对调用方公开的 ready 回执，固定等待时间不能充当就绪确认。
 
 **trace**（独立提供方 `fxapk-cdp-trace`）：只附着给出的 page target，启用 Page / Runtime / Debugger / Network，async stack depth 32。`ready.json` 在命令全部 ACK、顶层 frame 属于该 origin、且看到同 origin 执行上下文后才写出，表示已开始记录，不保证之后事件送达。观察不到附着前的脚本解析和请求。顶层 frame 离开 exact origin 时以 `top_frame_origin_rejected` 失败。结束只 detach 自己的 session，不关浏览器。显式开关（默认全关）：
 
@@ -121,11 +123,13 @@ fxapk rea native attach out/native-recovery-01 --report out/app.json --out out/a
 
 `address-to-file-offset` 返回文件偏移（不是虚拟地址）；`read-bytes --length` 只是有界观察；两者都不自动进入 recover。配方必须显式文件偏移和期望字节，只重算声明过的变换，终止转换是最后一步；字节对上也只说明声明的变换重算成功，`relation_verified` 保持 false。attach 搬运 `native_recovery_input`、native recovery 文件与网页观察附件；PCAP 等未搬运类型仍只指向 `source_artifact_base`。
 
-## REA 6.4.0 导航兼容修复
+## REA 6.4.0 / 6.7.0 导航兼容修复
 
-`python -m fxapk_rea.rea_compat --root <rea-agents包目录> --apply`（不带 `--apply` 只核验）。只接受已知 6.4.0 源文件哈希或本补丁哈希，未知修改拒绝覆盖，可重复执行；普通采集不修改依赖。`capabilities` 与 `execution.json` 记录实际补丁 ID 与源码 SHA-256。
+`python -m fxapk_rea.rea_compat --root <rea-agents包目录> --apply`（不带 `--apply` 只核验）。按包版本分别核验 6.4.0 / 6.7.0 源文件与补丁哈希，未知修改拒绝覆盖，可重复执行；普通采集不修改依赖。`capabilities` 与 `execution.json` 记录实际补丁 ID 与源码 SHA-256。
 
-已销毁脚本的明确 CDP `-32000` 错误记作 `script_sources/provider_unavailable`，保留其他证据。inspect 遇此错误且进程完整退出时，只允许对原 target/origin 再开一次观察窗口（`new_observation_window_after_navigation`）；首轮原件与回执保留，不混合文档，第二次仍变化则失败。
+6.7.0 的被动 `inspect_web_page` 仍使用 `rea-cdp-browser/2`，完整原件与 completeness 保留；target 的 `attached=null` 原样保留为未知。上游场景捕获的 limits/event families 合同属于不同 operation，不纳入本插件的被动 inspect 支持声明。
+
+已销毁脚本的明确 CDP `-32000` 错误记作 `script_sources/provider_unavailable`，保留其他证据。inspect 返回导航导致的 `target_changed` 且进程完整退出时，只允许对原 target/origin 再开一次观察窗口（`new_observation_window_after_navigation`）；首轮原件与回执保留，不混合文档，第二次仍变化则失败。
 
 ## 合成夹具与验证
 
