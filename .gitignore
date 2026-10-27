@@ -72,4 +72,9 @@ ybku/
 .enrich_cache/
 
 # 设计/过程文档只留本地，不进公开仓库（2026-08-16 用户指示）
-docs/
+# 例外：给执行 agent 的开发任务书是仓库内指令（对标 AGENTS.md），不是案件过程文档。
+# 父目录若整体排除则子项无法再被重新包含，故这里排除 docs/* 而非 docs/。
+docs/*
+!docs/dev/
+docs/dev/*
+!docs/dev/*.md
