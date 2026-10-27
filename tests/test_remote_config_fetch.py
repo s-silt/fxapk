@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import gzip
+import ipaddress
 import json
 
 import pytest
@@ -184,6 +185,37 @@ def test_target_is_safe_blocks_internal_and_metadata() -> None:
     assert _target_is_safe("https://8.8.8.8/x")[0] is True  # 公网放行
 
 
+def test_target_is_safe_blocks_non_global_and_embedded_ipv4() -> None:
+    from apkscan.config.fetch import _target_is_safe
+    from tests.doc_addresses import GLOBAL_FIXTURE_IP, assert_global_fixture_contract
+
+    assert_global_fixture_contract()
+
+    for bad in (
+        "http://100.64.0.1/",
+        "http://100.127.255.254/",
+        "http://[::ffff:100.64.0.1]/",
+        "http://[::ffff:10.0.0.1]/",
+        "http://[64:ff9b::a00:1]/",  # leak-scan: allow NAT64 内嵌非公网 IPv4 回归夹具，判据要求该字面
+        "http://[64:ff9b::6440:1]/",  # leak-scan: allow NAT64 内嵌非公网 IPv4 回归夹具，判据要求该字面
+        "http://[64:ff9b:1::1]/",
+        "http://[2002:a00:1::]/",
+        "http://198.18.0.1/",
+        "http://192.0.0.1/",
+        "http://224.0.0.1/",  # leak-scan: allow 多播段回归夹具，判据要求该字面
+    ):
+        assert _target_is_safe(bad)[0] is False, bad
+    nat64_public = ipaddress.IPv6Address(
+        (0x64FF9B << 96) | int(ipaddress.IPv4Address(GLOBAL_FIXTURE_IP))
+    )
+    for public in (
+        "http://8.8.8.8/",
+        f"http://{GLOBAL_FIXTURE_IP}/",
+        f"http://[{nat64_public}]/",
+    ):
+        assert _target_is_safe(public)[0] is True, public
+
+
 def test_fetch_blocks_ssrf_before_request(monkeypatch) -> None:
     pytest.importorskip("requests")
 
@@ -236,7 +268,15 @@ class _FakeSock:
 def test_assert_peer_public_blocks_internal_and_closes() -> None:
     from apkscan.config.fetch import _assert_peer_public, _BlockedPeerError
 
-    for bad in ("169.254.169.254", "127.0.0.1", "10.0.0.1", "192.168.1.1", "172.16.0.1", "::1"):
+    for bad in (
+        "169.254.169.254",
+        "127.0.0.1",
+        "10.0.0.1",
+        "192.168.1.1",
+        "172.16.0.1",
+        "::1",
+        "100.64.0.1",
+    ):
         sock = _FakeSock(bad)
         with pytest.raises(_BlockedPeerError):
             _assert_peer_public(sock)
