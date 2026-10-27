@@ -5,8 +5,8 @@
 ``ok=False`` + error，绝不抛。下到的是**未信任的第三方字节**：只存不执行，交给 ``config.decode`` 离线解码。
 
 ★SSRF 双层防护（URL 来自对手可控的 APK 字符串）：
-1. **预解析校验** ``_target_is_safe``：连接前把 host 解析成 IP，凡内网/回环/链路本地(含云元数据
-   169.254.169.254)/保留/多播即拒；并 ``allow_redirects=False`` 禁 302→内网。
+1. **预解析校验** ``_target_is_safe``：连接前把 host 解析成 IP，非公网（``is_global`` 为假，含
+   100.64.0.0/10 共享地址段）及 IPv6 内嵌的非公网 IPv4 即拒；并 ``allow_redirects=False`` 禁 302→内网。
 2. **连接层实连 IP 校验** ``_assert_peer_public``：requests 会**再解析一次**——恶意 DNS 可第一次返公网
    IP 骗过预检、第二次返内网 IP(DNS-rebinding/TOCTOU)。故在 urllib3 建立 TCP socket 后、TLS 握手与 HTTP
    请求发出**之前**，校验**实际连接的 peer IP**；命中受限段即掐断，彻底堵死 rebinding。urllib3 内部 API
@@ -33,13 +33,42 @@ _CHUNK = 8192
 
 _IpAddr = ipaddress.IPv4Address | ipaddress.IPv6Address
 
+_NAT64_WKP = ipaddress.IPv6Network("64:ff9b::/96")  # leak-scan: allow RFC 6052/8215 NAT64 前缀，协议常量非主机地址
+_NAT64_LOCAL = ipaddress.IPv6Network("64:ff9b:1::/48")
+
+
+def _embedded_ipv4(addr: _IpAddr) -> list[ipaddress.IPv4Address]:
+    """IPv6 中嵌入的 IPv4（IPv4-mapped / NAT64 / 6to4 / Teredo），须与外层一并按公网判。"""
+    if not isinstance(addr, ipaddress.IPv6Address):
+        return []
+    out: list[ipaddress.IPv4Address] = []
+    if addr.ipv4_mapped is not None:
+        out.append(addr.ipv4_mapped)
+    if addr in _NAT64_WKP:
+        out.append(ipaddress.IPv4Address(int(addr) & 0xFFFFFFFF))
+    if addr.sixtofour is not None:
+        out.append(addr.sixtofour)
+    if addr.teredo is not None:
+        out.extend(addr.teredo)
+    return out
+
 
 def _ip_is_blocked(addr: _IpAddr) -> bool:
-    """是否受限地址（内网/回环/链路本地含云元数据/保留/多播/未指定）——SSRF 目标黑名单的单一判据。"""
-    return bool(
-        addr.is_private or addr.is_loopback or addr.is_link_local
-        or addr.is_reserved or addr.is_multicast or addr.is_unspecified
-    )
+    """非公网即拒（以 ``is_global`` 为白名单），并检查 IPv6 内嵌 IPv4；SSRF 判据的单一来源。"""
+    is_nat64_wkp = isinstance(addr, ipaddress.IPv6Address) and addr in _NAT64_WKP
+    if (
+        not addr.is_global
+        or addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or (addr.is_reserved and not is_nat64_wkp)
+        or addr.is_multicast
+        or addr.is_unspecified
+    ):
+        return True
+    if isinstance(addr, ipaddress.IPv6Address) and addr in _NAT64_LOCAL:
+        return True
+    return any(_ip_is_blocked(v4) for v4 in _embedded_ipv4(addr))
 
 
 def _target_is_safe(url: str) -> tuple[bool, str]:
@@ -67,7 +96,7 @@ def _target_is_safe(url: str) -> tuple[bool, str]:
         return False, "无可解析地址"
     for ip in candidates:
         if _ip_is_blocked(ip):
-            return False, f"目标解析到受限地址 {ip}（内网/回环/元数据段）"
+            return False, f"目标解析到非公网地址 {ip}"
     return True, ""
 
 
