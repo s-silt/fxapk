@@ -311,6 +311,31 @@ def test_guarded_session_mounts_peer_validating_adapter() -> None:
         session.close()
 
 
+def test_guarded_session_ignores_environment_proxy(monkeypatch) -> None:
+    requests = pytest.importorskip("requests")
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        monkeypatch.setenv(name, "http://127.0.0.1:9")
+    for name in ("http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy", "REQUEST_METHOD"):
+        monkeypatch.delenv(name, raising=False)
+
+    from apkscan.config.fetch import _build_guarded_session
+
+    url = "http://8.8.8.8/x"
+    session = _build_guarded_session()
+    assert session is not None
+    try:
+        assert session.trust_env is False
+        assert not session.merge_environment_settings(url, {}, None, None, None)["proxies"]
+    finally:
+        session.close()
+
+    default_session = requests.Session()
+    try:
+        assert default_session.merge_environment_settings(url, {}, None, None, None)["proxies"]
+    finally:
+        default_session.close()
+
+
 def test_peer_guard_mixin_invokes_check_on_new_conn() -> None:
     """接线证明：mixin 的 _new_conn 会对 super() 建立的 socket 调 peer 校验（内网 peer → 建连即掐断）。"""
     from apkscan.config import fetch as fetchmod
