@@ -5,6 +5,7 @@
 
 ## 待发布
 
+- **行为变更**：远程配置下载（`fetch_config_object` / `config-probe`）不再读取 `HTTP(S)_PROXY` / `ALL_PROXY`、`.netrc`、`REQUESTS_CA_BUNDLE` 等环境配置，始终直连目标：经代理时实连 peer 是代理地址，连接层 DNS-rebinding 防护会失效。需经代理才能出网的环境下该阶段会以连接失败降级。
 - 远程配置下载（`fetch_config_object` / `config-probe`）的 SSRF 判据改为仅放行公网地址（`is_global`），与 `origin_check` 一致：此前放行的 100.64.0.0/10 共享地址段（如 Tailscale）、198.18.0.0/15 等非公网段，以及 IPv4-mapped、NAT64、6to4、Teredo 中内嵌的非公网 IPv4，预解析与实连 peer 两层均拒绝。
 - CI 新增 `pytest (ASC provider, locked)` 关：droidasc 按测试清单中的官方轮子 sha256 走 hash 校验安装，其余按 `plugins/fxapk-asc/requirements.lock` 安装，设 `FXAPK_REQUIRE_ASC_LIVE=1` 后 ASC 真跑测试缺件即失败、不再静默 skip。ASC 身份表（核心与 worker）与 REA 兼容修补的四个源码哈希改为对照官方发布物独立算出的字面量清单（PyPI 轮子与 npm 归档 integrity），REA 6.4.0 / 6.7.0 的目标文件原文作为夹具（MIT），在其上不替换哈希真跑修补。droidasc 的 revision 是上游 git commit，发布物内不含，仍只能人工核对。
 
