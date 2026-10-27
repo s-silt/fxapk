@@ -313,9 +313,10 @@ def test_guarded_session_mounts_peer_validating_adapter() -> None:
 
 def test_guarded_session_ignores_environment_proxy(monkeypatch) -> None:
     requests = pytest.importorskip("requests")
-    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+    for name in ("http_proxy", "https_proxy", "all_proxy"):
         monkeypatch.setenv(name, "http://127.0.0.1:9")
-    for name in ("http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy", "REQUEST_METHOD"):
+        monkeypatch.setenv(name.upper(), "http://127.0.0.1:9")
+    for name in ("NO_PROXY", "no_proxy", "REQUEST_METHOD"):
         monkeypatch.delenv(name, raising=False)
 
     from apkscan.config.fetch import _build_guarded_session
