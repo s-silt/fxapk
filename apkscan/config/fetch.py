@@ -11,6 +11,7 @@
    IP 骗过预检、第二次返内网 IP(DNS-rebinding/TOCTOU)。故在 urllib3 建立 TCP socket 后、TLS 握手与 HTTP
    请求发出**之前**，校验**实际连接的 peer IP**；命中受限段即掐断，彻底堵死 rebinding。urllib3 内部 API
    变动时优雅降级为仅预解析校验（不崩、不regress到无防护）。
+   连接始终直连（忽略环境代理），确保本层校验的是目标服务的实连 peer。
 """
 
 from __future__ import annotations
@@ -179,6 +180,7 @@ def _build_guarded_session() -> Any:  # noqa: ANN401 — requests.Session | None
     except ImportError:
         return None
     session = requests.Session()
+    session.trust_env = False  # 不读环境代理/.netrc/CA 变量，确保实连 peer 是目标而非代理
     if _GUARDED_ADAPTER_CLS is not None:
         try:
             adapter = _GUARDED_ADAPTER_CLS(max_retries=0)
