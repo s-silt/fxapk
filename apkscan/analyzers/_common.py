@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeGuard
 
 from apkscan.core.models import Confidence, Endpoint, Evidence
+from apkscan.core.observations import evidence_identity
 
 # 标量工具：转发 textutil 的权威实现，供分析器以共享版引用。
 from apkscan.core.textutil import as_str_list as as_str_list
@@ -152,7 +153,7 @@ class EndpointCollector:
     """累积去重的端点表：value -> Endpoint，evidences 合并。"""
 
     by_value: dict[str, Endpoint] = field(default_factory=dict)
-    _ev_keys: dict[str, set[tuple[str, str]]] = field(default_factory=dict)
+    _ev_keys: dict[str, set[tuple[object, ...]]] = field(default_factory=dict)
 
     def add(
         self,
@@ -179,7 +180,7 @@ class EndpointCollector:
             ep.is_cleartext = ep.is_cleartext or is_cleartext
             ep.is_private = ep.is_private or is_private
 
-        ev_key = (evidence.source, evidence.location)
+        ev_key = evidence_identity(evidence)
         if ev_key not in self._ev_keys[value]:
             self._ev_keys[value].add(ev_key)
             ep.evidences.append(evidence)

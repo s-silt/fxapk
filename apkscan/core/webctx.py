@@ -23,6 +23,7 @@ from __future__ import annotations
 from apkscan.core.bounded_io import read_limited
 
 import logging
+import hashlib
 import os
 import posixpath
 import zlib
@@ -291,6 +292,13 @@ class WebBodyInput:
     body_sha256: str
     body_truncated: bool
 
+    def provenance(self) -> dict:
+        return {
+            "member_path": self.source_file, "member_sha256": self.source_sha256,
+            "body_sha256": self.body_sha256, "body_text_sha256": hashlib.sha256(self.data).hexdigest(),
+            "entry_ref": self.entry_ref, "body_truncated": self.body_truncated,
+        }
+
 
 class WebContext:
     """网页证据上下文（实现 ``AnalysisContext`` 协议，``platform="web"``）。
@@ -316,6 +324,7 @@ class WebContext:
         origin: str = "",
         source_dir: str = "",
         load_errors: list[str] | None = None,
+        evidence_sources: dict[str, dict] | None = None,
     ) -> None:
         self.config = config
         self.apk_path = ""  # 无 APK：jadx/unpack 等增强器据此自然不启用
@@ -328,6 +337,9 @@ class WebContext:
         self.origin = origin
         self.source_dir = source_dir
         self.load_errors: list[str] = list(load_errors or [])
+        self.evidence_sources = dict(evidence_sources or {})
+        self.evidence_handoff: dict[str, dict] = {}
+        self.handoff_receipt: dict = {}
 
     # ---- AnalysisContext 协议：包标识 ------------------------------------
 
@@ -401,6 +413,7 @@ def load_web_evidence(
         raise FileNotFoundError(f"网页证据目录不存在或不是目录：{root}")
 
     files: dict[str, bytes] = {}
+    evidence_sources: dict[str, dict] = {}
     errors: list[str] = []
     total = 0
     excluded = {Path(path).resolve(strict=False) for path in exclude_dirs}
@@ -455,6 +468,8 @@ def load_web_evidence(
             errors.append(f"{rel}: 读取失败（{type(exc).__name__}）")
             continue
 
+        source_sha256 = hashlib.sha256(data).hexdigest()
+        source_size = len(data)
         if _looks_gzip(data):
             plain = _gunzip_bounded(data)
             if plain is None:
@@ -496,6 +511,11 @@ def load_web_evidence(
             errors.append(f"{rel}: 规范名与现有证据冲突，已保留为 {remapped}（未丢失）")
             key = WEB_PREFIX + remapped
         files[key] = data
+        evidence_sources[key] = {
+            "source_path": rel, "source_sha256": source_sha256, "source_size": source_size,
+            "analyzed_sha256": hashlib.sha256(data).hexdigest(),
+            "representation_changed": source_sha256 != hashlib.sha256(data).hexdigest(),
+        }
         total += len(data)
 
     logger.info(
@@ -508,6 +528,7 @@ def load_web_evidence(
         origin=origin or root.name,
         source_dir=str(root),
         load_errors=errors,
+        evidence_sources=evidence_sources,
     )
 
 

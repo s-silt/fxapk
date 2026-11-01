@@ -73,3 +73,16 @@ def source_access_summary(provider: str) -> dict[str, Any]:
             "api_access_caveat": row["api_access_caveat"],
             "institutional_use_status": row["institutional_use_status"],
             "account_entitlements_verified": False}
+
+
+def source_lineage_summary(provider: str) -> dict[str, Any]:
+    """Catalog grouping is a correlation constraint, never proof of independence."""
+    row = _providers().get(provider, {})
+    return {
+        "provider": provider,
+        "source_family": row.get("source_family", "unknown"),
+        "evidence_roles": list(row.get("evidence_roles", [])),
+        "upstream_lineage_status": "not_verified",
+        "independence_status": "not_established",
+        "same_family_counts_as_independent": False,
+    }

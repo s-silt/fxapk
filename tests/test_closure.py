@@ -126,7 +126,16 @@ def _endpoint(
     return Endpoint(
         value=value,
         kind=kind,
-        evidences=[Evidence(source=source, location=location, snippet=value)],
+        evidences=[Evidence(
+            source=source,
+            location=location,
+            snippet=value,
+            provenance={"member_sha256": "a" * 64, "member_path": location},
+            locator={"byte_offset": 1, "offset_unit": "byte"},
+            structure_status="parsed",
+            reference_status="referenced",
+            reachability="reachable",
+        )],
         is_suspicious=True,
         enrichment=merged_enrichment,
     )
@@ -227,6 +236,7 @@ def test_select_targets_with_stats_reports_truncation() -> None:
         "limit": 6,
         "truncated": 1,
         "dropped": ["198.51.100.16"],
+        "admission_excluded": 0,
     }
 
 
@@ -285,6 +295,7 @@ def test_close_report_truncated_targets_yield_partial_with_gap() -> None:
         "limit": 6,
         "truncated": 1,
         "dropped": ["198.51.100.16"],
+        "admission_excluded": 0,
     }
     assert any("198.51.100.16" in str(gap) for gap in closure["gaps"])
 

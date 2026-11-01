@@ -909,15 +909,15 @@ def test_merge_and_rerender_reads_runtime_report_once(tmp_path, monkeypatch) -> 
 
     from pathlib import Path
 
-    real_read_text = Path.read_text
+    real_read = merge.read_runtime_input
     read_counts: dict[str, int] = {}
 
-    def _counting_read_text(self: Path, *args: Any, **kwargs: Any) -> str:
-        key = str(self)
+    def _counting_read(path: Path) -> Any:
+        key = str(path)
         read_counts[key] = read_counts.get(key, 0) + 1
-        return real_read_text(self, *args, **kwargs)
+        return real_read(path)
 
-    monkeypatch.setattr(Path, "read_text", _counting_read_text)
+    monkeypatch.setattr(merge, "read_runtime_input", _counting_read)
 
     real_loads = json.loads
     loads_count = {"n": 0}

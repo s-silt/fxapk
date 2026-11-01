@@ -75,6 +75,44 @@ def test_build_snapshot_materializes_protocol() -> None:
     assert "res/icon.png" not in snap._files
 
 
+def test_snapshot_preserves_dex_ledgers_and_preread_worker_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from apkscan.core import snapshot as snapshot_mod
+
+    path = "assets/large.json"
+    ctx = _fake(files={path: b"source-bytes"})
+    ctx.main_dex_report = {"complete": False, "loaded": 1}
+    ctx.extra_dex_report = {"requested": 2, "failed": 1}
+    ctx.dex_decode_report = {"status": "partial", "decoded": 3}
+    ctx._declared_sizes[path] = snapshot_mod._MAX_PREREAD_BYTES + 1
+    reads = []
+
+    def context_read(_path: str) -> bytes:
+        reads.append(_path)
+        return b"context-read"
+
+    ctx.read_file = context_read
+    snap = build_snapshot(ctx)
+
+    assert reads == []
+    assert path not in snap._files
+    assert snap.main_dex_report == ctx.main_dex_report
+    assert snap.extra_dex_report == ctx.extra_dex_report
+    assert snap.dex_decode_report == ctx.dex_decode_report
+
+    worker_reads = []
+
+    class WorkerApk:
+        def get_file(self, requested: str) -> bytes:
+            worker_reads.append(requested)
+            return b"worker-fallback"
+
+    monkeypatch.setattr(snap, "_ensure_worker_apk", lambda: WorkerApk())
+    assert snap.read_file(path) == b"worker-fallback"
+    assert worker_reads == [path]
+
+
 def test_build_snapshot_carries_extra_dex_paths_across_pickle() -> None:
     """dump DEX 路径必须物化进快照并活过 pickle 往返（进程池 IPC 的最小等价）。
     曾漏带：androguard 侧（dex_strings 已物化）看得见 33 个 dump DEX 的字符串，jadx 侧
@@ -368,8 +406,8 @@ def test_worker_init_and_analyze_resolve_run_and_error(
     monkeypatch.setattr(parallel, "discover_analyzers", lambda: [_Boom()])
     parallel._worker_init(snap)
     _, bres, berr = parallel._worker_analyze("boom")
-    assert bres is None and berr is not None
-    assert "ValueError" in berr and "kaboom" in berr
+    assert bres is not None and bres.input_gaps == [] and berr is not None
+    assert berr == "ValueError"
 
 
 def _eligible_for(ctx: object) -> list[tuple]:

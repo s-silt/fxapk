@@ -17,7 +17,11 @@ import re
 from typing import Any, Iterable, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
-from apkscan.core.corpus import native_anchor_policy_snapshot, native_anchor_weakness
+from apkscan.core.corpus import (
+    RELATION_INDEX_VERSION,
+    native_anchor_policy_snapshot,
+    native_anchor_weakness,
+)
 
 
 POLICY_ID = "fxapk-linkage-rules-v2"
@@ -642,6 +646,9 @@ def collapse_manifest_entries(
             scope_indexed = row.get("case_ioc_scope_indexed") is True
             raw_configs = row.get("remote_config_objects")
             raw_iocs = row.get("key_iocs")
+            if row.get("relation_index_version") != RELATION_INDEX_VERSION:
+                raw_configs = None
+                raw_iocs = None
             if scope_indexed:
                 if isinstance(raw_configs, list):
                     states["remote_config_objects"]["valid"] = True

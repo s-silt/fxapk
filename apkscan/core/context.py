@@ -6,10 +6,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from typing import Protocol, runtime_checkable
 
 from apkscan.core.models import AnalysisConfig, CertInfo, ComponentSet
+from apkscan.core.observations import DexStringRecord
 
 
 @runtime_checkable
@@ -65,7 +66,6 @@ class AnalysisContext(Protocol):
     def dex_strings(self) -> Iterator[str]:
         """DEX 字符串池（惰性迭代）。"""
         ...
-
     def list_files(self) -> list[str]:
         """APK 内所有文件路径。"""
         ...
@@ -89,3 +89,25 @@ class AnalysisContext(Protocol):
     def certificates(self) -> list[CertInfo]:
         """签名证书列表。"""
         ...
+
+
+def iter_dex_records(ctx: object) -> Iterator[DexStringRecord]:
+    """Adapt new occurrence-aware contexts without tightening old context protocols."""
+    getter = getattr(ctx, "dex_string_records", None)
+    if callable(getter):
+        records = getter()
+        if not isinstance(records, Iterable):
+            return
+        for record in records:
+            if isinstance(record, DexStringRecord):
+                yield record
+            elif isinstance(record, str):
+                yield DexStringRecord(record)
+        return
+    getter = getattr(ctx, "dex_strings")
+    values = getter()
+    if not isinstance(values, Iterable):
+        return
+    for value in values:
+        if isinstance(value, str):
+            yield DexStringRecord(value)

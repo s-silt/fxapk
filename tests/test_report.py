@@ -1076,7 +1076,17 @@ def test_html_c2_badge_tiers_by_contact(tmp_path: Path) -> None:
     from apkscan.report import html as report_html
 
     def _render(source: str | None) -> str:
-        refs = [Evidence(source=source, location="flows", snippet="x")] if source else []
+        refs = [Evidence(
+            source=source or "dex",
+            location="flows",
+            snippet="x",
+            provenance={"extractor": "synthetic", "member_path": "flows",
+                        "member_sha256": "a" * 64},
+            locator={"byte_offset": 1, "offset_unit": "byte"},
+            structure_status="parsed",
+            reference_status="referenced",
+            reachability="reachable",
+        )]
         rpt = Report(
             package_name="com.x",
             meta={},

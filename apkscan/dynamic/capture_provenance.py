@@ -42,6 +42,10 @@ def capture_scope(namespace: str | None, *, verified: bool = False) -> Iterator[
 
 
 def scoped_evidence(*args: Any, **kwargs: Any) -> Evidence:
+    from apkscan.dynamic.event_origin import evidence_coordinates
+
+    event = kwargs.pop("runtime_event", None)
+    kwargs.update(evidence_coordinates(event))
     evidence = Evidence(*args, **kwargs)
     namespace, verified = _scope.get()
     if namespace and not verified and evidence.source in OBSERVED_CONTACT_SOURCES:
@@ -49,6 +53,10 @@ def scoped_evidence(*args: Any, **kwargs: Any) -> Evidence:
     if namespace and not evidence.location.startswith(namespace + '::'):
         evidence.location = namespace + '::' + evidence.location
     return evidence
+
+
+def scoped_event_refs(events: list[dict[str, Any]] | None, **kwargs: Any) -> list[Evidence]:
+    return [scoped_evidence(runtime_event=event, **kwargs) for event in events] if events else [scoped_evidence(**kwargs)]
 
 
 def validate_ledger(report: Report) -> None:

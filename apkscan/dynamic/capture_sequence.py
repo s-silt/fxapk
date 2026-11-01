@@ -151,6 +151,9 @@ def run_rounds(package: str, *, report: Any, unpacked: bool, out_dir: str,
             except Exception as exc:  # noqa: BLE001 - failure remains visible; later rounds can complement it
                 logger.exception("[capture-sequence] round failed")
                 record.update(status="error", reason=f"capture_round_failed:{type(exc).__name__}")
+        from apkscan.dynamic.capture_safety import round_safety
+
+        record["capture_safety"] = round_safety(record, record.get("result", {}), package)
         records.append(record)
     return records
 

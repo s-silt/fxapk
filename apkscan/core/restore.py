@@ -39,7 +39,7 @@ _REQUIRED = ("category", "value", "source")
 # ``evidence_scope`` records a factual absence of direct current-case support,
 # not an analyst policy suppression.  It can be resolved only by adding direct
 # Evidence; a restore credential must never erase or bypass it.
-NON_REVOCABLE_RESTORE_SOURCES = frozenset({"evidence_scope"})
+NON_REVOCABLE_RESTORE_SOURCES = frozenset({"evidence_scope", "evidence_admission"})
 
 
 def norm_component(value: object) -> str:

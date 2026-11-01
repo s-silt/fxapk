@@ -35,8 +35,10 @@
 from __future__ import annotations
 
 import logging
+import hashlib
 import posixpath
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -422,17 +424,26 @@ class JsBundleAnalyzer(BaseAnalyzer):
         # 逐文件累积密钥命中（去重后再产 Finding）。
         secret_hits: dict[tuple[str, str], _SecretHit] = {}
         scanned = 0
+        duplicate_targets = {path for path, count in Counter(all_files).items() if count > 1}
         for path in targets:
             if scanned >= _MAX_FILES:
                 logger.warning(
                     "[%s] JS 文件数超过上限 %d，截断扫描", self.name, _MAX_FILES
                 )
                 break
-            text = self._read_text(ctx, path)
-            if text is None:
+            raw = self._read_bytes(ctx, path)
+            if raw is None:
+                continue
+            text = bytes(raw).decode("utf-8", errors="ignore")
+            if not text:
                 continue
             scanned += 1
-            self._scan_file_chunked(text, path, collector, secret_hits, rules)
+            self._scan_file_chunked(
+                text, path, collector, secret_hits, rules,
+                provenance={"extractor": "js-bundle-v1", "member_path": path,
+                            "member_sha256": hashlib.sha256(raw).hexdigest()},
+                locator_enabled=path not in duplicate_targets,
+            )
 
         endpoints = collector.endpoints({"url": 0, "domain": 1, "ip": 2, "path": 3})
         result.endpoints = endpoints
@@ -564,6 +575,9 @@ class JsBundleAnalyzer(BaseAnalyzer):
         collector: EndpointCollector,
         secret_hits: dict[tuple[str, str], _SecretHit],
         rules: _Rules,
+        *,
+        provenance: dict[str, str] | None = None,
+        locator_enabled: bool = True,
     ) -> None:
         """整文件分块扫（不漏端点/密钥），块间重叠避免跨界匹配被切断。
 
@@ -576,7 +590,9 @@ class JsBundleAnalyzer(BaseAnalyzer):
         n = len(text)
         if n <= _CHUNK_THRESHOLD_CHARS:
             try:
-                self._scan_file(text, path, collector, secret_hits, rules)
+                self._scan_file(text, path, collector, secret_hits, rules,
+                                base_offset=0, provenance=provenance,
+                                locator_enabled=locator_enabled)
             except Exception:  # noqa: BLE001 — 单文件失败不影响其余
                 logger.exception("[%s] 扫描 JS 文件失败，跳过：%s", self.name, path)
             return
@@ -594,7 +610,9 @@ class JsBundleAnalyzer(BaseAnalyzer):
         while start < n:
             chunk = text[start : start + _SCAN_CHUNK_BYTES]
             try:
-                self._scan_file(chunk, path, collector, secret_hits, rules)
+                self._scan_file(chunk, path, collector, secret_hits, rules,
+                                base_offset=start, provenance=provenance,
+                                locator_enabled=locator_enabled)
             except Exception:  # noqa: BLE001 — 单块失败不影响其余块/文件
                 logger.exception("[%s] 分块扫描失败，跳过该块：%s", self.name, path)
             start += step
@@ -606,14 +624,23 @@ class JsBundleAnalyzer(BaseAnalyzer):
         collector: EndpointCollector,
         secret_hits: dict[tuple[str, str], _SecretHit],
         rules: _Rules,
+        *,
+        base_offset: int = 0,
+        provenance: dict[str, str] | None = None,
+        locator_enabled: bool = True,
     ) -> None:
         """在单文件里抽字符串字面量 → 端点；并扫硬编码密钥（键值 / JWT / PEM）。"""
         # 1) 端点：只在字符串字面量内部抽（避免 a.length / rect.top 误判）。
         for m in _STRING_LITERAL_RE.finditer(text):
-            literal = m.group(1) or m.group(2) or m.group(3) or ""
+            group = next((index for index in (1, 2, 3) if m.group(index) is not None), None)
+            if group is None:
+                continue
+            literal = m.group(group) or ""
             if not literal or len(literal) > _MAX_LITERAL_LEN:
                 continue
-            self._scan_literal(literal, path, collector, rules)
+            self._scan_literal(literal, path, collector, rules,
+                               base_offset=base_offset + m.start(group),
+                               provenance=provenance, locator_enabled=locator_enabled)
 
         # 2) 硬编码密钥：键值上下文（在全文上扫，键名约束已足够精确）。
         for m in _SECRET_KV_RE.finditer(text):
@@ -670,10 +697,22 @@ class JsBundleAnalyzer(BaseAnalyzer):
             )
 
     def _scan_literal(
-        self, literal: str, path: str, collector: EndpointCollector, rules: _Rules
+        self, literal: str, path: str, collector: EndpointCollector, rules: _Rules,
+        *, base_offset: int = 0, provenance: dict[str, str] | None = None,
+        locator_enabled: bool = True,
     ) -> None:
         """在单个字符串字面量内部抽 URL / host / IP / 相对 API 路径。"""
         consumed: list[tuple[int, int]] = []
+        def evidence(snippet: str, offset: int) -> Evidence:
+            return Evidence(
+                source="js", location=path, snippet=snippet,
+                provenance=dict(provenance or {}),
+                locator=(
+                    {"char_offset": base_offset + offset,
+                     "offset_unit": "decoded-text-codepoint"}
+                    if locator_enabled else {}
+                ),
+            )
 
         # 1) 完整 URL（先抽，记录区间避免 host 重复抽）。
         for m in _URL_RE.finditer(literal):
@@ -692,7 +731,7 @@ class JsBundleAnalyzer(BaseAnalyzer):
             collector.add(
                 cleaned,
                 "url",
-                Evidence(source="js", location=path, snippet=_short(raw, rules.snippet_max)),
+                evidence(_short(raw, rules.snippet_max), m.start()),
                 is_cleartext=is_cleartext,
                 is_private=(host_ip is not None and _ip_is_private(host_ip)) or _host_is_private(host),
             )
@@ -702,7 +741,7 @@ class JsBundleAnalyzer(BaseAnalyzer):
                 collector.add(
                     host,
                     "ip",
-                    Evidence(source="js", location=path, snippet=host_snippet),
+                    evidence(host_snippet, m.start()),
                     is_private=_ip_is_private(host_ip),
                 )
                 # ★IP 与域名同样要打来源档：此前只有域名分支标 tier，IP 整类不降档，
@@ -713,7 +752,7 @@ class JsBundleAnalyzer(BaseAnalyzer):
                 collector.add(
                     host,
                     "domain",
-                    Evidence(source="js", location=path, snippet=host_snippet),
+                    evidence(host_snippet, m.start()),
                 )
                 collector.mark_tier(host, infra.domain_source_tier(path, len(literal), context=self._tier_context))
 
@@ -734,7 +773,7 @@ class JsBundleAnalyzer(BaseAnalyzer):
             collector.add(
                 ip_str,
                 "ip",
-                Evidence(source="js", location=path, snippet=_short(m.group(), rules.snippet_max)),
+                evidence(_short(m.group(), rules.snippet_max), m.start()),
                 is_private=_ip_is_private(ip_obj),
             )
             # 同上：裸 IP 也走来源档，否则第三方库常量里的裸 IP 直接进最高档。
@@ -755,7 +794,7 @@ class JsBundleAnalyzer(BaseAnalyzer):
             collector.add(
                 domain,
                 "domain",
-                Evidence(source="js", location=path, snippet=_short(m.group(), rules.snippet_max)),
+                evidence(_short(m.group(), rules.snippet_max), m.start()),
             )
             collector.mark_tier(domain, infra.domain_source_tier(path, len(literal), context=self._tier_context))
 
@@ -771,7 +810,7 @@ class JsBundleAnalyzer(BaseAnalyzer):
             collector.add(
                 apath,
                 "path",
-                Evidence(source="js", location=path, snippet=_short(apath, rules.snippet_max)),
+                evidence(_short(apath, rules.snippet_max), m.start()),
             )
 
     # ------------------------------------------------------------------
@@ -945,6 +984,19 @@ class JsBundleAnalyzer(BaseAnalyzer):
         index.android.bundle / app-service.js 后段的端点/密钥直接丢、且 WARNING 吓新手。
         现返回完整文本，由 :meth:`_scan_file_chunked` 分块扫完整个文件（内存可控、不漏）。
         """
+        raw = self._read_bytes(ctx, path)
+        if raw is None:
+            return None
+        if not raw:
+            return None
+        try:
+            return bytes(raw).decode("utf-8", errors="ignore")
+        except Exception:  # noqa: BLE001 — utf-8 errors=ignore 几乎不抛，仅防御
+            logger.exception("[%s] utf-8 解码失败，跳过：%s", self.name, path)
+            return None
+
+    def _read_bytes(self, ctx: "AnalysisContext", path: str) -> bytes | None:
+        """Read one bundle member once, preserving bytes for provenance hashing."""
         try:
             raw = ctx.read_file(path)
         except Exception:  # noqa: BLE001 — 单文件读取失败不影响其余
@@ -955,13 +1007,7 @@ class JsBundleAnalyzer(BaseAnalyzer):
         if not isinstance(raw, (bytes, bytearray)):
             logger.warning("[%s] read_file 返回非 bytes，跳过：%s", self.name, path)
             return None
-        if not raw:
-            return None
-        try:
-            return bytes(raw).decode("utf-8", errors="ignore")
-        except Exception:  # noqa: BLE001 — utf-8 errors=ignore 几乎不抛，仅防御
-            logger.exception("[%s] utf-8 解码失败，跳过：%s", self.name, path)
-            return None
+        return bytes(raw)
 
     # ------------------------------------------------------------------
     # 规则加载

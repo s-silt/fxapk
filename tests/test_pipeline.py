@@ -41,12 +41,15 @@ class _GoodAnalyzer(BaseAnalyzer):
                 Endpoint(
                     value="pay.example.com",
                     kind="domain",
-                    evidences=[Evidence(source="dex", location="X;->y", snippet="pay.example.com")],
+                    evidences=[_qualified_static_evidence()],
                 ),
                 # ★不能用 1.2.3.4：四段全 ≤32 是低段位形态（版本号/序号的主要产生形态），
                 #   classify_ip 判它待核 → 不进富化目标，用它当「IP 被富化」的夹具会假红。
                 #   富化目标筛选走的是 IP 判据，夹具就得选 IP 判据下确实判最高档的值。
-                Endpoint(value="45.76.1.1", kind="ip"),  # leak-scan: allow pipeline 富化目标夹具，须是 IP 判据下判最高档的公网地址
+                Endpoint(
+                    value="192.0.2.45", kind="ip",
+                    evidences=[_qualified_static_evidence()],
+                ),
                 Endpoint(value="https://pay.example.com/notify", kind="url"),
             ],
             findings=[
@@ -157,7 +160,7 @@ def test_pipeline_runs_and_records_errors(monkeypatch, fake_ctx):
     status = {s["name"]: s for s in report.analyzer_status}
     assert status["good"]["status"] == "ran"
     assert status["crashing"]["status"] == "error"
-    assert "boom" in status["crashing"]["reason"]
+    assert status["crashing"]["reason"] == "RuntimeError"
     assert status["needs_adb"]["status"] == "skipped"
     assert "adb" in status["needs_adb"]["reason"]
 
@@ -169,7 +172,7 @@ def test_pipeline_runs_and_records_errors(monkeypatch, fake_ctx):
     # ★这里就是要**写死字面**：schema_version 是对外契约，消费方（AI / CI / 第三方工具）据它
     #   判断字段布局。改成 `== REPORT_SCHEMA_VERSION` 看着更"整洁"，实则是拿常量和它自己比，
     #   测试从此失去独立预期——版本被意外 bump 也不会红。契约变更应当在这里显式改一行。
-    assert report.schema_version == "1.2"
+    assert report.schema_version == "1.3"
     assert report.meta["tool_version"]  # 工具版本落 meta（非空）
     assert len(report.meta["ruleset_digest"]) == 16  # 规则内容摘要（可复现锚点）
 
@@ -254,6 +257,18 @@ def test_endpoint_leads_built_from_domains_and_ips(monkeypatch, fake_ctx):
 
 
 def test_online_enrichment_applied_and_failures_recorded(monkeypatch, fake_ctx):
+    from apkscan.core import enrichment
+
+    original_ip_advice = enrichment.infra.effective_ip_advice
+    monkeypatch.setattr(
+        enrichment.infra,
+        "effective_ip_advice",
+        lambda value, *args, **kwargs: (
+            "建议调证"
+            if value == "192.0.2.45"
+            else original_ip_advice(value, *args, **kwargs)
+        ),
+    )
     monkeypatch.setattr(pipeline, "discover_analyzers", lambda: [_GoodAnalyzer()])
     monkeypatch.setattr(
         pipeline, "discover_enrichers", lambda: [_DomainEnricher(), _CrashingEnricher()]
@@ -361,19 +376,32 @@ def test_offline_skips_enrichers(monkeypatch, fake_ctx):
     assert called["n"] == 0
 
 
-def test_enrichment_targets_only_suspicious():
+def test_enrichment_targets_only_suspicious(monkeypatch: pytest.MonkeyPatch):
     """联网富化只对"高度可疑"端点（建议调证）：infra 域名 / 私网·回环 IP 一律不查。"""
+    from apkscan.core import enrichment
+
+    monkeypatch.setattr(
+        enrichment.infra,
+        "effective_advice",
+        lambda value, _tier: "建议调证" if value == "gateway.example.test" else "待核",
+    )
+    monkeypatch.setattr(
+        enrichment.infra,
+        "effective_ip_advice",
+        lambda value, _tier, **_kwargs: "建议调证" if value == "192.0.2.45" else "待核",
+    )
+    evidence = _qualified_static_evidence()
     eps = [
-        Endpoint(value="gw.synthetic-c2a.vip", kind="domain", evidences=[]),  # 疑似 C2 → 查
-        Endpoint(value="maps.googleapis.com", kind="domain", evidences=[]),  # 已知 infra → 跳
-        Endpoint(value="connectivitycheck.gstatic.com", kind="domain", evidences=[]),  # infra → 跳
-        Endpoint(value="45.76.1.1", kind="ip", evidences=[]),  # 真公网 IP → 查  # leak-scan: allow pipeline 闭环目标夹具，非公网不会进 closure 候选
-        Endpoint(value="127.0.0.1", kind="ip", evidences=[]),  # 回环 → 待核 → 跳
-        Endpoint(value="192.168.1.1", kind="ip", evidences=[]),  # 私网 → 跳
-        Endpoint(value="https://gw.synthetic-c2a.vip/x", kind="url", evidences=[]),  # url 不富化
+        Endpoint(value="gateway.example.test", kind="domain", evidences=[evidence]),  # 疑似服务 → 查
+        Endpoint(value="maps.example.test", kind="domain", evidences=[evidence]),  # 已知 infra → 跳
+        Endpoint(value="connectivity.example.test", kind="domain", evidences=[evidence]),  # infra → 跳
+        Endpoint(value="192.0.2.45", kind="ip", evidences=[evidence]),  # 合成公网分类 → 查
+        Endpoint(value="127.0.0.1", kind="ip", evidences=[evidence]),  # 回环 → 待核 → 跳
+        Endpoint(value="192.168.1.1", kind="ip", evidences=[evidence]),  # 私网 → 跳
+        Endpoint(value="https://gateway.example.test/x", kind="url", evidences=[evidence]),  # url 不富化
     ]
     targets = {e.value for e in pipeline._enrichment_targets(eps)}
-    assert targets == {"gw.synthetic-c2a.vip", "45.76.1.1"}  # leak-scan: allow pipeline 闭环目标夹具，非公网不会进 closure 候选
+    assert targets == {"gateway.example.test", "192.0.2.45"}
 
 
 def test_enrichment_targets_respect_source_tier():
@@ -388,11 +416,12 @@ def test_enrichment_targets_respect_source_tier():
       就是 tier，不叠加 tier 就分不开它们。
     """
     same_value = "api.the.com"  # leak-scan: allow 判据链上零命中的夹具，两个端点须只在 tier 上有别
-    app_tier = Endpoint(value=same_value, kind="domain", evidences=[],
+    evidence = _qualified_static_evidence()
+    app_tier = Endpoint(value=same_value, kind="domain", evidences=[evidence],
                         enrichment={"tier": infra.TIER_APP})
-    library_tier = Endpoint(value=same_value, kind="domain", evidences=[],
+    library_tier = Endpoint(value=same_value, kind="domain", evidences=[evidence],
                             enrichment={"tier": infra.TIER_LIBRARY_FILE})
-    bulk_tier = Endpoint(value=same_value, kind="domain", evidences=[],
+    bulk_tier = Endpoint(value=same_value, kind="domain", evidences=[evidence],
                          enrichment={"tier": infra.TIER_BULK_STRING})
 
     assert pipeline._enrichment_targets([app_tier]) == [app_tier], "app tier 照常查"
@@ -407,7 +436,7 @@ def test_enrichment_targets_skip_static_low_tier_ips(monkeypatch):
         infra, "classify_ip", lambda *_args, **_kwargs: (infra.ADVICE_INVESTIGATE, "synthetic")
     )
 
-    tiered_ip = Endpoint(value=synthetic_ip, kind="ip", evidences=[],
+    tiered_ip = Endpoint(value=synthetic_ip, kind="ip", evidences=[_qualified_static_evidence()],
                          enrichment={"tier": infra.TIER_LIBRARY_FILE})
 
     assert pipeline._enrichment_targets([tiered_ip]) == []
@@ -431,9 +460,22 @@ def test_enrichment_targets_keep_runtime_observed_low_tier_ip(monkeypatch):
 
 def _synthetic_suspicious_domains(count: int) -> list[Endpoint]:
     return [
-        Endpoint(value=f"h{i}." + "synthetic-c2a" + ".vip", kind="domain")
+        Endpoint(value=f"h{i}." + "synthetic-c2a" + ".vip", kind="domain",
+                 evidences=[_qualified_static_evidence(offset=i)])
         for i in range(count)
     ]
+
+
+def _qualified_static_evidence(*, offset: int = 1) -> Evidence:
+    return Evidence(
+        source="dex",
+        location="classes.dex",
+        provenance={"member_path": "classes.dex", "member_sha256": "a" * 64},
+        locator={"byte_offset": offset, "offset_unit": "byte"},
+        structure_status="parsed",
+        reference_status="referenced",
+        reachability="reachable",
+    )
 
 
 def test_analyze_high_cardinality_defers_all_enrichment(monkeypatch):
@@ -530,11 +572,12 @@ def test_analyze_static_ip_subcap_defers_all_enrichment(monkeypatch):
         infra, "classify_ip", lambda *_args, **_kwargs: (infra.ADVICE_INVESTIGATE, "synthetic")
     )
     endpoints = [
-        Endpoint(
-            value=f"100.64.{40 + i // 200}.{40 + i % 200}",
-            kind="ip",
-            enrichment={"tier": infra.TIER_APP},
-        )
+            Endpoint(
+                value=f"100.64.{40 + i // 200}.{40 + i % 200}",
+                kind="ip",
+                evidences=[_qualified_static_evidence(offset=i)],
+                enrichment={"tier": infra.TIER_APP},
+            )
         for i in range(17)
     ]
     state = SimpleNamespace(
@@ -642,8 +685,9 @@ def test_provider_budget_prioritizes_runtime_contact_over_input_order():
     )
 
     assert runtime_endpoint.value in queried
-    assert endpoints[19].value not in queried
-    assert endpoints[19].enrichment["source_status"]["icp"]["reason"] == (
+    skipped = next(endpoint for endpoint in endpoints if endpoint.value not in queried)
+    assert skipped is not runtime_endpoint
+    assert skipped.enrichment["source_status"]["icp"]["reason"] == (
         "provider_budget_exhausted"
     )
 
@@ -687,6 +731,7 @@ def test_low_tier_static_ip_has_explicit_skip_reason(monkeypatch):
     endpoint = Endpoint(
         value="100.64.0.10",
         kind="ip",
+        evidences=[_qualified_static_evidence()],
         enrichment={"tier": infra.TIER_LIBRARY_FILE},
     )
 
@@ -949,9 +994,9 @@ def test_domain_lead_dns_hosting_in_evidence_and_notes():
             enrichment={
                 "rdap": {"registrar": "R", "source": "rdap"},
                 "dns": {
-                    "ips": ["45.76.1.1", "198.51.100.39"],  # leak-scan: allow pipeline 闭环目标夹具，非公网不会进 closure 候选
+                    "ips": ["192.0.2.45", "198.51.100.39"],
                     "hosting": [
-                        {"ip": "45.76.1.1", "asn": "AS20473 Vultr", "org": "Vultr", "country": "US"},  # leak-scan: allow pipeline 闭环目标夹具，非公网不会进 closure 候选
+                        {"ip": "192.0.2.45", "asn": "AS20473 ExampleNet", "org": "ExampleNet", "country": "ZZ"},
                         {"ip": "198.51.100.39", "asn": "AS20473 Vultr", "org": "Vultr", "country": "US"},
                     ],
                 },
@@ -961,8 +1006,8 @@ def test_domain_lead_dns_hosting_in_evidence_and_notes():
     leads = pipeline.build_endpoint_leads(eps)
     lead = next(l for l in leads if l.category == LeadCategory.DOMAIN)
     blob = " ".join(lead.evidence_to_obtain) + " " + (lead.notes or "")
-    assert "45.76.1.1" in blob  # leak-scan: allow pipeline 闭环目标夹具，非公网不会进 closure 候选
-    assert "Vultr" in blob
+    assert "192.0.2.45" in blob
+    assert "ExampleNet" in blob
 
 
 def test_domain_lead_uses_hit_cloudfront_cname_as_exact_aws_request_target() -> None:
@@ -1196,3 +1241,78 @@ def test_leads_deduped_globally_across_analyzers(monkeypatch, fake_ctx):
     }
     # advice 填空：首条为空，由后来者的「建议调证」补上。
     assert merged.advice == "建议调证"
+
+
+def test_offline_enrichment_records_admission_decisions():
+    from types import SimpleNamespace
+
+    endpoint = Endpoint(
+        value="api.example.test",
+        kind="domain",
+        evidences=[
+            Evidence(
+                source="resource",
+                location="assets/strings.xml",
+                scope="case_evidence",
+                suspicions=[{"kind": "synthetic_fixture"}],
+            )
+        ],
+    )
+    state = SimpleNamespace(
+        config=AnalysisConfig(online=False),
+        meta={},
+        endpoints=[endpoint],
+        enricher_status=[],
+    )
+
+    pipeline._stage_enrich(state)
+
+    assert endpoint.enrichment["evidence_admission"]["passive_enrichment"]["state"] == "review"
+    assert state.meta["enrichment_plan"]["admission_excluded"] == 1
+
+
+def test_admission_excluded_endpoint_cannot_reuse_cached_provider_hit(monkeypatch):
+    from types import SimpleNamespace
+
+    from apkscan.core.source_status import provider_payload_if_hit
+
+    class _Spy(BaseEnricher):
+        name = "rdap"
+        applies_to = ["domain"]
+
+        def enrich(self, endpoint: Endpoint) -> EnrichmentResult:
+            raise AssertionError("admission-excluded endpoints must not be queried")
+
+    endpoint = Endpoint(
+        value="api.example.test",
+        kind="domain",
+        evidences=[
+            Evidence(
+                source="resource",
+                location="assets/strings.xml",
+                scope="case_evidence",
+                suspicions=[{"kind": "synthetic_fixture"}],
+            )
+        ],
+        enrichment={
+            "rdap": {"registrar": "stale provider data"},
+            "source_status": {"rdap": {"status": "hit"}},
+        },
+    )
+    state = SimpleNamespace(
+        config=AnalysisConfig(online=True),
+        meta={},
+        endpoints=[endpoint],
+        enricher_status=[],
+    )
+    monkeypatch.setattr(pipeline, "discover_enrichers", lambda: [_Spy()])
+
+    pipeline._stage_enrich(state)
+
+    assert endpoint.enrichment["source_status"]["rdap"] == {
+        "status": "skipped",
+        "reason": "evidence_admission",
+    }
+    assert provider_payload_if_hit(endpoint.enrichment, "rdap") == {}
+    assert endpoint.enrichment["rdap"] == {"registrar": "stale provider data"}
+    assert state.meta["enrichment_plan"]["admission_excluded"] == 1

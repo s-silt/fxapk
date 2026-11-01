@@ -1,7 +1,7 @@
 """Explicit endpoint-invocation budgets apply to both enrichment entry paths."""
 import pytest
 from apkscan.core.enrichment import enrich_selected_targets
-from apkscan.core.models import Endpoint, EnrichmentResult
+from apkscan.core.models import Endpoint, EnrichmentResult, Evidence, EvidenceScope
 from apkscan.core.registry import BaseEnricher
 
 
@@ -91,3 +91,44 @@ def test_closure_budget_cannot_reset_for_resolved_ips(monkeypatch):
     assert len(domain.enrichment["resolved_ip_enrichment"]) == 2
     assert domain.enrichment["resolved_ip_enrichment"]["198.51.100.11"]["source_status"]["ip_rdap"] == {
         "status": "skipped", "reason": "run_source_budget_exhausted"}
+
+
+def test_provider_allocation_is_stable_and_round_robins_sources():
+    def endpoint(value: str, member: str) -> Endpoint:
+        return Endpoint(
+            kind="domain",
+            value=value,
+            evidences=[
+                Evidence(
+                    source="runtime-pcap",
+                    location="pcap-dns",
+                    scope=EvidenceScope.CASE_EVIDENCE,
+                    provenance={"member_sha256": member * 64, "member_path": f"{member}.pcap"},
+                    locator={"frame": 1},
+                    structure_status="parsed",
+                    reference_status="referenced",
+                    reachability="observed",
+                )
+            ],
+        )
+
+    first = [
+        endpoint("decoy-a.example.test", "a"),
+        endpoint("decoy-b.example.test", "a"),
+        endpoint("independent.example.test", "b"),
+    ]
+    second = list(reversed(first))
+    allocations: list[set[str]] = []
+    for values in (first, second):
+        source = SyntheticSource()
+        enrich_selected_targets(
+            values,
+            [source],
+            include_case_close=True,
+            provider_limits={source.name: 2},
+        )
+        allocations.append(set(source.calls))
+
+    assert allocations[0] == allocations[1]
+    assert "independent.example.test" in allocations[0]
+    assert len(allocations[0]) == 2

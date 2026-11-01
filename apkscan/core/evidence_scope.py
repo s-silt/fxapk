@@ -18,12 +18,16 @@ from copy import deepcopy
 from typing import Any
 
 from apkscan.core import infra
+from apkscan.core.admission import ADMISSION_NOTE, DOWNGRADE_ADMISSION, admitted_refs, evaluate_usage
+from apkscan.core.observations import evidence_identity
 from apkscan.core.models import (
     ADVICE_INVESTIGATE,
     ADVICE_REVIEW,
     DOWNGRADE_EVIDENCE_SCOPE,
     OBSERVED_CONTACT_SOURCES,
     EvidenceScope,
+    VALID_ADVICE,
+    effective_advice,
     evidence_source_is_direct,
 )
 
@@ -99,27 +103,14 @@ def serialized_lead_case_evidence_refs(
     raw_endpoints = report.get("endpoints")
     if not isinstance(raw_endpoints, list):
         return refs
-    seen = {
-        (
-            str(ref.get("source", "")),
-            str(ref.get("location", "")),
-            str(ref.get("snippet", "")),
-            str(ref.get("scope", "")),
-        )
-        for ref in refs
-    }
+    seen = {evidence_identity(ref) for ref in refs}
     for endpoint in raw_endpoints:
         if not isinstance(endpoint, Mapping):
             continue
         if _network_key(endpoint.get("kind"), endpoint.get("value")) != wanted:
             continue
         for ref in serialized_case_evidence_refs(endpoint, "evidences"):
-            key = (
-                str(ref.get("source", "")),
-                str(ref.get("location", "")),
-                str(ref.get("snippet", "")),
-                str(ref.get("scope", "")),
-            )
+            key = evidence_identity(ref)
             if key not in seen:
                 refs.append(ref)
                 seen.add(key)
@@ -139,12 +130,30 @@ def project_serialized_lead(
     """Return a non-mutating, scope-qualified Lead projection for outputs."""
     projected: dict[str, Any] = dict(lead)
     direct_refs = serialized_lead_case_evidence_refs(report, lead)
-    if direct_refs:
+    decision = evaluate_usage(direct_refs, "lead_priority")
+    projected["evidence_admission"] = decision
+    qualified_refs = admitted_refs(direct_refs, "lead_priority")
+    if qualified_refs:
         # Decision outputs cite only the refs that licensed the decision.  In
         # the same-value Endpoint case this also carries the Endpoint evidence
         # into the projected Lead without touching the raw report.
-        projected["source_refs"] = direct_refs
-        sources = [str(ref.get("source", "")) for ref in direct_refs]
+        projected["source_refs"] = qualified_refs
+        raw_downgrades = projected.get("downgrades")
+        downgrades = dict(raw_downgrades) if isinstance(raw_downgrades, Mapping) else {}
+        if DOWNGRADE_ADMISSION in downgrades:
+            downgrades.pop(DOWNGRADE_ADMISSION)
+            projected["downgrades"] = downgrades
+            base = projected.get("base_advice")
+            legacy = projected.get("legacy_effective_advice")
+            if base in VALID_ADVICE or legacy in VALID_ADVICE:
+                refreshed = effective_advice(
+                    base if base in VALID_ADVICE else None,
+                    downgrades,
+                    legacy if legacy in VALID_ADVICE else None,
+                )
+                if refreshed:
+                    projected["advice"] = refreshed
+        sources = [str(ref.get("source", "")) for ref in qualified_refs]
         projected["is_c2"] = (
             isinstance(projected.get("category"), str)
             and str(projected.get("category", "")).upper() in {"DOMAIN", "IP"}
@@ -158,12 +167,16 @@ def project_serialized_lead(
 
     if projected.get("advice") == ADVICE_INVESTIGATE:
         projected["advice"] = ADVICE_REVIEW
+    projected["source_refs"] = []
     projected["is_c2"] = False
     projected["is_runtime_seen"] = False
     projected["is_runtime_contact"] = False
     raw_downgrades = projected.get("downgrades")
     downgrades = dict(raw_downgrades) if isinstance(raw_downgrades, Mapping) else {}
-    downgrades[DOWNGRADE_EVIDENCE_SCOPE] = EVIDENCE_SCOPE_DOWNGRADE_NOTE
+    if direct_refs:
+        downgrades[DOWNGRADE_ADMISSION] = ADMISSION_NOTE
+    else:
+        downgrades[DOWNGRADE_EVIDENCE_SCOPE] = EVIDENCE_SCOPE_DOWNGRADE_NOTE
     projected["downgrades"] = downgrades
     return projected
 
@@ -185,22 +198,28 @@ def project_serialized_leads(report: object) -> list[dict[str, Any]]:
 def _serialized_direct_network_keys(
     report: Mapping[str, object],
 ) -> set[tuple[str, str]]:
-    """Return normalized network values supported by direct case evidence."""
+    """Return network values with admitted observed-contact support."""
     keys: set[tuple[str, str]] = set()
     raw_endpoints = report.get("endpoints")
     for endpoint in raw_endpoints if isinstance(raw_endpoints, list) else []:
-        if not isinstance(endpoint, Mapping) or not serialized_has_case_evidence(
-            endpoint, "evidences"
-        ):
+        if not isinstance(endpoint, Mapping):
+            continue
+        eligible = admitted_refs(
+            serialized_case_evidence_refs(endpoint, "evidences"), "closure_candidate"
+        )
+        if not any(ref.get("source") in OBSERVED_CONTACT_SOURCES for ref in eligible):
             continue
         key = _network_key(endpoint.get("kind"), endpoint.get("value"))
         if key is not None:
             keys.add(key)
     raw_leads = report.get("leads")
     for lead in raw_leads if isinstance(raw_leads, list) else []:
-        if not isinstance(lead, Mapping) or not serialized_has_case_evidence(
-            lead, "source_refs"
-        ):
+        if not isinstance(lead, Mapping):
+            continue
+        eligible = admitted_refs(
+            serialized_case_evidence_refs(lead, "source_refs"), "closure_candidate"
+        )
+        if not any(ref.get("source") in OBSERVED_CONTACT_SOURCES for ref in eligible):
             continue
         key = _network_key(lead.get("category"), lead.get("value"))
         if key is not None:
@@ -219,10 +238,11 @@ def _append_unique_text(target: dict[str, Any], field: str, value: str) -> None:
 def project_serialized_closure(report: object) -> dict[str, Any]:
     """Return a non-mutating, scope-safe closure projection.
 
-    Existing states are never upgraded.  A serialized ``complete`` claim is
+    Existing states are never upgraded. A serialized ``complete`` claim is
     retained only when it carries a non-empty target inventory and every
-    target has matching current-case evidence.  Missing inventory is a failed
-    closure; partial target support is a partial closure.
+    target has matching admitted observed-contact evidence. This is a minimum
+    contact-consistency check, not proof of the remaining closure layers.
+    Missing inventory is a failed closure; partial target support is partial.
     """
     if not isinstance(report, Mapping):
         return {}
@@ -260,7 +280,7 @@ def project_serialized_closure(report: object) -> dict[str, Any]:
         _append_unique_text(
             projected,
             "gaps",
-            "闭环目标缺少当前案件直接证据：" + ", ".join(missing),
+            "闭环目标缺少合格的当前案件运行时接触证据：" + ", ".join(missing),
         )
         _append_unique_text(projected, "next_actions", _MISSING_CLOSURE_ACTION)
     return projected

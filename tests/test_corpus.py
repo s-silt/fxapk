@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -27,11 +28,29 @@ from apkscan.report import json as report_json
 
 
 def _evidence(scope: str = "case_evidence") -> dict:
-    return {"source": "dex", "location": "classes.dex", "scope": scope}
+    return {
+        "source": "dex",
+        "location": "classes.dex",
+        "scope": scope,
+        "provenance": {"member_path": "classes.dex", "member_sha256": "a" * 64},
+        "locator": {"byte_offset": 1, "offset_unit": "byte"},
+        "structure_status": "parsed",
+        "reference_status": "referenced",
+        "reachability": "reachable",
+    }
 
 
 def _runtime_dns_evidence(scope: str = "case_evidence") -> dict:
-    return {"source": "runtime-pcap", "location": "pcap-dns", "scope": scope}
+    return {
+        "source": "runtime-pcap",
+        "location": "pcap-dns",
+        "scope": scope,
+        "provenance": {"member_path": "capture.pcap", "member_sha256": "b" * 64},
+        "locator": {"packet_index": 1},
+        "structure_status": "parsed",
+        "reference_status": "referenced",
+        "reachability": "reachable",
+    }
 
 
 def _save_manifest_cas(root: Path, entries: list[dict], *, allow_shrink: bool = False) -> None:
@@ -497,6 +516,12 @@ def test_real_serialized_report_keeps_current_case_iocs() -> None:
         source="dex",
         location="classes.dex",
         scope=EvidenceScope.CASE_EVIDENCE,
+        provenance={"extractor": "synthetic", "member_path": "classes.dex",
+                    "member_sha256": "a" * 64},
+        locator={"byte_offset": 1, "offset_unit": "byte"},
+        structure_status="parsed",
+        reference_status="referenced",
+        reachability="reachable",
     )
     report = Report(
         package_name="com.example.synthetic",
@@ -575,6 +600,7 @@ def test_legacy_manifest_case_ioc_projection_is_suppressed_until_reindex(
         encoding="utf-8",
     )
     report_before = report_file.read_bytes()
+    report_before_hash = hashlib.sha256(report_before).hexdigest()
 
     [safe] = corpus.load_materialized_manifest(tmp_path)
 
@@ -608,7 +634,10 @@ def test_legacy_manifest_case_ioc_projection_is_suppressed_until_reindex(
     assert rebuilt["domains"] == []
     assert rebuilt["cname_edges"] == []
     assert rebuilt["remote_config_objects"] == []
+    assert rebuilt["relation_index_version"] == "evidence-admission/1"
+    assert rebuilt["relation_status"] == "unknown"
     assert report_file.read_bytes() == report_before
+    assert hashlib.sha256(report_file.read_bytes()).hexdigest() == report_before_hash
 
 
 def test_manifest_does_not_promote_batch_reference_values_to_case_evidence() -> None:

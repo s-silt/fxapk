@@ -9,7 +9,8 @@ from typer.testing import CliRunner
 
 from apkscan import cli
 from apkscan.core import pipeline
-from apkscan.core.models import AnalysisConfig, Endpoint, EnrichmentResult
+from apkscan.core.admission import evaluate_usage
+from apkscan.core.models import AnalysisConfig, Endpoint, EnrichmentResult, Evidence
 from apkscan.core.registry import BaseEnricher
 from apkscan.report.digest import build_digest
 
@@ -256,7 +257,26 @@ def test_pipeline_digest_exposes_consistent_high_cardinality_deferral(monkeypatc
             raise AssertionError(f"缺凭据不得查询 {ep.kind}")
 
     monkeypatch.delenv("FXAPK_SYNTHETIC_MISSING_DIGEST_KEY", raising=False)
-    endpoints = [Endpoint(value=f"node-{index}.example.test", kind="domain") for index in range(33)]
+    endpoints = [
+        Endpoint(
+            value=f"node-{index}.example.test",
+            kind="domain",
+            evidences=[Evidence(
+                source="dex",
+                location=f"classes-{index}.dex",
+                provenance={"member_path": f"classes-{index}.dex", "member_sha256": "a" * 64},
+                locator={"byte_offset": index, "offset_unit": "byte"},
+                structure_status="parsed",
+                reference_status="referenced",
+                reachability="reachable",
+            )],
+        )
+        for index in range(33)
+    ]
+    for endpoint in endpoints:
+        endpoint.enrichment["evidence_admission"] = {
+            "passive_enrichment": evaluate_usage(endpoint.evidences, "passive_enrichment")
+        }
     state = _run_enrichment_stage(
         monkeypatch,
         endpoints,

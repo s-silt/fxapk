@@ -1,7 +1,14 @@
 
 // 取证用途：对取证样本自身在分析机上做运行时观测，产出端点/密钥/独特串等线索，不面向任何第三方基础设施。
 // apkscan 运行时密钥 hook（best-effort）：抓活体 AES key/iv/明文/密文回传 Python。
-Java.perform(function () {
+var _coverage = (typeof globalThis !== 'undefined' && globalThis.__fxapkProbeCoverage) || {
+    perform: function (_family, callback) {
+        try { if (typeof Java !== 'undefined' && (!('available' in Java) || Java.available)) Java.perform(callback); } catch (_) {}
+    },
+    attempted: function () {}, installed: function () {}, registrationError: function () {},
+    trigger: function () {}, drop: function () {}, truncated: function () {}
+};
+_coverage.perform('crypto', function () {
     var _seen = {};
     var _count = 0;
     var _CAP = 4000;          // 与 Python _SINK_CAP 对齐
@@ -11,7 +18,12 @@ Java.perform(function () {
         if (bytes === null || bytes === undefined) return null;
         try {
             var out = '';
-            for (var i = 0; i < bytes.length; i++) {
+            var length = bytes.length;
+            if (length > _MAXB) {
+                _coverage.truncated('crypto', 'events');
+                length = _MAXB;
+            }
+            for (var i = 0; i < length; i++) {
                 var b = bytes[i] & 0xff;
                 out += ('0' + b.toString(16)).slice(-2);
             }
@@ -30,6 +42,7 @@ Java.perform(function () {
         if (bytes === null || bytes === undefined) return null;
         try {
             if (bytes.length > _MAXB) {
+                _coverage.truncated('crypto', 'events');
                 var sub = Java.array('byte', Array.prototype.slice.call(bytes, 0, _MAXB));
                 return sub;
             }
@@ -38,7 +51,7 @@ Java.perform(function () {
     }
     function emit(p) {
         try {
-            if (_count >= _CAP) return;
+            if (_count >= _CAP) { _coverage.drop('crypto', 'events'); return; }
             if (p.event === 'init') {
                 var k = (p.src || '') + '|' + (p.transformation || '') + '|' +
                         (p.key_hex || '') + '|' + (p.iv_hex || '');
@@ -58,7 +71,9 @@ Java.perform(function () {
         var _state = {};  // identityHashCode -> {opmode,transformation,key_hex,iv_hex}
 
         Cipher.init.overloads.forEach(function (ov) {
+            _coverage.attempted('crypto', 'cipher_init');
             ov.implementation = function () {
+                _coverage.trigger('crypto', 'cipher_init');
                 var args = arguments;
                 try {
                     var opmode = (args.length > 0) ? args[0] : 0;
@@ -78,10 +93,13 @@ Java.perform(function () {
                 } catch (e) {}
                 return ov.apply(this, args);
             };
+            _coverage.installed('crypto', 'cipher_init');
         });
 
         Cipher.doFinal.overloads.forEach(function (ov) {
+            _coverage.attempted('crypto', 'cipher_final');
             ov.implementation = function () {
+                _coverage.trigger('crypto', 'cipher_final');
                 var args = arguments;
                 var out = ov.apply(this, args);
                 try {
@@ -107,25 +125,36 @@ Java.perform(function () {
                 } catch (e) {}
                 return out;
             };
+            _coverage.installed('crypto', 'cipher_final');
         });
         console.log('[apkscan] javax.crypto.Cipher hooked');
     } catch (e) {
+        _coverage.registrationError('crypto', 'cipher_init');
+        _coverage.registrationError('crypto', 'cipher_final');
         console.log('[apkscan] Cipher hook skip: ' + e);
     }
 
     // --- SecretKeySpec.$init：构造期抓原始 key bytes（覆盖 getEncoded 被混淆/返回 null）---
     try {
         var SecretKeySpec = Java.use('javax.crypto.spec.SecretKeySpec');
-        SecretKeySpec.$init.overload('[B', 'java.lang.String').implementation = function (keyBytes, algo) {
+        var secretKey = SecretKeySpec.$init.overload('[B', 'java.lang.String');
+        _coverage.attempted('crypto', 'secret_key');
+        secretKey.implementation = function (keyBytes, algo) {
+            _coverage.trigger('crypto', 'secret_key');
             try {
                 emit({src: 'secretkeyspec', event: 'init', transformation: '' + algo,
                       key_hex: b2hex(keyBytes), ts: Date.now()});
             } catch (e) {}
             return this.$init(keyBytes, algo);
         };
+        _coverage.installed('crypto', 'secret_key');
         // 带 offset/length 的构造（部分库用此形式，否则漏 key）。
-        SecretKeySpec.$init.overload('[B', 'int', 'int', 'java.lang.String').implementation =
-            function (keyBytes, off, len, algo) {
+        var secretKeySlice = SecretKeySpec.$init.overload(
+            '[B', 'int', 'int', 'java.lang.String'
+        );
+        _coverage.attempted('crypto', 'secret_key');
+        secretKeySlice.implementation = function (keyBytes, off, len, algo) {
+                _coverage.trigger('crypto', 'secret_key');
                 try {
                     var sub = null;
                     try { sub = Java.array('byte', Array.prototype.slice.call(keyBytes, off, off + len)); } catch (e3) { sub = keyBytes; }
@@ -134,22 +163,29 @@ Java.perform(function () {
                 } catch (e) {}
                 return this.$init(keyBytes, off, len, algo);
             };
+        _coverage.installed('crypto', 'secret_key');
         console.log('[apkscan] SecretKeySpec hooked');
     } catch (e) {
+        _coverage.registrationError('crypto', 'secret_key');
         console.log('[apkscan] SecretKeySpec hook skip: ' + e);
     }
 
     // --- IvParameterSpec.$init：抓 iv bytes -------------------------------
     try {
         var IvParameterSpec = Java.use('javax.crypto.spec.IvParameterSpec');
-        IvParameterSpec.$init.overload('[B').implementation = function (ivBytes) {
+        var ivSpec = IvParameterSpec.$init.overload('[B');
+        _coverage.attempted('crypto', 'iv_spec');
+        ivSpec.implementation = function (ivBytes) {
+            _coverage.trigger('crypto', 'iv_spec');
             try {
                 emit({src: 'ivspec', event: 'init', iv_hex: b2hex(ivBytes), ts: Date.now()});
             } catch (e) {}
             return this.$init(ivBytes);
         };
+        _coverage.installed('crypto', 'iv_spec');
         console.log('[apkscan] IvParameterSpec hooked');
     } catch (e) {
+        _coverage.registrationError('crypto', 'iv_spec');
         console.log('[apkscan] IvParameterSpec hook skip: ' + e);
     }
 
@@ -165,17 +201,27 @@ Java.perform(function () {
                 emit({src: 'mac', event: 'init', transformation: transformation, key_hex: key_hex, ts: Date.now()});
             } catch (e) {}
         }
-        Mac.init.overload('java.security.Key').implementation = function (key) {
+        var macInit = Mac.init.overload('java.security.Key');
+        _coverage.attempted('crypto', 'mac_init');
+        macInit.implementation = function (key) {
+            _coverage.trigger('crypto', 'mac_init');
             _emitMacKey(this, key);
             return this.init(key);
         };
-        Mac.init.overload('java.security.Key', 'java.security.spec.AlgorithmParameterSpec')
-            .implementation = function (key, spec) {
+        _coverage.installed('crypto', 'mac_init');
+        var macInitSpec = Mac.init.overload(
+            'java.security.Key', 'java.security.spec.AlgorithmParameterSpec'
+        );
+        _coverage.attempted('crypto', 'mac_init');
+        macInitSpec.implementation = function (key, spec) {
+                _coverage.trigger('crypto', 'mac_init');
                 _emitMacKey(this, key);
                 return this.init(key, spec);
             };
+        _coverage.installed('crypto', 'mac_init');
         console.log('[apkscan] Mac hooked');
     } catch (e) {
+        _coverage.registrationError('crypto', 'mac_init');
         console.log('[apkscan] Mac hook skip: ' + e);
     }
 
@@ -195,12 +241,17 @@ Java.perform(function () {
             "iv:(c&&c.iv&&c.iv.toString)?c.iv.toString():''," +
             "pt:(m&&m.toString)?m.toString():''}));}catch(e){}return r;};" +
             "}catch(e){}})();";
-        WebView.loadUrl.overload('java.lang.String').implementation = function (url) {
+        var webViewLoadUrl = WebView.loadUrl.overload('java.lang.String');
+        _coverage.attempted('crypto', 'webview_load_url');
+        webViewLoadUrl.implementation = function (url) {
+            _coverage.trigger('crypto', 'webview_load_url');
             try { this.evaluateJavascript(injectJs, null); } catch (e) {}
             return this.loadUrl(url);
         };
+        _coverage.installed('crypto', 'webview_load_url');
         console.log('[apkscan] WebView CryptoJS wrapper armed');
     } catch (e) {
+        _coverage.registrationError('crypto', 'webview_load_url');
         console.log('[apkscan] WebView CryptoJS hook skip: ' + e);
     }
 });

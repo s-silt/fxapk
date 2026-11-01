@@ -4,7 +4,57 @@
 
 完整参数 `fxapk --help`；`fxapk` 未装成命令时用 `python -m apkscan.cli`。
 
+报告 schema 1.3 的 Evidence 可携带 `provenance`、`locator`、`structure_status`、
+`reference_status`、`reachability` 与 `suspicions`；仅在真实来源和坐标同时存在时输出
+稳定的 `occurrence_id`。旧报告缺少这些字段时保持 unknown/空值，不补造定位。
+
+证据准入按 occurrence 和用途分别评估：`passive_enrichment`、`lead_priority`、
+`closure_candidate`、`dex_query`、`model_summary`、`corpus_relation`；判定结果为
+`allowed`、`review` 或 `blocked`。某个值获准不代表同值的其他引用也获准。静态候选不等于
+运行时观测，也不证明业务归属。
+
+DEX 解码预算复用既有数量、字符数和快照容量边界；这些边界本身不提供解析进程隔离，
+隔离是否启用由下方环境配置决定。
+
+可选解析器进程限制通过环境变量启用：必须同时设置 `FXAPK_PARSER_TIMEOUT_SEC` 与
+`FXAPK_PARSER_MEMORY_MB`；`FXAPK_PARSER_OUTPUT_MB` 可选，未设置时 IPC 输出上限为 64 MiB。
+任一必需项缺失或配置无效都会失败关闭。限制按一次解析或一次隔离延迟读取分别生效，
+不是整次分析的总时限，也不是原生代码沙箱。未配置时维持进程内解析，回执明确标为
+`not_enforced`；默认不宣称性能收益。Linux 的内存限制是地址空间上限（RLIMIT_AS），不是
+RSS 测量；Windows 使用 Job Object，其强制约束须在 Windows 平台验收；macOS 无法执行所需
+内存限制时会失败关闭。
+配置解析失败会在 analyze 输出目录写入独立的 `*.parser-failure.json` 回执，不生成空报告。
+
+## 探针证据、采集退化与调证对象
+
+- `no-proxy` 观察轮不请求 TLS 校验修改；MITM 轮与原版 `floor-only` 轮分别留档。
+  OkHttp 不再次执行请求正文的 `writeTo()`，正文标为 `not_read_non_interference`；
+  SQLCipher 只观察路径与密钥，不在应用连接上执行导出 SQL，标为
+  `not_attempted_non_interference`。因此未读正文、未导出库不是阴性结果或导出失败。
+- 探针安装、触发、丢弃和截断分别记录；Java bridge 就绪不等于各 hook 安装成功。
+  缺少回执保持 unknown，未触发或未找到 API 不等于反检测，也不证明不存在相应行为。
+- `probe-leads` 回灌保存原始日志 bytes 哈希、解码文本哈希、行号及 codepoint 坐标；
+  日志超过 8 MiB 或导入线索超过 10,000 条时拒绝导入，而不是静默截断后声称完整。
+  bundled 事件并回以同一次读取的运行时报告 bytes 哈希和实际数组 JSON pointer 定位，
+  同值的不同 occurrence 保留。脚本/采集身份缺失不补造；哈希不证明真实性或目标 App 归属。
+- `meta.capture_safety_comparison` 对原版 PCAP 基线与探针轮作保守比较；`digest.capture_safety`
+  只压缩该回执。只有同一原版 APK、前台确认、显式引导页/网络检查、匹配动作/初始状态/环境声明
+  及仍可验证的检查材料都具备时才形成可比信号。状态可为 `inconclusive`、`reported_regression`、
+  `baseline_failed` 或 `no_reported_regression`，均不证明因果或普遍无干扰。
+  采集 done 不等于通过引导页；零流量不等于应用无网络。不会自动清数据或重置设备状态。
+- 多源富化保留查询时间、提供方原始时间字段与来源家族，不把现在的查询结果视作事件发生时的关系。
+  Shodan 与 InternetDB 同属一个家族，不当两份独立佐证。调证候选分别列服务角色、所需端点/端口/
+  时区时间窗/App 关联标识、要调取的账户/绑定/日志与待核问题；CDN 可先调绑定和回源配置，
+  不冒充 Origin。法律渠道与历史关系仍需核实，ASN/RDAP/承载/CDN 不证明 App 运营者。
+  `digest.closure.request_targets` 是有界摘要，正式判断回查完整 closure 和逐来源回执。
+
 ## 命令表
+
+网页材料可附 `--evidence-handoff <证据目录外的JSON>`：
+`fxapk.web-evidence-handoff.v1` 逐文件校验原始大小/哈希，绑定采集来源、HAR entry 与覆盖缺口。
+文本坐标按解码后 codepoint 计；HAR 正文坐标另带 entry 的 JSON pointer，不当原始字节偏移。
+截断、TLS 忽略验证、关联未知、DOM 快照作为待核来源保留；哈希吻合不证明材料真实性或目标 App 归属。
+采集范围与未分析附件见 `meta.web_capture_visibility`，完整交接回执见 `meta.web_evidence.handoff`。
 
 | 想干什么 | 命令 |
 |---|---|
@@ -58,6 +108,7 @@ Hunter 默认在搜索前读取账户免费余额并在本机账本（`~/.fxapk/
 - 报告内容可重建到 `manifest.jsonl`；人工确认的多案关联、隔离状态和入库顺序只写在非派生 `catalog.jsonl`。一个报告可绑定多个 `case_id`；普通查询默认排除 `quarantined`。旧版/开发版先 `corpus versions` 审计，再显式 `corpus quarantine-version --apply`；工具不自动删历史证据。
 - rules-v2 后，旧 manifest 缺 `repack_identity_verdict` 时 `link-candidates` 返回 `status=partial` 与 `migration.next_action`，先 `fxapk corpus reindex --corpus <库>` 重算投影（不改报告字节）；重建后仍缺则该报告从未完成评估，须用当前 fxapk 重新分析，不能把"未评估"改写成 `unknown`。
 - 案件级 IOC 索引只接收至少一条显式 `case_evidence` 的 `Lead.source_refs[]` / `Endpoint.evidences[]`。
+- corpus 关系索引使用 `relation_index_version=evidence-admission/1`；缺少标记的历史关系保持 unknown，只有显式 `corpus reindex` 才重建索引，报告原始字节不改。证据准入按 occurrence 和用途分别评估：静态候选不代表运行时观测或业务归属。
 - `corpus migrate-catalog` 把旧 `manifest.case_id` 迁到 `catalog.jsonl`：先 dry-run，再 `--apply`。**迁移不可回滚，`--apply` 前整目录备份**——`corpus restore` 恢复的 manifest 会被 catalog 立刻重新物化，手删 `catalog.jsonl` 则整库 fail-closed。
 - `corpus reconcile` 默认只读列计划；`--apply` 只新增不可变报告或并入案件关联，字节冲突、隔离记录或包哈希变化非零退出。Phase 2 始终消费精确 package 哈希。
 
@@ -70,7 +121,7 @@ Phase 1 产生报告、附件和不可变 `case-package.json`；Phase 2 只读�
 - `closure`：运行时、归属与调证对象是否闭环
 - `review`：精确 package 哈希是否被接受、要求修改或已失效
 
-四者不能互相推出；报告或附件变化后旧复核显示 `stale`。`closure=complete` 要求主目标五层（运行时、资源登记、BGP 宣告、托管分发、最终归属对象）都有证据；前面套着 CDN、源站未定位的不判 complete。
+四者不能互相推出；报告或附件变化后旧复核显示 `stale`。`closure=complete` 要求主目标五层（运行时、资源登记、BGP 宣告、托管分发、最终归属对象）都有证据；前面套着 CDN、源站未定位的不判 complete。缓存或导出的 `complete` 声明经安全投影时，还要求每个目标至少有一条用途准入通过的运行时接触证据；这只是最小一致性校验，并不证明其余闭环条件满足或替代逐层核验。
 
 报告 schema 1.2 起每条 Evidence 带 `scope`：`case_evidence`（当前案件直接证据）、`batch_reference`（批量/跨案参考，只辅助复核，不能升级为"建议调证"或满足 closure）、`legacy_unspecified`（旧报告迁移）。该资格闸作用于摘要、调证函、IOC、JSONL 和 HTML/PDF；`--only-investigate` 排除参考值。闭环同走安全投影：声称 `complete` 但目标清单为空按 `failed` 消费，任一目标无显式 `case_evidence` 只能按 `partial` 消费；Phase-1 建包直接拒绝虚假 `complete`。`evidence_scope` 不能用 `lead restore/replay` 撤销。
 

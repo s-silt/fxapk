@@ -12,6 +12,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
+from apkscan.core import apk as apk_mod
 from apkscan.core.apk import _load_extra_dex, build_extra_dex_report
 
 
@@ -40,6 +41,31 @@ def test_load_extra_dex_missing_file_is_recorded_not_swallowed(tmp_path: Path) -
     _loaded, failures = _load_extra_dex([str(tmp_path / "nope.dex")])
     assert len(failures) == 1
     assert failures[0]["error_type"] in {"FileNotFoundError", "OSError"}
+
+
+def test_oversized_extra_dex_is_refused_before_dex_construction(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    import androguard.core.dex as androguard_dex
+
+    monkeypatch.setattr(apk_mod, "_DEX_SINGLE_LIMIT_BYTES", 4)
+    monkeypatch.setattr(apk_mod, "_DEX_TOTAL_LIMIT_BYTES", 32)
+    constructed = []
+
+    class FakeDex:
+        def __init__(self, _data: bytes) -> None:
+            constructed.append(True)
+
+    monkeypatch.setattr(androguard_dex, "DEX", FakeDex)
+    oversized = tmp_path / "oversized.dex"
+    oversized.write_bytes(b"12345")
+
+    loaded, failures = _load_extra_dex([str(oversized)])
+
+    assert loaded == []
+    assert constructed == []
+    assert len(failures) == 1
+    assert failures[0]["error_type"] == "ZipEntryTooLargeError"
 
 
 def test_build_report_counts_and_completeness() -> None:

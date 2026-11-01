@@ -4,7 +4,62 @@
 
 Full flags: `fxapk --help`; if `fxapk` is not installed as a command, use `python -m apkscan.cli`.
 
+In report schema 1.3, Evidence may carry `provenance`, `locator`,
+`structure_status`, `reference_status`, `reachability`, and `suspicions`.
+A stable `occurrence_id` is emitted only when real provenance and coordinates
+are both available; legacy reports retain unknown/empty values rather than
+inventing locations.
+
+Parser process limits are opt-in. Set both `FXAPK_PARSER_TIMEOUT_SEC` and
+`FXAPK_PARSER_MEMORY_MB`; `FXAPK_PARSER_OUTPUT_MB` is optional and defaults to a 64 MiB
+IPC output cap. Missing or invalid required configuration fails closed. Limits apply
+per parse operation and per isolated lazy read, not to the total analysis and not as
+a native-code sandbox. With no configuration, parsing remains in-process and the
+receipt explicitly says `not_enforced`; no default performance benefit is claimed.
+Linux uses an address-space limit (RLIMIT_AS), not measured RSS; Windows uses a Job
+Object whose enforcement must be verified on Windows rather than inferred from Linux
+tests. If macOS cannot enforce the requested memory limit, parsing fails closed.
+An analyze parser failure writes a separate `*.parser-failure.json` receipt and does
+not create an empty report.
+
+## Probe evidence, capture regressions and request targets
+
+- The `no-proxy` observation round does not request TLS-verification changes. Preserve it,
+  the original `floor-only` baseline and MITM rounds separately. OkHttp never replays
+  request-body `writeTo()`; `not_read_non_interference` means unread, not empty. SQLCipher
+  observes paths/keys without exporting through the application's connection;
+  `not_attempted_non_interference` is not an export failure.
+- Installation, triggering, dropped observations and truncation have separate receipts.
+  Java bridge readiness does not confirm hook registration. Missing receipts stay unknown;
+  an unavailable API or untriggered hook does not establish anti-analysis or absence of behavior.
+- Probe-log import preserves the raw-byte hash, decoded-text hash, line and codepoint
+  coordinates. Inputs over 8 MiB or 10,000 imported leads fail rather than silently truncate.
+  Bundled event references bind the runtime report's exact read bytes and original array JSON
+  pointer; distinct occurrences survive aggregation. Missing identities stay unavailable;
+  hashes do not prove authenticity or target-App attribution.
+- `meta.capture_safety_comparison` and its compact `digest.capture_safety` projection require
+  the same original APK, foreground confirmation, explicit onboarding/network outcomes,
+  matching declared action/initial-state/environment digests and hash-bound check artifacts.
+  Outcomes are `inconclusive`, `reported_regression`, `baseline_failed` or
+  `no_reported_regression`, never proof of causality or universal non-interference.
+  Capture completion is not onboarding success; zero traffic is not network failure.
+  No automatic app-data clearing or device-state reset is performed.
+- Enrichment separates query execution time, uninterpreted provider time fields and source
+  family. Shodan and InternetDB are not independent corroboration. Request candidates include
+  service roles, identifiers, event windows/timezones, records to obtain and verification
+  questions. An edge provider may supply account/domain/origin bindings without being the
+  Origin or App operator. Legal channels and historical relationships remain unverified.
+  `digest.closure.request_targets` is bounded; consult full closure and source receipts for decisions.
+
 ## Command table
+
+Saved web evidence accepts `--evidence-handoff <JSON outside the evidence directory>`.
+The `fxapk.web-evidence-handoff.v1` contract binds original file hashes/sizes,
+capture provenance, HAR entries, and upstream coverage gaps. Text offsets use decoded
+codepoints; HAR body offsets also carry an entry JSON pointer, not a raw-byte coordinate.
+Truncation, ignored TLS verification, unknown request associations, and rendered DOM
+remain review signals. A matching hash proves neither authenticity nor target-app attribution.
+See `meta.web_capture_visibility` and `meta.web_evidence.handoff` for the full boundaries.
 
 | Goal | Command |
 |---|---|

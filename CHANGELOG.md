@@ -5,6 +5,16 @@
 
 ## 待发布
 
+- 探针非干扰性收紧：OkHttp 不重放请求正文，SQLCipher 不在应用连接上导库；无代理观察轮不请求 TLS 校验修改。保留未读取/未导出状态，不把缺失当阴性；配对基线比较分开引导页、网络与采集状态，不作因果保证。
+- 探针日志与 bundled 事件补来源哈希、真实行/数组定位和 occurrence 保留；安装、触发、丢弃、截断分开记回执，Java bridge 就绪不冒充 hook 安装成功。
+- 多源富化补查询/提供方时间与来源家族语义；调证候选补服务角色、标识、所需记录及待核问题。摘要保留有界的逐目标/逐 IP 请求对象，不把 ASN/CDN/承载商写成 App 运营者。
+- 解析器支持显式逐操作进程限制与 JSON-only IPC；配置失败、子进程失败或输入哈希变化保持失败回执，不回退到无约束解析。未配置仍明确 `not_enforced`，不声称总预算或原生沙箱。
+
+- 网页分析新增目录外 `--evidence-handoff` 哈希绑定交接契约；文本/HAR 引用保留逐次定位、采集完整性及来源状态。截断正文不污染请求 URL 的完整性判断，材料真实性和目标 App 归属仍未验证。
+
+- Evidence admission now records allowed occurrence IDs and per-analysis file-read gaps; enrichment target allocation is stable and round-robin across provenance buckets. Corpus relation queries require `evidence-admission/1`; explicit reindex rebuilds derived indexes without rewriting report bytes.
+- DEX decode visibility reuses existing budgets and cache envelopes; this is distinct from opt-in parser isolation. No measured RSS or whole-analysis sandbox is claimed.
+- Evidence occurrence/provenance fields are preserved through report IO, snapshots, endpoint collectors, and JS/resource/native scans; schema 1.3 emits stable `occurrence_id` values without changing legacy `evidence_id`.
 - **行为变更**：远程配置下载（`fetch_config_object` / `config-probe`）不再读取 `HTTP(S)_PROXY` / `ALL_PROXY`、`.netrc`、`REQUESTS_CA_BUNDLE` 等环境配置，始终直连目标：经代理时实连 peer 是代理地址，连接层 DNS-rebinding 防护会失效。需经代理才能出网的环境下该阶段会以连接失败降级。
 - 远程配置下载（`fetch_config_object` / `config-probe`）的 SSRF 判据改为仅放行公网地址（`is_global`），与 `origin_check` 一致：此前放行的 100.64.0.0/10 共享地址段（如 Tailscale）、198.18.0.0/15 等非公网段，以及 IPv4-mapped、NAT64、6to4、Teredo 中内嵌的非公网 IPv4，预解析与实连 peer 两层均拒绝。
 - CI 新增 `pytest (ASC provider, locked)` 关：droidasc 按测试清单中的官方轮子 sha256 走 hash 校验安装，其余按 `plugins/fxapk-asc/requirements.lock` 安装，设 `FXAPK_REQUIRE_ASC_LIVE=1` 后 ASC 真跑测试缺件即失败、不再静默 skip。ASC 身份表（核心与 worker）与 REA 兼容修补的四个源码哈希改为对照官方发布物独立算出的字面量清单（PyPI 轮子与 npm 归档 integrity），REA 6.4.0 / 6.7.0 的目标文件原文作为夹具（MIT），在其上不替换哈希真跑修补。droidasc 的 revision 是上游 git commit，发布物内不含，仍只能人工核对。

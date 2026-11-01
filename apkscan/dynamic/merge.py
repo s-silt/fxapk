@@ -32,8 +32,11 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from apkscan.dynamic.capture_provenance import (
-    capture_scope, scoped_evidence, retain_observations, project_observations, validate_ledger, append_capture_ref, sync_endpoint_refs,
+    capture_scope, scoped_evidence, scoped_event_refs, retain_observations, project_observations, validate_ledger, append_capture_ref, sync_endpoint_refs,
 )
+from apkscan.dynamic.event_origin import RuntimePayload, bind_event, bind_evidence, index_events, preserve_origin
+from apkscan.dynamic.runtime_input import RuntimeReadFailure, input_receipt, read_runtime_input
+from apkscan.core.observations import evidence_identity
 from apkscan.core import infra, pipeline
 from apkscan.core.textutil import host_from_url
 from apkscan.core.models import (
@@ -78,6 +81,7 @@ META_WRITE_CATEGORIES = {
     # 各并回子步骤的结局：ok（跑完了，可能没结果）/ error（崩了）。★没有它，
     # 「样本没有凭据」与「凭据解析器崩了」都是 runtime_credential_count=0，无从分辨。
     'runtime_merge_steps': 'coverage',
+    'runtime_report_input': 'coverage',
     'runtime_remote_control': 'signal',
     'runtime_remote_control_targets': 'signal',
     'runtime_remote_control_unknown_packages': 'signal',
@@ -133,8 +137,6 @@ def _emit(on_progress: Callable[[str], None] | None, msg: str) -> None:
 # 缓存绝不跨调用泄漏（文件在两次 merge 间可能变），单独调用 loader 时无缓存、行为与旧版一致。
 
 # 「文件缺失 / 读或解析失败」的缓存占位——把负结果也缓存，免得每个消费者都重试一遍读盘。
-_RUNTIME_PAYLOAD_MISSING: Any = object()
-
 # 线程本地：每个线程独立的作用域缓存栈顶（None 表示当前无活动作用域，不缓存）。
 _runtime_cache_state = threading.local()
 
@@ -151,10 +153,9 @@ def _runtime_payload_cache() -> Iterator[None]:
 
 
 def _read_runtime_payload(runtime_report_path: str) -> Any:
-    """读并解析 runtime_report.json 一次，返回 payload dict / list / 标量。
+    """有界解析 runtime_report.json，返回来源绑定 dict 或结构化读取失败。
 
-    - 文件缺失 或 read/解析失败 → 返回 ``_RUNTIME_PAYLOAD_MISSING`` 占位（调用方据此走各自的
-      缺文件 / 坏 JSON 分支，保持与旧 loader 完全一致的 logging 与返回）。
+    - 文件缺失、超限或解析失败不等于成功但没有观测。
     - 有活动缓存作用域（:func:`_runtime_payload_cache`）时，同一路径只真正读+解析一次，
       后续消费者复用结果（含负结果）。无作用域时每次都真读（行为与旧版一致）。
     """
@@ -163,16 +164,9 @@ def _read_runtime_payload(runtime_report_path: str) -> Any:
     if cache is not None and key in cache:
         return cache[key]
 
-    path = Path(runtime_report_path)
-    if not path.exists():
-        result: Any = _RUNTIME_PAYLOAD_MISSING
-    else:
-        try:
-            result = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            # 单次解析、单次记：不静默吞（logger.exception 带 traceback），且不再由各 loader 重复记。
-            logger.exception("[merge] 读取/解析 runtime 报告失败（相关运行时并回跳过）：%s", path)
-            result = _RUNTIME_PAYLOAD_MISSING
+    result = read_runtime_input(Path(runtime_report_path))
+    if isinstance(result, RuntimeReadFailure):
+        logger.warning("[merge] 运行时输入未接受：%s", result.reason)
 
     if cache is not None:
         cache[key] = result
@@ -204,12 +198,8 @@ def import_runtime_diagnostics_only(report: object, runtime_report_path: str) ->
 def _stamp_process_observations(
     runtime_report_path: str, observations: list[object],
 ) -> list[object]:
-    from apkscan.core.integrity import sha256_file
-
-    try:
-        observation_sha = sha256_file(runtime_report_path)
-    except OSError:
-        observation_sha = ""
+    payload = _read_runtime_payload(runtime_report_path)
+    observation_sha = payload.sha256 if isinstance(payload, RuntimePayload) else ""
     try:
         observation_path = str(Path(runtime_report_path).resolve())
     except OSError:
@@ -307,7 +297,6 @@ def load_runtime_endpoints(runtime_report_path: str) -> list[Endpoint]:
         （runtime / runtime-pcap / runtime-tls-decrypted 等）原样保留，非 runtime* 与合成的钉
         ``runtime-derived``（非 observed-contact，见 :func:`_evidences_from_jsonable`）。
     """
-    import json
     from pathlib import Path
 
     path = Path(runtime_report_path)
@@ -615,7 +604,8 @@ def decrypt_runtime_messages(report: Report, runtime_report_path: str, *,
             logger.info("[merge] 运行时明文捕获冒充对象线索：%s", "、".join(retained[:5]))
             # 同一份 brand_hints 既留档进 meta、也走 Finding 出口——只写 meta 时
             # 读报告的人看不到它（见 _add_brand_hint_finding 的说明）。
-            _add_brand_hint_finding(report, brand_hints, display=retained)
+            brand_index = index_events(events, lambda event: cryptohook.brand_hints_from_events([event]))
+            _add_brand_hint_finding(report, brand_hints, display=retained, event_index=brand_index)
 
         # 候选配方（按优先级）：实测合并配方优先、纯静态配方兜底。逐信封依次尝试、首个解出即用。
         # 关键：「实测优先但绝不回归静态」——实测拿到二进制 key 覆盖、却与静态 iv 推导口径不兼容
@@ -657,6 +647,10 @@ def decrypt_runtime_messages(report: Report, runtime_report_path: str, *,
                     continue
                 stats["decrypted"] += 1
                 eps = _endpoints_from_plaintext(plain, url)
+                for endpoint in eps:
+                    for evidence in endpoint.evidences:
+                        bind_evidence(evidence, msg)
+                        evidence.provenance["derivation"] = "runtime_envelope_decryption"
                 plaintext_endpoints.extend(eps)
 
         stats["plaintext_endpoints"] = len(plaintext_endpoints)
@@ -683,12 +677,12 @@ def _load_runtime_messages(runtime_report_path: str) -> list[dict[str, Any]]:
     同一路径只读+解析一次（解析失败已由 reader 记 exception，此处不重复记）。
     """
     payload = _read_runtime_payload(runtime_report_path)
-    if payload is _RUNTIME_PAYLOAD_MISSING:
+    if isinstance(payload, RuntimeReadFailure):
         return []
     raw = payload.get("messages") if isinstance(payload, dict) else None
     if not isinstance(raw, list):
         return []
-    return [m for m in raw if isinstance(m, dict)]
+    return [bind_event(payload, "messages", i, m) for i, m in enumerate(raw) if isinstance(m, dict)]
 
 
 def _decrypt_with_candidates(
@@ -714,12 +708,12 @@ def _load_events_field(runtime_report_path: str, field: str) -> list[dict[str, A
     已由 reader 记 exception，此处不重复记）。
     """
     payload = _read_runtime_payload(runtime_report_path)
-    if payload is _RUNTIME_PAYLOAD_MISSING:
+    if isinstance(payload, RuntimeReadFailure):
         return []
     raw = payload.get(field) if isinstance(payload, dict) else None
     if not isinstance(raw, list):
         return []
-    return [e for e in raw if isinstance(e, dict)]
+    return [bind_event(payload, field, i, e) for i, e in enumerate(raw) if isinstance(e, dict)]
 
 
 def _load_crypto_events(runtime_report_path: str) -> list[dict[str, Any]]:
@@ -785,12 +779,16 @@ def merge_runtime_traces(report: Report, runtime_report_path: str) -> dict[str, 
         jb_hints = cryptohook.jsbridge_hints_from_events(jb_events)
         if jb_hints:
             report.meta["runtime_jsbridge"] = jb_hints
-            stats["jsbridge_leads"] = _add_runtime_jsbridge_leads(report, jb_hints)
+            jb_index = index_events(jb_events, lambda event: cryptohook.jsbridge_hints_from_events([event]))
+            stats["jsbridge_leads"] = _add_runtime_jsbridge_leads(report, jb_hints, jb_index)
 
         api_hints = cryptohook.sensitive_api_hints_from_events(api_events)
         if api_hints:
             report.meta["runtime_sensitive_apis"] = api_hints
-            stats["api_confirmed"] = _confirm_sensitive_api_findings(report, api_hints)
+            api_index = index_events(api_events, lambda event: (
+                hint.rsplit(".", 1)[-1] for hint in cryptohook.sensitive_api_hints_from_events([event])
+            ))
+            stats["api_confirmed"] = _confirm_sensitive_api_findings(report, api_hints, api_index)
 
         # P3：样本自我检测（root/模拟器/frida）→ 反取证/反分析行为 Finding + meta。
         ad_events = _load_events_field(runtime_report_path, "antidetect_events")
@@ -851,7 +849,7 @@ def merge_runtime_credentials(report: Report, runtime_report_path: str) -> dict[
         for raw in raw_events:
             ev = cryptohook.normalize_credential_event(raw)
             if ev is not None:
-                events.append(ev)
+                events.append(preserve_origin(raw, ev))
         if not events:
             return stats
 
@@ -887,7 +885,7 @@ def _add_runtime_credential_leads(report: Report, events: list[dict[str, Any]]) 
         key = (LeadCategory.RUNTIME_CREDENTIAL.value, value)
         if key in existing:
             append_capture_ref(report, LeadCategory.RUNTIME_CREDENTIAL, value,
-                               scoped_evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=snippet[:200]))
+                               scoped_evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=snippet[:200], runtime_event=ev))
             continue
         existing.add(key)
         report.leads.append(
@@ -898,7 +896,7 @@ def _add_runtime_credential_leads(report: Report, events: list[dict[str, Any]]) 
                 confidence=Confidence.HIGH,
                 advice="建议调证",
                 source_refs=[
-                    scoped_evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=snippet[:200])
+                    scoped_evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=snippet[:200], runtime_event=ev)
                 ],
                 notes=_CREDENTIAL_COMPLIANCE_NOTE,
             )
@@ -966,29 +964,29 @@ def _credential_host_endpoints(events: list[dict[str, Any]]) -> list[Endpoint]:
         if not url:
             continue
         for ep in _endpoints_from_plaintext(url, url):
+            for evidence in ep.evidences:
+                bind_evidence(evidence, ev)
             if ep.value not in found:
                 found[ep.value] = ep
+            else:
+                for evidence in ep.evidences:
+                    if evidence not in found[ep.value].evidences:
+                        found[ep.value].evidences.append(evidence)
     return list(found.values())
 
 
-def _add_runtime_jsbridge_leads(report: Report, jb_hints: list[str]) -> int:
+def _add_runtime_jsbridge_leads(report: Report, jb_hints: list[str], event_index: dict[str, list[dict[str, Any]]] | None = None) -> int:
     """把运行时观测到的桥接接口加成 CONFIG_KEY Lead（source=runtime），去重 append。"""
     existing = {(lead.category.value, lead.value) for lead in report.leads}
     added = 0
     for hint in jb_hints:
         value = f"JSBridge:{hint}"
         key = (LeadCategory.CONFIG_KEY.value, value)
+        refs = scoped_event_refs((event_index or {}).get(hint), source=_RUNTIME_SOURCE,
+                                 location="runtime", snippet=f"运行时暴露/调用：{hint}")
         if key in existing:
-            if append_capture_ref(report, LeadCategory.CONFIG_KEY, value,
-                    scoped_evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=f"运行时暴露/调用：{hint}")):
-                continue
-            # 已有同名（静态桥接框架）→ 追加 runtime 证据，升为活体确认。
-            for lead in report.leads:
-                if lead.category == LeadCategory.CONFIG_KEY and lead.value == value:
-                    lead.source_refs.append(
-                        scoped_evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=f"运行时暴露/调用：{hint}")
-                    )
-                    break
+            for ref in refs:
+                append_capture_ref(report, LeadCategory.CONFIG_KEY, value, ref)
             continue
         existing.add(key)
         report.leads.append(
@@ -997,9 +995,7 @@ def _add_runtime_jsbridge_leads(report: Report, jb_hints: list[str]) -> int:
                 value=value,
                 confidence=Confidence.HIGH,
                 advice="建议调证",
-                source_refs=[
-                    scoped_evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=f"运行时暴露/调用：{hint}")
-                ],
+                source_refs=refs,
                 notes="运行时实测：H5 可调用/已调用的原生 JS-bridge 接口（活体确认）。",
             )
         )
@@ -1016,17 +1012,17 @@ def _add_anti_analysis_finding(
     """
     kinds_label = "、".join(f"{k}×{v}" for k, v in sorted(ad_kinds.items()))
     # 取每类首个 probe 作为证据样本。
-    samples: dict[str, str] = {}
+    samples: dict[str, dict[str, Any]] = {}
     for ev in ad_events:
         if not isinstance(ev, dict):
             continue
         kind = str(ev.get("kind", "")).strip()
         probe = str(ev.get("probe", "")).strip()
         if kind and probe and kind not in samples:
-            samples[kind] = probe
+            samples[kind] = ev
     evidences = [
-        scoped_evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=f"[{k}] {p[:160]}")
-        for k, p in samples.items()
+        scoped_evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=f"[{k}] {str(event.get('probe', ''))[:160]}", runtime_event=event)
+        for k, event in samples.items()
     ]
     severity = Severity.HIGH if ("root" in ad_kinds or "frida" in ad_kinds) else Severity.MEDIUM
     report.findings.append(
@@ -1070,6 +1066,7 @@ def _add_brand_hint_finding(
     brand_hints: list[str],
     *,
     display: list[str] | None = None,
+    event_index: dict[str, list[dict[str, Any]]] | None = None,
 ) -> None:
     """运行时明文里出现的品牌/行业词 → 产 observation Finding（冒充对象研判材料）。
 
@@ -1090,12 +1087,14 @@ def _add_brand_hint_finding(
     #   后一轮只并入新的词条证据；展示句可以摘要，证据和 meta 保留全部已观察词。
     current = [hint for hint in brand_hints if isinstance(hint, str) and hint]
     shown = current if display is None else [hint for hint in display if isinstance(hint, str) and hint]
+    refs = [ref for hint in current for ref in scoped_event_refs(
+        (event_index or {}).get(hint), source=_RUNTIME_SOURCE, location="runtime", snippet=hint[:160],
+    )]
     existing = next((f for f in report.findings if f.id == "RUNTIME-BRAND-HINTS"), None)
     if existing is not None:
-        seen = {(ev.source, ev.location, ev.snippet) for ev in existing.evidences}
-        for hint in current:
-            evidence = scoped_evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=hint[:160])
-            key = (evidence.source, evidence.location, evidence.snippet)
+        seen = {evidence_identity(ev) for ev in existing.evidences}
+        for evidence in refs:
+            key = evidence_identity(evidence)
             if key in seen:
                 continue
             existing.evidences.append(evidence)
@@ -1120,10 +1119,7 @@ def _add_brand_hint_finding(
                 "★注意同名不等于冒充——行业通用词、第三方 SDK 文案、被仿冒方自身接口字段"
                 "都可能产生同样的词，需另有证据才能认定冒充关系。"
             ),
-            evidences=[
-                scoped_evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=hint[:160])
-                for hint in current
-            ],
+            evidences=refs,
             references=[],
         )
     )
@@ -1160,7 +1156,7 @@ def _brand_hint_description(brand_hints: list[str]) -> str:
     )
 
 
-def _confirm_sensitive_api_findings(report: Report, api_hints: list[str]) -> int:
+def _confirm_sensitive_api_findings(report: Report, api_hints: list[str], event_index: dict[str, list[dict[str, Any]]] | None = None) -> int:
     """给匹配的静态 sensitive_api Finding 追加 runtime Evidence（活体确认）。
 
     匹配口径：运行时 api 串（如 "TelephonyManager.getDeviceId"）的方法名出现在 Finding 的
@@ -1172,12 +1168,14 @@ def _confirm_sensitive_api_findings(report: Report, api_hints: list[str]) -> int
         if getattr(finding, "category", "") != "sensitive_api":
             continue
         hay = f"{finding.id} {finding.title} {finding.description}"
-        matched = next((m for m in method_names if m and m in hay), None)
-        if matched is None:
+        matched = sorted(m for m in method_names if m and m in hay)
+        if not matched:
             continue
-        finding.evidences.append(
-            scoped_evidence(source=_RUNTIME_SOURCE, location="runtime", snippet=f"运行时实测调用：{matched}")
-        )
+        for method in matched:
+            for ref in scoped_event_refs((event_index or {}).get(method), source=_RUNTIME_SOURCE,
+                                         location="runtime", snippet=f"运行时实测调用：{method}"):
+                if ref not in finding.evidences:
+                    finding.evidences.append(ref)
         confirmed += 1
     return confirmed
 
@@ -1352,7 +1350,7 @@ def merge_runtime_databases(report: Report, runtime_report_path: str) -> dict[st
         for raw in raw_events:
             ev = cryptohook.normalize_sqlcipher_event(raw)
             if ev is not None:
-                events.append(ev)
+                events.append(preserve_origin(raw, ev))
         if not events:
             return stats
 
@@ -1365,6 +1363,8 @@ def merge_runtime_databases(report: Report, runtime_report_path: str) -> dict[st
         for ev in events:
             db_path = str(ev.get("db_path", ""))
             if db_path in seen_db:
+                if ev.get("event") != "exported" or not ev.get("plain_path"):
+                    added += _add_db_degraded_lead(report, db_path, str(ev.get("key", "")), existing, ev)
                 continue
             seen_db.add(db_path)
             dbs += 1
@@ -1381,7 +1381,7 @@ def merge_runtime_databases(report: Report, runtime_report_path: str) -> dict[st
                 logger.info("[merge] 落地库无可抠物证（空库/无敏感表）：%s", db_path)
                 continue
             # key_only 降级 / exported 但 plain_path 缺：产人工解密 playbook Lead。
-            added += _add_db_degraded_lead(report, db_path, str(ev.get("key", "")), existing)
+            added += _add_db_degraded_lead(report, db_path, str(ev.get("key", "")), existing, ev)
 
         stats["victim_leads"] = added
         stats["victim_databases"] = dbs
@@ -1539,17 +1539,19 @@ def _db_where_to_request(column: str) -> str:
 
 
 def _add_db_degraded_lead(
-    report: Report, db_path: str, key: str, existing: set[tuple[str, str]]
+    report: Report, db_path: str, key: str, existing: set[tuple[str, str]], event: dict[str, Any] | None = None
 ) -> int:
     """SQLCipher 导出失败降级（key_only）：产带人工解密 playbook 的 VICTIM_DATA Lead，去重 append。"""
     db_name = db_path.rsplit("/", 1)[-1] if db_path else "db"
     lead_value = f"DB(加密未导出):{db_name}"
     dedup = (LeadCategory.VICTIM_DATA.value, lead_value)
+    export_note = ("未尝试导出（避免干扰应用）" if event and event.get("export_status") == "not_attempted_non_interference"
+                   else "未取得明文导出")
     if dedup in existing:
         old_hint = f"（密钥已截断留存：{key}）" if key else ""
         append_capture_ref(report, LeadCategory.VICTIM_DATA, lead_value,
             scoped_evidence(source=_RUNTIME_SOURCE, location=db_path,
-                            snippet=f"SQLCipher 加密库，自动导出失败{old_hint}"[:200]))
+                            snippet=f"SQLCipher 加密库，{export_note}{old_hint}"[:200], runtime_event=event))
         return 0
     existing.add(dedup)
     key_hint = f"（密钥已截断留存：{key}）" if key else ""
@@ -1564,7 +1566,8 @@ def _add_db_degraded_lead(
                 scoped_evidence(
                     source=_RUNTIME_SOURCE,
                     location=db_path,
-                    snippet=f"SQLCipher 加密库，自动导出失败{key_hint}"[:200],
+                    snippet=f"SQLCipher 加密库，{export_note}{key_hint}"[:200],
+                    runtime_event=event,
                 )
             ],
             notes=(
@@ -1631,7 +1634,10 @@ def merge_runtime_clipboard(report: Report, runtime_report_path: str) -> dict[st
         if not addresses:
             return stats
 
-        stats["clipboard_leads"] = _add_runtime_clipboard_leads(report, addresses)
+        address_index = index_events(events, lambda event: (
+            address[0] for address in cryptohook.clipboard_addresses_from_events([event])
+        ))
+        stats["clipboard_leads"] = _add_runtime_clipboard_leads(report, addresses, address_index)
 
         report.meta["runtime_clipboard"] = True
         report.meta["runtime_clipboard_address_count"] = len(addresses)
@@ -1646,7 +1652,7 @@ def merge_runtime_clipboard(report: Report, runtime_report_path: str) -> dict[st
 
 
 def _add_runtime_clipboard_leads(
-    report: Report, addresses: list[tuple[str, str, bool]]
+    report: Report, addresses: list[tuple[str, str, bool]], event_index: dict[str, list[dict[str, Any]]] | None = None
 ) -> int:
     """把剪贴板抽出的链上地址产成 PAYMENT 类 Lead，去重 append；返回**新增** Lead 数。
 
@@ -1660,7 +1666,8 @@ def _add_runtime_clipboard_leads(
         if lead.category == LeadCategory.PAYMENT
     }
     for value, chain, checksum_verified in addresses:
-        runtime_ev = scoped_evidence(
+        refs = scoped_event_refs(
+            (event_index or {}).get(value),
             source=_RUNTIME_SOURCE,
             location="runtime-clipboard",
             snippet=f"运行时剪贴板抓取链上地址（{chain}）：{value}"[:200],
@@ -1668,12 +1675,9 @@ def _add_runtime_clipboard_leads(
         prior = existing.get(value)
         if prior is not None:
             # 静态已抠到同地址 → 不产重复，追加 runtime 证据使 is_runtime_seen=True。
-            if not any(
-                ev.scope is EvidenceScope.CASE_EVIDENCE
-                and str(ev.source).startswith("runtime")
-                for ev in prior.source_refs
-            ):
-                prior.source_refs.append(runtime_ev)
+            for ref in refs:
+                if ref not in prior.source_refs:
+                    prior.source_refs.append(ref)
             continue
         verified_note = (
             "校验和已通过。" if checksum_verified else "全小写/全大写未通过大小写校验，低可信、需人工复核。"
@@ -1686,7 +1690,7 @@ def _add_runtime_clipboard_leads(
             evidence_to_obtain=list(_CLIPBOARD_LEAD_EVIDENCE),
             confidence=Confidence.HIGH if checksum_verified else Confidence.MEDIUM,
             advice="建议调证",
-            source_refs=[runtime_ev],
+            source_refs=refs,
             notes=(
                 f"链上收款地址（{chain}），{verified_note}"
                 "运行时剪贴板抓取，受害人复制转账入口（资金流起点）——"
@@ -1845,7 +1849,7 @@ def merge_runtime_remote_control(report: Report, runtime_report_path: str) -> di
         for raw in raw_events:
             ev = cryptohook.normalize_remote_control_event(raw)
             if ev is not None:
-                events.append(ev)
+                events.append(preserve_origin(raw, ev))
         if not events:
             return stats
 
@@ -1881,7 +1885,12 @@ def merge_runtime_remote_control(report: Report, runtime_report_path: str) -> di
                 known_targets.append((pkg, subject))
             else:
                 unknown_targets.append(pkg)
-        stats["rc_leads"] = _add_remote_control_leads(report, known_targets)
+        package_index = index_events(events, lambda event: [str(event.get("target_package", "")).strip()])
+        host_index = index_events(events, lambda event: [str(event.get("host", "")).strip()])
+        action_index = index_events(events, lambda event: [str(event.get("action", "")).strip()]
+                                    if event.get("event") == "gesture" else [])
+        screen_events = [event for event in events if event.get("event") == "screencapture"]
+        stats["rc_leads"] = _add_remote_control_leads(report, known_targets, package_index)
         stats["unknown_packages"] = len(unknown_targets)
 
         # ② 屏幕/控件树回传 host → 并入端点走 infra 分级（别把 CDN 当 C2）。
@@ -1890,8 +1899,8 @@ def merge_runtime_remote_control(report: Report, runtime_report_path: str) -> di
                 Endpoint(
                     value=h,
                     kind="domain",
-                    evidences=[
-                        scoped_evidence(
+                    evidences=scoped_event_refs(
+                            host_index.get(h),
                             # 回传 host 是 Frida 无障碍 hook **上报**的字符串（经规整），非 pcap dst_ip /
                             # mitm upstream——不是"运行时真观测到连去该 peer IP"的 observed-contact。故钉
                             # runtime-derived（仍 runtime*、is_runtime_seen 不变，但不在 assemble 的
@@ -1902,8 +1911,7 @@ def merge_runtime_remote_control(report: Report, runtime_report_path: str) -> di
                             source=_RUNTIME_DERIVED_SOURCE,
                             location="runtime-remote-control",
                             snippet=f"无障碍远控屏幕/控件树回传 host：{h}",
-                        )
-                    ],
+                    ),
                 )
                 for h in hosts
             ]
@@ -1915,7 +1923,8 @@ def merge_runtime_remote_control(report: Report, runtime_report_path: str) -> di
         stats["screencapture"] = screencapture
         if gesture_actions or screencapture:
             _add_remote_control_finding(
-                report, known_targets, unknown_targets, gesture_actions, screencapture
+                report, known_targets, unknown_targets, gesture_actions, screencapture,
+                action_index, screen_events,
             )
         elif unknown_targets:
             # ★没抓到手势/录屏，但确实观察到针对未知包的无障碍事件——仍必须有出口。
@@ -1924,7 +1933,7 @@ def merge_runtime_remote_control(report: Report, runtime_report_path: str) -> di
             #   ★而下面那行日志自己写着「launch-only 抓不到，多数需引导式人工动态」：
             #     抓包本就常常很浅，**没抓到手势不等于没有能力**——
             #     拿手势当报告前提，正好卡在最容易漏的地方。
-            _add_unknown_remote_target_finding(report, unknown_targets)
+            _add_unknown_remote_target_finding(report, unknown_targets, package_index)
 
         report.meta["runtime_remote_control"] = True
         report.meta["runtime_remote_control_targets"] = [s for _, s in known_targets]
@@ -1944,7 +1953,7 @@ def merge_runtime_remote_control(report: Report, runtime_report_path: str) -> di
     return stats
 
 
-def _add_unknown_remote_target_finding(report: Report, unknown_targets: list[str]) -> None:
+def _add_unknown_remote_target_finding(report: Report, unknown_targets: list[str], event_index: dict[str, list[dict[str, Any]]] | None = None) -> None:
     """只观察到「针对未知包的无障碍事件」、无手势/录屏时的出口（LOW observation）。
 
     ★与 :func:`_add_remote_control_finding` 的分工：那条要求实测到手势或录屏，
@@ -1955,9 +1964,19 @@ def _add_unknown_remote_target_finding(report: Report, unknown_targets: list[str
       应用。而 launch-only 抓包常常抓不到手势（见并回日志里那句说明），
       用手势作为报告前提会让浅抓包的样本整批静默。
     """
-    if any(f.id == "RUNTIME-REMOTE-CONTROL-UNKNOWN-TARGET" for f in report.findings):
-        return  # 幂等：重复合并不得堆同 ID
     shown = unknown_targets[:12]
+    refs = [ref for pkg in shown for ref in scoped_event_refs(
+        (event_index or {}).get(pkg), source=_RUNTIME_SOURCE,
+        location="runtime-remote-control", snippet=f"无障碍事件目标包：{pkg}",
+    )]
+    existing = next((finding for finding in report.findings if finding.id == "RUNTIME-REMOTE-CONTROL-UNKNOWN-TARGET"), None)
+    if existing is not None:
+        seen = {evidence_identity(ref) for ref in existing.evidences}
+        for ref in refs:
+            if evidence_identity(ref) not in seen:
+                existing.evidences.append(ref)
+                seen.add(evidence_identity(ref))
+        return
     more = len(unknown_targets) - len(shown)
     label = "、".join(shown) + (f"（另有 {more} 个）" if more > 0 else "")
     report.findings.append(
@@ -1979,21 +1998,14 @@ def _add_unknown_remote_target_finding(report: Report, unknown_targets: list[str
                 "若涉及资金类应用，建议补一次引导式动态抓包以确认是否实施手势操控。"
                 "★不宜据本条单独认定已发生远控——目前只观察到事件指向。"
             ),
-            evidences=[
-                scoped_evidence(
-                    source=_RUNTIME_SOURCE,
-                    location="runtime-remote-control",
-                    snippet=f"无障碍事件目标包：{pkg}",
-                )
-                for pkg in shown
-            ],
+            evidences=refs,
             references=[],
         )
     )
 
 
 def _add_remote_control_leads(
-    report: Report, known_targets: list[tuple[str, str]]
+    report: Report, known_targets: list[tuple[str, str]], event_index: dict[str, list[dict[str, Any]]] | None = None
 ) -> int:
     """把命中已知银行/支付包名的目标产成 REMOTE_CONTROL Lead，去重 append，返回新增数。"""
     existing = {(lead.category.value, lead.value) for lead in report.leads}
@@ -2001,10 +2013,12 @@ def _add_remote_control_leads(
     for package, subject in known_targets:
         lead_value = f"无障碍远控目标:{subject}({package})"
         key = (LeadCategory.REMOTE_CONTROL.value, lead_value)
+        refs = scoped_event_refs((event_index or {}).get(package), source=_RUNTIME_SOURCE,
+                                 location="runtime-remote-control",
+                                 snippet=f"无障碍服务劫持目标 app：{package}（{subject}）"[:200])
         if key in existing:
-            append_capture_ref(report, LeadCategory.REMOTE_CONTROL, lead_value,
-                scoped_evidence(source=_RUNTIME_SOURCE, location="runtime-remote-control",
-                                snippet=f"无障碍服务劫持目标 app：{package}（{subject}）"[:200]))
+            for ref in refs:
+                append_capture_ref(report, LeadCategory.REMOTE_CONTROL, lead_value, ref)
             continue
         existing.add(key)
         report.leads.append(
@@ -2019,13 +2033,7 @@ def _add_remote_control_leads(
                 evidence_to_obtain=list(_REMOTE_CONTROL_EVIDENCE),
                 confidence=Confidence.HIGH,
                 advice="建议调证",
-                source_refs=[
-                    scoped_evidence(
-                        source=_RUNTIME_SOURCE,
-                        location="runtime-remote-control",
-                        snippet=f"无障碍服务劫持目标 app：{package}（{subject}）"[:200],
-                    )
-                ],
+                source_refs=refs,
                 notes=f"{_REMOTE_CONTROL_COMPLIANCE_NOTE} {_REMOTE_CONTROL_TIMING_NOTE}",
             )
         )
@@ -2039,6 +2047,8 @@ def _add_remote_control_finding(
     unknown_targets: list[str],
     gesture_actions: list[str],
     screencapture: int,
+    action_index: dict[str, list[dict[str, Any]]] | None = None,
+    screen_events: list[dict[str, Any]] | None = None,
 ) -> None:
     """运行时实测无障碍远控行为（手势序列 / 屏幕录制）→ 产高 severity Finding（不 Lead 化）。
 
@@ -2058,16 +2068,18 @@ def _add_remote_control_finding(
         if len(sample_actions) >= 5:
             break
     for action in sample_actions:
-        evidences.append(
-            scoped_evidence(
+        evidences.extend(
+            scoped_event_refs(
+                (action_index or {}).get(action),
                 source=_RUNTIME_SOURCE,
                 location="runtime-remote-control",
                 snippet=f"下发远控指令：{action}",
             )
         )
     if screencapture:
-        evidences.append(
-            scoped_evidence(
+        evidences.extend(
+            scoped_event_refs(
+                screen_events,
                 source=_RUNTIME_SOURCE,
                 location="runtime-remote-control",
                 snippet="MediaProjection.createVirtualDisplay：屏幕录制开启",
@@ -2407,8 +2419,6 @@ def _recipe_brief(meta: dict[str, Any]) -> str:
 
 def _parse_envelope(body: Any) -> dict[str, Any] | None:
     """把报文体（str 或 dict）解析为信封 dict，须含 data 与 timestamp 两键；否则 None。"""
-    import json
-
     obj: Any = body
     if isinstance(body, str):
         if not body.strip():
@@ -2432,8 +2442,6 @@ def _endpoints_from_plaintext(plaintext: str, source_url: str) -> list[Endpoint]
 
     产 Endpoint(source="runtime-decrypted")。明文非 JSON 时退化为在文本上跑正则。
     """
-    import json
-
     location = source_url or "runtime-decrypted"
     found: dict[str, Endpoint] = {}
 
@@ -2671,17 +2679,14 @@ def _merge_and_rerender(
         if variant:
             stats["runtime_variant"] = variant
         payload = _read_runtime_payload(rr_path)
+        report.meta["runtime_report_input"] = input_receipt(payload)
         ui_observations = payload.get("ui_observations") if isinstance(payload, Mapping) else None
         if isinstance(ui_observations, list):
             existing = report.meta.get("ui_observations")
             merged_observations = [
                 dict(item) for item in existing if isinstance(item, Mapping)
             ] if isinstance(existing, list) else []
-            try:
-                from apkscan.core.integrity import sha256_file
-                current_runtime_sha = sha256_file(rr_path)
-            except OSError:
-                current_runtime_sha = ""
+            current_runtime_sha = payload.sha256 if isinstance(payload, RuntimePayload) else ""
             for observation_index, item in enumerate(ui_observations, 1):
                 if not isinstance(item, Mapping):
                     continue
@@ -2727,8 +2732,12 @@ def _merge_and_rerender(
             _emit(on_progress, step.progress)
             name = getattr(step.func, "__name__", str(step.func))
             try:
-                sub = step.func(report, rr_path)
-                step_status[name] = {"status": "ok", "error_type": ""}
+                if isinstance(payload, RuntimeReadFailure):
+                    sub = {}
+                    step_status[name] = {"status": "skipped", "reason": payload.reason}
+                else:
+                    sub = step.func(report, rr_path)
+                    step_status[name] = {"status": "ok", "error_type": ""}
             except Exception as exc:  # noqa: BLE001 —— 一步崩了不阻断其余，但必须留痕
                 sub = {}
                 step_status[name] = {"status": "error", "error_type": type(exc).__name__}
