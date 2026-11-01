@@ -33,7 +33,7 @@ import importlib.resources
 import json
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from apkscan.core import chainaddr
@@ -232,7 +232,11 @@ FRIDA_ACCESSIBILITY_HOOK_JS: str = _load_frida_js("accessibility_hook.js")
 # ---------------------------------------------------------------------------
 
 
-def make_message_handler(sink: list[dict[str, Any]]) -> Callable[[dict[str, Any], Any], None]:
+def make_message_handler(
+    sink: list[dict[str, Any]],
+    *,
+    capture_context: Mapping[str, Any] | None = None,
+) -> Callable[[dict[str, Any], Any], None]:
     """构造 Frida ``script.on('message', handler)`` 回调，把 crypto 事件存进 ``sink``。
 
     handler 只认 ``message['type']=='send'`` 且 ``payload['type']==CRYPTO_MSG_TYPE`` 的消息；
@@ -247,6 +251,8 @@ def make_message_handler(sink: list[dict[str, Any]]) -> Callable[[dict[str, Any]
         ``handler(message, _data)``。第二参是 send 的 ArrayBuffer→bytes；本设计二进制都走
         payload 字符串，该参一般为 None，留参（``_data``）以符合 Frida 回调签名。
     """
+
+    context_snapshot = dict(capture_context) if capture_context is not None else None
 
     def handler(message: Any, _data: Any = None) -> None:
         try:
@@ -267,6 +273,8 @@ def make_message_handler(sink: list[dict[str, Any]]) -> Callable[[dict[str, Any]
             event = normalize_crypto_event(payload)
             if event is None:
                 return
+            if context_snapshot is not None:
+                event["capture_context"] = dict(context_snapshot)
             if len(sink) >= _SINK_CAP:
                 if len(sink) == _SINK_CAP:
                     logger.warning("[cryptohook] crypto 事件达上限 %d，后续丢弃", _SINK_CAP)
@@ -283,6 +291,8 @@ def make_typed_handler(
     sink: list[dict[str, Any]],
     msg_type: str,
     normalizer: Callable[[Any], dict[str, Any] | None],
+    *,
+    capture_context: Mapping[str, Any] | None = None,
 ) -> Callable[[dict[str, Any], Any], None]:
     """通用 on_message 工厂：只收 ``payload['type']==msg_type`` 的 send 消息进 ``sink``。
 
@@ -290,6 +300,8 @@ def make_typed_handler(
     crypto/jsbridge/sensitive_api 三通道复用。本工厂**不记 error 日志**（避免多 handler
     重复刷；error 由 crypto 通道的 make_message_handler 统一记一次）。
     """
+
+    context_snapshot = dict(capture_context) if capture_context is not None else None
 
     def handler(message: Any, _data: Any = None) -> None:
         try:
@@ -301,6 +313,8 @@ def make_typed_handler(
             event = normalizer(payload)
             if event is None:
                 return
+            if context_snapshot is not None:
+                event["capture_context"] = dict(context_snapshot)
             if len(sink) >= _SINK_CAP:
                 if len(sink) == _SINK_CAP:
                     logger.warning("[cryptohook] %s 事件达上限 %d，后续丢弃", msg_type, _SINK_CAP)
