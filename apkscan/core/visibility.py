@@ -99,14 +99,16 @@ _INPUT_KEYS_BY_SOURCE: dict[str, tuple[str, ...]] = {
     "dex": (
         "dex_available", "dex_scanned", "dex_strings_truncated", "dex_string_pool",
         "is_hardened", "hardening_structural", "extra_dex_visibility", "artifact_lineage",
+        "main_dex_visibility", "dex_decode_visibility", "parser_execution",
     ),
     "java": ("analyzer_receipts", "jadx_receipt", "jadx_scan_truncated", "jadx_status"),
-    "native": ("native_obfuscation", "native_files_scanned"),
+    "native": ("native_obfuscation", "native_files_scanned", "file_read_visibility"),
     "resource": (
         "uni_encrypted", "crypto_recipe", "resource_files_scanned",
         "resource_files_read_failed", "resource_listing_failed",
+        "file_read_visibility", "web_capture_visibility",
     ),
-    "runtime": ("runtime_merged", "capture_quality", "capture_signals"),
+    "runtime": ("runtime_merged", "capture_quality", "capture_signals", "runtime_report_input"),
 }
 
 
@@ -149,6 +151,15 @@ def _dex_visibility(meta: dict) -> tuple[str, list[str]]:
     if meta.get("dex_available") is False:
         why.append("DEX 解析失败（dex_available=False）")
         return VIS_UNAVAILABLE, why
+
+    main = meta.get("main_dex_visibility")
+    decoded = meta.get("dex_decode_visibility")
+    if isinstance(main, dict) and main.get("complete") is False:
+        why.append("主 DEX 部分失败、枚举中断或重复成员名无法唯一解析；见 main_dex_visibility")
+        return VIS_PARTIAL, why
+    if isinstance(decoded, dict) and decoded.get("status") == "partial":
+        why.append("DEX 字符串解码预算触发或解码中断；已读证据保留，见 dex_decode_visibility")
+        return VIS_PARTIAL, why
 
     # ★加固结论描述的是**原包**。一旦有脱壳 dump 的额外 DEX 并入本次分析（loaded>0），真实代码
     #   已重新可见，加固不再等同「只剩壳桩」——此时按下方并入完整度评估，而非先行判 stub_only。
@@ -274,6 +285,12 @@ def _native_visibility(meta: dict) -> tuple[str, list[str]]:
       ``suspected``/``libraries`` 键——那个分支在生产里一次都没成立过，于是装着 5 个虚拟化
       .so 的样本照样读作 native 完整可见。分析器辛苦标出来的疑似库，下游没人接。
     """
+    read_gaps = _file_read_gaps(meta, native=True)
+    if read_gaps:
+        failed_paths = {item["path"] for item in read_gaps}
+        return VIS_PARTIAL, [
+            f"{len(failed_paths)} 个 native 文件读取失败（.so 内容未进入本次分析）"
+        ]
     obf = meta.get("native_obfuscation")
     if isinstance(obf, list):
         if obf:
@@ -340,10 +357,18 @@ def _resource_visibility(meta: dict) -> tuple[str, list[str]]:
     if meta.get("uni_encrypted"):
         why.append("uni-app 代码加密（confusion）：业务 JS 与接口在资源层不可读")
         return VIS_OPAQUE, why
+    if meta.get("web_capture_visibility"):
+        return VIS_PARTIAL, ["网页采集范围有限；截断、未投影观察及附件未分析状态见 web_capture_visibility"]
     # ★列举整体失败是**本次实测到的故障**，不是"没做这一维"：必须落进 _INSUFFICIENT 档去
     #   封顶，而不是混进 unknown 那条专供旧报告/未评估的豁免通道。
     if meta.get("resource_listing_failed"):
         return VIS_UNAVAILABLE, ["资源列举失败：本次分析未能枚举包内资源，该层完全未看"]
+    read_gaps = _file_read_gaps(meta, native=False)
+    if read_gaps:
+        failed_paths = {item["path"] for item in read_gaps}
+        return VIS_PARTIAL, [
+            f"{len(failed_paths)} 个资源文件读取失败，内容未进入本次分析"
+        ]
     recipe = meta.get("crypto_recipe")
     if isinstance(recipe, dict) and recipe:
         why.append("资源层存在已识别的加密配置文件；在解密并入之前该部分不可读")
@@ -377,6 +402,23 @@ def _resource_visibility(meta: dict) -> tuple[str, list[str]]:
     return VIS_UNKNOWN, ["资源层无扫描信号（旧报告，或资源扫描未运行）"]
 
 
+def _file_read_gaps(meta: dict, *, native: bool) -> list[dict]:
+    raw = meta.get("file_read_visibility")
+    if not isinstance(raw, list):
+        return []
+    gaps = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        path = item.get("path")
+        if not isinstance(path, str):
+            continue
+        is_native = path.lower().endswith(".so")
+        if is_native is native:
+            gaps.append(item)
+    return gaps
+
+
 def _runtime_visibility(meta: dict) -> tuple[str, list[str]]:
     """运行时观测这条路走到哪一步 —— 它是静态盲区的**独立补救渠道**。
 
@@ -388,6 +430,9 @@ def _runtime_visibility(meta: dict) -> tuple[str, list[str]]:
     纯静态分析本就没有运行时证据，那是选择不是故障。
     """
     why: list[str] = []
+    runtime_input = meta.get("runtime_report_input")
+    if isinstance(runtime_input, dict) and runtime_input.get("status") in {"unavailable", "partial"}:
+        return VIS_PARTIAL, ["运行时报告读取失败或有无效事件；不能将缺失解释为无行为"]
     if not (meta.get("runtime_merged") or meta.get("capture_quality") or meta.get("capture_signals")):
         return VIS_UNAVAILABLE, ["未做运行时观测（纯静态分析）"]
 

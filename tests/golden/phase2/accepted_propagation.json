@@ -10,45 +10,45 @@
   "inventory": {
     "candidates": [
       {
-        "candidate_id": "p1:50bd32d7237745c32824fbe5962070b2b54fa65dd430062d1ff923889565d59f",
+        "candidate_id": "p1:bf98575765292005670ffe532726d6c1f5690b530f08d643fd56a360355760ab",
         "collection": "leads",
         "display_value": "100.64.0.10",
         "evidence_id": "ev-prop-b",
         "has_evidence": true,
-        "manifest_sha256": "21eec955bd6a87da74bac882c1e63903bccb08e4a6719353474e6058db8d13f3",
-        "package_id": "9a2c6ecf84ef81c6265a8a69b273ef756ea1e4a12e9c43e2f5c9e3621ee16a34",
+        "manifest_sha256": "e121090bf9a9bae556a00550cd28de9a5e41715c3c0440cbf747bba10122e8d0",
+        "package_id": "3aecd7af6a94bfdb23b030ff6e9fbee66780f7106132f0578adfd429e1e010ed",
         "parent_id": "lead:2d1fc3d3b99736dbab8b1a2f9627dcc3908e44c9dcb931c61c0a6150a7568b6f",
         "report_relpath": "report.json",
         "scope": "case_evidence"
       },
       {
-        "candidate_id": "p1:04002eaf241a488df54646a77049771c8ae26629f161a6d089e924fefb702d83",
+        "candidate_id": "p1:765a8f5bcae5eba6cb720e053487ea2beb1583105bcab6fb5eda41091b9635cf",
         "collection": "leads",
         "display_value": "100.64.0.10",
         "evidence_id": "ev-prop",
         "has_evidence": true,
-        "manifest_sha256": "232047fecc639c2932d3b9489a9ac6c530d5653ec43b3863f0d2f9d4fbe2d0f3",
-        "package_id": "fd31f4579247cc740527b03dd41215b5eecd2d66e2f72b01911824a1401de904",
+        "manifest_sha256": "7efbf5369e20345f822601d2c5c1254f1464cfb4822ad3f5739d09641e1cb900",
+        "package_id": "b0957b60ae9518ccd070499bfcf33e4a9d893c9650a34f97affd0beb5ae077c0",
         "parent_id": "lead:2d1fc3d3b99736dbab8b1a2f9627dcc3908e44c9dcb931c61c0a6150a7568b6f",
         "report_relpath": "report.json",
         "scope": "case_evidence"
       }
     ],
     "case_id": "CASE-GOLDEN-PROP",
-    "fingerprint": "29c017b688f7aa8f8eb2b6dee83feb3e09b17683642ba22ad7dfd0000d5bfa4e",
+    "fingerprint": "1ba9b9129c6a6084a82dfb8c6aca10b6acab6a27bcbd58bf9ad7b76d468eaba5",
     "issues": [],
     "packages": [
       {
         "directory_name": "pkg-2",
-        "manifest_sha256": "21eec955bd6a87da74bac882c1e63903bccb08e4a6719353474e6058db8d13f3",
-        "package_id": "9a2c6ecf84ef81c6265a8a69b273ef756ea1e4a12e9c43e2f5c9e3621ee16a34",
+        "manifest_sha256": "e121090bf9a9bae556a00550cd28de9a5e41715c3c0440cbf747bba10122e8d0",
+        "package_id": "3aecd7af6a94bfdb23b030ff6e9fbee66780f7106132f0578adfd429e1e010ed",
         "report_sha256": "c5fb083fee5c3a97ac62b83c4491ef933f54d8942601bb33920118e4cdc7a9bd"
       },
       {
         "directory_name": "pkg-1",
-        "manifest_sha256": "232047fecc639c2932d3b9489a9ac6c530d5653ec43b3863f0d2f9d4fbe2d0f3",
-        "package_id": "fd31f4579247cc740527b03dd41215b5eecd2d66e2f72b01911824a1401de904",
-        "report_sha256": "476f246ee7411790a7bfbc1c8851c56f1a27314e58befefefcf069a7883ecf87"
+        "manifest_sha256": "7efbf5369e20345f822601d2c5c1254f1464cfb4822ad3f5739d09641e1cb900",
+        "package_id": "b0957b60ae9518ccd070499bfcf33e4a9d893c9650a34f97affd0beb5ae077c0",
+        "report_sha256": "7b1a3957d44d9758e39c17ffdffebd5369423237489a5c974294cdce98073a97"
       }
     ],
     "schema_version": "1.0",
@@ -61,41 +61,41 @@
   "materialize": {
     "coverage": {
       "case_id": "CASE-GOLDEN-PROP",
-      "decisions_fingerprint": "c1cce9b07e3ccb467817e38b6a2fcab112b01b6efe48ad51e80211eb6cf14e3c",
+      "decisions_fingerprint": "3a16505f533e6fff0659d69b6a11ca62347adf34bb61a34c36de62d97da85b8b",
       "entries": [
         {
-          "candidate_id": "p1:04002eaf241a488df54646a77049771c8ae26629f161a6d089e924fefb702d83",
+          "candidate_id": "p1:765a8f5bcae5eba6cb720e053487ea2beb1583105bcab6fb5eda41091b9635cf",
           "clue_id": "CL-PROP-1",
           "disposition": "accepted_clue",
           "materialized_from": "decision:<decision:1>",
           "provenance": {
-            "candidate_id": "p1:04002eaf241a488df54646a77049771c8ae26629f161a6d089e924fefb702d83",
+            "candidate_id": "p1:765a8f5bcae5eba6cb720e053487ea2beb1583105bcab6fb5eda41091b9635cf",
             "collection": "leads",
             "evidence_id": "ev-prop",
-            "manifest_sha256": "232047fecc639c2932d3b9489a9ac6c530d5653ec43b3863f0d2f9d4fbe2d0f3",
-            "package_id": "fd31f4579247cc740527b03dd41215b5eecd2d66e2f72b01911824a1401de904",
+            "manifest_sha256": "7efbf5369e20345f822601d2c5c1254f1464cfb4822ad3f5739d09641e1cb900",
+            "package_id": "b0957b60ae9518ccd070499bfcf33e4a9d893c9650a34f97affd0beb5ae077c0",
             "parent_id": "lead:2d1fc3d3b99736dbab8b1a2f9627dcc3908e44c9dcb931c61c0a6150a7568b6f",
             "report_relpath": "report.json",
             "scope": "case_evidence"
           }
         },
         {
-          "candidate_id": "p1:50bd32d7237745c32824fbe5962070b2b54fa65dd430062d1ff923889565d59f",
+          "candidate_id": "p1:bf98575765292005670ffe532726d6c1f5690b530f08d643fd56a360355760ab",
           "disposition": "duplicate_or_merged",
           "materialized_from": "decision:<decision:1>",
-          "merged_into_candidate_id": "p1:04002eaf241a488df54646a77049771c8ae26629f161a6d089e924fefb702d83",
+          "merged_into_candidate_id": "p1:765a8f5bcae5eba6cb720e053487ea2beb1583105bcab6fb5eda41091b9635cf",
           "propagation": "accepted_parent_unselected_member",
           "reason": "同 parent 证据成员，结论由判决 <decision:1> 点名的 accepted candidate 承载",
           "source_decision_id": "<decision:1>"
         }
       ],
-      "inventory_fingerprint": "29c017b688f7aa8f8eb2b6dee83feb3e09b17683642ba22ad7dfd0000d5bfa4e",
+      "inventory_fingerprint": "1ba9b9129c6a6084a82dfb8c6aca10b6acab6a27bcbd58bf9ad7b76d468eaba5",
       "materializer_version": "phase2-materialize/1.1",
       "schema_version": "1.0"
     },
     "report": {
       "case_id": "CASE-GOLDEN-PROP",
-      "decisions_fingerprint": "c1cce9b07e3ccb467817e38b6a2fcab112b01b6efe48ad51e80211eb6cf14e3c",
+      "decisions_fingerprint": "3a16505f533e6fff0659d69b6a11ca62347adf34bb61a34c36de62d97da85b8b",
       "entry_count": 2,
       "schema_version": "phase2-materialize/1.1",
       "stale_decisions": [],
@@ -104,8 +104,8 @@
   },
   "replay": {
     "items": [],
-    "new_fingerprint": "29c017b688f7aa8f8eb2b6dee83feb3e09b17683642ba22ad7dfd0000d5bfa4e",
-    "old_fingerprint": "29c017b688f7aa8f8eb2b6dee83feb3e09b17683642ba22ad7dfd0000d5bfa4e",
+    "new_fingerprint": "1ba9b9129c6a6084a82dfb8c6aca10b6acab6a27bcbd58bf9ad7b76d468eaba5",
+    "old_fingerprint": "1ba9b9129c6a6084a82dfb8c6aca10b6acab6a27bcbd58bf9ad7b76d468eaba5",
     "summary": {
       "blocked_stale": 0,
       "carry_with_note": 0,
@@ -115,7 +115,7 @@
   },
   "triage": {
     "case_id": "CASE-GOLDEN-PROP",
-    "inventory_fingerprint": "29c017b688f7aa8f8eb2b6dee83feb3e09b17683642ba22ad7dfd0000d5bfa4e",
+    "inventory_fingerprint": "1ba9b9129c6a6084a82dfb8c6aca10b6acab6a27bcbd58bf9ad7b76d468eaba5",
     "issues": [],
     "parents": [
       {
@@ -124,8 +124,8 @@
         "conflicts": [],
         "display": "100.64.0.10",
         "member_candidate_ids": [
-          "p1:04002eaf241a488df54646a77049771c8ae26629f161a6d089e924fefb702d83",
-          "p1:50bd32d7237745c32824fbe5962070b2b54fa65dd430062d1ff923889565d59f"
+          "p1:765a8f5bcae5eba6cb720e053487ea2beb1583105bcab6fb5eda41091b9635cf",
+          "p1:bf98575765292005670ffe532726d6c1f5690b530f08d643fd56a360355760ab"
         ],
         "merged_into": [],
         "packages": 2,

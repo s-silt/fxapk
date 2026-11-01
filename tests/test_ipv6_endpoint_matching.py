@@ -161,7 +161,17 @@ def test_ipv6_lead_reaches_the_letter_attribution_chain() -> None:
             "category": "IP", "value": f"[{_V6_FULL}]:8443/tcp", "subject": "某科技有限公司",
             "where_to_request": "云服务商", "advice": "建议调证",
             "evidence_to_obtain": ["租户实名"],
-            "source_refs": [{"evidence_id": "E1", "scope": "case_evidence"}],
+            "source_refs": [{
+                "evidence_id": "E1",
+                "source": "dex",
+                "location": "classes.dex",
+                "scope": "case_evidence",
+                "provenance": {"member_path": "classes.dex", "member_sha256": "a" * 64},
+                "locator": {"byte_offset": 1, "offset_unit": "byte"},
+                "structure_status": "parsed",
+                "reference_status": "referenced",
+                "reachability": "reachable",
+            }],
         }],
         "endpoints": [{
             "value": _V6_FULL, "kind": "ip",

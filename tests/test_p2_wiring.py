@@ -30,7 +30,17 @@ def _report(**meta: Any) -> Report:
 
 def _ip_ep(value: str, asn: dict | None = None) -> Endpoint:
     ep = Endpoint(kind="ip", value=value,
-                  evidences=[Evidence(source="strings", location="classes.dex", snippet=value)])
+                  evidences=[Evidence(
+                      source="strings",
+                      location="classes.dex",
+                      snippet=value,
+                      provenance={"extractor": "synthetic", "member_path": "classes.dex",
+                                  "member_sha256": "a" * 64},
+                      locator={"byte_offset": 1, "offset_unit": "byte"},
+                      structure_status="parsed",
+                      reference_status="referenced",
+                      reachability="reachable",
+                  )])
     if asn:
         ep.enrichment["asn"] = asn
     return ep
@@ -245,7 +255,13 @@ def test_shape_uncertain_excluded_from_manifest_key_iocs() -> None:
     lead = {"category": "IP", "value": "198.51.100.24", "advice": ADVICE_INVESTIGATE,
             "is_c2": True, "shape_uncertain": True,
             "source_refs": [{"source": "dex", "location": "classes.dex",
-                             "scope": "case_evidence"}]}
+                             "scope": "case_evidence",
+                             "provenance": {"member_path": "classes.dex",
+                                            "member_sha256": "a" * 64},
+                             "locator": {"byte_offset": 1, "offset_unit": "byte"},
+                             "structure_status": "parsed",
+                             "reference_status": "referenced",
+                             "reachability": "reachable"}]}
     entry = corpus.manifest_entry({"leads": [lead], "meta": {}})
     assert entry["key_iocs"] == []
 

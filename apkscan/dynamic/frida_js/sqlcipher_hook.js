@@ -1,15 +1,21 @@
 
 // 取证用途：对取证样本自身在分析机上做运行时观测，产出端点/密钥/独特串等线索，不面向任何第三方基础设施。
-// apkscan 运行时落地库导出（best-effort）：hook SQLCipher/SQLite openDatabase，导明文库回传。
-Java.perform(function () {
+// Observe database opens without issuing SQL on the application's connection.
+var _coverage = (typeof globalThis !== 'undefined' && globalThis.__fxapkProbeCoverage) || {
+    perform: function (_family, callback) {
+        try { if (typeof Java !== 'undefined' && (!('available' in Java) || Java.available)) Java.perform(callback); } catch (_) {}
+    },
+    attempted: function () {}, installed: function () {}, registrationError: function () {},
+    trigger: function () {}, drop: function () {}, truncated: function () {}
+};
+_coverage.perform('sqlcipher', function () {
     var _db_count = 0;
     var _DB_CAP = 200;
-    var _seen_db = {};        // 同一库路径只导一次（避免反复 export 刷爆 + 重复磁盘 IO）
-    var _TMP_DIR = '/data/local/tmp/apkscan_db';
+    var _seen_db = {};
 
     function dbEmit(p) {
         try {
-            if (_db_count >= _DB_CAP) return;
+            if (_db_count >= _DB_CAP) { _coverage.drop('sqlcipher', 'events'); return; }
             _db_count += 1;
             p.type = 'apkscan-sqlcipher';
             send(p);
@@ -19,65 +25,19 @@ Java.perform(function () {
         try {
             if (s === null || s === undefined) return null;
             var t = '' + s;
+            if (t.length > n) _coverage.truncated('sqlcipher', 'events');
             return t.length > n ? t.slice(0, n) : t;
         } catch (e) { return null; }
     }
-    function baseName(p) {
-        try {
-            var s = '' + p;
-            var i = s.lastIndexOf('/');
-            return i >= 0 ? s.slice(i + 1) : s;
-        } catch (e) { return 'db'; }
-    }
-    // 确保设备临时导出目录存在（best-effort，失败照常尝试导出，导不出再降级）。
-    function ensureTmpDir() {
-        try {
-            var JFile = Java.use('java.io.File');
-            var d = JFile.$new(_TMP_DIR);
-            if (!d.exists()) { try { d.mkdirs(); } catch (e2) {} }
-        } catch (e) {}
-    }
-    // 对一个已打开的 SQLCipher db 句柄注入 ATTACH+sqlcipher_export，导明文库。
-    // 返回明文库设备路径（成功）或 null（失败 → 调用方降级 key_only）。
-    function exportPlain(db, dbPath, key) {
-        if (db === null || db === undefined) return null;
-        if (!db.rawExecSQL) return null;        // 非 SQLCipher 句柄（普通 SQLite）→ 不导，交收尾 adb pull
-        ensureTmpDir();
-        var plainPath = _TMP_DIR + '/' + baseName(dbPath) + '.plain.db';
-        // 先按 SQLCipher v4 默认尝试；失败再降到 v3 KDF 兼容模式重试。
-        var compat = [4, 3];
-        for (var ci = 0; ci < compat.length; ci++) {
-            try {
-                try { db.rawExecSQL('PRAGMA cipher_compatibility = ' + compat[ci] + ';'); } catch (eC) {}
-                // 目标明文库 KEY '' = 不加密（明文）。
-                db.rawExecSQL("ATTACH DATABASE '" + plainPath + "' AS plain KEY '';");
-                db.rawExecSQL("SELECT sqlcipher_export('plain');");
-                db.rawExecSQL("DETACH DATABASE plain;");
-                return plainPath;   // 任一兼容档导出成功即返回
-            } catch (eExp) {
-                // 本档失败：清掉可能半导出的目标，换下一档重试。
-                try { db.rawExecSQL("DETACH DATABASE plain;"); } catch (eD) {}
-            }
-        }
-        return null;   // v4/v3 都失败 → 降级
-    }
-
     function handleOpen(db, dbPath, key, where) {
         try {
+            if (_db_count >= _DB_CAP) { _coverage.drop('sqlcipher', 'events'); return; }
             var path = '' + dbPath;
             if (_seen_db[path]) return;
             _seen_db[path] = true;
-            var plainPath = null;
-            try { plainPath = exportPlain(db, path, key); } catch (eX) { plainPath = null; }
-            if (plainPath) {
-                dbEmit({event: 'exported', db_path: path, plain_path: plainPath,
-                        key: clipStr(key, 128), where: where, ts: Date.now()});
-            } else {
-                // 导出失败 / 普通 SQLite（无 rawExecSQL）：降级，仅回传 key + 原库路径。
-                // merge 侧据此写人工解密 playbook；普通 SQLite 由收尾 adb pull databases 拉回。
-                dbEmit({event: 'key_only', db_path: path, plain_path: null,
-                        key: clipStr(key, 128), where: where, ts: Date.now()});
-            }
+            dbEmit({event: 'key_only', db_path: path, plain_path: null,
+                    export_status: 'not_attempted_non_interference',
+                    key: clipStr(key, 128), where: where, ts: Date.now()});
         } catch (e) {}
     }
 
@@ -90,7 +50,9 @@ Java.perform(function () {
             var SDB = Java.use(cn);
             if (SDB.openOrCreateDatabase) {
                 SDB.openOrCreateDatabase.overloads.forEach(function (ov) {
+                    _coverage.attempted('sqlcipher', 'cipher_open');
                     ov.implementation = function () {
+                        _coverage.trigger('sqlcipher', 'cipher_open');
                         var db = ov.apply(this, arguments);
                         try {
                             var args = arguments;
@@ -106,21 +68,25 @@ Java.perform(function () {
                         } catch (e) {}
                         return db;
                     };
+                    _coverage.installed('sqlcipher', 'cipher_open');
                 });
                 console.log('[apkscan] SQLCipher ' + cn + '.openOrCreateDatabase hooked');
-            }
+            } else _coverage.registrationError('sqlcipher', 'cipher_open');
         } catch (e) {
+            _coverage.registrationError('sqlcipher', 'cipher_open');
             console.log('[apkscan] SQLCipher ' + cn + ' hook skip: ' + e);
         }
     });
 
     // --- 普通 SQLite：android.database.sqlite.SQLiteDatabase.openDatabase（无 key）---
-    // 普通库无 sqlcipher_export，handleOpen 走 key_only 降级；真正拉回交收尾 adb pull databases。
+    // 普通库只记录路径；已有落盘材料的只读采集由宿主负责。
     try {
         var ADB = Java.use('android.database.sqlite.SQLiteDatabase');
         if (ADB.openDatabase) {
             ADB.openDatabase.overloads.forEach(function (ov) {
+                _coverage.attempted('sqlcipher', 'sqlite_open');
                 ov.implementation = function () {
+                    _coverage.trigger('sqlcipher', 'sqlite_open');
                     var db = ov.apply(this, arguments);
                     try {
                         var dbPath = (arguments.length > 0) ? ('' + arguments[0]) : null;
@@ -130,10 +96,12 @@ Java.perform(function () {
                     } catch (e) {}
                     return db;
                 };
+                _coverage.installed('sqlcipher', 'sqlite_open');
             });
             console.log('[apkscan] android SQLiteDatabase.openDatabase hooked');
-        }
+        } else _coverage.registrationError('sqlcipher', 'sqlite_open');
     } catch (e) {
+        _coverage.registrationError('sqlcipher', 'sqlite_open');
         console.log('[apkscan] android SQLiteDatabase hook skip: ' + e);
     }
 });

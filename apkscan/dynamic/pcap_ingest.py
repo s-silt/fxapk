@@ -2634,6 +2634,8 @@ def _merge_runtime_endpoint_dicts(payload: dict, fresh: list[dict]) -> int:
 
     命中已有端点 → 把 runtime 富化与证据并进去（静态已知的 IP 这次被实测连上了，是升级不是重复）。
     """
+    from apkscan.core.observations import evidence_identity
+
     existing = payload.get("endpoints")
     if not isinstance(existing, list):
         existing = []
@@ -2662,21 +2664,11 @@ def _merge_runtime_endpoint_dicts(payload: dict, fresh: list[dict]) -> int:
             # ★去重：同一份 pcap 重复 --into 时，此前每次都把同样的证据再追加一遍，
             #   报告里同一条连接被列 N 次，读的人以为观测到了 N 次。
             seen = {
-                (
-                    str(e.get("source")),
-                    str(e.get("location")),
-                    str(e.get("snippet")),
-                    str(e.get("scope", EvidenceScope.LEGACY_UNSPECIFIED.value)),
-                )
+                evidence_identity(e)
                 for e in evs if isinstance(e, dict)
             }
             for e in ep["evidences"]:
-                sig = (
-                    str(e.get("source")),
-                    str(e.get("location")),
-                    str(e.get("snippet")),
-                    str(e.get("scope", EvidenceScope.LEGACY_UNSPECIFIED.value)),
-                )
+                sig = evidence_identity(e)
                 if sig in seen:
                     continue
                 seen.add(sig)

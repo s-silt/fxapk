@@ -179,15 +179,11 @@ def _patch_capture(monkeypatch: pytest.MonkeyPatch, result: dict) -> dict[str, A
 def _patch_merge(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     import apkscan.dynamic.merge as merge_mod
 
-    calls: dict[str, Any] = {"load_path": None, "rerender_called": False, "rerender_args": None}
-
-    def _fake_load(path: str) -> list:
-        calls["load_path"] = path
-        return ["EP"]
+    calls: dict[str, Any] = {"rerender_called": False, "rerender_args": None}
 
     def _fake_rerender(
         report: Report,
-        endpoints: list,
+        endpoints: list | None,
         out_dir: str,
         base: str = "report",
         *,
@@ -213,7 +209,6 @@ def _patch_merge(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             "report_paths": [f"{out_dir}/{base}.json"],
         }
 
-    monkeypatch.setattr(merge_mod, "load_runtime_endpoints", _fake_load)
     monkeypatch.setattr(merge_mod, "merge_and_rerender", _fake_rerender)
     return calls
 
@@ -285,8 +280,8 @@ def test_full_pipeline_happy_path_all_done(monkeypatch: pytest.MonkeyPatch) -> N
     # on_progress 多次上报。
     assert progresses
     # merge 用 runtime_report.json 作并入来源，且 report 透传。
-    assert merge_calls["load_path"] == "out/runtime_report.json"
     assert merge_calls["rerender_args"]["runtime_report_path"] == "out/runtime_report.json"
+    assert merge_calls["rerender_args"]["endpoints"] is None
     assert merge_calls["rerender_called"] is True
     # capture 用包名 + out= + duration。
     assert cap_calls["package"] == "com.fraud.app"
@@ -552,10 +547,10 @@ def test_merge_exception_marks_error_does_not_raise(monkeypatch: pytest.MonkeyPa
         monkeypatch, _dynamic_result(STATUS_DONE, report_paths=["out/runtime_report.json"])
     )
 
-    def _boom_load(path: str) -> list:
-        raise RuntimeError("merge load exploded")
+    def _boom_rerender(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("merge rerender exploded")
 
-    monkeypatch.setattr(merge_mod, "load_runtime_endpoints", _boom_load)
+    monkeypatch.setattr(merge_mod, "merge_and_rerender", _boom_rerender)
 
     result = auto.run("sample.apk", out_dir="out")  # 不应抛
     assert _status_of(result["steps"], auto._STEP_MERGE) == STATUS_ERROR
@@ -675,7 +670,6 @@ def test_report_paths_deduplicated(monkeypatch: pytest.MonkeyPatch) -> None:
 
     import apkscan.dynamic.merge as merge_mod
 
-    monkeypatch.setattr(merge_mod, "load_runtime_endpoints", lambda p: [])
     # merge 重渲返回与静态相同的 out/report.json → 应去重。
     monkeypatch.setattr(
         merge_mod,
@@ -1617,8 +1611,6 @@ def test_unknown_identity_reaches_quality_gate(monkeypatch: pytest.MonkeyPatch, 
     而闭环门只看 runtime_variant → 遗留 wrapper 的流量仍能升 complete。断掉 merge 里注入身份的
     那几行，本测试必红。
     """
-    from apkscan.dynamic import merge as merge_mod
-
     report = _patch_static_ok(monkeypatch, "com.fraud.app")
     _patch_doctor(monkeypatch, ok=True)
     _set_device(monkeypatch, True)
@@ -1642,9 +1634,6 @@ def test_unknown_identity_reaches_quality_gate(monkeypatch: pytest.MonkeyPatch, 
         _prov, "install_apk",
         lambda *a, **k: {"ok": False, "detail": "INSTALL_FAILED_UPDATE_INCOMPATIBLE"},
     )
-    # 只桩 load（让真 merge_capture_quality 跑），rerender 走真实现的 quality 注入
-    monkeypatch.setattr(merge_mod, "load_runtime_endpoints", lambda p: [])
-
     auto.run("sample.apk", out_dir=out)
 
     assert report.meta["capture_apk_identity"]["which"] == "unknown"

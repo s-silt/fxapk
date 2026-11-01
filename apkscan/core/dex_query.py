@@ -849,18 +849,34 @@ def _add_observation(
         ),
         "scope": "case_evidence",
         "evidence_id": evidence_id(source, location),
+        "provenance": {
+            "extractor": "asc-receipt-v1", "receipt_id": receipt_id,
+            "member_path": member.get("name"), "member_sha256": member.get("sha256"),
+            "member_ordinal": member.get("ordinal"),
+        },
+        "locator": {
+            "method_descriptor": hit.get("descriptor"),
+            "instruction_offset": hit.get("offset"), "offset_unit": hit.get("offset_unit"),
+        } if isinstance(hit.get("offset"), int) and hit.get("offset_unit") else {},
+        "structure_status": "parsed",
+        "reference_status": "referenced" if xref_checked else "unknown",
+        "reachability": "unknown",
     }
+    from apkscan.core.admission import evaluate_usage
+    from apkscan.core.observations import evidence_identity, occurrence_id
+    from apkscan.core.report_io import _evidence_from_dict
+
+    evidence["occurrence_id"] = occurrence_id(_evidence_from_dict(evidence))
+    evidence["admission"] = evaluate_usage([evidence], "dex_query")
     for lead in leads:
         if isinstance(lead, dict) and lead.get("value") == value:
             refs = lead.get("source_refs")
             if not isinstance(refs, list):
                 refs = []
                 lead["source_refs"] = refs
-            signature = (evidence["source"], evidence["location"], evidence["snippet"], evidence["scope"])
+            signature = evidence_identity(evidence)
             if not any(
-                isinstance(item, dict) and (
-                    item.get("source"), item.get("location"), item.get("snippet"), item.get("scope"),
-                ) == signature
+                isinstance(item, dict) and evidence_identity(item) == signature
                 for item in refs
             ):
                 refs.append(evidence)

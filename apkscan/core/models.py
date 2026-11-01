@@ -110,6 +110,12 @@ class Evidence:
     observed_at: float | None = None
     #: 对当前案件的证据资格。核心生产者默认产当前案件直接证据；旧报告由迁移器显式标 unknown。
     scope: EvidenceScope = EvidenceScope.CASE_EVIDENCE
+    provenance: dict = field(default_factory=dict)
+    locator: dict = field(default_factory=dict)
+    structure_status: str = "unknown"
+    reference_status: str = "unknown"
+    reachability: str = "unknown"
+    suspicions: list[dict] = field(default_factory=list)
 
 
 # 未核重建标签。大小写和首尾空白归一后仍不能单独充当当前案件直接证据。
@@ -373,10 +379,12 @@ class Lead:
         :attr:`is_runtime_contact`（仅 :data:`OBSERVED_CONTACT_SOURCES`）。徽标分层即据此二者分档，
         避免把「出现在报告里」误呈成「实连」。
         """
+        from apkscan.core.admission import admitted_refs
+
         return any(
             ev.scope is EvidenceScope.CASE_EVIDENCE
             and str(getattr(ev, "source", "")).startswith("runtime")
-            for ev in self.source_refs
+            for ev in admitted_refs(self.source_refs, "lead_priority")
         )
 
     @property
@@ -394,10 +402,12 @@ class Lead:
         contact 源（见 ``dynamic.merge._RUNTIME_DERIVED_SOURCE``）。凡仍盖裸 ``runtime`` 的进程内生产者
         （如 dead-drop 从回包体抽出、App 未直连的二级 C2）会绕过本档、属 producer 侧待收紧项，非本属性能判。
         """
+        from apkscan.core.admission import admitted_refs
+
         return any(
             ev.scope is EvidenceScope.CASE_EVIDENCE
             and str(getattr(ev, "source", "")) in OBSERVED_CONTACT_SOURCES
-            for ev in self.source_refs
+            for ev in admitted_refs(self.source_refs, "lead_priority")
         )
 
 
@@ -664,20 +674,16 @@ def merge_runtime_into_lead_dict(
         except ValueError:
             return EvidenceScope.LEGACY_UNSPECIFIED.value
 
-    seen: set[tuple[str, str, str, str]] = set()
+    from apkscan.core.observations import evidence_identity
+    from apkscan.core.admission import DOWNGRADE_ADMISSION, admitted_refs
+
+    seen: set[tuple[object, ...]] = set()
     for ref in refs:
         if not isinstance(ref, dict):
             continue
         scope = _scope_value(ref)
         ref["scope"] = scope
-        seen.add(
-            (
-                str(ref.get("source")),
-                str(ref.get("location")),
-                str(ref.get("snippet")),
-                scope,
-            )
-        )
+        seen.add(evidence_identity(ref))
     case_merged = False
     for ev in incoming:
         if not isinstance(ev, dict):
@@ -687,17 +693,12 @@ def merge_runtime_into_lead_dict(
         normalized = dict(ev)
         scope = _scope_value(normalized)
         normalized["scope"] = scope
-        sig = (
-            str(normalized.get("source")),
-            str(normalized.get("location")),
-            str(normalized.get("snippet")),
-            scope,
-        )
+        sig = evidence_identity(normalized)
         if sig in seen:
             continue
         seen.add(sig)
         refs.append(normalized)
-        if scope == EvidenceScope.CASE_EVIDENCE.value:
+        if admitted_refs([normalized], "lead_priority"):
             case_merged = True
     # ★sni_masquerade 取并集，且**独立于 merged**：新观测到的伪装名即便没带来新证据
     #   （证据签名撞了）也必须并进去。它不是加分项、是「这封函不该发给谁」的硬警示，
@@ -765,19 +766,40 @@ def merge_runtime_into_lead_dict(
                 existing["legacy_effective_advice"] = shim.legacy_effective_advice
             ledger_changed = True
 
+    if admitted_refs(refs, "lead_priority"):
+        current_dg = _norm_dg(existing.get("downgrades"))
+        if DOWNGRADE_ADMISSION in current_dg:
+            def _anchor(value: object) -> str | None:
+                return value.strip() if isinstance(value, str) and value.strip() in VALID_ADVICE else None
+
+            current_advice = existing.get("advice")
+            current_legacy = _anchor(existing.get("legacy_effective_advice"))
+            shim = Lead(
+                category=LeadCategory.DOMAIN,
+                value=str(existing.get("value", "")),
+                advice=current_advice if isinstance(current_advice, str) else "",
+                base_advice=_anchor(existing.get("base_advice")),
+                downgrades=dict(current_dg),
+                legacy_effective_advice=current_legacy,
+            )
+            if lift_downgrade(shim, DOWNGRADE_ADMISSION):
+                existing["advice"] = shim.advice
+                existing["downgrades"] = shim.downgrades
+                ledger_changed = True
+
     # 派生位始终据全量 source_refs 重算。只有当前案件直接证据可升位；批次参考、旧版未说明
     # 或坏 scope 即使 source 标签写成 runtime-pcap，也不得伪造「实连已观测」。
     existing["is_runtime_seen"] = any(
         isinstance(ref, dict)
         and _scope_value(ref) == EvidenceScope.CASE_EVIDENCE.value
         and str(ref.get("source", "")).startswith("runtime")
-        for ref in refs
+        for ref in admitted_refs(refs, "lead_priority")
     )
     existing["is_runtime_contact"] = any(
         isinstance(ref, dict)
         and _scope_value(ref) == EvidenceScope.CASE_EVIDENCE.value
         and str(ref.get("source", "")) in OBSERVED_CONTACT_SOURCES
-        for ref in refs
+        for ref in admitted_refs(refs, "lead_priority")
     )
     return case_merged, ledger_changed
 
@@ -858,6 +880,8 @@ class AnalyzerResult:
     endpoints: list[Endpoint] = field(default_factory=list)
     meta: dict = field(default_factory=dict)
     error: str | None = None
+    input_gaps: list[dict[str, str]] = field(default_factory=list)
+    evidence_inputs: dict[str, dict] = field(default_factory=dict)
 
 
 @dataclass
@@ -938,7 +962,8 @@ class AnalysisConfig:
 #:
 #: 1.2 —— Evidence 增加 ``scope``，把当前案件直接证据与批量/跨案参考分开。旧 1.0/1.1
 #:        缺失字段迁移为 ``legacy_unspecified``，安全方向不自动授予直接证据资格。
-REPORT_SCHEMA_VERSION = "1.2"
+#: 1.3 adds occurrence provenance; legacy evidence_id remains source/location based.
+REPORT_SCHEMA_VERSION = "1.3"
 
 #: 分析完整度状态（Report.analysis_status）。
 #: complete=无分析器报错；partial=有分析器报错但仍有成功产出；failed=无任何分析器成功跑完。

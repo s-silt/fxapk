@@ -549,6 +549,7 @@ def enrich_targets(
     """
     from apkscan.core.enrichment import enrich_selected_targets
     from apkscan.core.enrichment_profiles import CONTRACTS
+    from apkscan.core.source_semantics import source_contexts
 
     records: list[dict[str, Any]] = []
     configured_env = env or {}
@@ -563,6 +564,10 @@ def enrich_targets(
         endpoint = Endpoint(value=target.value, kind=target.kind, is_suspicious=True)
         started_at = datetime.now(timezone.utc).isoformat()
         try:
+            for enricher in typed:
+                receipt = getattr(enricher, "receipt", None)
+                if isinstance(receipt, dict):
+                    receipt.clear()
             enrich_selected_targets(
                 [endpoint],
                 typed,  # type: ignore[arg-type]
@@ -602,6 +607,9 @@ def enrich_targets(
                 "receipts": {_provider_name(e): dict(getattr(e, "receipt", {})) for e in typed
                              if isinstance(getattr(e, "receipt", None), dict)},
             }
+        )
+        records[-1]["source_context"] = source_contexts(
+            endpoint.enrichment, records[-1].get("receipts"),
         )
         # Persistence errors must stop the run, not become provider failures.
         if on_record is not None:

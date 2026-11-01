@@ -37,6 +37,7 @@ class DynamicResult(TypedDict):
     report_paths: list[str]
     ui_observations: list[dict[str, Any]]
     web_observation: NotRequired[dict[str, Any]]
+    capture_signals: NotRequired[dict[str, Any]]
 
 
 # status 取值常量，供实现方与调用方共用，避免裸字符串拼写漂移。

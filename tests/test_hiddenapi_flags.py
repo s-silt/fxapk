@@ -235,15 +235,15 @@ def test_relax_report_without_baseline_keeps_the_old_whole_process_semantics() -
 
 
 def test_load_apk_pins_a_baseline_onto_the_context() -> None:
-    """★接线锁：基线必须由 ``load_apk`` 自己钉在 ctx 上。
+    """★接线锁：基线必须由子进程内的 ``_load_apk_inprocess`` 钉在 ctx 上。
 
     只在 pipeline 侧减基线是不够的——没人钉，``getattr`` 恒取到 None，退化回串账。
     这里直接检查构造器契约（真解析 APK 属集成测试范畴，另有样本用例覆盖）。
     """
     import inspect
 
-    src = inspect.getsource(apk_mod.load_apk)
-    assert "hiddenapi_flags_snapshot()" in src, "load_apk 没钉基线，隔离形同虚设"
+    src = inspect.getsource(apk_mod._load_apk_inprocess)
+    assert "hiddenapi_flags_snapshot()" in src, "in-process parser 没钉基线，隔离形同虚设"
     # 必须在解析 DEX（放行发生地）**之前**钉，否则本样本自己的放行会被算进基线而消失
     assert src.index("hiddenapi_flags_snapshot()") < src.index("_load_extra_dex("), (
         "基线钉晚了：本样本自己放行的取值会被当成前账减掉"

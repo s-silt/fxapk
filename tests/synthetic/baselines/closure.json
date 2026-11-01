@@ -22,6 +22,7 @@
     ],
     "status": "failed",
     "target_selection": {
+      "admission_excluded": 0,
       "candidate_total": 0,
       "dropped": [],
       "limit": 6,
@@ -53,6 +54,7 @@
     ],
     "status": "failed",
     "target_selection": {
+      "admission_excluded": 0,
       "candidate_total": 0,
       "dropped": [],
       "limit": 6,
@@ -84,6 +86,7 @@
     ],
     "status": "failed",
     "target_selection": {
+      "admission_excluded": 0,
       "candidate_total": 0,
       "dropped": [],
       "limit": 6,
@@ -116,6 +119,7 @@
     ],
     "status": "failed",
     "target_selection": {
+      "admission_excluded": 0,
       "candidate_total": 0,
       "dropped": [],
       "limit": 6,
@@ -147,6 +151,7 @@
     ],
     "status": "failed",
     "target_selection": {
+      "admission_excluded": 0,
       "candidate_total": 0,
       "dropped": [],
       "limit": 6,
@@ -179,6 +184,7 @@
     ],
     "status": "failed",
     "target_selection": {
+      "admission_excluded": 0,
       "candidate_total": 0,
       "dropped": [],
       "limit": 6,
@@ -210,6 +216,7 @@
     ],
     "status": "failed",
     "target_selection": {
+      "admission_excluded": 0,
       "candidate_total": 0,
       "dropped": [],
       "limit": 6,
@@ -241,6 +248,7 @@
     ],
     "status": "failed",
     "target_selection": {
+      "admission_excluded": 0,
       "candidate_total": 0,
       "dropped": [],
       "limit": 6,
@@ -272,6 +280,7 @@
     ],
     "status": "failed",
     "target_selection": {
+      "admission_excluded": 0,
       "candidate_total": 0,
       "dropped": [],
       "limit": 6,

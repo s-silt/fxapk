@@ -5,15 +5,15 @@
 
 - cryptohook.normalize_sqlcipher_event：规范化导出成功/降级事件、不抛。
 - cryptohook.FRIDA_SQLCIPHER_HOOK_JS：Frida JS 常量完整性（多 fallback 类名、send 通道、
-  sqlcipher_export、v3/v4 cipher_compatibility 适配）。
+  key_only 与 not_attempted_non_interference 回执，不读取或修改数据库）。
 - merge.merge_runtime_databases：用标准库 sqlite3 在 tmp **真造**明文 .plain.db（建 account/
   message/contact 表填合成数据，含手机号/域名/IM 账号）→ 喂 merge → 断言产 VICTIM_DATA Lead、
   手机号脱敏、where_to_request 对、合规 notes；坏/不存在 db 不抛；空库不产 Lead。
 - db_carve 启发式命中/不命中。
 - 导出失败降级（合成"仅 key+路径"事件 → Lead.notes 带人工解密 playbook、不崩）。
 
-真机部分（frida JS 注入 SQLCipher rawExecSQL + adb pull .plain.db）无法单测，由用户在 MuMu
-复验，与现有 cryptohook 真机 JS 行为一致。
+实际设备未在本测试中使用；bundled JS 的调用/返回/异常保持与无 SQL、无导出、无文件访问的
+非干扰回归见 ``tests/test_okhttp_noninterference.py``。
 """
 
 from __future__ import annotations
@@ -190,11 +190,17 @@ def test_frida_sqlcipher_hook_js_integrity() -> None:
     # 多 fallback 类名（SQLCipher net.sqlcipher + 系统 android SQLite）
     assert "net.sqlcipher.database.SQLiteDatabase" in js
     assert "android.database.sqlite.SQLiteDatabase" in js
-    # 导出关键：sqlcipher_export + ATTACH
-    assert "sqlcipher_export" in js
-    assert "ATTACH DATABASE" in js
-    # v3/v4 KDF 适配
-    assert "cipher_compatibility" in js
+    assert "key_only" in js
+    assert "not_attempted_non_interference" in js
+    for forbidden in (
+        "sqlcipher_export",
+        "ATTACH DATABASE",
+        "rawExecSQL",
+        "PRAGMA",
+        "exportPlain",
+        "java.io.File",
+    ):
+        assert forbidden not in js
     assert "send(" in js  # 回传通道
     assert cryptohook.SQLCIPHER_MSG_TYPE in js  # 通道判别值与 Python 一致
 

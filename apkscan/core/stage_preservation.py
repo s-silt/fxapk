@@ -22,6 +22,13 @@ from apkscan.core.models import (
     Report,
 )
 from apkscan.report import json as report_json
+from apkscan.core.observations import evidence_identity
+
+_evidence_identity = evidence_identity
+
+
+def _scope_token(scope: object) -> str:
+    return scope.value if isinstance(scope, EvidenceScope) else str(scope or "")
 
 logger = logging.getLogger(__name__)
 
@@ -478,14 +485,6 @@ def _dedupe_evidence(evidences: list[Evidence]) -> list[Evidence]:
     return out
 
 
-def _evidence_identity(ev: Evidence) -> tuple[object, ...]:
-    return (ev.source, ev.location, ev.snippet, _scope_token(ev.scope), ev.observed_at)
-
-
-def _scope_token(scope: object) -> str:
-    if isinstance(scope, EvidenceScope):
-        return scope.value
-    return str(scope or "")
 
 
 def _lead_key(ld: Lead) -> tuple[LeadCategory, str]:

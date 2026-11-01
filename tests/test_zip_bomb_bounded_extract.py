@@ -246,6 +246,7 @@ def test_read_file_turns_too_large_into_warning_and_none(
 def test_snapshot_lazy_read_turns_too_large_into_warning_and_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    from apkscan.core.file_read import FileReadLedger
     from apkscan.core.snapshot import SnapshotContext
 
     p = _make_lying_apk(tmp_path)
@@ -253,6 +254,8 @@ def test_snapshot_lazy_read_turns_too_large_into_warning_and_none(
     snap = SnapshotContext.__new__(SnapshotContext)
     snap.apk_path = str(p)
     snap._files = {}
+    snap.parser_limits = None
+    snap.file_read_ledger = FileReadLedger()
     snap._worker_apk = _RealZipEntryApk(str(p))
     snap._worker_declared_sizes = None
     monkeypatch.setattr(apk_mod, "_MAX_DECOMPRESSED_FILE_BYTES", 4 * 1024)

@@ -117,6 +117,7 @@ MANIFEST_NAME = "manifest.jsonl"
 #: 结果是**更完整的那份被静默丢弃**——正是取证上最不该发生的一类损失。
 _SURFACE_STATIC = "static"
 _SURFACE_UNPACKED = "unpacked"
+RELATION_INDEX_VERSION = "evidence-admission/1"
 
 
 def evidence_surface(report: dict) -> str:
@@ -277,6 +278,10 @@ def _sanitize_case_ioc_projection(entry: dict) -> dict:
     if row.get("case_ioc_scope_indexed") is not True:
         for field in _CASE_IOC_FIELDS:
             row[field] = []
+    if row.get("relation_index_version") != RELATION_INDEX_VERSION:
+        for field in ("key_iocs", "domains", "cname_edges", "remote_config_objects"):
+            row[field] = []
+        row["relation_status"] = "unknown"
     return row
 
 
@@ -395,7 +400,10 @@ def _key_iocs(report: dict) -> list[str]:
     """
     out: list[str] = []
     seen: set[str] = set()
+    from apkscan.core.admission import admitted_refs
     for lead in project_serialized_leads(report):
+        if not admitted_refs(lead.get("source_refs") or [], "corpus_relation"):
+            continue
         if not (lead.get("is_c2") or lead.get("advice") == _ADVICE_INVESTIGATE):
             continue
         if lead.get("shape_uncertain"):
@@ -416,6 +424,8 @@ def _remote_config_objects(report: dict) -> list[dict]:
     meta["remote_config_artifacts"]）并上**显式 case_evidence** 的 ``REMOTE_CONFIG`` 线索 URL。
     artifact 是报告生产阶段的逐案事实，暂不套用 Lead scope；Lead 缺/坏 scope 一律不索引。
     """
+    from apkscan.core.admission import admitted_refs
+
     objects: dict[str, dict] = {}
     for art in _meta(report).get("remote_config_artifacts") or []:
         if not isinstance(art, dict):
@@ -427,6 +437,7 @@ def _remote_config_objects(report: dict) -> list[dict]:
         if (
             lead.get("category") == "REMOTE_CONFIG"
             and serialized_has_case_evidence(lead, "source_refs")
+            and admitted_refs(lead.get("source_refs") or [], "corpus_relation")
         ):
             url = _s(lead.get("value")).strip()
             if url:
@@ -440,15 +451,18 @@ def _normalize_domain(value: object) -> str:
 
 
 def _has_case_runtime_dns_evidence(endpoint: Mapping[str, object]) -> bool:
+    from apkscan.core.admission import admitted_refs
+
     evidences = endpoint.get("evidences")
     if not isinstance(evidences, list):
         return False
+    eligible_refs = admitted_refs(evidences, "corpus_relation")
     return any(
         isinstance(evidence, Mapping)
         and _s(evidence.get("scope")) == "case_evidence"
         and _s(evidence.get("source")) == "runtime-pcap"
         and _s(evidence.get("location")) == "pcap-dns"
-        for evidence in evidences
+        for evidence in eligible_refs
     )
 
 
@@ -463,9 +477,11 @@ def _domain_control_iocs(report: dict) -> tuple[list[str], list[dict[str, str]]]
     """
     domains: set[str] = set()
     edges: set[tuple[str, str]] = set()
+    from apkscan.core.admission import admitted_refs
     for lead in project_serialized_leads(report):
         if (
             serialized_has_case_evidence(lead, "source_refs")
+            and admitted_refs(lead.get("source_refs") or [], "corpus_relation")
             and _s(lead.get("category")).upper() == "DOMAIN"
         ):
             value = _normalize_domain(lead.get("value"))
@@ -475,6 +491,7 @@ def _domain_control_iocs(report: dict) -> tuple[list[str], list[dict[str, str]]]
         if (
             not isinstance(endpoint, dict)
             or not serialized_has_case_evidence(endpoint, "evidences")
+            or not admitted_refs(endpoint.get("evidences") or [], "corpus_relation")
             or _s(endpoint.get("kind")).lower() != "domain"
         ):
             continue
@@ -738,7 +755,15 @@ def manifest_entry(report: dict, case_id: str | None = None) -> dict:
     classification = meta.get("app_classification")
     classification = classification if isinstance(classification, dict) else {}
     domains, cname_edges = _domain_control_iocs(report)
+    key_iocs = _key_iocs(report)
+    remote_config_objects = _remote_config_objects(report)
     entry = {
+        "relation_index_version": RELATION_INDEX_VERSION,
+        "relation_status": (
+            "qualified_candidates"
+            if domains or cname_edges or key_iocs or remote_config_objects
+            else "unknown"
+        ),
         # ---- 库内主键 ----
         "sample_sha256": sha,
         "sample_sha256_synthetic": synthetic,
@@ -786,12 +811,12 @@ def manifest_entry(report: dict, case_id: str | None = None) -> dict:
             "findings": _count(report, "findings"),
         },
         "finding_ids": _finding_ids(report),
-        "key_iocs": _key_iocs(report),
+        "key_iocs": key_iocs,
         # 域名控制面反查：完整域名与明确观测的 CNAME 边。共享 NS 不在此处自动升级为同控锚点。
         "domains": domains,
         "cname_edges": cname_edges,
         # ---- config-chain 跨样本串联维度（同 OSS 对象 / 同配置内容）----
-        "remote_config_objects": _remote_config_objects(report),
+        "remote_config_objects": remote_config_objects,
     }
     # Omit the field when the analyzer did not produce a bounded verdict.
     # ``unknown`` is an explicit assessed verdict; missing means unassessed and
@@ -2562,6 +2587,8 @@ def find_by_config_object(entries: list[dict], value: str) -> list[dict]:
     target_lower = target.lower()
     out: list[dict] = []
     for entry in entries:
+        if entry.get("relation_index_version") != RELATION_INDEX_VERSION:
+            continue
         for obj in entry.get("remote_config_objects") or []:
             if not isinstance(obj, dict):
                 continue
@@ -2579,7 +2606,8 @@ def find_by_domain(entries: list[dict], value: str) -> list[dict]:
         return []
     return [
         entry for entry in entries
-        if target in {_normalize_domain(v) for v in entry.get("domains") or []}
+        if entry.get("relation_index_version") == RELATION_INDEX_VERSION
+        and target in {_normalize_domain(v) for v in entry.get("domains") or []}
     ]
 
 
@@ -2593,6 +2621,8 @@ def find_by_cname(entries: list[dict], value: str) -> list[dict]:
         return []
     out: list[dict] = []
     for entry in entries:
+        if entry.get("relation_index_version") != RELATION_INDEX_VERSION:
+            continue
         for edge in entry.get("cname_edges") or []:
             if not isinstance(edge, dict):
                 continue
@@ -2612,6 +2642,8 @@ def shared_config_objects(entries: list[dict]) -> list[dict]:
     """
     groups: dict[tuple[str, str], set[str]] = {}
     for entry in entries:
+        if entry.get("relation_index_version") != RELATION_INDEX_VERSION:
+            continue
         sample = _s(entry.get("sample_sha256")).strip().lower()
         if not sample:
             continue

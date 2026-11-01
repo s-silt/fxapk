@@ -10,99 +10,99 @@
   "inventory": {
     "candidates": [
       {
-        "candidate_id": "p1:15599125e04b1803d92cddcbceeafcee7551a8ce513d49cc310fa2e8f747c8d9",
+        "candidate_id": "p1:b02b9dfd5d32e0a70609563413c52d832910b83065043cf25f4a1cdb6986cb67",
         "collection": "endpoints",
         "display_value": "100.64.0.1",
         "evidence_id": "ev-endpoint",
         "has_evidence": true,
-        "manifest_sha256": "2cf8fe52298b2942e55a0ac8dfc67b7171c37eb598c3278e89b94dbb627e2dee",
-        "package_id": "7e49956681fe997f046e9ebdbcf2524fdd0e4d726fad504467ed0d15b1f40049",
+        "manifest_sha256": "0847bd37d3f6d732a5e503251cf36ac9e2b787a530c0d4d5ef1be3f1db180213",
+        "package_id": "0bb92a289369518be888040bfbec14298937e82f2ec69866db73405f0a4b4d46",
         "parent_id": "endpoint:e4c4068dd3d108a6f0d321ab61fbfb14efd5807ec0b4b93b5e307003973ee94f",
         "report_relpath": "report.json",
         "scope": "case_evidence"
       },
       {
-        "candidate_id": "p1:391658c8123ee8c7df4039b3af2a6ccefd6dbd70ca708908c50aa4939ef960cc",
+        "candidate_id": "p1:ceee605dcf32cada396d7644ab8bc28196287b1dfa1c84aca05417c3ef7792c6",
         "collection": "findings",
         "display_value": "synthetic finding",
         "evidence_id": "ev-finding",
         "has_evidence": true,
-        "manifest_sha256": "2cf8fe52298b2942e55a0ac8dfc67b7171c37eb598c3278e89b94dbb627e2dee",
-        "package_id": "7e49956681fe997f046e9ebdbcf2524fdd0e4d726fad504467ed0d15b1f40049",
+        "manifest_sha256": "0847bd37d3f6d732a5e503251cf36ac9e2b787a530c0d4d5ef1be3f1db180213",
+        "package_id": "0bb92a289369518be888040bfbec14298937e82f2ec69866db73405f0a4b4d46",
         "parent_id": "finding:d538b253af404531b262a2763836870d0d5f4e70b0ff9f13daeac7a10173ecb1",
         "report_relpath": "report.json",
         "scope": "case_evidence"
       },
       {
-        "candidate_id": "p1:8336fdcbec37a9ffb5ef13155475f0a9a956c7e27a1c16ca696a0dfe5b96e708",
+        "candidate_id": "p1:9ddc29f7154c86a9264c8b9c7c32a17934bc172f827b58c5596ecc000b4c7da0",
         "collection": "leads",
         "display_value": "100.64.0.1:443/tcp",
         "evidence_id": "ev-mirror",
         "has_evidence": true,
-        "manifest_sha256": "2cf8fe52298b2942e55a0ac8dfc67b7171c37eb598c3278e89b94dbb627e2dee",
-        "package_id": "7e49956681fe997f046e9ebdbcf2524fdd0e4d726fad504467ed0d15b1f40049",
+        "manifest_sha256": "0847bd37d3f6d732a5e503251cf36ac9e2b787a530c0d4d5ef1be3f1db180213",
+        "package_id": "0bb92a289369518be888040bfbec14298937e82f2ec69866db73405f0a4b4d46",
         "parent_id": "lead:0dbc423fb822d0e40b290f6ce9c7a04dae50205521a653e955685807d0c4b366",
         "report_relpath": "report.json",
         "scope": "case_evidence"
       },
       {
-        "candidate_id": "p1:b50675a388096b0ed5879e2986639804736da38efa6974c3f8687996bb7328da",
+        "candidate_id": "p1:fa850203b221463db586ac8b833677eae070b6e3de2af1db5960877f490e9e9e",
         "collection": "leads",
         "display_value": "seen.example.test",
         "evidence_id": "ev-seen",
         "has_evidence": true,
-        "manifest_sha256": "2cf8fe52298b2942e55a0ac8dfc67b7171c37eb598c3278e89b94dbb627e2dee",
-        "package_id": "7e49956681fe997f046e9ebdbcf2524fdd0e4d726fad504467ed0d15b1f40049",
+        "manifest_sha256": "0847bd37d3f6d732a5e503251cf36ac9e2b787a530c0d4d5ef1be3f1db180213",
+        "package_id": "0bb92a289369518be888040bfbec14298937e82f2ec69866db73405f0a4b4d46",
         "parent_id": "lead:514547047b3462b10f73d2aa14da21f7d824fac1b9bdfba65132a3bc50c96ba0",
         "report_relpath": "report.json",
         "scope": "case_evidence"
       },
       {
-        "candidate_id": "p1:4bd2b4544112282fabf62d9687ae493453185e2c1924063c3e7582d4cd3a17f4",
+        "candidate_id": "p1:66d5859a4357f1ed0d78d4462b9b412de55d99cbc2a5b4aff15ccd6696e28a0b",
         "collection": "leads",
         "display_value": "missing.example.test",
         "evidence_id": "ev-missing",
         "has_evidence": true,
-        "manifest_sha256": "2cf8fe52298b2942e55a0ac8dfc67b7171c37eb598c3278e89b94dbb627e2dee",
-        "package_id": "7e49956681fe997f046e9ebdbcf2524fdd0e4d726fad504467ed0d15b1f40049",
+        "manifest_sha256": "0847bd37d3f6d732a5e503251cf36ac9e2b787a530c0d4d5ef1be3f1db180213",
+        "package_id": "0bb92a289369518be888040bfbec14298937e82f2ec69866db73405f0a4b4d46",
         "parent_id": "lead:7ed2c6d0c6c12cfd1eb47e824258e728f5274302bb79d4bf9e8d02475927fd01",
         "report_relpath": "report.json",
         "scope": "case_evidence"
       },
       {
-        "candidate_id": "p1:f0a4053f6df7be881d6e2396b2e68e6d0d149e7ab4afa900a7621bfae9c91618",
+        "candidate_id": "p1:8a45df104155103d0b7b72d9d1fdb8378bfd2bb4da088694d3404b9b1699cfc2",
         "collection": "leads",
         "display_value": "nullstate.example.test",
         "evidence_id": "ev-null",
         "has_evidence": true,
-        "manifest_sha256": "2cf8fe52298b2942e55a0ac8dfc67b7171c37eb598c3278e89b94dbb627e2dee",
-        "package_id": "7e49956681fe997f046e9ebdbcf2524fdd0e4d726fad504467ed0d15b1f40049",
+        "manifest_sha256": "0847bd37d3f6d732a5e503251cf36ac9e2b787a530c0d4d5ef1be3f1db180213",
+        "package_id": "0bb92a289369518be888040bfbec14298937e82f2ec69866db73405f0a4b4d46",
         "parent_id": "lead:8a89ecdf04248c3afd99cede40eba87a1ba128ade76808defd354519d9432992",
         "report_relpath": "report.json",
         "scope": "case_evidence"
       },
       {
-        "candidate_id": "p1:581a402520d77453afb50bbb3784307436e78b37e527e8afbc1a14a91f2d05c7",
+        "candidate_id": "p1:584ff1df03506e9a1792ec450d5203e1d7eb1fbaf6dc0335ac8fe6996b0706e5",
         "collection": "leads",
         "display_value": "ledger.example.test",
         "evidence_id": "ev-ledger",
         "has_evidence": true,
-        "manifest_sha256": "2cf8fe52298b2942e55a0ac8dfc67b7171c37eb598c3278e89b94dbb627e2dee",
-        "package_id": "7e49956681fe997f046e9ebdbcf2524fdd0e4d726fad504467ed0d15b1f40049",
+        "manifest_sha256": "0847bd37d3f6d732a5e503251cf36ac9e2b787a530c0d4d5ef1be3f1db180213",
+        "package_id": "0bb92a289369518be888040bfbec14298937e82f2ec69866db73405f0a4b4d46",
         "parent_id": "lead:ee1e5797fa6d24f840258bc67499f8c66080d9df3e61e9d21b0e4c0f37bbcee3",
         "report_relpath": "report.json",
         "scope": "case_evidence"
       }
     ],
     "case_id": "CASE-GOLDEN-SINGLE",
-    "fingerprint": "c66a52576b408a78d65216fa8d64112d3ff6463b97a46aef5ac0d71dea300662",
+    "fingerprint": "2c7054ae3e5491f6bda38f9abf01f587782395d2cf75d93ad0700cb270b027cb",
     "issues": [],
     "packages": [
       {
         "directory_name": "pkg",
-        "manifest_sha256": "2cf8fe52298b2942e55a0ac8dfc67b7171c37eb598c3278e89b94dbb627e2dee",
-        "package_id": "7e49956681fe997f046e9ebdbcf2524fdd0e4d726fad504467ed0d15b1f40049",
-        "report_sha256": "254e2577a506e68c18d391678baa2b980c464b551059b91ca2fe06f207e3a3b5"
+        "manifest_sha256": "0847bd37d3f6d732a5e503251cf36ac9e2b787a530c0d4d5ef1be3f1db180213",
+        "package_id": "0bb92a289369518be888040bfbec14298937e82f2ec69866db73405f0a4b4d46",
+        "report_sha256": "d49cd16d8d6461ba3354a660981a245e6a13c9eb6c0c5c57fb12b9a02ff5b107"
       }
     ],
     "schema_version": "1.0",
@@ -115,58 +115,58 @@
   "materialize": {
     "coverage": {
       "case_id": "CASE-GOLDEN-SINGLE",
-      "decisions_fingerprint": "c52a33d62a0c78c094f2fbd8a44cf9df8fdbe32aa6658579e42be2fcd96a7087",
+      "decisions_fingerprint": "368ce8f9523af196acd38c02343bdadf4c5e8871a053a3438febc8b9a99ffce1",
       "entries": [
         {
-          "candidate_id": "p1:15599125e04b1803d92cddcbceeafcee7551a8ce513d49cc310fa2e8f747c8d9",
-          "disposition": "duplicate_or_merged",
-          "materialized_from": "auto:triage",
-          "reason": "[auto:triage R1-MIRROR] endpoint host 规范化后与同案 lead 网络身份同值，判决挂 lead"
-        },
-        {
-          "candidate_id": "p1:391658c8123ee8c7df4039b3af2a6ccefd6dbd70ca708908c50aa4939ef960cc",
-          "disposition": "report_only",
-          "materialized_from": "auto:triage",
-          "reason": "[auto:triage finding:LOW] 分析叙事（finding）非逐值调证对象"
-        },
-        {
-          "candidate_id": "p1:4bd2b4544112282fabf62d9687ae493453185e2c1924063c3e7582d4cd3a17f4",
-          "disposition": "report_only",
-          "materialized_from": "decision:<decision:1>",
-          "reason": "[判决 <decision:1>] synthetic human review"
-        },
-        {
-          "candidate_id": "p1:581a402520d77453afb50bbb3784307436e78b37e527e8afbc1a14a91f2d05c7",
+          "candidate_id": "p1:584ff1df03506e9a1792ec450d5203e1d7eb1fbaf6dc0335ac8fe6996b0706e5",
           "disposition": "excluded_with_reason",
           "materialized_from": "auto:triage",
           "reason": "[auto:triage R4-LEDGER] Phase1 降档台账 advice=无需调证 downgrades=['(空)']"
         },
         {
-          "candidate_id": "p1:8336fdcbec37a9ffb5ef13155475f0a9a956c7e27a1c16ca696a0dfe5b96e708",
+          "candidate_id": "p1:66d5859a4357f1ed0d78d4462b9b412de55d99cbc2a5b4aff15ccd6696e28a0b",
+          "disposition": "report_only",
+          "materialized_from": "decision:<decision:1>",
+          "reason": "[判决 <decision:1>] synthetic human review"
+        },
+        {
+          "candidate_id": "p1:8a45df104155103d0b7b72d9d1fdb8378bfd2bb4da088694d3404b9b1699cfc2",
           "disposition": "report_only",
           "materialized_from": "decision:<decision:2>",
           "reason": "[判决 <decision:2>] synthetic human review"
         },
         {
-          "candidate_id": "p1:b50675a388096b0ed5879e2986639804736da38efa6974c3f8687996bb7328da",
+          "candidate_id": "p1:9ddc29f7154c86a9264c8b9c7c32a17934bc172f827b58c5596ecc000b4c7da0",
           "disposition": "report_only",
           "materialized_from": "decision:<decision:3>",
           "reason": "[判决 <decision:3>] synthetic human review"
         },
         {
-          "candidate_id": "p1:f0a4053f6df7be881d6e2396b2e68e6d0d149e7ab4afa900a7621bfae9c91618",
+          "candidate_id": "p1:b02b9dfd5d32e0a70609563413c52d832910b83065043cf25f4a1cdb6986cb67",
+          "disposition": "duplicate_or_merged",
+          "materialized_from": "auto:triage",
+          "reason": "[auto:triage R1-MIRROR] endpoint host 规范化后与同案 lead 网络身份同值，判决挂 lead"
+        },
+        {
+          "candidate_id": "p1:ceee605dcf32cada396d7644ab8bc28196287b1dfa1c84aca05417c3ef7792c6",
+          "disposition": "report_only",
+          "materialized_from": "auto:triage",
+          "reason": "[auto:triage finding:LOW] 分析叙事（finding）非逐值调证对象"
+        },
+        {
+          "candidate_id": "p1:fa850203b221463db586ac8b833677eae070b6e3de2af1db5960877f490e9e9e",
           "disposition": "report_only",
           "materialized_from": "decision:<decision:4>",
           "reason": "[判决 <decision:4>] synthetic human review"
         }
       ],
-      "inventory_fingerprint": "c66a52576b408a78d65216fa8d64112d3ff6463b97a46aef5ac0d71dea300662",
+      "inventory_fingerprint": "2c7054ae3e5491f6bda38f9abf01f587782395d2cf75d93ad0700cb270b027cb",
       "materializer_version": "phase2-materialize/1.1",
       "schema_version": "1.0"
     },
     "report": {
       "case_id": "CASE-GOLDEN-SINGLE",
-      "decisions_fingerprint": "c52a33d62a0c78c094f2fbd8a44cf9df8fdbe32aa6658579e42be2fcd96a7087",
+      "decisions_fingerprint": "368ce8f9523af196acd38c02343bdadf4c5e8871a053a3438febc8b9a99ffce1",
       "entry_count": 7,
       "schema_version": "phase2-materialize/1.1",
       "stale_decisions": [],
@@ -175,8 +175,8 @@
   },
   "replay": {
     "items": [],
-    "new_fingerprint": "c66a52576b408a78d65216fa8d64112d3ff6463b97a46aef5ac0d71dea300662",
-    "old_fingerprint": "c66a52576b408a78d65216fa8d64112d3ff6463b97a46aef5ac0d71dea300662",
+    "new_fingerprint": "2c7054ae3e5491f6bda38f9abf01f587782395d2cf75d93ad0700cb270b027cb",
+    "old_fingerprint": "2c7054ae3e5491f6bda38f9abf01f587782395d2cf75d93ad0700cb270b027cb",
     "summary": {
       "blocked_stale": 0,
       "carry_with_note": 0,
@@ -186,7 +186,7 @@
   },
   "triage": {
     "case_id": "CASE-GOLDEN-SINGLE",
-    "inventory_fingerprint": "c66a52576b408a78d65216fa8d64112d3ff6463b97a46aef5ac0d71dea300662",
+    "inventory_fingerprint": "2c7054ae3e5491f6bda38f9abf01f587782395d2cf75d93ad0700cb270b027cb",
     "issues": [],
     "parents": [
       {
@@ -195,7 +195,7 @@
         "conflicts": [],
         "display": "100.64.0.1",
         "member_candidate_ids": [
-          "p1:15599125e04b1803d92cddcbceeafcee7551a8ce513d49cc310fa2e8f747c8d9"
+          "p1:b02b9dfd5d32e0a70609563413c52d832910b83065043cf25f4a1cdb6986cb67"
         ],
         "merged_into": [
           "lead:0dbc423fb822d0e40b290f6ce9c7a04dae50205521a653e955685807d0c4b366"
@@ -214,7 +214,7 @@
         "conflicts": [],
         "display": "synthetic finding",
         "member_candidate_ids": [
-          "p1:391658c8123ee8c7df4039b3af2a6ccefd6dbd70ca708908c50aa4939ef960cc"
+          "p1:ceee605dcf32cada396d7644ab8bc28196287b1dfa1c84aca05417c3ef7792c6"
         ],
         "merged_into": [],
         "packages": 1,
@@ -231,7 +231,7 @@
         "conflicts": [],
         "display": "100.64.0.1:443/tcp",
         "member_candidate_ids": [
-          "p1:8336fdcbec37a9ffb5ef13155475f0a9a956c7e27a1c16ca696a0dfe5b96e708"
+          "p1:9ddc29f7154c86a9264c8b9c7c32a17934bc172f827b58c5596ecc000b4c7da0"
         ],
         "merged_into": [],
         "packages": 1,
@@ -246,7 +246,7 @@
         "conflicts": [],
         "display": "seen.example.test",
         "member_candidate_ids": [
-          "p1:b50675a388096b0ed5879e2986639804736da38efa6974c3f8687996bb7328da"
+          "p1:fa850203b221463db586ac8b833677eae070b6e3de2af1db5960877f490e9e9e"
         ],
         "merged_into": [],
         "packages": 1,
@@ -263,7 +263,7 @@
         "conflicts": [],
         "display": "missing.example.test",
         "member_candidate_ids": [
-          "p1:4bd2b4544112282fabf62d9687ae493453185e2c1924063c3e7582d4cd3a17f4"
+          "p1:66d5859a4357f1ed0d78d4462b9b412de55d99cbc2a5b4aff15ccd6696e28a0b"
         ],
         "merged_into": [],
         "packages": 1,
@@ -280,7 +280,7 @@
         "conflicts": [],
         "display": "nullstate.example.test",
         "member_candidate_ids": [
-          "p1:f0a4053f6df7be881d6e2396b2e68e6d0d149e7ab4afa900a7621bfae9c91618"
+          "p1:8a45df104155103d0b7b72d9d1fdb8378bfd2bb4da088694d3404b9b1699cfc2"
         ],
         "merged_into": [],
         "packages": 1,
@@ -297,7 +297,7 @@
         "conflicts": [],
         "display": "ledger.example.test",
         "member_candidate_ids": [
-          "p1:581a402520d77453afb50bbb3784307436e78b37e527e8afbc1a14a91f2d05c7"
+          "p1:584ff1df03506e9a1792ec450d5203e1d7eb1fbaf6dc0335ac8fe6996b0706e5"
         ],
         "merged_into": [],
         "packages": 1,

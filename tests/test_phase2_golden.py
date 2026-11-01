@@ -64,6 +64,24 @@ def _runtime(omit: str | None = None, **overrides: Any) -> dict[str, Any]:
     return state
 
 
+def _evidence(evidence_id: str) -> dict[str, Any]:
+    return {
+        "evidence_id": evidence_id,
+        "source": "dex",
+        "location": "classes.dex",
+        "scope": "case_evidence",
+        "provenance": {
+            "extractor": "phase2-golden-v1",
+            "member_path": "classes.dex",
+            "member_sha256": "a" * 64,
+        },
+        "locator": {"byte_offset": 1, "offset_unit": "byte"},
+        "structure_status": "parsed",
+        "reference_status": "referenced",
+        "reachability": "reachable",
+    }
+
+
 def _lead(
     value: str,
     advice: str,
@@ -77,7 +95,7 @@ def _lead(
         "category": category,
         "value": value,
         "advice": advice,
-        "source_refs": [{"evidence_id": evidence_id, "scope": "case_evidence"}],
+        "source_refs": [_evidence(evidence_id)],
     }
     if confidence is not None:
         body["confidence"] = confidence
@@ -90,7 +108,7 @@ def _endpoint(kind: str, value: str, evidence_id: str) -> dict[str, Any]:
     return {
         "kind": kind,
         "value": value,
-        "evidences": [{"evidence_id": evidence_id, "scope": "case_evidence"}],
+        "evidences": [_evidence(evidence_id)],
     }
 
 
@@ -100,7 +118,7 @@ def _finding() -> dict[str, Any]:
         "title": "synthetic finding",
         "description": "synthetic narrative",
         "severity": "LOW",
-        "evidences": [{"evidence_id": "ev-finding", "scope": "case_evidence"}],
+        "evidences": [_evidence("ev-finding")],
     }
 
 

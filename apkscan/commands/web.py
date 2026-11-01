@@ -75,6 +75,9 @@ def analyze_web(
         "--web-supplement",
         help="本地网页补采配置 JSON。explicit supplement 才把已验证观察解析进候选；不把目录当普通网页证据。",
     ),
+    evidence_handoff: Path | None = typer.Option(
+        None, "--evidence-handoff", help="证据目录外的哈希绑定采集交接清单（不证明真实性或 App 归属）。",
+    ),
 ) -> None:
     """分析已落盘的网页证据目录，产出与 ``analyze`` 同构的报告。"""
     # 复用 analyze 的报告写出与摘要打印：report 文件名/格式/`.sha256` 旁文件是**同一份契约**，
@@ -114,6 +117,10 @@ def analyze_web(
             origin=origin,
             exclude_dirs=(out_dir,),
         )
+        if evidence_handoff is not None:
+            from apkscan.core.web_handoff import load_handoff
+
+            load_handoff(evidence_handoff, ctx)
     except FileNotFoundError as exc:
         typer.echo(f"错误：证据目录不可读：{evidence_dir}（{safe_exception_text(exc)}）", err=True)
         raise typer.Exit(code=2)
@@ -159,6 +166,7 @@ def analyze_web(
         "file_count": file_count,
         # 如实带出读取缺口：completeness / 人工复核据此知道"这份分析看了多少"。
         "load_errors": list(ctx.load_errors),
+        "handoff": ctx.handoff_receipt,
     }
 
     base = _sanitize_base(origin or Path(ctx.source_dir or str(evidence_dir)).name)

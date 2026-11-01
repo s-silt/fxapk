@@ -8,10 +8,17 @@
 <p align="center"><strong>中文</strong> &nbsp;·&nbsp; <a href="README.en.md">English</a></p>
 <p align="center">
   <a href="https://github.com/s-silt/fxapk/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/s-silt/fxapk/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.21.0">v1.21.0</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
+  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.22.0">v1.22.0</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
 </p>
 
 命令 `fxapk`（别名 `apkscan`），PyPI 包名 `fxapk`。面向直接运行源码或 Python 包的人与 AI 助手，不提供 exe 或 GUI。变更见 [CHANGELOG.md](CHANGELOG.md)。
+
+解析器进程限制为显式 opt-in：设置 `FXAPK_PARSER_TIMEOUT_SEC` 与
+`FXAPK_PARSER_MEMORY_MB` 两项；`FXAPK_PARSER_OUTPUT_MB` 可选，默认 IPC 输出上限为 64 MiB。
+配置不完整或无效时失败关闭。限制按解析操作和隔离延迟读取分别应用，不代表整次分析时限或
+原生沙箱。未配置时仍为进程内解析，回执标记 `not_enforced`，不承诺默认性能收益。
+Linux 使用 RLIMIT_AS 地址空间上限而非 RSS 测量；Windows 使用 Job Object，其强制约束须在
+Windows 平台验收；macOS 无法执行内存限制时失败关闭。
 
 | 核心能力 | 说明 |
 | --- | --- |
@@ -34,16 +41,18 @@ APK / 已落盘网页证据        已授权设备采集
 
 静态分析不需要 JDK 或设备；部分分析器和动态能力需要额外工具。`selfcheck` 显示当前能力，报告中的 `analyzer_status` 与 `source_status` 说明实际执行情况。未发现不等于不存在，采集完成也不等于证据闭环。
 
+报告 schema 1.3 保留 Evidence 的来源与定位。证据准入按 occurrence 分别评估富化、线索优先级、闭环候选、DEX 查询、模型摘要和语料关系等用途，结果为 `allowed`、`review` 或 `blocked`；静态候选不等于运行时观测，也不证明业务归属。旧语料关系索引须显式重建，未标记的历史关系保持未知。只有未配置解析隔离时，DEX 上游对象构造的资源隔离状态才是 `not_enforced`；这不声称有 RSS 或时间沙箱。
+
 ## 快速开始
 
 ```bash
-python -m pip install "fxapk==1.21.0"     # 或 clone 后 python -m pip install -e .
+python -m pip install "fxapk==1.22.0"     # 或 clone 后 python -m pip install -e .
 fxapk selfcheck
 fxapk analyze app.apk --offline --out out
 fxapk digest out/app.json
 ```
 
-[发布页](https://github.com/s-silt/fxapk/releases/tag/v1.21.0) 提供 wheel、源码归档与 `SHA256SUMS.txt`，安装前核对哈希。联网服务密钥按 [.env.example](.env.example) 写入仓库根 `.env` 或 `~/.fxapk/.env`（不读当前目录的 `.env`），不写入报告或仓库。命令未注册到 PATH 时用 `python -m apkscan.cli` 代替 `fxapk`。
+[发布页](https://github.com/s-silt/fxapk/releases/tag/v1.22.0) 提供 wheel、源码归档与 `SHA256SUMS.txt`，安装前核对哈希。联网服务密钥按 [.env.example](.env.example) 写入仓库根 `.env` 或 `~/.fxapk/.env`（不读当前目录的 `.env`），不写入报告或仓库。命令未注册到 PATH 时用 `python -m apkscan.cli` 代替 `fxapk`。
 
 `digest` 用于初筛和定位；正式判断必须回查 `report.json` 的结构化字段与原始证据。让 AI 助手操作时，给它 [AGENTS.md](AGENTS.md)、样本路径、是否允许联网及设备操作范围。
 
@@ -73,7 +82,7 @@ fxapk digest out/app.json
 | `closure` | 运行时、归属与调证对象是否过证据门 |
 | `review` | 精确包哈希是否被复核接受 |
 
-四种状态不能互相推出。`review=accepted` 不会把 `closure=partial` 变成完整。`auto --strict-case` 的退出码 `0 / 5 / 6` 对应 `complete / partial / failed`。
+四种状态不能互相推出。`review=accepted` 不会把 `closure=partial` 变成完整。对缓存或导出的 `complete` 闭环声明，安全投影还要求每个目标至少有一条用途准入通过的运行时接触证据；这是最小一致性校验，不证明其余闭环条件已满足，也不替代逐层核验。`auto --strict-case` 的退出码 `0 / 5 / 6` 对应 `complete / partial / failed`。
 
 ## 默认行为与边界
 

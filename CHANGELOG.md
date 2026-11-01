@@ -5,6 +5,21 @@
 
 ## 待发布
 
+## 1.22.0 — 2026-11-01
+
+- 探针非干扰性收紧：OkHttp 不重放请求正文，SQLCipher 不在应用连接上导库；无代理观察轮不请求 TLS 校验修改。保留未读取/未导出状态，不把缺失当阴性；配对基线比较分开引导页、网络与采集状态，不作因果保证。
+- 探针日志与 bundled 事件补来源哈希、真实行/数组定位和 occurrence 保留；安装、触发、丢弃、截断分开记回执，Java bridge 就绪不冒充 hook 安装成功。
+- 多源富化补查询/提供方时间与来源家族语义；调证候选补服务角色、标识、所需记录及待核问题。摘要保留有界的逐目标/逐 IP 请求对象，不把 ASN/CDN/承载商写成 App 运营者。
+- 解析器支持显式逐操作进程限制与 JSON-only IPC；配置失败、子进程失败或输入哈希变化保持失败回执，不回退到无约束解析。未配置仍明确 `not_enforced`，不声称总预算或原生沙箱。
+
+- 网页分析新增目录外 `--evidence-handoff` 哈希绑定交接契约；文本/HAR 引用保留逐次定位、采集完整性及来源状态。截断正文不污染请求 URL 的完整性判断，材料真实性和目标 App 归属仍未验证。
+
+- 证据准入记录获准的 occurrence ID 与本次文件读取缺口；富化目标按来源桶稳定轮转分配预算。语料关系查询要求 `evidence-admission/1`；显式重建只更新派生索引，不改写原报告字节。
+- DEX 解码覆盖复用已有预算与缓存边界，并在多 DEX 间轮转分配扫描机会；预算耗尽保持 partial，不保证完整召回。这与可选解析器进程隔离不同，不声称测得 RSS 或建立整次分析沙箱。
+- Evidence 的 occurrence/provenance 贯通报告读写、快照、端点收集与 JS/资源/native 扫描；schema 1.3 输出稳定 `occurrence_id`，不改变旧 `evidence_id`。旧字段缺失保持未知，不补造来源。
+- 运行时端点与事件使用同一次有界 JSON 读取及哈希校验；读取失败、畸形输入和超限显式降级，不生成成功零发现。导入保留定位、结构/引用/可达状态及疑点字段。
+- HTTP 报文时间按 epoch 秒保留，Frida 事件按毫秒转秒；未知单位不猜测。Frida 回调在脚本加载前绑定本次 spawn 的 PID 与脚本哈希，重试和迟到事件不借用最后一轮进程身份；未绑定的 PID/UID/脚本保持未知。
+- 验证限于合成夹具、离线跨仓库桥接和对应提交的 CI；未做真实 APK 引导页/网络、BLA 对照、设备或在线富化验收。核心升级至 1.22.0，可选插件源码未变，继续使用各自 0.1.2 版本；发行附件仍提供核心及三个插件的 wheel、源码归档与 `SHA256SUMS.txt`。
 - **行为变更**：远程配置下载（`fetch_config_object` / `config-probe`）不再读取 `HTTP(S)_PROXY` / `ALL_PROXY`、`.netrc`、`REQUESTS_CA_BUNDLE` 等环境配置，始终直连目标：经代理时实连 peer 是代理地址，连接层 DNS-rebinding 防护会失效。需经代理才能出网的环境下该阶段会以连接失败降级。
 - 远程配置下载（`fetch_config_object` / `config-probe`）的 SSRF 判据改为仅放行公网地址（`is_global`），与 `origin_check` 一致：此前放行的 100.64.0.0/10 共享地址段（如 Tailscale）、198.18.0.0/15 等非公网段，以及 IPv4-mapped、NAT64、6to4、Teredo 中内嵌的非公网 IPv4，预解析与实连 peer 两层均拒绝。
 - CI 新增 `pytest (ASC provider, locked)` 关：droidasc 按测试清单中的官方轮子 sha256 走 hash 校验安装，其余按 `plugins/fxapk-asc/requirements.lock` 安装，设 `FXAPK_REQUIRE_ASC_LIVE=1` 后 ASC 真跑测试缺件即失败、不再静默 skip。ASC 身份表（核心与 worker）与 REA 兼容修补的四个源码哈希改为对照官方发布物独立算出的字面量清单（PyPI 轮子与 npm 归档 integrity），REA 6.4.0 / 6.7.0 的目标文件原文作为夹具（MIT），在其上不替换哈希真跑修补。droidasc 的 revision 是上游 git commit，发布物内不含，仍只能人工核对。
