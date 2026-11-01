@@ -4,62 +4,7 @@
 
 完整参数 `fxapk --help`；`fxapk` 未装成命令时用 `python -m apkscan.cli`。
 
-报告 schema 1.3 的 Evidence 可携带 `provenance`、`locator`、`structure_status`、
-`reference_status`、`reachability` 与 `suspicions`；仅在真实来源和坐标同时存在时输出
-稳定的 `occurrence_id`。旧报告缺少这些字段时保持 unknown/空值，不补造定位。
-
-证据准入按 occurrence 和用途分别评估：`passive_enrichment`、`lead_priority`、
-`closure_candidate`、`dex_query`、`model_summary`、`corpus_relation`；判定结果为
-`allowed`、`review` 或 `blocked`。某个值获准不代表同值的其他引用也获准。静态候选不等于
-运行时观测，也不证明业务归属。
-
-DEX 解码预算复用既有数量、字符数和快照容量边界；这些边界本身不提供解析进程隔离，
-隔离是否启用由下方环境配置决定。
-
-可选解析器进程限制通过环境变量启用：必须同时设置 `FXAPK_PARSER_TIMEOUT_SEC` 与
-`FXAPK_PARSER_MEMORY_MB`；`FXAPK_PARSER_OUTPUT_MB` 可选，未设置时 IPC 输出上限为 64 MiB。
-任一必需项缺失或配置无效都会失败关闭。限制按一次解析或一次隔离延迟读取分别生效，
-不是整次分析的总时限，也不是原生代码沙箱。未配置时维持进程内解析，回执明确标为
-`not_enforced`；默认不宣称性能收益。Linux 的内存限制是地址空间上限（RLIMIT_AS），不是
-RSS 测量；Windows 使用 Job Object，其强制约束须在 Windows 平台验收；macOS 无法执行所需
-内存限制时会失败关闭。
-配置解析失败会在 analyze 输出目录写入独立的 `*.parser-failure.json` 回执，不生成空报告。
-
-## 探针证据、采集退化与调证对象
-
-- `no-proxy` 观察轮不请求 TLS 校验修改；MITM 轮与原版 `floor-only` 轮分别留档。
-  OkHttp 不再次执行请求正文的 `writeTo()`，正文标为 `not_read_non_interference`；
-  SQLCipher 只观察路径与密钥，不在应用连接上执行导出 SQL，标为
-  `not_attempted_non_interference`。因此未读正文、未导出库不是阴性结果或导出失败。
-- 探针安装、触发、丢弃和截断分别记录；Java bridge 就绪不等于各 hook 安装成功。
-  缺少回执保持 unknown，未触发或未找到 API 不等于反检测，也不证明不存在相应行为。
-- `probe-leads` 回灌保存原始日志 bytes 哈希、解码文本哈希、行号及 codepoint 坐标；
-  日志超过 8 MiB 或导入线索超过 10,000 条时拒绝导入，而不是静默截断后声称完整。
-  bundled 事件并回以同一次读取的运行时报告 bytes 哈希和实际数组 JSON pointer 定位，
-  同值的不同 occurrence 保留。脚本/采集身份缺失不补造；哈希不证明真实性或目标 App 归属。
-- HTTP `messages[].ts` 为 epoch 秒；Frida 事件的 `ts` 为毫秒，导入后的 `observed_at`
-  统一为秒，`event_time_semantics` 保留生产者单位。未知通道或无效时间保持 unavailable。
-  回调在脚本加载前绑定本次 spawn 的 PID 与脚本哈希；重试、加载中或迟到的事件保留原身份。
-  未逐事件绑定时，PID/UID/脚本不能从最终采集摘要补齐，并记录 `process_binding_missing`。
-  端点与事件共享有界读取及同一原始哈希；畸形或超限报告记 unavailable/partial，不当零发现。
-- `meta.capture_safety_comparison` 对原版 PCAP 基线与探针轮作保守比较；`digest.capture_safety`
-  只压缩该回执。只有同一原版 APK、前台确认、显式引导页/网络检查、匹配动作/初始状态/环境声明
-  及仍可验证的检查材料都具备时才形成可比信号。状态可为 `inconclusive`、`reported_regression`、
-  `baseline_failed` 或 `no_reported_regression`，均不证明因果或普遍无干扰。
-  采集 done 不等于通过引导页；零流量不等于应用无网络。不会自动清数据或重置设备状态。
-- 多源富化保留查询时间、提供方原始时间字段与来源家族，不把现在的查询结果视作事件发生时的关系。
-  Shodan 与 InternetDB 同属一个家族，不当两份独立佐证。调证候选分别列服务角色、所需端点/端口/
-  时区时间窗/App 关联标识、要调取的账户/绑定/日志与待核问题；CDN 可先调绑定和回源配置，
-  不冒充 Origin。法律渠道与历史关系仍需核实，ASN/RDAP/承载/CDN 不证明 App 运营者。
-  `digest.closure.request_targets` 是有界摘要，正式判断回查完整 closure 和逐来源回执。
-
 ## 命令表
-
-网页材料可附 `--evidence-handoff <证据目录外的JSON>`：
-`fxapk.web-evidence-handoff.v1` 逐文件校验原始大小/哈希，绑定采集来源、HAR entry 与覆盖缺口。
-文本坐标按解码后 codepoint 计；HAR 正文坐标另带 entry 的 JSON pointer，不当原始字节偏移。
-截断、TLS 忽略验证、关联未知、DOM 快照作为待核来源保留；哈希吻合不证明材料真实性或目标 App 归属。
-采集范围与未分析附件见 `meta.web_capture_visibility`，完整交接回执见 `meta.web_evidence.handoff`。
 
 | 想干什么 | 命令 |
 |---|---|
@@ -89,6 +34,37 @@ RSS 测量；Windows 使用 Job Object，其强制约束须在 Windows 平台验
 | DEX 字符串引用查询与导入（可选 fxapk-asc 隔离 worker） | `fxapk dex query` / `fxapk dex import`，见 [plugins/fxapk-asc/README.md](plugins/fxapk-asc/README.md) |
 | 识别线（只读/离线；晋级门未过退出码 4） | `fxapk recognize reanalysis` / `labels validate` / `split build\|validate` / `evaluate` |
 
+## 已保存网页材料
+
+网页材料可附 `--evidence-handoff <证据目录外的JSON>`：
+`fxapk.web-evidence-handoff.v1` 逐文件校验原始大小/哈希，绑定采集来源、HAR entry 与覆盖缺口。
+文本坐标按解码后 codepoint 计；HAR 正文坐标另带 entry 的 JSON pointer，不当原始字节偏移。
+截断、TLS 忽略验证、关联未知、DOM 快照作为待核来源保留；哈希吻合不证明材料真实性或目标 App 归属。
+采集范围与未分析附件见 `meta.web_capture_visibility`，完整交接回执见 `meta.web_evidence.handoff`。
+
+## 采集与探针记录
+
+- `no-proxy` 观察轮不请求 TLS 校验修改；MITM 轮与原版 `floor-only` 轮分别留档。
+  OkHttp 不再次执行请求正文的 `writeTo()`，正文标为 `not_read_non_interference`；
+  SQLCipher 只观察路径与密钥，不在应用连接上执行导出 SQL，标为
+  `not_attempted_non_interference`。因此未读正文、未导出库不是阴性结果或导出失败。
+- 探针安装、触发、丢弃和截断分别记录；Java bridge 就绪不等于各 hook 安装成功。
+  缺少回执保持 unknown，未触发或未找到 API 不等于反检测，也不证明不存在相应行为。
+- `probe-leads` 回灌保存原始日志字节哈希、解码文本哈希、行号及 codepoint 坐标；
+  日志超过 8 MiB 或导入线索超过 10,000 条时拒绝导入，而不是静默截断后声称完整。
+  内置探针事件并回以同一次读取的运行时报告字节哈希和实际数组 JSON pointer 定位，
+  同值的不同 occurrence 保留。脚本/采集身份缺失不补造；哈希不证明真实性或目标 App 归属。
+- HTTP `messages[].ts` 为 epoch 秒；Frida 事件的 `ts` 为毫秒，导入后的 `observed_at`
+  统一为秒，`event_time_semantics` 保留生产者单位。未知通道或无效时间保持 unavailable。
+  回调在脚本加载前绑定本次 spawn 的 PID 与脚本哈希；重试、加载中或迟到的事件保留原身份。
+  未逐事件绑定时，PID/UID/脚本不能从最终采集摘要补齐，并记录 `process_binding_missing`。
+  端点与事件共享有界读取及同一原始哈希；畸形或超限报告记 unavailable/partial，不当零发现。
+- `meta.capture_safety_comparison` 对原版 PCAP 基线与探针轮作保守比较；`digest.capture_safety`
+  只压缩该回执。只有同一原版 APK、前台确认、显式引导页/网络检查、匹配动作/初始状态/环境声明
+  及仍可验证的检查材料都具备时才形成可比信号。状态可为 `inconclusive`、`reported_regression`、
+  `baseline_failed` 或 `no_reported_regression`，均不证明因果或普遍无干扰。
+  采集 done 不等于通过引导页；零流量不等于应用无网络。不会自动清数据或重置设备状态。
+
 ## 被动资源画像与批量富化
 
 `enrich batch` 可显式选择 `--providers fofa_profile,fofa_host,daydaymap_profile`，先 dry-run 核对服务、披露范围与预算，再加 `--no-dry-run`。搜索只取有界首屏，记录已报告总量、实际返回量与覆盖状态；未知总量、缺字段和权限失败不等于"没有资产"。产品、证书和测绘时间帮助判断服务类型，不能单独确认云实例、租户或运营者。
@@ -101,6 +77,12 @@ RSS 测量；Windows 使用 Job Object，其强制约束须在 Windows 平台验
 服务恢复后可加 `--recover-transient`：按来源间隔调用（`--provider-interval` 默认 2 s），瞬时限流、超时或解析失败每个来源最多补试一次（`--retry-delay` 默认 15 s），Retry-After > 60 s 延后；鉴权、权限、额度错误不重试。原失败与补试分别留痕，恢复不抹除历史缺口。
 
 Hunter 默认在搜索前读取账户免费余额并在本机账本（`~/.fxapk/hunter-quota.sqlite3`，可用 `FXAPK_HUNTER_QUOTA_DB` 指定）预留积分，同账户按 UTC+8 日期共享每日 500 积分上限；余额未知或预留失败即停。`FXAPK_HUNTER_CREDIT_MODE=free_only` 在请求前返回 `disabled / free_only_billing_unverified`。账户配置见 [.env.example](.env.example)。
+
+- 多源富化保留查询时间、提供方原始时间字段与来源家族，不把现在的查询结果视作事件发生时的关系。
+  Shodan 与 InternetDB 同属一个家族，不当两份独立佐证。调证候选分别列服务角色、所需端点/端口/
+  时区时间窗/App 关联标识、要调取的账户/绑定/日志与待核问题；CDN 可先调绑定和回源配置，
+  不冒充 Origin。法律渠道与历史关系仍需核实，ASN/RDAP/承载/CDN 不证明 App 运营者。
+  `digest.closure.request_targets` 是有界摘要，正式判断回查完整 closure 和逐来源回执。
 
 ## JADX 索引
 
@@ -132,6 +114,17 @@ Phase 1 产生报告、附件和不可变 `case-package.json`；Phase 2 只读�
 
 持久化 JSON 拒绝 `NaN` / `Infinity`，失败不覆盖已有报告。
 
+### 证据来源与准入
+
+报告 schema 1.3 的 Evidence 可携带 `provenance`、`locator`、`structure_status`、
+`reference_status`、`reachability` 与 `suspicions`；仅在真实来源和坐标同时存在时输出
+稳定的 `occurrence_id`。旧报告缺少这些字段时保持 unknown/空值，不补造定位。
+
+证据准入按 occurrence 和用途分别评估：`passive_enrichment`、`lead_priority`、
+`closure_candidate`、`dex_query`、`model_summary`、`corpus_relation`；判定结果为
+`allowed`、`review` 或 `blocked`。某个值获准不代表同值的其他引用也获准。静态候选不等于
+运行时观测，也不证明业务归属。
+
 ### 两组别混淆的字段
 
 - `visibility`（样本内容看不看得见）vs `analysis_status`（工具跑得顺不顺）：分析器全成功与 DEX 是壳、六条结论都不能下可以同时成立。`blocked_claims` 点名哪些结论不能下，`next_actions` 说怎么补。
@@ -143,6 +136,20 @@ Phase 1 产生报告、附件和不可变 `case-package.json`；Phase 2 只读�
 - `out/app.json` — 完整数据；`report.meta.closure` 含验收结论、五层证据、来源覆盖、缺口与下一步
 - `case-package.json` / `case-review.json` — Phase-1 包与 Phase-2 复核记录
 - `--fmt pdf` 导 PDF（需本机 Chrome 或 Edge）
+
+## 解析预算
+
+DEX 解码预算复用既有数量、字符数和快照容量边界；这些边界本身不提供解析进程隔离，
+隔离通过以下环境变量单独启用。
+
+可选解析器进程限制通过环境变量启用：必须同时设置 `FXAPK_PARSER_TIMEOUT_SEC` 与
+`FXAPK_PARSER_MEMORY_MB`；`FXAPK_PARSER_OUTPUT_MB` 可选，未设置时 IPC 输出上限为 64 MiB。
+任一必需项缺失或配置无效都会失败关闭。限制按一次解析或一次隔离延迟读取分别生效，
+不是整次分析的总时限，也不是原生代码沙箱。未配置时维持进程内解析，回执明确标为
+`not_enforced`；默认不宣称性能收益。Linux 的内存限制是地址空间上限（RLIMIT_AS），不是
+RSS 测量；Windows 使用 Job Object，其强制约束须在 Windows 平台验收；macOS 无法执行所需
+内存限制时会失败关闭。
+配置解析失败会在 analyze 输出目录写入独立的 `*.parser-failure.json` 回执，不生成空报告。
 
 ## 固定依赖与复现
 
