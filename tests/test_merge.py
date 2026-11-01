@@ -1078,6 +1078,71 @@ def test_loaders_unchanged_without_active_cache(tmp_path) -> None:
     assert merge._load_events_field(str(bad), "clipboard_events") == []
 
 
+def test_load_runtime_endpoints_preserves_evidence_facts_and_review_status(tmp_path) -> None:
+    from apkscan.core.admission import evaluate_evidence
+    from apkscan.core.observations import occurrence_id
+
+    report_file = tmp_path / "runtime_report.json"
+    _write_runtime_report(
+        report_file,
+        [
+            {
+                "value": "suspicious.example.test",
+                "kind": "domain",
+                "evidences": [
+                    {
+                        "source": "runtime",
+                        "location": "source/evidence",
+                        "snippet": "synthetic",
+                        "observed_at": 1700000000.25,
+                        "scope": "case_evidence",
+                        "provenance": {"artifact_sha256": "a" * 64, "producer": "synthetic"},
+                        "locator": {
+                            "json_pointer": "/source/evidence",
+                            "coordinate_system": "synthetic",
+                        },
+                        "structure_status": "malformed",
+                        "reference_status": "resolved",
+                        "reachability": "unreachable",
+                        "suspicions": [{"kind": "synthetic_suspicion"}],
+                    },
+                    {
+                        "source": "runtime",
+                        "location": "source/malformed",
+                        "provenance": "not-a-mapping",
+                        "locator": "not-a-mapping",
+                        "structure_status": 7,
+                        "reference_status": None,
+                        "reachability": False,
+                        "suspicions": "not-a-list",
+                    },
+                ],
+            },
+        ],
+    )
+
+    report = _make_report()
+    endpoints = merge.load_runtime_endpoints(str(report_file))
+    merge.merge_runtime_endpoints(report, endpoints)
+    evidences = report.endpoints[0].evidences
+
+    preserved = next(ev for ev in evidences if ev.location == "source/evidence")
+    assert preserved.provenance["artifact_sha256"] == "a" * 64
+    assert preserved.locator["json_pointer"] == "/source/evidence"
+    assert preserved.structure_status == "malformed"
+    assert preserved.reference_status == "resolved"
+    assert preserved.reachability == "unreachable"
+    assert preserved.suspicions == [{"kind": "synthetic_suspicion"}]
+    assert preserved.observed_at == 1700000000.25
+    assert occurrence_id(preserved)
+    assert evaluate_evidence(preserved, "lead_priority").state == "review"
+
+    malformed = next(ev for ev in evidences if ev.location == "source/malformed")
+    assert {item["kind"] for item in malformed.suspicions} >= {
+        "malformed_suspicion", "malformed_evidence_fact",
+    }
+
+
 # ---------------------------------------------------------------------------
 # stats glue：表驱动透传子统计（行为不变）
 # ---------------------------------------------------------------------------
