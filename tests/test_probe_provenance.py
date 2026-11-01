@@ -33,11 +33,11 @@ def test_dedup_keeps_occurrences_without_mutating_inputs_or_upgrading_same_probe
     assert len(leads[0].source_refs) == 1
     assert len({occurrence_id(ref) for ref in deduped[0].source_refs}) == 2
     path = tmp_path / "report.json"
-    path.write_text(json.dumps({"leads": [], "endpoints": []}))
+    path.write_text(json.dumps({"leads": [], "endpoints": []}), encoding="utf-8")
     probe_ingest.merge_into_report_json(str(path), [leads[0]])
-    assert json.loads(path.read_text())["leads"][0]["confidence"] == Confidence.MEDIUM.value
+    assert json.loads(path.read_text(encoding="utf-8"))["leads"][0]["confidence"] == Confidence.MEDIUM.value
     probe_ingest.merge_into_report_json(str(path), [leads[1]])
-    payload = json.loads(path.read_text())
+    payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["leads"][0]["confidence"] == Confidence.MEDIUM.value
     assert len(payload["leads"][0]["source_refs"]) == 2
     endpoint = next(ep for ep in payload["endpoints"] if ep["value"] == "backend.example.test")
