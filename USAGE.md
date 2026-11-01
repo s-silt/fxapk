@@ -37,6 +37,11 @@ RSS 测量；Windows 使用 Job Object，其强制约束须在 Windows 平台验
   日志超过 8 MiB 或导入线索超过 10,000 条时拒绝导入，而不是静默截断后声称完整。
   bundled 事件并回以同一次读取的运行时报告 bytes 哈希和实际数组 JSON pointer 定位，
   同值的不同 occurrence 保留。脚本/采集身份缺失不补造；哈希不证明真实性或目标 App 归属。
+- HTTP `messages[].ts` 为 epoch 秒；Frida 事件的 `ts` 为毫秒，导入后的 `observed_at`
+  统一为秒，`event_time_semantics` 保留生产者单位。未知通道或无效时间保持 unavailable。
+  回调在脚本加载前绑定本次 spawn 的 PID 与脚本哈希；重试、加载中或迟到的事件保留原身份。
+  未逐事件绑定时，PID/UID/脚本不能从最终采集摘要补齐，并记录 `process_binding_missing`。
+  端点与事件共享有界读取及同一原始哈希；畸形或超限报告记 unavailable/partial，不当零发现。
 - `meta.capture_safety_comparison` 对原版 PCAP 基线与探针轮作保守比较；`digest.capture_safety`
   只压缩该回执。只有同一原版 APK、前台确认、显式引导页/网络检查、匹配动作/初始状态/环境声明
   及仍可验证的检查材料都具备时才形成可比信号。状态可为 `inconclusive`、`reported_regression`、

@@ -51,6 +51,15 @@ not create an empty report.
   Origin or App operator. Legal channels and historical relationships remain unverified.
   `digest.closure.request_targets` is bounded; consult full closure and source receipts for decisions.
 
+HTTP `messages[].ts` uses epoch seconds; Frida event timestamps use milliseconds.
+Imported `observed_at` values use seconds, while `event_time_semantics` preserves the
+producer unit. Unknown channels or invalid times remain unavailable. Handlers bind
+each spawned PID and script hash before script loading; retry and late events retain
+their original identity. Unbound PID/UID/script identity is never filled from the final
+capture summary and carries `process_binding_missing`. Endpoints and events share a
+bounded read and original hash; malformed or oversized reports are unavailable/partial,
+not successful zero-finding reports.
+
 ## Command table
 
 Saved web evidence accepts `--evidence-handoff <JSON outside the evidence directory>`.
