@@ -23,9 +23,11 @@
 from __future__ import annotations
 
 import bisect
+import hashlib
 import logging
 import posixpath
 import re
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -34,6 +36,7 @@ from apkscan.core import infra, tld_policy
 from apkscan.core.tld_policy import BARE_STRICT_TLDS as _SAFE_BARE_TLDS
 from apkscan.core.tld_policy import URL_HOST_TLDS as _COMMON_TLDS
 from apkscan.core.models import AnalyzerResult, Confidence, Evidence, Finding, Severity
+from apkscan.core.context import iter_dex_records
 from apkscan.core.registry import BaseAnalyzer, load_rules
 from apkscan.analyzers._common import EndpointCollector
 from apkscan.core.textutil import as_str_list as _as_str_list
@@ -428,10 +431,11 @@ class EndpointsAnalyzer(BaseAnalyzer):
                         return
 
         try:
-            for idx, s in enumerate(ctx.dex_strings()):
+            for idx, record in enumerate(iter_dex_records(ctx)):
                 if idx >= _MAX_DEX_STRINGS or len(out) >= 20:
                     break
-                if isinstance(s, str) and "127." in s:
+                s = record.value
+                if "127." in s:
                     _harvest(s, "dex")
         except Exception:  # noqa: BLE001 — 单源扫描失败不影响启发式整体
             logger.debug("[%s] 扫 dex 找回环 IP 失败", self.name, exc_info=True)
@@ -455,7 +459,8 @@ class EndpointsAnalyzer(BaseAnalyzer):
         if not loopbacks:
             return None
         try:
-            has_native = bool(self._collect_so_paths(ctx))
+            native_paths, _ = self._collect_so_paths(ctx)
+            has_native = bool(native_paths)
         except Exception:  # noqa: BLE001 — 启发式旁路，采集失败即保守不产 Finding
             logger.debug("[%s] 采集 .so 判定 native 存在性失败", self.name, exc_info=True)
             return None
@@ -499,17 +504,23 @@ class EndpointsAnalyzer(BaseAnalyzer):
         """
         truncated = False
         try:
-            for idx, s in enumerate(ctx.dex_strings()):
+            for idx, record in enumerate(iter_dex_records(ctx)):
                 if idx >= _MAX_DEX_STRINGS:
                     logger.warning(
                         "[%s] DEX 字符串超过上限 %d，截断扫描", self.name, _MAX_DEX_STRINGS
                     )
                     truncated = True
                     break
-                if not isinstance(s, str) or not s:
+                s = record.value
+                if not s:
                     continue
                 try:
-                    self._scan_text(s, "dex", "dex_strings", collector, rules, bulk_len=len(s))
+                    self._scan_text(
+                        s, "dex", "dex_strings", collector, rules, bulk_len=len(s),
+                        provenance=record.provenance or None,
+                        locator=record.locator or None,
+                        offset_unit="decoded-text-codepoint",
+                    )
                 except Exception:
                     logger.exception("[%s] 解析 DEX 字符串失败，跳过该条", self.name)
         except Exception:
@@ -528,7 +539,11 @@ class EndpointsAnalyzer(BaseAnalyzer):
         if not isinstance(manifest, str) or not manifest:
             return
         try:
-            self._scan_text(manifest, "manifest", "AndroidManifest.xml", collector, rules, bulk_len=0)
+            self._scan_text(
+                manifest, "manifest", "AndroidManifest.xml", collector, rules, bulk_len=0,
+                provenance={"extractor": "endpoints-v1", "member_path": "AndroidManifest.xml"},
+                offset_unit="decoded-text-codepoint",
+            )
         except Exception:
             logger.exception("[%s] 解析 manifest 文本失败", self.name)
 
@@ -553,6 +568,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
             return 0, 0, True
 
         scanned = 0
+        duplicate_paths = {path for path, count in Counter(files).items() if count > 1}
         failed = 0
         for path in files:
             if not self._is_resource_target(path, rules):
@@ -566,7 +582,10 @@ class EndpointsAnalyzer(BaseAnalyzer):
             scanned += 1
             # 分块扫描：大文件按块解码 + 扫，块间重叠避免跨界漏匹配；小文件整体扫（行为不变）。
             self._scan_bytes_chunked(
-                data, "resource", path, collector, rules, self._decode_latin1
+                data, "resource", path, collector, rules, self._decode_latin1,
+                provenance={"extractor": "endpoints-v1", "member_path": path,
+                            "member_sha256": hashlib.sha256(data).hexdigest()},
+                locator_enabled=path not in duplicate_paths,
             )
         return scanned, failed, False
 
@@ -574,7 +593,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
         self, ctx: "AnalysisContext", collector: EndpointCollector, rules: _Rules
     ) -> int:
         """扫 native .so：read_file 后正则抽可见 ASCII 串再匹配。返回扫描文件数。"""
-        paths = self._collect_so_paths(ctx)
+        paths, duplicate_paths = self._collect_so_paths(ctx)
         scanned = 0
         for path in paths:
             data = self._safe_read(ctx, path)
@@ -583,7 +602,12 @@ class EndpointsAnalyzer(BaseAnalyzer):
             scanned += 1
             # 分块抽 ASCII 串：大 .so（如 12MB+ libweexjss.so）按块跑，块间重叠避免跨界
             # 的端点 ASCII run 被切断；小文件整体扫（行为不变）。
-            self._scan_native_bytes_chunked(data, path, collector, rules)
+            self._scan_native_bytes_chunked(
+                data, path, collector, rules,
+                provenance={"extractor": "endpoints-v1", "member_path": path,
+                            "member_sha256": hashlib.sha256(data).hexdigest()},
+                locator_enabled=path not in duplicate_paths,
+            )
         return scanned
 
     # ------------------------------------------------------------------
@@ -598,6 +622,9 @@ class EndpointsAnalyzer(BaseAnalyzer):
         collector: EndpointCollector,
         rules: _Rules,
         decode: Callable[[bytes], str],
+        *,
+        provenance: dict[str, str] | None = None,
+        locator_enabled: bool = True,
     ) -> None:
         """对完整 bytes 分块解码 + 扫描（resource 通道），块间重叠避免跨界漏匹配。
 
@@ -612,7 +639,9 @@ class EndpointsAnalyzer(BaseAnalyzer):
             text = decode(data)
             if text:
                 try:
-                    self._scan_text(text, source, location, collector, rules, bulk_len=0)
+                    self._scan_text(text, source, location, collector, rules, bulk_len=0,
+                                    provenance=provenance,
+                                    offset_unit="byte" if locator_enabled else None, base_offset=0)
                 except Exception:
                     logger.exception("[%s] 解析文件失败，跳过：%s", self.name, location)
             return
@@ -632,7 +661,9 @@ class EndpointsAnalyzer(BaseAnalyzer):
             text = decode(chunk)
             if text:
                 try:
-                    self._scan_text(text, source, location, collector, rules, bulk_len=0)
+                    self._scan_text(text, source, location, collector, rules, bulk_len=0,
+                                    provenance=provenance,
+                                    offset_unit="byte" if locator_enabled else None, base_offset=start)
                 except Exception:
                     logger.exception("[%s] 分块扫描失败，跳过该块：%s", self.name, location)
             start += step
@@ -643,6 +674,9 @@ class EndpointsAnalyzer(BaseAnalyzer):
         location: str,
         collector: EndpointCollector,
         rules: _Rules,
+        *,
+        provenance: dict[str, str] | None = None,
+        locator_enabled: bool = True,
     ) -> None:
         """对完整 native bytes 分块抽 ASCII 串再扫，块间重叠避免跨界 ASCII run 被切断。
 
@@ -651,7 +685,9 @@ class EndpointsAnalyzer(BaseAnalyzer):
         """
         n = len(data)
         if n <= _CHUNK_THRESHOLD_BYTES:
-            self._scan_native_chunk(data, location, collector, rules)
+            self._scan_native_chunk(data, location, collector, rules,
+                                    provenance=provenance, base_offset=0,
+                                    locator_enabled=locator_enabled)
             return
 
         logger.debug(
@@ -666,7 +702,9 @@ class EndpointsAnalyzer(BaseAnalyzer):
         start = 0
         while start < n:
             self._scan_native_chunk(
-                data[start : start + _SCAN_CHUNK_BYTES], location, collector, rules
+                data[start : start + _SCAN_CHUNK_BYTES], location, collector, rules,
+                provenance=provenance, base_offset=start,
+                locator_enabled=locator_enabled,
             )
             start += step
 
@@ -676,6 +714,10 @@ class EndpointsAnalyzer(BaseAnalyzer):
         location: str,
         collector: EndpointCollector,
         rules: _Rules,
+        *,
+        provenance: dict[str, str] | None = None,
+        base_offset: int = 0,
+        locator_enabled: bool = True,
     ) -> None:
         """对一段 native bytes 抽可见 ASCII 串并逐串扫端点。单块异常吞 + logging，不炸整体。"""
         try:
@@ -683,7 +725,11 @@ class EndpointsAnalyzer(BaseAnalyzer):
                 ascii_run = m.group().decode("ascii", errors="ignore")
                 if not ascii_run:
                     continue
-                self._scan_text(ascii_run, "native", location, collector, rules, bulk_len=len(ascii_run))
+                self._scan_text(
+                    ascii_run, "native", location, collector, rules, bulk_len=len(ascii_run),
+                    provenance=provenance, offset_unit="byte" if locator_enabled else None,
+                    base_offset=base_offset + m.start(),
+                )
         except Exception:
             logger.exception("[%s] 解析 native 文件失败，跳过：%s", self.name, location)
 
@@ -700,6 +746,10 @@ class EndpointsAnalyzer(BaseAnalyzer):
         rules: _Rules,
         *,
         bulk_len: int,
+        provenance: dict[str, str] | None = None,
+        locator: dict[str, object] | None = None,
+        offset_unit: str | None = None,
+        base_offset: int = 0,
     ) -> None:
         """在一段文本里抽 URL / 域名 / IP，命中加入 collector。
 
@@ -711,6 +761,23 @@ class EndpointsAnalyzer(BaseAnalyzer):
         dex / native 逐条通道传 ``len(text)``（此时 text 就是单条），manifest /
         resource 整块通道传 0（只让路径 glob 判据生效，与 web_evidence 同取舍）。
         """
+        def make_evidence(snippet: str, match_start: int) -> Evidence:
+            loc = dict(locator or {})
+            if provenance and (locator is not None or offset_unit is not None):
+                if "byte_offset" in loc and isinstance(loc.get("offset_unit"), str):
+                    loc["char_offset"] = base_offset + match_start
+                    loc["char_offset_unit"] = "decoded-text-codepoint"
+                elif offset_unit == "byte":
+                    loc["byte_offset"] = base_offset + match_start
+                    loc["offset_unit"] = offset_unit
+                elif offset_unit:
+                    loc["char_offset"] = base_offset + match_start
+                    loc["offset_unit"] = offset_unit
+                elif not loc.get("offset_unit"):
+                    loc["offset_unit"] = "unknown"
+            return Evidence(source=source, location=location, snippet=snippet,
+                            provenance=dict(provenance or {}), locator=loc)
+
         # 1) URL（最具体，先抽）。记录已被 URL 覆盖的区间，避免域名/IP 重复抽。
         consumed: list[tuple[int, int]] = []
         for m in _URL_RE.finditer(text):
@@ -733,7 +800,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
             collector.add(
                 cleaned,
                 "url",
-                Evidence(source=source, location=location, snippet=_truncate(raw, rules.snippet_max)),
+                make_evidence(_truncate(raw, rules.snippet_max), m.start()),
                 is_cleartext=is_cleartext,
                 is_private=is_private,
             )
@@ -749,7 +816,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
                     collector.add(
                         host,
                         "ip",
-                        Evidence(source=source, location=location, snippet=host_snippet),
+                        make_evidence(host_snippet, m.start()),
                         is_private=_ip_is_private(host_ip),
                     )
                     # ★IP 与域名同样要标来源档，且这不只是「降档」的入口，也是「救回」的
@@ -761,7 +828,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
                 collector.add(
                     host,
                     "domain",
-                    Evidence(source=source, location=location, snippet=host_snippet),
+                    make_evidence(host_snippet, m.start()),
                 )
                 collector.mark_tier(host, infra.domain_source_tier(location, bulk_len, context=self._tier_context))
 
@@ -783,7 +850,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
             collector.add(
                 ip_str,
                 "ip",
-                Evidence(source=source, location=location, snippet=_truncate(m.group(), rules.snippet_max)),
+                make_evidence(_truncate(m.group(), rules.snippet_max), m.start()),
                 is_private=_ip_is_private(ip_obj),
             )
             # 同上：裸 IP 也标来源档（降档与 best_tier 救回共用同一入口）。
@@ -805,7 +872,7 @@ class EndpointsAnalyzer(BaseAnalyzer):
             collector.add(
                 domain,
                 "domain",
-                Evidence(source=source, location=location, snippet=_truncate(m.group(), rules.snippet_max)),
+                make_evidence(_truncate(m.group(), rules.snippet_max), m.start()),
             )
             collector.mark_tier(domain, infra.domain_source_tier(location, bulk_len, context=self._tier_context))
 
@@ -828,9 +895,10 @@ class EndpointsAnalyzer(BaseAnalyzer):
     # 采集 / IO 辅助
     # ------------------------------------------------------------------
 
-    def _collect_so_paths(self, ctx: "AnalysisContext") -> list[str]:
+    def _collect_so_paths(self, ctx: "AnalysisContext") -> tuple[list[str], set[str]]:
         """native_libs() + list_files() 中所有 .so（去重，保序）。"""
         seen: set[str] = set()
+        duplicates: set[str] = set()
         out: list[str] = []
         for getter in (ctx.native_libs, ctx.list_files):
             try:
@@ -838,13 +906,19 @@ class EndpointsAnalyzer(BaseAnalyzer):
             except Exception:
                 logger.exception("[%s] 采集 .so 路径失败（%s）", self.name, getter.__name__)
                 continue
+            source_seen: set[str] = set()
             for p in items:
                 if not isinstance(p, str):
                     continue
-                if p.lower().endswith(".so") and p not in seen:
+                if not p.lower().endswith(".so"):
+                    continue
+                if p in source_seen:
+                    duplicates.add(p)
+                source_seen.add(p)
+                if p not in seen:
                     seen.add(p)
                     out.append(p)
-        return out
+        return out, duplicates
 
     def _is_resource_target(self, path: str, rules: _Rules) -> bool:
         low = path.replace("\\", "/").lower()

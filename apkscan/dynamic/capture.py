@@ -26,6 +26,7 @@ status="skipped" + 手册（playbook，给出可手动复现的完整取证步�
 from __future__ import annotations
 
 import inspect
+import hashlib
 import ipaddress
 import json
 import logging
@@ -60,6 +61,7 @@ from apkscan.dynamic import (
     cryptohook,
     pcap_ingest,
     provision,
+    probe_coverage,
     runtime_evidence,
 )
 from apkscan.dynamic.capture_plan import CaptureDecision, decide_capture
@@ -866,6 +868,13 @@ def _capture(
     #: 传给 _start_frida_session 的可变信使：它在 script.load() 成功那一刻即置 injected=True，
     #: 使「已注入」这个事实不依赖函数能否正常返回（load→return 之间抛异常也返回 (None, None)）。
     shim_state: dict[str, bool] = {}
+    probe_state = probe_coverage.new_probe_state(
+        package=package,
+        requested_hooks=selected_hooks,
+        frida_requested=frida,
+        pass_tag=pass_tag or None,
+        sample_sha256=sample_sha256,
+    )
     crypto_events: list[dict[str, Any]] = []
     jsbridge_events: list[dict[str, Any]] = []  # P1：运行时 JS-bridge 暴露面/调用
     sensitive_api_events: list[dict[str, Any]] = []  # P1：运行时敏感 API 调用
@@ -1024,6 +1033,8 @@ def _capture(
                 allow_behavior_modification=allow_behavior_modification,
                 antidetect=antidetect,
                 shim_state=shim_state,
+                probe_state=probe_state,
+                enable_tls_unpinning=mitm,
                 **({"selected_hooks": selected_hooks} if selected_hooks is not None else {}),
             )
             if frida_session is not None:
@@ -1042,7 +1053,7 @@ def _capture(
             _wait(_FRIDA_GRACE)
             if _frida_session_alive(frida_session):
                 playbook.append(
-                    f"frida-core 注入 SSL unpinning + 运行时密钥 hook 并启动 {package}"
+                    f"frida-core 注入{'SSL unpinning + ' if mitm else ''}运行时观察 hook 并启动 {package}"
                     "（hook 就绪与活体 key 回传待收尾按 hook_ready_status 确认）"
                 )
                 # ★codex 真机 BUG2：此处仅"会话存活"，hook 是否真装上要到收尾 _frida_hook_status 才知；
@@ -1078,12 +1089,16 @@ def _capture(
         # 退 floor 后不回退 subprocess frida——但**仅当 floor 真起来了**(floor_handle 非 None)。
         # floor 是桩 / 设备侧不可用时(handle=None)并没真退成 floor,subprocess frida 仍是唯一的
         # unpinning 兜底,不能连它一起丢,否则 pinned HTTPS 只剩密文(codex review 复核 P2)。
-        if frida and frida_session is None and not (retreated and floor_handle is not None):
+        if mitm and frida and frida_session is None and not (retreated and floor_handle is not None):
             frida_proc = _start_frida_unpinning(package, out_path, serial)
         if frida and frida_session is None and frida_proc is None:
             # 未起 frida（缺 frida / 写脚本失败 / 秒退熔断退 floor）→ 无 unpinning，HTTPS 可能仅密文。
             # ★floor-only（frida=False）本就不注入 frida、不该刷此告警——已由上方"跳过 frida 注入"说明覆盖。
-            warn = "frida 未启动（缺 frida / 脚本写出失败 / 秒退退 floor），无 SSL unpinning，HTTPS 可能仅密文"
+            warn = (
+                "frida 未启动（缺 frida / 脚本写出失败 / 秒退退 floor），无 SSL unpinning，HTTPS 可能仅密文"
+                if mitm else
+                "运行时观察探针未启动；不回退 TLS 修改脚本，保留 floor 材料，本轮探针覆盖不可用"
+            )
             logger.warning("[capture] %s", warn)
             playbook.append(warn)
             warnings.append(warn)
@@ -1410,23 +1425,43 @@ def _capture(
         mitm_bytes = flows_file.stat().st_size if flows_file.exists() else 0
     except OSError:
         mitm_bytes = 0
-    # ★#7：hook 就绪三态——只有收到显式 fxapk_hook_ready:true 才算 confirmed；未确认/Java 不可用
-    #   附告警，不把"未确认"上报成"已确认"掩盖 hook 没装上。
-    hook_status = _frida_hook_status(frida_session)
+    raw_uid = pcap_app_attr.get("target_uid")
+    observed_uid = raw_uid if isinstance(raw_uid, int) and not isinstance(raw_uid, bool) else None
+    for family, events in (
+        ("crypto", crypto_events),
+        ("jsbridge", jsbridge_events),
+        ("sensitive_api", sensitive_api_events),
+        ("okhttp", credential_events),
+        ("sqlcipher", sqlcipher_events),
+        ("clipboard", clipboard_events),
+        ("accessibility", remote_control_events),
+    ):
+        probe_coverage.note_sink_drop(probe_state, family, events)
+    if observed_pid is None:
+        raw_pid = probe_state.get("observed_pid")
+        observed_pid = raw_pid if isinstance(raw_pid, int) and not isinstance(raw_pid, bool) else None
+    probe_cov = probe_coverage.finalize_probe_state(
+        probe_state,
+        observed_pid=observed_pid,
+        observed_uid=observed_uid,
+    )
+    hook_status = _frida_hook_status(frida_session, probe_state)
     if hook_status in ("java-unavailable", "unconfirmed"):
         warnings.append(
-            f"frida hook 未确认就绪（{hook_status}）——注入可能未生效（反检测样本常见），运行时事件可能不全，靠 floor/pcap 兜底"
+            f"frida hook 未确认就绪（{hook_status}）——运行时探针安装状态未知或不完整，运行时事件可能不全，靠 floor/pcap 兜底"
         )
     capture_signals: dict[str, Any] = {
         "proxy_set": bool(proxy_set),
         "reverse_set": bool(reverse_set),
         "floor_started": floor_handle is not None,
         "floor_pulled": floor_pcap is not None,
-        "hook_ready": hook_status == "confirmed",  # ★#7：仅收到显式 fxapk_hook_ready:true 才算已确认
+        "hook_ready": hook_status == "confirmed",  # Every requested family must confirm installation.
         "hook_ready_status": hook_status,  # confirmed / java-unavailable / unconfirmed / none
-        # ★Frida 17+ 的 Java bridge 供给情况：hook 没装上时，这一栏区分"宿主没给 bridge"
-        #   与"样本反检测/ART 不可用"——两者的补法完全不同（前者装 frida-tools，后者换探针）。
+        "probe_coverage": probe_cov,
+        # Java bridge readiness is reported separately; unavailable APIs are not anti-Frida evidence.
         "frida_bridges": _frida_bridge_status(frida_session),
+        "tls_unpinning_requested": bool(frida and mitm),
+        "tls_policy": "interception_requested" if mitm else "no_tls_modification_requested",
         "mitm_bytes": mitm_bytes,
         "endpoint_total": len(endpoints),
         # ★P0-c：秒退熔断落盘。此前 retreated/retreat_count 只是局部变量、外部读不到，编排层无从判断
@@ -1487,8 +1522,6 @@ def _capture(
     if selected_hooks is not None:
         capture_signals["requested_hooks"] = list(selected_hooks)
 
-    raw_uid = pcap_app_attr.get("target_uid")
-    observed_uid = raw_uid if isinstance(raw_uid, int) and not isinstance(raw_uid, bool) else None
     from apkscan.core.runtime_diagnostics import observation_from_capture
 
     process_observations = [observation_from_capture(
@@ -1520,6 +1553,15 @@ def _capture(
         runtime_variant=runtime_variant,
         ui_observations=ui_observations,
         process_observations=process_observations,
+        capture_context={
+            "script_sha256": probe_cov.get("script_sha256"),
+            "package": probe_cov.get("requested_package"),
+            "pid": probe_cov.get("observed_pid"),
+            "uid": probe_cov.get("observed_uid"),
+            "round": probe_cov.get("round"),
+            "pass_tag": probe_cov.get("pass_tag"),
+            "sample_sha256": probe_cov.get("sample_sha256"),
+        },
     )
     report_paths = [report_path] if report_path else []
 
@@ -1537,6 +1579,7 @@ def _capture(
         result["reason"] = f"{result['reason']}；{suffix}" if result["reason"] else suffix
 
     result["artifacts"] = artifacts
+    result["capture_signals"] = capture_signals
     result["report_paths"] = report_paths
     result["playbook"] = playbook
     if ui_observations:
@@ -1670,21 +1713,6 @@ CHANNELS: tuple[tuple[str, str, Any], ...] = (
     ("remote_control", cryptohook.ACCESSIBILITY_MSG_TYPE, cryptohook.normalize_remote_control_event),
 )
 
-# ★#7 hook readiness：所有 hook 装完后由 JS 显式回传 fxapk_hook_ready——在 Java.perform 内确认 ART
-# 可用（catch 反检测样本下 script.load 成功但实际 "Java is not defined"/hook 没装上的假就绪）。
-_FRIDA_HOOK_READY_JS = (
-    ";(function () {"
-    "  try {"
-    "    if (typeof Java !== 'undefined' && Java.available) {"
-    "      Java.perform(function () { send({ fxapk_hook_ready: true }); });"
-    "    } else {"
-    "      send({ fxapk_hook_ready: false, reason: 'java-unavailable' });"
-    "    }"
-    "  } catch (e) { send({ fxapk_hook_ready: false, reason: String(e) }); }"
-    "})();"
-)
-
-
 #: Frida 17 起 GumJS 不再内置 Java/ObjC bridge：脚本一引用 ``Java``，运行时就 send 一条
 #: ``frida:load-bridge`` 向宿主要源码，宿主回 ``frida:bridge-loaded``。frida-tools 的 REPL/CLI
 #: 自带这个应答器，Python API 没有——于是同一份脚本在 CLI 下能跑、用 ``create_script`` 就
@@ -1789,6 +1817,7 @@ def _build_injection_source(
     allow_behavior_modification: bool = False,
     antidetect: str = "off",
     selected_hooks: tuple[str, ...] | None = None,
+    enable_tls_unpinning: bool = True,
 ) -> str:
     """Use bundled observers only; sample strings are never executable script."""
     hooks = {
@@ -1806,7 +1835,9 @@ def _build_injection_source(
     ):
         raise ValueError("invalid requested hook profile")
     selected = set(hooks) if selected_hooks is None else set(selected_hooks)
-    parts = [_FRIDA_JAVA_BRIDGE_LOADER_JS, FRIDA_UNPINNING_JS]
+    parts = [_FRIDA_JAVA_BRIDGE_LOADER_JS, probe_coverage.load_bootstrap()]
+    if enable_tls_unpinning:
+        parts.append(FRIDA_UNPINNING_JS)
     for name in ("crypto", "jsbridge", "sensitive_api"):
         if name in selected:
             parts.append(hooks[name])
@@ -1815,7 +1846,6 @@ def _build_injection_source(
     for name in ("okhttp", "sqlcipher", "clipboard", "accessibility"):
         if name in selected:
             parts.append(hooks[name])
-    parts.append(_FRIDA_HOOK_READY_JS)
     return "\n".join(parts)
 
 
@@ -1834,7 +1864,9 @@ def _start_frida_session(
     allow_behavior_modification: bool = False,
     antidetect: str = "off",
     shim_state: dict[str, bool] | None = None,
+    probe_state: dict[str, Any] | None = None,
     selected_hooks: tuple[str, ...] | None = None,
+    enable_tls_unpinning: bool = True,
 ) -> tuple[Any, Any]:
     """用 frida-core（``import frida``）spawn 目标 app 并注入 unpinning + 运行时 hook 套件。
 
@@ -1876,14 +1908,21 @@ def _start_frida_session(
         source = _build_injection_source(
             allow_behavior_modification=allow_behavior_modification,
             antidetect=antidetect,
+            enable_tls_unpinning=enable_tls_unpinning,
             **({"selected_hooks": selected_hooks} if selected_hooks is not None else {}),
         )
+        if probe_state is not None:
+            probe_state["script_sha256"] = hashlib.sha256(source.encode("utf-8")).hexdigest()
+            probe_state["script_sha256_source"] = "assembled_injection_source"
         # serial 钉定那台（-D 等价）；None 退回 USB（向后兼容）。
         if serial:
             device_handle = frida.get_device(serial, timeout=_FRIDA_USB_TIMEOUT)
         else:
             device_handle = frida.get_usb_device(timeout=_FRIDA_USB_TIMEOUT)
         pid = device_handle.spawn([package])
+        if probe_state is not None and isinstance(pid, int) and not isinstance(pid, bool):
+            probe_state["observed_pid"] = pid
+            probe_state["observed_pid_source"] = "frida_spawn"
         session = device_handle.attach(pid)
         # 在会话上寄存 device 句柄，供 _frida_session_alive 用 enumerate_processes 复验 pid 存活。
         try:
@@ -1895,28 +1934,19 @@ def _start_frida_session(
         #   script.load() 注册**——请求就是 load 过程中发出来的，晚一步就赶不上。
         bridge_state: dict[str, Any] = {}
         script.on("message", _make_bridge_loader(script, bridge_state))
+        if probe_state is not None:
+            def _probe_status_handler(message: Any, _data: Any) -> None:
+                try:
+                    if isinstance(message, dict) and message.get("type") == "send":
+                        probe_coverage.record_status(probe_state, message.get("payload"))
+                except Exception:
+                    logger.debug("[capture] probe coverage message failed", exc_info=True)
+
+            script.on("message", _probe_status_handler)
         try:
             session._fxapk_bridge_state = bridge_state  # type: ignore[attr-defined]
         except Exception:
             logger.debug("[capture] 无法在会话寄存 bridge 状态（忽略）", exc_info=True)
-        # ★#7：hook readiness 通道——JS 装完 hook 后 send fxapk_hook_ready，异步落进标志容器，
-        #   供收尾时读（capture_signals["hook_ready"]），把"会话建立"细化为"hook 真装上"。
-        hook_ready: dict[str, Any] = {"ready": None}
-
-        def _hook_ready_handler(message: Any, _data: Any) -> None:
-            try:
-                if isinstance(message, dict) and message.get("type") == "send":
-                    payload = message.get("payload")
-                    if isinstance(payload, dict) and "fxapk_hook_ready" in payload:
-                        hook_ready["ready"] = bool(payload.get("fxapk_hook_ready"))
-            except Exception:
-                logger.debug("[capture] hook_ready 消息处理异常（忽略）", exc_info=True)
-
-        script.on("message", _hook_ready_handler)
-        try:
-            session._fxapk_hook_ready = hook_ready  # type: ignore[attr-defined]
-        except Exception:
-            logger.debug("[capture] 无法在会话寄存 hook_ready 标志（忽略）", exc_info=True)
         # crypto 主通道（含 error 诊断）单独走 make_message_handler。
         script.on("message", cryptohook.make_message_handler(sink))
         # 其余 7 路运行时事件通道表驱动注册（sink 顺序与 CHANNELS 严格对齐；None 则跳过该通道）。
@@ -2947,9 +2977,7 @@ def _budget_remaining(started_at: float, total_budget_sec: int) -> float:
 def _frida_bridge_status(session: Any) -> dict[str, Any]:
     """本次会话的 Java/ObjC bridge 供给情况（Frida 17+）。绝不抛。
 
-    ★为什么要单列：``hook_ready`` 只说"hook 装没装上"，说不出**为什么没装上**。Frida 17 起
-      Java bridge 不再内置，宿主没应答 = 脚本里 ``Java`` 未定义 = 全部 Java hook 静默失效，
-      但会话照样存活、事件只是空的。这一栏把那种情形与"样本反检测"分开。
+    Java bridge供给与家族级 hook 注册状态分开记录；unsupported API 本身不证明反检测。
     """
     if session is None:
         return {"requested": [], "loaded": [], "missing": []}
@@ -2962,26 +2990,31 @@ def _frida_bridge_status(session: Any) -> dict[str, Any]:
     return {"requested": [], "loaded": [], "missing": []}
 
 
-def _frida_hook_status(session: Any) -> str:
-    """frida hook 就绪状态（★#7，三态不混淆"已确认"与"未确认"）。JS 装完 hook 在 Java.perform
-    内 send fxapk_hook_ready，落进 ``session._fxapk_hook_ready``：
-
-    - ``"confirmed"``        收到 True —— hook 真装上；
-    - ``"java-unavailable"`` 收到 False —— ART/Java 不可用或异常（反检测样本假就绪，据此诚实降级）；
-    - ``"unconfirmed"``      会话存活但未收到信号 —— 抓包窗内 JS 没跑到/时序未到（不当已确认）；
-    - ``"none"``             无会话。
-
-    绝不抛。``hook_ready`` 布尔只在 ``"confirmed"`` 为真；``unconfirmed``/``java-unavailable`` 由
-    调用方附告警，避免把"未确认"上报成"已确认"掩盖 hook 没装上。
-    """
+def _frida_hook_status(session: Any, probe_state: dict[str, Any] | None = None) -> str:
+    """Return confirmed only when each requested family reported installed registrations."""
     if session is None:
         return "none"
     try:
+        if isinstance(probe_state, dict):
+            if probe_state.get("java_bridge_ready") is False:
+                return "java-unavailable"
+            requested = probe_state.get("requested_hooks")
+            families = probe_state.get("families")
+            if (
+                isinstance(requested, list)
+                and requested
+                and isinstance(families, dict)
+                and all(
+                    isinstance(families.get(name), dict)
+                    and families[name].get("registration_status") == "installed"
+                    for name in requested
+                )
+            ):
+                return "confirmed"
+            return "unconfirmed"
         flag = getattr(session, "_fxapk_hook_ready", None)
         if isinstance(flag, dict):
             ready = flag.get("ready")
-            if ready is True:
-                return "confirmed"
             if ready is False:
                 return "java-unavailable"
     except Exception:
@@ -4011,6 +4044,7 @@ def _write_runtime_report(
     runtime_variant: str = "original-runtime",
     ui_observations: list[dict[str, Any]] | None = None,
     process_observations: list[dict[str, Any]] | None = None,
+    capture_context: dict[str, Any] | None = None,
 ) -> str:
     """把运行时端点写成 out/runtime_report.json（复用 report.json 的序列化）。
 
@@ -4030,6 +4064,48 @@ def _write_runtime_report(
     返回报告路径；写出失败记日志返回空串（不抛）。
     """
     report_file = out_path / "runtime_report.json"
+    capture_values = capture_context or {}
+    context = {
+        key: capture_values.get(key)
+        for key in (
+            "script_sha256",
+            "package",
+            "pid",
+            "uid",
+            "round",
+            "pass_tag",
+            "sample_sha256",
+        )
+    }
+
+    def _event_rows(name: str, events: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for index, event in enumerate(events or []):
+            row = dict(event)
+            row["capture_context"] = context
+            gaps = row.get("capture_gaps")
+            if not isinstance(gaps, list):
+                gaps = []
+            if (
+                row.get("body_capture_status") == "not_read_non_interference"
+                and "request_body_not_read_non_interference" not in gaps
+            ):
+                gaps.append("request_body_not_read_non_interference")
+            if (
+                row.get("export_status") == "not_attempted_non_interference"
+                and "database_export_not_attempted_non_interference" not in gaps
+            ):
+                gaps.append("database_export_not_attempted_non_interference")
+            if gaps:
+                row["capture_gaps"] = gaps
+            row["event_provenance"] = {
+                "completeness": "not_attested",
+                "target_app_attribution_verified": False,
+            }
+            row["event_locator"] = {"json_pointer": f"/{name}/{index}"}
+            rows.append(row)
+        return rows
+
     payload = {
         "package_name": package,
         "source": "runtime",
@@ -4048,17 +4124,17 @@ def _write_runtime_report(
         "endpoint_total": len(endpoints),
         "endpoints": [report_json._to_jsonable(ep) for ep in endpoints],
         "messages": list(messages or []),
-        "crypto_events": list(crypto_events or []),
-        "jsbridge_events": list(jsbridge_events or []),
-        "sensitive_api_events": list(sensitive_api_events or []),
-        "antidetect_events": list(antidetect_events or []),
-        "credential_events": list(credential_events or []),
-        "sqlcipher_events": list(sqlcipher_events or []),
+        "crypto_events": _event_rows("crypto_events", crypto_events),
+        "jsbridge_events": _event_rows("jsbridge_events", jsbridge_events),
+        "sensitive_api_events": _event_rows("sensitive_api_events", sensitive_api_events),
+        "antidetect_events": _event_rows("antidetect_events", antidetect_events),
+        "credential_events": _event_rows("credential_events", credential_events),
+        "sqlcipher_events": _event_rows("sqlcipher_events", sqlcipher_events),
         # 第二波：剪贴板链上地址（★ 隐私护栏：只含抽出的地址，绝不含剪贴板全文）。
-        "clipboard_events": list(clipboard_events or []),
+        "clipboard_events": _event_rows("clipboard_events", clipboard_events),
         # 第二波（最后）：无障碍远控（目标银行/支付包名清单 + 远控手势 + 屏幕录制）。
         # ★ launch-only 抓不到，多数需引导式人工动态——多数情况下为空数组，属预期。
-        "remote_control_events": list(remote_control_events or []),
+        "remote_control_events": _event_rows("remote_control_events", remote_control_events),
         "ui_observations": list(ui_observations or []),
     }
     if process_observations is not None:

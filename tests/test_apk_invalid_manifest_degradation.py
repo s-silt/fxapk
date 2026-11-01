@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import struct
 import threading
 import zipfile
@@ -116,6 +117,99 @@ def test_invalid_manifest_degrades_but_keeps_dex_jadx_analysis_available(
     # DEX 观察路径必须真的被走到（get_all_dex 被消费、坏 DEX 单条跳过而非整体压掉），
     # 而不是靠「降级」名义静默短路（codex 复审 P2：测试要锁真实调用链）。
     assert ctx._apk.dex_batches_consumed == 1
+
+
+def test_main_dex_iteration_failure_retains_successful_objects_and_partial_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import androguard.core.apk as androguard_apk
+    import androguard.core.dex as androguard_dex
+
+    class PartialStreamApk:
+        def __init__(self, _path: str) -> None:
+            pass
+
+        def is_valid_APK(self) -> bool:  # noqa: N802
+            return True
+
+        def get_dex_names(self) -> list[str]:
+            return ["classes.dex", "classes2.dex"]
+
+        def get_all_dex(self):
+            yield b"retained-dex"
+            raise ValueError("stream stopped")
+
+    class FakeDex:
+        def __init__(self, data: bytes) -> None:
+            self.data = data
+
+    monkeypatch.setattr(androguard_apk, "APK", PartialStreamApk)
+    monkeypatch.setattr(androguard_dex, "DEX", FakeDex)
+    sample = tmp_path / "partial-main-dex.apk"
+    sample.write_bytes(b"synthetic APK fixture")
+
+    ctx = apk_mod.load_apk(str(sample), AnalysisConfig(online=False))
+
+    assert [dex.data for dex in ctx._dex_objs] == [b"retained-dex"]
+    assert ctx.main_dex_report["requested"] == 2
+    assert ctx.main_dex_report["loaded"] == 1
+    assert ctx.main_dex_report["failed"] == 0
+    assert ctx.main_dex_report["enumeration_failed"] is True
+    assert ctx.main_dex_report["complete"] is False
+
+
+def test_main_dex_parse_failure_keeps_successful_sibling_hashes_and_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import androguard.core.apk as androguard_apk
+    import androguard.core.dex as androguard_dex
+
+    class TwoDexApk:
+        def __init__(self, _path: str) -> None:
+            pass
+
+        def is_valid_APK(self) -> bool:  # noqa: N802
+            return True
+
+        def get_dex_names(self) -> list[str]:
+            return ["classes.dex", "classes2.dex"]
+
+        def get_all_dex(self):
+            yield b"invalid-dex"
+            yield b"valid-dex"
+
+    class FakeDex:
+        def __init__(self, data: bytes) -> None:
+            if data == b"invalid-dex":
+                raise ValueError("fake parse failure")
+            self.data = data
+
+    monkeypatch.setattr(androguard_apk, "APK", TwoDexApk)
+    monkeypatch.setattr(androguard_dex, "DEX", FakeDex)
+    sample = tmp_path / "main-dex-member-failure.apk"
+    sample.write_bytes(b"synthetic APK fixture")
+
+    ctx = apk_mod.load_apk(str(sample), AnalysisConfig(online=False))
+    ledger = ctx.main_dex_report
+
+    assert [dex.data for dex in ctx._dex_objs] == [b"valid-dex"]
+    assert ledger["requested"] == 2
+    assert ledger["loaded"] == 1
+    assert ledger["failed"] == 1
+    assert ledger["enumeration_failed"] is False
+    assert ledger["complete"] is False
+    assert ledger["failure_samples"] == [{
+        "path": "classes.dex",
+        "sha256": hashlib.sha256(b"invalid-dex").hexdigest(),
+        "error_type": "ValueError",
+    }]
+    assert ctx._dex_objs[0]._fxapk_provenance["sample_sha256"] == hashlib.sha256(
+        sample.read_bytes()
+    ).hexdigest()
+    assert ctx._dex_objs[0]._fxapk_provenance["member_path"] == "classes2.dex"
+    assert ctx._dex_objs[0]._fxapk_provenance["member_sha256"] == hashlib.sha256(
+        b"valid-dex"
+    ).hexdigest()
 
 
 def test_dex_aggregate_budget_rejects_before_androguard(tmp_path: Path) -> None:

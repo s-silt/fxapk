@@ -14,9 +14,11 @@ from collections import Counter
 from typing import Any
 
 from apkscan.core.coverage import collect_coverage
+from apkscan.core.admission import evaluate_usage
 from apkscan.core.evidence_scope import (
     project_serialized_closure,
     project_serialized_leads,
+    serialized_lead_case_evidence_refs,
 )
 from apkscan.core.leads import _overseas_target_coverage, _project_overseas_profiles
 from apkscan.core.web_observations import digest_web_observations
@@ -30,6 +32,7 @@ from apkscan.core.models import (
 )
 from apkscan.core.redact import redact_value, scrub_pii
 from apkscan.core.restore import restore_index, restored_sources_for
+from apkscan.report.diagnostics import compact_capture_safety, compact_request_targets
 
 # 排序优先级：建议调证 > 待核 > 无需调证；同档高可信在前；C2 在前。
 _ADVICE_RANK = {"建议调证": 0, "待核": 1, "无需调证": 2}
@@ -123,6 +126,8 @@ def _compact_lead(
         # 供下游筛选/研判分层——勿把仅 is_runtime_seen（含手编 runtime-derived）当「实连/确认 C2」。
         "is_runtime_seen": runtime_seen,
         "is_runtime_contact": runtime_contact,
+        "evidence_admission": lead.get("evidence_admission"),
+        "model_summary_admission": lead.get("model_summary_admission"),
         "where_to_request": where,
         "evidence_to_obtain": evidence,
         "notes": notes,
@@ -569,6 +574,14 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
     # booleans/advice cannot let batch/legacy evidence outrank current-case
     # evidence.  The projection is copy-on-write and leaves report untouched.
     leads = project_serialized_leads(report)
+    raw_leads = report.get("leads")
+    if isinstance(raw_leads, list):
+        valid_raw_leads = [lead for lead in raw_leads if isinstance(lead, dict)]
+        for projected, raw_lead in zip(leads, valid_raw_leads, strict=True):
+            projected["model_summary_admission"] = evaluate_usage(
+                serialized_lead_case_evidence_refs(report, raw_lead),
+                "model_summary",
+            )
     leads_sorted = sorted(leads, key=_lead_sort_key)
     pii_flag = [False]  # 单元素可变标记：任一 lead 自由文本抹掉 PII 即置 True（见 _compact_lead）
     # 人工放行凭据：让「这条是被人放行的」在 digest（AI 的主消费面）上直接可见。
@@ -621,12 +634,13 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
         for key, value in (closure.get("target_selection") or {}).items()
         if value and key in (
             "truncated", "repack_excluded", "inconsistent_excluded",
-            "manually_restored", "source_deferred", "scope_excluded",
+            "manually_restored", "source_deferred", "scope_excluded", "admission_excluded",
         )
     } if isinstance(closure.get("target_selection"), dict) else {}
     # 与 coverage 同口径：没有排除事件就整键不出现（缺失=无事件），空字典占位是噪音。
     if _selection:
         compact_closure["target_selection"] = _selection
+    compact_closure.update(compact_request_targets(closure, redact=redact))
 
     network_attribution = _compact_network_attribution(meta.get("network_attribution"))
     role_candidate_count = (
@@ -654,6 +668,11 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
             "attributed_role_candidates": role_candidate_count,
         },
         "integrity": _integrity(report),  # run 级完整性红旗（reliable=False 时结果可能不可信）
+        "sample_text_policy": {
+            "role": "untrusted-observation",
+            "may_control_commands": False,
+            "may_trigger_retry_install_or_privilege_change": False,
+        },
         # ★证据可见性放在 leads **之前**：消费方（尤其是 AI）必须先知道「哪些输入没看见」，
         #   否则会把一份壳桩样本的空线索列表读成「该样本干净」。见 core/visibility.py。
         "visibility": _compact_visibility(meta.get("visibility")),
@@ -701,8 +720,20 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
     # ★扫描覆盖缺口（core/coverage.py 协议）：哪些分析器没扫全。仅非零项，且**无缺口时整键不出现**
     #   （缺失=无事件）。没有这一段，各 count=0 分不清「样本确实没有」与「这一面根本没扫到」。
     _coverage = collect_coverage(meta)
+    capture = meta.get("web_capture_visibility")
+    if isinstance(capture, dict) and capture:
+        _coverage["web_capture"] = {
+            key: capture.get(key) for key in (
+                "status", "bound_files", "truncated_files", "unloaded_files", "blocked_claims",
+            )
+        }
     if _coverage:
         digest["coverage"] = _coverage
+    parser_execution = meta.get("parser_execution")
+    if isinstance(parser_execution, dict) and parser_execution:
+        digest["parser_execution"] = parser_execution
+    if safety := compact_capture_safety(meta.get("capture_safety_comparison")):
+        digest["capture_safety"] = safety
     # jadx 持久索引状态透出（消费面之一：不透出等于没接）。兼容旧报告：只有 meta
     # 明确带 jadx_index_status 时才输出整段；key 按 hex64 语法校验后才带（绝非路径）。
     if "jadx_index_status" in meta:

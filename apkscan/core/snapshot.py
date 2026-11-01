@@ -9,9 +9,8 @@
 - dex_strings（tuple，4.1MB）+ manifest/components/permissions/certs/native_libs/config/list_files（小）；
 - **文本资源 dict**（.js/.json/.xml/… 共 ~8MB；59.5MB 的大头是图片/字体/.so 等分析器不读的二进制，不收）。
 
-read_file 正确性保证：命中文本 dict 直接返回；未命中（罕见二进制读）→ **惰性重开 APK 兜底**（worker 内
-按 apk_path 建 androguard APK，仅在真发生非文本读时才付这份开销；多数分析器只读文本→永不触发）。
-worker 内的 APK 句柄不 pickle（``__getstate__`` 排除），每 worker 惰性建一次。
+read_file 正确性保证：命中文本 dict 直接返回；未命中（罕见二进制读）按模式惰性读取。遗留模式在
+分析器 worker 内重开 APK；隔离模式则启动受同一策略约束的 parser child。APK 句柄不 pickle。
 
 仅 **android（APK）** 走并行快照；无 apk_path 由 pipeline 回退串行。
 """
@@ -21,6 +20,10 @@ from __future__ import annotations
 import logging
 import zipfile
 from typing import TYPE_CHECKING, Any
+from copy import deepcopy
+from apkscan.core.context import iter_dex_records
+from apkscan.core.file_read import FileReadLedger
+from apkscan.core.observations import DexStringRecord
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +56,7 @@ _MAX_SNAPSHOT_TOTAL_BYTES = 64 * 1024 * 1024
 
 
 class SnapshotContext:
-    """可 pickle 的 AnalysisContext 快照（满足同一协议；read_file 走预读 dict + 惰性 APK 兜底）。"""
+    """可 pickle 的 AnalysisContext 快照；未预读文件按解析策略惰性读取。"""
 
     def __init__(
         self,
@@ -73,9 +76,19 @@ class SnapshotContext:
         native_libs: list[str],
         certificates: list,
         files: dict[str, bytes],
+        records: tuple[DexStringRecord, ...] | None = None,
         dex_available: bool = True,
         apk_validation_ok: bool = True,
         manifest_anomaly: str | None = None,
+        main_dex_report: dict | None = None,
+        extra_dex_report: dict | None = None,
+        dex_decode_report: dict | None = None,
+        sample_sha256: str = "",
+        read_failures: dict[str, str] | None = None,
+        parser_limits: dict | None = None,
+        parser_execution: dict | None = None,
+        declared_sizes: dict[str, int] | None = None,
+        hiddenapi_relaxation: dict | None = None,
     ) -> None:
         # AnalysisContext 协议的 property/属性。
         self.package_name = package_name
@@ -83,6 +96,18 @@ class SnapshotContext:
         self.platform = platform
         self.config = config
         self.apk_path = apk_path
+        self.sample_sha256 = sample_sha256
+        self.parser_limits = deepcopy(parser_limits) if parser_limits is not None else None
+        self.parser_execution = deepcopy(parser_execution or {})
+        self.declared_sizes = (
+            dict(declared_sizes) if declared_sizes is not None else None
+        )
+        self.hiddenapi_relaxation = (
+            deepcopy(hiddenapi_relaxation) if hiddenapi_relaxation is not None else None
+        )
+        self.main_dex_report = deepcopy(main_dex_report or {})
+        self.extra_dex_report = deepcopy(extra_dex_report or {})
+        self.dex_decode_report = deepcopy(dex_decode_report or {})
         # 脱壳 dump 的额外 .dex 文件路径（jadx 增强器在 worker 内读取、一并反编译）。曾漏带：
         # 消费方 `getattr(ctx, "extra_dex_paths", None) or []` 静默退化成空列表，串行生效、
         # 并行失效（加固样本在实际使用路径只反编译出壳桩）。故设为**必填参数**——build_snapshot
@@ -100,21 +125,29 @@ class SnapshotContext:
         # 方法返回的数据。
         self._permissions = permissions
         self._components = components
-        self._dex_strings = dex_strings
+        self._dex_records = records if records is not None else tuple(
+            DexStringRecord(value) for value in dex_strings
+        )
+        self._dex_strings = tuple(record.value for record in self._dex_records)
         self._file_list = file_list
         self._native_libs = native_libs
         self._certificates = certificates
         self._files = files  # 预读文本资源 path→bytes
+        self.file_read_ledger = FileReadLedger(read_failures)
         # worker 内惰性 APK 句柄（不 pickle）：None=未建，False=建过但失败，否则为 APK 实例。
         self._worker_apk: Any = None
-        # worker 内惰性 zip 声明大小表（不 pickle，每 worker 从 apk_path 重建）：None=未建。
-        self._worker_declared_sizes: dict[str, int] | None = None
+        # 遗留模式可在 worker 惰性建表；隔离模式接收 parser child 物化的表。
+        self._worker_declared_sizes: dict[str, int] | None = (
+            dict(declared_sizes) if declared_sizes is not None else None
+        )
 
-    # ---- pickle：排除 worker 惰性态（androguard 句柄不可 pickle；声明大小表每 worker 重建）----
+    # ---- pickle：排除不可 pickle 的 APK 句柄；隔离模式保留已传入的声明大小表 ----
     def __getstate__(self) -> dict:
         state = self.__dict__.copy()
         state["_worker_apk"] = None
-        state["_worker_declared_sizes"] = None
+        state["_worker_declared_sizes"] = (
+            dict(self.declared_sizes) if self.declared_sizes is not None else None
+        )
         return state
 
     # ---- AnalysisContext 协议方法 ----
@@ -127,6 +160,9 @@ class SnapshotContext:
     def dex_strings(self):
         return iter(self._dex_strings)
 
+    def dex_string_records(self):
+        return iter(self._dex_records)
+
     def list_files(self) -> list[str]:
         return self._file_list
 
@@ -138,8 +174,15 @@ class SnapshotContext:
 
     def read_file(self, path: str) -> bytes | None:
         """命中预读文本 dict 直接返回；未命中惰性重开 APK 兜底（保证永远返回正确字节）。绝不抛。"""
+        self.file_read_ledger.request(path)
         if path in self._files:
-            return self._files[path]
+            data = self._files[path]
+            if data is None:
+                self.file_read_ledger.record_failure(
+                    path,
+                    self.file_read_ledger.failure_for(path) or "unavailable_context",
+                )
+            return data
         return self._lazy_read(path)
 
     def declared_size(self, path: str) -> int | None:
@@ -157,6 +200,26 @@ class SnapshotContext:
             return None
 
     def _lazy_read(self, path: str) -> bytes | None:
+        if self.parser_limits is not None:
+            from apkscan.core.parser_limits import ParserLimits
+            from apkscan.core.parser_worker import run_parser_read
+
+            try:
+                data, reason = run_parser_read(
+                    apk_path=self.apk_path,
+                    expected_sha256=self.sample_sha256,
+                    file_path=path,
+                    limits=ParserLimits(**self.parser_limits),
+                    declared_sizes=self.declared_sizes or {},
+                )
+            except Exception:  # noqa: BLE001 — isolated read failures become explicit ledger gaps
+                logger.exception("snapshot isolated read worker failed: %s", path)
+                data, reason = None, "parser_worker_failed"
+            if data is None:
+                self.file_read_ledger.record_failure(
+                    path, reason or "unavailable_context"
+                )
+            return data
         # zip 炸弹前置拦截（与串行 ApkContext.read_file 同口径）：声明解压后大小超上限即跳过、不解压。
         # 并行 worker 惰性读 .so（native_obfuscation / re_toolkit 的 .so 扫描）走本路，必须复刻此闸——
         # 否则 zip 炸弹 .so（小压缩、巨解压）会在 worker 内被 androguard get_file 全量解压致 OOM。
@@ -167,32 +230,42 @@ class SnapshotContext:
                 declared,
                 path,
             )
+            self.file_read_ledger.record_failure(path, "declared_limit")
             return None
         apk = self._ensure_worker_apk()
         if apk is None:
+            self.file_read_ledger.record_failure(path, "unavailable_context")
             return None
         from apkscan.core.apk import ZipEntryTooLargeError
 
         try:
-            return apk.get_file(path)
+            data = apk.get_file(path)
+            if data is None:
+                self.file_read_ledger.record_failure(path, "unavailable_context")
+            return data
         except ZipEntryTooLargeError as exc:
             logger.warning(
                 "snapshot 惰性 read_file 跳过（实际解压产出超 %d 字节上限，疑 zip 炸弹）：%s",
                 exc.limit,
                 path,
             )
+            self.file_read_ledger.record_failure(path, "actual_decompression_limit")
             return None
         except Exception:  # noqa: BLE001 — 缺失/读取失败按 None（与 ApkContext.read_file 一致）
             logger.debug("snapshot 惰性 read_file 未命中：%s", path, exc_info=True)
+            self.file_read_ledger.record_failure(path, "read_failure")
             return None
 
     def _ensure_declared_sizes(self) -> dict[str, int]:
-        """worker 内惰性建 zip 声明大小表（中央目录元数据、不解压，代价小），缓存。
+        """按模式取得 zip 声明大小表并缓存；隔离模式只用父进程传入的表。
 
         与 ApkContext._declared_sizes 同口径：单独对 apk_path 开只读 zip 句柄读 infolist；打不开 /
         无 apk_path → 空 dict（查不到=「无法判断」，_lazy_read 照原逻辑放行，不误伤）。绝不抛。
         """
         if self._worker_declared_sizes is not None:
+            return self._worker_declared_sizes
+        if self.parser_limits is not None:
+            self._worker_declared_sizes = dict(self.declared_sizes or {})
             return self._worker_declared_sizes
         sizes: dict[str, int] = {}
         if self.apk_path:
@@ -247,7 +320,10 @@ class SnapshotContext:
 
 def build_snapshot(ctx: Any) -> SnapshotContext:
     """把真实 ApkContext 物化成可 pickle 的 SnapshotContext（仅 android/APK 用；预读文本资源）。绝不抛。"""
+    if isinstance(ctx, SnapshotContext):
+        return ctx
     files: dict[str, bytes] = {}
+    ledger = getattr(ctx, "file_read_ledger", None)
     file_list: list[str] = []
     try:
         # 只枚举一次文件表并复用：ApkContext.list_files() 未缓存，每次重走 androguard get_files()，
@@ -264,11 +340,28 @@ def build_snapshot(ctx: Any) -> SnapshotContext:
         low = path.lower()
         if low.endswith(".dex") or not low.endswith(_TEXT_SUFFIXES):
             continue
+        if total >= _MAX_SNAPSHOT_TOTAL_BYTES:
+            break
+        size_getter = getattr(ctx, "declared_size", None)
+        if callable(size_getter):
+            try:
+                declared = size_getter(path)
+            except Exception:
+                declared = None
+            if isinstance(declared, int) and declared > min(
+                _MAX_PREREAD_BYTES, _MAX_SNAPSHOT_TOTAL_BYTES - total,
+            ):
+                continue
         try:
             data = ctx.read_file(path)
         except Exception:  # noqa: BLE001 — 单文件预读失败跳过，worker 内惰性兜底仍可读
+            if isinstance(ledger, FileReadLedger):
+                ledger.record_failure(path, "read_failure")
             continue
         if data is None:
+            if isinstance(ledger, FileReadLedger):
+                if ledger.failure_for(path) is None:
+                    ledger.record_failure(path, "unavailable_context")
             continue
         if len(data) > _MAX_PREREAD_BYTES:
             # 后缀属文本白名单但内容超大（如伪装成 *.key/*.map 的二进制）：不收进快照，避免随
@@ -285,6 +378,7 @@ def build_snapshot(ctx: Any) -> SnapshotContext:
         files[path] = data
         total += len(data)
 
+    records = tuple(iter_dex_records(ctx))
     return SnapshotContext(
         package_name=getattr(ctx, "package_name", "") or "",
         manifest_xml=getattr(ctx, "manifest_xml", "") or "",
@@ -296,14 +390,26 @@ def build_snapshot(ctx: Any) -> SnapshotContext:
         jadx_baseline_index=getattr(ctx, "jadx_baseline_index", None),
         permissions=list(ctx.permissions()),
         components=ctx.components(),
-        dex_strings=tuple(ctx.dex_strings()),
+        dex_strings=tuple(record.value for record in records),
+        records=records,
         file_list=file_list,
         native_libs=list(ctx.native_libs()),
         certificates=list(ctx.certificates()),
         files=files,
+        read_failures=(
+            ledger.failure_reasons if isinstance(ledger, FileReadLedger) else None
+        ),
         dex_available=getattr(ctx, "dex_available", True),
         apk_validation_ok=getattr(ctx, "apk_validation_ok", True),
         manifest_anomaly=getattr(ctx, "manifest_anomaly", None),
+        main_dex_report=getattr(ctx, "main_dex_report", None),
+        extra_dex_report=getattr(ctx, "extra_dex_report", None),
+        dex_decode_report=getattr(ctx, "dex_decode_report", None),
+        sample_sha256=getattr(ctx, "sample_sha256", ""),
+        parser_limits=getattr(ctx, "parser_limits", None),
+        parser_execution=getattr(ctx, "parser_execution", None),
+        declared_sizes=getattr(ctx, "declared_sizes", None),
+        hiddenapi_relaxation=getattr(ctx, "hiddenapi_relaxation", None),
     )
 
 

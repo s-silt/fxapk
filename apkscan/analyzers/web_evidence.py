@@ -209,6 +209,7 @@ def _iter_text(
             "body_decode_error", "body_text_decode_error", "content_encoding_not_decoded",
         ))
         for body in bodies:
+            result.evidence_inputs[body.location] = body.provenance()
             if not body.location.lower().endswith(suffixes):
                 continue
             if len(out) >= MAX_FILES:
@@ -225,7 +226,18 @@ def _iter_text(
     return out
 
 
-def _add_endpoint(collector: EndpointCollector, raw: str, path: str, snippet: str) -> None:
+def _web_ref(path: str, snippet: str, offset: int | None) -> Evidence:
+    return Evidence(
+        source=EVIDENCE_SOURCE, location=path, snippet=truncate(snippet, SNIPPET_MAX),
+        provenance={"extractor": "web-text-v1", "member_path": path},
+        locator=({"char_offset": offset, "offset_unit": "decoded-text-codepoint"}
+                 if offset is not None else {}),
+    )
+
+
+def _add_endpoint(
+    collector: EndpointCollector, raw: str, path: str, snippet: str, offset: int | None = None,
+) -> None:
     """把一个 URL / 域名收进端点表（形态校验后），标明文/私网 + 来源可信度档。非法形态静默丢。
 
     ★来源档（tier）必须在这里打：网页证据里混着第三方 vendor bundle，它们的常量
@@ -243,7 +255,7 @@ def _add_endpoint(collector: EndpointCollector, raw: str, path: str, snippet: st
     if not value or len(value) > 2048:
         return
     low = value.lower()
-    evidence = Evidence(source=EVIDENCE_SOURCE, location=path, snippet=truncate(snippet, SNIPPET_MAX))
+    evidence = _web_ref(path, snippet, offset)
     tier = infra.domain_source_tier(path, 0, context="web")
     if low.startswith(("http://", "https://", "ws://", "wss://")):
         host = host_from_url(value)
@@ -349,6 +361,7 @@ class _ConfigHit:
     value: str
     path: str
     snippet: str
+    offset: int = 0
 
 
 class WebInlineConfigAnalyzer(BaseAnalyzer):
@@ -376,17 +389,17 @@ class WebInlineConfigAnalyzer(BaseAnalyzer):
                     body = block.group(1)
                     if not body.strip():
                         continue
-                    hits.extend(self._scan_block(body, path))
+                    hits.extend(self._scan_block(body, path, block.start(1)))
             except Exception:
                 logger.exception("[%s] 扫描内联脚本失败：%s", self.name, path)
 
         seen: set[tuple[str, str]] = set()
         for hit in hits[:MAX_ITEMS]:
+            _add_endpoint(collector, hit.value, hit.path, hit.snippet, hit.offset)
             key = (hit.key, hit.value)
             if key in seen:
                 continue
             seen.add(key)
-            _add_endpoint(collector, hit.value, hit.path, hit.snippet)
             result.leads.append(self._lead(hit))
 
         result.endpoints = collector.endpoints({"url": 0, "domain": 1, "ip": 2})
@@ -395,7 +408,7 @@ class WebInlineConfigAnalyzer(BaseAnalyzer):
         logger.info("[%s] 内联配置命中 %d 条、端点 %d 个", self.name, len(seen), len(result.endpoints))
         return result
 
-    def _scan_block(self, body: str, path: str) -> list[_ConfigHit]:
+    def _scan_block(self, body: str, path: str, base_offset: int = 0) -> list[_ConfigHit]:
         out: list[_ConfigHit] = []
         for regex in (_WINDOW_ASSIGN_RE, _VAR_ASSIGN_RE, _JSON_ASSIGN_RE):
             for m in regex.finditer(body):
@@ -409,6 +422,7 @@ class WebInlineConfigAnalyzer(BaseAnalyzer):
                         value=value,
                         path=path,
                         snippet=snippet_around(body, m, radius=60),
+                        offset=base_offset + m.start(),
                     )
                 )
         return out
@@ -436,11 +450,7 @@ class WebInlineConfigAnalyzer(BaseAnalyzer):
             ),
             confidence=Confidence.MEDIUM,
             source_refs=[
-                Evidence(
-                    source=EVIDENCE_SOURCE,
-                    location=hit.path,
-                    snippet=truncate(hit.snippet, SNIPPET_MAX),
-                )
+                _web_ref(hit.path, hit.snippet, hit.offset)
             ],
         )
 
@@ -514,7 +524,7 @@ class WebRedirectChainAnalyzer(BaseAnalyzer):
 
         grouped: dict[str, list[_Hop]] = {}
         for hop in hops:
-            _add_endpoint(collector, hop.target, hop.path, hop.snippet)
+            _add_endpoint(collector, hop.target, hop.path, hop.snippet, hop.order)
             grouped.setdefault(hop.path, []).append(hop)
 
         # 不把互不相关的证据文件首尾相接成一条“实测链”。静态文件之间没有因果边；
@@ -607,11 +617,7 @@ class WebRedirectChainAnalyzer(BaseAnalyzer):
                 "如需确认真实走向，转运行时观测（按不同 UA/平台各跑一次）。"
             ),
             evidences=[
-                Evidence(
-                    source=EVIDENCE_SOURCE,
-                    location=hop.path,
-                    snippet=truncate(hop.snippet, SNIPPET_MAX),
-                )
+                _web_ref(hop.path, hop.snippet, hop.order)
                 for hop in hops[:20]
             ],
         )
@@ -646,6 +652,7 @@ class _Recipe:
     context_word: str
     path: str
     snippet: str
+    offset: int = 0
 
 
 class WebRequestRecipeAnalyzer(BaseAnalyzer):
@@ -715,6 +722,7 @@ class WebRequestRecipeAnalyzer(BaseAnalyzer):
                     context_word=word,
                     path=path,
                     snippet=snippet_around(text, m, radius=60),
+                    offset=m.start(),
                 )
             )
         return out
@@ -761,11 +769,7 @@ class WebRequestRecipeAnalyzer(BaseAnalyzer):
                 "以运行时实际请求为准核对本判据。"
             ),
             evidences=[
-                Evidence(
-                    source=EVIDENCE_SOURCE,
-                    location=r.path,
-                    snippet=truncate(r.snippet, SNIPPET_MAX),
-                )
+                _web_ref(r.path, r.snippet, r.offset)
                 for r in recipes[:20]
             ],
         )

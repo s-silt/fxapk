@@ -78,6 +78,7 @@ from apkscan.core.enrichment import (
     _provider_configured,
     _run_enrichment,  # noqa: F401 - compatibility re-export
     enrich_selected_targets,
+    mark_admission_excluded,
     mark_enrichment_skipped,
     mark_enrichment_unexecuted,
 )
@@ -107,11 +108,16 @@ META_WRITE_CATEGORIES = {
     'enrichment_plan': 'coverage',
     'enrichment_skipped_offline': 'coverage',
     'extra_dex_visibility': 'coverage',
+    'file_read_visibility': 'coverage',
+    'web_capture_visibility': 'coverage',
+    'main_dex_visibility': 'coverage',
+    'dex_decode_visibility': 'coverage',
     'jadx_judgment_ledger': 'coverage',
     'missing_analyzers': 'coverage',
     'mode': 'signal',
     'network_attribution': 'signal',
     'overseas_targets': 'signal',
+    'parser_execution': 'coverage',
     'remote_config_archived': 'record',
     'remote_config_artifacts': 'signal',
     'remote_config_fetch_skipped': 'coverage',
@@ -312,6 +318,38 @@ def _init_pipeline_state(ctx: "AnalysisContext", config: AnalysisConfig) -> _Pip
     )
 
 
+def _merge_file_read_gaps(meta: dict, raw_gaps: object) -> None:
+    if not isinstance(raw_gaps, list):
+        return
+    from apkscan.core.file_read import FILE_READ_FAILURE_REASONS
+
+    merged = {
+        (item["path"], item["source"], item["reason"])
+        for item in meta.get("file_read_visibility", [])
+        if isinstance(item, dict)
+        and isinstance(item.get("path"), str)
+        and isinstance(item.get("source"), str)
+        and isinstance(item.get("reason"), str)
+        and item["reason"] in FILE_READ_FAILURE_REASONS
+    } if isinstance(meta.get("file_read_visibility"), list) else set()
+    for item in raw_gaps:
+        if not isinstance(item, dict):
+            continue
+        path, source, reason = item.get("path"), item.get("source"), item.get("reason")
+        if (
+            isinstance(path, str)
+            and isinstance(source, str)
+            and isinstance(reason, str)
+            and reason in FILE_READ_FAILURE_REASONS
+        ):
+            merged.add((path, source, reason))
+    if merged:
+        meta["file_read_visibility"] = [
+            {"path": path, "source": source, "reason": reason}
+            for path, source, reason in sorted(merged)
+        ]
+
+
 def _stage_run_analyzers(state: _PipelineState) -> None:
     """跑分析器（android 多核走进程池并行，否则串行；按 requires 门控）→ **按发现顺序聚合**
     endpoints/leads/findings/meta + 记 status + finding 溯源盖章 → 端点按 value 去重。
@@ -356,6 +394,7 @@ def _stage_run_analyzers(state: _PipelineState) -> None:
             continue
 
         result, error = results_map.get(name, (None, "分析器未返回结果"))
+        _merge_file_read_gaps(meta, getattr(result, "input_gaps", None))
         if error is not None:
             logger.warning("分析器执行异常：%s（%s）", name, error)
             state.analyzer_status.append({"name": name, "status": "error", "reason": error})
@@ -367,6 +406,10 @@ def _stage_run_analyzers(state: _PipelineState) -> None:
             )
             continue
 
+        if getattr(ctx, "platform", "android") == "web":
+            from apkscan.core.web_handoff import bind_result
+
+            bind_result(ctx, result)
         state.endpoints.extend(result.endpoints)
         state.leads.extend(result.leads)
         # 溯源：集中给每条 finding 盖上产出它的分析器名（此处 analyzer 归属仍在；一旦 extend 进
@@ -428,6 +471,20 @@ def _stage_degradation_flags(state: _PipelineState) -> None:
     """把上下文的降级标志显式带入 meta，避免"未采集"被静默当成"采集为空"。"""
     ctx = state.ctx
     meta = state.meta
+    if state.platform == "web":
+        from apkscan.core.web_handoff import coverage_summary
+
+        if capture := coverage_summary(ctx):
+            meta["web_capture_visibility"] = capture
+    main_dex_report = getattr(ctx, "main_dex_report", None)
+    if isinstance(main_dex_report, dict) and main_dex_report:
+        meta["main_dex_visibility"] = main_dex_report
+    dex_decode_report = getattr(ctx, "dex_decode_report", None)
+    if isinstance(dex_decode_report, dict) and dex_decode_report:
+        meta["dex_decode_visibility"] = dex_decode_report
+    parser_execution = getattr(ctx, "parser_execution", None)
+    if isinstance(parser_execution, dict) and parser_execution:
+        meta["parser_execution"] = parser_execution
     if state.platform == "android" and getattr(ctx, "dex_available", True) is False:
         meta["dex_parse_failed"] = True
         logger.warning("DEX 不可用（加固/无 dex），静态端点/SDK/支付线索严重不完整")
@@ -448,7 +505,11 @@ def _stage_degradation_flags(state: _PipelineState) -> None:
 
         # ★只报**本样本**放行的取值：用事件游标切片，既隔离前一个样本，也不会漏掉后一个
         #   样本再次出现的相同 flag。基线在 load_apk 时钉下；手搓 ctx 缺属性则退化为全量。
-        relax = hiddenapi_relax_report(getattr(ctx, "hiddenapi_flags_baseline", None))
+        captured_relax = getattr(ctx, "hiddenapi_relaxation", None)
+        relax = (
+            captured_relax if isinstance(captured_relax, dict)
+            else hiddenapi_relax_report(getattr(ctx, "hiddenapi_flags_baseline", None))
+        )
         if relax.get("unknown_flags"):
             block["hiddenapi_flags_relaxed"] = relax
         meta["extra_dex_visibility"] = block
@@ -610,6 +671,21 @@ def _stage_enrich(state: _PipelineState) -> None:
         target_limit != requested_target_limit
         or static_ip_limit != requested_static_ip_limit
     )
+    targets = _enrichment_targets(state.endpoints)
+    admission_excluded = sum(
+        1
+        for endpoint in state.endpoints
+        if endpoint.kind in ("domain", "ip")
+        and not (
+            isinstance(endpoint.enrichment.get("evidence_admission"), dict)
+            and isinstance(
+                endpoint.enrichment["evidence_admission"].get("passive_enrichment"),
+                dict,
+            )
+            and endpoint.enrichment["evidence_admission"]["passive_enrichment"].get("state")
+            == "allowed"
+        )
+    )
     if not config.online:
         meta["enrichment_skipped_offline"] = True
         meta["enrichment_plan"] = {
@@ -620,14 +696,18 @@ def _stage_enrich(state: _PipelineState) -> None:
             "target_limit": target_limit,
             "static_ip_limit": static_ip_limit,
             "limit_clamped": limit_clamped,
-            "candidate_total": 0,
+            "candidate_total": len(targets),
+            "candidate_by_kind": {
+                kind: sum(endpoint.kind == kind for endpoint in targets)
+                for kind in ("domain", "ip")
+            },
+            "admission_excluded": admission_excluded,
             "estimated_provider_invocations": {},
         }
         meta["enrichment_execution"] = {"status": "not_run", "reason": "offline"}
         logger.info("offline 模式：跳过全部富化器（归属信息未查询，非查无结果）")
         return
 
-    targets = _enrichment_targets(state.endpoints)
     all_discovered = list(discover_enrichers())
     discovered = [
         enricher
@@ -637,6 +717,21 @@ def _stage_enrich(state: _PipelineState) -> None:
     case_close_only = [
         enricher for enricher in all_discovered if getattr(enricher, "case_close_only", False)
     ]
+    excluded_endpoints = [
+        endpoint
+        for endpoint in state.endpoints
+        if endpoint.kind in ("domain", "ip")
+        and not (
+            isinstance(endpoint.enrichment.get("evidence_admission"), dict)
+            and isinstance(
+                endpoint.enrichment["evidence_admission"].get("passive_enrichment"),
+                dict,
+            )
+            and endpoint.enrichment["evidence_admission"]["passive_enrichment"].get("state")
+            == "allowed"
+        )
+    ]
+    mark_admission_excluded(excluded_endpoints, discovered)
     mode = getattr(config, "mode", ANALYSIS_MODE_PASSIVE)
     static_ip_targets = [
         endpoint
@@ -716,6 +811,7 @@ def _stage_enrich(state: _PipelineState) -> None:
         "candidate_total": len(targets),
         "candidate_by_kind": candidate_by_kind,
         "static_ip_candidate_total": len(static_ip_targets),
+        "admission_excluded": admission_excluded,
         "low_tier_static_excluded": len(low_tier_static_endpoints),
         "requested_target_limit": requested_target_limit,
         "requested_static_ip_limit": requested_static_ip_limit,

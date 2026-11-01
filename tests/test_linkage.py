@@ -42,6 +42,7 @@ def _entry(
     record_state: str | None = None,
     report_bytes_sha256: object = None,
     repack_verdict: object = "unknown",
+    relation_index_version: str | None = "evidence-admission/1",
 ) -> dict:
     entry = {
         "sample_sha256": _sample(sample),
@@ -62,9 +63,41 @@ def _entry(
     }
     if record_state is not None:
         entry["record_state"] = record_state
+    if relation_index_version is not None:
+        entry["relation_index_version"] = relation_index_version
+        entry["relation_status"] = "qualified_candidates"
     if report_bytes_sha256 is not None:
         entry["report_bytes_sha256"] = report_bytes_sha256
     return entry
+
+
+def test_unversioned_key_iocs_are_not_linkage_evidence() -> None:
+    shared = "https://api.example/shared"
+    legacy = _entry("legacy", iocs=[shared], relation_index_version=None)
+    current = _entry("current", iocs=[shared])
+
+    result = rank_link_candidates([legacy, current], limit=None)
+
+    assert not any(
+        evidence.get("family") == "ioc"
+        for candidate in result["candidates"]
+        for evidence in candidate["supporting_evidence"]
+    )
+
+
+def test_unversioned_config_url_and_sha_are_not_linkage_evidence() -> None:
+    config = {"url": "https://shared.example.test/config.dat", "sha256": "a" * 64}
+    legacy = _entry("legacy", configs=[dict(config)], relation_index_version=None)
+    current = _entry("current", configs=[dict(config)])
+
+    result = rank_link_candidates([legacy, current], limit=None)
+
+    assert legacy["remote_config_objects"] == [config]
+    assert not any(
+        evidence.get("family") == "remote_config"
+        for candidate in result["candidates"]
+        for evidence in candidate["supporting_evidence"]
+    )
 
 
 def _native(sha: str, name: str = "libbusiness.so") -> dict:

@@ -1518,7 +1518,17 @@ def test_p1b_merge_upgrades_to_high_on_two_source_corroboration(tmp_path) -> Non
     seed = {
         "category": "IP", "value": val,
         "advice": infra.ADVICE_INVESTIGATE, "confidence": Confidence.MEDIUM.value,
-        "where_to_request": "x", "evidences": [],
+        "where_to_request": "x", "source_refs": [{
+            "source": "dex",
+            "location": "classes.dex",
+            "snippet": "synthetic static endpoint reference",
+            "scope": "case_evidence",
+            "provenance": {},
+            "locator": {},
+            "structure_status": "parsed",
+            "reference_status": "referenced",
+            "reachability": "reachable",
+        }],
     }
     path = _seed_report(tmp_path, seed)
     added = probe_ingest.merge_into_report_json(

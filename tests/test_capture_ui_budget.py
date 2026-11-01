@@ -73,6 +73,7 @@ def test_cold_start_connections_are_sampled_before_frida_resume(monkeypatch, tmp
     _prepare(monkeypatch)
     state = {"active": False}
     observed = []
+    subprocess_observed = []
 
     class Sampler:
         def __init__(self, *_args, **_kwargs):
@@ -86,13 +87,13 @@ def test_cold_start_connections_are_sampled_before_frida_resume(monkeypatch, tmp
             return None
 
     def spawn(*_args, **_kwargs):
+        observed.append(state["active"])
         if fallback:
             return None, None
-        observed.append(state["active"])
         return object(), object()
 
     def subprocess_spawn(*_args, **_kwargs):
-        observed.append(state["active"])
+        subprocess_observed.append(state["active"])
         return None
 
     monkeypatch.setattr(capture, "_SocketSampler", Sampler)
@@ -104,6 +105,7 @@ def test_cold_start_connections_are_sampled_before_frida_resume(monkeypatch, tmp
         "com.example.synthetic", tmp_path, 1, "device-1", mitm=False, floor=False, frida=True,
     )
     assert observed == [True]
+    assert subprocess_observed == []
     assert state["active"] is False
 
 

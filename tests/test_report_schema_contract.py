@@ -57,13 +57,20 @@ _LEAD_KEYS_1_2 = {
     "where_to_request",
 }
 
-_EVIDENCE_KEYS_1_2 = {
+_EVIDENCE_KEYS_1_3 = {
     "evidence_id",
+    "occurrence_id",
     "location",
     "observed_at",
     "scope",
     "snippet",
     "source",
+    "provenance",
+    "locator",
+    "structure_status",
+    "reference_status",
+    "reachability",
+    "suspicions",
 }
 
 
@@ -105,7 +112,7 @@ def test_evidence_keys_are_frozen_at_schema_1_2() -> None:
     )
     payload = report_json.to_dict(_empty_report([lead]))
 
-    assert set(payload["leads"][0]["source_refs"][0]) == _EVIDENCE_KEYS_1_2, (
+    assert set(payload["leads"][0]["source_refs"][0]) == _EVIDENCE_KEYS_1_3, (
         "Evidence 序列化字段集合变了。请把 REPORT_SCHEMA_VERSION bump 到 1.3、"
         "更新本测试的集合、并写进 CHANGELOG。"
     )
@@ -115,4 +122,4 @@ def test_schema_version_literal_matches_the_frozen_key_sets() -> None:
     # 写死字面：与上面两个集合成对。任何一边先动，这里就是提醒另一边也要动的锚点。
     payload = report_json.to_dict(_empty_report())
 
-    assert payload["schema_version"] == "1.2"
+    assert payload["schema_version"] == "1.3"

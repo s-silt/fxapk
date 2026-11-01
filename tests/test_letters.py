@@ -46,12 +46,24 @@ def _payment_lead() -> dict:
                 "snippet": "...",
                 "evidence_id": "ev-pay-0001",
                 "scope": "case_evidence",
+                "provenance": {"extractor": "fixture", "member_path": "strings.xml",
+                               "member_sha256": "a" * 64},
+                "locator": {"char_offset": 2, "char_offset_unit": "decoded-text-codepoint"},
+                "structure_status": "parsed",
+                "reference_status": "referenced",
+                "reachability": "reachable",
             },
             {
                 "source": "dex",
                 "location": "com/x/Pay.java",
                 "evidence_id": "ev-pay-0002",
                 "scope": "case_evidence",
+                "provenance": {"extractor": "fixture", "member_path": "classes.dex",
+                               "member_sha256": "b" * 64},
+                "locator": {"byte_offset": 2, "offset_unit": "byte"},
+                "structure_status": "parsed",
+                "reference_status": "referenced",
+                "reachability": "reachable",
             },
         ],
     }
@@ -545,7 +557,17 @@ def _lead_for(value: str) -> dict:
         "category": "DOMAIN", "value": value, "subject": "某科技有限公司",
         "where_to_request": "域名注册商 / 云厂商", "advice": "建议调证",
         "evidence_to_obtain": ["注册人实名", "租户日志"],
-        "source_refs": [{"evidence_id": "E1", "scope": "case_evidence"}],
+        "source_refs": [{
+            "evidence_id": "E1",
+            "source": "runtime-pcap",
+            "location": "capture.pcap",
+            "scope": "case_evidence",
+            "provenance": {"member_path": "capture.pcap", "member_sha256": "c" * 64},
+            "locator": {"packet_index": 1},
+            "structure_status": "parsed",
+            "reference_status": "referenced",
+            "reachability": "reachable",
+        }],
     }
 
 
@@ -686,7 +708,12 @@ def _ip_lead(value: str) -> dict:
         "category": "IP", "value": value, "subject": "某科技有限公司",
         "where_to_request": "云服务商", "advice": "建议调证",
         "evidence_to_obtain": ["租户实名", "开通与登录日志"],
-        "source_refs": [{"evidence_id": "E1", "scope": "case_evidence"}],
+        "source_refs": [{
+            "evidence_id": "E1",
+            "source": "runtime-pcap",
+            "location": "capture.pcap",
+            "scope": "case_evidence",
+        }],
     }
 
 

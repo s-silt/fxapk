@@ -13,6 +13,14 @@
 
 Command `fxapk` (alias `apkscan`), PyPI package `fxapk`. For people and AI assistants running the source or the Python package directly; no exe or GUI is provided. See [CHANGELOG.md](CHANGELOG.md) for changes.
 
+Parser limits are opt-in through `FXAPK_PARSER_TIMEOUT_SEC` and `FXAPK_PARSER_MEMORY_MB`;
+`FXAPK_PARSER_OUTPUT_MB` optionally controls the IPC output cap (64 MiB by default).
+Only an unconfigured parser uses the legacy in-process path (`not_enforced`). Invalid
+configuration, unsupported enforcement or worker failure never fall back to unrestricted parsing.
+Limits apply per operation, not to total analysis or as a native-code sandbox. Linux uses
+address-space limits, not RSS measurement; Windows enforcement needs Windows validation.
+See [USAGE.en.md](USAGE.en.md) for probe safety receipts and service-provider request candidates.
+
 | Core capability | Description |
 | --- | --- |
 | **Static extraction** | Parses configuration, endpoints, components and packer signals in the APK; marks gaps explicitly when a capability is missing |

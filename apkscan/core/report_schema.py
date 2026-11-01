@@ -18,7 +18,7 @@ META_WRITE_CATEGORIES = {
 }
 META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
 
-SUPPORTED_REPORT_SCHEMAS: tuple[str, ...] = ("1.0", "1.1", REPORT_SCHEMA_VERSION)
+SUPPORTED_REPORT_SCHEMAS: tuple[str, ...] = ("1.0", "1.1", "1.2", REPORT_SCHEMA_VERSION)
 
 
 class UnsupportedReportSchema(ValueError):

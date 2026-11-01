@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import importlib.resources
+from copy import deepcopy
+from dataclasses import replace
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
@@ -442,6 +444,44 @@ def render_to_string(report: Report) -> str:
 
 def _render_template(template: Any, report: Report) -> str:
     """用已加载的模板对象渲染（提出来便于在 as_file 作用域内调用）。"""
+    from apkscan.core.admission import admitted_refs
+    from apkscan.core.evidence_scope import (
+        project_serialized_closure,
+        serialized_lead_case_evidence_refs,
+    )
+    from apkscan.core.leads import quarantine_reference_only_leads
+    from apkscan.core.report_io import _evidence_from_dict
+    from apkscan.report import json as report_json
+
+    report = replace(report, leads=deepcopy(report.leads))
+    quarantine_reference_only_leads(report.leads, report.endpoints)
+    serialized_projection: dict[str, Any] = {
+        "leads": [
+            {
+                "category": lead.raw_category or lead.category.value,
+                "value": lead.value,
+                "source_refs": [report_json._to_jsonable(ref) for ref in lead.source_refs],
+            }
+            for lead in report.leads
+        ],
+        "endpoints": [
+            {
+                "kind": endpoint.kind,
+                "value": endpoint.value,
+                "evidences": [
+                    report_json._to_jsonable(ref) for ref in endpoint.evidences
+                ],
+            }
+            for endpoint in report.endpoints
+        ],
+    }
+    for lead, serialized_lead in zip(
+        report.leads, serialized_projection["leads"], strict=True
+    ):
+        refs = serialized_lead_case_evidence_refs(serialized_projection, serialized_lead)
+        lead.source_refs = [
+            _evidence_from_dict(ref) for ref in admitted_refs(refs, "lead_priority")
+        ]
     lead_groups = group_leads_by_category(report.leads)
     endpoints = split_endpoints(report.endpoints)
     enrichment_by_endpoint = {ep.value: _endpoint_enrichment(ep) for ep in report.endpoints}
@@ -470,7 +510,10 @@ def _render_template(template: Any, report: Report) -> str:
     from apkscan.core.dex_query import project_dex_handoff, project_dex_query
     from apkscan.core.runtime_diagnostics import project_runtime_diagnostics
 
-    meta_map = report.meta if isinstance(report.meta, dict) else {}
+    meta_map: dict[str, Any] = dict(report.meta) if isinstance(report.meta, dict) else {}
+    if "closure" in meta_map:
+        serialized_projection["meta"] = {"closure": meta_map["closure"]}
+        meta_map["closure"] = project_serialized_closure(serialized_projection)
     dex_query_view = project_dex_query(meta_map)
     dex_query_handoff = project_dex_handoff(meta_map)
     runtime_diagnostics_view = project_runtime_diagnostics(meta_map)
@@ -497,7 +540,7 @@ def _render_template(template: Any, report: Report) -> str:
         endpoints=endpoints,
         endpoint_total=len(report.endpoints),
         enrichment_by_endpoint=enrichment_by_endpoint,
-        meta=report.meta or {},
+        meta=meta_map,
         overseas_targets=overseas_targets,
         # overseas_targets 只是 Shodan/CT 命中画像；分母须另从 endpoint 路由面计算，
         # 否则 ASN-only 候选会在 HTML 里消失，「0 条画像」还会被误读成「0 个候选」。

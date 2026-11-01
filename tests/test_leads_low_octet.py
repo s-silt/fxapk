@@ -34,7 +34,17 @@ def _ip_ep(value: str, asn: dict | None = None) -> Endpoint:
     ep = Endpoint(
         kind="ip",
         value=value,
-        evidences=[Evidence(source="strings", location="classes.dex", snippet=value)],
+        evidences=[Evidence(
+            source="strings",
+            location="classes.dex",
+            snippet=value,
+            provenance={"extractor": "synthetic", "member_path": "classes.dex",
+                        "member_sha256": "a" * 64},
+            locator={"byte_offset": 1, "offset_unit": "byte"},
+            structure_status="parsed",
+            reference_status="referenced",
+            reachability="reachable",
+        )],
     )
     if asn is not None:
         ep.enrichment["asn"] = asn

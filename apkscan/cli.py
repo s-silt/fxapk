@@ -9,6 +9,7 @@ report.html / report.json 由其它 agent 实现；本文件惰性导入它们�
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Mapping
 from pathlib import Path
@@ -463,6 +464,25 @@ def analyze(
                 jadx_baseline_index=jadx_baseline_index,
             )
         except ApkParseError as exc:
+            if exc.parser_receipt is not None:
+                sidecar = Path(out) / f"{apk.stem}.parser-failure.json"
+                from apkscan.core.atomic import atomic_write_text
+
+                failure = {
+                    "status": "failed",
+                    "blocked_claims": exc.parser_receipt.get(
+                        "blocked_claims", ["parser_derived_observations"]
+                    ),
+                    "reason": exc.parser_receipt.get("reason", "parser_worker_failed"),
+                    "parser_execution": exc.parser_receipt,
+                }
+                atomic_write_text(
+                    sidecar,
+                    json.dumps(
+                        failure, ensure_ascii=False, allow_nan=False, indent=2
+                    ) + "\n",
+                )
+                typer.echo(f"解析器失败回执：{sidecar}", err=True)
             typer.echo(f"错误：APK 解析失败：{apk}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=2) from exc
 
@@ -1461,9 +1481,14 @@ def probe_leads(
 
     warn_unredacted_agent_output("probe-leads")
 
+    from apkscan.dynamic import probe_ingest
+
     try:
         try:
-            text = log.read_text(encoding="utf-8", errors="replace")
+            parsed_leads = probe_ingest.load_probe_log(log)
+        except probe_ingest.ProbeLogLimitError as exc:
+            typer.echo(f"错误：探针日志超过导入预算，未生成部分线索：{exc}", err=True)
+            raise typer.Exit(code=2) from exc
         except FileNotFoundError:
             typer.echo(f"错误：找不到探针日志：{log}", err=True)
             raise typer.Exit(code=1) from None
@@ -1471,9 +1496,7 @@ def probe_leads(
             typer.echo(f"错误：读取探针日志失败：{log}（{safe_exception_text(exc)}）", err=True)
             raise typer.Exit(code=1) from exc
 
-        from apkscan.dynamic import probe_ingest
-
-        leads = probe_ingest.dedup(probe_ingest.parse_probe_log(text))
+        leads = probe_ingest.dedup(parsed_leads)
         typer.echo(f"解析出 {len(leads)} 条去重调证线索。")
 
         ledger_md = probe_ingest.build_ledger_md(leads)

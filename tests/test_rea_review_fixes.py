@@ -115,7 +115,7 @@ def _assert_not_direct(payload: dict, tmp_path) -> None:  # noqa: ANN001
     assert payload == original
     assert closure["status"] != "complete"
     assert projected[0]["advice"] != "建议调证"
-    assert [ref["source"] for ref in projected[0]["source_refs"]] == sources
+    assert projected[0]["source_refs"] == []
     assert projected[0]["value"] == lead_value
     assert digest["closure"]["status"] != "complete"
     assert all(item.get("advice") != "建议调证" for item in digest["leads"])
@@ -215,23 +215,16 @@ def test_r3_whitespace_scope_token_stays_non_direct(tmp_path) -> None:  # noqa: 
     _assert_not_direct(payload, tmp_path)
 
 
-def test_r3_missing_source_case_evidence_remains_direct(tmp_path) -> None:  # noqa: ANN001
+def test_r3_missing_source_case_evidence_is_not_admitted() -> None:
     ref = {"location": "classes.dex", "snippet": "synthetic", "scope": "case_evidence"}
     payload = _report([ref])  # type: ignore[list-item]
     closure = project_serialized_closure(payload)
     typed = report_from_dict(deepcopy(payload))
-    report_path = tmp_path / "report.json"
-    report_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    manifest = tmp_path / "case-package.json"
 
-    assert closure["status"] == "complete"
-    assert typed.leads[0].advice == "建议调证"
-    assert select_targets(typed)
-    created = create_case_package(
-        report_path, manifest, case_id="case-001", producer="analyst-a",
-    )
-    assert created["closure_snapshot"] == "complete"
-    assert verify_case_package(manifest)["status"] == "verified"
+    assert closure["status"] != "complete"
+    assert typed.leads[0].advice == "待核"
+    assert project_serialized_leads(payload)[0]["source_refs"] == []
+    assert select_targets(typed) == []
 
 
 @pytest.mark.parametrize("source", ["dex", "runtime-pcap"])
@@ -242,7 +235,10 @@ def test_r3_independent_case_evidence_keeps_trust(source: str, tmp_path) -> None
         _ref("batch", "batch_reference", "batch.csv"),
         _ref(source, "case_evidence", "independent"),
     ]
-    payload = _report(refs)
+    endpoint_refs = refs
+    if source == "dex":
+        endpoint_refs = [*refs, _ref("runtime-pcap", "case_evidence", "contact")]
+    payload = _report(refs, endpoint_refs=endpoint_refs)
     original = deepcopy(payload)
     typed = report_from_dict(deepcopy(payload))
     digest = build_digest(payload, redact=False)
@@ -282,12 +278,15 @@ def test_r3_normalized_match_keeps_independent_evidence(
     direct_source: str,
     tmp_path,  # noqa: ANN001
 ) -> None:
+    endpoint_refs = [_ref(direct_source, "case_evidence", "independent")]
+    if direct_source == "dex":
+        endpoint_refs.append(_ref("runtime-pcap", "case_evidence", "contact"))
     payload = _report(
         [_ref(" Derived-Native "), _ref("legacy", "legacy_unspecified", "old.json")],
         category=category,
         lead_value=lead_value,
         endpoint_value=endpoint_value,
-        endpoint_refs=[_ref(direct_source, "case_evidence", "independent")],
+        endpoint_refs=endpoint_refs,
     )
     original = deepcopy(payload)
     typed = report_from_dict(deepcopy(payload))

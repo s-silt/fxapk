@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from copy import deepcopy
 from dataclasses import fields
 from pathlib import Path
 from typing import Mapping
@@ -52,12 +53,49 @@ def _evidence_from_dict(value: object) -> Evidence:
         scope = EvidenceScope(str(value.get("scope", EvidenceScope.LEGACY_UNSPECIFIED.value)))
     except ValueError:
         scope = EvidenceScope.LEGACY_UNSPECIFIED
+    provenance: dict[str, object] = {}
+    raw_provenance = value.get("provenance")
+    if isinstance(raw_provenance, Mapping):
+        provenance = {str(key): deepcopy(item) for key, item in raw_provenance.items()}
+    locator: dict[str, object] = {}
+    raw_locator = value.get("locator")
+    if isinstance(raw_locator, Mapping):
+        locator = {str(key): deepcopy(item) for key, item in raw_locator.items()}
+    status_fields = ("structure_status", "reference_status", "reachability")
+    statuses: dict[str, str] = {}
+    for name in status_fields:
+        status_value = value.get(name)
+        statuses[name] = status_value if isinstance(status_value, str) else "unknown"
+    raw_suspicions = value.get("suspicions")
+    if isinstance(raw_suspicions, list):
+        suspicions: list[dict[str, object]] = [
+            {str(key): deepcopy(item) for key, item in suspicion.items()}
+            for suspicion in raw_suspicions if isinstance(suspicion, Mapping)
+        ]
+        if len(suspicions) != len(raw_suspicions):
+            suspicions.append({"kind": "malformed_suspicion"})
+    elif raw_suspicions is None or (
+        isinstance(raw_suspicions, str) and not raw_suspicions
+    ):
+        suspicions = []
+    else:
+        suspicions = [{"kind": "malformed_suspicion"}]
+    for name in status_fields:
+        if name in value and not isinstance(value[name], str):
+            suspicions.append({"kind": "malformed_evidence_fact", "field": name})
+    for name in ("provenance", "locator"):
+        if name in value and not isinstance(value[name], Mapping):
+            suspicions.append({"kind": "malformed_evidence_fact", "field": name})
     return Evidence(
         source=str(value.get("source", "")),
         location=str(value.get("location", "")),
         snippet=str(value.get("snippet", "")),
         observed_at=observed if isinstance(observed, (int, float)) else None,
         scope=scope,
+        provenance=provenance,
+        locator=locator,
+        **statuses,
+        suspicions=suspicions,
     )
 
 

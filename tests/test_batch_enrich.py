@@ -69,6 +69,26 @@ class _ExplodingEnricher(BaseEnricher):
         raise AssertionError(f"这条路径不该发请求，却查了 {ep.kind}")
 
 
+def test_query_receipt_is_not_reused_for_later_target_without_receipt():
+    class ReceiptEnricher(_CountingEnricher):
+        def __init__(self):
+            super().__init__()
+            self.receipt = {}
+
+        def enrich(self, ep):
+            if not self.calls:
+                self.receipt["started_at"] = "2026-01-01T00:00:00Z"
+            return super().enrich(ep)
+
+    records = batch_enrich.enrich_targets([
+        batch_enrich.Target(value="one.example.test", kind="domain"),
+        batch_enrich.Target(value="two.example.test", kind="domain"),
+    ], [ReceiptEnricher()])
+    assert records[0]["source_context"]["counting_stub"]["query_time"]["status"] == "recorded"
+    assert records[1]["receipts"]["counting_stub"] == {}
+    assert records[1]["source_context"]["counting_stub"]["query_time"]["status"] == "unavailable"
+
+
 class _KeyGatedEnricher(BaseEnricher):
     name = "key_gated_stub"
     applies_to = ["ip"]

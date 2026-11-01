@@ -12,7 +12,9 @@ from typer.testing import CliRunner
 
 from apkscan import cli
 from apkscan.core.corpus import (
+    RELATION_INDEX_VERSION,
     _remote_config_objects,
+    _sanitize_case_ioc_projection,
     find_by_config_object,
     manifest_entry,
     shared_config_objects,
@@ -29,12 +31,22 @@ def test_remote_config_objects_from_artifacts_and_leads() -> None:
             {
                 "category": "REMOTE_CONFIG",
                 "value": "https://b.oss-cn.aliyuncs.com/c.dat",  # leak-scan: allow 合成对象存储夹具，基线既有值
-                "source_refs": [{"source": "dex", "location": "classes.dex", "scope": "case_evidence"}],
+                "source_refs": [{
+                    "source": "dex", "location": "classes.dex", "scope": "case_evidence",
+                    "provenance": {"member_sha256": "a" * 64},
+                    "locator": {"byte_offset": 1},
+                    "structure_status": "parsed", "reference_status": "referenced",
+                }],
             },  # 与产物同 url
             {
                 "category": "REMOTE_CONFIG",
                 "value": "https://other.oss.com/x.json",  # leak-scan: allow 合成对象存储夹具，基线既有值
-                "source_refs": [{"source": "dex", "location": "classes.dex", "scope": "case_evidence"}],
+                "source_refs": [{
+                    "source": "dex", "location": "classes.dex", "scope": "case_evidence",
+                    "provenance": {"member_sha256": "b" * 64},
+                    "locator": {"byte_offset": 2},
+                    "structure_status": "parsed", "reference_status": "referenced",
+                }],
             },  # 仅候选（无下载）
             {"category": "DOMAIN", "value": "api.x.com"},  # 非 remote_config
         ],
@@ -55,13 +67,17 @@ def test_manifest_entry_includes_remote_config_objects() -> None:
     report = {"meta": {"sample_sha256": "s1",
                        "remote_config_artifacts": [{"source_url": "https://x/c.dat", "sha256": "aa"}]}}
     entry = manifest_entry(report)
+    assert entry["relation_index_version"] == RELATION_INDEX_VERSION
     assert entry["remote_config_objects"] == [{"url": "https://x/c.dat", "sha256": "aa"}]
+    assert entry["relation_status"] == "qualified_candidates"
 
 
 def test_find_by_config_object_url_and_sha() -> None:
     entries = [
-        {"sample_sha256": "s1", "remote_config_objects": [{"url": "https://x/c.dat", "sha256": "aa11"}]},
-        {"sample_sha256": "s2", "remote_config_objects": [{"url": "https://y/d.dat", "sha256": "bb22"}]},
+        {"sample_sha256": "s1", "relation_index_version": RELATION_INDEX_VERSION,
+         "remote_config_objects": [{"url": "https://x/c.dat", "sha256": "aa11"}]},
+        {"sample_sha256": "s2", "relation_index_version": RELATION_INDEX_VERSION,
+         "remote_config_objects": [{"url": "https://y/d.dat", "sha256": "bb22"}]},
     ]
     assert [e["sample_sha256"] for e in find_by_config_object(entries, "https://x/c.dat")] == ["s1"]
     assert [e["sample_sha256"] for e in find_by_config_object(entries, "AA11")] == ["s1"]  # sha 大小写归一
@@ -71,9 +87,12 @@ def test_find_by_config_object_url_and_sha() -> None:
 
 def test_shared_config_objects_clusters_by_url_and_sha() -> None:
     entries = [
-        {"sample_sha256": "s1", "remote_config_objects": [{"url": "https://shared/c.dat", "sha256": "same"}]},
-        {"sample_sha256": "s2", "remote_config_objects": [{"url": "https://shared/c.dat", "sha256": "same"}]},
-        {"sample_sha256": "s3", "remote_config_objects": [{"url": "https://unique/x.dat", "sha256": "other"}]},
+        {"sample_sha256": "s1", "relation_index_version": RELATION_INDEX_VERSION,
+         "remote_config_objects": [{"url": "https://shared/c.dat", "sha256": "same"}]},
+        {"sample_sha256": "s2", "relation_index_version": RELATION_INDEX_VERSION,
+         "remote_config_objects": [{"url": "https://shared/c.dat", "sha256": "same"}]},
+        {"sample_sha256": "s3", "relation_index_version": RELATION_INDEX_VERSION,
+         "remote_config_objects": [{"url": "https://unique/x.dat", "sha256": "other"}]},
     ]
     clusters = shared_config_objects(entries)
     url_clusters = [c for c in clusters if c["key_type"] == "url"]
@@ -87,8 +106,10 @@ def test_shared_config_objects_clusters_by_url_and_sha() -> None:
 def test_shared_config_objects_url_only_correlation() -> None:
     # s1 已下载（有 sha），s2 仅 passive 候选（无 sha）——仍按 url 串联；sha 簇因单样本不成立
     entries = [
-        {"sample_sha256": "s1", "remote_config_objects": [{"url": "https://shared/c.dat", "sha256": "aa"}]},
-        {"sample_sha256": "s2", "remote_config_objects": [{"url": "https://shared/c.dat", "sha256": None}]},
+        {"sample_sha256": "s1", "relation_index_version": RELATION_INDEX_VERSION,
+         "remote_config_objects": [{"url": "https://shared/c.dat", "sha256": "aa"}]},
+        {"sample_sha256": "s2", "relation_index_version": RELATION_INDEX_VERSION,
+         "remote_config_objects": [{"url": "https://shared/c.dat", "sha256": None}]},
     ]
     clusters = shared_config_objects(entries)
     url_clusters = [c for c in clusters if c["key_type"] == "url"]
@@ -99,10 +120,45 @@ def test_shared_config_objects_url_only_correlation() -> None:
 def test_shared_config_objects_no_self_cluster() -> None:
     # 单样本多次引用同一对象不成簇（须 ≥2 个不同样本）
     entries = [
-        {"sample_sha256": "s1", "remote_config_objects": [
+        {"sample_sha256": "s1", "relation_index_version": RELATION_INDEX_VERSION,
+         "remote_config_objects": [
             {"url": "https://x/c.dat", "sha256": "aa"}, {"url": "https://x/c.dat", "sha256": "aa"}]},
     ]
     assert shared_config_objects(entries) == []
+
+
+def test_legacy_config_objects_are_preserved_but_not_used_as_relations() -> None:
+    legacy = {
+        "sample_sha256": "legacy",
+        "remote_config_objects": [{"url": "https://legacy.example.test/config", "sha256": None}],
+    }
+    indexed = {
+        "sample_sha256": "indexed",
+        "relation_index_version": RELATION_INDEX_VERSION,
+        "remote_config_objects": [{"url": "https://indexed.example.test/config", "sha256": None}],
+    }
+
+    assert find_by_config_object([legacy, indexed], "https://legacy.example.test/config") == []
+    assert find_by_config_object([legacy, indexed], "https://indexed.example.test/config") == [indexed]
+    assert shared_config_objects([legacy, indexed]) == []
+    assert legacy["remote_config_objects"] == [
+        {"url": "https://legacy.example.test/config", "sha256": None}
+    ]
+
+
+def test_unversioned_config_projection_is_suppressed_without_mutating_raw_entry() -> None:
+    legacy = {
+        "sample_sha256": "legacy",
+        "remote_config_objects": [{"url": "https://legacy.example.test/config", "sha256": "a" * 64}],
+    }
+
+    projected = _sanitize_case_ioc_projection(legacy)
+
+    assert projected["remote_config_objects"] == []
+    assert projected["relation_status"] == "unknown"
+    assert legacy["remote_config_objects"] == [
+        {"url": "https://legacy.example.test/config", "sha256": "a" * 64}
+    ]
 
 
 # --------------------------------------------------------------------------- #

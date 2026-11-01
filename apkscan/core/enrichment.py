@@ -36,6 +36,8 @@ from apkscan.core.models import (
 from apkscan.core.registry import BaseEnricher
 from apkscan.core.enrichment_budget import EnrichmentBudget
 from apkscan.core.source_status import provider_payload_if_hit
+from apkscan.core.admission import admitted_refs, evaluate_usage
+from apkscan.core.observations import evidence_identity
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -62,7 +64,7 @@ def _endpoint_runtime_observed(endpoint: Endpoint) -> bool:
     return any(
         evidence.scope is EvidenceScope.CASE_EVIDENCE
         and str(evidence.source) in OBSERVED_CONTACT_SOURCES
-        for evidence in endpoint.evidences
+        for evidence in admitted_refs(endpoint.evidences, "passive_enrichment")
     )
 
 
@@ -129,6 +131,14 @@ def _enrichment_targets(endpoints: list[Endpoint]) -> list[Endpoint]:
     """
     targets: list[Endpoint] = []
     for ep in endpoints:
+        decision = evaluate_usage(ep.evidences, "passive_enrichment")
+        admission = ep.enrichment.get("evidence_admission")
+        if not isinstance(admission, dict):
+            admission = {}
+            ep.enrichment["evidence_admission"] = admission
+        admission["passive_enrichment"] = decision
+        if decision["state"] != "allowed":
+            continue
         runtime_observed = _endpoint_runtime_observed(ep)
         if ep.kind == "domain":
             advice = (
@@ -148,7 +158,7 @@ def _enrichment_targets(endpoints: list[Endpoint]) -> list[Endpoint]:
             continue  # 非 domain/ip 本就不被 WHOIS/ICP/ASN 路由
         if advice == infra.ADVICE_INVESTIGATE:
             targets.append(ep)
-    return targets
+    return sorted(targets, key=lambda ep: (ep.kind, ep.value.casefold(), ep.value))
 
 
 def _low_tier_static_suppressed(endpoint: Endpoint) -> bool:
@@ -939,6 +949,76 @@ def _mark_case_close_deferred(
             }
 
 
+def _allocation_bucket(endpoint: Endpoint) -> tuple[str, ...]:
+    refs = admitted_refs(endpoint.evidences, "passive_enrichment")
+    if not refs:
+        refs = [
+            evidence for evidence in endpoint.evidences
+            if not getattr(evidence, "provenance", None)
+            and not getattr(evidence, "locator", None)
+        ]
+    buckets: list[tuple[str, ...]] = []
+    for evidence in refs:
+        provenance = getattr(evidence, "provenance", None)
+        provenance = provenance if isinstance(provenance, Mapping) else {}
+        member_sha = provenance.get("member_sha256")
+        member_path = provenance.get("member_path")
+        if isinstance(member_sha, str) or isinstance(member_path, str):
+            buckets.append((
+                "member",
+                member_sha.lower() if isinstance(member_sha, str) else "",
+                member_path if isinstance(member_path, str) else "",
+            ))
+            continue
+        source = getattr(evidence, "source", "")
+        location = getattr(evidence, "location", "")
+        if source or location:
+            buckets.append(("legacy", str(source), str(location)))
+    return min(buckets) if buckets else ("unknown",)
+
+
+def _stable_candidate_key(endpoint: Endpoint) -> tuple:
+    try:
+        normalized_value = infra.match_key(endpoint.kind, endpoint.value)
+    except (TypeError, ValueError):
+        normalized_value = endpoint.value.casefold()
+    signatures = tuple(sorted(repr(evidence_identity(evidence)) for evidence in endpoint.evidences))
+    return endpoint.kind, normalized_value, signatures
+
+
+def _fair_allocation_order(
+    endpoints: list[Endpoint], tier_priority: Mapping[object, int]
+) -> list[Endpoint]:
+    groups: dict[tuple[bool, int, bool], dict[tuple[str, ...], list[Endpoint]]] = {}
+    for endpoint in endpoints:
+        priority = (
+            not _endpoint_runtime_observed(endpoint),
+            tier_priority.get(endpoint.enrichment.get("tier"), 1),
+            not bool(endpoint.is_suspicious),
+        )
+        groups.setdefault(priority, {}).setdefault(
+            _allocation_bucket(endpoint), []
+        ).append(endpoint)
+    ordered: list[Endpoint] = []
+    for priority in sorted(groups):
+        buckets = groups[priority]
+        for queue in buckets.values():
+            queue.sort(key=_stable_candidate_key)
+        offset = 0
+        bucket_keys = sorted(buckets)
+        while True:
+            added = False
+            for bucket in bucket_keys:
+                queue = buckets[bucket]
+                if offset < len(queue):
+                    ordered.append(queue[offset])
+                    added = True
+            if not added:
+                break
+            offset += 1
+    return ordered
+
+
 def mark_enrichment_skipped(
     endpoints: list[Endpoint],
     enrichers: list[BaseEnricher],
@@ -947,6 +1027,25 @@ def mark_enrichment_skipped(
 ) -> None:
     """为一次明确未执行的联网计划逐端点/供应商记审计状态，不覆盖已有结果。"""
     mark_enrichment_unexecuted(endpoints, enrichers, status="skipped", reason=reason)
+
+
+def mark_admission_excluded(
+    endpoints: list[Endpoint], enrichers: list[BaseEnricher]
+) -> None:
+    """Mark excluded ordinary candidates so cached provider payloads are not current hits."""
+    for endpoint in endpoints:
+        source_status = endpoint.enrichment.setdefault("source_status", {})
+        if not isinstance(source_status, dict):
+            source_status = {}
+            endpoint.enrichment["source_status"] = source_status
+        for enricher in enrichers:
+            if endpoint.kind not in (getattr(enricher, "applies_to", []) or []):
+                continue
+            provider = _provider_name(enricher)
+            source_status[provider] = {
+                "status": "skipped",
+                "reason": "evidence_admission",
+            }
 
 
 def mark_enrichment_unexecuted(
@@ -1017,9 +1116,9 @@ def enrich_selected_targets(
             continue
         if not _provider_configured(enricher):
             continue
-        matching_with_order = [
-            (index, endpoint)
-            for index, endpoint in enumerate(endpoints)
+        matching = [
+            endpoint
+            for endpoint in endpoints
             if endpoint.kind in (getattr(enricher, "applies_to", []) or [])
         ]
         tier_priority = {
@@ -1028,15 +1127,7 @@ def enrich_selected_targets(
             infra.TIER_LIBRARY_FILE: 2,
             infra.TIER_BULK_STRING: 3,
         }
-        matching_with_order.sort(
-            key=lambda item: (
-                not _endpoint_runtime_observed(item[1]),
-                tier_priority.get(item[1].enrichment.get("tier"), 1),
-                not bool(item[1].is_suspicious),
-                item[0],
-            )
-        )
-        matching = [endpoint for _index, endpoint in matching_with_order]
+        matching = _fair_allocation_order(matching, tier_priority)
         allowed_endpoint_ids[provider] = {
             id(endpoint) for endpoint in matching[:limits[provider]]
         }

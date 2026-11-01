@@ -5,7 +5,7 @@ import json
 import pytest
 
 from apkscan.core.models import EvidenceScope
-from apkscan.core.report_io import load_report
+from apkscan.core.report_io import load_report, report_from_dict
 from apkscan.core.report_schema import (
     UnsupportedReportSchema,
     migrate_report_payload,
@@ -51,7 +51,7 @@ def test_missing_schema_is_legacy_not_current() -> None:
 def test_legacy_report_migration_marks_missing_evidence_scope_unknown() -> None:
     migrated = migrate_report_payload(_legacy_payload("1.1"))
 
-    assert migrated["schema_version"] == "1.2"
+    assert migrated["schema_version"] == "1.3"
     assert migrated["endpoints"][0]["evidences"][0]["scope"] == "legacy_unspecified"
     assert migrated["leads"][0]["source_refs"][0]["scope"] == "legacy_unspecified"
 
@@ -62,8 +62,18 @@ def test_load_report_migrates_legacy_scope_without_trusting_it(tmp_path) -> None
 
     report = load_report(path)
 
-    assert report.schema_version == "1.2"
+    assert report.schema_version == "1.3"
     assert report.endpoints[0].evidences[0].scope is EvidenceScope.LEGACY_UNSPECIFIED
+
+
+def test_schema_1_2_is_accepted_and_migrated_without_occurrence_coordinates() -> None:
+    payload = _legacy_payload("1.2")
+    migrated = migrate_report_payload(payload)
+    assert migrated["schema_version"] == "1.3"
+    loaded = report_from_dict(migrated)
+    evidence = loaded.endpoints[0].evidences[0]
+    assert evidence.provenance == {}
+    assert evidence.locator == {}
 
 
 def test_loaded_legacy_endpoint_cannot_retain_investigate_upgrade(tmp_path) -> None:  # noqa: ANN001

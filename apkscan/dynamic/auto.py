@@ -64,6 +64,7 @@ META_WRITE_CATEGORIES = {
     'capture_quality': 'coverage',
     'capture_adaptation': 'record',
     'cross_round_decryption': 'record',
+    'capture_safety_comparison': 'coverage',
     'online': 'signal',
     'target_serial': 'record',
     'web_observation_plan': 'coverage',
@@ -609,6 +610,9 @@ def run(
             )
 
         if three_rounds and isinstance(report, Report) and round_records:
+            from apkscan.dynamic.capture_safety import compare_rounds
+
+            report.meta["capture_safety_comparison"] = compare_rounds(report.meta.get("capture_rounds", []))
             from apkscan.dynamic.capture_sequence import complement_decryption
             report.meta["cross_round_decryption"] = complement_decryption(report, round_records)
             from apkscan.core.closure import evaluate_capture_quality, refresh_visibility_snapshot
