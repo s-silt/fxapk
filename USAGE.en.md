@@ -4,71 +4,7 @@
 
 Full flags: `fxapk --help`; if `fxapk` is not installed as a command, use `python -m apkscan.cli`.
 
-In report schema 1.3, Evidence may carry `provenance`, `locator`,
-`structure_status`, `reference_status`, `reachability`, and `suspicions`.
-A stable `occurrence_id` is emitted only when real provenance and coordinates
-are both available; legacy reports retain unknown/empty values rather than
-inventing locations.
-
-Parser process limits are opt-in. Set both `FXAPK_PARSER_TIMEOUT_SEC` and
-`FXAPK_PARSER_MEMORY_MB`; `FXAPK_PARSER_OUTPUT_MB` is optional and defaults to a 64 MiB
-IPC output cap. Missing or invalid required configuration fails closed. Limits apply
-per parse operation and per isolated lazy read, not to the total analysis and not as
-a native-code sandbox. With no configuration, parsing remains in-process and the
-receipt explicitly says `not_enforced`; no default performance benefit is claimed.
-Linux uses an address-space limit (RLIMIT_AS), not measured RSS; Windows uses a Job
-Object whose enforcement must be verified on Windows rather than inferred from Linux
-tests. If macOS cannot enforce the requested memory limit, parsing fails closed.
-An analyze parser failure writes a separate `*.parser-failure.json` receipt and does
-not create an empty report.
-
-## Probe evidence, capture regressions and request targets
-
-- The `no-proxy` observation round does not request TLS-verification changes. Preserve it,
-  the original `floor-only` baseline and MITM rounds separately. OkHttp never replays
-  request-body `writeTo()`; `not_read_non_interference` means unread, not empty. SQLCipher
-  observes paths/keys without exporting through the application's connection;
-  `not_attempted_non_interference` is not an export failure.
-- Installation, triggering, dropped observations and truncation have separate receipts.
-  Java bridge readiness does not confirm hook registration. Missing receipts stay unknown;
-  an unavailable API or untriggered hook does not establish anti-analysis or absence of behavior.
-- Probe-log import preserves the raw-byte hash, decoded-text hash, line and codepoint
-  coordinates. Inputs over 8 MiB or 10,000 imported leads fail rather than silently truncate.
-  Bundled event references bind the runtime report's exact read bytes and original array JSON
-  pointer; distinct occurrences survive aggregation. Missing identities stay unavailable;
-  hashes do not prove authenticity or target-App attribution.
-- `meta.capture_safety_comparison` and its compact `digest.capture_safety` projection require
-  the same original APK, foreground confirmation, explicit onboarding/network outcomes,
-  matching declared action/initial-state/environment digests and hash-bound check artifacts.
-  Outcomes are `inconclusive`, `reported_regression`, `baseline_failed` or
-  `no_reported_regression`, never proof of causality or universal non-interference.
-  Capture completion is not onboarding success; zero traffic is not network failure.
-  No automatic app-data clearing or device-state reset is performed.
-- Enrichment separates query execution time, uninterpreted provider time fields and source
-  family. Shodan and InternetDB are not independent corroboration. Request candidates include
-  service roles, identifiers, event windows/timezones, records to obtain and verification
-  questions. An edge provider may supply account/domain/origin bindings without being the
-  Origin or App operator. Legal channels and historical relationships remain unverified.
-  `digest.closure.request_targets` is bounded; consult full closure and source receipts for decisions.
-
-HTTP `messages[].ts` uses epoch seconds; Frida event timestamps use milliseconds.
-Imported `observed_at` values use seconds, while `event_time_semantics` preserves the
-producer unit. Unknown channels or invalid times remain unavailable. Handlers bind
-each spawned PID and script hash before script loading; retry and late events retain
-their original identity. Unbound PID/UID/script identity is never filled from the final
-capture summary and carries `process_binding_missing`. Endpoints and events share a
-bounded read and original hash; malformed or oversized reports are unavailable/partial,
-not successful zero-finding reports.
-
 ## Command table
-
-Saved web evidence accepts `--evidence-handoff <JSON outside the evidence directory>`.
-The `fxapk.web-evidence-handoff.v1` contract binds original file hashes/sizes,
-capture provenance, HAR entries, and upstream coverage gaps. Text offsets use decoded
-codepoints; HAR body offsets also carry an entry JSON pointer, not a raw-byte coordinate.
-Truncation, ignored TLS verification, unknown request associations, and rendered DOM
-remain review signals. A matching hash proves neither authenticity nor target-app attribution.
-See `meta.web_capture_visibility` and `meta.web_evidence.handoff` for the full boundaries.
 
 | Goal | Command |
 |---|---|
@@ -98,6 +34,48 @@ See `meta.web_capture_visibility` and `meta.web_evidence.handoff` for the full b
 | DEX string-reference query and import (optional fxapk-asc isolated worker) | `fxapk dex query` / `fxapk dex import`, see [plugins/fxapk-asc/README.md](plugins/fxapk-asc/README.md) |
 | Recognition line (read-only/offline; exit 4 when the promotion gate fails) | `fxapk recognize reanalysis` / `labels validate` / `split build\|validate` / `evaluate` |
 
+## Saved web evidence
+
+Saved web evidence accepts `--evidence-handoff <JSON outside the evidence directory>`.
+The `fxapk.web-evidence-handoff.v1` contract binds original file hashes/sizes,
+capture provenance, HAR entries, and upstream coverage gaps. Text offsets use decoded
+codepoints; HAR body offsets also carry an entry JSON pointer, not a raw-byte coordinate.
+Truncation, ignored TLS verification, unknown request associations, and rendered DOM
+remain review signals. A matching hash proves neither authenticity nor target-app attribution.
+See `meta.web_capture_visibility` and `meta.web_evidence.handoff` for the full boundaries.
+
+## Capture and probe records
+
+- The `no-proxy` observation round does not request TLS-verification changes. Preserve it,
+  the original `floor-only` baseline and MITM rounds separately. OkHttp never replays
+  request-body `writeTo()`; `not_read_non_interference` means unread, not empty. SQLCipher
+  observes paths/keys without exporting through the application's connection;
+  `not_attempted_non_interference` is not an export failure.
+- Installation, triggering, dropped observations and truncation have separate receipts.
+  Java bridge readiness does not confirm hook registration. Missing receipts stay unknown;
+  an unavailable API or untriggered hook does not establish anti-analysis or absence of behavior.
+- Probe-log import preserves the raw-byte hash, decoded-text hash, line and codepoint
+  coordinates. Inputs over 8 MiB or 10,000 imported leads fail rather than silently truncate.
+  Bundled event references bind the runtime report's exact read bytes and original array JSON
+  pointer; distinct occurrences survive aggregation. Missing identities stay unavailable;
+  hashes do not prove authenticity or target-App attribution.
+- `meta.capture_safety_comparison` and its compact `digest.capture_safety` projection require
+  the same original APK, foreground confirmation, explicit onboarding/network outcomes,
+  matching declared action/initial-state/environment digests and hash-bound check artifacts.
+  Outcomes are `inconclusive`, `reported_regression`, `baseline_failed` or
+  `no_reported_regression`, never proof of causality or universal non-interference.
+  Capture completion is not onboarding success; zero traffic is not network failure.
+  No automatic app-data clearing or device-state reset is performed.
+
+HTTP `messages[].ts` uses epoch seconds; Frida event timestamps use milliseconds.
+Imported `observed_at` values use seconds, while `event_time_semantics` preserves the
+producer unit. Unknown channels or invalid times remain unavailable. Handlers bind
+each spawned PID and script hash before script loading; retry and late events retain
+their original identity. Unbound PID/UID/script identity is never filled from the final
+capture summary and carries `process_binding_missing`. Endpoints and events share a
+bounded read and original hash; malformed or oversized reports are unavailable/partial,
+not successful zero-finding reports.
+
 ## Passive resource profiles and batch enrichment
 
 `enrich batch` can explicitly select `--providers fofa_profile,fofa_host,daydaymap_profile`. Dry-run first to verify the services, disclosure scope and budget, then add `--no-dry-run`. Search returns a bounded first page only and records reported totals, actual returns and coverage status; unknown totals, missing fields and permission failures do not mean "no assets". Product, certificate and survey times help judge the service type; they cannot alone confirm a cloud instance, tenant or operator.
@@ -110,6 +88,13 @@ is recorded as `failed/upstream_permission_denied`; it cannot be used to declare
 After service recovery add `--recover-transient`: calls are spaced per source (`--provider-interval`, default 2 s); transient rate limits, timeouts or resolution failures get at most one retry per source (`--retry-delay`, default 15 s); Retry-After over 60 s defers; authentication, permission and quota errors are not retried. The original failure and the retry are recorded separately — recovery does not erase historical gaps.
 
 Hunter reads the account's free balance before searching and reserves credits in a local ledger (`~/.fxapk/hunter-quota.sqlite3`, overridable via `FXAPK_HUNTER_QUOTA_DB`); the same account shares a daily 500-point cap by UTC+8 date, and an unknown balance or failed reservation stops the search. `FXAPK_HUNTER_CREDIT_MODE=free_only` returns `disabled / free_only_billing_unverified` before any request. Account configuration: [.env.example](.env.example).
+
+- Enrichment separates query execution time, uninterpreted provider time fields and source
+  family. Shodan and InternetDB are not independent corroboration. Request candidates include
+  service roles, identifiers, event windows/timezones, records to obtain and verification
+  questions. An edge provider may supply account/domain/origin bindings without being the
+  Origin or App operator. Legal channels and historical relationships remain unverified.
+  `digest.closure.request_targets` is bounded; consult full closure and source receipts for decisions.
 
 ## JADX index
 
@@ -140,6 +125,19 @@ Since report schema 1.2 every Evidence carries `scope`: `case_evidence` (direct 
 
 Persisted JSON rejects `NaN` / `Infinity`; a failed write does not overwrite an existing report.
 
+### Evidence sources and admission
+
+In report schema 1.3, Evidence may carry `provenance`, `locator`,
+`structure_status`, `reference_status`, `reachability`, and `suspicions`.
+A stable `occurrence_id` is emitted only when real provenance and coordinates
+are both available; legacy reports retain unknown/empty values rather than
+inventing locations.
+
+Admission is assessed per occurrence and purpose: `passive_enrichment`, `lead_priority`,
+`closure_candidate`, `dex_query`, `model_summary`, and `corpus_relation`. Results are
+`allowed`, `review`, or `blocked`; admitting one occurrence does not admit every reference
+to the same value. Static candidates are not runtime observations or proof of business ownership.
+
 ### Two field groups not to confuse
 
 - `visibility` (was the sample's content visible) vs `analysis_status` (did the tooling run healthy): every analyzer succeeding while the DEX is a stub and six conclusions cannot be made can both be true at once. `blocked_claims` names the conclusions that cannot be made; `next_actions` says how to close the gap.
@@ -151,6 +149,23 @@ Persisted JSON rejects `NaN` / `Infinity`; a failed write does not overwrite an 
 - `out/app.json` — full data; `report.meta.closure` holds the acceptance verdict, five-layer evidence, source coverage, gaps and next steps
 - `case-package.json` / `case-review.json` — Phase-1 package and Phase-2 review record
 - `--fmt pdf` exports PDF (needs local Chrome or Edge)
+
+## Parser budgets
+
+DEX decoding reuses count, character and snapshot-size budgets. These limits do not
+isolate parser processes; isolation is enabled separately through the settings below.
+
+Parser process limits are opt-in. Set both `FXAPK_PARSER_TIMEOUT_SEC` and
+`FXAPK_PARSER_MEMORY_MB`; `FXAPK_PARSER_OUTPUT_MB` is optional and defaults to a 64 MiB
+IPC output cap. Missing or invalid required configuration fails closed. Limits apply
+per parse operation and per isolated lazy read, not to the total analysis and not as
+a native-code sandbox. With no configuration, parsing remains in-process and the
+receipt explicitly says `not_enforced`; no default performance benefit is claimed.
+Linux uses an address-space limit (RLIMIT_AS), not measured RSS; Windows uses a Job
+Object whose enforcement must be verified on Windows rather than inferred from Linux
+tests. If macOS cannot enforce the requested memory limit, parsing fails closed.
+An analyze parser failure writes a separate `*.parser-failure.json` receipt and does
+not create an empty report.
 
 ## Pinned dependencies and reproduction
 
