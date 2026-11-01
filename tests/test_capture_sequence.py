@@ -99,22 +99,40 @@ def test_auto_unpacks_then_runs_three_rounds_and_merges_each(tmp_path, monkeypat
 
 
 def test_round_namespace_preserves_same_coordinate_from_different_captures(tmp_path, monkeypatch):
-    from apkscan.core.models import Endpoint, Evidence
     from apkscan.dynamic import merge
+
     observed = []
-    monkeypatch.setattr(merge, "load_runtime_endpoints",
-        lambda path: [Endpoint(kind="domain", value="api.example.test",
-                               evidences=[Evidence(source="runtime", location="flow:1")])])
+
+    runtime_path = tmp_path / "runtime_report.json"
+    runtime_path.write_text(
+        json.dumps(
+            {
+                "endpoints": [
+                    {
+                        "kind": "domain",
+                        "value": "api.example.test",
+                        "evidences": [{"source": "runtime", "location": "flow:1"}],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
     def collect(rep, endpoints, *a, **kw):
         observed.extend(endpoints[0].evidences)
         return {"merged": 1, "new_leads": 0, "report_paths": []}
-    monkeypatch.setattr(merge, "merge_and_rerender", collect)
-    for name in ("a" * 64, "b" * 64):
-        auto._run_merge(report(), str(tmp_path / "runtime_report.json"), out_dir=str(tmp_path),
+
+    monkeypatch.setattr(merge, "_merge_and_rerender", collect)
+    names = ("a" * 64, "b" * 64)
+    for name in names:
+        auto._run_merge(report(), str(runtime_path), out_dir=str(tmp_path),
                         base="synthetic", formats=[], on_progress=None,
                         evidence_namespace="capture:" + name)
-    assert len({ev.location for ev in observed}) == 2
-    assert all(ev.source == "runtime" for ev in observed)
+    assert [ev.location for ev in observed] == [
+        f"capture:{name}::flow:1" for name in names
+    ]
+    assert all(ev.source == "runtime-derived" for ev in observed)
 
 
 def test_two_rounds_can_complement_ciphertext_and_recipe_without_editing_raw(tmp_path):
