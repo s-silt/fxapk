@@ -159,7 +159,14 @@ def test_bundled_event_normalization_and_aggregation_preserve_occurrences(tmp_pa
     assert all(ref.provenance["completeness"] == "not_attested" for ref in refs)
     if field == "sqlcipher_events":
         assert all("未尝试导出" in ref.snippet for ref in refs)
-        assert all(ref.provenance["capture_gaps"] == ["database_export_not_attempted_non_interference"] for ref in refs)
+        assert all(
+            set(ref.provenance["capture_gaps"])
+            == {
+                "process_binding_missing",
+                "database_export_not_attempted_non_interference",
+            }
+            for ref in refs
+        )
 
 
 @pytest.mark.parametrize("raw", [b'{"credential_events":[],"credential_events":[]}', b'{"v":NaN}', b'{"v":1e999}', b'[]', b'{'])

@@ -1911,8 +1911,9 @@ def _start_frida_session(
             enable_tls_unpinning=enable_tls_unpinning,
             **({"selected_hooks": selected_hooks} if selected_hooks is not None else {}),
         )
+        script_sha256 = hashlib.sha256(source.encode("utf-8")).hexdigest()
         if probe_state is not None:
-            probe_state["script_sha256"] = hashlib.sha256(source.encode("utf-8")).hexdigest()
+            probe_state["script_sha256"] = script_sha256
             probe_state["script_sha256_source"] = "assembled_injection_source"
         # serial 钉定那台（-D 等价）；None 退回 USB（向后兼容）。
         if serial:
@@ -1920,9 +1921,26 @@ def _start_frida_session(
         else:
             device_handle = frida.get_usb_device(timeout=_FRIDA_USB_TIMEOUT)
         pid = device_handle.spawn([package])
-        if probe_state is not None and isinstance(pid, int) and not isinstance(pid, bool):
+        valid_spawned_pid = isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
+        if probe_state is not None and valid_spawned_pid:
             probe_state["observed_pid"] = pid
             probe_state["observed_pid_source"] = "frida_spawn"
+        capture_context: dict[str, Any] = {
+            "script_sha256": script_sha256,
+            "package": package,
+            "pid": pid if valid_spawned_pid else None,
+            "uid": None,
+            "round": None,
+            "pass_tag": None,
+            "sample_sha256": None,
+        }
+        if probe_state is not None:
+            for name in ("round", "pass_tag", "sample_sha256"):
+                value = probe_state.get(name)
+                if probe_state.get(f"{name}_source") == "caller_declared" and (
+                    type(value) is int or isinstance(value, str) and len(value) <= 512
+                ):
+                    capture_context[name] = value
         session = device_handle.attach(pid)
         # 在会话上寄存 device 句柄，供 _frida_session_alive 用 enumerate_processes 复验 pid 存活。
         try:
@@ -1948,7 +1966,10 @@ def _start_frida_session(
         except Exception:
             logger.debug("[capture] 无法在会话寄存 bridge 状态（忽略）", exc_info=True)
         # crypto 主通道（含 error 诊断）单独走 make_message_handler。
-        script.on("message", cryptohook.make_message_handler(sink))
+        script.on(
+            "message",
+            cryptohook.make_message_handler(sink, capture_context=capture_context),
+        )
         # 其余 7 路运行时事件通道表驱动注册（sink 顺序与 CHANNELS 严格对齐；None 则跳过该通道）。
         channel_sinks = (
             jsbridge_sink,
@@ -1964,7 +1985,12 @@ def _start_frida_session(
                 continue
             script.on(
                 "message",
-                cryptohook.make_typed_handler(chan_sink, msg_type, normalize),
+                cryptohook.make_typed_handler(
+                    chan_sink,
+                    msg_type,
+                    normalize,
+                    capture_context=capture_context,
+                ),
             )
         script.load()
         # ★P0-a：shim 一旦 load 进目标进程，样本行为即可能被改写、流量即可能被诱导。此处**立刻**把
@@ -4082,10 +4108,43 @@ def _write_runtime_report(
         rows: list[dict[str, Any]] = []
         for index, event in enumerate(events or []):
             row = dict(event)
-            row["capture_context"] = context
+            event_context = row.get("capture_context")
+            if isinstance(event_context, dict):
+                row_context = {
+                    key: event_context.get(key)
+                    for key in (
+                        "script_sha256",
+                        "package",
+                        "pid",
+                        "uid",
+                        "round",
+                        "pass_tag",
+                        "sample_sha256",
+                    )
+                }
+            else:
+                row_context = {
+                    "script_sha256": None,
+                    "package": context.get("package"),
+                    "pid": None,
+                    "uid": None,
+                    "round": context.get("round"),
+                    "pass_tag": context.get("pass_tag"),
+                    "sample_sha256": context.get("sample_sha256"),
+                }
+            row["capture_context"] = row_context
             gaps = row.get("capture_gaps")
             if not isinstance(gaps, list):
                 gaps = []
+            pid = row_context.get("pid")
+            script_sha256 = row_context.get("script_sha256")
+            if (
+                type(pid) is not int
+                or pid <= 0
+                or not isinstance(script_sha256, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", script_sha256)
+            ) and "process_binding_missing" not in gaps:
+                gaps.append("process_binding_missing")
             if (
                 row.get("body_capture_status") == "not_read_non_interference"
                 and "request_body_not_read_non_interference" not in gaps

@@ -1892,6 +1892,196 @@ def test_start_frida_session_attaches_and_loads_script(monkeypatch):
     assert captured["resumed"] == 4321
 
 
+def test_frida_event_context_stays_bound_to_each_spawned_attempt(monkeypatch, tmp_path):
+    import hashlib
+    import sys
+    import types
+
+    from apkscan.core.models import Report
+    from apkscan.dynamic import cryptohook, merge, probe_coverage
+
+    scripts: list[Any] = []
+    pids = iter((111, 222))
+    sources = iter(("synthetic-first-source", "synthetic-second-source"))
+    monkeypatch.setattr(capture, "_build_injection_source", lambda **_kwargs: next(sources))
+
+    class _FakeScript:
+        def __init__(self, source: str) -> None:
+            self.source = source
+            self.handlers: list[Any] = []
+            scripts.append(self)
+
+        def on(self, _name: str, handler: Any) -> None:
+            self.handlers.append(handler)
+
+        def emit(self) -> None:
+            crypto_message = {
+                "type": "send",
+                "payload": {
+                    "type": cryptohook.CRYPTO_MSG_TYPE,
+                    "src": "cipher",
+                    "event": "init",
+                    "ts": 1700000000125,
+                    "capture_context": {"pid": 999, "script_sha256": "f" * 64},
+                },
+            }
+            jsbridge_message = {
+                "type": "send",
+                "payload": {
+                    "type": cryptohook.JSBRIDGE_MSG_TYPE,
+                    "event": "register",
+                    "iface": "SyntheticBridge",
+                    "ts": 1700000000125,
+                    "capture_context": {"pid": 999, "script_sha256": "f" * 64},
+                },
+            }
+            for handler in self.handlers:
+                handler(crypto_message, None)
+                handler(jsbridge_message, None)
+
+        def load(self) -> None:
+            self.emit()
+
+    class _FakeSession:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+
+        def create_script(self, source: str) -> _FakeScript:
+            return _FakeScript(source)
+
+        def detach(self) -> None:
+            pass
+
+    class _FakeDevice:
+        def spawn(self, _argv: Any) -> int:
+            return next(pids)
+
+        def attach(self, pid: int) -> _FakeSession:
+            return _FakeSession(pid)
+
+        def resume(self, _pid: int) -> None:
+            pass
+
+        def kill(self, _pid: int) -> None:
+            pass
+
+    fake_device = _FakeDevice()
+    monkeypatch.setitem(
+        sys.modules,
+        "frida",
+        types.SimpleNamespace(get_usb_device=lambda timeout=None: fake_device),
+    )
+    state = probe_coverage.new_probe_state(
+        package="com.example.synthetic",
+        requested_hooks=("crypto", "jsbridge"),
+        frida_requested=True,
+        pass_tag="synthetic-pass",
+        sample_sha256="a" * 64,
+    )
+    state["round"] = 3
+    state["round_source"] = "caller_declared"
+    crypto_events: list[dict[str, Any]] = []
+    jsbridge_events: list[dict[str, Any]] = []
+
+    first_session, _ = capture._start_frida_session(
+        "com.example.synthetic",
+        crypto_events,
+        jsbridge_events,
+        probe_state=state,
+        selected_hooks=("crypto", "jsbridge"),
+        enable_tls_unpinning=False,
+    )
+    second_session, _ = capture._start_frida_session(
+        "com.example.synthetic",
+        crypto_events,
+        jsbridge_events,
+        probe_state=state,
+        selected_hooks=("crypto", "jsbridge"),
+        enable_tls_unpinning=False,
+    )
+    assert first_session is not None and second_session is not None
+
+    scripts[0].emit()
+    assert [event["capture_context"]["pid"] for event in crypto_events] == [111, 222, 111]
+    assert [event["capture_context"]["pid"] for event in jsbridge_events] == [111, 222, 111]
+
+    first_sha256 = hashlib.sha256(b"synthetic-first-source").hexdigest()
+    second_sha256 = hashlib.sha256(b"synthetic-second-source").hexdigest()
+    for events in (crypto_events, jsbridge_events):
+        assert [
+            (
+                event["capture_context"]["pid"],
+                event["capture_context"]["script_sha256"],
+                event["capture_context"]["round"],
+                event["capture_context"]["pass_tag"],
+                event["capture_context"]["sample_sha256"],
+            )
+            for event in events
+        ] == [
+            (111, first_sha256, 3, "synthetic-pass", "a" * 64),
+            (222, second_sha256, 3, "synthetic-pass", "a" * 64),
+            (111, first_sha256, 3, "synthetic-pass", "a" * 64),
+        ]
+    final_context = {
+        "script_sha256": second_sha256,
+        "package": "com.example.synthetic",
+        "pid": 222,
+        "uid": 4321,
+        "round": 3,
+        "pass_tag": "synthetic-pass",
+        "sample_sha256": "a" * 64,
+    }
+    report_path = capture._write_runtime_report(
+        "com.example.synthetic",
+        tmp_path,
+        [],
+        crypto_events=crypto_events,
+        jsbridge_events=[*jsbridge_events, {"event": "register", "iface": "UnboundBridge"}],
+        capture_context=final_context,
+    )
+    report = Report(
+        package_name="com.example.synthetic",
+        meta={},
+        leads=[],
+        endpoints=[],
+        findings=[],
+        analyzer_status=[],
+    )
+    assert merge.merge_runtime_traces(report, report_path)["jsbridge_leads"] == 2
+
+    bridge_lead = next(lead for lead in report.leads if lead.value == "JSBridge:SyntheticBridge")
+    expected_contexts = [
+        (111, first_sha256),
+        (222, second_sha256),
+        (111, first_sha256),
+    ]
+    assert [
+        (
+            ref.provenance["capture_context"]["pid"],
+            ref.provenance["capture_context"]["script_sha256"],
+        )
+        for ref in bridge_lead.source_refs
+    ] == expected_contexts
+    raw = Path(report_path).read_bytes()
+    assert all(
+        ref.provenance["artifact_sha256"] == hashlib.sha256(raw).hexdigest()
+        for ref in bridge_lead.source_refs
+    )
+    assert [ref.locator["json_pointer"] for ref in bridge_lead.source_refs] == [
+        "/jsbridge_events/0",
+        "/jsbridge_events/1",
+        "/jsbridge_events/2",
+    ]
+
+    unbound_lead = next(lead for lead in report.leads if lead.value == "JSBridge:UnboundBridge")
+    unbound_ref = unbound_lead.source_refs[0]
+    unbound_context = unbound_ref.provenance["capture_context"]
+    assert unbound_context.get("pid") is None
+    assert unbound_context.get("uid") is None
+    assert unbound_context.get("script_sha256") is None
+    assert "process_binding_missing" in unbound_ref.provenance["capture_gaps"]
+
+
 def test_start_frida_session_cleans_up_on_load_failure(monkeypatch):
     """脚本 load 失败 → kill 已 spawn 的进程 + detach，返回 (None,None)（避免回退路径二次 spawn 冲突）。"""
     import sys

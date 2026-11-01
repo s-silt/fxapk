@@ -165,12 +165,20 @@ def test_runtime_report_events_bind_capture_context_and_merge_coverage(tmp_path)
             _probe_state(), observed_pid=4321, observed_uid=None
         )
     }
+    bound_context = {
+        **context,
+        "script_sha256": "c" * 64,
+        "pid": 8765,
+    }
     report_path = capture._write_runtime_report(
         "com.example.synthetic",
         tmp_path,
         [],
         capture_signals=signals,
-        crypto_events=[{"src": "cipher", "event": "init"}],
+        crypto_events=[
+            {"src": "cipher", "event": "init"},
+            {"src": "cipher", "event": "doFinal", "capture_context": bound_context},
+        ],
         credential_events=[
             {"body_capture_status": "not_read_non_interference"}
         ],
@@ -181,19 +189,34 @@ def test_runtime_report_events_bind_capture_context_and_merge_coverage(tmp_path)
     )
     payload = json.loads((tmp_path / "runtime_report.json").read_text(encoding="utf-8"))
     event = payload["crypto_events"][0]
+    bound_event = payload["crypto_events"][1]
     okhttp_event = payload["credential_events"][0]
     sqlcipher_event = payload["sqlcipher_events"][0]
 
-    assert event["capture_context"] == context
+    assert event["capture_context"] == {
+        "script_sha256": None,
+        "package": context["package"],
+        "pid": None,
+        "uid": None,
+        "round": context["round"],
+        "pass_tag": context["pass_tag"],
+        "sample_sha256": context["sample_sha256"],
+    }
+    assert "process_binding_missing" in event["capture_gaps"]
+    assert bound_event["capture_context"] == bound_context
     assert event["event_locator"]["json_pointer"] == "/crypto_events/0"
     assert event["event_provenance"] == {
         "completeness": "not_attested",
         "target_app_attribution_verified": False,
     }
-    assert okhttp_event["capture_gaps"] == ["request_body_not_read_non_interference"]
-    assert sqlcipher_event["capture_gaps"] == [
-        "database_export_not_attempted_non_interference"
-    ]
+    assert set(okhttp_event["capture_gaps"]) == {
+        "process_binding_missing",
+        "request_body_not_read_non_interference",
+    }
+    assert set(sqlcipher_event["capture_gaps"]) == {
+        "process_binding_missing",
+        "database_export_not_attempted_non_interference",
+    }
     assert payload["capture_signals"]["probe_coverage"] == signals["probe_coverage"]
 
     report = Report(
