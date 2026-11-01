@@ -425,22 +425,17 @@ def _patch_capture(monkeypatch: pytest.MonkeyPatch, result: dict[str, Any]) -> d
 
 
 def _patch_merge(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """merge 桩：记录 load_runtime_endpoints / merge_and_rerender 的入参。"""
+    """merge 桩：记录 merge_and_rerender 的入参。"""
     from apkscan.dynamic import merge
 
     calls: dict[str, Any] = {
-        "load_path": None,
         "rerender_called": False,
         "rerender_args": None,
     }
 
-    def _fake_load(path: str) -> list:
-        calls["load_path"] = path
-        return ["EP"]  # 非空哨兵，断言被透传给 merge_and_rerender
-
     def _fake_rerender(
         report: Report,
-        endpoints: list,
+        endpoints: list | None,
         out_dir: str,
         base: str = "report",
         *,
@@ -461,7 +456,6 @@ def _patch_merge(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             on_progress("并入运行时端点 ...")
         return {"merged": 2, "new_leads": 1, "total_endpoints": 5, "report_paths": [f"{out_dir}/{base}.json"]}
 
-    monkeypatch.setattr(merge, "load_runtime_endpoints", _fake_load)
     monkeypatch.setattr(merge, "merge_and_rerender", _fake_rerender)
     return calls
 
@@ -521,7 +515,7 @@ def test_analyze_dynamic_calls_merge_after_capture_done(monkeypatch):
     assert args["out_dir"] == "outdir"
     assert args["base"] == "demo"  # base 透传给重渲（与静态写出同 base，避免两套报告）
     assert args["formats"] == ["html", "json"]
-    assert args["endpoints"] == ["EP"]  # load_runtime_endpoints 的结果被透传
+    assert args["endpoints"] is None  # merge 在缓存作用域内自动加载
 
 
 def test_analyze_dynamic_merge_uses_runtime_report_json(monkeypatch):
@@ -532,8 +526,8 @@ def test_analyze_dynamic_merge_uses_runtime_report_json(monkeypatch):
 
     cli._run_dynamic_after_static("a.apk", "com.x", "outdir", _make_report("com.x"), ["json"], "demo")
 
-    assert merge_calls["load_path"] == "outdir/runtime_report.json"
     assert merge_calls["rerender_args"]["runtime_report_path"] == "outdir/runtime_report.json"
+    assert merge_calls["rerender_args"]["endpoints"] is None
 
 
 def test_analyze_dynamic_merge_falls_back_to_out_dir_path(monkeypatch):
@@ -546,7 +540,10 @@ def test_analyze_dynamic_merge_falls_back_to_out_dir_path(monkeypatch):
 
     cli._run_dynamic_after_static("a.apk", "com.x", "outdir", _make_report("com.x"), ["json"], "demo")
 
-    assert merge_calls["load_path"] == os.path.join("outdir", "runtime_report.json")
+    assert merge_calls["rerender_args"]["runtime_report_path"] == os.path.join(
+        "outdir", "runtime_report.json"
+    )
+    assert merge_calls["rerender_args"]["endpoints"] is None
 
 
 @pytest.mark.parametrize("status", [STATUS_SKIPPED, STATUS_ERROR])
@@ -576,10 +573,10 @@ def test_analyze_dynamic_merge_exception_does_not_break_static_report(monkeypatc
     _patch_unpack(monkeypatch)
     _patch_capture(monkeypatch, _done_result())
 
-    def _boom_load(path: str) -> list:
-        raise RuntimeError("merge load exploded")
+    def _boom_rerender(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("merge rerender exploded")
 
-    monkeypatch.setattr(merge, "load_runtime_endpoints", _boom_load)
+    monkeypatch.setattr(merge, "merge_and_rerender", _boom_rerender)
 
     # 不应抛出。
     cli._run_dynamic_after_static("a.apk", "com.x", "outdir", _make_report("com.x"), ["json"], "demo")

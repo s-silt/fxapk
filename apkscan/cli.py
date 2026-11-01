@@ -2463,10 +2463,9 @@ def _merge_runtime_into_report(
         # 运行时端点来源（不动 capture 契约）：优先 report_paths 里的 runtime_report.json，
         # 否则回退到约定路径 out/runtime_report.json。
         runtime_path = _resolve_runtime_report_path(capture_result, out)
-        endpoints = _merge.load_runtime_endpoints(runtime_path)
         stats = _merge.merge_and_rerender(
             report,
-            endpoints,
+            None,
             out,
             base,
             formats=formats,

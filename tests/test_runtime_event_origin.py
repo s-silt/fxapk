@@ -103,7 +103,7 @@ def test_runtime_input_failure_is_not_a_successful_zero_findings_merge(tmp_path,
     path.write_bytes(raw)
     assert isinstance(merge._read_runtime_payload(str(path)), RuntimeReadFailure)
     report = _report()
-    merge.merge_and_rerender(report, [], str(tmp_path), formats=["json"])
+    merge.merge_and_rerender(report, None, str(tmp_path), formats=["json"])
     assert report.meta["runtime_report_input"]["status"] == "unavailable"
     assert {step["status"] for step in report.meta["runtime_merge_steps"].values()} == {"skipped"}
     assert report.meta["visibility"]["sources"]["runtime"]["visibility"] == "partial"

@@ -145,6 +145,9 @@ _runtime_cache_state = threading.local()
 def _runtime_payload_cache() -> Iterator[None]:
     """开一个 per-call 的 runtime_report.json 解析缓存作用域（退出即清空、可安全嵌套）。"""
     prev = getattr(_runtime_cache_state, "cache", None)
+    if prev is not None:
+        yield
+        return
     _runtime_cache_state.cache = {}
     try:
         yield
@@ -297,17 +300,9 @@ def load_runtime_endpoints(runtime_report_path: str) -> list[Endpoint]:
         （runtime / runtime-pcap / runtime-tls-decrypted 等）原样保留，非 runtime* 与合成的钉
         ``runtime-derived``（非 observed-contact，见 :func:`_evidences_from_jsonable`）。
     """
-    from pathlib import Path
-
     path = Path(runtime_report_path)
-    if not path.exists():
-        logger.info("[merge] runtime 报告不存在，无运行时端点可并入：%s", path)
-        return []
-
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        logger.exception("[merge] 读取/解析 runtime 报告失败：%s", path)
+    payload = _read_runtime_payload(runtime_report_path)
+    if isinstance(payload, RuntimeReadFailure):
         return []
 
     raw_endpoints = payload.get("endpoints") if isinstance(payload, dict) else None
@@ -333,7 +328,7 @@ def _endpoint_from_jsonable(item: Any) -> Endpoint | None:
         value = item.get("value")
         kind = item.get("kind")
         if not isinstance(value, str) or not value:
-            logger.warning("[merge] 端点缺少有效 value，跳过：%r", item)
+            logger.warning("[merge] 端点缺少有效 value，跳过")
             return None
         if not isinstance(kind, str) or not kind:
             kind = "url"
@@ -350,7 +345,7 @@ def _endpoint_from_jsonable(item: Any) -> Endpoint | None:
             enrichment=dict(enrichment) if isinstance(enrichment, dict) else {},
         )
     except Exception:  # noqa: BLE001 - 单条端点还原失败不应中断整体
-        logger.exception("[merge] 还原端点失败，跳过：%r", item)
+        logger.exception("[merge] 还原端点失败，跳过")
         return None
 
 
@@ -2589,42 +2584,48 @@ _RUNTIME_MERGE_STEPS: tuple[_RuntimeMergeStep, ...] = (
 
 
 def merge_and_rerender(
-    report: Report, endpoints: list[Endpoint], out_dir: str, base: str = "report", *,
+    report: Report, endpoints: list[Endpoint] | None, out_dir: str, base: str = "report", *,
     formats: list[str] | None = None, on_progress: Callable[[str], None] | None = None,
     runtime_report_path: str | None = None, evidence_namespace: str | None = None,
 ) -> dict[str, Any]:
-    verified = False
-    if evidence_namespace:
-        validate_ledger(report)
-    if evidence_namespace and runtime_report_path:
-        from apkscan.core.integrity import sha256_file
-        identity = report.meta.get("capture_apk_identity", {})
-        payload = _read_runtime_payload(runtime_report_path)
-        original = identity.get("original") if isinstance(identity, Mapping) else None
-        sample_hash = original.get("sha256") if isinstance(original, Mapping) else None
-        sample_bound = (isinstance(sample_hash, str) and len(sample_hash) == 64
-                        and all(c in "0123456789abcdef" for c in sample_hash))
-        rounds = report.meta.get("capture_rounds")
-        round_bound = isinstance(rounds, list) and any(
-            isinstance(row, Mapping) and row.get("sample_sha256") == sample_hash
-            and evidence_namespace == "capture:" + str(row.get("runtime_report_sha256") or "")
-            for row in rounds)
-        sample_bound = sample_bound and round_bound
-        try:
-            verified = sample_bound and (isinstance(identity, Mapping) and identity.get("which") == "original"
-                        and isinstance(payload, Mapping) and payload.get("package_name") == report.package_name
-                        and payload.get("runtime_variant") == "original-runtime"
-                        and evidence_namespace == "capture:" + sha256_file(runtime_report_path))
-        except OSError:
-            verified = False
-    if evidence_namespace and not verified:
-        for endpoint in endpoints:
-            for evidence in endpoint.evidences:
-                if evidence.source in {"runtime", "runtime-pcap"}:
-                    evidence.source = "runtime-derived"
-    with capture_scope(evidence_namespace, verified=verified):
-        return _merge_and_rerender(report, endpoints, out_dir, base, formats=formats,
-                                  on_progress=on_progress, runtime_report_path=runtime_report_path)
+    rr_path = runtime_report_path or str(Path(out_dir) / "runtime_report.json")
+    with _runtime_payload_cache():
+        verified = False
+        if evidence_namespace:
+            validate_ledger(report)
+        payload = _read_runtime_payload(rr_path) if (endpoints is None or evidence_namespace) else None
+        if evidence_namespace:
+            identity = report.meta.get("capture_apk_identity", {})
+            original = identity.get("original") if isinstance(identity, Mapping) else None
+            sample_hash = original.get("sha256") if isinstance(original, Mapping) else None
+            sample_bound = (isinstance(sample_hash, str) and len(sample_hash) == 64
+                            and all(c in "0123456789abcdef" for c in sample_hash))
+            rounds = report.meta.get("capture_rounds")
+            round_bound = isinstance(rounds, list) and any(
+                isinstance(row, Mapping) and row.get("sample_sha256") == sample_hash
+                and evidence_namespace == "capture:" + str(row.get("runtime_report_sha256") or "")
+                for row in rounds)
+            runtime_hash = payload.sha256 if isinstance(payload, RuntimePayload) else ""
+            verified = bool(
+                sample_bound and round_bound
+                and isinstance(identity, Mapping) and identity.get("which") == "original"
+                and isinstance(payload, RuntimePayload)
+                and payload.get("package_name") == report.package_name
+                and payload.get("runtime_variant") == "original-runtime"
+                and evidence_namespace == "capture:" + runtime_hash
+            )
+        with capture_scope(evidence_namespace, verified=verified):
+            if endpoints is None:
+                endpoints = load_runtime_endpoints(rr_path)
+            elif evidence_namespace and not verified:
+                for endpoint in endpoints:
+                    for evidence in endpoint.evidences:
+                        if evidence.source in {"runtime", "runtime-pcap"}:
+                            evidence.source = "runtime-derived"
+            return _merge_and_rerender(
+                report, endpoints, out_dir, base, formats=formats,
+                on_progress=on_progress, runtime_report_path=rr_path,
+            )
 
 
 def _merge_and_rerender(

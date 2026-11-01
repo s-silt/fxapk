@@ -17,6 +17,8 @@ import json
 import warnings as _warnings
 from typing import Any
 
+import pytest
+
 from apkscan.core import infra
 from apkscan.core import visibility
 from apkscan.core.models import (
@@ -433,10 +435,46 @@ def test_load_runtime_endpoints_bad_json_returns_empty_logged(tmp_path, caplog) 
     report_file.write_text("{not valid json", encoding="utf-8")
     import logging
 
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.WARNING):
         eps = merge.load_runtime_endpoints(str(report_file))
     assert eps == []
     assert any("runtime" in rec.message for rec in caplog.records)
+
+
+@pytest.mark.parametrize(
+    ("raw", "reason"),
+    [
+        (b'{"marker":"SYNTHETIC_RAW"}', "runtime_report_size_limit"),
+        (b'{"marker":"SYNTHETIC_RAW","marker":"SYNTHETIC_RAW"}',
+         "runtime_report_invalid_json"),
+        (b'{"marker":"SYNTHETIC_RAW","value":NaN}', "runtime_report_invalid_json"),
+        (b'["SYNTHETIC_RAW"]', "runtime_report_invalid_root"),
+    ],
+)
+def test_load_runtime_endpoints_uses_bounded_fail_closed_reader(
+    tmp_path, monkeypatch, caplog, raw: bytes, reason: str,
+) -> None:
+    from apkscan.dynamic import runtime_input
+
+    path = tmp_path / "runtime_report.json"
+    path.write_bytes(raw)
+    if reason == "runtime_report_size_limit":
+        monkeypatch.setattr(runtime_input, "REPORT_JSON_MAX_BYTES", len(raw) - 1)
+
+    calls: list[str] = []
+    real_read = merge.read_runtime_input
+
+    def _counting_read(candidate) -> Any:
+        calls.append(str(candidate))
+        return real_read(candidate)
+
+    monkeypatch.setattr(merge, "read_runtime_input", _counting_read)
+    with caplog.at_level("WARNING"):
+        assert merge.load_runtime_endpoints(str(path)) == []
+
+    assert calls == [str(path)]
+    assert reason in caplog.text
+    assert "SYNTHETIC_RAW" not in caplog.text
 
 
 def test_load_runtime_endpoints_missing_endpoints_array_returns_empty(tmp_path) -> None:
@@ -934,6 +972,76 @@ def test_merge_and_rerender_reads_runtime_report_once(tmp_path, monkeypatch) -> 
     assert read_counts.get(rr_path, 0) == 1, read_counts
     # 该文件内容也只被 json 解析一次。
     assert loads_count["n"] == 1, loads_count["n"]
+
+
+def test_merge_none_loads_endpoints_and_shares_verified_payload_with_events(
+    tmp_path, monkeypatch,
+) -> None:
+    import apkscan.core.integrity as integrity
+
+    runtime_path = tmp_path / "runtime_report.json"
+    payload = {
+        "package_name": "com.test.app",
+        "runtime_variant": "original-runtime",
+        "endpoints": [
+            {
+                "value": "capture.example.test",
+                "kind": "domain",
+                "evidences": [
+                    {
+                        "source": "runtime",
+                        "location": "source/evidence",
+                        "scope": "case_evidence",
+                    },
+                ],
+            },
+        ],
+        "jsbridge_events": [{"event": "register", "iface": "SyntheticBridge"}],
+    }
+    raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    runtime_path.write_bytes(raw)
+    runtime_hash = _hashlib.sha256(raw).hexdigest()
+    sample_hash = "b" * 64
+    report = _make_report(meta={
+        "capture_apk_identity": {
+            "which": "original",
+            "original": {"sha256": sample_hash},
+        },
+        "capture_rounds": [{
+            "sample_sha256": sample_hash,
+            "runtime_report_sha256": runtime_hash,
+        }],
+    })
+
+    real_read = merge.read_runtime_input
+    reads: list[str] = []
+
+    def _counting_read(path) -> Any:
+        reads.append(str(path))
+        return real_read(path)
+
+    monkeypatch.setattr(merge, "read_runtime_input", _counting_read)
+    monkeypatch.setattr(
+        integrity, "sha256_file",
+        lambda *_args, **_kwargs: pytest.fail("namespace verification reopened runtime report"),
+    )
+
+    merge.merge_and_rerender(
+        report,
+        None,
+        str(tmp_path),
+        formats=["json"],
+        runtime_report_path=str(runtime_path),
+        evidence_namespace=f"capture:{runtime_hash}",
+    )
+
+    assert reads == [str(runtime_path)]
+    assert report.meta["runtime_report_input"]["artifact_sha256"] == runtime_hash
+    endpoint = next(ep for ep in report.endpoints if ep.value == "capture.example.test")
+    assert endpoint.evidences[0].location == f"capture:{runtime_hash}::source/evidence"
+    assert endpoint.evidences[0].source == "runtime"
+    bridge_lead = next(lead for lead in report.leads if lead.value == "JSBridge:SyntheticBridge")
+    assert bridge_lead.source_refs[0].provenance["artifact_sha256"] == runtime_hash
 
 
 def test_runtime_payload_cache_scoped_to_call(tmp_path) -> None:
