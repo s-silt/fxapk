@@ -28,6 +28,7 @@ import re
 import threading
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -359,28 +360,29 @@ def _evidences_from_jsonable(raw: Any, value: str) -> list[Evidence]:
     （不在 ``assemble._OBSERVED_CONTACT_SOURCES``），故不凭空授予"运行时真接触该 peer IP"的信任，
     守住 network_attribution 运行时行为角色的信任边界（见 ``_RUNTIME_DERIVED_SOURCE``）。
     """
+    from apkscan.core.report_io import _evidence_from_dict
+
     evidences: list[Evidence] = []
     if isinstance(raw, list):
         for ev in raw:
-            if not isinstance(ev, dict):
+            if not isinstance(ev, Mapping):
                 continue
-            raw_source = str(ev.get("source", ""))
-            try:
-                scope = EvidenceScope(
-                    str(ev.get("scope", EvidenceScope.LEGACY_UNSPECIFIED.value))
-                )
-            except ValueError:
-                scope = EvidenceScope.LEGACY_UNSPECIFIED
-            evidences.append(
-                scoped_evidence(
-                    source=raw_source if raw_source.startswith("runtime") else _RUNTIME_DERIVED_SOURCE,
-                    location=str(ev.get("location", "")),
-                    snippet=str(ev.get("snippet", "")),
-                    scope=scope,
-                    observed_at=(float(ev["observed_at"]) if type(ev.get("observed_at")) in (int, float)
-                                 and math.isfinite(ev["observed_at"]) else None),
-                )
+            evidence_data = dict(ev)
+            observed_at = evidence_data.get("observed_at")
+            sanitized_observed_at: float | None = None
+            if isinstance(observed_at, (int, float)) and not isinstance(observed_at, bool):
+                candidate_observed_at = float(observed_at)
+                if math.isfinite(candidate_observed_at):
+                    sanitized_observed_at = candidate_observed_at
+            evidence_data["observed_at"] = sanitized_observed_at
+            evidence = _evidence_from_dict(evidence_data)
+            raw_source = evidence_data.get("source")
+            evidence.source = (
+                raw_source
+                if isinstance(raw_source, str) and raw_source.startswith("runtime")
+                else _RUNTIME_DERIVED_SOURCE
             )
+            evidences.append(scoped_evidence(**asdict(evidence)))
     if not evidences:
         evidences.append(
             scoped_evidence(
