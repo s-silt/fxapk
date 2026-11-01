@@ -68,6 +68,73 @@ def test_aggregated_jsbridge_hint_retains_both_occurrences(tmp_path):
     ]
 
 
+def test_message_seconds_and_frida_milliseconds_keep_their_producer_units(tmp_path):
+    from tests.test_merge import _C5B_TS, _c5b_encrypt, _c5b_recipe_meta
+
+    path = tmp_path / "runtime_report.json"
+    message = {
+        "url": "https://config.synthetic.test/config",
+        "ts": 1700000000.125,
+        "response_body": json.dumps(
+            {
+                "data": _c5b_encrypt('{"webConfig":"https://api.synthetic.test/login"}'),
+                "timestamp": _C5B_TS,
+            }
+        ),
+    }
+    frida_event = {"event": "register", "iface": "SyntheticBridge", "ts": 1700000000125}
+    raw = json.dumps(
+        {"messages": [message], "jsbridge_events": [frida_event]},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    path.write_bytes(raw)
+
+    report = _report()
+    report.meta["crypto_recipe"] = _c5b_recipe_meta()
+    assert merge.decrypt_runtime_messages(report, str(path))["decrypted"] == 1
+    assert merge.merge_runtime_traces(report, str(path))["jsbridge_leads"] == 1
+
+    message_refs = [
+        evidence
+        for endpoint in report.endpoints
+        for evidence in endpoint.evidences
+        if evidence.source == "runtime-decrypted"
+    ]
+    frida_lead = next(lead for lead in report.leads if lead.value == "JSBridge:SyntheticBridge")
+    frida_refs = frida_lead.source_refs
+    assert message_refs and frida_refs
+    for refs, pointer, semantics in (
+        (message_refs, "/messages/0", "producer_reported_unix_seconds"),
+        (frida_refs, "/jsbridge_events/0", "producer_reported_unix_milliseconds"),
+    ):
+        assert all(ref.observed_at == 1700000000.125 for ref in refs)
+        assert all(ref.provenance["event_time_semantics"] == semantics for ref in refs)
+        assert all(ref.provenance["artifact_sha256"] == hashlib.sha256(raw).hexdigest() for ref in refs)
+        assert {ref.locator["json_pointer"] for ref in refs} == {pointer}
+
+
+@pytest.mark.parametrize(
+    ("field", "timestamp"),
+    [
+        ("messages", True),
+        ("messages", -1),
+        ("messages", float("inf")),
+        ("messages", 253402300800),
+        ("crypto_events", 253402300800000),
+        ("unknown_events", 1700000000125),
+    ],
+)
+def test_unknown_or_invalid_timestamp_is_unavailable(field, timestamp):
+    from apkscan.dynamic.event_origin import RuntimePayload, bind_event, evidence_coordinates
+
+    payload = RuntimePayload({}, b"{}", "runtime_report.json")
+    event = bind_event(payload, field, 0, {"ts": timestamp})
+    coordinates = evidence_coordinates(event)
+
+    assert coordinates["observed_at"] is None
+    assert coordinates["provenance"]["event_time_semantics"] == "unavailable"
+
+
 @pytest.mark.parametrize(("field", "event", "merger"), [
     ("crypto_events", {"plaintext_b64": base64.b64encode(b'{"webName":"SyntheticBrand"}').decode()}, merge.decrypt_runtime_messages),
     ("sqlcipher_events", {"event": "key_only", "db_path": "/synthetic/application.db", "key": "fixture",
