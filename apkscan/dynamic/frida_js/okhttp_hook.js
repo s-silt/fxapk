@@ -1,12 +1,19 @@
 
 // 取证用途：对取证样本自身在分析机上做运行时观测，产出端点/密钥/独特串等线索，不面向任何第三方基础设施。
 // apkscan 运行时凭据采集（best-effort）：OkHttp 加密前明文 request dump（真实 host + token）。
-Java.perform(function () {
+var _coverage = (typeof globalThis !== 'undefined' && globalThis.__fxapkProbeCoverage) || {
+    perform: function (_family, callback) {
+        try { if (typeof Java !== 'undefined' && (!('available' in Java) || Java.available)) Java.perform(callback); } catch (_) {}
+    },
+    attempted: function () {}, installed: function () {}, registrationError: function () {},
+    trigger: function () {}, drop: function () {}, truncated: function () {}
+};
+_coverage.perform('okhttp', function () {
     var _cred_count = 0;
     var _CRED_CAP = 1500;
     function credEmit(p) {
         try {
-            if (_cred_count >= _CRED_CAP) return;
+            if (_cred_count >= _CRED_CAP) { _coverage.drop('okhttp', 'events'); return; }
             _cred_count += 1;
             p.type = 'apkscan-credential';
             p.source = 'okhttp';
@@ -17,6 +24,7 @@ Java.perform(function () {
         try {
             if (s === null || s === undefined) return null;
             var t = '' + s;
+            if (t.length > n) _coverage.truncated('okhttp', 'events');
             return t.length > n ? t.slice(0, n) : t;
         } catch (e) { return null; }
     }
@@ -24,6 +32,7 @@ Java.perform(function () {
     function dumpRequest(req, where) {
         try {
             if (req === null || req === undefined) return;
+            if (_cred_count >= _CRED_CAP) { _coverage.drop('okhttp', 'events'); return; }
             var url = null, method = null, headersObj = {}, bodyText = null;
             try { url = '' + req.url().toString(); } catch (e) {}
             try { method = '' + req.method(); } catch (e) {}
@@ -31,27 +40,16 @@ Java.perform(function () {
             try {
                 var hs = req.headers();
                 var n = hs.size();
+                if (n > 40) _coverage.truncated('okhttp', 'events');
                 for (var i = 0; i < n && i < 40; i++) {
                     var hn = '' + hs.name(i);
                     var hv = '' + hs.value(i);
                     headersObj[hn] = clipStr(hv, 512);
                 }
             } catch (e) {}
-            // body：把 RequestBody 写进 Buffer 取明文（仅文本类，超大跳过）。
-            try {
-                var body = req.body();
-                if (body !== null && body !== undefined) {
-                    var Buffer = Java.use('okio.Buffer');
-                    var buf = Buffer.$new();
-                    body.writeTo(buf);
-                    var len = -1;
-                    try { len = buf.size(); } catch (e) {}
-                    if (len < 0 || len <= 262144) {
-                        bodyText = clipStr('' + buf.readUtf8(), 8192);
-                    }
-                }
-            } catch (e) {}
+            // RequestBody may consume a stream or retain its sink. Never replay it.
             credEmit({url: url, method: method, headers: headersObj, body: bodyText,
+                      body_capture_status: 'not_read_non_interference',
                       where: where, ts: Date.now()});
         } catch (e) {}
     }
@@ -65,7 +63,9 @@ Java.perform(function () {
         try {
             var RealCall = Java.use(cn);
             if (RealCall.execute) {
+                _coverage.attempted('okhttp', 'execute');
                 RealCall.execute.implementation = function () {
+                    _coverage.trigger('okhttp', 'execute');
                     try {
                         var req = null;
                         try { req = this.request(); } catch (e) {}
@@ -74,10 +74,12 @@ Java.perform(function () {
                     } catch (e) {}
                     return this.execute();
                 };
+                _coverage.installed('okhttp', 'execute');
                 hookedRealCall = true;
                 console.log('[apkscan] OkHttp ' + cn + '.execute hooked');
-            }
+            } else _coverage.registrationError('okhttp', 'execute');
         } catch (e) {
+            _coverage.registrationError('okhttp', 'execute');
             console.log('[apkscan] OkHttp ' + cn + ' hook skip: ' + e);
         }
     });
@@ -91,7 +93,10 @@ Java.perform(function () {
             var Chain = Java.use(cn);
             if (Chain.proceed && Chain.proceed.overload) {
                 try {
-                    Chain.proceed.overload('okhttp3.Request').implementation = function (request) {
+                    var proceed = Chain.proceed.overload('okhttp3.Request');
+                    _coverage.attempted('okhttp', 'proceed');
+                    proceed.implementation = function (request) {
+                        _coverage.trigger('okhttp', 'proceed');
                         try {
                             var idx = -1;
                             try { idx = this.index.value; } catch (e) {}
@@ -100,12 +105,15 @@ Java.perform(function () {
                         } catch (e) {}
                         return this.proceed(request);
                     };
+                    _coverage.installed('okhttp', 'proceed');
                     console.log('[apkscan] OkHttp ' + cn + '.proceed hooked');
                 } catch (e) {
+                    _coverage.registrationError('okhttp', 'proceed');
                     console.log('[apkscan] OkHttp ' + cn + '.proceed overload skip: ' + e);
                 }
-            }
+            } else _coverage.registrationError('okhttp', 'proceed');
         } catch (e) {
+            _coverage.registrationError('okhttp', 'proceed');
             console.log('[apkscan] OkHttp ' + cn + ' chain hook skip: ' + e);
         }
     });

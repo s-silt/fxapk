@@ -26,6 +26,7 @@ from apkscan.core.models import (
 from apkscan.core.restore import is_restored, restore_index
 
 from apkscan.core.closure._shared import _mapping
+from apkscan.core.admission import admitted_refs, evaluate_usage
 
 logger = logging.getLogger(__name__)
 
@@ -65,9 +66,10 @@ def _parse_fofa_row(row: object) -> dict[str, Any] | None:
 
 
 def _runtime_info(endpoint: Endpoint) -> dict[str, Any]:
+    eligible_refs = admitted_refs(endpoint.evidences, "closure_candidate")
     observed = any(
         ev.scope is EvidenceScope.CASE_EVIDENCE and ev.source.startswith("runtime")
-        for ev in endpoint.evidences
+        for ev in eligible_refs
     )
     if not observed:
         # Runtime enrichment has no independent scope marker.  Without a
@@ -82,7 +84,7 @@ def _runtime_info(endpoint: Endpoint) -> dict[str, Any]:
             or any(not isinstance(ref, str) or not ref.startswith(runtime["selected_observation_ref"] + "::") for ref in refs)
             or not any(
                 ev.scope is EvidenceScope.CASE_EVIDENCE and ev.source in OBSERVED_CONTACT_SOURCES
-                and ev.location in refs for ev in endpoint.evidences))
+                and ev.location in refs for ev in eligible_refs))
     ):
         return {"observed": True, "sequence_identity_unconfirmed": True}
     runtime["observed"] = True
@@ -252,12 +254,13 @@ def _select_targets_with_stats(report: Report, max_targets: int) -> tuple[list[E
             continue
         key = (lead.category.value.lower(), _match_value(lead.category.value, lead.value))
         lead_rank[key] = min(lead_rank.get(key, 9), {"HIGH": 0, "MEDIUM": 1, "LOW": 2}.get(lead.confidence.value, 3))
-        if has_case_evidence(lead.source_refs):
+        if admitted_refs(lead.source_refs, "closure_candidate"):
             lead_case_evidence.add(key)
         (shape_suspect if getattr(lead, "shape_uncertain", False) else shape_ok).add(key)
 
     candidates: list[tuple[Endpoint, int, bool]] = []
     scope_excluded = 0
+    admission_excluded = 0
     for endpoint in report.endpoints:
         if endpoint.kind not in {"domain", "ip"} or endpoint.is_private:
             continue
@@ -268,6 +271,9 @@ def _select_targets_with_stats(report: Report, max_targets: int) -> tuple[list[E
         # 当前案件闭环目标名额。混合证据只要有一条 case_evidence 即可继续。
         if not has_case_evidence(endpoint.evidences) and key not in lead_case_evidence:
             scope_excluded += 1
+            continue
+        if evaluate_usage(endpoint.evidences, "closure_candidate")["state"] != "allowed" and key not in lead_case_evidence:
+            admission_excluded += 1
             continue
         candidates.append((endpoint, lead_rank[key], key in shape_suspect and key not in shape_ok))
 
@@ -289,6 +295,7 @@ def _select_targets_with_stats(report: Report, max_targets: int) -> tuple[list[E
     selected = ordered[:max_targets]
     dropped = ordered[max_targets:]
     stats: dict[str, object] = {
+        "admission_excluded": admission_excluded,
         "candidate_total": len(ordered),
         "selected": len(selected),
         "limit": max_targets,

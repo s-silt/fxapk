@@ -15,99 +15,99 @@
   "inventory": {
     "candidates": [
       {
-        "candidate_id": "p1:7b39c45c72a52e7a6bd7f34106401e5c2013a67e07d1f9885fc68dcc31429c72",
-        "collection": "leads",
-        "display_value": "100.64.0.20",
-        "evidence_id": "ev-carry-a",
-        "has_evidence": true,
-        "manifest_sha256": "5f7c872199e02f14c1ec931f0c2f47598073b7bf15ba26be3b7b945695c48566",
-        "package_id": "543460f7e7d6f8388bf1472d394c79c07be1a7671bbfa9cc10723ea724661f48",
-        "parent_id": "lead:c4f1127ac913e67ef3d303132e250888aa8a04a4eb90f5699397bdf1c10ba79c",
-        "report_relpath": "report.json",
-        "scope": "case_evidence"
-      },
-      {
-        "candidate_id": "p1:bd76188a377f8b4c8faf1916fa33340fecb18a768506c28844c9c3845f9636f1",
-        "collection": "leads",
-        "display_value": "100.64.0.20",
-        "evidence_id": "ev-carry-b",
-        "has_evidence": true,
-        "manifest_sha256": "b4d3b7b16d5d3577eac1d4ab67420f39e13a766534a2e77e4526b6946cf9785d",
-        "package_id": "6c35a94d7ff294955da3909bc0b6373b416fce1945a77ab60040246befca30d9",
-        "parent_id": "lead:c4f1127ac913e67ef3d303132e250888aa8a04a4eb90f5699397bdf1c10ba79c",
-        "report_relpath": "report.json",
-        "scope": "case_evidence"
-      },
-      {
-        "candidate_id": "p1:186000761eeff9120318a9bba915e5de6d7bb9c612b8efe00a6b6f4c3f683c62",
+        "candidate_id": "p1:4f3a1221d1acb8f97289b6ccac39a7058c5647e97a8367b38acd0d15682ae54c",
         "collection": "leads",
         "display_value": "hold.example.test",
         "evidence_id": "ev-hold",
         "has_evidence": true,
-        "manifest_sha256": "b330bc1642e02cb4124ea8a57273945225cbad8f5e6546dbdaf8ef270c5889c0",
-        "package_id": "7a31780ccf886876593a801a7cb73844eaeb62aeaf81346db67b19a92003a970",
+        "manifest_sha256": "7738b1927eccadd0ef19321033d7b2f57ae5baf2bdc20bc6b4a9de9dee509122",
+        "package_id": "389319f45a3c9cfd945645086ea29e519976c7cdc9f66f915572f9e3556625bb",
         "parent_id": "lead:c2b040a4d0fc3bc05181d1dd1c49cc816d5faec17ab37fa108153e0201bdbeaa",
         "report_relpath": "report.json",
         "scope": "case_evidence"
       },
       {
-        "candidate_id": "p1:5a09f6b24ed63e08dc8d1b5a19d7d49e007b895f2e41983f202ffe7af1ca4859",
+        "candidate_id": "p1:033c16fe8a2a8e4f1c3253cc92ee815ac894bf8cb3fab355ee8a948b3752bcd3",
+        "collection": "leads",
+        "display_value": "100.64.0.20",
+        "evidence_id": "ev-carry-a",
+        "has_evidence": true,
+        "manifest_sha256": "4e7a1d34b5d36a05f0bf6ddb45c8d84f31ac3067c3e388d2e014f41074bc259f",
+        "package_id": "6fe5337d55957d472bfcc22c6106671a9ff93fb81f1ae4fbb261baafab559a02",
+        "parent_id": "lead:c4f1127ac913e67ef3d303132e250888aa8a04a4eb90f5699397bdf1c10ba79c",
+        "report_relpath": "report.json",
+        "scope": "case_evidence"
+      },
+      {
+        "candidate_id": "p1:523993a32c6676d4a9b89736b73737c6efe8cb2f0e2241f6279fa493867b3396",
         "collection": "leads",
         "display_value": "100.64.0.30",
-        "evidence_id": "ev-block-a",
+        "evidence_id": "ev-block-b",
         "has_evidence": true,
-        "manifest_sha256": "361079540b0fd9bec7b780bd5f1878328953811407111e7be4e9b80b5ebd819e",
-        "package_id": "86f55d837ebe6f33b637f1f387794aca4030928bbac29278c3c0344550628ad0",
+        "manifest_sha256": "a513e43d2340a1f1d958a5f5b4706743ccda32772dbcdc74a236ef3eaa1bc454",
+        "package_id": "c672c34cfd694e48ae30f5ae0afa34c76221d300438c44de1d243f03c280e046",
         "parent_id": "lead:e7a42b57e8242b97aacfdf63a9c066fa6a16a4196be09b6760e8da804536dd4c",
         "report_relpath": "report.json",
         "scope": "case_evidence"
       },
       {
-        "candidate_id": "p1:fea007baf90eefc38474070c57579677aaa7c781a28a86a37840c3aa57e259fa",
+        "candidate_id": "p1:1bf7977bd4515108653823d9f14fde8b6a69bc258b2fec961628f546de613f3b",
+        "collection": "leads",
+        "display_value": "100.64.0.20",
+        "evidence_id": "ev-carry-b",
+        "has_evidence": true,
+        "manifest_sha256": "797d019376fafa51aee15fa9e3acb6fbde38c72bac842fb539d3d6312d897268",
+        "package_id": "d2d1c8e8a56a97777f5ca00d0fc5b817d52d5f3a16a88a25265bdc710926607e",
+        "parent_id": "lead:c4f1127ac913e67ef3d303132e250888aa8a04a4eb90f5699397bdf1c10ba79c",
+        "report_relpath": "report.json",
+        "scope": "case_evidence"
+      },
+      {
+        "candidate_id": "p1:bfee8eb5fe25b84aa33e281c2720823eda632a27b141c59957903cc002f47c8d",
         "collection": "leads",
         "display_value": "100.64.0.30",
-        "evidence_id": "ev-block-b",
+        "evidence_id": "ev-block-a",
         "has_evidence": true,
-        "manifest_sha256": "4ff669518340dfd4fb006fac87c1dac33bb8c0ecc6cfd3e1b9c214a99bc33585",
-        "package_id": "a45e0ae824581d4626afa81cf574e5bfdf2c146d0050cb15721ca6de7947697e",
+        "manifest_sha256": "b7fb7eb12e2f9dba244bb7f9454709532c35aa30efff0bbe5675170495e73520",
+        "package_id": "e7dae00f564252c1d4d433a2b211f3b6a685b2c83ee338a130afad7e5ad5129c",
         "parent_id": "lead:e7a42b57e8242b97aacfdf63a9c066fa6a16a4196be09b6760e8da804536dd4c",
         "report_relpath": "report.json",
         "scope": "case_evidence"
       }
     ],
     "case_id": "CASE-GOLDEN-REPLAY",
-    "fingerprint": "2b5bbce160852c344dfc99feb5d3dd1ce6457fbaf5d9445758d8c0fbc0d24f70",
+    "fingerprint": "15d9d8d390b4b4149a61039c6344662d7c48c472b2c6c6b96c1c6521d5fb468f",
     "issues": [],
     "packages": [
       {
-        "directory_name": "pkg-carry",
-        "manifest_sha256": "5f7c872199e02f14c1ec931f0c2f47598073b7bf15ba26be3b7b945695c48566",
-        "package_id": "543460f7e7d6f8388bf1472d394c79c07be1a7671bbfa9cc10723ea724661f48",
-        "report_sha256": "eefce36d44c56981c194a6e75d19dedabf19f68134fb25d47e17d2c3fe72107f"
-      },
-      {
-        "directory_name": "pkg-carry-extra",
-        "manifest_sha256": "b4d3b7b16d5d3577eac1d4ab67420f39e13a766534a2e77e4526b6946cf9785d",
-        "package_id": "6c35a94d7ff294955da3909bc0b6373b416fce1945a77ab60040246befca30d9",
-        "report_sha256": "a8999b2daf2d2d36425fbb3d026655465d9c31a7fdb7533b5c2696b78e19827a"
-      },
-      {
         "directory_name": "pkg-hold",
-        "manifest_sha256": "b330bc1642e02cb4124ea8a57273945225cbad8f5e6546dbdaf8ef270c5889c0",
-        "package_id": "7a31780ccf886876593a801a7cb73844eaeb62aeaf81346db67b19a92003a970",
-        "report_sha256": "a2886f1441fb150b1e400726809427efb20a75679640f10bcccfe0b5b195a134"
+        "manifest_sha256": "7738b1927eccadd0ef19321033d7b2f57ae5baf2bdc20bc6b4a9de9dee509122",
+        "package_id": "389319f45a3c9cfd945645086ea29e519976c7cdc9f66f915572f9e3556625bb",
+        "report_sha256": "85aace972540a4c3f90f0da42da6f70e5f017e443fecd570a7680b296fb8c445"
       },
       {
-        "directory_name": "pkg-block",
-        "manifest_sha256": "361079540b0fd9bec7b780bd5f1878328953811407111e7be4e9b80b5ebd819e",
-        "package_id": "86f55d837ebe6f33b637f1f387794aca4030928bbac29278c3c0344550628ad0",
-        "report_sha256": "352c3defcb485294b0479f6c2c24868e245da6edd62dbe9dd2b70b9b3e551d8e"
+        "directory_name": "pkg-carry",
+        "manifest_sha256": "4e7a1d34b5d36a05f0bf6ddb45c8d84f31ac3067c3e388d2e014f41074bc259f",
+        "package_id": "6fe5337d55957d472bfcc22c6106671a9ff93fb81f1ae4fbb261baafab559a02",
+        "report_sha256": "a8913fa0da7706edaa68da86cb07df918ae01319b3258414480f5e0a1df158d4"
       },
       {
         "directory_name": "pkg-block-extra",
-        "manifest_sha256": "4ff669518340dfd4fb006fac87c1dac33bb8c0ecc6cfd3e1b9c214a99bc33585",
-        "package_id": "a45e0ae824581d4626afa81cf574e5bfdf2c146d0050cb15721ca6de7947697e",
-        "report_sha256": "85b63ab196d07b0d914b7c2edeaf6667d97a996f394759eb6585193969746e63"
+        "manifest_sha256": "a513e43d2340a1f1d958a5f5b4706743ccda32772dbcdc74a236ef3eaa1bc454",
+        "package_id": "c672c34cfd694e48ae30f5ae0afa34c76221d300438c44de1d243f03c280e046",
+        "report_sha256": "0a0ef64a60a972518f28be07d67afb5e810b5092a4d8bd383d4e6c4a37564ac4"
+      },
+      {
+        "directory_name": "pkg-carry-extra",
+        "manifest_sha256": "797d019376fafa51aee15fa9e3acb6fbde38c72bac842fb539d3d6312d897268",
+        "package_id": "d2d1c8e8a56a97777f5ca00d0fc5b817d52d5f3a16a88a25265bdc710926607e",
+        "report_sha256": "1c1e1c528564c1b7b01a75c6ac735b99fb042437071e75c203dcb6219667a25a"
+      },
+      {
+        "directory_name": "pkg-block",
+        "manifest_sha256": "b7fb7eb12e2f9dba244bb7f9454709532c35aa30efff0bbe5675170495e73520",
+        "package_id": "e7dae00f564252c1d4d433a2b211f3b6a685b2c83ee338a130afad7e5ad5129c",
+        "report_sha256": "39d8a5181bf97faf7d8d6bef746f2ec9465de01851bdd6bd4e10e7e49b4e07a4"
       }
     ],
     "schema_version": "1.0",
@@ -120,50 +120,50 @@
   "materialize": {
     "coverage": {
       "case_id": "CASE-GOLDEN-REPLAY",
-      "decisions_fingerprint": "b8902e3250a620b8b98a700d74171008115b6c713a4cd65b7bd3637aede31c08",
+      "decisions_fingerprint": "53e687bb8620cb200cc1ded5bc98a9b0341c7462f8bad7776aede9a90690697e",
       "entries": [
         {
-          "candidate_id": "p1:186000761eeff9120318a9bba915e5de6d7bb9c612b8efe00a6b6f4c3f683c62",
+          "candidate_id": "p1:033c16fe8a2a8e4f1c3253cc92ee815ac894bf8cb3fab355ee8a948b3752bcd3",
+          "disposition": "pending_with_action",
+          "materialized_from": "skeleton",
+          "next_action": "在 queue.md 复核该 parent 并用 decide 记录判决",
+          "reason": "human 队列尚未判决（T1:advice=建议调证）"
+        },
+        {
+          "candidate_id": "p1:1bf7977bd4515108653823d9f14fde8b6a69bc258b2fec961628f546de613f3b",
+          "disposition": "pending_with_action",
+          "materialized_from": "skeleton",
+          "next_action": "在 queue.md 复核该 parent 并用 decide 记录判决",
+          "reason": "human 队列尚未判决（T1:advice=建议调证）"
+        },
+        {
+          "candidate_id": "p1:4f3a1221d1acb8f97289b6ccac39a7058c5647e97a8367b38acd0d15682ae54c",
           "disposition": "report_only",
           "materialized_from": "decision:<decision:1>",
           "reason": "[判决 <decision:1>] synthetic hold"
         },
         {
-          "candidate_id": "p1:5a09f6b24ed63e08dc8d1b5a19d7d49e007b895f2e41983f202ffe7af1ca4859",
+          "candidate_id": "p1:523993a32c6676d4a9b89736b73737c6efe8cb2f0e2241f6279fa493867b3396",
           "disposition": "pending_with_action",
           "materialized_from": "skeleton",
           "next_action": "在 queue.md 复核该 parent 并用 decide 记录判决",
           "reason": "human 队列尚未判决（T1:runtime_contact）"
         },
         {
-          "candidate_id": "p1:7b39c45c72a52e7a6bd7f34106401e5c2013a67e07d1f9885fc68dcc31429c72",
-          "disposition": "pending_with_action",
-          "materialized_from": "skeleton",
-          "next_action": "在 queue.md 复核该 parent 并用 decide 记录判决",
-          "reason": "human 队列尚未判决（T1:advice=建议调证）"
-        },
-        {
-          "candidate_id": "p1:bd76188a377f8b4c8faf1916fa33340fecb18a768506c28844c9c3845f9636f1",
-          "disposition": "pending_with_action",
-          "materialized_from": "skeleton",
-          "next_action": "在 queue.md 复核该 parent 并用 decide 记录判决",
-          "reason": "human 队列尚未判决（T1:advice=建议调证）"
-        },
-        {
-          "candidate_id": "p1:fea007baf90eefc38474070c57579677aaa7c781a28a86a37840c3aa57e259fa",
+          "candidate_id": "p1:bfee8eb5fe25b84aa33e281c2720823eda632a27b141c59957903cc002f47c8d",
           "disposition": "pending_with_action",
           "materialized_from": "skeleton",
           "next_action": "在 queue.md 复核该 parent 并用 decide 记录判决",
           "reason": "human 队列尚未判决（T1:runtime_contact）"
         }
       ],
-      "inventory_fingerprint": "2b5bbce160852c344dfc99feb5d3dd1ce6457fbaf5d9445758d8c0fbc0d24f70",
+      "inventory_fingerprint": "15d9d8d390b4b4149a61039c6344662d7c48c472b2c6c6b96c1c6521d5fb468f",
       "materializer_version": "phase2-materialize/1.1",
       "schema_version": "1.0"
     },
     "report": {
       "case_id": "CASE-GOLDEN-REPLAY",
-      "decisions_fingerprint": "b8902e3250a620b8b98a700d74171008115b6c713a4cd65b7bd3637aede31c08",
+      "decisions_fingerprint": "53e687bb8620cb200cc1ded5bc98a9b0341c7462f8bad7776aede9a90690697e",
       "entry_count": 5,
       "schema_version": "phase2-materialize/1.1",
       "stale_decisions": [
@@ -192,8 +192,8 @@
         "scope": "parent"
       }
     ],
-    "new_fingerprint": "2b5bbce160852c344dfc99feb5d3dd1ce6457fbaf5d9445758d8c0fbc0d24f70",
-    "old_fingerprint": "18f47269f7f876290da6238d23e45990ed8d363af429ce42af2a1aae2634809d",
+    "new_fingerprint": "15d9d8d390b4b4149a61039c6344662d7c48c472b2c6c6b96c1c6521d5fb468f",
+    "old_fingerprint": "a2968b575893063d03fc480f11f5f4ba5140665d7113a028cf5b2a9d7e80e2c4",
     "summary": {
       "blocked_stale": 1,
       "carry_with_note": 1,
@@ -203,7 +203,7 @@
   },
   "triage": {
     "case_id": "CASE-GOLDEN-REPLAY",
-    "inventory_fingerprint": "2b5bbce160852c344dfc99feb5d3dd1ce6457fbaf5d9445758d8c0fbc0d24f70",
+    "inventory_fingerprint": "15d9d8d390b4b4149a61039c6344662d7c48c472b2c6c6b96c1c6521d5fb468f",
     "issues": [],
     "parents": [
       {
@@ -212,7 +212,7 @@
         "conflicts": [],
         "display": "hold.example.test",
         "member_candidate_ids": [
-          "p1:186000761eeff9120318a9bba915e5de6d7bb9c612b8efe00a6b6f4c3f683c62"
+          "p1:4f3a1221d1acb8f97289b6ccac39a7058c5647e97a8367b38acd0d15682ae54c"
         ],
         "merged_into": [],
         "packages": 1,
@@ -227,8 +227,8 @@
         "conflicts": [],
         "display": "100.64.0.20",
         "member_candidate_ids": [
-          "p1:7b39c45c72a52e7a6bd7f34106401e5c2013a67e07d1f9885fc68dcc31429c72",
-          "p1:bd76188a377f8b4c8faf1916fa33340fecb18a768506c28844c9c3845f9636f1"
+          "p1:033c16fe8a2a8e4f1c3253cc92ee815ac894bf8cb3fab355ee8a948b3752bcd3",
+          "p1:1bf7977bd4515108653823d9f14fde8b6a69bc258b2fec961628f546de613f3b"
         ],
         "merged_into": [],
         "packages": 2,
@@ -245,8 +245,8 @@
         "conflicts": [],
         "display": "100.64.0.30",
         "member_candidate_ids": [
-          "p1:5a09f6b24ed63e08dc8d1b5a19d7d49e007b895f2e41983f202ffe7af1ca4859",
-          "p1:fea007baf90eefc38474070c57579677aaa7c781a28a86a37840c3aa57e259fa"
+          "p1:523993a32c6676d4a9b89736b73737c6efe8cb2f0e2241f6279fa493867b3396",
+          "p1:bfee8eb5fe25b84aa33e281c2720823eda632a27b141c59957903cc002f47c8d"
         ],
         "merged_into": [],
         "packages": 2,

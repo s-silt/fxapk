@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from apkscan.analyzers.js_bundle import (
     FINDING_AES_KEY,
     FINDING_APPID,
@@ -93,6 +95,17 @@ def test_uniapp_literal_url_extracted_and_length_not_misjudged() -> None:
     assert result.leads == []
     assert result.meta["js_files_scanned"] == 1
     assert result.meta["js_endpoint_count"] == len(result.endpoints)
+
+
+@pytest.mark.parametrize("quote", ["'", '"', "`"])
+def test_literal_locator_uses_the_matching_quote_group(quote: str) -> None:
+    url = "https://quoted.example.test/api"
+    payload = f"const endpoint={quote}{url}{quote};".encode()
+    result = _analyze({"assets/www/main.js": payload})
+    endpoint = next(item for item in result.endpoints if item.value == url)
+    evidence = next(item for item in endpoint.evidences if item.source == "js")
+    assert evidence.locator["char_offset"] == payload.decode().index(url)
+    assert evidence.locator["offset_unit"] == "decoded-text-codepoint"
 
 
 def test_length_top_outside_literal_never_extracted() -> None:
@@ -363,7 +376,7 @@ def test_url_across_chunk_boundary_not_split() -> None:
     """跨 4MB 块边界的 URL 字面量被块间重叠完整抽到，不被切断。"""
     from apkscan.analyzers.js_bundle import _SCAN_CHUNK_BYTES
 
-    url = "https://boundary-c2.example-fraud.cn/path"
+    url = "https://boundary-c2.example.test/path"
     lit = f"var u='{url}';"
     # 让字面量起点落在首块末尾的重叠窗内（块边界 _SCAN_CHUNK_BYTES 之前 100 字节起）。
     head = b"a" * (_SCAN_CHUNK_BYTES - 100)
@@ -377,7 +390,7 @@ def test_overlap_does_not_double_count_endpoint() -> None:
     """落在重叠窗内的端点被相邻两块各扫一次，collector 去重后仍只产 1 个端点。"""
     from apkscan.analyzers.js_bundle import _SCAN_CHUNK_BYTES, _SCAN_OVERLAP_CHARS
 
-    url = "https://dedup-c2.example-fraud.cn/x"
+    url = "https://dedup-c2.example.test/x"
     lit = f"var u='{url}';"
     # 放在重叠窗中部（块0尾 + 块1头都覆盖）。
     pos = _SCAN_CHUNK_BYTES - _SCAN_OVERLAP_CHARS // 2

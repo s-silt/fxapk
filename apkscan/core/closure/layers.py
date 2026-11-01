@@ -15,6 +15,7 @@ from apkscan.core.models import Endpoint, EvidenceScope
 from apkscan.core.attribution import classify_network
 from apkscan.network.categories import CAT_CDN, CAT_SECURITY_PROXY
 from apkscan.core.source_status import normalize_source_status_map, provider_payload_if_hit
+from apkscan.core.source_semantics import source_contexts
 
 from apkscan.core.closure._shared import (
     CLOSURE_COMPLETE,
@@ -395,7 +396,7 @@ def _hosting_layer(enrichment: Mapping[str, object]) -> dict[str, object]:
     )
 
 
-def _request_layer(hosting: Mapping[str, object], origin: Mapping[str, object]) -> dict[str, object]:
+def _request_target_layer(hosting: Mapping[str, object], origin: Mapping[str, object]) -> dict[str, object]:
     evidence = _mapping(hosting.get("evidence"))
     infrastructure_provider = evidence.get("provider")
     request_evidence = {
@@ -481,6 +482,29 @@ def _request_layer(hosting: Mapping[str, object], origin: Mapping[str, object]) 
     return _layer(CLOSURE_FAILED, reason="no executable provider request target")
 
 
+def _request_layer(hosting: Mapping[str, object], origin: Mapping[str, object]) -> dict[str, object]:
+    result = _request_target_layer(hosting, origin)
+    evidence = _mapping(result.get("evidence"))
+    edge_first = origin.get("required") is True and origin.get("status") != CLOSURE_COMPLETE
+    evidence.update({
+        "provider_role": "edge_delivery" if edge_first else "hosting_or_network_provider",
+        "relationship_status": (
+            "supported_by_layer_evidence" if result["status"] == CLOSURE_COMPLETE
+            else "candidate" if evidence.get("provider") else "unknown"
+        ),
+        "required_identifiers": ["IP/domain", "port/protocol", "event time window with timezone", "App-to-endpoint evidence"],
+        "verification_questions": [
+            "Did this provider serve the identified resource during the event window?",
+            "Was the resource assigned directly or through a reseller; who held the tenant/account binding?",
+        ],
+        "legal_request_channel_status": "not_verified",
+        "incident_time_correlation": "not_established",
+        "establishes_business_ownership": False,
+    })
+    result["evidence"] = evidence
+    return result
+
+
 def _runtime_layer(endpoint: Endpoint) -> dict[str, object]:
     runtime = _runtime_info(endpoint)
     runtime_evidence = [
@@ -534,6 +558,7 @@ def _single_target_closure(endpoint: Endpoint) -> dict[str, object]:
         "status": status,
         "layers": layers,
         "source_status": _normalize_source_status(enrichment),
+        "source_context": source_contexts(enrichment),
         "origin": origin,
         "actual_service_operator": {"status": "unknown", "evidence": {}},
         "gaps": gaps,
@@ -682,6 +707,7 @@ def assemble_target_closure(endpoint: Endpoint) -> dict[str, object]:
         "resolved_ips": [str(target.get("value")) for target in resolved_targets],
         "resolved_ip_selection": resolved_ip_selection,
         "resolved_ip_targets": resolved_targets,
+        "source_context": source_contexts(endpoint.enrichment),
         "actual_service_operator": {"status": "unknown", "evidence": {}},
         "gaps": gaps,
     }

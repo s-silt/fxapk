@@ -33,7 +33,7 @@ import importlib.resources
 import json
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from apkscan.core import chainaddr
@@ -165,7 +165,7 @@ FRIDA_OKHTTP_HOOK_JS: str = _load_frida_js("okhttp_hook.js")
 
 
 # ---------------------------------------------------------------------------
-# 第二波：SQLCipher/SQLite 落地库导出 —— hook openDatabase 抓库路径+key，导明文库回传
+# 第二波：SQLCipher/SQLite 落地库观察 —— hook openDatabase 记录库路径+key
 # ---------------------------------------------------------------------------
 #
 # 物证价值（全工程最高之一）：诈骗 app 本地落地库（SQLCipher 加密）藏 IM 聊天/话术剧本、
@@ -173,16 +173,11 @@ FRIDA_OKHTTP_HOOK_JS: str = _load_frida_js("okhttp_hook.js")
 #
 # 机制：hook net.sqlcipher.database.SQLiteDatabase.openOrCreateDatabase（SQLCipher 加密库）
 # 与 android.database.sqlite.SQLiteDatabase.openDatabase（普通 SQLite），抓**库路径 + password/
-# raw key**；对 SQLCipher 库随即用 rawExecSQL 注入
-#   ATTACH DATABASE '<tmp>/<name>.plain.db' AS plain KEY ''; SELECT sqlcipher_export('plain'); DETACH plain;
-# 把明文库导到设备临时目录，send() 回传 {plain_path, db_path, key}。
+# raw key**；不会对 supplied database 发起 SQL、导出、文件访问或连接写入，
+# 只以 key_only + not_attempted_non_interference 回传 {db_path, key}。
 #
-# v3/v4 KDF 适配（核验坑）：SQLCipher v3/v4 默认 KDF 迭代数不同，导出前先按 v4 默认尝试，
-# 失败则 `PRAGMA cipher_compatibility = 3` 再试。导出失败必降级（event=key_only，仅回传
-# key + 原库路径，由 merge 写人工解密 playbook 进 Lead.notes），**不崩、不假成功**。
-#
-# 时序依赖（核验坑）：sqlcipher_export 需库**已被 app 打开**——hook 在 openDatabase 回调里
-# 即时导出（库此刻已开），但 launch-only 抓不全未触发打开的库。merge/文档侧诚实标注。
+# 当前 hook 只保留非干扰观察；normalize_sqlcipher_event 仍接受旧报告中的 exported
+# 事件，以便读取历史材料，但不代表本次 hook 会产生导出内容。
 #
 # R8 混淆护栏：SQLCipher 类名随版本/混淆而变，多 fallback 类名 + 每步 try/catch，hook 不到
 # 只 console.log、绝不崩。
@@ -237,7 +232,11 @@ FRIDA_ACCESSIBILITY_HOOK_JS: str = _load_frida_js("accessibility_hook.js")
 # ---------------------------------------------------------------------------
 
 
-def make_message_handler(sink: list[dict[str, Any]]) -> Callable[[dict[str, Any], Any], None]:
+def make_message_handler(
+    sink: list[dict[str, Any]],
+    *,
+    capture_context: Mapping[str, Any] | None = None,
+) -> Callable[[dict[str, Any], Any], None]:
     """构造 Frida ``script.on('message', handler)`` 回调，把 crypto 事件存进 ``sink``。
 
     handler 只认 ``message['type']=='send'`` 且 ``payload['type']==CRYPTO_MSG_TYPE`` 的消息；
@@ -252,6 +251,8 @@ def make_message_handler(sink: list[dict[str, Any]]) -> Callable[[dict[str, Any]
         ``handler(message, _data)``。第二参是 send 的 ArrayBuffer→bytes；本设计二进制都走
         payload 字符串，该参一般为 None，留参（``_data``）以符合 Frida 回调签名。
     """
+
+    context_snapshot = dict(capture_context) if capture_context is not None else None
 
     def handler(message: Any, _data: Any = None) -> None:
         try:
@@ -272,6 +273,8 @@ def make_message_handler(sink: list[dict[str, Any]]) -> Callable[[dict[str, Any]
             event = normalize_crypto_event(payload)
             if event is None:
                 return
+            if context_snapshot is not None:
+                event["capture_context"] = dict(context_snapshot)
             if len(sink) >= _SINK_CAP:
                 if len(sink) == _SINK_CAP:
                     logger.warning("[cryptohook] crypto 事件达上限 %d，后续丢弃", _SINK_CAP)
@@ -288,6 +291,8 @@ def make_typed_handler(
     sink: list[dict[str, Any]],
     msg_type: str,
     normalizer: Callable[[Any], dict[str, Any] | None],
+    *,
+    capture_context: Mapping[str, Any] | None = None,
 ) -> Callable[[dict[str, Any], Any], None]:
     """通用 on_message 工厂：只收 ``payload['type']==msg_type`` 的 send 消息进 ``sink``。
 
@@ -295,6 +300,8 @@ def make_typed_handler(
     crypto/jsbridge/sensitive_api 三通道复用。本工厂**不记 error 日志**（避免多 handler
     重复刷；error 由 crypto 通道的 make_message_handler 统一记一次）。
     """
+
+    context_snapshot = dict(capture_context) if capture_context is not None else None
 
     def handler(message: Any, _data: Any = None) -> None:
         try:
@@ -306,6 +313,8 @@ def make_typed_handler(
             event = normalizer(payload)
             if event is None:
                 return
+            if context_snapshot is not None:
+                event["capture_context"] = dict(context_snapshot)
             if len(sink) >= _SINK_CAP:
                 if len(sink) == _SINK_CAP:
                     logger.warning("[cryptohook] %s 事件达上限 %d，后续丢弃", msg_type, _SINK_CAP)
@@ -622,7 +631,7 @@ def _normalize_okhttp_credential(payload: dict[str, Any], source: str = "okhttp"
     body_raw = _as_clean_str(payload.get("body"), 8192)
     body = _mask_phone_numbers(body_raw) if body_raw else ""
 
-    return {
+    result = {
         "source": source,
         "url": url,
         "method": _as_clean_str(payload.get("method")) or "",
@@ -630,6 +639,9 @@ def _normalize_okhttp_credential(payload: dict[str, Any], source: str = "okhttp"
         "body": body,
         "ts": payload.get("ts") if isinstance(payload.get("ts"), int) else None,
     }
+    if payload.get("body_capture_status") == "not_read_non_interference":
+        result["body_capture_status"] = "not_read_non_interference"
+    return result
 
 
 def _normalize_sharedprefs_credential(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -723,7 +735,7 @@ def normalize_sqlcipher_event(payload: Any) -> dict[str, Any] | None:
     **sqlcipher_event 权威 schema**（producer=Frida FRIDA_SQLCIPHER_HOOK_JS，
     consumer=merge_runtime_databases；落进 runtime_report.json['sqlcipher_events']）：
 
-    - ``event``: ``exported``（已导出明文 .plain.db）| ``key_only``（导出失败降级，仅 key+路径）。
+    - ``event``: ``exported``（旧导出材料）| ``key_only``（只观察 key+路径，未导出）。
     - ``db_path``: 设备上原加密库路径（必有，否则无取证价值 → None）。
     - ``plain_path``: 导出的明文库设备路径（exported 才有；key_only 为空）。
     - ``key``: 库密钥（**高敏**，截断不留全文，凭它可人工解密原库）。
@@ -746,7 +758,7 @@ def normalize_sqlcipher_event(payload: Any) -> dict[str, Any] | None:
     raw_key = payload.get("key")
     key = _truncate_secret(str(raw_key)) if isinstance(raw_key, str) and raw_key.strip() else ""
 
-    return {
+    result = {
         "event": event,
         "db_path": db_path,
         "plain_path": plain_path or "",
@@ -754,6 +766,9 @@ def normalize_sqlcipher_event(payload: Any) -> dict[str, Any] | None:
         "where": _as_clean_str(payload.get("where")) or "",
         "ts": payload.get("ts") if isinstance(payload.get("ts"), int) else None,
     }
+    if payload.get("export_status") == "not_attempted_non_interference":
+        result["export_status"] = "not_attempted_non_interference"
+    return result
 
 
 # ---------------------------------------------------------------------------

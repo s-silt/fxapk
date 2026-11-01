@@ -26,6 +26,7 @@ import time
 
 import psutil
 
+from apkscan.core.models import AnalyzerResult
 from apkscan.core.registry import discover_analyzers
 
 logger = logging.getLogger(__name__)
@@ -245,14 +246,50 @@ def _worker_analyze(name: str) -> tuple:
     analyzer = (_WORKER_STATE.get("analyzers") or {}).get(name)
     if analyzer is None:
         return (name, None, "worker 未发现该分析器")
+    return _invoke_analyzer(snap, name, analyzer)
+
+
+def _invoke_analyzer(ctx: object, name: str, analyzer: object) -> tuple:
+    ledger = getattr(ctx, "file_read_ledger", None)
+    begin_scope = getattr(ledger, "begin_scope", None)
+    end_scope = getattr(ledger, "end_scope", None)
+    if callable(begin_scope):
+        begin_scope()
+    def read_gaps() -> list[dict[str, str]]:
+        if not callable(end_scope):
+            return []
+        raw = end_scope(name)
+        if not isinstance(raw, list):
+            return []
+        gaps: list[dict[str, str]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            path, source, reason = item.get("path"), item.get("source"), item.get("reason")
+            if (
+                isinstance(path, str)
+                and isinstance(source, str)
+                and isinstance(reason, str)
+            ):
+                gaps.append({"path": path, "source": source, "reason": reason})
+        return gaps
     try:
-        return (name, analyzer.analyze(snap), None)
+        result = getattr(analyzer, "analyze")(ctx)
     except Exception as exc:  # noqa: BLE001 — 单分析器失败不炸 worker，回传错误
         # 错误处理铁律：记完整堆栈（与串行 _analyze_serial 同口径）。worker 已在 _worker_init
         # 配好日志，logger.exception 把 traceback 落到 worker stderr（继承主控台）；否则并行路只
         # 回一行 "ValueError: ..." 无堆栈，崩溃分析器排障从"看堆栈"退化成"盲猜"。
         logger.exception("分析器执行异常：%s", name)
-        return (name, None, f"{type(exc).__name__}: {exc}")
+        gaps = read_gaps()
+        return (
+            name,
+            AnalyzerResult(analyzer=name, input_gaps=gaps),
+            type(exc).__name__,
+        )
+    gaps = read_gaps()
+    if isinstance(result, AnalyzerResult):
+        result.input_gaps.extend(gaps)
+    return (name, result, None)
 
 
 def _should_parallelize(ctx: object, eligible: list) -> bool:
@@ -270,14 +307,7 @@ def _should_parallelize(ctx: object, eligible: list) -> bool:
 
 def _analyze_serial(ctx: object, eligible: list) -> list[tuple]:
     """串行跑（无 androguard pickle 开销；并行不适用/失败时的回退）。"""
-    out: list[tuple] = []
-    for name, analyzer in eligible:
-        try:
-            out.append((name, analyzer.analyze(ctx), None))
-        except Exception as exc:  # noqa: BLE001 — 单点故障不中断流水线
-            logger.exception("分析器执行异常：%s", name)
-            out.append((name, None, f"{type(exc).__name__}: {exc}"))
-    return out
+    return [_invoke_analyzer(ctx, name, analyzer) for name, analyzer in eligible]
 
 
 #: **短任务批次**的总超时预算（秒）。防病态输入（如构造触发正则灾难性回溯的字符串）让某个

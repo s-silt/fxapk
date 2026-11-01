@@ -30,7 +30,7 @@
         "value": "api.evilbackend-synthetic.test"
       }
     ],
-    "schema_version": "1.2"
+    "schema_version": "1.3"
   },
   "backend-credential-db-dsn": {
     "leads": [
@@ -49,7 +49,7 @@
         "value": "mysql://root:pass123@db.evil-synthetic.test:3306"
       }
     ],
-    "schema_version": "1.2"
+    "schema_version": "1.3"
   },
   "card-merchant-keyword": {
     "leads": [
@@ -68,7 +68,7 @@
         "value": "卡商"
       }
     ],
-    "schema_version": "1.2"
+    "schema_version": "1.3"
   },
   "crypto-recipe-cryptojs-envelope": {
     "leads": [
@@ -87,7 +87,7 @@
         "value": "AES-CFB/Pkcs7 key(utf8,32B)=0123…cdef iv=md5(key+ts)[:16]"
       }
     ],
-    "schema_version": "1.2"
+    "schema_version": "1.3"
   },
   "fourth-party-payment-gateway": {
     "leads": [
@@ -134,11 +134,11 @@
         "value": "商户号 (mch_id / merchant id)"
       }
     ],
-    "schema_version": "1.2"
+    "schema_version": "1.3"
   },
   "hardened-unidentified-stub": {
     "leads": [],
-    "schema_version": "1.2"
+    "schema_version": "1.3"
   },
   "payment-sdk-alipay": {
     "leads": [
@@ -171,7 +171,7 @@
         "value": "支付宝 (Alipay SDK)"
       }
     ],
-    "schema_version": "1.2"
+    "schema_version": "1.3"
   },
   "self-hosted-im-websocket": {
     "leads": [
@@ -204,7 +204,7 @@
         "value": "im.evilbroker-synthetic.test"
       }
     ],
-    "schema_version": "1.2"
+    "schema_version": "1.3"
   },
   "wallet-secret-mnemonic": {
     "leads": [
@@ -223,6 +223,6 @@
         "value": "legal winner thank year wave sausage worth useful legal winner thank yellow"
       }
     ],
-    "schema_version": "1.2"
+    "schema_version": "1.3"
   }
 }

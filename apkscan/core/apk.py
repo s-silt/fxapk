@@ -13,16 +13,21 @@ import logging
 import re
 import struct
 import subprocess
+import sys
 import zipfile
 import zlib
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from contextvars import ContextVar
 from functools import cached_property, lru_cache
 from pathlib import Path
-from typing import Any, BinaryIO, NoReturn
+from typing import TYPE_CHECKING, Any, BinaryIO, NoReturn, cast
 
 from apkscan.core.redact import safe_exception_diagnostic, safe_exception_text
 from apkscan.core import tools
+from apkscan.core.dex_records import DecodeLimits, collect_dex_records
+from apkscan.core.file_read import FileReadLedger
+from apkscan.core.observations import DexStringRecord
+from apkscan.core.integrity import sha256_file
 from apkscan.core.models import (
     AnalysisConfig,
     CertInfo,
@@ -31,6 +36,9 @@ from apkscan.core.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from apkscan.core.snapshot import SnapshotContext
 
 
 _ANDROGUARD_SILENCED = False
@@ -415,6 +423,35 @@ def _install_axml_nsmap_shim() -> None:
 class ApkParseError(RuntimeError):
     """APK 无法解析（损坏 / 非 APK）。fail fast 用。"""
 
+    def __init__(
+        self,
+        *args: object,
+        parser_receipt: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(*args)
+        self.parser_receipt = dict(parser_receipt) if parser_receipt is not None else None
+
+
+def _parser_not_enforced_receipt(*, status: str, reason: str) -> dict[str, Any]:
+    receipt = {
+        "schema_version": 1,
+        "status": status,
+        "parser_isolation": "not_enforced",
+        "policy": None,
+        "backend": "in_process",
+        "platform": sys.platform,
+        "memory_limit_scope": "not_applicable",
+        "memory_limit_enforced": False,
+        "ownership_complete": False,
+        "termination_complete": False,
+        "forced_tree_kill": False,
+        "tree_cleanup_complete": False,
+        "reason": reason,
+    }
+    if status == "failed":
+        receipt["blocked_claims"] = ["parser_derived_observations"]
+    return receipt
+
 
 #: read_file 缓存的单文件上限：超过此值的文件（大 .so / 大资源）读到后不进 _read_cache，
 #: 避免巨型二进制随分析常驻内存（缓存本意是让多个分析器重复读小文本资源命中，大文件重复读
@@ -696,13 +733,17 @@ class ApkContext:
         dex_available: bool = True,
         apk_validation_ok: bool = True,
         extra_dex_report: dict[str, object] | None = None,
+        main_dex_report: dict[str, object] | None = None,
+        sample_sha256: str = "",
         hiddenapi_flags_baseline: int | None = None,
         jadx_cache_root: str | None = None,
         jadx_baseline_index: str | None = None,
+        parser_execution: dict[str, Any] | None = None,
     ) -> None:
         # apk: androguard.core.apk.APK；dex_objs: list[DEX]
         self._apk = apk
         self._dex_objs = dex_objs
+        self.file_read_ledger = FileReadLedger()
         # _read_cache 累计已缓存字节数（防病态多文件累加撑爆内存，见 _MAX_TOTAL_CACHE_BYTES）。
         self._cached_bytes = 0
         # extra_dex_objs: 脱壳 dump 出来、外部传入的额外 DEX（androguard DEX 实例）。
@@ -720,6 +761,7 @@ class ApkContext:
         self.config = config
         # apk_path: APK 原始文件绝对路径（jadx/unpack 等增强器需要；无则空串，增强器应优雅跳过）。
         self.apk_path = apk_path
+        self.sample_sha256 = sample_sha256
         # 供 pipeline 写入 Report.meta，使"加固导致 DEX 不可见 / 合法性校验异常"
         # 这类降级在报告里显式可见，而非静默当成"扫描完毕无命中"。
         self.dex_available = dex_available
@@ -728,10 +770,13 @@ class ApkContext:
         # 是常态，"请求了几个"与"真解析成功几个"必须分开呈现，否则报告会把"没看见"
         # 说成"看过了没有"。pipeline 写进 meta.extra_dex_visibility。
         self.extra_dex_report: dict[str, object] = dict(extra_dex_report or {})
+        self.main_dex_report = dict(main_dex_report or {})
+        self.dex_decode_report: dict = {}
         # 本样本加载**前**已放行的 hidden-api flag 取值。放行记录攒在进程级集合里，而 batch
         # 单进程顺序跑多个样本，不减这条基线就会把上一个样本的账写进这一份报告（见
         # hiddenapi_relax_report 的 since 参数）。缺省 0：单样本路径本就无前账。
         self.hiddenapi_flags_baseline: int = hiddenapi_flags_baseline or 0
+        self.parser_execution = dict(parser_execution or {})
 
     # ---- 标量属性 -------------------------------------------------------
 
@@ -934,12 +979,25 @@ class ApkContext:
         一次性解码并缓存，使 dex_strings() 的重复遍历（6+ 个分析器）只解码一次。
         顺序与 _dex_objs → _extra_dex_objs 逐 DEX 产出严格一致。
         """
-        out: list[str] = []
-        for dex in self._dex_objs:
-            out.extend(_iter_dex_strings(dex))
-        for dex in self._extra_dex_objs:
-            out.extend(_iter_dex_strings(dex))
-        return tuple(out)
+        return tuple(record.value for record in self._dex_records_tuple)
+
+    def dex_string_records(self) -> Iterator[DexStringRecord]:
+        return iter(self._dex_records_tuple)
+
+    @cached_property
+    def _dex_records_tuple(self) -> tuple[DexStringRecord, ...]:
+        sources = []
+        for kind, objects in (("main", self._dex_objs), ("extra", self._extra_dex_objs)):
+            for index, dex in enumerate(objects):
+                origin = getattr(dex, "_fxapk_provenance", None)
+                provenance = dict(origin) if isinstance(origin, dict) else {
+                    "source_kind": kind, "member_status": "unknown",
+                    "context_ordinal": index,
+                }
+                provenance["extractor"] = "androguard-string-data-v1"
+                sources.append((dex, provenance))
+        records, self.dex_decode_report = collect_dex_records(sources, DecodeLimits())
+        return records
 
     def list_files(self) -> list[str]:
         try:
@@ -983,9 +1041,16 @@ class ApkContext:
         return self._declared_sizes.get(path)
 
     def read_file(self, path: str) -> bytes | None:
+        ledger = self.file_read_ledger
+        ledger.request(path)
         cache = self._read_cache
         if path in cache:
-            return cache[path]
+            cached = cache[path]
+            if cached is None:
+                ledger.record_failure(
+                    path, ledger.failure_for(path) or "unavailable_context"
+                )
+            return cached
         declared = self._declared_sizes.get(path)
         if declared is not None and declared > _MAX_DECOMPRESSED_FILE_BYTES:
             logger.warning(
@@ -994,6 +1059,7 @@ class ApkContext:
                 _MAX_DECOMPRESSED_FILE_BYTES,
                 path,
             )
+            ledger.record_failure(path, "declared_limit")
             cache[path] = None
             return None
         try:
@@ -1004,11 +1070,15 @@ class ApkContext:
                 exc.limit,
                 path,
             )
+            ledger.record_failure(path, "actual_decompression_limit")
             data = None
         except Exception:
             # androguard 对缺失文件抛 FileNotPresent；视为正常缺失但仍记录
             logger.debug("read_file 未命中：%s", path, exc_info=True)
+            ledger.record_failure(path, "read_failure")
             data = None
+        if data is None and ledger.failure_for(path) is None:
+            ledger.record_failure(path, "unavailable_context")
         # 超大文件（大 .so / 大资源）不进缓存，避免常驻内存。None（未命中）仍缓存以避免重复
         # 未命中查询；小文件照常缓存供多分析器重复读命中。未缓存的文件（无论何种原因）仍
         # 返回完整字节，只是每次重读——不缓存只影响性能，不影响正确性。
@@ -1134,7 +1204,10 @@ def _iter_dex_strings(dex: Any) -> Iterator[str]:
         return
 
 
-def _load_extra_dex(extra_dex: list[str]) -> tuple[list, list[dict[str, str]]]:
+def _load_extra_dex(
+    extra_dex: list[str], *, byte_budget: int | None = None,
+    count_budget: int | None = None,
+) -> tuple[list, list[dict[str, str]]]:
     """把 extra_dex 路径列表（脱壳 dump 的 .dex 文件）解析为 androguard DEX 实例列表。
 
     返回 ``(DEX 实例列表, 失败明细列表)``。失败明细每项含 ``path`` / ``sha256`` /
@@ -1154,12 +1227,26 @@ def _load_extra_dex(extra_dex: list[str]) -> tuple[list, list[dict[str, str]]]:
 
     out: list = []
     failures: list[dict[str, str]] = []
-    for path in extra_dex:
+    remaining = _DEX_TOTAL_LIMIT_BYTES if byte_budget is None else byte_budget
+    count_budget = _DEX_COUNT_LIMIT if count_budget is None else count_budget
+    for index, path in enumerate(extra_dex):
         digest = ""
         try:
-            buff = Path(path).read_bytes()
+            if index >= count_budget or remaining <= 0:
+                raise ZipEntryTooLargeError(str(path), max(0, remaining))
+            limit = min(_DEX_SINGLE_LIMIT_BYTES, remaining)
+            with Path(path).open("rb") as stream:
+                buff = stream.read(limit + 1)
+            if len(buff) > limit:
+                raise ZipEntryTooLargeError(str(path), limit)
+            remaining -= len(buff)
             digest = hashlib.sha256(buff).hexdigest()
-            out.append(DEX(buff))
+            dex = DEX(buff)
+            setattr(dex, "_fxapk_provenance", {
+                "source_kind": "extra", "member_path": str(path),
+                "member_sha256": digest, "member_resolution": "external-file",
+            })
+            out.append(dex)
         except Exception as exc:  # noqa: BLE001 - 坏/不兼容 DEX 跳过即可，不炸主流程
             # 收敛成一行 warning + 异常摘要（不打整坨 traceback）：frida-dexdump dump 的
             # Android 10+ DEX 常因 androguard 不认 hidden-api flag 抛 ValueError
@@ -1327,7 +1414,7 @@ def _reject_if_zip_bomb(path: str) -> None:
         )
 
 
-def load_apk(
+def _load_apk_inprocess(
     path: str,
     config: AnalysisConfig,
     extra_dex: list[str] | None = None,
@@ -1360,6 +1447,14 @@ def load_apk(
     from androguard.core.apk import APK
     from androguard.core.dex import DEX
 
+    try:
+        sample_sha256 = sha256_file(path)
+    except OSError:
+        sample_sha256 = ""
+    main_failures: list[dict[str, str]] = []
+    attempted = total_dex_bytes = 0
+    enumeration_failed = False
+    dex_names: list[str] = []
     budget_token = _dex_extract_total_bytes.set(0)
     try:
         try:
@@ -1384,13 +1479,28 @@ def load_apk(
         dex_objs: list = []
         dex_available = True
         try:
+            names_getter = getattr(apk, "get_dex_names", None)
+            if callable(names_getter):
+                dex_names = list(cast(Iterable[str], names_getter()))
             # ★ 提速（实测 22.8s→8.8s，2.6x）：只建 DEX 对象（字符串池/类/方法即够静态分析），
             #   从已解析的 apk 直接取各 classes*.dex 字节构造 DEX。**不走 AnalyzeAPK**——后者会
             #   重复解析一遍 APK，还构建并丢弃最耗时的 Analysis 交叉引用图（本项目从不使用 dx）。
-            for dex_bytes in apk.get_all_dex():
+            for index, dex_bytes in enumerate(cast(Iterable[bytes], apk.get_all_dex())):
+                attempted += 1
+                total_dex_bytes += len(dex_bytes)
+                member_path = dex_names[index] if index < len(dex_names) else ""
+                digest = hashlib.sha256(dex_bytes).hexdigest()
                 try:
-                    dex_objs.append(DEX(dex_bytes))
-                except Exception:
+                    dex = DEX(dex_bytes)
+                    setattr(dex, "_fxapk_provenance", {
+                        "sample_sha256": sample_sha256, "source_kind": "main",
+                        "member_path": member_path, "member_sha256": digest,
+                        "member_resolution": "name-lookup",
+                    })
+                    dex_objs.append(dex)
+                except Exception as exc:
+                    main_failures.append({"path": member_path, "sha256": digest,
+                                          "error_type": type(exc).__name__})
                     logger.exception("单个 DEX 解析失败，跳过：%s", path)
         except ZipEntryTooLargeError as exc:
             # DEX 是核心条目：Level 2/2.5 实际产出拒读与 Level 1 声明超限同为 fail-fast，
@@ -1402,7 +1512,7 @@ def load_apk(
         except Exception:
             # DEX 不可见（加固）不应使整体失败：manifest/资源/证书仍可用
             logger.exception("DEX 解析失败（可能加固），降级为无 DEX 字符串：%s", path)
-            dex_objs = []
+            enumeration_failed = True
     finally:
         # 异常、连续样本、并发/嵌套调用都恢复调用前状态，不把实际产出账串到别的样本。
         _dex_extract_total_bytes.reset(budget_token)
@@ -1410,7 +1520,10 @@ def load_apk(
     # 失败明细随 context 带出，最终落到 meta.extra_dex_visibility 与 visibility.dex。
     requested_extra = list(extra_dex or [])
     extra_dex_objs, extra_dex_failures = (
-        _load_extra_dex(requested_extra) if requested_extra else ([], [])
+        _load_extra_dex(
+            requested_extra, byte_budget=max(0, _DEX_TOTAL_LIMIT_BYTES - total_dex_bytes),
+            count_budget=max(0, _DEX_COUNT_LIMIT - attempted),
+        ) if requested_extra else ([], [])
     )
 
     # DEX 解析成功但为空（典型加固/无 dex）同样视为"静态 DEX 不可用"，需在报告显式告警。
@@ -1429,6 +1542,7 @@ def load_apk(
         dex_objs=dex_objs,
         config=config,
         apk_path=apk_path,
+        sample_sha256=sample_sha256,
         extra_dex_objs=extra_dex_objs,
         # jadx 要按路径把 dump DEX 一并反编译。传**全部请求路径**（含 androguard 解析失败的）：
         # androguard 因不认 Android 10+ hidden-api flag 拒载的 DEX，jadx 的解析器往往仍能反编译。
@@ -1438,7 +1552,80 @@ def load_apk(
         extra_dex_report=build_extra_dex_report(
             requested_extra, len(extra_dex_objs), extra_dex_failures
         ),
+        main_dex_report={
+            "requested": len(dex_names) if dex_names else attempted,
+            "loaded": len(dex_objs), "failed": len(main_failures),
+            "enumeration_failed": enumeration_failed,
+            "duplicate_names": len(dex_names) != len(set(dex_names)),
+            "complete": not main_failures and not enumeration_failed
+            and len(dex_names) == len(set(dex_names)),
+            "failure_samples": main_failures[:_MAX_EXTRA_DEX_FAILURE_SAMPLES],
+        },
         hiddenapi_flags_baseline=hiddenapi_baseline,
         jadx_cache_root=jadx_cache_root,
         jadx_baseline_index=jadx_baseline_index,
     )
+
+
+def load_apk(
+    path: str,
+    config: AnalysisConfig,
+    extra_dex: list[str] | None = None,
+    jadx_cache_root: str | None = None,
+    jadx_baseline_index: str | None = None,
+) -> ApkContext | SnapshotContext:
+    """Load an APK using the explicit parser policy, or the legacy in-process mode."""
+    from apkscan.core.parser_limits import ParserConfigurationError, ParserLimits
+
+    try:
+        limits = ParserLimits.from_environment()
+    except ParserConfigurationError as exc:
+        receipt = _parser_not_enforced_receipt(
+            status="failed",
+            reason="parser_configuration_invalid",
+        )
+        raise ApkParseError(
+            "Parser limit configuration is incomplete or invalid.",
+            parser_receipt=receipt,
+        ) from exc
+    if limits is None:
+        ctx = _load_apk_inprocess(
+            path,
+            config,
+            extra_dex=extra_dex,
+            jadx_cache_root=jadx_cache_root,
+            jadx_baseline_index=jadx_baseline_index,
+        )
+        ctx.parser_execution = _parser_not_enforced_receipt(
+            status="not_enforced",
+            reason="parser_limits_unconfigured",
+        )
+        return ctx
+    from apkscan.core.parser_worker import ParserBridgeError, run_parser_load
+
+    try:
+        return run_parser_load(
+            path,
+            config,
+            extra_dex,
+            jadx_cache_root,
+            jadx_baseline_index,
+            limits,
+        )
+    except ParserBridgeError as exc:
+        raise ApkParseError(
+            str(exc),
+            parser_receipt=exc.receipt,
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 — configured parsing must never fall back in-process
+        from apkscan.core.parser_worker import _receipt
+
+        receipt = _receipt(
+            limits,
+            status="failed",
+            reason="parser_worker_failed",
+        )
+        raise ApkParseError(
+            "Parser worker failed before returning a snapshot.",
+            parser_receipt=receipt,
+        ) from exc

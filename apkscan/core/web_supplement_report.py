@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import stat
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -35,6 +36,7 @@ from apkscan.core.models import (
     Report,
     Severity,
 )
+from apkscan.core.report_io import _evidence_from_dict
 from apkscan.core.report_schema import UnsupportedReportSchema, ensure_writable_report_version
 from apkscan.core.web_observation_plan import load_config_path, parse_config
 from apkscan.core.web_supplement import apply_static, restore_held_endpoints
@@ -767,28 +769,24 @@ def _evidence_list(value: object) -> list[Evidence]:
     if not isinstance(value, list):
         raise SupplementRefusal("invalid_report")
     evidences: list[Evidence] = []
-    allowed = {item.value for item in EvidenceScope}
     for row in value:
         if not isinstance(row, dict):
             raise SupplementRefusal("invalid_report")
         raw_scope = row.get("scope")
-        if raw_scope is None:
-            scope = EvidenceScope.LEGACY_UNSPECIFIED
-        elif not isinstance(raw_scope, str) or raw_scope not in allowed:
+        if raw_scope is not None and (
+            not isinstance(raw_scope, str)
+            or raw_scope not in {item.value for item in EvidenceScope}
+        ):
             raise SupplementRefusal("invalid_report")
-        else:
-            scope = EvidenceScope(raw_scope)
         observed = row.get("observed_at")
         if isinstance(observed, bool) or (
             observed is not None and not isinstance(observed, (int, float))
         ):
             raise SupplementRefusal("invalid_report")
-        evidences.append(Evidence(
-            source=str(row.get("source", "")),
-            location=str(row.get("location", "")),
-            snippet=str(row.get("snippet", "")),
+        evidence = _evidence_from_dict(row)
+        evidences.append(replace(
+            evidence,
             observed_at=float(observed) if isinstance(observed, (int, float)) else None,
-            scope=scope,
         ))
     return evidences
 

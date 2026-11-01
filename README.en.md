@@ -8,10 +8,18 @@
 <p align="center"><a href="README.md">中文</a> &nbsp;·&nbsp; <strong>English</strong></p>
 <p align="center">
   <a href="https://github.com/s-silt/fxapk/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/s-silt/fxapk/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.21.0">v1.21.0</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
+  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.22.0">v1.22.0</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
 </p>
 
 Command `fxapk` (alias `apkscan`), PyPI package `fxapk`. For people and AI assistants running the source or the Python package directly; no exe or GUI is provided. See [CHANGELOG.md](CHANGELOG.md) for changes.
+
+Parser limits are opt-in through `FXAPK_PARSER_TIMEOUT_SEC` and `FXAPK_PARSER_MEMORY_MB`;
+`FXAPK_PARSER_OUTPUT_MB` optionally controls the IPC output cap (64 MiB by default).
+Only an unconfigured parser uses the legacy in-process path (`not_enforced`). Invalid
+configuration, unsupported enforcement or worker failure never fall back to unrestricted parsing.
+Limits apply per operation, not to total analysis or as a native-code sandbox. Linux uses
+address-space limits, not RSS measurement; Windows enforcement needs Windows validation.
+See [USAGE.en.md](USAGE.en.md) for probe safety receipts and service-provider request candidates.
 
 | Core capability | Description |
 | --- | --- |
@@ -37,13 +45,13 @@ Static analysis needs no JDK or device; some analyzers and dynamic capabilities 
 ## Quick start
 
 ```bash
-python -m pip install "fxapk==1.21.0"     # or clone, then python -m pip install -e .
+python -m pip install "fxapk==1.22.0"     # or clone, then python -m pip install -e .
 fxapk selfcheck
 fxapk analyze app.apk --offline --out out
 fxapk digest out/app.json
 ```
 
-The [release page](https://github.com/s-silt/fxapk/releases/tag/v1.21.0) provides the wheel, source archives and `SHA256SUMS.txt`; verify hashes before installing. Put online-service credentials in the repository-root `.env` or `~/.fxapk/.env` per [.env.example](.env.example) (a `.env` in the current directory is not read); they are never written into reports or the repository. If the command is not on PATH, use `python -m apkscan.cli` instead of `fxapk`.
+The [release page](https://github.com/s-silt/fxapk/releases/tag/v1.22.0) provides the wheel, source archives and `SHA256SUMS.txt`; verify hashes before installing. Put online-service credentials in the repository-root `.env` or `~/.fxapk/.env` per [.env.example](.env.example) (a `.env` in the current directory is not read); they are never written into reports or the repository. If the command is not on PATH, use `python -m apkscan.cli` instead of `fxapk`.
 
 `digest` is for triage and navigation; formal conclusions must go back to the structured fields and original evidence in `report.json`. When delegating to an AI assistant, give it [AGENTS.md](AGENTS.md), the sample path, and whether network and device operations are in scope.
 

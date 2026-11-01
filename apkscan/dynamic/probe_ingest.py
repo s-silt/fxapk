@@ -14,20 +14,22 @@ logging）、不静默吞错、全量 type hints。:func:`parse_probe_log` 是�
 from __future__ import annotations
 
 import ipaddress
+import hashlib
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 
 from apkscan.core import infra
+from apkscan.core.admission import evaluate_evidence
+from apkscan.core.observations import evidence_identity
 from apkscan.core import runtime_inventory as _inv
 from apkscan.core.atomic import atomic_write_text
 from apkscan.core.models import (
     Confidence,
     Evidence,
-    EvidenceScope,
     Lead,
     LeadCategory,
     merge_runtime_into_lead_dict,
@@ -53,6 +55,13 @@ META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
 
 # 探针线索来源标记（与 merge.py 一致：source 以 runtime 开头 → Lead.is_runtime_seen=True）。
 _RUNTIME_SOURCE = "runtime-probe"
+MAX_PROBE_LOG_BYTES = 8 * 1024 * 1024
+MAX_PROBE_LEADS = 10_000
+MAX_PROBE_LINE_CHARS = 16_384
+
+
+class ProbeLogLimitError(ValueError):
+    """Reject an incomplete import rather than report truncated coverage as complete."""
 
 # 探针 tag → (LeadCategory, where_to_request)。tag 即各探针 console.log 的 `[xxx]` 前缀。
 _TAG_MAP: dict[str, tuple[LeadCategory, str]] = {
@@ -180,6 +189,7 @@ class ProbeLead:
     raw: str  # 原始日志行（证据留痕）
     where_to_request: str = ""
     observed_at: float | None = None  # 行首时间戳（Unix epoch 秒），日志无时间前缀则 None
+    source_refs: list[Evidence] = field(default_factory=list)
 
 
 def _first_tag(line: str) -> str | None:
@@ -205,7 +215,7 @@ def _classify(tag: str, line: str) -> tuple[LeadCategory, str]:
 
 
 def parse_probe_log(text: str) -> list[ProbeLead]:
-    """解析 frida 探针日志，抽出含 `[LEAD` 的行为结构化线索。纯函数，绝不抛。
+    """解析日志并保留逐行定位；超过显式输入预算时拒绝整个导入。
 
     - 只取含 `[LEAD` 标记的行（探针对高价值锚点的显式标注）。
     - 行首 tag 在 :data:`_SKIP_TAGS`（导航/定位/脱壳辅助）→ 跳过。
@@ -214,9 +224,21 @@ def parse_probe_log(text: str) -> list[ProbeLead]:
     out: list[ProbeLead] = []
     if not text:
         return out
-    for line in text.splitlines():
+    if len(text) > MAX_PROBE_LOG_BYTES:
+        raise ProbeLogLimitError("probe_log_input_limit")
+    encoded = text.encode("utf-8", errors="surrogatepass")
+    if len(encoded) > MAX_PROBE_LOG_BYTES:
+        raise ProbeLogLimitError("probe_log_input_limit")
+    text_sha = hashlib.sha256(encoded).hexdigest()
+    char_offset = 0
+    for line_number, original_line in enumerate(text.splitlines(keepends=True), 1):
+        offset = char_offset
+        char_offset += len(original_line)
+        line = original_line.rstrip("\r\n")
         if "[LEAD" not in line:
             continue
+        if len(line) > MAX_PROBE_LINE_CHARS or len(out) >= MAX_PROBE_LEADS:
+            raise ProbeLogLimitError("probe_log_record_limit")
         try:
             # 剥离行首时间戳后再做 tag/value 解析（时间戳不在方括号内，否则会污染 value）；
             # raw 仍留原始整行作证据。
@@ -236,6 +258,20 @@ def parse_probe_log(text: str) -> list[ProbeLead]:
                     raw=line.strip(),
                     where_to_request=where,
                     observed_at=observed_at,
+                    source_refs=[Evidence(
+                        source=_RUNTIME_SOURCE,
+                        location="frida-probe:" + tag,
+                        snippet=line.strip()[:200],
+                        observed_at=observed_at,
+                        provenance={
+                            "extractor": "probe-log-v1", "log_text_sha256": text_sha,
+                            "probe_tag": tag, "script_identity_status": "not_provided",
+                            "capture_identity_status": "not_provided",
+                            "target_app_attribution_verified": False,
+                        },
+                        locator={"line": line_number, "line_base": 1,
+                                 "char_offset": offset, "offset_unit": "decoded-text-codepoint"},
+                    )],
                 )
             )
         except Exception:  # noqa: BLE001 - 单行解析失败不影响其余
@@ -243,16 +279,45 @@ def parse_probe_log(text: str) -> list[ProbeLead]:
     return out
 
 
+def load_probe_log(path: Path) -> list[ProbeLead]:
+    with path.open("rb") as handle:
+        raw = handle.read(MAX_PROBE_LOG_BYTES + 1)
+    if len(raw) > MAX_PROBE_LOG_BYTES:
+        raise ProbeLogLimitError("probe_log_input_limit")
+    leads = parse_probe_log(raw.decode("utf-8", errors="replace"))
+    digest = hashlib.sha256(raw).hexdigest()
+    for lead in leads:
+        for ref in lead.source_refs:
+            ref.provenance.update({"log_file_sha256": digest, "member_path": path.name,
+                                   "log_file_bytes": len(raw), "decoding": "utf-8-replace"})
+    return leads
+
+
+def _lead_refs(lead: ProbeLead) -> list[Evidence]:
+    return lead.source_refs or [Evidence(
+        source=_RUNTIME_SOURCE, location="frida-probe:" + lead.probe,
+        snippet=lead.raw[:200], observed_at=lead.observed_at,
+    )]
+
+
 def dedup(leads: list[ProbeLead]) -> list[ProbeLead]:
     """按 (category, value) 去重，保持首现顺序。"""
-    seen: set[tuple[str, str]] = set()
+    seen: dict[tuple[str, str], ProbeLead] = {}
+    identities: dict[tuple[str, str], set[tuple[object, ...]]] = {}
     out: list[ProbeLead] = []
     for pl in leads:
         key = (pl.category.value, pl.value)
         if key in seen:
+            for ref in _lead_refs(pl):
+                identity = evidence_identity(ref)
+                if identity not in identities[key]:
+                    seen[key].source_refs.append(ref)
+                    identities[key].add(identity)
             continue
-        seen.add(key)
-        out.append(pl)
+        item = replace(pl, source_refs=list(_lead_refs(pl)))
+        seen[key] = item
+        identities[key] = {evidence_identity(ref) for ref in item.source_refs}
+        out.append(item)
     return out
 
 
@@ -437,14 +502,7 @@ def to_report_leads(leads: list[ProbeLead]) -> list[Lead]:
                 # ★同时封存 base_advice：这是判据链（含保底规则）的结论，探针路径此前完全没接
                 #   可撤销抑制机制——base 为 None 意味着将来任何一次降档都撤不回来。
                 base_advice=advice,
-                source_refs=[
-                    Evidence(
-                        source=_RUNTIME_SOURCE,
-                        location="frida-probe:" + pl.probe,
-                        snippet=pl.raw[:200],
-                        observed_at=pl.observed_at,
-                    )
-                ],
+                source_refs=list(_lead_refs(pl)),
                 notes=notes,
             )
         )
@@ -524,10 +582,13 @@ def build_ledger_md(leads: list[ProbeLead]) -> str:
 def to_ledger_dict(leads: list[ProbeLead]) -> dict[str, object]:
     """把线索聚成 JSON 台账（程序化消费/入图用）。"""
     deduped = dedup(leads)
-    by_cat: dict[str, list[dict[str, str]]] = {}
+    from apkscan.report.json import _to_jsonable
+
+    by_cat: dict[str, list[dict[str, object]]] = {}
     for pl in deduped:
         by_cat.setdefault(pl.category.value, []).append(
-            {"value": pl.value, "probe": pl.probe, "where_to_request": pl.where_to_request, "raw": pl.raw}
+            {"value": pl.value, "probe": pl.probe, "where_to_request": pl.where_to_request,
+             "raw": pl.raw, "source_refs": _to_jsonable(_lead_refs(pl))}
         )
     return {"total": len(deduped), "categories": len(by_cat), "by_category": by_cat}
 
@@ -868,6 +929,13 @@ def merge_into_report_json(report_json_path: str, leads: list[ProbeLead]) -> int
             lead_dict = report_json._to_jsonable(lead)
             hit = existing_by_key.get(key)
             if hit is not None:
+                previous_refs = hit.get("source_refs")
+                independent_support = any(
+                    isinstance(ref, dict)
+                    and ref.get("source") in {"dex", "resource", "runtime-pcap"}
+                    and evaluate_evidence(ref, "lead_priority").state == "allowed"
+                    for ref in (previous_refs if isinstance(previous_refs, list) else [])
+                )
                 # 命中已存在键：不丢弃——把 runtime 探针证据并进原 lead、升为活体确认。
                 # ★confirmed 只计**证据**并入；仅抑制账本变化不是「确认」（与 pcap 侧同口径）。
                 ev_merged, _ledger = merge_runtime_into_lead_dict(
@@ -880,6 +948,7 @@ def merge_into_report_json(report_json_path: str, leads: list[ProbeLead]) -> int
                     tgt = _network_target(str(hit.get("value", "")))
                     if (
                         tgt is not None
+                        and independent_support
                         and hit.get("advice") == infra.ADVICE_INVESTIGATE
                         and hit.get("confidence") != Confidence.HIGH.value
                     ):
@@ -903,20 +972,20 @@ def merge_into_report_json(report_json_path: str, leads: list[ProbeLead]) -> int
         if probe_ips or probe_domains:
             from apkscan.dynamic.pcap_ingest import _merge_runtime_endpoint_dicts
 
+            address_refs: dict[tuple[str, str], dict[tuple[object, ...], Evidence]] = {}
+            for lead in leads:
+                ips, domains = probe_address_values([lead])
+                for kind, values in (("ip", ips), ("domain", domains)):
+                    for value in values:
+                        refs = address_refs.setdefault((kind, value), {})
+                        for ref in _lead_refs(lead):
+                            refs.setdefault(evidence_identity(ref), ref)
             fresh_endpoints = [
                 {
                     "value": value,
                     "kind": kind,
                     "is_private": False,
-                    "evidences": [
-                        {
-                            "source": "runtime-probe",
-                            "location": "probe-log",
-                            "snippet": f"进程内探针抽取：{value}",
-                            "observed_at": None,
-                            "scope": EvidenceScope.CASE_EVIDENCE.value,
-                        }
-                    ],
+                    "evidences": [report_json._to_jsonable(ref) for ref in address_refs[(kind, value)].values()],
                     # 只证明进程内观测到了地址，不编造端口、字节数、双向载荷或 UID/socket 归因。
                     "enrichment": {"runtime": {"observed_by": "probe"}},
                 }

@@ -63,6 +63,7 @@ class WebHarAnalyzer(BaseAnalyzer):
 
     def analyze(self, ctx: "AnalysisContext") -> AnalyzerResult:
         result, bodies = decode_har_evidence(ctx)
+        result.evidence_inputs = {body.location: body.provenance() for body in bodies}
         if bodies:
             body_result = EndpointsAnalyzer().analyze(WebContext(
                 ctx.config, files={body.location: body.data for body in bodies},
@@ -124,7 +125,13 @@ def decode_har_evidence(ctx: "AnalysisContext") -> tuple[AnalyzerResult, tuple[W
                 continue
             location = f"{path}#/log/entries/{index}"
             observed = _timestamp(entry.get("startedDateTime"))
-            evidence = Evidence(source="web", location=location + "/request/url", observed_at=observed)
+            evidence = Evidence(
+                source="web", location=location + "/request/url", observed_at=observed,
+                provenance={"extractor": "web-har-v1", "member_path": path,
+                            "member_sha256": source_sha256},
+                locator={"json_pointer": f"/log/entries/{index}/request/url"},
+                structure_status="parsed",
+            )
             collector.add(url, "url", evidence)
             host = urlsplit(url).hostname or ""
             try:
@@ -149,8 +156,12 @@ def decode_har_evidence(ctx: "AnalysisContext") -> tuple[AnalyzerResult, tuple[W
             redirect = _http_url(response.get("redirectURL"), url)
             if redirect and status is not None and 300 <= status < 400:
                 row["redirect_url"] = redirect
-                collector.add(redirect, "url", Evidence(source="web", location=location + "/response/redirectURL",
-                                                      observed_at=observed))
+                collector.add(redirect, "url", Evidence(
+                    source="web", location=location + "/response/redirectURL", observed_at=observed,
+                    provenance=dict(evidence.provenance),
+                    locator={"json_pointer": f"/log/entries/{index}/response/redirectURL"},
+                    structure_status="parsed",
+                ))
             server_ip = entry.get("serverIPAddress")
             if isinstance(server_ip, str):
                 try:

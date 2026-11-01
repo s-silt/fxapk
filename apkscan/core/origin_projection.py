@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 import hashlib
 import ipaddress
 import json
@@ -178,7 +179,7 @@ def integrate_check(payload: dict[str, Any], check: dict[str, Any], receipt: Pat
         id="origin-check." + digest[:16], title="CDN 源站候选核验", severity=Severity.INFO,
         category="origin-check", description=f"{target}：{_STATUS[status]}，源站未确认。完整结果见源站候选核验章节。",
         recommendation="以回源配置或日志进一步核实；保留待核状态。",
-        evidences=[Evidence(source=evidence.source, location=evidence.location, snippet=f"{target}；源站未确认")])
+        evidences=[replace(evidence, snippet=f"{target}；源站未确认")])
     result.setdefault("findings", []).append(_to_jsonable(finding))
     closure = meta.get("closure")
     if isinstance(closure, dict) and closure.get("status") == "complete":

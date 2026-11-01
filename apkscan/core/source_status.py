@@ -206,7 +206,7 @@ def canonicalize_source_status_tree(
         else:
             value["source_status"] = normalize_source_status_map(value.get("source_status"))
         for key, child in tuple(value.items()):
-            if key != "source_status":
+            if key not in {"source_status", "source_context"}:
                 canonicalize_source_status_tree(child, seen)
     else:
         for child in value:

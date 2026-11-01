@@ -15,6 +15,7 @@ from typing import Any
 from apkscan.core.atomic import atomic_write_text
 from apkscan.core.integrity import evidence_id
 from apkscan.core.models import Evidence, Lead, Report
+from apkscan.core.observations import occurrence_id
 from apkscan.core.source_status import canonicalize_source_status_tree
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,7 @@ def _to_jsonable(obj: Any) -> Any:
         # 可回溯锚点 —— 同条证据跨报告 / 跨文件 id 稳定（取证完整性背书层）。
         if isinstance(obj, Evidence):
             d["evidence_id"] = evidence_id(obj.source, obj.location)
+            d["occurrence_id"] = occurrence_id(obj)
         return d
     if isinstance(obj, dict):
         return {str(_to_jsonable(k)): _to_jsonable(v) for k, v in obj.items()}

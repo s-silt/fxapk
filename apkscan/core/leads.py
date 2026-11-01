@@ -30,9 +30,11 @@ from apkscan.core.models import (
     LeadCategory,
     apply_downgrade,
     has_case_evidence,
+    lift_downgrade,
 )
 from apkscan.network.categories import CAT_CLOUD, CAT_HOSTING_RESELLER, CAT_IDC
 from apkscan.core.source_status import provider_payload_if_hit
+from apkscan.core.admission import ADMISSION_NOTE, DOWNGRADE_ADMISSION, admitted_refs, evaluate_usage
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +73,8 @@ def _apply_evidence_scope(lead: Lead, endpoint: Endpoint) -> None:
     """参考材料可见但不升级：无当前案件直接证据时结构化降到待核。"""
     if not has_case_evidence(endpoint.evidences):
         apply_downgrade(lead, DOWNGRADE_EVIDENCE_SCOPE, _EVIDENCE_SCOPE_NOTE)
+    elif evaluate_usage(endpoint.evidences, "lead_priority")["state"] != "allowed":
+        apply_downgrade(lead, DOWNGRADE_ADMISSION, ADMISSION_NOTE)
 
 
 def quarantine_reference_only_leads(lead_items: list[Lead], endpoints: list[Endpoint]) -> None:
@@ -85,7 +89,19 @@ def quarantine_reference_only_leads(lead_items: list[Lead], endpoints: list[Endp
         for ep in endpoints
         if ep.kind in {"domain", "ip"} and has_case_evidence(ep.evidences)
     }
+    endpoint_refs: dict[tuple[str, str], list[Evidence]] = {}
+    for ep in endpoints:
+        if ep.kind in {"domain", "ip"}:
+            endpoint_refs.setdefault((ep.kind, infra.match_key(ep.kind, ep.value)), []).extend(ep.evidences)
     for lead in lead_items:
+        refs = list(lead.source_refs)
+        if lead.category in {LeadCategory.DOMAIN, LeadCategory.IP}:
+            kind = lead.category.value.lower()
+            refs.extend(endpoint_refs.get((kind, infra.match_key(kind, lead.value)), []))
+        if has_case_evidence(refs) and evaluate_usage(refs, "lead_priority")["state"] != "allowed":
+            apply_downgrade(lead, DOWNGRADE_ADMISSION, ADMISSION_NOTE)
+        elif evaluate_usage(refs, "lead_priority")["state"] == "allowed":
+            lift_downgrade(lead, DOWNGRADE_ADMISSION)
         if has_case_evidence(lead.source_refs):
             continue
         if lead.category in {LeadCategory.DOMAIN, LeadCategory.IP}:
@@ -753,9 +769,10 @@ def _domain_lead(ep: Endpoint, online: bool = True) -> Lead:
     #   证据照样被压待核——`is_runtime_contact` 徽标标着实连、advice 却是待核，出口自相
     #   矛盾，且 runtime-first 的闭环候选被 advice 门挡掉。口径同样必须是严格的
     #   OBSERVED_CONTACT_SOURCES（runtime-derived 只证明"出现在 runtime 报告里"，不豁免）。
+    eligible_refs = admitted_refs(ep.evidences, "lead_priority")
     domain_runtime_observed = any(
         ev.scope is EvidenceScope.CASE_EVIDENCE and str(ev.source) in OBSERVED_CONTACT_SOURCES
-        for ev in ep.evidences
+        for ev in eligible_refs
     )
     tier_suppressed = (
         advice == infra.ADVICE_INVESTIGATE
@@ -906,16 +923,17 @@ def _ip_lead(
     #   runtime-derived（手编/回灌，只证明"出现在 runtime 报告里"）与解密派生值
     #   也当成实连证据。豁免形态判据这种事，必须用严格口径，与 attribution 侧同源。
     #   ★提取成变量：classify_ip 与下面的 tier 降档共用同一口径——真连过的 IP 两处都豁免。
+    eligible_refs = admitted_refs(ep.evidences, "lead_priority")
     runtime_observed = any(
         ev.scope is EvidenceScope.CASE_EVIDENCE and str(ev.source) in OBSERVED_CONTACT_SOURCES
-        for ev in ep.evidences
+        for ev in eligible_refs
     )
     if ep.is_private:
         advice = infra.ADVICE_SKIP
     else:
         # ★全量扫证据、不截前 N 条：带端口/URL 的那条可能排在任何位置，
         #   漏看一条就可能把真实后端降成待核。snippet 有长度上限，全量拼接开销可控。
-        context = " ".join((ev.snippet or "") for ev in ep.evidences)
+        context = " ".join((ev.snippet or "") for ev in eligible_refs)
         bare = infra._strip_port_suffix(ep.value)
         advice, ip_reason = infra.classify_ip(
             ep.value,
