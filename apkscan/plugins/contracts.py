@@ -63,6 +63,12 @@ class AndroidUiPlugin(FxapkPlugin, Protocol):
     def run_round(self, context: CaptureRoundContext) -> dict[str, Any]: ...
 
 
+class StaticAnalysisPlugin(FxapkPlugin, Protocol):
+    """Optional serial static stage; inputs are local files, not device commands."""
+
+    def run_static(self, request: dict[str, Any]) -> dict[str, Any]: ...
+
+
 class WebSupplementPlugin(FxapkPlugin, Protocol):
     """Optional web observation. Core calls this; it does not import the plugin package."""
 

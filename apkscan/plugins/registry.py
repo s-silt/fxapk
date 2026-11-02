@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 _ENTRYPOINT_GROUP = "fxapk.plugins"
 _ALLOWED = {
+    "flutter": ("fxapk-flutter", "fxapk_flutter.plugin:plugin_factory"),
     "android_ui": ("fxapk-android-ui", "fxapk_android_ui.plugin:plugin_factory"),
     "rea": ("fxapk-rea", "fxapk_rea.plugin:plugin_factory"),
 }

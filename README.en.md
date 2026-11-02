@@ -8,7 +8,7 @@
 <p align="center"><a href="README.md">中文</a> &nbsp;·&nbsp; <strong>English</strong></p>
 <p align="center">
   <a href="https://github.com/s-silt/fxapk/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/s-silt/fxapk/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.22.0">v1.22.0</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
+  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.23.0">v1.23.0</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
 </p>
 
 Command `fxapk` (alias `apkscan`), PyPI package `fxapk`. For people and AI assistants running the source or the Python package directly; no exe or GUI is provided. See [CHANGELOG.md](CHANGELOG.md) for changes.
@@ -37,13 +37,13 @@ Static analysis needs no JDK or device; some analyzers and dynamic capabilities 
 ## Quick start
 
 ```bash
-python -m pip install "fxapk==1.22.0"     # or clone, then python -m pip install -e .
+python -m pip install "fxapk==1.23.0"     # or clone, then python -m pip install -e .
 fxapk selfcheck
 fxapk analyze app.apk --offline --out out
 fxapk digest out/app.json
 ```
 
-The [release page](https://github.com/s-silt/fxapk/releases/tag/v1.22.0) provides the wheel, source archives and `SHA256SUMS.txt`; verify hashes before installing. Put online-service credentials in the repository-root `.env` or `~/.fxapk/.env` per [.env.example](.env.example) (a `.env` in the current directory is not read); they are never written into reports or the repository. If the command is not on PATH, use `python -m apkscan.cli` instead of `fxapk`.
+The [release page](https://github.com/s-silt/fxapk/releases/tag/v1.23.0) provides the wheel, source archives and `SHA256SUMS.txt`; verify hashes before installing. Put online-service credentials in the repository-root `.env` or `~/.fxapk/.env` per [.env.example](.env.example) (a `.env` in the current directory is not read); they are never written into reports or the repository. If the command is not on PATH, use `python -m apkscan.cli` instead of `fxapk`.
 
 `digest` is for triage and navigation; formal conclusions must go back to the structured fields and original evidence in `report.json`. When delegating to an AI assistant, give it [AGENTS.md](AGENTS.md), the sample path, and whether network and device operations are in scope.
 
@@ -57,6 +57,12 @@ The [release page](https://github.com/s-silt/fxapk/releases/tag/v1.22.0) provide
 | Android UI screenshots and action plans | Optional plugin `fxapk ui ...`, see [ANDROID-UI.en.md](ANDROID-UI.en.md) |
 | Follow-up queries and closure on an existing report | `fxapk case close out/app.json` (requires network and write-back authorization) |
 | Full command reference | [USAGE.en.md](USAGE.en.md) · `fxapk --help` |
+
+### Optional Flutter AOT plugin
+
+`fxapk-flutter 0.1.0` ships as a release attachment and requires core 1.23.0+; install the wheel from the attachments, or run `python -m pip install -e ./plugins/fxapk-flutter` in the source tree. APKs identified as Flutter enter the `--flutter auto` stage by default; `--flutter off` disables it, and `--flutter required` preserves the report but exits 4 when the analysis does not succeed. A missing plugin or toolchain is recorded as a coverage gap; dependencies are never installed automatically.
+
+Only a prepared local Blutter executable, a pinned Docker image and toolchain.json are used; the analysis container has no network and never pulls images or compiles. Adds `fxapk flutter capabilities|analyze|query|attach`; static assembly, direct calls and URL literals are not complete source code or actual network transmission. Queries and evidence bundles are not redacted. Configuration, caching and supported scope: [plugin README](plugins/fxapk-flutter/README.md).
 
 ### Optional REA plugin (web observation / native address recovery)
 

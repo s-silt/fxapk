@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fxapk-flutter"
+version = "0.1.0"
+description = "Offline Flutter AOT analysis and evidence indexing for fxapk"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dependencies = ["fxapk>=1.23.0", "typer", "pyelftools==0.32"]
+
+[project.entry-points."fxapk.plugins"]
+flutter = "fxapk_flutter.plugin:plugin_factory"
+
+[tool.setuptools.packages.find]
+where = ["src"]

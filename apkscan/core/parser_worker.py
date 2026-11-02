@@ -166,6 +166,11 @@ def _config_from_request(value: object) -> AnalysisConfig:
         or type(value.get("enrich_max_targets", 32)) is not int
         or type(value.get("enrich_static_ip_max_targets", 16)) is not int
         or type(value.get("enrichment_dry_run", False)) is not bool
+        or not isinstance(value.get("flutter"), str)
+        or value.get("flutter") not in {"auto", "off", "required"}
+        or type(value.get("flutter_timeout")) is not int
+        or not 1 <= value.get("flutter_timeout", 0) <= 1800
+        or (value.get("flutter_toolchain") is not None and not isinstance(value.get("flutter_toolchain"), str))
         or (
             value.get("web_supplement") is not None
             and not isinstance(value.get("web_supplement"), str)

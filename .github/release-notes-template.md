@@ -8,23 +8,25 @@ $changes
 
 ## 安装包
 
-核心 **fxapk $core_version** 提供 wheel 与源码归档，并由本流程发布到 PyPI。可选插件均为独立版本，仅通过本页附件分发，不发布到 PyPI：**fxapk-android-ui $plugin_version**（Android CLI 与 adb 自备）、**fxapk-rea $rea_version**（默认关闭，需在进程环境显式设置 `FXAPK_ENABLE_REA=1`；`trace` 另装 `[trace]` extra）、**fxapk-asc $asc_version**（`fxapk dex` 隔离 worker，macOS 上以 `memory_limit_unavailable` 拒绝执行）。核心要求 Python $requires_python，插件要求以其包元数据为准。
+核心 **fxapk $core_version** 提供 wheel 与源码归档，并由本流程发布到 PyPI。可选插件均为独立版本，仅通过本页附件分发，不发布到 PyPI：**fxapk-android-ui $plugin_version**（Android CLI 与 adb 自备）、**fxapk-rea $rea_version**（默认关闭，需在进程环境显式设置 `FXAPK_ENABLE_REA=1`；`trace` 另装 `[trace]` extra）、**fxapk-asc $asc_version**（`fxapk dex` 隔离 worker，macOS 上以 `memory_limit_unavailable` 拒绝执行）、**fxapk-flutter $flutter_version**（离线 Flutter AOT 静态分析：仅 Android ARM64，须事先自备本地 Blutter 可执行文件与固定 Docker 镜像，分析不拉取镜像、不编译、不执行 APK；查询与证据包未脱敏，静态汇编与 URL 字面量不是实际网络传输证据）。核心要求 Python $requires_python，插件要求以其包元数据为准。
 
 ```bash
 python -m pip install "fxapk==$core_version"
 python -m pip install ./fxapk_android_ui-$plugin_version-py3-none-any.whl
 python -m pip install ./fxapk_rea-$rea_version-py3-none-any.whl
 python -m pip install ./fxapk_asc-$asc_version-py3-none-any.whl
+python -m pip install ./fxapk_flutter-$flutter_version-py3-none-any.whl
 fxapk --version
 fxapk ui --help
 fxapk dex --help
+fxapk flutter --help
 ```
 
 以上命令在下载附件所在目录执行；仅安装需要的插件即可。REA 安装后保持关闭，
 需明确启用时才为该进程设置 `FXAPK_ENABLE_REA=1` 并运行 `fxapk rea --help`。
 `trace` 的可选依赖可通过
 `python -m pip install "./fxapk_rea-$rea_version-py3-none-any.whl[trace]"` 安装。
-插件不会自动启动浏览器、查询第三方或连接设备。
+插件不会自动启动浏览器、查询第三方或连接设备。本页附件含核心与四个可选插件共十个归档；插件归档不含 Blutter 可执行文件或 Docker 镜像，Flutter 分析也不会自动拉取或构建它们。
 
 安装前用附件 `SHA256SUMS.txt` 核对全部归档。它们不是完整离线依赖包，安装可能下载声明依赖。许可见各归档内的 MIT 声明，第三方工具和依赖遵循各自许可。[安卓 UI 指南](https://github.com/$repository/blob/$tag/ANDROID-UI.md)。
 

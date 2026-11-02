@@ -1186,6 +1186,10 @@ def run(ctx: "AnalysisContext", config: AnalysisConfig) -> Report:
     state.meta["analysis_started_at"] = started_at
     _run_stage(state, "analyze", _stage_run_analyzers)              # 分析器执行 + 聚合 + 端点去重
     _run_stage(state, "degradation_flags", _stage_degradation_flags)  # 降级标志入 meta
+    from apkscan.core.flutter_analysis import run_flutter_stage
+
+    _run_stage(state, "flutter", run_flutter_stage)                # serial offline optional AOT analysis
+    state.endpoints = _dedup_endpoints(state.endpoints)
     _run_stage(state, "web_supplement", _stage_web_supplement)      # 自动网页补采；失败不中断主分析
     _run_stage(state, "remote_config_fetch", _stage_remote_config_fetch)  # 授权档：下载+解码远程配置，回灌端点
     _run_stage(state, "enrich", _stage_enrich)                     # 联网富化（两遍，主动/被动硬隔离）

@@ -841,6 +841,21 @@
     {% endif %}
     {% endif %}
 
+    {% set flutter = meta.get("flutter_analysis") %}
+    {% if flutter is mapping %}
+    <div class="harden-ok" style="background:#eff6ff;color:#1e40af;border-color:#bfdbfe">
+      <strong>Flutter / Dart 原生解析：{{ flutter.get("status", "unknown") }}</strong>
+      {% if flutter.get("status") == "ok" %}
+      {% set fc = flutter.get("coverage", {}) %}
+      · Dart {{ flutter.get("compatibility", {}).get("dart_version", "unknown") }}
+      · {{ fc.get("functions", 0) }} 个函数
+      · {{ fc.get("direct_calls", 0) }} 条直接调用（原始指令不匹配 {{ fc.get("raw_call_mismatches", 0) }} 条）
+      · {{ fc.get("unresolved_indirect_calls", 0) }} 条间接调用未解析。
+      {% else %} · {{ flutter.get("reason", "unknown") }}。{% endif %}
+      静态汇编与对象池证据，不代表实际网络传输或完整源码恢复。
+    </div>
+    {% endif %}
+
     {#- 数据完整性 / 采集说明：把降级与离线显式告知，避免"未采集"被误读为"采集为空" -#}
     {#- P0-c：本次运行时证据采自哪个 APK（原版 / 去壳重打包版）+ 哈希。取证溯源硬要求：
         路径可同名可覆盖，哈希才是身份；旁路轮另出的 runtime_report 也在此挂指针。 -#}
