@@ -8,7 +8,7 @@
 <p align="center"><strong>中文</strong> &nbsp;·&nbsp; <a href="README.en.md">English</a></p>
 <p align="center">
   <a href="https://github.com/s-silt/fxapk/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/s-silt/fxapk/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.22.0">v1.22.0</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
+  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.23.0">v1.23.0</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
 </p>
 
 命令 `fxapk`（别名 `apkscan`），PyPI 包名 `fxapk`。面向直接运行源码或 Python 包的人与 AI 助手，不提供 exe 或 GUI。变更见 [CHANGELOG.md](CHANGELOG.md)。
@@ -37,13 +37,13 @@ APK / 已落盘网页证据        已授权设备采集
 ## 快速开始
 
 ```bash
-python -m pip install "fxapk==1.22.0"     # 或 clone 后 python -m pip install -e .
+python -m pip install "fxapk==1.23.0"     # 或 clone 后 python -m pip install -e .
 fxapk selfcheck
 fxapk analyze app.apk --offline --out out
 fxapk digest out/app.json
 ```
 
-[发布页](https://github.com/s-silt/fxapk/releases/tag/v1.22.0) 提供 wheel、源码归档与 `SHA256SUMS.txt`，安装前核对哈希。联网服务密钥按 [.env.example](.env.example) 写入仓库根 `.env` 或 `~/.fxapk/.env`（不读当前目录的 `.env`），不写入报告或仓库。命令未注册到 PATH 时用 `python -m apkscan.cli` 代替 `fxapk`。
+[发布页](https://github.com/s-silt/fxapk/releases/tag/v1.23.0) 提供 wheel、源码归档与 `SHA256SUMS.txt`，安装前核对哈希。联网服务密钥按 [.env.example](.env.example) 写入仓库根 `.env` 或 `~/.fxapk/.env`（不读当前目录的 `.env`），不写入报告或仓库。命令未注册到 PATH 时用 `python -m apkscan.cli` 代替 `fxapk`。
 
 `digest` 用于初筛和定位；正式判断必须回查 `report.json` 的结构化字段与原始证据。让 AI 助手操作时，给它 [AGENTS.md](AGENTS.md)、样本路径、是否允许联网及设备操作范围。
 
@@ -57,6 +57,12 @@ fxapk digest out/app.json
 | Android UI 截图与动作计划 | 可选插件 `fxapk ui ...`，见 [ANDROID-UI.md](ANDROID-UI.md) |
 | 已有报告补查与闭环 | `fxapk case close out/app.json`（需联网与写回授权） |
 | 完整命令 | [USAGE.md](USAGE.md) · `fxapk --help` |
+
+### 可选 Flutter AOT 插件
+
+`fxapk-flutter 0.1.0` 随发行附件提供，要求核心 1.23.0+；从附件安装 wheel，或在源码树运行 `python -m pip install -e ./plugins/fxapk-flutter`。识别为 Flutter 的 APK 默认进入 `--flutter auto` 阶段；`--flutter off` 关闭，`--flutter required` 在未成功时保留报告并退出 4。缺插件或工具链会记录覆盖缺口，不会自动安装依赖。
+
+仅使用事先准备的本地 Blutter 可执行文件、固定 Docker 镜像和 toolchain.json，分析容器禁网，不拉取镜像或编译。新增 `fxapk flutter capabilities|analyze|query|attach`；静态汇编、直接调用与 URL 字面量不等于完整源码或实际网络传输。查询与证据包未脱敏。配置、缓存和支持范围见 [插件说明](plugins/fxapk-flutter/README.md)。
 
 ### 可选 REA 插件（网页观察 / Native 地址恢复）
 

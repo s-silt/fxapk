@@ -13,6 +13,7 @@ from apkscan.core.models import AnalysisConfig
 _EXPECTED_STAGES = [
     "analyze",
     "degradation_flags",
+    "flutter",
     "web_supplement",
     "remote_config_fetch",
     "enrich",

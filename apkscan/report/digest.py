@@ -692,6 +692,20 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
         "closure": compact_closure,
     }
     native_handoff = project_native_handoff(report)
+    flutter = meta.get("flutter_analysis")
+    if isinstance(flutter, dict):
+        coverage = flutter.get("coverage")
+        coverage = coverage if isinstance(coverage, dict) else {}
+        compatibility = flutter.get("compatibility")
+        compatibility = compatibility if isinstance(compatibility, dict) else {}
+        digest["flutter_analysis"] = {
+            "status": flutter.get("status"), "reason": flutter.get("reason"),
+            "dart_version": compatibility.get("dart_version"), "abi": compatibility.get("abi"),
+            "functions": coverage.get("functions"), "direct_calls": coverage.get("direct_calls"),
+            "raw_call_mismatches": coverage.get("raw_call_mismatches"),
+            "unresolved_indirect_calls": coverage.get("unresolved_indirect_calls"),
+            "runtime_observed": False,
+        }
     if native_handoff:
         digest["native_recovery"] = native_handoff
     if "web_observations" in meta:

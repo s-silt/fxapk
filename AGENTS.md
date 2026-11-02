@@ -107,7 +107,15 @@ REA 插件默认关闭：即使已安装也不导入、不注册命令、不用�
 - Native：`digest.native_recovery` 只给固定命令。插件只认 PE/ELF；Windows 上 Ghidra 只接 x86/x64 PE，Linux/macOS 才 `fxapk rea native extract <apk> --member lib/<abi>/<name>.so` 再 inspect（Linux 实跑未验收）。配方只重算声明过的变换，`relation_verified` 保持 false。IDA/Hopper 未支持。
 - 真实 Android WebView 尚未实机验收。细节见 `plugins/fxapk-rea/README.md` 与 `skills/fxapk-web-evidence/SKILL.md`。
 
-## 7. 环境准备
+## 7. Flutter AOT 插件（可选）
+
+- `fxapk-flutter` 是可选静态插件，要求核心 ≥1.23.0，经发行附件 wheel 或 `python -m pip install -e ./plugins/fxapk-flutter` 安装；只处理识别为 Flutter 的 APK（Android ARM64 `libapp.so` + `libflutter.so`）。
+- `analyze` 的 `--flutter auto`（默认）对识别样本自动跑该阶段，`--flutter off` 关闭，`--flutter required` 未成功时保留报告并退出 4；`--flutter-toolchain` 指定本地 toolchain.json（缺省 `FXAPK_FLUTTER_TOOLCHAIN` / `~/.fxapk/flutter/toolchain.json`），`--flutter-timeout`（1–1800，默认 300）只约束单次容器运行。`auto` 命令没有 Flutter 选项。
+- 只用事先准备的本地 Blutter 可执行文件、固定 Docker 镜像与 toolchain.json；容器禁网、只读挂载、限资源，不拉取镜像、不下载、不编译、不执行 APK；缺插件或工具链记覆盖缺口，不自动安装依赖。
+- `fxapk flutter capabilities|analyze|query|attach`：query 与证据包未脱敏；attach 要求 `meta.sample_sha256` 精确匹配并写新目录，不重算 lead 分级或闭环；产出端点为 `derived-native` 静态证据（`runtime_observed=false`、`reachability=unknown`），不是运行时传输证据，不单独晋级闭环。
+- 本次集成仅合成回归与产物级验收，未做真实样本验收。
+
+## 8. 环境准备
 
 ```bash
 pip install -e .                       # Python >= 3.11
@@ -122,11 +130,11 @@ git config core.hooksPath .githooks    # 提交前泄漏扫描，改代码必开
 
 **真机**：需要已 root 的 Android 真机或模拟器；纯静态不需要。`fxapk doctor`（授权后）按设备 ABI 与主机 frida 版本部署 frida-server、安装 mitmproxy CA。两个易混淆点：Frida ≥17 的 Java bridge 由宿主应答（doctor 已检测，验收看 capture 报告 `frida_bridges`）；frida-server 能被 `frida-ps` 列出不等于以 root 运行（doctor 按 `/proc/<pid>/status` 判真实 UID）。mitmproxy 安装见 `tools/TOOLCHAIN.md`。
 
-## 8. 联网富化
+## 9. 联网富化
 
 两遍门控：第①遍归属（rdap/whois/dns/asn/icp）形成辖区候选；第②遍只对境外+未知端点收集承载、边缘、Origin 候选（Shodan 为 `case_close_only`，由 `case close` 或 `enrich batch` 调用；crt.sh 免 key 默认开）。不向目标业务服务主动探测。`exposure` 技术栈指纹是零网络映射，只作弱候选。`enrich batch` 默认 `--dry-run` 只估配额，确认后 `--no-dry-run`。源不适用与查无记录分开标注——工具失败 ≠ 阴性。
 
-## 9. 开发约定
+## 10. 开发约定
 
 - 文档/指令变更只做格式、引用、契约与泄漏检查；代码行为变更必过本地三关：`python -m ruff check apkscan tests` + `python -m pyright apkscan` + `python -m pytest -q`。`-m "not slow"` 排除需要 `FXAPK_TEST_APK` 的真 spawn 等价测试。
 - Python type hints；pytest，不用 unittest。富化器继承 `BaseEnricher`，失败返回 `EnrichmentResult(ok=False)`，不裸 except、不吞 log。
@@ -134,7 +142,7 @@ git config core.hooksPath .githooks    # 提交前泄漏扫描，改代码必开
 - CI 装 `pip install -e "."`：可选依赖进 `pyproject` extra，需要它的 CI job 要装；依赖 extra 的测试 `pytest.importorskip`。可选插件默认发现不得让坏插件拖垮核心命令。
 - 合并前等 CI 绿（`gh run watch <id> --exit-status`）；不 `--no-verify`，不 force push master；未经指示不主动 commit。
 
-## 10. 已否决的方案
+## 11. 已否决的方案
 
 - 二进制紧凑端点数组提取（`[IPv4(4)+port(2)]` 记录）：随机/密文字节约半数会被判成端点，且解码链够不到解密后明文——取证工具凭空造 IP 一票否决。
 - Brotli 剥层：Python `brotli` 没有输出上限，无法限住峰值内存，且真样本里它在 RSA 解密之后、仓内管线够不到。
