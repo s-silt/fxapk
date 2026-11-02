@@ -32,6 +32,7 @@
 | 导出 CSV / 比差异 / JSONL | `fxapk export out/app.json` / `fxapk diff a.json b.json` / `fxapk jsonl out/app.json` |
 | JADX 使用位置、调用路径、家族对照 | `fxapk jadx usage <值> --jadx-cache-root <cache> --apk-sha256 <sha>` / `jadx callpath` / `jadx compare <a.json> <b.json>` |
 | DEX 字符串引用查询与导入（可选 fxapk-asc 隔离 worker） | `fxapk dex query` / `fxapk dex import`，见 [plugins/fxapk-asc/README.md](plugins/fxapk-asc/README.md) |
+| Flutter AOT 静态分析（可选插件，离线容器） | `fxapk flutter capabilities` / `analyze` / `query` / `attach`，见 [plugins/fxapk-flutter/README.md](plugins/fxapk-flutter/README.md) |
 | 识别线（只读/离线；晋级门未过退出码 4） | `fxapk recognize reanalysis` / `labels validate` / `split build\|validate` / `evaluate` |
 
 ## 已保存网页材料
@@ -191,6 +192,21 @@ fxapk case prepare-materials private/demo --out private/demo/pre-report.json
 ## 可选 Android UI 插件
 
 `fxapk-android-ui 0.1.2` 提供 `ui capabilities` / `ui snapshot` / `ui run-plan`；设备命令显式 `--serial`，观察/计划还须 `--package` 与新的 `--out`。安装插件不会自动为 `auto`/`capture` 接入 UI 观察。截图、布局与诊断可能含原值。见 [ANDROID-UI.md](ANDROID-UI.md)。
+
+## 可选 Flutter AOT 插件
+
+`fxapk-flutter`（发行附件 wheel，或源码树 `python -m pip install -e ./plugins/fxapk-flutter`；要求核心 ≥1.23.0）对识别为 Flutter 的 APK 做离线 AOT 静态分析（仅 Android ARM64）。`analyze` 的 `--flutter auto`（默认）/ `off` / `required` 控制该阶段，`required` 未成功时保留报告并退出 4；`--flutter-toolchain` 指定本地 toolchain.json（缺省读 `FXAPK_FLUTTER_TOOLCHAIN` 或 `~/.fxapk/flutter/toolchain.json`）；`--flutter-timeout` 范围 1–1800 秒、默认 300，只约束单次容器运行，不是整条流水线的时限。`auto` 命令没有 Flutter 选项。缺插件或工具链时记录覆盖缺口，不自动安装。
+
+```text
+fxapk analyze sample.apk --offline --flutter auto --out analysis
+fxapk analyze sample.apk --offline --flutter required --out analysis-required
+fxapk flutter analyze sample.apk --out flutter-result
+fxapk flutter query flutter-result --symbol UploadService.uploadContacts
+fxapk flutter query flutter-result --text contacts
+fxapk flutter attach flutter-result --report analysis/sample.json --out new-revision
+```
+
+`attach` 要求报告 `meta.sample_sha256` 与证据包绑定的 APK 哈希一致，输出必须是新目录；原报告字节原样保留为 `source-report.json`，不重算 lead 分级与闭环。缓存与清单哈希只证明字节一致，不证明内容真实。查询与证据包未脱敏。配置、缓存键与支持范围见 [plugins/fxapk-flutter/README.md](plugins/fxapk-flutter/README.md)。
 
 ## License
 

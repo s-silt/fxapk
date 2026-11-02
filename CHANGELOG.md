@@ -5,6 +5,16 @@
 
 ## 待发布
 
+## 1.23.0 — 2026-11-02
+
+- 新增可选插件 `fxapk-flutter 0.1.0`（仅随发行附件分发、不发布 PyPI，要求核心 ≥1.23.0）：`analyze` 新增 `--flutter auto|off|required`，识别为 Flutter 的 APK 默认进入离线 AOT 静态阶段；`required` 在 Flutter 分析未成功时保留报告并以退出码 4 结束；缺插件或工具链记录覆盖缺口，不自动安装依赖。`auto` 命令无 Flutter 选项。
+- 证据绑定：精确快照匹配（dart_version/snapshot/abi/压缩指针/快照标志全等才命中），内容缓存键覆盖 libapp/libflutter 摘要、兼容性、工具链身份与插件/索引版本；命中逐文件校验清单并重绑当前 APK，失效缓存隔离重算；bundle 校验 cache_key、来源 APK 哈希与成员摘要后才可用。
+- 执行边界：仅使用事先准备的本地 Blutter 可执行文件与固定 Docker 镜像；分析容器禁网、只读挂载、限制 CPU/内存/进程数，不拉取镜像、不下载、不编译、不执行 APK。
+- 静态证据口径：直接 BL 调用逐条对照原 ELF 指令核验，不匹配保持未核验；间接/虚调用计为覆盖缺口。URL 只作字面量候选产出 `derived-native` 端点，`runtime_observed=false`、`reachability=unknown`，不构成实际传输证据。
+- `fxapk flutter attach`：要求 `meta.sample_sha256` 精确匹配，单次读取原报告并原样留存 `source-report.json`，写入新目录、不改原报告字段、不重算 lead 分级与闭环；投影证据带与核心序列化一致的 `evidence_id`/`occurrence_id`。
+- 发行附件：核心 1.23.0 与四个可选插件（android-ui / rea / asc / flutter）共十个归档，附 `SHA256SUMS.txt`。
+- 验证范围：本版本内容为合成回归、产物级与 CI 验收；提供方上报的两个真实 APK 验收未在本次集成中独立复现，不宣称真实设备或在线工具链验收。
+
 ## 1.22.0 — 2026-11-01
 
 - 证据来源：报告 schema 1.3 增加逐次定位、来源和覆盖状态，保留旧 `evidence_id`；富化、线索、闭环和语料关系统一按用途准入，静态候选不作为运行时或归属证据。

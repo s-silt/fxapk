@@ -941,6 +941,10 @@ class AnalysisConfig:
     web_supplement: str | None = None
     #: 程序化调用可直接传已解析对象。与路径同时出现则拒绝执行。
     web_supplement_request: dict | None = None
+    #: Prepared local Flutter AOT backend. Never downloads/builds during analysis.
+    flutter: str = "auto"
+    flutter_toolchain: str | None = None
+    flutter_timeout: int = 300
 
 
 #: report.json 结构版本。消费方（AI / CI / 第三方工具）据此判断字段布局；发生破坏性字段变更时 bump。

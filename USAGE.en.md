@@ -32,6 +32,7 @@ Full flags: `fxapk --help`; if `fxapk` is not installed as a command, use `pytho
 | Export CSV / diff / JSONL | `fxapk export out/app.json` / `fxapk diff a.json b.json` / `fxapk jsonl out/app.json` |
 | JADX usage locations, call paths, family comparison | `fxapk jadx usage <value> --jadx-cache-root <cache> --apk-sha256 <sha>` / `jadx callpath` / `jadx compare <a.json> <b.json>` |
 | DEX string-reference query and import (optional fxapk-asc isolated worker) | `fxapk dex query` / `fxapk dex import`, see [plugins/fxapk-asc/README.md](plugins/fxapk-asc/README.md) |
+| Flutter AOT static analysis (optional plugin, offline container) | `fxapk flutter capabilities` / `analyze` / `query` / `attach`, see [plugins/fxapk-flutter/README.md](plugins/fxapk-flutter/README.md) |
 | Recognition line (read-only/offline; exit 4 when the promotion gate fails) | `fxapk recognize reanalysis` / `labels validate` / `split build\|validate` / `evaluate` |
 
 ## Saved web evidence
@@ -207,6 +208,21 @@ fxapk case prepare-materials private/demo --out private/demo/pre-report.json
 ## Optional Android UI plugin
 
 `fxapk-android-ui 0.1.1` provides `ui capabilities` / `ui snapshot` / `ui run-plan`; device commands take an explicit `--serial`, and observations/plans also require `--package` and a new `--out`. Installing the plugin does not automatically attach UI observation to `auto`/`capture`. Screenshots, layouts and diagnostics may contain raw values. See [ANDROID-UI.en.md](ANDROID-UI.en.md).
+
+## Optional Flutter AOT plugin
+
+`fxapk-flutter` (release-attachment wheel, or `python -m pip install -e ./plugins/fxapk-flutter` in the source tree; requires core >=1.23.0) performs offline AOT static analysis on APKs identified as Flutter (Android ARM64 only). `analyze` controls the stage via `--flutter auto` (default) / `off` / `required`, where `required` preserves the report but exits 4 on failure; `--flutter-toolchain` points to a local toolchain.json (falling back to `FXAPK_FLUTTER_TOOLCHAIN` or `~/.fxapk/flutter/toolchain.json`); `--flutter-timeout` accepts 1-1800 seconds (default 300) and bounds a single container run only - it is not a whole-pipeline deadline. The `auto` command has no Flutter options. A missing plugin or toolchain is recorded as a coverage gap; nothing is installed automatically.
+
+```text
+fxapk analyze sample.apk --offline --flutter auto --out analysis
+fxapk analyze sample.apk --offline --flutter required --out analysis-required
+fxapk flutter analyze sample.apk --out flutter-result
+fxapk flutter query flutter-result --symbol UploadService.uploadContacts
+fxapk flutter query flutter-result --text contacts
+fxapk flutter attach flutter-result --report analysis/sample.json --out new-revision
+```
+
+`attach` requires the report `meta.sample_sha256` to equal the bundle's bound APK hash and writes to a new output directory; original report bytes are preserved as `source-report.json` and lead grading/closure are not recomputed. Cache and manifest hashes prove byte equality, not content truth. Queries and evidence bundles are not redacted. Configuration, cache keys and supported scope: [plugins/fxapk-flutter/README.md](plugins/fxapk-flutter/README.md).
 
 ## License
 

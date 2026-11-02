@@ -424,6 +424,9 @@ def analyze(
             "默认关（尽力而为、退出码 0），适合 CI / 批量 / Agent 判定。"
         ),
     ),
+    flutter: str = typer.Option("auto", "--flutter", help="Flutter AOT: auto, off, required. Uses prepared local tools only."),
+    flutter_toolchain: str | None = typer.Option(None, "--flutter-toolchain", help="Local Flutter toolchain JSON."),
+    flutter_timeout: int = typer.Option(300, "--flutter-timeout", min=1, max=1800),
 ) -> None:
     """分析一个 APK 并产出报告。"""
     logging.basicConfig(
@@ -437,6 +440,8 @@ def analyze(
     try:
         formats = _parse_formats(fmt)
         _validate_mode(mode)
+        if flutter not in {"auto", "off", "required"}:
+            raise typer.BadParameter("--flutter must be auto, off or required")
         out = _resolve_out(out, apk)  # 未给 --out → 默认落到 APK 同目录下的 out/
         from apkscan.core.web_supplement_runtime import static_web_arguments
 
@@ -450,6 +455,9 @@ def analyze(
             enrich_static_ip_max_targets=enrich_static_ip_max_targets,
             enrichment_dry_run=enrichment_dry_run,
             web_supplement=static_web,
+            flutter=flutter,
+            flutter_toolchain=flutter_toolchain,
+            flutter_timeout=flutter_timeout,
         )
 
         extra_dex_files = _resolve_extra_dex(extra_dex)
@@ -555,6 +563,10 @@ def analyze(
                 )
 
         _exit_if_report_delivery_failed(combine_deliveries(deliveries))
+
+        if flutter == "required" and report.meta.get("flutter_analysis", {}).get("status") != "ok":
+            typer.echo("Flutter analysis incomplete; retained other analysis results.", err=True)
+            raise typer.Exit(code=4)
 
         # --strict：所有工作（写报告 / 入账 / 动态）完成后，据完整度决定退出码，供 CI / Agent 判定。
         # 非严格默认退 0（尽力而为，向后兼容）。退出穿过 finally 正常收尾（与 capture 同范式）。
