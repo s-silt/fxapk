@@ -558,6 +558,11 @@ def analyze(
 
         _print_summary(report)
 
+        if input_identity_changed:
+            _exit_if_report_delivery_failed(combine_deliveries(deliveries))
+            typer.echo("APK changed after parsing; retained the snapshot-bound report.", err=True)
+            raise typer.Exit(code=4)
+
         # --dynamic：静态完成后，若有设备则自动 unpack + capture（实现由 dynamic 模块 agent 完成）。
         if dynamic:
             if not device_detected:
@@ -572,10 +577,6 @@ def analyze(
                 )
 
         _exit_if_report_delivery_failed(combine_deliveries(deliveries))
-
-        if input_identity_changed:
-            typer.echo("APK changed after parsing; retained the snapshot-bound report.", err=True)
-            raise typer.Exit(code=4)
 
         if flutter == "required" and report.meta.get("flutter_analysis", {}).get("status") != "ok":
             typer.echo("Flutter analysis incomplete; retained other analysis results.", err=True)

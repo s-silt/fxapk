@@ -627,7 +627,8 @@ def test_pipeline_flutter_missing_snapshot_identity(fake_ctx, tmp_path, monkeypa
     assert report.meta["flutter_analysis"]["reason"] == "snapshot_identity_missing"
 
 
-def test_cli_input_changed_preserves_snapshot(tmp_path, monkeypatch):
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_cli_input_changed_preserves_snapshot(tmp_path, monkeypatch, dynamic):
     from typer.testing import CliRunner
 
     import apkscan.cli as cli
@@ -646,9 +647,13 @@ def test_cli_input_changed_preserves_snapshot(tmp_path, monkeypatch):
     apk = tmp_path / "synthetic.apk"
     apk.write_bytes(b"replaced")
     out = tmp_path / "out-changed"
+    dynamic_calls = []
+    monkeypatch.setattr(cli.device, "has_device", lambda: True)
+    monkeypatch.setattr(cli, "_run_dynamic_after_static", lambda *a, **k: dynamic_calls.append(a))
     result = CliRunner().invoke(app, ["analyze", str(apk), "--offline", "--flutter", "auto",
-                                      "--fmt", "json", "--out", str(out)])
+                                      "--fmt", "json", "--out", str(out)] + (["--dynamic"] if dynamic else []))
     assert result.exit_code == 4
+    assert dynamic_calls == []
     saved = json.loads((out / "synthetic.json").read_bytes())
     assert saved["meta"]["sample_sha256"] == original
     manifest = saved["meta"]["evidence_manifest"]
