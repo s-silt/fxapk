@@ -107,6 +107,7 @@ def test_cache_rebinds_each_apk_and_detects_tampering(flutter, prepared, tmp_pat
     assert second["cache_hit"] and not first["cache_hit"]
     assert first["source"]["apk_sha256"] != second["source"]["apk_sha256"]
     assert first["cache_key"] == second["cache_key"]
+    assert first["coverage"]["index_version"] == "4"
     assert len(prepared.executions) == 1
     (prepared.cache / first["cache_key"] / "raw/pp.txt").write_text("changed")
     third = flutter.runtime.analyze(prepared.apks[0], tmp_path / "three", prepared.config)
@@ -231,7 +232,7 @@ def test_stage_uses_plugin_and_preserves_static_provenance(flutter, prepared, tm
     from apkscan.core import flutter_analysis as stage
     from apkscan.core.pipeline import _PipelineState
     cfg = AnalysisConfig(out_dir=str(tmp_path / "pipeline"), flutter="required", flutter_toolchain=str(prepared.config))
-    state = _PipelineState(ctx=SimpleNamespace(apk_path=str(prepared.apks[0])), config=cfg, platform="android", capabilities=set())
+    state = _PipelineState(ctx=SimpleNamespace(apk_path=str(prepared.apks[0]), sample_sha256=flutter.evidence.digest(prepared.apks[0])), config=cfg, platform="android", capabilities=set())
     state.meta["app_framework"] = {"identified": True, "name": "flutter"}
     monkeypatch.setattr(stage, "discover_plugins", lambda: ([flutter.plugin.FlutterPlugin()], []))
     stage.run_flutter_stage(state)
@@ -408,7 +409,8 @@ def _fake_plugin(calls):
         def run_static(self, request):
             calls.append(request)
             return {
-                "metadata": {"schema_version": "fxapk-flutter/1", "status": "ok", "runtime_observed": False},
+                "metadata": {"schema_version": "fxapk-flutter/1", "status": "ok", "runtime_observed": False,
+                          "source": {"apk_sha256": request["expected_apk_sha256"]}},
                 "endpoints": [
                     Endpoint(
                         value="https://example.invalid/api", kind="url",
@@ -428,6 +430,7 @@ def test_pipeline_flutter_stage_runs_plugin(fake_ctx, tmp_path, monkeypatch):
 
     calls = []
     _stub_pipeline(monkeypatch, _fake_plugin(calls))
+    fake_ctx.sample_sha256 = "a" * 64
     report = pipeline.run(fake_ctx, AnalysisConfig(online=False, flutter="required", out_dir=str(tmp_path)))
     assert report.meta["flutter_analysis"]["status"] == "ok"
     assert calls and calls[0]["apk"] == fake_ctx.apk_path
@@ -527,3 +530,173 @@ def test_cli_flutter_auto_preserves_report_without_gate(tmp_path, monkeypatch):
                                     "--fmt", "json", "--out", str(out)])
     assert result.exit_code == 0
     assert json.loads((out / "synthetic.json").read_bytes())["meta"]["flutter_analysis"]["status"] == "failed"
+
+
+@pytest.mark.parametrize("sub", ["attached", ""])
+def test_attach_rejects_overlapping_output(flutter, prepared, tmp_path, monkeypatch, sub):
+    root = tmp_path / "bundle"
+    result = flutter.runtime.analyze(prepared.apks[0], root, prepared.config)
+    report = tmp_path / "report.json"
+    data = {"schema_version": "1.3",
+            "meta": {"sample_sha256": result["source"]["apk_sha256"]},
+            "endpoints": [], "leads": []}
+    flutter.evidence.save(report, data)
+    manifest_before = (root / "manifest.json").read_bytes()
+    inventory_before = flutter.evidence.inventory(root)
+    copied = []
+
+    def _copy(*args, **kwargs):
+        copied.append(args)
+        raise AssertionError("copy should not be reached")
+
+    monkeypatch.setattr(flutter.projection.shutil, "copytree", _copy)
+    out = root / sub if sub else root
+    with pytest.raises(flutter.evidence.FlutterError, match="overlapping_paths"):
+        flutter.projection.attach(root, report, out)
+    assert copied == []
+    if sub:
+        assert not out.exists()
+    assert flutter.evidence.inventory(root) == inventory_before
+    assert (root / "manifest.json").read_bytes() == manifest_before
+
+
+@pytest.mark.parametrize("cache_kind", ["same", "inside", "parent"])
+def test_analyze_rejects_overlapping_cache(flutter, prepared, tmp_path, monkeypatch, cache_kind):
+    out = tmp_path / "out"
+    cache = {"same": out, "inside": out / "cache", "parent": out.parent}[cache_kind]
+    config = tmp_path / "toolchain-overlap.json"
+    flutter.evidence.save(config, {"schema_version": "fxapk-flutter-toolchain/1",
+                                   "entries": [prepared.entry], "cache_dir": str(cache)})
+    monkeypatch.setattr(flutter.runtime, "execute",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("execute should not be reached")))
+    with pytest.raises(flutter.evidence.FlutterError, match="overlapping_paths"):
+        flutter.runtime.analyze(prepared.apks[0], out, config)
+    assert not out.exists()
+    assert prepared.executions == []
+    assert not (cache / "analysis.lock").exists()
+
+
+def test_pipeline_flutter_apk_identity_mismatch(flutter, prepared, fake_ctx, tmp_path, monkeypatch):
+    from apkscan.core import pipeline
+
+    _stub_pipeline(monkeypatch, flutter.plugin.FlutterPlugin())
+    fake_ctx.apk_path = str(prepared.apks[1])
+    fake_ctx.sample_sha256 = flutter.evidence.digest(prepared.apks[0])
+    cfg = AnalysisConfig(online=False, flutter="required", out_dir=str(tmp_path / "pipeline"),
+                         flutter_toolchain=str(prepared.config))
+    report = pipeline.run(fake_ctx, cfg)
+    assert report.meta["flutter_analysis"]["status"] == "failed"
+    assert report.meta["flutter_analysis"]["reason"] == "apk_identity_mismatch"
+    assert report.endpoints == []
+    assert prepared.executions == []
+    assert report.analysis_status == "partial"
+
+
+def test_pipeline_flutter_rejects_dishonest_source(fake_ctx, tmp_path, monkeypatch):
+    from apkscan.core import pipeline
+    from apkscan.core.models import Endpoint, Evidence
+
+    class _DishonestPlugin:
+        name = "flutter"
+
+        def run_static(self, request):
+            return {
+                "metadata": {"schema_version": "fxapk-flutter/1", "status": "ok", "runtime_observed": False,
+                             "source": {"apk_sha256": "b" * 64}},
+                "endpoints": [Endpoint(value="https://example.invalid/api", kind="url",
+                                       evidences=[Evidence(source="derived-native", location="synthetic")])],
+            }
+
+    _stub_pipeline(monkeypatch, _DishonestPlugin())
+    fake_ctx.sample_sha256 = "a" * 64
+    report = pipeline.run(fake_ctx, AnalysisConfig(online=False, flutter="required", out_dir=str(tmp_path)))
+    assert report.meta["flutter_analysis"]["status"] == "failed"
+    assert report.meta["flutter_analysis"]["reason"] == "apk_identity_mismatch"
+    assert all(e.value != "https://example.invalid/api" for e in report.endpoints)
+    assert report.analysis_status == "partial"
+
+
+def test_pipeline_flutter_missing_snapshot_identity(fake_ctx, tmp_path, monkeypatch):
+    from apkscan.core import pipeline
+
+    calls = []
+    _stub_pipeline(monkeypatch, _fake_plugin(calls))
+    report = pipeline.run(fake_ctx, AnalysisConfig(online=False, flutter="required", out_dir=str(tmp_path)))
+    assert calls == []
+    assert report.meta["flutter_analysis"]["status"] == "unavailable"
+    assert report.meta["flutter_analysis"]["reason"] == "snapshot_identity_missing"
+
+
+def test_cli_input_changed_preserves_snapshot(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    import apkscan.cli as cli
+    from apkscan.cli import app
+    from apkscan.core.models import Report
+
+    original = hashlib.sha256(b"original").hexdigest()
+    replaced = hashlib.sha256(b"replaced").hexdigest()
+    report = Report(package_name="synthetic.test", meta={"flutter_analysis": {"status": "ok"}},
+                    leads=[], endpoints=[], findings=[], analyzer_status=[], analysis_status="complete")
+    _stub_cli(monkeypatch, report)
+    monkeypatch.setattr(cli, "load_apk",
+                        lambda *a, **k: SimpleNamespace(package_name="synthetic.test",
+                                                       extra_dex_report=None,
+                                                       sample_sha256=original))
+    apk = tmp_path / "synthetic.apk"
+    apk.write_bytes(b"replaced")
+    out = tmp_path / "out-changed"
+    result = CliRunner().invoke(app, ["analyze", str(apk), "--offline", "--flutter", "auto",
+                                      "--fmt", "json", "--out", str(out)])
+    assert result.exit_code == 4
+    saved = json.loads((out / "synthetic.json").read_bytes())
+    assert saved["meta"]["sample_sha256"] == original
+    manifest = saved["meta"]["evidence_manifest"]
+    assert manifest["sha256"] == original
+    assert manifest["post_analysis_sha256"] == replaced
+    assert manifest["md5"] == "" and manifest["sha1"] == "" and manifest["size"] == 0
+    assert manifest["status"] == "input_changed"
+    assert saved["analysis_status"] == "failed"
+    assert saved["completeness"] == 0.0
+
+
+def test_index_ignores_payloads_inside_strings(flutter, tmp_path):
+    root = tmp_path / "bundle"
+    (root / "input").mkdir(parents=True)
+    (root / "input/libapp.so").write_bytes(elf_bytes())
+    outputs(root)
+    asm = root / "raw/asm/synthetic.dart"
+    asm.write_text(asm.read_text().replace(
+        "    // 0x1010: r0 = \"ok\"",
+        "    // 0x1010: r0 = \"// 0x1000: bl #0x1010\"\n"
+        "    // 0x1014: r1 = \"// ** addr: 0x2000, size: 0x10\"\n"
+        "    // 0x1018: r2 = \"blr x0\"\n"
+        "    // 0x101c: r3 = \"https://example.invalid/post\""))
+    result = flutter.index.build(root)
+    assert result["functions"] == 2
+    assert result["direct_calls"] == 1
+    assert result["unresolved_indirect_calls"] == 1
+    assert result["index_version"] == "4"
+    post = flutter.index.query(root, symbol="UploadService.post")["matches"][0]
+    assert post["calls"] == []
+    url = flutter.index.query(root, text="https://example.invalid/post")["matches"][0]
+    assert url["function"] == 0x1010 and url["address"] == 0x101c
+    upload = flutter.index.query(root, symbol="UploadService.uploadContacts")["matches"][0]
+    assert upload["calls"][0]["verified"] == 1
+
+
+def test_index_rejects_callsite_outside_function_range(flutter, tmp_path):
+    root = tmp_path / "bundle"
+    (root / "input").mkdir(parents=True)
+    (root / "input/libapp.so").write_bytes(elf_bytes())
+    outputs(root)
+    asm = root / "raw/asm/synthetic.dart"
+    asm.write_text(asm.read_text().replace(
+        "    // 0x1010: r0 = \"ok\"",
+        "    // 0x1000: bl #0x1010\n    // 0x1010: r0 = \"ok\""))
+    result = flutter.index.build(root)
+    assert result["raw_call_mismatches"] == 1
+    post = flutter.index.query(root, symbol="UploadService.post")["matches"][0]
+    assert post["calls"][0]["verified"] == 0
+    upload = flutter.index.query(root, symbol="UploadService.uploadContacts")["matches"][0]
+    assert upload["calls"][0]["verified"] == 1

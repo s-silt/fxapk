@@ -11,7 +11,7 @@ from apkscan.core.models import Endpoint, Evidence
 from apkscan.core.report_schema import report_schema_info
 from apkscan.report.json import _to_jsonable
 
-from .evidence import FlutterError, contained, digest, read, save, validate_bundle
+from .evidence import FlutterError, contained, digest, read, reject_overlapping_paths, save, validate_bundle
 from .index import url_candidates
 
 
@@ -40,6 +40,7 @@ def project(bundle: Path, relative: str) -> dict:
 
 
 def attach(bundle: Path, report: Path, out: Path) -> dict:
+    reject_overlapping_paths(bundle, out)
     manifest = validate_bundle(bundle)
     raw = read(report, 32 * 1024 * 1024)
     try:

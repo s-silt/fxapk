@@ -66,6 +66,12 @@ def contained(root: Path, relative: str) -> Path:
     return target
 
 
+def reject_overlapping_paths(first: Path, second: Path) -> None:
+    left, right = first.resolve(), second.resolve()
+    if left.is_relative_to(right) or right.is_relative_to(left):
+        raise FlutterError("overlapping_paths")
+
+
 def inventory(root: Path) -> list[dict]:
     rows = []
     total = 0

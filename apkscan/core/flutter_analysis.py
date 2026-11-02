@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from apkscan.core.models import Endpoint
@@ -35,19 +36,30 @@ def run_flutter_stage(state: Any) -> None:
             status = next((s for s in statuses if s["name"] == "flutter"), {})
             metadata.update(status="unavailable", reason=status.get("reason") or "plugin_not_installed")
         else:
-            try:
-                result = plugin.run_static({"apk": state.ctx.apk_path, "out_dir": state.config.out_dir,
-                                            "toolchain": state.config.flutter_toolchain, "timeout": state.config.flutter_timeout})
-                metadata = result["metadata"]
-                endpoints = result["endpoints"]
-                if not isinstance(metadata, dict) or metadata.get("status") not in {"ok", "failed", "partial", "unavailable"}:
-                    raise ValueError("invalid_flutter_result")
-                if not isinstance(endpoints, list) or not all(isinstance(e, Endpoint) for e in endpoints):
-                    raise ValueError("invalid_flutter_endpoints")
-                state.endpoints.extend(endpoints)
-            except Exception as exc:  # noqa: BLE001 - optional plugin failure must preserve other analyzers
-                logger.warning("Flutter plugin execution failed (%s)", type(exc).__name__)
-                metadata = {"schema_version": "fxapk-flutter/1", "status": "failed", "reason": "plugin_execution_failed", "runtime_observed": False}
+            expected = getattr(state.ctx, "sample_sha256", "")
+            if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+                metadata.update(status="unavailable", reason="snapshot_identity_missing")
+            else:
+                try:
+                    result = plugin.run_static({"apk": state.ctx.apk_path, "out_dir": state.config.out_dir,
+                                                "toolchain": state.config.flutter_toolchain, "timeout": state.config.flutter_timeout,
+                                                "expected_apk_sha256": expected})
+                    metadata = result["metadata"]
+                    endpoints = result["endpoints"]
+                    if not isinstance(metadata, dict) or metadata.get("status") not in {"ok", "failed", "partial", "unavailable"}:
+                        raise ValueError("invalid_flutter_result")
+                    if not isinstance(endpoints, list) or not all(isinstance(e, Endpoint) for e in endpoints):
+                        raise ValueError("invalid_flutter_endpoints")
+                    if metadata["status"] == "ok":
+                        source = metadata.get("source")
+                        if not isinstance(source, dict) or source.get("apk_sha256") != expected:
+                            metadata = {"schema_version": "fxapk-flutter/1", "status": "failed",
+                                        "reason": "apk_identity_mismatch", "runtime_observed": False}
+                        else:
+                            state.endpoints.extend(endpoints)
+                except Exception as exc:  # noqa: BLE001 - optional plugin failure must preserve other analyzers
+                    logger.warning("Flutter plugin execution failed (%s)", type(exc).__name__)
+                    metadata = {"schema_version": "fxapk-flutter/1", "status": "failed", "reason": "plugin_execution_failed", "runtime_observed": False}
     state.meta["flutter_analysis"] = metadata
     if mode != "off":
         state.analyzer_status.append({"name": "flutter", "status": "ran" if metadata["status"] == "ok" else "error", "reason": metadata.get("reason", "")})

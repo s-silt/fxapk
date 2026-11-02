@@ -14,6 +14,7 @@
 - `fxapk flutter attach`：要求 `meta.sample_sha256` 精确匹配，单次读取原报告并原样留存 `source-report.json`，写入新目录、不改原报告字段、不重算 lead 分级与闭环；投影证据带与核心序列化一致的 `evidence_id`/`occurrence_id`。
 - 发行附件：核心 1.23.0 与四个可选插件（android-ui / rea / asc / flutter）共十个归档，附 `SHA256SUMS.txt`。
 - 验证范围：本版本内容为合成回归、产物级与 CI 验收；提供方上报的两个真实 APK 验收未在本次集成中独立复现，不宣称真实设备或在线工具链验收。
+- 输入绑定与防线：Flutter 阶段在执行前与结果回灌后均以解析期 `sample_sha256` 绑定检材，不一致记 `apk_identity_mismatch`、缺快照记 `snapshot_identity_missing`；`analyze` 结束后最终指纹与快照不一致时保留快照身份、清空派生哈希、置 `analysis_status=failed`/`completeness=0` 并以退出码 4 结束。汇编解析行级锚定并校验调用方地址范围（索引版本升至 4，v3 缓存失效）；bundle/输出/缓存路径重叠在写出前一律拒绝（`overlapping_paths`）。
 
 ## 1.22.0 — 2026-11-01
 

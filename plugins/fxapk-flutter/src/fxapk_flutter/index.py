@@ -14,10 +14,11 @@ from elftools.elf.elffile import ELFFile
 from .detect import address_offset
 from .evidence import FlutterError, read
 
-INDEX_VERSION = "3"
-_ADDR = re.compile(r"// \*\* addr: (0x[0-9a-f]+), size: (0x[0-9a-f]+)")
-_LINE = re.compile(r"//\s+(0x[0-9a-f]+):")
-_BL = re.compile(r"//\s+(0x[0-9a-f]+):\s+bl\s+#(0x[0-9a-f]+)")
+INDEX_VERSION = "4"
+_ADDR = re.compile(r"^\s*// \*\* addr: (0x[0-9a-f]+), size: (0x[0-9a-f]+)\s*$")
+_LINE = re.compile(r"^\s*//\s+(0x[0-9a-f]+):")
+_BL = re.compile(r"^\s*//\s+(0x[0-9a-f]+):\s+bl\s+#(0x[0-9a-f]+)(?:\s|$)")
+_INDIRECT = re.compile(r"^\s*//\s+0x[0-9a-f]+:\s+blr\b")
 _STRING = re.compile(r'(?:String: |r\d+ = )("(?:[^"\\]|\\.)*")')
 
 
@@ -88,7 +89,10 @@ def build(root: Path) -> dict:
             signature = ""
             current = None
             current_address = None
+            current_end = None
             for number, line in enumerate(lines, 1):
+                if line.strip() == "}":
+                    current = current_end = current_address = None
                 class_match = re.match(r"^(?:(?:abstract|final|base|sealed|interface) )*class (\S+)", line)
                 if class_match:
                     cls = class_match[1]
@@ -97,25 +101,30 @@ def build(root: Path) -> dict:
                 match = _ADDR.search(line)
                 if match:
                     current = int(match[1], 16)
+                    current_end = current + int(match[2], 16)
+                    current_address = None
                     # Keep readable constructor/getter/closure signatures, not guessed source code.
                     name_parts = signature.split("(", 1)[0].split()
                     method = name_parts[-1] if name_parts else f"closure@{current:x}"
                     symbol = cls + "." + method
                     db.execute("INSERT INTO functions VALUES(?,?,?,?,?)", (current, symbol, relative, int(match[2], 16), number))
                     functions += 1
-                at = _LINE.search(line)
+                at = _LINE.match(line)
                 if at:
-                    current_address = int(at[1], 16)
+                    address = int(at[1], 16)
+                    current_address = address if (current is not None and current_end is not None
+                                                  and current <= address and address + 4 <= current_end
+                                                  and address % 4 == 0) else None
                 call = _BL.search(line)
                 if call and current is not None:
                     site, target = int(call[1], 16), int(call[2], 16)
-                    verified = verified_bl(raw, elf, site, target)
+                    verified = current_address == site and verified_bl(raw, elf, site, target)
                     db.execute("INSERT INTO calls VALUES(?,?,?,?,?,?)", (current, site, target, int(verified), relative, number))
                     calls += 1
                     mismatches += not verified
-                if re.search(r"\bblr\s+", line):
+                if _INDIRECT.match(line):
                     indirect += 1
-                value_match = _STRING.search(line)
+                value_match = _STRING.search(line) if at else None
                 if value_match:
                     try:
                         value = decode_string(value_match[1])
@@ -137,7 +146,7 @@ def build(root: Path) -> dict:
                         kind = "path_literal"
                     if re.match(r"^(?:[A-Za-z]:[\\/]|/(?:Users|home|opt|build|workspace)/)", value):
                         kind = "dependency_path" if any(s in value for s in (".pub-cache", "flutter/packages", "dart-sdk")) else "build_path_candidate"
-                    db.execute("INSERT INTO strings VALUES(?,?,?,?,?,?)", (current, current_address, value, relative, number, kind))
+                    db.execute("INSERT INTO strings VALUES(?,?,?,?,?,?)", (current if current_address is not None else None, current_address, value, relative, number, kind))
                     strings += 1
                 if functions > 100000 or strings > 500000 or calls > 2000000:
                     raise FlutterError("index_limit")

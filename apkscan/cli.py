@@ -517,11 +517,20 @@ def analyze(
         # 取证完整性背书：检材指纹（多算法 + 分析环境）落 meta["evidence_manifest"]，
         # 并把 sha256 提到顶层快捷键 meta["sample_sha256"]（CSV 导出 / 关联候选聚类已预留引用）。
         # 纯函数容错、绝不抛；外层仍包 try 兜底任何意外，失败只 logging 不炸 analyze。
+        input_identity_changed = False
         try:
             from apkscan import __version__
             from apkscan.core.integrity import sample_fingerprint
 
             manifest = sample_fingerprint(str(apk), tool_version=__version__)
+            snapshot_sha256 = getattr(ctx, "sample_sha256", "")
+            if snapshot_sha256 and manifest.get("sha256") != snapshot_sha256:
+                input_identity_changed = True
+                manifest = {**manifest, "post_analysis_sha256": manifest.get("sha256", ""),
+                            "sha256": snapshot_sha256, "sha1": "", "md5": "", "size": 0,
+                            "status": "input_changed"}
+                report.analysis_status = "failed"
+                report.completeness = 0.0
             report.meta["evidence_manifest"] = manifest
             report.meta["sample_sha256"] = manifest.get("sha256", "")
         except Exception:
@@ -563,6 +572,10 @@ def analyze(
                 )
 
         _exit_if_report_delivery_failed(combine_deliveries(deliveries))
+
+        if input_identity_changed:
+            typer.echo("APK changed after parsing; retained the snapshot-bound report.", err=True)
+            raise typer.Exit(code=4)
 
         if flutter == "required" and report.meta.get("flutter_analysis", {}).get("status") != "ok":
             typer.echo("Flutter analysis incomplete; retained other analysis results.", err=True)

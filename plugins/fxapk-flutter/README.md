@@ -101,6 +101,8 @@ lead grades and closure remain unchanged. Older attachments remain at the explic
 and resolve any prior attachment references when creating a self-contained package.
 Hashes establish byte consistency, not artifact authenticity or actual App behavior.
 
+Output and cache directories must be disjoint from each other and from the bundle; overlapping paths are rejected before any write. A missing or invalid toolchain configuration fails before the output directory is created, so no failure.json is produced in that case. Pipeline invocations bind the parser's APK snapshot hash before and after the backend run.
+
 Upstream: https://github.com/worawit/blutter (MIT). This plugin is an adapter; the
 upstream executable and Dart sources are kept in the local toolchain, not vendored
 with case material into fxapk. First locally accepted combination: Android ARM64,

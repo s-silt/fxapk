@@ -16,7 +16,7 @@ from apkscan.core.proctree import run_owned
 
 from . import __version__
 from .detect import inspect_pair
-from .evidence import SCHEMA, FlutterError, digest, extract, inventory, load, save, validate_bundle
+from .evidence import SCHEMA, FlutterError, digest, extract, inventory, load, reject_overlapping_paths, save, validate_bundle
 from .index import INDEX_VERSION, build
 
 
@@ -117,19 +117,25 @@ def serial_lock(cache: Path):
         lock.unlink(missing_ok=True)
 
 
-def analyze(apk: Path, out: Path, toolchain: Path | None = None, *, timeout: int = 300, use_cache: bool = True) -> dict:
+def analyze(apk: Path, out: Path, toolchain: Path | None = None, *, timeout: int = 300,
+            use_cache: bool = True, expected_apk_sha256: str | None = None) -> dict:
     if not 1 <= timeout <= 1800:
         raise FlutterError("invalid_timeout")
+    if out.exists():
+        raise FileExistsError(out)
+    data = configuration(toolchain)
+    cache = Path(data.get("cache_dir", str(Path.home() / ".fxapk/flutter/cache"))).resolve()
+    reject_overlapping_paths(out, cache)
     out.mkdir(parents=True, exist_ok=False)
     try:
         source = extract(apk, out / "input")
+        if expected_apk_sha256 is not None and source["apk_sha256"] != expected_apk_sha256:
+            raise FlutterError("apk_identity_mismatch")
         compatibility = inspect_pair(out / "input/libapp.so", out / "input/libflutter.so")
-        data = configuration(toolchain)
         entry = select(data, compatibility)
         docker = shutil.which(str(data.get("docker", "docker")))
         if not docker:
             raise FlutterError("docker_unavailable")
-        cache = Path(data.get("cache_dir", str(Path.home() / ".fxapk/flutter/cache"))).resolve()
         identity = {"libapp": source["libapp"]["sha256"], "libflutter": source["libflutter"]["sha256"],
                     "compatibility": compatibility, "tool": entry, "plugin_version": __version__, "index_version": INDEX_VERSION}
         key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()

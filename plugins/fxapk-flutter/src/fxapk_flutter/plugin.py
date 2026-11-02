@@ -81,7 +81,8 @@ class FlutterPlugin:
         root = Path(request["out_dir"]) / relative
         try:
             path = Path(request["toolchain"]) if request.get("toolchain") else None
-            analyze(Path(request["apk"]), root, path, timeout=request.get("timeout", 300))
+            analyze(Path(request["apk"]), root, path, timeout=request.get("timeout", 300),
+                    expected_apk_sha256=request["expected_apk_sha256"])
             return project(root, relative)
         except (FlutterError, OSError) as exc:
             return {"metadata": {"schema_version": "fxapk-flutter/1", "status": "failed",

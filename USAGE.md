@@ -195,7 +195,7 @@ fxapk case prepare-materials private/demo --out private/demo/pre-report.json
 
 ## 可选 Flutter AOT 插件
 
-`fxapk-flutter`（发行附件 wheel，或源码树 `python -m pip install -e ./plugins/fxapk-flutter`；要求核心 ≥1.23.0）对识别为 Flutter 的 APK 做离线 AOT 静态分析（仅 Android ARM64）。`analyze` 的 `--flutter auto`（默认）/ `off` / `required` 控制该阶段，`required` 未成功时保留报告并退出 4；`--flutter-toolchain` 指定本地 toolchain.json（缺省读 `FXAPK_FLUTTER_TOOLCHAIN` 或 `~/.fxapk/flutter/toolchain.json`）；`--flutter-timeout` 范围 1–1800 秒、默认 300，只约束单次容器运行，不是整条流水线的时限。`auto` 命令没有 Flutter 选项。缺插件或工具链时记录覆盖缺口，不自动安装。
+`fxapk-flutter`（发行附件 wheel，或源码树 `python -m pip install -e ./plugins/fxapk-flutter`；要求核心 ≥1.23.0）对识别为 Flutter 的 APK 做离线 AOT 静态分析（仅 Android ARM64）。`analyze` 的 `--flutter auto`（默认）/ `off` / `required` 控制该阶段，`required` 未成功时保留报告并退出 4；`--flutter-toolchain` 指定本地 toolchain.json（缺省读 `FXAPK_FLUTTER_TOOLCHAIN` 或 `~/.fxapk/flutter/toolchain.json`）；`--flutter-timeout` 范围 1–1800 秒、默认 300，只约束单次容器运行，不是整条流水线的时限。`auto` 命令没有 Flutter 选项。缺插件或工具链时记录覆盖缺口，不自动安装。`analyze` 还会核对解析期快照与最终指纹：输入文件在分析期间被改写时，保留快照绑定的报告并以退出码 4 结束（`--flutter auto` 同样适用）。
 
 ```text
 fxapk analyze sample.apk --offline --flutter auto --out analysis
