@@ -15,6 +15,7 @@ fxapk auto inputs/sample.apk --online --three-rounds --out outputs/run
 - `capture-web` 只发 GET，同主机跳转自动跟随，额外主机须 `--allow-host`；不继承代理、netrc、浏览器登录态或 cookie；不执行 JS，不捕获全部 XHR/WebSocket 或子资源。HAR 原文是私有证据，默认过滤敏感头并记录过滤状态。
 - `auto` CLI 默认三轮（`--single-round` 保留单轮；程序化 `auto.run` 需显式 `three_rounds=True`）：先脱壳重分析，再 PCAP → 通用探针 → 定向采集。`--duration` 是每轮时长，每轮封顶 1200 s。定向轮只按脱壳结果选择内置 crypto/OkHttp/JSBridge/SQLCipher 能力，不把样本代码拼成注入脚本。
 - PCAP 单文件上限 256 MiB，超限明确 `resource_limit`，不静默截断。三轮目录互不覆盖，运行时文件哈希与原样本 SHA 绑定；派生端点带来源命名空间。跨轮复用实测配方解既有支持的信封报文时保留密文原件，解出的端点仍是派生证据，不升格为实连或运营者确认。
+- 已保存 fxfetch ZIP 用 `intake-fetch` 分路离线分析；定点材料用 `evidence-review`，已授权运行窗口用 `recover-runtime`。这些独立入口不自动加入三轮 `auto`，不自行启动样本、部署采集环境或重访 URL；详见 [离线复核](OFFLINE-REVIEW.md) 与 [恢复链](RECOVERY-PIPELINE.md)。
 
 ## 报告前材料入口
 
@@ -33,6 +34,7 @@ fxapk case prepare-materials cases/CASE-001 --coverage phase2/coverage.json --cl
 - `case phase2 ... --case-dir <案件目录>` 读直接子目录中的 `case-package.json`，以 manifest 登记的报告路径和哈希为准；指定包含 Phase1 包的那层目录，不把 `cases/` 根当一个案。旧脚本固定读 `report.json` 的地方改用新版 CLI，不重命名或覆盖不可变包。
 - 旧材料缺身份或哈希仍需补证，不自动升格为已验包；旧 PASS 字样不作可复用验收。需要新验收时用单独工作副本和新产物。
 - 复核签发要求同目录 `coverage.json`、`decisions.jsonl` 与回执哈希一致，跨机器一起保留。`corpus add --package` 只接受与包登记报告逐字节一致的输入。
+- 定点复核的新目录含原清单、逐任务回执、`review.json`、`feedback.json` 和报告投影；intake/recovery 另保留各自阶段清单与子进程日志。原件与哈希一起留存，`offline_evidence_review` 不是 Phase-2 的 `case-review.json`，不自动建包、签发、闭环或发布正式 PDF/XLSX。
 
 ## 服务商按角色落实
 

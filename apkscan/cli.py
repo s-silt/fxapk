@@ -48,6 +48,7 @@ from apkscan.commands.lead import lead_app
 from apkscan.commands.web import analyze_web, capture_web
 from apkscan.commands.web_supplement import supplement_web
 from apkscan.commands.origin_check import origin_check
+from apkscan.commands.evidence_review import evidence_review, intake_fetch, recover_runtime
 
 META_WRITE_OWNER = "cli"
 META_WRITE_CATEGORIES = {
@@ -86,6 +87,9 @@ app.add_typer(dex_app, name="dex")
 app.add_typer(jadx_app, name="jadx")
 app.add_typer(lead_app, name="lead")
 app.add_typer(recognize_app, name="recognize")
+app.command("evidence-review")(evidence_review)
+app.command("intake-fetch")(intake_fetch)
+app.command("recover-runtime")(recover_runtime)
 
 # Optional command groups are discovered after core registration. A missing or
 # broken plugin must not prevent the core CLI from importing.

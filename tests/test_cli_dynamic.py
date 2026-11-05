@@ -676,7 +676,7 @@ def test_capture_plan_json_packed_lowers_threshold(tmp_path: Path) -> None:
     payload = _json.loads(result.stdout)
     assert payload["frida_retreat_threshold"] == 2
     assert payload["signals"]["packed"] is True
-    assert payload["expect_native_protocol"] is True  # 无端点键 → 预判 native
+    assert payload["expect_native_protocol"] is False  # 缺端点数据不能判断实现层
 
 
 def test_capture_plan_default_still_prints_text_steps(tmp_path: Path) -> None:

@@ -8,7 +8,7 @@
 <p align="center"><a href="README.md">中文</a> &nbsp;·&nbsp; <strong>English</strong></p>
 <p align="center">
   <a href="https://github.com/s-silt/fxapk/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/s-silt/fxapk/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.23.0">v1.23.0</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
+  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.24.0">v1.24.0</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
 </p>
 
 Command `fxapk` (alias `apkscan`), PyPI package `fxapk`. For people and AI assistants running the source or the Python package directly; no exe or GUI is provided. See [CHANGELOG.md](CHANGELOG.md) for changes.
@@ -37,19 +37,22 @@ Static analysis needs no JDK or device; some analyzers and dynamic capabilities 
 ## Quick start
 
 ```bash
-python -m pip install "fxapk==1.23.0"     # or clone, then python -m pip install -e .
+python -m pip install "fxapk==1.24.0"     # or clone, then python -m pip install -e .
 fxapk selfcheck
 fxapk analyze app.apk --offline --out out
 fxapk digest out/app.json
 ```
 
-The [release page](https://github.com/s-silt/fxapk/releases/tag/v1.23.0) provides the wheel, source archives and `SHA256SUMS.txt`; verify hashes before installing. Put online-service credentials in the repository-root `.env` or `~/.fxapk/.env` per [.env.example](.env.example) (a `.env` in the current directory is not read); they are never written into reports or the repository. If the command is not on PATH, use `python -m apkscan.cli` instead of `fxapk`.
+The [release page](https://github.com/s-silt/fxapk/releases/tag/v1.24.0) provides the wheel, source archives and `SHA256SUMS.txt`; verify hashes before installing. Put online-service credentials in the repository-root `.env` or `~/.fxapk/.env` per [.env.example](.env.example) (a `.env` in the current directory is not read); they are never written into reports or the repository. If the command is not on PATH, use `python -m apkscan.cli` instead of `fxapk`.
 
 `digest` is for triage and navigation; formal conclusions must go back to the structured fields and original evidence in `report.json`. When delegating to an AI assistant, give it [AGENTS.md](AGENTS.md), the sample path, and whether network and device operations are in scope.
 
 | Task | Entry point |
 | --- | --- |
 | Saved web pages, JS or HAR | `fxapk analyze-web <directory> --out out` |
+| Saved fxfetch task archive | `fxapk intake-fetch <ZIP> --fxfetch <trusted-local-CLI> --out <new-directory>` |
+| Targeted offline evidence review | `fxapk evidence-review <manifest> --out <new-directory>` |
+| Authorized targeted DEX/JNI recovery | `fxapk recover-runtime <plan> --out <new-directory>` |
 | Web supplement | Add `--web-supplement <local JSON>` to the first analysis; for an existing report use `fxapk supplement-web <report.json> --web-supplement <config> --out <new-out-dir>` (does not re-run the APK, does not touch devices) |
 | Device troubleshooting | `fxapk doctor --no-fix`, then repair per authorization |
 | PCAP floor without Frida | `fxapk capture <package> --mode floor-only` (still needs adb, root and device-side tcpdump) |
@@ -97,3 +100,9 @@ Collect and analyze only within lawful authorization. Shared CDN, ASN, certifica
 Before developing from source run `git config core.hooksPath .githooks`. For code behavior changes run Ruff, Pyright, pytest and the strict incremental leak scan; fixtures use synthetic data, and case values or credentials must never enter the repository. See [USAGE.en.md](USAGE.en.md#developing-from-source), [ARCHITECTURE.md](ARCHITECTURE.md), [COMPANION-TOOLS.en.md](COMPANION-TOOLS.en.md).
 
 License: [MIT](LICENSE).
+
+## Offline evidence review and fxfetch intake
+
+`fxapk intake-fetch` routes saved fxfetch archives into separate offline web and original-APK analyses. `fxapk evidence-review` checks DEX/JADX, JNI logs, ELF, memory writes, filesystem events, crypto hypotheses and AArch64 execution. `fxapk recover-runtime` connects authorized targeted acquisition to reanalysis and verification. Every stage reaches the receipt, digest and HTML report. Memory-bounded subprocess stages are explicitly unsupported on macOS; real-device recovery is unaccepted and unverified source binding keeps results at most partial. See [offline contracts](OFFLINE-REVIEW.md) and [the recovery pipeline](RECOVERY-PIPELINE.md).
+
+Install review dependencies with `python -m pip install "fxapk[review]==1.24.0"`; supply fxfetch, JADX, adb and Frida when required by the selected backend. Recovery does not install or launch the sample or enable REA. Hash binding, selected-range recovery and emulation do not establish authentic provenance, complete structures or case closure; real-device integration requires separate acceptance.

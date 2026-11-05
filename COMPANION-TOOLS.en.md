@@ -14,6 +14,7 @@ adapters and probes. Credentials, devices and external executables require local
 | Enrichment adapters for `analyze`, `case close` and `enrich batch` | Service credentials, entitlements, query authorization and budget |
 | Dynamic orchestration, built-in hooks and 8 Frida probes | adb, a rooted device, tcpdump and the Frida/mitmproxy tools required by the selected mode |
 | Corpus, Phase-1 packages and Phase-2 CLI | Case/corpus storage outside the worktree; human review |
+| `intake-fetch`, `evidence-review`, `recover-runtime` and recovery observer scripts | Saved inputs, a compatible fxfetch CLI and the `review` extra; JADX and authorized device tools as required |
 
 The bundled `apkscan/dynamic/frida_probes/` contains `coldstart-config`, `objstore-config`,
 `native-ssl`, `tls-keylog`, `sms-forward-outbound`, `mqtt-xmpp-im`, `telegram-mtproto` and
@@ -24,7 +25,7 @@ probe runs automatically.
 ## Start offline
 
 ```bash
-python -m pip install "fxapk==1.19.0"
+python -m pip install "fxapk==1.24.0"
 fxapk analyze app.apk --offline --out out
 fxapk digest out/app.json
 ```
@@ -58,9 +59,10 @@ not execution: distinguish `hit/no_record/failed/skipped/disabled`; failure is n
 | Purpose | Configuration |
 | --- | --- |
 | Supported deep PCAP decryption | `python -m pip install "fxapk[pcap]"`; the `dynamic` extra also declares cryptography, not device tools |
+| Targeted offline review and AArch64 emulation | `python -m pip install "fxapk[review]==1.24.0"`: pyelftools, Capstone 5, cryptography and Unicorn 2; excludes fxfetch/JADX/adb/Frida |
 | Experimental linkage reranker | `python -m pip install "fxapk[ml]"`; independent-label and training gates still apply |
 | jadx, adb, tshark, Frida and frida-dexdump | [Toolchain setup](tools/TOOLCHAIN.en.md) and [Python tool pins](tools/toolchain-requirements.txt) |
-| Android UI plugin | Independent `fxapk-android-ui 0.1.1` (core 1.18.1+); external Android CLI, adb and an authorized device; see the [full guide](ANDROID-UI.en.md) |
+| Android UI plugin | Independent `fxapk-android-ui 0.1.2` (core 1.18.1+); external Android CLI, adb and an authorized device; see the [full guide](ANDROID-UI.en.md) |
 | mitmproxy | A separate environment with explicit executable mappings, as described in the toolchain guide |
 
 Default capture/auto still require Frida. Explicit `capture --mode floor-only` needs no Frida,
@@ -68,6 +70,8 @@ but requires adb, device root and device-side tcpdump. Missing prerequisites can
 not every command can degrade automatically. Use `fxapk selfcheck` for overall capabilities and,
 when device inspection is authorized, `fxapk doctor --no-fix`. Selfcheck does not validate every
 API key or account entitlement. Doctor repairs devices by default.
+
+Recovery does not depend on enabling REA. The `proc_mem` backend needs adb/root; `frida` also needs compatible host/device Frida and an authorized observation window. Filesystem-event review is offline only. Unicorn supports AArch64 without dynamic linking or TLS segments. Missing dependencies yield `unsupported`, never automatic installation or proof of absence. See [the recovery pipeline](RECOVERY-PIPELINE.md).
 
 ## Export and external integration
 

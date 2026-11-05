@@ -38,7 +38,7 @@ jobs:
       - name: Install deps + linters
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e "."
+          python -m pip install -e ".[review]"
           python -m pip install -e "./plugins/fxapk-flutter"
           # Pinned: the lint gate must be deterministic — unpinned ruff lets a
           # release with changed defaults/rules silently alter what CI enforces.
@@ -126,7 +126,8 @@ jobs:
       - name: Install package + test deps
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e "."
+          python -m pip install -e ".[review]"
+          # Run actual synthetic recovery/emulation checks rather than optional-dependency skips.
           # trace 传输测试在插件可选 extra 里，不进核心依赖。
           python -m pip install -e "./plugins/fxapk-rea[trace]"
           # Synthetic Flutter tests need pyelftools; no Docker image or case input in CI.
@@ -147,6 +148,20 @@ jobs:
         run: >-
           python -m pytest -q -n auto
           --cov=apkscan --cov-report=term-missing:skip-covered --cov-fail-under=80
+          --junitxml=${{ runner.temp }}/fxapk-tests.xml
+      - name: Verify Linux process ownership tests actually ran
+        if: runner.os == 'Linux'
+        run: |
+          python - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          root = ET.parse(Path(os.environ["RUNNER_TEMP"]) / "fxapk-tests.xml").getroot()
+          for name in ("test_linux_preexisting_nondumpable_process_does_not_break_owned_run", "test_outer_timeout_kills_nested_owned_session_but_not_unrelated_process"):
+              cases = [case for case in root.iter("testcase") if case.get("name") == name]
+              assert len(cases) == 1 and len(cases[0]) == 0, f"critical test missing, skipped or failed: {name}"
+              print(f"PASSED: {name}")
+          PY
       - name: Run tests (macOS / Windows)
         if: runner.os != 'Linux'
         env:

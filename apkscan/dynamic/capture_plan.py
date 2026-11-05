@@ -1,16 +1,7 @@
-"""apkscan.dynamic.capture_plan — 据静态报告给"针对该样本的抓包打法"（探针之外的方法决策树）。
+"""Bounded acquisition suggestions, not authorization or evidence-closure decisions.
 
-读 ``report.json`` 的规避信号（加固 / endpoint 数 / 应用层加密配方 / 自建 IM / Telegram 改包），
-按《反分析涉诈 App —— frida 探针之外的抓包/取证方法目录》的决策树，输出一串**有序、可执行、带
-时间盒与停止门**的抓包步骤。核心约束（治"几小时零产出"）：
-
-  ① floor 优先：先带外 pcap 保底拿接入节点，再谈明文——"零产出"不可接受；
-  ② 每步带时间盒（≤Nmin）；
-  ③ frida 秒退 fail-fast：秒退累计 ≤2~3 次就弃明文、退 floor，别死磕；
-  ④ 明确停止门："够了就停"，不追求"全都要"。
-
-授权/取证口径：个人安全研究 / 测试取证，仅对自有 / 授权样本；用"去 pin / 流量解析 / 离线解密
-自有抓包"等取证措辞，不用攻击性表述。纯逻辑、**绝不抛**（坏 report 退化为只给铁律 + 起手式）。
+Static hints select questions to verify. Recipe presence, empty endpoints and
+early exits do not establish plaintext recovery, protocol implementation or cause.
 """
 
 from __future__ import annotations
@@ -22,38 +13,38 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # 结构化决策的硬约束常量（把 capture_plan 的铁律落到引擎可读的字段）。
-_TOTAL_BUDGET_SEC = 3600  # 铁律：抓包总预算 ≤60min，到点交已有结果。
-_RETREAT_THRESHOLD_DEFAULT = 3  # frida 秒退累计达此数即弃明文、退 floor。
-_RETREAT_THRESHOLD_PACKED = 2  # 加固样本反检测秒退风险高 → 更早退 floor。
+_TOTAL_BUDGET_SEC = 3600  # 单轮资源上限，不是案件闭环条件。
+_RETREAT_THRESHOLD_DEFAULT = 3  # 同条件重复失败的资源上限，不诊断退出原因。
+_RETREAT_THRESHOLD_PACKED = 2
 
 # 铁律永远第一条——这是治"几小时零产出"的行为约束。
 _DIRECTIVES = (
-    "【铁律·先读】抓包总预算 ≤60min，到点就交已有结果——『零产出』不可接受（带外 pcap 优先留证，零流量必须说明原因）。"
-    "四条：① floor 优先（先带外保底再谈明文）；② 每步带时间盒；③ frida 秒退 fail-fast（累计 ≤2~3 次就弃明文、退 floor、别死磕）；"
-    "④ 达停止门即停（见末条），不追求『全都要』。口径：个人安全研究 / 授权取证，措辞用『去 pin / 流量解析 / 离线解密自有抓包』。"
+    "【铁律·先读】仅在本次授权范围内执行；工具建议不增加授权。floor 优先：先保存无探针原包基线，再观察。"
+    "单轮时间盒 ≤60min；同条件秒退无进展即停止重试，累计上限 2~3 次仅限制资源。"
+    "零流量、未触发、归因不足、failed/partial 分别保留。时间耗尽或已有线索均不表示案件闭环。"
 )
 _BASELINE = (
-    "【第0步·保底·≤15min】不碰 App 本体先带外抓一份 pcap：设备端 PCAPdroid（免 root VpnService、按 UID 只抓目标 App）"
-    "或 网关 / 旁路由 tcpdump → `fxapk pcap-leads capture.pcap --into report.json`。"
-    "✅停止门：拿到 ≥1 个接入节点 IP:port + SNI + DNS = 案子已有可调证产出（待核验的基础设施线索，不能直接认定源站或运营者）。"
-    "带外 pcap 优先，但仍可能漏采、未触发业务或无法归因；不能保证拿到接入节点或源站。"
+    "【第0步·原包基线·≤15min】按现有设备与网络条件保存带外 pcap、原 APK 哈希、操作窗口和 UID/socket 归因。"
+    "PCAPdroid 的 VpnService 与网关 tcpdump 各有覆盖限制，按实际采集方式记录。"
+    "接入节点 IP:port、SNI、DNS 是待核基础设施线索，不能直接认定源站或运营者；"
+    "不能保证取得流量。核同一目标双向载荷、业务触发和时间对应，不以节点数量替代取证质量。"
 )
 _PINNING = (
-    "【TLS pinning·≤30min·达不到就退】mitm 起了但证书告警 / 0 流量：按存活率从高到低试，任一成即停："
-    "① LSPosed + JustTrustMe / TrustMeAlready（**很多样本只测 frida、不测 Xposed，先试这个**）→ "
-    "② 系统级 CA（Magisk 把 user CA 提到系统层）→ ③ 静态去 pin（`apk-mitm app.apk` 或改 network_security_config 重签）→ "
-    "④ Florida frida unpin。全失败 → 退第0步带外 pcap 拿 IP / SNI，别再磕明文。"
+    "【TLS 诊断·≤20min】证书告警或代理零流量不独立证明 pinning。先核路由、代理、CA 信任、"
+    "目标业务是否触发、实际 TLS 库与现有日志。只读观察按已定位层选择；"
+    "重签、去 pin、替换返回值等行为修改须核已有专项授权并另记 modified-runtime，与原包基线分开。"
 )
 _STOP = (
-    "【停止门·够了就停，别空耗】任一达成即停，不追求『全都要』：① 接入节点 ≥1 → floor 达成、案子可调证；"
-    "② 明文经 crypto_recipe 离线解 或 tls-keylog 解出 → 明文达成；③ frida 秒退累计 ≥3 或总时长超 60min → 弃明文、"
-    "把 floor 结果回灌交活。**记住：带外 pcap 不保证有流量；缺采、归因不足和缺少双向业务载荷必须显式保留。**"
+    "【停止门·资源与证据分开】本轮问题已有对应原始证据时停止该项；相同错误无新线索或预算耗尽时停止重试并交付缺口。"
+    "配方仅为候选，须绑定当前样本和报文、核参数/认证/负例并逐字节对照；资源或配置解密不等于业务回传。"
+    "案件是否闭环按实际范围与证据合同复核，不由预算、退出次数、明文可读性或接入节点数量决定。"
 )
 _MERGE = (
-    "【回灌串案】所有路线产出统一 `--into` 同一 report.json：`fxapk probe-leads probe.log --into report.json "
+    "【回灌串案】核输入哈希、窗口与来源后回灌可写工作报告；冻结包保留原字节，新证据创建新 revision。"
+    "`fxapk probe-leads probe.log --into report.json "
     "--sample-sha <样本sha256>`（探针；日志无样本标识，须显式声明并与报告 meta.sample_sha256 相符）/ "
     "`fxapk pcap-leads capture.pcap --into report.json`（pcap），合并进同一 report.leads 串案，"
-    "并按台账末尾「取证完备性」诊断（定人 / 穿透 / 固证）补抓缺的轴。"
+    "未归因和覆盖缺口继续保留，不因合并成功升级证据状态。"
 )
 
 
@@ -114,7 +105,7 @@ class _Signals:
     zero_endpoints: bool = False
     has_crypto_recipe: bool = False
     self_hosted_im: bool = False
-    anti_frida: bool = False  # 样本内置反 frida 工具（直 syscall/内存加载）→ frida 抓包可能被击败
+    anti_frida: bool = False  # 静态反分析候选，不是当前退出原因证明。
     endpoint_count: int = 0
 
 
@@ -129,8 +120,11 @@ def _extract_signals(report: Any) -> _Signals:
         ep_count = sum(1 for e in endpoints if isinstance(e, dict))
         return _Signals(
             packed=_is_packed(findings, leads),
-            zero_endpoints=ep_count == 0,
-            has_crypto_recipe=bool(meta.get("crypto_recipe") or meta.get("runtime_crypto_recipe")),
+            zero_endpoints=isinstance(rep.get("endpoints"), list) and not endpoints,
+            has_crypto_recipe=any(
+                isinstance(meta.get(key), dict) and bool(meta[key])
+                for key in ("crypto_recipe", "runtime_crypto_recipe")
+            ),
             self_hosted_im=(
                 _telegram_hint(leads, findings) or _has_lead_category(leads, "SELF_HOSTED_IM")
             ),
@@ -146,14 +140,14 @@ def _extract_signals(report: Any) -> _Signals:
 class CaptureDecision:
     """抓包引擎可消费的结构化决策（与 plan_capture 文本同源，见 _extract_signals）。
 
-    治『几小时零产出』：把 capture_plan 的四条铁律从建议文本落成引擎可读字段——
-    floor 优先恒开、有配方跳注入走离线解、endpoint=0/自建 IM 预判 native、加固下调秒退阈值。
+    保留现有字段兼容调用者。静态报告不能单独决定跳过明文观察或确定 native 实现；
+    对这两项返回 False（证据不足），不表示必须注入或已证明非 native。
     """
 
-    floor_first: bool  # 先带外 pcap 保底拿接入节点（恒 True，零产出不可接受）。
-    prefer_offline_decrypt: bool  # 有配方 → 离线解密优先于任何 frida 注入。
-    skip_frida_plaintext: bool  # 有配方 → 可跳过 frida 明文注入路径。
-    expect_native_protocol: bool  # endpoint=0 / 自建 IM → native 直发，明文难抓。
+    floor_first: bool  # 先保存原包带外基线，结果可能 partial/failed。
+    prefer_offline_decrypt: bool  # 有候选配方 → 优先离线验证，尚未证实解密成功。
+    skip_frida_plaintext: bool  # 静态信号不能自动跳过观察，也不授权注入。
+    expect_native_protocol: bool  # 静态端点数量/IM 名称不能证明 native 实现。
     frida_retreat_threshold: int  # frida 秒退累计达此数即弃明文、退 floor。
     total_budget_sec: int  # 抓包总预算（铁律 ≤60min）。
     signals: dict[str, bool]  # 原始信号，供上层透明展示 / 调试。
@@ -167,25 +161,25 @@ def decide_capture(report: Any) -> CaptureDecision:
     与 plan_capture 共用 _extract_signals，保证『机器决策』与『人读打法』永不漂移。
     """
     s = _extract_signals(report)
-    reasons: list[str] = ["floor 优先：先带外 pcap 保底拿接入节点，零产出不可接受"]
+    reasons: list[str] = ["floor 优先：保存原包基线；预算/重试上限不代表取证完成"]
     if s.has_crypto_recipe:
-        reasons.append("命中加密配方 → 离线解密优先于任何 frida 注入，可跳过明文注入")
+        reasons.append("候选配方 → 优先离线验证当前样本与报文，不能仅据字段存在跳过明文观察")
     if s.zero_endpoints:
-        reasons.append("endpoint=0 → 疑 native 直发 / 自建协议，明文难抓，靠 floor(pcap) 拿接入节点")
+        reasons.append("endpoint=0 → 静态可见性缺口，不能推断协议或实现层")
     if s.self_hosted_im:
-        reasons.append("自建 IM / Telegram 改包 → native 协议，接入节点靠旁路 pcap 兜底")
+        reasons.append("自建 IM / Telegram 候选 → 核实际调用和协议，名称不证明 native 实现")
     if s.packed:
-        reasons.append("已加固 → 反检测秒退风险高，秒退熔断阈值下调至 2")
+        reasons.append("加固候选 → 同条件重试资源上限下调至 2，不据此诊断秒退原因")
     if s.anti_frida:
         reasons.append(
-            "命中反 frida 工具（直 syscall / 内存加载）→ frida hook 可能静默失效，"
-            "优先旁路 pcap / tls-keylog，秒退阈值下调、别把零产出当样本干净"
+            "静态反 frida 候选 → 对照无探针/启动注入/延后观察窗口，先核 API/bridge/ABI 与日志；"
+            "重试上限下调，未命中不表示不存在"
         )
     return CaptureDecision(
         floor_first=True,
         prefer_offline_decrypt=s.has_crypto_recipe,
-        skip_frida_plaintext=s.has_crypto_recipe,
-        expect_native_protocol=s.zero_endpoints or s.self_hosted_im,
+        skip_frida_plaintext=False,
+        expect_native_protocol=False,
         frida_retreat_threshold=(
             _RETREAT_THRESHOLD_PACKED
             if (s.packed or s.anti_frida)
@@ -250,36 +244,35 @@ def plan_capture(report: Any) -> list[str]:
             s.self_hosted_im,
         )
 
-        # 零注入明文优先：配方已抠到 → 离线解，先于一切 frida 注入。
+        # 优先复核已有材料，不把配方存在写成已成功解密。
         if has_recipe:
             steps.append(
-                "【应用层加密配方已抠到·零注入明文·首选】report.meta.crypto_recipe 含算法 / key / iv（配方）："
-                "带外抓到的密文 body 直接**离线解密**（cipher-hook 校验 / 手动 AES）——这条不碰 frida、反检测无效化，"
-                "对『明文 HTTP + 应用层加密』的涉诈 App 是最稳的明文路径，**优先于任何注入**。"
+                "【候选配方·优先离线验证】核 crypto_recipe/runtime_crypto_recipe 的算法、参数来源和当前样本绑定。"
+                "对已保存密文独立解密，与捕获输出逐字节比较，认证算法增加篡改负例；"
+                "验证失败保留原因，不因配方存在而跳过所需观察。"
             )
         if packed:
             steps.append(
-                "【加固壳·≤20min】静态端点不完整：先 `fxapk auto` / `fxapk repackage` 脱壳去壳重打包（对真实 DEX 抓包）。"
-                "frida 易被反检测秒退 → 必配 anti-detection-hook(+native)；**秒退 ≤2 次就停 frida，换注入面一次**"
-                "（LSPosed + TrustMeAlready 或 改名 / 改端口的 strongR-frida / Florida），还不行 → 弃明文、交第0步 floor。"
+                "【加固候选·≤20min】先核原包结构、实际加载模块、已有恢复 DEX 和目标类覆盖。"
+                "恢复物绑定来源并检查头部、解析和语义覆盖；不能以可打开代替完整脱壳。"
+                "启动注入退出时核 Frida/API/Java bridge/ABI，比较无探针与延后只读观察；"
+                "相同条件无进展即停，重试上限 2 次，不自动重打包或改变反检测行为。"
             )
         if s.anti_frida:
             steps.append(
-                "【反 frida 工具·先知悉·不设时间盒】样本内置直 syscall / 内存加载类反检测工具（如 LibcoreSyscall）："
-                "frida hook 可能被绕过而**静默失效**（抓不到≠没有）。别把 frida 零产出当『样本干净』——"
-                "直接走第0步旁路 pcap 拿接入节点 + tls-keylog 探针导主密钥离线解 TLS；秒退阈值已下调，别死磕注入。"
+                "【反 frida 候选·≤10min】静态工具特征不证明本次检测执行或退出原因。"
+                "核进程、加载时机、脚本实际加载/错误/事件计数，按证据选择最小观察点。"
+                "未命中保留覆盖未知；恢复阶段保持已有可用网络与原始日志。"
             )
         if zero_ep:
             steps.append(
-                "【endpoint=0·≤20min】普通 HTTP / OkHttp 抓不到端点：多半 native 直发 / 自建协议（MTProto）/ QUIC。"
-                "① 旁路 pcap + `fxapk pcap-leads` 拿接入节点 IP（首选、最稳，见第0步）；"
-                "② tls-keylog 探针导主密钥 → Wireshark 离线解 TLS / QUIC；③ native-ssl / socket / netstat 探针抓 native 发包。"
-                "明文拿不到不强求——接入节点 IP 已够调证。"
+                "【endpoint=0·≤20min】只说明报告未列出静态端点；先核分析器状态、DEX/资源/JNI 覆盖和业务触发。"
+                "不能据此判断 native、自建协议或无网络行为；按原包 PCAP 与具体调用路径选择补证。"
             )
         if telegram:
             steps.append(
-                "【自建 IM / Telegram 改包】telegram-mtproto-hook（TLRPC 登录 / 聊天 / 接入节点）+ netstat-hook（/proc/net/tcp）"
-                "+ native-ssl；需注入，秒退就退接入节点级——接入节点 IP:port 由旁路 pcap 兜底（pcap-leads）。"
+                "【自建 IM / Telegram 候选】先查具体类/函数与调用路径；确认匹配后才选择 telegram-mtproto-hook、"
+                "netstat-hook 或 native-ssl 的只读观察面。名称不证明 native 协议或运营者；登录等业务操作按本次授权。"
             )
 
         steps.append(_PINNING)

@@ -37,6 +37,9 @@ fxapk（命令别名 `apkscan`）是 APK 调证取证分析 CLI：按能力门�
 | 一把梭 | `fxapk auto <apk> --fix --strict-case`（专用测试机已授权） |
 | 已有报告补富化 + 五层闭环 | `fxapk case close <report.json>`（partial=5、failed=6） |
 | 已落盘网页证据 | `fxapk analyze-web <目录> --out out`（默认离线，`--online` 只开归属富化） |
+| 已保存 fxfetch 任务 ZIP | `fxapk intake-fetch <zip> --fxfetch <可信本机CLI> --out <新目录>`；网页与原 APK 分别离线分析，不重访目标 |
+| 已有定点证据 | `fxapk evidence-review <清单> --out <新目录>`；输入绑定哈希，结果进入 report/digest/HTML，合同见 [OFFLINE-REVIEW.md](OFFLINE-REVIEW.md) |
+| 已授权 DEX/JNI 定点恢复 | `fxapk recover-runtime <计划> --out <新目录>`；显式 serial/PID/可读页范围，接重分析、JADX 和函数验证，合同见 [RECOVERY-PIPELINE.md](RECOVERY-PIPELINE.md)；macOS 有界阶段不支持，来源未绑定最多 partial，未作真机验收 |
 | 批量 | `fxapk batch <dir>` |
 | 真机环境 | `fxapk doctor --no-fix`，授权后 `fxapk doctor` |
 | 脱壳 / 重打包 / 抓包单步 | `fxapk unpack` / `fxapk repackage` / `fxapk capture <pkg>` |
@@ -45,6 +48,8 @@ fxapk（命令别名 `apkscan`）是 APK 调证取证分析 CLI：按能力门�
 | 运行时算法生成的配置子域 | `fxapk config-channel --prefix … --domain …`（纯离线枚举候选） |
 
 `digest` 用于分流定位；形成归因、调证结论或正式报告时必须回查 `report.json` 的结构化字段与原始证据。命令失败先读 `playbook`，playbook 不产生新授权。
+
+恢复链逐阶段保留失败、零命中、超时、未执行和来源未绑定，后续成功不覆盖前段缺口。`unpack` 已取得 DEX 而请求的重分析失败时返回 error，原始产物继续保留。选定范围恢复、合成样本验收、真实样本验收及案件闭环分别报告；模拟原函数不等于独立算法，字段/符号候选不等于完整结构或原始名称。
 
 ## 4. 案件分析流程与闭环口径
 

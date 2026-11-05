@@ -25,7 +25,7 @@ def test_directives_first_then_pcap_baseline() -> None:
     assert "pcap-leads" in _joined(steps)
 
 
-def test_packed_recommends_unpack_and_anti_detect() -> None:
+def test_packed_preserves_structure_review_and_authorization() -> None:
     report = {"findings": [{"id": "PACK-DETECTED", "category": "packing", "title": "已加固"}]}
     steps = capture_plan.plan_capture(report)
     text = _joined(steps)
@@ -39,7 +39,7 @@ def test_packer_lead_also_counts_as_packed() -> None:
     assert "脱壳" in _joined(steps) or "加固" in _joined(steps)
 
 
-def test_zero_endpoints_flags_native_protocol() -> None:
+def test_zero_endpoints_describes_coverage_gap() -> None:
     report = {"endpoints": []}
     text = _joined(capture_plan.plan_capture(report))
     assert "endpoint" in text.lower()
@@ -75,22 +75,22 @@ def test_directives_encode_timebox_and_failfast() -> None:
     text = _joined(capture_plan.plan_capture({}))
     assert "floor" in text.lower() or "保底" in text
     assert "时间盒" in text or "≤" in text  # 时间盒
-    assert "秒退" in text and ("弃" in text or "别死磕" in text or "fail-fast" in text)  # fail-fast
+    assert "秒退" in text and "停止重试" in text
     assert "停止门" in text
 
 
-def test_floor_baseline_has_stop_gate() -> None:
-    """带外 pcap 起手式必须给"拿到接入节点=已有产出"的停止门，保证不会零产出。"""
+def test_floor_baseline_has_evidence_qualified_stop_gate() -> None:
+    """带外基线说明已有线索及停止门，不承诺一定取得流量。"""
     text = _joined(capture_plan.plan_capture({}))
     assert "接入节点" in text
     assert "停止门" in text
 
 
-def test_recipe_is_zero_inject_priority() -> None:
-    """命中加密配方时，离线解密应标为零注入、优先于注入（绕开反 frida 的明文首选）。"""
+def test_recipe_prioritizes_offline_verification() -> None:
+    """候选配方优先离线验证，不直接判定已取得明文。"""
     report = {"meta": {"crypto_recipe": {"algo": "AES", "key": "..."}}}
     text = _joined(capture_plan.plan_capture(report))
-    assert "零注入" in text or "优先于" in text
+    assert "优先离线验证" in text
 
 
 # ===== decide_capture：结构化决策（供抓包引擎消费，与 plan_capture 文本同源）=====
@@ -111,10 +111,10 @@ def test_decide_never_raises_on_bad_input() -> None:
 
 
 def test_decide_recipe_prefers_offline_decrypt() -> None:
-    """有加密配方：离线解密优先、可跳过 frida 明文注入。"""
+    """有候选配方：离线验证优先，不自动跳过明文观察。"""
     d = capture_plan.decide_capture({"meta": {"crypto_recipe": {"algo": "AES", "key": "x"}}})
     assert d.prefer_offline_decrypt is True
-    assert d.skip_frida_plaintext is True
+    assert d.skip_frida_plaintext is False
     assert d.signals["has_crypto_recipe"] is True
 
 
@@ -126,18 +126,18 @@ def test_decide_no_recipe_does_not_skip_frida() -> None:
     assert d.expect_native_protocol is False
 
 
-def test_decide_zero_endpoints_expects_native() -> None:
-    """endpoint=0：预判 native 直发/自建协议，明文难抓、更要靠 floor。"""
+def test_decide_zero_endpoints_does_not_infer_native() -> None:
+    """空端点不证明实现层。"""
     d = capture_plan.decide_capture({"endpoints": []})
-    assert d.expect_native_protocol is True
+    assert d.expect_native_protocol is False
     assert d.signals["zero_endpoints"] is True
 
 
-def test_decide_self_hosted_im_expects_native() -> None:
+def test_decide_im_name_does_not_infer_implementation() -> None:
     d = capture_plan.decide_capture(
         {"leads": [{"category": "SELF_HOSTED_IM", "value": "mtproto 1.2.3.4:30113"}]}
     )
-    assert d.expect_native_protocol is True
+    assert d.expect_native_protocol is False
 
 
 def test_decide_packed_lowers_retreat_threshold() -> None:
@@ -166,12 +166,12 @@ def test_decide_reasons_are_human_readable() -> None:
             lambda d: d.prefer_offline_decrypt is True,
             ("离线", "解密"),
         ),
-        # zero_ep：决策预判 native，文本含『endpoint=0』
-        ({"endpoints": []}, lambda d: d.expect_native_protocol is True, ("endpoint=0",)),
-        # self_hosted_im：决策预判 native，文本含专项探针
+        # zero_ep：不推断 native，文本明确列出静态可见性缺口。
+        ({"endpoints": []}, lambda d: d.expect_native_protocol is False, ("endpoint=0",)),
+        # IM 名称不证明实现层，专项观察须先核具体调用。
         (
             {"leads": [{"category": "SELF_HOSTED_IM", "value": "mtproto 1.2.3.4:30113"}]},
-            lambda d: d.expect_native_protocol is True,
+            lambda d: d.expect_native_protocol is False,
             ("telegram-mtproto", "netstat"),
         ),
         # packed：决策阈值降 2 / signals.packed，文本含『加固/脱壳』
@@ -194,14 +194,14 @@ def test_decide_runtime_crypto_recipe_alias() -> None:
     """runtime_crypto_recipe（动态 merge 侧真实写入的实测配方 key）与 crypto_recipe 同权。"""
     d = capture_plan.decide_capture({"meta": {"runtime_crypto_recipe": {"algo": "AES", "key": "x"}}})
     assert d.prefer_offline_decrypt is True
-    assert d.skip_frida_plaintext is True
+    assert d.skip_frida_plaintext is False
     assert d.signals["has_crypto_recipe"] is True
     text = _joined(capture_plan.plan_capture({"meta": {"runtime_crypto_recipe": {"algo": "AES"}}}))
     assert "离线" in text and "解密" in text
 
 
 def test_decide_baseline_default_shape() -> None:
-    """有端点、无其它信号 → 全默认：不跳 frida、非 native、秒退阈值 3。"""
+    """有端点、无其它信号：不据静态字段跳过观察或推断实现层。"""
     d = capture_plan.decide_capture({"endpoints": [{"value": "a.com", "kind": "domain"}]})
     assert d.prefer_offline_decrypt is False
     assert d.skip_frida_plaintext is False
@@ -209,18 +209,18 @@ def test_decide_baseline_default_shape() -> None:
     assert d.frida_retreat_threshold == 3
 
 
-def test_decide_empty_report_expects_native() -> None:
-    """空报告=无端点 → 有意预判 native（记录这一略反直觉但正确的行为）。"""
-    assert capture_plan.decide_capture({}).expect_native_protocol is True
+def test_decide_empty_report_keeps_implementation_unknown() -> None:
+    """未提供端点与已分析无端点分别记录。"""
+    assert capture_plan.decide_capture({}).expect_native_protocol is False
 
 
 def test_decide_packed_and_recipe_combo() -> None:
-    """加固 + 已抠配方（取证现场常见组合）：阈值降 2、跳 frida 明文、依据含两类。"""
+    """加固与候选配方同时存在：资源上限下调，仍保留验证缺口。"""
     d = capture_plan.decide_capture(
         {"findings": [{"id": "PACK-DETECTED"}], "meta": {"crypto_recipe": {"algo": "AES"}}}
     )
     assert d.frida_retreat_threshold == 2
-    assert d.skip_frida_plaintext is True
+    assert d.skip_frida_plaintext is False
     joined = " ".join(d.reasons)
     assert ("加固" in joined or "秒退" in joined) and ("配方" in joined or "离线" in joined)
 
@@ -242,8 +242,8 @@ def test_decide_capture_reads_report_dataclass() -> None:
         analyzer_status=[],
     )
     d = capture_plan.decide_capture(report)
-    # packed 被抽到 → 秒退阈值下调至 2(与 dict 版同款);crypto_recipe 被抽到 → 跳明文注入。
+    # dataclass 与 dict 使用相同资源上限；候选配方不自动跳过明文观察。
     assert d.frida_retreat_threshold == 2
     assert d.signals["packed"] is True
-    assert d.skip_frida_plaintext is True
+    assert d.skip_frida_plaintext is False
     assert d.signals["has_crypto_recipe"] is True

@@ -12,10 +12,10 @@
   命令写给它执行——门在收到命令前不产生任何子进程，故 ``gate -> cmd.exe -> java -> 后代``
   必然全员入 Job，不存在「先启动后入组」的竞态窗口。超时 ``TerminateJobObject`` 一击整树，
   并核对 Job 成员通知及等待原进程句柄退出。跟踪或 assign 失败则**不放行**（fail closed）。
-- **POSIX**：``start_new_session=True`` 新进程组（setsid 在 exec 前完成，同样无竞态），
-  超时 ``killpg(SIGKILL)``，随后扫描进程组确认无存活成员。已知边界：后代若自行调用
-  ``setsid()/setpgid()`` 脱离进程组则不可见也杀不到（覆盖协作式工具链如 jadx/java；对抗性
-  逃逸需 cgroup/PID namespace，超出本层）。
+- **POSIX**：``start_new_session=True`` 新进程组，超时杀组并确认成员退出。
+  Linux 另以每次启动的随机继承标记追踪嵌套受控子进程，即使内层新建 session 仍可清理。
+  无法读取环境且不能证明早于本次启动的同 UID 进程保留为终止未确认，不中断已知后代清理。
+  主动清除标记并脱组的对抗性逃逸仍需 cgroup/PID namespace，超出本层。
 
 两条路径在命令正常退出后都**再查一次是否有残留后代**：根进程退出但后代仍在（脱管的
 daemon 化 java）时强杀整树并在 ``reason_codes`` 记 ``descendants_after_root_exit``——
@@ -721,36 +721,75 @@ else:
     # -----------------------------------------------------------------------
     import os
     import signal
+    import uuid
 
-    def _posix_group_pids(pgid: int) -> list[int]:
-        """当前仍存活的该进程组成员 PID（排除自身；权限/竞态消失的按不存在处理）。"""
+    _POSIX_TOKEN_ENV = "_FXAPK_OWNED_POSIX_TOKENS"
+    _POSIX_TOKENS: dict[int, str] = {}
+    _POSIX_STARTED: dict[int, float] = {}
+    _POSIX_UNVERIFIED: set[int] = set()
+
+    def _posix_owned_processes(pgid: int):
+        """Keep Process identities when signaling; never expose environment contents."""
         import psutil
 
-        alive: list[int] = []
+        token = _POSIX_TOKENS.get(pgid)
         for proc in psutil.process_iter(["pid"]):
-            pid = proc.info["pid"]
-            if pid == os.getpid():
+            if proc.pid == os.getpid():
                 continue
             try:
-                if os.getpgid(pid) == pgid:
-                    alive.append(pid)
-            except (ProcessLookupError, PermissionError, OSError):
+                if proc.status() == psutil.STATUS_ZOMBIE:
+                    continue
+                if os.getpgid(proc.pid) == pgid:
+                    yield proc
+                elif token and sys.platform == "linux" and proc.uids().real == os.getuid():
+                    if token in proc.environ().get(_POSIX_TOKEN_ENV, "").split(","):
+                        yield proc
+            except (psutil.NoSuchProcess, ProcessLookupError):
                 continue
-        return alive
+            except (psutil.AccessDenied, PermissionError):
+                try:
+                    if sys.platform == "linux" and proc.uids().real != os.getuid():
+                        continue
+                    if proc.create_time() < _POSIX_STARTED.get(pgid, 0.0):
+                        continue  # Predates this invocation; cannot be its descendant.
+                except psutil.NoSuchProcess:
+                    continue
+                except psutil.AccessDenied:
+                    pass
+                _POSIX_UNVERIFIED.add(pgid)
+
+    def _posix_group_pids(pgid: int) -> list[int]:
+        """已知仍存活的受控成员；读权限缺口另记，不能当成无后代。"""
+        return [proc.pid for proc in _posix_owned_processes(pgid)]
 
     def _posix_kill_group(pgid: int) -> None:
+        import psutil
+
         try:
             os.killpg(pgid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):
             pass  # 组已空/权限异常 → 交由下方存活验证定性，不在这里掩盖
+        deadline = time.monotonic() + _QUIESCE_BUDGET
+        while True:
+            owned = list(_posix_owned_processes(pgid))
+            for proc in owned:
+                try:
+                    proc.kill()  # psutil verifies the saved process creation identity.
+                except psutil.NoSuchProcess:
+                    pass
+                except psutil.AccessDenied:
+                    _POSIX_UNVERIFIED.add(pgid)
+            if not owned or time.monotonic() >= deadline:
+                break
+            time.sleep(_QUIESCE_INTERVAL)
 
     def _posix_wait_quiesce(pgid: int) -> bool:
         deadline = time.monotonic() + _QUIESCE_BUDGET
         while time.monotonic() < deadline:
             if not _posix_group_pids(pgid):
-                return True
+                return pgid not in _POSIX_UNVERIFIED
             time.sleep(_QUIESCE_INTERVAL)
-        return not _posix_group_pids(pgid)
+        return not _posix_group_pids(pgid) and pgid not in _POSIX_UNVERIFIED
 
     def _posix_pids_after_grace(pgid: int) -> list[int]:
         """root 退出后查组内存活：宽限内轮询（孙进程被 init 收养后的收割是异步的，
@@ -801,9 +840,18 @@ else:
 
             preexec = _limit_address_space
 
+        token = uuid.uuid4().hex
+        inherited = os.environ.get(_POSIX_TOKEN_ENV, "").split(",")
+        inherited = [value for value in inherited if len(value) == 32 and all(c in "0123456789abcdef" for c in value)]
+        if len(inherited) >= 64:
+            return OwnedRun(None, "", "", False, False, True, False, _codes("process_nesting_budget"))
+        child_env = dict(os.environ if env is None else env)
+        child_env[_POSIX_TOKEN_ENV] = ",".join([*inherited, token])
+        # Account for process-clock resolution; never dismiss a newly created process.
+        started_before_spawn = time.time() - 1.0
         try:
             proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=child_env,
                 start_new_session=True, text=True, encoding="utf-8", errors="replace",
                 preexec_fn=preexec,
             )
@@ -816,6 +864,8 @@ else:
         except OSError as exc:
             raise _SpawnFailed(safe_exception_text(exc)) from exc
         pgid = proc.pid  # setsid 后组长即子进程自身
+        _POSIX_TOKENS[pgid] = token
+        _POSIX_STARTED[pgid] = started_before_spawn
         timed_out = False
         forced = False
         reasons: list[str] = []
@@ -853,7 +903,7 @@ else:
                     _posix_kill_group(pgid)
             terminated = _posix_wait_quiesce(pgid)
             if not terminated:
-                reasons.append("survivors_after_kill")
+                reasons.append("tree_state_unverified" if pgid in _POSIX_UNVERIFIED else "survivors_after_kill")
             result = OwnedRun(
                 returncode=_reap_returncode(proc, reasons),
                 stdout=stdout, stderr=stderr, timed_out=timed_out,
@@ -877,6 +927,9 @@ else:
                     proc.wait(timeout=_DRAIN_BUDGET)
                 except Exception:  # noqa: BLE001 - 外层保留原始 internal_error
                     logger.exception("[proctree] POSIX 异常收口 reap 失败：pgid=%s", pgid)
+            _POSIX_TOKENS.pop(pgid, None)
+            _POSIX_STARTED.pop(pgid, None)
+            _POSIX_UNVERIFIED.discard(pgid)
 
 
 __all__ = ["OwnedRun", "run_owned"]
