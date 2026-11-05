@@ -13,7 +13,7 @@
 从发布页下载并核对 `SHA256SUMS.txt` 后，可安装核心与独立插件 wheel：
 
 ```bash
-python -m pip install "fxapk==1.22.0"
+python -m pip install "fxapk==1.24.0"
 python -m pip install ./fxapk_android_ui-0.1.2-py3-none-any.whl
 fxapk --version
 fxapk ui --help

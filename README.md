@@ -8,7 +8,7 @@
 <p align="center"><strong>中文</strong> &nbsp;·&nbsp; <a href="README.en.md">English</a></p>
 <p align="center">
   <a href="https://github.com/s-silt/fxapk/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/s-silt/fxapk/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.23.0">v1.23.0</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
+  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.24.0">v1.24.0</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
 </p>
 
 命令 `fxapk`（别名 `apkscan`），PyPI 包名 `fxapk`。面向直接运行源码或 Python 包的人与 AI 助手，不提供 exe 或 GUI。变更见 [CHANGELOG.md](CHANGELOG.md)。
@@ -37,19 +37,22 @@ APK / 已落盘网页证据        已授权设备采集
 ## 快速开始
 
 ```bash
-python -m pip install "fxapk==1.23.0"     # 或 clone 后 python -m pip install -e .
+python -m pip install "fxapk==1.24.0"     # 或 clone 后 python -m pip install -e .
 fxapk selfcheck
 fxapk analyze app.apk --offline --out out
 fxapk digest out/app.json
 ```
 
-[发布页](https://github.com/s-silt/fxapk/releases/tag/v1.23.0) 提供 wheel、源码归档与 `SHA256SUMS.txt`，安装前核对哈希。联网服务密钥按 [.env.example](.env.example) 写入仓库根 `.env` 或 `~/.fxapk/.env`（不读当前目录的 `.env`），不写入报告或仓库。命令未注册到 PATH 时用 `python -m apkscan.cli` 代替 `fxapk`。
+[发布页](https://github.com/s-silt/fxapk/releases/tag/v1.24.0) 提供 wheel、源码归档与 `SHA256SUMS.txt`，安装前核对哈希。联网服务密钥按 [.env.example](.env.example) 写入仓库根 `.env` 或 `~/.fxapk/.env`（不读当前目录的 `.env`），不写入报告或仓库。命令未注册到 PATH 时用 `python -m apkscan.cli` 代替 `fxapk`。
 
 `digest` 用于初筛和定位；正式判断必须回查 `report.json` 的结构化字段与原始证据。让 AI 助手操作时，给它 [AGENTS.md](AGENTS.md)、样本路径、是否允许联网及设备操作范围。
 
 | 任务 | 入口 |
 | --- | --- |
 | 已保存的网页、JS 或 HAR | `fxapk analyze-web <目录> --out out` |
+| 已保存的 fxfetch 任务包 | `fxapk intake-fetch <ZIP> --fxfetch <可信本机CLI> --out <新目录>` |
+| 离线定点证据复核 | `fxapk evidence-review <清单> --out <新目录>` |
+| 已授权 DEX/JNI 定点恢复 | `fxapk recover-runtime <计划> --out <新目录>` |
 | 网页补采 | 首次分析加 `--web-supplement <本地JSON>`；已有报告用 `fxapk supplement-web <report.json> --web-supplement <config> --out <new-out-dir>`（不重跑 APK、不碰设备） |
 | 真机环境排查 | `fxapk doctor --no-fix`，再按授权修复 |
 | 不用 Frida 的 PCAP 底座 | `fxapk capture <包名> --mode floor-only`（仍需 adb、root、设备侧 tcpdump） |
@@ -97,3 +100,9 @@ fxapk digest out/app.json
 源码开发先 `git config core.hooksPath .githooks`。代码行为变更运行 Ruff、Pyright、pytest 和严格增量泄漏扫描；夹具使用合成数据，案件原值与密钥不得入库。见 [USAGE.md](USAGE.md#从源码改代码)、[ARCHITECTURE.md](ARCHITECTURE.md)、[COMPANION-TOOLS.md](COMPANION-TOOLS.md)。
 
 许可：[MIT](LICENSE)。
+
+## 离线证据复核与 fxfetch 衔接
+
+已有 fxfetch 任务数据包可用 `fxapk intake-fetch` 接入网页和原 APK 的独立离线分析。`fxapk evidence-review` 提供 DEX/JADX、JNI 记录、ELF 查询、内存追踪、文件事件、密码验证及 AArch64 模拟复核；`fxapk recover-runtime` 衔接已授权的定点采集、重分析与验证。逐项结果进入回执、摘要和 HTML。macOS 的有界子进程阶段明确不支持；真实设备恢复未验收，来源未绑定时最多 partial。用法见 [离线合同](OFFLINE-REVIEW.md) 与 [恢复链](RECOVERY-PIPELINE.md)。
+
+复核依赖用 `python -m pip install "fxapk[review]==1.24.0"` 安装；fxfetch、JADX、adb 和所选后端需要的 Frida 由使用者准备。恢复命令不会安装或启动样本，也不自动开启 REA。哈希绑定、选定范围恢复和模拟验证均不证明来源真实性、完整结构或案件闭环；真实设备链路仍须单独验收。

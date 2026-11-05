@@ -11,6 +11,9 @@
 | 分析一个 APK（**默认联网**查归属） | `fxapk analyze app.apk --out out`；不联网加 `--offline` |
 | 授权联网留存 HTTP 跳转与响应（不执行 JS） | `fxapk capture-web https://example.invalid/start --authorized --out private/capture.har` |
 | 分析存下来的 HTML/JS/HAR（默认离线） | `fxapk analyze-web <目录> --out out`；`--online` 只开归属富化 |
+| 接入已保存的 fxfetch 任务包（离线） | `fxapk intake-fetch <ZIP> --fxfetch <可信本机CLI> --out <新目录>`；可加 `--review-manifest <清单>` |
+| 复核已提供的定点证据 | `fxapk evidence-review <清单> --report <已有报告.json> --out <新目录>`；`--report` 可省略 |
+| 已授权的定点 DEX/JNI 恢复 | `fxapk recover-runtime <计划.json> --out <新目录>`；计划显式指定原 APK 哈希、设备、PID 和范围 |
 | 批量 | `fxapk batch <目录>` |
 | 一把梭（接了 root 机才跑动态；**会改设备**） | `fxapk auto app.apk --out out`；验收门加 `--strict-case`（退出码 0/5/6 = complete/partial/failed） |
 | 已有报告补多源查询与五层归属 | `fxapk case close out/app.json` |
@@ -43,8 +46,13 @@
 截断、TLS 忽略验证、关联未知、DOM 快照作为待核来源保留；哈希吻合不证明材料真实性或目标 App 归属。
 采集范围与未分析附件见 `meta.web_capture_visibility`，完整交接回执见 `meta.web_evidence.handoff`。
 
+`intake-fetch` 调用独立的兼容 fxfetch CLI，校验已保存 ZIP 与副本哈希，将网页和原始 APK 分路离线分析，不重访来源 URL。`--fxapk` 可指定可信本机分析入口；`--timeout` 默认 600 秒、范围 1–3600，用于子进程与定向复核的共享预算（清理与报告落盘可额外耗时）。默认绑定当前 Python 的入口，离线子进程关闭设备探测；仅源码运行且没有同解释器入口时须指定 `--fxapk`。`--review-manifest` 只匹配一个已分析的原始 APK；没有清单时复核阶段明确 `not_run`。原件、各阶段日志、`intake.json` 和 `index.html` 保存在新目录；ZIP 最大 2 GiB，最多分析 8 个、各不超过 512 MiB 的原始 APK。契约见 [OFFLINE-REVIEW.md](OFFLINE-REVIEW.md)。
+
+`evidence-review` 接收绑定输入 SHA-256 的清单，支持 `native/trace/filesystem/crypto/dex/jni/emulate/recover/acquisition`；输出逐任务回执、`review.json`、`feedback.json`、report/digest/HTML。依赖未验证时后续依赖任务 `not_run`，独立任务继续。三个新入口的终态退出码为 `0/5/6 = ok/partial/failed`；入口参数或前置读取错误退出 2。复核状态不等于 `closure` 或 Phase-2 人工接受，详细回执与日志可能含原值。macOS 无法强制内存限额的阶段明确 `unsupported/platform_memory_limit_unavailable`，不启动子进程；没有可用结果的接入或恢复链为 failed。恢复链因来源未绑定，当前有产物时最多 partial，不会以退出 0 声称恢复全贯通。
+
 ## 采集与探针记录
 
+- `recover-runtime` 仅观察显式计划中的已运行进程；`proc_mem` 读取选定页，不采 JNI，`frida` 观察 DEX/JNI。最多 32 段、合计 32 MiB、每段 8 MiB，要求页对齐并核对进程启动标识。取得的 DEX 原字节接入 `analyze --offline --extra-dex`、方法验证和真实 JADX 子进程。重分析从报告顶层读取 `analysis_status`，后续成功不抹掉此前失败；`unpack` 请求的重分析失败时返回 error 并保留已取得 DEX。命令不安装/启动 App，不部署 Frida、不改代理或目标方法；详见 [RECOVERY-PIPELINE.md](RECOVERY-PIPELINE.md)。
 - `no-proxy` 观察轮不请求 TLS 校验修改；MITM 轮与原版 `floor-only` 轮分别留档。
   OkHttp 不再次执行请求正文的 `writeTo()`，正文标为 `not_read_non_interference`；
   SQLCipher 只观察路径与密钥，不在应用连接上执行导出 SQL，标为

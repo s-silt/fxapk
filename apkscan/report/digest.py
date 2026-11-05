@@ -692,6 +692,10 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
         "closure": compact_closure,
     }
     native_handoff = project_native_handoff(report)
+    from apkscan.core.offline_review.runner import projection as project_offline_review
+
+    if offline_review := project_offline_review(meta.get("offline_evidence_review")):
+        digest["offline_evidence_review"] = offline_review
     flutter = meta.get("flutter_analysis")
     if isinstance(flutter, dict):
         coverage = flutter.get("coverage")

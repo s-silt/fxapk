@@ -16,7 +16,7 @@
 #   ★ --no-deps 不可省：省了 pip 会重新解析依赖，把锁住的版本又升上去。
 #
 # 重新生成（升级依赖时）：
-#   python -m venv /tmp/lockenv && /tmp/lockenv/bin/pip install '.[pcap,dynamic,ml]'
+#   python -m venv /tmp/lockenv && /tmp/lockenv/bin/pip install '.[pcap,dynamic,ml,review]'
 #   /tmp/lockenv/bin/pip freeze | grep -v '^fxapk' > requirements.lock   # 再补回本文件头
 #   之后跑 tests/test_requirements_lock.py 确认锁与 pyproject 没脱节。
 #
@@ -33,6 +33,7 @@ annotated-doc==0.0.5
 apkInspector==1.3.6
 asn1crypto==1.5.1
 asttokens==3.0.2
+capstone==5.0.9
 certifi==2026.7.22
 cffi==2.1.0
 charset-normalizer==3.4.9
@@ -63,6 +64,7 @@ prompt_toolkit==3.0.53
 psutil==7.2.2
 pure_eval==0.2.3
 pycparser==3.0
+pyelftools==0.32
 pydot==4.0.1
 Pygments==2.20.0
 pyparsing==3.3.2
@@ -82,5 +84,6 @@ traitlets==5.15.1
 typer==0.27.0
 typing_extensions==4.16.0
 urllib3==2.7.0
+unicorn==2.1.4
 wcwidth==0.8.2
 win32-setctime==1.2.0 ; sys_platform == "win32"

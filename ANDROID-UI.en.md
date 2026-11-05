@@ -13,7 +13,7 @@ Obtain Android CLI for your platform from the [official download page](https://d
 Download the release files and verify `SHA256SUMS.txt` before installing the independent plugin wheel:
 
 ```bash
-python -m pip install "fxapk==1.22.0"
+python -m pip install "fxapk==1.24.0"
 python -m pip install ./fxapk_android_ui-0.1.2-py3-none-any.whl
 fxapk --version
 fxapk ui --help

@@ -135,8 +135,7 @@ def run(
 
     report_paths: list[str] = []
     if reanalyze:
-        # 4) 回灌：load_apk(extra_dex=dumped) + pipeline.run + 写报告。失败不致命，
-        #    脱壳产物已在 artifacts，仅在 reason 标注重分析失败。
+        # 4) 回灌失败保留 artifacts，但整条已请求链必须返回 error，不能只在 reason 写缺口。
         try:
             report_paths, reanalyzed = _reanalyze(apk_path, artifacts, out_dir)
             if on_reanalyzed is not None:
@@ -148,7 +147,7 @@ def run(
         except Exception:  # noqa: BLE001 - 重分析失败不丢脱壳产物
             logger.exception("脱壳后重分析失败：%s", apk_path)
             result = empty_result(
-                STATUS_DONE,
+                STATUS_ERROR,
                 f"脱壳成功（{len(artifacts)} 个 DEX），但重分析失败（详见日志）",
             )
             result["artifacts"] = artifacts

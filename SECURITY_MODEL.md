@@ -12,11 +12,12 @@ fxapk（命令别名 `apkscan`）是 APK 调证取证 CLI（Python ≥3.11，PyP
 3. **分析机 ↔ 测试设备**：adb/Frida/tcpdump/mitmproxy CA（`apkscan/dynamic/`、`apkscan/core/device.py`，subprocess 列表参数 + 超时）；样本在设备上运行，其流量、Frida 回传消息回到主机（`probe_ingest.py`、`pcap_ingest.py`、`tshark_backend.py`、`merge.py`）。
 4. **网页/HAR/CDP → 分析机**：`analyze-web`（默认离线）、`apkscan/analyzers/web_har.py`、`web_evidence.py`；可选 REA 插件（`plugins/fxapk-rea`，默认关闭，需 `FXAPK_ENABLE_REA=1`）。
 5. **DEX 查询隔离进程**：`plugins/fxapk-asc` 由 `apkscan/core/dex_query.py` 以 `python -I -m fxapk_asc.worker` 子进程调用。
-6. **插件加载**：`apkscan/plugins/registry.py` 只加载 `_ALLOWED` 白名单内的 entry point（`android_ui`、`rea`）。
+6. **插件加载**：`apkscan/plugins/registry.py` 只加载 `_ALLOWED` 白名单内的 entry point（`android_ui`、`rea`、`flutter`）。
 7. **样本派生数据 → 报告/文书**：Jinja2 HTML（`apkscan/report/html.py`，`select_autoescape`）、PDF（`pdf.py`）、文书（`letters.py`，Markdown 出口 `_md_safe`）、CSV `export`、digest（有限脱敏 `apkscan/core/redact.py`）。
 8. **案件库**：corpus（`apkscan/core/corpus*.py`，库根须在工作树外，fail-closed 哈希校验）、phase2 不可变包（`apkscan/core/phase2/`）、`lead restore|replay`、`regress`。
 9. **本机其他进程**：共享分析机上的低权限用户/进程可读写临时目录、缓存（JADX 索引分片、run ledger）、`.env`。
 10. **供应链**：`.github/workflows/ci.yml`、`release.yml`（顶层只读，publish job 声明 `id-token: write` 用 PyPI Trusted Publishing）、`requirements.lock`、提交前泄漏扫描（`apkscan/core/leakscan.py`、`.githooks/`）。
+11. **已保存材料与恢复回执 → 分析机**：`core/fetch_intake.py` 调用可信本机 fxfetch CLI，读取其 handoff、ZIP 与原 APK；`core/offline_review/` 读取哈希绑定的 DEX/ELF/内存/日志，部分任务交给有界子进程；`dynamic/recovery.py` 接收显式 PID/范围的设备回传。输入哈希不证明来源真实性；详细回执、源码和子进程日志含受控原值。
 
 ## 2. 主要组件
 
@@ -26,7 +27,7 @@ fxapk（命令别名 `apkscan`）是 APK 调证取证 CLI（Python ≥3.11，PyP
 | fxapk-Dynamic | `apkscan/dynamic/`、`apkscan/core/device.py` |
 | fxapk-Enrich | `apkscan/enrichers/`、`apkscan/core/enrichment*.py`、`apkscan/core/closure/`、`apkscan/attribution/`、`apkscan/network/`、`apkscan/core/dotenv.py`、`secrets.py` |
 | fxapk-Output | `apkscan/cli.py`、`apkscan/commands/`、`apkscan/report/`、`apkscan/core/corpus*.py`、`apkscan/core/phase2/`、`redact.py` |
-| fxapk-Plugins | `plugins/`（rea、asc、android-ui）、`apkscan/plugins/`、`apkscan/core/dex_query.py` |
+| fxapk-Plugins | `plugins/`（rea、asc、android-ui、flutter）、`apkscan/plugins/`、`apkscan/core/dex_query.py` |
 | Build-Release | `.github/workflows/`、`tools/`、`skills/`、`.githooks/`、`apkscan/core/leakscan.py`、`pyproject.toml`、`requirements.lock` |
 
 ## 3. 入口点与可达者
@@ -59,6 +60,7 @@ fxapk（命令别名 `apkscan`）是 APK 调证取证 CLI（Python ≥3.11，PyP
 - corpus 须在工作树外 + fail-closed；phase2 不可变清单与覆盖审计。
 - ASC 隔离子进程（`python -I`）；插件 entry point 白名单；REA 默认关闭；`analyze-web` 默认离线。
 - 设备命令走 subprocess 列表参数 + 超时。
+- 离线复核要求逐输入哈希、新输出目录和有限任务数；DEX/模拟/字段恢复 worker 使用进程树所有权、时间、内存和输出限制。恢复只读选定页并核对进程启动标识，失败与未绑定状态传到报告，绝不凭恢复成功提升闭环。macOS 无法强制内存限额时不启动 worker；Linux 以随机继承标记清理嵌套 session，不覆盖主动清除环境并脱组的对抗性逃逸。同 UID 进程环境不可读时，只有可证明早于本次启动才跳过，否则记终止未确认并继续清理已知后代。离线接入和重分析子进程关闭 adb 探测；恢复前须准备已有 adb server，避免其作为作业后代被清理。
 - 泄漏扫描 hook + CI（`leak-scan --base origin/master --strict`）；发布用 OIDC Trusted Publishing、顶层权限只读。
 
 ## 7. 范围外 / 接受的风险（维护者确认）
