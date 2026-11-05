@@ -90,7 +90,7 @@ def capture(config: dict, folder: Path) -> dict:
     if config.get("backend") == "frida":
         if not isinstance(modules, list) or len(modules) > 16 or not all(isinstance(m, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", m) for m in modules):
             raise ValueError("runtime_module_selection_invalid")
-        import frida
+        import frida  # type: ignore[import-not-found]  # optional dynamic extra; checked before device access
     before = _identity(serial, pid, name)
     ranges = _ranges(serial, pid, config, folder)
     run_id = uuid.uuid4().hex
