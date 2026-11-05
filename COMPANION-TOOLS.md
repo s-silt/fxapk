@@ -14,6 +14,7 @@ fxapk 需要 Python 3.11+ 及 [pyproject.toml](pyproject.toml) 声明的运行�
 | `analyze`、`case close`、`enrich batch` 等入口的富化适配器 | 对应服务凭据、账户权益、查询授权及预算 |
 | 动态编排与内置 hook；8 个 Frida 探针 | adb、root 设备、tcpdump，以及所选模式需要的 Frida/mitmproxy 等工具 |
 | corpus、Phase-1 包与 Phase-2 CLI | 工作树外的案件/语料库目录；人工复核 |
+| `intake-fetch`、`evidence-review`、`recover-runtime` 与恢复观察脚本 | 已保存材料、兼容 fxfetch CLI、`review` extra；JADX 和授权设备工具按任务准备 |
 
 内置探针位于 `apkscan/dynamic/frida_probes/`：`coldstart-config`、`objstore-config`、
 `native-ssl`、`tls-keylog`、`sms-forward-outbound`、`mqtt-xmpp-im`、
@@ -23,7 +24,7 @@ fxapk 需要 Python 3.11+ 及 [pyproject.toml](pyproject.toml) 声明的运行�
 ## 离线静态起步
 
 ```bash
-python -m pip install "fxapk==1.19.0"
+python -m pip install "fxapk==1.24.0"
 fxapk analyze app.apk --offline --out out
 fxapk digest out/app.json
 ```
@@ -54,15 +55,18 @@ fxapk enrich batch -t targets.txt -o enrich_out
 | 用途 | 配置依据 |
 | --- | --- |
 | 支持的 PCAP 深度解密 | `python -m pip install "fxapk[pcap]"`；`dynamic` extra 同样声明 cryptography，不安装设备工具 |
+| 离线定点复核与 AArch64 模拟 | `python -m pip install "fxapk[review]==1.24.0"`，包含 pyelftools、Capstone 5、cryptography、Unicorn 2；不安装 fxfetch/JADX/adb/Frida |
 | 实验串案排序器 | `python -m pip install "fxapk[ml]"`；仍须通过独立标签与训练门 |
 | jadx、adb、tshark、Frida、frida-dexdump | [工具链安装与路径配置](tools/TOOLCHAIN.md)、[固定 Python 工具版本](tools/toolchain-requirements.txt) |
-| Android UI 插件 | 独立 `fxapk-android-ui 0.1.1`（核心 1.18.1+）；外部 Android CLI、adb 与授权设备；见 [完整指南](ANDROID-UI.md) |
+| Android UI 插件 | 独立 `fxapk-android-ui 0.1.2`（核心 1.18.1+）；外部 Android CLI、adb 与授权设备；见 [完整指南](ANDROID-UI.md) |
 | mitmproxy | 按工具链文档安装在独立环境，并显式映射可执行文件 |
 
 默认 `capture`/`auto` 仍要求 Frida；显式 `capture --mode floor-only` 不用 Frida，
 但需要 adb、设备 root 和设备侧 tcpdump。缺少前置条件可能阻断该步骤，不能保证所有命令自动降级。
 先用 `fxapk selfcheck` 查看总体能力，再在设备检查已授权时用 `fxapk doctor --no-fix`。
 selfcheck 不逐个验证 API Key 或账户权益；doctor 默认修设备，不能把它当成只读自检。
+
+恢复链不依赖 REA 启用开关。`proc_mem` 后端需 adb 与 root，`frida` 后端还需兼容的主机/设备 Frida；调用前须已有授权观察窗口。文件事件仅支持离线复核，Unicorn 仅支持 AArch64 且不支持动态链接或 TLS 段；缺依赖记录 `unsupported`，不会自动安装或据零命中判断不存在。见 [恢复链](RECOVERY-PIPELINE.md)。
 
 ## 导出与外部集成
 

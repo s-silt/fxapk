@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 # 发行名 fxapk（PyPI）；CLI 命令 fxapk（保留 apkscan 别名）；内部 import 包仍为 apkscan。
 name = "fxapk"
-version = "1.23.0"
+version = "1.24.0"
 description = "涉诈 APK 调证分析 CLI — 静态分析 + 配置键值/服务归属提取，产出调证线索清单"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -51,6 +51,8 @@ dev = ["pytest", "ruff", "pyright", "packaging>=22", "build>=1.2", "setuptools>=
 # 但正常安装不保证；显式声明使 `pip install fxapk[pcap]` 明确锁定该能力）。惰性引入，缺失则优雅降级为仅元数据。
 pcap = ["cryptography>=42.0"]
 dynamic = ["cryptography>=42.0"]
+# Optional offline evidence queries; missing libraries produce explicit unsupported receipts.
+review = ["pyelftools>=0.31,<1", "capstone>=5,<6", "cryptography>=42.0", "unicorn>=2.1,<3"]
 # 串案学习排序仅在独立标签门槛通过后才惰性导入；普通分析/评测不安装重量级 ML 栈。
 # 锁住次版本，避免求解器或默认值漂移在同一训练数据上静默改变模型产物。
 ml = ["scikit-learn>=1.8,<1.9"]

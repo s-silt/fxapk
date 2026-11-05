@@ -1750,6 +1750,19 @@
     {% endif %}
   </section>
 
+{% if report.meta.get('offline_evidence_review') %}
+<section id="offline-evidence-review">
+  <h2>离线证据复核</h2>
+  <p>状态：{{ report.meta.offline_evidence_review.state }}。仅覆盖指定输入；输入哈希一致不独立证明样本来源或运行时行为。</p>
+  <table><thead><tr><th>任务</th><th>类型</th><th>状态</th><th>原因 / 缺口</th></tr></thead><tbody>
+  {% for item in report.meta.offline_evidence_review.tasks %}
+  <tr><td>{{ item.id }}</td><td>{{ item.kind }}</td><td>{{ item.state }}</td><td>{{ item.reason_codes | join(', ') }}</td></tr>{# leak-scan: allow Jinja task-field access, not network host literals. #}
+  {% endfor %}
+  </tbody></table>
+  {% if report.meta.offline_evidence_review.not_requested %}<p>本轮未请求：{{ report.meta.offline_evidence_review.not_requested | join(', ') }}。</p>{% endif %}
+</section>
+{% endif %}
+
   <div class="footer">本报告由 apkscan 生成，仅用于授权的反诈调证场景。线索为机器提取，归属信息以人工核实为准。</div>
 
   </div>

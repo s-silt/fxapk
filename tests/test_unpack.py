@@ -305,7 +305,7 @@ def test_out_keyword_alias(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
         return _FakeProc(returncode=0, stdout="ok")
 
     monkeypatch.setattr(unpack.subprocess, "run", _fake_run)
-    monkeypatch.setattr(unpack, "_reanalyze", lambda a, e, o: [])
+    monkeypatch.setattr(unpack, "_reanalyze", lambda a, e, o: ([], object()))
 
     result = unpack.run("sample.apk", out=str(target), reanalyze=True)
     assert result["status"] == STATUS_DONE
@@ -341,7 +341,7 @@ def test_dexdump_uses_dash_d_when_serial_given(
         return _FakeProc(returncode=0, stdout="ok")
 
     monkeypatch.setattr(unpack.subprocess, "run", _fake_run)
-    monkeypatch.setattr(unpack, "_reanalyze", lambda a, e, o: [])
+    monkeypatch.setattr(unpack, "_reanalyze", lambda a, e, o: ([], object()))
 
     result = unpack.run(
         "sample.apk", out_dir=str(tmp_path / "out"), reanalyze=True, serial="emulator-5554"
@@ -374,7 +374,7 @@ def test_dexdump_keeps_fu_when_serial_none(
         return _FakeProc(returncode=0, stdout="ok")
 
     monkeypatch.setattr(unpack.subprocess, "run", _fake_run)
-    monkeypatch.setattr(unpack, "_reanalyze", lambda a, e, o: [])
+    monkeypatch.setattr(unpack, "_reanalyze", lambda a, e, o: ([], object()))
 
     result = unpack.run("sample.apk", out_dir=str(tmp_path / "out"), reanalyze=True)
     assert result["status"] == STATUS_DONE
@@ -404,7 +404,7 @@ def test_dexdump_does_not_use_pipe_avoids_grandchild_hang(
         return _FakeProc(returncode=0, stdout="ok")
 
     monkeypatch.setattr(unpack.subprocess, "run", _fake_run)
-    monkeypatch.setattr(unpack, "_reanalyze", lambda a, e, o: [])
+    monkeypatch.setattr(unpack, "_reanalyze", lambda a, e, o: ([], object()))
 
     unpack.run("sample.apk", out_dir=str(tmp_path / "out"), reanalyze=True)
 
@@ -522,10 +522,10 @@ def test_load_apk_raises_error(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "无法解析" in result["reason"] or "取包名失败" in result["reason"]
 
 
-def test_reanalyze_failure_keeps_artifacts_done(
+def test_reanalyze_failure_keeps_artifacts_but_marks_chain_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """脱壳成功但重分析炸 → 仍 done（产物在 artifacts），reason 标注重分析失败。"""
+    """脱壳成功但回灌失败必须 error；保留已取得的原始产物。"""
     _all_capabilities_ok(monkeypatch)
     _patch_package_name(monkeypatch)
 
@@ -545,7 +545,7 @@ def test_reanalyze_failure_keeps_artifacts_done(
 
     result = unpack.run("sample.apk", out_dir=str(tmp_path / "out"), reanalyze=True)
 
-    assert result["status"] == STATUS_DONE
+    assert result["status"] == STATUS_ERROR
     assert result["artifacts"]  # 脱壳产物保留
     assert "重分析失败" in result["reason"]
     assert result["report_paths"] == []
@@ -579,7 +579,7 @@ def test_dexdump_force_stops_app_before_and_after_spawn(
         return _FakeProc(returncode=0, stdout="ok")
 
     monkeypatch.setattr(unpack.subprocess, "run", _fake_run)
-    monkeypatch.setattr(unpack, "_reanalyze", lambda a, e, o: [])
+    monkeypatch.setattr(unpack, "_reanalyze", lambda a, e, o: ([], object()))
 
     result = unpack.run(
         "sample.apk", out_dir=str(tmp_path / "out"), reanalyze=True, serial="emulator-5554"
@@ -606,7 +606,7 @@ def test_dexdump_timeout_salvages_partial_dex(
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=unpack._DEXDUMP_TIMEOUT)
 
     monkeypatch.setattr(unpack.subprocess, "run", _fake_run)
-    monkeypatch.setattr(unpack, "_reanalyze", lambda a, e, o: [])
+    monkeypatch.setattr(unpack, "_reanalyze", lambda a, e, o: ([], object()))
 
     result = unpack.run("sample.apk", out_dir=str(tmp_path / "out"), reanalyze=True)
 

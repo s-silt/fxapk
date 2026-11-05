@@ -11,6 +11,9 @@ Full flags: `fxapk --help`; if `fxapk` is not installed as a command, use `pytho
 | Analyse an APK (**online by default** for attribution) | `fxapk analyze app.apk --out out`; add `--offline` for no network |
 | Authorized online retention of HTTP redirects and responses (no JS execution) | `fxapk capture-web https://example.invalid/start --authorized --out private/capture.har` |
 | Analyse saved HTML/JS/HAR (offline by default) | `fxapk analyze-web <dir> --out out`; `--online` enables attribution enrichment only |
+| Ingest a saved fxfetch task archive offline | `fxapk intake-fetch <ZIP> --fxfetch <trusted-local-CLI> --out <new-directory>`; optionally add `--review-manifest <manifest>` |
+| Review supplied targeted evidence | `fxapk evidence-review <manifest> --report <existing-report.json> --out <new-directory>`; `--report` is optional |
+| Authorized targeted DEX/JNI recovery | `fxapk recover-runtime <plan.json> --out <new-directory>`; explicitly select the original APK hash, device, PID and ranges |
 | Batch | `fxapk batch <dir>` |
 | Full pipeline (dynamic runs only on a rooted device; **modifies the device**) | `fxapk auto app.apk --out out`; add `--strict-case` for the acceptance gate (exit 0/5/6 = complete/partial/failed) |
 | Multi-source lookups and five-layer attribution on an existing report | `fxapk case close out/app.json` |
@@ -45,8 +48,13 @@ Truncation, ignored TLS verification, unknown request associations, and rendered
 remain review signals. A matching hash proves neither authenticity nor target-app attribution.
 See `meta.web_capture_visibility` and `meta.web_evidence.handoff` for the full boundaries.
 
+`intake-fetch` invokes an independent compatible fxfetch CLI, verifies the saved ZIP and its copy, and analyzes web evidence and original APKs separately offline without revisiting URLs. `--fxapk` selects the trusted local analyzer; `--timeout` defaults to 600 seconds (1–3600) for the shared subprocess and targeted-review budget (cleanup and publication can add wall time). Defaults bind to the current Python installation and disable device probing in offline children; source-only use without a matching console entry point needs `--fxapk`. Optional `--review-manifest` must match exactly one analyzed original APK; otherwise review is explicitly `not_run`. Originals, logs, `intake.json` and `index.html` remain in a new directory. ZIP limit: 2 GiB; at most eight original APKs, each at most 512 MiB. See [OFFLINE-REVIEW.md](OFFLINE-REVIEW.md).
+
+`evidence-review` accepts SHA-256-bound inputs for `native/trace/filesystem/crypto/dex/jni/emulate/recover/acquisition` tasks. It writes task receipts, `review.json`, `feedback.json` and report/digest/HTML. Unverified dependencies leave dependent tasks `not_run`; independent tasks continue. The three new entry points exit `0/5/6` for `ok/partial/failed`; argument or initial input errors exit 2. These states do not establish closure or Phase-2 acceptance. Detailed receipts and logs may contain raw values. macOS memory-bounded stages return `unsupported/platform_memory_limit_unavailable` without spawning. Intake/recovery with no usable result is failed. Since source binding remains unverified, the current recovery chain with usable output is at most partial; exit 0 does not claim end-to-end runtime acceptance.
+
 ## Capture and probe records
 
+- `recover-runtime` observes only the running process selected in the explicit plan. `proc_mem` reads selected pages without JNI observation; `frida` observes DEX/JNI. Limits are 32 page-aligned ranges, 32 MiB total and 8 MiB per range, with process-start identity checks. Original DEX bytes feed `analyze --offline --extra-dex`, method validation and a real JADX subprocess. Reanalysis reads top-level `analysis_status`; later success never erases earlier failure. Requested `unpack` reanalysis failure returns error while retaining DEX files. It does not install/launch apps, deploy Frida, change proxies or modify target methods. See [RECOVERY-PIPELINE.md](RECOVERY-PIPELINE.md).
 - The `no-proxy` observation round does not request TLS-verification changes. Preserve it,
   the original `floor-only` baseline and MITM rounds separately. OkHttp never replays
   request-body `writeTo()`; `not_read_non_interference` means unread, not empty. SQLCipher
@@ -207,7 +215,7 @@ fxapk case prepare-materials private/demo --out private/demo/pre-report.json
 
 ## Optional Android UI plugin
 
-`fxapk-android-ui 0.1.1` provides `ui capabilities` / `ui snapshot` / `ui run-plan`; device commands take an explicit `--serial`, and observations/plans also require `--package` and a new `--out`. Installing the plugin does not automatically attach UI observation to `auto`/`capture`. Screenshots, layouts and diagnostics may contain raw values. See [ANDROID-UI.en.md](ANDROID-UI.en.md).
+`fxapk-android-ui 0.1.2` provides `ui capabilities` / `ui snapshot` / `ui run-plan`; device commands take an explicit `--serial`, and observations/plans also require `--package` and a new `--out`. Installing the plugin does not automatically attach UI observation to `auto`/`capture`. Screenshots, layouts and diagnostics may contain raw values. See [ANDROID-UI.en.md](ANDROID-UI.en.md).
 
 ## Optional Flutter AOT plugin
 

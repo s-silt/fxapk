@@ -55,6 +55,29 @@ def _kill_if_alive(pid: int) -> None:
         pass
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux inherited ownership tracking")
+def test_outer_timeout_kills_nested_owned_session_but_not_unrelated_process(tmp_path):
+    import subprocess
+
+    pid_file = tmp_path / "nested.pid"
+    leaf = ("import os,time;from pathlib import Path;"
+            f"Path({str(pid_file)!r}).write_text(str(os.getpid()));time.sleep(120)")
+    middle = ("import sys;from apkscan.core.proctree import run_owned;"
+              f"run_owned([sys.executable,'-c',{leaf!r}],timeout=60)")
+    unrelated = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(120)"])
+    try:
+        result = proctree.run_owned([sys.executable, "-c", middle], timeout=5)
+        assert result.timed_out and result.termination_complete, result
+        assert pid_file.is_file(), "nested worker never started; cleanup path was not exercised"
+        assert _sleeper_gone(int(pid_file.read_text(encoding="utf-8")))
+        assert unrelated.poll() is None
+    finally:
+        unrelated.terminate()
+        unrelated.wait(timeout=5)
+        if pid_file.exists():
+            _kill_if_alive(int(pid_file.read_text(encoding="utf-8")))
+
+
 def test_timeout_kills_whole_tree_including_grandchild() -> None:
     """★B1 核心（真实进程）：超时不只杀直接子进程——.bat/cmd→java→后代 的等价形态
     （python→python 孙进程）整树终止并验证无存活，结局如实进 OwnedRun。"""
@@ -219,6 +242,77 @@ def test_posix_internal_error_after_spawn_kills_and_reaps_group(
     assert any(kind == "wait" for kind, _value in calls), "直接子进程未被 reap"
     assert result.reason_codes == ("internal_error",)
     assert result.termination_complete is False
+
+
+@pytest.mark.parametrize("older", [True, False])
+def test_posix_access_denied_process_is_ignored_only_when_older(monkeypatch, older):
+    from types import SimpleNamespace
+
+    name = "_apkscan_proctree_access_test"
+    spec = importlib.util.spec_from_file_location(name, Path(proctree.__file__))
+    assert spec is not None and spec.loader is not None
+    posix = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, name, posix)
+    with monkeypatch.context() as loading:
+        loading.setattr(sys, "platform", "linux")
+        spec.loader.exec_module(posix)
+
+    class Protected:
+        pid = 4243
+        def status(self):
+            return psutil.STATUS_RUNNING
+        def uids(self):
+            return SimpleNamespace(real=1000)
+        def environ(self):
+            raise psutil.AccessDenied(self.pid)
+        def create_time(self):
+            return time.time() - 100 if older else time.time() + 1
+        def kill(self):
+            pytest.fail("unverified unrelated process must never be killed")
+
+    class Child:
+        pid = 4242
+        returncode = 0
+        def communicate(self, **kwargs):
+            return "success", ""
+        def poll(self):
+            return 0
+    monkeypatch.setattr(posix.subprocess, "Popen", lambda *a, **kw: Child())
+    monkeypatch.setattr(posix.os, "getuid", lambda: 1000, raising=False)
+    monkeypatch.setattr(posix.os, "getpgid", lambda pid: 9999, raising=False)
+    monkeypatch.setattr(psutil, "process_iter", lambda *a: iter([Protected()]))
+    monkeypatch.setattr(sys, "platform", "linux")
+    result = posix.run_owned(["synthetic"], timeout=1)
+    assert result.returncode == 0 and result.stdout == "success"
+    assert result.ownership_complete is True
+    assert result.termination_complete is older
+    assert result.reason_codes == (() if older else ("tree_state_unverified",))
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux procfs dumpability")
+def test_linux_preexisting_nondumpable_process_does_not_break_owned_run():
+    import subprocess
+
+    script = ("import ctypes,time;"
+              "assert ctypes.CDLL(None).prctl(4,0,0,0,0)==0;"
+              "print('ready',flush=True);time.sleep(120)")
+    unrelated = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE, text=True)
+    try:
+        assert unrelated.stdout is not None and unrelated.stdout.readline().strip() == "ready"
+        try:
+            psutil.Process(unrelated.pid).environ()
+        except psutil.AccessDenied:
+            pass
+        else:
+            pytest.skip("host can read nondumpable process; permission condition unavailable")
+        time.sleep(1.1)  # Clearly older than run_owned's conservative creation cutoff.
+        result = proctree.run_owned([sys.executable, "-c", "print('ok')"], timeout=5)
+        assert result.returncode == 0 and result.stdout.strip() == "ok"
+        assert result.termination_complete and not result.reason_codes, result
+        assert unrelated.poll() is None
+    finally:
+        unrelated.terminate()
+        unrelated.wait(timeout=5)
 
 
 def test_spawn_failure_reported_not_raised() -> None:

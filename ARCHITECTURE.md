@@ -10,7 +10,7 @@
 4. `core/closure`、`provider_review`：证据层与服务商角色核验；资源持有者、BGP、承载、CDN、运营主体不混同
 5. `core/phase2`：不可变包清单、覆盖审计、运行历史、冲突复核、报告前材料组合
 6. `commands`：参数和输出适配；报告渲染不反向决定证据是否成立
-7. `plugins/`：可选插件经 `fxapk.plugins` 入口白名单加载（`android_ui`、`rea`）；`fxapk-asc` 不走 registry，由 `dex_query` 发现后以 `python -I -m fxapk_asc.worker` 隔离进程调用。坏插件不得拖垮核心命令；REA 另需 `FXAPK_ENABLE_REA=1`
+7. `plugins/`：可选插件经 `fxapk.plugins` 入口白名单加载（`android_ui`、`rea`、`flutter`）；`fxapk-asc` 不走 registry，由 `dex_query` 发现后以 `python -I -m fxapk_asc.worker` 隔离进程调用。坏插件不得拖垮核心命令；REA 另需 `FXAPK_ENABLE_REA=1`
 
 层级 AST 守卫覆盖采集层反向依赖。`run_review` 是纯数据审阅，`preparation` 负责组合；`json_io` 不接受证据身份、不做包 PASS，哈希核验由证据层负责。
 
@@ -32,6 +32,7 @@
 - 第一轮 PCAP 不要求故意未启动的 Frida；后轮失败不替换原始基线。未知身份、坏清单、缺失样本绑定及重复工件不得凭状态汇总获得 complete。
 - `capture_adaptation` 为 AI/人工提供有限信号与缺口；建议选择器只接受证据支持的内置观察器 ID，不接受脚本、shell 或外部地址。反调试、证书绑定、native 自定义协议及坏 DEX 都可能留下未解决缺口。
 - 可选 UI 插件的独立命令不自动接入 `auto`/`capture`；程序化接入需显式传入插件、三轮选项与固定设备。UI 截图与布局不在 digest 脱敏范围内。
+- 定点恢复是独立入口：`commands/evidence_review` → `dynamic/recovery` → 有界采集子进程 → `analyze --offline --extra-dex` → `core/offline_review/runner`。DEX、模拟与字段恢复使用有界 worker，JADX 另有进程预算。`proc_mem` 不采 JNI；`frida` 仅观察显式 PID/范围与所选模块，不安装或启动样本。
 
 ## 公共名称与真实连接目标
 
@@ -42,6 +43,8 @@
 - HAR 正文以有界共享输入进入配置、重定向与请求配方分析，保留条目、正文哈希及截断信息，不执行 JavaScript；部分正文不能提升为完整页面或连接证据。
 - 阶段二 Survey 区分旧式 `unassessed` 与绑定完整的 `phase2-survey/1.0`，字段与资源限制见 [PRE-REPORT-WORKFLOW.md](PRE-REPORT-WORKFLOW.md#survey-输入完整性契约)。
 - 网页观察（REA / CDP trace）、DEX 查询回执、native 恢复各自保留原件、哈希与 JSON Pointer；静态线索、xref 和网页候选不晋级为运行时观察。
+- `core/fetch_intake` 经可信本机 fxfetch CLI 消费 `fxfetch.analysis-handoff.v1`，验证 ZIP 副本并分路处理网页和原 APK；不导入 fxfetch 内部模块。`core/offline_review/runner` 统一任务依赖、回执、反馈和报告投影，详细值留在任务回执，`meta.offline_evidence_review` 仅投影元数据。
+- 恢复链读取报告顶层 `analysis_status`；子进程错误、不完整报告、零命中和未执行分别保留。`source_binding_verified=false` 不因哈希一致、JADX 输出或模拟成功变真，恢复状态不重算 closure 或 Phase-2 接受。
 
 ## 验收状态
 

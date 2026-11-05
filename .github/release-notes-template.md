@@ -28,6 +28,8 @@ fxapk flutter --help
 `python -m pip install "./fxapk_rea-$rea_version-py3-none-any.whl[trace]"` 安装。
 插件不会自动启动浏览器、查询第三方或连接设备。本页附件含核心与四个可选插件共十个归档；插件归档不含 Blutter 可执行文件或 Docker 镜像，Flutter 分析也不会自动拉取或构建它们。
 
+定点复核可另装 `python -m pip install "fxapk[review]==$core_version"`，包含 pyelftools、Capstone、cryptography 和 Unicorn。`intake-fetch` 仍需兼容的独立 fxfetch CLI；JADX、adb 与所选后端的 Frida 须自备。命令、状态与范围见[离线复核](https://github.com/$repository/blob/$tag/OFFLINE-REVIEW.md)和[恢复链](https://github.com/$repository/blob/$tag/RECOVERY-PIPELINE.md)。这些入口不自动完成案件闭环或正式 PDF/XLSX 发布。
+
 安装前用附件 `SHA256SUMS.txt` 核对全部归档。它们不是完整离线依赖包，安装可能下载声明依赖。许可见各归档内的 MIT 声明，第三方工具和依赖遵循各自许可。[安卓 UI 指南](https://github.com/$repository/blob/$tag/ANDROID-UI.md)。
 
 ## 来源与使用边界

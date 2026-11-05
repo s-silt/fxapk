@@ -28,6 +28,8 @@ fxapk 是 APK 静态/动态分析 CLI（Python 3.11+，发行包名 `fxapk`，�
 9. 富化器继承 `BaseEnricher`，失败转 `EnrichmentResult(ok=False)`，不抛异常、
    不裸 `except`、不吞日志。
 
+恢复链另核 `intake-fetch` / `evidence-review` / `recover-runtime` 的真实 CLI、worker、回执与 report/digest/HTML 接线：报告健康字段在顶层 `analysis_status`，不从 meta 猜测；失败、超时、零命中、依赖未执行与来源未绑定不得被后续成功覆盖。哈希一致与模拟成功不证明原 APK 来源、完整方法语义或案件闭环；真实设备验收与合成测试分开报告。
+
 ## 工程约定
 
 10. Python type hints 必须；测试用 pytest（不用 unittest）。

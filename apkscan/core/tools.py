@@ -133,6 +133,8 @@ def adb_path() -> str:
     源码：显式工具配置，再回退 PATH。
     找不到 → ""（不抛）。
     """
+    if os.environ.get("FXAPK_NO_DEVICE_PROBE") == "1":
+        return ""
     if frozen():
         name = "adb.exe" if sys.platform == "win32" else "adb"
         for d in _bundle_dirs():
