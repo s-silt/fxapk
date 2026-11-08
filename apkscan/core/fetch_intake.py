@@ -8,7 +8,6 @@ import hashlib
 import html
 import os
 import re
-import shutil
 import sys
 import sysconfig
 import time
@@ -19,6 +18,7 @@ from typing import Callable
 from apkscan.core.offline_review.common import json_value, read_bytes
 from apkscan.core.offline_review.runner import write_json
 from apkscan.core.proctree import run_owned
+from apkscan.core import tools
 
 MAX_ARCHIVE = 2 * 1024**3
 MAX_APK = 512 * 1024**2
@@ -38,7 +38,7 @@ def file_hash(path: Path, limit: int) -> str:
 
 
 def _resolve_executable(executable: str) -> str:
-    found = shutil.which(executable)
+    found = tools.safe_which(executable)
     if not found:
         raise ValueError("executable_unavailable")
     return str(Path(found).resolve())

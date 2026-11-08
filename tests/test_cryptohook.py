@@ -453,3 +453,20 @@ def test_frida_antidetect_js_integrity() -> None:
     assert "SystemProperties" in js  # qemu 属性屏蔽
     assert "apkscan-antidetect" in js  # 通道判别值
     assert "su" in js and "qemu" in js and "frida" in js  # 三类检测特征
+
+
+def test_brand_hints_survive_deeply_nested_json() -> None:
+    """★RecursionError 回归（sfind-3f138d1e）：超深嵌套明文不得中断品牌线索抽取。"""
+    import base64
+
+    from apkscan.dynamic import cryptohook
+
+    deep = b"[" * 5000 + b"]" * 5000
+    event = {"plaintext_b64": base64.b64encode(deep).decode()}
+    # 中等深度合法 JSON 仍能取到品牌键；与恶意事件同批时不得被其中断。
+    import json as _json
+
+    nested = {"a": {"b": {"webName": "某证券"}}}
+    ev2 = {"plaintext_b64": base64.b64encode(_json.dumps(nested).encode()).decode()}
+    hints = cryptohook.brand_hints_from_events([event, ev2])
+    assert "某证券" in hints

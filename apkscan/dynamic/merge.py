@@ -595,14 +595,19 @@ def decrypt_runtime_messages(report: Report, runtime_report_path: str, *,
             stats["live_recipe"] = 1
             logger.info("[merge] 采用运行时实测配方（活体 key）解密：%s", _recipe_brief(live_meta))
         # 冒充对象（webName/品牌/行业词）从活体明文抽出，写进 meta 供报告呈现。
-        brand_hints = cryptohook.brand_hints_from_events(events) if events else []
-        if brand_hints:
-            retained = _retain_brand_hints(report, brand_hints)
-            logger.info("[merge] 运行时明文捕获冒充对象线索：%s", "、".join(retained[:5]))
-            # 同一份 brand_hints 既留档进 meta、也走 Finding 出口——只写 meta 时
-            # 读报告的人看不到它（见 _add_brand_hint_finding 的说明）。
-            brand_index = index_events(events, lambda event: cryptohook.brand_hints_from_events([event]))
-            _add_brand_hint_finding(report, brand_hints, display=retained, event_index=brand_index)
+        # ★独立 try：品牌线索抽取是锦上添花，任何异常（如畸形/超深明文）绝不能
+        #   拖垮后面的信封解密主流程。
+        try:
+            brand_hints = cryptohook.brand_hints_from_events(events) if events else []
+            if brand_hints:
+                retained = _retain_brand_hints(report, brand_hints)
+                logger.info("[merge] 运行时明文捕获冒充对象线索：%s", "、".join(retained[:5]))
+                # 同一份 brand_hints 既留档进 meta、也走 Finding 出口——只写 meta 时
+                # 读报告的人看不到它（见 _add_brand_hint_finding 的说明）。
+                brand_index = index_events(events, lambda event: cryptohook.brand_hints_from_events([event]))
+                _add_brand_hint_finding(report, brand_hints, display=retained, event_index=brand_index)
+        except Exception:
+            logger.exception("[merge] 运行时品牌线索抽取失败（跳过，不影响信封解密）")
 
         # 候选配方（按优先级）：实测合并配方优先、纯静态配方兜底。逐信封依次尝试、首个解出即用。
         # 关键：「实测优先但绝不回归静态」——实测拿到二进制 key 覆盖、却与静态 iv 推导口径不兼容
@@ -1303,6 +1308,17 @@ def _mask_db_value(value: str) -> str:
     return masked[:_DB_VALUE_MAX]
 
 
+def _path_log_tag(path: Any) -> str:
+    """路径的单向短哈希：日志里可关联同一文件，又不落盘目录结构/用户名等敏感成分
+    （CodeQL py/clear-text-logging-sensitive-data：设备侧路径属不可信输入）。"""
+    import hashlib
+
+    try:
+        return hashlib.sha256(str(path).encode("utf-8", "replace")).hexdigest()[:12]
+    except Exception:  # noqa: BLE001 — 打标失败不阻断日志
+        return "?"
+
+
 def _sha256_of_file(path: Any) -> str:
     """算文件 SHA256（取证完整性留存）；失败 → 空串（不抛）。"""
     import hashlib
@@ -1315,8 +1331,39 @@ def _sha256_of_file(path: Any) -> str:
                 h.update(chunk)
         return h.hexdigest()
     except OSError:
-        logger.exception("[merge] 计算 .plain.db SHA256 失败：%s", path)
+        logger.exception("[merge] 计算 .plain.db SHA256 失败：%s", _path_log_tag(path))
         return ""
+
+
+def _trusted_plain_db_path(plain_path: str, runtime_report_path: str) -> Path | None:
+    r"""``plain_path`` 只允许解析到本 run ``out/dump_db/`` 内的常规文件，否则 None。
+
+    ``plain_path`` 来自设备侧 Frida 事件（不可信）：不设防时 ``\\attacker\share\x``
+    这类 UNC 路径会让分析机向攻击者服务器发起 NTLM 认证（登录哈希外泄），或打开任意
+    本地文件。UNC（``\\``/``//``）、drive-relative（``C:foo``）在触碰文件系统前先拒；
+    随后 ``resolve``（跟随符号链接）要求**直接**位于 runtime_report.json 同级
+    ``dump_db/`` 目录内且为常规文件。
+    """
+    raw = plain_path.strip()
+    if not raw:
+        return None
+    # UNC 与 Windows 设备路径（\\.\ \\?\ 同属 \\ 前缀）在 resolve 前拒掉。
+    if raw.startswith(("\\\\", "//")):
+        return None
+    # drive-relative（C:foo / C:）不是绝对路径，先显式拒掉再交给 is_absolute 复核。
+    if re.match(r"^[A-Za-z]:($|[^/\\])", raw):
+        return None
+    try:
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            return None
+        dump_db = (Path(runtime_report_path).resolve().parent / "dump_db").resolve()
+        resolved = candidate.resolve()
+        if resolved.parent != dump_db or not resolved.is_file():
+            return None
+        return resolved
+    except (OSError, ValueError):
+        return None
 
 
 def merge_runtime_databases(report: Report, runtime_report_path: str) -> dict[str, int]:
@@ -1366,11 +1413,15 @@ def merge_runtime_databases(report: Report, runtime_report_path: str) -> dict[st
             seen_db.add(db_path)
             dbs += 1
             plain_path = str(ev.get("plain_path", ""))
-            if ev.get("event") == "exported" and plain_path:
-                digest = _sha256_of_file(plain_path)
+            # ★路径校验：plain_path 是设备侧不可信输入，只认解析进本 run out/dump_db
+            #   的常规文件；UNC/穿越/符号链接逃逸一律按降级事件处理，绝不打开。
+            trusted_plain = _trusted_plain_db_path(plain_path, runtime_report_path)
+            if ev.get("event") == "exported" and trusted_plain is not None:
+                trusted_str = str(trusted_plain)
+                digest = _sha256_of_file(trusted_str)
                 if digest:
-                    digests[plain_path] = digest
-                carved = _carve_plain_db(plain_path)
+                    digests[trusted_str] = digest
+                carved = _carve_plain_db(trusted_str)
                 if carved:
                     added += _add_victim_data_leads(report, db_path, carved, existing)
                     continue
@@ -1409,7 +1460,7 @@ def _carve_plain_db(plain_path: str) -> list[tuple[str, str, str]]:
     out: list[tuple[str, str, str]] = []
     p = Path(plain_path)
     if not p.exists() or not p.is_file():
-        logger.info("[merge] .plain.db 不存在，跳过：%s", plain_path)
+        logger.info("[merge] .plain.db 不存在，跳过：%s", _path_log_tag(plain_path))
         return out
     conn: Any = None
     try:
@@ -1430,10 +1481,10 @@ def _carve_plain_db(plain_path: str) -> list[tuple[str, str, str]]:
             _carve_table(cur, table, out, seen)
     except sqlite3.DatabaseError:
         # 非 sqlite / 损坏 / 加密未解 → 单库失败，不影响其它。
-        logger.exception("[merge] sqlite 读取落地库失败（坏库/非 sqlite），跳过：%s", plain_path)
+        logger.exception("[merge] sqlite 读取落地库失败（坏库/非 sqlite），跳过：%s", _path_log_tag(plain_path))
         return out
     except Exception:  # noqa: BLE001 — 单库任何异常都不应中断整体
-        logger.exception("[merge] 读取落地库异常，跳过：%s", plain_path)
+        logger.exception("[merge] 读取落地库异常，跳过：%s", _path_log_tag(plain_path))
         return out
     finally:
         if conn is not None:
@@ -1444,6 +1495,11 @@ def _carve_plain_db(plain_path: str) -> list[tuple[str, str, str]]:
     return out
 
 
+def _sql_quote_ident(name: str) -> str:
+    """SQL 标识符引用：内嵌双引号按 SQL 规则成对转义（表名/列名来自库自身，防注入）。"""
+    return '"' + name.replace('"', '""') + '"'
+
+
 def _carve_table(
     cur: Any, table: str, out: list[tuple[str, str, str]], seen: set[tuple[str, str, str]]
 ) -> None:
@@ -1451,14 +1507,14 @@ def _carve_table(
     import sqlite3
 
     try:
-        # 表名取自 sqlite_master（库自身），但仍用引号包裹防御特殊字符。
-        cur.execute(f'PRAGMA table_info("{table}")')
+        # 表名/列名取自 sqlite_master（库自身，不可信），用 _sql_quote_ident 防御特殊字符。
+        cur.execute(f"PRAGMA table_info({_sql_quote_ident(table)})")
         cols_info = cur.fetchall()
         carve_cols = [str(c[1]) for c in cols_info if c and len(c) > 1 and _is_carve_column(str(c[1]))]
         if not carve_cols:
             return
-        col_list = ", ".join(f'"{c}"' for c in carve_cols)
-        cur.execute(f'SELECT {col_list} FROM "{table}" LIMIT {_DB_MAX_ROWS}')
+        col_list = ", ".join(_sql_quote_ident(c) for c in carve_cols)
+        cur.execute(f"SELECT {col_list} FROM {_sql_quote_ident(table)} LIMIT {_DB_MAX_ROWS}")
         rows = cur.fetchall()
         per_col_count: dict[str, int] = {}
         for row in rows:
@@ -2422,7 +2478,10 @@ def _parse_envelope(body: Any) -> dict[str, Any] | None:
             return None
         try:
             obj = json.loads(body)
-        except ValueError:
+        except (ValueError, RecursionError):
+            # ★RecursionError 与坏 JSON 同等对待：body 是任意抓到的响应体，
+            #   数千层嵌套 JSON 会让 json.loads 溢出——逃逸会冒到
+            #   decrypt_runtime_messages 外层 except，丢掉全部已解密端点与统计。
             return None
     if not isinstance(obj, dict):
         return None
@@ -2456,16 +2515,25 @@ def _endpoints_from_plaintext(plaintext: str, source_url: str) -> list[Endpoint]
         )
 
     # 优先把明文当 JSON 递归收集字符串值（精确，能抓到 webName 等）。
+    # ★RecursionError 与 ValueError 同等对待：服务端可下发数千层嵌套 JSON，
+    #   json.loads / 递归遍历都会撞递归上限——逃逸会让整个解密合并阶段被跳过
+    #   （已解出的端点不再合并、runtime_decrypt_stats 不写入）。
     text_values: list[str] = []
     web_name = ""
     try:
         obj = json.loads(plaintext)
-        for key, val in _walk_json_strings(obj):
+    except (ValueError, RecursionError):
+        text_values = [plaintext]
+    else:
+        pairs, walk_truncated = _walk_json_strings(obj)
+        for key, val in pairs:
             text_values.append(val)
             if key.lower() == "webname" and val:
                 web_name = val
-    except ValueError:
-        text_values = [plaintext]
+        if walk_truncated:
+            # ★深度截断的分支可能藏端点：原文并入扫描文本走正则兜底，
+            #   与 json.loads 失败的降级路径行为一致（257~990 层静默丢端点的修复）。
+            text_values.append(plaintext)
 
     haystack = "\n".join(text_values) if text_values else plaintext
 
@@ -2486,18 +2554,41 @@ def _endpoints_from_plaintext(plaintext: str, source_url: str) -> list[Endpoint]
     return list(found.values())
 
 
-def _walk_json_strings(obj: Any, key: str = "") -> list[tuple[str, str]]:
-    """递归收集 JSON 里的 (key, str_value) 对（用于从明文契约抽地址/字段）。"""
+#: ``_walk_json_strings`` 迭代遍历的深度上限（与 cryptohook._walk_strings 同口径）：
+#: 更深分支直接跳过——深到这里的结构对端点抽取无意义，且递归实现会撞
+#: RecursionError 让整个解密合并阶段被跳过。
+_WALK_JSON_STRINGS_MAX_DEPTH = 256
+
+
+def _walk_json_strings(obj: Any, key: str = "") -> tuple[list[tuple[str, str]], bool]:
+    """迭代收集 JSON 里的 (key, str_value) 对（与 cryptohook._walk_strings 同范式）。
+
+    ★不用递归：攻击者可在明文里放几百层嵌套 JSON。显式栈 + 深度上限，子节点
+    逆序入栈以保持与递归版一致的 DFS 产出顺序。
+
+    返回 ``(pairs, truncated)``：``truncated`` 表示有分支因超深度上限被跳过——
+    调用方须把原文并入降级扫描，避免深层端点静默丢失。
+    """
     out: list[tuple[str, str]] = []
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            out.extend(_walk_json_strings(v, str(k)))
-    elif isinstance(obj, list):
-        for item in obj:
-            out.extend(_walk_json_strings(item, key))
-    elif isinstance(obj, str):
-        out.append((key, obj))
-    return out
+    truncated = False
+    stack: list[tuple[Any, str, int]] = [(obj, key, 0)]
+    while stack:
+        node, k, depth = stack.pop()
+        if isinstance(node, dict):
+            if depth >= _WALK_JSON_STRINGS_MAX_DEPTH:
+                truncated = True
+                continue
+            for ck, cv in reversed(list(node.items())):
+                stack.append((cv, str(ck), depth + 1))
+        elif isinstance(node, list):
+            if depth >= _WALK_JSON_STRINGS_MAX_DEPTH:
+                truncated = True
+                continue
+            for item in reversed(node):
+                stack.append((item, k, depth + 1))
+        elif isinstance(node, str):
+            out.append((k, node))
+    return out, truncated
 
 
 def _host_of_url(url: str) -> str:

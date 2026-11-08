@@ -104,23 +104,34 @@ def test_guarded_get_blocks_redirect_to_metadata_endpoint() -> None:
     """★codex B3：重定向到云元数据/链路本地地址（169.254.169.254）被拒（SSRF 防护）。"""
     client = _RedirectClient("http://169.254.169.254/latest/meta-data/")
     with pytest.raises(_http.SSRFBlocked):
-        _http.guarded_get(client, "https://rdap.org/domain/x.com")
+        _http.guarded_get(client, "https://rdap.org/domain/example.com")
     # 初始 rdap.org 请求发出、但危险的重定向目标绝不请求
-    assert client.urls == ["https://rdap.org/domain/x.com"]
+    assert client.urls == ["https://rdap.org/domain/example.com"]
 
 
 def test_guarded_get_blocks_redirect_to_private_ip() -> None:
     """★重定向到内网私有地址（10.0.0.0/8）同样被拒。"""
     client = _RedirectClient("http://10.0.0.5/admin")
     with pytest.raises(_http.SSRFBlocked):
-        _http.guarded_get(client, "https://rdap.org/domain/x.com")
+        _http.guarded_get(client, "https://rdap.org/domain/example.com")
+
+
+def test_guarded_get_blocks_plain_http_redirect(monkeypatch) -> None:
+    """★重定向必须保持 https——http 降级跳（哪怕目标是公网域名）一律拒收，
+    防链路攻击者替换响应体。monkeypatch _host_is_public 隔离 scheme 检查，
+    不靠 conftest 的 DNS 拦截碰巧抛错。"""
+    monkeypatch.setattr(_http, "_host_is_public", lambda host: True)
+    client = _RedirectClient("http://public-looking.example.com/x")
+    with pytest.raises(_http.SSRFBlocked):
+        _http.guarded_get(client, "https://rdap.org/domain/example.com")
+    assert client.urls == ["https://rdap.org/domain/example.com"]
 
 
 def test_guarded_get_returns_non_redirect_without_dns() -> None:
     """★非重定向响应直接返回，不对初始 URL 做 host 校验（离线 fake 不触 DNS）。"""
     client = _RedirectClient("unused")
     client._served_redirect = True  # 首个即 200
-    resp = _http.guarded_get(client, "https://rdap.org/domain/x.com")
+    resp = _http.guarded_get(client, "https://rdap.org/domain/example.com")
     assert resp.status_code == 200
 
 
@@ -130,6 +141,10 @@ def test_host_is_public_rejects_private_and_metadata() -> None:
     assert _http._host_is_public("127.0.0.1") is False        # 环回
     assert _http._host_is_public("10.0.0.1") is False         # 私网
     assert _http._host_is_public("192.168.1.1") is False      # 私网
+    # ★sfind-4430e03b：共享地址段与 IPv6 内嵌 IPv4 必须拒（is_global 白名单判据）。
+    assert _http._host_is_public("100.64.0.1") is False       # CGNAT 100.64.0.0/10
+    assert _http._host_is_public("::ffff:127.0.0.1") is False  # IPv4-mapped 环回
+    assert _http._host_is_public("64:ff9b::a00:1") is False    # leak-scan: allow NAT64→内网 IPv4 判据测试字面量
 
 
 def test_multisource_default_session_is_capped() -> None:

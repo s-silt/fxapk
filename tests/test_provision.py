@@ -57,11 +57,11 @@ class _FakeCompleted:
 
 
 def _patch_which(monkeypatch: pytest.MonkeyPatch, present: set[str]) -> None:
-    """monkeypatch shutil.which：仅 present 集合内的命令"在 PATH"。"""
+    """monkeypatch shutil.which（tools.safe_which 底层）：仅 present 集合内的命令"在 PATH"。"""
     def _which(name: str) -> str | None:
         return f"/usr/bin/{name}" if name in present else None
 
-    monkeypatch.setattr(provision.shutil, "which", _which)
+    monkeypatch.setattr(tools.shutil, "which", _which)
 
 
 # ---------------------------------------------------------------------------
@@ -701,7 +701,7 @@ def test_subject_hash_openssl_and_cryptography_agree(monkeypatch, real_ca_pem):
     crypto_hash = provision._hash_via_cryptography(real_ca_pem)
     assert crypto_hash == expected
     # _subject_hash_old 走优先 openssl，缺则退 cryptography，结果都应等于 expected。
-    monkeypatch.setattr(provision.shutil, "which", lambda name: None)  # 强制走 cryptography
+    monkeypatch.setattr(tools.shutil, "which", lambda name: None)  # 强制走 cryptography
     assert provision._subject_hash_old(real_ca_pem) == expected
 
 
@@ -932,6 +932,12 @@ def test_adb_subprocess_uses_utf8_replace(monkeypatch: pytest.MonkeyPatch) -> No
     assert captured.get("errors") == "replace"
 
 
+def _trust_device_frida_binary(monkeypatch: pytest.MonkeyPatch, sha: str = "ab" * 32) -> None:
+    """纵深防御桩：设备端 frida-server 哈希与本机期望一致（重启路径的前置核对）。"""
+    monkeypatch.setattr(provision, "_expected_frida_server_sha256", lambda serial=None: sha)
+    monkeypatch.setattr(provision, "_remote_file_sha256", lambda serial, path: sha)
+
+
 def test_ensure_frida_server_restarts_non_root_as_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -939,9 +945,10 @@ def test_ensure_frida_server_restarts_non_root_as_root(
     monkeypatch.setattr(provision.device, "frida_server_running", lambda serial=None: True)
     monkeypatch.setattr(provision.device, "frida_server_is_root", lambda serial=None: False)
     monkeypatch.setattr(provision, "_frida_binary_present", lambda serial=None: True)  # 二进制已部署
+    _trust_device_frida_binary(monkeypatch)
     started: list[object] = []
 
-    def _fake_start(serial: object = None) -> bool:
+    def _fake_start(serial: object = None, *, expected_sha256: object = None) -> bool:
         started.append(serial)
         return True  # su/adbd 拿到 root，成功以 root 起起来
 
@@ -974,7 +981,8 @@ def test_ensure_frida_server_does_not_accept_enumeration_only_false_positive(
         lambda serial=None, expected_version="": next(probes),
     )
     monkeypatch.setattr(provision, "_frida_binary_present", lambda serial=None: True)
-    monkeypatch.setattr(provision, "_start_frida_server_background", lambda serial=None: True)
+    _trust_device_frida_binary(monkeypatch)
+    monkeypatch.setattr(provision, "_start_frida_server_background", lambda serial=None, **_kw: True)
     monkeypatch.setattr(provision, "host_frida_version", lambda: "17.15.3")
     monkeypatch.setattr(provision.time, "sleep", lambda *_a: None)
 
@@ -992,7 +1000,8 @@ def test_ensure_frida_server_running_not_root_reports_honestly(
     monkeypatch.setattr(provision.device, "frida_server_running", lambda serial=None: True)
     monkeypatch.setattr(provision.device, "frida_server_is_root", lambda serial=None: False)
     monkeypatch.setattr(provision, "_frida_binary_present", lambda serial=None: True)  # 二进制已部署
-    monkeypatch.setattr(provision, "_start_frida_server_background", lambda serial=None: False)
+    _trust_device_frida_binary(monkeypatch)
+    monkeypatch.setattr(provision, "_start_frida_server_background", lambda serial=None, **_kw: False)
     monkeypatch.setattr(provision, "_su_uid0", lambda serial=None: False)
     monkeypatch.setattr(provision.time, "sleep", lambda *_a: None)
 
@@ -1038,6 +1047,105 @@ def test_ensure_frida_server_already_running_root_no_restart(
     assert res["ok"] is True
     assert res["action"] == "already_running"
     assert not started  # 没重启
+
+
+# ---------------------------------------------------------------------------
+# frida-server 启动前 SHA256 核对（纵深防御：防 shell 权限替换二进制后被 root 拉起）
+# ---------------------------------------------------------------------------
+
+
+def test_start_frida_server_background_rejects_hash_mismatch(monkeypatch):
+    """设备端 frida-server SHA256 与期望不符 → 拒绝以 root 启动（返回 False，不发任何启动命令）。"""
+    monkeypatch.setattr(provision, "_remote_file_sha256", lambda serial, path: "bb" * 32)
+    calls: list[object] = []
+    monkeypatch.setattr(provision, "_su_ok", lambda cmd, serial=None: calls.append(cmd) or True)
+    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None, **_kw: calls.append(extra) or True)
+
+    assert provision._start_frida_server_background(None, expected_sha256="aa" * 32) is False
+    assert calls == []  # 连杀旧进程/启动命令都没发
+
+
+def test_start_frida_server_background_hash_unreadable_proceeds_with_warning(
+    monkeypatch,
+):
+    """设备端哈希读不出（无 sha256sum）→ 记 warning 按未验证继续（不阻断老设备）。"""
+    monkeypatch.setattr(provision, "_remote_file_sha256", lambda serial, path: "")
+    monkeypatch.setattr(provision, "_adbd_is_root", lambda serial=None: True)
+    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None, **_kw: True)
+
+    assert provision._start_frida_server_background(None, expected_sha256="aa" * 32) is True
+
+
+def test_ensure_frida_server_untrusted_binary_falls_through_to_deploy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """设备端 frida-server 哈希与期望不符 → 不做 root 重启，落部署流程重推校验过的二进制。"""
+    payload = b"x" * 100
+    pushed_sha = hashlib.sha256(payload).hexdigest()
+
+    def _dl(url: str, dest: Path, on_progress: Any) -> str:
+        Path(dest).write_bytes(payload)
+        return ""
+
+    monkeypatch.setattr(provision.device, "frida_server_running", lambda serial=None: True)
+    monkeypatch.setattr(provision.device, "frida_server_is_root", lambda serial=None: False)
+    monkeypatch.setattr(provision, "_frida_binary_present", lambda serial=None: True)
+    monkeypatch.setattr(provision, "_expected_frida_server_sha256", lambda serial=None: "aa" * 32)
+    # 第一次调用（重启路径核对）返回不符值 → 不信任；之后（部署路径核对）返回与 push 一致。
+    remote_shas = iter(["bb" * 32])
+    monkeypatch.setattr(
+        provision,
+        "_remote_file_sha256",
+        lambda serial, path: next(remote_shas, pushed_sha),
+    )
+    monkeypatch.setattr(provision, "device_abi", lambda serial=None: "arm64-v8a")
+    monkeypatch.setattr(provision, "host_frida_version", lambda: "16.5.9")
+    monkeypatch.setattr(provision, "_download_and_extract", _dl)
+    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None, **_kw: True)
+    monkeypatch.setattr(provision, "_adbd_is_root", lambda serial=None: True)
+    monkeypatch.setattr(provision.time, "sleep", lambda *_a: None)
+    started: list[object] = []
+    monkeypatch.setattr(
+        provision,
+        "_start_frida_server_background",
+        lambda serial=None, **_kw: started.append(serial) or True,
+    )
+
+    res = provision.ensure_frida_server()
+    # 关键：不走 restarted_as_root；部署路径会以期望哈希再调一次启动（此处被桩掉）。
+    assert res["action"] == "deployed"
+    assert res["ok"] is True
+    assert started  # 部署路径确实发起了启动
+
+
+def test_ensure_frida_server_deploy_rejects_remote_hash_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """部署路径：push 后设备端哈希与本次推送字节不一致 → 拒绝以 root 启动，报 error。"""
+    states = iter([False])
+    monkeypatch.setattr(device, "frida_server_running", lambda serial=None: next(states, False))
+    monkeypatch.setattr(provision, "device_abi", lambda serial=None: "arm64-v8a")
+    monkeypatch.setattr(provision, "host_frida_version", lambda: "16.5.9")
+    monkeypatch.setattr(
+        provision, "_download_and_extract", lambda url, dest, on_progress: ""
+    )
+    monkeypatch.setattr(provision, "_adb_ok", lambda extra, serial=None, **_kw: True)
+    monkeypatch.setattr(provision, "_adbd_is_root", lambda serial=None: True)
+    # 设备端返回一个与 push 字节不同的哈希 → 正向不匹配。
+    monkeypatch.setattr(provision, "_remote_file_sha256", lambda serial, path: "cd" * 32)
+    started: list[object] = []
+    monkeypatch.setattr(
+        provision,
+        "_start_frida_server_background",
+        lambda serial=None, **_kw: started.append(serial) or True,
+    )
+    monkeypatch.setattr(provision.time, "sleep", lambda *_a: None)
+
+    res = provision.ensure_frida_server()
+    assert res["ok"] is False
+    assert res["action"] == "error"
+    assert "SHA256" in res["detail"]
+    assert started == []  # 拒绝启动
 
 
 # ---------------------------------------------------------------------------

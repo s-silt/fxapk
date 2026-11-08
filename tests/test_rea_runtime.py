@@ -109,3 +109,16 @@ def test_inspect_origin_option_is_one_plain_array_element(runtime, tmp_path, mon
         observation_ms=1000,
     )
     assert seen[seen.index("--allowed-origins") + 1] == "https://example.test"
+
+
+def test_rea_runtime_uses_safe_which_not_bare_path(runtime, monkeypatch):
+    """★安全回归：rea/node 查找必须走 safe_which（防 Windows 当前目录二进制投放）。"""
+    seen: list[str] = []
+
+    def _safe(name: str):
+        seen.append(name)
+        return None
+
+    monkeypatch.setattr(runtime, "safe_which", _safe)
+    runtime.ReaRuntime()
+    assert seen == ["rea", "node"]

@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import quote, urljoin, urlparse
 
 import requests
+from apkscan.config.fetch import _ip_is_blocked
 from apkscan.enrichers._rate_limit import request_slot
 
 #: 单次富化响应体硬上限（16MB）：远超任何合法 RDAP / Shodan / FOFA / certspotter JSON，
@@ -133,7 +134,11 @@ class SSRFBlocked(requests.RequestException):
 
 
 def _host_is_public(host: str) -> bool:
-    """host 解析出的**全部** IP 均为公网可路由地址才算安全；任一私网/环回/链路本地/保留/多播/未指定 → 不安全。
+    """host 解析出的**全部** IP 均为公网可路由地址才算安全；任一非公网即拒。
+
+    ★判据与 ``config.fetch._ip_is_blocked`` 同一来源（``is_global`` 白名单）：覆盖
+    100.64.0.0/10 共享地址段、NAT64/6to4/Teredo/IPv4-mapped 等 IPv6 内嵌 IPv4——
+    旧的 is_private 黑名单会把 CGNAT 与内嵌映射地址漏放。
 
     ★覆盖边界（如实标注）：这是**预解析**校验——校验通过到 requests 真正连接之间存在 DNS 重绑定 TOCTOU 窗口
     （requests 会再解析一次，可能拿到不同 IP）。完整防护需固定 IP 连接 + 保留 Host 头，本工具威胁模型下
@@ -147,8 +152,7 @@ def _host_is_public(host: str) -> bool:
     except ValueError:
         pass
     else:
-        return not (literal.is_private or literal.is_loopback or literal.is_link_local
-                    or literal.is_reserved or literal.is_multicast or literal.is_unspecified)
+        return not _ip_is_blocked(literal)
     try:
         infos = socket.getaddrinfo(host, None)
     except (socket.gaierror, UnicodeError, ValueError):
@@ -161,8 +165,7 @@ def _host_is_public(host: str) -> bool:
         except ValueError:
             return False
         saw = True
-        if (addr.is_private or addr.is_loopback or addr.is_link_local
-                or addr.is_reserved or addr.is_multicast or addr.is_unspecified):
+        if _ip_is_blocked(addr):
             return False
     return saw
 
@@ -190,4 +193,8 @@ def guarded_get(client: Any, url: str, *, timeout: Any = None,
         if not location:
             return resp
         current = urljoin(current, location)
+        # ★重定向目标必须保持 https——http 降级跳可被链路攻击者替换响应体，
+        #   也避免明文 hop 把 RDAP 查询内容暴露给路径上的窃听者。
+        if urlparse(current).scheme != "https":
+            raise SSRFBlocked(f"拒绝跟随非 HTTPS 重定向：{current!r}")
     raise SSRFBlocked(f"重定向次数超过 {max_redirects}，中止：{url!r}")

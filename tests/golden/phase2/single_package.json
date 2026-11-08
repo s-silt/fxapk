@@ -102,6 +102,7 @@
         "directory_name": "pkg",
         "manifest_sha256": "0847bd37d3f6d732a5e503251cf36ac9e2b787a530c0d4d5ef1be3f1db180213",
         "package_id": "0bb92a289369518be888040bfbec14298937e82f2ec69866db73405f0a4b4d46",
+        "report_relpath": "report.json",
         "report_sha256": "d49cd16d8d6461ba3354a660981a245e6a13c9eb6c0c5c57fb12b9a02ff5b107"
       }
     ],

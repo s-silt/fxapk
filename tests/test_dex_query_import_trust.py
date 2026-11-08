@@ -1017,3 +1017,57 @@ def test_collect_receipt_files_stat_size_lie_still_hits_byte_budget(
     with pytest.raises(DexQueryError) as excinfo:
         collect_receipt_files(tmp_path, meta)
     assert excinfo.value.reason == "dex_receipt_oversize"
+
+
+def _shared_code_item_fixture(monkeypatch, hit_count: int):
+    """构造「多 descriptor 共享同一 code item」的最小 _verify_xref_hits 场景。"""
+    from types import SimpleNamespace
+
+    from apkscan.core import dex_query as dq
+
+    value = "evil.example"
+    value_sha = hashlib.sha256(value.encode()).hexdigest()
+    insns = b"\x1a\x00\x00\x00"  # const-string v0, string@0：一个合法 2-code-unit 指令
+    code = dq._DexCode(insns_off=0x100, insns_size=2, insns=insns)
+    descriptors = [f"LA;->m{i}()V" for i in range(hit_count)]
+    parsed = dq._ParsedDex(
+        strings=(value,), methods={desc: code for desc in descriptors}
+    )
+    member = SimpleNamespace(name="classes.dex", ordinal=0, data=b"x", sha256="0" * 64)
+    monkeypatch.setattr(dq, "inventory_dex_bytes", lambda _apk: ([member], [], False))
+    monkeypatch.setattr(dq, "_parse_dex", lambda _data: parsed)
+    hits = [{
+        "grade": "static-reference", "precision": "exact", "offset": 0,
+        "offset_unit": "code_units", "file_offset": 0x100,
+        "descriptor": desc, "value_sha256": value_sha,
+    } for desc in descriptors]
+    return dq, hits
+
+
+def test_xref_verify_scans_shared_code_item_once(monkeypatch) -> None:
+    """sfind-16cc45f0：200 个 descriptor 指向同一 code item 时指令流只解码一遍。"""
+    dq, _hits = _shared_code_item_fixture(monkeypatch, 200)
+    scans = []
+    real = dq._const_string_indexes
+
+    def _spy(insns, wanted):
+        scans.append(len(wanted))
+        return real(insns, wanted)
+
+    monkeypatch.setattr(dq, "_const_string_indexes", _spy)
+    check = dq._verify_xref_hits(b"apk", _receipt := {
+        "query_values": ["evil.example"], "members": [{
+            "name": "classes.dex", "ordinal": 0, "status": "hit",
+            "hits": _hits}]})
+    assert check.verified is True
+    assert len(scans) == 1  # 共享 code item 只扫一次（修复前是 200 次）
+
+
+def test_xref_verify_caps_exact_hit_count(monkeypatch) -> None:
+    """手工 receipt 的 exact 命中数超 max_hits → 整体按未核处理（fail-closed）。"""
+    dq, hits = _shared_code_item_fixture(monkeypatch, 201)
+    receipt = {"query_values": ["evil.example"], "members": [{
+        "name": "classes.dex", "ordinal": 0, "status": "hit", "hits": hits}]}
+    check = dq._verify_xref_hits(b"apk", receipt)
+    assert check.verified is False
+    assert check.status == "parse_unavailable"

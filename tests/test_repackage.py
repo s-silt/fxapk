@@ -317,3 +317,61 @@ def test_verdict_clears_logcat_before_launch_and_uses_wait(
     assert ok is True
     assert calls[0] == ["logcat", "-c"], "启动前未先清 logcat"
     assert waited == [repackage._SPAWN_GRACE], "未走可打桩 _wait（单测会真睡）"
+
+
+# --- 安全回归：launcher 组件白名单 + am start 单引号包裹（防样本 manifest 命令注入） ---
+
+
+def test_resolve_launcher_component_rejects_shell_metachars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★安全回归：样本 manifest 可控的 activity 名含 shell 元字符 → 拒绝返回 None（回退 monkey）。"""
+    for bad in (
+        "com.fraud.app/.A;id",
+        "com.fraud.app/.A$(id)",
+        "com.fraud.app/.A`id`",
+        "com.fraud.app/.A B",
+        "com.fraud.app/.A|sh",
+        "com.fraud.app/.A\tid",
+    ):
+        monkeypatch.setattr(repackage, "_adb", lambda sub, serial, _b=bad: _b + "\n")
+        assert repackage._resolve_launcher_component("com.fraud.app", None) is None, bad
+
+
+def test_resolve_launcher_component_accepts_valid_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """合法类名（含相对 ``.Foo``、全限定、内部类 ``$``）照常放行。"""
+    cases = {
+        "com.fraud.app/com.fraud.app.SplashActivity": "com.fraud.app/com.fraud.app.SplashActivity",
+        "com.fraud.app/.MainActivity": "com.fraud.app/.MainActivity",
+        "com.fraud.app/com.fraud.app.Outer$Inner": "com.fraud.app/com.fraud.app.Outer$Inner",
+    }
+    for raw, want in cases.items():
+        monkeypatch.setattr(repackage, "_adb", lambda sub, serial, _r=raw: _r + "\n")
+        assert repackage._resolve_launcher_component("com.fraud.app", None) == want
+
+
+def test_verdict_quotes_component_for_am_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★安全回归：am start -n 的组件实参必须经 _shq 单引号包裹（纵深防御，设备 shell 不重分词）。"""
+    calls: list[list[str]] = []
+
+    def _rec_adb(sub: list[str], serial: object) -> str:
+        calls.append(sub)
+        return ""
+
+    monkeypatch.setattr(repackage, "_adb", _rec_adb)
+    monkeypatch.setattr(
+        repackage, "_resolve_launcher_component", lambda p, s: "com.fraud.app/.A"
+    )
+    monkeypatch.setattr(repackage, "_process_alive", lambda p, s: True)
+    monkeypatch.setattr(repackage, "_logcat_has_fatal", lambda p, s: False)
+    monkeypatch.setattr(repackage, "_frida_attachable", lambda p, s: True)
+    monkeypatch.setattr(repackage, "_wait", lambda d: None)
+
+    ok, _ = repackage._verdict_app_alive("com.fraud.app", None)
+    assert ok is True
+    am_calls = [c for c in calls if c[:3] == ["shell", "am", "start"]]
+    assert am_calls, "未发起 am start"
+    # 组件实参必须是单引号包裹后的单个 argv（adb 重拼后设备 shell 不再分词）。
+    assert am_calls[0] == ["shell", "am", "start", "-n", "'com.fraud.app/.A'"]

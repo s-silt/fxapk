@@ -168,3 +168,27 @@ def test_missing_optional_library_is_visible_and_later_stage_runs(tmp_path, monk
     receipt = runner.run(plan, tmp_path / "out")
     assert [row["state"] for row in receipt["tasks"]] == ["unsupported", "ok"]
     assert receipt["tasks"][0]["reason_codes"] == ["optional_dependency_unavailable"]
+
+
+def test_hash_mismatch_never_retains_unverified_input(tmp_path):
+    """★顺序修复回归（sfind-d0e9f024）：sha256 不匹配的输入不得写进 inputs/。"""
+    data = encoded([event(1)])
+    (tmp_path / "trace.jsonl").write_bytes(data)
+    good_hash = hashlib.sha256(data).hexdigest()
+    tasks = [
+        {"id": "bad-hash", "kind": "trace", "input": "trace.jsonl", "sha256": "0" * 64, **TRACE},
+        {"id": "bad-format", "kind": "trace", "input": "trace.jsonl", "sha256": "not-hex", **TRACE},
+        {"id": "good", "kind": "trace", "input": "trace.jsonl", "sha256": good_hash, **TRACE},
+    ]
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"schema_version": "fxapk.offline-review.v1",
+                                "sample_sha256": "a" * 64, "tasks": tasks}))
+    out = tmp_path / "review"
+    receipt = runner.run(plan, out, retain_inputs=True)
+    states = {row["id"]: row for row in receipt["tasks"]}
+    assert states["bad-hash"]["state"] == "failed"
+    assert states["bad-hash"]["reason_codes"] == ["review_input_hash_mismatch"]
+    assert states["bad-format"]["reason_codes"] == ["review_input_hash_mismatch"]
+    assert states["good"]["state"] == "ok"
+    retained = sorted(p.name for p in (out / "inputs").iterdir())
+    assert retained == ["good.bin"]

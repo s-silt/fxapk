@@ -30,14 +30,13 @@ import os
 import socket
 import threading
 import time
-from pathlib import Path
 from typing import Any
 
 from apkscan.core.redact import redact_url, safe_exception_diagnostic
 from apkscan.core.enrichment import safe_error_type
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
-from apkscan.enrichers import _http
+from apkscan.enrichers import _cache, _http
 from apkscan.enrichers._ipinfo import lookup_ips_batch
 
 #: 本模块 ``requests`` 符号 = 有界 shim（DoH get + 转发给 /batch 的 post 均流式限体，codex B1）。
@@ -68,7 +67,7 @@ _DNS_TYPE_CNAME = 5  # CNAME 记录（DoH Answer 里 type=5），构成 CDN 边�
 _BENCHMARK_NET = ipaddress.ip_network("198.18.0.0/15")
 
 #: 本地缓存目录与文件。
-CACHE_DIR = Path(".apkscan_cache")
+CACHE_DIR = _cache.cache_root() / "enrichment"
 CACHE_FILE = CACHE_DIR / "dns.json"
 
 #: DNS 富化缓存 TTL（秒）。DNS 解析（A 记录 + 托管归属）会随诈骗后端换 IP / 迁云而变，
@@ -216,22 +215,7 @@ class DnsEnricher(BaseEnricher):
     # ------------------------------------------------------------------ 缓存
     def _load_cache(self) -> dict[str, dict[str, Any]]:
         """读缓存文件。★必须持 self._lock 调用（Windows os.replace race，见 asn/rdap 注释）。"""
-        if not CACHE_FILE.is_file():
-            return {}
-        try:
-            text = CACHE_FILE.read_text(encoding="utf-8")
-            data = json.loads(text)
-        except Exception as exc:  # noqa: BLE001 - 缓存损坏不应中断富化主流程
-            logger.warning(
-                "DNS 缓存读取/解析失败，忽略：%s（%s）",
-                CACHE_FILE,
-                safe_exception_diagnostic(exc),
-            )
-            return {}
-        if not isinstance(data, dict):
-            logger.warning("DNS 缓存顶层非 dict，忽略：%s", CACHE_FILE)
-            return {}
-        return data
+        return _cache.read_cache_json(CACHE_FILE)
 
     def _load_cache_locked(self) -> dict[str, dict[str, Any]]:
         with self._lock:

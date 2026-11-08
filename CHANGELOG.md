@@ -5,6 +5,17 @@
 
 ## 待发布
 
+## 1.26.0 — 2026-11-09
+
+- 安全加固（2026-11-08 代码扫描 22 项发现全部修复）：repackage launcher activity 名严格校验后方可进入 `adb shell am start`；可执行文件查找统一走 `tools.safe_which`（拒绝 cwd 直属/相对/drive-relative 命中），覆盖 core、dynamic、report 与 fxapk-rea/flutter/android-ui 插件全部裸 `shutil.which` 调用点。
+- 解压与解析边界：`.so`/DEX 拒绝 bzip2/LZMA 高膨胀成员；DEX 名口径与 androguard 对齐；snapshot 非 DEX 聚合解压预算；AndroidManifest 兜底按压缩方式白名单 + 64KiB 分块 + 16MB 上限；JADX postings 单值/总量上限并如实 partial；DEX xref 按共享 code item 去重扫描。
+- 网络与证据边界：mitm 压缩 body 按编码有界解码（gzip/deflate/br/zstd；brotli 需 ≥1.2 否则拒解码，zstd 改用声明依赖的 `max_length`）；深嵌套 JSON 全路径 RecursionError 防护与深度上限；native extract 单次读入内存绑定哈希；SQLCipher `plain_path` 限定 dump_db 内普通文件并转义标识符；远程配置 fetch 绝对 deadline + 抓取次数上限；缓存/证据/报告输入先校验哈希再使用；富化缓存迁移至每用户缓存目录、有界读取、命中再验证，Shodan 缓存写侧封顶防反复清空。
+- SSRF 与重定向：web_capture 解析一次并固定连接 IP（DNS rebinding/NAT64 防护）；RDAP 重定向仅 HTTPS 且逐跳公网校验（含 CGNAT、NAT64、映射 IPv6 等）。
+- 性能：web_evidence 跳转链扫描改线性游标（ReDoS 修复且保留属性值内 `<` 语义）；fxapk-rea `_javascript_lines` 去二次方切分并按 fact 缓存行偏移；web_supplement 重复观察树按 SHA 分组只读一次。
+- 复核：经 kiro-cli Opus 5.5 两轮独立复核，全部发现与回归项修复并补回归测试。
+- 可选插件独立版本：fxapk-rea 0.1.3、fxapk-android-ui 0.1.3、fxapk-flutter 0.1.1（源码有安全相关改动）；fxapk-asc 维持 0.1.2。
+- 验证范围为合成回归与跨平台 CI；不宣称真实设备验收。
+
 ## 1.25.0 — 2026-11-08
 
 - 新增 `fxapk evidence pack/verify/extract/analyze/case-verify/corpus-add`：默认 ZIP64/Zstandard 6（方法 93），可选 DEFLATE 6；逐文件保留原始字节、manifest、SHA-256 和案件 package_id。Python 3.11–3.13 增加条件依赖 `backports.zstd>=1.8,<2`，3.14+ 使用标准库；旧工具需显式选择 DEFLATE，不静默降级。

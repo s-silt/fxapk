@@ -31,11 +31,10 @@ import re
 import threading
 import time
 from http.cookies import CookieError, SimpleCookie
-from pathlib import Path
 from typing import Any
 
 
-from apkscan.enrichers import _http
+from apkscan.enrichers import _cache, _http
 from apkscan.enrichers._profile import bounded_profile, coverage
 from apkscan.enrichers.multisource import _ServiceError, _reject_redirect
 
@@ -62,7 +61,9 @@ _MAX_HTTP_HEADER_VALUE_LENGTH = 512
 # RFC 7230 token 的可见 ASCII 子集；只把合法 Cookie 名写入报告，绝不保留 Cookie 值。
 _COOKIE_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,128}$")
 
-CACHE_DIR = Path(".apkscan_cache")
+#: 缓存落在每用户缓存目录（FXAPK_CACHE_DIR 可覆盖）——工作目录的 .apkscan_cache
+#: 可被样本仓库/共享目录预置投毒条目，绝不再作为可信缓存来源。
+CACHE_DIR = _cache.cache_root() / "enrichment"
 CACHE_FILE = CACHE_DIR / "shodan.json"
 
 #: Shodan 富化缓存 TTL（秒）。主机开放端口/服务/banner 变化快（比 ASN/注册人频繁得多）——无 TTL 会把
@@ -237,17 +238,7 @@ class ShodanEnricher(BaseEnricher):
         """读缓存文件。★必须持 self._lock 调用：Windows 下读句柄 open 与另一线程的
         os.replace(shodan.json) 撞同一文件会抛 PermissionError(WinError 5)/Errno 13，
         让缓存静默丢失。读写共用一把锁消除该重叠窗口；enrich() 经 _load_cache_locked 进入。"""
-        if not CACHE_FILE.is_file():
-            return {}
-        try:
-            data = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            logger.warning("Shodan 缓存读取/解析失败，忽略：%s", CACHE_FILE, exc_info=True)
-            return {}
-        if not isinstance(data, dict):
-            logger.warning("Shodan 缓存顶层非 dict，忽略：%s", CACHE_FILE)
-            return {}
-        return data
+        return _cache.read_cache_json(CACHE_FILE)
 
     def _load_cache_locked(self) -> dict[str, dict[str, Any]]:
         """持锁读缓存，供 enrich() 的命中检查用，避免与并发写的 os.replace 撞车。"""
@@ -264,11 +255,27 @@ class ShodanEnricher(BaseEnricher):
                 and (entry.get("_profile_contract") == _PROFILE_CONTRACT
                      or entry.get("_source_status") == "no_record"))
 
+    #: 缓存文件写侧上限：必须低于 ``_cache.MAX_CACHE_FILE_BYTES`` 读帽——
+    #: 保证本模块写出的文件永远可读。超限条目不缓存（大响应每次回源，诚实降级）。
+    _CACHE_WRITE_LIMIT_BYTES = _cache.MAX_CACHE_FILE_BYTES - 1024 * 1024
+
     def _save_cache_entry(self, value: str, entry: dict[str, Any]) -> None:
         with self._lock:
             cache = self._load_cache()
             # 打时间戳供 TTL 过期判断（见 CACHE_TTL_SECONDS）。
-            cache[value] = {**entry, _CACHED_AT_KEY: time.time(), "_profile_contract": _PROFILE_CONTRACT}
+            new_entry = {**entry, _CACHED_AT_KEY: time.time(), "_profile_contract": _PROFILE_CONTRACT}
+            cache[value] = new_entry
+            payload = json.dumps(cache, ensure_ascii=False, indent=2)
+            if len(payload.encode("utf-8")) > self._CACHE_WRITE_LIMIT_BYTES:
+                # ★写侧封顶：先淘汰过期条目腾位置；仍超限说明本条目太大或缓存已满——
+                #   不写入、保留旧文件。否则文件超过读帽后 read_cache_json 恒返回 {}，
+                #   保存退化为"只写新条"反复清空整个缓存（kiro 二轮复核）。
+                cache = {k: v for k, v in cache.items() if self._cache_is_fresh(v)}
+                cache[value] = new_entry
+                payload = json.dumps(cache, ensure_ascii=False, indent=2)
+                if len(payload.encode("utf-8")) > self._CACHE_WRITE_LIMIT_BYTES:
+                    logger.warning("Shodan 缓存条目过大或缓存已满，本条不缓存：%s", value)
+                    return
             try:
                 CACHE_DIR.mkdir(parents=True, exist_ok=True)
                 # 原子写：临时文件 + replace，避免崩溃/并发留半截坏缓存。
@@ -276,10 +283,52 @@ class ShodanEnricher(BaseEnricher):
                 tmp = CACHE_FILE.with_name(
                     f"{CACHE_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp"
                 )
-                tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+                tmp.write_text(payload, encoding="utf-8")
                 tmp.replace(CACHE_FILE)
             except Exception:
                 logger.warning("Shodan 缓存写入失败：%s", CACHE_FILE, exc_info=True)
+
+    @staticmethod
+    def _cached_target_matches(kind: str, value: str, data: dict[str, Any], resolved_ip: Any) -> bool:
+        """缓存画像的 IP 必须与查询目标绑定：ip 端点逐值相等；domain 端点要求
+        画像 IP 与入缓存时记录的解析 IP 一致（缓存键本身已是 value，内容须自洽）。"""
+        try:
+            profile_ip = ipaddress.ip_address(str(data.get("ip")))
+        except ValueError:
+            return False
+        if kind == "ip":
+            try:
+                return profile_ip == ipaddress.ip_address(value)
+            except ValueError:
+                return False
+        if not isinstance(resolved_ip, str):
+            return False
+        try:
+            return profile_ip == ipaddress.ip_address(resolved_ip)
+        except ValueError:
+            return False
+
+    def _validated_cache_entry(self, kind: str, value: str, cached: dict[str, Any]) -> dict[str, Any] | None:
+        """缓存命中再验证：no_record 标记原样放行；画像条目必须带 ``_raw`` 原始
+        payload 且重跑 ``_parse_host``（bounded_profile 同一边界），目标/IP 绑定
+        不符或解析失败一律返回 None 按未命中处理——种植/损坏的缓存不得绕过校验进报告。"""
+        note = str(cached.get("note", ""))
+        if cached.get("_source_status") == "no_record" or "库中无该主机记录" in note:
+            return {"note": note or "Shodan 库中无该主机记录", "source": "shodan",
+                    "_source_status": "no_record", "_cache_hit": True}
+        if "无法解析" in note:
+            return None  # 旧版失败 DNS 缓存：按未命中重查，不当画像返回
+        raw = cached.get("_raw")
+        if not isinstance(raw, dict):
+            return None
+        try:
+            data = _parse_host(raw)
+        except Exception:  # noqa: BLE001 — 缓存内容损坏按未命中处理，不向上炸富化
+            return None
+        if not self._cached_target_matches(kind, value, data, cached.get("_resolved_ip")):
+            return None
+        data["_cache_hit"] = True
+        return data
 
     # ------------------------------------------------------------------ 查询
     def _check_response(self, response: Any) -> None:
@@ -315,8 +364,12 @@ class ShodanEnricher(BaseEnricher):
                 return str(ipaddress.ip_address(ip.strip()))
         return None
 
-    def _query(self, value: str, kind: str, key: str) -> dict[str, Any]:
-        """解析（域名时）→ host 查询 → 归一。404（库中无记录）抛 _ShodanMiss；其余异常向上抛。"""
+    def _query(self, value: str, kind: str, key: str) -> tuple[dict[str, Any], dict[str, Any], str]:
+        """解析（域名时）→ host 查询 → 归一。404（库中无记录）抛 _ShodanMiss；其余异常向上抛。
+
+        返回 ``(归一数据, 原始 payload, 实际查询的 IP)``——原始 payload 与解析 IP 一并入缓存，
+        供命中路径重跑 ``_parse_host`` 做与实时响应同口径的校验。
+        """
         if kind == "domain":
             ip = self._resolve(value, key)
             if not ip:
@@ -340,7 +393,7 @@ class ShodanEnricher(BaseEnricher):
             raise _ServiceError("invalid_host_profile")
         if ipaddress.ip_address(returned_ip) != ipaddress.ip_address(ip):
             raise _ServiceError("profile_target_mismatch")
-        return _parse_host(payload)
+        return _parse_host(payload), payload, ip
 
     # ------------------------------------------------------------------ 入口
     def enrich(self, ep: Endpoint) -> EnrichmentResult:
@@ -363,16 +416,17 @@ class ShodanEnricher(BaseEnricher):
         cached = cache.get(value)
         if isinstance(cached, dict) and self._cache_is_fresh(cached):
             logger.debug("Shodan 缓存命中：%s", value)
-            data = {k: v for k, v in cached.items() if k not in {_CACHED_AT_KEY, "_profile_contract"}}
-            self.receipt.update(cache_hit=True, cached_at=cached.get(_CACHED_AT_KEY))
-            # Older caches contain only note/source and were incorrectly counted as hits.
-            if "无法解析" in str(data.get("note", "")):
-                cached = None  # Failed DNS must be retried, not cached as a host miss.
-            else:
-                if "库中无该主机记录" in str(data.get("note", "")):
-                    data["_source_status"] = "no_record"
+            # ★缓存命中与实时响应同一条校验路：必须带 _raw 原始 payload，重跑 _parse_host
+            #   （bounded_profile 字段边界同一来源），并核对目标/IP 绑定——种植的缓存
+            #   条目（错 IP、超大 banner、伪造画像）不得绕过校验直接进报告。
+            #   receipt.cache_hit 只在再验证通过后落账——校验失败转在线查询时
+            #   回执不得谎称命中。
+            data = self._validated_cache_entry(ep.kind, value, cached)
+            if data is not None:
+                self.receipt.update(cache_hit=True, cached_at=cached.get(_CACHED_AT_KEY))
                 return EnrichmentResult(provider=self.name, ok=True, data=data)
-        if isinstance(cached, dict):
+            logger.debug("Shodan 缓存条目未过再验证，按未命中处理：%s", value)
+        elif isinstance(cached, dict):
             logger.debug("Shodan 缓存过期，重查：%s", value)
 
         # 2) 网络查询。
@@ -381,7 +435,7 @@ class ShodanEnricher(BaseEnricher):
                 data={"_source_status": "skipped", "_error_type": self._blocked_error})
         try:
             self.receipt["network_attempted"] = True
-            data = self._query(value, ep.kind, key)
+            data, payload, resolved_ip = self._query(value, ep.kind, key)
         except _ShodanMiss as miss:
             self._consecutive_failures = 0
             # 库中无记录：缓存空标记避免复查（耗额度），按"查询无结果"返回（ok=True 无值）。
@@ -404,7 +458,10 @@ class ShodanEnricher(BaseEnricher):
             return EnrichmentResult(provider=self.name, ok=False, error=error_type,
                                     data={"_source_status": "failed", "_error_type": error_type})
 
-        # 3) 成功才写缓存（失败不缓存，便于后续重试）。
+        # 3) 成功才写缓存（失败不缓存，便于后续重试）。原始 payload 与解析 IP 一并入缓存，
+        #    命中路径据此重跑 _parse_host 复核，不信任缓存里预解析的字段。
         self._consecutive_failures = 0
-        self._save_cache_entry(value, data)
+        self._save_cache_entry(
+            value, {**data, "_raw": payload, "_resolved_ip": resolved_ip}
+        )
         return EnrichmentResult(provider=self.name, ok=True, data=data)

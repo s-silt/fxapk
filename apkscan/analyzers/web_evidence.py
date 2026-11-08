@@ -26,6 +26,7 @@ import base64
 import binascii
 import logging
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -320,9 +321,40 @@ def _add_host_endpoint(
 #   整块内联配置（C2 地址、备用域名池）会静默漏掉。这不是"畸形标签罕不罕见"的问题：
 #   本工具的输入本就是会主动规避分析的样本，扫描上限只限制处理规模、不缓解这种逃逸。
 #   lookahead 同时挡住 `</scriptfoo>`（那不是结束标签）；`[^>]*` 是平坦量词，无嵌套回溯。
-_SCRIPT_BLOCK_RE = re.compile(
-    r"<script\b[^>]*>(.*?)</script(?=[\s/>])[^>]*>", re.IGNORECASE | re.DOTALL
-)
+# ★ReDoS 修复：原 `(.*?)</script` 在"开标签无闭合"时会从每个 `<script` 起点把余文
+#   重扫一遍（O(候选数×文本长)）。改由 _iter_script_blocks 用只向前推进的游标产出
+#   (body, body_offset)，语义等价但总成本与文本长度同阶。
+_SCRIPT_OPEN_RE = re.compile(r"<script\b", re.IGNORECASE)
+_SCRIPT_CLOSE_RE = re.compile(r"</script(?=[\s/>])", re.IGNORECASE)
+#: 开标签属性段上限：正常 <script ...> 远小于此；超长开标签按"非脚本块"跳过（有界防御）。
+_SCRIPT_TAG_SPAN = 4096
+
+
+def _iter_script_blocks(text: str) -> Iterator[tuple[str, int]]:
+    """产出 ``(脚本体, 体起始偏移)``，等价于原 ``_SCRIPT_BLOCK_RE`` 的 group(1)/start(1)。
+
+    开标签：``<script`` 候选 + ``str.find`` 在 _SCRIPT_TAG_SPAN 窗口内找第一个 ``>``
+    （等价于原 ``[^>]*>``，但有界）。闭合标签：首个 ``</script`` + 合法 lookahead，
+    其后的 ``>`` 用无界 ``find``（等价于原 ``[^>]*>``；候选位置单调，扫描区不重叠）。
+    """
+    pos = 0
+    n = len(text)
+    while True:
+        om = _SCRIPT_OPEN_RE.search(text, pos)
+        if om is None:
+            return
+        gt = text.find(">", om.end(), min(om.end() + _SCRIPT_TAG_SPAN, n))
+        if gt == -1:
+            pos = om.end()
+            continue
+        cm = _SCRIPT_CLOSE_RE.search(text, gt + 1)
+        if cm is None:
+            return
+        cgt = text.find(">", cm.end())
+        if cgt == -1:
+            return
+        yield text[gt + 1 : cm.start()], gt + 1
+        pos = cgt + 1
 
 # window.X = "..." / globalThis.X = '...'（值限单行、有界长度，防灾难性回溯）。
 _WINDOW_ASSIGN_RE = re.compile(
@@ -385,11 +417,10 @@ class WebInlineConfigAnalyzer(BaseAnalyzer):
 
         for path, text in _iter_text(ctx, self.name, _HTML_SUFFIXES, result, include_har_bodies=True):
             try:
-                for block in _SCRIPT_BLOCK_RE.finditer(text):
-                    body = block.group(1)
+                for body, body_offset in _iter_script_blocks(text):
                     if not body.strip():
                         continue
-                    hits.extend(self._scan_block(body, path, block.start(1)))
+                    hits.extend(self._scan_block(body, path, body_offset))
             except Exception:
                 logger.exception("[%s] 扫描内联脚本失败：%s", self.name, path)
 
@@ -470,14 +501,65 @@ _LOCATION_CALL_RE = re.compile(
 )
 
 # <meta http-equiv="refresh" content="0;url=https://...">
-_META_REFRESH_RE = re.compile(
-    r"""<meta[^>]*?http-equiv\s*=\s*['"]?refresh['"]?[^>]*?>""",
-    re.IGNORECASE,
+# ★ReDoS 修复：原 `<meta[^>]*?http-equiv...` 的惰性量词在"<meta 后无 >"时会从每个
+#   `<meta` 起点把余文扫一遍。改为两步：先取有界（≤2048 字符）的整个 <meta...> 标签，
+#   再在标签文本里查 http-equiv=refresh —— 贪婪否定字符类是单次线性扫描，无回溯放大。
+# ★ReDoS 二次方残留修复：不用正则。`[^>]` 每个 `<meta` 起点都可能扫满 2048 字符
+#   （80 万个 `<meta` 实测 8.3s）；`[^<>]` 虽线性但会漏检属性值里含 `<` 的合法标签
+#   （`<meta data-x="<" http-equiv="refresh" ...>` 浏览器照样执行）。改为游标扫描：
+#   finditer 找 `<meta` 起点（C 速度单遍），`>` 位置单调维护（只在被越过时重 find），
+#   每个起点至多看 2053 字符——与 `<meta[^>]{0,2048}>` 语义完全等价且严格 O(n)。
+_META_START_RE = re.compile(r"<meta", re.IGNORECASE)
+#: `<meta`(5) + 内容 ≤2048 + `>`(1) —— 与原 `[^>]{0,2048}` 的字符口径一致。
+_META_TAG_MAX_LEN = 5 + 2048 + 1
+
+
+class _TagSpan:
+    """``snippet_around`` 用的最小区间替身（提供 start()/end()，等价 re.Match 接口）。"""
+
+    __slots__ = ("_s", "_e")
+
+    def __init__(self, start: int, end: int) -> None:
+        self._s = start
+        self._e = end
+
+    def start(self) -> int:
+        return self._s
+
+    def end(self) -> int:
+        return self._e
+
+
+def _iter_meta_tags(text: str) -> Iterator[tuple[int, int]]:
+    """产出 ``(start, end)`` 的 ``<meta...>`` 标签区间，语义等价
+    ``<meta[^>]{0,2048}>`` 但严格线性（见上方注释）。"""
+    pos = 0  # 已消费到此位置（上一个成功匹配的结束）
+    gt = -1  # 已定位的下一个 '>' 绝对位置；-1 表示需按当前起点重找
+    for m in _META_START_RE.finditer(text):
+        p = m.start()
+        if p < pos:
+            continue  # 落在上一个标签内部，finditer 仍会报出——跳过
+        if gt < p + 5:
+            gt = text.find(">", p + 5)
+            if gt < 0:
+                return  # 其后不再有 '>'，所有起点均失败
+        if gt - p > _META_TAG_MAX_LEN:
+            continue  # 起点失败；gt 仍是 p 之后首个 '>'，对后续起点继续有效
+        yield p, gt + 1
+        pos = gt + 1
+        gt = -1  # 该 '>' 已被消费，下个起点需重新定位
+_META_HTTP_EQUIV_RE = re.compile(
+    r"""http-equiv\s*=\s*['"]?refresh['"]?""", re.IGNORECASE
 )
 _META_URL_RE = re.compile(r"""url\s*=\s*['"]?([^'"\s>;]{1,2048})""", re.IGNORECASE)
 
 # 响应头里的 Location:（.headers 落盘证据；行首匹配）
-_HEADER_LOCATION_RE = re.compile(r"""^\s*location\s*:\s*(\S{1,2048})\s*$""", re.IGNORECASE | re.MULTILINE)
+# ★ReDoS 修复：`^\s*` 的 \s 含换行，MULTILINE 下每个行首都可能向后吞掉整段空行再
+#   失败 → O(行数×文本长)。`[ \t]` 把横向空白限定在行内；且只对 .headers 证据启用。
+_HEADER_LOCATION_RE = re.compile(
+    r"""^[ \t]*location[ \t]*:[ \t]*(\S{1,2048})[ \t]*\r?$""",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 @dataclass
@@ -566,17 +648,26 @@ class WebRedirectChainAnalyzer(BaseAnalyzer):
             out.append(self._hop(m.start(), m.group(2), "location-assign", path, text, m))
         for m in _LOCATION_CALL_RE.finditer(text):
             out.append(self._hop(m.start(), m.group(2), "location-call", path, text, m))
-        for m in _META_REFRESH_RE.finditer(text):
-            url = _META_URL_RE.search(m.group(0))
+        for start, end in _iter_meta_tags(text):
+            tag = text[start:end]
+            if _META_HTTP_EQUIV_RE.search(tag) is None:
+                continue
+            url = _META_URL_RE.search(tag)
             if url is not None:
-                out.append(self._hop(m.start(), url.group(1), "meta-refresh", path, text, m))
-        for m in _HEADER_LOCATION_RE.finditer(text):
-            out.append(self._hop(m.start(), m.group(1), "header-location", path, text, m))
+                out.append(
+                    self._hop(
+                        start, url.group(1), "meta-refresh", path, text,
+                        _TagSpan(start, end),
+                    )
+                )
+        if path.lower().endswith(_HEADER_SUFFIXES):
+            for m in _HEADER_LOCATION_RE.finditer(text):
+                out.append(self._hop(m.start(), m.group(1), "header-location", path, text, m))
         return out
 
     @staticmethod
     def _hop(
-        order: int, target: str, mechanism: str, path: str, text: str, m: re.Match
+        order: int, target: str, mechanism: str, path: str, text: str, m: object
     ) -> _Hop:
         return _Hop(
             order=order,

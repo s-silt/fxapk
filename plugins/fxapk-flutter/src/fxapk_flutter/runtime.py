@@ -18,6 +18,7 @@ from . import __version__
 from .detect import inspect_pair
 from .evidence import SCHEMA, FlutterError, digest, extract, inventory, load, reject_overlapping_paths, save, validate_bundle
 from .index import INDEX_VERSION, build
+from apkscan.core import tools
 
 
 def config_path(path: Path | None = None) -> Path:
@@ -133,7 +134,7 @@ def analyze(apk: Path, out: Path, toolchain: Path | None = None, *, timeout: int
             raise FlutterError("apk_identity_mismatch")
         compatibility = inspect_pair(out / "input/libapp.so", out / "input/libflutter.so")
         entry = select(data, compatibility)
-        docker = shutil.which(str(data.get("docker", "docker")))
+        docker = tools.safe_which(str(data.get("docker", "docker")))
         if not docker:
             raise FlutterError("docker_unavailable")
         identity = {"libapp": source["libapp"]["sha256"], "libflutter": source["libflutter"]["sha256"],
@@ -198,7 +199,7 @@ def capabilities(apk: Path | None, toolchain: Path | None = None) -> dict:
             source = extract(apk, root)
             compatibility = inspect_pair(root / "libapp.so", root / "libflutter.so")
         entry = select(data, compatibility)
-        docker = shutil.which(str(data.get("docker", "docker")))
+        docker = tools.safe_which(str(data.get("docker", "docker")))
         if not docker:
             raise FlutterError("docker_unavailable")
         docker_check(docker, entry["image_id"])

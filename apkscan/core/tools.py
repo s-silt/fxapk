@@ -80,16 +80,54 @@ def _python_scripts_dir() -> Path:
     return Path(sysconfig.get_path("scripts"))
 
 
+def safe_which(name: str) -> str | None:
+    """``shutil.which`` 的安全版：只丢弃两类 cwd 相关命中。
+
+    Windows 上 ``shutil.which`` 会把当前目录插到 PATH 搜索最前（``NeedCurrentDirectoryForExePath``，
+    即使显式传 ``path=`` 也一样）；分析对象/案件包所在目录可能被投放同名可执行文件
+    （binary planting）。过滤口径：
+
+    - 命中文件**直接位于** cwd（``.\\node.exe`` / PATH 含 ``.``）→ 二进制投放，丢弃；
+    - ``found`` 本身是相对路径（来自相对 PATH 项，按 cwd 解析同样不可信）→ 丢弃。
+
+    cwd **子目录**里的绝对路径命中不误伤——那要求 PATH 显式指向该子目录，属用户配置；
+    用户主目录作 cwd 时 ``%LOCALAPPDATA%`` 工具（adb、nvm node、pipx）照常可用。
+    返回值保持 ``shutil.which`` 原样（不 resolve）。
+    """
+    found = shutil.which(name)
+    if not found:
+        return None
+    try:
+        cwd = Path.cwd().resolve()
+        candidate = Path(found)
+        resolved = candidate.resolve()
+    except OSError:
+        logger.exception("[tools] 解析 %s 命中路径失败：%s", name, found)
+        return None
+    # ``root`` 覆盖 POSIX 风格绝对路径（测试桩 ``/usr/bin/x`` 在 Windows 上
+    # ``is_absolute()`` 为 False 但有根 ``\\``，不属 cwd 相对结果）；
+    # ``anchor`` 不能用——drive-relative 命中（PATH 项 ``C:sub`` → ``C:sub\x.exe``）
+    # anchor 为 ``C:`` 但 root 为空，实际相对 cwd 解析，必须拒。
+    if not (candidate.is_absolute() or candidate.root) or resolved.parent == cwd:
+        logger.warning(
+            "[tools] 丢弃 %s 的 PATH 命中（cwd 直属文件或相对路径结果，疑二进制投放）：%s",
+            name,
+            found,
+        )
+        return None
+    return found
+
+
 def executable_path(name: str) -> str:
     """Resolve without permanent PATH changes.
 
-    Frozen: only shutil.which(name), ignoring toolchain configuration and scripts.
+    Frozen: only safe PATH lookup, ignoring toolchain configuration and scripts.
     Source: explicit configuration > interpreter scripts (only _FRIDA_TOOLS) > PATH.
     Tools outside _FRIDA_TOOLS (adb/tshark/jadx) use configuration > PATH;
     jadx's additional addon fallback belongs to resolve_jadx, not this function.
     """
     if frozen():
-        return shutil.which(name) or ""
+        return safe_which(name) or ""
     selected = _configured_tool(name)
     if selected is not None:
         return selected
@@ -97,7 +135,7 @@ def executable_path(name: str) -> str:
         local = _python_scripts_dir() / (name + (".exe" if os.name == "nt" else ""))
         if local.is_file() and os.access(local, os.X_OK):
             return str(local)
-    return shutil.which(name) or ""
+    return safe_which(name) or ""
 
 
 def frozen() -> bool:
@@ -218,7 +256,7 @@ def resolve_jadx() -> tuple[list[str], dict[str, str]] | None:
     selected = _configured_tool("jadx")
     if selected is not None:
         return ([selected], {}) if selected else None
-    on_path = shutil.which("jadx")
+    on_path = safe_which("jadx")
     if on_path:
         return [on_path], {}
     addon = jadx_addon_dir()
@@ -243,9 +281,9 @@ def has_jadx() -> bool:
 def resolve_apksigner() -> tuple[list[str], dict[str, str]] | None:
     """解析 apksigner（Android SDK build-tools；重签名）：PATH 优先。返回 (argv, 注入 env) 或 None。
 
-    完整路径而非裸名：Windows 上 apksigner 是 .bat，shutil.which 已解析为全名，避免 subprocess WinError 2。
+    完整路径而非裸名：Windows 上 apksigner 是 .bat，safe_which 已解析为全名，避免 subprocess WinError 2。
     """
-    exe = shutil.which("apksigner")
+    exe = safe_which("apksigner")
     return ([exe], {}) if exe else None
 
 
@@ -256,7 +294,7 @@ def has_apksigner() -> bool:
 
 def resolve_zipalign() -> tuple[list[str], dict[str, str]] | None:
     """解析 zipalign（Android SDK build-tools；4 字节对齐）：PATH 优先。返回 (argv, env) 或 None。"""
-    exe = shutil.which("zipalign")
+    exe = safe_which("zipalign")
     return ([exe], {}) if exe else None
 
 
@@ -267,7 +305,7 @@ def has_zipalign() -> bool:
 
 def resolve_keytool() -> tuple[list[str], dict[str, str]] | None:
     """解析 keytool（JDK 自带；首次生成 debug keystore）：PATH 优先，回退 ``JAVA_HOME/bin``。"""
-    exe = shutil.which("keytool")
+    exe = safe_which("keytool")
     if exe:
         return ([exe], {})
     java_home = os.environ.get("JAVA_HOME")
@@ -290,7 +328,7 @@ def aapt_path() -> str:
     对抗构造 AndroidManifest 让 androguard 静默 mis-parse 的“清单投毒”。找不到 → ""（不抛，
     调用方据此降级为纯 sanity 信号，不改判）。
     """
-    return shutil.which("aapt2") or shutil.which("aapt") or ""
+    return safe_which("aapt2") or safe_which("aapt") or ""
 
 
 def kill_adb_server() -> bool:
@@ -394,4 +432,5 @@ __all__ = [
     "has_frida_dexdump",
     "has_mitmproxy",
     "kill_adb_server",
+    "safe_which",
 ]

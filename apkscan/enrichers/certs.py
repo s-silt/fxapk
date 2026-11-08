@@ -30,12 +30,11 @@ import logging
 import os
 import threading
 import time
-from pathlib import Path
 from typing import Any
 
 
 from apkscan.core.enrichment import safe_error_type
-from apkscan.enrichers import _http
+from apkscan.enrichers import _cache, _http
 
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
@@ -54,7 +53,7 @@ _MAX_ISSUERS = 20
 #: 进程级礼貌限速：crt.sh 是公共免费服务，相邻请求间隔下限（秒），避免一次跑一片域名打爆它。
 _MIN_INTERVAL = 1.5
 
-CACHE_DIR = Path(".apkscan_cache")
+CACHE_DIR = _cache.cache_root() / "enrichment"
 CACHE_FILE = CACHE_DIR / "certs.json"
 
 
@@ -172,17 +171,7 @@ class CertsEnricher(BaseEnricher):
     def _load_cache(self) -> dict[str, Any]:
         """读缓存文件。★必须持 self._lock 调用：Windows 下读句柄与另一线程 os.replace
         撞同一文件会抛 PermissionError，让缓存静默丢失。读写共用一把锁消除该重叠窗口。"""
-        if not CACHE_FILE.is_file():
-            return {}
-        try:
-            data = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            logger.warning("certs(crt.sh) 缓存读取/解析失败，忽略：%s", CACHE_FILE, exc_info=True)
-            return {}
-        if not isinstance(data, dict):
-            logger.warning("certs(crt.sh) 缓存顶层非 dict，忽略：%s", CACHE_FILE)
-            return {}
-        return data
+        return _cache.read_cache_json(CACHE_FILE)
 
     def _load_cache_locked(self) -> dict[str, Any]:
         with self._lock:
@@ -202,6 +191,27 @@ class CertsEnricher(BaseEnricher):
                 tmp.replace(CACHE_FILE)
             except Exception:
                 logger.warning("certs(crt.sh) 缓存写入失败：%s", CACHE_FILE, exc_info=True)
+
+    @staticmethod
+    def _validated_cache_entry(domain: str, cached: dict[str, Any]) -> dict[str, Any] | None:
+        """缓存命中校验：必须是 ``_parse_crtsh`` 产出的形态且 domain 绑定一致——
+        相关主机名/issuer 限有界字符串列表。种植/损坏的缓存条目按未命中重查，
+        不得绕过 provider 解析边界直接进报告。"""
+        if cached.get("source") != "crtsh" or cached.get("domain") != domain:
+            return None
+        hosts = cached.get("related_hostnames")
+        issuers = cached.get("issuers")
+        total = cached.get("hostname_total")
+        count = cached.get("cert_count")
+        if (not isinstance(hosts, list) or not isinstance(issuers, list)
+                or len(hosts) > _MAX_HOSTNAMES or len(issuers) > _MAX_ISSUERS
+                or any(not isinstance(h, str) or not h or len(h) > 253 for h in hosts)
+                or any(not isinstance(i, str) or not i.strip() or len(i) > 512 for i in issuers)):
+            return None
+        if (not isinstance(total, int) or isinstance(total, bool) or total < len(hosts)
+                or not isinstance(count, int) or isinstance(count, bool) or count < 0):
+            return None
+        return dict(cached)
 
     # ------------------------------------------------------------------ 查询
     def _query(self, domain: str) -> dict[str, Any]:
@@ -234,8 +244,11 @@ class CertsEnricher(BaseEnricher):
         cache = self._load_cache_locked()
         cached = cache.get(value)
         if isinstance(cached, dict):
-            logger.debug("certs(crt.sh) 缓存命中：%s", value)
-            return EnrichmentResult(provider=self.name, ok=True, data=dict(cached))
+            data = self._validated_cache_entry(value, cached)
+            if data is not None:
+                logger.debug("certs(crt.sh) 缓存命中：%s", value)
+                return EnrichmentResult(provider=self.name, ok=True, data=data)
+            logger.debug("certs(crt.sh) 缓存条目未过校验，按未命中处理：%s", value)
 
         # 2) 网络查询。crt.sh 常超时/限流 → 任何异常吞成 ok=False，绝不炸主流程。
         try:

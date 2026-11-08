@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import apkscan.enrichers._cache as _cache
 import apkscan.enrichers.shodan as sh_mod
 from apkscan.core import exposure, forensic, pipeline
 from apkscan.core.closure import ClosureConfig, close_report
@@ -354,6 +355,67 @@ def test_cached_at_not_leaked_into_data(monkeypatch: pytest.MonkeyPatch) -> None
     e.enrich(_ep("198.51.100.36", "ip"))
     r = e.enrich(_ep("198.51.100.36", "ip"))  # 命中未过期
     assert "_cached_at" not in r.data
+    assert r.data.get("_cache_hit") is True
+
+
+def _plant_cache(value: str, entry: dict) -> None:
+    """直接写缓存文件模拟投毒/损坏条目（绕过 _save_cache_entry 的正常写入路径）。"""
+    import json as _json
+    import time as _time
+    sh_mod.CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    sh_mod.CACHE_FILE.write_text(
+        _json.dumps({value: {**entry, "_cached_at": _time.time(), "_profile_contract": 3}}),
+        encoding="utf-8",
+    )
+
+
+def test_planted_cache_entry_without_raw_is_miss(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★sfind-93620b6a：种植的画像条目缺 _raw 原始 payload → 按未命中重查，不得直进报告。"""
+    monkeypatch.setenv("FXAPK_SHODAN_KEY", "testkey")
+    fake = _FakeRequests({"/shodan/host/198.51.100.36": (200, _HOST_PAYLOAD)})
+    monkeypatch.setattr(sh_mod._http, "capped_get", fake.get)
+    _plant_cache("198.51.100.36", {"ip": "203.0.113.66", "org": "PLANTED", "services": [{"banner": "x" * 999999}]})
+    r = ShodanEnricher().enrich(_ep("198.51.100.36", "ip"))
+    assert len(fake.calls) == 1, "无 _raw 的种植缓存条目被当命中返回"
+    assert r.data["ip"] == "198.51.100.36" and r.data["org"] == "Linode"
+
+
+def test_planted_cache_ip_mismatch_is_miss(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★sfind-93620b6a：_raw 在但画像 IP 与查询目标不符 → 绑定校验拒绝，按未命中重查。"""
+    monkeypatch.setenv("FXAPK_SHODAN_KEY", "testkey")
+    fake = _FakeRequests({"/shodan/host/198.51.100.36": (200, _HOST_PAYLOAD)})
+    monkeypatch.setattr(sh_mod._http, "capped_get", fake.get)
+    foreign = {**_HOST_PAYLOAD, "ip_str": "203.0.113.9"}
+    _plant_cache("198.51.100.36", {"_raw": foreign, "_resolved_ip": "203.0.113.9"})
+    r = ShodanEnricher().enrich(_ep("198.51.100.36", "ip"))
+    assert len(fake.calls) == 1, "IP 不符的种植缓存条目被当命中返回"
+    assert r.data["ip"] == "198.51.100.36"
+
+
+def test_planted_cache_domain_inconsistent_binding_is_miss(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★sfind-93620b6a：domain 条目 _resolved_ip 与 _raw 画像 IP 不一致 → 拒绝命中。"""
+    monkeypatch.setenv("FXAPK_SHODAN_KEY", "testkey")
+    fake = _FakeRequests({
+        "dns/resolve": (200, {"evil.example.com": "203.0.113.9"}),
+        "/shodan/host/203.0.113.9": (200, {**_HOST_PAYLOAD, "ip_str": "203.0.113.9"}),
+    })
+    monkeypatch.setattr(sh_mod._http, "capped_get", fake.get)
+    _plant_cache("evil.example.com", {"_raw": _HOST_PAYLOAD, "_resolved_ip": "203.0.113.9"})
+    r = ShodanEnricher().enrich(_ep("evil.example.com", "domain"))
+    assert len(fake.calls) == 2, "绑定不自洽的 domain 缓存条目被当命中返回"
+    assert r.data["ip"] == "203.0.113.9"
+
+
+def test_oversized_cache_file_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★sfind-93620b6a：超大缓存文件不读入内存，按无缓存处理。"""
+    monkeypatch.setenv("FXAPK_SHODAN_KEY", "testkey")
+    fake = _FakeRequests({"/shodan/host/198.51.100.36": (200, _HOST_PAYLOAD)})
+    monkeypatch.setattr(sh_mod._http, "capped_get", fake.get)
+    sh_mod.CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    sh_mod.CACHE_FILE.write_text(" " * (_cache.MAX_CACHE_FILE_BYTES + 1), encoding="utf-8")
+    r = ShodanEnricher().enrich(_ep("198.51.100.36", "ip"))
+    assert len(fake.calls) == 1
+    assert r.data["org"] == "Linode"
 
 
 def test_forensic_uses_shodan_country() -> None:
