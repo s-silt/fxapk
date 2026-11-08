@@ -25,7 +25,7 @@ probe runs automatically.
 ## Start offline
 
 ```bash
-python -m pip install "fxapk==1.24.0"
+python -m pip install "fxapk==1.25.0"
 fxapk analyze app.apk --offline --out out
 fxapk digest out/app.json
 ```
@@ -59,7 +59,7 @@ not execution: distinguish `hit/no_record/failed/skipped/disabled`; failure is n
 | Purpose | Configuration |
 | --- | --- |
 | Supported deep PCAP decryption | `python -m pip install "fxapk[pcap]"`; the `dynamic` extra also declares cryptography, not device tools |
-| Targeted offline review and AArch64 emulation | `python -m pip install "fxapk[review]==1.24.0"`: pyelftools, Capstone 5, cryptography and Unicorn 2; excludes fxfetch/JADX/adb/Frida |
+| Targeted offline review and AArch64 emulation | `python -m pip install "fxapk[review]==1.25.0"`: pyelftools, Capstone 5, cryptography and Unicorn 2; excludes fxfetch/JADX/adb/Frida |
 | Experimental linkage reranker | `python -m pip install "fxapk[ml]"`; independent-label and training gates still apply |
 | jadx, adb, tshark, Frida and frida-dexdump | [Toolchain setup](tools/TOOLCHAIN.en.md) and [Python tool pins](tools/toolchain-requirements.txt) |
 | Android UI plugin | Independent `fxapk-android-ui 0.1.2` (core 1.18.1+); external Android CLI, adb and an authorized device; see the [full guide](ANDROID-UI.en.md) |

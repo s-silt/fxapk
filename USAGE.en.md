@@ -38,6 +38,20 @@ Full flags: `fxapk --help`; if `fxapk` is not installed as a command, use `pytho
 | Flutter AOT static analysis (optional plugin, offline container) | `fxapk flutter capabilities` / `analyze` / `query` / `attach`, see [plugins/fxapk-flutter/README.md](plugins/fxapk-flutter/README.md) |
 | Recognition line (read-only/offline; exit 4 when the promotion gate fails) | `fxapk recognize reanalysis` / `labels validate` / `split build\|validate` / `evaluate` |
 
+## Privacy and output
+
+`digest` provides limited redaction: sensitive-category values and fixed patterns for email addresses, domestic phone numbers, identity numbers and long digit strings in lead text. Names, addresses, international phone numbers and explanatory text in findings/visibility/closure/overseas_targets are not guaranteed to be removed. `--no-redact` restores raw values.
+
+These outputs preserve sensitive values and need separate review: `jsonl`, `diff`, `lead show/restore/replay`, `corpus events/ls/seen/shared-config/shared-native/shared-build-env/link-candidates`, `probe-leads`, `pcap-leads`, `export` CSV, HTML/PDF, letters, corpus records, `case_correlation.json` and `report.json`. `corpus link-discover/link-explain/link-groups` default to `--evidence-values omit`; explicit `--evidence-values raw` restores values. `link-labels-validate/link-evaluate/link-readiness/link-train` emit aggregates only. Archives can also contain source-directory paths; compression neither redacts them nor authorizes third-party transmission.
+
+## Evidence archives
+
+`fxapk evidence pack <directory> --out evidence.zip` defaults to ZIP64/Zstd level 6; use `--compression deflate` for older tools. `evidence verify` streams all members; `evidence extract --out <new-directory>` restores original bytes. Original manifests, SHA-256 values and package IDs remain unchanged. The storage index establishes internal consistency, not provenance or case closure.
+
+`capture`, `recover-runtime`, `intake-fetch` and `evidence-review` accept `--archive-out <new-ZIP>` instead of `--out`, with optional `--archive-compression deflate`. Archiving preserves partial/failed business states. Only this run's staging directory is cleaned after successful publication and verification; failures retain evidence and a receipt.
+
+Use `archive.zip::relative/member` for verified member reads. `evidence-review <ZIP> --archive-member replay-plan.json` replays retained inputs; `intake-fetch <ZIP> --archive-member saved-task.zip` consumes an embedded task. `evidence analyze <ZIP> --member sample.apk --out <new-directory>` runs the existing offline analyzer. PCAP and socket/UID commands and the runtime reader API also accept member references. `evidence case-verify` and `corpus-add` temporarily extract the full archive and retain existing package/corpus gates. Zstd uses method 93: Python 3.11–3.13 installs `backports.zstd`; 3.14+ uses the standard library. Archives may contain raw evidence and source paths; ACLs, alternate streams and xattrs are not preserved. See [EVIDENCE-ARCHIVE.md](EVIDENCE-ARCHIVE.md) for limits and compatibility.
+
 ## Saved web evidence
 
 Saved web evidence accepts `--evidence-handoff <JSON outside the evidence directory>`.

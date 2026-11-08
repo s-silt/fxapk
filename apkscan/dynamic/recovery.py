@@ -207,7 +207,7 @@ def capture(config: dict, folder: Path) -> dict:
     return receipt
 
 
-def _run(plan_path: Path, output: Path, progress=None) -> dict:
+def _run(plan_path: Path, output: Path, progress=None, *, retain_review_inputs: bool = False) -> dict:
     raw = read_bytes(plan_path, 1024**2)
     plan = json_value(raw)
     if not isinstance(plan, dict) or plan.get("schema_version") != "fxapk.runtime-recovery.v1":
@@ -311,7 +311,8 @@ def _run(plan_path: Path, output: Path, progress=None) -> dict:
         manifest = output / "review-plan.json"
         write_json(manifest, {"schema_version": "fxapk.offline-review.v1", "sample_sha256": sample, "tasks": tasks})
         try:
-            reviewed = review_run(manifest, output / "reviewed", report_path, progress)
+            reviewed = review_run(manifest, output / "reviewed", report_path, progress,
+                                  retain_inputs=retain_review_inputs)
             independent_result = any(row["id"] != "runtime_acquisition" and row["state"] in {"ok", "partial"}
                                      for row in reviewed["tasks"])
             stage("review", reviewed["state"], sorted({reason for row in reviewed["tasks"] for reason in row["reason_codes"]}))
@@ -326,10 +327,10 @@ def _run(plan_path: Path, output: Path, progress=None) -> dict:
     return receipt
 
 
-def run(plan_path: Path, output: Path, progress=None) -> dict:
+def run(plan_path: Path, output: Path, progress=None, *, retain_review_inputs: bool = False) -> dict:
     existed = output.exists()
     try:
-        return _run(plan_path, output, progress)
+        return _run(plan_path, output, progress, retain_review_inputs=retain_review_inputs)
     except Exception as error:
         if not existed and (output / "recovery.json").exists():
             receipt = json_value(read_bytes(output / "recovery.json"))

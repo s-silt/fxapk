@@ -386,7 +386,8 @@ def create_case_package(
         "case_id": case,
         "producer": actor,
         "created_at": _now(),
-        "report_schema_version": report.schema_version,
+        # Bind the frozen artifact's version, not its in-memory migration target.
+        "report_schema_version": str(raw_report.get("schema_version", report.schema_version)),
         "sample_sha256": sample_sha256,
         "tool_version": tool_version,
         "ruleset_digest": ruleset_digest,
@@ -618,7 +619,11 @@ def verify_case_package(manifest_path: str | Path) -> dict[str, object]:
                 issues.append("analysis_snapshot does not match report")
             if payload.get("closure_snapshot") != expected_closure:
                 issues.append("closure_snapshot does not match report")
-            if payload.get("report_schema_version") != report.schema_version:
+            # 1.22-1.24 recorded the reader's migrated version. Both forms bind
+            # deterministically to these same frozen bytes; unrelated versions fail.
+            if payload.get("report_schema_version") not in (
+                str(raw_report.get("schema_version", report.schema_version)), report.schema_version,
+            ):
                 issues.append("report_schema_version does not match report")
             try:
                 report_identity = _report_identity(report.meta)

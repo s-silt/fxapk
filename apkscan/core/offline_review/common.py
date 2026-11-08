@@ -12,13 +12,9 @@ MAX_EVENTS = 100_000
 
 
 def read_bytes(path: Path, limit: int = MAX_BYTES) -> bytes:
-    if not path.is_file():
-        raise ValueError("input_not_regular_file")
-    with path.open("rb") as stream:
-        data = stream.read(limit + 1)
-    if len(data) > limit:
-        raise ValueError("input_byte_budget")
-    return data
+    from apkscan.core.evidence_archive import read_reference
+
+    return read_reference(path, limit)
 
 
 def sha256(data: bytes) -> str:

@@ -669,10 +669,20 @@ def load_socket_tables(paths: "Sequence[Path | str]") -> tuple["UidSockets | Non
     for raw in paths or ():
         try:
             p = Path(raw)
-            if not p.is_file():
-                continue
-            text = p.read_text(encoding="utf-8", errors="replace")
+            if "::" in str(raw):
+                from apkscan.core.evidence_archive import read_reference
+
+                # Archive corruption must not silently leave a partial UID table.
+                text = read_reference(raw, 32 * 1024**2).decode("utf-8", errors="replace")
+            else:
+                if not p.is_file():
+                    continue
+                text = p.read_text(encoding="utf-8", errors="replace")
         except OSError:
+            if "::" in str(raw):
+                from apkscan.core.evidence_archive import ArchiveError
+
+                raise ArchiveError("archive_socket_input_unreadable") from None
             logger.warning("[socket_attr] socket 快照读取失败，跳过：%s", raw)
             continue
         # 时间线与快照的头部不同，两个解析器都试一遍，取解出记录多的那个——

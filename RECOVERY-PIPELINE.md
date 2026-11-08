@@ -143,3 +143,9 @@ because a dump exists.
 
 API references: [Frida JavaScript API](https://frida.re/docs/javascript-api/)
 and [Unicorn programming tutorial](https://www.unicorn-engine.org/docs/tutorial.html). <!-- leak-scan: allow official Unicorn API documentation, not case infrastructure. -->
+
+`capture`, `recover-runtime`, `intake-fetch` and `evidence-review` also support
+`--archive-out` instead of `--out`. New output is compressed and fully verified before
+its dedicated staging directory is removed. Storage success never overrides capture
+or analysis failure; storage failure retains staging and a visible receipt. See
+[Evidence archive storage](EVIDENCE-ARCHIVE.md) for replay and reading limits.
