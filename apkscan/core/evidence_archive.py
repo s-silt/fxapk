@@ -387,18 +387,20 @@ class EvidenceArchive:
         self._member_data(info)
         decoder = zlib.decompressobj(-15)
         remaining, size, checksum = info.compress_size, 0, 0
-        pending = b""
+        pending, full = b"", False
         while not decoder.eof:
             _deadline(self.deadline)
-            if not pending:
+            if not pending and not full:
                 if not remaining:
                     raise ArchiveError("archive_decode_failed")
                 pending = self.stream.read(min(CHUNK, remaining))
                 if not pending:
                     raise ArchiveError("archive_decode_failed")
                 remaining -= len(pending)
-            data = decoder.decompress(pending, max_length=min(CHUNK, limit - size + 1, info.file_size - size + 1))
+            bound = min(CHUNK, limit - size + 1, info.file_size - size + 1)
+            data = decoder.decompress(pending, max_length=bound)
             pending = decoder.unconsumed_tail
+            full = len(data) == bound
             size += len(data)
             if size > limit or size > info.file_size:
                 raise ArchiveError("archive_member_budget")

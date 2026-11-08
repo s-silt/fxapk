@@ -84,6 +84,17 @@ def test_deflate_output_bound_and_valid_empty_stream(tmp_path, monkeypatch):
     assert ea.read_reference(f"{archive}::empty", 1) == b""
 
 
+def test_deflate_reader_drains_output_after_compressed_input_is_consumed(tmp_path):
+    # The final match straddles the 1 MiB output bound after all input is read.
+    data = b"\0" * (1024 * 1024 + 50)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "payload.bin").write_bytes(data)
+    archive = tmp_path / "boundary.zip"
+    ea.pack(source, archive, compression="deflate")
+    assert ea.read_reference(f"{archive}::payload.bin", len(data)) == data
+
+
 @pytest.mark.parametrize("damage", ["trailer_missing", "trailer_bad", "extra_data", "extra_frame", "size_lie", "window"])
 def test_bounded_decoder_rejects_incomplete_and_overstated_frames(tmp_path, damage):
     codec = ea._zstd_backend()
