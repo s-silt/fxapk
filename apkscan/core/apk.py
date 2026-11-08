@@ -467,6 +467,10 @@ _MAX_READ_CACHE_BYTES = 32 * 1024 * 1024
 #: 到一两百 MB 量级），故取 500MB：既能拦住典型 zip 炸弹，又不误伤合法大文件。
 _MAX_DECOMPRESSED_FILE_BYTES = 500 * 1024 * 1024
 
+#: AndroidManifest.xml 兜底直读的独立上限：合法清单通常 <1MB，16MB 已极宽；
+#: 不沿用 500MB 通用上限——兜底路径只做包名/AXML 解析，不值得为它分配大缓冲。
+_MAX_MANIFEST_XML_BYTES = 16 * 1024 * 1024
+
 #: 单实例生命周期内 _read_cache 累计缓存总量上限：防"许多个体各自都在
 #: _MAX_READ_CACHE_BYTES 以下"的文件累加撑爆内存——zip 炸弹的另一变体，不是单文件超大，
 #: 是数量多（如几千个刚好卡在 32MB 以下的伪装文本资源）。单文件上限挡不住这种累加。与
@@ -502,6 +506,18 @@ _dex_extract_total_bytes: ContextVar[int | None] = ContextVar(
     "dex_extract_total_bytes", default=None
 )
 
+#: 非 DEX 条目实际解压累计器（跨条目聚合）：classes*.dex 之外的所有条目按真实解压
+#: 产出计入同一预算。中央目录声明可低报骗过 Level 1——「每条不超单文件上限、条目数
+#: 无上限」的聚合炸弹只有按实际产出累计才能约束。读取作用域（build_snapshot 预读、
+#: SnapshotContext 惰性读）各自 set(0) 建立独立预算；None=不在受控作用域内，不聚合。
+_other_extract_total_bytes: ContextVar[int | None] = ContextVar(
+    "other_extract_total_bytes", default=None
+)
+
+#: 非 DEX 实际解压总量上限：与 DEX 聚合上限同量级。触顶按 ZipEntryTooLargeError 拒绝；
+#: 被丢弃的解压产出（含触发 ZipEntryTooLargeError 的 cap+1 字节）同样计入。
+_OTHER_TOTAL_LIMIT_BYTES = 1024 * 1024 * 1024
+
 
 def _bounded_extract_file_based_on_header_info(
     apk_file: BinaryIO,
@@ -514,7 +530,31 @@ def _bounded_extract_file_based_on_header_info(
     raw_entry = central_directory_info.get("filename")
     entry = raw_entry if isinstance(raw_entry, str) else None
 
+    def _charge_other_total(nbytes: int) -> None:
+        """非 DEX 条目按实际解压产出计入跨条目总预算；超限抛 ZipEntryTooLargeError。
+
+        只在 ``_other_extract_total_bytes`` 作用域内生效（None → 不聚合，与 DEX 计数器
+        同口径）；DEX 条目走自己的 ``_dex_extract_total_bytes``，此处跳过。
+        """
+        if entry is not None and _is_dex_entry_name(entry):
+            return
+        current = _other_extract_total_bytes.get()
+        if current is None:
+            return
+        actual_total = current + nbytes
+        _other_extract_total_bytes.set(actual_total)
+        if actual_total > _OTHER_TOTAL_LIMIT_BYTES:
+            logger.warning(
+                "apkInspector 有界解压拒绝（聚合）：非 DEX 条目实际解压累计 %d 字节 > %d 上限（末条 %s）",
+                actual_total,
+                _OTHER_TOTAL_LIMIT_BYTES,
+                entry if entry is not None else "<未知条目>",
+            )
+            raise ZipEntryTooLargeError(entry, _OTHER_TOTAL_LIMIT_BYTES)
+
     def _raise_too_large(indicator: str) -> NoReturn:
+        # ★被丢弃的解压产出同样计入聚合预算——「解压到 cap+1 才放弃」的工作不白做。
+        _charge_other_total(cap + 1)
         logger.warning(
             "apkInspector 有界解压拒绝（疑 zip 炸弹）：条目 %s 实际产出超 %d 字节上限（%s）",
             entry if entry is not None else "<未知条目>",
@@ -530,6 +570,7 @@ def _bounded_extract_file_based_on_header_info(
         data = apk_file.read(read_size)
         if len(data) > cap:
             _raise_too_large(indicator)
+        _charge_other_total(len(data))
         return data
 
     def _bounded_inflate(
@@ -580,7 +621,10 @@ def _bounded_extract_file_based_on_header_info(
         #   临时缓冲（codex 第三轮复审 P1；tracemalloc 实测 flush(500MiB) 峰值 500MiB）。
         #   ``decompress(data, max_length)`` 则按需分块增长、不按 max_length 预分配
         #   （CPython 3.11.15 / 3.12.10 实测 max_length=500MiB 峰值 0.1MiB），故 max_length 无须再切块。
+        # ★已产出的字节无论后续成功/失败都计入聚合预算（真实解压工作不白做）。
+        produced = len(output)
         if not c_obj.eof:
+            _charge_other_total(produced)
             raise zlib.error("Error -5 while decompressing data: incomplete or truncated stream")
 
         # 普通 DEFLATED 与 zlib.decompress 一致，忽略 unused_data。篡改分支
@@ -592,8 +636,10 @@ def _bounded_extract_file_based_on_header_info(
             if not trailing and (left is None or left > 0):
                 trailing = bool(apk_file.read(1))
             if trailing:
+                _charge_other_total(produced)
                 raise ValueError("Invalid or non-pure deflate")
 
+        _charge_other_total(produced)
         return bytes(output)
 
     filename_length = int(local_header_info["file_name_length"])
@@ -656,7 +702,7 @@ def _bounded_extract_file_based_on_header_info(
             extracted_data = compressed_data
             indicator = "STORED_TAMPERED"
 
-    if entry is not None and _APK_DEX_MEMBER_RE.fullmatch(entry):
+    if entry is not None and _is_dex_entry_name(entry):
         previous_total = _dex_extract_total_bytes.get()
         if previous_total is not None:
             # Level 2.5：对 classes*.dex 的实际解压产出跨条目累计。声明可低报骗过
@@ -832,7 +878,41 @@ class ApkContext:
                         )
                         raw = b""
                     else:
-                        raw = zf.read("AndroidManifest.xml")
+                        # ★声明大小可被伪造，且 ZipExtFile 对 bzip2/LZMA 的
+                        #   decompress 不带 max_length——单次 read(n) 的**内存峰值**
+                        #   随真实明文增长（kiro 实测 400MiB 明文峰值 ~830MB）。
+                        #   故：只收 STORED/DEFLATED，64KiB 分块读，清单单独 16MB 上限。
+                        if mf_info.compress_type not in (
+                            zipfile.ZIP_STORED,
+                            zipfile.ZIP_DEFLATED,
+                        ):
+                            logger.warning(
+                                "AndroidManifest.xml 压缩方式 %d 不支持有界直读，放弃兜底",
+                                mf_info.compress_type,
+                            )
+                        else:
+                            chunks: list[bytes] = []
+                            total = 0
+                            try:
+                                with zf.open(mf_info) as fh:
+                                    while total <= _MAX_MANIFEST_XML_BYTES:
+                                        chunk = fh.read(
+                                            min(65536, _MAX_MANIFEST_XML_BYTES + 1 - total)
+                                        )
+                                        if not chunk:
+                                            break
+                                        chunks.append(chunk)
+                                        total += len(chunk)
+                            except Exception:  # noqa: BLE001 - 坏条目/CRC 错误等统一放弃兜底
+                                logger.debug("AndroidManifest.xml 有界直读失败（忽略）", exc_info=True)
+                                chunks = []
+                                total = 0
+                            raw = b"".join(chunks) if total <= _MAX_MANIFEST_XML_BYTES else b""
+                            if total > _MAX_MANIFEST_XML_BYTES:
+                                logger.warning(
+                                    "AndroidManifest.xml 实际解压产出超 %d 上限（疑 zip 炸弹），放弃兜底直读",
+                                    _MAX_MANIFEST_XML_BYTES,
+                                )
             except Exception:  # noqa: BLE001 - 读不到就放弃兜底
                 logger.debug("读取 AndroidManifest.xml 原始字节失败（忽略）", exc_info=True)
                 raw = b""
@@ -1331,16 +1411,27 @@ def _dt(value: Any) -> str:
 
 #: androguard 的 ``APK(path)`` 构造期 / ``get_all_dex()`` 会**急切解压**的条目。只有这些条目声明
 #: 超上限才真能把我们炸出 OOM；其余条目由 read_file 的逐条闸拦住即可。
-_EAGERLY_DECOMPRESSED_RE = re.compile(r"^(AndroidManifest\.xml|resources\.arsc|classes\d*\.dex)$")
+#: ★DEX 一支必须与 androguard ``get_dex_names`` 同口径（``.` 不转义、``$`` 容许尾换行），
+#:   否则 ``classes2_dex`` / ``classes3.dex\n`` 这类 look-alike 名会绕过全部预算闸。
+_EAGERLY_DECOMPRESSED_RE = re.compile(
+    r"^(AndroidManifest\.xml|resources\.arsc|classes(\d*).dex)$"
+)
 
 # DEX 聚合预算（Level 1.5）：单个核心条目没超 zip-bomb 上限、但大量 classesN.dex 的
 # **总解压量**仍可击穿内存。口径须与 analyzers/jadx.py 的物化预算常量同步
 # （_MAX_MATERIALIZE_DEX_BYTES / _MAX_MATERIALIZE_TOTAL_BYTES / _MAX_MATERIALIZE_DEX_COUNT），
 # 改任何一处必须同步另一处（doctor 模式的「须与权威同步」注释）。
-_APK_DEX_MEMBER_RE = re.compile(r"^classes(\d*)\.dex$")
+#: 与 androguard ``APK.get_dex_names`` 完全同口径：``re.compile(r"^classes(\d*).dex$").match``
+#: ——``.`` 不转义匹配任意字符、``$`` 容许末尾换行（故不能用 fullmatch + ``\.`` 严格式）。
+_ANDROGUARD_DEX_NAME_RE = re.compile(r"^classes(\d*).dex$")
 _DEX_SINGLE_LIMIT_BYTES = 256 * 1024 * 1024
 _DEX_TOTAL_LIMIT_BYTES = 1024 * 1024 * 1024
 _DEX_COUNT_LIMIT = 200
+
+
+def _is_dex_entry_name(name: str) -> bool:
+    """androguard 会当作 DEX 加载的条目名（含 look-alike 与尾换行形态）。"""
+    return _ANDROGUARD_DEX_NAME_RE.match(name) is not None
 
 
 def _reject_if_dex_budget_exceeded(path: str) -> None:
@@ -1358,7 +1449,7 @@ def _reject_if_dex_budget_exceeded(path: str) -> None:
     total = 0
     count = 0
     for info in infos:
-        if _APK_DEX_MEMBER_RE.fullmatch(info.filename) is None:
+        if not _is_dex_entry_name(info.filename):
             continue
         if info.file_size > _DEX_SINGLE_LIMIT_BYTES:
             raise ApkParseError(

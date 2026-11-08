@@ -120,6 +120,7 @@ META_WRITE_CATEGORIES = {
     'parser_execution': 'coverage',
     'remote_config_archived': 'record',
     'remote_config_artifacts': 'signal',
+    'remote_config_fetch_capped': 'coverage',
     'remote_config_fetch_skipped': 'coverage',
     'remote_config_fetch_skipped_passive_mode': 'coverage',
     'remote_config_fetched': 'record',
@@ -568,9 +569,19 @@ def _stage_remote_config_fetch(state: _PipelineState) -> None:
     # 原始 blob 落盘目录：输出目录下的 remote_config/（与 report.json 同处，报告可相对引用）。
     out_dir = getattr(config, "out_dir", None)
     archive_dir = Path(out_dir) / _REMOTE_CONFIG_SUBDIR if out_dir else None
+    # ★抓取数量硬顶：每个候选最坏要等满下载 deadline，候选无上限会把 authorized-active
+    #   阶段拖成无界等待。超出部分只记审计、不下载。
+    fetchable = candidates[:_MAX_REMOTE_CONFIG_FETCHES]
+    skipped_fetch = len(candidates) - len(fetchable)
+    if skipped_fetch:
+        meta["remote_config_fetch_capped"] = skipped_fetch
+        logger.warning(
+            "远程配置候选 %d 个超过单轮抓取上限 %d，剩余 %d 个本轮不下载",
+            len(candidates), _MAX_REMOTE_CONFIG_FETCHES, skipped_fetch,
+        )
     new_endpoints: list[Endpoint] = []
     artifacts = [_fetch_decode_one(getattr(lead, "value", ""), recipe, new_endpoints, archive_dir)
-                 for lead in candidates]
+                 for lead in fetchable]
     meta["remote_config_artifacts"] = artifacts
     meta["remote_config_fetched"] = sum(1 for a in artifacts if a.get("decoded"))
     meta["remote_config_archived"] = sum(1 for a in artifacts if a.get("stored_path"))
@@ -582,6 +593,7 @@ def _stage_remote_config_fetch(state: _PipelineState) -> None:
 # 落盘子目录、落盘实现、端点构造三者与 `fxapk config-probe` 共用同一份（见 config_probe_run）：
 # 两条路径产出的是同一类证据，各写一份迟早会在 source 标记或 stored_path 形状上分叉。
 _REMOTE_CONFIG_SUBDIR = config_probe_run.REMOTE_CONFIG_SUBDIR
+_MAX_REMOTE_CONFIG_FETCHES = 8
 _archive_blob = config_probe_run.archive_blob
 _config_endpoint = config_probe_run.config_endpoint
 

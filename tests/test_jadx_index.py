@@ -936,3 +936,51 @@ def test_find_value_usage_fail_closed_on_malformed_posting(tmp_path: Path) -> No
     with pytest.raises(JadxIndexError) as exc:
         find_value_usage(forged, "anything")
     assert _code_of(exc) == "malformed"
+
+
+def test_scan_postings_per_value_cap_yields_partial(tmp_path: Path) -> None:
+    """sfind-67005310：单值约百万次重复 → postings 精确停在 per-value 上限，coverage=partial。"""
+    src = tmp_path / "java"
+    _java_tree(src, {"Hot.java": "A" * 1_000_000 + "\n"})
+    limits = Limits()
+    result = scan_java_sources(src, ["A"], lineage=_lin(), limits=limits)
+    assert len(result.postings) == limits.max_postings_per_value
+    assert result.coverage == "partial"
+
+
+def test_scan_postings_total_cap_yields_partial(tmp_path: Path) -> None:
+    """总量上限：每个值都未触 per-value 上限，但合计触顶 → 停止并 partial。"""
+    src = tmp_path / "java"
+    _java_tree(src, {"Hot.java": "A" * 500 + "\n" + "B" * 500 + "\n"})
+    limits = Limits(max_postings_per_value=600, max_postings_total=700)
+    result = scan_java_sources(src, ["A", "B"], lineage=_lin(), limits=limits)
+    assert len(result.postings) == 700
+    assert result.coverage == "partial"
+
+
+def test_scan_single_value_cap_does_not_starve_other_files(tmp_path: Path) -> None:
+    """★N2 回归：单值触顶只跳过该值——诱饵值塞满上限后，其它文件的命中必须照常产出。"""
+    src = tmp_path / "java"
+    _java_tree(src, {
+        "Decoy.java": "A" * 9000 + "\n",   # 单值远超 per-value 上限（默认 8192）
+        "Real.java": "needle-B here\n",
+    })
+    limits = Limits(max_postings_per_value=100, max_postings_total=100000)
+    result = scan_java_sources(src, ["A", "needle-B"], lineage=_lin(), limits=limits)
+    b_hits = [p for p in result.postings if p["path"] == "Real.java"]
+    assert b_hits, "单值触顶中止了整个扫描，Real.java 未被扫描"
+    assert result.coverage == "partial"  # 单值饱和如实降级
+
+
+def test_scan_postings_exact_saturation_still_partial(tmp_path: Path) -> None:
+    """★kiro 二轮复核 N2 残留：值在前一文件**恰好**用满 per-value 上限时，
+    后续文件的同值命中被跳过也必须计入覆盖缺口——不得误报 complete。"""
+    src = tmp_path / "java"
+    _java_tree(src, {
+        "A1.java": "A" * 100 + "\n",   # 恰好 100 次 = 上限，不触发饱和标志
+        "A2.java": "x A y\n",          # 同值还有命中，但被 count>=limit 静默跳过
+    })
+    limits = Limits(max_postings_per_value=100, max_postings_total=100000)
+    result = scan_java_sources(src, ["A"], lineage=_lin(), limits=limits)
+    assert len(result.postings) == 100
+    assert result.coverage == "partial"  # A2.java 的 A 被跳过 → 覆盖不完整

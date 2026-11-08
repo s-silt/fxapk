@@ -1352,6 +1352,66 @@ def test_decrypt_runtime_messages_non_envelope_ignored(tmp_path) -> None:
     assert stats["failed"] == 0
 
 
+def test_decrypt_runtime_messages_deep_json_does_not_abort_merge(tmp_path) -> None:
+    """★深嵌套 JSON 回归（sfind-3f138d1e 残留）：服务端可下发数千层嵌套明文，
+    json.loads 的 RecursionError 不得让整个解密合并阶段被跳过——统计须照常写入，
+    原文里的 URL 仍按降级路径抽取。"""
+    deep = '{"u":"https://deep.synthetic-c2a.test/x","nest":' + '{"a":' * 3000 + "1" + "}" * 3000 + "}"
+    data = _c5b_encrypt(deep)
+    env = json.dumps({"data": data, "timestamp": _C5B_TS})
+    rr_path = _write_runtime_report_with_messages(
+        tmp_path, [{"url": "https://api.synthetic-c2a.test/post", "response_body": env}]
+    )
+    report = _make_report(meta={"crypto_recipe": _c5b_recipe_meta()})
+
+    stats = merge.decrypt_runtime_messages(report, rr_path)
+
+    assert stats["decrypted"] == 1
+    assert stats["failed"] == 0
+    assert report.meta.get("runtime_decrypted") is True
+    values = {ep.value for ep in report.endpoints}
+    assert "https://deep.synthetic-c2a.test/x" in values
+
+
+def test_decrypt_runtime_messages_deep_json_envelope_does_not_abort(tmp_path) -> None:
+    """★信封解析逃逸路径回归（kiro 二轮复核）：响应体是数千层嵌套 JSON 时
+    ``_parse_envelope`` 的 json.loads RecursionError 不得冒泡炸掉整个解密合并
+    阶段——按"非信封"跳过，统计照常写入。"""
+    deep_body = "[" * 3000 + "]" * 3000  # 合法 JSON 但远超递归上限
+    rr_path = _write_runtime_report_with_messages(
+        tmp_path, [{"url": "https://api.synthetic-c2a.test/post", "response_body": deep_body}]
+    )
+    report = _make_report(meta={"crypto_recipe": _c5b_recipe_meta()})
+
+    stats = merge.decrypt_runtime_messages(report, rr_path)
+
+    assert stats["decrypted"] == 0
+    assert stats["failed"] == 0
+    assert report.endpoints == []
+
+
+def test_walk_json_strings_is_iterative_and_depth_bounded() -> None:
+    """★_walk_json_strings 显式栈 + 深度上限：5000 层嵌套用递归版必 RecursionError，
+    迭代版不炸；超出 _WALK_JSON_STRINGS_MAX_DEPTH 的分支跳过并置 truncated。"""
+    obj: dict[str, Any] = {"shallow_url": "https://ok.example/x"}
+    node = obj
+    for _ in range(5000):
+        node["n"] = {}
+        node = node["n"]
+    node["deep_leaf"] = "deep-value"  # ~5002 层深，超出深度上限应被跳过
+
+    pairs, truncated = merge._walk_json_strings(obj)
+    keys = {k for k, _ in pairs}
+    assert "shallow_url" in keys
+    assert "deep_leaf" not in keys
+    assert truncated is True
+
+    # 未截断的正常结构：truncated=False，产出与递归版一致的 DFS (key, value) 序列。
+    pairs2, truncated2 = merge._walk_json_strings({"a": {"b": ["x", {"c": "y"}]}, "d": "z"})
+    assert truncated2 is False
+    assert pairs2 == [("b", "x"), ("c", "y"), ("d", "z")]
+
+
 def test_decrypt_runtime_messages_missing_crypto_lib(tmp_path, monkeypatch) -> None:
     """缺 cryptography → 不解密、warning、静态报告不受损（保留密文，不崩）。"""
     from apkscan.core import appcrypto

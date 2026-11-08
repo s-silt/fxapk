@@ -16,12 +16,11 @@ import json
 import logging
 import os
 import threading
-from pathlib import Path
 from typing import Any
 
 
 from apkscan.core.enrichment import safe_error_type
-from apkscan.enrichers import _http
+from apkscan.enrichers import _cache, _http
 
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
@@ -35,7 +34,7 @@ IP_RDAP_TIMEOUT = 8
 IP_RDAP_URL = "https://rdap.org/ip/{ip}"
 
 #: 本地缓存目录与文件。
-CACHE_DIR = Path(".apkscan_cache")
+CACHE_DIR = _cache.cache_root() / "enrichment"
 CACHE_FILE = CACHE_DIR / "ip_rdap.json"
 
 
@@ -170,18 +169,7 @@ class IpRdapEnricher(BaseEnricher):
         """读缓存文件。★必须持 self._lock 调用：Windows 下读句柄 open 与另一线程的
         os.replace(ip_rdap.json) 撞同一文件会抛 PermissionError(WinError 5)/Errno 13，
         让缓存静默丢失。读写共用一把锁消除该重叠窗口；enrich() 经 _load_cache_locked 进入。"""
-        if not CACHE_FILE.is_file():
-            return {}
-        try:
-            text = CACHE_FILE.read_text(encoding="utf-8")
-            data = json.loads(text)
-        except Exception:
-            logger.warning("IP-RDAP 缓存读取/解析失败，忽略：%s", CACHE_FILE, exc_info=True)
-            return {}
-        if not isinstance(data, dict):
-            logger.warning("IP-RDAP 缓存顶层非 dict，忽略：%s", CACHE_FILE)
-            return {}
-        return data
+        return _cache.read_cache_json(CACHE_FILE)
 
     def _load_cache_locked(self) -> dict[str, dict[str, Any]]:
         with self._lock:

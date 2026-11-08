@@ -6,7 +6,6 @@ import ipaddress
 import json
 import math
 import re
-import shutil
 import sys
 import tempfile
 from dataclasses import asdict
@@ -15,6 +14,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from apkscan.core.proctree import run_owned
+from apkscan.core.tools import safe_which
 
 from .evidence import EvidenceError, MAX_INPUT_BYTES, origin_of, read_bounded
 from .rea_compat import provenance
@@ -103,8 +103,11 @@ def run_bounded(
 
 class ReaRuntime:
     def __init__(self, executable: str | None = None, node: str | None = None):
-        self.executable = executable or shutil.which("rea")
-        self.node = node or shutil.which("node")
+        # safe_which：Windows 上 shutil.which 默认先搜当前目录，案件/证据目录里被投放的
+        # 同名 node.exe/rea.exe 会被当成真工具执行（binary planting）。只信 PATH 且丢弃
+        # 解析后落在 cwd 内的命中。
+        self.executable = executable or safe_which("rea")
+        self.node = node or safe_which("node")
 
     def command(self) -> list[str]:
         if not self.executable or not Path(self.executable).is_file():

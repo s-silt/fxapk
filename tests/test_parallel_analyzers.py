@@ -940,3 +940,59 @@ def test_snapshot_carries_jadx_baseline_index_through_pickle() -> None:
     )
     restored = pickle.loads(pickle.dumps(snap))
     assert restored.jadx_baseline_index == "b" * 64
+
+
+def test_build_snapshot_charges_discarded_reads_and_caps_bad_reads() -> None:
+    """★sfind-588bc9e1：被丢弃的超大预读字节计入 64MiB 总预算；失败读数有上限。"""
+    from apkscan.core import apk as apk_mod
+    from apkscan.core import snapshot as snap_mod
+
+    # 场景1：40MB 丢弃读（>32MB）+ 30MB 正常读 → total=70MB>64MiB → 后续不再收进快照。
+    # 修复前丢弃不计 total：mid.json 会被收进快照。声明尺寸全部谎报为 10B，
+    # 绕过 declared_size 预检，逼 read_file 返回真实大字节。
+    ctx = _fake(
+        files={
+            "a/big.json": b"x" * (40 * 1024 * 1024),
+            "a/mid.json": b"y" * (30 * 1024 * 1024),
+            "a/last.json": b"z",
+        },
+        declared_sizes={"a/big.json": 10, "a/mid.json": 10, "a/last.json": 10},
+    )
+    reads: list[str] = []
+    real_read = ctx.read_file
+
+    def _spy_read(path: str):
+        reads.append(path)
+        return real_read(path)
+
+    ctx.read_file = _spy_read  # type: ignore[method-assign]
+    snap = snap_mod.build_snapshot(ctx)
+    assert reads == ["a/big.json", "a/mid.json"]  # mid 真实读过、因累计超限被丢弃；last 未读
+    assert "a/big.json" not in snap._files
+    assert "a/mid.json" not in snap._files
+    assert "a/last.json" not in snap._files
+
+    # 场景2：全部 read_file 返回 None → 恰好 _MAX_BAD_PREREAD_READS 次失败读后停止。
+    calls: list[str] = []
+
+    def _none(path: str) -> None:
+        calls.append(path)
+        return None
+
+    ctx2 = _fake(files={f"f{i:03d}.json": b"x" for i in range(200)})
+    ctx2.read_file = _none  # type: ignore[method-assign]
+    snap_mod.build_snapshot(ctx2)
+    assert len(calls) == snap_mod._MAX_BAD_PREREAD_READS
+
+    # 场景3：预读循环运行在聚合解压预算作用域内（shim 按实际产出累计），结束后复位。
+    seen: list[int | None] = []
+
+    def _spy(path: str) -> bytes:
+        seen.append(apk_mod._other_extract_total_bytes.get())
+        return b"ok"
+
+    ctx3 = _fake(files={"x.json": b"ok"})
+    ctx3.read_file = _spy  # type: ignore[method-assign]
+    snap_mod.build_snapshot(ctx3)
+    assert seen == [0]
+    assert apk_mod._other_extract_total_bytes.get() is None

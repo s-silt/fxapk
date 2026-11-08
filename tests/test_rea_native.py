@@ -155,7 +155,7 @@ def test_capabilities_backend_unavailable_and_elf_mismatch(native, monkeypatch, 
     monkeypatch.setattr(native.sys, "platform", "win32")
     from fxapk_rea import runtime as rea_runtime
 
-    monkeypatch.setattr(rea_runtime.shutil, "which", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(rea_runtime, "safe_which", lambda *_args, **_kwargs: None)
     info = native.capabilities(provider="ghidra")
     assert info["status"] == "unavailable"
     assert info["reason"] == "rea_missing"
@@ -667,6 +667,40 @@ def test_extract_member_and_reject_duplicate(native, tmp_path):
         archive.writestr("../lib/arm64-v8a/libsample.so", blob)
     with pytest.raises(native.NativeError, match="invalid_member"):
         native.extract_native(slip, "../lib/arm64-v8a/libsample.so", tmp_path / "slip-out")
+
+
+def test_extract_native_hash_and_parse_share_same_bytes(native, tmp_path, monkeypatch):
+    """★TOCTOU 回归（sfind-8b6629c9）：apk_sha256 必须绑定 zipfile 实际解析的字节。
+
+    旧实现先 _hash_file 再 ZipFile(apk) 二次打开，共享盘文件可在两次打开间被替换；
+    修复后 APK 只读一次进内存，ZipFile 必须收到 BytesIO 且其内容 == 落盘字节。
+    """
+    import io
+    import zipfile as _zf
+
+    member = "lib/arm64-v8a/libsample.so"
+    blob = _elf()
+    apk = tmp_path / "sample.zip"
+    with _zf.ZipFile(apk, "w") as archive:
+        archive.writestr(member, blob)
+    apk_bytes = apk.read_bytes()
+
+    seen_sources: list[object] = []
+    real_zipfile = native.zipfile.ZipFile
+
+    def spy(source, *args, **kwargs):
+        seen_sources.append(source)
+        return real_zipfile(source, *args, **kwargs)
+
+    monkeypatch.setattr(native.zipfile, "ZipFile", spy)
+    out = tmp_path / "extracted"
+    summary = native.extract_native(apk, member, out)
+
+    assert len(seen_sources) == 1
+    source = seen_sources[0]
+    assert isinstance(source, io.BytesIO)
+    assert source.getvalue() == apk_bytes
+    assert summary["apk_sha256"] == hashlib.sha256(apk_bytes).hexdigest()
 
 
 def _off_config(path: Path) -> Path:

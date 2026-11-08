@@ -82,7 +82,7 @@ def prepared(flutter, tmp_path, monkeypatch):
         executions.append(root)
         outputs(root)
     monkeypatch.setattr(r, "inspect_pair", lambda *_: compatibility)
-    monkeypatch.setattr(r.shutil, "which", lambda _: "synthetic-docker")
+    monkeypatch.setattr(r.tools.shutil, "which", lambda _: "/usr/bin/synthetic-docker")
     monkeypatch.setattr(r, "docker_check", lambda *_: None)
     monkeypatch.setattr(r, "execute", execute)
     return SimpleNamespace(apks=apks, config=config, cache=cache, executions=executions, compatibility=compatibility, entry=entry)

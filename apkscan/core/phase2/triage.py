@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 from collections import defaultdict
@@ -14,6 +15,8 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+
+from apkscan.core.json_io import read_json_bounded
 
 from . import inventory as pc
 
@@ -168,24 +171,39 @@ def _read_parent_versions(
         relpath = getattr(candidate, "report_relpath", "")
         if relpath:
             relpath_by_package.setdefault(str(getattr(candidate, "package_id", "")), str(relpath))
-    package_reports = sorted({
-        (str(getattr(p, "directory_name", "")),
-         relpath_by_package.get(str(getattr(p, "package_id", "")), "report.json"))
-        for p in inventory.packages
-    })
 
-    for name, relpath in package_reports:
-        if not name:
+    # ★只读 inventory 登记过的报告：Phase1Package.report_relpath 是 manifest
+    #   artifacts 核验过的真实文件名（零候选包也携带），report_sha256 是 inventory
+    #   读取时的字节哈希。没有登记路径或哈希的包一律不读盘——包目录里任何未登记的
+    #   report.json 都不得进入判据。
+    report_by_dir: dict[str, tuple[str, str]] = {}
+    for p in inventory.packages:
+        name = str(getattr(p, "directory_name", ""))
+        if not name or name in report_by_dir:
             continue
+        relpath = str(getattr(p, "report_relpath", "") or "") or relpath_by_package.get(
+            str(getattr(p, "package_id", "")), "")
+        expected_sha = str(getattr(p, "report_sha256", "") or "")
+        if relpath and expected_sha:
+            report_by_dir[name] = (relpath, expected_sha)
+
+    limits = pc.InventoryLimits()
+    for name, (relpath, expected_sha) in sorted(report_by_dir.items()):
         package_root = (case_dir / name).resolve()
         report_path = (package_root / relpath).resolve()
         if not report_path.is_relative_to(package_root) or not report_path.is_file():
             continue
 
-        with report_path.open("r", encoding="utf-8") as handle:
-            report = json.load(handle)
-
+        try:
+            report, report_raw = read_json_bounded(
+                report_path, limits.max_report_bytes, limits.max_json_depth
+            )
+        except (OSError, UnicodeError, ValueError, OverflowError):
+            continue
         if not isinstance(report, dict):
+            continue
+        # 重读字节必须与 inventory 登记哈希一致；文件在盘点后被替换/篡改即丢弃。
+        if hashlib.sha256(report_raw).hexdigest() != expected_sha:
             continue
 
         for collection in _COLLECTIONS:

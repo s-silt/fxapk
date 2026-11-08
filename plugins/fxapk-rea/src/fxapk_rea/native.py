@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import ipaddress
 import json
 import math
@@ -1489,10 +1490,14 @@ def extract_native(apk: Path, member: str, out: Path, report: Path | None = None
     if not isinstance(member, str) or _MEMBER.fullmatch(member) is None or "\\" in member:
         raise NativeError("invalid_member")
     abi = member.split("/")[1]
-    apk_sha = _hash_file(apk, MAX_APK_BYTES)
+    # ★TOCTOU 修复：APK 只读一次进内存（≤MAX_APK_BYTES），哈希与 zip 解析共用同一份
+    #   字节。旧实现先 _hash_file 再 ZipFile(apk) 二次打开——共享盘上文件可在两次打开
+    #   之间被替换，manifest 的 apk_sha256 就不再绑定实际产出 binary.bin 的来源。
+    apk_bytes = _read_file(apk, MAX_APK_BYTES)
+    apk_sha = _sha(apk_bytes)
     _ancestors(apk)
     try:
-        archive = zipfile.ZipFile(apk)
+        archive = zipfile.ZipFile(io.BytesIO(apk_bytes))
     except (zipfile.BadZipFile, OSError):
         raise NativeError("invalid_zip") from None
     try:

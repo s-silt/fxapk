@@ -298,7 +298,11 @@ def test_review_archive_round_trip_and_bad_member_reaches_all_projections(tmp_pa
     replay = CliRunner().invoke(app, ["evidence-review", str(output), "--archive-member", "replay-plan.json", "--out", str(tmp_path / "replayed")])
     assert replay.exit_code == 5, replay.output
     rerun = json.loads((tmp_path / "replayed/review.json").read_text())
-    assert [(r["state"], r["reason_codes"]) for r in rerun["tasks"]] == [(r["state"], r["reason_codes"]) for r in receipt["tasks"]]
+    # ★哈希不符的输入不再留存进归档（先校验后复制）：replay 时其成员本就不在
+    #   review.zip 里，原因码诚实记为 archive_member_missing 而非复现
+    #   review_input_hash_mismatch；state 仍须与首轮一致。
+    assert [r["state"] for r in rerun["tasks"]] == [r["state"] for r in receipt["tasks"]]
+    assert rerun["tasks"][0]["reason_codes"] == ["archive_member_missing"]
 
 
 def test_archived_pcap_and_runtime_readers_match_original_bytes(tmp_path):

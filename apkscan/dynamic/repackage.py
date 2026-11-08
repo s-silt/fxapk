@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -456,19 +457,39 @@ def _read_tail(log_path: str, limit: int = _STDOUT_TAIL) -> str:
 # ---------------------------------------------------------------------------
 
 
+# launcher 组件 activity 段白名单：只允许 Java 类名字符（``.`` 分隔、``$`` 内部类）。
+# ``adb shell am start -n <组件>`` 的实参会被设备 shell 重新分词，样本 manifest 里可控的
+# ``android:name`` 若含 ``;`` ``$()`` 反引号/空格等元字符即在设备上以 shell（root 时 uid0）
+# 执行任意命令。包名段已由 ``device.is_valid_package`` + ``== package`` 双重把关。
+_LAUNCHER_ACTIVITY_RE = re.compile(r"[A-Za-z0-9_.$]+")
+
+
 def _resolve_launcher_component(package: str, serial: str | None) -> str | None:
     """解析该包**真实**的 launcher activity 组件（``pkg/act``）。
 
     ★不再硬编码 ``.MainActivity``（codex A3）——真实 app 的入口极少字面叫 MainActivity，硬编码近乎必失、
     存活判定实际全靠 monkey 兜底。用 ``cmd package resolve-activity --brief`` 拿 LAUNCHER 真实组件；
     拿不到（老机型/无输出）返回 None，调用方回退 monkey。
+
+    ★安全：activity 段来自样本 manifest（攻击者可控），必须先过
+    :data:`_LAUNCHER_ACTIVITY_RE` 白名单再返回；非法 → None 回退 monkey（monkey 只用已校验的包名）。
     """
     out = _adb(["shell", "cmd", "package", "resolve-activity", "--brief", package], serial)
     for line in out.splitlines():
         line = line.strip()
         # --brief 末行形如 "com.pkg/com.pkg.RealLauncher"；取含 '/' 且以包名起头的组件。
-        if "/" in line and line.split("/", 1)[0] == package:
-            return line
+        if "/" not in line or line.split("/", 1)[0] != package:
+            continue
+        activity = line.split("/", 1)[1]
+        # 相对类名（``.Foo``）展开为包名后缀再校验（与 ComponentName.unflattenFromString 同口径）。
+        if activity.startswith("."):
+            activity = package + activity
+        if not _LAUNCHER_ACTIVITY_RE.fullmatch(activity):
+            logger.warning(
+                "[repack] launcher 组件 activity 段含非法字符，拒绝用于 am start：%r", line
+            )
+            return None
+        return line
     return None
 
 
@@ -484,7 +505,10 @@ def _verdict_app_alive(package: str, serial: str | None) -> tuple[bool, str]:
         # 启动入口：优先真实 launcher 组件，拿不到再用 monkey 的 LAUNCHER category 兜底。
         component = _resolve_launcher_component(package, serial)
         if component:
-            _adb(["shell", "am", "start", "-n", component], serial)  # best-effort
+            # 组件已过白名单校验；再经 _shq 单引号包裹作纵深防御——adb 会把 shell 之后的
+            # argv 用空格重拼下发，设备 shell 分词时引号保证组件整体作为 -n 的单个实参，
+            # 任何漏网元字符也无法逃逸成命令。
+            _adb(["shell", "am", "start", "-n", device._shq(component)], serial)  # best-effort
         _adb(["shell", "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1"], serial)
         _wait(_SPAWN_GRACE)
         if not _process_alive(package, serial):
