@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 # 发行名 fxapk（PyPI）；CLI 命令 fxapk（保留 apkscan 别名）；内部 import 包仍为 apkscan。
 name = "fxapk"
-version = "1.24.0"
+version = "1.25.0"
 description = "涉诈 APK 调证分析 CLI — 静态分析 + 配置键值/服务归属提取，产出调证线索清单"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -34,6 +34,7 @@ dependencies = [
     "requests",
     "pyyaml",
     "psutil",  # 并行分析器 worker 数按可用内存封顶（pipeline._decide_workers）；缺失则退固定兜底
+    "backports.zstd>=1.8,<2; python_version < '3.14'",  # Standard ZIP Zstandard on supported older Python
 ]
 
 [project.urls]

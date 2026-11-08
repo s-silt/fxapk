@@ -15,7 +15,7 @@ mitmproxy 12.2.3 应安装在独立的 Python 3.12+ 环境，并在下面的配�
 Pydantic 冲突；不要降级项目的其他依赖来强行共用环境。两个环境都应执行 `pip check`。
 核心静态分析仍支持项目元数据声明的 Python 版本。
 
-离线复核使用同一解释器安装 `python -m pip install "fxapk[review]==1.24.0"`（源码树用 `-e ".[review]"），提供 pyelftools、Capstone 5、cryptography 与 Unicorn 2。该 extra 不安装 fxfetch、JADX、adb 或 Frida。`intake-fetch --fxfetch <绝对路径>` 接兼容的独立 CLI，可用 `--fxapk` 固定分析入口；DEX/JADX 验证沿用下面的 JADX 映射。`recover-runtime` 的 `proc_mem` 后端需要 adb/root，`frida` 后端还需匹配的 Frida；不会自行部署或启动它们。依赖缺失须看逐任务回执，`selfcheck` 不是所有离线复核任务的验收。详见 [恢复链](../RECOVERY-PIPELINE.md)。 macOS 的强制内存限额阶段明确不支持；Linux 的 JVM 必须能在地址空间限额内启动，否则保留 JADX 缺口。默认分析入口绑定当前解释器，离线子进程禁用 adb 探测；恢复前准备已有 adb server。
+离线复核使用同一解释器安装 `python -m pip install "fxapk[review]==1.25.0"`（源码树用 `-e ".[review]"），提供 pyelftools、Capstone 5、cryptography 与 Unicorn 2。该 extra 不安装 fxfetch、JADX、adb 或 Frida。`intake-fetch --fxfetch <绝对路径>` 接兼容的独立 CLI，可用 `--fxapk` 固定分析入口；DEX/JADX 验证沿用下面的 JADX 映射。`recover-runtime` 的 `proc_mem` 后端需要 adb/root，`frida` 后端还需匹配的 Frida；不会自行部署或启动它们。依赖缺失须看逐任务回执，`selfcheck` 不是所有离线复核任务的验收。详见 [恢复链](../RECOVERY-PIPELINE.md)。 macOS 的强制内存限额阶段明确不支持；Linux 的 JVM 必须能在地址空间限额内启动，否则保留 JADX 缺口。默认分析入口绑定当前解释器，离线子进程禁用 adb 探测；恢复前准备已有 adb server。
 
 ```powershell
 py -3.12 -m venv .venv/toolchain/mitmproxy-env

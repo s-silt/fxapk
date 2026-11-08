@@ -16,6 +16,24 @@ permissions:
   contents: read
 
 jobs:
+  archive-codecs:
+    name: archive codecs (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install package and test dependencies
+        run: python -m pip install -e ".[review]" pytest
+      - name: Verify backport and standard-library archive paths
+        run: python -m pytest -q tests/test_evidence_archive.py tests/test_evidence_zstd.py
+
   lint:
     name: lint + typecheck
     runs-on: ubuntu-latest

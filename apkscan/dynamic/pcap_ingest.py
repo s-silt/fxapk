@@ -642,6 +642,15 @@ MAX_CAPTURE_BYTES = 256 * 1024 * 1024
 
 def parse_pcap(path: str) -> PcapSummary:
     """读 pcap 文件并解析；文件缺失/坏 → **带失败态**的 summary（不抛）。"""
+    from apkscan.core.evidence_archive import ArchiveError, read_reference, split_reference
+
+    if "::" in path:
+        try:
+            split_reference(path)
+            return parse_pcap_bytes(read_reference(path, MAX_CAPTURE_BYTES))
+        except (OSError, ValueError) as error:
+            code = str(error) if isinstance(error, ArchiveError) else "archive_input_read_failed"
+            return PcapSummary(parse_status="resource_limit" if "budget" in code else "read_error", error=code)
     try:
         file = Path(path)
         if file.stat().st_size > MAX_CAPTURE_BYTES:

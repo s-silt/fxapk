@@ -36,6 +36,7 @@ from apkscan.core.models import (
 )
 from apkscan.core.report_delivery import ReportDelivery, combine_deliveries
 from apkscan.core.report_naming import report_base
+from apkscan.core.evidence_archive import Compression
 
 # 样本库 / 案件子命令已物理拆到 apkscan/commands/（纯搬移）；add_typer 留此处以引用主 app。
 from apkscan.commands.corpus import corpus_app
@@ -49,6 +50,7 @@ from apkscan.commands.web import analyze_web, capture_web
 from apkscan.commands.web_supplement import supplement_web
 from apkscan.commands.origin_check import origin_check
 from apkscan.commands.evidence_review import evidence_review, intake_fetch, recover_runtime
+from apkscan.commands.evidence_archive import app as evidence_archive_app
 
 META_WRITE_OWNER = "cli"
 META_WRITE_CATEGORIES = {
@@ -90,6 +92,7 @@ app.add_typer(recognize_app, name="recognize")
 app.command("evidence-review")(evidence_review)
 app.command("intake-fetch")(intake_fetch)
 app.command("recover-runtime")(recover_runtime)
+app.add_typer(evidence_archive_app, name="evidence")
 
 # Optional command groups are discovered after core registration. A missing or
 # broken plugin must not prevent the core CLI from importing.
@@ -932,6 +935,8 @@ def capture(
         "--antidetect",
         help="行为修改 shim 档位：off（默认，不改样本行为）| java（注入 shim）| native（预留，主仓暂无内置 native shim，取该值将报错）。",
     ),
+    archive_out: Path | None = typer.Option(None, "--archive-out", help="采集后校验并压缩为新 ZIP64 包，与 --out 二选一；失败保留暂存证据。"),
+    archive_compression: Compression = typer.Option(Compression.zstd, "--archive-compression", help="归档算法：zstd 均衡 / deflate 兼容旧工具；级别 6。"),
 ) -> None:
     """真机抓包：对运行中的目标应用做流量抓取，提取动态端点。
 
@@ -956,19 +961,28 @@ def capture(
                 f"--antidetect 取值非法：{antidetect!r}（可选 off / java；native 主仓暂无内置 native shim）"
             )
             raise typer.Exit(code=2)
-        out = _resolve_out_cwd(out)  # 未给 / 相对 → 绝对化到 cwd 下的 out/（口径确定）
-        result = _capture.run(
-            package,
-            out=out,
-            duration=duration,
-            serial=serial,
-            mode=mode,
-            allow_behavior_modification=allow_behavior_modification,
-            antidetect=antidetect,
-        )
+        from apkscan.core.evidence_archive import ArchiveError
+        from apkscan.core.evidence_output import EvidenceOutput
+
+        directory = Path(_resolve_out_cwd(out)) if archive_out is None or out is not None else None
+        try:
+            with EvidenceOutput(directory, archive_out, lambda event: typer.echo(json.dumps(event), err=True),
+                                compression=archive_compression.value) as destination:
+                result = _capture.run(
+                    package, out=str(destination.path), duration=duration, serial=serial,
+                    mode=mode, allow_behavior_modification=allow_behavior_modification, antidetect=antidetect,
+                )
+            if archive_out:
+                result = destination.display(result)
+                typer.echo(json.dumps({"archive": str(archive_out), "storage": destination.storage}))
+        except ArchiveError as error:
+            typer.echo(json.dumps({"state": "failed", "reason_codes": [str(error)]}), err=True)
+            raise typer.Exit(2 if str(error) == "choose_output_directory_or_archive" else 6) from error
         _print_dynamic_result("抓包", result)
         # 业务失败返回非零退出码（在 adb 清理 finally 之前抛，仍会穿过 finally 收 server）。
         _raise_exit_for_status(result.get("status") if isinstance(result, dict) else None)
+        if destination.storage and destination.storage["state"] != "verified":
+            raise typer.Exit(5)
     finally:
         _cleanup_adb_quiet(_adb_owned)
 
@@ -1653,7 +1667,12 @@ def pcap_leads(
         snap_paths = [Path(p) for p in (uid_sockets or [])]
         if not snap_paths and auto_uid_sockets:
             # capture 把 pcap 与快照落在同一个目录，这是最常见的形态。
-            snap_paths = _discover_socket_snapshots(pcap.parent)
+            if "::" in str(pcap):
+                from apkscan.core.evidence_archive import archived_siblings
+
+                snap_paths = archived_siblings(pcap, _SOCKET_SNAPSHOT_GLOBS)
+            else:
+                snap_paths = _discover_socket_snapshots(pcap.parent)
             if snap_paths:
                 typer.echo(f"自动探测到 socket 快照：{', '.join(p.name for p in snap_paths)}"
                            f"（--no-uid-sockets 可关闭探测）")

@@ -696,6 +696,11 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
 
     if offline_review := project_offline_review(meta.get("offline_evidence_review")):
         digest["offline_evidence_review"] = offline_review
+    from apkscan.core.evidence_archive import storage_projection
+
+    manifest = meta.get("evidence_manifest")
+    if isinstance(manifest, dict) and (storage := storage_projection(manifest.get("archive_storage"))):
+        digest["archive_storage"] = storage
     flutter = meta.get("flutter_analysis")
     if isinstance(flutter, dict):
         coverage = flutter.get("coverage")

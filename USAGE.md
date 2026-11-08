@@ -38,6 +38,20 @@
 | Flutter AOT 静态分析（可选插件，离线容器） | `fxapk flutter capabilities` / `analyze` / `query` / `attach`，见 [plugins/fxapk-flutter/README.md](plugins/fxapk-flutter/README.md) |
 | 识别线（只读/离线；晋级门未过退出码 4） | `fxapk recognize reanalysis` / `labels validate` / `split build\|validate` / `evaluate` |
 
+## 隐私与输出
+
+`digest` 默认有限脱敏：遮蔽高敏类别值及线索自由文本中固定形态的邮箱、国内手机号、证件号和长数字串；姓名、地址、境外号码及 findings/visibility/closure/overseas_targets 等说明文字不保证移除。`--no-redact` 恢复原值。
+
+以下出口原样输出高敏值，须单独审核：`jsonl`、`diff`、`lead show/restore/replay`、`corpus events/ls/seen/shared-config/shared-native/shared-build-env/link-candidates`、`probe-leads`、`pcap-leads`、`export` CSV、HTML/PDF、文书、corpus 存证、`case_correlation.json` 与 `report.json`。`corpus link-discover/link-explain/link-groups` 默认 `--evidence-values omit`，显式 `--evidence-values raw` 恢复原值；`link-labels-validate/link-evaluate/link-readiness/link-train` 只输出聚合结果。归档还可能包含源目录路径；压缩不脱敏，也不授权向第三方传输。
+
+## 证据归档
+
+`fxapk evidence pack <目录> --out evidence.zip` 默认 ZIP64/Zstd 6；旧工具兼容用 `--compression deflate`。`evidence verify` 流式校验整包，`evidence extract --out <新目录>` 逐字节提取。原 manifest、SHA-256 与 package_id 保留；归档索引只证明内部一致性，不替代案件证据门。
+
+`capture` / `recover-runtime` / `intake-fetch` / `evidence-review` 可用 `--archive-out <新ZIP>` 代替 `--out`，并可加 `--archive-compression deflate`。业务 partial/failed 不因归档成功变成 ok；只有本次暂存目录在归档发布并校验成功后自动清理，失败保留材料和回执。
+
+归档内读取用 `archive.zip::relative/member`；`evidence-review <ZIP> --archive-member replay-plan.json` 重放已保留输入，`intake-fetch <ZIP> --archive-member saved-task.zip` 接入包内任务，`evidence analyze <ZIP> --member sample.apk --out <新目录>` 固定离线分析。单成员先核验再交给分析器；PCAP 与 socket/UID 命令及运行时读取 API 支持成员引用。`evidence case-verify` / `corpus-add` 是整包临时展开的例外，仍走原案件验包与 corpus 边界。兼容性、上限、隐私及文件系统元数据限制见 [EVIDENCE-ARCHIVE.md](EVIDENCE-ARCHIVE.md)。
+
 ## 已保存网页材料
 
 网页材料可附 `--evidence-handoff <证据目录外的JSON>`：

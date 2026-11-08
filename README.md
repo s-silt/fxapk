@@ -8,101 +8,36 @@
 <p align="center"><strong>中文</strong> &nbsp;·&nbsp; <a href="README.en.md">English</a></p>
 <p align="center">
   <a href="https://github.com/s-silt/fxapk/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/s-silt/fxapk/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.24.0">v1.24.0</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
+  <a href="https://github.com/s-silt/fxapk/releases/tag/v1.25.0">v1.25.0</a> &nbsp;·&nbsp; Python 3.11+ &nbsp;·&nbsp; <a href="LICENSE">MIT</a>
 </p>
 
-命令 `fxapk`（别名 `apkscan`），PyPI 包名 `fxapk`。面向直接运行源码或 Python 包的人与 AI 助手，不提供 exe 或 GUI。变更见 [CHANGELOG.md](CHANGELOG.md)。
-
-| 核心能力 | 说明 |
-| --- | --- |
-| **静态提取** | 解析 APK 中的配置、端点、组件与加固信号；能力不足时明确标记缺口 |
-| **动态证据** | 在已授权设备上采集 PCAP、socket 归因与探针信息，分轮留档；可选 UI 插件补截图与布局 |
-| **基础设施归属** | 分开记录资源持有者、BGP、承载/CDN 与运营者，保留逐来源回执 |
-| **包与复核** | 固化报告和附件哈希，独立记录 Phase-2 覆盖、判决与复核状态 |
-
-```text
-APK / 已落盘网页证据        已授权设备采集
-          │                      │
-          └──────► 结构化报告 ◄────┘
-                         │
-              来源、覆盖、缺口与下一步
-                         │
-               Phase-1 不可变证据包
-                         │
-           Phase-2 清单 → 人工判决 → 门禁
-```
-
-静态分析不需要 JDK 或设备；部分分析器和动态能力需要额外工具。`selfcheck` 显示当前能力，报告中的 `analyzer_status` 与 `source_status` 说明实际执行情况。未发现不等于不存在，采集完成也不等于证据闭环。
+`fxapk`（别名 `apkscan`）从 APK、授权设备流量和已有网页材料中提取线索，记录来源、归属与覆盖缺口。提供 Python CLI，不提供 exe 或 GUI。
 
 ## 快速开始
 
 ```bash
-python -m pip install "fxapk==1.24.0"     # 或 clone 后 python -m pip install -e .
+python -m pip install "fxapk==1.25.0"
 fxapk selfcheck
 fxapk analyze app.apk --offline --out out
 fxapk digest out/app.json
 ```
 
-[发布页](https://github.com/s-silt/fxapk/releases/tag/v1.24.0) 提供 wheel、源码归档与 `SHA256SUMS.txt`，安装前核对哈希。联网服务密钥按 [.env.example](.env.example) 写入仓库根 `.env` 或 `~/.fxapk/.env`（不读当前目录的 `.env`），不写入报告或仓库。命令未注册到 PATH 时用 `python -m apkscan.cli` 代替 `fxapk`。
+静态分析不需要设备。发行附件及校验和见[发布页](https://github.com/s-silt/fxapk/releases/tag/v1.25.0)；源码安装、密钥配置与可选工具见 [USAGE.md](USAGE.md)。
 
-`digest` 用于初筛和定位；正式判断必须回查 `report.json` 的结构化字段与原始证据。让 AI 助手操作时，给它 [AGENTS.md](AGENTS.md)、样本路径、是否允许联网及设备操作范围。
+## 常用入口
 
-| 任务 | 入口 |
+| 任务 | 命令 |
 | --- | --- |
-| 已保存的网页、JS 或 HAR | `fxapk analyze-web <目录> --out out` |
-| 已保存的 fxfetch 任务包 | `fxapk intake-fetch <ZIP> --fxfetch <可信本机CLI> --out <新目录>` |
-| 离线定点证据复核 | `fxapk evidence-review <清单> --out <新目录>` |
-| 已授权 DEX/JNI 定点恢复 | `fxapk recover-runtime <计划> --out <新目录>` |
-| 网页补采 | 首次分析加 `--web-supplement <本地JSON>`；已有报告用 `fxapk supplement-web <report.json> --web-supplement <config> --out <new-out-dir>`（不重跑 APK、不碰设备） |
-| 真机环境排查 | `fxapk doctor --no-fix`，再按授权修复 |
-| 不用 Frida 的 PCAP 底座 | `fxapk capture <包名> --mode floor-only`（仍需 adb、root、设备侧 tcpdump） |
-| 多轮自动采集 | `fxapk auto app.apk --strict-case`（仅限已授权的专用设备） |
-| Android UI 截图与动作计划 | 可选插件 `fxapk ui ...`，见 [ANDROID-UI.md](ANDROID-UI.md) |
-| 已有报告补查与闭环 | `fxapk case close out/app.json`（需联网与写回授权） |
-| 完整命令 | [USAGE.md](USAGE.md) · `fxapk --help` |
+| 分析已保存网页 | `fxapk analyze-web <目录> --out out` |
+| 接入 fxfetch 任务包 | `fxapk intake-fetch <ZIP> --fxfetch <可信本机CLI> --out <新目录>` |
+| 定点离线复核 | `fxapk evidence-review <清单> --out <新目录>` |
+| 无损归档与校验 | `fxapk evidence pack <目录> --out evidence.zip` · `fxapk evidence verify evidence.zip` |
+| 检查设备环境 | `fxapk doctor --no-fix` |
 
-### 可选 Flutter AOT 插件
+`analyze` 默认联网；`doctor` 默认修设备，`auto` 会安装并运行样本，均须对应授权。`digest` 仅有限脱敏，报告和归档可能保留原值，详见[隐私边界](USAGE.md#隐私与输出)。正式判断须回查原始证据；存储校验、分析完成、案件闭环与人工接受是独立状态。
 
-`fxapk-flutter 0.1.0` 随发行附件提供，要求核心 1.23.0+；从附件安装 wheel，或在源码树运行 `python -m pip install -e ./plugins/fxapk-flutter`。识别为 Flutter 的 APK 默认进入 `--flutter auto` 阶段；`--flutter off` 关闭，`--flutter required` 在未成功时保留报告并退出 4。缺插件或工具链会记录覆盖缺口，不会自动安装依赖。
+## 文档
 
-仅使用事先准备的本地 Blutter 可执行文件、固定 Docker 镜像和 toolchain.json，分析容器禁网，不拉取镜像或编译。新增 `fxapk flutter capabilities|analyze|query|attach`；静态汇编、直接调用与 URL 字面量不等于完整源码或实际网络传输。查询与证据包未脱敏。配置、缓存和支持范围见 [插件说明](plugins/fxapk-flutter/README.md)。
-
-### 可选 REA 插件（网页观察 / Native 地址恢复）
-
-默认关闭：即使已安装，也不会被导入、注册命令或用于自动补采。仅在明确需要时为该进程设置 `FXAPK_ENABLE_REA=1`（PowerShell `$env:FXAPK_ENABLE_REA='1'`）。启用不等于授权浏览器、设备或联网操作。`import` / `inspect` / `trace` 只采集，`attach` 只把核验过的观察挂进新目录；它们不自动闭环，也不把观察晋级成 leads 或 runtime。真实 Android WebView 尚未实机验收。命令、限额与边界见 [plugins/fxapk-rea/README.md](plugins/fxapk-rea/README.md)。
-
-## 证据包与阶段二复核
-
-代码仓库与案件材料分开：证据包、语料库与历史材料保存在工作树外，`FXAPK_CORPUS` 显式指向库目录。`case phase2 ... --case-dir <案件目录>` 按 manifest 登记的路径与哈希验包；`case review` 必须提供 `--gate-receipt`，同目录的 `coverage.json` 和 `decisions.jsonl` 须齐全且哈希匹配。升级时保留原件，在工作副本生成新的阶段二材料。详见 [PRE-REPORT-WORKFLOW.md](PRE-REPORT-WORKFLOW.md)。
-
-| 状态 | 回答什么 |
-| --- | --- |
-| `package_integrity` | 清单、路径和附件哈希是否一致 |
-| `analysis` | 分析器是否完整执行 |
-| `closure` | 运行时、归属与调证对象是否过证据门 |
-| `review` | 精确包哈希是否被复核接受 |
-
-四种状态不能互相推出。`review=accepted` 不会把 `closure=partial` 变成完整。对缓存或导出的 `complete` 闭环声明，安全投影还要求每个目标至少有一条用途准入通过的运行时接触证据；这是最小一致性校验，不证明其余闭环条件已满足，也不替代逐层核验。`auto --strict-case` 的退出码 `0 / 5 / 6` 对应 `complete / partial / failed`。
-
-## 默认行为与边界
-
-- **解析器进程限制需显式启用。** 未配置时仍在当前进程解析；配置后失败不回退到无约束解析。参数和适用范围见[解析预算](USAGE.md#解析预算)。
-- **`analyze` 默认联网。** 域名/IP 会交给第三方富化服务，DNS 查询可能被观察；不主动访问样本业务 URL，但不承诺零流量。离线用 `--offline`。
-- **`doctor` 默认修设备，`auto` 会安装并运行样本。** 去壳重打包旁路还需原版基线、判据建议，以及 `--allow-behavior-modification --antidetect java` 双门；行为修改证据不能单独结案。
-- **`digest` 默认有限脱敏。** 高敏类别值及线索自由文本中固定形态的隐私字段被遮蔽；姓名、地址、境外号码及其他自由文本不保证移除。`--no-redact` 恢复原值。
-
-其他出口原样输出高敏值，需单独审核：`jsonl`、`diff`、`lead show/restore/replay`、`corpus events/ls/seen/shared-config/shared-native/shared-build-env/link-candidates`、`probe-leads`、`pcap-leads`、CSV、HTML/PDF、文书、corpus 存证、`case_correlation.json` 与 `report.json`。`corpus link-discover/link-explain/link-groups` 默认 `--evidence-values omit`，显式 `raw` 恢复原值；`link-labels-validate/link-evaluate/link-readiness/link-train` 只输出聚合结果。
-
-只在合法授权范围内采集与分析。共享 CDN、ASN、证书或技术锚不能单独证明运营者或同一主体。本版有合成回归与跨平台 CI，不以此宣称真实设备或全部第三方账户已验收。
-
-## 开发
-
-源码开发先 `git config core.hooksPath .githooks`。代码行为变更运行 Ruff、Pyright、pytest 和严格增量泄漏扫描；夹具使用合成数据，案件原值与密钥不得入库。见 [USAGE.md](USAGE.md#从源码改代码)、[ARCHITECTURE.md](ARCHITECTURE.md)、[COMPANION-TOOLS.md](COMPANION-TOOLS.md)。
-
-许可：[MIT](LICENSE)。
-
-## 离线证据复核与 fxfetch 衔接
-
-已有 fxfetch 任务数据包可用 `fxapk intake-fetch` 接入网页和原 APK 的独立离线分析。`fxapk evidence-review` 提供 DEX/JADX、JNI 记录、ELF 查询、内存追踪、文件事件、密码验证及 AArch64 模拟复核；`fxapk recover-runtime` 衔接已授权的定点采集、重分析与验证。逐项结果进入回执、摘要和 HTML。macOS 的有界子进程阶段明确不支持；真实设备恢复未验收，来源未绑定时最多 partial。用法见 [离线合同](OFFLINE-REVIEW.md) 与 [恢复链](RECOVERY-PIPELINE.md)。
-
-复核依赖用 `python -m pip install "fxapk[review]==1.24.0"` 安装；fxfetch、JADX、adb 和所选后端需要的 Frida 由使用者准备。恢复命令不会安装或启动样本，也不自动开启 REA。哈希绑定、选定范围恢复和模拟验证均不证明来源真实性、完整结构或案件闭环；真实设备链路仍须单独验收。
+- [命令与参数](USAGE.md) · [AI 操作指南](AGENTS.md) · [工具准备](tools/TOOLCHAIN.md)
+- [证据归档](EVIDENCE-ARCHIVE.md) · [离线复核](OFFLINE-REVIEW.md) · [定点恢复](RECOVERY-PIPELINE.md) · [报告前工作流](PRE-REPORT-WORKFLOW.md)
+- [可选插件与配套工具](COMPANION-TOOLS.md) · [开发架构](ARCHITECTURE.md) · [更新记录](CHANGELOG.md)

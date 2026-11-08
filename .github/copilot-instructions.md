@@ -38,3 +38,5 @@ fxapk 是 APK 静态/动态分析 CLI（Python 3.11+，发行包名 `fxapk`，�
 12. `tests/synthetic/baselines/` 语义快照只经 `tools/update_synthetic_baseline.py` 更新；
     类别检出 `baseline.json` 按该目录 README 的独立流程生成。两者须审阅并提交 diff，CI 不得改写。
 13. Commit 用 conventional 前缀，中文正文可；PR 保持单一主题。
+
+归档变更须核验 `evidence pack/verify/extract` 与四个 `--archive-out` 入口：压缩流完整结束、原文件哈希、成员边界与失败保留均不能省；存储成功不升级业务状态。归档引用不得回退本机外部路径；冻结案件 schema 按原报告 JSON 判断，详见 `EVIDENCE-ARCHIVE.md`。
