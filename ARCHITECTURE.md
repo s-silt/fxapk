@@ -14,6 +14,10 @@
 
 层级 AST 守卫覆盖采集层反向依赖。`run_review` 是纯数据审阅，`preparation` 负责组合；`json_io` 不接受证据身份、不做包 PASS，哈希核验由证据层负责。
 
+## 证据存储
+
+`core/evidence_archive` 统一 ZIP64/Zstd 与 DEFLATE 的有界读取、路径约束、原字节哈希和原子发布；`core/evidence_output` 管理四个采集/处理入口的专属暂存与失败回执。成员先验后用，外部引用不回退本机；案件验包和 corpus 入口完整临时展开后复用原门禁。归档输入分析/复核的存储状态进入 report/digest/HTML，输出归档状态见控制台及旁侧回执，均不改写业务终态、closure 或 review。新包记录原 schema，验包兼容原版本与确定的迁移版本，升级不要求重写原包。详细契约见 [EVIDENCE-ARCHIVE.md](EVIDENCE-ARCHIVE.md)。
+
 ## 富化执行
 
 - `case source-catalog` 返回带核验日期的产品目录，不读密钥、不验证套餐、不执行查询。

@@ -5,6 +5,17 @@
 
 ## 待发布
 
+## 1.25.0 — 2026-11-08
+
+- 新增 `fxapk evidence pack/verify/extract/analyze/case-verify/corpus-add`：默认 ZIP64/Zstandard 6（方法 93），可选 DEFLATE 6；逐文件保留原始字节、manifest、SHA-256 和案件 package_id。Python 3.11–3.13 增加条件依赖 `backports.zstd>=1.8,<2`，3.14+ 使用标准库；旧工具需显式选择 DEFLATE，不静默降级。
+- `capture`、`recover-runtime`、`intake-fetch` 和 `evidence-review` 支持 `--archive-out` 与 `--archive-compression`。归档发布并校验后仅清理本次暂存目录；生成、校验或清理失败保留材料及可见回执。原有 partial/failed 状态不因存储成功升级。
+- 成员引用 `archive.zip::relative/member` 接通 PCAP、运行时读取 API、socket/UID、离线复核、原 APK 与嵌套 fxfetch 输入；先校验选中成员再交给分析器，不向本机外部路径回退。复核保留实际读取输入并生成独立重放清单，读取失败进入回执、报告、摘要与 HTML。
+- 案件验包及 corpus 入库临时完整展开后复用既有门禁；新包记录原 schema，验包兼容原 schema 及由相同冻结字节确定的迁移版本（含 1.22–1.24 旧包），也不要求改写原 manifest 或 package_id。
+- 压缩读取校验完整流结束、CRC、长度、SHA-256、成员跨度和资源上限；修复 DEFLATE 在截断、附加流或虚报长度时可能误判成功的问题。拒绝路径逃逸、链接、重名、加密、成员间或目录前后未登记字节及不支持格式，归档输出不覆盖既有文件。
+- 修复复核任务 id 与 `replay-plan` / `source-report` 的大小写文件冲突，生成失败保留具体错误与原异常；校验中央目录真实成员数后再分配成员对象。兼容跨系统绝对路径映射及符号链接暂存路径，归档输出错误与参数错误分别报告。
+- 中英文 README 精简为安装、常用入口与文档导航，保留原有标题和徽章样式；同步命令、架构、agent、工具与归档文档。归档未脱敏；“无损”只指原文件正文和清单，不包含 ACL、ADS、xattr 或提取后的时间/权限恢复。
+- 验证范围为合成证据、真实离线 CLI/子进程及跨平台 CI；设备接线使用模拟回执，不据此宣称真实设备或真实案件全链验收。存储完整性、分析完成、案件闭环与人工接受分别报告。
+
 ## 1.24.0 — 2026-11-05
 
 - 新增 `intake-fetch`，离线接入 fxfetch 已保存的材料，分别分析原始 APK 与网页证据并保留来源绑定；fxfetch 仍是独立 CLI，须自备兼容版本，可用 `--fxfetch` 指定入口。

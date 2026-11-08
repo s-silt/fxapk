@@ -157,3 +157,8 @@ Authentication follows the library's [AEAD API](https://cryptography.io/en/lates
 
 These tools were inspired by useful workflows in MobileRE-Skill, but are independent
 implementations. They do not execute upstream scripts or assume their runtime/API compatibility.
+
+For verified compressed input and output, see [Evidence archive storage](EVIDENCE-ARCHIVE.md).
+`evidence-review` accepts `--archive-member` for an archived plan and `--archive-out`
+instead of `--out`. Compressed review outputs retain consumed inputs and a derived
+`replay-plan.json`; original manifests and failed/partial task states remain intact.

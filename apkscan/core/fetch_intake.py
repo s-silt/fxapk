@@ -99,7 +99,7 @@ def _index(output: Path, receipt: dict) -> None:
 
 def run(archive: Path, output: Path, *, fxfetch: str = "fxfetch", fxapk: str | None = None,
         timeout: int = 600, review_manifest: Path | None = None,
-        progress: Callable[[dict], None] | None = None) -> dict:
+        progress: Callable[[dict], None] | None = None, retain_review_inputs: bool = False) -> dict:
     if not 1 <= timeout <= 3600:
         raise ValueError("intake_timeout_invalid")
     if output.exists():
@@ -246,7 +246,8 @@ def run(archive: Path, output: Path, *, fxfetch: str = "fxfetch", fxapk: str | N
                 review_stage.update(state="running", reason_codes=[])
                 publish()
                 reviewed = review_evidence(review_manifest, output / "targeted-review",
-                                           output / matches[0]["json_report_path"], progress, deadline=deadline)
+                                           output / matches[0]["json_report_path"], progress, deadline=deadline,
+                                           retain_inputs=retain_review_inputs)
                 review_stage.update(state=reviewed["state"], reason_codes=sorted({
                     reason for row in reviewed["tasks"] for reason in row["reason_codes"]}),
                     report_path="targeted-review/report.html")

@@ -1075,6 +1075,7 @@
   {% if manifest %}
   <section id="evidence-integrity">
     <h2>证据完整性 <span class="muted" style="font-size:13px;font-weight:400">（检材指纹 + 分析环境，供可复现 / 可回溯校验）</span></h2>
+    {% if manifest.get("archive_storage") %}<p>归档读取校验：{{ manifest.archive_storage.state }}。只核验本次所读成员的原始字节，不代表整个归档或采集来源已验证。</p>{% endif %}
     <div class="kv">
       <div class="k">检材 SHA-256</div><div class="mono-strong" style="font-size:11px">{{ manifest.get("sha256") or "—" }}</div>
       <div class="k">检材大小</div><div class="mono">{{ manifest.get("size") }} 字节</div>

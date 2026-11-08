@@ -226,20 +226,21 @@ def test_cli_digest_redacts_without_any_flag(tmp_path) -> None:
 
 
 def test_unredacted_command_docs_stay_in_sync() -> None:
-    """★P3-3：不脱敏名单在三处人工维护（frozenset / 本模块 docstring / AGENTS.md），
-    frozenset 与运行时接线之外的两份文档已经滞后过一次（link-candidates 只加了前者）。
-    锁住：frozenset 里每个命令的可辨识 token 必须同时出现在两份文档里。
-    """
+    """Keep raw-output inventories in agent/usage docs and link concise READMEs to them."""
     import apkscan.core.redact as redact_mod
 
     root = Path(__file__).resolve().parents[1]
     agents = (root / "AGENTS.md").read_text(encoding="utf-8")
     readme = (root / "README.md").read_text(encoding="utf-8")
     readme_en = (root / "README.en.md").read_text(encoding="utf-8")
+    usage = (root / "USAGE.md").read_text(encoding="utf-8")
+    usage_en = (root / "USAGE.en.md").read_text(encoding="utf-8")
+    assert "(USAGE.md#隐私与输出)" in readme and "## 隐私与输出" in usage
+    assert "(USAGE.en.md#privacy-and-output)" in readme_en and "## Privacy and output" in usage_en
     docstring = redact_mod.__doc__ or ""
     for command in sorted(redact_mod.UNREDACTED_AGENT_COMMANDS):
-        token = command.split()[-1]
+        token = command.split()[1] if "--evidence-values" in command else command.split()[-1]
         assert token in agents, f"AGENTS.md 的不脱敏出口名单缺 {command!r}"
         assert token in docstring, f"redact 模块 docstring 的名单缺 {command!r}"
-        assert token in readme, f"README.md 的不脱敏出口名单缺 {command!r}"
-        assert token in readme_en, f"README.en.md 的不脱敏出口名单缺 {command!r}"
+        assert token in usage, f"USAGE.md 的不脱敏出口名单缺 {command!r}"
+        assert token in usage_en, f"USAGE.en.md 的不脱敏出口名单缺 {command!r}"

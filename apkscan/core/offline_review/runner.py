@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Callable
 
 from apkscan.core.atomic import atomic_write_text
+from apkscan.core.evidence_archive import materialize, resolve_reference, split_reference
+from apkscan.core.json_io import REPORT_JSON_MAX_BYTES
 from apkscan.core.models import Report
 from apkscan.core.report_io import load_report
 from apkscan.report import html, json as report_json
@@ -85,7 +87,8 @@ def projection(value: object) -> dict | None:
         return None
     return {"state": value.get("state"), "coverage": "supplied_inputs_only",
             "source_binding_verified": False,
-            "tasks": [{key: row.get(key) for key in ("id", "kind", "state", "reason_codes", "input_sha256", "receipt_sha256")}
+            "tasks": [{key: row.get(key) for key in ("id", "kind", "state", "reason_codes", "input_sha256", "receipt_sha256", "storage_integrity", "input_storage")
+                       if key not in {"storage_integrity", "input_storage"} or row.get(key) is not None}
                       for row in value["tasks"] if isinstance(row, dict)],
             "not_requested": value.get("not_requested", [])}
 
@@ -95,7 +98,8 @@ def write_json(path: Path, value: object) -> None:
 
 
 def run(manifest: Path, output: Path, report_path: Path | None = None,
-        progress: Callable[[dict], None] | None = None, *, deadline: float | None = None) -> dict:
+        progress: Callable[[dict], None] | None = None, *, deadline: float | None = None,
+        retain_inputs: bool = False) -> dict:
     raw = read_bytes(manifest, 1024 * 1024)
     plan = json_value(raw)
     if not isinstance(plan, dict) or plan.get("schema_version") != "fxapk.offline-review.v1":
@@ -111,7 +115,7 @@ def run(manifest: Path, output: Path, report_path: Path | None = None,
         if not isinstance(task, dict) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", str(task.get("id", ""))):
             raise ValueError("task_identifier_invalid")
         identifier = task["id"].casefold()
-        if identifier in {"manifest", "review", "report", "digest", "feedback", "con", "prn", "aux", "nul"} or re.fullmatch(r"(?:com|lpt)[0-9]", identifier):
+        if identifier in {"manifest", "review", "report", "digest", "feedback", "replay-plan", "source-report", "con", "prn", "aux", "nul"} or re.fullmatch(r"(?:com|lpt)[0-9]", identifier):
             raise ValueError("reserved_task_identifier")
         if identifier in identifiers:
             raise ValueError("duplicate_task_identifier")
@@ -121,20 +125,28 @@ def run(manifest: Path, output: Path, report_path: Path | None = None,
         identifiers.add(identifier)
         if not isinstance(task.get("kind"), str) or len(task["kind"]) > 64:
             raise ValueError("task_kind_invalid")
-    report = load_report(report_path) if report_path else None
+    report = None
+    if report_path:
+        with materialize(report_path, limit=REPORT_JSON_MAX_BYTES) as local_report:
+            report = load_report(local_report)
     if report is not None and report.meta.get("sample_sha256") != sample:
         raise ValueError("review_report_sample_mismatch")
     if output.exists():
         raise ValueError("review_output_exists")
     output.mkdir(parents=True, exist_ok=False)
     (output / "manifest.json").write_bytes(raw)
+    replay = {**plan, "tasks": [dict(task) for task in tasks]}
+    if retain_inputs:
+        (output / "inputs").mkdir()
+        if report_path:
+            (output / "source-report.json").write_bytes(read_bytes(report_path, REPORT_JSON_MAX_BYTES))
     receipt = {"schema_version": "fxapk.offline-review-result.v1", "manifest_sha256": sha256(raw),
                "sample_sha256": sample, "state": "running", "source_binding_verified": False,
                "not_requested": sorted(set(REVIEWERS) - {task["kind"] for task in tasks}),
                "tasks": [{"id": task["id"], "kind": task["kind"], "state": "not_run",
                           "reason_codes": ["awaiting_execution"]} for task in tasks]}
     write_json(output / "review.json", receipt)
-    for task, row in zip(tasks, receipt["tasks"]):
+    for task, replay_task, row in zip(tasks, replay["tasks"], receipt["tasks"]):
         row.update(state="running", reason_codes=[])
         write_json(output / "review.json", receipt)
         if progress:
@@ -152,12 +164,20 @@ def run(manifest: Path, output: Path, report_path: Path | None = None,
                 source = task.get("input")
                 if not isinstance(source, str) or not source:
                     raise ValueError("review_input_required")
-                input_path = Path(source)
-                if not input_path.is_absolute():
-                    input_path = manifest.parent / input_path
+                reference = resolve_reference(manifest, source)
+                parsed = split_reference(reference)
+                input_path = parsed[0] if parsed else Path(reference)
                 if input_path.resolve().is_relative_to(output.resolve()):
                     raise ValueError("review_input_inside_output")
-                source_data = read_bytes(input_path)
+                if parsed:
+                    row.update(input_storage="archive_member", storage_integrity="pending")
+                source_data = read_bytes(Path(reference))
+                if retain_inputs:
+                    retained = f"inputs/{row['id']}.bin"
+                    (output / retained).write_bytes(source_data)
+                    replay_task["input"] = retained
+                if parsed:
+                    row.update(input_storage="archive_member", storage_integrity="verified")
                 row["input_sha256"] = sha256(source_data)
                 row["input_size"] = len(source_data)
                 expected = task.get("sha256")
@@ -175,8 +195,12 @@ def run(manifest: Path, output: Path, report_path: Path | None = None,
             # A broken parser must not silently remove this stage or suppress later tasks.
             code = str(error) if isinstance(error, ValueError) and re.fullmatch(r"[a-z_]{1,80}", str(error)) else "review_failed"
             detail = result("failed", [code], exception_type=type(error).__name__)
+            if row.get("storage_integrity") == "pending":
+                row["storage_integrity"] = "failed"
         detail.update(id=row["id"], kind=row["kind"], input_sha256=row.get("input_sha256"),
                       source_binding_verified=False)
+        if "input_storage" in row:
+            detail.update(input_storage=row["input_storage"], storage_integrity=row["storage_integrity"])
         detail_path = output / f"{row['id']}.json"
         write_json(detail_path, detail)
         row.update(state=detail["state"], reason_codes=detail["reason_codes"],
@@ -189,6 +213,8 @@ def run(manifest: Path, output: Path, report_path: Path | None = None,
                         "failed" if "failed" in states and not states & {"ok", "partial"} else "partial")
     write_json(output / "review.json", receipt)
     write_json(output / "feedback.json", feedback(receipt))
+    if retain_inputs:
+        write_json(output / "replay-plan.json", replay)
     if report is None:
         report = Report(package_name="offline-evidence-review", meta={}, leads=[], endpoints=[], findings=[], analyzer_status=[])
         report.meta["sample_sha256"] = sample

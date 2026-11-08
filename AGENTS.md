@@ -51,6 +51,8 @@ fxapk（命令别名 `apkscan`）是 APK 调证取证分析 CLI：按能力门�
 
 恢复链逐阶段保留失败、零命中、超时、未执行和来源未绑定，后续成功不覆盖前段缺口。`unpack` 已取得 DEX 而请求的重分析失败时返回 error，原始产物继续保留。选定范围恢复、合成样本验收、真实样本验收及案件闭环分别报告；模拟原函数不等于独立算法，字段/符号候选不等于完整结构或原始名称。
 
+归档入口：`evidence pack|verify|extract|analyze|case-verify|corpus-add`；默认 Zstd 6，旧工具用 `--compression deflate`。`capture` / `recover-runtime` / `intake-fetch` / `evidence-review` 的 `--archive-out` 与 `--out` 二选一，`--archive-compression deflate` 可改格式。`archive.zip::member` 先校验选中成员再读取，不向本机外部路径回退。存储成功不提升业务、闭环或复核状态；归档原值与源路径未脱敏。仅清理已成功归档的本次暂存目录，不删除既有证据。完整边界见 [EVIDENCE-ARCHIVE.md](EVIDENCE-ARCHIVE.md)。
+
 ## 4. 案件分析流程与闭环口径
 
 **调证优先级**（覆盖工具默认的高敏物证优先）：

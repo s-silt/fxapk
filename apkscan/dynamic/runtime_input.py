@@ -33,6 +33,14 @@ def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def read_runtime_input(path: Path) -> RuntimePayload | RuntimeReadFailure:
     try:
+        if "::" in str(path):
+            from apkscan.core.evidence_archive import ArchiveError, read_reference
+
+            try:
+                raw = read_reference(path, REPORT_JSON_MAX_BYTES)
+            except ArchiveError as error:
+                return RuntimeReadFailure(str(error))
+            return _parse_runtime(raw, path)
         if path.is_symlink():
             return RuntimeReadFailure("runtime_report_unsafe_file")
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
@@ -45,12 +53,7 @@ def read_runtime_input(path: Path) -> RuntimePayload | RuntimeReadFailure:
             raw = read_limited(stream, REPORT_JSON_MAX_BYTES)
         if len(raw) > REPORT_JSON_MAX_BYTES:
             return RuntimeReadFailure("runtime_report_size_limit")
-        value = loads_bounded(raw.decode("utf-8"), object_pairs_hook=_unique_object,
-                              parse_float=parse_finite_json_float,
-                              parse_constant=reject_nonfinite_json_constant)
-        if not isinstance(value, dict):
-            return RuntimeReadFailure("runtime_report_invalid_root")
-        return RuntimePayload(value, raw, str(path))
+        return _parse_runtime(raw, path)
     except FileNotFoundError:
         return RuntimeReadFailure("runtime_report_missing")
     except BoundedJsonError:
@@ -59,6 +62,15 @@ def read_runtime_input(path: Path) -> RuntimePayload | RuntimeReadFailure:
         return RuntimeReadFailure("runtime_report_invalid_json")
     except OSError:
         return RuntimeReadFailure("runtime_report_read_failed")
+
+
+def _parse_runtime(raw: bytes, path: Path) -> RuntimePayload | RuntimeReadFailure:
+    value = loads_bounded(raw.decode("utf-8"), object_pairs_hook=_unique_object,
+                          parse_float=parse_finite_json_float,
+                          parse_constant=reject_nonfinite_json_constant)
+    if not isinstance(value, dict):
+        return RuntimeReadFailure("runtime_report_invalid_root")
+    return RuntimePayload(value, raw, str(path))
 
 
 def input_receipt(payload: object) -> dict[str, Any]:
