@@ -1126,7 +1126,9 @@ def brand_hints_from_events(events: list[dict[str, Any]]) -> list[str]:
             continue
         try:
             obj = json.loads(text)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, RecursionError):
+            # ★RecursionError：超深嵌套明文（如 "[[[...]]]"]）会让 json.loads 抛
+            #   非 ValueError 异常；单条事件的解析失败绝不能中断整个品牌线索抽取。
             obj = None
         if obj is not None:
             for key, val in _walk_strings(obj):
@@ -1153,17 +1155,34 @@ def _plaintext_of(event: dict[str, Any]) -> str:
     return raw.decode("utf-8", errors="ignore")
 
 
+#: ``_walk_strings`` 迭代遍历的深度上限：更深的分支直接跳过（品牌键都在浅层；
+#: 深到这里的结构对线索抽取无意义，且递归实现会撞 RecursionError 中断解密阶段）。
+_WALK_STRINGS_MAX_DEPTH = 256
+
+
 def _walk_strings(obj: Any, key: str = "") -> list[tuple[str, str]]:
-    """递归收集 JSON 里的 (key, str_value) 对（与 merge._walk_json_strings 同范式）。"""
+    """迭代收集 JSON 里的 (key, str_value) 对（与 merge._walk_json_strings 同范式）。
+
+    ★不用递归：攻击者可在明文里放几百层嵌套 JSON，递归 ``_walk_strings`` 会抛
+    RecursionError 逃逸出去、让 merge 的整个解密阶段被跳过。显式栈 + 深度上限，
+    子节点逆序入栈以保持与递归版一致的 DFS 产出顺序。
+    """
     out: list[tuple[str, str]] = []
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            out.extend(_walk_strings(v, str(k)))
-    elif isinstance(obj, list):
-        for item in obj:
-            out.extend(_walk_strings(item, key))
-    elif isinstance(obj, str):
-        out.append((key, obj))
+    stack: list[tuple[Any, str, int]] = [(obj, key, 0)]
+    while stack:
+        node, k, depth = stack.pop()
+        if isinstance(node, dict):
+            if depth >= _WALK_STRINGS_MAX_DEPTH:
+                continue
+            for ck, cv in reversed(list(node.items())):
+                stack.append((cv, str(ck), depth + 1))
+        elif isinstance(node, list):
+            if depth >= _WALK_STRINGS_MAX_DEPTH:
+                continue
+            for item in reversed(node):
+                stack.append((item, k, depth + 1))
+        elif isinstance(node, str):
+            out.append((k, node))
     return out
 
 

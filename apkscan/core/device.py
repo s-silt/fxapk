@@ -1,7 +1,7 @@
 """动态能力探测助手：设备 / Frida / mitmproxy 是否可用。
 
 设计铁律：
-- 纯 subprocess + shutil.which，全部 try/except + logging + 超时，**绝不抛异常**，
+- 纯 subprocess + tools.safe_which，全部 try/except + logging + 超时，**绝不抛异常**，
   探测不到一律返回安全默认值（False / 空列表）。
 - 本模块**不得 import apkscan.core.registry**（registry 反过来 import 本模块，避免循环导入）。
 
@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 import re
-import shutil
 import subprocess
 import time
 from dataclasses import dataclass
@@ -120,14 +119,14 @@ def _run(
     """运行外部命令并捕获输出。任何失败（缺命令/超时/非零退出/异常）返回 None，绝不抛。
 
     ``adb`` 走 tools.adb_path()（frozen 用同目录随包 adb.exe，源码用 PATH）；
-    其它命令仍走 shutil.which。
+    其它命令走 tools.safe_which（cwd 投放防护，同 adb 口径）。
     """
     if not args:
         exe = None
     elif args[0] == "adb":
         exe = tools.adb_path() or None
     else:
-        exe = shutil.which(args[0])
+        exe = tools.safe_which(args[0])
     if exe is None:
         logger.debug("命令不在 PATH，跳过：%s", args[0] if args else "(空)")
         return None

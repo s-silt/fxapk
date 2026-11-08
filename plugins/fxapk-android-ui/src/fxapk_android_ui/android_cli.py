@@ -1,12 +1,12 @@
 """Narrow subprocess adapter for the official Android CLI."""
 from __future__ import annotations
 
-import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from apkscan.core.proctree import run_owned
+from apkscan.core import tools
 
 
 @dataclass(frozen=True)
@@ -31,7 +31,7 @@ class CommandResult:
 
 class AndroidCli:
     def __init__(self, executable: str | None = None, *, timeout_sec: float = 15.0, deadline: float | None = None) -> None:
-        self.executable = executable or shutil.which("android") or shutil.which("android.exe")
+        self.executable = executable or tools.safe_which("android") or tools.safe_which("android.exe")
         self.timeout_sec = timeout_sec
         self.deadline = deadline
 

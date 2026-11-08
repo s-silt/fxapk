@@ -20,6 +20,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
+from apkscan.core import tools
 
 if TYPE_CHECKING:
     from apkscan.core.models import Report
@@ -65,7 +66,7 @@ _KNOWN_PATHS: tuple[str, ...] = (
 def find_browser() -> str | None:
     """定位一个 Chromium 系浏览器可执行文件；找不到返回 None。"""
     for cmd in _BROWSER_COMMANDS:
-        found = shutil.which(cmd)
+        found = tools.safe_which(cmd)
         if found:
             return found
     for path in _KNOWN_PATHS:

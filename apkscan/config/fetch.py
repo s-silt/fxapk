@@ -19,6 +19,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import socket
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -72,15 +73,15 @@ def _ip_is_blocked(addr: _IpAddr) -> bool:
     return any(_ip_is_blocked(v4) for v4 in _embedded_ipv4(addr))
 
 
-def _target_is_safe(url: str) -> tuple[bool, str]:
-    """★SSRF 预解析校验：解析 host 的所有地址，任一落受限段即拒（防被诱导访问内网/窃取云 IAM 凭据）。
+def _checked_addresses(url: str) -> tuple[list[_IpAddr], str]:
+    """解析 host 的全部地址并逐一过 ``_ip_is_blocked``；返回 ``(地址列表, 拒绝原因)``。
 
-    IP 字面量直接判；域名走 getaddrinfo，**全部**解析地址都须安全才放行。解析失败 → 拒。
-    这是第一层；DNS-rebinding（预检判公网、连接时返内网）由连接层 ``_assert_peer_public`` 兜底。绝不抛。
+    地址列表供调用方**固定连接**——预检通过的 IP 直接交给连接层，消除
+    「预检解析一次、连接再解析一次」之间的 DNS rebinding 窗口。
     """
     host = urlsplit(url).hostname if isinstance(url, str) else None
     if not host:
-        return False, "无法解析 host"
+        return [], "无法解析 host"
     candidates: list[_IpAddr] = []
     try:
         candidates.append(ipaddress.ip_address(host))  # host 是 IP 字面量
@@ -92,13 +93,23 @@ def _target_is_safe(url: str) -> tuple[bool, str]:
                 except ValueError:
                     continue
         except (socket.gaierror, OSError):
-            return False, "DNS 解析失败"
+            return [], "DNS 解析失败"
     if not candidates:
-        return False, "无可解析地址"
+        return [], "无可解析地址"
     for ip in candidates:
         if _ip_is_blocked(ip):
-            return False, f"目标解析到非公网地址 {ip}"
-    return True, ""
+            return [], f"目标解析到非公网地址 {ip}"
+    return candidates, ""
+
+
+def _target_is_safe(url: str) -> tuple[bool, str]:
+    """★SSRF 预解析校验：解析 host 的所有地址，任一落受限段即拒（防被诱导访问内网/窃取云 IAM 凭据）。
+
+    IP 字面量直接判；域名走 getaddrinfo，**全部**解析地址都须安全才放行。解析失败 → 拒。
+    这是第一层；DNS-rebinding（预检判公网、连接时返内网）由连接层 ``_assert_peer_public`` 兜底。绝不抛。
+    """
+    candidates, why = _checked_addresses(url)
+    return bool(candidates), why
 
 
 class _BlockedPeerError(Exception):
@@ -232,18 +243,48 @@ def fetch_config_object(
         declared = resp.headers.get("Content-Length")
         if declared is not None and declared.isdigit() and int(declared) > max_bytes:
             return FetchResult(url, False, None, status, f"响应体过大（声明 {declared}B > 上限 {max_bytes}B）")
-        chunks: list[bytes] = []
-        total = 0
-        for chunk in resp.iter_content(_CHUNK):
-            if time.monotonic() > deadline:
-                return FetchResult(url, False, None, status, "下载总时限超限，已中止（慢速滴流防护）")
-            if not chunk:
-                continue
-            total += len(chunk)
-            if total > max_bytes:
-                return FetchResult(url, False, None, status, f"响应体超上限 {max_bytes}B，已中止下载")
-            chunks.append(chunk)
-        return FetchResult(url, True, b"".join(chunks), status, None)
+
+        # ★墙钟看门狗：慢速滴流（每次 recv 都有数据、但永远凑不满一个 chunk）会让
+        #   iter_content 内部的 read() 一直阻塞，分块循环里的 deadline 检查永远轮不到。
+        #   到点由旁路线程 shutdown 底层 socket，让阻塞中的 recv 立即报错返回。
+        done = threading.Event()
+
+        def _deadline_guard() -> None:
+            if done.wait(timeout=max(0.0, deadline - time.monotonic())):
+                return
+            try:
+                raw = getattr(resp, "raw", None)
+                fp = getattr(raw, "_fp", None)
+                buf = getattr(fp, "fp", None)
+                sock_io = getattr(buf, "raw", None)
+                sock = getattr(sock_io, "_sock", None)
+                if sock is not None:
+                    sock.shutdown(socket.SHUT_RDWR)
+                    sock.close()
+            except Exception:  # noqa: BLE001 — 解包失败仍走 resp.close() 兜底
+                pass
+            try:
+                resp.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+        guard = threading.Thread(target=_deadline_guard, daemon=True)
+        guard.start()
+        try:
+            chunks: list[bytes] = []
+            total = 0
+            for chunk in resp.iter_content(_CHUNK):
+                if time.monotonic() > deadline:
+                    return FetchResult(url, False, None, status, "下载总时限超限，已中止（慢速滴流防护）")
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > max_bytes:
+                    return FetchResult(url, False, None, status, f"响应体超上限 {max_bytes}B，已中止下载")
+                chunks.append(chunk)
+            return FetchResult(url, True, b"".join(chunks), status, None)
+        finally:
+            done.set()
     except Exception as exc:  # noqa: BLE001 — requests 各类异常（含 rebinding 掐断）一律降级，绝不抛
         logger.warning(
             "[remote_config] 下载失败 %s：%s",

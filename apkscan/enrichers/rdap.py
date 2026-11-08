@@ -27,12 +27,11 @@ import logging
 import os
 import threading
 import time
-from pathlib import Path
 from typing import Any
 
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
-from apkscan.enrichers import _http
+from apkscan.enrichers import _cache, _http
 from apkscan.enrichers.whois import query_whois
 
 #: 本模块 ``requests`` 符号 = 有界 shim（get 流式限体，codex B1）。RDAP 查询另叠重定向 SSRF 守卫（B3）。
@@ -48,7 +47,7 @@ RDAP_TIMEOUT = 8
 RDAP_URL = "https://rdap.org/domain/{domain}"
 
 #: 本地缓存目录与文件。
-CACHE_DIR = Path(".apkscan_cache")
+CACHE_DIR = _cache.cache_root() / "enrichment"
 CACHE_FILE = CACHE_DIR / "rdap.json"
 
 #: RDAP 富化缓存 TTL（秒）。域名注册方会随过户/转移而变——无 TTL 会把首次注册人永久固化，
@@ -216,18 +215,7 @@ class RdapEnricher(BaseEnricher):
         """读缓存文件。★必须持 self._lock 调用：Windows 下读句柄 open 与另一线程的
         os.replace(rdap.json) 撞同一文件会抛 PermissionError(WinError 5)/Errno 13，
         让缓存静默丢失。读写共用一把锁消除该重叠窗口；enrich() 经 _load_cache_locked 进入。"""
-        if not CACHE_FILE.is_file():
-            return {}
-        try:
-            text = CACHE_FILE.read_text(encoding="utf-8")
-            data = json.loads(text)
-        except Exception:
-            logger.warning("RDAP 缓存读取/解析失败，忽略：%s", CACHE_FILE, exc_info=True)
-            return {}
-        if not isinstance(data, dict):
-            logger.warning("RDAP 缓存顶层非 dict，忽略：%s", CACHE_FILE)
-            return {}
-        return data
+        return _cache.read_cache_json(CACHE_FILE)
 
     def _load_cache_locked(self) -> dict[str, dict[str, Any]]:
         """持锁读缓存，供 enrich() 的命中检查用，避免与并发写的 os.replace 撞车。"""

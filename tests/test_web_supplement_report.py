@@ -751,3 +751,42 @@ def test_supplement_carries_dex_receipt_and_attach_verifies(
     final = tmp_path / "final"
     attachment.attach(bundle_b, supplemented / "report.json", final)
     assert (final / "dex-query" / f"{receipt_id}.json").read_bytes() == blob
+
+
+def test_duplicate_observation_entries_read_tree_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★sfind-d6777611：web_observations 同 sha 重复条目只触发一次整树读取，
+    逐条目声明仍各自核对。"""
+    import apkscan.core.web_supplement_report as wsr
+
+    calls = {"n": 0}
+    real_bounded = wsr._bounded_files
+
+    def counting(root: Path) -> dict[str, bytes]:
+        calls["n"] += 1
+        return real_bounded(root)
+
+    monkeypatch.setattr(wsr, "_bounded_files", counting)
+    monkeypatch.setattr(wsr, "_validate_manifest", lambda *_a, **_k: None)
+    monkeypatch.setattr(wsr, "_verify_context_binding", lambda *_a, **_k: None)
+
+    sha = "ab" * 32
+    tree = tmp_path / "case" / "external_observations" / sha
+    tree.mkdir(parents=True)
+    manifest = b'{"schema_version": "fxapk-web-observation-manifest/1"}\n'
+    (tree / "manifest.json").write_bytes(manifest)
+    claimed = hashlib.sha256(manifest).hexdigest()
+    entry = {
+        "source_sha256": sha,
+        "bundle_relative_path": f"external_observations/{sha}/",
+        "manifest_sha256": claimed,
+    }
+    payload = {"meta": {"web_observations": [dict(entry) for _ in range(5)]}}
+    wsr._verify_attachment_claims(payload, tmp_path / "case")
+    assert calls["n"] == 1, "同 sha 重复条目重复读取整树"
+
+    # 逐条目声明仍被核对：把其中一条的 manifest_sha256 改错必须拒绝。
+    bad = {"meta": {"web_observations": [dict(entry), {**entry, "manifest_sha256": "cd" * 32}]}}
+    with pytest.raises(wsr.SupplementRefusal):
+        wsr._verify_attachment_claims(bad, tmp_path / "case")

@@ -352,3 +352,45 @@ def test_peer_guard_mixin_invokes_check_on_new_conn() -> None:
     guarded = type("_G", (mixin, _Base), {})
     with pytest.raises(fetchmod._BlockedPeerError):
         guarded()._new_conn()
+
+
+def test_fetch_deadline_guard_aborts_blocked_stream(monkeypatch) -> None:
+    """慢速滴流回归（sfind-c4cef2c0）：iter_content 永远阻塞在读里时，
+    墙钟看门狗必须在 deadline 到点掐断——分块循环的 deadline 检查根本轮不到。"""
+    import threading
+
+    pytest.importorskip("requests")
+    from apkscan.config import fetch as fetchmod
+
+    release = threading.Event()
+
+    class _BlockingResp(_FakeResp):
+        def iter_content(self, _n):
+            release.wait(60)  # 模拟滴流：recv 永远有数据但永远读不完，阻塞在这里
+            yield b"x"
+
+        def close(self):
+            release.set()  # 看门狗到点调 close() → 阻塞的读必须解开
+
+    _patch_session_get(monkeypatch, lambda self, *a, **k: _BlockingResp(200, {}, ()))
+    # monotonic：第 1 次算 deadline（0→deadline=30s），第 2 次看门狗取剩余（29.95→0.05s），
+    # 之后循环检查/兜底全返回 1e9（远超 deadline → 中止）。
+    vals = iter([0.0, 29.95] + [1e9] * 200)
+    monkeypatch.setattr(fetchmod.time, "monotonic", lambda: next(vals, 1e9))
+
+    r = fetch_config_object(_PUB)
+    assert r.ok is False
+
+
+def test_remote_config_fetch_count_is_capped(monkeypatch, tmp_path) -> None:
+    """pipeline 抓取上限回归（sfind-c4cef2c0）：候选无上限时时只下载前 N 个。"""
+    urls = [f"https://cfg.example.com/c{i}.dat" for i in range(10)]
+    monkeypatch.setattr(
+        pipeline, "fetch_config_object",
+        lambda url, **k: FetchResult(url, False, None, None, "HTTP 404"),
+    )
+    st = _state(online=True, mode=ANALYSIS_MODE_AUTHORIZED_ACTIVE,
+                urls=urls, out_dir=str(tmp_path))
+    pipeline._stage_remote_config_fetch(st)
+    assert len(st.meta["remote_config_artifacts"]) == pipeline._MAX_REMOTE_CONFIG_FETCHES
+    assert st.meta["remote_config_fetch_capped"] == 10 - pipeline._MAX_REMOTE_CONFIG_FETCHES

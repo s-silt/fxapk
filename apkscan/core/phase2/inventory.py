@@ -90,6 +90,7 @@ class Phase1Package:
     directory_name: str
     manifest_sha256: str
     report_sha256: str
+    report_relpath: str = "report.json"
 
 
 @dataclass
@@ -627,13 +628,14 @@ def build_inventory(
                 manifest_case_ids[child.name] = manifest_case_id
         seen_packages.add(package_id)
         manifest_sha = sha256_hex(manifest_raw)
+        report_rel = report_path.relative_to(child.resolve()).as_posix()
         package = Phase1Package(
-            package_id, child.name, manifest_sha, sha256_hex(report_raw)
+            package_id, child.name, manifest_sha, sha256_hex(report_raw), report_rel
         )
         inv.packages.append(package)
         _collect_report_candidates(
             inv, package_id, manifest_sha, report,
-            report_path.relative_to(child.resolve()).as_posix(), child.name, limits
+            report_rel, child.name, limits
         )
     _resolve_case_id(
         inv, case_id, manifest_case_ids, strict=verify_packages, fallback=case_id or root.name

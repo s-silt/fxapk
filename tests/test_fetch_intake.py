@@ -113,7 +113,7 @@ def test_review_manifest_is_consumed_after_matching_apk_and_visible(tmp_path, mo
 def test_missing_cli_has_terminal_failure_receipt(tmp_path, monkeypatch):
     path = tmp_path / "source.zip"
     path.write_bytes(b"synthetic")
-    monkeypatch.setattr(fetch_intake.shutil, "which", lambda value: None)
+    monkeypatch.setattr(fetch_intake.tools.shutil, "which", lambda value: None)
     result = fetch_intake.run(path, tmp_path / "out")
     assert result["reason_code"] == "executable_unavailable"
     assert result["stages"][1]["reason_codes"] == ["executable_unavailable"]

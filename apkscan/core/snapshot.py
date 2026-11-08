@@ -54,6 +54,11 @@ _MAX_PREREAD_BYTES = 32 * 1024 * 1024
 #: 64MB 远超实测整包文本 ~8MB，只挡病态累加。
 _MAX_SNAPSHOT_TOTAL_BYTES = 64 * 1024 * 1024
 
+#: 预读失败/超大丢弃读数上限：读异常、返回 None、解压后超 _MAX_PREREAD_BYTES 被丢弃都计一次。
+#: 聚合解压预算管真实膨胀工作量，但「快速失败」的条目不耗解压预算——条目数本身无上限，
+#: 仍需一个有界停止条件（正确性不受影响：剩余文件落 worker 惰性兜底）。
+_MAX_BAD_PREREAD_READS = 64
+
 
 class SnapshotContext:
     """可 pickle 的 AnalysisContext 快照；未预读文件按解析策略惰性读取。"""
@@ -136,6 +141,9 @@ class SnapshotContext:
         self.file_read_ledger = FileReadLedger(read_failures)
         # worker 内惰性 APK 句柄（不 pickle）：None=未建，False=建过但失败，否则为 APK 实例。
         self._worker_apk: Any = None
+        # 本 worker 已计入的非 DEX 实际解压字节数（聚合 zip 炸弹预算的跨读累计器；
+        # int 可 pickle，随快照分发后各 worker 独立累计）。
+        self._lazy_other_extract_bytes = 0
         # 遗留模式可在 worker 惰性建表；隔离模式接收 parser child 物化的表。
         self._worker_declared_sizes: dict[str, int] | None = (
             dict(declared_sizes) if declared_sizes is not None else None
@@ -236,8 +244,20 @@ class SnapshotContext:
         if apk is None:
             self.file_read_ledger.record_failure(path, "unavailable_context")
             return None
-        from apkscan.core.apk import ZipEntryTooLargeError
+        from apkscan.core.apk import (
+            ZipEntryTooLargeError,
+            _OTHER_TOTAL_LIMIT_BYTES,
+            _other_extract_total_bytes,
+        )
 
+        # ★聚合解压预算：单文件上限管不住「每条都不超限、条目数无上限」的 zip 炸弹。
+        #   本 worker 的累计计数器随每次惰性读递增，触顶后不再发起新读。
+        #   getattr 兜底：测试可用 __new__ 构造不完整实例。
+        charged_so_far = getattr(self, "_lazy_other_extract_bytes", 0)
+        if charged_so_far >= _OTHER_TOTAL_LIMIT_BYTES:
+            self.file_read_ledger.record_failure(path, "decompression_budget")
+            return None
+        token = _other_extract_total_bytes.set(charged_so_far)
         try:
             data = apk.get_file(path)
             if data is None:
@@ -255,6 +275,11 @@ class SnapshotContext:
             logger.debug("snapshot 惰性 read_file 未命中：%s", path, exc_info=True)
             self.file_read_ledger.record_failure(path, "read_failure")
             return None
+        finally:
+            charged = _other_extract_total_bytes.get()
+            _other_extract_total_bytes.reset(token)
+            if charged is not None:
+                self._lazy_other_extract_bytes = charged  # type: ignore[attr-defined]
 
     def _ensure_declared_sizes(self) -> dict[str, int]:
         """按模式取得 zip 声明大小表并缓存；隔离模式只用父进程传入的表。
@@ -333,50 +358,65 @@ def build_snapshot(ctx: Any) -> SnapshotContext:
     except Exception:  # noqa: BLE001 — 枚举失败不致命（worker 惰性兜底）
         logger.warning("snapshot 枚举文件表失败，依赖 worker 惰性 read_file 兜底", exc_info=True)
 
+    from apkscan.core.apk import _other_extract_total_bytes
+
     total = 0
-    for path in file_list:
-        if not isinstance(path, str):
-            continue
-        low = path.lower()
-        if low.endswith(".dex") or not low.endswith(_TEXT_SUFFIXES):
-            continue
-        if total >= _MAX_SNAPSHOT_TOTAL_BYTES:
-            break
-        size_getter = getattr(ctx, "declared_size", None)
-        if callable(size_getter):
-            try:
-                declared = size_getter(path)
-            except Exception:
-                declared = None
-            if isinstance(declared, int) and declared > min(
-                _MAX_PREREAD_BYTES, _MAX_SNAPSHOT_TOTAL_BYTES - total,
-            ):
+    bad_reads = 0
+    # ★聚合解压预算作用域：预读循环内所有非 DEX read_file 的真实解压产出计入同一
+    #   预算（含被丢弃与失败的读）。中央目录声明可低报骗过前置检查，只有 shim 按
+    #   实际产出累计才可信——「每条都不超单文件上限、条目数无上限」的聚合炸弹在此截停。
+    extract_token = _other_extract_total_bytes.set(0)
+    try:
+        for path in file_list:
+            if not isinstance(path, str):
                 continue
-        try:
-            data = ctx.read_file(path)
-        except Exception:  # noqa: BLE001 — 单文件预读失败跳过，worker 内惰性兜底仍可读
-            if isinstance(ledger, FileReadLedger):
-                ledger.record_failure(path, "read_failure")
-            continue
-        if data is None:
-            if isinstance(ledger, FileReadLedger):
-                if ledger.failure_for(path) is None:
-                    ledger.record_failure(path, "unavailable_context")
-            continue
-        if len(data) > _MAX_PREREAD_BYTES:
-            # 后缀属文本白名单但内容超大（如伪装成 *.key/*.map 的二进制）：不收进快照，避免随
-            # pickle ×worker 数放大致 OOM；worker 惰性兜底仍可按需读到完整字节，正确性不受影响。
-            logger.debug("snapshot 跳过超大预读文件（worker 惰性兜底）：%s（%d 字节）", path, len(data))
-            continue
-        if total + len(data) > _MAX_SNAPSHOT_TOTAL_BYTES:
-            # 预读累计达总上限：停止预读，剩余文件落 worker 惰性兜底。防恶意样本用多个伪装大文件
-            # 把快照（= worker 内存封顶公式输入）撑大反噬封顶。正确性不受影响（惰性仍可读）。
-            logger.debug(
-                "snapshot 预读累计达总上限 %d 字节，剩余文件落 worker 惰性兜底", _MAX_SNAPSHOT_TOTAL_BYTES
-            )
-            break
-        files[path] = data
-        total += len(data)
+            low = path.lower()
+            if low.endswith(".dex") or not low.endswith(_TEXT_SUFFIXES):
+                continue
+            if total >= _MAX_SNAPSHOT_TOTAL_BYTES or bad_reads >= _MAX_BAD_PREREAD_READS:
+                break
+            size_getter = getattr(ctx, "declared_size", None)
+            if callable(size_getter):
+                try:
+                    declared = size_getter(path)
+                except Exception:
+                    declared = None
+                if isinstance(declared, int) and declared > min(
+                    _MAX_PREREAD_BYTES, _MAX_SNAPSHOT_TOTAL_BYTES - total,
+                ):
+                    continue
+            try:
+                data = ctx.read_file(path)
+            except Exception:  # noqa: BLE001 — 单文件预读失败跳过，worker 内惰性兜底仍可读
+                bad_reads += 1
+                if isinstance(ledger, FileReadLedger):
+                    ledger.record_failure(path, "read_failure")
+                continue
+            if data is None:
+                bad_reads += 1
+                if isinstance(ledger, FileReadLedger):
+                    if ledger.failure_for(path) is None:
+                        ledger.record_failure(path, "unavailable_context")
+                continue
+            # ★真实解压产出无论收不收进快照都计入预读总预算——被丢弃的大文件同样
+            #   是真实解压工作，不能让「解压后丢弃」绕过 64MiB 总量闸。
+            total += len(data)
+            if len(data) > _MAX_PREREAD_BYTES:
+                # 后缀属文本白名单但内容超大（如伪装成 *.key/*.map 的二进制）：不收进快照，避免随
+                # pickle ×worker 数放大致 OOM；worker 惰性兜底仍可按需读到完整字节，正确性不受影响。
+                bad_reads += 1
+                logger.debug("snapshot 跳过超大预读文件（worker 惰性兜底）：%s（%d 字节）", path, len(data))
+                continue
+            if total > _MAX_SNAPSHOT_TOTAL_BYTES:
+                # 预读累计达总上限：停止预读，剩余文件落 worker 惰性兜底。防恶意样本用多个伪装大文件
+                # 把快照（= worker 内存封顶公式输入）撑大反噬封顶。正确性不受影响（惰性仍可读）。
+                logger.debug(
+                    "snapshot 预读累计达总上限 %d 字节，剩余文件落 worker 惰性兜底", _MAX_SNAPSHOT_TOTAL_BYTES
+                )
+                break
+            files[path] = data
+    finally:
+        _other_extract_total_bytes.reset(extract_token)
 
     records = tuple(iter_dex_records(ctx))
     return SnapshotContext(

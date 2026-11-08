@@ -7,7 +7,7 @@ import time
 from typing import Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
-from apkscan.config.fetch import _target_is_safe
+from apkscan.config.fetch import _checked_addresses
 
 _HEADER_ALLOWLIST = {"content-type", "content-length", "location", "server", "cache-control", "content-encoding"}
 
@@ -40,10 +40,14 @@ def _new_session() -> Any:
             self.connections = []
         def clear(self):
             pass  # No cookie jar, authentication or environment proxy is used.
-        def get(self, url, *, stream, allow_redirects, timeout, headers):
+        def get(self, url, *, stream, allow_redirects, timeout, headers, connect_ip=None):
             if allow_redirects is not False:
                 raise ValueError("automatic_redirects_forbidden")
             request = origin_check._url(url)
+            if connect_ip:
+                # ★固定连接到预检通过的地址：_resolve 走 connect_ip 分支，不再二次
+                #   getaddrinfo——消除预检/连接两次解析间的 DNS rebinding 窗口。
+                request["connect_ip"] = connect_ip
             address = origin_check._resolve(request)
             connection = origin_check._PinnedConnection(request, address, timeout=min(timeout))
             self.connections.append(connection)
@@ -105,10 +109,11 @@ def capture_http(url: str, *, authorized: bool = False,
                 result["_capture"]["gaps"].append("redirect_cycle")
                 break
             seen.add(url)
-            safe, _reason = _target_is_safe(url)
-            if not safe:
+            addresses, _reason = _checked_addresses(url)
+            if not addresses:
                 result["_capture"]["gaps"].append("target_not_verified_public")
                 break
+            pinned_ip = str(addresses[0])
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 result["_capture"]["gaps"].append("time_budget_exceeded")
@@ -121,7 +126,8 @@ def capture_http(url: str, *, authorized: bool = False,
                 result["_capture"]["network_requests"] += 1
                 response = session.get(url, stream=True, allow_redirects=False,
                                        timeout=(min(10.0, remaining), min(10.0, remaining)),
-                                       headers={"User-Agent": "fxapk-authorized-evidence/1"})
+                                       headers={"User-Agent": "fxapk-authorized-evidence/1"},
+                                       connect_ip=pinned_ip)
                 body = bytearray()
                 truncated = False
                 while True:

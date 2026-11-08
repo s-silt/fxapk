@@ -171,18 +171,23 @@ def run(manifest: Path, output: Path, report_path: Path | None = None,
                     raise ValueError("review_input_inside_output")
                 if parsed:
                     row.update(input_storage="archive_member", storage_integrity="pending")
+                # ★先校验后留存：task["sha256"] 必须是 64 位小写 hex，且实际字节哈希
+                #   与之一致，才允许把输入写进 inputs/ 并打包进证据归档——否则未验证的
+                #   任意本地文件（如 ../../.env）会先被复制、再随归档外泄。
+                expected = task.get("sha256")
+                if not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+                    raise ValueError("review_input_hash_mismatch")
                 source_data = read_bytes(Path(reference))
+                row["input_sha256"] = sha256(source_data)
+                row["input_size"] = len(source_data)
+                if expected != row["input_sha256"]:
+                    raise ValueError("review_input_hash_mismatch")
                 if retain_inputs:
                     retained = f"inputs/{row['id']}.bin"
                     (output / retained).write_bytes(source_data)
                     replay_task["input"] = retained
                 if parsed:
                     row.update(input_storage="archive_member", storage_integrity="verified")
-                row["input_sha256"] = sha256(source_data)
-                row["input_size"] = len(source_data)
-                expected = task.get("sha256")
-                if expected != row["input_sha256"]:
-                    raise ValueError("review_input_hash_mismatch")
                 if deadline is not None:
                     detail = isolated_review(source_data, task, output, deadline=deadline)
                 elif task["kind"] in {"dex", "emulate", "recover"}:

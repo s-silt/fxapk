@@ -15,7 +15,7 @@
 - 所有对外函数返回结构化 dict，**绝不把异常抛给调用方**（失败 → ok=False + fix_cmd）。
 - 每个 except 必 logging（warning/exception），不裸 pass、不静默吞错。
 - 可选依赖（cryptography）惰性 import 且容缺；外部工具（adb/frida/openssl/mitmdump）
-  一律 shutil.which 先探，缺则结构化降级 + fix_cmd。
+  一律 tools.safe_which 先探（cwd 投放防护），缺则结构化降级 + fix_cmd。
 - 下载用 requests（自带 certifi，避免 macOS/Homebrew Python 的 urllib 默认 SSL 上下文
   缺 CA → SSLCertVerificationError）+ lzma + tempfile + hashlib。requests 已是运行期依赖。
 - 所有 requests / subprocess 调用必带 timeout；临时文件 finally 清理（ignore errors）。
@@ -30,7 +30,6 @@ import logging
 import lzma
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 import time
@@ -491,12 +490,73 @@ _FRIDA_START_CMDS: tuple[str, ...] = (
 )
 
 
-def _start_frida_server_background(serial: str | None) -> bool:
+def _file_sha256(path: Path) -> str:
+    """流式计算本地文件 SHA256（不整文件读入内存）。失败 → ''（不抛）。"""
+    try:
+        digest = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        logger.exception("[provision] 计算本地文件 SHA256 失败：%s", path)
+        return ""
+
+
+def _remote_file_sha256(serial: str | None, remote_path: str) -> str:
+    """设备上文件的 SHA256（``sha256sum``，``toybox sha256sum`` 兜底）。
+
+    返回 64 位小写 hex；命令不可用/无输出/解析失败 → ''。调用方必须把 '' 当作
+    「无法核对」而非「校验通过」——绝不假装已验证。
+    """
+    for form in (f"sha256sum {remote_path}", f"toybox sha256sum {remote_path}"):
+        proc = _adb(["shell", form], serial)
+        if proc is None or proc.returncode != 0:
+            continue
+        out = (proc.stdout or "").strip().split()
+        if out and re.fullmatch(r"[0-9a-fA-F]{64}", out[0]):
+            return out[0].lower()
+    return ""
+
+
+def _expected_frida_server_sha256(serial: str | None) -> str:
+    """本机期望部署的 frida-server SHA256（与部署路径同源：env pin 优先，否则内置 .xz）。
+
+    只覆盖免下载路径（frozen 内置 ``frida-servers/``）；解析不到 → ''。此时调用方应
+    转部署流程——部署路径按实际 push 的字节校验，不依赖本函数。
+    """
+    pinned = (os.environ.get(_FRIDA_SHA256_ENV) or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", pinned):
+        return pinned
+    ver = host_frida_version()
+    abi = device_abi(serial)
+    if not ver or not abi:
+        return ""
+    fabi = _FRIDA_ABI_MAP.get(abi, "")
+    bundled = _bundled_frida_server_xz(ver, fabi) if fabi else None
+    if bundled is None:
+        return ""
+    try:
+        raw = _bounded_lzma_decompress(bundled.read_bytes(), _FRIDA_MAX_SERVER_BYTES)
+    except Exception:
+        logger.exception("[provision] 解压内置 frida-server 失败，无法核对设备端哈希")
+        return ""
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _start_frida_server_background(
+    serial: str | None, *, expected_sha256: str | None = None
+) -> bool:
     """后台拉起 frida-server，脱离 adb 会话（setsid→nohup 兜底）。不抛。
 
     长驻进程必须重定向 std{in,out,err} 并 setsid/nohup，否则 adb shell 会被进程的
     管道阻塞到 subprocess 超时，误把"已启动"判成失败。本函数负责把它拉起来，是否真在跑
     由调用方随后轮询 ``device.frida_server_running`` 判定。
+
+    ``expected_sha256``：以 root 启动前必须核对设备端 ``/data/local/tmp/frida-server``
+    的 SHA256 与期望一致（纵深防御——样本注入的 shell 命令可在 shell 权限下替换该文件，
+    被 su/root 拉起即提权）。正向不匹配 → 拒绝启动返回 False；设备端哈希读不出
+    （无 sha256sum）→ 记 warning 后按未验证继续（与修复前同等保障，不阻断老设备）。
 
     Returns:
         ``root_started``：拉起的 frida-server 是否以 **root** 运行——以**权威 root 能力**为准
@@ -504,6 +564,20 @@ def _start_frida_server_background(serial: str | None) -> bool:
         不可靠的 returncode 解耦**（含 ``&`` 的后台命令会被管道阻塞到超时，returncode 不可信，
         故不能据它判 root）。ps 在 MuMu 上又看不到 frida-server 行、无法靠 ps 判 root。
     """
+    if expected_sha256:
+        remote_sha = _remote_file_sha256(serial, _FRIDA_SERVER_REMOTE)
+        if remote_sha and remote_sha != expected_sha256.lower():
+            logger.warning(
+                "[provision] 设备端 frida-server SHA256 与期望不符（%s… != %s…），拒绝以 root 启动",
+                remote_sha[:12],
+                expected_sha256[:12],
+            )
+            return False
+        if not remote_sha:
+            logger.warning(
+                "[provision] 无法读取设备端 frida-server SHA256（sha256sum 不可用？），"
+                "按未验证继续启动"
+            )
     # 先杀掉可能已在跑的**非 root** frida-server：su 型设备（adb root 不可用）上若先有非 root
     # 实例占着端口，root 实例就起不来 → frida-ps 能列进程但 spawn 注入失败（"need Gadget /
     # jailed Android"）。杀掉后再以 root 重起，确保 spawn 可用。失败无害（本就没在跑）。
@@ -708,46 +782,66 @@ def _ensure_frida_server_impl(
             #   - 未部署 → 别重启幽灵进程，**直接落到下方部署流程**（push 二进制 + su 起 root）。
             #   - 已部署 → 杀旧 + 以 root 重启（自愈）；仍确认不了 root 再落部署兜底。
             if _frida_binary_present(serial):
-                _emit(on_progress, "frida-server 未确认 root，杀掉以 root 重启（spawn 注入需 root）")
-                logger.warning(
-                    "[provision] frida-server 未确认以 root 运行（spawn 会 jailed）；杀掉以 root 重启"
+                # 纵深防御：以 root 重启前先核对设备端二进制与本机期望版本哈希一致——
+                # 样本注入的 shell 命令可在 shell 权限下替换 /data/local/tmp/frida-server，
+                # 被 su/root 拉起即提权。期望哈希只覆盖免下载路径（env pin / 内置 .xz）；
+                # 核对不过或无法解析期望 → 不重启，落部署流程重推校验过的二进制。
+                expected_sha = _expected_frida_server_sha256(serial)
+                trusted = bool(expected_sha) and (
+                    _remote_file_sha256(serial, _FRIDA_SERVER_REMOTE) == expected_sha
                 )
-                root_started = _start_frida_server_background(serial)
-                for _ in range(_VERIFY_RETRIES):
-                    try:
-                        running = device.frida_server_running(serial)
-                    except Exception:
-                        logger.exception("[provision] root 重启后验证轮询异常")
-                        running = False
-                    if running and root_started:
-                        expected_ver = host_frida_version()
-                        probe = device.frida_server_probe(serial, expected_version=expected_ver)
-                        if probe.ok:
-                            result.update(
-                                ok=True,
-                                action="restarted_as_root",
-                                detail=f"已以 root 重启并通过真实附加验收：{probe.detail}",
-                                version=probe.version or expected_ver,
+                if trusted:
+                    _emit(on_progress, "frida-server 未确认 root，杀掉以 root 重启（spawn 注入需 root）")
+                    logger.warning(
+                        "[provision] frida-server 未确认以 root 运行（spawn 会 jailed）；杀掉以 root 重启"
+                    )
+                    root_started = _start_frida_server_background(
+                        serial, expected_sha256=expected_sha
+                    )
+                    for _ in range(_VERIFY_RETRIES):
+                        try:
+                            running = device.frida_server_running(serial)
+                        except Exception:
+                            logger.exception("[provision] root 重启后验证轮询异常")
+                            running = False
+                        if running and root_started:
+                            expected_ver = host_frida_version()
+                            probe = device.frida_server_probe(serial, expected_version=expected_ver)
+                            if probe.ok:
+                                result.update(
+                                    ok=True,
+                                    action="restarted_as_root",
+                                    detail=f"已以 root 重启并通过真实附加验收：{probe.detail}",
+                                    version=probe.version or expected_ver,
+                                )
+                                return result
+                            logger.warning("[provision] root 重启后严格验收未通过：%s", probe.detail)
+                        if running and not root_started:
+                            su_uid0 = _su_uid0(serial)
+                            detail = (
+                                "frida-server 在跑但未能以 root 重启（设备 su 不接受标准 `su -c` 形态）："
+                                + ("su 可拿 uid=0 但未起成功，请手动起" if su_uid0 else "su 不可用/已锁，无法获取 root")
+                                + "；spawn 注入将被判 jailed，脱壳/运行时 hook 不可用。"
                             )
+                            logger.warning("[provision] %s", detail)
+                            result.update(ok=False, action="running_not_root", detail=detail)
+                            result["fix_cmd"] = [
+                                "adb shell su -c 'pkill -f frida-server'",
+                                f"adb shell su -c 'setsid {_FRIDA_SERVER_REMOTE} >/dev/null 2>&1 &'",
+                                "frida-ps -U  # 应能列出进程；spawn 仍 jailed 则 su 未给 root",
+                            ]
                             return result
-                        logger.warning("[provision] root 重启后严格验收未通过：%s", probe.detail)
-                    if running and not root_started:
-                        su_uid0 = _su_uid0(serial)
-                        detail = (
-                            "frida-server 在跑但未能以 root 重启（设备 su 不接受标准 `su -c` 形态）："
-                            + ("su 可拿 uid=0 但未起成功，请手动起" if su_uid0 else "su 不可用/已锁，无法获取 root")
-                            + "；spawn 注入将被判 jailed，脱壳/运行时 hook 不可用。"
-                        )
-                        logger.warning("[provision] %s", detail)
-                        result.update(ok=False, action="running_not_root", detail=detail)
-                        result["fix_cmd"] = [
-                            "adb shell su -c 'pkill -f frida-server'",
-                            f"adb shell su -c 'setsid {_FRIDA_SERVER_REMOTE} >/dev/null 2>&1 &'",
-                            "frida-ps -U  # 应能列出进程；spawn 仍 jailed 则 su 未给 root",
-                        ]
-                        return result
-                    time.sleep(_VERIFY_INTERVAL)
-                logger.warning("[provision] 以 root 重启 frida-server 后仍未见运行；继续走部署流程兜底")
+                        time.sleep(_VERIFY_INTERVAL)
+                    logger.warning("[provision] 以 root 重启 frida-server 后仍未见运行；继续走部署流程兜底")
+                else:
+                    _emit(
+                        on_progress,
+                        "设备 frida-server 哈希与期望不符或无法核对，转部署流程重推校验过的二进制",
+                    )
+                    logger.warning(
+                        "[provision] 设备 frida-server SHA256 校验未通过（期望 %s…），走部署流程重推",
+                        expected_sha[:12] if expected_sha else "?",
+                    )
             else:
                 # 二进制未部署却被判"在跑"（MuMu 误判）→ 落到下方部署流程，把自己的 frida-server
                 # push 上去并以 root 起，别去重启一个不存在的二进制。
@@ -836,6 +930,21 @@ def _ensure_frida_server_impl(
             result["fix_cmd"] = _manual_frida_steps(ver, abi, fabi)
             return result
 
+        # 纵深防御：以 root 启动前核对设备端二进制 == 本次 push 的字节（防 push 后被替换）。
+        # 正向不匹配 → 拒绝启动；设备端哈希读不出（无 sha256sum）→ 记 warning 按未验证继续。
+        pushed_sha = _file_sha256(Path(tmp_path))
+        remote_sha = _remote_file_sha256(serial, _FRIDA_SERVER_REMOTE) if pushed_sha else ""
+        if pushed_sha and remote_sha and remote_sha != pushed_sha:
+            result["detail"] = (
+                "设备端 frida-server SHA256 与本次推送不一致，拒绝以 root 启动（疑被替换）"
+            )
+            result["fix_cmd"] = _manual_frida_steps(ver, abi, fabi)
+            return result
+        if pushed_sha and not remote_sha:
+            logger.warning(
+                "[provision] 无法读取设备端 frida-server SHA256（sha256sum 不可用？），"
+                "按未验证继续启动"
+            )
         _emit(on_progress, "后台启动 frida-server（需 root）")
         # frida-server 是长驻进程；若用 `su -c '... &'` 而不重定向 stdout/stderr，
         # 子进程会继承 adb shell 的管道 fd，adb shell 不会立即返回 → subprocess.run
@@ -843,7 +952,9 @@ def _ensure_frida_server_impl(
         # 因此用 setsid/nohup 彻底脱离会话并把 std{in,out,err} 重定向掉，adb shell 才会
         # 立即返回。且**不以这一步的 returncode 判成败**——以第 8 步轮询 frida_server_running
         # 成功为准（命令本身超时/非零都不直接判失败）。
-        root_started = _start_frida_server_background(serial)
+        root_started = _start_frida_server_background(
+            serial, expected_sha256=pushed_sha or None
+        )
 
         # 8) 轮询验证（启动成败以此为准，不看上一步 returncode）。
         _emit(on_progress, "验证 frida-server 是否在跑")
@@ -947,7 +1058,7 @@ def _generate_ca(ca_path: Path, on_progress: Callable[[str], None] | None) -> bo
 
 def _hash_via_openssl(pem_path: Path) -> str:
     """用 openssl CLI 算 subject_hash_old。openssl 缺失/失败 → ''（不抛）。"""
-    exe = shutil.which("openssl")
+    exe = tools.safe_which("openssl")
     if exe is None:
         logger.debug("[provision] openssl 不在 PATH，跳过 openssl 算 hash")
         return ""

@@ -83,30 +83,35 @@
         "directory_name": "pkg-hold",
         "manifest_sha256": "7738b1927eccadd0ef19321033d7b2f57ae5baf2bdc20bc6b4a9de9dee509122",
         "package_id": "389319f45a3c9cfd945645086ea29e519976c7cdc9f66f915572f9e3556625bb",
+        "report_relpath": "report.json",
         "report_sha256": "85aace972540a4c3f90f0da42da6f70e5f017e443fecd570a7680b296fb8c445"
       },
       {
         "directory_name": "pkg-carry",
         "manifest_sha256": "4e7a1d34b5d36a05f0bf6ddb45c8d84f31ac3067c3e388d2e014f41074bc259f",
         "package_id": "6fe5337d55957d472bfcc22c6106671a9ff93fb81f1ae4fbb261baafab559a02",
+        "report_relpath": "report.json",
         "report_sha256": "a8913fa0da7706edaa68da86cb07df918ae01319b3258414480f5e0a1df158d4"
       },
       {
         "directory_name": "pkg-block-extra",
         "manifest_sha256": "a513e43d2340a1f1d958a5f5b4706743ccda32772dbcdc74a236ef3eaa1bc454",
         "package_id": "c672c34cfd694e48ae30f5ae0afa34c76221d300438c44de1d243f03c280e046",
+        "report_relpath": "report.json",
         "report_sha256": "0a0ef64a60a972518f28be07d67afb5e810b5092a4d8bd383d4e6c4a37564ac4"
       },
       {
         "directory_name": "pkg-carry-extra",
         "manifest_sha256": "797d019376fafa51aee15fa9e3acb6fbde38c72bac842fb539d3d6312d897268",
         "package_id": "d2d1c8e8a56a97777f5ca00d0fc5b817d52d5f3a16a88a25265bdc710926607e",
+        "report_relpath": "report.json",
         "report_sha256": "1c1e1c528564c1b7b01a75c6ac735b99fb042437071e75c203dcb6219667a25a"
       },
       {
         "directory_name": "pkg-block",
         "manifest_sha256": "b7fb7eb12e2f9dba244bb7f9454709532c35aa30efff0bbe5675170495e73520",
         "package_id": "e7dae00f564252c1d4d433a2b211f3b6a685b2c83ee338a130afad7e5ad5129c",
+        "report_relpath": "report.json",
         "report_sha256": "39d8a5181bf97faf7d8d6bef746f2ec9465de01851bdd6bd4e10e7e49b4e07a4"
       }
     ],

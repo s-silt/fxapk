@@ -32,7 +32,7 @@ from typing import Any, ClassVar
 from apkscan.core.enrichment import safe_error_type
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
-from apkscan.enrichers import _http
+from apkscan.enrichers import _cache, _http
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ HTTP_TIMEOUT_SECONDS = 20
 CACHE_TTL_SECONDS = 24 * 60 * 60
 FAILED_REFRESH_RETRY_SECONDS = 60
 
-CACHE_DIR = Path(".apkscan_cache")
+CACHE_DIR = _cache.cache_root() / "enrichment"
 CACHE_FILE = CACHE_DIR / "spamhaus_drop_v4.json"
 
 _CACHE_SCHEMA_VERSION = 1
@@ -251,13 +251,11 @@ class SpamhausDropEnricher(BaseEnricher):
         Windows 下文件读取句柄可能与另一线程的 ``replace`` 冲突，因此缓存读取、
         原子替换和进程内状态更新共用同一把锁。
         """
-        if not CACHE_FILE.is_file():
+        data = _cache.read_cache_json(CACHE_FILE)
+        if not data:
             return None
 
         try:
-            data = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
-            if not isinstance(data, dict):
-                raise ValueError("缓存根节点不是对象")
             if data.get("schema_version") != _CACHE_SCHEMA_VERSION:
                 raise ValueError("缓存版本不受支持")
 

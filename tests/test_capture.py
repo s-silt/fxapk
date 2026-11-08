@@ -4932,3 +4932,112 @@ def test_reverse_and_mitm_are_kept_when_proxy_restore_fails(monkeypatch, tmp_pat
     assert "mitmdump" not in terminated, "代理未还原却停了 mitmdump——设备会彻底断网"
     trail = " ".join(result["playbook"])
     assert "保留" in trail and "断网" in trail
+
+
+def test_body_text_gzip_bomb_stays_bounded() -> None:
+    """★zip 炸弹回归（sfind-6a5dd25c）：gzip 压缩体必须在 _MAX_BODY_BYTES 内截断，
+    不得先全量解压。"""
+    import gzip
+    from types import SimpleNamespace
+
+    from apkscan.dynamic import capture
+
+    bomb = gzip.compress(b'{"data":"x","timestamp":1}' + b"0" * (50 * 1024 * 1024))
+    msg = SimpleNamespace(
+        raw_content=bomb,
+        headers={"content-encoding": "gzip"},
+        content=None,
+        text=None,
+    )
+    out = capture._body_text(msg)
+    assert len(out) <= capture._MAX_BODY_BYTES
+    assert out.startswith('{"data"')
+
+
+def test_body_text_brotli_bomb_stays_bounded() -> None:
+    """★zip 炸弹回归（sfind-6a5dd25c 残留）：brotli 压缩体同样必须在
+    _MAX_BODY_BYTES 内截断，且单次 process 产出受 output_buffer_limit 封顶。"""
+    brotli = pytest.importorskip("brotli")
+    from types import SimpleNamespace
+
+    from apkscan.dynamic import capture
+
+    bomb = brotli.compress(b'{"data":"x","timestamp":1}' + b"0" * (50 * 1024 * 1024))
+    msg = SimpleNamespace(
+        raw_content=bomb,
+        headers={"content-encoding": "br"},
+        content=None,
+        text=None,
+    )
+    out = capture._body_text(msg)
+    assert len(out) <= capture._MAX_BODY_BYTES
+    assert out.startswith('{"data"')
+
+
+def test_brotli_bounded_passes_output_buffer_limit(monkeypatch) -> None:
+    """★brotli≥1.2 路径必须真的把 output_buffer_limit 传给 process——
+    替身记录实参，防"探测支持却走旧调用"的静默回退。"""
+    brotli = pytest.importorskip("brotli")
+    from apkscan.dynamic import capture
+
+    calls: list[int | None] = []
+
+    class _FakeDecompressor:
+        def process(self, data: bytes, output_buffer_limit: int | None = None) -> bytes:
+            calls.append(output_buffer_limit)
+            return b""
+
+        def is_finished(self) -> bool:
+            return True
+
+    monkeypatch.setattr(brotli, "Decompressor", _FakeDecompressor)
+    monkeypatch.setattr(capture, "_brotli_output_cap_supported", lambda: True)
+    assert capture._brotli_body_bounded(b"x" * 100, 10) == b""
+    assert calls and all(c is not None and c > 0 for c in calls)
+
+
+def test_brotli_unsupported_cap_returns_none(monkeypatch) -> None:
+    """★旧版 brotli 无 output_buffer_limit：单次 process 可吐出 GB 级——
+    宁可不解码（退回原始字节）也不解压。"""
+    pytest.importorskip("brotli")
+    from apkscan.dynamic import capture
+
+    monkeypatch.setattr(capture, "_brotli_output_cap_supported", lambda: False)
+    assert capture._brotli_body_bounded(b"x" * 100, 10) is None
+
+
+def test_body_text_zstd_bomb_stays_bounded() -> None:
+    """★zip 炸弹回归（sfind-6a5dd25c 残留）：zstd 压缩体在 max_length 封顶内截断，
+    与帧头声明的内容大小无关。"""
+    zstd = pytest.importorskip("backports.zstd")
+    from types import SimpleNamespace
+
+    from apkscan.dynamic import capture
+
+    bomb = zstd.compress(b'{"data":"x","timestamp":1}' + b"0" * (50 * 1024 * 1024))
+    msg = SimpleNamespace(
+        raw_content=bomb,
+        headers={"content-encoding": "zstd"},
+        content=None,
+        text=None,
+    )
+    out = capture._body_text(msg)
+    assert len(out) <= capture._MAX_BODY_BYTES
+    assert out.startswith('{"data"')
+
+
+def test_body_text_unknown_encoding_treated_opaque() -> None:
+    from types import SimpleNamespace
+
+    from apkscan.dynamic import capture
+
+    msg = SimpleNamespace(
+        raw_content=b"\x00\x01binary" * 100,
+        headers={"content-encoding": "x-weird"},
+        content=None,
+        text=None,
+    )
+    out = capture._body_text(msg)
+    assert out == (b"\x00\x01binary" * 100)[: capture._MAX_BODY_BYTES].decode(
+        "utf-8", errors="ignore"
+    )

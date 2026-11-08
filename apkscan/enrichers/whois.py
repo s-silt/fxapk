@@ -15,9 +15,9 @@ import logging
 import os
 import threading
 from datetime import date, datetime
-from pathlib import Path
 from typing import Any
 
+from apkscan.enrichers import _cache
 from apkscan.core.enrichment import safe_error_type
 from apkscan.core.redact import safe_exception_diagnostic
 from apkscan.core.models import Endpoint, EnrichmentResult
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 WHOIS_TIMEOUT = 8
 
 #: 本地缓存目录与文件。
-CACHE_DIR = Path(".apkscan_cache")
+CACHE_DIR = _cache.cache_root() / "enrichment"
 CACHE_FILE = CACHE_DIR / "whois.json"
 
 # python-whois 库自身的 logger（名为 "whois"）在连接超时/无应答时会刷 ERROR
@@ -122,18 +122,7 @@ class WhoisEnricher(BaseEnricher):
         """读缓存文件。★必须持 self._lock 调用：Windows 下读句柄 open 与另一线程的
         os.replace(whois.json) 撞同一文件会抛 PermissionError(WinError 5)/Errno 13，
         让缓存静默丢失。读写共用一把锁消除该重叠窗口；enrich() 经 _load_cache_locked 进入。"""
-        if not CACHE_FILE.is_file():
-            return {}
-        try:
-            text = CACHE_FILE.read_text(encoding="utf-8")
-            data = json.loads(text)
-        except Exception:
-            logger.warning("WHOIS 缓存读取/解析失败，忽略：%s", CACHE_FILE, exc_info=True)
-            return {}
-        if not isinstance(data, dict):
-            logger.warning("WHOIS 缓存顶层非 dict，忽略：%s", CACHE_FILE)
-            return {}
-        return data
+        return _cache.read_cache_json(CACHE_FILE)
 
     def _load_cache_locked(self) -> dict[str, dict[str, Any]]:
         """持锁读缓存，供 enrich() 的命中检查用，避免与并发写的 os.replace 撞车。"""

@@ -517,3 +517,49 @@ def test_shim_lying_compressed_size_reads_correctly_and_stays_bounded(
     )
     assert (data, indicator) == (b"abc" * 5000, "DEFLATED")
     assert reader.max_read <= 4096
+
+
+def test_non_dex_aggregate_budget_bounds_runaway_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★sfind-588bc9e1（无修复即红）：非 DEX 条目的真实解压产出跨条目累计——
+    每条都不超单文件上限、条目数无上限的聚合炸弹在 _OTHER_TOTAL_LIMIT_BYTES 处截停。
+    且被丢弃的解压产出（含触发 ZipEntryTooLargeError 的部分）同样计入。"""
+    p = _make_lying_apk(tmp_path)
+    apk_mod._install_bounded_zip_extract_shim()
+    entry = _zip_entry(p)
+    bomb_local = entry.get_local_header_dict("bomb.bin")
+    bomb_central = entry.get_central_directory_entry_dict("bomb.bin")
+    honest_local = entry.get_local_header_dict("honest.txt")
+    honest_central = entry.get_central_directory_entry_dict("honest.txt")
+
+    # 聚合上限压到 100 KiB：honest(11B) + bomb(64KiB) 放行，第二个 bomb 即穿预算。
+    monkeypatch.setattr(apk_mod, "_OTHER_TOTAL_LIMIT_BYTES", 100 * 1024)
+    token = apk_mod._other_extract_total_bytes.set(0)
+    try:
+        data, _ = apk_mod._bounded_extract_file_based_on_header_info(
+            entry.zip, honest_local, honest_central
+        )
+        assert data == b"hello world"
+        data, _ = apk_mod._bounded_extract_file_based_on_header_info(
+            entry.zip, bomb_local, bomb_central
+        )
+        assert data == _BOMB_PAYLOAD
+        with pytest.raises(apk_mod.ZipEntryTooLargeError) as excinfo:
+            apk_mod._bounded_extract_file_based_on_header_info(
+                entry.zip, bomb_local, bomb_central
+            )
+        assert excinfo.value.limit == 100 * 1024  # 聚合预算触发（非单文件 500MB 上限）
+        # 预算已穿：连诚实小条目也不再放行（真实解压工作已达上限）。
+        with pytest.raises(apk_mod.ZipEntryTooLargeError):
+            apk_mod._bounded_extract_file_based_on_header_info(
+                entry.zip, honest_local, honest_central
+            )
+    finally:
+        apk_mod._other_extract_total_bytes.reset(token)
+
+    # 作用域外（None）不聚合：同一 bomb 条目在预算作用域外照常返回。
+    data, _ = apk_mod._bounded_extract_file_based_on_header_info(
+        entry.zip, bomb_local, bomb_central
+    )
+    assert data == _BOMB_PAYLOAD

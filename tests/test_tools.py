@@ -102,9 +102,12 @@ def test_adb_path_frozen_falls_back_to_path_when_no_local_adb(monkeypatch, tmp_p
     fake_exe = tmp_path / "fxapk.exe"
     fake_exe.write_bytes(b"MZ")
     monkeypatch.setattr(tools.sys, "executable", str(fake_exe))
-    monkeypatch.setattr(tools.shutil, "which", lambda name: "/path/adb" if name == "adb" else None)
+    monkeypatch.setattr(
+        tools.shutil, "which",
+        lambda name: str(tmp_path / "adb") if name == "adb" else None,
+    )
 
-    assert tools.adb_path() == "/path/adb"
+    assert tools.adb_path() == str(tmp_path / "adb")
 
 
 @pytest.mark.real_adb_path
@@ -416,11 +419,15 @@ def _make_jadx_addon(base: Path, *, with_jre: bool = True) -> Path:
 
 
 def test_resolve_jadx_prefers_path(monkeypatch, tmp_path):
-    """PATH 上有 jadx → 直接用，不注入 JAVA_HOME（即使插件包也在）。"""
-    monkeypatch.setattr(tools.shutil, "which", lambda n: r"C:\sys\jadx.exe" if n == "jadx" else None)
+    """PATH 上有 jadx → 直接用，不注入 JAVA_HOME（即使插件包也在）。
+
+    ★safe_which 只放行带根的绝对路径：POSIX 上 ``C:\\sys\\jadx.exe`` 是相对文件名
+    会被丢弃，故按平台给绝对路径（Windows 盘符 / POSIX 前缀）。"""
+    jadx_path = r"C:\sys\jadx.exe" if sys.platform == "win32" else "/usr/bin/jadx"
+    monkeypatch.setattr(tools.shutil, "which", lambda n: jadx_path if n == "jadx" else None)
     monkeypatch.setattr(tools, "app_data_dirs", lambda: [tmp_path])
     _make_jadx_addon(tmp_path)
-    assert tools.resolve_jadx() == ([r"C:\sys\jadx.exe"], {})
+    assert tools.resolve_jadx() == ([jadx_path], {})
     assert tools.has_jadx() is True
 
 
@@ -452,3 +459,74 @@ def test_resolve_jadx_none_when_nothing(monkeypatch, tmp_path):
     assert tools.resolve_jadx() is None
     assert tools.has_jadx() is False
     assert tools.jadx_addon_dir() is None
+
+
+# ---------------------------------------------------------------------------
+# safe_which()（binary planting 防护：丢弃解析后位于 cwd 内的 PATH 命中）
+# ---------------------------------------------------------------------------
+
+
+def test_safe_which_drops_cwd_hit(monkeypatch, tmp_path):
+    """Windows 语义回归：命中文件直接位于 cwd → 丢弃（binary planting）。"""
+    planted = tmp_path / "node.exe"
+    planted.write_bytes(b"MZ")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        tools.shutil, "which", lambda name, mode=0, path=None: str(planted)
+    )
+    assert tools.safe_which("node") is None
+
+
+def test_safe_which_drops_relative_path_result(monkeypatch, tmp_path):
+    """相对路径命中（来自相对 PATH 项 / Windows 隐式 .\\ 搜索）同样按 cwd 解析 → 丢弃。"""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        tools.shutil, "which", lambda name, mode=0, path=None: ".\\node.exe"
+    )
+    assert tools.safe_which("node") is None
+
+
+def test_safe_which_drops_drive_relative_result(monkeypatch, tmp_path):
+    """★kiro 二轮复核：PATH 项 ``C:sub`` 会让 ``shutil.which`` 返回 drive-relative
+    命中 ``C:sub\\node.exe``——anchor 为 ``C:`` 但实际相对 cwd 解析，必须丢弃。"""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        tools.shutil, "which",
+        lambda name, mode=0, path=None: "C:sub\\node.exe",
+    )
+    assert tools.safe_which("node") is None
+
+
+def test_safe_which_keeps_subdir_hit_inside_cwd(monkeypatch, tmp_path):
+    """★N1 回归：cwd 子目录里的绝对路径命中不误伤——要求 PATH 显式指向，
+    用户主目录作 cwd 时 %LOCALAPPDATA% 工具照常可用。"""
+    workdir = tmp_path / "home"
+    tool_dir = workdir / ".local" / "bin"
+    tool_dir.mkdir(parents=True)
+    tool = tool_dir / "node"
+    tool.write_bytes(b"bin")
+    monkeypatch.chdir(workdir)
+    monkeypatch.setattr(
+        tools.shutil, "which", lambda name, mode=0, path=None: str(tool)
+    )
+    assert tools.safe_which("node") == str(tool)
+
+
+def test_safe_which_keeps_path_hit_outside_cwd(monkeypatch, tmp_path):
+    """正常 PATH 命中（绝对路径、不在 cwd 内）照常返回。"""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    tool = elsewhere / "node"
+    tool.write_bytes(b"bin")
+    workdir = tmp_path / "cwd"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    monkeypatch.setattr(
+        tools.shutil, "which", lambda name, mode=0, path=None: str(tool)
+    )
+    assert tools.safe_which("node") == str(tool)
+
+
+def test_safe_which_none_when_missing(monkeypatch):
+    monkeypatch.setattr(tools.shutil, "which", lambda name, mode=0, path=None: None)
+    assert tools.safe_which("no-such-tool-xyz") is None

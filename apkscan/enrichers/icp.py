@@ -27,14 +27,13 @@ import json
 import logging
 import os
 import threading
-from pathlib import Path
 from typing import Any
 
 from apkscan.core.enrichment import safe_error_type
 from apkscan.core.redact import safe_exception_diagnostic
 from apkscan.core.models import Endpoint, EnrichmentResult
 from apkscan.core.registry import BaseEnricher
-from apkscan.enrichers import _http
+from apkscan.enrichers import _cache, _http
 
 #: 本模块 ``requests`` 符号 = 有界 shim（get 流式限体，防被劫持上游灌爆内存，codex B1）。
 #: 生产走此 shim；测试仍可 ``monkeypatch.setattr(icp, "requests", fake)`` 覆盖。
@@ -59,7 +58,7 @@ MANUAL_LOOKUP_URL = "https://icp.chinaz.com/{domain}"
 MANUAL_HINT = "ICP 自动查询不可用，需人工核（工信部 beian.miit.gov.cn）"
 
 #: 本地缓存目录与文件。
-CACHE_DIR = Path(".apkscan_cache")
+CACHE_DIR = _cache.cache_root() / "enrichment"
 CACHE_FILE = CACHE_DIR / "icp.json"
 
 
@@ -267,18 +266,7 @@ class IcpEnricher(BaseEnricher):
         """读缓存文件。★必须持 self._lock 调用：Windows 下读句柄 open 与另一线程的
         os.replace(icp.json) 撞同一文件会抛 PermissionError(WinError 5)/Errno 13，
         让缓存静默丢失。读写共用一把锁消除该重叠窗口；enrich() 经 _load_cache_locked 进入。"""
-        if not CACHE_FILE.is_file():
-            return {}
-        try:
-            text = CACHE_FILE.read_text(encoding="utf-8")
-            data = json.loads(text)
-        except Exception:
-            logger.warning("ICP 缓存读取/解析失败，忽略：%s", CACHE_FILE, exc_info=True)
-            return {}
-        if not isinstance(data, dict):
-            logger.warning("ICP 缓存顶层非 dict，忽略：%s", CACHE_FILE)
-            return {}
-        return data
+        return _cache.read_cache_json(CACHE_FILE)
 
     def _load_cache_locked(self) -> dict[str, dict[str, Any]]:
         """持锁读缓存，供 enrich() 的命中检查用，避免与并发写的 os.replace 撞车。"""
@@ -300,6 +288,17 @@ class IcpEnricher(BaseEnricher):
                 tmp.replace(CACHE_FILE)
             except Exception:
                 logger.warning("ICP 缓存写入失败：%s", CACHE_FILE, exc_info=True)
+
+    @staticmethod
+    def _validated_cache_entry(cached: dict[str, Any]) -> dict[str, Any] | None:
+        """缓存命中校验：ICP 结果是 ``str | None`` 扁平字段的 dict——种植的嵌套
+        结构/巨型字符串/非字符串值不得绕过 provider 解析边界直接进报告。"""
+        for key, val in cached.items():
+            if not isinstance(key, str) or not key or len(key) > 128:
+                return None
+            if val is not None and (not isinstance(val, str) or len(val) > 2048):
+                return None
+        return dict(cached)
 
     # ------------------------------------------------------------------ 查询
     def _query(self, domain: str) -> dict[str, str | None]:
@@ -432,8 +431,11 @@ class IcpEnricher(BaseEnricher):
         cache = self._load_cache_locked()
         cached = cache.get(self._cache_key(domain))
         if isinstance(cached, dict):
-            logger.debug("ICP 缓存命中：%s", domain)
-            return EnrichmentResult(provider=self.name, ok=True, data=dict(cached))
+            data = self._validated_cache_entry(cached)
+            if data is not None:
+                logger.debug("ICP 缓存命中：%s", domain)
+                return EnrichmentResult(provider=self.name, ok=True, data=data)
+            logger.debug("ICP 缓存条目未过校验，按未命中处理：%s", domain)
 
         # 2) 查询。区分两类失败：
         #    - IcpUnavailable：预期内不可用 → 附人工核验链接，明确提示人工核。

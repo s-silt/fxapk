@@ -951,7 +951,8 @@ def _verify_xref_hits(apk_bytes: bytes, receipt: Mapping[str, Any]) -> _XrefChec
                 by_hash[hashlib.sha256(value.encode("utf-8")).hexdigest()] = value
     verified: set[int] = set()
     parse_failed = False
-    budget = DexQueryLimits().uncompressed_bytes
+    limits = DexQueryLimits()
+    budget = limits.uncompressed_bytes
     raw_members = receipt.get("members")
     if not isinstance(raw_members, list):
         return _XrefCheck(False, "parse_unavailable", frozenset())
@@ -979,7 +980,13 @@ def _verify_xref_hits(apk_bytes: bytes, receipt: Mapping[str, Any]) -> _XrefChec
         if not isinstance(hits, list):
             parse_failed = True
             continue
-        wanted: dict[str, set[int]] = {}
+        # ★按 code item（insns_off）分组而非按 descriptor：多个方法描述符可共享同一
+        #   code_off（_read_code_item 按偏移缓存返回同一 _DexCode）。若按 descriptor
+        #   各扫一次，同一份指令流会被重复遍历 N 次——crafted DEX + 手工 receipt 可把
+        #   import --apk 的核验拖成 O(方法数 × 指令长度)。同一 code item 的 wanted
+        #   offset 取并集，每个 item 至多扫一遍。
+        wanted: dict[int, tuple[_DexCode, set[int]]] = {}
+        exact_candidates = 0
         for hit in hits:
             if not isinstance(hit, dict) or hit.get("grade") != "static-reference":
                 continue
@@ -992,23 +999,36 @@ def _verify_xref_hits(apk_bytes: bytes, receipt: Mapping[str, Any]) -> _XrefChec
                 or not isinstance(descriptor, str) or descriptor not in parsed.methods
             ):
                 continue
-            wanted.setdefault(descriptor, set()).add(offset)
-        decoded: dict[str, Mapping[int, int] | None] = {}
-        for descriptor, offsets in wanted.items():
+            exact_candidates += 1
+            code = parsed.methods[descriptor]
+            entry = wanted.get(code.insns_off)
+            if entry is None:
+                wanted[code.insns_off] = (code, {offset})
+            else:
+                entry[1].add(offset)
+        if exact_candidates > limits.max_hits:
+            # 导入的 receipt 不受 worker max_hits 约束；exact 命中数超限按未核处理
+            # （fail-closed），不为无界输入买单。
+            parse_failed = True
+            continue
+        decoded: dict[int, Mapping[int, int] | None] = {}
+        for code, offsets in wanted.values():
             try:
-                decoded[descriptor] = _const_string_indexes(parsed.methods[descriptor].insns, offsets)
+                decoded[code.insns_off] = _const_string_indexes(code.insns, offsets)
             except _DexParseError:
                 parse_failed = True
-                decoded[descriptor] = None
+                decoded[code.insns_off] = None
         for hit in hits:
             if not isinstance(hit, dict) or hit.get("grade") != "static-reference":
                 continue
             if hit.get("precision") != "exact":
                 continue
             descriptor = hit.get("descriptor")
-            if isinstance(descriptor, str) and descriptor in decoded and decoded[descriptor] is None:
+            code = parsed.methods.get(descriptor) if isinstance(descriptor, str) else None
+            item_key = code.insns_off if code is not None else None
+            if item_key is not None and item_key in decoded and decoded[item_key] is None:
                 continue
-            refs = decoded[descriptor] if isinstance(descriptor, str) and descriptor in decoded else None
+            refs = decoded.get(item_key) if item_key is not None else None
             if not _exact_hit_matches(parsed, hit, by_hash, string_refs=refs):
                 raise DexQueryError("xref_mismatch")
             verified.add(id(hit))

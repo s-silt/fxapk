@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fxapk-flutter"
-version = "0.1.0"
+version = "0.1.1"
 description = "Offline Flutter AOT analysis and evidence indexing for fxapk"
 readme = "README.md"
 requires-python = ">=3.11"

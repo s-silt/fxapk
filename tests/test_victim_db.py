@@ -102,6 +102,13 @@ def _build_plain_db(path: Path) -> None:
         conn.close()
 
 
+def _dump_db(tmp_path: Path) -> Path:
+    """本 run 的 out/dump_db 目录（merge 只认 plain_path 解析进这里）。"""
+    d = tmp_path / "dump_db"
+    d.mkdir(exist_ok=True)
+    return d
+
+
 def _write_runtime_report(
     tmp_path: Path,
     *,
@@ -236,7 +243,7 @@ def test_db_carve_column_hit_and_miss() -> None:
 
 
 def test_merge_databases_produces_victim_data_lead(tmp_path: Path) -> None:
-    plain = tmp_path / "im.db.plain.db"
+    plain = _dump_db(tmp_path) / "im.db.plain.db"
     _build_plain_db(plain)
     rr = _write_runtime_report(
         tmp_path,
@@ -266,7 +273,7 @@ def test_merge_databases_produces_victim_data_lead(tmp_path: Path) -> None:
 
 def test_merge_databases_masks_phone_numbers(tmp_path: Path) -> None:
     """受害人手机号是高敏个人信息：抠出的值里手机号中间打码（不留全文）。"""
-    plain = tmp_path / "im.db.plain.db"
+    plain = _dump_db(tmp_path) / "im.db.plain.db"
     _build_plain_db(plain)
     rr = _write_runtime_report(
         tmp_path,
@@ -296,7 +303,7 @@ def test_merge_databases_masks_phone_numbers(tmp_path: Path) -> None:
 
 def test_merge_databases_records_sha256_for_integrity(tmp_path: Path) -> None:
     """合规护栏：拉回 .plain.db 落盘后算 SHA256 留存（取证完整性）。"""
-    plain = tmp_path / "im.db.plain.db"
+    plain = _dump_db(tmp_path) / "im.db.plain.db"
     _build_plain_db(plain)
     rr = _write_runtime_report(
         tmp_path,
@@ -319,7 +326,7 @@ def test_merge_databases_records_sha256_for_integrity(tmp_path: Path) -> None:
 
 def test_merge_databases_empty_db_no_lead(tmp_path: Path) -> None:
     """空库（无敏感表/数据）不产 Lead。"""
-    plain = tmp_path / "empty.plain.db"
+    plain = _dump_db(tmp_path) / "empty.plain.db"
     conn = sqlite3.connect(str(plain))
     conn.execute("CREATE TABLE android_metadata (locale TEXT)")
     conn.commit()
@@ -344,7 +351,7 @@ def test_merge_databases_empty_db_no_lead(tmp_path: Path) -> None:
 
 def test_merge_databases_bad_db_file_never_raises(tmp_path: Path) -> None:
     """损坏的 db 文件（非 sqlite）不抛，单库失败不影响整体。"""
-    bad = tmp_path / "broken.plain.db"
+    bad = _dump_db(tmp_path) / "broken.plain.db"
     bad.write_bytes(b"this is not a sqlite database at all")
     rr = _write_runtime_report(
         tmp_path,
@@ -362,6 +369,7 @@ def test_merge_databases_bad_db_file_never_raises(tmp_path: Path) -> None:
 
 
 def test_merge_databases_missing_plain_file_never_raises(tmp_path: Path) -> None:
+    """plain_path 不可信/缺失 → 不打开该路径，按降级事件产 playbook Lead（不抛）。"""
     rr = _write_runtime_report(
         tmp_path,
         sqlcipher_events=[
@@ -374,7 +382,44 @@ def test_merge_databases_missing_plain_file_never_raises(tmp_path: Path) -> None
     )
     report = _make_report()
     stats = merge.merge_runtime_databases(report, rr)
-    assert stats["victim_leads"] == 0
+    # 不可信 plain_path 不再静默跳过：记为降级事件（人工解密 playbook）。
+    assert stats["victim_leads"] >= 1
+
+
+def test_merge_databases_rejects_untrusted_plain_paths(tmp_path: Path, monkeypatch) -> None:
+    """★路径穿越回归（sfind-0ed6d888）：UNC/绝对路径/dump_db 外路径一律不打开。"""
+    import sqlite3 as _sqlite3
+
+    opened: list[str] = []
+    real_connect = _sqlite3.connect
+
+    def spy_connect(*args, **kwargs):
+        opened.append(str(args[0] if args else ""))
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(_sqlite3, "connect", spy_connect)
+    bad_paths = [
+        "/dev/zero",
+        r"\\mallory-server\share\x.plain.db",
+        str(tmp_path / "outside.plain.db"),  # dump_db 之外的绝对路径
+        "C:relative.plain.db",  # drive-relative
+    ]
+    events = [
+        {
+            "event": "exported",
+            "db_path": f"/data/data/com.test.app/databases/db{i}.db",
+            "plain_path": bad,
+        }
+        for i, bad in enumerate(bad_paths)
+    ]
+    rr = _write_runtime_report(tmp_path, sqlcipher_events=events)
+    report = _make_report()
+    stats = merge.merge_runtime_databases(report, rr)  # 立即返回，不抛
+    assert stats["victim_databases"] == len(bad_paths)
+    # 任何 sqlite3.connect 都不该指向这些路径（根本不该发起连接）。
+    assert not any("mallory" in p or "dev/zero" in p or "outside" in p for p in opened)
+    # 均按降级事件记录。
+    assert stats["victim_leads"] >= len(bad_paths)
 
 
 def test_merge_databases_empty_when_no_events(tmp_path: Path) -> None:
@@ -424,7 +469,7 @@ def test_merge_databases_key_only_degraded_produces_playbook_lead(tmp_path: Path
 
 def test_merge_databases_dedups_same_db(tmp_path: Path) -> None:
     """同一原库多次导出事件 → 同一物证库去重，不重复刷线索。"""
-    plain = tmp_path / "im.db.plain.db"
+    plain = _dump_db(tmp_path) / "im.db.plain.db"
     _build_plain_db(plain)
     ev = {
         "event": "exported",

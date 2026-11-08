@@ -520,6 +520,16 @@ def _verify_attachment_claims(payload: dict[str, Any], base: Path) -> None:
         return
     if not isinstance(entries, list):
         raise SupplementRefusal("invalid_report")
+    # ★条目数先限 _MAX_TREES：同 sha 重复条目再多也只读一次树，但条目本身的
+    #   声明核对仍是逐条 O(n)——超限直接拒，不给报告无限放大循环。
+    if len(entries) > _MAX_TREES:
+        raise SupplementRefusal("oversize")
+    # ★先做逐条目的廉价字段校验并按 source_sha256 分组：同 sha 的重复条目共享
+    #   一次 manifest/全树读取（_bounded_files 是整树 walk+限读，逐条目重读会把
+    #   磁盘 IO 放大成 O(条目数×树大小)）。每个条目自己的 manifest_sha256 /
+    #   context_record 声明仍逐条核对，不因为分组而放宽。
+    by_sha: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
     for entry in entries:
         if not isinstance(entry, dict):
             raise SupplementRefusal("invalid_report")
@@ -529,29 +539,40 @@ def _verify_attachment_claims(payload: dict[str, Any], base: Path) -> None:
             raise SupplementRefusal("invalid_report")
         if relative != f"external_observations/{sha}/":
             raise SupplementRefusal("source_hash_mismatch")
+        if sha not in by_sha:
+            by_sha[sha] = []
+            order.append(sha)
+        by_sha[sha].append(entry)
+    for sha in order:
+        group = by_sha[sha]
         root = base / "external_observations" / sha
         _reject_reparse_ancestors(root)
         if _is_reparse(root) or not root.is_dir():
             raise SupplementRefusal("missing_observation")
         manifest_path = root / "manifest.json"
-        claimed = entry.get("manifest_sha256")
         manifest_on_disk = manifest_path.is_file() and not _is_reparse(manifest_path)
-        if not manifest_on_disk and claimed is None:
-            if entry.get("context_record") not in (None,):
-                raise SupplementRefusal("tampered_observation")
-            continue
-        if (
-            not manifest_on_disk
-            or not isinstance(claimed, str)
-            or _SHA.fullmatch(claimed) is None
-        ):
-            raise SupplementRefusal("source_hash_mismatch")
-        blob = _read_capped(manifest_path, "tampered_observation")
-        if hashlib.sha256(blob).hexdigest() != claimed:
-            raise SupplementRefusal("source_hash_mismatch")
-        disk = _bounded_files(root)
-        _validate_manifest(sha, disk, {})
-        _verify_context_binding(entry, root, meta, sha)
+        manifest_sha: str | None = None
+        disk: dict[str, bytes] | None = None
+        for entry in group:
+            claimed = entry.get("manifest_sha256")
+            if not manifest_on_disk and claimed is None:
+                if entry.get("context_record") not in (None,):
+                    raise SupplementRefusal("tampered_observation")
+                continue
+            if (
+                not manifest_on_disk
+                or not isinstance(claimed, str)
+                or _SHA.fullmatch(claimed) is None
+            ):
+                raise SupplementRefusal("source_hash_mismatch")
+            if manifest_sha is None:
+                blob = _read_capped(manifest_path, "tampered_observation")
+                manifest_sha = hashlib.sha256(blob).hexdigest()
+                disk = _bounded_files(root)
+                _validate_manifest(sha, disk, {})
+            if manifest_sha != claimed:
+                raise SupplementRefusal("source_hash_mismatch")
+            _verify_context_binding(entry, root, meta, sha)
 
 
 def _verify_context_binding(

@@ -448,6 +448,15 @@ def _materialize_dex_inputs(
                         if name.lower().endswith(".dex"):
                             unrecognized += 1
                         continue
+                    # ★zip bomb 防护：bzip2/LZMA 成员由 zipfile 无输出上限地整段解压，
+                    #   声明 file_size 可以说谎；_copy_stream_limited 的字节闸在解压后才生效。
+                    #   Android 只用 STORED/DEFLATED——其余压缩方式按未识别 DEX 计缺口跳过。
+                    if info.compress_type not in (
+                        zipfile.ZIP_STORED,
+                        zipfile.ZIP_DEFLATED,
+                    ):
+                        unrecognized += 1
+                        continue
                     ordinal = _apk_dex_ordinal(name, match.group(1))
                     if ordinal in seen_ordinals:
                         raise _DexMaterializeError(

@@ -1179,6 +1179,11 @@ class Limits:
     #: 不超限的文件可以把总读取量堆起来。默认 512MiB 约为实测真实大样本的 6 倍余量。
     max_total_bytes: int = 512 * 1024 * 1024
     max_value_len: int = _DEFAULT_MAX_VALUE_LEN
+    #: postings 数量硬帽。单个查询值在全样本中出现次数、以及全部值的 posting 总数都必须
+    #: 有界——敌对样本可用「短值 × 百万次重复」把 postings 列表堆到内存耗尽。触顶即停扫、
+    #: coverage 诚实降 partial。
+    max_postings_per_value: int = 8192
+    max_postings_total: int = 65536
     max_classes_per_file: int = 256
     max_methods_per_class: int = 512
     max_calls_per_method: int = 256
@@ -1190,6 +1195,8 @@ class Limits:
             "max_file_bytes",
             "max_total_bytes",
             "max_value_len",
+            "max_postings_per_value",
+            "max_postings_total",
             "max_classes_per_file",
             "max_methods_per_class",
             "max_calls_per_method",
@@ -1923,18 +1930,28 @@ def scan_java_sources(
     scan_limit_hit = files_total > limits.max_files
     selected = paths[: limits.max_files]
 
+    # value → digest 只依赖查询值本身，提出文件循环外算一次（原实现每文件每值重算 sha256）。
+    value_digests = {
+        value: "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+        for value in query_values
+    }
     postings: list[Mapping[str, object]] = []
     files: list[str] = []
     structures: list[dict[str, object]] = []
     structure_identities: set[tuple[str, str]] = set()
     structure_limit_hit = False
     byte_budget_hit = False
+    posting_limit_hit = False
+    value_posting_limit_hit = False
+    value_posting_counts: dict[str, int] = {}
     read_failed = 0
     truncated = 0
     scanned = 0
     bytes_scanned = 0
 
     for relative, path in selected:
+        if posting_limit_hit:
+            break
         if bytes_scanned >= limits.max_total_bytes:
             # ★聚合读取预算：触顶即停、剩余文件不扫，coverage 诚实降 partial
             # （scanned < files_total 且 read_failed/truncated/scan_limit_hit 皆无，
@@ -1959,12 +1976,30 @@ def scan_java_sources(
         text = data.decode("utf-8", errors="replace")
         lines = text.splitlines()
         for value in query_values:
-            digest = "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+            digest = value_digests[value]
+            count = value_posting_counts.get(digest, 0)
+            if count >= limits.max_postings_per_value:
+                # ★值在前序文件恰好用满上限时，本文件的同值命中被静默跳过也算
+                #   覆盖缺口——必须标 partial 而非 complete（kiro 二轮复核 N2 残留）。
+                if value in text:
+                    value_posting_limit_hit = True
+                continue
+            value_capped = False
             for line_number, line_text in enumerate(lines, start=1):
                 start = 0
                 while True:
                     column_zero = line_text.find(value, start)
                     if column_zero < 0:
+                        break
+                    if len(postings) >= limits.max_postings_total:
+                        # ★总量触顶：整个扫描停止（posting_limit_hit），coverage partial。
+                        posting_limit_hit = True
+                        break
+                    if count >= limits.max_postings_per_value:
+                        # ★单值触顶：只跳过该值继续扫其它值/文件——诱饵值不得
+                        #   让后续文件的命中整体失效；饱和如实计入 coverage。
+                        value_capped = True
+                        value_posting_limit_hit = True
                         break
                     postings.append(
                         {
@@ -1974,8 +2009,14 @@ def scan_java_sources(
                             "value_digest": digest,
                         }
                     )
+                    count += 1
                     # 允许重叠子串命中。
                     start = column_zero + 1
+                if posting_limit_hit or value_capped:
+                    break
+            value_posting_counts[digest] = count
+            if posting_limit_hit:
+                break
 
         file_classes, file_limited = _extract_file_structure(relative, text, limits)
         for class_record in file_classes:
@@ -1996,6 +2037,8 @@ def scan_java_sources(
         and not scan_limit_hit
         and not structure_limit_hit
         and not byte_budget_hit
+        and not posting_limit_hit
+        and not value_posting_limit_hit
         else "partial"
     )
     return ShardScanResult(

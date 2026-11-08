@@ -293,3 +293,27 @@ def test_cli_issues默认阻断(tmp_path: Path) -> None:
     assert not (tmp_path / "phase2").exists()
     assert cli.main(["triage", "--case-dir", str(tmp_path), "--allow-inventory-issues"]) == 0
     assert (tmp_path / "phase2" / "triage.json").is_file()
+
+
+def test_未登记report_json不参与判据(tmp_path: Path) -> None:
+    """包 B 只登记 analysis.json（空 leads），目录里另放未登记 report.json 含域名 lead；
+    包 A 的同域 endpoint 不得被该未验证 lead 镜像，必须留 T1 人工复核。
+    突变：_read_parent_versions 回退读 report.json → endpoint 被 R1 合并 → 红。"""
+    _write_package(
+        tmp_path, "pkg-a",
+        endpoints=[_endpoint("domain", "planted.example.test")],
+    )
+    pkg_b = write_verified_package(tmp_path, "pkg-b", report_name="analysis.json")
+    (pkg_b / "report.json").write_text(json.dumps({
+        "package_name": "com.example.synthetic",
+        "meta": {"sample_sha256": "0" * 64, "tool_version": "1.15.0",
+                 "ruleset_digest": "b" * 16},
+        "leads": [_lead("planted.example.test", "无需调证", category="DOMAIN",
+                        is_runtime_seen=False, is_runtime_contact=False, is_c2=False)],
+        "endpoints": [], "findings": [], "analyzer_status": [],
+        "analysis_status": "complete",
+    }, ensure_ascii=False), encoding="utf-8")
+    _, triage = _triage_of(tmp_path)
+    endpoint = _by_collection(triage, "endpoints")[0]
+    assert endpoint.bucket == "human"
+    assert endpoint.merged_into == ()

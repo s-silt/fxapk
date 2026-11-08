@@ -20,6 +20,7 @@ from typing import Any, cast
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from apkscan.config.fetch import _ip_is_blocked
 from apkscan.core.case_identity import normalize_case_id
 
 MAX_BYTES = 2 * 1024 * 1024
@@ -103,8 +104,10 @@ def build_plan(reference_url: str, candidate_url: str, *, case_id: str,
 
 def _public_ip(value: str) -> str:
     address = ipaddress.ip_address(value)
-    mapped = getattr(address, "ipv4_mapped", None)
-    if not address.is_global or (mapped is not None and not mapped.is_global):
+    # ★与 config.fetch._ip_is_blocked 同一判据（is_global 白名单 + NAT64/6to4/
+    #   Teredo/IPv4-mapped 内嵌 IPv4 递归）——旧的 is_global+mapped 检查会放行
+    #   64:ff9b::/96 包内网 IPv4 的 NAT64 地址（DNS rebinding 入口）。  # leak-scan: allow RFC 6052 NAT64 前缀，判据注释非主机地址
+    if _ip_is_blocked(address):
         raise ValueError("Candidate/request address is not a public Internet address")
     return str(address)
 

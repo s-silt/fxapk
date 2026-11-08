@@ -82,26 +82,17 @@ def _nonfinite(_: str) -> Any:
     raise EvidenceError("nonfinite_json_number")
 
 
+_JS_LINE_SPLIT_RE = re.compile(r"\r\n|[\n\r\u2028\u2029]")
+
+
 def _javascript_lines(text: str) -> list[str]:
-    """按 JS 行终止符切分。不使用 ``str.splitlines``，避免把 VT/FF 当成换行。"""
-    lines: list[str] = []
-    start = 0
-    index = 0
-    limit = len(text)
-    while index < limit:
-        if text.startswith("\r\n", index):
-            lines.append(text[start:index])
-            index += 2
-            start = index
-            continue
-        if text[index] in "\n\r\u2028\u2029":
-            lines.append(text[start:index])
-            index += 1
-            start = index
-            continue
-        index += 1
-    lines.append(text[start:])
-    return lines
+    """按 JS 行终止符切分。不使用 ``str.splitlines``，避免把 VT/FF 当成换行。
+
+    ★用 ``re.split``（C 实现）：旧逐字符 Python 循环在 12MB 脚本上每次调用要秒级，
+    被 ``_bind_initiator`` 按请求次数调用会把投影拖垮（O(请求数×脚本大小)）。
+    终止符集合与旧实现一致：``\\r\\n`` 优先于单字符 ``\\n``/``\\r``/``\\u2028``/``\\u2029``。
+    """
+    return _JS_LINE_SPLIT_RE.split(text)
 
 
 def _utf16_units(text: str) -> int:
@@ -219,8 +210,13 @@ def _bind_initiator(
     column = initiator.get("column")
     if type(line) is not int or type(column) is not int:
         return _unresolved("initiator_coordinates_missing")
-    rows = _javascript_lines(fact["text"])
-    if line >= len(rows) or column > _utf16_units(rows[line]):
+    # ★按 fact 缓存「每行 UTF-16 长度」：同一脚本被上千个请求引用时，
+    #   旧实现每请求重切一次全文（O(请求数×脚本大小)）。缓存后每请求只剩一次列表查找。
+    units = fact.get("line_units")
+    if not isinstance(units, list):
+        units = [_utf16_units(row) for row in _javascript_lines(fact["text"])]
+        fact["line_units"] = units
+    if line >= len(units) or column > units[line]:
         return _unresolved("initiator_coordinates_out_of_range")
     return (
         None,

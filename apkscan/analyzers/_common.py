@@ -404,7 +404,13 @@ def _read_so_windows(zip_path: str, entry: str, window: int) -> bytes | None:
 
     try:
         with zipfile.ZipFile(zip_path) as zf:
-            size = zf.getinfo(entry).file_size
+            info = zf.getinfo(entry)
+            # ★zip bomb 防护：bzip2/LZMA 成员由 zipfile 无输出上限地整段解压，
+            #   声明的 file_size 可以说谎。Android APK 只用 STORED/DEFLATED；
+            #   其余压缩方式返回 None，调用方回退 ctx.read_file（走有界提取器）。
+            if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                return None
+            size = info.file_size
             if size > _MAX_DECOMPRESSED_FILE_BYTES:  # 同 read_file 的前置拦截：超上限不解压
                 return None
             with zf.open(entry) as fp:

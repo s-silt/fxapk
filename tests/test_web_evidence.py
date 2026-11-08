@@ -730,6 +730,19 @@ def test_redirect_chain_covers_all_four_mechanisms() -> None:
     assert mechanisms == {"meta-refresh", "location-assign", "location-call", "header-location"}
 
 
+def test_meta_refresh_with_lt_in_attr_value_still_detected() -> None:
+    """★kiro 二轮复核：``<meta data-x="<" http-equiv="refresh" ...>`` 的属性值里
+    含 ``<`` 是合法 HTML、浏览器照样执行——``[^<>]`` 会整块漏检。游标扫描须与
+    原 ``[^>]`` 语义等价（``<`` 不终止标签）。"""
+    html = (
+        f'<meta data-x="<" http-equiv="refresh" content="0;url=https://{DOC_HOP1}/lt">'
+    ).encode()
+    result = WebRedirectChainAnalyzer().analyze(_ctx({"web/lt.html": html}))
+    chain = result.meta["web_redirect_chain"][0]["hops"]
+    assert [c["mechanism"] for c in chain] == ["meta-refresh"]
+    assert chain[0]["target"] == f"https://{DOC_HOP1}/lt"
+
+
 def test_redirect_candidates_from_separate_files_are_not_fabricated_as_one_chain() -> None:
     """静态文件之间没有因果边；各文件单独分组、步号分别从 1 开始。"""
     files = {
@@ -1151,16 +1164,43 @@ def test_script_regex_has_no_catastrophic_backtracking() -> None:
     """
     import time
 
-    from apkscan.analyzers.web_evidence import _SCRIPT_BLOCK_RE
+    from apkscan.analyzers.web_evidence import _iter_script_blocks
 
     # ① 开标签后长尾且始终不闭合
     unterminated = "<script>x</script" + " " * 200_000
     start = time.monotonic()
-    assert _SCRIPT_BLOCK_RE.search(unterminated) is None
+    assert list(_iter_script_blocks(unterminated)) == []
     assert time.monotonic() - start < 5.0
 
     # ② 大量近似结束标签，最后才真正闭合
     near_miss = "<script>" + "</scriptfoo>" * 20_000 + "</script>"
     start = time.monotonic()
-    assert _SCRIPT_BLOCK_RE.search(near_miss) is not None
+    blocks = list(_iter_script_blocks(near_miss))
+    assert len(blocks) == 1
     assert time.monotonic() - start < 5.0
+
+
+def test_web_analyzers_reject_regex_redenial_inputs() -> None:
+    """★ReDoS 回归（sfind-d8e281fe）：百万级换行/<meta/<script 输入必须秒级完成。"""
+    import time
+
+    from apkscan.analyzers.web_evidence import (
+        WebInlineConfigAnalyzer,
+        WebRedirectChainAnalyzer,
+        _iter_script_blocks,
+    )
+
+    cases = {
+        "newlines": "\n" * 1_000_000,
+        "meta": "<meta" * 800_000,
+        "script": "<script>" * 500_000,
+    }
+    for name, text in cases.items():
+        start = time.monotonic()
+        if name == "script":
+            list(_iter_script_blocks(text))
+        else:
+            WebRedirectChainAnalyzer()._scan(text, f"web/x.{'headers' if name == 'newlines' else 'html'}")
+            WebInlineConfigAnalyzer().analyze(_ctx({"web/x.html": text.encode()}))
+        elapsed = time.monotonic() - start
+        assert elapsed < 10.0, f"{name} took {elapsed:.1f}s"

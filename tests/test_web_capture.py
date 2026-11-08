@@ -9,6 +9,10 @@ from apkscan.core.models import AnalysisConfig
 from apkscan.core.webctx import WebContext
 import json
 
+# 会话均为 mock，不会发起真实连接；公网字面量仅作 connect_ip 透传断言值。
+_PINNED_IP = "93.184.216.34"  # leak-scan: allow 透传断言值，非真实连接目标
+_NAT64_REBIND = "64:ff9b::a9fe:a9fe"  # leak-scan: allow DNS rebinding 攻击向量字面量（NAT64 内嵌 169.254.169.254）
+
 
 class Raw(BytesIO):
     def read1(self, size, decode_content=True):
@@ -46,7 +50,7 @@ class Session:
 def setup(monkeypatch, responses):
     session = Session(responses)
     monkeypatch.setattr(web_capture, "_new_session", lambda: session)
-    monkeypatch.setattr(web_capture, "_target_is_safe", lambda url: (True, ""))
+    monkeypatch.setattr(web_capture, "_checked_addresses", lambda url: ([_PINNED_IP], ""))
     return session
 
 
@@ -80,9 +84,34 @@ def test_cross_host_redirect_waits_for_explicit_scope(monkeypatch):
 
 def test_dns_rejection_never_sends_http(monkeypatch):
     session = setup(monkeypatch, [])
-    monkeypatch.setattr(web_capture, "_target_is_safe", lambda url: (False, "private"))
+    monkeypatch.setattr(web_capture, "_checked_addresses", lambda url: ([], "private"))
     result = web_capture.capture_http("https://example.test", authorized=True)
     assert not session.calls and result["_capture"]["network_requests"] == 0
+
+
+def test_checked_ip_is_pinned_into_session(monkeypatch):
+    """★sfind-5c865ddd：预检通过的 IP 作为 connect_ip 传给会话——连接层不再二次解析，
+    DNS rebinding 无法在两次查询间换地址。"""
+    session = setup(monkeypatch, [Response(b"ok")])
+    web_capture.capture_http("https://example.test", authorized=True)
+    assert session.calls[0][1].get("connect_ip") == _PINNED_IP
+
+
+def test_rebinding_second_answer_never_reaches_connect(monkeypatch):
+    """★sfind-5c865ddd：真实 _checked_addresses 只解析一次；getaddrinfo 第二次返回
+    NAT64 地址也不会被连接——Session.get 收到的是预检钉死的 connect_ip。"""
+    import socket
+    answers = iter([
+        [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (_PINNED_IP, 0))],
+        [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", (_NAT64_REBIND, 0, 0, 0))],
+    ])
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: next(answers))
+    session = Session([Response(b"ok")])
+    monkeypatch.setattr(web_capture, "_new_session", lambda: session)
+    result = web_capture.capture_http("https://rebinding.example.test", authorized=True)
+    assert session.calls[0][1].get("connect_ip") == _PINNED_IP
+    # NAT64 第二答若被 _resolve 再解析会命中 _ip_is_blocked——此处根本不发生第二次解析
+    assert result["_capture"]["status"] == "captured_http"
 
 
 def test_body_budget_and_partial_export_survive_import(monkeypatch):

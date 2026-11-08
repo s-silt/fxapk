@@ -42,12 +42,14 @@
         "directory_name": "pkg-2",
         "manifest_sha256": "e121090bf9a9bae556a00550cd28de9a5e41715c3c0440cbf747bba10122e8d0",
         "package_id": "3aecd7af6a94bfdb23b030ff6e9fbee66780f7106132f0578adfd429e1e010ed",
+        "report_relpath": "report.json",
         "report_sha256": "c5fb083fee5c3a97ac62b83c4491ef933f54d8942601bb33920118e4cdc7a9bd"
       },
       {
         "directory_name": "pkg-1",
         "manifest_sha256": "7efbf5369e20345f822601d2c5c1254f1464cfb4822ad3f5739d09641e1cb900",
         "package_id": "b0957b60ae9518ccd070499bfcf33e4a9d893c9650a34f97affd0beb5ae077c0",
+        "report_relpath": "report.json",
         "report_sha256": "7b1a3957d44d9758e39c17ffdffebd5369423237489a5c974294cdce98073a97"
       }
     ],

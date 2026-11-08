@@ -39,6 +39,7 @@ import tempfile
 import threading
 import socket
 import time
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Callable, Mapping
@@ -2860,6 +2861,10 @@ def _pull_exported_databases(
             if local:
                 ev["plain_path"] = str(local)  # 回填本地路径供 merge
                 pulled_any = True
+            else:
+                # 回拉未成功：清掉设备侧 plain_path——merge 端只认 out/dump_db 内的
+                # 本地路径，残留的设备路径（可能是 UNC/任意本地路径）绝不能带进报告。
+                ev["plain_path"] = ""
         # 2) 补充：尽力把 app 私有 databases/*.db（普通 SQLite）一并拉回（best-effort）。
         _pull_plain_sqlite_databases(package, dump_dir, serial)
         # 3) 兜底：把导出临时目录里所有 .plain.db 拉回（事件可能漏记某些库）。
@@ -3989,23 +3994,147 @@ def _message_from_flow(flow: object) -> dict[str, Any] | None:
     }
 
 
+def _content_encoding(msg: object) -> str:
+    """取消息 Content-Encoding 头（小写；无 → ""）。"""
+    headers = getattr(msg, "headers", None)
+    if headers is None:
+        return ""
+    try:
+        return str(headers.get("content-encoding", "") or "")
+    except Exception:  # noqa: BLE001 — 头对象形态不定，取不到按无编码
+        return ""
+
+
+def _inflate_body_bounded(data: bytes, wbits: int, limit: int) -> bytes | None:
+    """zlib 有界解压：``max_length`` 封顶输出，输入未消费部分直接丢弃。"""
+    try:
+        decompressor = zlib.decompressobj(wbits)
+        return decompressor.decompress(data, limit)
+    except zlib.error:
+        return None
+
+
+_BROTLI_CAP_SUPPORTED: bool | None = None
+
+
+def _brotli_output_cap_supported() -> bool:
+    """brotli ≥1.2 的 ``Decompressor.process`` 支持 ``output_buffer_limit``；
+    旧版无此参数（TypeError）→ False，退回仅累计截断的旧路径。"""
+    global _BROTLI_CAP_SUPPORTED
+    if _BROTLI_CAP_SUPPORTED is None:
+        try:
+            import brotli  # type: ignore[import-not-found]
+
+            brotli.Decompressor().process(b"", output_buffer_limit=1)
+            _BROTLI_CAP_SUPPORTED = True
+        except Exception:  # noqa: BLE001 — 缺库/旧版/签名差异统一按不支持处理
+            _BROTLI_CAP_SUPPORTED = False
+    return _BROTLI_CAP_SUPPORTED
+
+
+def _brotli_body_bounded(data: bytes, limit: int) -> bytes | None:
+    """brotli 流式有界解压：小步喂入、累计超限即停。
+
+    ★单次 ``process`` 产出上限：brotli≥1.2 传 ``output_buffer_limit``（剩余额度+1），
+    压缩炸弹无法在一次调用里冲出 GB 级瞬时内存；旧版无此参数时退回小步累计截断
+    （瞬时峰值不可控，如实标注的残余风险）。
+    """
+    try:
+        import brotli  # type: ignore[import-not-found]
+    except ImportError:
+        return None
+    decompressor = brotli.Decompressor()
+    out = bytearray()
+    step = 8192
+    # ★旧版 brotli 无 output_buffer_limit：单次 process 可把压缩炸弹一次性
+    #   吐出 GB 级内存，8KB 分块喂入挡不住——宁可不解码（退回原始字节）也不解压。
+    if not _brotli_output_cap_supported():
+        return None
+    for offset in range(0, len(data), step):
+        chunk = data[offset : offset + step]
+        try:
+            piece = decompressor.process(
+                chunk, output_buffer_limit=max(1, limit + 1 - len(out))
+            )
+        except Exception:  # noqa: BLE001 — brotli 各实现异常类型不一，统一拒收
+            return None
+        out += piece
+        if len(out) > limit or decompressor.is_finished():
+            break
+    return bytes(out[:limit])
+
+
+def _zstd_body_bounded(data: bytes, limit: int) -> bytes | None:
+    """zstd 有界解压：``decompress(max_length=…)`` 输出封顶，与帧头声明的
+    内容大小无关——老实声明 2GB 的炸弹帧也只产出 limit 字节。
+
+    ★用 pyproject 声明的依赖：Python 3.14+ 走 stdlib ``compression.zstd``，
+    更早版本走 ``backports.zstd``（同一 API）。不用第三方 ``zstandard`` 包——
+    它不在依赖声明里，且 ``max_output_size`` 会信任帧头声明值分配。
+    """
+    try:
+        from compression.zstd import ZstdDecompressor  # type: ignore[import-not-found]
+    except ImportError:
+        try:
+            from backports.zstd import ZstdDecompressor  # type: ignore[import-not-found]
+        except ImportError:
+            return None
+    try:
+        return ZstdDecompressor().decompress(data, max_length=limit)
+    except Exception:  # noqa: BLE001 — ZstdError 等统一拒收
+        return None
+
+
+def _decode_body_bounded(raw: bytes, encoding: str) -> bytes:
+    """按 Content-Encoding 有界解码到 ``_MAX_BODY_BYTES``；未知/失败 → 原始字节。
+
+    ★不用 mitmproxy 的 ``.text``/``.content``：二者会先把 Content-Encoding
+    （gzip/deflate/br/zstd）**全量解压进内存**再截断，压缩炸弹可在截断前 OOM。
+    这里读 ``raw_content``（线上原始字节）后自行限幅解码。
+    """
+    enc = (encoding or "").strip().lower()
+    if enc in ("", "identity"):
+        return raw
+    limit = _MAX_BODY_BYTES + 1
+    decoded: bytes | None = None
+    if enc in ("gzip", "x-gzip"):
+        decoded = _inflate_body_bounded(raw, 31, limit)
+    elif enc == "deflate":
+        # HTTP deflate 既有 zlib 包装也有裸流；先试 zlib 头，失败回退 raw。
+        decoded = _inflate_body_bounded(raw, 15, limit)
+        if decoded is None:
+            decoded = _inflate_body_bounded(raw, -15, limit)
+    elif enc == "br":
+        decoded = _brotli_body_bounded(raw, limit)
+    elif enc == "zstd":
+        decoded = _zstd_body_bounded(raw, limit)
+    # 未知编码：按原始字节处理（不透明载荷，不假装已解码）。
+    return raw if decoded is None else decoded
+
+
 def _body_text(msg: object) -> str:
     """安全取出 mitmproxy 请求/响应的文本体（超限截断；取不到 → 空串）。"""
     if msg is None:
         return ""
-    # 优先 .text（mitmproxy 已按 content-type 解码）；回退 .content（bytes）。
+    raw = getattr(msg, "raw_content", None)
+    if isinstance(raw, (bytes, bytearray)):
+        data = _decode_body_bounded(bytes(raw), _content_encoding(msg))
+        try:
+            return data[:_MAX_BODY_BYTES].decode("utf-8", errors="ignore")
+        except Exception:  # noqa: BLE001 — errors=ignore 几乎不抛，仅防御
+            logger.exception("[capture] 报文体解码失败")
+            return ""
+    # raw_content 不可用的旧式/流式/替身消息：退化旧路径（.text → .content），
+    # 解码责任在消息对象侧无法在此拦截，仍只保留前 _MAX_BODY_BYTES。
     text = getattr(msg, "text", None)
     if isinstance(text, str) and text:
         return text[:_MAX_BODY_BYTES]
     content = getattr(msg, "content", None)
     if isinstance(content, (bytes, bytearray)):
-        if len(content) > _MAX_BODY_BYTES:
-            content = bytes(content[:_MAX_BODY_BYTES])
         try:
-            return bytes(content).decode("utf-8", errors="ignore")
+            return bytes(content[:_MAX_BODY_BYTES]).decode("utf-8", errors="ignore")
         except Exception:  # noqa: BLE001 — errors=ignore 几乎不抛，仅防御
             logger.exception("[capture] 报文体解码失败")
-            return ""
     return ""
 
 
