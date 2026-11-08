@@ -1,12 +1,14 @@
 """Storage commands, offline APK analysis and the existing case verification gate."""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import NoReturn
 
 import typer
 
@@ -19,7 +21,7 @@ META_WRITE_CATEGORIES = {"evidence_manifest": "record"}
 META_WRITE_KEYS = frozenset(META_WRITE_CATEGORIES)
 
 
-def _failure(error: Exception, output: Path | None = None, prior: dict | None = None):
+def _failure(error: Exception, output: Path | None = None, prior: dict | None = None) -> NoReturn:
     code = str(error) if isinstance(error, ValueError) and re.fullmatch("[a-z_]{1,80}", str(error)) else "archive_operation_failed"
     value = {**(prior or {}), "state": "failed", "reason_codes": sorted(set([*(prior or {}).get("reason_codes", []), code])),
              "exception_type": type(error).__name__}
@@ -29,7 +31,7 @@ def _failure(error: Exception, output: Path | None = None, prior: dict | None = 
     raise typer.Exit(6) from error
 
 
-def _progress(event):
+def _progress(event: dict) -> None:
     typer.echo(json.dumps(event), err=True)
 
 
@@ -39,7 +41,7 @@ def pack_command(
     out: Path = typer.Option(..., "--out", help="New ZIP64 archive outside the evidence directory"),
     level: int = typer.Option(6, "--level", min=0, max=9),
     compression: Compression = typer.Option(Compression.zstd, "--compression", help="zstd: balanced size/read speed; deflate: older ZIP tools"),
-):
+) -> None:
     """Archive original bytes, then verify every member; never delete the source."""
     try:
         receipt = pack(source, out, level=level, compression=compression.value, progress=_progress)
@@ -49,7 +51,7 @@ def pack_command(
 
 
 @app.command("verify")
-def verify_command(archive: Path = typer.Argument(..., exists=True, dir_okay=False)):
+def verify_command(archive: Path = typer.Argument(..., exists=True, dir_okay=False)) -> None:
     """Stream and hash every original file without extracting the archive."""
     try:
         with EvidenceArchive(archive) as source:
@@ -64,7 +66,7 @@ def extract_command(
     archive: Path = typer.Argument(..., exists=True, dir_okay=False),
     out: Path = typer.Option(..., "--out", help="New directory"),
     member: list[str] | None = typer.Option(None, "--member", help="Repeat for selected members; omitted extracts all"),
-):
+) -> None:
     try:
         with EvidenceArchive(archive) as source:
             receipt = source.extract(out, member)
@@ -79,7 +81,7 @@ def analyze_command(
     member: str = typer.Option(..., "--member", help="APK member; only this member is materialized"),
     out: Path = typer.Option(..., "--out", help="New analysis directory"),
     timeout: int = typer.Option(600, "--timeout", min=1, max=3600),
-):
+) -> None:
     """Read a verified APK into temporary storage and run the offline pipeline."""
     from apkscan.core.fetch_intake import _process
     from apkscan.core.offline_review.common import json_value, read_bytes
@@ -126,6 +128,20 @@ def analyze_command(
             report.meta["evidence_manifest"] = manifest
             report_json.dump(report, str(reports[0]))
             html.render(report, str(reports[0].with_suffix(".html")))
+            # The analysis subprocess wrote <stem>.sha256 for its own bytes;
+            # the rewritten report/HTML invalidate it, so recompute in place.
+            products = [reports[0]]
+            html_report = reports[0].with_suffix(".html")
+            if html_report.is_file():
+                products.append(html_report)
+            lines = []
+            for product in products:
+                digest = hashlib.sha256()
+                with product.open("rb") as stream:
+                    for block in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(block)
+                lines.append(f"{digest.hexdigest()}  {product.name}")
+            atomic_write_text(report_dir / f"{reports[0].stem}.sha256", "\n".join(lines) + "\n")
             atomic_write_text(out / "digest.json", json.dumps(build_digest(report_json.to_dict(report)), ensure_ascii=False, indent=2))
         atomic_write_text(receipt_path, json.dumps(receipt, indent=2))
     except Exception as error:
@@ -139,7 +155,7 @@ def analyze_command(
 def case_verify_command(
     archive: Path = typer.Argument(..., exists=True, dir_okay=False),
     member: str = typer.Option(..., "--member", help="Unmodified Phase1 case manifest member"),
-):
+) -> None:
     """Run the existing full case gate, including REA guards, in bounded staging."""
     from apkscan.core.case_package import verify_case_package
 
@@ -162,7 +178,7 @@ def corpus_add_command(
     archive: Path = typer.Argument(..., exists=True, dir_okay=False),
     manifest_member: str = typer.Option("case-package.json", "--manifest-member", help="Frozen Phase1 manifest member"),
     corpus: Path = typer.Option(..., "--corpus", help="Explicit corpus root outside a Git worktree"),
-):
+) -> None:
     """Verify the whole case, then ingest its original report with case/package binding."""
     from apkscan.commands.corpus import corpus_add, resolve_corpus
     from apkscan.core.case_package import verify_case_package

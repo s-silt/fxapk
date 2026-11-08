@@ -5,13 +5,16 @@ import json
 import re
 import tempfile
 from pathlib import Path
+from types import TracebackType
+from typing import Callable, Self
 
 from apkscan.core.atomic import atomic_create_bytes
 from apkscan.core.evidence_archive import ArchiveError, pack, remove_owned_staging
 
 
 class EvidenceOutput:
-    def __init__(self, out: Path | None, archive_out: Path | None, progress=None, *, compression: str = "zstd"):
+    def __init__(self, out: Path | None, archive_out: Path | None,
+                 progress: Callable[[dict], None] | None = None, *, compression: str = "zstd") -> None:
         if (out is None) == (archive_out is None):
             raise ArchiveError("choose_output_directory_or_archive")
         self.archive_out = archive_out
@@ -32,16 +35,17 @@ class EvidenceOutput:
             self.staging = Path(tempfile.mkdtemp(prefix=".fxapk-evidence-", dir=self.archive_out.parent))
             self.path = self.staging / "data"
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         return self
 
-    def _receipt(self):
+    def _receipt(self) -> None:
         if self.receipt_path is not None and self.storage is not None:
             raw = json.dumps(self.storage, ensure_ascii=False, allow_nan=False, indent=2).encode()
             if not atomic_create_bytes(self.receipt_path, raw):
                 raise ArchiveError("archive_receipt_exists")
 
-    def __exit__(self, exc_type, error, traceback):
+    def __exit__(self, exc_type: type[BaseException] | None, error: BaseException | None,
+                 traceback: TracebackType | None) -> bool:
         if self.archive_out is None:
             return False
         assert self.staging is not None
@@ -79,7 +83,7 @@ class EvidenceOutput:
     def reference(self, member: str) -> str:
         return f"{self.archive_out}::{member}" if self.archive_out is not None else str(self.path / member)
 
-    def display(self, value):
+    def display(self, value: object) -> object:
         """Keep original receipts unchanged; console paths point to the archive."""
         if isinstance(value, dict):
             return {k: self.display(v) for k, v in value.items()}

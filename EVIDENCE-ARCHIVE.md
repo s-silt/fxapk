@@ -130,8 +130,8 @@ Zstd 解码窗口最多 64 MiB；Zstd 与 DEFLATE 单次输出最多 1 MiB，同
 名称冲突、重复成员、加密及不支持的 ZIP 算法均拒绝。
 
 损坏、截断、CRC/SHA 不匹配、资源超限及输出冲突返回稳定错误码，例如
-`archive_member_hash_mismatch`、`archive_decode_failed`、`archive_member_budget`，
-不转成零命中或无记录。独立复核任务可继续，失败任务在结果中保留。
+`archive_member_hash_mismatch`、`archive_decode_failed`、`archive_member_budget`、
+`archive_member_gap`，不转成零命中或无记录。独立复核任务可继续，失败任务在结果中保留。
 `pack/verify/extract/case-verify` 成功退出 0，失败退出 6；离线 APK 分析还可返回 partial 5。
 已有采集、复核、恢复和 intake 命令保留其业务退出语义；输出归档失败退出 6，
 参数或前置读取错误按各入口既有规则处理（复核、恢复、intake 为 2）。

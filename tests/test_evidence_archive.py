@@ -39,6 +39,50 @@ def forged(path, files, rows=None, hint=None):
     return path
 
 
+def splice_archive(path, at, payload):
+    """Insert bytes at an absolute offset and repair every recorded offset past it."""
+    raw = path.read_bytes()
+    eocd = raw.rfind(b"PK\x05\x06")
+    assert raw[eocd:eocd + 4] == b"PK\x05\x06"
+    cd_size, cd_offset = struct.unpack_from("<2L", raw, eocd + 12)
+    assert cd_offset != 0xFFFFFFFF and cd_size != 0xFFFFFFFF
+    patches = []
+    pos, end = cd_offset, cd_offset + cd_size
+    while pos < end:
+        assert raw[pos:pos + 4] == b"PK\x01\x02"
+        namesize, extrasize, commentsize = struct.unpack_from("<3H", raw, pos + 28)
+        offset = struct.unpack_from("<L", raw, pos + 42)[0]
+        if offset == 0xFFFFFFFF:
+            # ZIP64 extra carries the real 8-byte offset after saturated usize/csize.
+            usize32 = struct.unpack_from("<L", raw, pos + 24)[0]
+            csize32 = struct.unpack_from("<L", raw, pos + 20)[0]
+            extra = raw[pos + 46 + namesize:pos + 46 + namesize + extrasize]
+            cursor = 0
+            while cursor + 4 <= len(extra):
+                tag, length = struct.unpack_from("<HH", extra, cursor)
+                if tag == 1:
+                    skip = 8 * (usize32 == 0xFFFFFFFF) + 8 * (csize32 == 0xFFFFFFFF)
+                    patches.append((pos + 46 + namesize + cursor + 4 + skip,
+                                    struct.unpack_from("<Q", extra, cursor + 4 + skip)[0], 8))
+                    break
+                cursor += 4 + length
+            else:
+                raise AssertionError("ZIP64 extra field missing")
+        else:
+            patches.append((pos + 42, offset, 4))
+        pos += 46 + namesize + extrasize + commentsize
+    assert pos == end
+    patches.append((eocd + 16, cd_offset, 4))
+    updated = bytearray(raw)
+    updated[at:at] = payload
+    size = len(payload)
+    for field, target, width in patches:
+        if target >= at:
+            position = field + size if field >= at else field
+            struct.pack_into("<L" if width == 4 else "<Q", updated, position, target + size)
+    path.write_bytes(updated)
+
+
 @pytest.mark.parametrize("compression,method", [("zstd", 93), ("deflate", 8)])
 def test_round_trip_exact_bytes_names_and_original_manifests(tmp_path, compression, method):
     root = source_tree(tmp_path)
@@ -108,6 +152,40 @@ def test_crc_corruption_and_truncation_fail_visible_cli(tmp_path):
     result = CliRunner().invoke(app, ["evidence", "verify", str(archive)])
     assert result.exit_code == 6 and '"state": "failed"' in result.output
     archive.write_bytes(data[:-16])
+    result = CliRunner().invoke(app, ["evidence", "verify", str(archive)])
+    assert result.exit_code == 6 and "archive_directory_invalid" in result.output
+
+
+def _two_file_archive(tmp_path):
+    root = tmp_path / "source"
+    root.mkdir()
+    (root / "first.bin").write_bytes(b"first" * 100)
+    (root / "second.bin").write_bytes(b"second" * 100)
+    archive = tmp_path / "evidence.zip"
+    pack(root, archive)
+    return archive
+
+
+def test_archive_rejects_unregistered_bytes_between_members(tmp_path):
+    archive = _two_file_archive(tmp_path)
+    with zipfile.ZipFile(archive) as bundle:
+        offsets = sorted(item.header_offset for item in bundle.infolist())
+    splice_archive(archive, offsets[1], b"XXXXX")
+    result = CliRunner().invoke(app, ["evidence", "verify", str(archive)])
+    assert result.exit_code == 6 and "archive_member_gap" in result.output
+
+
+def test_archive_rejects_unregistered_bytes_before_central_directory(tmp_path):
+    archive = _two_file_archive(tmp_path)
+    with zipfile.ZipFile(archive) as bundle:
+        splice_archive(archive, bundle.start_dir, b"XXXXX")
+    result = CliRunner().invoke(app, ["evidence", "verify", str(archive)])
+    assert result.exit_code == 6 and "archive_member_gap" in result.output
+
+
+def test_archive_rejects_unregistered_bytes_after_central_directory(tmp_path):
+    archive = _two_file_archive(tmp_path)
+    splice_archive(archive, archive.read_bytes().rfind(b"PK\x05\x06"), b"XXXXX")
     result = CliRunner().invoke(app, ["evidence", "verify", str(archive)])
     assert result.exit_code == 6 and "archive_directory_invalid" in result.output
 
@@ -306,6 +384,27 @@ def test_archive_corruption_reaches_review_report_without_hiding_other_tasks(tmp
     assert receipt["tasks"][0]["storage_integrity"] == "failed"
 
 
+def test_review_archive_out_accepts_report_above_review_member_budget(tmp_path):
+    from apkscan.core.models import Report
+    from apkscan.core.report_io import write_report
+    report_path = tmp_path / "report.json"
+    report = Report(package_name="com.example.synthetic",
+                    meta={"sample_sha256": "a" * 64, "padding": "x" * (32 * 1024**2 + 4096)},
+                    leads=[], endpoints=[], findings=[], analyzer_status=[])
+    write_report(report, report_path, render_existing_html=False)
+    assert report_path.stat().st_size > 32 * 1024**2
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"schema_version": "fxapk.offline-review.v1", "sample_sha256": "a" * 64,
+        "tasks": [{"id": "future", "kind": "future-kind"}]}))
+    archive = tmp_path / "review.zip"
+    result = CliRunner().invoke(app, ["evidence-review", str(plan), "--report", str(report_path),
+                                     "--archive-out", str(archive)])
+    assert result.exit_code == 5, result.output
+    original = report_path.read_bytes()
+    with EvidenceArchive(archive) as reader:
+        assert reader.read("source-report.json", len(original)) == original
+
+
 def test_archive_analysis_failure_keeps_process_reason(tmp_path, monkeypatch):
     from apkscan.core import fetch_intake
     root = tmp_path / "source"
@@ -342,6 +441,15 @@ def test_archive_apk_real_offline_pipeline_preserves_hash_and_reports_storage(tm
     assert report["meta"]["evidence_manifest"]["archive_storage"]["state"] == "verified"
     assert json.loads((out / "digest.json").read_text(encoding="utf-8"))["archive_storage"]["state"] == "verified"
     assert "归档读取校验" in (out / receipt["report"]).with_suffix(".html").read_text(encoding="utf-8")
+    report_file = out / receipt["report"]
+    products = sorted(report_file.parent.glob("*.json")) + sorted(report_file.parent.glob("*.html"))
+    lines = report_file.with_suffix(".sha256").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == len(products)
+    entries = {}
+    for line in lines:
+        digest, _, name = line.partition("  ")
+        entries[name] = digest
+    assert entries == {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in products}
 
 
 def test_zip64_directory_and_member_count_budget(tmp_path):

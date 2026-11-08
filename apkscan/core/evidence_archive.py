@@ -26,7 +26,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import BinaryIO, Iterator
+from types import ModuleType
+from typing import BinaryIO, Callable, Iterator, Self
 
 from apkscan.core.json_contract import parse_finite_json_float, reject_nonfinite_json_constant
 from apkscan.core.json_io import loads_bounded
@@ -46,7 +47,7 @@ class ArchiveError(ValueError):
     """Only stable metadata codes cross the command/report boundary."""
 
 
-def _zstd_backend():
+def _zstd_backend() -> ModuleType:
     """Lazy loading keeps existing DEFLATE archives usable if the codec is absent."""
     try:
         module = "compression.zstd" if sys.version_info >= (3, 14) else "backports.zstd"
@@ -55,7 +56,7 @@ def _zstd_backend():
         raise ArchiveError("archive_zstd_dependency_missing") from error
 
 
-def _writer(compression: str, level: int):
+def _writer(compression: str, level: int) -> tuple[ModuleType, int]:
     if compression not in {"zstd", "deflate"}:
         raise ArchiveError("archive_compression_unsupported")
     if type(level) is not int or not (1 if compression == "zstd" else 0) <= level <= 9:
@@ -96,7 +97,7 @@ def _key(value: str) -> str:
     return unicodedata.normalize("NFC", value).casefold()
 
 
-def _regular(path: Path, *, directory: bool = False):
+def _regular(path: Path, *, directory: bool = False) -> os.stat_result:
     info = path.lstat()
     if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
         raise ArchiveError("archive_links_not_supported")
@@ -105,7 +106,7 @@ def _regular(path: Path, *, directory: bool = False):
     return info
 
 
-def _identity(info) -> tuple:
+def _identity(info: os.stat_result) -> tuple[int, ...]:
     # CPython on Windows can expose creation time through lstat().st_ctime
     # and change time through fstat().st_ctime. Birth time is consistent.
     stamp = getattr(info, "st_birthtime_ns", info.st_ctime_ns) if os.name == "nt" else info.st_ctime_ns
@@ -118,7 +119,7 @@ def _deadline(deadline: float) -> None:
 
 
 def _json(data: bytes) -> dict:
-    def pairs(rows):
+    def pairs(rows: list[tuple[str, object]]) -> dict:
         out = {}
         for k, v in rows:
             if k in out:
@@ -166,8 +167,9 @@ def _directory_budget(stream: BinaryIO, size: int, limits: Limits) -> None:
     _, disk, cd_disk, disk_count, count, cd_size, cd_offset, comment = struct.unpack_from("<4s4H2LH", tail, offset)
     if disk or cd_disk or disk_count != count or offset + 22 + comment != len(tail):
         raise ArchiveError("archive_directory_invalid")
+    eocd = size - len(tail) + offset
+    directory_end = eocd
     if count == 65535 or cd_size == 0xFFFFFFFF or cd_offset == 0xFFFFFFFF:
-        eocd = size - len(tail) + offset
         if eocd < 20:
             raise ArchiveError("archive_directory_invalid")
         stream.seek(eocd - 20)
@@ -177,6 +179,8 @@ def _directory_budget(stream: BinaryIO, size: int, limits: Limits) -> None:
             # Classic ZIP can contain exactly 65535 members without a ZIP64 record.
             if count > limits.members + 1 or cd_size > limits.metadata_bytes or cd_offset + cd_size > size:
                 raise ArchiveError("archive_directory_budget")
+            if cd_offset + cd_size != eocd:
+                raise ArchiveError("archive_directory_invalid")
             _directory_entries(stream, cd_offset, cd_size, count, limits)
             stream.seek(0)
             return
@@ -187,10 +191,14 @@ def _directory_budget(stream: BinaryIO, size: int, limits: Limits) -> None:
         if len(record) != 56:
             raise ArchiveError("archive_directory_invalid")
         signature, record_size, _, _, disk, cd_disk, disk_count, count, cd_size, cd_offset = struct.unpack("<4sQ2H2L4Q", record)
-        if signature != b"PK\x06\x06" or record_size != 44 or disk or cd_disk or count != disk_count:
+        if (signature != b"PK\x06\x06" or record_size != 44 or disk or cd_disk or count != disk_count
+                or zip64_offset + 56 != eocd - 20):
             raise ArchiveError("archive_directory_invalid")
+        directory_end = zip64_offset
     if count > limits.members + 1 or cd_size > limits.metadata_bytes or cd_offset + cd_size > size:
         raise ArchiveError("archive_directory_budget")
+    if cd_offset + cd_size != directory_end:
+        raise ArchiveError("archive_directory_invalid")
     _directory_entries(stream, cd_offset, cd_size, count, limits)
     stream.seek(0)
 
@@ -198,7 +206,7 @@ def _directory_budget(stream: BinaryIO, size: int, limits: Limits) -> None:
 class EvidenceArchive:
     """Pinned archive handle; bounded decoding always verifies full member bytes."""
 
-    def __init__(self, path: str | Path, limits: Limits | None = None):
+    def __init__(self, path: str | Path, limits: Limits | None = None) -> None:
         self.path = Path(path)
         self.limits = limits or Limits()
         self.deadline = time.monotonic() + self.limits.seconds
@@ -292,18 +300,18 @@ class EvidenceArchive:
             self.close()
             raise
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, *args):
+    def __exit__(self, *args: object) -> None:
         self.close()
 
-    def close(self):
+    def close(self) -> None:
         if self.zip is not None:
             self.zip.close()
         self.stream.close()
 
-    def _unchanged(self):
+    def _unchanged(self) -> None:
         if (_identity(os.fstat(self.stream.fileno())) != self.identity
                 or _identity(_regular(self.path)) != self.identity):
             raise ArchiveError("archive_changed")
@@ -349,8 +357,16 @@ class EvidenceArchive:
             if sizes != [info.file_size, info.compress_size] or crc != info.CRC:
                 raise ArchiveError("archive_local_header_invalid")
         position = self.stream.tell()
-        if info.header_offset < 0 or position + info.compress_size > self.member_ends[info.filename]:
+        gap = self.member_ends[info.filename] - (position + info.compress_size)
+        if info.header_offset < 0 or gap < 0:
             raise ArchiveError("archive_member_overlap")
+        # A data descriptor (signature optional, ZIP64 sizes allowed) is the
+        # only registered padding between compressed data and the next header.
+        if flags & 8:
+            if gap not in (12, 16, 20, 24):
+                raise ArchiveError("archive_member_gap")
+        elif gap != 0:
+            raise ArchiveError("archive_member_gap")
 
     def _zstd_blocks(self, info: zipfile.ZipInfo, limit: int) -> Iterator[bytes]:
         """Require a complete bounded frame, exact span, CRC and original size."""
@@ -555,7 +571,7 @@ def _directories(root: Path, limits: Limits, deadline: float) -> list[str]:
 
 
 def pack(root: Path, output: Path, *, limits: Limits | None = None, level: int = 6,
-         compression: str = "zstd", progress=None) -> dict:
+         compression: str = "zstd", progress: Callable[[dict], None] | None = None) -> dict:
     limits = limits or Limits()
     deadline = time.monotonic() + limits.seconds
     _regular(root, directory=True)

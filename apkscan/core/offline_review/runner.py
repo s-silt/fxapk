@@ -10,6 +10,7 @@ from typing import Callable
 
 from apkscan.core.atomic import atomic_write_text
 from apkscan.core.evidence_archive import materialize, resolve_reference, split_reference
+from apkscan.core.json_io import REPORT_JSON_MAX_BYTES
 from apkscan.core.models import Report
 from apkscan.core.report_io import load_report
 from apkscan.report import html, json as report_json
@@ -126,7 +127,7 @@ def run(manifest: Path, output: Path, report_path: Path | None = None,
             raise ValueError("task_kind_invalid")
     report = None
     if report_path:
-        with materialize(report_path, limit=32 * 1024**2) as local_report:
+        with materialize(report_path, limit=REPORT_JSON_MAX_BYTES) as local_report:
             report = load_report(local_report)
     if report is not None and report.meta.get("sample_sha256") != sample:
         raise ValueError("review_report_sample_mismatch")
@@ -138,7 +139,7 @@ def run(manifest: Path, output: Path, report_path: Path | None = None,
     if retain_inputs:
         (output / "inputs").mkdir()
         if report_path:
-            (output / "source-report.json").write_bytes(read_bytes(report_path))
+            (output / "source-report.json").write_bytes(read_bytes(report_path, REPORT_JSON_MAX_BYTES))
     receipt = {"schema_version": "fxapk.offline-review-result.v1", "manifest_sha256": sha256(raw),
                "sample_sha256": sample, "state": "running", "source_binding_verified": False,
                "not_requested": sorted(set(REVIEWERS) - {task["kind"] for task in tasks}),
