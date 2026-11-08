@@ -5,7 +5,7 @@
 
 ## 待发布
 
-## 1.25.0 — 2026-11-05
+## 1.25.0 — 2026-11-08
 
 - 新增 `fxapk evidence pack/verify/extract/analyze/case-verify/corpus-add`：默认 ZIP64/Zstandard 6（方法 93），可选 DEFLATE 6；逐文件保留原始字节、manifest、SHA-256 和案件 package_id。Python 3.11–3.13 增加条件依赖 `backports.zstd>=1.8,<2`，3.14+ 使用标准库；旧工具需显式选择 DEFLATE，不静默降级。
 - `capture`、`recover-runtime`、`intake-fetch` 和 `evidence-review` 支持 `--archive-out` 与 `--archive-compression`。归档发布并校验后仅清理本次暂存目录；生成、校验或清理失败保留材料及可见回执。原有 partial/failed 状态不因存储成功升级。
