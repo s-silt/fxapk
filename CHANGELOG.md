@@ -5,6 +5,16 @@
 
 ## 待发布
 
+## 1.27.0 — 2026-11-09
+
+- 远程配置制品与证据绑定：远程配置制品新增字段路径（`fields`，JSONPath 或 `$text[偏移]`）、变换序列（`transforms`，不记录 key/IV 字节）、材料完整性（`material`，`Content-Encoding` 非 `identity` 时为 `unknown`）与缺口（`gaps`）；端点证据带 `provenance`（`artifact_sha256`、`field_paths`）与 `locator`（仅相对 `stored_path`）；`config-probe` 合并时向已有端点追加去重证据，不再丢弃。
+- 控制链（`control_chains`）扩展：后端新增 `field_paths`、`consumer_candidates`（JADX 快照内同一方法的字面量共现，`binding=heuristic_same_method`，仅为启发式候选，不是消费证明）、`consumer_gaps`、`runtime_correlations` / `runtime_gaps`；`digest` 输出这些字段，默认对 `source_url` 脱敏。
+- 运行时配置观察与来源关联：`capture` 新增可选 hook 族 `config_body` / `config_consumer`（仅库 API 可选，CLI 与 `auto` 未接入；`config_consumer` 必须与 `config_body` 同时请求；只观察不修改返回值），运行时报告写 `config_body_artifacts` / `addressing_events` / `capture_context`；合并阶段新增“配置运行时来源关联”投影，原版 APK/轮次身份门复用既有校验（`runtime_scope_verified`）。
+- 新增 `fxapk probe-target`：默认只生成离线计划；仅 `--execute --mode authorized-active` 且目标已在报告中、在 `--allow` 清单内时执行白名单检查（`tls`/`tls-no-sni`/`tls-random-sni`/`host-compare`/`resource`/`business`/`objstore-head`/`objstore-get`/`follow`），最多 6 次请求、2MiB、10 分钟窗口，不跟随重定向；归档含原始响应、未脱敏；`origin_status` 恒为 `not_confirmed`。证书归属与同 IP 多域名绑定须独立提供方 Ed25519 签名材料才产生 `BUSINESS_CERTIFICATE` / `SHARED_TLS` 等角色特征；工具流量不构成 App 接触证据。
+- 新增 `fxapk addressing-evaluate <清单> --out <文件>`：只读离线复核原 APK/报告/运行时材料哈希，独立标签缺失保持 `unknown`。
+- 传输加固：新增共享 `pinned_transport`（校验全部 DNS 解析结果、数字地址连接、核对实际 peer、TLS ≥1.2 与证书校验）；远程配置下载在 IP 钉定守卫缺失或挂载失败时停止下载，不再回落普通会话；`origin-check` 复用同一传输。
+- 验证与边界：合成回归与 CI；运行时消费关联缺完整的原生 Go 配置到网络参数真实正例，probe-target 部分真实检查缺材料，addressing-evaluate 缺独立真实标签；不宣称真实设备验收、完整因果证明或已验证准确率。可选插件源码与版本未变。
+
 ## 1.26.0 — 2026-11-09
 
 - 安全加固（2026-11-08 代码扫描 22 项发现全部修复）：repackage launcher activity 名严格校验后方可进入 `adb shell am start`；可执行文件查找统一走 `tools.safe_which`（拒绝 cwd 直属/相对/drive-relative 命中），覆盖 core、dynamic、report 与 fxapk-rea/flutter/android-ui 插件全部裸 `shutil.which` 调用点。

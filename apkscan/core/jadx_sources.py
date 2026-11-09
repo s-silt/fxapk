@@ -177,3 +177,48 @@ def query_sources(cache: Path, index_key: str, value: str) -> dict[str, Any]:
         reasons.add("query_value_coverage_unknown")
     return {"hits": hits, "snapshots": receipts, "reason_codes": sorted(reasons),
             "coverage": "complete" if receipts and not reasons else "partial"}
+
+
+def read_snapshot_sources(
+    cache: Path, index_key: str, receipt: dict[str, Any],
+) -> tuple[dict[str, str], list[str]]:
+    """Read exactly the current analysis's content-addressed snapshot, never discover another."""
+    try:
+        sha = receipt["sha256"]
+        if not _HEX.fullmatch(index_key) or not isinstance(sha, str) or not _HEX.fullmatch(sha):
+            raise ValueError("invalid_snapshot_identity")
+        relative = f"query-sources/{index_key}/{sha}.json.gz"
+        if receipt.get("locator") != relative:
+            raise ValueError("snapshot_locator_mismatch")
+        with gzip.open(contained(cache, relative), "rb") as stream:
+            raw = stream.read(MAX_SOURCE_BYTES * 2 + 1)
+        if len(raw) > MAX_SOURCE_BYTES * 2 or digest_bytes(raw) != sha:
+            raise ValueError("snapshot_hash_mismatch")
+        data = json.loads(raw)
+        manifest = contained(cache, f"{index_key}/manifest.json")
+        with manifest.open("rb") as stream:
+            manifest_bytes = stream.read(MAX_FILE_BYTES + 1)
+        if len(manifest_bytes) > MAX_FILE_BYTES:
+            raise ValueError("manifest_too_large")
+        if (data["schema"] != "jadx-query-sources-1" or data["index_key"] != index_key
+                or data["index_manifest_sha256"] != digest_bytes(manifest_bytes)
+                or data["coverage"] not in ("complete", "partial")):
+            raise ValueError("snapshot_binding_mismatch")
+        files = data["files"]
+        if not isinstance(files, list) or len(files) > MAX_FILES:
+            raise ValueError("snapshot_files_invalid")
+        sources: dict[str, str] = {}
+        total = 0
+        for item in files:
+            name, text = item["path"], item["text"]
+            contained(Path("/snapshot").absolute(), name)
+            encoded = text.encode("utf-8")
+            total += len(encoded)
+            if (name in sources or not name.endswith(".java") or len(encoded) > MAX_FILE_BYTES
+                    or total > MAX_SOURCE_BYTES or digest_bytes(encoded) != item["sha256"]):
+                raise ValueError("snapshot_file_invalid")
+            sources[name] = text
+        gaps = [] if sources and data["coverage"] == "complete" else ["consumer_scan_partial"]
+        return dict(sorted(sources.items())), gaps
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, EOFError):
+        return {}, ["consumer_source_invalid"]

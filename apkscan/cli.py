@@ -49,6 +49,8 @@ from apkscan.commands.lead import lead_app
 from apkscan.commands.web import analyze_web, capture_web
 from apkscan.commands.web_supplement import supplement_web
 from apkscan.commands.origin_check import origin_check
+from apkscan.commands.probe_target import probe_target
+from apkscan.commands.addressing_evaluate import addressing_evaluate
 from apkscan.commands.evidence_review import evidence_review, intake_fetch, recover_runtime
 from apkscan.commands.evidence_archive import app as evidence_archive_app
 
@@ -127,6 +129,8 @@ def phase2_command(ctx: typer.Context) -> None:
 app.command(name="analyze-web")(analyze_web)
 app.command(name="capture-web")(capture_web)
 app.command(name="origin-check")(origin_check)
+app.command(name="probe-target")(probe_target)
+app.command(name="addressing-evaluate")(addressing_evaluate)
 app.command(name="supplement-web")(supplement_web)
 
 # 合法输出格式（--fmt）。全非法时回退而非静默产出零报告。
@@ -1998,6 +2002,18 @@ def _sample_id_of(report_json_path: str) -> str:
     return str(value) if value else ""
 
 
+def _config_probe_evidence_key(evidence: dict) -> tuple:
+    """Exact observation identity for this merge; provenance/locator order is immaterial."""
+    import json
+
+    return (
+        evidence.get("source"), evidence.get("location"), evidence.get("snippet"),
+        evidence.get("scope"), evidence.get("observed_at"),
+        json.dumps(evidence.get("provenance") or {}, sort_keys=True),
+        json.dumps(evidence.get("locator") or {}, sort_keys=True),
+    )
+
+
 def _merge_config_probe_into_report(report_json_path: str, result: object) -> tuple[int, int]:
     """把取回结果并进 report.json：endpoints + **leads** + meta 记一次运行。原子写。
 
@@ -2016,6 +2032,7 @@ def _merge_config_probe_into_report(report_json_path: str, result: object) -> tu
         ``(新增端点数, 新增线索数)``
     """
     import json as _json
+    from copy import deepcopy
 
     from apkscan.core.atomic import atomic_write_text
     from apkscan.core.json_io import REPORT_JSON_MAX_BYTES, load_json_file
@@ -2038,18 +2055,44 @@ def _merge_config_probe_into_report(report_json_path: str, result: object) -> tu
     if not isinstance(endpoints, list):
         endpoints = []
         payload["endpoints"] = endpoints
-    seen = {
-        (str(e.get("kind")), str(e.get("value")))
+    existing = {
+        (str(e.get("kind")), str(e.get("value"))): e
         for e in endpoints if isinstance(e, dict)
     }
-    fresh = []
+    grouped = {}
+    evidence_keys = {}
     for ep in getattr(result, "endpoints", []):
         key = (ep.kind, ep.value)
-        if key in seen:
+        if key not in grouped:
+            grouped[key] = deepcopy(ep)
+            grouped[key].evidences = []
+            evidence_keys[key] = set()
+        for evidence in ep.evidences:
+            identity = _config_probe_evidence_key(report_json._to_jsonable(evidence))
+            if identity not in evidence_keys[key]:
+                evidence_keys[key].add(identity)
+                grouped[key].evidences.append(deepcopy(evidence))
+    fresh = []
+    added_evidence = 0
+    for key in sorted(grouped):
+        ep = grouped[key]
+        ep.evidences.sort(key=lambda e: _json.dumps(_config_probe_evidence_key(report_json._to_jsonable(e))))
+        if key in existing:
+            target = existing[key]
+            if not isinstance(target.get("evidences"), list):
+                target["evidences"] = []
+            known_evidence = {_config_probe_evidence_key(e) for e in target["evidences"] if isinstance(e, dict)}
+            for evidence in ep.evidences:
+                serialized = report_json._to_jsonable(evidence)
+                identity = _config_probe_evidence_key(serialized)
+                if identity not in known_evidence:
+                    known_evidence.add(identity)
+                    target["evidences"].append(serialized)
+                    added_evidence += 1
             continue
-        seen.add(key)
         endpoints.append(report_json._to_jsonable(ep))
         fresh.append(ep)
+    logger.info("[config_probe] 已有端点追加 %d 条证据", added_evidence)
 
     # ★meta 要在产 Lead **之前**取好：第四步的重打包隔离读的就是 meta 里的
     #   repack_identity 判定与人工放行墓碑。末尾的三分运行记录也写在这里。
@@ -2130,6 +2173,7 @@ def _merge_config_probe_into_report(report_json_path: str, result: object) -> tu
         if (outcome.url, outcome.sha256) in known:
             continue
         known.add((outcome.url, outcome.sha256))
+        outcome_record = outcome.to_dict()
         # 形状与 pipeline._fetch_decode_one 的返回逐字段对齐——消费方按名取值，
         # 差一个字段就会在另一条路上静默取到 None。
         artifacts.append({
@@ -2141,6 +2185,10 @@ def _merge_config_probe_into_report(report_json_path: str, result: object) -> tu
             "domains": list(outcome.domains),
             "ips": list(outcome.ips),
             "stored_path": outcome.stored_path,
+            "fields": outcome_record["fields"],
+            "transforms": outcome_record["transforms"],
+            "material": outcome_record["material"],
+            "gaps": outcome_record["gaps"],
         })
     if artifacts:
         meta["remote_config_artifacts"] = artifacts

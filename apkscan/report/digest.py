@@ -469,7 +469,7 @@ def _severity_name(value: object) -> str:
     return got if isinstance(got, str) else "UNKNOWN"
 
 
-def _compact_control_chains(raw: object) -> list[dict[str, Any]]:
+def _compact_control_chains(raw: object, *, redact: bool) -> list[dict[str, Any]]:
     """控制链 → digest 紧凑段：远程配置对象 → 解密配方 → 后端 → 落地归因。
 
     ★为什么必须有这个出口：``build_control_chains`` 的存在理由就是「报告输出的不再是孤立
@@ -480,6 +480,8 @@ def _compact_control_chains(raw: object) -> list[dict[str, Any]]:
     ★摘要必须保住**关系**：把 source_url / recipe / backends 拆成三个平铺列表就退回孤立 IOC
       了，等于没接。所以逐链成条，链内保留次序与归属。
     """
+    from apkscan.core.redact import redact_url
+
     if not isinstance(raw, list) or not raw:
         return []
     out: list[dict[str, Any]] = []
@@ -490,6 +492,20 @@ def _compact_control_chains(raw: object) -> list[dict[str, Any]]:
             {
                 "kind": b.get("kind"),
                 "value": b.get("value"),
+                "field_paths": sorted({p for p in (b.get("field_paths") or []) if isinstance(p, str)}),
+                "consumer_candidates": [
+                    {k: c.get(k) for k in ("status", "binding", "field_path", "method", "source_path", "source_sha256", "sinks")}
+                    for c in b.get("consumer_candidates", []) if isinstance(c, dict)
+                ],
+                "consumer_gaps": sorted({g for g in b.get("consumer_gaps", []) if isinstance(g, str)}),
+                "runtime_correlations": [
+                    {k: c.get(k) for k in ("field_path", "capture_ref", "runtime_variant", "consumption", "gaps", "evidence_event_ids",
+                                          "protocol", "port", "host_status", "sni_status", "peer_ip")}
+                    for c in b.get("runtime_correlations", []) if isinstance(c, dict)
+                ],
+                "runtime_gaps": sorted(b.get("runtime_gaps", ["runtime_binding_unavailable"])),
+                "material_comparisons": b.get("material_comparisons", []),
+                "suspicions": b.get("suspicions", []),
                 # 落地归因只取可读标签，链条视图不重复整份五层结构（那在 enrichment 里）。
                 "landing": [
                     {
@@ -505,7 +521,11 @@ def _compact_control_chains(raw: object) -> list[dict[str, Any]]:
             if isinstance(b, dict)
         ]
         out.append({
-            "source_url": chain.get("source_url"),
+            "source_url": redact_url(chain.get("source_url"), include_fingerprint=False) if redact else chain.get("source_url"),
+            "artifact_sha256": chain.get("artifact_sha256"),
+            "gaps": sorted({g for g in (chain.get("gaps") or []) if isinstance(g, str)}),
+            "material": {"complete": (chain.get("material") or {}).get("complete", "unknown")},
+            "transforms": [{"step": t.get("step")} for t in (chain.get("transforms") or []) if isinstance(t, dict)],
             "decoded": bool(chain.get("decoded")),
             "decode_chain": [str(s) for s in (chain.get("decode_chain") or [])],
             # 配方只带形态摘要（算法/模式/编码），chain.py 已保证不含 key 明文。
@@ -678,7 +698,7 @@ def build_digest(report: object, *, redact: bool = True) -> dict[str, Any]:
         "visibility": _compact_visibility(meta.get("visibility")),
         # ★控制链紧接 visibility：先知道哪里没看见，再看「看见的这些是怎么串起来的」。
         #   原先只写 meta、无出口——组成节点各自可见 ≠ 这条关系可见。
-        "control_chains": _compact_control_chains(meta.get("control_chains")),
+        "control_chains": _compact_control_chains(meta.get("control_chains"), redact=redact),
         # ★三段的顺序即研判次序：哪里没看见 → 看见了什么事实 → 该向谁调证。
         #   findings 承载 leads 不表达的判断（重打包警示、通讯录窃取接口、未知壳…），
         #   此前完全不透出，对 AI 等于不存在。

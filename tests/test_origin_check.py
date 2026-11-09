@@ -312,15 +312,16 @@ def test_slow_response_headers_obey_total_deadline(tmp_path, monkeypatch):
 
 
 def test_pinned_https_enforces_tls12_floor(monkeypatch):
+    from apkscan.core import pinned_transport as pt
     context = SimpleNamespace(minimum_version=None)
-    sock = SimpleNamespace(close=lambda: None)
+    sock = SimpleNamespace(close=lambda: None, getpeername=lambda: ("192.0.2.1", 443))
     def wrap_socket(value, *, server_hostname):
-        assert context.minimum_version == oc.ssl.TLSVersion.TLSv1_2
+        assert context.minimum_version == pt.ssl.TLSVersion.TLSv1_2
         assert value is sock and server_hostname == "origin.example.test"
         return sock
     context.wrap_socket = wrap_socket
-    monkeypatch.setattr(oc.ssl, "create_default_context", lambda: context)
-    monkeypatch.setattr(oc.socket, "create_connection", lambda *a: sock)
+    monkeypatch.setattr(pt.ssl, "create_default_context", lambda: context)
+    monkeypatch.setattr(pt, "connect_pinned", lambda *a, **k: sock)
     connection = oc._PinnedConnection(plan()["candidate"], "192.0.2.1")
     connection.connect()
     connection.close()

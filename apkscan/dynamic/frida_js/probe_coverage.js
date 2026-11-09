@@ -3,6 +3,8 @@
     if (root.__fxapkProbeCoverage) return;
 
     var hooks = {
+        config_body: ['body_bytes', 'response', 'events'],
+        config_consumer: ['body_origin', 'string_origin', 'json_origin', 'field_read', 'socket_argument', 'events'],
         crypto: ['cipher_init', 'cipher_final', 'secret_key', 'iv_spec', 'mac_init', 'webview_load_url', 'events'],
         jsbridge: ['add_interface', 'dsbridge_call', 'events'],
         sensitive_api: ['sensitive_api', 'events'],
